@@ -1,0 +1,197 @@
+{
+  "fx": {
+    "sarToRmb": 1.8
+  },
+  "profitRate": 0.25,
+  "groups": {
+    "DSY": [
+      "DL",
+      "DX",
+      "FY",
+      "LQ",
+      "NM",
+      "HL",
+      "JY",
+      "ZL",
+      "TS",
+      "MZ"
+    ],
+    "LGM": [
+      "CX",
+      "YJ",
+      "XL",
+      "QY",
+      "QH"
+    ],
+    "ALL": [
+      "DL",
+      "DX",
+      "FY",
+      "LQ",
+      "NM",
+      "HL",
+      "JY",
+      "ZL",
+      "TS",
+      "MZ",
+      "CX",
+      "YJ",
+      "XL",
+      "QY",
+      "QH"
+    ]
+  },
+  "stores": [
+    {
+      "storeKey": "DL",
+      "groupKey": "DSY",
+      "shopName": "DLSDdsy3688",
+      "enabled": true,
+      "productStatsEnabled": true,
+      "profileKey": "dl",
+      "port": 9333,
+      "profileName": "DL - DLSDdsy3688"
+    },
+    {
+      "storeKey": "DX",
+      "groupKey": "DSY",
+      "shopName": "DXSDdsy3688",
+      "enabled": true,
+      "productStatsEnabled": true,
+      "profileKey": "dx",
+      "port": 9334,
+      "profileName": "DX - DXSDdsy3688"
+    },
+    {
+      "storeKey": "FY",
+      "groupKey": "DSY",
+      "shopName": "FYSDdsy3688",
+      "enabled": true,
+      "productStatsEnabled": true,
+      "profileKey": "fy",
+      "port": 9335,
+      "profileName": "FY - FYSDdsy3688"
+    },
+    {
+      "storeKey": "LQ",
+      "groupKey": "DSY",
+      "shopName": "LQSDdsy3688",
+      "enabled": true,
+      "productStatsEnabled": true,
+      "profileKey": "lq",
+      "port": 9336,
+      "profileName": "LQ - LQSDdsy3688"
+    },
+    {
+      "storeKey": "NM",
+      "groupKey": "DSY",
+      "shopName": "NMSDdsy3688",
+      "enabled": true,
+      "productStatsEnabled": true,
+      "profileKey": "nm",
+      "port": 9337,
+      "profileName": "NM - NMSDdsy3688"
+    },
+    {
+      "storeKey": "HL",
+      "groupKey": "DSY",
+      "shopName": "HLSDdsy1993",
+      "enabled": true,
+      "productStatsEnabled": true,
+      "profileKey": "shein-main",
+      "port": 9360,
+      "profileName": "HL - Main Account"
+    },
+    {
+      "storeKey": "JY",
+      "groupKey": "DSY",
+      "shopName": "JYSDdsy1993",
+      "enabled": true,
+      "productStatsEnabled": true,
+      "profileKey": "jy",
+      "port": 9339,
+      "profileName": "JY - JYSDdsy1993"
+    },
+    {
+      "storeKey": "ZL",
+      "groupKey": "DSY",
+      "shopName": "ZLSDdsy3688",
+      "enabled": true,
+      "productStatsEnabled": true,
+      "profileKey": "zl",
+      "port": 9340,
+      "profileName": "ZL - ZLSDdsy3688"
+    },
+    {
+      "storeKey": "TS",
+      "groupKey": "DSY",
+      "shopName": "TSDSdsy688",
+      "enabled": true,
+      "productStatsEnabled": true,
+      "profileKey": "ts",
+      "port": 9341,
+      "profileName": "TS - TSDSdsy688"
+    },
+    {
+      "storeKey": "MZ",
+      "groupKey": "DSY",
+      "shopName": "MZSDdsy3688",
+      "enabled": true,
+      "productStatsEnabled": true,
+      "profileKey": "mz",
+      "port": 9342,
+      "profileName": "MZ - MZSDdsy3688"
+    },
+    {
+      "storeKey": "CX",
+      "groupKey": "LGM",
+      "shopName": "GS9489101",
+      "enabled": true,
+      "productStatsEnabled": true,
+      "profileKey": "cx",
+      "port": 9343,
+      "profileName": "CX - GS9489101"
+    },
+    {
+      "storeKey": "YJ",
+      "groupKey": "LGM",
+      "shopName": "GS7451160",
+      "enabled": true,
+      "productStatsEnabled": true,
+      "profileKey": "qy",
+      "port": 9346,
+      "profileName": "YJ - GS7451160"
+    },
+    {
+      "storeKey": "XL",
+      "groupKey": "LGM",
+      "shopName": "GS8146729",
+      "enabled": true,
+      "productStatsEnabled": true,
+      "profileKey": "yj",
+      "port": 9344,
+      "profileName": "XL - GS8146729"
+    },
+    {
+      "storeKey": "QY",
+      "groupKey": "LGM",
+      "shopName": "GS9307061",
+      "enabled": true,
+      "productStatsEnabled": true,
+      "profileKey": "xl",
+      "port": 9345,
+      "profileName": "QY - GS9307061"
+    },
+    {
+      "storeKey": "QH",
+      "groupKey": "LGM",
+      "shopName": "GS8715910",
+      "enabled": true,
+      "productStatsEnabled": true,
+      "profileKey": "qh",
+      "port": 9347,
+      "profileName": "QH - GS8715910"
+    }
+  ],
+  "businessUtcOffsetHours": 8
+}

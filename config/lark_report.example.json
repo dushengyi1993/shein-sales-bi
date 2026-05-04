@@ -1,0 +1,8 @@
+﻿{
+  "recipientUserId": "ou_xxx_replace_with_feishu_open_id",
+  "recipientNote": "Feishu/Lark recipient open_id for daily report. Keep the real value in config/lark_report.json, which is ignored by git.",
+  "defaultIdentity": "bot",
+  "identityNote": "Use bot by default. If switching to user identity, grant the required Feishu message permission first.",
+  "reportGroups": ["DSY", "LGM"],
+  "syncStoresByGroupNote": "Daily report covers the configured store groups."
+}

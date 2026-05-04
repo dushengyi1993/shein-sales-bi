@@ -1,0 +1,70 @@
+﻿# Agent / local execution notes
+.codex/
+
+# Browser login profiles and Chrome runtime data (never upload)
+profiles/
+
+# Generated outputs, runtime state, logs, payloads and backups
+outputs/
+logs/
+state/
+tmp/
+backups/
+lark_payloads/
+*.log
+*.jsonl
+
+# Local credentials, sessions and machine-specific config
+.env
+.env.*
+!.env.example
+*.local
+*.local.*
+*.secret.*
+*.secrets.*
+*.token.*
+*.credential.*
+*.credentials.*
+config/*.local.json
+config/lark_report.json
+config/*secret*.json
+config/*token*.json
+config/*credential*.json
+infra/metabase/.env
+infra/metabase/data/
+infra/metabase/plugins/
+infra/metabase/.admin.local.json
+infra/metabase/.session.local.json
+
+# Dependencies and caches
+node_modules/
+.pnpm-store/
+.npm/
+.yarn/
+.cache/
+__pycache__/
+*.py[cod]
+
+# Local databases, dumps and bulky archives
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+*.bak
+*.backup
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+*.ext4
+*.bin
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

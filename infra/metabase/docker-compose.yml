@@ -1,0 +1,65 @@
+name: shein-bi
+
+services:
+  metabase:
+    image: metabase/metabase:latest
+    container_name: shein-metabase
+    restart: unless-stopped
+    ports:
+      - "${METABASE_PORT:-3000}:3000"
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_HOST: metabase-db
+      MB_DB_PORT: 5432
+      MB_DB_DBNAME: ${METABASE_DB_NAME:-metabase}
+      MB_DB_USER: ${METABASE_DB_USER:-metabase}
+      MB_DB_PASS: ${METABASE_DB_PASSWORD}
+      JAVA_TIMEZONE: Asia/Shanghai
+      MB_SITE_LOCALE: zh_CN
+      MB_ANON_TRACKING_ENABLED: "false"
+    depends_on:
+      metabase-db:
+        condition: service_healthy
+    volumes:
+      - metabase-plugins:/plugins
+
+  metabase-db:
+    image: postgres:16-alpine
+    container_name: shein-metabase-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${METABASE_DB_NAME:-metabase}
+      POSTGRES_USER: ${METABASE_DB_USER:-metabase}
+      POSTGRES_PASSWORD: ${METABASE_DB_PASSWORD}
+      TZ: Asia/Shanghai
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${METABASE_DB_USER:-metabase} -d ${METABASE_DB_NAME:-metabase}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - metabase-postgres:/var/lib/postgresql/data
+
+  warehouse-db:
+    image: postgres:16-alpine
+    container_name: shein-warehouse-db
+    restart: unless-stopped
+    ports:
+      - "${WAREHOUSE_PORT:-54329}:5432"
+    environment:
+      POSTGRES_DB: ${WAREHOUSE_DB_NAME:-shein_bi}
+      POSTGRES_USER: ${WAREHOUSE_DB_USER:-shein}
+      POSTGRES_PASSWORD: ${WAREHOUSE_DB_PASSWORD}
+      TZ: Asia/Shanghai
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${WAREHOUSE_DB_USER:-shein} -d ${WAREHOUSE_DB_NAME:-shein_bi}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - warehouse-postgres:/var/lib/postgresql/data
+
+volumes:
+  metabase-postgres:
+  warehouse-postgres:
+  metabase-plugins:

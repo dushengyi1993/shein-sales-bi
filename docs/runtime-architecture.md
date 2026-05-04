@@ -1,0 +1,207 @@
+﻿# 运行环境架构
+
+## 2026-05-03 当前运行环境摘要
+
+- 飞书生产链路继续在 Windows 侧运行，BI 后置刷新不反向影响飞书表格、看板和日报。
+- 链接表现每日任务为 `SHEIN-Sales-15Stores-LinkManagement-0530`，每天 `05:30`，同步飞书链接底表并刷新 BI；旧 `0340` / `0510` 链接任务不要恢复。
+- HL 正式 profile 为 `profiles/persistent-shein-main-profile`，CDP 端口 `9360`；旧 `profiles/persistent-hl-profile` 已删除。
+
+## 结论
+
+不全量切到 WSL，也不把业务逻辑写成 PowerShell。
+
+推荐架构：
+
+- 工作区：所有项目文件、脚本、配置、日志、浏览器 profile、截图证据都放在 `E:\Codex WorkSpace\Shein销售统计`。
+- 脚本语言：优先 Python / Node，保持跨平台和可维护。
+- PowerShell：只作为 Windows 上的薄启动器，用来启动 Chrome 或计划任务，不承载核心业务逻辑。
+- WSL2：适合跑数据处理、文本处理、批量脚本；但不是 SHEIN 浏览器自动化的主执行环境。
+- Windows Chrome：负责 SHEIN 登录态和页面自动化，但使用工作区内的 `profiles/` 作为 `--user-data-dir`，避免占用默认 C 盘 Chrome 用户目录。定时任务默认使用 Chrome `--headless=new` 无界面模式；只有登录、验证码、人机校验或排障时才打开可见 Chrome。
+- 飞书写入：当前 `lark-cli` 在 Windows 侧可用，脚本可直接调用；如后续需要长期后台任务，优先用 Windows 计划任务调用工作区脚本。
+
+## 当前 Windows 计划任务（北京时间）
+
+- `SHEIN-Sales-15Stores-YesterdayFinal-0010`：每天 `00:10` 跑前一天最终版。
+- `SHEIN-Sales-15Stores-Intraday-Daytime`：每天 `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10` 跑当天滚动同步。
+- `SHEIN-Sales-15Stores-LinkManagement-0530`：每天 `05:30` 跑前一完整业务日链接管理同步，同步飞书链接底表并刷新 BI。
+- `SHEIN-BI-Daily-Pipeline-0640`：每天 `06:40` 刷新 PostgreSQL BI 仓库、体检、门户和晨报。
+- 每日飞书文字日报和可视化日报图不再使用独立固定任务；由 `08:10` 当天同步成功完成后自动发送。若 `08:10` 因关机/失败未发送，上午后续成功的滚动同步可补发一次，并用 `state/daily-report-sent-YYYYMMDD.flag` 防重复。
+- `SHEIN-Sales-15Stores-Watchdog-Logon`：Windows 登录时和每天 `09:20` 检查漏跑并补偿；不额外同步当日。
+
+安装/更新入口：
+
+`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_windows_scheduled_tasks.ps1 -IncludeWatchdog`
+
+计划任务 Action 不直接调用 `powershell.exe -File ...`，而是调用 `wscript.exe` 执行 `scripts/run_scheduled_hidden.vbs`，再隐藏启动对应 `.ps1`。这样即使同步任务运行十几分钟，也不会在前台留下黑色命令行窗口。任务最长运行时间为 90 分钟，避免后台卡死影响下一次同步。
+
+## 为什么不全用 WSL
+
+- SHEIN 登录态和 Chrome UI 自动化天然在 Windows Chrome 上更稳。
+- 当前 `lark-cli` 已在 Windows 侧配置好授权，WSL 里没有直接安装。
+- WSL 调 Windows GUI/Chrome 可行但链路更绕，长期定时任务出错点更多。
+
+## BI 系统的 WSL 边界
+
+2026-05-01 开始，新的专业 BI 系统采用“新系统 WSL 化、旧生产链路暂不动”的策略：
+
+- Metabase、Metabase 配置库、SHEIN 数据仓库通过 Docker 跑在 WSL。
+- WSL 发行版已迁移到 `D:\WSL\Ubuntu-24.04`。
+- Docker 数据根已迁移到 `D:\SheinBI\docker-data\docker-data.ext4`，实际挂载到 WSL 内 `/mnt/wsl/shein-docker-data/docker`。
+- 现有销售抓取、飞书同步、日报、Windows 计划任务继续在 Windows 侧运行，直到 BI 系统稳定可替代。
+- 后续新写的 BI 数据入仓、规则引擎、Metabase 配置脚本，优先按“可迁移到 Linux 服务器”的方式设计，减少 PowerShell 业务逻辑。
+
+也就是说：**BI 底座可以先 WSL/服务器化，但不要为了统一环境去冒险迁移已稳定的飞书生产链路。**
+
+## 为什么不把业务逻辑写 PowerShell
+
+- PowerShell 适合启动 Windows 程序，不适合承载复杂抓取、解析、聚合、幂等写表逻辑。
+- 后续核心逻辑统一沉淀到 Python / Node，方便测试、复用和迁移。
+
+## C 盘使用边界
+
+允许使用：
+- 已安装的 Windows Chrome 程序；当前自动探测优先 `C:\Program Files\Google\Chrome\Application\chrome.exe`，D 盘路径只作兜底。
+- 已配置好的 `lark-cli.exe`。
+- 系统/工具本身已有缓存。
+
+不主动写入：
+- 项目脚本。
+- SHEIN 浏览器 profile。
+- 抓取日志。
+- 页面截图/证据。
+- 统计结果。
+- 项目 skill。
+
+这些都写入当前工作区。
+
+## 浏览器 profile 与磁盘瘦身边界（2026-05-02）
+
+15 店 SHEIN 登录态保存在工作区内的独立 Chrome profile。不要删除整个 `persistent-*` 目录；登录态通常在 `Profile 1`、`Default`、`Network`、`Local Storage`、Cookies/Session 相关文件中。
+
+当前店铺映射：
+
+| 店铺 | profile 目录 | CDP 端口 |
+|---|---|---:|
+| DL | `profiles/persistent-dl-profile` | 9333 |
+| DX | `profiles/persistent-dx-profile` | 9334 |
+| FY | `profiles/persistent-fy-profile` | 9335 |
+| LQ | `profiles/persistent-lq-profile` | 9336 |
+| NM | `profiles/persistent-nm-profile` | 9337 |
+| HL | `profiles/persistent-shein-main-profile` | 9360 |
+| JY | `profiles/persistent-jy-profile` | 9339 |
+| ZL | `profiles/persistent-zl-profile` | 9340 |
+| TS | `profiles/persistent-ts-profile` | 9341 |
+| MZ | `profiles/persistent-mz-profile` | 9342 |
+| CX | `profiles/persistent-cx-profile` | 9343 |
+| YJ | `profiles/persistent-qy-profile` | 9346 |
+| XL | `profiles/persistent-yj-profile` | 9344 |
+| QY | `profiles/persistent-xl-profile` | 9345 |
+| QH | `profiles/persistent-qh-profile` | 9347 |
+
+补充说明：
+
+- 旧 `profiles/persistent-hl-profile` 已删除；当前 HL 正式使用 `profiles/persistent-shein-main-profile`。
+- `profiles/persistent-feishu-profile` 是飞书网页登录态，用于看板富文本、卡片样式和页面自动化，不属于 15 店 SHEIN 登录。
+- Chrome 自动生成的 `OptGuideOnDeviceModel` 是重复模型缓存，不是登录态。等同步任务和 Chrome 进程停止后，可只删除各 profile 下的 `OptGuideOnDeviceModel` 来释放约 30GB+。
+- 瘦身时不要动 `Profile 1`、`Default`、`Network`、`Local Storage`、Cookies/Session 相关文件。
+- 2026-05-02 文件整理报告见 `outputs/cleanup/project-file-cleanup-2026-05-02.md`；误生成的 `E:\Codex` 已归档到 `backups/file-cleanup-20260502T125310/E-Codex-stray-chrome-profile`。
+
+## 前台窗口策略
+
+- 主方案：定时同步通过 `run_sales_sync_job.mjs` 自动启动无界面 Chrome，不占任务栏。
+- 如果某店重启后 headless Chrome 起不来，`run_sales_sync_job.mjs` 会自动尝试后台窗口模式作为兜底；这只用于恢复抓取可用性，不代表要常驻前台窗口。
+- `launch_store_browser.mjs` 使用 `detached=false` + `unref()` 启动 Chrome，避免 Windows/Node 下 detached Chrome 偶发 libuv assertion，同时不让启动器阻塞终端。
+- 计划任务启动器：使用 `wscript.exe` + `scripts/run_scheduled_hidden.vbs` 隐藏 PowerShell 控制台，避免同步期间前台出现长期停留的 cmd/PowerShell 黑窗。
+- 可见窗口：仅用于首次登录、验证码、人机校验、保存密码选择或人工排障。
+- 兜底方案：`--background-browser` / `--background` 会把窗口最小化/离屏，但仍可能在任务栏出现，不作为首选。
+- 不推荐把 Windows 多桌面作为主方案：它只是把窗口移动到另一个桌面，仍依赖前台 GUI 会话，重启、调度和焦点稳定性不如 headless。
+- 若前台窗口已经打开，可用 `scripts/close_store_browsers.ps1 -Group DSY` 安全关闭工作区店铺 Chrome；脚本会按工作区 profile 路径校验，避免误关用户的普通 Chrome。
+
+## 登录态掉线与自动恢复经验（2026-04-28）
+
+现象：页面仍可能显示“我的订单”，但接口 `/gsp/orderPlus/listOrder` 返回 `code=20302`、`msg=子系统登录重定向`。这种情况应按“接口登录态失效”处理，不能只看页面标题或页面内容。
+
+处理流程：
+
+1. 先查看 `logs/scheduled/` 和 `logs/jobs/`，确认失败范围。
+2. 如果只有某个分组失败，例如 DSY 10 店全部 `20302`、LGM 正常，则优先恢复失败分组，不要重跑全部历史。
+3. 使用 `scripts/auto_relogin_shein_store.mjs` 恢复登录态：
+   - 示例：`node scripts/auto_relogin_shein_store.mjs DL,DX --date 2026-04-28 --visible`
+   - 脚本只检查账号/密码输入框是否已有值，并点击登录按钮；不读取、不输出账号密码。
+   - 如果出现验证码、人机校验、短信验证，脚本不能绕过，应打开可见窗口让用户处理。
+4. 登录恢复后，补跑当天同步：
+   - 示例：`node scripts/run_sales_sync_job.mjs --date 2026-04-28 --status 当天同步 --group DSY --no-monthly --no-compact-display --no-dashboard`
+5. DSY 与 LGM 都成功后，再统一刷新派生展示层，避免半新半旧：
+   - `node scripts/generate_monthly_sales_table.mjs --month YYYY-MM --include-lgm`
+   - `node scripts/generate_compact_display_tables.mjs --group ALL --current-month YYYY-MM --recent-months 2`
+   - `node scripts/setup_lark_dashboard_main_v3.mjs --month YYYY-MM`
+   - `node scripts/setup_lark_dashboard_previous_month.mjs --month YYYY-MM`
+6. 若店铺事实已写入但产品/月表/看板后续步骤遇到飞书临时 `HTTP 500` / `5000`，应从失败环节开始补跑；任何上游失败都不能继续刷新主看板。
+
+## 15 店看板刷新
+
+- 当前有两个正式 Dashboard：
+  - 当月主看板：`SHEIN经营看板 v3-主看板`，刷新脚本 `node scripts/setup_lark_dashboard_main_v3.mjs --month YYYY-MM`。
+  - 上月看板：`SHEIN经营看板 v3-上月`，刷新脚本 `node scripts/setup_lark_dashboard_previous_month.mjs --month YYYY-MM`。
+- 看板不直接读取大明细表，也不依赖 Dashboard filter；当月读取 `看板数据-MAIN-*`，上月读取 `看板数据-PREV-*` 小型聚合表，避免飞书前端出现“配置数据发生变更，请重新配置”。
+- 核心指标卡读取 `KPI*` 专用字段；`看板数据-MAIN-范围汇总` 的 `全部/DSY/LGM` 三行不能直接做统计卡 `SUM`，否则会重复求和。
+- 主看板和上月看板的 `数据时间说明` 是飞书内部 `RICH_TEXT` 组件。公开 Dashboard 更新接口只能安全更新普通图表配置；更新已存在 text block 的 `data_config.text` 会把 Markdown 变成带引号的普通字符串，导致字面量 `\n`、字体不生效，甚至显示“加载失败”。因此不要再用公开接口改它；当前正式刷新脚本会通过 `scripts/update_dashboard_time_richtext_ui.mjs` 使用已登录飞书网页 profile 调用内部富文本保存链路更新时间块。
+- 富文本时间块更新是 best-effort：数据源先刷新成功，再更新时间块；若飞书页面偶发 `Target page, context or browser has been closed`、超时或网络抖动，`setup_lark_dashboard_main_v3.mjs` 会自动重试 3 次。多次失败时不阻断销售数据源刷新，但需要后续补刷时间块并排查飞书 profile 登录态。若时间块更新卡住，可先用 `node scripts/setup_lark_dashboard_main_v3.mjs --month YYYY-MM --no-richtext-time` 发布核心数据源，再单独处理时间块。
+- 看板视觉规范：顶部 KPI 卡、趋势图和店铺榜按口径统一分色，全部/合计=绿色系，`DSY`=蓝色系，`LGM`=橙色系；产品榜使用紫粉系。店铺排行标签只显示 `01 DX` 这种排名+店铺代号，分组由颜色表达，不再在标签里显示 `DSY/` 或 `LGM/`。
+- 用户会在飞书前端手动微调正式看板布局和组件大小；自动刷新脚本默认不得重排、不得重建无关组件、不得改变布局。`setup_lark_dashboard_main_v3.mjs` 默认 `arrange=false`，只有用户明确同意时才传 `--arrange`。
+- 定时同步不在 DSY/LGM 单组任务内刷新看板；两组都成功后，由包装脚本统一调用当月主看板和上月看板刷新脚本。
+- 恢复完成后，用 `scripts/close_store_browsers.ps1 -Group DSY` 或 `-Group LGM` 关闭为登录打开的可见窗口，后续定时任务继续用 headless。
+
+关键避坑：SHEIN 登录 URL 的 redirect 参数必须是合法 base64。不要把 `/gsp/order-management/list` 这类带 `-` 的原始路径直接拼到 `/login/GMPSSO/` 后面，否则会触发 `Illegal base64 character 2d` 的服务端错误弹窗。
+
+## 2026-04-28 登录失效自动恢复硬规则
+
+- 定时同步/手动同步遇到 SHEIN 接口返回 20302 子系统登录重定向 时，不能直接把失败信息和本地旧数据当成最新结果继续发送或展示。
+- scripts/run_sales_sync_job.mjs 默认启用自动恢复：先调用 scripts/auto_relogin_shein_store.mjs 使用已保存的浏览器账号密码恢复登录态，再重新抓取该店当天数据，只有重新抓取成功后才写入飞书事实表并刷新看板。
+- 如果自动恢复失败，任务必须把该店标为失败/需要人工登录；日报或告警应明确提示，不得把旧文件里的销售额冒充为最新数据。
+- 可选参数：--no-auto-relogin 仅用于排障禁用自动登录；--relogin-visible 默认用于验证码/保存密码场景；--relogin-headless 可用于无界面试验。
+- 若保存密码看似没有命中，先确认启动时是否使用了对应店铺 profile 和 `--profile-directory=Profile 1`。2026-05-03 的 JY 告警就是因为登录态掉线且自动恢复未命中 profile，人工登录后已补跑 `2026-05-02` 最终版和 `2026-05-03` 今日数据。
+- 2026-04-28 已用 LGM 组重跑验证：CX/YJ/XL/QY/QH 今日抓取与写入成功，合计 1243.06 SAR。
+
+## 数据抓取时间展示规则
+
+- SHEIN 日报文字、日报图片和飞书 Base 看板必须显示“数据抓取时间”；图片/看板可同时显示生成时间或刷新时间，但不能只显示生成/刷新时间。数据抓取时间优先取当日各店 `outputs/shein_fetch/<store>/<date>.json` 的最新 `fetchTime`。
+- 当前两个正式看板顶部富文本时间块已通过内部保存链路修复为正常标题样式；定时刷新会在数据源刷新后自动尝试更新时间块，并带 3 次轻量重试。看板数据卡片和图表仍按 `MAIN/PREV` 聚合表正常刷新。
+
+## 逻辑体检
+
+- 体检脚本：`node scripts/audit_shein_sales_logic.mjs --month YYYY-MM --date YYYY-MM-DD`
+- 体检脚本读取飞书云端组件时会对 `EOF`、`HTTP 500/5000`、限流、证书/CDN 抖动做轻量重试，避免临时网络波动造成假失败。
+- 体检内容包括：
+  - DSY/LGM 店铺分组是否重叠或漏店；
+  - `ALL = DSY + LGM` 是否成立；
+  - 产品明细合计是否等于店铺日销合计；
+  - 看板顶部统计卡是否全部读取 `KPI*` 字段；
+  - 定时任务是否先完成两组同步，再统一刷新月表/宽表/看板；
+  - 日报任务是否避免在发送前执行年度汇总、周/月宽表等重刷新。
+
+
+
+## 2026-04-29 HL 时区复核结论
+
+- HL 后台页面时区已确认正确；系统曾统计错误，是因为本地店铺配置里保留过猜测性的 `accountUtcOffsetHours=3`，导致抓取查询区间被额外换算成 `19:00~18:59`。
+- 已删除 HL 特殊偏移配置，并回补 HL `2026-02-04` 至 `2026-04-29`。后续默认规则：除非用户明确确认某店后台日期口径不同，否则所有店按后台日期直接查询北京时间自然日，不做单店额外偏移。
+- 受影响后处理：重刷对应月份的店铺月表、产品日事实、年度汇总、产品周/月宽表、订单/SKC 明细和看板，再运行逻辑体检。
+- 飞书接口出现 `tls/x509/certificate/not open.feishu.cn` 这类证书/CDN 抖动时应自动重试，不能发布半新半旧数据。
+
+
+## 2026-04-29 月表保留与上月看板策略
+- 独立月度展示表只保留当月和上个月：例如当前为 2026-04 时，只保留 `月度日销-2026-04`、`月度日销-2026-03` 以及对应 `产品日销量-YYYY-MM`；更早月份进入年度汇总表。
+- `generate_compact_display_tables.mjs` 默认 `recentMonths=2`，每月过完后会自动把新的当月/上月作为保留集合，并把更早独立月表列入 `cleanupCandidates`，删除仍需用户确认。
+- 当前有两个 Dashboard：`SHEIN经营看板 v3-主看板`（当月滚动）和 `SHEIN经营看板 v3-上月`（上月完整）。上月看板使用 `看板数据-PREV-*` 五张轻量数据源，避免与当月 `看板数据-MAIN-*` 互相覆盖。
+- 看板继续使用轻量聚合数据源，而不是直接读取订单/SKC 大明细表；这样更稳、更快，也避免 Dashboard 直接扫事实表时筛选和排序不稳定。优化方向是减少重复数据源和字段，但不要让看板直接读大明细表。
+
+# 2026-05-02 调度与 HL profile 更新
+
+- 飞书同步任务现在承担 BI 后置刷新：00:10 和白天滚动任务完成飞书写表/看板后，会继续刷新 PostgreSQL BI 仓库、本地 BI 门户和晨报。
+- 旧独立链接管理计划任务 `SHEIN-Sales-15Stores-LinkManagement-0340` / `SHEIN-Sales-15Stores-LinkManagement-0510` 已经删除；当前链接同步由 `SHEIN-Sales-15Stores-LinkManagement-0530` 每天 05:30 负责。上午滚动任务主要负责销售同步后的 BI 后置刷新。
+- HL 旧子账号 profile `profiles/persistent-hl-profile` 已删除；正式 HL profile 为 `profiles/persistent-shein-main-profile`，CDP 端口 `9360`。
+- 飞书定时任务和写表链路都通过 `config/stores.json` 获取 HL profile；当前生产脚本中没有旧 HL profile、旧端口 `9338` 或 `profileKey=hl` 引用。
+- 后置 BI 刷新失败时只记录日志，不让飞书生产任务失败。
+
+

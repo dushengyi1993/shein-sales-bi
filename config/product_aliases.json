@@ -1,0 +1,635 @@
+{
+  "version": 7,
+  "source": "user_confirmed_2026-05-02",
+  "notes": [
+    "canonical 必须尽量使用 config/product_catalog.json 的标准货号。",
+    "用户明确纠正：1710 -> WK-1710-4手持搅拌器；6810 -> SK-6810半自动意式咖啡机；175 -> SK-JB-175离心式榨汁机；便携式咖啡机 -> KF-JN-02便携咖啡机；03012 -> SK-03012台式榨汁机；185 -> SK-185台式榨汁机；3065 -> SK-3065蒸汽熨烫机。",
+    "短数字别名必须依赖标题关键词约束，避免误归并。",
+    "2026-04-27 用户确认：2001胶囊咖啡机作为新标准货号；3065/SK-3065 类历史货号统一合并到 SK-GT-3065蒸汽熨烫机。",
+    "2026-04-27：LGM 接入后确认 QY505缝纫机 / QY505 / 505缝纫机 归并到 SM-505A电动缝纫机。",
+    "2026-04-28 用户确认新增归并：1810->S1810；11004->SK-11004；1713/QY1713->SK-1713-4；7028->SK-7028；QY185/LQ185->SK-185；102/KJ-102三角形->KJ-102；冰箱->PA4-6L；999->SK-999；1924->SK-1924；961->SM-961；1928->SK-1928；025->HS-025；LQ杆式吸尘器->SK-3378；SK-04029意式咖啡机->SK-04029半自动意式咖啡机；补充 SK-JFB-794 完整别名。",
+    "2026-05-03 user confirmed: standalone ice maker product name must be normalized into SK-03038 ice maker canonical SKU."
+  ],
+  "aliases": [
+    {
+      "canonical": "SK-03038制冰机",
+      "aliases": [
+        "SK-03038制冰机",
+        "制冰机",
+        "DX制冰机",
+        "DL制冰机",
+        "MZ制冰机",
+        "QY制冰机",
+        "03038",
+        "SK-03038",
+        "SK-03038???",
+        "???",
+        "DX???",
+        "DL???",
+        "MZ???",
+        "QY???"
+      ],
+      "source": "user_confirmed_2026-05-03",
+      "status": "active"
+    },
+    {
+      "canonical": "SK-1713-4手持搅拌器",
+      "aliases": [
+        "SK-1713-4手持搅拌器",
+        "SK-1713-4搅拌器",
+        "SK-1713搅拌器",
+        "1713-4",
+        "MZ1713搅拌器",
+        "1713",
+        "QY1713搅拌器"
+      ]
+    },
+    {
+      "canonical": "SM-505A电动缝纫机",
+      "aliases": [
+        "SM-505A电动缝纫机",
+        "TXSM-505A电动缝纫机",
+        "505A电动缝纫机",
+        "TXSM-505A",
+        "505A",
+        "505",
+        "QY505",
+        "QY505缝纫机",
+        "505缝纫机"
+      ]
+    },
+    {
+      "canonical": "S1810电热水壶",
+      "aliases": [
+        "S1810电热水壶",
+        "S1810",
+        "GL-BL02电热水壶",
+        "BL-031电热水壶",
+        "WK-102电热水壶",
+        "电热水壶",
+        "1810"
+      ]
+    },
+    {
+      "canonical": "SK-GT-3065蒸汽熨烫机",
+      "aliases": [
+        "SK-GT-3065蒸汽熨烫机",
+        "SK-3065蒸汽熨烫机",
+        "SK-3065熨烫机",
+        "MZ3065熨烫机",
+        "3065"
+      ]
+    },
+    {
+      "canonical": "WK-1710-4手持搅拌器",
+      "aliases": [
+        "WK-1710-4手持搅拌器",
+        "WK-1710-4搅拌器",
+        "MZ1710搅拌器",
+        "1710"
+      ]
+    },
+    {
+      "canonical": "SK-3378杆式吸尘器",
+      "aliases": [
+        "SK-3378杆式吸尘器",
+        "MZ杆式吸尘器",
+        "3378",
+        "LQ杆式吸尘器"
+      ]
+    },
+    {
+      "canonical": "PA4-6L便携式冰箱",
+      "aliases": [
+        "PA4-6L便携式冰箱",
+        "PA4-6L便携式小冰箱",
+        "PA-4L便携式小冰箱",
+        "PA4-6L",
+        "MZ便携式小冰箱",
+        "DX便携式小冰箱",
+        "冰箱"
+      ]
+    },
+    {
+      "canonical": "SK-11004蒸汽熨烫机",
+      "aliases": [
+        "SK-11004蒸汽熨烫机",
+        "SK-11004熨烫机",
+        "MZ11004熨烫机",
+        "CY-808B熨烫机",
+        "11004"
+      ]
+    },
+    {
+      "canonical": "SK-JB-175离心式榨汁机",
+      "aliases": [
+        "SK-JB-175离心式榨汁机",
+        "SD-175榨汁机",
+        "SK-175榨汁机",
+        "MZ榨汁机175",
+        "175"
+      ]
+    },
+    {
+      "canonical": "FZ-666颈部按摩器",
+      "aliases": [
+        "FZ-666颈部按摩器",
+        "FZ-666肩颈按摩器",
+        "MZ666肩颈按摩器",
+        "666"
+      ]
+    },
+    {
+      "canonical": "KJ-102S三明治机和早餐机",
+      "aliases": [
+        "KJ-102S三明治机和早餐机",
+        "KJ-102S三明治机",
+        "SK-102S三明治机"
+      ]
+    },
+    {
+      "canonical": "KJ-102三明治机和早餐机",
+      "aliases": [
+        "KJ-102三明治机和早餐机",
+        "KJ-102三明治机",
+        "SK-102三明治机",
+        "HY-811三明治机",
+        "102",
+        "KJ-102三角形三明治机"
+      ]
+    },
+    {
+      "canonical": "SK-03012台式榨汁机",
+      "aliases": [
+        "SK-03012台式榨汁机",
+        "SK-03012榨汁机",
+        "SK-03012",
+        "MK榨汁机03012",
+        "LQ榨汁机03012",
+        "03012"
+      ]
+    },
+    {
+      "canonical": "SK-7027绞肉机",
+      "aliases": [
+        "SK-7027绞肉机",
+        "7027"
+      ]
+    },
+    {
+      "canonical": "SK-185台式榨汁机",
+      "aliases": [
+        "SK-185台式榨汁机",
+        "SK-185榨汁机",
+        "SK-185榨汁",
+        "MA榨汁机185",
+        "185",
+        "QY185榨汁机",
+        "LQ185榨汁机"
+      ]
+    },
+    {
+      "canonical": "SK-7025A绞肉机",
+      "aliases": [
+        "SK-7025A绞肉机",
+        "SK-7025绞肉机",
+        "MZ7025A绞肉器",
+        "7025"
+      ]
+    },
+    {
+      "canonical": "SM-961厨师机",
+      "aliases": [
+        "SM-961厨师机",
+        "961"
+      ]
+    },
+    {
+      "canonical": "SK-6810半自动意式咖啡机",
+      "aliases": [
+        "SK-6810半自动意式咖啡机",
+        "SK-6810意式咖啡机",
+        "CM6810意式咖啡机",
+        "6810"
+      ]
+    },
+    {
+      "canonical": "SK-7028绞肉机",
+      "aliases": [
+        "SK-7028绞肉机",
+        "SK-7028绞肉器",
+        "7028"
+      ]
+    },
+    {
+      "canonical": "SK-1924直发夹板",
+      "aliases": [
+        "SK-1924直发夹板",
+        "1924"
+      ]
+    },
+    {
+      "canonical": "SK-11041蒸汽熨烫机",
+      "aliases": [
+        "SK-11041蒸汽熨烫机",
+        "SK-11041熨烫机",
+        "SK-11041"
+      ]
+    },
+    {
+      "canonical": "SK-223三明治机和早餐机",
+      "aliases": [
+        "SK-223三明治机和早餐机",
+        "SK-223牛排机",
+        "223"
+      ]
+    },
+    {
+      "canonical": "SK-04031胶囊咖啡机",
+      "aliases": [
+        "SK-04031胶囊咖啡机",
+        "04031胶囊咖啡机",
+        "04031"
+      ]
+    },
+    {
+      "canonical": "SK-999食品料理机",
+      "aliases": [
+        "SK-999食品料理机",
+        "SK-999料理机",
+        "SK-999榨汁机",
+        "999"
+      ]
+    },
+    {
+      "canonical": "KF-JN-02便携咖啡机",
+      "aliases": [
+        "KF-JN-02便携咖啡机",
+        "KF-JN-02便携式咖啡机",
+        "KF-JN-02",
+        "便携式咖啡机"
+      ]
+    },
+    {
+      "canonical": "SK-6863半自动意式咖啡机",
+      "aliases": [
+        "SK-6863半自动意式咖啡机",
+        "SK-6863意式咖啡机"
+      ]
+    },
+    {
+      "canonical": "SK-5118电磁炉",
+      "aliases": [
+        "SK-5118电磁炉",
+        "5118"
+      ]
+    },
+    {
+      "canonical": "CM-121E美式咖啡机",
+      "aliases": [
+        "CM-121E美式咖啡机",
+        "121"
+      ]
+    },
+    {
+      "canonical": "SK-10075电油炸锅",
+      "aliases": [
+        "SK-10075电油炸锅",
+        "10075"
+      ]
+    },
+    {
+      "canonical": "SK-15013卷发钳和卷发棒",
+      "aliases": [
+        "SK-15013卷发钳和卷发棒",
+        "15013"
+      ]
+    },
+    {
+      "canonical": "SK-1914热风梳",
+      "aliases": [
+        "SK-1914热风梳",
+        "1914"
+      ]
+    },
+    {
+      "canonical": "HS-025直发夹板",
+      "aliases": [
+        "HS-025直发夹板",
+        "025"
+      ]
+    },
+    {
+      "canonical": "SK-JFB-675B卷发钳和卷发棒",
+      "aliases": [
+        "SK-JFB-675B卷发钳和卷发棒"
+      ]
+    },
+    {
+      "canonical": "SK-7015绞肉机",
+      "aliases": [
+        "SK-7015绞肉机"
+      ]
+    },
+    {
+      "canonical": "SK-YM-7032绞肉机",
+      "aliases": [
+        "SK-YM-7032绞肉机"
+      ]
+    },
+    {
+      "canonical": "SK-JFB-794卷发钳和卷发棒",
+      "aliases": [
+        "794",
+        "SK-JFB-794卷发钳和卷发棒"
+      ]
+    },
+    {
+      "canonical": "SK-5110电磁炉",
+      "aliases": [
+        "SK-5110电磁炉",
+        "5110"
+      ]
+    },
+    {
+      "canonical": "SL-6699蒸汽熨烫机",
+      "aliases": [
+        "SL-6699蒸汽熨烫机",
+        "SK-6699熨烫机",
+        "MZ6699熨烫机",
+        "6699"
+      ]
+    },
+    {
+      "canonical": "SK-1928直发夹板",
+      "aliases": [
+        "SK-1928直发夹板",
+        "1928"
+      ]
+    },
+    {
+      "canonical": "V22行车记录仪",
+      "aliases": [
+        "V22行车记录仪",
+        "v22行车记录仪",
+        "V22"
+      ]
+    },
+    {
+      "canonical": "2001胶囊咖啡机",
+      "aliases": [
+        "2001胶囊咖啡机",
+        "2001"
+      ]
+    },
+    {
+      "canonical": "SK-04029半自动意式咖啡机",
+      "aliases": [
+        "SK-04029意式咖啡机"
+      ]
+    },
+    {
+      "canonical": "2001?????",
+      "aliases": [
+        "2001?????",
+        "CM-2001?????"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "FZ-666?????",
+      "aliases": [
+        "FZ-666?????",
+        "FZ-666"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-088???",
+      "aliases": [
+        "SK-088???",
+        "088"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-11041?????",
+      "aliases": [
+        "SK-11041?????",
+        "11041",
+        "LQ11041???",
+        "QY11041?????"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-13014?????",
+      "aliases": [
+        "SK-13014?????",
+        "13014",
+        "SK-13014"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-13015?????",
+      "aliases": [
+        "SK-13015?????",
+        "13015"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-13034?????",
+      "aliases": [
+        "SK-13034?????",
+        "13034"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-270???",
+      "aliases": [
+        "SK-270???",
+        "270"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-271???",
+      "aliases": [
+        "SK-271???",
+        "271"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-272???",
+      "aliases": [
+        "SK-272???",
+        "272"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-446???????",
+      "aliases": [
+        "SK-446???????",
+        "446"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-JFB-675B???????",
+      "aliases": [
+        "SK-JFB-675B???????",
+        "675",
+        "sk-675???"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-6810????????",
+      "aliases": [
+        "SK-6810????????",
+        "6810?????"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-7015???",
+      "aliases": [
+        "SK-7015???",
+        "7015"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-YM-7032???",
+      "aliases": [
+        "SK-YM-7032???",
+        "7032",
+        "SK-7032???",
+        "SK-YM-7032"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-777???????",
+      "aliases": [
+        "SK-777???????",
+        "777"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-7027???",
+      "aliases": [
+        "SK-7027???",
+        "MZ7027???",
+        "SK7027???"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-7028???",
+      "aliases": [
+        "SK-7028???",
+        "MZ7028???",
+        "SK7028???"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-6863????????",
+      "aliases": [
+        "SK-6863????????",
+        "DX-6863?????",
+        "LQ-63?????"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-04029????????",
+      "aliases": [
+        "SK-04029????????",
+        "FY-29?????"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-13065???",
+      "aliases": [
+        "SK-13065???",
+        "FY065???"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "S1810????",
+      "aliases": [
+        "S1810????",
+        "KT10 Pro????"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "WK-1710-4?????",
+      "aliases": [
+        "WK-1710-4?????",
+        "LQ1710???"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "JD-389????",
+      "aliases": [
+        "JD-389????",
+        "LQ389????"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "PA4-6L?????",
+      "aliases": [
+        "PA4-6L?????",
+        "LQPA4L???"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-JB-175??????",
+      "aliases": [
+        "SK-JB-175??????",
+        "LQ???175"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-1711?????",
+      "aliases": [
+        "SK-1711?????",
+        "QY1711???"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-GT-3065?????",
+      "aliases": [
+        "SK-GT-3065?????",
+        "QY3065???",
+        "QY3065?????"
+      ],
+      "source": "config/product_aliases.json"
+    },
+    {
+      "canonical": "SK-3378?????",
+      "aliases": [
+        "SK-3378?????",
+        "QY3378???",
+        "?SK-3378?????"
+      ],
+      "source": "config/product_aliases.json"
+    }
+  ]
+}

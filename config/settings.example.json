@@ -1,0 +1,37 @@
+﻿{
+    "timezone":  "Asia/Shanghai",
+    "currency":  {
+                     "source":  "SAR",
+                     "target":  "RMB",
+                     "sarToRmb":  1.8
+                 },
+    "profitRate":  0.25,
+    "shein":  {
+                  "orderListUrl":  "https://sso.geiwohuo.com/#/gsp/order-management/list",
+                  "dateBasis":  "订单创建时间",
+                  "excludeStatuses":  [
+                                          "取消",
+                                          "已取消"
+                                      ],
+                  "pageSizePreferred":  20
+              },
+    "schedules":  {
+                      "todayRolling":  [
+                                           "00:05",
+                                           "06:05",
+                                           "12:05",
+                                           "18:05"
+                                       ],
+                      "yesterdayFinal":  "02:00",
+                      "dailyReport":  "09:00"
+                  },
+    "lark":  {
+                 "baseToken":  "填写新建后的 base token",
+                 "reportChatIdOrUserId":  "填写飞书播报对象"
+             },
+    "paths":  {
+                  "profileRoot":  "profiles",
+                  "logRoot":  "logs",
+                  "captureRoot":  "outputs/captures"
+              }
+}
