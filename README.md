@@ -71,6 +71,7 @@
 - `schemas/`：飞书 Base 结构参考。
 - `scripts/`：抓取、同步、看板、日报、BI 入仓、门户生成、定时任务脚本。
 - `docs/`：数据模型、运行架构、BI 架构、运维说明、参考表结构。
+- `docs/migration-and-restore.md`：GitHub 托管后的迁移/复用边界；说明哪些文件不上传、换电脑或上云时如何补齐运行数据和密钥。
 - `infra/`：Metabase、PostgreSQL 数据仓库和 Docker 相关配置。
 - `skills/shein-sales-ops/`：项目专用 skill，保存业务口径和避坑经验。
 - `state/`：本地运行状态。
