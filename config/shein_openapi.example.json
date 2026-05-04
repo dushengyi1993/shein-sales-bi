@@ -1,0 +1,34 @@
+﻿{
+  "environment": "test",
+  "cooperationMode": "半托管",
+  "market": "SA",
+  "apiBaseUrls": {
+    "test": "https://openapi-test01.sheincorp.cn",
+    "prodSemiManaged": "https://openapi.sheincorp.com"
+  },
+  "authHosts": {
+    "test": "openapi-sem-test01.dotfashion.cn",
+    "prod": "openapi-sem.sheincorp.com"
+  },
+  "app": {
+    "appId": "填写开放平台应用 APP_ID；不要提交真实值",
+    "appSecretKey": "填写开放平台应用 APP_SECRET_KEY；不要提交真实值"
+  },
+  "stores": [
+    {
+      "storeKey": "DL",
+      "shopName": "示例店铺名",
+      "enabled": false,
+      "openKeyId": "店铺授权获得；不要提交真实值",
+      "secretKey": "解密后的店铺 secretKey；不要提交真实值",
+      "encryptedSecretKey": "平台返回的加密 secretKey，可选；不要提交真实值",
+      "authorizedAt": null,
+      "notes": "先用一个真实店铺试点，跑通后再复制到 15 店"
+    }
+  ],
+  "safeWriteOperations": {
+    "enabled": false,
+    "requireDryRun": true,
+    "allowedOperations": []
+  }
+}

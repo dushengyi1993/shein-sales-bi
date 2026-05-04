@@ -1,4 +1,4 @@
-﻿# SHEIN 销售统计与 BI 经营系统
+# SHEIN 销售统计与 BI 经营系统
 
 ## 2026-05-03 当前权威状态
 
@@ -132,6 +132,7 @@
 - BI 门户 UI 当前口径：`docs/bi-portal-ui-current.md`
 - BI 仓库模型：`docs/bi-warehouse-model.md`
 - SHEIN 后台数据地图：`docs/shein-backend-survey.md`
+- SHEIN 官方 OpenAPI 接入计划：`docs/shein-openapi-integration.md`
 - 数据模型：`docs/data-model.md`
 - 实施路线：`docs/implementation-roadmap.md`
 - 3 月参考表结构：`docs/reference-month-table-structure.md`
@@ -144,5 +145,6 @@
 - 旧独立链接管理任务 `SHEIN-Sales-15Stores-LinkManagement-0340` / `SHEIN-Sales-15Stores-LinkManagement-0510` 已删除；当前链接每日任务是 `SHEIN-Sales-15Stores-LinkManagement-0530`。
 - HL 只保留主账号 profile：`profiles/persistent-shein-main-profile`；旧 `profiles/persistent-hl-profile` 已删除，飞书定时任务和写表链路都会读取 `config/stores.json` 中的 `profileKey=shein-main` / `port=9360`。
 - BI 后置刷新失败只记录日志，不反向影响飞书表格、看板和日报。
+
 
 
