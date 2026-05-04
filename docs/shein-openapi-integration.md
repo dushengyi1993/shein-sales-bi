@@ -1,4 +1,4 @@
-﻿# SHEIN OpenAPI 接入计划（半托管 / 沙特市场）
+# SHEIN OpenAPI 接入计划（半托管 / 沙特市场）
 
 > 当前项目正在从“登录浏览器抓取 SHEIN 后台数据”逐步切换到 SHEIN 官方开放平台 API。本文记录当前已确认的官方规则、应用创建口径、本地配置边界和分阶段接入计划。
 
@@ -81,6 +81,14 @@ Signature = RandomKey + Base64String
 - 店铺级 `openKeyId`
 - 授权回调拿到的 `tempToken`
 - 未脱敏的完整 API 请求头
+
+## 当前测试验证结果
+
+- 应用已由用户上传图标并提交审核，开放平台应用管理中显示状态为 `审核中`。
+- 平台授权调试工具已跑通测试授权链路：测试 `APP_ID / APP_Secretkey` -> 模拟授权 -> `tempToken` -> `/open-api/auth/get-by-token` -> 店铺级 `openKeyId` 与解密后 `secretKey`。
+- 本地 OpenAPI 客户端已用测试密钥调用测试环境普通接口 `/open-api/goods/query-site-list`，返回 `code=0 / OK`。
+- 测试密钥和测试店铺密钥只保存在 `tmp/shein-openapi-runtime/*.local.json`，该目录被 `.gitignore` 排除，不进入 GitHub。
+- 可复跑的测试接口探针：`node scripts/probe_shein_openapi_test_call.mjs`。
 
 ## 分阶段接入计划
 
