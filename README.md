@@ -142,7 +142,7 @@
 - BI 仓库模型：`docs/bi-warehouse-model.md`
 - SHEIN 后台数据地图：`docs/shein-backend-survey.md`
 - SHEIN 官方 OpenAPI 接入计划：`docs/shein-openapi-integration.md`
+- scripts 脚本清单与废弃边界：`docs/scripts-inventory.md`
 - 数据模型：`docs/data-model.md`
 - 实施路线：`docs/implementation-roadmap.md`
 - 3 月参考表结构：`docs/reference-month-table-structure.md`
-

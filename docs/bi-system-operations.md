@@ -14,6 +14,7 @@
 - 本机 BI 门户：[http://127.0.0.1:8787/](http://127.0.0.1:8787/)
 - 局域网协作访问：[http://192.168.2.49:8787/](http://192.168.2.49:8787/)
 - 本地门户文件：`outputs/bi-portal/index.html`
+- V1 是唯一正式门户；V2 平行版已废弃，`outputs/bi-portal/v2/` 和 `scripts/generate_bi_portal_v2.mjs` 不再存在，日常生成脚本也不再注入 V2 跳转。
 - 启动本机网页服务：双击 `打开SHEIN-BI网页服务.cmd`
 - 启动局域网协作服务：双击 `打开SHEIN-BI局域网协作服务.cmd`
 - Markdown 经营晨报：`outputs/bi-briefings/latest.md`
@@ -59,6 +60,7 @@
 - 当前正式任务：`SHEIN-Sales-15Stores-LinkManagement-0530`，每天北京时间 `05:30`。
 - 执行脚本：`scripts/scheduled_link_management_daily.ps1`。
 - 执行内容：抓前一完整业务日 15 店链接数据，写本地 JSON、PostgreSQL 和 BI 门户；飞书链接管理表已废弃，不再写入。
+- BI 门户侧栏的“链接表现数据”更新时间应显示源文件抓取时间：`outputs/shein_links/<店铺>/<链接日>.json` 内 `fetchTime` 的最大值；BI 下午重跑重新入仓时产生的数据库 `updated_at` 只可作为内部排障字段，不作为主要更新时间展示。
 - 如果部分店失败：尽量同步成功店铺，并发送飞书异常提醒。
 - 旧 `SHEIN-Sales-15Stores-LinkManagement-0340` / `SHEIN-Sales-15Stores-LinkManagement-0510` 不应恢复。
 

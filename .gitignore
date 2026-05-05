@@ -1,11 +1,15 @@
-﻿# Agent / local execution notes
+# Agent / local execution notes
 .codex/
 
 # Browser login profiles and Chrome runtime data (never upload)
 profiles/
 
 # Generated outputs, runtime state, logs, payloads and backups
-outputs/
+outputs/*
+!outputs/bi-portal/
+outputs/bi-portal/*
+!outputs/bi-portal/index.html
+!outputs/bi-portal/data.json
 logs/
 state/
 tmp/
@@ -68,3 +72,4 @@ Thumbs.db
 desktop.ini
 .vscode/
 .idea/
+

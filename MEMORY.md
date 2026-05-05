@@ -75,10 +75,21 @@
 ## SHEIN BI 系统
 - 架构原则：`SHEIN 后台抓取 -> 本地 JSON / PostgreSQL 数据仓库 -> Metabase BI / 本地 BI 门户`。
 - 本地 BI 门户入口：`http://127.0.0.1:8787/`；文件为 `outputs/bi-portal/index.html`；生成脚本为 `scripts/generate_bi_portal.mjs`；数据文件为 `outputs/bi-portal/data.json`。
+- V1 是当前唯一正式本地 BI 门户；V2 平行版本已废弃，`outputs/bi-portal/v2/`、`scripts/generate_bi_portal_v2.mjs` 和 V1 的 V2 跳转入口已删除，后续不要恢复自动生成 V2。
+- BI 门户侧栏“链接表现数据”更新时间必须显示链接源文件抓取时间，即 `outputs/shein_links/<店铺>/<链接日>.json` 的 `fetchTime` 最大值；不要用 BI 重跑入仓时的 `updated_at` 冒充链接抓取时间。
 - Metabase 运行在 WSL + Docker，Docker 数据位于 `D:\SheinBI\docker-data\docker-data.ext4`，WSL 发行版位于 `D:\WSL\Ubuntu-24.04`。
 - 若 Docker / Postgres / Metabase 出现 `input/output error`，优先怀疑 `D:\SheinBI\docker-data\docker-data.ext4` 文件系统异常；恢复顺序是先停止 WSL / Docker，再做 volume 备份和 `e2fsck -fy`，最后重启容器并跑 BI audit，不要直接删除 Docker 数据。
 - Metabase 管理员凭据只保存在 `infra/metabase/.admin.local.json`，不要写入聊天、文档或日志。
 - 当前团队访问已开放临时局域网协作：`http://192.168.2.49:8787/`，仅限 `192.168.2.0/24` 私有网络，局域网内无需账号密码，未开放公网或端口转发；共享动作状态写入 `state/bi_action_state.json`，操作审计写入 `logs/bi_portal_action_audit.jsonl`，留痕以访问 IP 为准。团队正式版上线前还需固定地址、动作状态入库、HTTPS 和备份。
+
+
+## BI V2 平行站点（2026-05-05 起）
+- V1 仍是当前正式入口：`http://127.0.0.1:8787/`；V2 平行验收入口：`http://127.0.0.1:8787/v2/`，局域网入口：`http://192.168.2.49:8787/v2/`。
+- V2 文件位于 `outputs/bi-portal/v2/`，生成脚本为 `scripts/generate_bi_portal_v2.mjs`，设计系统源为 `design-system/bi-portal-v2/MASTER.md`，系统设计文档为 `docs/bi-portal-v2-system-design.md`。
+- `scripts/generate_bi_portal.mjs` 已自动串联生成 V2，并给 V1 注入“体验 V2 / 平行新版”按钮；V2 生成失败不阻断 V1 刷新，直到用户确认切换前不要废弃 V1。
+- `scripts/serve_bi_portal.mjs` 已支持目录 `index.html`，因此同一端口可访问 `/v2/`，不要为 V2 另开新端口。
+- V2 当前复用 V1 的 `outputs/bi-portal/data.json` 并复制为 `outputs/bi-portal/v2/data.json`；如果数据结构限制 V2 的交互、性能或表达效果，可以在不破坏 V1 的前提下为 V2 单独优化数据包。
+- V2 不能以“页面覆盖齐全”作为完成标准；每次交付前必须自己用真实浏览器截图检查首页和至少一个核心子页面，确认无横向滚动、无明显默认表格模板感、首屏能一眼看出经营结论、筛选和图表不挤爆。
 
 ## BI 门户 UI 当前规则
 - 首页是“总控驾驶舱”，主要承载总览、分组、趋势和排行榜；具体操作下沉到店铺、货号 360、SKC/链接、订单/售后、动作池、系统状态等子页面。

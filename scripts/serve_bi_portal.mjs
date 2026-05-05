@@ -446,7 +446,7 @@ async function main() {
         }
         return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
       }
-      const file = safePath(root, req.url || '/');
+      let file = safePath(root, req.url || '/');
       if (!file) return send(res, 403, 'Forbidden', {'Content-Type': 'text/plain; charset=utf-8'});
       let stat;
       try {
@@ -454,7 +454,14 @@ async function main() {
       } catch {
         return send(res, 404, 'Not found', {'Content-Type': 'text/plain; charset=utf-8'});
       }
-      if (stat.isDirectory()) return send(res, 403, 'Forbidden', {'Content-Type': 'text/plain; charset=utf-8'});
+      if (stat.isDirectory()) {
+        file = path.join(file, 'index.html');
+        try {
+          stat = await fs.stat(file);
+        } catch {
+          return send(res, 404, 'Not found', {'Content-Type': 'text/plain; charset=utf-8'});
+        }
+      }
       const ext = path.extname(file).toLowerCase();
       const data = await fs.readFile(file);
       send(res, 200, data, {'Content-Type': types[ext] || 'application/octet-stream'});

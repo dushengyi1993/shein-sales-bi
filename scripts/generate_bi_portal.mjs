@@ -569,9 +569,27 @@ async function enrichPortalDataWithLocalLinkLabels(data) {
   const linkDate = data?.dates?.linkDate || '';
   const meta = await readLatestLinkInventoryMeta(linkDate);
   if (!meta.size) return data;
+  let linkFetchTimes = [];
+  try {
+    const baseDir = path.join(ROOT, 'outputs', 'shein_links');
+    const dirs = (await fs.readdir(baseDir, {withFileTypes: true})).filter(d => d.isDirectory()).map(d => d.name);
+    for (const storeKey of dirs) {
+      const file = path.join(baseDir, storeKey, `${linkDate}.json`);
+      try {
+        const payload = JSON.parse(await fs.readFile(file, 'utf8'));
+        if (payload?.fetchTime) linkFetchTimes.push(String(payload.fetchTime));
+      } catch {}
+    }
+  } catch {}
+  const sourceLinkUpdatedAt = linkFetchTimes.length ? linkFetchTimes.sort().at(-1) : data?.dates?.linkUpdatedAt;
   const enrichArray = rows => Array.isArray(rows) ? rows.map(row => enrichLinkRecordWithInventoryMeta(row, meta)) : rows;
   return {
     ...data,
+    dates: {
+      ...(data.dates || {}),
+      linkUpdatedAt: sourceLinkUpdatedAt,
+      linkWarehouseUpdatedAt: data?.dates?.linkUpdatedAt || '',
+    },
     links: enrichArray(data.links),
     storeLinks: enrichArray(data.storeLinks),
     duplicateLinks: enrichArray(data.duplicateLinks),
@@ -1987,6 +2005,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
       background:#f5f7fb;
     }
     *{box-sizing:border-box}
+    body *{min-width:0}
     html{scroll-behavior:smooth}
     body{margin:0;min-height:100dvh;color:var(--text);background:
       radial-gradient(circle at 12% 6%,rgba(96,165,250,.28),transparent 30%),
@@ -2018,7 +2037,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .meta small{display:block;color:var(--muted);font-size:11px;line-height:1.45;margin-top:2px;font-family:var(--mono)}
     body[data-theme="light"] .meta{background:#f8fafc;color:#64748b}
     .audit-ok{color:#bbf7d0}.audit-warn{color:#fde68a}.audit-bad{color:#fecdd3}
-    main{position:relative;width:100%;max-width:1720px;margin:0 auto;padding:28px}
+    main{position:relative;width:100%;max-width:calc(100vw - 286px);margin:0 auto;padding:28px}
     .hero{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:32px;background:linear-gradient(135deg,rgba(15,23,42,.88),rgba(30,41,59,.52));box-shadow:var(--shadow);padding:28px;margin-bottom:18px}
     body:not([data-current-tab="overview"]) .hero{display:none}
     body[data-theme="light"] .hero{background:linear-gradient(180deg,#ffffff 0%,#f8fafc 100%);box-shadow:0 18px 54px rgba(15,23,42,.08)}
@@ -2032,6 +2051,9 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .link-pill,.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:42px;border-radius:999px;border:1px solid rgba(148,163,184,.24);padding:10px 14px;background:rgba(15,23,42,.62);color:#dbeafe;cursor:pointer}
     body[data-theme="light"] .link-pill,body[data-theme="light"] .btn{background:#ffffff;color:#1e3a8a;box-shadow:0 1px 2px rgba(15,23,42,.05)}
     .link-pill:hover,.btn:hover{border-color:rgba(34,211,238,.62);box-shadow:0 0 0 4px rgba(34,211,238,.08)}
+    .theme-fab{position:fixed;right:18px;bottom:18px;z-index:760;min-height:42px;border-radius:999px;border:1px solid rgba(148,163,184,.28);background:rgba(15,23,42,.88);color:#e0f2fe;padding:9px 14px;font-weight:850;cursor:pointer;box-shadow:0 18px 44px rgba(0,0,0,.22);backdrop-filter:blur(14px)}
+    .theme-fab:hover{border-color:rgba(34,211,238,.62);box-shadow:0 0 0 4px rgba(34,211,238,.08),0 18px 44px rgba(0,0,0,.22)}
+    body[data-theme="light"] .theme-fab{background:#ffffff;color:#1e3a8a;border-color:#dbe3ef;box-shadow:0 14px 34px rgba(15,23,42,.14)}
     .overview-dock{position:relative;z-index:1;margin-top:24px;border:1px solid rgba(148,163,184,.18);border-radius:26px;background:rgba(2,6,23,.30);padding:18px;overflow:visible}
     body[data-theme="light"] .overview-dock{background:#f8fafc;border-color:#dbe3ef;box-shadow:inset 0 1px 0 rgba(255,255,255,.9)}
     .overview-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:14px;flex-wrap:wrap}
@@ -2046,6 +2068,8 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     body:not([data-current-tab="actions"]) .toolbar .action-scope-toolbar{display:none!important}
     body[data-theme="light"] .home-scope-toolbar{background:#ffffff;border-color:#e2e8f0;box-shadow:0 6px 18px rgba(15,23,42,.04)}
     .home-scope-hint{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap;color:var(--muted);font-size:12px;font-weight:800}
+    .toolbar .home-scope-hint{height:38px;min-height:38px;overflow:hidden;flex-wrap:nowrap;justify-content:flex-start}
+    .toolbar .home-scope-hint .tag{white-space:nowrap}
     .home-scope-hint .tag{margin:0}
     .overview-core{display:grid;grid-template-columns:1fr;gap:14px;align-items:stretch;margin-bottom:16px}
     .overview-core .kpis{grid-template-columns:repeat(2,minmax(0,1fr));margin:0}
@@ -2065,16 +2089,21 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     body[data-theme="light"] .help{color:#334155;background:rgba(255,255,255,.75)}
     .help:hover:after,.help:focus-visible:after{content:attr(data-tip);position:absolute;left:50%;bottom:calc(100% + 10px);transform:translateX(-50%);z-index:620;width:260px;padding:10px 12px;border-radius:14px;border:1px solid rgba(148,163,184,.28);background:rgba(2,6,23,.96);color:#e5edf8;box-shadow:var(--shadow);font-size:12px;line-height:1.55;text-align:left;white-space:normal}
     body[data-theme="light"] .help:hover:after,body[data-theme="light"] .help:focus-visible:after{background:#fff;color:#0f172a}
-    .toolbar{position:sticky;top:12px;z-index:380;display:grid;grid-template-columns:minmax(260px,1.2fr) minmax(190px,.78fr) minmax(150px,.55fr) auto;gap:10px;margin:0 0 18px;padding:12px;border:1px solid var(--line);border-radius:22px;background:rgba(3,7,18,.84);backdrop-filter:blur(18px);box-shadow:0 18px 50px rgba(0,0,0,.22)}
+    .toolbar{position:sticky;top:12px;z-index:380;display:grid;grid-template-columns:minmax(270px,360px) 150px 300px 88px minmax(440px,1fr);gap:10px;margin:0 0 16px;padding:8px;border:1px solid var(--line);border-radius:18px;background:rgba(3,7,18,.84);backdrop-filter:blur(18px);box-shadow:0 18px 50px rgba(0,0,0,.22);align-items:center}
     body[data-theme="light"] .toolbar{background:rgba(255,255,255,.96);box-shadow:0 14px 34px rgba(15,23,42,.12)}
-    .toolbar-range-dock{grid-column:1/-1;margin-top:2px}
+    .toolbar-range-dock{grid-column:auto;margin-top:0}
     .toolbar-range-dock[hidden]{display:none!important}
-    .toolbar-range-dock .range-toolbar{position:relative;top:auto;margin:0;border-radius:18px;box-shadow:none;background:rgba(15,23,42,.55)}
+    .toolbar-range-dock .range-toolbar{position:relative;top:auto;margin:0;border-radius:14px;box-shadow:none;background:rgba(15,23,42,.55)}
     body[data-theme="light"] .toolbar-range-dock .range-toolbar{background:#f8fafc;box-shadow:none}
-    .toolbar-range-dock .range-toolbar-main{grid-template-columns:minmax(300px,.8fr) minmax(360px,1.2fr) auto;padding:8px}
-    .toolbar-range-dock .range-button{min-height:46px}
-    .toolbar-range-dock .range-button strong{font-size:16px}
+    .toolbar-range-dock .range-toolbar-main{grid-template-columns:minmax(178px,.34fr) minmax(360px,1fr);padding:5px;gap:8px;align-items:center}
+    .toolbar-range-dock .range-button{min-height:38px;padding:6px 10px;border-radius:12px}
+    .toolbar-range-dock .range-button span,.toolbar-range-dock .range-button small{display:none}
+    .toolbar-range-dock .range-button strong{font-size:14px;white-space:nowrap}
+    .toolbar-range-dock .range-preset-strip{flex-wrap:nowrap;overflow-x:auto;gap:5px;padding-bottom:0;scrollbar-width:thin}
+    .toolbar-range-dock .range-preset-strip button{min-height:30px;padding:5px 8px;font-size:12px;white-space:nowrap}
+    .toolbar-range-dock .range-current-tags{display:none}
     .focusbar{display:flex;gap:10px;flex-wrap:wrap;margin:-6px 0 18px;padding:0 4px}
+    .toolbar .btn{height:38px;min-height:38px;padding:6px 10px;border-radius:12px;font-size:13px}
     .action-local-filter{border:1px solid rgba(34,211,238,.18);border-radius:20px;background:linear-gradient(135deg,rgba(14,165,233,.10),rgba(15,23,42,.38));padding:14px;margin:0 0 14px}
     .toolbar .action-local-filter{grid-column:1/-1;margin:0;padding:12px;background:rgba(14,165,233,.10)}
     .action-local-filter-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:10px;flex-wrap:wrap}
@@ -2089,7 +2118,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     body[data-theme="light"] .focus-chip:hover,body[data-theme="light"] .focus-chip.active{color:#0f172a;background:#e0f2fe;border-color:#67e8f9;box-shadow:0 0 0 4px rgba(8,145,178,.08)}
     .focus-chip small{color:var(--muted);font-family:var(--mono)}
     .search-wrap{position:relative}.search-wrap svg{position:absolute;left:13px;top:13px;width:18px;height:18px;color:var(--muted)}
-    input,select{width:100%;min-height:44px;border:1px solid rgba(148,163,184,.22);border-radius:14px;background:rgba(15,23,42,.90);color:#fff;padding:0 14px;outline:none}
+    input,select{width:100%;height:38px;min-height:38px;border:1px solid rgba(148,163,184,.22);border-radius:12px;background:rgba(15,23,42,.90);color:#fff;padding:0 12px;outline:none}
     body[data-theme="light"] input,body[data-theme="light"] select{background:#ffffff;color:#0f172a;border-color:#dbe3ef}
     .search-wrap input{padding-left:40px}
     input::placeholder{color:#6b7b90}
@@ -2326,9 +2355,10 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     body[data-theme="light"] .metric-matrix{background:#f8fafc;border-color:#e2e8f0}
     .metric-matrix.cols-1{grid-template-columns:minmax(70px,.8fr) minmax(120px,1.2fr)}
     .metric-matrix.cols-2{grid-template-columns:minmax(70px,.7fr) repeat(2,minmax(120px,1fr))}
-    .metric-matrix.cols-3{grid-template-columns:minmax(70px,.7fr) repeat(3,minmax(88px,1fr))}
+    .metric-matrix.cols-3{grid-template-columns:minmax(70px,.68fr) minmax(108px,1.05fr) minmax(108px,1.05fr) minmax(92px,.82fr)}
     .metric-matrix.cols-4{grid-template-columns:minmax(70px,.68fr) minmax(86px,.9fr) repeat(3,minmax(92px,1fr))}
-    .matrix-cell{min-height:50px;padding:10px;border-right:1px solid rgba(148,163,184,.14);border-bottom:1px solid rgba(148,163,184,.14);display:flex;align-items:center;justify-content:center;text-align:center}
+    .metric-matrix.profit-matrix{grid-template-columns:minmax(70px,.66fr) minmax(118px,1fr) minmax(118px,1fr) minmax(96px,.86fr)}
+    .matrix-cell{min-height:50px;padding:10px;border-right:1px solid rgba(148,163,184,.14);border-bottom:1px solid rgba(148,163,184,.14);display:flex;align-items:center;justify-content:center;text-align:center;flex-direction:column;line-height:1.16}
     .metric-matrix.cols-1 .matrix-cell:nth-child(2n),.metric-matrix.cols-2 .matrix-cell:nth-child(3n),.metric-matrix.cols-3 .matrix-cell:nth-child(4n),.metric-matrix.cols-4 .matrix-cell:nth-child(5n){border-right:0}
     .matrix-cell:nth-last-child(-n+2){border-bottom:0}
     .metric-matrix.cols-2 .matrix-cell:nth-last-child(-n+3),.metric-matrix.cols-3 .matrix-cell:nth-last-child(-n+4){border-bottom:0}
@@ -2336,9 +2366,10 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .matrix-cell.label{font-weight:950;color:var(--text);justify-content:flex-start;text-align:left;background:rgba(148,163,184,.045)}
     .matrix-cell.head{font-size:12px;color:var(--muted);font-weight:950;background:rgba(148,163,184,.09);letter-spacing:.04em}
     .matrix-cell.value{font-family:var(--mono);font-size:21px;font-weight:950;font-variant-numeric:tabular-nums;color:var(--text);letter-spacing:-.035em}
+    .profit-matrix .matrix-cell.value{align-items:center;justify-content:center;text-align:center;font-size:20px}
     .metric-matrix.cols-1 .matrix-cell.value{font-size:24px}
     .matrix-cell .minor-money{display:block;margin-top:3px;color:var(--muted);font-size:13px;font-weight:800;letter-spacing:0}
-    .matrix-cell .coverage-note{display:block;margin-top:4px;color:var(--muted);font-size:11px;font-weight:800;letter-spacing:0}
+    .matrix-cell .coverage-note{display:block;margin-top:5px;color:var(--muted);font-family:var(--font);font-size:11px;font-weight:800;letter-spacing:0;line-height:1.25}
     .matrix-cell .pending-profit{color:#f97316;font-family:var(--font);font-size:15px;letter-spacing:0}
     .matrix-cell .positive{color:#22c55e}.matrix-cell .warn{color:#f97316}.matrix-cell .danger{color:#ef4444}
     .ops-command{display:grid;grid-template-columns:minmax(320px,.9fr) minmax(520px,1.35fr);gap:16px;margin-bottom:16px;align-items:stretch}
@@ -2369,13 +2400,31 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .profit-scatter{height:330px;position:relative}
     .profit-scatter svg{width:100%;height:300px;display:block;overflow:visible}
     .profit-scatter .axis{fill:var(--muted);font-size:11px}.profit-scatter .grid-line{stroke:rgba(148,163,184,.16);stroke-width:1;stroke-dasharray:4 6}.profit-scatter .axis-line{stroke:rgba(148,163,184,.34);stroke-width:1}.profit-scatter .point{stroke:#fff;stroke-width:1.3;cursor:pointer}
-    .selection-model{display:grid;gap:14px}
+    .selection-model{display:grid;grid-template-columns:minmax(300px,.78fr) minmax(520px,1.22fr);gap:14px;align-items:start}
     .selection-verdict{border:1px solid rgba(34,197,94,.22);border-radius:22px;background:linear-gradient(135deg,rgba(6,78,59,.20),rgba(15,23,42,.48));padding:15px}
     .selection-verdict h4{margin:0 0 8px;font-size:20px;letter-spacing:-.03em}.selection-verdict p{margin:0;color:var(--muted);line-height:1.65;font-size:13px}
     .selection-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:12px}.selection-metrics div{border:1px solid rgba(148,163,184,.16);border-radius:16px;background:rgba(2,6,23,.24);padding:10px}.selection-metrics span{display:block;color:var(--muted);font-size:11px;font-weight:850}.selection-metrics strong{display:block;margin-top:5px;font-family:var(--mono);font-size:17px}
     .selection-matrix{display:grid;gap:8px}.matrix-row{display:grid;grid-template-columns:92px repeat(4,minmax(0,1fr));gap:8px}.matrix-cell{min-height:76px;border:1px solid rgba(148,163,184,.16);border-radius:14px;background:rgba(15,23,42,.44);padding:9px;font-size:12px}.matrix-cell.head{min-height:auto;background:rgba(15,23,42,.62);color:var(--muted);font-weight:900;text-align:center}.matrix-cell.good{border-color:rgba(34,197,94,.34);background:rgba(6,78,59,.22)}.matrix-cell.mid{border-color:rgba(251,191,36,.34);background:rgba(120,53,15,.18)}.matrix-cell.bad{border-color:rgba(248,113,113,.34);background:rgba(127,29,29,.18)}.matrix-cell b{display:block;font-family:var(--mono);font-size:15px}.matrix-cell small{display:block;color:var(--muted);line-height:1.45;margin-top:4px}
     .selection-slider-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.selection-slider-grid label{display:grid;gap:6px;color:var(--muted);font-size:12px;font-weight:850}.selection-slider-grid input{min-height:40px;border:1px solid var(--line);border-radius:12px;background:rgba(15,23,42,.52);color:var(--text);padding:8px 10px;font-family:var(--mono);font-size:14px}
     .selection-output{border:1px solid rgba(34,211,238,.24);border-radius:18px;background:rgba(8,47,73,.22);padding:12px;margin-top:10px}.selection-output strong{display:block;font-family:var(--mono);font-size:24px;letter-spacing:-.03em}.selection-output span{display:block;color:var(--muted);font-size:12px;line-height:1.65;margin-top:5px}
+    .selection-side{display:grid;gap:12px}
+    .trend-panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
+    .trend-toggle{display:inline-flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+    .trend-toggle button{min-height:32px;border:1px solid rgba(148,163,184,.22);border-radius:999px;background:rgba(15,23,42,.62);color:var(--muted);padding:6px 10px;font-size:12px;font-weight:850;cursor:pointer}
+    .trend-toggle button.active{background:rgba(34,211,238,.14);border-color:rgba(34,211,238,.52);color:#e0f2fe}
+    body[data-theme="light"] .trend-toggle button{background:#fff;color:#475569;border-color:#dbe3ef}
+    body[data-theme="light"] .trend-toggle button.active{background:#e0f2fe;color:#075985;border-color:#67e8f9}
+    .stock-warning-table .evidence-grid{min-width:170px}
+    .coverage-board{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:12px 0}
+    .coverage-tile{border:1px solid rgba(148,163,184,.18);border-radius:16px;background:rgba(15,23,42,.42);padding:11px;min-height:118px}
+    body[data-theme="light"] .coverage-tile{background:#fff;border-color:#e2e8f0;box-shadow:0 4px 12px rgba(15,23,42,.04)}
+    .coverage-tile strong{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:14px}.coverage-tile small{display:block;color:var(--muted);line-height:1.45;margin-top:5px}.coverage-tile .mono{font-size:12px}
+    .comment-cell-zh{font-size:14px;line-height:1.65;color:var(--text);font-weight:750;max-width:620px}
+    .comment-cell-ar{margin-top:7px;color:var(--muted);font-size:12px;line-height:1.55;max-width:620px}
+    .stars{letter-spacing:1px;color:#f59e0b;font-size:16px;white-space:nowrap}
+    .stars .off{color:rgba(148,163,184,.35)}
+    .action-card.v1-action{display:grid;grid-template-columns:minmax(220px,.8fr) minmax(280px,1fr) minmax(300px,1.25fr);gap:12px;align-items:start}
+    .action-card.v1-action .action-main{min-width:0}.action-card.v1-action .action-evidence{min-width:0}.action-card.v1-action .action-controls{display:grid;gap:10px}
     body[data-theme="light"] .profit-card,
     body[data-theme="light"] .calculator-output,body[data-theme="light"] .selection-verdict,body[data-theme="light"] .selection-output{background:#ffffff;border-color:#e2e8f0;box-shadow:0 8px 22px rgba(15,23,42,.05)}
     body[data-theme="light"] .profit-card.good{background:#f0fdf4;border-color:#bbf7d0}
@@ -2646,7 +2695,8 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     body[data-theme="light"] .commander-metrics div,
     body[data-theme="light"] .review-meta div{background:#f8fafc;border-color:#e2e8f0}
     .footer{color:var(--muted);font-size:12px;padding:24px 0;text-align:center}
-    @media (max-width:1180px){.shell{grid-template-columns:1fr}.side{position:relative;height:auto}.kpis,.overview-core .kpis{grid-template-columns:1fr}.overview-core,.overview-core .group-summary-grid.two,.home-scope-toolbar,.calendar-duo,.calendar-input-row,.range-calendar-grid,.range-popover-grid,.range-toolbar-main,.page-guide-inner,.page-guide-grid,.page-decision-grid,.store-flow,.store-kpi-grid,.problem-stack,.store-action-steps,.profit-workbench-grid,.ops-command,.ops-question-grid,.ops-pillar-grid,.profit-command,.profit-logic,.profit-summary-grid,.profit-calculator{grid-template-columns:1fr}.home-scope-hint{justify-content:flex-start}.range-popover{min-width:0;width:calc(100vw - 56px);left:0}.toolbar{grid-template-columns:1fr}.range-toolbar{top:8px}.grid.cols-2,.grid.cols-3,.split,.spotlight,.sop-grid,.cause-grid,.command-room,.command-lanes,.detail-grid{grid-template-columns:1fr}.brief-grid{grid-template-columns:repeat(2,1fr)}.brief-grid.five{grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.hero-top{display:block}.quick-links{justify-content:flex-start;margin-top:18px}h2{font-size:30px}}
+    @media (max-width:1280px){.toolbar{grid-template-columns:minmax(190px,230px) 118px 112px 82px minmax(430px,1fr);gap:8px}.toolbar-range-dock{grid-column:auto}.toolbar-range-dock .range-toolbar-main{grid-template-columns:minmax(178px,.48fr) minmax(250px,1fr)}}
+    @media (max-width:1180px){.shell{grid-template-columns:1fr}.side{position:relative;height:auto}main{max-width:100vw}.kpis,.overview-core .kpis{grid-template-columns:1fr}.overview-core,.overview-core .group-summary-grid.two,.home-scope-toolbar,.calendar-duo,.calendar-input-row,.range-calendar-grid,.range-popover-grid,.range-toolbar-main,.page-guide-inner,.page-guide-grid,.page-decision-grid,.store-flow,.store-kpi-grid,.problem-stack,.store-action-steps,.profit-workbench-grid,.ops-command,.ops-question-grid,.ops-pillar-grid,.profit-command,.profit-logic,.profit-summary-grid,.profit-calculator,.selection-model{grid-template-columns:1fr}.home-scope-hint{justify-content:flex-start}.range-popover{min-width:0;width:calc(100vw - 56px);left:0}.toolbar{grid-template-columns:1fr}.range-toolbar{top:8px}.grid.cols-2,.grid.cols-3,.split,.spotlight,.sop-grid,.cause-grid,.command-room,.command-lanes,.detail-grid,.action-card.v1-action{grid-template-columns:1fr}.brief-grid{grid-template-columns:repeat(2,1fr)}.brief-grid.five{grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.coverage-board{grid-template-columns:repeat(2,minmax(0,1fr))}.hero-top{display:block}.quick-links{justify-content:flex-start;margin-top:18px}h2{font-size:30px}}
     @media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
   </style>
 </head>
@@ -3062,6 +3112,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
   </main>
 </div>
 <div id="toast" class="toast" role="status" aria-live="polite">已复制</div>
+<button class="theme-fab" id="themeToggleFab" type="button" aria-label="切换浅色或深色主题">浅色/深色</button>
 <script id="portal-data" type="application/json">${json}</script>
 <script>
 let DATA = JSON.parse(document.getElementById('portal-data').textContent);
@@ -3137,10 +3188,10 @@ function actionDomainActive(){ return isActionFilterTab() ? state.domain : ''; }
 function actionRiskActive(){ return isActionFilterTab() ? state.risk : ''; }
 function actionStatusActive(){ return isActionFilterTab() ? state.status : ''; }
 function actionFocusActive(){ return isActionFilterTab() ? (state.focus || 'all') : 'all'; }
-let state = {tab:'overview', q:'', product:'', store:'', domain:'', risk:'', status:'', focus:'all', insight:'all', rankPeriod:'day', rankWindow:'', startDate:'', endDate:'', rangePreset:'today'};
+let state = {tab:'overview', q:'', product:'', store:'', domain:'', risk:'', status:'', focus:'all', insight:'all', rankPeriod:'day', rankWindow:'', startDate:'', endDate:'', rangePreset:'today', trendMetric:'sales'};
 let lastRenderedTab = '';
 let shouldScrollToActiveTab = false;
-const STATE_KEYS = ['tab','q','product','store','domain','risk','status','focus','insight','rankPeriod','rankWindow','startDate','endDate','rangePreset'];
+const STATE_KEYS = ['tab','q','product','store','domain','risk','status','focus','insight','rankPeriod','rankWindow','startDate','endDate','rangePreset','trendMetric'];
 let applyingHash = false;
 const ACTION_STATE_KEY = 'SHEIN_BI_ACTION_STATE_V1';
 const ACTION_STATE_API = '/api/action-state';
@@ -4222,6 +4273,18 @@ function profitDisplayHtml(summary, opts = {}){
   const cls = Number(s.profitSar || 0) < 0 ? 'danger' : 'positive';
   return '<span class="'+cls+'">'+escapeHtml(fmt.format(Number(s.profitSar || 0)))+'</span><span class="coverage-note">覆盖 '+pct(s.costCoverageRate)+' · 未扣月仓储</span>';
 }
+function profitMarginHtml(summary){
+  const s = summary || {};
+  if (!s.hasAnyCost || s.margin == null) return '<div class="matrix-cell value profit-margin-cell"><span class="pending-profit">待成本表</span></div>';
+  const cls = Number(s.margin || 0) >= .25 ? 'positive' : Number(s.margin || 0) >= .1 ? 'warn' : 'danger';
+  return '<div class="matrix-cell value profit-margin-cell"><span class="'+cls+'">'+escapeHtml(pct(s.margin))+'</span></div>';
+}
+function starHtml(value){
+  const n = Math.max(0, Math.min(5, Math.round(Number(value || 0))));
+  let out = '';
+  for (let i = 1; i <= 5; i++) out += '<span class="'+(i <= n ? '' : 'off')+'">★</span>';
+  return '<span class="stars" aria-label="'+num(n)+'星">'+out+'</span>';
+}
 function homeScopeSubtitle(){
   const parts = [storeScopeLabel()];
   const p = productScopeQuery();
@@ -4262,7 +4325,7 @@ function renderKpis(){
       profit
     };
   });
-  const matrix = (cols, rowsHtml) => '<div class="metric-matrix cols-'+cols+'">'+rowsHtml+'</div>';
+  const matrix = (cols, rowsHtml, extraClass = '') => '<div class="metric-matrix cols-'+cols+(extraClass ? ' '+extraClass : '')+'">'+rowsHtml+'</div>';
   const head = cells => cells.map(c => '<div class="matrix-cell head">'+escapeHtml(c)+'</div>').join('');
   const label = txt => '<div class="matrix-cell label">'+escapeHtml(txt)+'</div>';
   const value = html => '<div class="matrix-cell value">'+html+'</div>';
@@ -4282,14 +4345,14 @@ function renderKpis(){
       head(['范围','订单','销量','动销货号'])+
       rows.map(r => label(r.label)+value(num(r.orders)+' 单')+value(num(r.quantity)+' 件')+value(num(r.activeProducts)+' 个')).join('')
     ), '订单按净成交订单号去重；销量只统计净成交商品件数；动销货号是当前时段有净成交销量的标准货号数量。')+
-    card('当前时段退货 / 售后', afterLabel, matrix(2,
-      head(['范围','数量','金额 SAR/RMB'])+
-      rows.map(r => label(r.label)+value(num(r.returnCases)+' 单')+moneyDualValue(r.returnAmountSar)).join('')
+    card('当前时段退货 / 售后', afterLabel, matrix(3,
+      head(['范围','数量','SAR','RMB'])+
+      rows.map(r => label(r.label)+value(num(r.returnCases)+' 单')+moneyValue(r.returnAmountSar)+rmbValue(r.returnAmountSar)).join('')
     ), '按订单 > 退货退款里的售后申请时间 request_time 统计；金额是这些售后订单对应的商品金额合计。')+
-    card('当前时段真实利润', '按成本表 / 退货保守口径', matrix(2,
-      head(['范围','SAR','RMB'])+
-      rows.map(r => label(r.label)+value(profitDisplayHtml(r.profit))+value(r.profit?.hasAnyCost ? escapeHtml(fmt.format(Number(r.profit.profitSar || 0) * RMB_RATE)) : '<span class="pending-profit">待成本表</span>')).join('')
-    ), '真实利润=净营收-商品成本-退货派送费；退货或派送失败营收按 0，仍扣成本并加 13.88 SAR。月仓储费只用于月度总利润，不拆到单货号。', 'profit');
+    card('当前时段真实利润', '按成本表 / 退货保守口径', matrix(3,
+      head(['范围','SAR','RMB','利润率'])+
+      rows.map(r => label(r.label)+value(profitDisplayHtml(r.profit))+value(r.profit?.hasAnyCost ? escapeHtml(fmt.format(Number(r.profit.profitSar || 0) * RMB_RATE)) : '<span class="pending-profit">待成本表</span>')+profitMarginHtml(r.profit)).join('')
+    , 'profit-matrix'), '真实利润=净营收-商品成本-退货派送费；退货或派送失败营收按 0，仍扣成本并加 13.88 SAR。月仓储费只用于月度总利润，不拆到单货号。', 'profit');
   document.querySelectorAll('[data-overview-jump]').forEach(btn => btn.addEventListener('click', e => {
     if (e.target?.classList?.contains('help')) return;
     kpiJump(btn.dataset.overviewJump || 'business');
@@ -4421,7 +4484,6 @@ function rankPeriodSwitch(){
 const RANGE_PRESETS = [
   ['today','今天'],
   ['yesterday','昨天'],
-  ['latestData','最新数据日'],
   ['last3','近3天'],
   ['last7','近7天'],
   ['last15','近15天'],
@@ -4487,7 +4549,7 @@ function dateRangeToolbar(){
       '<div class="range-preset-strip" aria-label="快捷时间">'+
         RANGE_PRESETS.map(([key,label]) => '<button type="button" class="'+(state.rangePreset === key ? 'active' : '')+'" data-range-preset="'+key+'">'+label+'</button>').join('')+
       '</div>'+
-      '<div class="range-current-tags"><span class="tag info">'+escapeHtml(presetLabel)+'</span><span class="tag good">最新数据 '+escapeHtml(dataAnchorDate())+'</span></div>'+
+      '<div class="range-current-tags"><span class="tag info">'+escapeHtml(presetLabel)+'</span></div>'+
     '</div>'+
     '<div class="range-popover" id="rangePopover" hidden>'+
       '<div class="calendar-input-row">'+
@@ -4723,15 +4785,90 @@ function buildSalesSeries(kind){
     scope:Math.round(r.scope * 100) / 100
   }));
 }
-function renderSalesLineChart(kind = 'day'){
-  const series = buildSalesSeries(kind);
+const TREND_METRICS = {
+  sales:{label:'销售额', unit:'SAR', money:true, aria:'销售额趋势'},
+  quantity:{label:'销量', unit:'件', money:false, aria:'销量趋势'},
+  returns:{label:'退货数量', unit:'单', money:false, aria:'退货数量趋势'},
+  profit:{label:'利润额', unit:'SAR', money:true, aria:'利润额趋势'}
+};
+function trendMetricKey(){
+  return TREND_METRICS[state.trendMetric] ? state.trendMetric : 'sales';
+}
+function trendMetricButtons(){
+  const cur = trendMetricKey();
+  return '<div class="trend-toggle" aria-label="趋势指标切换">'+Object.entries(TREND_METRICS).map(([key, meta]) =>
+    '<button type="button" class="'+(cur === key ? 'active' : '')+'" data-trend-metric="'+key+'">'+escapeHtml(meta.label)+'</button>'
+  ).join('')+'</div>';
+}
+function trendValueText(v, metric = trendMetricKey()){
+  const n = Number(v || 0);
+  return TREND_METRICS[metric]?.money ? money(n) : (num(n) + ' ' + (TREND_METRICS[metric]?.unit || ''));
+}
+function buildMetricSeries(kind, metric = trendMetricKey()){
+  if (metric === 'sales') return buildSalesSeries(kind);
+  const range = chartRangeFor(kind);
+  const buckets = new Map();
+  const ensure = (id) => {
+    const row = buckets.get(id) || {id, label: kind === 'month' ? monthPeriodLabel(id, range) : id, total:0, DSY:0, LGM:0, scope:0};
+    buckets.set(id, row);
+    return row;
+  };
+  if (metric === 'quantity') {
+    const hasProduct = Boolean(productScopeQuery());
+    const source = hasProduct ? (DATA.rankings?.dailyStoreProducts || []) : (DATA.rankings?.dailyStores || []);
+    for (const r of source) {
+      const d = String(r.date || '').slice(0, 10);
+      if (!d || d < range.start || d > range.end) continue;
+      if (!storeMatchesScope(r)) continue;
+      if (hasProduct && !productDailyMatch(r)) continue;
+      const id = kind === 'month' ? monthId(d) : d;
+      const row = ensure(id);
+      const v = Number(r.quantity || 0);
+      row.total += v; row.scope += v;
+      const g = storeGroupKey(r);
+      if (g === 'DSY' || g === 'LGM') row[g] += v;
+    }
+  } else if (metric === 'returns') {
+    for (const r of DATA.afterSales || []) {
+      const d = String(r.request_time || r.snapshot_date || '').slice(0, 10);
+      if (!d || d < range.start || d > range.end) continue;
+      if (!storeMatchesScope(r)) continue;
+      if (productScopeQuery() && !productMatch(r)) continue;
+      const id = kind === 'month' ? monthId(d) : d;
+      const row = ensure(id);
+      row.total += 1; row.scope += 1;
+      const g = storeGroupKey(r);
+      if (g === 'DSY' || g === 'LGM') row[g] += 1;
+    }
+  } else if (metric === 'profit') {
+    for (const r of profitDailyRows(range.start, range.end, state.store, true)) {
+      const d = String(r.date || '').slice(0, 10);
+      if (!d) continue;
+      const id = kind === 'month' ? monthId(d) : d;
+      const row = ensure(id);
+      const v = Number(r.profit_before_storage_sar || 0);
+      row.total += v; row.scope += v;
+      const g = storeGroupKey(r);
+      if (g === 'DSY' || g === 'LGM') row[g] += v;
+    }
+  }
+  return Array.from(buckets.values()).sort((a,b)=>String(a.id).localeCompare(String(b.id))).map(r => ({
+    ...r,
+    total:Math.round(r.total * 100) / 100,
+    DSY:Math.round(r.DSY * 100) / 100,
+    LGM:Math.round(r.LGM * 100) / 100,
+    scope:Math.round(r.scope * 100) / 100
+  }));
+}
+function renderMetricLineChart(kind = 'day', metric = trendMetricKey()){
+  const series = buildMetricSeries(kind, metric);
   const range = chartRangeFor(kind);
   const scope = storeFilterKind();
   const scoped = scope.type !== 'all' || Boolean(productScopeQuery());
-  const colors = scoped ? {scope:'#10b981'} : {total:'#10b981', DSY:'#2563eb', LGM:'#f97316'};
+  const colors = scoped ? {scope: metric === 'profit' ? '#14b8a6' : metric === 'returns' ? '#ef4444' : '#10b981'} : {total:'#10b981', DSY:'#2563eb', LGM:'#f97316'};
   const labels = scoped ? {scope:homeScopeSubtitle()} : {total:'总计', DSY:'DSY', LGM:'LGM'};
   if (!series.length) {
-    return '<div class="empty">当前时间段 '+escapeHtml(range.start)+' 至 '+escapeHtml(range.end)+' 暂无销售数据。</div>';
+    return '<div class="empty">当前时间段 '+escapeHtml(range.start)+' 至 '+escapeHtml(range.end)+' 暂无'+escapeHtml(TREND_METRICS[metric]?.label || '趋势')+'数据。</div>';
   }
   const keys = Object.keys(colors);
   const values = series.flatMap(x => keys.map(k => Number(x[k] || 0)));
@@ -4742,12 +4879,12 @@ function renderSalesLineChart(kind = 'day'){
   const gridTicks = [0, 0.25, 0.5, 0.75, 1].map(t => {
     const val = max * t;
     const y = yFor(val);
-    return '<line class="grid-line" x1="'+padL+'" y1="'+y.toFixed(1)+'" x2="'+(w-padR)+'" y2="'+y.toFixed(1)+'"></line>'+
-      '<text class="axis" text-anchor="end" x="'+(padL-10)+'" y="'+(y+4).toFixed(1)+'">'+escapeHtml(money(val))+'</text>';
+    return '<line class="grid-line" x1="'+padL+'" y1="'+y.toFixed(1)+'" x2="'+(w-padR)+'" y2="'+y.toFixed(1)+'"></line>'+ 
+      '<text class="axis" text-anchor="end" x="'+(padL-10)+'" y="'+(y+4).toFixed(1)+'">'+escapeHtml(trendValueText(val, metric))+'</text>';
   }).join('');
   const lines = keys.map(k => {
     const pts = series.map((r,i) => xFor(i).toFixed(1)+','+yFor(r[k]).toFixed(1)).join(' ');
-    const dots = series.map((r,i) => '<circle class="dot" cx="'+xFor(i).toFixed(1)+'" cy="'+yFor(r[k]).toFixed(1)+'" r="3.5" fill="'+colors[k]+'"><title>'+escapeHtml(labels[k]+' '+r.label+' '+money(r[k]))+'</title></circle>').join('');
+    const dots = series.map((r,i) => '<circle class="dot" cx="'+xFor(i).toFixed(1)+'" cy="'+yFor(r[k]).toFixed(1)+'" r="3.5" fill="'+colors[k]+'"><title>'+escapeHtml(labels[k]+' '+r.label+' '+trendValueText(r[k], metric))+'</title></circle>').join('');
     return '<polyline class="series" points="'+pts+'" stroke="'+colors[k]+'"></polyline>'+dots;
   }).join('');
   const labelEvery = series.length <= 7 ? 1 : Math.ceil(series.length / 5);
@@ -4758,7 +4895,7 @@ function renderSalesLineChart(kind = 'day'){
     const x = xFor(i);
     const y = Math.max(14, yFor(v) - 9 - keys.indexOf(k) * 12);
     const anchor = i === 0 ? 'start' : i === series.length - 1 ? 'end' : 'middle';
-    return '<text class="value-label" text-anchor="'+anchor+'" x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" fill="'+colors[k]+'">'+escapeHtml(fmt0.format(v))+'</text>';
+    return '<text class="value-label" text-anchor="'+anchor+'" x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" fill="'+colors[k]+'">'+escapeHtml(TREND_METRICS[metric]?.money ? fmt0.format(v) : num(v))+'</text>';
   }).join('')).join('');
   const xLabels = series.length <= 8 ? series : series.filter((_,i)=> i === 0 || i === series.length - 1 || i % Math.ceil(series.length / 6) === 0);
   const axisLabels = xLabels.map(r => {
@@ -4768,23 +4905,27 @@ function renderSalesLineChart(kind = 'day'){
   const hitRects = series.map((r,i) => {
     const prev = i === 0 ? padL : (xFor(i - 1) + xFor(i)) / 2;
     const next = i === series.length - 1 ? (w - padR) : (xFor(i) + xFor(i + 1)) / 2;
-    const tip = [r.label].concat(keys.map(k => labels[k] + '：' + money(r[k]))).join('\\n');
+    const tip = [r.label].concat(keys.map(k => labels[k] + '：' + trendValueText(r[k], metric))).join('\\n');
     return '<rect class="chart-hit" x="'+prev.toFixed(1)+'" y="'+padT+'" width="'+Math.max(8, next-prev).toFixed(1)+'" height="'+(h-padT-padB)+'" data-tip="'+escapeHtml(tip)+'"></rect>';
   }).join('');
   const latest = series.at(-1) || {};
   const sliceNote = kind === 'month' ? monthSliceNote(range) : '';
   return '<div class="line-chart">'+
-    '<svg viewBox="0 0 '+w+' '+h+'" role="img" aria-label="'+(kind === 'month' ? '月销趋势' : '日销趋势')+'">'+
+    '<svg viewBox="0 0 '+w+' '+h+'" role="img" aria-label="'+escapeHtml((kind === 'month' ? '月' : '日') + (TREND_METRICS[metric]?.aria || '趋势'))+'">'+
       gridTicks+
-      '<line class="axis-line" x1="'+padL+'" y1="'+padT+'" x2="'+padL+'" y2="'+(h-padB)+'"></line>'+
-      '<line class="axis-line" x1="'+padL+'" y1="'+(h-padB)+'" x2="'+(w-padR)+'" y2="'+(h-padB)+'"></line>'+
+      '<line class="axis-line" x1="'+padL+'" y1="'+padT+'" x2="'+padL+'" y2="'+(h-padB)+'"></line>'+ 
+      '<line class="axis-line" x1="'+padL+'" y1="'+(h-padB)+'" x2="'+(w-padR)+'" y2="'+(h-padB)+'"></line>'+ 
       lines+valueLabels+axisLabels+hitRects+
-    '</svg>'+
-    '<div class="chart-tip" aria-hidden="true"></div>'+
-    '<div class="chart-legend">'+keys.map(k=>'<span><i style="--c:'+colors[k]+'"></i>'+labels[k]+'：'+money(latest[k] || 0)+'</span>').join('')+'</div>'+
-    '<p class="sub">时间段：'+escapeHtml(range.start)+' 至 '+escapeHtml(range.end)+'；当前显示 '+num(series.length)+' 个'+(kind === 'month' ? '月份' : '日期')+'。'+(sliceNote ? ' '+escapeHtml(sliceNote) : '')+'</p>'+
+    '</svg>'+ 
+    '<div class="chart-tip" aria-hidden="true"></div>'+ 
+    '<div class="chart-legend">'+keys.map(k=>'<span><i style="--c:'+colors[k]+'"></i>'+labels[k]+'：'+trendValueText(latest[k] || 0, metric)+'</span>').join('')+'</div>'+ 
+    '<p class="sub">时间段：'+escapeHtml(range.start)+' 至 '+escapeHtml(range.end)+'；当前显示 '+num(series.length)+' 个'+(kind === 'month' ? '月份' : '日期')+'。'+(sliceNote ? ' '+escapeHtml(sliceNote) : '')+'</p>'+ 
   '</div>';
 }
+function renderSalesLineChart(kind = 'day'){
+  return renderMetricLineChart(kind, 'sales');
+}
+
 function buildProfitMonthSeries(){
   const range = chartRangeFor('month');
   const scope = storeFilterKind();
@@ -4975,11 +5116,10 @@ function renderHomeDashboard(){
   if (groupEl) groupEl.innerHTML = '';
   renderKpis();
   $('homeDashboard').innerHTML =
-    '<div class="dashboard-section-title"><h3>趋势</h3><div class="sub">日趋势默认近 30 天，月趋势默认近 6 个月；选择店铺、分组或货号后，曲线自动切成对应范围。</div></div>'+
+    '<div class="dashboard-section-title trend-panel-head"><div><h3>趋势</h3><div class="sub">日趋势默认近 30 天，月趋势默认近 6 个月；选择店铺、分组或货号后，曲线自动切成对应范围。</div></div>'+trendMetricButtons()+'</div>'+
     '<div class="trend-stack">'+
-      panel('日销趋势', storeFilterKind().type === 'all' && !productScopeQuery() ? '总计 / DSY / LGM 三条线。' : homeScopeSubtitle(), renderSalesLineChart('day'))+
-      panel('月销趋势', storeFilterKind().type === 'all' && !productScopeQuery() ? '按月聚合，总计 / DSY / LGM 三条线。' : '按月聚合：' + homeScopeSubtitle(), renderSalesLineChart('month'))+
-      panel('月利润趋势', storeFilterKind().type === 'all' && !productScopeQuery() ? '默认近 6 个月；总计 / DSY / LGM。月总盘已扣仓储费。' : '当前范围利润：' + homeScopeSubtitle(), renderProfitLineChart())+
+      panel('日趋势 · '+TREND_METRICS[trendMetricKey()].label, storeFilterKind().type === 'all' && !productScopeQuery() ? '总计 / DSY / LGM 三条线。' : homeScopeSubtitle(), renderMetricLineChart('day'))+
+      panel('月趋势 · '+TREND_METRICS[trendMetricKey()].label, storeFilterKind().type === 'all' && !productScopeQuery() ? '按月聚合，总计 / DSY / LGM 三条线。' : '按月聚合：' + homeScopeSubtitle(), renderMetricLineChart('month'))+
     '</div>'+
     '<div class="dashboard-section-title"><h3>排行榜</h3><div class="sub">店铺只显示 DL/DX 等代号，货号显示归并后的标准货号；排行榜按上方时间段重算。</div></div>'+
     '<div class="dashboard-grid equal">'+
@@ -5025,6 +5165,10 @@ function renderHomeDashboard(){
     state.product = '';
     state.q = '';
     jumpToTab('actions', {keepFilters:true});
+    renderAll();
+  }));
+  document.querySelectorAll('[data-trend-metric]').forEach(btn => btn.addEventListener('click', () => {
+    state.trendMetric = btn.dataset.trendMetric || 'sales';
     renderAll();
   }));
 }
@@ -7216,13 +7360,12 @@ function renderStoreCockpit(){
       ['判断', r => escapeHtml(linkIssueText(r, allStoreLinks))]
     ], linkMetricGroups(true), {limit:false})+
     '<div class="store-section-title"><div><h3>本店低展示库存预警</h3><div class="sub">库存来自 SHEIN 商品列表展示库存，不再使用备货信息里的假库存；本表直接列出本店已上架且展示库存低的 SKC，方便你去后台按 SKC 查询。</div></div><span class="tag mid">库存动作 · '+num(lowStockRows.length)+' 条</span></div>'+
-    table(lowStockRows, [
-      ['SKC', r => '<span class="mono">'+escapeHtml(r.skc || '-')+'</span>'+copyButton(r.skc, '复制')],
-      ['标准货号', r => '<b>'+escapeHtml(r.standard_goods_sn || '-')+'</b>'],
+    '<div class="stock-warning-table">'+table(lowStockRows, [
+      ['SKC / 货号', r => '<b>'+escapeHtml(r.standard_goods_sn || '-')+'</b><br><span class="mono">'+escapeHtml(r.skc || '-')+'</span>'+copyButton(r.skc, '复制')],
       ['库存', r => stockEvidenceHtml(r), 'num'],
       ['状态', r => '<span class="tag good">'+escapeHtml(String(r.shelf_statuses || '').replaceAll('ON_SHELF','已上架'))+'</span>'],
-      ['建议', r => '如果还要继续卖，去 SHEIN 后台把该 SKC 的展示库存调高；如果是准备停卖的链接，则忽略。']
-    ], {limit:false})+
+      ['建议', r => '<span class="tag mid">调高展示库存</span><div class="muted">如果继续卖，按 SKC 去后台调高；准备停卖则忽略。</div>']
+    ], {limit:false})+'</div>'+
     '<div class="store-section-title"><div><h3>本店待处理链接</h3><div class="sub">只放明确需要处理的链接：下架候选、低点击、低支付、待上架卡点或已有替代的30天0销量链接。</div></div><span class="tag mid">需要动作</span></div>'+
     groupedTable(problemLinks, [
       ['SKC', r => '<span class="mono">'+escapeHtml(r.skc || '-')+'</span>'+copyButton(r.skc, '复制')],
@@ -7412,13 +7555,15 @@ function renderProductSpotlight(){
       '<article class="path-card"><span class="domain">'+escapeHtml(c[0])+'</span><h4>'+escapeHtml(c[1])+'</h4><p>'+escapeHtml(c[2])+'</p></article>'
     ).join('')+'</div>'+
     growthBlock+
-    sectionTitleHtml('15 店覆盖与承接', '固定显示 15 个店。这里的销售是“本店该标准货号全部 SKC / 链接合计”，不是最佳 SKC 单独销售；最佳 SKC 只用于判断承接和替代。', '15 店全量')+
-    '<div class="coverage-legend">'+
-      '<div><b>缺覆盖</b><span>有些店已卖/已上架，另一些店没有上架链接，才考虑补。</span></div>'+
-      '<div><b>有承接</b><span>本店有上架 SKC，继续看 7/30 表现和标签。</span></div>'+
-      '<div><b>弱链接</b><span>同店同款有更好链接时，优先比较后再决定下架或优化。</span></div>'+
-      '<div><b>空白店</b><span>暂无上架/销售信号，不等于一定要补链。</span></div>'+
-    '</div>'+
+    sectionTitleHtml('15 店覆盖与承接', '固定显示 15 个店。先扫卡片状态，再看明细表；销售是本店该标准货号全部 SKC / 链接合计。', '15 店全量')+
+    '<div class="coverage-board">'+matrixSorted.map(r => {
+      const cls = r.need_supplement_link ? 'mid' : Number(r.sales_sar || 0) > 0 ? 'good' : r._empty ? 'info' : 'good';
+      const status = r.need_supplement_link ? '缺承接' : Number(r.sales_sar || 0) > 0 ? '有销售' : r.has_on_shelf_link ? '已上架' : '空白';
+      return '<article class="coverage-tile"><strong>'+escapeHtml(r.store_key || '-')+' <span class="tag '+cls+'">'+escapeHtml(status)+'</span></strong>'+
+        '<small>净成交 '+escapeHtml(money(r.sales_sar))+' · 销量 '+num(r.quantity)+'</small>'+
+        '<small>链接 上架 '+num(r.on_shelf_count)+' / 总 '+num(r.link_count)+' · 待上架 '+num(r.wait_shelf_count)+'</small>'+
+        '<small>最佳 <span class="mono">'+escapeHtml(r.best_skc || '-')+'</span></small></article>';
+    }).join('')+'</div>'+
     table(matrixSorted, [
       ['店铺', r => '<b>'+r.store_key+'</b>'],
       ['覆盖', r => '<span class="tag '+(r.need_supplement_link ? 'mid' : 'good')+'">'+escapeHtml(r.coverage_status || '-')+'</span>'],
@@ -7655,10 +7800,11 @@ function renderComments(){
     '<div class="table-note">当前时间段：'+escapeHtml(selectedRangeText())+'。先看原文；中文翻译已优先读取 SHEIN 平台译文字段；没有中文时再显示待翻译提示。</div>'+
     table(rows, [
       ['判断', r => '<span class="tag '+commentRowLevel(r)+'">'+escapeHtml(commentLevelText(r))+'</span>'],
-      ['时间/店铺', r => '<span class="mono">'+escapeHtml(String(r.comment_time || r.comment_date || '-').replace('T',' ').slice(0,19))+'</span><br><b>'+escapeHtml(r.store_key || '-')+'</b>'],
+      ['时间', r => '<span class="mono">'+escapeHtml(String(r.comment_time || r.comment_date || '-').replace('T',' ').slice(0,19))+'</span>'],
+      ['店铺', r => '<b>'+escapeHtml(r.store_key || '-')+'</b>'],
       ['货号/SKC', r => '<b>'+escapeHtml(r.standard_goods_sn || '-').slice(0,64)+'</b><br><span class="mono">'+escapeHtml(r.skc || '-')+'</span>'+copyButton(r.skc, '复制SKC')],
-      ['星级/标签', r => '<b>'+num(r.goods_comment_star)+'</b> 星<br><span class="muted">'+escapeHtml(r.bad_comment_labels || r.goods_comment_star_name || '-')+'</span>'],
-      ['评价原文', r => '<div class="comment-original">'+escapeHtml(commentText(r)).slice(0,260)+'</div><div class="comment-translation">'+(commentZh(r) ? '中文：'+escapeHtml(commentZh(r)).slice(0,260) : '中文翻译：待批量翻译入库')+'</div>'],
+      ['星级/标签', r => starHtml(r.goods_comment_star)+'<br><span class="muted">'+escapeHtml(r.bad_comment_labels || r.goods_comment_star_name || '-')+'</span>'],
+      ['中文 / 阿文原文', r => '<div class="comment-cell-zh">'+(commentZh(r) ? escapeHtml(commentZh(r)).slice(0,320) : '<span class="muted">中文翻译待入库</span>')+'</div><div class="comment-cell-ar">'+escapeHtml(commentText(r)).slice(0,260)+'</div>'],
       ['属性', r => '<span class="muted">'+escapeHtml(r.goods_attribute || '-').slice(0,80)+'</span>']
     ], {limit:80});
   document.querySelectorAll('[data-comment-product]').forEach(btn => btn.addEventListener('click', () => {
@@ -7767,19 +7913,19 @@ function renderBusiness(){
   $('financeTable').innerHTML =
     businessEmptyNote+
     '<div class="ops-command">'+
-      '<section class="ops-verdict"><div><h3>这页先看什么？</h3><p>这不是订单流水页，而是复核台：先看当前筛选的成交、售后、履约和回款是否能互相解释；发现集中问题后再展开明细查单。</p><div class="ops-big">'+escapeHtml(pct(afterRate))+'</div><p>售后金额 / 订单销售额。比例越高，越应该先看售后集中货号和履约异常。</p></div>'+
+      '<section class="ops-verdict"><div><h3>订单 / 售后复核台</h3><p>先用当前时间段确认：成交是否真实、售后压力是否集中、履约异常能否解释退款。这里不是流水仓库，明细只在需要查单时展开。</p><div class="ops-big">'+escapeHtml(pct(afterRate))+'</div><p>售后金额 / 订单销售额。比例越高，越应该先看售后集中货号和履约异常。</p></div>'+
         '<div class="ops-question-grid">'+
           '<div><b>成交是否真实</b><span>订单销售 '+escapeHtml(money(orderSales))+'；财务摘要为最新快照 '+escapeHtml(money(financeTrade))+'</span></div>'+
           '<div><b>售后压力在哪</b><span>售后 '+escapeHtml(num(afterRows.length))+' 单，金额 '+escapeHtml(money(afterAmount))+'</span></div>'+
           '<div><b>履约是否解释异常</b><span>异常/取消面单 '+escapeHtml(num(abnormalWaybills.length))+' 条</span></div>'+
         '</div></section>'+
-      '<section><div class="ops-pillar-grid">'+
+        '<section><div class="ops-pillar-grid">'+
         '<div class="ops-pillar"><span>订单销售</span><strong>'+money(orderSales)+'</strong><small>'+num(orderRows.length)+' 行 · 按订单创建时间</small></div>'+
         '<div class="ops-pillar"><span>售后金额</span><strong>'+money(afterAmount)+'</strong><small>'+num(afterRows.length)+' 单 · 按售后申请时间</small></div>'+
         '<div class="ops-pillar"><span>最新财务待结算</span><strong>'+money(pending)+'</strong><small>财务摘要是最新快照；明细按当前时间段过滤 '+num(financeOrderRows.length)+' 条</small></div>'+
         '<div class="ops-pillar"><span>履约异常/取消</span><strong>'+num(abnormalWaybills.length)+'</strong><small>用于解释退款、取消、未妥投</small></div>'+
       '</div>'+
-      sectionTitleHtml('优先复核对象', '按售后金额排序；点货号或店铺可带筛选跳到对应视角。', selectedRangeText())+
+      sectionTitleHtml('优先复核对象', '只列真正需要先复核的货号 / 店铺；按售后金额排序，点击可带筛选跳转。', selectedRangeText())+
       '<div class="ops-focus-list">'+focusHtml+'</div></section>'+
     '</div>'+
     '<details class="detail-section" style="margin-top:16px"><summary>查看财务店铺摘要</summary><div class="detail-body">'+
@@ -7970,22 +8116,24 @@ function renderSelectionBenchmark(samples){
     }).join('')+'</div>');
   }
   return '<div class="selection-model">'+
-    '<div class="selection-verdict"><h4>选品标尺结论</h4><p>按历史成本表倒推体积，并用实际销售利润校准：当前最优区间是 <b>进货 '+escapeHtml(best?.pBand || '-')+' RMB、体积 '+escapeHtml(best?.vBand || '-')+'</b>。未来新选品按 <b>2000 RMB/方 = 2 RMB/L</b> 估算头程；如果没有把握售价，先避开低货值大体积。</p>'+
+    '<div class="selection-side"><div class="selection-verdict"><h4>选品标尺结论</h4><p>按历史成本表倒推体积，并用实际销售利润校准：当前最优区间是 <b>进货 '+escapeHtml(best?.pBand || '-')+' RMB、体积 '+escapeHtml(best?.vBand || '-')+'</b>。未来新选品按 <b>2000 RMB/方 = 2 RMB/L</b> 估算头程；如果没有把握售价，先避开低货值大体积。</p>'+
       '<div class="selection-metrics">'+
         '<div><span>历史进货价中位数</span><strong>'+escapeHtml(cny(purchaseMedian))+'</strong><small>'+escapeHtml(cny(purchaseP25))+' ~ '+escapeHtml(cny(purchaseP75))+'</small></div>'+
         '<div><span>倒推体积中位数</span><strong>'+escapeHtml(fmt.format(volumeMedian))+'L</strong><small>'+escapeHtml(fmt.format(volumeP25))+'L ~ '+escapeHtml(fmt.format(volumeP75))+'L</small></div>'+
         '<div><span>尾程固定费</span><strong>SAR 31.28</strong><small>上架 0.3 + 出库 6 + 派送 24.984</small></div>'+
       '</div></div>'+
-    sectionTitleHtml('进货价 × 体积选品矩阵', '绿色优先、橙色观察、红色谨慎；体积来自历史头程按 1600 RMB/方倒推，未来头程按 2000 RMB/方重算。')+
-    '<div class="selection-matrix">'+rows.join('')+'</div>'+
-    sectionTitleHtml('历史利润样本 Top 5', '看真实赚钱品落在哪些进货价和体积区间。')+
-    table(topExamples, [
+      sectionTitleHtml('历史利润样本 Top 5', '看真实赚钱品落在哪些进货价和体积区间。')+
+      table(topExamples, [
       ['货号', r => '<b>'+escapeHtml(r.standard_goods_sn || '-')+'</b>'],
       ['进货价/体积', r => escapeHtml(cny(r.purchase))+'<br><span class="muted">'+escapeHtml(fmt.format(r.inferredVolume))+'L</span>', 'num'],
       ['净成交/利润', r => money(r.net_revenue_sar || r.gross_revenue_sar)+'<br><span class="muted">利润 '+money(r.profit)+'</span>', 'num'],
       ['利润率/ROI', r => pct(r.margin)+'<br><span class="muted">ROI '+pct(r.roi)+'</span>', 'num'],
       ['未来头程', r => escapeHtml(cny(r.freightUnitCny))+' / 件', 'num']
-    ], {limit:5})+
+    ], {limit:5})+'</div>'+
+    '<div>'+
+      sectionTitleHtml('进货价 × 体积选品矩阵', '绿色优先、橙色观察、红色谨慎；体积来自历史头程按 1600 RMB/方倒推，未来头程按 2000 RMB/方重算。')+
+      '<div class="selection-matrix">'+rows.join('')+'</div>'+
+    '</div>'+
   '</div>';
 }
 function aggregateProfitProductsFromDailyRows(rows){
@@ -8206,8 +8354,9 @@ function renderProfitPage(){
   const rankedProfitProducts = products
     .filter(r => Number(r.cost_coverage_revenue_rate || 0) >= .9 && Number(r.net_revenue_sar || 0) > 0 && r.profit_margin_before_storage != null)
     .sort((a,b)=>Number(b.profit_margin_before_storage ?? -999)-Number(a.profit_margin_before_storage ?? -999));
-  const winners = rankedProfitProducts;
-  const losers = [...rankedProfitProducts].sort((a,b)=>Number(a.profit_margin_before_storage ?? 999)-Number(b.profit_margin_before_storage ?? 999));
+  const winners = rankedProfitProducts.filter(r => Number(r.profit_margin_before_storage || 0) >= .15);
+  const losers = rankedProfitProducts.filter(r => Number(r.profit_margin_before_storage || 0) < .15)
+    .sort((a,b)=>Number(a.profit_margin_before_storage ?? 999)-Number(b.profit_margin_before_storage ?? 999));
   const gapRows = products.filter(r => Number(r.missing_cost_revenue_sar || 0) > 0 || (Number(r.net_revenue_sar || 0) > 0 && Number(r.cost_coverage_revenue_rate || 0) < .9))
     .sort((a,b)=>Number(b.missing_cost_revenue_sar||0)-Number(a.missing_cost_revenue_sar||0));
   const profitCols = [
@@ -8220,10 +8369,10 @@ function renderProfitPage(){
   ];
   $('profitWinners').innerHTML = winners.length
     ? table(winners, profitCols, {limit:30})
-    : '<div class="empty">当前时间、店铺/分组、货号筛选下暂无“高利润 / 可加码”货号。</div>';
+    : '<div class="empty">当前时间、店铺/分组、货号筛选下暂无利润率 ≥ 15% 的货号。</div>';
   $('profitLosers').innerHTML = losers.length
     ? table(losers, profitCols, {limit:30})
-    : '<div class="empty">当前时间、店铺/分组、货号筛选下暂无明显低利润或退货侵蚀货号。</div>';
+    : '<div class="empty">当前时间、店铺/分组、货号筛选下暂无利润率 < 15% 的货号。</div>';
   $('profitCostGaps').innerHTML =
     '<div class="table-note">成本文件放在 <span class="mono">inputs/costs/</span>；模板是 <span class="mono">inputs/costs/SHEIN成本表模板.xlsx</span>。如果一批货缺头程运输费，会显示为缺口但不会污染单位成本。</div>'+
     (gapRows.length ? table(gapRows, [
@@ -8252,31 +8401,37 @@ function actionCard(a){
   const reasonHtml = a.action_domain === 'link'
     ? storeActionReasonHtml(a, DATA.storeLinks || DATA.links || [])
     : '<span class="decision-note">'+escapeHtml(a.reason || '').slice(0,160)+'</span>';
-  return '<article class="action-card">'+
-    '<div class="row1"><span class="domain">'+domainName(a.action_domain)+'<span class="status-badge"><i class="status-dot '+st+'"></i>'+statusLabel(st)+'</span></span><span class="score">'+num(a.score)+'</span></div>'+
-    '<h4>'+escapeHtml(a.category || '-')+' · '+escapeHtml(a.store_key || '-')+'</h4>'+
-    '<p><b>'+escapeHtml(a.standard_goods_sn || a.title || '-')+'</b> '+(a.skc ? '<span class="mono">'+escapeHtml(a.skc)+'</span> '+copyButton(a.skc, '复制SKC') : '')+'</p>'+
-    '<p class="muted">'+reasonHtml+'</p>'+
-    '<div class="muted">'+evidenceHtml+'</div>'+
-    '<p class="next">'+escapeHtml(a.next_step || '')+'</p>'+
-    '<div style="margin-top:10px">'+priorityTag(a.priority)+'</div>'+
-    '<div class="command-actions">'+
-      '<button class="status-btn" data-action-copy-command="'+key+'">复制处理指令</button>'+
-      '<button class="status-btn" data-action-focus-target="store" data-action-key="'+key+'">看店铺</button>'+
-      '<button class="status-btn" data-action-focus-target="product" data-action-key="'+key+'">看货号</button>'+
-      '<button class="status-btn" data-action-focus-target="link" data-action-key="'+key+'">看SKC</button>'+
+  return '<article class="action-card v1-action">'+
+    '<div class="action-main">'+
+      '<div class="row1"><span class="domain">'+domainName(a.action_domain)+'<span class="status-badge"><i class="status-dot '+st+'"></i>'+statusLabel(st)+'</span></span><span class="score">'+num(a.score)+'</span></div>'+
+      '<h4>'+escapeHtml(a.category || '-')+' · '+escapeHtml(a.store_key || '-')+'</h4>'+
+      '<p><b>'+escapeHtml(a.standard_goods_sn || a.title || '-')+'</b> '+(a.skc ? '<span class="mono">'+escapeHtml(a.skc)+'</span> '+copyButton(a.skc, '复制SKC') : '')+'</p>'+
+      '<div style="margin-top:10px">'+priorityTag(a.priority)+'</div>'+
     '</div>'+
-    '<div class="status-actions">'+
-      '<button class="status-btn '+(st === 'done' ? 'active' : '')+'" data-action-key="'+key+'" data-action-status="done">标记已处理</button>'+
-      '<button class="status-btn '+(st === 'review' ? 'active' : '')+'" data-action-key="'+key+'" data-action-status="review">待复查</button>'+
-      '<button class="status-btn '+(st === 'ignored' ? 'active' : '')+'" data-action-key="'+key+'" data-action-status="ignored">忽略</button>'+
-      '<button class="status-btn '+(st === 'open' ? 'active' : '')+'" data-action-key="'+key+'" data-action-status="open">恢复未处理</button>'+
+    '<div class="action-evidence">'+
+      '<p class="muted">'+reasonHtml+'</p>'+
+      '<div class="muted">'+evidenceHtml+'</div>'+
+      '<p class="next">'+escapeHtml(a.next_step || '')+'</p>'+
     '</div>'+
-    ((rec.owner || rec.note || rec.updatedBy) ? '<div class="meta-line">负责人：'+escapeHtml(rec.owner || '-')+'；备注：'+escapeHtml(rec.note || '-')+(rec.updatedBy ? '；最近操作：'+escapeHtml(rec.updatedBy) : '')+'</div>' : '')+
-    '<div class="action-meta">'+
-      '<input name="action-owner" aria-label="负责人" placeholder="负责人" value="'+escapeHtml(rec.owner || '')+'" data-action-owner="'+key+'" />'+
-      '<input name="action-note" aria-label="处理备注" placeholder="备注：处理结果 / 复查时间 / 暂不处理原因" value="'+escapeHtml(rec.note || '')+'" data-action-note="'+key+'" />'+
-      '<button class="status-btn meta-save" data-action-save-meta="'+key+'">保存备注</button>'+
+    '<div class="action-controls">'+
+      '<div class="command-actions">'+
+        '<button class="status-btn" data-action-copy-command="'+key+'">复制处理指令</button>'+
+        '<button class="status-btn" data-action-focus-target="store" data-action-key="'+key+'">看店铺</button>'+
+        '<button class="status-btn" data-action-focus-target="product" data-action-key="'+key+'">看货号</button>'+
+        '<button class="status-btn" data-action-focus-target="link" data-action-key="'+key+'">看SKC</button>'+
+      '</div>'+
+      '<div class="status-actions">'+
+        '<button class="status-btn '+(st === 'done' ? 'active' : '')+'" data-action-key="'+key+'" data-action-status="done">已处理</button>'+
+        '<button class="status-btn '+(st === 'review' ? 'active' : '')+'" data-action-key="'+key+'" data-action-status="review">待复查</button>'+
+        '<button class="status-btn '+(st === 'ignored' ? 'active' : '')+'" data-action-key="'+key+'" data-action-status="ignored">忽略</button>'+
+        '<button class="status-btn '+(st === 'open' ? 'active' : '')+'" data-action-key="'+key+'" data-action-status="open">未处理</button>'+
+      '</div>'+
+      ((rec.owner || rec.note || rec.updatedBy) ? '<div class="meta-line">负责人：'+escapeHtml(rec.owner || '-')+'；备注：'+escapeHtml(rec.note || '-')+(rec.updatedBy ? '；最近操作：'+escapeHtml(rec.updatedBy) : '')+'</div>' : '')+
+      '<div class="action-meta">'+
+        '<input name="action-owner" aria-label="负责人" placeholder="负责人" value="'+escapeHtml(rec.owner || '')+'" data-action-owner="'+key+'" />'+
+        '<input name="action-note" aria-label="处理备注" placeholder="备注 / 复查时间" value="'+escapeHtml(rec.note || '')+'" data-action-note="'+key+'" />'+
+        '<button class="status-btn meta-save" data-action-save-meta="'+key+'">保存</button>'+
+      '</div>'+
     '</div>'+
   '</article>';
 }
@@ -9501,6 +9656,8 @@ function applyTheme(theme){
   try { localStorage.setItem('SHEIN_BI_THEME', next); } catch {}
   const btn = $('themeToggle');
   if (btn) btn.textContent = next === 'light' ? '切换深色' : '切换浅色';
+  const fab = $('themeToggleFab');
+  if (fab) fab.textContent = next === 'light' ? '切换深色' : '切换浅色';
 }
 function initTheme(){
   let saved = '';
@@ -9509,6 +9666,8 @@ function initTheme(){
   applyTheme(saved);
   const btn = $('themeToggle');
   if (btn) btn.addEventListener('click', () => applyTheme(document.body.dataset.theme === 'light' ? 'dark' : 'light'));
+  const fab = $('themeToggleFab');
+  if (fab) fab.addEventListener('click', () => applyTheme(document.body.dataset.theme === 'light' ? 'dark' : 'light'));
 }
 document.querySelectorAll('[data-tab]').forEach(btn => btn.addEventListener('click', () => { activateTab(btn.dataset.tab, {scroll:true}); renderAll(); }));
 document.querySelectorAll('[data-tab-jump]').forEach(btn => btn.addEventListener('click', () => { activateTab(btn.dataset.tabJump, {scroll:true}); renderAll(); }));
