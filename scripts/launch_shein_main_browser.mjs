@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {spawn} from 'node:child_process';
+import {spawn, spawnSync} from 'node:child_process';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_URL = 'https://sso.geiwohuo.com/#/gsp/inventory-management/storage-age';
@@ -128,13 +128,43 @@ const chromeArgs = [
   cliArgs.url,
 ];
 
-const child = spawn(chrome, chromeArgs, {
-  cwd: ROOT,
-  detached: true,
-  stdio: 'ignore',
-  windowsHide: cliArgs.background || cliArgs.headless,
-});
-child.unref();
+function psSingleQuote(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+function quoteWindowsArg(value) {
+  const s = String(value);
+  if (!/[\s"]/.test(s)) return s;
+  return `"${s.replace(/(\\*)"/g, '$1$1\\"').replace(/\\+$/g, '$&$&')}"`;
+}
+
+if (process.platform === 'win32') {
+  const result = spawnSync('powershell.exe', [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-EncodedCommand',
+      Buffer.from([
+        "$ErrorActionPreference = 'Stop'",
+        `$argsForChrome = ${psSingleQuote(chromeArgs.map(quoteWindowsArg).join(' '))}`,
+        `Start-Process -FilePath ${psSingleQuote(chrome)} -ArgumentList $argsForChrome${cliArgs.background || cliArgs.headless ? ' -WindowStyle Minimized' : ''}`,
+      ].join('\n'), 'utf16le').toString('base64'),
+    ], {
+    cwd: ROOT,
+    stdio: 'ignore',
+    windowsHide: cliArgs.background || cliArgs.headless,
+    timeout: 15000,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`PowerShell Start-Process failed with exit code ${result.status}`);
+} else {
+  const child = spawn(chrome, chromeArgs, {
+    cwd: ROOT,
+    detached: true,
+    stdio: 'ignore',
+  });
+  child.unref();
+}
 
 console.log(JSON.stringify({
   profileName: PROFILE_NAME,

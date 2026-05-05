@@ -583,9 +583,23 @@ function buildSql() {
 WITH
 kpi AS (
   SELECT jsonb_build_object(
-    'salesSar', coalesce(sum(sales_sar),0),
-    'orders', coalesce(sum(valid_order_count),0),
-    'quantity', coalesce(sum(quantity),0),
+    'salesSar', (
+      SELECT coalesce(sum(net_revenue_sar),0)
+      FROM mart.profit_order_item
+      WHERE created_date = (SELECT max(sales_date) FROM mart.bi_business_store_current)
+    ),
+    'orders', (
+      SELECT count(DISTINCT order_no)
+      FROM mart.profit_order_item
+      WHERE created_date = (SELECT max(sales_date) FROM mart.bi_business_store_current)
+        AND coalesce(net_revenue_sar,0) > 0
+    ),
+    'quantity', (
+      SELECT coalesce(sum(quantity),0)
+      FROM mart.profit_order_item
+      WHERE created_date = (SELECT max(sales_date) FROM mart.bi_business_store_current)
+        AND coalesce(net_revenue_sar,0) > 0
+    ),
     'pendingSettlementSar', coalesce(sum(pending_settlement_income_sar),0),
     'inTransitSar', coalesce(sum(in_transit_order_amount_sar),0),
     'payedIncomeSar', coalesce(sum(payed_income_sar),0),
@@ -595,6 +609,16 @@ kpi AS (
     'lowStockProducts', coalesce(sum(low_display_stock_count),0),
     'lowStarComments', coalesce(sum(low_star_comment_count),0),
     'waybillExceptions', coalesce(sum(waybill_exception_count),0),
+    'costProductCount', (SELECT count(*) FROM mart.product_unit_cost_current WHERE unit_cost_sar IS NOT NULL),
+    'costMissingProductCount', (
+      SELECT count(DISTINCT oi.standard_goods_sn)
+      FROM fact.order_item oi
+      LEFT JOIN mart.product_unit_cost_by_match_key c
+        ON c.match_key <> ''
+       AND c.match_key = dim.product_match_key(oi.standard_goods_sn)
+      WHERE coalesce(oi.standard_goods_sn,'') <> ''
+        AND c.unit_cost_sar IS NULL
+    ),
     'riskScore', coalesce(sum(risk_score),0)
   ) AS data
   FROM mart.bi_business_store_current
@@ -985,6 +1009,40 @@ sales_anchor AS (
 sales_calendar AS (
   SELECT DISTINCT date::date AS date
   FROM fact.store_daily_sales
+  UNION
+  SELECT DISTINCT created_date::date AS date
+  FROM mart.profit_order_item
+),
+net_order_item AS (
+  SELECT
+    created_date::date AS date,
+    store_key,
+    group_key,
+    standard_goods_sn,
+    raw_goods_sn,
+    skc,
+    goods_title,
+    order_no,
+    order_key,
+    CASE WHEN coalesce(net_revenue_sar,0) > 0 THEN coalesce(quantity,0) ELSE 0 END AS quantity,
+    coalesce(net_revenue_sar,0) AS sales_sar,
+    coalesce(gross_revenue_sar,0) AS gross_sales_sar,
+    coalesce(revenue_reversal,false) AS revenue_reversal
+  FROM mart.profit_order_item
+  WHERE coalesce(standard_goods_sn,'') <> ''
+),
+net_daily_store_sales AS (
+  SELECT
+    date,
+    store_key,
+    max(coalesce(n.group_key,'')) AS group_key,
+    max(coalesce(s.shop_name,'')) AS shop_name,
+    round(sum(coalesce(n.sales_sar,0))::numeric, 2) AS sales_sar,
+    count(DISTINCT order_no) FILTER (WHERE coalesce(n.sales_sar,0) > 0) AS orders,
+    round(sum(coalesce(n.quantity,0))::numeric, 0) AS quantity
+  FROM net_order_item n
+  LEFT JOIN dim.store s USING (store_key)
+  GROUP BY date, store_key
 ),
 period_defs AS (
   SELECT
@@ -1035,11 +1093,11 @@ store_period_rank AS (
       max(coalesce(s.group_key,'')) AS group_key,
       max(coalesce(s.shop_name,'')) AS shop_name,
       round(sum(coalesce(s.sales_sar,0))::numeric, 2) AS sales_sar,
-      sum(coalesce(s.valid_order_count,0)) AS orders,
-      round(sum(coalesce(s.quantity_positive_amount, s.quantity_all,0))::numeric, 0) AS quantity,
+      sum(coalesce(s.orders,0)) AS orders,
+      round(sum(coalesce(s.quantity,0))::numeric, 0) AS quantity,
       count(DISTINCT s.date) AS days
     FROM period_defs p
-    JOIN fact.store_daily_sales s
+    JOIN net_daily_store_sales s
       ON s.date BETWEEN p.start_date AND p.end_date
     GROUP BY p.period_key, p.period_label, p.period_id, p.start_date, p.end_date, s.store_key
     ORDER BY p.period_key, sales_sar DESC, s.store_key
@@ -1058,12 +1116,12 @@ product_period_rank AS (
       max(coalesce(oi.goods_title,'')) AS goods_title,
       round(sum(coalesce(oi.sales_sar,0))::numeric, 2) AS sales_sar,
       round(sum(coalesce(oi.quantity,0))::numeric, 0) AS quantity,
-      count(DISTINCT oi.order_no) AS orders,
-      count(DISTINCT oi.store_key) AS store_count,
-      count(DISTINCT oi.created_date) AS days
+      count(DISTINCT oi.order_no) FILTER (WHERE coalesce(oi.sales_sar,0) > 0) AS orders,
+      count(DISTINCT oi.store_key) FILTER (WHERE coalesce(oi.sales_sar,0) > 0) AS store_count,
+      count(DISTINCT oi.date) AS days
     FROM period_defs p
-    JOIN fact.order_item oi
-      ON oi.created_date BETWEEN p.start_date AND p.end_date
+    JOIN net_order_item oi
+      ON oi.date BETWEEN p.start_date AND p.end_date
     WHERE coalesce(oi.standard_goods_sn,'') <> ''
     GROUP BY p.period_key, p.period_label, p.period_id, p.start_date, p.end_date, oi.standard_goods_sn
     ORDER BY p.period_key, sales_sar DESC, oi.standard_goods_sn
@@ -1080,11 +1138,11 @@ sales_period_summary AS (
       p.start_date,
       p.end_date,
       round(sum(coalesce(s.sales_sar,0))::numeric, 2) AS sales_sar,
-      sum(coalesce(s.valid_order_count,0)) AS orders,
-      round(sum(coalesce(s.quantity_positive_amount, s.quantity_all,0))::numeric, 0) AS quantity,
+      sum(coalesce(s.orders,0)) AS orders,
+      round(sum(coalesce(s.quantity,0))::numeric, 0) AS quantity,
       count(DISTINCT s.date) AS days
     FROM period_defs p
-    LEFT JOIN fact.store_daily_sales s
+    LEFT JOIN net_daily_store_sales s
       ON s.date BETWEEN p.start_date AND p.end_date
     GROUP BY p.period_key, p.period_label, p.period_id, p.start_date, p.end_date
   ) t
@@ -1098,9 +1156,9 @@ daily_store_sales AS (
       max(coalesce(group_key,'')) AS group_key,
       max(coalesce(shop_name,'')) AS shop_name,
       round(sum(coalesce(sales_sar,0))::numeric, 2) AS sales_sar,
-      sum(coalesce(valid_order_count,0)) AS orders,
-      round(sum(coalesce(quantity_positive_amount, quantity_all,0))::numeric, 0) AS quantity
-    FROM fact.store_daily_sales
+      sum(coalesce(orders,0)) AS orders,
+      round(sum(coalesce(quantity,0))::numeric, 0) AS quantity
+    FROM net_daily_store_sales
     GROUP BY date, store_key
     ORDER BY date, store_key
   ) t
@@ -1109,43 +1167,43 @@ daily_product_sales AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY date, standard_goods_sn), '[]'::jsonb) AS data
   FROM (
     SELECT
-      oi.created_date::date AS date,
+      oi.date::date AS date,
       oi.standard_goods_sn,
       max(coalesce(oi.goods_title,'')) AS goods_title,
       string_agg(DISTINCT nullif(oi.skc,''), ' ') FILTER (WHERE nullif(oi.skc,'') IS NOT NULL) AS skc_list,
       round(sum(coalesce(oi.sales_sar,0))::numeric, 2) AS sales_sar,
       round(sum(coalesce(oi.quantity,0))::numeric, 0) AS quantity,
-      count(DISTINCT oi.order_no) AS orders,
-      count(DISTINCT oi.store_key) AS store_count
-    FROM fact.order_item oi
+      count(DISTINCT oi.order_no) FILTER (WHERE coalesce(oi.sales_sar,0) > 0) AS orders,
+      count(DISTINCT oi.store_key) FILTER (WHERE coalesce(oi.sales_sar,0) > 0) AS store_count
+    FROM net_order_item oi
     WHERE coalesce(oi.standard_goods_sn,'') <> ''
-    GROUP BY oi.created_date, oi.standard_goods_sn
-    ORDER BY oi.created_date, oi.standard_goods_sn
+    GROUP BY oi.date, oi.standard_goods_sn
+    ORDER BY oi.date, oi.standard_goods_sn
   ) t
 ),
 daily_product_group_sales AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY date, group_key, standard_goods_sn), '[]'::jsonb) AS data
   FROM (
     SELECT
-      oi.created_date::date AS date,
+      oi.date::date AS date,
       coalesce(oi.group_key,'') AS group_key,
       oi.standard_goods_sn,
       string_agg(DISTINCT nullif(oi.skc,''), ' ') FILTER (WHERE nullif(oi.skc,'') IS NOT NULL) AS skc_list,
       round(sum(coalesce(oi.sales_sar,0))::numeric, 2) AS sales_sar,
       round(sum(coalesce(oi.quantity,0))::numeric, 0) AS quantity,
-      count(DISTINCT oi.order_no) AS orders,
-      count(DISTINCT oi.store_key) AS store_count
-    FROM fact.order_item oi
+      count(DISTINCT oi.order_no) FILTER (WHERE coalesce(oi.sales_sar,0) > 0) AS orders,
+      count(DISTINCT oi.store_key) FILTER (WHERE coalesce(oi.sales_sar,0) > 0) AS store_count
+    FROM net_order_item oi
     WHERE coalesce(oi.standard_goods_sn,'') <> ''
-    GROUP BY oi.created_date, coalesce(oi.group_key,''), oi.standard_goods_sn
-    ORDER BY oi.created_date, coalesce(oi.group_key,''), oi.standard_goods_sn
+    GROUP BY oi.date, coalesce(oi.group_key,''), oi.standard_goods_sn
+    ORDER BY oi.date, coalesce(oi.group_key,''), oi.standard_goods_sn
   ) t
 ),
 daily_store_product_sales AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY date, store_key, standard_goods_sn), '[]'::jsonb) AS data
   FROM (
     SELECT
-      oi.created_date::date AS date,
+      oi.date::date AS date,
       oi.store_key,
       max(coalesce(oi.group_key,'')) AS group_key,
       oi.standard_goods_sn,
@@ -1153,12 +1211,117 @@ daily_store_product_sales AS (
       string_agg(DISTINCT nullif(oi.skc,''), ' ') FILTER (WHERE nullif(oi.skc,'') IS NOT NULL) AS skc_list,
       round(sum(coalesce(oi.sales_sar,0))::numeric, 2) AS sales_sar,
       round(sum(coalesce(oi.quantity,0))::numeric, 0) AS quantity,
-      count(DISTINCT oi.order_no) AS orders
-    FROM fact.order_item oi
+      count(DISTINCT oi.order_no) FILTER (WHERE coalesce(oi.sales_sar,0) > 0) AS orders
+    FROM net_order_item oi
     WHERE coalesce(oi.standard_goods_sn,'') <> ''
       AND coalesce(oi.store_key,'') <> ''
-    GROUP BY oi.created_date, oi.store_key, oi.standard_goods_sn
-    ORDER BY oi.created_date, oi.store_key, oi.standard_goods_sn
+    GROUP BY oi.date, oi.store_key, oi.standard_goods_sn
+    ORDER BY oi.date, oi.store_key, oi.standard_goods_sn
+  ) t
+),
+profit_daily_store_product AS (
+  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY date, store_key, standard_goods_sn), '[]'::jsonb) AS data
+  FROM (
+    SELECT
+      date::date AS date,
+      store_key,
+      group_key,
+      standard_goods_sn,
+      round(sum(coalesce(gross_revenue_sar,0))::numeric, 2) AS gross_revenue_sar,
+      round(sum(coalesce(net_revenue_sar,0))::numeric, 2) AS net_revenue_sar,
+      round(sum(coalesce(quantity,0))::numeric, 0) AS quantity,
+      sum(coalesce(order_lines,0)) AS order_lines,
+      sum(coalesce(orders,0)) AS orders,
+      round(sum(coalesce(product_cost_sar,0))::numeric, 2) AS product_cost_sar,
+      round(sum(coalesce(return_delivery_fee_sar,0))::numeric, 2) AS return_delivery_fee_sar,
+      round(sum(coalesce(profit_before_storage_sar,0))::numeric, 2) AS profit_before_storage_sar,
+      round(sum(coalesce(known_net_revenue_sar,0))::numeric, 2) AS known_net_revenue_sar,
+      round(sum(coalesce(known_gross_revenue_sar,0))::numeric, 2) AS known_gross_revenue_sar,
+      round(sum(coalesce(missing_cost_revenue_sar,0))::numeric, 2) AS missing_cost_revenue_sar,
+      round(sum(coalesce(missing_cost_quantity,0))::numeric, 0) AS missing_cost_quantity,
+      sum(coalesce(missing_cost_lines,0)) AS missing_cost_lines,
+      sum(coalesce(reversal_lines,0)) AS reversal_lines,
+      CASE WHEN sum(coalesce(net_revenue_sar,0)) FILTER (WHERE missing_cost_lines = 0) > 0
+        THEN round((sum(coalesce(profit_before_storage_sar,0)) / nullif(sum(coalesce(known_net_revenue_sar,0)),0))::numeric, 4)
+        ELSE NULL END AS profit_margin_before_storage,
+      CASE WHEN sum(coalesce(net_revenue_sar,0)) > 0
+        THEN round((sum(coalesce(known_net_revenue_sar,0)) / nullif(sum(coalesce(net_revenue_sar,0)),0))::numeric, 4)
+        ELSE NULL END AS cost_coverage_revenue_rate
+    FROM mart.profit_daily_store_product
+    WHERE coalesce(standard_goods_sn,'') <> ''
+    GROUP BY date, store_key, group_key, standard_goods_sn
+    ORDER BY date, store_key, standard_goods_sn
+  ) t
+),
+profit_month_group AS (
+  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY month_start, group_key), '[]'::jsonb) AS data
+  FROM (
+    SELECT
+      month_start,
+      group_key,
+      round(gross_revenue_sar::numeric, 2) AS gross_revenue_sar,
+      round(net_revenue_sar::numeric, 2) AS net_revenue_sar,
+      round(product_cost_sar::numeric, 2) AS product_cost_sar,
+      round(return_delivery_fee_sar::numeric, 2) AS return_delivery_fee_sar,
+      round(profit_before_storage_sar::numeric, 2) AS profit_before_storage_sar,
+      round(month_storage_fee_sar::numeric, 2) AS month_storage_fee_sar,
+      round(allocated_storage_fee_sar::numeric, 2) AS allocated_storage_fee_sar,
+      round(profit_after_storage_sar::numeric, 2) AS profit_after_storage_sar,
+      round(profit_margin_after_storage::numeric, 4) AS profit_margin_after_storage,
+      round(cost_coverage_revenue_rate::numeric, 4) AS cost_coverage_revenue_rate,
+      round(missing_cost_revenue_sar::numeric, 2) AS missing_cost_revenue_sar,
+      missing_cost_lines,
+      reversal_lines
+    FROM mart.profit_month_group
+    ORDER BY month_start, group_key
+  ) t
+),
+profit_product_summary AS (
+  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY profit_before_storage_sar DESC NULLS LAST, gross_revenue_sar DESC, standard_goods_sn), '[]'::jsonb) AS data
+  FROM (
+    SELECT
+      standard_goods_sn,
+      round(gross_revenue_sar::numeric, 2) AS gross_revenue_sar,
+      round(net_revenue_sar::numeric, 2) AS net_revenue_sar,
+      round(quantity::numeric, 0) AS quantity,
+      round(product_cost_sar::numeric, 2) AS product_cost_sar,
+      round(return_delivery_fee_sar::numeric, 2) AS return_delivery_fee_sar,
+      round(profit_before_storage_sar::numeric, 2) AS profit_before_storage_sar,
+      round(profit_margin_before_storage::numeric, 4) AS profit_margin_before_storage,
+      round(missing_cost_revenue_sar::numeric, 2) AS missing_cost_revenue_sar,
+      round(missing_cost_quantity::numeric, 0) AS missing_cost_quantity,
+      missing_cost_lines,
+      reversal_lines,
+      round(unit_cost_sar::numeric, 2) AS unit_cost_sar,
+      complete_batch_count,
+      ignored_batch_count,
+      round(costed_quantity::numeric, 0) AS costed_quantity,
+      round(avg_purchase_unit_price::numeric, 2) AS avg_purchase_unit_price,
+      round(avg_volume_l::numeric, 2) AS avg_volume_l,
+      round(avg_weight_kg::numeric, 2) AS avg_weight_kg,
+      (
+        SELECT round((sum(coalesce(b.first_leg_freight_amount,0)) / nullif(sum(coalesce(b.shipped_quantity,0)),0))::numeric, 2)
+        FROM fact.product_cost_batch b
+        WHERE b.complete_batch
+          AND dim.product_match_key(b.standard_goods_sn) = dim.product_match_key(mart.profit_product_summary.standard_goods_sn)
+      ) AS historical_first_leg_unit_cny,
+      (
+        SELECT round(((sum(coalesce(b.first_leg_freight_amount,0)) / nullif(sum(coalesce(b.shipped_quantity,0)),0)) / 1600.0 * 1000)::numeric, 2)
+        FROM fact.product_cost_batch b
+        WHERE b.complete_batch
+          AND dim.product_match_key(b.standard_goods_sn) = dim.product_match_key(mart.profit_product_summary.standard_goods_sn)
+      ) AS inferred_volume_l_1600,
+      (
+        SELECT round(((sum(coalesce(b.first_leg_freight_amount,0)) / nullif(sum(coalesce(b.shipped_quantity,0)),0)) * (2000.0 / 1600.0))::numeric, 2)
+        FROM fact.product_cost_batch b
+        WHERE b.complete_batch
+          AND dim.product_match_key(b.standard_goods_sn) = dim.product_match_key(mart.profit_product_summary.standard_goods_sn)
+      ) AS future_first_leg_unit_cny_at_2000,
+      last_cost_imported_at,
+      round(cost_coverage_revenue_rate::numeric, 4) AS cost_coverage_revenue_rate
+    FROM mart.profit_product_summary
+    ORDER BY profit_before_storage_sar DESC NULLS LAST, gross_revenue_sar DESC, standard_goods_sn
+    LIMIT 500
   ) t
 ),
 finance AS (
@@ -1204,9 +1367,8 @@ finance_orders AS (
       finance_detail_count,
       check_status
     FROM fact.finance_no_finish_order
-    WHERE snapshot_date = (SELECT max(snapshot_date) FROM fact.finance_no_finish_order)
-    ORDER BY order_delivery_time DESC NULLS LAST, estimate_income_money_total DESC NULLS LAST, store_key
-    LIMIT 180
+    ORDER BY coalesce(order_delivery_time::date, snapshot_date) DESC NULLS LAST, estimate_income_money_total DESC NULLS LAST, store_key
+    LIMIT 5000
   ) t
 ),
 finance_goods_rows AS (
@@ -1215,6 +1377,7 @@ finance_goods_rows AS (
     f.store_key,
     f.group_key,
     f.order_no,
+    fo.order_delivery_time,
     coalesce(nullif(f.standard_goods_sn,''), nullif(oi.standard_goods_sn,'')) AS standard_goods_sn,
     coalesce(nullif(f.raw_goods_sn,''), nullif(oi.raw_goods_sn,'')) AS raw_goods_sn,
     nullif(f.spu,'') AS spu,
@@ -1291,9 +1454,8 @@ orders AS (
       quantity, round(sales_sar::numeric, 2) AS sales_sar,
       goods_performance_status_desc
     FROM fact.order_item
-    WHERE created_date = (SELECT max(date) FROM fact.store_daily_sales)
-    ORDER BY order_create_time DESC NULLS LAST, sales_sar DESC NULLS LAST
-    LIMIT 120
+    ORDER BY created_date DESC NULLS LAST, order_create_time DESC NULLS LAST, sales_sar DESC NULLS LAST
+    LIMIT 12000
   ) t
 ),
 after_sales AS (
@@ -1307,10 +1469,9 @@ after_sales AS (
       resolution_plan_name, order_sub_status_name, return_package_status_name,
       reason_names, appeal_status
     FROM fact.after_sales_item
-    WHERE request_time::date BETWEEN (SELECT max(date) FROM fact.store_daily_sales) - interval '89 days'
-      AND (SELECT max(date) FROM fact.store_daily_sales)
+    WHERE request_time IS NOT NULL
     ORDER BY request_time DESC NULLS LAST, price_amount_total DESC NULLS LAST
-    LIMIT 160
+    LIMIT 8000
   ) t
 ),
 waybills AS (
@@ -1323,11 +1484,10 @@ waybills AS (
       goods_sn_list, skc_list, goods_quantity,
       round(estimate_performance_price::numeric, 2) AS estimate_performance_price
     FROM fact.waybill_package
-    WHERE snapshot_date = (SELECT max(snapshot_date) FROM fact.waybill_package)
     ORDER BY
       CASE WHEN coalesce(show_status_desc,'') ~ '(异常|失败|超时|取消)' THEN 0 ELSE 1 END,
-      collect_time DESC NULLS LAST
-    LIMIT 140
+      coalesce(collect_time, print_time, snapshot_date::timestamp) DESC NULLS LAST
+    LIMIT 8000
   ) t
 ),
 campaigns AS (
@@ -1566,9 +1726,9 @@ trend_sales_daily AS (
   SELECT
     date,
     round(sum(coalesce(sales_sar,0))::numeric, 2) AS sales_sar,
-    sum(coalesce(valid_order_count,0)) AS orders,
-    round(sum(coalesce(quantity_positive_amount, quantity_all,0))::numeric, 0) AS quantity
-  FROM fact.store_daily_sales
+    sum(coalesce(orders,0)) AS orders,
+    round(sum(coalesce(quantity,0))::numeric, 0) AS quantity
+  FROM net_daily_store_sales
   GROUP BY date
   ORDER BY date DESC
   LIMIT 14
@@ -1679,7 +1839,7 @@ trend_finance_series AS (
 ),
 trend_sales_ranked_dates AS (
   SELECT date, row_number() OVER (ORDER BY date DESC) AS rn
-  FROM (SELECT DISTINCT date FROM fact.store_daily_sales) d
+  FROM (SELECT DISTINCT date FROM net_daily_store_sales) d
 ),
 trend_store_sales_change AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY abs(change_sar) DESC), '[]'::jsonb) AS data
@@ -1694,13 +1854,13 @@ trend_store_sales_change AS (
       END AS change_pct
     FROM (
       SELECT store_key, sum(coalesce(sales_sar,0)) AS sales_sar
-      FROM fact.store_daily_sales
+      FROM net_daily_store_sales
       WHERE date = (SELECT date FROM trend_sales_ranked_dates WHERE rn = 1)
       GROUP BY store_key
     ) c
     FULL JOIN (
       SELECT store_key, sum(coalesce(sales_sar,0)) AS sales_sar
-      FROM fact.store_daily_sales
+      FROM net_daily_store_sales
       WHERE date = (SELECT date FROM trend_sales_ranked_dates WHERE rn = 2)
       GROUP BY store_key
     ) p USING (store_key)
@@ -1746,6 +1906,11 @@ SELECT jsonb_build_object(
     'dailyProducts', (SELECT data FROM daily_product_sales),
     'dailyProductGroups', (SELECT data FROM daily_product_group_sales),
     'dailyStoreProducts', (SELECT data FROM daily_store_product_sales)
+  ),
+  'profit', jsonb_build_object(
+    'dailyStoreProducts', (SELECT data FROM profit_daily_store_product),
+    'monthGroups', (SELECT data FROM profit_month_group),
+    'products', (SELECT data FROM profit_product_summary)
   ),
   'actions', (SELECT data FROM actions),
   'links', (SELECT data FROM links),
@@ -2173,7 +2338,55 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .matrix-cell.value{font-family:var(--mono);font-size:21px;font-weight:950;font-variant-numeric:tabular-nums;color:var(--text);letter-spacing:-.035em}
     .metric-matrix.cols-1 .matrix-cell.value{font-size:24px}
     .matrix-cell .minor-money{display:block;margin-top:3px;color:var(--muted);font-size:13px;font-weight:800;letter-spacing:0}
+    .matrix-cell .coverage-note{display:block;margin-top:4px;color:var(--muted);font-size:11px;font-weight:800;letter-spacing:0}
+    .matrix-cell .pending-profit{color:#f97316;font-family:var(--font);font-size:15px;letter-spacing:0}
     .matrix-cell .positive{color:#22c55e}.matrix-cell .warn{color:#f97316}.matrix-cell .danger{color:#ef4444}
+    .ops-command{display:grid;grid-template-columns:minmax(320px,.9fr) minmax(520px,1.35fr);gap:16px;margin-bottom:16px;align-items:stretch}
+    .ops-verdict{border:1px solid rgba(96,165,250,.26);border-radius:26px;background:linear-gradient(145deg,rgba(37,99,235,.17),rgba(15,23,42,.48));padding:18px;display:flex;flex-direction:column;justify-content:space-between;min-height:100%}
+    body[data-theme="light"] .ops-verdict{background:linear-gradient(145deg,#eff6ff,#fff);border-color:#bfdbfe}
+    .ops-verdict h3{margin:0 0 8px;font-size:24px;letter-spacing:-.04em}.ops-verdict p{margin:0;color:var(--muted);line-height:1.7}.ops-verdict .ops-big{font-family:var(--mono);font-size:32px;font-weight:950;letter-spacing:-.05em;margin:14px 0 4px;font-variant-numeric:tabular-nums;color:#60a5fa}body[data-theme="light"] .ops-verdict .ops-big{color:#1d4ed8}
+    .ops-question-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:14px}.ops-question-grid div{border:1px solid rgba(148,163,184,.18);border-radius:16px;padding:10px;background:rgba(15,23,42,.28)}body[data-theme="light"] .ops-question-grid div{background:#f8fafc;border-color:#e2e8f0}.ops-question-grid b{display:block;font-size:12px;margin-bottom:4px}.ops-question-grid span{display:block;font-size:12px;color:var(--muted);line-height:1.45}
+    .ops-pillar-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.ops-pillar{border:1px solid rgba(148,163,184,.18);border-radius:20px;padding:14px;background:linear-gradient(135deg,rgba(15,23,42,.64),rgba(2,6,23,.32));min-height:126px}.ops-pillar span{display:block;color:var(--muted);font-size:12px;font-weight:800}.ops-pillar strong{display:block;margin-top:8px;font-family:var(--mono);font-size:24px;font-weight:950;font-variant-numeric:tabular-nums}.ops-pillar small{display:block;margin-top:5px;color:var(--muted);font-size:12px;line-height:1.45}body[data-theme="light"] .ops-pillar{background:#fff;border-color:#e2e8f0}
+    .ops-focus-list{display:grid;gap:10px}.ops-focus-row{display:grid;grid-template-columns:88px 1fr auto;gap:10px;align-items:center;border:1px solid rgba(148,163,184,.16);border-radius:16px;padding:10px;background:rgba(15,23,42,.24)}body[data-theme="light"] .ops-focus-row{background:#fff;border-color:#e2e8f0}.ops-focus-row b{font-size:14px}.ops-focus-row small{display:block;color:var(--muted);margin-top:3px}.ops-focus-row .num{font-family:var(--mono);font-weight:900;font-variant-numeric:tabular-nums}
+    .profit-command{display:grid;grid-template-columns:minmax(320px,.95fr) minmax(520px,1.4fr);gap:16px;margin-bottom:16px;align-items:stretch}
+    .profit-verdict{border:1px solid rgba(20,184,166,.26);border-radius:26px;background:linear-gradient(145deg,rgba(13,148,136,.18),rgba(15,23,42,.48));padding:18px;display:flex;flex-direction:column;justify-content:space-between;min-height:100%}
+    body[data-theme="light"] .profit-verdict{background:linear-gradient(145deg,#ecfeff,#fff);border-color:#99f6e4}
+    .profit-verdict h3{margin:0 0 8px;font-size:24px;letter-spacing:-.04em}.profit-verdict p{margin:0;color:var(--muted);line-height:1.7}
+    .profit-verdict .profit-big{font-family:var(--mono);font-size:34px;font-weight:950;letter-spacing:-.05em;margin:14px 0 4px;font-variant-numeric:tabular-nums}.profit-big.good{color:#22c55e}.profit-big.bad{color:#ef4444}.profit-big.warn{color:#f97316}
+    .profit-logic{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:14px}.profit-logic div{border:1px solid rgba(148,163,184,.18);border-radius:16px;padding:10px;background:rgba(15,23,42,.28)}body[data-theme="light"] .profit-logic div{background:#f8fafc;border-color:#e2e8f0}.profit-logic b{display:block;font-size:12px;color:var(--text);margin-bottom:4px}.profit-logic span{display:block;font-size:12px;color:var(--muted);line-height:1.45}
+    .profit-summary-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:16px}
+    .profit-card{border:1px solid rgba(148,163,184,.18);border-radius:22px;background:linear-gradient(135deg,rgba(15,23,42,.68),rgba(2,6,23,.36));padding:15px;min-height:132px;display:flex;flex-direction:column;justify-content:space-between}
+    .profit-card span{display:block;color:var(--muted);font-size:12px;font-weight:800}.profit-card strong{display:block;margin-top:8px;font-family:var(--mono);font-size:26px;font-weight:950;font-variant-numeric:tabular-nums;letter-spacing:-.04em}.profit-card small{display:block;margin-top:5px;color:var(--muted);font-size:12px;line-height:1.45}
+    .profit-card.good{border-color:rgba(34,197,94,.28);background:linear-gradient(135deg,rgba(6,78,59,.20),rgba(15,23,42,.50))}
+    .profit-card.warn{border-color:rgba(251,146,60,.34);background:linear-gradient(135deg,rgba(120,53,15,.22),rgba(15,23,42,.50))}
+    .profit-card.bad{border-color:rgba(248,113,113,.34);background:linear-gradient(135deg,rgba(127,29,29,.20),rgba(15,23,42,.50))}
+    .profit-workbench-grid{display:grid;grid-template-columns:1.05fr .95fr;gap:16px;align-items:start}
+    .profit-calculator{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:12px 0}
+    .profit-calculator label{display:grid;gap:6px;color:var(--muted);font-size:12px;font-weight:800}
+    .profit-calculator input{min-height:40px;border:1px solid var(--line);border-radius:12px;background:rgba(15,23,42,.52);color:var(--text);padding:8px 10px;font-family:var(--mono);font-size:14px}
+    .calculator-output{border:1px solid rgba(34,211,238,.24);border-radius:18px;background:rgba(8,47,73,.22);padding:12px;margin-top:10px}
+    .calculator-output strong{display:block;font-family:var(--mono);font-size:24px;letter-spacing:-.03em}.calculator-output span{display:block;color:var(--muted);font-size:12px;line-height:1.55;margin-top:5px}
+    .profit-scatter{height:330px;position:relative}
+    .profit-scatter svg{width:100%;height:300px;display:block;overflow:visible}
+    .profit-scatter .axis{fill:var(--muted);font-size:11px}.profit-scatter .grid-line{stroke:rgba(148,163,184,.16);stroke-width:1;stroke-dasharray:4 6}.profit-scatter .axis-line{stroke:rgba(148,163,184,.34);stroke-width:1}.profit-scatter .point{stroke:#fff;stroke-width:1.3;cursor:pointer}
+    .selection-model{display:grid;gap:14px}
+    .selection-verdict{border:1px solid rgba(34,197,94,.22);border-radius:22px;background:linear-gradient(135deg,rgba(6,78,59,.20),rgba(15,23,42,.48));padding:15px}
+    .selection-verdict h4{margin:0 0 8px;font-size:20px;letter-spacing:-.03em}.selection-verdict p{margin:0;color:var(--muted);line-height:1.65;font-size:13px}
+    .selection-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:12px}.selection-metrics div{border:1px solid rgba(148,163,184,.16);border-radius:16px;background:rgba(2,6,23,.24);padding:10px}.selection-metrics span{display:block;color:var(--muted);font-size:11px;font-weight:850}.selection-metrics strong{display:block;margin-top:5px;font-family:var(--mono);font-size:17px}
+    .selection-matrix{display:grid;gap:8px}.matrix-row{display:grid;grid-template-columns:92px repeat(4,minmax(0,1fr));gap:8px}.matrix-cell{min-height:76px;border:1px solid rgba(148,163,184,.16);border-radius:14px;background:rgba(15,23,42,.44);padding:9px;font-size:12px}.matrix-cell.head{min-height:auto;background:rgba(15,23,42,.62);color:var(--muted);font-weight:900;text-align:center}.matrix-cell.good{border-color:rgba(34,197,94,.34);background:rgba(6,78,59,.22)}.matrix-cell.mid{border-color:rgba(251,191,36,.34);background:rgba(120,53,15,.18)}.matrix-cell.bad{border-color:rgba(248,113,113,.34);background:rgba(127,29,29,.18)}.matrix-cell b{display:block;font-family:var(--mono);font-size:15px}.matrix-cell small{display:block;color:var(--muted);line-height:1.45;margin-top:4px}
+    .selection-slider-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.selection-slider-grid label{display:grid;gap:6px;color:var(--muted);font-size:12px;font-weight:850}.selection-slider-grid input{min-height:40px;border:1px solid var(--line);border-radius:12px;background:rgba(15,23,42,.52);color:var(--text);padding:8px 10px;font-family:var(--mono);font-size:14px}
+    .selection-output{border:1px solid rgba(34,211,238,.24);border-radius:18px;background:rgba(8,47,73,.22);padding:12px;margin-top:10px}.selection-output strong{display:block;font-family:var(--mono);font-size:24px;letter-spacing:-.03em}.selection-output span{display:block;color:var(--muted);font-size:12px;line-height:1.65;margin-top:5px}
+    body[data-theme="light"] .profit-card,
+    body[data-theme="light"] .calculator-output,body[data-theme="light"] .selection-verdict,body[data-theme="light"] .selection-output{background:#ffffff;border-color:#e2e8f0;box-shadow:0 8px 22px rgba(15,23,42,.05)}
+    body[data-theme="light"] .profit-card.good{background:#f0fdf4;border-color:#bbf7d0}
+    body[data-theme="light"] .profit-card.warn{background:#fff7ed;border-color:#fed7aa}
+    body[data-theme="light"] .profit-card.bad{background:#fff1f2;border-color:#fecdd3}
+    body[data-theme="light"] .profit-calculator input,body[data-theme="light"] .selection-slider-grid input{background:#ffffff;color:#0f172a;border-color:#cbd5e1}
+    body[data-theme="light"] .selection-metrics div,body[data-theme="light"] .matrix-cell{background:#f8fafc;border-color:#e2e8f0}
+    body[data-theme="light"] .matrix-cell.head{background:#eef2ff}
+    body[data-theme="light"] .matrix-cell.good{background:#ecfdf5;border-color:#a7f3d0}
+    body[data-theme="light"] .matrix-cell.mid{background:#fffbeb;border-color:#fde68a}
+    body[data-theme="light"] .matrix-cell.bad{background:#fff1f2;border-color:#fecdd3}
     .rank-list.product-rank .rank-item{min-height:70px}
     .rank-item{display:grid;grid-template-columns:38px minmax(0,1fr) minmax(118px,auto);gap:10px;align-items:center;width:100%;min-height:64px;text-align:left;border:1px solid rgba(148,163,184,.16);border-radius:16px;background:rgba(15,23,42,.48);color:var(--text);padding:10px 12px;cursor:pointer}
     .rank-item:hover{border-color:rgba(34,211,238,.48);background:rgba(34,211,238,.08)}
@@ -2433,7 +2646,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     body[data-theme="light"] .commander-metrics div,
     body[data-theme="light"] .review-meta div{background:#f8fafc;border-color:#e2e8f0}
     .footer{color:var(--muted);font-size:12px;padding:24px 0;text-align:center}
-    @media (max-width:1180px){.shell{grid-template-columns:1fr}.side{position:relative;height:auto}.kpis,.overview-core .kpis{grid-template-columns:1fr}.overview-core,.overview-core .group-summary-grid.two,.home-scope-toolbar,.calendar-duo,.calendar-input-row,.range-calendar-grid,.range-popover-grid,.range-toolbar-main,.page-guide-inner,.page-guide-grid,.page-decision-grid,.store-flow,.store-kpi-grid,.problem-stack,.store-action-steps{grid-template-columns:1fr}.home-scope-hint{justify-content:flex-start}.range-popover{min-width:0;width:calc(100vw - 56px);left:0}.toolbar{grid-template-columns:1fr}.range-toolbar{top:8px}.grid.cols-2,.grid.cols-3,.split,.spotlight,.sop-grid,.cause-grid,.command-room,.command-lanes,.detail-grid{grid-template-columns:1fr}.brief-grid{grid-template-columns:repeat(2,1fr)}.brief-grid.five{grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.hero-top{display:block}.quick-links{justify-content:flex-start;margin-top:18px}h2{font-size:30px}}
+    @media (max-width:1180px){.shell{grid-template-columns:1fr}.side{position:relative;height:auto}.kpis,.overview-core .kpis{grid-template-columns:1fr}.overview-core,.overview-core .group-summary-grid.two,.home-scope-toolbar,.calendar-duo,.calendar-input-row,.range-calendar-grid,.range-popover-grid,.range-toolbar-main,.page-guide-inner,.page-guide-grid,.page-decision-grid,.store-flow,.store-kpi-grid,.problem-stack,.store-action-steps,.profit-workbench-grid,.ops-command,.ops-question-grid,.ops-pillar-grid,.profit-command,.profit-logic,.profit-summary-grid,.profit-calculator{grid-template-columns:1fr}.home-scope-hint{justify-content:flex-start}.range-popover{min-width:0;width:calc(100vw - 56px);left:0}.toolbar{grid-template-columns:1fr}.range-toolbar{top:8px}.grid.cols-2,.grid.cols-3,.split,.spotlight,.sop-grid,.cause-grid,.command-room,.command-lanes,.detail-grid{grid-template-columns:1fr}.brief-grid{grid-template-columns:repeat(2,1fr)}.brief-grid.five{grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.hero-top{display:block}.quick-links{justify-content:flex-start;margin-top:18px}h2{font-size:30px}}
     @media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
   </style>
 </head>
@@ -2454,6 +2667,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
       <button data-tab="links">${svgIcon('link')}SKC / 链接</button>
       <button data-tab="comments">${svgIcon('alert')}评价 / 口碑</button>
       <button data-tab="business">${svgIcon('metabase')}订单 / 售后</button>
+      <button data-tab="profit">${svgIcon('metabase')}成本 / 利润</button>
       <button data-tab="actions">${svgIcon('action')}今日动作池</button>
       <button data-tab="system">${svgIcon('alert')}系统状态</button>
       <a href="${htmlEscape(links.home)}" target="_blank" rel="noreferrer">${svgIcon('metabase')}打开 Metabase 深度分析</a>
@@ -2594,7 +2808,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
         <div class="card-body">
           <div class="grid cols-2">
             <div>
-              <div class="sub" style="margin-bottom:8px">店铺风险象限：横轴销售额，纵轴综合风险</div>
+              <div class="sub" style="margin-bottom:8px">店铺风险象限：横轴净成交额，纵轴综合风险</div>
               <div class="chart-box" id="storeScatter"></div>
             </div>
             <div>
@@ -2734,25 +2948,23 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     </section>
 
     <section id="business" class="section">
-      <div class="grid cols-2">
-        <div class="card">
-          <div class="card-h">
-            <div><h3>财务摘要</h3><div class="sub">来自“我的收入”新财务入口，优先展示在途、待结算、已结算和账期。</div></div>
-            <a class="tag info" href="${htmlEscape(links.finance)}" target="_blank">财务深钻</a>
-          </div>
-          <div class="card-body"><div id="financeTable"></div></div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-h">
+          <div><h3>订单 / 售后复核台</h3><div class="sub">先回答：成交是否真实、售后压力来自哪里、哪些订单/货号需要复核。财务和履约只作为互证证据。</div></div>
+          <a class="tag info" href="${htmlEscape(links.finance)}" target="_blank">财务深钻</a>
         </div>
-        <div class="card">
-          <div class="card-h">
-            <div><h3>营销活动</h3><div class="sub">活动销售、活动曝光和参与商品数。</div></div>
-            <a class="tag info" href="${htmlEscape(links.ops)}" target="_blank">营销深钻</a>
-          </div>
-          <div class="card-body"><div id="campaignTable"></div></div>
-        </div>
+        <div class="card-body"><div id="financeTable"></div></div>
       </div>
       <details class="detail-section" style="margin-top:16px">
-        <summary>明细复核区：财务、订单、售后、履约</summary>
+        <summary>展开单据证据区：财务、订单、售后、履约</summary>
         <div class="detail-body">
+          <div class="card" style="margin-bottom:16px">
+            <div class="card-h">
+              <div><h3>营销活动辅助解释</h3><div class="sub">只作为销售波动解释，不作为订单售后页主判断。</div></div>
+              <a class="tag info" href="${htmlEscape(links.ops)}" target="_blank">营销深钻</a>
+            </div>
+            <div class="card-body"><div id="campaignTable"></div></div>
+          </div>
           <div class="detail-grid">
             <div class="card">
               <div class="card-h"><div><h3>收入明细 · 在途订单</h3><div class="sub">来自新财务入口的“在途订单金额”明细，用来和订单销售互相印证。</div></div></div>
@@ -2779,6 +2991,40 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
           </div>
         </div>
       </details>
+    </section>
+
+    <section id="profit" class="section">
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-h">
+          <div><h3>成本 / 利润经营台</h3><div class="sub">先看当前筛选是否赚钱，再看趋势和货号动作；净成交剔除退货，真实退货退款才额外扣 13.88 SAR。</div></div>
+          <span class="tag info" id="profitTag"></span>
+        </div>
+        <div class="card-body" id="profitOverview"></div>
+      </div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-h"><div><h3>月利润趋势</h3><div class="sub">总计 / DSY / LGM 看全局；筛到单店或货号时看当前范围。月趋势按所选日期片段，不强行补整月。</div></div></div>
+        <div class="card-body" id="profitTrendPanel"></div>
+      </div>
+      <div class="grid cols-2" style="margin-bottom:16px">
+        <div class="card">
+          <div class="card-h"><div><h3>高利润 / 可加码货号</h3><div class="sub">按利润率从高到低排序；先看哪些货号最值得加码。</div></div></div>
+          <div class="card-body" id="profitWinners"></div>
+        </div>
+        <div class="card">
+          <div class="card-h"><div><h3>低利润 / 需要处理货号</h3><div class="sub">按利润率从低到高排序；先看哪些货号最需要处理。</div></div></div>
+          <div class="card-body" id="profitLosers"></div>
+        </div>
+      </div>
+      <div class="profit-workbench-grid">
+        <div class="card">
+          <div class="card-h"><div><h3>选品标尺 / 利润试算</h3><div class="sub">基于成本表倒推体积，用未来 2000 RMB/方头程估算新品安全边界。</div></div></div>
+          <div class="card-body" id="profitCalculatorPanel"></div>
+        </div>
+        <div class="card">
+          <div class="card-h"><div><h3>成本覆盖缺口</h3><div class="sub">没有成本的货号不硬算真实利润；后续成本表更新后这里会自动收敛。</div></div></div>
+          <div class="card-body" id="profitCostGaps"></div>
+        </div>
+      </div>
     </section>
 
     <section id="actions" class="section">
@@ -2839,6 +3085,8 @@ const fmt0 = new Intl.NumberFormat('zh-CN', {maximumFractionDigits: 0});
 const money = n => 'SAR ' + fmt.format(Number(n || 0));
 const RMB_RATE = 1.8;
 const rmb = n => 'RMB ' + fmt.format(Number(n || 0) * RMB_RATE);
+const cny = n => 'RMB ' + fmt.format(Number(n || 0));
+const sarToCny = n => Number(n || 0) * RMB_RATE;
 const num = n => fmt0.format(Number(n || 0));
 const niceCeil = n => {
   const v = Math.max(1, Math.ceil(Number(n || 0)));
@@ -3489,6 +3737,16 @@ function seriesForMonth(series, baseDate){
 function sumSeries(series, key){
   return (series || []).reduce((sum, x) => sum + Number(x?.[key] || 0), 0);
 }
+function aggregateRows(rows, keyFn, reducer){
+  const map = new Map();
+  for (const row of rows || []) {
+    const key = keyFn(row);
+    const acc = map.get(key) || {};
+    reducer(acc, row);
+    map.set(key, acc);
+  }
+  return Array.from(map.values());
+}
 function isoDate(d){
   if (!(d instanceof Date) || Number.isNaN(d.getTime())) return '';
   const y = d.getFullYear();
@@ -3598,6 +3856,17 @@ function inSelectedRangeValue(value){
   const d = String(value || '').slice(0, 10);
   return Boolean(d && d >= r.start && d <= r.end);
 }
+function firstDateValue(row, keys = []){
+  for (const key of keys) {
+    const d = String(row?.[key] || '').slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+  }
+  return '';
+}
+function rowInSelectedRangeBy(row, keys = []){
+  const d = firstDateValue(row, keys);
+  return Boolean(d && inSelectedRangeValue(d));
+}
 function filterDailyRows(rows, key = 'date'){
   return (rows || []).filter(row => inSelectedRange(row, key));
 }
@@ -3678,7 +3947,8 @@ function productQueryMatch(row, q = productScopeQuery()){
     row.product_sn,
     row.product_code,
     row.store_product_code,
-    row.standardProductCode
+    row.standardProductCode,
+    row.raw_goods_sn
   ].map(x => String(x || '')).join(' ').toLowerCase();
   if (codeText.includes(q)) return true;
 
@@ -3897,6 +4167,61 @@ function homeAfterSalesForScope(start, end, scopeValue = ''){
   const after = afterSalesScopeSummary();
   return {cases:Number(after.rangeCases || 0), amount_sar:Number(after.rangeAmountSar || 0)};
 }
+function profitDailyRows(start, end, scopeValue = state.store, respectProduct = true){
+  const q = productScopeQuery();
+  return (DATA.profit?.dailyStoreProducts || []).filter(r => {
+    const d = String(r.date || '').slice(0, 10);
+    if (!d || d < start || d > end) return false;
+    if (!storeMatchesScope(r, scopeValue)) return false;
+    if (respectProduct && q && !productQueryMatch(r, q)) return false;
+    return true;
+  });
+}
+function profitSummaryForRows(rows){
+  const out = {
+    grossRevenueSar:0,
+    netRevenueSar:0,
+    productCostSar:0,
+    returnFeeSar:0,
+    profitSar:0,
+    knownGrossRevenueSar:0,
+    missingCostRevenueSar:0,
+    missingCostQuantity:0,
+    missingCostLines:0,
+    reversalLines:0,
+    orders:0,
+    quantity:0
+  };
+  for (const r of rows || []) {
+    out.grossRevenueSar += Number(r.gross_revenue_sar || 0);
+    out.netRevenueSar += Number(r.net_revenue_sar || 0);
+    out.productCostSar += Number(r.product_cost_sar || 0);
+    out.returnFeeSar += Number(r.return_delivery_fee_sar || 0);
+    out.profitSar += Number(r.profit_before_storage_sar || 0);
+    out.knownGrossRevenueSar += Number(r.known_net_revenue_sar ?? r.known_gross_revenue_sar ?? 0);
+    out.missingCostRevenueSar += Number(r.missing_cost_revenue_sar || 0);
+    out.missingCostQuantity += Number(r.missing_cost_quantity || 0);
+    out.missingCostLines += Number(r.missing_cost_lines || 0);
+    out.reversalLines += Number(r.reversal_lines || 0);
+    out.orders += Number(r.orders || 0);
+    out.quantity += Number(r.quantity || 0);
+  }
+  out.costCoverageRate = out.netRevenueSar > 0 ? out.knownGrossRevenueSar / out.netRevenueSar : null;
+  out.margin = out.netRevenueSar > 0 && out.knownGrossRevenueSar > 0 ? out.profitSar / out.netRevenueSar : null;
+  out.hasAnyCost = out.knownGrossRevenueSar > 0 || out.productCostSar > 0;
+  return out;
+}
+function homeProfitForScope(start, end, scopeValue = ''){
+  return profitSummaryForRows(profitDailyRows(start, end, scopeValue, true));
+}
+function profitDisplayHtml(summary, opts = {}){
+  const s = summary || {};
+  if (!s.hasAnyCost) {
+    return '<span class="pending-profit">待成本表</span><span class="coverage-note">成本覆盖 0%，先导入成本表</span>';
+  }
+  const cls = Number(s.profitSar || 0) < 0 ? 'danger' : 'positive';
+  return '<span class="'+cls+'">'+escapeHtml(fmt.format(Number(s.profitSar || 0)))+'</span><span class="coverage-note">覆盖 '+pct(s.costCoverageRate)+' · 未扣月仓储</span>';
+}
 function homeScopeSubtitle(){
   const parts = [storeScopeLabel()];
   const p = productScopeQuery();
@@ -3925,6 +4250,7 @@ function renderKpis(){
   const rows = homeScopeRows().map(def => {
     const sales = homeSalesForScope(range.start, range.end, def.scopeValue);
     const after = homeAfterSalesForScope(range.start, range.end, def.scopeValue);
+    const profit = homeProfitForScope(range.start, range.end, def.scopeValue);
     return {
       ...def,
       sales_sar:sales.sales_sar,
@@ -3933,7 +4259,7 @@ function renderKpis(){
       activeProducts:activeProductCountForScope(range.start, range.end, def.scopeValue),
       returnCases:after.cases,
       returnAmountSar:after.amount_sar,
-      profitSar:Number(sales.sales_sar || 0) * 0.25
+      profit
     };
   });
   const matrix = (cols, rowsHtml) => '<div class="metric-matrix cols-'+cols+'">'+rowsHtml+'</div>';
@@ -3948,22 +4274,22 @@ function renderKpis(){
       '<div class="matrix-card-head"><h4>'+escapeHtml(title)+' <em class="help" tabindex="0" data-tip="'+escapeHtml(tip)+'">?</em></h4><div class="sub">'+escapeHtml(sub)+'</div></div>'+body+
     '</button>';
   $('kpis').innerHTML =
-    card('当前时段销售额', selectedRangeText(), matrix(2,
+    card('当前时段净成交额', selectedRangeText(), matrix(2,
       head(['范围','SAR','RMB'])+
       rows.map(r => label(r.label)+moneyValue(r.sales_sar)+rmbValue(r.sales_sar)).join('')
-    ), '按顶部时间段和首页店铺/货号筛选联动；默认显示总计、DSY、LGM，筛到单店或分组时显示对应范围。RMB 按固定汇率 1 SAR = 1.8 估算。')+
+    ), '按顶部时间段和首页店铺/货号筛选联动；退货、仅退款、派送失败等反转订单不计入成交额。RMB 按固定汇率 1 SAR = 1.8 估算。')+
     card('当前时段订单 / 销量 / 动销', selectedRangeText(), matrix(3,
       head(['范围','订单','销量','动销货号'])+
       rows.map(r => label(r.label)+value(num(r.orders)+' 单')+value(num(r.quantity)+' 件')+value(num(r.activeProducts)+' 个')).join('')
-    ), '订单按订单号去重；销量按商品件数；动销货号是当前时段有销量的标准货号数量。')+
+    ), '订单按净成交订单号去重；销量只统计净成交商品件数；动销货号是当前时段有净成交销量的标准货号数量。')+
     card('当前时段退货 / 售后', afterLabel, matrix(2,
       head(['范围','数量','金额 SAR/RMB'])+
       rows.map(r => label(r.label)+value(num(r.returnCases)+' 单')+moneyDualValue(r.returnAmountSar)).join('')
     ), '按订单 > 退货退款里的售后申请时间 request_time 统计；金额是这些售后订单对应的商品金额合计。')+
-    card('当前时段预测利润', '按销售额 25% 估算', matrix(2,
+    card('当前时段真实利润', '按成本表 / 退货保守口径', matrix(2,
       head(['范围','SAR','RMB'])+
-      rows.map(r => label(r.label)+moneyValue(r.profitSar)+rmbValue(r.profitSar)).join('')
-    ), '暂按预测利润率 25% 粗算，用于快速看经营规模；后续接入成本和完整财务后再替换成真实利润。');
+      rows.map(r => label(r.label)+value(profitDisplayHtml(r.profit))+value(r.profit?.hasAnyCost ? escapeHtml(fmt.format(Number(r.profit.profitSar || 0) * RMB_RATE)) : '<span class="pending-profit">待成本表</span>')).join('')
+    ), '真实利润=净营收-商品成本-退货派送费；退货或派送失败营收按 0，仍扣成本并加 13.88 SAR。月仓储费只用于月度总利润，不拆到单货号。', 'profit');
   document.querySelectorAll('[data-overview-jump]').forEach(btn => btn.addEventListener('click', e => {
     if (e.target?.classList?.contains('help')) return;
     kpiJump(btn.dataset.overviewJump || 'business');
@@ -4332,6 +4658,44 @@ function monthLabel(dateText){
   const s = String(dateText || '').slice(0, 7);
   return s || '-';
 }
+function isoDateOnly(value){
+  return String(value || '').slice(0, 10);
+}
+function monthEndDate(id){
+  const [y, m] = String(id || '').split('-').map(Number);
+  if (!y || !m) return '';
+  return new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
+}
+function monthPeriodBounds(id, range){
+  const start = isoDateOnly(range?.start);
+  const end = isoDateOnly(range?.end);
+  const monthStart = String(id || '').slice(0, 7) + '-01';
+  const monthEnd = monthEndDate(id);
+  if (!monthEnd) return {start:monthStart, end:monthStart, partial:false};
+  const sliceStart = start && start > monthStart ? start : monthStart;
+  const sliceEnd = end && end < monthEnd ? end : monthEnd;
+  return {start:sliceStart, end:sliceEnd, partial:sliceStart !== monthStart || sliceEnd !== monthEnd};
+}
+function monthPeriodLabel(id, range){
+  const b = monthPeriodBounds(id, range);
+  if (!b.partial) return id || '-';
+  return (id || '-') + '（' + b.start.slice(5) + '~' + b.end.slice(5) + '）';
+}
+function monthSliceNote(range){
+  const startId = monthId(range?.start);
+  const endId = monthId(range?.end);
+  if (!startId || !endId) return '';
+  const ids = [];
+  let cur = startId + '-01';
+  while (monthId(cur) <= endId && ids.length < 24) {
+    ids.push(monthId(cur));
+    const [y,m] = monthId(cur).split('-').map(Number);
+    cur = new Date(Date.UTC(y, m, 1)).toISOString().slice(0,10);
+  }
+  const partial = ids.map(id => ({id, ...monthPeriodBounds(id, range)})).filter(x => x.partial);
+  if (!partial.length) return '';
+  return '月趋势按所选日期切片，不补整月：' + partial.map(x => x.id + '=' + x.start.slice(5) + '~' + x.end.slice(5)).join('；') + '。';
+}
 function buildSalesSeries(kind){
   const range = chartRangeFor(kind);
   const buckets = new Map();
@@ -4343,7 +4707,7 @@ function buildSalesSeries(kind){
     if (!storeMatchesScope(r)) continue;
     if (hasProduct && !productDailyMatch(r)) continue;
     const id = kind === 'month' ? monthId(d) : d;
-    const row = buckets.get(id) || {id, label: kind === 'month' ? monthLabel(d) : d, total:0, DSY:0, LGM:0, scope:0};
+    const row = buckets.get(id) || {id, label: kind === 'month' ? monthPeriodLabel(id, range) : d, total:0, DSY:0, LGM:0, scope:0};
     const value = Number(r.sales_sar || 0);
     row.total += value;
     row.scope += value;
@@ -4408,6 +4772,7 @@ function renderSalesLineChart(kind = 'day'){
     return '<rect class="chart-hit" x="'+prev.toFixed(1)+'" y="'+padT+'" width="'+Math.max(8, next-prev).toFixed(1)+'" height="'+(h-padT-padB)+'" data-tip="'+escapeHtml(tip)+'"></rect>';
   }).join('');
   const latest = series.at(-1) || {};
+  const sliceNote = kind === 'month' ? monthSliceNote(range) : '';
   return '<div class="line-chart">'+
     '<svg viewBox="0 0 '+w+' '+h+'" role="img" aria-label="'+(kind === 'month' ? '月销趋势' : '日销趋势')+'">'+
       gridTicks+
@@ -4417,7 +4782,147 @@ function renderSalesLineChart(kind = 'day'){
     '</svg>'+
     '<div class="chart-tip" aria-hidden="true"></div>'+
     '<div class="chart-legend">'+keys.map(k=>'<span><i style="--c:'+colors[k]+'"></i>'+labels[k]+'：'+money(latest[k] || 0)+'</span>').join('')+'</div>'+
-    '<p class="sub">时间段：'+escapeHtml(range.start)+' 至 '+escapeHtml(range.end)+'；当前显示 '+num(series.length)+' 个'+(kind === 'month' ? '月份' : '日期')+'。</p>'+
+    '<p class="sub">时间段：'+escapeHtml(range.start)+' 至 '+escapeHtml(range.end)+'；当前显示 '+num(series.length)+' 个'+(kind === 'month' ? '月份' : '日期')+'。'+(sliceNote ? ' '+escapeHtml(sliceNote) : '')+'</p>'+
+  '</div>';
+}
+function buildProfitMonthSeries(){
+  const range = chartRangeFor('month');
+  const scope = storeFilterKind();
+  const hasScopedProduct = Boolean(productScopeQuery()) || scope.type === 'store';
+  if (hasScopedProduct) {
+    const buckets = new Map();
+    for (const r of profitDailyRows(range.start, range.end, state.store, true)) {
+      const d = String(r.date || '').slice(0, 10);
+      const id = monthId(d);
+      if (!id) continue;
+      const row = buckets.get(id) || {id, label:monthPeriodLabel(id, range), scope:0, total:0, DSY:0, LGM:0, coverageNumerator:0, coverageDenominator:0};
+      const v = Number(r.profit_before_storage_sar || 0);
+      row.scope += v;
+      row.total += v;
+      row.coverageNumerator += Number(r.known_net_revenue_sar ?? r.known_gross_revenue_sar ?? 0);
+      row.coverageDenominator += Number(r.net_revenue_sar || 0);
+      buckets.set(id, row);
+    }
+    return Array.from(buckets.values()).sort((a,b)=>String(a.id).localeCompare(String(b.id))).map(r => ({...r, scope:Math.round(r.scope*100)/100, total:Math.round(r.total*100)/100, coverageRate:r.coverageDenominator ? r.coverageNumerator/r.coverageDenominator : null, beforeStorage:true}));
+  }
+  const rows = (DATA.profit?.monthGroups || []).filter(r => {
+    const m = String(r.month_start || '').slice(0, 7);
+    if (!m) return false;
+    return m >= monthId(range.start) && m <= monthId(range.end);
+  });
+  const map = new Map();
+  for (const r of rows) {
+    if (!storeMatchesScope({store_key:'', group_key:r.group_key || ''})) continue;
+    const id = String(r.month_start || '').slice(0, 7);
+    const row = map.get(id) || {id, label:monthPeriodLabel(id, range), total:0, DSY:0, LGM:0, scope:0, storage:0, coverageNumerator:0, coverageDenominator:0};
+    const value = Number(r.profit_after_storage_sar || 0);
+    row.total += value;
+    row.scope += value;
+    const g = String(r.group_key || '').toUpperCase();
+    if (g === 'DSY' || g === 'LGM') row[g] += value;
+    row.storage += Number(r.allocated_storage_fee_sar || 0);
+    row.coverageNumerator += Number(r.known_net_revenue_sar ?? r.known_gross_revenue_sar ?? 0);
+    row.coverageDenominator += Number(r.net_revenue_sar || 0);
+    map.set(id, row);
+  }
+  return Array.from(map.values()).sort((a,b)=>String(a.id).localeCompare(String(b.id))).map(r => ({...r, total:Math.round(r.total*100)/100, DSY:Math.round(r.DSY*100)/100, LGM:Math.round(r.LGM*100)/100, scope:Math.round(r.scope*100)/100, coverageRate:r.coverageDenominator ? r.coverageNumerator/r.coverageDenominator : null, beforeStorage:false}));
+}
+function aggregateProfitMonthRowsFromDailyRows(rows){
+  const map = new Map();
+  for (const r of rows || []) {
+    const id = monthId(String(r.date || '').slice(0, 10));
+    if (!id) continue;
+    const row = map.get(id) || {
+      month_start:id + '-01',
+      group_key:homeScopeSubtitle(),
+      net_revenue_sar:0,
+      product_cost_sar:0,
+      return_delivery_fee_sar:0,
+      allocated_storage_fee_sar:0,
+      profit_after_storage_sar:0,
+      known_net_revenue_sar:0,
+      known_gross_revenue_sar:0,
+      gross_revenue_sar:0,
+      beforeStorage:true
+    };
+    row.net_revenue_sar += Number(r.net_revenue_sar || 0);
+    row.product_cost_sar += Number(r.product_cost_sar || 0);
+    row.return_delivery_fee_sar += Number(r.return_delivery_fee_sar || 0);
+    row.profit_after_storage_sar += Number(r.profit_before_storage_sar || 0);
+    row.known_net_revenue_sar += Number(r.known_net_revenue_sar ?? r.known_gross_revenue_sar ?? 0);
+    row.known_gross_revenue_sar += Number(r.known_gross_revenue_sar || 0);
+    row.gross_revenue_sar += Number(r.gross_revenue_sar || 0);
+    map.set(id, row);
+  }
+  return Array.from(map.values()).sort((a,b)=>String(a.month_start).localeCompare(String(b.month_start))).map(r => ({
+    ...r,
+    net_revenue_sar:Math.round(r.net_revenue_sar * 100) / 100,
+    product_cost_sar:Math.round(r.product_cost_sar * 100) / 100,
+    return_delivery_fee_sar:Math.round(r.return_delivery_fee_sar * 100) / 100,
+    allocated_storage_fee_sar:0,
+    profit_after_storage_sar:Math.round(r.profit_after_storage_sar * 100) / 100,
+    profit_margin_after_storage:r.net_revenue_sar > 0 ? r.profit_after_storage_sar / r.net_revenue_sar : null,
+    cost_coverage_revenue_rate:r.net_revenue_sar > 0 ? r.known_net_revenue_sar / r.net_revenue_sar : null
+  }));
+}
+function renderProfitLineChart(){
+  const series = buildProfitMonthSeries();
+  const range = chartRangeFor('month');
+  const scope = storeFilterKind();
+  const scoped = scope.type !== 'all' || Boolean(productScopeQuery());
+  const colors = scoped ? {scope:'#14b8a6'} : {total:'#10b981', DSY:'#2563eb', LGM:'#f97316'};
+  const labels = scoped ? {scope:homeScopeSubtitle()} : {total:'总计', DSY:'DSY', LGM:'LGM'};
+  if (!series.length) return '<div class="empty">当前范围暂无可计算利润。请先导入成本表，或确认所选时间段有订单数据。</div>';
+  const keys = Object.keys(colors);
+  const values = series.flatMap(x => keys.map(k => Number(x[k] || 0)));
+  const maxAbs = niceCeil(Math.max(1, ...values.map(v => Math.abs(v))));
+  const min = values.some(v => v < 0) ? -maxAbs : 0;
+  const max = maxAbs;
+  const w = 1280, h = 310, padL = 92, padR = 28, padT = 24, padB = 52;
+  const span = Math.max(1, max - min);
+  const xFor = (i) => series.length === 1 ? (padL + (w - padR)) / 2 : padL + (i / (series.length - 1)) * (w - padL - padR);
+  const yFor = (v) => padT + (1 - ((Number(v || 0) - min) / span)) * (h - padT - padB);
+  const ticks = [min, min/2, 0, max/2, max].filter((v,i,a)=>a.indexOf(v)===i).sort((a,b)=>a-b);
+  const gridTicks = ticks.map(val => {
+    const y = yFor(val);
+    return '<line class="grid-line" x1="'+padL+'" y1="'+y.toFixed(1)+'" x2="'+(w-padR)+'" y2="'+y.toFixed(1)+'"></line>'+
+      '<text class="axis" text-anchor="end" x="'+(padL-10)+'" y="'+(y+4).toFixed(1)+'">'+escapeHtml(money(val))+'</text>';
+  }).join('');
+  const lines = keys.map(k => {
+    const pts = series.map((r,i) => xFor(i).toFixed(1)+','+yFor(r[k]).toFixed(1)).join(' ');
+    const dots = series.map((r,i) => '<circle class="dot" cx="'+xFor(i).toFixed(1)+'" cy="'+yFor(r[k]).toFixed(1)+'" r="3.8" fill="'+colors[k]+'"><title>'+escapeHtml(labels[k]+' '+r.label+' '+money(r[k]))+'</title></circle>').join('');
+    return '<polyline class="series" points="'+pts+'" stroke="'+colors[k]+'"></polyline>'+dots;
+  }).join('');
+  const labelEvery = series.length <= 7 ? 1 : Math.ceil(series.length / 5);
+  const valueLabels = keys.map(k => series.map((r,i) => {
+    if (!(i === 0 || i === series.length - 1 || i % labelEvery === 0)) return '';
+    const v = Number(r[k] || 0);
+    if (!v && i !== 0 && i !== series.length - 1) return '';
+    const x = xFor(i);
+    const y = Math.max(14, yFor(v) - 9 - keys.indexOf(k) * 12);
+    const anchor = i === 0 ? 'start' : i === series.length - 1 ? 'end' : 'middle';
+    return '<text class="value-label" text-anchor="'+anchor+'" x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" fill="'+colors[k]+'">'+escapeHtml(fmt0.format(v))+'</text>';
+  }).join('')).join('');
+  const axisLabels = series.map((r,i)=> (series.length <= 8 || i === 0 || i === series.length-1 || i % Math.ceil(series.length/6)===0)
+    ? '<text class="axis" text-anchor="'+(i===0?'start':i===series.length-1?'end':'middle')+'" x="'+xFor(i).toFixed(1)+'" y="'+(h-8)+'">'+escapeHtml(r.label)+'</text>'
+    : '').join('');
+  const hitRects = series.map((r,i) => {
+    const prev = i === 0 ? padL : (xFor(i - 1) + xFor(i)) / 2;
+    const next = i === series.length - 1 ? (w - padR) : (xFor(i) + xFor(i + 1)) / 2;
+    const tip = [r.label].concat(keys.map(k => labels[k] + '：' + money(r[k]))).concat(['成本覆盖：' + pct(r.coverageRate), r.beforeStorage ? '口径：未扣月仓储' : '口径：已扣分摊月仓储']).join('\\n');
+    return '<rect class="chart-hit" x="'+prev.toFixed(1)+'" y="'+padT+'" width="'+Math.max(8, next-prev).toFixed(1)+'" height="'+(h-padT-padB)+'" data-tip="'+escapeHtml(tip)+'"></rect>';
+  }).join('');
+  const latest = series.at(-1) || {};
+  const note = series.some(x => x.beforeStorage) ? '当前筛选到单店或货号，展示未扣仓储费的商品经营利润；仓储费只在月度总计/分组口径按净成交额分摊扣除。' : '月度总计与分组已扣按净成交额分摊的月仓储费。';
+  const sliceNote = monthSliceNote(range);
+  return '<div class="line-chart">'+
+    '<svg viewBox="0 0 '+w+' '+h+'" role="img" aria-label="月利润趋势">'+gridTicks+
+      '<line class="axis-line" x1="'+padL+'" y1="'+padT+'" x2="'+padL+'" y2="'+(h-padB)+'"></line>'+
+      '<line class="axis-line" x1="'+padL+'" y1="'+(h-padB)+'" x2="'+(w-padR)+'" y2="'+(h-padB)+'"></line>'+
+      lines+valueLabels+axisLabels+hitRects+
+    '</svg><div class="chart-tip" aria-hidden="true"></div>'+
+    '<div class="chart-legend">'+keys.map(k=>'<span><i style="--c:'+colors[k]+'"></i>'+labels[k]+'：'+money(latest[k] || 0)+'</span>').join('')+'</div>'+
+    '<p class="sub">时间段：'+escapeHtml(range.start)+' 至 '+escapeHtml(range.end)+'；'+escapeHtml(note)+(sliceNote ? ' '+escapeHtml(sliceNote) : '')+'</p>'+
   '</div>';
 }
 function homeSalesTrendSvg(){
@@ -4474,20 +4979,21 @@ function renderHomeDashboard(){
     '<div class="trend-stack">'+
       panel('日销趋势', storeFilterKind().type === 'all' && !productScopeQuery() ? '总计 / DSY / LGM 三条线。' : homeScopeSubtitle(), renderSalesLineChart('day'))+
       panel('月销趋势', storeFilterKind().type === 'all' && !productScopeQuery() ? '按月聚合，总计 / DSY / LGM 三条线。' : '按月聚合：' + homeScopeSubtitle(), renderSalesLineChart('month'))+
+      panel('月利润趋势', storeFilterKind().type === 'all' && !productScopeQuery() ? '默认近 6 个月；总计 / DSY / LGM。月总盘已扣仓储费。' : '当前范围利润：' + homeScopeSubtitle(), renderProfitLineChart())+
     '</div>'+
     '<div class="dashboard-section-title"><h3>排行榜</h3><div class="sub">店铺只显示 DL/DX 等代号，货号显示归并后的标准货号；排行榜按上方时间段重算。</div></div>'+
     '<div class="dashboard-grid equal">'+
-      panel('店铺销售额排行', '当前范围 '+num(storeBySales.length)+' 店 · '+periodRangeText(rankSummary), rankList(storeBySales, {valueKey:'sales_sar', name:storeRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:r=>groupColor(storeGroupKey(r)), meta:r=>'订单 '+num(r.orders)+' · 销量 '+num(r.quantity)+' 件 · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+ 
-      panel('店铺销量排行', '完整 '+num(storeByQty.length)+' 店 · 按销量件数排序。', rankList(storeByQty, {valueKey:'quantity', name:storeRankName, format:v=>num(v)+' 件', subValue:r=>money(r.sales_sar), color:r=>groupColor(storeGroupKey(r)), meta:r=>'订单 '+num(r.orders)+' · 销售 '+money(r.sales_sar)+' · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+
+      panel('店铺净成交额排行', '当前范围 '+num(storeBySales.length)+' 店 · '+periodRangeText(rankSummary), rankList(storeBySales, {valueKey:'sales_sar', name:storeRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:r=>groupColor(storeGroupKey(r)), meta:r=>'订单 '+num(r.orders)+' · 销量 '+num(r.quantity)+' 件 · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+ 
+      panel('店铺净销量排行', '完整 '+num(storeByQty.length)+' 店 · 按净成交销量件数排序。', rankList(storeByQty, {valueKey:'quantity', name:storeRankName, format:v=>num(v)+' 件', subValue:r=>money(r.sales_sar), color:r=>groupColor(storeGroupKey(r)), meta:r=>'订单 '+num(r.orders)+' · 净成交 '+money(r.sales_sar)+' · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+
     '</div>'+
     '<div class="dashboard-grid equal" style="margin-top:16px">'+
-      panel('产品销售额排行', '当前范围 '+num(productBySales.length)+' 个标准货号 · 点击进入货号 360。', rankList(productBySales, {className:'product-rank', valueKey:'sales_sar', name:productRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:()=> '#db2777', meta:r=>productRankMeta(r, '销量 '+num(r.quantity)+' 件 · 订单 '+num(r.orders)+' · 覆盖 '+num(r.store_count)+' 店 · '+num(r.days)+' 天'), attr:r=>'data-home-product="'+escapeHtml(r.standard_goods_sn || '')+'"'}))+
-      panel('产品销量排行', '完整 '+num(productByQty.length)+' 个标准货号 · 按销量件数排序。', rankList(productByQty, {className:'product-rank', valueKey:'quantity', name:productRankName, format:v=>num(v)+' 件', subValue:r=>money(r.sales_sar), color:()=> '#a855f7', meta:r=>productRankMeta(r, '销售 '+money(r.sales_sar)+' · 订单 '+num(r.orders)+' · 覆盖 '+num(r.store_count)+' 店 · '+num(r.days)+' 天'), attr:r=>'data-home-product="'+escapeHtml(r.standard_goods_sn || '')+'"'}))+
+      panel('产品净成交额排行', '当前范围 '+num(productBySales.length)+' 个标准货号 · 点击进入货号 360。', rankList(productBySales, {className:'product-rank', valueKey:'sales_sar', name:productRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:()=> '#db2777', meta:r=>productRankMeta(r, '销量 '+num(r.quantity)+' 件 · 订单 '+num(r.orders)+' · 覆盖 '+num(r.store_count)+' 店 · '+num(r.days)+' 天'), attr:r=>'data-home-product="'+escapeHtml(r.standard_goods_sn || '')+'"'}))+
+      panel('产品净销量排行', '完整 '+num(productByQty.length)+' 个标准货号 · 按净成交销量件数排序。', rankList(productByQty, {className:'product-rank', valueKey:'quantity', name:productRankName, format:v=>num(v)+' 件', subValue:r=>money(r.sales_sar), color:()=> '#a855f7', meta:r=>productRankMeta(r, '净成交 '+money(r.sales_sar)+' · 订单 '+num(r.orders)+' · 覆盖 '+num(r.store_count)+' 店 · '+num(r.days)+' 天'), attr:r=>'data-home-product="'+escapeHtml(r.standard_goods_sn || '')+'"'}))+
     '</div>'+
     '<div class="dashboard-section-title"><h3>动作与风险</h3><div class="sub">首页只看结构，具体处理进动作池。</div></div>'+
     '<div class="dashboard-grid equal">'+
       panel('动作结构', '动作池精选清单的业务域分布。', homeBarList(domainRows, 'count', 'label', {format:v=>num(v)+' 条', color:()=> '#0891b2', attr:r=>'data-home-domain="'+escapeHtml(r.label || '')+'"'} )+'<button class="btn" style="margin-top:12px" data-home-actions="1">进入今日动作池</button>')+
-      panel('趋势准备', '只说明当前是否具备趋势分析条件，不重复展示销售额。', homeSalesTrendSvg())+
+      panel('趋势准备', '只说明当前是否具备趋势分析条件，不重复展示净成交额。', homeSalesTrendSvg())+
     '</div>';
   bindRangeToolbarControls();
   document.querySelectorAll('[data-home-store]').forEach(btn => btn.addEventListener('click', () => {
@@ -4807,7 +5313,7 @@ function backendDataMapRows(){
       domain:'销售订单域', menu:'订单 > 我的订单', route:'#/gsp/order-management/list', endpoint:'/gsp/orderPlus/listOrder',
       status: DATA.orders?.length ? 'good' : 'bad',
       coverage:'15 店；订单商品行 ' + num(DATA.orders?.length || 0),
-      use:'销售额、订单数、货号/SKC 销售事实；作为所有经营判断的主口径。',
+      use:'净成交额、净成交订单数、货号/SKC 净销量；作为经营看板主口径。',
       tab:'business'
     },
     {
@@ -5208,6 +5714,11 @@ function focusCount(key){
   }).length;
 }
 function renderFocusBar(){
+  if (!isActionFilterTab()) {
+    const el = $('focusBar');
+    if (el) el.innerHTML = '';
+    return;
+  }
   $('focusBar').innerHTML = focusDefs().map(f =>
     '<button class="focus-chip '+(state.focus === f.key ? 'active' : '')+'" data-focus="'+f.key+'" title="'+escapeHtml(f.hint)+'">'+
       '<span>'+f.label+'</span><small>'+focusCount(f.key)+'</small>'+
@@ -7215,11 +7726,11 @@ function renderInsights(){
 function renderBusiness(){
   const allBusinessCount = (DATA.finance || []).length + (DATA.orders || []).length + (DATA.afterSales || []).length + (DATA.waybills || []).length + (DATA.financeOrders || []).length + (DATA.financeGoods || []).length;
   const financeRows = (DATA.finance || []).filter(includes);
-  const orderRows = (DATA.orders || []).filter(includes);
-  const afterRows = (DATA.afterSales || []).filter(includes);
-  const waybillRows = (DATA.waybills || []).filter(includes);
-  const financeOrderRows = (DATA.financeOrders || []).filter(includes);
-  const financeGoodsRows = (DATA.financeGoods || []).filter(includes);
+  const orderRows = (DATA.orders || []).filter(includes).filter(r => rowInSelectedRangeBy(r, ['created_date', 'order_create_time']));
+  const afterRows = (DATA.afterSales || []).filter(includes).filter(r => rowInSelectedRangeBy(r, ['request_time', 'snapshot_date']));
+  const waybillRows = (DATA.waybills || []).filter(includes).filter(r => rowInSelectedRangeBy(r, ['collect_time', 'print_time', 'snapshot_date']));
+  const financeOrderRows = (DATA.financeOrders || []).filter(includes).filter(r => rowInSelectedRangeBy(r, ['order_delivery_time', 'snapshot_date']));
+  const financeGoodsRows = (DATA.financeGoods || []).filter(includes).filter(r => rowInSelectedRangeBy(r, ['order_delivery_time', 'snapshot_date']));
   const filteredBusinessCount = financeRows.length + orderRows.length + afterRows.length + waybillRows.length + financeOrderRows.length + financeGoodsRows.length;
   const businessEmptyNote = !filteredBusinessCount && allBusinessCount
     ? '<div class="warning-panel inline"><h3>当前筛选下没有订单/售后结果，不是底库丢失</h3><ul><li>底库仍有订单、售后、财务或履约数据，共 '+num(allBusinessCount)+' 行。</li><li>请看顶部时间、店铺、货号和全局搜索；点“清空筛选”可恢复。</li></ul></div>'
@@ -7230,25 +7741,48 @@ function renderBusiness(){
   const orderSales = orderRows.reduce((sum,r)=>sum+Number(r.sales_sar||0),0);
   const afterAmount = afterRows.reduce((sum,r)=>sum+Number(r.price_amount_total||0),0);
   const abnormalWaybills = waybillRows.filter(r => String(r.show_status_desc || '').match(/异常|失败|超时|取消/));
+  const afterRate = orderSales > 0 ? afterAmount / orderSales : null;
+  const afterByProduct = aggregateRows(afterRows, r => r.standard_goods_sn || '未归并', (acc, r) => {
+    acc.standard_goods_sn = r.standard_goods_sn || '未归并';
+    acc.cases = (acc.cases || 0) + 1;
+    acc.amount = (acc.amount || 0) + Number(r.price_amount_total || 0);
+    acc.stores = acc.stores || new Set();
+    if (r.store_key) acc.stores.add(r.store_key);
+  }).map(r => ({...r, store_count:r.stores?.size || 0})).sort((a,b)=>Number(b.amount||0)-Number(a.amount||0)).slice(0,6);
+  const afterByStore = aggregateRows(afterRows, r => r.store_key || '-', (acc, r) => {
+    acc.store_key = r.store_key || '-';
+    acc.cases = (acc.cases || 0) + 1;
+    acc.amount = (acc.amount || 0) + Number(r.price_amount_total || 0);
+  }).sort((a,b)=>Number(b.amount||0)-Number(a.amount||0)).slice(0,6);
+  const focusHtml = [
+    ...afterByProduct.map(r => ({scope:'货号', name:r.standard_goods_sn, desc:'售后 '+num(r.cases)+' 单 · '+num(r.store_count)+' 店', amount:r.amount, q:r.standard_goods_sn})),
+    ...afterByStore.map(r => ({scope:'店铺', name:r.store_key, desc:'售后 '+num(r.cases)+' 单', amount:r.amount, store:r.store_key}))
+  ].sort((a,b)=>Number(b.amount||0)-Number(a.amount||0)).slice(0,8).map(r =>
+    '<button class="ops-focus-row" '+(r.store ? 'data-home-store="'+escapeHtml(r.store)+'"' : r.q ? 'data-home-product="'+escapeHtml(r.q)+'"' : '')+'>'+
+      '<span class="tag '+(r.scope === '货号' ? 'info' : 'mid')+'">'+escapeHtml(r.scope)+'</span>'+
+      '<span><b>'+escapeHtml(r.name || '-')+'</b><small>'+escapeHtml(r.desc || '')+'</small></span>'+
+      '<span class="num">'+escapeHtml(money(r.amount))+'</span>'+
+    '</button>'
+  ).join('') || '<div class="empty">当前筛选下暂无售后压力集中项。</div>';
   $('financeTable').innerHTML =
     businessEmptyNote+
-    '<div class="store-flow">'+
-      '<div class="store-verdict"><h3>订单 / 售后经营复核</h3><p>这一页不是单纯明细列表。先看财务、订单、售后、履约是否互相印证；具体单据放到下方折叠明细里。</p>'+
-        '<div class="store-action-steps">'+
-          '<div class="store-step"><b>1 财务口径</b><p>交易额 '+money(financeTrade)+'，待结算 '+money(pending)+'，在途 '+money(inTransit)+'。</p></div>'+
-          '<div class="store-step"><b>2 订单口径</b><p>订单销售 '+money(orderSales)+'，订单明细 '+num(orderRows.length)+' 行。</p></div>'+
-          '<div class="store-step"><b>3 售后/履约</b><p>售后 '+num(afterRows.length)+' 单，履约异常/取消 '+num(abnormalWaybills.length)+' 单。</p></div>'+
-        '</div>'+
+    '<div class="ops-command">'+
+      '<section class="ops-verdict"><div><h3>这页先看什么？</h3><p>这不是订单流水页，而是复核台：先看当前筛选的成交、售后、履约和回款是否能互相解释；发现集中问题后再展开明细查单。</p><div class="ops-big">'+escapeHtml(pct(afterRate))+'</div><p>售后金额 / 订单销售额。比例越高，越应该先看售后集中货号和履约异常。</p></div>'+
+        '<div class="ops-question-grid">'+
+          '<div><b>成交是否真实</b><span>订单销售 '+escapeHtml(money(orderSales))+'；财务摘要为最新快照 '+escapeHtml(money(financeTrade))+'</span></div>'+
+          '<div><b>售后压力在哪</b><span>售后 '+escapeHtml(num(afterRows.length))+' 单，金额 '+escapeHtml(money(afterAmount))+'</span></div>'+
+          '<div><b>履约是否解释异常</b><span>异常/取消面单 '+escapeHtml(num(abnormalWaybills.length))+' 条</span></div>'+
+        '</div></section>'+
+      '<section><div class="ops-pillar-grid">'+
+        '<div class="ops-pillar"><span>订单销售</span><strong>'+money(orderSales)+'</strong><small>'+num(orderRows.length)+' 行 · 按订单创建时间</small></div>'+
+        '<div class="ops-pillar"><span>售后金额</span><strong>'+money(afterAmount)+'</strong><small>'+num(afterRows.length)+' 单 · 按售后申请时间</small></div>'+
+        '<div class="ops-pillar"><span>最新财务待结算</span><strong>'+money(pending)+'</strong><small>财务摘要是最新快照；明细按当前时间段过滤 '+num(financeOrderRows.length)+' 条</small></div>'+
+        '<div class="ops-pillar"><span>履约异常/取消</span><strong>'+num(abnormalWaybills.length)+'</strong><small>用于解释退款、取消、未妥投</small></div>'+
       '</div>'+
-      '<div class="store-kpi-grid">'+
-        '<div class="store-kpi"><span>财务交易额</span><strong>'+money(financeTrade)+'</strong><small>最新财务快照</small></div>'+
-        '<div class="store-kpi"><span>待结算</span><strong>'+money(pending)+'</strong><small>可对账</small></div>'+
-        '<div class="store-kpi"><span>财务在途</span><strong>'+money(inTransit)+'</strong><small>'+num(financeOrderRows.length)+' 条明细</small></div>'+
-        '<div class="store-kpi"><span>订单销售</span><strong>'+money(orderSales)+'</strong><small>'+num(orderRows.length)+' 行</small></div>'+
-        '<div class="store-kpi"><span>售后金额</span><strong>'+money(afterAmount)+'</strong><small>'+num(afterRows.length)+' 单</small></div>'+
-        '<div class="store-kpi"><span>履约异常/取消</span><strong>'+num(abnormalWaybills.length)+'</strong><small>面单快照</small></div>'+
-      '</div>'+
+      sectionTitleHtml('优先复核对象', '按售后金额排序；点货号或店铺可带筛选跳到对应视角。', selectedRangeText())+
+      '<div class="ops-focus-list">'+focusHtml+'</div></section>'+
     '</div>'+
+    '<details class="detail-section" style="margin-top:16px"><summary>查看财务店铺摘要</summary><div class="detail-body">'+
     sectionTitleHtml('财务店铺摘要', '每行一个店：看待结算、在途、已结算、账期和异常金额。', '最新财务快照')+
     table(financeRows, [
     ['店铺', r => '<b>'+r.store_key+'</b>'],
@@ -7260,9 +7794,9 @@ function renderBusiness(){
     ['账期', r => (r.account_period_days ? num(r.account_period_days)+' 天' : '-')+'<br><span class="muted">'+escapeHtml(r.privilege_config_type_desc || '')+'</span>'],
     ['结算异常', r => money(r.settlement_abnormal_sar), 'num'],
     ['可提现', r => money(r.withdrawable_amount_sar), 'num']
-  ]);
+  ])+'</div></details>';
   $('financeOrdersTable').innerHTML =
-    sectionTitleHtml('收入明细 · 在途订单', '用于和订单销售互相印证；不是所有店都已完整接入财务明细。', num(financeOrderRows.length)+' 条')+
+    sectionTitleHtml('收入明细 · 在途订单', '按发货日过滤；用于和订单销售互相印证，不是所有店都已完整接入财务明细。', selectedRangeText()+' · '+num(financeOrderRows.length)+' 条')+
     table(financeOrderRows, [
     ['店铺', r => '<b>'+r.store_key+'</b>'],
     ['发货日', r => r.order_delivery_time || '-'],
@@ -7273,7 +7807,7 @@ function renderBusiness(){
     ['状态', r => escapeHtml(r.check_status || '-')]
   ]);
   $('financeGoodsTable').innerHTML =
-    sectionTitleHtml('收入明细 · 商品 / SKC', '商品层用于回到标准货号和 SKC，后面可和链接、售后、订单一起判断。', num(financeGoodsRows.length)+' 条')+
+    sectionTitleHtml('收入明细 · 商品 / SKC', '按财务订单发货日过滤；商品层用于回到标准货号和 SKC。', selectedRangeText()+' · '+num(financeGoodsRows.length)+' 条')+
     table(financeGoodsRows, [
     ['店铺', r => '<b>'+r.store_key+'</b>'],
     ['财务订单', r => '<span class="mono">'+(r.order_no || '-')+'</span>'],
@@ -7317,7 +7851,7 @@ function renderBusiness(){
     ['金额', r => money(r.price_amount_total), 'num']
   ]);
   $('waybillTable').innerHTML =
-    sectionTitleHtml('发货 / 履约明细', '用于解释取消、未妥投、物流异常和售后集中；不是销售额口径。', '最新业务快照')+
+    sectionTitleHtml('发货 / 履约明细', '按揽收/打印/快照时间过滤；用于解释取消、未妥投、物流异常和售后集中。', selectedRangeText())+
     table(waybillRows, [
     ['店铺', r => '<b>'+r.store_key+'</b>'],
     ['包裹/物流', r => '<span class="mono">'+(r.place_order_package_id || '-')+'</span><div class="muted">'+escapeHtml(r.express_code || '')+' '+escapeHtml(r.express_no || '')+'</div>'],
@@ -7326,6 +7860,389 @@ function renderBusiness(){
     ['货号/SKC', r => '<span class="muted">'+escapeHtml(r.goods_sn_list || '').slice(0,70)+'</span><br><span class="mono">'+escapeHtml(r.skc_list || '').slice(0,70)+'</span>'],
     ['数量/费用', r => num(r.goods_quantity)+'<br><span class="muted">'+money(r.estimate_performance_price)+'</span>', 'num']
   ]);
+}
+function profitKpiCard(label, value, sub = '', cls = ''){
+  return '<article class="profit-card '+escapeHtml(cls)+'"><span>'+escapeHtml(label)+'</span><strong>'+escapeHtml(value)+'</strong><small>'+escapeHtml(sub)+'</small></article>';
+}
+function profitProductRows(){
+  return (DATA.profit?.products || []).filter(r => productMatch(r));
+}
+function profitCostMetaByProduct(){
+  const map = new Map();
+  for (const r of DATA.profit?.products || []) {
+    const key = String(r.standard_goods_sn || '').trim();
+    if (key) map.set(key, r);
+  }
+  return map;
+}
+function purchaseBand(v){
+  const n = Number(v || 0);
+  if (n <= 0) return null;
+  if (n < 30) return '0-30';
+  if (n < 80) return '30-80';
+  if (n < 150) return '80-150';
+  return '150+';
+}
+function volumeBand(v){
+  const n = Number(v || 0);
+  if (n <= 0) return null;
+  if (n < 5) return '<5L';
+  if (n < 15) return '5-15L';
+  if (n < 25) return '15-25L';
+  return '25L+';
+}
+function selectionSamples(rows = profitProductRows()){
+  return (rows || []).map(r => {
+    const purchase = Number(r.avg_purchase_unit_price || 0);
+    const inferredVolume = Number(r.inferred_volume_l_1600 || r.inferredVolume || 0);
+    const margin = r.profit_margin_before_storage == null ? null : Number(r.profit_margin_before_storage);
+    const qty = Number(r.quantity || 0);
+    const profit = Number(r.profit_before_storage_sar || 0);
+    const revenue = Number(r.net_revenue_sar || r.gross_revenue_sar || 0);
+    const freightUnitCny = Number(r.future_first_leg_unit_cny_at_2000 || (inferredVolume * 2) || 0);
+    const fixedTailSar = 0.3 + 6 + 24.984;
+    const actualAvgSaleSar = qty > 0 ? Number(r.gross_revenue_sar || 0) / qty : null;
+    const profitPerCbm = inferredVolume > 0 ? profit / (inferredVolume / 1000 * Math.max(1, qty)) : null;
+    const roi = purchase > 0 ? (profit * RMB_RATE) / (purchase * Math.max(1, qty)) : null;
+    return {...r, purchase, inferredVolume, margin, qty, profit, revenue, freightUnitCny, fixedTailSar, actualAvgSaleSar, profitPerCbm, roi, pBand:purchaseBand(purchase), vBand:volumeBand(inferredVolume)};
+  }).filter(r => r.purchase > 0 && r.inferredVolume > 0 && r.margin != null && r.qty > 0);
+}
+function median(values){
+  const a = values.map(Number).filter(Number.isFinite).sort((x,y)=>x-y);
+  if (!a.length) return null;
+  const mid = Math.floor(a.length / 2);
+  return a.length % 2 ? a[mid] : (a[mid-1] + a[mid]) / 2;
+}
+function quantile(values, q){
+  const a = values.map(Number).filter(Number.isFinite).sort((x,y)=>x-y);
+  if (!a.length) return null;
+  const pos = (a.length - 1) * q;
+  const lo = Math.floor(pos), hi = Math.ceil(pos);
+  return lo === hi ? a[lo] : a[lo] + (a[hi] - a[lo]) * (pos - lo);
+}
+function modelCostSar(purchaseCny, volumeL, otherCny = 0){
+  const freightCny = Number(volumeL || 0) * 2; // 2000 RMB/CBM = 2 RMB/L
+  return (Number(purchaseCny || 0) + freightCny + Number(otherCny || 0)) / RMB_RATE + 0.3 + 6 + 24.984;
+}
+function breakevenSaleSar(purchaseCny, volumeL, returnRate = 0.05, targetMargin = 0){
+  const rr = Math.max(0, Math.min(0.8, Number(returnRate || 0)));
+  const cost = modelCostSar(purchaseCny, volumeL, 0);
+  const expectedReturnLoss = rr * (cost + 13.88);
+  const denom = Math.max(0.01, 1 - rr - Number(targetMargin || 0));
+  return (cost + expectedReturnLoss) / denom;
+}
+function selectionCellStats(samples, pBand, vBand){
+  const rows = samples.filter(r => r.pBand === pBand && r.vBand === vBand);
+  if (!rows.length) return {pBand, vBand, n:0, cls:'mid', label:'样本少', score:null};
+  const medMargin = median(rows.map(r=>r.margin));
+  const totalProfit = rows.reduce((a,r)=>a+r.profit,0);
+  const totalQty = rows.reduce((a,r)=>a+r.qty,0);
+  const medDensity = median(rows.map(r=>r.profitPerCbm));
+  const score = (Number(medMargin || 0) * 55) + Math.min(25, Math.log10(Math.max(1,totalProfit)) * 7) + Math.min(20, Math.log10(Math.max(1,totalQty)) * 5);
+  const cls = medMargin >= .25 && totalProfit > 1000 ? 'good' : medMargin < .1 || totalProfit < 0 ? 'bad' : 'mid';
+  return {pBand, vBand, n:rows.length, cls, label:cls === 'good' ? '优先' : cls === 'bad' ? '谨慎' : '观察', score, medMargin, totalProfit, totalQty, medDensity, examples:rows.sort((a,b)=>b.profit-a.profit).slice(0,2)};
+}
+function bestSelectionZones(samples){
+  const pBands = ['0-30','30-80','80-150','150+'];
+  const vBands = ['<5L','5-15L','15-25L','25L+'];
+  const cells = pBands.flatMap(p => vBands.map(v => selectionCellStats(samples, p, v))).filter(c => c.n);
+  return cells.sort((a,b)=>Number(b.score||-999)-Number(a.score||-999));
+}
+function renderSelectionBenchmark(samples){
+  if (!samples.length) return '<div class="empty">成本表暂时没有足够的头程/进货价样本，无法建立选品标尺。</div>';
+  const zones = bestSelectionZones(samples);
+  const best = zones[0];
+  const purchaseMedian = median(samples.map(r=>r.purchase));
+  const purchaseP25 = quantile(samples.map(r=>r.purchase), .25);
+  const purchaseP75 = quantile(samples.map(r=>r.purchase), .75);
+  const volumeMedian = median(samples.map(r=>r.inferredVolume));
+  const volumeP25 = quantile(samples.map(r=>r.inferredVolume), .25);
+  const volumeP75 = quantile(samples.map(r=>r.inferredVolume), .75);
+  const topExamples = samples.slice().sort((a,b)=>(b.profit||0)-(a.profit||0)).slice(0,5);
+  const pBands = ['0-30','30-80','80-150','150+'];
+  const vBands = ['<5L','5-15L','15-25L','25L+'];
+  const rows = ['<div class="matrix-row"><div></div>'+pBands.map(p=>'<div class="matrix-cell head">进货 '+escapeHtml(p)+' RMB</div>').join('')+'</div>'];
+  for (const v of vBands) {
+    rows.push('<div class="matrix-row"><div class="matrix-cell head">体积 '+escapeHtml(v)+'</div>'+pBands.map(p => {
+      const c = selectionCellStats(samples,p,v);
+      const ex = (c.examples||[]).map(x=>x.standard_goods_sn).join(' / ');
+      return '<div class="matrix-cell '+c.cls+'"><b>'+escapeHtml(c.label)+'</b><small>样本 '+num(c.n)+' · 中位利润率 '+(c.medMargin == null ? '-' : pct(c.medMargin))+'</small><small>'+escapeHtml(ex || '暂无历史品')+'</small></div>';
+    }).join('')+'</div>');
+  }
+  return '<div class="selection-model">'+
+    '<div class="selection-verdict"><h4>选品标尺结论</h4><p>按历史成本表倒推体积，并用实际销售利润校准：当前最优区间是 <b>进货 '+escapeHtml(best?.pBand || '-')+' RMB、体积 '+escapeHtml(best?.vBand || '-')+'</b>。未来新选品按 <b>2000 RMB/方 = 2 RMB/L</b> 估算头程；如果没有把握售价，先避开低货值大体积。</p>'+
+      '<div class="selection-metrics">'+
+        '<div><span>历史进货价中位数</span><strong>'+escapeHtml(cny(purchaseMedian))+'</strong><small>'+escapeHtml(cny(purchaseP25))+' ~ '+escapeHtml(cny(purchaseP75))+'</small></div>'+
+        '<div><span>倒推体积中位数</span><strong>'+escapeHtml(fmt.format(volumeMedian))+'L</strong><small>'+escapeHtml(fmt.format(volumeP25))+'L ~ '+escapeHtml(fmt.format(volumeP75))+'L</small></div>'+
+        '<div><span>尾程固定费</span><strong>SAR 31.28</strong><small>上架 0.3 + 出库 6 + 派送 24.984</small></div>'+
+      '</div></div>'+
+    sectionTitleHtml('进货价 × 体积选品矩阵', '绿色优先、橙色观察、红色谨慎；体积来自历史头程按 1600 RMB/方倒推，未来头程按 2000 RMB/方重算。')+
+    '<div class="selection-matrix">'+rows.join('')+'</div>'+
+    sectionTitleHtml('历史利润样本 Top 5', '看真实赚钱品落在哪些进货价和体积区间。')+
+    table(topExamples, [
+      ['货号', r => '<b>'+escapeHtml(r.standard_goods_sn || '-')+'</b>'],
+      ['进货价/体积', r => escapeHtml(cny(r.purchase))+'<br><span class="muted">'+escapeHtml(fmt.format(r.inferredVolume))+'L</span>', 'num'],
+      ['净成交/利润', r => money(r.net_revenue_sar || r.gross_revenue_sar)+'<br><span class="muted">利润 '+money(r.profit)+'</span>', 'num'],
+      ['利润率/ROI', r => pct(r.margin)+'<br><span class="muted">ROI '+pct(r.roi)+'</span>', 'num'],
+      ['未来头程', r => escapeHtml(cny(r.freightUnitCny))+' / 件', 'num']
+    ], {limit:5})+
+  '</div>';
+}
+function aggregateProfitProductsFromDailyRows(rows){
+  const metaMap = profitCostMetaByProduct();
+  const groups = new Map();
+  for (const r of rows || []) {
+    const key = String(r.standard_goods_sn || '').trim();
+    if (!key) continue;
+    const g = groups.get(key) || {
+      standard_goods_sn:key,
+      gross_revenue_sar:0,
+      net_revenue_sar:0,
+      quantity:0,
+      orders:0,
+      order_lines:0,
+      product_cost_sar:0,
+      return_delivery_fee_sar:0,
+      profit_before_storage_sar:0,
+      known_net_revenue_sar:0,
+      known_gross_revenue_sar:0,
+      missing_cost_revenue_sar:0,
+      missing_cost_quantity:0,
+      missing_cost_lines:0,
+      reversal_lines:0
+    };
+    g.gross_revenue_sar += Number(r.gross_revenue_sar || 0);
+    g.net_revenue_sar += Number(r.net_revenue_sar || 0);
+    g.quantity += Number(r.quantity || 0);
+    g.orders += Number(r.orders || 0);
+    g.order_lines += Number(r.order_lines || 0);
+    g.product_cost_sar += Number(r.product_cost_sar || 0);
+    g.return_delivery_fee_sar += Number(r.return_delivery_fee_sar || 0);
+    g.profit_before_storage_sar += Number(r.profit_before_storage_sar || 0);
+    g.known_net_revenue_sar += Number(r.known_net_revenue_sar ?? r.known_gross_revenue_sar ?? 0);
+    g.known_gross_revenue_sar += Number(r.known_gross_revenue_sar || 0);
+    g.missing_cost_revenue_sar += Number(r.missing_cost_revenue_sar || 0);
+    g.missing_cost_quantity += Number(r.missing_cost_quantity || 0);
+    g.missing_cost_lines += Number(r.missing_cost_lines || 0);
+    g.reversal_lines += Number(r.reversal_lines || 0);
+    groups.set(key, g);
+  }
+  return Array.from(groups.values()).map(g => {
+    const meta = metaMap.get(g.standard_goods_sn) || {};
+    const coverage = g.net_revenue_sar > 0 ? g.known_net_revenue_sar / g.net_revenue_sar : null;
+    const margin = g.net_revenue_sar > 0 && g.known_net_revenue_sar > 0 ? g.profit_before_storage_sar / g.net_revenue_sar : null;
+    return {
+      ...meta,
+      ...g,
+      unit_cost_sar: meta.unit_cost_sar,
+      complete_batch_count: meta.complete_batch_count,
+      ignored_batch_count: meta.ignored_batch_count,
+      costed_quantity: meta.costed_quantity,
+      avg_purchase_unit_price: meta.avg_purchase_unit_price,
+      avg_volume_l: meta.avg_volume_l,
+      avg_weight_kg: meta.avg_weight_kg,
+      last_cost_imported_at: meta.last_cost_imported_at,
+      cost_coverage_revenue_rate: coverage,
+      profit_margin_before_storage: margin
+    };
+  });
+}
+function renderProfitScatter(rows){
+  const usable = selectionSamples(rows).slice(0, 120);
+  if (!usable.length) return '<div class="empty">成本表里还没有足够的体积/利润率样本；后续成本表补“长宽高”后会出现选品曲线。</div>';
+  const xs = usable.map(r => Number(r.inferredVolume || 0));
+  const ys = usable.map(r => Number(r.profit_margin_before_storage || 0));
+  const maxX = niceCeil(Math.max(1, ...xs));
+  const minY = Math.min(-0.2, Math.min(...ys));
+  const maxY = Math.max(0.8, Math.max(...ys));
+  const w=720,h=300,padL=58,padR=22,padT=20,padB=44;
+  const xFor = v => padL + (Number(v || 0)/maxX) * (w-padL-padR);
+  const yFor = v => padT + (1 - ((Number(v || 0)-minY)/(maxY-minY))) * (h-padT-padB);
+  const yTicks = [minY, 0, (maxY)/2, maxY];
+  const grid = yTicks.map(v => '<line class="grid-line" x1="'+padL+'" y1="'+yFor(v).toFixed(1)+'" x2="'+(w-padR)+'" y2="'+yFor(v).toFixed(1)+'"></line><text class="axis" text-anchor="end" x="'+(padL-8)+'" y="'+(yFor(v)+4).toFixed(1)+'">'+escapeHtml(pct(v))+'</text>').join('');
+  const points = usable.map(r => {
+    const margin = Number(r.profit_margin_before_storage || 0);
+    const color = margin >= .25 ? '#22c55e' : margin >= .1 ? '#f97316' : '#ef4444';
+    return '<circle class="point" cx="'+xFor(r.inferredVolume).toFixed(1)+'" cy="'+yFor(margin).toFixed(1)+'" r="5" fill="'+color+'"><title>'+escapeHtml((r.standard_goods_sn||'-')+' 体积 '+fmt.format(r.inferredVolume)+'L 利润率 '+pct(margin))+'</title></circle>';
+  }).join('');
+  return '<div class="profit-scatter"><svg viewBox="0 0 '+w+' '+h+'" role="img" aria-label="利润率与体积散点">'+grid+
+    '<line class="axis-line" x1="'+padL+'" y1="'+padT+'" x2="'+padL+'" y2="'+(h-padB)+'"></line>'+
+    '<line class="axis-line" x1="'+padL+'" y1="'+yFor(0).toFixed(1)+'" x2="'+(w-padR)+'" y2="'+yFor(0).toFixed(1)+'"></line>'+
+    '<line class="axis-line" x1="'+padL+'" y1="'+(h-padB)+'" x2="'+(w-padR)+'" y2="'+(h-padB)+'"></line>'+
+    points+
+    '<text class="axis" x="'+padL+'" y="'+(h-8)+'">0L</text><text class="axis" text-anchor="end" x="'+(w-padR)+'" y="'+(h-8)+'">'+escapeHtml(fmt.format(maxX))+'L</text>'+
+  '</svg><p class="sub">横轴体积（L），纵轴利润率；绿色高利润，橙色观察，红色谨慎。</p></div>';
+}
+function renderProfitCalculator(){
+  const html =
+    '<div class="selection-slider-grid">'+
+      '<label>预估售价 SAR<input id="calcSaleSar" type="number" step="0.01" value="99"></label>'+
+      '<label>进货单价 CNY<input id="calcPurchaseCny" type="number" step="0.01" value="60"></label>'+
+      '<label>预估体积 L<input id="calcVolumeL" type="number" step="0.1" value="10"></label>'+
+      '<label>预估退货/派送失败率 %<input id="calcReturnRate" type="number" step="0.1" value="5"></label>'+
+    '</div>'+
+    '<div class="selection-output" id="calcProfitOutput"></div>'+
+    '<p class="sub">计算口径：单位成本=(采购+头程+其它)/1.8；退货期望成本=退货率 × (单位成本 + 13.88 SAR)，退货营收按 0 保守处理。体积目前只用于选品参考，不直接扣仓储到单品。</p>';
+  return html;
+}
+function updateProfitCalculator(){
+  const out = $('calcProfitOutput');
+  if (!out) return;
+  const sale = Number($('calcSaleSar')?.value || 0);
+  const purchase = Number($('calcPurchaseCny')?.value || 0);
+  const rr = Math.max(0, Number($('calcReturnRate')?.value || 0) / 100);
+  const volume = Number($('calcVolumeL')?.value || 0);
+  const freightCny = volume * 2;
+  const unitCostSar = modelCostSar(purchase, volume, 0);
+  const expectedReturnLoss = rr * (unitCostSar + 13.88);
+  const expectedProfit = sale * (1 - rr) - unitCostSar - expectedReturnLoss;
+  const margin = sale > 0 ? expectedProfit / sale : null;
+  const be0 = breakevenSaleSar(purchase, volume, rr, 0);
+  const be25 = breakevenSaleSar(purchase, volume, rr, .25);
+  const fixedRatio = sale > 0 ? (0.3 + 6 + 24.984) / sale : null;
+  const verdict = margin == null ? '请输入售价' : margin >= .25 ? '达到优先选品线' : margin >= .1 ? '可观察，但要看动销和售后' : '低于安全线，谨慎选品';
+  out.innerHTML = '<strong>'+escapeHtml(money(expectedProfit))+' · '+escapeHtml(pct(margin))+'</strong>'+
+    '<span>未来头程按 2000 RMB/方估算：体积 '+escapeHtml(fmt.format(volume))+'L = 头程 '+escapeHtml(cny(freightCny))+' / 件；总成本 '+escapeHtml(money(unitCostSar))+'；预期退货损失 '+escapeHtml(money(expectedReturnLoss))+'。</span>'+
+    '<span>保本售价 '+escapeHtml(money(be0))+'；若要 25% 利润率，建议售价至少 '+escapeHtml(money(be25))+'。尾程固定费占售价 '+escapeHtml(pct(fixedRatio))+'。'+escapeHtml(verdict)+'</span>';
+}
+function bindProfitCalculator(){
+  document.querySelectorAll('#profitCalculatorPanel input').forEach(input => {
+    if (input.dataset.profitCalcBound) return;
+    input.dataset.profitCalcBound = '1';
+    input.addEventListener('input', updateProfitCalculator);
+  });
+  updateProfitCalculator();
+}
+function profitActionText(r){
+  const margin = Number(r.profit_margin_before_storage ?? 0);
+  const profit = Number(r.profit_before_storage_sar || 0);
+  const reversal = Number(r.reversal_lines || 0);
+  const coverage = Number(r.cost_coverage_revenue_rate || 0);
+  if (coverage < .9) return '<span class="tag mid">先补成本</span><br><span class="muted">覆盖 '+escapeHtml(pct(coverage))+'</span>';
+  if (profit <= 0) return '<span class="tag high">暂停/复核</span><br><span class="muted">利润为负</span>';
+  if (margin < .1) return '<span class="tag high">调价/淘汰</span><br><span class="muted">利润率 '+escapeHtml(pct(margin))+'</span>';
+  if (reversal > 0 && margin < .25) return '<span class="tag mid">控退货</span><br><span class="muted">反转 '+escapeHtml(num(reversal))+' 行</span>';
+  if (margin >= .25 && profit > 0) return '<span class="tag good">可加码</span><br><span class="muted">利润率 '+escapeHtml(pct(margin))+'</span>';
+  return '<span class="tag info">观察</span><br><span class="muted">继续跟踪</span>';
+}
+function renderProfitPage(){
+  const range = ensureDateRange();
+  const rows = profitDailyRows(range.start, range.end, state.store, true);
+  const summary = profitSummaryForRows(rows);
+  const allCostProducts = profitProductRows();
+  const selectionRows = selectionSamples(allCostProducts);
+  const products = aggregateProfitProductsFromDailyRows(rows);
+  const costProducts = products.filter(r => Number(r.known_net_revenue_sar ?? r.known_gross_revenue_sar ?? 0) > 0 || Number(r.product_cost_sar || 0) > 0).length;
+  const missingProducts = products.filter(r => Number(r.missing_cost_revenue_sar || 0) > 0 || (Number(r.net_revenue_sar || 0) > 0 && Number(r.cost_coverage_revenue_rate || 0) < .9)).length;
+  const rawMonthRows = DATA.profit?.monthGroups || [];
+  const isScopedProfit = storeFilterKind().type !== 'all' || Boolean(productScopeQuery());
+  const monthRows = isScopedProfit ? aggregateProfitMonthRowsFromDailyRows(profitDailyRows(chartRangeFor('month').start, chartRangeFor('month').end, state.store, true)) : rawMonthRows;
+  const storageMonths = new Set(rawMonthRows.filter(r => Number(r.month_storage_fee_sar || 0) > 0).map(r => String(r.month_start || '').slice(0,7))).size;
+  const hasCost = summary.hasAnyCost;
+  const margin = Number(summary.margin ?? 0);
+  const profitLevel = !hasCost ? 'warn' : Number(summary.profitSar || 0) < 0 ? 'bad' : margin >= .25 ? 'good' : margin >= .1 ? 'warn' : 'bad';
+  const profitVerdict = !hasCost
+    ? '当前筛选范围成本覆盖不足，先补成本表再判断利润。'
+    : Number(summary.profitSar || 0) < 0
+      ? '当前筛选范围亏损，优先看低利润货号、退货侵蚀和成本异常。'
+      : margin >= .25
+        ? '当前筛选范围利润健康，可优先复盘高利润货号并考虑加码。'
+        : margin >= .1
+          ? '当前筛选范围有利润但安全垫一般，先看退货费和低利润货号。'
+          : '当前筛选范围利润率偏低，适合做调价、控退货或淘汰复核。';
+  $('profitTag').textContent = selectedRangeText() + ' · ' + homeScopeSubtitle();
+  $('profitOverview').innerHTML =
+    '<div class="profit-command">'+
+      '<section class="profit-verdict">'+
+        '<div><h3>先看结论</h3><p>'+escapeHtml(profitVerdict)+'</p>'+
+          '<div class="profit-big '+escapeHtml(profitLevel)+'">'+escapeHtml(hasCost ? money(summary.profitSar) : '待成本表')+'</div>'+
+          '<p>'+escapeHtml(selectedRangeText())+' · '+escapeHtml(homeScopeSubtitle())+' · 利润率 '+escapeHtml(hasCost ? pct(summary.margin) : '-')+'</p></div>'+
+        '<div class="profit-logic">'+
+          '<div><b>收入</b><span>净成交 '+escapeHtml(money(summary.netRevenueSar))+'</span></div>'+
+          '<div><b>成本</b><span>商品成本 '+escapeHtml(money(summary.productCostSar))+'</span></div>'+
+          '<div><b>退货</b><span>反转 '+escapeHtml(num(summary.reversalLines))+' 行 · 退货费 '+escapeHtml(money(summary.returnFeeSar))+'</span></div>'+
+          '<div><b>仓储</b><span>单店/货号未拆；月总盘扣除</span></div>'+
+        '</div>'+
+      '</section>'+
+      '<section>'+
+    '<div class="profit-summary-grid">'+
+      profitKpiCard('当前真实利润', hasCost ? money(summary.profitSar) : '待成本表', hasCost ? ('RMB '+fmt.format(Number(summary.profitSar||0)*RMB_RATE)+' · 未扣月仓储') : '导入成本表后自动替换首页粗估', hasCost ? (Number(summary.profitSar||0) >= 0 ? 'good' : 'bad') : 'warn')+
+      profitKpiCard('利润率', hasCost ? pct(summary.margin) : '-', '当前筛选口径；单店/货号不拆仓储费', hasCost ? (Number(summary.margin||0) >= .25 ? 'good' : Number(summary.margin||0) >= .1 ? 'warn' : 'bad') : 'warn')+
+      profitKpiCard('成本覆盖', pct(summary.costCoverageRate), '缺成本净成交 '+money(summary.missingCostRevenueSar), Number(summary.costCoverageRate||0) >= .9 ? 'good' : 'warn')+
+      profitKpiCard('退货保守扣减', money(summary.returnFeeSar), '反转 '+num(summary.reversalLines)+' 行；仅真实退货退款扣 13.88 SAR', Number(summary.returnFeeSar||0) ? 'bad' : 'good')+
+    '</div>'+
+    '<div class="store-flow">'+
+      '<div class="store-verdict"><h3>口径说明</h3><p>商品/店铺/货号层先算“未扣仓储费”的真实商品经营利润；月度总利润再扣月仓储费。仓储费是全仓总数，不能硬拆到每个货号。</p>'+
+        '<div class="store-action-steps">'+
+          '<div class="store-step"><b>成本批次</b><p>同货号完整批次总成本 / 发货总数；缺头程运输费的批次不计入均摊。</p></div>'+
+          '<div class="store-step"><b>退货反转</b><p>退货/仅退款/派件失败营收按 0；仅真实退货退款额外扣 13.88 SAR。</p></div>'+
+          '<div class="store-step"><b>月仓储费</b><p>只算月总利润；DSY/LGM 按当月净成交额比例分摊，不拆到单货号。</p></div>'+
+        '</div></div>'+
+      '<div class="store-kpi-grid">'+
+        '<div class="store-kpi"><span>已覆盖成本货号</span><strong>'+num(costProducts)+'</strong><small>完整批次</small></div>'+
+        '<div class="store-kpi"><span>缺成本货号</span><strong>'+num(missingProducts)+'</strong><small>补表优先</small></div>'+
+        '<div class="store-kpi"><span>仓储费月份</span><strong>'+num(storageMonths)+'</strong><small>只进月总利润</small></div>'+
+        '<div class="store-kpi"><span>成本覆盖净成交</span><strong>'+money(summary.knownGrossRevenueSar)+'</strong><small>可算利润部分</small></div>'+
+        '<div class="store-kpi"><span>商品成本</span><strong>'+money(summary.productCostSar)+'</strong><small>完整批次均摊</small></div>'+
+        '<div class="store-kpi"><span>净营收</span><strong>'+money(summary.netRevenueSar)+'</strong><small>退货营收按 0</small></div>'+
+      '</div>'+
+    '</div></section></div>';
+  const profitMonthDetailRows = monthRows.filter(r => {
+      const m = String(r.month_start || '').slice(0,7);
+      const cr = chartRangeFor('month');
+      if (!(m >= monthId(cr.start) && m <= monthId(cr.end))) return false;
+      return isScopedProfit || storeMatchesScope({store_key:'', group_key:r.group_key || ''});
+    });
+  $('profitTrendPanel').innerHTML = renderProfitLineChart() + sectionTitleHtml('月度利润明细', isScopedProfit ? '当前店铺/分组/货号筛选下的月度商品经营利润；未拆月仓储费。' : '总计和分组月利润；仓储费按 DSY/LGM 净成交额比例分摊。') + table(profitMonthDetailRows, [
+      ['月份/组', r => '<b>'+escapeHtml(String(r.month_start || '').slice(0,7))+'</b><br><span class="tag info">'+escapeHtml(r.group_key || '-')+'</span>'],
+      ['净营收', r => money(r.net_revenue_sar), 'num'],
+      ['商品成本', r => money(r.product_cost_sar), 'num'],
+      ['退货费', r => money(r.return_delivery_fee_sar), 'num'],
+      ['分摊仓储', r => money(r.allocated_storage_fee_sar), 'num'],
+      ['月利润', r => money(r.profit_after_storage_sar)+'<br><span class="muted">'+pct(r.profit_margin_after_storage)+'</span>', 'num'],
+      ['覆盖', r => pct(r.cost_coverage_revenue_rate), 'num']
+    ], {limit:false});
+  $('profitCalculatorPanel').innerHTML = renderSelectionBenchmark(selectionRows) + sectionTitleHtml('新选品利润试算', '输入计划售价、进货价和体积，按未来 2000 RMB/方头程 + SHEIN 固定尾程费估算保本线。') + renderProfitCalculator() + sectionTitleHtml('历史样本：进货价 / 倒推体积 × 利润率', '当前成本表没有物理长宽高，体积先由历史头程按 1600 RMB/方倒推，未来头程按 2000 RMB/方重算；后续补长宽高后会更准。') + renderProfitScatter(allCostProducts);
+  const rankedProfitProducts = products
+    .filter(r => Number(r.cost_coverage_revenue_rate || 0) >= .9 && Number(r.net_revenue_sar || 0) > 0 && r.profit_margin_before_storage != null)
+    .sort((a,b)=>Number(b.profit_margin_before_storage ?? -999)-Number(a.profit_margin_before_storage ?? -999));
+  const winners = rankedProfitProducts;
+  const losers = [...rankedProfitProducts].sort((a,b)=>Number(a.profit_margin_before_storage ?? 999)-Number(b.profit_margin_before_storage ?? 999));
+  const gapRows = products.filter(r => Number(r.missing_cost_revenue_sar || 0) > 0 || (Number(r.net_revenue_sar || 0) > 0 && Number(r.cost_coverage_revenue_rate || 0) < .9))
+    .sort((a,b)=>Number(b.missing_cost_revenue_sar||0)-Number(a.missing_cost_revenue_sar||0));
+  const profitCols = [
+    ['货号', r => '<button class="link-like" data-profit-product="'+escapeHtml(r.standard_goods_sn || '')+'"><b>'+escapeHtml(r.standard_goods_sn || '-')+'</b></button>'],
+    ['净成交/原销售', r => money(r.net_revenue_sar)+'<br><span class="muted">原 '+money(r.gross_revenue_sar)+'</span>', 'num'],
+    ['成本/退货费', r => money(r.product_cost_sar)+'<br><span class="muted">退货费 '+money(r.return_delivery_fee_sar)+'</span>', 'num'],
+    ['利润/率', r => money(r.profit_before_storage_sar)+'<br><span class="muted">'+pct(r.profit_margin_before_storage)+'</span>', 'num'],
+    ['单位成本', r => r.unit_cost_sar == null ? '-' : money(r.unit_cost_sar), 'num'],
+    ['建议动作', r => profitActionText(r)]
+  ];
+  $('profitWinners').innerHTML = winners.length
+    ? table(winners, profitCols, {limit:30})
+    : '<div class="empty">当前时间、店铺/分组、货号筛选下暂无“高利润 / 可加码”货号。</div>';
+  $('profitLosers').innerHTML = losers.length
+    ? table(losers, profitCols, {limit:30})
+    : '<div class="empty">当前时间、店铺/分组、货号筛选下暂无明显低利润或退货侵蚀货号。</div>';
+  $('profitCostGaps').innerHTML =
+    '<div class="table-note">成本文件放在 <span class="mono">inputs/costs/</span>；模板是 <span class="mono">inputs/costs/SHEIN成本表模板.xlsx</span>。如果一批货缺头程运输费，会显示为缺口但不会污染单位成本。</div>'+
+    (gapRows.length ? table(gapRows, [
+      ['货号', r => '<button class="link-like" data-profit-product="'+escapeHtml(r.standard_goods_sn || '')+'"><b>'+escapeHtml(r.standard_goods_sn || '-')+'</b></button>'],
+      ['成本覆盖', r => pct(r.cost_coverage_revenue_rate), 'num'],
+      ['缺成本净成交', r => money(r.missing_cost_revenue_sar), 'num'],
+      ['缺成本数量', r => num(r.missing_cost_quantity)+' 件', 'num'],
+      ['完整批次', r => num(r.complete_batch_count), 'num'],
+      ['忽略批次', r => num(r.ignored_batch_count), 'num'],
+      ['最近导入', r => escapeHtml(String(r.last_cost_imported_at || '-').replace('T',' ').slice(0,19))]
+    ], {limit:80}) : '<div class="empty">当前筛选范围成本覆盖正常，暂无缺口。</div>');
+  document.querySelectorAll('[data-profit-product]').forEach(btn => btn.addEventListener('click', () => {
+    state.product = btn.dataset.profitProduct || '';
+    state.q = state.product;
+    jumpToTab('products', {keepFilters:true});
+    renderAll();
+  }));
+  bindProfitCalculator();
+  bindChartTooltips();
 }
 function actionCard(a){
   const rec = actionRecord(a);
@@ -7911,6 +8828,20 @@ const PAGE_GUIDES = {
       ['看履约明细', 'waybillTable']
     ]
   },
+  profit: {
+    title: '成本 / 利润',
+    purpose: '回答一个问题：真实利润到底从哪里来？先补成本覆盖，再看月度总利润、分组利润和货号利润，仓储费只影响月总盘。',
+    steps: [
+      ['先看覆盖', '成本表缺口会直接影响真实利润可信度；缺头程运费的批次会被保留但不计入单位成本。'],
+      ['再看月利润', '月度利润会扣商品成本、退货派送费和按净成交额分摊的月仓储费。'],
+      ['最后做选品', '用单位成本、体积、售价和退货率模拟利润率，指导后续选品。']
+    ],
+    actions: [
+      ['看利润总览', 'profitOverview'],
+      ['看月利润趋势', 'profitTrendPanel'],
+      ['看选品计算器', 'profitCalculatorPanel']
+    ]
+  },
   actions: {
     title: '今日动作池',
     purpose: '回答一个问题：今天到底先处理哪些事？这里是精选实操清单，不是全量异常仓库。',
@@ -8015,11 +8946,15 @@ function focusedLink(){
 function renderPageDecisionSummaries(){
   const rangeText = selectedRangeText();
   const actions = currentActions();
+  const activeIds = ['stores','products','links','business','profit','actions','system'];
+  activeIds.forEach(id => {
+    if (state.tab !== id) removeSectionDecisionBlock(id);
+  });
   const store = focusedStore();
   const stores = DATA.stores || [];
   const topSalesStore = [...stores].sort((a,b)=>Number(b.sales_sar||0)-Number(a.sales_sar||0))[0];
   const topRiskStore = [...stores].sort((a,b)=>Number(b.risk_score||0)-Number(a.risk_score||0))[0];
-  if (store) {
+  if (state.tab === 'stores' && store) {
     if (storeFilterKind().type !== 'all') {
       removeSectionDecisionBlock('stores');
     } else {
@@ -8041,7 +8976,7 @@ function renderPageDecisionSummaries(){
     });
     }
   }
-  const product = focusedProduct();
+  const product = state.tab === 'products' ? focusedProduct() : null;
   if (product) {
     const sn = product.standard_goods_sn || '-';
     const rangeProduct = aggregateDailyProducts().find(x => x.standard_goods_sn === sn);
@@ -8060,7 +8995,7 @@ function renderPageDecisionSummaries(){
       target:'productSpotlight'
     });
   }
-  const link = focusedLink();
+  const link = state.tab === 'links' ? focusedLink() : null;
   if (link) {
     const issueCount = [link.retire_candidate, link.high_exposure_low_click, link.high_visit_low_pay, link.wait_shelf_block_candidate].filter(Boolean).length;
     sectionDecisionBlock('links', {
@@ -8077,15 +9012,16 @@ function renderPageDecisionSummaries(){
       target:'linkSpotlight'
     });
   }
+  if (state.tab === 'business') {
   const financeRows = (DATA.finance || []).filter(includes);
-  const orders = (DATA.orders || []).filter(includes);
-  const after = (DATA.afterSales || []).filter(includes);
-  const waybills = (DATA.waybills || []).filter(includes);
+  const orders = (DATA.orders || []).filter(includes).filter(r => rowInSelectedRangeBy(r, ['created_date', 'order_create_time']));
+  const after = (DATA.afterSales || []).filter(includes).filter(r => rowInSelectedRangeBy(r, ['request_time', 'snapshot_date']));
+  const waybills = (DATA.waybills || []).filter(includes).filter(r => rowInSelectedRangeBy(r, ['collect_time', 'print_time', 'snapshot_date']));
   const financePending = financeRows.reduce((s,r)=>s+Number(r.pending_settlement_income_sar||0),0);
   const afterAmount = after.reduce((s,r)=>s+Number(r.price_amount_total||0),0);
   sectionDecisionBlock('business', {
     title:'订单 / 售后 / 财务决策摘要',
-    subtitle:'这页用于互相印证：订单解释销售，售后解释风险，财务解释回款，履约解释取消和异常。',
+    subtitle:'当前时间段：' + selectedRangeText() + '。订单、售后、履约明细跟随时间筛选；财务摘要是最新快照。',
     tag: state.store || '全部店铺',
     cards:[
       {label:'订单明细', value:num(orders.length) + ' 行', hint:'用于反查店铺、货号、SKC 的销售来源。', level:'good'},
@@ -8096,6 +9032,27 @@ function renderPageDecisionSummaries(){
     next:'先看财务摘要和售后退货；需要复核某个订单或 SKC 时，再展开收入明细、订单明细和履约明细。',
     target:'financeTable'
   });
+  }
+  if (state.tab === 'profit') {
+  const pr = profitSummaryForRows(profitDailyRows(ensureDateRange().start, ensureDateRange().end, state.store, true));
+  const prProducts = aggregateProfitProductsFromDailyRows(profitDailyRows(ensureDateRange().start, ensureDateRange().end, state.store, true));
+  const costProducts = prProducts.filter(r => Number(r.known_gross_revenue_sar || 0) > 0 || Number(r.product_cost_sar || 0) > 0).length;
+  const missingProducts = prProducts.filter(r => Number(r.missing_cost_revenue_sar || 0) > 0 || Number(r.cost_coverage_revenue_rate || 0) < .9).length;
+  sectionDecisionBlock('profit', {
+    title:'成本 / 利润决策摘要',
+    subtitle:'当前时间段：' + rangeText + '。真实利润跟随顶部时间、店铺/分组和货号筛选；月仓储费只在月度总盘扣除。',
+    tag: pr.hasAnyCost ? ('覆盖 ' + pct(pr.costCoverageRate)) : '等待成本表',
+    cards:[
+      {label:'当前真实利润', value:pr.hasAnyCost ? money(pr.profitSar) : '待成本表', hint:'净营收 - 商品成本 - 退货派送费；单店/货号口径未扣月仓储。', level:pr.hasAnyCost ? (Number(pr.profitSar||0) >= 0 ? 'good' : 'high') : 'mid'},
+      {label:'成本覆盖', value:pct(pr.costCoverageRate), hint:'只有有成本的净成交额才计入真实利润；缺成本不能硬算。', level:Number(pr.costCoverageRate||0) >= .9 ? 'good' : 'mid'},
+      {label:'成本货号', value:num(costProducts) + ' 个', hint:'缺成本货号 '+num(missingProducts)+' 个；导入成本表后自动更新。', level:costProducts ? 'good' : 'mid'},
+      {label:'退货费用', value:money(pr.returnFeeSar), hint:'退货或派送失败每单加 13.88 SAR，按保守毁损处理。', level:Number(pr.returnFeeSar||0) ? 'high' : 'good'}
+    ],
+    next:'先补齐成本覆盖，再看月利润趋势；选品前用右侧计算器模拟售价、体积、头程和退货率。',
+    target:'profitOverview'
+  });
+  }
+  if (state.tab === 'actions') {
   const statusCounts = actions.reduce((acc,a)=>{ const st=actionStatus(a); acc[st]=(acc[st]||0)+1; return acc; },{});
   const domainCount = actions.reduce((acc,a)=>{ const k=domainName(a.action_domain); acc[k]=(acc[k]||0)+1; return acc; },{});
   const topDomain = Object.entries(domainCount).sort((a,b)=>b[1]-a[1])[0];
@@ -8112,6 +9069,8 @@ function renderPageDecisionSummaries(){
     next:'先用顶部全局筛选缩小到一个店或一个货号，再用动作池专用筛选细分后批量分派；处理后标记“已处理”或“待复查”。',
     target:'actionBulkPanel'
   });
+  }
+  if (state.tab === 'system') {
   const audit = DATA.audit || {};
   const pipeline = DATA.pipeline || {};
   const task = pipeline.task || {};
@@ -8129,6 +9088,7 @@ function renderPageDecisionSummaries(){
     next:'如果体检错误为 0，可以正常看经营页面；如果有 warning，先读“当前口径说明”再判断是否影响今天操作。',
     target:'systemStatus'
   });
+  }
   document.querySelectorAll('[data-decision-target]').forEach(btn => {
     if (btn.dataset.decisionBound) return;
     btn.dataset.decisionBound = '1';
@@ -8150,7 +9110,7 @@ function renderPageGuides(){
     const html =
       '<div class="page-guide-inner">' +
         '<div>' +
-          '<div class="page-guide-title"><span>'+escapeHtml(id === 'stores' ? '店' : id === 'products' ? '货' : id === 'links' ? '链' : id === 'business' ? '单' : id === 'actions' ? '办' : '检')+'</span>'+escapeHtml(cfg.title)+'</div>' +
+          '<div class="page-guide-title"><span>'+escapeHtml(id === 'stores' ? '店' : id === 'products' ? '货' : id === 'links' ? '链' : id === 'comments' ? '评' : id === 'business' ? '单' : id === 'profit' ? '利' : id === 'actions' ? '办' : '检')+'</span>'+escapeHtml(cfg.title)+'</div>' +
           '<div class="page-guide-purpose">'+escapeHtml(cfg.purpose)+'</div>' +
           '<div class="page-guide-actions">'+cfg.actions.map(guideButtonHtml).join('')+'</div>' +
         '</div>' +
@@ -8231,6 +9191,9 @@ function renderAll(){
     renderComments();
   } else if (state.tab === 'business') {
     renderBusiness();
+  } else if (state.tab === 'profit') {
+    renderProfitPage();
+    bindChartTooltips();
   } else if (state.tab === 'actions') {
     renderActions();
   } else if (state.tab === 'system') {

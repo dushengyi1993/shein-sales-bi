@@ -1,17 +1,18 @@
 # SHEIN 销售统计与 BI 经营系统
 
-## 2026-05-03 当前权威状态
+## 2026-05-05 当前权威状态
 
 - 飞书生产链路继续保留，BI 系统作为旁路双线运行。
 - 销售同步完成后会后置刷新 BI；如果单店失败但本地 15 店销售文件已齐，BI 仍会刷新，并通过飞书消息提醒失败店铺。
-- 链接表现改为每日后半夜一次，当前任务为 `SHEIN-Sales-15Stores-LinkManagement-0530`，每天 `05:30`。旧 `0340` / `0510` 链接任务不要恢复。
+- 链接表现改为每日后半夜一次，当前任务为 `SHEIN-Sales-15Stores-LinkManagement-0530`，每天 `05:30`，只写本地 / PostgreSQL / BI；飞书链接管理表已废弃。旧 `0340` / `0510` 链接任务不要恢复。
 - HL 已切换为主账号 profile：`profiles/persistent-shein-main-profile`；旧 `profiles/persistent-hl-profile` 已删除。
+- `2026-05-05` Docker / WSL 数据盘异常已手动恢复；BI 门户、飞书同步、飞书日报和局域网访问已恢复，下一次重点观察 `2026-05-06 05:30` 和 `2026-05-06 06:40` 自动任务。
 
 本工作区用于 SHEIN 15 店销售数据自动抓取、飞书多维表格统计、每日飞书日报、链接管理，以及正在并行建设的 PostgreSQL + Metabase + 本地 BI 经营门户。
 
 当前原则：**飞书生产链路继续稳定运行，BI 系统作为旁路逐步替代看板与人工分析。**
 
-## 当前状态（2026-05-03）
+## 当前状态（2026-05-05）
 
 - 店铺范围：15 家店，`DSY` 组 10 家，`LGM` 组 5 家。
 - 当前店铺代码：`CX DL DX FY HL JY LQ MZ NM QH QY TS XL YJ ZL`。
@@ -26,16 +27,16 @@
   - Metabase：`http://172.22.172.186:3000`
 - 定时任务：
   - `00:10`：前一天完整销售额最终版。
-  - `05:30`：链接管理 15 店每日同步，任务名 `SHEIN-Sales-15Stores-LinkManagement-0530`。
+  - `05:30`：链接管理 15 店每日同步，任务名 `SHEIN-Sales-15Stores-LinkManagement-0530`，不再写飞书链接管理表。
   - `06:40`：BI 每日流水线，任务名 `SHEIN-BI-Daily-Pipeline-0640`。
   - `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10`：当天滚动同步。
   - 日报不再使用固定 09:00 任务；每天早上 08:10 同步成功完成后自动发送飞书文字日报 + 可视化日报图，上午后续成功同步可补发一次。
   - `09:20` 和 Windows 登录时：watchdog 漏跑补偿，不额外同步当日。
 - 当前正式同步规则：`DSY` 和 `LGM` 两组都成功后，才统一刷新月表、年度/周月宽表、当月主看板和上月看板，避免半新半旧数据。
 - 当前 BI 自动任务状态：
-  - `SHEIN-BI-Daily-Pipeline-0640` 每天 `06:40` 运行；`2026-05-03 06:40` 正式运行已成功，Windows Last Result 为 `0`。
+  - `SHEIN-BI-Daily-Pipeline-0640` 每天 `06:40` 运行；`2026-05-05` 早晨正式日志失败后已手动恢复，最新手动验证日志为 `bi-daily-pipeline-20260505-111437.log`，状态 `success`。
   - `2026-05-02 06:40` 的 `267014` 是已修复的历史失败记录，保留作排障证据。
-  - 链接表现任务 `SHEIN-Sales-15Stores-LinkManagement-0530` 每天 `05:30`；下一次/首次正式自动验证为 `2026-05-04 05:30`。
+  - 下一次正式自动验证为 `2026-05-06 05:30` 链接任务和 `2026-05-06 06:40` BI 任务。
 - 团队访问边界：
   - 当前已开放临时局域网协作访问：`http://192.168.2.49:8787/`，仅限 `192.168.2.0/24` 私有网络，局域网内直接打开即可。
   - 未开放公网，未配置端口转发。
@@ -49,7 +50,11 @@
 - 统计日：北京时间自然日。
 - 时间口径：订单创建时间。
 - 汇率：`1 SAR = 1.8 RMB`。
-- 预测利润率：`25%`。
+- 利润口径：首页和成本/利润页已改为真实利润；成本未覆盖时显示“待成本表 / 成本覆盖率”，不再用 `25%` 粗估冒充真实利润。
+- 当前正式成本文件为 `inputs/costs/成本计算表.xlsx`；`单台总成本（SAR）` 是单批单件完整成本输入，系统先还原为批次总成本，再按同货号所有完整批次加权平均计算单位成本。
+- BI 销售/成交额统一使用“净成交额”：退货、仅退款、派送失败等反转订单不计入成交额、订单数和销量；这些订单仍扣商品成本；只有真实退货退款额外扣 `13.88 SAR`，`仅退款`、`派件失败`、`派件异常` 不重复扣退货派送费。
+- 利润只对正销售额订单行扣商品成本；`sales_sar <= 0` 的揽收前取消 / 0 金额行不视为已售出，不扣商品成本或退货派送费。
+- 历史测试品 `2001/CM-2001` 有单独手工成本补充文件 `inputs/costs/历史手工成本补充.csv`，仅用于历史利润复核。
 - 同一天同店铺重复运行必须更新同一条事实记录，不得重复累加。
 - 遇到 SHEIN `20302 子系统登录重定向`：先自动恢复登录并重新抓取；恢复失败时明确报错，不得把旧数据当最新数据。
 - 不给单店保留猜测性的时区偏移；除非用户明确确认某店后台日期口径不同，否则按后台日期直接查询北京时间自然日。
@@ -114,12 +119,16 @@
   `node scripts/check_bi_first_run.mjs`
 - 重新生成本地 BI 门户：
   `node scripts/generate_bi_portal.mjs`
+- 生成成本表模板：
+  `node scripts/create_cost_template.mjs`
+- 检查/导入成本表：
+  `node scripts/import_product_costs.mjs --dry-run`
 
 ## 工具说明
 
 - SHEIN 生产抓取链路使用自写 Node 脚本连接 Chrome DevTools Protocol，不依赖手工页面操作。
 - Chrome 程序路径由 `scripts/launch_store_browser.mjs` 自动探测，当前优先使用 C 盘正式安装路径，D 盘只作兜底候选；店铺登录态仍在工作区 `profiles/`。
-- 店铺浏览器默认 headless；若重启后某 profile headless 起不来，`run_sales_sync_job.mjs` 会自动兜底到后台窗口模式。启动器保持 `detached=false` + `unref()`，避免 Windows/Node 下 detached Chrome 偶发崩溃。
+- 店铺浏览器默认 headless；若重启后某 profile headless 起不来，`run_sales_sync_job.mjs` 会自动兜底到后台窗口模式。Windows 下 `launch_store_browser.mjs` / `launch_shein_main_browser.mjs` 通过 `PowerShell Start-Process` 后台启动 Chrome，避免 `cmd start` 路径空格问题和 detached Chrome 偶发崩溃。
 - 飞书 Base/消息主要使用 `lark-cli`，日报接收人配置在 `config/lark_report.json`，该文件必须保持合法 UTF-8 JSON。
 - 飞书看板富文本和卡片样式使用 Playwright + 已登录飞书 profile。
 - 本机有 `opencli`，PowerShell 下建议调用 `C:\Users\dushengyi\AppData\Roaming\npm\opencli.cmd`。当前稳定生产链路暂不替换为 opencli；后续网页探索、临时浏览器操作或封装 lark-cli 时可以评估使用。
@@ -136,15 +145,4 @@
 - 数据模型：`docs/data-model.md`
 - 实施路线：`docs/implementation-roadmap.md`
 - 3 月参考表结构：`docs/reference-month-table-structure.md`
-
-# 2026-05-02 当前补充：双线运行调度
-
-- 飞书生产同步仍是当前主链路；BI/本地经营门户改为飞书同步成功后的后置刷新。
-- 00:10 前一日最终版成功后，会刷新前一日 BI 数据切片。
-- 白天滚动同步成功后，会刷新当日 BI 数据；如果单店失败但本地销售文件齐，也会照常刷新 BI，并通过飞书消息提醒问题店铺。
-- 旧独立链接管理任务 `SHEIN-Sales-15Stores-LinkManagement-0340` / `SHEIN-Sales-15Stores-LinkManagement-0510` 已删除；当前链接每日任务是 `SHEIN-Sales-15Stores-LinkManagement-0530`。
-- HL 只保留主账号 profile：`profiles/persistent-shein-main-profile`；旧 `profiles/persistent-hl-profile` 已删除，飞书定时任务和写表链路都会读取 `config/stores.json` 中的 `profileKey=shein-main` / `port=9360`。
-- BI 后置刷新失败只记录日志，不反向影响飞书表格、看板和日报。
-
-
 

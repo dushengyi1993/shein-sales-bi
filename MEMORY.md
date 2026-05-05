@@ -3,7 +3,7 @@
 ## 评价全量与平台翻译（当前权威）
 - 评价/口碑底库必须按每个店开店以来全量补抓；日常评价同步默认只抓最近 `14` 天作为增量防漏窗口，不要再用 90 天这种过长窗口浪费后台资源。
 - 评论翻译使用 SHEIN 后台评论列表接口的 `translate: 1` 平台翻译，写入 `fact.product_comment.goods_comment_content_zh`，`translation_provider='shein-platform'`；不再使用本地启发式翻译、浏览器插件或第三方插件作为正式结果。
-- 当前全量结果：`fact.product_comment` 共 `1776` 条，`1774` 条有 SHEIN 平台译文；剩余 2 条为原文为空的评价，无需翻译。全量补抓脚本为 `scripts/backfill_shein_comments_full_history.mjs`，日常业务域抓取为 `scripts/fetch_shein_business_domains.mjs`。
+- 当前全量结果：`fact.product_comment` 共 `1796` 条，`1794` 条有 SHEIN 平台译文；剩余 2 条为原文为空的评价，无需翻译。全量补抓脚本为 `scripts/backfill_shein_comments_full_history.mjs`，日常业务域抓取为 `scripts/fetch_shein_business_domains.mjs`。
 - SHEIN 评论接口宽窗口会报 `mgs97906 数据量太多...缩小评论时间`；全量补抓必须按日期窗口分段，并在必要时自动拆分。
 
 ## 2026-05-03 BI 链接对比 / 制冰机归并 / 评价翻译
@@ -27,7 +27,7 @@
 - 飞书生产链路继续保留，负责正式 Base 表格、原生看板和飞书日报；BI 系统作为旁路双线运行，稳定后再逐步替换飞书展示层。
 - BI 不从飞书反抓数据作为源头；源头是 SHEIN 后台抓取后的本地 JSON 与 PostgreSQL 数据仓库。
 - 新建飞书 Base 数据表后，提醒用户手动扩容到 `20000` 行；默认 `2000` 行容易写满。
-- 正常抓取、同步、日报、watchdog 和 BI 任务必须后台/隐藏运行；只有登录、验证码、人机校验或排障时才打开可见窗口。
+- 正常抓取、同步、日报、watchdog 和 BI 任务必须后台/隐藏运行；非必要不要打开前端浏览器窗口或命令行窗口。只有登录、验证码、人机校验、用户明确要求看前端，或必须排查浏览器交互问题时才打开可见窗口；临时验证必须优先用静态检查、HTTP/API、CDP 后台连通或 hidden/offscreen，并在验证后关闭。
 - Chrome 程序路径优先使用 `C:\Program Files\Google\Chrome\Application\chrome.exe`；D 盘路径只作兜底候选。店铺登录态仍在工作区 `profiles/`，不要因为程序在 C 盘就把 profile 移回 C 盘。
 
 ## 店铺、账号与统计口径
@@ -48,8 +48,8 @@
 
 ## 计划任务
 - `00:10`：前一天最终版销售同步、飞书表格/看板/日报链路。
-- `05:30`：链接管理 15 店每日同步，任务名 `SHEIN-Sales-15Stores-LinkManagement-0530`，脚本 `scripts/scheduled_link_management_daily.ps1`；旧 `0340` / `0510` 链接任务不要恢复。
-- `06:40`：BI 每日流水线，任务名 `SHEIN-BI-Daily-Pipeline-0640`；`2026-05-03 06:40` 已正式成功，Windows Last Result 为 `0`。`2026-05-02 06:40` 的 `267014` 仅保留作历史排障证据。
+- `05:30`：链接管理 15 店每日同步，任务名 `SHEIN-Sales-15Stores-LinkManagement-0530`，脚本 `scripts/scheduled_link_management_daily.ps1`；只写本地 / PostgreSQL / BI，不再写飞书链接表；旧 `0340` / `0510` 链接任务不要恢复。
+- `06:40`：BI 每日流水线，任务名 `SHEIN-BI-Daily-Pipeline-0640`；`2026-05-05` 早晨正式日志失败后已手动恢复，最新手动验证日志 `bi-daily-pipeline-20260505-111437.log` 为 `success`；下一次重点观察 `2026-05-06 06:40` 正式自动验证。`2026-05-02 06:40` 的 `267014` 仅保留作历史排障证据。
 - `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10`：当天滚动销售同步；同步后后置刷新 BI，但不得重复触发链接管理抓取或飞书链接表写入，链接只走 `05:30` 专用任务。
 - 日报不再使用固定 `09:00` 任务；每天早上 `08:10` 同步成功完成后自动发送飞书文字日报和可视化日报图，上午后续成功同步可补发一次，并使用 flag 防重。
 - 计划任务应通过 `wscript.exe` + `scripts/run_scheduled_hidden.vbs` 隐藏启动 PowerShell，最长运行时间 90 分钟，不要直接注册前台 PowerShell 窗口。
@@ -76,6 +76,7 @@
 - 架构原则：`SHEIN 后台抓取 -> 本地 JSON / PostgreSQL 数据仓库 -> Metabase BI / 本地 BI 门户`。
 - 本地 BI 门户入口：`http://127.0.0.1:8787/`；文件为 `outputs/bi-portal/index.html`；生成脚本为 `scripts/generate_bi_portal.mjs`；数据文件为 `outputs/bi-portal/data.json`。
 - Metabase 运行在 WSL + Docker，Docker 数据位于 `D:\SheinBI\docker-data\docker-data.ext4`，WSL 发行版位于 `D:\WSL\Ubuntu-24.04`。
+- 若 Docker / Postgres / Metabase 出现 `input/output error`，优先怀疑 `D:\SheinBI\docker-data\docker-data.ext4` 文件系统异常；恢复顺序是先停止 WSL / Docker，再做 volume 备份和 `e2fsck -fy`，最后重启容器并跑 BI audit，不要直接删除 Docker 数据。
 - Metabase 管理员凭据只保存在 `infra/metabase/.admin.local.json`，不要写入聊天、文档或日志。
 - 当前团队访问已开放临时局域网协作：`http://192.168.2.49:8787/`，仅限 `192.168.2.0/24` 私有网络，局域网内无需账号密码，未开放公网或端口转发；共享动作状态写入 `state/bi_action_state.json`，操作审计写入 `logs/bi_portal_action_audit.jsonl`，留痕以访问 IP 为准。团队正式版上线前还需固定地址、动作状态入库、HTTPS 和备份。
 
@@ -91,7 +92,7 @@
 - 首页未筛选时顶部矩阵显示 `总计 / DSY 组 / LGM 组`；筛到单店或分组时显示对应范围。
 - 首页日销趋势默认近 30 天，月销趋势默认过去 6 个月；选择非单日时间段后趋势跟随起止日期变化。
 - 时间选择弹窗使用大号双日历，左侧开始日期、右侧结束日期；快捷按钮放在弹窗外侧。
-- 顶部统一矩阵总盘包含：当前时段销售额、当前时段订单/销量/动销、当前时段退货数量、当前时段预测利润；总计、DSY、LGM 三行固定展示，数字居中并随时间段变化。
+- 顶部统一矩阵总盘包含：当前时段销售额、当前时段订单/销量/动销、当前时段退货数量、当前时段真实利润；总计、DSY、LGM 三行固定展示，数字居中并随时间段变化。
 - 日销趋势和月销趋势上下排列、各占全宽；折线包含总计、DSY、LGM 三条线，纵轴使用整数刻度，关键节点显示完整数字，悬停显示完整 SAR 值。
 - 排行榜显示完整店铺和标准货号，不使用小框内部滚动；店铺标签只显示 `DL / DX / HL` 这类代号，不重复写 `DSY / LGM`。
 - 侧栏每个数据域只显示一条精确到秒的更新时间；数据口径日放在鼠标悬停提示里，避免同一域出现两个时间。
@@ -99,11 +100,29 @@
 - 支持浅色 / 深色主题；浅色主题不得出现灰底灰字。
 - 店铺视角的 7 天 / 30 天链接指标必须用真正二级表头：第一行指标组，第二行周期，正文每个周期数字独立列；不要用 `<br>` 或小卡片硬拼造成错位。
 - 店铺视角的低展示库存预警来自 `fact.visible_inventory_snapshot` 最新正确展示库存快照，按本店已上架且展示库存低的 SKC 全量列出；动作池库存动作只是精选待办，不代表低库存全量。
-- 修 BI 门户 UI 时默认不主动打开前端；后台完成代码检查、门户生成和静态 HTML/JSON 断言后，由用户在自己的浏览器刷新查看。只有用户要求或必须排查浏览器交互问题时才打开前端。
+- 修 BI 门户 UI 时默认不主动打开前端；后台完成代码检查、门户生成和静态 HTML/JSON 断言后，由用户在自己的浏览器刷新查看。不要为了“看一眼”主动打开前端浏览器或可见命令行窗口；只有用户要求或必须排查浏览器交互问题时才打开前端。
+
+## 成本与真实利润口径
+- 首页和成本/利润页不再用 `25%` 预测利润冒充真实利润；成本未覆盖时必须显示“待成本表 / 成本覆盖率 / 缺成本销售额”。
+- 成本表文件放在 `inputs/costs/`，当前正式文件为 `inputs/costs/成本计算表.xlsx`，模板为 `inputs/costs/SHEIN成本表模板.xlsx`；导入脚本为 `scripts/import_product_costs.mjs`，模板生成脚本为 `scripts/create_cost_template.mjs`。
+- 同货号分批发货时，单位成本 = 完整批次总成本 / 完整批次发货总数；缺“头程运输费金额”的批次只保留缺口，不参与单位成本均摊。
+- 成本表中的 `单台总成本（SAR）` 代表单批单件完整成本；入库时先乘以该批数量还原批次总成本，最终仍按所有完整批次加权平均。成本匹配要兼容销售端标准货号和成本表型号代码，匹配键由 `dim.product_match_key()` 提供。
+
+- 成本/利润页的顶部摘要、月利润趋势、月度利润明细、高利润/低利润货号和成本缺口必须同时受顶部时间、店铺/分组、货号/SKC 筛选影响；不能再使用全局历史 `profit_product_summary` 冒充当前筛选口径。
+
+- 选品标尺模型不要停留在手填利润计算器；必须基于成本表进货价、历史头程、真实利润率和退货扣减建立“进货价 × 体积”矩阵。当前成本表缺物理长宽高时，体积先按历史头程约 `1600 RMB/方` 倒推，未来选品头程按 `2000 RMB/方 = 2 RMB/L` 重算。
+- 历史测试品 `2001/CM-2001` 已按用户确认补手工成本：总成本 `5500 RMB`、数量 `37`，文件为 `inputs/costs/历史手工成本补充.csv`；该品已停做，只用于历史利润复核。
+- BI 销售/成交额统一为净成交额：退货、仅退款、派送失败等反转订单不计入首页成交额、订单数、销量、趋势和排行；利润率分母使用剩余净成交额。
+- 退货、仅退款、派送失败等保守处理订单：营收视为 `0`，仍扣商品成本；只有真实退货退款链路额外扣 `13.88 SAR` 退货派送费，`仅退款`、`派件失败`、`派件异常` 不再重复扣退货派送费。
+- `sales_sar <= 0` 的揽收前取消 / 0 金额订单行不视为真实售出，不扣商品成本或退货派送费；利润成本必须和正销售额行对齐，避免取消单误扣成本。
+- 月趋势按用户选择的日期范围切片，不补全整月；例如 `2026-04-03 ~ 2026-06-03` 中 4 月只统计 `04-03~04-30`，6 月只统计 `06-01~06-03`，页面必须标注。
+- 月仓储费只用于月度总利润；DSY/LGM 按净成交额比例分摊，不能拆到单独货号、SKC 或订单。
+- 利润分组里 `TS`、`MZ` 在 `2026-03-01` 前归 `LGM`，从 `2026-03-01` 起归 `DSY`。
+- 真实利润相关数据库对象：`fact.product_cost_batch`、`fact.monthly_storage_fee`、`mart.product_unit_cost_current`、`mart.profit_order_item`、`mart.profit_daily_store_product`、`mart.profit_month_group`、`mart.profit_product_summary`。
 
 ## 工具与避坑
 - SHEIN 抓取主链路是自写 Node 脚本 + Chrome DevTools Protocol/WebSocket + 工作区 Chrome profile；飞书主要用 `lark-cli`。
-- `run_sales_sync_job.mjs` 在 headless Chrome 启动失败时会兜底到后台窗口模式；`launch_store_browser.mjs` 不使用 detached Chrome，避免 Windows/Node 下偶发 libuv assertion。
+- `run_sales_sync_job.mjs` 在 headless Chrome 启动失败时会兜底到后台窗口模式；`launch_store_browser.mjs` / `launch_shein_main_browser.mjs` 在 Windows 下通过 `PowerShell Start-Process` 后台启动 Chrome，避免 `cmd start` 的路径空格问题和 Node detached Chrome 的 libuv assertion。
 - `config/lark_report.json` 是日报接收人配置，必须保持合法 UTF-8 JSON；若自动日报读取失败，先校验这个文件。
 - `scripts/generate_today_detailed_report_image.mjs` 用于生成只含今日数据的详尽长图，适合临时重发今日战报。
 - 飞书看板富文本和卡片样式更新使用 Playwright + 已登录飞书 profile。

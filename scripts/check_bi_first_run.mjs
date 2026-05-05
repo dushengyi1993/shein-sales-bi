@@ -357,11 +357,12 @@ function verdict({task, recentLogs = [], scheduledRunLog, scheduledDryRun, audit
 }
 function recoveryStatus({task, latestLog = {}, latestLogRelation = {}, scheduledRunLog, scheduledDryRun, audit, portal, verdict: v}) {
   const taskFailed = !!(task?.exists && !isPendingFirstRun(task) && !isTaskRunning(task) && Number(task.LastTaskResult) !== 0);
+  const scheduledLogFailed = !!(scheduledRunLog?.status && scheduledRunLog.status !== 'success');
   const latestManualSuccess = latestLog?.status === 'success' && latestLogRelation?.kind === 'manual_after_task';
   const entryOk = !!scheduledDryRun?.ok;
   const auditOk = !!audit?.ok && Number(audit?.errors || 0) === 0;
   const portalOk = !!portal?.html?.exists && !!portal?.data?.exists;
-  if (taskFailed && latestManualSuccess && entryOk && auditOk && portalOk) {
+  if ((taskFailed || scheduledLogFailed) && latestManualSuccess && entryOk && auditOk && portalOk) {
     return {
       level: 'pending_next_auto',
       title: '已修复，待下次正式自动验证',
@@ -485,6 +486,16 @@ async function main() {
   };
   summary.verdict = verdict(summary);
   summary.recovery = recoveryStatus(summary);
+  if (summary.recovery?.level === 'pending_next_auto' && summary.verdict.status === 'error') {
+    summary.verdict = {
+      status: 'warning',
+      errors: [],
+      warnings: [
+        ...summary.verdict.errors.map(x => `今日自动任务失败但已手动恢复，保留到明天自动验证：${x}`),
+        ...summary.verdict.warnings,
+      ],
+    };
+  }
   const outDir = path.join(ROOT, 'outputs', 'bi_first_run_check');
   await fs.mkdir(outDir, {recursive:true});
   const stamp = localStamp();

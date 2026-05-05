@@ -1,10 +1,11 @@
 ﻿# 运行环境架构
 
-## 2026-05-03 当前运行环境摘要
+## 2026-05-05 当前运行环境摘要
 
 - 飞书生产链路继续在 Windows 侧运行，BI 后置刷新不反向影响飞书表格、看板和日报。
-- 链接表现每日任务为 `SHEIN-Sales-15Stores-LinkManagement-0530`，每天 `05:30`，同步飞书链接底表并刷新 BI；旧 `0340` / `0510` 链接任务不要恢复。
+- 链接表现每日任务为 `SHEIN-Sales-15Stores-LinkManagement-0530`，每天 `05:30`，只写本地 / PostgreSQL / BI；旧 `0340` / `0510` 链接任务不要恢复。
 - HL 正式 profile 为 `profiles/persistent-shein-main-profile`，CDP 端口 `9360`；旧 `profiles/persistent-hl-profile` 已删除。
+- `2026-05-05` Docker / WSL 数据盘异常已恢复；BI 门户和局域网访问已恢复，下一次重点观察 `2026-05-06 05:30` 与 `2026-05-06 06:40` 正式自动任务。
 
 ## 结论
 
@@ -23,7 +24,7 @@
 
 - `SHEIN-Sales-15Stores-YesterdayFinal-0010`：每天 `00:10` 跑前一天最终版。
 - `SHEIN-Sales-15Stores-Intraday-Daytime`：每天 `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10` 跑当天滚动同步。
-- `SHEIN-Sales-15Stores-LinkManagement-0530`：每天 `05:30` 跑前一完整业务日链接管理同步，同步飞书链接底表并刷新 BI。
+- `SHEIN-Sales-15Stores-LinkManagement-0530`：每天 `05:30` 跑前一完整业务日链接管理同步，只写本地 JSON、PostgreSQL 和 BI 门户，不再写飞书链接表。
 - `SHEIN-BI-Daily-Pipeline-0640`：每天 `06:40` 刷新 PostgreSQL BI 仓库、体检、门户和晨报。
 - 每日飞书文字日报和可视化日报图不再使用独立固定任务；由 `08:10` 当天同步成功完成后自动发送。若 `08:10` 因关机/失败未发送，上午后续成功的滚动同步可补发一次，并用 `state/daily-report-sent-YYYYMMDD.flag` 防重复。
 - `SHEIN-Sales-15Stores-Watchdog-Logon`：Windows 登录时和每天 `09:20` 检查漏跑并补偿；不额外同步当日。
@@ -199,7 +200,7 @@
 # 2026-05-02 调度与 HL profile 更新
 
 - 飞书同步任务现在承担 BI 后置刷新：00:10 和白天滚动任务完成飞书写表/看板后，会继续刷新 PostgreSQL BI 仓库、本地 BI 门户和晨报。
-- 旧独立链接管理计划任务 `SHEIN-Sales-15Stores-LinkManagement-0340` / `SHEIN-Sales-15Stores-LinkManagement-0510` 已经删除；当前链接同步由 `SHEIN-Sales-15Stores-LinkManagement-0530` 每天 05:30 负责。上午滚动任务主要负责销售同步后的 BI 后置刷新。
+- 旧独立链接管理计划任务 `SHEIN-Sales-15Stores-LinkManagement-0340` / `SHEIN-Sales-15Stores-LinkManagement-0510` 已经删除；当前链接同步由 `SHEIN-Sales-15Stores-LinkManagement-0530` 每天 05:30 负责，只写本地 / PostgreSQL / BI。上午滚动任务主要负责销售同步后的 BI 后置刷新。
 - HL 旧子账号 profile `profiles/persistent-hl-profile` 已删除；正式 HL profile 为 `profiles/persistent-shein-main-profile`，CDP 端口 `9360`。
 - 飞书定时任务和写表链路都通过 `config/stores.json` 获取 HL profile；当前生产脚本中没有旧 HL profile、旧端口 `9338` 或 `profileKey=hl` 引用。
 - 后置 BI 刷新失败时只记录日志，不让飞书生产任务失败。

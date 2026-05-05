@@ -26,6 +26,22 @@ CREATE TABLE IF NOT EXISTS dim.product (
   updated_at timestamptz DEFAULT now()
 );
 
+CREATE OR REPLACE FUNCTION dim.product_match_key(value text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  WITH k AS (
+    SELECT upper(regexp_replace(coalesce(value,''), '[^A-Za-z0-9]+', '', 'g')) AS key
+  )
+  SELECT CASE
+    WHEN key IN ('2001','CM2001') THEN '2001'
+    WHEN key IN ('MZ7028','SK7028','7028') THEN 'SK7028'
+    ELSE key
+  END
+  FROM k;
+$$;
+
 CREATE TABLE IF NOT EXISTS dim.skc (
   skc text PRIMARY KEY,
   spu text,
@@ -766,6 +782,392 @@ CREATE TABLE IF NOT EXISTS ops.action (
   updated_at timestamptz DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS fact.product_cost_batch (
+  batch_key text PRIMARY KEY,
+  standard_goods_sn text NOT NULL,
+  raw_goods_sn text,
+  batch_no text,
+  shipped_quantity numeric,
+  goods_cost_amount numeric,
+  first_leg_freight_amount numeric,
+  other_cost_amount numeric,
+  total_cost_amount numeric,
+  currency_code text DEFAULT 'CNY',
+  cost_sar numeric,
+  unit_cost_sar numeric,
+  complete_batch boolean DEFAULT false,
+  ignored_reason text,
+  purchase_unit_price numeric,
+  length_cm numeric,
+  width_cm numeric,
+  height_cm numeric,
+  volume_l numeric,
+  weight_kg numeric,
+  source_file text,
+  source_sheet text,
+  source_row_no integer,
+  imported_at timestamptz DEFAULT now(),
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_product_cost_batch_product ON fact.product_cost_batch(standard_goods_sn);
+CREATE INDEX IF NOT EXISTS idx_product_cost_batch_complete ON fact.product_cost_batch(standard_goods_sn, complete_batch);
+
+CREATE TABLE IF NOT EXISTS fact.monthly_storage_fee (
+  month_start date PRIMARY KEY,
+  total_fee_amount numeric,
+  currency_code text DEFAULT 'SAR',
+  total_fee_sar numeric,
+  note text,
+  source_file text,
+  imported_at timestamptz DEFAULT now(),
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_monthly_storage_fee_month ON fact.monthly_storage_fee(month_start);
+
+CREATE OR REPLACE VIEW mart.product_unit_cost_current AS
+SELECT
+  standard_goods_sn,
+  count(*) FILTER (WHERE complete_batch) AS complete_batch_count,
+  count(*) FILTER (WHERE NOT complete_batch) AS ignored_batch_count,
+  sum(coalesce(shipped_quantity,0)) FILTER (WHERE complete_batch) AS costed_quantity,
+  sum(coalesce(cost_sar,0)) FILTER (WHERE complete_batch) AS total_cost_sar,
+  CASE
+    WHEN sum(coalesce(shipped_quantity,0)) FILTER (WHERE complete_batch) > 0
+    THEN sum(coalesce(cost_sar,0)) FILTER (WHERE complete_batch)
+      / nullif(sum(coalesce(shipped_quantity,0)) FILTER (WHERE complete_batch), 0)
+    ELSE NULL
+  END AS unit_cost_sar,
+  avg(purchase_unit_price) FILTER (WHERE complete_batch AND purchase_unit_price IS NOT NULL) AS avg_purchase_unit_price,
+  avg(volume_l) FILTER (WHERE complete_batch AND volume_l IS NOT NULL) AS avg_volume_l,
+  avg(weight_kg) FILTER (WHERE complete_batch AND weight_kg IS NOT NULL) AS avg_weight_kg,
+  max(imported_at) AS last_imported_at,
+  string_agg(DISTINCT ignored_reason, ' / ') FILTER (WHERE ignored_reason IS NOT NULL AND ignored_reason <> '') AS ignored_reasons,
+  dim.product_match_key(standard_goods_sn) AS match_key
+FROM fact.product_cost_batch
+GROUP BY standard_goods_sn;
+
+CREATE OR REPLACE VIEW mart.product_unit_cost_by_match_key AS
+SELECT
+  match_key,
+  string_agg(DISTINCT standard_goods_sn, ' / ' ORDER BY standard_goods_sn) AS cost_standard_goods_sn_list,
+  sum(complete_batch_count) AS complete_batch_count,
+  sum(ignored_batch_count) AS ignored_batch_count,
+  sum(costed_quantity) AS costed_quantity,
+  sum(total_cost_sar) AS total_cost_sar,
+  CASE
+    WHEN sum(costed_quantity) > 0
+    THEN sum(total_cost_sar) / nullif(sum(costed_quantity), 0)
+    ELSE NULL
+  END AS unit_cost_sar,
+  avg(avg_purchase_unit_price) FILTER (WHERE avg_purchase_unit_price IS NOT NULL) AS avg_purchase_unit_price,
+  avg(avg_volume_l) FILTER (WHERE avg_volume_l IS NOT NULL) AS avg_volume_l,
+  avg(avg_weight_kg) FILTER (WHERE avg_weight_kg IS NOT NULL) AS avg_weight_kg,
+  max(last_imported_at) AS last_imported_at,
+  string_agg(DISTINCT ignored_reasons, ' / ') FILTER (WHERE ignored_reasons IS NOT NULL AND ignored_reasons <> '') AS ignored_reasons
+FROM mart.product_unit_cost_current
+WHERE coalesce(match_key,'') <> ''
+GROUP BY match_key;
+
+CREATE OR REPLACE VIEW mart.profit_after_sales_impact AS
+WITH classified AS (
+  SELECT
+    store_key,
+    order_no,
+    standard_goods_sn,
+    nullif(skc,'') AS skc,
+    aftersales_order_no,
+    coalesce(quantity, 1) AS quantity,
+    coalesce(price_amount_total, price_amount, 0) AS amount_sar,
+    resolution_plan_name,
+    order_sub_status_name,
+    return_package_status_name,
+    (
+      (
+        coalesce(return_package_status_name,'') ILIKE '%派件失败%'
+        OR coalesce(return_package_status_name,'') ILIKE '%派件异常%'
+        OR coalesce(resolution_plan_name,'') ILIKE '%退货%'
+        OR coalesce(resolution_plan_name,'') ILIKE '%仅退款%'
+        OR coalesce(order_sub_status_name,'') ILIKE '%同意退款%'
+        OR coalesce(order_sub_status_name,'') ILIKE '%已妥投%'
+        OR coalesce(order_sub_status_name,'') ILIKE '%待交接%'
+        OR coalesce(order_sub_status_name,'') ILIKE '%待买家退货%'
+      )
+      AND NOT (
+        coalesce(resolution_plan_name,'') ILIKE '%驳回%'
+        OR coalesce(order_sub_status_name,'') ILIKE '%已关闭%'
+        OR (
+          coalesce(order_sub_status_name,'') ILIKE '%已取消%'
+          AND coalesce(return_package_status_name,'') NOT ILIKE '%派件%'
+        )
+      )
+    ) AS revenue_reversal
+  FROM fact.after_sales_item
+  WHERE coalesce(order_no,'') <> ''
+)
+SELECT
+  store_key,
+  order_no,
+  standard_goods_sn,
+  skc,
+  bool_or(revenue_reversal) AS revenue_reversal,
+  count(DISTINCT aftersales_order_no) AS after_sales_cases,
+  sum(quantity) FILTER (WHERE revenue_reversal) AS impact_quantity,
+  sum(amount_sar) FILTER (WHERE revenue_reversal) AS impact_amount_sar,
+  string_agg(DISTINCT resolution_plan_name, ' / ') FILTER (WHERE coalesce(resolution_plan_name,'') <> '') AS resolution_plans,
+  string_agg(DISTINCT order_sub_status_name, ' / ') FILTER (WHERE coalesce(order_sub_status_name,'') <> '') AS order_sub_statuses,
+  string_agg(DISTINCT return_package_status_name, ' / ') FILTER (WHERE coalesce(return_package_status_name,'') <> '') AS return_package_statuses
+FROM classified
+GROUP BY store_key, order_no, standard_goods_sn, skc;
+
+CREATE OR REPLACE VIEW mart.profit_order_item AS
+SELECT
+  oi.order_item_key,
+  oi.order_key,
+  oi.store_key,
+  CASE
+    WHEN oi.created_date < DATE '2026-03-01' AND oi.store_key IN ('TS','MZ') THEN 'LGM'
+    WHEN oi.store_key IN ('TS','MZ') THEN 'DSY'
+    ELSE coalesce(oi.group_key, s.group_key)
+  END AS group_key,
+  oi.order_no,
+  oi.bill_no,
+  oi.created_date,
+  date_trunc('month', oi.created_date)::date AS month_start,
+  oi.order_create_time,
+  oi.standard_goods_sn,
+  oi.raw_goods_sn,
+  oi.skc,
+  oi.goods_title,
+  coalesce(oi.quantity,0) AS quantity,
+  coalesce(oi.sales_sar,0) AS gross_revenue_sar,
+  CASE WHEN coalesce(ai.revenue_reversal,false) THEN 0 ELSE coalesce(oi.sales_sar,0) END AS net_revenue_sar,
+  c.unit_cost_sar,
+  CASE
+    WHEN c.unit_cost_sar IS NULL THEN NULL
+    WHEN coalesce(oi.sales_sar,0) <= 0 THEN 0
+    ELSE c.unit_cost_sar * coalesce(oi.quantity,0)
+  END AS product_cost_sar,
+  CASE
+    WHEN coalesce(ai.revenue_reversal,false)
+      AND coalesce(oi.sales_sar,0) > 0
+      AND coalesce(ai.resolution_plans,'') ILIKE '%退货%'
+      AND coalesce(ai.resolution_plans,'') NOT ILIKE '%仅退款%'
+      AND coalesce(ai.return_package_statuses,'') NOT ILIKE '%派件失败%'
+      AND coalesce(ai.return_package_statuses,'') NOT ILIKE '%派件异常%'
+      AND coalesce(ai.order_sub_statuses,'') NOT ILIKE '%派件失败%'
+      AND coalesce(ai.order_sub_statuses,'') NOT ILIKE '%派件异常%'
+    THEN 13.88
+    ELSE 0
+  END AS return_delivery_fee_sar,
+  CASE
+    WHEN c.unit_cost_sar IS NULL THEN NULL
+    ELSE (CASE WHEN coalesce(ai.revenue_reversal,false) THEN 0 ELSE coalesce(oi.sales_sar,0) END)
+      - CASE WHEN coalesce(oi.sales_sar,0) <= 0 THEN 0 ELSE c.unit_cost_sar * coalesce(oi.quantity,0) END
+      - CASE
+          WHEN coalesce(ai.revenue_reversal,false)
+            AND coalesce(oi.sales_sar,0) > 0
+            AND coalesce(ai.resolution_plans,'') ILIKE '%退货%'
+            AND coalesce(ai.resolution_plans,'') NOT ILIKE '%仅退款%'
+            AND coalesce(ai.return_package_statuses,'') NOT ILIKE '%派件失败%'
+            AND coalesce(ai.return_package_statuses,'') NOT ILIKE '%派件异常%'
+            AND coalesce(ai.order_sub_statuses,'') NOT ILIKE '%派件失败%'
+            AND coalesce(ai.order_sub_statuses,'') NOT ILIKE '%派件异常%'
+          THEN 13.88
+          ELSE 0
+        END
+  END AS profit_before_storage_sar,
+  CASE
+    WHEN c.unit_cost_sar IS NULL THEN NULL
+    WHEN (CASE WHEN coalesce(ai.revenue_reversal,false) THEN 0 ELSE coalesce(oi.sales_sar,0) END) = 0 THEN NULL
+    ELSE (
+      (CASE WHEN coalesce(ai.revenue_reversal,false) THEN 0 ELSE coalesce(oi.sales_sar,0) END)
+      - CASE WHEN coalesce(oi.sales_sar,0) <= 0 THEN 0 ELSE c.unit_cost_sar * coalesce(oi.quantity,0) END
+      - CASE
+          WHEN coalesce(ai.revenue_reversal,false)
+            AND coalesce(oi.sales_sar,0) > 0
+            AND coalesce(ai.resolution_plans,'') ILIKE '%退货%'
+            AND coalesce(ai.resolution_plans,'') NOT ILIKE '%仅退款%'
+            AND coalesce(ai.return_package_statuses,'') NOT ILIKE '%派件失败%'
+            AND coalesce(ai.return_package_statuses,'') NOT ILIKE '%派件异常%'
+            AND coalesce(ai.order_sub_statuses,'') NOT ILIKE '%派件失败%'
+            AND coalesce(ai.order_sub_statuses,'') NOT ILIKE '%派件异常%'
+          THEN 13.88
+          ELSE 0
+        END
+    ) / nullif((CASE WHEN coalesce(ai.revenue_reversal,false) THEN 0 ELSE coalesce(oi.sales_sar,0) END), 0)
+  END AS profit_margin_before_storage,
+  c.complete_batch_count::bigint AS complete_batch_count,
+  c.ignored_batch_count::bigint AS ignored_batch_count,
+  (c.unit_cost_sar IS NULL) AS cost_missing,
+  coalesce(ai.revenue_reversal,false) AS revenue_reversal,
+  coalesce(ai.after_sales_cases,0) AS after_sales_cases,
+  coalesce(ai.impact_quantity,0) AS impact_quantity,
+  coalesce(ai.impact_amount_sar,0) AS impact_amount_sar,
+  ai.resolution_plans,
+  ai.order_sub_statuses,
+  ai.return_package_statuses
+FROM fact.order_item oi
+LEFT JOIN dim.store s ON s.store_key = oi.store_key
+LEFT JOIN mart.product_unit_cost_by_match_key c
+  ON c.match_key <> ''
+ AND c.match_key = dim.product_match_key(oi.standard_goods_sn)
+LEFT JOIN LATERAL (
+  SELECT *
+  FROM mart.profit_after_sales_impact x
+  WHERE x.store_key = oi.store_key
+    AND x.order_no = oi.order_no
+    AND x.revenue_reversal
+    AND (
+      (coalesce(x.skc,'') <> '' AND x.skc = oi.skc)
+      OR (coalesce(x.standard_goods_sn,'') <> '' AND x.standard_goods_sn = oi.standard_goods_sn)
+      OR (coalesce(x.skc,'') = '' AND coalesce(x.standard_goods_sn,'') = '')
+    )
+  ORDER BY CASE WHEN x.skc = oi.skc THEN 0 WHEN x.standard_goods_sn = oi.standard_goods_sn THEN 1 ELSE 2 END
+  LIMIT 1
+) ai ON true;
+
+CREATE OR REPLACE VIEW mart.profit_daily_store_product AS
+SELECT
+  created_date AS date,
+  store_key,
+  group_key,
+  standard_goods_sn,
+  count(*) AS order_lines,
+  count(DISTINCT order_key) AS orders,
+  sum(quantity) AS quantity,
+  sum(gross_revenue_sar) AS gross_revenue_sar,
+  sum(net_revenue_sar) AS net_revenue_sar,
+  sum(product_cost_sar) FILTER (WHERE NOT cost_missing) AS product_cost_sar,
+  sum(return_delivery_fee_sar) AS return_delivery_fee_sar,
+  sum(profit_before_storage_sar) FILTER (WHERE NOT cost_missing) AS profit_before_storage_sar,
+  sum(net_revenue_sar) FILTER (WHERE NOT cost_missing) AS known_net_revenue_sar,
+  sum(gross_revenue_sar) FILTER (WHERE NOT cost_missing) AS known_gross_revenue_sar,
+  sum(gross_revenue_sar) FILTER (WHERE cost_missing) AS missing_cost_revenue_sar,
+  sum(quantity) FILTER (WHERE cost_missing) AS missing_cost_quantity,
+  count(*) FILTER (WHERE cost_missing) AS missing_cost_lines,
+  count(*) FILTER (WHERE revenue_reversal) AS reversal_lines,
+  sum(return_delivery_fee_sar) FILTER (WHERE revenue_reversal) AS reversal_fee_sar,
+  CASE
+    WHEN sum(net_revenue_sar) FILTER (WHERE NOT cost_missing) > 0
+    THEN sum(profit_before_storage_sar) FILTER (WHERE NOT cost_missing)
+      / nullif(sum(net_revenue_sar) FILTER (WHERE NOT cost_missing), 0)
+    ELSE NULL
+  END AS profit_margin_before_storage,
+  CASE
+    WHEN sum(gross_revenue_sar) > 0
+    THEN sum(gross_revenue_sar) FILTER (WHERE NOT cost_missing) / nullif(sum(gross_revenue_sar), 0)
+    ELSE NULL
+  END AS cost_coverage_revenue_rate
+FROM mart.profit_order_item
+GROUP BY created_date, store_key, group_key, standard_goods_sn;
+
+CREATE OR REPLACE VIEW mart.profit_month_group AS
+WITH group_month AS (
+  SELECT
+    month_start,
+    group_key,
+    sum(gross_revenue_sar) AS gross_revenue_sar,
+    sum(net_revenue_sar) AS net_revenue_sar,
+    sum(product_cost_sar) FILTER (WHERE NOT cost_missing) AS product_cost_sar,
+    sum(return_delivery_fee_sar) AS return_delivery_fee_sar,
+    sum(profit_before_storage_sar) FILTER (WHERE NOT cost_missing) AS profit_before_storage_sar,
+    sum(gross_revenue_sar) FILTER (WHERE NOT cost_missing) AS known_gross_revenue_sar,
+    sum(gross_revenue_sar) FILTER (WHERE cost_missing) AS missing_cost_revenue_sar,
+    count(*) FILTER (WHERE cost_missing) AS missing_cost_lines,
+    count(*) FILTER (WHERE revenue_reversal) AS reversal_lines
+  FROM mart.profit_order_item
+  GROUP BY month_start, group_key
+),
+month_total AS (
+  SELECT month_start, sum(net_revenue_sar) AS month_net_revenue_sar
+  FROM group_month
+  GROUP BY month_start
+)
+SELECT
+  g.month_start,
+  g.group_key,
+  g.gross_revenue_sar,
+  g.net_revenue_sar,
+  g.product_cost_sar,
+  g.return_delivery_fee_sar,
+  g.profit_before_storage_sar,
+  g.known_gross_revenue_sar,
+  g.missing_cost_revenue_sar,
+  g.missing_cost_lines,
+  g.reversal_lines,
+  coalesce(sf.total_fee_sar,0) AS month_storage_fee_sar,
+  CASE
+    WHEN coalesce(mt.month_net_revenue_sar,0) > 0
+    THEN coalesce(sf.total_fee_sar,0) * g.net_revenue_sar / nullif(mt.month_net_revenue_sar,0)
+    ELSE 0
+  END AS allocated_storage_fee_sar,
+  g.profit_before_storage_sar
+    - CASE
+        WHEN coalesce(mt.month_net_revenue_sar,0) > 0
+        THEN coalesce(sf.total_fee_sar,0) * g.net_revenue_sar / nullif(mt.month_net_revenue_sar,0)
+        ELSE 0
+      END AS profit_after_storage_sar,
+  CASE
+    WHEN g.net_revenue_sar > 0
+    THEN (
+      g.profit_before_storage_sar
+      - CASE
+          WHEN coalesce(mt.month_net_revenue_sar,0) > 0
+          THEN coalesce(sf.total_fee_sar,0) * g.net_revenue_sar / nullif(mt.month_net_revenue_sar,0)
+          ELSE 0
+        END
+    ) / nullif(g.net_revenue_sar,0)
+    ELSE NULL
+  END AS profit_margin_after_storage,
+  CASE
+    WHEN g.gross_revenue_sar > 0 THEN g.known_gross_revenue_sar / nullif(g.gross_revenue_sar,0)
+    ELSE NULL
+  END AS cost_coverage_revenue_rate
+FROM group_month g
+JOIN month_total mt ON mt.month_start = g.month_start
+LEFT JOIN fact.monthly_storage_fee sf ON sf.month_start = g.month_start;
+
+CREATE OR REPLACE VIEW mart.profit_product_summary AS
+SELECT
+  p.standard_goods_sn,
+  sum(p.gross_revenue_sar) AS gross_revenue_sar,
+  sum(p.net_revenue_sar) AS net_revenue_sar,
+  sum(p.quantity) AS quantity,
+  sum(p.product_cost_sar) AS product_cost_sar,
+  sum(p.return_delivery_fee_sar) AS return_delivery_fee_sar,
+  sum(p.profit_before_storage_sar) AS profit_before_storage_sar,
+  CASE
+    WHEN sum(p.net_revenue_sar) FILTER (WHERE p.missing_cost_lines = 0) > 0
+    THEN sum(p.profit_before_storage_sar) / nullif(sum(p.known_net_revenue_sar),0)
+    ELSE NULL
+  END AS profit_margin_before_storage,
+  sum(p.missing_cost_revenue_sar) AS missing_cost_revenue_sar,
+  sum(p.missing_cost_quantity) AS missing_cost_quantity,
+  sum(p.missing_cost_lines) AS missing_cost_lines,
+  sum(p.reversal_lines) AS reversal_lines,
+  max(c.unit_cost_sar) AS unit_cost_sar,
+  max(c.complete_batch_count)::bigint AS complete_batch_count,
+  max(c.ignored_batch_count)::bigint AS ignored_batch_count,
+  max(c.costed_quantity) AS costed_quantity,
+  max(c.avg_purchase_unit_price) AS avg_purchase_unit_price,
+  max(c.avg_volume_l) AS avg_volume_l,
+  max(c.avg_weight_kg) AS avg_weight_kg,
+  max(c.last_imported_at) AS last_cost_imported_at,
+  CASE
+    WHEN sum(p.gross_revenue_sar) > 0
+    THEN sum(p.known_gross_revenue_sar) / nullif(sum(p.gross_revenue_sar),0)
+    ELSE NULL
+  END AS cost_coverage_revenue_rate
+FROM mart.profit_daily_store_product p
+LEFT JOIN mart.product_unit_cost_by_match_key c
+  ON c.match_key <> ''
+ AND c.match_key = dim.product_match_key(p.standard_goods_sn)
+GROUP BY p.standard_goods_sn;
+
 CREATE OR REPLACE VIEW mart.bi_store_overview_current AS
 WITH latest_sales AS (
   SELECT max(date) AS date FROM fact.store_daily_sales
@@ -997,7 +1399,7 @@ SELECT
   (l.is_on_shelf
     AND coalesce(l.is_hard_dead,false) = false
     AND l.first_shelf_time IS NOT NULL
-    AND l.first_shelf_time::date <= l.snapshot_date - interval '30 days'
+    AND l.first_shelf_time::date <= (l.snapshot_date - 30)
     AND coalesce(p.c30_sale_cnt,0) = 0) AS retire_candidate,
   (l.is_on_shelf
     AND coalesce(p.eps_uv,0) >= 100
@@ -1011,7 +1413,7 @@ SELECT
     WHEN l.is_wait_shelf AND l.wait_shelf_blocked THEN '待上架卡点'
     WHEN l.is_on_shelf AND coalesce(p.c30_sale_cnt,0) = 0
       AND l.first_shelf_time IS NOT NULL
-      AND l.first_shelf_time::date <= l.snapshot_date - interval '30 days' THEN '下架候选'
+      AND l.first_shelf_time::date <= (l.snapshot_date - 30) THEN '下架候选'
     WHEN l.is_on_shelf AND coalesce(p.eps_uv,0) >= 100 AND coalesce(p.click_rate,0) < 0.02 THEN '优化：高曝光低点击'
     WHEN l.is_on_shelf AND coalesce(p.goods_uv,0) >= 30 AND coalesce(p.pay_rate,0) < 0.01 THEN '优化：高访客低支付'
     WHEN l.is_on_shelf THEN '正常在售'
@@ -1136,7 +1538,7 @@ comments AS (
     count(*) FILTER (WHERE goods_comment_star <= 3) AS low_star_comment_count,
     avg(goods_comment_star) AS avg_comment_star
   FROM fact.product_comment
-  WHERE comment_date >= (SELECT date FROM latest_business) - interval '90 days'
+  WHERE comment_date >= ((SELECT date FROM latest_business) - 90)
   GROUP BY store_key
 ),
 marketing AS (
@@ -1323,7 +1725,7 @@ comments AS (
     count(*) FILTER (WHERE goods_comment_star <= 3) AS low_star_comment_count,
     avg(goods_comment_star) AS avg_comment_star
   FROM fact.product_comment
-  WHERE comment_date >= (SELECT date FROM latest_business) - interval '90 days'
+  WHERE comment_date >= ((SELECT date FROM latest_business) - 90)
   GROUP BY standard_goods_sn
 )
 SELECT
@@ -1406,7 +1808,7 @@ order_sales_30 AS (
     standard_goods_sn,
     sum(coalesce(quantity,0)) AS order_qty_30
   FROM fact.order_item
-  WHERE created_date >= (SELECT date FROM latest_inventory) - interval '30 days'
+  WHERE created_date >= ((SELECT date FROM latest_inventory) - 30)
     AND coalesce(standard_goods_sn, '') <> ''
   GROUP BY store_key, standard_goods_sn
 ),

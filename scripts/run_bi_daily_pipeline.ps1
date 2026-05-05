@@ -200,6 +200,11 @@ if (-not $SkipBusinessLoad) {
   }
 }
 
+Run-NonBlocking-Step "Import product costs and monthly storage fees if provided" {
+  node .\scripts\import_product_costs.mjs --dir .\inputs\costs `
+    --distro $Distro --container $Container --database $Database --user $User
+}
+
 Run-Step "Audit BI warehouse" {
   node .\scripts\audit_bi_warehouse.mjs --distro $Distro --container $Container --database $Database --user $User
 }

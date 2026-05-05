@@ -23,13 +23,16 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 ## 业务口径
 - 统计日：北京时间自然日。
 - 销售额：按 SHEIN 订单创建时间，汇总商品明细正金额行。
-- 汇率：`1 SAR = 1.8 RMB`；预测利润率：`25%`。
+- 汇率：`1 SAR = 1.8 RMB`；BI 首页和成本/利润页使用真实利润口径，不再用 `25%` 预测利润冒充真实利润。
+- BI 净成交额：退货、仅退款、派送失败等反转订单不计入成交额、订单数和销量；仍扣商品成本，只有真实退货退款额外扣 `13.88 SAR`。
 - 产品销量：按标准货号归并；一单同产品 2 件计 2。
 - 今日动销产品数：按分组、按当天统计标准货号去重数；某标准货号当天在该组任一店铺销量 `>0` 即计 1。
 - 不做猜测性单店时区偏移；HL 的错误 `accountUtcOffsetHours=3` 已删除并回补。
 
 ## 定时任务
 - `00:10`：前一天最终版。
+- `05:30`：链接管理 15 店每日同步，任务名 `SHEIN-Sales-15Stores-LinkManagement-0530`，只写本地 / PostgreSQL / BI，不再写飞书链接表。
+- `06:40`：BI 每日流水线，任务名 `SHEIN-BI-Daily-Pipeline-0640`。
 - `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10`：当天滚动同步。
 - 日报：早上 08:10 同步成功后自动发送；上午后续成功同步可补发一次，用 `state/daily-report-sent-YYYYMMDD.flag` 防重复。
 - watchdog：`09:20` 和 Windows 登录时，只做漏跑补偿。
@@ -56,6 +59,8 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 单店抓取：`node scripts/fetch_shein_sales.mjs DL --date YYYY-MM-DD`
 - 单组同步：`node scripts/run_sales_sync_job.mjs --mode intraday --group DSY`
 - 15 店当天同步：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_intraday_dsy.ps1`
+- BI 每日流水线：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_bi_daily_pipeline.ps1`
+- 生成 BI 门户：`node scripts/generate_bi_portal.mjs`
 - 月表：`node scripts/generate_monthly_sales_table.mjs --month YYYY-MM --include-lgm`
 - 年度/宽表：`node scripts/generate_compact_display_tables.mjs --group ALL --current-month YYYY-MM --recent-months 2`
 - 当月看板：`node scripts/setup_lark_dashboard_main_v3.mjs --month YYYY-MM`
@@ -85,7 +90,7 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 
 ## 工具
 - 生产抓取链路：自写 Node + Chrome DevTools Protocol/WebSocket + 工作区 Chrome profile。
-- Chrome 路径：`launch_store_browser.mjs` 优先 C 盘正式安装路径，D 盘只兜底；店铺 profile 仍必须留在工作区。headless 启动失败时同步脚本会 fallback 到后台窗口模式。
+- Chrome 路径：`launch_store_browser.mjs` 优先 C 盘正式安装路径，D 盘只兜底；店铺 profile 仍必须留在工作区。headless 启动失败时同步脚本会 fallback 到后台窗口模式。Windows 后台启动通过 `PowerShell Start-Process`，不要改回 `cmd start`。
 - 飞书 Base/IM：`lark-cli`。
 - 飞书看板富文本和样式：Playwright + `profiles/persistent-feishu-profile`。
 - 本机有 `opencli`，PowerShell 下应调用 `C:\Users\dushengyi\AppData\Roaming\npm\opencli.cmd`。当前稳定生产链路暂不替换；可用于后续网页探索、临时浏览器操作或封装 lark-cli。

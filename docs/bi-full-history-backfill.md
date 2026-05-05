@@ -1,6 +1,6 @@
 ﻿# SHEIN BI 全量历史回填记录
 
-最后更新：2026-05-02
+最后更新：2026-05-05
 
 ## 当前结论
 
@@ -68,13 +68,13 @@
 - `scripts/scheduled_intraday_dsy.ps1`
 - 后置入口：`scripts/run_bi_after_feishu_sync.ps1`
 
-独立 05:30 链接任务 `SHEIN-Sales-15Stores-LinkManagement-0530` 已删除；链接刷新改由飞书白天同步后的每日 05:30 固定执行，并用 `state/link-management-synced-YYYY-MM-DD.flag` 防重。
+链接刷新使用每日固定任务 `SHEIN-Sales-15Stores-LinkManagement-0530`，北京时间 `05:30` 抓前一完整业务日链接表现；飞书链接管理表已废弃，该任务只写本地 JSON、PostgreSQL 和 BI 门户，并用 `state/link-management-synced-YYYY-MM-DD.flag` 防重。
 
 ## 剩余限制
 
 - 销售/订单历史已按开店以来全量入仓。
 - 链接表现、库存、质量、售后、履约、财务等域目前按后台接口可用窗口或当前快照入仓；后续如果要“所有业务域全历史”，需要逐域确认后台是否支持历史范围查询。
-- 当前链接数据日仍是 `2026-05-01`，销售/业务日为 `2026-05-02`；门户会显示口径提醒。
+- 当前日常 BI 口径由流水线维护；截至 `2026-05-05` 收尾验证，销售/业务日为 `2026-05-05`，链接表现日为 `2026-05-04`。
 
 ## 2026-05-02 高价值业务域补量状态
 
