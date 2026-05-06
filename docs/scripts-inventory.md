@@ -27,6 +27,8 @@
   - `setup_lark_dashboard_previous_month.mjs`
   - `update_dashboard_time_richtext_ui.mjs`
   - `send_daily_lark_report.mjs`
+  - `generate_daily_report_image.mjs`
+  - `generate_monthly_report_image.mjs`
   - `generate_today_detailed_report_image.mjs`
 - BI 仓库/门户：
   - `run_bi_daily_pipeline.ps1`
@@ -43,6 +45,7 @@
   - `open_bi_portal.ps1`
   - `check_bi_first_run.mjs`
   - `audit_bi_warehouse.mjs`
+  - `generate_bi_briefing.mjs`
 - 链接管理：
   - `scheduled_link_management_daily.ps1`
   - `run_link_management_job.mjs`
@@ -71,6 +74,7 @@
 - `use_utf8.ps1`
 - `notify_sync_issue.mjs`
 - `check_workspace_skill.ps1`
+- `watchdog_sales_automation.mjs`
 
 ## 审计、补历史、一次性修复，保留但不日常运行
 
@@ -105,6 +109,14 @@
 - `setup_lark_dashboard_native.mjs`
   - 状态：旧/实验看板脚本。
   - 暂保留作历史参考，不用于日常。
+- `scheduled_daily_report_dsy.ps1`
+  - 状态：固定 `09:00` 日报任务包装器，当前默认不安装。
+  - 原因：日报已改为早上 `08:10` 同步成功后自动发送，上午后续成功同步可补发一次并用 flag 防重。
+  - 只有用户明确要求恢复独立固定日报任务时，才通过 `install_windows_scheduled_tasks.ps1 -IncludeDailyReport` 安装。
+- `generate_lark_ops_report_doc.mjs`
+  - 状态：飞书文档版经营入口兜底脚本。
+  - 原因：原用于飞书 Base Dashboard 不稳定时生成普通飞书文档；当前主入口已转为本地 BI 门户和飞书日报。
+  - 暂保留作历史参考，不用于日常自动任务。
 
 ## 临时探索 / 排障探针，后续可考虑归档
 

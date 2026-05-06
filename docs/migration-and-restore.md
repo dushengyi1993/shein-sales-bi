@@ -21,6 +21,7 @@
 - `schemas/`：飞书 Base 等结构参考。
 - `scripts/`：抓取、同步、BI 入仓、门户生成、定时任务、运维脚本。
 - `skills/shein-sales-ops/`：项目专用业务规则 skill。
+- `outputs/bi-portal/index.html`、`outputs/bi-portal/data.json`：当前 BI 门户静态产物，作为私有仓库里的可复用入口保留。
 - 根目录 `.cmd`：给人直接双击使用的入口。
 
 ## GitHub 仓库里故意不放
@@ -28,7 +29,7 @@
 | 路径 | 为什么不传 | 迁移时怎么处理 |
 | --- | --- | --- |
 | `profiles/` | Chrome 店铺登录态，包含 cookies、session 和大量可重建缓存 | 当前仍用浏览器抓取时，换电脑要用安全方式单独复制；API 替换完成后不应依赖它 |
-| `outputs/` | 抓取结果、BI 静态数据、报表图片等运行输出，体积会持续增长 | 可重新跑流水线生成；若要保留历史快照，单独归档 |
+| `outputs/`（除 `outputs/bi-portal/index.html` / `data.json`） | 抓取结果、报表图片、审计结果等运行输出，体积会持续增长 | 可重新跑流水线生成；若要保留历史快照，单独归档 |
 | `logs/` | 计划任务日志、审计日志，可能含业务运行细节 | 排障或审计需要时单独备份 |
 | `state/` | 本地运行状态、动作处理状态、同步 flag | 迁移当前局域网协作状态时，单独复制 `state/bi_action_state.json`；正式团队版建议入 PostgreSQL |
 | `backups/` | 本地历史备份和归档，体积大 | 只在需要回查旧资料时单独保存 |

@@ -78,6 +78,7 @@
 ## SHEIN BI 系统
 - 架构原则：`SHEIN 后台抓取 -> 本地 JSON / PostgreSQL 数据仓库 -> Metabase BI / 本地 BI 门户`。
 - 本地 BI 门户入口：`http://127.0.0.1:8787/`；文件为 `outputs/bi-portal/index.html`；生成脚本为 `scripts/generate_bi_portal.mjs`；数据文件为 `outputs/bi-portal/data.json`。
+- GitHub 私有仓库已纳入 `outputs/bi-portal/index.html` 和 `outputs/bi-portal/data.json` 作为当前 BI 门户可复用产物；`outputs/` 其他抓取结果、报表、图片、审计结果仍默认忽略，迁移生产状态时单独备份。
 - V1 是当前唯一正式本地 BI 门户；V2 平行版本已废弃，`outputs/bi-portal/v2/`、`scripts/generate_bi_portal_v2.mjs` 和 V1 的 V2 跳转入口已删除，后续不要恢复自动生成 V2。
 - BI 门户侧栏“链接表现数据”更新时间必须显示链接源文件抓取时间，即 `outputs/shein_links/<店铺>/<链接日>.json` 的 `fetchTime` 最大值；“售后/库存/财务数据”也必须显示业务域源文件抓取时间，即 `outputs/shein_business_domains/<店铺>/<业务日>.json` 的 `fetchTime` 最大值；不要用 BI 重跑入仓时的 `updated_at` 冒充抓取时间。
 - Metabase 运行在 WSL + Docker，Docker 数据位于 `D:\SheinBI\docker-data\docker-data.ext4`，WSL 发行版位于 `D:\WSL\Ubuntu-24.04`。
