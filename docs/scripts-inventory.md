@@ -54,9 +54,17 @@
 - 成本/利润：
   - `create_cost_template.mjs`
   - `import_product_costs.mjs`
+- 营销活动半自动：
+  - `marketing/build_marketing_cost_map.py`
+  - `marketing/dsy_marketing_deadline_fill.mjs`
 - OpenAPI 试点：
   - `check_shein_openapi_client.mjs`
   - `probe_shein_openapi_test_call.mjs`
+  - `shein_openapi_authorize_hl.mjs`
+  - `probe_shein_openapi_hl.mjs`
+  - `fetch_shein_openapi_sales.mjs`
+  - `reconcile_shein_openapi_hl_sales.mjs`
+  - `load_shein_openapi_sales_warehouse.mjs`
 
 ## 运维、登录、环境辅助，保留
 

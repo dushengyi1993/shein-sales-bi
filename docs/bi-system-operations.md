@@ -180,6 +180,7 @@
 - 检查 BI 门户：打开 [http://127.0.0.1:8787/#tab=system](http://127.0.0.1:8787/#tab=system)。
 - 检查局域网协作服务：打开 [http://192.168.2.49:8787/#tab=system](http://192.168.2.49:8787/#tab=system)，或检查 `http://192.168.2.49:8787/api/health` 返回 `lanMode=true`、`authRequired=false`、`writableActionState=true`。
 - 修改 BI 门户 UI 时，默认先后台验证：`node --check scripts/generate_bi_portal.mjs`、`node scripts/generate_bi_portal.mjs`、静态检查 `outputs/bi-portal/index.html` / `data.json`。除非用户要求或必须排查浏览器交互问题，不主动打开前端。
+- 检查 HL OpenAPI 销售试点：`node scripts/fetch_shein_openapi_sales.mjs HL --start YYYY-MM-DD --end YYYY-MM-DD` 后运行 `node scripts/load_shein_openapi_sales_warehouse.mjs --store HL --start YYYY-MM-DD --end YYYY-MM-DD`，再在系统状态页查看 “SHEIN OpenAPI 试点对账”。
 - 检查成本文件解析但不入库：`node .\scripts\import_product_costs.mjs --dry-run`。
 - 重新创建成本模板：`node .\scripts\create_cost_template.mjs`。
 - 检查 BI 自动任务：`检查SHEIN-BI自动任务.cmd`。

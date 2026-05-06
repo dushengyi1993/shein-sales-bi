@@ -7,8 +7,10 @@
 - 链接表现改为每日后半夜一次，当前任务为 `SHEIN-Sales-15Stores-LinkManagement-0530`，每天 `05:30`，只写本地 / PostgreSQL / BI；飞书链接管理表已废弃。旧 `0340` / `0510` 链接任务不要恢复。
 - HL 已切换为主账号 profile：`profiles/persistent-shein-main-profile`；旧 `profiles/persistent-hl-profile` 已删除。
 - `2026-05-05` Docker / WSL 数据盘异常已手动恢复；`2026-05-06 05:30` 链接/业务域任务和 `2026-05-06 07:00` BI 每日流水线已自动跑通。飞书多维表格 / 看板写入暂停开关为 `state/feishu-base-sync-paused.flag`。
+- HL OpenAPI 销售试点已跑通并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` 写入 `fact.openapi_*` 并行事实表与 `mart.openapi_sales_reconciliation` 对账表；BI 系统状态页显示 “SHEIN OpenAPI 试点对账”。正式切换生产销售表前继续累计多日 `matched`。
+- 系统定位正在从“BI 数据分析”扩展为“自动运营驾驶舱”：先把可重复运营动作沉淀为脚本和规则，再按“建议/预填/复核/人工确认提交/审计留痕”的边界逐步开放自动化。
 
-本工作区用于 SHEIN 15 店销售数据自动抓取、飞书多维表格统计、每日飞书日报、链接管理，以及正在并行建设的 PostgreSQL + Metabase + 本地 BI 经营门户。
+本工作区用于 SHEIN 15 店销售数据自动抓取、飞书多维表格统计、每日飞书日报、链接管理、营销活动报名辅助，以及正在并行建设的 PostgreSQL + Metabase + 本地 BI / 自动运营驾驶舱。
 
 当前原则：**SHEIN 抓数、BI 刷新和飞书日报继续运行；飞书多维表格 / 看板写入先暂停，待用户确认再恢复。**
 
@@ -125,6 +127,14 @@
   `node scripts/check_bi_first_run.mjs`
 - 重新生成本地 BI 门户：
   `node scripts/generate_bi_portal.mjs`
+- 抓取 HL OpenAPI 销售试点数据：
+  `node scripts/fetch_shein_openapi_sales.mjs HL --start YYYY-MM-DD --end YYYY-MM-DD`
+- 将 HL OpenAPI 销售写入并行表并生成对账：
+  `node scripts/load_shein_openapi_sales_warehouse.mjs --store HL --start YYYY-MM-DD --end YYYY-MM-DD`
+- 生成营销活动成本映射：
+  `python scripts/marketing/build_marketing_cost_map.py`
+- 辅助填报 DSY 两天内截止的营销活动（只预填，不点最终提交）：
+  `node scripts/marketing/dsy_marketing_deadline_fill.mjs --hours 48`
 - 生成成本表模板：
   `node scripts/create_cost_template.mjs`
 - 检查/导入成本表：
@@ -148,6 +158,7 @@
 - BI 仓库模型：`docs/bi-warehouse-model.md`
 - SHEIN 后台数据地图：`docs/shein-backend-survey.md`
 - SHEIN 官方 OpenAPI 接入计划：`docs/shein-openapi-integration.md`
+- 营销活动报名价格规则：`docs/marketing-campaign-signup-pricing-rules.md`
 - scripts 脚本清单与废弃边界：`docs/scripts-inventory.md`
 - 数据模型：`docs/data-model.md`
 - 实施路线：`docs/implementation-roadmap.md`

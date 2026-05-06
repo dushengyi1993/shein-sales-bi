@@ -25,6 +25,8 @@ function parseArgs(argv) {
     dashboardJson: path.join(ROOT, 'outputs', 'link-dashboard', 'link-ops-dashboard-2026-04-30.json'),
     salesDate: '',
     linkDate: '',
+    skipLinks: false,
+    skipDashboard: false,
     dryRun: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -38,6 +40,8 @@ function parseArgs(argv) {
     else if (a === '--dashboard-json') args.dashboardJson = path.resolve(argv[++i]);
     else if (a === '--sales-date') args.salesDate = argv[++i];
     else if (a === '--link-date') args.linkDate = argv[++i];
+    else if (a === '--skip-links') args.skipLinks = true;
+    else if (a === '--skip-dashboard') args.skipDashboard = true;
     else if (a === '--dry-run') args.dryRun = true;
   }
   return args;
@@ -387,6 +391,9 @@ async function collectSales(args, productMap, skcMap) {
 }
 
 async function collectLinks(args, productMap, skcMap) {
+  if (args.skipLinks) {
+    return {master: [], perf: [], coverage: [], suggestions: [], catalog: [], fileCount: 0};
+  }
   const files = await listJsonFiles(args.linksDir, args.linkDate);
   const master = [];
   const perf = [];
@@ -538,6 +545,7 @@ async function collectLinks(args, productMap, skcMap) {
 }
 
 async function collectDashboard(args) {
+  if (args.skipDashboard) return {actions: [], storeCockpit: []};
   if (!fssync.existsSync(args.dashboardJson)) return {actions: [], storeCockpit: []};
   const j = await readJson(args.dashboardJson);
   const date = j.meta?.linkDate || j.meta?.salesDate || null;

@@ -29,6 +29,7 @@
 | 路径 | 为什么不传 | 迁移时怎么处理 |
 | --- | --- | --- |
 | `profiles/` | Chrome 店铺登录态，包含 cookies、session 和大量可重建缓存 | 当前仍用浏览器抓取时，换电脑要用安全方式单独复制；API 替换完成后不应依赖它 |
+| `config/shein_openapi.local.json` | SHEIN OpenAPI 应用级和店铺级真实密钥 | 只在本机或云端密钥管理中保存；迁移时单独安全传递，禁止提交 GitHub |
 | `outputs/`（除 `outputs/bi-portal/index.html` / `data.json`） | 抓取结果、报表图片、审计结果等运行输出，体积会持续增长 | 可重新跑流水线生成；若要保留历史快照，单独归档 |
 | `logs/` | 计划任务日志、审计日志，可能含业务运行细节 | 排障或审计需要时单独备份 |
 | `state/` | 本地运行状态、动作处理状态、同步 flag | 迁移当前局域网协作状态时，单独复制 `state/bi_action_state.json`；正式团队版建议入 PostgreSQL |

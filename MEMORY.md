@@ -9,7 +9,7 @@
 ## 2026-05-03 BI 链接对比 / 制冰机归并 / 评价翻译
 - 货号页和动作池遇到重复弱链接时，必须从全量 `DATA.storeLinks` / 链接仓库取同店同标准货号链接，不能显示“页面明细池未取到完整同组链接”这类退缩兜底。
 - 链接对比指标统一按 `曝光 -> 访客 -> 销量 -> 支付率` 展示，并在每个指标下显示 `7天 / 30天`。
-- `制冰机`、`03038`、`SK-03038`、`SK-03038???` 等统一归并到 `SK-03038制冰机`。
+- `制冰机`、`03038`、`SK-03038` 及带异常尾缀的同类写法统一归并到 `SK-03038制冰机`。
 - 评价中文翻译写入 `fact.product_comment.goods_comment_content_zh`，提供者记录为 `shein-platform`；日常 BI 流水线由业务域抓取/入仓链路直接写入 SHEIN 平台译文，不再运行本地启发式翻译脚本。
 
 ## 2026-05-03 BI 货号 / 评价 / 动作池口径补充
@@ -75,8 +75,18 @@
 - 备货信息里的库存口径不可信，不用于库存低提醒；正确展示库存优先来自商品列表库存接口，后续真实库存等外部系统接入。
 - 今日实操清单必须保持可操作数量，不恢复到千级全量模板建议。
 
+## 营销活动报名规则
+- SHEIN 营销活动自动化只允许辅助勾选商品、填写活动价/降幅和复核，不得点击最终 `提交报名`；最终提交必须由用户在可见前端人工审核后点击。
+- 营销活动报价规则以 `docs/marketing-campaign-signup-pricing-rules.md` 为准：固定价货号按“基准价 + 随机下浮 `2 SAR` / 上浮 `1 SAR`”填报；利润率货号按“目标利润率随机下浮 `2` 个点 / 上浮 `1` 个点”反推；其它货号默认按 `30%` 利润率并允许 `28% ~ 31%` 浮动，平台最低折扣/页面回写规则优先。
+- 营销活动选择商品页必须先把右下角每页显示改成 `500 条/页` 再全选，并核对 `总计 N 个` 与 `已选商品 N 个` 一致；不能在默认 `20 条/页` 下全选。
+- 当前用户指定规则：`SM-505A/TXSM-505A电动缝纫机 -> 110`、`KF-JN-02便携咖啡机 -> 96`、`SK-185台式榨汁机 -> 91`、`SK-03012台式榨汁机 -> 96`、`SK-03038制冰机 -> 330`；`FZ-666颈部按摩器 -> 15% 利润率`；`SK-7025A/SK-7027/SK-7028 绞肉机 -> 25% 利润率`。
+- `2026-05-06` MZ 店铺两个活动已由用户自行提交：`SA-超级爆品活动-第39期 / 40228` 和 `SA New Arrivals Promo_Batch 39 / 40227`；后续不要重复操作 MZ 已提交活动。
+- 营销活动半自动入口已纳入仓库：先运行 `python scripts/marketing/build_marketing_cost_map.py` 生成忽略的本地成本映射 `tmp/mbrs/marketing-cost-map.json`，再运行 `node scripts/marketing/dsy_marketing_deadline_fill.mjs --hours 48`；结果和审计仍输出到忽略目录 `tmp/mbrs/deadline-fill-results/`。
+- 本系统长期定位不只是 BI 数据分析，也是自动运营驾驶舱；所有写操作默认按“建议/预填/用户复核/人工最终提交/审计留痕”推进，除非用户明确授权并已有回滚方案，否则不得直接提交不可逆运营动作。
+
 ## SHEIN BI 系统
 - 架构原则：`SHEIN 后台抓取 -> 本地 JSON / PostgreSQL 数据仓库 -> Metabase BI / 本地 BI 门户`。
+- HL OpenAPI 销售试点已建立并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` -> `scripts/load_shein_openapi_sales_warehouse.mjs` -> `fact.openapi_store_daily_sales` / `fact.openapi_order_header` / `fact.openapi_order_item` / `mart.openapi_sales_reconciliation`；系统状态页会显示 “SHEIN OpenAPI 试点对账”。正式切换生产事实表前必须继续确认多日 `matched`。
 - 本地 BI 门户入口：`http://127.0.0.1:8787/`；文件为 `outputs/bi-portal/index.html`；生成脚本为 `scripts/generate_bi_portal.mjs`；数据文件为 `outputs/bi-portal/data.json`。
 - GitHub 私有仓库已纳入 `outputs/bi-portal/index.html` 和 `outputs/bi-portal/data.json` 作为当前 BI 门户可复用产物；`outputs/` 其他抓取结果、报表、图片、审计结果仍默认忽略，迁移生产状态时单独备份。
 - V1 是当前唯一正式本地 BI 门户；V2 平行版本已废弃，`outputs/bi-portal/v2/`、`scripts/generate_bi_portal_v2.mjs` 和 V1 的 V2 跳转入口已删除，后续不要恢复自动生成 V2。

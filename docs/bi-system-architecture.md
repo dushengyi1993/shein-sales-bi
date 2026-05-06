@@ -92,6 +92,7 @@ BI 系统当前分为三层入口：
    - 负责“每天先看什么、先处理什么、如何复制指令、如何标记处理状态”。
    - 当前服务支持本机 `127.0.0.1:8787` 和临时局域网 `192.168.2.49:8787`；局域网只限私有网段试用，未开放公网。
    - 通过本机服务打开时，动作状态写入 `state/bi_action_state.json`；直接双击 HTML 打开时，动作状态保存在浏览器本地。
+   - 系统状态页已接入 `mart.openapi_sales_reconciliation`，展示 HL OpenAPI 销售试点与浏览器抓取的对账状态；该试点暂不覆盖正式销售事实表。
 
 当前团队访问状态：
 
@@ -135,6 +136,7 @@ BI 系统当前分为三层入口：
 - `fact_after_sales`
 - `fact_fulfillment_daily`
 - `fact_marketing_campaign_daily`
+- OpenAPI 并行试点表：`fact.openapi_store_daily_sales`、`fact.openapi_order_header`、`fact.openapi_order_item`。这些表只用于 API / 浏览器双跑验证，正式切换前不作为首页和日报的生产销售源。
 
 用途：Metabase 的主要数据源。
 
@@ -162,6 +164,7 @@ BI 系统当前分为三层入口：
 - `mart_link_health_score`
 - `mart_product_opportunity`
 - `mart_inventory_risk`
+- `mart.openapi_sales_reconciliation`：OpenAPI 试点与浏览器抓取的日维度对账表，记录销售额、订单数、商品行数、源文件和 `matched` / `warning` 状态。
 
 用途：BI 看板、日常筛选、实操台。
 

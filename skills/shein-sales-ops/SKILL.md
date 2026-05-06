@@ -1,6 +1,6 @@
 ---
 name: shein-sales-ops
-description: SHEIN/希音销售统计自动化项目专用工作流。用户提到 SHEIN 店铺抓取、DSY/LGM、订单创建时间、SAR/RMB、货号归并、飞书 Base、经营看板、日报、历史回补、退货/成本利润或本工作区时使用。优先执行脚本，Markdown 只保留长期规则和入口。
+description: SHEIN/希音销售统计自动化项目专用工作流。用户提到 SHEIN 店铺抓取、DSY/LGM、订单创建时间、SAR/RMB、货号归并、飞书 Base、经营看板、日报、历史回补、退货/成本利润、营销活动报名或本工作区时使用。优先执行脚本，Markdown 只保留长期规则和入口。
 ---
 
 # SHEIN Sales Ops
@@ -18,6 +18,7 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 当月主看板：`SHEIN经营看板 v3-主看板`，ID `blkFn3qHrwdsrJyX`，数据源 `看板数据-MAIN-*`
 - 上月看板：`SHEIN经营看板 v3-上月`，ID `blkWeyZhphgRZYim`，数据源 `看板数据-PREV-*`
 - 店铺：DSY=`DL DX FY LQ NM HL JY ZL TS MZ`；LGM=`CX YJ XL QY QH`
+- HL OpenAPI 销售试点已建立并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` -> `fact.openapi_*` -> `mart.openapi_sales_reconciliation`；正式切换前继续累计多日 `matched`。
 - LGM profile 映射：`CX=profile cx/GS9489101`，`YJ=profile qy/GS7451160`，`XL=profile yj/GS8146729`，`QY=profile xl/GS9307061`，`QH=profile qh/GS8715910`
 
 ## 业务口径
@@ -66,6 +67,8 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 15 店当天同步：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_intraday_dsy.ps1`
 - BI 每日流水线：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_bi_daily_pipeline.ps1`
 - 生成 BI 门户：`node scripts/generate_bi_portal.mjs`
+- 营销活动报名补填：规则见 `docs/marketing-campaign-signup-pricing-rules.md`；当前执行入口为 `node scripts/marketing/dsy_marketing_deadline_fill.mjs --hours 48`，只允许填价和复核，不得点击最终 `提交报名`。
+- HL OpenAPI 销售试点：`node scripts/fetch_shein_openapi_sales.mjs HL --start YYYY-MM-DD --end YYYY-MM-DD` 后运行 `node scripts/load_shein_openapi_sales_warehouse.mjs --store HL --start YYYY-MM-DD --end YYYY-MM-DD`，只写 API 并行事实表和 `mart.openapi_sales_reconciliation`。
 - 月表：`node scripts/generate_monthly_sales_table.mjs --month YYYY-MM --include-lgm`
 - 年度/宽表：`node scripts/generate_compact_display_tables.mjs --group ALL --current-month YYYY-MM --recent-months 2`
 - 当月看板：`node scripts/setup_lark_dashboard_main_v3.mjs --month YYYY-MM`

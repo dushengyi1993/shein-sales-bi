@@ -82,13 +82,51 @@ Signature = RandomKey + Base64String
 - 授权回调拿到的 `tempToken`
 - 未脱敏的完整 API 请求头
 
-## 当前测试验证结果
+## 当前验证结果（2026-05-06）
 
-- 应用已由用户上传图标并提交审核，开放平台应用管理中显示状态为 `审核中`。
-- 平台授权调试工具已跑通测试授权链路：测试 `APP_ID / APP_Secretkey` -> 模拟授权 -> `tempToken` -> `/open-api/auth/get-by-token` -> 店铺级 `openKeyId` 与解密后 `secretKey`。
-- 本地 OpenAPI 客户端已用测试密钥调用测试环境普通接口 `/open-api/goods/query-site-list`，返回 `code=0 / OK`。
-- 测试密钥和测试店铺密钥只保存在 `tmp/shein-openapi-runtime/*.local.json`，该目录被 `.gitignore` 排除，不进入 GitHub。
-- 可复跑的测试接口探针：`node scripts/probe_shein_openapi_test_call.mjs`。
+- HL 真实应用 `HL-皓兰SHEIN运营中台` 已审核通过并启用。
+- 用户已提交 `销量查询` 与 `SFS备货履约` 权限包申请，等待 SHEIN 审核结果。
+- HL 店铺授权已完成，`tempToken` 已通过 `/open-api/auth/get-by-token` 换取店铺级密钥。
+- 真实应用级密钥与店铺级密钥只保存在 `config/shein_openapi.local.json`，该文件被 `.gitignore` 排除，不进入 GitHub。
+- 当前本机出口 IP 已加入开放平台 IP 白名单；后续迁移云端时，还要把云服务器固定出口 IP 加入白名单。
+- 本地 OpenAPI 客户端已成功调用半托管生产环境 `https://openapi.sheincorp.com`。
+- 已跑通的 HL 只读接口：
+  - 店铺信息：`/open-api/openapi-business-backend/query-store-info`
+  - 站点 / 币种：`/open-api/goods/query-site-list`
+  - 商家仓库：`/open-api/msc/warehouse/list`
+  - 商品列表：`/open-api/openapi-business-backend/product/query`
+  - 商品详情：`/open-api/goods/spu-info`
+  - SKU 库存：`/open-api/stock/stock-query`
+  - 订单列表：`/open-api/order/order-list`
+  - 订单详情：`/open-api/order/order-detail`
+  - 退货列表：`/open-api/return-order/list`
+  - 退货详情：`/open-api/return-order/details`
+  - 财务报账单列表：`/open-api/finance/report-order-list`
+  - 财务对账单列表：`/open-api/finance/get-check-order-list`
+  - 财务对账单详情：`/open-api/finance/get-check-order-detail`
+- 已确认财务对账单列表按生成时间查询的窗口不能超过 7 天，项目探针默认使用 6 天窗口。
+- 2026-05-05 与 2026-05-06 两天 HL 订单对账已经通过：订单数、正销售订单数、商品行数、正销售件数、销售额、订单号集合、商品 `goodsId` 集合均与浏览器抓取一致。
+
+可复跑脚本：
+
+```powershell
+node scripts/shein_openapi_authorize_hl.mjs --store HL --port 9360
+node scripts/probe_shein_openapi_hl.mjs --store HL
+node scripts/fetch_shein_openapi_sales.mjs HL --date 2026-05-05
+node scripts/reconcile_shein_openapi_hl_sales.mjs --store HL --start 2026-05-05 --end 2026-05-06
+```
+
+注意：第一条授权脚本只在店铺授权过期或更换应用密钥时需要重新执行。
+
+`scripts/fetch_shein_openapi_sales.mjs` 输出目录为 `outputs/shein_openapi_fetch/`，结构尽量兼容原 `outputs/shein_fetch/`，但不会覆盖浏览器抓取文件。当前已通过 `load_bi_warehouse.mjs --dry-run` 验证可被现有销售入仓流程识别；正式试点入仓使用 `scripts/load_shein_openapi_sales_warehouse.mjs` 写入并行表和对账表，不覆盖浏览器生产事实表。
+
+已补安全开关：
+
+```powershell
+node scripts/load_bi_warehouse.mjs --sales-dir outputs/shein_openapi_fetch --sales-date 2026-05-05 --skip-links --skip-dashboard --dry-run
+```
+
+其中 `--skip-links` 会跳过链接域，`--skip-dashboard` 会跳过旧动作池 / 店铺驾驶舱片段，避免 API 销售试点时误动其他业务域。
 
 ## 分阶段接入计划
 
@@ -107,10 +145,10 @@ Signature = RandomKey + Base64String
 
 ### P2：一个真实店铺试点
 
-- 应用审核通过后，先授权 1 个店铺。
-- 只读接入：站点 / 币种、商品列表、订单列表 / 详情、库存、财务对账、退货。
-- 与当前浏览器抓取结果对账，确认口径差异。
-- API 数据入 PostgreSQL 后刷新 BI 门户。
+- HL 店铺已完成真实授权。
+- 只读接入已验证：站点 / 币种、商品列表、订单列表 / 详情、库存、财务对账、退货。
+- 初步订单销售对账已通过。
+- 当前已完成：HL OpenAPI 销售数据写入 API 并行层，并在 BI 系统状态页展示 OpenAPI / 浏览器对账。下一步继续累计多日 `matched`，并在已申请权限审核通过后扩展库存、退货、财务、SFS 等更多业务域。
 
 ### P3：15 店分批替换
 
@@ -131,3 +169,30 @@ Signature = RandomKey + Base64String
 - 合规证书和资料维护。
 
 所有写操作都必须具备：权限开关、操作者留痕、执行前预览、执行后对账、失败重试边界和人工回滚方案。
+
+## 2026-05-06 进展：HL OpenAPI 并行入仓与 BI 对账展示
+
+本阶段已把 HL 的 OpenAPI 销售数据写入并行表，不覆盖浏览器抓取生产事实表：
+
+- `fact.openapi_store_daily_sales`
+- `fact.openapi_order_header`
+- `fact.openapi_order_item`
+- `mart.openapi_sales_reconciliation`
+
+可复跑脚本：
+
+```powershell
+node scripts/fetch_shein_openapi_sales.mjs HL --start 2026-05-05 --end 2026-05-06
+node scripts/load_shein_openapi_sales_warehouse.mjs --store HL --start 2026-05-05 --end 2026-05-06
+node scripts/generate_bi_portal.mjs
+```
+
+验证结果：
+
+- 2026-05-05：浏览器销售 `108.24 SAR`，OpenAPI 销售 `108.24 SAR`，差异 `0`。
+- 2026-05-06：浏览器销售 `0 SAR`，OpenAPI 销售 `0 SAR`，差异 `0`。
+- 两天订单数、正销售订单数、商品行数、销售额、浏览器独有订单数、API 独有订单数均一致。
+- `outputs/bi-portal/data.json` 已包含 `openapiReconciliation`。
+- `outputs/bi-portal/index.html` 的系统状态页已展示 “SHEIN OpenAPI 试点对账” 卡片。
+
+当前结论：HL 销售入口已经具备“API 与浏览器双跑、并行入仓、BI 可见对账”的最小闭环；正式切换生产事实表前，仍需继续积累多日 matched 结果，并等待已申请权限审核完成后再扩展销量、SFS、库存、财务等更多业务域。

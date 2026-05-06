@@ -423,6 +423,51 @@ async function runPsql(args, sql) {
   return stdout.trim();
 }
 
+async function readOpenApiReconciliation(args) {
+  const sql = `
+SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY date DESC, store_key), '[]'::jsonb)::text
+FROM (
+  SELECT
+    date,
+    store_key,
+    status,
+    browser_source_file,
+    api_source_file,
+    browser_order_count,
+    api_order_count,
+    browser_positive_order_count,
+    api_positive_order_count,
+    browser_goods_line_count,
+    api_goods_line_count,
+    round(coalesce(browser_sales_sar,0)::numeric, 2) AS browser_sales_sar,
+    round(coalesce(api_sales_sar,0)::numeric, 2) AS api_sales_sar,
+    order_count_delta,
+    positive_order_count_delta,
+    goods_line_count_delta,
+    round(coalesce(quantity_positive_delta,0)::numeric, 2) AS quantity_positive_delta,
+    round(coalesce(sales_sar_delta,0)::numeric, 2) AS sales_sar_delta,
+    browser_only_order_count,
+    api_only_order_count,
+    browser_only_goods_count,
+    api_only_goods_count,
+    generated_at
+  FROM mart.openapi_sales_reconciliation
+  ORDER BY date DESC, store_key
+  LIMIT 60
+) t;
+`;
+  try {
+    const raw = await runPsql(args, sql);
+    return JSON.parse(raw || '[]');
+  } catch (err) {
+    const message = String(err?.message || err || '');
+    if (message.includes('openapi_sales_reconciliation') || message.includes('does not exist') || message.includes('relation')) {
+      return [];
+    }
+    throw err;
+  }
+}
+
 function htmlEscape(s) {
   return String(s ?? '')
     .replace(/&/g, '&amp;')
@@ -8753,6 +8798,60 @@ function teamAccessSummaryText(){
     ...r.rows.map(([k,v]) => '- ' + k + '：' + v)
   ].join('\\n');
 }
+function openApiReconciliationRows(){
+  return (DATA.openapiReconciliation || [])
+    .slice()
+    .sort((a,b)=>String(b.date || '').localeCompare(String(a.date || '')) || String(a.store_key || '').localeCompare(String(b.store_key || '')));
+}
+function openApiStatusLabel(status){
+  if (status === 'matched') return '一致';
+  if (status === 'warning') return '有差异';
+  if (status === 'missing_browser') return '缺浏览器数据';
+  if (status === 'missing_api') return '缺 API 数据';
+  return status || '-';
+}
+function openApiStatusClass(status){
+  if (status === 'matched') return 'good';
+  if (status === 'warning') return 'mid';
+  return 'high';
+}
+function openApiReconciliationSummary(){
+  const rows = openApiReconciliationRows();
+  const matched = rows.filter(r => r.status === 'matched').length;
+  const warning = rows.filter(r => r.status && r.status !== 'matched').length;
+  const latest = rows[0] || null;
+  const totalDelta = rows.reduce((sum,r)=>sum+Math.abs(Number(r.sales_sar_delta || 0)),0);
+  const latestGeneratedAt = rows.map(r => r.generated_at).filter(Boolean).sort().at(-1) || '';
+  return {rows, matched, warning, latest, totalDelta, latestGeneratedAt};
+}
+function renderOpenApiReconciliationPanel(){
+  const s = openApiReconciliationSummary();
+  if (!s.rows.length) return '';
+  const allMatched = s.warning === 0;
+  const latest = s.latest || {};
+  const titleTag = allMatched ? '试点一致' : '需复核';
+  const tagClass = allMatched ? 'good' : 'mid';
+  const rows = s.rows.slice(0, 12);
+  return '<div class="card soft" style="margin-top:12px">' +
+    '<div class="card-h"><div><h3>SHEIN OpenAPI 试点对账</h3><div class="sub">只展示 API 并行表与原浏览器抓取的对比；当前不会覆盖正式 BI 销售表。</div></div><span class="tag '+tagClass+'">'+escapeHtml(titleTag)+'</span></div>' +
+    '<div class="progress-grid" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr))">' +
+      '<div class="progress-card"><span>最新店铺/日期</span><strong>'+escapeHtml((latest.store_key || '-') + ' ' + (latest.date || '-'))+'</strong><small>HL 单店试点</small></div>' +
+      '<div class="progress-card"><span>一致天数</span><strong>'+num(s.matched)+'</strong><small>共 '+num(s.rows.length)+' 条对账</small></div>' +
+      '<div class="progress-card"><span>差异天数</span><strong>'+num(s.warning)+'</strong><small>销售差异合计 '+money(s.totalDelta)+'</small></div>' +
+      '<div class="progress-card"><span>最近入仓</span><strong>'+escapeHtml(s.latestGeneratedAt ? String(s.latestGeneratedAt).slice(0,10) : '-')+'</strong><small>'+escapeHtml(s.latestGeneratedAt ? localTimeText(new Date(s.latestGeneratedAt)) : '-')+'</small></div>' +
+    '</div>' +
+    table(rows, [
+      ['日期/店铺', r=>'<b>'+escapeHtml(r.date || '-')+'</b><br><span class="tag info">'+escapeHtml(r.store_key || '-')+'</span>'],
+      ['状态', r=>'<span class="tag '+openApiStatusClass(r.status)+'">'+escapeHtml(openApiStatusLabel(r.status))+'</span>'],
+      ['浏览器销售', r=>money(r.browser_sales_sar), 'num'],
+      ['API 销售', r=>money(r.api_sales_sar), 'num'],
+      ['销售差异', r=>money(r.sales_sar_delta), 'num'],
+      ['订单差异', r=>'订单 '+num(r.order_count_delta)+'<br><span class="muted">浏览器独有 '+num(r.browser_only_order_count)+' / API 独有 '+num(r.api_only_order_count)+'</span>', 'num'],
+      ['文件', r=>'<span class="mono">'+escapeHtml(r.api_source_file || '-')+'</span>']
+    ], {limit:false}) +
+    '<p class="muted" style="margin:10px 0 0">下一步等销量/SFS 等权限全部审批后，再把更多业务域也接入 API；通过多日 matched 后才切换正式数据源。</p>' +
+  '</div>';
+}
 function systemStatusSummaryText(){
   const audit = DATA.audit || {};
   const pipeline = DATA.pipeline || {};
@@ -8765,6 +8864,7 @@ function systemStatusSummaryText(){
   const firstRunCheckStatus = firstRunCheck.status === 'error' ? '需处理' : firstRunCheck.status === 'warning' ? '有提醒' : firstRunCheck.status === 'ok' ? '通过' : '-';
   const actionSummary = actionStateSummary();
   const teamAccess = teamAccessReadiness();
+  const openapi = openApiReconciliationSummary();
   const warningMessages = [
     ...(Array.isArray(DATA.warnings) ? DATA.warnings : []),
     ...(Array.isArray(audit.warningMessages) ? audit.warningMessages : [])
@@ -8812,6 +8912,17 @@ function systemStatusSummaryText(){
     '- 范围：' + teamAccess.scope,
     '- 下一步：' + teamAccess.next
   ];
+  if (openapi.rows.length) {
+    const latest = openapi.latest || {};
+    lines.push(
+      '',
+      '【SHEIN OpenAPI 试点】',
+      '- 最新：' + (latest.store_key || '-') + ' ' + (latest.date || '-') + '，' + openApiStatusLabel(latest.status),
+      '- 一致天数：' + num(openapi.matched) + ' / ' + num(openapi.rows.length),
+      '- 差异天数：' + num(openapi.warning),
+      '- 最新入仓：' + (openapi.latestGeneratedAt ? localTimeText(new Date(openapi.latestGeneratedAt)) : '-')
+    );
+  }
   if (warningMessages.length) {
     lines.push('', '【提醒】');
     warningMessages.slice(0, 8).forEach((x, i) => lines.push('- ' + (i + 1) + '. ' + x));
@@ -9008,6 +9119,7 @@ function renderSystem(){
         '<div class="store-kpi"><span>协作动作</span><strong>'+num(actionCounts.tracked)+'</strong><small>已追踪</small></div>'+
       '</div>'+
     '</div>'+
+    renderOpenApiReconciliationPanel()+
     sectionTitleHtml('数据体检与数量', '先看这些；如果这里通过，业务页面通常可以正常使用。', audit.ok ? '体检通过' : '需检查', audit.ok ? 'good' : 'high')+
     '<div class="split">' +
       '<div>' + table(healthRows.map(x => ({k:x[0], v:x[1]})), [['项目', r=>r.k], ['状态', r=>'<span class="mono">'+escapeHtml(r.v)+'</span>']]) + '</div>' +
@@ -9937,8 +10049,12 @@ async function main() {
   markStage('read:firstRunCheck');
   const firstRunCheck = await readLatestFirstRunCheckSummary();
   const raw = await runPsql(args, buildSql());
+  markStage('read:openapiReconciliation');
+  const openapiReconciliation = await readOpenApiReconciliation(args);
   markStage('json:parse');
-  const data = await enrichPortalDataWithLocalLinkLabels(deepSanitize(JSON.parse(raw)));
+  const parsedData = deepSanitize(JSON.parse(raw));
+  parsedData.openapiReconciliation = deepSanitize(openapiReconciliation);
+  const data = await enrichPortalDataWithLocalLinkLabels(parsedData);
   markStage('sanitize');
   const safeAudit = deepSanitize(audit);
   const safePipeline = deepSanitize(pipeline);
@@ -10016,6 +10132,7 @@ async function main() {
       waybills: data.waybills?.length || 0,
       campaigns: data.campaigns?.length || 0,
       insights: data.insights?.length || 0,
+      openapiReconciliation: data.openapiReconciliation?.length || 0,
     },
   }, null, 2));
 }
