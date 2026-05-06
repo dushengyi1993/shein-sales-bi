@@ -24,6 +24,8 @@ New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $Stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $LogFile = Join-Path $LogDir "intraday-15stores-$Stamp.log"
 $RunStartedAt = Get-Date
+$FeishuBasePauseFlag = Join-Path $Root "state\feishu-base-sync-paused.flag"
+$FeishuBasePaused = Test-Path -LiteralPath $FeishuBasePauseFlag
 
 function Test-AllStoreSalesFilesReady([string]$Date) {
   $stores = @('DL','DX','FY','LQ','NM','HL','JY','ZL','TS','MZ','CX','YJ','XL','QY','QH')
@@ -75,17 +77,26 @@ function Send-SyncIssueAlert([string]$Mode, [string]$Date, [string]$Reason) {
 Push-Location $Root
 try {
   "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] SHEIN 15-store intraday sync start" | Out-File -FilePath $LogFile -Encoding UTF8
-  & $Node ".\scripts\run_sales_sync_job.mjs" --mode intraday --group DSY --no-monthly --no-compact-display --no-dashboard 2>&1 |
+  if ($FeishuBasePaused) {
+    "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Feishu Base/table/dashboard writes are paused by state\feishu-base-sync-paused.flag; keep local fetch, BI refresh and daily report." | Out-File -FilePath $LogFile -Encoding UTF8 -Append
+  }
+  $DsySyncArgs = @("--mode", "intraday", "--group", "DSY", "--no-monthly", "--no-compact-display", "--no-dashboard")
+  $LgmSyncArgs = @("--mode", "intraday", "--group", "LGM", "--no-monthly", "--no-compact-display", "--no-dashboard")
+  if ($FeishuBasePaused) {
+    $DsySyncArgs += @("--no-lark-base", "--no-products")
+    $LgmSyncArgs += @("--no-lark-base", "--no-products")
+  }
+  & $Node ".\scripts\run_sales_sync_job.mjs" @DsySyncArgs 2>&1 |
     ForEach-Object { $_ | Out-File -FilePath $LogFile -Encoding UTF8 -Append }
   $DsyExitCode = $LASTEXITCODE
-  & $Node ".\scripts\run_sales_sync_job.mjs" --mode intraday --group LGM --no-monthly --no-compact-display --no-dashboard 2>&1 |
+  & $Node ".\scripts\run_sales_sync_job.mjs" @LgmSyncArgs 2>&1 |
     ForEach-Object { $_ | Out-File -FilePath $LogFile -Encoding UTF8 -Append }
   $LgmExitCode = $LASTEXITCODE
   $MonthlyExitCode = 0
   $CompactExitCode = 0
   $DashboardExitCode = 0
   $BiPostExitCode = 0
-  if ($DsyExitCode -eq 0 -and $LgmExitCode -eq 0) {
+  if ($DsyExitCode -eq 0 -and $LgmExitCode -eq 0 -and -not $FeishuBasePaused) {
     $Month = Get-Date -Format "yyyy-MM"
     & $Node ".\scripts\generate_monthly_sales_table.mjs" --month $Month --include-lgm 2>&1 |
       ForEach-Object { $_ | Out-File -FilePath $LogFile -Encoding UTF8 -Append }
@@ -106,6 +117,9 @@ try {
         ForEach-Object { $_ | Out-File -FilePath $LogFile -Encoding UTF8 -Append }
       $CompactExitCode = $LASTEXITCODE
     }
+  } elseif ($FeishuBasePaused) {
+    $DashboardExitCode = 0
+    "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Skip Feishu monthly/display/dashboard refresh because Feishu Base sync is paused." | Out-File -FilePath $LogFile -Encoding UTF8 -Append
   } else {
     $DashboardExitCode = 0
     "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Skip dashboard refresh because one group failed." | Out-File -FilePath $LogFile -Encoding UTF8 -Append
@@ -133,7 +147,11 @@ try {
     # daytime intraday sales sync; otherwise BI refresh is delayed by the heavy
     # link fetch + Feishu link-table write path.
     $RunLinkForMorning = $false
-    $FullBusinessForMorning = ($RunStartedAt.Hour -ge 8 -and $RunStartedAt.Hour -lt 12)
+    # Business domains are now fetched once per day by the 05:30
+    # link-management + business-domain job.  Intraday Feishu/sales refreshes
+    # should only refresh sales/link-derived BI slices and must not open SHEIN
+    # business-domain pages again.
+    $FullBusinessForMorning = $false
     $PostArgs = @(
       "-NoProfile",
       "-ExecutionPolicy", "Bypass",
@@ -146,10 +164,11 @@ try {
     )
     if ($RunLinkForMorning) { $PostArgs += "-RunLinkManagement" }
     if ($FullBusinessForMorning) { $PostArgs += "-FullBusinessFetch" }
+    $UpstreamLabel = if ($FeishuBasePaused) { "local sales fetch" } else { "Feishu intraday" }
     if ($ExitCode -eq 0) {
-      "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Feishu intraday succeeded; refresh BI dual-run slice sales=$Today link=$Yesterday business=$Today runLink=$RunLinkForMorning fullBusiness=$FullBusinessForMorning." | Out-File -FilePath $LogFile -Encoding UTF8 -Append
+      "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $UpstreamLabel succeeded; refresh BI dual-run slice sales=$Today link=$Yesterday business=$Today runLink=$RunLinkForMorning fullBusiness=$FullBusinessForMorning." | Out-File -FilePath $LogFile -Encoding UTF8 -Append
     } else {
-      "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Feishu intraday returned $ExitCode but 15 local sales files are ready; refresh BI sales slice anyway. sales=$Today link=$Yesterday business=$Today runLink=$RunLinkForMorning fullBusiness=$FullBusinessForMorning." | Out-File -FilePath $LogFile -Encoding UTF8 -Append
+      "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $UpstreamLabel returned $ExitCode but 15 local sales files are ready; refresh BI sales slice anyway. sales=$Today link=$Yesterday business=$Today runLink=$RunLinkForMorning fullBusiness=$FullBusinessForMorning." | Out-File -FilePath $LogFile -Encoding UTF8 -Append
     }
     & powershell @PostArgs 2>&1 |
       ForEach-Object { $_ | Out-File -FilePath $LogFile -Encoding UTF8 -Append }
@@ -161,7 +180,7 @@ try {
     "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Skip BI post-refresh because Feishu intraday/report failed." | Out-File -FilePath $LogFile -Encoding UTF8 -Append
   }
   if ($ExitCode -ne 0) {
-    Send-SyncIssueAlert "intraday" $Today "?????????????????????? 15 ???????? BI ??????"
+    Send-SyncIssueAlert "intraday" $Today "Intraday sales sync failed; some store local files may be missing, and BI may be stale."
   }
   "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] SHEIN 15-store intraday sync end, dsy=$DsyExitCode, lgm=$LgmExitCode, monthly=$MonthlyExitCode, compact=$CompactExitCode, dashboard=$DashboardExitCode, report=$ReportExitCode, biPost=$BiPostExitCode, exit=$ExitCode" | Out-File -FilePath $LogFile -Encoding UTF8 -Append
   exit $ExitCode

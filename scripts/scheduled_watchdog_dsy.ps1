@@ -24,10 +24,15 @@ $LogDir = Join-Path $Root "logs\scheduled"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $Stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $LogFile = Join-Path $LogDir "watchdog-15stores-$Stamp.log"
+$FeishuBasePauseFlag = Join-Path $Root "state\feishu-base-sync-paused.flag"
+$FeishuBasePaused = Test-Path -LiteralPath $FeishuBasePauseFlag
 
 Push-Location $Root
 try {
   "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] SHEIN 15-store watchdog start" | Out-File -FilePath $LogFile -Encoding UTF8
+  if ($FeishuBasePaused) {
+    "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Feishu Base/table/dashboard writes are paused by state\feishu-base-sync-paused.flag; watchdog only catches up local fetch/alerts." | Out-File -FilePath $LogFile -Encoding UTF8 -Append
+  }
   & $Node ".\scripts\watchdog_sales_automation.mjs" --group DSY --no-sync-today --send-alert 2>&1 |
     ForEach-Object { $_ | Out-File -FilePath $LogFile -Encoding UTF8 -Append }
   $DsyExitCode = $LASTEXITCODE
@@ -37,7 +42,7 @@ try {
   $MonthlyExitCode = 0
   $CompactExitCode = 0
   $DashboardExitCode = 0
-  if ($DsyExitCode -eq 0 -and $LgmExitCode -eq 0) {
+  if ($DsyExitCode -eq 0 -and $LgmExitCode -eq 0 -and -not $FeishuBasePaused) {
     $Month = Get-Date -Format "yyyy-MM"
     & $Node ".\scripts\generate_monthly_sales_table.mjs" --month $Month --include-lgm 2>&1 |
       ForEach-Object { $_ | Out-File -FilePath $LogFile -Encoding UTF8 -Append }
@@ -57,6 +62,9 @@ try {
         $DashboardExitCode = $LASTEXITCODE
       }
     }
+  } elseif ($FeishuBasePaused) {
+    $DashboardExitCode = 0
+    "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Skip Feishu monthly/display/dashboard refresh because Feishu Base sync is paused." | Out-File -FilePath $LogFile -Encoding UTF8 -Append
   } else {
     $DashboardExitCode = 0
     "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Skip dashboard refresh because one group failed." | Out-File -FilePath $LogFile -Encoding UTF8 -Append

@@ -124,7 +124,7 @@ async function readTextAuto(file) {
 async function readScheduledTaskStatus() {
   const ps = [
     '$ErrorActionPreference="Stop"',
-    '$name="SHEIN-BI-Daily-Pipeline-0640"',
+    '$name="SHEIN-BI-Daily-Pipeline-0700"',
     '$t=Get-ScheduledTask -TaskName $name',
     '$i=Get-ScheduledTaskInfo -TaskName $name',
     '$next=if($i.NextRunTime){$i.NextRunTime.ToString("yyyy-MM-dd HH:mm:ss")}else{""}',
@@ -197,12 +197,12 @@ function epochMsFromLocalText(text) {
 
 async function readScheduledTaskStatusViaSchtasks(reason = '') {
   try {
-    const res = await runWindowsCommand('cmd.exe', ['/c', 'schtasks /query /tn SHEIN-BI-Daily-Pipeline-0640 /v /fo csv'], {timeoutMs: 8_000});
+    const res = await runWindowsCommand('cmd.exe', ['/c', 'schtasks /query /tn SHEIN-BI-Daily-Pipeline-0700 /v /fo csv'], {timeoutMs: 8_000});
     if (res.code !== 0 || !res.stdout) return {exists: false, error: reason || res.stderr || `schtasks exit ${res.code}`};
     const lines = res.stdout.split(/\r?\n/).filter(Boolean);
     const row = lines[1] || '';
     const cols = parseCsvPrefix(row, 8);
-    const taskName = String(cols[1] || '').replace(/^\\+/, '') || 'SHEIN-BI-Daily-Pipeline-0640';
+    const taskName = String(cols[1] || '').replace(/^\\+/, '') || 'SHEIN-BI-Daily-Pipeline-0700';
     const nextRun = normalizeSchtasksDate(cols[2] || '');
     const lastRun = normalizeSchtasksDate(cols[5] || '');
     const lastResult = Number(cols[6]);
@@ -402,18 +402,20 @@ async function runPsql(args, sql) {
     windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
-  let stdout = '';
-  let stderr = '';
-  child.stdout.on('data', d => { stdout += d.toString(); });
-  child.stderr.on('data', d => { stderr += d.toString(); });
+  const stdoutChunks = [];
+  const stderrChunks = [];
+  child.stdout.on('data', d => { stdoutChunks.push(Buffer.from(d)); });
+  child.stderr.on('data', d => { stderrChunks.push(Buffer.from(d)); });
   child.stdin.write(sql);
   child.stdin.end();
   const timer = setTimeout(() => {
-    stderr += `\npsql timeout after ${Math.round(PORTAL_GENERATE_TIMEOUT_MS / 1000)}s stage=${portalGenerateStage}`;
+    stderrChunks.push(Buffer.from(`\npsql timeout after ${Math.round(PORTAL_GENERATE_TIMEOUT_MS / 1000)}s stage=${portalGenerateStage}`));
     child.kill();
   }, Math.max(30_000, PORTAL_GENERATE_TIMEOUT_MS - 20_000));
   const code = await new Promise(resolve => child.on('close', resolve));
   clearTimeout(timer);
+  const stdout = Buffer.concat(stdoutChunks).toString('utf8');
+  const stderr = Buffer.concat(stderrChunks).toString('utf8');
   if (code !== 0) {
     throw new Error(`psql failed (${code})\n${stderr.slice(-4000)}\n${stdout.slice(-2000)}`);
   }
@@ -567,28 +569,52 @@ function enrichLinkRecordWithInventoryMeta(record, meta) {
 
 async function enrichPortalDataWithLocalLinkLabels(data) {
   const linkDate = data?.dates?.linkDate || '';
+  const businessDate = data?.dates?.businessDate || '';
+  const readSourceFetchTimes = async (subdir, date) => {
+    if (!date) return [];
+    const fetchTimes = [];
+    try {
+      const baseDir = path.join(ROOT, 'outputs', subdir);
+      const dirs = (await fs.readdir(baseDir, {withFileTypes: true})).filter(d => d.isDirectory()).map(d => d.name);
+      for (const storeKey of dirs) {
+        const file = path.join(baseDir, storeKey, `${date}.json`);
+        try {
+          const payload = JSON.parse(await fs.readFile(file, 'utf8'));
+          if (payload?.fetchTime) fetchTimes.push(String(payload.fetchTime));
+        } catch {}
+      }
+    } catch {}
+    return fetchTimes;
+  };
+
+  const sourceDatePatch = {};
+  const businessFetchTimes = await readSourceFetchTimes('shein_business_domains', businessDate);
+  if (businessFetchTimes.length) {
+    sourceDatePatch.businessUpdatedAt = businessFetchTimes.sort().at(-1);
+    sourceDatePatch.businessWarehouseUpdatedAt = data?.dates?.businessUpdatedAt || '';
+  }
+  const linkFetchTimes = await readSourceFetchTimes('shein_links', linkDate);
+  if (linkFetchTimes.length) {
+    sourceDatePatch.linkUpdatedAt = linkFetchTimes.sort().at(-1);
+    sourceDatePatch.linkWarehouseUpdatedAt = data?.dates?.linkUpdatedAt || '';
+  }
+
   const meta = await readLatestLinkInventoryMeta(linkDate);
-  if (!meta.size) return data;
-  let linkFetchTimes = [];
-  try {
-    const baseDir = path.join(ROOT, 'outputs', 'shein_links');
-    const dirs = (await fs.readdir(baseDir, {withFileTypes: true})).filter(d => d.isDirectory()).map(d => d.name);
-    for (const storeKey of dirs) {
-      const file = path.join(baseDir, storeKey, `${linkDate}.json`);
-      try {
-        const payload = JSON.parse(await fs.readFile(file, 'utf8'));
-        if (payload?.fetchTime) linkFetchTimes.push(String(payload.fetchTime));
-      } catch {}
-    }
-  } catch {}
-  const sourceLinkUpdatedAt = linkFetchTimes.length ? linkFetchTimes.sort().at(-1) : data?.dates?.linkUpdatedAt;
+  if (!meta.size) {
+    return {
+      ...data,
+      dates: {
+        ...(data.dates || {}),
+        ...sourceDatePatch,
+      },
+    };
+  }
   const enrichArray = rows => Array.isArray(rows) ? rows.map(row => enrichLinkRecordWithInventoryMeta(row, meta)) : rows;
   return {
     ...data,
     dates: {
       ...(data.dates || {}),
-      linkUpdatedAt: sourceLinkUpdatedAt,
-      linkWarehouseUpdatedAt: data?.dates?.linkUpdatedAt || '',
+      ...sourceDatePatch,
     },
     links: enrichArray(data.links),
     storeLinks: enrichArray(data.storeLinks),
@@ -964,15 +990,20 @@ matrix AS (
   FROM (
     SELECT
       store_key, group_key, standard_goods_sn, coverage_status,
+      link_date,
       has_on_shelf_link, need_supplement_link, link_count, on_shelf_count,
       wait_shelf_count, sold_out_count, duplicate_on_shelf,
       best_skc, best_link_c30_sale,
       round(sales_sar::numeric, 2) AS sales_sar,
       quantity, action_count, focus_action_count, round(max_action_score::numeric, 1) AS max_action_score
     FROM mart.bi_store_product_matrix_current
-    WHERE need_supplement_link OR action_count > 0 OR sales_sar > 0
+    WHERE need_supplement_link
+       OR has_on_shelf_link
+       OR link_count > 0
+       OR action_count > 0
+       OR sales_sar > 0
     ORDER BY coalesce(max_action_score,0) DESC, sales_sar DESC, store_key, standard_goods_sn
-    LIMIT 300
+    LIMIT 2400
   ) t
 ),
 comments AS (
@@ -2038,6 +2069,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     body[data-theme="light"] .meta{background:#f8fafc;color:#64748b}
     .audit-ok{color:#bbf7d0}.audit-warn{color:#fde68a}.audit-bad{color:#fecdd3}
     main{position:relative;width:100%;max-width:calc(100vw - 286px);margin:0 auto;padding:28px}
+    body[data-current-tab="overview"] main{padding-left:18px;padding-right:18px}
     .hero{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:32px;background:linear-gradient(135deg,rgba(15,23,42,.88),rgba(30,41,59,.52));box-shadow:var(--shadow);padding:28px;margin-bottom:18px}
     body:not([data-current-tab="overview"]) .hero{display:none}
     body[data-theme="light"] .hero{background:linear-gradient(180deg,#ffffff 0%,#f8fafc 100%);box-shadow:0 18px 54px rgba(15,23,42,.08)}
@@ -2066,6 +2098,9 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     body:not([data-current-tab="overview"]) .toolbar .home-only-filter{display:none}
     body[data-current-tab="overview"] .toolbar .subpage-filter{display:none!important}
     body:not([data-current-tab="actions"]) .toolbar .action-scope-toolbar{display:none!important}
+    body[data-current-tab="actions"] .toolbar{grid-template-columns:minmax(260px,1.05fr) minmax(220px,.82fr) minmax(150px,.5fr) 92px minmax(620px,1.75fr)}
+    body[data-current-tab="actions"] .toolbar .subpage-filter{display:block!important}
+    body[data-current-tab="actions"] .toolbar-range-dock{display:none!important}
     body[data-theme="light"] .home-scope-toolbar{background:#ffffff;border-color:#e2e8f0;box-shadow:0 6px 18px rgba(15,23,42,.04)}
     .home-scope-hint{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap;color:var(--muted);font-size:12px;font-weight:800}
     .toolbar .home-scope-hint{height:38px;min-height:38px;overflow:hidden;flex-wrap:nowrap;justify-content:flex-start}
@@ -2090,6 +2125,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .help:hover:after,.help:focus-visible:after{content:attr(data-tip);position:absolute;left:50%;bottom:calc(100% + 10px);transform:translateX(-50%);z-index:620;width:260px;padding:10px 12px;border-radius:14px;border:1px solid rgba(148,163,184,.28);background:rgba(2,6,23,.96);color:#e5edf8;box-shadow:var(--shadow);font-size:12px;line-height:1.55;text-align:left;white-space:normal}
     body[data-theme="light"] .help:hover:after,body[data-theme="light"] .help:focus-visible:after{background:#fff;color:#0f172a}
     .toolbar{position:sticky;top:12px;z-index:380;display:grid;grid-template-columns:minmax(270px,360px) 150px 300px 88px minmax(440px,1fr);gap:10px;margin:0 0 16px;padding:8px;border:1px solid var(--line);border-radius:18px;background:rgba(3,7,18,.84);backdrop-filter:blur(18px);box-shadow:0 18px 50px rgba(0,0,0,.22);align-items:center}
+    body:not([data-current-tab="overview"]):not([data-current-tab="actions"]) .toolbar{grid-template-columns:minmax(210px,.7fr) minmax(210px,.7fr) minmax(90px,.3fr) 92px minmax(728px,1.68fr)}
     body[data-theme="light"] .toolbar{background:rgba(255,255,255,.96);box-shadow:0 14px 34px rgba(15,23,42,.12)}
     .toolbar-range-dock{grid-column:auto;margin-top:0}
     .toolbar-range-dock[hidden]{display:none!important}
@@ -2105,12 +2141,14 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .focusbar{display:flex;gap:10px;flex-wrap:wrap;margin:-6px 0 18px;padding:0 4px}
     .toolbar .btn{height:38px;min-height:38px;padding:6px 10px;border-radius:12px;font-size:13px}
     .action-local-filter{border:1px solid rgba(34,211,238,.18);border-radius:20px;background:linear-gradient(135deg,rgba(14,165,233,.10),rgba(15,23,42,.38));padding:14px;margin:0 0 14px}
-    .toolbar .action-local-filter{grid-column:1/-1;margin:0;padding:12px;background:rgba(14,165,233,.10)}
+    .toolbar .action-local-filter{grid-column:auto;margin:0;padding:0;border:0;background:transparent}
     .action-local-filter-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:10px;flex-wrap:wrap}
+    .toolbar .action-local-filter-head{display:none}
     .action-local-filter-head strong{font-size:15px}.action-local-filter-head span{color:var(--muted);font-size:12px;line-height:1.55;max-width:720px}
     .action-local-filter-controls{display:grid;grid-template-columns:repeat(3,minmax(160px,1fr));gap:10px;margin-bottom:12px}
-    .toolbar .action-local-filter-controls{grid-template-columns:repeat(3,minmax(170px,1fr))}
+    .toolbar .action-local-filter-controls{grid-template-columns:repeat(3,minmax(120px,1fr));gap:8px;margin-bottom:0}
     .action-focusbar{margin:0;padding:0}
+    .toolbar .action-focusbar{display:none}
     body[data-theme="light"] .action-local-filter{background:#f8fafc;border-color:#dbeafe}
     .focus-chip{min-height:40px;border:1px solid rgba(148,163,184,.22);border-radius:999px;background:rgba(15,23,42,.68);color:#dbeafe;padding:8px 13px;cursor:pointer;display:inline-flex;align-items:center;gap:8px}
     .focus-chip:hover,.focus-chip.active{border-color:rgba(34,211,238,.55);background:rgba(34,211,238,.11);box-shadow:0 0 0 4px rgba(34,211,238,.06)}
@@ -2372,6 +2410,11 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .matrix-cell .coverage-note{display:block;margin-top:5px;color:var(--muted);font-family:var(--font);font-size:11px;font-weight:800;letter-spacing:0;line-height:1.25}
     .matrix-cell .pending-profit{color:#f97316;font-family:var(--font);font-size:15px;letter-spacing:0}
     .matrix-cell .positive{color:#22c55e}.matrix-cell .warn{color:#f97316}.matrix-cell .danger{color:#ef4444}
+    .metric-matrix .matrix-cell{min-height:54px;border-radius:0;background:transparent;padding:10px;display:flex;align-items:center;justify-content:center;text-align:center;flex-direction:column;line-height:1.16}
+    .metric-matrix .matrix-cell.label{font-size:16px;font-weight:950;letter-spacing:-.01em;align-items:center;justify-content:center;text-align:center;background:rgba(148,163,184,.065);color:var(--text)}
+    .metric-matrix .matrix-cell.head{min-height:44px;font-size:12px;border-radius:0;background:rgba(148,163,184,.09);color:var(--muted)}
+    .metric-matrix .matrix-cell.value{font-size:21px;font-weight:950;letter-spacing:-.035em;background:transparent}
+    .metric-matrix.cols-1 .matrix-cell.value{font-size:24px}
     .ops-command{display:grid;grid-template-columns:minmax(320px,.9fr) minmax(520px,1.35fr);gap:16px;margin-bottom:16px;align-items:stretch}
     .ops-verdict{border:1px solid rgba(96,165,250,.26);border-radius:26px;background:linear-gradient(145deg,rgba(37,99,235,.17),rgba(15,23,42,.48));padding:18px;display:flex;flex-direction:column;justify-content:space-between;min-height:100%}
     body[data-theme="light"] .ops-verdict{background:linear-gradient(145deg,#eff6ff,#fff);border-color:#bfdbfe}
@@ -2391,7 +2434,10 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .profit-card.good{border-color:rgba(34,197,94,.28);background:linear-gradient(135deg,rgba(6,78,59,.20),rgba(15,23,42,.50))}
     .profit-card.warn{border-color:rgba(251,146,60,.34);background:linear-gradient(135deg,rgba(120,53,15,.22),rgba(15,23,42,.50))}
     .profit-card.bad{border-color:rgba(248,113,113,.34);background:linear-gradient(135deg,rgba(127,29,29,.20),rgba(15,23,42,.50))}
-    .profit-workbench-grid{display:grid;grid-template-columns:1.05fr .95fr;gap:16px;align-items:start}
+    .profit-workbench-grid{display:grid;grid-template-columns:1fr;gap:16px;align-items:start}
+    .profit-tool-grid{display:grid;grid-template-columns:minmax(340px,.52fr) minmax(520px,.78fr);gap:16px;align-items:start;margin-top:16px}
+    .profit-tool-card{border:1px solid rgba(148,163,184,.16);border-radius:22px;background:rgba(2,6,23,.20);padding:14px;min-width:0}
+    body[data-theme="light"] .profit-tool-card{background:#fff;border-color:#e2e8f0;box-shadow:0 8px 22px rgba(15,23,42,.04)}
     .profit-calculator{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:12px 0}
     .profit-calculator label{display:grid;gap:6px;color:var(--muted);font-size:12px;font-weight:800}
     .profit-calculator input{min-height:40px;border:1px solid var(--line);border-radius:12px;background:rgba(15,23,42,.52);color:var(--text);padding:8px 10px;font-family:var(--mono);font-size:14px}
@@ -2400,7 +2446,12 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .profit-scatter{height:330px;position:relative}
     .profit-scatter svg{width:100%;height:300px;display:block;overflow:visible}
     .profit-scatter .axis{fill:var(--muted);font-size:11px}.profit-scatter .grid-line{stroke:rgba(148,163,184,.16);stroke-width:1;stroke-dasharray:4 6}.profit-scatter .axis-line{stroke:rgba(148,163,184,.34);stroke-width:1}.profit-scatter .point{stroke:#fff;stroke-width:1.3;cursor:pointer}
-    .selection-model{display:grid;grid-template-columns:minmax(300px,.78fr) minmax(520px,1.22fr);gap:14px;align-items:start}
+    .selection-model{display:grid;grid-template-columns:minmax(360px,.68fr) minmax(640px,1.32fr);gap:16px;align-items:start}
+    .selection-model.wide{grid-template-areas:"verdict matrix" "samples samples"}
+    .selection-model.wide .selection-verdict{grid-area:verdict}
+    .selection-model.wide .selection-matrix-panel{grid-area:matrix;min-width:0}
+    .selection-model.wide .selection-sample-panel{grid-area:samples;min-width:0}
+    .selection-sample-panel table{table-layout:auto}
     .selection-verdict{border:1px solid rgba(34,197,94,.22);border-radius:22px;background:linear-gradient(135deg,rgba(6,78,59,.20),rgba(15,23,42,.48));padding:15px}
     .selection-verdict h4{margin:0 0 8px;font-size:20px;letter-spacing:-.03em}.selection-verdict p{margin:0;color:var(--muted);line-height:1.65;font-size:13px}
     .selection-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:12px}.selection-metrics div{border:1px solid rgba(148,163,184,.16);border-radius:16px;background:rgba(2,6,23,.24);padding:10px}.selection-metrics span{display:block;color:var(--muted);font-size:11px;font-weight:850}.selection-metrics strong{display:block;margin-top:5px;font-family:var(--mono);font-size:17px}
@@ -2423,8 +2474,41 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .comment-cell-ar{margin-top:7px;color:var(--muted);font-size:12px;line-height:1.55;max-width:620px}
     .stars{letter-spacing:1px;color:#f59e0b;font-size:16px;white-space:nowrap}
     .stars .off{color:rgba(148,163,184,.35)}
-    .action-card.v1-action{display:grid;grid-template-columns:minmax(220px,.8fr) minmax(280px,1fr) minmax(300px,1.25fr);gap:12px;align-items:start}
-    .action-card.v1-action .action-main{min-width:0}.action-card.v1-action .action-evidence{min-width:0}.action-card.v1-action .action-controls{display:grid;gap:10px}
+    .action-list{grid-template-columns:repeat(auto-fill,minmax(620px,1fr))}
+    body[data-current-tab="actions"] #actionsList.action-list{grid-template-columns:1fr;gap:18px}
+    body[data-current-tab="actions"] #actionsList .store-section-title{grid-column:1/-1}
+    .action-card.v1-action{display:grid;grid-template-columns:minmax(320px,.72fr) minmax(560px,1.28fr);grid-template-areas:"main evidence" "controls controls";gap:12px;align-items:stretch}
+    .action-card.v1-action .action-main,.action-card.v1-action .action-evidence,.action-card.v1-action .action-controls{min-width:0;border:1px solid rgba(148,163,184,.13);border-radius:18px;background:rgba(2,6,23,.16);padding:12px}
+    body[data-theme="light"] .action-card.v1-action .action-main,body[data-theme="light"] .action-card.v1-action .action-evidence,body[data-theme="light"] .action-card.v1-action .action-controls{background:#fff;border-color:#e2e8f0}
+    .action-card.v1-action .action-main{grid-area:main;display:flex;flex-direction:column;gap:8px}
+    .action-card.v1-action .action-evidence{grid-area:evidence;display:grid;gap:10px;align-content:start}
+    .action-card.v1-action .action-controls{grid-area:controls;display:grid;grid-template-columns:minmax(360px,.75fr) minmax(360px,.75fr) minmax(560px,1.1fr);gap:10px;align-items:center;align-content:center}
+    .action-card.v1-action h4{margin:4px 0 0;font-size:18px;line-height:1.35}
+    .action-card.v1-action p{line-height:1.65}
+    .action-card.v1-action .action-evidence{font-size:15px;line-height:1.75}
+    .action-card.v1-action .action-evidence p,
+    .action-card.v1-action .action-evidence .muted,
+    .action-card.v1-action .action-evidence .decision-note{font-size:15px;line-height:1.75;max-width:none;color:#cbd5e1}
+    body[data-theme="light"] .action-card.v1-action .action-evidence p,
+    body[data-theme="light"] .action-card.v1-action .action-evidence .muted,
+    body[data-theme="light"] .action-card.v1-action .action-evidence .decision-note{color:#334155}
+    .action-card.v1-action .action-evidence .decision-strong{font-size:18px;line-height:1.45}
+    .action-card.v1-action .action-evidence .next{font-size:17px;line-height:1.65;font-weight:800;color:#dbeafe}
+    body[data-theme="light"] .action-card.v1-action .action-evidence .next{color:#1e3a8a}
+    .action-card.v1-action .action-evidence .evidence-grid span{font-size:13px}
+    .action-card.v1-action .action-evidence .evidence-grid b{font-size:15px}
+    .merged-signal-list{display:grid;gap:8px}
+    .merged-signal{border:1px solid rgba(148,163,184,.16);border-radius:14px;background:rgba(15,23,42,.20);padding:9px 10px}
+    body[data-theme="light"] .merged-signal{background:#f8fafc;border-color:#e2e8f0}
+    .merged-signal b{display:block;color:#fda4af;font-size:15px;line-height:1.45}
+    body[data-theme="light"] .merged-signal b{color:#be123c}
+    .merged-signal span,.merged-signal small{display:block;color:#cbd5e1;line-height:1.65}
+    body[data-theme="light"] .merged-signal span,body[data-theme="light"] .merged-signal small{color:#334155}
+    .action-card.v1-action .command-actions,.action-card.v1-action .status-actions{margin-top:0;padding-top:0}
+    .action-card.v1-action .command-actions,.action-card.v1-action .status-actions{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+    .action-card.v1-action .status-btn{width:100%;justify-content:center}
+    .action-card.v1-action .action-meta{grid-template-columns:minmax(130px,.65fr) minmax(260px,1.25fr) minmax(92px,auto);gap:8px;margin-top:0;padding-top:0;border-top:0}
+    .action-card.v1-action .meta-line{grid-column:1/-1;margin-top:0;padding-top:8px;border-top:1px solid rgba(148,163,184,.12)}
     body[data-theme="light"] .profit-card,
     body[data-theme="light"] .calculator-output,body[data-theme="light"] .selection-verdict,body[data-theme="light"] .selection-output{background:#ffffff;border-color:#e2e8f0;box-shadow:0 8px 22px rgba(15,23,42,.05)}
     body[data-theme="light"] .profit-card.good{background:#f0fdf4;border-color:#bbf7d0}
@@ -2455,8 +2539,9 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .metric-area{fill:rgba(34,211,238,.10)}
     .metric-point{fill:var(--cyan);stroke:rgba(255,255,255,.70);stroke-width:1.5}
     .trend-stack{display:grid;grid-template-columns:1fr;gap:16px}
-    .line-chart{height:420px;position:relative}
-    .line-chart svg{width:100%;height:330px;display:block;overflow:visible}
+    .line-chart{height:440px;position:relative}
+    .line-chart svg{width:100%;height:350px;display:block;overflow:visible}
+    body[data-current-tab="overview"] .trend-stack .card-body{padding-left:4px;padding-right:4px}
     .line-chart .axis{fill:var(--muted);font-size:11px}
     .line-chart .axis-line{stroke:rgba(148,163,184,.34);stroke-width:1}
     .line-chart .grid-line{stroke:rgba(148,163,184,.16);stroke-width:1;stroke-dasharray:4 6}
@@ -2493,7 +2578,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .copy{display:inline-flex;align-items:center;gap:6px;border:0;border-radius:10px;padding:4px 7px;margin-top:6px;background:rgba(96,165,250,.13);color:#dbeafe;cursor:pointer}
     .copy:hover{background:rgba(96,165,250,.22)}
     body[data-theme="light"] .copy{background:#eff6ff;color:#1d4ed8}
-    .action-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px;align-items:stretch}
+    .action-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(620px,1fr));gap:14px;align-items:stretch}
     .action-card{padding:16px;border:1px solid var(--line);border-radius:20px;background:linear-gradient(135deg,rgba(15,23,42,.78),rgba(17,24,39,.46));min-height:100%;display:flex;flex-direction:column}
     body[data-theme="light"] .action-card{background:linear-gradient(135deg,rgba(255,255,255,.90),rgba(241,245,249,.78))}
     .action-card h4{margin:10px 0 6px;font-size:16px}.action-card p{margin:0;color:#cbd5e1;line-height:1.58}.action-card .next{margin-top:10px;color:#dbeafe}
@@ -2695,8 +2780,9 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     body[data-theme="light"] .commander-metrics div,
     body[data-theme="light"] .review-meta div{background:#f8fafc;border-color:#e2e8f0}
     .footer{color:var(--muted);font-size:12px;padding:24px 0;text-align:center}
-    @media (max-width:1280px){.toolbar{grid-template-columns:minmax(190px,230px) 118px 112px 82px minmax(430px,1fr);gap:8px}.toolbar-range-dock{grid-column:auto}.toolbar-range-dock .range-toolbar-main{grid-template-columns:minmax(178px,.48fr) minmax(250px,1fr)}}
-    @media (max-width:1180px){.shell{grid-template-columns:1fr}.side{position:relative;height:auto}main{max-width:100vw}.kpis,.overview-core .kpis{grid-template-columns:1fr}.overview-core,.overview-core .group-summary-grid.two,.home-scope-toolbar,.calendar-duo,.calendar-input-row,.range-calendar-grid,.range-popover-grid,.range-toolbar-main,.page-guide-inner,.page-guide-grid,.page-decision-grid,.store-flow,.store-kpi-grid,.problem-stack,.store-action-steps,.profit-workbench-grid,.ops-command,.ops-question-grid,.ops-pillar-grid,.profit-command,.profit-logic,.profit-summary-grid,.profit-calculator,.selection-model{grid-template-columns:1fr}.home-scope-hint{justify-content:flex-start}.range-popover{min-width:0;width:calc(100vw - 56px);left:0}.toolbar{grid-template-columns:1fr}.range-toolbar{top:8px}.grid.cols-2,.grid.cols-3,.split,.spotlight,.sop-grid,.cause-grid,.command-room,.command-lanes,.detail-grid,.action-card.v1-action{grid-template-columns:1fr}.brief-grid{grid-template-columns:repeat(2,1fr)}.brief-grid.five{grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.coverage-board{grid-template-columns:repeat(2,minmax(0,1fr))}.hero-top{display:block}.quick-links{justify-content:flex-start;margin-top:18px}h2{font-size:30px}}
+    @media (max-width:1280px){.toolbar{grid-template-columns:minmax(190px,230px) 118px 112px 82px minmax(430px,1fr);gap:8px}body:not([data-current-tab="overview"]):not([data-current-tab="actions"]) .toolbar{grid-template-columns:minmax(154px,.7fr) minmax(154px,.7fr) minmax(72px,.3fr) 82px minmax(350px,1.4fr)}.toolbar-range-dock{grid-column:auto}.toolbar-range-dock .range-toolbar-main{grid-template-columns:minmax(178px,.48fr) minmax(250px,1fr)}body[data-current-tab="actions"] .toolbar{grid-template-columns:minmax(210px,1fr) minmax(180px,.82fr) minmax(118px,.5fr) 82px}.toolbar .action-local-filter{grid-column:1/-1}.toolbar .action-local-filter-controls{grid-template-columns:repeat(3,minmax(120px,1fr))}}
+    @media (max-width:1180px){.shell{grid-template-columns:1fr}.side{position:relative;height:auto}main{max-width:100vw}.kpis,.overview-core .kpis{grid-template-columns:1fr}.overview-core,.overview-core .group-summary-grid.two,.home-scope-toolbar,.calendar-duo,.calendar-input-row,.range-calendar-grid,.range-popover-grid,.range-toolbar-main,.page-guide-inner,.page-guide-grid,.page-decision-grid,.store-flow,.store-kpi-grid,.problem-stack,.store-action-steps,.profit-workbench-grid,.profit-tool-grid,.ops-command,.ops-question-grid,.ops-pillar-grid,.profit-command,.profit-logic,.profit-summary-grid,.profit-calculator,.selection-model{grid-template-columns:1fr}.selection-model.wide{grid-template-areas:"verdict" "matrix" "samples"}.home-scope-hint{justify-content:flex-start}.range-popover{min-width:0;width:calc(100vw - 56px);left:0}.toolbar{grid-template-columns:1fr}.range-toolbar{top:8px}.grid.cols-2,.grid.cols-3,.split,.spotlight,.sop-grid,.cause-grid,.command-room,.command-lanes,.detail-grid,.action-card.v1-action{grid-template-columns:1fr}.brief-grid{grid-template-columns:repeat(2,1fr)}.brief-grid.five{grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.coverage-board{grid-template-columns:repeat(2,minmax(0,1fr))}.hero-top{display:block}.quick-links{justify-content:flex-start;margin-top:18px}h2{font-size:30px}}
+    @media (max-width:1180px){.action-card.v1-action{grid-template-areas:"main" "evidence" "controls"}.action-card.v1-action .action-controls{grid-template-columns:1fr}.action-card.v1-action .command-actions,.action-card.v1-action .status-actions{grid-template-columns:repeat(2,minmax(0,1fr))}.action-card.v1-action .action-meta{grid-template-columns:1fr}}
     @media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
   </style>
 </head>
@@ -3057,11 +3143,11 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
       </div>
       <div class="grid cols-2" style="margin-bottom:16px">
         <div class="card">
-          <div class="card-h"><div><h3>高利润 / 可加码货号</h3><div class="sub">按利润率从高到低排序；先看哪些货号最值得加码。</div></div></div>
+          <div class="card-h"><div><h3>高利润 / 可加码货号</h3><div class="sub">利润率 ≥ 20%；按利润率从高到低排序，先看哪些货号最值得加码。</div></div></div>
           <div class="card-body" id="profitWinners"></div>
         </div>
         <div class="card">
-          <div class="card-h"><div><h3>低利润 / 需要处理货号</h3><div class="sub">按利润率从低到高排序；先看哪些货号最需要处理。</div></div></div>
+          <div class="card-h"><div><h3>低利润 / 需要处理货号</h3><div class="sub">利润率 < 20%；按利润率从低到高排序，先看哪些货号最需要处理。</div></div></div>
           <div class="card-body" id="profitLosers"></div>
         </div>
       </div>
@@ -3483,7 +3569,51 @@ function domainName(d){
   return ({link:'链接', inventory:'库存', quality:'质量', after_sales:'售后', finance:'财务', business:'经营'}[d] || d || '-');
 }
 function actionKey(a){
+  if (a?._actionKey) return a._actionKey;
   return [a.date || '', a.store_key || '', a.action_domain || '', a.category || '', a.standard_goods_sn || '', a.skc || ''].join('|');
+}
+function actionMergeKey(a){
+  if (a?.skc) return [a.date || '', a.store_key || '', a.action_domain || '', a.standard_goods_sn || '', a.skc || ''].join('|');
+  return actionKey(a);
+}
+function uniqueCompact(values){
+  return [...new Set((values || []).map(x => String(x || '').trim()).filter(Boolean))];
+}
+function actionPriorityScore(priority){
+  const p = String(priority || '');
+  if (p.includes('高') || /high/i.test(p)) return 3;
+  if (p.includes('中') || /mid|medium/i.test(p)) return 2;
+  if (p.includes('低') || /low/i.test(p)) return 1;
+  return 0;
+}
+function mergedPriority(rows){
+  const best = [...(rows || [])].sort((a,b)=>actionPriorityScore(b.priority)-actionPriorityScore(a.priority))[0];
+  return best?.priority || rows?.[0]?.priority || '';
+}
+function mergeActionGroup(rows){
+  const sorted = [...(rows || [])].sort((a,b)=>Number(b.score||0)-Number(a.score||0));
+  const primary = sorted[0] || {};
+  if (sorted.length <= 1) return primary;
+  const merged = {...primary};
+  merged._actionKey = actionMergeKey(primary);
+  merged._mergedActions = sorted;
+  merged._mergedCount = sorted.length;
+  merged.score = Math.max(...sorted.map(x => Number(x.score || 0)));
+  merged.priority = mergedPriority(sorted);
+  merged.category = uniqueCompact(sorted.map(x => x.category || x.title)).join(' / ') || primary.category || primary.title || '';
+  merged.reason = uniqueCompact(sorted.map(x => x.reason)).join('；') || primary.reason || '';
+  merged.evidence = uniqueCompact(sorted.map(x => actionEvidenceText(x) || x.evidence)).join('；') || primary.evidence || '';
+  merged.next_step = uniqueCompact(sorted.map(x => x.next_step)).join('；') || primary.next_step || '';
+  return merged;
+}
+function mergeActionsBySkuDomain(rows){
+  const map = new Map();
+  for (const a of rows || []) {
+    const key = actionMergeKey(a);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(a);
+  }
+  return [...map.values()].map(mergeActionGroup).sort((a,b)=>Number(b.score||0)-Number(a.score||0));
 }
 function insightKey(x){
   return [x.title || '', x.store_key || '', x.standard_goods_sn || '', x.skc || '', String(x.evidence || '').slice(0,80)].join('|');
@@ -3501,11 +3631,19 @@ function insightType(x){
   return 'business';
 }
 function actionStatus(a){
-  const rec = actionState[actionKey(a)];
-  return rec?.status || 'open';
+  return actionRecord(a).status || 'open';
 }
 function actionRecord(a){
-  return actionState[actionKey(a)] || {status:'open', owner:'', note:''};
+  const direct = actionState[actionKey(a)];
+  if (direct) return direct;
+  if (Array.isArray(a?._mergedActions)) {
+    const recs = a._mergedActions.map(x => actionState[actionKey(x)]).filter(Boolean);
+    if (recs.length) {
+      const picked = recs.find(x => x.status && x.status !== 'open') || recs[0];
+      return {...picked, owner: picked.owner || '', note: picked.note || ''};
+    }
+  }
+  return {status:'open', owner:'', note:''};
 }
 function actionStateSummary(){
   const entries = Object.entries(actionState || {});
@@ -4873,7 +5011,7 @@ function renderMetricLineChart(kind = 'day', metric = trendMetricKey()){
   const keys = Object.keys(colors);
   const values = series.flatMap(x => keys.map(k => Number(x[k] || 0)));
   const max = niceCeil(Math.max(1, ...values));
-  const w = 1280, h = 310, padL = 92, padR = 28, padT = 24, padB = 52;
+  const w = 1880, h = 310, padL = 92, padR = 28, padT = 24, padB = 52;
   const xFor = (i) => series.length === 1 ? (padL + (w - padR)) / 2 : padL + (i / (series.length - 1)) * (w - padL - padR);
   const yFor = (v) => padT + (1 - (Number(v || 0) / max)) * (h - padT - padB);
   const gridTicks = [0, 0.25, 0.5, 0.75, 1].map(t => {
@@ -5019,7 +5157,7 @@ function renderProfitLineChart(){
   const maxAbs = niceCeil(Math.max(1, ...values.map(v => Math.abs(v))));
   const min = values.some(v => v < 0) ? -maxAbs : 0;
   const max = maxAbs;
-  const w = 1280, h = 310, padL = 92, padR = 28, padT = 24, padB = 52;
+  const w = 1880, h = 310, padL = 92, padR = 28, padT = 24, padB = 52;
   const span = Math.max(1, max - min);
   const xFor = (i) => series.length === 1 ? (padL + (w - padR)) / 2 : padL + (i / (series.length - 1)) * (w - padL - padR);
   const yFor = (v) => padT + (1 - ((Number(v || 0) - min) / span)) * (h - padT - padB);
@@ -5322,7 +5460,7 @@ function domainHealthRows(){
     {
       key:'automation', label:'自动刷新', status: audit.errors ? 'bad' : (taskPendingFirstRun || audit.warnings ? 'warn' : 'good'),
       value: taskPendingFirstRun ? '待首次运行' : (latestLog.status ? pipelineStatusLabel(latestLog.status) : (task.State || '-')),
-      detail: taskPendingFirstRun ? '计划任务已就绪，但 06:40 首次正式自动运行还没发生。' : ('最新日志 ' + (latestLog.file || '-') + '；任务状态 ' + (task.State || '-') + '。'),
+      detail: taskPendingFirstRun ? '计划任务已就绪，但 07:00 首次正式自动运行还没发生。' : ('最新日志 ' + (latestLog.file || '-') + '；任务状态 ' + (task.State || '-') + '。'),
       tab:'system'
     }
   ];
@@ -5443,7 +5581,7 @@ function renderTrendReadiness(){
       '<div class="brief"><span>可做 30 日预警</span><strong>'+num(monthReady)+' / '+num(rows.length)+'</strong></div>'+
     '</div>'+
     '<div class="split" style="margin-top:14px">'+
-      '<article class="health-card warn"><div class="row1"><span class="tag mid">当前边界</span><span class="mono">no fake trend</span></div><h4>现在不做假趋势图</h4><p>'+escapeHtml(unavailable.join(' ') || '趋势数据已经具备基础条件。')+'</p><p class="next">等 06:40 自动任务连续积累多天后，这里会自动从“准备雷达”升级为真实趋势诊断。</p></article>'+
+      '<article class="health-card warn"><div class="row1"><span class="tag mid">当前边界</span><span class="mono">no fake trend</span></div><h4>现在不做假趋势图</h4><p>'+escapeHtml(unavailable.join(' ') || '趋势数据已经具备基础条件。')+'</p><p class="next">等 07:00 自动任务连续积累多天后，这里会自动从“准备雷达”升级为真实趋势诊断。</p></article>'+
       '<article class="health-card '+(storeChanges.length ? 'good' : 'warn')+'"><div class="row1"><span class="tag '+(storeChanges.length ? 'good' : 'mid')+'">'+(storeChanges.length ? '已可计算' : '等待数据')+'</span><span class="mono">store change</span></div><h4>店铺销售波动</h4>'+
         (storeChanges.length ? '<p>'+storeChanges.slice(0,4).map(x => escapeHtml(x.store_key)+': '+money(x.change_sar)+'（'+(x.change_pct == null ? '-' : x.change_pct + '%')+'）').join('<br>')+'</p>' : '<p>目前销售仓只有 1 天切片，还不能计算店铺环比波动。</p>')+
       '</article>'+
@@ -5644,7 +5782,7 @@ function minutesBetween(a, b){
 }
 function automationFirstRunSummary(task, latestLog){
   if (!task?.exists) {
-    return {level:'bad', title:'自动任务未找到', detail: task?.error || '没有读到 SHEIN-BI-Daily-Pipeline-0640。', items:['先确认 Windows 计划任务是否存在。']};
+    return {level:'bad', title:'自动任务未找到', detail: task?.error || '没有读到 SHEIN-BI-Daily-Pipeline-0700。', items:['先确认 Windows 计划任务是否存在。']};
   }
   const now = new Date();
   const nextRun = taskDateFromEpochOrText(task.NextRunEpochMs, task.NextRunTime || '');
@@ -5660,7 +5798,7 @@ function automationFirstRunSummary(task, latestLog){
       items:[
         '现在看到“尚未首跑”是正常状态。',
         '请以 Windows 计划任务里的下次运行时间为准。',
-        '06:40 后刷新门户，确认是否出现真实上次运行时间和新日志。'
+        '07:00 后刷新门户，确认是否出现真实上次运行时间和新日志。'
       ]
     };
   }
@@ -5669,11 +5807,11 @@ function automationFirstRunSummary(task, latestLog){
     return {
       level:'warn',
       title:'等待首次自动运行',
-      detail:'计划任务已就绪，距离 ' + (task.NextRunTime || '06:40') + ' 约 ' + (mins == null ? '-' : num(mins)) + ' 分钟。',
+      detail:'计划任务已就绪，距离 ' + (task.NextRunTime || '07:00') + ' 约 ' + (mins == null ? '-' : num(mins)) + ' 分钟。',
       items:[
         '现在看到“尚未首跑”是正常状态。',
-        '06:40 之后重新打开或刷新门户，系统状态页会显示真实上次运行时间。',
-        '如果 06:40 后刷新后仍显示待首跑，再检查计划任务和最新日志。'
+        '07:00 之后重新打开或刷新门户，系统状态页会显示真实上次运行时间。',
+        '如果 07:00 后刷新后仍显示待首跑，再检查计划任务和最新日志。'
       ]
     };
   }
@@ -5762,7 +5900,7 @@ function pipelineStabilitySummary(recentLogs, task, latestLog){
   }
   if (pendingFirstRun) {
     level = level === 'bad' ? 'bad' : 'warn';
-    notes.push('06:40 自动任务尚未首跑，当前稳定性主要来自手动验证日志。');
+    notes.push('07:00 自动任务尚未首跑，当前稳定性主要来自手动验证日志。');
   }
   if (latestStatus && latestStatus !== 'success') {
     level = 'bad';
@@ -7092,6 +7230,19 @@ function actionEvidenceHtml(action){
   if (domain.includes('link')) return '<span class="decision-note">'+escapeHtml(raw).slice(0,160)+'</span>';
   return '<span class="muted">'+escapeHtml(raw).slice(0,160)+'</span>';
 }
+function mergedActionSignalsHtml(action){
+  const rows = Array.isArray(action?._mergedActions) ? action._mergedActions : [];
+  if (rows.length <= 1) return '';
+  return '<div class="merged-signal-list">'+rows.map(x => {
+    const reason = String(x.reason || '').trim();
+    const evidence = actionEvidenceText(x) || String(x.evidence || '').trim();
+    return '<div class="merged-signal">'+
+      '<b>'+escapeHtml(x.category || x.title || '-')+'</b>'+
+      (reason ? '<span>'+escapeHtml(reason)+'</span>' : '')+
+      (evidence ? '<small>'+escapeHtml(evidence).slice(0,220)+'</small>' : '')+
+    '</div>';
+  }).join('')+'</div>';
+}
 function stockEvidenceHtml(row){
   const items = [
     ['\u53ef\u552e', row.usable_inventory],
@@ -7442,9 +7593,18 @@ function renderProductSpotlight(){
   });
   const actions = (DATA.actions || []).filter(x => x.standard_goods_sn === sn).slice(0, 8);
   const allLinks = (DATA.storeLinks || DATA.links || []).filter(x => x.standard_goods_sn === sn);
+  const linksByStore = new Map();
+  allLinks.forEach(link => {
+    const key = link.store_key || '';
+    if (!key) return;
+    if (!linksByStore.has(key)) linksByStore.set(key, []);
+    linksByStore.get(key).push(link);
+  });
+  const storeLinkMetric = (store, key) => (linksByStore.get(store) || []).reduce((sum, x) => sum + Number(x?.[key] || 0), 0);
   const links = allLinks.slice(0, 24);
   const ordersAll = (DATA.orders || []).filter(x => x.standard_goods_sn === sn);
-  const afterAll = (DATA.afterSales || []).filter(x => x.standard_goods_sn === sn);
+  const afterAllRaw = (DATA.afterSales || []).filter(x => x.standard_goods_sn === sn);
+  const afterAll = afterAllRaw.filter(x => inSelectedRange(x, 'request_time'));
   const financeGoodsAll = (DATA.financeGoods || []).filter(x => x.standard_goods_sn === sn);
   const commentAll = (DATA.comments || [])
     .filter(x => x.standard_goods_sn === sn)
@@ -7467,7 +7627,7 @@ function renderProductSpotlight(){
     ['链接覆盖', num(product.on_shelf_store_count) + '/15 店上架', missingStores > 0 ? '仍有 ' + num(missingStores) + ' 个店缺上架链接；先看是否属于“部分店已卖，部分店缺覆盖”。' : '15 店覆盖基本完整，重点转向链接承接和优胜劣汰。'],
     ['订单表现', money(rangeSalesSar) + ' / ' + num(rangeOrders) + ' 单', '当前时间段：' + rangeLabel + '。对照销售明细，看销售是否集中在少数店或少数 SKC。'],
     ['财务在途', money(financeGoodsAmount) + ' / ' + num(financeGoodsAll.length) + ' 条', financeGoodsAll.length ? '财务在途已能回到货号层，可和订单、售后互相印证。' : '暂未匹配到财务商品，可能是其它店还未接入财务明细或 entity_id 未补齐。'],
-    ['售后质量', num(afterAll.length) + ' 单 / ' + money(afterAmount), afterAll.length ? '售后集中时不要只补链接，先判断退货原因、评价和质量等级。' : '当前售后样本未命中该货号，可优先看覆盖和承接。'],
+    ['售后质量', num(afterAll.length) + ' 单 / ' + money(afterAmount), afterAll.length ? '当前时段售后集中时不要只补链接，先判断退货原因、评价和质量等级。' : '当前时段售后样本未命中该货号，可优先看覆盖和承接。'],
     ['评价口碑', num(commentAll.length) + ' 条 / 低星 ' + num(lowComments.length), commentAll.length ? '货号页先看摘要；完整历史评价已单开“评价 / 口碑”页，可按货号和店铺筛选。' : '当前评论库未命中该货号，后续补历史评价后自动出现。']
   ];
   if (growth) decisionCards.push([
@@ -7539,7 +7699,7 @@ function renderProductSpotlight(){
         '<div class="store-action-steps">'+
           '<div class="store-step"><b>1 看当前销售</b><p>'+escapeHtml(rangeLabel)+'：'+money(rangeSalesSar)+'，销量 '+num(rangeQuantity)+'，订单 '+num(rangeOrders)+'。</p></div>'+
           '<div class="store-step"><b>2 看覆盖缺口</b><p>上架 '+num(product.on_shelf_store_count)+'/15 店，缺 '+num(missingStores)+' 店；不是全店未上架才需要补链。</p></div>'+
-        '<div class="store-step"><b>3 看质量与财务</b><p>售后 '+num(afterAll.length)+' 单，低星评价 '+num(lowComments.length)+' 条，财务商品 '+num(financeGoodsAll.length)+' 条，用来和订单互相印证。</p></div>'+
+        '<div class="store-step"><b>3 看质量与财务</b><p>当前时段售后 '+num(afterAll.length)+' 单，低星评价 '+num(lowComments.length)+' 条，财务商品 '+num(financeGoodsAll.length)+' 条，用来和订单互相印证。</p></div>'+
         '</div>'+
       '</div>'+
       '<div class="store-kpi-grid">'+
@@ -7559,9 +7719,14 @@ function renderProductSpotlight(){
     '<div class="coverage-board">'+matrixSorted.map(r => {
       const cls = r.need_supplement_link ? 'mid' : Number(r.sales_sar || 0) > 0 ? 'good' : r._empty ? 'info' : 'good';
       const status = r.need_supplement_link ? '缺承接' : Number(r.sales_sar || 0) > 0 ? '有销售' : r.has_on_shelf_link ? '已上架' : '空白';
+      const dateNote = r.link_date ? ' · 数据 ' + String(r.link_date).slice(5) : '';
+      const storeExposure = storeLinkMetric(r.store_key, 'eps_uv');
+      const storeExposure30 = storeLinkMetric(r.store_key, 'c30_eps_uv');
+      const storeVisitors30 = storeLinkMetric(r.store_key, 'c30_goods_uv');
       return '<article class="coverage-tile"><strong>'+escapeHtml(r.store_key || '-')+' <span class="tag '+cls+'">'+escapeHtml(status)+'</span></strong>'+
         '<small>净成交 '+escapeHtml(money(r.sales_sar))+' · 销量 '+num(r.quantity)+'</small>'+
-        '<small>链接 上架 '+num(r.on_shelf_count)+' / 总 '+num(r.link_count)+' · 待上架 '+num(r.wait_shelf_count)+'</small>'+
+        '<small>链接 上架 '+num(r.on_shelf_count)+' / 总 '+num(r.link_count)+' · 待上架 '+num(r.wait_shelf_count)+escapeHtml(dateNote)+'</small>'+
+        '<small>曝光 当日 '+num(storeExposure)+' · 30天 '+num(storeExposure30)+' / 访客 '+num(storeVisitors30)+'</small>'+
         '<small>最佳 <span class="mono">'+escapeHtml(r.best_skc || '-')+'</span></small></article>';
     }).join('')+'</div>'+
     table(matrixSorted, [
@@ -7569,6 +7734,7 @@ function renderProductSpotlight(){
       ['覆盖', r => '<span class="tag '+(r.need_supplement_link ? 'mid' : 'good')+'">'+escapeHtml(r.coverage_status || '-')+'</span>'],
       ['链接结构', r => '上架 '+num(r.on_shelf_count)+' / 总 '+num(r.link_count)+'<br><span class="muted">待上架 '+num(r.wait_shelf_count)+' · 售罄 '+num(r.sold_out_count)+'</span>'],
       ['最佳 SKC', r => '<span class="mono">'+(r.best_skc || '-')+'</span>'+copyButton(r.best_skc, '复制SKC')],
+      ['曝光/访客', r => '当日曝光 '+num(storeLinkMetric(r.store_key, 'eps_uv'))+'<br><span class="muted">30天曝光 '+num(storeLinkMetric(r.store_key, 'c30_eps_uv'))+' · 访客 '+num(storeLinkMetric(r.store_key, 'c30_goods_uv'))+'</span>', 'num'],
       ['本店货号合计销售', r => money(r.sales_sar)+'<br><span class="muted">全部 SKC 合计销量 '+num(r.quantity)+'</span>', 'num'],
       ['待办动作', r => num(r.action_count)+' 条<br><span class="muted">优先级分 '+num(r.max_action_score)+'</span>', 'num']
     ])+
@@ -8115,13 +8281,18 @@ function renderSelectionBenchmark(samples){
       return '<div class="matrix-cell '+c.cls+'"><b>'+escapeHtml(c.label)+'</b><small>样本 '+num(c.n)+' · 中位利润率 '+(c.medMargin == null ? '-' : pct(c.medMargin))+'</small><small>'+escapeHtml(ex || '暂无历史品')+'</small></div>';
     }).join('')+'</div>');
   }
-  return '<div class="selection-model">'+
-    '<div class="selection-side"><div class="selection-verdict"><h4>选品标尺结论</h4><p>按历史成本表倒推体积，并用实际销售利润校准：当前最优区间是 <b>进货 '+escapeHtml(best?.pBand || '-')+' RMB、体积 '+escapeHtml(best?.vBand || '-')+'</b>。未来新选品按 <b>2000 RMB/方 = 2 RMB/L</b> 估算头程；如果没有把握售价，先避开低货值大体积。</p>'+
+  return '<div class="selection-model wide">'+
+    '<div class="selection-verdict"><h4>选品标尺结论</h4><p>按历史成本表倒推体积，并用实际销售利润校准：当前最优区间是 <b>进货 '+escapeHtml(best?.pBand || '-')+' RMB、体积 '+escapeHtml(best?.vBand || '-')+'</b>。未来新选品按 <b>2000 RMB/方 = 2 RMB/L</b> 估算头程；如果没有把握售价，先避开低货值大体积。</p>'+
       '<div class="selection-metrics">'+
         '<div><span>历史进货价中位数</span><strong>'+escapeHtml(cny(purchaseMedian))+'</strong><small>'+escapeHtml(cny(purchaseP25))+' ~ '+escapeHtml(cny(purchaseP75))+'</small></div>'+
         '<div><span>倒推体积中位数</span><strong>'+escapeHtml(fmt.format(volumeMedian))+'L</strong><small>'+escapeHtml(fmt.format(volumeP25))+'L ~ '+escapeHtml(fmt.format(volumeP75))+'L</small></div>'+
         '<div><span>尾程固定费</span><strong>SAR 31.28</strong><small>上架 0.3 + 出库 6 + 派送 24.984</small></div>'+
       '</div></div>'+
+    '<div class="selection-matrix-panel">'+
+      sectionTitleHtml('进货价 × 体积选品矩阵', '绿色优先、橙色观察、红色谨慎；体积来自历史头程按 1600 RMB/方倒推，未来头程按 2000 RMB/方重算。')+
+      '<div class="selection-matrix">'+rows.join('')+'</div>'+
+    '</div>'+
+    '<div class="selection-sample-panel">'+
       sectionTitleHtml('历史利润样本 Top 5', '看真实赚钱品落在哪些进货价和体积区间。')+
       table(topExamples, [
       ['货号', r => '<b>'+escapeHtml(r.standard_goods_sn || '-')+'</b>'],
@@ -8129,10 +8300,7 @@ function renderSelectionBenchmark(samples){
       ['净成交/利润', r => money(r.net_revenue_sar || r.gross_revenue_sar)+'<br><span class="muted">利润 '+money(r.profit)+'</span>', 'num'],
       ['利润率/ROI', r => pct(r.margin)+'<br><span class="muted">ROI '+pct(r.roi)+'</span>', 'num'],
       ['未来头程', r => escapeHtml(cny(r.freightUnitCny))+' / 件', 'num']
-    ], {limit:5})+'</div>'+
-    '<div>'+
-      sectionTitleHtml('进货价 × 体积选品矩阵', '绿色优先、橙色观察、红色谨慎；体积来自历史头程按 1600 RMB/方倒推，未来头程按 2000 RMB/方重算。')+
-      '<div class="selection-matrix">'+rows.join('')+'</div>'+
+    ], {limit:5})+
     '</div>'+
   '</div>';
 }
@@ -8350,12 +8518,17 @@ function renderProfitPage(){
       ['月利润', r => money(r.profit_after_storage_sar)+'<br><span class="muted">'+pct(r.profit_margin_after_storage)+'</span>', 'num'],
       ['覆盖', r => pct(r.cost_coverage_revenue_rate), 'num']
     ], {limit:false});
-  $('profitCalculatorPanel').innerHTML = renderSelectionBenchmark(selectionRows) + sectionTitleHtml('新选品利润试算', '输入计划售价、进货价和体积，按未来 2000 RMB/方头程 + SHEIN 固定尾程费估算保本线。') + renderProfitCalculator() + sectionTitleHtml('历史样本：进货价 / 倒推体积 × 利润率', '当前成本表没有物理长宽高，体积先由历史头程按 1600 RMB/方倒推，未来头程按 2000 RMB/方重算；后续补长宽高后会更准。') + renderProfitScatter(allCostProducts);
+  $('profitCalculatorPanel').innerHTML = renderSelectionBenchmark(selectionRows) +
+    '<div class="profit-tool-grid">'+
+      '<div class="profit-tool-card">'+sectionTitleHtml('新选品利润试算', '输入计划售价、进货价和体积，按未来 2000 RMB/方头程 + SHEIN 固定尾程费估算保本线。') + renderProfitCalculator()+'</div>'+
+      '<div class="profit-tool-card">'+sectionTitleHtml('历史样本：进货价 / 倒推体积 × 利润率', '当前成本表没有物理长宽高，体积先由历史头程按 1600 RMB/方倒推，未来头程按 2000 RMB/方重算；后续补长宽高后会更准。') + renderProfitScatter(allCostProducts)+'</div>'+
+    '</div>';
+  const profitMarginSplit = .20;
   const rankedProfitProducts = products
     .filter(r => Number(r.cost_coverage_revenue_rate || 0) >= .9 && Number(r.net_revenue_sar || 0) > 0 && r.profit_margin_before_storage != null)
     .sort((a,b)=>Number(b.profit_margin_before_storage ?? -999)-Number(a.profit_margin_before_storage ?? -999));
-  const winners = rankedProfitProducts.filter(r => Number(r.profit_margin_before_storage || 0) >= .15);
-  const losers = rankedProfitProducts.filter(r => Number(r.profit_margin_before_storage || 0) < .15)
+  const winners = rankedProfitProducts.filter(r => Number(r.profit_margin_before_storage || 0) >= profitMarginSplit);
+  const losers = rankedProfitProducts.filter(r => Number(r.profit_margin_before_storage || 0) < profitMarginSplit)
     .sort((a,b)=>Number(a.profit_margin_before_storage ?? 999)-Number(b.profit_margin_before_storage ?? 999));
   const gapRows = products.filter(r => Number(r.missing_cost_revenue_sar || 0) > 0 || (Number(r.net_revenue_sar || 0) > 0 && Number(r.cost_coverage_revenue_rate || 0) < .9))
     .sort((a,b)=>Number(b.missing_cost_revenue_sar||0)-Number(a.missing_cost_revenue_sar||0));
@@ -8369,10 +8542,10 @@ function renderProfitPage(){
   ];
   $('profitWinners').innerHTML = winners.length
     ? table(winners, profitCols, {limit:30})
-    : '<div class="empty">当前时间、店铺/分组、货号筛选下暂无利润率 ≥ 15% 的货号。</div>';
+    : '<div class="empty">当前时间、店铺/分组、货号筛选下暂无利润率 ≥ 20% 的货号。</div>';
   $('profitLosers').innerHTML = losers.length
     ? table(losers, profitCols, {limit:30})
-    : '<div class="empty">当前时间、店铺/分组、货号筛选下暂无利润率 < 15% 的货号。</div>';
+    : '<div class="empty">当前时间、店铺/分组、货号筛选下暂无利润率 < 20% 的货号。</div>';
   $('profitCostGaps').innerHTML =
     '<div class="table-note">成本文件放在 <span class="mono">inputs/costs/</span>；模板是 <span class="mono">inputs/costs/SHEIN成本表模板.xlsx</span>。如果一批货缺头程运输费，会显示为缺口但不会污染单位成本。</div>'+
     (gapRows.length ? table(gapRows, [
@@ -8398,6 +8571,8 @@ function actionCard(a){
   const st = actionStatus(a);
   const key = encodeURIComponent(actionKey(a));
   const evidenceHtml = actionEvidenceHtml(a);
+  const mergedSignalsHtml = mergedActionSignalsHtml(a);
+  const mergeTag = Number(a._mergedCount || 0) > 1 ? '<span class="tag info">合并 '+num(a._mergedCount)+' 条</span>' : '';
   const reasonHtml = a.action_domain === 'link'
     ? storeActionReasonHtml(a, DATA.storeLinks || DATA.links || [])
     : '<span class="decision-note">'+escapeHtml(a.reason || '').slice(0,160)+'</span>';
@@ -8406,11 +8581,10 @@ function actionCard(a){
       '<div class="row1"><span class="domain">'+domainName(a.action_domain)+'<span class="status-badge"><i class="status-dot '+st+'"></i>'+statusLabel(st)+'</span></span><span class="score">'+num(a.score)+'</span></div>'+
       '<h4>'+escapeHtml(a.category || '-')+' · '+escapeHtml(a.store_key || '-')+'</h4>'+
       '<p><b>'+escapeHtml(a.standard_goods_sn || a.title || '-')+'</b> '+(a.skc ? '<span class="mono">'+escapeHtml(a.skc)+'</span> '+copyButton(a.skc, '复制SKC') : '')+'</p>'+
-      '<div style="margin-top:10px">'+priorityTag(a.priority)+'</div>'+
+      '<div style="margin-top:10px">'+priorityTag(a.priority)+mergeTag+'</div>'+
     '</div>'+
     '<div class="action-evidence">'+
-      '<p class="muted">'+reasonHtml+'</p>'+
-      '<div class="muted">'+evidenceHtml+'</div>'+
+      (mergedSignalsHtml || ('<p class="muted">'+reasonHtml+'</p><div class="muted">'+evidenceHtml+'</div>'))+
       '<p class="next">'+escapeHtml(a.next_step || '')+'</p>'+
     '</div>'+
     '<div class="action-controls">'+
@@ -8436,7 +8610,10 @@ function actionCard(a){
   '</article>';
 }
 function currentActions(){
-  return (DATA.actions || []).filter(includes).filter(statusMatchAction);
+  return mergeActionsBySkuDomain((DATA.actions || []).filter(includes)).filter(statusMatchAction);
+}
+function findActionByKey(key){
+  return currentActions().find(a => actionKey(a) === key) || (DATA.actions || []).find(a => actionKey(a) === key);
 }
 function actionListText(rows = currentActions()){
   const header = [
@@ -8605,7 +8782,7 @@ function systemStatusSummaryText(){
     '- 体检：' + (audit.ok ? '通过' : '需检查') + '；提醒 ' + num(audit.warnings || 0) + '；错误 ' + num(audit.errors || 0),
     '',
     '【自动任务】',
-    '- 任务：' + (task.TaskName || 'SHEIN-BI-Daily-Pipeline-0640'),
+    '- 任务：' + (task.TaskName || 'SHEIN-BI-Daily-Pipeline-0700'),
     '- 状态：' + (task.State || '-'),
     '- 下次运行：' + (task.NextRunTime || '-'),
     '- 上次运行：' + taskLastRunText(task),
@@ -8774,7 +8951,7 @@ function renderSystem(){
     ['最新流水线关系', checkLatestLog.file ? (checkLatestLog.file + ' / ' + (checkLatestRelation.text || '-')) : '-']
   ];
   const pipelineRows = [
-    ['计划任务', task.exists ? (task.TaskName || 'SHEIN-BI-Daily-Pipeline-0640') : '未找到'],
+    ['计划任务', task.exists ? (task.TaskName || 'SHEIN-BI-Daily-Pipeline-0700') : '未找到'],
     ['任务状态', task.exists ? (task.State || '-') : (task.error || '-')],
     ['下次运行', task.NextRunTime || '-'],
     ['上次运行', taskLastRunText(task)],
@@ -8842,7 +9019,7 @@ function renderSystem(){
       '<div>' + table(actionStateRows.map(x => ({k:x[0], v:x[1]})), [['动作协作', r=>r.k], ['状态', r=>'<span class="mono">'+escapeHtml(r.v)+'</span>']]) + '</div>' +
     '</div>' +
     '<div class="card soft" style="margin-top:12px">' +
-      '<div class="card-h"><div><h3>首跑验收 / 自动刷新观察</h3><div class="sub">专门判断 06:40 自动任务是否已经首跑，以及首跑后是否可用。</div></div><span class="tag '+firstRunTagClass+'">'+escapeHtml(firstRun.title)+'</span></div>' +
+      '<div class="card-h"><div><h3>首跑验收 / 自动刷新观察</h3><div class="sub">专门判断 07:00 自动任务是否已经首跑，以及首跑后是否可用。</div></div><span class="tag '+firstRunTagClass+'">'+escapeHtml(firstRun.title)+'</span></div>' +
       '<div class="card-body"><p class="next '+(firstRun.level === 'bad' ? 'warn' : '')+'">'+escapeHtml(firstRun.detail || '-')+'</p>' +
       '<ul class="compact-list">' + (firstRun.items || []).map(x => '<li>'+escapeHtml(x)+'</li>').join('') + '</ul>' +
       '<div class="status-actions"><button class="status-btn" id="refreshPortalData">重新读取最新状态</button><button class="status-btn" id="runFirstRunCheck">重新生成验收报告</button><button class="status-btn" id="copySystemStatusSummary">复制系统巡检摘要</button><span class="muted">通过本机网页服务打开时可用；直接双击 HTML 时请重新打开文件。</span></div>' +
@@ -8893,11 +9070,11 @@ function renderSystem(){
     '<div class="action-list">' +
       '<article class="action-card"><span class="domain">本地门户</span><h4>每天先打开这个</h4><p class="mono">'+portalPath+'</p>'+copyButton(portalPath, '复制路径')+'<p class="next">双击项目根目录里的“打开SHEIN-BI经营门户.cmd”也可以直接打开。</p></article>' +
       '<article class="action-card"><span class="domain">晨报</span><h4>Markdown 经营晨报</h4><p class="mono">'+briefingPath+'</p>'+copyButton(briefingPath, '复制路径')+'<p class="next">每日 BI 流水线会自动生成 latest.md；也可以双击项目根目录里的“打开SHEIN-BI经营晨报.cmd”直接打开，适合复制到飞书群或留档复盘。</p></article>' +
-      '<article class="action-card"><span class="domain">首跑验收</span><h4>自动任务验收报告</h4><p class="mono">'+firstRunCheckPath+'</p>'+copyButton(firstRunCheckPath, '复制路径')+'<p class="next">双击“检查SHEIN-BI自动任务.cmd”可生成最新验收报告；06:40 后用它确认自动任务是否真正跑完。</p></article>' +
+      '<article class="action-card"><span class="domain">首跑验收</span><h4>自动任务验收报告</h4><p class="mono">'+firstRunCheckPath+'</p>'+copyButton(firstRunCheckPath, '复制路径')+'<p class="next">双击“检查SHEIN-BI自动任务.cmd”可生成最新验收报告；07:00 后用它确认自动任务是否真正跑完。</p></article>' +
       '<article class="action-card"><span class="domain">网页服务</span><h4>本机网页访问入口</h4><p class="mono">http://127.0.0.1:8787/</p>'+copyButton('http://127.0.0.1:8787/', '复制地址')+'<p class="next">双击“打开SHEIN-BI网页服务.cmd”可启动本机服务。默认只给本机访问；需要给同事看时再用局域网模式。</p></article>' +
       '<article class="action-card"><span class="domain">协作状态</span><h4>动作状态导出</h4><p class="next">导出当前已处理、待复查、忽略、负责人和备注，方便临时备份或发给团队。</p><div class="status-actions"><button class="status-btn" data-export-action-state="json">导出 JSON</button><button class="status-btn" data-copy-action-summary="1">复制摘要</button></div></article>' +
       '<article class="action-card"><span class="domain">Metabase</span><h4>深度分析入口</h4><p class="mono">${htmlEscape(links.home)}</p><a class="btn" href="${htmlEscape(links.home)}" target="_blank">打开 Metabase</a></article>' +
-      '<article class="action-card"><span class="domain">刷新数据</span><h4>BI 每日自动任务</h4><p class="mono">SHEIN-BI-Daily-Pipeline-0640</p><p class="next">每天 06:40 隐藏运行；如果需要手动刷新，可运行 scripts\\\\run_bi_daily_pipeline.ps1。</p></article>' +
+      '<article class="action-card"><span class="domain">刷新数据</span><h4>BI 每日自动任务</h4><p class="mono">SHEIN-BI-Daily-Pipeline-0700</p><p class="next">每天 07:00 隐藏运行；如果需要手动刷新，可运行 scripts\\\\run_bi_daily_pipeline.ps1。</p></article>' +
     '</div>';
   const notes = [
     {k:'正确展示库存', v:'来自商品列表库存接口，不再使用备货信息里的假库存。库存动作只保留已上架且近 30 天有销量/订单的低库存项。'},
@@ -9237,7 +9414,7 @@ function renderPageDecisionSummaries(){
     cards:[
       {label:'数据体检', value:audit.ok ? '通过' : '需处理', hint:'错误 '+num(audit.errors||0)+'；提醒 '+num(audit.warnings||0), level:audit.ok ? 'good' : 'high'},
       {label:'销售 / 业务 / 链接', value:[DATA.dates?.salesDate, DATA.dates?.businessDate, DATA.dates?.linkDate].filter(Boolean).join(' / '), hint:'三个口径日一致时最适合做当日判断。', level:'info'},
-      {label:'BI 自动任务', value:taskOk ? '成功' : '待确认', hint:'06:40 每日流水线，失败会保留验收报告。', level:taskOk ? 'good' : 'mid'},
+      {label:'BI 自动任务', value:taskOk ? '成功' : '待确认', hint:'07:00 每日流水线，失败会保留验收报告。', level:taskOk ? 'good' : 'mid'},
       {label:'团队访问', value:'本机模式', hint:'当前只开放 127.0.0.1，团队版需再配置权限和固定地址。', level:'mid'}
     ],
     next:'如果体检错误为 0，可以正常看经营页面；如果有 warning，先读“当前口径说明”再判断是否影响今天操作。',
@@ -9456,7 +9633,7 @@ function renderAll(){
   document.querySelectorAll('[data-action-copy-command]').forEach(btn => btn.addEventListener('click', async e => {
     e.stopPropagation();
     const key = decodeURIComponent(btn.dataset.actionCopyCommand || '');
-    const action = (DATA.actions || []).find(a => actionKey(a) === key);
+    const action = findActionByKey(key);
     if (!action) return showToast('没有找到这条动作');
     try {
       await navigator.clipboard.writeText(actionCommandText(action));
@@ -9468,7 +9645,7 @@ function renderAll(){
   document.querySelectorAll('[data-action-focus-target]').forEach(btn => btn.addEventListener('click', e => {
     e.stopPropagation();
     const key = decodeURIComponent(btn.dataset.actionKey || '');
-    const action = (DATA.actions || []).find(a => actionKey(a) === key);
+    const action = findActionByKey(key);
     focusActionTarget(action, btn.dataset.actionFocusTarget || 'store');
   }));
   const bulkAssign = $('bulkAssignActions');

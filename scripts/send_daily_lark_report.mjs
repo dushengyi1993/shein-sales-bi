@@ -21,7 +21,21 @@ const STATE_PATH = path.join(ROOT, 'state', 'lark_base.json');
 const FETCH_DIR = path.join(ROOT, 'outputs', 'shein_fetch');
 const PAYLOAD_DIR = path.join(ROOT, 'outputs', 'lark_payloads');
 const REPORT_DIR = path.join(ROOT, 'outputs', 'reports');
+const FEISHU_BASE_PAUSE_FLAG = path.join(ROOT, 'state', 'feishu-base-sync-paused.flag');
 const FX_SAR_TO_RMB = 1.8;
+
+function envTruthy(value) {
+  return /^(1|true|yes|on)$/i.test(String(value || '').trim());
+}
+
+async function fileExists(file) {
+  try {
+    await fs.access(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function parseArgs(argv) {
   const args = {
@@ -440,6 +454,8 @@ const args = parseArgs(process.argv.slice(2));
 const storesConfig = JSON.parse(await fs.readFile(STORES_PATH, 'utf8'));
 const reportConfig = await loadJsonIfExists(REPORT_CONFIG_PATH) || {};
 const state = JSON.parse(await fs.readFile(STATE_PATH, 'utf8'));
+const feishuBasePaused = envTruthy(process.env.SHEIN_FEISHU_BASE_PAUSED)
+  || await fileExists(FEISHU_BASE_PAUSE_FLAG);
 args.as = args.as || reportConfig.defaultIdentity || 'user';
 args.group = args.group || 'DSY';
 if (!['user', 'bot'].includes(args.as)) {
@@ -466,6 +482,7 @@ if (args.syncToday) {
   const syncResults = [];
   for (const groupKey of reportGroups) {
     const syncArgs = ['--mode', 'intraday', '--group', groupKey, '--no-monthly', '--no-compact-display', '--no-dashboard'];
+    if (feishuBasePaused) syncArgs.push('--no-lark-base', '--no-products');
     const configuredStores = reportConfig.syncStoresByGroup?.[groupKey];
     if (Array.isArray(configuredStores) && configuredStores.length) {
       syncArgs.push('--stores', configuredStores.join(','));
@@ -483,16 +500,20 @@ if (args.syncToday) {
   const month = today.slice(0, 7);
   // 日报前置同步只做轻量刷新：抓取/事实表/产品日事实 + 主看板。
   // 月表、年度汇总、周/月宽表由定时同步统一刷新，不放在日报发送前，避免日报长时间卡住。
-  const dashboard = await runNode('setup_lark_dashboard_main_v3.mjs', ['--month', month]);
-  syncDashboardRefresh = {
-    ok: dashboard.ok,
-    code: dashboard.code,
-    parsed: dashboard.ok ? parseFirstJson(dashboard.stdout) : null,
-    stdoutTail: dashboard.stdout.slice(-2000),
-    stderrTail: dashboard.stderr.slice(-2000),
-  };
-  if (!dashboard.ok) {
-    throw new Error(`今日同步已成功，但主看板刷新失败，日报已停止发送以避免看板/日报口径不一致：${dashboard.stderr || dashboard.stdout}`);
+  if (feishuBasePaused) {
+    syncDashboardRefresh = {ok: true, skipped: true, reason: 'feishu_base_paused'};
+  } else {
+    const dashboard = await runNode('setup_lark_dashboard_main_v3.mjs', ['--month', month]);
+    syncDashboardRefresh = {
+      ok: dashboard.ok,
+      code: dashboard.code,
+      parsed: dashboard.ok ? parseFirstJson(dashboard.stdout) : null,
+      stdoutTail: dashboard.stdout.slice(-2000),
+      stderrTail: dashboard.stderr.slice(-2000),
+    };
+    if (!dashboard.ok) {
+      throw new Error(`今日同步已成功，但主看板刷新失败，日报已停止发送以避免看板/日报口径不一致：${dashboard.stderr || dashboard.stdout}`);
+    }
   }
 }
 
@@ -560,7 +581,7 @@ if (args.send || args.dryRun) {
 }
 
 let reportLog = null;
-if (args.send && state.tables?.['飞书日报记录']?.table_id) {
+if (args.send && !feishuBasePaused && state.tables?.['飞书日报记录']?.table_id) {
   reportLog = await upsertReportLog({
     baseToken: state.baseToken,
     tableId: state.tables['飞书日报记录'].table_id,
@@ -584,8 +605,10 @@ console.log(JSON.stringify({
   yesterday,
   recipientUserId: recipientUserId ? `${recipientUserId.slice(0, 6)}...` : null,
   syncToday: args.syncToday,
+  feishuBasePaused,
   syncOk: syncResult ? syncResult.ok : null,
   syncDashboardOk: syncDashboardRefresh ? syncDashboardRefresh.ok : null,
+  syncDashboardSkipped: !!syncDashboardRefresh?.skipped,
   syncWarning: syncWarning.trim() || null,
   yesterdayTotalSar: yesterdayData.totalSar,
   todayTotalSar: todayData.totalSar,
@@ -599,4 +622,5 @@ console.log(JSON.stringify({
   sendDryRun: args.dryRun && !args.send,
   sendOk: sendResult ? true : null,
   reportLog,
+  reportLogSkipped: args.send && feishuBasePaused,
 }, null, 2));

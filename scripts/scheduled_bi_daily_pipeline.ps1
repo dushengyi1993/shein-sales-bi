@@ -18,8 +18,9 @@ function Get-BjDate([int]$OffsetDays) {
 }
 
 # Daily BI refresh is intended to run after the final yesterday sales job and
-# after the 05:30 link-management job. Therefore all business dates default to
-# Beijing yesterday.
+# after the 05:30 link-management + business-domain fetch job. Therefore all
+# business dates default to Beijing yesterday, and this script only loads the
+# files already fetched at 05:30 instead of opening SHEIN again.
 $targetDate = Get-BjDate -1
 $pipelineScript = Join-Path $repo "scripts\run_bi_daily_pipeline.ps1"
 
@@ -48,4 +49,5 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $pipelineScript `
   -Distro $Distro `
   -Container $Container `
   -Database $Database `
-  -User $User
+  -User $User `
+  -SkipBusinessFetch

@@ -1249,8 +1249,14 @@ CREATE OR REPLACE VIEW mart.bi_store_product_matrix_current AS
 WITH latest_sales AS (
   SELECT max(created_date) AS date FROM fact.order_item
 ),
-latest_link AS (
-  SELECT max(date) AS date FROM fact.product_store_coverage
+latest_coverage AS (
+  SELECT max(date) AS max_date FROM fact.product_store_coverage
+),
+latest_store_coverage AS (
+  SELECT store_key, max(date) AS date
+  FROM fact.product_store_coverage
+  WHERE date >= (SELECT max_date FROM latest_coverage) - interval '3 days'
+  GROUP BY store_key
 ),
 sales AS (
   SELECT
@@ -1271,7 +1277,7 @@ actions AS (
     count(*) FILTER (WHERE focus) AS focus_action_count,
     max(score) AS max_action_score
   FROM mart.link_action_candidate
-  WHERE date = (SELECT date FROM latest_link)
+  WHERE date = (SELECT max_date FROM latest_coverage)
   GROUP BY store_key, standard_goods_sn
 )
 SELECT
@@ -1300,11 +1306,13 @@ SELECT
   coalesce(a.focus_action_count, 0) AS focus_action_count,
   coalesce(a.max_action_score, 0) AS max_action_score
 FROM fact.product_store_coverage c
+JOIN latest_store_coverage lsc
+  ON lsc.store_key = c.store_key AND lsc.date = c.date
 LEFT JOIN sales s
   ON s.store_key = c.store_key AND s.standard_goods_sn = c.standard_goods_sn
 LEFT JOIN actions a
   ON a.store_key = c.store_key AND a.standard_goods_sn = c.standard_goods_sn
-WHERE c.date = (SELECT date FROM latest_link);
+;
 
 CREATE OR REPLACE VIEW mart.bi_product_overview_current AS
 WITH base AS (
@@ -1662,7 +1670,6 @@ WHERE s.enabled = true;
 
 CREATE OR REPLACE VIEW mart.bi_product_360_current AS
 WITH latest_business AS (SELECT max(snapshot_date) AS date FROM fact.home_finance_snapshot),
-latest_link AS (SELECT max(snapshot_date) AS date FROM fact.link_master_snapshot),
 sales AS (
   SELECT
     standard_goods_sn,
@@ -1681,9 +1688,11 @@ coverage AS (
     count(*) FILTER (WHERE need_supplement_link) AS missing_store_count,
     sum(on_shelf_count) AS on_shelf_link_count,
     sum(wait_shelf_count) AS wait_shelf_link_count,
-    sum(sold_out_count) AS sold_out_link_count
-  FROM fact.product_store_coverage
-  WHERE date = (SELECT date FROM latest_link)
+    sum(sold_out_count) AS sold_out_link_count,
+    min(link_date) AS min_link_date,
+    max(link_date) AS max_link_date,
+    count(DISTINCT store_key) AS coverage_store_count
+  FROM mart.bi_store_product_matrix_current
   GROUP BY standard_goods_sn
 ),
 inventory AS (

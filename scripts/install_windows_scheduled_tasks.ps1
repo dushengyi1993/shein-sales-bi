@@ -133,7 +133,7 @@ Register-InteractiveTask `
 if ($IncludeLinkManagement) {
   Register-InteractiveTask `
     -TaskName $LinkManagementTaskName `
-    -Description "SHEIN 15-store link-management sync at $LinkManagementTime Beijing time. Tracks link coverage, display stock, performance, and suggestions. Workspace: $Root" `
+    -Description "SHEIN 15-store link-management + business-domain fetch at $LinkManagementTime Beijing time. Fetches previous complete day links, after-sales, stock, comments, fulfillment, finance and quality files; BI loads them later. Workspace: $Root" `
     -ScriptPath $LinkManagementScript `
     -Trigger @($LinkManagementTrigger)
 }

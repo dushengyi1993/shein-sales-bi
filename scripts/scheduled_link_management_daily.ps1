@@ -99,28 +99,42 @@ function Send-LinkIssueAlert([int]$ExitCode, [string]$TargetDate) {
   } | Out-Null
 }
 
-Log "SHEIN link-management daily BI/local sync start date=$Date"
+Log "SHEIN link-management + business-domain daily fetch start date=$Date"
 
 $LinkExitCode = Invoke-LoggedCommand "Run link-management fetch/local artifacts for $Date" {
   & $Node ".\scripts\run_link_management_job.mjs" --group ALL --date $Date --headless-browser --allow-partial --no-lark
 }
 
 if ($LinkExitCode -ne 0) {
-  Log "WARN link-management fetch returned non-zero; will alert and continue BI refresh with latest available link snapshot."
+  Log "WARN link-management fetch returned non-zero; will alert, continue business-domain fetch, and let 07:00 BI refresh use latest available link snapshot."
   Send-LinkIssueAlert -ExitCode $LinkExitCode -TargetDate $Date
 }
 
-$BiExitCode = Invoke-LoggedCommand "Refresh BI after link-management for $Date" {
-  & powershell -NoProfile -ExecutionPolicy Bypass -File ".\scripts\run_bi_daily_pipeline.ps1" `
-    -SalesDate $Date `
-    -LinkDate $Date `
-    -BusinessDate $Date `
-    -SkipBusinessFetch `
-    -SkipBusinessLoad
+$BusinessExitCode = Invoke-LoggedCommand "Fetch SHEIN business domains for $Date" {
+  & $Node ".\scripts\fetch_shein_business_domains.mjs" `
+    --group ALL `
+    --date $Date `
+    --wait-ms 2000 `
+    --max-pages 20 `
+    --store-attempts 2 `
+    --relogin-headless `
+    --json
 }
 
-$Ok = ($LinkExitCode -eq 0 -and $BiExitCode -eq 0)
-Log "SHEIN link-management daily BI/local sync end date=$Date linkExit=$LinkExitCode biExit=$BiExitCode ok=$Ok log=$LogFile"
+if ($BusinessExitCode -ne 0) {
+  Log "WARN business-domain fetch returned non-zero; successful stores/domains remain on disk and 07:00 BI refresh will load what is available."
+  Invoke-LoggedCommand "Send business-domain issue alert" {
+    & $Node ".\scripts\notify_sync_issue.mjs" `
+      --mode "business-domain-daily" `
+      --date $Date `
+      --failed-stores "UNKNOWN" `
+      --message "05:30 business-domain fetch had partial failures; successful stores/domains were saved and 07:00 BI refresh will continue with available data." `
+      --log-file $LogFile
+  } | Out-Null
+}
+
+$Ok = ($LinkExitCode -eq 0 -and $BusinessExitCode -eq 0)
+Log "SHEIN link-management + business-domain daily fetch end date=$Date linkExit=$LinkExitCode businessExit=$BusinessExitCode ok=$Ok log=$LogFile"
 
 if ($Ok) { exit 0 }
 exit 1

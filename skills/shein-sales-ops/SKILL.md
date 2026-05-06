@@ -14,7 +14,7 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 
 ## 当前资产
 - 工作区：`E:\Codex WorkSpace\Shein销售统计`
-- Base：`https://zcnm3ts63aph.feishu.cn/base/SnnQbrAu6aLzMWsnEICcy0cKnJh`
+- Base：`https://zcnm3ts63aph.feishu.cn/base/SnnQbrAu6aLzMWsnEICcy0cKnJh`（当前标题已标注多维表格同步暂停、日报正常）
 - 当月主看板：`SHEIN经营看板 v3-主看板`，ID `blkFn3qHrwdsrJyX`，数据源 `看板数据-MAIN-*`
 - 上月看板：`SHEIN经营看板 v3-上月`，ID `blkWeyZhphgRZYim`，数据源 `看板数据-PREV-*`
 - 店铺：DSY=`DL DX FY LQ NM HL JY ZL TS MZ`；LGM=`CX YJ XL QY QH`
@@ -30,11 +30,12 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 不做猜测性单店时区偏移；HL 的错误 `accountUtcOffsetHours=3` 已删除并回补。
 
 ## 定时任务
-- `00:10`：前一天最终版。
+- `00:10`：前一天最终版；若存在 `state/feishu-base-sync-paused.flag`，只抓本地数据并刷新 BI，不写飞书 Base / 看板。
 - `05:30`：链接管理 15 店每日同步，任务名 `SHEIN-Sales-15Stores-LinkManagement-0530`，只写本地 / PostgreSQL / BI，不再写飞书链接表。
-- `06:40`：BI 每日流水线，任务名 `SHEIN-BI-Daily-Pipeline-0640`。
-- `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10`：当天滚动同步。
-- 日报：早上 08:10 同步成功后自动发送；上午后续成功同步可补发一次，用 `state/daily-report-sent-YYYYMMDD.flag` 防重复。
+- `07:00`：BI 每日流水线，任务名 `SHEIN-BI-Daily-Pipeline-0700`。
+- `2026-05-06 05:30` 链接/业务域任务和 `2026-05-06 07:00` BI 每日流水线已自动跑通；下一次例行观察 `2026-05-07 05:30` / `07:00`。
+- `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10`：当天滚动抓取；Base 暂停期间只抓本地数据并刷新 BI。
+- 日报：早上 08:10 同步成功后自动发送；上午后续成功同步可补发一次，用 `state/daily-report-sent-YYYYMMDD.flag` 防重复。Base 暂停期间照常发送 IM 文字和图片日报，只跳过写 `飞书日报记录` 表。
 - watchdog：`09:20` 和 Windows 登录时，只做漏跑补偿。
 - 计划任务必须通过 `wscript.exe` + `scripts/run_scheduled_hidden.vbs` 隐藏运行，最长 90 分钟。
 
@@ -44,6 +45,8 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 独立月表只保留当月和上月；更早月份进入年度汇总。
 - 产品周/月销量只保留宽表。跨周/月必须先补齐新周期列再写入。
 - 新建飞书 Base 表后提醒用户手动扩容到 `20000` 行。
+- 当前飞书 Base / 看板写入受 `state/feishu-base-sync-paused.flag` 控制；存在该文件时不要手动补跑飞书表格、月表、宽表或 Dashboard 刷新脚本，除非用户明确要求恢复。
+- BI 门户侧栏更新时间必须显示源文件抓取时间：销售取销售源抓取时间；链接取 `outputs/shein_links/<店铺>/<链接日>.json.fetchTime` 最大值；售后/库存/财务取 `outputs/shein_business_domains/<店铺>/<业务日>.json.fetchTime` 最大值。不要用 BI 重跑入仓 `updated_at` 冒充后台抓取时间。
 
 ## 货号规则
 - 标准货号：`config/product_catalog.json`

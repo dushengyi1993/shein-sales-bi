@@ -9,7 +9,7 @@ import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const TASK_NAME = 'SHEIN-BI-Daily-Pipeline-0640';
+const TASK_NAME = 'SHEIN-BI-Daily-Pipeline-0700';
 
 function pad(n) { return String(n).padStart(2, '0'); }
 function localStamp(d = new Date()) {
@@ -131,7 +131,7 @@ function epochMsFromLocalText(text) {
 }
 async function readTaskViaSchtasks(reason = '') {
   try {
-    const res = await run('cmd.exe', ['/c', 'schtasks /query /tn SHEIN-BI-Daily-Pipeline-0640 /v /fo csv'], {timeoutMs: 8_000});
+    const res = await run('cmd.exe', ['/c', 'schtasks /query /tn SHEIN-BI-Daily-Pipeline-0700 /v /fo csv'], {timeoutMs: 8_000});
     if (res.code !== 0 || !res.stdout) return {exists:false, error: reason || res.stderr || `schtasks exit ${res.code}`};
     const lines = res.stdout.split(/\r?\n/).filter(Boolean);
     const cols = parseCsvPrefix(lines[1] || '', 8);
@@ -374,7 +374,7 @@ function recoveryStatus({task, latestLog = {}, latestLogRelation = {}, scheduled
         `入口 dry-run：${entryOk ? '通过' : '失败'}`,
         `体检：${auditOk ? '通过' : '需检查'}`
       ],
-      next: `等待下一次正式自动运行 ${task.NextRunTime || '06:40'}；若成功，计划任务结果应恢复为成功。`
+      next: `等待下一次正式自动运行 ${task.NextRunTime || '07:00'}；若成功，计划任务结果应恢复为成功。`
     };
   }
   if (v?.status === 'ok') {

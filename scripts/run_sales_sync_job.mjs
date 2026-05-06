@@ -5,7 +5,7 @@
  * It performs:
  *   1) ensure each selected store's workspace Chrome profile is open
  *   2) fetch the target Beijing business day
- *   3) sync daily fact/log records into Lark Base
+ *   3) sync daily fact/log records into Lark Base unless Feishu Base sync is paused
  *   4) refresh product daily fact and product daily wide display table
  *   5) refresh compact archive / product weekly-monthly wide tables
  *   6) refresh the corresponding monthly daily-sales display table
@@ -26,8 +26,22 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
 const JOB_LOG_DIR = path.join(ROOT, 'logs', 'jobs');
 const CHECKPOINT_PATH = path.join(ROOT, 'state', 'shein_sync_checkpoint.json');
+const FEISHU_BASE_PAUSE_FLAG = path.join(ROOT, 'state', 'feishu-base-sync-paused.flag');
 
 const storesConfig = JSON.parse(await fs.readFile(STORES_PATH, 'utf8'));
+
+function envTruthy(value) {
+  return /^(1|true|yes|on)$/i.test(String(value || '').trim());
+}
+
+async function fileExists(file) {
+  try {
+    await fs.access(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function parseArgs(argv) {
   const args = {
@@ -46,6 +60,7 @@ function parseArgs(argv) {
     autoRelogin: true,
     reloginVisible: true,
     storeAttempts: 3,
+    skipLarkBase: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -65,6 +80,7 @@ function parseArgs(argv) {
     }
     else if (a === '--no-compact-display' || a === '--no-compact') args.refreshCompactDisplay = false;
     else if (a === '--no-dashboard') args.refreshDashboard = false;
+    else if (a === '--no-lark-base' || a === '--skip-lark-base') args.skipLarkBase = true;
     else if (a === '--dashboard-name') args.dashboardName = argv[++i];
     else if (a === '--refresh-all-dashboard') args.refreshAllDashboard = true;
     else if (a === '--all-dashboard-name') args.allDashboardName = argv[++i];
@@ -357,6 +373,13 @@ async function syncOneStore(store, date, status, options) {
   result.salesSar = fetchResult.salesSar;
 
   const detailFile = path.join(ROOT, 'outputs', 'shein_fetch', store.storeKey, `${date}.json`);
+  if (args.skipLarkBase) {
+    result.syncOk = true;
+    result.syncSkipped = true;
+    result.syncSkipReason = 'feishu_base_paused';
+    return result;
+  }
+
   const syncResult = await runNode('sync_shein_daily_to_lark.mjs', ['--file', detailFile, '--status', status]);
   result.syncStdoutTail = syncResult.stdout.slice(-1200);
   result.syncStderrTail = syncResult.stderr.slice(-1200);
@@ -412,6 +435,16 @@ async function updateCheckpointFromJob(job) {
 }
 
 const args = parseArgs(process.argv.slice(2));
+args.skipLarkBase = args.skipLarkBase
+  || envTruthy(process.env.SHEIN_FEISHU_BASE_PAUSED)
+  || await fileExists(FEISHU_BASE_PAUSE_FLAG);
+if (args.skipLarkBase) {
+  args.refreshProducts = false;
+  args.refreshCompactDisplay = false;
+  args.refreshMonthly = false;
+  args.refreshDashboard = false;
+  args.refreshAllDashboard = false;
+}
 const {date, status} = resolveJobDateAndStatus(args);
 const stores = selectedStores(args);
 const month = date.slice(0, 7);
@@ -423,6 +456,7 @@ const job = {
   status,
   group: args.group,
   browserMode: args.browserMode,
+  feishuBasePaused: args.skipLarkBase,
   stores: stores.map(s => s.storeKey),
   results: [],
   productRefresh: null,
@@ -444,6 +478,7 @@ for (const store of stores) {
     storeKey: result.storeKey,
     date,
     ok: result.fetchOk && result.syncOk,
+    syncSkipped: !!result.syncSkipped,
     salesSar: result.salesSar,
     error: result.error,
   }));
@@ -573,6 +608,7 @@ console.log(JSON.stringify({
     .reduce((sum, r) => sum + Number(r.salesSar || 0), 0),
   skippedDownstreamRefresh: job.skippedDownstreamRefresh,
   skipReason: job.skipReason,
+  feishuBasePaused: job.feishuBasePaused,
   logFile: path.relative(ROOT, logFile),
   monthlyTable: job.monthlyRefresh?.parsed?.tableName || null,
   monthlyOk: job.monthlyRefresh?.ok ?? null,

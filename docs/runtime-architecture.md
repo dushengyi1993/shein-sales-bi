@@ -1,11 +1,12 @@
 ﻿# 运行环境架构
 
-## 2026-05-05 当前运行环境摘要
+## 2026-05-06 当前运行环境摘要
 
-- 飞书生产链路继续在 Windows 侧运行，BI 后置刷新不反向影响飞书表格、看板和日报。
+- SHEIN 抓数、BI 后置刷新和飞书日报继续在 Windows 侧运行；飞书多维表格 / 原生看板写入已临时暂停。
+- 暂停开关为 `state/feishu-base-sync-paused.flag`；存在该文件时跳过飞书事实表、产品表、月表、宽表和看板写入，删除后可恢复。
 - 链接表现每日任务为 `SHEIN-Sales-15Stores-LinkManagement-0530`，每天 `05:30`，只写本地 / PostgreSQL / BI；旧 `0340` / `0510` 链接任务不要恢复。
 - HL 正式 profile 为 `profiles/persistent-shein-main-profile`，CDP 端口 `9360`；旧 `profiles/persistent-hl-profile` 已删除。
-- `2026-05-05` Docker / WSL 数据盘异常已恢复；BI 门户和局域网访问已恢复，下一次重点观察 `2026-05-06 05:30` 与 `2026-05-06 06:40` 正式自动任务。
+- `2026-05-05` Docker / WSL 数据盘异常已恢复；`2026-05-06 05:30` 链接/业务域任务和 `2026-05-06 07:00` BI 每日流水线已正式自动跑通，下一次例行观察 `2026-05-07 05:30` 与 `2026-05-07 07:00`。
 
 ## 结论
 
@@ -18,15 +19,15 @@
 - PowerShell：只作为 Windows 上的薄启动器，用来启动 Chrome 或计划任务，不承载核心业务逻辑。
 - WSL2：适合跑数据处理、文本处理、批量脚本；但不是 SHEIN 浏览器自动化的主执行环境。
 - Windows Chrome：负责 SHEIN 登录态和页面自动化，但使用工作区内的 `profiles/` 作为 `--user-data-dir`，避免占用默认 C 盘 Chrome 用户目录。定时任务默认使用 Chrome `--headless=new` 无界面模式；只有登录、验证码、人机校验或排障时才打开可见 Chrome。
-- 飞书写入：当前 `lark-cli` 在 Windows 侧可用，脚本可直接调用；如后续需要长期后台任务，优先用 Windows 计划任务调用工作区脚本。
+- 飞书写入：当前 `lark-cli` 在 Windows 侧可用；但飞书 Base / 看板写入受 `state/feishu-base-sync-paused.flag` 控制，暂停期间只保留飞书 IM 日报和异常提醒。
 
 ## 当前 Windows 计划任务（北京时间）
 
-- `SHEIN-Sales-15Stores-YesterdayFinal-0010`：每天 `00:10` 跑前一天最终版。
-- `SHEIN-Sales-15Stores-Intraday-Daytime`：每天 `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10` 跑当天滚动同步。
-- `SHEIN-Sales-15Stores-LinkManagement-0530`：每天 `05:30` 跑前一完整业务日链接管理同步，只写本地 JSON、PostgreSQL 和 BI 门户，不再写飞书链接表。
-- `SHEIN-BI-Daily-Pipeline-0640`：每天 `06:40` 刷新 PostgreSQL BI 仓库、体检、门户和晨报。
-- 每日飞书文字日报和可视化日报图不再使用独立固定任务；由 `08:10` 当天同步成功完成后自动发送。若 `08:10` 因关机/失败未发送，上午后续成功的滚动同步可补发一次，并用 `state/daily-report-sent-YYYYMMDD.flag` 防重复。
+- `SHEIN-Sales-15Stores-YesterdayFinal-0010`：每天 `00:10` 跑前一天最终版；Base 暂停期间只写本地销售文件并刷新 BI。
+- `SHEIN-Sales-15Stores-Intraday-Daytime`：每天 `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10` 跑当天滚动抓取；Base 暂停期间只写本地销售文件并刷新 BI。
+- `SHEIN-Sales-15Stores-LinkManagement-0530`：每天 `05:30` 跑前一完整业务日链接管理和业务域抓取，先写本地 JSON；`07:00` BI 流水线再入仓刷新门户，不再写飞书链接表。
+- `SHEIN-BI-Daily-Pipeline-0700`：每天 `07:00` 入仓 05:30 已抓取的链接/业务域数据，并刷新 PostgreSQL BI 仓库、体检、门户和晨报。
+- 每日飞书文字日报和可视化日报图不再使用独立固定任务；由 `08:10` 当天抓取成功完成后自动发送。若 `08:10` 因关机/失败未发送，上午后续成功的滚动同步可补发一次，并用 `state/daily-report-sent-YYYYMMDD.flag` 防重复；Base 暂停期间只跳过日报记录表写入，不影响 IM 消息和日报图。
 - `SHEIN-Sales-15Stores-Watchdog-Logon`：Windows 登录时和每天 `09:20` 检查漏跑并补偿；不额外同步当日。
 
 安装/更新入口：
@@ -48,7 +49,7 @@
 - Metabase、Metabase 配置库、SHEIN 数据仓库通过 Docker 跑在 WSL。
 - WSL 发行版已迁移到 `D:\WSL\Ubuntu-24.04`。
 - Docker 数据根已迁移到 `D:\SheinBI\docker-data\docker-data.ext4`，实际挂载到 WSL 内 `/mnt/wsl/shein-docker-data/docker`。
-- 现有销售抓取、飞书同步、日报、Windows 计划任务继续在 Windows 侧运行，直到 BI 系统稳定可替代。
+- 现有销售抓取、飞书日报、Windows 计划任务继续在 Windows 侧运行；飞书 Base / 看板写入已通过暂停开关临时停用，直到用户确认恢复。
 - 后续新写的 BI 数据入仓、规则引擎、Metabase 配置脚本，优先按“可迁移到 Linux 服务器”的方式设计，减少 PowerShell 业务逻辑。
 
 也就是说：**BI 底座可以先 WSL/服务器化，但不要为了统一环境去冒险迁移已稳定的飞书生产链路。**
@@ -166,8 +167,8 @@
 
 ## 数据抓取时间展示规则
 
-- SHEIN 日报文字、日报图片和飞书 Base 看板必须显示“数据抓取时间”；图片/看板可同时显示生成时间或刷新时间，但不能只显示生成/刷新时间。数据抓取时间优先取当日各店 `outputs/shein_fetch/<store>/<date>.json` 的最新 `fetchTime`。
-- 当前两个正式看板顶部富文本时间块已通过内部保存链路修复为正常标题样式；定时刷新会在数据源刷新后自动尝试更新时间块，并带 3 次轻量重试。看板数据卡片和图表仍按 `MAIN/PREV` 聚合表正常刷新。
+- SHEIN 日报文字、日报图片和 BI 门户必须显示“数据抓取时间”；图片/门户可同时显示生成时间或刷新时间，但不能只显示生成/刷新时间。销售数据抓取时间优先取当日各店 `outputs/shein_fetch/<store>/<date>.json` 的最新 `fetchTime`。
+- 飞书 Base / 看板写入暂停期间，正式看板顶部富文本时间块不会随定时任务自动刷新；恢复 Base / 看板写入后，仍使用内部保存链路更新时间块，并带 3 次轻量重试。
 
 ## 逻辑体检
 
@@ -199,7 +200,7 @@
 
 # 2026-05-02 调度与 HL profile 更新
 
-- 飞书同步任务现在承担 BI 后置刷新：00:10 和白天滚动任务完成飞书写表/看板后，会继续刷新 PostgreSQL BI 仓库、本地 BI 门户和晨报。
+- 销售抓取任务现在承担 BI 后置刷新：00:10 和白天滚动任务完成本地销售抓取后，会继续刷新 PostgreSQL BI 仓库、本地 BI 门户和晨报；飞书 Base / 看板写入在暂停开关存在时跳过。
 - 旧独立链接管理计划任务 `SHEIN-Sales-15Stores-LinkManagement-0340` / `SHEIN-Sales-15Stores-LinkManagement-0510` 已经删除；当前链接同步由 `SHEIN-Sales-15Stores-LinkManagement-0530` 每天 05:30 负责，只写本地 / PostgreSQL / BI。上午滚动任务主要负责销售同步后的 BI 后置刷新。
 - HL 旧子账号 profile `profiles/persistent-hl-profile` 已删除；正式 HL profile 为 `profiles/persistent-shein-main-profile`，CDP 端口 `9360`。
 - 飞书定时任务和写表链路都通过 `config/stores.json` 获取 HL profile；当前生产脚本中没有旧 HL profile、旧端口 `9338` 或 `profileKey=hl` 引用。
