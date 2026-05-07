@@ -12,6 +12,9 @@
 - `scheduled_link_management_daily.ps1`
 - `scheduled_watchdog_dsy.ps1`
 - `scheduled_yesterday_final_dsy.ps1`
+- `scheduled_openapi_hl_reconciliation.ps1`
+- `scheduled_openapi_hl_intraday.ps1`
+- `scheduled_openapi_hl_yesterday_final.ps1`
 
 ## 当前生产主链路，必须保留
 

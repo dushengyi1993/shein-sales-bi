@@ -8,6 +8,7 @@
 - HL 已切换为主账号 profile：`profiles/persistent-shein-main-profile`；旧 `profiles/persistent-hl-profile` 已删除。
 - `2026-05-05` Docker / WSL 数据盘异常已手动恢复；`2026-05-06 05:30` 链接/业务域任务和 `2026-05-06 07:00` BI 每日流水线已自动跑通。飞书多维表格 / 看板写入暂停开关为 `state/feishu-base-sync-paused.flag`。
 - HL OpenAPI 销售试点已跑通并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` 写入 `fact.openapi_*` 并行事实表与 `mart.openapi_sales_reconciliation` 对账表；BI 系统状态页显示 “SHEIN OpenAPI 试点对账”。正式切换生产销售表前继续累计多日 `matched`。
+- HL OpenAPI 销售试点已固定为 Windows 计划任务双跑：`SHEIN-Sales-OpenAPI-HL-YesterdayFinal-0025` 每天 `00:25` 对账前一天最终版，`SHEIN-Sales-OpenAPI-HL-Intraday-1225` 每天 `12:25` 对账当天日内销售；只写 `fact.openapi_*` 和 `mart.openapi_sales_reconciliation` 并刷新 BI 状态页，不覆盖浏览器生产事实表。`2026-05-07 13:28` 已把当前出口 IP `188.253.112.44` 加入 SHEIN 开放平台白名单，完整入口复跑成功并刷新 BI；当日 intraday 对账为 `warning`，原因是 API 已多看到 1 个新订单，而浏览器生产源文件仍停留在上一轮同步。
 - 系统定位正在从“BI 数据分析”扩展为“自动运营驾驶舱”：先把可重复运营动作沉淀为脚本和规则，再按“建议/预填/复核/人工确认提交/审计留痕”的边界逐步开放自动化。
 
 本工作区用于 SHEIN 15 店销售数据自动抓取、飞书多维表格统计、每日飞书日报、链接管理、营销活动报名辅助，以及正在并行建设的 PostgreSQL + Metabase + 本地 BI / 自动运营驾驶舱。
@@ -131,6 +132,8 @@
   `node scripts/fetch_shein_openapi_sales.mjs HL --start YYYY-MM-DD --end YYYY-MM-DD`
 - 将 HL OpenAPI 销售写入并行表并生成对账：
   `node scripts/load_shein_openapi_sales_warehouse.mjs --store HL --start YYYY-MM-DD --end YYYY-MM-DD`
+- 手动运行 HL OpenAPI 对账入口：
+  `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_openapi_hl_reconciliation.ps1 -Mode intraday`
 - 生成营销活动成本映射：
   `python scripts/marketing/build_marketing_cost_map.py`
 - 辅助填报 DSY 两天内截止的营销活动（只预填，不点最终提交）：

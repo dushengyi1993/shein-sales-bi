@@ -69,6 +69,649 @@ CREATE TABLE IF NOT EXISTS raw.local_file_catalog (
   raw_meta jsonb DEFAULT '{}'::jsonb
 );
 
+CREATE TABLE IF NOT EXISTS raw.et_fetch_batch (
+  batch_id text PRIMARY KEY,
+  mode text,
+  target_date date,
+  fetched_at timestamptz,
+  base_url text,
+  profile_dir text,
+  manifest_path text,
+  ok boolean,
+  sync_windows jsonb DEFAULT '{}'::jsonb,
+  raw_manifest jsonb DEFAULT '{}'::jsonb,
+  loaded_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS raw.et_endpoint_row (
+  row_key text PRIMARY KEY,
+  batch_id text REFERENCES raw.et_fetch_batch(batch_id),
+  endpoint_key text NOT NULL,
+  parent_endpoint_key text,
+  natural_id text,
+  target_date date,
+  fetched_at timestamptz,
+  source_file text,
+  row_data jsonb NOT NULL,
+  loaded_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_et_endpoint_row_endpoint_date ON raw.et_endpoint_row(endpoint_key, target_date);
+CREATE INDEX IF NOT EXISTS idx_et_endpoint_row_natural_id ON raw.et_endpoint_row(endpoint_key, natural_id);
+
+CREATE TABLE IF NOT EXISTS fact.et_sku_master (
+  goods_id text PRIMARY KEY,
+  barcode text,
+  sku_code text,
+  model_number text,
+  standard_goods_sn text,
+  match_key text,
+  title_cn text,
+  title_en text,
+  brand_name text,
+  report_price numeric,
+  status text,
+  status_name text,
+  created_time timestamp,
+  source_batch_id text,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_et_sku_master_standard ON fact.et_sku_master(standard_goods_sn);
+
+CREATE TABLE IF NOT EXISTS fact.et_sku_specification (
+  sku_id text PRIMARY KEY,
+  barcode text,
+  sku_code text,
+  standard_goods_sn text,
+  match_key text,
+  sku_length numeric,
+  sku_width numeric,
+  sku_height numeric,
+  sku_volume numeric,
+  sku_weight numeric,
+  goods_length numeric,
+  goods_width numeric,
+  goods_height numeric,
+  goods_weight numeric,
+  goods_volume numeric,
+  status text,
+  created_time timestamp,
+  source_batch_id text,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS fact.et_store_stock_snapshot (
+  unique_key text PRIMARY KEY,
+  snapshot_date date NOT NULL,
+  batch_id text,
+  f_id text,
+  sku_id text,
+  storeroom_id text,
+  storeroom_name text,
+  barcode text,
+  sku_code text,
+  standard_goods_sn text,
+  match_key text,
+  title_cn text,
+  title_en text,
+  quantity numeric,
+  real_quantity numeric,
+  s_b2b_quantity numeric,
+  s_b2b_real_quantity numeric,
+  fbn_quantity numeric,
+  fbn_real_quantity numeric,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_et_store_stock_date_product ON fact.et_store_stock_snapshot(snapshot_date, standard_goods_sn);
+CREATE INDEX IF NOT EXISTS idx_et_store_stock_warehouse ON fact.et_store_stock_snapshot(snapshot_date, storeroom_name);
+
+CREATE TABLE IF NOT EXISTS fact.et_box_stock_snapshot (
+  unique_key text PRIMARY KEY,
+  snapshot_date date NOT NULL,
+  batch_id text,
+  f_id text,
+  box_id text,
+  sku_id text,
+  goods_id text,
+  storeroom_id text,
+  storeroom_name text,
+  store_site_id text,
+  barcode text,
+  sku_code text,
+  standard_goods_sn text,
+  match_key text,
+  title_cn text,
+  title_en text,
+  quantity numeric,
+  real_quantity numeric,
+  sku_lock_status_name text,
+  site_lock_status_name text,
+  update_time timestamp,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_et_box_stock_date_product ON fact.et_box_stock_snapshot(snapshot_date, standard_goods_sn);
+
+CREATE TABLE IF NOT EXISTS fact.et_stock_running (
+  f_id text PRIMARY KEY,
+  batch_id text,
+  storeroom_name text,
+  barcode text,
+  sku_code text,
+  standard_goods_sn text,
+  match_key text,
+  title_cn text,
+  title_en text,
+  quantity numeric,
+  balance numeric,
+  supply_price numeric,
+  sort text,
+  sort_name text,
+  from_id text,
+  created_time timestamp,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_et_stock_running_time ON fact.et_stock_running(created_time);
+CREATE INDEX IF NOT EXISTS idx_et_stock_running_product ON fact.et_stock_running(standard_goods_sn, created_time);
+
+CREATE TABLE IF NOT EXISTS fact.et_ship_order (
+  ship_order_id text PRIMARY KEY,
+  batch_id text,
+  storeroom_id text,
+  storeroom_title text,
+  transport_title text,
+  status text,
+  status_name text,
+  send_quantity numeric,
+  inland_quantity numeric,
+  overseas_quantity numeric,
+  platform_quantity numeric,
+  case_number numeric,
+  all_box_number numeric,
+  send_box_count numeric,
+  store_box_count numeric,
+  weight numeric,
+  volume numeric,
+  country_id text,
+  city_id text,
+  storage_area text,
+  create_time timestamp,
+  check_time timestamp,
+  ship_time timestamp,
+  into_time timestamp,
+  end_time timestamp,
+  remark text,
+  waybill_code text,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS fact.et_ship_order_item (
+  unique_key text PRIMARY KEY,
+  batch_id text,
+  ship_order_id text REFERENCES fact.et_ship_order(ship_order_id),
+  f_id text,
+  goods_id text,
+  sku_id text,
+  barcode text,
+  sku_code text,
+  model_number text,
+  standard_goods_sn text,
+  match_key text,
+  title_cn text,
+  title_en text,
+  goods_title text,
+  quantity numeric,
+  cost_price numeric,
+  price numeric,
+  receive1 numeric,
+  receive2 numeric,
+  receive3 numeric,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_et_ship_order_item_product ON fact.et_ship_order_item(standard_goods_sn);
+
+CREATE TABLE IF NOT EXISTS fact.et_ship_order_box (
+  unique_key text PRIMARY KEY,
+  batch_id text,
+  ship_order_id text REFERENCES fact.et_ship_order(ship_order_id),
+  box_id text,
+  client_box_id text,
+  barcode text,
+  sku_code text,
+  standard_goods_sn text,
+  match_key text,
+  goods_title text,
+  case_quantity numeric,
+  real_quantity numeric,
+  storeroom_name text,
+  target_store text,
+  length numeric,
+  width numeric,
+  height numeric,
+  weight numeric,
+  etd timestamp,
+  eta timestamp,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS fact.et_box (
+  box_id text PRIMARY KEY,
+  batch_id text,
+  client_box_id text,
+  ship_order_id text,
+  storeroom_name text,
+  city_name text,
+  transport_name text,
+  status_name text,
+  logistics_status text,
+  get_time timestamp,
+  go_time timestamp,
+  volume numeric,
+  weight numeric,
+  storage_area text,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS fact.et_box_item (
+  unique_key text PRIMARY KEY,
+  batch_id text,
+  box_id text,
+  f_id text,
+  goods_id text,
+  sku_id text,
+  barcode text,
+  sku_code text,
+  model_number text,
+  standard_goods_sn text,
+  match_key text,
+  goods_title text,
+  case_quantity numeric,
+  real_quantity numeric,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS fact.et_outbound (
+  outbound_id text PRIMARY KEY,
+  batch_id text,
+  storeroom_id text,
+  storeroom_title text,
+  from_id text,
+  status text,
+  status_name text,
+  sku_count numeric,
+  box_count numeric,
+  create_time timestamp,
+  reserve_time timestamp,
+  outbound_time timestamp,
+  logistics_title text,
+  remark text,
+  waybill_code text,
+  file_url text,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_et_outbound_remark ON fact.et_outbound(remark);
+CREATE INDEX IF NOT EXISTS idx_et_outbound_time ON fact.et_outbound(outbound_time);
+
+CREATE TABLE IF NOT EXISTS fact.et_outbound_item (
+  unique_key text PRIMARY KEY,
+  batch_id text,
+  outbound_id text REFERENCES fact.et_outbound(outbound_id),
+  f_id text,
+  sku_id text,
+  barcode text,
+  sku_code text,
+  standard_goods_sn text,
+  match_key text,
+  title_cn text,
+  title_en text,
+  quantity numeric,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS fact.et_return_order (
+  return_order_id text PRIMARY KEY,
+  batch_id text,
+  store_name_out text,
+  store_name_in text,
+  rtv text,
+  shipment_number text,
+  status text,
+  status_name text,
+  to_pickup_name text,
+  to_instock_name text,
+  is_worn_in_name text,
+  out_quantity numeric,
+  in_quantity numeric,
+  all_weight numeric,
+  reserve_time timestamp,
+  create_time timestamp,
+  operator text,
+  reason text,
+  reason_remark text,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_et_return_shipment ON fact.et_return_order(shipment_number);
+CREATE INDEX IF NOT EXISTS idx_et_return_time ON fact.et_return_order(create_time);
+
+CREATE TABLE IF NOT EXISTS fact.et_return_order_item (
+  unique_key text PRIMARY KEY,
+  batch_id text,
+  return_order_id text REFERENCES fact.et_return_order(return_order_id),
+  f_id text,
+  goods_id text,
+  sku_id text,
+  barcode text,
+  sku_code text,
+  standard_goods_sn text,
+  match_key text,
+  goods_title text,
+  quantity numeric,
+  instock numeric,
+  differ numeric,
+  create_time timestamp,
+  remark text,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS fact.et_allocate (
+  allocate_id text PRIMARY KEY,
+  batch_id text,
+  from_id text,
+  out_storeroom text,
+  out_storeroom_id text,
+  in_storeroom text,
+  in_storeroom_id text,
+  status text,
+  status_name text,
+  case_number numeric,
+  real_number numeric,
+  logistics_name text,
+  logistics_no text,
+  create_time timestamp,
+  reserve_time timestamp,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS fact.et_allocate_item (
+  unique_key text PRIMARY KEY,
+  batch_id text,
+  allocate_id text REFERENCES fact.et_allocate(allocate_id),
+  f_id text,
+  goods_id text,
+  sku_id text,
+  barcode text,
+  sku_code text,
+  standard_goods_sn text,
+  match_key text,
+  goods_title text,
+  quantity numeric,
+  pick_amount numeric,
+  refuse_amount numeric,
+  receive_quantity numeric,
+  stock numeric,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS fact.et_store_receipt (
+  receipt_id text PRIMARY KEY,
+  batch_id text,
+  storeroom_name text,
+  sort_name text,
+  from_id text,
+  total_plan_quantity numeric,
+  total_quantity numeric,
+  remark text,
+  create_time timestamp,
+  end_time timestamp,
+  status_name text,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS fact.et_change_pack (
+  change_id text PRIMARY KEY,
+  batch_id text,
+  damage_store text,
+  pack_store text,
+  single_store text,
+  change_sort_name text,
+  pack_sort_name text,
+  barcode text,
+  standard_goods_sn text,
+  match_key text,
+  quantity numeric,
+  quantity2 numeric,
+  money numeric,
+  status text,
+  status_name text,
+  create_time timestamp,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS fact.et_box_damaged (
+  dlno text PRIMARY KEY,
+  batch_id text,
+  box_id text,
+  oversea_id text,
+  ship_order_id text,
+  title text,
+  allocate_id text,
+  allocate_name text,
+  allocate_status text,
+  box_damaged_status text,
+  box_damaged_name text,
+  sort_name text,
+  barcode text,
+  standard_goods_sn text,
+  match_key text,
+  sku_qty numeric,
+  check_qty numeric,
+  differ numeric,
+  create_time timestamp,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS fact.et_income_bill (
+  income_bill_id text PRIMARY KEY,
+  batch_id text,
+  client_from_id text,
+  oversea_id text,
+  source_type text,
+  sort text,
+  sort_name text,
+  status text,
+  status_name text,
+  freight numeric,
+  tariff numeric,
+  other_income numeric,
+  cq_money numeric,
+  in_money numeric,
+  out_money numeric,
+  pay_id text,
+  pay_sort text,
+  ship_time timestamp,
+  create_time timestamp,
+  push_time timestamp,
+  first_date timestamp,
+  billing_period_date timestamp,
+  remark text,
+  waybill_code text,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_et_income_bill_time ON fact.et_income_bill(ship_time);
+CREATE INDEX IF NOT EXISTS idx_et_income_bill_source ON fact.et_income_bill(source_type, client_from_id, oversea_id);
+
+CREATE TABLE IF NOT EXISTS fact.et_income_bill_item (
+  unique_key text PRIMARY KEY,
+  batch_id text,
+  income_bill_id text REFERENCES fact.et_income_bill(income_bill_id),
+  goods_title text,
+  sku_code text,
+  standard_goods_sn text,
+  match_key text,
+  quantity numeric,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS fact.et_income_bill_summary (
+  unique_key text PRIMARY KEY,
+  batch_id text,
+  target_date date,
+  sort text,
+  sort_name text,
+  country_id text,
+  country_name text,
+  total_freight numeric,
+  total_tariff numeric,
+  total_other_income numeric,
+  total_cq_money numeric,
+  total_fee numeric,
+  total_in_money numeric,
+  total_out_money numeric,
+  total_unmatured numeric,
+  total_expire numeric,
+  total_overdue numeric,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS fact.et_income_payment (
+  f_id text PRIMARY KEY,
+  batch_id text,
+  income_bill_id text,
+  pay_id text,
+  pay_sort text,
+  pay_money numeric,
+  currency text,
+  status text,
+  status_name text,
+  create_time timestamp,
+  pay_time timestamp,
+  invoice_no text,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS fact.et_freight_rate (
+  unique_key text PRIMARY KEY,
+  batch_id text,
+  transport_id text,
+  transport_title text,
+  country_id text,
+  country_title text,
+  sort_id text,
+  sort_title text,
+  sort_status text,
+  tier_a text,
+  tier_b text,
+  tier_c text,
+  tier_d text,
+  tier_e text,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE OR REPLACE VIEW mart.et_product_inventory_current AS
+WITH
+latest_store AS (
+  SELECT b.batch_id, b.target_date AS snapshot_date
+  FROM raw.et_fetch_batch b
+  WHERE b.ok IS TRUE
+    AND b.mode <> 'smoke'
+    AND EXISTS (SELECT 1 FROM fact.et_store_stock_snapshot s WHERE s.batch_id = b.batch_id)
+  ORDER BY b.fetched_at DESC NULLS LAST, b.batch_id DESC
+  LIMIT 1
+),
+latest_box AS (
+  SELECT b.batch_id, b.target_date AS snapshot_date
+  FROM raw.et_fetch_batch b
+  WHERE b.ok IS TRUE
+    AND b.mode <> 'smoke'
+    AND EXISTS (SELECT 1 FROM fact.et_box_stock_snapshot x WHERE x.batch_id = b.batch_id)
+  ORDER BY b.fetched_at DESC NULLS LAST, b.batch_id DESC
+  LIMIT 1
+),
+store_agg AS (
+  SELECT
+    standard_goods_sn,
+    match_key,
+    max(title_cn) FILTER (WHERE coalesce(title_cn,'') <> '') AS sample_title_cn,
+    sum(coalesce(real_quantity, quantity, 0)) AS loose_total_qty,
+    sum(coalesce(real_quantity, quantity, 0)) FILTER (WHERE storeroom_name LIKE '%09%' OR storeroom_name ILIKE '%散件%') AS loose_sellable_qty,
+    sum(coalesce(real_quantity, quantity, 0)) FILTER (WHERE storeroom_name LIKE '%03%' OR storeroom_name ILIKE '%RTV%') AS rtv_qty,
+    sum(coalesce(real_quantity, quantity, 0)) FILTER (WHERE storeroom_name LIKE '%04%' OR storeroom_name ILIKE '%Damaged%' OR storeroom_name ILIKE '%破损%') AS damaged_qty,
+    sum(coalesce(real_quantity, quantity, 0)) FILTER (WHERE storeroom_name LIKE '%06%' OR storeroom_name ILIKE '%报废%') AS scrap_qty,
+    string_agg(DISTINCT nullif(storeroom_name,''), ' / ') AS loose_warehouses,
+    max(snapshot_date) AS store_snapshot_date
+  FROM fact.et_store_stock_snapshot
+  WHERE batch_id = (SELECT batch_id FROM latest_store)
+    AND coalesce(standard_goods_sn,'') <> ''
+  GROUP BY standard_goods_sn, match_key
+),
+box_agg AS (
+  SELECT
+    standard_goods_sn,
+    match_key,
+    max(title_cn) FILTER (WHERE coalesce(title_cn,'') <> '') AS sample_title_cn,
+    sum(coalesce(real_quantity, quantity, 0)) AS box_total_qty,
+    sum(coalesce(real_quantity, quantity, 0)) FILTER (WHERE storeroom_name LIKE '%01%' OR storeroom_name ILIKE '%整箱%') AS full_carton_qty,
+    count(DISTINCT box_id) AS box_count,
+    string_agg(DISTINCT nullif(storeroom_name,''), ' / ') AS box_warehouses,
+    max(snapshot_date) AS box_snapshot_date
+  FROM fact.et_box_stock_snapshot
+  WHERE batch_id = (SELECT batch_id FROM latest_box)
+    AND coalesce(standard_goods_sn,'') <> ''
+  GROUP BY standard_goods_sn, match_key
+)
+SELECT
+  coalesce(s.standard_goods_sn, b.standard_goods_sn) AS standard_goods_sn,
+  coalesce(s.match_key, b.match_key) AS match_key,
+  coalesce(s.sample_title_cn, b.sample_title_cn) AS sample_title_cn,
+  coalesce(s.loose_sellable_qty,0) AS loose_sellable_qty,
+  coalesce(b.full_carton_qty,0) AS full_carton_qty,
+  coalesce(s.rtv_qty,0) AS rtv_qty,
+  coalesce(s.damaged_qty,0) AS damaged_qty,
+  coalesce(s.scrap_qty,0) AS scrap_qty,
+  coalesce(s.loose_total_qty,0) AS loose_total_qty,
+  coalesce(b.box_total_qty,0) AS box_total_qty,
+  coalesce(s.loose_sellable_qty,0) + coalesce(b.full_carton_qty,0) AS estimated_available_qty,
+  coalesce(s.rtv_qty,0) + coalesce(s.damaged_qty,0) AS pending_process_qty,
+  coalesce(b.box_count,0) AS box_count,
+  s.loose_warehouses,
+  b.box_warehouses,
+  s.store_snapshot_date,
+  b.box_snapshot_date
+FROM store_agg s
+FULL JOIN box_agg b
+  ON b.match_key = s.match_key;
+
 CREATE TABLE IF NOT EXISTS fact.store_daily_sales (
   date date NOT NULL,
   store_key text NOT NULL REFERENCES dim.store(store_key),
@@ -787,6 +1430,8 @@ CREATE TABLE IF NOT EXISTS fact.product_cost_batch (
   standard_goods_sn text NOT NULL,
   raw_goods_sn text,
   batch_no text,
+  shipped_date date,
+  arrived_date date,
   shipped_quantity numeric,
   goods_cost_amount numeric,
   first_leg_freight_amount numeric,
@@ -811,8 +1456,12 @@ CREATE TABLE IF NOT EXISTS fact.product_cost_batch (
   updated_at timestamptz DEFAULT now()
 );
 
+ALTER TABLE fact.product_cost_batch ADD COLUMN IF NOT EXISTS shipped_date date;
+ALTER TABLE fact.product_cost_batch ADD COLUMN IF NOT EXISTS arrived_date date;
+
 CREATE INDEX IF NOT EXISTS idx_product_cost_batch_product ON fact.product_cost_batch(standard_goods_sn);
 CREATE INDEX IF NOT EXISTS idx_product_cost_batch_complete ON fact.product_cost_batch(standard_goods_sn, complete_batch);
+CREATE INDEX IF NOT EXISTS idx_product_cost_batch_arrival ON fact.product_cost_batch(standard_goods_sn, arrived_date);
 
 CREATE TABLE IF NOT EXISTS fact.monthly_storage_fee (
   month_start date PRIMARY KEY,
@@ -923,36 +1572,187 @@ SELECT
 FROM classified
 GROUP BY store_key, order_no, standard_goods_sn, skc;
 
-CREATE OR REPLACE VIEW mart.profit_order_item AS
+CREATE OR REPLACE VIEW mart.rtv_recovery_impact AS
+WITH after_sales_express AS (
+  SELECT
+    ai.store_key,
+    ai.order_no,
+    ai.standard_goods_sn,
+    nullif(ai.skc,'') AS skc,
+    upper(nullif(x->>'expressNo','')) AS express_no,
+    sum(coalesce(ai.quantity, 1)) AS after_sales_return_qty,
+    string_agg(DISTINCT ai.aftersales_order_no, ' / ') FILTER (WHERE coalesce(ai.aftersales_order_no,'') <> '') AS aftersales_order_nos,
+    string_agg(DISTINCT ai.return_order_no, ' / ') FILTER (WHERE coalesce(ai.return_order_no,'') <> '') AS shein_return_order_nos
+  FROM fact.after_sales_item ai
+  LEFT JOIN LATERAL jsonb_array_elements(coalesce(ai.raw_summary->'case'->'returnExpressInfoList','[]'::jsonb)) x ON true
+  WHERE coalesce(ai.order_no,'') <> ''
+    AND coalesce(ai.return_order_no,'') <> ''
+    AND coalesce(x->>'expressNo','') <> ''
+  GROUP BY ai.store_key, ai.order_no, ai.standard_goods_sn, nullif(ai.skc,''), upper(nullif(x->>'expressNo',''))
+),
+et_return_received AS (
+  SELECT
+    upper(ro.shipment_number) AS express_no,
+    coalesce(nullif(ri.match_key,''), dim.product_match_key(ri.standard_goods_sn)) AS match_key,
+    string_agg(DISTINCT ro.return_order_id, ' / ') FILTER (WHERE coalesce(ro.return_order_id,'') <> '') AS et_return_order_ids,
+    string_agg(DISTINCT ro.store_name_in, ' / ') FILTER (WHERE coalesce(ro.store_name_in,'') <> '') AS et_return_warehouses,
+    max(ro.create_time) AS et_received_time,
+    sum(
+      CASE
+        WHEN coalesce(ro.status_name,'') IN ('已完结','已到货')
+          AND (coalesce(ro.in_quantity,0) > 0 OR coalesce(ri.instock,0) > 0)
+        THEN greatest(
+          coalesce(ri.instock,0),
+          CASE WHEN coalesce(ri.instock,0) > 0 THEN 0 ELSE coalesce(ri.quantity,0) END,
+          CASE WHEN ri.return_order_id IS NULL THEN coalesce(ro.in_quantity,0) ELSE 0 END
+        )
+        ELSE 0
+      END
+    ) AS et_received_qty,
+    sum(
+      CASE
+        WHEN (coalesce(ro.store_name_in,'') ILIKE '%09%' OR coalesce(ro.store_name_in,'') ILIKE '%散件%')
+          AND coalesce(ro.status_name,'') IN ('已完结','已到货')
+          AND (coalesce(ro.in_quantity,0) > 0 OR coalesce(ri.instock,0) > 0)
+        THEN greatest(
+          coalesce(ri.instock,0),
+          CASE WHEN coalesce(ri.instock,0) > 0 THEN 0 ELSE coalesce(ri.quantity,0) END,
+          CASE WHEN ri.return_order_id IS NULL THEN coalesce(ro.in_quantity,0) ELSE 0 END
+        )
+        ELSE 0
+      END
+    ) AS et_received_to_09_qty,
+    sum(
+      CASE
+        WHEN (coalesce(ro.store_name_in,'') ILIKE '%03%' OR coalesce(ro.store_name_in,'') ILIKE '%RTV%')
+          AND coalesce(ro.status_name,'') IN ('已完结','已到货')
+          AND (coalesce(ro.in_quantity,0) > 0 OR coalesce(ri.instock,0) > 0)
+        THEN greatest(
+          coalesce(ri.instock,0),
+          CASE WHEN coalesce(ri.instock,0) > 0 THEN 0 ELSE coalesce(ri.quantity,0) END,
+          CASE WHEN ri.return_order_id IS NULL THEN coalesce(ro.in_quantity,0) ELSE 0 END
+        )
+        ELSE 0
+      END
+    ) AS et_received_to_rtv_qty
+  FROM fact.et_return_order ro
+  LEFT JOIN fact.et_return_order_item ri ON ri.return_order_id = ro.return_order_id
+  WHERE coalesce(ro.shipment_number,'') <> ''
+  GROUP BY upper(ro.shipment_number), coalesce(nullif(ri.match_key,''), dim.product_match_key(ri.standard_goods_sn))
+),
+stock_running_09 AS (
+  SELECT
+    upper(from_id) AS express_no,
+    coalesce(nullif(match_key,''), dim.product_match_key(standard_goods_sn)) AS match_key,
+    sum(coalesce(quantity,0)) AS stock_running_09_qty,
+    string_agg(DISTINCT storeroom_name, ' / ') FILTER (WHERE coalesce(storeroom_name,'') <> '') AS stock_running_warehouses,
+    max(created_time) AS stock_running_09_time
+  FROM fact.et_stock_running
+  WHERE coalesce(from_id,'') <> ''
+    AND coalesce(quantity,0) > 0
+    AND (coalesce(storeroom_name,'') ILIKE '%09%' OR coalesce(storeroom_name,'') ILIKE '%散件%')
+  GROUP BY upper(from_id), coalesce(nullif(match_key,''), dim.product_match_key(standard_goods_sn))
+),
+per_express AS (
+  SELECT
+    af.store_key,
+    af.order_no,
+    af.standard_goods_sn,
+    af.skc,
+    af.express_no,
+    af.after_sales_return_qty,
+    least(
+      coalesce(af.after_sales_return_qty,0),
+      greatest(coalesce(er.et_received_qty,0), coalesce(sr.stock_running_09_qty,0))
+    ) AS rtv_received_quantity,
+    least(
+      coalesce(af.after_sales_return_qty,0),
+      greatest(coalesce(er.et_received_to_09_qty,0), coalesce(sr.stock_running_09_qty,0))
+    ) AS rtv_received_to_09_quantity,
+    least(
+      coalesce(af.after_sales_return_qty,0),
+      coalesce(er.et_received_to_rtv_qty,0)
+    ) AS rtv_received_to_rtv_quantity,
+    er.et_return_order_ids,
+    af.aftersales_order_nos,
+    af.shein_return_order_nos,
+    concat_ws(' / ', nullif(er.et_return_warehouses,''), nullif(sr.stock_running_warehouses,'')) AS rtv_warehouses,
+    greatest(er.et_received_time, sr.stock_running_09_time) AS rtv_latest_received_time
+  FROM after_sales_express af
+  LEFT JOIN et_return_received er
+    ON er.express_no = af.express_no
+   AND er.match_key = dim.product_match_key(af.standard_goods_sn)
+  LEFT JOIN stock_running_09 sr
+    ON sr.express_no = af.express_no
+   AND sr.match_key = dim.product_match_key(af.standard_goods_sn)
+)
 SELECT
-  oi.order_item_key,
-  oi.order_key,
-  oi.store_key,
+  store_key,
+  order_no,
+  standard_goods_sn,
+  skc,
+  sum(after_sales_return_qty) AS after_sales_return_qty,
+  sum(rtv_received_quantity) AS rtv_received_quantity,
+  sum(rtv_received_to_09_quantity) AS rtv_received_to_09_quantity,
+  sum(rtv_received_to_rtv_quantity) AS rtv_received_to_rtv_quantity,
   CASE
-    WHEN oi.created_date < DATE '2026-03-01' AND oi.store_key IN ('TS','MZ') THEN 'LGM'
-    WHEN oi.store_key IN ('TS','MZ') THEN 'DSY'
-    ELSE coalesce(oi.group_key, s.group_key)
-  END AS group_key,
-  oi.order_no,
-  oi.bill_no,
-  oi.created_date,
-  date_trunc('month', oi.created_date)::date AS month_start,
-  oi.order_create_time,
-  oi.standard_goods_sn,
-  oi.raw_goods_sn,
-  oi.skc,
-  oi.goods_title,
-  coalesce(oi.quantity,0) AS quantity,
-  coalesce(oi.sales_sar,0) AS gross_revenue_sar,
-  CASE WHEN coalesce(ai.revenue_reversal,false) THEN 0 ELSE coalesce(oi.sales_sar,0) END AS net_revenue_sar,
-  c.unit_cost_sar,
-  CASE
-    WHEN c.unit_cost_sar IS NULL THEN NULL
-    WHEN coalesce(oi.sales_sar,0) <= 0 THEN 0
-    ELSE c.unit_cost_sar * coalesce(oi.quantity,0)
-  END AS product_cost_sar,
-  CASE
-    WHEN coalesce(ai.revenue_reversal,false)
+    WHEN sum(rtv_received_to_09_quantity) > 0 THEN 'confirmed_09'
+    WHEN sum(rtv_received_quantity) > 0 THEN 'received_not_09'
+    ELSE 'not_received_or_unmatched'
+  END AS rtv_recovery_status,
+  string_agg(DISTINCT express_no, ' / ') FILTER (WHERE coalesce(express_no,'') <> '') AS rtv_express_numbers,
+  string_agg(DISTINCT et_return_order_ids, ' / ') FILTER (WHERE coalesce(et_return_order_ids,'') <> '') AS et_return_order_ids,
+  string_agg(DISTINCT aftersales_order_nos, ' / ') FILTER (WHERE coalesce(aftersales_order_nos,'') <> '') AS aftersales_order_nos,
+  string_agg(DISTINCT shein_return_order_nos, ' / ') FILTER (WHERE coalesce(shein_return_order_nos,'') <> '') AS shein_return_order_nos,
+  string_agg(DISTINCT rtv_warehouses, ' / ') FILTER (WHERE coalesce(rtv_warehouses,'') <> '') AS rtv_warehouses,
+  max(rtv_latest_received_time) AS rtv_latest_received_time
+FROM per_express
+GROUP BY store_key, order_no, standard_goods_sn, skc;
+
+CREATE OR REPLACE VIEW mart.profit_order_item AS
+WITH base AS (
+  SELECT
+    oi.order_item_key,
+    oi.order_key,
+    oi.store_key,
+    CASE
+      WHEN oi.created_date < DATE '2026-03-01' AND oi.store_key IN ('TS','MZ') THEN 'LGM'
+      WHEN oi.store_key IN ('TS','MZ') THEN 'DSY'
+      ELSE coalesce(oi.group_key, s.group_key)
+    END AS group_key,
+    oi.order_no,
+    oi.bill_no,
+    oi.created_date,
+    date_trunc('month', oi.created_date)::date AS month_start,
+    oi.order_create_time,
+    oi.standard_goods_sn,
+    oi.raw_goods_sn,
+    oi.skc,
+    oi.goods_title,
+    coalesce(oi.quantity,0) AS quantity,
+    coalesce(oi.sales_sar,0) AS gross_revenue_sar,
+    CASE WHEN coalesce(ai.revenue_reversal,false) THEN 0 ELSE coalesce(oi.sales_sar,0) END AS net_revenue_sar,
+    c.unit_cost_sar,
+    c.complete_batch_count::bigint AS complete_batch_count,
+    c.ignored_batch_count::bigint AS ignored_batch_count,
+    (c.unit_cost_sar IS NULL) AS cost_missing,
+    coalesce(ai.revenue_reversal,false) AS revenue_reversal,
+    coalesce(ai.after_sales_cases,0) AS after_sales_cases,
+    coalesce(ai.impact_quantity,0) AS impact_quantity,
+    coalesce(ai.impact_amount_sar,0) AS impact_amount_sar,
+    ai.resolution_plans,
+    ai.order_sub_statuses,
+    ai.return_package_statuses,
+    coalesce(rr.rtv_received_quantity,0) AS rtv_received_quantity,
+    coalesce(rr.rtv_received_to_09_quantity,0) AS rtv_received_to_09_quantity,
+    coalesce(rr.rtv_received_to_rtv_quantity,0) AS rtv_received_to_rtv_quantity,
+    rr.rtv_recovery_status,
+    rr.rtv_express_numbers,
+    rr.et_return_order_ids,
+    rr.rtv_warehouses,
+    rr.rtv_latest_received_time,
+    (
+      coalesce(ai.revenue_reversal,false)
       AND coalesce(oi.sales_sar,0) > 0
       AND coalesce(ai.resolution_plans,'') ILIKE '%退货%'
       AND coalesce(ai.resolution_plans,'') NOT ILIKE '%仅退款%'
@@ -960,75 +1760,133 @@ SELECT
       AND coalesce(ai.return_package_statuses,'') NOT ILIKE '%派件异常%'
       AND coalesce(ai.order_sub_statuses,'') NOT ILIKE '%派件失败%'
       AND coalesce(ai.order_sub_statuses,'') NOT ILIKE '%派件异常%'
-    THEN 13.88
-    ELSE 0
-  END AS return_delivery_fee_sar,
+    ) AS should_charge_return_delivery_fee
+  FROM fact.order_item oi
+  LEFT JOIN dim.store s ON s.store_key = oi.store_key
+  LEFT JOIN mart.product_unit_cost_by_match_key c
+    ON c.match_key <> ''
+   AND c.match_key = dim.product_match_key(oi.standard_goods_sn)
+  LEFT JOIN LATERAL (
+    SELECT *
+    FROM mart.profit_after_sales_impact x
+    WHERE x.store_key = oi.store_key
+      AND x.order_no = oi.order_no
+      AND x.revenue_reversal
+      AND (
+        (coalesce(x.skc,'') <> '' AND x.skc = oi.skc)
+        OR (coalesce(x.standard_goods_sn,'') <> '' AND x.standard_goods_sn = oi.standard_goods_sn)
+        OR (coalesce(x.skc,'') = '' AND coalesce(x.standard_goods_sn,'') = '')
+      )
+    ORDER BY CASE WHEN x.skc = oi.skc THEN 0 WHEN x.standard_goods_sn = oi.standard_goods_sn THEN 1 ELSE 2 END
+    LIMIT 1
+  ) ai ON true
+  LEFT JOIN LATERAL (
+    SELECT *
+    FROM mart.rtv_recovery_impact x
+    WHERE x.store_key = oi.store_key
+      AND x.order_no = oi.order_no
+      AND x.rtv_received_quantity > 0
+      AND (
+        (coalesce(x.skc,'') <> '' AND x.skc = oi.skc)
+        OR (coalesce(x.standard_goods_sn,'') <> '' AND x.standard_goods_sn = oi.standard_goods_sn)
+        OR (coalesce(x.skc,'') = '' AND coalesce(x.standard_goods_sn,'') = '')
+      )
+    ORDER BY CASE WHEN x.skc = oi.skc THEN 0 WHEN x.standard_goods_sn = oi.standard_goods_sn THEN 1 ELSE 2 END
+    LIMIT 1
+  ) rr ON true
+)
+SELECT
+  order_item_key,
+  order_key,
+  store_key,
+  group_key,
+  order_no,
+  bill_no,
+  created_date,
+  month_start,
+  order_create_time,
+  standard_goods_sn,
+  raw_goods_sn,
+  skc,
+  goods_title,
+  quantity,
+  gross_revenue_sar,
+  net_revenue_sar,
+  unit_cost_sar,
   CASE
-    WHEN c.unit_cost_sar IS NULL THEN NULL
-    ELSE (CASE WHEN coalesce(ai.revenue_reversal,false) THEN 0 ELSE coalesce(oi.sales_sar,0) END)
-      - CASE WHEN coalesce(oi.sales_sar,0) <= 0 THEN 0 ELSE c.unit_cost_sar * coalesce(oi.quantity,0) END
-      - CASE
-          WHEN coalesce(ai.revenue_reversal,false)
-            AND coalesce(oi.sales_sar,0) > 0
-            AND coalesce(ai.resolution_plans,'') ILIKE '%退货%'
-            AND coalesce(ai.resolution_plans,'') NOT ILIKE '%仅退款%'
-            AND coalesce(ai.return_package_statuses,'') NOT ILIKE '%派件失败%'
-            AND coalesce(ai.return_package_statuses,'') NOT ILIKE '%派件异常%'
-            AND coalesce(ai.order_sub_statuses,'') NOT ILIKE '%派件失败%'
-            AND coalesce(ai.order_sub_statuses,'') NOT ILIKE '%派件异常%'
-          THEN 13.88
-          ELSE 0
-        END
+    WHEN unit_cost_sar IS NULL THEN NULL
+    WHEN gross_revenue_sar <= 0 THEN 0
+    ELSE unit_cost_sar * quantity
+  END AS product_cost_sar,
+  CASE WHEN should_charge_return_delivery_fee THEN 13.88 ELSE 0 END AS return_delivery_fee_sar,
+  CASE
+    WHEN unit_cost_sar IS NULL THEN NULL
+    WHEN revenue_reversal AND gross_revenue_sar > 0
+    THEN least(quantity, rtv_received_quantity) * unit_cost_sar
+    ELSE 0
+  END AS rtv_recoverable_cost_sar,
+  CASE
+    WHEN unit_cost_sar IS NULL THEN NULL
+    WHEN revenue_reversal AND gross_revenue_sar > 0
+    THEN least(quantity, rtv_received_to_09_quantity) * unit_cost_sar
+    ELSE 0
+  END AS rtv_09_recoverable_cost_sar,
+  CASE
+    WHEN unit_cost_sar IS NULL THEN NULL
+    ELSE net_revenue_sar
+      - CASE WHEN gross_revenue_sar <= 0 THEN 0 ELSE unit_cost_sar * quantity END
+      - CASE WHEN should_charge_return_delivery_fee THEN 13.88 ELSE 0 END
   END AS profit_before_storage_sar,
   CASE
-    WHEN c.unit_cost_sar IS NULL THEN NULL
-    WHEN (CASE WHEN coalesce(ai.revenue_reversal,false) THEN 0 ELSE coalesce(oi.sales_sar,0) END) = 0 THEN NULL
-    ELSE (
-      (CASE WHEN coalesce(ai.revenue_reversal,false) THEN 0 ELSE coalesce(oi.sales_sar,0) END)
-      - CASE WHEN coalesce(oi.sales_sar,0) <= 0 THEN 0 ELSE c.unit_cost_sar * coalesce(oi.quantity,0) END
-      - CASE
-          WHEN coalesce(ai.revenue_reversal,false)
-            AND coalesce(oi.sales_sar,0) > 0
-            AND coalesce(ai.resolution_plans,'') ILIKE '%退货%'
-            AND coalesce(ai.resolution_plans,'') NOT ILIKE '%仅退款%'
-            AND coalesce(ai.return_package_statuses,'') NOT ILIKE '%派件失败%'
-            AND coalesce(ai.return_package_statuses,'') NOT ILIKE '%派件异常%'
-            AND coalesce(ai.order_sub_statuses,'') NOT ILIKE '%派件失败%'
-            AND coalesce(ai.order_sub_statuses,'') NOT ILIKE '%派件异常%'
-          THEN 13.88
+    WHEN unit_cost_sar IS NULL THEN NULL
+    ELSE net_revenue_sar
+      - CASE WHEN gross_revenue_sar <= 0 THEN 0 ELSE unit_cost_sar * quantity END
+      - CASE WHEN should_charge_return_delivery_fee THEN 13.88 ELSE 0 END
+      + CASE
+          WHEN revenue_reversal AND gross_revenue_sar > 0
+          THEN least(quantity, rtv_received_quantity) * unit_cost_sar
           ELSE 0
         END
-    ) / nullif((CASE WHEN coalesce(ai.revenue_reversal,false) THEN 0 ELSE coalesce(oi.sales_sar,0) END), 0)
+  END AS profit_if_rtv_received_resellable_sar,
+  CASE
+    WHEN unit_cost_sar IS NULL THEN NULL
+    ELSE net_revenue_sar
+      - CASE WHEN gross_revenue_sar <= 0 THEN 0 ELSE unit_cost_sar * quantity END
+      - CASE WHEN should_charge_return_delivery_fee THEN 13.88 ELSE 0 END
+      + CASE
+          WHEN revenue_reversal AND gross_revenue_sar > 0
+          THEN least(quantity, rtv_received_to_09_quantity) * unit_cost_sar
+          ELSE 0
+        END
+  END AS profit_if_rtv_09_resellable_sar,
+  CASE
+    WHEN unit_cost_sar IS NULL THEN NULL
+    WHEN net_revenue_sar = 0 THEN NULL
+    ELSE (
+      net_revenue_sar
+      - CASE WHEN gross_revenue_sar <= 0 THEN 0 ELSE unit_cost_sar * quantity END
+      - CASE WHEN should_charge_return_delivery_fee THEN 13.88 ELSE 0 END
+    ) / nullif(net_revenue_sar, 0)
   END AS profit_margin_before_storage,
-  c.complete_batch_count::bigint AS complete_batch_count,
-  c.ignored_batch_count::bigint AS ignored_batch_count,
-  (c.unit_cost_sar IS NULL) AS cost_missing,
-  coalesce(ai.revenue_reversal,false) AS revenue_reversal,
-  coalesce(ai.after_sales_cases,0) AS after_sales_cases,
-  coalesce(ai.impact_quantity,0) AS impact_quantity,
-  coalesce(ai.impact_amount_sar,0) AS impact_amount_sar,
-  ai.resolution_plans,
-  ai.order_sub_statuses,
-  ai.return_package_statuses
-FROM fact.order_item oi
-LEFT JOIN dim.store s ON s.store_key = oi.store_key
-LEFT JOIN mart.product_unit_cost_by_match_key c
-  ON c.match_key <> ''
- AND c.match_key = dim.product_match_key(oi.standard_goods_sn)
-LEFT JOIN LATERAL (
-  SELECT *
-  FROM mart.profit_after_sales_impact x
-  WHERE x.store_key = oi.store_key
-    AND x.order_no = oi.order_no
-    AND x.revenue_reversal
-    AND (
-      (coalesce(x.skc,'') <> '' AND x.skc = oi.skc)
-      OR (coalesce(x.standard_goods_sn,'') <> '' AND x.standard_goods_sn = oi.standard_goods_sn)
-      OR (coalesce(x.skc,'') = '' AND coalesce(x.standard_goods_sn,'') = '')
-    )
-  ORDER BY CASE WHEN x.skc = oi.skc THEN 0 WHEN x.standard_goods_sn = oi.standard_goods_sn THEN 1 ELSE 2 END
-  LIMIT 1
-) ai ON true;
+  complete_batch_count,
+  ignored_batch_count,
+  cost_missing,
+  revenue_reversal,
+  after_sales_cases,
+  impact_quantity,
+  impact_amount_sar,
+  rtv_received_quantity,
+  rtv_received_to_09_quantity,
+  rtv_received_to_rtv_quantity,
+  rtv_recovery_status,
+  rtv_express_numbers,
+  et_return_order_ids,
+  rtv_warehouses,
+  rtv_latest_received_time,
+  resolution_plans,
+  order_sub_statuses,
+  return_package_statuses
+FROM base;
 
 CREATE OR REPLACE VIEW mart.profit_daily_store_product AS
 SELECT
@@ -1043,7 +1901,13 @@ SELECT
   sum(net_revenue_sar) AS net_revenue_sar,
   sum(product_cost_sar) FILTER (WHERE NOT cost_missing) AS product_cost_sar,
   sum(return_delivery_fee_sar) AS return_delivery_fee_sar,
+  sum(rtv_recoverable_cost_sar) FILTER (WHERE NOT cost_missing) AS rtv_recoverable_cost_sar,
+  sum(rtv_09_recoverable_cost_sar) FILTER (WHERE NOT cost_missing) AS rtv_09_recoverable_cost_sar,
+  sum(rtv_received_quantity) AS rtv_received_quantity,
+  sum(rtv_received_to_09_quantity) AS rtv_received_to_09_quantity,
   sum(profit_before_storage_sar) FILTER (WHERE NOT cost_missing) AS profit_before_storage_sar,
+  sum(profit_if_rtv_received_resellable_sar) FILTER (WHERE NOT cost_missing) AS profit_if_rtv_received_resellable_sar,
+  sum(profit_if_rtv_09_resellable_sar) FILTER (WHERE NOT cost_missing) AS profit_if_rtv_09_resellable_sar,
   sum(net_revenue_sar) FILTER (WHERE NOT cost_missing) AS known_net_revenue_sar,
   sum(gross_revenue_sar) FILTER (WHERE NOT cost_missing) AS known_gross_revenue_sar,
   sum(gross_revenue_sar) FILTER (WHERE cost_missing) AS missing_cost_revenue_sar,
@@ -1074,7 +1938,13 @@ WITH group_month AS (
     sum(net_revenue_sar) AS net_revenue_sar,
     sum(product_cost_sar) FILTER (WHERE NOT cost_missing) AS product_cost_sar,
     sum(return_delivery_fee_sar) AS return_delivery_fee_sar,
+    sum(rtv_recoverable_cost_sar) FILTER (WHERE NOT cost_missing) AS rtv_recoverable_cost_sar,
+    sum(rtv_09_recoverable_cost_sar) FILTER (WHERE NOT cost_missing) AS rtv_09_recoverable_cost_sar,
+    sum(rtv_received_quantity) AS rtv_received_quantity,
+    sum(rtv_received_to_09_quantity) AS rtv_received_to_09_quantity,
     sum(profit_before_storage_sar) FILTER (WHERE NOT cost_missing) AS profit_before_storage_sar,
+    sum(profit_if_rtv_received_resellable_sar) FILTER (WHERE NOT cost_missing) AS profit_if_rtv_received_resellable_sar,
+    sum(profit_if_rtv_09_resellable_sar) FILTER (WHERE NOT cost_missing) AS profit_if_rtv_09_resellable_sar,
     sum(gross_revenue_sar) FILTER (WHERE NOT cost_missing) AS known_gross_revenue_sar,
     sum(gross_revenue_sar) FILTER (WHERE cost_missing) AS missing_cost_revenue_sar,
     count(*) FILTER (WHERE cost_missing) AS missing_cost_lines,
@@ -1094,7 +1964,13 @@ SELECT
   g.net_revenue_sar,
   g.product_cost_sar,
   g.return_delivery_fee_sar,
+  g.rtv_recoverable_cost_sar,
+  g.rtv_09_recoverable_cost_sar,
+  g.rtv_received_quantity,
+  g.rtv_received_to_09_quantity,
   g.profit_before_storage_sar,
+  g.profit_if_rtv_received_resellable_sar,
+  g.profit_if_rtv_09_resellable_sar,
   g.known_gross_revenue_sar,
   g.missing_cost_revenue_sar,
   g.missing_cost_lines,
@@ -1111,6 +1987,18 @@ SELECT
         THEN coalesce(sf.total_fee_sar,0) * g.net_revenue_sar / nullif(mt.month_net_revenue_sar,0)
         ELSE 0
       END AS profit_after_storage_sar,
+  g.profit_if_rtv_received_resellable_sar
+    - CASE
+        WHEN coalesce(mt.month_net_revenue_sar,0) > 0
+        THEN coalesce(sf.total_fee_sar,0) * g.net_revenue_sar / nullif(mt.month_net_revenue_sar,0)
+        ELSE 0
+      END AS profit_if_rtv_received_resellable_after_storage_sar,
+  g.profit_if_rtv_09_resellable_sar
+    - CASE
+        WHEN coalesce(mt.month_net_revenue_sar,0) > 0
+        THEN coalesce(sf.total_fee_sar,0) * g.net_revenue_sar / nullif(mt.month_net_revenue_sar,0)
+        ELSE 0
+      END AS profit_if_rtv_09_resellable_after_storage_sar,
   CASE
     WHEN g.net_revenue_sar > 0
     THEN (
@@ -1139,7 +2027,13 @@ SELECT
   sum(p.quantity) AS quantity,
   sum(p.product_cost_sar) AS product_cost_sar,
   sum(p.return_delivery_fee_sar) AS return_delivery_fee_sar,
+  sum(p.rtv_recoverable_cost_sar) AS rtv_recoverable_cost_sar,
+  sum(p.rtv_09_recoverable_cost_sar) AS rtv_09_recoverable_cost_sar,
+  sum(p.rtv_received_quantity) AS rtv_received_quantity,
+  sum(p.rtv_received_to_09_quantity) AS rtv_received_to_09_quantity,
   sum(p.profit_before_storage_sar) AS profit_before_storage_sar,
+  sum(p.profit_if_rtv_received_resellable_sar) AS profit_if_rtv_received_resellable_sar,
+  sum(p.profit_if_rtv_09_resellable_sar) AS profit_if_rtv_09_resellable_sar,
   CASE
     WHEN sum(p.net_revenue_sar) FILTER (WHERE p.missing_cost_lines = 0) > 0
     THEN sum(p.profit_before_storage_sar) / nullif(sum(p.known_net_revenue_sar),0)
@@ -1167,6 +2061,197 @@ LEFT JOIN mart.product_unit_cost_by_match_key c
   ON c.match_key <> ''
  AND c.match_key = dim.product_match_key(p.standard_goods_sn)
 GROUP BY p.standard_goods_sn;
+
+CREATE OR REPLACE VIEW mart.inventory_depletion_product_current AS
+WITH sales_anchor AS (
+  SELECT max(created_date)::date AS max_date FROM mart.profit_order_item
+),
+batch_base AS (
+  SELECT
+    dim.product_match_key(standard_goods_sn) AS match_key,
+    standard_goods_sn,
+    raw_goods_sn,
+    nullif(raw_summary->>'希音标准名','') AS cost_product_name,
+    batch_no,
+    shipped_date,
+    arrived_date,
+    coalesce(shipped_quantity,0) AS shipped_quantity,
+    goods_cost_amount,
+    first_leg_freight_amount,
+    other_cost_amount,
+    cost_sar,
+    unit_cost_sar,
+    purchase_unit_price,
+    complete_batch,
+    ignored_reason,
+    source_file,
+    source_sheet,
+    source_row_no,
+    raw_summary,
+    (
+      coalesce(shipped_quantity,0) > 0
+      AND arrived_date IS NOT NULL
+      AND first_leg_freight_amount IS NOT NULL
+    ) AS is_arrived_stock,
+    (
+      coalesce(shipped_quantity,0) > 0
+      AND shipped_date IS NOT NULL
+      AND NOT (
+        arrived_date IS NOT NULL
+        AND first_leg_freight_amount IS NOT NULL
+      )
+    ) AS is_incoming_stock,
+    (
+      coalesce(shipped_quantity,0) > 0
+      AND shipped_date IS NULL
+    ) AS is_not_shipped_stock
+  FROM fact.product_cost_batch
+  WHERE coalesce(dim.product_match_key(standard_goods_sn),'') <> ''
+),
+batch_agg AS (
+  SELECT
+    match_key,
+    string_agg(DISTINCT standard_goods_sn, ' / ' ORDER BY standard_goods_sn) AS cost_standard_goods_sn_list,
+    string_agg(DISTINCT raw_goods_sn, ' / ' ORDER BY raw_goods_sn) FILTER (WHERE coalesce(raw_goods_sn,'') <> '') AS raw_goods_sn_list,
+    max(cost_product_name) FILTER (WHERE cost_product_name IS NOT NULL) AS cost_product_name,
+    count(*) AS batch_count,
+    count(*) FILTER (WHERE is_arrived_stock) AS arrived_batch_count,
+    count(*) FILTER (WHERE is_incoming_stock) AS incoming_batch_count,
+    count(*) FILTER (WHERE is_not_shipped_stock) AS not_shipped_batch_count,
+    sum(shipped_quantity) FILTER (WHERE is_arrived_stock) AS arrived_quantity,
+    sum(shipped_quantity) FILTER (WHERE is_incoming_stock) AS incoming_quantity,
+    sum(shipped_quantity) FILTER (WHERE is_not_shipped_stock) AS not_shipped_quantity,
+    sum(coalesce(cost_sar,0)) FILTER (WHERE is_arrived_stock AND complete_batch) AS arrived_cost_sar,
+    min(shipped_date) FILTER (WHERE shipped_date IS NOT NULL) AS first_shipped_date,
+    max(shipped_date) FILTER (WHERE shipped_date IS NOT NULL) AS latest_shipped_date,
+    min(arrived_date) FILTER (WHERE arrived_date IS NOT NULL) AS first_arrived_date,
+    max(arrived_date) FILTER (WHERE arrived_date IS NOT NULL) AS latest_arrived_date,
+    string_agg(DISTINCT ignored_reason, ' / ') FILTER (WHERE coalesce(ignored_reason,'') <> '') AS ignored_reasons
+  FROM batch_base
+  GROUP BY match_key
+),
+sales_base AS (
+  SELECT
+    dim.product_match_key(standard_goods_sn) AS match_key,
+    standard_goods_sn,
+    goods_title,
+    created_date::date AS date,
+    CASE WHEN coalesce(gross_revenue_sar,0) > 0 THEN coalesce(quantity,0) ELSE 0 END AS gross_quantity,
+    CASE WHEN coalesce(net_revenue_sar,0) > 0 THEN coalesce(quantity,0) ELSE 0 END AS net_quantity,
+    coalesce(gross_revenue_sar,0) AS gross_revenue_sar,
+    coalesce(net_revenue_sar,0) AS net_revenue_sar,
+    coalesce(revenue_reversal,false) AS revenue_reversal
+  FROM mart.profit_order_item
+  WHERE coalesce(dim.product_match_key(standard_goods_sn),'') <> ''
+),
+sales_agg AS (
+  SELECT
+    match_key,
+    string_agg(DISTINCT standard_goods_sn, ' / ' ORDER BY standard_goods_sn) AS sales_standard_goods_sn_list,
+    max(goods_title) FILTER (WHERE coalesce(goods_title,'') <> '') AS sales_product_name,
+    sum(gross_quantity) AS gross_sold_quantity,
+    sum(net_quantity) AS net_sold_quantity,
+    sum(gross_revenue_sar) AS gross_revenue_sar,
+    sum(net_revenue_sar) AS net_revenue_sar,
+    sum(gross_quantity) FILTER (WHERE revenue_reversal) AS reversal_quantity,
+    count(*) FILTER (WHERE revenue_reversal) AS reversal_lines,
+    sum(gross_quantity) FILTER (WHERE date >= (SELECT max_date FROM sales_anchor) - interval '6 days') AS gross_sold_7d,
+    sum(gross_quantity) FILTER (WHERE date >= (SELECT max_date FROM sales_anchor) - interval '13 days') AS gross_sold_14d,
+    sum(gross_quantity) FILTER (WHERE date >= (SELECT max_date FROM sales_anchor) - interval '29 days') AS gross_sold_30d,
+    max(date) FILTER (WHERE gross_quantity > 0) AS last_sale_date,
+    min(date) FILTER (WHERE gross_quantity > 0) AS first_sale_date
+  FROM sales_base
+  GROUP BY match_key
+),
+keys AS (
+  SELECT match_key FROM batch_agg
+  UNION
+  SELECT match_key FROM sales_agg
+)
+SELECT
+  coalesce(nullif(split_part(b.cost_standard_goods_sn_list, ' / ', 1), ''), nullif(split_part(s.sales_standard_goods_sn_list, ' / ', 1), ''), k.match_key) AS standard_goods_sn,
+  k.match_key,
+  coalesce(b.cost_standard_goods_sn_list, s.sales_standard_goods_sn_list) AS standard_goods_sn_list,
+  b.raw_goods_sn_list,
+  coalesce(b.cost_product_name, s.sales_product_name, '') AS goods_title,
+  coalesce(b.batch_count,0)::bigint AS batch_count,
+  coalesce(b.arrived_batch_count,0)::bigint AS arrived_batch_count,
+  coalesce(b.incoming_batch_count,0)::bigint AS incoming_batch_count,
+  coalesce(b.not_shipped_batch_count,0)::bigint AS not_shipped_batch_count,
+  coalesce(b.arrived_quantity,0) AS arrived_quantity,
+  coalesce(b.incoming_quantity,0) AS incoming_quantity,
+  coalesce(b.not_shipped_quantity,0) AS not_shipped_quantity,
+  coalesce(s.gross_sold_quantity,0) AS gross_sold_quantity,
+  coalesce(s.net_sold_quantity,0) AS net_sold_quantity,
+  coalesce(s.reversal_quantity,0) AS reversal_quantity,
+  coalesce(s.reversal_lines,0)::bigint AS reversal_lines,
+  greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0) AS estimated_on_hand_quantity,
+  greatest(coalesce(b.arrived_quantity,0) + coalesce(b.incoming_quantity,0) - coalesce(s.gross_sold_quantity,0), 0) AS estimated_total_supply_quantity,
+  greatest(coalesce(s.gross_sold_quantity,0) - coalesce(b.arrived_quantity,0), 0) AS oversold_or_missing_batch_quantity,
+  CASE WHEN coalesce(b.arrived_quantity,0) > 0 THEN coalesce(s.gross_sold_quantity,0) / nullif(b.arrived_quantity,0) ELSE NULL END AS depletion_rate,
+  coalesce(s.gross_sold_7d,0) AS gross_sold_7d,
+  coalesce(s.gross_sold_14d,0) AS gross_sold_14d,
+  coalesce(s.gross_sold_30d,0) AS gross_sold_30d,
+  (0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)) AS weighted_daily_gross_sales,
+  CASE
+    WHEN (0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)) > 0
+    THEN greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0)
+      / nullif((0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)),0)
+    ELSE NULL
+  END AS days_of_supply_on_hand,
+  CASE
+    WHEN (0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)) > 0
+    THEN greatest(coalesce(b.arrived_quantity,0) + coalesce(b.incoming_quantity,0) - coalesce(s.gross_sold_quantity,0), 0)
+      / nullif((0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)),0)
+    ELSE NULL
+  END AS days_of_supply_with_incoming,
+  s.last_sale_date,
+  s.first_sale_date,
+  b.first_shipped_date,
+  b.latest_shipped_date,
+  b.first_arrived_date,
+  b.latest_arrived_date,
+  round(coalesce(b.arrived_cost_sar,0)::numeric, 2) AS arrived_cost_sar,
+  c.unit_cost_sar,
+  c.avg_purchase_unit_price,
+  c.avg_volume_l,
+  c.avg_weight_kg,
+  b.ignored_reasons,
+  CASE
+    WHEN coalesce(b.arrived_quantity,0) = 0 AND coalesce(s.gross_sold_quantity,0) > 0 THEN '成本表缺到仓批次'
+    WHEN coalesce(b.arrived_quantity,0) = 0 AND coalesce(b.incoming_quantity,0) > 0 THEN '在途未到仓'
+    WHEN coalesce(b.arrived_quantity,0) = 0 AND coalesce(b.not_shipped_quantity,0) > 0 THEN '未发/待确认'
+    WHEN greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0) = 0 AND coalesce(b.incoming_quantity,0) > 0 THEN '等补货/在途承接'
+    WHEN greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0) = 0 AND coalesce(s.gross_sold_quantity,0) > 0 THEN '已售罄/疑似缺货'
+    WHEN coalesce(s.gross_sold_30d,0) = 0 AND greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0) > 0 THEN '低动销库存'
+    WHEN (0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)) > 0
+      AND greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0)
+        / nullif((0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)),0) <= 14 THEN '14天内断货'
+    WHEN (0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)) > 0
+      AND greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0)
+        / nullif((0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)),0) <= 30 THEN '30天内需补货'
+    WHEN (0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)) > 0
+      AND greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0)
+        / nullif((0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)),0) > 120 THEN '库存偏慢'
+    ELSE '健康'
+  END AS stock_status,
+  CASE
+    WHEN coalesce(b.arrived_quantity,0) = 0 AND coalesce(s.gross_sold_quantity,0) > 0 THEN 'high'
+    WHEN coalesce(b.arrived_quantity,0) = 0 AND coalesce(b.incoming_quantity,0) > 0 THEN 'mid'
+    WHEN greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0) = 0 AND coalesce(s.gross_sold_quantity,0) > 0 THEN 'high'
+    WHEN coalesce(s.gross_sold_30d,0) = 0 AND greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0) > 0 THEN 'mid'
+    WHEN (0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)) > 0
+      AND greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0)
+        / nullif((0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)),0) <= 14 THEN 'high'
+    WHEN (0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)) > 0
+      AND greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0)
+        / nullif((0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)),0) <= 30 THEN 'mid'
+    ELSE 'low'
+  END AS risk_level
+FROM keys k
+LEFT JOIN batch_agg b USING (match_key)
+LEFT JOIN sales_agg s USING (match_key)
+LEFT JOIN mart.product_unit_cost_by_match_key c USING (match_key);
 
 CREATE OR REPLACE VIEW mart.bi_store_overview_current AS
 WITH latest_sales AS (

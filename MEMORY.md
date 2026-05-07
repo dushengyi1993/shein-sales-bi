@@ -1,4 +1,4 @@
-﻿# MEMORY
+# MEMORY
 
 ## 评价全量与平台翻译（当前权威）
 - 评价/口碑底库必须按每个店开店以来全量补抓；日常评价同步默认只抓最近 `14` 天作为增量防漏窗口，不要再用 90 天这种过长窗口浪费后台资源。
@@ -87,6 +87,7 @@
 ## SHEIN BI 系统
 - 架构原则：`SHEIN 后台抓取 -> 本地 JSON / PostgreSQL 数据仓库 -> Metabase BI / 本地 BI 门户`。
 - HL OpenAPI 销售试点已建立并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` -> `scripts/load_shein_openapi_sales_warehouse.mjs` -> `fact.openapi_store_daily_sales` / `fact.openapi_order_header` / `fact.openapi_order_item` / `mart.openapi_sales_reconciliation`；系统状态页会显示 “SHEIN OpenAPI 试点对账”。正式切换生产事实表前必须继续确认多日 `matched`。
+- SHEIN OpenAPI 若返回 `openapi00002 IP is not in the whitelist`，优先检查当前出口 IP 是否在开放平台 `https://open.sheincorp.com/backstage/white-list`；`2026-05-07` 已补加当前出口 IP `188.253.112.44`，历史 IP `82.27.116.13` 仍保留。不要把 OpenAPI app secret、店铺 secret、openKeyId 写入聊天、文档或日志。
 - 本地 BI 门户入口：`http://127.0.0.1:8787/`；文件为 `outputs/bi-portal/index.html`；生成脚本为 `scripts/generate_bi_portal.mjs`；数据文件为 `outputs/bi-portal/data.json`。
 - GitHub 私有仓库已纳入 `outputs/bi-portal/index.html` 和 `outputs/bi-portal/data.json` 作为当前 BI 门户可复用产物；`outputs/` 其他抓取结果、报表、图片、审计结果仍默认忽略，迁移生产状态时单独备份。
 - V1 是当前唯一正式本地 BI 门户；V2 平行版本已废弃，`outputs/bi-portal/v2/`、`scripts/generate_bi_portal_v2.mjs` 和 V1 的 V2 跳转入口已删除，后续不要恢复自动生成 V2。
@@ -125,6 +126,13 @@
 - 修 BI 门户 UI 时默认不主动打开前端；后台完成代码检查、门户生成和静态 HTML/JSON 断言后，由用户在自己的浏览器刷新查看。不要为了“看一眼”主动打开前端浏览器或可见命令行窗口；只有用户要求或必须排查浏览器交互问题时才打开前端。
 - 但涉及页面布局、宽屏留白、对齐、卡片挤压、图表绘图区等视觉判断时，只要用户要求打开前端，就必须用最大化/大视口真实页面验证；不要用未最大化小窗口或纯代码想象来判断宽屏布局。
 
+## 实际库存与去化口径
+- `实际库存 / 去化` 页面以成本表批次为库存基数：`到仓/派送日期` 和 `头程运输费` 都有值才计入已到仓库存；有发货日期但缺到仓或头程费用的批次计入在途/待确认；没有发货日期但有数量的批次计入未发/待确认。
+- 库存消耗按毛销量扣减，退货、仅退款、派送失败暂不加回库存，避免高估可售库存；这与利润页的净成交/退货成本口径不同。
+- 去化速度默认使用 `近7天毛销量/7 × 40% + 近30天毛销量/30 × 60%`；库存可卖天数按估算在库和含在途两套口径展示。
+- 店铺/分组筛选只影响销售速度和风险排序，不硬拆物理库存；成本表没有店铺库存分配字段前，库存基数保持全局标准货号口径。
+- 该页面是经营估算库存，不是仓库实盘；未来接入真实仓储系统后再升级到货号 × 店铺/仓库粒度。
+
 ## 成本与真实利润口径
 - 首页和成本/利润页不再用 `25%` 预测利润冒充真实利润；成本未覆盖时必须显示“待成本表 / 成本覆盖率 / 缺成本销售额”。
 - 成本表文件放在 `inputs/costs/`，当前正式文件为 `inputs/costs/成本计算表.xlsx`，模板为 `inputs/costs/SHEIN成本表模板.xlsx`；导入脚本为 `scripts/import_product_costs.mjs`，模板生成脚本为 `scripts/create_cost_template.mjs`。
@@ -161,3 +169,25 @@
 
 
 
+
+## ET 货代仓接入口径
+- ET 货代后台使用独立浏览器 profile：`profiles/persistent-et-forwarder-profile`；入口为 `http://47.90.12.162:9007/Home/Index` 和 `http://wl.et-global.cn/Home/Index`，只保存浏览器登录态，不把密码写进文档或仓库。
+- ET 大部分列表/明细接口必须带 `X-Requested-With: XMLHttpRequest` 请求头；否则同一接口会返回 `404 无法找到资源`。接口 `content-type` 可能是 `text/html`，但正文是 JSON，抓取器不能只按 content-type 判断。
+- ET 仓库含义：`ETRUH09散件仓` 为核心可售散件仓；`ETRUH01整箱仓` 为海运整箱/待拆箱仓，部分一件一箱货号可直接按箱出库；`ETRUH03_RTV` 为退货/退回仓；`ETRUH04Damaged` 为破损待换包装仓；`ETRUH06报废` 为毁损报废仓。
+- ET 发货申请单对应成本表批次，出库单备注/物流号可关联 SHEIN 订单物流号，RTV 的 `ShipmentNumber` 可关联 SHEIN 退货物流号；匹配不到时应进待复核池，不能硬归并。
+- ET 每日计划任务为 `SHEIN-Sales-ETForwarder-0420`，脚本 `scripts/scheduled_et_forwarder_daily.ps1`；日常同步按“增量游标 + 重叠校验”抓取，抓到上一轮已见约 5 条记录即停止，不固定重抓长时间窗口。
+- ET 财务里的头程/上架等费用先作为成本表核对来源，不默认覆盖用户成本表；仓储费若拿不到 SKU 明细，先按库存体积天数估算分摊并在 BI 明确标注。
+
+## 2026-05-07 ET 货代全量补数与替代边界
+- ET 抓取器 `scripts/fetch_et_forwarder.mjs` 已支持 `--endpoints` 分模块、`--skip-details` 列表先行、`--detail-offset` / `--max-details` / `--detail-concurrency` 明细分块；出库和财务账单这类大明细必须分块跑，避免一次性超时或压满电脑。
+- `2026-05-07` 已完成 ET 全量主体入仓：出库单约 `6201`、出库明细约 `6188`、RTV 约 `311`、库存流水约 `7408`、财务账单约 `7165`、财务账单明细约 `7137`；评估报告位于 `outputs/et-forwarder/reports/et-forwarder-assessment-2026-05-07.md`。
+- ET 可优先替代或增强：实际库存、在途/到仓状态、发货申请单批次、箱明细、出库单、RTV、损溢破损、物流/仓储财务复核。ET 暂不直接替代：国内采购成本、已确认头程/上架/下架成本、月仓储费；这些仍以手工成本表或用户确认后的规则为准。
+- ET 发货申请单与手工成本表批次核对当前结果：`84` 个批次数量一致，`2` 个批次数量差异，`13` 个批次在 ET 无同名发货申请单或属于历史/手工补录批次；未确认前不要自动覆盖成本表口径。
+- ET 货号归并当前仍需用户确认的重点编码包括：`SK-1713-4-GREY`、`GL-BL02`、`SD-175`、`PL4-6L`、`SK-7025-BLACK`、`CM6810`、`C06`、`C06（04031）`、`SM-520A`、`SK-794`、`CX1788`、`PL4-6LPINK`、`FZ-666Beige` 以及 `p-DL-FZ-666/P-DL-FZ-666/p-DLFZ666` 包材/箱子类；确认前不要写死归并。
+
+## 2026-05-07 ET 货代仓与 RTV 利润口径补充
+- ET 货号归并已确认：7025 -> SK-7025A绞肉机，LQ榨汁机175 -> SK-JB-175离心式榨汁机；SM-520A电动缝纫机、CX1788手持搅拌器 是新货号且当前在途；p-DL-FZ-666/P-DL-FZ-666/p-DLFZ666/PDLFZ666 是 FZ-666 包材，报废 是占位编码，均不作为可售货号。
+- 8A04PD9、8A04QUP、KYD03172GF、KYD05552GF 是其他货代发货批次，不应当作为 ET 发货申请单缺失报警。
+- RTV 利润主口径继续保守：退货/仅退款/派送失败等反转订单主利润仍按营收 0 处理，并按既有规则扣商品成本与必要退货派送费；ET 已收 RTV 只新增“可二次销售测算”金额，不替代主利润。
+- 当前 ET 数据能确认 RTV 收到后进入 ETRUH03_RTV 或直接进入 ETRUH09散件仓；暂未抓到可精确关联单件从 ETRUH03_RTV 后续转入 ETRUH09散件仓 的调拨链路。若不能确认进 09，主利润仍按保守方式；二售测算按“ET 已收件”单独展示。
+- ET 财务账单已能抓到每日仓储费总账（sort_name=仓储费），但当前账单明细未返回 SKU 级仓储费 item rows；在找到仓储费详情接口前，不要用 ET 自动替代按货号仓储费，只能做月总或估算分摊。

@@ -1,6 +1,6 @@
 {
-  "version": 10,
-  "source": "user_confirmed_2026-05-02",
+  "version": 11,
+  "source": "user_confirmed_2026-05-07_et_forwarder",
   "notes": [
     "canonical 必须尽量使用 config/product_catalog.json 的标准货号。",
     "用户明确纠正：1710 -> WK-1710-4手持搅拌器；6810 -> SK-6810半自动意式咖啡机；175 -> SK-JB-175离心式榨汁机；便携式咖啡机 -> KF-JN-02便携咖啡机；03012 -> SK-03012台式榨汁机；185 -> SK-185台式榨汁机；3065 -> SK-3065蒸汽熨烫机。",
@@ -11,7 +11,10 @@
     "2026-05-03 user confirmed: standalone ice maker product name must be normalized into SK-03038 ice maker canonical SKU.",
     "2026-05-05：货号聚合审计后补充一批明显断词/店铺前缀别名（如 SK-270厨机、SK-7028绞机、LQ11041熨烫机），用于修复货号 360/矩阵分裂。",
     "2026-05-05：二次货号审计补充更多明显断词别名（如 JD-389空炸锅、SK-11004汽熨烫机、SK-6810半动意式咖啡机）。",
-    "2026-05-05：三次货号审计补充明显断词别名（如缺“机/式/汁/颈”等），用于修复货号360、链接、订单、售后、评论数据包残留分裂。"
+    "2026-05-05：三次货号审计补充明显断词别名（如缺“机/式/汁/颈”等），用于修复货号360、链接、订单、售后、评论数据包残留分裂。",
+    "2026-05-07 用户确认 ET 货代仓货号归并：SK-1713-4-GREY->SK-1713-4手持搅拌器；GL-BL02->S1810电热水壶；SD-175/LQ榨汁机175->SK-JB-175离心式榨汁机；PL4-6L/PL4-6LPINK->PA4-6L便携式冰箱；SK-7025/SK-7025-BLACK/7025->SK-7025A绞肉机；CM6810->SK-6810半自动意式咖啡机；C06/C06（04031）->SK-04031胶囊咖啡机；SK-794->SK-JFB-794卷发钳和卷发棒；FZ-666Beige->FZ-666颈部按摩器。",
+    "2026-05-07 用户确认 ET 新货号：SM-520A电动缝纫机、CX1788手持搅拌器，当前还在路上，先作为新标准货号记录，不并入旧款。",
+    "2026-05-07 用户确认 ET 的 p-DL-FZ-666/P-DL-FZ-666/p-DLFZ666 等是箱子/包材类，不作为可售货号参与经营聚合。"
   ],
   "aliases": [
     {
@@ -47,9 +50,12 @@
         "QY1713搅拌器",
         "SK-1713-4持搅拌器",
         "SK-1713-4手持拌器",
-        "SK-1713-4手持搅器"
+        "SK-1713-4手持搅器",
+        "SK-1713-4-GREY",
+        "SK-1713-4-GREY搅拌器"
       ],
-      "source": "obvious_fragment_aliases_2026-05-05_round3"
+      "source": "user_confirmed_2026-05-07_et_forwarder",
+      "status": "active"
     },
     {
       "canonical": "SM-505A电动缝纫机",
@@ -222,8 +228,14 @@
         "SK-7025A绞肉机",
         "SK-7025绞肉机",
         "MZ7025A绞肉器",
-        "7025"
-      ]
+        "7025",
+        "SK-7025",
+        "SK-7025-BLACK",
+        "SK-7025BLACK",
+        "SK-7025-BLACK绞肉机"
+      ],
+      "source": "user_confirmed_2026-05-07_et_forwarder",
+      "status": "active"
     },
     {
       "canonical": "SM-961厨师机",
@@ -283,8 +295,13 @@
       "aliases": [
         "SK-04031胶囊咖啡机",
         "04031胶囊咖啡机",
-        "04031"
-      ]
+        "04031",
+        "C06",
+        "C06（04031）",
+        "C06胶囊咖啡机"
+      ],
+      "source": "user_confirmed_2026-05-07_et_forwarder",
+      "status": "active"
     },
     {
       "canonical": "SK-999食品料理机",
@@ -377,8 +394,12 @@
       "canonical": "SK-JFB-794卷发钳和卷发棒",
       "aliases": [
         "794",
-        "SK-JFB-794卷发钳和卷发棒"
-      ]
+        "SK-JFB-794卷发钳和卷发棒",
+        "SK-794",
+        "SK-794卷发棒"
+      ],
+      "source": "user_confirmed_2026-05-07_et_forwarder",
+      "status": "active"
     },
     {
       "canonical": "SK-5110电磁炉",
@@ -448,9 +469,11 @@
       "aliases": [
         "FZ-666?????",
         "FZ-666",
-        "FZ-666颈部按摩器"
+        "FZ-666颈部按摩器",
+        "FZ-666Beige",
+        "FZ-666Beige颈部按摩器"
       ],
-      "source": "catalog_code_repair_2026-05-05",
+      "source": "user_confirmed_2026-05-07_et_forwarder",
       "status": "active"
     },
     {
@@ -581,9 +604,11 @@
         "SK-6810半自动意式咖啡机",
         "6810意式咖啡机",
         "SK-6810半动意式咖啡机",
-        "SK-6810半自动式咖啡机"
+        "SK-6810半自动式咖啡机",
+        "CM6810",
+        "CM6810意式咖啡机"
       ],
-      "source": "catalog_code_repair_2026-05-05",
+      "source": "user_confirmed_2026-05-07_et_forwarder",
       "status": "active"
     },
     {
@@ -698,9 +723,11 @@
         "KT10 Pro????",
         "S1810电热水壶",
         "S1810",
-        "S1810电水壶"
+        "S1810电水壶",
+        "GL-BL02",
+        "GL-BL02电热水壶"
       ],
-      "source": "catalog_code_repair_2026-05-05",
+      "source": "user_confirmed_2026-05-07_et_forwarder",
       "status": "active"
     },
     {
@@ -738,9 +765,13 @@
         "PA4",
         "LQPA4L小冰箱",
         "PA4-6L便携冰箱",
-        "PA4-6L便携式冰"
+        "PA4-6L便携式冰",
+        "PL4-6L",
+        "PL4-6LPINK",
+        "PL4-6L便携式冰箱",
+        "PL4-6LPINK便携式冰箱"
       ],
-      "source": "catalog_code_repair_2026-05-05",
+      "source": "user_confirmed_2026-05-07_et_forwarder",
       "status": "active"
     },
     {
@@ -751,9 +782,11 @@
         "SK-JB-175离心式榨汁机",
         "SK-JB-175",
         "LQ榨汁机175",
-        "SK-JB-175离式榨汁机"
+        "SK-JB-175离式榨汁机",
+        "SD-175",
+        "SD-175榨汁机"
       ],
-      "source": "catalog_code_repair_2026-05-05",
+      "source": "user_confirmed_2026-05-07_et_forwarder",
       "status": "active"
     },
     {
@@ -806,6 +839,43 @@
       ],
       "source": "obvious_fragment_aliases_2026-05-05_round3",
       "status": "active"
+    },
+    {
+      "canonical": "SM-520A电动缝纫机",
+      "aliases": [
+        "SM-520A电动缝纫机",
+        "SM-520A"
+      ],
+      "source": "user_confirmed_2026-05-07_et_forwarder",
+      "status": "active"
+    },
+    {
+      "canonical": "CX1788手持搅拌器",
+      "aliases": [
+        "CX1788手持搅拌器",
+        "CX1788"
+      ],
+      "source": "user_confirmed_2026-05-07_et_forwarder",
+      "status": "active"
+    }
+  ],
+  "ignoredAliases": [
+    {
+      "reason": "FZ-666包装箱/包材，不作为可售货号",
+      "aliases": [
+        "p-DL-FZ-666",
+        "p-DLFZ666",
+        "PDLFZ666",
+        "p-DL-FZ-666箱子"
+      ],
+      "source": "user_confirmed_2026-05-07_et_forwarder"
+    },
+    {
+      "reason": "ET 报废占位，不作为可售货号",
+      "aliases": [
+        "报废"
+      ],
+      "source": "user_confirmed_2026-05-07_et_forwarder"
     }
   ]
 }

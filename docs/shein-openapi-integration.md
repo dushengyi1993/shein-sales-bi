@@ -88,7 +88,7 @@ Signature = RandomKey + Base64String
 - 用户已提交 `销量查询` 与 `SFS备货履约` 权限包申请，等待 SHEIN 审核结果。
 - HL 店铺授权已完成，`tempToken` 已通过 `/open-api/auth/get-by-token` 换取店铺级密钥。
 - 真实应用级密钥与店铺级密钥只保存在 `config/shein_openapi.local.json`，该文件被 `.gitignore` 排除，不进入 GitHub。
-- 当前本机出口 IP 已加入开放平台 IP 白名单；后续迁移云端时，还要把云服务器固定出口 IP 加入白名单。
+- 当前本机出口 IP 已加入开放平台 IP 白名单；`2026-05-07` 已补加 `188.253.112.44`。后续若本机出口 IP 变化或迁移云端，还要把新的固定出口 IP 加入白名单。
 - 本地 OpenAPI 客户端已成功调用半托管生产环境 `https://openapi.sheincorp.com`。
 - 已跑通的 HL 只读接口：
   - 店铺信息：`/open-api/openapi-business-backend/query-store-info`
@@ -196,3 +196,22 @@ node scripts/generate_bi_portal.mjs
 - `outputs/bi-portal/index.html` 的系统状态页已展示 “SHEIN OpenAPI 试点对账” 卡片。
 
 当前结论：HL 销售入口已经具备“API 与浏览器双跑、并行入仓、BI 可见对账”的最小闭环；正式切换生产事实表前，仍需继续积累多日 matched 结果，并等待已申请权限审核完成后再扩展销量、SFS、库存、财务等更多业务域。
+
+## 2026-05-07 进展：HL OpenAPI 固定双跑计划任务
+
+已把 HL 官方 OpenAPI 销售试点从手动/不定期核对改为固定计划任务双跑：
+
+- `SHEIN-Sales-OpenAPI-HL-YesterdayFinal-0025`：每天 `00:25` 抓取并对账前一天最终版销售。
+- `SHEIN-Sales-OpenAPI-HL-Intraday-1225`：每天 `12:25` 抓取并对账当天日内销售。
+- 调度入口：`scripts/scheduled_openapi_hl_yesterday_final.ps1`、`scripts/scheduled_openapi_hl_intraday.ps1`。
+- 统一执行脚本：`scripts/scheduled_openapi_hl_reconciliation.ps1`。
+- 任务安装入口：`scripts/install_windows_scheduled_tasks.ps1 -IncludeOpenApiPilot`。
+
+边界保持不变：官方 OpenAPI 结果只写入 `fact.openapi_store_daily_sales` / `fact.openapi_order_header` / `fact.openapi_order_item` 和 `mart.openapi_sales_reconciliation`，不覆盖浏览器抓取生产事实表。
+
+白名单处理与复跑结果：
+
+- `2026-05-07 12:59` 手动验证曾返回 `openapi00002 IP is not in the whitelist: 188.253.112.44`。
+- `2026-05-07 13:28` 已在 SHEIN 开放平台 `IP白名单` 页补加 `188.253.112.44`，页面白名单包含 `188.253.112.44` 与历史 IP `82.27.116.13`。
+- 复跑 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_openapi_hl_reconciliation.ps1 -Mode intraday` 成功，日志为 `logs/scheduled/openapi-hl-intraday-20260507-132856.log`，并刷新 `outputs/bi-portal/data.json` / `outputs/bi-portal/index.html`。
+- 当日 intraday 对账状态为 `warning`：API 销售 `472 SAR`、浏览器源文件销售 `227 SAR`，API 多 1 个订单；这是日内 API 抓取时间晚于浏览器上一轮同步导致的待复核差异，不是白名单错误。下一轮浏览器同步后应继续观察是否回到 `matched`。

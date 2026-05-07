@@ -1,0 +1,685 @@
+#!/usr/bin/env node
+/**
+ * Read-only ET forwarder / warehouse backend fetcher.
+ *
+ * It reuses the dedicated Chrome profile login state and only calls list/detail
+ * JSON endpoints. It never clicks or submits write actions in the ET backend.
+ */
+import fs from 'node:fs/promises';
+import fssync from 'node:fs';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {spawn} from 'node:child_process';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+function parseArgs(argv) {
+  const args = {
+    mode: 'daily',
+    date: bjDate(0),
+    startDate: '2020-01-01',
+    baseUrl: 'http://47.90.12.162:9007',
+    port: 9397,
+    profileDir: path.join(ROOT, 'profiles', 'persistent-et-forwarder-profile'),
+    outDir: path.join(ROOT, 'outputs', 'et-forwarder'),
+    limit: 100,
+    maxPages: 0,
+    maxDetails: 0,
+    detailOffset: 0,
+    detailConcurrency: 1,
+    skipDetails: false,
+    dailyInitialPages: 3,
+    overlapRows: 5,
+    minPages: 1,
+    waitMs: 250,
+    launch: true,
+    visible: false,
+    statePath: path.join(ROOT, 'state', 'et_forwarder_sync_state.json'),
+    endpoints: '',
+    updateState: true,
+    dryRun: false,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--mode') args.mode = argv[++i];
+    else if (a === '--date') args.date = argv[++i];
+    else if (a === '--start-date') args.startDate = argv[++i];
+    else if (a === '--base-url') args.baseUrl = argv[++i].replace(/\/+$/, '');
+    else if (a === '--port') args.port = Number(argv[++i]);
+    else if (a === '--profile-dir') args.profileDir = path.resolve(argv[++i]);
+    else if (a === '--out-dir') args.outDir = path.resolve(argv[++i]);
+    else if (a === '--limit') args.limit = Number(argv[++i]);
+    else if (a === '--max-pages') args.maxPages = Number(argv[++i]);
+    else if (a === '--max-details') args.maxDetails = Number(argv[++i]);
+    else if (a === '--detail-offset') args.detailOffset = Number(argv[++i]);
+    else if (a === '--detail-concurrency') args.detailConcurrency = Number(argv[++i]);
+    else if (a === '--skip-details') args.skipDetails = true;
+    else if (a === '--daily-initial-pages') args.dailyInitialPages = Number(argv[++i]);
+    else if (a === '--overlap-rows') args.overlapRows = Number(argv[++i]);
+    else if (a === '--min-pages') args.minPages = Number(argv[++i]);
+    else if (a === '--wait-ms') args.waitMs = Number(argv[++i]);
+    else if (a === '--state-path') args.statePath = path.resolve(argv[++i]);
+    else if (a === '--endpoints') args.endpoints = argv[++i] || '';
+    else if (a === '--no-state-update') args.updateState = false;
+    else if (a === '--update-state') args.updateState = true;
+    else if (a === '--no-launch') args.launch = false;
+    else if (a === '--visible') args.visible = true;
+    else if (a === '--dry-run') args.dryRun = true;
+  }
+  args.limit = Math.max(1, Number(args.limit) || 100);
+  args.maxPages = Math.max(0, Number(args.maxPages) || 0);
+  args.maxDetails = Math.max(0, Number(args.maxDetails) || 0);
+  args.detailOffset = Math.max(0, Number(args.detailOffset) || 0);
+  args.detailConcurrency = Math.max(1, Math.min(8, Number(args.detailConcurrency) || 1));
+  if (!['daily', 'backfill', 'smoke'].includes(args.mode)) {
+    throw new Error(`Unsupported mode: ${args.mode}`);
+  }
+  if (args.mode === 'smoke') {
+    args.maxPages = args.maxPages || 1;
+    args.maxDetails = args.maxDetails || 2;
+    args.waitMs = Math.max(args.waitMs, 120);
+    args.updateState = false;
+  } else if (args.mode === 'daily' && !args.maxDetails) {
+    args.maxDetails = 50;
+  }
+  args.endpointList = String(args.endpoints || '')
+    .split(/[,\s]+/)
+    .map(s => s.trim())
+    .filter(Boolean);
+  return args;
+}
+
+function bjDate(offsetDays) {
+  const d = new Date(Date.now() + 8 * 3600_000 + offsetDays * 86400_000);
+  return d.toISOString().slice(0, 10);
+}
+
+function addDays(date, offset) {
+  const d = new Date(`${date}T00:00:00+08:00`);
+  d.setDate(d.getDate() + offset);
+  return d.toISOString().slice(0, 10);
+}
+
+function firstDayOfMonth(date) {
+  return `${date.slice(0, 7)}-01`;
+}
+
+function firstDayOfPrevMonth(date) {
+  const d = new Date(`${date}T00:00:00+08:00`);
+  d.setMonth(d.getMonth() - 1, 1);
+  return d.toISOString().slice(0, 10);
+}
+
+function safeName(value) {
+  return String(value || '')
+    .replace(/[^\w.-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 160) || 'unnamed';
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function httpJson(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
+  return res.json();
+}
+
+async function isCdpReady(port) {
+  try {
+    const info = await httpJson(`http://127.0.0.1:${port}/json/version`);
+    return Boolean(info?.webSocketDebuggerUrl);
+  } catch {
+    return false;
+  }
+}
+
+function findChrome() {
+  const candidates = [
+    process.env.CHROME_PATH,
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+  ].filter(Boolean);
+  return candidates.find(p => fssync.existsSync(p));
+}
+
+async function launchChrome(args) {
+  const chrome = findChrome();
+  if (!chrome) throw new Error('Cannot find chrome.exe for ET forwarder profile.');
+  await fs.mkdir(args.profileDir, {recursive: true});
+  const chromeArgs = [
+    `--remote-debugging-port=${args.port}`,
+    `--user-data-dir=${args.profileDir}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-popup-blocking',
+    args.baseUrl + '/Home/Index',
+  ];
+  const psArgs = [
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-Command',
+    [
+      '$ErrorActionPreference="Stop";',
+      `Start-Process -FilePath ${psQuote(chrome)} -ArgumentList ${psQuote(chromeArgs.map(winArg).join(' '))} -WindowStyle ${args.visible ? 'Normal' : 'Hidden'}`,
+    ].join(' '),
+  ];
+  await new Promise((resolve, reject) => {
+    const child = spawn('powershell.exe', psArgs, {windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']});
+    let stderr = '';
+    child.stderr.on('data', d => { stderr += d.toString(); });
+    child.on('close', code => code === 0 ? resolve() : reject(new Error(stderr || `Chrome launch failed: ${code}`)));
+  });
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    if (await isCdpReady(args.port)) return;
+    await sleep(500);
+  }
+  throw new Error(`Chrome CDP did not become ready on port ${args.port}.`);
+}
+
+function psQuote(s) {
+  return `'${String(s).replace(/'/g, "''")}'`;
+}
+
+function winArg(s) {
+  const value = String(s);
+  if (!/[\s"]/.test(value)) return value;
+  return `"${value.replace(/"/g, '\\"')}"`;
+}
+
+class CdpClient {
+  constructor(wsUrl) {
+    this.wsUrl = wsUrl;
+    this.seq = 1;
+    this.pending = new Map();
+    this.ws = null;
+  }
+  async connect() {
+    this.ws = new WebSocket(this.wsUrl);
+    await new Promise((resolve, reject) => {
+      this.ws.onopen = resolve;
+      this.ws.onerror = reject;
+    });
+    this.ws.onmessage = ev => {
+      const msg = JSON.parse(ev.data);
+      if (msg.id && this.pending.has(msg.id)) {
+        const p = this.pending.get(msg.id);
+        this.pending.delete(msg.id);
+        if (msg.error) p.reject(new Error(JSON.stringify(msg.error)));
+        else p.resolve(msg.result);
+      }
+    };
+  }
+  call(method, params = {}) {
+    const id = this.seq++;
+    this.ws.send(JSON.stringify({id, method, params}));
+    return new Promise((resolve, reject) => this.pending.set(id, {resolve, reject}));
+  }
+  async eval(expression) {
+    const result = await this.call('Runtime.evaluate', {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
+    return result.result.value;
+  }
+  close() {
+    try { this.ws?.close(); } catch {}
+  }
+}
+
+async function getEtPage(args) {
+  const pages = await httpJson(`http://127.0.0.1:${args.port}/json/list`);
+  let page = pages.find(p => p.type === 'page' && p.url?.startsWith(args.baseUrl) && p.webSocketDebuggerUrl);
+  if (!page) page = pages.find(p => p.type === 'page' && /et-global\.cn|47\.90\.12\.162/.test(p.url || '') && p.webSocketDebuggerUrl);
+  if (!page) page = pages.find(p => p.type === 'page' && p.webSocketDebuggerUrl);
+  if (!page) throw new Error('No Chrome page with CDP WebSocket found.');
+  return page;
+}
+
+async function browserFetchJson(cdp, args, url) {
+  const absolute = url.startsWith('http') ? url : args.baseUrl + url;
+  const script = `(async()=>{` +
+    `const r=await fetch(${JSON.stringify(absolute)}, {credentials:'include', headers:{'X-Requested-With':'XMLHttpRequest','Accept':'application/json, text/javascript, */*; q=0.01'}});` +
+    `const text=await r.text(); let json=null; try{json=JSON.parse(text)}catch(e){};` +
+    `return {ok:r.ok,status:r.status,url:r.url,contentType:r.headers.get('content-type'),text:text.slice(0,400),json};` +
+  `})()`;
+  const out = await cdp.eval(script);
+  if (!out.ok || !out.json) {
+    throw new Error(`ET fetch failed status=${out.status} url=${absolute} head=${out.text}`);
+  }
+  return out.json;
+}
+
+function withParams(pathname, params) {
+  const qs = new URLSearchParams();
+  qs.set('t', String(Math.random()));
+  for (const [k, v] of Object.entries(params || {})) {
+    if (v === undefined || v === null) continue;
+    qs.set(k, String(v));
+  }
+  return `${pathname}?${qs.toString()}`;
+}
+
+const ENDPOINTS = {
+  goods: {
+    kind: 'snapshot',
+    idFields: ['GoodsId', 'Barcode'],
+    list: ctx => withParams('/Goods/Goods/GetGridJson', {page: ctx.page, limit: ctx.limit, state: -1, keyword: '', modelNumber: '', titleCn: '', titleEn: '', className: ''}),
+  },
+  sku_specification: {
+    kind: 'snapshot',
+    idFields: ['SkuId', 'Barcode'],
+    list: ctx => withParams('/Goods/SkuSpecification/GetGridJson', {page: ctx.page, limit: ctx.limit, barcode: '', status: -1}),
+  },
+  store_stock: {
+    kind: 'snapshot',
+    idFields: ['FId', 'SkuId', 'Barcode', 'StoreroomId'],
+    list: ctx => withParams('/Goods/StockSearch/GetStoreStockGridJson', {page: ctx.page, limit: ctx.limit, storeroomId: '', skuCode: '', title: ''}),
+  },
+  box_stock: {
+    kind: 'snapshot',
+    idFields: ['FId', 'BoxId', 'SkuId', 'Barcode'],
+    list: ctx => withParams('/Goods/StockSearch/GetBoxStockGridJson', {page: ctx.page, limit: ctx.limit, storeroomId: '', barcode: '', skuCode: '', siteId: '', title: ''}),
+  },
+  stock_running: {
+    kind: 'rolling',
+    idFields: ['FId'],
+    list: ctx => withParams('/Goods/StockSearch/GetStockRunningGridJson', {page: ctx.page, limit: ctx.limit, sort: '', storeroom: '', barcode: '', fromId: '', start: ctx.rollingStart, end: ctx.date, title: ''}),
+  },
+  ship_order: {
+    kind: 'ship',
+    idFields: ['ShipOrderId'],
+    list: ctx => withParams('/Delivery/ShipOrder/GetGridJson', {page: ctx.page, limit: ctx.limit, storeroomId: '', transportId: '', status: '', shipOrderId: '', startTime: ctx.shipStart, endTime: ctx.date, barcode: '', skuCode: '', sType: '', keyWords: '', doSort: '', boxId: '', overDifference: -1, cod: -1}),
+    details: [
+      {name: 'ship_order_item', idField: 'ShipOrderId', url: (id, ctx) => withParams('/Delivery/ShipOrder/GetShipOrderDetailForm', {page: 1, limit: ctx.detailLimit, shipOrderId: id})},
+      {name: 'ship_order_box', idField: 'ShipOrderId', url: (id, ctx) => withParams('/Delivery/ShipOrder/GetBoxDetailForm', {page: 1, limit: ctx.detailLimit, shipOrderId: id})},
+    ],
+  },
+  box_list: {
+    kind: 'ship',
+    idFields: ['BoxId'],
+    list: ctx => withParams('/Delivery/BoxList/GetGridJson', {page: ctx.page, limit: ctx.limit, shipOrderId: ''}),
+    details: [
+      {name: 'box_item', idField: 'BoxId', url: (id, ctx) => withParams('/Delivery/BoxList/GetDetailsGridJson', {page: 1, limit: ctx.detailLimit, boxId: id})},
+    ],
+  },
+  outbound: {
+    kind: 'rolling_no_date_filter',
+    idFields: ['OutboundId'],
+    list: ctx => withParams('/Delivery/Outbound/GetGridJson', {page: ctx.page, limit: ctx.limit, outboundId: '', status: '', fromId: '', barcode: '', boxId: '', remark: ''}),
+    inWindow: row => dateInWindow(row.OutboundTime || row.Createtime, row.__ctx.rollingStart, row.__ctx.date),
+    details: [
+      {name: 'outbound_item', idField: 'OutboundId', url: (id, ctx) => withParams('/Delivery/Outbound/GetOutboundDetailViewGridJson', {page: 1, limit: ctx.detailLimit, outboundId: id})},
+    ],
+  },
+  return_order: {
+    kind: 'rolling',
+    idFields: ['ReturnOrderId'],
+    list: ctx => withParams('/Delivery/ReturnOrder/GetGridJson', {page: ctx.page, limit: ctx.limit, returnOrderId: '', rtv: '', shipmentNumber: '', reserveTimeRange: `${ctx.rollingStart} - ${ctx.date}`, storeroomIdIn: '', storeroomIdOut: '', status: ''}),
+    details: [
+      {name: 'return_order_item', idField: 'ReturnOrderId', url: (id, ctx) => withParams('/Delivery/ReturnOrder/GetDetailGridJson', {page: 1, limit: ctx.detailLimit, id})},
+    ],
+  },
+  allocate: {
+    kind: 'rolling',
+    idFields: ['AllocateId'],
+    list: ctx => withParams('/Delivery/Allocate/GetGridJson', {page: ctx.page, limit: ctx.limit, outStoreroom: '', inStoreroom: '', transport: '', allocateId: '', asn: '', status: '', barcode: '', sType: '', startTime: ctx.rollingStart, endTime: ctx.date, amzStatus: '', boxId: '', isReservation: '', logisticsNo: '', fbaStorageNumber: ''}),
+    details: [
+      {name: 'allocate_item', idField: 'AllocateId', url: (id, ctx) => withParams('/Delivery/Allocate/GetDetailGridJson', {page: 1, limit: ctx.detailLimit, id})},
+    ],
+  },
+  store_receipt: {
+    kind: 'rolling',
+    idFields: ['ReceiptId'],
+    list: ctx => withParams('/Delivery/StoreReceipt/GetGridJson', {page: ctx.page, limit: ctx.limit, receiptId: '', boxId: '', barcode: '', createtimeRange: `${ctx.rollingStart} - ${ctx.date}`, fromId: '', storeroomId: '', sort: ''}),
+  },
+  change_pack: {
+    kind: 'rolling_no_date_filter',
+    idFields: ['ChangeId'],
+    list: ctx => withParams('/Delivery/ChangePack/GetGridJson', {page: ctx.page, limit: ctx.limit}),
+    inWindow: row => dateInWindow(row.CreateTime || row.Createtime, row.__ctx.rollingStart, row.__ctx.date),
+  },
+  box_damaged: {
+    kind: 'rolling',
+    idFields: ['DLNO'],
+    list: ctx => withParams('/Delivery/BoxDamaged/GetGridJson', {page: ctx.page, limit: ctx.limit, boxId: '', shipOrderId: '', overseaId: '', storeroomId: '', status: -1, barcode: '', createtimeRange: `${ctx.rollingStart} - ${ctx.date}`}),
+  },
+  income_bill: {
+    kind: 'finance',
+    idFields: ['IncomeBillId'],
+    list: ctx => withParams('/Finance/IncomeBill/GetGridJson', {page: ctx.page, limit: ctx.limit, sort: '', status: '', cityId: '', overseaId: '', incomeBillId: '', start: ctx.financeStart, end: ctx.date, paySort: '', payStartTime: '', payEndTime: '', payId: '', sourceType: ''}),
+    details: [
+      {name: 'income_bill_item', idField: 'IncomeBillId', url: (id, ctx) => withParams('/Finance/IncomeBill/GetDetailGridJson', {page: 1, limit: ctx.detailLimit, id})},
+    ],
+  },
+  income_summary: {
+    kind: 'finance',
+    idFields: ['Sort', 'SortName', 'CountryId'],
+    list: ctx => withParams('/Finance/IncomeBill/GetSummaryGridJson', {page: ctx.page, limit: ctx.limit, start: ctx.financeStart, end: ctx.date}),
+  },
+  income_payment: {
+    kind: 'finance',
+    idFields: ['FId', 'PayId'],
+    list: ctx => withParams('/Finance/IncomeBillDetail/GetGridJson', {page: ctx.page, limit: ctx.limit, incomeBillId: '', payId: '', paySort: '', money: '', creStartTime: ctx.financeStart, creEndTime: ctx.date, status: -1}),
+  },
+  freight_rate: {
+    kind: 'snapshot',
+    idFields: ['TransportId', 'CountryId', 'SortId'],
+    list: ctx => withParams('/Finance/FreightQuery/GetGridJson', {page: ctx.page, limit: ctx.limit, keyword: '', countryId: '', sortId: ''}),
+  },
+};
+
+function rowIdentity(row, idFields = []) {
+  const parts = idFields.map(f => row?.[f]).filter(v => v !== undefined && v !== null && String(v) !== '');
+  if (!parts.length) return '';
+  return parts.map(v => String(v).trim()).join('|');
+}
+
+async function readState(statePath) {
+  try {
+    return JSON.parse(await fs.readFile(statePath, 'utf8'));
+  } catch (err) {
+    if (err?.code === 'ENOENT') return {version: 1, endpoints: {}};
+    throw err;
+  }
+}
+
+async function writeState(statePath, state) {
+  await fs.mkdir(path.dirname(statePath), {recursive: true});
+  await fs.writeFile(statePath, JSON.stringify(state, null, 2), 'utf8');
+}
+
+function dateInWindow(value, start, end) {
+  const s = String(value || '').slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) && s >= start && s <= end;
+}
+
+function rowsFromJson(json) {
+  return Array.isArray(json?.data) ? json.data : [];
+}
+
+async function fetchPaged(cdp, args, endpointKey, def, ctx) {
+  const allRows = [];
+  const pages = [];
+  let count = null;
+  let overlapCount = 0;
+  let stoppedByOverlap = false;
+  let stoppedByDailyInitialCap = false;
+  const previousIds = new Set(ctx.previousEndpointIds?.[endpointKey] || []);
+  const canUseOverlapStop = args.mode === 'daily'
+    && !['snapshot'].includes(def.kind)
+    && previousIds.size > 0
+    && def.idFields?.length;
+  const canUseInitialCap = args.mode === 'daily'
+    && !['snapshot'].includes(def.kind)
+    && previousIds.size === 0
+    && args.dailyInitialPages > 0;
+  for (let page = 1; ; page++) {
+    if (args.maxPages && page > args.maxPages) break;
+    const pageCtx = {...ctx, page};
+    const url = def.list(pageCtx);
+    const json = await browserFetchJson(cdp, args, url);
+    const rows = rowsFromJson(json);
+    if (count === null) count = Number(json.count ?? rows.length);
+    const pageOverlapCount = canUseOverlapStop
+      ? rows.filter(r => previousIds.has(rowIdentity(r, def.idFields))).length
+      : 0;
+    overlapCount += pageOverlapCount;
+    pages.push({page, url, count: json.count ?? null, rows: rows.length, msg: json.msg ?? ''});
+    allRows.push(...rows.map(r => ({...r, __ctx: pageCtx})));
+    if (!rows.length) break;
+    if (rows.length < ctx.limit) break;
+    if (count !== null && allRows.length >= count) break;
+    if (canUseOverlapStop && page >= args.minPages && overlapCount >= args.overlapRows) {
+      stoppedByOverlap = true;
+      break;
+    }
+    if (canUseInitialCap && page >= args.dailyInitialPages) {
+      stoppedByDailyInitialCap = true;
+      break;
+    }
+    await sleep(args.waitMs);
+  }
+  const filteredRows = def.inWindow && args.mode === 'daily' ? allRows.filter(def.inWindow) : allRows;
+  return {
+    rows: filteredRows.map(({__ctx, ...r}) => r),
+    rawRowCount: allRows.length,
+    count,
+    pages,
+    overlapCount,
+    stoppedByOverlap,
+    stoppedByDailyInitialCap,
+  };
+}
+
+async function fetchDetails(cdp, args, def, listRows, ctx) {
+  const detailResults = {};
+  if (args.skipDetails) return detailResults;
+  for (const d of def.details || []) {
+    const rows = [];
+    const ids = [...new Set(listRows.map(r => r?.[d.idField]).filter(Boolean))];
+    const start = args.detailOffset || 0;
+    const end = args.maxDetails ? start + args.maxDetails : undefined;
+    const limited = ids.slice(start, end);
+    let cursor = 0;
+    async function worker() {
+      for (;;) {
+        const current = cursor++;
+        if (current >= limited.length) return;
+        const id = limited[current];
+        const json = await browserFetchJson(cdp, args, d.url(id, ctx));
+        rows.push(...rowsFromJson(json).map(r => ({...r, __parent_id: id})));
+        await sleep(args.waitMs);
+      }
+    }
+    const workers = Array.from(
+      {length: Math.min(args.detailConcurrency, limited.length || 1)},
+      () => worker(),
+    );
+    await Promise.all(workers);
+    detailResults[d.name] = {
+      rows,
+      totalParents: ids.length,
+      parentCount: limited.length,
+      detailOffset: start,
+      detailLimit: args.maxDetails || 0,
+      skippedBefore: Math.min(start, ids.length),
+      skippedAfter: Math.max(0, ids.length - start - limited.length),
+      skippedParents: Math.max(0, ids.length - limited.length),
+    };
+  }
+  return detailResults;
+}
+
+function buildContext(args) {
+  const backfillStart = args.startDate || '2020-01-01';
+  return {
+    date: args.date,
+    rollingStart: args.mode === 'backfill' ? backfillStart : addDays(args.date, -2),
+    shipStart: args.mode === 'backfill' ? backfillStart : addDays(args.date, -7),
+    financeStart: args.mode === 'backfill' ? backfillStart : firstDayOfPrevMonth(args.date),
+    currentMonthStart: firstDayOfMonth(args.date),
+    limit: args.limit,
+    detailLimit: Math.max(500, args.limit),
+  };
+}
+
+function endpointKeysForMode(args) {
+  const all = Object.keys(ENDPOINTS);
+  const keys = args.mode === 'smoke'
+    ? ['goods', 'sku_specification', 'store_stock', 'box_stock', 'stock_running', 'ship_order', 'outbound', 'return_order', 'box_damaged', 'income_bill', 'freight_rate']
+    : all;
+  if (args.endpointList?.length) {
+    const unknown = args.endpointList.filter(k => !ENDPOINTS[k]);
+    if (unknown.length) throw new Error(`Unknown ET endpoints: ${unknown.join(', ')}`);
+    return keys.filter(k => args.endpointList.includes(k));
+  }
+  return keys;
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const state = await readState(args.statePath);
+  if (!(await isCdpReady(args.port))) {
+    if (!args.launch) throw new Error(`ET Chrome CDP is not ready on port ${args.port}.`);
+    await launchChrome(args);
+  }
+  const page = await getEtPage(args);
+  const cdp = new CdpClient(page.webSocketDebuggerUrl);
+  await cdp.connect();
+  await cdp.call('Page.enable').catch(() => {});
+  if (!page.url?.startsWith(args.baseUrl)) {
+    await cdp.call('Page.navigate', {url: args.baseUrl + '/Home/Index'});
+    await sleep(1800);
+  }
+  const home = await cdp.eval(`(async()=>{const r=await fetch(${JSON.stringify(args.baseUrl + '/Home/Index')},{credentials:'include'}); const text=await r.text(); return {status:r.status,title:(text.match(/<title>([^<]+)/)||[])[1]||'', login:/Login|验证码|密码/.test(text)&&!/易通天下物流端/.test(text)};})()`);
+  if (home.status !== 200 || home.login) {
+    cdp.close();
+    throw new Error(`ET login state is not ready. status=${home.status} title=${home.title}`);
+  }
+
+  const batchId = `et-${args.mode}-${args.date}-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  const batchDir = path.join(args.outDir, args.date, batchId);
+  await fs.mkdir(batchDir, {recursive: true});
+  const ctx = {
+    ...buildContext(args),
+    previousEndpointIds: Object.fromEntries(Object.entries(state.endpoints || {}).map(([key, value]) => [key, value.recentIds || []])),
+  };
+  const manifest = {
+    batchId,
+    mode: args.mode,
+    targetDate: args.date,
+    createdAt: new Date().toISOString(),
+    baseUrl: args.baseUrl,
+    profileDir: path.relative(ROOT, args.profileDir).replace(/\\/g, '/'),
+    detailOptions: {
+      skipDetails: args.skipDetails,
+      detailOffset: args.detailOffset,
+      maxDetails: args.maxDetails,
+      detailConcurrency: args.detailConcurrency,
+    },
+    windows: {
+      rollingStart: ctx.rollingStart,
+      shipStart: ctx.shipStart,
+      financeStart: ctx.financeStart,
+      date: ctx.date,
+    },
+    endpoints: {},
+    files: {},
+    ok: false,
+  };
+  try {
+    for (const key of endpointKeysForMode(args)) {
+      const def = ENDPOINTS[key];
+      const result = await fetchPaged(cdp, args, key, def, ctx);
+      const file = `${safeName(key)}.json`;
+      await fs.writeFile(path.join(batchDir, file), JSON.stringify({
+        endpoint: key,
+        fetchedAt: new Date().toISOString(),
+        count: result.count,
+        rawRowCount: result.rawRowCount,
+        rows: result.rows,
+        pages: result.pages,
+      }, null, 2), 'utf8');
+      manifest.endpoints[key] = {
+        kind: def.kind,
+        count: result.count,
+        rawRowCount: result.rawRowCount,
+        rowCount: result.rows.length,
+        pages: result.pages.length,
+        overlapCount: result.overlapCount,
+        stoppedByOverlap: result.stoppedByOverlap,
+        stoppedByDailyInitialCap: result.stoppedByDailyInitialCap,
+      };
+      manifest.files[key] = file;
+
+      if (def.details?.length && result.rows.length) {
+        const detailMap = await fetchDetails(cdp, args, def, result.rows, ctx);
+        for (const [detailKey, detailResult] of Object.entries(detailMap)) {
+          const detailFile = `${safeName(detailKey)}.json`;
+          await fs.writeFile(path.join(batchDir, detailFile), JSON.stringify({
+            endpoint: detailKey,
+            parentEndpoint: key,
+            fetchedAt: new Date().toISOString(),
+            totalParents: detailResult.totalParents,
+            parentCount: detailResult.parentCount,
+            detailOffset: detailResult.detailOffset,
+            detailLimit: detailResult.detailLimit,
+            skippedBefore: detailResult.skippedBefore,
+            skippedAfter: detailResult.skippedAfter,
+            skippedParents: detailResult.skippedParents,
+            rows: detailResult.rows,
+          }, null, 2), 'utf8');
+          manifest.endpoints[detailKey] = {
+            kind: 'detail',
+            parent: key,
+            rowCount: detailResult.rows.length,
+            totalParents: detailResult.totalParents,
+            parentCount: detailResult.parentCount,
+            detailOffset: detailResult.detailOffset,
+            detailLimit: detailResult.detailLimit,
+            skippedBefore: detailResult.skippedBefore,
+            skippedAfter: detailResult.skippedAfter,
+            skippedParents: detailResult.skippedParents,
+          };
+          manifest.files[detailKey] = detailFile;
+        }
+      }
+      await sleep(args.waitMs);
+    }
+    manifest.ok = true;
+  } finally {
+    cdp.close();
+  }
+  const manifestPath = path.join(batchDir, 'manifest.json');
+  await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+  await fs.writeFile(path.join(args.outDir, 'latest-manifest.json'), JSON.stringify({...manifest, manifestPath: path.relative(ROOT, manifestPath).replace(/\\/g, '/')}, null, 2), 'utf8');
+  if (args.updateState && manifest.ok && !args.dryRun) {
+    const nextState = {
+      ...state,
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      lastBatchId: batchId,
+      endpoints: {...(state.endpoints || {})},
+    };
+    for (const [key, file] of Object.entries(manifest.files)) {
+      if (!ENDPOINTS[key]) continue;
+      const def = ENDPOINTS[key];
+      const data = JSON.parse(await fs.readFile(path.join(batchDir, file), 'utf8'));
+      const ids = [];
+      const seen = new Set();
+      for (const row of data.rows || []) {
+        const id = rowIdentity(row, def.idFields);
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        ids.push(id);
+        if (ids.length >= 500) break;
+      }
+      nextState.endpoints[key] = {
+        ...(nextState.endpoints[key] || {}),
+        recentIds: ids,
+        lastBatchId: batchId,
+        lastFetchedAt: data.fetchedAt,
+        lastRowCount: data.rows?.length || 0,
+      };
+    }
+    await writeState(args.statePath, nextState);
+  }
+  console.log(JSON.stringify({
+    ok: manifest.ok,
+    batchId,
+    manifestPath,
+    rowCounts: Object.fromEntries(Object.entries(manifest.endpoints).map(([k, v]) => [k, v.rowCount])),
+  }, null, 2));
+}
+
+main().catch(err => {
+  console.error(err?.stack || String(err));
+  process.exit(1);
+});

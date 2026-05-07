@@ -101,6 +101,19 @@ function monthStart(value) {
   return '';
 }
 
+function dateOnly(value) {
+  const s = text(value);
+  if (!s) return null;
+  let m = s.match(/^(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})/);
+  if (!m) m = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (m) return `${m[1]}-${String(m[2]).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}`;
+  const d = new Date(s);
+  if (!Number.isNaN(d.getTime())) {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+  return null;
+}
+
 function currency(value, fallback = 'CNY') {
   const s = text(value).toUpperCase();
   if (/SAR|ر\.س|里亚尔|沙特/.test(s)) return 'SAR';
@@ -146,7 +159,9 @@ function buildCostRow(row, sourceFile, sourceSheet, idx) {
   const rawGoodsSn = text(pick(row, ['货号', '标准货号', '商品货号', 'goods_sn', 'sku', '型号']));
   const title = text(pick(row, ['品名', '商品名称', '标题', '产品名称']));
   const normalized = normalizeGoodsSnDetailed(rawGoodsSn, {goodsTitle: title});
-  const batchNo = text(pick(row, ['发货申请单', '发货申请单号', '批次号', '发货批次', '采购单号', '单号'])) || `${path.basename(sourceFile)}-${sourceSheet}-${idx}`;
+  const batchNo = text(pick(row, ['发货单号', '发货申请单', '发货申请单号', '批次号', '发货批次', '采购单号', '单号'])) || `${path.basename(sourceFile)}-${sourceSheet}-${idx}`;
+  const shippedDate = dateOnly(pick(row, ['发货日期', '发货时间', '发货日', '出货日期', '出货时间', 'shipping_date', 'shipped_date']));
+  const arrivedDate = dateOnly(pick(row, ['到仓/派送日期', '到仓日期', '到仓时间', '派送日期', '派送时间', '入仓日期', '入库日期', 'arrived_date', 'warehouse_arrived_date']));
   const shippedQuantity = num(pick(row, ['发货数量', '数量', '出货数量', '入仓数量', '总数量']));
   const goodsCost = num(pick(row, ['货款金额', '商品成本', '采购成本', '货值', '货款', '成本金额']));
   const firstLegFreight = num(pick(row, ['头程运输费金额', '头程运费', '头程运输费', '头程费用', '运输费金额']));
@@ -172,6 +187,8 @@ function buildCostRow(row, sourceFile, sourceSheet, idx) {
     standard_goods_sn: normalized.canonical || rawGoodsSn,
     raw_goods_sn: rawGoodsSn,
     batch_no: batchNo,
+    shipped_date: shippedDate,
+    arrived_date: arrivedDate,
     shipped_quantity: shippedQuantity,
     goods_cost_amount: goodsCost,
     first_leg_freight_amount: firstLegFreight,
@@ -391,7 +408,7 @@ async function main() {
   const results = [];
   results.push(await deleteImportedRowsForSources(args, files));
   results.push(await upsertRows(args, 'fact.product_cost_batch', [
-    'batch_key','standard_goods_sn','raw_goods_sn','batch_no','shipped_quantity',
+    'batch_key','standard_goods_sn','raw_goods_sn','batch_no','shipped_date','arrived_date','shipped_quantity',
     'goods_cost_amount','first_leg_freight_amount','other_cost_amount','total_cost_amount',
     'currency_code','cost_sar','unit_cost_sar','complete_batch','ignored_reason',
     'purchase_unit_price','length_cm','width_cm','height_cm','volume_l','weight_kg',

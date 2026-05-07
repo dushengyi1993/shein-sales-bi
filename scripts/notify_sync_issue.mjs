@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import crypto from 'node:crypto';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const REPORT_CONFIG_PATH = path.join(ROOT, 'config', 'lark_report.json');
@@ -63,6 +64,12 @@ function runLark(args) {
   });
 }
 
+function idempotencyKey(parts) {
+  const raw = parts.filter(Boolean).join('|');
+  const hash = crypto.createHash('sha1').update(raw).digest('hex').slice(0, 24);
+  return `sync-issue-${hash}`;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const failed = splitStores(args.failedStores);
@@ -106,17 +113,25 @@ async function main() {
     return;
   }
 
-  const res = await runLark([
+  const baseLarkArgs = [
     'im', '+messages-send',
     '--as', identity,
     '--user-id', recipient,
     '--text', text,
-    '--idempotency-key', `sync-issue-${date}-${modeLabel}-${failed.join('-')}-${loginRequired.join('-')}-${stamp}`,
-  ]);
+  ];
+  const key = idempotencyKey([date, modeLabel, failed.join(','), loginRequired.join(','), args.message, stamp]);
+  let res = await runLark([...baseLarkArgs, '--idempotency-key', key]);
+  let fallbackTried = false;
+  if (!res.ok && /field validation failed/i.test(`${res.stdout}\n${res.stderr}`)) {
+    fallbackTried = true;
+    res = await runLark(baseLarkArgs);
+  }
   console.log(JSON.stringify({
     ok: res.ok,
     code: res.code,
     outFile,
+    idempotencyKey: key,
+    fallbackTried,
     stdoutTail: res.stdout.slice(-1000),
     stderrTail: res.stderr.slice(-1000),
   }, null, 2));
