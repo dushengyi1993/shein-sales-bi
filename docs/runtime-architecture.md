@@ -1,12 +1,12 @@
 ﻿# 运行环境架构
 
-## 2026-05-06 当前运行环境摘要
+## 2026-05-09 当前运行环境摘要
 
 - SHEIN 抓数、BI 后置刷新和飞书日报继续在 Windows 侧运行；飞书多维表格 / 原生看板写入已临时暂停。
 - 暂停开关为 `state/feishu-base-sync-paused.flag`；存在该文件时跳过飞书事实表、产品表、月表、宽表和看板写入，删除后可恢复。
 - 链接表现每日任务为 `SHEIN-Sales-15Stores-LinkManagement-0530`，每天 `05:30`，只写本地 / PostgreSQL / BI；旧 `0340` / `0510` 链接任务不要恢复。
 - HL 正式 profile 为 `profiles/persistent-shein-main-profile`，CDP 端口 `9360`；旧 `profiles/persistent-hl-profile` 已删除。
-- `2026-05-05` Docker / WSL 数据盘异常已恢复；`2026-05-06 05:30` 链接/业务域任务和 `2026-05-06 07:00` BI 每日流水线已正式自动跑通，下一次例行观察 `2026-05-07 05:30` 与 `2026-05-07 07:00`。
+- `2026-05-05` Docker / WSL 数据盘异常已恢复；`2026-05-09 05:30` 链接/业务域任务和 `2026-05-09 07:00` BI 每日流水线已正式自动跑通。`2026-05-09 11:31:49` 已手动触发 `SHEIN-Sales-ETForwarder-0420` 计划任务入口并返回 `LastTaskResult=0`，下一次例行观察 `2026-05-10 04:20 / 05:30 / 07:00`。
 
 ## 结论
 
@@ -24,9 +24,10 @@
 ## 当前 Windows 计划任务（北京时间）
 
 - `SHEIN-Sales-15Stores-YesterdayFinal-0010`：每天 `00:10` 跑前一天最终版；Base 暂停期间只写本地销售文件并刷新 BI。
+- `SHEIN-Sales-ETForwarder-0420`：每天 `04:20` 跑 ET 货代仓同步；抓库存、RTV、出库、发货申请单、库存流水和财务，按增量游标 + 重叠校验停止。
 - `SHEIN-Sales-15Stores-Intraday-Daytime`：每天 `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10` 跑当天滚动抓取；Base 暂停期间只写本地销售文件并刷新 BI。
 - `SHEIN-Sales-15Stores-LinkManagement-0530`：每天 `05:30` 跑前一完整业务日链接管理和业务域抓取，先写本地 JSON；`07:00` BI 流水线再入仓刷新门户，不再写飞书链接表。
-- `SHEIN-BI-Daily-Pipeline-0700`：每天 `07:00` 入仓 05:30 已抓取的链接/业务域数据，并刷新 PostgreSQL BI 仓库、体检、门户和晨报。
+- `SHEIN-BI-Daily-Pipeline-0700`：每天 `07:00` 入仓 05:30 已抓取的链接/业务域数据，并刷新 PostgreSQL BI 仓库、RTV 换单和仓库去向追踪、体检、门户、UI 冒烟检查和晨报。
 - 每日飞书文字日报和可视化日报图不再使用独立固定任务；由 `08:10` 当天抓取成功完成后自动发送。若 `08:10` 因关机/失败未发送，上午后续成功的滚动同步可补发一次，并用 `state/daily-report-sent-YYYYMMDD.flag` 防重复；Base 暂停期间只跳过日报记录表写入，不影响 IM 消息和日报图。
 - `SHEIN-Sales-15Stores-Watchdog-Logon`：Windows 登录时和每天 `09:20` 检查漏跑并补偿；不额外同步当日。
 
@@ -78,7 +79,9 @@
 
 ## 浏览器 profile 与磁盘瘦身边界（2026-05-02）
 
-15 店 SHEIN 登录态保存在工作区内的独立 Chrome profile。不要删除整个 `persistent-*` 目录；登录态通常在 `Profile 1`、`Default`、`Network`、`Local Storage`、Cookies/Session 相关文件中。
+16 店 SHEIN 登录态保存在工作区内的独立 Chrome profile。不要删除整个 `persistent-*` 目录；登录态通常在 `Profile 1`、`Default`、`Network`、`Local Storage`、Cookies/Session 相关文件中。
+
+2026-05-10 已复核 16 店 profile 显示名与登录抓数：`PROFILE_NAME.txt`、Chrome `Preferences`、Chrome `Local State` 均与 `config/stores.json` 一致；用稳定日期后台重抓对账数据库，未发现登录错位。`YJ / XL / QY` 的 `profileKey` 名称与店铺代码不一致是历史遗留，不是错误。
 
 当前店铺映射：
 
@@ -99,16 +102,20 @@
 | XL | `profiles/persistent-yj-profile` | 9344 |
 | QY | `profiles/persistent-xl-profile` | 9345 |
 | QH | `profiles/persistent-qh-profile` | 9347 |
+| TZ | `profiles/persistent-tz-profile` | 9348 |
 
 补充说明：
 
 - 旧 `profiles/persistent-hl-profile` 已删除；当前 HL 正式使用 `profiles/persistent-shein-main-profile`。
-- `profiles/persistent-feishu-profile` 是飞书网页登录态，用于看板富文本、卡片样式和页面自动化，不属于 15 店 SHEIN 登录。
+- `YJ=profiles/persistent-qy-profile`、`XL=profiles/persistent-yj-profile`、`QY=profiles/persistent-xl-profile` 是当前正确生产绑定；不要仅按目录名直觉互换。
+- `profiles/persistent-feishu-profile` 是飞书网页登录态，用于看板富文本、卡片样式和页面自动化，不属于 16 店 SHEIN 登录。
 - Chrome 自动生成的 `OptGuideOnDeviceModel` 是重复模型缓存，不是登录态。等同步任务和 Chrome 进程停止后，可只删除各 profile 下的 `OptGuideOnDeviceModel` 来释放约 30GB+。
 - 瘦身时不要动 `Profile 1`、`Default`、`Network`、`Local Storage`、Cookies/Session 相关文件。
 - 2026-05-02 文件整理报告见 `outputs/cleanup/project-file-cleanup-2026-05-02.md`；误生成的 `E:\Codex` 已归档到 `backups/file-cleanup-20260502T125310/E-Codex-stray-chrome-profile`。
 
 ## 前台窗口策略
+
+- 非必要情况下不要打开前端/可见浏览器窗口；默认用后台、headless、HTTP/CDP、日志、JSON、静态检查和 UI 冒烟脚本验证。只有首次登录、验证码/人机验证、用户明确要求看前台、或必须排查浏览器交互问题时，才打开可见窗口；完成后应关闭。
 
 - 主方案：定时同步通过 `run_sales_sync_job.mjs` 自动启动无界面 Chrome，不占任务栏。
 - 如果某店重启后 headless Chrome 起不来，`run_sales_sync_job.mjs` 会自动尝试后台窗口模式作为兜底；这只用于恢复抓取可用性，不代表要常驻前台窗口。
@@ -121,7 +128,7 @@
 
 ## 登录态掉线与自动恢复经验（2026-04-28）
 
-现象：页面仍可能显示“我的订单”，但接口 `/gsp/orderPlus/listOrder` 返回 `code=20302`、`msg=子系统登录重定向`。这种情况应按“接口登录态失效”处理，不能只看页面标题或页面内容。
+现象：页面仍可能显示“我的订单”，但接口 `/gsp/orderPlus/listOrder` 返回 `code=20302`、`msg=子系统登录重定向`。这种情况应按“接口登录态失效”处理，不能只看页面标题或页面内容。 页面文本里出现某个店铺号也不等于当前登录主体；核验 profile 是否错位时，必须用实际订单接口 + 稳定日期重抓 + 数据库样本对账。当天数据会继续变化，不适合作为最终错位判断样本。
 
 处理流程：
 
@@ -140,7 +147,7 @@
    - `node scripts/setup_lark_dashboard_previous_month.mjs --month YYYY-MM`
 6. 若店铺事实已写入但产品/月表/看板后续步骤遇到飞书临时 `HTTP 500` / `5000`，应从失败环节开始补跑；任何上游失败都不能继续刷新主看板。
 
-## 15 店看板刷新
+## 16 店看板刷新
 
 - 当前有两个正式 Dashboard：
   - 当月主看板：`SHEIN经营看板 v3-主看板`，刷新脚本 `node scripts/setup_lark_dashboard_main_v3.mjs --month YYYY-MM`。
@@ -163,7 +170,7 @@
 - 如果自动恢复失败，任务必须把该店标为失败/需要人工登录；日报或告警应明确提示，不得把旧文件里的销售额冒充为最新数据。
 - 可选参数：--no-auto-relogin 仅用于排障禁用自动登录；--relogin-visible 默认用于验证码/保存密码场景；--relogin-headless 可用于无界面试验。
 - 若保存密码看似没有命中，先确认启动时是否使用了对应店铺 profile 和 `--profile-directory=Profile 1`。2026-05-03 的 JY 告警就是因为登录态掉线且自动恢复未命中 profile，人工登录后已补跑 `2026-05-02` 最终版和 `2026-05-03` 今日数据。
-- 2026-04-28 已用 LGM 组重跑验证：CX/YJ/XL/QY/QH 今日抓取与写入成功，合计 1243.06 SAR。
+- 2026-04-28 已用 LGM 组重跑验证：CX/YJ/XL/QY/QH/TZ 今日抓取与写入成功，合计 1243.06 SAR。
 
 ## 数据抓取时间展示规则
 
@@ -207,3 +214,6 @@
 - 后置 BI 刷新失败时只记录日志，不让飞书生产任务失败。
 
 
+
+## ET 前台窗口规则
+- ET 货代仓也适用“非必要不打开前端窗口”：`scripts/fetch_et_forwarder.mjs` 默认 `visible=false` 并用 `WindowStyle Hidden` 启动 Chrome；自动登录优先走 `scripts/et_login_helper.py` + OCR。只有 OCR/验证码连续失败、登录态必须人工处理、用户明确要求，或必须排查浏览器交互问题时，才允许临时加 `--visible` 打开 ET 前台窗口，处理完必须关闭。

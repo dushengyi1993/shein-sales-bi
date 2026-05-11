@@ -23,7 +23,7 @@ const SALES_DIR = path.join(ROOT, 'outputs', 'shein_fetch');
 const REPORT_DIR = path.join(ROOT, 'outputs', 'reports');
 const OUT_DIR = path.join(ROOT, 'outputs', 'link-dashboard');
 
-const STORE_ORDER = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH'];
+const STORE_ORDER = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ'];
 const HIGH = '高';
 const MID = '中';
 const LOW = '低';
@@ -1347,7 +1347,7 @@ function renderHtml(payload) {
 
     <section id="tab-coverage" class="tab-panel" hidden>
       <section class="section">
-        <div class="section-head"><div><h2>货号覆盖矩阵</h2><div class="sub">只列“已有店铺在卖、其他店缺已上架链接”的货号；15店都没上架的不提醒。</div></div></div>
+        <div class="section-head"><div><h2>货号覆盖矩阵</h2><div class="sub">只列“已有店铺在卖、其他店缺已上架链接”的货号；全部店都没上架的不提醒。</div></div></div>
         <div class="table-wrap"><table><thead><tr><th>货号</th><th>已上架店铺</th><th>缺上架店铺</th><th>订单30天销量</th><th>链接30天销量</th><th>链接30天曝光</th><th>机会分</th></tr></thead><tbody id="coverageBody"></tbody></table></div>
       </section>
     </section>

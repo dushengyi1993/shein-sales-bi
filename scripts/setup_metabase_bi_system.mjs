@@ -176,7 +176,7 @@ const dashboards = [
         sql: `select count(*)::int as "动作数" from mart.bi_guided_action_current;`,
       },
       {
-        name: '系统首页 · 15店经营健康矩阵',
+        name: '系统首页 · 全店经营健康矩阵',
         display: 'table',
         description: '总览表。每天先看风险分和异常项，再决定进哪个业务域。',
         sql: `select

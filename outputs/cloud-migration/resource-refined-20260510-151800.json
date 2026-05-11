@@ -1,0 +1,153 @@
+﻿{
+    "timestamp":  "2026-05-10T15:22:29",
+    "logicalProcessors":  24,
+    "baseline30s":  {
+                        "wsl-docker-vm":  {
+                                              "processCount":  6,
+                                              "workingSetMB":  1927.4,
+                                              "privateMB":  3044.9,
+                                              "avgCpuPercent":  0
+                                          },
+                        "shein-chrome-headless":  {
+                                                      "processCount":  123,
+                                                      "workingSetMB":  8479.6,
+                                                      "privateMB":  19942.7,
+                                                      "avgCpuPercent":  0
+                                                  },
+                        "bi-portal-node":  {
+                                               "processCount":  1,
+                                               "workingSetMB":  46.5,
+                                               "privateMB":  87.5,
+                                               "avgCpuPercent":  0
+                                           }
+                    },
+    "chromeByProfile":  [
+                            {
+                                "profile":  "persistent-cx-profile",
+                                "processCount":  8,
+                                "workingSetMB":  234.5,
+                                "privateMB":  1465.2
+                            },
+                            {
+                                "profile":  "persistent-dl-profile",
+                                "processCount":  8,
+                                "workingSetMB":  924.2,
+                                "privateMB":  1442.8
+                            },
+                            {
+                                "profile":  "persistent-dx-profile",
+                                "processCount":  8,
+                                "workingSetMB":  896.2,
+                                "privateMB":  1384.7
+                            },
+                            {
+                                "profile":  "persistent-fy-profile",
+                                "processCount":  8,
+                                "workingSetMB":  257.8,
+                                "privateMB":  1473.2
+                            },
+                            {
+                                "profile":  "persistent-jy-profile",
+                                "processCount":  8,
+                                "workingSetMB":  241,
+                                "privateMB":  1482.1
+                            },
+                            {
+                                "profile":  "persistent-lq-profile",
+                                "processCount":  8,
+                                "workingSetMB":  925.8,
+                                "privateMB":  1442.6
+                            },
+                            {
+                                "profile":  "persistent-mz-profile",
+                                "processCount":  9,
+                                "workingSetMB":  836.6,
+                                "privateMB":  1427
+                            },
+                            {
+                                "profile":  "persistent-nm-profile",
+                                "processCount":  8,
+                                "workingSetMB":  917.5,
+                                "privateMB":  1400.7
+                            },
+                            {
+                                "profile":  "persistent-qh-profile",
+                                "processCount":  9,
+                                "workingSetMB":  378.1,
+                                "privateMB":  1547.3
+                            },
+                            {
+                                "profile":  "persistent-qy-profile",
+                                "processCount":  8,
+                                "workingSetMB":  275.9,
+                                "privateMB":  1448
+                            },
+                            {
+                                "profile":  "persistent-shein-main-profile",
+                                "processCount":  8,
+                                "workingSetMB":  290.1,
+                                "privateMB":  217.4
+                            },
+                            {
+                                "profile":  "persistent-ts-profile",
+                                "processCount":  8,
+                                "workingSetMB":  276.8,
+                                "privateMB":  1484.6
+                            },
+                            {
+                                "profile":  "persistent-xl-profile",
+                                "processCount":  9,
+                                "workingSetMB":  193.6,
+                                "privateMB":  875
+                            },
+                            {
+                                "profile":  "persistent-yj-profile",
+                                "processCount":  8,
+                                "workingSetMB":  922.7,
+                                "privateMB":  1445
+                            },
+                            {
+                                "profile":  "persistent-zl-profile",
+                                "processCount":  8,
+                                "workingSetMB":  908.7,
+                                "privateMB":  1407.1
+                            }
+                        ],
+    "biRefresh":  {
+                      "exitCode":  null,
+                      "durationSeconds":  227.7,
+                      "avgDuringRun":  {
+                                           "wsl-docker-vm":  {
+                                                                 "processCount":  6,
+                                                                 "workingSetMB":  2221.6,
+                                                                 "privateMB":  4350.4,
+                                                                 "avgCpuPercent":  0
+                                                             },
+                                           "shein-chrome-headless":  {
+                                                                         "processCount":  123,
+                                                                         "workingSetMB":  8857.7,
+                                                                         "privateMB":  19948.1,
+                                                                         "avgCpuPercent":  0
+                                                                     },
+                                           "bi-portal-node":  {
+                                                                  "processCount":  1,
+                                                                  "workingSetMB":  46.5,
+                                                                  "privateMB":  87.5,
+                                                                  "avgCpuPercent":  0
+                                                              }
+                                       },
+                      "peakProjectWorkingSetMB":  11820.3,
+                      "peakWorkingSetByGroupMB":  {
+                                                      "project-node-jobs":  59.6,
+                                                      "wsl-docker-vm":  3002.8,
+                                                      "shein-chrome-headless":  8855.9,
+                                                      "bi-portal-node":  46.5
+                                                  },
+                      "log":  "E:\\Codex WorkSpace\\Shein销售统计\\outputs\\cloud-migration\\generate-bi-portal-refined-20260510-151800.log"
+                  },
+    "dockerStats":  [
+                        "shein-metabase|1.55%|1.198GiB / 15.58GiB",
+                        "shein-metabase-db|0.00%|61.48MiB / 15.58GiB",
+                        "shein-warehouse-db|0.00%|223.6MiB / 15.58GiB"
+                    ]
+}

@@ -333,6 +333,8 @@ function buildMarkdown(data) {
   const trend = trendReadiness(data);
   const generated = new Date(data.generatedAt || Date.now()).toLocaleString('zh-CN', {hour12:false});
 
+  const storeCount = Number(data.counts?.stores || (data.stores || []).length || 0) || 0;
+  const storeCountText = storeCount ? String(storeCount) : '全部';
   const lines = [];
   lines.push(`# SHEIN BI 今日经营晨报`);
   lines.push('');
@@ -384,7 +386,7 @@ function buildMarkdown(data) {
   lines.push(`## 4. 跨域优先货号`);
   lines.push('');
   topProducts.forEach((p, idx) => {
-    lines.push(`- ${idx + 1}. ${safe(p.standard_goods_sn)}｜跨域分 ${num(p.crossScore)}｜销售 ${money(p.sales_sar)}｜上架 ${num(p.on_shelf_store_count)}/15｜动作 ${num(p.productActions.length)}｜售后 ${num(p.afterRows.length)} 单 / ${money(p.afterAmount)}｜财务 ${money(p.financeAmount)}｜原因：${safe(p.reasons.join('；'))}`);
+    lines.push(`- ${idx + 1}. ${safe(p.standard_goods_sn)}｜跨域分 ${num(p.crossScore)}｜销售 ${money(p.sales_sar)}｜上架 ${num(p.on_shelf_store_count)}/${storeCountText}｜动作 ${num(p.productActions.length)}｜售后 ${num(p.afterRows.length)} 单 / ${money(p.afterAmount)}｜财务 ${money(p.financeAmount)}｜原因：${safe(p.reasons.join('；'))}`);
   });
   lines.push('');
 
@@ -395,7 +397,7 @@ function buildMarkdown(data) {
   } else {
     growthRows.forEach((p, idx) => {
       const riskNote = p.referenceRisk ? `｜注意：${safe(p.referenceLabel)}存在${safe(p.referenceRisk)}，复制前先修承接` : '';
-      lines.push(`- ${idx + 1}. ${safe(p.standard_goods_sn)}｜${safe(p.opportunityType)}｜机会分 ${num(p.growthScore)}｜销售 ${money(p.sales_sar)}｜30天销量 ${num(p.c30Sales)}｜已上架 ${num(p.onShelfStores)}/15｜可扩 ${num(p.missingStores)} 店｜售后压力 ${Math.round(Number(p.afterRate || 0) * 100)}%｜原因：${safe(p.reasons.join('；'))}${riskNote}`);
+      lines.push(`- ${idx + 1}. ${safe(p.standard_goods_sn)}｜${safe(p.opportunityType)}｜机会分 ${num(p.growthScore)}｜销售 ${money(p.sales_sar)}｜30天销量 ${num(p.c30Sales)}｜已上架 ${num(p.onShelfStores)}/${storeCountText}｜可扩 ${num(p.missingStores)} 店｜售后压力 ${Math.round(Number(p.afterRate || 0) * 100)}%｜原因：${safe(p.reasons.join('；'))}${riskNote}`);
     });
   }
   lines.push('');

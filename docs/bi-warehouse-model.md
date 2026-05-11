@@ -326,7 +326,7 @@ SKC 维度。
 
 ### `mart.product_store_coverage`
 
-回答“某货号在 15 店哪些已上架、哪些缺链接”。
+回答“某货号在 16 店哪些已上架、哪些缺链接”。
 
 - `date`
 - `standard_goods_sn`
@@ -340,7 +340,7 @@ SKC 维度。
 
 规则：
 
-- 15 店都没有已上架链接：不提醒；
+- 16 店都没有已上架链接：不提醒；
 - 部分店有已上架、部分店没有：进入补链候选。
 
 ### `mart.link_health_score`
@@ -386,6 +386,29 @@ SKC 维度。
 - 店铺、货号、SKC 都是筛选维度；
 - 每天只给可处理数量。
 
+### `mart.et_rtv_destination_allocation`
+
+ET RTV 收件后的库存流水去向视图。用途是回答“退件收到后去了哪里”，并给利润页的 `rtv_09_recoverable_cost_sar` 提供 09 可二售测算依据。
+
+核心口径：
+
+- 直接入 `ETRUH09散件仓` 的 RTV 直接计为可售 09；
+- 入 `ETRUH03_RTV` 后，按同货号后续 `调拨单` 的库存流水 FIFO 分配到 09、04、06、仍在 03 或其它/未知；
+- `ETRUH04Damaged` 后续若转 `ETRUH06报废`，会从破损口径转入报废口径；
+- 这是库存流水级 / 同货号 FIFO 证据，不是单件序列号扫描。
+
+### `mart.shein_return_rtv_trace`
+
+SHEIN 售后退货单到 ET RTV 收件和仓库去向的明细视图。BI `订单 / 售后` 页面使用它展示“退货收件 / 仓库去向追踪”。
+
+关键字段：
+
+- `trace_status`：`未匹配到ET收件`、`已收-可售09`、`已收-仍在03_RTV`、`已收-破损04`、`已收-报废06`、`已收-其它/未知去向`、`已收-未解析去向`；
+- `shein_return_express_numbers`：SHEIN 售后侧退货物流号；
+- `et_return_order_ids` / `rtv_express_numbers`：ET RTV 单号和 ET 侧物流号；
+- `destination_summary`：ET 库存流水推断出的仓库去向；
+- `final_09_quantity` / `still_03_quantity` / `final_damaged_quantity` / `final_scrap_quantity` / `final_other_quantity`：按去向拆分的数量。
+
 ## 操作层
 
 ### `ops.action`
@@ -417,6 +440,36 @@ SKC 维度。
 - `operation`
 - `note`
 - `created_at`
+
+### `ops.rtv_tracking_verification`
+
+RTV 换单自动复核记录。用途是把 ET RTV 已收物流号与 SHEIN 售后详情 / 退货物流详情里的真实换单号关联起来，避免只靠售后列表当前退货物流号造成漏匹配。
+
+关键字段：
+
+- `verification_id`
+- `store_key`
+- `et_return_order_id`
+- `et_shipment_number`
+- `et_shipment_number_raw`
+- `standard_goods_sn`
+- `shein_aftersales_order_no`
+- `shein_order_no`
+- `shein_return_order_no`
+- `shein_current_express_no`
+- `match_status`
+- `match_source`
+- `matched_tracking_no`
+- `discovered_tracking_numbers`
+- `current_express_numbers`
+- `route_summary`
+- `verified_at`
+
+口径：
+
+- `match_status='matched'` 才会被 `mart.rtv_recovery_impact` 吸收。
+- 主利润仍保守；确认 RTV 已收只进入 `RTV 已收可二次销售测算`，不直接改主利润。
+- `mart.rtv_manual_review_candidates` 的候选售后单按标准货号 + 时间窗口生成；ET `sku_code` / `barcode` 的店铺前缀只能作为候选排序线索，不作为过滤条件，避免跨店销售的退货被漏掉。
 
 ## Metabase 建模建议
 

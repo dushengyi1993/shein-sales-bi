@@ -1425,6 +1425,39 @@ CREATE TABLE IF NOT EXISTS ops.action (
   updated_at timestamptz DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS ops.rtv_tracking_verification (
+  verification_id text PRIMARY KEY,
+  store_key text,
+  et_return_order_id text,
+  et_shipment_number text,
+  et_shipment_number_raw text,
+  standard_goods_sn text,
+  shein_aftersales_order_no text,
+  shein_order_no text,
+  shein_order_id text,
+  shein_return_order_no text,
+  shein_return_order_id text,
+  shein_current_express_no text,
+  match_status text NOT NULL DEFAULT 'unchecked',
+  match_source text,
+  matched_tracking_no text,
+  discovered_tracking_numbers jsonb DEFAULT '[]'::jsonb,
+  current_express_numbers jsonb DEFAULT '[]'::jsonb,
+  route_summary jsonb DEFAULT '[]'::jsonb,
+  raw_detail jsonb,
+  raw_return_detail jsonb,
+  raw_route jsonb,
+  error_message text,
+  verified_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_rtv_tracking_verification_et
+  ON ops.rtv_tracking_verification (et_return_order_id, et_shipment_number);
+
+CREATE INDEX IF NOT EXISTS idx_rtv_tracking_verification_shein
+  ON ops.rtv_tracking_verification (store_key, shein_aftersales_order_no);
+
 CREATE TABLE IF NOT EXISTS fact.product_cost_batch (
   batch_key text PRIMARY KEY,
   standard_goods_sn text NOT NULL,
@@ -1544,6 +1577,8 @@ WITH classified AS (
         OR coalesce(order_sub_status_name,'') ILIKE '%已妥投%'
         OR coalesce(order_sub_status_name,'') ILIKE '%待交接%'
         OR coalesce(order_sub_status_name,'') ILIKE '%待买家退货%'
+        OR coalesce(order_sub_status_name,'') ILIKE '%待卖家处理%'
+        OR coalesce(order_sub_status_name,'') ILIKE '%待买家选择方案%'
       )
       AND NOT (
         coalesce(resolution_plan_name,'') ILIKE '%驳回%'
@@ -1572,31 +1607,522 @@ SELECT
 FROM classified
 GROUP BY store_key, order_no, standard_goods_sn, skc;
 
+CREATE OR REPLACE VIEW mart.et_rtv_09_allocation AS
+WITH rtv_in AS (
+  SELECT
+    from_id AS return_order_id,
+    coalesce(nullif(match_key,''), dim.product_match_key(standard_goods_sn)) AS match_key,
+    standard_goods_sn,
+    quantity::numeric AS rtv_quantity,
+    created_time AS rtv_received_time
+  FROM fact.et_stock_running
+  WHERE sort_name = '平台RTV'
+    AND quantity > 0
+    AND coalesce(from_id,'') LIKE 'TH%'
+    AND (coalesce(storeroom_name,'') ILIKE '%03%' OR coalesce(storeroom_name,'') ILIKE '%RTV%')
+),
+transfer_pairs AS (
+  SELECT
+    o.from_id AS transfer_id,
+    coalesce(nullif(o.match_key,''), dim.product_match_key(o.standard_goods_sn)) AS match_key,
+    sum(abs(o.quantity))::numeric AS out_qty_03,
+    least(
+      sum(abs(o.quantity))::numeric,
+      coalesce(sum(i.quantity) FILTER (WHERE coalesce(i.storeroom_name,'') ILIKE '%09%' OR coalesce(i.storeroom_name,'') ILIKE '%散件%'),0)::numeric
+    ) AS in_qty_09,
+    least(
+      sum(abs(o.quantity))::numeric,
+      coalesce(sum(i.quantity) FILTER (WHERE coalesce(i.storeroom_name,'') ILIKE '%04%' OR coalesce(i.storeroom_name,'') ILIKE '%Damaged%'),0)::numeric
+    ) AS in_qty_damaged,
+    least(
+      sum(abs(o.quantity))::numeric,
+      coalesce(sum(i.quantity) FILTER (WHERE coalesce(i.storeroom_name,'') ILIKE '%06%' OR coalesce(i.storeroom_name,'') ILIKE '%报废%'),0)::numeric
+    ) AS in_qty_scrap,
+    min(o.created_time) AS out_time_03,
+    max(i.created_time) AS in_time,
+    string_agg(DISTINCT i.storeroom_name, ' / ') FILTER (WHERE coalesce(i.storeroom_name,'') <> '') AS destination_warehouses
+  FROM fact.et_stock_running o
+  LEFT JOIN fact.et_stock_running i
+    ON lower(i.from_id) = lower(o.from_id)
+   AND coalesce(nullif(i.match_key,''), dim.product_match_key(i.standard_goods_sn)) = coalesce(nullif(o.match_key,''), dim.product_match_key(o.standard_goods_sn))
+   AND i.quantity > 0
+  WHERE o.sort_name = '调拨单'
+    AND o.quantity < 0
+    AND (coalesce(o.storeroom_name,'') ILIKE '%03%' OR coalesce(o.storeroom_name,'') ILIKE '%RTV%')
+  GROUP BY o.from_id, coalesce(nullif(o.match_key,''), dim.product_match_key(o.standard_goods_sn))
+),
+rtv_seq AS (
+  SELECT
+    *,
+    coalesce(sum(rtv_quantity) OVER (
+      PARTITION BY match_key
+      ORDER BY rtv_received_time, return_order_id
+      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+    ),0) AS rtv_start,
+    sum(rtv_quantity) OVER (
+      PARTITION BY match_key
+      ORDER BY rtv_received_time, return_order_id
+      ROWS UNBOUNDED PRECEDING
+    ) AS rtv_end
+  FROM rtv_in
+),
+transfer_09_seq AS (
+  SELECT
+    *,
+    coalesce(sum(in_qty_09) OVER (
+      PARTITION BY match_key
+      ORDER BY coalesce(in_time,out_time_03), transfer_id
+      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+    ),0) AS t09_start,
+    sum(in_qty_09) OVER (
+      PARTITION BY match_key
+      ORDER BY coalesce(in_time,out_time_03), transfer_id
+      ROWS UNBOUNDED PRECEDING
+    ) AS t09_end
+  FROM transfer_pairs
+  WHERE in_qty_09 > 0
+),
+alloc_09 AS (
+  SELECT
+    r.return_order_id,
+    r.match_key,
+    r.standard_goods_sn,
+    r.rtv_quantity,
+    r.rtv_received_time,
+    sum(
+      CASE
+        WHEN t.transfer_id IS NULL THEN 0
+        ELSE greatest(0, least(r.rtv_end, t.t09_end) - greatest(r.rtv_start, t.t09_start))
+      END
+    ) AS rtv_to_09_quantity,
+    string_agg(DISTINCT t.transfer_id, ' / ') FILTER (
+      WHERE t.transfer_id IS NOT NULL
+        AND greatest(0, least(r.rtv_end, t.t09_end) - greatest(r.rtv_start, t.t09_start)) > 0
+    ) AS transfer_to_09_ids,
+    max(t.in_time) FILTER (
+      WHERE t.transfer_id IS NOT NULL
+        AND greatest(0, least(r.rtv_end, t.t09_end) - greatest(r.rtv_start, t.t09_start)) > 0
+    ) AS latest_09_time
+  FROM rtv_seq r
+  LEFT JOIN transfer_09_seq t
+    ON t.match_key = r.match_key
+   AND coalesce(t.in_time,t.out_time_03) >= r.rtv_received_time
+   AND least(r.rtv_end, t.t09_end) > greatest(r.rtv_start, t.t09_start)
+  GROUP BY r.return_order_id, r.match_key, r.standard_goods_sn, r.rtv_quantity, r.rtv_received_time
+)
+SELECT
+  return_order_id,
+  match_key,
+  standard_goods_sn,
+  rtv_quantity,
+  least(rtv_quantity, coalesce(rtv_to_09_quantity,0)) AS rtv_to_09_quantity,
+  transfer_to_09_ids,
+  rtv_received_time,
+  latest_09_time,
+  CASE
+    WHEN coalesce(rtv_to_09_quantity,0) > 0 THEN 'fifo_by_product_stock_ledger'
+    ELSE 'not_traced_to_09'
+  END AS allocation_method
+FROM alloc_09;
+
+CREATE OR REPLACE VIEW mart.et_rtv_destination_allocation AS
+WITH rtv_in AS (
+  SELECT
+    from_id AS return_order_id,
+    coalesce(nullif(match_key,''), dim.product_match_key(standard_goods_sn)) AS match_key,
+    max(standard_goods_sn) AS standard_goods_sn,
+    storeroom_name AS initial_warehouse,
+    sum(quantity)::numeric AS rtv_quantity,
+    min(created_time) AS rtv_received_time
+  FROM fact.et_stock_running
+  WHERE sort_name = '平台RTV'
+    AND quantity > 0
+    AND coalesce(from_id,'') LIKE 'TH%'
+  GROUP BY from_id, coalesce(nullif(match_key,''), dim.product_match_key(standard_goods_sn)), storeroom_name
+),
+transfer_out_03 AS (
+  SELECT
+    lower(o.from_id) AS transfer_id,
+    coalesce(nullif(o.match_key,''), dim.product_match_key(o.standard_goods_sn)) AS match_key,
+    sum(abs(o.quantity))::numeric AS out_qty,
+    min(o.created_time) AS out_time
+  FROM fact.et_stock_running o
+  WHERE o.sort_name = '调拨单'
+    AND o.quantity < 0
+    AND (coalesce(o.storeroom_name,'') ILIKE '%03%' OR coalesce(o.storeroom_name,'') ILIKE '%RTV%')
+  GROUP BY lower(o.from_id), coalesce(nullif(o.match_key,''), dim.product_match_key(o.standard_goods_sn))
+),
+transfer_pos_03 AS (
+  SELECT
+    lower(i.from_id) AS transfer_id,
+    coalesce(nullif(i.match_key,''), dim.product_match_key(i.standard_goods_sn)) AS match_key,
+    CASE
+      WHEN coalesce(i.storeroom_name,'') ILIKE '%09%' OR coalesce(i.storeroom_name,'') ILIKE '%散件%' THEN '09'
+      WHEN coalesce(i.storeroom_name,'') ILIKE '%04%' OR coalesce(i.storeroom_name,'') ILIKE '%Damaged%' THEN 'damaged'
+      WHEN coalesce(i.storeroom_name,'') ILIKE '%06%' OR coalesce(i.storeroom_name,'') ILIKE '%报废%' THEN 'scrap'
+      ELSE 'other'
+    END AS dest_type,
+    string_agg(DISTINCT i.storeroom_name, ' / ') FILTER (WHERE coalesce(i.storeroom_name,'') <> '') AS dest_warehouses,
+    sum(i.quantity)::numeric AS pos_qty,
+    max(i.created_time) AS in_time
+  FROM fact.et_stock_running i
+  WHERE i.sort_name = '调拨单'
+    AND i.quantity > 0
+  GROUP BY lower(i.from_id), coalesce(nullif(i.match_key,''), dim.product_match_key(i.standard_goods_sn)),
+    CASE
+      WHEN coalesce(i.storeroom_name,'') ILIKE '%09%' OR coalesce(i.storeroom_name,'') ILIKE '%散件%' THEN '09'
+      WHEN coalesce(i.storeroom_name,'') ILIKE '%04%' OR coalesce(i.storeroom_name,'') ILIKE '%Damaged%' THEN 'damaged'
+      WHEN coalesce(i.storeroom_name,'') ILIKE '%06%' OR coalesce(i.storeroom_name,'') ILIKE '%报废%' THEN 'scrap'
+      ELSE 'other'
+    END
+),
+transfer_pos_total_03 AS (
+  SELECT transfer_id, match_key, sum(pos_qty) AS total_pos_qty
+  FROM transfer_pos_03
+  GROUP BY transfer_id, match_key
+),
+transfer_events_03 AS (
+  SELECT
+    o.transfer_id,
+    o.match_key,
+    p.dest_type,
+    p.dest_warehouses,
+    CASE
+      WHEN coalesce(t.total_pos_qty,0) > o.out_qty THEN o.out_qty * p.pos_qty / nullif(t.total_pos_qty,0)
+      ELSE p.pos_qty
+    END AS event_qty,
+    o.out_time,
+    p.in_time
+  FROM transfer_out_03 o
+  JOIN transfer_pos_03 p
+    ON p.transfer_id = o.transfer_id
+   AND p.match_key = o.match_key
+  LEFT JOIN transfer_pos_total_03 t
+    ON t.transfer_id = o.transfer_id
+   AND t.match_key = o.match_key
+
+  UNION ALL
+
+  SELECT
+    o.transfer_id,
+    o.match_key,
+    'other' AS dest_type,
+    '无正向入库记录' AS dest_warehouses,
+    greatest(0, o.out_qty - coalesce(t.total_pos_qty,0)) AS event_qty,
+    o.out_time,
+    o.out_time AS in_time
+  FROM transfer_out_03 o
+  LEFT JOIN transfer_pos_total_03 t
+    ON t.transfer_id = o.transfer_id
+   AND t.match_key = o.match_key
+  WHERE greatest(0, o.out_qty - coalesce(t.total_pos_qty,0)) > 0
+),
+rtv_03_seq AS (
+  SELECT
+    *,
+    coalesce(sum(rtv_quantity) OVER (
+      PARTITION BY match_key
+      ORDER BY rtv_received_time, return_order_id
+      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+    ),0) AS rtv_start,
+    sum(rtv_quantity) OVER (
+      PARTITION BY match_key
+      ORDER BY rtv_received_time, return_order_id
+      ROWS UNBOUNDED PRECEDING
+    ) AS rtv_end
+  FROM rtv_in
+  WHERE coalesce(initial_warehouse,'') ILIKE '%03%' OR coalesce(initial_warehouse,'') ILIKE '%RTV%'
+),
+transfer_03_seq AS (
+  SELECT
+    *,
+    coalesce(sum(event_qty) OVER (
+      PARTITION BY match_key
+      ORDER BY coalesce(in_time,out_time), transfer_id, dest_type
+      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+    ),0) AS event_start,
+    sum(event_qty) OVER (
+      PARTITION BY match_key
+      ORDER BY coalesce(in_time,out_time), transfer_id, dest_type
+      ROWS UNBOUNDED PRECEDING
+    ) AS event_end
+  FROM transfer_events_03
+  WHERE event_qty > 0
+),
+alloc_03_detail AS (
+  SELECT
+    r.return_order_id,
+    r.match_key,
+    t.dest_type,
+    greatest(0, least(r.rtv_end, t.event_end) - greatest(r.rtv_start, t.event_start)) AS allocated_qty,
+    t.transfer_id,
+    t.dest_warehouses,
+    t.in_time
+  FROM rtv_03_seq r
+  JOIN transfer_03_seq t
+    ON t.match_key = r.match_key
+   AND coalesce(t.in_time,t.out_time) >= r.rtv_received_time
+   AND least(r.rtv_end, t.event_end) > greatest(r.rtv_start, t.event_start)
+),
+alloc_03 AS (
+  SELECT
+    return_order_id,
+    match_key,
+    sum(allocated_qty) FILTER (WHERE dest_type = '09') AS from_03_to_09_quantity,
+    sum(allocated_qty) FILTER (WHERE dest_type = 'damaged') AS from_03_to_damaged_quantity,
+    sum(allocated_qty) FILTER (WHERE dest_type = 'scrap') AS from_03_to_scrap_quantity,
+    sum(allocated_qty) FILTER (WHERE dest_type = 'other') AS from_03_to_other_quantity,
+    string_agg(DISTINCT transfer_id, ' / ') FILTER (WHERE dest_type = '09') AS transfer_to_09_ids,
+    string_agg(DISTINCT transfer_id, ' / ') FILTER (WHERE dest_type = 'damaged') AS transfer_to_damaged_ids,
+    string_agg(DISTINCT transfer_id, ' / ') FILTER (WHERE dest_type = 'scrap') AS transfer_to_scrap_ids,
+    string_agg(DISTINCT transfer_id, ' / ') FILTER (WHERE dest_type = 'other') AS transfer_to_other_ids,
+    string_agg(DISTINCT dest_warehouses, ' / ') FILTER (WHERE coalesce(dest_warehouses,'') <> '') AS routed_warehouses,
+    max(in_time) AS latest_route_time,
+    sum(allocated_qty) AS allocated_from_03_quantity
+  FROM alloc_03_detail
+  GROUP BY return_order_id, match_key
+),
+base_alloc AS (
+  SELECT
+    r.return_order_id,
+    r.match_key,
+    r.standard_goods_sn,
+    r.initial_warehouse,
+    r.rtv_quantity,
+    r.rtv_received_time,
+    CASE WHEN coalesce(r.initial_warehouse,'') ILIKE '%09%' OR coalesce(r.initial_warehouse,'') ILIKE '%散件%' THEN r.rtv_quantity ELSE 0 END AS direct_09_quantity,
+    CASE WHEN coalesce(r.initial_warehouse,'') ILIKE '%04%' OR coalesce(r.initial_warehouse,'') ILIKE '%Damaged%' THEN r.rtv_quantity ELSE 0 END AS direct_damaged_quantity,
+    CASE WHEN coalesce(r.initial_warehouse,'') ILIKE '%06%' OR coalesce(r.initial_warehouse,'') ILIKE '%报废%' THEN r.rtv_quantity ELSE 0 END AS direct_scrap_quantity,
+    CASE
+      WHEN coalesce(r.initial_warehouse,'') ILIKE '%03%' OR coalesce(r.initial_warehouse,'') ILIKE '%RTV%'
+      THEN greatest(0, r.rtv_quantity - coalesce(a.allocated_from_03_quantity,0))
+      ELSE 0
+    END AS still_03_quantity,
+    coalesce(a.from_03_to_09_quantity,0) AS from_03_to_09_quantity,
+    coalesce(a.from_03_to_damaged_quantity,0) AS from_03_to_damaged_quantity,
+    coalesce(a.from_03_to_scrap_quantity,0) AS from_03_to_scrap_quantity,
+    coalesce(a.from_03_to_other_quantity,0) AS from_03_to_other_quantity,
+    a.transfer_to_09_ids,
+    a.transfer_to_damaged_ids,
+    a.transfer_to_scrap_ids,
+    a.transfer_to_other_ids,
+    a.routed_warehouses,
+    a.latest_route_time
+  FROM rtv_in r
+  LEFT JOIN alloc_03 a
+    ON a.return_order_id = r.return_order_id
+   AND a.match_key = r.match_key
+),
+damaged_pool AS (
+  SELECT
+    *,
+    (direct_damaged_quantity + from_03_to_damaged_quantity) AS damaged_input_quantity,
+    coalesce(latest_route_time, rtv_received_time) AS damaged_time
+  FROM base_alloc
+  WHERE (direct_damaged_quantity + from_03_to_damaged_quantity) > 0
+),
+transfer_out_04 AS (
+  SELECT
+    lower(o.from_id) AS transfer_id,
+    coalesce(nullif(o.match_key,''), dim.product_match_key(o.standard_goods_sn)) AS match_key,
+    sum(abs(o.quantity))::numeric AS out_qty,
+    min(o.created_time) AS out_time
+  FROM fact.et_stock_running o
+  WHERE o.sort_name = '调拨单'
+    AND o.quantity < 0
+    AND (coalesce(o.storeroom_name,'') ILIKE '%04%' OR coalesce(o.storeroom_name,'') ILIKE '%Damaged%')
+  GROUP BY lower(o.from_id), coalesce(nullif(o.match_key,''), dim.product_match_key(o.standard_goods_sn))
+),
+transfer_pos_04 AS (
+  SELECT
+    lower(i.from_id) AS transfer_id,
+    coalesce(nullif(i.match_key,''), dim.product_match_key(i.standard_goods_sn)) AS match_key,
+    CASE
+      WHEN coalesce(i.storeroom_name,'') ILIKE '%09%' OR coalesce(i.storeroom_name,'') ILIKE '%散件%' THEN '09'
+      WHEN coalesce(i.storeroom_name,'') ILIKE '%06%' OR coalesce(i.storeroom_name,'') ILIKE '%报废%' THEN 'scrap'
+      ELSE 'other'
+    END AS dest_type,
+    sum(i.quantity)::numeric AS pos_qty,
+    max(i.created_time) AS in_time
+  FROM fact.et_stock_running i
+  WHERE i.sort_name = '调拨单'
+    AND i.quantity > 0
+  GROUP BY lower(i.from_id), coalesce(nullif(i.match_key,''), dim.product_match_key(i.standard_goods_sn)),
+    CASE
+      WHEN coalesce(i.storeroom_name,'') ILIKE '%09%' OR coalesce(i.storeroom_name,'') ILIKE '%散件%' THEN '09'
+      WHEN coalesce(i.storeroom_name,'') ILIKE '%06%' OR coalesce(i.storeroom_name,'') ILIKE '%报废%' THEN 'scrap'
+      ELSE 'other'
+    END
+),
+transfer_pos_total_04 AS (
+  SELECT transfer_id, match_key, sum(pos_qty) AS total_pos_qty
+  FROM transfer_pos_04
+  GROUP BY transfer_id, match_key
+),
+transfer_events_04 AS (
+  SELECT
+    o.transfer_id,
+    o.match_key,
+    p.dest_type,
+    CASE
+      WHEN coalesce(t.total_pos_qty,0) > o.out_qty THEN o.out_qty * p.pos_qty / nullif(t.total_pos_qty,0)
+      ELSE p.pos_qty
+    END AS event_qty,
+    o.out_time,
+    p.in_time
+  FROM transfer_out_04 o
+  JOIN transfer_pos_04 p
+    ON p.transfer_id = o.transfer_id
+   AND p.match_key = o.match_key
+  LEFT JOIN transfer_pos_total_04 t
+    ON t.transfer_id = o.transfer_id
+   AND t.match_key = o.match_key
+),
+damaged_seq AS (
+  SELECT
+    *,
+    coalesce(sum(damaged_input_quantity) OVER (
+      PARTITION BY match_key
+      ORDER BY damaged_time, return_order_id
+      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+    ),0) AS damaged_start,
+    sum(damaged_input_quantity) OVER (
+      PARTITION BY match_key
+      ORDER BY damaged_time, return_order_id
+      ROWS UNBOUNDED PRECEDING
+    ) AS damaged_end
+  FROM damaged_pool
+),
+transfer_04_seq AS (
+  SELECT
+    *,
+    coalesce(sum(event_qty) OVER (
+      PARTITION BY match_key
+      ORDER BY coalesce(in_time,out_time), transfer_id, dest_type
+      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+    ),0) AS event_start,
+    sum(event_qty) OVER (
+      PARTITION BY match_key
+      ORDER BY coalesce(in_time,out_time), transfer_id, dest_type
+      ROWS UNBOUNDED PRECEDING
+    ) AS event_end
+  FROM transfer_events_04
+  WHERE event_qty > 0
+),
+alloc_04 AS (
+  SELECT
+    d.return_order_id,
+    d.match_key,
+    sum(greatest(0, least(d.damaged_end, t.event_end) - greatest(d.damaged_start, t.event_start))) FILTER (WHERE t.dest_type = 'scrap') AS damaged_to_scrap_quantity,
+    sum(greatest(0, least(d.damaged_end, t.event_end) - greatest(d.damaged_start, t.event_start))) FILTER (WHERE t.dest_type = '09') AS damaged_to_09_quantity,
+    sum(greatest(0, least(d.damaged_end, t.event_end) - greatest(d.damaged_start, t.event_start))) FILTER (WHERE t.dest_type = 'other') AS damaged_to_other_quantity,
+    string_agg(DISTINCT t.transfer_id, ' / ') FILTER (WHERE t.dest_type = 'scrap') AS damaged_to_scrap_transfer_ids,
+    max(t.in_time) AS latest_damaged_route_time
+  FROM damaged_seq d
+  JOIN transfer_04_seq t
+    ON t.match_key = d.match_key
+   AND coalesce(t.in_time,t.out_time) >= d.damaged_time
+   AND least(d.damaged_end, t.event_end) > greatest(d.damaged_start, t.event_start)
+  GROUP BY d.return_order_id, d.match_key
+)
+SELECT
+  b.return_order_id,
+  b.match_key,
+  b.standard_goods_sn,
+  b.initial_warehouse,
+  b.rtv_quantity,
+  b.rtv_received_time,
+  b.direct_09_quantity,
+  b.from_03_to_09_quantity,
+  coalesce(a4.damaged_to_09_quantity,0) AS damaged_to_09_quantity,
+  least(b.rtv_quantity, b.direct_09_quantity + b.from_03_to_09_quantity + coalesce(a4.damaged_to_09_quantity,0)) AS final_09_quantity,
+  b.still_03_quantity,
+  greatest(0, b.direct_damaged_quantity + b.from_03_to_damaged_quantity - coalesce(a4.damaged_to_scrap_quantity,0) - coalesce(a4.damaged_to_09_quantity,0) - coalesce(a4.damaged_to_other_quantity,0)) AS final_damaged_quantity,
+  least(b.rtv_quantity, b.direct_scrap_quantity + b.from_03_to_scrap_quantity + coalesce(a4.damaged_to_scrap_quantity,0)) AS final_scrap_quantity,
+  b.from_03_to_other_quantity + coalesce(a4.damaged_to_other_quantity,0) AS final_other_quantity,
+  b.transfer_to_09_ids,
+  b.transfer_to_damaged_ids,
+  b.transfer_to_scrap_ids,
+  a4.damaged_to_scrap_transfer_ids,
+  b.routed_warehouses,
+  greatest(b.latest_route_time, a4.latest_damaged_route_time) AS latest_destination_time,
+  concat_ws(' / ',
+    CASE WHEN b.direct_09_quantity > 0 THEN '直接入09' END,
+    CASE WHEN b.from_03_to_09_quantity > 0 THEN '03调拨入09' END,
+    CASE WHEN coalesce(a4.damaged_to_09_quantity,0) > 0 THEN '04调拨入09' END,
+    CASE WHEN b.still_03_quantity > 0 THEN '仍在03_RTV' END,
+    CASE WHEN greatest(0, b.direct_damaged_quantity + b.from_03_to_damaged_quantity - coalesce(a4.damaged_to_scrap_quantity,0) - coalesce(a4.damaged_to_09_quantity,0) - coalesce(a4.damaged_to_other_quantity,0)) > 0 THEN '破损仓04' END,
+    CASE WHEN b.direct_scrap_quantity + b.from_03_to_scrap_quantity + coalesce(a4.damaged_to_scrap_quantity,0) > 0 THEN '报废仓06' END,
+    CASE WHEN b.from_03_to_other_quantity + coalesce(a4.damaged_to_other_quantity,0) > 0 THEN '其它/未知' END
+  ) AS destination_summary,
+  'stock_ledger_fifo_by_product' AS allocation_method
+FROM base_alloc b
+LEFT JOIN alloc_04 a4
+  ON a4.return_order_id = b.return_order_id
+ AND a4.match_key = b.match_key;
+
 CREATE OR REPLACE VIEW mart.rtv_recovery_impact AS
-WITH after_sales_express AS (
+WITH after_sales_raw AS (
   SELECT
     ai.store_key,
     ai.order_no,
     ai.standard_goods_sn,
     nullif(ai.skc,'') AS skc,
-    upper(nullif(x->>'expressNo','')) AS express_no,
-    sum(coalesce(ai.quantity, 1)) AS after_sales_return_qty,
-    string_agg(DISTINCT ai.aftersales_order_no, ' / ') FILTER (WHERE coalesce(ai.aftersales_order_no,'') <> '') AS aftersales_order_nos,
-    string_agg(DISTINCT ai.return_order_no, ' / ') FILTER (WHERE coalesce(ai.return_order_no,'') <> '') AS shein_return_order_nos
+    nullif(regexp_replace(upper(coalesce(x->>'expressNo','')), '[^0-9A-Z]', '', 'g'), '') AS express_no,
+    ai.aftersales_order_no,
+    ai.return_order_no,
+    coalesce(ai.quantity, 1) AS quantity
   FROM fact.after_sales_item ai
   LEFT JOIN LATERAL jsonb_array_elements(coalesce(ai.raw_summary->'case'->'returnExpressInfoList','[]'::jsonb)) x ON true
   WHERE coalesce(ai.order_no,'') <> ''
     AND coalesce(ai.return_order_no,'') <> ''
-    AND coalesce(x->>'expressNo','') <> ''
-  GROUP BY ai.store_key, ai.order_no, ai.standard_goods_sn, nullif(ai.skc,''), upper(nullif(x->>'expressNo',''))
-),
-et_return_received AS (
+    AND nullif(regexp_replace(upper(coalesce(x->>'expressNo','')), '[^0-9A-Z]', '', 'g'), '') IS NOT NULL
+
+  UNION
+
   SELECT
-    upper(ro.shipment_number) AS express_no,
+    ai.store_key,
+    ai.order_no,
+    ai.standard_goods_sn,
+    nullif(ai.skc,'') AS skc,
+    nullif(regexp_replace(upper(coalesce(v.et_shipment_number,'')), '[^0-9A-Z]', '', 'g'), '') AS express_no,
+    ai.aftersales_order_no,
+    ai.return_order_no,
+    coalesce(ai.quantity, 1) AS quantity
+  FROM ops.rtv_tracking_verification v
+  JOIN fact.after_sales_item ai
+    ON ai.store_key = v.store_key
+   AND ai.aftersales_order_no = v.shein_aftersales_order_no
+  WHERE v.match_status = 'matched'
+    AND coalesce(ai.order_no,'') <> ''
+    AND coalesce(ai.return_order_no,'') <> ''
+    AND nullif(regexp_replace(upper(coalesce(v.et_shipment_number,'')), '[^0-9A-Z]', '', 'g'), '') IS NOT NULL
+),
+after_sales_express AS (
+  SELECT
+    store_key,
+    order_no,
+    standard_goods_sn,
+    skc,
+    express_no,
+    sum(quantity) AS after_sales_return_qty,
+    string_agg(DISTINCT aftersales_order_no, ' / ') FILTER (WHERE coalesce(aftersales_order_no,'') <> '') AS aftersales_order_nos,
+    string_agg(DISTINCT return_order_no, ' / ') FILTER (WHERE coalesce(return_order_no,'') <> '') AS shein_return_order_nos
+  FROM after_sales_raw
+  WHERE express_no IS NOT NULL
+  GROUP BY store_key, order_no, standard_goods_sn, skc, express_no
+),
+et_return_received_base AS (
+  SELECT
+    nullif(regexp_replace(upper(coalesce(ro.shipment_number,'')), '[^0-9A-Z]', '', 'g'), '') AS express_no,
     coalesce(nullif(ri.match_key,''), dim.product_match_key(ri.standard_goods_sn)) AS match_key,
     string_agg(DISTINCT ro.return_order_id, ' / ') FILTER (WHERE coalesce(ro.return_order_id,'') <> '') AS et_return_order_ids,
-    string_agg(DISTINCT ro.store_name_in, ' / ') FILTER (WHERE coalesce(ro.store_name_in,'') <> '') AS et_return_warehouses,
-    max(ro.create_time) AS et_received_time,
+    concat_ws(
+      ' / ',
+      string_agg(DISTINCT ro.store_name_in, ' / ') FILTER (WHERE coalesce(ro.store_name_in,'') <> ''),
+      string_agg(DISTINCT rdest.destination_summary, ' / ') FILTER (WHERE coalesce(rdest.destination_summary,'') <> '')
+    ) AS et_return_warehouses,
+    greatest(max(ro.create_time), max(rdest.latest_destination_time)) AS et_received_time,
     sum(
       CASE
         WHEN coalesce(ro.status_name,'') IN ('已完结','已到货')
@@ -1621,7 +2147,7 @@ et_return_received AS (
         )
         ELSE 0
       END
-    ) AS et_received_to_09_qty,
+    ) + max(coalesce(rdest.final_09_quantity,0)) AS et_received_to_09_qty,
     sum(
       CASE
         WHEN (coalesce(ro.store_name_in,'') ILIKE '%03%' OR coalesce(ro.store_name_in,'') ILIKE '%RTV%')
@@ -1637,21 +2163,111 @@ et_return_received AS (
     ) AS et_received_to_rtv_qty
   FROM fact.et_return_order ro
   LEFT JOIN fact.et_return_order_item ri ON ri.return_order_id = ro.return_order_id
-  WHERE coalesce(ro.shipment_number,'') <> ''
-  GROUP BY upper(ro.shipment_number), coalesce(nullif(ri.match_key,''), dim.product_match_key(ri.standard_goods_sn))
+  LEFT JOIN mart.et_rtv_destination_allocation rdest
+    ON rdest.return_order_id = ro.return_order_id
+   AND rdest.match_key = coalesce(nullif(ri.match_key,''), dim.product_match_key(ri.standard_goods_sn))
+  WHERE nullif(regexp_replace(upper(coalesce(ro.shipment_number,'')), '[^0-9A-Z]', '', 'g'), '') IS NOT NULL
+  GROUP BY nullif(regexp_replace(upper(coalesce(ro.shipment_number,'')), '[^0-9A-Z]', '', 'g'), ''), coalesce(nullif(ri.match_key,''), dim.product_match_key(ri.standard_goods_sn))
+),
+et_return_received_verification AS (
+  SELECT
+    nullif(regexp_replace(upper(coalesce(v.et_shipment_number,'')), '[^0-9A-Z]', '', 'g'), '') AS express_no,
+    dim.product_match_key(ai.standard_goods_sn) AS match_key,
+    string_agg(DISTINCT ro.return_order_id, ' / ') FILTER (WHERE coalesce(ro.return_order_id,'') <> '') AS et_return_order_ids,
+    concat_ws(
+      ' / ',
+      string_agg(DISTINCT ro.store_name_in, ' / ') FILTER (WHERE coalesce(ro.store_name_in,'') <> ''),
+      string_agg(DISTINCT rdest_any.destination_summary, ' / ') FILTER (WHERE coalesce(rdest_any.destination_summary,'') <> '')
+    ) AS et_return_warehouses,
+    greatest(max(ro.create_time), max(rdest_any.latest_destination_time)) AS et_received_time,
+    sum(
+      CASE
+        WHEN coalesce(ro.status_name,'') IN ('已完结','已到货')
+          AND (coalesce(ro.in_quantity,0) > 0 OR coalesce(ri.instock,0) > 0)
+        THEN greatest(
+          coalesce(ri.instock,0),
+          CASE WHEN coalesce(ri.instock,0) > 0 THEN 0 ELSE coalesce(ri.quantity,0) END,
+          CASE WHEN ri.return_order_id IS NULL THEN coalesce(ro.in_quantity,0) ELSE 0 END
+        )
+        ELSE 0
+      END
+    ) AS et_received_qty,
+    sum(
+      CASE
+        WHEN (coalesce(ro.store_name_in,'') ILIKE '%09%' OR coalesce(ro.store_name_in,'') ILIKE '%散件%')
+          AND coalesce(ro.status_name,'') IN ('已完结','已到货')
+          AND (coalesce(ro.in_quantity,0) > 0 OR coalesce(ri.instock,0) > 0)
+        THEN greatest(
+          coalesce(ri.instock,0),
+          CASE WHEN coalesce(ri.instock,0) > 0 THEN 0 ELSE coalesce(ri.quantity,0) END,
+          CASE WHEN ri.return_order_id IS NULL THEN coalesce(ro.in_quantity,0) ELSE 0 END
+        )
+        ELSE 0
+      END
+    ) + max(coalesce(rdest_any.final_09_quantity,0)) AS et_received_to_09_qty,
+    sum(
+      CASE
+        WHEN (coalesce(ro.store_name_in,'') ILIKE '%03%' OR coalesce(ro.store_name_in,'') ILIKE '%RTV%')
+          AND coalesce(ro.status_name,'') IN ('已完结','已到货')
+          AND (coalesce(ro.in_quantity,0) > 0 OR coalesce(ri.instock,0) > 0)
+        THEN greatest(
+          coalesce(ri.instock,0),
+          CASE WHEN coalesce(ri.instock,0) > 0 THEN 0 ELSE coalesce(ri.quantity,0) END,
+          CASE WHEN ri.return_order_id IS NULL THEN coalesce(ro.in_quantity,0) ELSE 0 END
+        )
+        ELSE 0
+      END
+    ) AS et_received_to_rtv_qty
+  FROM ops.rtv_tracking_verification v
+  JOIN fact.after_sales_item ai
+    ON ai.store_key = v.store_key
+   AND ai.aftersales_order_no = v.shein_aftersales_order_no
+  JOIN fact.et_return_order ro
+    ON ro.return_order_id = v.et_return_order_id
+  LEFT JOIN fact.et_return_order_item ri
+    ON ri.return_order_id = ro.return_order_id
+  LEFT JOIN LATERAL (
+    SELECT
+      sum(final_09_quantity) AS final_09_quantity,
+      max(latest_destination_time) AS latest_destination_time,
+      string_agg(DISTINCT destination_summary, ' / ') FILTER (WHERE coalesce(destination_summary,'') <> '') AS destination_summary
+    FROM mart.et_rtv_destination_allocation x
+    WHERE x.return_order_id = ro.return_order_id
+  ) rdest_any ON true
+  WHERE v.match_status = 'matched'
+    AND nullif(regexp_replace(upper(coalesce(v.et_shipment_number,'')), '[^0-9A-Z]', '', 'g'), '') IS NOT NULL
+    AND dim.product_match_key(ai.standard_goods_sn) IS NOT NULL
+  GROUP BY nullif(regexp_replace(upper(coalesce(v.et_shipment_number,'')), '[^0-9A-Z]', '', 'g'), ''), dim.product_match_key(ai.standard_goods_sn)
+),
+et_return_received AS (
+  SELECT
+    express_no,
+    match_key,
+    string_agg(DISTINCT et_return_order_ids, ' / ') FILTER (WHERE coalesce(et_return_order_ids,'') <> '') AS et_return_order_ids,
+    string_agg(DISTINCT et_return_warehouses, ' / ') FILTER (WHERE coalesce(et_return_warehouses,'') <> '') AS et_return_warehouses,
+    max(et_received_time) AS et_received_time,
+    max(et_received_qty) AS et_received_qty,
+    max(et_received_to_09_qty) AS et_received_to_09_qty,
+    max(et_received_to_rtv_qty) AS et_received_to_rtv_qty
+  FROM (
+    SELECT * FROM et_return_received_base
+    UNION ALL
+    SELECT * FROM et_return_received_verification
+  ) x
+  GROUP BY express_no, match_key
 ),
 stock_running_09 AS (
   SELECT
-    upper(from_id) AS express_no,
+    nullif(regexp_replace(upper(coalesce(from_id,'')), '[^0-9A-Z]', '', 'g'), '') AS express_no,
     coalesce(nullif(match_key,''), dim.product_match_key(standard_goods_sn)) AS match_key,
     sum(coalesce(quantity,0)) AS stock_running_09_qty,
     string_agg(DISTINCT storeroom_name, ' / ') FILTER (WHERE coalesce(storeroom_name,'') <> '') AS stock_running_warehouses,
     max(created_time) AS stock_running_09_time
   FROM fact.et_stock_running
-  WHERE coalesce(from_id,'') <> ''
+  WHERE nullif(regexp_replace(upper(coalesce(from_id,'')), '[^0-9A-Z]', '', 'g'), '') IS NOT NULL
     AND coalesce(quantity,0) > 0
     AND (coalesce(storeroom_name,'') ILIKE '%09%' OR coalesce(storeroom_name,'') ILIKE '%散件%')
-  GROUP BY upper(from_id), coalesce(nullif(match_key,''), dim.product_match_key(standard_goods_sn))
+  GROUP BY nullif(regexp_replace(upper(coalesce(from_id,'')), '[^0-9A-Z]', '', 'g'), ''), coalesce(nullif(match_key,''), dim.product_match_key(standard_goods_sn))
 ),
 per_express AS (
   SELECT
@@ -1708,6 +2324,271 @@ SELECT
   max(rtv_latest_received_time) AS rtv_latest_received_time
 FROM per_express
 GROUP BY store_key, order_no, standard_goods_sn, skc;
+
+CREATE OR REPLACE VIEW mart.rtv_manual_review_candidates AS
+WITH after_sales_raw AS (
+  SELECT DISTINCT
+    ai.store_key,
+    ai.group_key,
+    ai.order_no,
+    ai.return_order_no,
+    ai.aftersales_order_no,
+    ai.request_time,
+    ai.standard_goods_sn,
+    nullif(ai.skc,'') AS skc,
+    dim.product_match_key(ai.standard_goods_sn) AS match_key,
+    nullif(regexp_replace(upper(coalesce(x->>'expressNo','')), '[^0-9A-Z]', '', 'g'), '') AS express_no,
+    ai.resolution_plan_name,
+    ai.order_sub_status_name,
+    ai.return_package_status_name,
+    coalesce(ai.quantity,1) AS quantity
+  FROM fact.after_sales_item ai
+  LEFT JOIN LATERAL jsonb_array_elements(coalesce(ai.raw_summary->'case'->'returnExpressInfoList','[]'::jsonb)) x ON true
+  WHERE coalesce(ai.return_order_no,'') <> ''
+    AND coalesce(ai.order_no,'') <> ''
+
+  UNION
+
+  SELECT DISTINCT
+    ai.store_key,
+    ai.group_key,
+    ai.order_no,
+    ai.return_order_no,
+    ai.aftersales_order_no,
+    ai.request_time,
+    ai.standard_goods_sn,
+    nullif(ai.skc,'') AS skc,
+    dim.product_match_key(ai.standard_goods_sn) AS match_key,
+    nullif(regexp_replace(upper(coalesce(v.et_shipment_number,'')), '[^0-9A-Z]', '', 'g'), '') AS express_no,
+    ai.resolution_plan_name,
+    ai.order_sub_status_name,
+    ai.return_package_status_name,
+    coalesce(ai.quantity,1) AS quantity
+  FROM ops.rtv_tracking_verification v
+  JOIN fact.after_sales_item ai
+    ON ai.store_key = v.store_key
+   AND ai.aftersales_order_no = v.shein_aftersales_order_no
+  WHERE v.match_status = 'matched'
+    AND coalesce(ai.return_order_no,'') <> ''
+    AND coalesce(ai.order_no,'') <> ''
+),
+after_sales_express AS (
+  SELECT *
+  FROM after_sales_raw
+  WHERE express_no IS NOT NULL
+),
+et_return AS (
+  SELECT
+    ro.return_order_id,
+    ro.rtv,
+    ro.shipment_number AS et_shipment_number_raw,
+    nullif(regexp_replace(upper(coalesce(ro.shipment_number,'')), '[^0-9A-Z]', '', 'g'), '') AS et_shipment_number,
+    CASE
+      WHEN nullif(regexp_replace(upper(coalesce(ro.shipment_number,'')), '[^0-9A-Z]', '', 'g'), '') ~ '^[0-9]{10,}$' THEN true
+      ELSE false
+    END AS suspected_emile_handoff,
+    ro.status_name,
+    ro.store_name_in,
+    ro.to_instock_name,
+    ro.in_quantity,
+    ro.create_time,
+    ri.standard_goods_sn,
+    ri.match_key,
+    ri.sku_code,
+    substring(upper(coalesce(ri.sku_code,'')) from '^([A-Z]{2})[-_]') AS store_key_guess,
+    ri.barcode,
+    ri.goods_title,
+    coalesce(nullif(ri.instock,0), nullif(ri.quantity,0), nullif(ro.in_quantity,0), 0) AS received_quantity
+  FROM fact.et_return_order ro
+  LEFT JOIN fact.et_return_order_item ri ON ri.return_order_id = ro.return_order_id
+  WHERE nullif(regexp_replace(upper(coalesce(ro.shipment_number,'')), '[^0-9A-Z]', '', 'g'), '') IS NOT NULL
+    AND nullif(regexp_replace(upper(coalesce(ro.shipment_number,'')), '[^0-9A-Z]', '', 'g'), '') <> ''
+    AND coalesce(ro.status_name,'') IN ('已完结','已到货')
+    AND (
+      coalesce(ro.in_quantity,0) > 0
+      OR coalesce(ri.instock,0) > 0
+      OR coalesce(ro.to_instock_name,'') <> ''
+    )
+),
+exact_match AS (
+  SELECT
+    e.return_order_id,
+    e.match_key,
+    count(*) AS exact_match_count
+  FROM et_return e
+  JOIN after_sales_express af
+    ON af.express_no = e.et_shipment_number
+   AND af.match_key = e.match_key
+  GROUP BY e.return_order_id, e.match_key
+)
+SELECT
+  e.return_order_id,
+  e.rtv,
+  e.et_shipment_number_raw,
+  e.et_shipment_number,
+  e.suspected_emile_handoff,
+  e.status_name,
+  e.store_name_in,
+  e.to_instock_name,
+  e.in_quantity,
+  e.create_time,
+  e.standard_goods_sn,
+  e.match_key,
+  e.sku_code,
+  e.store_key_guess,
+  e.barcode,
+  e.goods_title,
+  e.received_quantity,
+  coalesce(x.exact_match_count,0) AS exact_match_count,
+  coalesce(c.candidate_case_count,0) AS candidate_case_count,
+  c.candidate_cases,
+  CASE
+    WHEN e.suspected_emile_handoff THEN 'ET RTV 已收，但物流号像 EMile/换单后的数字单号；需进 SHEIN 退货单物流详情核实原退货单'
+    ELSE 'ET RTV 已收，但 SHEIN 售后现有退货物流号未直接匹配；需人工核实是否换单号'
+  END AS review_reason,
+  CASE
+    WHEN e.suspected_emile_handoff AND coalesce(c.candidate_case_count,0) > 0 THEN 'high'
+    WHEN coalesce(c.candidate_case_count,0) > 0 THEN 'medium'
+    ELSE 'low'
+  END AS review_priority
+FROM et_return e
+LEFT JOIN exact_match x
+  ON x.return_order_id = e.return_order_id
+ AND x.match_key = e.match_key
+LEFT JOIN LATERAL (
+  SELECT
+    count(*) AS candidate_case_count,
+    string_agg(
+      concat_ws(' · ',
+        af.store_key,
+        af.order_no,
+        '退货单 ' || af.return_order_no,
+        '售后单 ' || af.aftersales_order_no,
+        'SHEIN物流 ' || coalesce(af.express_no,'-'),
+        to_char(af.request_time, 'YYYY-MM-DD')
+      ),
+      ' || '
+      ORDER BY af.request_time DESC NULLS LAST
+    ) AS candidate_cases
+  FROM (
+    SELECT DISTINCT
+      af.store_key,
+      af.order_no,
+      af.return_order_no,
+      af.aftersales_order_no,
+      af.express_no,
+      af.request_time,
+      CASE
+        WHEN e.store_key_guess IS NULL OR e.store_key_guess = '' THEN 0
+        WHEN af.store_key = e.store_key_guess THEN 0
+        ELSE 1
+      END AS store_rank
+    FROM after_sales_express af
+    WHERE af.match_key = e.match_key
+      AND (
+        e.create_time IS NULL
+        OR af.request_time IS NULL
+        OR af.request_time BETWEEN e.create_time - interval '90 days' AND e.create_time + interval '15 days'
+      )
+    ORDER BY store_rank, af.request_time DESC NULLS LAST
+    LIMIT 20
+  ) af
+) c ON true
+WHERE coalesce(x.exact_match_count,0) = 0
+  AND NOT EXISTS (
+    SELECT 1
+    FROM ops.rtv_tracking_verification v
+    WHERE v.match_status = 'matched'
+      AND v.et_return_order_id = e.return_order_id
+  );
+
+CREATE OR REPLACE VIEW mart.shein_return_rtv_trace AS
+WITH after_sales AS (
+  SELECT
+    ai.store_key,
+    ai.group_key,
+    ai.order_no,
+    ai.return_order_no,
+    ai.aftersales_order_no,
+    ai.request_time,
+    ai.standard_goods_sn,
+    nullif(ai.skc,'') AS skc,
+    ai.resolution_plan_name,
+    ai.order_sub_status_name,
+    ai.return_package_status_name,
+    coalesce(ai.quantity,1) AS quantity,
+    string_agg(
+      DISTINCT nullif(regexp_replace(upper(coalesce(x->>'expressNo','')), '[^0-9A-Z]', '', 'g'), ''),
+      ' / '
+    ) FILTER (WHERE nullif(regexp_replace(upper(coalesce(x->>'expressNo','')), '[^0-9A-Z]', '', 'g'), '') IS NOT NULL) AS shein_return_express_numbers
+  FROM fact.after_sales_item ai
+  LEFT JOIN LATERAL jsonb_array_elements(coalesce(ai.raw_summary->'case'->'returnExpressInfoList','[]'::jsonb)) x ON true
+  WHERE coalesce(ai.return_order_no,'') <> ''
+    AND coalesce(ai.order_no,'') <> ''
+  GROUP BY ai.store_key, ai.group_key, ai.order_no, ai.return_order_no, ai.aftersales_order_no,
+    ai.request_time, ai.standard_goods_sn, nullif(ai.skc,''), ai.resolution_plan_name,
+    ai.order_sub_status_name, ai.return_package_status_name, coalesce(ai.quantity,1)
+)
+SELECT
+  a.store_key,
+  a.group_key,
+  a.order_no,
+  a.return_order_no,
+  a.aftersales_order_no,
+  a.request_time,
+  a.standard_goods_sn,
+  a.skc,
+  a.resolution_plan_name,
+  a.order_sub_status_name,
+  a.return_package_status_name,
+  a.quantity,
+  a.shein_return_express_numbers,
+  coalesce(rr.rtv_received_quantity,0) AS rtv_received_quantity,
+  coalesce(rr.rtv_received_to_09_quantity,0) AS rtv_received_to_09_quantity,
+  coalesce(rr.rtv_received_to_rtv_quantity,0) AS rtv_received_to_rtv_quantity,
+  rr.rtv_recovery_status,
+  rr.rtv_express_numbers,
+  rr.et_return_order_ids,
+  rr.rtv_warehouses,
+  rr.rtv_latest_received_time,
+  coalesce(dest.final_09_quantity,0) AS final_09_quantity,
+  coalesce(dest.still_03_quantity,0) AS still_03_quantity,
+  coalesce(dest.final_damaged_quantity,0) AS final_damaged_quantity,
+  coalesce(dest.final_scrap_quantity,0) AS final_scrap_quantity,
+  coalesce(dest.final_other_quantity,0) AS final_other_quantity,
+  dest.destination_summary,
+  CASE
+    WHEN coalesce(rr.rtv_received_quantity,0) <= 0 THEN '未匹配到ET收件'
+    WHEN coalesce(dest.final_09_quantity,0) > 0 THEN '已收-可售09'
+    WHEN coalesce(dest.final_damaged_quantity,0) > 0 THEN '已收-破损04'
+    WHEN coalesce(dest.final_scrap_quantity,0) > 0 THEN '已收-报废06'
+    WHEN coalesce(dest.still_03_quantity,0) > 0 THEN '已收-仍在03_RTV'
+    WHEN coalesce(dest.final_other_quantity,0) > 0 THEN '已收-其它/未知去向'
+    ELSE '已收-未解析去向'
+  END AS trace_status
+FROM after_sales a
+LEFT JOIN mart.rtv_recovery_impact rr
+  ON rr.store_key = a.store_key
+ AND rr.order_no = a.order_no
+ AND (
+   (coalesce(a.skc,'') <> '' AND a.skc = rr.skc)
+   OR dim.product_match_key(a.standard_goods_sn) = dim.product_match_key(rr.standard_goods_sn)
+ )
+ AND (
+   coalesce(rr.aftersales_order_nos,'') = ''
+   OR position(a.aftersales_order_no in rr.aftersales_order_nos) > 0
+ )
+LEFT JOIN LATERAL (
+  SELECT
+    sum(final_09_quantity) AS final_09_quantity,
+    sum(still_03_quantity) AS still_03_quantity,
+    sum(final_damaged_quantity) AS final_damaged_quantity,
+    sum(final_scrap_quantity) AS final_scrap_quantity,
+    sum(final_other_quantity) AS final_other_quantity,
+    string_agg(DISTINCT destination_summary, ' / ') FILTER (WHERE coalesce(destination_summary,'') <> '') AS destination_summary
+  FROM mart.et_rtv_destination_allocation d
+  WHERE d.return_order_id = ANY(regexp_split_to_array(coalesce(rr.et_return_order_ids,''), '\\s*/\\s*'))
+) dest ON true;
 
 CREATE OR REPLACE VIEW mart.profit_order_item AS
 WITH base AS (

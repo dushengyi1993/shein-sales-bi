@@ -33,6 +33,7 @@ function parseArgs(argv) {
     minPages: 1,
     waitMs: 250,
     launch: true,
+    autoLogin: true,
     visible: false,
     statePath: path.join(ROOT, 'state', 'et_forwarder_sync_state.json'),
     endpoints: '',
@@ -63,6 +64,8 @@ function parseArgs(argv) {
     else if (a === '--no-state-update') args.updateState = false;
     else if (a === '--update-state') args.updateState = true;
     else if (a === '--no-launch') args.launch = false;
+    else if (a === '--auto-login') args.autoLogin = true;
+    else if (a === '--no-auto-login') args.autoLogin = false;
     else if (a === '--visible') args.visible = true;
     else if (a === '--dry-run') args.dryRun = true;
   }
@@ -119,6 +122,46 @@ function safeName(value) {
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function pythonCandidates() {
+  return [
+    process.env.SHEIN_PYTHON,
+    'C:\\Users\\dushengyi\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe',
+    'python',
+  ].filter(Boolean);
+}
+
+async function runPythonJson(pyArgs, options = {}) {
+  let lastError = null;
+  for (const py of pythonCandidates()) {
+    if (path.isAbsolute(py) && !fssync.existsSync(py)) continue;
+    try {
+      return await new Promise((resolve, reject) => {
+        const child = spawn(py, pyArgs, {
+          cwd: ROOT,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {...process.env, ...(options.env || {})},
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', d => { stdout += d.toString('utf8'); });
+        child.stderr.on('data', d => { stderr += d.toString('utf8'); });
+        child.on('error', reject);
+        child.on('close', code => {
+          const text = stdout.trim().split(/\r?\n/).filter(Boolean).pop() || '';
+          let parsed = null;
+          try { parsed = JSON.parse(text); } catch {}
+          if (code === 0 && parsed) resolve(parsed);
+          else reject(new Error(parsed?.error || stderr.trim() || `python helper exited ${code}`));
+        });
+      });
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError || new Error('No usable Python runtime found.');
 }
 
 async function httpJson(url) {
@@ -244,16 +287,125 @@ async function getEtPage(args) {
 
 async function browserFetchJson(cdp, args, url) {
   const absolute = url.startsWith('http') ? url : args.baseUrl + url;
+  const pathOrUrl = url.startsWith('http') ? absolute : url;
   const script = `(async()=>{` +
-    `const r=await fetch(${JSON.stringify(absolute)}, {credentials:'include', headers:{'X-Requested-With':'XMLHttpRequest','Accept':'application/json, text/javascript, */*; q=0.01'}});` +
+    `try{` +
+    `const raw=${JSON.stringify(pathOrUrl)};` +
+    `const sameOriginBase=(location&&/^https?:/.test(location.origin))?location.origin:${JSON.stringify(args.baseUrl)};` +
+    `const target=/^https?:/i.test(raw)?raw:new URL(raw,sameOriginBase).href;` +
+    `const r=await fetch(target, {credentials:'include', headers:{'X-Requested-With':'XMLHttpRequest','Accept':'application/json, text/javascript, */*; q=0.01'}});` +
     `const text=await r.text(); let json=null; try{json=JSON.parse(text)}catch(e){};` +
     `return {ok:r.ok,status:r.status,url:r.url,contentType:r.headers.get('content-type'),text:text.slice(0,400),json};` +
+    `}catch(e){return {ok:false,status:0,url:${JSON.stringify(absolute)},contentType:'',text:String(e&&e.message||e),json:null,fetchError:String(e&&e.stack||e)}};` +
   `})()`;
   const out = await cdp.eval(script);
   if (!out.ok || !out.json) {
     throw new Error(`ET fetch failed status=${out.status} url=${absolute} head=${out.text}`);
   }
   return out.json;
+}
+
+async function probeEtHome(cdp, args) {
+  return cdp.eval(`(async()=>{` +
+    `try{` +
+    `const sameOriginBase=(location&&/^https?:/.test(location.origin))?location.origin:${JSON.stringify(args.baseUrl)};` +
+    `const r=await fetch(new URL('/Home/Index',sameOriginBase).href,{credentials:'include'});` +
+    `const text=await r.text();` +
+    `return {status:r.status,title:(text.match(/<title>([^<]+)/)||[])[1]||'',login:/Login|验证码|密码|登入/.test(text)&&!/易通天下物流端/.test(text)};` +
+    `}catch(e){return {status:0,title:'',login:true,error:String(e&&e.message||e)}};` +
+  `})()`);
+}
+
+async function readSavedEtCredentials(args) {
+  const out = await runPythonJson([
+    path.join(ROOT, 'scripts', 'et_login_helper.py'),
+    'credentials',
+    '--profile-dir',
+    args.profileDir,
+    '--base-url',
+    args.baseUrl,
+  ], {env: {ET_LOGIN_HELPER_ALLOW_SECRET: '1'}});
+  if (!out?.ok || !out.username || !out.password) {
+    throw new Error(`ET saved credentials are not available (${out?.error || 'unknown'}).`);
+  }
+  return {username: out.username, password: out.password, origin: out.origin};
+}
+
+async function fetchCaptchaToFile(cdp, args, attempt) {
+  const out = await cdp.eval(`(async()=>{` +
+    `const sameOriginBase=(location&&/^https?:/.test(location.origin))?location.origin:${JSON.stringify(args.baseUrl)};` +
+    `const r=await fetch(new URL('/Login/GetAuthCode?t='+Date.now()+${JSON.stringify(`-${attempt}`)},sameOriginBase).href,{credentials:'include'});` +
+    `const buf=await r.arrayBuffer();` +
+    `let s=''; const bytes=new Uint8Array(buf);` +
+    `for(let i=0;i<bytes.length;i+=0x8000){s+=String.fromCharCode.apply(null,bytes.subarray(i,i+0x8000));}` +
+    `return {status:r.status,base64:btoa(s)};` +
+  `})()`);
+  if (!out?.base64 || out.status !== 200) throw new Error(`ET captcha fetch failed status=${out?.status}`);
+  const dir = path.join(ROOT, 'tmp', 'et-captcha');
+  await fs.mkdir(dir, {recursive: true});
+  const file = path.join(dir, `captcha-${Date.now()}-${attempt}.png`);
+  await fs.writeFile(file, Buffer.from(out.base64, 'base64'));
+  return file;
+}
+
+async function recognizeEtCaptcha(imagePath) {
+  const out = await runPythonJson([
+    path.join(ROOT, 'scripts', 'et_login_helper.py'),
+    'ocr',
+    '--image',
+    imagePath,
+  ]);
+  if (!out?.ok || !out.text) throw new Error(`ET captcha OCR failed (${out?.error || 'empty result'}).`);
+  return String(out.text).replace(/[^0-9A-Za-z]/g, '').slice(0, 5);
+}
+
+async function postEtLogin(cdp, args, credentials, vercode) {
+  return cdp.eval(`(async()=>{` +
+    `const body=new URLSearchParams();` +
+    `body.set('username',${JSON.stringify(credentials.username)});` +
+    `body.set('password',${JSON.stringify(credentials.password)});` +
+    `body.set('vercode',${JSON.stringify(vercode)});` +
+    `body.set('redirectLink','');` +
+    `const sameOriginBase=(location&&/^https?:/.test(location.origin))?location.origin:${JSON.stringify(args.baseUrl)};` +
+    `const r=await fetch(new URL('/Login/CheckCustomerLogin?t='+Math.random(),sameOriginBase).href,{method:'POST',credentials:'include',headers:{'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8','X-Requested-With':'XMLHttpRequest','Accept':'application/json, text/javascript, */*; q=0.01'},body});` +
+    `const text=await r.text(); let json=null; try{json=JSON.parse(text)}catch(e){};` +
+    `return {status:r.status,json,text:text.slice(0,300)};` +
+  `})()`);
+}
+
+async function autoLoginEt(cdp, args) {
+  if (!args.autoLogin) return false;
+  const credentials = await readSavedEtCredentials(args);
+  let lastMessage = '';
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    let captchaFile = '';
+    try {
+      captchaFile = await fetchCaptchaToFile(cdp, args, attempt);
+      const code = await recognizeEtCaptcha(captchaFile);
+      if (code.length < 4) {
+        lastMessage = `captcha OCR returned too short result: ${code}`;
+        continue;
+      }
+      const result = await postEtLogin(cdp, args, credentials, code);
+      const state = result?.json?.state;
+      if (state === 'success') {
+        await cdp.call('Page.navigate', {url: args.baseUrl + '/Home/Index'}).catch(() => {});
+        await sleep(1600);
+        const home = await probeEtHome(cdp, args);
+        if (home.status === 200 && !home.login) {
+          console.log(JSON.stringify({ok: true, step: 'et_auto_login', username: credentials.username, origin: credentials.origin}));
+          return true;
+        }
+        lastMessage = `login accepted but home still not ready title=${home.title || ''}`;
+      } else {
+        lastMessage = result?.json?.message || result?.text || `status=${result?.status}`;
+      }
+    } finally {
+      if (captchaFile) fs.unlink(captchaFile).catch(() => {});
+    }
+    await sleep(500);
+  }
+  throw new Error(`ET auto login failed after captcha attempts: ${lastMessage}`);
 }
 
 function withParams(pathname, params) {
@@ -538,10 +690,14 @@ async function main() {
     await cdp.call('Page.navigate', {url: args.baseUrl + '/Home/Index'});
     await sleep(1800);
   }
-  const home = await cdp.eval(`(async()=>{const r=await fetch(${JSON.stringify(args.baseUrl + '/Home/Index')},{credentials:'include'}); const text=await r.text(); return {status:r.status,title:(text.match(/<title>([^<]+)/)||[])[1]||'', login:/Login|验证码|密码/.test(text)&&!/易通天下物流端/.test(text)};})()`);
+  let home = await probeEtHome(cdp, args);
   if (home.status !== 200 || home.login) {
-    cdp.close();
-    throw new Error(`ET login state is not ready. status=${home.status} title=${home.title}`);
+    await autoLoginEt(cdp, args);
+    home = await probeEtHome(cdp, args);
+    if (home.status !== 200 || home.login) {
+      cdp.close();
+      throw new Error(`ET login state is not ready. status=${home.status} title=${home.title}`);
+    }
   }
 
   const batchId = `et-${args.mode}-${args.date}-${new Date().toISOString().replace(/[:.]/g, '-')}`;

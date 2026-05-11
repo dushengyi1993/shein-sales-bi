@@ -118,7 +118,7 @@ async function setDashboardCards(dashboardId, cardLayouts) {
 const cards = [
   {
     name: 'SHEIN BI · 今日销售额',
-    description: '最新销售日的 15 店总销售额，来自数据仓库 fact.store_daily_sales。',
+    description: '最新销售日的全店总销售额，来自数据仓库 fact.store_daily_sales。',
     display: 'scalar',
     sql: `select round(sum(sales_sar)::numeric, 2) as "销售额 SAR"
 from fact.store_daily_sales

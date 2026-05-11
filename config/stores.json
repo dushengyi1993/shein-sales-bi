@@ -21,7 +21,8 @@
       "YJ",
       "XL",
       "QY",
-      "QH"
+      "QH",
+      "TZ"
     ],
     "ALL": [
       "DL",
@@ -38,7 +39,8 @@
       "YJ",
       "XL",
       "QY",
-      "QH"
+      "QH",
+      "TZ"
     ]
   },
   "stores": [
@@ -191,6 +193,17 @@
       "profileKey": "qh",
       "port": 9347,
       "profileName": "QH - GS8715910"
+    },
+    {
+      "storeKey": "TZ",
+      "groupKey": "LGM",
+      "shopName": "GS5636781",
+      "enabled": true,
+      "productStatsEnabled": true,
+      "profileKey": "tz",
+      "port": 9348,
+      "profileName": "TZ - GS5636781",
+      "accountUtcOffsetHours": 8
     }
   ],
   "businessUtcOffsetHours": 8

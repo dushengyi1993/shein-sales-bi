@@ -530,7 +530,14 @@ async function fetchTable(name) {
   return {name, tableId, ...data};
 }
 
-check(enabledStores.length === 15, 'error', 'ENABLED_STORE_COUNT_NOT_15', '启用店铺不是 15 家', {enabledStores});
+const configuredAllStores = Array.isArray(storesCfg.groups?.ALL) ? storesCfg.groups.ALL : enabledStores;
+check(
+  enabledStores.length === configuredAllStores.length && configuredAllStores.every(storeKey => enabledStores.includes(storeKey)),
+  'error',
+  'ENABLED_STORE_GROUP_ALL_MISMATCH',
+  '启用店铺与 groups.ALL 配置不一致',
+  {enabledStores, configuredAllStores},
+);
 check(localStoreExpected.size > 0, 'error', 'NO_LOCAL_STORE_EXPECTED', '没有读到本地店铺抓取数据', {});
 check(localProductExpected.size > 0, 'error', 'NO_LOCAL_PRODUCT_EXPECTED', '没有读到本地产品抓取数据', {});
 

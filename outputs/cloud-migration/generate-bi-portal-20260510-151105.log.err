@@ -1,0 +1,13 @@
+[generate_bi_portal] 2026-05-10T07:12:13.969Z main:start
+[generate_bi_portal] 2026-05-10T07:12:13.972Z metabase:url
+[generate_bi_portal] 2026-05-10T07:12:13.976Z read:audit
+[generate_bi_portal] 2026-05-10T07:12:13.982Z read:pipeline
+[generate_bi_portal] 2026-05-10T07:12:16.794Z read:briefing
+[generate_bi_portal] 2026-05-10T07:12:16.797Z read:firstRunCheck
+[generate_bi_portal] 2026-05-10T07:12:16.800Z psql:start
+Error: psql failed (null)
+
+psql timeout after 240s stage=psql:start
+
+    at runPsql (file:///E:/Codex%20WorkSpace/Shein%E9%94%80%E5%94%AE%E7%BB%9F%E8%AE%A1/scripts/generate_bi_portal.mjs:439:11)
+    at async main (file:///E:/Codex%20WorkSpace/Shein%E9%94%80%E5%94%AE%E7%BB%9F%E8%AE%A1/scripts/generate_bi_portal.mjs:10872:15)

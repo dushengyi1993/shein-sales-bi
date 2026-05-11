@@ -26,6 +26,25 @@ function markStage(stage) {
   console.error(`[generate_bi_portal] ${new Date().toISOString()} ${stage}`);
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function writeFileWithRetry(file, data, encoding = 'utf8', attempts = 8) {
+  for (let i = 1; i <= attempts; i += 1) {
+    try {
+      await fs.writeFile(file, data, encoding);
+      return;
+    } catch (err) {
+      const code = String(err?.code || '');
+      const retryable = ['UNKNOWN', 'EBUSY', 'EPERM', 'EACCES'].includes(code);
+      if (!retryable || i === attempts) throw err;
+      markStage(`write:retry:${path.basename(file)}:${i}`);
+      await sleep(Math.min(5000, 300 * i));
+    }
+  }
+}
+
 function parseArgs(argv) {
   const args = {
     distro: 'Ubuntu-24.04',
@@ -667,6 +686,46 @@ async function enrichPortalDataWithLocalLinkLabels(data) {
   };
 }
 
+async function readManualCostFileMeta() {
+  const dir = path.join(ROOT, 'inputs', 'costs');
+  const files = [];
+  try {
+    const entries = await fs.readdir(dir, {withFileTypes: true});
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const name = entry.name;
+      if (!/\.(xlsx|xls|csv)$/i.test(name)) continue;
+      if (/模板|readme/i.test(name)) continue;
+      const fullPath = path.join(dir, name);
+      try {
+        const stat = await fs.stat(fullPath);
+        files.push({
+          file: path.relative(ROOT, fullPath).replace(/\\/g, '/'),
+          updatedAt: stat.mtime.toISOString(),
+          size: stat.size,
+        });
+      } catch {}
+    }
+  } catch {}
+  files.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+  return {
+    latestUpdatedAt: files[0]?.updatedAt || '',
+    files,
+  };
+}
+
+async function attachManualCostFileMeta(data) {
+  const meta = await readManualCostFileMeta();
+  return {
+    ...data,
+    dates: {
+      ...(data?.dates || {}),
+      manualCostFileUpdatedAt: meta.latestUpdatedAt,
+      manualCostFiles: meta.files,
+    },
+  };
+}
+
 function buildSql() {
   return `
 WITH
@@ -762,6 +821,7 @@ after_sales_event_daily AS (
     round(sum(coalesce(price_amount_total, price_amount,0))::numeric, 2) AS amount_sar
   FROM fact.after_sales_item
   WHERE request_time IS NOT NULL
+    AND coalesce(order_sub_status_name,'') <> '已取消'
   GROUP BY request_time::date
 ),
 after_sales_event_group_daily AS (
@@ -772,6 +832,7 @@ after_sales_event_group_daily AS (
     round(sum(coalesce(price_amount_total, price_amount,0))::numeric, 2) AS amount_sar
   FROM fact.after_sales_item
   WHERE request_time IS NOT NULL
+    AND coalesce(order_sub_status_name,'') <> '已取消'
   GROUP BY request_time::date, coalesce(group_key,'')
 ),
 stores AS (
@@ -1138,6 +1199,7 @@ net_order_item AS (
     goods_title,
     order_no,
     order_key,
+    CASE WHEN coalesce(gross_revenue_sar,0) > 0 THEN coalesce(quantity,0) ELSE 0 END AS gross_quantity,
     CASE WHEN coalesce(net_revenue_sar,0) > 0 THEN coalesce(quantity,0) ELSE 0 END AS quantity,
     coalesce(net_revenue_sar,0) AS sales_sar,
     coalesce(gross_revenue_sar,0) AS gross_sales_sar,
@@ -1152,8 +1214,11 @@ net_daily_store_sales AS (
     max(coalesce(n.group_key,'')) AS group_key,
     max(coalesce(s.shop_name,'')) AS shop_name,
     round(sum(coalesce(n.sales_sar,0))::numeric, 2) AS sales_sar,
+    round(sum(coalesce(n.gross_sales_sar,0))::numeric, 2) AS gross_sales_sar,
     count(DISTINCT order_no) FILTER (WHERE coalesce(n.sales_sar,0) > 0) AS orders,
-    round(sum(coalesce(n.quantity,0))::numeric, 0) AS quantity
+    count(DISTINCT order_no) FILTER (WHERE coalesce(n.gross_sales_sar,0) > 0) AS gross_orders,
+    round(sum(coalesce(n.quantity,0))::numeric, 0) AS quantity,
+    round(sum(coalesce(n.gross_quantity,0))::numeric, 0) AS gross_quantity
   FROM net_order_item n
   LEFT JOIN dim.store s USING (store_key)
   GROUP BY date, store_key
@@ -1207,8 +1272,11 @@ store_period_rank AS (
       max(coalesce(s.group_key,'')) AS group_key,
       max(coalesce(s.shop_name,'')) AS shop_name,
       round(sum(coalesce(s.sales_sar,0))::numeric, 2) AS sales_sar,
+      round(sum(coalesce(s.gross_sales_sar,0))::numeric, 2) AS gross_sales_sar,
       sum(coalesce(s.orders,0)) AS orders,
+      sum(coalesce(s.gross_orders,0)) AS gross_orders,
       round(sum(coalesce(s.quantity,0))::numeric, 0) AS quantity,
+      round(sum(coalesce(s.gross_quantity,0))::numeric, 0) AS gross_quantity,
       count(DISTINCT s.date) AS days
     FROM period_defs p
     JOIN net_daily_store_sales s
@@ -1229,8 +1297,11 @@ product_period_rank AS (
       oi.standard_goods_sn,
       max(coalesce(oi.goods_title,'')) AS goods_title,
       round(sum(coalesce(oi.sales_sar,0))::numeric, 2) AS sales_sar,
+      round(sum(coalesce(oi.gross_sales_sar,0))::numeric, 2) AS gross_sales_sar,
       round(sum(coalesce(oi.quantity,0))::numeric, 0) AS quantity,
+      round(sum(coalesce(oi.gross_quantity,0))::numeric, 0) AS gross_quantity,
       count(DISTINCT oi.order_no) FILTER (WHERE coalesce(oi.sales_sar,0) > 0) AS orders,
+      count(DISTINCT oi.order_no) FILTER (WHERE coalesce(oi.gross_sales_sar,0) > 0) AS gross_orders,
       count(DISTINCT oi.store_key) FILTER (WHERE coalesce(oi.sales_sar,0) > 0) AS store_count,
       count(DISTINCT oi.date) AS days
     FROM period_defs p
@@ -1252,8 +1323,11 @@ sales_period_summary AS (
       p.start_date,
       p.end_date,
       round(sum(coalesce(s.sales_sar,0))::numeric, 2) AS sales_sar,
+      round(sum(coalesce(s.gross_sales_sar,0))::numeric, 2) AS gross_sales_sar,
       sum(coalesce(s.orders,0)) AS orders,
+      sum(coalesce(s.gross_orders,0)) AS gross_orders,
       round(sum(coalesce(s.quantity,0))::numeric, 0) AS quantity,
+      round(sum(coalesce(s.gross_quantity,0))::numeric, 0) AS gross_quantity,
       count(DISTINCT s.date) AS days
     FROM period_defs p
     LEFT JOIN net_daily_store_sales s
@@ -1270,8 +1344,11 @@ daily_store_sales AS (
       max(coalesce(group_key,'')) AS group_key,
       max(coalesce(shop_name,'')) AS shop_name,
       round(sum(coalesce(sales_sar,0))::numeric, 2) AS sales_sar,
+      round(sum(coalesce(gross_sales_sar,0))::numeric, 2) AS gross_sales_sar,
       sum(coalesce(orders,0)) AS orders,
-      round(sum(coalesce(quantity,0))::numeric, 0) AS quantity
+      sum(coalesce(gross_orders,0)) AS gross_orders,
+      round(sum(coalesce(quantity,0))::numeric, 0) AS quantity,
+      round(sum(coalesce(gross_quantity,0))::numeric, 0) AS gross_quantity
     FROM net_daily_store_sales
     GROUP BY date, store_key
     ORDER BY date, store_key
@@ -1286,8 +1363,11 @@ daily_product_sales AS (
       max(coalesce(oi.goods_title,'')) AS goods_title,
       string_agg(DISTINCT nullif(oi.skc,''), ' ') FILTER (WHERE nullif(oi.skc,'') IS NOT NULL) AS skc_list,
       round(sum(coalesce(oi.sales_sar,0))::numeric, 2) AS sales_sar,
+      round(sum(coalesce(oi.gross_sales_sar,0))::numeric, 2) AS gross_sales_sar,
       round(sum(coalesce(oi.quantity,0))::numeric, 0) AS quantity,
+      round(sum(coalesce(oi.gross_quantity,0))::numeric, 0) AS gross_quantity,
       count(DISTINCT oi.order_no) FILTER (WHERE coalesce(oi.sales_sar,0) > 0) AS orders,
+      count(DISTINCT oi.order_no) FILTER (WHERE coalesce(oi.gross_sales_sar,0) > 0) AS gross_orders,
       count(DISTINCT oi.store_key) FILTER (WHERE coalesce(oi.sales_sar,0) > 0) AS store_count
     FROM net_order_item oi
     WHERE coalesce(oi.standard_goods_sn,'') <> ''
@@ -1304,8 +1384,11 @@ daily_product_group_sales AS (
       oi.standard_goods_sn,
       string_agg(DISTINCT nullif(oi.skc,''), ' ') FILTER (WHERE nullif(oi.skc,'') IS NOT NULL) AS skc_list,
       round(sum(coalesce(oi.sales_sar,0))::numeric, 2) AS sales_sar,
+      round(sum(coalesce(oi.gross_sales_sar,0))::numeric, 2) AS gross_sales_sar,
       round(sum(coalesce(oi.quantity,0))::numeric, 0) AS quantity,
+      round(sum(coalesce(oi.gross_quantity,0))::numeric, 0) AS gross_quantity,
       count(DISTINCT oi.order_no) FILTER (WHERE coalesce(oi.sales_sar,0) > 0) AS orders,
+      count(DISTINCT oi.order_no) FILTER (WHERE coalesce(oi.gross_sales_sar,0) > 0) AS gross_orders,
       count(DISTINCT oi.store_key) FILTER (WHERE coalesce(oi.sales_sar,0) > 0) AS store_count
     FROM net_order_item oi
     WHERE coalesce(oi.standard_goods_sn,'') <> ''
@@ -1324,8 +1407,11 @@ daily_store_product_sales AS (
       max(coalesce(oi.goods_title,'')) AS goods_title,
       string_agg(DISTINCT nullif(oi.skc,''), ' ') FILTER (WHERE nullif(oi.skc,'') IS NOT NULL) AS skc_list,
       round(sum(coalesce(oi.sales_sar,0))::numeric, 2) AS sales_sar,
+      round(sum(coalesce(oi.gross_sales_sar,0))::numeric, 2) AS gross_sales_sar,
       round(sum(coalesce(oi.quantity,0))::numeric, 0) AS quantity,
-      count(DISTINCT oi.order_no) FILTER (WHERE coalesce(oi.sales_sar,0) > 0) AS orders
+      round(sum(coalesce(oi.gross_quantity,0))::numeric, 0) AS gross_quantity,
+      count(DISTINCT oi.order_no) FILTER (WHERE coalesce(oi.sales_sar,0) > 0) AS orders,
+      count(DISTINCT oi.order_no) FILTER (WHERE coalesce(oi.gross_sales_sar,0) > 0) AS gross_orders
     FROM net_order_item oi
     WHERE coalesce(oi.standard_goods_sn,'') <> ''
       AND coalesce(oi.store_key,'') <> ''
@@ -1742,19 +1828,119 @@ orders AS (
     LIMIT 12000
   ) t
 ),
+after_sales_order_map AS (
+  SELECT
+    store_key,
+    order_no,
+    min(created_date)::date AS order_created_date,
+    min(order_create_time) AS order_create_time,
+    round(sum(coalesce(sales_sar,0))::numeric, 2) AS order_sales_sar
+  FROM fact.order_item
+  WHERE coalesce(order_no,'') <> ''
+  GROUP BY store_key, order_no
+),
 after_sales AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) AS data
   FROM (
     SELECT
-      snapshot_date, store_key, group_key, request_time,
-      aftersales_order_no, return_order_no, order_no,
-      standard_goods_sn, skc, goods_title,
-      quantity, round(price_amount_total::numeric, 2) AS price_amount_total,
+      a.snapshot_date, a.store_key, a.group_key, a.request_time,
+      om.order_created_date, om.order_create_time, om.order_sales_sar,
+      a.aftersales_order_no, a.return_order_no, a.order_no,
+      a.standard_goods_sn, a.skc, a.goods_title,
+      a.quantity,
+      round(coalesce(om.order_sales_sar, a.estimated_income_amount, a.price_amount_total, a.price_amount, 0)::numeric, 2) AS price_amount_total,
+      round(coalesce(om.order_sales_sar, a.estimated_income_amount, a.price_amount_total, a.price_amount, 0)::numeric, 2) AS amount_sar,
+      a.resolution_plan_name, a.order_sub_status_name, a.return_package_status_name,
+      a.reason_names, a.appeal_status
+    FROM fact.after_sales_item a
+    LEFT JOIN after_sales_order_map om
+      ON om.store_key = a.store_key AND om.order_no = a.order_no
+    WHERE a.request_time IS NOT NULL
+      AND coalesce(a.order_sub_status_name,'') <> '已取消'
+    ORDER BY a.request_time DESC NULLS LAST, coalesce(om.order_sales_sar, a.estimated_income_amount, a.price_amount_total, a.price_amount, 0) DESC NULLS LAST
+    LIMIT 8000
+  ) t
+),
+after_sales_review AS (
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) AS data
+  FROM (
+    SELECT
+      a.snapshot_date, a.store_key, a.group_key, a.request_time,
+      om.order_created_date, om.order_create_time, om.order_sales_sar,
+      a.aftersales_order_no, a.return_order_no, a.order_no,
+      a.standard_goods_sn, a.skc, a.goods_title,
+      a.quantity,
+      round(coalesce(om.order_sales_sar, a.estimated_income_amount, a.price_amount_total, a.price_amount, 0)::numeric, 2) AS price_amount_total,
+      round(coalesce(om.order_sales_sar, a.estimated_income_amount, a.price_amount_total, a.price_amount, 0)::numeric, 2) AS amount_sar,
+      a.resolution_plan_name, a.order_sub_status_name, a.return_package_status_name,
+      a.reason_names, a.appeal_status,
+      greatest(0, (current_date - a.request_time::date))::int AS open_days,
+      CASE
+        WHEN coalesce(a.order_sub_status_name,'') = '已取消' THEN '已取消忽略'
+        WHEN coalesce(a.order_sub_status_name,'') LIKE '%同意退款%' OR coalesce(a.return_package_status_name,'') LIKE '%已签收%' THEN '已落定'
+        ELSE '待复核'
+      END AS review_status,
+      CASE
+        WHEN coalesce(a.order_sub_status_name,'') LIKE '%待%' OR coalesce(a.return_package_status_name,'') LIKE '%待%' THEN '等待平台/买家/仓库推进'
+        WHEN coalesce(a.return_package_status_name,'') LIKE '%运输%' OR coalesce(a.return_package_status_name,'') LIKE '%揽收%' THEN '物流途中，需持续追踪'
+        ELSE '已按未取消售后计入退货；若后续取消，会在下次同步自动冲回'
+      END AS review_reason
+    FROM fact.after_sales_item a
+    LEFT JOIN after_sales_order_map om
+      ON om.store_key = a.store_key AND om.order_no = a.order_no
+    WHERE a.request_time IS NOT NULL
+      AND coalesce(a.order_sub_status_name,'') <> '已取消'
+      AND NOT (coalesce(a.order_sub_status_name,'') LIKE '%同意退款%' OR coalesce(a.return_package_status_name,'') LIKE '%已签收%')
+    ORDER BY a.request_time DESC NULLS LAST, open_days DESC, coalesce(om.order_sales_sar, a.estimated_income_amount, a.price_amount_total, a.price_amount, 0) DESC NULLS LAST
+    LIMIT 1000
+  ) t
+),
+rtv_review AS (
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) AS data
+  FROM (
+    SELECT
+      return_order_id, rtv,
+      et_shipment_number_raw, et_shipment_number, suspected_emile_handoff,
+      status_name, store_name_in, to_instock_name, in_quantity, create_time,
+      standard_goods_sn, sku_code, store_key_guess, barcode, goods_title,
+      received_quantity, exact_match_count, candidate_case_count,
+      candidate_cases, review_reason, review_priority
+    FROM mart.rtv_manual_review_candidates
+    ORDER BY
+      CASE review_priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+      create_time DESC NULLS LAST,
+      return_order_id DESC
+    LIMIT 1000
+  ) t
+),
+rtv_trace AS (
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) AS data
+  FROM (
+    SELECT
+      store_key, group_key, order_no, return_order_no, aftersales_order_no,
+      request_time, standard_goods_sn, skc,
       resolution_plan_name, order_sub_status_name, return_package_status_name,
-      reason_names, appeal_status
-    FROM fact.after_sales_item
-    WHERE request_time IS NOT NULL
-    ORDER BY request_time DESC NULLS LAST, price_amount_total DESC NULLS LAST
+      quantity, shein_return_express_numbers,
+      rtv_received_quantity, rtv_received_to_09_quantity, rtv_received_to_rtv_quantity,
+      rtv_recovery_status, rtv_express_numbers, et_return_order_ids,
+      rtv_warehouses, rtv_latest_received_time,
+      final_09_quantity, still_03_quantity, final_damaged_quantity,
+      final_scrap_quantity, final_other_quantity,
+      destination_summary, trace_status
+    FROM mart.shein_return_rtv_trace
+    ORDER BY
+      CASE trace_status
+        WHEN '未匹配到ET收件' THEN 0
+        WHEN '已收-其它/未知去向' THEN 1
+        WHEN '已收-未解析去向' THEN 2
+        WHEN '已收-仍在03_RTV' THEN 3
+        WHEN '已收-破损04' THEN 4
+        WHEN '已收-报废06' THEN 5
+        WHEN '已收-可售09' THEN 6
+        ELSE 7
+      END,
+      request_time DESC NULLS LAST,
+      rtv_latest_received_time DESC NULLS LAST
     LIMIT 8000
   ) t
 ),
@@ -1821,7 +2007,7 @@ insights AS (
         '货号综合风险高' AS title,
         CASE WHEN coalesce(risk_score,0) >= 120 THEN '高' ELSE '中' END AS priority,
         least(190, round(risk_score::numeric, 1)) AS score,
-        concat('销售 ', round(coalesce(sales_sar,0)::numeric,2), ' SAR；上架店 ', on_shelf_store_count, '/15；缺店 ', missing_store_count, '；售后 ', after_sales_case_count, '；低星 ', low_star_comment_count, '。') AS evidence,
+        concat('销售 ', round(coalesce(sales_sar,0)::numeric,2), ' SAR；上架店 ', on_shelf_store_count, '/', (SELECT count(*) FROM dim.store WHERE enabled IS DISTINCT FROM false), '；缺店 ', missing_store_count, '；售后 ', after_sales_case_count, '；低星 ', low_star_comment_count, '。') AS evidence,
         '从货号 360 进入，优先判断是覆盖不足、质量售后集中，还是链接承接问题。' AS next_step
       FROM mart.bi_product_360_current
       WHERE coalesce(risk_score,0) >= 90
@@ -2220,6 +2406,9 @@ SELECT jsonb_build_object(
   'inventoryAlerts', (SELECT data FROM inventory_alerts),
   'orders', (SELECT data FROM orders),
   'afterSales', (SELECT data FROM after_sales),
+  'afterSalesReview', (SELECT data FROM after_sales_review),
+  'rtvReview', (SELECT data FROM rtv_review),
+  'rtvTrace', (SELECT data FROM rtv_trace),
   'waybills', (SELECT data FROM waybills),
   'campaigns', (SELECT data FROM campaigns),
   'insights', (SELECT data FROM insights),
@@ -2628,7 +2817,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     body[data-theme="light"] .calendar-day{background:#ffffff;color:#0f172a}
     body[data-theme="light"] .calendar-day.in-range{background:#dbeafe;border-color:#bfdbfe}
     .rank-list{display:grid;gap:9px}
-    .overview-matrix-card{position:relative;overflow:visible;border:1px solid rgba(148,163,184,.18);border-radius:24px;background:radial-gradient(circle at top right,rgba(34,211,238,.10),transparent 34%),linear-gradient(135deg,rgba(15,23,42,.72),rgba(15,23,42,.38));padding:16px;cursor:pointer;transition:.18s transform,.18s border-color,.18s box-shadow;color:var(--text);text-align:left}
+    .overview-matrix-card{position:relative;overflow:visible;border:1px solid rgba(148,163,184,.18);border-radius:24px;background:radial-gradient(circle at top right,rgba(34,211,238,.10),transparent 34%),linear-gradient(135deg,rgba(15,23,42,.72),rgba(15,23,42,.38));padding:16px;cursor:pointer;transition:.18s transform,.18s border-color,.18s box-shadow;color:var(--text);text-align:left;display:block}
     .overview-matrix-card:hover{transform:translateY(-2px);border-color:rgba(34,211,238,.50);box-shadow:0 0 0 4px rgba(34,211,238,.07)}
     body[data-theme="light"] .overview-matrix-card{background:#ffffff;border-color:#e2e8f0;box-shadow:0 8px 22px rgba(15,23,42,.05)}
     .matrix-card-head{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:12px}
@@ -2667,6 +2856,43 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .ops-question-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:14px}.ops-question-grid div{border:1px solid rgba(148,163,184,.18);border-radius:16px;padding:10px;background:rgba(15,23,42,.28)}body[data-theme="light"] .ops-question-grid div{background:#f8fafc;border-color:#e2e8f0}.ops-question-grid b{display:block;font-size:12px;margin-bottom:4px}.ops-question-grid span{display:block;font-size:12px;color:var(--muted);line-height:1.45}
     .ops-pillar-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.ops-pillar{border:1px solid rgba(148,163,184,.18);border-radius:20px;padding:14px;background:linear-gradient(135deg,rgba(15,23,42,.64),rgba(2,6,23,.32));min-height:126px}.ops-pillar span{display:block;color:var(--muted);font-size:12px;font-weight:800}.ops-pillar strong{display:block;margin-top:8px;font-family:var(--mono);font-size:24px;font-weight:950;font-variant-numeric:tabular-nums}.ops-pillar small{display:block;margin-top:5px;color:var(--muted);font-size:12px;line-height:1.45}body[data-theme="light"] .ops-pillar{background:#fff;border-color:#e2e8f0}
     .ops-focus-list{display:grid;gap:10px}.ops-focus-row{display:grid;grid-template-columns:88px 1fr auto;gap:10px;align-items:center;border:1px solid rgba(148,163,184,.16);border-radius:16px;padding:10px;background:rgba(15,23,42,.24)}body[data-theme="light"] .ops-focus-row{background:#fff;border-color:#e2e8f0}.ops-focus-row b{font-size:14px}.ops-focus-row small{display:block;color:var(--muted);margin-top:3px}.ops-focus-row .num{font-family:var(--mono);font-weight:900;font-variant-numeric:tabular-nums}
+    .page-anchor-row{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px}
+    .page-anchor-row a,.page-anchor-row button{min-height:36px;border-radius:999px;border:1px solid rgba(148,163,184,.24);background:rgba(15,23,42,.50);color:var(--text);padding:7px 12px;font-weight:850;text-decoration:none;cursor:pointer}
+    .page-anchor-row a:hover,.page-anchor-row button:hover{border-color:rgba(34,211,238,.55);background:rgba(34,211,238,.12)}
+    body[data-theme="light"] .page-anchor-row a,body[data-theme="light"] .page-anchor-row button{background:#fff;border-color:#dbe3ef;color:#0f172a}
+    .mission-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:14px 0}
+    .mission-card{border:1px solid rgba(148,163,184,.18);border-radius:20px;background:linear-gradient(135deg,rgba(15,23,42,.54),rgba(2,6,23,.25));padding:14px;min-height:128px}
+    body[data-theme="light"] .mission-card{background:#fff;border-color:#e2e8f0;box-shadow:0 8px 20px rgba(15,23,42,.045)}
+    .mission-card span{display:block;color:var(--muted);font-size:12px;font-weight:900}.mission-card strong{display:block;margin-top:8px;font-family:var(--mono);font-size:24px;font-weight:950;font-variant-numeric:tabular-nums}.mission-card p{margin:7px 0 0;color:var(--muted);font-size:12px;line-height:1.5}
+    .mission-card.good strong{color:#22c55e}.mission-card.warn strong{color:#f97316}.mission-card.bad strong{color:#fb7185}.mission-card.info strong{color:#38bdf8}
+    .workstream-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:12px}
+    .workstream-card{border:1px solid rgba(148,163,184,.18);border-radius:18px;background:rgba(15,23,42,.28);padding:12px}
+    body[data-theme="light"] .workstream-card{background:#f8fafc;border-color:#e2e8f0}
+    .workstream-card b{display:block;font-size:13px;margin-bottom:6px}.workstream-card span{display:block;color:var(--muted);font-size:12px;line-height:1.55}
+    .rtv-center{display:grid;gap:16px}
+    .rtv-hero{display:grid;grid-template-columns:minmax(320px,.92fr) minmax(520px,1.45fr);gap:16px;align-items:stretch}
+    .rtv-verdict{border:1px solid rgba(251,113,133,.26);border-radius:26px;background:radial-gradient(circle at top left,rgba(251,113,133,.16),transparent 45%),linear-gradient(145deg,rgba(127,29,29,.16),rgba(15,23,42,.48));padding:18px;display:flex;flex-direction:column;justify-content:space-between;min-height:100%}
+    body[data-theme="light"] .rtv-verdict{background:linear-gradient(145deg,#fff1f2,#fff);border-color:#fecdd3}
+    .rtv-verdict h3{margin:0 0 8px;font-size:24px;letter-spacing:-.04em}.rtv-verdict p{margin:0;color:var(--muted);line-height:1.72}
+    .rtv-big{font-family:var(--mono);font-size:34px;font-weight:950;letter-spacing:-.05em;margin:14px 0 4px;color:#fb7185;font-variant-numeric:tabular-nums}
+    body[data-theme="light"] .rtv-big{color:#be123c}
+    .rtv-flow-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+    .rtv-stage{position:relative;border:1px solid rgba(148,163,184,.18);border-radius:20px;background:linear-gradient(135deg,rgba(15,23,42,.64),rgba(2,6,23,.28));padding:14px;min-height:126px;overflow:hidden}
+    body[data-theme="light"] .rtv-stage{background:#fff;border-color:#e2e8f0;box-shadow:0 8px 20px rgba(15,23,42,.045)}
+    .rtv-stage:before{content:"";position:absolute;left:0;right:0;top:0;height:4px;background:var(--stage,#38bdf8)}
+    .rtv-stage span{display:block;color:var(--muted);font-size:12px;font-weight:900}.rtv-stage strong{display:block;margin-top:8px;font-family:var(--mono);font-size:26px;font-weight:950;font-variant-numeric:tabular-nums}.rtv-stage small{display:block;margin-top:5px;color:var(--muted);font-size:12px;line-height:1.45}
+    .rtv-stage.good{--stage:#22c55e}.rtv-stage.warn{--stage:#f97316}.rtv-stage.bad{--stage:#ef4444}.rtv-stage.info{--stage:#38bdf8}
+    .rtv-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+    .rtv-actions a,.rtv-actions button{min-height:36px;border-radius:999px;border:1px solid rgba(148,163,184,.24);background:rgba(15,23,42,.54);color:var(--text);padding:7px 12px;font-weight:850;text-decoration:none;cursor:pointer}
+    .rtv-actions a:hover,.rtv-actions button:hover{border-color:rgba(34,211,238,.55);background:rgba(34,211,238,.12)}
+    body[data-theme="light"] .rtv-actions a,body[data-theme="light"] .rtv-actions button{background:#fff;border-color:#dbe3ef;color:#0f172a}
+    .rtv-term-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:8px 0 2px}
+    .rtv-term{border:1px solid rgba(148,163,184,.16);border-radius:16px;background:rgba(15,23,42,.24);padding:10px}
+    body[data-theme="light"] .rtv-term{background:#f8fafc;border-color:#e2e8f0}
+    .rtv-term b{display:block;font-size:13px;margin-bottom:5px}.rtv-term span{display:block;color:var(--muted);font-size:12px;line-height:1.55}
+    .rtv-decision{display:grid;gap:4px;min-width:130px}.rtv-decision b{font-size:13px}.rtv-decision small{color:var(--muted);line-height:1.45}
+    .rtv-waybill{display:grid;gap:4px}.rtv-waybill .mono{font-size:12px}
+    .rtv-table-hint{margin:8px 0 12px;color:var(--muted);font-size:12px;line-height:1.6}
     .profit-command{display:grid;grid-template-columns:minmax(320px,.95fr) minmax(520px,1.4fr);gap:16px;margin-bottom:16px;align-items:stretch}
     .profit-verdict{border:1px solid rgba(20,184,166,.26);border-radius:26px;background:linear-gradient(145deg,rgba(13,148,136,.18),rgba(15,23,42,.48));padding:18px;display:flex;flex-direction:column;justify-content:space-between;min-height:100%}
     body[data-theme="light"] .profit-verdict{background:linear-gradient(145deg,#ecfeff,#fff);border-color:#99f6e4}
@@ -3026,7 +3252,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     body[data-theme="light"] .review-meta div{background:#f8fafc;border-color:#e2e8f0}
     .footer{color:var(--muted);font-size:12px;padding:24px 0;text-align:center}
     @media (max-width:1280px){.toolbar{grid-template-columns:minmax(190px,230px) 118px 112px 82px minmax(430px,1fr);gap:8px}body:not([data-current-tab="overview"]):not([data-current-tab="actions"]) .toolbar{grid-template-columns:minmax(154px,.7fr) minmax(154px,.7fr) minmax(72px,.3fr) 82px minmax(350px,1.4fr)}.toolbar-range-dock{grid-column:auto}.toolbar-range-dock .range-toolbar-main{grid-template-columns:minmax(178px,.48fr) minmax(250px,1fr)}body[data-current-tab="actions"] .toolbar{grid-template-columns:minmax(210px,1fr) minmax(180px,.82fr) minmax(118px,.5fr) 82px}.toolbar .action-local-filter{grid-column:1/-1}.toolbar .action-local-filter-controls{grid-template-columns:repeat(3,minmax(120px,1fr))}}
-    @media (max-width:1180px){.shell{grid-template-columns:1fr}.side{position:relative;height:auto}main{max-width:100vw}.kpis,.overview-core .kpis{grid-template-columns:1fr}.overview-core,.overview-core .group-summary-grid.two,.home-scope-toolbar,.calendar-duo,.calendar-input-row,.range-calendar-grid,.range-popover-grid,.range-toolbar-main,.page-guide-inner,.page-guide-grid,.page-decision-grid,.store-flow,.store-kpi-grid,.problem-stack,.store-action-steps,.profit-workbench-grid,.profit-tool-grid,.ops-command,.ops-question-grid,.ops-pillar-grid,.profit-command,.profit-logic,.profit-summary-grid,.profit-calculator,.selection-model{grid-template-columns:1fr}.selection-model.wide{grid-template-areas:"verdict" "matrix" "samples"}.home-scope-hint{justify-content:flex-start}.range-popover{min-width:0;width:calc(100vw - 56px);left:0}.toolbar{grid-template-columns:1fr}.range-toolbar{top:8px}.grid.cols-2,.grid.cols-3,.split,.spotlight,.sop-grid,.cause-grid,.command-room,.command-lanes,.detail-grid,.action-card.v1-action{grid-template-columns:1fr}.brief-grid{grid-template-columns:repeat(2,1fr)}.brief-grid.five{grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.coverage-board{grid-template-columns:repeat(2,minmax(0,1fr))}.hero-top{display:block}.quick-links{justify-content:flex-start;margin-top:18px}h2{font-size:30px}}
+    @media (max-width:1180px){.shell{grid-template-columns:1fr}.side{position:relative;height:auto}main{max-width:100vw}.kpis,.overview-core .kpis{grid-template-columns:1fr}.overview-core,.overview-core .group-summary-grid.two,.home-scope-toolbar,.calendar-duo,.calendar-input-row,.range-calendar-grid,.range-popover-grid,.range-toolbar-main,.page-guide-inner,.page-guide-grid,.page-decision-grid,.store-flow,.store-kpi-grid,.problem-stack,.store-action-steps,.profit-workbench-grid,.profit-tool-grid,.ops-command,.ops-question-grid,.ops-pillar-grid,.profit-command,.profit-logic,.profit-summary-grid,.rtv-hero,.rtv-flow-grid,.rtv-term-grid,.mission-grid,.workstream-grid,.profit-calculator,.selection-model{grid-template-columns:1fr}.selection-model.wide{grid-template-areas:"verdict" "matrix" "samples"}.home-scope-hint{justify-content:flex-start}.range-popover{min-width:0;width:calc(100vw - 56px);left:0}.toolbar{grid-template-columns:1fr}.range-toolbar{top:8px}.grid.cols-2,.grid.cols-3,.split,.spotlight,.sop-grid,.cause-grid,.command-room,.command-lanes,.detail-grid,.action-card.v1-action{grid-template-columns:1fr}.brief-grid{grid-template-columns:repeat(2,1fr)}.brief-grid.five{grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.coverage-board{grid-template-columns:repeat(2,minmax(0,1fr))}.hero-top{display:block}.quick-links{justify-content:flex-start;margin-top:18px}h2{font-size:30px}}
     @media (max-width:1180px){.action-card.v1-action{grid-template-areas:"main" "evidence" "controls"}.action-card.v1-action .action-controls{grid-template-columns:1fr}.action-card.v1-action .command-actions,.action-card.v1-action .status-actions{grid-template-columns:repeat(2,minmax(0,1fr))}.action-card.v1-action .action-meta{grid-template-columns:1fr}}
     @media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
   </style>
@@ -3059,7 +3285,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
       <div><strong>SHEIN 销售源</strong><br><span id="salesDate"></span><small id="salesUpdatedAt"></small></div>
       <div><strong>SHEIN 业务域</strong><br><span id="businessDate"></span><small id="businessUpdatedAt"></small></div>
       <div><strong>SHEIN 链接表现</strong><br><span id="linkDate"></span><small id="linkUpdatedAt"></small></div>
-      <div><strong>手动成本表</strong><br><span id="manualCostDate"></span></div>
+      <div><strong>成本表文件</strong><br><span id="manualCostDate"></span></div>
       <div><strong>ET 货代仓</strong><br><span id="etDate"></span></div>
       <div style="margin-top:8px">数据体检：<span id="auditState"></span></div>
     </div>
@@ -3280,7 +3506,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
         <div class="card-body" id="storeCockpit"></div>
       </div>
       <div class="card">
-        <div class="card-h"><div><h3>15 店横向对照表</h3><div class="sub">每行一个店：当前时段销售/订单 + 最新风险信号。用于横向找问题店，点店铺进入作战台。</div></div></div>
+        <div class="card-h"><div><h3>店铺横向对照表</h3><div class="sub">每行一个店：当前时段销售/订单 + 最新风险信号。用于横向找问题店，点店铺进入作战台。</div></div></div>
         <div class="card-body"><div id="storesTable"></div></div>
       </div>
     </section>
@@ -3339,6 +3565,13 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
         </div>
         <div class="card-body"><div id="financeTable"></div></div>
       </div>
+      <div class="card" style="margin-bottom:16px" id="rtvWorkbenchCard">
+        <div class="card-h">
+          <div><h3>RTV / 退货去向中心</h3><div class="sub">专门回答：退货有没有被 ET 收到、收到后去了哪里、是否可以二次销售、还有哪些换单要复核。</div></div>
+          <span class="tag mid">RTV 专区</span>
+        </div>
+        <div class="card-body"><div id="rtvWorkbench"></div></div>
+      </div>
       <details class="detail-section" style="margin-top:16px">
         <summary>展开单据证据区：财务、订单、售后、履约</summary>
         <div class="detail-body">
@@ -3364,11 +3597,11 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
             <div class="card-body"><div id="ordersTable"></div></div>
           </div>
           <div class="detail-grid" style="margin-top:16px">
-            <div class="card">
+            <div class="card" id="afterSalesEvidenceCard">
               <div class="card-h"><div><h3>售后 / 退货明细</h3><div class="sub">退货原因、售后状态、退款金额和对应 SKC。</div></div></div>
               <div class="card-body"><div id="afterSalesTable"></div></div>
             </div>
-            <div class="card">
+            <div class="card" id="waybillEvidenceCard">
               <div class="card-h"><div><h3>发货 / 履约明细</h3><div class="sub">面单、仓库、物流商、履约状态和包裹商品。</div></div></div>
               <div class="card-body"><div id="waybillTable"></div></div>
             </div>
@@ -3385,11 +3618,11 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
         </div>
         <div class="card-body" id="profitOverview"></div>
       </div>
-      <div class="card" style="margin-bottom:16px">
+      <div class="card" style="margin-bottom:16px" id="profitTrendCard">
         <div class="card-h"><div><h3>月利润趋势</h3><div class="sub">总计 / DSY / LGM 看全局；筛到单店或货号时看当前范围。月趋势按所选日期片段，不强行补整月。</div></div></div>
         <div class="card-body" id="profitTrendPanel"></div>
       </div>
-      <div class="grid cols-2" style="margin-bottom:16px">
+      <div class="grid cols-2" style="margin-bottom:16px" id="profitRankGrid">
         <div class="card">
           <div class="card-h"><div><h3>高利润 / 可加码货号</h3><div class="sub">利润率 ≥ 20%；按利润率从高到低排序，先看哪些货号最值得加码。</div></div></div>
           <div class="card-body" id="profitWinners"></div>
@@ -3400,11 +3633,11 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
         </div>
       </div>
       <div class="profit-workbench-grid">
-        <div class="card">
+        <div class="card" id="profitSelectionCard">
           <div class="card-h"><div><h3>选品标尺 / 利润试算</h3><div class="sub">基于成本表倒推体积，用未来 2000 RMB/方头程估算新品安全边界。</div></div></div>
           <div class="card-body" id="profitCalculatorPanel"></div>
         </div>
-        <div class="card">
+        <div class="card" id="profitCostGapCard">
           <div class="card-h"><div><h3>成本覆盖缺口</h3><div class="sub">没有成本的货号不硬算真实利润；后续成本表更新后这里会自动收敛。</div></div></div>
           <div class="card-body" id="profitCostGaps"></div>
         </div>
@@ -3420,20 +3653,20 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
         <div class="card-body" id="inventoryOverview"></div>
       </div>
       <div class="grid cols-2" style="margin-bottom:16px">
-        <div class="card">
+        <div class="card" id="inventoryRiskCard">
           <div class="card-h"><div><h3>补货 / 断货预警</h3><div class="sub">按当前店铺/分组销售速度测算去化天数；库存基数仍是全局物理批次。</div></div></div>
           <div class="card-body" id="inventoryRiskList"></div>
         </div>
-        <div class="card">
+        <div class="card" id="inventorySlowCard">
           <div class="card-h"><div><h3>库存沉淀 / 清货候选</h3><div class="sub">到仓有货但 30 天动销弱，优先看是否要做活动、优化链接或暂停补货。</div></div></div>
           <div class="card-body" id="inventorySlowList"></div>
         </div>
       </div>
-      <div class="card" style="margin-bottom:16px">
+      <div class="card" style="margin-bottom:16px" id="inventoryProductCard">
         <div class="card-h"><div><h3>货号库存去化明细</h3><div class="sub">一行一个标准货号；支持顶部货号/店铺/分组筛选。店铺筛选只改变销售速度，不代表该店独占这些库存。</div></div></div>
         <div class="card-body" id="inventoryProductTable"></div>
       </div>
-      <details class="detail-section">
+      <details class="detail-section" id="inventoryBatchFold">
         <summary>批次生命周期 / 在途明细</summary>
         <div class="detail-body">
           <div id="inventoryBatchTable"></div>
@@ -3481,7 +3714,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
 <script>
 let DATA = JSON.parse(document.getElementById('portal-data').textContent);
 let STORE_CODES = new Set((DATA.stores || []).map(s => s.store_key));
-const STORE_ORDER = ['DL','DX','FY','LQ','NM','HL','JY','ZL','TS','MZ','CX','YJ','XL','QY','QH'];
+const STORE_ORDER = ['DL','DX','FY','LQ','NM','HL','JY','ZL','TS','MZ','CX','YJ','XL','QY','QH','TZ'];
 function orderedStoreCodes(){
   const known = STORE_ORDER.filter(s => STORE_CODES.has(s));
   const extra = [...STORE_CODES].filter(s => !STORE_ORDER.includes(s)).sort();
@@ -3492,6 +3725,7 @@ function storeOrderIndex(store){
   return idx >= 0 ? idx : STORE_ORDER.length + 999;
 }
 let STORE_CODES_ARRAY = orderedStoreCodes();
+const TOTAL_STORE_COUNT = STORE_CODES_ARRAY.length || Number(DATA.counts?.stores || 0) || 0;
 let portalDataLastReadAt = new Date();
 let portalRefreshInFlight = false;
 let portalAutoRefreshTimer = null;
@@ -3514,12 +3748,12 @@ const pct = n => n == null || n === '' ? '-' : (Number(n) * 100).toFixed(1) + '%
 const $ = id => document.getElementById(id);
 const STORE_GROUP_FALLBACK = {
   DL:'DSY', DX:'DSY', FY:'DSY', LQ:'DSY', NM:'DSY', HL:'DSY', JY:'DSY', ZL:'DSY', TS:'DSY', MZ:'DSY',
-  CX:'LGM', YJ:'LGM', XL:'LGM', QY:'LGM', QH:'LGM'
+  CX:'LGM', YJ:'LGM', XL:'LGM', QY:'LGM', QH:'LGM', TZ:'LGM'
 };
 const GROUP_META = {
-  ALL:{key:'ALL', label:'全部', desc:'15 店合计', color:'#10b981', cls:'total'},
+  ALL:{key:'ALL', label:'全部', desc:String(TOTAL_STORE_COUNT || STORE_CODES_ARRAY.length) + ' 店合计', color:'#10b981', cls:'total'},
   DSY:{key:'DSY', label:'DSY 组', desc:'DL/DX/FY/LQ/NM/HL/JY/ZL/TS/MZ', color:'#2563eb', cls:'dsy'},
-  LGM:{key:'LGM', label:'LGM 组', desc:'CX/YJ/XL/QY/QH', color:'#f97316', cls:'lgm'}
+  LGM:{key:'LGM', label:'LGM 组', desc:'CX/YJ/XL/QY/QH/TZ', color:'#f97316', cls:'lgm'}
 };
 function storeGroupKey(row){
   return String(row?.group_key || STORE_GROUP_FALLBACK[String(row?.store_key || '').toUpperCase()] || 'OTHER').toUpperCase();
@@ -3552,10 +3786,10 @@ function actionDomainActive(){ return isActionFilterTab() ? state.domain : ''; }
 function actionRiskActive(){ return isActionFilterTab() ? state.risk : ''; }
 function actionStatusActive(){ return isActionFilterTab() ? state.status : ''; }
 function actionFocusActive(){ return isActionFilterTab() ? (state.focus || 'all') : 'all'; }
-let state = {tab:'overview', q:'', product:'', store:'', domain:'', risk:'', status:'', focus:'all', insight:'all', rankPeriod:'day', rankWindow:'', startDate:'', endDate:'', rangePreset:'today', trendMetric:'sales'};
+let state = {tab:'overview', q:'', product:'', store:'', domain:'', risk:'', status:'', focus:'all', insight:'all', rankPeriod:'day', rankWindow:'', startDate:'', endDate:'', rangePreset:'today', trendMetric:'sales', salesMode:'net', qtyMode:'net', returnsMode:'request', profitMode:'loss'};
 let lastRenderedTab = '';
 let shouldScrollToActiveTab = false;
-const STATE_KEYS = ['tab','q','product','store','domain','risk','status','focus','insight','rankPeriod','rankWindow','startDate','endDate','rangePreset','trendMetric'];
+const STATE_KEYS = ['tab','q','product','store','domain','risk','status','focus','insight','rankPeriod','rankWindow','startDate','endDate','rangePreset','trendMetric','salesMode','qtyMode','returnsMode','profitMode'];
 let applyingHash = false;
 const ACTION_STATE_KEY = 'SHEIN_BI_ACTION_STATE_V1';
 const ACTION_STATE_API = '/api/action-state';
@@ -4343,16 +4577,19 @@ function aggregateDailyStores(start = ensureDateRange().start, end = ensureDateR
     const d = String(r.date || '').slice(0, 10);
     if (!d || d < start || d > end) continue;
     const key = r.store_key || '-';
-    const row = map.get(key) || {store_key:key, group_key:r.group_key || '', shop_name:r.shop_name || '', sales_sar:0, orders:0, quantity:0, daysSet:new Set()};
+    const row = map.get(key) || {store_key:key, group_key:r.group_key || '', shop_name:r.shop_name || '', sales_sar:0, gross_sales_sar:0, orders:0, gross_orders:0, quantity:0, gross_quantity:0, daysSet:new Set()};
     row.group_key = row.group_key || r.group_key || '';
     row.shop_name = row.shop_name || r.shop_name || '';
     row.sales_sar += Number(r.sales_sar || 0);
+    row.gross_sales_sar += Number(r.gross_sales_sar ?? r.sales_sar ?? 0);
     row.orders += Number(r.orders || 0);
+    row.gross_orders += Number(r.gross_orders ?? r.orders ?? 0);
     row.quantity += Number(r.quantity || 0);
+    row.gross_quantity += Number(r.gross_quantity ?? r.quantity ?? 0);
     row.daysSet.add(d);
     map.set(key, row);
   }
-  return Array.from(map.values()).map(r => ({...r, sales_sar:Math.round(r.sales_sar * 100) / 100, days:r.daysSet.size, daysSet:undefined}));
+  return Array.from(map.values()).map(r => ({...r, sales_sar:Math.round(r.sales_sar * 100) / 100, gross_sales_sar:Math.round(r.gross_sales_sar * 100) / 100, days:r.daysSet.size, daysSet:undefined}));
 }
 function aggregateDailyProducts(start = ensureDateRange().start, end = ensureDateRange().end){
   const map = new Map();
@@ -4360,17 +4597,20 @@ function aggregateDailyProducts(start = ensureDateRange().start, end = ensureDat
     const d = String(r.date || '').slice(0, 10);
     if (!d || d < start || d > end) continue;
     const key = r.standard_goods_sn || '-';
-    const row = map.get(key) || {standard_goods_sn:key, goods_title:r.goods_title || '', sales_sar:0, quantity:0, orders:0, store_count:0, daysSet:new Set()};
+    const row = map.get(key) || {standard_goods_sn:key, goods_title:r.goods_title || '', sales_sar:0, gross_sales_sar:0, quantity:0, gross_quantity:0, orders:0, gross_orders:0, store_count:0, daysSet:new Set()};
     row.goods_title = row.goods_title || r.goods_title || '';
     row.skc_list = [row.skc_list, r.skc_list].filter(Boolean).join(' ');
     row.sales_sar += Number(r.sales_sar || 0);
+    row.gross_sales_sar += Number(r.gross_sales_sar ?? r.sales_sar ?? 0);
     row.quantity += Number(r.quantity || 0);
+    row.gross_quantity += Number(r.gross_quantity ?? r.quantity ?? 0);
     row.orders += Number(r.orders || 0);
+    row.gross_orders += Number(r.gross_orders ?? r.orders ?? 0);
     row.store_count = Math.max(Number(row.store_count || 0), Number(r.store_count || 0));
     row.daysSet.add(d);
     map.set(key, row);
   }
-  return Array.from(map.values()).map(r => ({...r, sales_sar:Math.round(r.sales_sar * 100) / 100, days:r.daysSet.size, daysSet:undefined}));
+  return Array.from(map.values()).map(r => ({...r, sales_sar:Math.round(r.sales_sar * 100) / 100, gross_sales_sar:Math.round(r.gross_sales_sar * 100) / 100, days:r.daysSet.size, daysSet:undefined}));
 }
 function aggregateDailyProductGroups(start = ensureDateRange().start, end = ensureDateRange().end){
   const map = new Map();
@@ -4380,16 +4620,19 @@ function aggregateDailyProductGroups(start = ensureDateRange().start, end = ensu
     const group = String(r.group_key || '').toUpperCase() || 'OTHER';
     const goods = r.standard_goods_sn || '-';
     const key = group + '|' + goods;
-    const row = map.get(key) || {group_key:group, standard_goods_sn:goods, sales_sar:0, quantity:0, orders:0, store_count:0, daysSet:new Set()};
+    const row = map.get(key) || {group_key:group, standard_goods_sn:goods, sales_sar:0, gross_sales_sar:0, quantity:0, gross_quantity:0, orders:0, gross_orders:0, store_count:0, daysSet:new Set()};
     row.skc_list = [row.skc_list, r.skc_list].filter(Boolean).join(' ');
     row.sales_sar += Number(r.sales_sar || 0);
+    row.gross_sales_sar += Number(r.gross_sales_sar ?? r.sales_sar ?? 0);
     row.quantity += Number(r.quantity || 0);
+    row.gross_quantity += Number(r.gross_quantity ?? r.quantity ?? 0);
     row.orders += Number(r.orders || 0);
+    row.gross_orders += Number(r.gross_orders ?? r.orders ?? 0);
     row.store_count = Math.max(Number(row.store_count || 0), Number(r.store_count || 0));
     row.daysSet.add(d);
     map.set(key, row);
   }
-  return Array.from(map.values()).map(r => ({...r, sales_sar:Math.round(r.sales_sar * 100) / 100, days:r.daysSet.size, daysSet:undefined}));
+  return Array.from(map.values()).map(r => ({...r, sales_sar:Math.round(r.sales_sar * 100) / 100, gross_sales_sar:Math.round(r.gross_sales_sar * 100) / 100, days:r.daysSet.size, daysSet:undefined}));
 }
 function productScopeQuery(){
   return String(state.product || '').trim().toLowerCase();
@@ -4460,39 +4703,22 @@ function aggregateDailyStoreProducts(start = ensureDateRange().start, end = ensu
     const store = String(r.store_key || '-').toUpperCase();
     const goods = r.standard_goods_sn || '-';
     const key = (opts.groupBy || 'storeProduct') === 'store' ? store : (opts.groupBy || 'storeProduct') === 'product' ? goods : store + '|' + goods;
-    const row = map.get(key) || {
-      store_key: store,
-      group_key: r.group_key || '',
-      standard_goods_sn: goods,
-      goods_title: r.goods_title || '',
-      sales_sar:0,
-      quantity:0,
-      orders:0,
-      storesSet:new Set(),
-      productsSet:new Set(),
-      daysSet:new Set()
-    };
+    const row = map.get(key) || {store_key:store, group_key:r.group_key || '', standard_goods_sn:goods, goods_title:r.goods_title || '', sales_sar:0, gross_sales_sar:0, quantity:0, gross_quantity:0, orders:0, gross_orders:0, storesSet:new Set(), productsSet:new Set(), daysSet:new Set()};
     row.group_key = row.group_key || r.group_key || '';
     row.goods_title = row.goods_title || r.goods_title || '';
     row.skc_list = [row.skc_list, r.skc_list].filter(Boolean).join(' ');
     row.sales_sar += Number(r.sales_sar || 0);
+    row.gross_sales_sar += Number(r.gross_sales_sar ?? r.sales_sar ?? 0);
     row.quantity += Number(r.quantity || 0);
+    row.gross_quantity += Number(r.gross_quantity ?? r.quantity ?? 0);
     row.orders += Number(r.orders || 0);
+    row.gross_orders += Number(r.gross_orders ?? r.orders ?? 0);
     row.storesSet.add(store);
     row.productsSet.add(goods);
     row.daysSet.add(d);
     map.set(key, row);
   }
-  return Array.from(map.values()).map(r => ({
-    ...r,
-    sales_sar:Math.round(r.sales_sar * 100) / 100,
-    store_count:r.storesSet.size,
-    activeProducts:r.productsSet.size,
-    days:r.daysSet.size,
-    storesSet:undefined,
-    productsSet:undefined,
-    daysSet:undefined
-  }));
+  return Array.from(map.values()).map(r => ({...r, sales_sar:Math.round(r.sales_sar * 100) / 100, gross_sales_sar:Math.round(r.gross_sales_sar * 100) / 100, store_count:r.storesSet.size, activeProducts:r.productsSet.size, days:r.daysSet.size, storesSet:undefined, productsSet:undefined, daysSet:undefined}));
 }
 function aggregateHomeStores(start = ensureDateRange().start, end = ensureDateRange().end){
   const hasProduct = Boolean(productScopeQuery());
@@ -4521,33 +4747,42 @@ function salesScopeSummary(){
     rangeStart: range.start,
     rangeEnd: range.end,
     rangeLabel: selectedRangeText(),
-    rangeSalesSar: sumSeries(rows, 'sales_sar'),
-    rangeOrders: sumSeries(rows, 'orders'),
-    rangeQuantity: sumSeries(rows, 'quantity'),
+    rangeSalesSar: sumSeries(rows, salesAmountKey()),
+    rangeOrders: sumSeries(rows, ordersKey()),
+    rangeQuantity: sumSeries(rows, quantityKey()),
     rangeDays: new Set((DATA.rankings?.dailyStores || []).map(r => String(r.date || '').slice(0,10)).filter(d => d >= range.start && d <= range.end)).size,
-    monthSalesSar: sumSeries(monthRows, 'sales_sar') || Number(k.salesSar || 0),
-    monthOrders: sumSeries(monthRows, 'orders') || Number(k.orders || 0),
-    monthQuantity: sumSeries(monthRows, 'quantity') || Number(k.quantity || 0),
+    monthSalesSar: sumSeries(monthRows, salesAmountKey()) || Number(k.salesSar || 0),
+    monthOrders: sumSeries(monthRows, ordersKey()) || Number(k.orders || 0),
+    monthQuantity: sumSeries(monthRows, quantityKey()) || Number(k.quantity || 0),
     days: Math.max(1, new Set((DATA.rankings?.dailyStores || []).map(r => String(r.date || '').slice(0,10)).filter(d => d >= monthStart(salesDate) && d <= salesDate)).size || 1)
   };
 }
 function afterSalesScopeSummary(){
   const date = DATA.dates?.businessDate || DATA.dates?.salesDate || dataAnchorDate();
   const range = ensureDateRange();
-  const series = DATA.trend?.afterSalesSeries || [];
-  const rangeRows = series.filter(x => String(x.date || '').slice(0,10) >= range.start && String(x.date || '').slice(0,10) <= range.end);
-  const today = series.find(x => x.date === date) || {};
-  const monthRows = seriesForMonth(series, date);
+  const dkey = afterSalesDateKey();
+  const valid = r => String(r.order_sub_status_name || '').trim() !== '已取消';
+  const dateOf = r => String(r[dkey] || r.request_time || r.snapshot_date || '').slice(0,10);
+  const rows = (DATA.afterSales || []).filter(r => {
+    const d = dateOf(r);
+    return d && d >= range.start && d <= range.end && valid(r);
+  });
+  const todayRows = (DATA.afterSales || []).filter(r => dateOf(r) === date && valid(r));
+  const monthRows = (DATA.afterSales || []).filter(r => {
+    const d = dateOf(r);
+    return d && d >= monthStart(date) && d <= date && valid(r);
+  });
+  const amount = arr => arr.reduce((sum,r)=>sum+Number(r.price_amount_total || 0),0);
   return {
     date: date || '-',
-    sourceLabel: DATA.trend?.afterSalesSource?.label || '按售后申请时间',
-    todayCases: Number(today.case_count ?? 0),
-    todayAmountSar: Number(today.amount_sar ?? 0),
-    rangeCases: sumSeries(rangeRows, 'case_count'),
-    rangeAmountSar: sumSeries(rangeRows, 'amount_sar'),
-    monthCases: sumSeries(monthRows, 'case_count') || Number(today.case_count ?? 0),
-    monthAmountSar: sumSeries(monthRows, 'amount_sar') || Number(today.amount_sar ?? 0),
-    days: Math.max(1, rangeRows.length || 1)
+    sourceLabel: state.returnsMode === 'order' ? '按订单创建时间' : '按售后申请时间',
+    todayCases: todayRows.length,
+    todayAmountSar: amount(todayRows),
+    rangeCases: rows.length,
+    rangeAmountSar: amount(rows),
+    monthCases: monthRows.length,
+    monthAmountSar: amount(monthRows),
+    days: Math.max(1, new Set(rows.map(dateOf).filter(Boolean)).size || 1)
   };
 }
 function afterSalesGroupScopeSummary(){
@@ -4565,7 +4800,7 @@ function afterSalesGroupScopeSummary(){
   }
   if (!map.size) {
     for (const r of DATA.afterSales || []) {
-      const d = String(r.request_time || r.snapshot_date || '').slice(0, 10);
+      const d = String(r[afterSalesDateKey()] || r.request_time || r.snapshot_date || '').slice(0, 10);
       if (!d || d < range.start || d > range.end) continue;
       const key = storeGroupKey(r);
       const row = map.get(key) || {group_key:key, cases:0, amount_sar:0};
@@ -4586,6 +4821,18 @@ function homeScopeRows(){
     {key:'LGM', label:'LGM 组', scopeValue:'GROUP:LGM'}
   ];
 }
+function salesAmountKey(){ return state.salesMode === 'gross' ? 'gross_sales_sar' : 'sales_sar'; }
+function quantityKey(){ return state.qtyMode === 'gross' ? 'gross_quantity' : 'quantity'; }
+function ordersKey(){ return state.qtyMode === 'gross' ? 'gross_orders' : 'orders'; }
+function profitValueKey(){ return state.profitMode === 'rtv' ? 'profitReceivedResellableSar' : 'profitSar'; }
+function profitRowValueKey(){ return state.profitMode === 'rtv' ? 'profit_if_rtv_received_resellable_sar' : 'profit_before_storage_sar'; }
+function afterSalesDateKey(){ return state.returnsMode === 'order' ? 'order_created_date' : 'request_time'; }
+function metricModeToggle(key, items){
+  const cur = state[key];
+  return '<div class="trend-toggle metric-switch-row" data-mode-group="'+escapeHtml(key)+'">'+items.map(it =>
+    '<button type="button" class="'+(cur === it.value ? 'active' : '')+'" data-metric-mode-key="'+escapeHtml(key)+'" data-metric-mode-value="'+escapeHtml(it.value)+'">'+escapeHtml(it.label)+'</button>'
+  ).join('')+'</div>';
+}
 function homeSalesForScope(start, end, scopeValue = ''){
   const hasProduct = Boolean(productScopeQuery());
   const source = hasProduct ? (DATA.rankings?.dailyStoreProducts || []) : (DATA.rankings?.dailyStores || []);
@@ -4595,9 +4842,9 @@ function homeSalesForScope(start, end, scopeValue = ''){
     if (!d || d < start || d > end) continue;
     if (!storeMatchesScope(r, scopeValue)) continue;
     if (hasProduct && !productDailyMatch(r)) continue;
-    row.sales_sar += Number(r.sales_sar || 0);
-    row.orders += Number(r.orders || 0);
-    row.quantity += Number(r.quantity || 0);
+    row.sales_sar += Number(r[salesAmountKey()] ?? r.sales_sar ?? 0);
+    row.orders += Number(r[ordersKey()] ?? r.orders ?? 0);
+    row.quantity += Number(r[quantityKey()] ?? r.quantity ?? 0);
     row.daysSet.add(d);
   }
   return {...row, sales_sar:Math.round(row.sales_sar * 100) / 100, days:row.daysSet.size, daysSet:undefined};
@@ -4609,32 +4856,37 @@ function activeProductCountForScope(start, end, scopeValue = ''){
     if (!d || d < start || d > end) continue;
     if (!storeMatchesScope(r, scopeValue)) continue;
     if (!productDailyMatch(r)) continue;
-    if (Number(r.quantity || 0) > 0 && r.standard_goods_sn) set.add(r.standard_goods_sn);
+    if (Number(r[quantityKey()] ?? r.quantity ?? 0) > 0 && r.standard_goods_sn) set.add(r.standard_goods_sn);
   }
   return set.size;
 }
 function homeAfterSalesForScope(start, end, scopeValue = ''){
   const hasProduct = Boolean(productScopeQuery());
+  if (state.returnsMode === 'order') {
+    const source = hasProduct ? (DATA.rankings?.dailyStoreProducts || []) : (DATA.rankings?.dailyStores || []);
+    const out = {cases:0, amount_sar:0};
+    for (const r of source) {
+      const d = String(r.date || '').slice(0, 10);
+      if (!d || d < start || d > end) continue;
+      if (!storeMatchesScope(r, scopeValue)) continue;
+      if (hasProduct && !productDailyMatch(r)) continue;
+      out.cases += Math.max(0, Number(r.gross_orders ?? r.orders ?? 0) - Number(r.orders || 0));
+      out.amount_sar += Math.max(0, Number(r.gross_sales_sar ?? r.sales_sar ?? 0) - Number(r.sales_sar || 0));
+    }
+    return {cases:out.cases, amount_sar:Math.round(out.amount_sar * 100) / 100};
+  }
   const detailRows = (DATA.afterSales || []).filter(r => {
     const d = String(r.request_time || r.snapshot_date || '').slice(0, 10);
     if (!d || d < start || d > end) return false;
+    if (String(r.order_sub_status_name || '').trim() === '已取消') return false;
     if (!storeMatchesScope(r, scopeValue)) return false;
     if (hasProduct && !productMatch(r)) return false;
     return true;
   });
-  if (detailRows.length || storeFilterKind(scopeValue).type === 'store' || hasProduct) {
-    return {
-      cases: detailRows.length,
-      amount_sar: detailRows.reduce((sum, r) => sum + Number(r.price_amount_total || r.amount_sar || r.refund_amount || 0), 0)
-    };
-  }
-  if (storeFilterKind(scopeValue).type === 'group') {
-    const map = afterSalesGroupScopeSummary();
-    const hit = map.get(storeFilterKind(scopeValue).key) || {};
-    return {cases:Number(hit.cases || 0), amount_sar:Number(hit.amount_sar || 0)};
-  }
-  const after = afterSalesScopeSummary();
-  return {cases:Number(after.rangeCases || 0), amount_sar:Number(after.rangeAmountSar || 0)};
+  return {
+    cases: detailRows.length,
+    amount_sar: detailRows.reduce((sum, r) => sum + Number(r.price_amount_total || r.amount_sar || r.refund_amount || 0), 0)
+  };
 }
 function profitDailyRows(start, end, scopeValue = state.store, respectProduct = true){
   const q = productScopeQuery();
@@ -4739,7 +4991,15 @@ function kpiJump(tab, patch = {}){
 }
 function renderKpis(){
   const range = ensureDateRange();
-  const afterLabel = DATA.trend?.afterSalesSource?.label || '按售后申请时间';
+  const salesTitle = state.salesMode === 'gross' ? '当前时段总销售额' : '当前时段净销售额';
+  const salesTip = state.salesMode === 'gross'
+    ? '总销售额按订单创建时间统计，不扣售后、退货、派送失败等反转订单。用于看原始成交规模。'
+    : '净销售额按订单创建时间统计，已扣除退货、仅退款、派送失败等反转订单。用于利润和真实经营口径。';
+  const qtyTip = state.qtyMode === 'gross'
+    ? '总订单/销量包含后续发生退货或派送失败的订单，用于看原始出单规模。'
+    : '净订单/销量只统计最终仍保留成交额的订单，用于经营结果口径。';
+  const afterLabel = state.returnsMode === 'order' ? '按订单创建时间 · 未取消售后' : '按售后申请时间';
+  const profitLabel = state.profitMode === 'rtv' ? '按RTV已收入仓可二售测算' : '按退货全损保守估计';
   const rows = homeScopeRows().map(def => {
     const sales = homeSalesForScope(range.start, range.end, def.scopeValue);
     const after = homeAfterSalesForScope(range.start, range.end, def.scopeValue);
@@ -4760,32 +5020,38 @@ function renderKpis(){
   const label = txt => '<div class="matrix-cell label">'+escapeHtml(txt)+'</div>';
   const value = html => '<div class="matrix-cell value">'+html+'</div>';
   const moneyValue = v => value(escapeHtml(fmt.format(Number(v || 0))));
-  const moneyDualValue = v => value(escapeHtml(fmt.format(Number(v || 0))) + '<span class="minor-money">RMB '+escapeHtml(fmt.format(Number(v || 0) * RMB_RATE))+'</span>');
   const rmbValue = v => value(escapeHtml(fmt.format(Number(v || 0) * RMB_RATE)));
   const card = (title, sub, body, tip, jump = 'business') =>
-    '<button class="overview-matrix-card" data-overview-jump="'+escapeHtml(jump)+'" aria-label="查看'+escapeHtml(title)+'">'+
+    '<div class="overview-matrix-card" role="button" tabindex="0" data-overview-jump="'+escapeHtml(jump)+'" aria-label="查看'+escapeHtml(title)+'">'+
       '<div class="matrix-card-head"><h4>'+escapeHtml(title)+' <em class="help" tabindex="0" data-tip="'+escapeHtml(tip)+'">?</em></h4><div class="sub">'+escapeHtml(sub)+'</div></div>'+body+
-    '</button>';
+    '</div>';
+  const profitMoney = r => Number(r.profit?.[profitValueKey()] ?? r.profit?.profitSar ?? 0);
   $('kpis').innerHTML =
-    card('当前时段净成交额', selectedRangeText(), matrix(2,
-      head(['范围','SAR','RMB'])+
-      rows.map(r => label(r.label)+moneyValue(r.sales_sar)+rmbValue(r.sales_sar)).join('')
-    ), '按顶部时间段和首页店铺/货号筛选联动；退货、仅退款、派送失败等反转订单不计入成交额。RMB 按固定汇率 1 SAR = 1.8 估算。')+
-    card('当前时段订单 / 销量 / 动销', selectedRangeText(), matrix(3,
-      head(['范围','订单','销量','动销货号'])+
-      rows.map(r => label(r.label)+value(num(r.orders)+' 单')+value(num(r.quantity)+' 件')+value(num(r.activeProducts)+' 个')).join('')
-    ), '订单按净成交订单号去重；销量只统计净成交商品件数；动销货号是当前时段有净成交销量的标准货号数量。')+
-    card('当前时段退货 / 售后', afterLabel, matrix(3,
-      head(['范围','数量','SAR','RMB'])+
-      rows.map(r => label(r.label)+value(num(r.returnCases)+' 单')+moneyValue(r.returnAmountSar)+rmbValue(r.returnAmountSar)).join('')
-    ), '按订单 > 退货退款里的售后申请时间 request_time 统计；金额是这些售后订单对应的商品金额合计。')+
-    card('当前时段真实利润', '按成本表 / 退货保守口径', matrix(3,
-      head(['范围','SAR','RMB','利润率'])+
-      rows.map(r => label(r.label)+value(profitDisplayHtml(r.profit))+value(r.profit?.hasAnyCost ? escapeHtml(fmt.format(Number(r.profit.profitSar || 0) * RMB_RATE)) : '<span class="pending-profit">待成本表</span>')+profitMarginHtml(r.profit)).join('')
-    , 'profit-matrix'), '真实利润=净营收-商品成本-退货派送费；退货或派送失败营收按 0，仍扣成本并加 13.88 SAR。月仓储费只用于月度总利润，不拆到单货号。', 'profit');
+    card(salesTitle, selectedRangeText(),
+      metricModeToggle('salesMode', [{value:'net', label:'净销售额'}, {value:'gross', label:'总销售额'}])+
+      matrix(2, head(['范围','SAR','RMB'])+rows.map(r => label(r.label)+moneyValue(r.sales_sar)+rmbValue(r.sales_sar)).join('')),
+      salesTip+' RMB 按固定汇率 1 SAR = 1.8 估算。')+
+    card('当前时段订单 / 销量 / 动销', selectedRangeText(),
+      metricModeToggle('qtyMode', [{value:'net', label:'净销量'}, {value:'gross', label:'总销量'}])+
+      matrix(3, head(['范围','订单','销量','动销货号'])+rows.map(r => label(r.label)+value(num(r.orders)+' 单')+value(num(r.quantity)+' 件')+value(num(r.activeProducts)+' 个')).join('')),
+      qtyTip+' 动销货号是当前时段有对应销量的标准货号数量。')+
+    card('当前时段退货 / 售后', afterLabel,
+      metricModeToggle('returnsMode', [{value:'request', label:'售后申请时间'}, {value:'order', label:'订单创建时间'}])+
+      matrix(3, head(['范围','数量','SAR','RMB'])+rows.map(r => label(r.label)+value(num(r.returnCases)+' 单')+moneyValue(r.returnAmountSar)+rmbValue(r.returnAmountSar)).join('')),
+      '已取消售后不计入；金额按订单实收/预计收入字段优先，避免售后列表展示价失真。')+
+    card('当前时段真实利润', profitLabel,
+      metricModeToggle('profitMode', [{value:'loss', label:'全损保守'}, {value:'rtv', label:'RTV入仓测算'}])+
+      matrix(3, head(['范围','SAR','RMB','利润率'])+rows.map(r => label(r.label)+value(profitDisplayHtml(r.profit))+value(r.profit?.hasAnyCost ? escapeHtml(fmt.format(profitMoney(r) * RMB_RATE)) : '<span class="pending-profit">待成本表</span>')+profitMarginHtml(r.profit)).join(''), 'profit-matrix'),
+      '全损保守：退货营收为0并扣成本；RTV入仓测算：ET已收退件按可二售回收成本测算。月仓储费只用于月度总利润，不拆到单货号。', 'profit');
   document.querySelectorAll('[data-overview-jump]').forEach(btn => btn.addEventListener('click', e => {
-    if (e.target?.classList?.contains('help')) return;
+    if (e.target?.classList?.contains('help') || e.target?.closest?.('[data-metric-mode-key]')) return;
     kpiJump(btn.dataset.overviewJump || 'business');
+  }));
+  document.querySelectorAll('[data-metric-mode-key]').forEach(btn => btn.addEventListener('click', e => {
+    e.preventDefault(); e.stopPropagation();
+    const key = btn.dataset.metricModeKey;
+    const val = btn.dataset.metricModeValue;
+    if (key && val && state[key] !== val) { state[key] = val; syncUrlHash(); renderAll(); }
   }));
 }
 function homeBarList(rows, valueKey, labelKey, opts = {}){
@@ -5200,7 +5466,7 @@ function buildSalesSeries(kind){
     if (hasProduct && !productDailyMatch(r)) continue;
     const id = kind === 'month' ? monthId(d) : d;
     const row = buckets.get(id) || {id, label: kind === 'month' ? monthPeriodLabel(id, range) : d, total:0, DSY:0, LGM:0, scope:0};
-    const value = Number(r.sales_sar || 0);
+    const value = Number(r[salesAmountKey()] ?? r.sales_sar ?? 0);
     row.total += value;
     row.scope += value;
     const g = storeGroupKey(r);
@@ -5253,22 +5519,40 @@ function buildMetricSeries(kind, metric = trendMetricKey()){
       if (hasProduct && !productDailyMatch(r)) continue;
       const id = kind === 'month' ? monthId(d) : d;
       const row = ensure(id);
-      const v = Number(r.quantity || 0);
+      const v = Number(r[quantityKey()] ?? r.quantity ?? 0);
       row.total += v; row.scope += v;
       const g = storeGroupKey(r);
       if (g === 'DSY' || g === 'LGM') row[g] += v;
     }
   } else if (metric === 'returns') {
-    for (const r of DATA.afterSales || []) {
-      const d = String(r.request_time || r.snapshot_date || '').slice(0, 10);
-      if (!d || d < range.start || d > range.end) continue;
-      if (!storeMatchesScope(r)) continue;
-      if (productScopeQuery() && !productMatch(r)) continue;
-      const id = kind === 'month' ? monthId(d) : d;
-      const row = ensure(id);
-      row.total += 1; row.scope += 1;
-      const g = storeGroupKey(r);
-      if (g === 'DSY' || g === 'LGM') row[g] += 1;
+    if (state.returnsMode === 'order') {
+      const hasProduct = Boolean(productScopeQuery());
+      const source = hasProduct ? (DATA.rankings?.dailyStoreProducts || []) : (DATA.rankings?.dailyStores || []);
+      for (const r of source) {
+        const d = String(r.date || '').slice(0, 10);
+        if (!d || d < range.start || d > range.end) continue;
+        if (!storeMatchesScope(r)) continue;
+        if (hasProduct && !productDailyMatch(r)) continue;
+        const id = kind === 'month' ? monthId(d) : d;
+        const row = ensure(id);
+        const v = Math.max(0, Number(r.gross_orders ?? r.orders ?? 0) - Number(r.orders || 0));
+        row.total += v; row.scope += v;
+        const g = storeGroupKey(r);
+        if (g === 'DSY' || g === 'LGM') row[g] += v;
+      }
+    } else {
+      for (const r of DATA.afterSales || []) {
+        const d = String(r.request_time || r.snapshot_date || '').slice(0, 10);
+        if (!d || d < range.start || d > range.end) continue;
+        if (String(r.order_sub_status_name || '').trim() === '已取消') continue;
+        if (!storeMatchesScope(r)) continue;
+        if (productScopeQuery() && !productMatch(r)) continue;
+        const id = kind === 'month' ? monthId(d) : d;
+        const row = ensure(id);
+        row.total += 1; row.scope += 1;
+        const g = storeGroupKey(r);
+        if (g === 'DSY' || g === 'LGM') row[g] += 1;
+      }
     }
   } else if (metric === 'profit') {
     for (const r of profitDailyRows(range.start, range.end, state.store, true)) {
@@ -5276,7 +5560,7 @@ function buildMetricSeries(kind, metric = trendMetricKey()){
       if (!d) continue;
       const id = kind === 'month' ? monthId(d) : d;
       const row = ensure(id);
-      const v = Number(r.profit_before_storage_sar || 0);
+      const v = Number(r[profitRowValueKey()] ?? r.profit_before_storage_sar ?? 0);
       row.total += v; row.scope += v;
       const g = storeGroupKey(r);
       if (g === 'DSY' || g === 'LGM') row[g] += v;
@@ -5309,7 +5593,7 @@ function renderMetricLineChart(kind = 'day', metric = trendMetricKey()){
   const gridTicks = [0, 0.25, 0.5, 0.75, 1].map(t => {
     const val = max * t;
     const y = yFor(val);
-    return '<line class="grid-line" x1="'+padL+'" y1="'+y.toFixed(1)+'" x2="'+(w-padR)+'" y2="'+y.toFixed(1)+'"></line>'+ 
+    return '<line class="grid-line" x1="'+padL+'" y1="'+y.toFixed(1)+'" x2="'+(w-padR)+'" y2="'+y.toFixed(1)+'"></line>'+
       '<text class="axis" text-anchor="end" x="'+(padL-10)+'" y="'+(y+4).toFixed(1)+'">'+escapeHtml(trendValueText(val, metric))+'</text>';
   }).join('');
   const lines = keys.map(k => {
@@ -5343,13 +5627,13 @@ function renderMetricLineChart(kind = 'day', metric = trendMetricKey()){
   return '<div class="line-chart">'+
     '<svg viewBox="0 0 '+w+' '+h+'" role="img" aria-label="'+escapeHtml((kind === 'month' ? '月' : '日') + (TREND_METRICS[metric]?.aria || '趋势'))+'">'+
       gridTicks+
-      '<line class="axis-line" x1="'+padL+'" y1="'+padT+'" x2="'+padL+'" y2="'+(h-padB)+'"></line>'+ 
-      '<line class="axis-line" x1="'+padL+'" y1="'+(h-padB)+'" x2="'+(w-padR)+'" y2="'+(h-padB)+'"></line>'+ 
+      '<line class="axis-line" x1="'+padL+'" y1="'+padT+'" x2="'+padL+'" y2="'+(h-padB)+'"></line>'+
+      '<line class="axis-line" x1="'+padL+'" y1="'+(h-padB)+'" x2="'+(w-padR)+'" y2="'+(h-padB)+'"></line>'+
       lines+valueLabels+axisLabels+hitRects+
-    '</svg>'+ 
-    '<div class="chart-tip" aria-hidden="true"></div>'+ 
-    '<div class="chart-legend">'+keys.map(k=>'<span><i style="--c:'+colors[k]+'"></i>'+labels[k]+'：'+trendValueText(latest[k] || 0, metric)+'</span>').join('')+'</div>'+ 
-    '<p class="sub">时间段：'+escapeHtml(range.start)+' 至 '+escapeHtml(range.end)+'；当前显示 '+num(series.length)+' 个'+(kind === 'month' ? '月份' : '日期')+'。'+(sliceNote ? ' '+escapeHtml(sliceNote) : '')+'</p>'+ 
+    '</svg>'+
+    '<div class="chart-tip" aria-hidden="true"></div>'+
+    '<div class="chart-legend">'+keys.map(k=>'<span><i style="--c:'+colors[k]+'"></i>'+labels[k]+'：'+trendValueText(latest[k] || 0, metric)+'</span>').join('')+'</div>'+
+    '<p class="sub">时间段：'+escapeHtml(range.start)+' 至 '+escapeHtml(range.end)+'；当前显示 '+num(series.length)+' 个'+(kind === 'month' ? '月份' : '日期')+'。'+(sliceNote ? ' '+escapeHtml(sliceNote) : '')+'</p>'+
   '</div>';
 }
 function renderSalesLineChart(kind = 'day'){
@@ -5571,7 +5855,7 @@ function renderHomeDashboard(){
     '</div>'+
     '<div class="dashboard-section-title"><h3>排行榜</h3><div class="sub">店铺只显示 DL/DX 等代号，货号显示归并后的标准货号；排行榜按上方时间段重算。</div></div>'+
     '<div class="dashboard-grid equal">'+
-      panel('店铺净成交额排行', '当前范围 '+num(storeBySales.length)+' 店 · '+periodRangeText(rankSummary), rankList(storeBySales, {valueKey:'sales_sar', name:storeRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:r=>groupColor(storeGroupKey(r)), meta:r=>'订单 '+num(r.orders)+' · 销量 '+num(r.quantity)+' 件 · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+ 
+      panel('店铺净成交额排行', '当前范围 '+num(storeBySales.length)+' 店 · '+periodRangeText(rankSummary), rankList(storeBySales, {valueKey:'sales_sar', name:storeRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:r=>groupColor(storeGroupKey(r)), meta:r=>'订单 '+num(r.orders)+' · 销量 '+num(r.quantity)+' 件 · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+
       panel('店铺净销量排行', '完整 '+num(storeByQty.length)+' 店 · 按净成交销量件数排序。', rankList(storeByQty, {valueKey:'quantity', name:storeRankName, format:v=>num(v)+' 件', subValue:r=>money(r.sales_sar), color:r=>groupColor(storeGroupKey(r)), meta:r=>'订单 '+num(r.orders)+' · 净成交 '+money(r.sales_sar)+' · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+
     '</div>'+
     '<div class="dashboard-grid equal" style="margin-top:16px">'+
@@ -5649,9 +5933,11 @@ function renderFilters(){
   $('businessDate').textContent = dataStamp(DATA.dates?.businessDate, DATA.dates?.businessUpdatedAt);
   $('linkDate').textContent = dataStamp(DATA.dates?.linkDate, DATA.dates?.linkUpdatedAt);
   if ($('manualCostDate')) {
-    const costTs = DATA.dates?.manualCostUpdatedAt || DATA.dates?.manualStorageUpdatedAt || '';
+    const costTs = DATA.dates?.manualCostFileUpdatedAt || DATA.dates?.manualCostUpdatedAt || DATA.dates?.manualStorageUpdatedAt || '';
     $('manualCostDate').textContent = costTs ? formatStamp(costTs) : '-';
-    $('manualCostDate').title = '手动成本表：' + (DATA.dates?.manualCostUpdatedAt ? shortTs(DATA.dates.manualCostUpdatedAt) : '-') + '\\n月仓储费：' + (DATA.dates?.manualStorageUpdatedAt ? shortTs(DATA.dates.manualStorageUpdatedAt) : '-');
+    const costFiles = Array.isArray(DATA.dates?.manualCostFiles) ? DATA.dates.manualCostFiles : [];
+    const costFileLine = costFiles.length ? costFiles.map(file => String(file.file || '') + '：' + shortTs(file.updatedAt)).join('\\n') : '-';
+    $('manualCostDate').title = '成本文件修改：' + (DATA.dates?.manualCostFileUpdatedAt ? shortTs(DATA.dates.manualCostFileUpdatedAt) : '-') + '\\n成本入仓刷新：' + (DATA.dates?.manualCostUpdatedAt ? shortTs(DATA.dates.manualCostUpdatedAt) : '-') + '\\n月仓储费：' + (DATA.dates?.manualStorageUpdatedAt ? shortTs(DATA.dates.manualStorageUpdatedAt) : '-') + '\\n\\n文件明细：\\n' + costFileLine;
   }
   if ($('etDate')) {
     $('etDate').textContent = DATA.dates?.etUpdatedAt ? formatStamp(DATA.dates.etUpdatedAt) : '-';
@@ -5767,7 +6053,7 @@ function domainHealthRows(){
     {
       key:'finance', label:'财务明细', status: financeCoverage >= 15 ? 'good' : (financeCoverage > 0 ? 'warn' : 'bad'),
       value: num(DATA.financeOrders?.length || 0) + ' 在途单 / ' + num(DATA.financeGoods?.length || 0) + ' 商品',
-      detail: financeCoverage > 0 ? 'gsfs 明细当前覆盖 HL 1/15 店；其它店未接入前，不要把财务明细空值当 0。' : '暂未抓到 gsfs 财务明细。',
+      detail: financeCoverage > 0 ? 'gsfs 明细当前覆盖 HL 1/' + num(TOTAL_STORE_COUNT) + ' 店；其它店未接入前，不要把财务明细空值当 0。' : '暂未抓到 gsfs 财务明细。',
       tab:'business'
     },
     {
@@ -5856,7 +6142,7 @@ function trendReadinessRows(){
     {
       key:'finance', label:'gsfs 财务明细趋势', days:Number(t.financeDays || 0), need:7, series:t.financeSeries || [], metric:'estimate_income_sar',
       value:(t.financeSeries || []).length ? money((t.financeSeries || []).at(-1)?.estimate_income_sar) : '-',
-      detail:'目前只覆盖 HL 财务明细；扩到 15 店前，只能作为阶段性财务趋势，不代表全店。',
+      detail:'目前只覆盖 HL 财务明细；扩到全部店前，只能作为阶段性财务趋势，不代表全店。',
       tab:'business'
     }
   ];
@@ -5913,7 +6199,7 @@ function backendDataMapRows(){
     {
       domain:'销售订单域', menu:'订单 > 我的订单', route:'#/gsp/order-management/list', endpoint:'/gsp/orderPlus/listOrder',
       status: DATA.orders?.length ? 'good' : 'bad',
-      coverage:'15 店；订单商品行 ' + num(DATA.orders?.length || 0),
+      coverage:'' + num(TOTAL_STORE_COUNT) + ' 店；订单商品行 ' + num(DATA.orders?.length || 0),
       use:'净成交额、净成交订单数、货号/SKC 净销量；作为经营看板主口径。',
       tab:'business'
     },
@@ -5975,10 +6261,10 @@ function backendDataMapRows(){
       domain:'财务收入域', menu:'财务 > 我的收入', route:'#/gsfs/finance-management/list',
       endpoint:'/gsfs/finance/platform/incomeOverview；/gsfs/finance/platform/noFinishOrderList',
       status: DATA.financeOrders?.length ? 'warn' : 'bad',
-      coverage:'HL 1/15 店；在途单 ' + num(DATA.financeOrders?.length || 0) + '；商品 ' + num(DATA.financeGoods?.length || 0),
+      coverage:'HL 1/' + num(TOTAL_STORE_COUNT) + ' 店；在途单 ' + num(DATA.financeOrders?.length || 0) + '；商品 ' + num(DATA.financeGoods?.length || 0),
       use:'在途收入、账期、财务商品与订单互证；其它店待主账号/权限扩展。',
       gap:'财务明细目前只覆盖 HL，不能把其它店财务明细视为 0。',
-      next:'后续逐店切主账号或补财务权限，把 gsfs 在途订单和商品层扩到 15 店。',
+      next:'后续逐店切主账号或补财务权限，把 gsfs 在途订单和商品层扩到全部店。',
       tab:'business'
     },
     {
@@ -6349,7 +6635,7 @@ function renderBattlePath(){
   const top = (key) => actions.filter(a => focusMatchByKey(a, key)).sort((a,b)=>Number(b.score||0)-Number(a.score||0)).slice(0,3);
   const cards = [
     ['先止损', 'retire', count('retire'), '下架/替换候选、长期无销量但有曝光、重复弱链接。先确认是否有替代链接。', top('retire')],
-    ['补覆盖', 'supplement', count('supplement'), '有些店已卖、有些店缺上架链接的货号；15 店都没上架的不进这里。', top('supplement')],
+    ['补覆盖', 'supplement', count('supplement'), '有些店已卖、有些店缺上架链接的货号；全部店都没上架的不进这里。', top('supplement')],
     ['修承接', 'optimize', count('optimize'), '高访客低支付、有流量无销量、低点击等，优先改主图、价格、评价、活动承接。', top('optimize')],
     ['控风险', 'after_sales', count('after_sales') + count('quality') + count('inventory'), '售后、质量和已上架低展示库存，避免销售被售后或库存展示拖累。', [...top('after_sales'), ...top('quality'), ...top('inventory')].sort((a,b)=>Number(b.score||0)-Number(a.score||0)).slice(0,3)]
   ];
@@ -6568,7 +6854,7 @@ function buildRootCauseCenter(limit = 9){
     addCause(causes, '售后质量', afterPressure + Math.min(45, Number(p.low_star_comment_count || 0) * 5), '售后 ' + num(afterCases) + ' 单 / ' + money(afterAmount) + '；低星 ' + num(p.low_star_comment_count), '先看退货原因和低星评价，再决定是否降流、换图说明或换链接。');
     addCause(causes, '弱链接止损', buckets.retire * 26, '下架/替换动作 ' + num(buckets.retire) + ' 条。', '先确认是否唯一承接；唯一承接先补新链接，再处理旧链接。');
     addCause(causes, '链接承接', buckets.optimize * 20 + (linkExposure > 0 && linkSales30 === 0 ? 28 : 0), '曝光 ' + num(linkExposure) + ' / 商详 ' + num(linkVisitors) + ' / 30天销量 ' + num(linkSales30) + '。', '按曝光→点击→商详→支付拆承接问题，先修主图、价格、评价和活动。');
-    addCause(causes, '覆盖缺口', buckets.supplement * 18 + Math.min(36, Number(p.missing_store_count || 0) * 5), '缺覆盖 ' + num(p.missing_store_count) + ' 店；补链动作 ' + num(buckets.supplement) + ' 条。', '只补部分店已上架、部分店缺的货号；15 店都没上架的不催。');
+    addCause(causes, '覆盖缺口', buckets.supplement * 18 + Math.min(36, Number(p.missing_store_count || 0) * 5), '缺覆盖 ' + num(p.missing_store_count) + ' 店；补链动作 ' + num(buckets.supplement) + ' 条。', '只补部分店已上架、部分店缺的货号；全部店都没上架的不催。');
     addCause(causes, '库存展示', Number(p.low_display_stock_count || 0) * 22 + buckets.inventory * 15, '低展示库存 ' + num(p.low_display_stock_count) + ' 个；库存动作 ' + num(buckets.inventory) + ' 条。', '只处理已上架且近 30 天有销量/订单的展示库存风险。');
     addCause(causes, '财务在途', Math.min(60, financeAmount / 30), '财务商品 ' + num(productFinance.length) + ' 条 / ' + money(financeAmount) + '。', '核对财务在途商品是否能匹配订单商品，未匹配保留 entity_id。');
     const sorted = causes.sort((a,b)=>b.weight-a.weight).slice(0, 4);
@@ -6802,7 +7088,7 @@ function growthPlaybookText(p){
     '货号：' + (p.standard_goods_sn || '-'),
     '机会类型：' + (p.opportunityType || '-'),
     '机会分：' + num(p.growthScore),
-    '证据：销售 ' + money(p.sales_sar) + '；链接30天销量 ' + num(p.c30Sales) + '；已上架 ' + num(p.onShelfStores) + '/15；可扩 ' + num(p.missingStores) + ' 店；售后压力 ' + Math.round(Number(p.afterRate || 0) * 100) + '%。',
+    '证据：销售 ' + money(p.sales_sar) + '；链接30天销量 ' + num(p.c30Sales) + '；已上架 ' + num(p.onShelfStores) + '/' + num(TOTAL_STORE_COUNT) + '；可扩 ' + num(p.missingStores) + ' 店；售后压力 ' + Math.round(Number(p.afterRate || 0) * 100) + '%。',
     referenceLabel + '：' + strongSkc,
     '建议扩店：' + stores,
     '复制清单：1）' + referenceLabel + '的主图/首图；2）标题关键词；3）价格带；4）活动/标签；5）评论和质量承接；6）详情页卖点顺序。',
@@ -6842,7 +7128,7 @@ function renderGrowthOpportunities(){
       '<div class="priority-metrics">'+
         '<div><span>销售</span><strong>'+money(p.sales_sar)+'</strong></div>'+
         '<div><span>30天销量</span><strong>'+num(p.c30Sales)+'</strong></div>'+
-        '<div><span>已上架</span><strong>'+num(p.onShelfStores)+'/15</strong></div>'+
+        '<div><span>已上架</span><strong>'+num(p.onShelfStores)+'/'+num(TOTAL_STORE_COUNT)+'</strong></div>'+
         '<div><span>可扩店</span><strong>'+num(p.missingStores)+'</strong></div>'+
         '<div><span>售后压力</span><strong>'+Math.round(Number(p.afterRate||0)*100)+'%</strong></div>'+
         '<div><span>'+growthReferenceLabel(p.strongLink)+'</span><strong class="mono">'+escapeHtml(p.strongLink?.skc || '-').slice(0,18)+'</strong></div>'+
@@ -6907,7 +7193,7 @@ function renderProductPriority(){
       '<div class="reason">'+escapeHtml(p.reasons.join('；') || '暂无异常')+'</div>'+
       '<div class="priority-metrics">'+
         '<div><span>销售</span><strong>'+money(p.sales_sar)+'</strong></div>'+
-        '<div><span>上架店</span><strong>'+num(p.on_shelf_store_count)+'/15</strong></div>'+
+        '<div><span>上架店</span><strong>'+num(p.on_shelf_store_count)+'/'+num(TOTAL_STORE_COUNT)+'</strong></div>'+
         '<div><span>财务</span><strong>'+money(p.financeAmount)+'</strong></div>'+
         '<div><span>售后</span><strong>'+num(p.afterRows.length)+' / '+money(p.afterAmount)+'</strong></div>'+
         '<div><span>动作</span><strong>'+num(p.productActions.length)+'</strong></div>'+
@@ -6932,9 +7218,9 @@ function buildBriefing(){
   const insights = DATA.insights || [];
   const byDomain = Object.fromEntries((DATA.actionDomain || []).map(x => [x.action_domain, Number(x.count || 0)]));
   const topStores = stores.slice(0,3).map(s => s.store_key + ' 风险' + num(s.risk_score) + '/售后' + num(s.after_sales_case_count));
-  const topProducts = products.slice(0,3).map(p => p.standard_goods_sn + ' 风险' + num(p.risk_score) + '/上架店' + num(p.on_shelf_store_count) + '/15');
+  const topProducts = products.slice(0,3).map(p => p.standard_goods_sn + ' 风险' + num(p.risk_score) + '/上架店' + num(p.on_shelf_store_count) + '/' + num(TOTAL_STORE_COUNT));
   const financeStores = (DATA.finance || []).filter(x => Number(x.finance_no_finish_order_count || 0) > 0);
-  const financeCoverage = financeStores.length + '/15';
+  const financeCoverage = financeStores.length + '/' + num(TOTAL_STORE_COUNT);
   const financeGoods = DATA.financeGoods || [];
   const financeGoodsMatched = financeGoods.filter(x => x.standard_goods_sn);
   const financeGoodsUnmatched = financeGoods.length - financeGoodsMatched.length;
@@ -6967,8 +7253,8 @@ function buildBriefing(){
     'SHEIN BI 今日经营简报',
     '数据日期：销售 ' + (DATA.dates?.salesDate || '-') + '；业务 ' + (DATA.dates?.businessDate || '-') + '；链接 ' + (DATA.dates?.linkDate || '-'),
     '',
-    '1）经营概览：今天销售 ' + money(sales.todaySalesSar) + ' / ' + rmb(sales.todaySalesSar) + '，订单 ' + num(sales.todayOrders) + ' 单，销量 ' + num(sales.todayQuantity) + ' 件；本月销售 ' + money(sales.monthSalesSar) + ' / ' + rmb(sales.monthSalesSar) + '。',
-    '2）售后口径：业务日 ' + after.date + ' 售后/退货 ' + num(after.todayCases) + ' 单；近 7 天 ' + num(after.weekCases) + ' 单；本月 ' + num(after.monthCases) + ' 单。少于 7/30 天时按当前已积累天数理解。',
+    '1）经营概览：当前时段销售 ' + money(sales.rangeSalesSar) + ' / ' + rmb(sales.rangeSalesSar) + '，订单 ' + num(sales.rangeOrders) + ' 单，销量 ' + num(sales.rangeQuantity) + ' 件；本月销售 ' + money(sales.monthSalesSar) + ' / ' + rmb(sales.monthSalesSar) + '。',
+    '2）售后口径：' + after.sourceLabel + '；当前时段售后/退货 ' + num(after.rangeCases) + ' 单 / ' + money(after.rangeAmountSar) + '；本月 ' + num(after.monthCases) + ' 单。已取消售后不计入。',
     '3）财务口径：待结算 ' + money(k.pendingSettlementSar) + ' / ' + rmb(k.pendingSettlementSar) + '；gsfs 在途明细 ' + num(k.financeNoFinishOrders) + ' 单 / ' + money(k.financeNoFinishIncomeSar) + '；明细覆盖店铺 ' + financeCoverage + '。',
     '4）财务商品：在途商品 ' + num(financeGoods.length) + ' 条，已匹配货号 ' + num(financeGoodsMatched.length) + ' 条，未匹配 ' + num(financeGoodsUnmatched) + ' 条；匹配金额 ' + money(financeGoodsMatchedAmount) + '；集中货号 ' + (topFinanceProducts.join('；') || '暂无') + '。',
     '5）今日动作池：共 ' + num(actions.length) + ' 条；链接 ' + num(byDomain.link) + '，售后 ' + num(byDomain.after_sales) + '，质量 ' + num(byDomain.quality) + '，库存 ' + num(byDomain.inventory) + '。',
@@ -7943,7 +8229,7 @@ function renderProductSpotlight(){
   const rangeOrders = Number(rangeProduct?.orders ?? ordersAll.length ?? 0);
   const rangeLabel = selectedRangeText();
   const decisionCards = [
-    ['链接覆盖', num(product.on_shelf_store_count) + '/15 店上架', missingStores > 0 ? '仍有 ' + num(missingStores) + ' 个店缺上架链接；先看是否属于“部分店已卖，部分店缺覆盖”。' : '15 店覆盖基本完整，重点转向链接承接和优胜劣汰。'],
+    ['链接覆盖', num(product.on_shelf_store_count) + '/' + num(TOTAL_STORE_COUNT) + ' 店上架', missingStores > 0 ? '仍有 ' + num(missingStores) + ' 个店缺上架链接；先看是否属于“部分店已卖，部分店缺覆盖”。' : '各店覆盖基本完整，重点转向链接承接和优胜劣汰。'],
     ['订单表现', money(rangeSalesSar) + ' / ' + num(rangeOrders) + ' 单', '当前时间段：' + rangeLabel + '。对照销售明细，看销售是否集中在少数店或少数 SKC。'],
     ['财务在途', money(financeGoodsAmount) + ' / ' + num(financeGoodsAll.length) + ' 条', financeGoodsAll.length ? '财务在途已能回到货号层，可和订单、售后互相印证。' : '暂未匹配到财务商品，可能是其它店还未接入财务明细或 entity_id 未补齐。'],
     ['售后质量', num(afterAll.length) + ' 单 / ' + money(afterAmount), afterAll.length ? '当前时段售后集中时不要只补链接，先判断退货原因、评价和质量等级。' : '当前时段售后样本未命中该货号，可优先看覆盖和承接。'],
@@ -8017,14 +8303,14 @@ function renderProductSpotlight(){
       '<div class="store-verdict"><div class="row1"><div><h3>'+escapeHtml(sn)+'</h3><p>货号页先判断：这个标准货号是要扩店、修链接、控售后，还是淘汰弱链接。</p></div>'+riskTag(product.risk_score)+'</div>'+
         '<div class="store-action-steps">'+
           '<div class="store-step"><b>1 看当前销售</b><p>'+escapeHtml(rangeLabel)+'：'+money(rangeSalesSar)+'，销量 '+num(rangeQuantity)+'，订单 '+num(rangeOrders)+'。</p></div>'+
-          '<div class="store-step"><b>2 看覆盖缺口</b><p>上架 '+num(product.on_shelf_store_count)+'/15 店，缺 '+num(missingStores)+' 店；不是全店未上架才需要补链。</p></div>'+
+          '<div class="store-step"><b>2 看覆盖缺口</b><p>上架 '+num(product.on_shelf_store_count)+'/'+num(TOTAL_STORE_COUNT)+' 店，缺 '+num(missingStores)+' 店；不是全店未上架才需要补链。</p></div>'+
         '<div class="store-step"><b>3 看质量与财务</b><p>当前时段售后 '+num(afterAll.length)+' 单，低星评价 '+num(lowComments.length)+' 条，财务商品 '+num(financeGoodsAll.length)+' 条，用来和订单互相印证。</p></div>'+
         '</div>'+
       '</div>'+
       '<div class="store-kpi-grid">'+
         '<div class="store-kpi"><span>销售额</span><strong>'+money(rangeSalesSar)+'</strong><small>'+escapeHtml(rangeLabel)+'</small></div>'+
         '<div class="store-kpi"><span>销量 / 订单</span><strong>'+num(rangeQuantity)+' / '+num(rangeOrders)+'</strong><small>按订单创建时间</small></div>'+
-        '<div class="store-kpi"><span>上架店</span><strong>'+num(product.on_shelf_store_count)+'/15</strong><small>缺 '+num(missingStores)+' 店</small></div>'+
+        '<div class="store-kpi"><span>上架店</span><strong>'+num(product.on_shelf_store_count)+'/'+num(TOTAL_STORE_COUNT)+'</strong><small>缺 '+num(missingStores)+' 店</small></div>'+
         '<div class="store-kpi"><span>动作</span><strong>'+num(actions.length)+'</strong><small>最新动作池</small></div>'+
         '<div class="store-kpi"><span>售后金额</span><strong>'+money(afterAmount)+'</strong><small>'+num(afterAll.length)+' 单</small></div>'+
         '<div class="store-kpi"><span>评价口碑</span><strong>'+num(commentAll.length)+' / '+num(lowComments.length)+'</strong><small>评价 / 低星</small></div>'+
@@ -8034,7 +8320,7 @@ function renderProductSpotlight(){
       '<article class="path-card"><span class="domain">'+escapeHtml(c[0])+'</span><h4>'+escapeHtml(c[1])+'</h4><p>'+escapeHtml(c[2])+'</p></article>'
     ).join('')+'</div>'+
     growthBlock+
-    sectionTitleHtml('15 店覆盖与承接', '固定显示 15 个店。先扫卡片状态，再看明细表；销售是本店该标准货号全部 SKC / 链接合计。', '15 店全量')+
+    sectionTitleHtml('店铺覆盖与承接', '固定显示 '+num(TOTAL_STORE_COUNT)+' 个店。先扫卡片状态，再看明细表；销售是本店该标准货号全部 SKC / 链接合计。', num(TOTAL_STORE_COUNT)+' 店全量')+
     '<div class="coverage-board">'+matrixSorted.map(r => {
       const cls = r.need_supplement_link ? 'mid' : Number(r.sales_sar || 0) > 0 ? 'good' : r._empty ? 'info' : 'good';
       const status = r.need_supplement_link ? '缺承接' : Number(r.sales_sar || 0) > 0 ? '有销售' : r.has_on_shelf_link ? '已上架' : '空白';
@@ -8076,13 +8362,13 @@ function renderProducts(){
     return {...enriched, _verdict:productRiskVerdict(enriched)};
   });
   $('productsTable').innerHTML =
-    sectionTitleHtml('货号风险池', '这张表用于先筛出“该扩、该修、该控售后、该观察”的货号；销售按当前时间段，覆盖/库存/售后/评价是最新业务快照。点货号进入货号 360 看 15 店承接。', selectedRangeText())+
+    sectionTitleHtml('货号风险池', '这张表用于先筛出“该扩、该修、该控售后、该观察”的货号；销售按当前时间段，覆盖/库存/售后/评价是最新业务快照。点货号进入货号 360 看各店承接。', selectedRangeText())+
     table(rowsWithRange, [
     ['货号', r => '<b>'+r.standard_goods_sn+'</b>'],
     ['系统判断', r => '<span class="tag '+r._verdict.level+'">'+escapeHtml(r._verdict.level === 'high' ? '先控风险' : r._verdict.level === 'mid' ? '重点关注' : '保留观察')+'</span><span class="decision-note">'+escapeHtml(r._verdict.text)+'</span>'],
     ['风险分', r => riskTag(r.risk_score)+'<div class="mono">'+num(r.risk_score)+'</div>'],
     ['当前时段销售', r => money(r.period_sales_sar)+'<br><span class="muted">销量 '+num(r.period_quantity)+' · 订单 '+num(r.period_orders)+'</span>', 'num'],
-    ['覆盖/库存', r => '上架店 '+num(r.on_shelf_store_count)+'/15<br><span class="muted">缺店 '+num(r.missing_store_count)+' · 低库存 '+num(r.low_display_stock_count)+'</span>'],
+    ['覆盖/库存', r => '上架店 '+num(r.on_shelf_store_count)+'/'+num(TOTAL_STORE_COUNT)+'<br><span class="muted">缺店 '+num(r.missing_store_count)+' · 低库存 '+num(r.low_display_stock_count)+'</span>'],
     ['售后/评价', r => '售后 '+num(r.after_sales_case_count)+' · 质退 '+num(r.quality_return_volume)+'<br><span class="muted">评论 '+num(r.comment_count)+' · 低星 '+num(r.low_star_comment_count)+'</span>']
   ]);
   const matrixRows = (DATA.matrix || []).filter(includes);
@@ -8354,15 +8640,51 @@ function renderInsights(){
   '</article>';
   }).join('') || '<div class="empty">没有匹配诊断</div>';
 }
+function rtvTraceDecision(row){
+  const status = String(row?.trace_status || '');
+  const has09 = Number(row?.final_09_quantity || 0) > 0 || status.includes('可售09');
+  const still03 = Number(row?.still_03_quantity || 0) > 0 || status.includes('仍在03');
+  const damaged = Number(row?.final_damaged_quantity || 0) > 0 || Number(row?.final_scrap_quantity || 0) > 0 || /破损|报废/.test(status);
+  const unknown = /未知|未解析/.test(status);
+  const unmatched = /未匹配/.test(status);
+  if (has09) return {label:'已回可售09', cls:'good', hint:'这部分可以进入“可二次销售”测算。', action:'利润页看二售测算；库存页看09可售。'};
+  if (damaged) return {label:'破损/报废', cls:'high', hint:'已收到但不应当作可售库存。', action:'按损失处理，必要时查 ET 损溢/破损单。'};
+  if (still03) return {label:'仍在03 RTV', cls:'mid', hint:'ET 已收退件，但还在 RTV 仓，未回到可售。', action:'等仓处理或催换包装/上架，暂不按可售。'};
+  if (unknown) return {label:'去向待确认', cls:'high', hint:'已收或疑似已收，但后续仓库去向不清晰。', action:'先查 ET 库存流水和 RTV 明细。'};
+  if (unmatched) return {label:'未匹配ET', cls:'high', hint:'SHEIN 有退货，但还没找到对应 ET RTV 收件。', action:'优先查换单物流，尤其 EMile 数字单号。'};
+  if (status) return {label:'ET已收待判定', cls:'info', hint:'已有收件线索，继续看仓库去向。', action:'看仓库去向列和数量拆分。'};
+  return {label:'待复核', cls:'mid', hint:'当前记录缺少明确状态。', action:'先核退货单和物流号。'};
+}
+function rtvTraceDecisionHtml(row){
+  const d = rtvTraceDecision(row);
+  return '<div class="rtv-decision"><span class="tag '+escapeHtml(d.cls)+'">'+escapeHtml(d.label)+'</span><b>'+escapeHtml(d.action)+'</b><small>'+escapeHtml(d.hint)+'</small></div>';
+}
+function rtvWarehouseTermsHtml(){
+  return '<div class="rtv-term-grid">'+
+    '<div class="rtv-term"><b>09 可售仓</b><span>能再次发给买家的散件库存；进入这里才是真正可二售。</span></div>'+
+    '<div class="rtv-term"><b>03 RTV 仓</b><span>退件/退回暂存仓；已收到但还没确认回到可售。</span></div>'+
+    '<div class="rtv-term"><b>04 破损仓</b><span>破损或待换包装；未处理前不当作可售。</span></div>'+
+    '<div class="rtv-term"><b>06 报废仓</b><span>毁损报废；按资产损失看，不进入可售。</span></div>'+
+  '</div>';
+}
+function rtvReviewActionText(row){
+  if (row?.suspected_emile_handoff) return '疑似 EMile 换单：进 SHEIN 退货物流详情找“新的运单号”，再和 ET 物流号核对。';
+  if (String(row?.review_priority || '') === 'high') return '高优先级：同货号/时间窗口接近，先复制 ET 物流号去 SHEIN 退货详情复核。';
+  if (row?.candidate_cases) return '有 SHEIN 候选：按候选退货单逐个看物流轨迹。';
+  return '没有明确候选：先按 ET 物流号、货号和收件时间反查。';
+}
 function renderBusiness(){
-  const allBusinessCount = (DATA.finance || []).length + (DATA.orders || []).length + (DATA.afterSales || []).length + (DATA.waybills || []).length + (DATA.financeOrders || []).length + (DATA.financeGoods || []).length;
+  const allBusinessCount = (DATA.finance || []).length + (DATA.orders || []).length + (DATA.afterSales || []).length + (DATA.rtvReview || []).length + (DATA.rtvTrace || []).length + (DATA.waybills || []).length + (DATA.financeOrders || []).length + (DATA.financeGoods || []).length;
   const financeRows = (DATA.finance || []).filter(includes);
   const orderRows = (DATA.orders || []).filter(includes).filter(r => rowInSelectedRangeBy(r, ['created_date', 'order_create_time']));
   const afterRows = (DATA.afterSales || []).filter(includes).filter(r => rowInSelectedRangeBy(r, ['request_time', 'snapshot_date']));
+  const afterReviewRows = (DATA.afterSalesReview || []).filter(includes).filter(r => rowInSelectedRangeBy(r, ['request_time', 'order_created_date', 'snapshot_date']));
+  const rtvReviewRows = (DATA.rtvReview || []).filter(includes).filter(r => rowInSelectedRangeBy(r, ['create_time']));
+  const rtvTraceRows = (DATA.rtvTrace || []).filter(includes).filter(r => rowInSelectedRangeBy(r, ['request_time', 'rtv_latest_received_time']));
   const waybillRows = (DATA.waybills || []).filter(includes).filter(r => rowInSelectedRangeBy(r, ['collect_time', 'print_time', 'snapshot_date']));
   const financeOrderRows = (DATA.financeOrders || []).filter(includes).filter(r => rowInSelectedRangeBy(r, ['order_delivery_time', 'snapshot_date']));
   const financeGoodsRows = (DATA.financeGoods || []).filter(includes).filter(r => rowInSelectedRangeBy(r, ['order_delivery_time', 'snapshot_date']));
-  const filteredBusinessCount = financeRows.length + orderRows.length + afterRows.length + waybillRows.length + financeOrderRows.length + financeGoodsRows.length;
+  const filteredBusinessCount = financeRows.length + orderRows.length + afterRows.length + afterReviewRows.length + rtvReviewRows.length + rtvTraceRows.length + waybillRows.length + financeOrderRows.length + financeGoodsRows.length;
   const businessEmptyNote = !filteredBusinessCount && allBusinessCount
     ? '<div class="warning-panel inline"><h3>当前筛选下没有订单/售后结果，不是底库丢失</h3><ul><li>底库仍有订单、售后、财务或履约数据，共 '+num(allBusinessCount)+' 行。</li><li>请看顶部时间、店铺、货号和全局搜索；点“清空筛选”可恢复。</li></ul></div>'
     : '';
@@ -8371,6 +8693,14 @@ function renderBusiness(){
   const inTransit = financeRows.reduce((sum,r)=>sum+Number(r.in_transit_order_amount_sar||0),0);
   const orderSales = orderRows.reduce((sum,r)=>sum+Number(r.sales_sar||0),0);
   const afterAmount = afterRows.reduce((sum,r)=>sum+Number(r.price_amount_total||0),0);
+  const afterReviewAmount = afterReviewRows.reduce((sum,r)=>sum+Number(r.price_amount_total||0),0);
+  const highRtvReview = rtvReviewRows.filter(r => String(r.review_priority || '') === 'high');
+  const emileRtvReview = rtvReviewRows.filter(r => r.suspected_emile_handoff);
+  const rtvTraceReceived = rtvTraceRows.filter(r => !String(r.trace_status || '').includes('未匹配'));
+  const rtvTraceTo09 = rtvTraceRows.filter(r => Number(r.final_09_quantity || 0) > 0 || String(r.trace_status || '').includes('可售09'));
+  const rtvTraceStill03 = rtvTraceRows.filter(r => Number(r.still_03_quantity || 0) > 0 || String(r.trace_status || '').includes('仍在03'));
+  const rtvTraceDamagedOrScrap = rtvTraceRows.filter(r => Number(r.final_damaged_quantity || 0) > 0 || Number(r.final_scrap_quantity || 0) > 0 || String(r.trace_status || '').match(/破损|报废/));
+  const rtvTraceUnknown = rtvTraceRows.filter(r => String(r.trace_status || '').match(/未匹配|未知|未解析/));
   const abnormalWaybills = waybillRows.filter(r => String(r.show_status_desc || '').match(/异常|失败|超时|取消/));
   const afterRate = orderSales > 0 ? afterAmount / orderSales : null;
   const afterByProduct = aggregateRows(afterRows, r => r.standard_goods_sn || '未归并', (acc, r) => {
@@ -8401,19 +8731,25 @@ function renderBusiness(){
       '<section class="ops-verdict"><div><h3>订单 / 售后复核台</h3><p>先用当前时间段确认：成交是否真实、售后压力是否集中、履约异常能否解释退款。这里不是流水仓库，明细只在需要查单时展开。</p><div class="ops-big">'+escapeHtml(pct(afterRate))+'</div><p>售后金额 / 订单销售额。比例越高，越应该先看售后集中货号和履约异常。</p></div>'+
         '<div class="ops-question-grid">'+
           '<div><b>成交是否真实</b><span>订单销售 '+escapeHtml(money(orderSales))+'；财务摘要为最新快照 '+escapeHtml(money(financeTrade))+'</span></div>'+
-          '<div><b>售后压力在哪</b><span>售后 '+escapeHtml(num(afterRows.length))+' 单，金额 '+escapeHtml(money(afterAmount))+'</span></div>'+
+          '<div><b>售后压力在哪</b><span>售后 '+escapeHtml(num(afterRows.length))+' 单，金额 '+escapeHtml(money(afterAmount))+'；未落定 '+escapeHtml(num(afterReviewRows.length))+' 单</span></div>'+
+          '<div><b>退件收到后去哪</b><span>ET 已收 '+escapeHtml(num(rtvTraceReceived.length))+' 单；可售09 '+escapeHtml(num(rtvTraceTo09.length))+'，03待处理 '+escapeHtml(num(rtvTraceStill03.length))+'，破损/报废 '+escapeHtml(num(rtvTraceDamagedOrScrap.length))+'</span></div>'+
+          '<div><b>RTV 是否漏匹配</b><span>待核 '+escapeHtml(num(rtvReviewRows.length))+' 条，其中疑似 EMile 换单 '+escapeHtml(num(emileRtvReview.length))+' 条</span></div>'+
           '<div><b>履约是否解释异常</b><span>异常/取消面单 '+escapeHtml(num(abnormalWaybills.length))+' 条</span></div>'+
         '</div></section>'+
         '<section><div class="ops-pillar-grid">'+
         '<div class="ops-pillar"><span>订单销售</span><strong>'+money(orderSales)+'</strong><small>'+num(orderRows.length)+' 行 · 按订单创建时间</small></div>'+
         '<div class="ops-pillar"><span>售后金额</span><strong>'+money(afterAmount)+'</strong><small>'+num(afterRows.length)+' 单 · 按售后申请时间</small></div>'+
-        '<div class="ops-pillar"><span>最新财务待结算</span><strong>'+money(pending)+'</strong><small>财务摘要是最新快照；明细按当前时间段过滤 '+num(financeOrderRows.length)+' 条</small></div>'+
+        '<div class="ops-pillar"><span>未落定售后</span><strong>'+num(afterReviewRows.length)+'</strong><small>'+money(afterReviewAmount)+' · 每日复核最新状态</small></div>'+
+        '<div class="ops-pillar"><span>RTV 已收</span><strong>'+num(rtvTraceReceived.length)+'</strong><small>收到后再看 09/03/04/06 去向</small></div>'+
+        '<div class="ops-pillar"><span>RTV 可二售09</span><strong>'+num(rtvTraceTo09.length)+'</strong><small>能进入二售测算；不是主利润口径</small></div>'+
+        '<div class="ops-pillar"><span>换单待核 high</span><strong>'+num(highRtvReview.length)+'</strong><small>优先复制 ET 物流号去 SHEIN 轨迹核对</small></div>'+
+        '<div class="ops-pillar"><span>最新财务待结算</span><strong>'+money(pending)+'</strong><small>财务摘要是最新快照；明细 '+num(financeOrderRows.length)+' 条</small></div>'+
         '<div class="ops-pillar"><span>履约异常/取消</span><strong>'+num(abnormalWaybills.length)+'</strong><small>用于解释退款、取消、未妥投</small></div>'+
       '</div>'+
       sectionTitleHtml('优先复核对象', '只列真正需要先复核的货号 / 店铺；按售后金额排序，点击可带筛选跳转。', selectedRangeText())+
       '<div class="ops-focus-list">'+focusHtml+'</div></section>'+
     '</div>'+
-    '<details class="detail-section" style="margin-top:16px"><summary>查看财务店铺摘要</summary><div class="detail-body">'+
+    '<details class="detail-section" style="margin-top:16px" id="financeEvidenceFold"><summary>查看财务店铺摘要</summary><div class="detail-body">'+
     sectionTitleHtml('财务店铺摘要', '每行一个店：看待结算、在途、已结算、账期和异常金额。', '最新财务快照')+
     table(financeRows, [
     ['店铺', r => '<b>'+r.store_key+'</b>'],
@@ -8471,6 +8807,17 @@ function renderBusiness(){
     ['销售额', r => money(r.sales_sar), 'num'],
     ['履约', r => escapeHtml(r.goods_performance_status_desc || '-')]
   ]);
+  $('afterSalesReviewTable').innerHTML =
+    sectionTitleHtml('未落定售后待复核', '只列未最终退款/未取消/未签收的售后单；这些单会在每日业务域抓取中继续刷新，最终取消后忽略，最终退款后进入正式售后口径。', selectedRangeText()+' · '+num(afterReviewRows.length)+' 单')+
+    table(afterReviewRows, [
+    ['店铺', r => '<b>'+r.store_key+'</b>'],
+    ['售后单', r => '<span class="mono">'+(r.aftersales_order_no || r.return_order_no || '-')+'</span><div class="muted">申请 '+(r.request_time || '').replace('T',' ').slice(0,19)+'</div>'],
+    ['订单', r => '<span class="mono">'+(r.order_no || '-')+'</span><div class="muted">订单 '+String(r.order_created_date || r.order_create_time || '-').slice(0,10)+'</div>'],
+    ['货号/SKC', r => '<b>'+escapeHtml(r.standard_goods_sn || '-').slice(0,60)+'</b><br><span class="mono">'+(r.skc || '-')+'</span>'+copyButton(r.skc, '复制SKC')],
+    ['状态', r => '<span class="tag mid">'+escapeHtml(r.order_sub_status_name || r.return_package_status_name || '待复核')+'</span><div class="muted">'+escapeHtml(r.review_reason || '')+'</div>'],
+    ['已挂起', r => num(r.open_days)+' 天', 'num'],
+    ['金额', r => money(r.price_amount_total), 'num']
+  ]);
   $('afterSalesTable').innerHTML =
     sectionTitleHtml('售后 / 退货明细', '按售后申请时间口径；重点看退货原因是否集中到某货号、某 SKC 或某店。', selectedRangeText())+
     table(afterRows, [
@@ -8481,6 +8828,56 @@ function renderBusiness(){
     ['状态', r => escapeHtml(r.order_sub_status_name || r.return_package_status_name || '-')],
     ['金额', r => money(r.price_amount_total), 'num']
   ]);
+  const rtvTraceStatusTag = status => {
+    const s = String(status || '-');
+    const cls = s.includes('未匹配') ? 'high' : s.includes('可售09') ? 'good' : s.match(/破损|报废/) ? 'mid' : s.match(/未知|未解析/) ? 'high' : 'info';
+    return '<span class="tag '+cls+'">'+escapeHtml(s)+'</span>';
+  };
+  const rtvTraceHtml =
+    sectionTitleHtml('退货收件 / 仓库去向追踪', '把 SHEIN 退货单和 ET RTV 收件、库存流水串起来：收到没有，收到后在 09 / 03 / 04 / 06 / 未知哪里。09 去向为库存流水 FIFO 证据，不是单件序列号扫描。', selectedRangeText()+' · '+num(rtvTraceRows.length)+' 条')+
+    '<div class="rtv-table-hint">阅读顺序：先看“结论/动作”，再看 SHEIN 退货物流和 ET 收件号，最后看 09/03/04/06 数量拆分。09=可售，03=RTV待处理，04=破损，06=报废。</div>'+
+    table(rtvTraceRows, [
+      ['结论/动作', r => rtvTraceDecisionHtml(r)],
+      ['状态', r => rtvTraceStatusTag(r.trace_status)],
+      ['店铺/退货单', r => '<b>'+escapeHtml(r.store_key || '-')+'</b><div class="mono">'+escapeHtml(r.return_order_no || r.aftersales_order_no || '-')+'</div><div class="muted">'+escapeHtml((r.request_time || '').replace('T',' ').slice(0,19))+'</div>'],
+      ['货号/SKC', r => '<b>'+escapeHtml(r.standard_goods_sn || '-').slice(0,60)+'</b><br><span class="mono">'+escapeHtml(r.skc || '-')+'</span>'+copyButton(r.skc, '复制SKC')],
+      ['SHEIN退货物流', r => '<span class="mono">'+escapeHtml(r.shein_return_express_numbers || '-')+'</span>'],
+      ['ET收件', r => '<span class="mono">'+escapeHtml(r.et_return_order_ids || '-')+'</span><div class="muted">'+escapeHtml(r.rtv_express_numbers || '')+'</div><div class="muted">'+escapeHtml((r.rtv_latest_received_time || '').replace('T',' ').slice(0,19))+'</div>'],
+      ['仓库去向', r => '<b>'+escapeHtml(r.destination_summary || r.rtv_warehouses || '-')+'</b><div class="muted">'+escapeHtml(r.rtv_warehouses || '')+'</div>'],
+      ['数量拆分', r => '总 '+num(r.quantity || 0)+'<br><span class="muted">09 '+num(r.final_09_quantity || 0)+' · 03 '+num(r.still_03_quantity || 0)+' · 04 '+num(r.final_damaged_quantity || 0)+' · 06 '+num(r.final_scrap_quantity || 0)+' · 未知 '+num(r.final_other_quantity || 0)+'</span>', 'num']
+    ], {limit: 300});
+  const rtvReviewTop = rtvReviewRows
+    .sort((a,b)=>(String(a.review_priority||'') === 'high' ? -1 : 0) - (String(b.review_priority||'') === 'high' ? -1 : 0) || String(b.create_time || '').localeCompare(String(a.create_time || '')))
+    .slice(0, 500);
+  const splitCandidates = text => String(text || '').split(' || ').filter(Boolean).slice(0, 3).map(x => '<div class="muted">'+escapeHtml(x).slice(0, 150)+'</div>').join('');
+  const rtvReviewHtml =
+    sectionTitleHtml('RTV 换单待复核', '反向从 ET 已收 RTV 找 SHEIN：ET 有收件物流号，但 SHEIN 售后当前物流号没有直接匹配。EMile/数字单号优先进退货单物流详情核实。', selectedRangeText()+' · '+num(rtvReviewTop.length)+' 条')+
+    table(rtvReviewTop, [
+      ['优先级', r => '<span class="tag '+(r.review_priority === 'high' ? 'high' : r.review_priority === 'medium' ? 'mid' : '')+'">'+escapeHtml(r.review_priority || '-')+'</span>'],
+      ['ET RTV / 物流', r => '<span class="mono">'+escapeHtml(r.return_order_id || '-')+'</span><div class="mono">'+escapeHtml(r.et_shipment_number_raw || '-')+'</div>'+copyButton(r.et_shipment_number_raw, '复制ET物流号')],
+      ['货号/SKU', r => '<b>'+escapeHtml(r.standard_goods_sn || '-').slice(0,60)+'</b><div class="mono">'+escapeHtml(r.sku_code || '-')+'</div>'],
+      ['收件仓/数量', r => escapeHtml(r.store_name_in || '-')+'<br><span class="muted">'+escapeHtml(r.to_instock_name || '')+' · '+num(r.received_quantity || r.in_quantity || 0)+' 件</span>'],
+      ['下一步', r => '<b>'+escapeHtml(rtvReviewActionText(r))+'</b><div class="muted">'+escapeHtml(r.review_reason || '-')+'</div>'],
+      ['SHEIN 候选', r => splitCandidates(r.candidate_cases) || '<span class="muted">暂无同货号候选，需按 ET 物流号人工查</span>']
+    ]);
+  if ($('rtvWorkbench')) {
+    $('rtvWorkbench').innerHTML =
+      '<div class="rtv-center">'+
+        '<div class="rtv-hero">'+
+          '<section class="rtv-verdict"><div><h3>RTV 先看这里</h3><p>不要再从订单、售后、财务几张表里来回找。这里按退货闭环看：SHEIN 有退货 → ET 是否收到 → 收到后去了哪里 → 是否进入二售测算。</p><div class="rtv-big">'+escapeHtml(num(highRtvReview.length))+'</div><p>高优先级换单待核。先处理这些，能提高“已收可二售”召回。</p></div>'+
+            '<div class="rtv-actions"><button type="button" onclick="document.getElementById(\\'rtvTraceTableAnchor\\')?.scrollIntoView({behavior:\\'smooth\\',block:\\'start\\'})">看退货去向</button><button type="button" onclick="document.getElementById(\\'rtvReviewTableAnchor\\')?.scrollIntoView({behavior:\\'smooth\\',block:\\'start\\'})">看换单待核</button><button type="button" onclick="document.querySelector(\\'[data-tab=profit]\\')?.click()">看利润影响</button><button type="button" onclick="document.querySelector(\\'[data-tab=inventory]\\')?.click()">看库存去化</button></div></section>'+
+          '<section><div class="rtv-flow-grid">'+
+            '<div class="rtv-stage info"><span>SHEIN 退货</span><strong>'+num(rtvTraceRows.length)+'</strong><small>当前筛选下可追踪退货记录</small></div>'+
+            '<div class="rtv-stage good"><span>ET 已收到</span><strong>'+num(rtvTraceReceived.length)+'</strong><small>已匹配或已有收件线索</small></div>'+
+            '<div class="rtv-stage good"><span>回到09可售</span><strong>'+num(rtvTraceTo09.length)+'</strong><small>进入二售测算，不改主利润</small></div>'+
+            '<div class="rtv-stage warn"><span>仍在03/待处理</span><strong>'+num(rtvTraceStill03.length)+'</strong><small>已收但还不能当可售</small></div>'+
+            '<div class="rtv-stage bad"><span>未知/未匹配</span><strong>'+num(rtvTraceUnknown.length)+'</strong><small>优先查换单或 ET 明细</small></div>'+
+          '</div>'+rtvWarehouseTermsHtml()+'</section>'+
+        '</div>'+
+        '<div id="rtvTraceTableAnchor">'+rtvTraceHtml+'</div>'+
+        '<div id="rtvReviewTableAnchor">'+rtvReviewHtml+'</div>'+
+      '</div>';
+  }
   $('waybillTable').innerHTML =
     sectionTitleHtml('发货 / 履约明细', '按揽收/打印/快照时间过滤；用于解释取消、未妥投、物流异常和售后集中。', selectedRangeText())+
     table(waybillRows, [
@@ -8799,6 +9196,13 @@ function renderProfitPage(){
           : '当前筛选范围利润率偏低，适合做调价、控退货或淘汰复核。';
   $('profitTag').textContent = selectedRangeText() + ' · ' + homeScopeSubtitle();
   $('profitOverview').innerHTML =
+    '<div class="page-anchor-row"><button type="button" onclick="document.getElementById(\\'profitTrendCard\\')?.scrollIntoView({behavior:\\'smooth\\',block:\\'start\\'})">看月利润趋势</button><button type="button" onclick="document.getElementById(\\'profitRankGrid\\')?.scrollIntoView({behavior:\\'smooth\\',block:\\'start\\'})">看加码/处理货号</button><button type="button" onclick="document.getElementById(\\'profitSelectionCard\\')?.scrollIntoView({behavior:\\'smooth\\',block:\\'start\\'})">看选品标尺</button><button type="button" onclick="document.getElementById(\\'profitCostGapCard\\')?.scrollIntoView({behavior:\\'smooth\\',block:\\'start\\'})">看成本缺口</button></div>'+
+    '<div class="mission-grid">'+
+      '<div class="mission-card '+escapeHtml(profitLevel)+'"><span>真实商品利润</span><strong>'+escapeHtml(hasCost ? money(summary.profitSar) : '待成本')+'</strong><p>主口径：退货营收归 0，真实退货退款扣退货运费；不把 RTV 回收直接冲回主利润。</p></div>'+
+      '<div class="mission-card '+(Number(summary.rtvRecoverableCostSar||0) ? 'good' : 'info')+'"><span>RTV 已收可二售</span><strong>'+escapeHtml(hasCost ? money(summary.profitReceivedResellableSar) : '-')+'</strong><p>测算口径：如果 ET 已收退件未来可卖，理论上比保守口径多 '+escapeHtml(money(summary.rtvRecoverableCostSar))+'。</p></div>'+
+      '<div class="mission-card '+(Number(summary.costCoverageRate||0) >= .9 ? 'good' : 'warn')+'"><span>成本覆盖率</span><strong>'+escapeHtml(pct(summary.costCoverageRate))+'</strong><p>缺成本净成交 '+escapeHtml(money(summary.missingCostRevenueSar))+'；成本不足时不要硬看利润率。</p></div>'+
+      '<div class="mission-card '+(Number(summary.returnFeeSar||0) ? 'warn' : 'good')+'"><span>售后侵蚀</span><strong>'+escapeHtml(money(summary.returnFeeSar))+'</strong><p>反转 '+escapeHtml(num(summary.reversalLines))+' 行；先定位低利润且退货多的货号。</p></div>'+
+    '</div>'+
     '<div class="profit-command">'+
       '<section class="profit-verdict">'+
         '<div><h3>先看结论</h3><p>'+escapeHtml(profitVerdict)+'</p>'+
@@ -9060,6 +9464,13 @@ function renderInventoryPage(){
   const scopeText = storeScopeLabel() + (productScopeQuery() || state.q ? ' · 已按货号/关键词筛选' : '');
   $('inventoryTag').textContent = scopeText + ' · 截至 ' + anchor;
   $('inventoryOverview').innerHTML =
+    '<div class="page-anchor-row"><button type="button" onclick="document.getElementById(\\'inventoryRiskCard\\')?.scrollIntoView({behavior:\\'smooth\\',block:\\'start\\'})">看补货/断货</button><button type="button" onclick="document.getElementById(\\'inventorySlowCard\\')?.scrollIntoView({behavior:\\'smooth\\',block:\\'start\\'})">看清货候选</button><button type="button" onclick="document.getElementById(\\'inventoryProductCard\\')?.scrollIntoView({behavior:\\'smooth\\',block:\\'start\\'})">看货号明细</button><button type="button" onclick="document.getElementById(\\'inventoryBatchFold\\')?.scrollIntoView({behavior:\\'smooth\\',block:\\'start\\'})">看批次/在途</button></div>'+
+    '<div class="mission-grid">'+
+      '<div class="mission-card good"><span>可承接库存</span><strong>'+escapeHtml(num(totalOnHand))+'</strong><p>ET 09散件 + 01整箱；这是今天最接近实盘的可售/可承接口径。</p></div>'+
+      '<div class="mission-card warn"><span>待处理库存</span><strong>'+escapeHtml(num(totalEtPending))+'</strong><p>03 RTV / 04破损 / 06报废，不直接当可卖；先处理可回流部分。</p></div>'+
+      '<div class="mission-card info"><span>在途 / 未发</span><strong>'+escapeHtml(num(totalIncoming))+'</strong><p>成本表有发货但缺到仓或头程费；未发 '+escapeHtml(num(totalNotShipped))+'。</p></div>'+
+      '<div class="mission-card bad"><span>高风险货号</span><strong>'+escapeHtml(num(urgent))+'</strong><p>断货、14天内断货或实盘缺货；优先看补货/断货预警。</p></div>'+
+    '</div>'+
     '<div class="store-flow">'+
       '<div class="store-verdict"><h3>先看结论</h3><p>有 ET 数据时，本页优先使用货代仓实盘库存：09散件仓和01整箱仓计入可售，03/04/06作为待处理/不可售提示；成本表继续用于在途、批次和成本解释。</p>'+
         '<div class="store-action-steps">'+
@@ -9719,15 +10130,15 @@ function renderSystem(){
 const PAGE_GUIDES = {
   stores: {
     title: '店铺视角',
-    purpose: '回答一个问题：哪个店现在最需要关注？先看上方结论，再看 15 店矩阵，不要一上来钻明细。',
+    purpose: '回答一个问题：哪个店现在最需要关注？先看上方结论，再看 店铺矩阵，不要一上来钻明细。',
     steps: [
       ['先看结论', '选择店铺后，店铺作战台会把销售、链接、售后、履约和库存压成几张判断卡。'],
-      ['再看对比', '15 店横向对照表用于比较当前时段销售和最新风险信号，重点找销售高但售后高、动作多或覆盖弱的店。'],
+      ['再看对比', '店铺横向对照表用于比较当前时段销售和最新风险信号，重点找销售高但售后高、动作多或覆盖弱的店。'],
       ['最后下钻', '点货号、SKC 或动作，再进入货号 360 / SKC 链接 / 动作池处理。']
     ],
     actions: [
       ['看店铺作战台', 'storeCockpit'],
-      ['看 15 店横向对照', 'storesTable'],
+      ['看店铺横向对照', 'storesTable'],
       ['去今日动作池', 'actions', 'tab']
     ]
   },
@@ -9941,11 +10352,11 @@ function renderPageDecisionSummaries(){
       {label:'待处理动作', value:num(storeActions.length) + ' 条', hint:'筛到该店后进入动作池分派处理。', level:storeActions.length ? 'mid' : 'good'}
     ];
     sectionDecisionBlock('stores', {
-      title: '15 店经营决策摘要',
+      title: '店铺经营决策摘要',
       subtitle: '未选店铺时默认提示最高风险店，同时保留当前时段销售最高店作为对照。',
       tag: '全部店铺',
       cards: storeCards,
-      next: '先点击 15 店横向对照表里的最高风险店或销售最高店，再看该店的作战台。',
+      next: '先点击店铺横向对照表里的最高风险店或销售最高店，再看该店的作战台。',
       target:'storeCockpit'
     });
     }
@@ -9961,7 +10372,7 @@ function renderPageDecisionSummaries(){
       tag: state.q ? '搜索聚焦' : '默认高风险',
       cards: [
         {label:'当前时段销售', value:money(rangeProduct?.sales_sar ?? product.sales_sar), hint:'销量 '+num(rangeProduct?.quantity ?? product.quantity)+'；订单 '+num(rangeProduct?.orders || 0), level:'good'},
-        {label:'链接覆盖', value:num(product.on_shelf_store_count) + '/15 店', hint:'缺覆盖 '+num(product.missing_store_count)+' 店；先区分“该补链”还是“暂不上”。', level:Number(product.missing_store_count||0) ? 'mid' : 'good'},
+        {label:'链接覆盖', value:num(product.on_shelf_store_count) + '/' + num(TOTAL_STORE_COUNT) + ' 店', hint:'缺覆盖 '+num(product.missing_store_count)+' 店；先区分“该补链”还是“暂不上”。', level:Number(product.missing_store_count||0) ? 'mid' : 'good'},
         {label:'售后压力', value:num(product.after_sales_case_count) + ' 单', hint:'质退 '+num(product.quality_return_volume)+'；低星 '+num(product.low_star_comment_count), level:Number(product.after_sales_case_count||0) ? 'high' : 'good'},
         {label:'相关动作', value:num(productActions.length) + ' 条', hint:'动作多时先看优先级和下一步，不要逐条扫全表。', level:productActions.length ? 'mid' : 'good'}
       ],
@@ -10607,7 +11018,7 @@ async function main() {
   markStage('json:parse');
   const parsedData = deepSanitize(JSON.parse(raw));
   parsedData.openapiReconciliation = deepSanitize(openapiReconciliation);
-  const data = await enrichPortalDataWithLocalLinkLabels(parsedData);
+  const data = await attachManualCostFileMeta(await enrichPortalDataWithLocalLinkLabels(parsedData));
   markStage('sanitize');
   const safeAudit = deepSanitize(audit);
   const safePipeline = deepSanitize(pipeline);
@@ -10618,11 +11029,11 @@ async function main() {
   const jsonFile = path.join(args.outDir, 'data.json');
   const htmlFile = path.join(args.outDir, 'index.html');
   markStage('write:data');
-  await fs.writeFile(jsonFile, JSON.stringify({...data, audit: safeAudit, pipeline: safePipeline, briefing: safeBriefing, firstRunCheck: safeFirstRunCheck}, null, 2), 'utf8');
+  await writeFileWithRetry(jsonFile, JSON.stringify({...data, audit: safeAudit, pipeline: safePipeline, briefing: safeBriefing, firstRunCheck: safeFirstRunCheck}, null, 2), 'utf8');
   markStage('build:html');
   const html = buildHtml(data, metabaseUrl, safeAudit, safePipeline, safeBriefing, safeFirstRunCheck);
   markStage('write:html');
-  await fs.writeFile(htmlFile, html, 'utf8');
+  await writeFileWithRetry(htmlFile, html, 'utf8');
   markStage('done');
   clearTimeout(portalGenerateTimer);
   console.log(JSON.stringify({
@@ -10682,6 +11093,8 @@ async function main() {
       financeGoods: data.financeGoods?.length || 0,
       orders: data.orders?.length || 0,
       afterSales: data.afterSales?.length || 0,
+      rtvReview: data.rtvReview?.length || 0,
+      rtvTrace: data.rtvTrace?.length || 0,
       waybills: data.waybills?.length || 0,
       campaigns: data.campaigns?.length || 0,
       insights: data.insights?.length || 0,

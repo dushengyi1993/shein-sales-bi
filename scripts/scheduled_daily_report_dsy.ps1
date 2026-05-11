@@ -28,7 +28,7 @@ $ReportFlag = Join-Path $Root ("state\daily-report-sent-" + (Get-Date -Format "y
 
 Push-Location $Root
 try {
-  "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] SHEIN 15-store daily report start" | Out-File -FilePath $LogFile -Encoding UTF8
+  "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] SHEIN all-store daily report start" | Out-File -FilePath $LogFile -Encoding UTF8
   if (Test-Path -LiteralPath $ReportFlag) {
     "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Daily report already sent today; skip." | Out-File -FilePath $LogFile -Encoding UTF8 -Append
     exit 0
@@ -40,7 +40,7 @@ try {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ReportFlag) | Out-Null
     "sentAt=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" | Out-File -FilePath $ReportFlag -Encoding UTF8
   }
-  "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] SHEIN 15-store daily report end, exit=$ExitCode" | Out-File -FilePath $LogFile -Encoding UTF8 -Append
+  "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] SHEIN all-store daily report end, exit=$ExitCode" | Out-File -FilePath $LogFile -Encoding UTF8 -Append
   exit $ExitCode
 }
 finally {

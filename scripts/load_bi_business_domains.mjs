@@ -481,6 +481,8 @@ async function collect(args) {
       const reasons = a.afterSalesReasonList || [];
       for (const [idx, g] of (a.afterSalesOrderGoodsInfos || [{}]).entries()) {
         const raw = g.goodsSn || '';
+        const incomeAmount = num(g.checkEstimateIncomeMoney ?? g.estimatedIncomeAmount ?? a.estimatedIncomeAmount);
+        const displayAmount = num(g.priceAmount ?? a.priceAmountTotal);
         rows.afterSales.push({
           after_sales_item_key: `${store.storeKey}__${a.aftersalesOrderNo || a.id}__${g.goodsId || g.entityId || idx}`,
           snapshot_date: date,
@@ -501,7 +503,7 @@ async function collect(args) {
           return_package_status_name: a.returnPackageStatusName || '',
           reason_codes: joinUnique(reasons.map(x => x.reasonCode)),
           reason_names: joinUnique(reasons.map(x => x.reasonName)),
-          price_amount_total: num(a.priceAmountTotal),
+          price_amount_total: incomeAmount || displayAmount,
           currency_code: a.priceAmountCurrencyCode || g.priceAmountCurrencyCode || '',
           goods_id: g.goodsId || '',
           entity_id: g.entityId || '',
@@ -512,7 +514,7 @@ async function collect(args) {
           suffix: g.suffix || '',
           goods_title: g.goodsTitle || '',
           quantity: num(g.quantity),
-          price_amount: num(g.priceAmount),
+          price_amount: incomeAmount || displayAmount,
           return_expense: num(g.returnExpense),
           performance_price: num(g.performancePrice),
           freeze_amount: num(g.freezeAmount),

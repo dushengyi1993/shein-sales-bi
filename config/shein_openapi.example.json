@@ -23,7 +23,7 @@
       "secretKey": "解密后的店铺 secretKey；不要提交真实值",
       "encryptedSecretKey": "平台返回的加密 secretKey，可选；不要提交真实值",
       "authorizedAt": null,
-      "notes": "先用一个真实店铺试点，跑通后再复制到 15 店"
+      "notes": "先用一个真实店铺试点，跑通后再复制到 16 店"
     }
   ],
   "safeWriteOperations": {

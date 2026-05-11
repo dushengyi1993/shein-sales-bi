@@ -243,7 +243,7 @@ function storeRanking(rows, x, y) {
   const sorted = [...rows].sort((a, b) => b.sar - a.sar || b.orders - a.orders || b.qty - a.qty || a.storeKey.localeCompare(b.storeKey));
   const max = Math.max(1, ...sorted.map(r => r.sar));
   const rowH = 34, labelW = 92, barW = 565;
-  let out = sectionTitle(x, y, '今日店铺排行（15店完整）', '颜色区分 DSY / LGM，按销售额降序');
+  let out = sectionTitle(x, y, `今日店铺排行（${sorted.length}店完整）`, '颜色区分 DSY / LGM，按销售额降序');
   sorted.forEach((r, i) => {
     const yy = y + 42 + i * rowH;
     const bw = Math.round(barW * r.sar / max);

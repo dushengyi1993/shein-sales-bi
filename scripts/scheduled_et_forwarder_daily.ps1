@@ -14,9 +14,17 @@ function Get-BjDate([int]$OffsetDays) {
   return $utcNow.AddHours(8).AddDays($OffsetDays).ToString("yyyy-MM-dd")
 }
 
-if ([string]::IsNullOrWhiteSpace($Date)) {
+$TargetDate = $Date
+if ([string]::IsNullOrWhiteSpace($TargetDate)) {
   # ET 仓库库存/出库/RTV/账单是操作型数据，按当天北京时间抓最新状态。
-  $Date = Get-BjDate 0
+  $TargetDate = Get-BjDate 0
+}
+if ([string]::IsNullOrWhiteSpace($TargetDate)) {
+  # Defensive fallback for Windows scheduled runs: never pass an empty --date to Node.
+  $TargetDate = [DateTime]::UtcNow.AddHours(8).ToString("yyyy-MM-dd")
+}
+if ($TargetDate -notmatch '^\d{4}-\d{2}-\d{2}$') {
+  throw "Invalid ET sync date: $TargetDate"
 }
 
 $Node = (Get-Command node -ErrorAction SilentlyContinue).Source
@@ -65,19 +73,19 @@ function Send-EtIssueAlert([string]$Message) {
   Invoke-LoggedCommand "Send ET forwarder issue alert" {
     & $Node ".\scripts\notify_sync_issue.mjs" `
       --mode "et-forwarder-daily" `
-      --date $Date `
+      --date $TargetDate `
       --failed-stores "ET" `
       --message $Message `
       --log-file $LogFile
   } | Out-Null
 }
 
-Log "ET forwarder daily sync start date=$Date"
+Log "ET forwarder daily sync start date=$TargetDate"
 
-$FetchExitCode = Invoke-LoggedCommand "Fetch ET forwarder daily artifacts for $Date" {
+$FetchExitCode = Invoke-LoggedCommand "Fetch ET forwarder daily artifacts for $TargetDate" {
   & $Node ".\scripts\fetch_et_forwarder.mjs" `
     --mode daily `
-    --date $Date `
+    --date $TargetDate `
     --overlap-rows 5 `
     --daily-initial-pages 2 `
     --max-details 50 `
@@ -104,7 +112,7 @@ if ([string]::IsNullOrWhiteSpace($ManifestPath)) {
   exit 1
 }
 
-$LoadExitCode = Invoke-LoggedCommand "Load ET forwarder warehouse for $Date" {
+$LoadExitCode = Invoke-LoggedCommand "Load ET forwarder warehouse for $TargetDate" {
   & $Node ".\scripts\load_et_forwarder_warehouse.mjs" --manifest "$ManifestPath"
 }
 
@@ -126,5 +134,5 @@ try {
   Log "WARN cannot update loadedAt in ET manifest :: $($_.Exception.Message)"
 }
 
-Log "ET forwarder daily sync end date=$Date ok=True log=$LogFile"
+Log "ET forwarder daily sync end date=$TargetDate ok=True log=$LogFile"
 exit 0

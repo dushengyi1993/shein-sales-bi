@@ -29,7 +29,7 @@ $FeishuBasePaused = Test-Path -LiteralPath $FeishuBasePauseFlag
 
 Push-Location $Root
 try {
-  "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] SHEIN 15-store watchdog start" | Out-File -FilePath $LogFile -Encoding UTF8
+  "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] SHEIN all-store watchdog start" | Out-File -FilePath $LogFile -Encoding UTF8
   if ($FeishuBasePaused) {
     "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Feishu Base/table/dashboard writes are paused by state\feishu-base-sync-paused.flag; watchdog only catches up local fetch/alerts." | Out-File -FilePath $LogFile -Encoding UTF8 -Append
   }
@@ -70,7 +70,7 @@ try {
     "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Skip dashboard refresh because one group failed." | Out-File -FilePath $LogFile -Encoding UTF8 -Append
   }
   $ExitCode = if ($DsyExitCode -ne 0) { $DsyExitCode } elseif ($LgmExitCode -ne 0) { $LgmExitCode } elseif ($MonthlyExitCode -ne 0) { $MonthlyExitCode } elseif ($CompactExitCode -ne 0) { $CompactExitCode } elseif ($DashboardExitCode -ne 0) { $DashboardExitCode } else { 0 }
-  "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] SHEIN 15-store watchdog end, dsy=$DsyExitCode, lgm=$LgmExitCode, monthly=$MonthlyExitCode, compact=$CompactExitCode, dashboard=$DashboardExitCode, exit=$ExitCode" | Out-File -FilePath $LogFile -Encoding UTF8 -Append
+  "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] SHEIN all-store watchdog end, dsy=$DsyExitCode, lgm=$LgmExitCode, monthly=$MonthlyExitCode, compact=$CompactExitCode, dashboard=$DashboardExitCode, exit=$ExitCode" | Out-File -FilePath $LogFile -Encoding UTF8 -Append
   exit $ExitCode
 }
 finally {

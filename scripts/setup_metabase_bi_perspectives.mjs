@@ -212,7 +212,7 @@ limit 500;`
   },
   {
     name: 'SHEIN BI · 货号视角',
-    description: '按标准货号进入，综合看 15 店销售、覆盖、缺链接、动作和样本 SKC。',
+    description: '按标准货号进入，综合看全店销售、覆盖、缺链接、动作和样本 SKC。',
     cards: [
       {
         name: 'SHEIN BI · 货号视角 · 货号总览表',

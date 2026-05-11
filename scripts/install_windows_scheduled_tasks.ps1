@@ -155,20 +155,20 @@ if (-not $IncludeEtForwarder -and (Get-ScheduledTask -TaskName $EtForwarderTaskN
 
 Register-InteractiveTask `
   -TaskName $IntradayTaskName `
-  -Description "SHEIN 15-store intraday sales sync at daytime checkpoints $($IntradayScheduleTimes -join ', '), Beijing time. Workspace: $Root" `
+  -Description "SHEIN all-store intraday sales sync at daytime checkpoints $($IntradayScheduleTimes -join ', '), Beijing time. Workspace: $Root" `
   -ScriptPath $IntradayScript `
   -Trigger $IntradayTriggers
 
 Register-InteractiveTask `
   -TaskName $YesterdayTaskName `
-  -Description "SHEIN 15-store previous-day final sales sync after midnight at $YesterdayFinalTime Beijing time. Workspace: $Root" `
+  -Description "SHEIN all-store previous-day final sales sync after midnight at $YesterdayFinalTime Beijing time. Workspace: $Root" `
   -ScriptPath $YesterdayScript `
   -Trigger @($YesterdayTrigger)
 
 if ($IncludeLinkManagement) {
   Register-InteractiveTask `
     -TaskName $LinkManagementTaskName `
-    -Description "SHEIN 15-store link-management + business-domain fetch at $LinkManagementTime Beijing time. Fetches previous complete day links, after-sales, stock, comments, fulfillment, finance and quality files; BI loads them later. Workspace: $Root" `
+    -Description "SHEIN all-store link-management + business-domain fetch at $LinkManagementTime Beijing time. Fetches previous complete day links, after-sales, stock, comments, fulfillment, finance and quality files; BI loads them later. Workspace: $Root" `
     -ScriptPath $LinkManagementScript `
     -Trigger @($LinkManagementTrigger)
 }
@@ -184,7 +184,7 @@ if ($IncludeEtForwarder) {
 if ($IncludeDailyReport) {
   Register-InteractiveTask `
     -TaskName $DailyReportTaskName `
-    -Description "SHEIN 15-store daily Lark report at $DailyReportTime Beijing time, using the morning sync data. Workspace: $Root" `
+    -Description "SHEIN all-store daily Lark report at $DailyReportTime Beijing time, using the morning sync data. Workspace: $Root" `
     -ScriptPath $DailyReportScript `
     -Trigger @($DailyReportTrigger)
 }
@@ -192,7 +192,7 @@ if ($IncludeDailyReport) {
 if ($IncludeWatchdog) {
   Register-InteractiveTask `
     -TaskName $WatchdogTaskName `
-    -Description "SHEIN 15-store watchdog at Windows logon and $WatchdogDailyTime. It catches up missed final syncs after reboot/offline time and does not run an extra today sync. Workspace: $Root" `
+    -Description "SHEIN all-store watchdog at Windows logon and $WatchdogDailyTime. It catches up missed final syncs after reboot/offline time and does not run an extra today sync. Workspace: $Root" `
     -ScriptPath $WatchdogScript `
     -Trigger @($WatchdogLogonTrigger, $WatchdogDailyTrigger)
 }

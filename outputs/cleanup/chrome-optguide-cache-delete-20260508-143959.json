@@ -1,0 +1,124 @@
+﻿{
+    "time":  "2026-05-08T14:40:06",
+    "profilesRoot":  "E:\\Codex WorkSpace\\Shein销售统计\\profiles",
+    "targetCount":  8,
+    "estimatedFreedGB":  31.81,
+    "stoppedWorkspaceChromeCount":  146,
+    "remainingWorkspaceChromeAfterStop":  0,
+    "targets":  [
+                    {
+                        "Profile":  "persistent-cx-profile",
+                        "Path":  "E:\\Codex WorkSpace\\Shein销售统计\\profiles\\persistent-cx-profile\\OptGuideOnDeviceModel",
+                        "Files":  6,
+                        "Bytes":  4269934835,
+                        "SizeGB":  3.98
+                    },
+                    {
+                        "Profile":  "persistent-dl-profile",
+                        "Path":  "E:\\Codex WorkSpace\\Shein销售统计\\profiles\\persistent-dl-profile\\OptGuideOnDeviceModel",
+                        "Files":  6,
+                        "Bytes":  4269934835,
+                        "SizeGB":  3.98
+                    },
+                    {
+                        "Profile":  "persistent-mz-profile",
+                        "Path":  "E:\\Codex WorkSpace\\Shein销售统计\\profiles\\persistent-mz-profile\\OptGuideOnDeviceModel",
+                        "Files":  6,
+                        "Bytes":  4269934835,
+                        "SizeGB":  3.98
+                    },
+                    {
+                        "Profile":  "persistent-qh-profile",
+                        "Path":  "E:\\Codex WorkSpace\\Shein销售统计\\profiles\\persistent-qh-profile\\OptGuideOnDeviceModel",
+                        "Files":  6,
+                        "Bytes":  4269934835,
+                        "SizeGB":  3.98
+                    },
+                    {
+                        "Profile":  "persistent-shein-main-profile",
+                        "Path":  "E:\\Codex WorkSpace\\Shein销售统计\\profiles\\persistent-shein-main-profile\\OptGuideOnDeviceModel",
+                        "Files":  6,
+                        "Bytes":  4269934835,
+                        "SizeGB":  3.98
+                    },
+                    {
+                        "Profile":  "persistent-ts-profile",
+                        "Path":  "E:\\Codex WorkSpace\\Shein销售统计\\profiles\\persistent-ts-profile\\OptGuideOnDeviceModel",
+                        "Files":  6,
+                        "Bytes":  4269934835,
+                        "SizeGB":  3.98
+                    },
+                    {
+                        "Profile":  "persistent-xl-profile",
+                        "Path":  "E:\\Codex WorkSpace\\Shein销售统计\\profiles\\persistent-xl-profile\\OptGuideOnDeviceModel",
+                        "Files":  6,
+                        "Bytes":  4269934835,
+                        "SizeGB":  3.98
+                    },
+                    {
+                        "Profile":  "persistent-zl-profile",
+                        "Path":  "E:\\Codex WorkSpace\\Shein销售统计\\profiles\\persistent-zl-profile\\OptGuideOnDeviceModel",
+                        "Files":  6,
+                        "Bytes":  4269934835,
+                        "SizeGB":  3.98
+                    }
+                ],
+    "deleted":  [
+                    {
+                        "Profile":  "persistent-cx-profile",
+                        "Path":  "E:\\Codex WorkSpace\\Shein销售统计\\profiles\\persistent-cx-profile\\OptGuideOnDeviceModel",
+                        "Files":  6,
+                        "SizeGB":  3.98,
+                        "ExistsAfter":  false
+                    },
+                    {
+                        "Profile":  "persistent-dl-profile",
+                        "Path":  "E:\\Codex WorkSpace\\Shein销售统计\\profiles\\persistent-dl-profile\\OptGuideOnDeviceModel",
+                        "Files":  6,
+                        "SizeGB":  3.98,
+                        "ExistsAfter":  false
+                    },
+                    {
+                        "Profile":  "persistent-mz-profile",
+                        "Path":  "E:\\Codex WorkSpace\\Shein销售统计\\profiles\\persistent-mz-profile\\OptGuideOnDeviceModel",
+                        "Files":  6,
+                        "SizeGB":  3.98,
+                        "ExistsAfter":  false
+                    },
+                    {
+                        "Profile":  "persistent-qh-profile",
+                        "Path":  "E:\\Codex WorkSpace\\Shein销售统计\\profiles\\persistent-qh-profile\\OptGuideOnDeviceModel",
+                        "Files":  6,
+                        "SizeGB":  3.98,
+                        "ExistsAfter":  false
+                    },
+                    {
+                        "Profile":  "persistent-shein-main-profile",
+                        "Path":  "E:\\Codex WorkSpace\\Shein销售统计\\profiles\\persistent-shein-main-profile\\OptGuideOnDeviceModel",
+                        "Files":  6,
+                        "SizeGB":  3.98,
+                        "ExistsAfter":  false
+                    },
+                    {
+                        "Profile":  "persistent-ts-profile",
+                        "Path":  "E:\\Codex WorkSpace\\Shein销售统计\\profiles\\persistent-ts-profile\\OptGuideOnDeviceModel",
+                        "Files":  6,
+                        "SizeGB":  3.98,
+                        "ExistsAfter":  false
+                    },
+                    {
+                        "Profile":  "persistent-xl-profile",
+                        "Path":  "E:\\Codex WorkSpace\\Shein销售统计\\profiles\\persistent-xl-profile\\OptGuideOnDeviceModel",
+                        "Files":  6,
+                        "SizeGB":  3.98,
+                        "ExistsAfter":  false
+                    },
+                    {
+                        "Profile":  "persistent-zl-profile",
+                        "Path":  "E:\\Codex WorkSpace\\Shein销售统计\\profiles\\persistent-zl-profile\\OptGuideOnDeviceModel",
+                        "Files":  6,
+                        "SizeGB":  3.98,
+                        "ExistsAfter":  false
+                    }
+                ]
+}

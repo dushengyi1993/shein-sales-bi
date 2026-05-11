@@ -1,0 +1,68 @@
+{
+  "products": [
+    {
+      "sku": "KF-JN-02便携咖啡机",
+      "category": "便携咖啡机",
+      "stores": [
+        "Amazon-US",
+        "noon-SA"
+      ],
+      "market": "KSA",
+      "platform": "Amazon",
+      "reference_policy": "strict_copy_shape_angle",
+      "verified_facts": [
+        {
+          "claim": "Portable electric espresso machine",
+          "source": "作图模板20251223.docx"
+        },
+        {
+          "claim": "Travel coffee machine, a must-have for camping",
+          "source": "作图模板20251223.docx"
+        },
+        {
+          "claim": "Car coffee machine with Type-C interface",
+          "source": "作图模板20251223.docx"
+        },
+        {
+          "claim": "Can be heated and used both hot and cold",
+          "source": "作图模板20251223.docx"
+        },
+        {
+          "claim": "Compatible with ground coffee and capsule coffee",
+          "source": "作图模板20251223.docx"
+        },
+        {
+          "claim": "Suitable for RV, hiking, office and other travel scenarios",
+          "source": "作图模板20251223.docx"
+        }
+      ],
+      "visual_facts": [
+        "产品本体、部件形状、颜色、角度以用户上传参考图为准",
+        "如果无法确定完整长相，不改变参考图中产品形状和方向"
+      ],
+      "candidate_claims": [
+        {
+          "claim": "具体容量、水箱大小、电池容量、萃取压力、加热温度",
+          "status": "needs_user_confirmation"
+        }
+      ],
+      "forbidden_claims": [
+        "BPA-Free",
+        "Safe"
+      ],
+      "forbidden_visuals": [
+        "包装盒",
+        "宗教元素",
+        "清真寺图案",
+        "戴头巾的宗教化男性形象",
+        "中文文字",
+        "酒精"
+      ],
+      "copy_language": [
+        "English",
+        "Arabic_review_required"
+      ],
+      "notes": "面向沙特市场；除 1:1 封面外全部 3:4；不要改变产品外观。"
+    }
+  ]
+}

@@ -790,8 +790,8 @@ function applyAllStoreNoOnShelfSuppression(objects, enabled = new Set()) {
       if (!suppressed.has(row.standardGoodsSn)) continue;
       row.allStoresNoOnShelfNoReminder = true;
       row.needSupplementLink = false;
-      row.recommendation = '15店均无上架链接，按暂不上/库存未到处理，暂不提醒';
-      if (!String(row.coverageStatus || '').includes('暂不提醒')) row.coverageStatus = `${row.coverageStatus}（15店均无上架，暂不提醒）`;
+      row.recommendation = '全部店均无上架链接，按暂不上/库存未到处理，暂不提醒';
+      if (!String(row.coverageStatus || '').includes('暂不提醒')) row.coverageStatus = `${row.coverageStatus}（全部店均无上架，暂不提醒）`;
     }
     obj.suggestionRows = (obj.suggestionRows || []).filter(row => !(row.ruleCode === 'COVERAGE_MISSING' && suppressed.has(row.standardGoodsSn)));
   }

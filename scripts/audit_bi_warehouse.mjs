@@ -116,16 +116,17 @@ function evaluate(summary, metabase) {
   }
 
   const storeCoverage = s.storeCoverage || {};
+  const expectedStoreCount = Number(s.storeCount || 0) || 0;
   const miss = key => {
     const arr = Array.isArray(storeCoverage[key]) ? storeCoverage[key].filter(Boolean) : [];
     return arr.length ? `???${arr.join('?')}` : '';
   };
-  if ((storeCoverage.sales_store_count || 0) < 15) warnings.push(`????????? ${storeCoverage.sales_store_count || 0}/15 ???${miss('sales_missing_stores')}?`);
-  if ((storeCoverage.business_store_count || 0) < 15) warnings.push(`?????????? ${storeCoverage.business_store_count || 0}/15 ???${miss('business_missing_stores')}?`);
-  if ((storeCoverage.inventory_store_count || 0) < 15) warnings.push(`????????? ${storeCoverage.inventory_store_count || 0}/15 ???${miss('inventory_missing_stores')}?`);
-  if ((storeCoverage.quality_store_count || 0) < 15) warnings.push(`????????? ${storeCoverage.quality_store_count || 0}/15 ???${miss('quality_missing_stores')}?`);
-  if ((storeCoverage.finance_detail_store_count || 0) > 0 && (storeCoverage.finance_detail_store_count || 0) < 15) {
-    warnings.push(`?? gsfs ??????? ${storeCoverage.finance_detail_store_count}/15 ???${miss('finance_detail_missing_stores')}??????????????????????????`);
+  if (expectedStoreCount && (storeCoverage.sales_store_count || 0) < expectedStoreCount) warnings.push(`销售最新日覆盖 ${storeCoverage.sales_store_count || 0}/${expectedStoreCount} 店${miss('sales_missing_stores')}`);
+  if (expectedStoreCount && (storeCoverage.business_store_count || 0) < expectedStoreCount) warnings.push(`业务域最新日覆盖 ${storeCoverage.business_store_count || 0}/${expectedStoreCount} 店${miss('business_missing_stores')}`);
+  if (expectedStoreCount && (storeCoverage.inventory_store_count || 0) < expectedStoreCount) warnings.push(`库存最新日覆盖 ${storeCoverage.inventory_store_count || 0}/${expectedStoreCount} 店${miss('inventory_missing_stores')}`);
+  if (expectedStoreCount && (storeCoverage.quality_store_count || 0) < expectedStoreCount) warnings.push(`质量最新日覆盖 ${storeCoverage.quality_store_count || 0}/${expectedStoreCount} 店${miss('quality_missing_stores')}`);
+  if (expectedStoreCount && (storeCoverage.finance_detail_store_count || 0) > 0 && (storeCoverage.finance_detail_store_count || 0) < expectedStoreCount) {
+    warnings.push(`gsfs 财务明细覆盖 ${storeCoverage.finance_detail_store_count}/${expectedStoreCount} 店${miss('finance_detail_missing_stores')}；未覆盖店铺不要把财务明细空值当 0。`);
   }
 
   const counts = s.latestCounts || {};
@@ -153,6 +154,7 @@ latest AS (
 ),
 summary AS (
   SELECT jsonb_build_object(
+    'storeCount', (SELECT count(*) FROM dim.store WHERE enabled IS DISTINCT FROM false),
     'latestDates', jsonb_build_object(
       'sales_date', (SELECT sales_date FROM latest),
       'link_date', (SELECT link_date FROM latest),

@@ -227,7 +227,7 @@
 
 ## 11. 风险与边界
 
-- ET 登录有验证码和掉线风险，抓取器只能尽量复用浏览器登录态；掉线时需要提醒人工处理。
+- ET 登录有验证码和掉线风险；抓取器已接入本地自动登录：从 ET 专属 Chrome profile 读取已保存账号密码、识别 4 位验证码并提交登录。若验证码连续识别失败、密码失效或后台改版，仍会发送飞书异常提醒并保留上一版 ET 数据。
 - `店铺管理` 页面含接口密钥等敏感字段，正式抓取默认不采集、不入库、不展示。
 - ET 后台接口返回 `text/html` 但内容是 JSON，不能只靠 `content-type` 判断。
 - 财务仓储费明细目前样本中仓储费账单的明细为空，需要后续继续探导出接口；如果确实拿不到 SKU 级明细，只能估算分摊。
@@ -247,14 +247,53 @@
 当前系统采用两套口径：
 
 1. 主口径仍然保守：退货/仅退款/派送失败等反转订单，营收按 0，商品成本仍扣除，真实退货退款按既有规则额外扣 13.88 SAR 退货派送费。
-2. 辅助口径新增“RTV 已收可二次销售测算”：如果 SHEIN 售后退件物流号能在 ET RTV 中确认已收件，则按当前单位成本回补一笔 tv_recoverable_cost_sar，并形成 profit_if_rtv_received_resellable_sar。这只是测算金额，不替代主口径。
+2. 辅助口径新增“RTV 已收可二次销售测算”：如果 SHEIN 售后退件物流号能在 ET RTV 中确认已收件，则按当前单位成本回补一笔 `rtv_recoverable_cost_sar`，并形成 `profit_if_rtv_received_resellable_sar`。这只是测算金额，不替代主口径。
 
-当前 ET 数据能判断退件入了 ETRUH03_RTV 或直接入 ETRUH09散件仓；暂未抓到可精确关联单件从 ETRUH03_RTV 后续转入 ETRUH09散件仓 的链路。因此：
+当前 ET 数据能判断退件直接入 09、入 03 后续调拨到 09、仍在 03、进入 04 破损、转 06 报废或其它/未知。03 后续去向通过 `mart.et_rtv_destination_allocation` 按同货号库存流水 FIFO 推断，因此：
 
 - 已收但只确认在 03：进入二售测算，不改主利润。
-- 能确认直接到 09 或库存流水中以同一退件物流号进 09：进入 tv_09_recoverable_cost_sar，后续可作为更强证据。
-- 查不到 ET 收件或进 09：完全保持保守口径。
+- 能确认直接到 09，或通过库存流水 FIFO 追到 09：进入 `rtv_09_recoverable_cost_sar`，后续可作为更强证据。
+- 进入 04 破损或 06 报废：保留去向明细，主利润仍按保守损失。
+- 查不到 ET 收件或去向未知：完全保持保守口径。
 
+#### 12.2.1 EMile / 换单号反向复核
+
+- 有些来自 EMile 的退货在运输途中会更换物流单号，SHEIN 售后列表里的 `returnExpressInfoList.expressNo` 可能不是 ET RTV 最终入仓单号。
+- 因此不能只做 “SHEIN 退货物流号 -> ET RTV” 单向匹配；还要反向做 “ET RTV 已收物流号 -> SHEIN 售后候选”。
+- `mart.rtv_manual_review_candidates`：
+  - 取 ET RTV 已收件、已入库或已有收件仓的记录；
+  - 排除已经和 SHEIN 售后物流号或 `ops.rtv_tracking_verification` 匹配的记录；
+  - 对 10 位以上纯数字物流号标记 `suspected_emile_handoff=true`，作为疑似 EMile/换单后的数字单号；
+  - 按同标准货号、时间窗口全店生成 SHEIN 售后候选；ET SKU 上的店铺前缀只作排序线索，不作硬过滤。
+- `scripts/verify_shein_rtv_tracking.mjs`：
+  - 直接复用各店已登录 Chrome profile / CDP；
+  - 读取 `aftersalesOrder/detail`、`returnOrder/detail`、`returnOrder/expressRoute` 和必要时的 `order/expressRoute`；
+  - JT/JTE 退货物流按同一运单号直连；iMile/EMile 通过物流详情里的 `new waybill number [...]`、`新的运单号[...]`、`运单已...更换` 等中英文换单文本确认；确认结果写入 `ops.rtv_tracking_verification`。
+- `mart.rtv_recovery_impact` 与 `mart.rtv_manual_review_candidates` 已吸收 `ops.rtv_tracking_verification` 中 `match_status='matched'` 的结果；确认匹配后，相关 RTV 会自动退出待复核池，并计入 `RTV 已收可二售测算`。
+- BI `订单 / 售后` 页面已新增 “RTV 换单待复核” 表；这部分只用于提高 `RTV 已收可二售测算` 的召回率，未经人工确认前不直接改主利润。
+
+#### 12.2.2 收件后的仓库去向追踪
+
+- `mart.et_rtv_destination_allocation` 从 ET 库存流水追踪 RTV 收件后的去向：直接入 `ETRUH09散件仓`、03 后续调拨入 09、仍在 `ETRUH03_RTV`、进入 `ETRUH04Damaged`、转 `ETRUH06报废` 或其它/未知。
+- 分配方法是同货号库存池 FIFO，不是单件序列号扫描；它适合用于二售测算和经营复核，但页面必须标明口径。
+- `mart.shein_return_rtv_trace` 将 SHEIN 退货单、ET RTV 收件和 ET 库存流水去向串成明细。BI `订单 / 售后` 页面中的 “退货收件 / 仓库去向追踪” 表用于回答每条退货“收到没有、收到后去了哪里”。
 ### 12.3 仓储费明细边界
 
 ET 财务账单中已能抓到每日仓储费总账（sort_name=仓储费），但当前抓到的账单明细没有返回 SKU 级 item rows。后续要继续探索仓储费详情页/接口；在拿到稳定 SKU 级明细前，ET 仓储费不能按货号替代手工月仓储费，只能用于月总核对或估算分摊。
+
+## 13. 2026-05-08 ET 自动登录修复
+
+- 早上 `SHEIN-Sales-ETForwarder-0420` 失败的直接原因是 ET 登录态过期，页面回到 `登入 - 易通天下客户中心`；旧抓取器只检查登录态并报警，没有进入验证码登录流程。
+- 已新增 `scripts/et_login_helper.py`：从 `profiles/persistent-et-forwarder-profile` 的 Chrome `Login Data` 读取已保存 ET 账号密码，并用本地 `.cache/python` 中的 OCR 依赖识别 `/Login/GetAuthCode` 4 位验证码。默认手动运行不会打印密码，只有抓取器进程设置 `ET_LOGIN_HELPER_ALLOW_SECRET=1` 时才把密码返回给本地进程。
+- 已升级 `scripts/fetch_et_forwarder.mjs`：检测到登录页时自动取凭据、拉取验证码图片、OCR、提交 `/Login/CheckCustomerLogin`，登录成功后继续原抓取流程；最多尝试 5 次，仍失败再发飞书异常提醒。
+- 同步修复 `scripts/scheduled_et_forwarder_daily.ps1` 的空日期保护，避免计划任务把空 `--date` 传给 Node 后触发 `Invalid time value`。
+- 已用临时 profile 演练“无登录 cookie + 已保存密码 + 验证码 OCR”的完整链路，自动登录成功；随后补跑 `2026-05-08` ET 日同步并入仓成功，BI 门户已重新生成。
+
+## 14. 2026-05-09 ET 同源探测修复
+
+- `2026-05-09 04:20` ET 任务失败不是验证码识别失败，而是首页探测阶段在页面内跨 ET 域名/IP 做 `fetch`，触发 `TypeError: Failed to fetch`，导致还没进入自动登录流程。
+- `scripts/fetch_et_forwarder.mjs` 已改为使用当前页面 `location.origin` 组装同源 URL；`probeEtHome` 对 fetch 异常返回可处理状态，不再直接抛异常。
+- 已手动补跑 `2026-05-09` ET 日同步并入仓成功；随后使用 `Start-ScheduledTask -TaskName SHEIN-Sales-ETForwarder-0420` 直接触发计划任务入口复验，`LastTaskResult=0`，下一次自动运行时间为 `2026-05-10 04:20`。
+
+## ET 前台窗口规则
+- ET 货代仓也适用“非必要不打开前端窗口”：`scripts/fetch_et_forwarder.mjs` 默认 `visible=false` 并用 `WindowStyle Hidden` 启动 Chrome；自动登录优先走 `scripts/et_login_helper.py` + OCR。只有 OCR/验证码连续失败、登录态必须人工处理、用户明确要求，或必须排查浏览器交互问题时，才允许临时加 `--visible` 打开 ET 前台窗口，处理完必须关闭。

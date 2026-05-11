@@ -1,24 +1,28 @@
 # SHEIN 销售统计与 BI 经营系统
 
-## 2026-05-06 当前权威状态
+## 2026-05-09 当前权威状态
 
 - 飞书多维表格 / 原生看板写入已临时暂停；飞书日报继续正常发送，BI 系统作为当前主要经营入口继续运行。
-- 销售同步完成后会后置刷新 BI；如果单店失败但本地 15 店销售文件已齐，BI 仍会刷新，并通过飞书消息提醒失败店铺。
+- 销售同步完成后会后置刷新 BI；如果单店失败但本地 16 店销售文件已齐，BI 仍会刷新，并通过飞书消息提醒失败店铺。
 - 链接表现改为每日后半夜一次，当前任务为 `SHEIN-Sales-15Stores-LinkManagement-0530`，每天 `05:30`，只写本地 / PostgreSQL / BI；飞书链接管理表已废弃。旧 `0340` / `0510` 链接任务不要恢复。
 - HL 已切换为主账号 profile：`profiles/persistent-shein-main-profile`；旧 `profiles/persistent-hl-profile` 已删除。
-- `2026-05-05` Docker / WSL 数据盘异常已手动恢复；`2026-05-06 05:30` 链接/业务域任务和 `2026-05-06 07:00` BI 每日流水线已自动跑通。飞书多维表格 / 看板写入暂停开关为 `state/feishu-base-sync-paused.flag`。
+- `2026-05-10` 已完成 16 店 profile 显示名与登录抓数复核：未发现 profile 名和登录态混乱；`YJ=profileKey qy`、`XL=profileKey yj`、`QY=profileKey xl` 是历史遗留但当前正确的绑定，不要仅凭名称直觉改动。
+- `2026-05-09 05:30` 链接/业务域任务、`2026-05-09 07:00` BI 每日流水线和白天滚动后置 BI 刷新均已跑通。飞书多维表格 / 看板写入暂停开关为 `state/feishu-base-sync-paused.flag`。
+- ET 货代仓已接入本地数据仓库和 BI：`04:20` 每日同步当前库存、RTV、出库、发货申请单、财务等；抓取器会用 ET 专属 profile 中已保存的密码 + 本地 OCR 自动登录。`2026-05-09` 早间同源探测问题已修复并通过计划任务入口复验。
+- RTV 换单号自动复核已接入 BI 流水线：`scripts/verify_shein_rtv_tracking.mjs` 直接读取 SHEIN 售后详情和退货物流详情，JT/JTE 走同运单直连，iMile/EMile 识别中英文换单证据；截至 `2026-05-09` 已确认 `132` 个 ET RTV 入仓单号。
+- RTV 收件后去向已进入 BI：`mart.et_rtv_destination_allocation` 追踪 09 可售、03_RTV、04 破损、06 报废和其它/未知去向；`mart.shein_return_rtv_trace` 在 `订单 / 售后` 页面展示每条 SHEIN 退货是否收到、收到后去了哪里。
 - HL OpenAPI 销售试点已跑通并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` 写入 `fact.openapi_*` 并行事实表与 `mart.openapi_sales_reconciliation` 对账表；BI 系统状态页显示 “SHEIN OpenAPI 试点对账”。正式切换生产销售表前继续累计多日 `matched`。
 - HL OpenAPI 销售试点已固定为 Windows 计划任务双跑：`SHEIN-Sales-OpenAPI-HL-YesterdayFinal-0025` 每天 `00:25` 对账前一天最终版，`SHEIN-Sales-OpenAPI-HL-Intraday-1225` 每天 `12:25` 对账当天日内销售；只写 `fact.openapi_*` 和 `mart.openapi_sales_reconciliation` 并刷新 BI 状态页，不覆盖浏览器生产事实表。`2026-05-07 13:28` 已把当前出口 IP `188.253.112.44` 加入 SHEIN 开放平台白名单，完整入口复跑成功并刷新 BI；当日 intraday 对账为 `warning`，原因是 API 已多看到 1 个新订单，而浏览器生产源文件仍停留在上一轮同步。
 - 系统定位正在从“BI 数据分析”扩展为“自动运营驾驶舱”：先把可重复运营动作沉淀为脚本和规则，再按“建议/预填/复核/人工确认提交/审计留痕”的边界逐步开放自动化。
 
-本工作区用于 SHEIN 15 店销售数据自动抓取、飞书多维表格统计、每日飞书日报、链接管理、营销活动报名辅助，以及正在并行建设的 PostgreSQL + Metabase + 本地 BI / 自动运营驾驶舱。
+本工作区用于 SHEIN 16 店销售数据自动抓取、飞书多维表格统计、每日飞书日报、链接管理、营销活动报名辅助，以及正在并行建设的 PostgreSQL + Metabase + 本地 BI / 自动运营驾驶舱。
 
 当前原则：**SHEIN 抓数、BI 刷新和飞书日报继续运行；飞书多维表格 / 看板写入先暂停，待用户确认再恢复。**
 
-## 当前状态（2026-05-06）
+## 当前状态（2026-05-09）
 
-- 店铺范围：15 家店，`DSY` 组 10 家，`LGM` 组 5 家。
-- 当前店铺代码：`CX DL DX FY HL JY LQ MZ NM QH QY TS XL YJ ZL`。
+- 店铺范围：16 家店，`DSY` 组 10 家，`LGM` 组 6 家。
+- 当前店铺代码：`CX DL DX FY HL JY LQ MZ NM QH QY TS TZ XL YJ ZL`（新增 `TZ / GS5636781`）。
 - 正式 Base：`https://zcnm3ts63aph.feishu.cn/base/SnnQbrAu6aLzMWsnEICcy0cKnJh`（标题已标注 `【多维表格同步暂停｜日报正常】`）
 - 当前正式看板：
   - 当月主看板：`SHEIN经营看板 v3-主看板`（`blkFn3qHrwdsrJyX`）
@@ -29,20 +33,23 @@
   - 局域网协作访问：`http://192.168.2.49:8787/`
   - Metabase：`http://172.22.172.186:3000`
 - 当前 BI 数据截面：
-  - 销售 / 订单：`2026-05-06`，最近抓取时间 `2026-05-06T10:10:13.337+08:00`
-  - 售后 / 库存 / 财务：业务日 `2026-05-05`，最近源文件抓取时间 `2026-05-06 05:46:42`
-  - 链接表现：链接日 `2026-05-05`，最近源文件抓取时间 `2026-05-06 05:37:48`
+  - 销售 / 订单：`2026-05-09`
+  - 售后 / 库存 / 财务：业务日 `2026-05-08`，源抓取时间 `2026-05-09 05:45:46`
+  - 链接表现：链接日 `2026-05-08`，源抓取时间 `2026-05-09 05:36:32`
+  - ET 货代仓：最新批次 `et-daily-2026-05-09-2026-05-09T03-31-50-575Z`，计划任务下一次自动运行 `2026-05-10 04:20`。
 - 定时任务：
   - `00:10`：前一天完整销售额最终版；飞书 Base 暂停期间只抓本地数据并刷新 BI。
-  - `05:30`：链接管理 15 店每日同步，任务名 `SHEIN-Sales-15Stores-LinkManagement-0530`，不再写飞书链接管理表。
-  - `07:00`：BI 每日流水线，任务名 `SHEIN-BI-Daily-Pipeline-0700`。
+  - `04:20`：ET 货代仓每日同步，任务名 `SHEIN-Sales-ETForwarder-0420`，按增量游标 + 重叠校验抓 ET 库存、RTV、出库、发货申请单、财务等。
+  - `05:30`：链接管理 16 店每日同步，任务名 `SHEIN-Sales-15Stores-LinkManagement-0530`，不再写飞书链接管理表。
+  - `07:00`：BI 每日流水线，任务名 `SHEIN-BI-Daily-Pipeline-0700`，包含 ET/SHEIN 入仓、RTV 换单自动复核、BI 体检、本地门户和晨报刷新。
   - `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10`：当天滚动抓取；飞书 Base 暂停期间只抓本地数据并刷新 BI。
   - 日报不再使用固定 09:00 任务；每天早上 08:10 同步成功完成后自动发送飞书文字日报 + 可视化日报图，上午后续成功同步可补发一次。
   - `09:20` 和 Windows 登录时：watchdog 漏跑补偿，不额外同步当日。
 - 当前飞书 Base 暂停规则：存在 `state/feishu-base-sync-paused.flag` 时，`DSY` 和 `LGM` 仍正常抓 SHEIN 本地数据、刷新 BI、发送日报，但跳过飞书事实表、产品表、月表、年度/周月宽表、当月主看板和上月看板写入。
 - 当前 BI 自动任务状态：
-  - `SHEIN-Sales-15Stores-LinkManagement-0530` 已于 `2026-05-06 05:30:01` 自动运行成功；下一次运行 `2026-05-07 05:30:00`。
-  - `SHEIN-BI-Daily-Pipeline-0700` 已于 `2026-05-06 07:00:01` 自动运行成功；下一次运行 `2026-05-07 07:00:00`。`2026-05-06` 后续 `08:10` / `10:10` 销售滚动后置 BI 也已成功刷新。
+  - `SHEIN-Sales-ETForwarder-0420` 已于 `2026-05-09 11:31:49` 手动触发计划任务入口复验成功，`LastTaskResult=0`，下一次运行 `2026-05-10 04:20:00`。
+  - `SHEIN-Sales-15Stores-LinkManagement-0530` 已于 `2026-05-09 05:30:01` 自动运行成功；下一次运行 `2026-05-10 05:30:00`。
+  - `SHEIN-BI-Daily-Pipeline-0700` 已于 `2026-05-09 07:00:01` 自动运行成功；下一次运行 `2026-05-10 07:00:00`。`2026-05-09` 白天滚动销售后置 BI 也已成功刷新。
   - `2026-05-02 07:00` 的 `267014` 是已修复的历史失败记录，保留作排障证据。
 - 团队访问边界：
   - 当前已开放临时局域网协作访问：`http://192.168.2.49:8787/`，仅限 `192.168.2.0/24` 私有网络，局域网内直接打开即可。
@@ -60,8 +67,8 @@
 - 利润口径：首页和成本/利润页已改为真实利润；成本未覆盖时显示“待成本表 / 成本覆盖率”，不再用 `25%` 粗估冒充真实利润。
 - 成本/利润页的高利润 / 低利润货号分界线固定为 `20%` 利润率：`>= 20%` 为可加码，`< 20%` 为需要处理。
 - 当前正式成本文件为 `inputs/costs/成本计算表.xlsx`；`单台总成本（SAR）` 是单批单件完整成本输入，系统先还原为批次总成本，再按同货号所有完整批次加权平均计算单位成本。
-- BI 销售/成交额统一使用“净成交额”：退货、仅退款、派送失败等反转订单不计入成交额、订单数和销量；这些订单仍扣商品成本；只有真实退货退款额外扣 `13.88 SAR`，`仅退款`、`派件失败`、`派件异常` 不重复扣退货派送费。
-- 利润只对正销售额订单行扣商品成本；`sales_sar <= 0` 的揽收前取消 / 0 金额行不视为已售出，不扣商品成本或退货派送费。
+- BI 首页默认使用“净成交额 / 净销量”：买家已发起且未取消的售后申请默认计入退货/反转，包含 `待买家退货`、`待交接`、`待卖家处理` 等未落定状态；最终取消后再自动冲回。退货、仅退款、派送失败等反转订单不计入成交额、订单数和销量；这些订单仍扣商品成本；只有真实退货退款额外扣 `13.88 SAR`，`仅退款`、`派件失败`、`派件异常` 不重复扣退货派送费。
+- 首页销售额可切换“净销售额 / 总销售额”，销量可切换“净销量 / 总销量”；但 `sales_sar <= 0` 或 `gross_revenue_sar <= 0` 的揽收前取消 / 0 金额行在净口径和总口径里都直接忽略，就当没有发生，不计订单、销量、成本或退货派送费。
 - 历史测试品 `2001/CM-2001` 有单独手工成本补充文件 `inputs/costs/历史手工成本补充.csv`，仅用于历史利润复核。
 - 今日动作池同一店铺、同一 SKC、同一业务域命中的多条规则合并成一张动作卡，显示“合并 N 条”和各规则信号；不同业务域仍分开处理。
 - 同一天同店铺重复运行必须更新同一条事实记录，不得重复累加。
@@ -91,7 +98,7 @@
 - `state/`：本地运行状态。
 - `outputs/`：抓取结果、报表、图片、审计结果；默认不进 GitHub，但 `outputs/bi-portal/index.html` 和 `outputs/bi-portal/data.json` 作为当前 BI 门户产物已纳入仓库，便于迁移和复用。
 - `logs/`：计划任务和运行日志。
-- `profiles/`：工作区内的 Chrome 店铺 profile；15 店登录态保存在 `persistent-*-profile`，不要删除整个 profile。后续磁盘瘦身只清 `OptGuideOnDeviceModel` 等 Chrome 可重建缓存，详见 `docs/runtime-architecture.md`。
+- `profiles/`：工作区内的 Chrome 店铺 profile；16 店登录态保存在 `persistent-*-profile`，不要删除整个 profile。后续磁盘瘦身只清 `OptGuideOnDeviceModel` 等 Chrome 可重建缓存，详见 `docs/runtime-architecture.md`。  如需核验店铺是否错位，使用稳定日期后台重抓并对账数据库，不要只看页面文本。
 - `outputs/cleanup/`：项目文件整理/清理清单，例如 `project-file-cleanup-2026-05-02.md`。
 
 ## 常用命令
@@ -104,7 +111,7 @@
   `node scripts/generate_today_detailed_report_image.mjs --date YYYY-MM-DD`
 - 抓取单店某天：
   `node scripts/fetch_shein_sales.mjs DL --date 2026-04-29`
-- 跑 15 店当天同步：
+- 跑 16 店当天同步：
   `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_intraday_dsy.ps1`
 - 发送日报：
   `node scripts/send_daily_lark_report.mjs --send --visual`
@@ -128,6 +135,12 @@
   `node scripts/check_bi_first_run.mjs`
 - 重新生成本地 BI 门户：
   `node scripts/generate_bi_portal.mjs`
+- BI 门户 UI 冒烟检查：
+  `node scripts/check_bi_portal_ui.mjs --json`
+- 手动运行 ET 货代仓同步：
+  `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_et_forwarder_daily.ps1`
+- 手动运行 RTV 换单复核：
+  `node scripts/verify_shein_rtv_tracking.mjs --priority high,medium,low --include-no-cases --limit 120 --case-limit 60 --max-runtime-ms 3600000`
 - 抓取 HL OpenAPI 销售试点数据：
   `node scripts/fetch_shein_openapi_sales.mjs HL --start YYYY-MM-DD --end YYYY-MM-DD`
 - 将 HL OpenAPI 销售写入并行表并生成对账：
@@ -144,6 +157,8 @@
   `node scripts/import_product_costs.mjs --dry-run`
 
 ## 工具说明
+
+- 非必要情况下不要打开前端/可见浏览器窗口；默认用后台、headless、HTTP/CDP、日志、JSON、静态检查和 UI 冒烟脚本验证。只有首次登录、验证码/人机验证、用户明确要求看前台、或必须排查浏览器交互问题时，才打开可见窗口；完成后应关闭。
 
 - SHEIN 生产抓取链路使用自写 Node 脚本连接 Chrome DevTools Protocol，不依赖手工页面操作。
 - Chrome 程序路径由 `scripts/launch_store_browser.mjs` 自动探测，当前优先使用 C 盘正式安装路径，D 盘只作兜底候选；店铺登录态仍在工作区 `profiles/`。
@@ -166,3 +181,17 @@
 - 数据模型：`docs/data-model.md`
 - 实施路线：`docs/implementation-roadmap.md`
 - 3 月参考表结构：`docs/reference-month-table-structure.md`
+
+## 电商产品套图生成（2026-05-09 新增）
+
+- 方法论：`docs/product-image-suite-methodology.md`
+- 调研依据：`docs/product-image-suite-research.md`
+- 本地 skill：`skills/ecommerce-product-image-suite/SKILL.md`
+- 批量提示词脚本：`scripts/product-image-suite/generate_prompt_suite.mjs`
+- 样例输入：`inputs/product-image-suite/sample-product-facts.json`
+- 样例输出：`outputs/product-image-suite/prompts/`
+
+该能力用于按店铺、货号和产品事实生成 13 张电商产品套图提示词。默认先做产品事实校验，再输出封面图、参数图、轮播图、场景图、卖点图、细节图、步骤图、尺寸图和清单/信任图；竞品资料只用于学习结构和视觉表达，不得直接变成本品参数或卖点。
+
+### ET 前台窗口规则
+- ET 货代仓也适用“非必要不打开前端窗口”：`scripts/fetch_et_forwarder.mjs` 默认 `visible=false` 并用 `WindowStyle Hidden` 启动 Chrome；自动登录优先走 `scripts/et_login_helper.py` + OCR。只有 OCR/验证码连续失败、登录态必须人工处理、用户明确要求，或必须排查浏览器交互问题时，才允许临时加 `--visible` 打开 ET 前台窗口，处理完必须关闭。

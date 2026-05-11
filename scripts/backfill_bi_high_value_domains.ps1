@@ -6,7 +6,7 @@
   [int]$PageSize = 50,
   [int]$MaxPages = 50,
   [int]$WaitMs = 1800,
-  [string]$Stores = "DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ,CX,YJ,XL,QY,QH",
+  [string]$Stores = "",
   [int]$BatchSize = 2,
   [int]$FetchTimeoutMinutes = 12,
   [int]$MaxJobs = 0,
@@ -50,8 +50,13 @@ if ($anchors.Count -eq 0 -or $anchors[$anchors.Count - 1] -ne $EndDate) {
   $anchors.Add($EndDate)
 }
 
-$storeKeys = $Stores.Split(",") | ForEach-Object { $_.Trim().ToUpperInvariant() } | Where-Object { $_ }
 $storesConfig = Get-Content -Raw -LiteralPath (Join-Path $Repo "config\stores.json") | ConvertFrom-Json
+$storeKeys = @()
+if ([string]::IsNullOrWhiteSpace($Stores)) {
+  $storeKeys = @($storesConfig.stores | Where-Object { $_.enabled -ne $false } | ForEach-Object { [string]$_.storeKey.ToUpperInvariant() })
+} else {
+  $storeKeys = @($Stores.Split(",") | ForEach-Object { $_.Trim().ToUpperInvariant() } | Where-Object { $_ })
+}
 $storeByKey = @{}
 foreach ($s in $storesConfig.stores) { $storeByKey[$s.storeKey.ToUpperInvariant()] = $s }
 

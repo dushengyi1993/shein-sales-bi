@@ -5,6 +5,7 @@
   [switch]$SkipBusinessFetch,
   [switch]$SkipSalesLinkLoad,
   [switch]$SkipBusinessLoad,
+  [switch]$SkipRtvVerify,
   [string]$Distro = "Ubuntu-24.04",
   [string]$Container = "shein-warehouse-db",
   [string]$Database = "shein_bi",
@@ -188,7 +189,7 @@ if (-not $SkipSalesLinkLoad) {
 }
 
 if (-not $SkipBusinessFetch) {
-  Run-NonBlocking-Step "Fetch SHEIN business domains for 15 stores" {
+  Run-NonBlocking-Step "Fetch SHEIN business domains for all enabled stores" {
     node .\scripts\fetch_shein_business_domains.mjs --group ALL --date $BusinessDate --wait-ms 2000 --max-pages 20
   }
 }
@@ -198,6 +199,15 @@ if (-not $SkipBusinessLoad) {
     node .\scripts\load_bi_business_domains.mjs --date $BusinessDate `
       --distro $Distro --container $Container --database $Database --user $User
   }
+}
+
+if (-not $SkipRtvVerify) {
+  Run-NonBlocking-Step "Verify SHEIN RTV tracking handoff" {
+    node .\scripts\verify_shein_rtv_tracking.mjs --priority high,medium,low --include-no-cases --limit 120 --case-limit 60 --max-runtime-ms 3600000 `
+      --distro $Distro --container $Container --database $Database --user $User
+  }
+} else {
+  Log "SKIP Verify SHEIN RTV tracking handoff"
 }
 
 Run-NonBlocking-Step "Import product costs and monthly storage fees if provided" {
@@ -213,9 +223,13 @@ Run-Step "Generate local BI portal" {
   node .\scripts\generate_bi_portal.mjs --distro $Distro --container $Container --database $Database --user $User
 }
 
+Run-NonBlocking-Step "Check BI portal UI smoke" {
+  node .\scripts\check_bi_portal_ui.mjs --json
+}
+
 Log "DONE BI daily pipeline log=$logFile"
 
-Run-Step "Refresh local BI portal status after DONE" {
+Run-NonBlocking-Step "Refresh local BI portal status after DONE" {
   node .\scripts\generate_bi_portal.mjs --distro $Distro --container $Container --database $Database --user $User
 }
 

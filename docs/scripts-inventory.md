@@ -10,6 +10,7 @@
 - `scheduled_bi_daily_pipeline.ps1`
 - `scheduled_intraday_dsy.ps1`
 - `scheduled_link_management_daily.ps1`
+- `scheduled_et_forwarder_daily.ps1`
 - `scheduled_watchdog_dsy.ps1`
 - `scheduled_yesterday_final_dsy.ps1`
 - `scheduled_openapi_hl_reconciliation.ps1`
@@ -47,8 +48,15 @@
   - `serve_bi_portal.ps1`
   - `open_bi_portal.ps1`
   - `check_bi_first_run.mjs`
+  - `check_bi_portal_ui.mjs`
   - `audit_bi_warehouse.mjs`
   - `generate_bi_briefing.mjs`
+- ET 货代仓 / RTV：
+  - `fetch_et_forwarder.mjs`
+  - `load_et_forwarder_warehouse.mjs`
+  - `scheduled_et_forwarder_daily.ps1`
+  - `report_et_forwarder_assessment.mjs`
+  - `verify_shein_rtv_tracking.mjs`：SHEIN 退货物流换单复核；候选应按标准货号 + 时间窗口全店搜索，`DL-` 等 ET SKU 前缀只作排序线索。JT/JTE 按同运单号直连，iMile/EMile 按物流详情换单轨迹确认。日常参数：`--priority high,medium,low --include-no-cases --limit 120 --case-limit 60 --max-runtime-ms 3600000`。
 - 链接管理：
   - `scheduled_link_management_daily.ps1`
   - `run_link_management_job.mjs`
@@ -74,6 +82,7 @@
 - `launch_store_browser.mjs`
 - `launch_shein_main_browser.mjs`
 - `auto_relogin_shein_store.mjs`
+- `et_login_helper.py`
 - `close_store_browsers.ps1`
 - `enable_bi_lan_firewall.ps1`
 - `install_windows_scheduled_tasks.ps1`
@@ -163,3 +172,12 @@
 3. 第一批可归档对象应从“临时探索 / 排障探针”里选。
 4. `sync_shein_links_to_lark.mjs` 虽废弃，但因内置拒绝执行保护，可先保留作历史迁移兜底。
 5. 任意删除前必须先搜索：Windows 计划任务、README/docs、其他脚本 import/spawn 引用。
+
+## 产品套图提示词生成
+
+- `scripts/product-image-suite/generate_prompt_suite.mjs`
+  - 用途：读取产品事实 JSON，按店铺/货号批量生成 13 张电商产品套图提示词。
+  - 输入示例：`inputs/product-image-suite/sample-product-facts.json`
+  - 输出目录：`outputs/product-image-suite/prompts/`
+  - 常用命令：`node scripts/product-image-suite/generate_prompt_suite.mjs --input inputs/product-image-suite/sample-product-facts.json --out outputs/product-image-suite/prompts --format both`
+  - 边界：脚本只根据 `verified_facts` 和 `visual_facts` 组织提示词；`candidate_claims` 只作为待确认项输出，不进入画面卖点。

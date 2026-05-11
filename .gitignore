@@ -18,6 +18,14 @@ lark_payloads/
 *.log
 *.jsonl
 
+# Curated non-secret recovery artifacts kept in Git for migration / handoff.
+!outputs/product-image-suite/
+!outputs/product-image-suite/**
+!outputs/cloud-migration/
+!outputs/cloud-migration/**
+!outputs/cleanup/
+!outputs/cleanup/**
+
 # Local credentials, sessions and machine-specific config
 .env
 .env.*
@@ -70,6 +78,7 @@ __pycache__/
 .DS_Store
 Thumbs.db
 desktop.ini
+~$*
 .vscode/
 .idea/
 

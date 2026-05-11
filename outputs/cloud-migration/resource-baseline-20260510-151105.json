@@ -1,0 +1,98 @@
+﻿{
+    "timestamp":  "2026-05-10T15:17:29",
+    "machine":  {
+                    "logicalProcessors":  24,
+                    "totalMemoryGB":  31.9,
+                    "freeMemoryGB":  3.1
+                },
+    "baseline60s":  {
+                        "wsl-docker-vm":  {
+                                              "processCount":  6,
+                                              "workingSetMB":  1749,
+                                              "privateMB":  2865.2,
+                                              "avgCpuPercent":  0
+                                          },
+                        "shein-chrome-headless":  {
+                                                      "processCount":  123,
+                                                      "workingSetMB":  8883.1,
+                                                      "privateMB":  19961.4,
+                                                      "avgCpuPercent":  1
+                                                  },
+                        "bi-portal-node":  {
+                                               "processCount":  1,
+                                               "workingSetMB":  46.6,
+                                               "privateMB":  87.5,
+                                               "avgCpuPercent":  0
+                                           }
+                    },
+    "biRefresh":  {
+                      "exitCode":  null,
+                      "durationSeconds":  0,
+                      "avgDuringRun":  {
+                                           "wsl-docker-vm":  {
+                                                                 "processCount":  6,
+                                                                 "workingSetMB":  1947.7,
+                                                                 "privateMB":  3072,
+                                                                 "avgCpuPercent":  0
+                                                             },
+                                           "shein-chrome-headless":  {
+                                                                         "processCount":  123,
+                                                                         "workingSetMB":  8797,
+                                                                         "privateMB":  19954.6,
+                                                                         "avgCpuPercent":  1915
+                                                                     },
+                                           "bi-portal-node":  {
+                                                                  "processCount":  1,
+                                                                  "workingSetMB":  46.5,
+                                                                  "privateMB":  87.5,
+                                                                  "avgCpuPercent":  0
+                                                              }
+                                       },
+                      "sampledPeakPerProcessMB":  {
+                                                      "other-project":  {
+                                                                            "workingSetMB":  98.6,
+                                                                            "privateMB":  76.5,
+                                                                            "processCount":  0
+                                                                        },
+                                                      "project-node-jobs":  {
+                                                                                "workingSetMB":  58.9,
+                                                                                "privateMB":  59.1,
+                                                                                "processCount":  0
+                                                                            },
+                                                      "wsl-docker-vm":  {
+                                                                            "workingSetMB":  1735.5,
+                                                                            "privateMB":  2848.3,
+                                                                            "processCount":  7
+                                                                        },
+                                                      "shein-chrome-headless":  {
+                                                                                    "workingSetMB":  815,
+                                                                                    "privateMB":  1325.7,
+                                                                                    "processCount":  123
+                                                                                },
+                                                      "bi-portal-node":  {
+                                                                             "workingSetMB":  46.6,
+                                                                             "privateMB":  87.5,
+                                                                             "processCount":  1
+                                                                         }
+                                                  },
+                      "log":  "E:\\Codex WorkSpace\\Shein销售统计\\outputs\\cloud-migration\\generate-bi-portal-20260510-151105.log"
+                  },
+    "dockerStats":  [
+                        "shein-metabase|1.68%|1.198GiB / 15.58GiB",
+                        "shein-metabase-db|0.03%|61.96MiB / 15.58GiB",
+                        "shein-warehouse-db|4.15%|161MiB / 15.58GiB"
+                    ],
+    "diskGB":  {
+                   "config":  0,
+                   "docs":  0,
+                   "infra":  0,
+                   "lib":  0,
+                   "scripts":  0,
+                   "skills":  0,
+                   "outputs":  1.67,
+                   "profiles":  39.23,
+                   "state":  0,
+                   "logs":  0.02,
+                   "tmp":  0.02
+               }
+}

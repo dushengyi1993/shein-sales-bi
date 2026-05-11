@@ -509,7 +509,7 @@ function sourceBlocks(month, tableNames) {
       name: '更新时间',
       type: 'text',
       dataConfig: {text: [
-        `**SHEIN 15店经营看板｜${month}**`,
+        `**SHEIN 全店经营看板｜${month}**`,
         `更新时间：${beijingNowString()}（北京时间）｜金额单位：SAR / RMB`,
       ].join('\n')},
     },

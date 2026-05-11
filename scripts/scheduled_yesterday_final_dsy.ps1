@@ -27,7 +27,8 @@ $FeishuBasePauseFlag = Join-Path $Root "state\feishu-base-sync-paused.flag"
 $FeishuBasePaused = Test-Path -LiteralPath $FeishuBasePauseFlag
 
 function Test-AllStoreSalesFilesReady([string]$Date) {
-  $stores = @('DL','DX','FY','LQ','NM','HL','JY','ZL','TS','MZ','CX','YJ','XL','QY','QH')
+  $storesConfig = Get-Content -Raw -LiteralPath (Join-Path $Root "config\stores.json") | ConvertFrom-Json
+  $stores = @($storesConfig.stores | Where-Object { $_.enabled -ne $false } | ForEach-Object { [string]$_.storeKey })
   foreach ($store in $stores) {
     $file = Join-Path $Root ("outputs\shein_fetch\{0}\{1}.json" -f $store, $Date)
     if (-not (Test-Path -LiteralPath $file)) { return $false }
@@ -75,7 +76,7 @@ function Send-SyncIssueAlert([string]$Mode, [string]$Date, [string]$Reason) {
 
 Push-Location $Root
 try {
-  "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] SHEIN 15-store yesterday-final sync start" | Out-File -FilePath $LogFile -Encoding UTF8
+  "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] SHEIN all-store yesterday-final sync start" | Out-File -FilePath $LogFile -Encoding UTF8
   if ($FeishuBasePaused) {
     "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Feishu Base/table/dashboard writes are paused by state\feishu-base-sync-paused.flag; keep local fetch and BI refresh." | Out-File -FilePath $LogFile -Encoding UTF8 -Append
   }
@@ -150,7 +151,7 @@ try {
   if ($ExitCode -ne 0) {
     Send-SyncIssueAlert "yesterday-final" $TargetDate "Yesterday-final sales sync failed; some store local files may be missing, and BI may be stale."
   }
-  "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] SHEIN 15-store yesterday-final sync end, dsy=$DsyExitCode, lgm=$LgmExitCode, monthly=$MonthlyExitCode, compact=$CompactExitCode, dashboard=$DashboardExitCode, biPost=$BiPostExitCode, exit=$ExitCode" | Out-File -FilePath $LogFile -Encoding UTF8 -Append
+  "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] SHEIN all-store yesterday-final sync end, dsy=$DsyExitCode, lgm=$LgmExitCode, monthly=$MonthlyExitCode, compact=$CompactExitCode, dashboard=$DashboardExitCode, biPost=$BiPostExitCode, exit=$ExitCode" | Out-File -FilePath $LogFile -Encoding UTF8 -Append
   exit $ExitCode
 }
 finally {

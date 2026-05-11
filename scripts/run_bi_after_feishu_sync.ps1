@@ -143,6 +143,11 @@ if (-not $FullBusinessFetch) {
   $BiArgs += @("-SkipBusinessFetch", "-SkipBusinessLoad")
 }
 
+if ($Mode -eq "intraday" -or $Mode -eq "yesterday-final") {
+  $BiArgs += @("-SkipRtvVerify")
+  Log "Skip RTV tracking verification for $Mode sales BI refresh; full RTV verification stays in daily BI pipeline."
+}
+
 $BiExitCode = Invoke-LoggedCommand "Run BI warehouse/portal refresh" {
   & powershell @BiArgs
 }
