@@ -293,7 +293,7 @@ ET 财务账单中已能抓到每日仓储费总账（sort_name=仓储费），�
 
 - `2026-05-09 04:20` ET 任务失败不是验证码识别失败，而是首页探测阶段在页面内跨 ET 域名/IP 做 `fetch`，触发 `TypeError: Failed to fetch`，导致还没进入自动登录流程。
 - `scripts/fetch_et_forwarder.mjs` 已改为使用当前页面 `location.origin` 组装同源 URL；`probeEtHome` 对 fetch 异常返回可处理状态，不再直接抛异常。
-- 已手动补跑 `2026-05-09` ET 日同步并入仓成功；随后使用 `Start-ScheduledTask -TaskName SHEIN-Sales-ETForwarder-0420` 直接触发计划任务入口复验，`LastTaskResult=0`，下一次自动运行时间为 `2026-05-10 04:20`。
+- 已手动补跑 `2026-05-09` ET 日同步并入仓成功；随后使用 `Start-ScheduledTask -TaskName SHEIN-Sales-ETForwarder-0420` 直接触发计划任务入口复验，`LastTaskResult=0`。
 
 ## ET 前台窗口规则
 - ET 货代仓也适用“非必要不打开前端窗口”：`scripts/fetch_et_forwarder.mjs` 默认 `visible=false` 并用 `WindowStyle Hidden` 启动 Chrome；自动登录优先走 `scripts/et_login_helper.py` + OCR。只有 OCR/验证码连续失败、登录态必须人工处理、用户明确要求，或必须排查浏览器交互问题时，才允许临时加 `--visible` 打开 ET 前台窗口，处理完必须关闭。

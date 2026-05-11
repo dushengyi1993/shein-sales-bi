@@ -13,11 +13,22 @@ import {fileURLToPath} from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const storesConfig = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
 const ORDER_URL = 'https://sso.geiwohuo.com/#/gsp/order-management/list';
+const GSP_ORIGIN = 'https://sso.geiwohuo.com';
 const CDP_COMMAND_TIMEOUT_MS = Number(process.env.SHEIN_CDP_TIMEOUT_MS || 60_000);
 const PAGE_FETCH_TIMEOUT_MS = Number(process.env.SHEIN_PAGE_FETCH_TIMEOUT_MS || 45_000);
+const WEBAPI_FETCH_TIMEOUT_MS = Number(process.env.SHEIN_WEBAPI_FETCH_TIMEOUT_MS || 45_000);
+const DEFAULT_WEBAPI_SESSION_DIR = path.join(ROOT, 'state', 'shein_webapi_sessions');
 
 function parseArgs(argv) {
-  const args = {outDir: path.join(ROOT, 'outputs', 'shein_fetch'), perPage: 50, byDay: false};
+  const args = {
+    outDir: path.join(ROOT, 'outputs', 'shein_fetch'),
+    perPage: 50,
+    byDay: false,
+    transport: null,
+    sessionDir: DEFAULT_WEBAPI_SESSION_DIR,
+    refreshSession: false,
+    saveSession: true,
+  };
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -28,6 +39,10 @@ function parseArgs(argv) {
     else if (a === '--per-page') args.perPage = Number(argv[++i]);
     else if (a === '--by-day') args.byDay = true;
     else if (a === '--json') args.json = true;
+    else if (a === '--transport') args.transport = String(argv[++i] || '').toLowerCase();
+    else if (a === '--session-dir') args.sessionDir = path.resolve(argv[++i]);
+    else if (a === '--refresh-session') args.refreshSession = true;
+    else if (a === '--no-save-session') args.saveSession = false;
     else rest.push(a);
   }
   args.storeKey = (rest[0] || '').toUpperCase();
@@ -39,6 +54,9 @@ function parseArgs(argv) {
   }
   if (!args.start) throw new Error('Missing --date or --start');
   if (!args.end) args.end = args.start;
+  if (args.transport && !['browser', 'webapi', 'auto'].includes(args.transport)) {
+    throw new Error('--transport must be one of: browser, webapi, auto');
+  }
   return args;
 }
 
@@ -185,6 +203,146 @@ async function pageFetch(send, endpoint, payload) {
   return value.json;
 }
 
+function resolveTransport(args, store) {
+  return String(args.transport || store.salesTransport || process.env.SHEIN_SALES_TRANSPORT || 'browser').toLowerCase();
+}
+
+function webApiSessionPath(args, store) {
+  return path.join(args.sessionDir, `${store.storeKey.toUpperCase()}.local.json`);
+}
+
+async function readJsonMaybe(file) {
+  try {
+    return JSON.parse(await fs.readFile(file, 'utf8'));
+  } catch (err) {
+    if (err?.code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+function cookieHeaderFromCookies(cookies) {
+  return cookies
+    .filter(c => c?.name && c?.value !== undefined)
+    .map(c => `${c.name}=${c.value}`)
+    .join('; ');
+}
+
+function isGeiwohuoCookie(cookie) {
+  const domain = String(cookie?.domain || '').replace(/^\./, '');
+  return domain === 'geiwohuo.com' || domain.endsWith('.geiwohuo.com');
+}
+
+function formatSecChUa(brands) {
+  if (!Array.isArray(brands) || !brands.length) return '';
+  return brands
+    .filter(b => b?.brand && b?.version)
+    .map(b => `"${String(b.brand).replace(/"/g, '\\"')}";v="${String(b.version).replace(/"/g, '')}"`)
+    .join(', ');
+}
+
+async function exportWebApiSessionFromCdp(store) {
+  const cdp = await connectCdp(store.port);
+  const {ws, send, page} = cdp;
+  try {
+    await send('Network.enable');
+    const version = await send('Browser.getVersion').catch(() => ({}));
+    const allCookies = await send('Network.getAllCookies');
+    const nav = await send('Runtime.evaluate', {
+      expression: `(() => ({
+        userAgent: navigator.userAgent,
+        language: navigator.language || '',
+        languages: Array.from(navigator.languages || []),
+        platform: navigator.userAgentData?.platform || navigator.platform || '',
+        mobile: Boolean(navigator.userAgentData?.mobile),
+        brands: navigator.userAgentData?.brands || []
+      }))()`,
+      returnByValue: true,
+    }).catch(() => ({result: {value: {}}}));
+    const cookies = (allCookies.cookies || []).filter(isGeiwohuoCookie);
+    const cookieHeader = cookieHeaderFromCookies(cookies);
+    if (!cookieHeader) {
+      throw new Error(`webapi_session_export_failed: no geiwohuo cookies on port ${store.port}`);
+    }
+    const browserHints = nav.result?.value || {};
+    return {
+      version: 1,
+      storeKey: store.storeKey,
+      shopName: store.shopName,
+      source: 'cdp.Network.getAllCookies',
+      exportedAt: new Date().toISOString(),
+      pageUrl: page.url,
+      cookieCount: cookies.length,
+      cookieHeader,
+      userAgent: browserHints.userAgent || version.userAgent || '',
+      acceptLanguage: Array.isArray(browserHints.languages) && browserHints.languages.length
+        ? browserHints.languages.join(',')
+        : (browserHints.language || 'zh-CN,zh;q=0.9,en;q=0.8'),
+      clientHints: {
+        secChUa: formatSecChUa(browserHints.brands),
+        secChUaMobile: browserHints.mobile ? '?1' : '?0',
+        secChUaPlatform: browserHints.platform ? `"${String(browserHints.platform).replace(/"/g, '')}"` : '',
+      },
+    };
+  } finally {
+    try { ws.close(); } catch {}
+  }
+}
+
+async function loadWebApiSession(args, store) {
+  const file = webApiSessionPath(args, store);
+  if (!args.refreshSession) {
+    const existing = await readJsonMaybe(file);
+    if (existing?.cookieHeader) return {...existing, sourceFile: file, loadedFromFile: true};
+  }
+  const exported = await exportWebApiSessionFromCdp(store);
+  if (args.saveSession) {
+    await fs.mkdir(path.dirname(file), {recursive: true});
+    await fs.writeFile(file, JSON.stringify(exported, null, 2), 'utf8');
+  }
+  return {...exported, sourceFile: file, loadedFromFile: false};
+}
+
+function webApiHeaders(session, originPath = '/order-management/list') {
+  const h = {
+    'User-Agent': session.userAgent || 'Mozilla/5.0',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': session.acceptLanguage || 'zh-CN,zh;q=0.9,en;q=0.8',
+    'Content-Type': 'application/json;charset=UTF-8',
+    'Origin': GSP_ORIGIN,
+    'Referer': `${GSP_ORIGIN}/`,
+    'Cookie': session.cookieHeader,
+    'Origin-Path': originPath,
+    'Origin-Url': `${GSP_ORIGIN}/#/gsp${originPath}`,
+    'build-version': '2026-04-23 11:38',
+    'Sec-Fetch-Site': 'same-origin',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Dest': 'empty',
+  };
+  if (session.clientHints?.secChUa) h['sec-ch-ua'] = session.clientHints.secChUa;
+  if (session.clientHints?.secChUaMobile) h['sec-ch-ua-mobile'] = session.clientHints.secChUaMobile;
+  if (session.clientHints?.secChUaPlatform) h['sec-ch-ua-platform'] = session.clientHints.secChUaPlatform;
+  return h;
+}
+
+async function webApiFetch(session, endpoint, payload) {
+  const res = await fetch(`${GSP_ORIGIN}${endpoint}`, {
+    method: 'POST',
+    credentials: 'omit',
+    signal: AbortSignal.timeout(WEBAPI_FETCH_TIMEOUT_MS),
+    headers: webApiHeaders(session),
+    body: JSON.stringify(payload),
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch {}
+  if (!json) throw new Error(`Non-JSON WebAPI response from ${endpoint}: status=${res.status} ${String(text || '').slice(0, 300)}`);
+  if (String(json.code) === '20302' || res.status === 401 || res.status === 403) {
+    throw new Error(`${endpoint} webapi auth failed: http=${res.status} code=${json.code} msg=${json.msg || json.message || ''}`);
+  }
+  if (String(json.code) !== '0') throw new Error(`${endpoint} webapi failed: http=${res.status} code=${json.code} msg=${json.msg || json.message || ''}`);
+  return json;
+}
+
 function round2(n) {
   return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 }
@@ -289,7 +447,7 @@ function extractRows(orders) {
   }
   return {orderRows, goodsRows};
 }
-async function fetchRange(send, store, start, end, perPage, timezone) {
+async function fetchRange(fetchJson, store, start, end, perPage, timezone) {
   const businessUtcOffsetHours = timezone.businessUtcOffsetHours;
   const accountUtcOffsetHours = timezone.accountUtcOffsetHours;
   const accountRange = accountRangeForBusinessRange(start, end, businessUtcOffsetHours, accountUtcOffsetHours);
@@ -301,12 +459,12 @@ async function fetchRange(send, store, start, end, perPage, timezone) {
     page: 1,
     perPage,
   };
-  const first = await pageFetch(send, '/gsp/orderPlus/listOrder', basePayload);
+  const first = await fetchJson('/gsp/orderPlus/listOrder', basePayload);
   const count = Number(first.info?.meta?.count || 0);
   const pages = Math.max(1, Math.ceil(count / perPage));
   const orderRefs = [...(first.info?.data || [])];
   for (let page = 2; page <= pages; page++) {
-    const resp = await pageFetch(send, '/gsp/orderPlus/listOrder', {...basePayload, page});
+    const resp = await fetchJson('/gsp/orderPlus/listOrder', {...basePayload, page});
     orderRefs.push(...(resp.info?.data || []));
   }
 
@@ -314,7 +472,7 @@ async function fetchRange(send, store, start, end, perPage, timezone) {
   for (let i = 0; i < orderRefs.length; i += 50) {
     const chunk = orderRefs.slice(i, i + 50);
     if (!chunk.length) continue;
-    const resp = await pageFetch(send, '/gsp/orderPlus/listOrderItem', {
+    const resp = await fetchJson('/gsp/orderPlus/listOrderItem', {
       orderPlusListPageVOList: chunk,
       tabIndex: 1,
     });
@@ -366,23 +524,19 @@ async function saveResult(outDir, storeKey, label, result) {
   await fs.mkdir(dir, {recursive: true});
   const file = path.join(dir, `${label}.json`);
   await fs.writeFile(file, JSON.stringify(result, null, 2), 'utf8');
-  return file;
+  return path.relative(ROOT, file).replace(/\\/g, '/');
 }
 
-const args = parseArgs(process.argv.slice(2));
-const store = getStore(args.storeKey);
-const {ws, send, page} = await connectCdp(store.port);
-try {
-  const orderPage = await ensureOrderPage(send);
-  const timezone = {
-    businessUtcOffsetHours: Number(storesConfig.businessUtcOffsetHours ?? 8),
-    accountUtcOffsetHours: await detectAccountUtcOffset(send, store),
-  };
+async function runWithFetcher(args, store, fetchJson, context) {
+  const timezone = context.timezone;
   const dates = [...eachDate(args.start, args.end)];
   if (args.byDay || dates.length === 1) {
     const daily = [];
     for (const d of dates) {
-      const result = await fetchRange(send, store, d, d, args.perPage, timezone);
+      const result = await fetchRange(fetchJson, store, d, d, args.perPage, timezone);
+      result.transport = context.transport;
+      result.session = context.session;
+      result.orderPage = context.orderPage;
       const file = await saveResult(args.outDir, store.storeKey, d, result);
       daily.push({date: d, file, ...result.summary});
     }
@@ -390,8 +544,10 @@ try {
     const output = {
       storeKey: store.storeKey,
       shopName: store.shopName,
-      pageUrl: orderPage.href || page.url,
-      orderPage,
+      pageUrl: context.orderPage?.href,
+      orderPage: context.orderPage,
+      transport: context.transport,
+      session: context.session,
       mode: 'by-day',
       start: args.start,
       end: args.end,
@@ -410,10 +566,11 @@ try {
         shopName: output.shopName,
         start: output.start,
         end: output.end,
+        transport: output.transport,
         days: output.days.length,
         totalSar: output.totalSar,
         totalRmb: output.totalRmb,
-        orderPage,
+        orderPage: output.orderPage,
         daily: output.days.map(d => ({
           date: d.date,
           orders: d.detailedOrderCount,
@@ -424,11 +581,70 @@ try {
       }, null, 2));
     }
   } else {
-    const result = await fetchRange(send, store, args.start, args.end, args.perPage, timezone);
-    result.orderPage = orderPage;
+    const result = await fetchRange(fetchJson, store, args.start, args.end, args.perPage, timezone);
+    result.transport = context.transport;
+    result.session = context.session;
+    result.orderPage = context.orderPage;
     const file = await saveResult(args.outDir, store.storeKey, `${args.start}_to_${args.end}`, result);
-    console.log(JSON.stringify({file, ...result.summary}, null, 2));
+    console.log(JSON.stringify({file, transport: context.transport, ...result.summary}, null, 2));
   }
-} finally {
-  ws.close();
+}
+
+async function runBrowserTransport(args, store) {
+  const {ws, send, page} = await connectCdp(store.port);
+  try {
+    const orderPage = await ensureOrderPage(send);
+    const timezone = {
+      businessUtcOffsetHours: Number(storesConfig.businessUtcOffsetHours ?? 8),
+      accountUtcOffsetHours: await detectAccountUtcOffset(send, store),
+    };
+    await runWithFetcher(args, store, (endpoint, payload) => pageFetch(send, endpoint, payload), {
+      transport: 'browser',
+      orderPage: {transport: 'browser', href: orderPage.href || page.url, ...orderPage},
+      timezone,
+    });
+  } finally {
+    ws.close();
+  }
+}
+
+async function runWebApiTransport(args, store) {
+  const session = await loadWebApiSession(args, store);
+  const timezone = {
+    businessUtcOffsetHours: Number(storesConfig.businessUtcOffsetHours ?? 8),
+    accountUtcOffsetHours: Number(store.accountUtcOffsetHours ?? 8),
+  };
+  await runWithFetcher(args, store, (endpoint, payload) => webApiFetch(session, endpoint, payload), {
+    transport: 'webapi',
+    orderPage: {
+      transport: 'webapi',
+      href: ORDER_URL,
+      sessionSource: session.loadedFromFile ? 'session-file' : 'cdp-export',
+      cookieCount: session.cookieCount,
+    },
+    timezone,
+    session: {
+      source: session.loadedFromFile ? 'session-file' : session.source,
+      exportedAt: session.exportedAt,
+      cookieCount: session.cookieCount,
+      sourceFile: path.relative(ROOT, session.sourceFile || '').replace(/\\/g, '/'),
+      userAgent: session.userAgent ? 'present' : 'missing',
+    },
+  });
+}
+
+const args = parseArgs(process.argv.slice(2));
+const store = getStore(args.storeKey);
+const transport = resolveTransport(args, store);
+if (transport === 'browser') {
+  await runBrowserTransport(args, store);
+} else if (transport === 'webapi') {
+  await runWebApiTransport(args, store);
+} else if (transport === 'auto') {
+  try {
+    await runWebApiTransport(args, store);
+  } catch (err) {
+    console.error(`[${store.storeKey}] WebAPI transport failed, falling back to browser: ${err?.message || err}`);
+    await runBrowserTransport(args, store);
+  }
 }

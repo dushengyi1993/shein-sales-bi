@@ -1,0 +1,111 @@
+{
+  "timestamp": "2026-05-11T20:17:34.9985991+08:00",
+  "command": "scripts\\run_sales_sync_job.mjs --date 2026-05-08 --group ALL --skip-lark-base --store-attempts 1 --relogin-headless",
+  "exitCode": 0,
+  "durationSeconds": 15.09,
+  "baseline": {
+    "timestamp": "2026-05-11T20:17:17.7743780+08:00",
+    "logicalProcessors": 24,
+    "groups": {
+      "projectNode": {
+        "processCount": 0,
+        "workingSetMB": 0,
+        "privateMB": 0,
+        "cpuSeconds": 0
+      },
+      "sheinChrome": {
+        "processCount": 124,
+        "workingSetMB": 6298.05,
+        "privateMB": 13452.34,
+        "cpuSeconds": 23433.656
+      },
+      "wslDocker": {
+        "processCount": 9,
+        "workingSetMB": 2687.17,
+        "privateMB": 4446.37,
+        "cpuSeconds": 0.188
+      }
+    }
+  },
+  "after": {
+    "timestamp": "2026-05-11T20:17:34.9483825+08:00",
+    "logicalProcessors": 24,
+    "groups": {
+      "projectNode": {
+        "processCount": 0,
+        "workingSetMB": 0,
+        "privateMB": 0,
+        "cpuSeconds": 0
+      },
+      "sheinChrome": {
+        "processCount": 124,
+        "workingSetMB": 6240.04,
+        "privateMB": 13459.22,
+        "cpuSeconds": 23447.923
+      },
+      "wslDocker": {
+        "processCount": 9,
+        "workingSetMB": 2644.99,
+        "privateMB": 3906.42,
+        "cpuSeconds": 0.188
+      }
+    }
+  },
+  "peaks": {
+    "projectNodeWorkingSetMB": 60.44,
+    "projectNodePrivateMB": 55.82,
+    "projectNodeProcessCount": 1,
+    "sheinChromeWorkingSetMB": 6290.99,
+    "sheinChromePrivateMB": 13459.9,
+    "sheinChromeProcessCount": 124,
+    "wslDockerWorkingSetMB": 2657.73,
+    "wslDockerPrivateMB": 4446.37
+  },
+  "sampleCount": 6,
+  "parsedJob": {
+    "ok": true,
+    "finalStatus": "done",
+    "date": "2026-05-08",
+    "status": "历史回补",
+    "stores": [
+      "DL",
+      "DX",
+      "FY",
+      "LQ",
+      "NM",
+      "HL",
+      "JY",
+      "ZL",
+      "TS",
+      "MZ",
+      "CX",
+      "YJ",
+      "XL",
+      "QY",
+      "QH",
+      "TZ"
+    ],
+    "failedStores": [],
+    "loginRequiredStores": [],
+    "autoReloginStores": [],
+    "totalSalesSar": 6526.15,
+    "skippedDownstreamRefresh": false,
+    "skipReason": null,
+    "feishuBasePaused": true,
+    "logFile": "logs\\jobs\\2026-05-11T12-17-17-850Z-intraday-2026-05-08.json",
+    "monthlyTable": null,
+    "monthlyOk": null,
+    "productOk": null,
+    "compactDisplayOk": null,
+    "productWideTables": null,
+    "dashboardOk": null,
+    "allDashboardOk": null,
+    "allDashboardUrl": null,
+    "dashboardSourceTables": null,
+    "productDailyRows": null,
+    "productDisplayTable": null
+  },
+  "stdoutFile": null,
+  "stderrFile": null,
+  "note": "Stdout/stderr log files were temporary and intentionally cleaned; parsedJob and peaks are retained in this JSON."
+}

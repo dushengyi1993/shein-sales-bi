@@ -62,15 +62,16 @@ New-NetFirewallRule `
   -Program $nodePath `
   -Protocol TCP `
   -LocalPort $Port `
-  -LocalAddress $lanIp `
+  -LocalAddress Any `
   -RemoteAddress $remoteAddress `
-  -Description "Temporary read-only LAN access for SHEIN BI portal on TCP $Port." | Out-Null
+  -Description "Temporary read-only LAN access for SHEIN BI portal on TCP $Port; LocalAddress is Any because DHCP may change the PC IP." | Out-Null
 
 [pscustomobject]@{
   ok = $true
   displayName = $DisplayName
   node = $nodePath
-  localAddress = $lanIp
+  currentLanIp = $lanIp
+  localAddress = "Any"
   remoteAddress = $remoteAddress
   port = $Port
 }

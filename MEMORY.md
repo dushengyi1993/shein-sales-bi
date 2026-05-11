@@ -1,4 +1,4 @@
-﻿# MEMORY
+# MEMORY
 
 ## 评价全量与平台翻译（当前权威）
 - 评价/口碑底库必须按每个店开店以来全量补抓；日常评价同步默认只抓最近 `14` 天作为增量防漏窗口，不要再用 90 天这种过长窗口浪费后台资源。
@@ -52,9 +52,9 @@
 - 程序化读取飞书 Base 记录时必须显式使用 `--format json`，避免解析旧格式导致误判。
 
 ## 计划任务
-- `00:10`：前一天最终版销售抓取；若 `state/feishu-base-sync-paused.flag` 存在，只写本地销售文件并后置刷新 BI，不写飞书多维表格/月表/宽表/看板。
+- `00:10`：前一天最终版销售抓取；若 `state/feishu-base-sync-paused.flag` 存在，只写本地销售文件并后置刷新 BI，不写飞书多维表格/月表/宽表/看板。自 `2026-05-11` 起，该任务还会在抓完 D-1 后自动回核 D-2 的销售数据（`third-day-stable-recheck`），用于修正“次日未发货前买家取消订单”导致的前一天初版偏差，并把额外稳定日切片入 BI 仓。
 - `05:30`：链接管理 + 业务域 16 店每日抓取，任务名 `SHEIN-Sales-15Stores-LinkManagement-0530`，脚本 `scripts/scheduled_link_management_daily.ps1`；抓前一完整业务日链接表现、退货/售后、库存、评价、履约、财务等业务域，只写本地文件，不再写飞书链接表；旧 `0340` / `0510` 链接任务不要恢复。
-- `07:00`：BI 每日流水线，任务名 `SHEIN-BI-Daily-Pipeline-0700`；在 `05:30` 抓数完成后，负责入仓、RTV 换单/去向复核、BI 体检、本地门户、UI 冒烟检查和晨报刷新。`2026-05-09 05:30` 链接/业务域任务和 `2026-05-09 07:00` BI 每日流水线已正式自动跑通；ET 计划任务入口已于 `2026-05-09 11:31:49` 复验成功，下一次例行观察 `2026-05-10 04:20 / 05:30 / 07:00`。旧 `2026-05-02 06:40` 的 `267014` 仅保留作历史排障证据。
+- `07:00`：BI 每日流水线，任务名 `SHEIN-BI-Daily-Pipeline-0700`；在 `05:30` 抓数完成后，负责入仓、RTV 换单/去向复核、BI 体检、本地门户、UI 冒烟检查和晨报刷新。`2026-05-09 05:30` 链接/业务域任务和 `2026-05-09 07:00` BI 每日流水线已正式自动跑通；ET 计划任务入口已于 `2026-05-09 11:31:49` 复验成功。旧 `2026-05-02 06:40` 的 `267014` 仅保留作历史排障证据。
 - `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10`：当天滚动销售抓取；同步后后置刷新 BI 销售切片；若飞书 Base 暂停开关存在，不写飞书多维表格/月表/宽表/看板，但早上成功后仍发送飞书日报。
 - 日报不再使用固定 `09:00` 任务；每天早上 `08:10` 同步成功完成后自动发送飞书文字日报和可视化日报图，上午后续成功同步可补发一次，并使用 flag 防重。
 - 飞书日报发送不受 `state/feishu-base-sync-paused.flag` 影响；暂停期间只跳过写入 Base 的 `飞书日报记录` 表，IM 消息和日报图片照常发送。
@@ -67,6 +67,7 @@
 - 货号 360 / 店铺×货号覆盖必须按“每个店自己的最新链接/覆盖快照”聚合，不能用全局 `max(date)` 过滤；16 店同步常会分批完成，若只取全局最新日，会把未在该日完成同步的店铺误判为没有链接。
 - 标准货号清单：`config/product_catalog.json`；别名归并：`config/product_aliases.json`；归一化逻辑：`lib/product_sku_normalizer.mjs`。
 - 货号开头括号备注不参与归并，例如 `（待定）SK-123`、`（废）SK-123`、`(废)SK-123` 都按 `SK-123` 处理。
+- `CM-121E美式咖啡机`、`121E美式咖啡机`、`121E`、`CM121E`、`CM-121E` 是同一个 121E 咖啡机，统一归并到 `CM-121E美式咖啡机`；用户 2026-05-11 咨询低库存保留店铺时已按合并口径判断。
 - 发现无法归并、疑似新货号或只凭短号/标题拿不准的货号时，必须汇总给用户确认，不得擅自合并。
 
 ## 链接管理规则
@@ -91,6 +92,7 @@
 ## SHEIN BI 系统
 - 架构原则：`SHEIN 后台抓取 -> 本地 JSON / PostgreSQL 数据仓库 -> Metabase BI / 本地 BI 门户`。
 - HL OpenAPI 销售试点已建立并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` -> `scripts/load_shein_openapi_sales_warehouse.mjs` -> `fact.openapi_store_daily_sales` / `fact.openapi_order_header` / `fact.openapi_order_item` / `mart.openapi_sales_reconciliation`；系统状态页会显示 “SHEIN OpenAPI 试点对账”。正式切换生产事实表前必须继续确认多日 `matched`。
+- 官方 OpenAPI 与后台 WebAPI 直连是两条不同链路：OpenAPI 需要开放平台应用、授权、`openKeyId` / `secretKey` 和 IP 白名单；后台 WebAPI 直连复用已登录 Cookie/session，当前已优先承接 16 店销售生产抓取。两类密钥/session 都禁止进入仓库。
 - CX 开放平台应用 `CX-椿霞SHEIN运营中台` 已在 `2026-05-10` 创建并提交审核，模式为半托管，业务功能选择商品管理、商品合规、订单管理、库存管理、财务管理；审核通过后再录入本地 `.local` 密钥并接入 API 双跑。
 - SHEIN OpenAPI 若返回 `openapi00002 IP is not in the whitelist`，优先检查当前出口 IP 是否在开放平台 `https://open.sheincorp.com/backstage/white-list`；`2026-05-07` 已补加当前出口 IP `188.253.112.44`，历史 IP `82.27.116.13` 仍保留。不要把 OpenAPI app secret、店铺 secret、openKeyId 写入聊天、文档或日志。
 - 本地 BI 门户入口：`http://127.0.0.1:8787/`；文件为 `outputs/bi-portal/index.html`；生成脚本为 `scripts/generate_bi_portal.mjs`；数据文件为 `outputs/bi-portal/data.json`。
@@ -101,7 +103,7 @@
 - Metabase 运行在 WSL + Docker，Docker 数据位于 `D:\SheinBI\docker-data\docker-data.ext4`，WSL 发行版位于 `D:\WSL\Ubuntu-24.04`。
 - 若 Docker / Postgres / Metabase 出现 `input/output error`，优先怀疑 `D:\SheinBI\docker-data\docker-data.ext4` 文件系统异常；恢复顺序是先停止 WSL / Docker，再做 volume 备份和 `e2fsck -fy`，最后重启容器并跑 BI audit，不要直接删除 Docker 数据。
 - Metabase 管理员凭据只保存在 `infra/metabase/.admin.local.json`，不要写入聊天、文档或日志。
-- 当前团队访问已开放临时局域网协作：`http://192.168.2.49:8787/`，仅限 `192.168.2.0/24` 私有网络，局域网内无需账号密码，未开放公网或端口转发；共享动作状态写入 `state/bi_action_state.json`，操作审计写入 `logs/bi_portal_action_audit.jsonl`，留痕以访问 IP 为准。团队正式版上线前还需固定地址、动作状态入库、HTTPS 和备份。
+- 当前团队访问已开放临时局域网协作：优先使用电脑名 `http://DUSHENGYI-PC2:8787/`，或用当前 WLAN IPv4 的 `http://<当前IP>:8787/`；DHCP 重分配后旧 IP 可能失效，不要把 `192.168.2.49` 当固定入口。仅限 `192.168.2.0/24` 私有网络，局域网内无需账号密码，未开放公网或端口转发；共享动作状态写入 `state/bi_action_state.json`，操作审计写入 `logs/bi_portal_action_audit.jsonl`，留痕以访问 IP 为准。团队正式版上线前还需固定地址、动作状态入库、HTTPS 和备份。
 
 
 
@@ -162,8 +164,9 @@
 - 真实利润相关数据库对象：`fact.product_cost_batch`、`fact.monthly_storage_fee`、`mart.product_unit_cost_current`、`mart.profit_order_item`、`mart.profit_daily_store_product`、`mart.profit_month_group`、`mart.profit_product_summary`。
 
 ## 工具与避坑
-- SHEIN 抓取主链路是自写 Node 脚本 + Chrome DevTools Protocol/WebSocket + 工作区 Chrome profile；飞书主要用 `lark-cli`。
-- `run_sales_sync_job.mjs` 在 headless Chrome 启动失败时会兜底到后台窗口模式；`launch_store_browser.mjs` / `launch_shein_main_browser.mjs` 在 Windows 下通过 `PowerShell Start-Process` 后台启动 Chrome，避免 `cmd start` 的路径空格问题和 Node detached Chrome 的 libuv assertion。
+- SHEIN 销售抓取主链路自 `2026-05-11` 起为 Node WebAPI 直连优先：`config/stores.json` 全 16 店 `salesTransport=auto`，`fetch_shein_sales.mjs --transport webapi|auto` 直调 `/gsp/orderPlus/listOrder` / `listOrderItem`；Chrome DevTools/CDP 主要用于导出/刷新 Cookie session、登录续期和回退。
+- `state/shein_webapi_sessions/*.local.json` 是 SHEIN 后台 WebAPI 直连的敏感 Cookie session，本地使用且被 `state/` 忽略；不要提交 GitHub、写入文档或聊天。`2026-05-08` 16 店销售 WebAPI 对账已与现有数据库一致，资源实测文件为 `outputs/cloud-migration/webapi-allstores-resource-20260511-201715.json`。
+- `run_sales_sync_job.mjs` 在 `salesTransport=auto` 时先 WebAPI 直连；直连成功不启动浏览器，直连失败才启动/刷新对应 Chrome profile 并可继续兜底到后台窗口模式。`launch_store_browser.mjs` / `launch_shein_main_browser.mjs` 在 Windows 下通过 `PowerShell Start-Process` 后台启动 Chrome，避免 `cmd start` 的路径空格问题和 Node detached Chrome 的 libuv assertion。
 - `config/lark_report.json` 是日报接收人配置，必须保持合法 UTF-8 JSON；若自动日报读取失败，先校验这个文件。
 - `scripts/generate_today_detailed_report_image.mjs` 用于生成只含今日数据的详尽长图，适合临时重发今日战报。
 - 飞书看板富文本和卡片样式更新使用 Playwright + 已登录飞书 profile。

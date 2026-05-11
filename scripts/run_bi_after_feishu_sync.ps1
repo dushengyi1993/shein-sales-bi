@@ -3,6 +3,7 @@
   [string]$SalesDate = "",
   [string]$LinkDate = "",
   [string]$BusinessDate = "",
+  [string]$ExtraSalesDates = "",
   [switch]$RunLinkManagement,
   [switch]$FullBusinessFetch,
   [string]$ParentLogFile = "",
@@ -84,7 +85,7 @@ function Invoke-LoggedCommand([string]$Name, [scriptblock]$Block) {
   }
 }
 
-Log "Post-Feishu BI refresh start mode=$Mode salesDate=$SalesDate linkDate=$LinkDate businessDate=$BusinessDate runLink=$RunLinkManagement fullBusiness=$FullBusinessFetch"
+Log "Post-Feishu BI refresh start mode=$Mode salesDate=$SalesDate linkDate=$LinkDate businessDate=$BusinessDate extraSalesDates=$ExtraSalesDates runLink=$RunLinkManagement fullBusiness=$FullBusinessFetch"
 
 if ($DryRun) {
   [pscustomobject]@{
@@ -97,6 +98,7 @@ if ($DryRun) {
     salesDate = $SalesDate
     linkDate = $LinkDate
     businessDate = $BusinessDate
+    extraSalesDates = $ExtraSalesDates
     runLinkManagement = [bool]$RunLinkManagement
     fullBusinessFetch = [bool]$FullBusinessFetch
     pipelineScript = Join-Path $Root "scripts\run_bi_daily_pipeline.ps1"
@@ -152,8 +154,28 @@ $BiExitCode = Invoke-LoggedCommand "Run BI warehouse/portal refresh" {
   & powershell @BiArgs
 }
 
-$Ok = ($BiExitCode -eq 0)
-Log "Post-Feishu BI refresh end mode=$Mode salesDate=$SalesDate linkDate=$LinkDate businessDate=$BusinessDate linkExit=$LinkExitCode biExit=$BiExitCode ok=$Ok log=$LogFile"
+$ExtraExitCode = 0
+$extraDates = @()
+if (-not [string]::IsNullOrWhiteSpace($ExtraSalesDates)) {
+  $extraDates = @($ExtraSalesDates -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d{4}-\d{2}-\d{2}$' } | Sort-Object -Unique)
+}
+if ($BiExitCode -eq 0 -and $extraDates.Count -gt 0) {
+  foreach ($extraDate in $extraDates) {
+    $code = Invoke-LoggedCommand "Load extra stable sales slice $extraDate" {
+      & $Node ".\scripts\load_bi_warehouse.mjs" --sales-date $extraDate --skip-links --skip-dashboard `
+        --distro $Distro --container $Container --database $Database --user $User
+    }
+    if ($code -ne 0 -and $ExtraExitCode -eq 0) { $ExtraExitCode = $code }
+  }
+  if ($ExtraExitCode -eq 0) {
+    $ExtraExitCode = Invoke-LoggedCommand "Regenerate BI portal after extra stable sales slices" {
+      & $Node ".\scripts\generate_bi_portal.mjs" --distro $Distro --container $Container --database $Database --user $User
+    }
+  }
+}
+
+$Ok = ($BiExitCode -eq 0 -and $ExtraExitCode -eq 0)
+Log "Post-Feishu BI refresh end mode=$Mode salesDate=$SalesDate linkDate=$LinkDate businessDate=$BusinessDate extraSalesDates=$ExtraSalesDates linkExit=$LinkExitCode biExit=$BiExitCode extraExit=$ExtraExitCode ok=$Ok log=$LogFile"
 
 # Do not fail the upstream Feishu production task because of BI-side issues.
 # Feishu remains the production path during the dual-run period.

@@ -294,7 +294,10 @@ async function tryAutoRelogin(store, date, options) {
 }
 
 async function fetchStoreSales(store, date) {
-  const fetchResult = await runNode('fetch_shein_sales.mjs', [store.storeKey, '--date', date]);
+  const fetchArgs = [store.storeKey, '--date', date];
+  const transport = salesTransportForStore(store);
+  if (transport && transport !== 'browser') fetchArgs.push('--transport', transport);
+  const fetchResult = await runNode('fetch_shein_sales.mjs', fetchArgs);
   const fetchJson = fetchResult.ok ? parseJsonFromOutput(fetchResult.stdout) : null;
   return {
     ok: fetchResult.ok,
@@ -302,7 +305,30 @@ async function fetchStoreSales(store, date) {
     stderrTail: fetchResult.stderr.slice(-1200),
     error: fetchResult.ok ? null : `fetch failed: ${fetchResult.stderr || fetchResult.stdout}`,
     salesSar: fetchJson?.totalSar ?? fetchJson?.daily?.[0]?.salesSar ?? null,
+    transport: fetchJson?.transport || transport || 'browser',
   };
+}
+
+async function fetchStoreSalesWithOptions(store, date, options = {}) {
+  const fetchArgs = [store.storeKey, '--date', date];
+  const transport = options.transport || salesTransportForStore(store);
+  if (transport && transport !== 'browser') fetchArgs.push('--transport', transport);
+  if (options.refreshSession) fetchArgs.push('--refresh-session');
+  const fetchResult = await runNode('fetch_shein_sales.mjs', fetchArgs);
+  const fetchJson = fetchResult.ok ? parseJsonFromOutput(fetchResult.stdout) : null;
+  return {
+    ok: fetchResult.ok,
+    stdoutTail: fetchResult.stdout.slice(-1200),
+    stderrTail: fetchResult.stderr.slice(-1200),
+    error: fetchResult.ok ? null : `fetch failed: ${fetchResult.stderr || fetchResult.stdout}`,
+    salesSar: fetchJson?.totalSar ?? fetchJson?.daily?.[0]?.salesSar ?? null,
+    transport: fetchJson?.transport || transport || 'browser',
+  };
+}
+
+function salesTransportForStore(store) {
+  const value = String(process.env.SHEIN_SALES_TRANSPORT || store.salesTransport || 'browser').trim().toLowerCase();
+  return ['webapi', 'auto', 'browser'].includes(value) ? value : 'browser';
 }
 
 async function syncOneStore(store, date, status, options) {
@@ -321,23 +347,41 @@ async function syncOneStore(store, date, status, options) {
   };
 
   const maxAttempts = Math.max(1, Number(options.storeAttempts || 1));
+  const salesTransport = salesTransportForStore(store);
+  const webApiFirst = salesTransport === 'webapi' || salesTransport === 'auto';
   let fetchResult = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (webApiFirst) {
+      fetchResult = await fetchStoreSalesWithOptions(store, date, {transport: salesTransport, refreshSession: false});
+      result.fetchStdoutTail = fetchResult.stdoutTail;
+      result.fetchStderrTail = fetchResult.stderrTail;
+      result.fetchTransport = fetchResult.transport;
+      if (fetchResult.ok) {
+        result.browser = {opened: false, launched: false, skipped: true, reason: 'webapi_transport_succeeded_without_browser_launch'};
+        break;
+      }
+      result.webApiFirstError = String(fetchResult.error || '').slice(0, 1000);
+    }
+
     result.browser = await ensureBrowser(store, options.launchMissing, options.browserMode);
     if (!result.browser.opened) {
-      result.error = result.browser.error;
+      result.error = webApiFirst
+        ? `${fetchResult?.error || 'webapi fetch failed'}; browser fallback unavailable: ${result.browser.error}`
+        : result.browser.error;
       return result;
     }
 
-    fetchResult = await fetchStoreSales(store, date);
+    fetchResult = await fetchStoreSalesWithOptions(store, date, {transport: salesTransport, refreshSession: webApiFirst});
     result.fetchStdoutTail = fetchResult.stdoutTail;
     result.fetchStderrTail = fetchResult.stderrTail;
+    result.fetchTransport = fetchResult.transport;
     if (!fetchResult.ok && isLoginRedirectError(fetchResult.error)) {
       result.autoRelogin = await tryAutoRelogin(store, date, options);
       if (result.autoRelogin.ok) {
-        fetchResult = await fetchStoreSales(store, date);
+        fetchResult = await fetchStoreSalesWithOptions(store, date, {transport: salesTransport, refreshSession: webApiFirst});
         result.fetchStdoutTail = fetchResult.stdoutTail;
         result.fetchStderrTail = fetchResult.stderrTail;
+        result.fetchTransport = fetchResult.transport;
       }
     }
 

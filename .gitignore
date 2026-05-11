@@ -23,6 +23,8 @@ lark_payloads/
 !outputs/product-image-suite/**
 !outputs/cloud-migration/
 !outputs/cloud-migration/**
+outputs/cloud-migration/*.log
+outputs/cloud-migration/*.log.err
 !outputs/cleanup/
 !outputs/cleanup/**
 

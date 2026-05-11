@@ -108,6 +108,14 @@ function compactJson(value, maxLen = 12000) {
   return JSON.stringify({truncated: true, preview: text.slice(0, maxLen)});
 }
 
+function normalizeStandardGoodsSn(value, context = {}) {
+  const raw = value || context.rawGoodsSn || context.raw_goods_sn || context.goodsSn || '';
+  const norm = normalizeGoodsSnDetailed(raw, {
+    goodsTitle: context.goodsTitle || context.goodsName || context.saleName || context.productNameCn || context.product_name_cn || context.title || '',
+  });
+  return norm.canonical || raw || '';
+}
+
 function csvEscape(v) {
   if (v === null || v === undefined || v === '') return '';
   let s;
@@ -416,13 +424,14 @@ async function collectLinks(args, productMap, skcMap) {
       raw_meta: compactJson({fetchTime: j.fetchTime, counts: j.counts}),
     });
     for (const row of j.linkRows || []) {
+      const standard = normalizeStandardGoodsSn(row.standardGoodsSn, row);
       master.push({
         unique_key: row.uniqueKey || `${row.date}__${row.storeKey}__${row.skc}`,
         snapshot_date: row.date || date,
         store_key: row.storeKey || store.storeKey,
         group_key: row.groupKey || store.groupKey,
         shop_name: row.shopName || store.shopName,
-        standard_goods_sn: row.standardGoodsSn || '',
+        standard_goods_sn: standard,
         raw_goods_sn: row.rawGoodsSn || '',
         spu: row.spu || row.spuCode || '',
         skc: row.skc || row.skcCode || '',
@@ -447,17 +456,18 @@ async function collectLinks(args, productMap, skcMap) {
         source_file: source,
         raw_summary: compactJson(row),
       });
-      addProduct(productMap, {...row, date});
-      addSkc(skcMap, {...row, date});
+      addProduct(productMap, {...row, standardGoodsSn: standard, date});
+      addSkc(skcMap, {...row, standardGoodsSn: standard, date});
     }
     for (const row of j.performanceRows || []) {
+      const standard = normalizeStandardGoodsSn(row.standardGoodsSn, row);
       perf.push({
         unique_key: row.uniqueKey || `${row.date}__${row.storeKey}__${row.skc}`,
         date: row.date || date,
         store_key: row.storeKey || store.storeKey,
         group_key: row.groupKey || store.groupKey,
         shop_name: row.shopName || store.shopName,
-        standard_goods_sn: row.standardGoodsSn || '',
+        standard_goods_sn: standard,
         raw_goods_sn: row.rawGoodsSn || '',
         spu: row.spu || '',
         skc: row.skc || '',
@@ -487,17 +497,18 @@ async function collectLinks(args, productMap, skcMap) {
         source_file: source,
         raw_summary: compactJson(row),
       });
-      addProduct(productMap, {...row, date});
-      addSkc(skcMap, {...row, date});
+      addProduct(productMap, {...row, standardGoodsSn: standard, date});
+      addSkc(skcMap, {...row, standardGoodsSn: standard, date});
     }
     for (const row of j.coverageRows || []) {
+      const standard = normalizeStandardGoodsSn(row.standardGoodsSn, row);
       coverage.push({
-        unique_key: row.uniqueKey || `${row.date}__${row.storeKey}__${row.standardGoodsSn}`,
+        unique_key: row.uniqueKey || `${row.date}__${row.storeKey}__${standard}`,
         date: row.date || date,
         store_key: row.storeKey || store.storeKey,
         group_key: row.groupKey || store.groupKey,
         shop_name: row.shopName || store.shopName,
-        standard_goods_sn: row.standardGoodsSn || '',
+        standard_goods_sn: standard,
         coverage_status: row.coverageStatus || '',
         has_on_shelf_link: bool(row.hasOnShelfLink),
         need_supplement_link: bool(row.needSupplementLink),
@@ -515,18 +526,19 @@ async function collectLinks(args, productMap, skcMap) {
         source_file: source,
         raw_summary: compactJson(row.rawSummary || row),
       });
-      addProduct(productMap, {...row, date});
+      addProduct(productMap, {...row, standardGoodsSn: standard, date});
     }
     for (const row of j.suggestionRows || []) {
+      const standard = normalizeStandardGoodsSn(row.standardGoodsSn, row);
       suggestions.push({
-        unique_key: row.uniqueKey || `${row.date}__${row.storeKey}__${row.ruleCode}__${row.targetKey || row.skc || row.standardGoodsSn}`,
+        unique_key: row.uniqueKey || `${row.date}__${row.storeKey}__${row.ruleCode}__${row.targetKey || row.skc || standard}`,
         date: row.date || date,
         store_key: row.storeKey || store.storeKey,
         group_key: row.groupKey || store.groupKey,
         shop_name: row.shopName || store.shopName,
         target_type: row.targetType || '',
         target_key: row.targetKey || '',
-        standard_goods_sn: row.standardGoodsSn || '',
+        standard_goods_sn: standard,
         skc: row.skc || '',
         rule_code: row.ruleCode || '',
         suggestion_type: row.suggestionType || '',
@@ -537,8 +549,8 @@ async function collectLinks(args, productMap, skcMap) {
         source_file: source,
         raw_summary: compactJson(row),
       });
-      addProduct(productMap, {...row, date});
-      addSkc(skcMap, {...row, date});
+      addProduct(productMap, {...row, standardGoodsSn: standard, date});
+      addSkc(skcMap, {...row, standardGoodsSn: standard, date});
     }
   }
   return {master, perf, coverage, suggestions, catalog, fileCount: files.length};
@@ -549,7 +561,9 @@ async function collectDashboard(args) {
   if (!fssync.existsSync(args.dashboardJson)) return {actions: [], storeCockpit: []};
   const j = await readJson(args.dashboardJson);
   const date = j.meta?.linkDate || j.meta?.salesDate || null;
-  const actions = (j.actions || []).map(a => ({
+  const actions = (j.actions || []).map(a => {
+    const standard = normalizeStandardGoodsSn(a.standardGoodsSn, a);
+    return ({
     action_id: a.id || `${date}__${a.type}__${a.store}__${a.skc || a.standardGoodsSn}`,
     date,
     type: a.type || '',
@@ -559,7 +573,7 @@ async function collectDashboard(args) {
     store_key: a.store || '',
     group_key: a.group || '',
     shop_name: a.shopName || '',
-    standard_goods_sn: a.standardGoodsSn || '',
+    standard_goods_sn: standard,
     skc: a.skc || '',
     image_url: a.imageUrl || '',
     title: a.title || '',
@@ -570,7 +584,8 @@ async function collectDashboard(args) {
     focus: bool(a.focus),
     metrics: compactJson(a.metrics || {}),
     raw_summary: compactJson(a),
-  }));
+  });
+  });
   const storeDate = j.meta?.salesDate || date;
   const storeCockpit = (j.storeCockpit || []).map(s => ({
     date: storeDate,

@@ -92,6 +92,25 @@ try {
   & $Node ".\scripts\run_sales_sync_job.mjs" @LgmSyncArgs 2>&1 |
     ForEach-Object { $_ | Out-File -FilePath $LogFile -Encoding UTF8 -Append }
   $LgmExitCode = $LASTEXITCODE
+  # Orders fetched shortly after midnight can still contain buyer cancellations
+  # that happen before next-day shipment.  Recheck D-2 once per night as the
+  # stable sales slice; by then the previous day's parcels should have been
+  # shipped and cancellation drift is much smaller.
+  $StableDate = (Get-Date).AddDays(-2).ToString("yyyy-MM-dd")
+  $StableDsyExitCode = 0
+  $StableLgmExitCode = 0
+  if ($StableDate -match '^\d{4}-\d{2}-\d{2}$') {
+    "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Start third-day stable sales recheck for $StableDate." | Out-File -FilePath $LogFile -Encoding UTF8 -Append
+    $StableDsyArgs = @("--mode", "yesterday-final", "--date", $StableDate, "--status", "third-day-stable-recheck", "--group", "DSY", "--no-monthly", "--no-compact-display", "--no-dashboard", "--no-lark-base", "--no-products", "--headless-browser", "--relogin-headless")
+    $StableLgmArgs = @("--mode", "yesterday-final", "--date", $StableDate, "--status", "third-day-stable-recheck", "--group", "LGM", "--no-monthly", "--no-compact-display", "--no-dashboard", "--no-lark-base", "--no-products", "--headless-browser", "--relogin-headless")
+    & $Node ".\scripts\run_sales_sync_job.mjs" @StableDsyArgs 2>&1 |
+      ForEach-Object { $_ | Out-File -FilePath $LogFile -Encoding UTF8 -Append }
+    $StableDsyExitCode = $LASTEXITCODE
+    & $Node ".\scripts\run_sales_sync_job.mjs" @StableLgmArgs 2>&1 |
+      ForEach-Object { $_ | Out-File -FilePath $LogFile -Encoding UTF8 -Append }
+    $StableLgmExitCode = $LASTEXITCODE
+    "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] End third-day stable sales recheck for $StableDate, dsy=$StableDsyExitCode, lgm=$StableLgmExitCode." | Out-File -FilePath $LogFile -Encoding UTF8 -Append
+  }
   $MonthlyExitCode = 0
   $CompactExitCode = 0
   $DashboardExitCode = 0
@@ -124,7 +143,7 @@ try {
     $DashboardExitCode = 0
     "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Skip dashboard refresh because one group failed." | Out-File -FilePath $LogFile -Encoding UTF8 -Append
   }
-  $ExitCode = if ($DsyExitCode -ne 0) { $DsyExitCode } elseif ($LgmExitCode -ne 0) { $LgmExitCode } elseif ($MonthlyExitCode -ne 0) { $MonthlyExitCode } elseif ($CompactExitCode -ne 0) { $CompactExitCode } elseif ($DashboardExitCode -ne 0) { $DashboardExitCode } else { 0 }
+  $ExitCode = if ($DsyExitCode -ne 0) { $DsyExitCode } elseif ($LgmExitCode -ne 0) { $LgmExitCode } elseif ($StableDsyExitCode -ne 0) { $StableDsyExitCode } elseif ($StableLgmExitCode -ne 0) { $StableLgmExitCode } elseif ($MonthlyExitCode -ne 0) { $MonthlyExitCode } elseif ($CompactExitCode -ne 0) { $CompactExitCode } elseif ($DashboardExitCode -ne 0) { $DashboardExitCode } else { 0 }
   $TargetDate = (Get-Date).AddDays(-1).ToString("yyyy-MM-dd")
   $SalesFilesReadyForBi = Test-AllStoreSalesFilesReady $TargetDate
   if ($ExitCode -eq 0 -or $SalesFilesReadyForBi) {
@@ -139,6 +158,7 @@ try {
       -SalesDate $TargetDate `
       -LinkDate $TargetDate `
       -BusinessDate $TargetDate `
+      -ExtraSalesDates $StableDate `
       -ParentLogFile $LogFile 2>&1 |
       ForEach-Object { $_ | Out-File -FilePath $LogFile -Encoding UTF8 -Append }
     $BiPostExitCode = $LASTEXITCODE
@@ -149,9 +169,9 @@ try {
     "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Skip BI post-refresh because Feishu yesterday-final failed." | Out-File -FilePath $LogFile -Encoding UTF8 -Append
   }
   if ($ExitCode -ne 0) {
-    Send-SyncIssueAlert "yesterday-final" $TargetDate "Yesterday-final sales sync failed; some store local files may be missing, and BI may be stale."
+    Send-SyncIssueAlert "yesterday-final" $TargetDate "Yesterday-final or third-day stable sales recheck failed; some store local files may be missing, and BI may be stale."
   }
-  "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] SHEIN all-store yesterday-final sync end, dsy=$DsyExitCode, lgm=$LgmExitCode, monthly=$MonthlyExitCode, compact=$CompactExitCode, dashboard=$DashboardExitCode, biPost=$BiPostExitCode, exit=$ExitCode" | Out-File -FilePath $LogFile -Encoding UTF8 -Append
+  "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] SHEIN all-store yesterday-final sync end, dsy=$DsyExitCode, lgm=$LgmExitCode, stableDate=$StableDate, stableDsy=$StableDsyExitCode, stableLgm=$StableLgmExitCode, monthly=$MonthlyExitCode, compact=$CompactExitCode, dashboard=$DashboardExitCode, biPost=$BiPostExitCode, exit=$ExitCode" | Out-File -FilePath $LogFile -Encoding UTF8 -Append
   exit $ExitCode
 }
 finally {

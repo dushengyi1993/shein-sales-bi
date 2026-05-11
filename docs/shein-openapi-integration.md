@@ -2,6 +2,8 @@
 
 > 当前项目正在从“登录浏览器抓取 SHEIN 后台数据”逐步切换到 SHEIN 官方开放平台 API。本文记录当前已确认的官方规则、应用创建口径、本地配置边界和分阶段接入计划。
 
+> 2026-05-11 补充：当前项目同时存在两条“API 化”链路。`SHEIN 官方 OpenAPI` 需要开放平台应用、授权和签名，HL 仍是并行试点；`SHEIN 后台 WebAPI 直连` 复用已登录 Cookie/session 调后台接口，已用于 16 店销售生产抓取的无浏览器直连优先。两者不要混为一谈，密钥和 Cookie session 都不得进入 GitHub。
+
 ## 当前已确认信息
 
 - 开发者主体：广州皓兰商贸有限公司。
@@ -118,7 +120,7 @@ node scripts/reconcile_shein_openapi_hl_sales.mjs --store HL --start 2026-05-05 
 
 注意：第一条授权脚本只在店铺授权过期或更换应用密钥时需要重新执行。
 
-`scripts/fetch_shein_openapi_sales.mjs` 输出目录为 `outputs/shein_openapi_fetch/`，结构尽量兼容原 `outputs/shein_fetch/`，但不会覆盖浏览器抓取文件。当前已通过 `load_bi_warehouse.mjs --dry-run` 验证可被现有销售入仓流程识别；正式试点入仓使用 `scripts/load_shein_openapi_sales_warehouse.mjs` 写入并行表和对账表，不覆盖浏览器生产事实表。
+`scripts/fetch_shein_openapi_sales.mjs` 输出目录为 `outputs/shein_openapi_fetch/`，结构尽量兼容原 `outputs/shein_fetch/`，但不会覆盖当前生产销售源文件。当前已通过 `load_bi_warehouse.mjs --dry-run` 验证可被现有销售入仓流程识别；正式试点入仓使用 `scripts/load_shein_openapi_sales_warehouse.mjs` 写入并行表和对账表，不覆盖生产事实表。
 
 已补安全开关：
 
@@ -148,14 +150,14 @@ node scripts/load_bi_warehouse.mjs --sales-dir outputs/shein_openapi_fetch --sal
 - HL 店铺已完成真实授权。
 - 只读接入已验证：站点 / 币种、商品列表、订单列表 / 详情、库存、财务对账、退货。
 - 初步订单销售对账已通过。
-- 当前已完成：HL OpenAPI 销售数据写入 API 并行层，并在 BI 系统状态页展示 OpenAPI / 浏览器对账。下一步继续累计多日 `matched`，并在已申请权限审核通过后扩展库存、退货、财务、SFS 等更多业务域。
+- 当前已完成：HL OpenAPI 销售数据写入 API 并行层，并在 BI 系统状态页展示 OpenAPI / 当前生产销售源对账。下一步继续累计多日 `matched`，并在已申请权限审核通过后扩展库存、退货、财务、SFS 等更多业务域。
 
 ### P3：16 店分批替换
 
 - 每批授权若干店铺。
-- 同一数据域先双跑：API 与浏览器抓取并行一段时间。
+- 同一数据域先双跑：官方 OpenAPI 与当前生产销售源（WebAPI 直连优先，必要时浏览器回退）并行一段时间。
 - 对账稳定后，将该数据域切到 API。
-- 浏览器 profile 仅保留为登录、排障、回退工具。
+- 浏览器 profile 仅保留为登录、Cookie/session 刷新、排障和回退工具。
 
 ### P4：运营自动化
 
@@ -172,7 +174,7 @@ node scripts/load_bi_warehouse.mjs --sales-dir outputs/shein_openapi_fetch --sal
 
 ## 2026-05-06 进展：HL OpenAPI 并行入仓与 BI 对账展示
 
-本阶段已把 HL 的 OpenAPI 销售数据写入并行表，不覆盖浏览器抓取生产事实表：
+本阶段已把 HL 的 OpenAPI 销售数据写入并行表，不覆盖生产销售事实表：
 
 - `fact.openapi_store_daily_sales`
 - `fact.openapi_order_header`
@@ -195,7 +197,7 @@ node scripts/generate_bi_portal.mjs
 - `outputs/bi-portal/data.json` 已包含 `openapiReconciliation`。
 - `outputs/bi-portal/index.html` 的系统状态页已展示 “SHEIN OpenAPI 试点对账” 卡片。
 
-当前结论：HL 销售入口已经具备“API 与浏览器双跑、并行入仓、BI 可见对账”的最小闭环；正式切换生产事实表前，仍需继续积累多日 matched 结果，并等待已申请权限审核完成后再扩展销量、SFS、库存、财务等更多业务域。
+当前结论：HL 销售入口已经具备“官方 OpenAPI 与当前生产销售源双跑、并行入仓、BI 可见对账”的最小闭环；正式切换生产事实表前，仍需继续积累多日 matched 结果，并等待已申请权限审核完成后再扩展销量、SFS、库存、财务等更多业务域。
 
 ## 2026-05-10 进展：CX 开放平台应用已提交审核
 
@@ -206,7 +208,7 @@ node scripts/generate_bi_portal.mjs
 - 业务功能：商品管理、商品合规、订单管理、库存管理、财务管理
 - 当前状态：审核中
 
-该应用仍未写入任何真实密钥到仓库。审核通过并完成店铺授权后，按 HL 的接入方式把 CX 加入 `.local` 配置，先走 API / 浏览器双跑对账，再决定是否替换生产数据入口。
+该应用仍未写入任何真实密钥到仓库。审核通过并完成店铺授权后，按 HL 的接入方式把 CX 加入 `.local` 配置，先走官方 OpenAPI / 当前生产销售源双跑对账，再决定是否替换生产数据入口。
 
 ## 2026-05-07 进展：HL OpenAPI 固定双跑计划任务
 
@@ -218,7 +220,7 @@ node scripts/generate_bi_portal.mjs
 - 统一执行脚本：`scripts/scheduled_openapi_hl_reconciliation.ps1`。
 - 任务安装入口：`scripts/install_windows_scheduled_tasks.ps1 -IncludeOpenApiPilot`。
 
-边界保持不变：官方 OpenAPI 结果只写入 `fact.openapi_store_daily_sales` / `fact.openapi_order_header` / `fact.openapi_order_item` 和 `mart.openapi_sales_reconciliation`，不覆盖浏览器抓取生产事实表。
+边界保持不变：官方 OpenAPI 结果只写入 `fact.openapi_store_daily_sales` / `fact.openapi_order_header` / `fact.openapi_order_item` 和 `mart.openapi_sales_reconciliation`，不覆盖生产销售事实表。
 
 白名单处理与复跑结果：
 

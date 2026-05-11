@@ -1,6 +1,6 @@
 ﻿# SHEIN BI 系统架构初版
 
-更新时间：2026-05-06
+更新时间：2026-05-11
 
 ## 结论
 
@@ -8,7 +8,7 @@
 
 ```mermaid
 flowchart LR
-  A["SHEIN 后台"] --> B["抓取与标准化脚本"]
+  A["SHEIN 后台 WebAPI / 官方 OpenAPI"] --> B["抓取与标准化脚本"]
   B --> C["PostgreSQL 数据仓库"]
   C --> D["Metabase BI"]
   C --> E["自定义实操台"]
@@ -34,9 +34,9 @@ flowchart LR
    - 当前本机使用 WSL + Docker + D 盘数据盘。
    - 未来迁移到朋友服务器时，迁移 Docker Compose、数据库、Metabase 即可。
 
-5. **现有生产链路不冒险迁移**
-   - Windows 计划任务、SHEIN Windows Chrome 登录态、SHEIN 抓数、BI 后置刷新和飞书日报继续运行；飞书 Base / 看板写入是否恢复由暂停开关控制。
-   - 新系统双写验证稳定后，再逐步替换。
+5. **生产链路逐步 API 化，不冒险硬迁移**
+   - Windows 计划任务、BI 后置刷新和飞书日报继续运行；飞书 Base / 看板写入是否恢复由暂停开关控制。
+   - SHEIN 销售抓取已改为 WebAPI 直连优先，Chrome 登录态保留为 Cookie/session 刷新和失败回退；官方 OpenAPI 继续并行试点，不直接覆盖生产事实表。
 
 ## 当前服务
 
@@ -80,6 +80,7 @@ BI 系统当前分为三层入口：
 1. **飞书生产链路**
    - 当前只保留飞书日报和异常提醒；Base 表格 / Dashboard 写入由 `state/feishu-base-sync-paused.flag` 暂停。
    - SHEIN 抓数和 BI 刷新不得因飞书 Base 暂停而中断。
+   - 销售源文件当前由 WebAPI 直连优先生成；直连失败时才回退 Chrome。
 
 2. **Metabase 分析层**
    - 连接 PostgreSQL 数据仓库。
@@ -90,9 +91,9 @@ BI 系统当前分为三层入口：
    - 文件入口：`outputs/bi-portal/index.html`
    - 本机服务：`http://127.0.0.1:8787/`
    - 负责“每天先看什么、先处理什么、如何复制指令、如何标记处理状态”。
-   - 当前服务支持本机 `127.0.0.1:8787` 和临时局域网 `192.168.2.49:8787`；局域网只限私有网段试用，未开放公网。
+   - 当前服务支持本机 `127.0.0.1:8787` 和临时局域网入口 `http://DUSHENGYI-PC2:8787/` / `http://<当前WLAN-IP>:8787/`；局域网只限私有网段试用，未开放公网。电脑重启后 DHCP 可能换 IP，团队访问不要依赖旧固定 IP。
    - 通过本机服务打开时，动作状态写入 `state/bi_action_state.json`；直接双击 HTML 打开时，动作状态保存在浏览器本地。
-   - 系统状态页已接入 `mart.openapi_sales_reconciliation`，展示 HL OpenAPI 销售试点与浏览器抓取的对账状态；该试点暂不覆盖正式销售事实表。
+   - 系统状态页已接入 `mart.openapi_sales_reconciliation`，展示 HL 官方 OpenAPI 销售试点与当前生产销售源的对账状态；该试点暂不覆盖正式销售事实表。
 
 当前团队访问状态：
 
@@ -104,7 +105,7 @@ BI 系统当前分为三层入口：
 - 任务名：`SHEIN-BI-Daily-Pipeline-0700`
 - 时间：每天 `07:00`
 - 入口：`wscript.exe` + `scripts/run_scheduled_hidden.vbs` + `scripts/scheduled_bi_daily_pipeline.ps1`
-- `2026-05-09 07:00:01` 正式自动任务已运行成功；后续 `2026-05-09 14:10` 销售滚动后置 BI 也已成功刷新。下一次例行自动验证为 `2026-05-10 07:00`。
+- `2026-05-09 07:00:01` 正式自动任务已运行成功；后续 `2026-05-09 14:10` 销售滚动后置 BI 也已成功刷新。
 - `2026-05-02 07:00` 的 `267014` 是已修复的历史失败记录，保留作排障证据。
 - 链接表现每日任务为 `SHEIN-Sales-15Stores-LinkManagement-0530`，每天 `05:30`，用于抓前一完整业务日链接数据和业务域数据，先写本地文件；`07:00` BI 流水线再入仓刷新门户，不再写飞书链接表。
 - ET 货代仓每日任务为 `SHEIN-Sales-ETForwarder-0420`，每天 `04:20`，用于抓 ET 库存、RTV、出库、发货申请单、库存流水和财务；`07:00` BI 流水线会结合 SHEIN 售后做 RTV 换单复核和仓库去向追踪。
@@ -137,7 +138,7 @@ BI 系统当前分为三层入口：
 - `fact_after_sales`
 - `fact_fulfillment_daily`
 - `fact_marketing_campaign_daily`
-- OpenAPI 并行试点表：`fact.openapi_store_daily_sales`、`fact.openapi_order_header`、`fact.openapi_order_item`。这些表只用于 API / 浏览器双跑验证，正式切换前不作为首页和日报的生产销售源。
+   - OpenAPI 并行试点表：`fact.openapi_store_daily_sales`、`fact.openapi_order_header`、`fact.openapi_order_item`。这些表只用于官方 OpenAPI / 当前生产销售源双跑验证，正式切换前不作为首页和日报的生产销售源。
 
 用途：Metabase 的主要数据源。
 
@@ -165,7 +166,7 @@ BI 系统当前分为三层入口：
 - `mart_link_health_score`
 - `mart_product_opportunity`
 - `mart_inventory_risk`
-- `mart.openapi_sales_reconciliation`：OpenAPI 试点与浏览器抓取的日维度对账表，记录销售额、订单数、商品行数、源文件和 `matched` / `warning` 状态。
+- `mart.openapi_sales_reconciliation`：官方 OpenAPI 试点与当前生产销售源的日维度对账表，记录销售额、订单数、商品行数、源文件和 `matched` / `warning` 状态。
 
 用途：BI 看板、日常筛选、实操台。
 

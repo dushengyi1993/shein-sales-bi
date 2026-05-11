@@ -52,7 +52,8 @@
       "productStatsEnabled": true,
       "profileKey": "dl",
       "port": 9333,
-      "profileName": "DL - DLSDdsy3688"
+      "profileName": "DL - DLSDdsy3688",
+      "salesTransport": "auto"
     },
     {
       "storeKey": "DX",
@@ -62,7 +63,8 @@
       "productStatsEnabled": true,
       "profileKey": "dx",
       "port": 9334,
-      "profileName": "DX - DXSDdsy3688"
+      "profileName": "DX - DXSDdsy3688",
+      "salesTransport": "auto"
     },
     {
       "storeKey": "FY",
@@ -72,7 +74,8 @@
       "productStatsEnabled": true,
       "profileKey": "fy",
       "port": 9335,
-      "profileName": "FY - FYSDdsy3688"
+      "profileName": "FY - FYSDdsy3688",
+      "salesTransport": "auto"
     },
     {
       "storeKey": "LQ",
@@ -82,7 +85,8 @@
       "productStatsEnabled": true,
       "profileKey": "lq",
       "port": 9336,
-      "profileName": "LQ - LQSDdsy3688"
+      "profileName": "LQ - LQSDdsy3688",
+      "salesTransport": "auto"
     },
     {
       "storeKey": "NM",
@@ -92,7 +96,8 @@
       "productStatsEnabled": true,
       "profileKey": "nm",
       "port": 9337,
-      "profileName": "NM - NMSDdsy3688"
+      "profileName": "NM - NMSDdsy3688",
+      "salesTransport": "auto"
     },
     {
       "storeKey": "HL",
@@ -102,7 +107,8 @@
       "productStatsEnabled": true,
       "profileKey": "shein-main",
       "port": 9360,
-      "profileName": "HL - Main Account"
+      "profileName": "HL - Main Account",
+      "salesTransport": "auto"
     },
     {
       "storeKey": "JY",
@@ -112,7 +118,8 @@
       "productStatsEnabled": true,
       "profileKey": "jy",
       "port": 9339,
-      "profileName": "JY - JYSDdsy1993"
+      "profileName": "JY - JYSDdsy1993",
+      "salesTransport": "auto"
     },
     {
       "storeKey": "ZL",
@@ -122,7 +129,8 @@
       "productStatsEnabled": true,
       "profileKey": "zl",
       "port": 9340,
-      "profileName": "ZL - ZLSDdsy3688"
+      "profileName": "ZL - ZLSDdsy3688",
+      "salesTransport": "auto"
     },
     {
       "storeKey": "TS",
@@ -132,7 +140,8 @@
       "productStatsEnabled": true,
       "profileKey": "ts",
       "port": 9341,
-      "profileName": "TS - TSDSdsy688"
+      "profileName": "TS - TSDSdsy688",
+      "salesTransport": "auto"
     },
     {
       "storeKey": "MZ",
@@ -142,7 +151,8 @@
       "productStatsEnabled": true,
       "profileKey": "mz",
       "port": 9342,
-      "profileName": "MZ - MZSDdsy3688"
+      "profileName": "MZ - MZSDdsy3688",
+      "salesTransport": "auto"
     },
     {
       "storeKey": "CX",
@@ -152,7 +162,8 @@
       "productStatsEnabled": true,
       "profileKey": "cx",
       "port": 9343,
-      "profileName": "CX - GS9489101"
+      "profileName": "CX - GS9489101",
+      "salesTransport": "auto"
     },
     {
       "storeKey": "YJ",
@@ -162,7 +173,8 @@
       "productStatsEnabled": true,
       "profileKey": "qy",
       "port": 9346,
-      "profileName": "YJ - GS7451160"
+      "profileName": "YJ - GS7451160",
+      "salesTransport": "auto"
     },
     {
       "storeKey": "XL",
@@ -172,7 +184,8 @@
       "productStatsEnabled": true,
       "profileKey": "yj",
       "port": 9344,
-      "profileName": "XL - GS8146729"
+      "profileName": "XL - GS8146729",
+      "salesTransport": "auto"
     },
     {
       "storeKey": "QY",
@@ -182,7 +195,8 @@
       "productStatsEnabled": true,
       "profileKey": "xl",
       "port": 9345,
-      "profileName": "QY - GS9307061"
+      "profileName": "QY - GS9307061",
+      "salesTransport": "auto"
     },
     {
       "storeKey": "QH",
@@ -192,7 +206,8 @@
       "productStatsEnabled": true,
       "profileKey": "qh",
       "port": 9347,
-      "profileName": "QH - GS8715910"
+      "profileName": "QH - GS8715910",
+      "salesTransport": "auto"
     },
     {
       "storeKey": "TZ",
@@ -203,7 +218,8 @@
       "profileKey": "tz",
       "port": 9348,
       "profileName": "TZ - GS5636781",
-      "accountUtcOffsetHours": 8
+      "accountUtcOffsetHours": 8,
+      "salesTransport": "auto"
     }
   ],
   "businessUtcOffsetHours": 8

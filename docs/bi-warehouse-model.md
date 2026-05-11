@@ -1,6 +1,6 @@
 # SHEIN BI 数据仓库模型草案
 
-更新时间：2026-05-01
+更新时间：2026-05-11
 
 ## 模型原则
 
@@ -19,6 +19,17 @@
 | `fact` | 订单、销售、链接表现、库存、评价、售后、履约等明细事实 |
 | `mart` | 给 Metabase 和网页使用的聚合宽表 |
 | `ops` | 操作建议、人工处理、备注、分配、处理历史 |
+
+## 数据保留与瘦身口径（2026-05-11）
+
+当前 PostgreSQL 业务库实测约 `957MB`，Metabase 配置库约 `32MB`；`D:\SheinBI\docker-data\docker-data.ext4` 显示 `80GB` 是虚拟盘容量，不代表真实业务数据已经占用 80GB。
+
+- 必须长期保留或可按年归档：订单/订单商品、售后/RTV、ET 出库/入仓/财务、成本/利润、库存快照中支撑利润和追责的事实数据。
+- `raw.et_endpoint_row` 是 ET 原始接口行，当前约 `383MB`，用于重解析、排障和审计；不是每日分析主表，可保留近 `30-90` 天在库，旧数据转压缩冷备。
+- `fact.link_performance_daily` 用于链接淘汰、补链和趋势判断；建议近 `180-365` 天保留日粒度，更早按月/店铺/货号聚合。
+- `fact.quality_skc_snapshot` 是商品质量快照；建议近 `180` 天保留日粒度，更早保留月末快照或按问题状态聚合。
+- `fact.link_suggestion` / `mart.link_action_candidate` 属于可重算建议层；可保留近 `30-90` 天，过期后由链接表现、库存、售后和质量事实重算。
+- BI 页面和利润相关的 `mart.shein_return_rtv_trace`、`ops.rtv_tracking_verification`、`fact.after_sales` 不是临时表，涉及退货去向、二售测算和人工复核留痕，应随业务事实长期留存或归档。
 
 ## 原始层
 

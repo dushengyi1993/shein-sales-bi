@@ -1,23 +1,25 @@
-﻿# SHEIN BI 系统运行说明
+# SHEIN BI 系统运行说明
 
-> 当前权威状态：2026-05-10。本文只保留接手和日常运维需要的信息；历史排障过程见 `.codex/plans/2026-05-01T14-11-55-shein-link-management-system.md` 和 `.codex/plans/2026-05-07T13-16-17-et-warehouse-bi-integration.md`。
+> 当前权威状态：2026-05-11。本文只保留接手和日常运维需要的信息；历史排障过程见 `.codex/plans/2026-05-01T14-11-55-shein-link-management-system.md` 和 `.codex/plans/2026-05-07T13-16-17-et-warehouse-bi-integration.md`。
 
 ## 1. 当前系统定位
 
 - 飞书多维表格 / 原生看板写入已临时暂停；飞书日报继续正常发送。
 - BI 系统作为旁路双线运行，负责 PostgreSQL 数据仓库、Metabase 和本地 BI 经营门户。
 - 不从飞书反抓数据做 BI 源头；BI 源头来自 SHEIN 后台抓取后的本地 JSON / PostgreSQL。
+- 销售本地 JSON 已改为 WebAPI 直连优先生成；Chrome profile 只作为 Cookie/session 刷新、登录续期和回退来源。
 - BI 后置刷新失败不应反向影响 SHEIN 抓数和飞书日报。
 - 暂停开关：`state/feishu-base-sync-paused.flag`。存在该文件时，跳过飞书事实表、产品表、月表、宽表和看板写入；删除该文件后可恢复写表链路。
 
 ## 2. 日常入口
 
 - 本机 BI 门户：[http://127.0.0.1:8787/](http://127.0.0.1:8787/)
-- 局域网协作访问：[http://192.168.2.49:8787/](http://192.168.2.49:8787/)
+- 局域网协作访问：优先使用电脑名 [http://DUSHENGYI-PC2:8787/](http://DUSHENGYI-PC2:8787/)；若同事电脑无法解析电脑名，则用当前 WLAN IPv4 访问 `http://<当前IP>:8787/`。电脑重启或路由器重新分配 DHCP 后 IP 可能变化，不要继续使用旧 IP。
 - 本地门户文件：`outputs/bi-portal/index.html`
 - V1 是唯一正式门户；V2 平行版已废弃，`outputs/bi-portal/v2/` 和 `scripts/generate_bi_portal_v2.mjs` 不再存在，日常生成脚本也不再注入 V2 跳转。
 - 启动本机网页服务：双击 `打开SHEIN-BI网页服务.cmd`
 - 启动局域网协作服务：双击 `打开SHEIN-BI局域网协作服务.cmd`
+- 配置局域网防火墙：以管理员运行 `配置SHEIN-BI局域网防火墙.cmd`；规则名为 `SHEIN BI Portal LAN 8787 ReadOnly`，应允许 `192.168.2.0/24` 访问本机 `8787`，`LocalAddress` 不应绑死到某个旧 IP。
 - Markdown 经营晨报：`outputs/bi-briefings/latest.md`
 - Metabase：`http://172.22.172.186:3000`
 - Metabase 管理员凭据只保存在 `infra/metabase/.admin.local.json`，不要写入文档或聊天。
@@ -26,6 +28,7 @@
 
 - 当前 BI 截面日期：销售/订单 `2026-05-08`，售后/库存/财务业务日 `2026-05-07`，链接表现日 `2026-05-07`。
 - 当前 BI 门户侧栏更新时间口径：销售取销售源数据抓取时间；售后/库存/财务取业务域源文件最大 `fetchTime`；链接表现取链接源文件最大 `fetchTime`；ET 货代仓取 ET 源文件/入仓批次时间。BI 入仓或页面重跑时间只作内部排障，不作为侧栏主要更新时间。
+- 销售抓取入口：16 店 `salesTransport=auto`，先 WebAPI 直连，失败才回退浏览器；本地 session 在 `state/shein_webapi_sessions/*.local.json`，不进 GitHub。
 - 店铺范围：`CX DL DX FY HL JY LQ MZ NM QH QY TS TZ XL YJ ZL`
 - 分组：DSY = `DL DX FY LQ NM HL JY ZL TS MZ`；LGM = `CX YJ XL QY QH TZ`。
 - 汇率：`1 SAR = 1.8 RMB`。
@@ -37,10 +40,10 @@
 
 | 时间 | 任务 | 说明 |
 | --- | --- | --- |
-| 00:10 | `SHEIN-Sales-15Stores-YesterdayFinal-0010` | 前一天最终版销售抓取；Base 暂停期间只写本地文件并后置刷新 BI。 |
+| 00:10 | `SHEIN-Sales-15Stores-YesterdayFinal-0010` | 前一天最终版销售抓取；Base 暂停期间只写本地文件并后置刷新 BI。自 `2026-05-11` 起，正常抓 D-1 后还会回核 D-2（`third-day-stable-recheck`），修正次日未发货前取消单带来的初版偏差，并通过 `run_bi_after_feishu_sync.ps1 -ExtraSalesDates` 把稳定日切片补入 BI。 |
 | 04:20 | `SHEIN-Sales-ETForwarder-0420` | ET 货代仓每日同步；抓库存快照、RTV、出库、发货申请单、箱明细、库存流水、财务等，按增量游标 + 重叠校验停止，不固定长窗口重抓。 |
 | 05:30 | `SHEIN-Sales-15Stores-LinkManagement-0530` | 前一完整业务日链接表现 + 业务域抓取（退货/售后、库存、评价、履约、财务等），只写本地文件/后续入仓，不再写飞书链接表。旧 `0340` / `0510` 任务不要恢复。 |
-| 07:00 | `SHEIN-BI-Daily-Pipeline-0700` | 刷新 PostgreSQL BI 仓库、自动复核 high/medium/low RTV 换单候选、BI 数据体检、BI 门户 UI 冒烟检查、本地门户和 Markdown 晨报。`2026-05-09 07:00:01` 正式自动运行成功；下一次运行 `2026-05-10 07:00:00`。 |
+| 07:00 | `SHEIN-BI-Daily-Pipeline-0700` | 刷新 PostgreSQL BI 仓库、自动复核 high/medium/low RTV 换单候选、BI 数据体检、BI 门户 UI 冒烟检查、本地门户和 Markdown 晨报。`2026-05-09 07:00:01` 已完成正式自动运行验证。 |
 | 08:10-22:10 | `SHEIN-Sales-15Stores-Intraday-Daytime` | 当天滚动销售抓取；Base 暂停期间只写本地文件并后置刷新 BI；早上成功后照常发送飞书日报。 |
 | 09:20 / 登录时 | Watchdog | 检查漏跑并补偿；不额外同步当日。 |
 
@@ -48,13 +51,23 @@
 
 - `2026-05-02 07:00` 的 `267014` 是已修复的历史失败记录，保留作排障证据。
 - `2026-05-05` 早晨 Docker / WSL 文件系统异常已手动恢复。
-- `2026-05-09 04:20` ET 任务曾在首页探测阶段因跨域/同源 URL 处理失败；`scripts/fetch_et_forwarder.mjs` 已改为使用当前页面 `location.origin` 并补跑成功，手动触发计划任务入口也返回 `LastTaskResult=0`。下一次观察 `2026-05-10 04:20`。
+- `2026-05-09 04:20` ET 任务曾在首页探测阶段因跨域/同源 URL 处理失败；`scripts/fetch_et_forwarder.mjs` 已改为使用当前页面 `location.origin` 并补跑成功，手动触发计划任务入口也返回 `LastTaskResult=0`。
 - `2026-05-09 05:30` 链接/业务域任务和 `2026-05-09 07:00` BI 任务已正式自动跑通。
+
+## 4A. SHEIN 销售 WebAPI 直连运行规则
+
+- 单店销售抓取：`node scripts/fetch_shein_sales.mjs HL --date YYYY-MM-DD --transport webapi`。
+- 强制浏览器回退：`node scripts/fetch_shein_sales.mjs HL --date YYYY-MM-DD --transport browser`。
+- 全店同步默认按 `config/stores.json.salesTransport=auto` 执行：`node scripts/run_sales_sync_job.mjs --date YYYY-MM-DD --group ALL --skip-lark-base --store-attempts 1`。
+- WebAPI session 文件位于 `state/shein_webapi_sessions/<店铺>.local.json`，包含 Cookie header 和浏览器指纹信息；这是敏感运行态，只能本机保存或加密迁移，不能提交 GitHub、写入文档或发聊天。
+- 直连成功时不会启动店铺浏览器；日志里的 `fetchTransport=webapi` 和 `browser.reason=webapi_transport_succeeded_without_browser_launch` 是成功证据。
+- 若 WebAPI 返回 `20302`、session 文件缺失或 Cookie 失效，`auto` 模式会启动对应 Chrome profile 刷新 session / 自动登录后重试；确需排障时可临时设置 `SHEIN_SALES_TRANSPORT=browser`。
+- `2026-05-11` 已用 `2026-05-08` 全 16 店做 WebAPI 对账，和现有数据库销售切片一致；资源实测见 `outputs/cloud-migration/webapi-allstores-resource-20260511-201715.json`。
 
 ## 5. 飞书日报与 BI 刷新规则
 
 - 当前飞书 Base / 看板写入暂停，但飞书日报仍是推送渠道。
-- 00:10 最终版本地抓取成功后，后置刷新前一日 BI。
+- 00:10 最终版本地抓取成功后，后置刷新前一日 BI；同时回核 D-2 稳定销售，若与初版有差异，会覆盖本地销售文件并补刷该稳定日 BI 切片。
 - 白天滚动本地抓取成功后，后置刷新当日 BI。
 - 如果某个店失败，但目标日期 16 店本地销售文件已经齐，BI 仍应刷新，并通过飞书消息提醒失败店铺。
 - 业务域单店失败不应阻断销售入仓和门户刷新，应在 BI 体检/提醒里标注。
@@ -185,8 +198,8 @@
 
 ## 10. 团队访问边界
 
-- 当前已开放临时局域网协作访问：`http://192.168.2.49:8787/`，同一局域网内无需账号密码即可访问。
-- 局域网服务监听 `0.0.0.0:8787`，Windows 防火墙规则为 `SHEIN BI Portal LAN 8787 ReadOnly`，仅放行 Private 网络 `192.168.2.0/24` 到本机 `192.168.2.49:8787`。
+- 当前已开放临时局域网协作访问：优先使用 `http://DUSHENGYI-PC2:8787/`，同一局域网内无需账号密码即可访问；若电脑名解析失败，则使用本机当前 WLAN IPv4 的 `http://<当前IP>:8787/`。
+- 局域网服务监听 `0.0.0.0:8787`，Windows 防火墙规则为 `SHEIN BI Portal LAN 8787 ReadOnly`，仅放行 Private 网络 `192.168.2.0/24` 到本机 `8787`；规则不应绑定某个 DHCP 旧 IP。
 - 当前未开放公网，未配置端口转发。
 - 同事可标记动作状态、填写负责人和备注；共享状态写入 `state/bi_action_state.json`，每次写入会记录 `updatedBy` / `updatedByUser`，当前以访问 IP 留痕；审计日志追加到 `logs/bi_portal_action_audit.jsonl`。
 - 通过本机网页服务打开门户时，动作状态同样写入 `state/bi_action_state.json`。
@@ -208,9 +221,10 @@
 ## 12. 常用验证
 
 - 检查 BI 门户：打开 [http://127.0.0.1:8787/#tab=system](http://127.0.0.1:8787/#tab=system)。
-- 检查局域网协作服务：打开 [http://192.168.2.49:8787/#tab=system](http://192.168.2.49:8787/#tab=system)，或检查 `http://192.168.2.49:8787/api/health` 返回 `lanMode=true`、`authRequired=false`、`writableActionState=true`。
+- 检查局域网协作服务：打开 [http://DUSHENGYI-PC2:8787/#tab=system](http://DUSHENGYI-PC2:8787/#tab=system)，或按当前 WLAN IPv4 检查 `http://<当前IP>:8787/api/health` 返回 `lanMode=true`、`authRequired=false`、`writableActionState=true`。
 - 修改 BI 门户 UI 时，默认先后台验证：`node --check scripts/generate_bi_portal.mjs`、`node scripts/generate_bi_portal.mjs`、静态检查 `outputs/bi-portal/index.html` / `data.json`。除非用户要求或必须排查浏览器交互问题，不主动打开前端。
 - 检查 HL OpenAPI 销售试点：`node scripts/fetch_shein_openapi_sales.mjs HL --start YYYY-MM-DD --end YYYY-MM-DD` 后运行 `node scripts/load_shein_openapi_sales_warehouse.mjs --store HL --start YYYY-MM-DD --end YYYY-MM-DD`，再在系统状态页查看 “SHEIN OpenAPI 试点对账”。
+- 检查 WebAPI 销售直连：`node scripts/fetch_shein_sales.mjs HL --date YYYY-MM-DD --transport webapi --json`，再和 `outputs/shein_fetch/HL/YYYY-MM-DD.json` 或数据库切片对账。
 - 检查成本文件解析但不入库：`node .\scripts\import_product_costs.mjs --dry-run`。
 - 重新创建成本模板：`node .\scripts\create_cost_template.mjs`。
 - 检查 BI 自动任务：`检查SHEIN-BI自动任务.cmd`。
@@ -224,7 +238,7 @@
 - 数据位置：Docker 数据盘为 `D:\SheinBI\docker-data\docker-data.ext4`，WSL 发行版位于 `D:\WSL\Ubuntu-24.04`。
 - 恢复原则：先停止 WSL / Docker，再备份 Docker volumes，确认备份存在后对 ext4 数据盘执行 `e2fsck -fy`，最后启动容器并跑 BI audit；不要直接删除 Docker 数据。
 - `2026-05-05` 已按上述流程恢复一次，并备份到 `D:\SheinBI\docker-data\recovery-backups\volumes-backup-20260505-094819.tar.gz`。
-- 恢复后必须验证：`http://127.0.0.1:8787/`、`http://192.168.2.49:8787/` 返回 200，BI 流水线最新日志为 `success`，BI audit 无 warning / error。
+- 恢复后必须验证：`http://127.0.0.1:8787/`、`http://DUSHENGYI-PC2:8787/` 或当前 WLAN IPv4 入口返回 200，BI 流水线最新日志为 `success`，BI audit 无 warning / error。
 
 ## 13. 货号 / 评价 / 动作池当前运维口径
 

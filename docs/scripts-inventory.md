@@ -22,6 +22,8 @@
 - 销售/日报/看板：
   - `run_sales_sync_job.mjs`
   - `fetch_shein_sales.mjs`
+    - `fetch_shein_sales.mjs` 支持 `--transport browser|webapi|auto`、`--session-dir`、`--refresh-session`，当前生产配置为 WebAPI 直连优先。
+    - `run_sales_sync_job.mjs` 读取 `config/stores.json.salesTransport` / `SHEIN_SALES_TRANSPORT`；`auto` 成功时不启动浏览器，失败才刷新 session 或回退 Chrome。
   - `sync_shein_daily_to_lark.mjs`
   - `sync_product_sales_to_lark.mjs`
   - `sync_order_skc_details_to_lark.mjs`

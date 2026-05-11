@@ -5,7 +5,7 @@
 ## 结论
 
 - GitHub 仓库用于保存代码、配置模板、数据结构、运维文档和可重复执行的脚本。
-- 浏览器登录态、真实账号密码、session、运行日志、抓取输出、数据库文件和本地备份不上传 GitHub。
+- 浏览器登录态、WebAPI Cookie session、真实账号密码、运行日志、抓取输出、数据库文件和本地备份不上传 GitHub。
 - 这些不上传的文件不是“漏掉”，而是因为它们要么含敏感登录信息，要么体积很大，要么是运行时可再生成数据。
 - 如果要完整迁移当前正在运行的系统，需要在 GitHub 仓库之外，再做一份“运行数据与密钥迁移包”或数据库备份。
 
@@ -33,6 +33,7 @@
 | `outputs/`（除 `outputs/bi-portal/index.html` / `data.json`） | 抓取结果、报表图片、审计结果等运行输出，体积会持续增长 | 可重新跑流水线生成；若要保留历史快照，单独归档 |
 | `logs/` | 计划任务日志、审计日志，可能含业务运行细节 | 排障或审计需要时单独备份 |
 | `state/` | 本地运行状态、动作处理状态、同步 flag | 迁移当前局域网协作状态时，单独复制 `state/bi_action_state.json`；正式团队版建议入 PostgreSQL |
+| `state/shein_webapi_sessions/*.local.json` | SHEIN 后台 WebAPI 直连复用的 Cookie session，含敏感登录态 | 不进 Git；迁移时只走加密渠道，或在新服务器重新登录/刷新 session |
 | `backups/` | 本地历史备份和归档，体积大 | 只在需要回查旧资料时单独保存 |
 | `tmp/` | 临时文件 | 不迁移 |
 | `.codex/` | Codex 执行记录，不是项目运行依赖 | 不迁移；仅当前开发上下文需要 |
@@ -85,13 +86,20 @@ git clone https://github.com/dushengyi1993/shein-sales-bi.git
 
 更稳的目标是：
 
-- SHEIN 数据抓取改为官方 API。
-- API 密钥放在云服务器环境变量或密钥管理服务中。
+- 销售抓取先保持 WebAPI 直连优先；官方 OpenAPI 权限齐全的数据域再逐步替换成官方 API。
+- Cookie session、OpenAPI 密钥和飞书配置放在云服务器环境变量、密钥管理服务或加密本地文件中，禁止提交 GitHub。
 - 数据库存 PostgreSQL。
 - BI 动作状态从 `state/bi_action_state.json` 改为 PostgreSQL 表。
 - 通过 HTTPS、账号权限、备份和监控来承载团队使用。
 
-在 API 完全替换前，如果必须把浏览器抓取搬到云端，需要单独评估验证码、人机校验、登录态失效和服务器图形环境问题。
+在 WebAPI / 官方 API 未覆盖的数据域，如果必须把浏览器抓取搬到云端，需要单独评估验证码、人机校验、登录态失效和服务器图形环境问题；但 `2026-05-11` 的销售抓取实测已经证明，销售域本身不需要常驻打开浏览器。
+
+## 当前资源实测（2026-05-11）
+
+- WebAPI 全 16 店销售抓取：`2026-05-08` 切片，耗时 `15.09s`，项目 Node 峰值约 `60.44MB` working set / `55.82MB` private，未额外启动店铺浏览器；证据文件 `outputs/cloud-migration/webapi-allstores-resource-20260511-201715.json`。
+- PostgreSQL 业务库 `shein_bi`：约 `957MB`；Metabase 配置库：约 `32MB`。
+- 容器静态占用参考：`shein-metabase` 约 `1.11GiB`，`shein-warehouse-db` 约 `167MB`，`shein-metabase-db` 约 `65MB`。
+- `D:\SheinBI\docker-data\docker-data.ext4` 的 `80GB` 是虚拟盘容量上限，不等于当前真实业务数据已经占用 80GB。
 
 ## 当前版本迁移边界
 

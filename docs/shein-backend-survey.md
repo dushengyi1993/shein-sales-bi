@@ -1,6 +1,6 @@
 # SHEIN 后台深度盘点
 
-更新时间：2026-05-01
+更新时间：2026-05-11
 
 ## 目的
 
@@ -60,6 +60,13 @@
 | 下载 | 下载中心 | `#/download-management/list` | 导出任务状态和文件下载记录 |
 
 ## 关键接口初版
+
+## 2026-05-11 销售 WebAPI 直连结论
+
+- `/gsp/orderPlus/listOrder` 与 `/gsp/orderPlus/listOrderItem` 已可在 Node 中直接请求，不需要打开页面执行 `fetch`。
+- 直连依赖 `state/shein_webapi_sessions/<店铺>.local.json` 中从已登录 Chrome profile 导出的 Cookie header / User-Agent / client hints；这是敏感本地运行态。
+- `2026-05-08` 已完成 16 店销售直连抓取并与当前数据库切片对账一致；因此销售域已具备“无常驻浏览器”的云迁移前置条件。
+- 其它业务域中，退货、面单、商品、库存、评价/翻译、履约、经营/营销/质量等后台 WebAPI 也已探测可用；财务收入概览仍有密码/验证限制，SBN 个别接口需要 `x-gw-auth` 等额外头，后续按域逐步固化。
 
 ### 订单 / 销售
 
