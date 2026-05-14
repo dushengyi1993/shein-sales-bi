@@ -1,6 +1,6 @@
 # SHEIN BI 数据仓库模型草案
 
-更新时间：2026-05-11
+更新时间：2026-05-13
 
 ## 模型原则
 
@@ -9,6 +9,7 @@
 - 事实表尽量细，Metabase 和实操台读取派生层。
 - 所有日期按北京时间自然日。
 - 订单销售事实仍以 SHEIN 订单创建时间和订单商品明细为准。
+- 销售有效性统一由 `lib/shein_sales_validity.mjs` 判断；源头总销售只剔除真正取消、揽收前取消等未形成销售的商品行。退款、退货、派件失败等属于净销售/售后利润层反转，不在源头总销售中抹掉。
 
 ## Schema 分层
 
@@ -144,7 +145,7 @@ SKC 维度。
 
 ### `fact.order_item`
 
-一行一个订单商品/SKC。
+一行一个订单商品/SKC。该表保留后台原始金额，同时写入源头总销售口径下的有效销售额，方便追溯“后台显示有金额但不应计总销售”的揽收前取消单。
 
 - `order_item_id`
 - `order_id`
@@ -156,10 +157,12 @@ SKC 维度。
 - `skc`
 - `sku_code`
 - `quantity`
-- `currency_price`
-- `sale_amount_sar`
-- `sale_amount_rmb`
+- `currency_price`：SHEIN 商品行原始金额，取消/退款行也保留原值。
+- `sales_sar` / `sales_rmb`：源头总销售口径下的有效销售金额；真正取消、揽收前取消行为 `0`。
+- `quantity`：源头总销售口径下的有效销售数量；真正取消、揽收前取消行为 `0`。
 - `raw_summary`
+
+源 JSON 商品行会保留 `isValidSale` 和 `salesExclusionReason`。典型排除原因包括 `cancelled_page_status`、`cancelled_before_pickup`、`cancelled_status_text`。例如 `2026-05-12 LQ / SK-5118电磁炉` 无货取消行的原始金额为 `68 SAR`，但入仓后 `sales_sar=0`、`quantity=0`。`用户已退款`、退货和派件失败行仍保留 `sales_sar`，后续由净销售/售后利润层处理。
 
 ### `fact.store_daily_sales`
 

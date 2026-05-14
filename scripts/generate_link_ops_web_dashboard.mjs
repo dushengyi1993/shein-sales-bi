@@ -15,6 +15,7 @@ import fs from 'node:fs/promises';
 import fssync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {isValidSalesGoodsRow, salesAmountSar, salesQuantity, summarizeSalesGoodsRows} from '../lib/shein_sales_validity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
@@ -419,10 +420,11 @@ function aggregateSales(history, storesCfg) {
     const meta = storeMeta.get(storeKey) || {};
     const groupKey = day.detail?.groupKey || meta.groupKey || meta.group || '';
     const sum = day.summary?.days?.[0] || day.detail?.summary || {};
-    const sar = metric(sum.salesSar);
-    const rmb = metric(sum.salesRmb, sar * 1.8);
-    const orders = metric(sum.orderRefCount || sum.apiCount || sum.detailedOrderCount);
-    const qty = metric(sum.quantityPositiveAmount || sum.quantityAll);
+    const goodsSales = Array.isArray(day.detail?.goodsRows) ? summarizeSalesGoodsRows(day.detail.goodsRows) : null;
+    const sar = metric(goodsSales?.salesSar ?? sum.salesSar);
+    const rmb = metric(sar * 1.8);
+    const orders = metric(goodsSales?.positiveAmountOrderCount ?? sum.orderRefCount ?? sum.apiCount ?? sum.detailedOrderCount);
+    const qty = metric(goodsSales?.quantityPositiveAmount ?? sum.quantityPositiveAmount ?? sum.quantityAll);
     const st = ensureStore(storeKey);
     latestFetchTimes.push(day.detail?.fetchTime || day.summary?.generatedAt || '');
     if (date === end) {
@@ -450,9 +452,10 @@ function aggregateSales(history, storesCfg) {
 
     const goodsRows = day.detail?.goodsRows || [];
     for (const row of goodsRows) {
+      if (!isValidSalesGoodsRow(row)) continue;
       const goodsSn = row.goodsSn || '未识别货号';
-      const lineSar = metric(row.currencyPrice) * metric(row.number || 1);
-      const lineQty = metric(row.number || 1);
+      const lineSar = metric(salesAmountSar(row));
+      const lineQty = metric(salesQuantity(row));
       const p = ensureProduct(goodsSn);
       if (row.goodsTitle && !p.goodsTitle) p.goodsTitle = row.goodsTitle;
       p.stores.add(storeKey);

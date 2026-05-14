@@ -22,6 +22,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import {normalizeGoodsSn} from '../lib/product_sku_normalizer.mjs';
+import {isValidSalesGoodsRow, salesAmountSar, salesQuantity} from '../lib/shein_sales_validity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STATE_PATH = path.join(ROOT, 'state', 'lark_base.json');
@@ -214,8 +215,9 @@ async function loadDailyProductRows(stores, dates) {
         continue;
       }
       for (const g of obj.goodsRows || []) {
-        const qty = Number(g.number || 0);
-        const salesSar = Number(g.currencyPrice || 0);
+        if (!isValidSalesGoodsRow(g)) continue;
+        const qty = salesQuantity(g);
+        const salesSar = salesAmountSar(g);
         const rawGoodsSn = String(g.goodsSn || g.skuSn || g.skuCode || g.skcName || '').trim();
         const goodsSn = normalizeGoodsSn(rawGoodsSn, {goodsTitle: g.goodsTitle});
         if (!goodsSn || qty <= 0 || salesSar <= 0) continue;

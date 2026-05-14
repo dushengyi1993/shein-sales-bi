@@ -1,6 +1,6 @@
 ﻿# 运行环境架构
 
-## 2026-05-11 当前运行环境摘要
+## 2026-05-13 当前运行环境摘要
 
 - SHEIN 抓数、BI 后置刷新和飞书日报继续在 Windows 侧运行；飞书多维表格 / 原生看板写入已临时暂停。
 - 销售抓取主入口已改为 Node WebAPI 直连优先；16 店 `salesTransport=auto`，成功时不启动浏览器，浏览器只保留为 Cookie/session 刷新、登录续期和回退工具。
@@ -27,9 +27,9 @@
 
 - `SHEIN-Sales-15Stores-YesterdayFinal-0010`：每天 `00:10` 跑前一天最终版；Base 暂停期间只写本地销售文件并刷新 BI。自 `2026-05-11` 起还会在同一任务内回核 D-2 稳定销售，修正次日未发货前取消订单导致的初版偏差。
 - `SHEIN-Sales-ETForwarder-0420`：每天 `04:20` 跑 ET 货代仓同步；抓库存、RTV、出库、发货申请单、库存流水和财务，按增量游标 + 重叠校验停止。
-- `SHEIN-Sales-15Stores-Intraday-Daytime`：每天 `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10` 跑当天滚动抓取；Base 暂停期间只写本地销售文件并刷新 BI。
+- `SHEIN-Sales-15Stores-Intraday-Daytime`：每天 `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10` 跑当天滚动抓取；Base 暂停期间只写本地销售文件并刷新 BI；后置 BI 默认跳过 RTV 换单复核，避免长复核挡住滚动销售看板。
 - `SHEIN-Sales-15Stores-LinkManagement-0530`：每天 `05:30` 跑前一完整业务日链接管理和业务域抓取，先写本地 JSON；`07:00` BI 流水线再入仓刷新门户，不再写飞书链接表。
-- `SHEIN-BI-Daily-Pipeline-0700`：每天 `07:00` 入仓 05:30 已抓取的链接/业务域数据，并刷新 PostgreSQL BI 仓库、RTV 换单和仓库去向追踪、体检、门户、UI 冒烟检查和晨报。
+- `SHEIN-BI-Daily-Pipeline-0700`：每天 `07:00` 入仓 05:30 已抓取的链接/业务域数据，并刷新 PostgreSQL BI 仓库、RTV 换单和仓库去向追踪、体检、门户、UI 冒烟检查和晨报；RTV 复核耗时长是正常现象，默认 60 分钟硬保护只用于防止无限挂死。
 - 每日飞书文字日报和可视化日报图不再使用独立固定任务；由 `08:10` 当天抓取成功完成后自动发送。若 `08:10` 因关机/失败未发送，上午后续成功的滚动同步可补发一次，并用 `state/daily-report-sent-YYYYMMDD.flag` 防重复；Base 暂停期间只跳过日报记录表写入，不影响 IM 消息和日报图。
 - `SHEIN-Sales-15Stores-Watchdog-Logon`：Windows 登录时和每天 `09:20` 检查漏跑并补偿；不额外同步当日。
 
@@ -218,11 +218,12 @@
 
 # 2026-05-02 调度与 HL profile 更新
 
-- 销售抓取任务现在承担 BI 后置刷新：00:10 和白天滚动任务完成本地销售抓取后，会继续刷新 PostgreSQL BI 仓库、本地 BI 门户和晨报；飞书 Base / 看板写入在暂停开关存在时跳过。00:10 还会把 D-2 稳定回核日期通过 `run_bi_after_feishu_sync.ps1 -ExtraSalesDates` 额外补入仓。
+- 销售抓取任务现在承担 BI 后置刷新：00:10 和白天滚动任务完成本地销售抓取后，会继续刷新 PostgreSQL BI 仓库、本地 BI 门户和晨报；飞书 Base / 看板写入在暂停开关存在时跳过。00:10 还会把 D-2 稳定回核日期通过 `run_bi_after_feishu_sync.ps1 -ExtraSalesDates` 额外补入仓。白天滚动后置刷新通过 `run_bi_after_feishu_sync.ps1` 传 `-SkipRtvVerify`，只刷新销售切片和门户；完整 RTV 复核留给 `07:00` 每日 BI 或手动命令。
 - 旧独立链接管理计划任务 `SHEIN-Sales-15Stores-LinkManagement-0340` / `SHEIN-Sales-15Stores-LinkManagement-0510` 已经删除；当前链接同步由 `SHEIN-Sales-15Stores-LinkManagement-0530` 每天 05:30 负责，只写本地 / PostgreSQL / BI。上午滚动任务主要负责销售同步后的 BI 后置刷新。
 - HL 旧子账号 profile `profiles/persistent-hl-profile` 已删除；正式 HL profile 为 `profiles/persistent-shein-main-profile`，CDP 端口 `9360`。
 - 飞书定时任务和写表链路都通过 `config/stores.json` 获取 HL profile；当前生产脚本中没有旧 HL profile、旧端口 `9338` 或 `profileKey=hl` 引用。
 - 后置 BI 刷新失败时只记录日志，不让飞书生产任务失败。
+- 判断“滚动 BI 是否更新”时，先看目标日 16 店本地销售文件、`logs/bi-daily-pipeline-*.log` 的入仓/门户生成步骤、`outputs/bi-portal/data.json` / `index.html` 的更新时间；不要把 RTV 复核运行时间长当成 BI 未更新。
 
 
 

@@ -5,6 +5,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import {normalizeGoodsSn} from '../lib/product_sku_normalizer.mjs';
+import {isValidSalesGoodsRow, salesAmountSar, salesQuantity} from '../lib/shein_sales_validity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT_DIR = path.join(ROOT, 'outputs', 'reports');
@@ -111,8 +112,9 @@ async function daySummary(stores, date, {asOfSec = null} = {}) {
     const obj = await readJson(path.join(FETCH_DIR, store.storeKey, `${date}.json`), {});
     if (obj.fetchTime) fetchTimes.push(obj.fetchTime);
     for (const item of obj.goodsRows || []) {
-      const qty = Number(item.number || 0);
-      const sar = Number(item.currencyPrice || 0);
+      if (!isValidSalesGoodsRow(item)) continue;
+      const qty = salesQuantity(item);
+      const sar = salesAmountSar(item);
       if (qty <= 0 || sar <= 0) continue;
       if (asOfSec !== null && !includeBefore(item, asOfSec)) continue;
       const row = storeMap.get(store.storeKey);

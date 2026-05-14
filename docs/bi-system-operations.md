@@ -1,11 +1,12 @@
 # SHEIN BI 系统运行说明
 
-> 当前权威状态：2026-05-11。本文只保留接手和日常运维需要的信息；历史排障过程见 `.codex/plans/2026-05-01T14-11-55-shein-link-management-system.md` 和 `.codex/plans/2026-05-07T13-16-17-et-warehouse-bi-integration.md`。
+> 当前权威状态：2026-05-13。本文只保留接手和日常运维需要的信息；历史排障过程见 `.codex/plans/2026-05-01T14-11-55-shein-link-management-system.md` 和 `.codex/plans/2026-05-07T13-16-17-et-warehouse-bi-integration.md`。
 
 ## 1. 当前系统定位
 
 - 飞书多维表格 / 原生看板写入已临时暂停；飞书日报继续正常发送。
 - BI 系统作为旁路双线运行，负责 PostgreSQL 数据仓库、Metabase 和本地 BI 经营门户。
+- 当前不能直接停用或删除 Metabase：PostgreSQL 是数据底座，Metabase 是正式深度分析/自由钻取层，BI Portal 是日常经营入口；只有等自研门户完全覆盖深钻能力后，才能重新评估是否降级 Metabase。
 - 不从飞书反抓数据做 BI 源头；BI 源头来自 SHEIN 后台抓取后的本地 JSON / PostgreSQL。
 - 销售本地 JSON 已改为 WebAPI 直连优先生成；Chrome profile 只作为 Cookie/session 刷新、登录续期和回退来源。
 - BI 后置刷新失败不应反向影响 SHEIN 抓数和飞书日报。
@@ -16,19 +17,21 @@
 - 本机 BI 门户：[http://127.0.0.1:8787/](http://127.0.0.1:8787/)
 - 局域网协作访问：优先使用电脑名 [http://DUSHENGYI-PC2:8787/](http://DUSHENGYI-PC2:8787/)；若同事电脑无法解析电脑名，则用当前 WLAN IPv4 访问 `http://<当前IP>:8787/`。电脑重启或路由器重新分配 DHCP 后 IP 可能变化，不要继续使用旧 IP。
 - 本地门户文件：`outputs/bi-portal/index.html`
-- V1 是唯一正式门户；V2 平行版已废弃，`outputs/bi-portal/v2/` 和 `scripts/generate_bi_portal_v2.mjs` 不再存在，日常生成脚本也不再注入 V2 跳转。
+- V1 是当前唯一正式生产门户；V2.1 是平行预览版，入口 `http://127.0.0.1:8787/v2/`，脚本 `scripts/generate_bi_portal_v2.mjs`，输出 `outputs/bi-portal/v2/index.html`。用户确认前不得替换 V1、不得改生产调度，日常运维仍以 V1 为准。
 - 启动本机网页服务：双击 `打开SHEIN-BI网页服务.cmd`
 - 启动局域网协作服务：双击 `打开SHEIN-BI局域网协作服务.cmd`
 - 配置局域网防火墙：以管理员运行 `配置SHEIN-BI局域网防火墙.cmd`；规则名为 `SHEIN BI Portal LAN 8787 ReadOnly`，应允许 `192.168.2.0/24` 访问本机 `8787`，`LocalAddress` 不应绑死到某个旧 IP。
+- 若局域网打不开但本机能打开，管理员执行 `scripts/fix_bi_lan_firewall.ps1` 重建规则；脚本会自动取当前 WLAN IPv4，只放行 `192.168.2.0/24` 到本机 `8787`。
 - Markdown 经营晨报：`outputs/bi-briefings/latest.md`
 - Metabase：`http://172.22.172.186:3000`
 - Metabase 管理员凭据只保存在 `infra/metabase/.admin.local.json`，不要写入文档或聊天。
 
 ## 3. 当前数据口径
 
-- 当前 BI 截面日期：销售/订单 `2026-05-08`，售后/库存/财务业务日 `2026-05-07`，链接表现日 `2026-05-07`。
+- 当前 BI 截面日期以门户系统状态页和 `outputs/bi-portal/data.json` 为准，不在本文写死；运维文档只记录口径和入口。
 - 当前 BI 门户侧栏更新时间口径：销售取销售源数据抓取时间；售后/库存/财务取业务域源文件最大 `fetchTime`；链接表现取链接源文件最大 `fetchTime`；ET 货代仓取 ET 源文件/入仓批次时间。BI 入仓或页面重跑时间只作内部排障，不作为侧栏主要更新时间。
 - 销售抓取入口：16 店 `salesTransport=auto`，先 WebAPI 直连，失败才回退浏览器；本地 session 在 `state/shein_webapi_sessions/*.local.json`，不进 GitHub。
+- 销售有效性口径：所有抓取、日报、产品统计、BI 入仓和飞书表格脚本必须共用 `lib/shein_sales_validity.mjs`。源头总销售只剔除真正取消、揽收前取消等未形成销售的商品行，例如 `pageStatus=CANCEL`、`goodsPerformanceStatus=6` 或订单/履约状态文本含取消；`用户已退款`、退货、派件失败等仍保留在总销售里，再由净销售额、售后/利润层反转。历史 summary 重算入口为 `scripts/repair_shein_sales_summaries.mjs`。
 - 店铺范围：`CX DL DX FY HL JY LQ MZ NM QH QY TS TZ XL YJ ZL`
 - 分组：DSY = `DL DX FY LQ NM HL JY ZL TS MZ`；LGM = `CX YJ XL QY QH TZ`。
 - 汇率：`1 SAR = 1.8 RMB`。
@@ -43,8 +46,8 @@
 | 00:10 | `SHEIN-Sales-15Stores-YesterdayFinal-0010` | 前一天最终版销售抓取；Base 暂停期间只写本地文件并后置刷新 BI。自 `2026-05-11` 起，正常抓 D-1 后还会回核 D-2（`third-day-stable-recheck`），修正次日未发货前取消单带来的初版偏差，并通过 `run_bi_after_feishu_sync.ps1 -ExtraSalesDates` 把稳定日切片补入 BI。 |
 | 04:20 | `SHEIN-Sales-ETForwarder-0420` | ET 货代仓每日同步；抓库存快照、RTV、出库、发货申请单、箱明细、库存流水、财务等，按增量游标 + 重叠校验停止，不固定长窗口重抓。 |
 | 05:30 | `SHEIN-Sales-15Stores-LinkManagement-0530` | 前一完整业务日链接表现 + 业务域抓取（退货/售后、库存、评价、履约、财务等），只写本地文件/后续入仓，不再写飞书链接表。旧 `0340` / `0510` 任务不要恢复。 |
-| 07:00 | `SHEIN-BI-Daily-Pipeline-0700` | 刷新 PostgreSQL BI 仓库、自动复核 high/medium/low RTV 换单候选、BI 数据体检、BI 门户 UI 冒烟检查、本地门户和 Markdown 晨报。`2026-05-09 07:00:01` 已完成正式自动运行验证。 |
-| 08:10-22:10 | `SHEIN-Sales-15Stores-Intraday-Daytime` | 当天滚动销售抓取；Base 暂停期间只写本地文件并后置刷新 BI；早上成功后照常发送飞书日报。 |
+| 07:00 | `SHEIN-BI-Daily-Pipeline-0700` | 刷新 PostgreSQL BI 仓库、自动复核 high/medium/low RTV 换单候选、BI 数据体检、BI 门户 UI 冒烟检查、本地门户和 Markdown 晨报。RTV 复核耗时长是正常现象，默认允许 60 分钟硬保护。`2026-05-09 07:00:01` 已完成正式自动运行验证。 |
+| 08:10-22:10 | `SHEIN-Sales-15Stores-Intraday-Daytime` | 当天滚动销售抓取；Base 暂停期间只写本地文件并后置刷新 BI；后置 BI 默认传 `-SkipRtvVerify`，只刷新销售切片和门户，不等待 RTV 复核；早上成功后照常发送飞书日报。 |
 | 09:20 / 登录时 | Watchdog | 检查漏跑并补偿；不额外同步当日。 |
 
 说明：
@@ -69,6 +72,7 @@
 - 当前飞书 Base / 看板写入暂停，但飞书日报仍是推送渠道。
 - 00:10 最终版本地抓取成功后，后置刷新前一日 BI；同时回核 D-2 稳定销售，若与初版有差异，会覆盖本地销售文件并补刷该稳定日 BI 切片。
 - 白天滚动本地抓取成功后，后置刷新当日 BI。
+- 白天滚动后置 BI 的验收重点是销售文件入仓和 `outputs/bi-portal/*` 更新时间；RTV 换单复核耗时不应作为“BI 没更新”的判断依据。
 - 如果某个店失败，但目标日期 16 店本地销售文件已经齐，BI 仍应刷新，并通过飞书消息提醒失败店铺。
 - 业务域单店失败不应阻断销售入仓和门户刷新，应在 BI 体检/提醒里标注。
 - 暂停期间 `send_daily_lark_report.mjs` 继续发送 IM 文字日报和日报图，但不再写入 Base 里的 `飞书日报记录` 表。
@@ -95,7 +99,7 @@
 - `JT` / `JTE` 这类退货物流通常不换面单；复核脚本会先按 ET RTV 物流号在 SHEIN 售后退货物流号里做全店精确直连匹配，即使 ET 货号编码和 SHEIN 标准货号不一致，也以“同一退货运单号”为强证据入库，并在利润二售测算里按 SHEIN 订单货号归属。
 - iMile / EMile 数字单号仍按“退货物流详情中的换单轨迹”识别，不因单号像数字就直接匹配；找不到明确换单轨迹的仍留在待复核池。
 - ET SKU 上的 `DL-` 等前缀只能作为仓库编码线索，不能硬当销售店铺；RTV 换单复核必须按“标准货号 + 时间窗口”全店搜索售后单，店铺前缀只用于排序，不用于过滤。
-- 每日 `07:00` 复核默认覆盖 high/medium/low 候选并包含无候选售后单的记录，`limit=120`、`case-limit=60`，并受 `max-runtime-ms=3600000` 保护；这样新 JT/JTE 直连、iMile/EMile 换单候选都能滚动复核。人工深挖时可提高 `--case-limit`，但应分批运行，避免拖慢整条 BI 流水线。
+- 每日 `07:00` 复核默认覆盖 high/medium/low 候选并包含无候选售后单的记录，`limit=120`、`case-limit=60`，并受 `max-runtime-ms=3600000`（60 分钟）硬保护；RTV 复核本来就比较耗时，耗时长不是异常。人工深挖时可提高 `--case-limit` 或分批运行；白天滚动销售 BI 刷新不等待该步骤。
 - `mart.rtv_recovery_impact` 和 `mart.rtv_manual_review_candidates` 会吸收 `ops.rtv_tracking_verification.match_status='matched'` 的结果；确认匹配后退出 BI 的“RTV 换单待复核”表。
 - RTV 收到后去了哪里，使用 `mart.et_rtv_destination_allocation` 从 ET 库存流水推断：直接入 `ETRUH09散件仓`、`平台RTV` 入 `ETRUH03_RTV` 后续调拨到 09、仍在 03、调拨到 `ETRUH04Damaged`、转 `ETRUH06报废` 或其它/未知，均按同货号库存池 FIFO 分配。该口径是库存流水级证据，不是序列号级扫描；但可用于更严谨的 `rtv_09_recoverable_cost_sar` / “09 可二售”测算。
 - `mart.shein_return_rtv_trace` 是面向页面和复核的明细视图：每条 SHEIN 退货单给出 `trace_status`（未匹配 ET、已收可售 09、仍在 03、破损 04、报废 06、未知/未解析）和 ET RTV 单号、物流号、仓库去向。BI `订单 / 售后` 页面展示“退货收件 / 仓库去向追踪”，用于回答“每个退货到底收到没有，收到后去了哪里”。
@@ -222,9 +226,11 @@
 
 - 检查 BI 门户：打开 [http://127.0.0.1:8787/#tab=system](http://127.0.0.1:8787/#tab=system)。
 - 检查局域网协作服务：打开 [http://DUSHENGYI-PC2:8787/#tab=system](http://DUSHENGYI-PC2:8787/#tab=system)，或按当前 WLAN IPv4 检查 `http://<当前IP>:8787/api/health` 返回 `lanMode=true`、`authRequired=false`、`writableActionState=true`。
+- 检查 BI 局域网防火墙：本机 `http://<当前IP>:8787/api/health` 返回 200 但其他电脑打不开时，用管理员运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fix_bi_lan_firewall.ps1`，确认 `ok=true`。
 - 修改 BI 门户 UI 时，默认先后台验证：`node --check scripts/generate_bi_portal.mjs`、`node scripts/generate_bi_portal.mjs`、静态检查 `outputs/bi-portal/index.html` / `data.json`。除非用户要求或必须排查浏览器交互问题，不主动打开前端。
 - 检查 HL OpenAPI 销售试点：`node scripts/fetch_shein_openapi_sales.mjs HL --start YYYY-MM-DD --end YYYY-MM-DD` 后运行 `node scripts/load_shein_openapi_sales_warehouse.mjs --store HL --start YYYY-MM-DD --end YYYY-MM-DD`，再在系统状态页查看 “SHEIN OpenAPI 试点对账”。
 - 检查 WebAPI 销售直连：`node scripts/fetch_shein_sales.mjs HL --date YYYY-MM-DD --transport webapi --json`，再和 `outputs/shein_fetch/HL/YYYY-MM-DD.json` 或数据库切片对账。
+- 检查取消单口径：先 dry-run `node scripts/repair_shein_sales_summaries.mjs --start YYYY-MM-DD --end YYYY-MM-DD`；确认后再加 `--write`。写回后运行 `node scripts/audit_shein_sales_logic.mjs --month YYYY-MM --date YYYY-MM-DD --offline`。
 - 检查成本文件解析但不入库：`node .\scripts\import_product_costs.mjs --dry-run`。
 - 重新创建成本模板：`node .\scripts\create_cost_template.mjs`。
 - 检查 BI 自动任务：`检查SHEIN-BI自动任务.cmd`。

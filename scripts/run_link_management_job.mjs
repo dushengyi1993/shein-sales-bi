@@ -193,8 +193,14 @@ async function main() {
       console.log('\n=== skip deprecated Lark link-management sync; BI/local data only ===');
     }
     if (args.generateWebDashboard) {
-      console.log(`\n=== generate link web dashboard (${okStores}) ===`);
-      webDashboard = await runNode('generate_link_ops_web_dashboard.mjs', ['--date', args.date, '--stores', okStores], 120_000);
+      const dashboardArgs = ['--date', args.date];
+      if (args.stores?.length) {
+        dashboardArgs.push('--group', 'ALL');
+      } else {
+        dashboardArgs.push('--group', args.group || 'ALL');
+      }
+      console.log(`\n=== generate link web dashboard (${dashboardArgs.join(' ')}) ===`);
+      webDashboard = await runNode('generate_link_ops_web_dashboard.mjs', dashboardArgs, 120_000);
     }
   } else {
     console.error(`Skip Lark sync because ${failed.length}/${stores.length} store(s) failed.`);

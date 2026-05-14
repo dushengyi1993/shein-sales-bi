@@ -20,12 +20,14 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 店铺：DSY=`DL DX FY LQ NM HL JY ZL TS MZ`；LGM=`CX YJ XL QY QH TZ`
 - HL OpenAPI 销售试点已建立并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` -> `fact.openapi_*` -> `mart.openapi_sales_reconciliation`；正式切换前继续累计多日 `matched`。
 - 16 店销售生产抓取已改为 WebAPI 直连优先：`config/stores.json.salesTransport=auto`，session 文件在 `state/shein_webapi_sessions/*.local.json`，直连成功不启动浏览器；浏览器只作刷新 session、登录续期和回退。
-- ET 货代仓已接入：`04:20` 抓 ET 库存/RTV/出库/发货申请单/财务，`07:00` BI 流水线入仓并做 RTV 换单自动复核和仓库去向追踪。
+- ET 货代仓已接入：`04:20` 抓 ET 库存/RTV/出库/发货申请单/财务，`07:00` BI 流水线入仓并做 RTV 换单自动复核和仓库去向追踪；RTV 复核耗时长是正常现象。
 - LGM profile 映射：`CX=profile cx/GS9489101`，`YJ=profile qy/GS7451160`，`XL=profile yj/GS8146729`，`QY=profile xl/GS9307061`，`QH=profile qh/GS8715910`，`TZ=profile tz/GS5636781`。`YJ/XL/QY` 的 profileKey 名称不等于店铺代码是历史遗留但当前正确，不要按名称直觉互换；错位核验用稳定日期重抓对账数据库。
 
 ## 业务口径
 - 统计日：北京时间自然日。
-- 销售额：按 SHEIN 订单创建时间，汇总商品明细正金额行。
+- 销售额：按 SHEIN 订单创建时间，汇总商品明细中的“有效销售行”。
+- 有效销售行统一使用 `lib/shein_sales_validity.mjs` 判断；源头总销售只剔除真正取消、揽收前取消等“未形成销售”的行，例如 `pageStatus=CANCEL`、`goodsPerformanceStatus=6` 或订单/履约状态文本含取消。`用户已退款`、退货、派件失败等不能在源头抹掉，应保留为总销售，再由净销售额、售后/利润层反转。`currency_price` / `currencyPrice` 保留后台原始金额用于追溯。
+- `fetch_shein_sales.mjs` 会给商品行补 `isValidSale` 和 `salesExclusionReason`；历史文件或修复窗口重算用 `scripts/repair_shein_sales_summaries.mjs`。`2026-05-13` 已写回 `2026-05-11` 至 `2026-05-13`，其中 LQ `2026-05-12` 无货取消 `SK-5118电磁炉` 从业绩中剔除；修正后的全历史 dry-run 只影响 `68 SAR`，此前 `43,472.16 SAR` 是误把退款/退货/派件失败当成源头取消的错误预览，已作废。
 - 汇率：`1 SAR = 1.8 RMB`；BI 首页和成本/利润页使用真实利润口径，不再用 `25%` 预测利润冒充真实利润。
 - BI 净成交额：退货、仅退款、派送失败等反转订单不计入成交额、订单数和销量；仍扣商品成本，只有真实退货退款额外扣 `13.88 SAR`。
 - 成本/利润页高利润 / 低利润货号按 `20%` 利润率切分：`>= 20%` 可加码，`< 20%` 需要处理。
@@ -38,9 +40,9 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - `00:10`：前一天最终版；若存在 `state/feishu-base-sync-paused.flag`，只抓本地数据并刷新 BI，不写飞书 Base / 看板。自 `2026-05-11` 起还会回核 D-2 稳定销售切片（`third-day-stable-recheck`），并通过 `run_bi_after_feishu_sync.ps1 -ExtraSalesDates` 补刷 BI。
 - `04:20`：ET 货代仓每日同步，任务名 `SHEIN-Sales-ETForwarder-0420`；遇到 ET 登录态过期时，`scripts/fetch_et_forwarder.mjs` 会调用 `scripts/et_login_helper.py` 用已保存密码 + 本地 OCR 自动登录。
 - `05:30`：链接管理 16 店每日同步，任务名 `SHEIN-Sales-15Stores-LinkManagement-0530`，只写本地 / PostgreSQL / BI，不再写飞书链接表。
-- `07:00`：BI 每日流水线，任务名 `SHEIN-BI-Daily-Pipeline-0700`；包含 ET/SHEIN 入仓、RTV 换单自动复核、BI 体检、本地门户和晨报刷新。
+- `07:00`：BI 每日流水线，任务名 `SHEIN-BI-Daily-Pipeline-0700`；包含 ET/SHEIN 入仓、RTV 换单自动复核、BI 体检、本地门户和晨报刷新；RTV 复核允许较长时间运行。
 - `2026-05-09 05:30` 链接/业务域任务和 `2026-05-09 07:00` BI 每日流水线已自动跑通；`2026-05-09 04:20` ET 任务的同源探测问题已修复，`11:31:49` 手动触发计划任务入口复验成功。
-- `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10`：当天滚动抓取；Base 暂停期间只抓本地数据并刷新 BI。
+- `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10`：当天滚动抓取；Base 暂停期间只抓本地数据并刷新 BI；后置 BI 默认 `-SkipRtvVerify`，不要让 RTV 复核耗时挡住滚动销售看板。
 - 日报：早上 08:10 同步成功后自动发送；上午后续成功同步可补发一次，用 `state/daily-report-sent-YYYYMMDD.flag` 防重复。Base 暂停期间照常发送 IM 文字和图片日报，只跳过写 `飞书日报记录` 表。
 - watchdog：`09:20` 和 Windows 登录时，只做漏跑补偿。
 - 计划任务必须通过 `wscript.exe` + `scripts/run_scheduled_hidden.vbs` 隐藏运行，最长 90 分钟。
@@ -53,7 +55,8 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 新建飞书 Base 表后提醒用户手动扩容到 `20000` 行。
 - 当前飞书 Base / 看板写入受 `state/feishu-base-sync-paused.flag` 控制；存在该文件时不要手动补跑飞书表格、月表、宽表或 Dashboard 刷新脚本，除非用户明确要求恢复。
 - BI 门户侧栏更新时间必须显示源文件抓取时间：销售取销售源抓取时间；链接取 `outputs/shein_links/<店铺>/<链接日>.json.fetchTime` 最大值；售后/库存/财务取 `outputs/shein_business_domains/<店铺>/<业务日>.json.fetchTime` 最大值。不要用 BI 重跑入仓 `updated_at` 冒充后台抓取时间。
-- RTV 换单自动复核结果写入 `ops.rtv_tracking_verification`；`mart.rtv_recovery_impact` 和 `mart.rtv_manual_review_candidates` 会吸收 `match_status='matched'` 的记录。`mart.et_rtv_destination_allocation` 和 `mart.shein_return_rtv_trace` 用 ET 库存流水追踪 09/03/04/06/未知去向。主利润仍保守，RTV 已收和 09 去向只进入“可二次销售测算”。
+- `fact.order_item.currency_price` 保留 SHEIN 原始金额；`fact.order_item.sales_sar` / `quantity` 是源头总销售口径下的有效销售额/销量。排查取消单时先看源 JSON 的 `isValidSale` / `salesExclusionReason`，再看入仓后的 `sales_sar=0` 是否一致；退款/退货/派件失败不应在这里变 0。
+- RTV 换单自动复核结果写入 `ops.rtv_tracking_verification`；`mart.rtv_recovery_impact` 和 `mart.rtv_manual_review_candidates` 会吸收 `match_status='matched'` 的记录。`mart.et_rtv_destination_allocation` 和 `mart.shein_return_rtv_trace` 用 ET 库存流水追踪 09/03/04/06/未知去向。主利润仍保守，RTV 已收和 09 去向只进入“可二次销售测算”。RTV 复核是慢任务，排查滚动 BI 不更新时优先看销售入仓和门户更新时间，不把复核耗时当失败。
 
 ## 货号规则
 - 标准货号：`config/product_catalog.json`
@@ -71,9 +74,10 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 16 店当天同步：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_intraday_dsy.ps1`
 - BI 每日流水线：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_bi_daily_pipeline.ps1`
 - 生成 BI 门户：`node scripts/generate_bi_portal.mjs`
+- 生成 V2.1 独立设计预览：`node scripts/generate_bi_portal_v2.mjs`；V2.1 只读复用 `outputs/bi-portal/data.json`，用户确认前不得替换 V1 或改生产调度。自 `2026-05-14` 起，V2 当前验收范围先限定首页：必须复刻 V1 首页功能/操作逻辑；其它子页尚未完成全量复刻。
 - ET 每日同步：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_et_forwarder_daily.ps1`
 - RTV 换单复核：`node scripts/verify_shein_rtv_tracking.mjs --priority high,medium,low --include-no-cases --limit 120 --case-limit 60 --max-runtime-ms 3600000`
-- 营销活动报名补填：规则见 `docs/marketing-campaign-signup-pricing-rules.md`；当前执行入口为 `node scripts/marketing/dsy_marketing_deadline_fill.mjs --hours 48`，只允许填价和复核，不得点击最终 `提交报名`。
+- 营销活动报名补填：规则见 `docs/marketing-campaign-signup-pricing-rules.md`；当前执行入口为 `node scripts/marketing/dsy_marketing_deadline_fill.mjs --stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --hours 48 --price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD.json --min-discount-fallback SK-13034`。选择商品页必须先切到 `500 条/页` 再全选并核对 `总计 N 个 = 已选商品 N 个`；只允许填价和复核，不得点击最终 `提交报名`。
 - HL OpenAPI 销售试点：`node scripts/fetch_shein_openapi_sales.mjs HL --start YYYY-MM-DD --end YYYY-MM-DD` 后运行 `node scripts/load_shein_openapi_sales_warehouse.mjs --store HL --start YYYY-MM-DD --end YYYY-MM-DD`，只写 API 并行事实表和 `mart.openapi_sales_reconciliation`。
 - 月表：`node scripts/generate_monthly_sales_table.mjs --month YYYY-MM --include-lgm`
 - 年度/宽表：`node scripts/generate_compact_display_tables.mjs --group ALL --current-month YYYY-MM --recent-months 2`
@@ -81,10 +85,12 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 上月看板：`node scripts/setup_lark_dashboard_previous_month.mjs --month YYYY-MM`
 - 日报：`node scripts/send_daily_lark_report.mjs --send --visual`
 - 今日详尽日报图：`node scripts/generate_today_detailed_report_image.mjs --date YYYY-MM-DD`
+- 重算历史销售 summary：`node scripts/repair_shein_sales_summaries.mjs --start YYYY-MM-DD --end YYYY-MM-DD --write`；无 `--write` 时只 dry-run。全历史写回前先看 `totalDeltaSar`，避免把净销售反转误当源头总销售修复。
 - 货号扫描：`node scripts/report_product_sku_candidates.mjs --group ALL --start YYYY-MM-DD --end YYYY-MM-DD`
 - 逻辑体检：`node scripts/audit_shein_sales_logic.mjs --month YYYY-MM --date YYYY-MM-DD`
 - 安装计划任务：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_windows_scheduled_tasks.ps1 -IncludeWatchdog`
 - 安全关店铺 Chrome：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/close_store_browsers.ps1 -Group DSY`
+- 修复 BI 局域网防火墙：管理员执行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fix_bi_lan_firewall.ps1`，应把规则 `SHEIN BI Portal LAN 8787 ReadOnly` 改为 `LocalAddress=Any`、`RemoteAddress=192.168.2.0/24`、端口 `8787`。
 
 ## 看板规则
 - 用户会手动调整正式看板布局和大小；默认不调用 `+dashboard-arrange`，不重建无关组件，不改布局和尺寸。只有用户明确允许时才传 `--arrange`。

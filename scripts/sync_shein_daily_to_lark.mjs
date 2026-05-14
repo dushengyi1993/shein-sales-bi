@@ -10,6 +10,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import {isValidSalesGoodsRow, summarizeSalesGoodsRows} from '../lib/shein_sales_validity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STATE_PATH = path.join(ROOT, 'state', 'lark_base.json');
@@ -105,7 +106,7 @@ function getTableId(state, name) {
 }
 
 function uniqueOrderCountFromGoods(goodsRows) {
-  return new Set((goodsRows || []).filter(g => Number(g.currencyPrice || 0) > 0).map(g => g.orderNo || g.orderId).filter(Boolean)).size;
+  return new Set((goodsRows || []).filter(isValidSalesGoodsRow).map(g => g.orderNo || g.orderId).filter(Boolean)).size;
 }
 
 function round2(n) {
@@ -242,9 +243,10 @@ async function createLog(baseToken, tableId, record) {
 function buildRecords(dailyObj, args) {
   const date = dailyObj.start;
   const uniqueKey = `${date}__${dailyObj.storeKey}`;
-  const salesSar = round2(dailyObj.summary?.salesSar || 0);
-  const salesRmb = round2(dailyObj.summary?.salesRmb ?? salesSar * FX_SAR_TO_RMB);
-  const positiveOrders = dailyObj.summary?.positiveAmountOrderCount ?? uniqueOrderCountFromGoods(dailyObj.goodsRows);
+  const goodsSales = Array.isArray(dailyObj.goodsRows) ? summarizeSalesGoodsRows(dailyObj.goodsRows) : null;
+  const salesSar = round2(goodsSales?.salesSar ?? dailyObj.summary?.salesSar ?? 0);
+  const salesRmb = round2(salesSar * FX_SAR_TO_RMB);
+  const positiveOrders = goodsSales?.positiveAmountOrderCount ?? dailyObj.summary?.positiveAmountOrderCount ?? uniqueOrderCountFromGoods(dailyObj.goodsRows);
   const now = localDateTimeString();
   const evidence = `orders=${dailyObj.summary?.detailedOrderCount ?? 0}; goods=${dailyObj.summary?.goodsLineCount ?? 0}; source=${path.relative(ROOT, args.file)}`;
   const logTaskTypeMap = {

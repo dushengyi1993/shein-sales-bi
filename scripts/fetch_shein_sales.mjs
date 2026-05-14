@@ -9,6 +9,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {isValidSalesGoodsRow, salesExclusionReason, summarizeSalesGoodsRows} from '../lib/shein_sales_validity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const storesConfig = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
@@ -418,7 +419,7 @@ function extractRows(orders) {
       const orderCustomerTime = orderTime?.time || orderTime?.g_zcs_time || null;
       const orderCreateTime = splitTime?.time || splitTime?.g_zcs_time || order.g_zcs_allocateTime || order.allocateTime;
       for (const goods of group.goodsList || []) {
-        goodsRows.push({
+        const row = {
           ...base,
           pageStatus: group.statusTimeline?.pageStatus,
           pageStatusDesc: group.statusTimeline?.pageStatusDesc,
@@ -441,7 +442,10 @@ function extractRows(orders) {
           goodsExchangeTag: goods.goodsExchangeTag,
           performanceTag: goods.performanceTag,
           storageTag: goods.storageTag,
-        });
+        };
+        row.isValidSale = isValidSalesGoodsRow(row);
+        row.salesExclusionReason = salesExclusionReason(row);
+        goodsRows.push(row);
       }
     }
   }
@@ -480,10 +484,11 @@ async function fetchRange(fetchJson, store, start, end, perPage, timezone) {
   }
   const orders = itemResponses.flatMap(r => Array.isArray(r.info) ? r.info : []);
   const {orderRows, goodsRows} = extractRows(orders);
-  const salesSar = round2(goodsRows.reduce((s, g) => s + g.currencyPrice, 0));
-  const positiveAmountOrderCount = new Set(goodsRows.filter(g => g.currencyPrice > 0).map(g => g.orderNo || g.orderId)).size;
-  const quantityAll = goodsRows.reduce((s, g) => s + g.number, 0);
-  const quantityPositiveAmount = goodsRows.filter(g => g.currencyPrice > 0).reduce((s, g) => s + g.number, 0);
+  const goodsSales = summarizeSalesGoodsRows(goodsRows);
+  const salesSar = round2(goodsSales.salesSar);
+  const positiveAmountOrderCount = goodsSales.positiveAmountOrderCount;
+  const quantityAll = goodsSales.quantityAll;
+  const quantityPositiveAmount = goodsSales.quantityPositiveAmount;
   return {
     storeKey: store.storeKey,
     shopName: store.shopName,
@@ -511,6 +516,10 @@ async function fetchRange(fetchJson, store, start, end, perPage, timezone) {
       quantityPositiveAmount,
       salesSar,
       salesRmb: round2(salesSar * Number(storesConfig.fx?.sarToRmb || 1.8)),
+      salesGoodsLineCount: goodsSales.salesGoodsLineCount,
+      excludedGoodsLineCount: goodsSales.excludedGoodsLineCount,
+      excludedSalesSar: round2(goodsSales.excludedSalesSar),
+      excludedQuantity: goodsSales.excludedQuantity,
     },
     orderRefs,
     orders,

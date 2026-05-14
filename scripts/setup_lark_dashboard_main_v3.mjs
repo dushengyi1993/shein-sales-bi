@@ -14,6 +14,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import {normalizeGoodsSn} from '../lib/product_sku_normalizer.mjs';
+import {isValidSalesGoodsRow, salesAmountSar, salesQuantity, summarizeSalesGoodsRows} from '../lib/shein_sales_validity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STATE_PATH = path.join(ROOT, 'state', 'lark_base.json');
@@ -399,14 +400,16 @@ async function readFetch(storeKey, date) {
 async function storeDay(store, date) {
   const obj = await readFetch(store.storeKey, date);
   const s = obj?.summary || {};
+  const goodsSales = Array.isArray(obj?.goodsRows) ? summarizeSalesGoodsRows(obj.goodsRows) : null;
+  const salesSar = goodsSales ? round2(goodsSales.salesSar) : round2(s.salesSar || 0);
   return {
     storeKey: store.storeKey,
     group: storeGroup(store),
     shopName: store.shopName || store.storeKey,
-    salesSar: round2(s.salesSar || 0),
-    salesRmb: round2((s.salesSar || 0) * FX),
-    orders: Number(s.positiveAmountOrderCount || 0),
-    qty: Number(s.quantityPositiveAmount || 0),
+    salesSar,
+    salesRmb: round2(salesSar * FX),
+    orders: Number(goodsSales?.positiveAmountOrderCount ?? s.positiveAmountOrderCount ?? 0),
+    qty: Number(goodsSales?.quantityPositiveAmount ?? s.quantityPositiveAmount ?? 0),
     fetchTime: obj?.fetchTime || null,
   };
 }
@@ -433,7 +436,8 @@ async function activeProductCountForDay(stores, date) {
   for (const store of stores.filter(s => s.productStatsEnabled !== false)) {
     const obj = await readFetch(store.storeKey, date);
     for (const g of obj?.goodsRows || []) {
-      const qty = Number(g.number || 0);
+      if (!isValidSalesGoodsRow(g)) continue;
+      const qty = salesQuantity(g);
       if (qty <= 0) continue;
       const rawGoodsSn = String(g.goodsSn || g.skuSn || g.skuCode || g.skcName || '').trim();
       const goodsSn = normalizeGoodsSn(rawGoodsSn, {goodsTitle: g.goodsTitle});
@@ -627,10 +631,11 @@ async function buildProductRows(storesConfig, month, limit, updatedAt) {
     for (const date of monthDates(month)) {
       const obj = await readFetch(store.storeKey, date);
       for (const g of obj?.goodsRows || []) {
+        if (!isValidSalesGoodsRow(g)) continue;
         const rawGoodsSn = String(g.goodsSn || g.skuSn || g.skuCode || g.skcName || '').trim();
         const goodsSn = normalizeGoodsSn(rawGoodsSn, {goodsTitle: g.goodsTitle});
-        const qty = Number(g.number || 0);
-        const salesSar = Number(g.currencyPrice || 0);
+        const qty = salesQuantity(g);
+        const salesSar = salesAmountSar(g);
         if (!goodsSn || qty <= 0 || salesSar <= 0) continue;
         if (!byProduct.has(goodsSn)) byProduct.set(goodsSn, {goodsSn, title: '', qty: 0, salesSar: 0, groups: new Set(), stores: new Set()});
         const row = byProduct.get(goodsSn);

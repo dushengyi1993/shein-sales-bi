@@ -1,5 +1,14 @@
 # MEMORY
 
+## 2026-05-13 产品套图提示词长期口径
+- 产品套图提示词当前优先服务 SHEIN 沙特市场，兼顾欧洲市场；Amazon / noon / Temu 暂时只作为视觉经验参考，除非用户明确要求对应平台版本，否则不强制套用它们的主图规则。
+- 英文和阿文同等重要；阿文翻译和校对由 Codex / reviewer / 子代理负责，不把阿文校对推给用户。
+- 提示词要尽量靠近 Gemini 优秀样例的细致程度：重点图按 `Visual Subject / Model & Styling / Scene & Atmosphere / Composition & Text` 写清人物、服装材质、动作、场景、光线、构图和英阿双语文案。
+- 个护、封面和场景图允许更强的明亮性感流量风：深领口、露肩、锁骨、上背线条、贴身真丝/罗纹面料、直视镜头、微张嘴唇、放松但勾人的姿态；底线是不色情、不露点、不透视裸露、不明显性行为姿势、不廉价低俗，且产品必须始终是主角。
+- 交付给用户复制的提示词文档，前半部分必须是完整可复制的英文提示词本身，不要夹中文说明；中文说明或全文翻译放在英文版后面。
+- 用户只要求改提示词时，不要自动更新桌面压缩包；只有用户明确说“重新打包/更新压缩包”才更新 handoff zip。
+
+
 ## 评价全量与平台翻译（当前权威）
 - 评价/口碑底库必须按每个店开店以来全量补抓；日常评价同步默认只抓最近 `14` 天作为增量防漏窗口，不要再用 90 天这种过长窗口浪费后台资源。
 - 评论翻译使用 SHEIN 后台评论列表接口的 `translate: 1` 平台翻译，写入 `fact.product_comment.goods_comment_content_zh`，`translation_provider='shein-platform'`；不再使用本地启发式翻译、浏览器插件或第三方插件作为正式结果。
@@ -39,6 +48,8 @@
 - HL 已切换为主账号：`profileKey=shein-main`，CDP 端口 `9360`，正式 profile 为 `profiles/persistent-shein-main-profile`；旧 `profiles/persistent-hl-profile` 已删除。
 - LGM 组当前本身就是主账号，不需要替换。
 - 统计日按北京时间自然日；订单销售以 SHEIN 订单创建时间为准。除非用户明确确认，不给单店保留猜测性时区偏移。
+- 销售有效性必须统一走 `lib/shein_sales_validity.mjs`：源头总销售只剔除真正取消、揽收前取消等“未形成销售”的商品行，例如 `pageStatus=CANCEL`、`goodsPerformanceStatus=6`、订单/履约状态文本含取消；用户已退款、退货、派件失败等不能在源头抹掉，应保留为总销售，再由净销售额、售后/利润层反转。后台原始金额仍保留在明细中用于追溯。
+- `2026-05-13` 已按取消单源头剔除口径写回 `2026-05-11` 至 `2026-05-13` 本地销售 summary；样本为 LQ `2026-05-12` 无货取消 `SK-5118电磁炉` 从业绩剔除，LQ 当日总销售 `211.67 SAR`。此前提到全历史约 `43,472.16 SAR` 是把退款/退货/派件失败误当源头取消的错误 dry-run 结果，已作废；修正后全历史金额影响仅 `68 SAR`，且就是这笔 LQ 取消单。
 - 固定汇率：`1 SAR = 1.8 RMB`；预测利润率默认按 `25%` 粗估，等成本和完整财务接入后替换。
 - 遇到 SHEIN 接口 `20302 子系统登录重定向`，先自动恢复登录并重抓；恢复失败时明确提示人工登录，不能用旧数据冒充最新数据。
 - 判断店铺登录态/错位时，不要仅凭页面文本或页面里出现的店铺号下结论；应以实际订单接口返回、稳定日期重抓与数据库样本对账为准。当天数据会继续变化，不适合作为最终 profile 错位判断样本。
@@ -54,8 +65,8 @@
 ## 计划任务
 - `00:10`：前一天最终版销售抓取；若 `state/feishu-base-sync-paused.flag` 存在，只写本地销售文件并后置刷新 BI，不写飞书多维表格/月表/宽表/看板。自 `2026-05-11` 起，该任务还会在抓完 D-1 后自动回核 D-2 的销售数据（`third-day-stable-recheck`），用于修正“次日未发货前买家取消订单”导致的前一天初版偏差，并把额外稳定日切片入 BI 仓。
 - `05:30`：链接管理 + 业务域 16 店每日抓取，任务名 `SHEIN-Sales-15Stores-LinkManagement-0530`，脚本 `scripts/scheduled_link_management_daily.ps1`；抓前一完整业务日链接表现、退货/售后、库存、评价、履约、财务等业务域，只写本地文件，不再写飞书链接表；旧 `0340` / `0510` 链接任务不要恢复。
-- `07:00`：BI 每日流水线，任务名 `SHEIN-BI-Daily-Pipeline-0700`；在 `05:30` 抓数完成后，负责入仓、RTV 换单/去向复核、BI 体检、本地门户、UI 冒烟检查和晨报刷新。`2026-05-09 05:30` 链接/业务域任务和 `2026-05-09 07:00` BI 每日流水线已正式自动跑通；ET 计划任务入口已于 `2026-05-09 11:31:49` 复验成功。旧 `2026-05-02 06:40` 的 `267014` 仅保留作历史排障证据。
-- `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10`：当天滚动销售抓取；同步后后置刷新 BI 销售切片；若飞书 Base 暂停开关存在，不写飞书多维表格/月表/宽表/看板，但早上成功后仍发送飞书日报。
+- `07:00`：BI 每日流水线，任务名 `SHEIN-BI-Daily-Pipeline-0700`；在 `05:30` 抓数完成后，负责入仓、RTV 换单/去向复核、BI 体检、本地门户、UI 冒烟检查和晨报刷新。RTV 复核耗时长是正常现象，默认 `--max-runtime-ms 3600000` 只防无限挂死。`2026-05-09 05:30` 链接/业务域任务和 `2026-05-09 07:00` BI 每日流水线已正式自动跑通；ET 计划任务入口已于 `2026-05-09 11:31:49` 复验成功。旧 `2026-05-02 06:40` 的 `267014` 仅保留作历史排障证据。
+- `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10`：当天滚动销售抓取；同步后后置刷新 BI 销售切片并默认跳过 RTV 复核（`-SkipRtvVerify`），若飞书 Base 暂停开关存在，不写飞书多维表格/月表/宽表/看板，但早上成功后仍发送飞书日报。排查滚动 BI 不更新时，优先看 16 店本地销售文件、BI 入仓/门户生成日志和 `outputs/bi-portal/*` 更新时间，不要把 RTV 复核耗时当成 BI 失败。
 - 日报不再使用固定 `09:00` 任务；每天早上 `08:10` 同步成功完成后自动发送飞书文字日报和可视化日报图，上午后续成功同步可补发一次，并使用 flag 防重。
 - 飞书日报发送不受 `state/feishu-base-sync-paused.flag` 影响；暂停期间只跳过写入 Base 的 `飞书日报记录` 表，IM 消息和日报图片照常发送。
 - 计划任务应通过 `wscript.exe` + `scripts/run_scheduled_hidden.vbs` 隐藏启动 PowerShell，最长运行时间 90 分钟，不要直接注册前台 PowerShell 窗口。
@@ -82,15 +93,18 @@
 
 ## 营销活动报名规则
 - SHEIN 营销活动自动化只允许辅助勾选商品、填写活动价/降幅和复核，不得点击最终 `提交报名`；最终提交必须由用户在可见前端人工审核后点击。
-- 营销活动报价规则以 `docs/marketing-campaign-signup-pricing-rules.md` 为准：固定价货号按“基准价 + 随机下浮 `2 SAR` / 上浮 `1 SAR`”填报；利润率货号按“目标利润率随机下浮 `2` 个点 / 上浮 `1` 个点”反推；其它货号默认按 `30%` 利润率并允许 `28% ~ 31%` 浮动，平台最低折扣/页面回写规则优先。
+- 营销活动报价规则以 `docs/marketing-campaign-signup-pricing-rules.md` 为准：固定价货号按“基准价 + 随机下浮 `2 SAR` / 上浮 `1 SAR`”填报；利润率货号按“目标利润率随机下浮 `2` 个点 / 上浮 `1` 个点”反推；用户点名固定价/利润率优先于新品保护价和清货候选价；其它货号默认按 `30%` 利润率并允许 `28% ~ 31%` 浮动，平台最低折扣/页面回写作为最终硬约束记录。
 - 营销活动选择商品页必须先把右下角每页显示改成 `500 条/页` 再全选，并核对 `总计 N 个` 与 `已选商品 N 个` 一致；不能在默认 `20 条/页` 下全选。
 - 当前用户指定规则：`SM-505A/TXSM-505A电动缝纫机 -> 110`、`KF-JN-02便携咖啡机 -> 96`、`SK-185台式榨汁机 -> 91`、`SK-03012台式榨汁机 -> 96`、`SK-03038制冰机 -> 330`；`FZ-666颈部按摩器 -> 15% 利润率`；`SK-7025A/SK-7027/SK-7028 绞肉机 -> 25% 利润率`。
+- 用户质疑营销活动漏报或要求“再检查”时，必须逐店重新扫描 DSY 店铺（含 `MZ`，除非用户明确排除）时间窗内仍可报名的活动；不要只补上一次报错活动，因为 SHEIN 系统可能新抓入商品。
+- `SK-13034` 是营销活动缺成本的明确例外：用户说明该品不用管、按平台默认最低折扣先填；此例外不得自动扩展到其它缺成本货号。
+- 若本期已生成 `outputs/reports/marketing-price-overrides-YYYY-MM-DD.json`，营销活动填报必须带 `--price-overrides`，避免新品保护价、清货底线或用户确认价未生效。
 - `2026-05-06` MZ 店铺两个活动已由用户自行提交：`SA-超级爆品活动-第39期 / 40228` 和 `SA New Arrivals Promo_Batch 39 / 40227`；后续不要重复操作 MZ 已提交活动。
 - 营销活动半自动入口已纳入仓库：先运行 `python scripts/marketing/build_marketing_cost_map.py` 生成忽略的本地成本映射 `tmp/mbrs/marketing-cost-map.json`，再运行 `node scripts/marketing/dsy_marketing_deadline_fill.mjs --hours 48`；结果和审计仍输出到忽略目录 `tmp/mbrs/deadline-fill-results/`。
 - 本系统长期定位不只是 BI 数据分析，也是自动运营驾驶舱；所有写操作默认按“建议/预填/用户复核/人工最终提交/审计留痕”推进，除非用户明确授权并已有回滚方案，否则不得直接提交不可逆运营动作。
 
 ## SHEIN BI 系统
-- 架构原则：`SHEIN 后台抓取 -> 本地 JSON / PostgreSQL 数据仓库 -> Metabase BI / 本地 BI 门户`。
+- 架构原则：`SHEIN 后台抓取 -> 本地 JSON / PostgreSQL 数据仓库 -> Metabase BI / 本地 BI 门户`。PostgreSQL 是核心数据仓库；Metabase 当前仍是正式深度分析/自由钻取层，BI Portal 是日常经营入口。没有完整替代前，不要建议直接删除或跳过 Metabase。
 - HL OpenAPI 销售试点已建立并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` -> `scripts/load_shein_openapi_sales_warehouse.mjs` -> `fact.openapi_store_daily_sales` / `fact.openapi_order_header` / `fact.openapi_order_item` / `mart.openapi_sales_reconciliation`；系统状态页会显示 “SHEIN OpenAPI 试点对账”。正式切换生产事实表前必须继续确认多日 `matched`。
 - 官方 OpenAPI 与后台 WebAPI 直连是两条不同链路：OpenAPI 需要开放平台应用、授权、`openKeyId` / `secretKey` 和 IP 白名单；后台 WebAPI 直连复用已登录 Cookie/session，当前已优先承接 16 店销售生产抓取。两类密钥/session 都禁止进入仓库。
 - CX 开放平台应用 `CX-椿霞SHEIN运营中台` 已在 `2026-05-10` 创建并提交审核，模式为半托管，业务功能选择商品管理、商品合规、订单管理、库存管理、财务管理；审核通过后再录入本地 `.local` 密钥并接入 API 双跑。
@@ -98,12 +112,14 @@
 - 本地 BI 门户入口：`http://127.0.0.1:8787/`；文件为 `outputs/bi-portal/index.html`；生成脚本为 `scripts/generate_bi_portal.mjs`；数据文件为 `outputs/bi-portal/data.json`。
 - BI 门户 UI 冒烟检查脚本为 `scripts/check_bi_portal_ui.mjs`，使用 `agent-browser` 无界面打开本地门户，检查首页核心区域和关键导航；报告写入 `outputs/bi_ui_check/latest.json`，失败时才保存截图。
 - GitHub 私有仓库已纳入 `outputs/bi-portal/index.html` 和 `outputs/bi-portal/data.json` 作为当前 BI 门户可复用产物；`outputs/` 其他抓取结果、报表、图片、审计结果仍默认忽略，迁移生产状态时单独备份。
-- V1 是当前唯一正式本地 BI 门户；V2 平行版本已废弃，`outputs/bi-portal/v2/`、`scripts/generate_bi_portal_v2.mjs` 和 V1 的 V2 跳转入口已删除，后续不要恢复自动生成 V2。
+- V1 仍是当前正式本地 BI 门户；V2.1 是独立经营 BI 预览版，入口 `http://127.0.0.1:8787/v2/`，由 `scripts/generate_bi_portal_v2.mjs` 生成到 `outputs/bi-portal/v2/index.html`，只读复用 `outputs/bi-portal/data.json`，用户确认前不得替换 V1 或改生产调度。
+- 自 `2026-05-14` 起，V2.1 首页（`tab=overview`）已按 V1 首页功能/操作逻辑重做，必须支持顶部筛选、四个经营矩阵、净/总销售额、净/总销量、退货/利润口径切换、日/月趋势、趋势指标切换、店铺/货号排行下钻和深浅主题；其它 V2 子页面尚未按 V1 全量复刻，不得把 V2 整站视为可替换 V1。
 - BI 门户侧栏“链接表现数据”更新时间必须显示链接源文件抓取时间，即 `outputs/shein_links/<店铺>/<链接日>.json` 的 `fetchTime` 最大值；“售后/库存/财务数据”也必须显示业务域源文件抓取时间，即 `outputs/shein_business_domains/<店铺>/<业务日>.json` 的 `fetchTime` 最大值；不要用 BI 重跑入仓时的 `updated_at` 冒充抓取时间。
 - Metabase 运行在 WSL + Docker，Docker 数据位于 `D:\SheinBI\docker-data\docker-data.ext4`，WSL 发行版位于 `D:\WSL\Ubuntu-24.04`。
 - 若 Docker / Postgres / Metabase 出现 `input/output error`，优先怀疑 `D:\SheinBI\docker-data\docker-data.ext4` 文件系统异常；恢复顺序是先停止 WSL / Docker，再做 volume 备份和 `e2fsck -fy`，最后重启容器并跑 BI audit，不要直接删除 Docker 数据。
 - Metabase 管理员凭据只保存在 `infra/metabase/.admin.local.json`，不要写入聊天、文档或日志。
 - 当前团队访问已开放临时局域网协作：优先使用电脑名 `http://DUSHENGYI-PC2:8787/`，或用当前 WLAN IPv4 的 `http://<当前IP>:8787/`；DHCP 重分配后旧 IP 可能失效，不要把 `192.168.2.49` 当固定入口。仅限 `192.168.2.0/24` 私有网络，局域网内无需账号密码，未开放公网或端口转发；共享动作状态写入 `state/bi_action_state.json`，操作审计写入 `logs/bi_portal_action_audit.jsonl`，留痕以访问 IP 为准。团队正式版上线前还需固定地址、动作状态入库、HTTPS 和备份。
+- BI 局域网打不开时先确认服务是否监听 `0.0.0.0:8787`、本机当前 LAN URL 是否 HTTP 200，再查防火墙规则 `SHEIN BI Portal LAN 8787 ReadOnly` 是否绑定旧 IP；修复脚本为 `scripts/fix_bi_lan_firewall.ps1`，管理员运行后规则应为 `LocalAddress=Any`、`RemoteAddress=192.168.2.0/24`、`LocalPort=8787`。
 
 
 

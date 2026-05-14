@@ -75,10 +75,10 @@
 
 ## 当前设计原则
 
-- Metabase 负责 BI 分析、筛选、钻取。
+- Metabase 负责 BI 分析、筛选、钻取；当前仍是正式 BI 深度分析层，不能因为 Java/JVM 内存占用就直接删除或跳过。
 - SHEIN 抓取、库存菜单接口、链接建议规则仍由本项目脚本负责。
 - 飞书 Base 继续作为协作底表，但不再依赖飞书 Dashboard 做复杂 BI。
-- 新 BI 系统优先跑在 WSL + Docker + D 盘数据盘上，方便未来迁移到服务器。
+- 新 BI 系统优先跑在 WSL + Docker + D 盘数据盘上，方便未来迁移到服务器；云端迁移时应按 PostgreSQL + Metabase + BI Portal 一起部署和验证。
 - 现有飞书同步、销售日报、Windows 计划任务和已稳定的 SHEIN Windows Chrome 登录态暂不迁移，直到 BI 系统验证可替代。
 
 ## Windows / WSL 边界

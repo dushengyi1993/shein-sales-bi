@@ -1,5 +1,5 @@
 {
-  "version": 12,
+  "version": 13,
   "source": "user_confirmed_2026-05-07_et_forwarder",
   "notes": [
     "canonical 必须尽量使用 config/product_catalog.json 的标准货号。",
@@ -15,7 +15,8 @@
     "2026-05-07 用户确认 ET 货代仓货号归并：SK-1713-4-GREY->SK-1713-4手持搅拌器；GL-BL02->S1810电热水壶；SD-175/LQ榨汁机175->SK-JB-175离心式榨汁机；PL4-6L/PL4-6LPINK->PA4-6L便携式冰箱；SK-7025/SK-7025-BLACK/7025->SK-7025A绞肉机；CM6810->SK-6810半自动意式咖啡机；C06/C06（04031）->SK-04031胶囊咖啡机；SK-794->SK-JFB-794卷发钳和卷发棒；FZ-666Beige->FZ-666颈部按摩器。",
     "2026-05-07 用户确认 ET 新货号：SM-520A电动缝纫机、CX1788手持搅拌器，当前还在路上，先作为新标准货号记录，不并入旧款。",
     "2026-05-07 用户确认 ET 的 p-DL-FZ-666/P-DL-FZ-666/p-DLFZ666 等是箱子/包材类，不作为可售货号参与经营聚合。",
-    "2026-05-11：121E/121E美式咖啡机/TZ 121E 链接统一归并到 CM-121E美式咖啡机，避免货号 360 和首页筛选把同一咖啡机拆成两个标准货号。"
+    "2026-05-11：121E/121E美式咖啡机/TZ 121E 链接统一归并到 CM-121E美式咖啡机，避免货号 360 和首页筛选把同一咖啡机拆成两个标准货号。",
+    "2026-05-11：合并重复 canonical 归并规则（75 -> 58），并移除 59 个历史乱码别名，避免导出审阅表重复显示同一标准货号。"
   ],
   "aliases": [
     {
@@ -28,16 +29,8 @@
         "MZ制冰机",
         "QY制冰机",
         "03038",
-        "SK-03038",
-        "SK-03038???",
-        "???",
-        "DX???",
-        "DL???",
-        "MZ???",
-        "QY???"
-      ],
-      "source": "user_confirmed_2026-05-03",
-      "status": "active"
+        "SK-03038"
+      ]
     },
     {
       "canonical": "SK-1713-4手持搅拌器",
@@ -54,9 +47,7 @@
         "SK-1713-4手持搅器",
         "SK-1713-4-GREY",
         "SK-1713-4-GREY搅拌器"
-      ],
-      "source": "user_confirmed_2026-05-07_et_forwarder",
-      "status": "active"
+      ]
     },
     {
       "canonical": "SM-505A电动缝纫机",
@@ -73,8 +64,7 @@
         "SM-505A电动纫机",
         "SM-505A电动缝纫",
         "SM-505A电缝纫机"
-      ],
-      "source": "obvious_fragment_aliases_2026-05-05_round3"
+      ]
     },
     {
       "canonical": "S1810电热水壶",
@@ -85,7 +75,9 @@
         "BL-031电热水壶",
         "WK-102电热水壶",
         "电热水壶",
-        "1810"
+        "1810",
+        "S1810电水壶",
+        "GL-BL02"
       ]
     },
     {
@@ -95,7 +87,11 @@
         "SK-3065蒸汽熨烫机",
         "SK-3065熨烫机",
         "MZ3065熨烫机",
-        "3065"
+        "3065",
+        "SK-GT-3065",
+        "QY3065熨烫机",
+        "QY3065熨烫机粉色",
+        "SK-GT-3065蒸汽烫机"
       ]
     },
     {
@@ -105,9 +101,10 @@
         "WK-1710-4搅拌器",
         "MZ1710搅拌器",
         "1710",
-        "WK-1710-4手搅拌器"
-      ],
-      "source": "obvious_fragment_aliases_2026-05-05_round3"
+        "WK-1710-4手搅拌器",
+        "WK-1710",
+        "LQ1710搅拌器"
+      ]
     },
     {
       "canonical": "SK-3378杆式吸尘器",
@@ -115,7 +112,11 @@
         "SK-3378杆式吸尘器",
         "MZ杆式吸尘器",
         "3378",
-        "LQ杆式吸尘器"
+        "LQ杆式吸尘器",
+        "SK-3378",
+        "）SK-3378杆式吸尘器",
+        "QY3378吸尘器",
+        "SK-3378杆吸尘器"
       ]
     },
     {
@@ -129,9 +130,15 @@
         "DX便携式小冰箱",
         "冰箱",
         "PA4-6L便携冰箱",
-        "PA4-6L携式冰箱"
-      ],
-      "source": "obvious_fragment_aliases_2026-05-05_round3"
+        "PA4-6L携式冰箱",
+        "PA4",
+        "LQPA4L小冰箱",
+        "PA4-6L便携式冰",
+        "PL4-6L",
+        "PL4-6LPINK",
+        "PL4-6L便携式冰箱",
+        "PL4-6LPINK便携式冰箱"
+      ]
     },
     {
       "canonical": "SK-11004蒸汽熨烫机",
@@ -152,7 +159,11 @@
         "SD-175榨汁机",
         "SK-175榨汁机",
         "MZ榨汁机175",
-        "175"
+        "175",
+        "SK-JB-175",
+        "LQ榨汁机175",
+        "SK-JB-175离式榨汁机",
+        "SD-175"
       ]
     },
     {
@@ -162,9 +173,11 @@
         "FZ-666肩颈按摩器",
         "MZ666肩颈按摩器",
         "666",
-        "FZ-666部按摩器"
-      ],
-      "source": "obvious_fragment_aliases_2026-05-05_round3"
+        "FZ-666部按摩器",
+        "FZ-666",
+        "FZ-666Beige",
+        "FZ-666Beige颈部按摩器"
+      ]
     },
     {
       "canonical": "KJ-102S三明治机和早餐机",
@@ -186,8 +199,7 @@
         "KJ-102明治机和早餐机",
         "KJ-102三明治机早餐机",
         "KJ-102三明治和早餐机"
-      ],
-      "source": "obvious_fragment_aliases_2026-05-05_round3"
+      ]
     },
     {
       "canonical": "SK-03012台式榨汁机",
@@ -199,14 +211,16 @@
         "LQ榨汁机03012",
         "03012",
         "SK-03012台式榨机"
-      ],
-      "source": "obvious_fragment_aliases_2026-05-05_round3"
+      ]
     },
     {
       "canonical": "SK-7027绞肉机",
       "aliases": [
         "SK-7027绞肉机",
-        "7027"
+        "7027",
+        "SK-7027",
+        "MZ7027绞肉机",
+        "SK7027绞肉机"
       ]
     },
     {
@@ -220,8 +234,7 @@
         "QY185榨汁机",
         "LQ185榨汁机",
         "SK-185台式榨机"
-      ],
-      "source": "obvious_fragment_aliases_2026-05-05_round3"
+      ]
     },
     {
       "canonical": "SK-7025A绞肉机",
@@ -234,9 +247,7 @@
         "SK-7025-BLACK",
         "SK-7025BLACK",
         "SK-7025-BLACK绞肉机"
-      ],
-      "source": "user_confirmed_2026-05-07_et_forwarder",
-      "status": "active"
+      ]
     },
     {
       "canonical": "SM-961厨师机",
@@ -253,9 +264,14 @@
         "SK-6810意式咖啡机",
         "CM6810意式咖啡机",
         "6810",
-        "SK-6810半自动意式啡机"
-      ],
-      "source": "obvious_fragment_aliases_2026-05-05_round3"
+        "SK-6810半自动意式啡机",
+        "SK-6810便携式榨汁机",
+        "SK-6810",
+        "6810意式咖啡机",
+        "SK-6810半动意式咖啡机",
+        "SK-6810半自动式咖啡机",
+        "CM6810"
+      ]
     },
     {
       "canonical": "SK-7028绞肉机",
@@ -264,7 +280,11 @@
         "SK-7028绞肉器",
         "MZ7028绞肉机",
         "MZ7028",
-        "7028"
+        "7028",
+        "SK-7028",
+        "SK-7028绞机",
+        "SK-7028肉机",
+        "SK7028绞肉机"
       ]
     },
     {
@@ -280,7 +300,11 @@
       "aliases": [
         "SK-11041蒸汽熨烫机",
         "SK-11041熨烫机",
-        "SK-11041"
+        "SK-11041",
+        "11041",
+        "LQ11041熨烫机",
+        "QY11041熨烫机粉色",
+        "SK-11041蒸熨烫机"
       ]
     },
     {
@@ -300,9 +324,7 @@
         "C06",
         "C06（04031）",
         "C06胶囊咖啡机"
-      ],
-      "source": "user_confirmed_2026-05-07_et_forwarder",
-      "status": "active"
+      ]
     },
     {
       "canonical": "SK-999食品料理机",
@@ -328,7 +350,10 @@
       "canonical": "SK-6863半自动意式咖啡机",
       "aliases": [
         "SK-6863半自动意式咖啡机",
-        "SK-6863意式咖啡机"
+        "SK-6863意式咖啡机",
+        "SK-6863",
+        "DX-6863意式咖啡机",
+        "LQ-63意式咖啡机"
       ]
     },
     {
@@ -380,31 +405,37 @@
     {
       "canonical": "SK-JFB-675B卷发钳和卷发棒",
       "aliases": [
-        "SK-JFB-675B卷发钳和卷发棒"
+        "SK-JFB-675B卷发钳和卷发棒",
+        "675",
+        "SK-JFB-675B",
+        "sk-675卷发棒"
       ]
     },
     {
       "canonical": "SK-7015绞肉机",
       "aliases": [
-        "SK-7015绞肉机"
+        "SK-7015绞肉机",
+        "7015",
+        "SK-7015"
       ]
     },
     {
       "canonical": "SK-YM-7032绞肉机",
       "aliases": [
-        "SK-YM-7032绞肉机"
+        "SK-YM-7032绞肉机",
+        "7032",
+        "SK-YM-7032",
+        "SK-7032绞肉机"
       ]
     },
     {
       "canonical": "SK-JFB-794卷发钳和卷发棒",
       "aliases": [
-        "794",
         "SK-JFB-794卷发钳和卷发棒",
+        "794",
         "SK-794",
         "SK-794卷发棒"
-      ],
-      "source": "user_confirmed_2026-05-07_et_forwarder",
-      "status": "active"
+      ]
     },
     {
       "canonical": "SK-5110电磁炉",
@@ -436,7 +467,6 @@
       "canonical": "V22行车记录仪",
       "aliases": [
         "V22行车记录仪",
-        "v22行车记录仪",
         "V22"
       ]
     },
@@ -446,422 +476,139 @@
         "2001胶囊咖啡机",
         "CM-2001胶囊咖啡机",
         "CM-2001",
-        "2001"
+        "2001",
+        "2001胶囊啡机"
       ]
     },
     {
       "canonical": "SK-04029半自动意式咖啡机",
       "aliases": [
-        "SK-04029意式咖啡机"
+        "SK-04029半自动意式咖啡机",
+        "SK-04029意式咖啡机",
+        "SK-04029",
+        "FY-29意式咖啡机"
       ]
-    },
-    {
-      "canonical": "2001胶囊咖啡机",
-      "aliases": [
-        "2001?????",
-        "CM-2001?????",
-        "CM-2001胶囊咖啡机",
-        "CM-2001",
-        "2001胶囊咖啡机",
-        "2001",
-        "2001胶囊啡机"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
-    },
-    {
-      "canonical": "FZ-666颈部按摩器",
-      "aliases": [
-        "FZ-666?????",
-        "FZ-666",
-        "FZ-666颈部按摩器",
-        "FZ-666Beige",
-        "FZ-666Beige颈部按摩器"
-      ],
-      "source": "user_confirmed_2026-05-07_et_forwarder",
-      "status": "active"
     },
     {
       "canonical": "SK-088绞肉机",
       "aliases": [
-        "SK-088???",
-        "088",
         "SK-088绞肉机",
+        "088",
         "SK-088"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
-    },
-    {
-      "canonical": "SK-11041蒸汽熨烫机",
-      "aliases": [
-        "SK-11041?????",
-        "11041",
-        "LQ11041???",
-        "QY11041?????",
-        "SK-11041蒸汽熨烫机",
-        "SK-11041",
-        "LQ11041熨烫机",
-        "QY11041熨烫机粉色",
-        "SK-11041蒸熨烫机"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
+      ]
     },
     {
       "canonical": "SK-13014杆式吸尘器",
       "aliases": [
-        "SK-13014?????",
+        "SK-13014杆式吸尘器",
         "13014",
-        "SK-13014",
-        "SK-13014杆式吸尘器"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
+        "SK-13014"
+      ]
     },
     {
       "canonical": "SK-13015杆式吸尘器",
       "aliases": [
-        "SK-13015?????",
-        "13015",
         "SK-13015杆式吸尘器",
+        "13015",
         "SK-13015"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
+      ]
     },
     {
       "canonical": "SK-13034杆式吸尘器",
       "aliases": [
-        "SK-13034?????",
-        "13034",
         "SK-13034杆式吸尘器",
+        "13034",
         "SK-13034"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
+      ]
     },
     {
       "canonical": "SK-270厨师机",
       "aliases": [
-        "SK-270???",
-        "270",
         "SK-270厨师机",
+        "270",
         "SK-270",
         "SK-270厨机"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
+      ]
     },
     {
       "canonical": "SK-271厨师机",
       "aliases": [
-        "SK-271???",
-        "271",
         "SK-271厨师机",
+        "271",
         "SK-271"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
+      ]
     },
     {
       "canonical": "SK-272厨师机",
       "aliases": [
-        "SK-272???",
-        "272",
         "SK-272厨师机",
+        "272",
         "SK-272"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
+      ]
     },
     {
       "canonical": "SK-446电动刀与切片器",
       "aliases": [
-        "SK-446???????",
-        "446",
         "SK-446电动刀与切片器",
+        "446",
         "SK-446"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
-    },
-    {
-      "canonical": "SK-JFB-675B卷发钳和卷发棒",
-      "aliases": [
-        "SK-JFB-675B???????",
-        "675",
-        "sk-675???",
-        "SK-JFB-675B卷发钳和卷发棒",
-        "SK-JFB-675B",
-        "sk-675卷发棒"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
-    },
-    {
-      "canonical": "SK-6810半自动意式咖啡机",
-      "aliases": [
-        "SK-6810????????",
-        "6810?????",
-        "SK-6810便携式榨汁机",
-        "SK-6810",
-        "SK-6810半自动意式咖啡机",
-        "6810意式咖啡机",
-        "SK-6810半动意式咖啡机",
-        "SK-6810半自动式咖啡机",
-        "CM6810",
-        "CM6810意式咖啡机"
-      ],
-      "source": "user_confirmed_2026-05-07_et_forwarder",
-      "status": "active"
-    },
-    {
-      "canonical": "SK-7015绞肉机",
-      "aliases": [
-        "SK-7015???",
-        "7015",
-        "SK-7015绞肉机",
-        "SK-7015"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
-    },
-    {
-      "canonical": "SK-YM-7032绞肉机",
-      "aliases": [
-        "SK-YM-7032???",
-        "7032",
-        "SK-7032???",
-        "SK-YM-7032",
-        "SK-YM-7032绞肉机",
-        "SK-7032绞肉机"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
+      ]
     },
     {
       "canonical": "SK-777碎冰机和刨冰机",
       "aliases": [
-        "SK-777???????",
-        "777",
         "SK-777碎冰机和刨冰机",
+        "777",
         "SK-777"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
-    },
-    {
-      "canonical": "SK-7027绞肉机",
-      "aliases": [
-        "SK-7027???",
-        "MZ7027???",
-        "SK7027???",
-        "SK-7027绞肉机",
-        "SK-7027",
-        "MZ7027绞肉机",
-        "SK7027绞肉机"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
-    },
-    {
-      "canonical": "SK-7028绞肉机",
-      "aliases": [
-        "SK-7028???",
-        "MZ7028???",
-        "SK7028???",
-        "SK-7028绞肉机",
-        "SK-7028",
-        "MZ7028绞肉机",
-        "SK-7028绞机",
-        "SK-7028肉机",
-        "SK7028绞肉机"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
-    },
-    {
-      "canonical": "SK-6863半自动意式咖啡机",
-      "aliases": [
-        "SK-6863????????",
-        "DX-6863?????",
-        "LQ-63?????",
-        "SK-6863半自动意式咖啡机",
-        "SK-6863",
-        "DX-6863意式咖啡机",
-        "LQ-63意式咖啡机"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
-    },
-    {
-      "canonical": "SK-04029半自动意式咖啡机",
-      "aliases": [
-        "SK-04029????????",
-        "FY-29?????",
-        "SK-04029半自动意式咖啡机",
-        "SK-04029",
-        "FY-29意式咖啡机"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
+      ]
     },
     {
       "canonical": "SK-13065吸尘器",
       "aliases": [
-        "SK-13065???",
-        "FY065???",
         "SK-13065吸尘器",
         "SK-13065",
         "13065",
         "FY065",
         "FY065吸尘器"
-      ],
-      "source": "user_confirmed_2026-05-05_data_audit",
-      "status": "active"
-    },
-    {
-      "canonical": "S1810电热水壶",
-      "aliases": [
-        "S1810????",
-        "KT10 Pro????",
-        "S1810电热水壶",
-        "S1810",
-        "S1810电水壶",
-        "GL-BL02",
-        "GL-BL02电热水壶"
-      ],
-      "source": "user_confirmed_2026-05-07_et_forwarder",
-      "status": "active"
-    },
-    {
-      "canonical": "WK-1710-4手持搅拌器",
-      "aliases": [
-        "WK-1710-4?????",
-        "LQ1710???",
-        "WK-1710-4手持搅拌器",
-        "WK-1710",
-        "LQ1710搅拌器",
-        "WK-1710-4手搅拌器"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
+      ]
     },
     {
       "canonical": "JD-389空气炸锅",
       "aliases": [
-        "JD-389????",
-        "LQ389????",
         "JD-389空气炸锅",
         "JD-389",
         "LQ389空气炸锅",
         "JD-389空炸锅"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
-    },
-    {
-      "canonical": "PA4-6L便携式冰箱",
-      "aliases": [
-        "PA4-6L?????",
-        "LQPA4L???",
-        "PA4-6L便携式冰箱",
-        "PA4",
-        "LQPA4L小冰箱",
-        "PA4-6L便携冰箱",
-        "PA4-6L便携式冰",
-        "PL4-6L",
-        "PL4-6LPINK",
-        "PL4-6L便携式冰箱",
-        "PL4-6LPINK便携式冰箱"
-      ],
-      "source": "user_confirmed_2026-05-07_et_forwarder",
-      "status": "active"
-    },
-    {
-      "canonical": "SK-JB-175离心式榨汁机",
-      "aliases": [
-        "SK-JB-175??????",
-        "LQ???175",
-        "SK-JB-175离心式榨汁机",
-        "SK-JB-175",
-        "LQ榨汁机175",
-        "SK-JB-175离式榨汁机",
-        "SD-175",
-        "SD-175榨汁机"
-      ],
-      "source": "user_confirmed_2026-05-07_et_forwarder",
-      "status": "active"
+      ]
     },
     {
       "canonical": "SK-1711手持搅拌器",
       "aliases": [
-        "SK-1711?????",
-        "QY1711???",
         "SK-1711手持搅拌器",
         "SK-1711",
         "QY1711搅拌器"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
-    },
-    {
-      "canonical": "SK-GT-3065蒸汽熨烫机",
-      "aliases": [
-        "SK-GT-3065?????",
-        "QY3065???",
-        "QY3065?????",
-        "SK-GT-3065蒸汽熨烫机",
-        "SK-GT-3065",
-        "QY3065熨烫机",
-        "QY3065熨烫机粉色",
-        "SK-GT-3065蒸汽烫机"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
-    },
-    {
-      "canonical": "SK-3378杆式吸尘器",
-      "aliases": [
-        "SK-3378?????",
-        "QY3378???",
-        "?SK-3378?????",
-        "SK-3378杆式吸尘器",
-        "SK-3378",
-        "）SK-3378杆式吸尘器",
-        "QY3378吸尘器",
-        "SK-3378杆吸尘器"
-      ],
-      "source": "catalog_code_repair_2026-05-05",
-      "status": "active"
+      ]
     },
     {
       "canonical": "SK-15030热风梳",
       "aliases": [
         "SK-15030热风梳",
         "SK-15030风梳"
-      ],
-      "source": "obvious_fragment_aliases_2026-05-05_round3",
-      "status": "active"
+      ]
     },
     {
       "canonical": "SM-520A电动缝纫机",
       "aliases": [
         "SM-520A电动缝纫机",
         "SM-520A"
-      ],
-      "source": "user_confirmed_2026-05-07_et_forwarder",
-      "status": "active"
+      ]
     },
     {
       "canonical": "CX1788手持搅拌器",
       "aliases": [
         "CX1788手持搅拌器",
         "CX1788"
-      ],
-      "source": "user_confirmed_2026-05-07_et_forwarder",
-      "status": "active"
+      ]
     }
   ],
   "ignoredAliases": [

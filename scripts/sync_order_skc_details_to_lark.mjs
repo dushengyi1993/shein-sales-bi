@@ -9,6 +9,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import {normalizeGoodsSn} from '../lib/product_sku_normalizer.mjs';
+import {isValidSalesGoodsRow, salesAmountSar, salesQuantity} from '../lib/shein_sales_validity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STATE_PATH = path.join(ROOT, 'state', 'lark_base.json');
@@ -185,7 +186,7 @@ function businessDateFromFile(obj, fallback) {
   return obj?.start || fallback;
 }
 function validGoods(g) {
-  return Number(g?.number || 0) > 0 && Number(g?.currencyPrice || 0) > 0;
+  return isValidSalesGoodsRow(g);
 }
 function orderKey(storeKey, orderNo, orderId) {
   return `${storeKey}__${orderNo || orderId}`;
@@ -206,9 +207,9 @@ function buildRows(files) {
     for (const [i, g] of (obj.goodsRows || []).entries()) {
       const goodsSn = normalizeGoodsSn(g.goodsSn || g.skuSn || g.skuCode || g.skcName || '', {goodsTitle: g.goodsTitle});
       const rawGoodsSn = String(g.goodsSn || '').trim();
-      const qty = Number(g.number || 0);
-      const sar = round2(Number(g.currencyPrice || 0));
       const isValid = validGoods(g);
+      const qty = isValid ? salesQuantity(g) : 0;
+      const sar = round2(isValid ? salesAmountSar(g) : 0);
       const orderNo = g.orderNo || g.billno || g.orderId;
       const ok = orderKey(store.storeKey, orderNo, g.orderId);
       if (!orderMap.has(ok)) {

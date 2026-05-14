@@ -16,6 +16,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import {normalizeGoodsSnDetailed} from '../lib/product_sku_normalizer.mjs';
+import {isValidSalesGoodsRow, salesAmountSar, salesQuantity, summarizeSalesGoodsRows} from '../lib/shein_sales_validity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STATE_PATH = path.join(ROOT, 'state', 'lark_base.json');
@@ -196,18 +197,20 @@ async function loadLocalExpected(storesCfg) {
       if (!data?.summary) continue;
       const store = storeMap.get(storeKey) || {};
       const summary = data.summary || {};
+      const goodsSales = Array.isArray(data.goodsRows) ? summarizeSalesGoodsRows(data.goodsRows) : null;
       localFiles.push({date, storeKey, groupKey: store.groupKey || data.groupKey || '', file: fullPath, data});
       addAgg(localStoreExpected, `${date}__${storeKey}`, {
         date,
         storeKey,
         groupKey: store.groupKey || data.groupKey || '',
-        salesSar: Number(summary.salesSar || 0),
-        orders: Number(summary.positiveAmountOrderCount || summary.orderCount || 0),
-        qty: Number(summary.quantityPositiveAmount || summary.quantity || 0),
+        salesSar: Number(goodsSales?.salesSar ?? summary.salesSar ?? 0),
+        orders: Number(goodsSales?.positiveAmountOrderCount ?? summary.positiveAmountOrderCount ?? summary.orderCount ?? 0),
+        qty: Number(goodsSales?.quantityPositiveAmount ?? summary.quantityPositiveAmount ?? summary.quantity ?? 0),
       });
       for (const g of data.goodsRows || []) {
-        const qty = Number(g.number || g.goodsQuantity || g.quantity || 0);
-        const salesSar = Number(g.currencyPrice || 0);
+        if (!isValidSalesGoodsRow(g)) continue;
+        const qty = salesQuantity(g);
+        const salesSar = salesAmountSar(g);
         const detail = normalizeGoodsSnDetailed(g.goodsSn || g.skuSn || g.skuCode || g.skcName || '', {goodsTitle: g.goodsTitle});
         const goodsSn = detail.canonical;
         if (!goodsSn || qty <= 0 || salesSar <= 0) continue;

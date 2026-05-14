@@ -11,6 +11,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import {normalizeGoodsSnDetailed} from '../lib/product_sku_normalizer.mjs';
+import {isValidSalesGoodsRow, summarizeSalesGoodsRows} from '../lib/shein_sales_validity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -306,17 +307,19 @@ async function collectSales(args, productMap, skcMap) {
     const date = j.start || dateFromFile(file);
     const source = rel(file);
     const summary = j.summary || {};
+    const goodsSales = summarizeSalesGoodsRows(j.goodsRows || []);
+    const salesSar = Math.round((goodsSales.salesSar + Number.EPSILON) * 100) / 100;
     daily.push({
       date,
       store_key: j.storeKey,
       group_key: j.groupKey,
       shop_name: j.shopName,
-      valid_order_count: int(summary.positiveAmountOrderCount),
-      goods_line_count: int(summary.goodsLineCount),
-      quantity_all: num(summary.quantityAll),
-      quantity_positive_amount: num(summary.quantityPositiveAmount),
-      sales_sar: num(summary.salesSar),
-      sales_rmb: num(summary.salesRmb),
+      valid_order_count: int(goodsSales.positiveAmountOrderCount),
+      goods_line_count: int((j.goodsRows || []).length),
+      quantity_all: num(goodsSales.quantityAll),
+      quantity_positive_amount: num(goodsSales.quantityPositiveAmount),
+      sales_sar: num(salesSar),
+      sales_rmb: Math.round((salesSar * 1.8 + Number.EPSILON) * 100) / 100,
       fetch_time: ts(j.fetchTime),
       source_file: source,
       raw_summary: compactJson(summary),
@@ -359,6 +362,9 @@ async function collectSales(args, productMap, skcMap) {
       const itemKey = `${j.storeKey}__${date}__${orderId}__${row.goodsId || row.entityId || row.skcName || row.skuCode || idx}__${idx}`;
       const qty = num(row.number) ?? 0;
       const price = num(row.currencyPrice) ?? 0;
+      const validSale = isValidSalesGoodsRow(row);
+      const salesQty = validSale ? qty : 0;
+      const salesPrice = validSale ? price : 0;
       const item = {
         order_item_key: itemKey,
         order_key: orderKey,
@@ -379,11 +385,11 @@ async function collectSales(args, productMap, skcMap) {
         sku_sn: row.skuSn || '',
         sku_suffix: row.suffix || '',
         goods_title: row.goodsTitle || '',
-        quantity: qty,
+        quantity: salesQty,
         currency_code: row.currencyCode || '',
         currency_price: price,
-        sales_sar: price,
-        sales_rmb: Math.round((price * 1.8 + Number.EPSILON) * 100) / 100,
+        sales_sar: salesPrice,
+        sales_rmb: Math.round((salesPrice * 1.8 + Number.EPSILON) * 100) / 100,
         goods_status: row.newOrderGoodsStatus ?? '',
         goods_performance_status: row.goodsPerformanceStatus ?? '',
         goods_performance_status_desc: row.goodsPerformanceStatusDesc || '',

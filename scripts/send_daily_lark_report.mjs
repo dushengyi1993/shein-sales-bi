@@ -13,6 +13,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import {normalizeGoodsSn} from '../lib/product_sku_normalizer.mjs';
+import {isValidSalesGoodsRow, salesAmountSar, salesQuantity, summarizeSalesGoodsRows} from '../lib/shein_sales_validity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
@@ -232,15 +233,17 @@ async function loadStoreDay(store, date) {
   const file = path.join(FETCH_DIR, store.storeKey, `${date}.json`);
   const obj = await loadJsonIfExists(file);
   const summary = obj?.summary || {};
+  const goodsSales = Array.isArray(obj?.goodsRows) ? summarizeSalesGoodsRows(obj.goodsRows) : null;
+  const salesSar = goodsSales ? round2(goodsSales.salesSar) : round2(summary.salesSar || 0);
   return {
     storeKey: store.storeKey,
     shopName: store.shopName,
     groupKey: store.groupKey,
-    salesSar: round2(summary.salesSar || 0),
-    salesRmb: round2((summary.salesSar || 0) * FX_SAR_TO_RMB),
-    orders: Number(summary.positiveAmountOrderCount || 0),
+    salesSar,
+    salesRmb: round2(salesSar * FX_SAR_TO_RMB),
+    orders: Number(goodsSales?.positiveAmountOrderCount ?? summary.positiveAmountOrderCount ?? 0),
     goods: Number(summary.goodsLineCount || 0),
-    qty: Number(summary.quantityPositiveAmount || 0),
+    qty: Number(goodsSales?.quantityPositiveAmount ?? summary.quantityPositiveAmount ?? 0),
     missing: !obj?.summary,
     fetchTime: obj?.fetchTime || null,
   };
@@ -319,10 +322,11 @@ async function loadTopProductsFromFetch(storesConfig, groupKeys, date, limit = 5
     for (const day of monthDates(month)) {
       const obj = await loadJsonIfExists(path.join(FETCH_DIR, store.storeKey, `${day}.json`));
       for (const g of obj?.goodsRows || []) {
+        if (!isValidSalesGoodsRow(g)) continue;
         const rawGoodsSn = String(g.goodsSn || g.skuSn || g.skuCode || g.skcName || '').trim();
         const goodsSn = normalizeGoodsSn(rawGoodsSn, {goodsTitle: g.goodsTitle});
-        const qty = Number(g.number || 0);
-        const sar = Number(g.currencyPrice || 0);
+        const qty = salesQuantity(g);
+        const sar = salesAmountSar(g);
         if (!goodsSn || qty <= 0 || sar <= 0) continue;
         if (!byProduct.has(goodsSn)) byProduct.set(goodsSn, {goodsSn, goodsTitle: String(g.goodsTitle || '').slice(0, 500), totalQty: 0, totalSar: 0});
         const row = byProduct.get(goodsSn);

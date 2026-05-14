@@ -5,6 +5,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import {normalizeGoodsSn} from '../lib/product_sku_normalizer.mjs';
+import {isValidSalesGoodsRow, salesAmountSar, salesQuantity, summarizeSalesGoodsRows} from '../lib/shein_sales_validity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const FETCH_DIR = path.join(ROOT, 'outputs', 'shein_fetch');
@@ -74,21 +75,24 @@ async function loadToday(cfg, groups, date) {
     const obj = await readJson(path.join(FETCH_DIR, store.storeKey, `${date}.json`), {});
     if (obj.fetchTime) fetchTimes.push(obj.fetchTime);
     const summary = obj.summary || {};
+    const goodsSales = Array.isArray(obj.goodsRows) ? summarizeSalesGoodsRows(obj.goodsRows) : null;
+    const salesSar = goodsSales ? round2(goodsSales.salesSar) : round2(summary.salesSar || 0);
     const row = {
       storeKey: store.storeKey,
       group: store.groupKey || store.group || '',
-      sar: round2(summary.salesSar || 0),
-      rmb: round2((summary.salesSar || 0) * FX),
-      orders: Number(summary.positiveAmountOrderCount || 0),
-      qty: Number(summary.quantityPositiveAmount || 0),
+      sar: salesSar,
+      rmb: round2(salesSar * FX),
+      orders: Number(goodsSales?.positiveAmountOrderCount ?? summary.positiveAmountOrderCount ?? 0),
+      qty: Number(goodsSales?.quantityPositiveAmount ?? summary.quantityPositiveAmount ?? 0),
       goodsLines: Number(summary.goodsLineCount || 0),
       missing: !obj.summary,
     };
     storeRows.push(row);
 
     for (const item of obj.goodsRows || []) {
-      const qty = Number(item.number || 0);
-      const sar = Number(item.currencyPrice || 0);
+      if (!isValidSalesGoodsRow(item)) continue;
+      const qty = salesQuantity(item);
+      const sar = salesAmountSar(item);
       if (qty <= 0 || sar <= 0) continue;
       const sku = itemSku(item);
       const p = productMap.get(sku) || {

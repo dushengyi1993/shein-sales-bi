@@ -13,6 +13,7 @@ import fssync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import {isValidSalesGoodsRow, salesAmountSar, salesQuantity, summarizeSalesGoodsRows} from '../lib/shein_sales_validity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
@@ -108,9 +109,10 @@ async function dayTotals(cfg, date, group = 'ALL_DYNAMIC') {
   for (const key of keys) {
     const obj = await loadFetch(key, date);
     if (!obj?.summary) { missing.push(key); continue; }
-    salesSar += Number(obj.summary.salesSar || 0);
-    orders += Number(obj.summary.positiveAmountOrderCount || 0);
-    qty += Number(obj.summary.quantityPositiveAmount || 0);
+    const goodsSales = Array.isArray(obj.goodsRows) ? summarizeSalesGoodsRows(obj.goodsRows) : null;
+    salesSar += Number(goodsSales?.salesSar ?? obj.summary.salesSar ?? 0);
+    orders += Number(goodsSales?.positiveAmountOrderCount ?? obj.summary.positiveAmountOrderCount ?? 0);
+    qty += Number(goodsSales?.quantityPositiveAmount ?? obj.summary.quantityPositiveAmount ?? 0);
     if (obj.fetchTime) fetchTimes.push(obj.fetchTime);
   }
   return {salesSar: round2(salesSar), salesRmb: round2(salesSar * FX), orders, qty, missing, fetchTimes};
@@ -138,8 +140,9 @@ async function monthProductTotal(cfg, month, group = 'ALL_DYNAMIC') {
       const obj = await loadFetch(key, date);
       if (!obj?.summary) { missing.push(`${date}:${key}`); continue; }
       for (const g of obj.goodsRows || []) {
-        const sar = Number(g.currencyPrice || 0);
-        const n = Number(g.number || 0);
+        if (!isValidSalesGoodsRow(g)) continue;
+        const sar = salesAmountSar(g);
+        const n = salesQuantity(g);
         if (sar > 0 && n > 0) { salesSar += sar; qty += n; }
       }
     }
@@ -331,7 +334,8 @@ async function auditScriptGuards(audit) {
     dashboard: await fs.readFile(path.join(ROOT, 'scripts', 'setup_lark_dashboard_main_v3.mjs'), 'utf8'),
   };
   for (const [name, text] of Object.entries({intraday: files.intraday, yesterday: files.yesterday})) {
-    audit.check(text.includes('--no-monthly --no-compact-display --no-dashboard'), 'error', 'SCHEDULED_GROUP_RUN_REFRESHES_DERIVED', `${name} 分组抓取必须先禁用派生刷新`, {});
+    const disablesDerivedRefresh = ['--no-monthly', '--no-compact-display', '--no-dashboard'].every(flag => text.includes(flag));
+    audit.check(disablesDerivedRefresh, 'error', 'SCHEDULED_GROUP_RUN_REFRESHES_DERIVED', `${name} 分组抓取必须先禁用派生刷新`, {});
     audit.check(text.includes('generate_monthly_sales_table.mjs') && text.includes('--include-lgm'), 'error', 'SCHEDULED_MISSING_UNIFIED_MONTHLY_REFRESH', `${name} 缺少两组成功后的统一月表刷新`, {});
     audit.check(text.includes('generate_compact_display_tables.mjs') && text.includes('--group ALL'), 'error', 'SCHEDULED_MISSING_UNIFIED_COMPACT_REFRESH', `${name} 缺少两组成功后的统一年度/宽表刷新`, {});
   }

@@ -24,6 +24,7 @@
   - `fetch_shein_sales.mjs`
     - `fetch_shein_sales.mjs` 支持 `--transport browser|webapi|auto`、`--session-dir`、`--refresh-session`，当前生产配置为 WebAPI 直连优先。
     - `run_sales_sync_job.mjs` 读取 `config/stores.json.salesTransport` / `SHEIN_SALES_TRANSPORT`；`auto` 成功时不启动浏览器，失败才刷新 session 或回退 Chrome。
+    - 销售有效性必须引用 `lib/shein_sales_validity.mjs`，不要在各脚本里各写一套取消/退款判断。
   - `sync_shein_daily_to_lark.mjs`
   - `sync_product_sales_to_lark.mjs`
   - `sync_order_skc_details_to_lark.mjs`
@@ -37,8 +38,8 @@
   - `generate_monthly_report_image.mjs`
   - `generate_today_detailed_report_image.mjs`
 - BI 仓库/门户：
-  - `run_bi_daily_pipeline.ps1`
-  - `run_bi_after_feishu_sync.ps1`
+  - `run_bi_daily_pipeline.ps1`：每日完整 BI 流水线入口；默认会跑 RTV 复核，支持 `-SkipRtvVerify` 用于只刷新销售/门户。
+  - `run_bi_after_feishu_sync.ps1`：销售抓取后的 BI 后置刷新入口；`intraday` / `yesterday-final` 模式会向每日流水线传 `-SkipRtvVerify`，避免滚动销售看板等待 RTV 复核。
   - `run_bi_postcheck.ps1`
   - `init_bi_warehouse.ps1`
   - `load_bi_warehouse.mjs`
@@ -46,6 +47,7 @@
   - `load_bi_business_domains.mjs`
   - `backfill_bi_high_value_domains.ps1`
   - `generate_bi_portal.mjs`
+  - `generate_bi_portal_v2.mjs`（V2.1 平行预览生成器；只读复用 `outputs/bi-portal/data.json`，输出到 `outputs/bi-portal/v2/`，不替换 V1、不接生产调度）
   - `serve_bi_portal.mjs`
   - `serve_bi_portal.ps1`
   - `open_bi_portal.ps1`
@@ -58,7 +60,7 @@
   - `load_et_forwarder_warehouse.mjs`
   - `scheduled_et_forwarder_daily.ps1`
   - `report_et_forwarder_assessment.mjs`
-  - `verify_shein_rtv_tracking.mjs`：SHEIN 退货物流换单复核；候选应按标准货号 + 时间窗口全店搜索，`DL-` 等 ET SKU 前缀只作排序线索。JT/JTE 按同运单号直连，iMile/EMile 按物流详情换单轨迹确认。日常参数：`--priority high,medium,low --include-no-cases --limit 120 --case-limit 60 --max-runtime-ms 3600000`。
+  - `verify_shein_rtv_tracking.mjs`：SHEIN 退货物流换单复核；候选应按标准货号 + 时间窗口全店搜索，`DL-` 等 ET SKU 前缀只作排序线索。JT/JTE 按同运单号直连，iMile/EMile 按物流详情换单轨迹确认。该脚本耗时长是正常现象，日常参数：`--priority high,medium,low --include-no-cases --limit 120 --case-limit 60 --max-runtime-ms 3600000`。
 - 链接管理：
   - `scheduled_link_management_daily.ps1`
   - `run_link_management_job.mjs`
@@ -69,7 +71,7 @@
   - `import_product_costs.mjs`
 - 营销活动半自动：
   - `marketing/build_marketing_cost_map.py`
-  - `marketing/dsy_marketing_deadline_fill.mjs`
+  - `marketing/dsy_marketing_deadline_fill.mjs`：DSY 营销活动报名半自动补填；只勾选商品、填活动价/降幅和复核，不点最终提交。重扫漏报时显式传 `--stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --hours 48`，本期价格覆盖表用 `--price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD.json`。
 - OpenAPI 试点：
   - `check_shein_openapi_client.mjs`
   - `probe_shein_openapi_test_call.mjs`
@@ -87,6 +89,8 @@
 - `et_login_helper.py`
 - `close_store_browsers.ps1`
 - `enable_bi_lan_firewall.ps1`
+- `fix_bi_lan_firewall.ps1`：管理员运行，修复局域网 BI 访问防火墙规则，避免规则绑定 DHCP 旧 IP。
+- `run_fix_bi_lan_firewall_admin.ps1`：临时 UAC wrapper，只用于人工触发上述防火墙修复。
 - `install_windows_scheduled_tasks.ps1`
 - `start_metabase_wsl.ps1`
 - `setup_metabase_instance.mjs`
@@ -105,6 +109,7 @@
 - `audit_full_sales_data_integrity.mjs`
 - `audit_product_table_integrity.mjs`
 - `audit_shein_sales_logic.mjs`
+- `repair_shein_sales_summaries.mjs`：按 `lib/shein_sales_validity.mjs` 重算历史 `outputs/shein_fetch/<store>/<date>.json` 的 summary，并补 `isValidSale` / `salesExclusionReason`。默认 dry-run；全历史 `--write` 必须先让用户确认。
 - `backfill_shein_sales.mjs`
 - `backfill_shein_comments_full_history.mjs`
 - `backfill_shein_comment_platform_translations.mjs`

@@ -53,34 +53,70 @@ const marginRuleBase = [
 ];
 const fixedPriceRules = new Map();
 const marginRules = new Map();
+const priceOverrideRules = new Map();
+const storePriceOverrideRules = new Map();
 
 function registerRuleKeys(map, label, value) {
   const keys = [
     compact(label),
     compact(normalizeGoodsSnDetailed(label, {goodsTitle: label}).canonical),
+    compact(modelCode(label)),
   ].filter(Boolean);
   for (const key of keys) map.set(key, value);
 }
 
 for (const [label, value] of fixedPriceBase) registerRuleKeys(fixedPriceRules, label, value);
 for (const [label, value] of marginRuleBase) registerRuleKeys(marginRules, label, value);
+await loadPriceOverrides();
 
 function parseArgs(argv) {
-  const out = {stores: [], activityIds: [], hours: 48, dryRun: false, noClose: false, minDiscountFallback: []};
+  const out = {stores: [], activityIds: [], hours: 48, allOpen: false, includeCoupon: false, dryRun: false, noClose: false, minDiscountFallback: [], priceOverrides: ''};
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--stores') out.stores = String(argv[++i] || '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
     else if (a === '--activity') out.activityIds = String(argv[++i] || '').split(',').map(s => Number(s.trim())).filter(Boolean);
     else if (a === '--hours') out.hours = Number(argv[++i] || 48);
+    else if (a === '--all-open') out.allOpen = true;
+    else if (a === '--include-coupon') out.includeCoupon = true;
     else if (a === '--dry-run') out.dryRun = true;
     else if (a === '--no-close') out.noClose = true;
     else if (a === '--min-discount-fallback') out.minDiscountFallback = String(argv[++i] || '').split(',').map(s => s.trim()).filter(Boolean);
+    else if (a === '--price-overrides') out.priceOverrides = path.resolve(argv[++i] || '');
   }
   return out;
 }
 
 function compact(s) {
   return String(s || '').normalize('NFKC').replace(/\s+/g, '').replace(/[()（）【】\[\]_:：/\\]/g, '').toUpperCase();
+}
+
+function modelCode(s) {
+  return String(s || '').match(/^[A-Z]{1,5}-?\d+[A-Z]?(?:-\d+)?/i)?.[0] || '';
+}
+
+async function loadPriceOverrides() {
+  if (!args.priceOverrides) return;
+  const doc = JSON.parse(await fs.readFile(args.priceOverrides, 'utf8'));
+  const items = Array.isArray(doc.items) ? doc.items : [];
+  for (const item of items) {
+    const label = item.canonical || item.goodsSn || item.supplierNo || '';
+    if (!label || item.targetPrice === undefined || item.targetPrice === null) continue;
+    const storeKeys = [
+      ...(Array.isArray(item.storeKeys) ? item.storeKeys : []),
+      ...(item.storeKey ? [item.storeKey] : []),
+    ].map(x => String(x || '').trim().toUpperCase()).filter(Boolean);
+    if (storeKeys.length) {
+      const before = new Map();
+      registerRuleKeys(before, label, item);
+      for (const key of item.keys || []) before.set(compact(key), item);
+      for (const storeKey of storeKeys) {
+        for (const key of before.keys()) storePriceOverrideRules.set(`${storeKey}:${key}`, item);
+      }
+    } else {
+      registerRuleKeys(priceOverrideRules, label, item);
+      for (const key of item.keys || []) priceOverrideRules.set(compact(key), item);
+    }
+  }
 }
 
 function round2(n) {
@@ -104,9 +140,42 @@ function randomBetween(seed, min, max) {
   return min + stableRandom(seed) * (max - min);
 }
 
+function findManualRule(keys) {
+  for (const k of keys) {
+    if (fixedPriceRules.has(k)) {
+      return {
+        ruleType: 'fixed_price',
+        source: 'fixed_price',
+        base: Number(fixedPriceRules.get(k)),
+        marginTarget: null,
+      };
+    }
+    if (marginRules.has(k)) {
+      const marginTarget = Number(marginRules.get(k));
+      return {
+        ruleType: 'margin',
+        source: `${Math.round(marginTarget * 100)}pct_profit`,
+        base: null,
+        marginTarget,
+      };
+    }
+  }
+  return null;
+}
+
+function discountPctForTarget(current, minDiscount, target) {
+  if (!(current > 0)) return minDiscount;
+  const raw = (1 - target / current) * 100;
+  const pct = Math.floor(raw + 1e-9);
+  return Math.max(minDiscount, pct);
+}
+
 function parseTime(s) {
   if (!s || s === '长期有效') return null;
-  const d = new Date(String(s).replace(/\//g, '-').replace(' ', 'T') + '+08:00');
+  const raw = String(s).trim();
+  const d = /(?:Z|[+-]\d{2}:?\d{2})$/.test(raw)
+    ? new Date(raw.replace(/\//g, '-').replace(' ', 'T'))
+    : new Date(raw.replace(/\//g, '-').replace(' ', 'T') + '+08:00');
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
@@ -371,15 +440,23 @@ async function fetchActivities(cdp, sessionId) {
   }));
 }
 
+function isCouponActivity(a) {
+  const text = [a.name, a.label, a.backendCate].filter(Boolean).join(' ');
+  return /coupon|优惠券/i.test(text);
+}
+
 function withinDeadline(a) {
   if (args.activityIds.length && !args.activityIds.includes(a.activityId)) return false;
+  if (!args.includeCoupon && isCouponActivity(a)) return false;
   if (!args.activityIds.length) {
     if (a.allowGoodsNum <= 0) return false;
     if (a.applyGoodsNum >= a.allowGoodsNum) return false;
   }
   const end = parseTime(a.signEnd);
   if (!end) return false;
-  return end.getTime() >= now.getTime() && end.getTime() <= deadlineMs;
+  if (end.getTime() < now.getTime()) return false;
+  if (args.activityIds.length || args.allOpen) return true;
+  return end.getTime() <= deadlineMs;
 }
 
 async function selectAllGoodsAndNext(cdp, sessionId) {
@@ -453,6 +530,35 @@ async function selectAllGoodsAndNext(cdp, sessionId) {
         totalGoods: Number((t.match(/总计\\s*(\\d+)\\s*个/) || [])[1] || 0),
       };
     };
+    const selectUncheckedVisibleRows = async () => {
+      let clicks = 0;
+      const rowChecks = [...document.querySelectorAll('tr input[type=checkbox]')]
+        .filter(x => !x.checked && !isDisabled(x));
+      for (const rowCb of rowChecks) {
+        fire(rowCb);
+        clicks++;
+        await sleep(100);
+      }
+      return clicks;
+    };
+    const tableScroller = () => [...document.querySelectorAll('div,main,section')]
+      .filter(el => el.querySelectorAll('tr input[type=checkbox]').length >= 2 && el.scrollHeight > el.clientHeight + 40)
+      .sort((a,b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight))[0];
+    const sweepVirtualRows = async totalGoods => {
+      const scroller = tableScroller();
+      if (!scroller) return 0;
+      let clicks = 0;
+      const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      for (let top = 0, guard = 0; guard < 80 && top <= max + 30; guard++, top += 360) {
+        scroller.scrollTop = Math.min(top, max);
+        scroller.dispatchEvent(new Event('scroll', {bubbles:true}));
+        await sleep(260);
+        clicks += await selectUncheckedVisibleRows();
+        const selectedNow = parseSelected().selectedCount;
+        if (totalGoods && selectedNow >= totalGoods) break;
+      }
+      return clicks;
+    };
     let pages = 0;
     let selectedClicks = 0;
     const totalPages = maxPage();
@@ -466,12 +572,9 @@ async function selectAllGoodsAndNext(cdp, sessionId) {
         selectedClicks++;
         await sleep(600);
       }
-      const rowChecks = [...document.querySelectorAll('tr input[type=checkbox]')]
-        .filter(x => !x.checked && !isDisabled(x));
-      for (const rowCb of rowChecks) {
-        fire(rowCb);
-        selectedClicks++;
-        await sleep(120);
+      selectedClicks += await selectUncheckedVisibleRows();
+      if (total.totalGoods && parseSelected().selectedCount < total.totalGoods) {
+        selectedClicks += await sweepVirtualRows(total.totalGoods);
       }
       pages++;
     }
@@ -494,30 +597,69 @@ function computeTarget(storeKey, activityId, row) {
   const keys = [
     compact(supplier),
     compact(canonical),
+    compact(modelCode(supplier)),
+    compact(modelCode(canonical)),
     compact(normalized.rawGoodsSn),
   ].filter(Boolean);
   const minDiscountFallbackNeedles = (args.minDiscountFallback || []).map(compact).filter(Boolean);
   const useMinDiscountFallback = minDiscountFallbackNeedles.some(needle => keys.some(k => k.includes(needle) || needle.includes(k)));
   const seed = `${storeKey}:${activityId}:${row.skc}:${supplier}`;
+  const current = Number(row.currentPrice || 0);
+  const minDiscount = Number(row.minDiscount || 10);
+  const manualRule = findManualRule(keys);
+  const override = manualRule
+    ? null
+    : (keys.map(k => storePriceOverrideRules.get(`${storeKey}:${k}`)).find(Boolean)
+      || keys.map(k => priceOverrideRules.get(k)).find(Boolean));
+  if (override) {
+    const targetBase = Number(override.targetPrice);
+    const cost = override.cost === null || override.cost === undefined ? null : Number(override.cost);
+    const marginFloor = override.minMarginFloor === null || override.minMarginFloor === undefined ? null : Number(override.minMarginFloor);
+    if (!Number.isFinite(targetBase) || targetBase <= 0) {
+      return {ok: false, reason: '覆盖价无效', supplierNo: supplier, canonical};
+    }
+    let target = round2(targetBase);
+    let platformAdjusted = false;
+    if (current > 0 && minDiscount > 0) {
+      const maxPrice = floor2(current * (1 - minDiscount / 100));
+      if (target > maxPrice) {
+        target = maxPrice;
+        platformAdjusted = true;
+      }
+    }
+    const projectedMargin = cost && target > 0 ? (target - cost) / target : null;
+    const floorBreached = marginFloor !== null && projectedMargin !== null && projectedMargin < marginFloor;
+    const discountPct = discountPctForTarget(current, minDiscount, target);
+    return {
+      ok: true,
+      supplierNo: supplier,
+      canonical,
+      source: override.rule || 'price_override',
+      ruleType: 'price_override',
+      basePrice: targetBase,
+      randomOffset: 0,
+      marginTarget: null,
+      marginUsed: projectedMargin === null ? null : round2(projectedMargin * 100),
+      currentPrice: current,
+      targetPrice: target,
+      targetPriceText: target.toFixed(2),
+      discountPct,
+      minDiscount,
+      platformAdjusted,
+      minMarginFloor: marginFloor === null ? null : round2(marginFloor * 100),
+      floorBreached,
+    };
+  }
   let source = '30pct_profit';
   let ruleType = 'margin';
   let base = null;
   let marginTarget = DEFAULT_MARGIN_TARGET;
   let marginUsed = null;
-  for (const k of keys) {
-    if (fixedPriceRules.has(k)) {
-      base = Number(fixedPriceRules.get(k));
-      ruleType = 'fixed_price';
-      source = 'fixed_price';
-      marginTarget = null;
-      break;
-    }
-    if (marginRules.has(k)) {
-      marginTarget = Number(marginRules.get(k));
-      ruleType = 'margin';
-      source = `${Math.round(marginTarget * 100)}pct_profit`;
-      break;
-    }
+  if (manualRule) {
+    base = manualRule.base;
+    ruleType = manualRule.ruleType;
+    source = manualRule.source;
+    marginTarget = manualRule.marginTarget;
   }
   let cost = null;
   if (base === null) {
@@ -566,8 +708,6 @@ function computeTarget(storeKey, activityId, row) {
   let target = ruleType === 'fixed_price'
     ? round2(base + offset)
     : round2(cost / (1 - marginUsed));
-  const current = Number(row.currentPrice || 0);
-  const minDiscount = Number(row.minDiscount || 10);
   let platformAdjusted = false;
   if (current > 0 && minDiscount > 0) {
     const maxPrice = floor2(current * (1 - minDiscount / 100));
@@ -576,9 +716,7 @@ function computeTarget(storeKey, activityId, row) {
       platformAdjusted = true;
     }
   }
-  const discountPct = current > 0
-    ? Math.max(minDiscount, Math.floor((1 - target / current) * 100 + 1e-9))
-    : minDiscount;
+  const discountPct = discountPctForTarget(current, minDiscount, target);
   return {
     ok: true,
     supplierNo: supplier,
@@ -604,15 +742,25 @@ async function collectVisibleRows(cdp, sessionId) {
     for (const tr of document.querySelectorAll('tr')) {
       const cells = [...tr.querySelectorAll('td')].map(td => td.innerText || '');
       if (cells.length < 6) continue;
-      const idx = Number((cells[0].match(/\\d+/) || [])[0]);
-      const info = cells[1] || '';
+      const rowText = tr.innerText || cells.join('\\n');
+      const idx = Number(((cells[0] || rowText).match(/\\d+/) || [])[0]);
+      const info = rowText;
+      const inputs = [...tr.querySelectorAll('input')];
       const skc = (info.match(/SKC:\\s*([a-z]{2}\\d+)/i) || [])[1] || '';
       const supplierNo = (info.match(/供方货号:\\s*([^\\n\\t]+)/) || [])[1]?.trim() || '';
-      const currentPrice = Number(((cells[3] || '').match(/([\\d.]+)/) || [])[1] || 0);
-      const minDiscount = Number(((cells[5] || '').match(/降幅要求[:：]\\s*(\\d+(?:\\.\\d+)?)%/) || [])[1] || 10);
-      const inputs = [...tr.querySelectorAll('input')];
-      if (!idx || !skc || inputs.length < 2) continue;
-      rows.push({idx, skc, supplierNo, currentPrice, minDiscount, goodsName: info.slice(0, 200)});
+      const priceCell = cells.find(c => /SAR\\s*[\\d.]+/i.test(c)) || '';
+      const currentPrice = Number((priceCell.match(/SAR\\s*([\\d.]+)/i) || (cells[3] || '').match(/([\\d.]+)/) || [])[1] || 0);
+      const textInputs = inputs.filter(x => /^(text|number)$/.test(x.type || 'text'));
+      const radioInputs = inputs.filter(x => x.type === 'radio');
+      const discountText = cells.join(' ');
+      const discountMatches = [...discountText.matchAll(/(\\d+(?:\\.\\d+)?)%\\s*价格降幅/g)].map(m => Number(m[1]));
+      let minDiscount = Number(((cells[5] || '').match(/降幅要求[:：]\\s*(\\d+(?:\\.\\d+)?)%/) || [])[1] || 0);
+      if (!minDiscount && discountMatches.length) minDiscount = Math.max(...discountMatches);
+      if (!minDiscount) minDiscount = 10;
+      let editMode = 'price';
+      if (radioInputs.length >= 2 && /VIP档|普通档/.test(discountText)) editMode = 'vip_discount';
+      if (!idx || !skc || textInputs.length < 1) continue;
+      rows.push({idx, skc, supplierNo, currentPrice, minDiscount, editMode, goodsName: info.slice(0, 200)});
     }
     return rows;
   `);
@@ -631,23 +779,44 @@ async function fillVisibleRows(cdp, sessionId, fills) {
       el.dispatchEvent(new Event('change', {bubbles:true}));
       el.dispatchEvent(new FocusEvent('blur', {bubbles:true}));
     };
+    const clickInput = el => {
+      if (!el) return;
+      el.click();
+      el.dispatchEvent(new Event('input', {bubbles:true}));
+      el.dispatchEvent(new Event('change', {bubbles:true}));
+    };
     const done = [];
     for (const tr of document.querySelectorAll('tr')) {
       const cells = [...tr.querySelectorAll('td')].map(td => td.innerText || '');
-      const idx = Number((cells[0]?.match(/\\d+/) || [])[0]);
+      const rowText = tr.innerText || cells.join('\\n');
+      const idx = Number(((cells[0] || rowText).match(/\\d+/) || [])[0]);
       if (!fills.has(idx)) continue;
       const inputs = [...tr.querySelectorAll('input')];
-      if (inputs.length < 2) continue;
+      const textInputs = inputs.filter(x => /^(text|number)$/.test(x.type || 'text'));
+      const radioInputs = inputs.filter(x => x.type === 'radio');
+      if (textInputs.length < 1) continue;
       const f = fills.get(idx);
-      setNativeValue(inputs[1], String(f.discountPct));
-      await sleep(30);
-      setNativeValue(inputs[0], f.targetPriceText);
-      await sleep(220);
-      if (f.ruleType === 'fixed_price') {
-        setNativeValue(inputs[0], f.targetPriceText);
-        await sleep(80);
+      if (f.editMode === 'vip_discount') {
+        clickInput(radioInputs[1] || radioInputs[0]);
+        await sleep(30);
+        const freshTextInputs = [...tr.querySelectorAll('input')].filter(x => /^(text|number)$/.test(x.type || 'text'));
+        const discountInput = freshTextInputs.find(x => !String(x.className || '').includes('ant-input-number-input')) || freshTextInputs[0];
+        setNativeValue(discountInput, String(f.discountPct));
+        await sleep(160);
+        done.push({idx, price: f.targetPriceText, discount: String(f.discountPct), editMode: f.editMode});
+      } else {
+        const priceInput = textInputs[0];
+        const discountInput = textInputs[1] || inputs[1];
+        setNativeValue(discountInput, String(f.discountPct));
+        await sleep(30);
+        setNativeValue(priceInput, f.targetPriceText);
+        await sleep(220);
+        if (f.ruleType === 'fixed_price') {
+          setNativeValue(priceInput, f.targetPriceText);
+          await sleep(80);
+        }
+        done.push({idx, price: f.targetPriceText, discount: String(f.discountPct), editMode: f.editMode || 'price'});
       }
-      done.push({idx, price: f.targetPriceText, discount: String(f.discountPct)});
     }
     return done;
   `, fills);
@@ -683,6 +852,14 @@ async function scrollTo(cdp, sessionId, top) {
 async function fillEditPage(cdp, sessionId, storeKey, activityId) {
   const ready = await waitFor(cdp, sessionId, `document.body && document.body.innerText.includes('提报的活动价格')`, 30_000);
   if (!ready) return {ok: false, reason: '编辑页未加载'};
+  const rowEditorReady = await waitFor(cdp, sessionId, `
+    [...document.querySelectorAll('tr')].some(tr => {
+      const cells = tr.querySelectorAll('td');
+      const textInputs = [...tr.querySelectorAll('input')].filter(x => /^(text|number)$/.test(x.type || 'text'));
+      return cells.length >= 6 && textInputs.length >= 1;
+    })
+  `, 60_000);
+  if (!rowEditorReady) return {ok: false, reason: '编辑表格未加载'};
   await sleep(1500);
 
   const expectedTotal = await evalJs(cdp, sessionId, `
@@ -732,11 +909,20 @@ async function fillEditPage(cdp, sessionId, storeKey, activityId) {
     const rows = await evalJs(cdp, sessionId, `
       const rows = [];
       for (const tr of document.querySelectorAll('tr')) {
-      const cells = [...tr.querySelectorAll('td')].map(td => td.innerText || '');
-      const idx = Number((cells[0]?.match(/\\d+/) || [])[0]);
-      const inputs = [...tr.querySelectorAll('input')];
-      if (!idx || inputs.length < 2) continue;
-        rows.push({idx, price: inputs[0].value, discount: String(parseInt(inputs[1].value, 10))});
+        const cells = [...tr.querySelectorAll('td')].map(td => td.innerText || '');
+        const rowText = tr.innerText || cells.join('\\n');
+        const idx = Number(((cells[0] || rowText).match(/\\d+/) || [])[0]);
+        const inputs = [...tr.querySelectorAll('input')];
+        const textInputs = inputs.filter(x => /^(text|number)$/.test(x.type || 'text'));
+        const radioInputs = inputs.filter(x => x.type === 'radio');
+        if (!idx || textInputs.length < 1) continue;
+        const discountText = cells.join(' ');
+        const editMode = radioInputs.length >= 2 && /VIP档|普通档/.test(discountText) ? 'vip_discount' : 'price';
+        if (editMode === 'vip_discount') {
+          const discountInput = textInputs.find(x => !String(x.className || '').includes('ant-input-number-input')) || textInputs[0];
+          const priceInput = textInputs.find(x => String(x.className || '').includes('ant-input-number-input')) || textInputs[1];
+          rows.push({idx, price: priceInput?.value || '', discount: String(parseInt(discountInput?.value || '', 10)), editMode});
+        } else rows.push({idx, price: textInputs[0].value, discount: String(parseInt((textInputs[1] || inputs[1]).value, 10)), editMode});
       }
       return rows;
     `);
@@ -750,6 +936,20 @@ async function fillEditPage(cdp, sessionId, storeKey, activityId) {
   for (const [idx, t] of targets.entries()) {
     const r = verifyRows.get(idx);
     const expectedByDiscount = floor2(t.currentPrice * (1 - t.discountPct / 100)).toFixed(2);
+    if (t.editMode === 'vip_discount') {
+      const actualPriceNum = Number(r?.price);
+      const targetPriceNum = Number(t.targetPriceText);
+      const discountPriceNum = Number(expectedByDiscount);
+      const priceOk = r && Number.isFinite(actualPriceNum) && (
+        Math.abs(actualPriceNum - targetPriceNum) <= 0.55 ||
+        Math.abs(actualPriceNum - discountPriceNum) <= 0.55
+      );
+      const discountOk = r && r.discount === String(t.discountPct);
+      if (!r || (!priceOk && !discountOk)) {
+        mismatches.push({idx, expectedPrice: t.targetPriceText, actualPrice: r?.price, expectedDiscount: String(t.discountPct), actualDiscount: r?.discount, supplierNo: t.supplierNo, skc: t.skc, editMode: t.editMode});
+      }
+      continue;
+    }
     if (r && r.price === expectedByDiscount && r.discount === String(t.discountPct) && r.price !== t.targetPriceText) {
       platformRewrites.push({idx, expectedPrice: t.targetPriceText, actualPrice: r.price, discount: String(t.discountPct), supplierNo: t.supplierNo, skc: t.skc});
       continue;
@@ -803,6 +1003,8 @@ const summary = {
   createdAt: new Date().toISOString(),
   now: now.toISOString(),
   hours: args.hours,
+  allOpen: args.allOpen,
+  includeCoupon: args.includeCoupon,
   stores: [],
 };
 
@@ -818,12 +1020,14 @@ for (const store of selectedStores) {
   await sleep(800);
   const cdp = await connectStore(store);
   try {
-    const {sessionId} = await newPage(cdp, LIST_URL);
-    const activities = await fetchActivities(cdp, sessionId);
+    const listPage = await newPage(cdp, LIST_URL);
+    const activities = await fetchActivities(cdp, listPage.sessionId);
+    await cdp.call('Target.closeTarget', {targetId: listPage.targetId}).catch(() => {});
     const due = activities.filter(withinDeadline);
     const storeResult = {store: store.storeKey, shopName: store.shopName, port: store.port, dueActivities: due, results: []};
     summary.stores.push(storeResult);
-    console.log(`[${store.storeKey}] 2天内截止活动：${due.map(a => `${a.activityId}-${a.name}`).join('；') || '无'}`);
+    const scopeLabel = args.allOpen ? '所有未截止可报名活动' : (args.activityIds.length ? '指定活动' : `${args.hours}小时内截止活动`);
+    console.log(`[${store.storeKey}] ${scopeLabel}：${due.map(a => `${a.activityId}-${a.name}`).join('；') || '无'}`);
     for (const activity of due) {
       console.log(`[${store.storeKey}] 处理 ${activity.activityId} ${activity.name}`);
       const result = await processActivity(cdp, store, activity).catch(err => ({ok: false, store: store.storeKey, activity, reason: err.message, stack: err.stack}));

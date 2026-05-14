@@ -658,7 +658,7 @@ latest_box AS (
   ORDER BY b.fetched_at DESC NULLS LAST, b.batch_id DESC
   LIMIT 1
 ),
-store_agg AS (
+store_agg_raw AS (
   SELECT
     standard_goods_sn,
     match_key,
@@ -675,7 +675,22 @@ store_agg AS (
     AND coalesce(standard_goods_sn,'') <> ''
   GROUP BY standard_goods_sn, match_key
 ),
-box_agg AS (
+store_agg AS (
+  SELECT
+    max(standard_goods_sn) AS standard_goods_sn,
+    match_key,
+    max(sample_title_cn) FILTER (WHERE coalesce(sample_title_cn,'') <> '') AS sample_title_cn,
+    sum(coalesce(loose_total_qty,0)) AS loose_total_qty,
+    sum(coalesce(loose_sellable_qty,0)) AS loose_sellable_qty,
+    sum(coalesce(rtv_qty,0)) AS rtv_qty,
+    sum(coalesce(damaged_qty,0)) AS damaged_qty,
+    sum(coalesce(scrap_qty,0)) AS scrap_qty,
+    string_agg(DISTINCT nullif(loose_warehouses,''), ' / ') AS loose_warehouses,
+    max(store_snapshot_date) AS store_snapshot_date
+  FROM store_agg_raw
+  GROUP BY match_key
+),
+box_agg_raw AS (
   SELECT
     standard_goods_sn,
     match_key,
@@ -689,6 +704,19 @@ box_agg AS (
   WHERE batch_id = (SELECT batch_id FROM latest_box)
     AND coalesce(standard_goods_sn,'') <> ''
   GROUP BY standard_goods_sn, match_key
+),
+box_agg AS (
+  SELECT
+    max(standard_goods_sn) AS standard_goods_sn,
+    match_key,
+    max(sample_title_cn) FILTER (WHERE coalesce(sample_title_cn,'') <> '') AS sample_title_cn,
+    sum(coalesce(box_total_qty,0)) AS box_total_qty,
+    sum(coalesce(full_carton_qty,0)) AS full_carton_qty,
+    sum(coalesce(box_count,0))::bigint AS box_count,
+    string_agg(DISTINCT nullif(box_warehouses,''), ' / ') AS box_warehouses,
+    max(box_snapshot_date) AS box_snapshot_date
+  FROM box_agg_raw
+  GROUP BY match_key
 )
 SELECT
   coalesce(s.standard_goods_sn, b.standard_goods_sn) AS standard_goods_sn,

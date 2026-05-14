@@ -17,6 +17,7 @@ import fssync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import {summarizeSalesGoodsRows} from '../lib/shein_sales_validity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STATE_PATH = path.join(ROOT, 'state', 'lark_base.json');
@@ -177,16 +178,18 @@ async function loadStoreDay(store, date) {
   const file = path.join(FETCH_DIR, store.storeKey, `${date}.json`);
   const obj = await loadJsonIfExists(file);
   const summary = obj?.summary || {};
+  const goodsSales = Array.isArray(obj?.goodsRows) ? summarizeSalesGoodsRows(obj.goodsRows) : null;
+  const salesSar = goodsSales ? round2(goodsSales.salesSar) : round2(summary.salesSar || 0);
   const mtime = fssync.existsSync(file) ? fssync.statSync(file).mtime : null;
   return {
     storeKey: store.storeKey,
     shopName: store.shopName,
     groupKey: store.groupKey,
     date,
-    salesSar: round2(summary.salesSar || 0),
-    salesRmb: round2((summary.salesSar || 0) * FX_SAR_TO_RMB),
-    orders: Number(summary.positiveAmountOrderCount || 0),
-    qty: Number(summary.quantityPositiveAmount || 0),
+    salesSar,
+    salesRmb: round2(salesSar * FX_SAR_TO_RMB),
+    orders: Number(goodsSales?.positiveAmountOrderCount ?? summary.positiveAmountOrderCount ?? 0),
+    qty: Number(goodsSales?.quantityPositiveAmount ?? summary.quantityPositiveAmount ?? 0),
     goodsLines: Number(summary.goodsLineCount || 0),
     missing: !obj?.summary,
     fetchTime: obj?.fetchTime || null,

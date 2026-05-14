@@ -89,6 +89,7 @@ git clone https://github.com/dushengyi1993/shein-sales-bi.git
 - 销售抓取先保持 WebAPI 直连优先；官方 OpenAPI 权限齐全的数据域再逐步替换成官方 API。
 - Cookie session、OpenAPI 密钥和飞书配置放在云服务器环境变量、密钥管理服务或加密本地文件中，禁止提交 GitHub。
 - 数据库存 PostgreSQL。
+- 当前完整 BI 迁移必须同时考虑 Metabase 和 BI Portal：Metabase 不是可直接删除的可选组件，仍承接深度分析、筛选和自由钻取；BI Portal 承接日常经营入口。
 - BI 动作状态从 `state/bi_action_state.json` 改为 PostgreSQL 表。
 - 通过 HTTPS、账号权限、备份和监控来承载团队使用。
 
@@ -98,7 +99,7 @@ git clone https://github.com/dushengyi1993/shein-sales-bi.git
 
 - WebAPI 全 16 店销售抓取：`2026-05-08` 切片，耗时 `15.09s`，项目 Node 峰值约 `60.44MB` working set / `55.82MB` private，未额外启动店铺浏览器；证据文件 `outputs/cloud-migration/webapi-allstores-resource-20260511-201715.json`。
 - PostgreSQL 业务库 `shein_bi`：约 `957MB`；Metabase 配置库：约 `32MB`。
-- 容器静态占用参考：`shein-metabase` 约 `1.11GiB`，`shein-warehouse-db` 约 `167MB`，`shein-metabase-db` 约 `65MB`。
+- 容器静态占用参考：`shein-metabase` 约 `1.11GiB`，`shein-warehouse-db` 约 `167MB`，`shein-metabase-db` 约 `65MB`；服务器选型要按 `PostgreSQL + Metabase + BI Portal + Node WebAPI` 估算，不能按“去掉 Metabase”估算。
 - `D:\SheinBI\docker-data\docker-data.ext4` 的 `80GB` 是虚拟盘容量上限，不等于当前真实业务数据已经占用 80GB。
 
 ## 当前版本迁移边界
