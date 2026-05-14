@@ -1,0 +1,19 @@
+{
+  "DSY": {
+    "title": "SHEIN DSY经营看板（自动刷新）",
+    "document_id": "CZuedngCko0ZR0xNXMXcbYdqnce",
+    "url": "https://zcnm3ts63aph.feishu.cn/docx/CZuedngCko0ZR0xNXMXcbYdqnce",
+    "month": "2026-04",
+    "updated_at": "2026-04-27T02:30:51.710Z",
+    "markdown_file": "outputs/reports/lark-ops-dashboard-DSY-2026-04.md",
+    "action": "update"
+  },
+  "default": {
+    "title": "SHEIN DSY经营看板（自动刷新）",
+    "document_id": "CZuedngCko0ZR0xNXMXcbYdqnce",
+    "url": "https://zcnm3ts63aph.feishu.cn/docx/CZuedngCko0ZR0xNXMXcbYdqnce",
+    "group": "DSY",
+    "month": "2026-04",
+    "updated_at": "2026-04-27T02:30:51.710Z"
+  }
+}

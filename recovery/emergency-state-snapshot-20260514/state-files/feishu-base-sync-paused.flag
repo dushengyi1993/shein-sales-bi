@@ -1,0 +1,5 @@
+paused=true
+pausedAt=2026-05-05 23:32:09 +08:00
+reason=User requested pausing Feishu Base/table/dashboard document tasks; Lark daily reports continue.
+scope=Skip Feishu Base fact/product/month/display/dashboard writes; keep SHEIN fetch, BI refresh, Lark IM daily reports and issue alerts.
+resume=Delete this flag or unset SHEIN_FEISHU_BASE_PAUSED to resume Base/table/dashboard writes.

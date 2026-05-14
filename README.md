@@ -100,6 +100,7 @@
 - `scripts/`：抓取、同步、看板、日报、BI 入仓、门户生成、定时任务脚本。
 - `docs/`：数据模型、运行架构、BI 架构、运维说明、参考表结构。
 - `docs/migration-and-restore.md`：GitHub 托管后的迁移/复用边界；说明哪些文件不上传、换电脑或上云时如何补齐运行数据和密钥。
+- `docs/emergency-recovery-backup.md`：硬盘故障应急恢复边界；说明哪些本地数据可重建、哪些需要数据库 dump 或加密备份。
 - `infra/`：Metabase、PostgreSQL 数据仓库和 Docker 相关配置。
 - `skills/shein-sales-ops/`：项目专用 skill，保存业务口径和避坑经验。
 - `state/`：本地运行状态。
@@ -188,6 +189,7 @@
 ## 关键文档
 
 - 运行环境架构：`docs/runtime-architecture.md`
+- 应急恢复备份边界：`docs/emergency-recovery-backup.md`
 - BI 系统架构：`docs/bi-system-architecture.md`
 - BI 运维说明：`docs/bi-system-operations.md`
 - BI 门户 UI 当前口径：`docs/bi-portal-ui-current.md`

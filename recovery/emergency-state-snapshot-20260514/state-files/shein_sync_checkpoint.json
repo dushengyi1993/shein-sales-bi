@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "groups": {
+    "DSY": {
+      "lastFinalDate": "2026-05-13",
+      "lastIntradayDate": "2026-05-14",
+      "lastWatchdogAt": "2026-05-14T01:20:06.037Z",
+      "lastSuccessAt": "2026-05-14T12:10:09.263Z",
+      "lastSuccessMode": "intraday",
+      "lastSuccessDate": "2026-05-14"
+    },
+    "LGM": {
+      "lastSuccessAt": "2026-05-14T12:10:14.196Z",
+      "lastSuccessMode": "intraday",
+      "lastSuccessDate": "2026-05-14",
+      "lastIntradayDate": "2026-05-14",
+      "lastFinalDate": "2026-05-13",
+      "lastWatchdogAt": "2026-05-14T01:20:06.178Z"
+    },
+    "ALL": {
+      "lastSuccessAt": "2026-05-11T12:17:30.678Z",
+      "lastSuccessMode": "intraday",
+      "lastSuccessDate": "2026-05-08",
+      "lastIntradayDate": "2026-05-08"
+    }
+  },
+  "updatedAt": "2026-05-14T12:10:14.196Z"
+}
