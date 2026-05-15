@@ -162,7 +162,7 @@
 - 售后/退货金额不能直接用 SHEIN 售后列表展示价 `priceAmountTotal/priceAmount`；优先使用接口里的订单实收/预计收入字段 `checkEstimateIncomeMoney`、`estimatedIncomeAmount`，没有实收字段时才回退展示价。例：`NM / GSH1X61950004DF / SK-10075电油炸锅` 售后展示价 `250 SAR`，订单实收为 `130 SAR`。
 - 售后/退货统一口径：只要买家发起售后且状态不是 `已取消`，就默认计入退货/反转，包含 `待买家退货`、`待交接`、`待卖家处理`、`待买家选择方案` 等未落定状态；若后续最终取消，再在下一次业务域同步后自动从净成交、净订单、净销量和利润反转中扣回。
 - 首页四个矩阵支持口径切换并联动趋势：销售额可切 净销售额/总销售额，订单销量可切 净销量/总销量，退货售后可切 售后申请时间/订单创建时间，真实利润可切 退货全损保守/RTV已收可二售测算；趋势图按当前所选口径同步变化。
-- 成本表文件放在 `inputs/costs/`，当前正式文件为 `inputs/costs/成本计算表.xlsx`，模板为 `inputs/costs/SHEIN成本表模板.xlsx`；导入脚本为 `scripts/import_product_costs.mjs`，模板生成脚本为 `scripts/create_cost_template.mjs`。
+- 成本表文件放在 `inputs/costs/`，当前正式文件为 `inputs/costs/成本.xlsx`，模板为 `inputs/costs/SHEIN成本表模板.xlsx`；导入脚本为 `scripts/import_product_costs.mjs`，模板生成脚本为 `scripts/create_cost_template.mjs`。
 - 同货号分批发货时，单位成本 = 完整批次总成本 / 完整批次发货总数；缺“头程运输费金额”的批次只保留缺口，不参与单位成本均摊。
 - 成本表中的 `单台总成本（SAR）` 代表单批单件完整成本；入库时先乘以该批数量还原批次总成本，最终仍按所有完整批次加权平均。成本匹配要兼容销售端标准货号和成本表型号代码，匹配键由 `dim.product_match_key()` 提供。
 

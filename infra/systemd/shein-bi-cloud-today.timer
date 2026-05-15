@@ -1,8 +1,8 @@
 [Unit]
-Description=Run SHEIN BI cloud intraday refresh every two hours in office hours
+Description=Run SHEIN BI cloud intraday refresh every two hours around the clock
 
 [Timer]
-OnCalendar=*-*-* 08,10,12,14,16,18,20,22:10:00
+OnCalendar=*-*-* 00,02,04,06,08,10,12,14,16,18,20,22:10:00
 Persistent=true
 Unit=shein-bi-cloud-today.service
 

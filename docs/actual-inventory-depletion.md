@@ -17,7 +17,7 @@
 
 ### 成本表批次
 
-正式成本表：`inputs/costs/成本计算表.xlsx`。
+正式成本表：`inputs/costs/成本.xlsx`。
 
 关键字段：
 

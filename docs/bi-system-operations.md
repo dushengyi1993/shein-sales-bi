@@ -156,7 +156,7 @@
 ### 9.1 成本文件入口
 
 - 成本文件统一放在 `inputs/costs/`。
-- 当前正式成本文件：`inputs/costs/成本计算表.xlsx`。用户以后更新成本表时，优先替换这个文件；导入脚本会先清理同源文件旧记录再写入，避免旧批次残留。
+- 当前正式成本文件：`inputs/costs/成本.xlsx`。用户以后更新成本表时，优先替换这个文件；导入脚本会先清理同源文件旧记录再写入，避免旧批次残留。
 - 模板文件：`inputs/costs/SHEIN成本表模板.xlsx`。
 - 导入脚本：`scripts/import_product_costs.mjs`。
 - 手动导入单个文件示例：`node .\scripts\import_product_costs.mjs --file .\inputs\costs\你的成本表.xlsx`。
@@ -275,6 +275,3 @@
 - 当前仓库核验结果：`fact.product_comment` 共 `1796` 条，覆盖 16 店，最早评价日期 `2025-10-04`、最新评价日期 `2026-05-04`；`1794` 条有 SHEIN 平台译文，剩余 2 条为原文为空，无需翻译。
 - 全量补抓脚本：`scripts/backfill_shein_comments_full_history.mjs`；日常业务域同步脚本：`scripts/fetch_shein_business_domains.mjs` + `scripts/load_bi_business_domains.mjs`，抓取时同时合并平台译文。
 - SHEIN 评论接口在大时间窗下可能返回 `mgs97906 数据量太多...缩小评论时间`，因此全量补抓必须按日期窗口分段，并在必要时自动拆分。
-
-
-

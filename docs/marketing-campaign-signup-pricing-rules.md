@@ -105,7 +105,7 @@
 ## 四、成本来源规则
 
 - 成本来源以当前正式成本链路为准：
-  - 正式成本文件：`inputs/costs/成本计算表.xlsx`
+  - 正式成本文件：`inputs/costs/成本.xlsx`
   - 营销活动成本映射：`tmp/mbrs/marketing-cost-map.json`
   - 营销活动成本映射生成脚本：`scripts/marketing/build_marketing_cost_map.py`
   - BI 导入脚本：`scripts/import_product_costs.mjs`
