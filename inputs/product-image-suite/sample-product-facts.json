@@ -9,7 +9,12 @@
       ],
       "market": "KSA",
       "platform": "SHEIN",
-      "reference_policy": "strict_copy_shape_angle",
+      "reference_policy": "reference_image_only_no_manual_color_or_shape",
+      "prompt_delivery_mode": "text_only",
+      "scene_constraints": [
+        "按用户允许的场景生成；如用户限制居家/办公室/旅行等，不擅自拓展"
+      ],
+      "generation_safety_mode": "bright_commercial_sexy_safe_to_render",
       "verified_facts": [
         {
           "claim": "Portable electric espresso machine",

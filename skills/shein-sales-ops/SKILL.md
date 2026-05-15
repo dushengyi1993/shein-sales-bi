@@ -40,7 +40,7 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - `00:10`：前一天最终版；若存在 `state/feishu-base-sync-paused.flag`，只抓本地数据并刷新 BI，不写飞书 Base / 看板。自 `2026-05-11` 起还会回核 D-2 稳定销售切片（`third-day-stable-recheck`），并通过 `run_bi_after_feishu_sync.ps1 -ExtraSalesDates` 补刷 BI。
 - `04:20`：ET 货代仓每日同步，任务名 `SHEIN-Sales-ETForwarder-0420`；遇到 ET 登录态过期时，`scripts/fetch_et_forwarder.mjs` 会调用 `scripts/et_login_helper.py` 用已保存密码 + 本地 OCR 自动登录。
 - `05:30`：链接管理 16 店每日同步，任务名 `SHEIN-Sales-15Stores-LinkManagement-0530`，只写本地 / PostgreSQL / BI，不再写飞书链接表。
-- `07:00`：BI 每日流水线，任务名 `SHEIN-BI-Daily-Pipeline-0700`；包含 ET/SHEIN 入仓、RTV 换单自动复核、BI 体检、本地门户和晨报刷新；RTV 复核允许较长时间运行。
+- `07:00`：BI 每日流水线，任务名 `SHEIN-BI-Daily-Pipeline-0700`；包含 ET/SHEIN 入仓、RTV 换单自动复核、BI 体检、本地门户和晨报刷新；RTV 复核允许较长时间运行。V1 门户生成放在流水线末尾单次执行，默认 `SHEIN_BI_PORTAL_TIMEOUT_MS=900000`，不要恢复多个状态点重复生成页面。
 - `2026-05-09 05:30` 链接/业务域任务和 `2026-05-09 07:00` BI 每日流水线已自动跑通；`2026-05-09 04:20` ET 任务的同源探测问题已修复，`11:31:49` 手动触发计划任务入口复验成功。
 - `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10`：当天滚动抓取；Base 暂停期间只抓本地数据并刷新 BI；后置 BI 默认 `-SkipRtvVerify`，不要让 RTV 复核耗时挡住滚动销售看板。
 - 日报：早上 08:10 同步成功后自动发送；上午后续成功同步可补发一次，用 `state/daily-report-sent-YYYYMMDD.flag` 防重复。Base 暂停期间照常发送 IM 文字和图片日报，只跳过写 `飞书日报记录` 表。
@@ -73,8 +73,8 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 单组同步：`node scripts/run_sales_sync_job.mjs --mode intraday --group DSY`
 - 16 店当天同步：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_intraday_dsy.ps1`
 - BI 每日流水线：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_bi_daily_pipeline.ps1`
-- 生成 BI 门户：`node scripts/generate_bi_portal.mjs`
-- 生成 V2.1 独立设计预览：`node scripts/generate_bi_portal_v2.mjs`；V2.1 只读复用 `outputs/bi-portal/data.json`，用户确认前不得替换 V1 或改生产调度。自 `2026-05-14` 起，V2 当前验收范围先限定首页：必须复刻 V1 首页功能/操作逻辑；其它子页尚未完成全量复刻。
+- 生成 BI 门户：`$env:SHEIN_BI_PORTAL_TIMEOUT_MS='900000'; node scripts/generate_bi_portal.mjs`
+- 生成 V2.1 独立设计预览：`node scripts/generate_bi_portal_v2.mjs`；V2.1 只读复用 `outputs/bi-portal/data.json`，用户确认前不得替换 V1 或改生产调度。自 `2026-05-14` 起，V2 当前验收范围先限定首页：必须复刻 V1 首页功能/操作逻辑；其它子页尚未完成全量复刻。V2 暂时不跟随日常同步自动刷新，只有用户明确要求开发/优化/验收 V2 时才生成或维护。
 - ET 每日同步：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_et_forwarder_daily.ps1`
 - RTV 换单复核：`node scripts/verify_shein_rtv_tracking.mjs --priority high,medium,low --include-no-cases --limit 120 --case-limit 60 --max-runtime-ms 3600000`
 - 营销活动报名补填：规则见 `docs/marketing-campaign-signup-pricing-rules.md`；当前执行入口为 `node scripts/marketing/dsy_marketing_deadline_fill.mjs --stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --hours 48 --price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD.json --min-discount-fallback SK-13034`。选择商品页必须先切到 `500 条/页` 再全选并核对 `总计 N 个 = 已选商品 N 个`；只允许填价和复核，不得点击最终 `提交报名`。

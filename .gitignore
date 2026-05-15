@@ -84,3 +84,7 @@ desktop.ini
 .vscode/
 .idea/
 
+
+# Cloud migration database dump folders are local/offsite backup material, not GitHub code backup.
+outputs/cloud-migration/db-dump-*/
+outputs/cloud-migration/db-dump-*/*

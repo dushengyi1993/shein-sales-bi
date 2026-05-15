@@ -24,6 +24,8 @@ const CATEGORY_SCENES = {
   '胶囊咖啡机': ['small apartment kitchen', 'office pantry', 'clean countertop with capsules only if included'],
   '电动缝纫机': ['DIY craft desk', 'home clothing repair table', 'beginner sewing learning scene'],
   '杆式吸尘器': ['bright living room floor', 'sofa gap cleaning', 'car interior cleaning'],
+  '布艺清洗机': ['bright home sofa stain cleaning', 'bedroom rug cleaning', 'mattress spot cleaning'],
+  '清洁机': ['bright home sofa stain cleaning', 'bedroom rug cleaning', 'dining chair fabric cleaning'],
   '蒸汽熨烫机': ['wardrobe garment care', 'before work outfit prep', 'travel suitcase clothing care'],
   '绞肉机': ['family kitchen meal prep', 'ingredient preparation close-up', 'easy cleaning countertop'],
   '三明治机和早餐机': ['bright breakfast table', 'family kitchen morning', 'weekend brunch scene'],
@@ -123,7 +125,15 @@ function shorten(text) {
 function exteriorLock(product) {
   const policy = product.reference_policy || 'strict_copy_shape_angle';
   const visual = (product.visual_facts || []).join('；');
+  if (String(policy).includes('reference_image_only_no_manual_color_or_shape')) {
+    return `Use the uploaded user/manufacturer reference images as the only source for product appearance (${policy}). Do not manually describe, reinterpret or change product color, shell shape, buttons, interface positions, windows, visible parts, accessories or proportions in the prompt; keep them strictly identical to the reference images. This hides only the product-appearance description, not the product itself: the product must remain large, clear and visually central. ${visual ? `Known visual facts for review only: ${visual}.` : ''}`;
+  }
   return `以用户上传的参考图为唯一产品外观依据（${policy}）。保持产品本体、配件、按钮、接口、颜色、比例、材质观感和可见角度一致；不要改变产品形状，不要发明参考图中不可见的结构。${visual ? `已知视觉事实：${visual}。` : ''}`;
+}
+
+function sceneConstraintText(product) {
+  const constraints = product.scene_constraints || [];
+  return constraints.length ? constraints.map((x) => String(x).trim()).filter(Boolean).join('; ') : '';
 }
 
 function negativePrompt(product) {
@@ -143,7 +153,10 @@ function negativePrompt(product) {
   ];
   const forbiddenClaims = product.forbidden_claims || [];
   const forbiddenVisuals = product.forbidden_visuals || [];
-  return [...base, ...forbiddenClaims.map((x) => `do not use claim: ${x}`), ...forbiddenVisuals.map((x) => `do not show: ${x}`)].join('; ');
+  const referenceOnly = String(product.reference_policy || '').includes('reference_image_only_no_manual_color_or_shape')
+    ? ['do not manually describe, recolor or redesign the product appearance; follow uploaded reference images only']
+    : [];
+  return [...base, ...referenceOnly, ...forbiddenClaims.map((x) => `do not use claim: ${x}`), ...forbiddenVisuals.map((x) => `do not show: ${x}`)].join('; ');
 }
 
 function promptFor(slot, product, store) {
@@ -159,6 +172,7 @@ function promptFor(slot, product, store) {
   const market = product.market || 'KSA';
   const languageRule = (product.copy_language || ['English', 'Arabic']).join(', ');
   const style = product.store_style_profile || {};
+  const sceneConstraints = sceneConstraintText(product);
   const styleText = [style.style_name, style.visual_mood, style.color_palette, style.model_style, style.background_style].filter(Boolean).join('; ') || 'SHEIN KSA-first ecommerce style, bright, attractive, tasteful, store-consistent';
   const references = (product.reference_images || []).map((r) => typeof r === 'string' ? r : `${r.role || 'reference'}: ${r.path_or_url || ''} ${r.notes || ''}`).filter(Boolean).join('; ');
 
@@ -201,11 +215,14 @@ function promptFor(slot, product, store) {
       `Store style profile: ${styleText}. Keep this store's products visually related in mood, lighting, color and model style without making every image identical.`,
       references ? `Reference images from user/manufacturer: ${references}. Use them as the primary source for product appearance, parts, accessories and visible structure.` : '',
       lock,
+      sceneConstraints ? `User scene constraints that must be obeyed: ${sceneConstraints}. Do not expand into forbidden scenes.` : '',
       `Use only these verified product facts as selling points: ${factText}.`,
-      `Scene and composition: ${layout}; use scene direction: ${scene}; keep the product clear, complete, center-focused and easy to recognize on a phone screen. Keep the subject inside a protected crop zone so 3:4 to 1:1 reuse will not cut off the product.`,
+      `Scene and composition: ${layout}; use scene direction: ${scene}; keep the product clear, complete, center-focused and easy to recognize on a phone screen. If using result props such as ice, water droplets, crispy food or stain removal, make them support the product rather than overpower it. The model can be attractive, but hands, gaze and body direction must guide attention back to the product and the real usage action. Keep the subject inside a protected crop zone so 3:4 to 1:1 reuse will not cut off the product.`,
       rule && slot.index === 1 ? `Platform main-image rule: ${rule.note}` : '',
       `Text rendering rule: English and Arabic are equally important. The image model may render the planned English/Arabic text, numbers, icons and small typography directly if typography is reliable. Planned text to render or verify: ${copy.length ? copy.join(' | ') : 'none'}. Text language rule: ${languageRule}. Review every English word, Arabic word, number, unit and glyph; Arabic translation must be checked by Codex/reviewer, not by the user; if any text is distorted, regenerate or use layout-tool composition as fallback.`,
       `Lighting and style: bright, high clarity, clean commercial photography, accurate colors, no dark muddy tone, no clutter. Models may be tasteful sexy, attractive, subtly alluring and fashion-forward when useful for traffic, but never pornographic, vulgar, cheap or more dominant than the product.`,
+      `Usage realism: the model must look like she is genuinely using the product; avoid fake posing such as touching hair or doing unrelated gestures while operating a cleaner, massager or kitchen appliance.`,
+      `If the image tool blocks the prompt for being too sexy, reduce risky posture and wording while keeping bright commercial attractiveness, fitted fabric, clean lighting and real usage action.`,
       `Do not let model, food, props or background overpower the product.`
     ].filter(Boolean).join('\n'),
     negative_prompt: negativePrompt(product),
@@ -215,7 +232,9 @@ function promptFor(slot, product, store) {
       '是否没有禁用词/禁用画面',
       '手机缩略图是否能看清产品和主文案',
       '是否没有展示未随货配件或包装盒',
-      '图上文字、数字、单位和阿文是否逐字准确；如不准确是否已重生成或后期修正'
+      '图上文字、数字、单位和阿文是否逐字准确；如不准确是否已重生成或后期修正',
+      '如果使用参考图优先策略，提示词是否没有擅自写死产品颜色/结构/按钮/接口等外观细节',
+      '人物动作是否真实服务产品，产品是否没有被人物抢走焦点'
     ]
   };
 }
@@ -225,17 +244,21 @@ function suitePrompt(product, store) {
   const market = product.market || 'KSA';
   const secondary = (product.secondary_markets || ['EU']).join(', ');
   const style = product.store_style_profile || {};
+  const sceneConstraints = sceneConstraintText(product);
   const styleText = [style.style_name, style.visual_mood, style.color_palette, style.model_style, style.background_style].filter(Boolean).join('; ') || 'SHEIN KSA-first ecommerce style, bright, attractive, tasteful, store-consistent';
   return [
     `Generate a complete 13-image ecommerce product image suite for ${platform}, primary market ${market}, secondary markets ${secondary}.`,
     `SKU: ${product.sku}; store: ${store}; category: ${product.category || extractCategory(product.sku)}.`,
-    'All 13 images must show the same product, same appearance, same color, same visible parts and accessories based on the user/manufacturer reference images.',
+    'Deliver text prompts only. Do not generate images.',
+    'All 13 images must show the same product appearance based strictly on the user/manufacturer reference images. If reference_policy is reference_image_only_no_manual_color_or_shape, do not manually describe or modify product color, shape, buttons, interfaces, windows or visible parts. This means hiding the appearance description only; the product itself must still be large, clear and visually central.',
+    sceneConstraints ? `Scene constraints must be obeyed across the suite: ${sceneConstraints}.` : '',
     `Keep a coherent store style across the whole suite: ${styleText}. The images should feel like the same store, but each image must have a distinct purpose and composition.`,
     'Image 2 is 1:1. All other images are 3:4. Keep the product clear, large and recognizable on mobile.',
     'English and Arabic copy are equally important. Render text clearly when possible, then verify every English word, Arabic word, number and unit against the provided overlay metadata.',
-    'Models may be tasteful sexy, attractive, subtly alluring and fashion-forward when useful for traffic, but never pornographic, vulgar, cheap or more dominant than the product.',
+    'Models may be tasteful sexy, attractive, subtly alluring and fashion-forward when useful for traffic, but never pornographic, vulgar, cheap or more dominant than the product. Keep the image bright, high clarity and commercially readable; if safety filters block the image, reduce risky posture/wording but keep attractive bright styling.',
+    'Model actions must be physically realistic and must guide attention back to the product and usage result.',
     'Do not invent product functions, parameters, accessories, certifications or results. Do not copy competitor-specific facts.'
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 function buildSuite(product, store) {

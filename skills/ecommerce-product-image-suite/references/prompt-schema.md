@@ -12,7 +12,10 @@
       "market": "KSA",
       "secondary_markets": ["EU"],
       "platform": "SHEIN",
-      "reference_policy": "strict_copy_shape_angle",
+      "reference_policy": "reference_image_only_no_manual_color_or_shape",
+      "prompt_delivery_mode": "text_only",
+      "scene_constraints": ["只在用户允许的场景中使用；若用户说正常居家，就不要写车内/酒吧/户外"],
+      "generation_safety_mode": "bright_commercial_sexy_safe_to_render",
       "verified_facts": [
         {"claim": "Portable electric espresso machine", "source": "user_template"}
       ],
@@ -57,6 +60,8 @@
       "name": "3:4 主封面",
       "ratio": "3:4",
       "goal": "提升点击率",
+      "reference_image_instruction": "产品外观、颜色、结构、按钮、接口和比例严格以用户上传参考图为准；提示词不额外描述产品外观细节",
+      "scene_constraints_applied": [],
       "prompt": "完整提示词",
       "negative_prompt": "负向提示词",
       "platform_rule": "Amazon/noon 主图白底安全规则；不适用时为 null",
@@ -119,6 +124,16 @@
 - 不在提示词中编造数值。
 - 在 `blocked_claims` 中提醒补资料。
 
+## 参考图优先的外观策略
+
+当用户提供厂家图/参考图，并说明作图工具会自行识别产品形状和颜色时：
+
+- `reference_policy` 使用 `reference_image_only_no_manual_color_or_shape`。
+- `prompt` 中不要写死产品颜色、壳体材质、按钮位置、窗口形状、接口位置等外观细节。
+- 只写“产品外观严格按用户上传参考图”，然后把篇幅用于模特、动作、真实使用场景、光线、构图、文案和情绪。
+- 注意：这是“外观描述隐身”，不是产品视觉隐身；产品仍要写清楚位置、大小、前景/C 位关系和真实使用动作。
+- 如果用户要求“不要搞到汽车上了”“聚焦肩颈按摩”等，必须在 `scene_constraints_applied` 中记录并在每张相关图执行。
+
 
 ## 整套模式输出
 
@@ -131,7 +146,7 @@
 }
 ```
 
-`suite_prompt` 必须说明：同一产品外观、同一店铺风格、同一色调、同一视觉质量；除第 2 张为 `1:1` 外，其余 `3:4`；英阿双语同等重要；可使用厂家参考图；人物可使用 Gemini 式明亮时尚大片和更强性感流量风，但不能色情低俗，产品必须是主角。
+`suite_prompt` 必须说明：同一产品外观、同一店铺风格、同一色调、同一视觉质量；除第 2 张为 `1:1` 外，其余 `3:4`；英阿双语同等重要；可使用厂家参考图；如参考图已提供，不要手写产品颜色和形状细节；人物可使用 Gemini 式明亮时尚大片和更强性感流量风，但不能色情低俗，产品必须是主角。
 
 
 ## Gemini 式细化字段
@@ -144,3 +159,5 @@
 - `composition_and_text`：构图、留白、文案位置、英阿双语文案。
 
 性感流量图可写到深领口、露肩、锁骨、上背线条、贴身真丝/罗纹面料、直视镜头、微张嘴唇等可执行细节；禁止露点、透视裸露、明显性行为姿势、色情低俗和人物压过产品。
+
+如果成图平台拦截或失败，优先把提示词降级为“高级清凉诱惑/高颜值/鲜亮明快/真实使用动作”：保留修身材质、清透光线和高明度色彩，删除强挑逗动作、过度私房感和容易触发审核的词。

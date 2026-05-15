@@ -38,15 +38,15 @@
   - `generate_monthly_report_image.mjs`
   - `generate_today_detailed_report_image.mjs`
 - BI 仓库/门户：
-  - `run_bi_daily_pipeline.ps1`：每日完整 BI 流水线入口；默认会跑 RTV 复核，支持 `-SkipRtvVerify` 用于只刷新销售/门户。
+  - `run_bi_daily_pipeline.ps1`：每日完整 BI 流水线入口；默认会跑 RTV 复核，支持 `-SkipRtvVerify` 用于只刷新销售/门户。门户生成统一在末尾单次执行，并默认设置 `SHEIN_BI_PORTAL_TIMEOUT_MS=900000`。
   - `run_bi_after_feishu_sync.ps1`：销售抓取后的 BI 后置刷新入口；`intraday` / `yesterday-final` 模式会向每日流水线传 `-SkipRtvVerify`，避免滚动销售看板等待 RTV 复核。
-  - `run_bi_postcheck.ps1`
+  - `run_bi_postcheck.ps1`：失败或延迟检查时补写 BI 首次体检状态；仅作为兜底，不用于成功流水线的常规二次生成。
   - `init_bi_warehouse.ps1`
   - `load_bi_warehouse.mjs`
   - `fetch_shein_business_domains.mjs`
   - `load_bi_business_domains.mjs`
   - `backfill_bi_high_value_domains.ps1`
-  - `generate_bi_portal.mjs`
+  - `generate_bi_portal.mjs`：V1 正式 BI 门户生成器；默认超时 `900` 秒，输出 `outputs/bi-portal/index.html` 与 `outputs/bi-portal/data.json`。
   - `generate_bi_portal_v2.mjs`（V2.1 平行预览生成器；只读复用 `outputs/bi-portal/data.json`，输出到 `outputs/bi-portal/v2/`，不替换 V1、不接生产调度）
   - `serve_bi_portal.mjs`
   - `serve_bi_portal.ps1`
@@ -187,4 +187,4 @@
   - 输入示例：`inputs/product-image-suite/sample-product-facts.json`
   - 输出目录：`outputs/product-image-suite/prompts/`
   - 常用命令：`node scripts/product-image-suite/generate_prompt_suite.mjs --input inputs/product-image-suite/sample-product-facts.json --out outputs/product-image-suite/prompts --format both`
-  - 边界：脚本只根据 `verified_facts` 和 `visual_facts` 组织提示词；`candidate_claims` 只作为待确认项输出，不进入画面卖点。
+  - 边界：脚本只根据 `verified_facts` 和 `visual_facts` 组织提示词；`candidate_claims` 只作为待确认项输出，不进入画面卖点。若 `reference_policy=reference_image_only_no_manual_color_or_shape`，脚本要求外观严格按参考图，但不手写产品颜色、结构、按钮、接口等细节。

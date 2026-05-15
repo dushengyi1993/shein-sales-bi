@@ -18,6 +18,7 @@
 - 局域网协作访问：优先使用电脑名 [http://DUSHENGYI-PC2:8787/](http://DUSHENGYI-PC2:8787/)；若同事电脑无法解析电脑名，则用当前 WLAN IPv4 访问 `http://<当前IP>:8787/`。电脑重启或路由器重新分配 DHCP 后 IP 可能变化，不要继续使用旧 IP。
 - 本地门户文件：`outputs/bi-portal/index.html`
 - V1 是当前唯一正式生产门户；V2.1 是平行预览版，入口 `http://127.0.0.1:8787/v2/`，脚本 `scripts/generate_bi_portal_v2.mjs`，输出 `outputs/bi-portal/v2/index.html`。用户确认前不得替换 V1、不得改生产调度，日常运维仍以 V1 为准。
+- V1 门户由 `scripts/generate_bi_portal.mjs` 生成；`scripts/run_bi_daily_pipeline.ps1` 已合并为末尾单次生成页面，默认 `SHEIN_BI_PORTAL_TIMEOUT_MS=900000`，不要恢复成多个状态点重复生成。
 - 启动本机网页服务：双击 `打开SHEIN-BI网页服务.cmd`
 - 启动局域网协作服务：双击 `打开SHEIN-BI局域网协作服务.cmd`
 - 配置局域网防火墙：以管理员运行 `配置SHEIN-BI局域网防火墙.cmd`；规则名为 `SHEIN BI Portal LAN 8787 ReadOnly`，应允许 `192.168.2.0/24` 访问本机 `8787`，`LocalAddress` 不应绑死到某个旧 IP。
@@ -227,7 +228,7 @@
 - 检查 BI 门户：打开 [http://127.0.0.1:8787/#tab=system](http://127.0.0.1:8787/#tab=system)。
 - 检查局域网协作服务：打开 [http://DUSHENGYI-PC2:8787/#tab=system](http://DUSHENGYI-PC2:8787/#tab=system)，或按当前 WLAN IPv4 检查 `http://<当前IP>:8787/api/health` 返回 `lanMode=true`、`authRequired=false`、`writableActionState=true`。
 - 检查 BI 局域网防火墙：本机 `http://<当前IP>:8787/api/health` 返回 200 但其他电脑打不开时，用管理员运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fix_bi_lan_firewall.ps1`，确认 `ok=true`。
-- 修改 BI 门户 UI 时，默认先后台验证：`node --check scripts/generate_bi_portal.mjs`、`node scripts/generate_bi_portal.mjs`、静态检查 `outputs/bi-portal/index.html` / `data.json`。除非用户要求或必须排查浏览器交互问题，不主动打开前端。
+- 修改 BI 门户 UI 时，默认先后台验证：`node --check scripts/generate_bi_portal.mjs`、`$env:SHEIN_BI_PORTAL_TIMEOUT_MS='900000'; node scripts/generate_bi_portal.mjs`、静态检查 `outputs/bi-portal/index.html` / `data.json`。除非用户要求或必须排查浏览器交互问题，不主动打开前端。
 - 检查 HL OpenAPI 销售试点：`node scripts/fetch_shein_openapi_sales.mjs HL --start YYYY-MM-DD --end YYYY-MM-DD` 后运行 `node scripts/load_shein_openapi_sales_warehouse.mjs --store HL --start YYYY-MM-DD --end YYYY-MM-DD`，再在系统状态页查看 “SHEIN OpenAPI 试点对账”。
 - 检查 WebAPI 销售直连：`node scripts/fetch_shein_sales.mjs HL --date YYYY-MM-DD --transport webapi --json`，再和 `outputs/shein_fetch/HL/YYYY-MM-DD.json` 或数据库切片对账。
 - 检查取消单口径：先 dry-run `node scripts/repair_shein_sales_summaries.mjs --start YYYY-MM-DD --end YYYY-MM-DD`；确认后再加 `--write`。写回后运行 `node scripts/audit_shein_sales_logic.mjs --month YYYY-MM --date YYYY-MM-DD --offline`。

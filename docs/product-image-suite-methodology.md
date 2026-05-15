@@ -151,6 +151,10 @@
   "market": "KSA",
   "secondary_markets": ["EU"],
   "category": "类目",
+  "reference_policy": "reference_image_only_no_manual_color_or_shape",
+  "prompt_delivery_mode": "text_only",
+  "scene_constraints": ["用户明确限制的场景，例如只在家里、不去车内、聚焦肩颈按摩"],
+  "generation_safety_mode": "bright_commercial_sexy_safe_to_render",
   "reference_images": [
     {
       "path_or_url": "厂家参考图路径或链接",
@@ -186,7 +190,17 @@
 - 场景本地化但不宗教化：现代厨房、客厅、办公室、汽车、露营、家庭聚会、梳妆台、健身后恢复等。
 - 需要流量感时，可加入“高级性感美女/轻微魅惑/适当露肤/深领口/露肩锁骨/贴身真丝或罗纹面料/直视镜头/微张嘴唇/放松但勾人的姿态”；底线是不色情、不露点、不透视裸露、不明显性行为姿势、不低质廉价擦边，且产品必须压过人物。
 
-### 5.2 可选风格包
+### 5.2 参考图优先与产品主次
+
+- 如果用户会上传厂家图/产品参考图给作图工具，提示词默认不要手写产品颜色、结构、按钮、接口、窗口形状等外观细节，只写“产品外观严格以参考图为准”。
+- 这叫“外观描述隐身”，不是“产品视觉隐身”：产品仍然要大、清楚、在前景/C 位/手部动作焦点或身体使用部位中。
+- 美女模特是流量入口，不是唯一主角。产品应位于前景、C 位、手部动作焦点或高亮区域，人物视线/动作要把注意力带回产品。
+- 可用“结果道具”强化转化，例如制冰机配冰块、水珠、果茶/冰咖，空气炸锅配酥脆食物，清洁机配污渍抽吸过程；结果道具必须服务产品，且不引入沙特禁忌或未确认配件。
+- 使用动作必须真实：清洁类专注刷污渍，按摩类自然佩戴或享受肩颈按摩，厨房类真实取食物/饮品；不要为了性感写出不合理摆拍。
+- 用户给了场景边界必须遵守，例如“正常在家里使用，不要汽车”“还是凸出肩颈按摩”，不能为了丰富画面擅自跑偏。
+- 如果作图平台因尺度失败，先收敛高风险词和姿态，保留高颜值、鲜亮明快、修身材质、清透光线和真实使用动作，优先保证能出图。
+
+### 5.3 可选风格包
 
 | 风格 | 适用类目 | 关键词 |
 |---|---|---|
@@ -196,6 +210,8 @@
 | 户外/差旅便携风 | 便携咖啡机、冰箱、按摩器 | car, RV, camping, office, travel-friendly |
 | 健康活力风 | 空气炸锅、按摩器、美容个护 | bright fitness/lifestyle, energetic, compliant clothing |
 | DIY 手作风 | 缝纫机、工具类 | crafting table, fabric, hands-on making, beginner-friendly |
+| 前景产品霸屏风 | 清洁机、按摩器、小家电 | foreground product hero, hands guiding attention, model in middle ground |
+| 明亮性感安全风 | 个护、清洁、制冰机 | high-key bright, fitted fabric, collarbones/shoulder line, real action |
 
 ## 5. 类目策略
 
