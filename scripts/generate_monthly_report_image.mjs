@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
-import fss from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import {requireChromeExecutable} from '../lib/chrome_executable.mjs';
 import {normalizeGoodsSn} from '../lib/product_sku_normalizer.mjs';
 import {isValidSalesGoodsRow, salesAmountSar, salesQuantity} from '../lib/shein_sales_validity.mjs';
 
@@ -66,21 +66,6 @@ function storesForGroups(cfg, groups) {
     .filter(Boolean));
 }
 function itemOrderKey(item) { return item.orderNo || item.orderId || item.orderSn || item.orderCode || ''; }
-async function chromePath() {
-  const candidates = [
-    process.env.CHROME_PATH,
-    'D:/Program Files/Google/Chrome/Application/chrome.exe',
-    'C:/Program Files/Google/Chrome/Application/chrome.exe',
-    'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
-    '/usr/bin/google-chrome',
-    '/usr/bin/google-chrome-stable',
-    '/usr/bin/chromium',
-    '/usr/bin/chromium-browser',
-    '/snap/bin/chromium',
-  ];
-  for (const c of candidates.filter(Boolean)) if (path.isAbsolute(c) ? fss.existsSync(c) : true) return c;
-  return 'chrome.exe';
-}
 function run(cmd, args) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {stdio: ['ignore', 'pipe', 'pipe']});
@@ -92,7 +77,7 @@ function run(cmd, args) {
   });
 }
 async function renderPng(htmlFile, pngFile, width, height) {
-  const chrome = await chromePath();
+  const chrome = requireChromeExecutable('Chrome/Chromium for monthly report rendering');
   const tmp = path.join(ROOT, 'profiles', 'monthly-report-render');
   await fs.mkdir(tmp, {recursive: true});
   const fileUrl = process.platform === 'win32'

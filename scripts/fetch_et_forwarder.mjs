@@ -10,6 +10,7 @@ import fssync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import {findChromeExecutable} from '../lib/chrome_executable.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -180,17 +181,7 @@ async function isCdpReady(port) {
 }
 
 function findChrome() {
-  const candidates = [
-    process.env.CHROME_PATH,
-    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-    '/usr/bin/google-chrome',
-    '/usr/bin/google-chrome-stable',
-    '/usr/bin/chromium',
-    '/usr/bin/chromium-browser',
-    '/snap/bin/chromium',
-  ].filter(Boolean);
-  return candidates.find(p => path.isAbsolute(p) ? fssync.existsSync(p) : true);
+  return findChromeExecutable();
 }
 
 async function launchChrome(args) {

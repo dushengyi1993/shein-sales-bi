@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
-import fss from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import {requireChromeExecutable} from '../lib/chrome_executable.mjs';
 import {normalizeGoodsSn} from '../lib/product_sku_normalizer.mjs';
 import {isValidSalesGoodsRow, salesAmountSar, salesQuantity, summarizeSalesGoodsRows} from '../lib/shein_sales_validity.mjs';
 
@@ -162,15 +162,6 @@ async function loadToday(cfg, groups, date) {
     latestFetchTime: fetchTimes.map(t => new Date(t)).filter(d => Number.isFinite(d.getTime())).sort((a, b) => b - a)[0]?.toISOString() || null,
   };
 }
-async function chromePath() {
-  const candidates = [
-    'C:/Program Files/Google/Chrome/Application/chrome.exe',
-    'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
-    'D:/Program Files/Google/Chrome/Application/chrome.exe',
-  ];
-  for (const c of candidates) if (fss.existsSync(c)) return c;
-  return 'chrome.exe';
-}
 function run(cmd, args) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {stdio: ['ignore', 'pipe', 'pipe']});
@@ -182,14 +173,21 @@ function run(cmd, args) {
   });
 }
 async function renderPng(htmlFile, pngFile, width, height) {
-  const chrome = await chromePath();
+  const chrome = requireChromeExecutable('Chrome/Chromium for detailed daily report rendering');
   const tmp = path.join(ROOT, 'profiles', 'daily-report-render');
   await fs.mkdir(tmp, {recursive: true});
-  await run(chrome, [
+  const fileUrl = process.platform === 'win32'
+    ? `file:///${htmlFile.replace(/\\/g, '/')}`
+    : `file://${htmlFile}`;
+  const chromeArgs = [
     `--user-data-dir=${tmp}`, '--headless=new', '--disable-gpu', '--hide-scrollbars',
+    '--disable-dev-shm-usage',
     '--force-device-scale-factor=1', `--window-size=${width},${height}`,
-    `--screenshot=${pngFile}`, `file:///${htmlFile.replace(/\\/g, '/')}`,
-  ]);
+    `--screenshot=${pngFile}`,
+  ];
+  if (process.platform !== 'win32') chromeArgs.push('--no-sandbox');
+  chromeArgs.push(fileUrl);
+  await run(chrome, chromeArgs);
 }
 
 const defs = `<defs>
