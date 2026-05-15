@@ -1,0 +1,12 @@
+[Unit]
+Description=SHEIN BI cloud yesterday final refresh
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/shein-bi/app
+Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_SALES_TRANSPORT=webapi
+ExecStart=/opt/shein-bi/app/scripts/cloud_bi_refresh.sh yesterday yesterday-final
+ExecStart=/opt/shein-bi/app/scripts/cloud_bi_refresh.sh 2daysago third-day-stable-recheck

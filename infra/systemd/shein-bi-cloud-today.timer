@@ -1,0 +1,10 @@
+[Unit]
+Description=Run SHEIN BI cloud intraday refresh every two hours in office hours
+
+[Timer]
+OnCalendar=*-*-* 08,10,12,14,16,18,20,22:10:00
+Persistent=true
+Unit=shein-bi-cloud-today.service
+
+[Install]
+WantedBy=timers.target

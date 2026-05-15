@@ -138,14 +138,33 @@ function tempName(table) {
   return `stage_${table.replace(/\W+/g, '_')}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 }
 
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function dockerPrefix() {
+  if (process.platform === 'win32') return 'sudo ';
+  if (typeof process.getuid === 'function' && process.getuid() === 0) return '';
+  return 'sudo ';
+}
+
+function psqlSpawnCommand(args, extraFlags = '') {
+  const psql = `${dockerPrefix()}docker exec -i ${shellQuote(args.container)} psql -U ${shellQuote(args.user)} -d ${shellQuote(args.database)} -v ON_ERROR_STOP=1${extraFlags}`;
+  if (process.platform === 'win32') {
+    return {
+      command: 'wsl',
+      args: ['-d', args.distro, '--', 'bash', '-lc', psql],
+    };
+  }
+  return {
+    command: 'bash',
+    args: ['-lc', psql],
+  };
+}
+
 async function runPsqlScript(args, script) {
-  const child = spawn('wsl', [
-    '-d', args.distro,
-    '--',
-    'bash',
-    '-lc',
-    `sudo docker exec -i ${args.container} psql -U ${args.user} -d ${args.database} -v ON_ERROR_STOP=1`,
-  ], {
+  const psql = psqlSpawnCommand(args);
+  const child = spawn(psql.command, psql.args, {
     cwd: ROOT,
     windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'],

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run SHEIN BI cloud yesterday final refresh
+
+[Timer]
+OnCalendar=*-*-* 00:10:00
+Persistent=true
+Unit=shein-bi-cloud-yesterday.service
+
+[Install]
+WantedBy=timers.target

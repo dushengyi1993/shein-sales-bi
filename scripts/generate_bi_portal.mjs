@@ -66,6 +66,30 @@ function parseArgs(argv) {
   return args;
 }
 
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function dockerPrefix() {
+  if (process.platform === 'win32') return 'sudo ';
+  if (typeof process.getuid === 'function' && process.getuid() === 0) return '';
+  return 'sudo ';
+}
+
+function psqlSpawnCommand(args, extraFlags = '') {
+  const psql = `${dockerPrefix()}docker exec -i ${shellQuote(args.container)} psql -U ${shellQuote(args.user)} -d ${shellQuote(args.database)} -v ON_ERROR_STOP=1${extraFlags}`;
+  if (process.platform === 'win32') {
+    return {
+      command: 'wsl',
+      args: ['-d', args.distro, '--', 'bash', '-lc', psql],
+    };
+  }
+  return {
+    command: 'bash',
+    args: ['-lc', psql],
+  };
+}
+
 async function readMetabaseUrl() {
   const file = path.join(ROOT, 'infra', 'metabase', '.session.local.json');
   try {
@@ -103,23 +127,45 @@ async function readLatestAuditSummary() {
 
 async function runWindowsCommand(command, args = [], options = {}) {
   const timeoutMs = Number(options.timeoutMs || 15_000);
-  const child = spawn(command, args, {
-    cwd: ROOT,
-    windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
+  return await new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(command, args, {
+        cwd: ROOT,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err) {
+      resolve({code: -1, stdout: '', stderr: String(err.message || err), timedOut: false, spawnError: true});
+      return;
+    }
+
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    let timedOut = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        code: result.code,
+        stdout: stdout.trim(),
+        stderr: (result.stderr || stderr).trim(),
+        timedOut,
+        spawnError: Boolean(result.spawnError),
+      });
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill(); } catch {}
+    }, timeoutMs);
+
+    child.stdout.on('data', d => { stdout += d.toString(); });
+    child.stderr.on('data', d => { stderr += d.toString(); });
+    child.on('error', err => finish({code: -1, stderr: String(err.message || err), spawnError: true}));
+    child.on('close', code => finish({code}));
   });
-  let stdout = '';
-  let stderr = '';
-  child.stdout.on('data', d => { stdout += d.toString(); });
-  child.stderr.on('data', d => { stderr += d.toString(); });
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    try { child.kill(); } catch {}
-  }, timeoutMs);
-  const code = await new Promise(resolve => child.on('close', resolve));
-  clearTimeout(timer);
-  return {code, stdout: stdout.trim(), stderr: stderr.trim(), timedOut};
 }
 
 function parseLogTimes(text) {
@@ -141,6 +187,13 @@ async function readTextAuto(file) {
 }
 
 async function readScheduledTaskStatus() {
+  if (process.platform !== 'win32') {
+    return {
+      exists: false,
+      platform: process.platform,
+      error: '当前运行环境不是 Windows，已跳过 Windows 计划任务读取；云端定时状态将在 Linux systemd/cron 接入后显示。',
+    };
+  }
   const ps = [
     '$ErrorActionPreference="Stop"',
     '$name="SHEIN-BI-Daily-Pipeline-0700"',
@@ -410,13 +463,8 @@ async function readLatestFirstRunCheckSummary() {
 
 async function runPsql(args, sql) {
   markStage('psql:start');
-  const child = spawn('wsl', [
-    '-d', args.distro,
-    '--',
-    'bash',
-    '-lc',
-    `sudo docker exec -i ${args.container} psql -U ${args.user} -d ${args.database} -v ON_ERROR_STOP=1 -t -A`,
-  ], {
+  const psql = psqlSpawnCommand(args, ' -t -A');
+  const child = spawn(psql.command, psql.args, {
     cwd: ROOT,
     windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'],

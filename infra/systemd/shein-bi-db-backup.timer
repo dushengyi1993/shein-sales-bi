@@ -1,0 +1,10 @@
+[Unit]
+Description=Run SHEIN BI PostgreSQL backup daily
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+Unit=shein-bi-db-backup.service
+
+[Install]
+WantedBy=timers.target

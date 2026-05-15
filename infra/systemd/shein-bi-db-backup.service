@@ -1,0 +1,9 @@
+[Unit]
+Description=SHEIN BI PostgreSQL backup
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/shein-bi/app
+ExecStart=/opt/shein-bi/app/scripts/cloud_db_backup.sh
