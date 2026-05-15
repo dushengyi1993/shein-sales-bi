@@ -23,6 +23,7 @@ const FETCH_DIR = path.join(ROOT, 'outputs', 'shein_fetch');
 const PAYLOAD_DIR = path.join(ROOT, 'outputs', 'lark_payloads');
 const REPORT_DIR = path.join(ROOT, 'outputs', 'reports');
 const FEISHU_BASE_PAUSE_FLAG = path.join(ROOT, 'state', 'feishu-base-sync-paused.flag');
+const DEFAULT_FEISHU_BASE_URL = 'https://zcnm3ts63aph.feishu.cn/base/SnnQbrAu6aLzMWsnEICcy0cKnJh';
 const FX_SAR_TO_RMB = 1.8;
 
 function envTruthy(value) {
@@ -457,7 +458,7 @@ async function upsertReportLog({baseToken, tableId, uniqueKey, sentAt, yesterday
 const args = parseArgs(process.argv.slice(2));
 const storesConfig = JSON.parse(await fs.readFile(STORES_PATH, 'utf8'));
 const reportConfig = await loadJsonIfExists(REPORT_CONFIG_PATH) || {};
-const state = JSON.parse(await fs.readFile(STATE_PATH, 'utf8'));
+const state = await loadJsonIfExists(STATE_PATH) || {};
 const feishuBasePaused = envTruthy(process.env.SHEIN_FEISHU_BASE_PAUSED)
   || await fileExists(FEISHU_BASE_PAUSE_FLAG);
 args.as = args.as || reportConfig.defaultIdentity || 'user';
@@ -486,6 +487,7 @@ if (args.syncToday) {
   const syncResults = [];
   for (const groupKey of reportGroups) {
     const syncArgs = ['--mode', 'intraday', '--group', groupKey, '--no-monthly', '--no-compact-display', '--no-dashboard'];
+    if (envTruthy(process.env.SHEIN_REPORT_SYNC_NO_LAUNCH)) syncArgs.push('--no-launch');
     if (feishuBasePaused) syncArgs.push('--no-lark-base', '--no-products');
     const configuredStores = reportConfig.syncStoresByGroup?.[groupKey];
     if (Array.isArray(configuredStores) && configuredStores.length) {
@@ -524,7 +526,9 @@ if (args.syncToday) {
 const yesterdayData = await loadReportDay(storesConfig, reportGroups, yesterday);
 const todayData = await loadReportDay(storesConfig, reportGroups, today);
 const topProducts = await loadTopProductsFromFetch(storesConfig, reportGroups, today, 5);
-const baseUrl = state.baseCreateResponse?.data?.base?.url || `https://zcnm3ts63aph.feishu.cn/base/${state.baseToken}`;
+const baseUrl = reportConfig.baseUrl
+  || state.baseCreateResponse?.data?.base?.url
+  || (state.baseToken ? `https://zcnm3ts63aph.feishu.cn/base/${state.baseToken}` : DEFAULT_FEISHU_BASE_URL);
 const message = buildMessage({groupLabel, today, yesterday, todayData, yesterdayData, topProducts, baseUrl, syncWarning: syncWarning.trim()});
 
 await fs.mkdir(REPORT_DIR, {recursive: true});
@@ -585,7 +589,7 @@ if (args.send || args.dryRun) {
 }
 
 let reportLog = null;
-if (args.send && !feishuBasePaused && state.tables?.['飞书日报记录']?.table_id) {
+if (args.send && !feishuBasePaused && state.baseToken && state.tables?.['飞书日报记录']?.table_id) {
   reportLog = await upsertReportLog({
     baseToken: state.baseToken,
     tableId: state.tables['飞书日报记录'].table_id,

@@ -26,6 +26,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+LOCAL_CONFIG = ROOT / "config" / "et_forwarder.local.json"
 LOCAL_PY_DEPS = ROOT / ".cache" / "python"
 if LOCAL_PY_DEPS.exists():
     sys.path.insert(0, str(LOCAL_PY_DEPS))
@@ -86,7 +87,52 @@ def _decrypt_chrome_password(profile_dir: Path, blob: bytes) -> str:
     return _dpapi_decrypt(blob).decode("utf-8")
 
 
+def _payload(username: str, password: str, origin: str) -> dict:
+    allow_secret = os.environ.get("ET_LOGIN_HELPER_ALLOW_SECRET") == "1"
+    payload = {
+        "ok": True,
+        "origin": origin,
+        "username": username,
+        "passwordLength": len(password),
+    }
+    if allow_secret:
+        payload["password"] = password
+    return payload
+
+
+def _config_credentials(base_url: str) -> dict | None:
+    """Read ET credentials from cloud-safe local secret sources.
+
+    Cloud Linux cannot decrypt a Windows Chrome password store, so production
+    cloud runs must use environment variables or config/et_forwarder.local.json.
+    Both are intentionally ignored by Git.
+    """
+    env_user = os.environ.get("ET_FORWARDER_USERNAME", "").strip()
+    env_pass = os.environ.get("ET_FORWARDER_PASSWORD", "")
+    if env_user and env_pass:
+        return _payload(env_user, env_pass, "env:ET_FORWARDER_USERNAME")
+
+    if not LOCAL_CONFIG.exists():
+        return None
+    data = json.loads(LOCAL_CONFIG.read_text(encoding="utf-8-sig"))
+    configured_base = str(data.get("baseUrl") or "").rstrip("/")
+    requested_base = str(base_url or "").rstrip("/")
+    if configured_base and requested_base and configured_base != requested_base:
+        aliases = [str(x).rstrip("/") for x in data.get("baseUrlAliases", []) if x]
+        if requested_base not in aliases:
+            return None
+    username = str(data.get("username") or "").strip()
+    password = str(data.get("password") or "")
+    if username and password:
+        return _payload(username, password, f"file:{LOCAL_CONFIG.as_posix()}")
+    return None
+
+
 def credentials(profile_dir: Path, base_url: str) -> None:
+    configured = _config_credentials(base_url)
+    if configured:
+        _json(configured)
+
     login_db = profile_dir / "Default" / "Login Data"
     if not login_db.exists():
         _json({"ok": False, "error": "login_data_not_found"}, 2)
@@ -124,16 +170,7 @@ def credentials(profile_dir: Path, base_url: str) -> None:
         if not username or not password_blob:
             continue
         password = _decrypt_chrome_password(profile_dir, password_blob)
-        allow_secret = os.environ.get("ET_LOGIN_HELPER_ALLOW_SECRET") == "1"
-        payload = {
-            "ok": True,
-            "origin": origin,
-            "username": username,
-            "passwordLength": len(password),
-        }
-        if allow_secret:
-            payload["password"] = password
-        _json(payload)
+        _json(_payload(username, password, origin))
 
     _json({"ok": False, "error": "saved_credentials_not_found"}, 3)
 

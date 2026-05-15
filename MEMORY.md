@@ -65,7 +65,8 @@
 ## 计划任务
 - 2026-05-15 起生产调度转为云端 systemd timer：`shein-bi-cloud-today.timer` 在北京时间 `00:10/02:10/.../22:10` 每两小时刷新当天销售、入仓并生成 BI Portal；`shein-bi-cloud-yesterday.timer` 每天 `00:10` 刷新前一天最终销售并复核前两天稳定日；`shein-bi-db-backup.timer` 每天 `02:30` 备份业务库和 Metabase 元数据库。
 - 本地 `SHEIN-*` Windows 计划任务已全部禁用，保留为回滚/迁移参考，不再作为生产调度。除非用户明确回滚，不要重新启用 `SHEIN-Sales-15Stores-Intraday-Daytime`、`SHEIN-BI-Daily-Pipeline-0700`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-Sales-ETForwarder-0420` 或 HL OpenAPI 本地任务。
-- 云端首阶段只自动覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成和数据库备份；链接/业务域、ET、RTV 完整复核、飞书日报/异常提醒和 HL OpenAPI 双跑仍需要逐项迁移到云端后再恢复自动化。
+- 云端首阶段只自动覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成和数据库备份；链接/业务域、RTV 完整复核和 HL OpenAPI 双跑仍需要逐项迁移到云端后再恢复自动化。
+- ET 和飞书日报已新增云端 Linux 入口：`scripts/cloud_et_forwarder_sync.sh` / `shein-bi-cloud-et-forwarder.timer`、`scripts/cloud_daily_lark_report.sh` / `shein-bi-cloud-daily-lark-report.timer`。启用前必须在服务器本地补齐敏感配置并手动验证：ET 需要 `config/et_forwarder.local.json` 或环境变量账号密码，不能直接复用 Windows Chrome 保存密码；飞书日报需要 `config/lark_report.json`、`lark-cli` 和飞书授权。上述 secret/token 不进 GitHub、文档或聊天。
 - 本地历史规则仍可作回滚参考：RTV 复核耗时长是正常现象，滚动销售刷新不应等待完整 RTV；BI 门户生成必须在流水线末尾单次执行，默认 `SHEIN_BI_PORTAL_TIMEOUT_MS=900000`，不要恢复“流水线完成 / 简报 / 首次体检”多个状态点重复生成页面。
 - 飞书 Base / 看板写入仍受 `state/feishu-base-sync-paused.flag` 约束；云端恢复飞书日报或异常通知前，不要默认认为本地日报任务仍在生产运行。
 

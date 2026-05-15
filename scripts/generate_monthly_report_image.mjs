@@ -68,11 +68,17 @@ function storesForGroups(cfg, groups) {
 function itemOrderKey(item) { return item.orderNo || item.orderId || item.orderSn || item.orderCode || ''; }
 async function chromePath() {
   const candidates = [
+    process.env.CHROME_PATH,
     'D:/Program Files/Google/Chrome/Application/chrome.exe',
     'C:/Program Files/Google/Chrome/Application/chrome.exe',
     'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/snap/bin/chromium',
   ];
-  for (const c of candidates) if (fss.existsSync(c)) return c;
+  for (const c of candidates.filter(Boolean)) if (path.isAbsolute(c) ? fss.existsSync(c) : true) return c;
   return 'chrome.exe';
 }
 function run(cmd, args) {
@@ -89,11 +95,17 @@ async function renderPng(htmlFile, pngFile, width, height) {
   const chrome = await chromePath();
   const tmp = path.join(ROOT, 'profiles', 'monthly-report-render');
   await fs.mkdir(tmp, {recursive: true});
-  await run(chrome, [
-    `--user-data-dir=${tmp}`, '--headless=new', '--disable-gpu', '--hide-scrollbars',
+  const fileUrl = process.platform === 'win32'
+    ? `file:///${htmlFile.replace(/\\/g, '/')}`
+    : `file://${htmlFile}`;
+  const chromeArgs = [
+    `--user-data-dir=${tmp}`, '--headless=new', '--disable-gpu', '--hide-scrollbars', '--disable-dev-shm-usage',
     '--force-device-scale-factor=1', `--window-size=${width},${height}`,
-    `--screenshot=${pngFile}`, `file:///${htmlFile.replace(/\\/g, '/')}`,
-  ]);
+    `--screenshot=${pngFile}`,
+  ];
+  if (process.platform !== 'win32') chromeArgs.push('--no-sandbox');
+  chromeArgs.push(fileUrl);
+  await run(chrome, chromeArgs);
 }
 
 async function monthSummary(stores, month) {

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run SHEIN BI cloud ET forwarder sync daily
+
+[Timer]
+OnCalendar=*-*-* 04:20:00
+Persistent=true
+Unit=shein-bi-cloud-et-forwarder.service
+
+[Install]
+WantedBy=timers.target

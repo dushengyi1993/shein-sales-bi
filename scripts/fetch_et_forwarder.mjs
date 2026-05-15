@@ -184,13 +184,18 @@ function findChrome() {
     process.env.CHROME_PATH,
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
     'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/snap/bin/chromium',
   ].filter(Boolean);
-  return candidates.find(p => fssync.existsSync(p));
+  return candidates.find(p => path.isAbsolute(p) ? fssync.existsSync(p) : true);
 }
 
 async function launchChrome(args) {
   const chrome = findChrome();
-  if (!chrome) throw new Error('Cannot find chrome.exe for ET forwarder profile.');
+  if (!chrome) throw new Error('Cannot find Chrome/Chromium for ET forwarder profile.');
   await fs.mkdir(args.profileDir, {recursive: true});
   const chromeArgs = [
     `--remote-debugging-port=${args.port}`,
@@ -198,8 +203,28 @@ async function launchChrome(args) {
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-popup-blocking',
+    '--disable-dev-shm-usage',
     args.baseUrl + '/Home/Index',
   ];
+  if (process.platform !== 'win32') {
+    chromeArgs.splice(chromeArgs.length - 1, 0, '--no-sandbox');
+    if (!args.visible) chromeArgs.splice(chromeArgs.length - 1, 0, '--headless=new', '--disable-gpu');
+  }
+  if (process.platform !== 'win32') {
+    const child = spawn(chrome, chromeArgs, {
+      cwd: ROOT,
+      detached: true,
+      stdio: 'ignore',
+      env: {...process.env},
+    });
+    child.unref();
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      if (await isCdpReady(args.port)) return;
+      await sleep(500);
+    }
+    throw new Error(`Chrome CDP did not become ready on port ${args.port}.`);
+  }
   const psArgs = [
     '-NoProfile',
     '-ExecutionPolicy',
@@ -326,7 +351,7 @@ async function readSavedEtCredentials(args) {
     args.baseUrl,
   ], {env: {ET_LOGIN_HELPER_ALLOW_SECRET: '1'}});
   if (!out?.ok || !out.username || !out.password) {
-    throw new Error(`ET saved credentials are not available (${out?.error || 'unknown'}).`);
+    throw new Error(`ET credentials are not available (${out?.error || 'unknown'}). On cloud, set ET_FORWARDER_USERNAME/ET_FORWARDER_PASSWORD or config/et_forwarder.local.json.`);
   }
   return {username: out.username, password: out.password, origin: out.origin};
 }

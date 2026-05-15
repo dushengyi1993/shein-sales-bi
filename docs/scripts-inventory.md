@@ -8,6 +8,8 @@
 
 - `cloud_bi_refresh.sh`
 - `cloud_db_backup.sh`
+- `cloud_et_forwarder_sync.sh`
+- `cloud_daily_lark_report.sh`
 - `archive_local_bi.ps1`：本地封存/复核脚本，供回滚前后检查使用。
 
 ## 本地 Windows 回滚 / 历史任务引用，必须保留
@@ -42,6 +44,7 @@
   - `setup_lark_dashboard_previous_month.mjs`
   - `update_dashboard_time_richtext_ui.mjs`
   - `send_daily_lark_report.mjs`
+    - 云端日报入口由 `cloud_daily_lark_report.sh` 调用；默认 `SHEIN_SALES_TRANSPORT=webapi`、`SHEIN_REPORT_SYNC_NO_LAUNCH=1`，避免日报前置同步意外唤起浏览器。
   - `generate_daily_report_image.mjs`
   - `generate_monthly_report_image.mjs`
   - `generate_today_detailed_report_image.mjs`
@@ -64,8 +67,11 @@
   - `audit_bi_warehouse.mjs`
   - `generate_bi_briefing.mjs`
 - ET 货代仓 / RTV：
+  - `cloud_et_forwarder_sync.sh`：Linux 云端 ET 同步入口；抓取、入仓并刷新 BI Portal。依赖服务器本地 `config/et_forwarder.local.json` 或 `ET_FORWARDER_USERNAME/ET_FORWARDER_PASSWORD`，密钥不进 GitHub。
   - `fetch_et_forwarder.mjs`
+    - Windows 下复用本地 ET Chrome profile；Linux 下使用 headless Chrome/Chromium、`--no-sandbox`、`--disable-dev-shm-usage`，通过 ET 本地凭据和 OCR 自动登录。
   - `load_et_forwarder_warehouse.mjs`
+    - Windows 通过 WSL/docker 入仓；Linux 云端直接调用 `docker exec -i`，必要时可用 `SHEIN_DOCKER_USE_SUDO=1`。
   - `scheduled_et_forwarder_daily.ps1`
   - `report_et_forwarder_assessment.mjs`
   - `verify_shein_rtv_tracking.mjs`：SHEIN 退货物流换单复核；候选应按标准货号 + 时间窗口全店搜索，`DL-` 等 ET SKU 前缀只作排序线索。JT/JTE 按同运单号直连，iMile/EMile 按物流详情换单轨迹确认。该脚本耗时长是正常现象，日常参数：`--priority high,medium,low --include-no-cases --limit 120 --case-limit 60 --max-runtime-ms 3600000`。

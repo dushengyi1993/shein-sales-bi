@@ -1,0 +1,10 @@
+[Unit]
+Description=Run SHEIN BI cloud daily Lark report with catch-up retries
+
+[Timer]
+OnCalendar=*-*-* 08,10,12:35:00
+Persistent=true
+Unit=shein-bi-cloud-daily-lark-report.service
+
+[Install]
+WantedBy=timers.target

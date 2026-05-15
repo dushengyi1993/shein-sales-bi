@@ -89,14 +89,33 @@ function tempName(table) {
   return `stage_${table.replace(/\W+/g, '_')}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 }
 
+function envTruthy(value) {
+  return /^(1|true|yes|on)$/i.test(String(value || '').trim());
+}
+
+function psqlSpawnSpec(args) {
+  if (process.platform === 'win32') {
+    return {
+      cmd: 'wsl',
+      args: [
+        '-d', args.distro,
+        '--',
+        'bash',
+        '-lc',
+        `sudo docker exec -i ${args.container} psql -U ${args.user} -d ${args.database} -v ON_ERROR_STOP=1`,
+      ],
+    };
+  }
+  const dockerArgs = ['exec', '-i', args.container, 'psql', '-U', args.user, '-d', args.database, '-v', 'ON_ERROR_STOP=1'];
+  if (envTruthy(process.env.SHEIN_DOCKER_USE_SUDO)) {
+    return {cmd: 'sudo', args: ['docker', ...dockerArgs]};
+  }
+  return {cmd: process.env.SHEIN_DOCKER_BIN || 'docker', args: dockerArgs};
+}
+
 async function runPsqlScript(args, script) {
-  const child = spawn('wsl', [
-    '-d', args.distro,
-    '--',
-    'bash',
-    '-lc',
-    `sudo docker exec -i ${args.container} psql -U ${args.user} -d ${args.database} -v ON_ERROR_STOP=1`,
-  ], {
+  const spec = psqlSpawnSpec(args);
+  const child = spawn(spec.cmd, spec.args, {
     cwd: ROOT,
     windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'],
