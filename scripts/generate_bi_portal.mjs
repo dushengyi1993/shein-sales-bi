@@ -12,7 +12,7 @@ import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const PORTAL_GENERATE_TIMEOUT_MS = Number(process.env.SHEIN_BI_PORTAL_TIMEOUT_MS || 240_000);
+const PORTAL_GENERATE_TIMEOUT_MS = Number(process.env.SHEIN_BI_PORTAL_TIMEOUT_MS || 900_000);
 const portalGenerateStartedAt = Date.now();
 let portalGenerateStage = 'bootstrap';
 const portalGenerateTimer = setTimeout(() => {

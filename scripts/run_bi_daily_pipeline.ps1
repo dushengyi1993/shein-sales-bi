@@ -18,6 +18,10 @@ $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 Set-Location $repo
 
+if ([string]::IsNullOrWhiteSpace($env:SHEIN_BI_PORTAL_TIMEOUT_MS)) {
+  $env:SHEIN_BI_PORTAL_TIMEOUT_MS = "900000"
+}
+
 function Get-BjDate([int]$OffsetDays) {
   $utcNow = [DateTime]::UtcNow
   return $utcNow.AddHours(8).AddDays($OffsetDays).ToString("yyyy-MM-dd")
@@ -219,6 +223,16 @@ Run-Step "Audit BI warehouse" {
   node .\scripts\audit_bi_warehouse.mjs --distro $Distro --container $Container --database $Database --user $User
 }
 
+Run-Step "Generate BI Markdown briefing" {
+  node .\scripts\generate_bi_briefing.mjs
+}
+
+Run-NonBlocking-Step "Generate BI first-run check report" {
+  node .\scripts\check_bi_first_run.mjs
+}
+
+Log "DONE BI daily pipeline log=$logFile"
+
 Run-Step "Generate local BI portal" {
   node .\scripts\generate_bi_portal.mjs --distro $Distro --container $Container --database $Database --user $User
 }
@@ -227,27 +241,4 @@ Run-NonBlocking-Step "Check BI portal UI smoke" {
   node .\scripts\check_bi_portal_ui.mjs --json
 }
 
-Log "DONE BI daily pipeline log=$logFile"
-
-Run-NonBlocking-Step "Refresh local BI portal status after DONE" {
-  node .\scripts\generate_bi_portal.mjs --distro $Distro --container $Container --database $Database --user $User
-}
-
-Run-Step "Generate BI Markdown briefing" {
-  node .\scripts\generate_bi_briefing.mjs
-}
-
-Run-Step "Refresh local BI portal briefing status" {
-  node .\scripts\generate_bi_portal.mjs --distro $Distro --container $Container --database $Database --user $User
-}
-
-Run-NonBlocking-Step "Generate BI first-run check report" {
-  node .\scripts\check_bi_first_run.mjs
-}
-
-Run-Step "Refresh local BI portal first-run check status" {
-  node .\scripts\generate_bi_portal.mjs --distro $Distro --container $Container --database $Database --user $User
-}
-
 Write-Output "BI daily pipeline completed. Log: $logFile"
-Start-DelayedPostCheck "success"

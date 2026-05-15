@@ -11,6 +11,10 @@ $ErrorActionPreference = "Continue"
 $repo = Split-Path -Parent $PSScriptRoot
 Set-Location $repo
 
+if ([string]::IsNullOrWhiteSpace($env:SHEIN_BI_PORTAL_TIMEOUT_MS)) {
+  $env:SHEIN_BI_PORTAL_TIMEOUT_MS = "900000"
+}
+
 $logDir = Join-Path $repo "logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $ts = Get-Date -Format "yyyyMMdd-HHmmss"
