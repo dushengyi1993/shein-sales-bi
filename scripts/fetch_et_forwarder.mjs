@@ -128,8 +128,16 @@ function sleep(ms) {
 function pythonCandidates() {
   return [
     process.env.SHEIN_PYTHON,
-    'C:\\Users\\dushengyi\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe',
-    'python',
+    ...(process.platform === 'win32'
+      ? [
+        'C:\\Users\\dushengyi\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe',
+        'python',
+        'py',
+      ]
+      : [
+        'python3',
+        'python',
+      ]),
   ].filter(Boolean);
 }
 
