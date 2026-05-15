@@ -4,11 +4,11 @@
 
 ## 1. 当前系统定位
 
-- 飞书多维表格 / 原生看板写入已临时暂停；飞书日报继续正常发送。
+- 飞书多维表格 / 原生看板写入已临时暂停；飞书日报/异常通知的本地历史链路已随 Windows 任务封存，后续需要单独迁到云端。
 - BI 系统当前以云端为正式入口，负责 PostgreSQL 数据仓库、Metabase 和 BI 经营门户。
 - 当前不能直接停用或删除 Metabase：PostgreSQL 是数据底座，Metabase 是正式深度分析/自由钻取层，BI Portal 是日常经营入口；只有等自研门户完全覆盖深钻能力后，才能重新评估是否降级 Metabase。
-- 不从飞书反抓数据做 BI 源头；BI 源头来自 SHEIN 后台抓取后的本地 JSON / PostgreSQL。
-- 销售本地 JSON 已改为 WebAPI 直连优先生成；Chrome profile 只作为 Cookie/session 刷新、登录续期和回退来源。
+- 不从飞书反抓数据做 BI 源头；BI 源头来自 SHEIN 后台抓取后的私有源文件 / PostgreSQL。
+- 销售源文件已改为 WebAPI 直连优先生成；Chrome profile 只作为 Cookie/session 刷新、登录续期和回退来源。
 - BI 后置刷新失败不应反向影响 SHEIN 抓数和飞书日报。
 - 暂停开关：`state/feishu-base-sync-paused.flag`。存在该文件时，跳过飞书事实表、产品表、月表、宽表和看板写入；删除该文件后可恢复写表链路。
 
@@ -23,8 +23,8 @@
 - 本地回滚时才启动局域网协作服务：双击 `打开SHEIN-BI局域网协作服务.cmd`。
 - 本地回滚时才配置局域网防火墙：以管理员运行 `配置SHEIN-BI局域网防火墙.cmd`；规则名为 `SHEIN BI Portal LAN 8787 ReadOnly`。
 - 当前封存动作可复用 `scripts/archive_local_bi.ps1`；如要同时禁用防火墙规则，需要管理员 PowerShell 加 `-DisableFirewall`。
-- Markdown 经营晨报：`outputs/bi-briefings/latest.md`
-- Metabase：`http://172.22.172.186:3000`
+- Markdown 经营晨报历史文件：`outputs/bi-briefings/latest.md`
+- Metabase 当前在云端 Docker 内部运行，不在文档中写公网裸地址；本地旧 WSL 地址只作历史排障参考。
 - Metabase 管理员凭据只保存在 `infra/metabase/.admin.local.json`，不要写入文档或聊天。
 
 ## 3. 当前数据口径
@@ -40,23 +40,30 @@
 
 ## 4. 计划任务
 
-所有生产任务都应通过 `wscript.exe` + `scripts/run_scheduled_hidden.vbs` 隐藏启动 PowerShell，不要直接注册前台 PowerShell 窗口。
+### 4.1 当前云端生产调度
 
-| 时间 | 任务 | 说明 |
+| 时间 | systemd timer | 说明 |
 | --- | --- | --- |
-| 00:10 | `SHEIN-Sales-15Stores-YesterdayFinal-0010` | 前一天最终版销售抓取；Base 暂停期间只写本地文件并后置刷新 BI。自 `2026-05-11` 起，正常抓 D-1 后还会回核 D-2（`third-day-stable-recheck`），修正次日未发货前取消单带来的初版偏差，并通过 `run_bi_after_feishu_sync.ps1 -ExtraSalesDates` 把稳定日切片补入 BI。 |
-| 04:20 | `SHEIN-Sales-ETForwarder-0420` | ET 货代仓每日同步；抓库存快照、RTV、出库、发货申请单、箱明细、库存流水、财务等，按增量游标 + 重叠校验停止，不固定长窗口重抓。 |
-| 05:30 | `SHEIN-Sales-15Stores-LinkManagement-0530` | 前一完整业务日链接表现 + 业务域抓取（退货/售后、库存、评价、履约、财务等），只写本地文件/后续入仓，不再写飞书链接表。旧 `0340` / `0510` 任务不要恢复。 |
-| 07:00 | `SHEIN-BI-Daily-Pipeline-0700` | 刷新 PostgreSQL BI 仓库、自动复核 high/medium/low RTV 换单候选、BI 数据体检、BI 门户 UI 冒烟检查、本地门户和 Markdown 晨报。RTV 复核耗时长是正常现象，默认允许 60 分钟硬保护。`2026-05-09 07:00:01` 已完成正式自动运行验证。 |
-| 08:10-22:10 | `SHEIN-Sales-15Stores-Intraday-Daytime` | 当天滚动销售抓取；Base 暂停期间只写本地文件并后置刷新 BI；后置 BI 默认传 `-SkipRtvVerify`，只刷新销售切片和门户，不等待 RTV 复核；早上成功后照常发送飞书日报。 |
-| 09:20 / 登录时 | Watchdog | 检查漏跑并补偿；不额外同步当日。 |
+| `00:10/02:10/.../22:10` | `shein-bi-cloud-today.timer` | 每两小时刷新当天销售、入仓并生成 BI Portal。 |
+| `00:10` | `shein-bi-cloud-yesterday.timer` | 刷新前一天最终销售，并复核前两天稳定日。 |
+| `02:30` | `shein-bi-db-backup.timer` | 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto`，默认保留 14 天。 |
 
-说明：
+云端首阶段只自动覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成和数据库备份。链接/业务域、ET、完整 RTV 复核、飞书日报/异常通知和 HL OpenAPI 双跑仍待迁到云端。
 
-- `2026-05-02 07:00` 的 `267014` 是已修复的历史失败记录，保留作排障证据。
-- `2026-05-05` 早晨 Docker / WSL 文件系统异常已手动恢复。
-- `2026-05-09 04:20` ET 任务曾在首页探测阶段因跨域/同源 URL 处理失败；`scripts/fetch_et_forwarder.mjs` 已改为使用当前页面 `location.origin` 并补跑成功，手动触发计划任务入口也返回 `LastTaskResult=0`。
-- `2026-05-09 05:30` 链接/业务域任务和 `2026-05-09 07:00` BI 任务已正式自动跑通。
+### 4.2 本地历史任务 / 回滚参考
+
+以下 Windows 任务已于 `2026-05-15` 封存禁用，不再作为生产调度；除非明确回滚，不要重新启用：
+
+- `SHEIN-Sales-15Stores-YesterdayFinal-0010`
+- `SHEIN-Sales-15Stores-Intraday-Daytime`
+- `SHEIN-Sales-15Stores-LinkManagement-0530`
+- `SHEIN-Sales-ETForwarder-0420`
+- `SHEIN-BI-Daily-Pipeline-0700`
+- `SHEIN-Sales-15Stores-Watchdog-Logon`
+- `SHEIN-Sales-OpenAPI-HL-Intraday-1225`
+- `SHEIN-Sales-OpenAPI-HL-YesterdayFinal-0025`
+
+如果将来回滚本地，Windows 任务仍应通过 `wscript.exe` + `scripts/run_scheduled_hidden.vbs` 隐藏启动 PowerShell，不要直接注册前台 PowerShell 窗口。
 
 ## 4A. SHEIN 销售 WebAPI 直连运行规则
 
@@ -71,19 +78,18 @@
 ## 5. 飞书日报与 BI 刷新规则
 
 - 当前飞书 Base / 看板写入暂停，但飞书日报仍是推送渠道。
-- 00:10 最终版本地抓取成功后，后置刷新前一日 BI；同时回核 D-2 稳定销售，若与初版有差异，会覆盖本地销售文件并补刷该稳定日 BI 切片。
-- 白天滚动本地抓取成功后，后置刷新当日 BI。
-- 白天滚动后置 BI 的验收重点是销售文件入仓和 `outputs/bi-portal/*` 更新时间；RTV 换单复核耗时不应作为“BI 没更新”的判断依据。
-- 如果某个店失败，但目标日期 16 店本地销售文件已经齐，BI 仍应刷新，并通过飞书消息提醒失败店铺。
+- 云端 `shein-bi-cloud-yesterday.timer` 刷新前一天最终版，并回核 D-2 稳定销售。
+- 云端 `shein-bi-cloud-today.timer` 每两小时刷新当天销售。
+- 滚动后置 BI 的验收重点是销售文件入仓和 BI Portal 更新时间；RTV 换单复核耗时不应作为“BI 没更新”的判断依据。
+- 如果某个店失败，但目标日期 16 店销售源文件已经齐，BI 仍应刷新；飞书异常提醒待云端化后恢复。
 - 业务域单店失败不应阻断销售入仓和门户刷新，应在 BI 体检/提醒里标注。
-- 暂停期间 `send_daily_lark_report.mjs` 继续发送 IM 文字日报和日报图，但不再写入 Base 里的 `飞书日报记录` 表。
+- `send_daily_lark_report.mjs` 仍保留，但云端日报/异常通知调度待补；不要默认本地日报任务仍在生产运行。
 
 ## 6. 链接表现更新规则
 
-- 链接表现每天更新一次即可，放在后半夜。
-- 当前正式任务：`SHEIN-Sales-15Stores-LinkManagement-0530`，每天北京时间 `05:30`。
-- 执行脚本：`scripts/scheduled_link_management_daily.ps1`。
-- 执行内容：抓前一完整业务日 16 店链接数据，写本地 JSON、PostgreSQL 和 BI 门户；飞书链接管理表已废弃，不再写入。
+- 链接表现每天更新一次即可，适合放在后半夜。
+- 本地历史任务 `SHEIN-Sales-15Stores-LinkManagement-0530` 已封存禁用；云端自动链接/业务域刷新尚未迁移完成。
+- 迁移前如需手动补链接/业务域，可按原脚本逻辑临时运行 `scripts/scheduled_link_management_daily.ps1` 或改写 Linux 入口；结果应写私有源文件、PostgreSQL 和 BI Portal，不再写飞书链接管理表。
 - BI 门户侧栏的“链接表现数据”更新时间应显示源文件抓取时间：`outputs/shein_links/<店铺>/<链接日>.json` 内 `fetchTime` 的最大值；“售后/库存/财务数据”更新时间应显示业务域源文件抓取时间：`outputs/shein_business_domains/<店铺>/<业务日>.json` 内 `fetchTime` 的最大值；BI 重跑重新入仓时产生的数据库 `updated_at` 只可作为内部排障字段，不作为主要更新时间展示。
 - 如果部分店失败：尽量同步成功店铺，并发送飞书异常提醒。
 - 旧 `SHEIN-Sales-15Stores-LinkManagement-0340` / `SHEIN-Sales-15Stores-LinkManagement-0510` 不应恢复。
@@ -91,7 +97,7 @@
 ## 6A. ET 货代仓与 RTV 换单复核
 
 - ET 专属 profile：`profiles/persistent-et-forwarder-profile`。
-- ET 每日同步任务：`SHEIN-Sales-ETForwarder-0420`，入口脚本 `scripts/scheduled_et_forwarder_daily.ps1`，抓取器 `scripts/fetch_et_forwarder.mjs`，入仓器 `scripts/load_et_forwarder_warehouse.mjs`。
+- ET 本地每日同步任务 `SHEIN-Sales-ETForwarder-0420` 已封存禁用；抓取器 `scripts/fetch_et_forwarder.mjs` 和入仓器 `scripts/load_et_forwarder_warehouse.mjs` 仍保留，后续需迁成云端任务后再恢复自动同步。
 - ET 登录态过期时，抓取器会调用 `scripts/et_login_helper.py`，读取 ET profile 中 Chrome 已保存的凭据并用本地 OCR 识别验证码；日志和文档不得输出密码。
 - ET 货代仓也适用“非必要不打开前端窗口”：`scripts/fetch_et_forwarder.mjs` 默认 `visible=false` 并用 `WindowStyle Hidden` 启动 Chrome；自动登录优先走 `scripts/et_login_helper.py` + OCR。只有 OCR/验证码连续失败、登录态必须人工处理、用户明确要求，或必须排查浏览器交互问题时，才允许临时加 `--visible` 打开 ET 前台窗口，处理完必须关闭。
 - RTV 主利润口径继续保守：反转订单营收按 0，仍扣商品成本；ET 已收件只进入“RTV 已收可二次销售测算”，不自动改主利润。
@@ -100,7 +106,7 @@
 - `JT` / `JTE` 这类退货物流通常不换面单；复核脚本会先按 ET RTV 物流号在 SHEIN 售后退货物流号里做全店精确直连匹配，即使 ET 货号编码和 SHEIN 标准货号不一致，也以“同一退货运单号”为强证据入库，并在利润二售测算里按 SHEIN 订单货号归属。
 - iMile / EMile 数字单号仍按“退货物流详情中的换单轨迹”识别，不因单号像数字就直接匹配；找不到明确换单轨迹的仍留在待复核池。
 - ET SKU 上的 `DL-` 等前缀只能作为仓库编码线索，不能硬当销售店铺；RTV 换单复核必须按“标准货号 + 时间窗口”全店搜索售后单，店铺前缀只用于排序，不用于过滤。
-- 每日 `07:00` 复核默认覆盖 high/medium/low 候选并包含无候选售后单的记录，`limit=120`、`case-limit=60`，并受 `max-runtime-ms=3600000`（60 分钟）硬保护；RTV 复核本来就比较耗时，耗时长不是异常。人工深挖时可提高 `--case-limit` 或分批运行；白天滚动销售 BI 刷新不等待该步骤。
+- 本地每日 `07:00` 复核逻辑已封存；手动或云端迁移后复核仍默认覆盖 high/medium/low 候选并包含无候选售后单记录，`limit=120`、`case-limit=60`，并受 `max-runtime-ms=3600000`（60 分钟）硬保护。RTV 复核本来就比较耗时，耗时长不是异常；滚动销售 BI 刷新不应等待该步骤。
 - `mart.rtv_recovery_impact` 和 `mart.rtv_manual_review_candidates` 会吸收 `ops.rtv_tracking_verification.match_status='matched'` 的结果；确认匹配后退出 BI 的“RTV 换单待复核”表。
 - RTV 收到后去了哪里，使用 `mart.et_rtv_destination_allocation` 从 ET 库存流水推断：直接入 `ETRUH09散件仓`、`平台RTV` 入 `ETRUH03_RTV` 后续调拨到 09、仍在 03、调拨到 `ETRUH04Damaged`、转 `ETRUH06报废` 或其它/未知，均按同货号库存池 FIFO 分配。该口径是库存流水级证据，不是序列号级扫描；但可用于更严谨的 `rtv_09_recoverable_cost_sar` / “09 可二售”测算。
 - `mart.shein_return_rtv_trace` 是面向页面和复核的明细视图：每条 SHEIN 退货单给出 `trace_status`（未匹配 ET、已收可售 09、仍在 03、破损 04、报废 06、未知/未解析）和 ET RTV 单号、物流号、仓库去向。BI `订单 / 售后` 页面展示“退货收件 / 仓库去向追踪”，用于回答“每个退货到底收到没有，收到后去了哪里”。
@@ -109,14 +115,14 @@
 
 - `scripts/check_bi_portal_ui.mjs` 是本地/回滚时的无界面 UI 体检入口；本地封存后，默认不要为“看一眼”重启本地前端，云端优先用 HTTP health、静态断言和日志验证。
 - 报告写入 `outputs/bi_ui_check/latest.json` 和带时间戳的历史 JSON；失败时才保存截图，避免每天无意义占用磁盘。
-- 该检查只读，不点击提交、保存、下架、报名等不可逆动作；在 `07:00` BI 流水线中作为非阻断步骤运行，失败时记录 WARN，主数据刷新不因 UI 检查失败而中断。
+- 该检查只读，不点击提交、保存、下架、报名等不可逆动作；本地历史流水线中它是非阻断步骤，云端化前优先用 HTTP health、静态断言和日志验证。
 
 ## 7. HL 主账号与 profile 边界
 
 - HL 已切换为主账号：`profileKey=shein-main`，端口 `9360`。
 - 正式 profile：`profiles/persistent-shein-main-profile`。
 - 旧 `profiles/persistent-hl-profile` 已删除。
-- 飞书定时任务和写表链路都应读取 `config/stores.json`，不要硬编码旧 HL profile 或旧端口。
+- 相关脚本和写表链路都应读取 `config/stores.json`，不要硬编码旧 HL profile 或旧端口。
 - LGM 组当前本身就是主账号，不需要替换。
 - 2026-05-10 已复核 16 店 profile 显示名与登录抓数，未发现错位；其中 `YJ=profileKey qy/port 9346`、`XL=profileKey yj/port 9344`、`QY=profileKey xl/port 9345` 是当前正确绑定。核验错位必须用稳定日期重抓对账数据库，不要只看页面文本。
 

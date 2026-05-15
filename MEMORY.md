@@ -63,15 +63,11 @@
 - 程序化读取飞书 Base 记录时必须显式使用 `--format json`，避免解析旧格式导致误判。
 
 ## 计划任务
-- `00:10`：前一天最终版销售抓取；若 `state/feishu-base-sync-paused.flag` 存在，只写本地销售文件并后置刷新 BI，不写飞书多维表格/月表/宽表/看板。自 `2026-05-11` 起，该任务还会在抓完 D-1 后自动回核 D-2 的销售数据（`third-day-stable-recheck`），用于修正“次日未发货前买家取消订单”导致的前一天初版偏差，并把额外稳定日切片入 BI 仓。
-- `05:30`：链接管理 + 业务域 16 店每日抓取，任务名 `SHEIN-Sales-15Stores-LinkManagement-0530`，脚本 `scripts/scheduled_link_management_daily.ps1`；抓前一完整业务日链接表现、退货/售后、库存、评价、履约、财务等业务域，只写本地文件，不再写飞书链接表；旧 `0340` / `0510` 链接任务不要恢复。
-- `07:00`：BI 每日流水线，任务名 `SHEIN-BI-Daily-Pipeline-0700`；在 `05:30` 抓数完成后，负责入仓、RTV 换单/去向复核、BI 体检、本地门户、UI 冒烟检查和晨报刷新。RTV 复核耗时长是正常现象，默认 `--max-runtime-ms 3600000` 只防无限挂死。BI 门户生成统一放在流水线末尾单次执行，默认超时 `900` 秒；不要在“流水线完成 / 简报 / 首次体检”每个状态点反复生成页面。`2026-05-09 05:30` 链接/业务域任务和 `2026-05-09 07:00` BI 每日流水线已正式自动跑通；ET 计划任务入口已于 `2026-05-09 11:31:49` 复验成功。旧 `2026-05-02 06:40` 的 `267014` 仅保留作历史排障证据。
-- `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10`：当天滚动销售抓取；同步后后置刷新 BI 销售切片并默认跳过 RTV 复核（`-SkipRtvVerify`），若飞书 Base 暂停开关存在，不写飞书多维表格/月表/宽表/看板，但早上成功后仍发送飞书日报。排查滚动 BI 不更新时，优先看 16 店本地销售文件、BI 入仓/门户生成日志和 `outputs/bi-portal/*` 更新时间，不要把 RTV 复核耗时当成 BI 失败。
-- 日报不再使用固定 `09:00` 任务；每天早上 `08:10` 同步成功完成后自动发送飞书文字日报和可视化日报图，上午后续成功同步可补发一次，并使用 flag 防重。
-- 飞书日报发送不受 `state/feishu-base-sync-paused.flag` 影响；暂停期间只跳过写入 Base 的 `飞书日报记录` 表，IM 消息和日报图片照常发送。
-- 计划任务应通过 `wscript.exe` + `scripts/run_scheduled_hidden.vbs` 隐藏启动 PowerShell，最长运行时间 90 分钟，不要直接注册前台 PowerShell 窗口。
-- 如果某个店失败，已成功店铺继续同步；只要目标日本地 16 店销售文件已齐，BI 仍应刷新，并发飞书消息提醒失败店铺。
-- BI 体检里 `link_date = sales_date - 1` 是正常口径，因为链接表现和业务域每天 `05:30` 抓前一天完整日；只有链接/业务域数据落后超过 1 天才应提醒。
+- 2026-05-15 起生产调度转为云端 systemd timer：`shein-bi-cloud-today.timer` 在北京时间 `00:10/02:10/.../22:10` 每两小时刷新当天销售、入仓并生成 BI Portal；`shein-bi-cloud-yesterday.timer` 每天 `00:10` 刷新前一天最终销售并复核前两天稳定日；`shein-bi-db-backup.timer` 每天 `02:30` 备份业务库和 Metabase 元数据库。
+- 本地 `SHEIN-*` Windows 计划任务已全部禁用，保留为回滚/迁移参考，不再作为生产调度。除非用户明确回滚，不要重新启用 `SHEIN-Sales-15Stores-Intraday-Daytime`、`SHEIN-BI-Daily-Pipeline-0700`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-Sales-ETForwarder-0420` 或 HL OpenAPI 本地任务。
+- 云端首阶段只自动覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成和数据库备份；链接/业务域、ET、RTV 完整复核、飞书日报/异常提醒和 HL OpenAPI 双跑仍需要逐项迁移到云端后再恢复自动化。
+- 本地历史规则仍可作回滚参考：RTV 复核耗时长是正常现象，滚动销售刷新不应等待完整 RTV；BI 门户生成必须在流水线末尾单次执行，默认 `SHEIN_BI_PORTAL_TIMEOUT_MS=900000`，不要恢复“流水线完成 / 简报 / 首次体检”多个状态点重复生成页面。
+- 飞书 Base / 看板写入仍受 `state/feishu-base-sync-paused.flag` 约束；云端恢复飞书日报或异常通知前，不要默认认为本地日报任务仍在生产运行。
 
 ## 数据与货号归并
 - 销售 / 订单历史已全量入 BI 仓库；链接、售后、履约、财务按价值和接口能力逐步补历史，库存只保留最新与滚动快照，不补开店以来全量。
@@ -204,7 +200,7 @@
 - ET 大部分列表/明细接口必须带 `X-Requested-With: XMLHttpRequest` 请求头；否则同一接口会返回 `404 无法找到资源`。接口 `content-type` 可能是 `text/html`，但正文是 JSON，抓取器不能只按 content-type 判断。
 - ET 仓库含义：`ETRUH09散件仓` 为核心可售散件仓；`ETRUH01整箱仓` 为海运整箱/待拆箱仓，部分一件一箱货号可直接按箱出库；`ETRUH03_RTV` 为退货/退回仓；`ETRUH04Damaged` 为破损待换包装仓；`ETRUH06报废` 为毁损报废仓。
 - ET 发货申请单对应成本表批次，出库单备注/物流号可关联 SHEIN 订单物流号，RTV 的 `ShipmentNumber` 可关联 SHEIN 退货物流号；匹配不到时应进待复核池，不能硬归并。
-- ET 每日计划任务为 `SHEIN-Sales-ETForwarder-0420`，脚本 `scripts/scheduled_et_forwarder_daily.ps1`；日常同步按“增量游标 + 重叠校验”抓取，抓到上一轮已见约 5 条记录即停止，不固定重抓长时间窗口。
+- ET 本地每日任务 `SHEIN-Sales-ETForwarder-0420` / `scripts/scheduled_et_forwarder_daily.ps1` 已随本地 BI 封存而禁用；ET 抓取和入仓逻辑仍保留，后续需要迁为云端任务后再恢复自动同步。原日常同步规则为“增量游标 + 重叠校验”，抓到上一轮已见约 5 条记录即停止，不固定重抓长时间窗口。
 - ET 财务里的头程/上架等费用先作为成本表核对来源，不默认覆盖用户成本表；仓储费若拿不到 SKU 明细，先按库存体积天数估算分摊并在 BI 明确标注。
 
 ## 2026-05-07 ET 货代全量补数与替代边界
@@ -222,7 +218,7 @@
 - ET 财务账单已能抓到每日仓储费总账（sort_name=仓储费），但当前账单明细未返回 SKU 级仓储费 item rows；在找到仓储费详情接口前，不要用 ET 自动替代按货号仓储费，只能做月总或估算分摊。
 
 ## 2026-05-08 ET 自动登录与验证码
-- ET 04:20 任务若遇到登录态过期，会自动读取 `profiles/persistent-et-forwarder-profile` 里 Chrome 已保存的 ET 账号密码，并用本地 OCR 识别 `/Login/GetAuthCode` 的 4 位验证码后提交登录；实现文件为 `scripts/et_login_helper.py` + `scripts/fetch_et_forwarder.mjs`。
+- ET 抓取器若遇到登录态过期，会自动读取 `profiles/persistent-et-forwarder-profile` 里 Chrome 已保存的 ET 账号密码，并用本地 OCR 识别 `/Login/GetAuthCode` 的 4 位验证码后提交登录；实现文件为 `scripts/et_login_helper.py` + `scripts/fetch_et_forwarder.mjs`。本地 04:20 任务当前已封存，逻辑保留待云端化。
 - `scripts/et_login_helper.py credentials` 默认只输出用户名和密码长度；只有抓取器本地进程设置 `ET_LOGIN_HELPER_ALLOW_SECRET=1` 时才返回密码，不得把密码写入日志、文档或聊天。
 - ET 自动登录依赖项目本地 `.cache/python` 中的 `ddddocr` 和 `cryptography`，不装到 C 盘；如果 OCR 连续失败、保存密码失效或 ET 登录页改版，任务仍会发飞书异常提醒并保留上一版 ET 数据。
 - `scripts/scheduled_et_forwarder_daily.ps1` 已加空日期兜底，避免计划任务无参数运行时把空 `--date` 传给 Node 导致 `Invalid time value`。
@@ -235,7 +231,7 @@
 - BI `订单 / 售后` 页面已新增“RTV 换单待复核”表，展示 ET RTV 单号、ET 物流号、货号/SKU、收件仓、判断原因和 SHEIN 候选。
 - 已新增自动直连复核脚本 `scripts/verify_shein_rtv_tracking.mjs`：直接复用各店已登录 Chrome profile / CDP 调 SHEIN 售后详情与退货物流详情接口，自动识别 `new waybill number [...]`、`新的运单号[...]`、`运单已...更换` 等中英文换单号证据，并写入 `ops.rtv_tracking_verification`。
 - 已验证示例：`ZL / 16FBC044CV / 6031126719507` 通过物流轨迹换单号 `6031326736754` 匹配 ET RTV `TH26040146319`。
-- `mart.rtv_recovery_impact`、`mart.rtv_manual_review_candidates` 已吸收 `ops.rtv_tracking_verification.match_status='matched'` 的结果；每天 `07:00` BI 流水线会先跑一轮 high/medium/low RTV 换单自动复核（默认 `--include-no-cases --limit 120 --case-limit 60 --max-runtime-ms 3600000`），再刷新门户。
+- `mart.rtv_recovery_impact`、`mart.rtv_manual_review_candidates` 已吸收 `ops.rtv_tracking_verification.match_status='matched'` 的结果；本地历史 `07:00` BI 流水线会先跑一轮 high/medium/low RTV 换单自动复核（默认 `--include-no-cases --limit 120 --case-limit 60 --max-runtime-ms 3600000`）再刷新门户。该完整复核待迁到云端，滚动销售刷新不应等待它。
 - `JT` / `JTE` 退货物流按“同一运单号直接对应”处理：先全店精确匹配 SHEIN 售后退货物流号，不受 ET 货号编码和 SHEIN 标准货号差异阻断；iMile / EMile 数字单号仍以物流详情里的换单轨迹为证据，不能只凭数字单号相似直接入库。
 - `mart.et_rtv_destination_allocation` 用 ET 库存流水追踪 RTV 收到后的去向：直接入 `ETRUH09散件仓`、03 后续调拨入 09、仍在 `ETRUH03_RTV`、进入 `ETRUH04Damaged`、转 `ETRUH06报废` 或其它/未知；按同货号库存池 FIFO 分配，是库存流水级证据，不是序列号级扫描。
 - `mart.shein_return_rtv_trace` 是面向 BI 的 SHEIN 退货 -> ET 收件/去向明细视图；BI `订单 / 售后` 页面用它展示每条退货“收到没有、收到后去了哪里”。主利润仍保守，09 去向只进入 `rtv_09_recoverable_cost_sar` / “09 可二售”测算。

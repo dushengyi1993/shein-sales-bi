@@ -69,7 +69,7 @@
 - `scripts/scheduled_intraday_dsy.ps1`
 - 后置入口：`scripts/run_bi_after_feishu_sync.ps1`
 
-链接刷新使用每日固定任务 `SHEIN-Sales-15Stores-LinkManagement-0530`，北京时间 `05:30` 抓前一完整业务日链接表现；飞书链接管理表已废弃，该任务只写本地 JSON、PostgreSQL 和 BI 门户，并用 `state/link-management-synced-YYYY-MM-DD.flag` 防重。
+链接刷新历史上使用本地每日固定任务 `SHEIN-Sales-15Stores-LinkManagement-0530`，北京时间 `05:30` 抓前一完整业务日链接表现；飞书链接管理表已废弃。自 `2026-05-15` 本地任务封存后，该任务只作为回滚/云端迁移参考，后续需迁为云端任务后再恢复自动刷新。
 
 ## 剩余限制
 

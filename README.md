@@ -2,7 +2,7 @@
 
 ## 2026-05-15 当前权威状态
 
-- 飞书多维表格 / 原生看板写入已临时暂停；飞书日报继续正常发送，BI 系统作为当前主要经营入口继续运行。
+- 飞书多维表格 / 原生看板写入已临时暂停；云端 BI 系统作为当前主要经营入口继续运行。飞书日报/异常通知的本地历史链路已随 Windows 任务封存，后续需要单独迁到云端。
 - 本地 BI 已封存，云端 BI 是正式入口：`http://43.165.167.135/`。公网入口已启用 Basic Auth；账号密码只在运行环境交付，不写入仓库或文档。详见 `docs/cloud-bi-operations.md`。
 - 本地 `8787` 服务已停止，`SHEIN-*` Windows 计划任务已禁用；除非明确回滚，不要重新启动本地 BI 或本地抓数任务。
 - 销售同步完成后会后置刷新 BI；如果单店失败但目标日期 16 店销售源文件已齐，BI 仍会刷新，并通过飞书消息提醒失败店铺。
@@ -12,13 +12,13 @@
 - 当前完整 BI 运行层仍是 PostgreSQL + Metabase + BI Portal：PostgreSQL 是核心数据仓库，Metabase 是正式深度分析/自由钻取层，BI Portal 是日常经营入口；在自研门户完全覆盖深钻前，云端迁移不能删除或跳过 Metabase。
 - HL 已切换为主账号 profile：`profiles/persistent-shein-main-profile`；旧 `profiles/persistent-hl-profile` 已删除。
 - `2026-05-10` 已完成 16 店 profile 显示名与登录抓数复核：未发现 profile 名和登录态混乱；`YJ=profileKey qy`、`XL=profileKey yj`、`QY=profileKey xl` 是历史遗留但当前正确的绑定，不要仅凭名称直觉改动。
-- `2026-05-09 05:30` 链接/业务域任务、`2026-05-09 07:00` BI 每日流水线和白天滚动后置 BI 刷新均已跑通。飞书多维表格 / 看板写入暂停开关为 `state/feishu-base-sync-paused.flag`。
-- `2026-05-13` 已明确 BI/RTV 调度边界：RTV 换单自动复核本来就耗时，不应被当成滚动 BI 未更新；`08:10-22:10` 滚动销售后置 BI 默认跳过 RTV 复核，只刷新销售切片和门户；完整 RTV 复核保留在 `07:00` 每日完整 BI 流水线或手动命令中，`--max-runtime-ms 3600000` 仅用于防止无限挂死。
-- ET 货代仓已接入本地数据仓库和 BI：`04:20` 每日同步当前库存、RTV、出库、发货申请单、财务等；抓取器会用 ET 专属 profile 中已保存的密码 + 本地 OCR 自动登录。`2026-05-09` 早间同源探测问题已修复并通过计划任务入口复验。
+- `2026-05-09 05:30` 链接/业务域任务、`2026-05-09 07:00` BI 每日流水线和白天滚动后置 BI 刷新是本地 Windows 历史验证记录；自 `2026-05-15` 本地任务封存后，不再作为生产调度。
+- `2026-05-13` 已明确 BI/RTV 调度边界：RTV 换单自动复核本来就耗时，不应被当成滚动 BI 未更新。云端首阶段滚动刷新只做销售 WebAPI、入仓和 BI Portal 生成；完整 RTV/ET/链接业务域云端化需要后续补齐。
+- ET 货代仓已接入过本地数据仓库和 BI，能抓库存、RTV、出库、发货申请单、财务等；但 `SHEIN-Sales-ETForwarder-0420` 已随本地任务封存，云端 ET 同步需要单独迁移后再恢复自动刷新。
 - RTV 换单号自动复核已接入 BI 流水线：`scripts/verify_shein_rtv_tracking.mjs` 直接读取 SHEIN 售后详情和退货物流详情，JT/JTE 走同运单直连，iMile/EMile 识别中英文换单证据；截至 `2026-05-09` 已确认 `132` 个 ET RTV 入仓单号。
 - RTV 收件后去向已进入 BI：`mart.et_rtv_destination_allocation` 追踪 09 可售、03_RTV、04 破损、06 报废和其它/未知去向；`mart.shein_return_rtv_trace` 在 `订单 / 售后` 页面展示每条 SHEIN 退货是否收到、收到后去了哪里。
 - HL OpenAPI 销售试点已跑通并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` 写入 `fact.openapi_*` 并行事实表与 `mart.openapi_sales_reconciliation` 对账表；BI 系统状态页显示 “SHEIN OpenAPI 试点对账”。正式切换生产销售表前继续累计多日 `matched`。
-- HL OpenAPI 销售试点已固定为 Windows 计划任务双跑：`SHEIN-Sales-OpenAPI-HL-YesterdayFinal-0025` 每天 `00:25` 对账前一天最终版，`SHEIN-Sales-OpenAPI-HL-Intraday-1225` 每天 `12:25` 对账当天日内销售；只写 `fact.openapi_*` 和 `mart.openapi_sales_reconciliation` 并刷新 BI 状态页，不覆盖生产销售事实表。`2026-05-07 13:28` 已把当前出口 IP `188.253.112.44` 加入 SHEIN 开放平台白名单，完整入口复跑成功并刷新 BI；当日 intraday 对账为 `warning`，原因是 API 已多看到 1 个新订单，而当时生产源文件仍停留在上一轮同步。
+- HL OpenAPI 销售试点曾在本地 Windows 任务中双跑，只写 `fact.openapi_*` 和 `mart.openapi_sales_reconciliation`，不覆盖生产销售事实表；这些 Windows 任务已封存，后续需改为云端任务并把云服务器出口 IP 加入 SHEIN 开放平台白名单。
 - 系统定位正在从“BI 数据分析”扩展为“自动运营驾驶舱”：先把可重复运营动作沉淀为脚本和规则，再按“建议/预填/复核/人工确认提交/审计留痕”的边界逐步开放自动化。
 
 本工作区用于 SHEIN 16 店销售数据自动抓取、飞书多维表格统计、每日飞书日报、链接管理、营销活动报名辅助，以及正在并行建设的 PostgreSQL + Metabase + 云端 BI / 自动运营驾驶舱。
@@ -52,20 +52,18 @@
   - 云端 `shein-bi-cloud-yesterday.timer`：每天 `00:10` 刷新前一天最终销售，并复核前两天稳定日。
   - 云端 `shein-bi-db-backup.timer`：每天 `02:30` 备份业务库和 Metabase 元数据库，默认保留 `14` 天。
   - 本地 `SHEIN-*` Windows 计划任务已禁用，保留为回滚参考，不再作为生产调度。
-  - 日报不再使用固定 09:00 任务；每天早上 08:10 同步成功完成后自动发送飞书文字日报 + 可视化日报图，上午后续成功同步可补发一次。
-  - `09:20` 和 Windows 登录时：watchdog 漏跑补偿，不额外同步当日。
-- 当前飞书 Base 暂停规则：存在 `state/feishu-base-sync-paused.flag` 时，`DSY` 和 `LGM` 仍正常抓 SHEIN 本地数据、刷新 BI、发送日报，但跳过飞书事实表、产品表、月表、年度/周月宽表、当月主看板和上月看板写入。
-- 当前 BI 自动任务状态：
-  - `SHEIN-Sales-ETForwarder-0420` 已于 `2026-05-09 11:31:49` 手动触发计划任务入口复验成功，`LastTaskResult=0`。
-  - `SHEIN-Sales-15Stores-LinkManagement-0530` 已于 `2026-05-09 05:30:01` 自动运行成功。
-  - `SHEIN-BI-Daily-Pipeline-0700` 已于 `2026-05-09 07:00:01` 自动运行成功；`2026-05-09` 白天滚动销售后置 BI 也已成功刷新。
+  - 飞书日报、watchdog、ET、链接/业务域和 HL OpenAPI 本地 Windows 任务均已封存；后续需要逐项迁到云端 systemd timer 或 API 服务。
+- 当前飞书 Base 暂停规则：存在 `state/feishu-base-sync-paused.flag` 时，跳过飞书事实表、产品表、月表、年度/周月宽表、当月主看板和上月看板写入。云端首阶段优先保障 SHEIN 销售抓取、入仓和 BI Portal 刷新；飞书日报/异常通知云端化待补。
+- 当前自动任务状态：
+  - 云端 `shein-bi-cloud-today.timer` / `shein-bi-cloud-yesterday.timer` / `shein-bi-db-backup.timer` 是当前生产调度。
+  - `SHEIN-Sales-ETForwarder-0420`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-BI-Daily-Pipeline-0700` 等是本地历史任务，已禁用，保留为回滚/迁移参考。
   - `2026-05-02 07:00` 的 `267014` 是已修复的历史失败记录，保留作排障证据。
 - 团队访问边界：
   - 当前团队访问转为云端入口 `http://43.165.167.135/`，受 Basic Auth 保护。
   - 本地局域网协作入口已封存；`8787` 服务停止，本地计划任务禁用。
   - 原 Windows 防火墙规则需要管理员权限才能禁用；只要本地没有服务监听 `8787`，局域网不会再打开本地 BI。
-  - 同事可标记动作状态、填写负责人和备注；共享状态写入 `state/bi_action_state.json`，操作审计写入 `logs/bi_portal_action_audit.jsonl`，留痕以访问 IP 为准。
-  - 团队正式版还需要固定访问地址、动作状态入 PostgreSQL、HTTPS 和备份。
+  - 同事可标记动作状态、填写负责人和备注；短期仍沿用云端服务侧状态文件，长期应迁入 PostgreSQL，避免文件状态成为单点。
+  - 团队正式版还需要域名、HTTPS、动作状态入 PostgreSQL、异地备份和更正式的账号权限。
 - 后续维护原则：优先把可重复动作脚本化；Markdown 只保留长期规则、入口和关键坑，不再追加流水账，避免小任务频繁触发上下文压缩。
 
 ## 核心口径
@@ -114,6 +112,15 @@
 - `outputs/cleanup/`：项目文件整理/清理清单，例如 `project-file-cleanup-2026-05-02.md`。
 
 ## 常用命令
+
+- 云端手动刷新当天销售 + BI Portal（在服务器 `/opt/shein-bi/app` 执行）：
+  `bash scripts/cloud_bi_refresh.sh today intraday`
+- 云端手动刷新前一天最终版（在服务器 `/opt/shein-bi/app` 执行）：
+  `bash scripts/cloud_bi_refresh.sh yesterday final`
+- 云端手动备份数据库（在服务器 `/opt/shein-bi/app` 执行）：
+  `bash scripts/cloud_db_backup.sh`
+
+以下 Windows 命令当前只作为本地开发、排障或回滚参考；本地 BI 已封存，除非明确回滚，不要重新启用本地计划任务：
 
 - 启动某店铺后台 Chrome：
   `node scripts/launch_store_browser.mjs DL --headless`

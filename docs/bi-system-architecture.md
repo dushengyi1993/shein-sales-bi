@@ -1,6 +1,6 @@
 ﻿# SHEIN BI 系统架构初版
 
-更新时间：2026-05-11
+更新时间：2026-05-15
 
 ## 结论
 
@@ -30,17 +30,17 @@ flowchart LR
    - Metabase 负责筛选、钻取、趋势、店铺/货号/SKC 多维分析，当前仍是正式深度分析层，不能在没有替代前删除。
    - 自定义网页负责“今天该处理什么、复制 SKC、标记已处理、分配同事、备注”。
 
-4. **先本机跑稳，再迁移服务器**
-   - 当前本机使用 WSL + Docker + D 盘数据盘。
-   - 未来迁移到朋友服务器时，迁移 Docker Compose、数据库、Metabase 即可。
+4. **云端为正式入口，本地只作回滚**
+   - 自 `2026-05-15` 起，云端 BI 是正式入口，本地 `8787` 服务和 `SHEIN-*` Windows 任务已封存。
+   - 本机 WSL + Docker + D 盘数据盘只保留为开发、排障和短期回滚参考。
 
 5. **生产链路逐步 API 化，不冒险硬迁移**
-   - Windows 计划任务、BI 后置刷新和飞书日报继续运行；飞书 Base / 看板写入是否恢复由暂停开关控制。
+   - 云端首阶段生产调度只覆盖销售 WebAPI、入仓、BI Portal 生成和数据库备份；链接/业务域、ET、完整 RTV、飞书日报和 HL OpenAPI 双跑需要逐项云端化。
    - SHEIN 销售抓取已改为 WebAPI 直连优先，Chrome 登录态保留为 Cookie/session 刷新和失败回退；官方 OpenAPI 继续并行试点，不直接覆盖生产事实表。
 
 ## 当前服务
 
-本机已运行：
+云端正式运行：
 
 - `shein-metabase`：Metabase BI 页面；
 - `shein-metabase-db`：Metabase 自身配置库；
@@ -52,63 +52,52 @@ flowchart LR
 - Schema 文件：`infra/warehouse/schema.sql`
 - 入仓脚本：`scripts/load_bi_warehouse.mjs`
 
-存放位置：
+云端存放位置：
 
-- WSL 发行版：`D:\WSL\Ubuntu-24.04`
-- Docker 数据盘：`D:\SheinBI\docker-data\docker-data.ext4`
+- 代码目录：`/opt/shein-bi/app`
+- 数据库备份目录：`/srv/shein-bi/backups/auto`
 - Compose 配置：`infra/metabase/docker-compose.yml`
 
 访问：
 
-- 当前通过 WSL IP 访问 Metabase，例如 `http://172.22.172.186:3000`
-- 当前系统化仪表盘：
-  - 经营系统首页：`http://172.22.172.186:3000/dashboard/13`
-  - 财务订单域：`http://172.22.172.186:3000/dashboard/14`
-  - 退货质量域：`http://172.22.172.186:3000/dashboard/15`
-  - 库存履约营销域：`http://172.22.172.186:3000/dashboard/16`
-- 早期原型和专题入口仍可用于参考：
-  - 经营驾驶舱原型：`http://172.22.172.186:3000/dashboard/5`
-  - 店铺视角：`http://172.22.172.186:3000/dashboard/6`
-  - 货号视角：`http://172.22.172.186:3000/dashboard/7`
-  - 链接/SKC 视角：`http://172.22.172.186:3000/dashboard/8`
-- `localhost:3000` 需要管理员权限配置端口转发，暂不强依赖。
+- 云端 BI Portal：`http://43.165.167.135/`，Nginx Basic Auth 保护。
+- Metabase 运行在云端 Docker 内部，不在文档中写公网裸地址；本地旧 WSL 地址只作历史排障参考。
+- Metabase dashboard 编号仍可作为内部迁移参考，但不要使用旧本地 WSL IP 作为正式入口。
 
-## 当前运行态（2026-05-06）
+## 当前运行态（2026-05-15）
 
 BI 系统当前分为三层入口：
 
 1. **飞书生产链路**
-   - 当前只保留飞书日报和异常提醒；Base 表格 / Dashboard 写入由 `state/feishu-base-sync-paused.flag` 暂停。
+   - Base 表格 / Dashboard 写入由 `state/feishu-base-sync-paused.flag` 暂停。
+   - 飞书日报和异常提醒的本地历史任务已封存，后续需要云端化后再恢复自动推送。
    - SHEIN 抓数和 BI 刷新不得因飞书 Base 暂停而中断。
    - 销售源文件当前由 WebAPI 直连优先生成；直连失败时才回退 Chrome。
 
 2. **Metabase 分析层**
    - 连接 PostgreSQL 数据仓库。
-   - 负责深度筛选、钻取、跨表分析和后续趋势分析；云端迁移时必须一起部署，除非后续自研门户已经完整替代这些能力。
+   - 负责深度筛选、钻取、跨表分析和后续趋势分析；当前云端必须一起部署，除非后续自研门户已经完整替代这些能力。
    - 管理员凭据只保存在 `infra/metabase/.admin.local.json`，不要写入文档或聊天。
 
-3. **本地 BI 经营门户**
+3. **云端 BI 经营门户**
    - 文件入口：`outputs/bi-portal/index.html`
-   - 本机服务：`http://127.0.0.1:8787/`
+   - 云端入口：`http://43.165.167.135/`
    - 负责“每天先看什么、先处理什么、如何复制指令、如何标记处理状态”。
-   - 当前服务支持本机 `127.0.0.1:8787` 和临时局域网入口 `http://DUSHENGYI-PC2:8787/` / `http://<当前WLAN-IP>:8787/`；局域网只限私有网段试用，未开放公网。电脑重启后 DHCP 可能换 IP，团队访问不要依赖旧固定 IP。
-   - 通过本机服务打开时，动作状态写入 `state/bi_action_state.json`；直接双击 HTML 打开时，动作状态保存在浏览器本地。
+   - 本地 `127.0.0.1:8787` 和局域网入口已封存，不再作为正式入口。
+   - 短期动作状态仍为服务端状态文件，长期应入 PostgreSQL，避免文件状态成为单点。
    - 系统状态页已接入 `mart.openapi_sales_reconciliation`，展示 HL 官方 OpenAPI 销售试点与当前生产销售源的对账状态；该试点暂不覆盖正式销售事实表。
 
 当前团队访问状态：
 
-- 已具备：本机门户、局域网临时访问、服务端动作状态文件、深链接、动作清单复制、CSV 导出、系统巡检页。
-- 未完成：正式账号/权限、固定服务器地址、多人编辑冲突控制、动作状态入库、HTTPS、备份和权限分级。
+- 已具备：云端公网入口、Basic Auth、服务端动作状态文件、深链接、动作清单复制、CSV 导出、系统巡检页。
+- 未完成：域名、HTTPS、多人编辑冲突控制、动作状态入库、异地备份和权限分级。
 
 当前自动任务状态：
 
-- 任务名：`SHEIN-BI-Daily-Pipeline-0700`
-- 时间：每天 `07:00`
-- 入口：`wscript.exe` + `scripts/run_scheduled_hidden.vbs` + `scripts/scheduled_bi_daily_pipeline.ps1`
-- `2026-05-09 07:00:01` 正式自动任务已运行成功；后续 `2026-05-09 14:10` 销售滚动后置 BI 也已成功刷新。
-- `2026-05-02 07:00` 的 `267014` 是已修复的历史失败记录，保留作排障证据。
-- 链接表现每日任务为 `SHEIN-Sales-15Stores-LinkManagement-0530`，每天 `05:30`，用于抓前一完整业务日链接数据和业务域数据，先写本地文件；`07:00` BI 流水线再入仓刷新门户，不再写飞书链接表。
-- ET 货代仓每日任务为 `SHEIN-Sales-ETForwarder-0420`，每天 `04:20`，用于抓 ET 库存、RTV、出库、发货申请单、库存流水和财务；`07:00` BI 流水线会结合 SHEIN 售后做 RTV 换单复核和仓库去向追踪。
+- 云端 `shein-bi-cloud-today.timer`：北京时间 `00:10/02:10/.../22:10`，刷新当天销售、入仓并生成 BI Portal。
+- 云端 `shein-bi-cloud-yesterday.timer`：每天 `00:10`，刷新前一天最终销售并复核前两天稳定日。
+- 云端 `shein-bi-db-backup.timer`：每天 `02:30`，备份业务库和 Metabase 元数据库。
+- 本地 `SHEIN-BI-Daily-Pipeline-0700`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-Sales-ETForwarder-0420` 等 Windows 任务已封存禁用，仅保留为回滚/迁移参考。
 
 ## 数据分层
 
@@ -299,7 +288,7 @@ BI 系统当前分为三层入口：
 
 ## 迁移路线
 
-### 阶段 1：本机 BI 基座
+### 阶段 1：本机 BI 基座（已完成，现为回滚参考）
 
 - Metabase 跑起来；
 - PostgreSQL 数据仓库跑起来；
@@ -320,11 +309,11 @@ BI 系统当前分为三层入口：
 - 支持复制 SKC、备注、标记处理、分配同事；
 - 处理状态回写数据库，必要时同步飞书。
 
-### 阶段 4：团队访问
+### 阶段 4：团队访问（云端进行中）
 
-- 先局域网；
-- 再服务器；
-- 最后考虑账号权限、HTTPS、备份、外网访问。
+- 云端临时公网入口 + Basic Auth 已启用；
+- 本地局域网入口已封存；
+- 下一步补域名、HTTPS、异地备份、动作状态入库和权限分级。
 
 ## 与飞书的关系
 

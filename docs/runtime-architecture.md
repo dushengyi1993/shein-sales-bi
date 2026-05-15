@@ -1,13 +1,14 @@
 ﻿# 运行环境架构
 
-## 2026-05-13 当前运行环境摘要
+## 2026-05-15 当前运行环境摘要
 
-- SHEIN 抓数、BI 后置刷新和飞书日报继续在 Windows 侧运行；飞书多维表格 / 原生看板写入已临时暂停。
+- SHEIN 销售抓数、BI 后置刷新和数据库备份已切到云端 systemd；本地 BI 和 `SHEIN-*` Windows 计划任务已封存禁用。
+- 飞书多维表格 / 原生看板写入已临时暂停；飞书日报/异常通知的本地历史任务已封存，后续需要单独云端化。
 - 销售抓取主入口已改为 Node WebAPI 直连优先；16 店 `salesTransport=auto`，成功时不启动浏览器，浏览器只保留为 Cookie/session 刷新、登录续期和回退工具。
 - 暂停开关为 `state/feishu-base-sync-paused.flag`；存在该文件时跳过飞书事实表、产品表、月表、宽表和看板写入，删除后可恢复。
-- 链接表现每日任务为 `SHEIN-Sales-15Stores-LinkManagement-0530`，每天 `05:30`，只写本地 / PostgreSQL / BI；旧 `0340` / `0510` 链接任务不要恢复。
+- 云端首阶段只自动覆盖销售 WebAPI、销售入仓、BI Portal 生成和数据库备份；链接/业务域、ET、完整 RTV 复核、飞书日报/异常通知和 HL OpenAPI 双跑仍待迁移。
 - HL 正式 profile 为 `profiles/persistent-shein-main-profile`，CDP 端口 `9360`；旧 `profiles/persistent-hl-profile` 已删除。
-- `2026-05-05` Docker / WSL 数据盘异常已恢复；`2026-05-09 05:30` 链接/业务域任务和 `2026-05-09 07:00` BI 每日流水线已正式自动跑通。`2026-05-09 11:31:49` 已手动触发 `SHEIN-Sales-ETForwarder-0420` 计划任务入口并返回 `LastTaskResult=0`。
+- `2026-05-09 05:30` 链接/业务域任务、`2026-05-09 07:00` BI 每日流水线和 `SHEIN-Sales-ETForwarder-0420` 是本地历史验证记录；自 `2026-05-15` 起不再作为生产调度。
 - `2026-05-11` WebAPI 全店销售抓取资源实测：16 店 `2026-05-08` 直连抓取耗时 `15.09s`，项目 Node 峰值约 `60.44MB` working set / `55.82MB` private，不额外启动店铺浏览器；证据见 `outputs/cloud-migration/webapi-allstores-resource-20260511-201715.json`。
 
 ## 结论
@@ -23,21 +24,18 @@
 - Windows Chrome：保留 SHEIN 登录态、Cookie/session 刷新和页面自动化回退；销售主链路已 WebAPI 直连优先。Chrome profile 仍使用工作区内的 `profiles/` 作为 `--user-data-dir`，避免占用默认 C 盘 Chrome 用户目录；只有登录、验证码、人机校验或排障时才打开可见 Chrome。
 - 飞书写入：当前 `lark-cli` 在 Windows 侧可用；但飞书 Base / 看板写入受 `state/feishu-base-sync-paused.flag` 控制，暂停期间只保留飞书 IM 日报和异常提醒。
 
-## 当前 Windows 计划任务（北京时间）
+## 当前云端 systemd 调度（北京时间）
 
-- `SHEIN-Sales-15Stores-YesterdayFinal-0010`：每天 `00:10` 跑前一天最终版；Base 暂停期间只写本地销售文件并刷新 BI。自 `2026-05-11` 起还会在同一任务内回核 D-2 稳定销售，修正次日未发货前取消订单导致的初版偏差。
-- `SHEIN-Sales-ETForwarder-0420`：每天 `04:20` 跑 ET 货代仓同步；抓库存、RTV、出库、发货申请单、库存流水和财务，按增量游标 + 重叠校验停止。
-- `SHEIN-Sales-15Stores-Intraday-Daytime`：每天 `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10` 跑当天滚动抓取；Base 暂停期间只写本地销售文件并刷新 BI；后置 BI 默认跳过 RTV 换单复核，避免长复核挡住滚动销售看板。
-- `SHEIN-Sales-15Stores-LinkManagement-0530`：每天 `05:30` 跑前一完整业务日链接管理和业务域抓取，先写本地 JSON；`07:00` BI 流水线再入仓刷新门户，不再写飞书链接表。
-- `SHEIN-BI-Daily-Pipeline-0700`：每天 `07:00` 入仓 05:30 已抓取的链接/业务域数据，并刷新 PostgreSQL BI 仓库、RTV 换单和仓库去向追踪、体检、门户、UI 冒烟检查和晨报；RTV 复核耗时长是正常现象，默认 60 分钟硬保护只用于防止无限挂死。
-- 每日飞书文字日报和可视化日报图不再使用独立固定任务；由 `08:10` 当天抓取成功完成后自动发送。若 `08:10` 因关机/失败未发送，上午后续成功的滚动同步可补发一次，并用 `state/daily-report-sent-YYYYMMDD.flag` 防重复；Base 暂停期间只跳过日报记录表写入，不影响 IM 消息和日报图。
-- `SHEIN-Sales-15Stores-Watchdog-Logon`：Windows 登录时和每天 `09:20` 检查漏跑并补偿；不额外同步当日。
+- `shein-bi-cloud-today.timer`：`00:10/02:10/.../22:10` 每两小时刷新当天销售、入仓并生成 BI Portal。
+- `shein-bi-cloud-yesterday.timer`：每天 `00:10` 刷新前一天最终销售，并复核前两天稳定日。
+- `shein-bi-db-backup.timer`：每天 `02:30` 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto`。
+- 本地 `SHEIN-*` Windows 计划任务已全部禁用，只保留为回滚和 Linux 迁移参考。
 
-安装/更新入口：
+本地回滚时的 Windows 安装/更新入口：
 
 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_windows_scheduled_tasks.ps1 -IncludeWatchdog`
 
-计划任务 Action 不直接调用 `powershell.exe -File ...`，而是调用 `wscript.exe` 执行 `scripts/run_scheduled_hidden.vbs`，再隐藏启动对应 `.ps1`。这样即使同步任务运行十几分钟，也不会在前台留下黑色命令行窗口。任务最长运行时间为 90 分钟，避免后台卡死影响下一次同步。
+回滚时 Windows 计划任务 Action 不直接调用 `powershell.exe -File ...`，而是调用 `wscript.exe` 执行 `scripts/run_scheduled_hidden.vbs`，再隐藏启动对应 `.ps1`。这样即使同步任务运行十几分钟，也不会在前台留下黑色命令行窗口。任务最长运行时间为 90 分钟，避免后台卡死影响下一次同步。
 
 ## SHEIN 销售 WebAPI 直连边界（2026-05-11）
 
@@ -61,7 +59,7 @@
 - Metabase、Metabase 配置库、SHEIN 数据仓库通过 Docker 跑在 WSL。
 - WSL 发行版已迁移到 `D:\WSL\Ubuntu-24.04`。
 - Docker 数据根已迁移到 `D:\SheinBI\docker-data\docker-data.ext4`，实际挂载到 WSL 内 `/mnt/wsl/shein-docker-data/docker`。
-- 现有销售抓取、飞书日报、Windows 计划任务继续在 Windows 侧运行；其中销售抓取已 WebAPI 直连优先，Chrome 为回退/登录续期工具。飞书 Base / 看板写入已通过暂停开关临时停用，直到用户确认恢复。
+- 本地旧销售抓取、飞书日报和 Windows 计划任务已封存；其中销售抓取逻辑已迁到云端 WebAPI 直连优先，Chrome 仅保留为回退/登录续期工具。飞书 Base / 看板写入已通过暂停开关临时停用，直到用户确认恢复并完成云端化。
 - 后续新写的 BI 数据入仓、规则引擎、Metabase 配置脚本，优先按“可迁移到 Linux 服务器”的方式设计，减少 PowerShell 业务逻辑。
 
 也就是说：**BI 底座可以先 WSL/服务器化，但不要为了统一环境去冒险迁移已稳定的飞书生产链路。**
@@ -216,14 +214,16 @@
 - 当前有两个 Dashboard：`SHEIN经营看板 v3-主看板`（当月滚动）和 `SHEIN经营看板 v3-上月`（上月完整）。上月看板使用 `看板数据-PREV-*` 五张轻量数据源，避免与当月 `看板数据-MAIN-*` 互相覆盖。
 - 看板继续使用轻量聚合数据源，而不是直接读取订单/SKC 大明细表；这样更稳、更快，也避免 Dashboard 直接扫事实表时筛选和排序不稳定。优化方向是减少重复数据源和字段，但不要让看板直接读大明细表。
 
-# 2026-05-02 调度与 HL profile 更新
+# 2026-05-15 云端调度与本地封存
 
-- 销售抓取任务现在承担 BI 后置刷新：00:10 和白天滚动任务完成本地销售抓取后，会继续刷新 PostgreSQL BI 仓库、本地 BI 门户和晨报；飞书 Base / 看板写入在暂停开关存在时跳过。00:10 还会把 D-2 稳定回核日期通过 `run_bi_after_feishu_sync.ps1 -ExtraSalesDates` 额外补入仓。白天滚动后置刷新通过 `run_bi_after_feishu_sync.ps1` 传 `-SkipRtvVerify`，只刷新销售切片和门户；完整 RTV 复核留给 `07:00` 每日 BI 或手动命令。
-- 旧独立链接管理计划任务 `SHEIN-Sales-15Stores-LinkManagement-0340` / `SHEIN-Sales-15Stores-LinkManagement-0510` 已经删除；当前链接同步由 `SHEIN-Sales-15Stores-LinkManagement-0530` 每天 05:30 负责，只写本地 / PostgreSQL / BI。上午滚动任务主要负责销售同步后的 BI 后置刷新。
+- 生产调度已切到云端 systemd timer：`shein-bi-cloud-today.timer` 每两小时刷新当天销售、入仓并生成 BI Portal；`shein-bi-cloud-yesterday.timer` 每天 `00:10` 刷新前一天最终销售并复核前两天稳定日；`shein-bi-db-backup.timer` 每天 `02:30` 做数据库备份。
+- 本地 `SHEIN-*` Windows 计划任务已封存禁用。`scheduled_intraday_dsy.ps1`、`scheduled_yesterday_final_dsy.ps1`、`scheduled_link_management_daily.ps1`、`scheduled_et_forwarder_daily.ps1`、`scheduled_bi_daily_pipeline.ps1` 等只保留为回滚/迁移参考，不再作为生产调度。
+- 云端首阶段只自动覆盖销售 WebAPI、销售入仓、BI Portal 生成和数据库备份；链接/业务域、ET、完整 RTV 复核、飞书日报/异常通知和 HL OpenAPI 双跑仍待迁移。
+- 旧独立链接管理计划任务 `SHEIN-Sales-15Stores-LinkManagement-0340` / `SHEIN-Sales-15Stores-LinkManagement-0510` 已删除；`SHEIN-Sales-15Stores-LinkManagement-0530` 是本地历史任务，已封存。
 - HL 旧子账号 profile `profiles/persistent-hl-profile` 已删除；正式 HL profile 为 `profiles/persistent-shein-main-profile`，CDP 端口 `9360`。
 - 飞书定时任务和写表链路都通过 `config/stores.json` 获取 HL profile；当前生产脚本中没有旧 HL profile、旧端口 `9338` 或 `profileKey=hl` 引用。
-- 后置 BI 刷新失败时只记录日志，不让飞书生产任务失败。
-- 判断“滚动 BI 是否更新”时，先看目标日 16 店本地销售文件、`logs/bi-daily-pipeline-*.log` 的入仓/门户生成步骤、`outputs/bi-portal/data.json` / `index.html` 的更新时间；不要把 RTV 复核运行时间长当成 BI 未更新。
+- 后置 BI 刷新失败时只记录日志，不应反向影响销售源抓取。
+- 判断“滚动 BI 是否更新”时，先看目标日 16 店销售源文件、云端刷新日志、入仓步骤、`outputs/bi-portal/data.json` / `index.html` 的更新时间；不要把 RTV 复核运行时间长当成 BI 未更新。
 
 
 

@@ -78,21 +78,20 @@
 - Metabase 负责 BI 分析、筛选、钻取；当前仍是正式 BI 深度分析层，不能因为 Java/JVM 内存占用就直接删除或跳过。
 - SHEIN 抓取、库存菜单接口、链接建议规则仍由本项目脚本负责。
 - 飞书 Base 继续作为协作底表，但不再依赖飞书 Dashboard 做复杂 BI。
-- 新 BI 系统优先跑在 WSL + Docker + D 盘数据盘上，方便未来迁移到服务器；云端迁移时应按 PostgreSQL + Metabase + BI Portal 一起部署和验证。
-- 现有飞书同步、销售日报、Windows 计划任务和已稳定的 SHEIN Windows Chrome 登录态暂不迁移，直到 BI 系统验证可替代。
+- 新 BI 系统已开始云端运行；云端应按 PostgreSQL + Metabase + BI Portal 一起部署和验证。
+- 本地飞书同步、销售日报、Windows 计划任务和 SHEIN Windows Chrome 登录态已随本地 BI 封存，不再作为生产入口；飞书日报/异常通知、ET、链接/业务域和完整 RTV 复核仍需逐项云端化。
 
 ## Windows / WSL 边界
 
 当前不是“全部切到 WSL”，而是分阶段迁移：
 
-1. **现有生产链路继续在 Windows 跑**
-   - 销售抓取、飞书 Base 同步、日报、计划任务继续按原时间执行。
-   - 这些任务依赖现有 Windows Chrome profile、`lark-cli` 授权和 Windows 计划任务，贸然搬迁风险较高。
+1. **现有生产链路转为云端优先**
+   - 销售抓取、销售入仓、BI Portal 生成和数据库备份已切到云端 systemd。
+   - 本地 Windows 任务只保留为回滚/迁移参考；飞书日报/异常通知、ET、链接/业务域和完整 RTV 复核待迁移。
 
-2. **新 BI 底座放到 WSL/D 盘**
-   - Metabase、Metabase 配置库、SHEIN 数据仓库都通过 Docker 跑在 WSL。
-   - Docker 数据根位于 `D:\SheinBI\docker-data\docker-data.ext4`，不是 C 盘。
-   - WSL 发行版本身位于 `D:\WSL\Ubuntu-24.04`，不是 C 盘。
+2. **本地 WSL/D 盘降级为回滚参考**
+   - Metabase、Metabase 配置库、SHEIN 数据仓库在云端 Docker 中运行。
+   - 本地 `D:\SheinBI\docker-data\docker-data.ext4` 和 `D:\WSL\Ubuntu-24.04` 只作历史排障和短期回滚参考。
 
 3. **后续逐步替换**
    - SHEIN 抓取结果先继续同步飞书，同时写入本地数据仓库。

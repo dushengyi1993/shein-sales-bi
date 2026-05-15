@@ -18,9 +18,11 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 当月主看板：`SHEIN经营看板 v3-主看板`，ID `blkFn3qHrwdsrJyX`，数据源 `看板数据-MAIN-*`
 - 上月看板：`SHEIN经营看板 v3-上月`，ID `blkWeyZhphgRZYim`，数据源 `看板数据-PREV-*`
 - 店铺：DSY=`DL DX FY LQ NM HL JY ZL TS MZ`；LGM=`CX YJ XL QY QH TZ`
+- 云端 BI 正式入口：`http://43.165.167.135/`，Nginx Basic Auth 保护；本地 `8787` 服务和 `SHEIN-*` Windows 任务已封存禁用，除非明确回滚不要重启。
+- 云端生产调度：`shein-bi-cloud-today.timer` 每两小时刷新当天销售、入仓并生成 BI Portal；`shein-bi-cloud-yesterday.timer` 每天 `00:10` 刷新前一天最终版并复核稳定日；`shein-bi-db-backup.timer` 每天 `02:30` 备份数据库。
 - HL OpenAPI 销售试点已建立并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` -> `fact.openapi_*` -> `mart.openapi_sales_reconciliation`；正式切换前继续累计多日 `matched`。
 - 16 店销售生产抓取已改为 WebAPI 直连优先：`config/stores.json.salesTransport=auto`，session 文件在 `state/shein_webapi_sessions/*.local.json`，直连成功不启动浏览器；浏览器只作刷新 session、登录续期和回退。
-- ET 货代仓已接入：`04:20` 抓 ET 库存/RTV/出库/发货申请单/财务，`07:00` BI 流水线入仓并做 RTV 换单自动复核和仓库去向追踪；RTV 复核耗时长是正常现象。
+- ET 货代仓已接入过本地仓库和 BI，但本地 `04:20` 任务已随本地封存禁用；云端 ET 同步待迁移。RTV 复核耗时长是正常现象，滚动销售刷新不应等待完整 RTV。
 - LGM profile 映射：`CX=profile cx/GS9489101`，`YJ=profile qy/GS7451160`，`XL=profile yj/GS8146729`，`QY=profile xl/GS9307061`，`QH=profile qh/GS8715910`，`TZ=profile tz/GS5636781`。`YJ/XL/QY` 的 profileKey 名称不等于店铺代码是历史遗留但当前正确，不要按名称直觉互换；错位核验用稳定日期重抓对账数据库。
 
 ## 业务口径
@@ -37,15 +39,10 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 不做猜测性单店时区偏移；HL 的错误 `accountUtcOffsetHours=3` 已删除并回补。
 
 ## 定时任务
-- `00:10`：前一天最终版；若存在 `state/feishu-base-sync-paused.flag`，只抓本地数据并刷新 BI，不写飞书 Base / 看板。自 `2026-05-11` 起还会回核 D-2 稳定销售切片（`third-day-stable-recheck`），并通过 `run_bi_after_feishu_sync.ps1 -ExtraSalesDates` 补刷 BI。
-- `04:20`：ET 货代仓每日同步，任务名 `SHEIN-Sales-ETForwarder-0420`；遇到 ET 登录态过期时，`scripts/fetch_et_forwarder.mjs` 会调用 `scripts/et_login_helper.py` 用已保存密码 + 本地 OCR 自动登录。
-- `05:30`：链接管理 16 店每日同步，任务名 `SHEIN-Sales-15Stores-LinkManagement-0530`，只写本地 / PostgreSQL / BI，不再写飞书链接表。
-- `07:00`：BI 每日流水线，任务名 `SHEIN-BI-Daily-Pipeline-0700`；包含 ET/SHEIN 入仓、RTV 换单自动复核、BI 体检、本地门户和晨报刷新；RTV 复核允许较长时间运行。V1 门户生成放在流水线末尾单次执行，默认 `SHEIN_BI_PORTAL_TIMEOUT_MS=900000`，不要恢复多个状态点重复生成页面。
-- `2026-05-09 05:30` 链接/业务域任务和 `2026-05-09 07:00` BI 每日流水线已自动跑通；`2026-05-09 04:20` ET 任务的同源探测问题已修复，`11:31:49` 手动触发计划任务入口复验成功。
-- `08:10 / 10:10 / 12:10 / 14:10 / 16:10 / 18:10 / 20:10 / 22:10`：当天滚动抓取；Base 暂停期间只抓本地数据并刷新 BI；后置 BI 默认 `-SkipRtvVerify`，不要让 RTV 复核耗时挡住滚动销售看板。
-- 日报：早上 08:10 同步成功后自动发送；上午后续成功同步可补发一次，用 `state/daily-report-sent-YYYYMMDD.flag` 防重复。Base 暂停期间照常发送 IM 文字和图片日报，只跳过写 `飞书日报记录` 表。
-- watchdog：`09:20` 和 Windows 登录时，只做漏跑补偿。
-- 计划任务必须通过 `wscript.exe` + `scripts/run_scheduled_hidden.vbs` 隐藏运行，最长 90 分钟。
+- 当前生产调度在云端 systemd：`shein-bi-cloud-today.timer`、`shein-bi-cloud-yesterday.timer`、`shein-bi-db-backup.timer`。云端首阶段只自动覆盖销售 WebAPI、销售入仓、BI Portal 生成和数据库备份。
+- 本地 `SHEIN-*` Windows 任务已于 `2026-05-15` 封存禁用，保留为回滚/迁移参考；除非明确回滚，不要重新启用 `SHEIN-Sales-15Stores-Intraday-Daytime`、`SHEIN-BI-Daily-Pipeline-0700`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-Sales-ETForwarder-0420` 或 HL OpenAPI 本地任务。
+- 链接/业务域、ET、完整 RTV 复核、飞书日报/异常通知和 HL OpenAPI 双跑仍待迁到云端。迁移完成前，不要默认本地日报、watchdog 或 ET 任务仍在生产运行。
+- 历史规则仍保留：V1 门户生成放在流水线末尾单次执行，默认 `SHEIN_BI_PORTAL_TIMEOUT_MS=900000`，不要恢复多个状态点重复生成页面；RTV 复核耗时长不是滚动 BI 失败。
 
 ## 数据层
 - 事实表：`店铺日报事实`、`产品日销量事实`、`订单明细事实`、`订单商品SKC明细事实`、`SKC链接映射`。
@@ -68,14 +65,18 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 发现无法归并、疑似新货号或拿不准的短号/标题时，先生成确认清单给用户，不要擅自合并。
 
 ## 关键脚本
+- 云端当天刷新：`bash scripts/cloud_bi_refresh.sh today intraday`（在服务器 `/opt/shein-bi/app` 执行）
+- 云端前一天最终版：`bash scripts/cloud_bi_refresh.sh yesterday final`
+- 云端数据库备份：`bash scripts/cloud_db_backup.sh`
+- 本地封存复核：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/archive_local_bi.ps1`
 - 单店浏览器：`node scripts/launch_store_browser.mjs DL --headless|--visible|--background`
 - 单店抓取：`node scripts/fetch_shein_sales.mjs DL --date YYYY-MM-DD --transport auto|webapi|browser`
 - 单组同步：`node scripts/run_sales_sync_job.mjs --mode intraday --group DSY`
-- 16 店当天同步：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_intraday_dsy.ps1`
-- BI 每日流水线：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_bi_daily_pipeline.ps1`
+- 16 店当天同步（本地回滚参考）：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_intraday_dsy.ps1`
+- BI 每日流水线（本地回滚参考）：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_bi_daily_pipeline.ps1`
 - 生成 BI 门户：`$env:SHEIN_BI_PORTAL_TIMEOUT_MS='900000'; node scripts/generate_bi_portal.mjs`
 - 生成 V2.1 独立设计预览：`node scripts/generate_bi_portal_v2.mjs`；V2.1 只读复用 `outputs/bi-portal/data.json`，用户确认前不得替换 V1 或改生产调度。自 `2026-05-14` 起，V2 当前验收范围先限定首页：必须复刻 V1 首页功能/操作逻辑；其它子页尚未完成全量复刻。V2 暂时不跟随日常同步自动刷新，只有用户明确要求开发/优化/验收 V2 时才生成或维护。
-- ET 每日同步：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_et_forwarder_daily.ps1`
+- ET 每日同步（待云端化，本地回滚参考）：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_et_forwarder_daily.ps1`
 - RTV 换单复核：`node scripts/verify_shein_rtv_tracking.mjs --priority high,medium,low --include-no-cases --limit 120 --case-limit 60 --max-runtime-ms 3600000`
 - 营销活动报名补填：规则见 `docs/marketing-campaign-signup-pricing-rules.md`；当前执行入口为 `node scripts/marketing/dsy_marketing_deadline_fill.mjs --stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --hours 48 --price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD.json --min-discount-fallback SK-13034`。选择商品页必须先切到 `500 条/页` 再全选并核对 `总计 N 个 = 已选商品 N 个`；只允许填价和复核，不得点击最终 `提交报名`。
 - HL OpenAPI 销售试点：`node scripts/fetch_shein_openapi_sales.mjs HL --start YYYY-MM-DD --end YYYY-MM-DD` 后运行 `node scripts/load_shein_openapi_sales_warehouse.mjs --store HL --start YYYY-MM-DD --end YYYY-MM-DD`，只写 API 并行事实表和 `mart.openapi_sales_reconciliation`。
@@ -88,9 +89,9 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 重算历史销售 summary：`node scripts/repair_shein_sales_summaries.mjs --start YYYY-MM-DD --end YYYY-MM-DD --write`；无 `--write` 时只 dry-run。全历史写回前先看 `totalDeltaSar`，避免把净销售反转误当源头总销售修复。
 - 货号扫描：`node scripts/report_product_sku_candidates.mjs --group ALL --start YYYY-MM-DD --end YYYY-MM-DD`
 - 逻辑体检：`node scripts/audit_shein_sales_logic.mjs --month YYYY-MM --date YYYY-MM-DD`
-- 安装计划任务：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_windows_scheduled_tasks.ps1 -IncludeWatchdog`
+- 安装计划任务（仅本地回滚时）：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_windows_scheduled_tasks.ps1 -IncludeWatchdog`
 - 安全关店铺 Chrome：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/close_store_browsers.ps1 -Group DSY`
-- 修复 BI 局域网防火墙：管理员执行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fix_bi_lan_firewall.ps1`，应把规则 `SHEIN BI Portal LAN 8787 ReadOnly` 改为 `LocalAddress=Any`、`RemoteAddress=192.168.2.0/24`、端口 `8787`。
+- 修复 BI 局域网防火墙（仅本地回滚时）：管理员执行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fix_bi_lan_firewall.ps1`，应把规则 `SHEIN BI Portal LAN 8787 ReadOnly` 改为 `LocalAddress=Any`、`RemoteAddress=192.168.2.0/24`、端口 `8787`。
 
 ## 看板规则
 - 用户会手动调整正式看板布局和大小；默认不调用 `+dashboard-arrange`，不重建无关组件，不改布局和尺寸。只有用户明确允许时才传 `--arrange`。

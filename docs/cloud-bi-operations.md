@@ -29,6 +29,8 @@
 | `shein-bi-cloud-yesterday.timer` | 北京时间 `00:10` | 刷新前一天最终销售，并复核前两天稳定日 |
 | `shein-bi-db-backup.timer` | 北京时间 `02:30` | 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto` |
 
+当前云端首阶段只自动覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成和数据库备份。链接/业务域、ET、完整 RTV 复核、飞书日报/异常通知和 HL OpenAPI 双跑仍待迁到云端；不要误以为本地 `SHEIN-*` Windows 任务仍在生产运行。
+
 备份默认保留 `14` 天。后续正式长期运行还应补对象存储或异地下载备份，避免云盘单点故障。
 
 ## 4. 云端刷新链路

@@ -1,10 +1,18 @@
 # scripts 目录脚本清单与保留边界
 
-> 目的：避免 `scripts/` 越积越乱。本文先做分类和风险标注，不直接删除脚本；删除或归档前需要再次确认，尤其不能误伤 Windows 计划任务和 BI 主链路。
+> 目的：避免 `scripts/` 越积越乱。本文先做分类和风险标注，不直接删除脚本；删除或归档前需要再次确认，尤其不能误伤云端 systemd 任务、本地回滚脚本和 BI 主链路。
 
-## 生产定时任务直接引用，必须保留
+## 云端生产定时任务直接引用，必须保留
 
-这些脚本被 Windows 计划任务直接调用或作为隐藏启动器使用：
+这些脚本被云端 systemd unit 直接调用：
+
+- `cloud_bi_refresh.sh`
+- `cloud_db_backup.sh`
+- `archive_local_bi.ps1`：本地封存/复核脚本，供回滚前后检查使用。
+
+## 本地 Windows 回滚 / 历史任务引用，必须保留
+
+这些脚本曾被 Windows 计划任务直接调用或作为隐藏启动器使用；`2026-05-15` 本地任务已封存禁用，但脚本保留作回滚和 Linux 迁移参考：
 
 - `run_scheduled_hidden.vbs`
 - `scheduled_bi_daily_pipeline.ps1`
@@ -89,7 +97,7 @@
 - `et_login_helper.py`
 - `close_store_browsers.ps1`
 - `enable_bi_lan_firewall.ps1`
-- `fix_bi_lan_firewall.ps1`：管理员运行，修复局域网 BI 访问防火墙规则，避免规则绑定 DHCP 旧 IP。
+- `fix_bi_lan_firewall.ps1`：本地回滚时管理员运行，修复局域网 BI 访问防火墙规则，避免规则绑定 DHCP 旧 IP。
 - `run_fix_bi_lan_firewall_admin.ps1`：临时 UAC wrapper，只用于人工触发上述防火墙修复。
 - `install_windows_scheduled_tasks.ps1`
 - `start_metabase_wsl.ps1`
@@ -142,7 +150,7 @@
   - 只有用户明确要求恢复独立固定日报任务时，才通过 `install_windows_scheduled_tasks.ps1 -IncludeDailyReport` 安装。
 - `generate_lark_ops_report_doc.mjs`
   - 状态：飞书文档版经营入口兜底脚本。
-  - 原因：原用于飞书 Base Dashboard 不稳定时生成普通飞书文档；当前主入口已转为本地 BI 门户和飞书日报。
+  - 原因：原用于飞书 Base Dashboard 不稳定时生成普通飞书文档；当前主入口已转为云端 BI 门户，飞书日报云端化待补。
   - 暂保留作历史参考，不用于日常自动任务。
 
 ## 临时探索 / 排障探针，后续可考虑归档
@@ -178,7 +186,7 @@
 2. 若要整理目录，优先做“移动归档 + README 标注”，不要直接删。
 3. 第一批可归档对象应从“临时探索 / 排障探针”里选。
 4. `sync_shein_links_to_lark.mjs` 虽废弃，但因内置拒绝执行保护，可先保留作历史迁移兜底。
-5. 任意删除前必须先搜索：Windows 计划任务、README/docs、其他脚本 import/spawn 引用。
+5. 任意删除前必须先搜索：云端 systemd unit、Windows 回滚任务、README/docs、其他脚本 import/spawn 引用。
 
 ## 产品套图提示词生成
 

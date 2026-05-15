@@ -1,16 +1,17 @@
 # BI 门户界面当前口径
 
-最后更新：2026-05-06 10:20
+最后更新：2026-05-15 23:05
 
 ## 1. 总体定位
 
-- BI 门户入口：`http://127.0.0.1:8787/`
+- BI 门户正式入口：`http://43.165.167.135/`
+- 本地 `http://127.0.0.1:8787/` 已封存，只作回滚/开发参考。
 - 本地文件：`outputs/bi-portal/index.html`
 - 数据文件：`outputs/bi-portal/data.json`
 - 生成脚本：`scripts/generate_bi_portal.mjs`
 - V1 是当前正式门户；`2026-05-12` 起新增 V2 平行预览版用于验收 Claude Design 风格，不替换 V1：
-  - V1 入口：`http://127.0.0.1:8787/`
-  - V2 预览入口：`http://127.0.0.1:8787/v2/`
+  - V1 正式入口：`http://43.165.167.135/`
+  - V2 预览文件：`outputs/bi-portal/v2/index.html`；本地封存后不要为了预览主动重启本地服务。
   - V2 生成脚本：`scripts/generate_bi_portal_v2.mjs`
   - V2 输出目录：`outputs/bi-portal/v2/`
   - V2 只读复用 `outputs/bi-portal/data.json`，不得在未确认前改动 V1 `outputs/bi-portal/index.html` 或生产调度。
@@ -236,8 +237,8 @@
 
 ## 2026-05-13 V2.1 独立设计预览口径
 
-- V1 正式入口仍为 `http://127.0.0.1:8787/`，本轮没有修改 `outputs/bi-portal/index.html`。
-- V2.1 预览入口为 `http://127.0.0.1:8787/v2/`，由 `scripts/generate_bi_portal_v2.mjs` 生成到 `outputs/bi-portal/v2/index.html`。
+- V1 正式入口为云端 `http://43.165.167.135/`；本地 `127.0.0.1:8787` 已封存。
+- V2.1 预览由 `scripts/generate_bi_portal_v2.mjs` 生成到 `outputs/bi-portal/v2/index.html`；本地封存后不要为了预览主动重启本地服务。
 - V2.1 只读取现有 `outputs/bi-portal/data.json`，不改变抓数、入仓、日报或 V1 调度。
 - 本轮视觉方向从“V1 套皮”改为独立经营 BI：降噪、提密、去装饰，减少大面积空白、过重阴影和过大圆角。
 - 子页统一使用紧凑页头，避免每个页面一进入就被大 hero 占满；动作池证据字段必须转成中文业务表达，不直接暴露 `weakC30/bestC30/cases/amount/status` 这类代码字段。
