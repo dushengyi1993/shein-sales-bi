@@ -1,0 +1,42 @@
+[
+  {
+    "TaskName": "SHEIN-BI-Daily-Pipeline-0700",
+    "TaskPath": "\\",
+    "State": 3
+  },
+  {
+    "TaskName": "SHEIN-Sales-15Stores-Intraday-Daytime",
+    "TaskPath": "\\",
+    "State": 3
+  },
+  {
+    "TaskName": "SHEIN-Sales-15Stores-LinkManagement-0530",
+    "TaskPath": "\\",
+    "State": 3
+  },
+  {
+    "TaskName": "SHEIN-Sales-15Stores-Watchdog-Logon",
+    "TaskPath": "\\",
+    "State": 3
+  },
+  {
+    "TaskName": "SHEIN-Sales-15Stores-YesterdayFinal-0010",
+    "TaskPath": "\\",
+    "State": 3
+  },
+  {
+    "TaskName": "SHEIN-Sales-ETForwarder-0420",
+    "TaskPath": "\\",
+    "State": 3
+  },
+  {
+    "TaskName": "SHEIN-Sales-OpenAPI-HL-Intraday-1225",
+    "TaskPath": "\\",
+    "State": 3
+  },
+  {
+    "TaskName": "SHEIN-Sales-OpenAPI-HL-YesterdayFinal-0025",
+    "TaskPath": "\\",
+    "State": 3
+  }
+]

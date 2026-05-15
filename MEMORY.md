@@ -104,23 +104,23 @@
 - 本系统长期定位不只是 BI 数据分析，也是自动运营驾驶舱；所有写操作默认按“建议/预填/用户复核/人工最终提交/审计留痕”推进，除非用户明确授权并已有回滚方案，否则不得直接提交不可逆运营动作。
 
 ## SHEIN BI 系统
-- 架构原则：`SHEIN 后台抓取 -> 本地 JSON / PostgreSQL 数据仓库 -> Metabase BI / 本地 BI 门户`。PostgreSQL 是核心数据仓库；Metabase 当前仍是正式深度分析/自由钻取层，BI Portal 是日常经营入口。没有完整替代前，不要建议直接删除或跳过 Metabase。
+- 架构原则：`SHEIN 后台/WebAPI/OpenAPI 抓取 -> 私有源文件 / PostgreSQL 数据仓库 -> Metabase BI / BI Portal`。PostgreSQL 是核心数据仓库；Metabase 当前仍是正式深度分析/自由钻取层，BI Portal 是日常经营入口。没有完整替代前，不要建议直接删除或跳过 Metabase。
+- 2026-05-15 起本地 BI 已封存，云端 BI 为正式入口：`http://43.165.167.135/`，由 Nginx Basic Auth 保护；账号密码不写入仓库、文档或日志。本地 `8787` 服务已停止，`SHEIN-*` Windows 计划任务已禁用；除非明确回滚，不要重新启用本地 BI 或本地定时任务。云端可复用改动必须及时同步 GitHub，敏感 session/密钥/数据库 dump 仍不得提交。
 - HL OpenAPI 销售试点已建立并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` -> `scripts/load_shein_openapi_sales_warehouse.mjs` -> `fact.openapi_store_daily_sales` / `fact.openapi_order_header` / `fact.openapi_order_item` / `mart.openapi_sales_reconciliation`；系统状态页会显示 “SHEIN OpenAPI 试点对账”。正式切换生产事实表前必须继续确认多日 `matched`。
 - 官方 OpenAPI 与后台 WebAPI 直连是两条不同链路：OpenAPI 需要开放平台应用、授权、`openKeyId` / `secretKey` 和 IP 白名单；后台 WebAPI 直连复用已登录 Cookie/session，当前已优先承接 16 店销售生产抓取。两类密钥/session 都禁止进入仓库。
 - CX 开放平台应用 `CX-椿霞SHEIN运营中台` 已在 `2026-05-10` 创建并提交审核，模式为半托管，业务功能选择商品管理、商品合规、订单管理、库存管理、财务管理；审核通过后再录入本地 `.local` 密钥并接入 API 双跑。
 - SHEIN OpenAPI 若返回 `openapi00002 IP is not in the whitelist`，优先检查当前出口 IP 是否在开放平台 `https://open.sheincorp.com/backstage/white-list`；`2026-05-07` 已补加当前出口 IP `188.253.112.44`，历史 IP `82.27.116.13` 仍保留。不要把 OpenAPI app secret、店铺 secret、openKeyId 写入聊天、文档或日志。
-- 本地 BI 门户入口：`http://127.0.0.1:8787/`；文件为 `outputs/bi-portal/index.html`；生成脚本为 `scripts/generate_bi_portal.mjs`；数据文件为 `outputs/bi-portal/data.json`。
-- BI 门户 UI 冒烟检查脚本为 `scripts/check_bi_portal_ui.mjs`，使用 `agent-browser` 无界面打开本地门户，检查首页核心区域和关键导航；报告写入 `outputs/bi_ui_check/latest.json`，失败时才保存截图。
+- BI Portal 静态文件为 `outputs/bi-portal/index.html`，数据文件为 `outputs/bi-portal/data.json`，生成脚本为 `scripts/generate_bi_portal.mjs`；云端由 `scripts/cloud_bi_refresh.sh` 在每次刷新后生成并重启服务。
+- BI 门户 UI 冒烟检查脚本为 `scripts/check_bi_portal_ui.mjs`；本地封存后默认不要为“看一眼”重新打开本地前端，云端验证优先用 HTTP health、静态断言和日志。
 - GitHub 私有仓库已纳入 `outputs/bi-portal/index.html` 和 `outputs/bi-portal/data.json` 作为当前 BI 门户可复用产物；`outputs/` 其他抓取结果、报表、图片、审计结果仍默认忽略，迁移生产状态时单独备份。
-- V1 仍是当前正式本地 BI 门户；V2.1 是独立经营 BI 预览版，入口 `http://127.0.0.1:8787/v2/`，由 `scripts/generate_bi_portal_v2.mjs` 生成到 `outputs/bi-portal/v2/index.html`，只读复用 `outputs/bi-portal/data.json`，用户确认前不得替换 V1 或改生产调度。
+- V1 仍是当前正式 BI Portal；V2.1 是独立经营 BI 预览版，由 `scripts/generate_bi_portal_v2.mjs` 生成到 `outputs/bi-portal/v2/index.html`，只读复用 `outputs/bi-portal/data.json`，用户确认前不得替换 V1 或改生产调度。
 - 自 `2026-05-14` 起，V2.1 首页（`tab=overview`）已按 V1 首页功能/操作逻辑重做，必须支持顶部筛选、四个经营矩阵、净/总销售额、净/总销量、退货/利润口径切换、日/月趋势、趋势指标切换、店铺/货号排行下钻和深浅主题；其它 V2 子页面尚未按 V1 全量复刻，不得把 V2 整站视为可替换 V1。
 - V2 暂时不进入日常同步刷新链路；它只是平行慢开发/慢优化项目。没有用户明确下达 V2 开发、优化或验收任务时，不要主动生成、同步、维护或把它接入自动任务。
 - BI 门户侧栏“链接表现数据”更新时间必须显示链接源文件抓取时间，即 `outputs/shein_links/<店铺>/<链接日>.json` 的 `fetchTime` 最大值；“售后/库存/财务数据”也必须显示业务域源文件抓取时间，即 `outputs/shein_business_domains/<店铺>/<业务日>.json` 的 `fetchTime` 最大值；不要用 BI 重跑入仓时的 `updated_at` 冒充抓取时间。
-- Metabase 运行在 WSL + Docker，Docker 数据位于 `D:\SheinBI\docker-data\docker-data.ext4`，WSL 发行版位于 `D:\WSL\Ubuntu-24.04`。
-- 若 Docker / Postgres / Metabase 出现 `input/output error`，优先怀疑 `D:\SheinBI\docker-data\docker-data.ext4` 文件系统异常；恢复顺序是先停止 WSL / Docker，再做 volume 备份和 `e2fsck -fy`，最后重启容器并跑 BI audit，不要直接删除 Docker 数据。
+- 云端 Metabase / PostgreSQL 运行在腾讯云 Ubuntu + Docker；本地旧 WSL + Docker 数据盘仅作历史/回滚参考，长期生产不要再依赖本地 WSL。
+- 若本地旧 Docker / Postgres / Metabase 出现 `input/output error`，优先怀疑 `D:\SheinBI\docker-data\docker-data.ext4` 文件系统异常；恢复顺序是先停止 WSL / Docker，再做 volume 备份和 `e2fsck -fy`，最后重启容器并跑 BI audit，不要直接删除 Docker 数据。
 - Metabase 管理员凭据只保存在 `infra/metabase/.admin.local.json`，不要写入聊天、文档或日志。
-- 当前团队访问已开放临时局域网协作：优先使用电脑名 `http://DUSHENGYI-PC2:8787/`，或用当前 WLAN IPv4 的 `http://<当前IP>:8787/`；DHCP 重分配后旧 IP 可能失效，不要把 `192.168.2.49` 当固定入口。仅限 `192.168.2.0/24` 私有网络，局域网内无需账号密码，未开放公网或端口转发；共享动作状态写入 `state/bi_action_state.json`，操作审计写入 `logs/bi_portal_action_audit.jsonl`，留痕以访问 IP 为准。团队正式版上线前还需固定地址、动作状态入库、HTTPS 和备份。
-- BI 局域网打不开时先确认服务是否监听 `0.0.0.0:8787`、本机当前 LAN URL 是否 HTTP 200，再查防火墙规则 `SHEIN BI Portal LAN 8787 ReadOnly` 是否绑定旧 IP；修复脚本为 `scripts/fix_bi_lan_firewall.ps1`，管理员运行后规则应为 `LocalAddress=Any`、`RemoteAddress=192.168.2.0/24`、`LocalPort=8787`。
+- 当前团队访问转为云端入口；本地局域网协作入口已经封存。若后续明确回滚到本地，才重新检查 `0.0.0.0:8787`、防火墙规则 `SHEIN BI Portal LAN 8787 ReadOnly` 和 `scripts/fix_bi_lan_firewall.ps1`。
 
 
 

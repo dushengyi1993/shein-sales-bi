@@ -5,6 +5,7 @@
 ## 结论
 
 - GitHub 仓库用于保存代码、配置模板、数据结构、运维文档和可重复执行的脚本。
+- `2026-05-15` 起，云端 BI 是正式入口，本地 BI 已封存；云端运行说明见 `docs/cloud-bi-operations.md`。
 - 浏览器登录态、WebAPI Cookie session、真实账号密码、运行日志、抓取输出、数据库文件和本地备份不上传 GitHub。
 - 这些不上传的文件不是“漏掉”，而是因为它们要么含敏感登录信息，要么体积很大，要么是运行时可再生成数据。
 - 如果要完整迁移当前正在运行的系统，需要在 GitHub 仓库之外，再做一份“运行数据与密钥迁移包”或数据库备份。
@@ -22,6 +23,9 @@
 - `scripts/`：抓取、同步、BI 入仓、门户生成、定时任务、运维脚本。
 - `skills/shein-sales-ops/`：项目专用业务规则 skill。
 - `outputs/bi-portal/index.html`、`outputs/bi-portal/data.json`：当前 BI 门户静态产物，作为私有仓库里的可复用入口保留。
+- `infra/systemd/`、`scripts/cloud_bi_refresh.sh`、`scripts/cloud_db_backup.sh`：云端 Linux 刷新、备份和定时任务配置。
+- `docs/cloud-bi-operations.md`：云端正式入口、本地封存状态和云端运维边界。
+- `scripts/archive_local_bi.ps1`：本地 BI 封存/复核脚本。
 - 根目录 `.cmd`：给人直接双击使用的入口。
 
 ## GitHub 仓库里故意不放
@@ -104,15 +108,16 @@ git clone https://github.com/dushengyi1993/shein-sales-bi.git
 
 ## 当前版本迁移边界
 
-当前 GitHub Release 代表“本地 + 局域网协作可用基线”，适合：
+当前 GitHub Release 代表“云端 BI 主入口 + 本地封存 + 自动运营能力逐步上云”的基线，适合：
 
 - 保存当前代码版本。
 - 后续开发官方 API 试点。
-- 后续云迁移前做对照和回滚。
+- 后续开发作图、传图、取标题、商家维护链接等云端自动运营功能。
+- 本地硬盘故障后的代码/脚本/文档恢复。
 
 它不代表：
 
 - 已经包含所有历史运行数据。
 - 已经包含浏览器登录态。
 - 已经可以不配置密钥直接在新机器运行。
-- 已经完成云端生产化部署。
+- 已经包含云端数据库 dump 或所有运行日志。
