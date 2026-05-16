@@ -39,11 +39,11 @@
 | `shein-bi-cloud-et-forwarder.timer` | 北京时间 `04:20` | 抓取 ET 货代仓、入仓，并刷新 BI Portal；需要服务器本地 ET 登录配置 |
 | `shein-bi-cloud-daily-lark-report.timer` | 北京时间 `08:35`，`10:35/12:35` 补偿重试 | 抓取当天销售后发送飞书日报和日报图；成功后写入当天 sent flag 防重复 |
 | `shein-bi-cloud-rtv-verify.timer` | 北京时间 `03:20` | 完整 RTV 换单复核 WebAPI 版，写入 `ops.rtv_tracking_verification`，不阻塞滚动销售刷新 |
-| `shein-bi-cloud-openapi-hl.timer` | 北京时间 `06:20` | HL OpenAPI 并行抓取、入仓和对账；需 SHEIN 开放平台白名单允许服务器 IP |
+| `shein-bi-cloud-openapi-hl.timer` | 北京时间 `06:20` | HL OpenAPI 并行抓取、入仓和对账；服务器 IP 白名单已配置 |
 | `shein-bi-cloud-watchdog.timer` | 每小时 | 检查云端服务、timer 和 BI 数据新鲜度，异常时发飞书提醒 |
 | `shein-bi-lark-sales-qa.service` | 常驻服务 | 飞书只读问数机器人，读取 BI Portal JSON 后回复消息，不写数据 |
 
-ET、飞书日报、完整 RTV WebAPI 复核、异常通知 watchdog 和只读问数机器人的 Linux systemd 入口已启用并通过手动验证。HL OpenAPI 云端入口已部署，但在 SHEIN 开放平台把云服务器出口 IP `43.165.167.135` 加入白名单前会返回 `openapi00002`。链接/业务域是低频日更数据，不按销售高频刷新看待；其无浏览器 WebAPI 直连迁移仍需后续补 endpoint/session 适配。不要误以为本地 `SHEIN-*` Windows 任务仍在生产运行。
+ET、飞书日报、完整 RTV WebAPI 复核、异常通知 watchdog 和只读问数机器人的 Linux systemd 入口已启用并通过手动验证。HL OpenAPI 云端入口已部署，并且云服务器出口 IP `43.165.167.135` 已加入 SHEIN 开放平台白名单，云端双跑已成功。链接/业务域是低频日更数据，不按销售高频刷新看待；其无浏览器 WebAPI 直连迁移仍需后续补 endpoint/session 适配。不要误以为本地 `SHEIN-*` Windows 任务仍在生产运行。
 
 备份默认保留 `14` 天。后续正式长期运行还应补对象存储或异地下载备份，避免云盘单点故障。
 
@@ -96,7 +96,7 @@ GitHub 应保存：
 - 若飞书日报图中文显示方框，先在服务器检查 `fc-match 'Noto Sans CJK SC'`；修复字体后只需重新生成/下次发送日报图，不需要重发已发送的旧图，除非用户明确要求。
 - `ssh shein-bi-tencent` 应能直接登录服务器并具有免密 `sudo` 运维能力；如果后续 HTTPS 占用 443，先迁移 SSH 端口。
 - `shein-bi-cloud-rtv-verify.timer` 应保持 active；烟测可用 `node scripts/verify_shein_rtv_tracking.mjs --transport webapi --limit 3 --case-limit 3 --json`。
-- `shein-bi-cloud-openapi-hl.timer` 应保持 active；若失败且错误为 `openapi00002 IP is not in the whitelist`，先去 SHEIN 开放平台把 `43.165.167.135` 加入白名单。
+- `shein-bi-cloud-openapi-hl.timer` 应保持 active；若后续再失败，先看 service 日志；此前 `openapi00002` 白名单问题已于 2026-05-16 修复。
 - `shein-bi-cloud-watchdog.timer` 应保持 active；销售/页面过期按 4.5 小时提醒，链接/业务域过期按 48 小时提醒。
 - `shein-bi-lark-sales-qa.service` 应保持 active；可用 `node scripts/lark_sales_qa_bot.mjs --answer "今天销售多少"` 本地只读测试答案。群聊中若无回复，优先检查机器人是否已入群、应用可见范围和 `im.message.receive_v1`/发消息权限。
 - GitHub `main` 应包含最新可复用代码和文档；敏感运行态只保留在本地/云端私有目录。

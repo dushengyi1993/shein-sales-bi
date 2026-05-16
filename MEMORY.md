@@ -232,7 +232,7 @@
 - 云端异常通知走 `scripts/cloud_ops_watchdog.mjs` + `shein-bi-cloud-watchdog.timer`；销售源/BI 页面按 `4.5h` 阈值，ET 按 `36h` 阈值，SHEIN 业务域 / 链接表现是日更低频数据，按 `48h` 阈值，不要把它们当销售高频刷新失败。
 - 云端只读飞书问数机器人走 `scripts/lark_sales_qa_bot.mjs` / `shein-bi-lark-sales-qa.service`，只读取 `outputs/bi-portal/data.json` 回答销售额、订单、销量、店铺排行、产品排行等问题，不写 PostgreSQL、飞书 Base 或运营状态。
 - `scripts/verify_shein_rtv_tracking.mjs` 已支持 `--transport webapi`，云端由 `scripts/cloud_rtv_verify.sh` / `shein-bi-cloud-rtv-verify.timer` 跑完整 RTV 换单复核；完整复核仍是异步低频任务，不阻塞每两小时滚动销售刷新。
-- HL OpenAPI 云端双跑入口 `scripts/cloud_openapi_hl_reconciliation.sh` / `shein-bi-cloud-openapi-hl.timer` 已部署；当前服务器侧阻塞为 SHEIN OpenAPI 报 `openapi00002 IP is not in the whitelist`，需要把云服务器出口 IP `43.165.167.135` 加入开放平台白名单后才能跑通。
+- HL OpenAPI 云端双跑入口 `scripts/cloud_openapi_hl_reconciliation.sh` / `shein-bi-cloud-openapi-hl.timer` 已部署；服务器出口 IP `43.165.167.135` 已加入开放平台白名单；云端 HL OpenAPI 抓取、入仓和 BI OpenAPI 对账已跑通。
 
 ## 2026-05-08 RTV 换单号复核口径
 - EMile 等退货物流可能在运输途中更换物流单号；`RTV 已收可二售测算` 不能只靠 SHEIN 售后列表里的 `returnExpressInfoList.expressNo` 单向匹配 ET RTV。
