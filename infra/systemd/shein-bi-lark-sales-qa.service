@@ -1,0 +1,16 @@
+[Unit]
+Description=SHEIN BI read-only Lark sales Q&A bot
+Wants=network-online.target docker.service
+After=network-online.target docker.service shein-bi-portal.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/shein-bi/app
+Environment=HOME=/root
+Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_lark_sales_qa_bot.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -4,6 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import {loadSheinWebApiSession, fetchSheinWebApiJson} from '../lib/shein_webapi_session.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
@@ -25,6 +26,7 @@ function parseArgs(argv) {
     caseLimit: 25,
     includeNoCases: false,
     visible: false,
+    transport: process.env.SHEIN_RTV_TRANSPORT || 'browser',
     json: false,
     maxRuntimeMs: Number(process.env.SHEIN_RTV_VERIFY_TIMEOUT_MS || 3600000),
   };
@@ -43,8 +45,12 @@ function parseArgs(argv) {
     else if (a === '--include-no-cases') args.includeNoCases = true;
     else if (a === '--visible') args.visible = true;
     else if (a === '--headless') args.visible = false;
+    else if (a === '--transport') args.transport = String(argv[++i] || args.transport).toLowerCase();
     else if (a === '--json') args.json = true;
     else if (a === '--max-runtime-ms') args.maxRuntimeMs = Math.max(30_000, Number(argv[++i] || 3600000));
+  }
+  if (!['browser', 'webapi'].includes(args.transport)) {
+    throw new Error('--transport must be browser or webapi');
   }
   return args;
 }
@@ -129,13 +135,34 @@ async function runNode(script, args = [], timeoutMs = 240000) {
 }
 
 async function runPsql(args, sql) {
-  const child = spawn('wsl', [
-    '-d', args.distro,
-    '--',
-    'bash',
-    '-lc',
-    `sudo docker exec -i ${args.container} psql -U ${args.user} -d ${args.database} -v ON_ERROR_STOP=1 -t -A -P pager=off`,
-  ], {
+  const useWsl = process.platform === 'win32';
+  const command = useWsl ? 'wsl' : 'docker';
+  const commandArgs = useWsl
+    ? [
+        '-d',
+        args.distro,
+        '--',
+        'bash',
+        '-lc',
+        `sudo docker exec -i ${args.container} psql -U ${args.user} -d ${args.database} -v ON_ERROR_STOP=1 -t -A -P pager=off`,
+      ]
+    : [
+        'exec',
+        '-i',
+        args.container,
+        'psql',
+        '-U',
+        args.user,
+        '-d',
+        args.database,
+        '-v',
+        'ON_ERROR_STOP=1',
+        '-t',
+        '-A',
+        '-P',
+        'pager=off',
+      ];
+  const child = spawn(command, commandArgs, {
     cwd: ROOT,
     windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -325,6 +352,17 @@ async function autoReloginStore(storeKey, visible) {
 }
 
 async function ensureStoreContext(store, args) {
+  if (args.transport === 'webapi') {
+    const session = await loadSheinWebApiSession(store.storeKey);
+    return {
+      store,
+      mode: 'webapi',
+      session,
+      send: null,
+      ws: null,
+      reloginTried: true,
+    };
+  }
   let conn;
   try {
     conn = await connectCdp(store.port);
@@ -342,6 +380,7 @@ async function ensureStoreContext(store, args) {
 }
 
 async function reconnectStore(ctx) {
+  if (ctx.mode === 'webapi') return;
   try { ctx.ws?.close(); } catch {}
   const conn = await connectCdp(ctx.store.port);
   ctx.send = conn.send;
@@ -350,6 +389,13 @@ async function reconnectStore(ctx) {
 }
 
 async function fetchWithRelogin(ctx, endpoint, payload, options, args) {
+  if (ctx.mode === 'webapi') {
+    return await fetchSheinWebApiJson(ctx.session, endpoint, payload, {
+      ...(options || {}),
+      originPath: options?.originPath || '/order-management/after-sales-list',
+      originUrl: options?.originUrl || AFTER_SALES_ROUTE,
+    });
+  }
   try {
     return await pageFetch(ctx.send, endpoint, payload, options);
   } catch (err) {

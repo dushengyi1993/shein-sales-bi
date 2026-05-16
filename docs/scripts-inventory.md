@@ -10,6 +10,9 @@
 - `cloud_db_backup.sh`
 - `cloud_et_forwarder_sync.sh`
 - `cloud_daily_lark_report.sh`
+- `cloud_rtv_verify.sh`
+- `cloud_openapi_hl_reconciliation.sh`
+- `cloud_lark_sales_qa_bot.sh`
 - `archive_local_bi.ps1`：本地封存/复核脚本，供回滚前后检查使用。
 
 ## 本地 Windows 回滚 / 历史任务引用，必须保留
@@ -68,13 +71,14 @@
   - `generate_bi_briefing.mjs`
 - ET 货代仓 / RTV：
   - `cloud_et_forwarder_sync.sh`：Linux 云端 ET 同步入口；抓取、入仓并刷新 BI Portal。依赖服务器本地 `config/et_forwarder.local.json` 或 `ET_FORWARDER_USERNAME/ET_FORWARDER_PASSWORD`，密钥不进 GitHub。
+  - `cloud_rtv_verify.sh`：Linux 云端完整 RTV 换单复核入口；由 `shein-bi-cloud-rtv-verify.timer` 调用，默认使用 WebAPI transport，不阻塞滚动销售刷新。
   - `fetch_et_forwarder.mjs`
     - Windows 下复用本地 ET Chrome profile；Linux 下使用 headless Chrome/Chromium、`--no-sandbox`、`--disable-dev-shm-usage`，通过 ET 本地凭据和 OCR 自动登录。
   - `load_et_forwarder_warehouse.mjs`
     - Windows 通过 WSL/docker 入仓；Linux 云端直接调用 `docker exec -i`，必要时可用 `SHEIN_DOCKER_USE_SUDO=1`。
   - `scheduled_et_forwarder_daily.ps1`
   - `report_et_forwarder_assessment.mjs`
-  - `verify_shein_rtv_tracking.mjs`：SHEIN 退货物流换单复核；候选应按标准货号 + 时间窗口全店搜索，`DL-` 等 ET SKU 前缀只作排序线索。JT/JTE 按同运单号直连，iMile/EMile 按物流详情换单轨迹确认。该脚本耗时长是正常现象，日常参数：`--priority high,medium,low --include-no-cases --limit 120 --case-limit 60 --max-runtime-ms 3600000`。
+  - `verify_shein_rtv_tracking.mjs`：SHEIN 退货物流换单复核；支持 `--transport browser|webapi`。候选应按标准货号 + 时间窗口全店搜索，`DL-` 等 ET SKU 前缀只作排序线索。JT/JTE 按同运单号直连，iMile/EMile 按物流详情换单轨迹确认。该脚本耗时长是正常现象，完整复核与滚动销售刷新分离。
 - 链接管理：
   - `scheduled_link_management_daily.ps1`
   - `run_link_management_job.mjs`
@@ -87,6 +91,7 @@
   - `marketing/build_marketing_cost_map.py`
   - `marketing/dsy_marketing_deadline_fill.mjs`：DSY 营销活动报名半自动补填；只勾选商品、填活动价/降幅和复核，不点最终提交。重扫漏报时显式传 `--stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --hours 48`，本期价格覆盖表用 `--price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD.json`。
 - OpenAPI 试点：
+  - `cloud_openapi_hl_reconciliation.sh`：Linux 云端 HL OpenAPI 并行对账入口；由 `shein-bi-cloud-openapi-hl.timer` 调用，需 SHEIN 开放平台白名单包含云服务器出口 IP。
   - `check_shein_openapi_client.mjs`
   - `probe_shein_openapi_test_call.mjs`
   - `shein_openapi_authorize_hl.mjs`
@@ -113,6 +118,8 @@
 - `setup_metabase_bi_system.mjs`
 - `use_utf8.ps1`
 - `notify_sync_issue.mjs`
+- `cloud_ops_watchdog.mjs`：云端 systemd/watchdog 新鲜度检查；销售/BI 页面按高频阈值，链接/业务域按日更低频阈值，异常时调用 `notify_sync_issue.mjs` 发飞书提醒。
+- `lark_sales_qa_bot.mjs`：云端只读飞书问数机器人核心逻辑；只读取 BI Portal JSON 并回复消息，不写数据库或飞书 Base。
 - `check_workspace_skill.ps1`
 - `watchdog_sales_automation.mjs`
 

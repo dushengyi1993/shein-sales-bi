@@ -1,0 +1,10 @@
+[Unit]
+Description=Run SHEIN BI cloud HL OpenAPI reconciliation daily
+
+[Timer]
+OnCalendar=*-*-* 06:20:00
+Persistent=true
+Unit=shein-bi-cloud-openapi-hl.service
+
+[Install]
+WantedBy=timers.target

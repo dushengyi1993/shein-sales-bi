@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
+TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
+LOG_DIR="${SHEIN_RTV_LOG_DIR:-/srv/shein-bi/logs/cloud-rtv-verify}"
+METABASE_URL="${METABASE_URL:-http://127.0.0.1:3000}"
+LIMIT="${SHEIN_RTV_LIMIT:-300}"
+CASE_LIMIT="${SHEIN_RTV_CASE_LIMIT:-25}"
+MAX_RUNTIME_MS="${SHEIN_RTV_VERIFY_TIMEOUT_MS:-3600000}"
+
+STAMP="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/rtv-verify-${STAMP}.log"
+
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "[cloud_rtv_verify] start root=$ROOT limit=$LIMIT caseLimit=$CASE_LIMIT"
+cd "$ROOT"
+
+node scripts/verify_shein_rtv_tracking.mjs \
+  --transport webapi \
+  --headless \
+  --limit "$LIMIT" \
+  --case-limit "$CASE_LIMIT" \
+  --max-runtime-ms "$MAX_RUNTIME_MS" \
+  --json
+
+node scripts/generate_bi_portal.mjs --metabase-url "$METABASE_URL"
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl is-active --quiet shein-bi-portal.service || systemctl start shein-bi-portal.service || true
+fi
+
+echo "[cloud_rtv_verify] done log=$LOG_FILE"

@@ -227,6 +227,13 @@
 - `scripts/scheduled_et_forwarder_daily.ps1` 已加空日期兜底，避免计划任务无参数运行时把空 `--date` 传给 Node 导致 `Invalid time value`。
 - `2026-05-09` 04:20 任务失败不是自动登录缺失，而是首页探测阶段在浏览器页内跨 ET 域名/IP 做 `fetch` 时先抛 `TypeError: Failed to fetch`，导致还没进入自动登录就退出；`scripts/fetch_et_forwarder.mjs` 已改为使用当前页面 `location.origin` 组装同源 URL，并对首页探测 fetch 异常做兜底，避免绕过自动登录。
 
+## 2026-05-16 云端 SSH / watchdog / 问数机器人 / RTV / OpenAPI 边界
+- 云端 SSH 直连已恢复：本机别名 `ssh shein-bi-tencent`，服务器用户 `sheinops`，key-only 登录，密码登录关闭；当前临时用 `443` 承载 SSH 是因为本地到 `22` 的 SSH 握手会在到达服务器前被断开。后续正式 HTTPS/域名占用 `443` 前，必须先把 SSH 迁到单独高位端口并同步腾讯云防火墙/UFW。
+- 云端异常通知走 `scripts/cloud_ops_watchdog.mjs` + `shein-bi-cloud-watchdog.timer`；销售源/BI 页面按 `4.5h` 阈值，ET 按 `36h` 阈值，SHEIN 业务域 / 链接表现是日更低频数据，按 `48h` 阈值，不要把它们当销售高频刷新失败。
+- 云端只读飞书问数机器人走 `scripts/lark_sales_qa_bot.mjs` / `shein-bi-lark-sales-qa.service`，只读取 `outputs/bi-portal/data.json` 回答销售额、订单、销量、店铺排行、产品排行等问题，不写 PostgreSQL、飞书 Base 或运营状态。
+- `scripts/verify_shein_rtv_tracking.mjs` 已支持 `--transport webapi`，云端由 `scripts/cloud_rtv_verify.sh` / `shein-bi-cloud-rtv-verify.timer` 跑完整 RTV 换单复核；完整复核仍是异步低频任务，不阻塞每两小时滚动销售刷新。
+- HL OpenAPI 云端双跑入口 `scripts/cloud_openapi_hl_reconciliation.sh` / `shein-bi-cloud-openapi-hl.timer` 已部署；当前服务器侧阻塞为 SHEIN OpenAPI 报 `openapi00002 IP is not in the whitelist`，需要把云服务器出口 IP `43.165.167.135` 加入开放平台白名单后才能跑通。
+
 ## 2026-05-08 RTV 换单号复核口径
 - EMile 等退货物流可能在运输途中更换物流单号；`RTV 已收可二售测算` 不能只靠 SHEIN 售后列表里的 `returnExpressInfoList.expressNo` 单向匹配 ET RTV。
 - 已新增反向复核视图 `mart.rtv_manual_review_candidates`：从 ET RTV 已收件出发，列出“ET 有收件物流号，但 SHEIN 售后当前物流号未直接匹配”的记录，并按同货号和时间窗口给 SHEIN 售后候选；ET `DL-` 等 SKU 前缀不能硬当销售店铺，只能作为候选排序线索。

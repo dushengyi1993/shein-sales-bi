@@ -11,6 +11,13 @@
 - GitHub 仓库 `main` 是云端代码来源；云端有值得保存的脚本、配置模板、门户静态产物或自动运营能力时，先同步回 GitHub，再部署到服务器。
 - 注意：`outputs/bi-portal/index.html` / `data.json` 会作为可恢复静态快照纳入 GitHub；服务器执行 `git reset --hard origin/main` 或类似部署后，可能把实时 BI 页面覆盖成仓库快照。每次服务器拉取/重置代码后，都要立即跑一次 `scripts/cloud_bi_refresh.sh today intraday` 或对应 systemd service，确认页面生成时间和销售源时间回到当前。
 
+### SSH 运维入口
+
+- 当前本机 SSH 直连已恢复：`ssh shein-bi-tencent`。
+- 服务器侧使用非 root 用户 `sheinops` + key-only 登录；密码登录已关闭。
+- 当前由于本地到服务器 `22` 端口的 SSH 握手在到达服务器前被断开，临时使用 `443` 端口承载 SSH；服务器 `22` 仍监听且放行。
+- 未来启用正式 HTTPS / 域名时，`443` 应还给 HTTPS，届时先把 SSH 改到单独高位端口并同步腾讯云防火墙 / UFW。
+
 ## 2. 本地 BI 封存状态
 
 - 自 `2026-05-15` 起，本地 BI 不再作为生产入口。
@@ -31,8 +38,12 @@
 | `shein-bi-db-backup.timer` | 北京时间 `02:30` | 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto` |
 | `shein-bi-cloud-et-forwarder.timer` | 北京时间 `04:20` | 抓取 ET 货代仓、入仓，并刷新 BI Portal；需要服务器本地 ET 登录配置 |
 | `shein-bi-cloud-daily-lark-report.timer` | 北京时间 `08:35`，`10:35/12:35` 补偿重试 | 抓取当天销售后发送飞书日报和日报图；成功后写入当天 sent flag 防重复 |
+| `shein-bi-cloud-rtv-verify.timer` | 北京时间 `03:20` | 完整 RTV 换单复核 WebAPI 版，写入 `ops.rtv_tracking_verification`，不阻塞滚动销售刷新 |
+| `shein-bi-cloud-openapi-hl.timer` | 北京时间 `06:20` | HL OpenAPI 并行抓取、入仓和对账；需 SHEIN 开放平台白名单允许服务器 IP |
+| `shein-bi-cloud-watchdog.timer` | 每小时 | 检查云端服务、timer 和 BI 数据新鲜度，异常时发飞书提醒 |
+| `shein-bi-lark-sales-qa.service` | 常驻服务 | 飞书只读问数机器人，读取 BI Portal JSON 后回复消息，不写数据 |
 
-ET 与飞书日报的 Linux systemd 入口已启用并通过手动真实验证。ET 使用服务器私有凭据；飞书日报使用服务器独立飞书 CLI 应用/机器人，`config/lark_report.json` 中的收件人 `open_id` 必须属于该应用，换机器人时需重新映射。链接/业务域、完整 RTV 复核和 HL OpenAPI 双跑仍待迁到云端；不要误以为本地 `SHEIN-*` Windows 任务仍在生产运行。
+ET、飞书日报、完整 RTV WebAPI 复核、异常通知 watchdog 和只读问数机器人的 Linux systemd 入口已启用并通过手动验证。HL OpenAPI 云端入口已部署，但在 SHEIN 开放平台把云服务器出口 IP `43.165.167.135` 加入白名单前会返回 `openapi00002`。链接/业务域是低频日更数据，不按销售高频刷新看待；其无浏览器 WebAPI 直连迁移仍需后续补 endpoint/session 适配。不要误以为本地 `SHEIN-*` Windows 任务仍在生产运行。
 
 备份默认保留 `14` 天。后续正式长期运行还应补对象存储或异地下载备份，避免云盘单点故障。
 
@@ -43,12 +54,16 @@ ET 与飞书日报的 Linux systemd 入口已启用并通过手动真实验证�
 - 数据库备份入口：`scripts/cloud_db_backup.sh`
 - ET 云端入口：`scripts/cloud_et_forwarder_sync.sh today`
 - 飞书日报云端入口：`scripts/cloud_daily_lark_report.sh today`
+- 完整 RTV 复核云端入口：`scripts/cloud_rtv_verify.sh`
+- HL OpenAPI 云端入口：`scripts/cloud_openapi_hl_reconciliation.sh`
+- 云端异常通知入口：`scripts/cloud_ops_watchdog.mjs`
+- 飞书只读问数机器人入口：`scripts/cloud_lark_sales_qa_bot.sh` / `scripts/lark_sales_qa_bot.mjs`
 - 销售抓取仍优先使用 SHEIN 后台 WebAPI session；直连成功时不会启动浏览器。
-- 官方 OpenAPI 已有权限的数据域后续可逐步替换为 OpenAPI；WebAPI 仍作为当前生产销售抓取主链路。
+- 官方 OpenAPI 已有权限的数据域后续可逐步替换为 OpenAPI；WebAPI 仍作为当前生产销售抓取主链路。HL OpenAPI 云端双跑当前只写并行表，不覆盖生产销售事实表。
 - ET 已改为 Linux headless Chrome + 账号密码/OCR 自动登录模式；Windows Chrome 保存密码不能直接迁到 Linux，服务器必须单独保存 `config/et_forwarder.local.json` 或等价环境变量。
 - 飞书日报依赖服务器本地 `config/lark_report.json`、`lark-cli` 和独立飞书机器人授权；旧应用 `open_id` 不能直接复用到新应用，必要时用 `union_id` 映射。飞书 Base / 看板写入仍受暂停开关控制，日报发送与 Base 写入分开处理。
 - 飞书日报图在 Linux headless Chrome 下依赖中文字体；服务器必须安装 `fonts-noto-cjk` / `fontconfig` 并能通过 `fc-match 'Noto Sans CJK SC'` 匹配到 Noto CJK，否则中文会渲染成方框。
-- 链接管理、商品图上传、取标题、商家维护链接等自动运营功能后续应优先按 Linux/云端服务方式扩展，避免重新绑定本地 Windows。
+- 链接/业务域目前按日更低频看待；watchdog 的阈值是 48 小时，不是销售高频的 4.5 小时。链接管理、商品图上传、取标题、商家维护链接等自动运营功能后续应优先按 Linux/云端服务方式扩展，避免重新绑定本地 Windows。
 
 ## 5. 运行数据与敏感信息边界
 
@@ -79,4 +94,9 @@ GitHub 应保存：
 - 飞书日报已验证可手动跑 `scripts/cloud_daily_lark_report.sh today`，文字和日报图能发送；成功后会写入当天 sent flag，避免同日 timer 重复发送。
 - 若 BI 侧栏显示的“页面生成 / 销售源”时间明显旧于当前调度，先检查是否刚部署覆盖了仓库静态快照；在服务器重跑 `shein-bi-cloud-today.service` 后，`outputs/bi-portal/data.json` 的 `generatedAt` 和 `salesUpdatedAt` 应更新到当天。
 - 若飞书日报图中文显示方框，先在服务器检查 `fc-match 'Noto Sans CJK SC'`；修复字体后只需重新生成/下次发送日报图，不需要重发已发送的旧图，除非用户明确要求。
+- `ssh shein-bi-tencent` 应能直接登录服务器并具有免密 `sudo` 运维能力；如果后续 HTTPS 占用 443，先迁移 SSH 端口。
+- `shein-bi-cloud-rtv-verify.timer` 应保持 active；烟测可用 `node scripts/verify_shein_rtv_tracking.mjs --transport webapi --limit 3 --case-limit 3 --json`。
+- `shein-bi-cloud-openapi-hl.timer` 应保持 active；若失败且错误为 `openapi00002 IP is not in the whitelist`，先去 SHEIN 开放平台把 `43.165.167.135` 加入白名单。
+- `shein-bi-cloud-watchdog.timer` 应保持 active；销售/页面过期按 4.5 小时提醒，链接/业务域过期按 48 小时提醒。
+- `shein-bi-lark-sales-qa.service` 应保持 active；可用 `node scripts/lark_sales_qa_bot.mjs --answer "今天销售多少"` 本地只读测试答案。群聊中若无回复，优先检查机器人是否已入群、应用可见范围和 `im.message.receive_v1`/发消息权限。
 - GitHub `main` 应包含最新可复用代码和文档；敏感运行态只保留在本地/云端私有目录。

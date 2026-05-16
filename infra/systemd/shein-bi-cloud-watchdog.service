@@ -1,0 +1,11 @@
+[Unit]
+Description=SHEIN BI cloud ops watchdog and Feishu alert
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/shein-bi/app
+Environment=HOME=/root
+Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+ExecStart=/usr/bin/env node /opt/shein-bi/app/scripts/cloud_ops_watchdog.mjs
