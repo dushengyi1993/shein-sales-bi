@@ -6,4 +6,5 @@ After=docker.service
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/shein-bi/app
+Environment=HOME=/root
 ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_db_backup.sh
