@@ -65,6 +65,13 @@ ET、飞书日报、完整 RTV WebAPI 复核、异常通知 watchdog 和只读�
 - 飞书日报图在 Linux headless Chrome 下依赖中文字体；服务器必须安装 `fonts-noto-cjk` / `fontconfig` 并能通过 `fc-match 'Noto Sans CJK SC'` 匹配到 Noto CJK，否则中文会渲染成方框。
 - 链接/业务域目前按日更低频看待；watchdog 的阈值是 48 小时，不是销售高频的 4.5 小时。链接管理、商品图上传、取标题、商家维护链接等自动运营功能后续应优先按 Linux/云端服务方式扩展，避免重新绑定本地 Windows。
 
+### 链接/业务域 WebAPI 直连现状
+
+- 已验证可直接复用现有 WebAPI session 的域：`gsp` 售后列表/统计、发货面单计数等。
+- 暂不能直接复用现有销售 session 的域：`mgs` 履约/评价、`pqmp` 质量、`spmp` 商品列表、`idms` 备货、`sbn` 经营/营销、`gsfs` 财务；这些在云端探针中返回 `20302 子系统登录重定向`。
+- 后续改造顺序：先解决子系统登录态/初始化，再解决 SBN 商品分析的 `x-gw-auth` 等动态头，最后处理财务二次密码或敏感权限边界。
+- 如果短期必须用浏览器兜底，云端只允许顺序或小并发短时运行，建议并发 `1`，最多 `2`；不能 16 店同时开浏览器。每个店跑完必须关闭浏览器进程，避免压垮 2C8G 服务器。
+
 ## 5. 运行数据与敏感信息边界
 
 以下内容不得提交 GitHub：
@@ -94,6 +101,7 @@ GitHub 应保存：
 - 飞书日报已验证可手动跑 `scripts/cloud_daily_lark_report.sh today`，文字和日报图能发送；成功后会写入当天 sent flag，避免同日 timer 重复发送。
 - 若 BI 侧栏显示的“页面生成 / 销售源”时间明显旧于当前调度，先检查是否刚部署覆盖了仓库静态快照；在服务器重跑 `shein-bi-cloud-today.service` 后，`outputs/bi-portal/data.json` 的 `generatedAt` 和 `salesUpdatedAt` 应更新到当天。
 - 若飞书日报图中文显示方框，先在服务器检查 `fc-match 'Noto Sans CJK SC'`；修复字体后只需重新生成/下次发送日报图，不需要重发已发送的旧图，除非用户明确要求。
+- `cloud_bi_refresh.sh` 应在生成 BI Portal 前运行 `audit_bi_warehouse.mjs`，否则页面顶部会显示“数据体检：未找到体检文件”。体检有 warning 时仍生成页面，让 BI 直接展示 warning 内容。
 - `ssh shein-bi-tencent` 应能直接登录服务器并具有免密 `sudo` 运维能力；如果后续 HTTPS 占用 443，先迁移 SSH 端口。
 - `shein-bi-cloud-rtv-verify.timer` 应保持 active；烟测可用 `node scripts/verify_shein_rtv_tracking.mjs --transport webapi --limit 3 --case-limit 3 --json`。
 - `shein-bi-cloud-openapi-hl.timer` 应保持 active；若后续再失败，先看 service 日志；此前 `openapi00002` 白名单问题已于 2026-05-16 修复。

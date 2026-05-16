@@ -233,6 +233,8 @@
 - 云端只读飞书问数机器人走 `scripts/lark_sales_qa_bot.mjs` / `shein-bi-lark-sales-qa.service`，只读取 `outputs/bi-portal/data.json` 回答销售额、订单、销量、店铺排行、产品排行等问题，不写 PostgreSQL、飞书 Base 或运营状态。
 - `scripts/verify_shein_rtv_tracking.mjs` 已支持 `--transport webapi`，云端由 `scripts/cloud_rtv_verify.sh` / `shein-bi-cloud-rtv-verify.timer` 跑完整 RTV 换单复核；完整复核仍是异步低频任务，不阻塞每两小时滚动销售刷新。
 - HL OpenAPI 云端双跑入口 `scripts/cloud_openapi_hl_reconciliation.sh` / `shein-bi-cloud-openapi-hl.timer` 已部署；服务器出口 IP `43.165.167.135` 已加入开放平台白名单；云端 HL OpenAPI 抓取、入仓和 BI OpenAPI 对账已跑通。
+- 2026-05-16 链接/业务域 WebAPI 直连探针：同一 HL session 下 `gsp` 售后统计/列表和发货面单 count 可 Node 直连；`mgs` 履约/评价、`pqmp` 质量、`spmp` 商品列表、`idms` 备货、`sbn` 经营/营销、`gsfs` 财务均返回 `20302 子系统登录重定向`。后续直连改造应先解决子系统登录态/初始化，再处理 SBN `x-gw-auth`；若必须用浏览器兜底，云端只能顺序或小并发（建议 1，最多 2）短时启动并及时关闭，不能 16 店同时开浏览器。
+- 2026-05-16 已修复云端 BI “未找到体检文件”：`audit_bi_warehouse.mjs` 支持 Linux 直接 `docker exec`，`cloud_bi_refresh.sh` 在生成 BI Portal 前运行体检；云端验证 `audit.ok=true`、`errors=0`，但因链接数据日为 `2026-05-14` 而销售日为 `2026-05-16`，当前会显示 1 个链接日更提醒，直到链接/业务域日更链路恢复。
 
 ## 2026-05-08 RTV 换单号复核口径
 - EMile 等退货物流可能在运输途中更换物流单号；`RTV 已收可二售测算` 不能只靠 SHEIN 售后列表里的 `returnExpressInfoList.expressNo` 单向匹配 ET RTV。
