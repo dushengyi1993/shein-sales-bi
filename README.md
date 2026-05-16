@@ -10,6 +10,7 @@
 - 云端当天销售刷新已改为全天每两小时一次：`00:10/02:10/.../22:10`；前一天最终版和 D-2 稳定复核仍在 `00:10`，数据库自动备份在 `02:30`。
 - 链接表现改为每日后半夜一次，当前只写私有源文件 / PostgreSQL / BI；飞书链接管理表已废弃。旧 `0340` / `0510` 链接任务不要恢复。
 - 当前完整 BI 运行层仍是 PostgreSQL + Metabase + BI Portal：PostgreSQL 是核心数据仓库，Metabase 是正式深度分析/自由钻取层，BI Portal 是日常经营入口；在自研门户完全覆盖深钻前，云端迁移不能删除或跳过 Metabase。
+- 服务器从 GitHub 拉取/重置代码后，要立即重跑一次云端 BI 刷新；仓库里的 `outputs/bi-portal/` 是灾备快照，不能把它误当成服务器实时数据。
 - HL 已切换为主账号 profile：`profiles/persistent-shein-main-profile`；旧 `profiles/persistent-hl-profile` 已删除。
 - `2026-05-10` 已完成 16 店 profile 显示名与登录抓数复核：未发现 profile 名和登录态混乱；`YJ=profileKey qy`、`XL=profileKey yj`、`QY=profileKey xl` 是历史遗留但当前正确的绑定，不要仅凭名称直觉改动。
 - `2026-05-09 05:30` 链接/业务域任务、`2026-05-09 07:00` BI 每日流水线和白天滚动后置 BI 刷新是本地 Windows 历史验证记录；自 `2026-05-15` 本地任务封存后，不再作为生产调度。
@@ -125,6 +126,7 @@
   `bash scripts/cloud_et_forwarder_sync.sh today`
 - 云端手动发送飞书日报（在服务器 `/opt/shein-bi/app` 执行；需 `config/lark_report.json` 和 `lark-cli` 授权）：
   `bash scripts/cloud_daily_lark_report.sh today`
+- 云端日报图若中文变方框，先确认服务器已安装中文字体并能匹配 `Noto Sans CJK SC`；代码字体栈以 Noto CJK 为 Linux 首选。
 
 以下 Windows 命令当前只作为本地开发、排障或回滚参考；本地 BI 已封存，除非明确回滚，不要重新启用本地计划任务：
 

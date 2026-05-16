@@ -11,6 +11,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT_DIR = path.join(ROOT, 'outputs', 'reports');
 const FETCH_DIR = path.join(ROOT, 'outputs', 'shein_fetch');
 const FX = 1.8;
+const DAILY_REPORT_FONT_STACK = "'Noto Sans CJK SC','Noto Sans SC','WenQuanYi Micro Hei','Microsoft YaHei','PingFang SC',Arial,sans-serif";
 
 function parseArgs(argv) {
   const args = {date: null, groups: ['DSY', 'LGM'], out: null, asOf: null};
@@ -160,14 +161,14 @@ const defs = `<defs>
   <linearGradient id="dsy" x1="0" x2="1"><stop offset="0" stop-color="#2563eb"/><stop offset="1" stop-color="#60a5fa"/></linearGradient>
   <linearGradient id="lgm" x1="0" x2="1"><stop offset="0" stop-color="#f97316"/><stop offset="1" stop-color="#fb923c"/></linearGradient>
   <style>
-    .title{font:800 46px 'Microsoft YaHei','Noto Sans CJK SC',Arial,sans-serif;fill:#f8fafc}
-    .sub{font:400 19px 'Microsoft YaHei','Noto Sans CJK SC',Arial,sans-serif;fill:#cbd5e1}
-    .section{font:800 28px 'Microsoft YaHei','Noto Sans CJK SC',Arial,sans-serif;fill:#fff}
-    .cardTitle{font:700 18px 'Microsoft YaHei','Noto Sans CJK SC',Arial,sans-serif;fill:#c4b5fd}
-    .num{font:800 35px Arial,'Microsoft YaHei';fill:#fff}
-    .small{font:400 16px 'Microsoft YaHei','Noto Sans CJK SC',Arial,sans-serif;fill:#94a3b8}
-    .label{font:600 18px 'Microsoft YaHei','Noto Sans CJK SC',Arial,sans-serif;fill:#e2e8f0}
-    .val{font:700 17px Arial,'Microsoft YaHei';fill:#f8fafc}
+    .title{font:800 46px ${DAILY_REPORT_FONT_STACK};fill:#f8fafc}
+    .sub{font:400 19px ${DAILY_REPORT_FONT_STACK};fill:#cbd5e1}
+    .section{font:800 28px ${DAILY_REPORT_FONT_STACK};fill:#fff}
+    .cardTitle{font:700 18px ${DAILY_REPORT_FONT_STACK};fill:#c4b5fd}
+    .num{font:800 35px ${DAILY_REPORT_FONT_STACK};fill:#fff}
+    .small{font:400 16px ${DAILY_REPORT_FONT_STACK};fill:#94a3b8}
+    .label{font:600 18px ${DAILY_REPORT_FONT_STACK};fill:#e2e8f0}
+    .val{font:700 17px ${DAILY_REPORT_FONT_STACK};fill:#f8fafc}
   </style>
 </defs>`;
 function sectionTitle(x, y, text, note = '') {

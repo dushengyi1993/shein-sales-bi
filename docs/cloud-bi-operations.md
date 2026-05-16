@@ -1,6 +1,6 @@
 # 云端 BI 运行说明
 
-> 当前权威状态：2026-05-15。本地 BI 已封存，云端 BI 是正式入口。
+> 当前权威状态：2026-05-16。本地 BI 已封存，云端 BI 是正式入口。
 
 ## 1. 当前入口
 
@@ -9,6 +9,7 @@
 - 云服务器：腾讯云 Lighthouse 东京，Ubuntu 24.04 x86_64，代码目录 `/opt/shein-bi/app`。
 - 服务组成：Nginx 对外反代，BI Portal 监听服务器本机 `127.0.0.1:8787`，PostgreSQL + Metabase 由 Docker Compose 承载。
 - GitHub 仓库 `main` 是云端代码来源；云端有值得保存的脚本、配置模板、门户静态产物或自动运营能力时，先同步回 GitHub，再部署到服务器。
+- 注意：`outputs/bi-portal/index.html` / `data.json` 会作为可恢复静态快照纳入 GitHub；服务器执行 `git reset --hard origin/main` 或类似部署后，可能把实时 BI 页面覆盖成仓库快照。每次服务器拉取/重置代码后，都要立即跑一次 `scripts/cloud_bi_refresh.sh today intraday` 或对应 systemd service，确认页面生成时间和销售源时间回到当前。
 
 ## 2. 本地 BI 封存状态
 
@@ -46,6 +47,7 @@ ET 与飞书日报的 Linux systemd 入口已启用并通过手动真实验证�
 - 官方 OpenAPI 已有权限的数据域后续可逐步替换为 OpenAPI；WebAPI 仍作为当前生产销售抓取主链路。
 - ET 已改为 Linux headless Chrome + 账号密码/OCR 自动登录模式；Windows Chrome 保存密码不能直接迁到 Linux，服务器必须单独保存 `config/et_forwarder.local.json` 或等价环境变量。
 - 飞书日报依赖服务器本地 `config/lark_report.json`、`lark-cli` 和独立飞书机器人授权；旧应用 `open_id` 不能直接复用到新应用，必要时用 `union_id` 映射。飞书 Base / 看板写入仍受暂停开关控制，日报发送与 Base 写入分开处理。
+- 飞书日报图在 Linux headless Chrome 下依赖中文字体；服务器必须安装 `fonts-noto-cjk` / `fontconfig` 并能通过 `fc-match 'Noto Sans CJK SC'` 匹配到 Noto CJK，否则中文会渲染成方框。
 - 链接管理、商品图上传、取标题、商家维护链接等自动运营功能后续应优先按 Linux/云端服务方式扩展，避免重新绑定本地 Windows。
 
 ## 5. 运行数据与敏感信息边界
@@ -75,4 +77,6 @@ GitHub 应保存：
 - `shein-bi-db-backup.timer` 应每日生成 `shein_bi.dump` 与 `metabase.dump`。
 - ET 已验证可手动跑 `scripts/cloud_et_forwarder_sync.sh today`，能登录、抓取、入仓并刷新门户；失败时保留上一版 ET 数据，不应阻断销售 BI。
 - 飞书日报已验证可手动跑 `scripts/cloud_daily_lark_report.sh today`，文字和日报图能发送；成功后会写入当天 sent flag，避免同日 timer 重复发送。
+- 若 BI 侧栏显示的“页面生成 / 销售源”时间明显旧于当前调度，先检查是否刚部署覆盖了仓库静态快照；在服务器重跑 `shein-bi-cloud-today.service` 后，`outputs/bi-portal/data.json` 的 `generatedAt` 和 `salesUpdatedAt` 应更新到当天。
+- 若飞书日报图中文显示方框，先在服务器检查 `fc-match 'Noto Sans CJK SC'`；修复字体后只需重新生成/下次发送日报图，不需要重发已发送的旧图，除非用户明确要求。
 - GitHub `main` 应包含最新可复用代码和文档；敏感运行态只保留在本地/云端私有目录。
