@@ -1,0 +1,13 @@
+[Unit]
+Description=SHEIN BI cloud link/business daily sync
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/shein-bi/app
+Environment=HOME=/root
+Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_BI_LOG_DIR=/srv/shein-bi/logs/cloud-link-business
+TimeoutStartSec=10800
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_link_business_sync.sh yesterday

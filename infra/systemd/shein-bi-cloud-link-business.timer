@@ -1,0 +1,10 @@
+[Unit]
+Description=Run SHEIN BI cloud link/business sync daily
+
+[Timer]
+OnCalendar=*-*-* 05:30:00
+Persistent=true
+Unit=shein-bi-cloud-link-business.service
+
+[Install]
+WantedBy=timers.target

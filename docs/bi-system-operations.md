@@ -47,8 +47,14 @@
 | `00:10/02:10/.../22:10` | `shein-bi-cloud-today.timer` | 每两小时刷新当天销售、入仓并生成 BI Portal。 |
 | `00:10` | `shein-bi-cloud-yesterday.timer` | 刷新前一天最终销售，并复核前两天稳定日。 |
 | `02:30` | `shein-bi-db-backup.timer` | 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto`，默认保留 14 天。 |
+| `03:20` | `shein-bi-cloud-rtv-verify.timer` | 完整 RTV 换单复核 WebAPI 版，不阻塞滚动销售刷新。 |
+| `04:20` | `shein-bi-cloud-et-forwarder.timer` | 同步 ET 货代仓、入仓并刷新 BI。 |
+| `05:30` | `shein-bi-cloud-link-business.timer` | 顺序抓取前一完整日链接/业务域，入仓、体检并刷新 BI。 |
+| `06:20` | `shein-bi-cloud-openapi-hl.timer` | HL OpenAPI 并行对账。 |
+| `08:35` | `shein-bi-cloud-daily-lark-report.timer` | 发送飞书日报；`10:35/12:35` 补偿重试。 |
+| 每小时 | `shein-bi-cloud-watchdog.timer` | 检查云端服务、timer 和数据新鲜度，异常时提醒。 |
 
-云端当前自动覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步和飞书日报。链接/业务域、完整 RTV 复核、异常通知和 HL OpenAPI 双跑仍待迁到云端。
+云端当前自动覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、飞书日报、完整 RTV 复核、链接/业务域日更、异常通知和 HL OpenAPI 双跑。
 
 ### 4.2 本地历史任务 / 回滚参考
 
@@ -88,8 +94,8 @@
 ## 6. 链接表现更新规则
 
 - 链接表现每天更新一次即可，适合放在后半夜。
-- 本地历史任务 `SHEIN-Sales-15Stores-LinkManagement-0530` 已封存禁用；云端自动链接/业务域刷新尚未迁移完成。
-- 迁移前如需手动补链接/业务域，可按原脚本逻辑临时运行 `scripts/scheduled_link_management_daily.ps1` 或改写 Linux 入口；结果应写私有源文件、PostgreSQL 和 BI Portal，不再写飞书链接管理表。
+- 本地历史任务 `SHEIN-Sales-15Stores-LinkManagement-0530` 已封存禁用；当前生产由云端 `shein-bi-cloud-link-business.timer` 每天 `05:30` 执行。
+- 云端手动补链接/业务域应在服务器运行 `scripts/cloud_link_business_sync.sh yesterday` 或指定日期；该入口按店顺序启动 headless Chrome，抓完即关闭浏览器，随后入仓、体检并刷新 BI。不要用本机补抓冒充云端日更。
 - BI 门户侧栏的“链接表现数据”更新时间应显示源文件抓取时间：`outputs/shein_links/<店铺>/<链接日>.json` 内 `fetchTime` 的最大值；“售后/库存/财务数据”更新时间应显示业务域源文件抓取时间：`outputs/shein_business_domains/<店铺>/<业务日>.json` 内 `fetchTime` 的最大值；BI 重跑重新入仓时产生的数据库 `updated_at` 只可作为内部排障字段，不作为主要更新时间展示。
 - 如果部分店失败：尽量同步成功店铺，并发送飞书异常提醒。
 - 旧 `SHEIN-Sales-15Stores-LinkManagement-0340` / `SHEIN-Sales-15Stores-LinkManagement-0510` 不应恢复。

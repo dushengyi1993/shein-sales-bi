@@ -65,8 +65,9 @@
 ## 计划任务
 - 2026-05-15 起生产调度转为云端 systemd timer：`shein-bi-cloud-today.timer` 在北京时间 `00:10/02:10/.../22:10` 每两小时刷新当天销售、入仓并生成 BI Portal；`shein-bi-cloud-yesterday.timer` 每天 `00:10` 刷新前一天最终销售并复核前两天稳定日；`shein-bi-db-backup.timer` 每天 `02:30` 备份业务库和 Metabase 元数据库。
 - 本地 `SHEIN-*` Windows 计划任务已全部禁用，保留为回滚/迁移参考，不再作为生产调度。除非用户明确回滚，不要重新启用 `SHEIN-Sales-15Stores-Intraday-Daytime`、`SHEIN-BI-Daily-Pipeline-0700`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-Sales-ETForwarder-0420` 或 HL OpenAPI 本地任务。
-- 云端首阶段只自动覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成和数据库备份；链接/业务域、RTV 完整复核和 HL OpenAPI 双跑仍需要逐项迁移到云端后再恢复自动化。
+- 云端自动化已覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成、数据库备份、ET 同步、飞书日报、完整 RTV 复核、链接/业务域日更、异常通知 watchdog、只读飞书问数机器人和 HL OpenAPI 双跑；本地 Windows 任务只作回滚参考。
 - ET 和飞书日报已启用云端 Linux 入口：`scripts/cloud_et_forwarder_sync.sh` / `shein-bi-cloud-et-forwarder.timer`、`scripts/cloud_daily_lark_report.sh` / `shein-bi-cloud-daily-lark-report.timer`。ET 服务器侧使用私有 `config/et_forwarder.local.json` 或环境变量账号密码，不能复用 Windows Chrome 保存密码；飞书日报服务器侧使用独立飞书 CLI 应用/机器人与私有 `config/lark_report.json`，旧应用的 `open_id` 不能直接给新应用用，换机器人时需用 `union_id` 重新映射收件人 `open_id`。上述 secret/token/收件人完整 ID 不进 GitHub、文档或聊天。2026-05-16 云端 ET 全量同步和云端飞书日报真实发送均已验证成功。
+- 链接/业务域已启用云端 Linux 入口：`scripts/cloud_link_business_sync.sh` / `shein-bi-cloud-link-business.timer`，每天 `05:30` 顺序跑前一完整日；它用服务器私有 `state/shein_browser_sessions/*.local.json` / `state/shein_webapi_sessions/*.local.json` 初始化 headless Chrome，按店抓取、入仓、体检并刷新 BI。不要再用本机隐藏补抓冒充云端日更；纯 Node 零浏览器直连只是后续优化。
 - 云端飞书日报图依赖 Linux 中文字体；服务器必须安装 `fonts-noto-cjk` / `fontconfig`，`fc-match 'Noto Sans CJK SC'` 应匹配 Noto CJK，否则 headless Chrome 生成的日报图中文会显示方框。
 - GitHub 中的 `outputs/bi-portal/index.html` / `data.json` 是灾备静态快照；服务器执行 `git reset --hard origin/main` 或类似部署后可能覆盖实时 BI 页面。每次服务器拉取/重置代码后，必须重跑 `scripts/cloud_bi_refresh.sh today intraday` 或 `shein-bi-cloud-today.service`，确认 `generatedAt` / `salesUpdatedAt` 更新到当前。
 - 本地历史规则仍可作回滚参考：RTV 复核耗时长是正常现象，滚动销售刷新不应等待完整 RTV；BI 门户生成必须在流水线末尾单次执行，默认 `SHEIN_BI_PORTAL_TIMEOUT_MS=900000`，不要恢复“流水线完成 / 简报 / 首次体检”多个状态点重复生成页面。
@@ -235,7 +236,7 @@
 - HL OpenAPI 云端双跑入口 `scripts/cloud_openapi_hl_reconciliation.sh` / `shein-bi-cloud-openapi-hl.timer` 已部署；服务器出口 IP `43.165.167.135` 已加入开放平台白名单；云端 HL OpenAPI 抓取、入仓和 BI OpenAPI 对账已跑通。
 - 2026-05-16 链接/业务域 WebAPI 直连探针：同一 HL session 下 `gsp` 售后统计/列表和发货面单 count 可 Node 直连；`mgs` 履约/评价、`pqmp` 质量、`spmp` 商品列表、`idms` 备货、`sbn` 经营/营销、`gsfs` 财务均返回 `20302 子系统登录重定向`。后续直连改造应先解决子系统登录态/初始化，再处理 SBN `x-gw-auth`；若必须用浏览器兜底，云端只能顺序或小并发（建议 1，最多 2）短时启动并及时关闭，不能 16 店同时开浏览器。
 - 2026-05-16 已修复云端 BI “未找到体检文件”：`audit_bi_warehouse.mjs` 支持 Linux 下按权限自动使用 `sudo docker exec`，`cloud_bi_refresh.sh` 在生成 BI Portal 前运行体检；云端验证 `audit.ok=true`、`errors=0`。若普通用户手动运行 watchdog 或 BI 生成脚本，要确认 `/srv/shein-bi/logs`、`state/cloud_ops_watchdog`、`outputs/bi-portal` 等运行目录可写，避免 root 运行后的权限残留。
-- 2026-05-16 已一次性补齐链接/业务域最新完整日：本地隐藏 profile 抓取 `2026-05-15` 全 16 店链接和业务域，上传云端后用 `load_bi_warehouse.mjs --link-date 2026-05-15` 与 `load_bi_business_domains.mjs --date 2026-05-15` 入仓；云端 BI 体检 `warnings=0/errors=0`，`dates.linkDate=2026-05-15`、`dates.businessDate=2026-05-15`。根因不是数据计算错，而是本地 Windows 日更任务封存后，云端尚未完成链接/业务域的子系统登录态/WebAPI 直连迁移；未获明确授权前不要重新启用本地 Windows 定时任务作为长期生产。
+- 2026-05-16 链接/业务域已完成云端闭环：`cloud_link_business_sync.sh` 服务器日志 `link-business-2026-05-15-20260516-163901.log` 显示 16 店全部 `done`，随后 `load_bi_warehouse.mjs --link-date 2026-05-15`、`load_bi_business_domains.mjs --date 2026-05-15`、BI 体检和门户生成均成功；`dates.linkDate=2026-05-15`、`dates.businessDate=2026-05-15`、`warnings=0/errors=0`。该闭环是云服务器自己抓取，不是本机补抓。
 
 ## 2026-05-08 RTV 换单号复核口径
 - EMile 等退货物流可能在运输途中更换物流单号；`RTV 已收可二售测算` 不能只靠 SHEIN 售后列表里的 `returnExpressInfoList.expressNo` 单向匹配 ET RTV。

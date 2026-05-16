@@ -19,6 +19,11 @@ const CHROME_CANDIDATES = [
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
   'D:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+  '/usr/bin/google-chrome',
+  '/usr/bin/google-chrome-stable',
+  '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
+  '/snap/bin/chromium',
 ];
 const CHROME = CHROME_CANDIDATES.find(p => fs.existsSync(p)) || 'chrome.exe';
 const ORDER_URL = 'https://sso.geiwohuo.com/#/gsp/order-management/list';
@@ -121,6 +126,10 @@ const args = [
   '--disable-background-timer-throttling',
   '--disable-renderer-backgrounding',
   '--disable-backgrounding-occluded-windows',
+  ...(process.platform !== 'win32' ? [
+    '--disable-dev-shm-usage',
+    ...(typeof process.getuid === 'function' && process.getuid() === 0 ? ['--no-sandbox'] : []),
+  ] : []),
   ...(cliArgs.headless ? [
     '--headless=new',
     '--disable-gpu',

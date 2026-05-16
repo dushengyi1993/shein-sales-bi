@@ -290,8 +290,31 @@ async function captureSbnHeaders(cdp) {
   const {ws, send} = cdp;
   await send('Network.enable');
   await send('Page.enable');
+  await send('Emulation.setDeviceMetricsOverride', {
+    width: 1365,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  }).catch(() => null);
   let resolved = false;
+  let targetRequestCount = 0;
+  let lastTargetHeaderKeys = [];
   let cleanup = null;
+  const pickHeader = (headers, name) => {
+    const wanted = name.toLowerCase();
+    for (const [key, value] of Object.entries(headers || {})) {
+      if (key.toLowerCase() === wanted) return value;
+    }
+    return null;
+  };
+  const buildAllowedHeaders = headers => {
+    const allowed = {};
+    for (const key of ['Accept', 'Content-Type', 'x-gw-auth', 'x-sbn-front-version', 'x-bbl-route', 'Origin-Url']) {
+      const value = pickHeader(headers, key);
+      if (value) allowed[key] = value;
+    }
+    return allowed;
+  };
   const headersPromise = new Promise(resolve => {
     const handler = ev => {
       const msg = JSON.parse(ev.data);
@@ -299,26 +322,35 @@ async function captureSbnHeaders(cdp) {
       const req = msg.params?.request;
       if (!String(req?.url || '').includes('/sbn/new_goods/get_skc_diagnose_list')) return;
       const h = req.headers || {};
-      resolved = true;
-      const allowed = {};
-      for (const key of ['Accept', 'Content-Type', 'x-gw-auth', 'x-sbn-front-version', 'x-bbl-route', 'Origin-Url']) {
-        if (h[key]) allowed[key] = h[key];
+      targetRequestCount += 1;
+      lastTargetHeaderKeys = Object.keys(h).sort();
+      const allowed = buildAllowedHeaders(h);
+      if (allowed['x-gw-auth']) {
+        resolved = true;
+        resolve(allowed);
       }
-      resolve(allowed);
     };
     cleanup = () => ws.removeEventListener?.('message', handler);
     ws.addEventListener('message', handler);
   });
-  await send('Page.navigate', {url: `${MERCHANDISE_URL}?linkFetchTs=${Date.now()}`});
-  // The SBN micro-frontend sometimes reuses cached route state on hash navigation.
-  // A hard reload reliably makes the frontend issue its own signed request.
-  await sleep(3500);
-  if (!resolved) await send('Page.reload', {ignoreCache: true});
-  const timeoutPromise = new Promise(resolve => setTimeout(() => resolve(null), 24_000));
-  const headers = await Promise.race([headersPromise, timeoutPromise]);
+  const waitForHeaders = ms => Promise.race([headersPromise, sleep(ms).then(() => null)]);
+  let headers = null;
+  for (let attempt = 1; attempt <= 3 && !resolved; attempt += 1) {
+    await send('Page.navigate', {url: `${MERCHANDISE_URL}?linkFetchTs=${Date.now()}-${attempt}`});
+    // The SBN micro-frontend sometimes reuses cached route state on hash navigation.
+    // A hard reload reliably makes the frontend issue its own signed request, but
+    // some cloud/headless runs need a second route initialization before SBN emits
+    // the signed request. Keep this retry local so one store does not break the
+    // full daily cloud job on a transient missing x-gw-auth capture.
+    headers = await waitForHeaders(7000);
+    if (headers) break;
+    await send('Page.reload', {ignoreCache: true});
+    headers = await waitForHeaders(attempt === 3 ? 25_000 : 12_000);
+  }
   cleanup?.();
   if (!resolved || !headers?.['x-gw-auth']) {
-    throw new Error('未捕获到商品分析接口 x-gw-auth 请求头，请确认商品分析页可正常打开');
+    const headerKeys = lastTargetHeaderKeys.length ? lastTargetHeaderKeys.join(',') : 'none';
+    throw new Error(`未捕获到商品分析接口 x-gw-auth 请求头，请确认商品分析页可正常打开 targetRequests=${targetRequestCount} headerKeys=${headerKeys}`);
   }
   return headers;
 }

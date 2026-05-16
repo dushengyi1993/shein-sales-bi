@@ -120,6 +120,9 @@
 - `notify_sync_issue.mjs`
 - `cloud_ops_watchdog.mjs`：云端 systemd/watchdog 新鲜度检查；销售/BI 页面按高频阈值，链接/业务域按日更低频阈值，异常时调用 `notify_sync_issue.mjs` 发飞书提醒。
 - `lark_sales_qa_bot.mjs`：云端只读飞书问数机器人核心逻辑；只读取 BI Portal JSON 并回复消息，不写数据库或飞书 Base。
+- `cloud_link_business_sync.sh`：云端链接/业务域日更入口；按店顺序 bootstrap 浏览器会话、抓链接和业务域、入仓、体检并刷新 BI。
+- `bootstrap_shein_browser_session.mjs`：把服务器私有 SHEIN WebAPI/browser session 注入云端 headless Chrome profile，并用订单接口只读探测登录态。
+- `export_shein_browser_session.mjs`：从已登录 Chrome profile 导出 SHEIN 浏览器会话状态到 `state/shein_browser_sessions/*.local.json`；输出属于敏感运行态，不提交 GitHub。
 - `check_workspace_skill.ps1`
 - `watchdog_sales_automation.mjs`
 
