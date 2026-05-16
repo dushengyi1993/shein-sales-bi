@@ -148,13 +148,30 @@ function sqlLiteral(v) {
 }
 
 async function runPsqlScript(args, script) {
-  const child = spawn('wsl', [
-    '-d', args.distro,
-    '--',
-    'bash',
-    '-lc',
-    `sudo docker exec -i ${args.container} psql -U ${args.user} -d ${args.database} -v ON_ERROR_STOP=1`,
-  ], {
+  const useWsl = process.platform === 'win32';
+  const command = useWsl ? 'wsl' : 'docker';
+  const commandArgs = useWsl
+    ? [
+        '-d',
+        args.distro,
+        '--',
+        'bash',
+        '-lc',
+        `sudo docker exec -i ${args.container} psql -U ${args.user} -d ${args.database} -v ON_ERROR_STOP=1`,
+      ]
+    : [
+        'exec',
+        '-i',
+        args.container,
+        'psql',
+        '-U',
+        args.user,
+        '-d',
+        args.database,
+        '-v',
+        'ON_ERROR_STOP=1',
+      ];
+  const child = spawn(command, commandArgs, {
     cwd: ROOT,
     windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'],
