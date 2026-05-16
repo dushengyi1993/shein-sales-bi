@@ -4,7 +4,7 @@
 
 ## 1. 当前系统定位
 
-- 飞书多维表格 / 原生看板写入已临时暂停；飞书日报/异常通知的本地历史链路已随 Windows 任务封存，后续需要单独迁到云端。
+- 飞书多维表格 / 原生看板写入已临时暂停；飞书日报已迁到云端独立飞书机器人并验证真实发送，异常通知后续再按云端链路补齐。
 - BI 系统当前以云端为正式入口，负责 PostgreSQL 数据仓库、Metabase 和 BI 经营门户。
 - 当前不能直接停用或删除 Metabase：PostgreSQL 是数据底座，Metabase 是正式深度分析/自由钻取层，BI Portal 是日常经营入口；只有等自研门户完全覆盖深钻能力后，才能重新评估是否降级 Metabase。
 - 不从飞书反抓数据做 BI 源头；BI 源头来自 SHEIN 后台抓取后的私有源文件 / PostgreSQL。
@@ -48,7 +48,7 @@
 | `00:10` | `shein-bi-cloud-yesterday.timer` | 刷新前一天最终销售，并复核前两天稳定日。 |
 | `02:30` | `shein-bi-db-backup.timer` | 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto`，默认保留 14 天。 |
 
-云端首阶段只自动覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成和数据库备份。链接/业务域、ET、完整 RTV 复核、飞书日报/异常通知和 HL OpenAPI 双跑仍待迁到云端。
+云端当前自动覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步和飞书日报。链接/业务域、完整 RTV 复核、异常通知和 HL OpenAPI 双跑仍待迁到云端。
 
 ### 4.2 本地历史任务 / 回滚参考
 

@@ -66,7 +66,7 @@
 - 2026-05-15 起生产调度转为云端 systemd timer：`shein-bi-cloud-today.timer` 在北京时间 `00:10/02:10/.../22:10` 每两小时刷新当天销售、入仓并生成 BI Portal；`shein-bi-cloud-yesterday.timer` 每天 `00:10` 刷新前一天最终销售并复核前两天稳定日；`shein-bi-db-backup.timer` 每天 `02:30` 备份业务库和 Metabase 元数据库。
 - 本地 `SHEIN-*` Windows 计划任务已全部禁用，保留为回滚/迁移参考，不再作为生产调度。除非用户明确回滚，不要重新启用 `SHEIN-Sales-15Stores-Intraday-Daytime`、`SHEIN-BI-Daily-Pipeline-0700`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-Sales-ETForwarder-0420` 或 HL OpenAPI 本地任务。
 - 云端首阶段只自动覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成和数据库备份；链接/业务域、RTV 完整复核和 HL OpenAPI 双跑仍需要逐项迁移到云端后再恢复自动化。
-- ET 和飞书日报已新增云端 Linux 入口：`scripts/cloud_et_forwarder_sync.sh` / `shein-bi-cloud-et-forwarder.timer`、`scripts/cloud_daily_lark_report.sh` / `shein-bi-cloud-daily-lark-report.timer`。启用前必须在服务器本地补齐敏感配置并手动验证：ET 需要 `config/et_forwarder.local.json` 或环境变量账号密码，不能直接复用 Windows Chrome 保存密码；飞书日报需要 `config/lark_report.json`、`lark-cli` 和飞书授权。上述 secret/token 不进 GitHub、文档或聊天。
+- ET 和飞书日报已启用云端 Linux 入口：`scripts/cloud_et_forwarder_sync.sh` / `shein-bi-cloud-et-forwarder.timer`、`scripts/cloud_daily_lark_report.sh` / `shein-bi-cloud-daily-lark-report.timer`。ET 服务器侧使用私有 `config/et_forwarder.local.json` 或环境变量账号密码，不能复用 Windows Chrome 保存密码；飞书日报服务器侧使用独立飞书 CLI 应用/机器人与私有 `config/lark_report.json`，旧应用的 `open_id` 不能直接给新应用用，换机器人时需用 `union_id` 重新映射收件人 `open_id`。上述 secret/token/收件人完整 ID 不进 GitHub、文档或聊天。2026-05-16 云端 ET 全量同步和云端飞书日报真实发送均已验证成功。
 - 本地历史规则仍可作回滚参考：RTV 复核耗时长是正常现象，滚动销售刷新不应等待完整 RTV；BI 门户生成必须在流水线末尾单次执行，默认 `SHEIN_BI_PORTAL_TIMEOUT_MS=900000`，不要恢复“流水线完成 / 简报 / 首次体检”多个状态点重复生成页面。
 - 飞书 Base / 看板写入仍受 `state/feishu-base-sync-paused.flag` 约束；云端恢复飞书日报或异常通知前，不要默认认为本地日报任务仍在生产运行。
 
@@ -219,7 +219,7 @@
 - ET 财务账单已能抓到每日仓储费总账（sort_name=仓储费），但当前账单明细未返回 SKU 级仓储费 item rows；在找到仓储费详情接口前，不要用 ET 自动替代按货号仓储费，只能做月总或估算分摊。
 
 ## 2026-05-08 ET 自动登录与验证码
-- ET 抓取器若遇到登录态过期，会自动读取 `profiles/persistent-et-forwarder-profile` 里 Chrome 已保存的 ET 账号密码，并用本地 OCR 识别 `/Login/GetAuthCode` 的 4 位验证码后提交登录；实现文件为 `scripts/et_login_helper.py` + `scripts/fetch_et_forwarder.mjs`。本地 04:20 任务当前已封存，逻辑保留待云端化。
+- ET 抓取器若遇到登录态过期，本地回滚可读取 `profiles/persistent-et-forwarder-profile` 里 Chrome 已保存的 ET 账号密码；云端正式链路读取服务器私有 `config/et_forwarder.local.json` 或环境变量账号密码，并用 OCR 识别 `/Login/GetAuthCode` 的 4 位验证码后提交登录；实现文件为 `scripts/et_login_helper.py` + `scripts/fetch_et_forwarder.mjs`。本地 04:20 任务已封存，云端 `shein-bi-cloud-et-forwarder.timer` 已启用并验证成功。
 - `scripts/et_login_helper.py credentials` 默认只输出用户名和密码长度；只有抓取器本地进程设置 `ET_LOGIN_HELPER_ALLOW_SECRET=1` 时才返回密码，不得把密码写入日志、文档或聊天。
 - ET 自动登录依赖项目本地 `.cache/python` 中的 `ddddocr` 和 `cryptography`，不装到 C 盘；如果 OCR 连续失败、保存密码失效或 ET 登录页改版，任务仍会发飞书异常提醒并保留上一版 ET 数据。
 - `scripts/scheduled_et_forwarder_daily.ps1` 已加空日期兜底，避免计划任务无参数运行时把空 `--date` 传给 Node 导致 `Invalid time value`。

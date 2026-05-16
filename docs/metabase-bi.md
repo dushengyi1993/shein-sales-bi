@@ -1,4 +1,4 @@
-﻿# SHEIN BI / Metabase 部署说明
+# SHEIN BI / Metabase 部署说明
 
 ## 本机访问
 
@@ -87,7 +87,7 @@
 
 1. **现有生产链路转为云端优先**
    - 销售抓取、销售入仓、BI Portal 生成和数据库备份已切到云端 systemd。
-   - 本地 Windows 任务只保留为回滚/迁移参考；飞书日报/异常通知、ET、链接/业务域和完整 RTV 复核待迁移。
+   - 本地 Windows 任务只保留为回滚/迁移参考；飞书日报和 ET 已迁到云端，异常通知、链接/业务域和完整 RTV 复核待迁移。
 
 2. **本地 WSL/D 盘降级为回滚参考**
    - Metabase、Metabase 配置库、SHEIN 数据仓库在云端 Docker 中运行。

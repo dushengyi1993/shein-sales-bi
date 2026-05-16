@@ -2,7 +2,7 @@
 
 ## 2026-05-15 当前权威状态
 
-- 飞书多维表格 / 原生看板写入已临时暂停；云端 BI 系统作为当前主要经营入口继续运行。飞书日报/异常通知已增加云端脚本和 systemd 入口，但需服务器本地 `config/lark_report.json`、`lark-cli` 授权和手动验证后再启用。
+- 飞书多维表格 / 原生看板写入已临时暂停；云端 BI 系统作为当前主要经营入口继续运行。飞书日报已迁到云端独立飞书机器人并真实发送验证通过；异常通知后续再按云端链路补齐。
 - 本地 BI 已封存，云端 BI 是正式入口：`http://43.165.167.135/`。公网入口已启用 Basic Auth；账号密码只在运行环境交付，不写入仓库或文档。详见 `docs/cloud-bi-operations.md`。
 - 本地 `8787` 服务已停止，`SHEIN-*` Windows 计划任务已禁用；除非明确回滚，不要重新启动本地 BI 或本地抓数任务。
 - 销售同步完成后会后置刷新 BI；如果单店失败但目标日期 16 店销售源文件已齐，BI 仍会刷新，并通过飞书消息提醒失败店铺。
@@ -14,7 +14,7 @@
 - `2026-05-10` 已完成 16 店 profile 显示名与登录抓数复核：未发现 profile 名和登录态混乱；`YJ=profileKey qy`、`XL=profileKey yj`、`QY=profileKey xl` 是历史遗留但当前正确的绑定，不要仅凭名称直觉改动。
 - `2026-05-09 05:30` 链接/业务域任务、`2026-05-09 07:00` BI 每日流水线和白天滚动后置 BI 刷新是本地 Windows 历史验证记录；自 `2026-05-15` 本地任务封存后，不再作为生产调度。
 - `2026-05-13` 已明确 BI/RTV 调度边界：RTV 换单自动复核本来就耗时，不应被当成滚动 BI 未更新。云端滚动刷新优先做销售 WebAPI、入仓和 BI Portal 生成；完整 RTV/链接业务域云端化需要后续补齐。
-- ET 货代仓已接入过本地数据仓库和 BI，能抓库存、RTV、出库、发货申请单、财务等；云端已新增 Linux headless Chrome + ET 本地凭据 + OCR 自动登录入口，不能直接复用 Windows Chrome 保存密码。启用前必须在服务器私有配置中补齐 ET 凭据并跑通手动验证。
+- ET 货代仓已接入数据仓库和 BI，能抓库存、RTV、出库、发货申请单、财务等；云端已启用 Linux headless Chrome + ET 本地凭据 + OCR 自动登录入口并完成真实同步验证，不能直接复用 Windows Chrome 保存密码。
 - RTV 换单号自动复核已接入 BI 流水线：`scripts/verify_shein_rtv_tracking.mjs` 直接读取 SHEIN 售后详情和退货物流详情，JT/JTE 走同运单直连，iMile/EMile 识别中英文换单证据；截至 `2026-05-09` 已确认 `132` 个 ET RTV 入仓单号。
 - RTV 收件后去向已进入 BI：`mart.et_rtv_destination_allocation` 追踪 09 可售、03_RTV、04 破损、06 报废和其它/未知去向；`mart.shein_return_rtv_trace` 在 `订单 / 售后` 页面展示每条 SHEIN 退货是否收到、收到后去了哪里。
 - HL OpenAPI 销售试点已跑通并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` 写入 `fact.openapi_*` 并行事实表与 `mart.openapi_sales_reconciliation` 对账表；BI 系统状态页显示 “SHEIN OpenAPI 试点对账”。正式切换生产销售表前继续累计多日 `matched`。
@@ -23,7 +23,7 @@
 
 本工作区用于 SHEIN 16 店销售数据自动抓取、飞书多维表格统计、每日飞书日报、链接管理、营销活动报名辅助，以及正在并行建设的 PostgreSQL + Metabase + 云端 BI / 自动运营驾驶舱。
 
-当前原则：**SHEIN 抓数和 BI 刷新在云端继续运行；飞书日报迁到云端后再恢复自动发送；飞书多维表格 / 看板写入先暂停，待用户确认再恢复。**
+当前原则：**SHEIN 抓数、BI 刷新、ET 同步和飞书日报在云端继续运行；飞书多维表格 / 看板写入先暂停，待用户确认再恢复。**
 
 ## 当前运行状态（2026-05-15 云端切换后）
 

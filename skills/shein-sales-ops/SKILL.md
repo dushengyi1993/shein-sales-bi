@@ -19,10 +19,10 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 上月看板：`SHEIN经营看板 v3-上月`，ID `blkWeyZhphgRZYim`，数据源 `看板数据-PREV-*`
 - 店铺：DSY=`DL DX FY LQ NM HL JY ZL TS MZ`；LGM=`CX YJ XL QY QH TZ`
 - 云端 BI 正式入口：`http://43.165.167.135/`，Nginx Basic Auth 保护；本地 `8787` 服务和 `SHEIN-*` Windows 任务已封存禁用，除非明确回滚不要重启。
-- 云端生产调度：`shein-bi-cloud-today.timer` 每两小时刷新当天销售、入仓并生成 BI Portal；`shein-bi-cloud-yesterday.timer` 每天 `00:10` 刷新前一天最终版并复核稳定日；`shein-bi-db-backup.timer` 每天 `02:30` 备份数据库。
+- 云端生产调度：`shein-bi-cloud-today.timer` 每两小时刷新当天销售、入仓并生成 BI Portal；`shein-bi-cloud-yesterday.timer` 每天 `00:10` 刷新前一天最终版并复核稳定日；`shein-bi-db-backup.timer` 每天 `02:30` 备份数据库；`shein-bi-cloud-et-forwarder.timer` 每天 `04:20` 跑 ET；`shein-bi-cloud-daily-lark-report.timer` 负责云端飞书日报。
 - HL OpenAPI 销售试点已建立并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` -> `fact.openapi_*` -> `mart.openapi_sales_reconciliation`；正式切换前继续累计多日 `matched`。
 - 16 店销售生产抓取已改为 WebAPI 直连优先：`config/stores.json.salesTransport=auto`，session 文件在 `state/shein_webapi_sessions/*.local.json`，直连成功不启动浏览器；浏览器只作刷新 session、登录续期和回退。
-- ET 货代仓已接入过本地仓库和 BI，但本地 `04:20` 任务已随本地封存禁用；云端 ET 同步待迁移。RTV 复核耗时长是正常现象，滚动销售刷新不应等待完整 RTV。
+- ET 货代仓已接入仓库和 BI；云端 ET 同步已启用并验证成功。RTV 复核耗时长是正常现象，滚动销售刷新不应等待完整 RTV。
 - LGM profile 映射：`CX=profile cx/GS9489101`，`YJ=profile qy/GS7451160`，`XL=profile yj/GS8146729`，`QY=profile xl/GS9307061`，`QH=profile qh/GS8715910`，`TZ=profile tz/GS5636781`。`YJ/XL/QY` 的 profileKey 名称不等于店铺代码是历史遗留但当前正确，不要按名称直觉互换；错位核验用稳定日期重抓对账数据库。
 
 ## 业务口径
@@ -39,9 +39,9 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 不做猜测性单店时区偏移；HL 的错误 `accountUtcOffsetHours=3` 已删除并回补。
 
 ## 定时任务
-- 当前生产调度在云端 systemd：`shein-bi-cloud-today.timer`、`shein-bi-cloud-yesterday.timer`、`shein-bi-db-backup.timer`。云端首阶段只自动覆盖销售 WebAPI、销售入仓、BI Portal 生成和数据库备份。
+- 当前生产调度在云端 systemd：`shein-bi-cloud-today.timer`、`shein-bi-cloud-yesterday.timer`、`shein-bi-db-backup.timer`、`shein-bi-cloud-et-forwarder.timer`、`shein-bi-cloud-daily-lark-report.timer`。云端当前自动覆盖销售 WebAPI、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步和飞书日报。
 - 本地 `SHEIN-*` Windows 任务已于 `2026-05-15` 封存禁用，保留为回滚/迁移参考；除非明确回滚，不要重新启用 `SHEIN-Sales-15Stores-Intraday-Daytime`、`SHEIN-BI-Daily-Pipeline-0700`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-Sales-ETForwarder-0420` 或 HL OpenAPI 本地任务。
-- 链接/业务域、ET、完整 RTV 复核、飞书日报/异常通知和 HL OpenAPI 双跑仍待迁到云端。迁移完成前，不要默认本地日报、watchdog 或 ET 任务仍在生产运行。
+- 链接/业务域、完整 RTV 复核、异常通知和 HL OpenAPI 双跑仍待迁到云端。不要默认本地日报、watchdog 或 ET 任务仍在生产运行；云端飞书日报使用独立机器人，换机器人时需重新映射收件人 `open_id`。
 - 历史规则仍保留：V1 门户生成放在流水线末尾单次执行，默认 `SHEIN_BI_PORTAL_TIMEOUT_MS=900000`，不要恢复多个状态点重复生成页面；RTV 复核耗时长不是滚动 BI 失败。
 
 ## 数据层
@@ -76,7 +76,7 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - BI 每日流水线（本地回滚参考）：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_bi_daily_pipeline.ps1`
 - 生成 BI 门户：`$env:SHEIN_BI_PORTAL_TIMEOUT_MS='900000'; node scripts/generate_bi_portal.mjs`
 - 生成 V2.1 独立设计预览：`node scripts/generate_bi_portal_v2.mjs`；V2.1 只读复用 `outputs/bi-portal/data.json`，用户确认前不得替换 V1 或改生产调度。自 `2026-05-14` 起，V2 当前验收范围先限定首页：必须复刻 V1 首页功能/操作逻辑；其它子页尚未完成全量复刻。V2 暂时不跟随日常同步自动刷新，只有用户明确要求开发/优化/验收 V2 时才生成或维护。
-- ET 每日同步（待云端化，本地回滚参考）：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_et_forwarder_daily.ps1`
+- 云端 ET 每日同步：服务器执行 `bash scripts/cloud_et_forwarder_sync.sh today`；本地回滚参考才用 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_et_forwarder_daily.ps1`
 - RTV 换单复核：`node scripts/verify_shein_rtv_tracking.mjs --priority high,medium,low --include-no-cases --limit 120 --case-limit 60 --max-runtime-ms 3600000`
 - 营销活动报名补填：规则见 `docs/marketing-campaign-signup-pricing-rules.md`；当前执行入口为 `node scripts/marketing/dsy_marketing_deadline_fill.mjs --stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --hours 48 --price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD.json --min-discount-fallback SK-13034`。选择商品页必须先切到 `500 条/页` 再全选并核对 `总计 N 个 = 已选商品 N 个`；只允许填价和复核，不得点击最终 `提交报名`。
 - HL OpenAPI 销售试点：`node scripts/fetch_shein_openapi_sales.mjs HL --start YYYY-MM-DD --end YYYY-MM-DD` 后运行 `node scripts/load_shein_openapi_sales_warehouse.mjs --store HL --start YYYY-MM-DD --end YYYY-MM-DD`，只写 API 并行事实表和 `mart.openapi_sales_reconciliation`。
