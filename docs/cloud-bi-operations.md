@@ -45,6 +45,8 @@
 
 ET、飞书日报、完整 RTV WebAPI 复核、异常通知 watchdog 和只读问数机器人的 Linux systemd 入口已启用并通过手动验证。HL OpenAPI 云端入口已部署，并且云服务器出口 IP `43.165.167.135` 已加入 SHEIN 开放平台白名单，云端双跑已成功。链接/业务域是低频日更数据，不按销售高频刷新看待；其无浏览器 WebAPI 直连迁移仍需后续补 endpoint/session 适配。不要误以为本地 `SHEIN-*` Windows 任务仍在生产运行。
 
+2026-05-16 处理过一次链接/业务域停更：根因是本地 Windows 日更任务已随本地 BI 封存而停用，但云端还没有完成链接/业务域的子系统登录态与 SBN `x-gw-auth` 直连迁移。当天用本地隐藏 profile 一次性抓取 `2026-05-15` 全 16 店链接与业务域 JSON，上传云端后分别用 `load_bi_warehouse.mjs --link-date 2026-05-15` 和 `load_bi_business_domains.mjs --date 2026-05-15` 入仓，并重新生成 BI。验证结果：`linkDate=2026-05-15`、`businessDate=2026-05-15`，BI 体检 `warnings=0/errors=0`。这只是一次性补数路径；未明确授权前不要重新启用本地 Windows 定时任务作为长期生产。
+
 备份默认保留 `14` 天。后续正式长期运行还应补对象存储或异地下载备份，避免云盘单点故障。
 
 ## 4. 云端刷新链路
@@ -64,6 +66,7 @@ ET、飞书日报、完整 RTV WebAPI 复核、异常通知 watchdog 和只读�
 - 飞书日报依赖服务器本地 `config/lark_report.json`、`lark-cli` 和独立飞书机器人授权；旧应用 `open_id` 不能直接复用到新应用，必要时用 `union_id` 映射。飞书 Base / 看板写入仍受暂停开关控制，日报发送与 Base 写入分开处理。
 - 飞书日报图在 Linux headless Chrome 下依赖中文字体；服务器必须安装 `fonts-noto-cjk` / `fontconfig` 并能通过 `fc-match 'Noto Sans CJK SC'` 匹配到 Noto CJK，否则中文会渲染成方框。
 - 链接/业务域目前按日更低频看待；watchdog 的阈值是 48 小时，不是销售高频的 4.5 小时。链接管理、商品图上传、取标题、商家维护链接等自动运营功能后续应优先按 Linux/云端服务方式扩展，避免重新绑定本地 Windows。
+- `audit_bi_warehouse.mjs` 与 `load_bi_business_domains.mjs` 均应支持 Linux 下自动使用 `sudo docker exec`；如果服务器手动运行时报 Docker socket 或写文件权限错误，先检查脚本是否为最新，以及 `/srv/shein-bi/logs`、`state/cloud_ops_watchdog`、`outputs/bi-portal`、`outputs/bi_audit` 是否被 root 运行残留成普通用户不可写。
 
 ### 链接/业务域 WebAPI 直连现状
 

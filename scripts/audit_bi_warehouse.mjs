@@ -46,7 +46,14 @@ function stamp() {
 
 async function runPsql(args, sql) {
   const useWsl = process.platform === 'win32';
-  const command = useWsl ? 'wsl' : 'docker';
+  const shellQuote = value => `'${String(value).replace(/'/g, `'\\''`)}'`;
+  const dockerPrefix = () => {
+    if (process.platform === 'win32') return 'sudo ';
+    if (typeof process.getuid === 'function' && process.getuid() === 0) return '';
+    return 'sudo ';
+  };
+  const linuxCommand = `${dockerPrefix()}docker exec -i ${shellQuote(args.container)} psql -U ${shellQuote(args.user)} -d ${shellQuote(args.database)} -v ON_ERROR_STOP=1 -t -A`;
+  const command = useWsl ? 'wsl' : 'bash';
   const commandArgs = useWsl
     ? [
         '-d',
@@ -54,21 +61,11 @@ async function runPsql(args, sql) {
         '--',
         'bash',
         '-lc',
-        `sudo docker exec -i ${args.container} psql -U ${args.user} -d ${args.database} -v ON_ERROR_STOP=1 -t -A`,
+        linuxCommand,
       ]
     : [
-        'exec',
-        '-i',
-        args.container,
-        'psql',
-        '-U',
-        args.user,
-        '-d',
-        args.database,
-        '-v',
-        'ON_ERROR_STOP=1',
-        '-t',
-        '-A',
+        '-lc',
+        linuxCommand,
       ];
   const child = spawn(command, commandArgs, {
     cwd: ROOT,
