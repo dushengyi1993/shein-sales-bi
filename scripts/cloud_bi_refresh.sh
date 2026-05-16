@@ -7,7 +7,9 @@ MODE="${2:-intraday}"
 TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
 LOG_DIR="${SHEIN_BI_LOG_DIR:-/srv/shein-bi/logs/cloud-refresh}"
 METABASE_URL="${METABASE_URL:-http://127.0.0.1:3000}"
-PORTAL_HEALTH_URL="${PORTAL_HEALTH_URL:-http://127.0.0.1:8787/api/health}"
+PORTAL_HEALTH_URL="${PORTAL_HEALTH_URL:-}"
+PORTAL_INDEX_PATH="${PORTAL_INDEX_PATH:-$ROOT/outputs/bi-portal/index.html}"
+PORTAL_DATA_PATH="${PORTAL_DATA_PATH:-$ROOT/outputs/bi-portal/data.json}"
 
 resolve_date() {
   local target="$1"
@@ -29,6 +31,22 @@ resolve_date() {
       exit 64
       ;;
   esac
+}
+
+check_portal_health() {
+  if [[ ! -s "$PORTAL_INDEX_PATH" ]]; then
+    echo "BI Portal index is missing or empty: $PORTAL_INDEX_PATH" >&2
+    exit 1
+  fi
+  if [[ ! -s "$PORTAL_DATA_PATH" ]]; then
+    echo "BI Portal data is missing or empty: $PORTAL_DATA_PATH" >&2
+    exit 1
+  fi
+  if [[ -n "$PORTAL_HEALTH_URL" ]]; then
+    curl -fsS --max-time 15 "$PORTAL_HEALTH_URL" >/dev/null
+  else
+    echo "[cloud_bi_refresh] portal files ok index=$PORTAL_INDEX_PATH data=$PORTAL_DATA_PATH"
+  fi
 }
 
 DATE="$(resolve_date "$TARGET")"
@@ -68,6 +86,6 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl is-active --quiet shein-bi-portal.service || systemctl start shein-bi-portal.service || true
 fi
 
-curl -fsS --max-time 15 "$PORTAL_HEALTH_URL" >/dev/null
+check_portal_health
 
 echo "[cloud_bi_refresh] done date=$DATE mode=$MODE log=$LOG_FILE"

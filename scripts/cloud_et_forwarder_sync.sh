@@ -6,7 +6,9 @@ TARGET="${1:-today}"
 TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
 LOG_DIR="${SHEIN_ET_LOG_DIR:-/srv/shein-bi/logs/cloud-et-forwarder}"
 METABASE_URL="${METABASE_URL:-http://127.0.0.1:3000}"
-PORTAL_HEALTH_URL="${PORTAL_HEALTH_URL:-http://127.0.0.1:8787/api/health}"
+PORTAL_HEALTH_URL="${PORTAL_HEALTH_URL:-}"
+PORTAL_INDEX_PATH="${PORTAL_INDEX_PATH:-$ROOT/outputs/bi-portal/index.html}"
+PORTAL_DATA_PATH="${PORTAL_DATA_PATH:-$ROOT/outputs/bi-portal/data.json}"
 LOCK_FILE="${SHEIN_ET_LOCK_FILE:-/tmp/shein-bi-cloud-et-forwarder.lock}"
 
 resolve_date() {
@@ -53,6 +55,22 @@ notify_issue() {
   fi
 }
 
+check_portal_health() {
+  if [[ ! -s "$PORTAL_INDEX_PATH" ]]; then
+    echo "BI Portal index is missing or empty: $PORTAL_INDEX_PATH" >&2
+    exit 1
+  fi
+  if [[ ! -s "$PORTAL_DATA_PATH" ]]; then
+    echo "BI Portal data is missing or empty: $PORTAL_DATA_PATH" >&2
+    exit 1
+  fi
+  if [[ -n "$PORTAL_HEALTH_URL" ]]; then
+    curl -fsS --max-time 15 "$PORTAL_HEALTH_URL" >/dev/null
+  else
+    echo "[cloud_et_forwarder_sync] portal files ok index=$PORTAL_INDEX_PATH data=$PORTAL_DATA_PATH"
+  fi
+}
+
 on_error() {
   local code=$?
   notify_issue "Cloud ET forwarder sync failed; BI will keep the previous ET warehouse data. See log: $LOG_FILE"
@@ -85,7 +103,7 @@ if [[ "${SHEIN_ET_REFRESH_PORTAL:-1}" == "1" ]]; then
   if command -v systemctl >/dev/null 2>&1; then
     systemctl restart shein-bi-portal.service || true
   fi
-  curl -fsS --max-time 15 "$PORTAL_HEALTH_URL" >/dev/null
+  check_portal_health
 fi
 
 echo "[cloud_et_forwarder_sync] done date=$DATE manifest=$MANIFEST_PATH log=$LOG_FILE"
