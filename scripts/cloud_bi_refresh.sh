@@ -79,6 +79,14 @@ node scripts/load_bi_warehouse.mjs \
   --skip-links \
   --skip-dashboard
 
+set +e
+node scripts/audit_bi_warehouse.mjs
+AUDIT_STATUS=$?
+set -e
+if [[ "$AUDIT_STATUS" -ne 0 ]]; then
+  echo "[cloud_bi_refresh] BI audit finished with status=$AUDIT_STATUS; continue portal generation so the page can show the audit result"
+fi
+
 node scripts/generate_bi_portal.mjs \
   --metabase-url "$METABASE_URL"
 
