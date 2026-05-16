@@ -41,6 +41,7 @@ outputs/cloud-migration/*.log.err
 *.credentials.*
 config/*.local.json
 config/lark_report.json
+config/lark_report.json.bak-*
 config/*secret*.json
 config/*token*.json
 config/*credential*.json
