@@ -8,4 +8,4 @@ Type=oneshot
 WorkingDirectory=/opt/shein-bi/app
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=SHEIN_FEISHU_BASE_PAUSED=1
-ExecStart=/opt/shein-bi/app/scripts/cloud_daily_lark_report.sh today
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_daily_lark_report.sh today

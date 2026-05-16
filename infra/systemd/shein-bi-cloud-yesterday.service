@@ -8,5 +8,5 @@ Type=oneshot
 WorkingDirectory=/opt/shein-bi/app
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=SHEIN_SALES_TRANSPORT=webapi
-ExecStart=/opt/shein-bi/app/scripts/cloud_bi_refresh.sh yesterday yesterday-final
-ExecStart=/opt/shein-bi/app/scripts/cloud_bi_refresh.sh 2daysago third-day-stable-recheck
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_bi_refresh.sh yesterday yesterday-final
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_bi_refresh.sh 2daysago third-day-stable-recheck
