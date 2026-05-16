@@ -9,7 +9,7 @@ import fs from 'node:fs/promises';
 import fssync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {spawn} from 'node:child_process';
+import {spawn, spawnSync} from 'node:child_process';
 import {findChromeExecutable} from '../lib/chrome_executable.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -141,10 +141,19 @@ function pythonCandidates() {
   ].filter(Boolean);
 }
 
+function commandExists(command) {
+  if (!command) return false;
+  if (path.isAbsolute(command)) return fssync.existsSync(command);
+  const result = process.platform === 'win32'
+    ? spawnSync('where.exe', [command], {stdio: 'ignore', windowsHide: true})
+    : spawnSync('sh', ['-c', 'command -v "$1" >/dev/null 2>&1', 'sh', command], {stdio: 'ignore'});
+  return result.status === 0;
+}
+
 async function runPythonJson(pyArgs, options = {}) {
   let lastError = null;
   for (const py of pythonCandidates()) {
-    if (path.isAbsolute(py) && !fssync.existsSync(py)) continue;
+    if (!commandExists(py)) continue;
     try {
       return await new Promise((resolve, reject) => {
         const child = spawn(py, pyArgs, {
