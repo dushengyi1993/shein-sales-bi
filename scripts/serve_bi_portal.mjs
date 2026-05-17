@@ -307,7 +307,7 @@ function buildLinkOpsTaskFromCommand(body, actor, req) {
     intents,
     targets,
     preview: {
-      summary: `识别为：${intents.join(' / ')}；等待人工补充/确认后才会进入执行队列。`,
+      summary: `识别为：${intents.join(' / ')}；任务池只承载可执行事项，确认后再检查材料并进入执行队列。`,
       riskNotes: linkOpsRiskNotes(intents),
       agentAnswer: typeof body.agentAnswer === 'string' ? body.agentAnswer.slice(0, 12000) : '',
       agentMode: typeof body.agentMode === 'string' ? body.agentMode.slice(0, 80) : '',
@@ -315,8 +315,8 @@ function buildLinkOpsTaskFromCommand(body, actor, req) {
       nextChecks: [
         '确认目标店铺和货号/SKC。',
         '匹配现有链接、覆盖矩阵和表现数据。',
-        '确认价格、库存、证书、图片、标题和活动规则。',
-        '生成执行前预览，不直接写 SHEIN。',
+        '确认价格、库存、证书、图片、标题、活动规则和本机素材是否已上传/同步到云端。',
+        '生成执行前预览；缺素材或缺接口权限时停在执行准备，不静默写 SHEIN。',
       ],
     },
     requestedBy: actorLabel(actor, req),
@@ -327,7 +327,7 @@ function buildLinkOpsTaskFromCommand(body, actor, req) {
     execution: {
       mode: 'manual_confirm_first',
       enabled: false,
-      note: '基座阶段禁用自动执行。',
+      note: '确认后进入执行准备；真实 SHEIN 写执行器和素材上传链路未齐全前，不直接改后台。',
     },
     history: [{
       at: now,

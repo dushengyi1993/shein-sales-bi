@@ -254,5 +254,5 @@
 - 云端飞书问数机器人已从规则问答升级为受控 Codex CLI 只读网关：`shein-bi-lark-sales-qa.service` -> `scripts/lark_sales_qa_bot.mjs` -> `codex exec --sandbox read-only`，`CODEX_HOME=/home/sheinops/.codex`。它不绑定本机 Codex App 或当前会话，本机关机不影响云端飞书问数。
 - `/home/sheinops/.codex/auth.json`、`config.toml` 和第三方 API 凭据只存在服务器私有目录，不进 GitHub、文档或日志；飞书/BI 不能直接裸调用 shell 或 Codex CLI，必须经过受控 Node 网关。
 - BI Portal 已有“链接管理中台”基座和 `/api/link-ops-tasks` 任务池：自然语言指令只能入队为待确认任务并留 IP/UA/备注等痕迹；SHEIN 写操作仍按“建议/预填/用户确认/人工最终提交/审计留痕”推进。
-- 2026-05-17 `/api/ops-agent/ask` 网页智能体回复接入已部署到云端 BI：Portal 服务改为 `sheinops` 用户运行并使用 `/home/sheinops/.codex`，链接管理中台已重构为独立会话工作流：先多轮对话，聊清楚后再进入任务池；推荐指令来自当前 BI 数据；任务池作为独立大区且任务默认折叠，支持确认、继续优化、待执行确认、完成、归档、删除、进度和历史留痕；会话支持删除，发送首条消息时前端应乐观显示新会话和用户消息。标题生成入口暂时从任务卡收起，等正式取标题 skill 导入后再接；仍不得执行 SHEIN 写操作。
+- 2026-05-17 `/api/ops-agent/ask` 网页智能体回复接入已部署到云端 BI：Portal 服务改为 `sheinops` 用户运行并使用 `/home/sheinops/.codex`，链接管理中台已重构为独立会话工作流：先多轮对话，聊清楚后再进入任务池；推荐指令来自当前 BI 数据；任务池作为独立大区且任务默认折叠。任务池按钮口径为“确认成任务 / 开始执行 / 标记完成 / 归档 / 删除”，任务卡必须展示任务目标、执行对象、需要材料、执行方式和操作记录；会话支持删除，发送首条消息时前端应乐观显示新会话和用户消息。云端 BI 不能直接读取本机标题文件、图片或本机 skill，短期需先上传/同步素材包到云端任务，再由云端执行器写 SHEIN；缺素材或缺接口权限时停在执行准备，不静默写后台。标题生成入口暂时从任务卡收起，等正式取标题 skill 导入后再接。
 

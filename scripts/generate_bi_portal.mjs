@@ -3177,6 +3177,20 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .linkops-task h4{margin:0 0 7px;font-size:15px}
     .linkops-task p{margin:5px 0;color:var(--muted);line-height:1.55;font-size:12px}
     .linkops-preview-list{margin:8px 0 0;padding-left:18px;color:var(--muted);font-size:12px;line-height:1.65}
+    .task-exec{border:1px solid rgba(56,189,248,.20);border-radius:16px;background:rgba(8,47,73,.16);padding:12px;margin-top:10px}
+    body[data-theme="light"] .task-exec{background:#f8fafc;border-color:#bae6fd}
+    .task-exec h5{margin:0 0 8px;font-size:13px;color:var(--text)}
+    .task-exec-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+    .task-exec-item{border:1px solid rgba(148,163,184,.14);border-radius:12px;padding:9px;background:rgba(15,23,42,.22);min-width:0}
+    body[data-theme="light"] .task-exec-item{background:#fff;border-color:#e2e8f0}
+    .task-exec-item b{display:block;font-size:11px;color:var(--muted);margin-bottom:4px}
+    .task-exec-item span,.task-exec-item div{font-size:12px;line-height:1.55}
+    .material-pills{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+    .material-pill{border:1px solid rgba(148,163,184,.20);border-radius:999px;padding:4px 8px;font-size:11px;color:var(--muted);background:rgba(15,23,42,.24)}
+    body[data-theme="light"] .material-pill{background:#fff;border-color:#e2e8f0}
+    .material-pill.need{color:#fde68a;border-color:rgba(250,204,21,.28)}
+    body[data-theme="light"] .material-pill.need{color:#92400e;border-color:#fde68a;background:#fffbeb}
+    .task-exec-note{margin-top:8px;font-size:12px;line-height:1.6;color:var(--muted)}
     .agent-answer-grid{display:grid;gap:10px;margin-top:10px}
     .agent-answer-card{border:1px solid rgba(56,189,248,.22);border-radius:16px;background:rgba(8,47,73,.18);padding:12px}
     body[data-theme="light"] .agent-answer-card{background:#f0f9ff;border-color:#bae6fd}
@@ -4310,8 +4324,8 @@ function renderAgentAnswerCards(text){
 function linkOpsStatusLabel(status){
   return ({
     draft:'草案',
-    confirmed:'已确认',
-    in_progress:'待执行确认',
+    confirmed:'待开始',
+    in_progress:'执行中',
     waiting_review:'待复核',
     done:'已完成',
     archived:'已归档',
@@ -4353,42 +4367,6 @@ async function deleteLinkOpsTask(id){
     renderAll();
   } catch (err) {
     showToast('删除失败：' + (err?.message || String(err || 'unknown')));
-  }
-}
-async function improveLinkOpsTask(id, mode){
-  const task = (linkOpsStore.tasks || []).find(t => String(t.id || '') === String(id || ''));
-  if (!task) return showToast('未找到任务');
-  const extra = prompt(mode === 'title' ? '标题生成要求（例如：更强调低噪音/大容量/沙特夏季场景）' : '你想让智能体继续怎么优化？', '');
-  if (extra === null) return;
-  const question = mode === 'title'
-    ? '基于当前 BI 数据和任务背景，给这个 SHEIN 商品生成 5 个英文标题备选。要求标题适合沙特市场、不要夸大、尽量包含核心关键词。任务：' + (task.command || '') + '。补充要求：' + extra
-    : '继续优化这个运营任务，给出更清晰的执行步骤、风险和下一步。任务：' + (task.command || '') + '。已有建议：' + (task.preview?.agentAnswer || '') + '。补充要求：' + extra;
-  showToast('智能体正在继续分析...');
-  try {
-    const askRes = await fetch(OPS_AGENT_ASK_API, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({question})
-    });
-    const askPayload = await askRes.json().catch(() => ({}));
-    if (!askRes.ok || !askPayload.ok) throw new Error(askPayload.error || ('HTTP ' + askRes.status));
-    const answer = String(askPayload.answer || '').trim();
-    const titleCandidates = mode === 'title'
-      ? answer.split(String.fromCharCode(10)).map(x => x.replace(/^[\\d\\-\\.\\)\\s]+/, '').trim()).filter(x => x.length > 12).slice(0, 8)
-      : (Array.isArray(task.preview?.titleCandidates) ? task.preview.titleCandidates : []);
-    await patchLinkOpsTask(id, {
-      event: mode === 'title' ? 'generate_title_candidates' : 'improve_task',
-      progress: Math.max(Number(task.progress || 10), 35),
-      status: task.status === 'draft' ? 'confirmed' : task.status,
-      preview: {
-        agentAnswer: answer,
-        agentMode: 'readonly-codex-gateway',
-        agentDurationMs: askPayload.durationMs || 0,
-        titleCandidates,
-      }
-    }, mode === 'title' ? '已生成标题备选' : '已继续优化任务');
-  } catch (err) {
-    showToast('智能体优化失败：' + (err?.message || String(err || 'unknown')));
   }
 }
 async function updateActionStatus(key, status){
@@ -8849,6 +8827,68 @@ function linkOpsIntentLabel(intent){
   };
   return map[intent] || intent || '任务';
 }
+function linkOpsTaskActionTitle(intents = []){
+  if (intents.includes('copy_product_draft')) return '补齐店铺覆盖：复制同款参数并创建草稿/待上架链接';
+  if (intents.includes('retire_link')) return '处理差链接：确认替代承接后下架或归档弱链接';
+  if (intents.includes('update_images') && intents.includes('update_title')) return '优化链接素材：换图并同步优化标题';
+  if (intents.includes('update_images')) return '优化链接图片：替换目标链接商品图';
+  if (intents.includes('update_title')) return '优化链接标题：生成并写入确认后的标题';
+  if (intents.includes('campaign_signup')) return '报名官方营销活动：按利润规则生成报名方案';
+  if (intents.includes('flash_discount')) return '设置限时折扣：按成本、限量和有效期执行';
+  if (intents.includes('certificate_review')) return '补齐证书/资质：定位缺口并准备提交材料';
+  return '人工复核：把会话结论整理成可执行检查清单';
+}
+function linkOpsTaskRequiredMaterials(intents = []){
+  const items = [];
+  if (intents.includes('copy_product_draft')) items.push('源 SKC / 类目参数 / 证书 / 图片 / 价格 / 库存100 / 10年后上架时间');
+  if (intents.includes('update_title')) items.push('最终标题文本或取标题规则');
+  if (intents.includes('update_images')) items.push('本机图片素材包，需先上传/同步到云端');
+  if (intents.includes('campaign_signup')) items.push('活动 ID、报名商品、成本与最低利润率');
+  if (intents.includes('flash_discount')) items.push('折扣价、限量、有效期、利润底线');
+  if (intents.includes('certificate_review')) items.push('证书/资质文件或可复用的同货号证书');
+  if (!items.length) items.push('人工确认后的执行口径和目标链接');
+  return [...new Set(items)];
+}
+function linkOpsTaskExecutorNote(intents = []){
+  if (intents.includes('update_images')) {
+    return '云服务器不能直接读取你本机图片。短期做法是：先把图片素材包上传/同步到云端任务，再由执行器调用 SHEIN API/WebAPI 写入。';
+  }
+  if (intents.includes('update_title')) {
+    return '标题是文本，确认后可以直接存到任务并由云端执行器写入；如果标题规则在本机 skill，需先同步 skill/规则到云端。';
+  }
+  if (intents.includes('copy_product_draft')) {
+    return '上品任务先生成草稿/待上架，不直接正式上架；图片、证书和源 SKC 参数必须在云端任务里齐全后才执行。';
+  }
+  if (intents.includes('campaign_signup') || intents.includes('flash_discount')) {
+    return '活动/折扣属于写操作，确认后进入执行队列；最终是否自动提交要按活动安全规则控制。';
+  }
+  return '确认后进入执行队列；若缺素材或接口权限，任务会停在“执行中/待材料”，不会静默乱改后台。';
+}
+function renderLinkOpsTaskExecution(t){
+  const intents = Array.isArray(t?.intents) ? t.intents : [];
+  const stores = Array.isArray(t?.targets?.stores) ? t.targets.stores : [];
+  const refs = Array.isArray(t?.targets?.productRefs) ? t.targets.productRefs : [];
+  const materials = linkOpsTaskRequiredMaterials(intents);
+  const hasAgentAnswer = !!String(t?.preview?.agentAnswer || '').trim();
+  const targetText = [
+    stores.length ? '店铺：'+stores.join('、') : '店铺：待从会话/数据里确认',
+    refs.length ? '货号/SKC：'+refs.join('、') : '货号/SKC：待确认'
+  ].join('；');
+  return '<div class="task-exec">'+
+    '<h5>这条任务具体要做什么</h5>'+
+    '<div class="task-exec-grid">'+
+      '<div class="task-exec-item"><b>任务目标</b><span>'+escapeHtml(linkOpsTaskActionTitle(intents))+'</span></div>'+
+      '<div class="task-exec-item"><b>执行对象</b><span>'+escapeHtml(targetText)+'</span></div>'+
+      '<div class="task-exec-item"><b>需要材料</b><div class="material-pills">'+materials.map(x => '<span class="material-pill need">'+escapeHtml(x)+'</span>').join('')+'</div></div>'+
+      '<div class="task-exec-item"><b>执行方式</b><span>'+escapeHtml(linkOpsTaskExecutorNote(intents))+'</span></div>'+
+    '</div>'+
+    '<div class="task-exec-note">'+
+      (hasAgentAnswer
+        ? '已带有智能体建议，可人工确认后开始执行。'
+        : '执行内容还不完整：建议先在会话里让智能体把步骤、目标链接、素材和风险讲清楚，再放入任务池。')+
+    '</div>'+
+  '</div>';
+}
 function linkOpsMatchProductRef(row, refs = []){
   if (!refs.length) return false;
   const hay = [
@@ -8976,7 +9016,7 @@ function renderLinkOps(){
       '</main>'+
     '</div>'+
     '<div class="ops-tasks" style="margin-top:14px">'+
-      '<div class="card-h" style="padding:0 0 12px"><div><h3>链接运营任务池</h3><div class="sub">聊清楚后沉淀到这里；适合承载多任务、长进度和团队跟进。</div></div><button class="btn" id="refreshLinkOpsTasks" type="button">刷新任务池</button></div>'+
+      '<div class="card-h" style="padding:0 0 12px"><div><h3>链接运营任务池</h3><div class="sub">这里只放可执行任务：必须能看清任务目标、对象、材料和执行方式。</div></div><button class="btn" id="refreshLinkOpsTasks" type="button">刷新任务池</button></div>'+
       '<div id="linkOpsTaskListInline"></div>'+
     '</div>';
   const tasks = linkOpsStore.tasks || [];
@@ -8993,22 +9033,23 @@ function renderLinkOps(){
       const agentAnswer = String(t.preview?.agentAnswer || '').trim();
       const progress = Math.max(0, Math.min(100, Number(t.progress || 0)));
       const history = Array.isArray(t.history) ? t.history.slice(-3).reverse() : [];
+      const taskTitle = linkOpsTaskActionTitle(intents);
       return '<details class="linkops-task">'+
-        '<summary class="task-summary"><div><h4>'+escapeHtml(String(t.command || '').slice(0,120))+'</h4><small>'+escapeHtml(stores.join(', ') || '待识别店铺')+' · '+escapeHtml(refs.join(', ') || '待识别货号')+' · 进度 '+num(progress)+'%</small></div><span class="tag '+linkOpsStatusClass(t.status)+'">'+escapeHtml(linkOpsStatusLabel(t.status))+'</span></summary>'+
+        '<summary class="task-summary"><div><h4>'+escapeHtml(taskTitle)+'</h4><small>'+escapeHtml(stores.join(', ') || '待识别店铺')+' · '+escapeHtml(refs.join(', ') || '待识别货号')+' · 进度 '+num(progress)+'%</small></div><span class="tag '+linkOpsStatusClass(t.status)+'">'+escapeHtml(linkOpsStatusLabel(t.status))+'</span></summary>'+
         '<div class="task-detail">'+
         '<div class="row1"><div>'+intents.map(x => '<span class="tag mid">'+escapeHtml(linkOpsIntentLabel(x))+'</span>').join(' ')+'</div><span class="muted">'+escapeHtml(String(t.createdAt || '').replace('T',' ').slice(0,16))+'</span></div>'+
         '<div class="task-progress"><i style="width:'+num(progress)+'%"></i></div><p>进度：<b>'+num(progress)+'%</b>'+(t.note ? ' · '+escapeHtml(t.note) : '')+'</p>'+
-        '<p>目标店：'+escapeHtml(stores.join(', ') || '待识别')+' · 货号/SKC：'+escapeHtml(refs.join(', ') || '待识别')+'</p>'+
+        '<p>原始指令：'+escapeHtml(String(t.command || '').slice(0,260))+'</p>'+
+        renderLinkOpsTaskExecution(t)+
         (agentAnswer ? '<details style="margin-top:8px" open><summary>智能体结论</summary>'+renderAgentAnswerCards(agentAnswer)+'</details>' : '')+
         renderLinkOpsDataAdvice(t)+
         (riskNotes.length ? '<ul class="linkops-preview-list">'+riskNotes.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul>' : '')+
         (nextChecks.length ? '<details style="margin-top:8px"><summary>执行前检查项</summary><ul class="linkops-preview-list">'+nextChecks.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul></details>' : '')+
-        (history.length ? '<details style="margin-top:8px"><summary>最近进度</summary><ul class="linkops-preview-list">'+history.map(h => '<li>'+escapeHtml(String(h.at || '').replace('T',' ').slice(0,19))+' · '+escapeHtml(h.event || '-')+' · '+escapeHtml(h.by || '-')+'</li>').join('')+'</ul></details>' : '')+
+        (history.length ? '<details style="margin-top:8px"><summary>操作记录</summary><ul class="linkops-preview-list">'+history.map(h => '<li>'+escapeHtml(String(h.at || '').replace('T',' ').slice(0,19))+' · '+escapeHtml(h.event || '-')+' · '+escapeHtml(h.by || '-')+'</li>').join('')+'</ul></details>' : '')+
         '<div class="task-actions">'+
-          '<button type="button" data-linkops-task-action="confirm" data-task-id="'+escapeHtml(t.id || '')+'">确认方案</button>'+
-          '<button type="button" data-linkops-task-action="improve" data-task-id="'+escapeHtml(t.id || '')+'">继续优化</button>'+
-          '<button type="button" data-linkops-task-action="start" data-task-id="'+escapeHtml(t.id || '')+'">待执行确认</button>'+
-          '<button type="button" data-linkops-task-action="done" data-task-id="'+escapeHtml(t.id || '')+'">完成</button>'+
+          '<button type="button" data-linkops-task-action="confirm" data-task-id="'+escapeHtml(t.id || '')+'">确认成任务</button>'+
+          '<button type="button" data-linkops-task-action="start" data-task-id="'+escapeHtml(t.id || '')+'">开始执行</button>'+
+          '<button type="button" data-linkops-task-action="done" data-task-id="'+escapeHtml(t.id || '')+'">标记完成</button>'+
           '<button type="button" data-linkops-task-action="archive" data-task-id="'+escapeHtml(t.id || '')+'">归档</button>'+
           '<button class="danger" type="button" data-linkops-task-action="delete" data-task-id="'+escapeHtml(t.id || '')+'">删除</button>'+
         '</div>'+
@@ -9032,9 +9073,8 @@ function renderLinkOps(){
   document.querySelectorAll('[data-linkops-task-action]').forEach(btn => btn.addEventListener('click', () => {
     const id = btn.dataset.taskId || '';
     const action = btn.dataset.linkopsTaskAction || '';
-    if (action === 'confirm') return patchLinkOpsTask(id, {event:'confirm', status:'confirmed', progress:25, note:'方案已人工确认，等待最终执行确认。'}, '已确认方案');
-    if (action === 'improve') return improveLinkOpsTask(id, 'improve');
-    if (action === 'start') return patchLinkOpsTask(id, {event:'await_execution_confirmation', status:'in_progress', progress:55, note:'已进入待执行确认；正式写 SHEIN 前还需要最终确认。'}, '已进入待执行确认');
+    if (action === 'confirm') return patchLinkOpsTask(id, {event:'confirm_task', status:'confirmed', progress:30, note:'已确认成可执行任务，下一步检查材料并开始执行。'}, '已确认成任务');
+    if (action === 'start') return patchLinkOpsTask(id, {event:'start_execution', status:'in_progress', progress:60, note:'已开始执行准备；如果任务需要本机图片/标题文件，请先上传或同步素材包到云端。'}, '已开始执行准备');
     if (action === 'done') return patchLinkOpsTask(id, {event:'mark_done', status:'done', progress:100, note:'已人工确认完成。'}, '已标记完成');
     if (action === 'archive') return patchLinkOpsTask(id, {event:'archive', status:'archived', progress:100}, '已归档');
     if (action === 'delete') return deleteLinkOpsTask(id);
