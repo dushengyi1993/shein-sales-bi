@@ -254,5 +254,5 @@
 - 云端飞书问数机器人已从规则问答升级为受控 Codex CLI 只读网关：`shein-bi-lark-sales-qa.service` -> `scripts/lark_sales_qa_bot.mjs` -> `codex exec --sandbox read-only`，`CODEX_HOME=/home/sheinops/.codex`。它不绑定本机 Codex App 或当前会话，本机关机不影响云端飞书问数。
 - `/home/sheinops/.codex/auth.json`、`config.toml` 和第三方 API 凭据只存在服务器私有目录，不进 GitHub、文档或日志；飞书/BI 不能直接裸调用 shell 或 Codex CLI，必须经过受控 Node 网关。
 - BI Portal 已有“链接管理中台”基座和 `/api/link-ops-tasks` 任务池：自然语言指令只能入队为待确认任务并留 IP/UA/备注等痕迹；SHEIN 写操作仍按“建议/预填/用户确认/人工最终提交/审计留痕”推进。
-- 2026-05-17 `/api/ops-agent/ask` 网页智能体回复接入已部署到云端 BI：Portal 服务改为 `sheinops` 用户运行并使用 `/home/sheinops/.codex`，网页可调用 Codex CLI 只读网关生成链接/销售建议，并把回复保存进任务卡；仍不得执行 SHEIN 写操作。
+- 2026-05-17 `/api/ops-agent/ask` 网页智能体回复接入已部署到云端 BI：Portal 服务改为 `sheinops` 用户运行并使用 `/home/sheinops/.codex`，网页可调用 Codex CLI 只读网关生成链接/销售建议并结构化展示；链接管理任务池已支持确认、继续优化、生成标题备选、进入执行预备、完成、归档、删除、进度和历史留痕。仍不得执行 SHEIN 写操作，标题/换图/下架等真实执行器需另行接入并保留人工确认。
 
