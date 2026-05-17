@@ -3141,7 +3141,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .health-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
     .command-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
     .linkops-grid{display:grid;grid-template-columns:minmax(340px,.95fr) minmax(360px,1.05fr);gap:14px}
-    .ops-workspace{display:grid;grid-template-columns:minmax(260px,.36fr) minmax(420px,.84fr) minmax(340px,.6fr);gap:14px;align-items:start}
+    .ops-workspace{display:grid;grid-template-columns:minmax(280px,.42fr) minmax(520px,1fr);gap:14px;align-items:start}
     .ops-rail,.ops-chat,.ops-tasks{border:1px solid rgba(148,163,184,.16);border-radius:26px;background:rgba(15,23,42,.34);padding:14px;min-width:0}
     body[data-theme="light"] .ops-rail,body[data-theme="light"] .ops-chat,body[data-theme="light"] .ops-tasks{background:#fff;border-color:#e2e8f0}
     .ops-session{border:1px solid rgba(148,163,184,.14);border-radius:18px;padding:10px;margin-bottom:8px;cursor:pointer;transition:transform .18s ease,border-color .18s ease,background .18s ease}
@@ -4149,25 +4149,34 @@ function recommendedLinkOpsPrompts(){
   const prompts = [];
   const weak = actions.find(a => /弱|重复|承接|下架|归档/.test(String(a.category || '') + String(a.next_step || '') + String(a.reason || '')));
   if (weak) prompts.push({
-    title:'处理高优先级弱链接',
-    text:'分析 '+(weak.store_key || '重点店')+' 店 '+(weak.standard_goods_sn || weak.skc || '高优先级货号')+' 的弱链接，给出下架、换图、补新链接的执行顺序。',
-    reason:'来自动作池高优先级信号',
+    title:(weak.store_key || '重点店')+' · '+(weak.standard_goods_sn || weak.skc || '弱链接'),
+    text:'针对 '+(weak.store_key || '该店')+' 店 '+(weak.standard_goods_sn || weak.skc || '这个货号')+'：先复盘当前弱链接表现，判断是换主图/改标题/补新链接，还是等待替代链接后再下架。请给出具体链接处理顺序和7天复盘标准。',
+    reason:'动作池高优先级：'+String(weak.category || weak.reason || weak.next_step || '').slice(0,50),
   });
-  const matrix = (DATA.matrix || []).find(r => r.need_supplement_link && r.standard_goods_sn);
+  const matrixRows = (DATA.matrix || []).filter(r => r.need_supplement_link && r.standard_goods_sn);
+  const matrix = matrixRows.sort((a,b)=>Number(b.sales_sar || 0)-Number(a.sales_sar || 0))[0];
   if (matrix) prompts.push({
-    title:'补齐缺覆盖货号',
-    text:'把 '+matrix.standard_goods_sn+' 在缺覆盖店铺补齐链接，先判断哪些店需要补、哪些店只需催待上架。',
-    reason:'来自店铺×货号覆盖矩阵',
+    title:(matrix.standard_goods_sn || '重点货号')+' · 补覆盖',
+    text:'围绕 '+matrix.standard_goods_sn+' 做补覆盖：列出哪些店完全缺链接、哪些店只有待上架、哪些店已有可复制参考 SKC；优先给 '+(matrix.store_key || '缺口店')+' 店制定补链/催上架动作。',
+    reason:'覆盖矩阵显示 '+(matrix.store_key || '某店')+' 需要补承接',
   });
-  const link = (DATA.storeLinks || DATA.links || []).find(r => Number(r.c30_sale_cnt || 0) === 0 && Number(r.c30_eps_uv || r.eps_uv || 0) > 3000);
+  const link = (DATA.storeLinks || DATA.links || [])
+    .filter(r => Number(r.c30_sale_cnt || 0) === 0 && Number(r.c30_eps_uv || r.eps_uv || 0) > 3000)
+    .sort((a,b)=>Number(b.c30_eps_uv || b.eps_uv || 0)-Number(a.c30_eps_uv || a.eps_uv || 0))[0];
   if (link) prompts.push({
-    title:'高曝光零成交复盘',
-    text:'复盘 '+(link.store_key || '')+' 店 '+(link.standard_goods_sn || link.skc || '')+' 高曝光但30天0单的原因，给出换图/标题/价格/活动建议。',
-    reason:'来自链接表现快照',
+    title:(link.store_key || '店铺')+' · 高曝光0单',
+    text:'复盘 '+(link.store_key || '')+' 店 '+(link.standard_goods_sn || link.skc || '')+'：30天曝光 '+num(link.c30_eps_uv || link.eps_uv)+'、销量0。请判断优先改主图、标题、价格、活动，还是重发新链接，并给出具体执行顺序。',
+    reason:'链接表现：高曝光但30天0单',
+  });
+  const wait = (DATA.storeLinks || DATA.links || []).find(r => isWaitShelfLink(r) && (r.standard_goods_sn || r.skc));
+  if (wait) prompts.push({
+    title:(wait.store_key || '店铺')+' · 待上架卡点',
+    text:'检查 '+(wait.store_key || '')+' 店 '+(wait.standard_goods_sn || wait.skc || '')+' 的待上架链接，判断缺证书、缺资质、缺资料还是审核/计划上架问题，并列出该补什么。',
+    reason:'链接仓库存在待上架链接',
   });
   prompts.push({
-    title:'本周链接运营重点',
-    text:'根据当前 BI 数据，列出今天最值得处理的5个链接管理任务，按收益和风险排序。',
+    title:'今日 Top5 链接动作',
+    text:'根据当前 BI 数据，列出今天最值得处理的5个链接管理任务。每条都要具体到店铺、货号、问题链接/参考链接、建议动作、预期收益和风险。',
     reason:'综合销售、覆盖和动作池',
   });
   return prompts.slice(0, 4);
@@ -4260,7 +4269,7 @@ function linkOpsStatusLabel(status){
   return ({
     draft:'草案',
     confirmed:'已确认',
-    in_progress:'执行中',
+    in_progress:'待执行确认',
     waiting_review:'待复核',
     done:'已完成',
     archived:'已归档',
@@ -8923,10 +8932,10 @@ function renderLinkOps(){
           '<div class="command-actions"><button class="btn primary" id="sendLinkOpsChat" type="button">发送给智能体</button><button class="btn" id="clearLinkOpsChat" type="button">清空输入</button></div>'+
         '</div>'+
       '</main>'+
-      '<aside class="ops-tasks">'+
-        '<div class="card-h" style="padding:0 0 12px"><div><h3>任务池</h3><div class="sub">只放已经聊清楚、准备推进的事</div></div><button class="btn" id="refreshLinkOpsTasks" type="button">刷新</button></div>'+
-        '<div id="linkOpsTaskListInline"></div>'+
-      '</aside>'+
+    '</div>'+
+    '<div class="ops-tasks" style="margin-top:14px">'+
+      '<div class="card-h" style="padding:0 0 12px"><div><h3>链接运营任务池</h3><div class="sub">聊清楚后沉淀到这里；适合承载多任务、长进度和团队跟进。</div></div><button class="btn" id="refreshLinkOpsTasks" type="button">刷新任务池</button></div>'+
+      '<div id="linkOpsTaskListInline"></div>'+
     '</div>';
   const tasks = linkOpsStore.tasks || [];
   const targetList = $('linkOpsTaskListInline') || list;
@@ -8955,7 +8964,7 @@ function renderLinkOps(){
         '<div class="task-actions">'+
           '<button type="button" data-linkops-task-action="confirm" data-task-id="'+escapeHtml(t.id || '')+'">确认方案</button>'+
           '<button type="button" data-linkops-task-action="improve" data-task-id="'+escapeHtml(t.id || '')+'">继续优化</button>'+
-          '<button type="button" data-linkops-task-action="start" data-task-id="'+escapeHtml(t.id || '')+'">执行预备</button>'+
+          '<button type="button" data-linkops-task-action="start" data-task-id="'+escapeHtml(t.id || '')+'">待执行确认</button>'+
           '<button type="button" data-linkops-task-action="done" data-task-id="'+escapeHtml(t.id || '')+'">完成</button>'+
           '<button type="button" data-linkops-task-action="archive" data-task-id="'+escapeHtml(t.id || '')+'">归档</button>'+
           '<button class="danger" type="button" data-linkops-task-action="delete" data-task-id="'+escapeHtml(t.id || '')+'">删除</button>'+
@@ -8964,7 +8973,7 @@ function renderLinkOps(){
     }).join('');
   };
   targetList.innerHTML = renderTaskList();
-  if (targetList !== list) list.innerHTML = '<div class="empty">任务池已移到右侧工作台。</div>';
+  if (targetList !== list) list.innerHTML = '';
   document.querySelectorAll('[data-linkops-session-id]').forEach(el => el.addEventListener('click', () => { linkOpsChatStore.activeId = el.dataset.linkopsSessionId || ''; renderAll(); }));
   document.querySelectorAll('[data-linkops-reco]').forEach(el => el.addEventListener('click', () => newLinkOpsChatFromPrompt(el.dataset.linkopsReco || '')));
   document.getElementById('newOpsChat')?.addEventListener('click', () => newLinkOpsChatFromPrompt(''));
@@ -8975,9 +8984,9 @@ function renderLinkOps(){
   document.querySelectorAll('[data-linkops-task-action]').forEach(btn => btn.addEventListener('click', () => {
     const id = btn.dataset.taskId || '';
     const action = btn.dataset.linkopsTaskAction || '';
-    if (action === 'confirm') return patchLinkOpsTask(id, {event:'confirm', status:'confirmed', progress:25, note:'方案已人工确认，等待执行预备。'}, '已确认方案');
+    if (action === 'confirm') return patchLinkOpsTask(id, {event:'confirm', status:'confirmed', progress:25, note:'方案已人工确认，等待最终执行确认。'}, '已确认方案');
     if (action === 'improve') return improveLinkOpsTask(id, 'improve');
-    if (action === 'start') return patchLinkOpsTask(id, {event:'start_execution_prep', status:'in_progress', progress:55, note:'进入执行预备；正式写 SHEIN 前仍需最终确认。'}, '已进入执行预备');
+    if (action === 'start') return patchLinkOpsTask(id, {event:'await_execution_confirmation', status:'in_progress', progress:55, note:'已进入待执行确认；正式写 SHEIN 前还需要最终确认。'}, '已进入待执行确认');
     if (action === 'done') return patchLinkOpsTask(id, {event:'mark_done', status:'done', progress:100, note:'已人工确认完成。'}, '已标记完成');
     if (action === 'archive') return patchLinkOpsTask(id, {event:'archive', status:'archived', progress:100}, '已归档');
     if (action === 'delete') return deleteLinkOpsTask(id);
@@ -11742,3 +11751,4 @@ main().catch(err => {
   console.error(err);
   process.exit(1);
 });
+
