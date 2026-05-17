@@ -72,6 +72,7 @@ const types = {
 
 const LINK_OPS_MAX_UPLOAD_FILE_BYTES = 10 * 1024 * 1024;
 const LINK_OPS_MAX_UPLOAD_TOTAL_BYTES = 30 * 1024 * 1024;
+const SHEIN_STORE_KEYS = new Set(['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'DSY', 'LGM']);
 const LINK_OPS_ALLOWED_UPLOAD_MIME = new Set([
   'image/jpeg',
   'image/png',
@@ -322,7 +323,7 @@ function inferLinkOpsIntent(command) {
   if (/补|复制|上品|上架|草稿|覆盖|缺链接|缺链/.test(text) || /\b(copy|draft|create|publish|coverage)\b/.test(lower)) intents.push('copy_product_draft');
   if (/标题|title/.test(lower)) intents.push('update_title');
   if (/主图|图片|套图|image|photo|pic/.test(lower)) intents.push('update_images');
-  if (/下架|死链|淘汰|归档/.test(text)) intents.push('retire_link');
+  if (/下架|死链|淘汰|归档|停掉|移除|删除链接/.test(text)) intents.push('retire_link');
   if (/营销|活动|报名/.test(text)) intents.push('campaign_signup');
   if (/限时|折扣|秒杀|促销|discount/.test(lower)) intents.push('flash_discount');
   if (/证书|资质|合规/.test(text)) intents.push('certificate_review');
@@ -330,10 +331,36 @@ function inferLinkOpsIntent(command) {
   return intents;
 }
 
+function linkOpsIntentLabel(intent) {
+  return ({
+    copy_product_draft: '补链接/复制上品',
+    update_title: '换标题',
+    update_images: '换图',
+    retire_link: '下架/归档链接',
+    campaign_signup: '报营销活动',
+    flash_discount: '限时折扣',
+    certificate_review: '证书/资质',
+    manual_review: '人工复核',
+  })[intent] || String(intent || '');
+}
+
+function linkOpsStatusLabel(status) {
+  return ({
+    draft: '草案',
+    confirmed: '待开始',
+    in_progress: '执行中',
+    waiting_review: '待复核',
+    done: '完成',
+    archived: '归档',
+  })[status] || String(status || '');
+}
+
 function inferLinkOpsTargets(command) {
   const text = String(command || '');
-  const storeMatches = [...new Set((text.match(/\b[A-Z]{2}\b/g) || []).filter(x => x.length === 2))].slice(0, 24);
-  const skuMatches = [...new Set((text.match(/[A-Z]{1,6}-?\d{2,8}[A-Z]?(?:[\u4e00-\u9fa5A-Za-z0-9-]*)?/g) || [])
+  const storeMatches = [...new Set((text.match(/\b[A-Z]{2,3}\b/g) || [])
+    .map(x => x.toUpperCase())
+    .filter(x => SHEIN_STORE_KEYS.has(x)))].slice(0, 24);
+  const skuMatches = [...new Set((text.match(/\b(?:[A-Z]{1,6}-?\d{1,8}[A-Z]?(?:-[A-Z0-9]+)?(?:[\u4e00-\u9fa5A-Za-z0-9-]*)?|(?:sv|sb)\d{8,})\b/giu) || [])
     .map(x => x
       .replace(/[，。；、,.]+$/g, '')
       .replace(/(各店|全店|所有店|差链接|弱链接|死链接|缺链接|链接|建议|下架|换图|补新|补链|覆盖).*$/u, ''))
@@ -342,6 +369,82 @@ function inferLinkOpsTargets(command) {
     stores: storeMatches,
     productRefs: skuMatches,
   };
+}
+
+function normalizeLinkOpsTargetSet(targets = {}) {
+  const stores = Array.isArray(targets?.stores)
+    ? targets.stores
+    : typeof targets?.stores === 'string'
+      ? targets.stores.split(/[,\s，、]+/)
+      : [];
+  const productRefs = Array.isArray(targets?.productRefs)
+    ? targets.productRefs
+    : typeof targets?.productRefs === 'string'
+      ? targets.productRefs.split(/[,\s，、]+/)
+      : [];
+  const clean = (arr, max) => [...new Set(arr
+    .map(x => String(x || '').trim())
+    .filter(Boolean))]
+    .slice(0, max);
+  return {
+    stores: clean(stores, 32),
+    productRefs: clean(productRefs, 48),
+  };
+}
+
+function mergeLinkOpsTargets(...items) {
+  return normalizeLinkOpsTargetSet({
+    stores: items.flatMap(x => normalizeLinkOpsTargetSet(x).stores),
+    productRefs: items.flatMap(x => normalizeLinkOpsTargetSet(x).productRefs),
+  });
+}
+
+function inferTargetsFromChatSession(session) {
+  const text = (Array.isArray(session?.messages) ? session.messages : [])
+    .slice(-12)
+    .map(m => String(m?.content || ''))
+    .join('\n');
+  return mergeLinkOpsTargets(
+    session?.targets && typeof session.targets === 'object' ? session.targets : {},
+    inferLinkOpsTargets(text)
+  );
+}
+
+function summarizeLinkOpsTargets(targets = {}) {
+  const t = normalizeLinkOpsTargetSet(targets);
+  const parts = [];
+  if (t.stores.length) parts.push(`店铺=${t.stores.join(',')}`);
+  if (t.productRefs.length) parts.push(`货号/SKC=${t.productRefs.join(',')}`);
+  return parts.join('；') || '暂未识别到明确店铺或货号/SKC';
+}
+
+function isLinkOpsActionCommand(command) {
+  const text = String(command || '').trim();
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  const intents = inferLinkOpsIntent(text).filter(x => x !== 'manual_review');
+  if (!intents.length) return false;
+  const actionVerb = /下架|归档|停掉|移除|删除链接|换图|更换图片|改标题|换标题|补链接|补链|复制上品|创建草稿|创建链接|上品|报活动|报名|限时折扣|设置折扣|补证书|补资质|上传证书/.test(text)
+    || /\b(retire|remove|archive|replace image|update title|create draft|campaign|discount)\b/.test(lower);
+  if (!actionVerb) return false;
+  const strongCommand = /把|将|要求|安排|加入任务池|加入动作池|执行|处理|现在|立即|直接/.test(text)
+    || /^(下架|归档|换图|改标题|补链接|补链|报活动|报名|设置折扣|补证书|补资质)/.test(text);
+  const giveCommand = /给.+(重新生成|生成|换|更换|改|下架|报|报名|设置|补)/.test(text);
+  const exploratory = /建议|分析|看看|找出|哪些|哪个|是否|能否|能不能|可以吗|怎么|如何|为什么|原因/.test(text);
+  if (exploratory && !strongCommand && !giveCommand) return false;
+  return strongCommand || giveCommand || !exploratory;
+}
+
+function findDuplicateAutoTask(tasks, sessionId, command) {
+  const sid = String(sessionId || '');
+  const cmd = String(command || '').trim();
+  if (!sid || !cmd) return null;
+  return (Array.isArray(tasks) ? tasks : []).find(t =>
+    String(t.chatSessionId || '') === sid &&
+    String(t.command || '').trim() === cmd &&
+    String(t.source || '') === 'chat_auto_action' &&
+    !['done', 'archived'].includes(String(t.status || ''))
+  ) || null;
 }
 
 function linkOpsRiskNotes(intents) {
@@ -367,17 +470,17 @@ function buildLinkOpsTaskFromCommand(body, actor, req) {
   if (command.length > 2000) throw new Error('Command too long');
   const now = new Date().toISOString();
   const intents = inferLinkOpsIntent(command);
-  const targets = {
-    ...inferLinkOpsTargets(command),
-    ...(body.targets && typeof body.targets === 'object' ? body.targets : {}),
-  };
+  const targets = mergeLinkOpsTargets(
+    inferLinkOpsTargets(command),
+    body.targets && typeof body.targets === 'object' ? body.targets : {}
+  );
   const id = `lot_${now.replace(/[-:.TZ]/g, '').slice(0, 14)}_${crypto.randomBytes(4).toString('hex')}`;
   return {
     id,
     version: 1,
     status: 'draft',
     progress: 10,
-    source: 'natural_language',
+    source: typeof body.source === 'string' ? body.source.slice(0, 80) : 'natural_language',
     chatSessionId: typeof body.chatSessionId === 'string' ? body.chatSessionId.slice(0, 80) : '',
     command,
     intents,
@@ -445,10 +548,10 @@ function buildChatSessionFromMessage(body, actor, req) {
     version: 1,
     status: 'chatting',
     title: message.slice(0, 80),
-    targets: {
-      ...inferLinkOpsTargets(message),
-      ...(body.targets && typeof body.targets === 'object' ? body.targets : {}),
-    },
+    targets: mergeLinkOpsTargets(
+      inferLinkOpsTargets(message),
+      body.targets && typeof body.targets === 'object' ? body.targets : {}
+    ),
     requestedBy: actorLabel(actor, req),
     requestedByUser: actorUser(actor, req),
     requestMeta: requestMeta(req),
@@ -475,10 +578,10 @@ function appendChatMessage(session, body, actor, req) {
     status: 'chatting',
     updatedAt: now,
     title: session.title || content.slice(0, 80),
-    targets: {
-      ...(session.targets && typeof session.targets === 'object' ? session.targets : {}),
-      ...inferLinkOpsTargets(content),
-    },
+    targets: mergeLinkOpsTargets(
+      session.targets && typeof session.targets === 'object' ? session.targets : {},
+      inferLinkOpsTargets(content)
+    ),
     messages,
     updatedBy: actorLabel(actor, req),
   };
@@ -491,6 +594,10 @@ function appendAssistantChatMessage(session, answer, meta = {}) {
   return {
     ...session,
     updatedAt: now,
+    targets: mergeLinkOpsTargets(
+      session.targets && typeof session.targets === 'object' ? session.targets : {},
+      inferLinkOpsTargets(answer)
+    ),
     messages,
   };
 }
@@ -748,7 +855,7 @@ function runChildProcess(command, args, options = {}) {
 async function askReadonlyOpsAgent(question) {
   const text = String(question || '').trim();
   if (!text) throw new Error('Missing question');
-  if (text.length > 2000) throw new Error('Question too long');
+  if (text.length > 12000) throw new Error('Question too long');
   const result = await runChildProcess(process.execPath, [
     path.join(ROOT, 'scripts', 'lark_sales_qa_bot.mjs'),
     '--answer',
@@ -1203,7 +1310,10 @@ async function main() {
           const sessionId = String(body.sessionId || body.id || '').trim();
           let session;
           let created = false;
+          let autoTask = null;
+          let taskData = null;
           try {
+            const userMessage = String(body.message || body.command || body.text || '').trim();
             if (sessionId) {
               const existing = current.sessions.find(s => String(s.id || '') === sessionId);
               if (!existing) return sendJson(res, 404, {ok: false, error: 'Chat session not found'});
@@ -1212,18 +1322,97 @@ async function main() {
               session = buildChatSessionFromMessage(body, actor, req);
               created = true;
             }
+            const conversationTargets = inferTargetsFromChatSession(session);
+            const shouldAutoTask = isLinkOpsActionCommand(userMessage);
+            let agentAnswer = '';
+            let agentDurationMs = 0;
             if (body.askAgent !== false) {
-              const conversation = (session.messages || []).slice(-8).map(m => `${m.role === 'assistant' ? '智能体' : '用户'}：${m.content}`).join('\n');
+              const conversation = (session.messages || []).slice(-10).map(m => `${m.role === 'assistant' ? '智能体' : '用户'}：${m.content}`).join('\n');
+              const extraRules = shouldAutoTask
+                ? [
+                    '本条最新用户消息已识别为明确运营动作命令。系统会自动把它加入链接运营任务池，等待人工确认/执行器预检。',
+                    '你的回复不能声称已经执行，也不要只说“没有权限所以不能”；应明确说“已加入待确认动作/任务，执行前还会核对目标、素材、权限和风险”。',
+                  ]
+                : [
+                    '每一轮都要根据整段会话和最新 BI JSON 上下文重新查数；如果最新用户消息换了店铺、货号或指标，以最新消息为准，缺省时再沿用上文。',
+                  ];
               const question = [
                 '这是 SHEIN 链接管理中台的一段运营会话。请只围绕 SHEIN 数据、链接管理、标题/图片/活动/补链建议回答。',
                 '如果信息还不够，先问需要补充什么；如果已经可以形成任务，请给出清晰的下一步和风险边界。',
+                '遇到“这个链接/这个品/2,223 这个”等指代时，必须结合上文已出现的店铺、货号、SKC、曝光/访客/销量数字重新定位；不能因为最新一句没写全就否定上轮数据。',
+                '会话已识别目标：' + summarizeLinkOpsTargets(conversationTargets),
+                ...extraRules,
                 conversation,
               ].join('\n\n');
               const startedAt = Date.now();
               const result = await askReadonlyOpsAgent(question);
-              session = appendAssistantChatMessage(session, result.answer, {
-                mode: 'readonly-codex-gateway',
-                durationMs: Date.now() - startedAt,
+              agentDurationMs = Date.now() - startedAt;
+              agentAnswer = result.answer;
+            }
+            if (shouldAutoTask) {
+              const taskStore = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
+              const duplicate = findDuplicateAutoTask(taskStore.tasks, session.id, userMessage);
+              if (duplicate) {
+                autoTask = duplicate;
+                taskData = taskStore;
+              } else {
+                autoTask = buildLinkOpsTaskFromCommand({
+                  command: userMessage,
+                  source: 'chat_auto_action',
+                  chatSessionId: session.id,
+                  targets: conversationTargets,
+                  agentAnswer,
+                  agentMode: agentAnswer ? 'readonly-codex-gateway' : '',
+                  agentDurationMs,
+                }, actor, req);
+                autoTask.status = 'confirmed';
+                autoTask.progress = Math.max(normalizeProgress(autoTask.progress, 10), 30);
+                autoTask.note = '来自运营会话的明确指令，已自动进入待执行任务；真正执行前仍会检查目标、素材、权限和风险，不会静默改 SHEIN。';
+                autoTask.execution = {
+                  ...(autoTask.execution || {}),
+                  mode: 'manual_confirm_first',
+                  enabled: false,
+                  note: '已收到明确运营命令；当前执行器仍只做受控预检/准备，真实写后台需通过执行器校验和人工边界。',
+                };
+                autoTask.preview = {
+                  ...(autoTask.preview || {}),
+                  summary: `来自会话的明确动作：${autoTask.intents.map(linkOpsIntentLabel).join(' / ')}；已自动加入任务池，等待执行前预检。`,
+                };
+                autoTask.history = appendTaskHistory(autoTask, 'auto_created_from_chat_command', actor, req, {
+                  status: autoTask.status,
+                  progress: autoTask.progress,
+                  chatSessionId: session.id,
+                });
+                taskData = {
+                  version: 1,
+                  updatedAt: new Date().toISOString(),
+                  tasks: [autoTask, ...taskStore.tasks].slice(0, 1000),
+                };
+                await writeJsonFile(args.linkOpsTaskFile, taskData);
+                await appendAudit(args.auditFile, {
+                  at: new Date().toISOString(),
+                  type: 'link-ops-chat-auto-task',
+                  actor,
+                  ...requestMeta(req),
+                  session: {id: session.id},
+                  task: {
+                    id: autoTask.id,
+                    status: autoTask.status,
+                    intents: autoTask.intents,
+                    stores: autoTask.targets?.stores || [],
+                    productRefs: autoTask.targets?.productRefs || [],
+                    commandLength: autoTask.command.length,
+                  },
+                });
+              }
+              const autoTaskNote = `已自动加入链接运营任务池：${autoTask.id}（${linkOpsStatusLabel(autoTask.status)}）。执行前仍会核对目标、素材、权限和风险，不会静默改 SHEIN。`;
+              agentAnswer = agentAnswer ? `${agentAnswer}\n\n${autoTaskNote}` : autoTaskNote;
+            }
+            if (agentAnswer) {
+              session = appendAssistantChatMessage(session, agentAnswer, {
+                mode: body.askAgent === false ? 'system-auto-task' : 'readonly-codex-gateway',
+                durationMs: agentDurationMs,
+                autoTaskId: autoTask?.id || '',
               });
             }
           } catch (err) {
@@ -1241,7 +1430,7 @@ async function main() {
             ...requestMeta(req),
             session: {id: session.id, created, messageCount: Array.isArray(session.messages) ? session.messages.length : 0},
           });
-          return sendJson(res, 200, {ok: true, data: next, session});
+          return sendJson(res, 200, {ok: true, data: next, session, autoTask, taskData});
         }
         if (req.method === 'PATCH') {
           if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});

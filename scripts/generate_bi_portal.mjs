@@ -4137,8 +4137,13 @@ async function sendLinkOpsChatMessage(){
     if (!res.ok || !payload.ok) throw new Error(payload.error || ('HTTP ' + res.status));
     linkOpsChatStore.sessions = Array.isArray(payload?.data?.sessions) ? payload.data.sessions : [];
     linkOpsChatStore.activeId = payload?.session?.id || linkOpsChatStore.activeId;
+    if (Array.isArray(payload?.taskData?.tasks)) {
+      linkOpsStore.tasks = payload.taskData.tasks;
+      linkOpsStore.ready = true;
+      linkOpsStore.error = '';
+    }
     if (input) input.value = '';
-    showToast('会话已更新');
+    showToast(payload?.autoTask?.id ? '会话已更新，明确命令已加入任务池' : '会话已更新');
   } catch (err) {
     opsAgentStore.error = err?.message || String(err || 'unknown');
     showToast('会话发送失败：' + opsAgentStore.error);

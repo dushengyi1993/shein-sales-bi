@@ -108,6 +108,19 @@ function findProduct(text, data) {
   const q = normalizeText(text).toLowerCase();
   if (!q) return '';
   const products = new Set();
+  const collect = rows => {
+    for (const row of rows || []) {
+      for (const key of ['standard_goods_sn', 'goods_sn', 'product', 'product_name']) {
+        if (row?.[key]) products.add(String(row[key]));
+      }
+    }
+  };
+  collect(data.rankings?.dailyProducts);
+  collect(data.rankings?.dailyStoreProducts);
+  collect(data.storeLinks || data.links);
+  collect(data.matrix);
+  collect(data.actions);
+  collect(data.products);
   for (const row of data.rankings?.dailyProducts || []) {
     if (row.standard_goods_sn) products.add(String(row.standard_goods_sn));
   }
@@ -121,6 +134,102 @@ function findProduct(text, data) {
     if (hit) return hit;
   }
   return '';
+}
+
+function extractUserMessages(text) {
+  const raw = String(text || '');
+  const matches = [...raw.matchAll(/用户：([\s\S]*?)(?=\n(?:用户|智能体)：|$)/g)].map(m => normalizeText(m[1]));
+  return matches.filter(Boolean);
+}
+
+function detectionTexts(text) {
+  const userMessages = extractUserMessages(text);
+  if (!userMessages.length) return [normalizeText(text)];
+  const latest = userMessages[userMessages.length - 1] || '';
+  const previous = userMessages.slice(0, -1).reverse().join(' ');
+  return [latest, previous, normalizeText(text)].filter(Boolean);
+}
+
+function pickStores(text) {
+  const upper = String(text || '').toUpperCase();
+  const found = [];
+  for (const key of STORE_KEYS) {
+    if (new RegExp(`(^|[^A-Z0-9])${key}([^A-Z0-9]|$)`).test(upper)) found.push(key);
+  }
+  if (/DSY/i.test(upper)) found.push('DSY');
+  if (/LGM/i.test(upper)) found.push('LGM');
+  return [...new Set(found)];
+}
+
+function pickStoresSmart(text) {
+  for (const part of detectionTexts(text)) {
+    const stores = pickStores(part);
+    if (stores.length) return stores;
+  }
+  return [];
+}
+
+function findProductSmart(text, data) {
+  for (const part of detectionTexts(text)) {
+    const product = findProduct(part, data);
+    if (product) return product;
+  }
+  return '';
+}
+
+function extractNumberHints(text) {
+  return [...new Set((String(text || '').match(/(?:\d{1,3}(?:,\d{3})+|\d{3,7})(?:\.\d+)?/g) || [])
+    .map(x => Number(String(x).replace(/,/g, '')))
+    .filter(x => Number.isFinite(x) && x >= 10))]
+    .slice(0, 40);
+}
+
+function extractSkcHints(text) {
+  return [...new Set((String(text || '').match(/\b(?:sv|sb)\d{8,}\b/ig) || [])
+    .map(x => x.trim()))]
+    .slice(0, 40);
+}
+
+function valueMatchesNumberHint(value, hints) {
+  const actual = Number(value);
+  return Number.isFinite(actual) && hints.some(h => Math.abs(actual - h) < 0.0001);
+}
+
+function rowMatchesStores(row, stores) {
+  if (!stores.length) return true;
+  return stores.some(store => {
+    if (store === 'DSY' || store === 'LGM') return row.group_key === store;
+    return row.store_key === store;
+  });
+}
+
+function linkRelevanceScore(row, {stores, product, numberHints, latestNumberHints, skcHints}) {
+  let score = 0;
+  if (stores.length && rowMatchesStores(row, stores)) score += 2000;
+  if (product && (row.standard_goods_sn === product || String(row.standard_goods_sn || '').includes(product))) score += 2000;
+  if (skcHints.some(x => String(row.skc || '').toLowerCase() === x.toLowerCase())) score += 100000;
+  if ((latestNumberHints || []).some(h =>
+    valueMatchesNumberHint(row.c30_eps_uv, [h]) ||
+    valueMatchesNumberHint(row.c30_goods_uv, [h]) ||
+    valueMatchesNumberHint(row.goods_uv, [h]) ||
+    valueMatchesNumberHint(row.c30_sale_cnt, [h]) ||
+    valueMatchesNumberHint(row.c7_sale_cnt, [h])
+  )) score += 150000;
+  if (numberHints.some(h =>
+    valueMatchesNumberHint(row.c30_eps_uv, [h]) ||
+    valueMatchesNumberHint(row.c30_goods_uv, [h]) ||
+    valueMatchesNumberHint(row.goods_uv, [h]) ||
+    valueMatchesNumberHint(row.c30_sale_cnt, [h]) ||
+    valueMatchesNumberHint(row.c7_sale_cnt, [h])
+  )) score += 50000;
+  if (row.retire_candidate) score += 800;
+  if (row.high_exposure_low_click || row.high_visit_low_pay) score += 500;
+  if (n(row.c30_sale_cnt) <= 0 && n(row.c30_eps_uv) > 0) score += 300;
+  if (row.is_on_shelf) score += 100;
+  score += Math.min(200, n(row.c30_eps_uv) / 1000);
+  score += Math.min(100, n(row.c30_goods_uv || row.goods_uv) / 50);
+  score += Math.min(200, n(row.c30_sale_cnt) * 10);
+  return score;
 }
 
 function rowSummary(row) {
@@ -167,32 +276,39 @@ function topRows(rows, metric, limit = 8) {
 }
 
 function compactSalesContext(question, data) {
-  const q = normalizeText(question);
+  const rawQuestion = String(question || '');
+  const q = normalizeText(rawQuestion);
+  const detectParts = detectionTexts(rawQuestion);
+  const latestDetectionText = detectParts[0] || q;
   const date = pickDate(q, data);
-  const store = pickStore(q);
-  const product = findProduct(q, data);
+  const stores = pickStoresSmart(rawQuestion);
+  const store = stores[0] || '';
+  const product = findProductSmart(rawQuestion, data);
+  const numberHints = extractNumberHints(q);
+  const latestNumberHints = extractNumberHints(latestDetectionText);
+  const skcHints = extractSkcHints(q);
   const dailyStores = (data.rankings?.dailyStores || []).filter(r => r.date === date);
   const dailyProducts = (data.rankings?.dailyProducts || []).filter(r => r.date === date);
   const dailyStoreProducts = (data.rankings?.dailyStoreProducts || []).filter(r => r.date === date);
-  const scopedStoreProducts = store && !['DSY', 'LGM'].includes(store)
-    ? dailyStoreProducts.filter(r => r.store_key === store)
-    : store === 'DSY' || store === 'LGM'
-      ? dailyStoreProducts.filter(r => r.group_key === store)
-      : dailyStoreProducts;
+  const scopedStoreProducts = stores.length
+    ? dailyStoreProducts.filter(r => rowMatchesStores(r, stores))
+    : dailyStoreProducts;
   const productStoreRows = product ? dailyStoreProducts.filter(r => r.standard_goods_sn === product) : [];
   const linkRows = (data.storeLinks || data.links || [])
     .filter(r => {
-      if (store && !['DSY', 'LGM'].includes(store) && r.store_key !== store) return false;
-      if ((store === 'DSY' || store === 'LGM') && r.group_key !== store) return false;
+      if (stores.length && !rowMatchesStores(r, stores)) return false;
       if (product && r.standard_goods_sn !== product && !String(r.standard_goods_sn || '').includes(product)) return false;
+      if (skcHints.length && skcHints.some(x => String(r.skc || '').toLowerCase() === x.toLowerCase())) return true;
       return true;
     })
-    .sort((a, b) => n(b.c30_sale_cnt) - n(a.c30_sale_cnt) || n(b.c30_goods_uv || b.goods_uv) - n(a.c30_goods_uv || a.goods_uv))
-    .slice(0, 30);
+    .sort((a, b) => linkRelevanceScore(b, {stores, product, numberHints, latestNumberHints, skcHints}) - linkRelevanceScore(a, {stores, product, numberHints, latestNumberHints, skcHints})
+      || n(b.c30_sale_cnt) - n(a.c30_sale_cnt)
+      || n(b.c30_eps_uv) - n(a.c30_eps_uv)
+      || n(b.c30_goods_uv || b.goods_uv) - n(a.c30_goods_uv || a.goods_uv))
+    .slice(0, 60);
   const matrixRows = (data.matrix || [])
     .filter(r => {
-      if (store && !['DSY', 'LGM'].includes(store) && r.store_key !== store) return false;
-      if ((store === 'DSY' || store === 'LGM') && r.group_key !== store) return false;
+      if (stores.length && !rowMatchesStores(r, stores)) return false;
       if (product && r.standard_goods_sn !== product && !String(r.standard_goods_sn || '').includes(product)) return false;
       return true;
     })
@@ -207,9 +323,9 @@ function compactSalesContext(question, data) {
       linkDate: data.dates?.linkDate || '',
       businessDate: data.dates?.businessDate || '',
     },
-    detected: {store, product},
+    detected: {store, stores, product, numberHints, latestNumberHints, skcHints},
     salesSummary: summary,
-    storeTop: topRows(store ? dailyStores.filter(r => store === 'DSY' ? r.group_key === 'DSY' : store === 'LGM' ? r.group_key === 'LGM' : r.store_key === store) : dailyStores, 'gross_sales_sar', 16),
+    storeTop: topRows(stores.length ? dailyStores.filter(r => rowMatchesStores(r, stores)) : dailyStores, 'gross_sales_sar', 16),
     productTop: topRows(product ? dailyProducts.filter(r => r.standard_goods_sn === product) : dailyProducts, 'gross_sales_sar', 16),
     storeProductTop: topRows(product ? productStoreRows : scopedStoreProducts, 'gross_sales_sar', 24),
     links: linkRows.map(r => ({
@@ -291,9 +407,11 @@ async function callReadonlyLlm(question, context) {
               text: [
                 '你是 SHEIN 沙特半托管运营数据只读助手。',
                 '你只能根据用户问题和提供的 JSON 数据回答销售、店铺、货号、链接表现、覆盖、售后/利润等经营问题。',
+                '每次回答都必须基于本轮 JSON 重新查数；最新用户消息换了店铺、货号、SKC 或指标时，以最新消息为准，指代不完整时再结合上文。',
                 '不要编造未提供的数据；缺数据就明确说缺哪类数据。',
                 '不要给出修改 BI 系统、服务器、代码、密钥、账号、非 SHEIN 业务的建议。',
-                '涉及上品、改标题、换图、下架、活动报名、限时折扣等写操作时，只能给“建议/需人工确认”，不能说已经执行。',
+                '涉及上品、改标题、换图、下架、活动报名、限时折扣等写操作时，不能说已经执行；如果用户问题里说明系统会加入任务池，就说已进入待确认动作/任务，等待执行器预检。',
+                '遇到“这个链接/2,223 这个/刚才那个”等指代时，优先用上下文里的 SKC、店铺、货号、曝光/访客/销量数字定位，不要因为最新一句没写全就否定上轮数据。',
                 '回答要简洁，优先给结论、关键数字、原因和下一步。数字保留 SAR / 订单 / 销量单位。',
               ].join('\n')
             }
@@ -377,8 +495,10 @@ async function callReadonlyCodexGateway(question, context) {
   if (!CODEX_GATEWAY_ENABLED) return null;
   const prompt = [
     '你是 SHEIN 沙特半托管运营数据只读智能体，运行在受控网关里。',
+    '每次回答都必须基于本轮提供的最新 BI JSON 上下文重新查数；如果最新用户消息换了店铺、货号、SKC 或指标，以最新消息为准，指代不完整时再结合上文。',
     '你只能根据下面提供的 BI JSON 上下文回答问题，不允许调用外部网站，不允许修改文件，不允许执行 SHEIN 写操作。',
-    '如果用户问上品、改标题、换图、下架、活动、限时折扣，只能给建议和需要人工确认的任务，不要说已经执行。',
+    '如果用户问上品、改标题、换图、下架、活动、限时折扣，不能说已经执行；但如果上下文提示系统会入任务池，应说明已进入待确认动作/任务，等待执行器预检。',
+    '遇到“这个链接/2,223 这个/刚才那个”等指代时，优先用上下文里的 SKC、店铺、货号、曝光/访客/销量数字定位，不要因为最新一句没写全就否定上轮已经查到的数据。',
     '如果问题超出 SHEIN 经营数据、链接管理、销售、货号、店铺、售后、利润范围，直接拒绝。',
     '回答要像运营负责人：先结论，再关键数字，再可能原因/下一步。不要只机械列排行。',
     '最终只输出一段中文，并以 FINAL_ANSWER: 开头。',
