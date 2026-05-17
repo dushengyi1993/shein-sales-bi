@@ -249,3 +249,10 @@
 - `JT` / `JTE` 退货物流按“同一运单号直接对应”处理：先全店精确匹配 SHEIN 售后退货物流号，不受 ET 货号编码和 SHEIN 标准货号差异阻断；iMile / EMile 数字单号仍以物流详情里的换单轨迹为证据，不能只凭数字单号相似直接入库。
 - `mart.et_rtv_destination_allocation` 用 ET 库存流水追踪 RTV 收到后的去向：直接入 `ETRUH09散件仓`、03 后续调拨入 09、仍在 `ETRUH03_RTV`、进入 `ETRUH04Damaged`、转 `ETRUH06报废` 或其它/未知；按同货号库存池 FIFO 分配，是库存流水级证据，不是序列号级扫描。
 - `mart.shein_return_rtv_trace` 是面向 BI 的 SHEIN 退货 -> ET 收件/去向明细视图；BI `订单 / 售后` 页面用它展示每条退货“收到没有、收到后去了哪里”。主利润仍保守，09 去向只进入 `rtv_09_recoverable_cost_sar` / “09 可二售”测算。
+
+## 2026-05-17 云端 Codex / 飞书问数 / 链接管理中台
+- 云端飞书问数机器人已从规则问答升级为受控 Codex CLI 只读网关：`shein-bi-lark-sales-qa.service` -> `scripts/lark_sales_qa_bot.mjs` -> `codex exec --sandbox read-only`，`CODEX_HOME=/home/sheinops/.codex`。它不绑定本机 Codex App 或当前会话，本机关机不影响云端飞书问数。
+- `/home/sheinops/.codex/auth.json`、`config.toml` 和第三方 API 凭据只存在服务器私有目录，不进 GitHub、文档或日志；飞书/BI 不能直接裸调用 shell 或 Codex CLI，必须经过受控 Node 网关。
+- BI Portal 已有“链接管理中台”基座和 `/api/link-ops-tasks` 任务池：自然语言指令只能入队为待确认任务并留 IP/UA/备注等痕迹；SHEIN 写操作仍按“建议/预填/用户确认/人工最终提交/审计留痕”推进。
+- 2026-05-17 工作区存在下一步开发中的 `/api/ops-agent/ask` 网页智能体回复接入改动；未完成云端部署和端到端验证前，不得在文档或汇报中称 BI 网页端已具备完整自然语言智能体能力。
+

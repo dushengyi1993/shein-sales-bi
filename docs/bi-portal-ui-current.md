@@ -251,3 +251,12 @@
 - V2 仍由 `scripts/generate_bi_portal_v2.mjs` 生成到 `outputs/bi-portal/v2/index.html`，只读 `outputs/bi-portal/data.json`；不得写入 V1 `outputs/bi-portal/index.html`。
 - V2 暂时不要求跟随每天/滚动同步自动刷新；它是平行慢开发项目，不是当前生产链路的一部分。
 - 已验证：`node --check scripts/generate_bi_portal_v2.mjs`、重新生成、`/v2/` HTTP 200、浏览器打开指定 hash 无控制台错误；截图证据为 `outputs/bi-portal/v2-overview-v1-logic-check-2.png`。
+
+## 2026-05-17 链接管理中台基座
+
+- BI Portal 已新增“链接管理中台”入口，定位是自动运营驾驶舱的第一层：先收集和展示待确认动作，不直接改 SHEIN 后台。
+- 当前已上线能力：自然语言运营指令提交、服务端任务池 `/api/link-ops-tasks`、任务状态/备注/负责人/IP/UA 留痕，以及任务卡片下方基于现有链接/覆盖矩阵的店铺级建议。
+- 当前建议来源仍是 BI 已有数据：店铺×货号覆盖、链接表现、同款最佳链接、缺链接/弱链接线索；它不是最终执行器。
+- 正在开发但未作为生产完成项提交的下一步：BI 页面通过受控 `/api/ops-agent/ask` 调用云端 Codex CLI 只读问答，把“智能体回复”直接显示在任务卡片下方。该步骤完成前，不要把网页自然语言入口当成真正全能力智能体。
+- SHEIN 写操作仍遵守长期边界：建议/预填/用户确认/人工最终提交/审计留痕；未经明确授权，不自动提交上品、下架、换图、换标题、报活动或限时折扣。
+

@@ -1,6 +1,6 @@
 # 云端 BI 运行说明
 
-> 当前权威状态：2026-05-16。本地 BI 已封存，云端 BI 是正式入口。
+> 当前权威状态：2026-05-17。本地 BI 已封存，云端 BI 是正式入口。
 
 ## 1. 当前入口
 
@@ -42,9 +42,9 @@
 | `shein-bi-cloud-link-business.timer` | 北京时间 `05:30` | 顺序启动云端 headless Chrome 抓取前一完整日链接/业务域，入仓、体检并刷新 BI |
 | `shein-bi-cloud-openapi-hl.timer` | 北京时间 `06:20` | HL OpenAPI 并行抓取、入仓和对账；服务器 IP 白名单已配置 |
 | `shein-bi-cloud-watchdog.timer` | 每小时 | 检查云端服务、timer 和 BI 数据新鲜度，异常时发飞书提醒 |
-| `shein-bi-lark-sales-qa.service` | 常驻服务 | 飞书只读问数机器人，读取 BI Portal JSON 后回复消息，不写数据 |
+| `shein-bi-lark-sales-qa.service` | 常驻服务 | 飞书只读问数机器人（云端 Codex CLI 网关），读取 BI Portal JSON 后回复消息，不写数据 |
 
-ET、飞书日报、完整 RTV WebAPI 复核、链接/业务域日更、异常通知 watchdog、只读问数机器人和 HL OpenAPI 双跑的 Linux systemd 入口已启用并通过手动验证。链接/业务域是低频日更数据，不按销售高频刷新看待；当前生产路径是云端顺序 headless Chrome + 私有会话状态，纯 Node 零浏览器直连仍是后续优化。不要误以为本地 `SHEIN-*` Windows 任务仍在生产运行。
+ET、飞书日报、完整 RTV WebAPI 复核、链接/业务域日更、异常通知 watchdog、只读问数机器人（云端 Codex CLI 网关）和 HL OpenAPI 双跑的 Linux systemd 入口已启用并通过手动验证。链接/业务域是低频日更数据，不按销售高频刷新看待；当前生产路径是云端顺序 headless Chrome + 私有会话状态，纯 Node 零浏览器直连仍是后续优化。不要误以为本地 `SHEIN-*` Windows 任务仍在生产运行。
 
 2026-05-16 链接/业务域已完成云端闭环：`scripts/cloud_link_business_sync.sh` 会按店顺序执行 `bootstrap_shein_browser_session.mjs`、`fetch_shein_links.mjs` 和 `fetch_shein_business_domains.mjs`，失败店铺会关闭并重启该店浏览器重试，全部完成后入仓、运行 BI 体检并生成门户。验证日志 `/srv/shein-bi/logs/cloud-link-business/link-business-2026-05-15-20260516-163901.log` 显示 16 店全部 `done`；BI `dates.linkDate=2026-05-15`、`dates.businessDate=2026-05-15`，体检 `warnings=0/errors=0`。这不是本机补抓；后续不要重新启用本地 Windows 链接/业务域任务作为长期生产。
 
@@ -61,7 +61,7 @@ ET、飞书日报、完整 RTV WebAPI 复核、链接/业务域日更、异常�
 - 链接/业务域日更云端入口：`scripts/cloud_link_business_sync.sh yesterday`
 - HL OpenAPI 云端入口：`scripts/cloud_openapi_hl_reconciliation.sh`
 - 云端异常通知入口：`scripts/cloud_ops_watchdog.mjs`
-- 飞书只读问数机器人入口：`scripts/cloud_lark_sales_qa_bot.sh` / `scripts/lark_sales_qa_bot.mjs`
+- 飞书只读问数机器人（云端 Codex CLI 网关）入口：`scripts/cloud_lark_sales_qa_bot.sh` / `scripts/lark_sales_qa_bot.mjs`
 - 销售抓取仍优先使用 SHEIN 后台 WebAPI session；直连成功时不会启动浏览器。
 - 官方 OpenAPI 已有权限的数据域后续可逐步替换为 OpenAPI；WebAPI 仍作为当前生产销售抓取主链路。HL OpenAPI 云端双跑当前只写并行表，不覆盖生产销售事实表。
 - ET 已改为 Linux headless Chrome + 账号密码/OCR 自动登录模式；Windows Chrome 保存密码不能直接迁到 Linux，服务器必须单独保存 `config/et_forwarder.local.json` 或等价环境变量。
@@ -114,3 +114,22 @@ GitHub 应保存：
 - `shein-bi-cloud-link-business.timer` 应保持 active；手动复跑用 `scripts/cloud_link_business_sync.sh yesterday`。若单店卡在 SBN `x-gw-auth`，优先看该店 attempt 重试日志，不要回退到本机补抓冒充云端日更。
 - `shein-bi-lark-sales-qa.service` 应保持 active；可用 `node scripts/lark_sales_qa_bot.mjs --answer "今天销售多少"` 本地只读测试答案。群聊中若无回复，优先检查机器人是否已入群、应用可见范围和 `im.message.receive_v1`/发消息权限。
 - GitHub `main` 应包含最新可复用代码和文档；敏感运行态只保留在本地/云端私有目录。
+
+
+## 飞书问数 / 云端 Codex CLI 网关
+
+- 当前生产链路为：飞书消息事件 -> 云端 `lark-cli` / `shein-bi-lark-sales-qa.service` -> `scripts/lark_sales_qa_bot.mjs` -> Codex CLI 只读执行 -> 回复飞书。
+- Codex CLI 安装在服务器系统路径，私有配置目录为 `/home/sheinops/.codex`；`auth.json`、`config.toml`、第三方 API 配置和 token 都不进入 GitHub、文档或日志。
+- 服务环境必须显式包含：`CODEX_HOME=/home/sheinops/.codex`、`SHEIN_QA_CODEX_GATEWAY_ENABLED=1`、`SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS=180000`。
+- 网关只把 `outputs/bi-portal/data.json` 压缩成销售、店铺、货号、链接/覆盖等只读上下文交给模型；不授予写 PostgreSQL、写飞书 Base、改 SHEIN 后台或改服务器文件的权限。
+- 失败兜底顺序：Codex CLI 只读网关失败时，退回直接 LLM 问答；再失败时退回脚本内规则回答，保证飞书机器人不会因为模型异常完全失声。
+- 这个机器人已经不绑定本机 Codex App 或当前聊天窗口；只要云端服务、飞书授权和服务器网络正常，本机关机也不影响飞书问数。
+
+验证命令（服务器 `/opt/shein-bi/app`）：
+
+```bash
+systemctl show shein-bi-lark-sales-qa.service -p Environment
+CODEX_HOME=/home/sheinops/.codex codex --version
+CODEX_HOME=/home/sheinops/.codex SHEIN_QA_CODEX_GATEWAY_ENABLED=1 node scripts/lark_sales_qa_bot.mjs --answer "DL这个店今天卖得最好的品是什么？"
+```
+

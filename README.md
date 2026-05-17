@@ -1,8 +1,8 @@
 # SHEIN 销售统计与 BI 经营系统
 
-## 2026-05-16 当前权威状态
+## 2026-05-17 当前权威状态
 
-- 飞书多维表格 / 原生看板写入已临时暂停；云端 BI 系统作为当前主要经营入口继续运行。飞书日报、异常通知 watchdog 和只读问数机器人均已迁到云端独立飞书机器人链路；日报真实发送和问数服务已验证。
+- 飞书多维表格 / 原生看板写入已临时暂停；云端 BI 系统作为当前主要经营入口继续运行。飞书日报、异常通知 watchdog 和只读问数机器人均已迁到云端独立飞书机器人链路；日报真实发送已验证，问数机器人已升级为云端 Codex CLI 只读网关，不再绑定本机 Codex 会话。
 - 本地 BI 已封存，云端 BI 是正式入口：`http://43.165.167.135/`。公网入口已启用 Basic Auth；账号密码只在运行环境交付，不写入仓库或文档。详见 `docs/cloud-bi-operations.md`。
 - 本地 `8787` 服务已停止，`SHEIN-*` Windows 计划任务已禁用；除非明确回滚，不要重新启动本地 BI 或本地抓数任务。
 - 销售同步完成后会后置刷新 BI；如果单店失败但目标日期 16 店销售源文件已齐，BI 仍会刷新，并通过飞书消息提醒失败店铺。
@@ -20,13 +20,13 @@
 - RTV 收件后去向已进入 BI：`mart.et_rtv_destination_allocation` 追踪 09 可售、03_RTV、04 破损、06 报废和其它/未知去向；`mart.shein_return_rtv_trace` 在 `订单 / 售后` 页面展示每条 SHEIN 退货是否收到、收到后去了哪里。
 - HL OpenAPI 销售试点已跑通并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` 写入 `fact.openapi_*` 并行事实表与 `mart.openapi_sales_reconciliation` 对账表；BI 系统状态页显示 “SHEIN OpenAPI 试点对账”。正式切换生产销售表前继续累计多日 `matched`。
 - HL OpenAPI 销售试点曾在本地 Windows 任务中双跑，只写 `fact.openapi_*` 和 `mart.openapi_sales_reconciliation`，不覆盖生产销售事实表；本地 Windows 任务已封存，云端 systemd 双跑入口已部署，云服务器出口 IP `43.165.167.135` 已加入 SHEIN 开放平台白名单，云端双跑已成功。
-- 系统定位正在从“BI 数据分析”扩展为“自动运营驾驶舱”：先把可重复运营动作沉淀为脚本和规则，再按“建议/预填/复核/人工确认提交/审计留痕”的边界逐步开放自动化。
+- 系统定位正在从“BI 数据分析”扩展为“自动运营驾驶舱”：先把可重复运营动作沉淀为脚本和规则，再按“建议/预填/复核/人工确认提交/审计留痕”的边界逐步开放自动化。2026-05-17 已上线“链接管理中台”基座：支持运营指令入队、任务池查看和基于现有链接/覆盖矩阵的建议卡；尚未自动执行 SHEIN 写操作。
 
 本工作区用于 SHEIN 16 店销售数据自动抓取、飞书多维表格统计、每日飞书日报、链接管理、营销活动报名辅助，以及正在并行建设的 PostgreSQL + Metabase + 云端 BI / 自动运营驾驶舱。
 
 当前原则：**SHEIN 抓数、BI 刷新、ET 同步、飞书日报、异常通知和只读问数机器人在云端继续运行；飞书多维表格 / 看板写入先暂停，待用户确认再恢复。**
 
-## 当前运行状态（2026-05-16 云端切换后）
+## 当前运行状态（2026-05-17 云端切换后）
 
 以下数据截面是最近一次写入文档的已验证快照；实时页面以 `outputs/bi-portal/data.json` 和 BI 门户系统状态页为准。
 
@@ -58,7 +58,7 @@
   - 云端 `shein-bi-cloud-link-business.timer`：每天 `05:30` 顺序启动云端 headless Chrome 抓取前一完整日链接/业务域，入仓、体检并刷新 BI；单店失败会重启浏览器重试。
   - 云端 `shein-bi-cloud-openapi-hl.timer`：每天 `06:20` 跑 HL OpenAPI 并行对账；已可在云端成功抓取、入仓和生成 OpenAPI 对账。
   - 云端 `shein-bi-cloud-watchdog.timer`：每小时检查云端服务、timer 和 BI 数据新鲜度；销售/页面按 4.5 小时阈值，链接/业务域按 48 小时日更阈值。
-  - 云端 `shein-bi-lark-sales-qa.service`：常驻只读飞书问数机器人，只读取 BI Portal 数据，不写数据库或飞书 Base。
+  - 云端 `shein-bi-lark-sales-qa.service`：常驻只读飞书问数机器人，通过 `/home/sheinops/.codex` 的 Codex CLI 配置执行受控只读问答，只读取 BI Portal 压缩上下文，不写数据库、飞书 Base 或 SHEIN 后台。
   - 本地 `SHEIN-*` Windows 计划任务已禁用，保留为回滚参考，不再作为生产调度。
   - 链接/业务域本地 Windows 日更任务已封存；当前生产改由云端 `shein-bi-cloud-link-business.timer` 顺序抓取，不再依赖本机补数。纯 Node 零浏览器直连仍是后续优化，不影响当前云端日更。
 - 当前飞书 Base 暂停规则：存在 `state/feishu-base-sync-paused.flag` 时，跳过飞书事实表、产品表、月表、年度/周月宽表、当月主看板和上月看板写入。云端飞书日报、异常通知和只读问数机器人只走消息/图片回复，不写 Base。
@@ -138,8 +138,10 @@
   `bash scripts/cloud_openapi_hl_reconciliation.sh`
 - 云端手动跑 watchdog（在服务器执行）：
   `node scripts/cloud_ops_watchdog.mjs --dry-run`
-- 本地或云端只读测试飞书问数机器人回答：
-  `node scripts/lark_sales_qa_bot.mjs --answer "今天销售多少"`
+- 云端只读测试飞书问数机器人回答（在服务器 `/opt/shein-bi/app` 执行）：
+  `CODEX_HOME=/home/sheinops/.codex SHEIN_QA_CODEX_GATEWAY_ENABLED=1 node scripts/lark_sales_qa_bot.mjs --answer "今天哪个店最差？原因可能是什么？"`
+- 云端 Codex CLI 连通性检查（只读执行，配置不进 GitHub）：
+  `CODEX_HOME=/home/sheinops/.codex codex exec --cd /opt/shein-bi/app --sandbox read-only "只回答 OK"`
 
 以下 Windows 命令当前只作为本地开发、排障或回滚参考；本地 BI 已封存，除非明确回滚，不要重新启用本地计划任务：
 

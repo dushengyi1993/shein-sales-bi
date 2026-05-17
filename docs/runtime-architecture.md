@@ -229,3 +229,12 @@
 
 ## ET 前台窗口规则
 - ET 货代仓也适用“非必要不打开前端窗口”：`scripts/fetch_et_forwarder.mjs` 默认 `visible=false` 并用 `WindowStyle Hidden` 启动 Chrome；自动登录优先走 `scripts/et_login_helper.py` + OCR。只有 OCR/验证码连续失败、登录态必须人工处理、用户明确要求，或必须排查浏览器交互问题时，才允许临时加 `--visible` 打开 ET 前台窗口，处理完必须关闭。
+
+## 2026-05-17 云端智能体运行边界
+
+- 云端已具备生产飞书问数链路：`shein-bi-lark-sales-qa.service` 常驻消费飞书消息，调用 `scripts/lark_sales_qa_bot.mjs`，再通过 Codex CLI 只读网关回答销售、店铺、货号、链接/覆盖相关问题。
+- Codex CLI 私有运行目录固定为 `/home/sheinops/.codex`；其中 `auth.json`、`config.toml` 和第三方 API 凭据仅存在服务器，不纳入 GitHub。
+- 飞书或 BI 网页不得直接暴露 shell / 裸 Codex CLI；必须经过 Node 网关做边界控制、输入约束、超时、只读上下文压缩和失败兜底。
+- 生产问数不再依赖本机 Codex App 或本地浏览器；本机只作为开发、排障和回滚环境。
+- 后续若把 BI 页面自然语言入口接到云端 Codex，也只能先做“只读回答 + 任务草案”，写操作必须进入任务池等待人工确认。
+
