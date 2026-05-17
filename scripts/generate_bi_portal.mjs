@@ -4198,7 +4198,7 @@ async function convertChatToTask(){
   const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
   const firstUser = messages.find(m => m.role === 'user')?.content || session.title || '';
   const latestUser = [...messages].reverse().find(m => m.role === 'user')?.content || '';
-  const command = ((firstUser && latestUser && firstUser !== latestUser) ? (firstUser + '\n\n最新补充：' + latestUser) : (latestUser || firstUser || session.title || '')).trim().slice(0, 1800);
+  const command = ((firstUser && latestUser && firstUser !== latestUser) ? (firstUser + '\\n\\n最新补充：' + latestUser) : (latestUser || firstUser || session.title || '')).trim().slice(0, 1800);
   if (!command) return showToast('这个会话还没有可沉淀的任务内容');
   try {
     const res = await fetch(LINK_OPS_TASKS_API, {
@@ -9164,7 +9164,7 @@ function linkOpsTaskForSession(session){
 function linkOpsSessionCommand(session){
   const first = String(linkOpsFirstUserMessage(session)?.content || session?.title || '').trim();
   const latest = String(linkOpsLatestUserMessage(session)?.content || '').trim();
-  if (first && latest && first !== latest) return (first + '\n\n最新补充：' + latest).slice(0, 1800);
+  if (first && latest && first !== latest) return (first + '\\n\\n最新补充：' + latest).slice(0, 1800);
   return (latest || first || '会话任务草案').slice(0, 1800);
 }
 function buildDraftTaskFromSession(session){
