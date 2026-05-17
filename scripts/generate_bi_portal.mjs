@@ -3151,6 +3151,23 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .linkops-task h4{margin:0 0 7px;font-size:15px}
     .linkops-task p{margin:5px 0;color:var(--muted);line-height:1.55;font-size:12px}
     .linkops-preview-list{margin:8px 0 0;padding-left:18px;color:var(--muted);font-size:12px;line-height:1.65}
+    .agent-answer-grid{display:grid;gap:10px;margin-top:10px}
+    .agent-answer-card{border:1px solid rgba(56,189,248,.22);border-radius:16px;background:rgba(8,47,73,.18);padding:12px}
+    body[data-theme="light"] .agent-answer-card{background:#f0f9ff;border-color:#bae6fd}
+    .agent-answer-card h4{margin:0 0 8px;font-size:13px;color:#7dd3fc}
+    body[data-theme="light"] .agent-answer-card h4{color:#0369a1}
+    .agent-answer-card ul{margin:0;padding-left:18px;color:var(--muted);font-size:12px;line-height:1.7}
+    .agent-answer-card p{margin:0;color:var(--muted);font-size:12px;line-height:1.7}
+    .task-progress{height:9px;border-radius:999px;background:rgba(148,163,184,.18);overflow:hidden;margin:9px 0}
+    .task-progress>i{display:block;height:100%;background:linear-gradient(90deg,#38bdf8,#22c55e);border-radius:999px}
+    .task-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}
+    .task-actions button{border:1px solid rgba(148,163,184,.18);background:rgba(15,23,42,.48);color:var(--text);border-radius:999px;padding:7px 10px;cursor:pointer;font-size:12px}
+    body[data-theme="light"] .task-actions button{background:#fff;border-color:#dbe3ef;color:#0f172a}
+    .task-actions button.danger{border-color:rgba(248,113,113,.35);color:#fecaca}
+    body[data-theme="light"] .task-actions button.danger{color:#b91c1c}
+    .title-candidates{display:grid;gap:8px;margin-top:8px}
+    .title-candidate{border:1px solid rgba(148,163,184,.18);border-radius:12px;padding:9px;background:rgba(15,23,42,.25);font-size:12px;line-height:1.6}
+    body[data-theme="light"] .title-candidate{background:#fff;border-color:#e2e8f0}
     .action-meta{display:grid;grid-template-columns:minmax(96px,.32fr) 1fr auto;gap:8px;margin-top:12px;padding-top:12px;border-top:1px solid rgba(148,163,184,.12)}
     .action-meta input{min-height:38px;border-radius:12px;font-size:12px}
     .action-meta .meta-save{min-height:38px;border-radius:12px;padding:7px 10px}
@@ -4056,6 +4073,123 @@ async function submitLinkOpsCommand(){
   } catch (err) {
     showToast('提交失败：' + (err?.message || String(err || 'unknown')));
     renderAll();
+  }
+}
+function splitAgentAnswer(text){
+  const raw = String(text || '').trim();
+  if (!raw) return [];
+  const normalized = raw.replace(/\r/g, '').replace(/；/g, '；\n').replace(/。(?=补|下|换|优|关|可|数|原|下|如果|建议|需|当前)/g, '。\n');
+  const parts = normalized.split('\n').map(x => x.trim()).filter(Boolean);
+  const groups = [
+    {title:'结论', match:/^(结论|总体|建议|当前)/, items:[]},
+    {title:'关键依据', match:/(数据|关键|曝光|UV|销量|订单|销售|覆盖|链接|店铺)/, items:[]},
+    {title:'建议动作', match:/(换图|补|下架|优化|催|新链接|观察|确认|推进|复盘)/, items:[]},
+    {title:'风险与边界', match:/(风险|人工|不要|不建议|等待|只读|不能|确认)/, items:[]},
+  ];
+  for (const part of parts) {
+    let placed = false;
+    for (const g of groups) {
+      if (g.match.test(part)) {
+        g.items.push(part);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) groups[1].items.push(part);
+  }
+  return groups.filter(g => g.items.length);
+}
+function renderAgentAnswerCards(text){
+  const groups = splitAgentAnswer(text);
+  if (!groups.length) return '';
+  return '<div class="agent-answer-grid">'+groups.map(g =>
+    '<div class="agent-answer-card"><h4>'+escapeHtml(g.title)+'</h4>'+
+    (g.items.length === 1 ? '<p>'+escapeHtml(g.items[0])+'</p>' : '<ul>'+g.items.slice(0,8).map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul>')+
+    '</div>'
+  ).join('')+'</div>';
+}
+function linkOpsStatusLabel(status){
+  return ({
+    draft:'草案',
+    confirmed:'已确认',
+    in_progress:'执行中',
+    waiting_review:'待复核',
+    done:'已完成',
+    archived:'已归档',
+  })[status] || status || '草案';
+}
+function linkOpsStatusClass(status){
+  if (status === 'done') return 'good';
+  if (status === 'in_progress' || status === 'waiting_review') return 'mid';
+  if (status === 'archived') return 'info';
+  return 'info';
+}
+async function patchLinkOpsTask(id, patch, successText){
+  if (!id) return;
+  if (actionStateStore.mode !== 'service') return showToast('当前不是网页服务模式，不能更新任务');
+  try {
+    const res = await fetch(LINK_OPS_TASKS_API, {
+      method:'PATCH',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({id, ...patch})
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || !payload.ok) throw new Error(payload.error || ('HTTP ' + res.status));
+    linkOpsStore.tasks = Array.isArray(payload?.data?.tasks) ? payload.data.tasks : [];
+    showToast(successText || '任务已更新');
+    renderAll();
+  } catch (err) {
+    showToast('任务更新失败：' + (err?.message || String(err || 'unknown')));
+  }
+}
+async function deleteLinkOpsTask(id){
+  if (!id) return;
+  if (!confirm('确定删除这个任务？删除后只能从审计日志追溯。')) return;
+  try {
+    const res = await fetch(LINK_OPS_TASKS_API + '?id=' + encodeURIComponent(id), {method:'DELETE'});
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || !payload.ok) throw new Error(payload.error || ('HTTP ' + res.status));
+    linkOpsStore.tasks = Array.isArray(payload?.data?.tasks) ? payload.data.tasks : [];
+    showToast('任务已删除');
+    renderAll();
+  } catch (err) {
+    showToast('删除失败：' + (err?.message || String(err || 'unknown')));
+  }
+}
+async function improveLinkOpsTask(id, mode){
+  const task = (linkOpsStore.tasks || []).find(t => String(t.id || '') === String(id || ''));
+  if (!task) return showToast('未找到任务');
+  const extra = prompt(mode === 'title' ? '标题生成要求（例如：更强调低噪音/大容量/沙特夏季场景）' : '你想让智能体继续怎么优化？', '');
+  if (extra === null) return;
+  const question = mode === 'title'
+    ? '基于当前 BI 数据和任务背景，给这个 SHEIN 商品生成 5 个英文标题备选。要求标题适合沙特市场、不要夸大、尽量包含核心关键词。任务：' + (task.command || '') + '。补充要求：' + extra
+    : '继续优化这个运营任务，给出更清晰的执行步骤、风险和下一步。任务：' + (task.command || '') + '。已有建议：' + (task.preview?.agentAnswer || '') + '。补充要求：' + extra;
+  showToast('智能体正在继续分析...');
+  try {
+    const askRes = await fetch(OPS_AGENT_ASK_API, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({question})
+    });
+    const askPayload = await askRes.json().catch(() => ({}));
+    if (!askRes.ok || !askPayload.ok) throw new Error(askPayload.error || ('HTTP ' + askRes.status));
+    const answer = String(askPayload.answer || '').trim();
+    const titleCandidates = mode === 'title'
+      ? answer.split(/\n+/).map(x => x.replace(/^[\\d\\-\\.\\)\\s]+/, '').trim()).filter(x => x.length > 12).slice(0, 8)
+      : (Array.isArray(task.preview?.titleCandidates) ? task.preview.titleCandidates : []);
+    await patchLinkOpsTask(id, {
+      event: mode === 'title' ? 'generate_title_candidates' : 'improve_task',
+      progress: Math.max(Number(task.progress || 10), 35),
+      status: task.status === 'draft' ? 'confirmed' : task.status,
+      preview: {
+        agentAnswer: answer,
+        agentMode: 'readonly-codex-gateway',
+        agentDurationMs: askPayload.durationMs || 0,
+        titleCandidates,
+      }
+    }, mode === 'title' ? '已生成标题备选' : '已继续优化任务');
+  } catch (err) {
+    showToast('智能体优化失败：' + (err?.message || String(err || 'unknown')));
   }
 }
 async function updateActionStatus(key, status){
@@ -8624,7 +8758,7 @@ function renderLinkOps(){
           '<button class="btn primary" id="submitLinkOpsCommand" type="button">生成任务草案</button>'+
           '<button class="btn" id="clearLinkOpsCommand" type="button">清空</button>'+
         '</div>'+
-        '<p class="muted">说明：云服务器本身不懂自然语言；这里先用规则解析生成任务草案。后续接大模型后，可以把你的话解析得更准确，并能查询数据回答问题。</p>'+
+        '<p class="muted">说明：这里会先让云端只读智能体分析，再把结果沉淀为任务草案；确认前不会执行 SHEIN 写操作。</p>'+
       '</div>'+
       '<div>'+
         '<div class="section-block-label">常用指令模板</div>'+
@@ -8639,7 +8773,7 @@ function renderLinkOps(){
       '<div class="card-body">'+
         (opsAgentStore.busy ? '<div class="empty">云端智能体正在分析，请稍等几十秒。这个过程只读 BI 数据，不会改 SHEIN。</div>' :
           opsAgentStore.error ? '<div class="next warn">智能体回答失败：'+escapeHtml(opsAgentStore.error)+'</div>' :
-          opsAgentStore.answer ? '<div class="briefing">'+escapeHtml(opsAgentStore.answer).replace(/\\n/g,'<br>')+'</div><p class="muted">耗时 '+num(Math.round(opsAgentStore.durationMs/1000))+' 秒；问题：'+escapeHtml(opsAgentStore.lastQuestion)+'</p>' :
+          opsAgentStore.answer ? renderAgentAnswerCards(opsAgentStore.answer)+'<p class="muted">耗时 '+num(Math.round(opsAgentStore.durationMs/1000))+' 秒；问题：'+escapeHtml(opsAgentStore.lastQuestion)+'</p>' :
           '<div class="empty">输入一条自然语言指令后，这里会直接显示智能体的分析和建议。</div>')+
       '</div>'+
     '</div>';
@@ -8656,16 +8790,31 @@ function renderLinkOps(){
       const riskNotes = Array.isArray(t.preview?.riskNotes) ? t.preview.riskNotes : [];
       const nextChecks = Array.isArray(t.preview?.nextChecks) ? t.preview.nextChecks : [];
       const agentAnswer = String(t.preview?.agentAnswer || '').trim();
+      const titleCandidates = Array.isArray(t.preview?.titleCandidates) ? t.preview.titleCandidates : [];
+      const progress = Math.max(0, Math.min(100, Number(t.progress || 0)));
+      const history = Array.isArray(t.history) ? t.history.slice(-4).reverse() : [];
       return '<article class="linkops-task">'+
-        '<div class="row1"><div>'+intents.map(x => '<span class="tag mid">'+escapeHtml(linkOpsIntentLabel(x))+'</span>').join(' ')+'</div><span class="mono">'+escapeHtml(String(t.createdAt || '').replace('T',' ').slice(0,19))+'</span></div>'+
+        '<div class="row1"><div>'+intents.map(x => '<span class="tag mid">'+escapeHtml(linkOpsIntentLabel(x))+'</span>').join(' ')+'</div><span class="tag '+linkOpsStatusClass(t.status)+'">'+escapeHtml(linkOpsStatusLabel(t.status))+'</span></div>'+
         '<h4>'+escapeHtml(String(t.command || '').slice(0,180))+'</h4>'+
-        '<p>状态：<b>'+escapeHtml(t.status || 'draft')+'</b> · 提交人：'+escapeHtml(t.requestedBy || '-')+'</p>'+
+        '<p>提交人：'+escapeHtml(t.requestedBy || '-')+' · 创建：'+escapeHtml(String(t.createdAt || '').replace('T',' ').slice(0,19))+'</p>'+
+        '<div class="task-progress"><i style="width:'+num(progress)+'%"></i></div><p>进度：<b>'+num(progress)+'%</b>'+(t.note ? ' · '+escapeHtml(t.note) : '')+'</p>'+
         '<p>目标店：'+escapeHtml(stores.join(', ') || '待识别')+' · 货号/SKC：'+escapeHtml(refs.join(', ') || '待识别')+'</p>'+
         '<p>'+escapeHtml(t.preview?.summary || '等待执行前预览')+'</p>'+
-        (agentAnswer ? '<div class="next good"><b>智能体回复：</b><br>'+escapeHtml(agentAnswer).split(String.fromCharCode(10)).join('<br>')+'</div>' : '')+
+        (agentAnswer ? renderAgentAnswerCards(agentAnswer) : '')+
+        (titleCandidates.length ? '<div class="title-candidates"><div class="section-block-label">标题备选</div>'+titleCandidates.map((x,i) => '<div class="title-candidate"><b>备选 '+(i+1)+'：</b>'+escapeHtml(x)+'</div>').join('')+'</div>' : '')+
         renderLinkOpsDataAdvice(t)+
         (riskNotes.length ? '<ul class="linkops-preview-list">'+riskNotes.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul>' : '')+
         (nextChecks.length ? '<details style="margin-top:8px"><summary>执行前检查项</summary><ul class="linkops-preview-list">'+nextChecks.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul></details>' : '')+
+        (history.length ? '<details style="margin-top:8px"><summary>最近进度</summary><ul class="linkops-preview-list">'+history.map(h => '<li>'+escapeHtml(String(h.at || '').replace('T',' ').slice(0,19))+' · '+escapeHtml(h.event || '-')+' · '+escapeHtml(h.by || '-')+'</li>').join('')+'</ul></details>' : '')+
+        '<div class="task-actions">'+
+          '<button type="button" data-linkops-task-action="confirm" data-task-id="'+escapeHtml(t.id || '')+'">确认方案</button>'+
+          '<button type="button" data-linkops-task-action="title" data-task-id="'+escapeHtml(t.id || '')+'">生成/优化标题</button>'+
+          '<button type="button" data-linkops-task-action="improve" data-task-id="'+escapeHtml(t.id || '')+'">继续提意见</button>'+
+          '<button type="button" data-linkops-task-action="start" data-task-id="'+escapeHtml(t.id || '')+'">进入执行预备</button>'+
+          '<button type="button" data-linkops-task-action="done" data-task-id="'+escapeHtml(t.id || '')+'">标记完成</button>'+
+          '<button type="button" data-linkops-task-action="archive" data-task-id="'+escapeHtml(t.id || '')+'">归档</button>'+
+          '<button class="danger" type="button" data-linkops-task-action="delete" data-task-id="'+escapeHtml(t.id || '')+'">删除</button>'+
+        '</div>'+
       '</article>';
     }).join('');
   }
@@ -8675,6 +8824,17 @@ function renderLinkOps(){
   }));
   document.getElementById('submitLinkOpsCommand')?.addEventListener('click', submitLinkOpsCommand);
   document.getElementById('clearLinkOpsCommand')?.addEventListener('click', () => { const input = document.getElementById('linkOpsCommand'); if (input) input.value = ''; });
+  document.querySelectorAll('[data-linkops-task-action]').forEach(btn => btn.addEventListener('click', () => {
+    const id = btn.dataset.taskId || '';
+    const action = btn.dataset.linkopsTaskAction || '';
+    if (action === 'confirm') return patchLinkOpsTask(id, {event:'confirm', status:'confirmed', progress:25, note:'方案已人工确认，等待执行预备。'}, '已确认方案');
+    if (action === 'title') return improveLinkOpsTask(id, 'title');
+    if (action === 'improve') return improveLinkOpsTask(id, 'improve');
+    if (action === 'start') return patchLinkOpsTask(id, {event:'start_execution_prep', status:'in_progress', progress:55, note:'进入执行预备；正式写 SHEIN 前仍需最终确认。'}, '已进入执行预备');
+    if (action === 'done') return patchLinkOpsTask(id, {event:'mark_done', status:'done', progress:100, note:'已人工确认完成。'}, '已标记完成');
+    if (action === 'archive') return patchLinkOpsTask(id, {event:'archive', status:'archived', progress:100}, '已归档');
+    if (action === 'delete') return deleteLinkOpsTask(id);
+  }));
 }
 function renderProducts(){
   const rows = (DATA.products || []).filter(includes);

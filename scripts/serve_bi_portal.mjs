@@ -298,6 +298,7 @@ function buildLinkOpsTaskFromCommand(body, actor, req) {
     id,
     version: 1,
     status: 'draft',
+    progress: 10,
     source: 'natural_language',
     command,
     intents,
@@ -325,6 +326,14 @@ function buildLinkOpsTaskFromCommand(body, actor, req) {
       enabled: false,
       note: '基座阶段禁用自动执行。',
     },
+    history: [{
+      at: now,
+      event: 'created',
+      by: actorLabel(actor, req),
+      user: actorUser(actor, req),
+      status: 'draft',
+      progress: 10,
+    }],
   };
 }
 
@@ -335,6 +344,70 @@ function normalizeLinkOpsTaskStore(value) {
     updatedAt: value?.updatedAt || null,
     tasks: tasks.filter(x => x && typeof x === 'object').slice(0, 1000),
   };
+}
+
+const LINK_OPS_ALLOWED_STATUSES = new Set(['draft', 'confirmed', 'in_progress', 'waiting_review', 'done', 'archived']);
+
+function normalizeProgress(value, fallback = 0) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
+
+function appendTaskHistory(task, event, actor, req, extra = {}) {
+  const history = Array.isArray(task.history) ? task.history.slice(-80) : [];
+  history.push({
+    at: new Date().toISOString(),
+    event,
+    by: actorLabel(actor, req),
+    user: actorUser(actor, req),
+    ...extra,
+  });
+  return history;
+}
+
+function patchLinkOpsTask(task, body, actor, req) {
+  const next = {
+    ...task,
+    updatedAt: new Date().toISOString(),
+  };
+  const event = String(body.event || body.action || 'update').slice(0, 80);
+  if (body.status !== undefined) {
+    const status = String(body.status || '').trim();
+    if (!LINK_OPS_ALLOWED_STATUSES.has(status)) throw new Error(`Invalid status: ${status}`);
+    next.status = status;
+  }
+  if (body.progress !== undefined) {
+    next.progress = normalizeProgress(body.progress, normalizeProgress(task.progress, 0));
+  }
+  if (typeof body.note === 'string') {
+    next.note = body.note.trim().slice(0, 2000);
+  }
+  if (typeof body.command === 'string') {
+    next.command = body.command.trim().slice(0, 2000) || next.command;
+  }
+  if (body.preview && typeof body.preview === 'object') {
+    next.preview = {
+      ...(task.preview && typeof task.preview === 'object' ? task.preview : {}),
+      ...body.preview,
+    };
+    if (typeof next.preview.agentAnswer === 'string') next.preview.agentAnswer = next.preview.agentAnswer.slice(0, 16000);
+    if (typeof next.preview.structuredAnswer === 'string') next.preview.structuredAnswer = next.preview.structuredAnswer.slice(0, 16000);
+    if (Array.isArray(next.preview.titleCandidates)) next.preview.titleCandidates = next.preview.titleCandidates.slice(0, 20).map(x => String(x).slice(0, 240));
+  }
+  if (body.execution && typeof body.execution === 'object') {
+    next.execution = {
+      ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
+      ...body.execution,
+    };
+  }
+  next.history = appendTaskHistory(next, event, actor, req, {
+    status: next.status,
+    progress: normalizeProgress(next.progress, 0),
+    hasAgentAnswer: !!next.preview?.agentAnswer,
+    hasNote: !!next.note,
+  });
+  return next;
 }
 
 function runChildProcess(command, args, options = {}) {
@@ -663,6 +736,69 @@ async function main() {
             },
           });
           return sendJson(res, 200, {ok: true, data: next, task});
+        }
+        if (req.method === 'PATCH') {
+          if (args.readOnly) {
+            return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
+          }
+          let body;
+          try {
+            body = await readBodyJson(req);
+          } catch (err) {
+            return sendJson(res, 400, {ok: false, error: err?.message || String(err || 'Invalid request')});
+          }
+          const id = String(body.id || '').trim();
+          if (!id) return sendJson(res, 400, {ok: false, error: 'Missing task id'});
+          const current = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
+          const idx = current.tasks.findIndex(t => String(t.id || '') === id);
+          if (idx < 0) return sendJson(res, 404, {ok: false, error: 'Task not found'});
+          let updated;
+          try {
+            updated = patchLinkOpsTask(current.tasks[idx], body, actor, req);
+          } catch (err) {
+            return sendJson(res, 400, {ok: false, error: err?.message || String(err || 'Invalid patch')});
+          }
+          const tasks = current.tasks.slice();
+          tasks[idx] = updated;
+          const next = {version: 1, updatedAt: new Date().toISOString(), tasks};
+          await writeJsonFile(args.linkOpsTaskFile, next);
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'link-ops-task-update',
+            actor,
+            ...requestMeta(req),
+            task: {
+              id,
+              event: String(body.event || body.action || 'update').slice(0, 80),
+              status: updated.status,
+              progress: normalizeProgress(updated.progress, 0),
+            },
+          });
+          return sendJson(res, 200, {ok: true, data: next, task: updated});
+        }
+        if (req.method === 'DELETE') {
+          if (args.readOnly) {
+            return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
+          }
+          const id = String(url.searchParams.get('id') || '').trim();
+          if (!id) return sendJson(res, 400, {ok: false, error: 'Missing task id'});
+          const current = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
+          const task = current.tasks.find(t => String(t.id || '') === id);
+          if (!task) return sendJson(res, 404, {ok: false, error: 'Task not found'});
+          const next = {
+            version: 1,
+            updatedAt: new Date().toISOString(),
+            tasks: current.tasks.filter(t => String(t.id || '') !== id),
+          };
+          await writeJsonFile(args.linkOpsTaskFile, next);
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'link-ops-task-delete',
+            actor,
+            ...requestMeta(req),
+            task: {id, status: task.status, commandLength: String(task.command || '').length},
+          });
+          return sendJson(res, 200, {ok: true, data: next, deleted: {id}});
         }
         return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
       }
