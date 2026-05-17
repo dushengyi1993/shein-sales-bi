@@ -3148,6 +3148,9 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .ops-session:hover{transform:translateY(-1px);border-color:rgba(56,189,248,.34)}
     .ops-session.active{background:rgba(14,165,233,.14);border-color:rgba(56,189,248,.48)}
     .ops-session b{display:block;font-size:13px;margin-bottom:5px}.ops-session small{display:block;color:var(--muted);font-size:11px;line-height:1.45}
+    .ops-session-head{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:start}
+    .ops-session-delete{border:0;background:transparent;color:var(--muted);font-size:12px;cursor:pointer;border-radius:999px;padding:2px 6px}
+    .ops-session-delete:hover{background:rgba(248,113,113,.12);color:#fca5a5}
     .ops-reco{border:1px solid rgba(34,197,94,.18);border-radius:16px;background:rgba(20,83,45,.14);padding:10px;margin-bottom:8px;cursor:pointer}
     body[data-theme="light"] .ops-reco{background:#f0fdf4;border-color:#bbf7d0}
     .ops-reco b{display:block;font-size:12px;margin-bottom:4px}.ops-reco p{margin:0;color:var(--muted);font-size:12px;line-height:1.55}
@@ -3166,6 +3169,11 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     body[data-theme="light"] .linkops-hints button{background:#fff;border-color:#e2e8f0;color:#0f172a}
     .linkops-task{border:1px solid rgba(148,163,184,.16);border-radius:18px;background:rgba(15,23,42,.32);padding:13px;margin-bottom:10px}
     body[data-theme="light"] .linkops-task{background:#fff;border-color:#e2e8f0}
+    .linkops-task summary{list-style:none;cursor:pointer}
+    .linkops-task summary::-webkit-details-marker{display:none}
+    .task-summary{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center}
+    .task-summary h4{margin:0;font-size:14px}.task-summary small{display:block;color:var(--muted);font-size:11px;margin-top:4px}
+    .task-detail{margin-top:12px;padding-top:12px;border-top:1px solid rgba(148,163,184,.14)}
     .linkops-task h4{margin:0 0 7px;font-size:15px}
     .linkops-task p{margin:5px 0;color:var(--muted);line-height:1.55;font-size:12px}
     .linkops-preview-list{margin:8px 0 0;padding-left:18px;color:var(--muted);font-size:12px;line-height:1.65}
@@ -3649,13 +3657,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
         </div>
         <div class="card-body" id="linkOpsCommandCenter"></div>
       </div>
-      <div class="card">
-        <div class="card-h">
-          <div><h3>链接运营任务池</h3><div class="sub">后续补链接、复制上品、换标题、换图、下架、营销活动和限时折扣都会先进入这里。</div></div>
-          <button class="btn" id="refreshLinkOpsTasks" type="button">刷新任务池</button>
-        </div>
-        <div class="card-body" id="linkOpsTaskList"></div>
-      </div>
+      <div id="linkOpsTaskList" style="display:none"></div>
     </section>
 
     <section id="comments" class="section">
@@ -4076,11 +4078,30 @@ async function sendLinkOpsChatMessage(){
   const message = String(input?.value || '').trim();
   if (!message) return showToast('先输入一条会话消息');
   if (actionStateStore.mode !== 'service') return showToast('当前不是网页服务模式，不能创建会话');
+  const now = new Date().toISOString();
+  const localId = linkOpsChatStore.activeId || ('local_' + Date.now());
+  const localMsg = {id:'local_msg_' + Date.now(), role:'user', content:message, at:now};
+  if (linkOpsChatStore.activeId) {
+    linkOpsChatStore.sessions = (linkOpsChatStore.sessions || []).map(s => String(s.id || '') === String(linkOpsChatStore.activeId)
+      ? {...s, updatedAt:now, messages:[...(Array.isArray(s.messages) ? s.messages : []), localMsg]}
+      : s);
+  } else {
+    linkOpsChatStore.activeId = localId;
+    linkOpsChatStore.sessions = [{
+      id: localId,
+      status: 'sending',
+      title: message.slice(0,80),
+      createdAt: now,
+      updatedAt: now,
+      messages: [localMsg],
+    }, ...(linkOpsChatStore.sessions || [])];
+  }
+  if (input) input.value = '';
   opsAgentStore.busy = true;
   opsAgentStore.error = '';
   renderAll();
   try {
-    const body = {message, sessionId: linkOpsChatStore.activeId || ''};
+    const body = {message, sessionId: localId.startsWith('local_') ? '' : localId};
     const res = await fetch(LINK_OPS_CHATS_API, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
@@ -4098,6 +4119,27 @@ async function sendLinkOpsChatMessage(){
   } finally {
     opsAgentStore.busy = false;
     renderAll();
+  }
+}
+async function deleteLinkOpsChatSession(id){
+  if (!id) return;
+  if (String(id).startsWith('local_')) {
+    linkOpsChatStore.sessions = (linkOpsChatStore.sessions || []).filter(s => String(s.id || '') !== String(id));
+    if (linkOpsChatStore.activeId === id) linkOpsChatStore.activeId = linkOpsChatStore.sessions[0]?.id || '';
+    renderAll();
+    return;
+  }
+  if (!confirm('确定删除这个会话？已经进入任务池的任务不会被删除。')) return;
+  try {
+    const res = await fetch(LINK_OPS_CHATS_API + '?id=' + encodeURIComponent(id), {method:'DELETE'});
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || !payload.ok) throw new Error(payload.error || ('HTTP ' + res.status));
+    linkOpsChatStore.sessions = Array.isArray(payload?.data?.sessions) ? payload.data.sessions : [];
+    if (linkOpsChatStore.activeId === id) linkOpsChatStore.activeId = linkOpsChatStore.sessions[0]?.id || '';
+    showToast('会话已删除');
+    renderAll();
+  } catch (err) {
+    showToast('删除会话失败：' + (err?.message || String(err || 'unknown')));
   }
 }
 async function newLinkOpsChatFromPrompt(promptText = ''){
@@ -8912,7 +8954,7 @@ function renderLinkOps(){
         (sessions.length ? sessions.map(s => {
           const count = Array.isArray(s.messages) ? s.messages.length : 0;
           const activeCls = String(s.id || '') === String(linkOpsChatStore.activeId || '') ? ' active' : '';
-          return '<div class="ops-session'+activeCls+'" data-linkops-session-id="'+escapeHtml(s.id || '')+'"><b>'+escapeHtml(s.title || '未命名会话')+'</b><small>'+escapeHtml(linkOpsStatusLabel(s.status || 'chatting'))+' · '+num(count)+' 条消息 · '+escapeHtml(String(s.updatedAt || s.createdAt || '').replace('T',' ').slice(0,16))+'</small></div>';
+          return '<div class="ops-session'+activeCls+'" data-linkops-session-id="'+escapeHtml(s.id || '')+'"><div class="ops-session-head"><div><b>'+escapeHtml(s.title || '未命名会话')+'</b><small>'+escapeHtml(s.status === 'sending' ? '发送中' : linkOpsStatusLabel(s.status || 'chatting'))+' · '+num(count)+' 条消息 · '+escapeHtml(String(s.updatedAt || s.createdAt || '').replace('T',' ').slice(0,16))+'</small></div><button class="ops-session-delete" type="button" data-linkops-session-delete="'+escapeHtml(s.id || '')+'">删除</button></div></div>';
         }).join('') : '<div class="empty">还没有会话。点右侧推荐指令，或直接输入你的运营问题。</div>')+
         '<div style="margin-top:14px"><div class="section-block-label">基于当前数据的推荐指令</div>'+
           prompts.map(p => '<div class="ops-reco" data-linkops-reco="'+escapeHtml(p.text)+'"><b>'+escapeHtml(p.title)+'</b><p>'+escapeHtml(p.reason)+'</p></div>').join('')+
@@ -8951,9 +8993,10 @@ function renderLinkOps(){
       const agentAnswer = String(t.preview?.agentAnswer || '').trim();
       const progress = Math.max(0, Math.min(100, Number(t.progress || 0)));
       const history = Array.isArray(t.history) ? t.history.slice(-3).reverse() : [];
-      return '<article class="linkops-task">'+
-        '<div class="row1"><div>'+intents.map(x => '<span class="tag mid">'+escapeHtml(linkOpsIntentLabel(x))+'</span>').join(' ')+'</div><span class="tag '+linkOpsStatusClass(t.status)+'">'+escapeHtml(linkOpsStatusLabel(t.status))+'</span></div>'+
-        '<h4>'+escapeHtml(String(t.command || '').slice(0,120))+'</h4>'+
+      return '<details class="linkops-task">'+
+        '<summary class="task-summary"><div><h4>'+escapeHtml(String(t.command || '').slice(0,120))+'</h4><small>'+escapeHtml(stores.join(', ') || '待识别店铺')+' · '+escapeHtml(refs.join(', ') || '待识别货号')+' · 进度 '+num(progress)+'%</small></div><span class="tag '+linkOpsStatusClass(t.status)+'">'+escapeHtml(linkOpsStatusLabel(t.status))+'</span></summary>'+
+        '<div class="task-detail">'+
+        '<div class="row1"><div>'+intents.map(x => '<span class="tag mid">'+escapeHtml(linkOpsIntentLabel(x))+'</span>').join(' ')+'</div><span class="muted">'+escapeHtml(String(t.createdAt || '').replace('T',' ').slice(0,16))+'</span></div>'+
         '<div class="task-progress"><i style="width:'+num(progress)+'%"></i></div><p>进度：<b>'+num(progress)+'%</b>'+(t.note ? ' · '+escapeHtml(t.note) : '')+'</p>'+
         '<p>目标店：'+escapeHtml(stores.join(', ') || '待识别')+' · 货号/SKC：'+escapeHtml(refs.join(', ') || '待识别')+'</p>'+
         (agentAnswer ? '<details style="margin-top:8px" open><summary>智能体结论</summary>'+renderAgentAnswerCards(agentAnswer)+'</details>' : '')+
@@ -8969,11 +9012,16 @@ function renderLinkOps(){
           '<button type="button" data-linkops-task-action="archive" data-task-id="'+escapeHtml(t.id || '')+'">归档</button>'+
           '<button class="danger" type="button" data-linkops-task-action="delete" data-task-id="'+escapeHtml(t.id || '')+'">删除</button>'+
         '</div>'+
-      '</article>';
+        '</div>'+
+      '</details>';
     }).join('');
   };
   targetList.innerHTML = renderTaskList();
   if (targetList !== list) list.innerHTML = '';
+  document.querySelectorAll('[data-linkops-session-delete]').forEach(btn => btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    deleteLinkOpsChatSession(btn.dataset.linkopsSessionDelete || '');
+  }));
   document.querySelectorAll('[data-linkops-session-id]').forEach(el => el.addEventListener('click', () => { linkOpsChatStore.activeId = el.dataset.linkopsSessionId || ''; renderAll(); }));
   document.querySelectorAll('[data-linkops-reco]').forEach(el => el.addEventListener('click', () => newLinkOpsChatFromPrompt(el.dataset.linkopsReco || '')));
   document.getElementById('newOpsChat')?.addEventListener('click', () => newLinkOpsChatFromPrompt(''));
