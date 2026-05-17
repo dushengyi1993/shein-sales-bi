@@ -5,10 +5,14 @@ import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import crypto from 'node:crypto';
 import readline from 'node:readline';
+import os from 'node:os';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DATA_PATH = process.env.SHEIN_QA_BI_DATA || path.join(ROOT, 'outputs', 'bi-portal', 'data.json');
 const STATE_DIR = process.env.SHEIN_QA_STATE_DIR || path.join(ROOT, 'state', 'lark_sales_qa_bot');
+const CODEX_CONFIG_DIR = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+const LLM_TIMEOUT_MS = Number(process.env.SHEIN_QA_LLM_TIMEOUT_MS || 20_000);
+const LLM_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_LLM_ENABLED || '1').toLowerCase());
 const STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ'];
 
 function parseArgs(argv) {
@@ -121,6 +125,175 @@ function rowSummary(row) {
   return `${moneySar(row?.gross_sales_sar ?? row?.sales_sar)}，订单 ${intNum(row?.gross_orders ?? row?.orders)}，销量 ${intNum(row?.gross_quantity ?? row?.quantity)}`;
 }
 
+function topRows(rows, metric, limit = 8) {
+  return [...(rows || [])]
+    .sort((a, b) => n(b?.[metric]) - n(a?.[metric]))
+    .slice(0, limit);
+}
+
+function compactSalesContext(question, data) {
+  const q = normalizeText(question);
+  const date = pickDate(q, data);
+  const store = pickStore(q);
+  const product = findProduct(q, data);
+  const dailyStores = (data.rankings?.dailyStores || []).filter(r => r.date === date);
+  const dailyProducts = (data.rankings?.dailyProducts || []).filter(r => r.date === date);
+  const dailyStoreProducts = (data.rankings?.dailyStoreProducts || []).filter(r => r.date === date);
+  const scopedStoreProducts = store && !['DSY', 'LGM'].includes(store)
+    ? dailyStoreProducts.filter(r => r.store_key === store)
+    : store === 'DSY' || store === 'LGM'
+      ? dailyStoreProducts.filter(r => r.group_key === store)
+      : dailyStoreProducts;
+  const productStoreRows = product ? dailyStoreProducts.filter(r => r.standard_goods_sn === product) : [];
+  const linkRows = (data.storeLinks || data.links || [])
+    .filter(r => {
+      if (store && !['DSY', 'LGM'].includes(store) && r.store_key !== store) return false;
+      if ((store === 'DSY' || store === 'LGM') && r.group_key !== store) return false;
+      if (product && r.standard_goods_sn !== product && !String(r.standard_goods_sn || '').includes(product)) return false;
+      return true;
+    })
+    .sort((a, b) => n(b.c30_sale_cnt) - n(a.c30_sale_cnt) || n(b.c30_goods_uv || b.goods_uv) - n(a.c30_goods_uv || a.goods_uv))
+    .slice(0, 30);
+  const matrixRows = (data.matrix || [])
+    .filter(r => {
+      if (store && !['DSY', 'LGM'].includes(store) && r.store_key !== store) return false;
+      if ((store === 'DSY' || store === 'LGM') && r.group_key !== store) return false;
+      if (product && r.standard_goods_sn !== product && !String(r.standard_goods_sn || '').includes(product)) return false;
+      return true;
+    })
+    .sort((a, b) => n(b.max_action_score) - n(a.max_action_score) || n(b.sales_sar) - n(a.sales_sar))
+    .slice(0, 30);
+  const summary = (data.rankings?.salesSummary || []).filter(r => r.end_date === date).slice(0, 12);
+  return {
+    dataFreshness: {
+      askedDate: date,
+      generatedAt: data.generatedAt || '',
+      salesUpdatedAt: data.dates?.salesUpdatedAt || '',
+      linkDate: data.dates?.linkDate || '',
+      businessDate: data.dates?.businessDate || '',
+    },
+    detected: {store, product},
+    salesSummary: summary,
+    storeTop: topRows(store ? dailyStores.filter(r => store === 'DSY' ? r.group_key === 'DSY' : store === 'LGM' ? r.group_key === 'LGM' : r.store_key === store) : dailyStores, 'gross_sales_sar', 16),
+    productTop: topRows(product ? dailyProducts.filter(r => r.standard_goods_sn === product) : dailyProducts, 'gross_sales_sar', 16),
+    storeProductTop: topRows(product ? productStoreRows : scopedStoreProducts, 'gross_sales_sar', 24),
+    links: linkRows.map(r => ({
+      store_key: r.store_key,
+      standard_goods_sn: r.standard_goods_sn,
+      skc: r.skc,
+      status: r.shelf_status_name,
+      is_on_shelf: r.is_on_shelf,
+      is_wait_shelf: r.is_wait_shelf,
+      c7_sale_cnt: r.c7_sale_cnt,
+      c30_sale_cnt: r.c30_sale_cnt,
+      c30_goods_uv: r.c30_goods_uv,
+      c30_eps_uv: r.c30_eps_uv,
+      click_rate: r.click_rate,
+      pay_rate: r.pay_rate,
+      retire_candidate: r.retire_candidate,
+      high_exposure_low_click: r.high_exposure_low_click,
+      high_visit_low_pay: r.high_visit_low_pay,
+      wait_shelf_block_candidate: r.wait_shelf_block_candidate,
+      health_bucket: r.health_bucket,
+    })),
+    coverage: matrixRows.map(r => ({
+      store_key: r.store_key,
+      standard_goods_sn: r.standard_goods_sn,
+      coverage_status: r.coverage_status,
+      need_supplement_link: r.need_supplement_link,
+      link_count: r.link_count,
+      on_shelf_count: r.on_shelf_count,
+      wait_shelf_count: r.wait_shelf_count,
+      best_skc: r.best_skc,
+      best_link_c30_sale: r.best_link_c30_sale,
+      sales_sar: r.sales_sar,
+      quantity: r.quantity,
+      action_count: r.action_count,
+      max_action_score: r.max_action_score,
+    })),
+  };
+}
+
+async function readCodexSettings() {
+  const configPath = process.env.CODEX_CONFIG_FILE || path.join(CODEX_CONFIG_DIR, 'config.toml');
+  const authPath = process.env.CODEX_AUTH_FILE || path.join(CODEX_CONFIG_DIR, 'auth.json');
+  const [configRaw, authRaw] = await Promise.all([
+    fs.readFile(configPath, 'utf8').catch(() => ''),
+    fs.readFile(authPath, 'utf8').catch(() => ''),
+  ]);
+  const model = process.env.SHEIN_QA_MODEL || configRaw.match(/^\s*model\s*=\s*"([^"]+)"/m)?.[1] || 'gpt-5.5';
+  const provider = configRaw.match(/^\s*model_provider\s*=\s*"([^"]+)"/m)?.[1] || '';
+  let baseUrl = process.env.OPENAI_BASE_URL || '';
+  if (!baseUrl && provider) {
+    const section = new RegExp(`\\[model_providers\\.${provider.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\]([\\s\\S]*?)(?:\\n\\[|$)`).exec(configRaw)?.[1] || '';
+    baseUrl = section.match(/^\s*base_url\s*=\s*"([^"]+)"/m)?.[1] || '';
+  }
+  let apiKey = process.env.OPENAI_API_KEY || '';
+  if (!apiKey && authRaw) {
+    try {
+      const auth = JSON.parse(authRaw);
+      apiKey = auth.OPENAI_API_KEY || auth.openai_api_key || auth.api_key || '';
+    } catch {}
+  }
+  return {model, baseUrl: (baseUrl || 'https://api.openai.com/v1').replace(/\/$/, ''), apiKey};
+}
+
+async function callReadonlyLlm(question, context) {
+  if (!LLM_ENABLED) return null;
+  const {model, baseUrl, apiKey} = await readCodexSettings();
+  if (!apiKey) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
+  try {
+    const payload = {
+      model,
+      input: [
+        {
+          role: 'system',
+          content: [
+            {
+              type: 'input_text',
+              text: [
+                '你是 SHEIN 沙特半托管运营数据只读助手。',
+                '你只能根据用户问题和提供的 JSON 数据回答销售、店铺、货号、链接表现、覆盖、售后/利润等经营问题。',
+                '不要编造未提供的数据；缺数据就明确说缺哪类数据。',
+                '不要给出修改 BI 系统、服务器、代码、密钥、账号、非 SHEIN 业务的建议。',
+                '涉及上品、改标题、换图、下架、活动报名、限时折扣等写操作时，只能给“建议/需人工确认”，不能说已经执行。',
+                '回答要简洁，优先给结论、关键数字、原因和下一步。数字保留 SAR / 订单 / 销量单位。',
+              ].join('\n')
+            }
+          ]
+        },
+        {
+          role: 'user',
+          content: [
+            {type: 'input_text', text: `用户问题：${question}`},
+            {type: 'input_text', text: `只读数据上下文 JSON：${JSON.stringify(context)}`},
+          ]
+        }
+      ],
+      max_output_tokens: 900,
+    };
+    const res = await fetch(`${baseUrl}/responses`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const raw = await res.text();
+    if (!res.ok) throw new Error(`LLM HTTP ${res.status}: ${raw.slice(0, 300)}`);
+    const json = JSON.parse(raw);
+    const text = json.output_text ||
+      (Array.isArray(json.output) ? json.output.flatMap(item => item.content || []).map(c => c.text || '').filter(Boolean).join('\n') : '');
+    return String(text || '').trim() || null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function answerQuestion(text, data) {
   const q = normalizeText(text);
   const date = pickDate(q, data);
@@ -191,6 +364,20 @@ function answerQuestion(text, data) {
   ].join('\n');
 }
 
+async function answerQuestionSmart(text, data) {
+  const context = compactSalesContext(text, data);
+  try {
+    const llmAnswer = await callReadonlyLlm(text, context);
+    if (llmAnswer) {
+      const latestNote = `\n\n数据口径：${context.dataFreshness.askedDate || '-'}；BI生成：${context.dataFreshness.generatedAt || '-'}；销售源：${context.dataFreshness.salesUpdatedAt || '-'}`;
+      return `${llmAnswer}${latestNote}`;
+    }
+  } catch (err) {
+    console.error(JSON.stringify({ok: false, stage: 'llm_answer_failed', error: String(err?.message || err).slice(0, 800)}));
+  }
+  return answerQuestion(text, data);
+}
+
 function shouldAnswerEvent(event) {
   const content = normalizeText(event?.content || '');
   if (!content) return false;
@@ -232,7 +419,7 @@ async function handleEvent(event, options = {}) {
   if (!shouldAnswerEvent(event)) return {ok: true, skipped: true, reason: 'not_sales_question'};
   if (await alreadyHandled(eventId)) return {ok: true, skipped: true, reason: 'duplicate'};
   const data = await readData();
-  const answer = answerQuestion(event.content || '', data);
+  const answer = await answerQuestionSmart(event.content || '', data);
   const sendArgs = [
     'im', '+messages-reply',
     '--as', 'bot',
@@ -275,7 +462,7 @@ async function consume(options = {}) {
 const args = parseArgs(process.argv.slice(2));
 if (args.answer) {
   const data = await readData();
-  console.log(answerQuestion(args.answer, data));
+  console.log(await answerQuestionSmart(args.answer, data));
 } else if (args.consume) {
   await consume({dryRun: args.dryRun});
 } else {
