@@ -8487,6 +8487,95 @@ function linkOpsIntentLabel(intent){
   };
   return map[intent] || intent || '任务';
 }
+function linkOpsMatchProductRef(row, refs = []){
+  if (!refs.length) return false;
+  const hay = [
+    row?.standard_goods_sn,
+    row?.skc,
+    row?.product_name_cn,
+    row?.goods_sn,
+    row?.product_code
+  ].filter(Boolean).join(' ').toLowerCase();
+  return refs.some(ref => {
+    const q = String(ref || '').trim().toLowerCase();
+    if (!q) return false;
+    const compact = q.replace(/[\s-]/g, '');
+    const hayCompact = hay.replace(/[\s-]/g, '');
+    return hay.includes(q) || hayCompact.includes(compact);
+  });
+}
+function linkOpsStoreAdvice(matrix, storeLinks){
+  const links = storeLinks || [];
+  const onShelf = links.filter(isOnShelfLink);
+  const wait = links.filter(isWaitShelfLink);
+  const problemLinks = links.filter(x =>
+    x.retire_candidate ||
+    x.high_exposure_low_click ||
+    x.high_visit_low_pay ||
+    x.wait_shelf_block_candidate ||
+    (Number(x.c30_sale_cnt || 0) === 0 && Number(x.c7_sale_cnt || 0) === 0 && onShelf.length > 1)
+  );
+  const best = [...onShelf].sort((a,b) =>
+    Number(b.c30_sale_cnt || 0) - Number(a.c30_sale_cnt || 0) ||
+    Number(b.c7_sale_cnt || 0) - Number(a.c7_sale_cnt || 0) ||
+    Number(b.c30_goods_uv || b.goods_uv || 0) - Number(a.c30_goods_uv || a.goods_uv || 0)
+  )[0] || null;
+  const actions = [];
+  if (matrix?.need_supplement_link || (!onShelf.length && wait.length)) {
+    actions.push('补新链接：当前没有已上架承接，优先用其他店同款 SKC 复制参数/证书/图片，先建草稿。');
+  }
+  if (problemLinks.some(x => x.retire_candidate) || (onShelf.length > 1 && problemLinks.length)) {
+    actions.push('下架/归档：有重复弱链接，先确认不是唯一承接，再下架弱链或等替代链接上架后归档。');
+  }
+  if (problemLinks.some(x => x.high_exposure_low_click)) {
+    actions.push('换图/标题：存在高曝光低点击，优先改主图、标题关键词和价格露出。');
+  }
+  if (problemLinks.some(x => x.high_visit_low_pay)) {
+    actions.push('修支付：存在高访客低支付，优先检查价格、评价、活动承接和详情页。');
+  }
+  if (!actions.length && best) actions.push('保留观察：已有上架链接，先保留当前最佳，继续跟踪 7/30 天表现。');
+  if (!actions.length) actions.push('暂不处理：当前数据不足，先等待链接日更或人工补充目标。');
+  return {onShelf, wait, problemLinks, best, actions};
+}
+function renderLinkOpsDataAdvice(task){
+  const refs = Array.isArray(task?.targets?.productRefs) ? task.targets.productRefs : [];
+  if (!refs.length) return '';
+  const matrixRows = (DATA.matrix || []).filter(r => linkOpsMatchProductRef(r, refs));
+  const linkRows = (DATA.storeLinks || DATA.links || []).filter(r => linkOpsMatchProductRef(r, refs));
+  if (!matrixRows.length && !linkRows.length) {
+    return '<div class="next warn">没有在当前 BI 快照里匹配到这些货号/SKC：'+escapeHtml(refs.join(', '))+'。请确认货号写法，或等待链接/业务域日更。</div>';
+  }
+  const stores = [...new Set([...(DATA.stores || []).map(s => s.store_key || s.key || s.code).filter(Boolean), ...matrixRows.map(r => r.store_key), ...linkRows.map(r => r.store_key)])]
+    .sort((a,b)=>storeOrderIndex(a)-storeOrderIndex(b) || String(a).localeCompare(String(b)));
+  const rows = stores.map(store => {
+    const m = matrixRows.find(x => x.store_key === store) || null;
+    const links = linkRows.filter(x => x.store_key === store);
+    return {store, matrix:m, links, advice:linkOpsStoreAdvice(m, links)};
+  }).filter(x => x.matrix || x.links.length);
+  const summary = {
+    stores: rows.length,
+    needSupplement: rows.filter(x => x.matrix?.need_supplement_link || (!x.advice.onShelf.length && x.advice.wait.length)).length,
+    problem: rows.filter(x => x.advice.problemLinks.length).length,
+    onShelf: rows.reduce((s,x)=>s+x.advice.onShelf.length,0),
+    wait: rows.reduce((s,x)=>s+x.advice.wait.length,0),
+  };
+  return '<div style="margin-top:12px">'+
+    '<div class="section-block-label">基于当前 BI 数据的建议</div>'+
+    '<div class="brief-grid five" style="margin-bottom:10px">'+
+      '<div class="brief-kpi"><span>命中店铺</span><strong>'+num(summary.stores)+'</strong><small>当前快照</small></div>'+
+      '<div class="brief-kpi"><span>需补覆盖</span><strong>'+num(summary.needSupplement)+'</strong><small>缺上架/只有待上架</small></div>'+
+      '<div class="brief-kpi"><span>问题店铺</span><strong>'+num(summary.problem)+'</strong><small>存在弱链/承接问题</small></div>'+
+      '<div class="brief-kpi"><span>上架链接</span><strong>'+num(summary.onShelf)+'</strong><small>同货号</small></div>'+
+      '<div class="brief-kpi"><span>待上架</span><strong>'+num(summary.wait)+'</strong><small>可优先补资料</small></div>'+
+    '</div>'+
+    table(rows, [
+      ['店铺', r => '<b>'+escapeHtml(r.store)+'</b>'],
+      ['覆盖', r => '<span class="tag '+(r.matrix?.need_supplement_link ? 'mid' : r.advice.onShelf.length ? 'good' : 'info')+'">'+escapeHtml(r.matrix?.coverage_status || (r.advice.onShelf.length ? '有上架链接' : r.advice.wait.length ? '只有待上架' : '暂无链接'))+'</span><br><span class="muted">上架 '+num(r.advice.onShelf.length)+' / 待上架 '+num(r.advice.wait.length)+' / 问题 '+num(r.advice.problemLinks.length)+'</span>'],
+      ['最佳/参考', r => r.advice.best ? '<span class="mono">'+escapeHtml(r.advice.best.skc || '-')+'</span><br><span class="muted">30天销量 '+num(r.advice.best.c30_sale_cnt)+' · 访客 '+num(r.advice.best.c30_goods_uv || r.advice.best.goods_uv)+'</span>' : '<span class="muted">暂无上架参考</span>'],
+      ['建议', r => '<ul class="linkops-preview-list">'+r.advice.actions.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul>']
+    ], {limit:false})+
+  '</div>';
+}
 function renderLinkOps(){
   const center = $('linkOpsCommandCenter');
   const list = $('linkOpsTaskList');
@@ -8531,6 +8620,7 @@ function renderLinkOps(){
         '<p>状态：<b>'+escapeHtml(t.status || 'draft')+'</b> · 提交人：'+escapeHtml(t.requestedBy || '-')+'</p>'+
         '<p>目标店：'+escapeHtml(stores.join(', ') || '待识别')+' · 货号/SKC：'+escapeHtml(refs.join(', ') || '待识别')+'</p>'+
         '<p>'+escapeHtml(t.preview?.summary || '等待执行前预览')+'</p>'+
+        renderLinkOpsDataAdvice(t)+
         (riskNotes.length ? '<ul class="linkops-preview-list">'+riskNotes.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul>' : '')+
         (nextChecks.length ? '<details style="margin-top:8px"><summary>执行前检查项</summary><ul class="linkops-preview-list">'+nextChecks.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul></details>' : '')+
       '</article>';
