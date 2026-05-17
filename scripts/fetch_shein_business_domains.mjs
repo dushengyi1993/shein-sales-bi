@@ -755,6 +755,26 @@ async function writeStoreResult(args, result) {
       result = merged;
     }
   }
+  if ((result.errors || []).length && fssync.existsSync(file)) {
+    let existing = null;
+    try { existing = JSON.parse(await fs.readFile(file, 'utf8')); } catch {}
+    if (existing?.store?.storeKey === result.store.storeKey) {
+      const existingCounts = buildCounts(existing);
+      const nextCounts = buildCounts(result);
+      const existingTotal = Object.values(existingCounts).reduce((sum, value) => sum + Number(value || 0), 0);
+      const nextTotal = Object.values(nextCounts).reduce((sum, value) => sum + Number(value || 0), 0);
+      if (existingTotal > 0 && nextTotal === 0) {
+        console.warn(`[${result.store.storeKey}] skip overwrite: new business-domain result has ${result.errors.length} errors and 0 rows; keeping existing ${file}`);
+        return file;
+      }
+    }
+  }
+  const totalRows = Object.values(buildCounts(result)).reduce((sum, value) => sum + Number(value || 0), 0);
+  if ((result.errors || []).length && totalRows === 0) {
+    const error = new Error(`all selected business-domain fetches failed or returned 0 rows; skip writing ${file}`);
+    error.result = result;
+    throw error;
+  }
   // Keep normalized page data complete; downstream warehouse loading depends on
   // these rows. The script still does not persist cookies, headers or tokens.
   await fs.writeFile(file, JSON.stringify(result, null, 2), 'utf8');

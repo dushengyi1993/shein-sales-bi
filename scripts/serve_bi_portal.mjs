@@ -199,6 +199,13 @@ function authenticateRequest(req, res, users) {
 }
 
 function normalizeRemoteAddress(req) {
+  const forwardedFor = String(req.headers['x-forwarded-for'] || '')
+    .split(',')
+    .map(x => x.trim())
+    .filter(Boolean)[0];
+  const forwardedRealIp = String(req.headers['x-real-ip'] || '').trim();
+  const forwarded = forwardedFor || forwardedRealIp;
+  if (forwarded) return forwarded.startsWith('::ffff:') ? forwarded.slice(7) : forwarded;
   const raw = String(req.socket.remoteAddress || '');
   if (raw.startsWith('::ffff:')) return raw.slice(7);
   if (raw === '::1') return '127.0.0.1';
@@ -216,6 +223,16 @@ function actorUser(actor, req) {
 async function appendAudit(file, entry) {
   await fs.mkdir(path.dirname(file), {recursive: true});
   await fs.appendFile(file, JSON.stringify(entry) + '\n', 'utf8');
+}
+
+function requestMeta(req) {
+  return {
+    remoteAddress: normalizeRemoteAddress(req),
+    socketAddress: req.socket.remoteAddress || '',
+    forwardedFor: String(req.headers['x-forwarded-for'] || ''),
+    realIp: String(req.headers['x-real-ip'] || ''),
+    userAgent: req.headers['user-agent'] || '',
+  };
 }
 
 async function readBodyJson(req, limitBytes = 1024 * 1024) {
@@ -372,8 +389,7 @@ async function main() {
             at: new Date().toISOString(),
             type: 'first-run-check',
             actor,
-            remoteAddress: normalizeRemoteAddress(req),
-            userAgent: req.headers['user-agent'] || '',
+            ...requestMeta(req),
           });
           if (firstRunCheckInFlight) return sendJson(res, 409, {ok: false, error: 'First run check already running'});
           firstRunCheckInFlight = true;
@@ -433,8 +449,7 @@ async function main() {
             at: new Date().toISOString(),
             type: 'action-state',
             actor,
-            remoteAddress: normalizeRemoteAddress(req),
-            userAgent: req.headers['user-agent'] || '',
+            ...requestMeta(req),
             patches: patches.map(p => ({
               key: String(p.key || '').slice(0, 240),
               status: String(p.status || 'open'),
