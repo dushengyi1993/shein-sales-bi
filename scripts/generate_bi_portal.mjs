@@ -4078,8 +4078,9 @@ async function submitLinkOpsCommand(){
 function splitAgentAnswer(text){
   const raw = String(text || '').trim();
   if (!raw) return [];
-  const normalized = raw.replace(/\r/g, '').replace(/；/g, '；\n').replace(/。(?=补|下|换|优|关|可|数|原|下|如果|建议|需|当前)/g, '。\n');
-  const parts = normalized.split('\n').map(x => x.trim()).filter(Boolean);
+  const nl = String.fromCharCode(10);
+  const normalized = raw.split(String.fromCharCode(13)).join('').split('；').join('；'+nl).replace(/。(?=补|下|换|优|关|可|数|原|下|如果|建议|需|当前)/g, '。'+nl);
+  const parts = normalized.split(nl).map(x => x.trim()).filter(Boolean);
   const groups = [
     {title:'结论', match:/^(结论|总体|建议|当前)/, items:[]},
     {title:'关键依据', match:/(数据|关键|曝光|UV|销量|订单|销售|覆盖|链接|店铺)/, items:[]},
