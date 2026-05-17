@@ -13,6 +13,8 @@ const STATE_DIR = process.env.SHEIN_QA_STATE_DIR || path.join(ROOT, 'state', 'la
 const CODEX_CONFIG_DIR = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
 const LLM_TIMEOUT_MS = Number(process.env.SHEIN_QA_LLM_TIMEOUT_MS || 45_000);
 const LLM_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_LLM_ENABLED || '1').toLowerCase());
+const CODEX_GATEWAY_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_CODEX_GATEWAY_ENABLED || '1').toLowerCase());
+const CODEX_GATEWAY_TIMEOUT_MS = Number(process.env.SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS || 120_000);
 const STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ'];
 
 function parseArgs(argv) {
@@ -327,6 +329,95 @@ async function callReadonlyLlm(question, context) {
   }
 }
 
+function stripCodexCliNoise(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return '';
+  const marker = 'FINAL_ANSWER:';
+  const idx = raw.lastIndexOf(marker);
+  if (idx >= 0) return raw.slice(idx + marker.length).trim();
+  return raw
+    .split(/\r?\n/)
+    .filter(line => !/^(OpenAI Codex|--------|workdir:|model:|provider:|approval:|sandbox:|reasoning|session id:|tokens used|user$|codex$|warning:|deprecated:)/i.test(line.trim()))
+    .join('\n')
+    .trim();
+}
+
+function runProcess(command, args, options = {}) {
+  return new Promise(resolve => {
+    const child = spawn(command, args, {
+      cwd: options.cwd || ROOT,
+      env: {...process.env, ...(options.env || {})},
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+      setTimeout(() => child.kill('SIGKILL'), 2000).unref?.();
+    }, options.timeoutMs || 60_000);
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', d => stdout += d);
+    child.stderr.on('data', d => stderr += d);
+    child.on('error', err => {
+      clearTimeout(timer);
+      resolve({ok: false, code: -1, timedOut, stdout, stderr: String(err?.stack || err)});
+    });
+    child.on('close', code => {
+      clearTimeout(timer);
+      resolve({ok: code === 0 && !timedOut, code, timedOut, stdout, stderr});
+    });
+    child.stdin.end(options.input || '');
+  });
+}
+
+async function callReadonlyCodexGateway(question, context) {
+  if (!CODEX_GATEWAY_ENABLED) return null;
+  const prompt = [
+    '你是 SHEIN 沙特半托管运营数据只读智能体，运行在受控网关里。',
+    '你只能根据下面提供的 BI JSON 上下文回答问题，不允许调用外部网站，不允许修改文件，不允许执行 SHEIN 写操作。',
+    '如果用户问上品、改标题、换图、下架、活动、限时折扣，只能给建议和需要人工确认的任务，不要说已经执行。',
+    '如果问题超出 SHEIN 经营数据、链接管理、销售、货号、店铺、售后、利润范围，直接拒绝。',
+    '回答要像运营负责人：先结论，再关键数字，再可能原因/下一步。不要只机械列排行。',
+    '最终只输出一段中文，并以 FINAL_ANSWER: 开头。',
+    '',
+    `用户问题：${question}`,
+    '',
+    `BI JSON 上下文：${JSON.stringify(context)}`,
+  ].join('\n');
+  const outFile = path.join(os.tmpdir(), `shein-qa-codex-${process.pid}-${Date.now()}.txt`);
+  const result = await runProcess('codex', [
+    'exec',
+    '--cd', ROOT,
+    '--sandbox', 'read-only',
+    '--skip-git-repo-check',
+    '--ignore-rules',
+    '--color', 'never',
+    '--output-last-message', outFile,
+    '--config', 'approval_policy="never"',
+    '--config', 'model_reasoning_effort="low"',
+    '-',
+  ], {
+    cwd: ROOT,
+    input: prompt,
+    timeoutMs: CODEX_GATEWAY_TIMEOUT_MS,
+    env: {CODEX_HOME: CODEX_CONFIG_DIR},
+  });
+  let answer = '';
+  try {
+    answer = await fs.readFile(outFile, 'utf8');
+    await fs.rm(outFile, {force: true});
+  } catch {
+    answer = result.stdout;
+  }
+  if (!result.ok) {
+    throw new Error(`codex gateway failed code=${result.code} timeout=${result.timedOut} stderr=${String(result.stderr || '').slice(-400)}`);
+  }
+  return stripCodexCliNoise(answer || result.stdout) || null;
+}
+
 function answerQuestion(text, data) {
   const q = normalizeText(text);
   const date = pickDate(q, data);
@@ -404,6 +495,15 @@ function answerQuestion(text, data) {
 
 async function answerQuestionSmart(text, data) {
   const context = compactSalesContext(text, data);
+  try {
+    const codexAnswer = await callReadonlyCodexGateway(text, context);
+    if (codexAnswer) {
+      const latestNote = `\n\n数据口径：${context.dataFreshness.askedDate || '-'}；BI生成：${context.dataFreshness.generatedAt || '-'}；销售源：${context.dataFreshness.salesUpdatedAt || '-'}`;
+      return `${codexAnswer}${latestNote}`;
+    }
+  } catch (err) {
+    console.error(JSON.stringify({ok: false, stage: 'codex_gateway_failed', error: String(err?.message || err).slice(0, 800)}));
+  }
   try {
     const llmAnswer = await callReadonlyLlm(text, context);
     if (llmAnswer) {
