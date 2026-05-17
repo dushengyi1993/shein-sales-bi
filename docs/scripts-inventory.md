@@ -84,6 +84,8 @@
   - `run_link_management_job.mjs`
   - `fetch_shein_links.mjs`
   - `generate_link_ops_web_dashboard.mjs`
+  - `serve_bi_portal.mjs`：同时承载 BI Portal 静态页面和链接运营状态 API；`/api/link-ops-chats` 支持运营会话、动态只读问数和明确命令自动入池，`/api/link-ops-tasks` 管理任务池，`/api/link-ops-assets` 管理任务素材包，`/api/link-ops-execute` 只做受控执行前检查。
+  - `upload_link_ops_assets.mjs`：从本机把图片、证书、标题/规则文件同步到云端链接运营任务素材包；只走白名单文件类型，不上传敏感登录态。
 - 成本/利润：
   - `create_cost_template.mjs`
   - `import_product_costs.mjs`
@@ -119,7 +121,7 @@
 - `use_utf8.ps1`
 - `notify_sync_issue.mjs`
 - `cloud_ops_watchdog.mjs`：云端 systemd/watchdog 新鲜度检查；销售/BI 页面按高频阈值，链接/业务域按日更低频阈值，异常时调用 `notify_sync_issue.mjs` 发飞书提醒。
-- `lark_sales_qa_bot.mjs`：云端只读飞书问数机器人核心逻辑；只读取 BI Portal JSON 并回复消息，不写数据库或飞书 Base。
+- `lark_sales_qa_bot.mjs`：云端只读飞书问数机器人和网页链接管理会话的核心问数逻辑；每轮从 BI Portal JSON 动态压缩销售、店铺、货号、链接/覆盖上下文并回复，不写数据库、飞书 Base 或 SHEIN 后台。
 - `cloud_link_business_sync.sh`：云端链接/业务域日更入口；按店顺序 bootstrap 浏览器会话、抓链接和业务域、入仓、体检并刷新 BI。
 - `bootstrap_shein_browser_session.mjs`：把服务器私有 SHEIN WebAPI/browser session 注入云端 headless Chrome profile，并用订单接口只读探测登录态。
 - `export_shein_browser_session.mjs`：从已登录 Chrome profile 导出 SHEIN 浏览器会话状态到 `state/shein_browser_sessions/*.local.json`；输出属于敏感运行态，不提交 GitHub。
