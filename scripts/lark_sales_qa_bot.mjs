@@ -11,7 +11,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DATA_PATH = process.env.SHEIN_QA_BI_DATA || path.join(ROOT, 'outputs', 'bi-portal', 'data.json');
 const STATE_DIR = process.env.SHEIN_QA_STATE_DIR || path.join(ROOT, 'state', 'lark_sales_qa_bot');
 const CODEX_CONFIG_DIR = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
-const LLM_TIMEOUT_MS = Number(process.env.SHEIN_QA_LLM_TIMEOUT_MS || 20_000);
+const LLM_TIMEOUT_MS = Number(process.env.SHEIN_QA_LLM_TIMEOUT_MS || 45_000);
 const LLM_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_LLM_ENABLED || '1').toLowerCase());
 const STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ'];
 
@@ -123,6 +123,39 @@ function findProduct(text, data) {
 
 function rowSummary(row) {
   return `${moneySar(row?.gross_sales_sar ?? row?.sales_sar)}，订单 ${intNum(row?.gross_orders ?? row?.orders)}，销量 ${intNum(row?.gross_quantity ?? row?.quantity)}`;
+}
+
+function storeRiskReason(storeKey, data) {
+  const store = (data.stores || []).find(r => r.store_key === storeKey) || {};
+  const actions = (data.actions || [])
+    .filter(a => a.store_key === storeKey)
+    .sort((a, b) => n(b.score) - n(a.score))
+    .slice(0, 3);
+  const reasons = [];
+  if (n(store.link_action_count) > 0) reasons.push(`链接动作 ${intNum(store.link_action_count)} 条`);
+  if (n(store.missing_product_count) > 0) reasons.push(`缺覆盖货号 ${intNum(store.missing_product_count)} 个`);
+  if (n(store.after_sales_case_count) > 0) reasons.push(`售后 ${intNum(store.after_sales_case_count)} 单`);
+  if (n(store.low_display_stock_count) > 0) reasons.push(`低展示库存 ${intNum(store.low_display_stock_count)} 条`);
+  if (n(store.waybill_exception_count) > 0) reasons.push(`履约异常 ${intNum(store.waybill_exception_count)} 个`);
+  if (actions.length) reasons.push(`高优先级动作：${actions.map(a => `${a.title || a.category || a.action_domain}(${intNum(a.score)}分)`).join('；')}`);
+  return reasons.join('；') || '暂未看到明显异常，只是今日销售靠后。';
+}
+
+function answerWorstStoreQuestion(date, data, latestNote) {
+  const rows = (data.rankings?.dailyStores || [])
+    .filter(r => r.date === date && STORE_KEYS.includes(String(r.store_key || '')))
+    .sort((a, b) => n(a.gross_sales_sar ?? a.sales_sar) - n(b.gross_sales_sar ?? b.sales_sar));
+  if (!rows.length) return `没查到 ${date} 的店铺销售数据。\n${latestNote}`;
+  const worst = rows[0];
+  const zeroRows = rows.filter(r => n(r.gross_sales_sar ?? r.sales_sar) <= 0);
+  const bottom = rows.slice(0, 5);
+  return [
+    `${date} 目前销售最差的是 ${worst.store_key}：${rowSummary(worst)}。`,
+    zeroRows.length > 1 ? `另有 ${zeroRows.length - 1} 个店当前也是 0 销售：${zeroRows.slice(1, 8).map(r => r.store_key).join('、')}。` : '',
+    `可能原因：${storeRiskReason(worst.store_key, data)}`,
+    `倒序参考：${bottom.map((r, i) => `${i + 1}. ${r.store_key} ${moneySar(r.gross_sales_sar ?? r.sales_sar)} / ${intNum(r.gross_orders ?? r.orders)}单`).join('；')}`,
+    latestNote,
+  ].filter(Boolean).join('\n');
 }
 
 function topRows(rows, metric, limit = 8) {
@@ -300,9 +333,14 @@ function answerQuestion(text, data) {
   const store = pickStore(q);
   const product = findProduct(q, data);
   const wantsRank = /排行|排名|top|前\d+|最高|最好/.test(q);
+  const wantsWorst = /最差|最低|最少|最弱|倒数|垫底|不好|差/.test(q);
   const wantsProduct = product || /货号|产品|商品|SKU|SKC/i.test(q);
   const wantsStore = store || /店铺|哪个店|各店|门店/.test(q);
   const latestNote = `数据口径：${date}；BI 生成：${data.generatedAt || '-'}；销售源：${data.dates?.salesUpdatedAt || '-'}`;
+
+  if (wantsWorst && /店|店铺|哪个/.test(q)) {
+    return answerWorstStoreQuestion(date, data, latestNote);
+  }
 
   if (wantsRank && wantsProduct) {
     const rows = (data.rankings?.dailyProducts || [])
