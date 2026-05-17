@@ -3140,6 +3140,17 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .health-card h4{margin:8px 0 6px;font-size:15px}.health-card p{margin:0;color:#cbd5e1;font-size:12px;line-height:1.55}.health-card .mono{font-size:12px}
     .health-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
     .command-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+    .linkops-grid{display:grid;grid-template-columns:minmax(340px,.95fr) minmax(360px,1.05fr);gap:14px}
+    .linkops-command-box textarea{width:100%;min-height:156px;resize:vertical;border:1px solid rgba(148,163,184,.22);border-radius:18px;background:rgba(2,6,23,.42);color:var(--text);padding:14px;font:inherit;line-height:1.55}
+    body[data-theme="light"] .linkops-command-box textarea{background:#fff;color:#0f172a;border-color:#dbe3ef}
+    .linkops-hints{display:grid;gap:8px;margin-top:10px}
+    .linkops-hints button{border:1px solid rgba(148,163,184,.18);border-radius:14px;background:rgba(15,23,42,.42);color:var(--text);padding:9px 10px;text-align:left;cursor:pointer}
+    body[data-theme="light"] .linkops-hints button{background:#fff;border-color:#e2e8f0;color:#0f172a}
+    .linkops-task{border:1px solid rgba(148,163,184,.16);border-radius:18px;background:rgba(15,23,42,.32);padding:13px;margin-bottom:10px}
+    body[data-theme="light"] .linkops-task{background:#fff;border-color:#e2e8f0}
+    .linkops-task h4{margin:0 0 7px;font-size:15px}
+    .linkops-task p{margin:5px 0;color:var(--muted);line-height:1.55;font-size:12px}
+    .linkops-preview-list{margin:8px 0 0;padding-left:18px;color:var(--muted);font-size:12px;line-height:1.65}
     .action-meta{display:grid;grid-template-columns:minmax(96px,.32fr) 1fr auto;gap:8px;margin-top:12px;padding-top:12px;border-top:1px solid rgba(148,163,184,.12)}
     .action-meta input{min-height:38px;border-radius:12px;font-size:12px}
     .action-meta .meta-save{min-height:38px;border-radius:12px;padding:7px 10px}
@@ -3320,6 +3331,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
       <button data-tab="stores">${svgIcon('store')}店铺视角</button>
       <button data-tab="products">${svgIcon('box')}货号 360</button>
       <button data-tab="links">${svgIcon('link')}SKC / 链接</button>
+          <button data-tab="linkops">${svgIcon('action')}链接管理中台</button>
           <button data-tab="comments">${svgIcon('alert')}评价 / 口碑</button>
           <button data-tab="business">${svgIcon('metabase')}订单 / 售后</button>
           <button data-tab="profit">${svgIcon('metabase')}成本 / 利润</button>
@@ -3594,6 +3606,23 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
       </div>
     </section>
 
+    <section id="linkops" class="section">
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-h">
+          <div><h3>链接管理中台</h3><div class="sub">先把自然语言运营指令沉淀为任务草案；当前阶段只建任务和预览，不自动修改 SHEIN 后台。</div></div>
+          <span class="tag mid" id="linkOpsModeTag">待确认执行</span>
+        </div>
+        <div class="card-body" id="linkOpsCommandCenter"></div>
+      </div>
+      <div class="card">
+        <div class="card-h">
+          <div><h3>链接运营任务池</h3><div class="sub">后续补链接、复制上品、换标题、换图、下架、营销活动和限时折扣都会先进入这里。</div></div>
+          <button class="btn" id="refreshLinkOpsTasks" type="button">刷新任务池</button>
+        </div>
+        <div class="card-body" id="linkOpsTaskList"></div>
+      </div>
+    </section>
+
     <section id="comments" class="section">
       <div class="card" style="margin-bottom:16px">
         <div class="card-h"><div><h3>评价 / 口碑总览</h3><div class="sub">把每个货号的历史评价、低星、差评标签和店铺分布梳理出来；先做筛选和原文查看，中文翻译后续批量补齐。</div></div><span class="tag info" id="commentsTag"></span></div>
@@ -3841,6 +3870,7 @@ const STATE_KEYS = ['tab','q','product','store','domain','risk','status','focus'
 let applyingHash = false;
 const ACTION_STATE_KEY = 'SHEIN_BI_ACTION_STATE_V1';
 const ACTION_STATE_API = '/api/action-state';
+const LINK_OPS_TASKS_API = '/api/link-ops-tasks';
 const SERVICE_HEALTH_API = '/api/health';
 const ACTION_STATE_SERVICE_PATH = 'state/bi_action_state.json';
 const actionStateStore = {
@@ -3893,6 +3923,7 @@ function actionStateStoreLabel(){
   return '\u5f53\u524d\u6d4f\u89c8\u5668';
 }
 let actionState = loadActionState();
+const linkOpsStore = {ready:false, error:'', tasks:[]};
 async function initServiceHealth(){
   if (actionStateStore.mode !== 'service') {
     serviceHealth = {
@@ -3954,6 +3985,48 @@ async function initActionState(){
     actionStateStore.ready = true;
     showToast('\u52a8\u4f5c\u72b6\u6001\u670d\u52a1\u4e0d\u53ef\u7528\uff0c\u5df2\u56de\u9000\u5f53\u524d\u6d4f\u89c8\u5668');
     renderAll();
+  }
+}
+async function refreshLinkOpsTasks(){
+  if (actionStateStore.mode !== 'service') {
+    linkOpsStore.ready = true;
+    linkOpsStore.error = '直接打开 HTML 文件时无法读取云端任务池。';
+    return;
+  }
+  try {
+    const res = await fetch(LINK_OPS_TASKS_API + '?limit=120', {cache:'no-store'});
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const payload = await res.json();
+    linkOpsStore.tasks = Array.isArray(payload?.data?.tasks) ? payload.data.tasks : [];
+    linkOpsStore.ready = true;
+    linkOpsStore.error = '';
+  } catch (err) {
+    linkOpsStore.ready = true;
+    linkOpsStore.error = err?.message || String(err || 'unknown');
+  }
+  if ((state.tab || '') === 'linkops') renderAll();
+}
+async function submitLinkOpsCommand(){
+  const input = document.getElementById('linkOpsCommand');
+  const command = String(input?.value || '').trim();
+  if (!command) return showToast('请先输入运营指令');
+  if (actionStateStore.mode !== 'service') return showToast('当前不是网页服务模式，不能写入云端任务池');
+  try {
+    const res = await fetch(LINK_OPS_TASKS_API, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({command})
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || !payload.ok) throw new Error(payload.error || ('HTTP ' + res.status));
+    linkOpsStore.tasks = Array.isArray(payload?.data?.tasks) ? payload.data.tasks : [];
+    linkOpsStore.ready = true;
+    linkOpsStore.error = '';
+    if (input) input.value = '';
+    showToast('已生成链接运营任务草案，等待人工确认');
+    renderAll();
+  } catch (err) {
+    showToast('提交失败：' + (err?.message || String(err || 'unknown')));
   }
 }
 async function updateActionStatus(key, status){
@@ -8401,6 +8474,75 @@ function renderProductSpotlight(){
     ])+
     detailBlockHtml('货号复核明细：订单、售后、财务、链接池', detailBody);
 }
+function linkOpsIntentLabel(intent){
+  const map = {
+    copy_product_draft:'复制上品/补覆盖',
+    update_title:'改标题',
+    update_images:'换图',
+    retire_link:'下架/归档',
+    campaign_signup:'营销活动',
+    flash_discount:'限时折扣',
+    certificate_review:'证书资质',
+    manual_review:'人工复核'
+  };
+  return map[intent] || intent || '任务';
+}
+function renderLinkOps(){
+  const center = $('linkOpsCommandCenter');
+  const list = $('linkOpsTaskList');
+  if (!center || !list) return;
+  const examples = [
+    '把BHRL-09激光脱毛仪补齐到所有缺链接的店，价格按同货号最高价，库存100，计划上架10年后，只建草稿。',
+    '给HL和CX的新品链接报7天限时折扣，限量10台，利润率不低于25%，先生成预览。',
+    '把DL店这个货号的标题同步到DX、FY、LQ，先列出会影响哪些链接。',
+    '找出SK-03038制冰机各店差链接，给出下架、换图、补新链接建议。'
+  ];
+  center.innerHTML =
+    '<div class="linkops-grid">'+
+      '<div class="linkops-command-box">'+
+        '<div class="section-block-label">自然语言运营指令</div>'+
+        '<textarea id="linkOpsCommand" placeholder="直接写你想让系统做什么。例如：把某个货号复制上品到哪些店、换标题/换图、报限时折扣、生成差链接处理任务。当前只建任务草案，不会自动执行。"></textarea>'+
+        '<div class="command-actions">'+
+          '<button class="btn primary" id="submitLinkOpsCommand" type="button">生成任务草案</button>'+
+          '<button class="btn" id="clearLinkOpsCommand" type="button">清空</button>'+
+        '</div>'+
+        '<p class="muted">说明：云服务器本身不懂自然语言；这里先用规则解析生成任务草案。后续接大模型后，可以把你的话解析得更准确，并能查询数据回答问题。</p>'+
+      '</div>'+
+      '<div>'+
+        '<div class="section-block-label">常用指令模板</div>'+
+        '<div class="linkops-hints">'+examples.map(x => '<button type="button" data-linkops-example="'+escapeHtml(x)+'">'+escapeHtml(x)+'</button>').join('')+'</div>'+
+      '</div>'+
+    '</div>';
+  const tasks = linkOpsStore.tasks || [];
+  if (linkOpsStore.error) {
+    list.innerHTML = '<div class="empty">任务池暂不可用：'+escapeHtml(linkOpsStore.error)+'</div>';
+  } else if (!tasks.length) {
+    list.innerHTML = '<div class="empty">暂无链接运营任务。先在上方输入一条指令，系统会生成待确认任务草案。</div>';
+  } else {
+    list.innerHTML = tasks.map(t => {
+      const intents = Array.isArray(t.intents) ? t.intents : [];
+      const stores = Array.isArray(t.targets?.stores) ? t.targets.stores : [];
+      const refs = Array.isArray(t.targets?.productRefs) ? t.targets.productRefs : [];
+      const riskNotes = Array.isArray(t.preview?.riskNotes) ? t.preview.riskNotes : [];
+      const nextChecks = Array.isArray(t.preview?.nextChecks) ? t.preview.nextChecks : [];
+      return '<article class="linkops-task">'+
+        '<div class="row1"><div>'+intents.map(x => '<span class="tag mid">'+escapeHtml(linkOpsIntentLabel(x))+'</span>').join(' ')+'</div><span class="mono">'+escapeHtml(String(t.createdAt || '').replace('T',' ').slice(0,19))+'</span></div>'+
+        '<h4>'+escapeHtml(String(t.command || '').slice(0,180))+'</h4>'+
+        '<p>状态：<b>'+escapeHtml(t.status || 'draft')+'</b> · 提交人：'+escapeHtml(t.requestedBy || '-')+'</p>'+
+        '<p>目标店：'+escapeHtml(stores.join(', ') || '待识别')+' · 货号/SKC：'+escapeHtml(refs.join(', ') || '待识别')+'</p>'+
+        '<p>'+escapeHtml(t.preview?.summary || '等待执行前预览')+'</p>'+
+        (riskNotes.length ? '<ul class="linkops-preview-list">'+riskNotes.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul>' : '')+
+        (nextChecks.length ? '<details style="margin-top:8px"><summary>执行前检查项</summary><ul class="linkops-preview-list">'+nextChecks.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul></details>' : '')+
+      '</article>';
+    }).join('');
+  }
+  document.querySelectorAll('[data-linkops-example]').forEach(btn => btn.addEventListener('click', () => {
+    const input = document.getElementById('linkOpsCommand');
+    if (input) input.value = btn.dataset.linkopsExample || '';
+  }));
+  document.getElementById('submitLinkOpsCommand')?.addEventListener('click', submitLinkOpsCommand);
+  document.getElementById('clearLinkOpsCommand')?.addEventListener('click', () => { const input = document.getElementById('linkOpsCommand'); if (input) input.value = ''; });
+}
 function renderProducts(){
   const rows = (DATA.products || []).filter(includes);
   const rangeMap = productPeriodSalesMap();
@@ -10641,6 +10783,8 @@ function renderAll(){
   } else if (state.tab === 'links') {
     renderLinkSpotlight();
     renderLinks();
+  } else if (state.tab === 'linkops') {
+    renderLinkOps();
   } else if (state.tab === 'comments') {
     renderComments();
   } else if (state.tab === 'business') {
@@ -11026,6 +11170,7 @@ $('exportFilteredActions').addEventListener('click', () => {
   downloadTextFile('shein-bi-actions-' + stamp + '.csv', '\\ufeff' + actionListCsv(), 'text/csv;charset=utf-8');
   showToast('已导出当前动作 CSV');
 });
+document.getElementById('refreshLinkOpsTasks')?.addEventListener('click', refreshLinkOpsTasks);
 window.addEventListener('hashchange', () => {
   applyingHash = true;
   stateFromHash();
@@ -11041,6 +11186,7 @@ applyStateToControls();
 renderAll();
 initServiceHealth();
 initActionState();
+refreshLinkOpsTasks();
 startPortalAutoRefresh();
 </script>
 </body>

@@ -26,6 +26,7 @@ function parseArgs(argv) {
     port: 8787,
     dir: path.join(ROOT, 'outputs', 'bi-portal'),
     stateFile: path.join(ROOT, 'state', 'bi_action_state.json'),
+    linkOpsTaskFile: path.join(ROOT, 'state', 'bi_link_ops_tasks.json'),
     authFile: path.join(ROOT, 'config', 'bi_users.local.json'),
     auditFile: path.join(ROOT, 'logs', 'bi_portal_action_audit.jsonl'),
     readOnly: false,
@@ -37,6 +38,7 @@ function parseArgs(argv) {
     else if (a === '--port') args.port = Number(argv[++i]);
     else if (a === '--dir') args.dir = path.resolve(argv[++i]);
     else if (a === '--state-file') args.stateFile = path.resolve(argv[++i]);
+    else if (a === '--link-ops-task-file') args.linkOpsTaskFile = path.resolve(argv[++i]);
     else if (a === '--auth-file') args.authFile = path.resolve(argv[++i]);
     else if (a === '--audit-file') args.auditFile = path.resolve(argv[++i]);
     else if (a === '--read-only') args.readOnly = true;
@@ -235,6 +237,101 @@ function requestMeta(req) {
   };
 }
 
+function inferLinkOpsIntent(command) {
+  const text = String(command || '').trim();
+  const lower = text.toLowerCase();
+  const intents = [];
+  if (/补|复制|上品|上架|草稿|覆盖|缺链接|缺链/.test(text)) intents.push('copy_product_draft');
+  if (/标题|title/.test(lower)) intents.push('update_title');
+  if (/主图|图片|套图|image|photo|pic/.test(lower)) intents.push('update_images');
+  if (/下架|死链|淘汰|归档/.test(text)) intents.push('retire_link');
+  if (/营销|活动|报名/.test(text)) intents.push('campaign_signup');
+  if (/限时|折扣|秒杀|促销|discount/.test(lower)) intents.push('flash_discount');
+  if (/证书|资质|合规/.test(text)) intents.push('certificate_review');
+  if (!intents.length) intents.push('manual_review');
+  return intents;
+}
+
+function inferLinkOpsTargets(command) {
+  const text = String(command || '');
+  const storeMatches = [...new Set((text.match(/\b[A-Z]{2}\b/g) || []).filter(x => x.length === 2))].slice(0, 24);
+  const skuMatches = [...new Set((text.match(/[A-Z]{1,6}-?\d{2,8}[A-Z]?(?:[\u4e00-\u9fa5A-Za-z0-9-]*)?/g) || [])
+    .map(x => x.replace(/[，。；、,.]+$/g, ''))
+    .filter(x => /\d/.test(x)))].slice(0, 24);
+  return {
+    stores: storeMatches,
+    productRefs: skuMatches,
+  };
+}
+
+function linkOpsRiskNotes(intents) {
+  const notes = ['当前只是建立任务草案，不会自动修改 SHEIN 后台。'];
+  if (intents.includes('copy_product_draft')) {
+    notes.push('复制上品需执行前检查：源 SKC、类目参数、证书/资质、图片、价格、库存100、计划上架时间。');
+  }
+  if (intents.includes('update_title') || intents.includes('update_images')) {
+    notes.push('标题/图片会影响流量承接，初期必须人工确认素材和目标链接。');
+  }
+  if (intents.includes('campaign_signup') || intents.includes('flash_discount')) {
+    notes.push('活动/限时折扣需校验成本、最低利润率、限量、有效期和是否与官方活动冲突。');
+  }
+  if (intents.includes('retire_link')) {
+    notes.push('下架前必须确认不是唯一承接链接，并先准备替代链接。');
+  }
+  return notes;
+}
+
+function buildLinkOpsTaskFromCommand(body, actor, req) {
+  const command = String(body.command || body.text || '').trim();
+  if (!command) throw new Error('Missing command');
+  if (command.length > 2000) throw new Error('Command too long');
+  const now = new Date().toISOString();
+  const intents = inferLinkOpsIntent(command);
+  const targets = {
+    ...inferLinkOpsTargets(command),
+    ...(body.targets && typeof body.targets === 'object' ? body.targets : {}),
+  };
+  const id = `lot_${now.replace(/[-:.TZ]/g, '').slice(0, 14)}_${crypto.randomBytes(4).toString('hex')}`;
+  return {
+    id,
+    version: 1,
+    status: 'draft',
+    source: 'natural_language',
+    command,
+    intents,
+    targets,
+    preview: {
+      summary: `识别为：${intents.join(' / ')}；等待人工补充/确认后才会进入执行队列。`,
+      riskNotes: linkOpsRiskNotes(intents),
+      nextChecks: [
+        '确认目标店铺和货号/SKC。',
+        '匹配现有链接、覆盖矩阵和表现数据。',
+        '确认价格、库存、证书、图片、标题和活动规则。',
+        '生成执行前预览，不直接写 SHEIN。',
+      ],
+    },
+    requestedBy: actorLabel(actor, req),
+    requestedByUser: actorUser(actor, req),
+    requestMeta: requestMeta(req),
+    createdAt: now,
+    updatedAt: now,
+    execution: {
+      mode: 'manual_confirm_first',
+      enabled: false,
+      note: '基座阶段禁用自动执行。',
+    },
+  };
+}
+
+function normalizeLinkOpsTaskStore(value) {
+  const tasks = Array.isArray(value?.tasks) ? value.tasks : [];
+  return {
+    version: 1,
+    updatedAt: value?.updatedAt || null,
+    tasks: tasks.filter(x => x && typeof x === 'object').slice(0, 1000),
+  };
+}
+
 async function readBodyJson(req, limitBytes = 1024 * 1024) {
   let raw = '';
   for await (const chunk of req) {
@@ -364,7 +461,9 @@ async function main() {
           lanMode: args.host === '0.0.0.0',
           root,
           stateFile: args.stateFile,
+          linkOpsTaskFile: args.linkOpsTaskFile,
           writableActionState: !args.readOnly,
+          writableLinkOpsTasks: !args.readOnly,
           readOnly: args.readOnly,
           authRequired,
           user: actor ? {
@@ -458,6 +557,48 @@ async function main() {
             })),
           });
           return sendJson(res, 200, {ok: true, data: next});
+        }
+        return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+      }
+      if (url.pathname === '/api/link-ops-tasks') {
+        if (req.method === 'GET') {
+          const current = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
+          const limit = Math.max(1, Math.min(500, Number(url.searchParams.get('limit') || 120)));
+          return sendJson(res, 200, {ok: true, data: {...current, tasks: current.tasks.slice(0, limit)}});
+        }
+        if (req.method === 'POST') {
+          if (args.readOnly) {
+            return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
+          }
+          let task;
+          try {
+            const body = await readBodyJson(req);
+            task = buildLinkOpsTaskFromCommand(body, actor, req);
+          } catch (err) {
+            return sendJson(res, 400, {ok: false, error: err?.message || String(err || 'Invalid request')});
+          }
+          const current = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
+          const next = {
+            version: 1,
+            updatedAt: new Date().toISOString(),
+            tasks: [task, ...current.tasks].slice(0, 1000),
+          };
+          await writeJsonFile(args.linkOpsTaskFile, next);
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'link-ops-task',
+            actor,
+            ...requestMeta(req),
+            task: {
+              id: task.id,
+              status: task.status,
+              intents: task.intents,
+              stores: task.targets?.stores || [],
+              productRefs: task.targets?.productRefs || [],
+              commandLength: task.command.length,
+            },
+          });
+          return sendJson(res, 200, {ok: true, data: next, task});
         }
         return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
       }
