@@ -3141,9 +3141,18 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .health-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
     .command-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
     .linkops-grid{display:grid;grid-template-columns:minmax(340px,.95fr) minmax(360px,1.05fr);gap:14px}
-    .ops-workspace{display:grid;grid-template-columns:minmax(280px,.42fr) minmax(520px,1fr);gap:14px;align-items:start}
-    .ops-rail,.ops-chat,.ops-tasks{border:1px solid rgba(148,163,184,.16);border-radius:26px;background:rgba(15,23,42,.34);padding:14px;min-width:0}
-    body[data-theme="light"] .ops-rail,body[data-theme="light"] .ops-chat,body[data-theme="light"] .ops-tasks{background:#fff;border-color:#e2e8f0}
+    .ops-workspace{display:grid;grid-template-columns:minmax(230px,.32fr) minmax(460px,.8fr) minmax(430px,.74fr);gap:14px;align-items:start}
+    .ops-rail,.ops-chat,.ops-tasks,.ops-task-panel{border:1px solid rgba(148,163,184,.16);border-radius:26px;background:rgba(15,23,42,.34);padding:14px;min-width:0}
+    body[data-theme="light"] .ops-rail,body[data-theme="light"] .ops-chat,body[data-theme="light"] .ops-tasks,body[data-theme="light"] .ops-task-panel{background:#fff;border-color:#e2e8f0}
+    .ops-task-panel{position:sticky;top:86px;max-height:calc(100dvh - 104px);overflow:auto}
+    .ops-workbench-head{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:start;padding-bottom:12px;border-bottom:1px solid rgba(148,163,184,.14);margin-bottom:12px}
+    .ops-workbench-head h3{margin:0 0 5px;font-size:16px;letter-spacing:-.02em}.ops-workbench-head .sub{font-size:12px;line-height:1.55}
+    .ops-now{border:1px solid rgba(56,189,248,.22);border-radius:20px;background:linear-gradient(135deg,rgba(8,47,73,.32),rgba(15,23,42,.18));padding:12px;margin-bottom:12px}
+    body[data-theme="light"] .ops-now{background:linear-gradient(135deg,#eff6ff,#f8fafc);border-color:#bae6fd}
+    .ops-now h4{margin:0 0 6px;font-size:14px}.ops-now p{margin:4px 0;color:var(--muted);font-size:12px;line-height:1.55}
+    .ops-workbench-archive{margin-top:12px}
+    @media(max-width:1180px){.ops-workspace{grid-template-columns:minmax(220px,.36fr) minmax(0,1fr)}.ops-task-panel{grid-column:1 / -1;position:static;max-height:none}}
+    @media(max-width:760px){.ops-workspace{grid-template-columns:1fr}.ops-rail{order:2}.ops-chat{order:1}.ops-task-panel{order:3}}
     .ops-session{border:1px solid rgba(148,163,184,.14);border-radius:18px;padding:10px;margin-bottom:8px;cursor:pointer;transition:transform .18s ease,border-color .18s ease,background .18s ease}
     .ops-session:hover{transform:translateY(-1px);border-color:rgba(56,189,248,.34)}
     .ops-session.active{background:rgba(14,165,233,.14);border-color:rgba(56,189,248,.48)}
@@ -3676,7 +3685,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     <section id="linkops" class="section">
       <div class="card" style="margin-bottom:16px">
         <div class="card-h">
-          <div><h3>链接管理中台</h3><div class="sub">先把自然语言运营指令沉淀为任务草案；当前阶段只建任务和预览，不自动修改 SHEIN 后台。</div></div>
+          <div><h3>链接管理中台</h3><div class="sub">一个会话就是一个任务工作台：边聊边查数、边整理执行步骤，写 SHEIN 后台前仍需确认和预检。</div></div>
           <span class="tag mid" id="linkOpsModeTag">待确认执行</span>
         </div>
         <div class="card-body" id="linkOpsCommandCenter"></div>
@@ -4057,7 +4066,7 @@ async function initActionState(){
 async function refreshLinkOpsTasks(){
   if (actionStateStore.mode !== 'service') {
     linkOpsStore.ready = true;
-    linkOpsStore.error = '直接打开 HTML 文件时无法读取云端任务池。';
+    linkOpsStore.error = '直接打开 HTML 文件时无法读取云端任务记录。';
     return;
   }
   try {
@@ -4143,7 +4152,7 @@ async function sendLinkOpsChatMessage(){
       linkOpsStore.error = '';
     }
     if (input) input.value = '';
-    showToast(payload?.autoTask?.id ? '会话已更新，明确命令已加入任务池' : '会话已更新');
+    showToast(payload?.autoTask?.id ? '会话已更新，明确命令已固化为任务' : '会话已更新');
   } catch (err) {
     opsAgentStore.error = err?.message || String(err || 'unknown');
     showToast('会话发送失败：' + opsAgentStore.error);
@@ -4160,7 +4169,7 @@ async function deleteLinkOpsChatSession(id){
     renderAll();
     return;
   }
-  if (!confirm('确定删除这个会话？已经进入任务池的任务不会被删除。')) return;
+  if (!confirm('确定删除这个会话？已经固化的任务记录不会被删除。')) return;
   try {
     const res = await fetch(LINK_OPS_CHATS_API + '?id=' + encodeURIComponent(id), {method:'DELETE'});
     const payload = await res.json().catch(() => ({}));
@@ -4187,7 +4196,9 @@ async function convertChatToTask(){
   if (!session) return showToast('先选择一个会话');
   const messages = Array.isArray(session.messages) ? session.messages : [];
   const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
-  const command = (session.title || messages.find(m => m.role === 'user')?.content || '').trim();
+  const firstUser = messages.find(m => m.role === 'user')?.content || session.title || '';
+  const latestUser = [...messages].reverse().find(m => m.role === 'user')?.content || '';
+  const command = ((firstUser && latestUser && firstUser !== latestUser) ? (firstUser + '\n\n最新补充：' + latestUser) : (latestUser || firstUser || session.title || '')).trim().slice(0, 1800);
   if (!command) return showToast('这个会话还没有可沉淀的任务内容');
   try {
     const res = await fetch(LINK_OPS_TASKS_API, {
@@ -4210,11 +4221,11 @@ async function convertChatToTask(){
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({id: session.id, status:'task_created'})
     }).catch(() => null);
-    showToast('已进入任务池');
+    showToast('已确认成任务');
     refreshLinkOpsChats();
     renderAll();
   } catch (err) {
-    showToast('进入任务池失败：' + (err?.message || String(err || 'unknown')));
+    showToast('确认任务失败：' + (err?.message || String(err || 'unknown')));
   }
 }
 function recommendedLinkOpsPrompts(){
@@ -4258,7 +4269,7 @@ async function submitLinkOpsCommand(){
   const input = document.getElementById('linkOpsCommand');
   const command = String(input?.value || '').trim();
   if (!command) return showToast('请先输入运营指令');
-  if (actionStateStore.mode !== 'service') return showToast('当前不是网页服务模式，不能写入云端任务池');
+  if (actionStateStore.mode !== 'service') return showToast('当前不是网页服务模式，不能写入云端任务记录');
   opsAgentStore.busy = true;
   opsAgentStore.error = '';
   opsAgentStore.answer = '';
@@ -8986,7 +8997,7 @@ function renderLinkOpsTaskExecution(t){
     '<div class="task-exec-note">'+
       (hasAgentAnswer
         ? '已带有智能体建议，可人工确认后开始执行。'
-        : '执行内容还不完整：建议先在会话里让智能体把步骤、目标链接、素材和风险讲清楚，再放入任务池。')+
+        : '执行内容还不完整：建议先在会话里让智能体把步骤、目标链接、素材和风险讲清楚，再确认成任务。')+
     '</div>'+
   '</div>';
 }
@@ -9112,6 +9123,137 @@ function renderLinkOpsDataAdvice(task){
     ], {limit:false})+
   '</div>';
 }
+function inferLinkOpsIntentFromText(text){
+  const raw = String(text || '').trim();
+  const lower = raw.toLowerCase();
+  const intents = [];
+  if (/补|复制|上品|上架|草稿|覆盖|缺链接|缺链/.test(raw) || /\b(copy|draft|create|publish|coverage)\b/.test(lower)) intents.push('copy_product_draft');
+  if (/标题|title/.test(lower)) intents.push('update_title');
+  if (/主图|图片|套图|image|photo|pic/.test(lower)) intents.push('update_images');
+  if (/下架|死链|淘汰|归档|停掉|移除|删除链接/.test(raw)) intents.push('retire_link');
+  if (/营销|活动|报名/.test(raw)) intents.push('campaign_signup');
+  if (/限时|折扣|秒杀|促销|discount/.test(lower)) intents.push('flash_discount');
+  if (/证书|资质|合规/.test(raw)) intents.push('certificate_review');
+  if (!intents.length) intents.push('manual_review');
+  return intents;
+}
+function linkOpsSessionMessages(session){
+  return Array.isArray(session?.messages) ? session.messages : [];
+}
+function linkOpsLatestUserMessage(session){
+  return [...linkOpsSessionMessages(session)].reverse().find(m => m.role === 'user') || null;
+}
+function linkOpsFirstUserMessage(session){
+  return linkOpsSessionMessages(session).find(m => m.role === 'user') || null;
+}
+function linkOpsLatestAssistantMessage(session){
+  return [...linkOpsSessionMessages(session)].reverse().find(m => m.role === 'assistant') || null;
+}
+function linkOpsTaskForSession(session){
+  if (!session?.id) return null;
+  const tasks = linkOpsStore.tasks || [];
+  const metaTaskId = [...linkOpsSessionMessages(session)].reverse().map(m => m?.meta?.autoTaskId).find(Boolean);
+  if (metaTaskId) {
+    const hit = tasks.find(t => String(t.id || '') === String(metaTaskId));
+    if (hit) return hit;
+  }
+  return tasks
+    .filter(t => String(t.chatSessionId || '') === String(session.id || ''))
+    .sort((a,b)=>String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')))[0] || null;
+}
+function linkOpsSessionCommand(session){
+  const first = String(linkOpsFirstUserMessage(session)?.content || session?.title || '').trim();
+  const latest = String(linkOpsLatestUserMessage(session)?.content || '').trim();
+  if (first && latest && first !== latest) return (first + '\n\n最新补充：' + latest).slice(0, 1800);
+  return (latest || first || '会话任务草案').slice(0, 1800);
+}
+function buildDraftTaskFromSession(session){
+  const command = linkOpsSessionCommand(session);
+  const lastAssistant = linkOpsLatestAssistantMessage(session);
+  const targets = session?.targets && typeof session.targets === 'object' ? session.targets : {};
+  return {
+    id: 'draft_' + String(session?.id || 'new'),
+    virtual: true,
+    status: 'draft',
+    progress: linkOpsSessionMessages(session).length ? 18 : 0,
+    chatSessionId: session?.id || '',
+    command,
+    intents: inferLinkOpsIntentFromText(command),
+    targets,
+    preview: {
+      summary: '这是随会话实时变化的任务草案；继续对话会更新目标、依据和动作，确认后才固化为可执行任务。',
+      riskNotes: ['草案不会写 SHEIN 后台；明确动作命令会自动固化为待确认任务。'],
+      nextChecks: ['补齐目标店铺、货号/SKC 和要执行的动作。', '确认素材、证书、标题或活动规则是否已准备。', '固化为任务后再上传素材并执行预检。'],
+      agentAnswer: String(lastAssistant?.content || ''),
+    },
+    note: '边聊边沉淀，尚未固化。',
+    createdAt: session?.createdAt || '',
+    updatedAt: session?.updatedAt || '',
+    history: [],
+  };
+}
+function renderLinkOpsTaskCard(t, options = {}){
+  const intents = Array.isArray(t?.intents) ? t.intents : [];
+  const stores = Array.isArray(t?.targets?.stores) ? t.targets.stores : [];
+  const refs = Array.isArray(t?.targets?.productRefs) ? t.targets.productRefs : [];
+  const riskNotes = Array.isArray(t?.preview?.riskNotes) ? t.preview.riskNotes : [];
+  const nextChecks = Array.isArray(t?.preview?.nextChecks) ? t.preview.nextChecks : [];
+  const agentAnswer = String(t?.preview?.agentAnswer || '').trim();
+  const progress = Math.max(0, Math.min(100, Number(t?.progress || 0)));
+  const history = Array.isArray(t?.history) ? t.history.slice(-4).reverse() : [];
+  const taskTitle = linkOpsTaskActionTitle(intents);
+  const isVirtual = !!t?.virtual;
+  const openAttr = options.open ? ' open' : '';
+  const shellClass = 'linkops-task' + (options.active ? ' active-task' : '') + (isVirtual ? ' virtual-task' : '');
+  const body =
+    '<div class="task-detail">'+
+      '<div class="row1"><div>'+intents.map(x => '<span class="tag mid">'+escapeHtml(linkOpsIntentLabel(x))+'</span>').join(' ')+'</div><span class="muted">'+escapeHtml(String(t?.updatedAt || t?.createdAt || '').replace('T',' ').slice(0,16))+'</span></div>'+
+      '<div class="task-progress"><i style="width:'+num(progress)+'%"></i></div><p>进度：<b>'+num(progress)+'%</b>'+(t?.note ? ' · '+escapeHtml(t.note) : '')+'</p>'+
+      '<p>任务指令：'+escapeHtml(String(t?.command || '').slice(0,420))+'</p>'+
+      renderLinkOpsTaskExecution(t)+
+      (isVirtual ? '<div class="next">这是当前会话的实时草案。继续聊会调整目标和动作；点“确认成任务”后才能上传素材和启动执行器。</div>' : renderLinkOpsAssetPanel(t)+renderLinkOpsExecutionState(t))+
+      (agentAnswer ? '<details style="margin-top:8px" open><summary>智能体结论</summary>'+renderAgentAnswerCards(agentAnswer)+'</details>' : '')+
+      renderLinkOpsDataAdvice(t)+
+      (riskNotes.length ? '<ul class="linkops-preview-list">'+riskNotes.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul>' : '')+
+      (nextChecks.length ? '<details style="margin-top:8px" '+(isVirtual ? 'open' : '')+'><summary>执行前检查项</summary><ul class="linkops-preview-list">'+nextChecks.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul></details>' : '')+
+      (history.length ? '<details style="margin-top:8px"><summary>操作记录</summary><ul class="linkops-preview-list">'+history.map(h => '<li>'+escapeHtml(String(h.at || '').replace('T',' ').slice(0,19))+' · '+escapeHtml(h.event || '-')+' · '+escapeHtml(h.by || '-')+'</li>').join('')+'</ul></details>' : '')+
+      '<div class="task-actions">'+
+        (isVirtual ? '<button class="primary" type="button" id="convertChatToTask">确认成任务</button>' : '')+
+        (!isVirtual ? '<button type="button" data-linkops-task-action="confirm" data-task-id="'+escapeHtml(t?.id || '')+'">确认成任务</button>' : '')+
+        (!isVirtual ? '<button type="button" data-linkops-task-action="start" data-task-id="'+escapeHtml(t?.id || '')+'">开始执行</button>' : '')+
+        (!isVirtual ? '<button type="button" data-linkops-task-action="done" data-task-id="'+escapeHtml(t?.id || '')+'">标记完成</button>' : '')+
+        (!isVirtual ? '<button type="button" data-linkops-task-action="archive" data-task-id="'+escapeHtml(t?.id || '')+'">归档</button>' : '')+
+        (!isVirtual ? '<button class="danger" type="button" data-linkops-task-action="delete" data-task-id="'+escapeHtml(t?.id || '')+'">删除</button>' : '')+
+      '</div>'+
+    '</div>';
+  return '<details class="'+shellClass+'"'+openAttr+'>'+
+    '<summary class="task-summary"><div><h4>'+escapeHtml(taskTitle)+'</h4><small>'+escapeHtml(stores.join(', ') || '待识别店铺')+' · '+escapeHtml(refs.join(', ') || '待识别货号/SKC')+' · 进度 '+num(progress)+'%</small></div><span class="tag '+linkOpsStatusClass(t?.status)+'">'+escapeHtml(isVirtual ? '实时草案' : linkOpsStatusLabel(t?.status))+'</span></summary>'+
+    body+
+  '</details>';
+}
+function renderActiveLinkOpsWorkbench(active){
+  if (!active) {
+    return '<aside class="ops-task-panel"><div class="ops-workbench-head"><div><h3>任务工作台</h3><div class="sub">一个会话对应一个任务界面。</div></div></div><div class="empty">先发送一句运营目标，右侧会实时生成任务草案。</div></aside>';
+  }
+  const realTask = linkOpsTaskForSession(active);
+  const task = realTask || buildDraftTaskFromSession(active);
+  const messages = linkOpsSessionMessages(active);
+  const statusText = realTask ? '已固化，可执行预检' : '实时草案，继续聊会自动调整';
+  return '<aside class="ops-task-panel">'+
+    '<div class="ops-workbench-head"><div><h3>任务工作台</h3><div class="sub">会话就是任务：边聊边定目标、补材料、做预检。</div></div><span class="tag '+(realTask ? 'good' : 'mid')+'">'+escapeHtml(statusText)+'</span></div>'+
+    '<div class="ops-now"><h4>'+escapeHtml(active.title || '运营任务')+'</h4><p>本会话 '+num(messages.length)+' 条消息；'+(realTask ? '已绑定任务 '+escapeHtml(realTask.id || '') : '尚未固化，明确命令会自动生成待确认任务。')+'</p></div>'+
+    renderLinkOpsTaskCard(task, {open:true, active:true})+
+    '<div class="ops-workbench-archive">'+renderOtherLinkOpsTasks(active)+'</div>'+
+  '</aside>';
+}
+function renderOtherLinkOpsTasks(active){
+  const tasks = (linkOpsStore.tasks || []).filter(t => !active?.id || String(t.chatSessionId || '') !== String(active.id || ''));
+  if (linkOpsStore.error) return '<div class="empty">任务记录暂不可用：'+escapeHtml(linkOpsStore.error)+'</div>';
+  if (!tasks.length) return '<div class="empty">暂无其它任务。当前会话就是主任务界面。</div>';
+  return '<details class="ops-tasks-archive"><summary>其它任务记录（'+num(tasks.length)+'）</summary><div style="margin-top:10px">'+
+    tasks.slice(0, 60).map(t => renderLinkOpsTaskCard(t, {open:false})).join('')+
+  '</div></details>';
+}
 function renderLinkOps(){
   const center = $('linkOpsCommandCenter');
   const list = $('linkOpsTaskList');
@@ -9123,20 +9265,20 @@ function renderLinkOps(){
   center.innerHTML =
     '<div class="ops-workspace">'+
       '<aside class="ops-rail">'+
-        '<div class="card-h" style="padding:0 0 10px"><div><h3>运营会话</h3><div class="sub">先聊清楚，再进入任务池</div></div><button class="btn" id="newOpsChat" type="button">新会话</button></div>'+
+        '<div class="card-h" style="padding:0 0 10px"><div><h3>运营会话</h3><div class="sub">每个会话就是一个任务工作台</div></div><button class="btn" id="newOpsChat" type="button">新会话</button></div>'+
         (linkOpsChatStore.error ? '<div class="next warn">会话不可用：'+escapeHtml(linkOpsChatStore.error)+'</div>' : '')+
         (sessions.length ? sessions.map(s => {
           const count = Array.isArray(s.messages) ? s.messages.length : 0;
+          const bound = linkOpsTaskForSession(s);
           const activeCls = String(s.id || '') === String(linkOpsChatStore.activeId || '') ? ' active' : '';
-          return '<div class="ops-session'+activeCls+'" data-linkops-session-id="'+escapeHtml(s.id || '')+'"><div class="ops-session-head"><div><b>'+escapeHtml(s.title || '未命名会话')+'</b><small>'+escapeHtml(s.status === 'sending' ? '发送中' : linkOpsStatusLabel(s.status || 'chatting'))+' · '+num(count)+' 条消息 · '+escapeHtml(String(s.updatedAt || s.createdAt || '').replace('T',' ').slice(0,16))+'</small></div><button class="ops-session-delete" type="button" data-linkops-session-delete="'+escapeHtml(s.id || '')+'">删除</button></div></div>';
+          return '<div class="ops-session'+activeCls+'" data-linkops-session-id="'+escapeHtml(s.id || '')+'"><div class="ops-session-head"><div><b>'+escapeHtml(s.title || '未命名会话')+'</b><small>'+escapeHtml(s.status === 'sending' ? '发送中' : linkOpsStatusLabel(s.status || 'chatting'))+' · '+num(count)+' 条消息 · '+(bound ? '已绑定任务' : '实时草案')+' · '+escapeHtml(String(s.updatedAt || s.createdAt || '').replace('T',' ').slice(0,16))+'</small></div><button class="ops-session-delete" type="button" data-linkops-session-delete="'+escapeHtml(s.id || '')+'">删除</button></div></div>';
         }).join('') : '<div class="empty">还没有会话。点右侧推荐指令，或直接输入你的运营问题。</div>')+
         '<div style="margin-top:14px"><div class="section-block-label">基于当前数据的推荐指令</div>'+
           prompts.map(p => '<div class="ops-reco" data-linkops-reco="'+escapeHtml(p.text)+'"><b>'+escapeHtml(p.title)+'</b><p>'+escapeHtml(p.reason)+'</p></div>').join('')+
         '</div>'+
       '</aside>'+
       '<main class="ops-chat">'+
-        '<div class="card-h" style="padding:0 0 12px"><div><h3>'+(active ? escapeHtml(active.title || '运营会话') : '新运营会话')+'</h3><div class="sub">只读分析，不会改 SHEIN；聊成熟后点“进入任务池”。</div></div>'+
-        (active ? '<button class="btn primary" id="convertChatToTask" type="button">进入任务池</button>' : '')+'</div>'+
+        '<div class="card-h" style="padding:0 0 12px"><div><h3>'+(active ? escapeHtml(active.title || '运营会话') : '新运营会话')+'</h3><div class="sub">像和 Codex 聊一样：边聊边在右侧生成任务、数据依据和执行步骤。</div></div></div>'+
         '<div class="chat-stream">'+
           (messages.length ? messages.map(m => '<div class="chat-msg '+(m.role === 'assistant' ? 'assistant' : 'user')+'">'+(m.role === 'assistant' ? renderAgentAnswerCards(m.content) : '<p>'+escapeHtml(m.content || '')+'</p>')+'<small class="muted">'+escapeHtml(String(m.at || '').replace('T',' ').slice(0,16))+'</small></div>').join('') : '<div class="empty">这是一个独立会话。你可以问“这个品哪些店该补链接”“这条链接该换图还是下架”“怎么报限时折扣”。</div>')+
           (opsAgentStore.busy ? '<div class="chat-msg assistant"><div class="empty">智能体正在分析当前 BI 数据...</div></div>' : '')+
@@ -9148,53 +9290,9 @@ function renderLinkOps(){
           '<div class="command-actions"><button class="btn primary" id="sendLinkOpsChat" type="button">发送给智能体</button><button class="btn" id="clearLinkOpsChat" type="button">清空输入</button></div>'+
         '</div>'+
       '</main>'+
-    '</div>'+
-    '<div class="ops-tasks" style="margin-top:14px">'+
-      '<div class="card-h" style="padding:0 0 12px"><div><h3>链接运营任务池</h3><div class="sub">这里只放可执行任务：必须能看清任务目标、对象、材料和执行方式。</div></div><button class="btn" id="refreshLinkOpsTasks" type="button">刷新任务池</button></div>'+
-      '<div id="linkOpsTaskListInline"></div>'+
+      renderActiveLinkOpsWorkbench(active)+
     '</div>';
-  const tasks = linkOpsStore.tasks || [];
-  const targetList = $('linkOpsTaskListInline') || list;
-  const renderTaskList = () => {
-    if (linkOpsStore.error) return '<div class="empty">任务池暂不可用：'+escapeHtml(linkOpsStore.error)+'</div>';
-    if (!tasks.length) return '<div class="empty">暂无任务。先在会话里聊清楚，再点“进入任务池”。</div>';
-    return tasks.map(t => {
-      const intents = Array.isArray(t.intents) ? t.intents : [];
-      const stores = Array.isArray(t.targets?.stores) ? t.targets.stores : [];
-      const refs = Array.isArray(t.targets?.productRefs) ? t.targets.productRefs : [];
-      const riskNotes = Array.isArray(t.preview?.riskNotes) ? t.preview.riskNotes : [];
-      const nextChecks = Array.isArray(t.preview?.nextChecks) ? t.preview.nextChecks : [];
-      const agentAnswer = String(t.preview?.agentAnswer || '').trim();
-      const progress = Math.max(0, Math.min(100, Number(t.progress || 0)));
-      const history = Array.isArray(t.history) ? t.history.slice(-3).reverse() : [];
-      const taskTitle = linkOpsTaskActionTitle(intents);
-      return '<details class="linkops-task">'+
-        '<summary class="task-summary"><div><h4>'+escapeHtml(taskTitle)+'</h4><small>'+escapeHtml(stores.join(', ') || '待识别店铺')+' · '+escapeHtml(refs.join(', ') || '待识别货号')+' · 进度 '+num(progress)+'%</small></div><span class="tag '+linkOpsStatusClass(t.status)+'">'+escapeHtml(linkOpsStatusLabel(t.status))+'</span></summary>'+
-        '<div class="task-detail">'+
-        '<div class="row1"><div>'+intents.map(x => '<span class="tag mid">'+escapeHtml(linkOpsIntentLabel(x))+'</span>').join(' ')+'</div><span class="muted">'+escapeHtml(String(t.createdAt || '').replace('T',' ').slice(0,16))+'</span></div>'+
-        '<div class="task-progress"><i style="width:'+num(progress)+'%"></i></div><p>进度：<b>'+num(progress)+'%</b>'+(t.note ? ' · '+escapeHtml(t.note) : '')+'</p>'+
-        '<p>原始指令：'+escapeHtml(String(t.command || '').slice(0,260))+'</p>'+
-        renderLinkOpsTaskExecution(t)+
-        renderLinkOpsAssetPanel(t)+
-        renderLinkOpsExecutionState(t)+
-        (agentAnswer ? '<details style="margin-top:8px" open><summary>智能体结论</summary>'+renderAgentAnswerCards(agentAnswer)+'</details>' : '')+
-        renderLinkOpsDataAdvice(t)+
-        (riskNotes.length ? '<ul class="linkops-preview-list">'+riskNotes.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul>' : '')+
-        (nextChecks.length ? '<details style="margin-top:8px"><summary>执行前检查项</summary><ul class="linkops-preview-list">'+nextChecks.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul></details>' : '')+
-        (history.length ? '<details style="margin-top:8px"><summary>操作记录</summary><ul class="linkops-preview-list">'+history.map(h => '<li>'+escapeHtml(String(h.at || '').replace('T',' ').slice(0,19))+' · '+escapeHtml(h.event || '-')+' · '+escapeHtml(h.by || '-')+'</li>').join('')+'</ul></details>' : '')+
-        '<div class="task-actions">'+
-          '<button type="button" data-linkops-task-action="confirm" data-task-id="'+escapeHtml(t.id || '')+'">确认成任务</button>'+
-          '<button type="button" data-linkops-task-action="start" data-task-id="'+escapeHtml(t.id || '')+'">开始执行</button>'+
-          '<button type="button" data-linkops-task-action="done" data-task-id="'+escapeHtml(t.id || '')+'">标记完成</button>'+
-          '<button type="button" data-linkops-task-action="archive" data-task-id="'+escapeHtml(t.id || '')+'">归档</button>'+
-          '<button class="danger" type="button" data-linkops-task-action="delete" data-task-id="'+escapeHtml(t.id || '')+'">删除</button>'+
-        '</div>'+
-        '</div>'+
-      '</details>';
-    }).join('');
-  };
-  targetList.innerHTML = renderTaskList();
-  if (targetList !== list) list.innerHTML = '';
+  list.innerHTML = '';
   document.querySelectorAll('[data-linkops-session-delete]').forEach(btn => btn.addEventListener('click', (e) => {
     e.stopPropagation();
     deleteLinkOpsChatSession(btn.dataset.linkopsSessionDelete || '');
