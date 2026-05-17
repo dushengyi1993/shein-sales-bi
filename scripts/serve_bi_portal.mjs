@@ -241,7 +241,7 @@ function inferLinkOpsIntent(command) {
   const text = String(command || '').trim();
   const lower = text.toLowerCase();
   const intents = [];
-  if (/补|复制|上品|上架|草稿|覆盖|缺链接|缺链/.test(text)) intents.push('copy_product_draft');
+  if (/补|复制|上品|上架|草稿|覆盖|缺链接|缺链/.test(text) || /\b(copy|draft|create|publish|coverage)\b/.test(lower)) intents.push('copy_product_draft');
   if (/标题|title/.test(lower)) intents.push('update_title');
   if (/主图|图片|套图|image|photo|pic/.test(lower)) intents.push('update_images');
   if (/下架|死链|淘汰|归档/.test(text)) intents.push('retire_link');
