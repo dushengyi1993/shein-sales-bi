@@ -3871,6 +3871,7 @@ let applyingHash = false;
 const ACTION_STATE_KEY = 'SHEIN_BI_ACTION_STATE_V1';
 const ACTION_STATE_API = '/api/action-state';
 const LINK_OPS_TASKS_API = '/api/link-ops-tasks';
+const OPS_AGENT_ASK_API = '/api/ops-agent/ask';
 const SERVICE_HEALTH_API = '/api/health';
 const ACTION_STATE_SERVICE_PATH = 'state/bi_action_state.json';
 const actionStateStore = {
@@ -3924,6 +3925,7 @@ function actionStateStoreLabel(){
 }
 let actionState = loadActionState();
 const linkOpsStore = {ready:false, error:'', tasks:[]};
+const opsAgentStore = {busy:false, answer:'', error:'', lastQuestion:'', durationMs:0};
 async function initServiceHealth(){
   if (actionStateStore.mode !== 'service') {
     serviceHealth = {
@@ -4011,11 +4013,37 @@ async function submitLinkOpsCommand(){
   const command = String(input?.value || '').trim();
   if (!command) return showToast('请先输入运营指令');
   if (actionStateStore.mode !== 'service') return showToast('当前不是网页服务模式，不能写入云端任务池');
+  opsAgentStore.busy = true;
+  opsAgentStore.error = '';
+  opsAgentStore.answer = '';
+  opsAgentStore.lastQuestion = command;
+  opsAgentStore.durationMs = 0;
+  renderAll();
+  try {
+    const askRes = await fetch(OPS_AGENT_ASK_API, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({question: command})
+    });
+    const askPayload = await askRes.json().catch(() => ({}));
+    if (!askRes.ok || !askPayload.ok) throw new Error(askPayload.error || ('HTTP ' + askRes.status));
+    opsAgentStore.answer = String(askPayload.answer || '');
+    opsAgentStore.durationMs = Number(askPayload.durationMs || 0);
+  } catch (err) {
+    opsAgentStore.error = err?.message || String(err || 'unknown');
+  } finally {
+    opsAgentStore.busy = false;
+  }
   try {
     const res = await fetch(LINK_OPS_TASKS_API, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({command})
+      body:JSON.stringify({
+        command,
+        agentAnswer: opsAgentStore.answer || '',
+        agentMode: opsAgentStore.answer ? 'readonly-codex-gateway' : '',
+        agentDurationMs: opsAgentStore.durationMs || 0
+      })
     });
     const payload = await res.json().catch(() => ({}));
     if (!res.ok || !payload.ok) throw new Error(payload.error || ('HTTP ' + res.status));
@@ -4023,10 +4051,11 @@ async function submitLinkOpsCommand(){
     linkOpsStore.ready = true;
     linkOpsStore.error = '';
     if (input) input.value = '';
-    showToast('已生成链接运营任务草案，等待人工确认');
+    showToast(opsAgentStore.answer ? '已生成智能体回答和任务草案' : '已生成任务草案，智能体回答失败');
     renderAll();
   } catch (err) {
     showToast('提交失败：' + (err?.message || String(err || 'unknown')));
+    renderAll();
   }
 }
 async function updateActionStatus(key, status){
@@ -8601,6 +8630,18 @@ function renderLinkOps(){
         '<div class="section-block-label">常用指令模板</div>'+
         '<div class="linkops-hints">'+examples.map(x => '<button type="button" data-linkops-example="'+escapeHtml(x)+'">'+escapeHtml(x)+'</button>').join('')+'</div>'+
       '</div>'+
+    '</div>'+
+    '<div class="card" style="margin-top:14px">'+
+      '<div class="card-h"><div><h3>智能体回复</h3><div class="sub">由云端 Codex 只读网关基于当前 BI 数据回答；不会执行 SHEIN 写操作。</div></div>'+
+        '<span class="tag '+(opsAgentStore.busy ? 'mid' : opsAgentStore.error ? 'high' : opsAgentStore.answer ? 'good' : 'info')+'">'+
+          escapeHtml(opsAgentStore.busy ? '分析中' : opsAgentStore.error ? '失败' : opsAgentStore.answer ? '已回答' : '等待指令')+
+        '</span></div>'+
+      '<div class="card-body">'+
+        (opsAgentStore.busy ? '<div class="empty">云端智能体正在分析，请稍等几十秒。这个过程只读 BI 数据，不会改 SHEIN。</div>' :
+          opsAgentStore.error ? '<div class="next warn">智能体回答失败：'+escapeHtml(opsAgentStore.error)+'</div>' :
+          opsAgentStore.answer ? '<div class="briefing">'+escapeHtml(opsAgentStore.answer).replace(/\\n/g,'<br>')+'</div><p class="muted">耗时 '+num(Math.round(opsAgentStore.durationMs/1000))+' 秒；问题：'+escapeHtml(opsAgentStore.lastQuestion)+'</p>' :
+          '<div class="empty">输入一条自然语言指令后，这里会直接显示智能体的分析和建议。</div>')+
+      '</div>'+
     '</div>';
   const tasks = linkOpsStore.tasks || [];
   if (linkOpsStore.error) {
@@ -8614,12 +8655,14 @@ function renderLinkOps(){
       const refs = Array.isArray(t.targets?.productRefs) ? t.targets.productRefs : [];
       const riskNotes = Array.isArray(t.preview?.riskNotes) ? t.preview.riskNotes : [];
       const nextChecks = Array.isArray(t.preview?.nextChecks) ? t.preview.nextChecks : [];
+      const agentAnswer = String(t.preview?.agentAnswer || '').trim();
       return '<article class="linkops-task">'+
         '<div class="row1"><div>'+intents.map(x => '<span class="tag mid">'+escapeHtml(linkOpsIntentLabel(x))+'</span>').join(' ')+'</div><span class="mono">'+escapeHtml(String(t.createdAt || '').replace('T',' ').slice(0,19))+'</span></div>'+
         '<h4>'+escapeHtml(String(t.command || '').slice(0,180))+'</h4>'+
         '<p>状态：<b>'+escapeHtml(t.status || 'draft')+'</b> · 提交人：'+escapeHtml(t.requestedBy || '-')+'</p>'+
         '<p>目标店：'+escapeHtml(stores.join(', ') || '待识别')+' · 货号/SKC：'+escapeHtml(refs.join(', ') || '待识别')+'</p>'+
         '<p>'+escapeHtml(t.preview?.summary || '等待执行前预览')+'</p>'+
+        (agentAnswer ? '<div class="next good"><b>智能体回复：</b><br>'+escapeHtml(agentAnswer).replace(/\n/g,'<br>')+'</div>' : '')+
         renderLinkOpsDataAdvice(t)+
         (riskNotes.length ? '<ul class="linkops-preview-list">'+riskNotes.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul>' : '')+
         (nextChecks.length ? '<details style="margin-top:8px"><summary>执行前检查项</summary><ul class="linkops-preview-list">'+nextChecks.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul></details>' : '')+

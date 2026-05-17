@@ -256,7 +256,9 @@ function inferLinkOpsTargets(command) {
   const text = String(command || '');
   const storeMatches = [...new Set((text.match(/\b[A-Z]{2}\b/g) || []).filter(x => x.length === 2))].slice(0, 24);
   const skuMatches = [...new Set((text.match(/[A-Z]{1,6}-?\d{2,8}[A-Z]?(?:[\u4e00-\u9fa5A-Za-z0-9-]*)?/g) || [])
-    .map(x => x.replace(/[，。；、,.]+$/g, ''))
+    .map(x => x
+      .replace(/[，。；、,.]+$/g, '')
+      .replace(/(各店|全店|所有店|差链接|弱链接|死链接|缺链接|链接|建议|下架|换图|补新|补链|覆盖).*$/u, ''))
     .filter(x => /\d/.test(x)))].slice(0, 24);
   return {
     stores: storeMatches,
@@ -303,6 +305,9 @@ function buildLinkOpsTaskFromCommand(body, actor, req) {
     preview: {
       summary: `识别为：${intents.join(' / ')}；等待人工补充/确认后才会进入执行队列。`,
       riskNotes: linkOpsRiskNotes(intents),
+      agentAnswer: typeof body.agentAnswer === 'string' ? body.agentAnswer.slice(0, 12000) : '',
+      agentMode: typeof body.agentMode === 'string' ? body.agentMode.slice(0, 80) : '',
+      agentDurationMs: Number.isFinite(Number(body.agentDurationMs)) ? Number(body.agentDurationMs) : 0,
       nextChecks: [
         '确认目标店铺和货号/SKC。',
         '匹配现有链接、覆盖矩阵和表现数据。',
@@ -329,6 +334,65 @@ function normalizeLinkOpsTaskStore(value) {
     version: 1,
     updatedAt: value?.updatedAt || null,
     tasks: tasks.filter(x => x && typeof x === 'object').slice(0, 1000),
+  };
+}
+
+function runChildProcess(command, args, options = {}) {
+  return new Promise(resolve => {
+    const child = spawn(command, args, {
+      cwd: options.cwd || ROOT,
+      env: {...process.env, ...(options.env || {})},
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+      setTimeout(() => child.kill('SIGKILL'), 2000).unref?.();
+    }, options.timeoutMs || 120_000);
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', d => { stdout += d; });
+    child.stderr.on('data', d => { stderr += d; });
+    child.on('error', err => {
+      clearTimeout(timer);
+      resolve({ok: false, code: -1, timedOut, stdout, stderr: String(err?.stack || err)});
+    });
+    child.on('close', code => {
+      clearTimeout(timer);
+      resolve({ok: code === 0 && !timedOut, code, timedOut, stdout, stderr});
+    });
+  });
+}
+
+async function askReadonlyOpsAgent(question) {
+  const text = String(question || '').trim();
+  if (!text) throw new Error('Missing question');
+  if (text.length > 2000) throw new Error('Question too long');
+  const result = await runChildProcess(process.execPath, [
+    path.join(ROOT, 'scripts', 'lark_sales_qa_bot.mjs'),
+    '--answer',
+    text,
+  ], {
+    cwd: ROOT,
+    timeoutMs: Number(process.env.SHEIN_BI_OPS_AGENT_TIMEOUT_MS || 190_000),
+    env: {
+      CODEX_HOME: process.env.CODEX_HOME || '/home/sheinops/.codex',
+      SHEIN_QA_CODEX_GATEWAY_ENABLED: process.env.SHEIN_QA_CODEX_GATEWAY_ENABLED || '1',
+      SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS: process.env.SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS || '180000',
+      SHEIN_QA_LLM_ENABLED: process.env.SHEIN_QA_LLM_ENABLED || '1',
+      SHEIN_QA_LLM_TIMEOUT_MS: process.env.SHEIN_QA_LLM_TIMEOUT_MS || '45000',
+    },
+  });
+  if (!result.ok) {
+    throw new Error(`Ops agent failed code=${result.code} timeout=${result.timedOut} stderr=${String(result.stderr || '').slice(-500)}`);
+  }
+  return {
+    answer: String(result.stdout || '').trim(),
+    stderrTail: String(result.stderr || '').slice(-1000),
   };
 }
 
@@ -599,6 +663,53 @@ async function main() {
             },
           });
           return sendJson(res, 200, {ok: true, data: next, task});
+        }
+        return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+      }
+      if (url.pathname === '/api/ops-agent/ask') {
+        if (req.method === 'POST') {
+          if (args.readOnly) {
+            return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
+          }
+          let body;
+          try {
+            body = await readBodyJson(req, 256 * 1024);
+          } catch (err) {
+            return sendJson(res, 400, {ok: false, error: err?.message || String(err || 'Invalid request')});
+          }
+          const question = String(body.question || body.command || body.text || '').trim();
+          const startedAt = Date.now();
+          try {
+            const result = await askReadonlyOpsAgent(question);
+            await appendAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'ops-agent-ask',
+              actor,
+              ...requestMeta(req),
+              questionPreview: question.slice(0, 240),
+              answerLength: result.answer.length,
+              durationMs: Date.now() - startedAt,
+              ok: true,
+            });
+            return sendJson(res, 200, {
+              ok: true,
+              mode: 'readonly-codex-gateway',
+              answer: result.answer,
+              durationMs: Date.now() - startedAt,
+            });
+          } catch (err) {
+            await appendAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'ops-agent-ask',
+              actor,
+              ...requestMeta(req),
+              questionPreview: question.slice(0, 240),
+              durationMs: Date.now() - startedAt,
+              ok: false,
+              error: String(err?.message || err).slice(0, 500),
+            });
+            return sendJson(res, 500, {ok: false, error: err?.message || String(err || 'Ops agent failed')});
+          }
         }
         return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
       }
