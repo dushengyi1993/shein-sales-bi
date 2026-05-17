@@ -4176,7 +4176,7 @@ async function improveLinkOpsTask(id, mode){
     if (!askRes.ok || !askPayload.ok) throw new Error(askPayload.error || ('HTTP ' + askRes.status));
     const answer = String(askPayload.answer || '').trim();
     const titleCandidates = mode === 'title'
-      ? answer.split(/\n+/).map(x => x.replace(/^[\\d\\-\\.\\)\\s]+/, '').trim()).filter(x => x.length > 12).slice(0, 8)
+      ? answer.split(String.fromCharCode(10)).map(x => x.replace(/^[\\d\\-\\.\\)\\s]+/, '').trim()).filter(x => x.length > 12).slice(0, 8)
       : (Array.isArray(task.preview?.titleCandidates) ? task.preview.titleCandidates : []);
     await patchLinkOpsTask(id, {
       event: mode === 'title' ? 'generate_title_candidates' : 'improve_task',
