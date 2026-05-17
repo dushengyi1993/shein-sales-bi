@@ -8662,7 +8662,7 @@ function renderLinkOps(){
         '<p>状态：<b>'+escapeHtml(t.status || 'draft')+'</b> · 提交人：'+escapeHtml(t.requestedBy || '-')+'</p>'+
         '<p>目标店：'+escapeHtml(stores.join(', ') || '待识别')+' · 货号/SKC：'+escapeHtml(refs.join(', ') || '待识别')+'</p>'+
         '<p>'+escapeHtml(t.preview?.summary || '等待执行前预览')+'</p>'+
-        (agentAnswer ? '<div class="next good"><b>智能体回复：</b><br>'+escapeHtml(agentAnswer).split('\n').join('<br>')+'</div>' : '')+
+        (agentAnswer ? '<div class="next good"><b>智能体回复：</b><br>'+escapeHtml(agentAnswer).split(String.fromCharCode(10)).join('<br>')+'</div>' : '')+
         renderLinkOpsDataAdvice(t)+
         (riskNotes.length ? '<ul class="linkops-preview-list">'+riskNotes.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul>' : '')+
         (nextChecks.length ? '<details style="margin-top:8px"><summary>执行前检查项</summary><ul class="linkops-preview-list">'+nextChecks.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul></details>' : '')+
