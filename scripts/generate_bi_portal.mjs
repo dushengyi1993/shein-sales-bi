@@ -3191,6 +3191,16 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .material-pill.need{color:#fde68a;border-color:rgba(250,204,21,.28)}
     body[data-theme="light"] .material-pill.need{color:#92400e;border-color:#fde68a;background:#fffbeb}
     .task-exec-note{margin-top:8px;font-size:12px;line-height:1.6;color:var(--muted)}
+    .asset-panel{border:1px dashed rgba(148,163,184,.28);border-radius:16px;padding:11px;margin-top:10px;background:rgba(15,23,42,.20)}
+    body[data-theme="light"] .asset-panel{background:#fff;border-color:#cbd5e1}
+    .asset-panel input[type=file]{width:100%;min-height:38px;border-radius:12px;border:1px solid rgba(148,163,184,.18);padding:7px;background:rgba(15,23,42,.18);color:var(--text)}
+    body[data-theme="light"] .asset-panel input[type=file]{background:#f8fafc;border-color:#e2e8f0}
+    .asset-list{display:grid;gap:6px;margin-top:8px}
+    .asset-row{display:grid;grid-template-columns:minmax(120px,1fr) auto auto;gap:8px;align-items:center;border:1px solid rgba(148,163,184,.14);border-radius:12px;padding:8px;font-size:12px}
+    body[data-theme="light"] .asset-row{border-color:#e2e8f0}
+    .asset-row .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.asset-row .meta{color:var(--muted);font-family:var(--mono);font-size:11px}
+    .execution-state{margin-top:10px;border:1px solid rgba(250,204,21,.22);border-radius:16px;background:rgba(120,53,15,.12);padding:10px;color:var(--muted);font-size:12px;line-height:1.6}
+    body[data-theme="light"] .execution-state{background:#fffbeb;border-color:#fde68a}
     .agent-answer-grid{display:grid;gap:10px;margin-top:10px}
     .agent-answer-card{border:1px solid rgba(56,189,248,.22);border-radius:16px;background:rgba(8,47,73,.18);padding:12px}
     body[data-theme="light"] .agent-answer-card{background:#f0f9ff;border-color:#bae6fd}
@@ -3923,6 +3933,8 @@ const ACTION_STATE_KEY = 'SHEIN_BI_ACTION_STATE_V1';
 const ACTION_STATE_API = '/api/action-state';
 const LINK_OPS_TASKS_API = '/api/link-ops-tasks';
 const LINK_OPS_CHATS_API = '/api/link-ops-chats';
+const LINK_OPS_ASSETS_API = '/api/link-ops-assets';
+const LINK_OPS_EXECUTE_API = '/api/link-ops-execute';
 const OPS_AGENT_ASK_API = '/api/ops-agent/ask';
 const SERVICE_HEALTH_API = '/api/health';
 const ACTION_STATE_SERVICE_PATH = 'state/bi_action_state.json';
@@ -4353,6 +4365,90 @@ async function patchLinkOpsTask(id, patch, successText){
     renderAll();
   } catch (err) {
     showToast('任务更新失败：' + (err?.message || String(err || 'unknown')));
+  }
+}
+function linkOpsGuessMime(file){
+  const name = String(file?.name || '').toLowerCase();
+  const type = String(file?.type || '').toLowerCase();
+  if (type) return type;
+  if (name.endsWith('.jpg') || name.endsWith('.jpeg')) return 'image/jpeg';
+  if (name.endsWith('.png')) return 'image/png';
+  if (name.endsWith('.webp')) return 'image/webp';
+  if (name.endsWith('.pdf')) return 'application/pdf';
+  if (name.endsWith('.csv')) return 'text/csv';
+  if (name.endsWith('.json')) return 'application/json';
+  if (name.endsWith('.txt')) return 'text/plain';
+  return 'application/octet-stream';
+}
+function linkOpsHumanBytes(bytes){
+  const n = Number(bytes || 0);
+  if (!Number.isFinite(n) || n <= 0) return '0B';
+  if (n < 1024) return Math.round(n)+'B';
+  if (n < 1024*1024) return (n/1024).toFixed(1)+'KB';
+  return (n/1024/1024).toFixed(1)+'MB';
+}
+function readFileAsBase64(file){
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || '').split(',').pop() || '');
+    reader.onerror = () => reject(reader.error || new Error('读取文件失败'));
+    reader.readAsDataURL(file);
+  });
+}
+async function uploadLinkOpsAssets(id){
+  if (!id) return;
+  if (actionStateStore.mode !== 'service') return showToast('当前不是网页服务模式，不能上传素材');
+  const input = Array.from(document.querySelectorAll('[data-linkops-asset-input]')).find(el => el.dataset.linkopsAssetInput === id);
+  const files = Array.from(input?.files || []);
+  if (!files.length) return showToast('请先选择要上传的素材文件');
+  if (files.length > 20) return showToast('一次最多上传 20 个文件');
+  const total = files.reduce((s,f)=>s+Number(f.size || 0),0);
+  if (files.some(f => Number(f.size || 0) > 10*1024*1024)) return showToast('单个文件不能超过 10MB');
+  if (total > 30*1024*1024) return showToast('单次上传总大小不能超过 30MB');
+  showToast('正在上传素材...');
+  try {
+    const encoded = [];
+    for (const file of files) {
+      encoded.push({
+        name: file.name,
+        type: linkOpsGuessMime(file),
+        size: file.size,
+        dataBase64: await readFileAsBase64(file),
+      });
+    }
+    const res = await fetch(LINK_OPS_ASSETS_API, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({taskId:id, files:encoded})
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || !payload.ok) throw new Error(payload.error || ('HTTP ' + res.status));
+    linkOpsStore.tasks = Array.isArray(payload?.data?.tasks) ? payload.data.tasks : [];
+    if (input) input.value = '';
+    showToast('素材已上传到云端任务包');
+    renderAll();
+  } catch (err) {
+    showToast('素材上传失败：' + (err?.message || String(err || 'unknown')));
+  }
+}
+async function startLinkOpsExecutor(id){
+  if (!id) return;
+  if (actionStateStore.mode !== 'service') return showToast('当前不是网页服务模式，不能启动执行器');
+  showToast('正在做执行前检查...');
+  try {
+    const res = await fetch(LINK_OPS_EXECUTE_API, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({id})
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || !payload.ok) throw new Error(payload.error || ('HTTP ' + res.status));
+    linkOpsStore.tasks = Array.isArray(payload?.data?.tasks) ? payload.data.tasks : [];
+    const state = payload?.execution?.state || '';
+    showToast(state === 'blocked' ? '执行器未启动：请先补齐材料' : '执行器已完成前置检查');
+    renderAll();
+  } catch (err) {
+    showToast('执行器启动失败：' + (err?.message || String(err || 'unknown')));
   }
 }
 async function deleteLinkOpsTask(id){
@@ -8889,6 +8985,39 @@ function renderLinkOpsTaskExecution(t){
     '</div>'+
   '</div>';
 }
+function renderLinkOpsAssetPanel(t){
+  const id = String(t?.id || '');
+  const assets = Array.isArray(t?.assets) ? t.assets : [];
+  const rows = assets.slice(0, 12).map(a =>
+    '<div class="asset-row">'+
+      '<span class="name">'+escapeHtml(a.originalName || a.storedName || a.id || '素材')+'</span>'+
+      '<span class="meta">'+escapeHtml(a.kind || 'file')+' · '+escapeHtml(linkOpsHumanBytes(a.bytes))+'</span>'+
+      '<span class="meta">'+escapeHtml(String(a.uploadedAt || '').replace('T',' ').slice(0,16))+'</span>'+
+    '</div>'
+  ).join('');
+  return '<div class="asset-panel">'+
+    '<div class="row1"><div><b>任务素材包</b><p>图片/证书/标题文件会上传到云端任务目录；服务器不能直接读取你本机文件。</p></div><span class="tag '+(assets.length ? 'good' : 'info')+'">'+num(assets.length)+' 个素材</span></div>'+
+    (rows ? '<div class="asset-list">'+rows+'</div>' : '<div class="empty">还没有素材。需要换图、补证书、复制上品时，先在这里上传。</div>')+
+    '<div class="command-actions" style="margin-top:9px">'+
+      '<input type="file" multiple data-linkops-asset-input="'+escapeHtml(id)+'" accept=".jpg,.jpeg,.png,.webp,.pdf,.txt,.csv,.json,image/jpeg,image/png,image/webp,application/pdf,text/plain,text/csv,application/json">'+
+      '<button class="btn" type="button" data-linkops-task-action="upload_assets" data-task-id="'+escapeHtml(id)+'">上传到云端任务包</button>'+
+    '</div>'+
+  '</div>';
+}
+function renderLinkOpsExecutionState(t){
+  const execution = t?.execution && typeof t.execution === 'object' ? t.execution : null;
+  if (!execution || !execution.runId) return '';
+  const preflight = execution.preflight && typeof execution.preflight === 'object' ? execution.preflight : {};
+  const blockers = Array.isArray(preflight.blockers) ? preflight.blockers : [];
+  const warnings = Array.isArray(preflight.warnings) ? preflight.warnings : [];
+  return '<div class="execution-state">'+
+    '<b>执行器状态：'+escapeHtml(execution.state || 'unknown')+'</b><br>'+
+    '<span class="mono">runId='+escapeHtml(execution.runId || '-')+'</span><br>'+
+    '<span>安全边界：第一版不静默提交 SHEIN；缺材料/权限时不会显示成功。</span>'+
+    (blockers.length ? '<ul class="linkops-preview-list">'+blockers.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul>' : '')+
+    (warnings.length ? '<ul class="linkops-preview-list">'+warnings.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul>' : '')+
+  '</div>';
+}
 function linkOpsMatchProductRef(row, refs = []){
   if (!refs.length) return false;
   const hay = [
@@ -9041,6 +9170,8 @@ function renderLinkOps(){
         '<div class="task-progress"><i style="width:'+num(progress)+'%"></i></div><p>进度：<b>'+num(progress)+'%</b>'+(t.note ? ' · '+escapeHtml(t.note) : '')+'</p>'+
         '<p>原始指令：'+escapeHtml(String(t.command || '').slice(0,260))+'</p>'+
         renderLinkOpsTaskExecution(t)+
+        renderLinkOpsAssetPanel(t)+
+        renderLinkOpsExecutionState(t)+
         (agentAnswer ? '<details style="margin-top:8px" open><summary>智能体结论</summary>'+renderAgentAnswerCards(agentAnswer)+'</details>' : '')+
         renderLinkOpsDataAdvice(t)+
         (riskNotes.length ? '<ul class="linkops-preview-list">'+riskNotes.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul>' : '')+
@@ -9074,7 +9205,8 @@ function renderLinkOps(){
     const id = btn.dataset.taskId || '';
     const action = btn.dataset.linkopsTaskAction || '';
     if (action === 'confirm') return patchLinkOpsTask(id, {event:'confirm_task', status:'confirmed', progress:30, note:'已确认成可执行任务，下一步检查材料并开始执行。'}, '已确认成任务');
-    if (action === 'start') return patchLinkOpsTask(id, {event:'start_execution', status:'in_progress', progress:60, note:'已开始执行准备；如果任务需要本机图片/标题文件，请先上传或同步素材包到云端。'}, '已开始执行准备');
+    if (action === 'upload_assets') return uploadLinkOpsAssets(id);
+    if (action === 'start') return startLinkOpsExecutor(id);
     if (action === 'done') return patchLinkOpsTask(id, {event:'mark_done', status:'done', progress:100, note:'已人工确认完成。'}, '已标记完成');
     if (action === 'archive') return patchLinkOpsTask(id, {event:'archive', status:'archived', progress:100}, '已归档');
     if (action === 'delete') return deleteLinkOpsTask(id);

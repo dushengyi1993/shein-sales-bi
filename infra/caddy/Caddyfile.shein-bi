@@ -1,0 +1,35 @@
+{
+	auto_https disable_redirects
+	servers {
+		protocols h1 h2
+	}
+}
+
+http://shein-bi.faceair.me {
+	redir https://shein-bi.faceair.me{uri} permanent
+}
+
+# 443 is multiplexed by HAProxy so SSH can continue using the same public port.
+# HAProxy forwards HTTPS traffic to this local Caddy listener.
+https://shein-bi.faceair.me:10443 {
+	encode zstd gzip
+	header -Alt-Svc
+	tls {
+		protocols tls1.2 tls1.3
+	}
+	reverse_proxy 127.0.0.1:8080 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto https
+	}
+}
+
+# Keep the old IP HTTP entrance available during migration.
+# Authentication is still enforced by the internal nginx hop.
+http://43.165.167.135 {
+	reverse_proxy 127.0.0.1:8080 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+}

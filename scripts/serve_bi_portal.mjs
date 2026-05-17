@@ -28,6 +28,7 @@ function parseArgs(argv) {
     stateFile: path.join(ROOT, 'state', 'bi_action_state.json'),
     linkOpsTaskFile: path.join(ROOT, 'state', 'bi_link_ops_tasks.json'),
     linkOpsChatFile: path.join(ROOT, 'state', 'bi_link_ops_chats.json'),
+    linkOpsAssetDir: '',
     authFile: path.join(ROOT, 'config', 'bi_users.local.json'),
     auditFile: path.join(ROOT, 'logs', 'bi_portal_action_audit.jsonl'),
     readOnly: false,
@@ -41,6 +42,7 @@ function parseArgs(argv) {
     else if (a === '--state-file') args.stateFile = path.resolve(argv[++i]);
     else if (a === '--link-ops-task-file') args.linkOpsTaskFile = path.resolve(argv[++i]);
     else if (a === '--link-ops-chat-file') args.linkOpsChatFile = path.resolve(argv[++i]);
+    else if (a === '--link-ops-asset-dir') args.linkOpsAssetDir = path.resolve(argv[++i]);
     else if (a === '--auth-file') args.authFile = path.resolve(argv[++i]);
     else if (a === '--audit-file') args.auditFile = path.resolve(argv[++i]);
     else if (a === '--read-only') args.readOnly = true;
@@ -48,6 +50,9 @@ function parseArgs(argv) {
   }
   if (!Number.isInteger(args.port) || args.port < 1 || args.port > 65535) {
     throw new Error(`Invalid --port: ${args.port}`);
+  }
+  if (!args.linkOpsAssetDir) {
+    args.linkOpsAssetDir = path.join(path.dirname(args.linkOpsTaskFile), 'bi_link_ops_assets');
   }
   return args;
 }
@@ -64,6 +69,77 @@ const types = {
   '.ico': 'image/x-icon',
   '.txt': 'text/plain; charset=utf-8',
 };
+
+const LINK_OPS_MAX_UPLOAD_FILE_BYTES = 10 * 1024 * 1024;
+const LINK_OPS_MAX_UPLOAD_TOTAL_BYTES = 30 * 1024 * 1024;
+const LINK_OPS_ALLOWED_UPLOAD_MIME = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'application/pdf',
+  'text/plain',
+  'text/csv',
+  'application/json',
+]);
+
+function safeFileStem(value, fallback = 'asset') {
+  const s = String(value || '')
+    .normalize('NFKC')
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
+    .replace(/\s+/g, '_')
+    .replace(/^\.+/g, '')
+    .slice(0, 80);
+  return s || fallback;
+}
+
+function safeTaskId(value) {
+  const s = String(value || '').trim();
+  if (!/^[A-Za-z0-9_-]{8,120}$/.test(s)) throw new Error('Invalid task id');
+  return s;
+}
+
+function assertInsideDir(baseDir, targetPath) {
+  const base = path.resolve(baseDir);
+  const target = path.resolve(targetPath);
+  const rel = path.relative(base, target);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error('Unsafe upload path');
+  }
+  return target;
+}
+
+function uploadExtensionFor(mime, name = '') {
+  const ext = path.extname(String(name || '')).toLowerCase();
+  const byMime = {
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/webp': '.webp',
+    'application/pdf': '.pdf',
+    'text/plain': '.txt',
+    'text/csv': '.csv',
+    'application/json': '.json',
+  };
+  const allowedExt = new Set(Object.values(byMime));
+  return allowedExt.has(ext) ? ext : (byMime[mime] || '.bin');
+}
+
+function hasUploadMagic(buffer, mime) {
+  if (!Buffer.isBuffer(buffer) || !buffer.length) return false;
+  if (mime === 'image/jpeg') return buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  if (mime === 'image/png') return buffer.length >= 8 && buffer.slice(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  if (mime === 'image/webp') return buffer.length >= 12 && buffer.slice(0, 4).toString('ascii') === 'RIFF' && buffer.slice(8, 12).toString('ascii') === 'WEBP';
+  if (mime === 'application/pdf') return buffer.length >= 4 && buffer.slice(0, 4).toString('ascii') === '%PDF';
+  if (mime === 'text/plain' || mime === 'text/csv' || mime === 'application/json') {
+    if (buffer.includes(0)) return false;
+    const head = buffer.slice(0, Math.min(buffer.length, 4096)).toString('utf8');
+    if (mime === 'application/json') {
+      const trimmed = head.trimStart();
+      return trimmed.startsWith('{') || trimmed.startsWith('[');
+    }
+    return true;
+  }
+  return false;
+}
 
 function send(res, status, body, headers = {}) {
   res.writeHead(status, {
@@ -483,6 +559,161 @@ function patchLinkOpsTask(task, body, actor, req) {
   return next;
 }
 
+function linkOpsTaskNeedsMaterial(task) {
+  const intents = Array.isArray(task?.intents) ? task.intents : [];
+  const needs = [];
+  if (intents.includes('update_images')) needs.push('image');
+  if (intents.includes('copy_product_draft')) needs.push('image_or_certificate');
+  if (intents.includes('certificate_review')) needs.push('certificate');
+  if (intents.includes('update_title')) needs.push('title_text_or_rule');
+  return needs;
+}
+
+function assetKindForMime(mime) {
+  if (String(mime || '').startsWith('image/')) return 'image';
+  if (mime === 'application/pdf') return 'certificate';
+  if (mime === 'text/plain' || mime === 'text/csv' || mime === 'application/json') return 'text';
+  return 'file';
+}
+
+function buildAssetRecord({taskId, file, buffer, storedPath, actor, req}) {
+  const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+  return {
+    id: `loa_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+    taskId,
+    originalName: String(file.name || 'asset').slice(0, 180),
+    mime: String(file.type || '').toLowerCase().trim(),
+    kind: assetKindForMime(String(file.type || '').toLowerCase().trim()),
+    bytes: buffer.length,
+    sha256,
+    storedName: path.basename(storedPath),
+    storedRelativePath: path.relative(ROOT, storedPath).replace(/\\/g, '/'),
+    uploadedAt: new Date().toISOString(),
+    uploadedBy: actorLabel(actor, req),
+    uploadedByUser: actorUser(actor, req),
+  };
+}
+
+async function attachLinkOpsAssets({store, taskId, files, args, actor, req}) {
+  const id = safeTaskId(taskId);
+  const tasks = Array.isArray(store.tasks) ? store.tasks.slice() : [];
+  const idx = tasks.findIndex(t => String(t.id || '') === id);
+  if (idx < 0) throw new Error('Task not found');
+  const normalizedFiles = Array.isArray(files) ? files : [];
+  if (!normalizedFiles.length) throw new Error('Missing files');
+  if (normalizedFiles.length > 20) throw new Error('Too many files');
+  let totalBytes = 0;
+  const baseDir = path.resolve(args.linkOpsAssetDir);
+  const taskDir = assertInsideDir(baseDir, path.join(baseDir, id));
+  await fs.mkdir(taskDir, {recursive: true});
+  const added = [];
+  for (const file of normalizedFiles) {
+    const mime = String(file?.type || '').toLowerCase().trim();
+    if (!LINK_OPS_ALLOWED_UPLOAD_MIME.has(mime)) throw new Error(`Unsupported file type: ${mime || 'unknown'}`);
+    const raw = String(file?.dataBase64 || file?.base64 || '').replace(/^data:[^;]+;base64,/, '');
+    if (!raw) throw new Error('Missing file content');
+    const buffer = Buffer.from(raw, 'base64');
+    if (!buffer.length) throw new Error('Empty file');
+    if (buffer.length > LINK_OPS_MAX_UPLOAD_FILE_BYTES) throw new Error(`File too large: ${file?.name || 'asset'}`);
+    totalBytes += buffer.length;
+    if (totalBytes > LINK_OPS_MAX_UPLOAD_TOTAL_BYTES) throw new Error('Upload batch too large');
+    if (!hasUploadMagic(buffer, mime)) throw new Error(`File content does not match type: ${file?.name || mime}`);
+    const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+    const ext = uploadExtensionFor(mime, file?.name || '');
+    const stem = safeFileStem(path.basename(String(file?.name || 'asset'), path.extname(String(file?.name || ''))), 'asset');
+    const storedName = `${sha256.slice(0, 16)}-${stem}${ext}`;
+    const storedPath = assertInsideDir(taskDir, path.join(taskDir, storedName));
+    await fs.writeFile(storedPath, buffer);
+    added.push(buildAssetRecord({taskId: id, file: {...file, type: mime}, buffer, storedPath, actor, req}));
+  }
+  const task = tasks[idx];
+  const assets = Array.isArray(task.assets) ? task.assets.slice(-200) : [];
+  const nextTask = {
+    ...task,
+    assets: [...added, ...assets],
+    updatedAt: new Date().toISOString(),
+  };
+  nextTask.history = appendTaskHistory(nextTask, 'upload_assets', actor, req, {
+    status: nextTask.status,
+    progress: normalizeProgress(nextTask.progress, 0),
+    assetCount: added.length,
+    totalBytes,
+  });
+  tasks[idx] = nextTask;
+  return {
+    store: {version: 1, updatedAt: new Date().toISOString(), tasks},
+    task: nextTask,
+    assets: added,
+  };
+}
+
+function runPreflightForLinkOpsTask(task) {
+  const blockers = [];
+  const warnings = [];
+  const assets = Array.isArray(task.assets) ? task.assets : [];
+  const needs = linkOpsTaskNeedsMaterial(task);
+  const status = String(task.status || 'draft');
+  if (!['confirmed', 'in_progress', 'waiting_review'].includes(status)) {
+    blockers.push('任务必须先点“确认成任务”，不能从草案直接执行。');
+  }
+  if (needs.includes('image') && !assets.some(a => a.kind === 'image')) {
+    blockers.push('缺少图片素材：请先上传或同步商品图。');
+  }
+  if (needs.includes('image_or_certificate') && !assets.some(a => a.kind === 'image' || a.kind === 'certificate')) {
+    blockers.push('复制上品缺少图片/证书素材：请先上传或同步可复用素材。');
+  }
+  if (needs.includes('certificate') && !assets.some(a => a.kind === 'certificate' || a.mime === 'application/pdf')) {
+    blockers.push('缺少证书/资质文件。');
+  }
+  if (needs.includes('title_text_or_rule') && !assets.some(a => a.kind === 'text')) {
+    warnings.push('标题类任务未上传标题文本/规则文件；如果标题已写在会话或任务说明里，可人工确认后继续。');
+  }
+  if (!Array.isArray(task.history)) warnings.push('任务缺少历史记录，建议先刷新任务状态。');
+  return {
+    ok: blockers.length === 0,
+    blockers,
+    warnings,
+    needs,
+    assetCount: assets.length,
+  };
+}
+
+function startControlledLinkOpsExecution(task, actor, req) {
+  const preflight = runPreflightForLinkOpsTask(task);
+  const now = new Date().toISOString();
+  const runId = `lor_${now.replace(/[-:.TZ]/g, '').slice(0, 14)}_${crypto.randomBytes(4).toString('hex')}`;
+  const next = {
+    ...task,
+    status: preflight.ok ? 'in_progress' : 'waiting_review',
+    progress: preflight.ok ? Math.max(normalizeProgress(task.progress, 0), 65) : Math.max(normalizeProgress(task.progress, 0), 45),
+    note: preflight.ok
+      ? '受控执行器已完成前置检查；当前第一版停在执行准备/预填阶段，不会静默提交 SHEIN。'
+      : `执行器未启动：${preflight.blockers.join('；')}`,
+    execution: {
+      ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
+      mode: 'controlled_prefill',
+      enabled: true,
+      runId,
+      state: preflight.ok ? 'ready_for_prefill' : 'blocked',
+      canAutoSubmit: false,
+      canSilentWrite: false,
+      preflight,
+      startedAt: now,
+      startedBy: actorLabel(actor, req),
+      note: '第一版只做材料/权限/防重检查和执行准备；正式 SHEIN 提交必须后续接具体适配器并保留人工确认。',
+    },
+    updatedAt: now,
+  };
+  next.history = appendTaskHistory(next, preflight.ok ? 'start_controlled_executor' : 'executor_blocked', actor, req, {
+    status: next.status,
+    progress: normalizeProgress(next.progress, 0),
+    runId,
+    blockers: preflight.blockers,
+    warnings: preflight.warnings,
+  });
+  return next;
+}
+
 function runChildProcess(command, args, options = {}) {
   return new Promise(resolve => {
     const child = spawn(command, args, {
@@ -673,6 +904,7 @@ async function main() {
           stateFile: args.stateFile,
           linkOpsTaskFile: args.linkOpsTaskFile,
           linkOpsChatFile: args.linkOpsChatFile,
+          linkOpsAssetDir: args.linkOpsAssetDir,
           writableActionState: !args.readOnly,
           writableLinkOpsTasks: !args.readOnly,
           writableLinkOpsChats: !args.readOnly,
@@ -874,6 +1106,82 @@ async function main() {
             task: {id, status: task.status, commandLength: String(task.command || '').length},
           });
           return sendJson(res, 200, {ok: true, data: next, deleted: {id}});
+        }
+        return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+      }
+      if (url.pathname === '/api/link-ops-assets') {
+        if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
+        if (req.method === 'POST') {
+          let body;
+          try {
+            body = await readBodyJson(req, Math.ceil(LINK_OPS_MAX_UPLOAD_TOTAL_BYTES * 1.45));
+          } catch (err) {
+            return sendJson(res, 400, {ok: false, error: err?.message || String(err || 'Invalid upload')});
+          }
+          const current = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
+          let result;
+          try {
+            result = await attachLinkOpsAssets({
+              store: current,
+              taskId: body.taskId || body.id,
+              files: body.files,
+              args,
+              actor,
+              req,
+            });
+          } catch (err) {
+            return sendJson(res, 400, {ok: false, error: err?.message || String(err || 'Upload failed')});
+          }
+          await writeJsonFile(args.linkOpsTaskFile, result.store);
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'link-ops-assets-upload',
+            actor,
+            ...requestMeta(req),
+            task: {
+              id: result.task.id,
+              status: result.task.status,
+              assetCount: result.assets.length,
+            },
+            assets: result.assets.map(a => ({id: a.id, kind: a.kind, mime: a.mime, bytes: a.bytes, sha256: a.sha256})),
+          });
+          return sendJson(res, 200, {ok: true, data: result.store, task: result.task, assets: result.assets});
+        }
+        return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+      }
+      if (url.pathname === '/api/link-ops-execute') {
+        if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
+        if (req.method === 'POST') {
+          const body = await readBodyJson(req, 256 * 1024).catch(err => ({_error: err?.message || String(err)}));
+          if (body._error) return sendJson(res, 400, {ok: false, error: body._error});
+          const id = String(body.id || body.taskId || '').trim();
+          if (!id) return sendJson(res, 400, {ok: false, error: 'Missing task id'});
+          const current = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
+          const idx = current.tasks.findIndex(t => String(t.id || '') === id);
+          if (idx < 0) return sendJson(res, 404, {ok: false, error: 'Task not found'});
+          const updated = startControlledLinkOpsExecution(current.tasks[idx], actor, req);
+          const tasks = current.tasks.slice();
+          tasks[idx] = updated;
+          const next = {version: 1, updatedAt: new Date().toISOString(), tasks};
+          await writeJsonFile(args.linkOpsTaskFile, next);
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'link-ops-execute',
+            actor,
+            ...requestMeta(req),
+            task: {
+              id: updated.id,
+              status: updated.status,
+              progress: normalizeProgress(updated.progress, 0),
+              execution: {
+                runId: updated.execution?.runId || '',
+                state: updated.execution?.state || '',
+                canSilentWrite: false,
+                canAutoSubmit: false,
+              },
+            },
+          });
+          return sendJson(res, 200, {ok: true, data: next, task: updated, execution: updated.execution});
         }
         return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
       }
