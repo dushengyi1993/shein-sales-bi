@@ -238,3 +238,10 @@
 - 生产问数不再依赖本机 Codex App 或本地浏览器；本机只作为开发、排障和回滚环境。
 - 后续若把 BI 页面自然语言入口接到云端 Codex，也只能先做“只读回答 + 任务草案”，写操作必须进入任务池等待人工确认。
 
+## 2026-05-17 公网域名入口
+
+- 正式域名入口为 `https://shein-bi.faceair.me/`，DNS 指向腾讯云服务器 `43.165.167.135`。
+- 服务器 443 端口同时承担 SSH 运维入口和 HTTPS 入口：`HAProxy` 在 443 做协议分流，SSH 流量转到本机 sshd `127.0.0.1:22`，HTTPS 流量转到 Caddy `127.0.0.1:10443`。
+- Caddy 负责 `shein-bi.faceair.me` 的自动 TLS 证书和 HTTP -> HTTPS 跳转；nginx 退到本机 `127.0.0.1:8080`，继续保留原 Basic Auth，并反代到 BI Portal `127.0.0.1:8787`。
+- 对应配置模板：`infra/haproxy/haproxy-ssh-https.cfg`、`infra/caddy/Caddyfile.shein-bi`。不要直接让 Node 服务暴露公网。
+
