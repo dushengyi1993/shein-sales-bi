@@ -3141,6 +3141,24 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .health-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
     .command-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
     .linkops-grid{display:grid;grid-template-columns:minmax(340px,.95fr) minmax(360px,1.05fr);gap:14px}
+    .ops-workspace{display:grid;grid-template-columns:minmax(260px,.36fr) minmax(420px,.84fr) minmax(340px,.6fr);gap:14px;align-items:start}
+    .ops-rail,.ops-chat,.ops-tasks{border:1px solid rgba(148,163,184,.16);border-radius:26px;background:rgba(15,23,42,.34);padding:14px;min-width:0}
+    body[data-theme="light"] .ops-rail,body[data-theme="light"] .ops-chat,body[data-theme="light"] .ops-tasks{background:#fff;border-color:#e2e8f0}
+    .ops-session{border:1px solid rgba(148,163,184,.14);border-radius:18px;padding:10px;margin-bottom:8px;cursor:pointer;transition:transform .18s ease,border-color .18s ease,background .18s ease}
+    .ops-session:hover{transform:translateY(-1px);border-color:rgba(56,189,248,.34)}
+    .ops-session.active{background:rgba(14,165,233,.14);border-color:rgba(56,189,248,.48)}
+    .ops-session b{display:block;font-size:13px;margin-bottom:5px}.ops-session small{display:block;color:var(--muted);font-size:11px;line-height:1.45}
+    .ops-reco{border:1px solid rgba(34,197,94,.18);border-radius:16px;background:rgba(20,83,45,.14);padding:10px;margin-bottom:8px;cursor:pointer}
+    body[data-theme="light"] .ops-reco{background:#f0fdf4;border-color:#bbf7d0}
+    .ops-reco b{display:block;font-size:12px;margin-bottom:4px}.ops-reco p{margin:0;color:var(--muted);font-size:12px;line-height:1.55}
+    .chat-stream{display:grid;gap:10px;max-height:620px;overflow:auto;padding-right:4px}
+    .chat-msg{max-width:92%;border:1px solid rgba(148,163,184,.16);border-radius:18px;padding:11px 12px;line-height:1.65;font-size:13px}
+    .chat-msg.user{justify-self:end;background:rgba(14,165,233,.15);border-color:rgba(56,189,248,.34)}
+    .chat-msg.assistant{justify-self:start;background:rgba(15,23,42,.26)}
+    body[data-theme="light"] .chat-msg.assistant{background:#f8fafc}
+    .chat-compose{margin-top:12px;display:grid;gap:9px}
+    .chat-compose textarea{width:100%;min-height:112px;resize:vertical;border:1px solid rgba(148,163,184,.22);border-radius:18px;background:rgba(2,6,23,.42);color:var(--text);padding:13px;font:inherit;line-height:1.55}
+    body[data-theme="light"] .chat-compose textarea{background:#fff;color:#0f172a;border-color:#dbe3ef}
     .linkops-command-box textarea{width:100%;min-height:156px;resize:vertical;border:1px solid rgba(148,163,184,.22);border-radius:18px;background:rgba(2,6,23,.42);color:var(--text);padding:14px;font:inherit;line-height:1.55}
     body[data-theme="light"] .linkops-command-box textarea{background:#fff;color:#0f172a;border-color:#dbe3ef}
     .linkops-hints{display:grid;gap:8px;margin-top:10px}
@@ -3888,6 +3906,7 @@ let applyingHash = false;
 const ACTION_STATE_KEY = 'SHEIN_BI_ACTION_STATE_V1';
 const ACTION_STATE_API = '/api/action-state';
 const LINK_OPS_TASKS_API = '/api/link-ops-tasks';
+const LINK_OPS_CHATS_API = '/api/link-ops-chats';
 const OPS_AGENT_ASK_API = '/api/ops-agent/ask';
 const SERVICE_HEALTH_API = '/api/health';
 const ACTION_STATE_SERVICE_PATH = 'state/bi_action_state.json';
@@ -3942,6 +3961,7 @@ function actionStateStoreLabel(){
 }
 let actionState = loadActionState();
 const linkOpsStore = {ready:false, error:'', tasks:[]};
+const linkOpsChatStore = {ready:false, error:'', sessions:[], activeId:''};
 const opsAgentStore = {busy:false, answer:'', error:'', lastQuestion:'', durationMs:0};
 async function initServiceHealth(){
   if (actionStateStore.mode !== 'service') {
@@ -4024,6 +4044,133 @@ async function refreshLinkOpsTasks(){
     linkOpsStore.error = err?.message || String(err || 'unknown');
   }
   if ((state.tab || '') === 'linkops') renderAll();
+}
+async function refreshLinkOpsChats(){
+  if (actionStateStore.mode !== 'service') {
+    linkOpsChatStore.ready = true;
+    linkOpsChatStore.error = '直接打开 HTML 文件时无法读取云端会话。';
+    return;
+  }
+  try {
+    const res = await fetch(LINK_OPS_CHATS_API + '?limit=80', {cache:'no-store'});
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const payload = await res.json();
+    linkOpsChatStore.sessions = Array.isArray(payload?.data?.sessions) ? payload.data.sessions : [];
+    if (!linkOpsChatStore.activeId && linkOpsChatStore.sessions[0]) linkOpsChatStore.activeId = linkOpsChatStore.sessions[0].id;
+    if (linkOpsChatStore.activeId && !linkOpsChatStore.sessions.some(s => s.id === linkOpsChatStore.activeId)) {
+      linkOpsChatStore.activeId = linkOpsChatStore.sessions[0]?.id || '';
+    }
+    linkOpsChatStore.ready = true;
+    linkOpsChatStore.error = '';
+  } catch (err) {
+    linkOpsChatStore.ready = true;
+    linkOpsChatStore.error = err?.message || String(err || 'unknown');
+  }
+  if ((state.tab || '') === 'linkops') renderAll();
+}
+function activeLinkOpsSession(){
+  return (linkOpsChatStore.sessions || []).find(s => String(s.id || '') === String(linkOpsChatStore.activeId || '')) || null;
+}
+async function sendLinkOpsChatMessage(){
+  const input = document.getElementById('linkOpsChatInput');
+  const message = String(input?.value || '').trim();
+  if (!message) return showToast('先输入一条会话消息');
+  if (actionStateStore.mode !== 'service') return showToast('当前不是网页服务模式，不能创建会话');
+  opsAgentStore.busy = true;
+  opsAgentStore.error = '';
+  renderAll();
+  try {
+    const body = {message, sessionId: linkOpsChatStore.activeId || ''};
+    const res = await fetch(LINK_OPS_CHATS_API, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || !payload.ok) throw new Error(payload.error || ('HTTP ' + res.status));
+    linkOpsChatStore.sessions = Array.isArray(payload?.data?.sessions) ? payload.data.sessions : [];
+    linkOpsChatStore.activeId = payload?.session?.id || linkOpsChatStore.activeId;
+    if (input) input.value = '';
+    showToast('会话已更新');
+  } catch (err) {
+    opsAgentStore.error = err?.message || String(err || 'unknown');
+    showToast('会话发送失败：' + opsAgentStore.error);
+  } finally {
+    opsAgentStore.busy = false;
+    renderAll();
+  }
+}
+async function newLinkOpsChatFromPrompt(promptText = ''){
+  linkOpsChatStore.activeId = '';
+  renderAll();
+  const input = document.getElementById('linkOpsChatInput');
+  if (input) {
+    input.value = promptText;
+    input.focus();
+  }
+}
+async function convertChatToTask(){
+  const session = activeLinkOpsSession();
+  if (!session) return showToast('先选择一个会话');
+  const messages = Array.isArray(session.messages) ? session.messages : [];
+  const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
+  const command = (session.title || messages.find(m => m.role === 'user')?.content || '').trim();
+  if (!command) return showToast('这个会话还没有可沉淀的任务内容');
+  try {
+    const res = await fetch(LINK_OPS_TASKS_API, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        command,
+        chatSessionId: session.id,
+        targets: session.targets || {},
+        agentAnswer: lastAssistant?.content || '',
+        agentMode: lastAssistant?.meta?.mode || 'readonly-codex-gateway',
+        agentDurationMs: lastAssistant?.meta?.durationMs || 0,
+      })
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || !payload.ok) throw new Error(payload.error || ('HTTP ' + res.status));
+    linkOpsStore.tasks = Array.isArray(payload?.data?.tasks) ? payload.data.tasks : [];
+    await fetch(LINK_OPS_CHATS_API, {
+      method:'PATCH',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({id: session.id, status:'task_created'})
+    }).catch(() => null);
+    showToast('已进入任务池');
+    refreshLinkOpsChats();
+    renderAll();
+  } catch (err) {
+    showToast('进入任务池失败：' + (err?.message || String(err || 'unknown')));
+  }
+}
+function recommendedLinkOpsPrompts(){
+  const actions = (DATA.actions || []).slice().sort((a,b)=>Number(b.score || b.priority_score || 0)-Number(a.score || a.priority_score || 0));
+  const prompts = [];
+  const weak = actions.find(a => /弱|重复|承接|下架|归档/.test(String(a.category || '') + String(a.next_step || '') + String(a.reason || '')));
+  if (weak) prompts.push({
+    title:'处理高优先级弱链接',
+    text:'分析 '+(weak.store_key || '重点店')+' 店 '+(weak.standard_goods_sn || weak.skc || '高优先级货号')+' 的弱链接，给出下架、换图、补新链接的执行顺序。',
+    reason:'来自动作池高优先级信号',
+  });
+  const matrix = (DATA.matrix || []).find(r => r.need_supplement_link && r.standard_goods_sn);
+  if (matrix) prompts.push({
+    title:'补齐缺覆盖货号',
+    text:'把 '+matrix.standard_goods_sn+' 在缺覆盖店铺补齐链接，先判断哪些店需要补、哪些店只需催待上架。',
+    reason:'来自店铺×货号覆盖矩阵',
+  });
+  const link = (DATA.storeLinks || DATA.links || []).find(r => Number(r.c30_sale_cnt || 0) === 0 && Number(r.c30_eps_uv || r.eps_uv || 0) > 3000);
+  if (link) prompts.push({
+    title:'高曝光零成交复盘',
+    text:'复盘 '+(link.store_key || '')+' 店 '+(link.standard_goods_sn || link.skc || '')+' 高曝光但30天0单的原因，给出换图/标题/价格/活动建议。',
+    reason:'来自链接表现快照',
+  });
+  prompts.push({
+    title:'本周链接运营重点',
+    text:'根据当前 BI 数据，列出今天最值得处理的5个链接管理任务，按收益和风险排序。',
+    reason:'综合销售、覆盖和动作池',
+  });
+  return prompts.slice(0, 4);
 }
 async function submitLinkOpsCommand(){
   const input = document.getElementById('linkOpsCommand');
@@ -8744,92 +8891,91 @@ function renderLinkOps(){
   const center = $('linkOpsCommandCenter');
   const list = $('linkOpsTaskList');
   if (!center || !list) return;
-  const examples = [
-    '把BHRL-09激光脱毛仪补齐到所有缺链接的店，价格按同货号最高价，库存100，计划上架10年后，只建草稿。',
-    '给HL和CX的新品链接报7天限时折扣，限量10台，利润率不低于25%，先生成预览。',
-    '把DL店这个货号的标题同步到DX、FY、LQ，先列出会影响哪些链接。',
-    '找出SK-03038制冰机各店差链接，给出下架、换图、补新链接建议。'
-  ];
+  const prompts = recommendedLinkOpsPrompts();
+  const sessions = linkOpsChatStore.sessions || [];
+  const active = activeLinkOpsSession();
+  const messages = Array.isArray(active?.messages) ? active.messages : [];
   center.innerHTML =
-    '<div class="linkops-grid">'+
-      '<div class="linkops-command-box">'+
-        '<div class="section-block-label">自然语言运营指令</div>'+
-        '<textarea id="linkOpsCommand" placeholder="直接写你想让系统做什么。例如：把某个货号复制上品到哪些店、换标题/换图、报限时折扣、生成差链接处理任务。当前只建任务草案，不会自动执行。"></textarea>'+
-        '<div class="command-actions">'+
-          '<button class="btn primary" id="submitLinkOpsCommand" type="button">生成任务草案</button>'+
-          '<button class="btn" id="clearLinkOpsCommand" type="button">清空</button>'+
+    '<div class="ops-workspace">'+
+      '<aside class="ops-rail">'+
+        '<div class="card-h" style="padding:0 0 10px"><div><h3>运营会话</h3><div class="sub">先聊清楚，再进入任务池</div></div><button class="btn" id="newOpsChat" type="button">新会话</button></div>'+
+        (linkOpsChatStore.error ? '<div class="next warn">会话不可用：'+escapeHtml(linkOpsChatStore.error)+'</div>' : '')+
+        (sessions.length ? sessions.map(s => {
+          const count = Array.isArray(s.messages) ? s.messages.length : 0;
+          const activeCls = String(s.id || '') === String(linkOpsChatStore.activeId || '') ? ' active' : '';
+          return '<div class="ops-session'+activeCls+'" data-linkops-session-id="'+escapeHtml(s.id || '')+'"><b>'+escapeHtml(s.title || '未命名会话')+'</b><small>'+escapeHtml(linkOpsStatusLabel(s.status || 'chatting'))+' · '+num(count)+' 条消息 · '+escapeHtml(String(s.updatedAt || s.createdAt || '').replace('T',' ').slice(0,16))+'</small></div>';
+        }).join('') : '<div class="empty">还没有会话。点右侧推荐指令，或直接输入你的运营问题。</div>')+
+        '<div style="margin-top:14px"><div class="section-block-label">基于当前数据的推荐指令</div>'+
+          prompts.map(p => '<div class="ops-reco" data-linkops-reco="'+escapeHtml(p.text)+'"><b>'+escapeHtml(p.title)+'</b><p>'+escapeHtml(p.reason)+'</p></div>').join('')+
         '</div>'+
-        '<p class="muted">说明：这里会先让云端只读智能体分析，再把结果沉淀为任务草案；确认前不会执行 SHEIN 写操作。</p>'+
-      '</div>'+
-      '<div>'+
-        '<div class="section-block-label">常用指令模板</div>'+
-        '<div class="linkops-hints">'+examples.map(x => '<button type="button" data-linkops-example="'+escapeHtml(x)+'">'+escapeHtml(x)+'</button>').join('')+'</div>'+
-      '</div>'+
-    '</div>'+
-    '<div class="card" style="margin-top:14px">'+
-      '<div class="card-h"><div><h3>智能体回复</h3><div class="sub">由云端 Codex 只读网关基于当前 BI 数据回答；不会执行 SHEIN 写操作。</div></div>'+
-        '<span class="tag '+(opsAgentStore.busy ? 'mid' : opsAgentStore.error ? 'high' : opsAgentStore.answer ? 'good' : 'info')+'">'+
-          escapeHtml(opsAgentStore.busy ? '分析中' : opsAgentStore.error ? '失败' : opsAgentStore.answer ? '已回答' : '等待指令')+
-        '</span></div>'+
-      '<div class="card-body">'+
-        (opsAgentStore.busy ? '<div class="empty">云端智能体正在分析，请稍等几十秒。这个过程只读 BI 数据，不会改 SHEIN。</div>' :
-          opsAgentStore.error ? '<div class="next warn">智能体回答失败：'+escapeHtml(opsAgentStore.error)+'</div>' :
-          opsAgentStore.answer ? renderAgentAnswerCards(opsAgentStore.answer)+'<p class="muted">耗时 '+num(Math.round(opsAgentStore.durationMs/1000))+' 秒；问题：'+escapeHtml(opsAgentStore.lastQuestion)+'</p>' :
-          '<div class="empty">输入一条自然语言指令后，这里会直接显示智能体的分析和建议。</div>')+
-      '</div>'+
+      '</aside>'+
+      '<main class="ops-chat">'+
+        '<div class="card-h" style="padding:0 0 12px"><div><h3>'+(active ? escapeHtml(active.title || '运营会话') : '新运营会话')+'</h3><div class="sub">只读分析，不会改 SHEIN；聊成熟后点“进入任务池”。</div></div>'+
+        (active ? '<button class="btn primary" id="convertChatToTask" type="button">进入任务池</button>' : '')+'</div>'+
+        '<div class="chat-stream">'+
+          (messages.length ? messages.map(m => '<div class="chat-msg '+(m.role === 'assistant' ? 'assistant' : 'user')+'">'+(m.role === 'assistant' ? renderAgentAnswerCards(m.content) : '<p>'+escapeHtml(m.content || '')+'</p>')+'<small class="muted">'+escapeHtml(String(m.at || '').replace('T',' ').slice(0,16))+'</small></div>').join('') : '<div class="empty">这是一个独立会话。你可以问“这个品哪些店该补链接”“这条链接该换图还是下架”“怎么报限时折扣”。</div>')+
+          (opsAgentStore.busy ? '<div class="chat-msg assistant"><div class="empty">智能体正在分析当前 BI 数据...</div></div>' : '')+
+          (opsAgentStore.error ? '<div class="next warn">智能体错误：'+escapeHtml(opsAgentStore.error)+'</div>' : '')+
+        '</div>'+
+        '<div class="chat-compose">'+
+          '<label class="section-block-label" for="linkOpsChatInput">继续对话</label>'+
+          '<textarea id="linkOpsChatInput" placeholder="例如：把建议拆成可执行步骤；先只看QY/TZ/YJ；不要下架，优先换图；再给我一个更保守的方案。"></textarea>'+
+          '<div class="command-actions"><button class="btn primary" id="sendLinkOpsChat" type="button">发送给智能体</button><button class="btn" id="clearLinkOpsChat" type="button">清空输入</button></div>'+
+        '</div>'+
+      '</main>'+
+      '<aside class="ops-tasks">'+
+        '<div class="card-h" style="padding:0 0 12px"><div><h3>任务池</h3><div class="sub">只放已经聊清楚、准备推进的事</div></div><button class="btn" id="refreshLinkOpsTasks" type="button">刷新</button></div>'+
+        '<div id="linkOpsTaskListInline"></div>'+
+      '</aside>'+
     '</div>';
   const tasks = linkOpsStore.tasks || [];
-  if (linkOpsStore.error) {
-    list.innerHTML = '<div class="empty">任务池暂不可用：'+escapeHtml(linkOpsStore.error)+'</div>';
-  } else if (!tasks.length) {
-    list.innerHTML = '<div class="empty">暂无链接运营任务。先在上方输入一条指令，系统会生成待确认任务草案。</div>';
-  } else {
-    list.innerHTML = tasks.map(t => {
+  const targetList = $('linkOpsTaskListInline') || list;
+  const renderTaskList = () => {
+    if (linkOpsStore.error) return '<div class="empty">任务池暂不可用：'+escapeHtml(linkOpsStore.error)+'</div>';
+    if (!tasks.length) return '<div class="empty">暂无任务。先在会话里聊清楚，再点“进入任务池”。</div>';
+    return tasks.map(t => {
       const intents = Array.isArray(t.intents) ? t.intents : [];
       const stores = Array.isArray(t.targets?.stores) ? t.targets.stores : [];
       const refs = Array.isArray(t.targets?.productRefs) ? t.targets.productRefs : [];
       const riskNotes = Array.isArray(t.preview?.riskNotes) ? t.preview.riskNotes : [];
       const nextChecks = Array.isArray(t.preview?.nextChecks) ? t.preview.nextChecks : [];
       const agentAnswer = String(t.preview?.agentAnswer || '').trim();
-      const titleCandidates = Array.isArray(t.preview?.titleCandidates) ? t.preview.titleCandidates : [];
       const progress = Math.max(0, Math.min(100, Number(t.progress || 0)));
-      const history = Array.isArray(t.history) ? t.history.slice(-4).reverse() : [];
+      const history = Array.isArray(t.history) ? t.history.slice(-3).reverse() : [];
       return '<article class="linkops-task">'+
         '<div class="row1"><div>'+intents.map(x => '<span class="tag mid">'+escapeHtml(linkOpsIntentLabel(x))+'</span>').join(' ')+'</div><span class="tag '+linkOpsStatusClass(t.status)+'">'+escapeHtml(linkOpsStatusLabel(t.status))+'</span></div>'+
-        '<h4>'+escapeHtml(String(t.command || '').slice(0,180))+'</h4>'+
-        '<p>提交人：'+escapeHtml(t.requestedBy || '-')+' · 创建：'+escapeHtml(String(t.createdAt || '').replace('T',' ').slice(0,19))+'</p>'+
+        '<h4>'+escapeHtml(String(t.command || '').slice(0,120))+'</h4>'+
         '<div class="task-progress"><i style="width:'+num(progress)+'%"></i></div><p>进度：<b>'+num(progress)+'%</b>'+(t.note ? ' · '+escapeHtml(t.note) : '')+'</p>'+
         '<p>目标店：'+escapeHtml(stores.join(', ') || '待识别')+' · 货号/SKC：'+escapeHtml(refs.join(', ') || '待识别')+'</p>'+
-        '<p>'+escapeHtml(t.preview?.summary || '等待执行前预览')+'</p>'+
-        (agentAnswer ? renderAgentAnswerCards(agentAnswer) : '')+
-        (titleCandidates.length ? '<div class="title-candidates"><div class="section-block-label">标题备选</div>'+titleCandidates.map((x,i) => '<div class="title-candidate"><b>备选 '+(i+1)+'：</b>'+escapeHtml(x)+'</div>').join('')+'</div>' : '')+
+        (agentAnswer ? '<details style="margin-top:8px" open><summary>智能体结论</summary>'+renderAgentAnswerCards(agentAnswer)+'</details>' : '')+
         renderLinkOpsDataAdvice(t)+
         (riskNotes.length ? '<ul class="linkops-preview-list">'+riskNotes.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul>' : '')+
         (nextChecks.length ? '<details style="margin-top:8px"><summary>执行前检查项</summary><ul class="linkops-preview-list">'+nextChecks.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul></details>' : '')+
         (history.length ? '<details style="margin-top:8px"><summary>最近进度</summary><ul class="linkops-preview-list">'+history.map(h => '<li>'+escapeHtml(String(h.at || '').replace('T',' ').slice(0,19))+' · '+escapeHtml(h.event || '-')+' · '+escapeHtml(h.by || '-')+'</li>').join('')+'</ul></details>' : '')+
         '<div class="task-actions">'+
           '<button type="button" data-linkops-task-action="confirm" data-task-id="'+escapeHtml(t.id || '')+'">确认方案</button>'+
-          '<button type="button" data-linkops-task-action="title" data-task-id="'+escapeHtml(t.id || '')+'">生成/优化标题</button>'+
-          '<button type="button" data-linkops-task-action="improve" data-task-id="'+escapeHtml(t.id || '')+'">继续提意见</button>'+
-          '<button type="button" data-linkops-task-action="start" data-task-id="'+escapeHtml(t.id || '')+'">进入执行预备</button>'+
-          '<button type="button" data-linkops-task-action="done" data-task-id="'+escapeHtml(t.id || '')+'">标记完成</button>'+
+          '<button type="button" data-linkops-task-action="improve" data-task-id="'+escapeHtml(t.id || '')+'">继续优化</button>'+
+          '<button type="button" data-linkops-task-action="start" data-task-id="'+escapeHtml(t.id || '')+'">执行预备</button>'+
+          '<button type="button" data-linkops-task-action="done" data-task-id="'+escapeHtml(t.id || '')+'">完成</button>'+
           '<button type="button" data-linkops-task-action="archive" data-task-id="'+escapeHtml(t.id || '')+'">归档</button>'+
           '<button class="danger" type="button" data-linkops-task-action="delete" data-task-id="'+escapeHtml(t.id || '')+'">删除</button>'+
         '</div>'+
       '</article>';
     }).join('');
-  }
-  document.querySelectorAll('[data-linkops-example]').forEach(btn => btn.addEventListener('click', () => {
-    const input = document.getElementById('linkOpsCommand');
-    if (input) input.value = btn.dataset.linkopsExample || '';
-  }));
-  document.getElementById('submitLinkOpsCommand')?.addEventListener('click', submitLinkOpsCommand);
-  document.getElementById('clearLinkOpsCommand')?.addEventListener('click', () => { const input = document.getElementById('linkOpsCommand'); if (input) input.value = ''; });
+  };
+  targetList.innerHTML = renderTaskList();
+  if (targetList !== list) list.innerHTML = '<div class="empty">任务池已移到右侧工作台。</div>';
+  document.querySelectorAll('[data-linkops-session-id]').forEach(el => el.addEventListener('click', () => { linkOpsChatStore.activeId = el.dataset.linkopsSessionId || ''; renderAll(); }));
+  document.querySelectorAll('[data-linkops-reco]').forEach(el => el.addEventListener('click', () => newLinkOpsChatFromPrompt(el.dataset.linkopsReco || '')));
+  document.getElementById('newOpsChat')?.addEventListener('click', () => newLinkOpsChatFromPrompt(''));
+  document.getElementById('sendLinkOpsChat')?.addEventListener('click', sendLinkOpsChatMessage);
+  document.getElementById('clearLinkOpsChat')?.addEventListener('click', () => { const input = document.getElementById('linkOpsChatInput'); if (input) input.value = ''; });
+  document.getElementById('convertChatToTask')?.addEventListener('click', convertChatToTask);
+  document.getElementById('refreshLinkOpsTasks')?.addEventListener('click', refreshLinkOpsTasks);
   document.querySelectorAll('[data-linkops-task-action]').forEach(btn => btn.addEventListener('click', () => {
     const id = btn.dataset.taskId || '';
     const action = btn.dataset.linkopsTaskAction || '';
     if (action === 'confirm') return patchLinkOpsTask(id, {event:'confirm', status:'confirmed', progress:25, note:'方案已人工确认，等待执行预备。'}, '已确认方案');
-    if (action === 'title') return improveLinkOpsTask(id, 'title');
     if (action === 'improve') return improveLinkOpsTask(id, 'improve');
     if (action === 'start') return patchLinkOpsTask(id, {event:'start_execution_prep', status:'in_progress', progress:55, note:'进入执行预备；正式写 SHEIN 前仍需最终确认。'}, '已进入执行预备');
     if (action === 'done') return patchLinkOpsTask(id, {event:'mark_done', status:'done', progress:100, note:'已人工确认完成。'}, '已标记完成');
@@ -11481,6 +11627,7 @@ renderAll();
 initServiceHealth();
 initActionState();
 refreshLinkOpsTasks();
+refreshLinkOpsChats();
 startPortalAutoRefresh();
 </script>
 </body>

@@ -27,6 +27,7 @@ function parseArgs(argv) {
     dir: path.join(ROOT, 'outputs', 'bi-portal'),
     stateFile: path.join(ROOT, 'state', 'bi_action_state.json'),
     linkOpsTaskFile: path.join(ROOT, 'state', 'bi_link_ops_tasks.json'),
+    linkOpsChatFile: path.join(ROOT, 'state', 'bi_link_ops_chats.json'),
     authFile: path.join(ROOT, 'config', 'bi_users.local.json'),
     auditFile: path.join(ROOT, 'logs', 'bi_portal_action_audit.jsonl'),
     readOnly: false,
@@ -39,6 +40,7 @@ function parseArgs(argv) {
     else if (a === '--dir') args.dir = path.resolve(argv[++i]);
     else if (a === '--state-file') args.stateFile = path.resolve(argv[++i]);
     else if (a === '--link-ops-task-file') args.linkOpsTaskFile = path.resolve(argv[++i]);
+    else if (a === '--link-ops-chat-file') args.linkOpsChatFile = path.resolve(argv[++i]);
     else if (a === '--auth-file') args.authFile = path.resolve(argv[++i]);
     else if (a === '--audit-file') args.auditFile = path.resolve(argv[++i]);
     else if (a === '--read-only') args.readOnly = true;
@@ -300,6 +302,7 @@ function buildLinkOpsTaskFromCommand(body, actor, req) {
     status: 'draft',
     progress: 10,
     source: 'natural_language',
+    chatSessionId: typeof body.chatSessionId === 'string' ? body.chatSessionId.slice(0, 80) : '',
     command,
     intents,
     targets,
@@ -343,6 +346,76 @@ function normalizeLinkOpsTaskStore(value) {
     version: 1,
     updatedAt: value?.updatedAt || null,
     tasks: tasks.filter(x => x && typeof x === 'object').slice(0, 1000),
+  };
+}
+
+function normalizeLinkOpsChatStore(value) {
+  const sessions = Array.isArray(value?.sessions) ? value.sessions : [];
+  return {
+    version: 1,
+    updatedAt: value?.updatedAt || null,
+    sessions: sessions.filter(x => x && typeof x === 'object').slice(0, 300),
+  };
+}
+
+function buildChatSessionFromMessage(body, actor, req) {
+  const message = String(body.message || body.command || body.text || '').trim();
+  if (!message) throw new Error('Missing message');
+  if (message.length > 4000) throw new Error('Message too long');
+  const now = new Date().toISOString();
+  const id = `los_${now.replace(/[-:.TZ]/g, '').slice(0, 14)}_${crypto.randomBytes(4).toString('hex')}`;
+  return {
+    id,
+    version: 1,
+    status: 'chatting',
+    title: message.slice(0, 80),
+    targets: {
+      ...inferLinkOpsTargets(message),
+      ...(body.targets && typeof body.targets === 'object' ? body.targets : {}),
+    },
+    requestedBy: actorLabel(actor, req),
+    requestedByUser: actorUser(actor, req),
+    requestMeta: requestMeta(req),
+    createdAt: now,
+    updatedAt: now,
+    messages: [{
+      id: `msg_${crypto.randomBytes(5).toString('hex')}`,
+      role: 'user',
+      content: message,
+      at: now,
+    }],
+  };
+}
+
+function appendChatMessage(session, body, actor, req) {
+  const content = String(body.message || body.command || body.text || '').trim();
+  if (!content) throw new Error('Missing message');
+  if (content.length > 4000) throw new Error('Message too long');
+  const now = new Date().toISOString();
+  const messages = Array.isArray(session.messages) ? session.messages.slice(-80) : [];
+  messages.push({id: `msg_${crypto.randomBytes(5).toString('hex')}`, role: 'user', content, at: now});
+  return {
+    ...session,
+    status: 'chatting',
+    updatedAt: now,
+    title: session.title || content.slice(0, 80),
+    targets: {
+      ...(session.targets && typeof session.targets === 'object' ? session.targets : {}),
+      ...inferLinkOpsTargets(content),
+    },
+    messages,
+    updatedBy: actorLabel(actor, req),
+  };
+}
+
+function appendAssistantChatMessage(session, answer, meta = {}) {
+  const now = new Date().toISOString();
+  const messages = Array.isArray(session.messages) ? session.messages.slice(-80) : [];
+  messages.push({id: `msg_${crypto.randomBytes(5).toString('hex')}`, role: 'assistant', content: String(answer || '').slice(0, 16000), at: now, meta});
+  return {
+    ...session,
+    updatedAt: now,
+    messages,
   };
 }
 
@@ -599,8 +672,10 @@ async function main() {
           root,
           stateFile: args.stateFile,
           linkOpsTaskFile: args.linkOpsTaskFile,
+          linkOpsChatFile: args.linkOpsChatFile,
           writableActionState: !args.readOnly,
           writableLinkOpsTasks: !args.readOnly,
+          writableLinkOpsChats: !args.readOnly,
           readOnly: args.readOnly,
           authRequired,
           user: actor ? {
@@ -798,6 +873,96 @@ async function main() {
             ...requestMeta(req),
             task: {id, status: task.status, commandLength: String(task.command || '').length},
           });
+          return sendJson(res, 200, {ok: true, data: next, deleted: {id}});
+        }
+        return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+      }
+      if (url.pathname === '/api/link-ops-chats') {
+        if (req.method === 'GET') {
+          const current = normalizeLinkOpsChatStore(await readJsonFile(args.linkOpsChatFile, {version: 1, updatedAt: null, sessions: []}));
+          const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit') || 80)));
+          return sendJson(res, 200, {ok: true, data: {...current, sessions: current.sessions.slice(0, limit)}});
+        }
+        if (req.method === 'POST') {
+          if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
+          let body;
+          try {
+            body = await readBodyJson(req, 512 * 1024);
+          } catch (err) {
+            return sendJson(res, 400, {ok: false, error: err?.message || String(err || 'Invalid request')});
+          }
+          const current = normalizeLinkOpsChatStore(await readJsonFile(args.linkOpsChatFile, {version: 1, updatedAt: null, sessions: []}));
+          const sessionId = String(body.sessionId || body.id || '').trim();
+          let session;
+          let created = false;
+          try {
+            if (sessionId) {
+              const existing = current.sessions.find(s => String(s.id || '') === sessionId);
+              if (!existing) return sendJson(res, 404, {ok: false, error: 'Chat session not found'});
+              session = appendChatMessage(existing, body, actor, req);
+            } else {
+              session = buildChatSessionFromMessage(body, actor, req);
+              created = true;
+            }
+            if (body.askAgent !== false) {
+              const conversation = (session.messages || []).slice(-8).map(m => `${m.role === 'assistant' ? '智能体' : '用户'}：${m.content}`).join('\n');
+              const question = [
+                '这是 SHEIN 链接管理中台的一段运营会话。请只围绕 SHEIN 数据、链接管理、标题/图片/活动/补链建议回答。',
+                '如果信息还不够，先问需要补充什么；如果已经可以形成任务，请给出清晰的下一步和风险边界。',
+                conversation,
+              ].join('\n\n');
+              const startedAt = Date.now();
+              const result = await askReadonlyOpsAgent(question);
+              session = appendAssistantChatMessage(session, result.answer, {
+                mode: 'readonly-codex-gateway',
+                durationMs: Date.now() - startedAt,
+              });
+            }
+          } catch (err) {
+            return sendJson(res, 500, {ok: false, error: err?.message || String(err || 'Chat failed')});
+          }
+          const sessions = created
+            ? [session, ...current.sessions].slice(0, 300)
+            : current.sessions.map(s => String(s.id || '') === session.id ? session : s);
+          const next = {version: 1, updatedAt: new Date().toISOString(), sessions};
+          await writeJsonFile(args.linkOpsChatFile, next);
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'link-ops-chat',
+            actor,
+            ...requestMeta(req),
+            session: {id: session.id, created, messageCount: Array.isArray(session.messages) ? session.messages.length : 0},
+          });
+          return sendJson(res, 200, {ok: true, data: next, session});
+        }
+        if (req.method === 'PATCH') {
+          if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
+          const body = await readBodyJson(req, 256 * 1024).catch(err => ({_error: err?.message || String(err)}));
+          if (body._error) return sendJson(res, 400, {ok: false, error: body._error});
+          const id = String(body.id || body.sessionId || '').trim();
+          if (!id) return sendJson(res, 400, {ok: false, error: 'Missing session id'});
+          const current = normalizeLinkOpsChatStore(await readJsonFile(args.linkOpsChatFile, {version: 1, updatedAt: null, sessions: []}));
+          const idx = current.sessions.findIndex(s => String(s.id || '') === id);
+          if (idx < 0) return sendJson(res, 404, {ok: false, error: 'Chat session not found'});
+          const session = {
+            ...current.sessions[idx],
+            title: typeof body.title === 'string' ? body.title.trim().slice(0, 100) : current.sessions[idx].title,
+            status: typeof body.status === 'string' ? body.status.trim().slice(0, 40) : current.sessions[idx].status,
+            updatedAt: new Date().toISOString(),
+          };
+          const sessions = current.sessions.slice();
+          sessions[idx] = session;
+          const next = {version: 1, updatedAt: new Date().toISOString(), sessions};
+          await writeJsonFile(args.linkOpsChatFile, next);
+          return sendJson(res, 200, {ok: true, data: next, session});
+        }
+        if (req.method === 'DELETE') {
+          if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
+          const id = String(url.searchParams.get('id') || '').trim();
+          if (!id) return sendJson(res, 400, {ok: false, error: 'Missing session id'});
+          const current = normalizeLinkOpsChatStore(await readJsonFile(args.linkOpsChatFile, {version: 1, updatedAt: null, sessions: []}));
+          const next = {version: 1, updatedAt: new Date().toISOString(), sessions: current.sessions.filter(s => String(s.id || '') !== id)};
+          await writeJsonFile(args.linkOpsChatFile, next);
           return sendJson(res, 200, {ok: true, data: next, deleted: {id}});
         }
         return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
