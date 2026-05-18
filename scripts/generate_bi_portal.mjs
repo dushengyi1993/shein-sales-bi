@@ -3193,6 +3193,8 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     body[data-theme="light"] .ops-upload-progress{background:#fff;border-color:#e2e8f0}
     .ops-upload-progress small{display:block;color:var(--muted);font-size:11px;margin-top:5px}
     .ops-upload-bar{height:8px;border-radius:999px;background:rgba(148,163,184,.18);overflow:hidden}.ops-upload-bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,#38bdf8,#22c55e);border-radius:999px;transition:width .18s ease}
+    .ops-file-input{display:none}
+    .ops-upload-note{color:var(--muted);font-size:11px;line-height:1.5;margin-top:6px}
     .ops-reply-wait{border:1px solid rgba(148,163,184,.16);border-radius:16px;background:rgba(15,23,42,.18);padding:10px;color:var(--muted);font-size:12px;line-height:1.55}
     body[data-theme="light"] .ops-reply-wait{background:#f8fafc;border-color:#e2e8f0}
     .linkops-command-box textarea{width:100%;min-height:156px;resize:vertical;border:1px solid rgba(148,163,184,.22);border-radius:18px;background:rgba(2,6,23,.42);color:var(--text);padding:14px;font:inherit;line-height:1.55}
@@ -9505,25 +9507,16 @@ function renderLinkOpsReplySuggestions(session, task){
   if (!items.length) return '';
   return '<div class="ops-reply-suggestions">'+items.map(x => '<button class="ops-reply-chip" type="button" data-linkops-reply-suggestion="'+escapeHtml(x)+'">'+escapeHtml(x)+'</button>').join('')+'</div>';
 }
-function renderLinkOpsSessionUploadPanel(active, activeTasks = []){
+function renderLinkOpsUploadStatus(active, activeTasks = []){
   const realTask = activeTasks.find(t => !['done','archived'].includes(String(t.status || ''))) || null;
-  const canUpload = !!active && actionStateStore.mode === 'service';
   const assets = realTask && Array.isArray(realTask.assets) ? realTask.assets : [];
   const uploadBody = linkOpsUploadStore.busy || linkOpsUploadStore.error || linkOpsUploadStore.phase
     ? '<div class="ops-upload-progress"><div class="ops-upload-bar"><i id="linkOpsUploadBar" style="width:'+num(linkOpsUploadStore.percent || 0)+'%"></i></div><small id="linkOpsUploadText">'+escapeHtml(linkOpsUploadStore.phase || '准备上传')+' · '+num(linkOpsUploadStore.percent || 0)+'%</small><small id="linkOpsUploadFile">'+escapeHtml(linkOpsUploadStore.fileName || linkOpsUploadStore.error || '')+'</small></div>'
     : '';
-  return '<div class="ops-upload-panel">'+
-    '<h4>会话文件</h4>'+
-    '<p>图片、证书、标题规则等文件会上传到当前会话对应的云端任务包。</p>'+
-    '<p>限制：单个 20MB，单次 120MB，最多 40 个。上传中可取消。</p>'+
-    '<input id="linkOpsSessionAssetInput" type="file" multiple '+(canUpload ? '' : 'disabled')+' accept=".jpg,.jpeg,.png,.webp,.pdf,.txt,.csv,.json,image/jpeg,image/png,image/webp,application/pdf,text/plain,text/csv,application/json">'+
-    '<div class="command-actions" style="margin-top:9px">'+
-      '<button class="btn" id="uploadLinkOpsSessionAssets" type="button" '+(canUpload && !linkOpsUploadStore.busy ? '' : 'disabled')+'>'+(realTask ? '上传到当前任务' : '生成任务并上传')+'</button>'+
-      (linkOpsUploadStore.busy ? '<button class="btn" id="cancelLinkOpsUpload" type="button">取消上传</button>' : '')+
-    '</div>'+
-    uploadBody+
-    '<p>当前任务素材：'+num(assets.length)+' 个。删除任务会同步清理素材目录；任务完成后暂不立刻删除，避免复核时找不到原文件。</p>'+
-  '</div>';
+  const note = active
+    ? '文件会进入当前会话任务包；限制：单个 20MB，单次 120MB，最多 40 个。当前任务素材 '+num(assets.length)+' 个。'
+    : '先创建或选择一个会话，再上传图片、证书、标题规则等文件。';
+  return uploadBody + '<div class="ops-upload-note">'+escapeHtml(note)+'</div>';
 }
 function renderLinkOpsTaskCard(t, options = {}){
   const intents = Array.isArray(t?.intents) ? t.intents : [];
@@ -9608,7 +9601,6 @@ function renderLinkOps(){
           const activeCls = String(s.id || '') === String(linkOpsChatStore.activeId || '') ? ' active' : '';
           return '<div class="ops-session'+activeCls+'" data-linkops-session-id="'+escapeHtml(s.id || '')+'"><div class="ops-session-head"><div><b>'+escapeHtml(linkOpsDisplayTitle(s))+'</b><small>'+escapeHtml(s.status === 'sending' ? '发送中' : linkOpsStatusLabel(s.status || 'chatting'))+' · '+num(count)+' 条消息 · '+(bound.length ? num(bound.length)+'个任务' : '实时草案')+' · '+escapeHtml(String(s.updatedAt || s.createdAt || '').replace('T',' ').slice(0,16))+'</small></div><button class="ops-session-delete" type="button" data-linkops-session-delete="'+escapeHtml(s.id || '')+'">删除</button></div></div>';
         }).join('') : '<div class="empty">还没有会话。点下方推荐指令，或直接输入你的运营问题。</div>')+
-        renderLinkOpsSessionUploadPanel(active, activeTasks)+
         '<div class="ops-reco-head"><div class="section-block-label">基于当前数据的推荐指令</div><button class="ops-reco-refresh" type="button" id="refreshLinkOpsRecommendations">刷新推荐</button></div>'+
         '<div>'+
           prompts.map(p => '<div class="ops-reco" data-linkops-reco="'+escapeHtml(p.text)+'"><b>'+escapeHtml(p.title)+'</b><p>'+escapeHtml(p.reason)+'</p></div>').join('')+
@@ -9625,7 +9617,14 @@ function renderLinkOps(){
           '<label class="section-block-label" for="linkOpsChatInput">继续对话</label>'+
           renderLinkOpsReplySuggestions(active, activeTask)+
           '<textarea id="linkOpsChatInput" placeholder="例如：把建议拆成可执行步骤；先只看QY/TZ/YJ；不要下架，优先换图；再给我一个更保守的方案。"></textarea>'+
-          '<div class="command-actions"><button class="btn primary" id="sendLinkOpsChat" type="button">发送给智能体</button><button class="btn" id="clearLinkOpsChat" type="button">清空输入</button></div>'+
+          '<input id="linkOpsSessionAssetInput" class="ops-file-input" type="file" multiple '+(active && actionStateStore.mode === 'service' ? '' : 'disabled')+' accept=".jpg,.jpeg,.png,.webp,.pdf,.txt,.csv,.json,image/jpeg,image/png,image/webp,application/pdf,text/plain,text/csv,application/json">'+
+          '<div class="command-actions">'+
+            '<button class="btn primary" id="sendLinkOpsChat" type="button">发送给智能体</button>'+
+            '<button class="btn" id="pickLinkOpsSessionAssets" type="button" '+(active && actionStateStore.mode === 'service' && !linkOpsUploadStore.busy ? '' : 'disabled')+'>上传文件</button>'+
+            (linkOpsUploadStore.busy ? '<button class="btn" id="cancelLinkOpsUpload" type="button">取消上传</button>' : '')+
+            '<button class="btn" id="clearLinkOpsChat" type="button">清空输入</button>'+
+          '</div>'+
+          renderLinkOpsUploadStatus(active, activeTasks)+
         '</div>'+
       '</main>'+
       renderActiveLinkOpsWorkbench(active)+
@@ -9650,7 +9649,12 @@ function renderLinkOps(){
   document.getElementById('clearLinkOpsChat')?.addEventListener('click', () => { const input = document.getElementById('linkOpsChatInput'); if (input) input.value = ''; });
   document.getElementById('convertChatToTask')?.addEventListener('click', convertChatToTask);
   document.getElementById('refreshLinkOpsTasks')?.addEventListener('click', refreshLinkOpsTasks);
-  document.getElementById('uploadLinkOpsSessionAssets')?.addEventListener('click', uploadLinkOpsSessionAssets);
+  document.getElementById('pickLinkOpsSessionAssets')?.addEventListener('click', () => {
+    const input = document.getElementById('linkOpsSessionAssetInput');
+    if (!activeLinkOpsSession()) return showToast('先选择或创建一个会话');
+    input?.click?.();
+  });
+  document.getElementById('linkOpsSessionAssetInput')?.addEventListener('change', uploadLinkOpsSessionAssets);
   document.getElementById('cancelLinkOpsUpload')?.addEventListener('click', cancelLinkOpsUpload);
   document.querySelectorAll('[data-linkops-task-action]').forEach(btn => btn.addEventListener('click', () => {
     const id = btn.dataset.taskId || '';
