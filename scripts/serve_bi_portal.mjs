@@ -481,6 +481,57 @@ function findDuplicateAutoTask(tasks, sessionId, command) {
   ) || null;
 }
 
+function findReusableChatTask(tasks, sessionId) {
+  const sid = String(sessionId || '');
+  if (!sid) return null;
+  return (Array.isArray(tasks) ? tasks : [])
+    .filter(t =>
+      String(t.chatSessionId || '') === sid &&
+      !['done', 'archived'].includes(String(t.status || ''))
+    )
+    .sort((a, b) => String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')))[0] || null;
+}
+
+function updateLinkOpsTaskFromChatCommand(task, body, actor, req) {
+  const command = String(body.command || body.text || '').trim();
+  if (!command) throw new Error('Missing command');
+  if (command.length > 2000) throw new Error('Command too long');
+  const now = new Date().toISOString();
+  const previousIntents = Array.isArray(task.intents) ? task.intents : [];
+  const intents = [...new Set([...previousIntents, ...inferLinkOpsIntent(command)])];
+  const targets = mergeLinkOpsTargets(
+    task.targets && typeof task.targets === 'object' ? task.targets : {},
+    inferLinkOpsTargets(command),
+    body.targets && typeof body.targets === 'object' ? body.targets : {}
+  );
+  const preview = {
+    ...(task.preview && typeof task.preview === 'object' ? task.preview : {}),
+    summary: `随会话更新：${intents.map(linkOpsIntentLabel).join(' / ')}；任务持续合并最新指令，不为同一会话重复开新任务。`,
+    riskNotes: linkOpsRiskNotes(intents),
+    agentAnswer: typeof body.agentAnswer === 'string' ? body.agentAnswer.slice(0, 12000) : (task.preview?.agentAnswer || ''),
+    agentMode: typeof body.agentMode === 'string' ? body.agentMode.slice(0, 80) : (task.preview?.agentMode || ''),
+    agentDurationMs: Number.isFinite(Number(body.agentDurationMs)) ? Number(body.agentDurationMs) : (task.preview?.agentDurationMs || 0),
+  };
+  const next = {
+    ...task,
+    status: ['draft'].includes(String(task.status || '')) ? 'confirmed' : task.status,
+    progress: Math.max(normalizeProgress(task.progress, 10), 30),
+    source: task.source || 'chat_auto_action',
+    command,
+    intents,
+    targets,
+    preview,
+    note: '已根据会话最新指令更新；继续对话会继续修订同一个任务，而不是生成重复任务。',
+    updatedAt: now,
+  };
+  next.history = appendTaskHistory(next, 'updated_from_chat_command', actor, req, {
+    status: next.status,
+    progress: next.progress,
+    chatSessionId: next.chatSessionId || body.chatSessionId || '',
+  });
+  return next;
+}
+
 function linkOpsRiskNotes(intents) {
   const notes = ['当前只是建立任务草案，不会自动修改 SHEIN 后台。'];
   if (intents.includes('copy_product_draft')) {
@@ -671,6 +722,13 @@ function patchLinkOpsTask(task, body, actor, req) {
     const status = String(body.status || '').trim();
     if (!LINK_OPS_ALLOWED_STATUSES.has(status)) throw new Error(`Invalid status: ${status}`);
     next.status = status;
+    if (['done', 'archived'].includes(status)) {
+      next.assetRetention = {
+        policy: 'keep_until_task_delete',
+        note: '任务完成/归档后暂保留素材用于复核；删除任务时同步清理素材目录。',
+        updatedAt: new Date().toISOString(),
+      };
+    }
   }
   if (body.progress !== undefined) {
     next.progress = normalizeProgress(body.progress, normalizeProgress(task.progress, 0));
@@ -791,6 +849,13 @@ async function attachLinkOpsAssets({store, taskId, files, args, actor, req}) {
     task: nextTask,
     assets: added,
   };
+}
+
+async function removeLinkOpsTaskAssetDir(taskId, args) {
+  const id = safeTaskId(taskId);
+  const baseDir = path.resolve(args.linkOpsAssetDir);
+  const taskDir = assertInsideDir(baseDir, path.join(baseDir, id));
+  await fs.rm(taskDir, {recursive: true, force: true});
 }
 
 function runPreflightForLinkOpsTask(task) {
@@ -1526,12 +1591,17 @@ async function main() {
             tasks: current.tasks.filter(t => String(t.id || '') !== id),
           };
           await writeJsonFile(args.linkOpsTaskFile, next);
+          let assetsDeleted = false;
+          try {
+            await removeLinkOpsTaskAssetDir(id, args);
+            assetsDeleted = true;
+          } catch {}
           await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'link-ops-task-delete',
             actor,
             ...requestMeta(req),
-            task: {id, status: task.status, commandLength: String(task.command || '').length},
+            task: {id, status: task.status, commandLength: String(task.command || '').length, assetsDeleted},
           });
           return sendJson(res, 200, {ok: true, data: next, deleted: {id}});
         }
@@ -1673,9 +1743,41 @@ async function main() {
             if (shouldAutoTask) {
               const taskStore = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
               const duplicate = findDuplicateAutoTask(taskStore.tasks, session.id, userMessage);
+              const reusable = duplicate || findReusableChatTask(taskStore.tasks, session.id);
               if (duplicate) {
                 autoTask = duplicate;
                 taskData = taskStore;
+              } else if (reusable) {
+                const idx = taskStore.tasks.findIndex(t => String(t.id || '') === String(reusable.id || ''));
+                autoTask = updateLinkOpsTaskFromChatCommand(reusable, {
+                  command: userMessage,
+                  source: 'chat_auto_action',
+                  chatSessionId: session.id,
+                  targets: conversationTargets,
+                  agentAnswer,
+                  agentMode: agentAnswer ? 'readonly-codex-gateway' : '',
+                  agentDurationMs,
+                }, actor, req);
+                autoTask.status = ['done', 'archived'].includes(String(autoTask.status || '')) ? autoTask.status : 'confirmed';
+                const tasks = taskStore.tasks.slice();
+                if (idx >= 0) tasks[idx] = autoTask;
+                taskData = {version: 1, updatedAt: new Date().toISOString(), tasks};
+                await writeJsonFile(args.linkOpsTaskFile, taskData);
+                await appendAudit(args.auditFile, {
+                  at: new Date().toISOString(),
+                  type: 'link-ops-chat-update-task',
+                  actor,
+                  ...requestMeta(req),
+                  session: {id: session.id},
+                  task: {
+                    id: autoTask.id,
+                    status: autoTask.status,
+                    intents: autoTask.intents,
+                    stores: autoTask.targets?.stores || [],
+                    productRefs: autoTask.targets?.productRefs || [],
+                    commandLength: autoTask.command.length,
+                  },
+                });
               } else {
                 autoTask = buildLinkOpsTaskFromCommand({
                   command: userMessage,
@@ -1726,7 +1828,9 @@ async function main() {
                   },
                 });
               }
-              const autoTaskNote = `已自动加入链接运营任务池：${autoTask.id}（${linkOpsStatusLabel(autoTask.status)}）。执行前仍会核对目标、素材、权限和风险，不会静默改 SHEIN。`;
+              const autoTaskNote = reusable && !duplicate
+                ? `已更新当前会话的链接运营任务：${autoTask.id}（${linkOpsStatusLabel(autoTask.status)}）。不会重复开新任务；执行前仍会核对目标、素材、权限和风险。`
+                : `已自动加入链接运营任务池：${autoTask.id}（${linkOpsStatusLabel(autoTask.status)}）。执行前仍会核对目标、素材、权限和风险，不会静默改 SHEIN。`;
               agentAnswer = agentAnswer ? `${agentAnswer}\n\n${autoTaskNote}` : autoTaskNote;
             }
             if (agentAnswer) {
