@@ -3141,9 +3141,10 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .health-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
     .command-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
     .linkops-grid{display:grid;grid-template-columns:minmax(340px,.95fr) minmax(360px,1.05fr);gap:14px}
-    .ops-workspace{display:grid;grid-template-columns:minmax(230px,.32fr) minmax(460px,.8fr) minmax(430px,.74fr);gap:14px;align-items:start}
-    .ops-rail,.ops-chat,.ops-tasks,.ops-task-panel{border:1px solid rgba(148,163,184,.16);border-radius:26px;background:rgba(15,23,42,.34);padding:14px;min-width:0}
-    body[data-theme="light"] .ops-rail,body[data-theme="light"] .ops-chat,body[data-theme="light"] .ops-tasks,body[data-theme="light"] .ops-task-panel{background:#fff;border-color:#e2e8f0}
+    .ops-workspace{display:grid;grid-template-columns:minmax(260px,.34fr) minmax(520px,1fr) minmax(360px,.55fr);gap:16px;align-items:start}
+    .ops-rail,.ops-chat,.ops-tasks,.ops-task-panel{border:1px solid rgba(148,163,184,.16);border-radius:28px;background:linear-gradient(180deg,rgba(15,23,42,.62),rgba(15,23,42,.30));padding:16px;min-width:0;box-shadow:0 20px 50px -36px rgba(2,6,23,.78),inset 0 1px 0 rgba(255,255,255,.04)}
+    body[data-theme="light"] .ops-rail,body[data-theme="light"] .ops-chat,body[data-theme="light"] .ops-tasks,body[data-theme="light"] .ops-task-panel{background:linear-gradient(180deg,#ffffff,#f8fafc);border-color:#e2e8f0;box-shadow:0 24px 60px -44px rgba(15,23,42,.28),inset 0 1px 0 rgba(255,255,255,.8)}
+    .ops-chat{min-height:690px;display:grid;grid-template-rows:auto minmax(360px,1fr) auto}
     .ops-task-panel{position:sticky;top:86px;max-height:calc(100dvh - 104px);overflow:auto}
     .ops-workbench-head{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:start;padding-bottom:12px;border-bottom:1px solid rgba(148,163,184,.14);margin-bottom:12px}
     .ops-workbench-head h3{margin:0 0 5px;font-size:16px;letter-spacing:-.02em}.ops-workbench-head .sub{font-size:12px;line-height:1.55}
@@ -3151,26 +3152,38 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     body[data-theme="light"] .ops-now{background:linear-gradient(135deg,#eff6ff,#f8fafc);border-color:#bae6fd}
     .ops-now h4{margin:0 0 6px;font-size:14px}.ops-now p{margin:4px 0;color:var(--muted);font-size:12px;line-height:1.55}
     .ops-workbench-archive{margin-top:12px}
+    .ops-rail-top{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;padding-bottom:12px;border-bottom:1px solid rgba(148,163,184,.12);margin-bottom:12px}
+    .ops-rail-top h3,.ops-chat-title h3{margin:0;font-size:16px;letter-spacing:-.02em}.ops-rail-top .sub,.ops-chat-title .sub{margin-top:5px;color:var(--muted);font-size:12px;line-height:1.5}
     @media(max-width:1180px){.ops-workspace{grid-template-columns:minmax(220px,.36fr) minmax(0,1fr)}.ops-task-panel{grid-column:1 / -1;position:static;max-height:none}}
     @media(max-width:760px){.ops-workspace{grid-template-columns:1fr}.ops-rail{order:2}.ops-chat{order:1}.ops-task-panel{order:3}}
-    .ops-session{border:1px solid rgba(148,163,184,.14);border-radius:18px;padding:10px;margin-bottom:8px;cursor:pointer;transition:transform .18s ease,border-color .18s ease,background .18s ease}
+    .ops-session{border:1px solid rgba(148,163,184,.14);border-radius:18px;padding:11px;margin-bottom:8px;cursor:pointer;transition:transform .22s cubic-bezier(.16,1,.3,1),border-color .18s ease,background .18s ease}
     .ops-session:hover{transform:translateY(-1px);border-color:rgba(56,189,248,.34)}
-    .ops-session.active{background:rgba(14,165,233,.14);border-color:rgba(56,189,248,.48)}
+    .ops-session.active{background:rgba(14,165,233,.14);border-color:rgba(56,189,248,.48);box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
     .ops-session b{display:block;font-size:13px;margin-bottom:5px}.ops-session small{display:block;color:var(--muted);font-size:11px;line-height:1.45}
     .ops-session-head{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:start}
     .ops-session-delete{border:0;background:transparent;color:var(--muted);font-size:12px;cursor:pointer;border-radius:999px;padding:2px 6px}
     .ops-session-delete:hover{background:rgba(248,113,113,.12);color:#fca5a5}
-    .ops-reco{border:1px solid rgba(34,197,94,.18);border-radius:16px;background:rgba(20,83,45,.14);padding:10px;margin-bottom:8px;cursor:pointer}
+    .ops-reco-head{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;margin:14px 0 8px}
+    .ops-reco-refresh{border:1px solid rgba(148,163,184,.20);border-radius:999px;background:rgba(15,23,42,.35);color:var(--text);padding:6px 9px;cursor:pointer;font-size:12px}
+    body[data-theme="light"] .ops-reco-refresh{background:#fff;border-color:#dbe3ef;color:#0f172a}
+    .ops-reco{border:1px solid rgba(34,197,94,.18);border-radius:17px;background:rgba(20,83,45,.14);padding:11px;margin-bottom:8px;cursor:pointer;transition:transform .18s ease,border-color .18s ease,background .18s ease}
+    .ops-reco:hover{transform:translateY(-1px);border-color:rgba(34,197,94,.34)}
     body[data-theme="light"] .ops-reco{background:#f0fdf4;border-color:#bbf7d0}
     .ops-reco b{display:block;font-size:12px;margin-bottom:4px}.ops-reco p{margin:0;color:var(--muted);font-size:12px;line-height:1.55}
-    .chat-stream{display:grid;gap:10px;max-height:620px;overflow:auto;padding-right:4px}
-    .chat-msg{max-width:92%;border:1px solid rgba(148,163,184,.16);border-radius:18px;padding:11px 12px;line-height:1.65;font-size:13px}
-    .chat-msg.user{justify-self:end;background:rgba(14,165,233,.15);border-color:rgba(56,189,248,.34)}
+    .chat-stream{display:grid;gap:12px;overflow:auto;padding:2px 4px 8px 0;align-content:start}
+    .chat-msg{max-width:92%;border:1px solid rgba(148,163,184,.16);border-radius:20px;padding:12px 13px;line-height:1.65;font-size:13px;box-shadow:0 16px 36px -32px rgba(2,6,23,.7)}
+    .chat-msg.user{justify-self:end;background:linear-gradient(135deg,rgba(14,165,233,.20),rgba(14,165,233,.10));border-color:rgba(56,189,248,.34)}
     .chat-msg.assistant{justify-self:start;background:rgba(15,23,42,.26)}
     body[data-theme="light"] .chat-msg.assistant{background:#f8fafc}
-    .chat-compose{margin-top:12px;display:grid;gap:9px}
+    .chat-msg p{margin:0}.chat-msg small{display:block;margin-top:8px;font-size:11px}
+    .chat-compose{margin-top:12px;display:grid;gap:9px;border-top:1px solid rgba(148,163,184,.12);padding-top:12px}
     .chat-compose textarea{width:100%;min-height:112px;resize:vertical;border:1px solid rgba(148,163,184,.22);border-radius:18px;background:rgba(2,6,23,.42);color:var(--text);padding:13px;font:inherit;line-height:1.55}
     body[data-theme="light"] .chat-compose textarea{background:#fff;color:#0f172a;border-color:#dbe3ef}
+    .ops-reply-suggestions{display:flex;flex-wrap:wrap;gap:7px}
+    .ops-reply-chip{border:1px solid rgba(56,189,248,.22);border-radius:999px;background:rgba(8,47,73,.18);color:var(--text);padding:7px 10px;font-size:12px;cursor:pointer;transition:transform .16s ease,border-color .16s ease}
+    .ops-reply-chip:hover{transform:translateY(-1px);border-color:rgba(56,189,248,.42)}
+    body[data-theme="light"] .ops-reply-chip{background:#f0f9ff;border-color:#bae6fd;color:#0f172a}
+    .ops-chat-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 0;border-top:1px solid rgba(148,163,184,.10);border-bottom:1px solid rgba(148,163,184,.10);margin-bottom:12px}
     .linkops-command-box textarea{width:100%;min-height:156px;resize:vertical;border:1px solid rgba(148,163,184,.22);border-radius:18px;background:rgba(2,6,23,.42);color:var(--text);padding:14px;font:inherit;line-height:1.55}
     body[data-theme="light"] .linkops-command-box textarea{background:#fff;color:#0f172a;border-color:#dbe3ef}
     .linkops-hints{display:grid;gap:8px;margin-top:10px}
@@ -3219,6 +3232,19 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .agent-answer-card p{margin:0;color:var(--muted);font-size:12px;line-height:1.7}
     .task-progress{height:9px;border-radius:999px;background:rgba(148,163,184,.18);overflow:hidden;margin:9px 0}
     .task-progress>i{display:block;height:100%;background:linear-gradient(90deg,#38bdf8,#22c55e);border-radius:999px}
+    .ops-task-stack{display:grid;gap:10px}
+    .task-progress-card{border:1px solid rgba(148,163,184,.16);border-radius:20px;background:rgba(15,23,42,.28);padding:12px}
+    body[data-theme="light"] .task-progress-card{background:#fff;border-color:#e2e8f0}
+    .task-progress-card summary{list-style:none;cursor:pointer}.task-progress-card summary::-webkit-details-marker{display:none}
+    .task-progress-card h4{margin:0;font-size:14px;letter-spacing:-.01em}.task-progress-card p{margin:6px 0;color:var(--muted);font-size:12px;line-height:1.6}
+    .task-stage-row{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:5px;margin-top:10px}
+    .task-stage{height:6px;border-radius:999px;background:rgba(148,163,184,.18)}
+    .task-stage.done{background:#22c55e}.task-stage.now{background:#38bdf8}
+    .task-mini-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}
+    .task-mini{border:1px solid rgba(148,163,184,.13);border-radius:13px;padding:8px;background:rgba(15,23,42,.18)}
+    body[data-theme="light"] .task-mini{background:#f8fafc;border-color:#e2e8f0}
+    .task-mini b{display:block;color:var(--muted);font-size:11px;margin-bottom:4px}.task-mini span{display:block;font-size:12px;line-height:1.45}
+    .task-fold-body{margin-top:10px;padding-top:10px;border-top:1px solid rgba(148,163,184,.12)}
     .task-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}
     .task-actions button{border:1px solid rgba(148,163,184,.18);background:rgba(15,23,42,.48);color:var(--text);border-radius:999px;padding:7px 10px;cursor:pointer;font-size:12px}
     body[data-theme="light"] .task-actions button{background:#fff;border-color:#dbe3ef;color:#0f172a}
@@ -4000,6 +4026,7 @@ let actionState = loadActionState();
 const linkOpsStore = {ready:false, error:'', tasks:[]};
 const linkOpsChatStore = {ready:false, error:'', sessions:[], activeId:''};
 const opsAgentStore = {busy:false, answer:'', error:'', lastQuestion:'', durationMs:0};
+let linkOpsRecommendationOffset = 0;
 async function initServiceHealth(){
   if (actionStateStore.mode !== 'service') {
     serviceHealth = {
@@ -4125,7 +4152,8 @@ async function sendLinkOpsChatMessage(){
     linkOpsChatStore.sessions = [{
       id: localId,
       status: 'sending',
-      title: message.slice(0,80),
+      title: linkOpsTitleFromSession({messages:[localMsg], targets:{}}),
+      autoTitle: true,
       createdAt: now,
       updatedAt: now,
       messages: [localMsg],
@@ -4230,40 +4258,79 @@ async function convertChatToTask(){
 }
 function recommendedLinkOpsPrompts(){
   const actions = (DATA.actions || []).slice().sort((a,b)=>Number(b.score || b.priority_score || 0)-Number(a.score || a.priority_score || 0));
+  const links = (DATA.storeLinks || DATA.links || []).slice();
+  const matrixRows = (DATA.matrix || []).slice();
   const prompts = [];
-  const weak = actions.find(a => /弱|重复|承接|下架|归档/.test(String(a.category || '') + String(a.next_step || '') + String(a.reason || '')));
-  if (weak) prompts.push({
-    title:(weak.store_key || '重点店')+' · '+(weak.standard_goods_sn || weak.skc || '弱链接'),
-    text:'针对 '+(weak.store_key || '该店')+' 店 '+(weak.standard_goods_sn || weak.skc || '这个货号')+'：先复盘当前弱链接表现，判断是换主图/改标题/补新链接，还是等待替代链接后再下架。请给出具体链接处理顺序和7天复盘标准。',
-    reason:'动作池高优先级：'+String(weak.category || weak.reason || weak.next_step || '').slice(0,50),
+  const seen = new Set();
+  const addPrompt = (p) => {
+    const key = String(p?.title || '') + '|' + String(p?.text || '').slice(0, 80);
+    if (!p?.text || seen.has(key)) return;
+    seen.add(key);
+    prompts.push(p);
+  };
+  actions.slice(0, 12).forEach(a => {
+    const store = a.store_key || '该店';
+    const ref = a.standard_goods_sn || a.skc || '这个链接';
+    const signal = String(a.category || a.reason || a.next_step || '高优先级动作').slice(0, 64);
+    addPrompt({
+      title: store+' · '+ref,
+      text:'复盘 '+store+' 店 '+ref+'：结合动作池“'+signal+'”，判断应该下架、换图、改标题、补新链接还是暂时观察。请列出具体目标链接、参考链接、执行顺序和复盘标准。',
+      reason:'动作池优先级 '+num(a.score || a.priority_score || 0)+'：'+signal,
+    });
   });
-  const matrixRows = (DATA.matrix || []).filter(r => r.need_supplement_link && r.standard_goods_sn);
-  const matrix = matrixRows.sort((a,b)=>Number(b.sales_sar || 0)-Number(a.sales_sar || 0))[0];
-  if (matrix) prompts.push({
-    title:(matrix.standard_goods_sn || '重点货号')+' · 补覆盖',
-    text:'围绕 '+matrix.standard_goods_sn+' 做补覆盖：列出哪些店完全缺链接、哪些店只有待上架、哪些店已有可复制参考 SKC；优先给 '+(matrix.store_key || '缺口店')+' 店制定补链/催上架动作。',
-    reason:'覆盖矩阵显示 '+(matrix.store_key || '某店')+' 需要补承接',
-  });
-  const link = (DATA.storeLinks || DATA.links || [])
-    .filter(r => Number(r.c30_sale_cnt || 0) === 0 && Number(r.c30_eps_uv || r.eps_uv || 0) > 3000)
-    .sort((a,b)=>Number(b.c30_eps_uv || b.eps_uv || 0)-Number(a.c30_eps_uv || a.eps_uv || 0))[0];
-  if (link) prompts.push({
-    title:(link.store_key || '店铺')+' · 高曝光0单',
-    text:'复盘 '+(link.store_key || '')+' 店 '+(link.standard_goods_sn || link.skc || '')+'：30天曝光 '+num(link.c30_eps_uv || link.eps_uv)+'、销量0。请判断优先改主图、标题、价格、活动，还是重发新链接，并给出具体执行顺序。',
-    reason:'链接表现：高曝光但30天0单',
-  });
-  const wait = (DATA.storeLinks || DATA.links || []).find(r => isWaitShelfLink(r) && (r.standard_goods_sn || r.skc));
-  if (wait) prompts.push({
-    title:(wait.store_key || '店铺')+' · 待上架卡点',
-    text:'检查 '+(wait.store_key || '')+' 店 '+(wait.standard_goods_sn || wait.skc || '')+' 的待上架链接，判断缺证书、缺资质、缺资料还是审核/计划上架问题，并列出该补什么。',
-    reason:'链接仓库存在待上架链接',
-  });
-  prompts.push({
+  links
+    .filter(r => Number(r.c30_sale_cnt || 0) === 0 && Number(r.c30_eps_uv || r.eps_uv || 0) > 1200)
+    .sort((a,b)=>Number(b.c30_eps_uv || b.eps_uv || 0)-Number(a.c30_eps_uv || a.eps_uv || 0))
+    .slice(0, 10)
+    .forEach(link => addPrompt({
+      title:(link.store_key || '店铺')+' · 高曝光0单',
+      text:'复盘 '+(link.store_key || '')+' 店 '+(link.standard_goods_sn || link.skc || '')+'：30天曝光 '+num(link.c30_eps_uv || link.eps_uv)+'、访客 '+num(link.c30_goods_uv || link.goods_uv)+'、销量0。请判断优先改主图、标题、价格、活动，还是重发新链接，并给出具体执行顺序。',
+      reason:'链接表现：有曝光但30天0单',
+    }));
+  links
+    .filter(r => Number(r.c30_goods_uv || r.goods_uv || 0) > 80 && Number(r.c30_sale_cnt || 0) === 0)
+    .sort((a,b)=>Number(b.c30_goods_uv || b.goods_uv || 0)-Number(a.c30_goods_uv || a.goods_uv || 0))
+    .slice(0, 8)
+    .forEach(link => addPrompt({
+      title:(link.store_key || '店铺')+' · 有访客无成交',
+      text:'诊断 '+(link.store_key || '')+' 店 '+(link.standard_goods_sn || link.skc || '')+'：30天访客 '+num(link.c30_goods_uv || link.goods_uv)+'、销量0。请判断是价格、评价、活动承接、详情页还是标题图片问题，并给出先后顺序。',
+      reason:'有访客但没有支付，需要看承接问题',
+    }));
+  matrixRows
+    .filter(r => r.need_supplement_link && r.standard_goods_sn)
+    .sort((a,b)=>Number(b.sales_sar || 0)-Number(a.sales_sar || 0))
+    .slice(0, 10)
+    .forEach(matrix => addPrompt({
+      title:(matrix.standard_goods_sn || '重点货号')+' · '+(matrix.store_key || '缺口店')+'补覆盖',
+      text:'围绕 '+matrix.standard_goods_sn+' 做补覆盖：先列出16店哪些有上架、哪些只有待上架、哪些完全缺链接；再针对 '+(matrix.store_key || '缺口店')+' 给出复制上品/补证书/补图/催审核的动作。',
+      reason:'覆盖矩阵显示 '+(matrix.store_key || '某店')+' 需要补承接',
+    }));
+  links
+    .filter(r => isWaitShelfLink(r) && (r.standard_goods_sn || r.skc))
+    .slice(0, 8)
+    .forEach(wait => addPrompt({
+      title:(wait.store_key || '店铺')+' · 待上架卡点',
+      text:'检查 '+(wait.store_key || '')+' 店 '+(wait.standard_goods_sn || wait.skc || '')+' 的待上架链接，判断缺证书、缺资质、缺资料、审核驳回还是计划上架时间问题，并列出该补什么。',
+      reason:'链接仓库存在待上架链接',
+    }));
+  addPrompt({
     title:'今日 Top5 链接动作',
     text:'根据当前 BI 数据，列出今天最值得处理的5个链接管理任务。每条都要具体到店铺、货号、问题链接/参考链接、建议动作、预期收益和风险。',
-    reason:'综合销售、覆盖和动作池',
+    reason:'综合销售、覆盖、链接表现和动作池',
   });
-  return prompts.slice(0, 4);
+  addPrompt({
+    title:'找出需要先停损的链接',
+    text:'找出当前最该先停损的差链接：要求按店铺、货号、SKC、30天曝光、访客、销量、是否有替代承接排序，并说明哪些只建议观察、哪些可以进入待下架任务。',
+    reason:'聚焦高浪费曝光和重复弱链',
+  });
+  addPrompt({
+    title:'补覆盖优先级排序',
+    text:'按货号价值和缺口店铺，给我一份补覆盖优先级清单：先处理哪些货号、哪些店、源 SKC 参考谁、需要补哪些图片或证书。',
+    reason:'适合安排批量上品/复制草稿',
+  });
+  if (!prompts.length) return [];
+  const start = Math.abs(linkOpsRecommendationOffset) % prompts.length;
+  return prompts.slice(start).concat(prompts.slice(0, start)).slice(0, 5);
 }
 async function submitLinkOpsCommand(){
   const input = document.getElementById('linkOpsCommand');
@@ -4351,6 +4418,9 @@ function renderAgentAnswerCards(text){
 }
 function linkOpsStatusLabel(status){
   return ({
+    chatting:'会话中',
+    sending:'发送中',
+    task_created:'已建任务',
     draft:'草案',
     confirmed:'待开始',
     in_progress:'执行中',
@@ -9149,6 +9219,40 @@ function linkOpsFirstUserMessage(session){
 function linkOpsLatestAssistantMessage(session){
   return [...linkOpsSessionMessages(session)].reverse().find(m => m.role === 'assistant') || null;
 }
+function linkOpsCompactText(text, max = 36){
+  return String(text || '')
+    .replace(/\\s+/g, ' ')
+    .replace(/[。；;，,]+$/g, '')
+    .trim()
+    .slice(0, max);
+}
+function linkOpsTitleFromSession(session){
+  const first = String(linkOpsFirstUserMessage(session)?.content || '').trim();
+  const latest = String(linkOpsLatestUserMessage(session)?.content || '').trim();
+  const text = first || latest || String(session?.title || '').trim();
+  const targets = session?.targets && typeof session.targets === 'object' ? session.targets : {};
+  const stores = Array.isArray(targets.stores) ? targets.stores.filter(Boolean).slice(0, 3) : [];
+  const refs = Array.isArray(targets.productRefs) ? targets.productRefs.filter(Boolean).slice(0, 2) : [];
+  const intents = inferLinkOpsIntentFromText(text).filter(x => x !== 'manual_review');
+  const intentText = intents.length ? linkOpsIntentLabel(intents[0]) : '数据复盘';
+  if (refs.length || stores.length) {
+    const target = [refs.join('、'), stores.length ? stores.join('、') + '店' : ''].filter(Boolean).join(' · ');
+    return linkOpsCompactText(target + ' · ' + intentText, 42);
+  }
+  const cleaned = linkOpsCompactText(text, 34);
+  return cleaned || '新的运营会话';
+}
+function linkOpsDisplayTitle(session){
+  if (!session) return '新运营会话';
+  const raw = String(session.title || '').trim();
+  const first = String(linkOpsFirstUserMessage(session)?.content || '').trim();
+  const derived = linkOpsTitleFromSession(session);
+  if (!raw) return derived;
+  if (/^los_/.test(raw) || /^local_/.test(raw) || raw === '未命名会话') return derived;
+  if (first && raw === first.slice(0, 80)) return derived;
+  if (raw.length > 48 && derived) return derived;
+  return raw;
+}
 function linkOpsTaskForSession(session){
   if (!session?.id) return null;
   const tasks = linkOpsStore.tasks || [];
@@ -9160,6 +9264,14 @@ function linkOpsTaskForSession(session){
   return tasks
     .filter(t => String(t.chatSessionId || '') === String(session.id || ''))
     .sort((a,b)=>String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')))[0] || null;
+}
+function linkOpsTasksForSession(session){
+  if (!session?.id) return [];
+  const tasks = linkOpsStore.tasks || [];
+  const ids = new Set([...linkOpsSessionMessages(session)].map(m => String(m?.meta?.autoTaskId || '')).filter(Boolean));
+  return tasks
+    .filter(t => String(t.chatSessionId || '') === String(session.id || '') || ids.has(String(t.id || '')))
+    .sort((a,b)=>String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')));
 }
 function linkOpsSessionCommand(session){
   const first = String(linkOpsFirstUserMessage(session)?.content || session?.title || '').trim();
@@ -9191,6 +9303,101 @@ function buildDraftTaskFromSession(session){
     updatedAt: session?.updatedAt || '',
     history: [],
   };
+}
+function linkOpsProgressInfo(t){
+  const status = String(t?.status || 'draft');
+  const progress = Math.max(0, Math.min(100, Number(t?.progress || 0)));
+  const hasAssets = Array.isArray(t?.assets) && t.assets.length > 0;
+  const needsMaterial = linkOpsTaskRequiredMaterials(Array.isArray(t?.intents) ? t.intents : [])
+    .some(x => /图片|证书|素材|标题/.test(String(x || '')));
+  let stage = 0;
+  let label = '识别目标';
+  if (status === 'confirmed' || progress >= 25) { stage = 1; label = '待确认范围'; }
+  if (progress >= 45 || (needsMaterial && hasAssets)) { stage = 2; label = needsMaterial && !hasAssets ? '待补材料' : '准备执行'; }
+  if (status === 'in_progress' || progress >= 65) { stage = 3; label = '执行中'; }
+  if (status === 'waiting_review') { stage = 4; label = '待复核'; }
+  if (status === 'done' || status === 'archived' || progress >= 100) { stage = 4; label = status === 'archived' ? '已归档' : '已完成'; }
+  if (t?.virtual) { stage = progress > 0 ? 1 : 0; label = '会话草案'; }
+  return {
+    progress,
+    stage,
+    label,
+    steps: ['识别', '确认', '准备', '执行', '复核'],
+  };
+}
+function renderLinkOpsProgressCard(t, options = {}){
+  const intents = Array.isArray(t?.intents) ? t.intents : [];
+  const stores = Array.isArray(t?.targets?.stores) ? t.targets.stores : [];
+  const refs = Array.isArray(t?.targets?.productRefs) ? t.targets.productRefs : [];
+  const info = linkOpsProgressInfo(t);
+  const title = linkOpsTaskActionTitle(intents);
+  const isVirtual = !!t?.virtual;
+  const openAttr = options.open ? ' open' : '';
+  const stages = info.steps.map((s, idx) => '<i class="task-stage '+(idx < info.stage ? 'done' : idx === info.stage ? 'now' : '')+'" title="'+escapeHtml(s)+'"></i>').join('');
+  const targetLine = [
+    stores.length ? stores.join('、') : '待识别店铺',
+    refs.length ? refs.join('、') : '待识别货号/SKC'
+  ].join(' · ');
+  const agentAnswer = String(t?.preview?.agentAnswer || '').trim();
+  const riskNotes = Array.isArray(t?.preview?.riskNotes) ? t.preview.riskNotes : [];
+  const nextChecks = Array.isArray(t?.preview?.nextChecks) ? t.preview.nextChecks : [];
+  const history = Array.isArray(t?.history) ? t.history.slice(-4).reverse() : [];
+  return '<details class="task-progress-card"'+openAttr+'>'+
+    '<summary class="task-summary">'+
+      '<div><h4>'+escapeHtml(title)+'</h4><small>'+escapeHtml(targetLine)+' · '+escapeHtml(info.label)+' · 进度 '+num(info.progress)+'%</small></div>'+
+      '<span class="tag '+linkOpsStatusClass(t?.status)+'">'+escapeHtml(isVirtual ? '实时草案' : linkOpsStatusLabel(t?.status))+'</span>'+
+    '</summary>'+
+    '<div class="task-fold-body">'+
+      '<div class="task-progress"><i style="width:'+num(info.progress)+'%"></i></div>'+
+      '<div class="task-stage-row">'+stages+'</div>'+
+      '<div class="task-mini-grid">'+
+        '<div class="task-mini"><b>当前阶段</b><span>'+escapeHtml(info.label)+'</span></div>'+
+        '<div class="task-mini"><b>更新时间</b><span>'+escapeHtml(String(t?.updatedAt || t?.createdAt || '').replace('T',' ').slice(0,16) || '-').replace('T',' ')+'</span></div>'+
+        '<div class="task-mini"><b>目标店铺</b><span>'+escapeHtml(stores.join('、') || '待识别')+'</span></div>'+
+        '<div class="task-mini"><b>目标货号/SKC</b><span>'+escapeHtml(refs.join('、') || '待识别')+'</span></div>'+
+      '</div>'+
+      '<p>任务指令：'+escapeHtml(String(t?.command || '').slice(0,360))+'</p>'+
+      (isVirtual ? '<div class="next">这是当前会话草案；继续对话会更新任务内容，明确动作会进入任务池。</div>' : '')+
+      (agentAnswer ? '<details style="margin-top:8px"><summary>智能体结论</summary>'+renderAgentAnswerCards(agentAnswer)+'</details>' : '')+
+      (refs.length ? '<details style="margin-top:8px"><summary>当前数据建议</summary>'+renderLinkOpsDataAdvice(t)+'</details>' : '')+
+      (riskNotes.length ? '<details style="margin-top:8px"><summary>风险边界</summary><ul class="linkops-preview-list">'+riskNotes.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul></details>' : '')+
+      (nextChecks.length ? '<details style="margin-top:8px"><summary>下一步检查</summary><ul class="linkops-preview-list">'+nextChecks.map(x => '<li>'+escapeHtml(x)+'</li>').join('')+'</ul></details>' : '')+
+      (history.length ? '<details style="margin-top:8px"><summary>最近进度</summary><ul class="linkops-preview-list">'+history.map(h => '<li>'+escapeHtml(String(h.at || '').replace('T',' ').slice(0,19))+' · '+escapeHtml(h.event || '-')+' · '+escapeHtml(h.by || '-')+'</li>').join('')+'</ul></details>' : '')+
+    '</div>'+
+  '</details>';
+}
+function linkOpsReplySuggestions(session, task){
+  const suggestions = [];
+  const command = linkOpsSessionCommand(session || {});
+  const intents = inferLinkOpsIntentFromText(command);
+  const targets = session?.targets && typeof session.targets === 'object' ? session.targets : {};
+  const stores = Array.isArray(targets.stores) ? targets.stores.filter(Boolean) : [];
+  const refs = Array.isArray(targets.productRefs) ? targets.productRefs.filter(Boolean) : [];
+  const refText = refs[0] || '这个货号';
+  const storeText = stores[0] || '目标店';
+  const add = (x) => { if (x && !suggestions.includes(x)) suggestions.push(x); };
+  if (!session) {
+    add('根据今天数据，找出最该处理的5个链接任务');
+    add('找出高曝光0单的链接，并按优先级排序');
+    add('列出本周最需要补覆盖的货号和店铺');
+  } else {
+    add('把上面的结论整理成可执行任务，并列出目标链接和风险');
+    add('只看 '+storeText+' 店，把数据重新核对一遍');
+    add('展开 '+refText+' 在16个店的覆盖、弱链和最佳参考链接');
+    if (intents.includes('retire_link')) add('下架前先确认是否有替代承接链接和误下风险');
+    if (intents.includes('update_images')) add('把换图需求拆成素材清单和主图文案要求');
+    if (intents.includes('update_title')) add('给出3个标题方向，并说明各自适合什么流量');
+    if (intents.includes('copy_product_draft')) add('列出复制上品需要从源 SKC 继承的参数、证书和图片');
+    if (intents.includes('campaign_signup') || intents.includes('flash_discount')) add('按成本和利润底线算一版活动/限时折扣方案');
+    if (task && !task.virtual) add('根据这个任务当前进度，告诉我下一步该做什么');
+  }
+  add('换一个更保守的方案，优先避免误操作');
+  return suggestions.slice(0, 6);
+}
+function renderLinkOpsReplySuggestions(session, task){
+  const items = linkOpsReplySuggestions(session, task);
+  if (!items.length) return '';
+  return '<div class="ops-reply-suggestions">'+items.map(x => '<button class="ops-reply-chip" type="button" data-linkops-reply-suggestion="'+escapeHtml(x)+'">'+escapeHtml(x)+'</button>').join('')+'</div>';
 }
 function renderLinkOpsTaskCard(t, options = {}){
   const intents = Array.isArray(t?.intents) ? t.intents : [];
@@ -9233,17 +9440,17 @@ function renderLinkOpsTaskCard(t, options = {}){
 }
 function renderActiveLinkOpsWorkbench(active){
   if (!active) {
-    return '<aside class="ops-task-panel"><div class="ops-workbench-head"><div><h3>任务工作台</h3><div class="sub">一个会话对应一个任务界面。</div></div></div><div class="empty">先发送一句运营目标，右侧会实时生成任务草案。</div></aside>';
+    return '<aside class="ops-task-panel"><div class="ops-workbench-head"><div><h3>任务进度</h3><div class="sub">这里只显示当前会话的任务进展，不放操作按钮。</div></div></div><div class="empty">先发送一句运营目标，右侧会实时生成任务草案。</div></aside>';
   }
-  const realTask = linkOpsTaskForSession(active);
-  const task = realTask || buildDraftTaskFromSession(active);
+  const realTasks = linkOpsTasksForSession(active);
+  const task = realTasks[0] || buildDraftTaskFromSession(active);
+  const tasks = realTasks.length ? realTasks : [task];
   const messages = linkOpsSessionMessages(active);
-  const statusText = realTask ? '已固化，可执行预检' : '实时草案，继续聊会自动调整';
+  const statusText = realTasks.length ? '已进入任务池' : '实时草案';
   return '<aside class="ops-task-panel">'+
-    '<div class="ops-workbench-head"><div><h3>任务工作台</h3><div class="sub">会话就是任务：边聊边定目标、补材料、做预检。</div></div><span class="tag '+(realTask ? 'good' : 'mid')+'">'+escapeHtml(statusText)+'</span></div>'+
-    '<div class="ops-now"><h4>'+escapeHtml(active.title || '运营任务')+'</h4><p>本会话 '+num(messages.length)+' 条消息；'+(realTask ? '已绑定任务 '+escapeHtml(realTask.id || '') : '尚未固化，明确命令会自动生成待确认任务。')+'</p></div>'+
-    renderLinkOpsTaskCard(task, {open:true, active:true})+
-    '<div class="ops-workbench-archive">'+renderOtherLinkOpsTasks(active)+'</div>'+
+    '<div class="ops-workbench-head"><div><h3>任务进度</h3><div class="sub">一个会话可以沉淀多个任务；默认折叠详情，只看进度。</div></div><span class="tag '+(realTasks.length ? 'good' : 'mid')+'">'+escapeHtml(statusText)+'</span></div>'+
+    '<div class="ops-now"><h4>'+escapeHtml(linkOpsDisplayTitle(active))+'</h4><p>本会话 '+num(messages.length)+' 条消息；当前 '+num(tasks.length)+' 个任务/草案。右侧不做执行操作，执行前在会话里确认范围和材料。</p></div>'+
+    '<div class="ops-task-stack">'+tasks.map((x, idx) => renderLinkOpsProgressCard(x, {open:idx === 0 && !realTasks.length})).join('')+'</div>'+
   '</aside>';
 }
 function renderOtherLinkOpsTasks(active){
@@ -9262,23 +9469,27 @@ function renderLinkOps(){
   const sessions = linkOpsChatStore.sessions || [];
   const active = activeLinkOpsSession();
   const messages = Array.isArray(active?.messages) ? active.messages : [];
+  const activeTasks = active ? linkOpsTasksForSession(active) : [];
+  const activeTask = activeTasks[0] || (active ? buildDraftTaskFromSession(active) : null);
   center.innerHTML =
     '<div class="ops-workspace">'+
       '<aside class="ops-rail">'+
-        '<div class="card-h" style="padding:0 0 10px"><div><h3>运营会话</h3><div class="sub">每个会话就是一个任务工作台</div></div><button class="btn" id="newOpsChat" type="button">新会话</button></div>'+
+        '<div class="ops-rail-top"><div><h3>运营会话</h3><div class="sub">每个会话都是一个独立任务界面</div></div><button class="btn" id="newOpsChat" type="button">新会话</button></div>'+
         (linkOpsChatStore.error ? '<div class="next warn">会话不可用：'+escapeHtml(linkOpsChatStore.error)+'</div>' : '')+
         (sessions.length ? sessions.map(s => {
           const count = Array.isArray(s.messages) ? s.messages.length : 0;
-          const bound = linkOpsTaskForSession(s);
+          const bound = linkOpsTasksForSession(s);
           const activeCls = String(s.id || '') === String(linkOpsChatStore.activeId || '') ? ' active' : '';
-          return '<div class="ops-session'+activeCls+'" data-linkops-session-id="'+escapeHtml(s.id || '')+'"><div class="ops-session-head"><div><b>'+escapeHtml(s.title || '未命名会话')+'</b><small>'+escapeHtml(s.status === 'sending' ? '发送中' : linkOpsStatusLabel(s.status || 'chatting'))+' · '+num(count)+' 条消息 · '+(bound ? '已绑定任务' : '实时草案')+' · '+escapeHtml(String(s.updatedAt || s.createdAt || '').replace('T',' ').slice(0,16))+'</small></div><button class="ops-session-delete" type="button" data-linkops-session-delete="'+escapeHtml(s.id || '')+'">删除</button></div></div>';
-        }).join('') : '<div class="empty">还没有会话。点右侧推荐指令，或直接输入你的运营问题。</div>')+
-        '<div style="margin-top:14px"><div class="section-block-label">基于当前数据的推荐指令</div>'+
+          return '<div class="ops-session'+activeCls+'" data-linkops-session-id="'+escapeHtml(s.id || '')+'"><div class="ops-session-head"><div><b>'+escapeHtml(linkOpsDisplayTitle(s))+'</b><small>'+escapeHtml(s.status === 'sending' ? '发送中' : linkOpsStatusLabel(s.status || 'chatting'))+' · '+num(count)+' 条消息 · '+(bound.length ? num(bound.length)+'个任务' : '实时草案')+' · '+escapeHtml(String(s.updatedAt || s.createdAt || '').replace('T',' ').slice(0,16))+'</small></div><button class="ops-session-delete" type="button" data-linkops-session-delete="'+escapeHtml(s.id || '')+'">删除</button></div></div>';
+        }).join('') : '<div class="empty">还没有会话。点下方推荐指令，或直接输入你的运营问题。</div>')+
+        '<div class="ops-reco-head"><div class="section-block-label">基于当前数据的推荐指令</div><button class="ops-reco-refresh" type="button" id="refreshLinkOpsRecommendations">刷新推荐</button></div>'+
+        '<div>'+
           prompts.map(p => '<div class="ops-reco" data-linkops-reco="'+escapeHtml(p.text)+'"><b>'+escapeHtml(p.title)+'</b><p>'+escapeHtml(p.reason)+'</p></div>').join('')+
         '</div>'+
       '</aside>'+
       '<main class="ops-chat">'+
-        '<div class="card-h" style="padding:0 0 12px"><div><h3>'+(active ? escapeHtml(active.title || '运营会话') : '新运营会话')+'</h3><div class="sub">像和 Codex 聊一样：边聊边在右侧生成任务、数据依据和执行步骤。</div></div></div>'+
+        '<div class="card-h ops-chat-title" style="padding:0 0 12px"><div><h3>'+(active ? escapeHtml(linkOpsDisplayTitle(active)) : '新运营会话')+'</h3><div class="sub">像和 Codex 聊一样：边聊边查数、沉淀任务、调整执行方案。</div></div></div>'+
+        '<div class="ops-chat-actions"><button class="btn" id="convertChatToTask" type="button">把当前会话确认成任务</button><button class="btn" id="refreshLinkOpsTasks" type="button">刷新任务记录</button><span class="muted">'+(activeTasks.length ? '已关联 '+num(activeTasks.length)+' 个任务' : '尚未固化任务')+'</span></div>'+
         '<div class="chat-stream">'+
           (messages.length ? messages.map(m => '<div class="chat-msg '+(m.role === 'assistant' ? 'assistant' : 'user')+'">'+(m.role === 'assistant' ? renderAgentAnswerCards(m.content) : '<p>'+escapeHtml(m.content || '')+'</p>')+'<small class="muted">'+escapeHtml(String(m.at || '').replace('T',' ').slice(0,16))+'</small></div>').join('') : '<div class="empty">这是一个独立会话。你可以问“这个品哪些店该补链接”“这条链接该换图还是下架”“怎么报限时折扣”。</div>')+
           (opsAgentStore.busy ? '<div class="chat-msg assistant"><div class="empty">智能体正在分析当前 BI 数据...</div></div>' : '')+
@@ -9286,6 +9497,7 @@ function renderLinkOps(){
         '</div>'+
         '<div class="chat-compose">'+
           '<label class="section-block-label" for="linkOpsChatInput">继续对话</label>'+
+          renderLinkOpsReplySuggestions(active, activeTask)+
           '<textarea id="linkOpsChatInput" placeholder="例如：把建议拆成可执行步骤；先只看QY/TZ/YJ；不要下架，优先换图；再给我一个更保守的方案。"></textarea>'+
           '<div class="command-actions"><button class="btn primary" id="sendLinkOpsChat" type="button">发送给智能体</button><button class="btn" id="clearLinkOpsChat" type="button">清空输入</button></div>'+
         '</div>'+
@@ -9299,6 +9511,14 @@ function renderLinkOps(){
   }));
   document.querySelectorAll('[data-linkops-session-id]').forEach(el => el.addEventListener('click', () => { linkOpsChatStore.activeId = el.dataset.linkopsSessionId || ''; renderAll(); }));
   document.querySelectorAll('[data-linkops-reco]').forEach(el => el.addEventListener('click', () => newLinkOpsChatFromPrompt(el.dataset.linkopsReco || '')));
+  document.getElementById('refreshLinkOpsRecommendations')?.addEventListener('click', () => { linkOpsRecommendationOffset += 5; renderAll(); });
+  document.querySelectorAll('[data-linkops-reply-suggestion]').forEach(btn => btn.addEventListener('click', () => {
+    const input = document.getElementById('linkOpsChatInput');
+    if (input) {
+      input.value = btn.dataset.linkopsReplySuggestion || '';
+      input.focus();
+    }
+  }));
   document.getElementById('newOpsChat')?.addEventListener('click', () => newLinkOpsChatFromPrompt(''));
   document.getElementById('sendLinkOpsChat')?.addEventListener('click', sendLinkOpsChatMessage);
   document.getElementById('clearLinkOpsChat')?.addEventListener('click', () => { const input = document.getElementById('linkOpsChatInput'); if (input) input.value = ''; });

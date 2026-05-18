@@ -354,6 +354,9 @@ function linkOpsIntentLabel(intent) {
 
 function linkOpsStatusLabel(status) {
   return ({
+    chatting: '会话中',
+    sending: '发送中',
+    task_created: '已建任务',
     draft: '草案',
     confirmed: '待开始',
     in_progress: '执行中',
@@ -424,6 +427,29 @@ function summarizeLinkOpsTargets(targets = {}) {
   if (t.stores.length) parts.push(`店铺=${t.stores.join(',')}`);
   if (t.productRefs.length) parts.push(`货号/SKC=${t.productRefs.join(',')}`);
   return parts.join('；') || '暂未识别到明确店铺或货号/SKC';
+}
+
+function compactLinkOpsTitleText(text, max = 36) {
+  return String(text || '')
+    .replace(/\s+/g, ' ')
+    .replace(/[。；;，,]+$/g, '')
+    .trim()
+    .slice(0, max);
+}
+
+function buildLinkOpsSessionTitle(message, targets = {}) {
+  const text = String(message || '').trim();
+  const t = normalizeLinkOpsTargetSet(targets);
+  const intents = inferLinkOpsIntent(text).filter(x => x !== 'manual_review');
+  const action = intents.length ? linkOpsIntentLabel(intents[0]) : '数据复盘';
+  if (t.productRefs.length || t.stores.length) {
+    const target = [
+      t.productRefs.slice(0, 2).join('、'),
+      t.stores.length ? `${t.stores.slice(0, 3).join('、')}店` : '',
+    ].filter(Boolean).join(' · ');
+    return compactLinkOpsTitleText(`${target} · ${action}`, 48);
+  }
+  return compactLinkOpsTitleText(text, 40) || '新的运营会话';
 }
 
 function isLinkOpsActionCommand(command) {
@@ -551,15 +577,17 @@ function buildChatSessionFromMessage(body, actor, req) {
   if (message.length > 4000) throw new Error('Message too long');
   const now = new Date().toISOString();
   const id = `los_${now.replace(/[-:.TZ]/g, '').slice(0, 14)}_${crypto.randomBytes(4).toString('hex')}`;
+  const targets = mergeLinkOpsTargets(
+    inferLinkOpsTargets(message),
+    body.targets && typeof body.targets === 'object' ? body.targets : {}
+  );
   return {
     id,
     version: 1,
     status: 'chatting',
-    title: message.slice(0, 80),
-    targets: mergeLinkOpsTargets(
-      inferLinkOpsTargets(message),
-      body.targets && typeof body.targets === 'object' ? body.targets : {}
-    ),
+    title: buildLinkOpsSessionTitle(message, targets),
+    autoTitle: true,
+    targets,
     requestedBy: actorLabel(actor, req),
     requestedByUser: actorUser(actor, req),
     requestMeta: requestMeta(req),
@@ -581,15 +609,18 @@ function appendChatMessage(session, body, actor, req) {
   const now = new Date().toISOString();
   const messages = Array.isArray(session.messages) ? session.messages.slice(-80) : [];
   messages.push({id: `msg_${crypto.randomBytes(5).toString('hex')}`, role: 'user', content, at: now});
+  const targets = mergeLinkOpsTargets(
+    session.targets && typeof session.targets === 'object' ? session.targets : {},
+    inferLinkOpsTargets(content)
+  );
+  const titleText = messages.filter(m => m.role === 'user').map(m => m.content).slice(0, 2).join('\n');
   return {
     ...session,
     status: 'chatting',
     updatedAt: now,
-    title: session.title || content.slice(0, 80),
-    targets: mergeLinkOpsTargets(
-      session.targets && typeof session.targets === 'object' ? session.targets : {},
-      inferLinkOpsTargets(content)
-    ),
+    title: session.autoTitle === false ? session.title : buildLinkOpsSessionTitle(titleText || content, targets),
+    autoTitle: session.autoTitle === false ? false : true,
+    targets,
     messages,
     updatedBy: actorLabel(actor, req),
   };
@@ -1734,6 +1765,7 @@ async function main() {
           const session = {
             ...current.sessions[idx],
             title: typeof body.title === 'string' ? body.title.trim().slice(0, 100) : current.sessions[idx].title,
+            autoTitle: typeof body.title === 'string' ? false : current.sessions[idx].autoTitle,
             status: typeof body.status === 'string' ? body.status.trim().slice(0, 40) : current.sessions[idx].status,
             updatedAt: new Date().toISOString(),
           };
