@@ -13,7 +13,7 @@ import fs from 'node:fs/promises';
 import fssync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {spawn} from 'node:child_process';
+import {spawn, spawnSync} from 'node:child_process';
 import crypto from 'node:crypto';
 import net from 'node:net';
 
@@ -34,6 +34,15 @@ const CHROME_CANDIDATES = [
   '/usr/bin/chromium-browser',
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+];
+const BUSY_SYNC_SERVICES = [
+  'shein-bi-cloud-today.service',
+  'shein-bi-cloud-yesterday.service',
+  'shein-bi-cloud-link-business.service',
+  'shein-bi-cloud-session-manager.service',
+  'shein-bi-cloud-et-forwarder.service',
+  'shein-bi-cloud-rtv-verify.service',
+  'shein-bi-cloud-openapi-hl.service',
 ];
 
 function parseArgs(argv) {
@@ -289,6 +298,65 @@ async function stopProcesses(session) {
   return results;
 }
 
+function listProcessLines() {
+  if (process.platform === 'win32') return [];
+  const ps = spawnSync('ps', ['-eo', 'pid=,args='], {encoding: 'utf8'});
+  return String(ps.stdout || '')
+    .split(/\n/)
+    .map(line => line.trim())
+    .filter(Boolean);
+}
+
+function pidFromProcessLine(line) {
+  const m = /^(\d+)\s+/.exec(String(line || ''));
+  return m ? Number(m[1]) : 0;
+}
+
+function isAnySyncServiceActive() {
+  if (process.platform === 'win32') return false;
+  for (const service of BUSY_SYNC_SERVICES) {
+    const r = spawnSync('systemctl', ['is-active', '--quiet', service], {stdio: 'ignore'});
+    if (r.status === 0) return true;
+  }
+  return false;
+}
+
+function isManualRuntimeLine(line) {
+  return (
+    /\bXvfb\s+:1[2-5][0-9]\b/.test(line) ||
+    /\bx11vnc\b.*\s-display\s+:1[2-5][0-9]\b/.test(line) ||
+    /\bwebsockify\b.*127\.0\.0\.1:16(?:08[0-9]|09[0-9]|1[01][0-9])\b/.test(line)
+  );
+}
+
+async function cleanupManualLoginRemnantsForStore(store, state) {
+  if (isAnySyncServiceActive()) return {skipped: true, reason: 'sync-service-active', killed: []};
+  const killed = [];
+  for (const session of state.sessions || []) {
+    const status = String(session.status || '');
+    if (session.storeKey !== store.storeKey) continue;
+    if (['active', 'starting'].includes(status)) continue;
+    const stopResults = await stopProcesses(session);
+    for (const r of stopResults) {
+      if (r.pid && !r.skipped) killed.push({source: 'state', key: r.key, pid: r.pid, ok: r.ok});
+    }
+  }
+  const prof = profileDir(store);
+  const portNeedle = `--remote-debugging-port=${store.port}`;
+  const pids = new Set();
+  for (const line of listProcessLines()) {
+    const pid = pidFromProcessLine(line);
+    if (!pid || pid === process.pid) continue;
+    if (line.includes(prof) && line.includes(portNeedle)) pids.add(pid);
+    else if (isManualRuntimeLine(line)) pids.add(pid);
+  }
+  for (const pid of pids) {
+    const result = await killPid(pid);
+    killed.push({source: 'orphan-process', pid, ok: result.ok});
+  }
+  return {skipped: false, killed};
+}
+
 function run(command, args, options = {}) {
   return new Promise(resolve => {
     const child = spawn(command, args, {
@@ -365,7 +433,15 @@ async function cmdStart(args) {
     throw new Error(`Another manual login session is active: ${activeAny.storeKey}/${activeAny.id}. Close it first.`);
   }
   if (await isPortOpen(Number(store.port))) {
-    throw new Error(`${store.storeKey} CDP port ${store.port} is already open; wait for sync task to finish or close that browser first.`);
+    const cleanup = await cleanupManualLoginRemnantsForStore(store, state);
+    if (cleanup.killed?.length) {
+      state.updatedAt = new Date().toISOString();
+      await writeJson(args.stateFile, state);
+    }
+    if (await isPortOpen(Number(store.port))) {
+      const suffix = cleanup.skipped ? ` Active sync service detected (${cleanup.reason});` : '';
+      throw new Error(`${store.storeKey} CDP port ${store.port} is already open.${suffix} wait for sync task to finish or close that browser first.`);
+    }
   }
 
   await fs.mkdir(args.logDir, {recursive: true});
