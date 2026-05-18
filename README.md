@@ -1,9 +1,10 @@
 # SHEIN 销售统计与 BI 经营系统
 
-## 2026-05-17 当前权威状态
+## 2026-05-18 当前权威状态
 
 - 飞书多维表格 / 原生看板写入已临时暂停；云端 BI 系统作为当前主要经营入口继续运行。飞书日报、异常通知 watchdog 和只读问数机器人均已迁到云端独立飞书机器人链路；日报真实发送已验证，问数机器人已升级为云端 Codex CLI 只读网关，不再绑定本机 Codex 会话。
 - 本地 BI 已封存，云端 BI 是正式入口：`https://shein-bi.faceair.me/`（旧 IP 入口 `http://43.165.167.135/` 仅作兜底）。公网入口已启用 Basic Auth；账号密码只在运行环境交付，不写入仓库或文档。详见 `docs/cloud-bi-operations.md`。
+- 云端 BI 已提供临时人工登录维护入口 `/cloud-login-maintenance`：当 SHEIN / SBN 子系统登录态失效、自动恢复失败或遇到验证码/滑块时，可在云服务器短时打开该店独立 profile 的 noVNC 浏览器窗口；完成后必须点“我已完成并关闭”，脚本会导出/探测登录态并关闭临时进程。该入口的状态文件、日志和短期 token 都是服务器私有运行态，不进 GitHub。
 - 本地 `8787` 服务已停止，`SHEIN-*` Windows 计划任务已禁用；除非明确回滚，不要重新启动本地 BI 或本地抓数任务。
 - 销售同步完成后会后置刷新 BI；如果单店失败但目标日期 16 店销售源文件已齐，BI 仍会刷新，并通过飞书消息提醒失败店铺。
 - SHEIN 销售生产入口已改为 Node WebAPI 直连优先：`config/stores.json` 的 16 店 `salesTransport=auto`，`run_sales_sync_job.mjs` 会先用 `state/shein_webapi_sessions/<店铺>.local.json` 的 Cookie session 直调 `/gsp/orderPlus/listOrder` 和 `/gsp/orderPlus/listOrderItem`；成功时不启动浏览器，失败时才刷新 session / 回退 Chrome。`2026-05-08` 16 店 WebAPI 抓取已与现有数据库对账一致。
@@ -26,9 +27,9 @@
 
 当前原则：**SHEIN 抓数、BI 刷新、ET 同步、飞书日报、异常通知和只读问数机器人在云端继续运行；飞书多维表格 / 看板写入先暂停，待用户确认再恢复。**
 
-## 当前运行状态（2026-05-17 云端切换后）
+## 当前运行状态（2026-05-18 云端切换后）
 
-以下数据截面是最近一次写入文档的已验证快照；实时页面以 `outputs/bi-portal/data.json` 和 BI 门户系统状态页为准。
+以下为当前入口、调度和边界说明；实时数据以 `outputs/bi-portal/data.json`、云端日志和 BI 门户系统状态页为准。
 
 - 店铺范围：16 家店，`DSY` 组 10 家，`LGM` 组 6 家。
 - 当前店铺代码：`CX DL DX FY HL JY LQ MZ NM QH QY TS TZ XL YJ ZL`（新增 `TZ / GS5636781`）。
@@ -37,17 +38,14 @@
   - 当月主看板：`SHEIN经营看板 v3-主看板`（`blkFn3qHrwdsrJyX`）
   - 上月看板：`SHEIN经营看板 v3-上月`（`blkWeyZhphgRZYim`）
 - 当前 BI 入口：
-  - 云端 BI：`http://43.165.167.135/`，Nginx Basic Auth 保护。
+  - 云端 BI：`https://shein-bi.faceair.me/`，Basic Auth 保护；旧 IP 入口 `http://43.165.167.135/` 仅作兜底。
+  - 云端登录维护中心：`https://shein-bi.faceair.me/cloud-login-maintenance`，用于临时打开指定店铺云端浏览器登录窗口。
   - 云端代码目录：`/opt/shein-bi/app`
   - 本地 BI 门户文件快照：`outputs/bi-portal/index.html` / `outputs/bi-portal/data.json`
   - V2.1 独立设计预览仍是平行项目，由 `scripts/generate_bi_portal_v2.mjs` 生成；用户确认前不得替换 V1 或改生产调度。
   - 本机 `http://127.0.0.1:8787/` 和局域网 `http://DUSHENGYI-PC2:8787/` 已封存，不再作为正式入口。
   - Metabase 当前部署在云端 Docker 内部，由云端 Nginx/服务配置受控访问，不在 README 写公开裸地址。
-- 当前 BI 数据截面：
-  - 销售 / 订单：`2026-05-09`
-  - 售后 / 库存 / 财务：业务日 `2026-05-08`，源抓取时间 `2026-05-09 05:45:46`
-  - 链接表现：链接日 `2026-05-08`，源抓取时间 `2026-05-09 05:36:32`
-  - ET 货代仓：最新写入文档批次 `et-daily-2026-05-09-2026-05-09T03-31-50-575Z`；实时以 BI 门户系统状态页和 ET 入仓日志为准。
+- 当前 BI 数据截面不再手工写死在 README；实时以 BI 门户系统状态页、`outputs/bi-portal/data.json`、云端 systemd 日志和数据库入仓时间为准。仓库中的 `outputs/bi-portal/` 只是灾备快照，服务器拉取/重置代码后必须重新跑云端 BI 刷新。
 - 定时任务：
   - 云端 `shein-bi-cloud-today.timer`：`00:10/02:10/.../22:10` 每两小时刷新当天销售、入仓并生成 BI Portal。
   - 云端 `shein-bi-cloud-yesterday.timer`：每天 `00:10` 刷新前一天最终销售，并复核前两天稳定日。
@@ -56,6 +54,7 @@
   - 云端 `shein-bi-cloud-daily-lark-report.timer`：每天 `08:35` 发送日报，`10:35/12:35` 补偿重试；需服务器本地飞书配置和授权后启用。
   - 云端 `shein-bi-cloud-rtv-verify.timer`：每天 `03:20` 跑完整 RTV 换单复核 WebAPI 版，不阻塞滚动销售刷新。
   - 云端 `shein-bi-cloud-link-business.timer`：每天 `05:30` 顺序启动云端 headless Chrome 抓取前一完整日链接/业务域，入仓、体检并刷新 BI；单店失败会重启浏览器重试。
+  - 云端 `shein-bi-cloud-session-manager.timer`：每天 `03:20` 顺序巡检/恢复 16 店 WebAPI + SBN 登录态，并检查 profile 体积。
   - 云端 `shein-bi-cloud-openapi-hl.timer`：每天 `06:20` 跑 HL OpenAPI 并行对账；已可在云端成功抓取、入仓和生成 OpenAPI 对账。
   - 云端 `shein-bi-cloud-watchdog.timer`：每小时检查云端服务、timer 和 BI 数据新鲜度；销售/页面按 4.5 小时阈值，链接/业务域按 48 小时日更阈值。
   - 云端 `shein-bi-lark-sales-qa.service`：常驻只读飞书问数机器人，通过 `/home/sheinops/.codex` 的 Codex CLI 配置执行受控只读问答，只读取 BI Portal 压缩上下文，不写数据库、飞书 Base 或 SHEIN 后台。
@@ -67,11 +66,11 @@
   - `SHEIN-Sales-ETForwarder-0420`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-BI-Daily-Pipeline-0700` 等是本地历史任务，已禁用，保留为回滚/迁移参考。
   - `2026-05-02 07:00` 的 `267014` 是已修复的历史失败记录，保留作排障证据。
 - 团队访问边界：
-  - 当前团队访问转为云端入口 `http://43.165.167.135/`，受 Basic Auth 保护。
+  - 当前团队访问转为云端入口 `https://shein-bi.faceair.me/`，旧 IP `http://43.165.167.135/` 仅作兜底，受 Basic Auth 保护。
   - 本地局域网协作入口已封存；`8787` 服务停止，本地计划任务禁用。
   - 原 Windows 防火墙规则需要管理员权限才能禁用；只要本地没有服务监听 `8787`，局域网不会再打开本地 BI。
   - 同事可标记动作状态、填写负责人和备注；短期仍沿用云端服务侧状态文件，长期应迁入 PostgreSQL，避免文件状态成为单点。
-  - 团队正式版还需要域名、HTTPS、动作状态入 PostgreSQL、异地备份和更正式的账号权限。
+  - 团队正式版已具备域名和 HTTPS；后续还需要动作状态入 PostgreSQL、异地备份和更正式的账号权限。
 - 后续维护原则：优先把可重复动作脚本化；Markdown 只保留长期规则、入口和关键坑，不再追加流水账，避免小任务频繁触发上下文压缩。
 
 ## 核心口径
@@ -117,6 +116,7 @@
 - `logs/`：计划任务和运行日志。
 - `profiles/`：工作区内的 Chrome 店铺 profile；16 店登录态保存在 `persistent-*-profile`，不要删除整个 profile。后续磁盘瘦身只清 `OptGuideOnDeviceModel` 等 Chrome 可重建缓存，详见 `docs/runtime-architecture.md`。  如需核验店铺是否错位，使用稳定日期后台重抓并对账数据库，不要只看页面文本。
 - `state/shein_webapi_sessions/`：WebAPI 直连复用的 Cookie session，本地敏感运行态，不进 GitHub；迁移时只能通过加密渠道或在新机器重新登录/刷新。
+- `/srv/shein-bi/runtime/cloud_manual_login_sessions.json` 与 `/srv/shein-bi/logs/cloud-manual-login/`：云端临时登录窗口运行态，只在服务器私有目录，不进 GitHub。
 - `outputs/cleanup/`：项目文件整理/清理清单，例如 `project-file-cleanup-2026-05-02.md`。
 
 ## 常用命令

@@ -1,10 +1,10 @@
 # SHEIN BI 系统运行说明
 
-> 当前权威状态：2026-05-15。本地 BI 已封存，云端 BI 是正式入口；云端专用运维清单见 `docs/cloud-bi-operations.md`。本文保留业务口径、本地回滚和历史 Windows 运维参考。
+> 当前权威状态：2026-05-18。本地 BI 已封存，云端 BI 是正式入口；云端专用运维清单见 `docs/cloud-bi-operations.md`。本文保留业务口径、本地回滚和历史 Windows 运维参考。
 
 ## 1. 当前系统定位
 
-- 飞书多维表格 / 原生看板写入已临时暂停；飞书日报已迁到云端独立飞书机器人并验证真实发送，异常通知后续再按云端链路补齐。
+- 飞书多维表格 / 原生看板写入已临时暂停；飞书日报、异常通知 watchdog 和只读问数机器人已迁到云端独立链路并验证。
 - BI 系统当前以云端为正式入口，负责 PostgreSQL 数据仓库、Metabase 和 BI 经营门户。
 - 当前不能直接停用或删除 Metabase：PostgreSQL 是数据底座，Metabase 是正式深度分析/自由钻取层，BI Portal 是日常经营入口；只有等自研门户完全覆盖深钻能力后，才能重新评估是否降级 Metabase。
 - 不从飞书反抓数据做 BI 源头；BI 源头来自 SHEIN 后台抓取后的私有源文件 / PostgreSQL。
@@ -14,7 +14,8 @@
 
 ## 2. 日常入口
 
-- 云端 BI 门户：[http://43.165.167.135/](http://43.165.167.135/)，已启用 Basic Auth；密码不得写入仓库或文档。
+- 云端 BI 门户：[https://shein-bi.faceair.me/](https://shein-bi.faceair.me/)，旧 IP 入口 [http://43.165.167.135/](http://43.165.167.135/) 仅作兜底；已启用 Basic Auth，密码不得写入仓库或文档。
+- 云端登录维护中心：[https://shein-bi.faceair.me/cloud-login-maintenance](https://shein-bi.faceair.me/cloud-login-maintenance)。当 SHEIN / SBN 子系统登录态失效或遇到验证码/滑块时，用它临时打开指定店铺的云端浏览器窗口；完成后必须点“我已完成并关闭”。
 - 本机 BI 门户和局域网协作入口已封存：`http://127.0.0.1:8787/`、`http://DUSHENGYI-PC2:8787/` 不再作为正式入口。
 - 本地门户文件：`outputs/bi-portal/index.html`
 - V1 是当前唯一正式生产门户；V2.1 是平行预览版，脚本 `scripts/generate_bi_portal_v2.mjs`，输出 `outputs/bi-portal/v2/index.html`。本地封存后不要为了预览主动重启本地服务；用户确认前不得替换 V1、不得改生产调度，日常运维仍以 V1 为准。
@@ -48,13 +49,14 @@
 | `00:10` | `shein-bi-cloud-yesterday.timer` | 刷新前一天最终销售，并复核前两天稳定日。 |
 | `02:30` | `shein-bi-db-backup.timer` | 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto`，默认保留 14 天。 |
 | `03:20` | `shein-bi-cloud-rtv-verify.timer` | 完整 RTV 换单复核 WebAPI 版，不阻塞滚动销售刷新。 |
+| `03:20` | `shein-bi-cloud-session-manager.timer` | 顺序巡检/恢复 16 店 WebAPI + SBN 登录态，并检查 profile 体积。 |
 | `04:20` | `shein-bi-cloud-et-forwarder.timer` | 同步 ET 货代仓、入仓并刷新 BI。 |
 | `05:30` | `shein-bi-cloud-link-business.timer` | 顺序抓取前一完整日链接/业务域，入仓、体检并刷新 BI。 |
 | `06:20` | `shein-bi-cloud-openapi-hl.timer` | HL OpenAPI 并行对账。 |
 | `08:35` | `shein-bi-cloud-daily-lark-report.timer` | 发送飞书日报；`10:35/12:35` 补偿重试。 |
 | 每小时 | `shein-bi-cloud-watchdog.timer` | 检查云端服务、timer 和数据新鲜度，异常时提醒。 |
 
-云端当前自动覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、飞书日报、完整 RTV 复核、链接/业务域日更、异常通知和 HL OpenAPI 双跑。
+云端当前自动覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、飞书日报、完整 RTV 复核、链接/业务域日更、异常通知、登录态巡检、只读问数机器人和 HL OpenAPI 双跑。
 
 ### 4.2 本地历史任务 / 回滚参考
 
@@ -87,9 +89,9 @@
 - 云端 `shein-bi-cloud-yesterday.timer` 刷新前一天最终版，并回核 D-2 稳定销售。
 - 云端 `shein-bi-cloud-today.timer` 每两小时刷新当天销售。
 - 滚动后置 BI 的验收重点是销售文件入仓和 BI Portal 更新时间；RTV 换单复核耗时不应作为“BI 没更新”的判断依据。
-- 如果某个店失败，但目标日期 16 店销售源文件已经齐，BI 仍应刷新；飞书异常提醒待云端化后恢复。
+- 如果某个店失败，但目标日期 16 店销售源文件已经齐，BI 仍应刷新；云端 watchdog / 异常通知负责提醒失败店铺和服务异常。
 - 业务域单店失败不应阻断销售入仓和门户刷新，应在 BI 体检/提醒里标注。
-- `send_daily_lark_report.mjs` 仍保留，但云端日报/异常通知调度待补；不要默认本地日报任务仍在生产运行。
+- `send_daily_lark_report.mjs` 仍保留；生产日报由云端 `shein-bi-cloud-daily-lark-report.timer` 调度，不要默认本地日报任务仍在生产运行。
 
 ## 6. 链接表现更新规则
 
@@ -215,13 +217,13 @@
 
 ## 10. 团队访问边界
 
-- 当前团队入口为云端 `http://43.165.167.135/`，通过 Basic Auth 限制访问。
+- 当前团队入口为云端 `https://shein-bi.faceair.me/`，旧 IP `http://43.165.167.135/` 仅作兜底，通过 Basic Auth 限制访问。
 - 本地局域网协作入口已封存；本地 `8787` 无监听服务，Windows 计划任务已禁用。
 - 原 Windows 防火墙规则 `SHEIN BI Portal LAN 8787 ReadOnly` 若仍显示启用，不代表本地 BI 已开放；关闭规则需要管理员权限。
 - 同事可标记动作状态、填写负责人和备注；共享状态写入 `state/bi_action_state.json`，每次写入会记录 `updatedBy` / `updatedByUser`，当前以访问 IP 留痕；审计日志追加到 `logs/bi_portal_action_audit.jsonl`。
 - 通过本机网页服务打开门户时，动作状态同样写入 `state/bi_action_state.json`。
 - 直接双击 HTML 打开时，动作状态只保存在当前浏览器。
-- 团队长期正式版还需要：域名与 HTTPS、多人编辑冲突控制增强、动作状态入 PostgreSQL、异地备份和更正式的账号权限。
+- 团队长期正式版已具备域名与 HTTPS；后续还需要多人编辑冲突控制增强、动作状态入 PostgreSQL、异地备份和更正式的账号权限。
 
 ## 11. 不要做的事
 
@@ -229,7 +231,7 @@
 - 不要因为 BI 开发中断飞书销售同步、链接同步、日报和正式看板刷新。
 - 不要删除 `267014` 历史失败记录。
 - 不要把密码、cookie、短信验证码写入文档、日志或聊天。
-- 不要重新开放本地公网或端口转发；长期团队访问走云端，并补域名、HTTPS 和备份。
+- 不要重新开放本地公网或端口转发；长期团队访问走云端，公网域名和 HTTPS 已配置，后续重点补异地备份和更正式的账号权限。
 - 不要删除整个 `profiles/persistent-*-profile`；如需瘦身，只清 Chrome 可重建缓存，尤其是 `OptGuideOnDeviceModel`。
 - 不要把缺头程运费的成本批次强行计入单位成本。
 - 不要把月仓储费摊到单独货号或单独订单。
@@ -237,8 +239,8 @@
 
 ## 12. 常用验证
 
-- 检查云端 BI 门户：打开 [http://43.165.167.135/#tab=system](http://43.165.167.135/#tab=system)。
-- 检查云端健康：未鉴权访问 `http://43.165.167.135/api/health` 应返回 `401`；带 Basic Auth 应返回 `200`。
+- 检查云端 BI 门户：打开 [https://shein-bi.faceair.me/#tab=system](https://shein-bi.faceair.me/#tab=system)。
+- 检查云端健康：未鉴权访问 `https://shein-bi.faceair.me/api/health` 应返回 `401`；带 Basic Auth 应返回 `200`。
 - 检查本地是否仍封存：`http://127.0.0.1:8787/api/health` 应无法连接；若能连上，说明本地 BI 被重新启动，需要确认是否为回滚。
 - 修改 BI 门户 UI 时，默认先后台验证：`node --check scripts/generate_bi_portal.mjs`、`$env:SHEIN_BI_PORTAL_TIMEOUT_MS='900000'; node scripts/generate_bi_portal.mjs`、静态检查 `outputs/bi-portal/index.html` / `data.json`。除非用户要求或必须排查浏览器交互问题，不主动打开前端。
 - 检查 HL OpenAPI 销售试点：`node scripts/fetch_shein_openapi_sales.mjs HL --start YYYY-MM-DD --end YYYY-MM-DD` 后运行 `node scripts/load_shein_openapi_sales_warehouse.mjs --store HL --start YYYY-MM-DD --end YYYY-MM-DD`，再在系统状态页查看 “SHEIN OpenAPI 试点对账”。

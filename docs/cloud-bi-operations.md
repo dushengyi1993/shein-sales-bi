@@ -4,10 +4,10 @@
 
 ## 1. 当前入口
 
-- 云端 BI：`http://43.165.167.135/`
+- 云端 BI：`https://shein-bi.faceair.me/`；旧 IP 入口 `http://43.165.167.135/` 仅作兜底。
 - 访问保护：Nginx Basic Auth 已启用；账号密码只在私下运行环境交付，不写入仓库、文档或日志。
 - 云服务器：腾讯云 Lighthouse 东京，Ubuntu 24.04 x86_64，代码目录 `/opt/shein-bi/app`。
-- 服务组成：Nginx 对外反代，BI Portal 监听服务器本机 `127.0.0.1:8787`，PostgreSQL + Metabase 由 Docker Compose 承载。
+- 服务组成：HAProxy/Caddy 负责公网 443 分流与 TLS，Nginx 在服务器本机 `127.0.0.1:8080` 保留 Basic Auth 并反代到 BI Portal `127.0.0.1:8787`；PostgreSQL + Metabase 由 Docker Compose 承载。
 - 域名入口：`https://shein-bi.faceair.me/`；服务器内部仍由 Nginx `127.0.0.1:8080` 转发到 BI Portal。
 - GitHub 仓库 `main` 是云端代码来源；云端有值得保存的脚本、配置模板、门户静态产物或自动运营能力时，先同步回 GitHub，再部署到服务器。
 - 注意：`outputs/bi-portal/index.html` / `data.json` 会作为可恢复静态快照纳入 GitHub；服务器执行 `git reset --hard origin/main` 或类似部署后，可能把实时 BI 页面覆盖成仓库快照。每次服务器拉取/重置代码后，都要立即跑一次 `scripts/cloud_bi_refresh.sh today intraday` 或对应 systemd service，确认页面生成时间和销售源时间回到当前。
@@ -90,6 +90,7 @@ ET、飞书日报、完整 RTV WebAPI 复核、链接/业务域日更、异常�
 - 操作流程：打开维护中心 -> 选店铺和页面 -> 打开云端登录窗口 -> 人工完成登录/验证码 -> 回维护中心点“我已完成并关闭”。完成动作会触发 `export_shein_browser_session.mjs --no-launch` 和 `bootstrap_shein_browser_session.mjs --no-launch` 验证，然后关闭 Chrome / x11vnc / websockify / Xvfb。
 - Nginx 配置必须支持 WebSocket upgrade；仓库模板为 `infra/nginx/shein-bi.conf`，包含 `proxy_set_header Upgrade` 和 `proxy_set_header Connection "upgrade"`。
 - 日志与状态：状态文件 `/srv/shein-bi/runtime/cloud_manual_login_sessions.json`；日志目录 `/srv/shein-bi/logs/cloud-manual-login`。这些都是服务器私有运行态，不进 GitHub。
+- 若开启时提示某店 `CDP port ... is already open`：先确认是否有生产同步 service 正在运行。`cloud_manual_login_session.mjs` 会在确认没有生产同步 service 活跃时自动清理已完成/已关闭临时窗口留下的孤儿 Chrome/VNC 进程；若生产同步正在运行，应等待同步结束，不要强杀。
 - 当前限制：一次只允许一个临时登录窗口；过期或完成后不能再进入窗口，需重新开启。登录维护入口仍依赖 BI Basic Auth，正式账号系统后再做更细权限。
 
 ## 5. 运行数据与敏感信息边界

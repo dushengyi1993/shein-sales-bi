@@ -1,12 +1,13 @@
 # 运行环境架构
 
-## 2026-05-15 当前运行环境摘要
+## 2026-05-18 当前运行环境摘要
 
 - SHEIN 销售抓数、BI 后置刷新和数据库备份已切到云端 systemd；本地 BI 和 `SHEIN-*` Windows 计划任务已封存禁用。
 - 飞书多维表格 / 原生看板写入已临时暂停；飞书日报、异常通知 watchdog 和只读问数机器人已云端化并验证。
 - 销售抓取主入口已改为 Node WebAPI 直连优先；16 店 `salesTransport=auto`，成功时不启动浏览器，浏览器只保留为 Cookie/session 刷新、登录续期和回退工具。
 - 暂停开关为 `state/feishu-base-sync-paused.flag`；存在该文件时跳过飞书事实表、产品表、月表、宽表和看板写入，删除后可恢复。
-- 云端当前自动覆盖销售 WebAPI、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、飞书日报、链接/业务域日更、完整 RTV 复核、异常通知和 HL OpenAPI 双跑。
+- 云端当前自动覆盖销售 WebAPI、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、飞书日报、链接/业务域日更、完整 RTV 复核、异常通知、登录态巡检、只读问数机器人和 HL OpenAPI 双跑。
+- SHEIN 临时人工登录维护入口已云端化：BI `/cloud-login-maintenance` 通过 noVNC 打开指定店铺独立 profile 的短时 Chrome 窗口，完成后导出/探测 session 并关闭临时进程。
 - HL 正式 profile 为 `profiles/persistent-shein-main-profile`，CDP 端口 `9360`；旧 `profiles/persistent-hl-profile` 已删除。
 - `2026-05-09 05:30` 链接/业务域任务、`2026-05-09 07:00` BI 每日流水线和 `SHEIN-Sales-ETForwarder-0420` 是本地历史验证记录；自 `2026-05-15` 起不再作为生产调度。
 - `2026-05-11` WebAPI 全店销售抓取资源实测：16 店 `2026-05-08` 直连抓取耗时 `15.09s`，项目 Node 峰值约 `60.44MB` working set / `55.82MB` private，不额外启动店铺浏览器；证据见 `outputs/cloud-migration/webapi-allstores-resource-20260511-201715.json`。
@@ -29,6 +30,7 @@
 - `shein-bi-cloud-today.timer`：`00:10/02:10/.../22:10` 每两小时刷新当天销售、入仓并生成 BI Portal。
 - `shein-bi-cloud-yesterday.timer`：每天 `00:10` 刷新前一天最终销售，并复核前两天稳定日。
 - `shein-bi-db-backup.timer`：每天 `02:30` 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto`。
+- `shein-bi-cloud-session-manager.timer`：每天 `03:20` 顺序巡检/恢复 16 店 WebAPI + SBN 登录态。
 - 本地 `SHEIN-*` Windows 计划任务已全部禁用，只保留为回滚和 Linux 迁移参考。
 
 本地回滚时的 Windows 安装/更新入口：
@@ -244,4 +246,12 @@
 - 服务器 443 端口同时承担 SSH 运维入口和 HTTPS 入口：`HAProxy` 在 443 做协议分流，SSH 流量转到本机 sshd `127.0.0.1:22`，HTTPS 流量转到 Caddy `127.0.0.1:10443`。
 - Caddy 负责 `shein-bi.faceair.me` 的自动 TLS 证书和 HTTP -> HTTPS 跳转；nginx 退到本机 `127.0.0.1:8080`，继续保留原 Basic Auth，并反代到 BI Portal `127.0.0.1:8787`。
 - 对应配置模板：`infra/haproxy/haproxy-ssh-https.cfg`、`infra/caddy/Caddyfile.shein-bi`。不要直接让 Node 服务暴露公网。
+
+## 2026-05-18 云端临时人工登录入口
+
+- 入口：`https://shein-bi.faceair.me/cloud-login-maintenance`，也可从 BI “系统 / 登录维护中心”进入。
+- 实现链路：`scripts/cloud_manual_login_session.mjs` 启动 `Xvfb + Chrome + x11vnc + websockify/noVNC`，`scripts/serve_bi_portal.mjs` 提供 `/api/cloud-login/sessions`、`/cloud-login/session/:id` 和 noVNC WebSocket 代理。
+- 安全边界：外网仍只经过现有 Basic Auth；会话 token 只短时存在于服务器私有状态文件，完成/关闭后会清空 token 和入口 URL；不保存密码、cookie、localStorage 或请求头值到 GitHub、文档或聊天。
+- 资源边界：一次只允许一个临时登录窗口。若某店 CDP 端口被已完成/已关闭的临时窗口残留占用，脚本会在确认没有生产同步 service 运行时清理孤儿 Chrome/VNC 进程；若生产同步正在运行，则拒绝开启并提示等待。
+- 验证边界：创建会话后应能获得 noVNC `101 Switching Protocols`；点击“我已完成并关闭”后应完成 `export_shein_browser_session.mjs --no-launch` 与 `bootstrap_shein_browser_session.mjs --no-launch`，且不残留 Chrome/Xvfb/x11vnc/websockify 进程。
 
