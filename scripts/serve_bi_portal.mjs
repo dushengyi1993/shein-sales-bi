@@ -81,6 +81,15 @@ const LINK_OPS_MAX_UPLOAD_FILE_BYTES = 20 * 1024 * 1024;
 const LINK_OPS_MAX_UPLOAD_TOTAL_BYTES = 120 * 1024 * 1024;
 const SHEIN_STORE_KEYS = new Set(['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'DSY', 'LGM']);
 const MANUAL_LOGIN_STORE_KEYS = new Set(['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ']);
+const LINK_OPS_STORE_CAPABILITIES = {
+  HL: {
+    openapiAuthorized: true,
+    verifiedRead: true,
+    salesReconciliation: true,
+    productPublishAdapter: false,
+    note: 'HL 已完成 SHEIN OpenAPI 真实授权，并已验证商品/订单/库存等只读接口和销售对账；商品发布/提交审核写适配器尚未实现验证。',
+  },
+};
 const LINK_OPS_ALLOWED_UPLOAD_MIME = new Set([
   'image/jpeg',
   'image/png',
@@ -429,6 +438,48 @@ function summarizeLinkOpsTargets(targets = {}) {
   return parts.join('；') || '暂未识别到明确店铺或货号/SKC';
 }
 
+function normalizeConcreteStoreKeys(stores = []) {
+  return [...new Set((Array.isArray(stores) ? stores : [])
+    .map(x => String(x || '').trim().toUpperCase())
+    .filter(x => x && SHEIN_STORE_KEYS.has(x) && !['DSY', 'LGM'].includes(x)))];
+}
+
+function buildLinkOpsCapabilitySummary(targets = {}) {
+  const t = normalizeLinkOpsTargetSet(targets);
+  const stores = normalizeConcreteStoreKeys(t.stores);
+  if (!stores.length) {
+    return [
+      '尚未锁定具体店铺；写操作需先明确目标店铺，再判断是否有官方 OpenAPI 授权或云端 WebAPI/headless 执行路径。',
+      '回答时不能把“未锁定店铺”说成“没有权限”，应提示先补齐目标店铺。',
+    ].join('\n');
+  }
+  return stores.map(store => {
+    const cap = LINK_OPS_STORE_CAPABILITIES[store];
+    if (cap?.openapiAuthorized) {
+      return `${store}: OpenAPI 已授权；只读/销售对账已验证；商品发布/提交审核写适配器=${cap.productPublishAdapter ? '已实现' : '待实现验证'}。`;
+    }
+    return `${store}: 暂未登记官方 OpenAPI 授权；写操作需先走云端 WebAPI/headless 受控执行，或完成该店 OpenAPI 接入。`;
+  }).join('\n');
+}
+
+function linkOpsCapabilityNotes(intents = [], targets = {}) {
+  const writeIntents = ['copy_product_draft', 'update_title', 'update_images', 'retire_link', 'campaign_signup', 'flash_discount', 'certificate_review'];
+  if (!intents.some(x => writeIntents.includes(x))) return [];
+  const stores = normalizeConcreteStoreKeys(normalizeLinkOpsTargetSet(targets).stores);
+  const notes = [];
+  if (stores.includes('HL')) {
+    notes.push('HL OpenAPI 已授权且只读/销售对账已验证；但商品发布/提交审核写适配器尚未接入验证，当前任务应进入 HL API 执行准备/预检，不能说“没有权限”，也不能谎称已提交审核。');
+  }
+  const notOpenApiStores = stores.filter(store => store !== 'HL');
+  if (notOpenApiStores.length) {
+    notes.push(`${notOpenApiStores.join(',')} 尚未登记官方 OpenAPI 授权；真实写操作需先走云端 WebAPI/headless 受控路径或补齐该店 OpenAPI。`);
+  }
+  if (!stores.length) {
+    notes.push('尚未识别具体目标店铺；执行前必须补齐店铺，不能泛化为所有店可执行。');
+  }
+  return notes;
+}
+
 function compactLinkOpsTitleText(text, max = 36) {
   return String(text || '')
     .replace(/\s+/g, ' ')
@@ -458,15 +509,62 @@ function isLinkOpsActionCommand(command) {
   const lower = text.toLowerCase();
   const intents = inferLinkOpsIntent(text).filter(x => x !== 'manual_review');
   if (!intents.length) return false;
-  const actionVerb = /下架|归档|停掉|移除|删除链接|换图|更换图片|改标题|换标题|补链接|补链|复制上品|创建草稿|创建链接|上品|报活动|报名|限时折扣|设置折扣|补证书|补资质|上传证书/.test(text)
-    || /\b(retire|remove|archive|replace image|update title|create draft|campaign|discount)\b/.test(lower);
+  const actionVerb = /下架|归档|停掉|移除|删除链接|换图|更换图片|改标题|换标题|补链接|补链|复制|复制上品|创建草稿|创建链接|上品|上链接|发链接|发布商品|刊登|提交审核|报活动|报名|限时折扣|设置折扣|补证书|补资质|上传证书/.test(text)
+    || /\b(retire|remove|archive|replace image|update title|create draft|create link|publish|submit review|campaign|discount)\b/.test(lower);
   if (!actionVerb) return false;
-  const strongCommand = /把|将|要求|安排|加入任务池|加入动作池|执行|处理|现在|立即|直接/.test(text)
+  const strongCommand = /把|将|要求|安排|加入任务池|加入动作池|执行|处理|现在|立即|直接|提交审核/.test(text)
     || /^(下架|归档|换图|改标题|补链接|补链|报活动|报名|设置折扣|补证书|补资质)/.test(text);
   const giveCommand = /给.+(重新生成|生成|换|更换|改|下架|报|报名|设置|补)/.test(text);
   const exploratory = /建议|分析|看看|找出|哪些|哪个|是否|能否|能不能|可以吗|怎么|如何|为什么|原因/.test(text);
   if (exploratory && !strongCommand && !giveCommand) return false;
   return strongCommand || giveCommand || !exploratory;
+}
+
+function isConfirmExecuteChatCommand(command) {
+  const text = String(command || '').trim();
+  if (!text || text.length > 80) return false;
+  if (/？|\?|能否|能不能|可以吗|是否|为什么|怎么|如何/.test(text)) return false;
+  return /^(确认|同意|可以|行|好|好的|ok|OK|执行|开始|提交|照做|按这个|按上面|就这样|走|去做)([，,。\s！!]*)(执行|开始|提交|审核|处理|做|吧|了|$)/.test(text)
+    || /确认.*(执行|提交|审核|处理)|同意.*(执行|提交|审核|处理)|(执行|提交|审核|处理).*吧/.test(text);
+}
+
+function hasActionableLinkOpsContext(session) {
+  const messages = Array.isArray(session?.messages) ? session.messages : [];
+  const prior = messages.slice(0, -1).slice(-10);
+  const text = prior
+    .map(m => String(m?.content || ''))
+    .join('\n');
+  const intents = inferLinkOpsIntent(text).filter(x => x !== 'manual_review');
+  if (!intents.length) return false;
+  return /下架|归档|停掉|移除|删除链接|换图|更换图片|改标题|换标题|补链接|补链|复制|上品|上链接|发链接|发布商品|刊登|提交审核|报活动|报名|限时折扣|设置折扣|补证书|补资质|上传证书|任务|动作/.test(text);
+}
+
+function compactChatLine(value, max = 420) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max);
+}
+
+function buildConfirmedLinkOpsCommandFromSession(session, latestMessage) {
+  const messages = Array.isArray(session?.messages) ? session.messages : [];
+  const prior = messages.slice(0, -1).slice(-12);
+  const userLines = prior
+    .filter(m => m?.role === 'user')
+    .map(m => compactChatLine(m.content))
+    .filter(x => x && !isConfirmExecuteChatCommand(x))
+    .slice(-4);
+  const assistantLines = prior
+    .filter(m => m?.role === 'assistant')
+    .map(m => compactChatLine(m.content, 700))
+    .filter(Boolean)
+    .slice(-2);
+  const command = [
+    `确认执行：${compactChatLine(latestMessage, 120)}`,
+    userLines.length ? `上文用户意图：\n${userLines.map(x => `- ${x}`).join('\n')}` : '',
+    assistantLines.length ? `上文智能体定位：\n${assistantLines.map(x => `- ${x}`).join('\n')}` : '',
+  ].filter(Boolean).join('\n\n');
+  return command.slice(0, 2000);
 }
 
 function findDuplicateAutoTask(tasks, sessionId, command) {
@@ -507,7 +605,8 @@ function updateLinkOpsTaskFromChatCommand(task, body, actor, req) {
   const preview = {
     ...(task.preview && typeof task.preview === 'object' ? task.preview : {}),
     summary: `随会话更新：${intents.map(linkOpsIntentLabel).join(' / ')}；任务持续合并最新指令，不为同一会话重复开新任务。`,
-    riskNotes: linkOpsRiskNotes(intents),
+    riskNotes: linkOpsRiskNotes(intents, targets),
+    capabilitySummary: buildLinkOpsCapabilitySummary(targets),
     agentAnswer: typeof body.agentAnswer === 'string' ? body.agentAnswer.slice(0, 12000) : (task.preview?.agentAnswer || ''),
     agentMode: typeof body.agentMode === 'string' ? body.agentMode.slice(0, 80) : (task.preview?.agentMode || ''),
     agentDurationMs: Number.isFinite(Number(body.agentDurationMs)) ? Number(body.agentDurationMs) : (task.preview?.agentDurationMs || 0),
@@ -532,7 +631,7 @@ function updateLinkOpsTaskFromChatCommand(task, body, actor, req) {
   return next;
 }
 
-function linkOpsRiskNotes(intents) {
+function linkOpsRiskNotes(intents, targets = {}) {
   const notes = ['当前只是建立任务草案，不会自动修改 SHEIN 后台。'];
   if (intents.includes('copy_product_draft')) {
     notes.push('复制上品需执行前检查：源 SKC、类目参数、证书/资质、图片、价格、库存100、计划上架时间。');
@@ -546,6 +645,7 @@ function linkOpsRiskNotes(intents) {
   if (intents.includes('retire_link')) {
     notes.push('下架前必须确认不是唯一承接链接，并先准备替代链接。');
   }
+  notes.push(...linkOpsCapabilityNotes(intents, targets));
   return notes;
 }
 
@@ -572,7 +672,8 @@ function buildLinkOpsTaskFromCommand(body, actor, req) {
     targets,
     preview: {
       summary: `识别为：${intents.join(' / ')}；任务池只承载可执行事项，确认后再检查材料并进入执行队列。`,
-      riskNotes: linkOpsRiskNotes(intents),
+      riskNotes: linkOpsRiskNotes(intents, targets),
+      capabilitySummary: buildLinkOpsCapabilitySummary(targets),
       agentAnswer: typeof body.agentAnswer === 'string' ? body.agentAnswer.slice(0, 12000) : '',
       agentMode: typeof body.agentMode === 'string' ? body.agentMode.slice(0, 80) : '',
       agentDurationMs: Number.isFinite(Number(body.agentDurationMs)) ? Number(body.agentDurationMs) : 0,
@@ -863,6 +964,9 @@ function runPreflightForLinkOpsTask(task) {
   const warnings = [];
   const assets = Array.isArray(task.assets) ? task.assets : [];
   const needs = linkOpsTaskNeedsMaterial(task);
+  const intents = Array.isArray(task?.intents) ? task.intents : [];
+  const targets = normalizeLinkOpsTargetSet(task?.targets || {});
+  const stores = normalizeConcreteStoreKeys(targets.stores);
   const status = String(task.status || 'draft');
   if (!['confirmed', 'in_progress', 'waiting_review'].includes(status)) {
     blockers.push('任务必须先点“确认成任务”，不能从草案直接执行。');
@@ -878,6 +982,13 @@ function runPreflightForLinkOpsTask(task) {
   }
   if (needs.includes('title_text_or_rule') && !assets.some(a => a.kind === 'text')) {
     warnings.push('标题类任务未上传标题文本/规则文件；如果标题已写在会话或任务说明里，可人工确认后继续。');
+  }
+  if (intents.includes('copy_product_draft') && stores.includes('HL') && !LINK_OPS_STORE_CAPABILITIES.HL?.productPublishAdapter) {
+    blockers.push('HL OpenAPI 已授权，但商品发布/提交审核写适配器尚未实现验证；本任务已进入执行准备，需先接入 publish/submit adapter 后才能真实提交审核。');
+  }
+  const nonOpenApiStores = stores.filter(store => !LINK_OPS_STORE_CAPABILITIES[store]?.openapiAuthorized);
+  if (intents.some(x => ['copy_product_draft', 'update_title', 'update_images', 'retire_link', 'campaign_signup', 'flash_discount', 'certificate_review'].includes(x)) && nonOpenApiStores.length) {
+    warnings.push(`${nonOpenApiStores.join(',')} 暂无官方 OpenAPI 授权记录；后续执行需走云端 WebAPI/headless 受控路径或先完成该店 OpenAPI 接入。`);
   }
   if (!Array.isArray(task.history)) warnings.push('任务缺少历史记录，建议先刷新任务状态。');
   return {
@@ -1714,15 +1825,25 @@ async function main() {
               created = true;
             }
             const conversationTargets = inferTargetsFromChatSession(session);
-            const shouldAutoTask = isLinkOpsActionCommand(userMessage);
+            const explicitActionCommand = isLinkOpsActionCommand(userMessage);
+            const confirmExecuteCommand = isConfirmExecuteChatCommand(userMessage);
+            const shouldAutoTask = explicitActionCommand || (confirmExecuteCommand && hasActionableLinkOpsContext(session));
+            const effectiveTaskCommand = explicitActionCommand
+              ? userMessage
+              : shouldAutoTask
+                ? buildConfirmedLinkOpsCommandFromSession(session, userMessage)
+                : userMessage;
             let agentAnswer = '';
             let agentDurationMs = 0;
             if (body.askAgent !== false) {
               const conversation = (session.messages || []).slice(-10).map(m => `${m.role === 'assistant' ? '智能体' : '用户'}：${m.content}`).join('\n');
               const extraRules = shouldAutoTask
                 ? [
-                    '本条最新用户消息已识别为明确运营动作命令。系统会自动把它加入链接运营任务池，等待人工确认/执行器预检。',
+                    confirmExecuteCommand
+                      ? '本条最新用户消息是对上文方案的确认执行。系统会继承上文用户意图和智能体定位，把同一会话加入或更新到链接运营任务池。'
+                      : '本条最新用户消息已识别为明确运营动作命令。系统会自动把它加入链接运营任务池，等待人工确认/执行器预检。',
                     '你的回复不能声称已经执行，也不要只说“没有权限所以不能”；应明确说“已加入待确认动作/任务，执行前还会核对目标、素材、权限和风险”。',
+                    '如果目标店铺是 HL，应说明 HL 已有 OpenAPI 授权和只读/销售对账能力；当前缺口是商品发布/提交审核写适配器尚未实现验证，不能笼统说 HL 没有权限。',
                   ]
                 : [
                     '每一轮都要根据整段会话和最新 BI JSON 上下文重新查数；如果最新用户消息换了店铺、货号或指标，以最新消息为准，缺省时再沿用上文。',
@@ -1732,6 +1853,7 @@ async function main() {
                 '如果信息还不够，先问需要补充什么；如果已经可以形成任务，请给出清晰的下一步和风险边界。',
                 '遇到“这个链接/这个品/2,223 这个”等指代时，必须结合上文已出现的店铺、货号、SKC、曝光/访客/销量数字重新定位；不能因为最新一句没写全就否定上轮数据。',
                 '会话已识别目标：' + summarizeLinkOpsTargets(conversationTargets),
+                '会话目标执行能力：\n' + buildLinkOpsCapabilitySummary(conversationTargets),
                 ...extraRules,
                 conversation,
               ].join('\n\n');
@@ -1742,7 +1864,7 @@ async function main() {
             }
             if (shouldAutoTask) {
               const taskStore = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
-              const duplicate = findDuplicateAutoTask(taskStore.tasks, session.id, userMessage);
+              const duplicate = findDuplicateAutoTask(taskStore.tasks, session.id, effectiveTaskCommand);
               const reusable = duplicate || findReusableChatTask(taskStore.tasks, session.id);
               if (duplicate) {
                 autoTask = duplicate;
@@ -1750,7 +1872,7 @@ async function main() {
               } else if (reusable) {
                 const idx = taskStore.tasks.findIndex(t => String(t.id || '') === String(reusable.id || ''));
                 autoTask = updateLinkOpsTaskFromChatCommand(reusable, {
-                  command: userMessage,
+                  command: effectiveTaskCommand,
                   source: 'chat_auto_action',
                   chatSessionId: session.id,
                   targets: conversationTargets,
@@ -1780,7 +1902,7 @@ async function main() {
                 });
               } else {
                 autoTask = buildLinkOpsTaskFromCommand({
-                  command: userMessage,
+                  command: effectiveTaskCommand,
                   source: 'chat_auto_action',
                   chatSessionId: session.id,
                   targets: conversationTargets,

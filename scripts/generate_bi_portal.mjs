@@ -9152,6 +9152,7 @@ function renderLinkOpsTaskExecution(t){
   const refs = Array.isArray(t?.targets?.productRefs) ? t.targets.productRefs : [];
   const materials = linkOpsTaskRequiredMaterials(intents);
   const hasAgentAnswer = !!String(t?.preview?.agentAnswer || '').trim();
+  const capabilitySummary = String(t?.preview?.capabilitySummary || '').trim();
   const targetText = [
     stores.length ? '店铺：'+stores.join('、') : '店铺：待从会话/数据里确认',
     refs.length ? '货号/SKC：'+refs.join('、') : '货号/SKC：待确认'
@@ -9164,6 +9165,7 @@ function renderLinkOpsTaskExecution(t){
       '<div class="task-exec-item"><b>需要材料</b><div class="material-pills">'+materials.map(x => '<span class="material-pill need">'+escapeHtml(x)+'</span>').join('')+'</div></div>'+
       '<div class="task-exec-item"><b>执行方式</b><span>'+escapeHtml(linkOpsTaskExecutorNote(intents))+'</span></div>'+
     '</div>'+
+    (capabilitySummary ? '<div class="task-exec-note"><b>接口能力：</b>'+escapeHtml(capabilitySummary)+'</div>' : '')+
     '<div class="task-exec-note">'+
       (hasAgentAnswer
         ? '已带有智能体建议，可人工确认后开始执行。'
