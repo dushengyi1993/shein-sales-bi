@@ -1,0 +1,15 @@
+[Unit]
+Description=SHEIN BI cloud SHEIN login/session manager
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=sheinops
+Group=sheinops
+WorkingDirectory=/opt/shein-bi/app
+Environment=HOME=/home/sheinops
+Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_BI_LOG_DIR=/srv/shein-bi/logs/cloud-session-manager
+TimeoutStartSec=7200
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_shein_session_manager.sh

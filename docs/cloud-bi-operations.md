@@ -40,6 +40,7 @@
 | `shein-bi-cloud-daily-lark-report.timer` | 北京时间 `08:35`，`10:35/12:35` 补偿重试 | 抓取当天销售后发送飞书日报和日报图；成功后写入当天 sent flag 防重复 |
 | `shein-bi-cloud-rtv-verify.timer` | 北京时间 `03:20` | 完整 RTV 换单复核 WebAPI 版，写入 `ops.rtv_tracking_verification`，不阻塞滚动销售刷新 |
 | `shein-bi-cloud-link-business.timer` | 北京时间 `05:30` | 顺序启动云端 headless Chrome 抓取前一完整日链接/业务域，入仓、体检并刷新 BI |
+| `shein-bi-cloud-session-manager.timer` | 北京时间 `03:20` | 云端登录态管家：顺序巡检/恢复 16 店 WebAPI + SBN 登录态，检查 profile 体积，生成报告 |
 | `shein-bi-cloud-openapi-hl.timer` | 北京时间 `06:20` | HL OpenAPI 并行抓取、入仓和对账；服务器 IP 白名单已配置 |
 | `shein-bi-cloud-watchdog.timer` | 每小时 | 检查云端服务、timer 和 BI 数据新鲜度，异常时发飞书提醒 |
 | `shein-bi-lark-sales-qa.service` | 常驻服务 | 飞书只读问数机器人（云端 Codex CLI 网关），读取 BI Portal JSON 后回复消息，不写数据 |
@@ -68,6 +69,7 @@ ET、飞书日报、完整 RTV WebAPI 复核、链接/业务域日更、异常�
 - 飞书日报依赖服务器本地 `config/lark_report.json`、`lark-cli` 和独立飞书机器人授权；旧应用 `open_id` 不能直接复用到新应用，必要时用 `union_id` 映射。飞书 Base / 看板写入仍受暂停开关控制，日报发送与 Base 写入分开处理。
 - 飞书日报图在 Linux headless Chrome 下依赖中文字体；服务器必须安装 `fonts-noto-cjk` / `fontconfig` 并能通过 `fc-match 'Noto Sans CJK SC'` 匹配到 Noto CJK，否则中文会渲染成方框。
 - 链接/业务域目前按日更低频看待；watchdog 的阈值是 48 小时，不是销售高频的 4.5 小时。当前云端生产路径是顺序 headless Chrome，依赖服务器私有 `state/shein_browser_sessions/*.local.json` / `state/shein_webapi_sessions/*.local.json`；链接管理、商品图上传、取标题、商家维护链接等自动运营功能后续应优先按 Linux/云端服务方式扩展，避免重新绑定本地 Windows。
+- 云端登录态管家入口：`scripts/cloud_shein_session_manager.sh` / `scripts/cloud_shein_session_manager.mjs`。它按店顺序启动临时 headless Chrome，自动检查/恢复 GSP 订单 WebAPI 与 SBN 商品分析子系统登录态，完成后关闭由它启动的店铺浏览器；默认不清理缓存，只报告 profile 体积。需要手动安全清缓存时才加 `--cleanup-cache`。
 - `audit_bi_warehouse.mjs` 与 `load_bi_business_domains.mjs` 均应支持 Linux 下自动使用 `sudo docker exec`；如果服务器手动运行时报 Docker socket 或写文件权限错误，先检查脚本是否为最新，以及 `/srv/shein-bi/logs`、`state/cloud_ops_watchdog`、`outputs/bi-portal`、`outputs/bi_audit` 是否被 root 运行残留成普通用户不可写。
 
 ### 链接/业务域 WebAPI / headless 现状
@@ -112,6 +114,7 @@ GitHub 应保存：
 - `shein-bi-cloud-openapi-hl.timer` 应保持 active；若后续再失败，先看 service 日志；此前 `openapi00002` 白名单问题已于 2026-05-16 修复。
 - `shein-bi-cloud-watchdog.timer` 应保持 active；销售/页面过期按 4.5 小时提醒，链接/业务域过期按 48 小时提醒。
 - `shein-bi-cloud-link-business.timer` 应保持 active；手动复跑用 `scripts/cloud_link_business_sync.sh yesterday`。若单店卡在 SBN `x-gw-auth`，优先看该店 attempt 重试日志，不要回退到本机补抓冒充云端日更。
+- `shein-bi-cloud-session-manager.timer` 应保持 active；手动复跑用 `scripts/cloud_shein_session_manager.sh`。报告文件在 `outputs/reports/cloud-session-manager-latest.json` / `.md`，若失败会被 watchdog 按 service failed 逻辑提醒。
 - `shein-bi-lark-sales-qa.service` 应保持 active；可用 `node scripts/lark_sales_qa_bot.mjs --answer "今天销售多少"` 本地只读测试答案。群聊中若无回复，优先检查机器人是否已入群、应用可见范围和 `im.message.receive_v1`/发消息权限。
 - GitHub `main` 应包含最新可复用代码和文档；敏感运行态只保留在本地/云端私有目录。
 
