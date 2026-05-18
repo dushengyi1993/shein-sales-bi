@@ -4565,10 +4565,10 @@ async function uploadLinkOpsAssets(id, options = {}){
   const input = options.input || Array.from(document.querySelectorAll('[data-linkops-asset-input]')).find(el => el.dataset.linkopsAssetInput === id);
   const files = Array.from(options.files || input?.files || []);
   if (!files.length) return showToast('请先选择要上传的素材文件');
-  if (files.length > 20) return showToast('一次最多上传 20 个文件');
+  if (files.length > 40) return showToast('一次最多上传 40 个文件');
   const total = files.reduce((s,f)=>s+Number(f.size || 0),0);
-  if (files.some(f => Number(f.size || 0) > 10*1024*1024)) return showToast('单个文件不能超过 10MB');
-  if (total > 30*1024*1024) return showToast('单次上传总大小不能超过 30MB');
+  if (files.some(f => Number(f.size || 0) > 20*1024*1024)) return showToast('单个文件不能超过 20MB');
+  if (total > 120*1024*1024) return showToast('单次上传总大小不能超过 120MB');
   setLinkOpsUploadState({busy:true, taskId:id, phase:'准备上传', fileName:files[0]?.name || '', percent:3, error:'', xhr:null, reader:null, cancelled:false}, true);
   try {
     const encoded = [];
@@ -9515,7 +9515,7 @@ function renderLinkOpsSessionUploadPanel(active, activeTasks = []){
   return '<div class="ops-upload-panel">'+
     '<h4>会话文件</h4>'+
     '<p>图片、证书、标题规则等文件会上传到当前会话对应的云端任务包。</p>'+
-    '<p>限制：单个 10MB，单次 30MB，最多 20 个。上传中可取消。</p>'+
+    '<p>限制：单个 20MB，单次 120MB，最多 40 个。上传中可取消。</p>'+
     '<input id="linkOpsSessionAssetInput" type="file" multiple '+(canUpload ? '' : 'disabled')+' accept=".jpg,.jpeg,.png,.webp,.pdf,.txt,.csv,.json,image/jpeg,image/png,image/webp,application/pdf,text/plain,text/csv,application/json">'+
     '<div class="command-actions" style="margin-top:9px">'+
       '<button class="btn" id="uploadLinkOpsSessionAssets" type="button" '+(canUpload && !linkOpsUploadStore.busy ? '' : 'disabled')+'>'+(realTask ? '上传到当前任务' : '生成任务并上传')+'</button>'+

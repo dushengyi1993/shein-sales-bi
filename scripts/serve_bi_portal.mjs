@@ -77,8 +77,8 @@ const types = {
   '.map': 'application/json; charset=utf-8',
 };
 
-const LINK_OPS_MAX_UPLOAD_FILE_BYTES = 10 * 1024 * 1024;
-const LINK_OPS_MAX_UPLOAD_TOTAL_BYTES = 30 * 1024 * 1024;
+const LINK_OPS_MAX_UPLOAD_FILE_BYTES = 20 * 1024 * 1024;
+const LINK_OPS_MAX_UPLOAD_TOTAL_BYTES = 120 * 1024 * 1024;
 const SHEIN_STORE_KEYS = new Set(['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'DSY', 'LGM']);
 const MANUAL_LOGIN_STORE_KEYS = new Set(['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ']);
 const LINK_OPS_ALLOWED_UPLOAD_MIME = new Set([
@@ -805,7 +805,7 @@ async function attachLinkOpsAssets({store, taskId, files, args, actor, req}) {
   if (idx < 0) throw new Error('Task not found');
   const normalizedFiles = Array.isArray(files) ? files : [];
   if (!normalizedFiles.length) throw new Error('Missing files');
-  if (normalizedFiles.length > 20) throw new Error('Too many files');
+  if (normalizedFiles.length > 40) throw new Error('Too many files');
   let totalBytes = 0;
   const baseDir = path.resolve(args.linkOpsAssetDir);
   const taskDir = assertInsideDir(baseDir, path.join(baseDir, id));
