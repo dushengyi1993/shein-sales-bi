@@ -1,6 +1,6 @@
 # 云端 BI 运行说明
 
-> 当前权威状态：2026-05-17。本地 BI 已封存，云端 BI 是正式入口。
+> 当前权威状态：2026-05-18。本地 BI 已封存，云端 BI 是正式入口。
 
 ## 1. 当前入口
 
@@ -8,6 +8,7 @@
 - 访问保护：Nginx Basic Auth 已启用；账号密码只在私下运行环境交付，不写入仓库、文档或日志。
 - 云服务器：腾讯云 Lighthouse 东京，Ubuntu 24.04 x86_64，代码目录 `/opt/shein-bi/app`。
 - 服务组成：Nginx 对外反代，BI Portal 监听服务器本机 `127.0.0.1:8787`，PostgreSQL + Metabase 由 Docker Compose 承载。
+- 域名入口：`https://shein-bi.faceair.me/`；服务器内部仍由 Nginx `127.0.0.1:8080` 转发到 BI Portal。
 - GitHub 仓库 `main` 是云端代码来源；云端有值得保存的脚本、配置模板、门户静态产物或自动运营能力时，先同步回 GitHub，再部署到服务器。
 - 注意：`outputs/bi-portal/index.html` / `data.json` 会作为可恢复静态快照纳入 GitHub；服务器执行 `git reset --hard origin/main` 或类似部署后，可能把实时 BI 页面覆盖成仓库快照。每次服务器拉取/重置代码后，都要立即跑一次 `scripts/cloud_bi_refresh.sh today intraday` 或对应 systemd service，确认页面生成时间和销售源时间回到当前。
 
@@ -79,6 +80,18 @@ ET、飞书日报、完整 RTV WebAPI 复核、链接/业务域日更、异常�
 - 后续改造顺序：先解决子系统登录态/初始化，再解决 SBN 商品分析的 `x-gw-auth` 等动态头，最后处理财务二次密码或敏感权限边界。
 - 当前生产使用云端 headless 顺序兜底，`cloud_link_business_sync.sh` 默认一次只跑 1 店，单店完成后关闭浏览器；不能改成 16 店同时开浏览器。若后续提并发，建议最多 `2` 并先看内存。
 
+### 云端临时人工登录入口
+
+- BI 页面“系统 / 登录维护中心”入口：`/cloud-login-maintenance`。
+- 用途：当某店 SHEIN / SBN / 子系统登录态失效、自动恢复失败、验证码/滑块必须人工处理时，在云服务器上临时启动该店独立 profile 的可见 Chrome，并通过 noVNC 嵌入到 BI 页面。
+- 入口实现：`scripts/cloud_manual_login_session.mjs` 负责创建、列出、完成和关闭临时会话；BI Portal 通过 `/api/cloud-login/sessions` 和 `/cloud-login/session/:id` 提供受保护页面。
+- 服务器依赖：`xvfb`、`x11vnc`、`websockify`、`novnc`，均绑定本机端口；外网只经过现有 Basic Auth 的 BI/Nginx/Caddy 链路访问。
+- 临时会话只保存 session id、短期访问 token、过期时间、端口、PID、日志文件和完成状态；不把密码、cookie、localStorage、请求头或 SHEIN token 写入仓库、文档或聊天。
+- 操作流程：打开维护中心 -> 选店铺和页面 -> 打开云端登录窗口 -> 人工完成登录/验证码 -> 回维护中心点“我已完成并关闭”。完成动作会触发 `export_shein_browser_session.mjs --no-launch` 和 `bootstrap_shein_browser_session.mjs --no-launch` 验证，然后关闭 Chrome / x11vnc / websockify / Xvfb。
+- Nginx 配置必须支持 WebSocket upgrade；仓库模板为 `infra/nginx/shein-bi.conf`，包含 `proxy_set_header Upgrade` 和 `proxy_set_header Connection "upgrade"`。
+- 日志与状态：状态文件 `/srv/shein-bi/runtime/cloud_manual_login_sessions.json`；日志目录 `/srv/shein-bi/logs/cloud-manual-login`。这些都是服务器私有运行态，不进 GitHub。
+- 当前限制：一次只允许一个临时登录窗口；过期或完成后不能再进入窗口，需重新开启。登录维护入口仍依赖 BI Basic Auth，正式账号系统后再做更细权限。
+
 ## 5. 运行数据与敏感信息边界
 
 以下内容不得提交 GitHub：
@@ -89,6 +102,7 @@ ET、飞书日报、完整 RTV WebAPI 复核、链接/业务域日更、异常�
 - `config/et_forwarder.local.json`
 - Metabase 管理员密码、数据库真实密码、Basic Auth 密码
 - 浏览器 profile、Cookie、OpenAPI secret、ET 密码、飞书 token、临时上传 token
+- 云端临时人工登录状态文件、短期 noVNC token 和登录维护日志
 - 数据库 dump、运行日志、批量抓取原始输出
 
 GitHub 应保存：
@@ -115,6 +129,7 @@ GitHub 应保存：
 - `shein-bi-cloud-watchdog.timer` 应保持 active；销售/页面过期按 4.5 小时提醒，链接/业务域过期按 48 小时提醒。
 - `shein-bi-cloud-link-business.timer` 应保持 active；手动复跑用 `scripts/cloud_link_business_sync.sh yesterday`。若单店卡在 SBN `x-gw-auth`，优先看该店 attempt 重试日志，不要回退到本机补抓冒充云端日更。
 - `shein-bi-cloud-session-manager.timer` 应保持 active；手动复跑用 `scripts/cloud_shein_session_manager.sh`。报告文件在 `outputs/reports/cloud-session-manager-latest.json` / `.md`，若失败会被 watchdog 按 service failed 逻辑提醒。
+- 云端人工登录入口验证：`/cloud-login-maintenance` 返回 `200`；`/cloud-login/novnc/vnc.html` 返回 `200`；创建会话后 `/cloud-login/session/:id` 返回 `200` 且 WebSocket 升级返回 `101 Switching Protocols`；点“我已完成并关闭”后 export/probe 成功且不残留 Chrome/Xvfb/x11vnc/websockify 进程。
 - `shein-bi-lark-sales-qa.service` 应保持 active；可用 `node scripts/lark_sales_qa_bot.mjs --answer "今天销售多少"` 本地只读测试答案。群聊中若无回复，优先检查机器人是否已入群、应用可见范围和 `im.message.receive_v1`/发消息权限。
 - GitHub `main` 应包含最新可复用代码和文档；敏感运行态只保留在本地/云端私有目录。
 

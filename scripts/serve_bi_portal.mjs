@@ -13,6 +13,7 @@
 import fs from 'node:fs/promises';
 import fssync from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
@@ -29,6 +30,7 @@ function parseArgs(argv) {
     linkOpsTaskFile: path.join(ROOT, 'state', 'bi_link_ops_tasks.json'),
     linkOpsChatFile: path.join(ROOT, 'state', 'bi_link_ops_chats.json'),
     linkOpsAssetDir: '',
+    manualLoginStateFile: process.env.SHEIN_MANUAL_LOGIN_STATE_FILE || '/srv/shein-bi/runtime/cloud_manual_login_sessions.json',
     authFile: path.join(ROOT, 'config', 'bi_users.local.json'),
     auditFile: path.join(ROOT, 'logs', 'bi_portal_action_audit.jsonl'),
     readOnly: false,
@@ -43,6 +45,7 @@ function parseArgs(argv) {
     else if (a === '--link-ops-task-file') args.linkOpsTaskFile = path.resolve(argv[++i]);
     else if (a === '--link-ops-chat-file') args.linkOpsChatFile = path.resolve(argv[++i]);
     else if (a === '--link-ops-asset-dir') args.linkOpsAssetDir = path.resolve(argv[++i]);
+    else if (a === '--manual-login-state-file') args.manualLoginStateFile = path.resolve(argv[++i]);
     else if (a === '--auth-file') args.authFile = path.resolve(argv[++i]);
     else if (a === '--audit-file') args.auditFile = path.resolve(argv[++i]);
     else if (a === '--read-only') args.readOnly = true;
@@ -68,11 +71,16 @@ const types = {
   '.svg': 'image/svg+xml; charset=utf-8',
   '.ico': 'image/x-icon',
   '.txt': 'text/plain; charset=utf-8',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.map': 'application/json; charset=utf-8',
 };
 
 const LINK_OPS_MAX_UPLOAD_FILE_BYTES = 10 * 1024 * 1024;
 const LINK_OPS_MAX_UPLOAD_TOTAL_BYTES = 30 * 1024 * 1024;
 const SHEIN_STORE_KEYS = new Set(['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'DSY', 'LGM']);
+const MANUAL_LOGIN_STORE_KEYS = new Set(['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ']);
 const LINK_OPS_ALLOWED_UPLOAD_MIME = new Set([
   'image/jpeg',
   'image/png',
@@ -966,6 +974,15 @@ function sendJson(res, status, value) {
   send(res, status, JSON.stringify(value, null, 2), {'Content-Type': 'application/json; charset=utf-8'});
 }
 
+function htmlEscape(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function safePath(root, requestUrl) {
   const url = new URL(requestUrl, 'http://localhost');
   let pathname = decodeURIComponent(url.pathname || '/');
@@ -977,6 +994,211 @@ function safePath(root, requestUrl) {
     return null;
   }
   return resolved;
+}
+
+const NOVNC_ROOT_CANDIDATES = [
+  '/usr/share/novnc',
+  '/usr/share/novnc-pkg',
+  path.join(ROOT, 'vendor', 'novnc'),
+];
+
+function novncRoot() {
+  return NOVNC_ROOT_CANDIDATES.find(p => fssync.existsSync(path.join(p, 'vnc.html'))) || '';
+}
+
+function manualLoginScriptArgs(args, command, extra = []) {
+  return [
+    path.join(ROOT, 'scripts', 'cloud_manual_login_session.mjs'),
+    command,
+    '--state-file', args.manualLoginStateFile,
+    '--base-path', '/cloud-login/session',
+    ...extra,
+  ];
+}
+
+function parseJsonStdout(stdout) {
+  const text = String(stdout || '').trim();
+  if (!text) return null;
+  try { return JSON.parse(text); } catch {}
+  const idx = text.lastIndexOf('\n{');
+  if (idx >= 0) {
+    try { return JSON.parse(text.slice(idx + 1)); } catch {}
+  }
+  return null;
+}
+
+async function runManualLoginHelper(args, command, extra = [], timeoutMs = 180_000) {
+  const result = await runChildProcess(process.execPath, manualLoginScriptArgs(args, command, extra), {
+    timeoutMs,
+    env: {
+      SHEIN_MANUAL_LOGIN_STATE_FILE: args.manualLoginStateFile,
+      SHEIN_MANUAL_LOGIN_LOG_DIR: process.env.SHEIN_MANUAL_LOGIN_LOG_DIR || '/srv/shein-bi/logs/cloud-manual-login',
+    },
+  });
+  const parsed = parseJsonStdout(result.stdout);
+  if (!result.ok || !parsed) {
+    const err = String(result.stderr || result.stdout || `manual login helper failed code=${result.code}`).slice(-1200);
+    return {ok: false, error: err, run: result};
+  }
+  return parsed;
+}
+
+async function readManualLoginState(args) {
+  const state = await readJsonFile(args.manualLoginStateFile, {version: 1, updatedAt: null, sessions: []});
+  return {
+    version: 1,
+    updatedAt: state?.updatedAt || null,
+    sessions: Array.isArray(state?.sessions) ? state.sessions : [],
+  };
+}
+
+async function findManualLoginSession(args, id, token) {
+  const state = await readManualLoginState(args);
+  const session = state.sessions.find(s => String(s.id || '') === String(id || ''));
+  if (!session) return {ok: false, status: 404, error: 'Session not found'};
+  if (String(session.token || '') !== String(token || '')) return {ok: false, status: 403, error: 'Invalid token'};
+  if (!['active', 'starting'].includes(String(session.status || ''))) return {ok: false, status: 410, error: `Session is ${session.status || 'not active'}`};
+  if (session.expiresAt && new Date(session.expiresAt).getTime() < Date.now()) return {ok: false, status: 410, error: 'Session expired'};
+  return {ok: true, session};
+}
+
+function manualLoginMaintenanceHtml() {
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SHEIN 登录维护中心</title>
+  <style>
+    :root{color-scheme:light dark;--bg:#f6f7f9;--card:#fff;--text:#111827;--muted:#6b7280;--line:#e5e7eb;--brand:#2563eb;--good:#059669;--warn:#d97706;--bad:#dc2626}
+    @media (prefers-color-scheme:dark){:root{--bg:#0b1120;--card:#111827;--text:#e5e7eb;--muted:#94a3b8;--line:#263244;--brand:#60a5fa}}
+    body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    header{position:sticky;top:0;background:color-mix(in srgb,var(--card) 92%,transparent);backdrop-filter:blur(12px);border-bottom:1px solid var(--line);padding:18px 24px;z-index:2}
+    h1{margin:0;font-size:22px} .sub{color:var(--muted);margin-top:4px}
+    main{max-width:1180px;margin:0 auto;padding:24px}
+    .grid{display:grid;grid-template-columns:360px 1fr;gap:18px}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 12px 30px rgba(15,23,42,.06)}
+    label{display:block;margin:12px 0 6px;color:var(--muted)} select,input{width:100%;box-sizing:border-box;border:1px solid var(--line);border-radius:12px;padding:11px 12px;background:transparent;color:var(--text)}
+    button,.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:0;border-radius:12px;background:var(--brand);color:white;padding:10px 14px;font-weight:700;cursor:pointer;text-decoration:none}
+    button.secondary{background:#64748b}.danger{background:var(--bad)}.good{background:var(--good)}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.status{display:inline-flex;border-radius:999px;padding:3px 9px;font-size:12px;background:#e2e8f0;color:#334155}.status.active{background:#dcfce7;color:#166534}.status.bad{background:#fee2e2;color:#991b1b}
+    table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid var(--line);padding:10px;text-align:left;vertical-align:top}th{color:var(--muted);font-weight:600}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.hint{color:var(--muted);font-size:13px}.msg{white-space:pre-wrap;border-radius:12px;background:rgba(148,163,184,.14);padding:12px;margin-top:12px}
+  </style>
+</head>
+<body>
+  <header><h1>SHEIN 登录维护中心</h1><div class="sub">云端临时浏览器入口。只在需要人工登录时打开；完成后请点“我已完成并关闭”。</div></header>
+  <main class="grid">
+    <section class="card">
+      <h2>开启临时登录窗口</h2>
+      <label>店铺</label><select id="store"></select>
+      <label>打开页面</label><select id="target"><option value="sbn">SBN 商品分析 / 链接表现</option><option value="order">订单后台</option><option value="home">后台首页</option></select>
+      <label>有效时间</label><select id="minutes"><option value="30">30 分钟</option><option value="15">15 分钟</option><option value="60">60 分钟</option></select>
+      <div class="row" style="margin-top:16px"><button id="start">打开云端登录窗口</button><button class="secondary" id="refresh">刷新状态</button></div>
+      <p class="hint">说明：窗口会使用该店云端独立 profile；不会显示或记录密码/cookie。若遇到验证码/滑块，你在远程窗口里手动处理即可。</p>
+      <div id="message" class="msg" hidden></div>
+    </section>
+    <section class="card">
+      <div class="row" style="justify-content:space-between"><h2>当前会话</h2><a class="btn secondary" href="/">返回 BI</a></div>
+      <div id="sessions"></div>
+    </section>
+  </main>
+  <script>
+    const STORES = ['DL','DX','FY','LQ','NM','HL','JY','ZL','TS','MZ','CX','YJ','XL','QY','QH','TZ'];
+    const $ = id => document.getElementById(id);
+    $('store').innerHTML = STORES.map(s => '<option value="'+s+'">'+s+'</option>').join('');
+    function msg(text){ const el=$('message'); el.hidden=false; el.textContent=text; }
+    async function api(url, opts={}){
+      const r = await fetch(url, {headers:{'Content-Type':'application/json'}, ...opts});
+      const j = await r.json().catch(()=>({ok:false,error:'Invalid JSON'}));
+      if(!r.ok || j.ok===false) throw new Error(j.error || ('HTTP '+r.status));
+      return j;
+    }
+    function sessionRow(s){
+      const active = s.status === 'active' || s.status === 'starting';
+      const canControl = active || s.status === 'expired' || (s.alive && Object.values(s.alive).some(Boolean));
+      const open = active && s.openUrl ? '<a class="btn" target="_blank" href="'+s.openUrl+'">进入窗口</a>' : '';
+      return '<tr><td><b>'+s.storeKey+'</b><br><span class="hint">'+(s.shopName||'')+'</span></td><td><span class="status '+(active?'active':(s.status==='expired'?'bad':''))+'">'+s.status+'</span><br><span class="hint">过期 '+(s.expiresAt||'-')+'</span></td><td class="mono">'+s.id+'</td><td><div class="row">'+open+(canControl?'<button class="good" data-finish="'+s.id+'" data-token="'+(s.token||'')+'">我已完成并关闭</button><button class="danger" data-close="'+s.id+'" data-token="'+(s.token||'')+'">直接关闭</button>':'')+'</div></td></tr>';
+    }
+    async function refresh(){
+      const j = await api('/api/cloud-login/sessions');
+      const sessions = j.sessions || [];
+      $('sessions').innerHTML = sessions.length ? '<table><thead><tr><th>店铺</th><th>状态</th><th>会话</th><th>操作</th></tr></thead><tbody>'+sessions.map(sessionRow).join('')+'</tbody></table>' : '<p class="hint">当前没有临时登录窗口。</p>';
+      document.querySelectorAll('[data-finish]').forEach(b=>b.onclick=async()=>{ b.disabled=true; try{ await api('/api/cloud-login/sessions/'+encodeURIComponent(b.dataset.finish)+'/finish',{method:'POST',body:JSON.stringify({token:b.dataset.token})}); msg('已导出登录态并关闭窗口。'); await refresh(); }catch(e){ msg('完成失败：'+e.message); b.disabled=false; }});
+      document.querySelectorAll('[data-close]').forEach(b=>b.onclick=async()=>{ b.disabled=true; try{ await api('/api/cloud-login/sessions/'+encodeURIComponent(b.dataset.close)+'/close',{method:'POST',body:JSON.stringify({token:b.dataset.token})}); msg('已关闭窗口。'); await refresh(); }catch(e){ msg('关闭失败：'+e.message); b.disabled=false; }});
+    }
+    $('refresh').onclick = refresh;
+    $('start').onclick = async () => {
+      $('start').disabled = true;
+      try {
+        const j = await api('/api/cloud-login/sessions', {method:'POST', body:JSON.stringify({storeKey:$('store').value,target:$('target').value,expiresMinutes:Number($('minutes').value)})});
+        msg('已开启 '+j.session.storeKey+' 临时登录窗口。新窗口打开后请完成登录，再回本页点“我已完成并关闭”。');
+        await refresh();
+        window.open(j.session.openUrl, '_blank', 'noopener,noreferrer');
+      } catch(e) { msg('开启失败：'+e.message); }
+      finally { $('start').disabled = false; }
+    };
+    refresh().catch(e=>msg('读取状态失败：'+e.message));
+  </script>
+</body>
+</html>`;
+}
+
+function manualLoginSessionHtml(session, token) {
+  const pathParam = `api/cloud-login/sessions/${encodeURIComponent(session.id)}/ws/${encodeURIComponent(token)}`;
+  const vncUrl = `/cloud-login/novnc/vnc.html?autoconnect=1&resize=scale&path=${encodeURIComponent(pathParam)}`;
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(session.storeKey)} 云端登录窗口</title><style>body{margin:0;background:#0f172a;color:#e5e7eb;font:14px system-ui}.bar{height:48px;display:flex;align-items:center;justify-content:space-between;padding:0 14px;background:#111827;border-bottom:1px solid #243044}.bar b{font-size:16px}.bar a{color:#93c5fd}iframe{display:block;width:100vw;height:calc(100vh - 48px);border:0;background:#111}</style></head><body><div class="bar"><b>${htmlEscape(session.storeKey)} 云端 SHEIN 登录窗口</b><span>有效期至 ${htmlEscape(session.expiresAt || '-')}；登录完成后回“登录维护中心”点完成关闭。 <a href="/cloud-login-maintenance">返回维护中心</a></span></div><iframe src="${htmlEscape(vncUrl)}" allow="clipboard-read; clipboard-write"></iframe></body></html>`;
+}
+
+async function serveNovncAsset(req, res, url) {
+  const root = novncRoot();
+  if (!root) return send(res, 503, 'noVNC is not installed', {'Content-Type': 'text/plain; charset=utf-8'});
+  let rel = decodeURIComponent(url.pathname.replace(/^\/cloud-login\/novnc\/?/, ''));
+  if (!rel) rel = 'vnc.html';
+  const file = path.resolve(root, rel);
+  const rootResolved = path.resolve(root);
+  if (file !== rootResolved && !file.startsWith(rootResolved + path.sep)) {
+    return send(res, 403, 'Forbidden', {'Content-Type': 'text/plain; charset=utf-8'});
+  }
+  try {
+    const st = await fs.stat(file);
+    const finalFile = st.isDirectory() ? path.join(file, 'vnc.html') : file;
+    const data = await fs.readFile(finalFile);
+    const ext = path.extname(finalFile).toLowerCase();
+    return send(res, 200, data, {'Content-Type': types[ext] || 'application/octet-stream'});
+  } catch {
+    return send(res, 404, 'Not found', {'Content-Type': 'text/plain; charset=utf-8'});
+  }
+}
+
+async function handleManualLoginWsUpgrade(req, socket, args) {
+  const fail = (status, text) => {
+    try {
+      socket.write(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\n${text}`);
+    } catch {}
+    try { socket.destroy(); } catch {}
+  };
+  const url = new URL(req.url || '/', 'http://localhost');
+  const m = /^\/api\/cloud-login\/sessions\/([^/]+)\/ws\/([^/]+)$/.exec(url.pathname);
+  if (!m) return fail(404, 'Not Found');
+  const id = decodeURIComponent(m[1]);
+  const token = decodeURIComponent(m[2]);
+  const found = await findManualLoginSession(args, id, token);
+  if (!found.ok) return fail(found.status || 403, found.error || 'Forbidden');
+  const port = Number(found.session.websockifyPort);
+  if (!Number.isInteger(port) || port <= 0) return fail(503, 'Bad websockify port');
+  const upstream = net.createConnection({host: '127.0.0.1', port}, () => {
+    const headers = {...req.headers, host: `127.0.0.1:${port}`};
+    const lines = [`GET /websockify HTTP/1.1`];
+    for (const [key, value] of Object.entries(headers)) {
+      if (Array.isArray(value)) for (const v of value) lines.push(`${key}: ${v}`);
+      else if (value !== undefined) lines.push(`${key}: ${value}`);
+    }
+    upstream.write(lines.join('\r\n') + '\r\n\r\n');
+    socket.pipe(upstream).pipe(socket);
+  });
+  upstream.on('error', () => fail(502, 'Websocket upstream unavailable'));
+  socket.on('error', () => { try { upstream.destroy(); } catch {} });
 }
 
 async function main() {
@@ -1012,6 +1234,7 @@ async function main() {
           linkOpsTaskFile: args.linkOpsTaskFile,
           linkOpsChatFile: args.linkOpsChatFile,
           linkOpsAssetDir: args.linkOpsAssetDir,
+          manualLoginStateFile: args.manualLoginStateFile,
           writableActionState: !args.readOnly,
           writableLinkOpsTasks: !args.readOnly,
           writableLinkOpsChats: !args.readOnly,
@@ -1026,6 +1249,73 @@ async function main() {
       }
       if (url.pathname === '/favicon.ico') {
         return send(res, 204, '', {'Content-Type': 'image/x-icon'});
+      }
+      if (url.pathname === '/cloud-login-maintenance') {
+        return send(res, 200, manualLoginMaintenanceHtml(), {'Content-Type': 'text/html; charset=utf-8'});
+      }
+      if (url.pathname.startsWith('/cloud-login/session/')) {
+        const m = /^\/cloud-login\/session\/([^/]+)$/.exec(url.pathname);
+        if (!m) return send(res, 404, 'Not found', {'Content-Type': 'text/plain; charset=utf-8'});
+        const found = await findManualLoginSession(args, decodeURIComponent(m[1]), url.searchParams.get('token') || '');
+        if (!found.ok) return send(res, found.status || 403, found.error || 'Forbidden', {'Content-Type': 'text/plain; charset=utf-8'});
+        return send(res, 200, manualLoginSessionHtml(found.session, url.searchParams.get('token') || ''), {'Content-Type': 'text/html; charset=utf-8'});
+      }
+      if (url.pathname.startsWith('/cloud-login/novnc/')) {
+        return await serveNovncAsset(req, res, url);
+      }
+      if (url.pathname === '/api/cloud-login/sessions') {
+        if (req.method === 'GET') {
+          const result = await runManualLoginHelper(args, 'list', ['--show-token'], 45_000);
+          return sendJson(res, result.ok === false ? 500 : 200, result);
+        }
+        if (req.method === 'POST') {
+          if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
+          const body = await readBodyJson(req, 32 * 1024).catch(err => ({_error: err?.message || String(err)}));
+          if (body._error) return sendJson(res, 400, {ok: false, error: body._error});
+          const storeKey = String(body.storeKey || body.store || '').trim().toUpperCase();
+          if (!MANUAL_LOGIN_STORE_KEYS.has(storeKey)) return sendJson(res, 400, {ok: false, error: 'Invalid store'});
+          const target = String(body.target || 'sbn').trim().toLowerCase();
+          const expires = Math.max(5, Math.min(120, Number(body.expiresMinutes || 30)));
+          const result = await runManualLoginHelper(args, 'start', ['--store', storeKey, '--target', target, '--expires-minutes', String(expires)], 90_000);
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'cloud-manual-login-start',
+            actor,
+            ...requestMeta(req),
+            storeKey,
+            target,
+            ok: result.ok !== false,
+            sessionId: result.session?.id || '',
+          });
+          return sendJson(res, result.ok === false ? 500 : 200, result);
+        }
+        return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+      }
+      {
+        const m = /^\/api\/cloud-login\/sessions\/([^/]+)\/(finish|close)$/.exec(url.pathname);
+        if (m) {
+          if (req.method !== 'POST') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+          if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
+          const body = await readBodyJson(req, 32 * 1024).catch(err => ({_error: err?.message || String(err)}));
+          if (body._error) return sendJson(res, 400, {ok: false, error: body._error});
+          const id = decodeURIComponent(m[1]);
+          const action = m[2];
+          const token = String(body.token || url.searchParams.get('token') || '').trim();
+          if (!token) return sendJson(res, 400, {ok: false, error: 'Missing session token'});
+          const extra = ['--id', id];
+          extra.push('--token', token);
+          const result = await runManualLoginHelper(args, action, extra, action === 'finish' ? 180_000 : 60_000);
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: `cloud-manual-login-${action}`,
+            actor,
+            ...requestMeta(req),
+            sessionId: id,
+            ok: result.ok !== false,
+            storeKey: result.session?.storeKey || '',
+          });
+          return sendJson(res, result.ok === false ? 500 : 200, result);
+        }
       }
       if (url.pathname === '/api/first-run-check') {
         if (req.method === 'GET') {
@@ -1535,6 +1825,15 @@ async function main() {
     }
   });
 
+  server.on('upgrade', (req, socket) => {
+    handleManualLoginWsUpgrade(req, socket, args).catch(err => {
+      try {
+        socket.write(`HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\n${String(err?.message || err)}`);
+      } catch {}
+      try { socket.destroy(); } catch {}
+    });
+  });
+
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(args.port, args.host, resolve);
@@ -1548,6 +1847,7 @@ async function main() {
     port: args.port,
     root,
     stateFile: args.stateFile,
+    manualLoginStateFile: args.manualLoginStateFile,
     lanMode: args.host === '0.0.0.0',
     readOnly: args.readOnly,
     authRequired,
