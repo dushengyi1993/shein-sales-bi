@@ -177,7 +177,7 @@
 - `sales_sar <= 0` 的揽收前取消 / 0 金额订单行不视为真实售出，不扣商品成本或退货派送费；利润成本必须和正销售额行对齐，避免取消单误扣成本。
 - 月趋势按用户选择的日期范围切片，不补全整月；例如 `2026-04-03 ~ 2026-06-03` 中 4 月只统计 `04-03~04-30`，6 月只统计 `06-01~06-03`，页面必须标注。
 - 月仓储费只用于月度总利润；DSY/LGM 按净成交额比例分摊，不能拆到单独货号、SKC 或订单。
-- 利润分组里 `TS`、`MZ` 在 `2026-03-01` 前归 `LGM`，从 `2026-03-01` 起归 `DSY`。
+- 利润分组里 `TS`、`MZ` 开店以来都归 `DSY`；不要再按 `2026-03-01` 切换到/切出 `LGM`。
 - 真实利润相关数据库对象：`fact.product_cost_batch`、`fact.monthly_storage_fee`、`mart.product_unit_cost_current`、`mart.profit_order_item`、`mart.profit_daily_store_product`、`mart.profit_month_group`、`mart.profit_product_summary`。
 
 ## 工具与避坑

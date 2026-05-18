@@ -2624,11 +2624,7 @@ WITH base AS (
     oi.order_item_key,
     oi.order_key,
     oi.store_key,
-    CASE
-      WHEN oi.created_date < DATE '2026-03-01' AND oi.store_key IN ('TS','MZ') THEN 'LGM'
-      WHEN oi.store_key IN ('TS','MZ') THEN 'DSY'
-      ELSE coalesce(oi.group_key, s.group_key)
-    END AS group_key,
+    coalesce(oi.group_key, s.group_key) AS group_key,
     oi.order_no,
     oi.bill_no,
     oi.created_date,
