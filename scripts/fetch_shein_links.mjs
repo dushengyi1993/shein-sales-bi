@@ -987,7 +987,14 @@ async function fetchStore(store, args) {
       prev7: await fetchDiagnoseWindow(send, addDays(date, -13), addDays(date, -7), args.pageSize, sbnHeaders),
       c30: await fetchDiagnoseWindow(send, addDays(date, -29), date, args.pageSize, sbnHeaders),
     };
-    const flow = args.fetchFlowDiagnose ? await fetchFlowDiagnose(send, args.pageSize, sbnHeaders) : {rows: [], tabs: [], lastUpdateTime: ''};
+    let flow = {rows: [], tabs: [], lastUpdateTime: ''};
+    if (args.fetchFlowDiagnose) {
+      try {
+        flow = await fetchFlowDiagnose(send, args.pageSize, sbnHeaders);
+      } catch (err) {
+        console.error(`[${store.storeKey}] WARN flow diagnose skipped: ${err?.message || err}`);
+      }
+    }
 
     const linkRows = flattenProductRows(store, date, productStatuses);
     const inventoryRows = flattenInventoryRows(store, date, stockup.rows);

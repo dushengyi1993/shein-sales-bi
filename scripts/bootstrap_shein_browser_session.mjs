@@ -266,22 +266,11 @@ async function orderProbe(send, date) {
 async function bootstrapStore(store, args) {
   const browserSessionFile = path.join(args.browserSessionDir, `${store.storeKey}.local.json`);
   const webApiSessionFile = path.join(args.sessionDir, `${store.storeKey}.local.json`);
-  let session = null;
-  let sessionKind = '';
-  if (fssync.existsSync(browserSessionFile)) {
-    session = await readJson(browserSessionFile);
-    sessionKind = 'browser';
-  } else if (fssync.existsSync(webApiSessionFile)) {
-    session = await readJson(webApiSessionFile);
-    sessionKind = 'webapi';
-  } else {
+  const candidates = [];
+  if (fssync.existsSync(browserSessionFile)) candidates.push({session: await readJson(browserSessionFile), sessionKind: 'browser'});
+  if (fssync.existsSync(webApiSessionFile)) candidates.push({session: await readJson(webApiSessionFile), sessionKind: 'webapi'});
+  if (!candidates.length) {
     return {storeKey: store.storeKey, ok: false, stage: 'session', error: `missing session file for ${store.storeKey}`};
-  }
-  const cookieParams = Array.isArray(session.cookies)
-    ? session.cookies.filter(c => c?.name && c?.value !== undefined).map(cookieParamFromExported)
-    : parseCookieHeader(session.cookieHeader).map(cookieParamFromHeader);
-  if (!cookieParams.length) {
-    return {storeKey: store.storeKey, ok: false, stage: 'session', error: 'session has no usable cookies'};
   }
   const browser = await launchStore(store, args);
   if (browser.error) {
@@ -289,6 +278,16 @@ async function bootstrapStore(store, args) {
   }
   const {send, ws} = await connectCdp(store.port);
   try {
+    let lastResult = null;
+    for (const candidate of candidates) {
+      const {session, sessionKind} = candidate;
+      const cookieParams = Array.isArray(session.cookies)
+        ? session.cookies.filter(c => c?.name && c?.value !== undefined).map(cookieParamFromExported)
+        : parseCookieHeader(session.cookieHeader).map(cookieParamFromHeader);
+      if (!cookieParams.length) {
+        lastResult = {storeKey: store.storeKey, ok: false, stage: 'session', sessionKind, error: 'session has no usable cookies'};
+        continue;
+      }
     if (session.userAgent) {
       await send('Network.setUserAgentOverride', {
         userAgent: session.userAgent,
@@ -313,7 +312,7 @@ async function bootstrapStore(store, args) {
     await navigate(send, ORDER_URL, 2500);
     const probe = args.probe ? await orderProbe(send, args.date) : null;
     const ok = !probe || probe.code === '0';
-    return {
+      const result = {
       storeKey: store.storeKey,
       ok,
       stage: ok ? 'ready' : 'probe',
@@ -323,6 +322,10 @@ async function bootstrapStore(store, args) {
       localStorageCount: sessionKind === 'browser' ? Object.keys(session.localStorage || {}).length : 0,
       probe: probe ? {code: probe.code || '', msg: probe.msg || '', count: probe.count ?? null, hasError: Boolean(probe.error)} : null,
     };
+      if (ok) return result;
+      lastResult = result;
+    }
+    return lastResult || {storeKey: store.storeKey, ok: false, stage: 'session', error: 'no usable session candidate'};
   } finally {
     try { ws.close(); } catch {}
   }

@@ -14,10 +14,13 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
 const ORDER_URL = 'https://sso.geiwohuo.com/#/gsp/order-management/list';
 const HOME_URL = 'https://sso.geiwohuo.com/#/gsp/home';
+const SBN_URL = 'https://sso.geiwohuo.com/#/sbn/merchandise/details';
 const encodeRedirect = url => Buffer.from(url, 'utf8').toString('base64');
 const LOGIN_URLS = [
+  `https://sso.geiwohuo.com/#/login/GMPSSO/${encodeRedirect(SBN_URL)}`,
   `https://sso.geiwohuo.com/#/login/GMPSSO/${encodeRedirect(ORDER_URL)}`,
   `https://sso.geiwohuo.com/#/login/GMPSSO/${encodeRedirect(HOME_URL)}`,
+  SBN_URL,
   HOME_URL,
   ORDER_URL,
 ];
@@ -148,6 +151,20 @@ async function apiProbe(send, date) {
   })()`);
 }
 
+async function sbnProbe(send) {
+  await navigate(send, SBN_URL, 8000);
+  return await evaluate(send, `(() => {
+    const text = document.body?.innerText || '';
+    return {
+      href: location.href,
+      title: document.title,
+      ok: !/\\/login\\/GMPSSO\\//.test(location.href) && text.includes('\\u5546\\u54c1\\u5206\\u6790'),
+      hasLoginText: text.includes('\\u8d26\\u53f7') && text.includes('\\u5bc6\\u7801') && text.includes('\\u767b\\u5f55'),
+      textPreview: text.slice(0, 500)
+    };
+  })()`);
+}
+
 async function trySavedPassword(send) {
   // This only uses Chrome UI/autofill. It does not read or log values.
   return await evaluate(send, `(async () => {
@@ -220,7 +237,11 @@ async function restoreOne(store, opts) {
     await navigate(send, ORDER_URL, 2500);
     let probe = await apiProbe(send, opts.date);
     steps.push({step: 'initial-probe', probe});
-    if (probe.code === '0') return {storeKey: store.storeKey, ok: true, alreadyOk: true, steps};
+    if (probe.code === '0') {
+      const sbn = await sbnProbe(send);
+      steps.push({step: 'initial-sbn-probe', sbn});
+      if (sbn.ok) return {storeKey: store.storeKey, ok: true, alreadyOk: true, steps};
+    }
 
     for (const url of LOGIN_URLS) {
       if (Date.now() - started > opts.timeoutMs) break;
@@ -251,7 +272,11 @@ async function restoreOne(store, opts) {
       await navigate(send, ORDER_URL, 3500);
       probe = await apiProbe(send, opts.date);
       steps.push({step: 'probe-after-url', url, probe});
-      if (probe.code === '0') return {storeKey: store.storeKey, ok: true, alreadyOk: false, steps};
+      if (probe.code === '0') {
+        const sbn = await sbnProbe(send);
+        steps.push({step: 'sbn-probe-after-url', url, sbn});
+        if (sbn.ok) return {storeKey: store.storeKey, ok: true, alreadyOk: false, steps};
+      }
     }
     return {storeKey: store.storeKey, ok: false, reason: 'login_not_restored', steps};
   } finally {
