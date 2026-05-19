@@ -388,7 +388,8 @@ function applySafeDefaults(payload, {sites, brands}) {
     next.source_system = 'OpenAPI';
     applied.push('source_system=OpenAPI');
   }
-  if (!next.site_list && !next.siteList) {
+  const existingSiteList = asArray(next.site_list || next.siteList);
+  if (!existingSiteList.length) {
     const sa = sites.find(s => s.siteAbbr === 'shein-sa') || sites[0];
     if (sa?.mainSite && sa?.siteAbbr) {
       next.site_list = [{main_site: sa.mainSite, sub_site_list: [sa.siteAbbr]}];
@@ -423,7 +424,16 @@ function validatePublishPayload(payload) {
   if (!has('source_system', 'sourceSystem')) blockers.push('缺 source_system=OpenAPI。');
   if (!arr('multi_language_name_list', 'multiLanguageNameList').length) blockers.push('缺 multi_language_name_list：至少需要商品标题/多语言名称。');
   if (!arr('product_attribute_list', 'productAttributeList').length) blockers.push('缺 product_attribute_list：需要类目属性模板和源商品参数。');
-  if (!arr('site_list', 'siteList').length) blockers.push('缺 site_list：HL 沙特站应包含 shein / shein-sa。');
+  const siteList = arr('site_list', 'siteList');
+  if (!siteList.length) {
+    blockers.push('缺 site_list：HL 沙特站应包含 shein / shein-sa。');
+  } else if (!siteList.some(site => {
+    const mainSite = String(site?.main_site ?? site?.mainSite ?? '').toLowerCase();
+    const subSites = asArray(site?.sub_site_list || site?.subSiteList).map(v => String(v).toLowerCase());
+    return mainSite === 'shein' && subSites.includes('shein-sa');
+  })) {
+    blockers.push('发布站点未包含 shein-sa：HL 草稿/发布前必须勾选 SHEIN 沙特站。');
+  }
   const skcList = arr('skc_list', 'skcList');
   if (!skcList.length) blockers.push('缺 skc_list：需要 SKC 图片、销售属性和 SKU 列表。');
   for (const [i, skc] of skcList.entries()) {

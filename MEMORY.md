@@ -207,5 +207,6 @@
 - BI Portal 链接管理中台是“会话即任务工作台”：自然语言每轮按最新一句和会话上下文从当前 `outputs/bi-portal/data.json` 动态取数；明确动作命令（下架、换图、改标题、补链、报活动等）必须固化为待确认任务并留 IP/UA/备注/审计，不能只回复“没权限”。
 - 链接管理素材上传走 `/api/link-ops-assets` 白名单和任务隔离私有目录；`/api/link-ops-execute` 做确认状态、素材、权限边界、执行前检查和审计。HL 写执行器 `scripts/link_ops_hl_openapi_executor.mjs` 已验证 `canPublishProduct=true`、站点 `shein-sa/SAR`、品牌 `SOKANY`；默认 dry-run，真实 `publishOrEdit` 必须 payload 完整且显式确认。
 - 商品复制架构：不等源店 OpenAPI；短期“源店 WebAPI/云端登录态读取商品详情 -> canonical draft -> 目标店 HL OpenAPI/商品子系统写草稿”，后续源店有 OpenAPI 时只替换源读取器。2026-05-19 已用 DL 商品编辑页 `/spmp/product/get_similar_product_detail` 复制 `S1810电热水壶` 到 HL `/spmp/product/save_draft` 草稿 `v2603291437289685`，只保存草稿，未提交审核/发布。
+- SPMP 商品编辑页写草稿时必须强制勾选目标发布站点；HL 沙特至少要写入 `site_list=[{main_site:"shein", sub_site_list:["shein-sa"]}]`。不能继承源店 `get_similar_product_detail` 返回的空 `site_list`，否则草稿页面“发布站点”会漏勾，提交审核前还需人工补选。
 - 商品资料母库不保存图片文件或图片 URL，图片只在任务执行时临时复制/换链/清理；平台 `skc` / `skuCode` 只作追溯，不能冒充商家 `supplierSku`。不同店铺核价/供货价差异不是商品参数冲突，发品前按报价策略处理（默认 50% 利润率或同款其它店最高核价，允许人工覆盖）。
 - 云端 BI 临时人工登录入口 `/cloud-login-maintenance` 只用于登录态失效、验证码/滑块等人工维护；状态、日志和 noVNC 短期 token 是服务器私有运行态，不进 GitHub。生产同步活跃时不要强杀浏览器/VNC。
