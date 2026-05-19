@@ -98,6 +98,9 @@ export SHEIN_BI_PORTAL_TIMEOUT_MS="${SHEIN_BI_PORTAL_TIMEOUT_MS:-900000}"
 trap close_store_browsers EXIT
 
 STORES="$(store_keys)"
+FAILED_STORES=()
+SUCCESS_STORES=()
+ALLOW_PARTIAL="${SHEIN_LINK_BUSINESS_ALLOW_PARTIAL:-1}"
 for STORE in $STORES; do
   STORE_OK=0
   MAX_ATTEMPTS="${SHEIN_LINK_BUSINESS_STORE_ATTEMPTS:-3}"
@@ -131,9 +134,28 @@ for STORE in $STORES; do
   done
   if [[ "$STORE_OK" != "1" ]]; then
     echo "[cloud_link_business_sync] store=$STORE failed after $MAX_ATTEMPTS attempts" >&2
-    exit 1
+    FAILED_STORES+=("$STORE")
+    if [[ "$ALLOW_PARTIAL" != "1" && "$ALLOW_PARTIAL" != "true" ]]; then
+      exit 1
+    fi
+  else
+    SUCCESS_STORES+=("$STORE")
   fi
 done
+
+if [[ "${#FAILED_STORES[@]}" -gt 0 ]]; then
+  echo "[cloud_link_business_sync] WARN failed stores: ${FAILED_STORES[*]}" >&2
+  mkdir -p "$ROOT/state/cloud_ops_alerts"
+  cat > "$ROOT/state/cloud_ops_alerts/link-business-last-partial.json" <<JSON
+{"date":"$DATE","generatedAt":"$(TZ="$TZ_NAME" date --iso-8601=seconds)","failedStores":"${FAILED_STORES[*]}","successStores":"${SUCCESS_STORES[*]}","logFile":"$LOG_FILE"}
+JSON
+  if [[ "${SHEIN_LINK_BUSINESS_LOAD_PARTIAL:-0}" != "1" && "${SHEIN_LINK_BUSINESS_LOAD_PARTIAL:-0}" != "true" ]]; then
+    echo "[cloud_link_business_sync] partial result recorded; skip BI warehouse/portal refresh to avoid presenting incomplete link/business date" >&2
+    check_portal_health
+    echo "[cloud_link_business_sync] done with partial failures date=$DATE failed=${FAILED_STORES[*]} log=$LOG_FILE"
+    exit 0
+  fi
+fi
 
 node scripts/generate_link_ops_web_dashboard.mjs \
   --date "$DATE" \
@@ -158,4 +180,9 @@ fi
 
 check_portal_health
 
-echo "[cloud_link_business_sync] done date=$DATE log=$LOG_FILE"
+if [[ "${#FAILED_STORES[@]}" -gt 0 ]]; then
+  echo "[cloud_link_business_sync] done with partial failures date=$DATE failed=${FAILED_STORES[*]} log=$LOG_FILE"
+else
+  rm -f "$ROOT/state/cloud_ops_alerts/link-business-last-partial.json" 2>/dev/null || true
+  echo "[cloud_link_business_sync] done date=$DATE log=$LOG_FILE"
+fi

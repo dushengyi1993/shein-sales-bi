@@ -240,6 +240,12 @@ node scripts/link_ops_build_product_draft_from_webapi.mjs --source-store DL --so
 - DL `S1810电热水壶 / sv260315124105439111444` 样本已能生成：类目 `4681`、品牌 `2a64l`、英文标题、3 个图片候选、1 个 SKC、1 个 SKU、库存草稿 `100`、计划上架时间 `10` 年后；但仍会阻断真实提交，因为当前快照缺 `product_attribute_list`、SKU 尺寸/重量、`supplier_sku` 和 `cost_info`。
 - 长期架构保持不变：短期源店读取走 WebAPI/云端登录态；后续 DL 等源店拿到官方 OpenAPI 后，只替换源读取器，继续复用 canonical draft 和 HL 目标写执行器。
 
+2026-05-19 已进一步验证“商品编辑页 WebAPI -> HL 草稿箱”链路：
+
+- 源读取：DL 商品编辑页 `/spmp/product/get_similar_product_detail` 可按 `spu_name` 返回复制上品所需详情，包含 `product_type_id`、商品属性、图片、SKU 尺寸重量、成本等字段，比链接快照完整。
+- 目标写入：HL 商品子系统 `/spmp/product/save_draft` 已真实更新草稿箱已有 `S1810电热水壶` 草稿 `v2603291437289685`，返回 `code=0`；回读确认类目 `4681`、`product_type_id=1939`、属性 10 条、SKC 图 11 张、库存 100、成本 `70 SAR`、计划上架 `2036-05-19 10:00:00`。
+- 安全边界：本次只保存草稿，未调用 `/spmp/product/publish`、OpenAPI `publishOrEdit` 或任何提交审核/上架接口。后续需把一次性 WebAPI 探测脚本固化为受控执行器，再接 BI 任务流。
+
 2026-05-19 已补商品资料母库结构与 HL OpenAPI 源读取验证：
 
 - 母库设计文档：`docs/link-ops-product-master.md`。

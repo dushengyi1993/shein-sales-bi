@@ -266,9 +266,15 @@ async function orderProbe(send, date) {
 async function bootstrapStore(store, args) {
   const browserSessionFile = path.join(args.browserSessionDir, `${store.storeKey}.local.json`);
   const webApiSessionFile = path.join(args.sessionDir, `${store.storeKey}.local.json`);
+  const browserSession = fssync.existsSync(browserSessionFile) ? await readJson(browserSessionFile) : null;
+  const webApiSession = fssync.existsSync(webApiSessionFile) ? await readJson(webApiSessionFile) : null;
   const candidates = [];
-  if (fssync.existsSync(browserSessionFile)) candidates.push({session: await readJson(browserSessionFile), sessionKind: 'browser'});
-  if (fssync.existsSync(webApiSessionFile)) candidates.push({session: await readJson(webApiSessionFile), sessionKind: 'webapi'});
+  if (browserSession) candidates.push({session: browserSession, sessionKind: 'browser', storageSession: browserSession});
+  // WebAPI cookies are usually fresher for GSP/order, while the exported browser
+  // session carries subsystem localStorage (SBN/SPMP/etc). Combine them so a
+  // fresh WebAPI cookie bootstrap does not accidentally wipe the SBN login state
+  // and make link/business sync fall back to the login page every day.
+  if (webApiSession) candidates.push({session: webApiSession, sessionKind: 'webapi', storageSession: browserSession});
   if (!candidates.length) {
     return {storeKey: store.storeKey, ok: false, stage: 'session', error: `missing session file for ${store.storeKey}`};
   }
@@ -280,7 +286,7 @@ async function bootstrapStore(store, args) {
   try {
     let lastResult = null;
     for (const candidate of candidates) {
-      const {session, sessionKind} = candidate;
+      const {session, sessionKind, storageSession} = candidate;
       const cookieParams = Array.isArray(session.cookies)
         ? session.cookies.filter(c => c?.name && c?.value !== undefined).map(cookieParamFromExported)
         : parseCookieHeader(session.cookieHeader).map(cookieParamFromHeader);
@@ -298,11 +304,11 @@ async function bootstrapStore(store, args) {
     await send('Network.setCookies', {
       cookies: cookieParams,
     });
-    if (sessionKind === 'browser' && (session.localStorage || session.sessionStorage)) {
+    if (storageSession && (storageSession.localStorage || storageSession.sessionStorage)) {
       await navigate(send, ORIGIN_URL, 1200);
       await evaluate(send, `(() => {
-        const localEntries = ${JSON.stringify(session.localStorage || {})};
-        const sessionEntries = ${JSON.stringify(session.sessionStorage || {})};
+        const localEntries = ${JSON.stringify(storageSession.localStorage || {})};
+        const sessionEntries = ${JSON.stringify(storageSession.sessionStorage || {})};
         for (const [k, v] of Object.entries(localEntries)) localStorage.setItem(k, String(v));
         for (const [k, v] of Object.entries(sessionEntries)) sessionStorage.setItem(k, String(v));
         return {local: Object.keys(localEntries).length, session: Object.keys(sessionEntries).length};
@@ -319,7 +325,7 @@ async function bootstrapStore(store, args) {
       browser,
       sessionKind,
       cookieCount: cookieParams.length,
-      localStorageCount: sessionKind === 'browser' ? Object.keys(session.localStorage || {}).length : 0,
+      localStorageCount: storageSession ? Object.keys(storageSession.localStorage || {}).length : 0,
       probe: probe ? {code: probe.code || '', msg: probe.msg || '', count: probe.count ?? null, hasError: Boolean(probe.error)} : null,
     };
       if (ok) return result;

@@ -55,6 +55,7 @@ const fixedPriceRules = new Map();
 const marginRules = new Map();
 const priceOverrideRules = new Map();
 const storePriceOverrideRules = new Map();
+const rowPriceOverrideRules = new Map();
 
 function registerRuleKeys(map, label, value) {
   const keys = [
@@ -105,6 +106,9 @@ async function loadPriceOverrides() {
       ...(Array.isArray(item.storeKeys) ? item.storeKeys : []),
       ...(item.storeKey ? [item.storeKey] : []),
     ].map(x => String(x || '').trim().toUpperCase()).filter(Boolean);
+    if (item.storeKey && item.activityId && item.skc) {
+      rowPriceOverrideRules.set(`${String(item.storeKey).trim().toUpperCase()}:${Number(item.activityId)}:${String(item.skc).trim().toLowerCase()}`, item);
+    }
     if (storeKeys.length) {
       const before = new Map();
       registerRuleKeys(before, label, item);
@@ -295,6 +299,7 @@ class Cdp {
 async function connectStore(store) {
   const version = await httpJson(`http://127.0.0.1:${store.port}/json/version`);
   const cdp = new Cdp(version.webSocketDebuggerUrl);
+  cdp.port = store.port;
   await cdp.connect();
   return cdp;
 }
@@ -416,15 +421,32 @@ async function setPageSize500(cdp, sessionId) {
 
 async function fetchActivities(cdp, sessionId) {
   await waitFor(cdp, sessionId, `document.body && document.body.innerText.includes('营销活动报名')`, 30_000);
-  const data = await evalJs(cdp, sessionId, `
-    const r = await fetch('/mrs-api-prefix/mbrs/activity/get_activity_list?page_num=1&page_size=30', {
-      method: 'POST',
-      headers: {'content-type': 'application/json'},
-      body: '{}',
-    });
-    return await r.json();
+  const pages = await evalJs(cdp, sessionId, `
+    const pages = [];
+    for (let page = 1; page <= 20; page += 1) {
+      const r = await fetch('/mrs-api-prefix/mbrs/activity/get_activity_list?page_num=' + page + '&page_size=100', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {'content-type': 'application/json'},
+        body: '{}',
+      });
+      const json = await r.json();
+      const list = json?.info?.activity_detail_list || [];
+      pages.push({page, list});
+      if (list.length < 100) break;
+    }
+    return pages;
   `);
-  const list = data?.info?.activity_detail_list || [];
+  const seen = new Set();
+  const list = [];
+  for (const page of pages || []) {
+    for (const activity of page.list || []) {
+      const id = Number(activity.activity_id);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      list.push(activity);
+    }
+  }
   return list.map(a => ({
     activityId: Number(a.activity_id),
     name: a.activity_name || '',
@@ -438,6 +460,17 @@ async function fetchActivities(cdp, sessionId) {
     applyGoodsNum: Number(a.apply_goods_num || 0),
     raw: a,
   }));
+}
+
+async function cleanupStorePages(cdp, keepTargetIds = []) {
+  const keep = new Set(keepTargetIds.filter(Boolean));
+  const targets = await httpJson(`http://127.0.0.1:${cdp.port}/json/list`).catch(() => []);
+  for (const target of targets) {
+    if (target.type !== 'page') continue;
+    if (keep.has(target.id)) continue;
+    if (!/sso\.geiwohuo\.com/.test(target.url || '')) continue;
+    await cdp.call('Target.closeTarget', {targetId: target.id}).catch(() => {});
+  }
 }
 
 function isCouponActivity(a) {
@@ -606,11 +639,13 @@ function computeTarget(storeKey, activityId, row) {
   const seed = `${storeKey}:${activityId}:${row.skc}:${supplier}`;
   const current = Number(row.currentPrice || 0);
   const minDiscount = Number(row.minDiscount || 10);
+  const rowOverride = rowPriceOverrideRules.get(`${String(storeKey).trim().toUpperCase()}:${Number(activityId)}:${String(row.skc || '').trim().toLowerCase()}`);
   const manualRule = findManualRule(keys);
-  const override = manualRule
-    ? null
-    : (keys.map(k => storePriceOverrideRules.get(`${storeKey}:${k}`)).find(Boolean)
-      || keys.map(k => priceOverrideRules.get(k)).find(Boolean));
+  const override = rowOverride
+    || (manualRule
+      ? null
+      : (keys.map(k => storePriceOverrideRules.get(`${storeKey}:${k}`)).find(Boolean)
+        || keys.map(k => priceOverrideRules.get(k)).find(Boolean)));
   if (override) {
     const targetBase = Number(override.targetPrice);
     const cost = override.cost === null || override.cost === undefined ? null : Number(override.cost);
@@ -977,7 +1012,7 @@ async function fillEditPage(cdp, sessionId, storeKey, activityId) {
 
 async function processActivity(cdp, store, activity) {
   const url = `${LIST_URL.replace('/list', `/sign-up/config/${activity.activityId}`)}`;
-  const {sessionId} = await newPage(cdp, url);
+  const {targetId, sessionId} = await newPage(cdp, url);
   const loaded = await waitFor(cdp, sessionId, `
     document.body && (
       document.body.innerText.includes('可报名商品') ||
@@ -985,14 +1020,14 @@ async function processActivity(cdp, store, activity) {
       document.body.innerText.includes('不可报名商品')
     )
   `, 35_000);
-  if (!loaded) return {ok: false, store: store.storeKey, activity, reason: '活动页面未加载'};
+  if (!loaded) return {ok: false, store: store.storeKey, activity, targetId, reason: '活动页面未加载'};
 
   const selection = await selectAllGoodsAndNext(cdp, sessionId);
-  if (!selection.ok) return {ok: false, store: store.storeKey, activity, selection, reason: selection.reason || '选择商品失败'};
+  if (!selection.ok) return {ok: false, store: store.storeKey, activity, targetId, selection, reason: selection.reason || '选择商品失败'};
 
   const fill = await fillEditPage(cdp, sessionId, store.storeKey, activity.activityId);
   const currentUrl = await evalJs(cdp, sessionId, `return location.href;`).catch(() => '');
-  return {ok: fill.ok, store: store.storeKey, activity, selection, fill, url: currentUrl};
+  return {ok: fill.ok, store: store.storeKey, activity, targetId, selection, fill, url: currentUrl};
 }
 
 const selectedStores = STORES.filter(s => s.groupKey === 'DSY' && s.enabled)
@@ -1028,14 +1063,17 @@ for (const store of selectedStores) {
     summary.stores.push(storeResult);
     const scopeLabel = args.allOpen ? '所有未截止可报名活动' : (args.activityIds.length ? '指定活动' : `${args.hours}小时内截止活动`);
     console.log(`[${store.storeKey}] ${scopeLabel}：${due.map(a => `${a.activityId}-${a.name}`).join('；') || '无'}`);
+    const keepTargetIds = [];
     for (const activity of due) {
       console.log(`[${store.storeKey}] 处理 ${activity.activityId} ${activity.name}`);
       const result = await processActivity(cdp, store, activity).catch(err => ({ok: false, store: store.storeKey, activity, reason: err.message, stack: err.stack}));
       storeResult.results.push(result);
+      if (result.ok && result.targetId) keepTargetIds.push(result.targetId);
       const file = path.join(OUT_DIR, `${store.storeKey}-${activity.activityId}.json`);
       await fs.writeFile(file, JSON.stringify(result, null, 2), 'utf8');
       console.log(`[${store.storeKey}] ${activity.activityId} ${result.ok ? '完成' : '异常'} ${result.reason || ''}`);
     }
+    await cleanupStorePages(cdp, keepTargetIds);
   } catch (err) {
     summary.stores.push({store: store.storeKey, shopName: store.shopName, port: store.port, error: err.message, stack: err.stack});
     console.log(`[${store.storeKey}] 异常：${err.message}`);

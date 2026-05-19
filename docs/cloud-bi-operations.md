@@ -153,3 +153,16 @@ CODEX_HOME=/home/sheinops/.codex codex --version
 CODEX_HOME=/home/sheinops/.codex SHEIN_QA_CODEX_GATEWAY_ENABLED=1 node scripts/lark_sales_qa_bot.mjs --answer "DL这个店今天卖得最好的品是什么？"
 ```
 
+2026-05-19 云端 Codex 运行环境修复口径：
+
+- `/home/sheinops/.codex/auth.json` 可由本机私有 `auth.json` 手动覆盖更新；更新前先备份，文件权限保持 `600`，不得提交 GitHub。
+- 服务器已安装 `bubblewrap`，并修复 `/home/sheinops/.codex/sessions` 属主为 `sheinops`；`kernel.apparmor_restrict_unprivileged_userns=0` 写入 `/etc/sysctl.d/99-codex-bubblewrap.conf`，以允许 Codex Linux sandbox 使用 user namespace。
+- `~/.codex/config.toml` 使用 `[features] hooks = true`，不再使用过期 `codex_hooks`。
+- 冒烟命令：`cd /tmp && CODEX_HOME=/home/sheinops/.codex timeout 120 codex exec --sandbox read-only --skip-git-repo-check "只回复 OK，不要解释。" < /dev/null`。若只出现短暂 `Reconnecting...` 但最终返回 `OK`，按网络抖动处理，不视为配置失败。
+
+2026-05-19 链接/业务域日更故障修复口径：
+
+- 故障表现：销售 WebAPI 正常，但链接表现进入 SBN 商品分析页时被重定向到登录页，导致 `/sbn/new_goods/get_skc_diagnose_list` 抓不到 `x-gw-auth`，`shein-bi-cloud-link-business.service` 失败。
+- 修复：`scripts/bootstrap_shein_browser_session.mjs` 现在会把新鲜 WebAPI cookie 与浏览器导出的子系统 `localStorage/sessionStorage` 合并使用，避免只用 WebAPI cookie 时丢掉 SBN 子系统状态。
+- 兜底：`scripts/cloud_link_business_sync.sh` 支持部分店铺失败继续执行并记录 `state/cloud_ops_alerts/link-business-last-partial.json`；默认不把部分成功结果入仓刷新 BI，避免把不完整链接/业务域日期展示成全量成功。
+- 恢复手段：若云端 SBN 子系统态整体失效，可在本机用 `scripts/auto_relogin_shein_store.mjs` 恢复对应店铺、再用 `scripts/export_shein_browser_session.mjs` 导出 `state/shein_browser_sessions/*.local.json` 并同步到云端私有同名目录；这些 session 文件是敏感运行态，不进 GitHub。

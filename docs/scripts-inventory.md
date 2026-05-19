@@ -93,7 +93,8 @@
   - `import_product_costs.mjs`
 - 营销活动半自动：
   - `marketing/build_marketing_cost_map.py`
-  - `marketing/dsy_marketing_deadline_fill.mjs`：DSY 营销活动报名半自动补填；只勾选商品、填活动价/降幅和复核，不点最终提交。重扫漏报时显式传 `--stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --hours 48`，本期价格覆盖表用 `--price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD.json`。
+  - `marketing/export_dsy_marketing_standards.mjs`：只读导出 DSY 营销活动填报标准。用户要先审核标准时，先跑 `--stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open`，排除优惠券活动，输出明细和“按标准货号一行”的审核表。
+  - `marketing/dsy_marketing_deadline_fill.mjs`：DSY 营销活动报名半自动补填；只勾选商品、填活动价/降幅和复核，不点最终提交。重扫漏报时显式传 `--stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open`；脚本分页全量扫活动列表、选择页先切 `500 条/页`，完成后只保留需要用户提交的活动编辑页。本期价格覆盖表用 `--price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD-approved.json`，缺成本例外仅用 `--min-discount-fallback SK-13034`。
 - OpenAPI 试点：
   - `cloud_openapi_hl_reconciliation.sh`：Linux 云端 HL OpenAPI 并行对账入口；由 `shein-bi-cloud-openapi-hl.timer` 调用，需 SHEIN 开放平台白名单包含云服务器出口 IP。
   - `check_shein_openapi_client.mjs`

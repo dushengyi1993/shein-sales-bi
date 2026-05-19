@@ -141,7 +141,7 @@
 - 云端只读测试飞书问数机器人回答（在服务器 `/opt/shein-bi/app` 执行）：
   `CODEX_HOME=/home/sheinops/.codex SHEIN_QA_CODEX_GATEWAY_ENABLED=1 node scripts/lark_sales_qa_bot.mjs --answer "今天哪个店最差？原因可能是什么？"`
 - 云端 Codex CLI 连通性检查（只读执行，配置不进 GitHub）：
-  `CODEX_HOME=/home/sheinops/.codex codex exec --cd /opt/shein-bi/app --sandbox read-only "只回答 OK"`
+  `cd /tmp && CODEX_HOME=/home/sheinops/.codex timeout 120 codex exec --sandbox read-only --skip-git-repo-check "只回复 OK，不要解释。" < /dev/null`
 
 以下 Windows 命令当前只作为本地开发、排障或回滚参考；本地 BI 已封存，除非明确回滚，不要重新启用本地计划任务：
 
@@ -201,8 +201,10 @@
   `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_openapi_hl_reconciliation.ps1 -Mode intraday`
 - 生成营销活动成本映射：
   `python scripts/marketing/build_marketing_cost_map.py`
-- 辅助填报 DSY 两天内截止的营销活动（只预填，不点最终提交；若本期有价格覆盖表，必须带 `--price-overrides`）：
-  `node scripts/marketing/dsy_marketing_deadline_fill.mjs --stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --hours 48 --price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD.json --min-discount-fallback SK-13034`
+- 导出 DSY 营销活动填报标准（只读，按货号汇总给用户审核；默认排除优惠券活动）：
+  `node scripts/marketing/export_dsy_marketing_standards.mjs --stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open`
+- 辅助填报 DSY 全部未截止营销活动（只预填，不点最终提交；若本期有用户确认覆盖表，必须带 `--price-overrides`）：
+  `node scripts/marketing/dsy_marketing_deadline_fill.mjs --stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open --price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD-approved.json --min-discount-fallback SK-13034`
 - 生成成本表模板：
   `node scripts/create_cost_template.mjs`
 - 检查/导入成本表：

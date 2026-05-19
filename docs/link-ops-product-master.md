@@ -171,4 +171,12 @@ node scripts/link_ops_build_product_master_candidate_from_openapi.mjs --store HL
 - `supplierSku` 为空，但不阻断，因为不能用平台 `skuCode` 冒充；
 - 图片未写入母库。
 
-结论：如果源店也有 OpenAPI，读取母库资料的完整度明显高于当前 WebAPI 快照；短期没有源店 OpenAPI 时，需要继续找商品编辑页 WebAPI。
+### DL S1810 商品编辑页 WebAPI -> HL 草稿
+
+2026-05-19 已完成一次真实草稿保存验证：
+
+- 源读取：DL 商品编辑页 `/spmp/product/get_similar_product_detail` 读取 `S1810电热水壶`，可补齐链接快照缺失的 `productTypeId`、商品属性、SKU 尺寸/重量、成本等字段。
+- 目标写入：HL 商品子系统 `/spmp/product/save_draft` 更新草稿箱已有草稿 `v2603291437289685`，回读确认类目 `4681`、`product_type_id=1939`、属性 10 条、SKC 图 11 张、库存 100、成本 `70 SAR`、计划上架 `2036-05-19 10:00:00`。
+- 边界：本次只保存草稿，未提交审核或正式发布；图片不进入商品资料母库，只在执行时临时复制/引用，用后按任务素材生命周期清理。
+
+结论：如果源店也有 OpenAPI，读取母库资料的完整度通常高于链接快照；短期没有源店 OpenAPI 时，商品编辑页 WebAPI 已证明能补齐链接快照缺口，但还需固化为受控执行器，并继续处理登录态、仓库/报价/证书/类目规则等校验。

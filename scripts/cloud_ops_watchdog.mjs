@@ -93,6 +93,16 @@ function fmtHours(n) {
   return `${Math.round(n * 10) / 10}h`;
 }
 
+
+async function readJsonIfExists(file) {
+  try {
+    return JSON.parse(await fs.readFile(file, 'utf8'));
+  } catch (err) {
+    if (err?.code === 'ENOENT') return null;
+    return {error: String(err?.message || err)};
+  }
+}
+
 async function readPortalDates(file) {
   try {
     const data = JSON.parse((await fs.readFile(file, 'utf8')).replace(/^\uFEFF/, ''));
@@ -145,6 +155,13 @@ async function main() {
     if (status.ActiveState !== 'active') {
       issues.push(`定时器未运行：${timer} state=${status.ActiveState || '-'} result=${status.Result || '-'}`);
     }
+  }
+
+  const partialLinkBusiness = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'link-business-last-partial.json'));
+  if (partialLinkBusiness?.error) {
+    issues.push(`链接/业务域部分失败状态不可读：${partialLinkBusiness.error}`);
+  } else if (partialLinkBusiness?.failedStores) {
+    issues.push(`链接/业务域日更部分店铺失败：date=${partialLinkBusiness.date || '-'} failed=${partialLinkBusiness.failedStores || '-'} log=${partialLinkBusiness.logFile || '-'}`);
   }
 
   const portal = await readPortalDates(args.portalData);
