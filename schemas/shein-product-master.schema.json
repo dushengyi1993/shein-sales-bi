@@ -1,0 +1,230 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.shein-bi/schemas/shein-product-master.schema.json",
+  "title": "SHEIN Product Master Candidate",
+  "type": "object",
+  "required": [
+    "schema",
+    "recordStatus",
+    "reviewStatus",
+    "identity",
+    "categoryProfile",
+    "titleSet",
+    "categoryAttributes",
+    "skuTemplates",
+    "pricingPolicy",
+    "imagePolicy",
+    "sourceObservations",
+    "conflicts"
+  ],
+  "properties": {
+    "schema": {
+      "const": "shein-product-master/v1"
+    },
+    "generatedAt": {
+      "type": "string"
+    },
+    "recordStatus": {
+      "enum": ["candidate", "active", "conflict", "archived"]
+    },
+    "reviewStatus": {
+      "enum": ["needs_review", "ready_candidate", "approved", "rejected"]
+    },
+    "identity": {
+      "type": "object",
+      "required": ["standardGoodsSn", "canonicalProductKey"],
+      "properties": {
+        "standardGoodsSn": {"type": "string"},
+        "canonicalProductKey": {"type": "string"},
+        "productFamily": {"type": "string"},
+        "sourceGoodsSnList": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      },
+      "additionalProperties": true
+    },
+    "categoryProfile": {
+      "type": "object",
+      "required": ["categoryId", "productTypeId", "brandCode", "status"],
+      "properties": {
+        "categoryId": {"type": "string"},
+        "productTypeId": {"type": "string"},
+        "categoryName": {"type": "string"},
+        "categoryPath": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "brandCode": {"type": "string"},
+        "brandName": {"type": "string"},
+        "status": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "titleSet": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["language", "title", "source", "status"],
+        "properties": {
+          "language": {"type": "string"},
+          "title": {"type": "string"},
+          "source": {"type": "string"},
+          "status": {"type": "string"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "categoryAttributes": {
+      "type": "object",
+      "required": ["model", "productAttributes", "saleAttributes"],
+      "properties": {
+        "model": {"const": "dynamic_attribute_array"},
+        "productAttributes": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/attributeValue"}
+        },
+        "saleAttributes": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/attributeValue"}
+        },
+        "note": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "skuTemplates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["templateKey", "supplierSku", "supplierSkuStatus", "platformSkuPolicy", "dimensions", "costInfo", "stockPolicy"],
+        "properties": {
+          "templateKey": {"type": "string"},
+          "variationText": {"type": "string"},
+          "sourcePlatformSkuCode": {"type": "string"},
+          "sourceSupplierSku": {"type": "string"},
+          "supplierSku": {"type": "string"},
+          "supplierSkuStatus": {"type": "string"},
+          "platformSkuPolicy": {
+            "type": "object",
+            "required": ["doNotGeneratePlatformSkuCode"],
+            "properties": {
+              "doNotGeneratePlatformSkuCode": {"const": true},
+              "note": {"type": "string"}
+            },
+            "additionalProperties": true
+          },
+          "dimensions": {
+            "type": "object",
+            "properties": {
+              "length": {"type": ["number", "null"]},
+              "width": {"type": ["number", "null"]},
+              "height": {"type": ["number", "null"]},
+              "weight": {"type": ["number", "null"]},
+              "unit": {"type": "string"},
+              "status": {"type": "string"}
+            },
+            "additionalProperties": true
+          },
+          "costInfo": {
+            "type": "object",
+            "properties": {
+              "currency": {"type": "string"},
+              "supplyPrice": {"type": ["number", "null"]},
+              "costSource": {"type": "string"},
+              "status": {"type": "string"}
+            },
+            "additionalProperties": true
+          },
+          "stockPolicy": {
+            "type": "object",
+            "properties": {
+              "initialStock": {"type": "number"},
+              "status": {"type": "string"}
+            },
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "compliance": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "pricingPolicy": {
+      "type": "object",
+      "required": ["mode", "defaultStrategies", "manualOverrideAllowed", "conflictPolicy"],
+      "properties": {
+        "mode": {"type": "string"},
+        "defaultStrategies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["code", "label"],
+            "properties": {
+              "code": {"type": "string"},
+              "label": {"type": "string"}
+            },
+            "additionalProperties": true
+          }
+        },
+        "manualOverrideAllowed": {"type": "boolean"},
+        "conflictPolicy": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "imagePolicy": {
+      "type": "object",
+      "required": ["storeImagesInMaster", "strategy"],
+      "properties": {
+        "storeImagesInMaster": {"const": false},
+        "strategy": {"const": "task_temp_material_package_only"},
+        "note": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "sourceObservations": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "conflicts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["fieldPath", "type", "status"],
+        "properties": {
+          "fieldPath": {"type": "string"},
+          "type": {"type": "string"},
+          "status": {"type": "string"},
+          "candidates": {"type": "array"},
+          "resolution": {},
+          "note": {"type": "string"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "openapiMapping": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "attributeValue": {
+      "type": "object",
+      "required": ["scope", "attributeId", "valueId", "valueText", "status"],
+      "properties": {
+        "scope": {"type": "string"},
+        "attributeId": {"type": "string"},
+        "attributeName": {"type": "string"},
+        "valueId": {"type": "string"},
+        "valueText": {"type": "string"},
+        "valueUnit": {"type": "string"},
+        "source": {"type": "string"},
+        "status": {"type": "string"},
+        "conflictKey": {"type": "string"}
+      },
+      "additionalProperties": true
+    }
+  }
+}

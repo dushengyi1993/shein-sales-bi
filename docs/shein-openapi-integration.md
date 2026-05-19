@@ -240,6 +240,16 @@ node scripts/link_ops_build_product_draft_from_webapi.mjs --source-store DL --so
 - DL `S1810电热水壶 / sv260315124105439111444` 样本已能生成：类目 `4681`、品牌 `2a64l`、英文标题、3 个图片候选、1 个 SKC、1 个 SKU、库存草稿 `100`、计划上架时间 `10` 年后；但仍会阻断真实提交，因为当前快照缺 `product_attribute_list`、SKU 尺寸/重量、`supplier_sku` 和 `cost_info`。
 - 长期架构保持不变：短期源店读取走 WebAPI/云端登录态；后续 DL 等源店拿到官方 OpenAPI 后，只替换源读取器，继续复用 canonical draft 和 HL 目标写执行器。
 
+2026-05-19 已补商品资料母库结构与 HL OpenAPI 源读取验证：
+
+- 母库设计文档：`docs/link-ops-product-master.md`。
+- 母库候选 JSON Schema：`schemas/shein-product-master.schema.json`。
+- WebAPI 快照候选生成：`scripts/link_ops_build_product_master_candidate.mjs`。
+- OpenAPI 源读取候选生成：`scripts/link_ops_build_product_master_candidate_from_openapi.mjs`。
+- DL `S1810电热水壶 / sv260315124105439111444` 用当前 WebAPI 快照可生成 `candidate_needs_review`，母库不含图片 URL，但仍缺 `productTypeId`、完整商品属性、尺寸重量。
+- HL OpenAPI 已验证可从 `/open-api/openapi-business-backend/product/query` 取 `spuName`，再调用 `/open-api/goods/spu-info` 获取较完整商品详情；样本 `FZ-666颈部按摩器` 可生成 `candidate_ready`，包含 `productTypeId`、商品属性、销售属性、尺寸重量、SAR 成本等字段。OpenAPI 返回的 `skuCode` 是平台编号，只做追溯；`supplierSku` 为空时不拿平台 `skuCode` 冒充。
+- 价格/核价不作为商品资料冲突。复制发品前按报价策略处理：默认可按 `50%` 利润率或同款其它店最高核价报价，并允许人工覆盖。
+
 ## 2026-05-10 进展：CX 开放平台应用已提交审核
 
 已在 CX 店铺对应开放平台账号中创建并提交应用：

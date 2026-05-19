@@ -441,7 +441,7 @@ function validatePublishPayload(payload) {
         if (sku?.[key] === undefined || sku?.[key] === null || sku?.[key] === '') blockers.push(`${skuPrefix} 缺 ${key}。`);
       }
       if (!sku?.mall_state && !sku?.mallState) blockers.push(`${skuPrefix} 缺 mall_state。`);
-      if (!sku?.supplier_sku && !sku?.supplierSku) blockers.push(`${skuPrefix} 缺 supplier_sku。`);
+      if (!sku?.supplier_sku && !sku?.supplierSku) warnings.push(`${skuPrefix} 缺 supplier_sku：不使用平台 sku_code 冒充；若 SHEIN 发布接口强制要求，再按规则或人工补。`);
       if (!sku?.cost_info && !sku?.costInfo) blockers.push(`${skuPrefix} 缺 cost_info：半托管新发品需要供货价/成本信息。`);
       const stockList = asArray(sku?.stock_info_list || sku?.stockInfoList);
       if (!stockList.length) blockers.push(`${skuPrefix} 缺 stock_info_list：至少需要库存数量，通常还需要仓库。`);
