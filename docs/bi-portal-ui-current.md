@@ -262,5 +262,6 @@
 - 本机素材边界：云端 BI 不能直接读取用户本机的标题文件、商品图或本机 skill。短期执行路径是先把图片/标题/规则上传或同步到云端任务素材包，再由云端执行器调用 SHEIN API/WebAPI/headless 执行；缺素材或缺接口权限时任务停在执行准备，不静默写 SHEIN。
 - 2026-05-17 已补第一版素材与执行器基座：`/api/link-ops-assets` 支持把图片、PDF 证书、TXT/CSV/JSON 标题或规则文件上传到任务素材包；本机批量同步可用 `scripts/upload_link_ops_assets.mjs`。`/api/link-ops-execute` 只做受控执行前检查和执行准备，要求任务先“确认成任务”，缺素材会阻断；第一版不会静默提交 SHEIN，也不会把未执行的写操作显示为成功。
 - 2026-05-18 补充：链接管理中台会区分“店铺已有 OpenAPI 授权”和“具体写适配器是否已实现”。HL 已有 OpenAPI 授权和只读/销售对账能力，相关补链/复制上品命令会进入任务池与 HL API 执行准备；但商品发布/提交审核写适配器未实现验证前，执行器会在预检阶段阻断真实提交，不得笼统回复“HL 没有权限”或谎称已提交审核。
+- 2026-05-19 补充：HL 商品写执行器已接入 `/api/link-ops-execute`。对 HL 的 `copy_product_draft` 任务，服务端会调用 `scripts/link_ops_hl_openapi_executor.mjs` 做真实 OpenAPI 发品权限、站点、品牌、仓库和发布 payload 预检，并把结果写回任务 `execution.hlOpenApiExecutor`。默认调用只做 dry-run，不会提交 SHEIN；真实 `publishOrEdit` 仍需要 payload 完整和显式执行确认。若缺源商品详情映射，任务应显示“缺发布 payload / 缺类目属性图片 SKU 成本库存尺寸”等具体阻断，而不是显示“没有权限”。
 - SHEIN 写操作仍遵守长期边界：建议/预填/用户确认/人工最终提交/审计留痕；未经明确授权，不自动提交上品、下架、换图、换标题、报活动或限时折扣。
 

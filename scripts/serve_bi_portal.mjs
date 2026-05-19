@@ -86,8 +86,8 @@ const LINK_OPS_STORE_CAPABILITIES = {
     openapiAuthorized: true,
     verifiedRead: true,
     salesReconciliation: true,
-    productPublishAdapter: false,
-    note: 'HL 已完成 SHEIN OpenAPI 真实授权，并已验证商品/订单/库存等只读接口和销售对账；商品发布/提交审核写适配器尚未实现验证。',
+    productPublishAdapter: true,
+    note: 'HL 已完成 SHEIN OpenAPI 真实授权，并已验证商品/订单/库存等只读接口和销售对账；商品发布/编辑执行器已接入受控预检，真实提交仍要求 payload 完整和显式确认。',
   },
 };
 const LINK_OPS_ALLOWED_UPLOAD_MIME = new Set([
@@ -468,7 +468,7 @@ function linkOpsCapabilityNotes(intents = [], targets = {}) {
   const stores = normalizeConcreteStoreKeys(normalizeLinkOpsTargetSet(targets).stores);
   const notes = [];
   if (stores.includes('HL')) {
-    notes.push('HL OpenAPI 已授权且只读/销售对账已验证；但商品发布/提交审核写适配器尚未接入验证，当前任务应进入 HL API 执行准备/预检，不能说“没有权限”，也不能谎称已提交审核。');
+    notes.push('HL OpenAPI 已授权且商品发布/编辑受控执行器已接入；当前任务应进入 HL API 预检/执行准备，缺发布 payload 时说明缺类目、属性、图片、SKU、成本、库存等资料，不能说“没有权限”，也不能谎称已提交审核。');
   }
   const notOpenApiStores = stores.filter(store => store !== 'HL');
   if (notOpenApiStores.length) {
@@ -974,8 +974,8 @@ function runPreflightForLinkOpsTask(task) {
   if (needs.includes('image') && !assets.some(a => a.kind === 'image')) {
     blockers.push('缺少图片素材：请先上传或同步商品图。');
   }
-  if (needs.includes('image_or_certificate') && !assets.some(a => a.kind === 'image' || a.kind === 'certificate')) {
-    blockers.push('复制上品缺少图片/证书素材：请先上传或同步可复用素材。');
+  if (needs.includes('image_or_certificate') && !assets.some(a => a.kind === 'image' || a.kind === 'certificate' || a.mime === 'application/json')) {
+    warnings.push('复制上品暂未上传图片/证书/发布 payload；若执行器不能从源商品详情还原素材，会在 OpenAPI 预检中继续阻断。');
   }
   if (needs.includes('certificate') && !assets.some(a => a.kind === 'certificate' || a.mime === 'application/pdf')) {
     blockers.push('缺少证书/资质文件。');
@@ -1000,38 +1000,192 @@ function runPreflightForLinkOpsTask(task) {
   };
 }
 
-function startControlledLinkOpsExecution(task, actor, req) {
+function shouldRunHlOpenApiProductExecutor(task) {
+  const intents = Array.isArray(task?.intents) ? task.intents : [];
+  const targets = normalizeLinkOpsTargetSet(task?.targets || {});
+  const stores = normalizeConcreteStoreKeys(targets.stores);
+  return intents.includes('copy_product_draft') && stores.includes('HL');
+}
+
+function uniqueMessages(values = []) {
+  const out = [];
+  const seen = new Set();
+  for (const value of values) {
+    const s = String(value || '').trim();
+    if (!s || seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
+function asArray(value) {
+  if (value === undefined || value === null) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function parseChildJsonOutput(stdout = '') {
+  const text = String(stdout || '').trim();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {}
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    try {
+      return JSON.parse(text.slice(start, end + 1));
+    } catch {}
+  }
+  return null;
+}
+
+async function runHlOpenApiProductExecutor(task, args, body = {}) {
+  const mode = String(body.mode || body.executionMode || '').toLowerCase() === 'execute' || body.execute === true
+    ? 'execute'
+    : 'dry-run';
+  const childArgs = [
+    path.join(ROOT, 'scripts', 'link_ops_hl_openapi_executor.mjs'),
+    '--task-file', args.linkOpsTaskFile,
+    '--task-id', String(task.id || ''),
+    mode === 'execute' ? '--execute' : '--dry-run',
+  ];
+  if (mode === 'execute') {
+    childArgs.push('--confirm', String(body.confirm || body.confirmText || ''));
+  }
+  const result = await runChildProcess(process.execPath, childArgs, {
+    cwd: ROOT,
+    timeoutMs: Number(process.env.SHEIN_LINK_OPS_OPENAPI_EXECUTOR_TIMEOUT_MS || 180_000),
+  });
+  const parsed = parseChildJsonOutput(result.stdout);
+  if (parsed) {
+    return {
+      ok: Boolean(parsed.ok),
+      mode,
+      code: result.code,
+      timedOut: result.timedOut,
+      result: parsed,
+      stderrTail: String(result.stderr || '').slice(-1200),
+    };
+  }
+  return {
+    ok: false,
+    mode,
+    code: result.code,
+    timedOut: result.timedOut,
+    result: {
+      ok: false,
+      state: result.timedOut ? 'timeout' : 'error',
+      blockers: [`HL OpenAPI 执行器未返回可解析结果：code=${result.code}${result.timedOut ? ' timeout=true' : ''}`],
+      warnings: [],
+      rawStdoutTail: String(result.stdout || '').slice(-1200),
+      rawStderrTail: String(result.stderr || '').slice(-1200),
+    },
+    stderrTail: String(result.stderr || '').slice(-1200),
+  };
+}
+
+async function startControlledLinkOpsExecution(task, actor, req, args, body = {}) {
   const preflight = runPreflightForLinkOpsTask(task);
+  let hlOpenApiExecutor = null;
+  if (shouldRunHlOpenApiProductExecutor(task)) {
+    hlOpenApiExecutor = await runHlOpenApiProductExecutor(task, args, body);
+  }
+  const executorResult = hlOpenApiExecutor?.result || null;
+  const combinedBlockers = uniqueMessages([
+    ...preflight.blockers,
+    ...asArray(executorResult?.blockers),
+  ]);
+  const combinedWarnings = uniqueMessages([
+    ...preflight.warnings,
+    ...asArray(executorResult?.warnings),
+  ]);
+  const ok = combinedBlockers.length === 0;
   const now = new Date().toISOString();
   const runId = `lor_${now.replace(/[-:.TZ]/g, '').slice(0, 14)}_${crypto.randomBytes(4).toString('hex')}`;
+  const executorState = executorResult?.state || (ok ? 'ready_for_prefill' : 'blocked');
+  const submitted = executorState === 'submitted';
+  const nextStatus = submitted
+    ? 'in_progress'
+    : hlOpenApiExecutor
+      ? 'waiting_review'
+      : (ok ? 'in_progress' : 'waiting_review');
+  const nextProgress = submitted
+    ? Math.max(normalizeProgress(task.progress, 0), 80)
+    : ok
+      ? Math.max(normalizeProgress(task.progress, 0), hlOpenApiExecutor ? 70 : 65)
+      : Math.max(normalizeProgress(task.progress, 0), 45);
   const next = {
     ...task,
-    status: preflight.ok ? 'in_progress' : 'waiting_review',
-    progress: preflight.ok ? Math.max(normalizeProgress(task.progress, 0), 65) : Math.max(normalizeProgress(task.progress, 0), 45),
-    note: preflight.ok
-      ? '受控执行器已完成前置检查；当前第一版停在执行准备/预填阶段，不会静默提交 SHEIN。'
-      : `执行器未启动：${preflight.blockers.join('；')}`,
+    status: nextStatus,
+    progress: nextProgress,
+    note: submitted
+      ? 'HL OpenAPI 已提交 publishOrEdit，等待 SHEIN 审核/状态回查。'
+      : ok && hlOpenApiExecutor
+        ? 'HL OpenAPI 执行器预检通过；仍需最终执行确认，系统不会静默提交 SHEIN。'
+        : ok
+          ? '受控执行器已完成前置检查；当前停在执行准备/预填阶段，不会静默提交 SHEIN。'
+          : `执行器阻断：${combinedBlockers.join('；')}`,
     execution: {
       ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
-      mode: 'controlled_prefill',
+      mode: hlOpenApiExecutor ? 'hl_openapi_product_executor' : 'controlled_prefill',
       enabled: true,
       runId,
-      state: preflight.ok ? 'ready_for_prefill' : 'blocked',
+      state: executorState,
       canAutoSubmit: false,
       canSilentWrite: false,
-      preflight,
+      preflight: {
+        ...preflight,
+        ok,
+        blockers: combinedBlockers,
+        warnings: combinedWarnings,
+      },
+      hlOpenApiExecutor: executorResult ? {
+        ok: Boolean(executorResult.ok),
+        mode: hlOpenApiExecutor.mode,
+        state: executorResult.state || '',
+        runId: executorResult.runId || '',
+        savedTo: executorResult.savedTo || '',
+        payload: executorResult.payload || null,
+        openapi: executorResult.openapi ? {
+          canPublishProduct: executorResult.openapi.canPublishProduct,
+          publishPermissionReason: executorResult.openapi.publishPermissionReason,
+          sites: executorResult.openapi.sites,
+          brands: executorResult.openapi.brands,
+          warehouses: executorResult.openapi.warehouses,
+          calls: executorResult.openapi.calls,
+        } : null,
+        publishResult: executorResult.publishResult || null,
+        safety: executorResult.safety || null,
+      } : null,
       startedAt: now,
       startedBy: actorLabel(actor, req),
-      note: '第一版只做材料/权限/防重检查和执行准备；正式 SHEIN 提交必须后续接具体适配器并保留人工确认。',
+      note: hlOpenApiExecutor
+        ? 'HL OpenAPI 执行器已接入。默认只做预检；真实 publishOrEdit 必须任务已确认、payload 完整、显式 execute 和确认文本同时满足。'
+        : '第一版只做材料/权限/防重检查和执行准备；正式 SHEIN 提交必须后续接具体适配器并保留人工确认。',
     },
     updatedAt: now,
   };
-  next.history = appendTaskHistory(next, preflight.ok ? 'start_controlled_executor' : 'executor_blocked', actor, req, {
+  next.history = appendTaskHistory(next, ok ? (submitted ? 'hl_openapi_submitted' : (hlOpenApiExecutor ? 'hl_openapi_preflight_ready' : 'start_controlled_executor')) : 'executor_blocked', actor, req, {
     status: next.status,
     progress: normalizeProgress(next.progress, 0),
     runId,
-    blockers: preflight.blockers,
-    warnings: preflight.warnings,
+    blockers: combinedBlockers,
+    warnings: combinedWarnings,
+    hlOpenApiExecutor: executorResult ? {
+      state: executorResult.state || '',
+      runId: executorResult.runId || '',
+      savedTo: executorResult.savedTo || '',
+      payloadFound: Boolean(executorResult.payload?.found),
+      payloadSummary: executorResult.payload?.summary || null,
+      canPublishProduct: executorResult.openapi?.canPublishProduct ?? null,
+      publishResult: executorResult.publishResult ? {
+        httpStatus: executorResult.publishResult.httpStatus,
+        code: executorResult.publishResult.code,
+        msg: executorResult.publishResult.msg,
+        traceId: executorResult.publishResult.traceId,
+      } : null,
+    } : null,
   });
   return next;
 }
@@ -1768,7 +1922,7 @@ async function main() {
           const current = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
           const idx = current.tasks.findIndex(t => String(t.id || '') === id);
           if (idx < 0) return sendJson(res, 404, {ok: false, error: 'Task not found'});
-          const updated = startControlledLinkOpsExecution(current.tasks[idx], actor, req);
+          const updated = await startControlledLinkOpsExecution(current.tasks[idx], actor, req, args, body);
           const tasks = current.tasks.slice();
           tasks[idx] = updated;
           const next = {version: 1, updatedAt: new Date().toISOString(), tasks};

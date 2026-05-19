@@ -200,6 +200,34 @@ node scripts/generate_bi_portal.mjs
 
 当前结论：HL 销售入口已经具备“官方 OpenAPI 与当前生产销售源双跑、并行入仓、BI 可见对账”的最小闭环；正式切换生产事实表前，仍需继续积累多日 matched 结果，并等待已申请权限审核完成后再扩展销量、SFS、库存、财务等更多业务域。
 
+## 2026-05-19 进展：HL 商品写执行器预检接入
+
+已按官方文档和真实接口返回确认 HL 具备商品发布前置能力：
+
+- 官方接口：`/open-api/goods/product/check-publish-permission`，文档页：<https://open.sheincorp.com/documents/apidoc/detail/3001589>。
+- 官方商品发布/编辑接口：`/open-api/goods/product/publishOrEdit`，文档页：<https://open.sheincorp.com/documents/apidoc/detail/3001707>。
+- 真实 HL 探针返回：`canPublishProduct=true`。
+- 真实站点列表包含 `shein-sa`，币种 `SAR`。
+- 真实品牌列表包含 `SOKANY`，`brand_code=2a64l`。
+
+已新增受控执行器：
+
+```powershell
+node scripts/link_ops_hl_openapi_executor.mjs --task-id <任务ID> --dry-run
+```
+
+执行器默认只做预检，不调用发布接口。它会真实调用 HL OpenAPI 检查发品权限、站点、品牌和仓库，然后寻找任务里的 `openapiPublishPayload` 或任务素材 JSON 中的发布 payload。
+
+真实提交必须同时满足：
+
+- 任务已确认；
+- 目标店铺包含 `HL`；
+- intent 包含 `copy_product_draft`；
+- 发布 payload 完整，包含类目、属性、站点、SKC 图片、销售属性、SKU、供货价/成本、库存、尺寸重量和上架方式等字段；
+- 命令显式传入 `--execute --confirm SHEIN_HL_OPENAPI_SUBMIT`。
+
+当前边界：执行器已经不再停留在“HL 没有权限 / 适配器未实现”，但 BI 现有链接表现数据不足以直接还原完整商品发布 payload。复制 DL 等非 OpenAPI 店铺的已上 SKC 到 HL 时，还需要下一步接入“源商品详情抓取/映射器”，把源后台详情转换成 `publishOrEdit` 所需 payload；否则执行器会阻断并说明缺失类目、属性、图片、SKU、成本、库存和尺寸重量等资料。
+
 ## 2026-05-10 进展：CX 开放平台应用已提交审核
 
 已在 CX 店铺对应开放平台账号中创建并提交应用：
