@@ -15,7 +15,19 @@ const LLM_TIMEOUT_MS = Number(process.env.SHEIN_QA_LLM_TIMEOUT_MS || 45_000);
 const LLM_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_LLM_ENABLED || '1').toLowerCase());
 const CODEX_GATEWAY_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_CODEX_GATEWAY_ENABLED || '1').toLowerCase());
 const CODEX_GATEWAY_TIMEOUT_MS = Number(process.env.SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS || 120_000);
+const LARK_CLI_BIN = process.env.LARK_CLI_BIN || 'lark-cli';
+const LARK_CLI_PREFIX_ARGS = parseArgList(process.env.LARK_CLI_PREFIX_ARGS || '');
 const STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ'];
+
+function parseArgList(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) return parsed.map(v => String(v));
+  } catch {}
+  return text.split(/\s+/).filter(Boolean);
+}
 
 function parseArgs(argv) {
   const args = {answer: '', consume: false, dryRun: false};
@@ -35,6 +47,10 @@ async function readData() {
 function n(value) {
   const x = Number(value || 0);
   return Number.isFinite(x) ? x : 0;
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
 }
 
 function moneySar(value) {
@@ -232,6 +248,121 @@ function linkRelevanceScore(row, {stores, product, numberHints, latestNumberHint
   return score;
 }
 
+function wantsInventoryQuestion(text) {
+  return /ET|et|货代|库存|在库|在途|仓库|仓|去化|补货|可卖|售罄|缺货|断货|周转|剩余/.test(String(text || ''));
+}
+
+function inventoryRelevanceScore(row, {product, numberHints, latestNumberHints, wantsInventory}) {
+  let score = wantsInventory ? 500 : 0;
+  const standardGoodsSn = String(row?.standard_goods_sn || row?.standard_goods_sn_list || '');
+  if (product && (standardGoodsSn === product || standardGoodsSn.includes(product))) score += 100000;
+  const numericFields = [
+    row?.et_loose_sellable_qty,
+    row?.et_full_carton_qty,
+    row?.et_estimated_available_qty,
+    row?.estimated_on_hand_quantity,
+    row?.incoming_quantity,
+    row?.estimated_total_supply_quantity,
+    row?.gross_sold_7d,
+    row?.gross_sold_30d,
+    row?.days_of_supply_on_hand,
+    row?.days_of_supply_with_incoming,
+  ];
+  if ((latestNumberHints || []).some(h => numericFields.some(v => valueMatchesNumberHint(v, [h])))) score += 50000;
+  if ((numberHints || []).some(h => numericFields.some(v => valueMatchesNumberHint(v, [h])))) score += 20000;
+  if (row?.has_et_inventory) score += 3000;
+  if (String(row?.risk_level || '').toLowerCase() === 'high') score += 1200;
+  if (/售罄|缺货|断货|补货|在途/i.test(String(row?.stock_status || ''))) score += 900;
+  if (n(row?.days_of_supply_on_hand) <= 7 && n(row?.weighted_daily_gross_sales) > 0) score += 700;
+  if (n(row?.et_estimated_available_qty) > 0) score += Math.min(500, n(row.et_estimated_available_qty));
+  score += Math.min(500, n(row?.gross_sold_30d) * 2);
+  return score;
+}
+
+function compactInventoryContext({question, data, product, numberHints, latestNumberHints}) {
+  const wantsInventory = wantsInventoryQuestion(question);
+  const inventory = data.inventoryDepletion || {};
+  const products = asArray(inventory.products)
+    .filter(row => {
+      if (!product) return true;
+      const standardGoodsSn = String(row?.standard_goods_sn || row?.standard_goods_sn_list || '');
+      return standardGoodsSn === product || standardGoodsSn.includes(product);
+    })
+    .sort((a, b) => inventoryRelevanceScore(b, {product, numberHints, latestNumberHints, wantsInventory})
+      - inventoryRelevanceScore(a, {product, numberHints, latestNumberHints, wantsInventory})
+      || n(a.days_of_supply_on_hand) - n(b.days_of_supply_on_hand)
+      || n(b.gross_sold_30d) - n(a.gross_sold_30d))
+    .slice(0, product ? 12 : 24);
+  const batches = asArray(inventory.batches)
+    .filter(row => {
+      if (!product) return false;
+      const standardGoodsSn = String(row?.standard_goods_sn || '');
+      return standardGoodsSn === product || standardGoodsSn.includes(product);
+    })
+    .slice(0, 12);
+  const lowPlatformStock = asArray(data.inventoryAlerts)
+    .filter(row => {
+      if (!product) return true;
+      const standardGoodsSn = String(row?.standard_goods_sn || '');
+      return standardGoodsSn === product || standardGoodsSn.includes(product);
+    })
+    .sort((a, b) => n(a.usable_inventory ?? a.inventory_quantity) - n(b.usable_inventory ?? b.inventory_quantity))
+    .slice(0, product ? 20 : 16);
+  return {
+    freshness: {
+      etUpdatedAt: data.dates?.etUpdatedAt || '',
+      etLatestBatchId: data.dates?.etLatestBatchId || '',
+      costFileUpdatedAt: data.dates?.manualCostFileUpdatedAt || '',
+    },
+    method: inventory.method || null,
+    products: products.map(r => ({
+      standard_goods_sn: r.standard_goods_sn,
+      goods_title: r.goods_title,
+      stock_status: r.stock_status,
+      risk_level: r.risk_level,
+      has_et_inventory: r.has_et_inventory,
+      et_loose_sellable_qty: r.et_loose_sellable_qty,
+      et_full_carton_qty: r.et_full_carton_qty,
+      et_estimated_available_qty: r.et_estimated_available_qty,
+      et_pending_process_qty: r.et_pending_process_qty,
+      et_damaged_qty: r.et_damaged_qty,
+      et_rtv_qty: r.et_rtv_qty,
+      estimated_on_hand_quantity: r.estimated_on_hand_quantity,
+      incoming_quantity: r.incoming_quantity,
+      estimated_total_supply_quantity: r.estimated_total_supply_quantity,
+      gross_sold_7d: r.gross_sold_7d,
+      gross_sold_30d: r.gross_sold_30d,
+      weighted_daily_gross_sales: r.weighted_daily_gross_sales,
+      days_of_supply_on_hand: r.days_of_supply_on_hand,
+      days_of_supply_with_incoming: r.days_of_supply_with_incoming,
+      et_loose_warehouses: r.et_loose_warehouses,
+      et_box_warehouses: r.et_box_warehouses,
+      et_store_snapshot_date: r.et_store_snapshot_date,
+      et_box_snapshot_date: r.et_box_snapshot_date,
+    })),
+    batches: batches.map(r => ({
+      batch_no: r.batch_no,
+      standard_goods_sn: r.standard_goods_sn,
+      batch_status: r.batch_status,
+      shipped_quantity: r.shipped_quantity,
+      estimated_remaining_quantity: r.estimated_remaining_quantity,
+      shipped_date: r.shipped_date,
+      arrived_date: r.arrived_date,
+    })),
+    platformStockAlerts: lowPlatformStock.map(r => ({
+      store_key: r.store_key,
+      standard_goods_sn: r.standard_goods_sn,
+      skc: r.skc,
+      snapshot_date: r.snapshot_date,
+      shelf_statuses: r.shelf_statuses,
+      usable_inventory: r.usable_inventory,
+      inventory_quantity: r.inventory_quantity,
+      pay_locked_quantity: r.pay_locked_quantity,
+      order_locked_quantity: r.order_locked_quantity,
+    })),
+  };
+}
+
 function rowSummary(row) {
   return `${moneySar(row?.gross_sales_sar ?? row?.sales_sar)}，订单 ${intNum(row?.gross_orders ?? row?.orders)}，销量 ${intNum(row?.gross_quantity ?? row?.quantity)}`;
 }
@@ -266,6 +397,37 @@ function answerWorstStoreQuestion(date, data, latestNote) {
     `可能原因：${storeRiskReason(worst.store_key, data)}`,
     `倒序参考：${bottom.map((r, i) => `${i + 1}. ${r.store_key} ${moneySar(r.gross_sales_sar ?? r.sales_sar)} / ${intNum(r.gross_orders ?? r.orders)}单`).join('；')}`,
     latestNote,
+  ].filter(Boolean).join('\n');
+}
+
+function answerInventoryQuestion(text, data) {
+  const q = normalizeText(text);
+  const product = findProductSmart(q, data);
+  const numberHints = extractNumberHints(q);
+  const latestNumberHints = extractNumberHints(detectionTexts(q)[0] || q);
+  const inventory = compactInventoryContext({question: q, data, product, numberHints, latestNumberHints});
+  const products = inventory.products || [];
+  const alerts = inventory.platformStockAlerts || [];
+  const freshness = inventory.freshness || {};
+  const latestNote = `ET 库存更新时间：${freshness.etUpdatedAt || '-'}；ET 批次：${freshness.etLatestBatchId || '-'}；BI生成：${data.generatedAt || '-'}`;
+  if (!products.length && !alerts.length) {
+    return `没查到${product ? ` ${product}` : ''} 的 ET/库存去化数据。\n${latestNote}`;
+  }
+  const rows = products.slice(0, product ? 8 : 10);
+  return [
+    product ? `${product} 库存/去化：` : `当前 ET/库存去化重点：`,
+    ...rows.map((r, i) => [
+      `${i + 1}. ${r.standard_goods_sn || '-'}`,
+      `状态 ${r.stock_status || '-'}`,
+      `ET可用 ${intNum(r.et_estimated_available_qty)} 件`,
+      `估算在库 ${intNum(r.estimated_on_hand_quantity)} 件`,
+      `在途 ${intNum(r.incoming_quantity)} 件`,
+      `近30天销量 ${intNum(r.gross_sold_30d)} 件`,
+      `在库可卖 ${r.days_of_supply_on_hand ?? '-'} 天`,
+      `含在途可卖 ${r.days_of_supply_with_incoming ?? '-'} 天`,
+    ].join('；')),
+    alerts.length ? `平台低展示库存样本：${alerts.slice(0, 6).map(a => `${a.store_key}/${a.standard_goods_sn} ${intNum(a.usable_inventory ?? a.inventory_quantity)}件`).join('；')}` : '',
+    `口径：ET/成本表实物库存与去化，不等同于 SHEIN 平台展示库存。${latestNote}`,
   ].filter(Boolean).join('\n');
 }
 
@@ -315,6 +477,7 @@ function compactSalesContext(question, data) {
     .sort((a, b) => n(b.max_action_score) - n(a.max_action_score) || n(b.sales_sar) - n(a.sales_sar))
     .slice(0, 30);
   const summary = (data.rankings?.salesSummary || []).filter(r => r.end_date === date).slice(0, 12);
+  const inventory = compactInventoryContext({question: rawQuestion, data, product, numberHints, latestNumberHints});
   return {
     dataFreshness: {
       askedDate: date,
@@ -322,8 +485,11 @@ function compactSalesContext(question, data) {
       salesUpdatedAt: data.dates?.salesUpdatedAt || '',
       linkDate: data.dates?.linkDate || '',
       businessDate: data.dates?.businessDate || '',
+      etUpdatedAt: data.dates?.etUpdatedAt || '',
+      etLatestBatchId: data.dates?.etLatestBatchId || '',
     },
     detected: {store, stores, product, numberHints, latestNumberHints, skcHints},
+    inventory,
     salesSummary: summary,
     storeTop: topRows(stores.length ? dailyStores.filter(r => rowMatchesStores(r, stores)) : dailyStores, 'gross_sales_sar', 16),
     productTop: topRows(product ? dailyProducts.filter(r => r.standard_goods_sn === product) : dailyProducts, 'gross_sales_sar', 16),
@@ -406,9 +572,10 @@ async function callReadonlyLlm(question, context) {
               type: 'input_text',
               text: [
                 '你是 SHEIN 沙特半托管运营数据助手；回答阶段只基于数据和上层网关上下文，不直接改后台。',
-                '你只能根据用户问题和提供的 JSON 数据回答销售、店铺、货号、链接表现、覆盖、售后/利润等经营问题，并可说明上层任务池/执行器的下一步。',
+                '你只能根据用户问题和提供的 JSON 数据回答销售、店铺、货号、链接表现、覆盖、ET/成本表库存、去化、售后/利润等经营问题，并可说明上层任务池/执行器的下一步。',
                 '每次回答都必须基于本轮 JSON 重新查数；最新用户消息换了店铺、货号、SKC 或指标时，以最新消息为准，指代不完整时再结合上文。',
                 '不要编造未提供的数据；缺数据就明确说缺哪类数据。',
+                '上下文里的 inventory.products 是 ET/成本表实物库存与去化口径，platformStockAlerts 是 SHEIN 平台展示库存；不要把二者混为一谈。只要 inventory 里有数据，就不能说“看不到 ET 库存”。',
                 '不要给出修改 BI 系统、服务器、代码、密钥、账号、非 SHEIN 业务的建议。',
                 '涉及上品、改标题、换图、下架、活动报名、限时折扣等写操作时，不能说已经执行；如果用户问题或上层网关说明系统会加入任务池/已识别为动作命令，就说已进入待确认动作/任务，等待执行器预检。',
                 '不要把“回答阶段不直接执行”误说成“店铺没有权限”。若上下文说明 HL 已有 OpenAPI 授权，应承认 HL 可进入 API 执行准备；只有真实写适配器未实现/预检未通过时，才说卡在适配器或预检。',
@@ -498,6 +665,7 @@ async function callReadonlyCodexGateway(question, context) {
     '你是 SHEIN 沙特半托管运营数据智能体，运行在受控网关里；回答阶段只读数据，不直接改后台。',
     '每次回答都必须基于本轮提供的最新 BI JSON 上下文重新查数；如果最新用户消息换了店铺、货号、SKC 或指标，以最新消息为准，指代不完整时再结合上文。',
     '你只能根据下面提供的 BI JSON 上下文回答问题，不允许调用外部网站，不允许修改文件，不允许绕过上层执行器直接执行 SHEIN 写操作。',
+    '上下文里的 inventory.products 是 ET/成本表实物库存与去化口径，platformStockAlerts 是 SHEIN 平台展示库存；不要把二者混为一谈。只要 inventory 里有数据，就不能说“看不到 ET 库存”。',
     '如果用户问上品、改标题、换图、下架、活动、限时折扣，不能说已经执行；但如果上下文提示系统会入任务池/已识别为动作命令，应说明已进入待确认动作/任务，等待执行器预检。',
     '不要把“当前回答不直接执行”说成“没有权限”。如果上下文说明 HL 已有 OpenAPI 授权，应承认 HL 可进入 API 执行准备；如果商品发布/提交审核写适配器未实现，只能说卡在适配器/预检，不能泛化为 HL 没权限。',
     '遇到“这个链接/2,223 这个/刚才那个”等指代时，优先用上下文里的 SKC、店铺、货号、曝光/访客/销量数字定位，不要因为最新一句没写全就否定上轮已经查到的数据。',
@@ -550,6 +718,10 @@ function answerQuestion(text, data) {
   const wantsProduct = product || /货号|产品|商品|SKU|SKC/i.test(q);
   const wantsStore = store || /店铺|哪个店|各店|门店/.test(q);
   const latestNote = `数据口径：${date}；BI 生成：${data.generatedAt || '-'}；销售源：${data.dates?.salesUpdatedAt || '-'}`;
+
+  if (wantsInventoryQuestion(q)) {
+    return answerInventoryQuestion(q, data);
+  }
 
   if (wantsWorst && /店|店铺|哪个/.test(q)) {
     return answerWorstStoreQuestion(date, data, latestNote);
@@ -644,12 +816,12 @@ function shouldAnswerEvent(event) {
   if (String(event?.message_type || '') !== 'text') return false;
   if (/app|bot/i.test(String(event?.sender_type || ''))) return false;
   if (event?.chat_type === 'p2p') return true;
-  return /销售|销量|订单|利润|退货|退款|排行|排名|货号|产品|商品|店铺|数据|BI|bi|今天|昨天|昨日/.test(content);
+  return /销售|销量|订单|利润|退货|退款|排行|排名|货号|产品|商品|店铺|数据|BI|bi|今天|昨天|昨日|ET|et|库存|货代|去化|补货|在库|在途|仓库|售罄|缺货|断货/.test(content);
 }
 
 function runLark(args) {
   return new Promise(resolve => {
-    const child = spawn('lark-cli', args, {cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe']});
+    const child = spawn(LARK_CLI_BIN, [...LARK_CLI_PREFIX_ARGS, ...args], {cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe']});
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8');
