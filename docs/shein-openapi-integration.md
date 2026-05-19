@@ -226,7 +226,19 @@ node scripts/link_ops_hl_openapi_executor.mjs --task-id <任务ID> --dry-run
 - 发布 payload 完整，包含类目、属性、站点、SKC 图片、销售属性、SKU、供货价/成本、库存、尺寸重量和上架方式等字段；
 - 命令显式传入 `--execute --confirm SHEIN_HL_OPENAPI_SUBMIT`。
 
-当前边界：执行器已经不再停留在“HL 没有权限 / 适配器未实现”，但 BI 现有链接表现数据不足以直接还原完整商品发布 payload。复制 DL 等非 OpenAPI 店铺的已上 SKC 到 HL 时，还需要下一步接入“源商品详情抓取/映射器”，把源后台详情转换成 `publishOrEdit` 所需 payload；否则执行器会阻断并说明缺失类目、属性、图片、SKU、成本、库存和尺寸重量等资料。
+当前边界：执行器已经不再停留在“HL 没有权限 / 适配器未实现”，但 BI 现有链接表现数据不足以直接还原完整商品发布 payload。复制 DL 等非 OpenAPI 店铺的已上 SKC 到 HL 时，还需要“源商品详情抓取/映射器”把源后台详情转换成 `publishOrEdit` 所需 payload；否则执行器会阻断并说明缺失类目、属性、图片、SKU、成本、库存和尺寸重量等资料。
+
+2026-05-19 已补第一版源店 WebAPI 快照映射基座：
+
+```powershell
+node scripts/link_ops_build_product_draft_from_webapi.mjs --source-store DL --source-skc sv260315124105439111444 --date 2026-05-15
+```
+
+- 新增 `lib/link_ops_product_draft_mapper.mjs`：从 `outputs/shein_links/<店铺>/<日期>.json` 和 `outputs/shein_links_raw/<店铺>/<日期>/*.json` 汇总源商品列表、备货库存、诊断表现等快照，生成 `canonical product draft`。
+- 新增 `scripts/link_ops_build_product_draft_from_webapi.mjs`：用于单独生成草稿和排查缺口，不写 SHEIN 后台。
+- `scripts/link_ops_hl_openapi_executor.mjs` 在任务没有上传 `openapiPublishPayload` 时，会尝试从任务里的源店 + 源 SKC 自动生成 WebAPI 快照 payload 草稿，再进入 HL OpenAPI 预检。
+- DL `S1810电热水壶 / sv260315124105439111444` 样本已能生成：类目 `4681`、品牌 `2a64l`、英文标题、3 个图片候选、1 个 SKC、1 个 SKU、库存草稿 `100`、计划上架时间 `10` 年后；但仍会阻断真实提交，因为当前快照缺 `product_attribute_list`、SKU 尺寸/重量、`supplier_sku` 和 `cost_info`。
+- 长期架构保持不变：短期源店读取走 WebAPI/云端登录态；后续 DL 等源店拿到官方 OpenAPI 后，只替换源读取器，继续复用 canonical draft 和 HL 目标写执行器。
 
 ## 2026-05-10 进展：CX 开放平台应用已提交审核
 

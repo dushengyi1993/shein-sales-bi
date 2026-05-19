@@ -4,6 +4,11 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import crypto from 'node:crypto';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
+import {
+  buildProductDraftFromSnapshots,
+  inferSourceProductFromTask,
+  summarizeDraftForExecutor,
+} from '../lib/link_ops_product_draft_mapper.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CONFIG = path.join(ROOT, 'config', 'shein_openapi.local.json');
@@ -95,6 +100,16 @@ function safeString(value, max = 800) {
 
 function jsonClone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+}
+
+function appendUnique(target, values) {
+  const seen = new Set(target);
+  for (const value of asArray(values)) {
+    const text = safeString(value, 1000);
+    if (!text || seen.has(text)) continue;
+    target.push(text);
+    seen.add(text);
+  }
 }
 
 async function readJson(file) {
@@ -327,6 +342,45 @@ async function findPublishPayload(task) {
   return null;
 }
 
+async function findOrBuildPublishPayload(task, {targetStore}) {
+  const existing = await findPublishPayload(task);
+  if (existing?.payload) return existing;
+  const inferred = inferSourceProductFromTask(task, {targetStore});
+  if (!inferred.sourceStore || !inferred.sourceSkc) {
+    return {
+      source: 'missing',
+      payload: null,
+      inferred,
+      generationError: inferred.sourceStore
+        ? '未能从任务中识别源 SKC。'
+        : '未能从任务中识别源店和源 SKC。',
+    };
+  }
+  try {
+    const generated = await buildProductDraftFromSnapshots({
+      sourceStore: inferred.sourceStore,
+      sourceSkc: inferred.sourceSkc,
+      date: 'latest',
+      targetStore,
+    });
+    return {
+      source: 'webapi_snapshot',
+      payload: jsonClone(generated.openapiPublishPayloadDraft),
+      generatedDraft: summarizeDraftForExecutor(generated),
+      canonicalDraft: generated.canonicalDraft,
+      mappingBlockers: generated.blockers,
+      mappingWarnings: generated.warnings,
+    };
+  } catch (err) {
+    return {
+      source: 'webapi_snapshot_error',
+      payload: null,
+      inferred,
+      generationError: err?.message || String(err),
+    };
+  }
+}
+
 function applySafeDefaults(payload, {sites, brands}) {
   const next = jsonClone(payload || {});
   const applied = [];
@@ -511,25 +565,27 @@ async function main() {
     warnings.push(`仓库列表探针失败：${safeString(err?.message || err)}`);
   }
 
-  const payloadFound = await findPublishPayload(task);
+  const payloadFound = await findOrBuildPublishPayload(task, {targetStore});
   let payloadSummary = null;
   let safeDefaults = [];
   let payloadValidation = {ok: false, blockers: ['缺 OpenAPI 发布 payload：需要先从源 SKC 后台详情映射出类目、属性、图片、SKU、供货价、库存和尺寸重量。'], warnings: []};
   let publishPayload = null;
   if (payloadFound?.payload) {
+    appendUnique(warnings, payloadFound.mappingWarnings);
     const applied = applySafeDefaults(payloadFound.payload, {sites, brands});
     publishPayload = applied.payload;
     safeDefaults = applied.applied;
     payloadValidation = validatePublishPayload(publishPayload);
     payloadSummary = extractPayloadSummary(publishPayload);
-    warnings.push(...payloadValidation.warnings);
-    blockers.push(...payloadValidation.blockers);
+    appendUnique(warnings, payloadValidation.warnings);
+    appendUnique(blockers, payloadValidation.blockers);
   } else {
-    blockers.push(...payloadValidation.blockers);
+    appendUnique(blockers, payloadValidation.blockers);
+    if (payloadFound?.generationError) appendUnique(warnings, `自动生成源商品草稿失败：${payloadFound.generationError}`);
   }
 
   if (productRefs.length && !payloadFound?.payload) {
-    warnings.push(`已识别任务对象 ${productRefs.join('、')}，但当前 BI 数据不足以还原完整发布 payload；需要接入源商品详情抓取/映射器。`);
+    warnings.push(`已识别任务对象 ${productRefs.join('、')}，但当前 BI 数据不足以还原完整发布 payload；需要补充源店、源 SKC 或更完整商品详情。`);
   }
 
   if (args.mode === 'execute') {
@@ -605,6 +661,9 @@ async function main() {
       safeDefaults,
       summary: payloadSummary,
       validation: payloadValidation,
+      generatedDraft: payloadFound?.generatedDraft || null,
+      generationError: payloadFound?.generationError || null,
+      inferredSource: payloadFound?.inferred || null,
     },
     blockers,
     warnings,
