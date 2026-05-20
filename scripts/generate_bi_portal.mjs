@@ -3184,6 +3184,9 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .ops-reply-chip:hover{transform:translateY(-1px);border-color:rgba(56,189,248,.42)}
     body[data-theme="light"] .ops-reply-chip{background:#f0f9ff;border-color:#bae6fd;color:#0f172a}
     .ops-chat-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 0;border-top:1px solid rgba(148,163,184,.10);border-bottom:1px solid rgba(148,163,184,.10);margin-bottom:12px}
+    .ops-task-control{border:1px solid rgba(34,197,94,.22);border-radius:18px;background:linear-gradient(135deg,rgba(20,83,45,.20),rgba(15,23,42,.16));padding:12px;display:grid;gap:8px}
+    body[data-theme="light"] .ops-task-control{background:linear-gradient(135deg,#f0fdf4,#f8fafc);border-color:#bbf7d0}
+    .ops-task-control b{display:block;font-size:13px}.ops-task-control p{margin:4px 0 0;color:var(--muted);font-size:12px;line-height:1.55}
     .ops-upload-panel{border:1px dashed rgba(56,189,248,.24);border-radius:20px;background:rgba(8,47,73,.16);padding:12px;margin-top:12px}
     body[data-theme="light"] .ops-upload-panel{background:#f8fafc;border-color:#bae6fd}
     .ops-upload-panel h4{margin:0 0 6px;font-size:13px}.ops-upload-panel p{margin:4px 0;color:var(--muted);font-size:12px;line-height:1.55}
@@ -4617,21 +4620,27 @@ async function uploadLinkOpsSessionAssets(){
     showToast('上传准备失败：' + (err?.message || String(err || 'unknown')));
   }
 }
-async function startLinkOpsExecutor(id){
+async function startLinkOpsExecutor(id, options = {}){
   if (!id) return;
   if (actionStateStore.mode !== 'service') return showToast('当前不是网页服务模式，不能启动执行器');
-  showToast('正在做执行前检查...');
+  const execute = !!options.execute;
+  if (execute && !confirm('确认提交到 SHEIN？\n\n只有执行器已预检通过、payload 完整时才会调用 SHEIN；系统会继续留痕。')) return;
+  showToast(execute ? '正在提交执行...' : '正在启动执行器并做预检...');
   try {
     const res = await fetch(LINK_OPS_EXECUTE_API, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({id})
+      body:JSON.stringify(execute ? {id, mode:'execute', confirm:'SHEIN_HL_OPENAPI_SUBMIT'} : {id, autoConfirm:true})
     });
     const payload = await res.json().catch(() => ({}));
     if (!res.ok || !payload.ok) throw new Error(payload.error || ('HTTP ' + res.status));
     linkOpsStore.tasks = Array.isArray(payload?.data?.tasks) ? payload.data.tasks : [];
     const state = payload?.execution?.state || '';
-    showToast(state === 'blocked' ? '执行器未启动：请先补齐材料' : '执行器已完成前置检查');
+    const blockers = payload?.execution?.preflight?.blockers || payload?.task?.execution?.preflight?.blockers || [];
+    if (state === 'blocked') showToast('执行器已启动但被预检阻断：' + (blockers[0] || '请查看任务详情'));
+    else if (state === 'submitted') showToast('已提交 SHEIN，等待审核/状态回查');
+    else if (state === 'ready_for_submit') showToast('预检通过，可以二次确认后提交 SHEIN');
+    else showToast('执行器已启动，状态：' + (state || '已记录'));
     renderAll();
   } catch (err) {
     showToast('执行器启动失败：' + (err?.message || String(err || 'unknown')));
@@ -9520,6 +9529,29 @@ function renderLinkOpsUploadStatus(active, activeTasks = []){
     : '先创建或选择一个会话，再上传图片、证书、标题规则等文件。';
   return uploadBody + '<div class="ops-upload-note">'+escapeHtml(note)+'</div>';
 }
+function renderActiveLinkOpsTaskControls(active, task){
+  if (!active) return '';
+  const isVirtual = !!task?.virtual;
+  const id = String(task?.id || '');
+  const status = String(task?.status || 'draft');
+  const executionState = String(task?.execution?.state || '');
+  const buttons = [];
+  if (isVirtual) {
+    buttons.push('<button class="btn primary" type="button" id="convertChatToTaskPrimary">确认成任务</button>');
+  } else {
+    if (status === 'draft') buttons.push('<button class="btn primary" type="button" data-linkops-task-action="confirm" data-task-id="'+escapeHtml(id)+'">确认成任务</button>');
+    buttons.push('<button class="btn primary" type="button" data-linkops-task-action="start" data-task-id="'+escapeHtml(id)+'">开始执行 / 预检</button>');
+    if (executionState === 'ready_for_submit') {
+      buttons.push('<button class="btn danger" type="button" data-linkops-task-action="submit" data-task-id="'+escapeHtml(id)+'">二次确认后提交 SHEIN</button>');
+    }
+    buttons.push('<button class="btn" type="button" id="pickLinkOpsSessionAssetsInline" '+(actionStateStore.mode === 'service' && !linkOpsUploadStore.busy ? '' : 'disabled')+'>上传素材</button>');
+    buttons.push('<button class="btn" type="button" data-linkops-task-action="done" data-task-id="'+escapeHtml(id)+'">标记完成</button>');
+  }
+  return '<div class="ops-task-control">'+
+    '<div><b>当前会话任务控制</b><p>'+escapeHtml(isVirtual ? '先把会话确认成任务，之后就能上传素材并启动执行器。' : '点击“开始执行 / 预检”会真正调用后端执行器，结果会写回任务进度和审计记录。')+'</p></div>'+
+    '<div class="command-actions">'+buttons.join('')+'</div>'+
+  '</div>';
+}
 function renderLinkOpsTaskCard(t, options = {}){
   const intents = Array.isArray(t?.intents) ? t.intents : [];
   const stores = Array.isArray(t?.targets?.stores) ? t.targets.stores : [];
@@ -9618,6 +9650,7 @@ function renderLinkOps(){
         '<div class="chat-compose">'+
           '<label class="section-block-label" for="linkOpsChatInput">继续对话</label>'+
           renderLinkOpsReplySuggestions(active, activeTask)+
+          renderActiveLinkOpsTaskControls(active, activeTask)+
           '<textarea id="linkOpsChatInput" placeholder="例如：把建议拆成可执行步骤；先只看QY/TZ/YJ；不要下架，优先换图；再给我一个更保守的方案。"></textarea>'+
           '<input id="linkOpsSessionAssetInput" class="ops-file-input" type="file" multiple '+(active && actionStateStore.mode === 'service' ? '' : 'disabled')+' accept=".jpg,.jpeg,.png,.webp,.pdf,.txt,.csv,.json,image/jpeg,image/png,image/webp,application/pdf,text/plain,text/csv,application/json">'+
           '<div class="command-actions">'+
@@ -9650,8 +9683,14 @@ function renderLinkOps(){
   document.getElementById('sendLinkOpsChat')?.addEventListener('click', sendLinkOpsChatMessage);
   document.getElementById('clearLinkOpsChat')?.addEventListener('click', () => { const input = document.getElementById('linkOpsChatInput'); if (input) input.value = ''; });
   document.getElementById('convertChatToTask')?.addEventListener('click', convertChatToTask);
+  document.getElementById('convertChatToTaskPrimary')?.addEventListener('click', convertChatToTask);
   document.getElementById('refreshLinkOpsTasks')?.addEventListener('click', refreshLinkOpsTasks);
   document.getElementById('pickLinkOpsSessionAssets')?.addEventListener('click', () => {
+    const input = document.getElementById('linkOpsSessionAssetInput');
+    if (!activeLinkOpsSession()) return showToast('先选择或创建一个会话');
+    input?.click?.();
+  });
+  document.getElementById('pickLinkOpsSessionAssetsInline')?.addEventListener('click', () => {
     const input = document.getElementById('linkOpsSessionAssetInput');
     if (!activeLinkOpsSession()) return showToast('先选择或创建一个会话');
     input?.click?.();
@@ -9664,6 +9703,7 @@ function renderLinkOps(){
     if (action === 'confirm') return patchLinkOpsTask(id, {event:'confirm_task', status:'confirmed', progress:30, note:'已确认成可执行任务，下一步检查材料并开始执行。'}, '已确认成任务');
     if (action === 'upload_assets') return uploadLinkOpsAssets(id);
     if (action === 'start') return startLinkOpsExecutor(id);
+    if (action === 'submit') return startLinkOpsExecutor(id, {execute:true});
     if (action === 'done') return patchLinkOpsTask(id, {event:'mark_done', status:'done', progress:100, note:'已人工确认完成。'}, '已标记完成');
     if (action === 'archive') return patchLinkOpsTask(id, {event:'archive', status:'archived', progress:100}, '已归档');
     if (action === 'delete') return deleteLinkOpsTask(id);

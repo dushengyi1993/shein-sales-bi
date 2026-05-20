@@ -271,6 +271,102 @@ function taskIntents(task) {
   return [...new Set(asArray(task?.intents).map(x => String(x || '').trim()).filter(Boolean))];
 }
 
+async function readJsonIfExists(file) {
+  try {
+    return await readJson(file);
+  } catch {
+    return null;
+  }
+}
+
+function compactRef(value) {
+  return String(value || '').toLowerCase().replace(/[\s_\-（）()【】\[\]，,。.;；:：/\\]+/g, '');
+}
+
+function explicitSkcRefs(task) {
+  const text = [
+    task?.sourceSkc,
+    task?.source_skc,
+    task?.skc,
+    task?.metadata?.sourceSkc,
+    ...taskProductRefs(task),
+    task?.command,
+    task?.title,
+    task?.summary,
+  ].map(x => safeString(x, 4000)).join('\n');
+  return [...new Set((text.match(/\b(s[avb]\d{8,})\b/ig) || []).map(x => x.trim()))];
+}
+
+function sourceCandidateScore(row, {targetStore, storeHints, productHints, explicitSkcs}) {
+  const store = normalizeStoreKey(row?.store_key || row?.storeKey);
+  const skc = safeString(row?.skc, 120);
+  if (!store || !skc || store === normalizeStoreKey(targetStore)) return -Infinity;
+  const standard = safeString(row?.standard_goods_sn || row?.standardGoodsSn || row?.raw_goods_sn || row?.rawGoodsSn, 400);
+  const hay = compactRef([standard, skc, row?.product_name_cn, row?.productNameCn, row?.goods_sn, row?.rawGoodsSn].filter(Boolean).join(' '));
+  let score = 0;
+  const matchedSkc = explicitSkcs.some(x => String(x).toLowerCase() === skc.toLowerCase());
+  if (matchedSkc) score += 2_000_000;
+  const matchedProduct = productHints.some(ref => {
+    const q = compactRef(ref);
+    const standardRef = compactRef(standard);
+    return q && (hay.includes(q) || (standardRef && q.includes(standardRef)));
+  });
+  if (!matchedSkc && !matchedProduct) return -Infinity;
+  if (matchedProduct) score += 300_000;
+  if (storeHints.includes(store)) score += 30_000;
+  if (/上架|on/i.test(String(row?.shelf_status_name || row?.shelfStatusName || ''))) score += 20_000;
+  if (row?.retire_candidate || row?.retireCandidate) score -= 50_000;
+  score += Number(row?.c30_sale_cnt ?? row?.c30SaleCnt ?? 0) * 10_000;
+  score += Number(row?.c7_sale_cnt ?? row?.c7SaleCnt ?? 0) * 8_000;
+  score += Number(row?.c30_goods_uv ?? row?.c30GoodsUv ?? row?.goods_uv ?? 0) * 20;
+  score += Number(row?.c30_eps_uv ?? row?.c30EpsUv ?? row?.eps_uv ?? 0) * 0.5;
+  return score;
+}
+
+async function inferSourceCandidatesFromBi(task, {targetStore}) {
+  const data = await readJsonIfExists(path.join(ROOT, 'outputs', 'bi-portal', 'data.json'));
+  const rows = asArray(data?.storeLinks || data?.links);
+  if (!rows.length) return [];
+  const storeHints = taskStores(task).filter(x => x && x !== normalizeStoreKey(targetStore));
+  const productHints = taskProductRefs(task).filter(x => !/^s[avb]\d{8,}$/i.test(x));
+  const skcHints = explicitSkcRefs(task);
+  const scored = rows
+    .map(row => ({
+      sourceStore: normalizeStoreKey(row?.store_key || row?.storeKey),
+      sourceSkc: safeString(row?.skc, 120),
+      standardGoodsSn: safeString(row?.standard_goods_sn || row?.standardGoodsSn, 240),
+      source: 'bi_portal_store_link',
+      score: sourceCandidateScore(row, {targetStore, storeHints, productHints, explicitSkcs: skcHints}),
+    }))
+    .filter(x => x.sourceStore && x.sourceSkc && Number.isFinite(x.score) && x.score > 0)
+    .sort((a, b) => b.score - a.score);
+  const out = [];
+  const seen = new Set();
+  for (const item of scored) {
+    const key = `${item.sourceStore}|${item.sourceSkc}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
+function uniqueSourceCandidates(values = []) {
+  const out = [];
+  const seen = new Set();
+  for (const value of values) {
+    const sourceStore = normalizeStoreKey(value?.sourceStore);
+    const sourceSkc = safeString(value?.sourceSkc, 120);
+    if (!sourceStore || !sourceSkc) continue;
+    const key = `${sourceStore}|${sourceSkc}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({...value, sourceStore, sourceSkc});
+  }
+  return out;
+}
+
 function looksLikePublishPayload(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value)
     && (value.skc_list || value.skcList || value.category_id || value.categoryId)
@@ -346,7 +442,9 @@ async function findOrBuildPublishPayload(task, {targetStore}) {
   const existing = await findPublishPayload(task);
   if (existing?.payload) return existing;
   const inferred = inferSourceProductFromTask(task, {targetStore});
-  if (!inferred.sourceStore || !inferred.sourceSkc) {
+  const biCandidates = await inferSourceCandidatesFromBi(task, {targetStore});
+  const candidates = uniqueSourceCandidates([inferred, ...biCandidates]);
+  if (!candidates.length) {
     return {
       source: 'missing',
       payload: null,
@@ -356,29 +454,46 @@ async function findOrBuildPublishPayload(task, {targetStore}) {
         : '未能从任务中识别源店和源 SKC。',
     };
   }
-  try {
-    const generated = await buildProductDraftFromSnapshots({
-      sourceStore: inferred.sourceStore,
-      sourceSkc: inferred.sourceSkc,
-      date: 'latest',
-      targetStore,
-    });
-    return {
-      source: 'webapi_snapshot',
-      payload: jsonClone(generated.openapiPublishPayloadDraft),
-      generatedDraft: summarizeDraftForExecutor(generated),
-      canonicalDraft: generated.canonicalDraft,
-      mappingBlockers: generated.blockers,
-      mappingWarnings: generated.warnings,
-    };
-  } catch (err) {
-    return {
-      source: 'webapi_snapshot_error',
-      payload: null,
-      inferred,
-      generationError: err?.message || String(err),
-    };
+  const errors = [];
+  for (const candidate of candidates) {
+    try {
+      const generated = await buildProductDraftFromSnapshots({
+        sourceStore: candidate.sourceStore,
+        sourceSkc: candidate.sourceSkc,
+        date: 'latest',
+        targetStore,
+      });
+      return {
+        source: candidate.source === 'bi_portal_store_link' ? 'bi_portal_webapi_snapshot' : 'webapi_snapshot',
+        payload: jsonClone(generated.openapiPublishPayloadDraft),
+        generatedDraft: summarizeDraftForExecutor(generated),
+        canonicalDraft: generated.canonicalDraft,
+        mappingBlockers: generated.blockers,
+        mappingWarnings: generated.warnings,
+        inferred: candidate,
+        attemptedCandidates: candidates.map(x => ({
+          sourceStore: x.sourceStore,
+          sourceSkc: x.sourceSkc,
+          standardGoodsSn: x.standardGoodsSn || '',
+          score: x.score ?? null,
+        })),
+      };
+    } catch (err) {
+      errors.push(`${candidate.sourceStore}/${candidate.sourceSkc}: ${err?.message || String(err)}`);
+    }
   }
+  return {
+    source: 'webapi_snapshot_error',
+    payload: null,
+    inferred,
+    attemptedCandidates: candidates.map(x => ({
+      sourceStore: x.sourceStore,
+      sourceSkc: x.sourceSkc,
+      standardGoodsSn: x.standardGoodsSn || '',
+      score: x.score ?? null,
+    })),
+    generationError: errors.slice(0, 8).join('；') || '未能从候选源链接生成发布 payload。',
+  };
 }
 
 function applySafeDefaults(payload, {sites, brands}) {

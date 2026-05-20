@@ -971,11 +971,14 @@ function runPreflightForLinkOpsTask(task) {
   if (!['confirmed', 'in_progress', 'waiting_review'].includes(status)) {
     blockers.push('任务必须先点“确认成任务”，不能从草案直接执行。');
   }
-  if (needs.includes('image') && !assets.some(a => a.kind === 'image')) {
+  if (needs.includes('image') && !intents.includes('copy_product_draft') && !assets.some(a => a.kind === 'image')) {
     blockers.push('缺少图片素材：请先上传或同步商品图。');
   }
   if (needs.includes('image_or_certificate') && !assets.some(a => a.kind === 'image' || a.kind === 'certificate' || a.mime === 'application/json')) {
     warnings.push('复制上品暂未上传图片/证书/发布 payload；若执行器不能从源商品详情还原素材，会在 OpenAPI 预检中继续阻断。');
+  }
+  if (needs.includes('image') && intents.includes('copy_product_draft') && !assets.some(a => a.kind === 'image')) {
+    warnings.push('复制上品未上传图片素材；系统会优先尝试从源店商品快照复制图片，源快照不足时再阻断。');
   }
   if (needs.includes('certificate') && !assets.some(a => a.kind === 'certificate' || a.mime === 'application/pdf')) {
     blockers.push('缺少证书/资质文件。');
@@ -1044,19 +1047,32 @@ async function runHlOpenApiProductExecutor(task, args, body = {}) {
   const mode = String(body.mode || body.executionMode || '').toLowerCase() === 'execute' || body.execute === true
     ? 'execute'
     : 'dry-run';
+  const taskSnapshotDir = path.join(ROOT, 'tmp', 'link-ops-executor-task-json');
+  const taskSnapshotFile = path.join(taskSnapshotDir, `${safeTaskId(task.id)}-${crypto.randomBytes(4).toString('hex')}.json`);
+  await fs.mkdir(taskSnapshotDir, {recursive: true});
+  await fs.writeFile(taskSnapshotFile, `${JSON.stringify({
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    tasks: [task],
+  }, null, 2)}\n`, 'utf8');
   const childArgs = [
     path.join(ROOT, 'scripts', 'link_ops_hl_openapi_executor.mjs'),
-    '--task-file', args.linkOpsTaskFile,
+    '--task-json', taskSnapshotFile,
     '--task-id', String(task.id || ''),
     mode === 'execute' ? '--execute' : '--dry-run',
   ];
   if (mode === 'execute') {
     childArgs.push('--confirm', String(body.confirm || body.confirmText || ''));
   }
-  const result = await runChildProcess(process.execPath, childArgs, {
-    cwd: ROOT,
-    timeoutMs: Number(process.env.SHEIN_LINK_OPS_OPENAPI_EXECUTOR_TIMEOUT_MS || 180_000),
-  });
+  let result;
+  try {
+    result = await runChildProcess(process.execPath, childArgs, {
+      cwd: ROOT,
+      timeoutMs: Number(process.env.SHEIN_LINK_OPS_OPENAPI_EXECUTOR_TIMEOUT_MS || 180_000),
+    });
+  } finally {
+    await fs.rm(taskSnapshotFile, {force: true}).catch(() => {});
+  }
   const parsed = parseChildJsonOutput(result.stdout);
   if (parsed) {
     return {
@@ -1086,10 +1102,22 @@ async function runHlOpenApiProductExecutor(task, args, body = {}) {
 }
 
 async function startControlledLinkOpsExecution(task, actor, req, args, body = {}) {
-  const preflight = runPreflightForLinkOpsTask(task);
+  const originalStatus = String(task?.status || 'draft');
+  const now = new Date().toISOString();
+  const autoConfirmed = originalStatus === 'draft';
+  const runnableTask = autoConfirmed
+    ? {
+      ...task,
+      status: 'confirmed',
+      progress: Math.max(normalizeProgress(task.progress, 0), 30),
+      note: task.note || '用户点击开始执行，系统已自动确认成可执行任务并进入预检。',
+      updatedAt: now,
+    }
+    : task;
+  const preflight = runPreflightForLinkOpsTask(runnableTask);
   let hlOpenApiExecutor = null;
-  if (shouldRunHlOpenApiProductExecutor(task)) {
-    hlOpenApiExecutor = await runHlOpenApiProductExecutor(task, args, body);
+  if (shouldRunHlOpenApiProductExecutor(runnableTask)) {
+    hlOpenApiExecutor = await runHlOpenApiProductExecutor(runnableTask, args, body);
   }
   const executorResult = hlOpenApiExecutor?.result || null;
   const combinedBlockers = uniqueMessages([
@@ -1101,7 +1129,6 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     ...asArray(executorResult?.warnings),
   ]);
   const ok = combinedBlockers.length === 0;
-  const now = new Date().toISOString();
   const runId = `lor_${now.replace(/[-:.TZ]/g, '').slice(0, 14)}_${crypto.randomBytes(4).toString('hex')}`;
   const executorState = executorResult?.state || (ok ? 'ready_for_prefill' : 'blocked');
   const submitted = executorState === 'submitted';
@@ -1116,7 +1143,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       ? Math.max(normalizeProgress(task.progress, 0), hlOpenApiExecutor ? 70 : 65)
       : Math.max(normalizeProgress(task.progress, 0), 45);
   const next = {
-    ...task,
+    ...runnableTask,
     status: nextStatus,
     progress: nextProgress,
     note: submitted
@@ -1160,6 +1187,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       } : null,
       startedAt: now,
       startedBy: actorLabel(actor, req),
+      autoConfirmed,
       note: hlOpenApiExecutor
         ? 'HL OpenAPI 执行器已接入。默认只做预检；真实 publishOrEdit 必须任务已确认、payload 完整、显式 execute 和确认文本同时满足。'
         : '第一版只做材料/权限/防重检查和执行准备；正式 SHEIN 提交必须后续接具体适配器并保留人工确认。',
@@ -1170,6 +1198,8 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     status: next.status,
     progress: normalizeProgress(next.progress, 0),
     runId,
+    autoConfirmed,
+    originalStatus,
     blockers: combinedBlockers,
     warnings: combinedWarnings,
     hlOpenApiExecutor: executorResult ? {
