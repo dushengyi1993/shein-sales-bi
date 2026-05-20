@@ -202,6 +202,8 @@
 - 链接/业务域当前生产是云端顺序 headless Chrome + 私有登录态日更；纯 Node 零浏览器直连仍是后续优化。若浏览器兜底，建议并发 1、最多 2，不能 16 店同时开。
 - 2026-05-19 链接/业务域日更报错根因是 SBN 商品分析子系统登录态丢失：销售 WebAPI 正常不代表 SBN 可用。`bootstrap_shein_browser_session.mjs` 必须合并新鲜 WebAPI cookie 与浏览器导出的子系统 storage；`cloud_link_business_sync.sh` 部分失败时默认不入仓刷新 BI，避免把不完整结果展示成全量成功。若云端 SBN 态失效，优先从本机已保存密码自动登录并导出 `state/shein_browser_sessions/*.local.json` 同步到云端私有目录，session 不进 GitHub。
 - 云端 Codex / 飞书问数机器人为受控只读网关：`shein-bi-lark-sales-qa.service` -> `scripts/lark_sales_qa_bot.mjs` -> `codex exec --sandbox read-only`，`CODEX_HOME=/home/sheinops/.codex`；不绑定本机 Codex App，本机关机不影响。`auth.json`、`config.toml`、第三方凭据只在服务器私有目录，不进 GitHub、文档或日志；飞书/BI 不能裸调用 shell 或 Codex CLI。
+- 云端飞书问数机器人支持“受控图表能力”：只基于当前 BI JSON 生成店铺销售、货号排行、链接表现、ET/库存去化等 PNG 图表并用飞书图片回复；渲染脚本为 `scripts/render_lark_qa_chart.py`，依赖服务器 `python3 + Pillow + Noto CJK`。这不是任意 AI 画图，也不开放后台写操作。
+- 本机旧飞书监听不要再用 PowerShell 原生命令长管道直连 `lark-cli event consume | node ...`，长时间运行时会缓冲导致事件到达但处理器不回；使用 `scripts/run_lark_sales_qa_event_pipe.mjs` 直接 spawn 并 pipe 事件流。用户已明确否定轮询方案，不得再改回轮询。
 - 2026-05-19 云端 Codex 已修复：可从本机私有 auth 覆盖 `/home/sheinops/.codex/auth.json`，服务器已安装 `bubblewrap`、修正 sessions 权限、设置 `kernel.apparmor_restrict_unprivileged_userns=0`、将 `codex_hooks` 改为 `hooks`；`codex exec --sandbox read-only --skip-git-repo-check "只回复 OK"` 返回 OK，短暂 `Reconnecting...` 只按网络抖动处理。
 - RTV 换单复核不能只靠 SHEIN 售后列表原始退货物流号；iMile/EMile/JT/JTE 等必须结合 SHEIN 物流详情换单轨迹和 ET RTV 反向候选。`mart.rtv_manual_review_candidates`、`ops.rtv_tracking_verification`、`mart.et_rtv_destination_allocation`、`mart.shein_return_rtv_trace` 是当前复核/展示主链路；未经人工确认的候选不改变主利润。
 - BI Portal 链接管理中台是“会话即任务工作台”：自然语言每轮按最新一句和会话上下文从当前 `outputs/bi-portal/data.json` 动态取数；明确动作命令（下架、换图、改标题、补链、报活动等）必须固化为待确认任务并留 IP/UA/备注/审计，不能只回复“没权限”。

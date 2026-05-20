@@ -17,6 +17,10 @@ const CODEX_GATEWAY_ENABLED = !['0', 'false', 'no'].includes(String(process.env.
 const CODEX_GATEWAY_TIMEOUT_MS = Number(process.env.SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS || 120_000);
 const LARK_CLI_BIN = process.env.LARK_CLI_BIN || 'lark-cli';
 const LARK_CLI_PREFIX_ARGS = parseArgList(process.env.LARK_CLI_PREFIX_ARGS || '');
+const CHART_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_CHART_ENABLED || '1').toLowerCase());
+const CHART_PYTHON = process.env.SHEIN_QA_CHART_PYTHON || 'python3';
+const CHART_SCRIPT = process.env.SHEIN_QA_CHART_SCRIPT || path.join(ROOT, 'scripts', 'render_lark_qa_chart.py');
+const CHART_DIR = process.env.SHEIN_QA_CHART_DIR || path.join(STATE_DIR, 'charts');
 const STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ'];
 
 function parseArgList(raw) {
@@ -30,12 +34,14 @@ function parseArgList(raw) {
 }
 
 function parseArgs(argv) {
-  const args = {answer: '', consume: false, dryRun: false};
+  const args = {answer: '', consume: false, dryRun: false, renderChart: '', chartOutput: ''};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--answer') args.answer = argv[++i] || '';
     else if (a === '--consume') args.consume = true;
     else if (a === '--dry-run') args.dryRun = true;
+    else if (a === '--render-chart') args.renderChart = argv[++i] || '';
+    else if (a === '--chart-output') args.chartOutput = argv[++i] || '';
   }
   return args;
 }
@@ -437,6 +443,199 @@ function topRows(rows, metric, limit = 8) {
     .slice(0, limit);
 }
 
+function wantsChartQuestion(text) {
+  const q = normalizeText(text);
+  if (!CHART_ENABLED || !q) return false;
+  const asksChart = /画图|图表|柱状图|折线图|趋势图|可视化|图片|出图|生成图|真正的图|真的图|不是文字图|数据.*图|chart|bar/i.test(q);
+  const allowedDomain = /SHEIN|shein|BI|bi|销售|销量|订单|利润|退货|退款|排行|排名|货号|产品|商品|店铺|链接|曝光|访客|点击|支付|ET|et|库存|货代|去化|补货|在库|在途|仓库|售罄|缺货|断货/.test(q);
+  const chartComplaint = /不是文字图|真正的图|真的图|数据.*(?:画|做|生成).*(?:图|图表)|把数据.*图/.test(q);
+  return asksChart && (allowedDomain || chartComplaint);
+}
+
+function compactLabel(value, maxLen = 34) {
+  const text = String(value || '-').replace(/\s+/g, ' ').trim();
+  return text.length > maxLen ? `${text.slice(0, maxLen - 1)}…` : text;
+}
+
+function chartFreshnessFootnote(data, date) {
+  return `数据口径：${date || data.dates?.salesDate || '-'}；BI生成：${data.generatedAt || '-'}；销售源：${data.dates?.salesUpdatedAt || '-'}`;
+}
+
+function buildStoreSalesChartSpec(text, data) {
+  const q = normalizeText(text);
+  const date = pickDate(q, data);
+  const stores = pickStoresSmart(text);
+  const rows = (data.rankings?.dailyStores || [])
+    .filter(r => r.date === date)
+    .filter(r => !stores.length || rowMatchesStores(r, stores))
+    .sort((a, b) => n(b.gross_sales_sar ?? b.sales_sar) - n(a.gross_sales_sar ?? a.sales_sar))
+    .slice(0, 16)
+    .map(r => ({
+      label: String(r.store_key || '-'),
+      value: n(r.gross_sales_sar ?? r.sales_sar),
+      valueLabel: moneySar(r.gross_sales_sar ?? r.sales_sar),
+      note: `订单 ${intNum(r.gross_orders ?? r.orders)}｜销量 ${intNum(r.gross_quantity ?? r.quantity)}`,
+    }));
+  if (!rows.length) return null;
+  const scope = stores.length ? `${stores.join('/')} ` : '';
+  return {
+    kind: 'store_sales',
+    title: `${date} ${scope}店铺销售排行`,
+    subtitle: '按销售额降序；用于快速查看今天/指定日期各店表现',
+    metricLabel: '销售额（SAR）',
+    unit: ' SAR',
+    footnote: chartFreshnessFootnote(data, date),
+    rows,
+  };
+}
+
+function buildProductSalesChartSpec(text, data) {
+  const q = normalizeText(text);
+  const date = pickDate(q, data);
+  const product = findProductSmart(text, data);
+  const stores = pickStoresSmart(text);
+  const sourceRows = product
+    ? (data.rankings?.dailyStoreProducts || [])
+      .filter(r => r.date === date && r.standard_goods_sn === product)
+      .filter(r => !stores.length || rowMatchesStores(r, stores))
+      .sort((a, b) => n(b.gross_sales_sar ?? b.sales_sar) - n(a.gross_sales_sar ?? a.sales_sar))
+      .slice(0, 16)
+      .map(r => ({
+        label: String(r.store_key || '-'),
+        value: n(r.gross_sales_sar ?? r.sales_sar),
+        valueLabel: moneySar(r.gross_sales_sar ?? r.sales_sar),
+        note: `订单 ${intNum(r.gross_orders ?? r.orders)}｜销量 ${intNum(r.gross_quantity ?? r.quantity)}`,
+      }))
+    : (data.rankings?.dailyProducts || [])
+      .filter(r => r.date === date)
+      .sort((a, b) => n(b.gross_sales_sar ?? b.sales_sar) - n(a.gross_sales_sar ?? a.sales_sar))
+      .slice(0, 12)
+      .map(r => ({
+        label: compactLabel(r.standard_goods_sn || r.product_name || '-'),
+        value: n(r.gross_sales_sar ?? r.sales_sar),
+        valueLabel: moneySar(r.gross_sales_sar ?? r.sales_sar),
+        note: `订单 ${intNum(r.gross_orders ?? r.orders)}｜销量 ${intNum(r.gross_quantity ?? r.quantity)}`,
+      }));
+  if (!sourceRows.length) return null;
+  return {
+    kind: 'product_sales',
+    title: product ? `${date} ${product} 各店销售` : `${date} 货号销售排行`,
+    subtitle: product ? '同一货号在各店的当日/指定日期销售表现' : '按货号销售额降序，展示当前表现靠前的产品',
+    metricLabel: '销售额（SAR）',
+    unit: ' SAR',
+    footnote: chartFreshnessFootnote(data, date),
+    rows: sourceRows,
+  };
+}
+
+function buildInventoryChartSpec(text, data) {
+  const q = normalizeText(text);
+  const product = findProductSmart(text, data);
+  const numberHints = extractNumberHints(q);
+  const latestNumberHints = extractNumberHints(detectionTexts(q)[0] || q);
+  const inventory = compactInventoryContext({question: q, data, product, numberHints, latestNumberHints});
+  const metric = /去化|可卖|天|周转/.test(q)
+    ? 'days_of_supply_on_hand'
+    : (/销量|近30|消耗/.test(q) ? 'gross_sold_30d' : 'et_estimated_available_qty');
+  const metricLabel = metric === 'days_of_supply_on_hand'
+    ? '在库可卖天数'
+    : (metric === 'gross_sold_30d' ? '近30天毛销量（件）' : 'ET估算可用库存（件）');
+  const unit = metric === 'days_of_supply_on_hand' ? ' 天' : ' 件';
+  const rows = (inventory.products || [])
+    .sort((a, b) => {
+      if (metric === 'days_of_supply_on_hand') return n(a[metric]) - n(b[metric]) || n(b.gross_sold_30d) - n(a.gross_sold_30d);
+      return n(b[metric]) - n(a[metric]) || n(b.gross_sold_30d) - n(a.gross_sold_30d);
+    })
+    .slice(0, 12)
+    .map(r => ({
+      label: compactLabel(r.standard_goods_sn || r.goods_title || '-'),
+      value: n(r[metric]),
+      valueLabel: `${metric === 'days_of_supply_on_hand' ? Number(n(r[metric]).toFixed(1)) : intNum(r[metric])}${unit}`,
+      note: `状态 ${r.stock_status || '-'}｜在途 ${intNum(r.incoming_quantity)}｜近30销量 ${intNum(r.gross_sold_30d)}`,
+    }));
+  if (!rows.length) return null;
+  return {
+    kind: 'inventory',
+    title: product ? `${product} 库存/去化图` : 'ET/库存去化重点图',
+    subtitle: '基于 ET/成本表实物库存与销售去化，不等同于 SHEIN 平台展示库存',
+    metricLabel,
+    unit,
+    footnote: `ET更新时间：${inventory.freshness?.etUpdatedAt || '-'}；BI生成：${data.generatedAt || '-'}`,
+    rows,
+  };
+}
+
+function buildLinkChartSpec(text, data) {
+  const q = normalizeText(text);
+  const product = findProductSmart(text, data);
+  const stores = pickStoresSmart(text);
+  const metric = /访客|UV|uv/.test(q)
+    ? 'c30_goods_uv'
+    : (/销量|成交|出单/.test(q) ? 'c30_sale_cnt' : 'c30_eps_uv');
+  const metricLabel = metric === 'c30_sale_cnt' ? '30天销量（件）' : (metric === 'c30_goods_uv' ? '30天商品访客' : '30天曝光');
+  const rows = (data.storeLinks || data.links || [])
+    .filter(r => !stores.length || rowMatchesStores(r, stores))
+    .filter(r => !product || r.standard_goods_sn === product || String(r.standard_goods_sn || '').includes(product))
+    .sort((a, b) => n(b[metric]) - n(a[metric]) || n(b.c30_sale_cnt) - n(a.c30_sale_cnt) || n(b.c30_goods_uv) - n(a.c30_goods_uv))
+    .slice(0, 12)
+    .map(r => ({
+      label: compactLabel(`${r.store_key || '-'} ${r.standard_goods_sn || '-'} ${String(r.skc || '').slice(-6)}`),
+      value: n(r[metric]),
+      valueLabel: intNum(r[metric]),
+      note: `30天销量 ${intNum(r.c30_sale_cnt)}｜访客 ${intNum(r.c30_goods_uv || r.goods_uv)}｜${r.shelf_status_name || '-'}`,
+    }));
+  if (!rows.length) return null;
+  return {
+    kind: 'link',
+    title: product ? `${product} 链接表现图` : '链接表现图',
+    subtitle: '基于当前链接表现快照，默认按 30 天曝光/访客/销量展示',
+    metricLabel,
+    unit: '',
+    footnote: `链接数据：${data.dates?.linkUpdatedAt || data.dates?.linkDate || '-'}；BI生成：${data.generatedAt || '-'}`,
+    rows,
+  };
+}
+
+function buildControlledChartSpec(text, data) {
+  if (!wantsChartQuestion(text)) return null;
+  const q = normalizeText(text);
+  if (/ET|et|库存|货代|去化|补货|在库|在途|仓库|售罄|缺货|断货|周转|可卖/.test(q)) {
+    return buildInventoryChartSpec(text, data);
+  }
+  if (/链接|曝光|访客|点击|支付|SKC|skc/.test(q)) {
+    return buildLinkChartSpec(text, data);
+  }
+  if (/货号|产品|商品|SKU|sku|销量排行|产品排行/.test(q) || findProductSmart(text, data)) {
+    return buildProductSalesChartSpec(text, data);
+  }
+  return buildStoreSalesChartSpec(text, data);
+}
+
+async function renderControlledChart(spec, options = {}) {
+  if (!spec) return null;
+  await fs.mkdir(CHART_DIR, {recursive: true});
+  const stem = `chart-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  const inputPath = path.join(CHART_DIR, `${stem}.json`);
+  const outputPath = options.outputPath || path.join(CHART_DIR, `${stem}.png`);
+  await fs.writeFile(inputPath, JSON.stringify(spec, null, 2), 'utf8');
+  const result = await runProcess(CHART_PYTHON, [
+    CHART_SCRIPT,
+    '--input', inputPath,
+    '--output', outputPath,
+  ], {cwd: ROOT, timeoutMs: 30_000});
+  await fs.rm(inputPath, {force: true}).catch(() => {});
+  if (!result.ok) {
+    throw new Error(`chart render failed code=${result.code} timeout=${result.timedOut} stderr=${String(result.stderr || '').slice(-500)}`);
+  }
+  return {path: outputPath, spec};
+}
+
+function larkLocalFileArg(filePath) {
+  const rel = path.relative(ROOT, filePath);
+  if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return rel.split(path.sep).join('/');
+  return filePath;
+}
+
 function compactSalesContext(question, data) {
   const rawQuestion = String(question || '');
   const q = normalizeText(rawQuestion);
@@ -580,6 +779,7 @@ async function callReadonlyLlm(question, context) {
                 '涉及上品、改标题、换图、下架、活动报名、限时折扣等写操作时，不能说已经执行；如果用户问题或上层网关说明系统会加入任务池/已识别为动作命令，就说已进入待确认动作/任务，等待执行器预检。',
                 '不要把“回答阶段不直接执行”误说成“店铺没有权限”。若上下文说明 HL 已有 OpenAPI 授权，应承认 HL 可进入 API 执行准备；只有真实写适配器未实现/预检未通过时，才说卡在适配器或预检。',
                 '遇到“这个链接/2,223 这个/刚才那个”等指代时，优先用上下文里的 SKC、店铺、货号、曝光/访客/销量数字定位，不要因为最新一句没写全就否定上轮数据。',
+                '如果用户要求画图、图表、柱状图或可视化，不要说不能画；上层网关会基于受控 BI 数据附上图片图表，你只负责给出简短解读。',
                 '回答要简洁，优先给结论、关键数字、原因和下一步。数字保留 SAR / 订单 / 销量单位。',
               ].join('\n')
             }
@@ -669,6 +869,7 @@ async function callReadonlyCodexGateway(question, context) {
     '如果用户问上品、改标题、换图、下架、活动、限时折扣，不能说已经执行；但如果上下文提示系统会入任务池/已识别为动作命令，应说明已进入待确认动作/任务，等待执行器预检。',
     '不要把“当前回答不直接执行”说成“没有权限”。如果上下文说明 HL 已有 OpenAPI 授权，应承认 HL 可进入 API 执行准备；如果商品发布/提交审核写适配器未实现，只能说卡在适配器/预检，不能泛化为 HL 没权限。',
     '遇到“这个链接/2,223 这个/刚才那个”等指代时，优先用上下文里的 SKC、店铺、货号、曝光/访客/销量数字定位，不要因为最新一句没写全就否定上轮已经查到的数据。',
+    '如果用户要求画图、图表、柱状图或可视化，不要说不能画；上层网关会基于受控 BI 数据附上图片图表，你只负责给出简短解读。',
     '如果问题超出 SHEIN 经营数据、链接管理、销售、货号、店铺、售后、利润范围，直接拒绝。',
     '回答要像运营负责人：先结论，再关键数字，再可能原因/下一步。不要只机械列排行。',
     '最终只输出一段中文，并以 FINAL_ANSWER: 开头。',
@@ -816,7 +1017,7 @@ function shouldAnswerEvent(event) {
   if (String(event?.message_type || '') !== 'text') return false;
   if (/app|bot/i.test(String(event?.sender_type || ''))) return false;
   if (event?.chat_type === 'p2p') return true;
-  return /销售|销量|订单|利润|退货|退款|排行|排名|货号|产品|商品|店铺|数据|BI|bi|今天|昨天|昨日|ET|et|库存|货代|去化|补货|在库|在途|仓库|售罄|缺货|断货/.test(content);
+  return /销售|销量|订单|利润|退货|退款|排行|排名|货号|产品|商品|店铺|数据|BI|bi|今天|昨天|昨日|ET|et|库存|货代|去化|补货|在库|在途|仓库|售罄|缺货|断货|画图|图表|柱状图|折线图|趋势图|可视化|图片/.test(content);
 }
 
 function runLark(args) {
@@ -851,7 +1052,11 @@ async function handleEvent(event, options = {}) {
   if (!shouldAnswerEvent(event)) return {ok: true, skipped: true, reason: 'not_sales_question'};
   if (await alreadyHandled(eventId)) return {ok: true, skipped: true, reason: 'duplicate'};
   const data = await readData();
-  const answer = await answerQuestionSmart(event.content || '', data);
+  const chartSpec = buildControlledChartSpec(event.content || '', data);
+  const baseAnswer = await answerQuestionSmart(event.content || '', data);
+  const answer = chartSpec
+    ? `${baseAnswer}\n\n图表：已按当前 BI 数据生成受控图表，图片见下一条。`
+    : baseAnswer;
   const sendArgs = [
     'im', '+messages-reply',
     '--as', 'bot',
@@ -861,6 +1066,25 @@ async function handleEvent(event, options = {}) {
   ];
   let sent = {ok: true, dryRun: true};
   if (!options.dryRun) sent = await runLark(sendArgs);
+  let chartResult = null;
+  let chartSent = null;
+  let chartError = '';
+  if (chartSpec) {
+    try {
+      chartResult = await renderControlledChart(chartSpec);
+      const imageArgs = [
+        'im', '+messages-reply',
+        '--as', 'bot',
+        '--message-id', event.message_id || event.id,
+        '--image', larkLocalFileArg(chartResult.path),
+        '--idempotency-key', `sales-qa-chart-${eventId}`.slice(0, 80),
+      ];
+      chartSent = options.dryRun ? {ok: true, dryRun: true} : await runLark(imageArgs);
+    } catch (err) {
+      chartError = String(err?.message || err).slice(0, 800);
+      console.error(JSON.stringify({ok: false, stage: 'chart_reply_failed', eventId, error: chartError}));
+    }
+  }
   await markHandled(eventId, {
     handledAt: new Date().toISOString(),
     eventId,
@@ -870,9 +1094,24 @@ async function handleEvent(event, options = {}) {
     answer,
     sendOk: sent.ok,
     sendCode: sent.code ?? null,
+    chartKind: chartSpec?.kind || '',
+    chartPath: chartResult?.path || '',
+    chartSendOk: chartSent?.ok ?? null,
+    chartSendCode: chartSent?.code ?? null,
+    chartError,
     stderrTail: String(sent.stderr || '').slice(-500),
   });
-  return {ok: sent.ok, eventId, answer, sendCode: sent.code ?? null, stderrTail: String(sent.stderr || '').slice(-500)};
+  return {
+    ok: sent.ok && (chartSent ? chartSent.ok : true) && !chartError,
+    eventId,
+    answer,
+    sendCode: sent.code ?? null,
+    chartKind: chartSpec?.kind || '',
+    chartPath: chartResult?.path || '',
+    chartSendCode: chartSent?.code ?? null,
+    chartError,
+    stderrTail: String(sent.stderr || '').slice(-500),
+  };
 }
 
 async function consume(options = {}) {
@@ -895,8 +1134,23 @@ const args = parseArgs(process.argv.slice(2));
 if (args.answer) {
   const data = await readData();
   console.log(await answerQuestionSmart(args.answer, data));
+} else if (args.renderChart) {
+  const data = await readData();
+  const spec = buildControlledChartSpec(args.renderChart, data);
+  if (!spec) {
+    console.error('No controlled chart spec matched this question.');
+    process.exit(2);
+  }
+  const result = await renderControlledChart(spec, {outputPath: args.chartOutput || ''});
+  console.log(JSON.stringify({
+    ok: true,
+    path: result.path,
+    kind: result.spec.kind,
+    title: result.spec.title,
+    rows: result.spec.rows?.length || 0,
+  }, null, 2));
 } else if (args.consume) {
   await consume({dryRun: args.dryRun});
 } else {
-  console.log('Usage: node scripts/lark_sales_qa_bot.mjs --answer "今天销售多少" | --consume');
+  console.log('Usage: node scripts/lark_sales_qa_bot.mjs --answer "今天销售多少" | --render-chart "今天店铺销售画图" [--chart-output out.png] | --consume');
 }
