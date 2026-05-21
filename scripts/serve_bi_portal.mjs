@@ -1338,7 +1338,9 @@ async function askReadonlyOpsAgent(question, options = {}) {
     env: {
       CODEX_HOME: process.env.CODEX_HOME || '/home/sheinops/.codex',
       SHEIN_QA_CODEX_GATEWAY_ENABLED: process.env.SHEIN_QA_CODEX_GATEWAY_ENABLED || '1',
-      SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS: process.env.SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS || '180000',
+      SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS: process.env.SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS || '600000',
+      SHEIN_QA_CODEX_MODEL: process.env.SHEIN_QA_CODEX_MODEL || 'gpt-5.5',
+      SHEIN_QA_CODEX_REASONING_EFFORT: process.env.SHEIN_QA_CODEX_REASONING_EFFORT || 'xhigh',
       SHEIN_QA_LLM_ENABLED: process.env.SHEIN_QA_LLM_ENABLED || '1',
       SHEIN_QA_LLM_TIMEOUT_MS: process.env.SHEIN_QA_LLM_TIMEOUT_MS || '45000',
       SHEIN_QA_CODEX_SESSION_ID: codexSessionId,

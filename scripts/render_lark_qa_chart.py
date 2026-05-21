@@ -141,8 +141,8 @@ def render(spec: dict, output: Path) -> None:
     label_x = margin
     label_w = int(spec.get("labelWidth") or 380)
     bar_x = label_x + label_w + 24
-    value_w = 220
-    bar_w = width - bar_x - value_w - margin
+    value_w = int(spec.get("valueWidth") or 220)
+    bar_w = max(120, width - bar_x - value_w - margin)
     base_y = top
 
     draw.text((bar_x, base_y - 34), metric_label, fill=muted, font=font_axis)
@@ -162,10 +162,10 @@ def render(spec: dict, output: Path) -> None:
         draw.rounded_rectangle((bar_x, track_y, bar_x + bar_w, track_y + 24), radius=12, fill=blue_soft)
         fill_w = int(bar_w * max(0.0, value) / max_value)
         if fill_w > 0:
-            draw.rounded_rectangle((bar_x, track_y, bar_x + fill_w, track_y + 24), radius=12, fill=blue)
+            draw.rounded_rectangle((bar_x, track_y, bar_x + fill_w, track_y + 24), radius=12, fill=str(row.get("color") or blue))
 
         value_label = str(row.get("valueLabel") or fmt_number(value, unit))
-        draw.text((bar_x + bar_w + 22, y0 + 8), value_label, fill=ink, font=font_value)
+        draw.text((bar_x + bar_w + 22, y0 + 8), ellipsize(draw, value_label, font_value, value_w - 24), fill=ink, font=font_value)
 
     # Simple axis hints.
     draw.text((bar_x, height - bottom + 16), "0", fill=muted, font=font_axis)

@@ -141,7 +141,7 @@ GitHub 应保存：
 
 - 当前生产链路为：飞书消息事件 -> 云端 `lark-cli` / `shein-bi-lark-sales-qa.service` -> `scripts/lark_sales_qa_bot.mjs` -> Codex CLI 只读执行 -> 回复飞书。
 - Codex CLI 安装在服务器系统路径，私有配置目录为 `/home/sheinops/.codex`；`auth.json`、`config.toml`、第三方 API 配置和 token 都不进入 GitHub、文档或日志。
-- 服务环境必须显式包含：`CODEX_HOME=/home/sheinops/.codex`、`SHEIN_QA_CODEX_GATEWAY_ENABLED=1`、`SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS=180000`。
+- 服务环境必须显式包含：`CODEX_HOME=/home/sheinops/.codex`、`SHEIN_QA_CODEX_GATEWAY_ENABLED=1`、`SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS=600000`、`SHEIN_QA_CODEX_MODEL=gpt-5.5`、`SHEIN_QA_CODEX_REASONING_EFFORT=xhigh`。
 - 网关只把 `outputs/bi-portal/data.json` 压缩成销售、店铺、货号、链接/覆盖等只读上下文交给模型；不授予写 PostgreSQL、写飞书 Base、改 SHEIN 后台或改服务器文件的权限。
 - 网页端“链接管理中台”的运营会话复用同一受控问数链路：每轮按最新一句和最近会话上下文重新从当前 BI JSON 取数；如果用户明确要求下架、换图、改标题、补链、报活动或限时折扣，服务端必须创建 / 更新同一会话任务并留痕。用户点击“开始执行 / 预检”后，`/api/link-ops-execute` 会进入受控执行器、写回进度和审计；真实写 SHEIN 仍必须满足对应适配器、payload 完整和二次确认，不能静默提交。
 - 失败兜底顺序：Codex CLI 只读网关失败时，退回直接 LLM 问答；再失败时退回脚本内规则回答，保证飞书机器人不会因为模型异常完全失声。
@@ -154,6 +154,12 @@ systemctl show shein-bi-lark-sales-qa.service -p Environment
 CODEX_HOME=/home/sheinops/.codex codex --version
 CODEX_HOME=/home/sheinops/.codex SHEIN_QA_CODEX_GATEWAY_ENABLED=1 node scripts/lark_sales_qa_bot.mjs --answer "DL这个店今天卖得最好的品是什么？"
 ```
+
+2026-05-21 云端模型与 my-codex 口径：
+
+- 飞书问数和链接管理中台的 Codex CLI 网关默认使用 `gpt-5.5` + `model_reasoning_effort=xhigh`；由于超高推理耗时更长，服务超时同步提升到 600 秒。
+- `/home/sheinops/.codex` 已安装 `my-codex` agents/skills/agent-packs/AGENTS 配置；安装前已备份 `.codex` 私有配置到 `/home/sheinops/.codex-backups/`，备份文件不得进入 GitHub。
+- `my-codex` 的远程 MCP OAuth 注册在非交互服务环境里不作为生产依赖；生产问数链路仍只依赖本地 Codex CLI、`CODEX_HOME` 和只读 BI JSON 上下文。
 
 2026-05-19 云端 Codex 运行环境修复口径：
 

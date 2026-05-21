@@ -14,7 +14,9 @@ const CODEX_CONFIG_DIR = process.env.CODEX_HOME || path.join(os.homedir(), '.cod
 const LLM_TIMEOUT_MS = Number(process.env.SHEIN_QA_LLM_TIMEOUT_MS || 45_000);
 const LLM_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_LLM_ENABLED || '1').toLowerCase());
 const CODEX_GATEWAY_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_CODEX_GATEWAY_ENABLED || '1').toLowerCase());
-const CODEX_GATEWAY_TIMEOUT_MS = Number(process.env.SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS || 120_000);
+const CODEX_GATEWAY_TIMEOUT_MS = Number(process.env.SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS || 600_000);
+const CODEX_GATEWAY_MODEL = process.env.SHEIN_QA_CODEX_MODEL || 'gpt-5.5';
+const CODEX_GATEWAY_REASONING_EFFORT = process.env.SHEIN_QA_CODEX_REASONING_EFFORT || 'xhigh';
 const LARK_CLI_BIN = process.env.LARK_CLI_BIN || 'lark-cli';
 const LARK_CLI_PREFIX_ARGS = parseArgList(process.env.LARK_CLI_PREFIX_ARGS || '');
 const CHART_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_CHART_ENABLED || '1').toLowerCase());
@@ -468,6 +470,18 @@ function compactLabel(value, maxLen = 34) {
   return text.length > maxLen ? `${text.slice(0, maxLen - 1)}…` : text;
 }
 
+function hasCjk(value) {
+  return /[\u3400-\u9fff]/.test(String(value || ''));
+}
+
+function compactProductInventoryLabel(row, maxLen = 46) {
+  const sn = String(row?.standard_goods_sn || row?.standard_goods_sn_list || row?.goods_sn || '').trim();
+  const title = String(row?.goods_title || row?.product_name || '').replace(/\s+/g, ' ').trim();
+  if (sn && hasCjk(sn)) return compactLabel(sn, maxLen);
+  if (sn && title && hasCjk(title)) return compactLabel(`${sn} ${title}`, maxLen);
+  return compactLabel(sn || title || '-', maxLen);
+}
+
 function chartFreshnessFootnote(data, date) {
   return `数据口径：${date || data.dates?.salesDate || '-'}；BI生成：${data.generatedAt || '-'}；销售源：${data.dates?.salesUpdatedAt || '-'}`;
 }
@@ -541,18 +555,29 @@ function buildProductSalesChartSpec(text, data) {
 
 function buildInventoryChartSpec(text, data) {
   const q = normalizeText(text);
+  const userMessages = extractUserMessages(text);
+  const latestUserText = userMessages.at(-1) || detectionTexts(text)[0] || q;
+  const priorUserText = userMessages.slice(0, -1).join(' ');
+  const userIntentText = normalizeText(`${priorUserText} ${latestUserText}`);
   const product = findProductSmart(text, data);
   const numberHints = extractNumberHints(q);
   const latestNumberHints = extractNumberHints(detectionTexts(q)[0] || q);
   const inventory = compactInventoryContext({question: q, data, product, numberHints, latestNumberHints});
   const allProductsMode = !product && /每个货号|按货号|货号.*一行|逐货号|所有货号|全部货号|全量|每个产品|所有产品|全部产品/.test(q);
-  const metric = /库存数量|库存数|现货|按库存/.test(q)
+  const wantsCycleFields = /去化周期|可售周期|可卖|周转|现货.*天|含在途.*天|周期/.test(userIntentText);
+  const wantsMultiInventoryView = allProductsMode && /库存|现货|在途|去化速度|日销|去化周期|可卖|周转|周期/.test(userIntentText) && wantsCycleFields;
+  const latestAsksStockSort = /按.*库存|库存数量|库存数|库存.*降序|现货.*排序/.test(latestUserText);
+  const latestAsksSpeedSort = /按.*去化速度|按.*日销|去化速度.*排序|日销.*排序/.test(latestUserText);
+  const latestAsksCycleSort = /按.*去化周期|按.*可卖|按.*天|去化周期.*排序|现货去化周期|从短到长|升序|断货风险/.test(userIntentText);
+  const metric = wantsMultiInventoryView
     ? 'estimated_on_hand_quantity'
-    : (/去化速度|日销|速度/.test(q)
-      ? 'weighted_daily_gross_sales'
-      : (/去化|可卖|天|周转|周期/.test(q)
-        ? 'days_of_supply_on_hand'
-        : (/销量|近30|消耗/.test(q) ? 'gross_sold_30d' : 'et_estimated_available_qty')));
+    : (latestAsksStockSort || /库存数量|库存数|按库存/.test(latestUserText)
+      ? 'estimated_on_hand_quantity'
+      : (latestAsksSpeedSort || /去化速度|日销|速度/.test(latestUserText)
+        ? 'weighted_daily_gross_sales'
+        : (latestAsksCycleSort || /去化|可卖|天|周转|周期/.test(userIntentText)
+          ? 'days_of_supply_on_hand'
+          : (/销量|近30|消耗/.test(q) ? 'gross_sold_30d' : 'et_estimated_available_qty'))));
   const metricLabel = metric === 'days_of_supply_on_hand'
     ? '在库可卖天数'
     : (metric === 'gross_sold_30d'
@@ -585,6 +610,11 @@ function buildInventoryChartSpec(text, data) {
     : (inventory.products || []);
   const rows = sourceRows
     .sort((a, b) => {
+      if (wantsMultiInventoryView && (latestAsksCycleSort || wantsCycleFields)) {
+        const dayA = n(a.days_of_supply_on_hand) > 0 && n(a.weighted_daily_gross_sales) > 0 ? n(a.days_of_supply_on_hand) : 999999;
+        const dayB = n(b.days_of_supply_on_hand) > 0 && n(b.weighted_daily_gross_sales) > 0 ? n(b.days_of_supply_on_hand) : 999999;
+        return dayA - dayB || n(b.estimated_on_hand_quantity ?? b.et_estimated_available_qty) - n(a.estimated_on_hand_quantity ?? a.et_estimated_available_qty);
+      }
       if (metric === 'days_of_supply_on_hand') {
         const dayA = metricValue(a) > 0 && n(a.weighted_daily_gross_sales) > 0 ? metricValue(a) : 999999;
         const dayB = metricValue(b) > 0 && n(b.weighted_daily_gross_sales) > 0 ? metricValue(b) : 999999;
@@ -593,27 +623,55 @@ function buildInventoryChartSpec(text, data) {
       return metricValue(b) - metricValue(a) || n(b.gross_sold_30d) - n(a.gross_sold_30d);
     })
     .slice(0, allProductsMode ? 120 : 12)
-    .map(r => ({
-      label: compactLabel(r.standard_goods_sn || r.goods_title || '-', allProductsMode ? 46 : 34),
-      value: metricValue(r),
-      valueLabel: `${metric === 'days_of_supply_on_hand' || metric === 'weighted_daily_gross_sales' ? Number(metricValue(r).toFixed(1)) : intNum(metricValue(r))}${unit}`,
-      note: `状态 ${r.stock_status || '-'}｜在途 ${intNum(r.incoming_quantity)}｜近30销量 ${intNum(r.gross_sold_30d)}`,
-    }));
+    .map(r => {
+      const speed = n(r.weighted_daily_gross_sales);
+      const daysOnHand = n(r.days_of_supply_on_hand);
+      const daysWithIncoming = n(r.days_of_supply_with_incoming);
+      const onHand = n(r.estimated_on_hand_quantity ?? r.et_estimated_available_qty ?? r.available_quantity);
+      const status = String(r.stock_status || '-');
+      const riskColor = speed > 0 && onHand <= 0
+        ? '#DC2626'
+        : (speed > 0 && daysOnHand > 0 && daysOnHand <= 14
+          ? '#DC2626'
+          : (speed > 0 && daysOnHand > 0 && daysOnHand <= 30
+            ? '#F97316'
+            : (/慢|滞|压/.test(status) || daysOnHand >= 180 ? '#6B7280' : '#2563EB')));
+      if (wantsMultiInventoryView) {
+        return {
+          label: compactProductInventoryLabel(r, allProductsMode ? 52 : 38),
+          value: onHand,
+          valueLabel: `现货${intNum(onHand)}｜日销${Number(speed.toFixed(1))}｜${formatDays(daysOnHand, speed > 0)}`,
+          note: `在途 ${intNum(r.incoming_quantity)}｜含在途 ${formatDays(daysWithIncoming, speed > 0)}｜${status}`,
+          color: riskColor,
+        };
+      }
+      return {
+        label: compactProductInventoryLabel(r, allProductsMode ? 46 : 34),
+        value: metricValue(r),
+        valueLabel: `${metric === 'days_of_supply_on_hand' || metric === 'weighted_daily_gross_sales' ? Number(metricValue(r).toFixed(1)) : intNum(metricValue(r))}${unit}`,
+        note: `状态 ${status}｜在途 ${intNum(r.incoming_quantity)}｜近30销量 ${intNum(r.gross_sold_30d)}`,
+        color: riskColor,
+      };
+    });
   if (!rows.length) return null;
+  const cycleTitle = '全货号库存去化周期图｜按现货去化周期排序';
   return {
     kind: 'inventory',
-    title: product ? `${product} 库存/去化图` : (allProductsMode ? '全货号库存/去化信息图' : 'ET/库存去化重点图'),
-    subtitle: allProductsMode
-      ? `逐货号展示，按${metricLabel.replace(/（.*?）/g, '')}${metric === 'days_of_supply_on_hand' ? '升序' : '降序'}排列；基于 ET/成本表实物库存与销售去化`
-      : '基于 ET/成本表实物库存与销售去化，不等同于 SHEIN 平台展示库存',
-    metricLabel,
+    title: product ? `${product} 库存/去化图` : (wantsMultiInventoryView ? cycleTitle : (allProductsMode ? '全货号库存/去化信息图' : 'ET/库存去化重点图')),
+    subtitle: wantsMultiInventoryView
+      ? '每个货号一行：货号+中文品名｜现货库存｜在途｜日销｜现货/含在途去化周期；红=断货风险，橙=30天内补货，灰=慢动销'
+      : (allProductsMode
+        ? `逐货号展示，按${metricLabel.replace(/（.*?）/g, '')}${metric === 'days_of_supply_on_hand' ? '升序' : '降序'}排列；基于 ET/成本表实物库存与销售去化`
+        : '基于 ET/成本表实物库存与销售去化，不等同于 SHEIN 平台展示库存'),
+    metricLabel: wantsMultiInventoryView ? '现货库存（件）；右侧标日销/去化周期' : metricLabel,
     unit,
     footnote: `ET更新时间：${inventory.freshness?.etUpdatedAt || '-'}；BI生成：${data.generatedAt || '-'}`,
     rows,
     maxRows: allProductsMode ? Math.min(120, rows.length) : undefined,
-    rowHeight: allProductsMode ? 56 : undefined,
-    width: allProductsMode ? 1800 : undefined,
-    labelWidth: allProductsMode ? 520 : undefined,
+    rowHeight: wantsMultiInventoryView ? 64 : (allProductsMode ? 56 : undefined),
+    width: wantsMultiInventoryView ? 2300 : (allProductsMode ? 1800 : undefined),
+    labelWidth: wantsMultiInventoryView ? 650 : (allProductsMode ? 520 : undefined),
+    valueWidth: wantsMultiInventoryView ? 520 : undefined,
   };
 }
 
@@ -1056,10 +1114,12 @@ function buildChartQuestion(text, conversation) {
   if (isChartRevisionRequest(current, conversation)) {
     const previous = conversation.lastChart?.sourceQuestion || conversation.lastChart?.title || '';
     const previousBlock = previous.includes('用户：') ? previous : (previous ? `用户：${previous}` : '');
+    const recentLines = recentConversationLines(conversation, 8);
     return [
+      ...recentLines,
       previousBlock,
       `用户：${current}`,
-      '智能体：按上一张图的业务口径继续修改并重新生成受控图表。',
+      '智能体：按整段会话里最新的用户改图要求重新生成受控图表；不要只沿用最早那张图的模板。',
     ].filter(Boolean).join('\n');
   }
   return current;
@@ -1132,7 +1192,7 @@ function appendConversationTurn(conversation, event, {policy, answer, chartSpec,
       title: chartSpec.title || '',
       subtitle: chartSpec.subtitle || '',
       metricLabel: chartSpec.metricLabel || '',
-      sourceQuestion: previewText(chartSourceQuestion || user, 1800),
+      sourceQuestion: previewText(chartSourceQuestion || user, 6000),
       chartPath: chartResult?.path || '',
       renderedAt: chartResult?.path ? now : '',
       rowCount: Array.isArray(chartSpec.rows) ? chartSpec.rows.length : 0,
@@ -1633,8 +1693,9 @@ async function callReadonlyCodexGateway(question, context) {
       '--skip-git-repo-check',
       '--ignore-rules',
       '--output-last-message', outFile,
+      '--model', CODEX_GATEWAY_MODEL,
       '--config', 'approval_policy="never"',
-      '--config', 'model_reasoning_effort="low"',
+      '--config', `model_reasoning_effort="${CODEX_GATEWAY_REASONING_EFFORT}"`,
       requestedSessionId,
       '-',
     ]
@@ -1646,8 +1707,9 @@ async function callReadonlyCodexGateway(question, context) {
       '--ignore-rules',
       '--color', 'never',
       '--output-last-message', outFile,
+      '--model', CODEX_GATEWAY_MODEL,
       '--config', 'approval_policy="never"',
-      '--config', 'model_reasoning_effort="low"',
+      '--config', `model_reasoning_effort="${CODEX_GATEWAY_REASONING_EFFORT}"`,
       '-',
     ];
   const result = await runProcess('codex', codexArgs, {
