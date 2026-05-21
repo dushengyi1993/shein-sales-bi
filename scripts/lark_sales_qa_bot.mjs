@@ -446,9 +446,9 @@ function topRows(rows, metric, limit = 8) {
 function wantsChartQuestion(text) {
   const q = normalizeText(text);
   if (!CHART_ENABLED || !q) return false;
-  const asksChart = /画图|图表|柱状图|折线图|趋势图|可视化|图片|出图|生成图|真正的图|真的图|不是文字图|数据.*图|chart|bar/i.test(q);
+  const asksChart = /画图|图表|柱状图|折线图|趋势图|可视化|图片|出图|生成图|信息图|真正的图|真的图|不是文字图|数据.*图|做成.*图|画成.*图|chart|bar|infographic/i.test(q);
   const allowedDomain = /SHEIN|shein|BI|bi|销售|销量|订单|利润|退货|退款|排行|排名|货号|产品|商品|店铺|链接|曝光|访客|点击|支付|ET|et|库存|货代|去化|补货|在库|在途|仓库|售罄|缺货|断货/.test(q);
-  const chartComplaint = /不是文字图|真正的图|真的图|数据.*(?:画|做|生成).*(?:图|图表)|把数据.*图/.test(q);
+  const chartComplaint = /不是文字图|真正的图|真的图|图呢|图片呢|图在哪|怎么没图|数据.*(?:画|做|生成).*(?:图|图表)|把数据.*图/.test(q);
   return asksChart && (allowedDomain || chartComplaint);
 }
 
@@ -565,6 +565,172 @@ function buildInventoryChartSpec(text, data) {
   };
 }
 
+function productCategoryMap(data) {
+  const countsByProduct = new Map();
+  for (const row of asArray(data.storeLinks || data.links)) {
+    const product = String(row?.standard_goods_sn || row?.goods_sn || '').trim();
+    const category = String(row?.category4_name || row?.category_name || row?.categoryName || '').trim();
+    if (!product || !category) continue;
+    if (!countsByProduct.has(product)) countsByProduct.set(product, new Map());
+    const counts = countsByProduct.get(product);
+    counts.set(category, (counts.get(category) || 0) + 1);
+  }
+  const result = new Map();
+  for (const [product, counts] of countsByProduct.entries()) {
+    const best = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh-Hans-CN'))[0]?.[0];
+    if (best) result.set(product, best);
+  }
+  return result;
+}
+
+function allKnownCategories(data) {
+  return [...new Set(asArray(data.storeLinks || data.links)
+    .map(row => String(row?.category4_name || row?.category_name || row?.categoryName || '').trim())
+    .filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+}
+
+function pickCategoryForProduct(row, categoryByProduct) {
+  const candidates = [
+    row?.standard_goods_sn,
+    String(row?.standard_goods_sn_list || '').split(',')[0],
+    row?.goods_sn,
+    row?.product,
+  ].map(v => String(v || '').trim()).filter(Boolean);
+  for (const product of candidates) {
+    if (categoryByProduct.has(product)) return categoryByProduct.get(product);
+  }
+  const direct = String(row?.category4_name || row?.category_name || row?.categoryName || '').trim();
+  if (direct) return direct;
+  const haystack = `${candidates.join(' ')} ${row?.goods_title || ''} ${row?.product_name || ''}`.toLowerCase();
+  const rules = [
+    ['绞肉机', ['绞肉']],
+    ['榨汁机', ['榨汁']],
+    ['咖啡机', ['咖啡']],
+    ['电热水壶', ['水壶', '热水壶']],
+    ['吸尘器', ['吸尘']],
+    ['蒸汽熨烫机', ['熨烫', '蒸汽']],
+    ['电动缝纫机', ['缝纫']],
+    ['制冰机', ['制冰']],
+    ['空气炸锅', ['空气炸']],
+    ['电磁炉', ['电磁炉']],
+    ['直发器', ['直发', '夹板']],
+    ['卷发钳和卷发棒', ['卷发']],
+    ['电热水瓶', ['热水瓶']],
+    ['料理机', ['破壁', '料理']],
+    ['手持打蛋器', ['打蛋']],
+    ['手持搅拌器', ['搅拌']],
+    ['食品料理机', ['料理机']],
+    ['三明治和早餐机', ['三明治', '早餐机']],
+  ];
+  for (const [category, keywords] of rules) {
+    if (keywords.some(keyword => haystack.includes(keyword.toLowerCase()))) return category;
+  }
+  return '未分类/待补类目';
+}
+
+function formatDays(value, hasSpeed = true) {
+  const x = Number(value);
+  if (!hasSpeed) return '-';
+  if (!Number.isFinite(x)) return '-';
+  if (x >= 999) return '999+天';
+  if (x >= 100) return `${Math.round(x)}天`;
+  return `${Number(x.toFixed(1)).toLocaleString('en-US')}天`;
+}
+
+function categoryInventoryStatus(row) {
+  if (!row.productCount && row.onHand <= 0 && row.pending <= 0 && row.speed <= 0) return {label: '待补数据', priority: 90};
+  if (row.speed > 0 && row.onHand <= 0) return {label: '断货', priority: 0};
+  if (row.speed > 0 && row.daysOnHand <= 14) return {label: '14天内', priority: 1};
+  if (row.speed > 0 && row.daysOnHand <= 30) return {label: '30天内', priority: 2};
+  if (row.speed > 0 && row.daysOnHand > 180) return {label: '周期长', priority: 5};
+  if (row.speed <= 0 && row.onHand > 0) return {label: '慢动销', priority: 4};
+  return {label: '健康', priority: 3};
+}
+
+function buildCategoryInventoryChartSpec(text, data) {
+  const categoryByProduct = productCategoryMap(data);
+  const rowsByCategory = new Map();
+  const ensure = category => {
+    const key = category || '未归类';
+    if (!rowsByCategory.has(key)) {
+      rowsByCategory.set(key, {
+        category: key,
+        products: new Set(),
+        onHand: 0,
+        pending: 0,
+        sold7d: 0,
+        sold30d: 0,
+        speed: 0,
+      });
+    }
+    return rowsByCategory.get(key);
+  };
+
+  for (const category of allKnownCategories(data)) ensure(category);
+
+  for (const row of asArray(data.inventoryDepletion?.products)) {
+    const product = String(row?.standard_goods_sn || row?.goods_sn || row?.product || '').trim();
+    const category = pickCategoryForProduct(row, categoryByProduct);
+    const agg = ensure(category);
+    if (product) agg.products.add(product);
+    agg.onHand += n(row?.estimated_on_hand_quantity ?? row?.et_estimated_available_qty ?? row?.available_quantity);
+    agg.pending += n(row?.incoming_quantity) + n(row?.not_shipped_quantity);
+    agg.sold7d += n(row?.gross_sold_7d);
+    agg.sold30d += n(row?.gross_sold_30d);
+    agg.speed += n(row?.weighted_daily_gross_sales ?? row?.weighted_daily_sales ?? row?.daily_sales);
+  }
+
+  const categories = [...rowsByCategory.values()].map(row => {
+    const daysOnHand = row.speed > 0 ? row.onHand / row.speed : null;
+    const daysWithPending = row.speed > 0 ? (row.onHand + row.pending) / row.speed : null;
+    const base = {
+      ...row,
+      productCount: row.products.size,
+      daysOnHand,
+      daysWithPending,
+    };
+    const status = categoryInventoryStatus(base);
+    return {...base, status: status.label, statusPriority: status.priority};
+  });
+
+  const chartRows = categories
+    .sort((a, b) => {
+      const dayA = Number.isFinite(a.daysOnHand) ? a.daysOnHand : 99999;
+      const dayB = Number.isFinite(b.daysOnHand) ? b.daysOnHand : 99999;
+      return a.statusPriority - b.statusPriority
+        || dayA - dayB
+        || b.speed - a.speed
+        || b.onHand - a.onHand
+        || a.category.localeCompare(b.category, 'zh-Hans-CN');
+    })
+    .map(row => ({
+      label: compactLabel(row.category, 24),
+      value: row.onHand,
+      valueLabel: `${intNum(row.onHand)}件`,
+      note: `${row.status}｜货号${intNum(row.productCount)}｜日销${Number(row.speed.toFixed(1)).toLocaleString('en-US')}｜现货${formatDays(row.daysOnHand, row.speed > 0)}｜待到/待发${intNum(row.pending)}`,
+    }));
+
+  if (!chartRows.length) return null;
+  const totalOnHand = categories.reduce((sum, row) => sum + row.onHand, 0);
+  const totalPending = categories.reduce((sum, row) => sum + row.pending, 0);
+  const totalSpeed = categories.reduce((sum, row) => sum + row.speed, 0);
+  const overallDays = totalSpeed > 0 ? totalOnHand / totalSpeed : null;
+  return {
+    kind: 'category_inventory',
+    title: '全品类库存去化信息图',
+    subtitle: `现货 ${intNum(totalOnHand)} 件｜待到/待发 ${intNum(totalPending)} 件｜加权日销 ${Number(totalSpeed.toFixed(1)).toLocaleString('en-US')}｜整体现货周期 ${formatDays(overallDays, totalSpeed > 0)}`,
+    metricLabel: '现货库存（件）',
+    unit: ' 件',
+    footnote: `口径：库存=estimated_on_hand_quantity；日销=weighted_daily_gross_sales；现货周期=库存/日销；ET更新时间：${data.dates?.etUpdatedAt || data.inventoryDepletion?.freshness?.etUpdatedAt || '-'}；BI生成：${data.generatedAt || '-'}`,
+    rows: chartRows,
+    maxRows: Math.min(80, chartRows.length),
+    rowHeight: 56,
+    width: 1680,
+    labelWidth: 430,
+  };
+}
+
 function buildLinkChartSpec(text, data) {
   const q = normalizeText(text);
   const product = findProductSmart(text, data);
@@ -599,6 +765,10 @@ function buildLinkChartSpec(text, data) {
 function buildControlledChartSpec(text, data) {
   if (!wantsChartQuestion(text)) return null;
   const q = normalizeText(text);
+  if (/(所有|全部|全).*(品类|类目)|品类|类目|信息图|infographic/i.test(q)
+    && /ET|et|库存|货代|去化|补货|在库|在途|仓库|售罄|缺货|断货|周转|可卖/.test(q)) {
+    return buildCategoryInventoryChartSpec(text, data);
+  }
   if (/ET|et|库存|货代|去化|补货|在库|在途|仓库|售罄|缺货|断货|周转|可卖/.test(q)) {
     return buildInventoryChartSpec(text, data);
   }

@@ -81,7 +81,8 @@ def fmt_number(value: float, unit: str = "") -> str:
 
 
 def render(spec: dict, output: Path) -> None:
-    rows = list(spec.get("rows") or [])[:16]
+    max_rows = int(spec.get("maxRows") or 16)
+    rows = list(spec.get("rows") or [])[:max(1, max_rows)]
     title = str(spec.get("title") or "SHEIN 经营图表")
     subtitle = str(spec.get("subtitle") or "")
     footnote = str(spec.get("footnote") or "")
@@ -89,7 +90,7 @@ def render(spec: dict, output: Path) -> None:
     metric_label = str(spec.get("metricLabel") or "数值")
 
     width = int(spec.get("width") or 1400)
-    row_h = 62
+    row_h = int(spec.get("rowHeight") or 62)
     top = 150 if subtitle else 120
     bottom = 108 if footnote else 78
     height = max(560, top + max(1, len(rows)) * row_h + bottom)
@@ -138,7 +139,7 @@ def render(spec: dict, output: Path) -> None:
         max_value = 1.0
 
     label_x = margin
-    label_w = 380
+    label_w = int(spec.get("labelWidth") or 380)
     bar_x = label_x + label_w + 24
     value_w = 220
     bar_w = width - bar_x - value_w - margin
