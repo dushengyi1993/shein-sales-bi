@@ -21,6 +21,8 @@ const CHART_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA
 const CHART_PYTHON = process.env.SHEIN_QA_CHART_PYTHON || 'python3';
 const CHART_SCRIPT = process.env.SHEIN_QA_CHART_SCRIPT || path.join(ROOT, 'scripts', 'render_lark_qa_chart.py');
 const CHART_DIR = process.env.SHEIN_QA_CHART_DIR || path.join(STATE_DIR, 'charts');
+const LINK_OPS_TASK_FILE = process.env.SHEIN_QA_LINK_OPS_TASK_FILE || path.join(ROOT, 'state', 'bi_link_ops_tasks.json');
+const OWNER_ONLY_OPS_WRITE = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_OWNER_ONLY_OPS_WRITE || '1').toLowerCase());
 const STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ'];
 
 function parseArgList(raw) {
@@ -118,6 +120,7 @@ function normalizeEventPayload(input) {
     ...message,
     event_id: input?.event_id || root.event_id || message.event_id || '',
     message_id: root.message_id || message.message_id || message.id || '',
+    chat_id: root.chat_id || message.chat_id || root.chat?.chat_id || message.chat?.chat_id || '',
     chat_type: root.chat_type || message.chat_type || '',
     message_type: root.message_type || message.message_type || '',
     sender_type: root.sender_type || root.sender?.sender_type || input?.sender?.sender_type || '',
@@ -806,6 +809,223 @@ function larkLocalFileArg(filePath) {
   return filePath;
 }
 
+const INFRA_ACTION_RE = /重启|部署|发布版本|发版|改代码|修改代码|提交代码|提交git|git\s+push|push|pull|reset|删库|清库|迁移数据库|执行SQL|跑SQL|改表|drop\s+table|truncate|systemctl|sudo|ssh|shell|命令行|定时器|timer|service|docker|nginx|caddy|metabase|postgres|数据库|服务器|BI系统|BI门户|源码|仓库|github|配置文件|auth\.json|config\.toml/i;
+const SECRET_RE = /token|cookie|密码|密钥|secret|app[_ -]?secret|auth\.json|config\.toml|凭据|验证码|session/i;
+const ECOM_DOMAIN_RE = /SHEIN|shein|希音|沙特|半托|电商|运营|店铺|货号|SKU|sku|SKC|skc|商品|产品|链接|上架|下架|标题|主图|图片|套图|卖点|五点|描述|关键词|竞品|竞对|搜索词|流量|曝光|访客|点击|支付|转化|销售|销量|订单|利润|成本|退货|退款|售后|库存|ET|et|货代|去化|补货|活动|报名|折扣|促销|定价|价格|BI|bi|图表|画图|信息图|日报|看板|动作池|任务池/;
+const OPS_WRITE_RE = /改标题|换标题|优化标题并(替换|执行|提交)|换图|更换图片|改主图|上传图片|补链接|补链|创建链接|复制上品|上品|上链接|发布商品|刊登|提交审核|下架|归档|删除链接|停掉链接|报活动|活动报名|报名活动|设置折扣|限时折扣|改价|调价|改价格|改库存|补证书|补资质|执行|开始处理|加入任务池|加入动作池/;
+const DRAFT_OR_RESEARCH_RE = /优化标题|标题优化|写标题|生成标题|改写标题|卖点|五点|描述|文案|关键词|竞品|竞对|参考|调研|搜索|查一下|找一下|分析.*标题|图片方案|套图方案/;
+
+function inferLinkOpsIntent(command) {
+  const text = String(command || '').trim();
+  const lower = text.toLowerCase();
+  const intents = [];
+  if (/补|复制|上品|上架|草稿|覆盖|缺链接|缺链/.test(text) || /\b(copy|draft|create|publish|coverage)\b/.test(lower)) intents.push('copy_product_draft');
+  if (/标题|title/.test(lower)) intents.push('update_title');
+  if (/主图|图片|套图|image|photo|pic/.test(lower)) intents.push('update_images');
+  if (/下架|死链|淘汰|归档|停掉|移除|删除链接/.test(text)) intents.push('retire_link');
+  if (/营销|活动|报名/.test(text)) intents.push('campaign_signup');
+  if (/限时|折扣|秒杀|促销|discount/.test(lower)) intents.push('flash_discount');
+  if (/证书|资质|合规/.test(text)) intents.push('certificate_review');
+  if (!intents.length) intents.push('manual_review');
+  return [...new Set(intents)];
+}
+
+function linkOpsIntentLabel(intent) {
+  return ({
+    copy_product_draft: '补链接/复制上品',
+    update_title: '换标题',
+    update_images: '换图',
+    retire_link: '下架/归档链接',
+    campaign_signup: '报营销活动',
+    flash_discount: '限时折扣',
+    certificate_review: '证书/资质',
+    manual_review: '人工复核',
+  })[intent] || String(intent || '');
+}
+
+function inferLinkOpsTargets(command) {
+  const text = String(command || '');
+  const stores = [...new Set((text.match(/\b[A-Z]{2,3}\b/g) || [])
+    .map(x => x.toUpperCase())
+    .filter(x => STORE_KEYS.includes(x) || ['DSY', 'LGM'].includes(x)))]
+    .slice(0, 24);
+  const productRefs = [...new Set((text.match(/\b(?:[A-Z]{1,6}-?\d{1,8}[A-Z]?(?:-[A-Z0-9]+)?(?:[\u4e00-\u9fa5A-Za-z0-9-]*)?|(?:sv|sb)\d{8,})\b/giu) || [])
+    .map(x => x
+      .replace(/[，。；、,.]+$/g, '')
+      .replace(/(各店|全店|所有店|差链接|弱链接|死链接|缺链接|链接|建议|下架|换图|补新|补链|覆盖).*$/u, ''))
+    .filter(x => /\d/.test(x)))]
+    .slice(0, 48);
+  return {stores, productRefs};
+}
+
+function isClearLinkOpsActionCommand(text) {
+  const q = normalizeText(text);
+  if (!OPS_WRITE_RE.test(q)) return false;
+  if (/建议|分析|看看|找出|哪些|哪个|是否|能否|能不能|可以吗|怎么|如何|为什么|原因/.test(q)
+    && !/执行|处理|现在|立即|直接|提交|确认|照做|按这个|加入任务池|加入动作池/.test(q)) {
+    return false;
+  }
+  return true;
+}
+
+function classifySafety(text, event = {}) {
+  const q = normalizeText(text);
+  const isEcom = ECOM_DOMAIN_RE.test(q);
+  const asksSecret = SECRET_RE.test(q) && /发|给|看|显示|导出|读取|打印|告诉|是什么|复制|下载|泄露/.test(q);
+  const isOpsWrite = isEcom && isClearLinkOpsActionCommand(q);
+  const isDraftOrResearch = DRAFT_OR_RESEARCH_RE.test(q) && isEcom;
+  const isInfra = INFRA_ACTION_RE.test(q) && !isOpsWrite;
+  const policy = {
+    decision: 'allow',
+    mode: 'readonly_analysis',
+    reason: 'ecommerce_ops_allowed',
+    ownerOnlyOpsWrite: OWNER_ONLY_OPS_WRITE,
+    isEcommerce: isEcom,
+    isOpsWrite,
+    needsPublicWeb: /竞品|竞对|关键词|标题|卖点|五点|描述|公开|网上|网页|搜索|调研/.test(q) && isEcom,
+    intents: isOpsWrite ? inferLinkOpsIntent(q) : [],
+    targets: isOpsWrite ? inferLinkOpsTargets(q) : {},
+    blocked: false,
+    blockMessage: '',
+  };
+  if (asksSecret) {
+    return {
+      ...policy,
+      decision: 'block',
+      mode: 'blocked_secret',
+      reason: 'secret_or_session_request_blocked',
+      blocked: true,
+      blockMessage: '这个请求我不能处理：涉及 token、cookie、密码、密钥、登录态或验证码等敏感信息。你可以让我查经营数据、生成运营建议或创建受控运营任务，但不能读取或输出凭据。',
+    };
+  }
+  if (isInfra) {
+    return {
+      ...policy,
+      decision: 'block',
+      mode: 'blocked_infrastructure',
+      reason: 'infrastructure_change_blocked',
+      blocked: true,
+      blockMessage: '这个请求我不能在飞书机器人里执行：它涉及 BI/数据库/服务器/代码/GitHub/配置等基础设施变更。飞书机器人只处理电商运营、数据分析、图表、草稿和受控 SHEIN 链接/商品运营任务。',
+    };
+  }
+  if (!isEcom) {
+    return {
+      ...policy,
+      decision: event.chat_type === 'p2p' ? 'block' : 'ignore',
+      mode: 'out_of_scope',
+      reason: 'not_ecommerce_ops',
+      blocked: event.chat_type === 'p2p',
+      blockMessage: '我这里只处理 SHEIN/电商运营相关事项：销售、库存、链接、标题、图片、活动、利润、退货、图表和运营任务。这个问题超出了当前机器人范围。',
+    };
+  }
+  if (isOpsWrite) {
+    return {
+      ...policy,
+      mode: OWNER_ONLY_OPS_WRITE ? 'ops_write_owner_only_allowed' : 'ops_write_needs_auth',
+      reason: OWNER_ONLY_OPS_WRITE ? 'owner_only_ops_write_allowed' : 'ops_write_disabled_until_auth',
+      blocked: !OWNER_ONLY_OPS_WRITE,
+      decision: OWNER_ONLY_OPS_WRITE ? 'allow' : 'block',
+      blockMessage: OWNER_ONLY_OPS_WRITE ? '' : '当前运营写动作需要员工账号系统/权限校验后才能开放；我可以先生成方案和任务草稿。',
+    };
+  }
+  if (isDraftOrResearch) {
+    return {...policy, mode: 'draft_or_public_research_allowed', reason: 'draft_and_public_web_allowed'};
+  }
+  return policy;
+}
+
+function shouldConsiderEvent(event) {
+  const content = normalizeText(event?.content || '');
+  if (!content) return false;
+  if (String(event?.message_type || '') !== 'text') return false;
+  if (/app|bot/i.test(String(event?.sender_type || ''))) return false;
+  if (event?.chat_type === 'p2p') return true;
+  return classifySafety(content, event).decision !== 'ignore';
+}
+
+async function readJsonFile(file, fallback) {
+  try {
+    return JSON.parse((await fs.readFile(file, 'utf8')).replace(/^\uFEFF/, ''));
+  } catch {
+    return fallback;
+  }
+}
+
+async function writeJsonFile(file, value) {
+  await fs.mkdir(path.dirname(file), {recursive: true});
+  await fs.writeFile(file, JSON.stringify(value, null, 2), 'utf8');
+}
+
+function normalizeLinkOpsTaskStore(value) {
+  return {
+    version: 1,
+    updatedAt: value?.updatedAt || null,
+    tasks: (Array.isArray(value?.tasks) ? value.tasks : []).filter(x => x && typeof x === 'object').slice(0, 1000),
+  };
+}
+
+function buildLarkLinkOpsTask({command, event, policy, answer}) {
+  const now = new Date().toISOString();
+  const id = `lot_lark_${now.replace(/[-:.TZ]/g, '').slice(0, 14)}_${crypto.randomBytes(4).toString('hex')}`;
+  const intents = policy.intents?.length ? policy.intents : inferLinkOpsIntent(command);
+  const targets = policy.targets && typeof policy.targets === 'object' ? policy.targets : inferLinkOpsTargets(command);
+  const actor = event.sender_id ? `lark:${event.sender_id}` : 'lark:unknown';
+  return {
+    id,
+    version: 1,
+    status: 'draft',
+    progress: 10,
+    source: 'lark_qa_owner_only',
+    chatSessionId: event.chat_id || event.sender_id || '',
+    command,
+    intents,
+    targets,
+    preview: {
+      summary: `来自飞书的受控运营动作：${intents.map(linkOpsIntentLabel).join(' / ')}。当前 owner-only 模式允许进入任务池；执行前仍走链接管理中台预检和审计。`,
+      riskNotes: [
+        '当前只创建/更新链接运营任务，不直接绕过中台静默修改 SHEIN。',
+        '真实执行仍需执行器检查目标店铺、货号/SKC、素材、价格、库存、证书/资质和接口权限。',
+        '后续接入团队后，这里需要接员工账号系统和角色权限。',
+      ],
+      agentAnswer: String(answer || '').slice(0, 12000),
+      agentMode: policy.mode,
+    },
+    requestedBy: actor,
+    requestedByUser: event.sender_id || '',
+    requestMeta: {
+      source: 'lark_sales_qa_bot',
+      chatType: event.chat_type || '',
+      messageId: event.message_id || event.id || '',
+      ownerOnlyOpsWrite: OWNER_ONLY_OPS_WRITE,
+    },
+    createdAt: now,
+    updatedAt: now,
+    execution: {
+      mode: 'owner_only_controlled_ops',
+      enabled: true,
+      note: '当前按用户要求默认开白运营写动作；执行仍必须通过链接管理中台/执行器，不开放系统/BI/服务器/代码修改。',
+    },
+    history: [{
+      at: now,
+      event: 'created_from_lark_qa',
+      by: actor,
+      status: 'draft',
+      progress: 10,
+    }],
+  };
+}
+
+async function createLarkLinkOpsTask({command, event, policy, answer, dryRun = false}) {
+  if (!policy?.isOpsWrite || policy.blocked) return null;
+  const task = buildLarkLinkOpsTask({command, event, policy, answer});
+  if (dryRun) return {...task, dryRun: true};
+  const store = normalizeLinkOpsTaskStore(await readJsonFile(LINK_OPS_TASK_FILE, {version: 1, updatedAt: null, tasks: []}));
+  store.tasks = [task, ...store.tasks].slice(0, 1000);
+  store.updatedAt = new Date().toISOString();
+  await writeJsonFile(LINK_OPS_TASK_FILE, store);
+  return task;
+}
+
 function compactSalesContext(question, data) {
   const rawQuestion = String(question || '');
   const q = normalizeText(rawQuestion);
@@ -941,12 +1161,15 @@ async function callReadonlyLlm(question, context) {
               type: 'input_text',
               text: [
                 '你是 SHEIN 沙特半托管运营数据助手；回答阶段只基于数据和上层网关上下文，不直接改后台。',
-                '你只能根据用户问题和提供的 JSON 数据回答销售、店铺、货号、链接表现、覆盖、ET/成本表库存、去化、售后/利润等经营问题，并可说明上层任务池/执行器的下一步。',
+                '你只能处理 SHEIN/电商运营相关问题：销售、店铺、货号、链接表现、覆盖、ET/成本表库存、去化、售后/利润、标题、图片、活动、价格、运营动作等。',
+                '当前安全边界：禁止修改 BI/数据库/服务器/代码/GitHub/配置/密钥；允许 SHEIN 链接/商品运营写动作进入受控任务池、预检、审计和执行器链路。',
+                '如果 securityPolicy.mode=ops_write_owner_only_allowed，说明当前 owner-only 模式允许运营写动作入任务池；你可以说已进入/可进入受控任务和预检，但不能声称已经静默改了 SHEIN。',
+                '标题优化、卖点、关键词、竞品参考等需求允许使用公开网页资料做只读调研；不得登录、绕过权限、抓取内部/敏感信息，也不得输出 token/cookie/密码/密钥。',
                 '每次回答都必须基于本轮 JSON 重新查数；最新用户消息换了店铺、货号、SKC 或指标时，以最新消息为准，指代不完整时再结合上文。',
                 '不要编造未提供的数据；缺数据就明确说缺哪类数据。',
                 '上下文里的 inventory.products 是 ET/成本表实物库存与去化口径，platformStockAlerts 是 SHEIN 平台展示库存；不要把二者混为一谈。只要 inventory 里有数据，就不能说“看不到 ET 库存”。',
                 '不要给出修改 BI 系统、服务器、代码、密钥、账号、非 SHEIN 业务的建议。',
-                '涉及上品、改标题、换图、下架、活动报名、限时折扣等写操作时，不能说已经执行；如果用户问题或上层网关说明系统会加入任务池/已识别为动作命令，就说已进入待确认动作/任务，等待执行器预检。',
+                '涉及上品、改标题、换图、下架、活动报名、限时折扣等运营写操作时，必须强调通过链接管理中台/飞书任务链路执行和留痕；如果上下文含 linkOpsTask，就带上任务号。',
                 '不要把“回答阶段不直接执行”误说成“店铺没有权限”。若上下文说明 HL 已有 OpenAPI 授权，应承认 HL 可进入 API 执行准备；只有真实写适配器未实现/预检未通过时，才说卡在适配器或预检。',
                 '遇到“这个链接/2,223 这个/刚才那个”等指代时，优先用上下文里的 SKC、店铺、货号、曝光/访客/销量数字定位，不要因为最新一句没写全就否定上轮数据。',
                 '如果用户要求画图、图表、柱状图或可视化，不要说不能画；上层网关会基于受控 BI 数据附上图片图表，你只负责给出简短解读。',
@@ -1033,10 +1256,14 @@ async function callReadonlyCodexGateway(question, context) {
   if (!CODEX_GATEWAY_ENABLED) return null;
   const prompt = [
     '你是 SHEIN 沙特半托管运营数据智能体，运行在受控网关里；回答阶段只读数据，不直接改后台。',
+    '你只能处理 SHEIN/电商运营相关问题：销售、店铺、货号、链接表现、覆盖、库存、去化、售后/利润、标题、图片、活动、价格、运营动作等。',
+    '当前安全边界：禁止修改 BI/数据库/服务器/代码/GitHub/配置/密钥；允许 SHEIN 链接/商品运营写动作进入受控任务池、预检、审计和执行器链路。',
+    '如果 securityPolicy.mode=ops_write_owner_only_allowed，说明当前 owner-only 模式允许运营写动作入任务池；你可以说已进入/可进入受控任务和预检，但不能声称已经静默改了 SHEIN。',
+    '标题优化、卖点、关键词、竞品参考等需求允许使用公开网页资料做只读调研；不得登录、绕过权限、抓取内部/敏感信息，也不得输出 token/cookie/密码/密钥。',
     '每次回答都必须基于本轮提供的最新 BI JSON 上下文重新查数；如果最新用户消息换了店铺、货号、SKC 或指标，以最新消息为准，指代不完整时再结合上文。',
-    '你只能根据下面提供的 BI JSON 上下文回答问题，不允许调用外部网站，不允许修改文件，不允许绕过上层执行器直接执行 SHEIN 写操作。',
+    '你可以根据下面提供的 BI JSON 上下文回答；只有标题/关键词/竞品/公开资料调研类问题才允许读取公开网页，除此之外不要调用外部网站；不允许修改文件，不允许绕过上层执行器直接执行 SHEIN 写操作。',
     '上下文里的 inventory.products 是 ET/成本表实物库存与去化口径，platformStockAlerts 是 SHEIN 平台展示库存；不要把二者混为一谈。只要 inventory 里有数据，就不能说“看不到 ET 库存”。',
-    '如果用户问上品、改标题、换图、下架、活动、限时折扣，不能说已经执行；但如果上下文提示系统会入任务池/已识别为动作命令，应说明已进入待确认动作/任务，等待执行器预检。',
+    '如果用户问上品、改标题、换图、下架、活动、限时折扣，不能说已经静默执行；但如果上下文提示系统会入任务池/已识别为动作命令，应说明已进入待确认动作/任务，等待执行器预检。',
     '不要把“当前回答不直接执行”说成“没有权限”。如果上下文说明 HL 已有 OpenAPI 授权，应承认 HL 可进入 API 执行准备；如果商品发布/提交审核写适配器未实现，只能说卡在适配器/预检，不能泛化为 HL 没权限。',
     '遇到“这个链接/2,223 这个/刚才那个”等指代时，优先用上下文里的 SKC、店铺、货号、曝光/访客/销量数字定位，不要因为最新一句没写全就否定上轮已经查到的数据。',
     '如果用户要求画图、图表、柱状图或可视化，不要说不能画；上层网关会基于受控 BI 数据附上图片图表，你只负责给出简短解读。',
@@ -1158,8 +1385,63 @@ function answerQuestion(text, data) {
   ].join('\n');
 }
 
-async function answerQuestionSmart(text, data) {
+function answerPolicyFallback(text, data, policy = {}) {
+  const q = normalizeText(text);
+  const product = findProductSmart(q, data) || policy.targets?.productRefs?.[0] || '';
+  const stores = policy.targets?.stores || pickStoresSmart(q);
+  const freshness = `BI生成：${data.generatedAt || '-'}；销售源：${data.dates?.salesUpdatedAt || '-'}`;
+  if (policy.isOpsWrite) {
+    const intents = (policy.intents || []).map(linkOpsIntentLabel).join(' / ') || '运营动作';
+    return [
+      `已识别为 SHEIN 受控运营动作：${intents}。`,
+      `目标：${[stores.length ? `店铺 ${stores.join(',')}` : '', product ? `货号/SKC ${product}` : ''].filter(Boolean).join('；') || '还需要在任务里补齐具体目标'}`,
+      '当前 owner-only 模式允许飞书创建运营任务；真实执行仍会走链接管理中台/执行器预检和审计，不会绕过中台静默改 SHEIN。',
+      freshness,
+    ].join('\n');
+  }
+  if (policy.mode === 'draft_or_public_research_allowed') {
+    const baseName = product || q.match(/[\u4e00-\u9fa5A-Za-z0-9-]{3,40}/)?.[0] || '该产品';
+    if (/标题|title/i.test(q)) {
+      return [
+        `可以做 ${baseName} 的标题优化。当前安全策略允许参考公开网页/竞品关键词，但只输出草稿，不直接改 SHEIN。`,
+        '先给你一版不联网兜底草稿：',
+        `1. ${baseName}｜高效实用｜家用便捷款`,
+        `2. ${baseName}｜快速省时｜厨房/家居日常必备`,
+        `3. ${baseName}｜大容量易操作｜适合沙特家庭使用`,
+        '如果需要，我可以在公开网页范围内补充竞品关键词后再给更强的一版。',
+        freshness,
+      ].join('\n');
+    }
+    return [
+      '这个属于电商运营草稿/公开资料参考类请求，安全策略允许处理。',
+      '我可以结合现有 BI 数据和公开网页资料生成标题、卖点、关键词、图片方案或运营建议；不会直接改 SHEIN 后台。',
+      freshness,
+    ].join('\n');
+  }
+  return '';
+}
+
+async function answerQuestionSmart(text, data, policy = {}, linkOpsTask = null) {
   const context = compactSalesContext(text, data);
+  context.securityPolicy = {
+    decision: policy.decision || '',
+    mode: policy.mode || '',
+    reason: policy.reason || '',
+    ownerOnlyOpsWrite: !!policy.ownerOnlyOpsWrite,
+    needsPublicWeb: !!policy.needsPublicWeb,
+    intents: policy.intents || [],
+    targets: policy.targets || {},
+  };
+  if (linkOpsTask) {
+    context.linkOpsTask = {
+      id: linkOpsTask.id || '',
+      status: linkOpsTask.status || '',
+      dryRun: !!linkOpsTask.dryRun,
+      intents: linkOpsTask.intents || [],
+      targets: linkOpsTask.targets || {},
+      note: '这是受控运营任务记录；真实执行仍需链接管理中台/执行器预检和审计。',
+    };
+  }
   try {
     const codexAnswer = await callReadonlyCodexGateway(text, context);
     if (codexAnswer) {
@@ -1178,16 +1460,13 @@ async function answerQuestionSmart(text, data) {
   } catch (err) {
     console.error(JSON.stringify({ok: false, stage: 'llm_answer_failed', error: String(err?.message || err).slice(0, 800)}));
   }
+  const policyFallback = answerPolicyFallback(text, data, policy);
+  if (policyFallback) return policyFallback;
   return answerQuestion(text, data);
 }
 
 function shouldAnswerEvent(event) {
-  const content = normalizeText(event?.content || '');
-  if (!content) return false;
-  if (String(event?.message_type || '') !== 'text') return false;
-  if (/app|bot/i.test(String(event?.sender_type || ''))) return false;
-  if (event?.chat_type === 'p2p') return true;
-  return /销售|销量|订单|利润|退货|退款|排行|排名|货号|产品|商品|店铺|数据|BI|bi|今天|昨天|昨日|ET|et|库存|货代|去化|补货|在库|在途|仓库|售罄|缺货|断货|画图|图表|柱状图|折线图|趋势图|可视化|图片/.test(content);
+  return shouldConsiderEvent(event);
 }
 
 function runLark(args) {
@@ -1221,12 +1500,49 @@ async function handleEvent(event, options = {}) {
   const eventId = event.event_id || event.message_id || crypto.createHash('sha1').update(JSON.stringify(event)).digest('hex');
   if (!shouldAnswerEvent(event)) return {ok: true, skipped: true, reason: 'not_sales_question'};
   if (await alreadyHandled(eventId)) return {ok: true, skipped: true, reason: 'duplicate'};
+  const policy = classifySafety(event.content || '', event);
+  if (policy.decision === 'ignore') return {ok: true, skipped: true, reason: policy.reason || 'ignored_by_policy'};
+  if (policy.blocked) {
+    const answer = policy.blockMessage || '这个请求超出了当前 SHEIN 电商运营机器人的安全范围。';
+    const sendArgs = [
+      'im', '+messages-reply',
+      '--as', 'bot',
+      '--message-id', event.message_id || event.id,
+      '--text', answer,
+      '--idempotency-key', `sales-qa-${eventId}`.slice(0, 80),
+    ];
+    const sent = options.dryRun ? {ok: true, dryRun: true} : await runLark(sendArgs);
+    await markHandled(eventId, {
+      handledAt: new Date().toISOString(),
+      eventId,
+      messageId: event.message_id || event.id || '',
+      chatType: event.chat_type || '',
+      questionPreview: String(event.content || '').slice(0, 200),
+      answer,
+      sendOk: sent.ok,
+      sendCode: sent.code ?? null,
+      safetyPolicy: policy,
+      blocked: true,
+      stderrTail: String(sent.stderr || '').slice(-500),
+    });
+    return {ok: sent.ok, eventId, blocked: true, safetyMode: policy.mode, answer, sendCode: sent.code ?? null};
+  }
   const data = await readData();
   const chartSpec = buildControlledChartSpec(event.content || '', data);
-  const baseAnswer = await answerQuestionSmart(event.content || '', data);
-  const answer = chartSpec
+  const baseAnswer = await answerQuestionSmart(event.content || '', data, policy);
+  const linkOpsTask = await createLarkLinkOpsTask({
+    command: event.content || '',
+    event,
+    policy,
+    answer: baseAnswer,
+    dryRun: !!options.dryRun,
+  });
+  const taskNote = linkOpsTask
+    ? `\n\n运营任务：已${linkOpsTask.dryRun ? '模拟' : ''}加入链接运营任务池 ${linkOpsTask.id}。当前是 owner-only 受控模式；后续接团队时需要接员工账号和权限。`
+    : '';
+  const answer = (chartSpec
     ? `${baseAnswer}\n\n图表：已按当前 BI 数据生成受控图表，图片见下一条。`
-    : baseAnswer;
+    : baseAnswer) + taskNote;
   const sendArgs = [
     'im', '+messages-reply',
     '--as', 'bot',
@@ -1264,6 +1580,9 @@ async function handleEvent(event, options = {}) {
     answer,
     sendOk: sent.ok,
     sendCode: sent.code ?? null,
+    safetyPolicy: policy,
+    linkOpsTaskId: linkOpsTask?.id || '',
+    linkOpsTaskDryRun: !!linkOpsTask?.dryRun,
     chartKind: chartSpec?.kind || '',
     chartPath: chartResult?.path || '',
     chartSendOk: chartSent?.ok ?? null,
@@ -1276,6 +1595,8 @@ async function handleEvent(event, options = {}) {
     eventId,
     answer,
     sendCode: sent.code ?? null,
+    safetyMode: policy.mode,
+    linkOpsTaskId: linkOpsTask?.id || '',
     chartKind: chartSpec?.kind || '',
     chartPath: chartResult?.path || '',
     chartSendCode: chartSent?.code ?? null,
@@ -1303,7 +1624,12 @@ async function consume(options = {}) {
 const args = parseArgs(process.argv.slice(2));
 if (args.answer) {
   const data = await readData();
-  console.log(await answerQuestionSmart(args.answer, data));
+  const policy = classifySafety(args.answer, {chat_type: 'p2p', message_type: 'text', sender_type: 'user'});
+  if (policy.blocked) {
+    console.log(policy.blockMessage);
+  } else {
+    console.log(await answerQuestionSmart(args.answer, data, policy));
+  }
 } else if (args.renderChart) {
   const data = await readData();
   const spec = buildControlledChartSpec(args.renderChart, data);
