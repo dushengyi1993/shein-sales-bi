@@ -21,6 +21,7 @@ const CHART_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA
 const CHART_PYTHON = process.env.SHEIN_QA_CHART_PYTHON || 'python3';
 const CHART_SCRIPT = process.env.SHEIN_QA_CHART_SCRIPT || path.join(ROOT, 'scripts', 'render_lark_qa_chart.py');
 const CHART_DIR = process.env.SHEIN_QA_CHART_DIR || path.join(STATE_DIR, 'charts');
+const CONVERSATION_DIR = process.env.SHEIN_QA_CONVERSATION_DIR || path.join(STATE_DIR, 'conversations');
 const LINK_OPS_TASK_FILE = process.env.SHEIN_QA_LINK_OPS_TASK_FILE || path.join(ROOT, 'state', 'bi_link_ops_tasks.json');
 const OWNER_ONLY_OPS_WRITE = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_OWNER_ONLY_OPS_WRITE || '1').toLowerCase());
 const STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ'];
@@ -163,7 +164,7 @@ function findProduct(text, data) {
 
 function extractUserMessages(text) {
   const raw = String(text || '');
-  const matches = [...raw.matchAll(/用户：([\s\S]*?)(?=\n(?:用户|智能体)：|$)/g)].map(m => normalizeText(m[1]));
+  const matches = [...raw.matchAll(/用户：([\s\S]*?)(?=(?:\s+)(?:用户|智能体)：|$)/g)].map(m => normalizeText(m[1]));
   return matches.filter(Boolean);
 }
 
@@ -187,7 +188,9 @@ function pickStores(text) {
 }
 
 function pickStoresSmart(text) {
-  for (const part of detectionTexts(text)) {
+  const hasUserMessages = extractUserMessages(text).length > 0;
+  const parts = detectionTexts(text);
+  for (const part of (hasUserMessages ? parts.slice(0, 2) : parts)) {
     const stores = pickStores(part);
     if (stores.length) return stores;
   }
@@ -195,7 +198,9 @@ function pickStoresSmart(text) {
 }
 
 function findProductSmart(text, data) {
-  for (const part of detectionTexts(text)) {
+  const hasUserMessages = extractUserMessages(text).length > 0;
+  const parts = detectionTexts(text);
+  for (const part of (hasUserMessages ? parts.slice(0, 2) : parts)) {
     const product = findProduct(part, data);
     if (product) return product;
   }
@@ -537,34 +542,75 @@ function buildInventoryChartSpec(text, data) {
   const numberHints = extractNumberHints(q);
   const latestNumberHints = extractNumberHints(detectionTexts(q)[0] || q);
   const inventory = compactInventoryContext({question: q, data, product, numberHints, latestNumberHints});
-  const metric = /去化|可卖|天|周转/.test(q)
-    ? 'days_of_supply_on_hand'
-    : (/销量|近30|消耗/.test(q) ? 'gross_sold_30d' : 'et_estimated_available_qty');
+  const allProductsMode = !product && /每个货号|按货号|货号.*一行|逐货号|所有货号|全部货号|全量|每个产品|所有产品|全部产品/.test(q);
+  const metric = /库存数量|库存数|现货|按库存/.test(q)
+    ? 'estimated_on_hand_quantity'
+    : (/去化速度|日销|速度/.test(q)
+      ? 'weighted_daily_gross_sales'
+      : (/去化|可卖|天|周转|周期/.test(q)
+        ? 'days_of_supply_on_hand'
+        : (/销量|近30|消耗/.test(q) ? 'gross_sold_30d' : 'et_estimated_available_qty')));
   const metricLabel = metric === 'days_of_supply_on_hand'
     ? '在库可卖天数'
-    : (metric === 'gross_sold_30d' ? '近30天毛销量（件）' : 'ET估算可用库存（件）');
-  const unit = metric === 'days_of_supply_on_hand' ? ' 天' : ' 件';
-  const rows = (inventory.products || [])
+    : (metric === 'gross_sold_30d'
+      ? '近30天毛销量（件）'
+      : (metric === 'weighted_daily_gross_sales' ? '加权日销（件/天）' : (metric === 'estimated_on_hand_quantity' ? '现货库存（件）' : 'ET估算可用库存（件）')));
+  const unit = metric === 'days_of_supply_on_hand' ? ' 天' : (metric === 'weighted_daily_gross_sales' ? ' 件/天' : ' 件');
+
+  const metricValue = row => {
+    if (metric === 'estimated_on_hand_quantity') return n(row.estimated_on_hand_quantity ?? row.et_estimated_available_qty ?? row.available_quantity);
+    return n(row[metric]);
+  };
+  const sourceRows = allProductsMode
+    ? asArray(data.inventoryDepletion?.products)
+      .filter(row => {
+        const productSn = String(row?.standard_goods_sn || row?.standard_goods_sn_list || row?.goods_sn || '').trim();
+        return !!productSn;
+      })
+      .map(row => ({
+        standard_goods_sn: row.standard_goods_sn || row.standard_goods_sn_list || row.goods_sn || '',
+        goods_title: row.goods_title,
+        stock_status: row.stock_status,
+        et_estimated_available_qty: row.et_estimated_available_qty,
+        estimated_on_hand_quantity: row.estimated_on_hand_quantity,
+        incoming_quantity: row.incoming_quantity,
+        gross_sold_30d: row.gross_sold_30d,
+        weighted_daily_gross_sales: row.weighted_daily_gross_sales ?? row.weighted_daily_sales ?? row.daily_sales,
+        days_of_supply_on_hand: row.days_of_supply_on_hand,
+        days_of_supply_with_incoming: row.days_of_supply_with_incoming,
+      }))
+    : (inventory.products || []);
+  const rows = sourceRows
     .sort((a, b) => {
-      if (metric === 'days_of_supply_on_hand') return n(a[metric]) - n(b[metric]) || n(b.gross_sold_30d) - n(a.gross_sold_30d);
-      return n(b[metric]) - n(a[metric]) || n(b.gross_sold_30d) - n(a.gross_sold_30d);
+      if (metric === 'days_of_supply_on_hand') {
+        const dayA = metricValue(a) > 0 && n(a.weighted_daily_gross_sales) > 0 ? metricValue(a) : 999999;
+        const dayB = metricValue(b) > 0 && n(b.weighted_daily_gross_sales) > 0 ? metricValue(b) : 999999;
+        return dayA - dayB || n(b.gross_sold_30d) - n(a.gross_sold_30d);
+      }
+      return metricValue(b) - metricValue(a) || n(b.gross_sold_30d) - n(a.gross_sold_30d);
     })
-    .slice(0, 12)
+    .slice(0, allProductsMode ? 120 : 12)
     .map(r => ({
-      label: compactLabel(r.standard_goods_sn || r.goods_title || '-'),
-      value: n(r[metric]),
-      valueLabel: `${metric === 'days_of_supply_on_hand' ? Number(n(r[metric]).toFixed(1)) : intNum(r[metric])}${unit}`,
+      label: compactLabel(r.standard_goods_sn || r.goods_title || '-', allProductsMode ? 46 : 34),
+      value: metricValue(r),
+      valueLabel: `${metric === 'days_of_supply_on_hand' || metric === 'weighted_daily_gross_sales' ? Number(metricValue(r).toFixed(1)) : intNum(metricValue(r))}${unit}`,
       note: `状态 ${r.stock_status || '-'}｜在途 ${intNum(r.incoming_quantity)}｜近30销量 ${intNum(r.gross_sold_30d)}`,
     }));
   if (!rows.length) return null;
   return {
     kind: 'inventory',
-    title: product ? `${product} 库存/去化图` : 'ET/库存去化重点图',
-    subtitle: '基于 ET/成本表实物库存与销售去化，不等同于 SHEIN 平台展示库存',
+    title: product ? `${product} 库存/去化图` : (allProductsMode ? '全货号库存/去化信息图' : 'ET/库存去化重点图'),
+    subtitle: allProductsMode
+      ? `逐货号展示，按${metricLabel.replace(/（.*?）/g, '')}${metric === 'days_of_supply_on_hand' ? '升序' : '降序'}排列；基于 ET/成本表实物库存与销售去化`
+      : '基于 ET/成本表实物库存与销售去化，不等同于 SHEIN 平台展示库存',
     metricLabel,
     unit,
     footnote: `ET更新时间：${inventory.freshness?.etUpdatedAt || '-'}；BI生成：${data.generatedAt || '-'}`,
     rows,
+    maxRows: allProductsMode ? Math.min(120, rows.length) : undefined,
+    rowHeight: allProductsMode ? 56 : undefined,
+    width: allProductsMode ? 1800 : undefined,
+    labelWidth: allProductsMode ? 520 : undefined,
   };
 }
 
@@ -768,6 +814,13 @@ function buildLinkChartSpec(text, data) {
 function buildControlledChartSpec(text, data) {
   if (!wantsChartQuestion(text)) return null;
   const q = normalizeText(text);
+  const latest = detectionTexts(text)[0] || q;
+  const requestsProductLevelInventory = /每个货号|按货号|货号.*一行|逐货号|所有货号|全部货号|全量|每个产品|所有产品|全部产品/.test(latest)
+    || /每个货号|按货号|货号.*一行|逐货号|所有货号|全部货号|全量|每个产品|所有产品|全部产品/.test(q);
+  if (requestsProductLevelInventory
+    && /ET|et|库存|货代|去化|补货|在库|在途|仓库|售罄|缺货|断货|周转|可卖|日销|速度/.test(q)) {
+    return buildInventoryChartSpec(text, data);
+  }
   if (/(所有|全部|全).*(品类|类目)|品类|类目|信息图|infographic/i.test(q)
     && /ET|et|库存|货代|去化|补货|在库|在途|仓库|售罄|缺货|断货|周转|可卖/.test(q)) {
     return buildCategoryInventoryChartSpec(text, data);
@@ -807,6 +860,199 @@ function larkLocalFileArg(filePath) {
   const rel = path.relative(ROOT, filePath);
   if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return rel.split(path.sep).join('/');
   return filePath;
+}
+
+function conversationIdentity(event = {}) {
+  const chat = String(event.chat_id || '').trim();
+  const sender = String(event.sender_id || '').trim();
+  const chatType = String(event.chat_type || '').trim() || 'unknown';
+  if (chat) return `${chatType}:chat:${chat}`;
+  if (sender) return `${chatType}:sender:${sender}`;
+  return `${chatType}:unknown`;
+}
+
+function conversationKey(event = {}) {
+  return crypto.createHash('sha1').update(conversationIdentity(event)).digest('hex');
+}
+
+function conversationFile(event = {}) {
+  return path.join(CONVERSATION_DIR, `${conversationKey(event)}.json`);
+}
+
+function blankConversationState(event = {}) {
+  return {
+    version: 1,
+    key: conversationKey(event),
+    chatType: event.chat_type || '',
+    createdAt: new Date().toISOString(),
+    updatedAt: null,
+    turns: [],
+    lastChart: null,
+    lastEcommerceAt: null,
+  };
+}
+
+async function readConversationState(event = {}) {
+  const fallback = blankConversationState(event);
+  const raw = await readJsonFile(conversationFile(event), fallback);
+  if (!raw || typeof raw !== 'object') return fallback;
+  return {
+    ...fallback,
+    ...raw,
+    key: fallback.key,
+    chatType: raw.chatType || fallback.chatType,
+    turns: Array.isArray(raw.turns) ? raw.turns.slice(-12) : [],
+    lastChart: raw.lastChart && typeof raw.lastChart === 'object' ? raw.lastChart : null,
+  };
+}
+
+async function writeConversationState(state) {
+  if (!state?.key) return;
+  const safe = {
+    version: 1,
+    key: state.key,
+    chatType: state.chatType || '',
+    createdAt: state.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    turns: Array.isArray(state.turns) ? state.turns.slice(-12) : [],
+    lastChart: state.lastChart || null,
+    lastEcommerceAt: state.lastEcommerceAt || null,
+  };
+  await fs.mkdir(CONVERSATION_DIR, {recursive: true});
+  await fs.writeFile(path.join(CONVERSATION_DIR, `${safe.key}.json`), JSON.stringify(safe, null, 2), 'utf8');
+}
+
+function previewText(text, maxLen = 600) {
+  const clean = normalizeText(text).replace(/(token|cookie|密码|密钥|secret|验证码)\s*[:：=]\s*\S+/ig, '$1=[已隐藏]');
+  return clean.length > maxLen ? `${clean.slice(0, maxLen - 1)}…` : clean;
+}
+
+function conversationHasEcommerceContext(conversation) {
+  if (!conversation || typeof conversation !== 'object') return false;
+  if (conversation.lastChart?.kind) return true;
+  return (conversation.turns || []).slice(-6).some(turn =>
+    turn?.policyMode !== 'out_of_scope' && (turn?.isEcommerce || turn?.chartKind || /电商|运营|库存|货号|链接|销售|图/.test(String(turn?.user || '')))
+  );
+}
+
+function isFollowupText(text) {
+  const q = normalizeText(text);
+  return /这个|那个|上面|刚才|上一张|这张|这图|那图|图呢|图片呢|图在哪|改|修改|重做|重画|重新|不满意|看不懂|不直观|按要求|换成|排序|每个货号|按货号|逐货号|放大|字大|宽一点|精简|只看|再来|继续|不是让你|我不是让你/.test(q);
+}
+
+function isChartRevisionRequest(text, conversation) {
+  if (!conversation?.lastChart?.kind) return false;
+  const q = normalizeText(text);
+  return isFollowupText(q) && /图|图片|信息图|可视化|改|修改|重做|重画|重新|不满意|看不懂|不直观|排序|货号|放大|精简|按要求/.test(q);
+}
+
+function recentConversationLines(conversation, limit = 4) {
+  return (conversation?.turns || [])
+    .slice(-limit)
+    .flatMap(turn => [
+      turn.user ? `用户：${turn.user}` : '',
+      turn.answer ? `智能体：${turn.answer}` : '',
+    ])
+    .filter(Boolean);
+}
+
+function buildEffectiveQuestion(text, conversation) {
+  const current = previewText(text, 1000);
+  if (!current) return '';
+  if (!isFollowupText(current) || !conversationHasEcommerceContext(conversation)) return current;
+  const lines = recentConversationLines(conversation, 4);
+  if (!lines.length) return current;
+  return [...lines, `用户：${current}`].join('\n');
+}
+
+function buildChartQuestion(text, conversation) {
+  const current = previewText(text, 1000);
+  if (isChartRevisionRequest(current, conversation)) {
+    const previous = conversation.lastChart?.sourceQuestion || conversation.lastChart?.title || '';
+    const previousBlock = previous.includes('用户：') ? previous : (previous ? `用户：${previous}` : '');
+    return [
+      previousBlock,
+      `用户：${current}`,
+      '智能体：按上一张图的业务口径继续修改并重新生成受控图表。',
+    ].filter(Boolean).join('\n');
+  }
+  return current;
+}
+
+function applyChartRevisionHints(spec, text) {
+  if (!spec) return spec;
+  const q = normalizeText(text);
+  const next = {
+    ...spec,
+    rows: Array.isArray(spec.rows) ? spec.rows : [],
+  };
+  if (/看不清|放大|字大|宽一点|更宽|不直观|看不懂/.test(q)) {
+    next.width = Math.max(n(next.width), 1800);
+    next.rowHeight = Math.max(n(next.rowHeight), 60);
+    next.labelWidth = Math.max(n(next.labelWidth), 520);
+  }
+  if (/精简|太长|只看前10|前十|top\s*10/i.test(q)) {
+    next.maxRows = Math.min(10, next.rows.length || 10);
+  } else if (/所有|全部|全量|每个货号|逐货号|按货号/.test(q)) {
+    next.maxRows = Math.min(120, next.rows.length || 120);
+  }
+  if (/排序|按/.test(q)) {
+    next.subtitle = `${next.subtitle || ''}｜已按续改要求重新排序/重排`.replace(/^｜/, '');
+  }
+  return next;
+}
+
+function summarizeConversationForContext(conversation) {
+  if (!conversationHasEcommerceContext(conversation)) return null;
+  return {
+    recentTurns: (conversation.turns || []).slice(-4).map(turn => ({
+      user: turn.user || '',
+      answer: turn.answer || '',
+      policyMode: turn.policyMode || '',
+      chartKind: turn.chartKind || '',
+      chartTitle: turn.chartTitle || '',
+    })),
+    lastChart: conversation.lastChart ? {
+      kind: conversation.lastChart.kind || '',
+      title: conversation.lastChart.title || '',
+      metricLabel: conversation.lastChart.metricLabel || '',
+      sourceQuestion: conversation.lastChart.sourceQuestion || '',
+    } : null,
+  };
+}
+
+function appendConversationTurn(conversation, event, {policy, answer, chartSpec, chartResult, linkOpsTask, chartSourceQuestion}) {
+  const now = new Date().toISOString();
+  const next = conversation || blankConversationState(event);
+  const user = previewText(event.content || '', 1000);
+  const turn = {
+    at: now,
+    messageId: event.message_id || event.id || '',
+    user,
+    answer: previewText(answer || '', 1200),
+    policyMode: policy?.mode || '',
+    policyReason: policy?.reason || '',
+    isEcommerce: !!policy?.isEcommerce,
+    linkOpsTaskId: linkOpsTask?.id || '',
+    chartKind: chartSpec?.kind || '',
+    chartTitle: chartSpec?.title || '',
+  };
+  next.turns = [...(next.turns || []), turn].slice(-12);
+  if (policy?.isEcommerce || chartSpec?.kind) next.lastEcommerceAt = now;
+  if (chartSpec?.kind) {
+    next.lastChart = {
+      kind: chartSpec.kind,
+      title: chartSpec.title || '',
+      subtitle: chartSpec.subtitle || '',
+      metricLabel: chartSpec.metricLabel || '',
+      sourceQuestion: previewText(chartSourceQuestion || user, 1800),
+      chartPath: chartResult?.path || '',
+      renderedAt: chartResult?.path ? now : '',
+      rowCount: Array.isArray(chartSpec.rows) ? chartSpec.rows.length : 0,
+    };
+  }
+  next.updatedAt = now;
+  return next;
 }
 
 const INFRA_ACTION_RE = /重启|部署|发布版本|发版|改代码|修改代码|提交代码|提交git|git\s+push|push|pull|reset|删库|清库|迁移数据库|执行SQL|跑SQL|改表|drop\s+table|truncate|systemctl|sudo|ssh|shell|命令行|定时器|timer|service|docker|nginx|caddy|metabase|postgres|数据库|服务器|BI系统|BI门户|源码|仓库|github|配置文件|auth\.json|config\.toml/i;
@@ -868,21 +1114,24 @@ function isClearLinkOpsActionCommand(text) {
   return true;
 }
 
-function classifySafety(text, event = {}) {
+function classifySafety(text, event = {}, conversation = null) {
   const q = normalizeText(text);
   const isEcom = ECOM_DOMAIN_RE.test(q);
+  const inheritedEcom = !isEcom && isFollowupText(q) && conversationHasEcommerceContext(conversation);
+  const effectiveIsEcom = isEcom || inheritedEcom;
   const asksSecret = SECRET_RE.test(q) && /发|给|看|显示|导出|读取|打印|告诉|是什么|复制|下载|泄露/.test(q);
-  const isOpsWrite = isEcom && isClearLinkOpsActionCommand(q);
-  const isDraftOrResearch = DRAFT_OR_RESEARCH_RE.test(q) && isEcom;
+  const isOpsWrite = effectiveIsEcom && isClearLinkOpsActionCommand(q);
+  const isDraftOrResearch = DRAFT_OR_RESEARCH_RE.test(q) && effectiveIsEcom;
   const isInfra = INFRA_ACTION_RE.test(q) && !isOpsWrite;
   const policy = {
     decision: 'allow',
-    mode: 'readonly_analysis',
-    reason: 'ecommerce_ops_allowed',
+    mode: inheritedEcom ? 'conversation_followup_allowed' : 'readonly_analysis',
+    reason: inheritedEcom ? 'recent_ecommerce_context' : 'ecommerce_ops_allowed',
     ownerOnlyOpsWrite: OWNER_ONLY_OPS_WRITE,
-    isEcommerce: isEcom,
+    isEcommerce: effectiveIsEcom,
+    inheritedEcommerceContext: inheritedEcom,
     isOpsWrite,
-    needsPublicWeb: /竞品|竞对|关键词|标题|卖点|五点|描述|公开|网上|网页|搜索|调研/.test(q) && isEcom,
+    needsPublicWeb: /竞品|竞对|关键词|标题|卖点|五点|描述|公开|网上|网页|搜索|调研/.test(q) && effectiveIsEcom,
     intents: isOpsWrite ? inferLinkOpsIntent(q) : [],
     targets: isOpsWrite ? inferLinkOpsTargets(q) : {},
     blocked: false,
@@ -908,7 +1157,7 @@ function classifySafety(text, event = {}) {
       blockMessage: '这个请求我不能在飞书机器人里执行：它涉及 BI/数据库/服务器/代码/GitHub/配置等基础设施变更。飞书机器人只处理电商运营、数据分析、图表、草稿和受控 SHEIN 链接/商品运营任务。',
     };
   }
-  if (!isEcom) {
+  if (!effectiveIsEcom) {
     return {
       ...policy,
       decision: event.chat_type === 'p2p' ? 'block' : 'ignore',
@@ -940,6 +1189,7 @@ function shouldConsiderEvent(event) {
   if (String(event?.message_type || '') !== 'text') return false;
   if (/app|bot/i.test(String(event?.sender_type || ''))) return false;
   if (event?.chat_type === 'p2p') return true;
+  if (/图呢|图片呢|图在哪|改.*图|重做|重画|不满意|看不懂|不直观|按要求|每个货号|按货号|上一张|这张图/.test(content)) return true;
   return classifySafety(content, event).decision !== 'ignore';
 }
 
@@ -1421,7 +1671,7 @@ function answerPolicyFallback(text, data, policy = {}) {
   return '';
 }
 
-async function answerQuestionSmart(text, data, policy = {}, linkOpsTask = null) {
+async function answerQuestionSmart(text, data, policy = {}, linkOpsTask = null, conversation = null) {
   const context = compactSalesContext(text, data);
   context.securityPolicy = {
     decision: policy.decision || '',
@@ -1442,6 +1692,8 @@ async function answerQuestionSmart(text, data, policy = {}, linkOpsTask = null) 
       note: '这是受控运营任务记录；真实执行仍需链接管理中台/执行器预检和审计。',
     };
   }
+  const conversationContext = summarizeConversationForContext(conversation);
+  if (conversationContext) context.conversation = conversationContext;
   try {
     const codexAnswer = await callReadonlyCodexGateway(text, context);
     if (codexAnswer) {
@@ -1500,7 +1752,8 @@ async function handleEvent(event, options = {}) {
   const eventId = event.event_id || event.message_id || crypto.createHash('sha1').update(JSON.stringify(event)).digest('hex');
   if (!shouldAnswerEvent(event)) return {ok: true, skipped: true, reason: 'not_sales_question'};
   if (await alreadyHandled(eventId)) return {ok: true, skipped: true, reason: 'duplicate'};
-  const policy = classifySafety(event.content || '', event);
+  let conversation = await readConversationState(event);
+  const policy = classifySafety(event.content || '', event, conversation);
   if (policy.decision === 'ignore') return {ok: true, skipped: true, reason: policy.reason || 'ignored_by_policy'};
   if (policy.blocked) {
     const answer = policy.blockMessage || '这个请求超出了当前 SHEIN 电商运营机器人的安全范围。';
@@ -1517,6 +1770,7 @@ async function handleEvent(event, options = {}) {
       eventId,
       messageId: event.message_id || event.id || '',
       chatType: event.chat_type || '',
+      conversationKey: conversation.key || '',
       questionPreview: String(event.content || '').slice(0, 200),
       answer,
       sendOk: sent.ok,
@@ -1528,8 +1782,13 @@ async function handleEvent(event, options = {}) {
     return {ok: sent.ok, eventId, blocked: true, safetyMode: policy.mode, answer, sendCode: sent.code ?? null};
   }
   const data = await readData();
-  const chartSpec = buildControlledChartSpec(event.content || '', data);
-  const baseAnswer = await answerQuestionSmart(event.content || '', data, policy);
+  const effectiveQuestion = buildEffectiveQuestion(event.content || '', conversation);
+  const chartQuestion = buildChartQuestion(event.content || '', conversation);
+  const previousChartKind = conversation.lastChart?.kind || '';
+  const chartRevision = isChartRevisionRequest(event.content || '', conversation);
+  let chartSpec = buildControlledChartSpec(chartQuestion, data);
+  if (chartSpec && chartRevision) chartSpec = applyChartRevisionHints(chartSpec, event.content || '');
+  const baseAnswer = await answerQuestionSmart(effectiveQuestion, data, policy, null, conversation);
   const linkOpsTask = await createLarkLinkOpsTask({
     command: event.content || '',
     event,
@@ -1571,12 +1830,16 @@ async function handleEvent(event, options = {}) {
       console.error(JSON.stringify({ok: false, stage: 'chart_reply_failed', eventId, error: chartError}));
     }
   }
+  conversation = appendConversationTurn(conversation, event, {policy, answer, chartSpec, chartResult, linkOpsTask, chartSourceQuestion: chartQuestion});
+  await writeConversationState(conversation);
   await markHandled(eventId, {
     handledAt: new Date().toISOString(),
     eventId,
     messageId: event.message_id || event.id || '',
     chatType: event.chat_type || '',
+    conversationKey: conversation.key || '',
     questionPreview: String(event.content || '').slice(0, 200),
+    effectiveQuestionPreview: effectiveQuestion.slice(0, 600),
     answer,
     sendOk: sent.ok,
     sendCode: sent.code ?? null,
@@ -1584,6 +1847,8 @@ async function handleEvent(event, options = {}) {
     linkOpsTaskId: linkOpsTask?.id || '',
     linkOpsTaskDryRun: !!linkOpsTask?.dryRun,
     chartKind: chartSpec?.kind || '',
+    chartRevision,
+    previousChartKind: chartRevision ? previousChartKind : '',
     chartPath: chartResult?.path || '',
     chartSendOk: chartSent?.ok ?? null,
     chartSendCode: chartSent?.code ?? null,
