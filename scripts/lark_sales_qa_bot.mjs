@@ -124,6 +124,8 @@ function normalizeEventPayload(input) {
     message_id: root.message_id || message.message_id || message.id || '',
     chat_id: root.chat_id || message.chat_id || root.chat?.chat_id || message.chat?.chat_id || '',
     chat_type: root.chat_type || message.chat_type || '',
+    thread_id: root.thread_id || message.thread_id || root.message_thread_id || message.message_thread_id || '',
+    root_id: root.root_id || message.root_id || root.parent_id || message.parent_id || '',
     message_type: root.message_type || message.message_type || '',
     sender_type: root.sender_type || root.sender?.sender_type || input?.sender?.sender_type || '',
     sender_id: root.sender_id || root.sender?.sender_id?.open_id || root.sender?.sender_id?.union_id || '',
@@ -867,21 +869,50 @@ function conversationIdentity(event = {}) {
   const chat = String(event.chat_id || '').trim();
   const sender = String(event.sender_id || '').trim();
   const chatType = String(event.chat_type || '').trim() || 'unknown';
-  if (sender) return `feishu-user:${sender}`;
-  if (chat) return `${chatType}:chat:${chat}`;
+  const thread = String(event.thread_id || event.root_id || '').trim();
+  if (chatType === 'p2p') {
+    if (sender) return `feishu:p2p:user:${sender}`;
+    if (chat) return `feishu:p2p:chat:${chat}`;
+  }
+  if (chat) {
+    if (thread) return `feishu:${chatType}:chat:${chat}:thread:${thread}`;
+    return `feishu:${chatType}:chat:${chat}`;
+  }
+  if (sender) return `feishu:${chatType}:sender:${sender}`;
   return `${chatType}:unknown`;
 }
 
-function legacyChatConversationKey(event = {}) {
+function conversationScope(event = {}) {
+  const chatType = String(event.chat_type || '').trim() || 'unknown';
+  if (chatType === 'p2p') return 'feishu_p2p_user';
+  if (event.thread_id || event.root_id) return 'feishu_group_thread';
+  if (event.chat_id) return 'feishu_group_chat';
+  return 'feishu_unknown';
+}
+
+function conversationIdentityFallbacks(event = {}) {
   const chat = String(event.chat_id || '').trim();
   const sender = String(event.sender_id || '').trim();
   const chatType = String(event.chat_type || '').trim() || 'unknown';
-  const legacyIdentity = chat ? `${chatType}:chat:${chat}` : (sender ? `${chatType}:sender:${sender}` : `${chatType}:unknown`);
-  return crypto.createHash('sha1').update(legacyIdentity).digest('hex');
+  const thread = String(event.thread_id || event.root_id || '').trim();
+  return [
+    // 上一版：所有飞书入口优先按 sender 绑定。私聊可继承这份记忆，群聊不继承，避免个人上下文带进群。
+    chatType === 'p2p' && sender ? `feishu-user:${sender}` : '',
+    // 更早版本：私聊或无线程群聊按 chat_id 绑定；有线程的群聊不继承群级上下文，避免串话。
+    chat && (chatType === 'p2p' || !thread) ? `${chatType}:chat:${chat}` : '',
+    // 兼容飞书线程字段可能变化时的同一群线程历史。
+    chat && thread ? `${chatType}:chat:${chat}:thread:${thread}` : '',
+    sender ? `${chatType}:sender:${sender}` : '',
+    `${chatType}:unknown`,
+  ].filter(Boolean);
 }
 
 function conversationKey(event = {}) {
   return crypto.createHash('sha1').update(conversationIdentity(event)).digest('hex');
+}
+
+function conversationKeyForIdentity(identity) {
+  return crypto.createHash('sha1').update(String(identity || '')).digest('hex');
 }
 
 function conversationFile(event = {}) {
@@ -896,7 +927,7 @@ function blankConversationState(event = {}) {
     memoryPolicy: {
       ttlMs: CONVERSATION_TTL_MS,
       storage: 'raw_full_conversation_no_manual_summary',
-      scope: 'same_feishu_user',
+      scope: conversationScope(event),
     },
     createdAt: new Date().toISOString(),
     updatedAt: null,
@@ -930,9 +961,12 @@ async function readConversationState(event = {}) {
   const fallback = blankConversationState(event);
   let raw = await readJsonFile(conversationFile(event), null);
   if (!raw) {
-    const legacyKey = legacyChatConversationKey(event);
-    if (legacyKey && legacyKey !== fallback.key) {
-      raw = await readJsonFile(path.join(CONVERSATION_DIR, `${legacyKey}.json`), null);
+    for (const legacyIdentity of conversationIdentityFallbacks(event)) {
+      const legacyKey = conversationKeyForIdentity(legacyIdentity);
+      if (legacyKey && legacyKey !== fallback.key) {
+        raw = await readJsonFile(path.join(CONVERSATION_DIR, `${legacyKey}.json`), null);
+        if (raw) break;
+      }
     }
   }
   if (!raw) raw = fallback;
@@ -962,7 +996,7 @@ async function writeConversationState(state) {
     memoryPolicy: {
       ttlMs: CONVERSATION_TTL_MS,
       storage: 'raw_full_conversation_no_manual_summary',
-      scope: 'same_feishu_user',
+      scope: state.memoryPolicy?.scope || 'feishu_unknown',
     },
     createdAt: state.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
