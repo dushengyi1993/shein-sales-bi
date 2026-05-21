@@ -48,7 +48,7 @@
 
 ET、飞书日报、完整 RTV WebAPI 复核、链接/业务域日更、异常通知 watchdog、只读问数机器人（云端 Codex CLI 网关）和 HL OpenAPI 双跑的 Linux systemd 入口已启用并通过手动验证。链接/业务域是低频日更数据，不按销售高频刷新看待；当前生产路径是云端顺序 headless Chrome + 私有会话状态，纯 Node 零浏览器直连仍是后续优化。不要误以为本地 `SHEIN-*` Windows 任务仍在生产运行。
 
-2026-05-16 链接/业务域已完成云端闭环：`scripts/cloud_link_business_sync.sh` 会按店顺序执行 `bootstrap_shein_browser_session.mjs`、`fetch_shein_links.mjs` 和 `fetch_shein_business_domains.mjs`，失败店铺会关闭并重启该店浏览器重试，全部完成后入仓、运行 BI 体检并生成门户。验证日志 `/srv/shein-bi/logs/cloud-link-business/link-business-2026-05-15-20260516-163901.log` 显示 16 店全部 `done`；BI `dates.linkDate=2026-05-15`、`dates.businessDate=2026-05-15`，体检 `warnings=0/errors=0`。这不是本机补抓；后续不要重新启用本地 Windows 链接/业务域任务作为长期生产。
+2026-05-16 链接/业务域已完成云端闭环：`scripts/cloud_link_business_sync.sh` 会按店顺序执行 `restore_shein_store_session.mjs`、`fetch_shein_links.mjs` 和 `fetch_shein_business_domains.mjs`，失败店铺会关闭并重启该店浏览器重试，全部完成后入仓、运行 BI 体检并生成门户。验证日志 `/srv/shein-bi/logs/cloud-link-business/link-business-2026-05-15-20260516-163901.log` 显示 16 店全部 `done`；BI `dates.linkDate=2026-05-15`、`dates.businessDate=2026-05-15`，体检 `warnings=0/errors=0`。这不是本机补抓；后续不要重新启用本地 Windows 链接/业务域任务作为长期生产。
 
 备份默认保留 `14` 天。后续正式长期运行还应补对象存储或异地下载备份，避免云盘单点故障。
 
@@ -130,6 +130,8 @@ GitHub 应保存：
 - `shein-bi-cloud-watchdog.timer` 应保持 active；销售/页面过期按 4.5 小时提醒，链接/业务域过期按 48 小时提醒。
 - `shein-bi-cloud-link-business.timer` 应保持 active；手动复跑用 `scripts/cloud_link_business_sync.sh yesterday`。若单店卡在 SBN `x-gw-auth`，优先看该店 attempt 重试日志，不要回退到本机补抓冒充云端日更。
 - `shein-bi-cloud-session-manager.timer` 应保持 active；手动复跑用 `scripts/cloud_shein_session_manager.sh`。报告文件在 `outputs/reports/cloud-session-manager-latest.json` / `.md`，若失败会被 watchdog 按 service failed 逻辑提醒。
+- `shein-bi-cloud-link-business.service` 必须以 `User=sheinops` / `Group=sheinops` 运行，因为它会启动 16 店 SHEIN Chrome profile；不要改回 root，否则会生成 root-owned profile 文件并让 `shein-bi-cloud-session-manager.service` 第二天因 `EACCES` 失败。ET forwarder 仍保留 root 执行，因为入仓依赖 Docker/root 环境，且它不写 16 店 SHEIN profile。
+- 登录态恢复统一走 `restore_shein_store_session.mjs`：先用服务器私有 `state/shein_browser_sessions/*.local.json` / `state/shein_webapi_sessions/*.local.json` bootstrap，再运行 `auto_relogin_shein_store.mjs` 验证 GSP order WebAPI 和 SBN 商品分析页。这样云端没有保存密码的店铺也不会只靠 Chrome autofill 自愈。
 - 云端人工登录入口验证：`/cloud-login-maintenance` 返回 `200`；`/cloud-login/novnc/vnc.html` 返回 `200`；创建会话后 `/cloud-login/session/:id` 返回 `200` 且 WebSocket 升级返回 `101 Switching Protocols`；点“我已完成并关闭”后 export/probe 成功且不残留 Chrome/Xvfb/x11vnc/websockify 进程。
 - `shein-bi-lark-sales-qa.service` 应保持 active；可用 `node scripts/lark_sales_qa_bot.mjs --answer "今天销售多少"` 本地只读测试答案。群聊中若无回复，优先检查机器人是否已入群、应用可见范围和 `im.message.receive_v1`/发消息权限。
 - GitHub `main` 应包含最新可复用代码和文档；敏感运行态只保留在本地/云端私有目录。
@@ -141,7 +143,7 @@ GitHub 应保存：
 - Codex CLI 安装在服务器系统路径，私有配置目录为 `/home/sheinops/.codex`；`auth.json`、`config.toml`、第三方 API 配置和 token 都不进入 GitHub、文档或日志。
 - 服务环境必须显式包含：`CODEX_HOME=/home/sheinops/.codex`、`SHEIN_QA_CODEX_GATEWAY_ENABLED=1`、`SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS=180000`。
 - 网关只把 `outputs/bi-portal/data.json` 压缩成销售、店铺、货号、链接/覆盖等只读上下文交给模型；不授予写 PostgreSQL、写飞书 Base、改 SHEIN 后台或改服务器文件的权限。
-- 网页端“链接管理中台”的运营会话复用同一受控问数链路：每轮按最新一句和最近会话上下文重新从当前 BI JSON 取数；如果用户明确要求下架、换图、改标题、补链、报活动或限时折扣，服务端只自动创建待确认任务并留痕，不直接写 SHEIN。
+- 网页端“链接管理中台”的运营会话复用同一受控问数链路：每轮按最新一句和最近会话上下文重新从当前 BI JSON 取数；如果用户明确要求下架、换图、改标题、补链、报活动或限时折扣，服务端必须创建 / 更新同一会话任务并留痕。用户点击“开始执行 / 预检”后，`/api/link-ops-execute` 会进入受控执行器、写回进度和审计；真实写 SHEIN 仍必须满足对应适配器、payload 完整和二次确认，不能静默提交。
 - 失败兜底顺序：Codex CLI 只读网关失败时，退回直接 LLM 问答；再失败时退回脚本内规则回答，保证飞书机器人不会因为模型异常完全失声。
 - 这个机器人已经不绑定本机 Codex App 或当前聊天窗口；只要云端服务、飞书授权和服务器网络正常，本机关机也不影响飞书问数。
 

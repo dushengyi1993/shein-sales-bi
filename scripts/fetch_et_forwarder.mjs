@@ -433,6 +433,11 @@ async function autoLoginEt(cdp, args) {
       } else {
         lastMessage = result?.json?.message || result?.text || `status=${result?.status}`;
       }
+    } catch (err) {
+      lastMessage = `attempt ${attempt}: ${err?.message || err}`;
+      console.error(`[fetch_et_forwarder] WARN captcha/login attempt failed: ${lastMessage}`);
+      await cdp.call('Page.navigate', {url: args.baseUrl + '/Login/Index'}).catch(() => {});
+      await sleep(1200);
     } finally {
       if (captchaFile) fs.unlink(captchaFile).catch(() => {});
     }

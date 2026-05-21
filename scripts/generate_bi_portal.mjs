@@ -4624,7 +4624,7 @@ async function startLinkOpsExecutor(id, options = {}){
   if (!id) return;
   if (actionStateStore.mode !== 'service') return showToast('当前不是网页服务模式，不能启动执行器');
   const execute = !!options.execute;
-  if (execute && !confirm('确认提交到 SHEIN？\n\n只有执行器已预检通过、payload 完整时才会调用 SHEIN；系统会继续留痕。')) return;
+  if (execute && !confirm('确认提交到 SHEIN？\\n\\n只有执行器已预检通过、payload 完整时才会调用 SHEIN；系统会继续留痕。')) return;
   showToast(execute ? '正在提交执行...' : '正在启动执行器并做预检...');
   try {
     const res = await fetch(LINK_OPS_EXECUTE_API, {

@@ -55,11 +55,32 @@ async function launchStore(storeKey, visible) {
     child.on('error', reject);
     child.on('close', code => code === 0 ? resolve() : reject(new Error(stderr || `launch failed ${code}`)));
   });
-  await sleep(2500);
 }
 
-async function connectCdp(port) {
-  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+async function fetchCdpTargets(port) {
+  const res = await fetch(`http://127.0.0.1:${port}/json/list`, {signal: AbortSignal.timeout(4000)});
+  if (!res.ok) throw new Error(`CDP target list HTTP ${res.status}`);
+  return await res.json();
+}
+
+async function waitForCdpTargets(port, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      const targets = await fetchCdpTargets(port);
+      if (Array.isArray(targets)) return targets;
+      lastError = new Error('CDP target list is not an array');
+    } catch (err) {
+      lastError = err;
+    }
+    await sleep(1000);
+  }
+  throw new Error(`CDP port ${port} did not become ready within ${timeoutMs}ms: ${lastError?.message || 'unknown error'}`);
+}
+
+async function connectCdp(port, timeoutMs = 45_000) {
+  const targets = await waitForCdpTargets(port, timeoutMs);
   const page = targets.find(t => t.type === 'page' && /geiwohuo|shein/i.test(t.url)) || targets.find(t => t.type === 'page');
   if (!page) throw new Error(`No page target on port ${port}`);
   const ws = new WebSocket(page.webSocketDebuggerUrl);
@@ -230,7 +251,7 @@ async function clickLogin(send) {
 
 async function restoreOne(store, opts) {
   await launchStore(store.storeKey, opts.visible);
-  const {send, ws} = await connectCdp(store.port);
+  const {send, ws} = await connectCdp(store.port, Math.min(opts.timeoutMs, 60_000));
   const started = Date.now();
   const steps = [];
   try {

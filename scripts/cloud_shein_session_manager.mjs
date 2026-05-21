@@ -275,7 +275,7 @@ async function probeStore(store, args) {
   const browserSessionFile = path.join(ROOT, 'state', 'shein_browser_sessions', `${store.storeKey}.local.json`);
   const webApiSessionFile = path.join(ROOT, 'state', 'shein_webapi_sessions', `${store.storeKey}.local.json`);
   const commandArgs = args.restore
-    ? [path.join(ROOT, 'scripts', 'auto_relogin_shein_store.mjs'), store.storeKey, '--date', args.date, '--headless', '--timeout-ms', String(args.timeoutMs)]
+    ? [path.join(ROOT, 'scripts', 'restore_shein_store_session.mjs'), '--store', store.storeKey, '--date', args.date, '--headless', '--timeout-ms', String(args.timeoutMs)]
     : [path.join(ROOT, 'scripts', 'bootstrap_shein_browser_session.mjs'), '--store', store.storeKey, '--date', args.date, '--headless', '--timeout-ms', String(args.timeoutMs)];
   const startedAt = new Date().toISOString();
   const res = await run(process.execPath, commandArgs, {timeoutMs: args.timeoutMs + 30_000});

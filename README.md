@@ -1,6 +1,6 @@
 # SHEIN 销售统计与 BI 经营系统
 
-## 2026-05-18 当前权威状态
+## 2026-05-21 当前权威状态
 
 - 飞书多维表格 / 原生看板写入已临时暂停；云端 BI 系统作为当前主要经营入口继续运行。飞书日报、异常通知 watchdog 和只读问数机器人均已迁到云端独立飞书机器人链路；日报真实发送已验证，问数机器人已升级为云端 Codex CLI 只读网关，不再绑定本机 Codex 会话。
 - 本地 BI 已封存，云端 BI 是正式入口：`https://shein-bi.faceair.me/`（旧 IP 入口 `http://43.165.167.135/` 仅作兜底）。公网入口已启用 Basic Auth；账号密码只在运行环境交付，不写入仓库或文档。详见 `docs/cloud-bi-operations.md`。
@@ -21,7 +21,7 @@
 - RTV 收件后去向已进入 BI：`mart.et_rtv_destination_allocation` 追踪 09 可售、03_RTV、04 破损、06 报废和其它/未知去向；`mart.shein_return_rtv_trace` 在 `订单 / 售后` 页面展示每条 SHEIN 退货是否收到、收到后去了哪里。
 - HL OpenAPI 销售试点已跑通并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` 写入 `fact.openapi_*` 并行事实表与 `mart.openapi_sales_reconciliation` 对账表；BI 系统状态页显示 “SHEIN OpenAPI 试点对账”。正式切换生产销售表前继续累计多日 `matched`。
 - HL OpenAPI 销售试点曾在本地 Windows 任务中双跑，只写 `fact.openapi_*` 和 `mart.openapi_sales_reconciliation`，不覆盖生产销售事实表；本地 Windows 任务已封存，云端 systemd 双跑入口已部署，云服务器出口 IP `43.165.167.135` 已加入 SHEIN 开放平台白名单，云端双跑已成功。
-- 系统定位正在从“BI 数据分析”扩展为“自动运营驾驶舱”：先把可重复运营动作沉淀为脚本和规则，再按“建议/预填/复核/人工确认提交/审计留痕”的边界逐步开放自动化。2026-05-17 已上线“链接管理中台”基座：支持“一个会话对应一个任务工作台”，边聊边沉淀任务目标、数据依据、素材、执行步骤和进度；自然语言会话每轮都会按最新 BI JSON 动态查数，明确下架/换图/补链/报活动等动作命令会自动进入任务并在同一界面可见；第一版执行器不会静默提交 SHEIN。
+- 系统定位正在从“BI 数据分析”扩展为“自动运营驾驶舱”：先把可重复运营动作沉淀为脚本和规则，再按“建议/预填/复核/人工确认提交/审计留痕”的边界逐步开放自动化。2026-05-17 已上线“链接管理中台”基座：支持“一个会话对应一个任务工作台”，边聊边沉淀任务目标、数据依据、素材、执行步骤和进度；自然语言会话每轮都会按最新 BI JSON 动态查数，明确下架/换图/补链/报活动等动作命令会自动进入任务并在同一界面可见。2026-05-20 起，任务区已提供“开始执行 / 预检”和二次确认入口，点击后会真实调用 `/api/link-ops-execute` 写回进度与审计；默认仍只做受控预检 / dry-run，不会静默提交 SHEIN。
 
 本工作区用于 SHEIN 16 店销售数据自动抓取、飞书多维表格统计、每日飞书日报、链接管理、营销活动报名辅助，以及正在并行建设的 PostgreSQL + Metabase + 云端 BI / 自动运营驾驶舱。
 
@@ -53,8 +53,9 @@
   - 云端 `shein-bi-cloud-et-forwarder.timer`：每天 `04:20` 同步 ET；需服务器本地 ET 凭据和手动验证后启用。
   - 云端 `shein-bi-cloud-daily-lark-report.timer`：每天 `08:35` 发送日报，`10:35/12:35` 补偿重试；需服务器本地飞书配置和授权后启用。
   - 云端 `shein-bi-cloud-rtv-verify.timer`：每天 `03:20` 跑完整 RTV 换单复核 WebAPI 版，不阻塞滚动销售刷新。
-  - 云端 `shein-bi-cloud-link-business.timer`：每天 `05:30` 顺序启动云端 headless Chrome 抓取前一完整日链接/业务域，入仓、体检并刷新 BI；单店失败会重启浏览器重试。
-  - 云端 `shein-bi-cloud-session-manager.timer`：每天 `03:20` 顺序巡检/恢复 16 店 WebAPI + SBN 登录态，并检查 profile 体积。
+- 云端 `shein-bi-cloud-link-business.timer`：每天 `05:30` 顺序启动云端 headless Chrome 抓取前一完整日链接/业务域，入仓、体检并刷新 BI；单店失败会重启浏览器重试。
+- 云端 `shein-bi-cloud-session-manager.timer`：每天 `03:20` 顺序巡检/恢复 16 店 WebAPI + SBN 登录态，并检查 profile 体积。
+- 2026-05-21 运维加固：链接/业务域服务统一以 `sheinops` 运行，避免 root 写 Chrome profile 后导致登录态管家 `EACCES`；登录态恢复改为先回灌 browser session、再验证 GSP + SBN；ET 验证码下载瞬时失败会进入重试，不再一次 `fetch failed` 就中断。
   - 云端 `shein-bi-cloud-openapi-hl.timer`：每天 `06:20` 跑 HL OpenAPI 并行对账；已可在云端成功抓取、入仓和生成 OpenAPI 对账。
   - 云端 `shein-bi-cloud-watchdog.timer`：每小时检查云端服务、timer 和 BI 数据新鲜度；销售/页面按 4.5 小时阈值，链接/业务域按 48 小时日更阈值。
   - 云端 `shein-bi-lark-sales-qa.service`：常驻只读飞书问数机器人，通过 `/home/sheinops/.codex` 的 Codex CLI 配置执行受控只读问答，只读取 BI Portal 压缩上下文，不写数据库、飞书 Base 或 SHEIN 后台。

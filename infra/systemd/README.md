@@ -9,6 +9,8 @@
 - `shein-bi-cloud-link-business.timer`：每天 `05:30` 顺序抓取前一完整日链接/业务域，入仓、体检并刷新 BI 门户。需要服务器私有 SHEIN session / browser session，敏感运行态不进 GitHub。
 - `shein-bi-cloud-daily-lark-report.timer`：每天 `08:35` 发送飞书日报，`10:35/12:35` 做补偿重试；成功后写 `state/cloud_daily_report_sent/YYYY-MM-DD.sent` 防重复。需要服务器本地 `config/lark_report.json`、`lark-cli` 和飞书授权，密钥/授权不进 GitHub。
 
+注意：`shein-bi-cloud-link-business.service` 必须以 `sheinops` 运行，不能用 root 跑 16 店 Chrome profile；否则会留下 root-owned profile 文件，导致 `shein-bi-cloud-session-manager.service` 第二天读 profile 报 `EACCES`。ET forwarder 保持 root 执行，因为入仓依赖 Docker/root 环境，且 ET 使用独立 profile，不写 16 店 SHEIN profile。
+
 部署到服务器后执行：
 
 ```bash

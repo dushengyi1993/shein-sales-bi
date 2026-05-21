@@ -1,13 +1,10 @@
 # MEMORY
 
 ## 2026-05-13 产品套图提示词长期口径
-- 产品套图提示词当前优先服务 SHEIN 沙特市场，兼顾欧洲市场；Amazon / noon / Temu 暂时只作为视觉经验参考，除非用户明确要求对应平台版本，否则不强制套用它们的主图规则。
-- 英文和阿文同等重要；阿文翻译和校对由 Codex / reviewer / 子代理负责，不把阿文校对推给用户。
-- 提示词要尽量靠近 Gemini 优秀样例的细致程度：重点图按 `Visual Subject / Model & Styling / Scene & Atmosphere / Composition & Text` 写清人物、服装材质、动作、场景、光线、构图和英阿双语文案。
-- 个护、封面和场景图允许更强的明亮性感流量风：深领口、露肩、锁骨、上背线条、贴身真丝/罗纹面料、直视镜头、微张嘴唇、放松但勾人的姿态；底线是不色情、不露点、不透视裸露、不明显性行为姿势、不廉价低俗，且产品必须始终是主角。
-- 交付给用户复制的提示词文档，前半部分必须是完整可复制的英文提示词本身，不要夹中文说明；中文说明或全文翻译放在英文版后面。
+- 产品套图提示词优先服务 SHEIN 沙特市场，兼顾欧洲市场；Amazon / noon / Temu 只作视觉经验参考，除非用户明确要求对应平台版本。
+- 英文和阿文同等重要，阿文翻译/校对由 Codex / reviewer / 子代理负责；交付文档前半部分必须是完整可复制英文提示词，不夹中文说明。
+- 提示词要接近 Gemini 优秀样例的细致程度，按 `Visual Subject / Model & Styling / Scene & Atmosphere / Composition & Text` 写清人物、服装、动作、场景、光线、构图和英阿双语文案；个护/封面/场景图可更明亮性感但不色情，产品必须始终是主角。
 - 用户只要求改提示词时，不要自动更新桌面压缩包；只有用户明确说“重新打包/更新压缩包”才更新 handoff zip。
-
 
 ## 评价、链接对比与动作池核心口径
 - 评价/口碑底库按每店开店以来全量补抓；日常增量默认最近 `14` 天。SHEIN 评论接口宽窗口会报 `mgs97906 数据量太多...缩小评论时间`，全量补抓必须按日期窗口分段并可自动拆分。
@@ -54,8 +51,8 @@
 - 2026-05-15 起生产调度转为云端 systemd timer：`shein-bi-cloud-today.timer` 在北京时间 `00:10/02:10/.../22:10` 每两小时刷新当天销售、入仓并生成 BI Portal；`shein-bi-cloud-yesterday.timer` 每天 `00:10` 刷新前一天最终销售并复核前两天稳定日；`shein-bi-db-backup.timer` 每天 `02:30` 备份业务库和 Metabase 元数据库。
 - 本地 `SHEIN-*` Windows 计划任务已全部禁用，保留为回滚/迁移参考，不再作为生产调度。除非用户明确回滚，不要重新启用 `SHEIN-Sales-15Stores-Intraday-Daytime`、`SHEIN-BI-Daily-Pipeline-0700`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-Sales-ETForwarder-0420` 或 HL OpenAPI 本地任务。
 - 云端自动化已覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成、数据库备份、ET 同步、飞书日报、完整 RTV 复核、链接/业务域日更、异常通知 watchdog、只读飞书问数机器人和 HL OpenAPI 双跑；本地 Windows 任务只作回滚参考。
-- ET 和飞书日报已启用云端 Linux 入口：`scripts/cloud_et_forwarder_sync.sh` / `shein-bi-cloud-et-forwarder.timer`、`scripts/cloud_daily_lark_report.sh` / `shein-bi-cloud-daily-lark-report.timer`。ET 服务器侧使用私有 `config/et_forwarder.local.json` 或环境变量账号密码，不能复用 Windows Chrome 保存密码；飞书日报服务器侧使用独立飞书 CLI 应用/机器人与私有 `config/lark_report.json`，旧应用的 `open_id` 不能直接给新应用用，换机器人时需用 `union_id` 重新映射收件人 `open_id`。上述 secret/token/收件人完整 ID 不进 GitHub、文档或聊天。2026-05-16 云端 ET 全量同步和云端飞书日报真实发送均已验证成功。
-- 链接/业务域已启用云端 Linux 入口：`scripts/cloud_link_business_sync.sh` / `shein-bi-cloud-link-business.timer`，每天 `05:30` 顺序跑前一完整日；它用服务器私有 `state/shein_browser_sessions/*.local.json` / `state/shein_webapi_sessions/*.local.json` 初始化 headless Chrome，按店抓取、入仓、体检并刷新 BI。不要再用本机隐藏补抓冒充云端日更；纯 Node 零浏览器直连只是后续优化。
+- ET 和飞书日报已启用云端 Linux 入口：`scripts/cloud_et_forwarder_sync.sh` / `shein-bi-cloud-et-forwarder.timer`、`scripts/cloud_daily_lark_report.sh` / `shein-bi-cloud-daily-lark-report.timer`。ET 服务器侧使用私有 `config/et_forwarder.local.json` 或环境变量账号密码，不能复用 Windows Chrome 保存密码；ET 入仓依赖 Docker/root 环境，服务仍保留 root 执行，但验证码下载的一次性 `fetch failed` 必须进入重试而不是直接中断。飞书日报服务器侧使用独立飞书 CLI 应用/机器人与私有 `config/lark_report.json`，旧应用的 `open_id` 不能直接给新应用用，换机器人时需用 `union_id` 重新映射收件人 `open_id`。上述 secret/token/收件人完整 ID 不进 GitHub、文档或聊天。2026-05-16 云端 ET 全量同步和云端飞书日报真实发送均已验证成功。
+- 链接/业务域已启用云端 Linux 入口：`scripts/cloud_link_business_sync.sh` / `shein-bi-cloud-link-business.timer`，每天 `05:30` 顺序跑前一完整日；它通过 `scripts/restore_shein_store_session.mjs` 用服务器私有 `state/shein_browser_sessions/*.local.json` / `state/shein_webapi_sessions/*.local.json` 初始化 headless Chrome，并验证 GSP + SBN 后再抓取、入仓、体检并刷新 BI。`shein-bi-cloud-link-business.service` 必须以 `sheinops` 运行，不能用 root 写 16 店 profile，否则次日 `shein-bi-cloud-session-manager.service` 会因 root-owned profile 报 `EACCES`。不要再用本机隐藏补抓冒充云端日更；纯 Node 零浏览器直连只是后续优化。
 - 云端飞书日报图依赖 Linux 中文字体；服务器必须安装 `fonts-noto-cjk` / `fontconfig`，`fc-match 'Noto Sans CJK SC'` 应匹配 Noto CJK，否则 headless Chrome 生成的日报图中文会显示方框。
 - GitHub 中的 `outputs/bi-portal/index.html` / `data.json` 是灾备静态快照；服务器执行 `git reset --hard origin/main` 或类似部署后可能覆盖实时 BI 页面。每次服务器拉取/重置代码后，必须重跑 `scripts/cloud_bi_refresh.sh today intraday` 或 `shein-bi-cloud-today.service`，确认 `generatedAt` / `salesUpdatedAt` 更新到当前。
 - 本地历史规则仍可作回滚参考：RTV 复核耗时长是正常现象，滚动销售刷新不应等待完整 RTV；BI 门户生成必须在流水线末尾单次执行，默认 `SHEIN_BI_PORTAL_TIMEOUT_MS=900000`，不要恢复“流水线完成 / 简报 / 首次体检”多个状态点重复生成页面。
@@ -94,11 +91,11 @@
 
 ## SHEIN BI 系统
 - 架构原则：`SHEIN 后台/WebAPI/OpenAPI 抓取 -> 私有源文件 / PostgreSQL 数据仓库 -> Metabase BI / BI Portal`。PostgreSQL 是核心数据仓库；Metabase 当前仍是正式深度分析/自由钻取层，BI Portal 是日常经营入口。没有完整替代前，不要建议直接删除或跳过 Metabase。
-- 2026-05-15 起本地 BI 已封存，云端 BI 为正式入口：`http://43.165.167.135/`，由 Nginx Basic Auth 保护；账号密码不写入仓库、文档或日志。本地 `8787` 服务已停止，`SHEIN-*` Windows 计划任务已禁用；除非明确回滚，不要重新启用本地 BI 或本地定时任务。云端可复用改动必须及时同步 GitHub，敏感 session/密钥/数据库 dump 仍不得提交。
+- 2026-05-15 起本地 BI 已封存，云端 BI 为正式入口：`https://shein-bi.faceair.me/`，旧 IP `http://43.165.167.135/` 仅作兜底；Basic Auth 账号密码不写入仓库、文档或日志。本地 `8787` 服务已停止，`SHEIN-*` Windows 计划任务已禁用；除非明确回滚，不要重新启用本地 BI 或本地定时任务。云端可复用改动必须及时同步 GitHub，敏感 session/密钥/数据库 dump 仍不得提交。
 - HL OpenAPI 销售试点已建立并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` -> `scripts/load_shein_openapi_sales_warehouse.mjs` -> `fact.openapi_store_daily_sales` / `fact.openapi_order_header` / `fact.openapi_order_item` / `mart.openapi_sales_reconciliation`；系统状态页会显示 “SHEIN OpenAPI 试点对账”。正式切换生产事实表前必须继续确认多日 `matched`。
 - 官方 OpenAPI 与后台 WebAPI 直连是两条不同链路：OpenAPI 需要开放平台应用、授权、`openKeyId` / `secretKey` 和 IP 白名单；后台 WebAPI 直连复用已登录 Cookie/session，当前已优先承接 16 店销售生产抓取。两类密钥/session 都禁止进入仓库。
 - CX 开放平台应用 `CX-椿霞SHEIN运营中台` 已在 `2026-05-10` 创建并提交审核，模式为半托管，业务功能选择商品管理、商品合规、订单管理、库存管理、财务管理；审核通过后再录入本地 `.local` 密钥并接入 API 双跑。
-- SHEIN OpenAPI 若返回 `openapi00002 IP is not in the whitelist`，优先检查当前出口 IP 是否在开放平台 `https://open.sheincorp.com/backstage/white-list`；`2026-05-07` 已补加当前出口 IP `188.253.112.44`，历史 IP `82.27.116.13` 仍保留。不要把 OpenAPI app secret、店铺 secret、openKeyId 写入聊天、文档或日志。
+- SHEIN OpenAPI 若返回 `openapi00002 IP is not in the whitelist`，优先检查服务器出口 IP `43.165.167.135` 是否在开放平台白名单；历史本机出口 `188.253.112.44` / `82.27.116.13` 只作本地排障参考。不要把 OpenAPI app secret、店铺 secret、openKeyId 写入聊天、文档或日志。
 - BI Portal 静态文件为 `outputs/bi-portal/index.html`，数据文件为 `outputs/bi-portal/data.json`，生成脚本为 `scripts/generate_bi_portal.mjs`；云端由 `scripts/cloud_bi_refresh.sh` 在每次刷新后生成并重启服务。
 - BI 门户 UI 冒烟检查脚本为 `scripts/check_bi_portal_ui.mjs`；本地封存后默认不要为“看一眼”重新打开本地前端，云端验证优先用 HTTP health、静态断言和日志。
 - GitHub 私有仓库已纳入 `outputs/bi-portal/index.html` 和 `outputs/bi-portal/data.json` 作为当前 BI 门户可复用产物；`outputs/` 其他抓取结果、报表、图片、审计结果仍默认忽略，迁移生产状态时单独备份。
@@ -111,63 +108,24 @@
 - Metabase 管理员凭据只保存在 `infra/metabase/.admin.local.json`，不要写入聊天、文档或日志。
 - 当前团队访问转为云端入口；本地局域网协作入口已经封存。若后续明确回滚到本地，才重新检查 `0.0.0.0:8787`、防火墙规则 `SHEIN BI Portal LAN 8787 ReadOnly` 和 `scripts/fix_bi_lan_firewall.ps1`。
 
-
-
 ## BI 门户 UI 当前规则
-- 首页是“总控驾驶舱”，主要承载总览、分组、趋势和排行榜；具体操作下沉到店铺、货号 360、SKC/链接、订单/售后、动作池、系统状态等子页面。
-- 首页看板筛选联动是当前首页核心口径，底层数据键为 `DATA.rankings.dailyStoreProducts`；不能只改顶部矩阵而不联动趋势和排行。
-- 首页筛选区和时间筛选必须统一放在页面最上方 sticky 工具栏，不能放到 hero、经营总览卡片或页面中段；需要当前时段口径的子页面，也把时间筛选嵌入顶部筛选区，不再另做内容区悬浮时间条。
-- 首页顶部筛选栏在宽屏下必须尽量单行展示；提示标签要有足够宽度，不得互相挤压；货号/SKC/品名、店铺/分组、时间筛选要按实际阅读权重分配宽度。
-- 普通子页面顶部筛选栏也要保持紧凑：货号/SKC/品名搜索框可适中偏长但不能压缩时间框，店铺框应明显短于搜索框，时间框要能完整显示起止日期；动作池除外，因为动作池不按时间回看。
-- 顶部 sticky 工具栏只放真正全局筛选：时间、店铺/分组、货号/SKC/品名、全局搜索；`业务域`、`风险`、`处理状态`、`快速聚焦` 只属于 `今日动作池` 页面局部筛选，不能影响评价、订单/售后、店铺、货号或 SKC/链接页面。
-- 今日动作池是当前最新待办池，不按时间段回看；动作池页不显示时间选择窗口，也不把 `startDate/endDate/rangePreset` 写入动作池视图链接。动作池专用筛选（业务域、风险、处理状态、快速聚焦）放在页面顶部 sticky 工具栏，只影响动作池。
-- 今日动作池里同一店铺、同一 SKC、同一业务域命中的多条规则必须合并成一张动作卡，展示“合并 N 条”和各规则信号；不要让用户对同一链接重复处理。不同业务域（如链接/库存/售后）仍可分开，避免误合并。
-- 首页看板内有货号/SKC/品名筛选和店铺/分组筛选；店铺筛选必须支持 `全部店铺`、`DSY 组`、`LGM 组` 和 16 个单店。
-- BI 首页货号/SKC/品名筛选中，短数字/短编号（如 `505`）应优先匹配标准货号、店铺货号、供应商货号等货号字段；不能匹配 SKC 长编号的任意中间片段。只有输入完整或较长 SKC 片段时，才匹配 SKC 字段，避免把无关货号算进动销货号。
-- 首页顶部矩阵、日销趋势、月销趋势、店铺排行、产品排行都必须同时受时间段、店铺/分组、货号/SKC 筛选影响；货号 + 店铺组合要使用店铺×货号日粒度数据，不要只看全局货号汇总。
-- 首页未筛选时顶部矩阵显示 `总计 / DSY 组 / LGM 组`；筛到单店或分组时显示对应范围。
-- 首页日销趋势默认近 30 天，月销趋势默认过去 6 个月；选择非单日时间段后趋势跟随起止日期变化。
-- 时间选择弹窗使用大号双日历，左侧开始日期、右侧结束日期；快捷按钮放在弹窗外侧。
-- 顶部统一矩阵总盘包含：当前时段销售额、当前时段订单/销量/动销、当前时段退货数量、当前时段真实利润；总计、DSY、LGM 三行固定展示，数字居中并随时间段变化。
-- 日销趋势和月销趋势上下排列、各占全宽；折线包含总计、DSY、LGM 三条线，纵轴使用整数刻度，关键节点显示完整数字，悬停显示完整 SAR 值。
-- 首页趋势图要减少图表左右留白，但不能用 SVG 非等比强行拉伸；正确方式是扩大自然画布 / viewBox、压缩卡片内边距，并保留坐标轴文字在图内可读区域。
-- 排行榜显示完整店铺和标准货号，不使用小框内部滚动；店铺标签只显示 `DL / DX / HL` 这类代号，不重复写 `DSY / LGM`。
-- 侧栏每个数据域只显示一条精确到秒的更新时间；数据口径日放在鼠标悬停提示里，避免同一域出现两个时间。
-- 从任意子页面点击“总控驾驶舱”必须回到页面顶部。
-- 支持浅色 / 深色主题；浅色主题不得出现灰底灰字。
-- 店铺视角的 7 天 / 30 天链接指标必须用真正二级表头：第一行指标组，第二行周期，正文每个周期数字独立列；不要用 `<br>` 或小卡片硬拼造成错位。
-- 店铺视角的低展示库存预警来自 `fact.visible_inventory_snapshot` 最新正确展示库存快照，按本店已上架且展示库存低的 SKC 全量列出；动作池库存动作只是精选待办，不代表低库存全量。
-- 修 BI 门户 UI 时默认不主动打开前端；后台完成代码检查、门户生成和静态 HTML/JSON 断言后，由用户在自己的浏览器刷新查看。不要为了“看一眼”主动打开前端浏览器或可见命令行窗口；只有用户要求或必须排查浏览器交互问题时才打开前端。
-- 但涉及页面布局、宽屏留白、对齐、卡片挤压、图表绘图区等视觉判断时，只要用户要求打开前端，就必须用最大化/大视口真实页面验证；不要用未最大化小窗口或纯代码想象来判断宽屏布局。
+- 详细 UI 规则以 `docs/bi-portal-ui-current.md` 为准；`MEMORY.md` 只保留下次开发最容易踩坑的红线。
+- 首页“总控驾驶舱”的矩阵、趋势、排行必须同时受时间、店铺/分组、货号/SKC/品名筛选影响；货号 + 店铺组合要用店铺×货号日粒度数据，不要只看全局货号汇总。
+- 顶部 sticky 工具栏只放全局筛选；动作池专用筛选只影响动作池。今日动作池是当前待办池，不按时间段回看，且同店同 SKC 同业务域多规则必须合并成一张动作卡。
+- 短数字/短编号货号筛选优先匹配标准货号、店铺货号、供应商货号；不要匹配 SKC 长编号任意中间片段。
+- 侧栏各数据域更新时间必须显示源文件抓取时间，不用入仓 `updated_at` 冒充。
+- 修 BI 门户 UI 时默认不主动打开前端；先用代码检查、生成、HTTP/API、静态 HTML/JSON 断言。只有用户要求或必须排查浏览器交互/视觉问题时才打开最大化真实页面。
 
 ## 实际库存与去化口径
-- `实际库存 / 去化` 页面以成本表批次为库存基数：`到仓/派送日期` 和 `头程运输费` 都有值才计入已到仓库存；有发货日期但缺到仓或头程费用的批次计入在途/待确认；没有发货日期但有数量的批次计入未发/待确认。
-- 库存消耗按毛销量扣减，退货、仅退款、派送失败暂不加回库存，避免高估可售库存；这与利润页的净成交/退货成本口径不同。
-- 去化速度默认使用 `近7天毛销量/7 × 40% + 近30天毛销量/30 × 60%`；库存可卖天数按估算在库和含在途两套口径展示。
-- 店铺/分组筛选只影响销售速度和风险排序，不硬拆物理库存；成本表没有店铺库存分配字段前，库存基数保持全局标准货号口径。
-- 该页面是经营估算库存，不是仓库实盘；未来接入真实仓储系统后再升级到货号 × 店铺/仓库粒度。
+- 详细口径见 `README.md` / `docs/bi-portal-ui-current.md`；这里保留红线：库存基数来自成本表完整批次，消耗按毛销量扣减，退货/仅退款/派送失败暂不加回库存。
+- 店铺/分组筛选只影响销售速度和风险排序，不硬拆物理库存；该页面是经营估算库存，不是仓库实盘。
 
 ## 成本与真实利润口径
-- 首页和成本/利润页不再用 `25%` 预测利润冒充真实利润；成本未覆盖时必须显示“待成本表 / 成本覆盖率 / 缺成本销售额”。
-- 售后/退货金额不能直接用 SHEIN 售后列表展示价 `priceAmountTotal/priceAmount`；优先使用接口里的订单实收/预计收入字段 `checkEstimateIncomeMoney`、`estimatedIncomeAmount`，没有实收字段时才回退展示价。例：`NM / GSH1X61950004DF / SK-10075电油炸锅` 售后展示价 `250 SAR`，订单实收为 `130 SAR`。
-- 售后/退货统一口径：只要买家发起售后且状态不是 `已取消`，就默认计入退货/反转，包含 `待买家退货`、`待交接`、`待卖家处理`、`待买家选择方案` 等未落定状态；若后续最终取消，再在下一次业务域同步后自动从净成交、净订单、净销量和利润反转中扣回。
-- 首页四个矩阵支持口径切换并联动趋势：销售额可切 净销售额/总销售额，订单销量可切 净销量/总销量，退货售后可切 售后申请时间/订单创建时间，真实利润可切 退货全损保守/RTV已收可二售测算；趋势图按当前所选口径同步变化。
-- 成本表文件放在 `inputs/costs/`，当前正式文件为 `inputs/costs/成本.xlsx`，模板为 `inputs/costs/SHEIN成本表模板.xlsx`；导入脚本为 `scripts/import_product_costs.mjs`，模板生成脚本为 `scripts/create_cost_template.mjs`。
-- 同货号分批发货时，单位成本 = 完整批次总成本 / 完整批次发货总数；缺“头程运输费金额”的批次只保留缺口，不参与单位成本均摊。
-- 成本表中的 `单台总成本（SAR）` 代表单批单件完整成本；入库时先乘以该批数量还原批次总成本，最终仍按所有完整批次加权平均。成本匹配要兼容销售端标准货号和成本表型号代码，匹配键由 `dim.product_match_key()` 提供。
-
-- 成本/利润页的顶部摘要、月利润趋势、月度利润明细、高利润/低利润货号和成本缺口必须同时受顶部时间、店铺/分组、货号/SKC 筛选影响；不能再使用全局历史 `profit_product_summary` 冒充当前筛选口径。
-- 成本/利润页的“高利润 / 可加码货号”和“低利润 / 需要处理货号”分界线为 `20%` 利润率：`>= 20%` 进高利润，`< 20%` 进低利润。
-
-- 选品标尺模型不要停留在手填利润计算器；必须基于成本表进货价、历史头程、真实利润率和退货扣减建立“进货价 × 体积”矩阵。当前成本表缺物理长宽高时，体积先按历史头程约 `1600 RMB/方` 倒推，未来选品头程按 `2000 RMB/方 = 2 RMB/L` 重算。
-- 历史测试品 `2001/CM-2001` 已按用户确认补手工成本：总成本 `5500 RMB`、数量 `37`，文件为 `inputs/costs/历史手工成本补充.csv`；该品已停做，只用于历史利润复核。
-- BI 首页默认销售/成交额为净成交额：所有未取消售后申请、退货、仅退款、派送失败等反转订单不计入首页成交额、订单数、销量、趋势和排行；利润率分母使用剩余净成交额。首页也可切换总销售额/总销量，但 `sales_sar <= 0` 或 `gross_revenue_sar <= 0` 的揽收前取消 / 0 金额行在净口径和总口径里都直接忽略，就当没有发生。
-- 退货、仅退款、派送失败等保守处理订单：营收视为 `0`，仍扣商品成本；只有真实退货退款链路额外扣 `13.88 SAR` 退货派送费，`仅退款`、`派件失败`、`派件异常` 不再重复扣退货派送费。
-- `sales_sar <= 0` 的揽收前取消 / 0 金额订单行不视为真实售出，不扣商品成本或退货派送费；利润成本必须和正销售额行对齐，避免取消单误扣成本。
-- 月趋势按用户选择的日期范围切片，不补全整月；例如 `2026-04-03 ~ 2026-06-03` 中 4 月只统计 `04-03~04-30`，6 月只统计 `06-01~06-03`，页面必须标注。
-- 月仓储费只用于月度总利润；DSY/LGM 按净成交额比例分摊，不能拆到单独货号、SKC 或订单。
-- 利润分组里 `TS`、`MZ` 开店以来都归 `DSY`；不要再按 `2026-03-01` 切换到/切出 `LGM`。
-- 真实利润相关数据库对象：`fact.product_cost_batch`、`fact.monthly_storage_fee`、`mart.product_unit_cost_current`、`mart.profit_order_item`、`mart.profit_daily_store_product`、`mart.profit_month_group`、`mart.profit_product_summary`。
+- 详细口径见 `README.md`、`docs/data-model.md`、`docs/bi-warehouse-model.md`；首页和成本/利润页不得用 `25%` 预测利润冒充真实利润，成本未覆盖必须显示缺口。
+- 售后/退货金额优先用订单实收/预计收入字段；所有未取消售后默认计入退货/反转，最终取消后再冲回。`sales_sar <= 0` 或 `gross_revenue_sar <= 0` 的揽收前取消 / 0 金额行不计订单、销量、成本或退货派送费。
+- 成本表正式文件为 `inputs/costs/成本.xlsx`；`单台总成本（SAR）` 是单批单件完整成本，入库后按完整批次加权平均，匹配键走 `dim.product_match_key()`。
+- 成本/利润页必须受顶部时间、店铺/分组、货号/SKC 筛选影响；高/低利润分界线固定 `20%`。利润分组里 `TS`、`MZ` 开店以来都归 `DSY`。
+- 真实利润核心对象：`fact.product_cost_batch`、`fact.monthly_storage_fee`、`mart.product_unit_cost_current`、`mart.profit_order_item`、`mart.profit_daily_store_product`、`mart.profit_month_group`、`mart.profit_product_summary`。
 
 ## 工具与避坑
 - SHEIN 销售抓取主链路自 `2026-05-11` 起为 Node WebAPI 直连优先：`config/stores.json` 全 16 店 `salesTransport=auto`，`fetch_shein_sales.mjs --transport webapi|auto` 直调 `/gsp/orderPlus/listOrder` / `listOrderItem`；Chrome DevTools/CDP 主要用于导出/刷新 Cookie session、登录续期和回退。
@@ -181,17 +139,11 @@
 - Node 脚本读取大体量子进程 stdout（尤其 PostgreSQL/psql JSON）时，必须收集 Buffer chunks 后 `Buffer.concat(...).toString('utf8')`；不要在每个 `data` chunk 上直接 `toString()` 拼接，否则中文多字节可能被切断成 `U+FFFD`，进而造成 BI 货号缺字和假聚合错误。
 - 飞书接口偶发 `EOF`、`HTTP 500/5000`、限流、TLS/CDN 抖动时应重试，不能发布半新半旧数据。
 
-## 2026-05-03 历史乱码归档
-- 原 `MEMORY.md` 和执行记录中的历史乱码已归档到 `backups/doc-mojibake-archive-2026-05-03T14-20-00/`；当前记忆只保留可复用长期规则，排障细节以归档和 `docs/` 为准。
-
-
 ## ET 货代仓核心口径
-- ET 货代后台使用独立 profile `profiles/persistent-et-forwarder-profile`；云端正式链路读取服务器私有 `config/et_forwarder.local.json` 或环境变量账号密码，不把密码写入文档、仓库、日志或聊天。
-- ET 大部分列表/明细接口必须带 `X-Requested-With: XMLHttpRequest`；接口 `content-type` 可能是 `text/html` 但正文是 JSON，抓取器不能只按 content-type 判断。
-- 仓库含义：`ETRUH09散件仓` 为核心可售散件仓，`ETRUH01整箱仓` 为海运整箱/待拆箱仓，`ETRUH03_RTV` 为退货仓，`ETRUH04Damaged` 为破损仓，`ETRUH06报废` 为报废仓。
-- ET 可增强实际库存、在途/到仓、发货申请单批次、箱明细、出库单、RTV、损溢破损、物流/仓储财务复核；国内采购成本、已确认头程/上架/下架成本、SKU 级仓储费仍以手工成本表或用户确认规则为准，不能自动覆盖。
-- ET 抓取器支持分模块、列表先行和明细分块；出库/财务账单大明细必须分块跑。ET 发货申请单对应成本表批次，出库单备注/物流号可关联 SHEIN 订单物流号，RTV `ShipmentNumber` 可关联 SHEIN 退货物流号；匹配不到进待复核池，不能硬归并。
-- ET 自动登录由 `scripts/et_login_helper.py` + `scripts/fetch_et_forwarder.mjs` 处理验证码；`credentials` 默认只输出用户名和密码长度，只有本地抓取进程设置 `ET_LOGIN_HELPER_ALLOW_SECRET=1` 时才返回密码。OCR/页面改版失败时发飞书异常并保留上一版 ET 数据。
+- ET 货代后台使用独立 profile；云端正式链路读取服务器私有 `config/et_forwarder.local.json` 或环境变量账号密码，不把密码写入文档、仓库、日志或聊天。
+- ET 大部分列表/明细接口必须带 `X-Requested-With: XMLHttpRequest`；仓库核心含义：`09` 可售散件、`01` 整箱、`03_RTV` 退货、`04Damaged` 破损、`06` 报废。
+- ET 可增强库存、在途/到仓、发货申请单、箱明细、出库、RTV、损溢破损、物流/仓储财务复核；国内采购成本、头程/上架/下架成本、SKU 级仓储费仍以手工成本表或用户确认规则为准。
+- ET 抓取器支持分模块、列表先行和明细分块；匹配 SHEIN/ET 时宁可进待复核池，不能硬归并。自动登录由 `scripts/et_login_helper.py` + OCR 处理，失败时发飞书异常并保留上一版 ET 数据。
 - ET 货号归并：已确认 `7025 -> SK-7025A绞肉机`、`LQ榨汁机175 -> SK-JB-175离心式榨汁机`；`SM-520A电动缝纫机`、`CX1788手持搅拌器` 是新货号且当前在途；`p-DL-FZ-666/P-DL-FZ-666/p-DLFZ666/PDLFZ666` 是 FZ-666 包材，`报废` 是占位编码，不作为可售货号。未确认编码不要写死归并。
 - `8A04PD9`、`8A04QUP`、`KYD03172GF`、`KYD05552GF` 是其他货代发货批次，不应作为 ET 发货申请单缺失报警。
 - RTV 利润主口径保守：退货/仅退款/派送失败等反转订单主利润仍按营收 0 并扣成本/必要费用；ET 已收 RTV 只新增“可二次销售测算”，不替代主利润。
@@ -206,8 +158,8 @@
 - 本机旧飞书监听不要再用 PowerShell 原生命令长管道直连 `lark-cli event consume | node ...`，长时间运行时会缓冲导致事件到达但处理器不回；使用 `scripts/run_lark_sales_qa_event_pipe.mjs` 直接 spawn 并 pipe 事件流。用户已明确否定轮询方案，不得再改回轮询。当前本机自动拉起由 Windows 计划任务 `SHEIN-Local-Lark-Sales-QA` 负责，触发器为当前用户登录，入口脚本为 `scripts/start_local_lark_sales_qa.ps1`，安装脚本为 `scripts/install_local_lark_sales_qa_task.ps1`。
 - 2026-05-19 云端 Codex 已修复：可从本机私有 auth 覆盖 `/home/sheinops/.codex/auth.json`，服务器已安装 `bubblewrap`、修正 sessions 权限、设置 `kernel.apparmor_restrict_unprivileged_userns=0`、将 `codex_hooks` 改为 `hooks`；`codex exec --sandbox read-only --skip-git-repo-check "只回复 OK"` 返回 OK，短暂 `Reconnecting...` 只按网络抖动处理。
 - RTV 换单复核不能只靠 SHEIN 售后列表原始退货物流号；iMile/EMile/JT/JTE 等必须结合 SHEIN 物流详情换单轨迹和 ET RTV 反向候选。`mart.rtv_manual_review_candidates`、`ops.rtv_tracking_verification`、`mart.et_rtv_destination_allocation`、`mart.shein_return_rtv_trace` 是当前复核/展示主链路；未经人工确认的候选不改变主利润。
-- BI Portal 链接管理中台是“会话即任务工作台”：自然语言每轮按最新一句和会话上下文从当前 `outputs/bi-portal/data.json` 动态取数；明确动作命令（下架、换图、改标题、补链、报活动等）必须固化为待确认任务并留 IP/UA/备注/审计，不能只回复“没权限”。
-- 链接管理素材上传走 `/api/link-ops-assets` 白名单和任务隔离私有目录；`/api/link-ops-execute` 做确认状态、素材、权限边界、执行前检查和审计。HL 写执行器 `scripts/link_ops_hl_openapi_executor.mjs` 已验证 `canPublishProduct=true`、站点 `shein-sa/SAR`、品牌 `SOKANY`；默认 dry-run，真实 `publishOrEdit` 必须 payload 完整且显式确认。
+- BI Portal 链接管理中台是“会话即任务工作台”：自然语言每轮按最新一句和会话上下文从当前 `outputs/bi-portal/data.json` 动态取数；明确动作命令（下架、换图、改标题、补链、报活动等）必须创建/更新同一会话任务并留 IP/UA/备注/审计，不能只回复“没权限”。用户点“开始执行 / 预检”后才进入 `/api/link-ops-execute`。
+- 链接管理素材上传走 `/api/link-ops-assets` 白名单和任务隔离私有目录；`/api/link-ops-execute` 做自动确认、素材/权限边界、HL 子执行器调度、进度和审计回写。HL 写执行器 `scripts/link_ops_hl_openapi_executor.mjs` 已验证 `canPublishProduct=true`、站点 `shein-sa/SAR`、品牌 `SOKANY`；默认 dry-run，真实 `publishOrEdit` 必须 payload 完整且显式二次确认。`copy_product_draft` 会先尝试从源商品快照复制图片/证书，源商品候选必须命中明确 SKC 或货号文本后才按销量排序。
 - 商品复制架构：不等源店 OpenAPI；短期“源店 WebAPI/云端登录态读取商品详情 -> canonical draft -> 目标店 HL OpenAPI/商品子系统写草稿”，后续源店有 OpenAPI 时只替换源读取器。2026-05-19 已用 DL 商品编辑页 `/spmp/product/get_similar_product_detail` 复制 `S1810电热水壶` 到 HL `/spmp/product/save_draft` 草稿 `v2603291437289685`，只保存草稿，未提交审核/发布。
 - SPMP 商品编辑页写草稿时必须强制勾选目标发布站点；HL 沙特至少要写入 `site_list=[{main_site:"shein", sub_site_list:["shein-sa"]}]`。不能继承源店 `get_similar_product_detail` 返回的空 `site_list`，否则草稿页面“发布站点”会漏勾，提交审核前还需人工补选。
 - 商品资料母库不保存图片文件或图片 URL，图片只在任务执行时临时复制/换链/清理；平台 `skc` / `skuCode` 只作追溯，不能冒充商家 `supplierSku`。不同店铺核价/供货价差异不是商品参数冲突，发品前按报价策略处理（默认 50% 利润率或同款其它店最高核价，允许人工覆盖）。

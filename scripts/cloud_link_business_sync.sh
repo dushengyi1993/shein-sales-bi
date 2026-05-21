@@ -107,10 +107,11 @@ for STORE in $STORES; do
   for ATTEMPT in $(seq 1 "$MAX_ATTEMPTS"); do
     echo "[cloud_link_business_sync] store=$STORE attempt=$ATTEMPT/$MAX_ATTEMPTS bootstrap/fetch start"
     close_one_store_browser "$STORE"
-    if node scripts/bootstrap_shein_browser_session.mjs \
+    if node scripts/restore_shein_store_session.mjs \
       --store "$STORE" \
       --date "$DATE" \
       --headless \
+      --timeout-ms "${SHEIN_SESSION_RESTORE_TIMEOUT_MS:-180000}" \
       && node scripts/fetch_shein_links.mjs \
         --stores "$STORE" \
         --date "$DATE" \

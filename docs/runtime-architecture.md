@@ -31,6 +31,7 @@
 - `shein-bi-cloud-yesterday.timer`：每天 `00:10` 刷新前一天最终销售，并复核前两天稳定日。
 - `shein-bi-db-backup.timer`：每天 `02:30` 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto`。
 - `shein-bi-cloud-session-manager.timer`：每天 `03:20` 顺序巡检/恢复 16 店 WebAPI + SBN 登录态。
+- 会写 16 店 SHEIN Chrome profile 的云端任务必须以 `sheinops` 运行；`shein-bi-cloud-link-business.service` 不能用 root，否则会留下 root-owned profile 文件，导致登录态管家次日 `EACCES`。登录态恢复入口为 `restore_shein_store_session.mjs`，先回灌 browser/WebAPI session，再验证 GSP + SBN。
 - 本地 `SHEIN-*` Windows 计划任务已全部禁用，只保留为回滚和 Linux 迁移参考。
 
 本地回滚时的 Windows 安装/更新入口：
@@ -238,7 +239,7 @@
 - Codex CLI 私有运行目录固定为 `/home/sheinops/.codex`；其中 `auth.json`、`config.toml` 和第三方 API 凭据仅存在服务器，不纳入 GitHub。
 - 飞书或 BI 网页不得直接暴露 shell / 裸 Codex CLI；必须经过 Node 网关做边界控制、输入约束、超时、只读上下文压缩和失败兜底。
 - 生产问数不再依赖本机 Codex App 或本地浏览器；本机只作为开发、排障和回滚环境。
-- BI 页面自然语言入口已接到同一受控问数网关：链接管理会话每轮根据最新一句和上下文，从当前 BI Portal JSON 重新压缩相关店铺、货号、SKC、曝光/访客/销量数据；指代不完整时才沿用上文。写操作仍不能直接执行，明确下架/换图/改标题/补链/报活动等命令必须先自动进入链接运营任务池，等待人工确认和执行器预检。
+- BI 页面自然语言入口已接到同一受控问数网关：链接管理会话每轮根据最新一句和上下文，从当前 BI Portal JSON 重新压缩相关店铺、货号、SKC、曝光/访客/销量数据；指代不完整时才沿用上文。明确下架、换图、改标题、补链、报活动等命令必须自动进入同一会话任务；用户点“开始执行 / 预检”后才调用 `/api/link-ops-execute`，由受控执行器写回进度、blocker/warning 和审计。真实提交 SHEIN 仍需要适配器、payload 完整和二次确认。
 
 ## 2026-05-17 公网域名入口
 

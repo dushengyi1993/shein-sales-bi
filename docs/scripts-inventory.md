@@ -86,7 +86,8 @@
   - `run_link_management_job.mjs`
   - `fetch_shein_links.mjs`
   - `generate_link_ops_web_dashboard.mjs`
-  - `serve_bi_portal.mjs`：同时承载 BI Portal 静态页面、链接运营状态 API 和云端临时登录维护入口；`/api/link-ops-chats` 支持运营会话、动态只读问数和明确命令自动入池，`/api/link-ops-tasks` 管理任务池，`/api/link-ops-assets` 管理任务素材包，`/api/link-ops-execute` 只做受控执行前检查，`/api/cloud-login/sessions` 管理短时 noVNC 登录窗口。
+  - `restore_shein_store_session.mjs`：云端单店登录态恢复入口；先用私有 browser/WebAPI session bootstrap，再调用 `auto_relogin_shein_store.mjs` 验证 GSP + SBN 登录态，供 session-manager 和 link/business 日更复用。
+  - `serve_bi_portal.mjs`：同时承载 BI Portal 静态页面、链接运营状态 API 和云端临时登录维护入口；`/api/link-ops-chats` 支持运营会话、动态只读问数和明确命令自动入池，`/api/link-ops-tasks` 管理任务池，`/api/link-ops-assets` 管理任务素材包，`/api/link-ops-execute` 做受控执行前检查、HL 子执行器调度、进度和审计回写，`/api/cloud-login/sessions` 管理短时 noVNC 登录窗口。
   - `upload_link_ops_assets.mjs`：从本机把图片、证书、标题/规则文件同步到云端链接运营任务素材包；只走白名单文件类型，不上传敏感登录态。
 - 成本/利润：
   - `create_cost_template.mjs`

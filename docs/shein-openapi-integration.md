@@ -151,7 +151,7 @@ node scripts/load_bi_warehouse.mjs --sales-dir outputs/shein_openapi_fetch --sal
 - 只读接入已验证：站点 / 币种、商品列表、订单列表 / 详情、库存、财务对账、退货。
 - 初步订单销售对账已通过。
 - 当前已完成：HL OpenAPI 销售数据写入 API 并行层，并在 BI 系统状态页展示 OpenAPI / 当前生产销售源对账。下一步继续累计多日 `matched`，并在已申请权限审核通过后扩展库存、退货、财务、SFS 等更多业务域。
-- 2026-05-18 链接管理中台已把 HL 识别为“OpenAPI 已授权店铺”，不会再把 HL 补链/复制上品请求笼统回复为“无权限”。但当前代码仍只验证了商品/订单/库存等只读与销售对账链路，商品发布/提交审核写适配器尚未实现验证；相关任务会先进入任务池和执行器预检，待写适配器接入后才能真实提交审核。
+- 2026-05-18 起，链接管理中台已把 HL 识别为“OpenAPI 已授权店铺”，不会再把 HL 补链/复制上品请求笼统回复为“无权限”。2026-05-20 后，HL `copy_product_draft` 任务可从 BI 当前会话直接进入 `/api/link-ops-execute`，由 `scripts/link_ops_hl_openapi_executor.mjs` 做 OpenAPI 权限、站点、品牌、仓库和 payload 预检；真实 `publishOrEdit` 仍必须 payload 完整且用户二次确认。
 
 ### P3：16 店分批替换
 
@@ -226,7 +226,7 @@ node scripts/link_ops_hl_openapi_executor.mjs --task-id <任务ID> --dry-run
 - 发布 payload 完整，包含类目、属性、站点、SKC 图片、销售属性、SKU、供货价/成本、库存、尺寸重量和上架方式等字段；
 - 命令显式传入 `--execute --confirm SHEIN_HL_OPENAPI_SUBMIT`。
 
-当前边界：执行器已经不再停留在“HL 没有权限 / 适配器未实现”，但 BI 现有链接表现数据不足以直接还原完整商品发布 payload。复制 DL 等非 OpenAPI 店铺的已上 SKC 到 HL 时，还需要“源商品详情抓取/映射器”把源后台详情转换成 `publishOrEdit` 所需 payload；否则执行器会阻断并说明缺失类目、属性、图片、SKU、成本、库存和尺寸重量等资料。
+当前边界：执行器已经不再停留在“HL 没有权限 / 适配器未实现”，但 BI 现有链接表现数据不足以直接还原完整商品发布 payload。复制 DL 等非 OpenAPI 店铺的已上 SKC 到 HL 时，还需要“源商品详情抓取/映射器”把源后台详情转换成 `publishOrEdit` 所需 payload；否则执行器会阻断并说明缺失类目、属性、SKU、成本、库存和尺寸重量等资料。图片素材对 `copy_product_draft` 不再作为第一层硬阻断，执行器会先尝试从源商品快照复制，源快照不足时再阻断。
 
 2026-05-19 已补第一版源店 WebAPI 快照映射基座：
 
@@ -239,6 +239,7 @@ node scripts/link_ops_build_product_draft_from_webapi.mjs --source-store DL --so
 - `scripts/link_ops_hl_openapi_executor.mjs` 在任务没有上传 `openapiPublishPayload` 时，会尝试从任务里的源店 + 源 SKC 自动生成 WebAPI 快照 payload 草稿，再进入 HL OpenAPI 预检。
 - DL `S1810电热水壶 / sv260315124105439111444` 样本已能生成：类目 `4681`、品牌 `2a64l`、英文标题、3 个图片候选、1 个 SKC、1 个 SKU、库存草稿 `100`、计划上架时间 `10` 年后；但仍会阻断真实提交，因为当前快照缺 `product_attribute_list`、SKU 尺寸/重量、`supplier_sku` 和 `cost_info`。
 - 长期架构保持不变：短期源店读取走 WebAPI/云端登录态；后续 DL 等源店拿到官方 OpenAPI 后，只替换源读取器，继续复用 canonical draft 和 HL 目标写执行器。
+- 2026-05-20 起，`/api/link-ops-execute` 会把当前任务快照传给 HL 子执行器；草稿任务点击开始时自动确认并写入执行审计，前端任务区显示“开始执行 / 预检”和预检通过后的二次提交入口。源商品候选必须命中明确 SKC 或货号文本后才按销量排序，避免误选无关高销量链接。
 
 2026-05-19 已进一步验证“商品编辑页 WebAPI -> HL 草稿箱”链路：
 

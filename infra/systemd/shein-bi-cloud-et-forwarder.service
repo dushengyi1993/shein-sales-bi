@@ -8,4 +8,6 @@ Type=oneshot
 WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/root
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_ET_LOG_DIR=/srv/shein-bi/logs/cloud-et-forwarder
+TimeoutStartSec=7200
 ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_et_forwarder_sync.sh today
