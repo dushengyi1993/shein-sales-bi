@@ -15,6 +15,7 @@
         "按用户允许的场景生成；如用户限制居家/办公室/旅行等，不擅自拓展"
       ],
       "generation_safety_mode": "bright_commercial_sexy_safe_to_render",
+      "model_safety_style": "gpt_image2_safe_aesthetic_translation",
       "verified_facts": [
         {
           "claim": "Portable electric espresso machine",
@@ -80,10 +81,10 @@
       ],
       "store_style_profile": {
         "style_name": "SHEIN KSA Bright Premium",
-        "visual_mood": "bright, premium, attractive, tasteful sexy when a model is useful",
+        "visual_mood": "bright, premium, attractive, GPT Image 2 friendly high-end feminine beauty when a model is useful",
         "color_palette": "clean warm neutrals with fresh accent colors",
-        "model_style": "beautiful, fashionable, subtly alluring, not vulgar, product remains hero",
-        "background_style": "clean modern lifestyle or ecommerce studio, high clarity"
+        "model_style": "adult model, mature appeal, premium feminine beauty, elegant modest clothing for KSA, natural graceful posture, not vulgar, product remains hero",
+        "background_style": "clean modern lifestyle or ecommerce studio, high clarity, highly realistic commercial photography, no 3D CG fake doll look"
       }
     }
   ]

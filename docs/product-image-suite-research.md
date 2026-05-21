@@ -301,6 +301,7 @@
 
 - Gemini 分享记录：<https://gemini.google.com/share/8542d133db8b>
 - Gemini 追加分享记录：<https://gemini.google.com/share/38365c080843>
+- X / 李岳：GPT Image 2 女性角色提示词安全审美写法：<https://x.com/liyue_ai/status/2056947629548843481?s=46>
 - Amazon product photos 官方博客：<https://sell.amazon.com/blog/product-photos>
 - Amazon Seller Central 图片要求帖：<https://sellercentral.amazon.com/seller-forums/discussions/t/13af96ea-6b07-4bf9-8dbe-a13292c2e3b1>
 - Amazon Home / Garden / Pets style guide：<https://images-na.ssl-images-amazon.com/images/G/01/rainier/help/Home_Garden_and_Pets-Style_Guide.pdf>
@@ -330,3 +331,22 @@
 - **明亮电商优先**：跨境电商图应高明度、高清晰、手机端强识别；如果画面过暗，会降低点击。
 - **性感尺度回退**：当过强性感导致出图失败，先删除高风险姿势和词汇，把吸引力转移到高颜值、鲜亮色彩、修身真丝/罗纹/运动面料、肩颈/锁骨/腰线、清透光线、水珠/冰块等安全但有欲望感的元素。
 - **类目经验**：布艺清洗机适合沙发/地毯/床垫等真实家用痛点；肩颈按摩器应优先聚焦肩颈、斜方肌、热敷和免提；制冰机可用夏日冰饮、办公室冰咖、家庭吧台等高明度场景，但沙特默认不出现酒精。即便 Gemini 样例里出现威士忌/鸡尾酒，也必须替换成无酒精饮品。
+
+## 9. 2026-05-20 口径更新：GPT Image 2 欲望词转高级审美词
+
+从 X 文章 <https://x.com/liyue_ai/status/2056947629548843481?s=46> 吸收的可复用方法：
+
+- GPT Image 2 对直白欲望词更敏感。不要在最终提示词里直接堆 `性感`、`诱惑`、`挑逗`、`胸大`、`翘臀`、`低机位`、`湿身` 等词。
+- 用户想要的“吸引力”应转译为高级审美语言：`成年女性角色`、`高级女性美`、`成熟吸引力`、`健康丰腴`、`自然流畅的身体曲线`、`肩颈舒展`、`腰线自然`、`剪裁合身`、`得体服装`、`明亮商业人像`、`时尚 editorial`。
+- 不要突出身体局部，要写整体体态；不要写挑逗动作，要写自然姿态；不要写私密暧昧场景，要写明亮干净的商业场景。
+- 失败后不要加“更性感”，而是增强人物时尚表现力、高级女性气质、身体比例与姿态、服装剪裁贴合度、柔和光影和皮肤质感。
+- 这条规则不等于放弃流量感。它是把“尺度”藏进气质、剪裁、姿态和光影里，让图既有购买吸引力，又更容易过 GPT Image 2 / 平台安全审查。
+- 已沉淀为 `skills/ecommerce-product-image-suite/references/gpt-image2-safe-aesthetic.md`，并接入 reviewer 检查项与脚本提示词风格。
+
+补充阅读该帖下方多个案例后，新增提炼：
+
+- 高质量提示词通常不是“卖点 + 美女”一句话，而是按 `任务/比例/风格 -> 构图 -> 成年身份和气质 -> 姿态和整体体态 -> 脸部发型妆容 -> 服装剪裁材质 -> 场景光影 -> 成图质量 -> 负向边界` 展开。
+- 案例里大量使用具体的姿态和材质词，例如自然回望、轻微侧身、肩颈舒展、S 型动态姿态、缎面、针织、柔光、浅景深、窗边自然光。这类写法可吸收。
+- 案例里的床上私密感、泳装湿身、女仆/猫耳、低机位身体凝视等不应照搬到 SHEIN 电商图；应降级为明亮商业场景、真实可购买服装、产品 C 位和正常商业镜头。
+- 对电商图的最终改造是：人物负责点击吸引力，产品负责成交信任。提示词每一段都必须回收产品主体、真实使用动作、移动端清晰度和事实约束。
+- reviewer 复核后补充两条边界：KSA 默认加得体服饰物理边界，避免把“合身剪裁”误生成极紧/过露；真实电商图默认加 `highly realistic commercial photography / natural skin texture / no 3D CG render look / no fake doll face`，防止把 3D CG 案例误迁移成假人感。

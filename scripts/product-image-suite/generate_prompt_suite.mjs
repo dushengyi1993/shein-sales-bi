@@ -136,6 +136,30 @@ function sceneConstraintText(product) {
   return constraints.length ? constraints.map((x) => String(x).trim()).filter(Boolean).join('; ') : '';
 }
 
+function marketText(product) {
+  return `${product.market || ''} ${(product.secondary_markets || []).join(' ')} ${product.platform || ''}`.toUpperCase();
+}
+
+function isKsaFirst(product) {
+  const text = marketText(product);
+  return text.includes('KSA') || text.includes('SAUDI') || text.includes('沙特');
+}
+
+function marketModestyGuidance(product) {
+  if (isKsaFirst(product)) {
+    return [
+      'KSA-first modesty guidance: keep attractive styling high-fashion and product-led rather than exposure-led.',
+      'Prefer elegant modest clothing with controlled neckline, no lingerie, no transparent fabric, no extreme cleavage, no bare midriff, no micro skirt, no very tight bodycon look; use refined long-sleeve or short-sleeve tops, elegant trousers or longer skirt, slightly relaxed drape, premium fabric and polished styling.',
+      'If the user explicitly asks for a bolder traffic style, express it through face, hair, makeup, fitted-but-decent tailoring, fabric sheen, posture, bright light and product interaction, not through more nudity or body-part focus.'
+    ].join(' ');
+  }
+  return 'EU/general market guidance: styling may be more fashion-forward, but still keep the image commercial, non-vulgar, product-led, adult, realistic and platform-safe.';
+}
+
+function realisticPhotographyGuidance(product) {
+  return 'Default ecommerce output should look like highly realistic commercial photography: natural skin texture with subtle real imperfections, realistic fabric texture, believable hands and anatomy, no 3D CG render look, no plastic skin, no fake doll face, no wax-figure or AI mannequin look, unless the user explicitly requests illustration/CG.';
+}
+
 function negativePrompt(product) {
   const base = [
     'no Chinese text',
@@ -144,7 +168,12 @@ function negativePrompt(product) {
     'no cross-like shapes or cross-shaped decorative patterns',
     'no alcohol or pork',
     'no excessive exposure or sexualized pose',
+    'no seductive, provocative, vulgar, adult-oriented or body-part-focused wording',
+    'no low-angle body-gazing camera, no chest close-up, no hip close-up',
+    'no underage, teen, lolita or childish sexy look',
+    'no lingerie, transparent fabric, extreme cleavage, bare midriff, micro skirt or very tight bodycon look for KSA-first output',
     'no cross-gender physical contact, hugging, kissing or intimate couple gesture',
+    'no 3D CG render look, no plastic skin, no fake doll face, no wax figure, no AI mannequin look unless illustration/CG is explicitly requested',
     'no unverified certification or medical claim',
     'no price, discount, seller logo, watermark or marketplace badge',
     'do not change product shape, color, parts, angle or accessories',
@@ -175,6 +204,8 @@ function promptFor(slot, product, store) {
   const sceneConstraints = sceneConstraintText(product);
   const styleText = [style.style_name, style.visual_mood, style.color_palette, style.model_style, style.background_style].filter(Boolean).join('; ') || 'SHEIN KSA-first ecommerce style, bright, attractive, tasteful, store-consistent';
   const references = (product.reference_images || []).map((r) => typeof r === 'string' ? r : `${r.role || 'reference'}: ${r.path_or_url || ''} ${r.notes || ''}`).filter(Boolean).join('; ');
+  const modesty = marketModestyGuidance(product);
+  const realism = realisticPhotographyGuidance(product);
 
   let layout = 'bright, clean, mobile-first ecommerce composition, product as the largest visual anchor';
   if (slot.key === 'cover_3x4') layout = 'high-conversion 3:4 ecommerce hero cover, product in the center, 3 to 4 small icon callouts, large readable English headline';
@@ -220,9 +251,11 @@ function promptFor(slot, product, store) {
       `Scene and composition: ${layout}; use scene direction: ${scene}; keep the product clear, complete, center-focused and easy to recognize on a phone screen. If using result props such as ice, water droplets, crispy food or stain removal, make them support the product rather than overpower it. The model can be attractive, but hands, gaze and body direction must guide attention back to the product and the real usage action. Keep the subject inside a protected crop zone so 3:4 to 1:1 reuse will not cut off the product.`,
       rule && slot.index === 1 ? `Platform main-image rule: ${rule.note}` : '',
       `Text rendering rule: English and Arabic are equally important. The image model may render the planned English/Arabic text, numbers, icons and small typography directly if typography is reliable. Planned text to render or verify: ${copy.length ? copy.join(' | ') : 'none'}. Text language rule: ${languageRule}. Review every English word, Arabic word, number, unit and glyph; Arabic translation must be checked by Codex/reviewer, not by the user; if any text is distorted, regenerate or use layout-tool composition as fallback.`,
-      `Lighting and style: bright, high clarity, clean commercial photography, accurate colors, no dark muddy tone, no clutter. Models may be tasteful sexy, attractive, subtly alluring and fashion-forward when useful for traffic, but never pornographic, vulgar, cheap or more dominant than the product.`,
-      `Usage realism: the model must look like she is genuinely using the product; avoid fake posing such as touching hair or doing unrelated gestures while operating a cleaner, massager or kitchen appliance.`,
-      `If the image tool blocks the prompt for being too sexy, reduce risky posture and wording while keeping bright commercial attractiveness, fitted fabric, clean lighting and real usage action.`,
+      `Market modesty and styling: ${modesty}`,
+      `Realism requirement: ${realism}`,
+      `Lighting and style: bright, high clarity, clean commercial photography, accurate colors, no dark muddy tone, no clutter. For GPT Image 2 safety, translate direct desire words into premium aesthetics: adult model, mature appeal, high-end feminine beauty, healthy graceful curves, coordinated body proportions, elegant fitted clothing, soft natural light, fashion editorial and commercial portrait quality. When a model appears, describe in this order: image task and composition, adult identity and temperament, natural pose and overall body proportions, face/hair/makeup, clothing cut and material, bright commercial scene and lighting, product-led action, final quality, safety boundary. Never use vulgar, provocative, adult-oriented or body-part-focused expression, and never let the model become more dominant than the product.`,
+      `Usage realism: the model must look like she is genuinely using the product; hands should naturally hold, press, guide, support or point to the product as appropriate; avoid fake posing such as touching hair, unrelated chin-holding, biting lips or doing unrelated gestures while operating a cleaner, massager or kitchen appliance.`,
+      `If the image tool blocks the prompt, do not ask for "more sexy"; instead strengthen fashion expression, mature feminine presence, natural body proportions, fitted tailoring, soft light, skin texture, clean commercial background and real product usage action.`,
       `Do not let model, food, props or background overpower the product.`
     ].filter(Boolean).join('\n'),
     negative_prompt: negativePrompt(product),
@@ -234,7 +267,9 @@ function promptFor(slot, product, store) {
       '是否没有展示未随货配件或包装盒',
       '图上文字、数字、单位和阿文是否逐字准确；如不准确是否已重生成或后期修正',
       '如果使用参考图优先策略，提示词是否没有擅自写死产品颜色/结构/按钮/接口等外观细节',
-      '人物动作是否真实服务产品，产品是否没有被人物抢走焦点'
+      '人物动作是否真实服务产品，产品是否没有被人物抢走焦点',
+      'KSA 市场是否使用得体服装和商业镜头，而不是暴露或身体凝视',
+      '成图是否像真实商业摄影，避免 3D CG 假人感、塑料皮肤和 AI 娃娃脸'
     ]
   };
 }
@@ -246,6 +281,8 @@ function suitePrompt(product, store) {
   const style = product.store_style_profile || {};
   const sceneConstraints = sceneConstraintText(product);
   const styleText = [style.style_name, style.visual_mood, style.color_palette, style.model_style, style.background_style].filter(Boolean).join('; ') || 'SHEIN KSA-first ecommerce style, bright, attractive, tasteful, store-consistent';
+  const modesty = marketModestyGuidance(product);
+  const realism = realisticPhotographyGuidance(product);
   return [
     `Generate a complete 13-image ecommerce product image suite for ${platform}, primary market ${market}, secondary markets ${secondary}.`,
     `SKU: ${product.sku}; store: ${store}; category: ${product.category || extractCategory(product.sku)}.`,
@@ -255,8 +292,10 @@ function suitePrompt(product, store) {
     `Keep a coherent store style across the whole suite: ${styleText}. The images should feel like the same store, but each image must have a distinct purpose and composition.`,
     'Image 2 is 1:1. All other images are 3:4. Keep the product clear, large and recognizable on mobile.',
     'English and Arabic copy are equally important. Render text clearly when possible, then verify every English word, Arabic word, number and unit against the provided overlay metadata.',
-    'Models may be tasteful sexy, attractive, subtly alluring and fashion-forward when useful for traffic, but never pornographic, vulgar, cheap or more dominant than the product. Keep the image bright, high clarity and commercially readable; if safety filters block the image, reduce risky posture/wording but keep attractive bright styling.',
-    'Model actions must be physically realistic and must guide attention back to the product and usage result.',
+    `Market modesty and styling: ${modesty}`,
+    `Realism requirement: ${realism}`,
+    'Models may show mature appeal, high-end feminine beauty, natural graceful curves, elegant fitted clothing and fashion-forward commercial presence when useful for traffic, but never use vulgar, provocative, adult-oriented or body-part-focused expression, and never let the model become more dominant than the product. Keep the image bright, high clarity and commercially readable; if safety filters block the image, translate risky wording into premium aesthetics rather than asking for more explicit sexiness.',
+    'Model actions must be physically realistic and must guide attention back to the product and usage result. Hands should naturally hold, press, guide, support or point to the product; avoid unrelated chin-holding, biting lips, hair-touching or pure posing.',
     'Do not invent product functions, parameters, accessories, certifications or results. Do not copy competitor-specific facts.'
   ].filter(Boolean).join('\n');
 }
