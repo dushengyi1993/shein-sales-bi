@@ -18,6 +18,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import crypto from 'node:crypto';
+import os from 'node:os';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -99,6 +100,13 @@ const LINK_OPS_ALLOWED_UPLOAD_MIME = new Set([
   'text/csv',
   'application/json',
 ]);
+const CLOUD_AI_MEMORY_TTL_MS = Math.max(0, Number(process.env.SHEIN_CLOUD_AI_MEMORY_TTL_MS || 0));
+const CLOUD_AI_MEMORY_POLICY = Object.freeze({
+  ttlMs: CLOUD_AI_MEMORY_TTL_MS,
+  ttlHours: CLOUD_AI_MEMORY_TTL_MS ? Number((CLOUD_AI_MEMORY_TTL_MS / 3600000).toFixed(2)) : null,
+  storage: 'raw_full_conversation_no_manual_summary',
+  scope: 'same_link_ops_chat_session',
+});
 
 function safeFileStem(value, fallback = 'asset') {
   const s = String(value || '')
@@ -116,6 +124,12 @@ function safeTaskId(value) {
   return s;
 }
 
+function safeCodexSessionId(value) {
+  const s = String(value || '').trim();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return '';
+  return s.toLowerCase();
+}
+
 function assertInsideDir(baseDir, targetPath) {
   const base = path.resolve(baseDir);
   const target = path.resolve(targetPath);
@@ -124,6 +138,36 @@ function assertInsideDir(baseDir, targetPath) {
     throw new Error('Unsafe upload path');
   }
   return target;
+}
+
+async function deleteCodexSessionRecord(sessionId) {
+  const id = safeCodexSessionId(sessionId);
+  if (!id) return {ok: true, skipped: true, reason: 'missing_or_invalid_session_id', deletedFiles: []};
+  const codexHome = path.resolve(process.env.CODEX_HOME || '/home/sheinops/.codex');
+  const sessionsDir = assertInsideDir(codexHome, path.join(codexHome, 'sessions'));
+  const deletedFiles = [];
+  const warnings = [];
+  async function walk(dir, depth = 0) {
+    if (depth > 8) return;
+    let entries = [];
+    try {
+      entries = await fs.readdir(dir, {withFileTypes: true});
+    } catch (err) {
+      if (err?.code !== 'ENOENT') warnings.push(String(err?.message || err).slice(0, 240));
+      return;
+    }
+    for (const entry of entries) {
+      const full = assertInsideDir(sessionsDir, path.join(dir, entry.name));
+      if (entry.isDirectory()) {
+        await walk(full, depth + 1);
+      } else if (entry.isFile() && entry.name.includes(id)) {
+        await fs.rm(full, {force: true});
+        deletedFiles.push(path.relative(codexHome, full).replace(/\\/g, '/'));
+      }
+    }
+  }
+  await walk(sessionsDir);
+  return {ok: true, sessionId: id, deletedFiles, warnings};
 }
 
 function uploadExtensionFor(mime, name = '') {
@@ -420,8 +464,7 @@ function mergeLinkOpsTargets(...items) {
 }
 
 function inferTargetsFromChatSession(session) {
-  const text = (Array.isArray(session?.messages) ? session.messages : [])
-    .slice(-12)
+  const text = recentCloudAiMessages(session?.messages)
     .map(m => String(m?.content || ''))
     .join('\n');
   return mergeLinkOpsTargets(
@@ -528,8 +571,22 @@ function isConfirmExecuteChatCommand(command) {
     || /确认.*(执行|提交|审核|处理)|同意.*(执行|提交|审核|处理)|(执行|提交|审核|处理).*吧/.test(text);
 }
 
+function messageTimeMs(message) {
+  const t = Date.parse(String(message?.at || ''));
+  return Number.isFinite(t) ? t : 0;
+}
+
+function recentCloudAiMessages(messages, nowMs = Date.now()) {
+  return (Array.isArray(messages) ? messages : [])
+    .filter(m => {
+      if (!CLOUD_AI_MEMORY_TTL_MS) return true;
+      const t = messageTimeMs(m);
+      return t && nowMs - t <= CLOUD_AI_MEMORY_TTL_MS;
+    });
+}
+
 function hasActionableLinkOpsContext(session) {
-  const messages = Array.isArray(session?.messages) ? session.messages : [];
+  const messages = recentCloudAiMessages(session?.messages);
   const prior = messages.slice(0, -1).slice(-10);
   const text = prior
     .map(m => String(m?.content || ''))
@@ -547,8 +604,8 @@ function compactChatLine(value, max = 420) {
 }
 
 function buildConfirmedLinkOpsCommandFromSession(session, latestMessage) {
-  const messages = Array.isArray(session?.messages) ? session.messages : [];
-  const prior = messages.slice(0, -1).slice(-12);
+  const messages = recentCloudAiMessages(session?.messages);
+  const prior = messages.slice(0, -1);
   const userLines = prior
     .filter(m => m?.role === 'user')
     .map(m => compactChatLine(m.content))
@@ -719,7 +776,16 @@ function normalizeLinkOpsChatStore(value) {
   return {
     version: 1,
     updatedAt: value?.updatedAt || null,
-    sessions: sessions.filter(x => x && typeof x === 'object').slice(0, 300),
+    memoryPolicy: CLOUD_AI_MEMORY_POLICY,
+    sessions: sessions
+      .filter(x => x && typeof x === 'object')
+      .map(session => ({
+        ...session,
+        memoryPolicy: CLOUD_AI_MEMORY_POLICY,
+        codexSessionId: safeCodexSessionId(session.codexSessionId || ''),
+        messages: recentCloudAiMessages(session.messages),
+      }))
+      .slice(0, 300),
   };
 }
 
@@ -740,6 +806,8 @@ function buildChatSessionFromMessage(body, actor, req) {
     title: buildLinkOpsSessionTitle(message, targets),
     autoTitle: true,
     targets,
+    memoryPolicy: CLOUD_AI_MEMORY_POLICY,
+    codexSessionId: '',
     requestedBy: actorLabel(actor, req),
     requestedByUser: actorUser(actor, req),
     requestMeta: requestMeta(req),
@@ -759,7 +827,7 @@ function appendChatMessage(session, body, actor, req) {
   if (!content) throw new Error('Missing message');
   if (content.length > 4000) throw new Error('Message too long');
   const now = new Date().toISOString();
-  const messages = Array.isArray(session.messages) ? session.messages.slice(-80) : [];
+  const messages = Array.isArray(session.messages) ? session.messages.slice() : [];
   messages.push({id: `msg_${crypto.randomBytes(5).toString('hex')}`, role: 'user', content, at: now});
   const targets = mergeLinkOpsTargets(
     session.targets && typeof session.targets === 'object' ? session.targets : {},
@@ -770,6 +838,7 @@ function appendChatMessage(session, body, actor, req) {
     ...session,
     status: 'chatting',
     updatedAt: now,
+    memoryPolicy: CLOUD_AI_MEMORY_POLICY,
     title: session.autoTitle === false ? session.title : buildLinkOpsSessionTitle(titleText || content, targets),
     autoTitle: session.autoTitle === false ? false : true,
     targets,
@@ -780,11 +849,12 @@ function appendChatMessage(session, body, actor, req) {
 
 function appendAssistantChatMessage(session, answer, meta = {}) {
   const now = new Date().toISOString();
-  const messages = Array.isArray(session.messages) ? session.messages.slice(-80) : [];
+  const messages = Array.isArray(session.messages) ? session.messages.slice() : [];
   messages.push({id: `msg_${crypto.randomBytes(5).toString('hex')}`, role: 'assistant', content: String(answer || '').slice(0, 16000), at: now, meta});
   return {
     ...session,
     updatedAt: now,
+    memoryPolicy: CLOUD_AI_MEMORY_POLICY,
     targets: mergeLinkOpsTargets(
       session.targets && typeof session.targets === 'object' ? session.targets : {},
       inferLinkOpsTargets(answer)
@@ -1251,10 +1321,13 @@ function runChildProcess(command, args, options = {}) {
   });
 }
 
-async function askReadonlyOpsAgent(question) {
+async function askReadonlyOpsAgent(question, options = {}) {
   const text = String(question || '').trim();
   if (!text) throw new Error('Missing question');
-  if (text.length > 12000) throw new Error('Question too long');
+  const maxQuestionChars = Math.max(12000, Number(process.env.SHEIN_BI_OPS_AGENT_MAX_QUESTION_CHARS || 480000));
+  if (text.length > maxQuestionChars) throw new Error('Question too long');
+  const codexSessionId = safeCodexSessionId(options.codexSessionId || '');
+  const codexMetaFile = path.join(os.tmpdir(), `shein-linkops-codex-session-${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.json`);
   const result = await runChildProcess(process.execPath, [
     path.join(ROOT, 'scripts', 'lark_sales_qa_bot.mjs'),
     '--answer',
@@ -1268,14 +1341,20 @@ async function askReadonlyOpsAgent(question) {
       SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS: process.env.SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS || '180000',
       SHEIN_QA_LLM_ENABLED: process.env.SHEIN_QA_LLM_ENABLED || '1',
       SHEIN_QA_LLM_TIMEOUT_MS: process.env.SHEIN_QA_LLM_TIMEOUT_MS || '45000',
+      SHEIN_QA_CODEX_SESSION_ID: codexSessionId,
+      SHEIN_QA_CODEX_SESSION_META_FILE: codexMetaFile,
     },
   });
+  const codexMeta = await readJsonFile(codexMetaFile, null);
+  await fs.rm(codexMetaFile, {force: true}).catch(() => {});
   if (!result.ok) {
     throw new Error(`Ops agent failed code=${result.code} timeout=${result.timedOut} stderr=${String(result.stderr || '').slice(-500)}`);
   }
   return {
     answer: String(result.stdout || '').trim(),
     stderrTail: String(result.stderr || '').slice(-1000),
+    codexSessionId: codexMeta?.sessionId || codexSessionId || '',
+    codexResumed: Boolean(codexMeta?.resumed),
   };
 }
 
@@ -2019,8 +2098,10 @@ async function main() {
                 : userMessage;
             let agentAnswer = '';
             let agentDurationMs = 0;
+            let codexResumed = false;
             if (body.askAgent !== false) {
-              const conversation = (session.messages || []).slice(-10).map(m => `${m.role === 'assistant' ? '智能体' : '用户'}：${m.content}`).join('\n');
+              const rememberedMessages = recentCloudAiMessages(session.messages);
+              const conversation = rememberedMessages.map(m => `${m.role === 'assistant' ? '智能体' : '用户'}：${m.content}`).join('\n');
               const extraRules = shouldAutoTask
                 ? [
                     confirmExecuteCommand
@@ -2034,17 +2115,22 @@ async function main() {
                   ];
               const question = [
                 '这是 SHEIN 链接管理中台的一段运营会话。请只围绕 SHEIN 数据、链接管理、标题/图片/活动/补链建议回答。',
+                '云端 AI 统一记忆规则：同一中台会话保存并传递原始会话文本，不在业务层手动摘要压缩；真正触及模型上下文上限时，由模型/调用层处理，最新用户消息永远优先。',
+                '云端 AI 统一权限边界：允许电商运营分析、受控图表、标题/卖点/图片方案草稿、公开竞品参考、以及链接/商品运营任务草案；敏感登录材料和底层维护类请求只能拒绝说明，不能展示细节，也不能在聊天里直接改经营看板底层系统。',
+                '明确的 SHEIN 链接/商品运营写动作（改标题、换图、补链接、下架、报活动等）只能进入同一会话任务池、预检和审计，不允许绕过中台静默写后台。',
                 '如果信息还不够，先问需要补充什么；如果已经可以形成任务，请给出清晰的下一步和风险边界。',
                 '遇到“这个链接/这个品/2,223 这个”等指代时，必须结合上文已出现的店铺、货号、SKC、曝光/访客/销量数字重新定位；不能因为最新一句没写全就否定上轮数据。',
                 '会话已识别目标：' + summarizeLinkOpsTargets(conversationTargets),
                 '会话目标执行能力：\n' + buildLinkOpsCapabilitySummary(conversationTargets),
                 ...extraRules,
-                conversation,
+                rememberedMessages.length ? conversation : '当前没有可继承的短期上下文，请按最新用户消息独立处理。',
               ].join('\n\n');
               const startedAt = Date.now();
-              const result = await askReadonlyOpsAgent(question);
+              const result = await askReadonlyOpsAgent(question, {codexSessionId: session.codexSessionId || ''});
               agentDurationMs = Date.now() - startedAt;
               agentAnswer = result.answer;
+              codexResumed = Boolean(result.codexResumed);
+              if (result.codexSessionId) session.codexSessionId = result.codexSessionId;
             }
             if (shouldAutoTask) {
               const taskStore = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
@@ -2143,6 +2229,8 @@ async function main() {
               session = appendAssistantChatMessage(session, agentAnswer, {
                 mode: body.askAgent === false ? 'system-auto-task' : 'readonly-codex-gateway',
                 durationMs: agentDurationMs,
+                codexSessionId: session.codexSessionId || '',
+                codexResumed,
                 autoTaskId: autoTask?.id || '',
               });
             }
@@ -2152,7 +2240,7 @@ async function main() {
           const sessions = created
             ? [session, ...current.sessions].slice(0, 300)
             : current.sessions.map(s => String(s.id || '') === session.id ? session : s);
-          const next = {version: 1, updatedAt: new Date().toISOString(), sessions};
+          const next = {version: 1, updatedAt: new Date().toISOString(), memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions};
           await writeJsonFile(args.linkOpsChatFile, next);
           await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
@@ -2177,11 +2265,12 @@ async function main() {
             title: typeof body.title === 'string' ? body.title.trim().slice(0, 100) : current.sessions[idx].title,
             autoTitle: typeof body.title === 'string' ? false : current.sessions[idx].autoTitle,
             status: typeof body.status === 'string' ? body.status.trim().slice(0, 40) : current.sessions[idx].status,
+            memoryPolicy: CLOUD_AI_MEMORY_POLICY,
             updatedAt: new Date().toISOString(),
           };
           const sessions = current.sessions.slice();
           sessions[idx] = session;
-          const next = {version: 1, updatedAt: new Date().toISOString(), sessions};
+          const next = {version: 1, updatedAt: new Date().toISOString(), memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions};
           await writeJsonFile(args.linkOpsChatFile, next);
           return sendJson(res, 200, {ok: true, data: next, session});
         }
@@ -2190,9 +2279,36 @@ async function main() {
           const id = String(url.searchParams.get('id') || '').trim();
           if (!id) return sendJson(res, 400, {ok: false, error: 'Missing session id'});
           const current = normalizeLinkOpsChatStore(await readJsonFile(args.linkOpsChatFile, {version: 1, updatedAt: null, sessions: []}));
-          const next = {version: 1, updatedAt: new Date().toISOString(), sessions: current.sessions.filter(s => String(s.id || '') !== id)};
+          const deletedSession = current.sessions.find(s => String(s.id || '') === id) || null;
+          let codexSessionDelete = {ok: true, skipped: true, reason: 'no_codex_session_id', deletedFiles: []};
+          if (deletedSession?.codexSessionId) {
+            try {
+              codexSessionDelete = await deleteCodexSessionRecord(deletedSession.codexSessionId);
+            } catch (err) {
+              codexSessionDelete = {
+                ok: false,
+                sessionId: safeCodexSessionId(deletedSession.codexSessionId),
+                deletedFiles: [],
+                warnings: [String(err?.message || err).slice(0, 300)],
+              };
+            }
+          }
+          const next = {version: 1, updatedAt: new Date().toISOString(), memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions: current.sessions.filter(s => String(s.id || '') !== id)};
           await writeJsonFile(args.linkOpsChatFile, next);
-          return sendJson(res, 200, {ok: true, data: next, deleted: {id}});
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'link-ops-chat-delete',
+            actor,
+            ...requestMeta(req),
+            session: {
+              id,
+              existed: Boolean(deletedSession),
+              messageCount: Array.isArray(deletedSession?.messages) ? deletedSession.messages.length : 0,
+              codexSessionId: deletedSession?.codexSessionId || '',
+              codexSessionDelete,
+            },
+          });
+          return sendJson(res, 200, {ok: true, data: next, deleted: {id, existed: Boolean(deletedSession), codexSession: codexSessionDelete}});
         }
         return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
       }

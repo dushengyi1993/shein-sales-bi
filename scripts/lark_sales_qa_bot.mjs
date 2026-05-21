@@ -22,6 +22,7 @@ const CHART_PYTHON = process.env.SHEIN_QA_CHART_PYTHON || 'python3';
 const CHART_SCRIPT = process.env.SHEIN_QA_CHART_SCRIPT || path.join(ROOT, 'scripts', 'render_lark_qa_chart.py');
 const CHART_DIR = process.env.SHEIN_QA_CHART_DIR || path.join(STATE_DIR, 'charts');
 const CONVERSATION_DIR = process.env.SHEIN_QA_CONVERSATION_DIR || path.join(STATE_DIR, 'conversations');
+const CONVERSATION_TTL_MS = Math.max(0, Number(process.env.SHEIN_QA_CONVERSATION_TTL_MS || 0));
 const LINK_OPS_TASK_FILE = process.env.SHEIN_QA_LINK_OPS_TASK_FILE || path.join(ROOT, 'state', 'bi_link_ops_tasks.json');
 const OWNER_ONLY_OPS_WRITE = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_OWNER_ONLY_OPS_WRITE || '1').toLowerCase());
 const STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ'];
@@ -866,9 +867,17 @@ function conversationIdentity(event = {}) {
   const chat = String(event.chat_id || '').trim();
   const sender = String(event.sender_id || '').trim();
   const chatType = String(event.chat_type || '').trim() || 'unknown';
+  if (sender) return `feishu-user:${sender}`;
   if (chat) return `${chatType}:chat:${chat}`;
-  if (sender) return `${chatType}:sender:${sender}`;
   return `${chatType}:unknown`;
+}
+
+function legacyChatConversationKey(event = {}) {
+  const chat = String(event.chat_id || '').trim();
+  const sender = String(event.sender_id || '').trim();
+  const chatType = String(event.chat_type || '').trim() || 'unknown';
+  const legacyIdentity = chat ? `${chatType}:chat:${chat}` : (sender ? `${chatType}:sender:${sender}` : `${chatType}:unknown`);
+  return crypto.createHash('sha1').update(legacyIdentity).digest('hex');
 }
 
 function conversationKey(event = {}) {
@@ -884,6 +893,11 @@ function blankConversationState(event = {}) {
     version: 1,
     key: conversationKey(event),
     chatType: event.chat_type || '',
+    memoryPolicy: {
+      ttlMs: CONVERSATION_TTL_MS,
+      storage: 'raw_full_conversation_no_manual_summary',
+      scope: 'same_feishu_user',
+    },
     createdAt: new Date().toISOString(),
     updatedAt: null,
     turns: [],
@@ -892,17 +906,50 @@ function blankConversationState(event = {}) {
   };
 }
 
+function timeMs(value) {
+  const t = Date.parse(String(value || ''));
+  return Number.isFinite(t) ? t : 0;
+}
+
+function isFreshAt(value, nowMs = Date.now()) {
+  if (!CONVERSATION_TTL_MS) return true;
+  const t = timeMs(value);
+  return !!t && nowMs - t <= CONVERSATION_TTL_MS;
+}
+
+function recentConversationTurns(turns, nowMs = Date.now()) {
+  return (Array.isArray(turns) ? turns : [])
+    .filter(turn => isFreshAt(turn?.at, nowMs));
+}
+
+function contextConversationTurns(conversation) {
+  return Array.isArray(conversation?.turns) ? conversation.turns : [];
+}
+
 async function readConversationState(event = {}) {
   const fallback = blankConversationState(event);
-  const raw = await readJsonFile(conversationFile(event), fallback);
+  let raw = await readJsonFile(conversationFile(event), null);
+  if (!raw) {
+    const legacyKey = legacyChatConversationKey(event);
+    if (legacyKey && legacyKey !== fallback.key) {
+      raw = await readJsonFile(path.join(CONVERSATION_DIR, `${legacyKey}.json`), null);
+    }
+  }
+  if (!raw) raw = fallback;
   if (!raw || typeof raw !== 'object') return fallback;
+  const nowMs = Date.now();
+  const lastChart = raw.lastChart && typeof raw.lastChart === 'object' && isFreshAt(raw.lastChart.renderedAt || raw.lastEcommerceAt || raw.updatedAt, nowMs)
+    ? raw.lastChart
+    : null;
   return {
     ...fallback,
     ...raw,
     key: fallback.key,
     chatType: raw.chatType || fallback.chatType,
-    turns: Array.isArray(raw.turns) ? raw.turns.slice(-12) : [],
-    lastChart: raw.lastChart && typeof raw.lastChart === 'object' ? raw.lastChart : null,
+    memoryPolicy: fallback.memoryPolicy,
+    turns: recentConversationTurns(raw.turns, nowMs),
+    lastChart,
+    lastEcommerceAt: isFreshAt(raw.lastEcommerceAt, nowMs) ? raw.lastEcommerceAt : null,
   };
 }
 
@@ -912,9 +959,14 @@ async function writeConversationState(state) {
     version: 1,
     key: state.key,
     chatType: state.chatType || '',
+    memoryPolicy: {
+      ttlMs: CONVERSATION_TTL_MS,
+      storage: 'raw_full_conversation_no_manual_summary',
+      scope: 'same_feishu_user',
+    },
     createdAt: state.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    turns: Array.isArray(state.turns) ? state.turns.slice(-12) : [],
+    turns: recentConversationTurns(state.turns),
     lastChart: state.lastChart || null,
     lastEcommerceAt: state.lastEcommerceAt || null,
   };
@@ -947,8 +999,8 @@ function isChartRevisionRequest(text, conversation) {
 }
 
 function recentConversationLines(conversation, limit = 4) {
-  return (conversation?.turns || [])
-    .slice(-limit)
+  const turns = contextConversationTurns(conversation);
+  return (limit ? turns.slice(-limit) : turns)
     .flatMap(turn => [
       turn.user ? `用户：${turn.user}` : '',
       turn.answer ? `智能体：${turn.answer}` : '',
@@ -1005,7 +1057,8 @@ function applyChartRevisionHints(spec, text) {
 function summarizeConversationForContext(conversation) {
   if (!conversationHasEcommerceContext(conversation)) return null;
   return {
-    recentTurns: (conversation.turns || []).slice(-4).map(turn => ({
+    memoryPolicy: conversation.memoryPolicy || null,
+    turns: contextConversationTurns(conversation).map(turn => ({
       user: turn.user || '',
       answer: turn.answer || '',
       policyMode: turn.policyMode || '',
@@ -1037,7 +1090,7 @@ function appendConversationTurn(conversation, event, {policy, answer, chartSpec,
     chartKind: chartSpec?.kind || '',
     chartTitle: chartSpec?.title || '',
   };
-  next.turns = [...(next.turns || []), turn].slice(-12);
+  next.turns = [...recentConversationTurns(next.turns), turn];
   if (policy?.isEcommerce || chartSpec?.kind) next.lastEcommerceAt = now;
   if (chartSpec?.kind) {
     next.lastChart = {
@@ -1471,6 +1524,17 @@ function stripCodexCliNoise(text) {
     .trim();
 }
 
+function extractCodexSessionId(...parts) {
+  const text = parts.map(x => String(x || '')).join('\n');
+  return safeCodexSessionId(text.match(/session id:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)?.[1] || '');
+}
+
+function safeCodexSessionId(value) {
+  const s = String(value || '').trim();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return '';
+  return s.toLowerCase();
+}
+
 function runProcess(command, args, options = {}) {
   return new Promise(resolve => {
     const child = spawn(command, args, {
@@ -1526,18 +1590,33 @@ async function callReadonlyCodexGateway(question, context) {
     `BI JSON 上下文：${JSON.stringify(context)}`,
   ].join('\n');
   const outFile = path.join(os.tmpdir(), `shein-qa-codex-${process.pid}-${Date.now()}.txt`);
-  const result = await runProcess('codex', [
-    'exec',
-    '--cd', ROOT,
-    '--sandbox', 'read-only',
-    '--skip-git-repo-check',
-    '--ignore-rules',
-    '--color', 'never',
-    '--output-last-message', outFile,
-    '--config', 'approval_policy="never"',
-    '--config', 'model_reasoning_effort="low"',
-    '-',
-  ], {
+  const requestedSessionId = safeCodexSessionId(process.env.SHEIN_QA_CODEX_SESSION_ID || '');
+  const metaFile = String(process.env.SHEIN_QA_CODEX_SESSION_META_FILE || '').trim();
+  const codexArgs = requestedSessionId
+    ? [
+      'exec',
+      'resume',
+      '--skip-git-repo-check',
+      '--ignore-rules',
+      '--output-last-message', outFile,
+      '--config', 'approval_policy="never"',
+      '--config', 'model_reasoning_effort="low"',
+      requestedSessionId,
+      '-',
+    ]
+    : [
+      'exec',
+      '--cd', ROOT,
+      '--sandbox', 'read-only',
+      '--skip-git-repo-check',
+      '--ignore-rules',
+      '--color', 'never',
+      '--output-last-message', outFile,
+      '--config', 'approval_policy="never"',
+      '--config', 'model_reasoning_effort="low"',
+      '-',
+    ];
+  const result = await runProcess('codex', codexArgs, {
     cwd: ROOT,
     input: prompt,
     timeoutMs: CODEX_GATEWAY_TIMEOUT_MS,
@@ -1549,6 +1628,19 @@ async function callReadonlyCodexGateway(question, context) {
     await fs.rm(outFile, {force: true});
   } catch {
     answer = result.stdout;
+  }
+  const sessionId = requestedSessionId || extractCodexSessionId(result.stderr, result.stdout, answer);
+  if (metaFile) {
+    await fs.mkdir(path.dirname(metaFile), {recursive: true}).catch(() => {});
+    await fs.writeFile(metaFile, JSON.stringify({
+      ok: result.ok,
+      sessionId,
+      requestedSessionId,
+      resumed: Boolean(requestedSessionId),
+      code: result.code,
+      timedOut: result.timedOut,
+      updatedAt: new Date().toISOString(),
+    }, null, 2), 'utf8').catch(() => {});
   }
   if (!result.ok) {
     throw new Error(`codex gateway failed code=${result.code} timeout=${result.timedOut} stderr=${String(result.stderr || '').slice(-400)}`);
