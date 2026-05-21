@@ -20,6 +20,9 @@ const CODEX_GATEWAY_REASONING_EFFORT = process.env.SHEIN_QA_CODEX_REASONING_EFFO
 const LARK_CLI_BIN = process.env.LARK_CLI_BIN || 'lark-cli';
 const LARK_CLI_PREFIX_ARGS = parseArgList(process.env.LARK_CLI_PREFIX_ARGS || '');
 const CHART_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_CHART_ENABLED || '1').toLowerCase());
+const CHART_INTENT_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_CHART_INTENT_ENABLED || '1').toLowerCase());
+const CHART_INTENT_TIMEOUT_MS = Number(process.env.SHEIN_QA_CHART_INTENT_TIMEOUT_MS || 90_000);
+const CHART_INTENT_MODEL = process.env.SHEIN_QA_CHART_INTENT_MODEL || CODEX_GATEWAY_MODEL;
 const CHART_PYTHON = process.env.SHEIN_QA_CHART_PYTHON || 'python3';
 const CHART_SCRIPT = process.env.SHEIN_QA_CHART_SCRIPT || path.join(ROOT, 'scripts', 'render_lark_qa_chart.py');
 const CHART_DIR = process.env.SHEIN_QA_CHART_DIR || path.join(STATE_DIR, 'charts');
@@ -40,13 +43,14 @@ function parseArgList(raw) {
 }
 
 function parseArgs(argv) {
-  const args = {answer: '', consume: false, dryRun: false, renderChart: '', chartOutput: ''};
+  const args = {answer: '', consume: false, dryRun: false, renderChart: '', planChart: '', chartOutput: ''};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--answer') args.answer = argv[++i] || '';
     else if (a === '--consume') args.consume = true;
     else if (a === '--dry-run') args.dryRun = true;
     else if (a === '--render-chart') args.renderChart = argv[++i] || '';
+    else if (a === '--plan-chart') args.planChart = argv[++i] || '';
     else if (a === '--chart-output') args.chartOutput = argv[++i] || '';
   }
   return args;
@@ -465,6 +469,21 @@ function wantsChartQuestion(text) {
   return asksChart && (allowedDomain || chartComplaint);
 }
 
+function shouldAskChartIntentPlanner(text, conversation) {
+  if (!CHART_ENABLED || !CHART_INTENT_ENABLED) return false;
+  const q = normalizeText(text);
+  if (!q) return false;
+  if (String(process.env.SHEIN_QA_CHART_INTENT_OVERRIDE_JSON || '').trim()) return true;
+  if (wantsChartQuestion(q)) return true;
+  if (isChartRevisionRequest(q, conversation)) return true;
+  if (conversation?.lastChart?.kind && isFollowupText(q)
+    && /图|这个|那个|刚才|上张|这张|改|换|重做|重画|重新|不对|不满意|看不懂|不直观|字段|维度|排序|颜色|中文|品名|加上|去掉|放大|缩小|太乱|太长|按/.test(q)) {
+    return true;
+  }
+  return /画一张|做一张|做成一张|来一张|搞一张|给我一张|出一张|生成一张|弄一张|弄成一张|做个|出个|给个|弄个|整理成|看板|视觉|版式|信息|看出|体现/.test(q)
+    && /销售|销量|库存|去化|链接|曝光|访客|点击|支付|利润|订单|货号|商品|产品|店铺|品类|类目|SKC|sku|撑多久|还能撑|可卖|周期/i.test(q);
+}
+
 function compactLabel(value, maxLen = 34) {
   const text = String(value || '-').replace(/\s+/g, ' ').trim();
   return text.length > maxLen ? `${text.slice(0, maxLen - 1)}…` : text;
@@ -872,30 +891,95 @@ function buildLinkChartSpec(text, data) {
   };
 }
 
-function buildControlledChartSpec(text, data) {
-  if (!wantsChartQuestion(text)) return null;
+function chartIntentPrompt(text, intent) {
+  if (!intent) return text;
+  const parts = [text, ''];
+  parts.push(`模型图表意图：${intent.chartFamily || 'auto'} ${intent.scope?.level || ''}`);
+  if (intent.scope?.allItems) parts.push('所有 全部 全量');
+  if (intent.scope?.product) parts.push(String(intent.scope.product));
+  if (Array.isArray(intent.scope?.stores) && intent.scope.stores.length) parts.push(intent.scope.stores.join(' '));
+  const metricText = (intent.metrics || []).join(' ');
+  if (/on_hand|stock|inventory/.test(metricText)) parts.push('库存 现货 库存数量');
+  if (/incoming|pending/.test(metricText)) parts.push('在途 待到 待发');
+  if (/daily_speed|speed|sell_through/.test(metricText)) parts.push('去化速度 日销');
+  if (/days_on_hand|days_with_incoming|cycle|period/.test(metricText)) parts.push('去化周期 可卖天数 周转 现货周期 含在途周期');
+  if (/sales|orders|quantity|revenue/.test(metricText)) parts.push('销量 销售额 订单 排行');
+  if (/exposure|uv|visitor|click|pay/.test(metricText)) parts.push('链接 曝光 访客 点击 支付 转化');
+  if (intent.scope?.level === 'product') parts.push('每个货号 按货号 逐货号 所有货号');
+  if (intent.scope?.level === 'category') parts.push('所有品类 品类 类目 信息图');
+  if (intent.scope?.level === 'link') parts.push('链接 SKC 曝光 访客 点击 支付');
+  if (intent.scope?.level === 'store') parts.push('店铺 各店 店铺排行');
+  if (intent.layout?.includeProductName) parts.push('中文品名 商品中文名');
+  if (intent.sort?.metric) parts.push(`按${intent.sort.metric}排序 ${intent.sort.direction === 'asc' ? '升序 从短到长 断货风险' : '降序'}`);
+  return parts.filter(Boolean).join('\n');
+}
+
+function annotateChartSpecWithIntent(spec, intent) {
+  if (!spec || !intent) return spec;
+  return {
+    ...spec,
+    chartIntent: {
+      source: intent.source || 'llm',
+      chartFamily: intent.chartFamily || '',
+      scope: intent.scope || {},
+      metrics: intent.metrics || [],
+      sort: intent.sort || {},
+      confidence: intent.confidence ?? null,
+      reason: previewText(intent.reason || '', 240),
+    },
+  };
+}
+
+function naturalChartFallbackPrompt(text) {
   const q = normalizeText(text);
-  const latest = detectionTexts(text)[0] || q;
+  const parts = [text, '图表 可视化'];
+  if (/撑多久|还能撑|可卖|周期|周转|去化|库存|现货|在途|补货|断货/.test(q)) parts.push('库存 去化周期 现货 在途 日销 可卖天数');
+  if (/货号|商品|产品|sku/i.test(q)) parts.push('每个货号 按货号 所有货号 中文品名');
+  if (/品类|类目/.test(q)) parts.push('所有品类 品类 类目');
+  if (/链接|SKC|skc|曝光|访客|点击|支付|转化/.test(q)) parts.push('链接 SKC 曝光 访客 点击 支付');
+  if (/店铺|各店|门店/.test(q)) parts.push('店铺 各店');
+  return parts.join('\n');
+}
+
+function buildControlledChartSpec(text, data, intent = null) {
+  if (intent?.shouldChart === false) return null;
+  if (!intent && !wantsChartQuestion(text)) return null;
+  const intentText = intent ? chartIntentPrompt(text, intent) : text;
+  const q = normalizeText(intentText);
+  if (intent?.chartFamily) {
+    const family = intent.chartFamily;
+    const forced = family === 'inventory'
+      ? buildInventoryChartSpec(intentText, data)
+      : (family === 'category_inventory'
+        ? buildCategoryInventoryChartSpec(intentText, data)
+        : (family === 'link'
+          ? buildLinkChartSpec(intentText, data)
+          : (family === 'product_sales'
+            ? buildProductSalesChartSpec(intentText, data)
+            : (family === 'store_sales' ? buildStoreSalesChartSpec(intentText, data) : null))));
+    if (forced) return annotateChartSpecWithIntent(forced, intent);
+  }
+  const latest = detectionTexts(intentText)[0] || q;
   const requestsProductLevelInventory = /每个货号|按货号|货号.*一行|逐货号|所有货号|全部货号|全量|每个产品|所有产品|全部产品/.test(latest)
     || /每个货号|按货号|货号.*一行|逐货号|所有货号|全部货号|全量|每个产品|所有产品|全部产品/.test(q);
   if (requestsProductLevelInventory
     && /ET|et|库存|货代|去化|补货|在库|在途|仓库|售罄|缺货|断货|周转|可卖|日销|速度/.test(q)) {
-    return buildInventoryChartSpec(text, data);
+    return buildInventoryChartSpec(intentText, data);
   }
   if (/(所有|全部|全).*(品类|类目)|品类|类目|信息图|infographic/i.test(q)
     && /ET|et|库存|货代|去化|补货|在库|在途|仓库|售罄|缺货|断货|周转|可卖/.test(q)) {
-    return buildCategoryInventoryChartSpec(text, data);
+    return buildCategoryInventoryChartSpec(intentText, data);
   }
   if (/ET|et|库存|货代|去化|补货|在库|在途|仓库|售罄|缺货|断货|周转|可卖/.test(q)) {
-    return buildInventoryChartSpec(text, data);
+    return buildInventoryChartSpec(intentText, data);
   }
   if (/链接|曝光|访客|点击|支付|SKC|skc/.test(q)) {
-    return buildLinkChartSpec(text, data);
+    return buildLinkChartSpec(intentText, data);
   }
-  if (/货号|产品|商品|SKU|sku|销量排行|产品排行/.test(q) || findProductSmart(text, data)) {
-    return buildProductSalesChartSpec(text, data);
+  if (/货号|产品|商品|SKU|sku|销量排行|产品排行/.test(q) || findProductSmart(intentText, data)) {
+    return buildProductSalesChartSpec(intentText, data);
   }
-  return buildStoreSalesChartSpec(text, data);
+  return buildStoreSalesChartSpec(intentText, data);
 }
 
 async function renderControlledChart(spec, options = {}) {
@@ -1541,6 +1625,228 @@ async function readCodexSettings() {
   return {model, baseUrl: (baseUrl || 'https://api.openai.com/v1').replace(/\/$/, ''), apiKey};
 }
 
+function extractResponseText(json) {
+  return json?.output_text ||
+    (Array.isArray(json?.output)
+      ? json.output.flatMap(item => item.content || []).map(c => c.text || '').filter(Boolean).join('\n')
+      : '');
+}
+
+function extractJsonObject(text) {
+  const raw = String(text || '').trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  try {
+    return JSON.parse(raw.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+}
+
+function normalizeIntentFamily(value) {
+  const s = String(value || '').toLowerCase();
+  if (/category|品类|类目/.test(s) && /inventory|库存|stock|去化/.test(s)) return 'category_inventory';
+  if (/category_inventory/.test(s)) return 'category_inventory';
+  if (/inventory|stock|库存|去化|补货|在途|现货|周转/.test(s)) return 'inventory';
+  if (/link|skc|链接|曝光|访客|点击|转化/.test(s)) return 'link';
+  if (/product|sku|货号|商品|产品/.test(s) && /sales|销售|销量|订单/.test(s)) return 'product_sales';
+  if (/store|shop|店铺|各店/.test(s)) return 'store_sales';
+  if (/sales|销售|销量|订单/.test(s)) return 'store_sales';
+  return '';
+}
+
+function normalizeIntentLevel(value, family) {
+  const s = String(value || '').toLowerCase();
+  if (/category|品类|类目/.test(s) || family === 'category_inventory') return 'category';
+  if (/link|skc|链接/.test(s) || family === 'link') return 'link';
+  if (/product|sku|货号|商品|产品|item/.test(s) || family === 'inventory' || family === 'product_sales') return 'product';
+  if (/store|shop|店铺|各店/.test(s) || family === 'store_sales') return 'store';
+  return family === 'category_inventory' ? 'category' : (family === 'link' ? 'link' : (family === 'inventory' ? 'product' : 'store'));
+}
+
+function normalizeIntentMetric(value) {
+  const s = String(value || '').toLowerCase();
+  if (/with[_ -]?incoming|含在途/.test(s)) return 'days_with_incoming';
+  if (/days|cycle|period|turnover|周期|可卖|周转|天/.test(s)) return 'days_on_hand';
+  if (/on[_ -]?hand|stock|inventory|现货|库存/.test(s)) return 'on_hand';
+  if (/incoming|pending|在途|待到|待发/.test(s)) return 'incoming';
+  if (/daily|speed|sell[_ -]?through|velocity|日销|速度|去化速度/.test(s)) return 'daily_speed';
+  if (/revenue|gmv|sar|销售额|金额/.test(s)) return 'sales_amount';
+  if (/sale|qty|quantity|销量|成交|出单/.test(s)) return 'sales_quantity';
+  if (/order|订单/.test(s)) return 'orders';
+  if (/uv|visitor|访客/.test(s)) return 'uv';
+  if (/exposure|impression|曝光/.test(s)) return 'exposure';
+  if (/click|点击/.test(s)) return 'click';
+  if (/pay|支付|转化/.test(s)) return 'pay';
+  return '';
+}
+
+function normalizeChartIntent(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const family = normalizeIntentFamily(raw.chartFamily || raw.family || raw.kind || raw.chart_kind);
+  const shouldChart = raw.shouldChart !== false && raw.should_chart !== false && family !== '';
+  const scopeRaw = raw.scope && typeof raw.scope === 'object' ? raw.scope : {};
+  const level = normalizeIntentLevel(scopeRaw.level || raw.level || raw.dimension || raw.scopeLevel, family);
+  const metricsRaw = [
+    ...(Array.isArray(raw.metrics) ? raw.metrics : []),
+    ...(Array.isArray(raw.fields) ? raw.fields : []),
+    raw.primaryMetric,
+    raw.metric,
+  ].filter(Boolean);
+  const metrics = [...new Set(metricsRaw.map(normalizeIntentMetric).filter(Boolean))];
+  const sortRaw = raw.sort && typeof raw.sort === 'object' ? raw.sort : {};
+  const sortMetric = normalizeIntentMetric(sortRaw.metric || raw.sortMetric || raw.orderBy || '');
+  const directionRaw = String(sortRaw.direction || raw.sortDirection || '').toLowerCase();
+  const direction = /asc|升|小到大|短到长|风险|断货/.test(directionRaw) ? 'asc' : (/desc|降|大到小|高到低/.test(directionRaw) ? 'desc' : '');
+  const storesRaw = Array.isArray(scopeRaw.stores || raw.stores) ? (scopeRaw.stores || raw.stores) : [];
+  const stores = [...new Set(storesRaw.map(x => String(x || '').toUpperCase()).filter(x => STORE_KEYS.includes(x)))];
+  const allItemsRaw = scopeRaw.allItems ?? scopeRaw.all_items ?? raw.allItems ?? raw.all_items;
+  const layoutRaw = raw.layout && typeof raw.layout === 'object' ? raw.layout : {};
+  return {
+    source: raw.source || 'llm',
+    shouldChart,
+    chartFamily: family,
+    scope: {
+      level,
+      allItems: Boolean(allItemsRaw) || /所有|全部|全量|每个|逐/.test(String(raw.reason || raw.userIntent || raw.intent || '')),
+      stores,
+      product: previewText(scopeRaw.product || raw.product || raw.standard_goods_sn || '', 80),
+    },
+    metrics,
+    sort: {
+      metric: sortMetric,
+      direction,
+    },
+    layout: {
+      includeProductName: Boolean(layoutRaw.includeProductName ?? raw.includeProductName ?? raw.include_product_name)
+        || /中文|品名|名称|title|name/.test(String([...(Array.isArray(raw.fields) ? raw.fields : []), raw.reason, raw.userIntent].join(' '))),
+      maxRows: Math.max(0, Math.min(160, Number(layoutRaw.maxRows || raw.maxRows || 0) || 0)),
+      wide: Boolean(layoutRaw.wide ?? raw.wide),
+    },
+    reason: previewText(raw.reason || raw.userIntent || raw.intent || '', 400),
+    confidence: Number.isFinite(Number(raw.confidence)) ? Number(raw.confidence) : null,
+  };
+}
+
+function chartIntentDataSummary(data) {
+  const inventoryProducts = asArray(data.inventoryDepletion?.products);
+  const links = asArray(data.storeLinks || data.links);
+  const latestDate = data.dates?.salesDate || data.rankings?.dailyStores?.[0]?.date || '';
+  return {
+    freshness: {
+      salesDate: latestDate,
+      generatedAt: data.generatedAt || '',
+      salesUpdatedAt: data.dates?.salesUpdatedAt || '',
+      linkDate: data.dates?.linkDate || '',
+      etUpdatedAt: data.dates?.etUpdatedAt || '',
+    },
+    availableChartFamilies: ['store_sales', 'product_sales', 'inventory', 'category_inventory', 'link'],
+    availableStores: STORE_KEYS,
+    counts: {
+      dailyStores: asArray(data.rankings?.dailyStores).length,
+      dailyProducts: asArray(data.rankings?.dailyProducts).length,
+      dailyStoreProducts: asArray(data.rankings?.dailyStoreProducts).length,
+      inventoryProducts: inventoryProducts.length,
+      links: links.length,
+      categories: allKnownCategories(data).length,
+    },
+    sampleProducts: inventoryProducts.slice(0, 80).map(r => ({
+      standard_goods_sn: r.standard_goods_sn || r.standard_goods_sn_list || r.goods_sn || '',
+      goods_title: r.goods_title || r.product_name || '',
+      stock_status: r.stock_status || '',
+    })),
+    sampleCategories: allKnownCategories(data).slice(0, 80),
+  };
+}
+
+async function inferControlledChartIntent(question, data, conversation = null) {
+  const override = String(process.env.SHEIN_QA_CHART_INTENT_OVERRIDE_JSON || '').trim();
+  if (override) {
+    const parsed = extractJsonObject(override) || JSON.parse(override);
+    return normalizeChartIntent({...parsed, source: 'override'});
+  }
+  if (!CHART_INTENT_ENABLED || !LLM_ENABLED) return null;
+  const {model, baseUrl, apiKey} = await readCodexSettings();
+  if (!apiKey) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CHART_INTENT_TIMEOUT_MS);
+  try {
+    const context = {
+      currentUserMessage: question,
+      recentConversation: recentConversationLines(conversation, 10),
+      lastChart: conversation?.lastChart ? {
+        kind: conversation.lastChart.kind || '',
+        title: conversation.lastChart.title || '',
+        metricLabel: conversation.lastChart.metricLabel || '',
+        sourceQuestion: previewText(conversation.lastChart.sourceQuestion || '', 2400),
+      } : null,
+      dataSummary: chartIntentDataSummary(data),
+    };
+    const payload = {
+      model: CHART_INTENT_MODEL || model,
+      input: [
+        {
+          role: 'system',
+          content: [{
+            type: 'input_text',
+            text: [
+              '你是 SHEIN 电商运营图表意图解析器，只负责理解自然语言和上下文，不回答业务问题。',
+              '请根据当前用户消息、最近会话和上一张图，判断是否需要生成/修改受控 BI 图表。',
+              '必须理解“这张图/刚才那个/按这个改/不满意/换成/加上/去掉/按某指标排”等指代；最新用户要求优先，上文只用于补全省略信息。',
+              '安全边界：只允许这些图表族：store_sales、product_sales、inventory、category_inventory、link。不能要求读取外部网页、修改系统、修改 BI、修改数据库或执行后台写操作。',
+              '只输出一个 JSON 对象，不要 Markdown，不要解释。',
+              'JSON 字段：shouldChart(boolean), chartFamily(enum), scope{level,allItems,stores,product}, metrics(array), sort{metric,direction}, layout{includeProductName,maxRows,wide}, reason(string), confidence(number)。',
+              'metric 可用：on_hand、incoming、daily_speed、days_on_hand、days_with_incoming、sales_amount、sales_quantity、orders、uv、exposure、click、pay。',
+            ].join('\n')
+          }]
+        },
+        {
+          role: 'user',
+          content: [{type: 'input_text', text: JSON.stringify(context)}],
+        },
+      ],
+      max_output_tokens: 700,
+    };
+    if (CODEX_GATEWAY_REASONING_EFFORT) payload.reasoning = {effort: CODEX_GATEWAY_REASONING_EFFORT};
+    const res = await fetch(`${baseUrl}/responses`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const raw = await res.text();
+    if (!res.ok) throw new Error(`chart intent LLM HTTP ${res.status}: ${raw.slice(0, 300)}`);
+    const parsed = extractJsonObject(extractResponseText(JSON.parse(raw)));
+    return normalizeChartIntent(parsed);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function buildControlledChartSpecSmart(text, data, conversation = null) {
+  let intent = null;
+  let intentError = '';
+  if (shouldAskChartIntentPlanner(text, conversation)) {
+    try {
+      intent = await inferControlledChartIntent(text, data, conversation);
+    } catch (err) {
+      intentError = String(err?.message || err).slice(0, 600);
+      console.error(JSON.stringify({ok: false, stage: 'chart_intent_failed', error: intentError}));
+    }
+  }
+  let spec = intent?.shouldChart ? buildControlledChartSpec(text, data, intent) : null;
+  if (!spec) spec = buildControlledChartSpec(text, data);
+  if (!spec && shouldAskChartIntentPlanner(text, conversation)) spec = buildControlledChartSpec(naturalChartFallbackPrompt(text), data);
+  return {spec, intent, intentError};
+}
+
 async function callReadonlyLlm(question, context) {
   if (!LLM_ENABLED) return null;
   const {model, baseUrl, apiKey} = await readCodexSettings();
@@ -1974,7 +2280,8 @@ async function handleEvent(event, options = {}) {
   const chartQuestion = buildChartQuestion(event.content || '', conversation);
   const previousChartKind = conversation.lastChart?.kind || '';
   const chartRevision = isChartRevisionRequest(event.content || '', conversation);
-  let chartSpec = buildControlledChartSpec(chartQuestion, data);
+  const chartPlan = await buildControlledChartSpecSmart(chartQuestion, data, conversation);
+  let chartSpec = chartPlan.spec;
   if (chartSpec && chartRevision) chartSpec = applyChartRevisionHints(chartSpec, event.content || '');
   const baseAnswer = await answerQuestionSmart(effectiveQuestion, data, policy, null, conversation);
   const linkOpsTask = await createLarkLinkOpsTask({
@@ -2036,6 +2343,8 @@ async function handleEvent(event, options = {}) {
     linkOpsTaskDryRun: !!linkOpsTask?.dryRun,
     chartKind: chartSpec?.kind || '',
     chartRevision,
+    chartIntent: chartPlan.intent || null,
+    chartIntentError: chartPlan.intentError || '',
     previousChartKind: chartRevision ? previousChartKind : '',
     chartPath: chartResult?.path || '',
     chartSendOk: chartSent?.ok ?? null,
@@ -2051,6 +2360,7 @@ async function handleEvent(event, options = {}) {
     safetyMode: policy.mode,
     linkOpsTaskId: linkOpsTask?.id || '',
     chartKind: chartSpec?.kind || '',
+    chartIntentFamily: chartPlan.intent?.chartFamily || '',
     chartPath: chartResult?.path || '',
     chartSendCode: chartSent?.code ?? null,
     chartError,
@@ -2085,7 +2395,7 @@ if (args.answer) {
   }
 } else if (args.renderChart) {
   const data = await readData();
-  const spec = buildControlledChartSpec(args.renderChart, data);
+  const {spec} = await buildControlledChartSpecSmart(args.renderChart, data, null);
   if (!spec) {
     console.error('No controlled chart spec matched this question.');
     process.exit(2);
@@ -2098,8 +2408,26 @@ if (args.answer) {
     title: result.spec.title,
     rows: result.spec.rows?.length || 0,
   }, null, 2));
+} else if (args.planChart) {
+  const data = await readData();
+  const {spec, intent, intentError} = await buildControlledChartSpecSmart(args.planChart, data, null);
+  console.log(JSON.stringify({
+    ok: Boolean(spec),
+    intent,
+    intentError,
+    spec: spec ? {
+      kind: spec.kind,
+      title: spec.title,
+      subtitle: spec.subtitle,
+      metricLabel: spec.metricLabel,
+      rows: spec.rows?.length || 0,
+      width: spec.width || null,
+      labelWidth: spec.labelWidth || null,
+      valueWidth: spec.valueWidth || null,
+    } : null,
+  }, null, 2));
 } else if (args.consume) {
   await consume({dryRun: args.dryRun});
 } else {
-  console.log('Usage: node scripts/lark_sales_qa_bot.mjs --answer "今天销售多少" | --render-chart "今天店铺销售画图" [--chart-output out.png] | --consume');
+  console.log('Usage: node scripts/lark_sales_qa_bot.mjs --answer "今天销售多少" | --render-chart "今天店铺销售画图" [--chart-output out.png] | --plan-chart "自然语言作图需求" | --consume');
 }
