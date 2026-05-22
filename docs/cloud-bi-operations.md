@@ -143,8 +143,9 @@ GitHub 应保存：
 - Codex CLI 安装在服务器系统路径，私有配置目录为 `/home/sheinops/.codex`；`auth.json`、`config.toml`、第三方 API 配置和 token 都不进入 GitHub、文档或日志。
 - 服务环境必须显式包含：`CODEX_HOME=/home/sheinops/.codex`、`SHEIN_QA_CODEX_GATEWAY_ENABLED=1`、`SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS=600000`、`SHEIN_QA_CODEX_MODEL=gpt-5.5`、`SHEIN_QA_CODEX_REASONING_EFFORT=xhigh`。
 - 网关只把 `outputs/bi-portal/data.json` 压缩成销售、店铺、货号、链接/覆盖等只读上下文交给模型；不授予写 PostgreSQL、写飞书 Base、改 SHEIN 后台或改服务器文件的权限。
-- 图表/作图请求采用“模型理解、代码控权和渲染”的两层结构：先由模型根据整段会话输出受控 `chartIntent`（图表族、维度、指标、排序、布局），再由代码只映射到白名单 BI 图表和只读数据；关键词规则只作为模型不可用时的兜底，不作为主理解层。
-- 库存图若用户提到 09/01/03/04/06 仓口径，飞书图表必须按运营可售现货计算：默认只计 `ETRUH09散件仓`；`SK-03038` 制冰机例外计 `ETRUH01整箱仓`；`ETRUH03_RTV`、`ETRUH04Damaged`、`ETRUH06报废` 不计可售现货。已售罄但有在途的货号仍展示在前，已售罄且无在途的货号放最后。
+- 图表/作图请求采用“模型理解、代码控权和渲染”的两层结构：先由模型根据整段会话输出受控 `chartIntent`（图表族、维度、指标、排序、布局、`constraints`），再由代码只映射到白名单 BI 图表和只读数据；关键词规则只作为模型不可用时的兜底，不作为主理解层。
+- 对上下文里出现的口径修正（例如仓库、排除项、例外货号、排序放置规则），模型必须写入 `chartIntent.constraints`，计算/渲染层必须直接消费该结构化约束；若约束当前数据无法执行，必须写入事件日志的 `chartUnappliedConstraints`，不能静默复用旧口径或旧图。
+- 库存图若用户提到 09/01/03/04/06 仓口径，飞书图表必须按 `constraints.stockPolicy` 计算运营可售现货：默认只计 `ETRUH09散件仓`；`SK-03038` 制冰机例外计 `ETRUH01整箱仓`；`ETRUH03_RTV`、`ETRUH04Damaged`、`ETRUH06报废` 不计可售现货。已售罄但有在途的货号仍展示在前，已售罄且无在途的货号放最后。
 - 网页端“链接管理中台”的运营会话复用同一受控问数链路：每轮按最新一句和最近会话上下文重新从当前 BI JSON 取数；如果用户明确要求下架、换图、改标题、补链、报活动或限时折扣，服务端必须创建 / 更新同一会话任务并留痕。用户点击“开始执行 / 预检”后，`/api/link-ops-execute` 会进入受控执行器、写回进度和审计；真实写 SHEIN 仍必须满足对应适配器、payload 完整和二次确认，不能静默提交。
 - 失败兜底顺序：Codex CLI 只读网关失败时，退回直接 LLM 问答；再失败时退回脚本内规则回答，保证飞书机器人不会因为模型异常完全失声。
 - 这个机器人已经不绑定本机 Codex App 或当前聊天窗口；只要云端服务、飞书授权和服务器网络正常，本机关机也不影响飞书问数。

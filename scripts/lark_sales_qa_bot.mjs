@@ -536,10 +536,180 @@ function wantsOperationalWarehouseStockPolicy(text) {
   return /09仓|09散件|ETRUH09|03仓|04仓|06仓|01仓|ETRUH01|RTV|rtv|破损|销毁|报废|03038|制冰机|实际现货|现货库存的去化实际|只有.*09.*现货|只有09.*算现货/.test(q);
 }
 
-function operationalWarehouseOnHand(row) {
-  const loose09 = n(row?.et_loose_sellable_qty);
-  const carton01 = isIceMaker03038(row) ? n(row?.et_full_carton_qty) : 0;
-  return loose09 + carton01;
+function uniqStrings(values) {
+  return [...new Set(asArray(values)
+    .map(v => String(v || '').trim())
+    .filter(Boolean))];
+}
+
+function canonicalStockWarehouse(value) {
+  const s = String(value || '').trim();
+  const upper = s.toUpperCase().replace(/\s+/g, '');
+  if (!upper) return '';
+  if (/RTV/.test(upper) || /(^|[^0-9])03([^0-9]|$)/.test(upper) || /ETRUH03/.test(upper)) return 'ETRUH03_RTV';
+  if (/DAMAGED|破损/.test(upper) || /(^|[^0-9])04([^0-9]|$)/.test(upper) || /ETRUH04/.test(upper)) return 'ETRUH04_DAMAGED';
+  if (/SCRAP|报废|销毁/.test(upper) || /(^|[^0-9])06([^0-9]|$)/.test(upper) || /ETRUH06/.test(upper)) return 'ETRUH06_SCRAP';
+  if (/(^|[^0-9])09([^0-9]|$)/.test(upper) || /ETRUH09/.test(upper) || /散件/.test(s)) return 'ETRUH09';
+  if (/(^|[^0-9])01([^0-9]|$)/.test(upper) || /ETRUH01/.test(upper) || /整箱/.test(s)) return 'ETRUH01';
+  return upper;
+}
+
+function stockWarehouseLabel(code) {
+  const c = canonicalStockWarehouse(code);
+  if (c === 'ETRUH09') return 'ETRUH09散件仓';
+  if (c === 'ETRUH01') return 'ETRUH01整箱仓';
+  if (c === 'ETRUH03_RTV') return 'ETRUH03_RTV';
+  if (c === 'ETRUH04_DAMAGED') return 'ETRUH04Damaged';
+  if (c === 'ETRUH06_SCRAP') return 'ETRUH06报废';
+  return c || String(code || '');
+}
+
+function defaultOperationalStockPolicy() {
+  return {
+    mode: 'operational_sellable',
+    sellableWarehouses: ['ETRUH09'],
+    excludedWarehouses: ['ETRUH03_RTV', 'ETRUH04_DAMAGED', 'ETRUH06_SCRAP'],
+    exceptionProducts: [{match: '03038', sellableWarehouses: ['ETRUH01']}],
+    soldOutWithIncomingPlacement: 'front',
+    soldOutWithoutIncomingPlacement: 'last',
+  };
+}
+
+function normalizeWarehouseList(values) {
+  return uniqStrings(values).map(canonicalStockWarehouse).filter(Boolean);
+}
+
+function normalizeExceptionProducts(values) {
+  return asArray(values).map(item => {
+    if (!item) return null;
+    if (typeof item === 'string') return {match: item, sellableWarehouses: []};
+    const match = String(item.match || item.product || item.standard_goods_sn || item.goods_sn || item.sku || '').trim();
+    const sellableWarehouses = normalizeWarehouseList(
+      item.sellableWarehouses || item.sellable_warehouses || item.warehouses || item.includeWarehouses || item.include_warehouses || []
+    );
+    return match ? {match, sellableWarehouses} : null;
+  }).filter(Boolean);
+}
+
+function normalizeStockPolicy(raw, inferenceText = '') {
+  const rawObj = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const rawText = typeof raw === 'string' ? raw : '';
+  const combinedText = normalizeText([
+    inferenceText,
+    rawText,
+    rawObj.mode,
+    rawObj.reason,
+    rawObj.description,
+    rawObj.note,
+    ...(Array.isArray(rawObj.sellableWarehouses) ? rawObj.sellableWarehouses : []),
+    ...(Array.isArray(rawObj.excludedWarehouses) ? rawObj.excludedWarehouses : []),
+  ].filter(Boolean).join(' '));
+  const hasExplicitPolicy = Boolean(raw)
+    || wantsOperationalWarehouseStockPolicy(combinedText)
+    || normalizeWarehouseList(rawObj.sellableWarehouses || rawObj.sellable_warehouses || rawObj.includeWarehouses || rawObj.include_warehouses || []).length > 0
+    || normalizeExceptionProducts(rawObj.exceptionProducts || rawObj.exception_products || rawObj.exceptions || []).length > 0;
+  const modeRaw = String(rawObj.mode || rawObj.type || '').toLowerCase();
+  if (!hasExplicitPolicy && !/operational|sellable|现货|可售|warehouse|仓/.test(modeRaw)) return {mode: 'default'};
+  if (/default|standard|默认/.test(modeRaw) && !wantsOperationalWarehouseStockPolicy(combinedText)) return {mode: 'default'};
+  const defaults = defaultOperationalStockPolicy();
+  const sellableWarehouses = normalizeWarehouseList(rawObj.sellableWarehouses || rawObj.sellable_warehouses || rawObj.includeWarehouses || rawObj.include_warehouses || []);
+  const excludedWarehouses = normalizeWarehouseList(rawObj.excludedWarehouses || rawObj.excluded_warehouses || rawObj.excludeWarehouses || rawObj.exclude_warehouses || []);
+  const exceptionProducts = normalizeExceptionProducts(rawObj.exceptionProducts || rawObj.exception_products || rawObj.exceptions || []);
+  return {
+    mode: 'operational_sellable',
+    sellableWarehouses: sellableWarehouses.length ? sellableWarehouses : defaults.sellableWarehouses,
+    excludedWarehouses: excludedWarehouses.length ? excludedWarehouses : defaults.excludedWarehouses,
+    exceptionProducts: exceptionProducts.length ? exceptionProducts.map(ex => ({
+      ...ex,
+      sellableWarehouses: ex.sellableWarehouses.length ? ex.sellableWarehouses : defaults.exceptionProducts[0].sellableWarehouses,
+    })) : defaults.exceptionProducts,
+    soldOutWithIncomingPlacement: /last|末|后/.test(String(rawObj.soldOutWithIncomingPlacement || rawObj.sold_out_with_incoming_placement || '').toLowerCase())
+      ? 'last'
+      : defaults.soldOutWithIncomingPlacement,
+    soldOutWithoutIncomingPlacement: /front|前/.test(String(rawObj.soldOutWithoutIncomingPlacement || rawObj.sold_out_without_incoming_placement || '').toLowerCase())
+      ? 'front'
+      : defaults.soldOutWithoutIncomingPlacement,
+  };
+}
+
+function stockPolicyFromIntent(intent, userIntentText = '') {
+  const raw = intent?.constraints?.stockPolicy
+    || intent?.constraints?.stock_policy
+    || intent?.stockPolicy
+    || intent?.stock_policy
+    || null;
+  return normalizeStockPolicy(raw, `${userIntentText || ''} ${intent?.reason || ''}`);
+}
+
+function stockPolicyUsesOperational(policy) {
+  return policy?.mode === 'operational_sellable';
+}
+
+function supportedOperationalWarehouse(code) {
+  return ['ETRUH09', 'ETRUH01'].includes(canonicalStockWarehouse(code));
+}
+
+function stockWarehouseQty(row, code) {
+  const c = canonicalStockWarehouse(code);
+  if (c === 'ETRUH09') return n(row?.et_loose_sellable_qty);
+  if (c === 'ETRUH01') return n(row?.et_full_carton_qty);
+  if (c === 'ETRUH03_RTV') return n(row?.et_rtv_qty);
+  if (c === 'ETRUH04_DAMAGED') return n(row?.et_damaged_qty);
+  if (c === 'ETRUH06_SCRAP') return n(row?.et_scrap_qty);
+  return 0;
+}
+
+function productMatchesPolicyException(row, exception) {
+  const needle = String(exception?.match || '').trim();
+  if (!needle) return false;
+  const haystack = productKeyText(row);
+  if (/^[0-9]+$/.test(needle)) return new RegExp(`(?:^|[^0-9])0?${needle.replace(/^0+/, '')}(?:[^0-9]|$)`).test(haystack);
+  return haystack.toLowerCase().includes(needle.toLowerCase());
+}
+
+function operationalWarehouseOnHand(row, policy = defaultOperationalStockPolicy()) {
+  if (!stockPolicyUsesOperational(policy)) {
+    return n(row?.estimated_on_hand_quantity ?? row?.et_estimated_available_qty ?? row?.available_quantity);
+  }
+  const counted = new Set();
+  let total = 0;
+  const includeWarehouse = (code) => {
+    const c = canonicalStockWarehouse(code);
+    if (!supportedOperationalWarehouse(c) || counted.has(c)) return;
+    counted.add(c);
+    total += stockWarehouseQty(row, c);
+  };
+  for (const code of normalizeWarehouseList(policy.sellableWarehouses || [])) includeWarehouse(code);
+  for (const exception of asArray(policy.exceptionProducts)) {
+    if (!productMatchesPolicyException(row, exception)) continue;
+    for (const code of normalizeWarehouseList(exception.sellableWarehouses || [])) includeWarehouse(code);
+  }
+  return total;
+}
+
+function summarizeStockPolicy(policy) {
+  if (!stockPolicyUsesOperational(policy)) return '';
+  const sellable = normalizeWarehouseList(policy.sellableWarehouses || []).map(stockWarehouseLabel).join('/');
+  const excluded = normalizeWarehouseList(policy.excludedWarehouses || []).map(stockWarehouseLabel).join('/');
+  const exceptions = asArray(policy.exceptionProducts)
+    .map(ex => `${ex.match || '-'}=>${normalizeWarehouseList(ex.sellableWarehouses || []).map(stockWarehouseLabel).join('/') || '-'}`)
+    .join('; ');
+  return `现货口径：计${sellable || '-'}；例外${exceptions || '无'}；排除${excluded || '无'}；已售罄有在途${policy.soldOutWithIncomingPlacement === 'front' ? '靠前' : '靠后'}，无在途${policy.soldOutWithoutIncomingPlacement === 'last' ? '最后' : '靠前'}`;
+}
+
+function auditStockPolicy(policy) {
+  if (!stockPolicyUsesOperational(policy)) return {applied: [], unapplied: []};
+  const applied = [summarizeStockPolicy(policy)];
+  const unsupported = [];
+  for (const code of normalizeWarehouseList(policy.sellableWarehouses || [])) {
+    if (!supportedOperationalWarehouse(code)) unsupported.push(`暂不支持把 ${stockWarehouseLabel(code)} 计入可售现货`);
+  }
+  for (const exception of asArray(policy.exceptionProducts)) {
+    for (const code of normalizeWarehouseList(exception.sellableWarehouses || [])) {
+      if (!supportedOperationalWarehouse(code)) unsupported.push(`暂不支持例外 ${exception.match || '-'} 使用 ${stockWarehouseLabel(code)}`);
+    }
+  }
+  return {applied, unapplied: [...new Set(unsupported)]};
 }
 
 function daysForStock(stock, speed) {
@@ -642,7 +812,7 @@ function buildProductSalesChartSpec(text, data) {
   };
 }
 
-function buildInventoryChartSpec(text, data) {
+function buildInventoryChartSpec(text, data, intent = null) {
   const q = normalizeText(text);
   const userMessages = extractUserMessages(text);
   const latestUserText = userMessages.at(-1) || detectionTexts(text)[0] || q;
@@ -655,7 +825,9 @@ function buildInventoryChartSpec(text, data) {
   const inventory = compactInventoryContext({question: q, data, product, numberHints, latestNumberHints});
   const allProductsMode = !product && explicitlyAllProducts;
   const wantsCycleFields = /去化周期|可售周期|可卖|周转|现货.*天|含在途.*天|周期/.test(userIntentText);
-  const operationalStockPolicy = wantsOperationalWarehouseStockPolicy(userIntentText);
+  const stockPolicy = stockPolicyFromIntent(intent, userIntentText);
+  const operationalStockPolicy = stockPolicyUsesOperational(stockPolicy);
+  const stockPolicyAudit = auditStockPolicy(stockPolicy);
   const wantsMultiInventoryView = allProductsMode && /库存|现货|在途|去化速度|日销|去化周期|可卖|周转|周期/.test(userIntentText) && wantsCycleFields;
   const latestAsksStockSort = /按.*库存|库存数量|库存数|库存.*降序|现货.*排序/.test(latestUserText);
   const latestAsksSpeedSort = /按.*去化速度|按.*日销|去化速度.*排序|日销.*排序/.test(latestUserText);
@@ -677,7 +849,7 @@ function buildInventoryChartSpec(text, data) {
   const unit = metric === 'days_of_supply_on_hand' ? ' 天' : (metric === 'weighted_daily_gross_sales' ? ' 件/天' : ' 件');
 
   const metricValue = row => {
-    if (operationalStockPolicy && metric === 'estimated_on_hand_quantity') return operationalWarehouseOnHand(row);
+    if (operationalStockPolicy && metric === 'estimated_on_hand_quantity') return operationalWarehouseOnHand(row, stockPolicy);
     if (metric === 'estimated_on_hand_quantity') return n(row.estimated_on_hand_quantity ?? row.et_estimated_available_qty ?? row.available_quantity);
     return n(row[metric]);
   };
@@ -710,8 +882,8 @@ function buildInventoryChartSpec(text, data) {
   const rows = sourceRows
     .sort((a, b) => {
       if (operationalStockPolicy && wantsMultiInventoryView) {
-        const onHandA = operationalWarehouseOnHand(a);
-        const onHandB = operationalWarehouseOnHand(b);
+        const onHandA = operationalWarehouseOnHand(a, stockPolicy);
+        const onHandB = operationalWarehouseOnHand(b, stockPolicy);
         const speedA = n(a.weighted_daily_gross_sales);
         const speedB = n(b.weighted_daily_gross_sales);
         return compareSortTuple(
@@ -735,7 +907,7 @@ function buildInventoryChartSpec(text, data) {
     .map(r => {
       const speed = n(r.weighted_daily_gross_sales);
       const onHand = operationalStockPolicy
-        ? operationalWarehouseOnHand(r)
+        ? operationalWarehouseOnHand(r, stockPolicy)
         : n(r.estimated_on_hand_quantity ?? r.et_estimated_available_qty ?? r.available_quantity);
       const daysOnHandRaw = operationalStockPolicy ? daysForStock(onHand, speed) : n(r.days_of_supply_on_hand);
       const daysWithIncomingRaw = operationalStockPolicy ? daysForStock(onHand + n(r.incoming_quantity), speed) : n(r.days_of_supply_with_incoming);
@@ -774,6 +946,7 @@ function buildInventoryChartSpec(text, data) {
     });
   if (!rows.length) return null;
   const cycleTitle = operationalStockPolicy ? '全货号09仓现货去化周期图｜按实际现货周期排序' : '全货号库存去化周期图｜按现货去化周期排序';
+  const unappliedFootnote = stockPolicyAudit.unapplied.length ? ` 未应用约束：${stockPolicyAudit.unapplied.join('；')}。` : '';
   return {
     kind: 'inventory',
     title: product ? `${product} 库存/去化图` : (wantsMultiInventoryView ? cycleTitle : (allProductsMode ? '全货号库存/去化信息图' : 'ET/库存去化重点图')),
@@ -786,8 +959,11 @@ function buildInventoryChartSpec(text, data) {
         : '基于 ET/成本表实物库存与销售去化，不等同于 SHEIN 平台展示库存'),
     metricLabel: wantsMultiInventoryView ? (operationalStockPolicy ? '09仓可售现货（件）；右侧标日销/实际去化周期' : '现货库存（件）；右侧标日销/去化周期') : metricLabel,
     unit,
-    footnote: `${operationalStockPolicy ? '现货口径：默认只计 ETRUH09散件仓；SK-03038 制冰机例外计 ETRUH01整箱仓；ETRUH03_RTV/04Damaged/06报废不计可售现货。' : ''}ET更新时间：${inventory.freshness?.etUpdatedAt || '-'}；BI生成：${data.generatedAt || '-'}`,
+    footnote: `${operationalStockPolicy ? `${summarizeStockPolicy(stockPolicy)}。` : ''}${unappliedFootnote}ET更新时间：${inventory.freshness?.etUpdatedAt || '-'}；BI生成：${data.generatedAt || '-'}`,
     rows,
+    constraints: intent?.constraints || {},
+    appliedConstraints: stockPolicyAudit.applied,
+    unappliedConstraints: stockPolicyAudit.unapplied,
     maxRows: allProductsMode ? Math.min(120, rows.length) : undefined,
     rowHeight: wantsMultiInventoryView ? 64 : (allProductsMode ? 56 : undefined),
     width: wantsMultiInventoryView ? 2300 : (allProductsMode ? 1800 : undefined),
@@ -1013,6 +1189,9 @@ function chartIntentPrompt(text, intent) {
   if (intent.scope?.level === 'store') parts.push('店铺 各店 店铺排行');
   if (intent.layout?.includeProductName) parts.push('中文品名 商品中文名');
   if (intent.sort?.metric) parts.push(`按${intent.sort.metric}排序 ${intent.sort.direction === 'asc' ? '升序 从短到长 断货风险' : '降序'}`);
+  if (intent.constraints && Object.keys(intent.constraints).length) parts.push(`模型结构化约束：${JSON.stringify(intent.constraints).slice(0, 1200)}`);
+  const stockPolicy = stockPolicyFromIntent(intent, text);
+  if (stockPolicyUsesOperational(stockPolicy)) parts.push(summarizeStockPolicy(stockPolicy));
   if (intent.reason) parts.push(`模型理解说明：${intent.reason}`);
   if (wantsOperationalWarehouseStockPolicy(intent.reason || '')) parts.push('09仓现货口径 只有ETRUH09散件仓算可售现货 SK-03038制冰机例外计ETRUH01整箱仓 03/04/06/RTV/破损/报废不计可售现货');
   return parts.filter(Boolean).join('\n');
@@ -1028,9 +1207,12 @@ function annotateChartSpecWithIntent(spec, intent) {
       scope: intent.scope || {},
       metrics: intent.metrics || [],
       sort: intent.sort || {},
+      constraints: intent.constraints || {},
       confidence: intent.confidence ?? null,
       reason: previewText(intent.reason || '', 240),
     },
+    appliedConstraints: spec.appliedConstraints || [],
+    unappliedConstraints: spec.unappliedConstraints || [],
   };
 }
 
@@ -1053,7 +1235,7 @@ function buildControlledChartSpec(text, data, intent = null) {
   if (intent?.chartFamily) {
     const family = intent.chartFamily;
     const forced = family === 'inventory'
-      ? buildInventoryChartSpec(intentText, data)
+      ? buildInventoryChartSpec(intentText, data, intent)
       : (family === 'category_inventory'
         ? buildCategoryInventoryChartSpec(intentText, data)
         : (family === 'link'
@@ -1068,14 +1250,14 @@ function buildControlledChartSpec(text, data, intent = null) {
     || /每个货号|按货号|货号.*一行|逐货号|所有货号|全部货号|全量|每个产品|所有产品|全部产品/.test(q);
   if (requestsProductLevelInventory
     && /ET|et|库存|货代|去化|补货|在库|在途|仓库|售罄|缺货|断货|周转|可卖|日销|速度/.test(q)) {
-    return buildInventoryChartSpec(intentText, data);
+    return buildInventoryChartSpec(intentText, data, intent);
   }
   if (/(所有|全部|全).*(品类|类目)|品类|类目|信息图|infographic/i.test(q)
     && /ET|et|库存|货代|去化|补货|在库|在途|仓库|售罄|缺货|断货|周转|可卖/.test(q)) {
     return buildCategoryInventoryChartSpec(intentText, data);
   }
   if (/ET|et|库存|货代|去化|补货|在库|在途|仓库|售罄|缺货|断货|周转|可卖/.test(q)) {
-    return buildInventoryChartSpec(intentText, data);
+    return buildInventoryChartSpec(intentText, data, intent);
   }
   if (/链接|曝光|访客|点击|支付|SKC|skc/.test(q)) {
     return buildLinkChartSpec(intentText, data);
@@ -1352,6 +1534,8 @@ function summarizeConversationForContext(conversation) {
       title: conversation.lastChart.title || '',
       metricLabel: conversation.lastChart.metricLabel || '',
       sourceQuestion: conversation.lastChart.sourceQuestion || '',
+      appliedConstraints: conversation.lastChart.appliedConstraints || [],
+      unappliedConstraints: conversation.lastChart.unappliedConstraints || [],
     } : null,
   };
 }
@@ -1384,6 +1568,9 @@ function appendConversationTurn(conversation, event, {policy, answer, chartSpec,
       chartPath: chartResult?.path || '',
       renderedAt: chartResult?.path ? now : '',
       rowCount: Array.isArray(chartSpec.rows) ? chartSpec.rows.length : 0,
+      chartIntent: chartSpec.chartIntent || null,
+      appliedConstraints: chartSpec.appliedConstraints || [],
+      unappliedConstraints: chartSpec.unappliedConstraints || [],
     };
   }
   next.updatedAt = now;
@@ -1789,6 +1976,30 @@ function normalizeIntentMetric(value) {
   return '';
 }
 
+function normalizeRequirementList(values) {
+  return uniqStrings(values).map(v => previewText(v, 160)).filter(Boolean);
+}
+
+function normalizeIntentConstraints(raw, fallbackText = '') {
+  const constraintsRaw = raw?.constraints && typeof raw.constraints === 'object' ? raw.constraints : {};
+  const stockPolicy = normalizeStockPolicy(
+    constraintsRaw.stockPolicy || constraintsRaw.stock_policy || raw?.stockPolicy || raw?.stock_policy || null,
+    fallbackText,
+  );
+  const result = {
+    displayRequirements: normalizeRequirementList(
+      constraintsRaw.displayRequirements || constraintsRaw.display_requirements || raw?.displayRequirements || raw?.display_requirements || [],
+    ),
+    negativeRequirements: normalizeRequirementList(
+      constraintsRaw.negativeRequirements || constraintsRaw.negative_requirements || raw?.negativeRequirements || raw?.negative_requirements || [],
+    ),
+  };
+  if (stockPolicy.mode !== 'default' || constraintsRaw.stockPolicy || constraintsRaw.stock_policy || raw?.stockPolicy || raw?.stock_policy) {
+    result.stockPolicy = stockPolicy;
+  }
+  return result;
+}
+
 function normalizeChartIntent(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const family = normalizeIntentFamily(raw.chartFamily || raw.family || raw.kind || raw.chart_kind);
@@ -1810,6 +2021,13 @@ function normalizeChartIntent(raw) {
   const stores = [...new Set(storesRaw.map(x => String(x || '').toUpperCase()).filter(x => STORE_KEYS.includes(x)))];
   const allItemsRaw = scopeRaw.allItems ?? scopeRaw.all_items ?? raw.allItems ?? raw.all_items;
   const layoutRaw = raw.layout && typeof raw.layout === 'object' ? raw.layout : {};
+  const fallbackText = [
+    raw.reason,
+    raw.userIntent,
+    raw.intent,
+    ...(Array.isArray(raw.fields) ? raw.fields : []),
+    ...(Array.isArray(raw.metrics) ? raw.metrics : []),
+  ].filter(Boolean).join(' ');
   return {
     source: raw.source || 'llm',
     shouldChart,
@@ -1831,6 +2049,7 @@ function normalizeChartIntent(raw) {
       maxRows: Math.max(0, Math.min(160, Number(layoutRaw.maxRows || raw.maxRows || 0) || 0)),
       wide: Boolean(layoutRaw.wide ?? raw.wide),
     },
+    constraints: normalizeIntentConstraints(raw, fallbackText),
     reason: previewText(raw.reason || raw.userIntent || raw.intent || '', 400),
     confidence: Number.isFinite(Number(raw.confidence)) ? Number(raw.confidence) : null,
   };
@@ -1850,6 +2069,13 @@ function chartIntentDataSummary(data) {
     },
     availableChartFamilies: ['store_sales', 'product_sales', 'inventory', 'category_inventory', 'link'],
     availableStores: STORE_KEYS,
+    availableStockPolicyFields: {
+      et_loose_sellable_qty: 'ETRUH09散件仓，可售现货',
+      et_full_carton_qty: 'ETRUH01整箱仓，当前仅按结构化例外计入可售现货',
+      et_rtv_qty: 'ETRUH03_RTV，不计可售现货',
+      et_damaged_qty: 'ETRUH04Damaged，不计可售现货',
+      et_scrap_qty: 'ETRUH06报废，不计可售现货',
+    },
     counts: {
       dailyStores: asArray(data.rankings?.dailyStores).length,
       dailyProducts: asArray(data.rankings?.dailyProducts).length,
@@ -1887,6 +2113,8 @@ async function inferControlledChartIntent(question, data, conversation = null) {
         title: conversation.lastChart.title || '',
         metricLabel: conversation.lastChart.metricLabel || '',
         sourceQuestion: previewText(conversation.lastChart.sourceQuestion || '', 2400),
+        appliedConstraints: conversation.lastChart.appliedConstraints || [],
+        unappliedConstraints: conversation.lastChart.unappliedConstraints || [],
       } : null,
       dataSummary: chartIntentDataSummary(data),
     };
@@ -1903,8 +2131,11 @@ async function inferControlledChartIntent(question, data, conversation = null) {
               '必须理解“这张图/刚才那个/按这个改/不满意/换成/加上/去掉/按某指标排”等指代；最新用户要求优先，上文只用于补全省略信息。',
               '安全边界：只允许这些图表族：store_sales、product_sales、inventory、category_inventory、link。不能要求读取外部网页、修改系统、修改 BI、修改数据库或执行后台写操作。',
               '只输出一个 JSON 对象，不要 Markdown，不要解释。',
-              'JSON 字段：shouldChart(boolean), chartFamily(enum), scope{level,allItems,stores,product}, metrics(array), sort{metric,direction}, layout{includeProductName,maxRows,wide}, reason(string), confidence(number)。',
+              'JSON 字段：shouldChart(boolean), chartFamily(enum), scope{level,allItems,stores,product}, metrics(array), sort{metric,direction}, layout{includeProductName,maxRows,wide}, constraints{stockPolicy,displayRequirements,negativeRequirements}, reason(string), confidence(number)。',
               'metric 可用：on_hand、incoming、daily_speed、days_on_hand、days_with_incoming、sales_amount、sales_quantity、orders、uv、exposure、click、pay。',
+              '如果用户在上下文里纠正了口径/仓库/排除项/例外品，必须放进 constraints，不能只写在 reason。',
+              '库存仓库口径用 constraints.stockPolicy：mode 只能是 operational_sellable 或 default；sellableWarehouses 例如 ["ETRUH09"]；excludedWarehouses 例如 ["ETRUH03_RTV","ETRUH04_DAMAGED","ETRUH06_SCRAP"]；exceptionProducts 例如 [{"match":"03038","sellableWarehouses":["ETRUH01"]}]；soldOutWithIncomingPlacement 可为 front/last；soldOutWithoutIncomingPlacement 可为 front/last。',
+              '例：用户说“只有09仓算现货，03038制冰机在01仓，03/04/06/RTV/破损/报废不算，已售罄有在途靠前、无在途最后”，应输出 constraints.stockPolicy={mode:"operational_sellable",sellableWarehouses:["ETRUH09"],excludedWarehouses:["ETRUH03_RTV","ETRUH04_DAMAGED","ETRUH06_SCRAP"],exceptionProducts:[{match:"03038",sellableWarehouses:["ETRUH01"]}],soldOutWithIncomingPlacement:"front",soldOutWithoutIncomingPlacement:"last"}。',
             ].join('\n')
           }]
         },
@@ -2449,6 +2680,8 @@ async function handleEvent(event, options = {}) {
     chartRevision,
     chartIntent: chartPlan.intent || null,
     chartIntentError: chartPlan.intentError || '',
+    chartAppliedConstraints: chartSpec?.appliedConstraints || [],
+    chartUnappliedConstraints: chartSpec?.unappliedConstraints || [],
     previousChartKind: chartRevision ? previousChartKind : '',
     chartPath: chartResult?.path || '',
     chartSendOk: chartSent?.ok ?? null,
@@ -2465,6 +2698,8 @@ async function handleEvent(event, options = {}) {
     linkOpsTaskId: linkOpsTask?.id || '',
     chartKind: chartSpec?.kind || '',
     chartIntentFamily: chartPlan.intent?.chartFamily || '',
+    chartAppliedConstraints: chartSpec?.appliedConstraints || [],
+    chartUnappliedConstraints: chartSpec?.unappliedConstraints || [],
     chartPath: chartResult?.path || '',
     chartSendCode: chartSent?.code ?? null,
     chartError,
@@ -2511,6 +2746,8 @@ if (args.answer) {
     kind: result.spec.kind,
     title: result.spec.title,
     rows: result.spec.rows?.length || 0,
+    appliedConstraints: result.spec.appliedConstraints || [],
+    unappliedConstraints: result.spec.unappliedConstraints || [],
   }, null, 2));
 } else if (args.planChart) {
   const data = await readData();
@@ -2528,6 +2765,9 @@ if (args.answer) {
       width: spec.width || null,
       labelWidth: spec.labelWidth || null,
       valueWidth: spec.valueWidth || null,
+      appliedConstraints: spec.appliedConstraints || [],
+      unappliedConstraints: spec.unappliedConstraints || [],
+      chartIntent: spec.chartIntent || null,
     } : null,
   }, null, 2));
 } else if (args.consume) {
