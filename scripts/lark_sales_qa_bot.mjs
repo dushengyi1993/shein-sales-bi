@@ -350,6 +350,9 @@ function compactInventoryContext({question, data, product, numberHints, latestNu
       et_pending_process_qty: r.et_pending_process_qty,
       et_damaged_qty: r.et_damaged_qty,
       et_rtv_qty: r.et_rtv_qty,
+      et_scrap_qty: r.et_scrap_qty,
+      operational_sellable_on_hand_qty: operationalWarehouseOnHand(r),
+      operational_stock_policy: '默认只计 ETRUH09 散件仓；SK-03038 制冰机例外计 ETRUH01 整箱仓；ETRUH03_RTV/ETRUH04Damaged/ETRUH06报废不计可售现货',
       estimated_on_hand_quantity: r.estimated_on_hand_quantity,
       incoming_quantity: r.incoming_quantity,
       estimated_total_supply_quantity: r.estimated_total_supply_quantity,
@@ -432,25 +435,37 @@ function answerInventoryQuestion(text, data) {
   const products = inventory.products || [];
   const alerts = inventory.platformStockAlerts || [];
   const freshness = inventory.freshness || {};
+  const operationalPolicy = wantsOperationalWarehouseStockPolicy(q);
   const latestNote = `ET 库存更新时间：${freshness.etUpdatedAt || '-'}；ET 批次：${freshness.etLatestBatchId || '-'}；BI生成：${data.generatedAt || '-'}`;
   if (!products.length && !alerts.length) {
     return `没查到${product ? ` ${product}` : ''} 的 ET/库存去化数据。\n${latestNote}`;
   }
-  const rows = products.slice(0, product ? 8 : 10);
+  const rows = (operationalPolicy
+    ? [...products].sort((a, b) => compareSortTuple(
+      operationalInventorySortTuple(a, operationalWarehouseOnHand(a), n(a.weighted_daily_gross_sales), daysForStock(operationalWarehouseOnHand(a), n(a.weighted_daily_gross_sales))),
+      operationalInventorySortTuple(b, operationalWarehouseOnHand(b), n(b.weighted_daily_gross_sales), daysForStock(operationalWarehouseOnHand(b), n(b.weighted_daily_gross_sales))),
+    ))
+    : products).slice(0, product ? 8 : 10);
   return [
     product ? `${product} 库存/去化：` : `当前 ET/库存去化重点：`,
-    ...rows.map((r, i) => [
-      `${i + 1}. ${r.standard_goods_sn || '-'}`,
-      `状态 ${r.stock_status || '-'}`,
-      `ET可用 ${intNum(r.et_estimated_available_qty)} 件`,
-      `估算在库 ${intNum(r.estimated_on_hand_quantity)} 件`,
-      `在途 ${intNum(r.incoming_quantity)} 件`,
-      `近30天销量 ${intNum(r.gross_sold_30d)} 件`,
-      `在库可卖 ${r.days_of_supply_on_hand ?? '-'} 天`,
-      `含在途可卖 ${r.days_of_supply_with_incoming ?? '-'} 天`,
-    ].join('；')),
+    ...rows.map((r, i) => {
+      const speed = n(r.weighted_daily_gross_sales);
+      const opOnHand = operationalWarehouseOnHand(r);
+      const opDays = daysForStock(opOnHand, speed);
+      const opDaysWithIncoming = daysForStock(opOnHand + n(r.incoming_quantity), speed);
+      return [
+        `${i + 1}. ${r.standard_goods_sn || '-'}`,
+        `状态 ${r.stock_status || '-'}`,
+        operationalPolicy ? `09仓可售 ${intNum(opOnHand)} 件${isIceMaker03038(r) ? '（03038取01仓）' : ''}` : `ET可用 ${intNum(r.et_estimated_available_qty)} 件`,
+        operationalPolicy ? `排除03/04/06 ${intNum(n(r.et_rtv_qty) + n(r.et_damaged_qty) + n(r.et_scrap_qty))} 件` : `估算在库 ${intNum(r.estimated_on_hand_quantity)} 件`,
+        `在途 ${intNum(r.incoming_quantity)} 件`,
+        `近30天销量 ${intNum(r.gross_sold_30d)} 件`,
+        operationalPolicy ? `实际现货可卖 ${formatDays(opDays, speed > 0)}` : `在库可卖 ${r.days_of_supply_on_hand ?? '-'} 天`,
+        operationalPolicy ? `含在途可卖 ${formatDays(opDaysWithIncoming, speed > 0)}` : `含在途可卖 ${r.days_of_supply_with_incoming ?? '-'} 天`,
+      ].join('；');
+    }),
     alerts.length ? `平台低展示库存样本：${alerts.slice(0, 6).map(a => `${a.store_key}/${a.standard_goods_sn} ${intNum(a.usable_inventory ?? a.inventory_quantity)}件`).join('；')}` : '',
-    `口径：ET/成本表实物库存与去化，不等同于 SHEIN 平台展示库存。${latestNote}`,
+    `口径：${operationalPolicy ? '默认只计 ETRUH09散件仓；SK-03038 制冰机例外计 ETRUH01整箱仓；ETRUH03_RTV/04Damaged/06报废不计可售现货。' : 'ET/成本表实物库存与去化，不等同于 SHEIN 平台展示库存。'}${latestNote}`,
   ].filter(Boolean).join('\n');
 }
 
@@ -480,7 +495,7 @@ function shouldAskChartIntentPlanner(text, conversation) {
     && /图|这个|那个|刚才|上张|这张|改|换|重做|重画|重新|不对|不满意|看不懂|不直观|字段|维度|排序|颜色|中文|品名|加上|去掉|放大|缩小|太乱|太长|按/.test(q)) {
     return true;
   }
-  return /画一张|做一张|做成一张|来一张|搞一张|给我一张|出一张|生成一张|弄一张|弄成一张|做个|出个|给个|弄个|整理成|看板|视觉|版式|信息|看出|体现/.test(q)
+  return /画一张|画一个|画个|重画|重新画|做一张|做成一张|来一张|搞一张|给我一张|出一张|生成一张|弄一张|弄成一张|做个|出个|给个|弄个|整理成|看板|视觉|版式|信息|看出|体现/.test(q)
     && /销售|销量|库存|去化|链接|曝光|访客|点击|支付|利润|订单|货号|商品|产品|店铺|品类|类目|SKC|sku|撑多久|还能撑|可卖|周期/i.test(q);
 }
 
@@ -499,6 +514,60 @@ function compactProductInventoryLabel(row, maxLen = 46) {
   if (sn && hasCjk(sn)) return compactLabel(sn, maxLen);
   if (sn && title && hasCjk(title)) return compactLabel(`${sn} ${title}`, maxLen);
   return compactLabel(sn || title || '-', maxLen);
+}
+
+function productKeyText(row) {
+  return String([
+    row?.standard_goods_sn,
+    row?.standard_goods_sn_list,
+    row?.raw_goods_sn_list,
+    row?.goods_sn,
+    row?.goods_title,
+    row?.product_name,
+  ].filter(Boolean).join(' '));
+}
+
+function isIceMaker03038(row) {
+  return /(?:^|[^0-9])0?3038(?:[^0-9]|$)|SK-?03038/i.test(productKeyText(row));
+}
+
+function wantsOperationalWarehouseStockPolicy(text) {
+  const q = normalizeText(text);
+  return /09仓|09散件|ETRUH09|03仓|04仓|06仓|01仓|ETRUH01|RTV|rtv|破损|销毁|报废|03038|制冰机|实际现货|现货库存的去化实际|只有.*09.*现货|只有09.*算现货/.test(q);
+}
+
+function operationalWarehouseOnHand(row) {
+  const loose09 = n(row?.et_loose_sellable_qty);
+  const carton01 = isIceMaker03038(row) ? n(row?.et_full_carton_qty) : 0;
+  return loose09 + carton01;
+}
+
+function daysForStock(stock, speed) {
+  const s = n(speed);
+  if (s <= 0) return null;
+  return n(stock) / s;
+}
+
+function operationalInventorySortTuple(row, onHand, speed, daysOnHand) {
+  const incoming = n(row?.incoming_quantity);
+  if (onHand <= 0 && incoming <= 0) return [9, 999999, -n(row?.gross_sold_30d), productKeyText(row)];
+  if (onHand <= 0 && incoming > 0) return [0, 0, -incoming, productKeyText(row)];
+  if (speed <= 0) return [6, 999998, -onHand, productKeyText(row)];
+  return [1, Number.isFinite(daysOnHand) ? daysOnHand : 999997, -n(row?.gross_sold_30d), productKeyText(row)];
+}
+
+function compareSortTuple(a, b) {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const av = a[i];
+    const bv = b[i];
+    if (typeof av === 'string' || typeof bv === 'string') {
+      const cmp = String(av || '').localeCompare(String(bv || ''), 'zh-Hans-CN');
+      if (cmp) return cmp;
+    } else if (av !== bv) {
+      return av - bv;
+    }
+  }
+  return 0;
 }
 
 function chartFreshnessFootnote(data, date) {
@@ -536,7 +605,8 @@ function buildStoreSalesChartSpec(text, data) {
 function buildProductSalesChartSpec(text, data) {
   const q = normalizeText(text);
   const date = pickDate(q, data);
-  const product = findProductSmart(text, data);
+  const explicitlyAllProducts = /每个货号|按货号|货号.*一行|逐货号|所有货号|全部货号|全量|每个产品|所有产品|全部产品/.test(q);
+  const product = explicitlyAllProducts ? '' : findProductSmart(text, data);
   const stores = pickStoresSmart(text);
   const sourceRows = product
     ? (data.rankings?.dailyStoreProducts || [])
@@ -578,12 +648,14 @@ function buildInventoryChartSpec(text, data) {
   const latestUserText = userMessages.at(-1) || detectionTexts(text)[0] || q;
   const priorUserText = userMessages.slice(0, -1).join(' ');
   const userIntentText = normalizeText(`${priorUserText} ${latestUserText}`);
-  const product = findProductSmart(text, data);
+  const explicitlyAllProducts = /每个货号|按货号|货号.*一行|逐货号|所有货号|全部货号|全量|每个产品|所有产品|全部产品/.test(q);
+  const product = explicitlyAllProducts ? '' : findProductSmart(text, data);
   const numberHints = extractNumberHints(q);
   const latestNumberHints = extractNumberHints(detectionTexts(q)[0] || q);
   const inventory = compactInventoryContext({question: q, data, product, numberHints, latestNumberHints});
-  const allProductsMode = !product && /每个货号|按货号|货号.*一行|逐货号|所有货号|全部货号|全量|每个产品|所有产品|全部产品/.test(q);
+  const allProductsMode = !product && explicitlyAllProducts;
   const wantsCycleFields = /去化周期|可售周期|可卖|周转|现货.*天|含在途.*天|周期/.test(userIntentText);
+  const operationalStockPolicy = wantsOperationalWarehouseStockPolicy(userIntentText);
   const wantsMultiInventoryView = allProductsMode && /库存|现货|在途|去化速度|日销|去化周期|可卖|周转|周期/.test(userIntentText) && wantsCycleFields;
   const latestAsksStockSort = /按.*库存|库存数量|库存数|库存.*降序|现货.*排序/.test(latestUserText);
   const latestAsksSpeedSort = /按.*去化速度|按.*日销|去化速度.*排序|日销.*排序/.test(latestUserText);
@@ -605,6 +677,7 @@ function buildInventoryChartSpec(text, data) {
   const unit = metric === 'days_of_supply_on_hand' ? ' 天' : (metric === 'weighted_daily_gross_sales' ? ' 件/天' : ' 件');
 
   const metricValue = row => {
+    if (operationalStockPolicy && metric === 'estimated_on_hand_quantity') return operationalWarehouseOnHand(row);
     if (metric === 'estimated_on_hand_quantity') return n(row.estimated_on_hand_quantity ?? row.et_estimated_available_qty ?? row.available_quantity);
     return n(row[metric]);
   };
@@ -618,6 +691,13 @@ function buildInventoryChartSpec(text, data) {
         standard_goods_sn: row.standard_goods_sn || row.standard_goods_sn_list || row.goods_sn || '',
         goods_title: row.goods_title,
         stock_status: row.stock_status,
+        et_loose_sellable_qty: row.et_loose_sellable_qty,
+        et_full_carton_qty: row.et_full_carton_qty,
+        et_rtv_qty: row.et_rtv_qty,
+        et_damaged_qty: row.et_damaged_qty,
+        et_scrap_qty: row.et_scrap_qty,
+        et_loose_warehouses: row.et_loose_warehouses,
+        et_box_warehouses: row.et_box_warehouses,
         et_estimated_available_qty: row.et_estimated_available_qty,
         estimated_on_hand_quantity: row.estimated_on_hand_quantity,
         incoming_quantity: row.incoming_quantity,
@@ -629,6 +709,16 @@ function buildInventoryChartSpec(text, data) {
     : (inventory.products || []);
   const rows = sourceRows
     .sort((a, b) => {
+      if (operationalStockPolicy && wantsMultiInventoryView) {
+        const onHandA = operationalWarehouseOnHand(a);
+        const onHandB = operationalWarehouseOnHand(b);
+        const speedA = n(a.weighted_daily_gross_sales);
+        const speedB = n(b.weighted_daily_gross_sales);
+        return compareSortTuple(
+          operationalInventorySortTuple(a, onHandA, speedA, daysForStock(onHandA, speedA)),
+          operationalInventorySortTuple(b, onHandB, speedB, daysForStock(onHandB, speedB)),
+        );
+      }
       if (wantsMultiInventoryView && (latestAsksCycleSort || wantsCycleFields)) {
         const dayA = n(a.days_of_supply_on_hand) > 0 && n(a.weighted_daily_gross_sales) > 0 ? n(a.days_of_supply_on_hand) : 999999;
         const dayB = n(b.days_of_supply_on_hand) > 0 && n(b.weighted_daily_gross_sales) > 0 ? n(b.days_of_supply_on_hand) : 999999;
@@ -644,10 +734,16 @@ function buildInventoryChartSpec(text, data) {
     .slice(0, allProductsMode ? 120 : 12)
     .map(r => {
       const speed = n(r.weighted_daily_gross_sales);
-      const daysOnHand = n(r.days_of_supply_on_hand);
-      const daysWithIncoming = n(r.days_of_supply_with_incoming);
-      const onHand = n(r.estimated_on_hand_quantity ?? r.et_estimated_available_qty ?? r.available_quantity);
+      const onHand = operationalStockPolicy
+        ? operationalWarehouseOnHand(r)
+        : n(r.estimated_on_hand_quantity ?? r.et_estimated_available_qty ?? r.available_quantity);
+      const daysOnHandRaw = operationalStockPolicy ? daysForStock(onHand, speed) : n(r.days_of_supply_on_hand);
+      const daysWithIncomingRaw = operationalStockPolicy ? daysForStock(onHand + n(r.incoming_quantity), speed) : n(r.days_of_supply_with_incoming);
+      const daysOnHand = Number.isFinite(daysOnHandRaw) ? daysOnHandRaw : 0;
+      const daysWithIncoming = Number.isFinite(daysWithIncomingRaw) ? daysWithIncomingRaw : 0;
       const status = String(r.stock_status || '-');
+      const activeSoldOut = operationalStockPolicy && onHand <= 0 && n(r.incoming_quantity) > 0;
+      const inactiveSoldOut = operationalStockPolicy && onHand <= 0 && n(r.incoming_quantity) <= 0;
       const riskColor = speed > 0 && onHand <= 0
         ? '#DC2626'
         : (speed > 0 && daysOnHand > 0 && daysOnHand <= 14
@@ -656,11 +752,15 @@ function buildInventoryChartSpec(text, data) {
             ? '#F97316'
             : (/慢|滞|压/.test(status) || daysOnHand >= 180 ? '#6B7280' : '#2563EB')));
       if (wantsMultiInventoryView) {
+        const policyPrefix = operationalStockPolicy ? '09现货' : '现货';
+        const policyNote = operationalStockPolicy
+          ? `${activeSoldOut ? '已售罄有在途｜' : ''}${inactiveSoldOut ? '已售罄无在途｜' : ''}09=${intNum(r.et_loose_sellable_qty)}${isIceMaker03038(r) ? `｜01例外=${intNum(r.et_full_carton_qty)}` : ''}｜排除03/04/06`
+          : '';
         return {
           label: compactProductInventoryLabel(r, allProductsMode ? 52 : 38),
           value: onHand,
-          valueLabel: `现货${intNum(onHand)}｜日销${Number(speed.toFixed(1))}｜${formatDays(daysOnHand, speed > 0)}`,
-          note: `在途 ${intNum(r.incoming_quantity)}｜含在途 ${formatDays(daysWithIncoming, speed > 0)}｜${status}`,
+          valueLabel: `${policyPrefix}${intNum(onHand)}｜日销${Number(speed.toFixed(1))}｜${formatDays(daysOnHand, speed > 0)}`,
+          note: `${policyNote ? `${policyNote}｜` : ''}在途 ${intNum(r.incoming_quantity)}｜含在途 ${formatDays(daysWithIncoming, speed > 0)}｜${status}`,
           color: riskColor,
         };
       }
@@ -673,18 +773,20 @@ function buildInventoryChartSpec(text, data) {
       };
     });
   if (!rows.length) return null;
-  const cycleTitle = '全货号库存去化周期图｜按现货去化周期排序';
+  const cycleTitle = operationalStockPolicy ? '全货号09仓现货去化周期图｜按实际现货周期排序' : '全货号库存去化周期图｜按现货去化周期排序';
   return {
     kind: 'inventory',
     title: product ? `${product} 库存/去化图` : (wantsMultiInventoryView ? cycleTitle : (allProductsMode ? '全货号库存/去化信息图' : 'ET/库存去化重点图')),
     subtitle: wantsMultiInventoryView
-      ? '每个货号一行：货号+中文品名｜现货库存｜在途｜日销｜现货/含在途去化周期；红=断货风险，橙=30天内补货，灰=慢动销'
+      ? (operationalStockPolicy
+        ? '每个货号一行：货号+中文品名｜09仓可售现货｜在途｜日销｜实际现货/含在途去化周期；已售罄有在途靠前，已售罄无在途放最后'
+        : '每个货号一行：货号+中文品名｜现货库存｜在途｜日销｜现货/含在途去化周期；红=断货风险，橙=30天内补货，灰=慢动销')
       : (allProductsMode
         ? `逐货号展示，按${metricLabel.replace(/（.*?）/g, '')}${metric === 'days_of_supply_on_hand' ? '升序' : '降序'}排列；基于 ET/成本表实物库存与销售去化`
         : '基于 ET/成本表实物库存与销售去化，不等同于 SHEIN 平台展示库存'),
-    metricLabel: wantsMultiInventoryView ? '现货库存（件）；右侧标日销/去化周期' : metricLabel,
+    metricLabel: wantsMultiInventoryView ? (operationalStockPolicy ? '09仓可售现货（件）；右侧标日销/实际去化周期' : '现货库存（件）；右侧标日销/去化周期') : metricLabel,
     unit,
-    footnote: `ET更新时间：${inventory.freshness?.etUpdatedAt || '-'}；BI生成：${data.generatedAt || '-'}`,
+    footnote: `${operationalStockPolicy ? '现货口径：默认只计 ETRUH09散件仓；SK-03038 制冰机例外计 ETRUH01整箱仓；ETRUH03_RTV/04Damaged/06报废不计可售现货。' : ''}ET更新时间：${inventory.freshness?.etUpdatedAt || '-'}；BI生成：${data.generatedAt || '-'}`,
     rows,
     maxRows: allProductsMode ? Math.min(120, rows.length) : undefined,
     rowHeight: wantsMultiInventoryView ? 64 : (allProductsMode ? 56 : undefined),
@@ -911,6 +1013,8 @@ function chartIntentPrompt(text, intent) {
   if (intent.scope?.level === 'store') parts.push('店铺 各店 店铺排行');
   if (intent.layout?.includeProductName) parts.push('中文品名 商品中文名');
   if (intent.sort?.metric) parts.push(`按${intent.sort.metric}排序 ${intent.sort.direction === 'asc' ? '升序 从短到长 断货风险' : '降序'}`);
+  if (intent.reason) parts.push(`模型理解说明：${intent.reason}`);
+  if (wantsOperationalWarehouseStockPolicy(intent.reason || '')) parts.push('09仓现货口径 只有ETRUH09散件仓算可售现货 SK-03038制冰机例外计ETRUH01整箱仓 03/04/06/RTV/破损/报废不计可售现货');
   return parts.filter(Boolean).join('\n');
 }
 
