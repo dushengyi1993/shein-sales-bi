@@ -30,7 +30,7 @@ function sleep(ms) {
 }
 
 function parseArgs(argv) {
-  const args = {visible: true, date: null, timeoutMs: 120000};
+  const args = {visible: true, date: null, timeoutMs: 120000, checkOnly: false};
   const stores = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -38,6 +38,7 @@ function parseArgs(argv) {
     else if (a === '--timeout-ms') args.timeoutMs = Number(argv[++i]);
     else if (a === '--headless') args.visible = false;
     else if (a === '--visible') args.visible = true;
+    else if (a === '--check-only') args.checkOnly = true;
     else if (!a.startsWith('--')) stores.push(...a.split(',').map(s => s.trim().toUpperCase()).filter(Boolean));
   }
   args.stores = stores;
@@ -263,6 +264,7 @@ async function restoreOne(store, opts) {
       steps.push({step: 'initial-sbn-probe', sbn});
       if (sbn.ok) return {storeKey: store.storeKey, ok: true, alreadyOk: true, steps};
     }
+    if (opts.checkOnly) return {storeKey: store.storeKey, ok: false, reason: 'current_profile_not_logged_in', checkOnly: true, steps};
 
     for (const url of LOGIN_URLS) {
       if (Date.now() - started > opts.timeoutMs) break;

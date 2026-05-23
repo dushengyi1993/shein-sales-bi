@@ -334,6 +334,7 @@ async function probeStore(store, args) {
       reportFile: parsed.reportFile || '',
       date: parsed.date || '',
     } : null,
+    exportSession: parsed?.exportSession || null,
     warnings,
   };
 }

@@ -3,8 +3,11 @@
  * Restore one SHEIN store session without relying on cloud-side saved passwords.
  *
  * Order of operations:
- * 1. Bootstrap Chrome from the exported browser/WebAPI session files.
- * 2. Run the normal auto relogin probe, which verifies both GSP order WebAPI and
+ * 1. First probe the current persistent Chrome profile. If it is still logged in,
+ *    export it immediately and do not overwrite it with an older session file.
+ * 2. Only when the current profile is not logged in, bootstrap Chrome from the
+ *    exported browser/WebAPI session files.
+ * 3. Run the normal auto relogin probe, which verifies both GSP order WebAPI and
  *    SBN product-analysis login state. If bootstrap was enough, this exits via
  *    the fast "alreadyOk" path; otherwise it can still use Chrome autofill as a
  *    fallback where available.
@@ -97,33 +100,95 @@ const common = [
   String(args.timeoutMs),
 ];
 
-const bootstrap = await runNode('bootstrap_shein_browser_session.mjs', common, args.timeoutMs + 30_000);
-const bootstrapJson = parseLastJson(bootstrap.stdout);
-console.log(`[restore_shein_store_session] ${args.store} bootstrap ${bootstrap.ok ? 'ok' : 'failed'}${bootstrap.timedOut ? ' timed_out' : ''}`);
+async function runAutoRelogin({checkOnly = false, timeoutMs = args.timeoutMs} = {}) {
+  const runArgs = [
+    args.store,
+    ...(args.date ? ['--date', args.date] : []),
+    args.headless ? '--headless' : '--visible',
+    '--timeout-ms',
+    String(timeoutMs),
+    ...(checkOnly ? ['--check-only'] : []),
+  ];
+  const result = await runNode('auto_relogin_shein_store.mjs', runArgs, timeoutMs + 30_000);
+  return {result, parsed: parseLastJson(result.stdout)};
+}
 
-const relogin = await runNode('auto_relogin_shein_store.mjs', [
-  args.store,
-  ...(args.date ? ['--date', args.date] : []),
-  args.headless ? '--headless' : '--visible',
-  '--timeout-ms',
-  String(args.timeoutMs),
-], args.timeoutMs + 30_000);
-const reloginJson = parseLastJson(relogin.stdout);
-console.log(`[restore_shein_store_session] ${args.store} relogin_probe ${relogin.ok ? 'ok' : 'failed'}${relogin.timedOut ? ' timed_out' : ''}`);
+async function exportCurrentSession() {
+  const exported = await runNode('export_shein_browser_session.mjs', [
+    '--store',
+    args.store,
+    '--no-launch',
+    args.headless ? '--headless' : '--visible',
+    '--wait-ms',
+    '1000',
+  ], 45_000);
+  const exportJson = parseLastJson(exported.stdout);
+  return {
+    ok: Boolean(exported.ok && exportJson?.ok),
+    code: exported.code,
+    timedOut: exported.timedOut,
+    parsedOk: Boolean(exportJson?.ok),
+    stores: Array.isArray(exportJson?.stores) ? exportJson.stores.map(r => ({
+      storeKey: r.storeKey,
+      ok: r.ok,
+      cookieCount: r.cookieCount || 0,
+      localStorageCount: r.localStorageCount || 0,
+      sessionStorageCount: r.sessionStorageCount || 0,
+      file: r.file || '',
+    })) : [],
+    stderrPreview: preview(exported.stderr),
+  };
+}
 
-const ok = Boolean(relogin.ok && reloginJson?.ok);
+const current = await runAutoRelogin({checkOnly: true, timeoutMs: Math.min(args.timeoutMs, 75_000)});
+console.log(`[restore_shein_store_session] ${args.store} current_profile_probe ${current.result.ok ? 'ok' : 'failed'}${current.result.timedOut ? ' timed_out' : ''}`);
+
+let bootstrap = null;
+let bootstrapJson = null;
+let relogin = current.result;
+let reloginJson = current.parsed;
+let restoreMode = 'current_profile';
+let exportSession = null;
+if (!(current.result.ok && current.parsed?.ok)) {
+  bootstrap = await runNode('bootstrap_shein_browser_session.mjs', common, args.timeoutMs + 30_000);
+  bootstrapJson = parseLastJson(bootstrap.stdout);
+  console.log(`[restore_shein_store_session] ${args.store} bootstrap ${bootstrap.ok ? 'ok' : 'failed'}${bootstrap.timedOut ? ' timed_out' : ''}`);
+
+  const fullRelogin = await runAutoRelogin({checkOnly: false, timeoutMs: args.timeoutMs});
+  relogin = fullRelogin.result;
+  reloginJson = fullRelogin.parsed;
+  restoreMode = 'bootstrap_then_relogin';
+  console.log(`[restore_shein_store_session] ${args.store} relogin_probe ${relogin.ok ? 'ok' : 'failed'}${relogin.timedOut ? ' timed_out' : ''}`);
+}
+
+const reloginOk = Boolean(relogin.ok && reloginJson?.ok);
+if (reloginOk) {
+  exportSession = await exportCurrentSession();
+  console.log(`[restore_shein_store_session] ${args.store} export_session ${exportSession.ok ? 'ok' : 'failed'}${exportSession.timedOut ? ' timed_out' : ''}`);
+}
+
+const ok = Boolean(reloginOk && (!exportSession || exportSession.ok));
 const summary = {
   ok,
   date: args.date || reloginJson?.date || bootstrapJson?.date || null,
   stores: [args.store],
   failedStores: ok ? [] : [args.store],
-  bootstrap: {
+  restoreMode,
+  currentProfile: {
+    ok: current.result.ok,
+    timedOut: current.result.timedOut,
+    code: current.result.code,
+    parsedOk: Boolean(current.parsed?.ok),
+    reportFile: current.parsed?.reportFile || '',
+    stderrPreview: preview(current.result.stderr),
+  },
+  bootstrap: bootstrap ? {
     ok: bootstrap.ok,
     timedOut: bootstrap.timedOut,
     code: bootstrap.code,
     parsedOk: Boolean(bootstrapJson?.ok),
     stderrPreview: preview(bootstrap.stderr),
-  },
+  } : null,
   relogin: {
     ok: relogin.ok,
     timedOut: relogin.timedOut,
@@ -132,6 +197,7 @@ const summary = {
     reportFile: reloginJson?.reportFile || '',
     stderrPreview: preview(relogin.stderr),
   },
+  exportSession,
   reportFile: reloginJson?.reportFile || '',
 };
 
