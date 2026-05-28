@@ -41,7 +41,7 @@
 | `shein-bi-cloud-daily-lark-report.timer` | 北京时间 `08:35`，`10:35/12:35` 补偿重试 | 抓取当天销售后发送飞书日报和日报图；成功后写入当天 sent flag 防重复 |
 | `shein-bi-cloud-rtv-verify.timer` | 北京时间 `03:20` | 完整 RTV 换单复核 WebAPI 版，写入 `ops.rtv_tracking_verification`，不阻塞滚动销售刷新 |
 | `shein-bi-cloud-link-business.timer` | 北京时间 `05:30` | 顺序启动云端 headless Chrome 抓取前一完整日链接/业务域，入仓、体检并刷新 BI |
-| `shein-bi-cloud-session-manager.timer` | 北京时间 `03:20` | 云端登录态管家：顺序巡检/恢复 16 店 WebAPI + SBN 登录态，检查 profile 体积，生成报告 |
+| `shein-bi-cloud-session-manager.timer` | 北京时间 `03:20` | 云端登录态管家：顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，检查 profile 体积，生成报告 |
 | `shein-bi-cloud-openapi-hl.timer` | 北京时间 `06:20` | HL OpenAPI 并行抓取、入仓和对账；服务器 IP 白名单已配置 |
 | `shein-bi-cloud-watchdog.timer` | 每小时 | 检查云端服务、timer 和 BI 数据新鲜度，异常时发飞书提醒 |
 | `shein-bi-lark-sales-qa.service` | 常驻服务 | 飞书只读问数机器人（云端 Codex CLI 网关），读取 BI Portal JSON 后回复消息，不写数据 |
@@ -78,7 +78,7 @@ ET、飞书日报、完整 RTV WebAPI 复核、链接/业务域日更、异常�
 - 已验证可直接复用现有 WebAPI session 的域：`gsp` 售后列表/统计、发货面单计数等。
 - 暂不能直接复用现有销售 session 的域：`mgs` 履约/评价、`pqmp` 质量、`spmp` 商品列表、`idms` 备货、`sbn` 经营/营销、`gsfs` 财务；这些在云端探针中返回 `20302 子系统登录重定向`。
 - 后续改造顺序：先解决子系统登录态/初始化，再解决 SBN 商品分析的 `x-gw-auth` 等动态头，最后处理财务二次密码或敏感权限边界。
-- 当前生产使用云端 headless 顺序兜底，`cloud_link_business_sync.sh` 默认一次只跑 1 店，单店完成后关闭浏览器；不能改成 16 店同时开浏览器。若后续提并发，建议最多 `2` 并先看内存。
+- 当前生产使用云端 headless 顺序兜底，`cloud_link_business_sync.sh` 默认一次只跑 1 店，单店完成后关闭浏览器；不能改成全店同时开浏览器。若后续提并发，建议最多 `2` 并先看内存。
 
 ### 云端临时人工登录入口
 
@@ -131,7 +131,7 @@ GitHub 应保存：
 - `shein-bi-cloud-watchdog.timer` 应保持 active；销售/页面过期按 4.5 小时提醒，链接/业务域过期按 48 小时提醒。
 - `shein-bi-cloud-link-business.timer` 应保持 active；手动复跑用 `scripts/cloud_link_business_sync.sh yesterday`。若单店卡在 SBN `x-gw-auth`，优先看该店 attempt 重试日志，不要回退到本机补抓冒充云端日更。
 - `shein-bi-cloud-session-manager.timer` 应保持 active；手动复跑用 `scripts/cloud_shein_session_manager.sh`。报告文件在 `outputs/reports/cloud-session-manager-latest.json` / `.md`，若失败会被 watchdog 按 service failed 逻辑提醒。
-- `shein-bi-cloud-link-business.service` 必须以 `User=sheinops` / `Group=sheinops` 运行，因为它会启动 16 店 SHEIN Chrome profile；不要改回 root，否则会生成 root-owned profile 文件并让 `shein-bi-cloud-session-manager.service` 第二天因 `EACCES` 失败。ET forwarder 仍保留 root 执行，因为入仓依赖 Docker/root 环境，且它不写 16 店 SHEIN profile。
+- `shein-bi-cloud-link-business.service` 必须以 `User=sheinops` / `Group=sheinops` 运行，因为它会启动当前 19 店 SHEIN Chrome profile；不要改回 root，否则会生成 root-owned profile 文件并让 `shein-bi-cloud-session-manager.service` 第二天因 `EACCES` 失败。ET forwarder 仍保留 root 执行，因为入仓依赖 Docker/root 环境，且它不写 SHEIN 店铺 profile。
 - 登录态恢复统一走 `restore_shein_store_session.mjs`：先用服务器私有 `state/shein_browser_sessions/*.local.json` / `state/shein_webapi_sessions/*.local.json` bootstrap，再运行 `auto_relogin_shein_store.mjs` 验证 GSP order WebAPI 和 SBN 商品分析页；验证成功后必须立即调用 `export_shein_browser_session.mjs --no-launch` 刷新该店 browser session 导出，避免第二天继续回灌过期 SBN 状态。云端没有保存密码的店铺不能只靠 Chrome autofill 自愈，若 SBN 已过期且无保存密码，需要走 `/cloud-login-maintenance` 人工登录一次。
 - 云端人工登录入口验证：`/cloud-login-maintenance` 返回 `200`；`/cloud-login/novnc/vnc.html` 返回 `200`；创建会话后 `/cloud-login/session/:id` 返回 `200` 且 WebSocket 升级返回 `101 Switching Protocols`；点“我已完成并关闭”后 export/probe 成功且不残留 Chrome/Xvfb/x11vnc/websockify 进程。
 - `shein-bi-lark-sales-qa.service` 应保持 active；可用 `node scripts/lark_sales_qa_bot.mjs --answer "今天销售多少"` 本地只读测试答案。群聊中若无回复，优先检查机器人是否已入群、应用可见范围和 `im.message.receive_v1`/发消息权限。

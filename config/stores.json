@@ -22,7 +22,10 @@
       "XL",
       "QY",
       "QH",
-      "TZ"
+      "TZ",
+      "JSH",
+      "TZZ",
+      "XC"
     ],
     "ALL": [
       "DL",
@@ -40,7 +43,10 @@
       "XL",
       "QY",
       "QH",
-      "TZ"
+      "TZ",
+      "JSH",
+      "TZZ",
+      "XC"
     ]
   },
   "stores": [
@@ -218,6 +224,42 @@
       "profileKey": "tz",
       "port": 9348,
       "profileName": "TZ - GS5636781",
+      "accountUtcOffsetHours": 8,
+      "salesTransport": "auto"
+    },
+    {
+      "storeKey": "JSH",
+      "groupKey": "LGM",
+      "shopName": "JSH",
+      "enabled": true,
+      "productStatsEnabled": true,
+      "profileKey": "jsh",
+      "port": 9349,
+      "profileName": "JSH - 待确认",
+      "accountUtcOffsetHours": 8,
+      "salesTransport": "auto"
+    },
+    {
+      "storeKey": "TZZ",
+      "groupKey": "LGM",
+      "shopName": "TZZ",
+      "enabled": true,
+      "productStatsEnabled": true,
+      "profileKey": "tzz",
+      "port": 9350,
+      "profileName": "TZZ - 待确认",
+      "accountUtcOffsetHours": 8,
+      "salesTransport": "auto"
+    },
+    {
+      "storeKey": "XC",
+      "groupKey": "LGM",
+      "shopName": "XC",
+      "enabled": true,
+      "productStatsEnabled": true,
+      "profileKey": "xc",
+      "port": 9351,
+      "profileName": "XC - 待确认",
       "accountUtcOffsetHours": 8,
       "salesTransport": "auto"
     }

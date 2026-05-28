@@ -24,6 +24,7 @@ const LOGIN_URLS = [
   HOME_URL,
   ORDER_URL,
 ];
+const MAX_STORES_PER_RUN = Math.max(1, Number(process.env.SHEIN_AUTO_RELOGIN_MAX_STORES || 3));
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -43,6 +44,13 @@ function parseArgs(argv) {
   }
   args.stores = stores;
   if (!args.stores.length) throw new Error('Missing store key(s), e.g. DL or DL,DX');
+  if (args.stores.length > MAX_STORES_PER_RUN) {
+    throw new Error(
+      `Refusing to auto-relogin ${args.stores.length} stores in one run; ` +
+      `limit is ${MAX_STORES_PER_RUN}. Run smaller batches or raise ` +
+      `SHEIN_AUTO_RELOGIN_MAX_STORES only after checking server capacity.`,
+    );
+  }
   return args;
 }
 

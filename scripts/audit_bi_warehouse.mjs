@@ -114,7 +114,7 @@ function evaluate(summary, metabase) {
   if (!latest.sales_date) errors.push('没有在 fact.store_daily_sales 中找到销售数据。');
   if (!latest.link_date) warnings.push('没有在 fact.link_master_snapshot 中找到链接数据。');
   if (!latest.business_date) warnings.push('没有在 fact.home_finance_snapshot 中找到业务域快照。');
-  if (!latest.finance_detail_date) warnings.push('没有在 fact.finance_no_finish_order 中找到 gsfs 财务明细数据。');
+  if (!latest.finance_detail_date) warnings.push('没有在 fact.finance_module_stat_snapshot 中找到 gsfs 财务模块快照。');
   const linkLagDaysFromSales = latest.link_date && latest.sales_date
     ? Math.floor((Date.parse(`${latest.sales_date}T00:00:00Z`) - Date.parse(`${latest.link_date}T00:00:00Z`)) / 86400000)
     : 0;
@@ -150,7 +150,6 @@ function evaluate(summary, metabase) {
   if ((counts.visible_inventory_total || 0) <= 0) warnings.push('正确展示库存合计为 0，库存入仓可能异常。');
   if ((counts.guided_actions || 0) > 500) warnings.push(`指导动作池过大：${counts.guided_actions} 条。`);
   if ((counts.guided_actions || 0) < 20) warnings.push(`指导动作池可能过小：${counts.guided_actions} 条。`);
-  if (latest.finance_detail_date && (counts.finance_no_finish_orders || 0) <= 0) warnings.push('已存在 gsfs 财务明细日期，但没有加载到在途收入订单。');
 
   return {ok: errors.length === 0, errors, warnings};
 }
@@ -166,7 +165,7 @@ latest AS (
     (SELECT max(snapshot_date) FROM fact.home_finance_snapshot) AS business_date,
     (SELECT max(snapshot_date) FROM fact.visible_inventory_snapshot) AS inventory_date,
     (SELECT max(snapshot_date) FROM fact.quality_skc_snapshot) AS quality_date,
-    (SELECT max(snapshot_date) FROM fact.finance_no_finish_order) AS finance_detail_date
+    (SELECT max(snapshot_date) FROM fact.finance_module_stat_snapshot) AS finance_detail_date
 ),
 summary AS (
   SELECT jsonb_build_object(
@@ -184,12 +183,12 @@ summary AS (
       'business_store_count', (SELECT count(DISTINCT store_key) FROM fact.home_finance_snapshot WHERE snapshot_date = (SELECT business_date FROM latest)),
       'inventory_store_count', (SELECT count(DISTINCT store_key) FROM fact.visible_inventory_snapshot WHERE snapshot_date = (SELECT inventory_date FROM latest)),
       'quality_store_count', (SELECT count(DISTINCT store_key) FROM fact.quality_skc_snapshot WHERE snapshot_date = (SELECT quality_date FROM latest)),
-      'finance_detail_store_count', (SELECT count(DISTINCT store_key) FROM fact.finance_no_finish_order WHERE snapshot_date = (SELECT finance_detail_date FROM latest)),
+      'finance_detail_store_count', (SELECT count(DISTINCT store_key) FROM fact.finance_module_stat_snapshot WHERE snapshot_date = (SELECT finance_detail_date FROM latest)),
       'sales_missing_stores', (SELECT to_jsonb(array_agg(store_key ORDER BY store_key)) FROM dim.store s WHERE NOT EXISTS (SELECT 1 FROM fact.store_daily_sales f WHERE f.date = (SELECT sales_date FROM latest) AND f.store_key = s.store_key)),
       'business_missing_stores', (SELECT to_jsonb(array_agg(store_key ORDER BY store_key)) FROM dim.store s WHERE NOT EXISTS (SELECT 1 FROM fact.home_finance_snapshot f WHERE f.snapshot_date = (SELECT business_date FROM latest) AND f.store_key = s.store_key)),
       'inventory_missing_stores', (SELECT to_jsonb(array_agg(store_key ORDER BY store_key)) FROM dim.store s WHERE NOT EXISTS (SELECT 1 FROM fact.visible_inventory_snapshot f WHERE f.snapshot_date = (SELECT inventory_date FROM latest) AND f.store_key = s.store_key)),
       'quality_missing_stores', (SELECT to_jsonb(array_agg(store_key ORDER BY store_key)) FROM dim.store s WHERE NOT EXISTS (SELECT 1 FROM fact.quality_skc_snapshot f WHERE f.snapshot_date = (SELECT quality_date FROM latest) AND f.store_key = s.store_key)),
-      'finance_detail_missing_stores', (SELECT to_jsonb(array_agg(store_key ORDER BY store_key)) FROM dim.store s WHERE NOT EXISTS (SELECT 1 FROM fact.finance_no_finish_order f WHERE f.snapshot_date = (SELECT finance_detail_date FROM latest) AND f.store_key = s.store_key))
+      'finance_detail_missing_stores', (SELECT to_jsonb(array_agg(store_key ORDER BY store_key)) FROM dim.store s WHERE NOT EXISTS (SELECT 1 FROM fact.finance_module_stat_snapshot f WHERE f.snapshot_date = (SELECT finance_detail_date FROM latest) AND f.store_key = s.store_key))
     ),
     'latestCounts', jsonb_build_object(
       'sales_rows', (SELECT count(*) FROM fact.store_daily_sales WHERE date = (SELECT sales_date FROM latest)),

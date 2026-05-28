@@ -2,7 +2,7 @@
 
 > 当前项目正在从“登录浏览器抓取 SHEIN 后台数据”逐步切换到 SHEIN 官方开放平台 API。本文记录当前已确认的官方规则、应用创建口径、本地配置边界和分阶段接入计划。
 
-> 2026-05-11 补充：当前项目同时存在两条“API 化”链路。`SHEIN 官方 OpenAPI` 需要开放平台应用、授权和签名，HL 仍是并行试点；`SHEIN 后台 WebAPI 直连` 复用已登录 Cookie/session 调后台接口，已用于 16 店销售生产抓取的无浏览器直连优先。两者不要混为一谈，密钥和 Cookie session 都不得进入 GitHub。
+> 2026-05-11 补充：当前项目同时存在两条“API 化”链路。`SHEIN 官方 OpenAPI` 需要开放平台应用、授权和签名，HL 仍是并行试点；`SHEIN 后台 WebAPI 直连` 复用已登录 Cookie/session 调后台接口，已用于当前 19 店销售生产抓取的无浏览器直连优先。两者不要混为一谈，密钥和 Cookie session 都不得进入 GitHub。
 
 ## 当前已确认信息
 
@@ -90,7 +90,7 @@ Signature = RandomKey + Base64String
 - 用户已提交 `销量查询` 与 `SFS备货履约` 权限包申请，等待 SHEIN 审核结果。
 - HL 店铺授权已完成，`tempToken` 已通过 `/open-api/auth/get-by-token` 换取店铺级密钥。
 - 真实应用级密钥与店铺级密钥只保存在 `config/shein_openapi.local.json`，该文件被 `.gitignore` 排除，不进入 GitHub。
-- 当前本机出口 IP 已加入开放平台 IP 白名单；`2026-05-07` 已补加 `188.253.112.44`。后续若本机出口 IP 变化或迁移云端，还要把新的固定出口 IP 加入白名单。
+- 当前生产云服务器出口 IP `43.165.167.135` 已加入开放平台 IP 白名单；本机排障时还需确认当前出口 IP 是否在对应开发者账号白名单中。历史本机出口 `188.253.112.44` / `82.27.116.13` 只作追溯参考。
 - 本地 OpenAPI 客户端已成功调用半托管生产环境 `https://openapi.sheincorp.com`。
 - 已跑通的 HL 只读接口：
   - 店铺信息：`/open-api/openapi-business-backend/query-store-info`
@@ -153,7 +153,7 @@ node scripts/load_bi_warehouse.mjs --sales-dir outputs/shein_openapi_fetch --sal
 - 当前已完成：HL OpenAPI 销售数据写入 API 并行层，并在 BI 系统状态页展示 OpenAPI / 当前生产销售源对账。下一步继续累计多日 `matched`，并在已申请权限审核通过后扩展库存、退货、财务、SFS 等更多业务域。
 - 2026-05-18 起，链接管理中台已把 HL 识别为“OpenAPI 已授权店铺”，不会再把 HL 补链/复制上品请求笼统回复为“无权限”。2026-05-20 后，HL `copy_product_draft` 任务可从 BI 当前会话直接进入 `/api/link-ops-execute`，由 `scripts/link_ops_hl_openapi_executor.mjs` 做 OpenAPI 权限、站点、品牌、仓库和 payload 预检；真实 `publishOrEdit` 仍必须 payload 完整且用户二次确认。
 
-### P3：16 店分批替换
+### P3：当前启用店铺分批替换
 
 - 每批授权若干店铺。
 - 同一数据域先双跑：官方 OpenAPI 与当前生产销售源（WebAPI 直连优先，必要时浏览器回退）并行一段时间。
@@ -257,6 +257,20 @@ node scripts/link_ops_build_product_draft_from_webapi.mjs --source-store DL --so
 - DL `S1810电热水壶 / sv260315124105439111444` 用当前 WebAPI 快照可生成 `candidate_needs_review`，母库不含图片 URL，但仍缺 `productTypeId`、完整商品属性、尺寸重量。
 - HL OpenAPI 已验证可从 `/open-api/openapi-business-backend/product/query` 取 `spuName`，再调用 `/open-api/goods/spu-info` 获取较完整商品详情；样本 `FZ-666颈部按摩器` 可生成 `candidate_ready`，包含 `productTypeId`、商品属性、销售属性、尺寸重量、SAR 成本等字段。OpenAPI 返回的 `skuCode` 是平台编号，只做追溯；`supplierSku` 为空时不拿平台 `skuCode` 冒充。
 - 价格/核价不作为商品资料冲突。复制发品前按报价策略处理：默认可按 `50%` 利润率或同款其它店最高核价报价，并允许人工覆盖。
+
+
+## 2026-05-28 进展：ZL 开放平台应用已提交审核
+
+已在 ZL 店铺对应开放平台账号中创建并提交应用：
+
+- 开发者主体：`广州番禺紫翎贸易商行（个体工商户）`。
+- 应用名：`ZL-紫翎SHEIN运营中台`。
+- 合作模式：半托管。
+- 业务功能：商品管理、商品合规、订单管理、库存管理、财务管理。
+- 当前状态：审核中。
+- IP 白名单已添加云服务器 `43.165.167.135` 和当时本机出口 `38.181.81.164`。
+
+该应用仍未写入任何真实密钥到仓库。审核通过并完成店铺授权后，按 HL 的接入方式把 ZL 加入 `.local` 配置，先走官方 OpenAPI / 当前生产销售源双跑对账，再决定是否替换生产数据入口。
 
 ## 2026-05-10 进展：CX 开放平台应用已提交审核
 

@@ -32,10 +32,10 @@
 
 - 当前 BI 截面日期以门户系统状态页和 `outputs/bi-portal/data.json` 为准，不在本文写死；运维文档只记录口径和入口。
 - 当前 BI 门户侧栏更新时间口径：销售取销售源数据抓取时间；售后/库存/财务取业务域源文件最大 `fetchTime`；链接表现取链接源文件最大 `fetchTime`；ET 货代仓取 ET 源文件/入仓批次时间。BI 入仓或页面重跑时间只作内部排障，不作为侧栏主要更新时间。
-- 销售抓取入口：16 店 `salesTransport=auto`，先 WebAPI 直连，失败才回退浏览器；本地 session 在 `state/shein_webapi_sessions/*.local.json`，不进 GitHub。
+- 销售抓取入口：当前 19 店 `salesTransport=auto`，先 WebAPI 直连，失败才回退浏览器；本地 session 在 `state/shein_webapi_sessions/*.local.json`，不进 GitHub。
 - 销售有效性口径：所有抓取、日报、产品统计、BI 入仓和飞书表格脚本必须共用 `lib/shein_sales_validity.mjs`。源头总销售只剔除真正取消、揽收前取消等未形成销售的商品行，例如 `pageStatus=CANCEL`、`goodsPerformanceStatus=6` 或订单/履约状态文本含取消；`用户已退款`、退货、派件失败等仍保留在总销售里，再由净销售额、售后/利润层反转。历史 summary 重算入口为 `scripts/repair_shein_sales_summaries.mjs`。
-- 店铺范围：`CX DL DX FY HL JY LQ MZ NM QH QY TS TZ XL YJ ZL`
-- 分组：DSY = `DL DX FY LQ NM HL JY ZL TS MZ`；LGM = `CX YJ XL QY QH TZ`。
+- 店铺范围：`CX DL DX FY HL JSH JY LQ MZ NM QH QY TS TZ TZZ XC XL YJ ZL`
+- 分组：DSY = `DL DX FY LQ NM HL JY ZL TS MZ`；LGM = `CX YJ XL QY QH TZ JSH TZZ XC`。
 - 汇率：`1 SAR = 1.8 RMB`。
 - 首页利润已改为真实利润口径；若成本表未覆盖，页面显示“待成本表 / 成本覆盖率”，不再用 `25%` 粗估冒充真实利润。
 
@@ -49,7 +49,7 @@
 | `00:10` | `shein-bi-cloud-yesterday.timer` | 刷新前一天最终销售，并复核前两天稳定日。 |
 | `02:30` | `shein-bi-db-backup.timer` | 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto`，默认保留 14 天。 |
 | `03:20` | `shein-bi-cloud-rtv-verify.timer` | 完整 RTV 换单复核 WebAPI 版，不阻塞滚动销售刷新。 |
-| `03:20` | `shein-bi-cloud-session-manager.timer` | 顺序巡检/恢复 16 店 WebAPI + SBN 登录态，并检查 profile 体积。 |
+| `03:20` | `shein-bi-cloud-session-manager.timer` | 顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并检查 profile 体积。 |
 | `04:20` | `shein-bi-cloud-et-forwarder.timer` | 同步 ET 货代仓、入仓并刷新 BI。 |
 | `05:30` | `shein-bi-cloud-link-business.timer` | 顺序抓取前一完整日链接/业务域，入仓、体检并刷新 BI。 |
 | `06:20` | `shein-bi-cloud-openapi-hl.timer` | HL OpenAPI 并行对账。 |
@@ -89,7 +89,7 @@
 - 云端 `shein-bi-cloud-yesterday.timer` 刷新前一天最终版，并回核 D-2 稳定销售。
 - 云端 `shein-bi-cloud-today.timer` 每两小时刷新当天销售。
 - 滚动后置 BI 的验收重点是销售文件入仓和 BI Portal 更新时间；RTV 换单复核耗时不应作为“BI 没更新”的判断依据。
-- 如果某个店失败，但目标日期 16 店销售源文件已经齐，BI 仍应刷新；云端 watchdog / 异常通知负责提醒失败店铺和服务异常。
+- 如果某个店失败，但目标日期当前启用店铺销售源文件已经齐，BI 仍应刷新；云端 watchdog / 异常通知负责提醒失败店铺和服务异常。
 - 业务域单店失败不应阻断销售入仓和门户刷新，应在 BI 体检/提醒里标注。
 - `send_daily_lark_report.mjs` 仍保留；生产日报由云端 `shein-bi-cloud-daily-lark-report.timer` 调度，不要默认本地日报任务仍在生产运行。
 
@@ -263,7 +263,7 @@
 
 ## 13. 货号 / 评价 / 动作池当前运维口径
 
-- 货号页 `16 店覆盖与承接` 的销售口径是“本店 + 标准货号 + 当前时间段”的全部 SKC / 链接合计销售；最佳 SKC 不承担销售汇总口径，只承担承接判断口径。
+- 货号页 `全店覆盖与承接` 的销售口径是“本店 + 标准货号 + 当前时间段”的全部 SKC / 链接合计销售；最佳 SKC 不承担销售汇总口径，只承担承接判断口径。
 - 如果 `本货号待处理动作` 里重复弱链接没有完整同组链接表，优先用动作池证据解析出弱链接与最佳链接销量差距，不能直接写“暂无可对比”。
 - `SKC 数据复核区` 是订单、财务、售后三方互证区，不作为每日必处理清单。
 - 评价页必须支持顶部全局时间段筛选；日常评价抓取任务每日执行一次，并把 SHEIN 平台译文作为批处理字段写入数据库，页面不做实时浏览器翻译。
@@ -287,6 +287,6 @@
 
 - 评价/口碑底库按每店开店以来全量补抓；日常新增评价同步默认只抓最近 `14` 天作为防漏增量窗口，既覆盖小范围延迟/补跑，也避免 90 天过长窗口浪费资源。
 - 评论中文翻译使用 SHEIN 评论列表接口的 `translate: 1` 平台译文，写入 `fact.product_comment.goods_comment_content_zh`，`translation_provider='shein-platform'`；旧的本地启发式翻译和 `scripts/translate_product_comments.mjs` 不再作为生产口径。
-- 当前仓库核验结果：`fact.product_comment` 共 `1796` 条，覆盖 16 店，最早评价日期 `2025-10-04`、最新评价日期 `2026-05-04`；`1794` 条有 SHEIN 平台译文，剩余 2 条为原文为空，无需翻译。
+- 2026-05-03 原 16 店全量评价补抓基线：`fact.product_comment` 共 `1796` 条，最早评价日期 `2025-10-04`、最新评价日期 `2026-05-04`；`1794` 条有 SHEIN 平台译文，剩余 2 条为原文为空，无需翻译。新增店铺的评价随日常业务域同步进入仓库。
 - 全量补抓脚本：`scripts/backfill_shein_comments_full_history.mjs`；日常业务域同步脚本：`scripts/fetch_shein_business_domains.mjs` + `scripts/load_bi_business_domains.mjs`，抓取时同时合并平台译文。
 - SHEIN 评论接口在大时间窗下可能返回 `mgs97906 数据量太多...缩小评论时间`，因此全量补抓必须按日期窗口分段，并在必要时自动拆分。

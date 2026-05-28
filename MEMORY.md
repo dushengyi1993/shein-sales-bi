@@ -26,10 +26,10 @@
 - Chrome 程序路径优先使用 `C:\Program Files\Google\Chrome\Application\chrome.exe`；D 盘路径只作兜底候选。店铺登录态仍在工作区 `profiles/`，不要因为程序在 C 盘就把 profile 移回 C 盘。
 
 ## 店铺、账号与统计口径
-- 当前 16 店：DSY 组 `DL DX FY LQ NM HL JY ZL TS MZ`；LGM 组 `CX YJ XL QY QH TZ`。TZ 已接入 LGM，店铺名 `GS5636781`，`profileKey=tz`，CDP 端口 `9348`，profile 为 `profiles/persistent-tz-profile`；TZ 后台时区已改为 `中国 北京 UTC+8`，`config/stores.json` 固定 `accountUtcOffsetHours=8`。
-- 16 店登录态保存在 `profiles/persistent-*-profile`；不要删除整个 profile。若要瘦身，只清理 Chrome 可重建缓存，例如 `OptGuideOnDeviceModel`。
+- 当前 19 店：DSY 组 `DL DX FY LQ NM HL JY ZL TS MZ`；LGM 组 `CX YJ XL QY QH TZ JSH TZZ XC`。新增 LGM 三店 `JSH/TZZ/XC` 已完成本地与云端登录、销售/链接/业务域入仓和 BI 刷新；三店 `accountUtcOffsetHours=8`，端口分别为 `9349/9350/9351`，profileKey 为 `jsh/tzz/xc`。
+- 当前 19 店登录态保存在 `profiles/persistent-*-profile`；不要删除整个 profile。若要瘦身，只清理 Chrome 可重建缓存，例如 `OptGuideOnDeviceModel`。
 - 2026-05-10 已复核 16 店 profile 显示名与登录抓数：`PROFILE_NAME.txt` / Chrome `Preferences` / `Local State` 均与配置一致；用稳定日期后台重抓对账未发现登录错位。`YJ=profileKey qy/port 9346`、`XL=profileKey yj/port 9344`、`QY=profileKey xl/port 9345` 是当前正确绑定，profileKey 名称是历史遗留，不要为了“看起来一致”改成 YJ/YJ、XL/XL、QY/QY。验证证据：`outputs/profile-audit/all-store-stable-refetch-verify-20260510/final-profile-login-verify-reviewed.json`。
-- 2026-05-08 已删除 8 个 `profiles/*/OptGuideOnDeviceModel` Chrome 可重建模型缓存，释放约 `31.81GB`；清理日志为 `outputs/cleanup/chrome-optguide-cache-delete-20260508-143959.json`。删除后 16 店 profile、飞书 profile、ET profile 和 BI 入口均已验证仍存在。
+- 2026-05-08 已删除 8 个 `profiles/*/OptGuideOnDeviceModel` Chrome 可重建模型缓存，释放约 `31.81GB`；清理日志为 `outputs/cleanup/chrome-optguide-cache-delete-20260508-143959.json`。删除后当时店铺 profile、飞书 profile、ET profile 和 BI 入口均已验证仍存在。
 - HL 已切换为主账号：`profileKey=shein-main`，CDP 端口 `9360`，正式 profile 为 `profiles/persistent-shein-main-profile`；旧 `profiles/persistent-hl-profile` 已删除。
 - LGM 组当前本身就是主账号，不需要替换。
 - 统计日按北京时间自然日；订单销售以 SHEIN 订单创建时间为准。除非用户明确确认，不给单店保留猜测性时区偏移。
@@ -52,7 +52,7 @@
 - 本地 `SHEIN-*` Windows 计划任务已全部禁用，保留为回滚/迁移参考，不再作为生产调度。除非用户明确回滚，不要重新启用 `SHEIN-Sales-15Stores-Intraday-Daytime`、`SHEIN-BI-Daily-Pipeline-0700`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-Sales-ETForwarder-0420` 或 HL OpenAPI 本地任务。
 - 云端自动化已覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成、数据库备份、ET 同步、飞书日报、完整 RTV 复核、链接/业务域日更、异常通知 watchdog、只读飞书问数机器人和 HL OpenAPI 双跑；本地 Windows 任务只作回滚参考。
 - ET 和飞书日报已启用云端 Linux 入口：`scripts/cloud_et_forwarder_sync.sh` / `shein-bi-cloud-et-forwarder.timer`、`scripts/cloud_daily_lark_report.sh` / `shein-bi-cloud-daily-lark-report.timer`。ET 服务器侧使用私有 `config/et_forwarder.local.json` 或环境变量账号密码，不能复用 Windows Chrome 保存密码；ET 入仓依赖 Docker/root 环境，服务仍保留 root 执行，但验证码下载的一次性 `fetch failed` 必须进入重试而不是直接中断。飞书日报服务器侧使用独立飞书 CLI 应用/机器人与私有 `config/lark_report.json`，旧应用的 `open_id` 不能直接给新应用用，换机器人时需用 `union_id` 重新映射收件人 `open_id`。上述 secret/token/收件人完整 ID 不进 GitHub、文档或聊天。2026-05-16 云端 ET 全量同步和云端飞书日报真实发送均已验证成功。
-- 链接/业务域已启用云端 Linux 入口：`scripts/cloud_link_business_sync.sh` / `shein-bi-cloud-link-business.timer`，每天 `05:30` 顺序跑前一完整日；它通过 `scripts/restore_shein_store_session.mjs` 用服务器私有 `state/shein_browser_sessions/*.local.json` / `state/shein_webapi_sessions/*.local.json` 初始化 headless Chrome，并验证 GSP + SBN 后再抓取、入仓、体检并刷新 BI。`shein-bi-cloud-link-business.service` 必须以 `sheinops` 运行，不能用 root 写 16 店 profile，否则次日 `shein-bi-cloud-session-manager.service` 会因 root-owned profile 报 `EACCES`。不要再用本机隐藏补抓冒充云端日更；纯 Node 零浏览器直连只是后续优化。
+- 链接/业务域已启用云端 Linux 入口：`scripts/cloud_link_business_sync.sh` / `shein-bi-cloud-link-business.timer`，每天 `05:30` 顺序跑前一完整日；它通过 `scripts/restore_shein_store_session.mjs` 用服务器私有 `state/shein_browser_sessions/*.local.json` / `state/shein_webapi_sessions/*.local.json` 初始化 headless Chrome，并验证 GSP + SBN 后再抓取、入仓、体检并刷新 BI。`shein-bi-cloud-link-business.service` 必须以 `sheinops` 运行，不能用 root 写 SHEIN 店铺 profile，否则次日 `shein-bi-cloud-session-manager.service` 会因 root-owned profile 报 `EACCES`。不要再用本机隐藏补抓冒充云端日更；纯 Node 零浏览器直连只是后续优化。
 - 云端飞书日报图依赖 Linux 中文字体；服务器必须安装 `fonts-noto-cjk` / `fontconfig`，`fc-match 'Noto Sans CJK SC'` 应匹配 Noto CJK，否则 headless Chrome 生成的日报图中文会显示方框。
 - GitHub 中的 `outputs/bi-portal/index.html` / `data.json` 是灾备静态快照；服务器执行 `git reset --hard origin/main` 或类似部署后可能覆盖实时 BI 页面。每次服务器拉取/重置代码后，必须重跑 `scripts/cloud_bi_refresh.sh today intraday` 或 `shein-bi-cloud-today.service`，确认 `generatedAt` / `salesUpdatedAt` 更新到当前。
 - 本地历史规则仍可作回滚参考：RTV 复核耗时长是正常现象，滚动销售刷新不应等待完整 RTV；BI 门户生成必须在流水线末尾单次执行，默认 `SHEIN_BI_PORTAL_TIMEOUT_MS=900000`，不要恢复“流水线完成 / 简报 / 首次体检”多个状态点重复生成页面。
@@ -60,7 +60,7 @@
 
 ## 数据与货号归并
 - 销售 / 订单历史已全量入 BI 仓库；链接、售后、履约、财务按价值和接口能力逐步补历史，库存只保留最新与滚动快照，不补开店以来全量。
-- 货号 360 / 店铺×货号覆盖必须按“每个店自己的最新链接/覆盖快照”聚合，不能用全局 `max(date)` 过滤；16 店同步常会分批完成，若只取全局最新日，会把未在该日完成同步的店铺误判为没有链接。
+- 货号 360 / 店铺×货号覆盖必须按“每个店自己的最新链接/覆盖快照”聚合，不能用全局 `max(date)` 过滤；全店同步常会分批完成，若只取全局最新日，会把未在该日完成同步的店铺误判为没有链接。
 - 标准货号清单：`config/product_catalog.json`；别名归并：`config/product_aliases.json`；归一化逻辑：`lib/product_sku_normalizer.mjs`；用户可见产品主标题由 `lib/product_display_name.mjs` 生成 `product_display_name`，优先显示完整“标准货号+中文品名”，但后台 key 仍是 `standard_goods_sn`。
 - `BL02` / `GL-BL02` / `BL02热水壶` 已确认归并到 `S1810电热水壶`；仓库 `dim.product_match_key()`、库存页、BI 前端和飞书问数机器人都应按 S1810 处理，不再展示独立 BL02 库存产品行。
 - 货号开头括号备注不参与归并，例如 `（待定）SK-123`、`（废）SK-123`、`(废)SK-123` 都按 `SK-123` 处理。
@@ -72,7 +72,7 @@
 - 历史飞书链接表仅保留查档且已加前缀：`（暂废弃）链接管理-链接主数据`、`（暂废弃）链接管理-表现日事实`、`（暂废弃）链接管理-展示库存日事实`、`（暂废弃）链接管理-货号店铺覆盖`、`（暂废弃）链接管理-建议`、`（暂废弃）链接管理-今日实操清单`。
 - `scripts/run_link_management_job.mjs` 默认 `BI/local-only`，不会写飞书；`scripts/sync_shein_links_to_lark.mjs` 默认拒绝执行，只有显式设置 `SHEIN_ENABLE_DEPRECATED_LARK_LINK_SYNC=1` 才允许一次性历史迁移。
 - 已标 `废` 且已下架的链接只作为历史状态忽略，不进入建议或今日实操，也不提醒归档。
-- 如果某货号 16 店都没有上架链接，按暂不上或库存未到处理，不进缺链接提醒；只有部分店已上架、部分店缺上架时才提醒补链。
+- 如果某货号当前启用店铺都没有上架链接，按暂不上或库存未到处理，不进缺链接提醒；只有部分店已上架、部分店缺上架时才提醒补链。
 - 待上架链接若后台返回缺证书、缺资质、缺资料、审核驳回等原因，应进入建议和实操清单。
 - 备货信息里的库存口径不可信，不用于库存低提醒；正确展示库存优先来自商品列表库存接口，后续真实库存等外部系统接入。
 - 今日实操清单必须保持可操作数量，不恢复到千级全量模板建议。
@@ -95,9 +95,9 @@
 - 架构原则：`SHEIN 后台/WebAPI/OpenAPI 抓取 -> 私有源文件 / PostgreSQL 数据仓库 -> Metabase BI / BI Portal`。PostgreSQL 是核心数据仓库；Metabase 当前仍是正式深度分析/自由钻取层，BI Portal 是日常经营入口。没有完整替代前，不要建议直接删除或跳过 Metabase。
 - 2026-05-15 起本地 BI 已封存，云端 BI 为正式入口：`https://shein-bi.faceair.me/`，旧 IP `http://43.165.167.135/` 仅作兜底；Basic Auth 账号密码不写入仓库、文档或日志。本地 `8787` 服务已停止，`SHEIN-*` Windows 计划任务已禁用；除非明确回滚，不要重新启用本地 BI 或本地定时任务。云端可复用改动必须及时同步 GitHub，敏感 session/密钥/数据库 dump 仍不得提交。
 - HL OpenAPI 销售试点已建立并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` -> `scripts/load_shein_openapi_sales_warehouse.mjs` -> `fact.openapi_store_daily_sales` / `fact.openapi_order_header` / `fact.openapi_order_item` / `mart.openapi_sales_reconciliation`；系统状态页会显示 “SHEIN OpenAPI 试点对账”。正式切换生产事实表前必须继续确认多日 `matched`。
-- 官方 OpenAPI 与后台 WebAPI 直连是两条不同链路：OpenAPI 需要开放平台应用、授权、`openKeyId` / `secretKey` 和 IP 白名单；后台 WebAPI 直连复用已登录 Cookie/session，当前已优先承接 16 店销售生产抓取。两类密钥/session 都禁止进入仓库。
-- CX 开放平台应用 `CX-椿霞SHEIN运营中台` 已在 `2026-05-10` 创建并提交审核，模式为半托管，业务功能选择商品管理、商品合规、订单管理、库存管理、财务管理；审核通过后再录入本地 `.local` 密钥并接入 API 双跑。
-- SHEIN OpenAPI 若返回 `openapi00002 IP is not in the whitelist`，优先检查服务器出口 IP `43.165.167.135` 是否在开放平台白名单；历史本机出口 `188.253.112.44` / `82.27.116.13` 只作本地排障参考。不要把 OpenAPI app secret、店铺 secret、openKeyId 写入聊天、文档或日志。
+- 官方 OpenAPI 与后台 WebAPI 直连是两条不同链路：OpenAPI 需要开放平台应用、授权、`openKeyId` / `secretKey` 和 IP 白名单；后台 WebAPI 直连复用已登录 Cookie/session，当前已优先承接 19 店销售生产抓取。两类密钥/session 都禁止进入仓库。
+- CX 开放平台应用 `CX-椿霞SHEIN运营中台` 已在 `2026-05-10` 提交审核；ZL 开放平台应用 `ZL-紫翎SHEIN运营中台` 已在 `2026-05-28` 提交审核。两者均为半托管，业务功能选择商品管理、商品合规、订单管理、库存管理、财务管理；审核通过后再录入本地 `.local` 密钥并接入 API 双跑。
+- SHEIN OpenAPI 若返回 `openapi00002 IP is not in the whitelist`，优先检查服务器出口 IP `43.165.167.135` 是否在开放平台白名单；ZL 申请时还添加过本机出口 `38.181.81.164`，历史本机出口 `188.253.112.44` / `82.27.116.13` 只作排障参考。不要把 OpenAPI app secret、店铺 secret、openKeyId 写入聊天、文档或日志。
 - BI Portal 静态文件为 `outputs/bi-portal/index.html`，数据文件为 `outputs/bi-portal/data.json`，生成脚本为 `scripts/generate_bi_portal.mjs`；云端由 `scripts/cloud_bi_refresh.sh` 在每次刷新后生成并重启服务。
 - BI 门户 UI 冒烟检查脚本为 `scripts/check_bi_portal_ui.mjs`；本地封存后默认不要为“看一眼”重新打开本地前端，云端验证优先用 HTTP health、静态断言和日志。
 - GitHub 私有仓库已纳入 `outputs/bi-portal/index.html` 和 `outputs/bi-portal/data.json` 作为当前 BI 门户可复用产物；`outputs/` 其他抓取结果、报表、图片、审计结果仍默认忽略，迁移生产状态时单独备份。
@@ -130,7 +130,7 @@
 - 真实利润核心对象：`fact.product_cost_batch`、`fact.monthly_storage_fee`、`mart.product_unit_cost_current`、`mart.profit_order_item`、`mart.profit_daily_store_product`、`mart.profit_month_group`、`mart.profit_product_summary`。
 
 ## 工具与避坑
-- SHEIN 销售抓取主链路自 `2026-05-11` 起为 Node WebAPI 直连优先：`config/stores.json` 全 16 店 `salesTransport=auto`，`fetch_shein_sales.mjs --transport webapi|auto` 直调 `/gsp/orderPlus/listOrder` / `listOrderItem`；Chrome DevTools/CDP 主要用于导出/刷新 Cookie session、登录续期和回退。
+- SHEIN 销售抓取主链路自 `2026-05-11` 起为 Node WebAPI 直连优先：`config/stores.json` 当前 19 店 `salesTransport=auto`，`fetch_shein_sales.mjs --transport webapi|auto` 直调 `/gsp/orderPlus/listOrder` / `listOrderItem`；Chrome DevTools/CDP 主要用于导出/刷新 Cookie session、登录续期和回退。
 - `state/shein_webapi_sessions/*.local.json` 是 SHEIN 后台 WebAPI 直连的敏感 Cookie session，本地使用且被 `state/` 忽略；不要提交 GitHub、写入文档或聊天。`2026-05-08` 16 店销售 WebAPI 对账已与现有数据库一致，资源实测文件为 `outputs/cloud-migration/webapi-allstores-resource-20260511-201715.json`。
 - `run_sales_sync_job.mjs` 在 `salesTransport=auto` 时先 WebAPI 直连；直连成功不启动浏览器，直连失败才启动/刷新对应 Chrome profile 并可继续兜底到后台窗口模式。`launch_store_browser.mjs` / `launch_shein_main_browser.mjs` 在 Windows 下通过 `PowerShell Start-Process` 后台启动 Chrome，避免 `cmd start` 的路径空格问题和 Node detached Chrome 的 libuv assertion。
 - `config/lark_report.json` 是日报接收人配置，必须保持合法 UTF-8 JSON；若自动日报读取失败，先校验这个文件。
@@ -153,7 +153,7 @@
 ## 云端生产、RTV、问数机器人与链接管理口径
 - 云端 SSH 本机别名 `ssh shein-bi-tencent`，用户 `sheinops`，key-only；`https://shein-bi.faceair.me/` 通过 HAProxy 在 443 分流 SSH/HTTPS，Caddy 管 TLS，nginx + Basic Auth 转 BI Portal。不要绕过网关直接暴露 Node。
 - 云端自动化已覆盖销售 WebAPI、BI、数据库备份、ET、飞书日报、完整 RTV 复核、链接/业务域日更、watchdog、只读飞书问数和 HL OpenAPI 双跑；本地 Windows 任务只作回滚参考。watchdog 阈值：销售/BI `4.5h`、ET `36h`、业务域/链接日更 `48h`，不要把低频日更当销售高频失败。
-- 链接/业务域当前生产是云端顺序 headless Chrome + 私有登录态日更；纯 Node 零浏览器直连仍是后续优化。若浏览器兜底，建议并发 1、最多 2，不能 16 店同时开。
+- 链接/业务域当前生产是云端顺序 headless Chrome + 私有登录态日更；纯 Node 零浏览器直连仍是后续优化。若浏览器兜底，建议并发 1、最多 2，不能全店同时开。
 - 2026-05-19 链接/业务域日更报错根因是 SBN 商品分析子系统登录态丢失：销售 WebAPI 正常不代表 SBN 可用。`bootstrap_shein_browser_session.mjs` 必须合并新鲜 WebAPI cookie 与浏览器导出的子系统 storage；`cloud_link_business_sync.sh` 部分失败时默认不入仓刷新 BI，避免把不完整结果展示成全量成功。若云端 SBN 态失效，优先从本机已保存密码自动登录并导出 `state/shein_browser_sessions/*.local.json` 同步到云端私有目录，session 不进 GitHub。
 - 云端 Codex / 飞书问数机器人为受控只读网关：`shein-bi-lark-sales-qa.service` -> `scripts/lark_sales_qa_bot.mjs` -> `codex exec --sandbox read-only`，`CODEX_HOME=/home/sheinops/.codex`；不绑定本机 Codex App，本机关机不影响。`auth.json`、`config.toml`、第三方凭据只在服务器私有目录，不进 GitHub、文档或日志；飞书/BI 不能裸调用 shell 或 Codex CLI。
 - 云端飞书问数机器人支持“受控图表能力”：只基于当前 BI JSON 生成店铺销售、货号排行、链接表现、ET/库存去化等 PNG 图表并用飞书图片回复；渲染脚本为 `scripts/render_lark_qa_chart.py`，依赖服务器 `python3 + Pillow + Noto CJK`。这不是任意 AI 画图，也不开放后台写操作。

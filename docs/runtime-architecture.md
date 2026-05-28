@@ -4,7 +4,7 @@
 
 - SHEIN 销售抓数、BI 后置刷新和数据库备份已切到云端 systemd；本地 BI 和 `SHEIN-*` Windows 计划任务已封存禁用。
 - 飞书多维表格 / 原生看板写入已临时暂停；飞书日报、异常通知 watchdog 和只读问数机器人已云端化并验证。
-- 销售抓取主入口已改为 Node WebAPI 直连优先；16 店 `salesTransport=auto`，成功时不启动浏览器，浏览器只保留为 Cookie/session 刷新、登录续期和回退工具。
+- 销售抓取主入口已改为 Node WebAPI 直连优先；当前 19 店 `salesTransport=auto`，成功时不启动浏览器，浏览器只保留为 Cookie/session 刷新、登录续期和回退工具。
 - 暂停开关为 `state/feishu-base-sync-paused.flag`；存在该文件时跳过飞书事实表、产品表、月表、宽表和看板写入，删除后可恢复。
 - 云端当前自动覆盖销售 WebAPI、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、飞书日报、链接/业务域日更、完整 RTV 复核、异常通知、登录态巡检、只读问数机器人和 HL OpenAPI 双跑。
 - SHEIN 临时人工登录维护入口已云端化：BI `/cloud-login-maintenance` 通过 noVNC 打开指定店铺独立 profile 的短时 Chrome 窗口，完成后导出/探测 session 并关闭临时进程。
@@ -31,8 +31,8 @@
 - `shein-bi-cloud-today.timer`：`00:10/02:10/.../22:10` 每两小时刷新当天销售、入仓并生成 BI Portal。
 - `shein-bi-cloud-yesterday.timer`：每天 `00:10` 刷新前一天最终销售，并复核前两天稳定日。
 - `shein-bi-db-backup.timer`：每天 `02:30` 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto`。
-- `shein-bi-cloud-session-manager.timer`：每天 `03:20` 顺序巡检/恢复 16 店 WebAPI + SBN 登录态。
-- 会写 16 店 SHEIN Chrome profile 的云端任务必须以 `sheinops` 运行；`shein-bi-cloud-link-business.service` 不能用 root，否则会留下 root-owned profile 文件，导致登录态管家次日 `EACCES`。登录态恢复入口为 `restore_shein_store_session.mjs`，先回灌 browser/WebAPI session，再验证 GSP + SBN。
+- `shein-bi-cloud-session-manager.timer`：每天 `03:20` 顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态。
+- 会写当前 19 店 SHEIN Chrome profile 的云端任务必须以 `sheinops` 运行；`shein-bi-cloud-link-business.service` 不能用 root，否则会留下 root-owned profile 文件，导致登录态管家次日 `EACCES`。登录态恢复入口为 `restore_shein_store_session.mjs`，先回灌 browser/WebAPI session，再验证 GSP + SBN。
 - 本地 `SHEIN-*` Windows 计划任务已全部禁用，只保留为回滚和 Linux 迁移参考。
 
 本地回滚时的 Windows 安装/更新入口：
@@ -92,7 +92,7 @@
 
 ## 浏览器 profile 与磁盘瘦身边界（2026-05-02）
 
-16 店 SHEIN 登录态保存在工作区内的独立 Chrome profile。不要删除整个 `persistent-*` 目录；登录态通常在 `Profile 1`、`Default`、`Network`、`Local Storage`、Cookies/Session 相关文件中。
+当前 19 店 SHEIN 登录态保存在工作区内的独立 Chrome profile。不要删除整个 `persistent-*` 目录；登录态通常在 `Profile 1`、`Default`、`Network`、`Local Storage`、Cookies/Session 相关文件中。
 
 2026-05-10 已复核 16 店 profile 显示名与登录抓数：`PROFILE_NAME.txt`、Chrome `Preferences`、Chrome `Local State` 均与 `config/stores.json` 一致；用稳定日期后台重抓对账数据库，未发现登录错位。`YJ / XL / QY` 的 `profileKey` 名称与店铺代码不一致是历史遗留，不是错误。
 
@@ -121,7 +121,7 @@
 
 - 旧 `profiles/persistent-hl-profile` 已删除；当前 HL 正式使用 `profiles/persistent-shein-main-profile`。
 - `YJ=profiles/persistent-qy-profile`、`XL=profiles/persistent-yj-profile`、`QY=profiles/persistent-xl-profile` 是当前正确生产绑定；不要仅按目录名直觉互换。
-- `profiles/persistent-feishu-profile` 是飞书网页登录态，用于看板富文本、卡片样式和页面自动化，不属于 16 店 SHEIN 登录。
+- `profiles/persistent-feishu-profile` 是飞书网页登录态，用于看板富文本、卡片样式和页面自动化，不属于 SHEIN 店铺登录。
 - Chrome 自动生成的 `OptGuideOnDeviceModel` 是重复模型缓存，不是登录态。等同步任务和 Chrome 进程停止后，可只删除各 profile 下的 `OptGuideOnDeviceModel` 来释放约 30GB+。
 - 瘦身时不要动 `Profile 1`、`Default`、`Network`、`Local Storage`、Cookies/Session 相关文件。
 - 2026-05-02 文件整理报告见 `outputs/cleanup/project-file-cleanup-2026-05-02.md`；误生成的 `E:\Codex` 已归档到 `backups/file-cleanup-20260502T125310/E-Codex-stray-chrome-profile`。
@@ -160,7 +160,7 @@
    - `node scripts/setup_lark_dashboard_previous_month.mjs --month YYYY-MM`
 6. 若店铺事实已写入但产品/月表/看板后续步骤遇到飞书临时 `HTTP 500` / `5000`，应从失败环节开始补跑；任何上游失败都不能继续刷新主看板。
 
-## 16 店看板刷新
+## 全店看板刷新
 
 - 当前有两个正式 Dashboard：
   - 当月主看板：`SHEIN经营看板 v3-主看板`，刷新脚本 `node scripts/setup_lark_dashboard_main_v3.mjs --month YYYY-MM`。
@@ -227,7 +227,7 @@
 - HL 旧子账号 profile `profiles/persistent-hl-profile` 已删除；正式 HL profile 为 `profiles/persistent-shein-main-profile`，CDP 端口 `9360`。
 - 飞书定时任务和写表链路都通过 `config/stores.json` 获取 HL profile；当前生产脚本中没有旧 HL profile、旧端口 `9338` 或 `profileKey=hl` 引用。
 - 后置 BI 刷新失败时只记录日志，不应反向影响销售源抓取。
-- 判断“滚动 BI 是否更新”时，先看目标日 16 店销售源文件、云端刷新日志、入仓步骤、`outputs/bi-portal/data.json` / `index.html` 的更新时间；不要把 RTV 复核运行时间长当成 BI 未更新。
+- 判断“滚动 BI 是否更新”时，先看目标日当前启用店铺销售源文件、云端刷新日志、入仓步骤、`outputs/bi-portal/data.json` / `index.html` 的更新时间；不要把 RTV 复核运行时间长当成 BI 未更新。
 
 
 

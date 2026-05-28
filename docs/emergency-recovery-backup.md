@@ -7,7 +7,7 @@
 如果本地数据真的全部丢失，**只要 GitHub 仓库还在，代码、抓取路径、计算口径、BI 门户生成逻辑和大部分配置都可以恢复**。现在仓库已经保存了：
 
 - 抓取脚本、入仓脚本、日报脚本、BI 门户生成脚本；
-- 16 店配置、货号目录、货号归并规则、销售有效性口径；
+- 当前店铺配置、货号目录、货号归并规则、销售有效性口径；
 - PostgreSQL 数据仓库 schema；
 - Metabase / BI Portal 架构与运维文档；
 - 当前静态 BI 门户产物 `outputs/bi-portal/index.html` 和 `outputs/bi-portal/data.json`；
@@ -47,7 +47,7 @@
 
 ### 可以较高把握重建的部分
 
-- SHEIN 销售：现在 16 店是 WebAPI 直连优先，抓取路径和口径都在 GitHub；重新登录后可按日期重抓。
+- SHEIN 销售：当前启用店铺是 WebAPI 直连优先，抓取路径和口径都在 GitHub；重新登录后可按日期重抓。
 - BI 门户：生成脚本、静态页面和当前 `data.json` 已在 GitHub；数据库重建后可重新生成。
 - 货号归并、销售有效性、日报和 BI 计算：核心逻辑都在 `lib/`、`scripts/`、`docs/` 和 `infra/warehouse/schema.sql`。
 - 评论翻译缓存和协作动作状态：已做小体积应急快照。

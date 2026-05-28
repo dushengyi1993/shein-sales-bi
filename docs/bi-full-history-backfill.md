@@ -102,7 +102,7 @@
 
 ### 运行方式
 
-历史业务域补抓使用：scripts/backfill_bi_high_value_domains.ps1。默认建议 BatchSize=3，比单店串行快很多，又不会像全 16 店并发那样容易卡死或影响正式同步。
+历史业务域补抓使用：scripts/backfill_bi_high_value_domains.ps1。默认建议 BatchSize=3，比单店串行快很多，又不会像全店并发那样容易卡死或影响正式同步。
 
 
 ## 2026-05-09 TZ 新店补齐

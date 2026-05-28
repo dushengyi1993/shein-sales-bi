@@ -21,6 +21,7 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
 
 function parseArgs(argv) {
   const args = {
@@ -80,8 +81,8 @@ const types = {
 
 const LINK_OPS_MAX_UPLOAD_FILE_BYTES = 20 * 1024 * 1024;
 const LINK_OPS_MAX_UPLOAD_TOTAL_BYTES = 120 * 1024 * 1024;
-const SHEIN_STORE_KEYS = new Set(['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'DSY', 'LGM']);
-const MANUAL_LOGIN_STORE_KEYS = new Set(['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ']);
+const DEFAULT_SHEIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC', 'DSY', 'LGM'];
+const DEFAULT_MANUAL_LOGIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
 const LINK_OPS_STORE_CAPABILITIES = {
   HL: {
     openapiAuthorized: true,
@@ -91,6 +92,25 @@ const LINK_OPS_STORE_CAPABILITIES = {
     note: 'HL 已完成 SHEIN OpenAPI 真实授权，并已验证商品/订单/库存等只读接口和销售对账；商品发布/编辑执行器已接入受控预检，真实提交仍要求 payload 完整和显式确认。',
   },
 };
+
+function configuredSheinStoreKeysSync() {
+  try {
+    const config = JSON.parse(fssync.readFileSync(STORES_PATH, 'utf8'));
+    const stores = Array.isArray(config?.stores) ? config.stores : [];
+    const storeKeys = stores
+      .filter(s => s && s.enabled !== false && s.storeKey)
+      .map(s => String(s.storeKey || '').trim().toUpperCase())
+      .filter(Boolean);
+    const groupKeys = Object.keys(config?.groups || {})
+      .map(k => String(k || '').trim().toUpperCase())
+      .filter(Boolean);
+    return new Set([...DEFAULT_SHEIN_STORE_KEYS, ...storeKeys, ...groupKeys]);
+  } catch {
+    return new Set(DEFAULT_SHEIN_STORE_KEYS);
+  }
+}
+
+const SHEIN_STORE_KEYS = configuredSheinStoreKeysSync();
 const LINK_OPS_ALLOWED_UPLOAD_MIME = new Set([
   'image/jpeg',
   'image/png',
@@ -225,6 +245,16 @@ async function writeJsonFile(file, value) {
   const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(value, null, 2), 'utf8');
   await fs.rename(tmp, file);
+}
+
+async function manualLoginStoreKeys() {
+  const config = await readJsonFile(STORES_PATH, null);
+  const stores = Array.isArray(config?.stores) ? config.stores : [];
+  const keys = stores
+    .filter(s => s && s.enabled !== false && s.storeKey && s.profileKey && Number.isInteger(Number(s.port)))
+    .map(s => String(s.storeKey || '').trim().toUpperCase())
+    .filter(Boolean);
+  return keys.length ? [...new Set(keys)] : DEFAULT_MANUAL_LOGIN_STORE_KEYS;
 }
 
 function sha256Hex(value) {
@@ -1534,7 +1564,8 @@ async function findManualLoginSession(args, id, token) {
   return {ok: true, session};
 }
 
-function manualLoginMaintenanceHtml() {
+async function manualLoginMaintenanceHtml() {
+  const manualStoresJson = JSON.stringify(await manualLoginStoreKeys()).replace(/</g, '\\u003c');
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1576,7 +1607,7 @@ function manualLoginMaintenanceHtml() {
     </section>
   </main>
   <script>
-    const STORES = ['DL','DX','FY','LQ','NM','HL','JY','ZL','TS','MZ','CX','YJ','XL','QY','QH','TZ'];
+    const STORES = ${manualStoresJson};
     const $ = id => document.getElementById(id);
     $('store').innerHTML = STORES.map(s => '<option value="'+s+'">'+s+'</option>').join('');
     function msg(text){ const el=$('message'); el.hidden=false; el.textContent=text; }
@@ -1723,7 +1754,7 @@ async function main() {
         return send(res, 204, '', {'Content-Type': 'image/x-icon'});
       }
       if (url.pathname === '/cloud-login-maintenance') {
-        return send(res, 200, manualLoginMaintenanceHtml(), {'Content-Type': 'text/html; charset=utf-8'});
+        return send(res, 200, await manualLoginMaintenanceHtml(), {'Content-Type': 'text/html; charset=utf-8'});
       }
       if (url.pathname.startsWith('/cloud-login/session/')) {
         const m = /^\/cloud-login\/session\/([^/]+)$/.exec(url.pathname);
@@ -1745,7 +1776,7 @@ async function main() {
           const body = await readBodyJson(req, 32 * 1024).catch(err => ({_error: err?.message || String(err)}));
           if (body._error) return sendJson(res, 400, {ok: false, error: body._error});
           const storeKey = String(body.storeKey || body.store || '').trim().toUpperCase();
-          if (!MANUAL_LOGIN_STORE_KEYS.has(storeKey)) return sendJson(res, 400, {ok: false, error: 'Invalid store'});
+          if (!(new Set(await manualLoginStoreKeys())).has(storeKey)) return sendJson(res, 400, {ok: false, error: 'Invalid store'});
           const target = String(body.target || 'sbn').trim().toLowerCase();
           const expires = Math.max(5, Math.min(120, Number(body.expiresMinutes || 30)));
           const result = await runManualLoginHelper(args, 'start', ['--store', storeKey, '--target', target, '--expires-minutes', String(expires)], 90_000);
