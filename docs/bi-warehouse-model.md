@@ -93,6 +93,8 @@
 - `first_seen_at`
 - `last_seen_at`
 
+归并匹配 key 由 `dim.product_match_key()` 提供，必须与 `lib/product_sku_normalizer.mjs` 的确认归并保持一致；`BL02` / `GL-BL02` / `BL02热水壶` 当前都归到 `S1810电热水壶`。`product_display_name` 是 BI JSON 生成阶段的展示字段，不是新的仓库主键。
+
 ### `dim.skc`
 
 SKC 维度。

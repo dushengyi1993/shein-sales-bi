@@ -1,6 +1,6 @@
 # 实际库存与销售去化周期口径
 
-更新时间：2026-05-06
+更新时间：2026-05-28
 
 ## 1. 这个页面回答什么
 
@@ -57,6 +57,8 @@
 ```text
 估算在库 = 已到仓批次数量 - 累计毛销量
 ```
+
+页面货号列的主标题使用 `product_display_name`（标准货号 + 中文品名），下方可保留原 `standard_goods_sn` 便于排障；库存计算和筛选仍按 `standard_goods_sn` / `dim.product_match_key()` 聚合。`BL02`、`GL-BL02`、`BL02热水壶` 已归并到 `S1810电热水壶`，不应再出现独立 BL02 库存产品行。
 
 结果小于 0 时显示为 0，同时把差额标记为“超卖/成本表缺批次”。
 
@@ -123,7 +125,9 @@
 ## 8. 相关文件
 
 - 数据库结构：`infra/warehouse/schema.sql`
+- 产品显示名：`lib/product_display_name.mjs`
 - 成本表导入：`scripts/import_product_costs.mjs`
 - BI 门户生成：`scripts/generate_bi_portal.mjs`
+- 相关测试：`scripts/test_product_display_name.mjs`、`scripts/test_product_match_key_schema.mjs`
 - 门户文件：`outputs/bi-portal/index.html`
 - 门户数据：`outputs/bi-portal/data.json`

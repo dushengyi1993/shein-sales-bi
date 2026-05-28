@@ -6,6 +6,7 @@ import {spawn} from 'node:child_process';
 import crypto from 'node:crypto';
 import readline from 'node:readline';
 import os from 'node:os';
+import {buildProductDisplayName} from '../lib/product_display_name.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DATA_PATH = process.env.SHEIN_QA_BI_DATA || path.join(ROOT, 'outputs', 'bi-portal', 'data.json');
@@ -67,6 +68,15 @@ function n(value) {
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
+}
+
+function productDisplayName(rowOrSn, data = null) {
+  const row = rowOrSn && typeof rowOrSn === 'object' ? rowOrSn : null;
+  const direct = String(row?.product_display_name || '').trim();
+  if (direct) return direct;
+  const sn = String(row ? (row.standard_goods_sn || row.standard_goods_sn_list || row.goods_sn || '') : (rowOrSn || '')).trim();
+  if (sn && data?.productDisplayNames?.[sn]) return data.productDisplayNames[sn];
+  return buildProductDisplayName(rowOrSn);
 }
 
 function moneySar(value) {
@@ -142,12 +152,22 @@ function normalizeEventPayload(input) {
 function findProduct(text, data) {
   const q = normalizeText(text).toLowerCase();
   if (!q) return '';
-  const products = new Set();
+  const candidates = new Map();
+  const addCandidate = (key, ...texts) => {
+    const productKey = String(key || '').trim();
+    if (!productKey) return;
+    if (!candidates.has(productKey)) candidates.set(productKey, new Set());
+    const set = candidates.get(productKey);
+    set.add(productKey);
+    for (const value of texts) {
+      const s = String(value || '').trim();
+      if (s) set.add(s);
+    }
+  };
   const collect = rows => {
     for (const row of rows || []) {
-      for (const key of ['standard_goods_sn', 'goods_sn', 'product', 'product_name']) {
-        if (row?.[key]) products.add(String(row[key]));
-      }
+      const key = row?.standard_goods_sn || row?.goods_sn || row?.product || row?.product_name;
+      addCandidate(key, row?.product_display_name, productDisplayName(row, data), row?.product_name, row?.goods_title);
     }
   };
   collect(data.rankings?.dailyProducts);
@@ -156,17 +176,19 @@ function findProduct(text, data) {
   collect(data.matrix);
   collect(data.actions);
   collect(data.products);
-  for (const row of data.rankings?.dailyProducts || []) {
-    if (row.standard_goods_sn) products.add(String(row.standard_goods_sn));
+  for (const [sn, display] of Object.entries(data.productDisplayNames || {})) {
+    addCandidate(sn, display);
   }
-  const sorted = [...products].sort((a, b) => b.length - a.length);
-  for (const p of sorted) {
-    if (q.includes(p.toLowerCase())) return p;
+  const sorted = [...candidates.entries()]
+    .flatMap(([key, texts]) => [...texts].map(value => ({key, value})))
+    .sort((a, b) => b.value.length - a.value.length);
+  for (const candidate of sorted) {
+    if (q.includes(candidate.value.toLowerCase())) return candidate.key;
   }
   const code = q.match(/[a-z]{1,5}[- ]?\d{2,6}[a-z]?/i)?.[0]?.replace(/\s+/g, '-').toUpperCase();
   if (code) {
-    const hit = sorted.find(p => p.toUpperCase().includes(code));
-    if (hit) return hit;
+    const hit = sorted.find(p => p.value.toUpperCase().includes(code));
+    if (hit) return hit.key;
   }
   return '';
 }
@@ -340,6 +362,7 @@ function compactInventoryContext({question, data, product, numberHints, latestNu
     method: inventory.method || null,
     products: products.map(r => ({
       standard_goods_sn: r.standard_goods_sn,
+      product_display_name: productDisplayName(r, data),
       goods_title: r.goods_title,
       stock_status: r.stock_status,
       risk_level: r.risk_level,
@@ -369,6 +392,7 @@ function compactInventoryContext({question, data, product, numberHints, latestNu
     batches: batches.map(r => ({
       batch_no: r.batch_no,
       standard_goods_sn: r.standard_goods_sn,
+      product_display_name: productDisplayName(r, data),
       batch_status: r.batch_status,
       shipped_quantity: r.shipped_quantity,
       estimated_remaining_quantity: r.estimated_remaining_quantity,
@@ -378,6 +402,7 @@ function compactInventoryContext({question, data, product, numberHints, latestNu
     platformStockAlerts: lowPlatformStock.map(r => ({
       store_key: r.store_key,
       standard_goods_sn: r.standard_goods_sn,
+      product_display_name: productDisplayName(r, data),
       skc: r.skc,
       snapshot_date: r.snapshot_date,
       shelf_statuses: r.shelf_statuses,
@@ -438,7 +463,7 @@ function answerInventoryQuestion(text, data) {
   const operationalPolicy = wantsOperationalWarehouseStockPolicy(q);
   const latestNote = `ET 库存更新时间：${freshness.etUpdatedAt || '-'}；ET 批次：${freshness.etLatestBatchId || '-'}；BI生成：${data.generatedAt || '-'}`;
   if (!products.length && !alerts.length) {
-    return `没查到${product ? ` ${product}` : ''} 的 ET/库存去化数据。\n${latestNote}`;
+    return `没查到${product ? ` ${productDisplayName(product, data)}` : ''} 的 ET/库存去化数据。\n${latestNote}`;
   }
   const rows = (operationalPolicy
     ? [...products].sort((a, b) => compareSortTuple(
@@ -447,14 +472,14 @@ function answerInventoryQuestion(text, data) {
     ))
     : products).slice(0, product ? 8 : 10);
   return [
-    product ? `${product} 库存/去化：` : `当前 ET/库存去化重点：`,
+    product ? `${productDisplayName(product, data)} 库存/去化：` : `当前 ET/库存去化重点：`,
     ...rows.map((r, i) => {
       const speed = n(r.weighted_daily_gross_sales);
       const opOnHand = operationalWarehouseOnHand(r);
       const opDays = daysForStock(opOnHand, speed);
       const opDaysWithIncoming = daysForStock(opOnHand + n(r.incoming_quantity), speed);
       return [
-        `${i + 1}. ${r.standard_goods_sn || '-'}`,
+        `${i + 1}. ${productDisplayName(r, data)}`,
         `状态 ${r.stock_status || '-'}`,
         operationalPolicy ? `09仓可售 ${intNum(opOnHand)} 件${isIceMaker03038(r) ? '（03038取01仓）' : ''}` : `ET可用 ${intNum(r.et_estimated_available_qty)} 件`,
         operationalPolicy ? `排除03/04/06 ${intNum(n(r.et_rtv_qty) + n(r.et_damaged_qty) + n(r.et_scrap_qty))} 件` : `估算在库 ${intNum(r.estimated_on_hand_quantity)} 件`,
@@ -464,7 +489,7 @@ function answerInventoryQuestion(text, data) {
         operationalPolicy ? `含在途可卖 ${formatDays(opDaysWithIncoming, speed > 0)}` : `含在途可卖 ${r.days_of_supply_with_incoming ?? '-'} 天`,
       ].join('；');
     }),
-    alerts.length ? `平台低展示库存样本：${alerts.slice(0, 6).map(a => `${a.store_key}/${a.standard_goods_sn} ${intNum(a.usable_inventory ?? a.inventory_quantity)}件`).join('；')}` : '',
+    alerts.length ? `平台低展示库存样本：${alerts.slice(0, 6).map(a => `${a.store_key}/${productDisplayName(a, data)} ${intNum(a.usable_inventory ?? a.inventory_quantity)}件`).join('；')}` : '',
     `口径：${operationalPolicy ? '默认只计 ETRUH09散件仓；SK-03038 制冰机例外计 ETRUH01整箱仓；ETRUH03_RTV/04Damaged/06报废不计可售现货。' : 'ET/成本表实物库存与去化，不等同于 SHEIN 平台展示库存。'}${latestNote}`,
   ].filter(Boolean).join('\n');
 }
@@ -509,15 +534,12 @@ function hasCjk(value) {
 }
 
 function compactProductInventoryLabel(row, maxLen = 46) {
-  const sn = String(row?.standard_goods_sn || row?.standard_goods_sn_list || row?.goods_sn || '').trim();
-  const title = String(row?.goods_title || row?.product_name || '').replace(/\s+/g, ' ').trim();
-  if (sn && hasCjk(sn)) return compactLabel(sn, maxLen);
-  if (sn && title && hasCjk(title)) return compactLabel(`${sn} ${title}`, maxLen);
-  return compactLabel(sn || title || '-', maxLen);
+  return compactLabel(productDisplayName(row), maxLen);
 }
 
 function productKeyText(row) {
   return String([
+    row?.product_display_name,
     row?.standard_goods_sn,
     row?.standard_goods_sn_list,
     row?.raw_goods_sn_list,
@@ -795,7 +817,7 @@ function buildProductSalesChartSpec(text, data) {
       .sort((a, b) => n(b.gross_sales_sar ?? b.sales_sar) - n(a.gross_sales_sar ?? a.sales_sar))
       .slice(0, 12)
       .map(r => ({
-        label: compactLabel(r.standard_goods_sn || r.product_name || '-'),
+        label: compactLabel(productDisplayName(r, data)),
         value: n(r.gross_sales_sar ?? r.sales_sar),
         valueLabel: moneySar(r.gross_sales_sar ?? r.sales_sar),
         note: `订单 ${intNum(r.gross_orders ?? r.orders)}｜销量 ${intNum(r.gross_quantity ?? r.quantity)}`,
@@ -803,7 +825,7 @@ function buildProductSalesChartSpec(text, data) {
   if (!sourceRows.length) return null;
   return {
     kind: 'product_sales',
-    title: product ? `${date} ${product} 各店销售` : `${date} 货号销售排行`,
+    title: product ? `${date} ${productDisplayName(product, data)} 各店销售` : `${date} 货号销售排行`,
     subtitle: product ? '同一货号在各店的当日/指定日期销售表现' : '按货号销售额降序，展示当前表现靠前的产品',
     metricLabel: '销售额（SAR）',
     unit: ' SAR',
@@ -861,6 +883,7 @@ function buildInventoryChartSpec(text, data, intent = null) {
       })
       .map(row => ({
         standard_goods_sn: row.standard_goods_sn || row.standard_goods_sn_list || row.goods_sn || '',
+        product_display_name: productDisplayName(row, data),
         goods_title: row.goods_title,
         stock_status: row.stock_status,
         et_loose_sellable_qty: row.et_loose_sellable_qty,
@@ -949,7 +972,7 @@ function buildInventoryChartSpec(text, data, intent = null) {
   const unappliedFootnote = stockPolicyAudit.unapplied.length ? ` 未应用约束：${stockPolicyAudit.unapplied.join('；')}。` : '';
   return {
     kind: 'inventory',
-    title: product ? `${product} 库存/去化图` : (wantsMultiInventoryView ? cycleTitle : (allProductsMode ? '全货号库存/去化信息图' : 'ET/库存去化重点图')),
+    title: product ? `${productDisplayName(product, data)} 库存/去化图` : (wantsMultiInventoryView ? cycleTitle : (allProductsMode ? '全货号库存/去化信息图' : 'ET/库存去化重点图')),
     subtitle: wantsMultiInventoryView
       ? (operationalStockPolicy
         ? '每个货号一行：货号+中文品名｜09仓可售现货｜在途｜日销｜实际现货/含在途去化周期；已售罄有在途靠前，已售罄无在途放最后'
@@ -1152,7 +1175,7 @@ function buildLinkChartSpec(text, data) {
     .sort((a, b) => n(b[metric]) - n(a[metric]) || n(b.c30_sale_cnt) - n(a.c30_sale_cnt) || n(b.c30_goods_uv) - n(a.c30_goods_uv))
     .slice(0, 12)
     .map(r => ({
-      label: compactLabel(`${r.store_key || '-'} ${r.standard_goods_sn || '-'} ${String(r.skc || '').slice(-6)}`),
+      label: compactLabel(`${r.store_key || '-'} ${productDisplayName(r, data)} ${String(r.skc || '').slice(-6)}`),
       value: n(r[metric]),
       valueLabel: intNum(r[metric]),
       note: `30天销量 ${intNum(r.c30_sale_cnt)}｜访客 ${intNum(r.c30_goods_uv || r.goods_uv)}｜${r.shelf_status_name || '-'}`,
@@ -1160,7 +1183,7 @@ function buildLinkChartSpec(text, data) {
   if (!rows.length) return null;
   return {
     kind: 'link',
-    title: product ? `${product} 链接表现图` : '链接表现图',
+    title: product ? `${productDisplayName(product, data)} 链接表现图` : '链接表现图',
     subtitle: '基于当前链接表现快照，默认按 30 天曝光/访客/销量展示',
     metricLabel,
     unit: '',
@@ -1858,6 +1881,7 @@ function compactSalesContext(question, data) {
     links: linkRows.map(r => ({
       store_key: r.store_key,
       standard_goods_sn: r.standard_goods_sn,
+      product_display_name: productDisplayName(r, data),
       skc: r.skc,
       status: r.shelf_status_name,
       is_on_shelf: r.is_on_shelf,
@@ -1877,6 +1901,7 @@ function compactSalesContext(question, data) {
     coverage: matrixRows.map(r => ({
       store_key: r.store_key,
       standard_goods_sn: r.standard_goods_sn,
+      product_display_name: productDisplayName(r, data),
       coverage_status: r.coverage_status,
       need_supplement_link: r.need_supplement_link,
       link_count: r.link_count,
@@ -2412,7 +2437,7 @@ function answerQuestion(text, data) {
     if (!rows.length) return `没查到 ${date} 的产品销售排行。\n${latestNote}`;
     return [
       `${date} 产品销售排行 TOP ${rows.length}`,
-      ...rows.map((r, i) => `${i + 1}. ${r.standard_goods_sn || '-'}：${rowSummary(r)}`),
+      ...rows.map((r, i) => `${i + 1}. ${productDisplayName(r, data)}：${rowSummary(r)}`),
       latestNote,
     ].join('\n');
   }
@@ -2436,7 +2461,7 @@ function answerQuestion(text, data) {
 
   if (wantsProduct && product) {
     const rows = (data.rankings?.dailyProducts || []).filter(r => r.date === date && r.standard_goods_sn === product);
-    if (!rows.length) return `没查到 ${date} ${product} 的销售数据。\n${latestNote}`;
+    if (!rows.length) return `没查到 ${date} ${productDisplayName(product, data)} 的销售数据。\n${latestNote}`;
     const row = rows.reduce((acc, r) => ({
       gross_sales_sar: n(acc.gross_sales_sar ?? acc.sales_sar) + n(r.gross_sales_sar ?? r.sales_sar),
       gross_orders: n(acc.gross_orders ?? acc.orders) + n(r.gross_orders ?? r.orders),
@@ -2447,7 +2472,7 @@ function answerQuestion(text, data) {
       .sort((a, b) => n(b.gross_sales_sar ?? b.sales_sar) - n(a.gross_sales_sar ?? a.sales_sar))
       .slice(0, 5);
     return [
-      `${date} ${product} 合计：${rowSummary(row)}`,
+      `${date} ${productDisplayName(product, data)} 合计：${rowSummary(row)}`,
       storeRows.length ? `店铺贡献：${storeRows.map(r => `${r.store_key} ${moneySar(r.gross_sales_sar ?? r.sales_sar)}`).join('；')}` : '',
       latestNote,
     ].filter(Boolean).join('\n');
@@ -2473,13 +2498,13 @@ function answerPolicyFallback(text, data, policy = {}) {
     const intents = (policy.intents || []).map(linkOpsIntentLabel).join(' / ') || '运营动作';
     return [
       `已识别为 SHEIN 受控运营动作：${intents}。`,
-      `目标：${[stores.length ? `店铺 ${stores.join(',')}` : '', product ? `货号/SKC ${product}` : ''].filter(Boolean).join('；') || '还需要在任务里补齐具体目标'}`,
+      `目标：${[stores.length ? `店铺 ${stores.join(',')}` : '', product ? `货号/SKC ${productDisplayName(product, data)}` : ''].filter(Boolean).join('；') || '还需要在任务里补齐具体目标'}`,
       '当前 owner-only 模式允许飞书创建运营任务；真实执行仍会走链接管理中台/执行器预检和审计，不会绕过中台静默改 SHEIN。',
       freshness,
     ].join('\n');
   }
   if (policy.mode === 'draft_or_public_research_allowed') {
-    const baseName = product || q.match(/[\u4e00-\u9fa5A-Za-z0-9-]{3,40}/)?.[0] || '该产品';
+    const baseName = product ? productDisplayName(product, data) : (q.match(/[\u4e00-\u9fa5A-Za-z0-9-]{3,40}/)?.[0] || '该产品');
     if (/标题|title/i.test(q)) {
       return [
         `可以做 ${baseName} 的标题优化。当前安全策略允许参考公开网页/竞品关键词，但只输出草稿，不直接改 SHEIN。`,

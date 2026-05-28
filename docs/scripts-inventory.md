@@ -62,7 +62,7 @@
   - `fetch_shein_business_domains.mjs`
   - `load_bi_business_domains.mjs`
   - `backfill_bi_high_value_domains.ps1`
-  - `generate_bi_portal.mjs`：V1 正式 BI 门户生成器；默认超时 `900` 秒，输出 `outputs/bi-portal/index.html` 与 `outputs/bi-portal/data.json`。
+  - `generate_bi_portal.mjs`：V1 正式 BI 门户生成器；默认超时 `900` 秒，输出 `outputs/bi-portal/index.html` 与 `outputs/bi-portal/data.json`；生成前会通过 `lib/product_display_name.mjs` 补齐 `product_display_name` 和顶层 `productDisplayNames`。
   - `generate_bi_portal_v2.mjs`（V2.1 平行预览生成器；只读复用 `outputs/bi-portal/data.json`，输出到 `outputs/bi-portal/v2/`，不替换 V1、不接生产调度）
   - `serve_bi_portal.mjs`
   - `serve_bi_portal.ps1`
@@ -125,7 +125,7 @@
 - `use_utf8.ps1`
 - `notify_sync_issue.mjs`
 - `cloud_ops_watchdog.mjs`：云端 systemd/watchdog 新鲜度检查；销售/BI 页面按高频阈值，链接/业务域按日更低频阈值，异常时调用 `notify_sync_issue.mjs` 发飞书提醒。
-- `lark_sales_qa_bot.mjs`：云端只读飞书问数机器人和网页链接管理会话的核心问数逻辑；每轮从 BI Portal JSON 动态压缩销售、店铺、货号、链接/覆盖上下文并回复，不写数据库、飞书 Base 或 SHEIN 后台。
+- `lark_sales_qa_bot.mjs`：云端只读飞书问数机器人和网页链接管理会话的核心问数逻辑；每轮从 BI Portal JSON 动态压缩销售、店铺、货号、链接/覆盖上下文并回复，不写数据库、飞书 Base 或 SHEIN 后台；产品文本和图表 label 优先使用 `product_display_name` / `productDisplayNames`。
 - `cloud_shein_session_manager.mjs` / `cloud_shein_session_manager.sh`：云端登录态管家；顺序巡检/恢复 16 店 WebAPI + SBN 登录态，并输出 profile 体积报告。
 - `cloud_manual_login_session.mjs`：云端临时人工登录窗口管理器；按店启动 Xvfb + Chrome + x11vnc + websockify/noVNC，完成后导出/探测登录态并关闭临时进程。状态、短期 token 和日志都属于服务器私有运行态，不提交 GitHub。
 - `cloud_link_business_sync.sh`：云端链接/业务域日更入口；按店顺序 bootstrap 浏览器会话、抓链接和业务域、入仓、体检并刷新 BI。
@@ -154,6 +154,14 @@
 - `probe_shein_business_domains.mjs`
 - `probe_shein_inventory_sources.mjs`
 - `probe_shein_stock_age.mjs`
+- `test_product_sku_normalizer.mjs`：货号归一化测试。
+- `test_product_match_key_schema.mjs`：仓库 `dim.product_match_key()` 静态规则测试，覆盖 `BL02` / `GL-BL02` -> `S1810`。
+- `test_product_display_name.mjs`：产品显示名规则测试，确保有可靠中文来源时显示“标准货号+中文品名”，无来源短码不乱补。
+
+## 相关共享库
+
+- `lib/product_sku_normalizer.mjs`：标准货号归一化、目录和别名归并。
+- `lib/product_display_name.mjs`：面向 BI 前端和飞书问数机器人的展示名生成；只改显示，不改变 `standard_goods_sn`。
 
 ## 明确废弃或默认禁用
 

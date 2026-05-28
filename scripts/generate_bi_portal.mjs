@@ -10,6 +10,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import {enrichProductDisplayNames} from '../lib/product_display_name.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORTAL_GENERATE_TIMEOUT_MS = Number(process.env.SHEIN_BI_PORTAL_TIMEOUT_MS || 900_000);
@@ -4298,7 +4299,7 @@ function recommendedLinkOpsPrompts(){
   };
   actions.slice(0, 12).forEach(a => {
     const store = a.store_key || '该店';
-    const ref = a.standard_goods_sn || a.skc || '这个链接';
+    const ref = a.standard_goods_sn ? productDisplayName(a) : (a.skc || '这个链接');
     const signal = String(a.category || a.reason || a.next_step || '高优先级动作').slice(0, 64);
     addPrompt({
       title: store+' · '+ref,
@@ -4312,7 +4313,7 @@ function recommendedLinkOpsPrompts(){
     .slice(0, 10)
     .forEach(link => addPrompt({
       title:(link.store_key || '店铺')+' · 高曝光0单',
-      text:'复盘 '+(link.store_key || '')+' 店 '+(link.standard_goods_sn || link.skc || '')+'：30天曝光 '+num(link.c30_eps_uv || link.eps_uv)+'、访客 '+num(link.c30_goods_uv || link.goods_uv)+'、销量0。请判断优先改主图、标题、价格、活动，还是重发新链接，并给出具体执行顺序。',
+      text:'复盘 '+(link.store_key || '')+' 店 '+(link.standard_goods_sn ? productDisplayName(link) : (link.skc || ''))+'：30天曝光 '+num(link.c30_eps_uv || link.eps_uv)+'、访客 '+num(link.c30_goods_uv || link.goods_uv)+'、销量0。请判断优先改主图、标题、价格、活动，还是重发新链接，并给出具体执行顺序。',
       reason:'链接表现：有曝光但30天0单',
     }));
   links
@@ -4321,7 +4322,7 @@ function recommendedLinkOpsPrompts(){
     .slice(0, 8)
     .forEach(link => addPrompt({
       title:(link.store_key || '店铺')+' · 有访客无成交',
-      text:'诊断 '+(link.store_key || '')+' 店 '+(link.standard_goods_sn || link.skc || '')+'：30天访客 '+num(link.c30_goods_uv || link.goods_uv)+'、销量0。请判断是价格、评价、活动承接、详情页还是标题图片问题，并给出先后顺序。',
+      text:'诊断 '+(link.store_key || '')+' 店 '+(link.standard_goods_sn ? productDisplayName(link) : (link.skc || ''))+'：30天访客 '+num(link.c30_goods_uv || link.goods_uv)+'、销量0。请判断是价格、评价、活动承接、详情页还是标题图片问题，并给出先后顺序。',
       reason:'有访客但没有支付，需要看承接问题',
     }));
   matrixRows
@@ -4329,8 +4330,8 @@ function recommendedLinkOpsPrompts(){
     .sort((a,b)=>Number(b.sales_sar || 0)-Number(a.sales_sar || 0))
     .slice(0, 10)
     .forEach(matrix => addPrompt({
-      title:(matrix.standard_goods_sn || '重点货号')+' · '+(matrix.store_key || '缺口店')+'补覆盖',
-      text:'围绕 '+matrix.standard_goods_sn+' 做补覆盖：先列出16店哪些有上架、哪些只有待上架、哪些完全缺链接；再针对 '+(matrix.store_key || '缺口店')+' 给出复制上品/补证书/补图/催审核的动作。',
+      title:productDisplayName(matrix)+' · '+(matrix.store_key || '缺口店')+'补覆盖',
+      text:'围绕 '+productDisplayName(matrix)+' 做补覆盖：先列出16店哪些有上架、哪些只有待上架、哪些完全缺链接；再针对 '+(matrix.store_key || '缺口店')+' 给出复制上品/补证书/补图/催审核的动作。',
       reason:'覆盖矩阵显示 '+(matrix.store_key || '某店')+' 需要补承接',
     }));
   links
@@ -4338,7 +4339,7 @@ function recommendedLinkOpsPrompts(){
     .slice(0, 8)
     .forEach(wait => addPrompt({
       title:(wait.store_key || '店铺')+' · 待上架卡点',
-      text:'检查 '+(wait.store_key || '')+' 店 '+(wait.standard_goods_sn || wait.skc || '')+' 的待上架链接，判断缺证书、缺资质、缺资料、审核驳回还是计划上架时间问题，并列出该补什么。',
+      text:'检查 '+(wait.store_key || '')+' 店 '+(wait.standard_goods_sn ? productDisplayName(wait) : (wait.skc || ''))+' 的待上架链接，判断缺证书、缺资质、缺资料、审核驳回还是计划上架时间问题，并列出该补什么。',
       reason:'链接仓库存在待上架链接',
     }));
   addPrompt({
@@ -4812,6 +4813,37 @@ function escapeHtml(s){
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 }
+function hasCjkText(s){
+  return /[\u3400-\u9fff]/.test(String(s || ''));
+}
+function compactProductText(s){
+  return String(s || '').normalize('NFKC').replace(/\s+/g, '').trim();
+}
+function productDisplayName(rowOrSn){
+  const r = rowOrSn && typeof rowOrSn === 'object' ? rowOrSn : null;
+  const direct = String(r?.product_display_name || '').trim();
+  if (direct) return direct;
+  const sn = String(r ? (r.standard_goods_sn || r.goods_sn || '') : (rowOrSn || '')).trim();
+  if (sn && DATA.productDisplayNames?.[sn]) return DATA.productDisplayNames[sn];
+  const title = String(r?.goods_title || r?.product_name_cn || r?.product_name || r?.title || '').trim();
+  if (sn && hasCjkText(sn)) return compactProductText(sn);
+  if (sn && title && hasCjkText(title)) {
+    const compactSn = compactProductText(sn);
+    const compactTitle = compactProductText(title);
+    const snCode = compactSn.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const titleMatch = compactTitle.match(/^([A-Za-z0-9][A-Za-z0-9_-]*)(.*)$/u);
+    const titleCode = titleMatch ? titleMatch[1].toUpperCase().replace(/[^A-Z0-9]/g, '') : '';
+    if (titleCode && snCode && titleCode === snCode && hasCjkText(titleMatch?.[2] || '')) return compactSn + titleMatch[2];
+    return compactSn + compactTitle;
+  }
+  return sn || title || '-';
+}
+function productDisplayNameWithRaw(rowOrSn){
+  const r = rowOrSn && typeof rowOrSn === 'object' ? rowOrSn : null;
+  const display = productDisplayName(rowOrSn);
+  const sn = String(r ? (r.standard_goods_sn || r.goods_sn || '') : (rowOrSn || '')).trim();
+  return sn && display !== sn ? display + '（' + sn + '）' : display;
+}
 
 function riskLevel(score){
   const s = Number(score || 0);
@@ -4981,7 +5013,7 @@ function actionCommandText(a){
     '业务域：' + domainName(a.action_domain),
     '动作：' + (a.category || a.title || '-'),
     '优先级/分数：' + (a.priority || '-') + ' / ' + num(a.score),
-    '货号：' + (a.standard_goods_sn || '-'),
+    '货号：' + (a.standard_goods_sn ? productDisplayName(a) : '-'),
     'SKC：' + (a.skc || '-'),
     '原因：' + (a.reason || '-'),
     '证据：' + (actionEvidenceText(a) || '-'),
@@ -5430,7 +5462,9 @@ function productQueryMatch(row, q = productScopeQuery()){
   // 短数字常用于搜货号，不能扫商品标题里的规格数字；中文/长文本再搜标题和品名。
   if (!isShortCodeQuery(q)) {
     const nameText = [
+      row.product_display_name,
       row.product_name,
+      row.product_name_cn,
       row.goods_title,
       row.goods_name,
       row.goodsName,
@@ -6115,7 +6149,7 @@ function storeRankName(r){
   return String(r.store_key || '-');
 }
 function productRankName(r){
-  return String(r.standard_goods_sn || '-');
+  return productDisplayName(r);
 }
 function productRankMeta(r, extra = ''){
   return extra;
@@ -6142,7 +6176,7 @@ function rankList(rows, opts = {}){
   return '<div class="rank-list '+escapeHtml(opts.className || '')+'">' + rows.map((r, i) => {
     const value = Number(r[valueKey] || 0);
     const pctWidth = Math.max(4, Math.round(value / max * 100));
-    const name = opts.name ? opts.name(r) : (r.store_key || r.standard_goods_sn || '-');
+    const name = opts.name ? opts.name(r) : (r.store_key || (r.standard_goods_sn ? productDisplayName(r) : '-'));
     const meta = opts.meta ? opts.meta(r) : '';
     const valueText = opts.format ? opts.format(value, r) : money(value);
     const subValue = opts.subValue ? opts.subValue(r) : '';
@@ -7393,7 +7427,7 @@ function renderBattlePath(){
   ];
   $('battlePath').innerHTML = cards.map(c =>
     '<article class="path-card"><span class="domain">'+c[0]+'</span><h4>'+c[2]+' 条</h4><p>'+c[3]+'</p>'+
-      '<div class="path-actions">'+c[4].map(a => '<button class="path-action" data-path-action-key="'+encodeURIComponent(actionKey(a))+'" data-path-action-focus="'+c[1]+'"><em>'+num(a.score)+'</em><b>'+escapeHtml(a.store_key || '-')+' · '+escapeHtml(a.category || '-')+'</b><span>'+escapeHtml(a.standard_goods_sn || a.skc || a.reason || '-')+'</span></button>').join('')+'</div>'+
+      '<div class="path-actions">'+c[4].map(a => '<button class="path-action" data-path-action-key="'+encodeURIComponent(actionKey(a))+'" data-path-action-focus="'+c[1]+'"><em>'+num(a.score)+'</em><b>'+escapeHtml(a.store_key || '-')+' · '+escapeHtml(a.category || '-')+'</b><span>'+escapeHtml(a.standard_goods_sn ? productDisplayName(a) : (a.skc || a.reason || '-'))+'</span></button>').join('')+'</div>'+
       '<button class="btn" style="margin-top:10px" data-focus-jump="'+c[1]+'">查看全部</button></article>'
   ).join('');
   document.querySelectorAll('[data-focus-jump]').forEach(btn => btn.addEventListener('click', () => {
@@ -7417,7 +7451,7 @@ function renderBattlePath(){
   }));
 }
 function actionSearchText(a){
-  return [a.category, a.title, a.reason, actionEvidenceText(a), a.next_step, a.standard_goods_sn, a.skc, a.store_key, a.action_domain].map(x => String(x || '')).join(' ');
+  return [a.category, a.title, a.reason, actionEvidenceText(a), a.next_step, a.standard_goods_sn, productDisplayName(a), a.skc, a.store_key, a.action_domain].map(x => String(x || '')).join(' ');
 }
 function topActionsBy(predicate, limit = 3){
   return (DATA.actions || []).filter(predicate).sort((a,b)=>Number(b.score||0)-Number(a.score||0)).slice(0, limit);
@@ -7454,7 +7488,7 @@ function sopRows(){
       count:retire.length,
       score:retire.reduce((s,a)=>s+Number(a.score||0),0),
       evidence:[
-        retire[0] ? '最高分：' + (retire[0].store_key || '-') + '｜' + (retire[0].standard_goods_sn || retire[0].skc || '-') + '｜' + num(retire[0].score) : '暂无强下架动作',
+        retire[0] ? '最高分：' + (retire[0].store_key || '-') + '｜' + (retire[0].standard_goods_sn ? productDisplayName(retire[0]) : (retire[0].skc || '-')) + '｜' + num(retire[0].score) : '暂无强下架动作',
         '原则：唯一承接不直接下架，先补新链接或确认不卖。'
       ],
       steps:['先看是否同店已有更强链接','没有替代就先补新链接','确认替代后再下架/停用弱链接'],
@@ -7468,8 +7502,8 @@ function sopRows(){
       count:supplement.length + growth.length,
       score:supplement.reduce((s,a)=>s+Number(a.score||0),0) + growth.reduce((s,p)=>s+Number(p.growthScore||0),0),
       evidence:[
-        supplement[0] ? '最高补链：' + (supplement[0].store_key || '-') + '｜' + (supplement[0].standard_goods_sn || '-') : '当前补链动作较少',
-        growth[0] ? '增长机会：' + growth[0].standard_goods_sn + '｜可扩 ' + num(growth[0].missingStores) + ' 店' : '暂无稳定增长机会'
+        supplement[0] ? '最高补链：' + (supplement[0].store_key || '-') + '｜' + (supplement[0].standard_goods_sn ? productDisplayName(supplement[0]) : '-') : '当前补链动作较少',
+        growth[0] ? '增长机会：' + productDisplayName(growth[0]) + '｜可扩 ' + num(growth[0].missingStores) + ' 店' : '暂无稳定增长机会'
       ],
       steps:['只补“部分店已上架、部分店缺”的货号','优先复制有销量/低售后压力的打法','补完后观察曝光、商详访客和订单是否同步提升'],
       buttons:[{label:'看补链动作', tab:'actions', focus:'supplement'}, growth[0] ? {label:'看增长货号', tab:'products', q:growth[0].standard_goods_sn} : null].filter(Boolean)
@@ -7482,7 +7516,7 @@ function sopRows(){
       count:optimize.length,
       score:optimize.reduce((s,a)=>s+Number(a.score||0),0),
       evidence:[
-        optimize[0] ? '最高分：' + (optimize[0].store_key || '-') + '｜' + (optimize[0].standard_goods_sn || optimize[0].skc || '-') + '｜' + num(optimize[0].score) : '暂无强承接动作',
+        optimize[0] ? '最高分：' + (optimize[0].store_key || '-') + '｜' + (optimize[0].standard_goods_sn ? productDisplayName(optimize[0]) : (optimize[0].skc || '-')) + '｜' + num(optimize[0].score) : '暂无强承接动作',
         '判断顺序：曝光 → 点击 → 商详 → 支付。'
       ],
       steps:['高曝光低点击：先看主图、标题、价格带','高访客低支付：看评价、退货、活动承接','优化后仍 30/60 天无销量再进淘汰'],
@@ -7496,7 +7530,7 @@ function sopRows(){
       count:afterQuality.length,
       score:afterQuality.reduce((s,a)=>s+Number(a.score||0),0),
       evidence:[
-        afterProducts[0] ? '售后集中：' + afterProducts[0].sn + '｜' + num(afterProducts[0].count) + ' 单' : '暂无售后集中货号',
+        afterProducts[0] ? '售后集中：' + productDisplayName(afterProducts[0].sn) + '｜' + num(afterProducts[0].count) + ' 单' : '暂无售后集中货号',
         '低星评价、退货原因和链接承接要一起看。'
       ],
       steps:['先找售后最集中的货号和店铺','区分物流/妥投问题还是商品质量问题','质量问题优先降流、换图说明或替换链接'],
@@ -7614,12 +7648,13 @@ function buildRootCauseCenter(limit = 9){
     const score = Number(p.risk_score || 0) + sorted.reduce((s,x)=>s+x.weight,0);
     if (score < 90 && productActions.length < 2) continue;
     const topAction = productActions.sort((a,b)=>Number(b.score||0)-Number(a.score||0))[0];
+    const displayName = productDisplayName(p);
     const main = sorted[0];
     rows.push({
       kind:'货号',
-      subject: sn,
+      subject: displayName,
       score,
-      title:'货号异常归因 · ' + sn,
+      title:'货号异常归因 · ' + displayName,
       subtitle:'不是先问“要不要下架”，而是先看主因：' + main.label,
       causes: sorted,
       chain:[
@@ -7837,7 +7872,7 @@ function growthPlaybookText(p){
   const strongSkc = p.strongLink?.skc || '-';
   return [
     'SHEIN BI 增长复制指令',
-    '货号：' + (p.standard_goods_sn || '-'),
+    '货号：' + productDisplayName(p),
     '机会类型：' + (p.opportunityType || '-'),
     '机会分：' + num(p.growthScore),
     '证据：销售 ' + money(p.sales_sar) + '；链接30天销量 ' + num(p.c30Sales) + '；已上架 ' + num(p.onShelfStores) + '/' + num(TOTAL_STORE_COUNT) + '；可扩 ' + num(p.missingStores) + ' 店；售后压力 ' + Math.round(Number(p.afterRate || 0) * 100) + '%。',
@@ -7875,7 +7910,7 @@ function renderGrowthOpportunities(){
   $('growthOpportunityGrid').innerHTML = rows.map(p =>
     '<article class="priority-card opportunity-card" data-growth-product="'+escapeHtml(p.standard_goods_sn || '')+'">'+
       '<div class="row1"><span class="domain">'+escapeHtml(p.opportunityType)+'</span><span class="score">'+num(p.growthScore)+'</span></div>'+
-      '<h4>'+escapeHtml(p.standard_goods_sn || '-')+'</h4>'+
+      '<h4>'+escapeHtml(productDisplayName(p))+'</h4>'+
       '<div class="reason">'+escapeHtml(p.reasons.join('；') || '有正向信号，建议观察')+'</div>'+
       '<div class="priority-metrics">'+
         '<div><span>销售</span><strong>'+money(p.sales_sar)+'</strong></div>'+
@@ -7941,7 +7976,7 @@ function renderProductPriority(){
   $('productPriorityGrid').innerHTML = rows.map(p =>
     '<article class="priority-card" data-priority-product="'+escapeHtml(p.standard_goods_sn || '')+'">'+
       '<div class="row1"><span class="domain">货号优先级</span><span class="score">'+num(p.crossScore)+'</span></div>'+
-      '<h4>'+escapeHtml(p.standard_goods_sn || '-')+'</h4>'+
+      '<h4>'+escapeHtml(productDisplayName(p))+'</h4>'+
       '<div class="reason">'+escapeHtml(p.reasons.join('；') || '暂无异常')+'</div>'+
       '<div class="priority-metrics">'+
         '<div><span>销售</span><strong>'+money(p.sales_sar)+'</strong></div>'+
@@ -7970,7 +8005,7 @@ function buildBriefing(){
   const insights = DATA.insights || [];
   const byDomain = Object.fromEntries((DATA.actionDomain || []).map(x => [x.action_domain, Number(x.count || 0)]));
   const topStores = stores.slice(0,3).map(s => s.store_key + ' 风险' + num(s.risk_score) + '/售后' + num(s.after_sales_case_count));
-  const topProducts = products.slice(0,3).map(p => p.standard_goods_sn + ' 风险' + num(p.risk_score) + '/上架店' + num(p.on_shelf_store_count) + '/' + num(TOTAL_STORE_COUNT));
+  const topProducts = products.slice(0,3).map(p => productDisplayName(p) + ' 风险' + num(p.risk_score) + '/上架店' + num(p.on_shelf_store_count) + '/' + num(TOTAL_STORE_COUNT));
   const financeStores = (DATA.finance || []).filter(x => Number(x.finance_no_finish_order_count || 0) > 0);
   const financeCoverage = financeStores.length + '/' + num(TOTAL_STORE_COUNT);
   const financeGoods = DATA.financeGoods || [];
@@ -7988,7 +8023,7 @@ function buildBriefing(){
   const topFinanceProducts = [...financeProductMap.entries()]
     .sort((a,b)=>b[1].amount-a[1].amount || b[1].n-a[1].n)
     .slice(0,2)
-    .map(([sn,v]) => sn + ' ' + num(v.n) + '条/' + money(v.amount));
+    .map(([sn,v]) => productDisplayName(sn) + ' ' + num(v.n) + '条/' + money(v.amount));
   const retireCount = actions.filter(a => /下架|替换|淘汰/.test(String(a.category || a.title || a.reason || ''))).length;
   const supplementCount = actions.filter(a => /补链接|缺上架链接|缺链接/.test(String(a.category || a.title || a.reason || ''))).length;
   const optimizeCount = actions.filter(a => a.action_domain === 'link' && /低支付|低点击|无销量|承接|优化|重复弱链接/.test(String(a.category || a.title || a.reason || ''))).length;
@@ -8017,10 +8052,10 @@ function buildBriefing(){
     '10）建议路径：先处理下架/替换 ' + num(retireCount) + ' 条，再处理补链接 ' + num(supplementCount) + ' 条，再看优化承接 ' + num(optimizeCount) + ' 条。',
     '',
     '首批诊断：',
-    ...insights.slice(0,5).map((x,i)=> (i+1) + '. ' + (x.title || '-') + '｜' + (x.store_key || x.standard_goods_sn || '全局') + '｜' + (x.next_step || '').slice(0,80))
+    ...insights.slice(0,5).map((x,i)=> (i+1) + '. ' + (x.title || '-') + '｜' + (x.store_key || (x.standard_goods_sn ? productDisplayName(x) : '全局')) + '｜' + (x.next_step || '').slice(0,80))
   ];
   if (growthRows.length) {
-    lines.splice(13, 0, '11）增长机会：' + growthRows.map(x => (x.standard_goods_sn || '-') + ' 机会分' + num(x.growthScore) + ' / ' + x.opportunityType).join('；') + '。');
+    lines.splice(13, 0, '11）增长机会：' + growthRows.map(x => productDisplayName(x) + ' 机会分' + num(x.growthScore) + ' / ' + x.opportunityType).join('；') + '。');
   }
   return {
     lines,
@@ -8086,7 +8121,7 @@ function commandRoomRows(){
       label:'先止损',
       title:'弱链接替换',
       score:Number(retire.score || 0),
-      target:(retire.store_key || '-') + '｜' + (retire.standard_goods_sn || retire.skc || '-'),
+      target:(retire.store_key || '-') + '｜' + (retire.standard_goods_sn ? productDisplayName(retire) : (retire.skc || '-')),
       reason:retire.reason || retire.evidence || '',
       next:retire.next_step || '',
       button:{label:'看止损动作', tab:'actions', focus:'retire', risk:'retire', q:retire.standard_goods_sn || retire.skc || '', store:retire.store_key || '', action:retire},
@@ -8096,7 +8131,7 @@ function commandRoomRows(){
       label:'补覆盖',
       title:'补链接/扩店',
       score:Number(supplement.score || 0),
-      target:(supplement.store_key || '-') + '｜' + (supplement.standard_goods_sn || supplement.skc || '-'),
+      target:(supplement.store_key || '-') + '｜' + (supplement.standard_goods_sn ? productDisplayName(supplement) : (supplement.skc || '-')),
       reason:supplement.reason || supplement.evidence || '',
       next:supplement.next_step || '',
       button:{label:'看补链动作', tab:'actions', focus:'supplement', q:supplement.standard_goods_sn || supplement.skc || '', store:supplement.store_key || '', action:supplement},
@@ -8106,7 +8141,7 @@ function commandRoomRows(){
       label:'修承接',
       title:'流量转化修复',
       score:Number(optimize.score || 0),
-      target:(optimize.store_key || '-') + '｜' + (optimize.standard_goods_sn || optimize.skc || '-'),
+      target:(optimize.store_key || '-') + '｜' + (optimize.standard_goods_sn ? productDisplayName(optimize) : (optimize.skc || '-')),
       reason:optimize.reason || optimize.evidence || '',
       next:optimize.next_step || '',
       button:{label:'看承接动作', tab:'actions', focus:'optimize', q:optimize.skc || optimize.standard_goods_sn || '', store:optimize.store_key || '', action:optimize},
@@ -8116,7 +8151,7 @@ function commandRoomRows(){
       label:'控风险',
       title:'售后/质量救火',
       score:Number(quality.score || 0),
-      target:(quality.store_key || '-') + '｜' + (quality.standard_goods_sn || quality.skc || '-'),
+      target:(quality.store_key || '-') + '｜' + (quality.standard_goods_sn ? productDisplayName(quality) : (quality.skc || '-')),
       reason:quality.reason || quality.evidence || '',
       next:quality.next_step || '',
       button:{label:'看风险动作', tab:'actions', domain:quality.action_domain || '', q:quality.standard_goods_sn || quality.skc || '', store:quality.store_key || '', action:quality},
@@ -8126,7 +8161,7 @@ function commandRoomRows(){
       label:'找增长',
       title:growth[0].opportunityType || '增长机会',
       score:Number(growth[0].growthScore || 0),
-      target:growth[0].standard_goods_sn || '-',
+      target:productDisplayName(growth[0]),
       reason:(growth[0].reasons || []).join('；'),
       next:growth[0].nextStep || '',
       button:{label:'看增长打法', tab:'products', q:growth[0].standard_goods_sn || ''},
@@ -8239,7 +8274,7 @@ function reviewCommandText(row){
     'SHEIN BI 复查指令',
     '复查类型：' + row.spec.label,
     '店铺：' + (a.store_key || '-'),
-    '货号：' + (a.standard_goods_sn || '-'),
+    '货号：' + (a.standard_goods_sn ? productDisplayName(a) : '-'),
     'SKC：' + (a.skc || '-'),
     '原动作：' + (a.category || a.title || '-'),
     '负责人：' + (row.rec.owner || '-'),
@@ -8274,7 +8309,7 @@ function renderReviewQueue(){
       const cls = r.dueState === 'overdue' ? 'overdue' : r.dueState === 'due' ? 'due' : '';
       return '<article class="review-card '+cls+'">'+
         '<div class="row1"><span class="tag '+(cls === 'overdue' ? 'high' : cls === 'due' ? 'mid' : 'info')+'">'+escapeHtml(r.spec.label)+'</span><span class="score">'+escapeHtml(dueText)+'</span></div>'+
-        '<h4>'+escapeHtml(a.store_key || '-')+'｜'+escapeHtml(a.standard_goods_sn || a.skc || a.category || '-')+'</h4>'+
+        '<h4>'+escapeHtml(a.store_key || '-')+'｜'+escapeHtml(a.standard_goods_sn ? productDisplayName(a) : (a.skc || a.category || '-'))+'</h4>'+
         '<p>'+escapeHtml(a.category || a.title || '-')+'</p>'+
         '<div class="review-meta">'+
           '<div><span>负责人</span><strong>'+escapeHtml(r.rec.owner || '-')+'</strong></div>'+
@@ -8333,22 +8368,23 @@ function renderCharts(){
   const topProducts = [...(DATA.products || [])]
     .sort((a,b)=>Number(b.risk_score||0)-Number(a.risk_score||0))
     .slice(0, 12)
-    .map(p => p.standard_goods_sn);
+    .map(p => ({sn:p.standard_goods_sn, name:productDisplayName(p)}));
   const matrixMap = new Map((DATA.matrix || []).map(m => [m.store_key + '|' + m.standard_goods_sn, m]));
   const header = '<div class="heat-row heat-head"><div></div>'+storeCodes.map(s => '<div class="heat-product" style="text-align:center">'+s+'</div>').join('')+'</div>';
-  const rows = topProducts.map(sn => {
+  const rows = topProducts.map(p => {
+    const sn = p.sn || '';
     const cells = storeCodes.map(store => {
       const m = matrixMap.get(store + '|' + sn);
-      let cls = 'none', label = '·', title = store + ' ' + sn + '：暂无数据';
+      let cls = 'none', label = '·', title = store + ' ' + p.name + '：暂无数据';
       if (m) {
         if (Number(m.action_count || 0) > 0) { cls = 'act'; label = String(m.action_count); }
         else if (m.need_supplement_link) { cls = 'miss'; label = '缺'; }
         else if (m.has_on_shelf_link) { cls = 'on'; label = '上'; }
-        title = store + ' ' + sn + '：' + (m.coverage_status || '-') + '；上架 ' + num(m.on_shelf_count) + '；动作 ' + num(m.action_count) + '；销售 ' + money(m.sales_sar);
+        title = store + ' ' + p.name + '：' + (m.coverage_status || '-') + '；上架 ' + num(m.on_shelf_count) + '；动作 ' + num(m.action_count) + '；销售 ' + money(m.sales_sar);
       }
       return '<button class="heat-cell '+cls+'" data-store="'+store+'" data-product="'+escapeHtml(sn)+'" title="'+escapeHtml(title)+'">'+label+'</button>';
     }).join('');
-    return '<div class="heat-row"><div class="heat-product" title="'+escapeHtml(sn)+'">'+escapeHtml(sn)+'</div>'+cells+'</div>';
+    return '<div class="heat-row"><div class="heat-product" title="'+escapeHtml(p.name)+'">'+escapeHtml(p.name)+'</div>'+cells+'</div>';
   }).join('');
   $('coverageHeatmap').innerHTML = '<div class="heatmap">'+header+rows+'</div>';
   document.querySelectorAll('.heat-cell').forEach(el => el.addEventListener('click', () => {
@@ -8392,7 +8428,7 @@ function renderDomains(){
   const topProduct = [...(DATA.products || [])].sort((a,b)=>Number(b.risk_score||0)-Number(a.risk_score||0))[0];
   $('decisionTips').innerHTML = '<div class="split">'+
     '<div class="tag high" style="white-space:normal;line-height:1.5">优先店铺：'+(topStore?.store_key || '-')+'，先看售后、质量和库存是否集中。</div>'+
-    '<div class="tag mid" style="white-space:normal;line-height:1.5">优先货号：'+(topProduct?.standard_goods_sn || '-')+'，先判断是链接覆盖、转化还是售后问题。</div>'+
+    '<div class="tag mid" style="white-space:normal;line-height:1.5">优先货号：'+(topProduct ? productDisplayName(topProduct) : '-')+'，先判断是链接覆盖、转化还是售后问题。</div>'+
     '</div>';
 }
 function isUsefulLinkLabel(label){
@@ -8863,13 +8899,13 @@ function renderStoreCockpit(){
     '<div class="store-section-title"><div><h3>本店好链接 / 可复制打法</h3><div class="sub">不只看差链接。这里列出本店近7/30天有销量、暂无明显承接风险的链接，重点看标签、活动和承接方式。</div></div><span class="tag good">保留/复制</span></div>'+
     groupedTable(goodLinks, [
       ['SKC', r => '<span class="mono">'+escapeHtml(r.skc || '-')+'</span>'+copyButton(r.skc, '复制')],
-      ['标准货号', r => '<b>'+escapeHtml(r.standard_goods_sn || '-')+'</b>'],
+      ['标准货号', r => '<b>'+escapeHtml(productDisplayName(r))+'</b>'],
       ['标签', r => linkLabelChips(r)],
       ['判断', r => escapeHtml(linkIssueText(r, allStoreLinks))]
     ], linkMetricGroups(true), {limit:false})+
     '<div class="store-section-title"><div><h3>本店低展示库存预警</h3><div class="sub">库存来自 SHEIN 商品列表展示库存，不再使用备货信息里的假库存；本表直接列出本店已上架且展示库存低的 SKC，方便你去后台按 SKC 查询。</div></div><span class="tag mid">库存动作 · '+num(lowStockRows.length)+' 条</span></div>'+
     '<div class="stock-warning-table">'+table(lowStockRows, [
-      ['SKC / 货号', r => '<b>'+escapeHtml(r.standard_goods_sn || '-')+'</b><br><span class="mono">'+escapeHtml(r.skc || '-')+'</span>'+copyButton(r.skc, '复制')],
+      ['SKC / 货号', r => '<b>'+escapeHtml(productDisplayName(r))+'</b><br><span class="mono">'+escapeHtml(r.skc || '-')+'</span>'+copyButton(r.skc, '复制')],
       ['库存', r => stockEvidenceHtml(r), 'num'],
       ['状态', r => '<span class="tag good">'+escapeHtml(String(r.shelf_statuses || '').replaceAll('ON_SHELF','已上架'))+'</span>'],
       ['建议', r => '<span class="tag mid">调高展示库存</span><div class="muted">如果继续卖，按 SKC 去后台调高；准备停卖则忽略。</div>']
@@ -8877,7 +8913,7 @@ function renderStoreCockpit(){
     '<div class="store-section-title"><div><h3>本店待处理链接</h3><div class="sub">只放明确需要处理的链接：下架候选、低点击、低支付、待上架卡点或已有替代的30天0销量链接。</div></div><span class="tag mid">需要动作</span></div>'+
     groupedTable(problemLinks, [
       ['SKC', r => '<span class="mono">'+escapeHtml(r.skc || '-')+'</span>'+copyButton(r.skc, '复制')],
-      ['标准货号', r => '<b>'+escapeHtml(r.standard_goods_sn || '-')+'</b>'],
+      ['标准货号', r => '<b>'+escapeHtml(productDisplayName(r))+'</b>'],
       ['状态', r => '<span class="tag '+(r.retire_candidate ? 'high' : 'mid')+'">'+escapeHtml(r.health_bucket || r.shelf_status_name || '-')+'</span>'],
       ['标签', r => linkLabelChips(r)],
       ['下一步', r => '<span class="decision-strong">'+escapeHtml(linkDecision(r, allStoreLinks).role)+'</span><span class="decision-note">'+escapeHtml(linkIssueText(r, allStoreLinks))+'</span>']
@@ -8885,14 +8921,14 @@ function renderStoreCockpit(){
     '<div class="store-section-title"><div><h3>本店优先货号</h3><div class="sub">销售按当前时间段；动作是最新动作池，动作分只是优先级，不是金额。</div></div><span class="tag info">经营入口</span></div>'+
     '<div class="spotlight">'+
       '<div>'+table(focusProducts, [
-        ['货号', r => '<b>'+escapeHtml(r.standard_goods_sn || '-')+'</b><br><button class="status-btn" data-product-focus="'+escapeHtml(r.standard_goods_sn || '')+'">看货号360</button>'],
+        ['货号', r => '<b>'+escapeHtml(productDisplayName(r))+'</b><br><button class="status-btn" data-product-focus="'+escapeHtml(r.standard_goods_sn || '')+'">看货号360</button>'],
         ['覆盖', r => '<span class="tag '+(r.need_supplement_link ? 'mid' : 'good')+'">'+escapeHtml(r.coverage_status || '-')+'</span><br><span class="muted">上架 '+num(r.on_shelf_count)+' / 总链接 '+num(r.link_count)+'</span>'],
         ['最佳SKC', r => '<span class="mono">'+escapeHtml(r.best_skc || '-')+'</span>'+copyButton(r.best_skc, '复制')],
       ['当前时段销售', r => money(r.sales_sar)+'<br><span class="muted">销量 '+num(r.quantity)+' / 订单 '+num(r.order_count)+'</span>', 'num'],
       ['待办动作', r => num(r.action_count)+' 条<br><span class="muted">优先级分 '+num(r.max_action_score)+'（只排序）</span>', 'num']
       ], {limit:false})+'</div>'+
       '<div>'+table(actionPreview, [
-        ['动作', r => '<b>'+escapeHtml(r.category || '-')+'</b><div class="muted">'+escapeHtml(domainName(r.action_domain))+' · '+escapeHtml(r.standard_goods_sn || '')+'</div>'],
+        ['动作', r => '<b>'+escapeHtml(r.category || '-')+'</b><div class="muted">'+escapeHtml(domainName(r.action_domain))+' · '+escapeHtml(r.standard_goods_sn ? productDisplayName(r) : '')+'</div>'],
         ['SKC', r => '<span class="mono">'+escapeHtml(r.skc || '-')+'</span>'+copyButton(r.skc, '复制')],
         ['原因', r => storeActionReasonHtml(r, allStoreLinks)],
         ['动作分', r => '<span class="mono">'+num(r.score)+'</span><br><span class="muted">优先级分，不是金额</span>', 'num']
@@ -8902,7 +8938,7 @@ function renderStoreCockpit(){
       '<div class="detail-grid">'+
         '<div><div class="section-block-label">售后明细 · 当前时段（按售后申请时间）</div>'+table(afterRange.slice(0, 10), [
           ['售后单', r => '<span class="mono">'+escapeHtml(r.aftersales_order_no || r.return_order_no || '-')+'</span>'],
-          ['货号/SKC', r => '<b>'+escapeHtml(r.standard_goods_sn || '-').slice(0,46)+'</b><br><span class="mono">'+escapeHtml(r.skc || '-')+'</span>'],
+          ['货号/SKC', r => '<b>'+escapeHtml(productDisplayName(r)).slice(0,60)+'</b><br><span class="mono">'+escapeHtml(r.skc || '-')+'</span>'],
           ['原因', r => escapeHtml(r.reason_names || '-').slice(0,80)]
         ])+'</div>'+
         '<div><div class="section-block-label">履约面单 · 最新业务日快照</div>'+table(waybillAll.slice(0, 10), [
@@ -8918,14 +8954,14 @@ function renderStoreCockpit(){
         ])+'</div>'+
         '<div><div class="section-block-label">财务商品 · 最新业务日</div>'+table(financeGoodsAll.slice(0, 10), [
           ['订单', r => '<span class="mono">'+escapeHtml(r.order_no || '-')+'</span>'],
-          ['货号/SKC', r => (r.standard_goods_sn ? '<b>'+escapeHtml(r.standard_goods_sn).slice(0,50)+'</b>' : '<span class="muted">未匹配</span>')+'<br><span class="mono">'+escapeHtml(r.skc || r.entity_id || '-')+'</span>'],
+          ['货号/SKC', r => (r.standard_goods_sn ? '<b>'+escapeHtml(productDisplayName(r)).slice(0,60)+'</b>' : '<span class="muted">未匹配</span>')+'<br><span class="mono">'+escapeHtml(r.skc || r.entity_id || '-')+'</span>'],
           ['数量/金额', r => num(r.quantity)+'<br><span class="muted">'+money(r.amount)+'</span>', 'num']
         ])+'</div>'+
       '</div>'+
       '<div class="section-block-label">本店链接池 · 最新链接日</div>'+
       groupedTable(allStoreLinks.slice(0, 40), [
         ['SKC', r => '<span class="mono">'+escapeHtml(r.skc || '-')+'</span>'+copyButton(r.skc, '复制')],
-        ['货号', r => '<b>'+escapeHtml(r.standard_goods_sn || '-')+'</b>'],
+        ['货号', r => '<b>'+escapeHtml(productDisplayName(r))+'</b>'],
         ['状态/标签', r => '<span class="tag">'+escapeHtml(r.shelf_status_name || '-')+'</span><br>'+linkLabelChips(r)]
       ], linkMetricGroups(true))+
     '</div></details>';
@@ -9052,7 +9088,7 @@ function renderProductSpotlight(){
     '</div>';
   $('productSpotlight').innerHTML =
     '<div class="store-flow">'+
-      '<div class="store-verdict"><div class="row1"><div><h3>'+escapeHtml(sn)+'</h3><p>货号页先判断：这个标准货号是要扩店、修链接、控售后，还是淘汰弱链接。</p></div>'+riskTag(product.risk_score)+'</div>'+
+      '<div class="store-verdict"><div class="row1"><div><h3>'+escapeHtml(productDisplayName(product))+'</h3><p>货号页先判断：这个标准货号是要扩店、修链接、控售后，还是淘汰弱链接。</p></div>'+riskTag(product.risk_score)+'</div>'+
         '<div class="store-action-steps">'+
           '<div class="store-step"><b>1 看当前销售</b><p>'+escapeHtml(rangeLabel)+'：'+money(rangeSalesSar)+'，销量 '+num(rangeQuantity)+'，订单 '+num(rangeOrders)+'。</p></div>'+
           '<div class="store-step"><b>2 看覆盖缺口</b><p>上架 '+num(product.on_shelf_store_count)+'/'+num(TOTAL_STORE_COUNT)+' 店，缺 '+num(missingStores)+' 店；不是全店未上架才需要补链。</p></div>'+
@@ -9720,7 +9756,7 @@ function renderProducts(){
   $('productsTable').innerHTML =
     sectionTitleHtml('货号风险池', '这张表用于先筛出“该扩、该修、该控售后、该观察”的货号；销售按当前时间段，覆盖/库存/售后/评价是最新业务快照。点货号进入货号 360 看各店承接。', selectedRangeText())+
     table(rowsWithRange, [
-    ['货号', r => '<b>'+r.standard_goods_sn+'</b>'],
+    ['货号', r => '<b>'+escapeHtml(productDisplayName(r))+'</b>'],
     ['系统判断', r => '<span class="tag '+r._verdict.level+'">'+escapeHtml(r._verdict.level === 'high' ? '先控风险' : r._verdict.level === 'mid' ? '重点关注' : '保留观察')+'</span><span class="decision-note">'+escapeHtml(r._verdict.text)+'</span>'],
     ['风险分', r => riskTag(r.risk_score)+'<div class="mono">'+num(r.risk_score)+'</div>'],
     ['当前时段销售', r => money(r.period_sales_sar)+'<br><span class="muted">销量 '+num(r.period_quantity)+' · 订单 '+num(r.period_orders)+'</span>', 'num'],
@@ -9738,7 +9774,7 @@ function renderProducts(){
     '</div>'+
     table(matrixRows, [
     ['店铺', r => '<b>'+r.store_key+'</b>'],
-    ['货号', r => '<b>'+r.standard_goods_sn+'</b>'],
+    ['货号', r => '<b>'+escapeHtml(productDisplayName(r))+'</b>'],
     ['覆盖状态', r => '<span class="tag '+(r.need_supplement_link ? 'mid' : 'good')+'">'+(r.coverage_status || '-')+'</span>'],
     ['链接', r => '总 '+num(r.link_count)+' / 上架 '+num(r.on_shelf_count)+'<br><span class="muted">待上架 '+num(r.wait_shelf_count)+' / 售罄 '+num(r.sold_out_count)+'</span>'],
     ['最佳 SKC', r => '<span class="mono">'+(r.best_skc || '-')+'</span>'+copyButton(r.best_skc, '复制SKC')],
@@ -9816,7 +9852,7 @@ function renderLinkSpotlight(){
     '</div>';
   $('linkSpotlight').innerHTML =
     '<div class="store-flow">'+
-      '<div class="store-verdict"><div class="row1"><div><h3>'+escapeHtml(skc || sn || '-')+'</h3><p>'+escapeHtml(sn || '-')+' · '+escapeHtml(link.store_key || '-')+'。SKC 页只判断这条链接：保留、优化、替换、补资料还是下架。</p></div>'+riskTag(Number(link.eps_uv||0)/8 + Number(actions[0]?.score||0)/80)+'</div>'+
+      '<div class="store-verdict"><div class="row1"><div><h3>'+escapeHtml(skc || productDisplayName(link))+'</h3><p>'+escapeHtml(productDisplayName(link))+' · '+escapeHtml(link.store_key || '-')+'。SKC 页只判断这条链接：保留、优化、替换、补资料还是下架。</p></div>'+riskTag(Number(link.eps_uv||0)/8 + Number(actions[0]?.score||0)/80)+'</div>'+
         '<div class="store-action-steps">'+
           '<div class="store-step"><b>当前判断</b><p><span class="decision-strong">'+escapeHtml(mainDecision.role)+'</span>：'+escapeHtml(mainDecision.text)+'</p></div>'+
           '<div class="store-step"><b>7天短期</b><p>销量 '+num(link.c7_sale_cnt)+'，访客 '+num(link.c7_goods_uv)+'，支付率 '+linkPayRate7(link)+'。</p></div>'+
@@ -9839,7 +9875,7 @@ function renderLinkSpotlight(){
     table(actionsWithDecision, [
       ['店铺', r => '<b>'+r.store_key+'</b>'],
       ['动作', r => '<span class="tag mid">'+escapeHtml(r.category || '-')+'</span>'],
-      ['货号/SKC', r => '<b>'+escapeHtml(r.standard_goods_sn || '-').slice(0,48)+'</b><br><span class="mono">'+(r.skc || '-')+'</span>'+copyButton(r.skc, '复制SKC')],
+      ['货号/SKC', r => '<b>'+escapeHtml(productDisplayName(r)).slice(0,60)+'</b><br><span class="mono">'+(r.skc || '-')+'</span>'+copyButton(r.skc, '复制SKC')],
       ['判断/下一步', r => (r._decision ? '<span class="decision-strong">'+escapeHtml(r._decision.role)+'</span><span class="decision-note">'+escapeHtml(r._decision.text)+'</span>' : '')+'<span class="decision-note">'+escapeHtml(r.next_step || '').slice(0,120)+'</span>']
     ])+
     sectionTitleHtml('同货号 / 同 SKC 链接对比', '同一个标准货号的其它链接放在一起，用 7天和30天判断这条是不是弱链接、替代链接或当前最佳。', '表格数字：7天 / 30天')+
@@ -9858,7 +9894,7 @@ function renderLinks(){
     sectionTitleHtml('SKC / 链接健康池', '先按状态、风险和 7/30 表现判断：补资料、优化承接、替换下架，还是保留观察。', '最新链接日')+
     groupedTable(rows, [
     ['店铺', r => '<b>'+r.store_key+'</b>'],
-    ['SKC', r => '<span class="mono">'+(r.skc || '-')+'</span><div class="muted">'+(r.standard_goods_sn || '')+'</div>'+copyButton(r.skc, '复制SKC')],
+    ['SKC', r => '<span class="mono">'+(r.skc || '-')+'</span><div class="muted">'+escapeHtml(r.standard_goods_sn ? productDisplayName(r) : '')+'</div>'+copyButton(r.skc, '复制SKC')],
     ['状态/健康', r => '<span class="tag '+(isOnShelfLink(r) ? 'good' : isWaitShelfLink(r) ? 'mid' : 'info')+'">'+escapeHtml(r.shelf_status_name || '-')+'</span><br><span class="muted">'+escapeHtml(r.health_bucket || '')+'</span>'],
     ['标签', r => linkLabelChips(r)],
     ['风险', r => [
@@ -9908,7 +9944,7 @@ function renderComments(){
     '</div>'+
     '<div class="split" style="margin-top:14px">'+
       '<div>'+sectionTitleHtml('按货号汇总', '找评论多、低星多、最近仍在出问题的货号。')+table(summary, [
-        ['货号', r => '<button class="link-like" data-comment-product="'+escapeHtml(r.standard_goods_sn || '')+'"><b>'+escapeHtml(r.standard_goods_sn || '-')+'</b></button>'],
+        ['货号', r => '<button class="link-like" data-comment-product="'+escapeHtml(r.standard_goods_sn || '')+'"><b>'+escapeHtml(productDisplayName(r))+'</b></button>'],
         ['评价', r => num(r.comment_count), 'num'],
         ['低星', r => num(r.low_star_count), 'num'],
         ['均星', r => num(r.avg_star), 'num'],
@@ -9929,7 +9965,7 @@ function renderComments(){
       ['判断', r => '<span class="tag '+commentRowLevel(r)+'">'+escapeHtml(commentLevelText(r))+'</span>'],
       ['时间', r => '<span class="mono">'+escapeHtml(String(r.comment_time || r.comment_date || '-').replace('T',' ').slice(0,19))+'</span>'],
       ['店铺', r => '<b>'+escapeHtml(r.store_key || '-')+'</b>'],
-      ['货号/SKC', r => '<b>'+escapeHtml(r.standard_goods_sn || '-').slice(0,64)+'</b><br><span class="mono">'+escapeHtml(r.skc || '-')+'</span>'+copyButton(r.skc, '复制SKC')],
+      ['货号/SKC', r => '<b>'+escapeHtml(productDisplayName(r)).slice(0,70)+'</b><br><span class="mono">'+escapeHtml(r.skc || '-')+'</span>'+copyButton(r.skc, '复制SKC')],
       ['星级/标签', r => starHtml(r.goods_comment_star)+'<br><span class="muted">'+escapeHtml(r.bad_comment_labels || r.goods_comment_star_name || '-')+'</span>'],
       ['中文 / 阿文原文', r => '<div class="comment-cell-zh">'+(commentZh(r) ? escapeHtml(commentZh(r)).slice(0,320) : '<span class="muted">中文翻译待入库</span>')+'</div><div class="comment-cell-ar">'+escapeHtml(commentText(r)).slice(0,260)+'</div>'],
       ['属性', r => '<span class="muted">'+escapeHtml(r.goods_attribute || '-').slice(0,80)+'</span>']
@@ -9982,8 +10018,8 @@ function renderInsights(){
     const detailTarget = ['finance','after_sales','fulfillment','marketing'].includes(insightType(x)) ? 'business' : 'actions';
     return '<article class="insight-card">'+
     '<div class="row1"><span class="domain">'+domainName(x.action_domain || x.insight_domain)+'</span><span class="score">'+num(x.score)+'</span></div>'+
-    '<h4>'+escapeHtml(x.title || '-')+' · '+escapeHtml(x.store_key || x.standard_goods_sn || '全局')+'</h4>'+
-    '<p><b>'+escapeHtml(x.standard_goods_sn || '')+'</b> '+(x.skc ? '<span class="mono">'+escapeHtml(x.skc)+'</span> '+copyButton(x.skc, '复制SKC') : '')+'</p>'+
+    '<h4>'+escapeHtml(x.title || '-')+' · '+escapeHtml(x.store_key || (x.standard_goods_sn ? productDisplayName(x) : '全局'))+'</h4>'+
+    '<p><b>'+escapeHtml(x.standard_goods_sn ? productDisplayName(x) : '')+'</b> '+(x.skc ? '<span class="mono">'+escapeHtml(x.skc)+'</span> '+copyButton(x.skc, '复制SKC') : '')+'</p>'+
     '<p class="muted">'+escapeHtml(actionEvidenceText(x) || x.evidence || '')+'</p>'+
     '<p class="next">'+escapeHtml(x.next_step || '')+'</p>'+
     '<div style="margin-top:10px">'+priorityTag(x.priority)+'</div>'+
@@ -10072,7 +10108,7 @@ function renderBusiness(){
     acc.amount = (acc.amount || 0) + Number(r.price_amount_total || 0);
   }).sort((a,b)=>Number(b.amount||0)-Number(a.amount||0)).slice(0,6);
   const focusHtml = [
-    ...afterByProduct.map(r => ({scope:'货号', name:r.standard_goods_sn, desc:'售后 '+num(r.cases)+' 单 · '+num(r.store_count)+' 店', amount:r.amount, q:r.standard_goods_sn})),
+    ...afterByProduct.map(r => ({scope:'货号', name:productDisplayName(r), desc:'售后 '+num(r.cases)+' 单 · '+num(r.store_count)+' 店', amount:r.amount, q:r.standard_goods_sn})),
     ...afterByStore.map(r => ({scope:'店铺', name:r.store_key, desc:'售后 '+num(r.cases)+' 单', amount:r.amount, store:r.store_key}))
   ].sort((a,b)=>Number(b.amount||0)-Number(a.amount||0)).slice(0,8).map(r =>
     '<button class="ops-focus-row" '+(r.store ? 'data-home-store="'+escapeHtml(r.store)+'"' : r.q ? 'data-home-product="'+escapeHtml(r.q)+'"' : '')+'>'+
@@ -10134,7 +10170,7 @@ function renderBusiness(){
     table(financeGoodsRows, [
     ['店铺', r => '<b>'+r.store_key+'</b>'],
     ['财务订单', r => '<span class="mono">'+(r.order_no || '-')+'</span>'],
-    ['货号', r => r.standard_goods_sn || r.raw_goods_sn ? '<b>'+escapeHtml(r.standard_goods_sn || r.raw_goods_sn).slice(0,60)+'</b>' : '<span class="muted">未匹配货号</span><div class="mono">'+escapeHtml(r.entity_id || '-')+'</div>'],
+    ['货号', r => r.standard_goods_sn || r.raw_goods_sn ? '<b>'+escapeHtml(r.standard_goods_sn ? productDisplayName(r) : r.raw_goods_sn).slice(0,70)+'</b>' : '<span class="muted">未匹配货号</span><div class="mono">'+escapeHtml(r.entity_id || '-')+'</div>'],
     ['SKC', r => '<span class="mono">'+(r.skc || '-')+'</span>'+copyButton(r.skc, '复制SKC')],
     ['商品', r => '<span class="muted">'+escapeHtml(r.goods_title || '').slice(0,90)+'</span>'],
     ['数量', r => num(r.quantity), 'num'],
@@ -10156,7 +10192,7 @@ function renderBusiness(){
     table(orderRows, [
     ['店铺', r => '<b>'+r.store_key+'</b>'],
     ['订单', r => '<span class="mono">'+(r.order_no || '-')+'</span><div class="muted">'+(r.order_create_time || '').replace('T',' ').slice(0,19)+'</div>'],
-    ['货号', r => '<b>'+escapeHtml(r.standard_goods_sn || '-').slice(0,60)+'</b>'],
+    ['货号', r => '<b>'+escapeHtml(productDisplayName(r)).slice(0,70)+'</b>'],
     ['SKC', r => '<span class="mono">'+(r.skc || '-')+'</span>'+copyButton(r.skc, '复制SKC')],
     ['商品', r => '<span class="muted">'+escapeHtml(r.goods_title || '').slice(0,90)+'</span>'],
     ['数量', r => num(r.quantity), 'num'],
@@ -10169,7 +10205,7 @@ function renderBusiness(){
     ['店铺', r => '<b>'+r.store_key+'</b>'],
     ['售后单', r => '<span class="mono">'+(r.aftersales_order_no || r.return_order_no || '-')+'</span><div class="muted">申请 '+(r.request_time || '').replace('T',' ').slice(0,19)+'</div>'],
     ['订单', r => '<span class="mono">'+(r.order_no || '-')+'</span><div class="muted">订单 '+String(r.order_created_date || r.order_create_time || '-').slice(0,10)+'</div>'],
-    ['货号/SKC', r => '<b>'+escapeHtml(r.standard_goods_sn || '-').slice(0,60)+'</b><br><span class="mono">'+(r.skc || '-')+'</span>'+copyButton(r.skc, '复制SKC')],
+    ['货号/SKC', r => '<b>'+escapeHtml(productDisplayName(r)).slice(0,70)+'</b><br><span class="mono">'+(r.skc || '-')+'</span>'+copyButton(r.skc, '复制SKC')],
     ['状态', r => '<span class="tag mid">'+escapeHtml(r.order_sub_status_name || r.return_package_status_name || '待复核')+'</span><div class="muted">'+escapeHtml(r.review_reason || '')+'</div>'],
     ['已挂起', r => num(r.open_days)+' 天', 'num'],
     ['金额', r => money(r.price_amount_total), 'num']
@@ -10179,7 +10215,7 @@ function renderBusiness(){
     table(afterRows, [
     ['店铺', r => '<b>'+r.store_key+'</b>'],
     ['售后单', r => '<span class="mono">'+(r.aftersales_order_no || r.return_order_no || '-')+'</span><div class="muted">'+(r.request_time || '').replace('T',' ').slice(0,19)+'</div>'],
-    ['货号/SKC', r => '<b>'+escapeHtml(r.standard_goods_sn || '-').slice(0,60)+'</b><br><span class="mono">'+(r.skc || '-')+'</span>'+copyButton(r.skc, '复制SKC')],
+    ['货号/SKC', r => '<b>'+escapeHtml(productDisplayName(r)).slice(0,70)+'</b><br><span class="mono">'+(r.skc || '-')+'</span>'+copyButton(r.skc, '复制SKC')],
     ['原因', r => escapeHtml(r.reason_names || '-')],
     ['状态', r => escapeHtml(r.order_sub_status_name || r.return_package_status_name || '-')],
     ['金额', r => money(r.price_amount_total), 'num']
@@ -10196,7 +10232,7 @@ function renderBusiness(){
       ['结论/动作', r => rtvTraceDecisionHtml(r)],
       ['状态', r => rtvTraceStatusTag(r.trace_status)],
       ['店铺/退货单', r => '<b>'+escapeHtml(r.store_key || '-')+'</b><div class="mono">'+escapeHtml(r.return_order_no || r.aftersales_order_no || '-')+'</div><div class="muted">'+escapeHtml((r.request_time || '').replace('T',' ').slice(0,19))+'</div>'],
-      ['货号/SKC', r => '<b>'+escapeHtml(r.standard_goods_sn || '-').slice(0,60)+'</b><br><span class="mono">'+escapeHtml(r.skc || '-')+'</span>'+copyButton(r.skc, '复制SKC')],
+      ['货号/SKC', r => '<b>'+escapeHtml(productDisplayName(r)).slice(0,70)+'</b><br><span class="mono">'+escapeHtml(r.skc || '-')+'</span>'+copyButton(r.skc, '复制SKC')],
       ['SHEIN退货物流', r => '<span class="mono">'+escapeHtml(r.shein_return_express_numbers || '-')+'</span>'],
       ['ET收件', r => '<span class="mono">'+escapeHtml(r.et_return_order_ids || '-')+'</span><div class="muted">'+escapeHtml(r.rtv_express_numbers || '')+'</div><div class="muted">'+escapeHtml((r.rtv_latest_received_time || '').replace('T',' ').slice(0,19))+'</div>'],
       ['仓库去向', r => '<b>'+escapeHtml(r.destination_summary || r.rtv_warehouses || '-')+'</b><div class="muted">'+escapeHtml(r.rtv_warehouses || '')+'</div>'],
@@ -10211,7 +10247,7 @@ function renderBusiness(){
     table(rtvReviewTop, [
       ['优先级', r => '<span class="tag '+(r.review_priority === 'high' ? 'high' : r.review_priority === 'medium' ? 'mid' : '')+'">'+escapeHtml(r.review_priority || '-')+'</span>'],
       ['ET RTV / 物流', r => '<span class="mono">'+escapeHtml(r.return_order_id || '-')+'</span><div class="mono">'+escapeHtml(r.et_shipment_number_raw || '-')+'</div>'+copyButton(r.et_shipment_number_raw, '复制ET物流号')],
-      ['货号/SKU', r => '<b>'+escapeHtml(r.standard_goods_sn || '-').slice(0,60)+'</b><div class="mono">'+escapeHtml(r.sku_code || '-')+'</div>'],
+      ['货号/SKU', r => '<b>'+escapeHtml(productDisplayName(r)).slice(0,70)+'</b><div class="mono">'+escapeHtml(r.sku_code || '-')+'</div>'],
       ['收件仓/数量', r => escapeHtml(r.store_name_in || '-')+'<br><span class="muted">'+escapeHtml(r.to_instock_name || '')+' · '+num(r.received_quantity || r.in_quantity || 0)+' 件</span>'],
       ['下一步', r => '<b>'+escapeHtml(rtvReviewActionText(r))+'</b><div class="muted">'+escapeHtml(r.review_reason || '-')+'</div>'],
       ['SHEIN 候选', r => splitCandidates(r.candidate_cases) || '<span class="muted">暂无同货号候选，需按 ET 物流号人工查</span>']
@@ -10349,7 +10385,7 @@ function renderSelectionBenchmark(samples){
   for (const v of vBands) {
     rows.push('<div class="matrix-row"><div class="matrix-cell head">体积 '+escapeHtml(v)+'</div>'+pBands.map(p => {
       const c = selectionCellStats(samples,p,v);
-      const ex = (c.examples||[]).map(x=>x.standard_goods_sn).join(' / ');
+      const ex = (c.examples||[]).map(x=>productDisplayName(x)).join(' / ');
       return '<div class="matrix-cell '+c.cls+'"><b>'+escapeHtml(c.label)+'</b><small>样本 '+num(c.n)+' · 中位利润率 '+(c.medMargin == null ? '-' : pct(c.medMargin))+'</small><small>'+escapeHtml(ex || '暂无历史品')+'</small></div>';
     }).join('')+'</div>');
   }
@@ -10367,7 +10403,7 @@ function renderSelectionBenchmark(samples){
     '<div class="selection-sample-panel">'+
       sectionTitleHtml('历史利润样本 Top 5', '看真实赚钱品落在哪些进货价和体积区间。')+
       table(topExamples, [
-      ['货号', r => '<b>'+escapeHtml(r.standard_goods_sn || '-')+'</b>'],
+      ['货号', r => '<b>'+escapeHtml(productDisplayName(r))+'</b>'],
       ['进货价/体积', r => escapeHtml(cny(r.purchase))+'<br><span class="muted">'+escapeHtml(fmt.format(r.inferredVolume))+'L</span>', 'num'],
       ['净成交/利润', r => money(r.net_revenue_sar || r.gross_revenue_sar)+'<br><span class="muted">利润 '+money(r.profit)+'</span>', 'num'],
       ['利润率/ROI', r => pct(r.margin)+'<br><span class="muted">ROI '+pct(r.roi)+'</span>', 'num'],
@@ -10463,7 +10499,7 @@ function renderProfitScatter(rows){
   const points = usable.map(r => {
     const margin = Number(r.profit_margin_before_storage || 0);
     const color = margin >= .25 ? '#22c55e' : margin >= .1 ? '#f97316' : '#ef4444';
-    return '<circle class="point" cx="'+xFor(r.inferredVolume).toFixed(1)+'" cy="'+yFor(margin).toFixed(1)+'" r="5" fill="'+color+'"><title>'+escapeHtml((r.standard_goods_sn||'-')+' 体积 '+fmt.format(r.inferredVolume)+'L 利润率 '+pct(margin))+'</title></circle>';
+    return '<circle class="point" cx="'+xFor(r.inferredVolume).toFixed(1)+'" cy="'+yFor(margin).toFixed(1)+'" r="5" fill="'+color+'"><title>'+escapeHtml(productDisplayName(r)+' 体积 '+fmt.format(r.inferredVolume)+'L 利润率 '+pct(margin))+'</title></circle>';
   }).join('');
   return '<div class="profit-scatter"><svg viewBox="0 0 '+w+' '+h+'" role="img" aria-label="利润率与体积散点">'+grid+
     '<line class="axis-line" x1="'+padL+'" y1="'+padT+'" x2="'+padL+'" y2="'+(h-padB)+'"></line>'+
@@ -10626,7 +10662,7 @@ function renderProfitPage(){
   const gapRows = products.filter(r => Number(r.missing_cost_revenue_sar || 0) > 0 || (Number(r.net_revenue_sar || 0) > 0 && Number(r.cost_coverage_revenue_rate || 0) < .9))
     .sort((a,b)=>Number(b.missing_cost_revenue_sar||0)-Number(a.missing_cost_revenue_sar||0));
   const profitCols = [
-    ['货号', r => '<button class="link-like" data-profit-product="'+escapeHtml(r.standard_goods_sn || '')+'"><b>'+escapeHtml(r.standard_goods_sn || '-')+'</b></button>'],
+    ['货号', r => '<button class="link-like" data-profit-product="'+escapeHtml(r.standard_goods_sn || '')+'"><b>'+escapeHtml(productDisplayName(r))+'</b></button>'],
     ['净成交/原销售', r => money(r.net_revenue_sar)+'<br><span class="muted">原 '+money(r.gross_revenue_sar)+'</span>', 'num'],
     ['成本/退货费', r => money(r.product_cost_sar)+'<br><span class="muted">退货费 '+money(r.return_delivery_fee_sar)+'</span>', 'num'],
     ['利润/率', r => money(r.profit_before_storage_sar)+'<br><span class="muted">'+pct(r.profit_margin_before_storage)+'</span>', 'num'],
@@ -10643,7 +10679,7 @@ function renderProfitPage(){
   $('profitCostGaps').innerHTML =
     '<div class="table-note">成本文件放在 <span class="mono">inputs/costs/</span>；模板是 <span class="mono">inputs/costs/SHEIN成本表模板.xlsx</span>。如果一批货缺头程运输费，会显示为缺口但不会污染单位成本。</div>'+
     (gapRows.length ? table(gapRows, [
-      ['货号', r => '<button class="link-like" data-profit-product="'+escapeHtml(r.standard_goods_sn || '')+'"><b>'+escapeHtml(r.standard_goods_sn || '-')+'</b></button>'],
+      ['货号', r => '<button class="link-like" data-profit-product="'+escapeHtml(r.standard_goods_sn || '')+'"><b>'+escapeHtml(productDisplayName(r))+'</b></button>'],
       ['成本覆盖', r => pct(r.cost_coverage_revenue_rate), 'num'],
       ['缺成本净成交', r => money(r.missing_cost_revenue_sar), 'num'],
       ['缺成本数量', r => num(r.missing_cost_quantity)+' 件', 'num'],
@@ -10853,7 +10889,7 @@ function renderInventoryPage(){
     .sort((a,b)=>inventoryOnHandQty(b)-inventoryOnHandQty(a))
     .slice(0,40);
   const compactCols = [
-    ['货号', r => '<button class="link-like" data-inventory-product="'+escapeHtml(r.standard_goods_sn || '')+'"><b>'+escapeHtml(r.standard_goods_sn || '-')+'</b></button><div class="muted">'+escapeHtml(r.goods_title || '').slice(0,60)+'</div>'],
+    ['货号', r => '<button class="link-like" data-inventory-product="'+escapeHtml(r.standard_goods_sn || '')+'"><b>'+escapeHtml(productDisplayName(r))+'</b></button><div class="muted">'+escapeHtml(r.standard_goods_sn || '').slice(0,60)+'</div>'],
     ['状态', r => inventoryStatusTag(r)+'<div class="muted">'+escapeHtml(inventoryAdvice(r)).slice(0,70)+'</div>'],
     ['可售/在途', r => num(inventoryOnHandQty(r))+' / '+num(r.incoming_quantity)+'<div class="muted">'+escapeHtml(inventorySourceText(r))+'</div>', 'num'],
     ['近7/30销量', r => num(r.scoped_sold_7d)+' / '+num(r.scoped_sold_30d), 'num'],
@@ -10862,7 +10898,7 @@ function renderInventoryPage(){
   $('inventoryRiskList').innerHTML = riskRows.length ? table(riskRows, compactCols, {limit:40}) : '<div class="empty">当前筛选下没有明显断货或补货风险。</div>';
   $('inventorySlowList').innerHTML = slowRows.length ? table(slowRows, compactCols, {limit:40}) : '<div class="empty">当前筛选下没有明显库存沉淀货号。</div>';
   $('inventoryProductTable').innerHTML = table(rows, [
-    ['货号', r => '<button class="link-like" data-inventory-product="'+escapeHtml(r.standard_goods_sn || '')+'"><b>'+escapeHtml(r.standard_goods_sn || '-')+'</b></button><div class="muted">'+escapeHtml(r.goods_title || '').slice(0,80)+'</div>'],
+    ['货号', r => '<button class="link-like" data-inventory-product="'+escapeHtml(r.standard_goods_sn || '')+'"><b>'+escapeHtml(productDisplayName(r))+'</b></button><div class="muted">'+escapeHtml(r.standard_goods_sn || '').slice(0,80)+'</div>'],
     ['库存状态', r => inventoryStatusTag(r)+'<div class="muted">'+escapeHtml(inventorySourceText(r))+' · '+escapeHtml(inventoryWarehouseText(r)).slice(0,70)+'</div>'],
     ['ET实盘可售', r => inventoryHasEt(r) ? (num(r.et_estimated_available_qty)+'<div class="muted">09 '+num(r.et_loose_sellable_qty)+' / 01 '+num(r.et_full_carton_qty)+'</div>') : '<span class="muted">暂无ET</span>', 'num'],
     ['待处理仓', r => inventoryHasEt(r) ? (num(r.et_pending_process_qty)+'<div class="muted">03 '+num(r.et_rtv_qty)+' / 04 '+num(r.et_damaged_qty)+' / 06 '+num(r.et_scrap_qty)+'</div>') : '<span class="muted">-</span>', 'num'],
@@ -10879,7 +10915,7 @@ function renderInventoryPage(){
     .sort((a,b)=>String(a.standard_goods_sn||'').localeCompare(String(b.standard_goods_sn||'')) || Number(a.batch_sort||0)-Number(b.batch_sort||0));
   $('inventoryBatchTable').innerHTML = sectionTitleHtml('批次生命周期', '按先进先出估算每个到仓批次剩余数量；在途/未发批次保留原数量。')+
     table(batchRows, [
-      ['货号', r => '<b>'+escapeHtml(r.standard_goods_sn || '-')+'</b><div class="muted">'+escapeHtml(r.goods_title || '').slice(0,60)+'</div>'],
+      ['货号', r => '<b>'+escapeHtml(productDisplayName(r))+'</b><div class="muted">'+escapeHtml(r.standard_goods_sn || '').slice(0,60)+'</div>'],
       ['批次/状态', r => '<span class="mono">'+escapeHtml(r.batch_no || '-')+'</span><br><span class="tag '+(r.batch_status==='已到仓'?'good':r.batch_status==='在途/待录头程'?'mid':'info')+'">'+escapeHtml(r.batch_status || '-')+'</span>'],
       ['发货/到仓', r => escapeHtml(r.shipped_date || '-')+'<br><span class="muted">'+escapeHtml(r.arrived_date || '-')+'</span>'],
       ['发货数/剩余', r => num(r.shipped_quantity)+' / <b>'+num(r.estimated_remaining_quantity)+'</b>', 'num'],
@@ -10908,7 +10944,7 @@ function actionCard(a){
     '<div class="action-main">'+
       '<div class="row1"><span class="domain">'+domainName(a.action_domain)+'<span class="status-badge"><i class="status-dot '+st+'"></i>'+statusLabel(st)+'</span></span><span class="score">'+num(a.score)+'</span></div>'+
       '<h4>'+escapeHtml(a.category || '-')+' · '+escapeHtml(a.store_key || '-')+'</h4>'+
-      '<p><b>'+escapeHtml(a.standard_goods_sn || a.title || '-')+'</b> '+(a.skc ? '<span class="mono">'+escapeHtml(a.skc)+'</span> '+copyButton(a.skc, '复制SKC') : '')+'</p>'+
+      '<p><b>'+escapeHtml(a.standard_goods_sn ? productDisplayName(a) : (a.title || '-'))+'</b> '+(a.skc ? '<span class="mono">'+escapeHtml(a.skc)+'</span> '+copyButton(a.skc, '复制SKC') : '')+'</p>'+
       '<div style="margin-top:10px">'+priorityTag(a.priority)+mergeTag+'</div>'+
     '</div>'+
     '<div class="action-evidence">'+
@@ -10956,7 +10992,7 @@ function actionListText(rows = currentActions()){
     const rec = actionRecord(a);
     return [
       (i + 1) + '. ' + (a.store_key || '-') + '｜' + domainName(a.action_domain) + '｜' + (a.category || a.title || '-'),
-      '货号：' + (a.standard_goods_sn || '-') + '｜SKC：' + (a.skc || '-'),
+      '货号：' + (a.standard_goods_sn ? productDisplayName(a) : '-') + '｜SKC：' + (a.skc || '-'),
       '分数/优先级：' + num(a.score) + ' / ' + (a.priority || '-'),
       '原因：' + (a.reason || '-'),
       '证据：' + (actionEvidenceText(a) || '-'),
@@ -11724,7 +11760,7 @@ function renderPageDecisionSummaries(){
     const rangeProduct = aggregateDailyProducts().find(x => x.standard_goods_sn === sn);
     const productActions = (DATA.actions || []).filter(a => a.standard_goods_sn === sn);
     sectionDecisionBlock('products', {
-      title: sn + ' · 货号决策摘要',
+      title: productDisplayName(product) + ' · 货号决策摘要',
       subtitle: '当前时间段：' + rangeText + '。这里按标准货号归并，看的是“产品”而不是各店后台原始货号。',
       tag: state.q ? '搜索聚焦' : '默认高风险',
       cards: [
@@ -12380,7 +12416,7 @@ async function main() {
   markStage('json:parse');
   const parsedData = deepSanitize(JSON.parse(raw));
   parsedData.openapiReconciliation = deepSanitize(openapiReconciliation);
-  const data = await attachManualCostFileMeta(await enrichPortalDataWithLocalLinkLabels(parsedData));
+  const data = enrichProductDisplayNames(await attachManualCostFileMeta(await enrichPortalDataWithLocalLinkLabels(parsedData)));
   markStage('sanitize');
   const safeAudit = deepSanitize(audit);
   const safePipeline = deepSanitize(pipeline);

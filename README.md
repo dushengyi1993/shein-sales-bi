@@ -1,6 +1,6 @@
 # SHEIN 销售统计与 BI 经营系统
 
-## 2026-05-21 当前权威状态
+## 2026-05-28 当前权威状态
 
 - 飞书多维表格 / 原生看板写入已临时暂停；云端 BI 系统作为当前主要经营入口继续运行。飞书日报、异常通知 watchdog 和只读问数机器人均已迁到云端独立飞书机器人链路；日报真实发送已验证，问数机器人已升级为云端 Codex CLI 只读网关，不再绑定本机 Codex 会话。
 - 本地 BI 已封存，云端 BI 是正式入口：`https://shein-bi.faceair.me/`（旧 IP 入口 `http://43.165.167.135/` 仅作兜底）。公网入口已启用 Basic Auth；账号密码只在运行环境交付，不写入仓库或文档。详见 `docs/cloud-bi-operations.md`。
@@ -83,6 +83,8 @@
 - 利润口径：首页和成本/利润页已改为真实利润；成本未覆盖时显示“待成本表 / 成本覆盖率”，不再用 `25%` 粗估冒充真实利润。
 - 成本/利润页的高利润 / 低利润货号分界线固定为 `20%` 利润率：`>= 20%` 为可加码，`< 20%` 为需要处理。
 - 当前正式成本文件为 `inputs/costs/成本.xlsx`；`单台总成本（SAR）` 是单批单件完整成本输入，系统先还原为批次总成本，再按同货号所有完整批次加权平均计算单位成本。
+- 用户可见的产品主标题统一使用 `product_display_name`：生成端由 `lib/product_display_name.mjs` 基于 `standard_goods_sn`、`config/product_catalog.json` 和可靠中文标题补齐“标准货号+中文品名”；搜索、筛选、归因和仓库 key 仍使用 `standard_goods_sn` / `dim.product_match_key()`。无可靠中文来源的异常短码不编造中文，保留原值并标记待确认。
+- `BL02` / `GL-BL02` / `BL02热水壶` 已归并到 `S1810电热水壶`；成本、库存、BI 货号行和问数机器人都应按 S1810 聚合，不再把 BL02 作为独立库存产品处理。
 - BI 首页默认使用“净成交额 / 净销量”：买家已发起且未取消的售后申请默认计入退货/反转，包含 `待买家退货`、`待交接`、`待卖家处理` 等未落定状态；最终取消后再自动冲回。退货、仅退款、派送失败等反转订单不计入成交额、订单数和销量；这些订单仍扣商品成本；只有真实退货退款额外扣 `13.88 SAR`，`仅退款`、`派件失败`、`派件异常` 不重复扣退货派送费。
 - 首页销售额可切换“净销售额 / 总销售额”，销量可切换“净销量 / 总销量”；但 `sales_sar <= 0` 或 `gross_revenue_sar <= 0` 的揽收前取消 / 0 金额行在净口径和总口径里都直接忽略，就当没有发生，不计订单、销量、成本或退货派送费。
 - 历史测试品 `2001/CM-2001` 有单独手工成本补充文件 `inputs/costs/历史手工成本补充.csv`，仅用于历史利润复核。
@@ -206,6 +208,7 @@
   `node scripts/marketing/export_dsy_marketing_standards.mjs --stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open`
 - 辅助填报 DSY 全部未截止营销活动（只预填，不点最终提交；若本期有用户确认覆盖表，必须带 `--price-overrides`）：
   `node scripts/marketing/dsy_marketing_deadline_fill.mjs --stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open --price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD-approved.json --min-discount-fallback SK-13034`
+- 优惠券活动不要套普通营销活动脚本/路径；例如活动 `34810` 应从优惠券详情 `#/mbrs/marketing/coupon/detail/34810` 进入 `继续报名`，批量导入确认会直接真实提报，操作前先看 `docs/marketing-campaign-signup-pricing-rules.md` 的优惠券专项边界。
 - 生成成本表模板：
   `node scripts/create_cost_template.mjs`
 - 检查/导入成本表：

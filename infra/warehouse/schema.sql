@@ -36,6 +36,7 @@ AS $$
   )
   SELECT CASE
     WHEN key IN ('2001','CM2001') THEN '2001'
+    WHEN key IN ('BL02','GLBL02') THEN 'S1810'
     WHEN key IN ('MZ7028','SK7028','7028') THEN 'SK7028'
     ELSE key
   END

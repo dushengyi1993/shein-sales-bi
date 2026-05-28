@@ -163,14 +163,31 @@
   - 无明显超低价
   - 无平台校验错误
 
-## 七、当前已知特殊情况
+## 七、优惠券活动专项边界
+
+优惠券活动与普通营销活动报名不是同一条入口，不得直接复用普通活动页的预填假设。
+
+- 已验证活动 `34810 / 平台优惠券招商活动` 的正确入口是：
+  1. 先进优惠券详情页 `#/mbrs/marketing/coupon/detail/34810`
+  2. 再点击 `继续报名`，进入 `#/mbrs/marketing/coupon/rule/signup/34810/{levelRuleId}?from=detail`
+- 不要使用普通活动 `#/mbrs/marketing/sign-up/config/34810` 路径；该路径会误导为普通活动预装，不能作为优惠券报名成功证据。
+- `levelRuleId` 按店铺变化，不能拿 DL 的 `2942` 套全部店。2026-05-28 执行批次已验证：DL=`2942`、DX=`3003`、FY=`3010`、LQ=`3026`、NM=`3036`、HL=`3017`、JY=`3001`、ZL=`3004`、TS=`1994`、MZ=`2045`。
+- 优惠券批量导入弹窗里的 `确定` 不是“只预填”；它会直接触发真实提报。只有用户明确授权提交时才可点击，否则必须停在导入前/确认前供用户复核。
+- 活动 `34810` 在 2026-05-28 执行批次只允许 `15%` 固定券档或不报券；不得生成 `30%/50%` 券，也不得生成小数券折扣。
+- 预算恢复走站点预算接口 `/mrs-api-prefix/mbrs/activity/multi-level/modify_site_limit`；2026-05-28 DSY 10 店 `shein-sa` 周预算已统一回写并回读为 `1000 SAR`。
+- 商品验证优先用 `/mrs-api-prefix/mbrs/activity/multi-level/goods/query?page_num=1&page_size=200`：
+  - `page_module='MULTI_LEVEL_RULE_GOODS'`：可报商品集合
+  - `page_module='MULTI_LEVEL_RULE_ENROLLED_GOODS'`：已报/处理中商品集合
+- 2026-05-28 审计汇总：`tmp/mbrs/coupon-submissions-34810/all-dsy-summary-with-dl.json`，总计 `348` 个唯一 `15%` 券 SKC 已进入已报/处理中集合，批准清单剩余未报为 `0`。
+
+## 八、当前已知特殊情况
 
 - `SM-505A电动缝纫机` / `TXSM-505A电动缝纫机`：
   - 当前按固定价 `110` 规则执行
   - 页面有时会先按整数降幅回写到 `109.xx`
   - 若发生，需二次回写活动价，确保活动价栏最终显示为目标值
 
-## 八、历史执行边界
+## 九、历史执行边界
 
 - `2026-05-06`：`MZ` 店铺的
   - `SA Potential Bestsellers Promo – Batch 39 / 40228`
