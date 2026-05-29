@@ -1,6 +1,6 @@
 # SHEIN BI 系统运行说明
 
-> 当前权威状态：2026-05-18。本地 BI 已封存，云端 BI 是正式入口；云端专用运维清单见 `docs/cloud-bi-operations.md`。本文保留业务口径、本地回滚和历史 Windows 运维参考。
+> 当前权威状态：2026-05-29。本地 BI 已封存，云端 BI 是正式入口；云端专用运维清单见 `docs/cloud-bi-operations.md`。本文保留业务口径、本地回滚和历史 Windows 运维参考。
 
 ## 1. 当前系统定位
 
@@ -200,6 +200,7 @@
 - 成本缺失的订单行不参与真实利润额计算，并在页面显示成本覆盖率和缺成本销售额。
 - 月仓储费表写入 `fact.monthly_storage_fee`，只用于月度总利润；DSY / LGM 按当月净成交额比例分摊。
 - 仓储费不能拆到单独货号，因此单货号、单 SKC 和单店页面展示“未扣仓储费”的商品经营利润。
+- 月利润复核不能只看当前订单创建月结果；还要看售后申请月对历史订单月的回冲。2026 年 3/4/5 月审计见 `docs/bi-profit-audit-2026-03-05.md`：当前主利润公式未发现少扣退货，5 月利润暂高主要来自售后反转率尚低、成本率较低和退货快递费较少；5 月仍处售后成熟期，不能当最终稳定利润。
 
 - 选品标尺模型：成本表缺长宽高时，先用历史头程 / `1600 RMB/方` 倒推出单件估算体积，再按未来 `2000 RMB/方` 重算新选品头程；矩阵分箱按进货价和体积，并用真实历史利润率、利润额、销量、ROI 校准。
 - `TS`、`MZ` 开店以来都归 `DSY`；利润视图和 BI 净成交首页数据都按当前店铺配置分组。
@@ -243,6 +244,7 @@
 - 检查云端健康：未鉴权访问 `https://shein-bi.faceair.me/api/health` 应返回 `401`；带 Basic Auth 应返回 `200`。
 - 检查本地是否仍封存：`http://127.0.0.1:8787/api/health` 应无法连接；若能连上，说明本地 BI 被重新启动，需要确认是否为回滚。
 - 修改 BI 门户 UI 时，默认先后台验证：`node --check scripts/generate_bi_portal.mjs`、`$env:SHEIN_BI_PORTAL_TIMEOUT_MS='900000'; node scripts/generate_bi_portal.mjs`、静态检查 `outputs/bi-portal/index.html` / `data.json`。除非用户要求或必须排查浏览器交互问题，不主动打开前端。
+- 云端是最终审核面。涉及 V1 弹窗/筛选/页面交互时，发布前必须在云端页面或云端服务输出复核；时间筛选月份切换的关键证据是弹窗保持 `hidden=false`、`aria-expanded=true`，月份标题正确更新且无 console error/warn。
 - 检查 HL OpenAPI 销售试点：`node scripts/fetch_shein_openapi_sales.mjs HL --start YYYY-MM-DD --end YYYY-MM-DD` 后运行 `node scripts/load_shein_openapi_sales_warehouse.mjs --store HL --start YYYY-MM-DD --end YYYY-MM-DD`，再在系统状态页查看 “SHEIN OpenAPI 试点对账”。
 - 检查 WebAPI 销售直连：`node scripts/fetch_shein_sales.mjs HL --date YYYY-MM-DD --transport webapi --json`，再和 `outputs/shein_fetch/HL/YYYY-MM-DD.json` 或数据库切片对账。
 - 检查取消单口径：先 dry-run `node scripts/repair_shein_sales_summaries.mjs --start YYYY-MM-DD --end YYYY-MM-DD`；确认后再加 `--write`。写回后运行 `node scripts/audit_shein_sales_logic.mjs --month YYYY-MM --date YYYY-MM-DD --offline`。

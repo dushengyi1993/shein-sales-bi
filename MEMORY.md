@@ -2,8 +2,7 @@
 
 ## 2026-05-13 产品套图提示词长期口径
 - 产品套图提示词优先服务 SHEIN 沙特市场，兼顾欧洲市场；Amazon / noon / Temu 只作视觉经验参考，除非用户明确要求对应平台版本。
-- 英文和阿文同等重要，阿文翻译/校对由 Codex / reviewer / 子代理负责；交付文档前半部分必须是完整可复制英文提示词，不夹中文说明。
-- 提示词要接近 Gemini 优秀样例的细致程度，按 `Visual Subject / Model & Styling / Scene & Atmosphere / Composition & Text` 写清人物、服装、动作、场景、光线、构图和英阿双语文案；个护/封面/场景图可更明亮性感但不色情，产品必须始终是主角。
+- 英文和阿文同等重要，交付文档前半部分必须是完整可复制英文提示词；按 `Visual Subject / Model & Styling / Scene & Atmosphere / Composition & Text` 写清人物、服装、动作、场景、光线、构图和英阿双语文案，产品始终是主角。
 - 用户只要求改提示词时，不要自动更新桌面压缩包；只有用户明确说“重新打包/更新压缩包”才更新 handoff zip。
 
 ## 评价、链接对比与动作池核心口径
@@ -22,7 +21,6 @@
 - BI 不从飞书反抓数据作为源头；源头是 SHEIN 后台抓取后的本地 JSON 与 PostgreSQL 数据仓库。
 - 新建飞书 Base 数据表后，提醒用户手动扩容到 `20000` 行；默认 `2000` 行容易写满。
 - 正常抓取、同步、日报、watchdog 和 BI 任务必须后台/隐藏运行；非必要不要打开前端浏览器窗口或命令行窗口。只有登录、验证码、人机校验、用户明确要求看前端，或必须排查浏览器交互问题时才打开可见窗口；临时验证必须优先用静态检查、HTTP/API、CDP 后台连通或 hidden/offscreen，并在验证后关闭。
-- ET 货代仓也适用“非必要不打开前端窗口”：`scripts/fetch_et_forwarder.mjs` 默认 `visible=false` 并用 `WindowStyle Hidden` 启动 Chrome；自动登录优先走 `scripts/et_login_helper.py` + OCR。只有 OCR/验证码连续失败、登录态必须人工处理、用户明确要求，或必须排查浏览器交互问题时，才允许临时加 `--visible` 打开 ET 前台窗口，处理完必须关闭。
 - Chrome 程序路径优先使用 `C:\Program Files\Google\Chrome\Application\chrome.exe`；D 盘路径只作兜底候选。店铺登录态仍在工作区 `profiles/`，不要因为程序在 C 盘就把 profile 移回 C 盘。
 
 ## 店铺、账号与统计口径
@@ -40,8 +38,7 @@
 - 判断店铺登录态/错位时，不要仅凭页面文本或页面里出现的店铺号下结论；应以实际订单接口返回、稳定日期重抓与数据库样本对账为准。当天数据会继续变化，不适合作为最终 profile 错位判断样本。
 
 ## 飞书资产与生产链路
-- 正式 Base：`https://zcnm3ts63aph.feishu.cn/base/SnnQbrAu6aLzMWsnEICcy0cKnJh`。
-- 正式 Base 标题已加暂停备注：`【多维表格同步暂停｜日报正常】SHEIN沙特半托自动驾驶座舱`；这是人工可见提醒，不代表删除 Base。
+- 正式 Base：`https://zcnm3ts63aph.feishu.cn/base/SnnQbrAu6aLzMWsnEICcy0cKnJh`，标题已加暂停备注 `【多维表格同步暂停｜日报正常】SHEIN沙特半托自动驾驶座舱`；这是人工可见提醒，不代表删除 Base。
 - 当前月主看板：`SHEIN经营看板 v3-主看板`，Dashboard ID `blkFn3qHrwdsrJyX`，读取 `看板数据-MAIN-*`。
 - 上月看板：`SHEIN经营看板 v3-上月`，Dashboard ID `blkWeyZhphgRZYim`，读取 `看板数据-PREV-*`。
 - 旧 `看板数据-DSY-*`、`看板数据-LGM-*`、`看板数据-ALL-*` 和旧 Dashboard 已清理，不要恢复为正式链路。
@@ -54,9 +51,9 @@
 - ET 和飞书日报已启用云端 Linux 入口：`scripts/cloud_et_forwarder_sync.sh` / `shein-bi-cloud-et-forwarder.timer`、`scripts/cloud_daily_lark_report.sh` / `shein-bi-cloud-daily-lark-report.timer`。ET 服务器侧使用私有 `config/et_forwarder.local.json` 或环境变量账号密码，不能复用 Windows Chrome 保存密码；ET 入仓依赖 Docker/root 环境，服务仍保留 root 执行，但验证码下载的一次性 `fetch failed` 必须进入重试而不是直接中断。飞书日报服务器侧使用独立飞书 CLI 应用/机器人与私有 `config/lark_report.json`，旧应用的 `open_id` 不能直接给新应用用，换机器人时需用 `union_id` 重新映射收件人 `open_id`。上述 secret/token/收件人完整 ID 不进 GitHub、文档或聊天。2026-05-16 云端 ET 全量同步和云端飞书日报真实发送均已验证成功。
 - 链接/业务域已启用云端 Linux 入口：`scripts/cloud_link_business_sync.sh` / `shein-bi-cloud-link-business.timer`，每天 `05:30` 顺序跑前一完整日；它通过 `scripts/restore_shein_store_session.mjs` 用服务器私有 `state/shein_browser_sessions/*.local.json` / `state/shein_webapi_sessions/*.local.json` 初始化 headless Chrome，并验证 GSP + SBN 后再抓取、入仓、体检并刷新 BI。`shein-bi-cloud-link-business.service` 必须以 `sheinops` 运行，不能用 root 写 SHEIN 店铺 profile，否则次日 `shein-bi-cloud-session-manager.service` 会因 root-owned profile 报 `EACCES`。不要再用本机隐藏补抓冒充云端日更；纯 Node 零浏览器直连只是后续优化。
 - 云端飞书日报图依赖 Linux 中文字体；服务器必须安装 `fonts-noto-cjk` / `fontconfig`，`fc-match 'Noto Sans CJK SC'` 应匹配 Noto CJK，否则 headless Chrome 生成的日报图中文会显示方框。
-- GitHub 中的 `outputs/bi-portal/index.html` / `data.json` 是灾备静态快照；服务器执行 `git reset --hard origin/main` 或类似部署后可能覆盖实时 BI 页面。每次服务器拉取/重置代码后，必须重跑 `scripts/cloud_bi_refresh.sh today intraday` 或 `shein-bi-cloud-today.service`，确认 `generatedAt` / `salesUpdatedAt` 更新到当前。
+- GitHub 中的 `outputs/bi-portal/index.html` / `data.json` 是灾备静态快照；服务器执行 `git reset --hard origin/main` 或类似部署后可能覆盖实时 BI 页面。每次服务器拉取/重置代码后，必须重跑 `scripts/cloud_bi_refresh.sh today intraday` 或 `shein-bi-cloud-today.service`，确认 `generatedAt` / `salesUpdatedAt` 更新到当前。BI 用户可见改动先在云端页面/服务输出验证，用户确认后再发布 GitHub release；本地验证不替代云端最终审核。
 - 本地历史规则仍可作回滚参考：RTV 复核耗时长是正常现象，滚动销售刷新不应等待完整 RTV；BI 门户生成必须在流水线末尾单次执行，默认 `SHEIN_BI_PORTAL_TIMEOUT_MS=900000`，不要恢复“流水线完成 / 简报 / 首次体检”多个状态点重复生成页面。
-- 飞书 Base / 看板写入仍受 `state/feishu-base-sync-paused.flag` 约束；云端恢复飞书日报或异常通知前，不要默认认为本地日报任务仍在生产运行。
+- 飞书 Base / 看板写入仍受 `state/feishu-base-sync-paused.flag` 约束；飞书日报和 watchdog 已云端化，但不要默认认为本地日报/提醒任务仍在生产运行。
 
 ## 数据与货号归并
 - 销售 / 订单历史已全量入 BI 仓库；链接、售后、履约、财务按价值和接口能力逐步补历史，库存只保留最新与滚动快照，不补开店以来全量。
@@ -99,7 +96,7 @@
 - CX 开放平台应用 `CX-椿霞SHEIN运营中台` 已在 `2026-05-10` 提交审核；ZL 开放平台应用 `ZL-紫翎SHEIN运营中台` 已在 `2026-05-28` 提交审核。两者均为半托管，业务功能选择商品管理、商品合规、订单管理、库存管理、财务管理；审核通过后再录入本地 `.local` 密钥并接入 API 双跑。
 - SHEIN OpenAPI 若返回 `openapi00002 IP is not in the whitelist`，优先检查服务器出口 IP `43.165.167.135` 是否在开放平台白名单；ZL 申请时还添加过本机出口 `38.181.81.164`，历史本机出口 `188.253.112.44` / `82.27.116.13` 只作排障参考。不要把 OpenAPI app secret、店铺 secret、openKeyId 写入聊天、文档或日志。
 - BI Portal 静态文件为 `outputs/bi-portal/index.html`，数据文件为 `outputs/bi-portal/data.json`，生成脚本为 `scripts/generate_bi_portal.mjs`；云端由 `scripts/cloud_bi_refresh.sh` 在每次刷新后生成并重启服务。
-- BI 门户 UI 冒烟检查脚本为 `scripts/check_bi_portal_ui.mjs`；本地封存后默认不要为“看一眼”重新打开本地前端，云端验证优先用 HTTP health、静态断言和日志。
+- BI 门户 UI 冒烟检查脚本为 `scripts/check_bi_portal_ui.mjs`；本地封存后默认不要为“看一眼”重新打开本地前端，云端验证优先用 HTTP health、静态断言和日志。V1 时间筛选弹窗的关键不变量：日期输入是文本 `YYYY-MM-DD`，月份切换后弹窗保持打开并更新月份，绑定根节点必须是实际弹窗而不是旧 toolbar root。
 - GitHub 私有仓库已纳入 `outputs/bi-portal/index.html` 和 `outputs/bi-portal/data.json` 作为当前 BI 门户可复用产物；`outputs/` 其他抓取结果、报表、图片、审计结果仍默认忽略，迁移生产状态时单独备份。
 - V1 仍是当前正式 BI Portal；V2.1 是独立经营 BI 预览版，由 `scripts/generate_bi_portal_v2.mjs` 生成到 `outputs/bi-portal/v2/index.html`，只读复用 `outputs/bi-portal/data.json`，用户确认前不得替换 V1 或改生产调度。
 - 自 `2026-05-14` 起，V2.1 首页（`tab=overview`）已按 V1 首页功能/操作逻辑重做，必须支持顶部筛选、四个经营矩阵、净/总销售额、净/总销量、退货/利润口径切换、日/月趋势、趋势指标切换、店铺/货号排行下钻和深浅主题；其它 V2 子页面尚未按 V1 全量复刻，不得把 V2 整站视为可替换 V1。
@@ -125,6 +122,7 @@
 ## 成本与真实利润口径
 - 详细口径见 `README.md`、`docs/data-model.md`、`docs/bi-warehouse-model.md`；首页和成本/利润页不得用 `25%` 预测利润冒充真实利润，成本未覆盖必须显示缺口。
 - 售后/退货金额优先用订单实收/预计收入字段；所有未取消售后默认计入退货/反转，最终取消后再冲回。`sales_sar <= 0` 或 `gross_revenue_sar <= 0` 的揽收前取消 / 0 金额行不计订单、销量、成本或退货派送费。
+- 2026-05-29 云端 SQL 重审确认：主利润公式未发现少扣退货；5 月利润暂高主要因售后反转率仍低、成本率较低和退货快递费较少。看月利润必须同时看订单创建月利润和售后申请月回冲影响，未成熟月份不能当最终利润，详见 `docs/bi-profit-audit-2026-03-05.md`。
 - 成本表正式文件为 `inputs/costs/成本.xlsx`；`单台总成本（SAR）` 是单批单件完整成本，入库后按完整批次加权平均，匹配键走 `dim.product_match_key()`。
 - 成本/利润页必须受顶部时间、店铺/分组、货号/SKC 筛选影响；高/低利润分界线固定 `20%`。利润分组里 `TS`、`MZ` 开店以来都归 `DSY`。
 - 真实利润核心对象：`fact.product_cost_batch`、`fact.monthly_storage_fee`、`mart.product_unit_cost_current`、`mart.profit_order_item`、`mart.profit_daily_store_product`、`mart.profit_month_group`、`mart.profit_product_summary`。
@@ -142,8 +140,8 @@
 - 飞书接口偶发 `EOF`、`HTTP 500/5000`、限流、TLS/CDN 抖动时应重试，不能发布半新半旧数据。
 
 ## ET 货代仓核心口径
-- ET 货代后台使用独立 profile；云端正式链路读取服务器私有 `config/et_forwarder.local.json` 或环境变量账号密码，不把密码写入文档、仓库、日志或聊天。
-- ET 大部分列表/明细接口必须带 `X-Requested-With: XMLHttpRequest`；仓库核心含义：`09` 可售散件、`01` 整箱、`03_RTV` 退货、`04Damaged` 破损、`06` 报废。
+- ET 货代后台使用独立 profile；云端正式链路读取服务器私有 `config/et_forwarder.local.json` 或环境变量账号密码，不把密码写入文档、仓库、日志或聊天。大部分列表/明细接口必须带 `X-Requested-With: XMLHttpRequest`。
+- ET 仓库核心含义：`09` 可售散件、`01` 整箱、`03_RTV` 退货、`04Damaged` 破损、`06` 报废。
 - ET 可增强库存、在途/到仓、发货申请单、箱明细、出库、RTV、损溢破损、物流/仓储财务复核；国内采购成本、头程/上架/下架成本、SKU 级仓储费仍以手工成本表或用户确认规则为准。
 - ET 抓取器支持分模块、列表先行和明细分块；匹配 SHEIN/ET 时宁可进待复核池，不能硬归并。自动登录由 `scripts/et_login_helper.py` + OCR 处理，失败时发飞书异常并保留上一版 ET 数据。
 - ET 货号归并：已确认 `7025 -> SK-7025A绞肉机`、`LQ榨汁机175 -> SK-JB-175离心式榨汁机`；`SM-520A电动缝纫机`、`CX1788手持搅拌器` 是新货号且当前在途；`p-DL-FZ-666/P-DL-FZ-666/p-DLFZ666/PDLFZ666` 是 FZ-666 包材，`报废` 是占位编码，不作为可售货号。未确认编码不要写死归并。

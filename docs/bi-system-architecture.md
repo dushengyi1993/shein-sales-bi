@@ -1,6 +1,6 @@
 # SHEIN BI 系统架构初版
 
-更新时间：2026-05-15
+更新时间：2026-05-29
 
 ## 结论
 
@@ -35,7 +35,7 @@ flowchart LR
    - 本机 WSL + Docker + D 盘数据盘只保留为开发、排障和短期回滚参考。
 
 5. **生产链路逐步 API 化，不冒险硬迁移**
-   - 云端首阶段生产调度只覆盖销售 WebAPI、入仓、BI Portal 生成和数据库备份；链接/业务域、ET、完整 RTV、飞书日报和 HL OpenAPI 双跑需要逐项云端化。
+   - 云端 systemd 已覆盖销售 WebAPI、入仓、BI Portal 生成、数据库备份、ET、完整 RTV、飞书日报、链接/业务域、异常通知、登录态巡检、只读问数机器人和 HL OpenAPI 双跑；后续替换链路仍必须逐项验证后切换。
    - SHEIN 销售抓取已改为 WebAPI 直连优先，Chrome 登录态保留为 Cookie/session 刷新和失败回退；官方 OpenAPI 继续并行试点，不直接覆盖生产事实表。
 
 ## 当前服务
@@ -60,17 +60,17 @@ flowchart LR
 
 访问：
 
-- 云端 BI Portal：`http://43.165.167.135/`，Nginx Basic Auth 保护。
+- 云端 BI Portal：`https://shein-bi.faceair.me/`，旧 IP `http://43.165.167.135/` 仅作兜底，Nginx Basic Auth 保护。
 - Metabase 运行在云端 Docker 内部，不在文档中写公网裸地址；本地旧 WSL 地址只作历史排障参考。
 - Metabase dashboard 编号仍可作为内部迁移参考，但不要使用旧本地 WSL IP 作为正式入口。
 
-## 当前运行态（2026-05-15）
+## 当前运行态（2026-05-29）
 
 BI 系统当前分为三层入口：
 
 1. **飞书生产链路**
    - Base 表格 / Dashboard 写入由 `state/feishu-base-sync-paused.flag` 暂停。
-   - 飞书日报已云端化并验证真实发送；异常提醒的本地历史任务已封存，后续需要云端化后再恢复自动推送。
+   - 飞书日报、异常通知 watchdog 和只读问数机器人已云端化并验证；本地历史监听/提醒任务只作回滚参考。
    - SHEIN 抓数和 BI 刷新不得因飞书 Base 暂停而中断。
    - 销售源文件当前由 WebAPI 直连优先生成；直连失败时才回退 Chrome。
 
@@ -81,7 +81,7 @@ BI 系统当前分为三层入口：
 
 3. **云端 BI 经营门户**
    - 文件入口：`outputs/bi-portal/index.html`
-   - 云端入口：`http://43.165.167.135/`
+   - 云端入口：`https://shein-bi.faceair.me/`，旧 IP `http://43.165.167.135/` 仅作兜底
    - 负责“每天先看什么、先处理什么、如何复制指令、如何标记处理状态”。
    - 本地 `127.0.0.1:8787` 和局域网入口已封存，不再作为正式入口。
    - 短期动作状态仍为服务端状态文件，长期应入 PostgreSQL，避免文件状态成为单点。
@@ -89,14 +89,15 @@ BI 系统当前分为三层入口：
 
 当前团队访问状态：
 
-- 已具备：云端公网入口、Basic Auth、服务端动作状态文件、深链接、动作清单复制、CSV 导出、系统巡检页。
-- 未完成：域名、HTTPS、多人编辑冲突控制、动作状态入库、异地备份和权限分级。
+- 已具备：云端域名/HTTPS 入口、Basic Auth、服务端动作状态文件、深链接、动作清单复制、CSV 导出、系统巡检页。
+- 未完成：多人编辑冲突控制、动作状态入库、异地备份和权限分级。
 
 当前自动任务状态：
 
 - 云端 `shein-bi-cloud-today.timer`：北京时间 `00:10/02:10/.../22:10`，刷新当天销售、入仓并生成 BI Portal。
 - 云端 `shein-bi-cloud-yesterday.timer`：每天 `00:10`，刷新前一天最终销售并复核前两天稳定日。
 - 云端 `shein-bi-db-backup.timer`：每天 `02:30`，备份业务库和 Metabase 元数据库。
+- 云端 `shein-bi-cloud-rtv-verify.timer`、`shein-bi-cloud-session-manager.timer`、`shein-bi-cloud-et-forwarder.timer`、`shein-bi-cloud-link-business.timer`、`shein-bi-cloud-openapi-hl.timer`、`shein-bi-cloud-daily-lark-report.timer`、`shein-bi-cloud-watchdog.timer` 和 `shein-bi-lark-sales-qa.service` 分别承担完整 RTV、登录态巡检、ET、链接/业务域、OpenAPI 双跑、飞书日报、异常通知和只读问数。
 - 本地 `SHEIN-BI-Daily-Pipeline-0700`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-Sales-ETForwarder-0420` 等 Windows 任务已封存禁用，仅保留为回滚/迁移参考。
 
 ## 数据分层
