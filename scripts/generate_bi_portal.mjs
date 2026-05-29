@@ -2823,7 +2823,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .range-preset-strip{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
     .range-preset-strip button{min-height:34px;border-radius:999px;border:1px solid rgba(148,163,184,.22);background:rgba(15,23,42,.66);color:#dbeafe;padding:6px 10px;cursor:pointer;font-size:12px;font-weight:850}
     .range-preset-strip button.active,.range-preset-strip button:hover{background:rgba(34,211,238,.14);border-color:rgba(34,211,238,.52);color:#fff}
-    .range-popover{position:absolute;left:0;right:auto;top:calc(100% + 12px);z-index:430;width:min(1160px,calc(100vw - 320px));min-width:900px;border:1px solid rgba(148,163,184,.22);border-radius:30px;background:linear-gradient(135deg,rgba(2,6,23,.98),rgba(15,23,42,.98));box-shadow:0 28px 80px rgba(0,0,0,.42);padding:18px}
+    .range-popover{position:fixed;left:304px;right:24px;top:100px;z-index:430;width:auto;max-width:none;min-width:0;max-height:calc(100dvh - 124px);overflow:auto;border:1px solid rgba(148,163,184,.22);border-radius:30px;background:linear-gradient(135deg,rgba(2,6,23,.98),rgba(15,23,42,.98));box-shadow:0 28px 80px rgba(0,0,0,.42);padding:18px}
     .range-popover[hidden]{display:none}
     .range-popover-grid{display:grid;grid-template-columns:1fr;gap:18px;align-items:stretch}
     .range-presets{display:grid;gap:8px;align-content:start}
@@ -2839,6 +2839,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     .calendar-input-card{border:1px solid rgba(148,163,184,.18);border-radius:20px;background:rgba(15,23,42,.48);padding:12px}
     .calendar-input-card span{display:block;color:var(--muted);font-size:12px;font-weight:900;margin-bottom:7px}
     .calendar-input-card input{min-height:48px;border-radius:15px;font-size:18px;font-weight:900}
+    .calendar-input-card input[type="text"]{font-family:var(--mono);letter-spacing:.01em}
     .range-calendar-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
     .range-calendar-panel{border:1px solid rgba(148,163,184,.18);border-radius:24px;background:linear-gradient(180deg,rgba(15,23,42,.72),rgba(30,41,59,.44));padding:16px}
     .calendar-panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
@@ -3430,7 +3431,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     body[data-theme="light"] .review-meta div{background:#f8fafc;border-color:#e2e8f0}
     .footer{color:var(--muted);font-size:12px;padding:24px 0;text-align:center}
     @media (max-width:1280px){.toolbar{grid-template-columns:minmax(190px,230px) 118px 112px 82px minmax(430px,1fr);gap:8px}body:not([data-current-tab="overview"]):not([data-current-tab="actions"]) .toolbar{grid-template-columns:minmax(154px,.7fr) minmax(154px,.7fr) minmax(72px,.3fr) 82px minmax(350px,1.4fr)}.toolbar-range-dock{grid-column:auto}.toolbar-range-dock .range-toolbar-main{grid-template-columns:minmax(178px,.48fr) minmax(250px,1fr)}body[data-current-tab="actions"] .toolbar{grid-template-columns:minmax(210px,1fr) minmax(180px,.82fr) minmax(118px,.5fr) 82px}.toolbar .action-local-filter{grid-column:1/-1}.toolbar .action-local-filter-controls{grid-template-columns:repeat(3,minmax(120px,1fr))}}
-    @media (max-width:1180px){.shell{grid-template-columns:1fr}.side{position:relative;height:auto}main{max-width:100vw}.kpis,.overview-core .kpis{grid-template-columns:1fr}.overview-core,.overview-core .group-summary-grid.two,.home-scope-toolbar,.calendar-duo,.calendar-input-row,.range-calendar-grid,.range-popover-grid,.range-toolbar-main,.page-guide-inner,.page-guide-grid,.page-decision-grid,.store-flow,.store-kpi-grid,.problem-stack,.store-action-steps,.profit-workbench-grid,.profit-tool-grid,.ops-command,.ops-question-grid,.ops-pillar-grid,.profit-command,.profit-logic,.profit-summary-grid,.rtv-hero,.rtv-flow-grid,.rtv-term-grid,.mission-grid,.workstream-grid,.profit-calculator,.selection-model{grid-template-columns:1fr}.selection-model.wide{grid-template-areas:"verdict" "matrix" "samples"}.home-scope-hint{justify-content:flex-start}.range-popover{min-width:0;width:calc(100vw - 56px);left:0}.toolbar{grid-template-columns:1fr}.range-toolbar{top:8px}.grid.cols-2,.grid.cols-3,.split,.spotlight,.sop-grid,.cause-grid,.command-room,.command-lanes,.detail-grid,.action-card.v1-action{grid-template-columns:1fr}.brief-grid{grid-template-columns:repeat(2,1fr)}.brief-grid.five{grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.coverage-board{grid-template-columns:repeat(2,minmax(0,1fr))}.hero-top{display:block}.quick-links{justify-content:flex-start;margin-top:18px}h2{font-size:30px}}
+    @media (max-width:1180px){.shell{grid-template-columns:1fr}.side{position:relative;height:auto}main{max-width:100vw}.kpis,.overview-core .kpis{grid-template-columns:1fr}.overview-core,.overview-core .group-summary-grid.two,.home-scope-toolbar,.calendar-duo,.calendar-input-row,.range-calendar-grid,.range-popover-grid,.range-toolbar-main,.page-guide-inner,.page-guide-grid,.page-decision-grid,.store-flow,.store-kpi-grid,.problem-stack,.store-action-steps,.profit-workbench-grid,.profit-tool-grid,.ops-command,.ops-question-grid,.ops-pillar-grid,.profit-command,.profit-logic,.profit-summary-grid,.rtv-hero,.rtv-flow-grid,.rtv-term-grid,.mission-grid,.workstream-grid,.profit-calculator,.selection-model{grid-template-columns:1fr}.selection-model.wide{grid-template-areas:"verdict" "matrix" "samples"}.home-scope-hint{justify-content:flex-start}.range-popover{left:28px;right:28px;top:92px;width:auto;max-height:calc(100dvh - 116px)}.toolbar{grid-template-columns:1fr}.range-toolbar{top:8px}.grid.cols-2,.grid.cols-3,.split,.spotlight,.sop-grid,.cause-grid,.command-room,.command-lanes,.detail-grid,.action-card.v1-action{grid-template-columns:1fr}.brief-grid{grid-template-columns:repeat(2,1fr)}.brief-grid.five{grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.coverage-board{grid-template-columns:repeat(2,minmax(0,1fr))}.hero-top{display:block}.quick-links{justify-content:flex-start;margin-top:18px}h2{font-size:30px}}
     @media (max-width:1180px){.action-card.v1-action{grid-template-areas:"main" "evidence" "controls"}.action-card.v1-action .action-controls{grid-template-columns:1fr}.action-card.v1-action .command-actions,.action-card.v1-action .status-actions{grid-template-columns:repeat(2,minmax(0,1fr))}.action-card.v1-action .action-meta{grid-template-columns:1fr}}
     @media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
   </style>
@@ -3790,6 +3791,10 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
             <div class="card" id="afterSalesEvidenceCard">
               <div class="card-h"><div><h3>售后 / 退货明细</h3><div class="sub">退货原因、售后状态、退款金额和对应 SKC。</div></div></div>
               <div class="card-body"><div id="afterSalesTable"></div></div>
+            </div>
+            <div class="card" id="afterSalesReviewEvidenceCard">
+              <div class="card-h"><div><h3>未落定售后待复核</h3><div class="sub">未最终退款、未取消或未签收的售后单；用于每日复核，不直接等同最终损失。</div></div></div>
+              <div class="card-body"><div id="afterSalesReviewTable"></div></div>
             </div>
             <div class="card" id="waybillEvidenceCard">
               <div class="card-h"><div><h3>发货 / 履约明细</h3><div class="sub">面单、仓库、物流商、履约状态和包裹商品。</div></div></div>
@@ -5241,7 +5246,7 @@ function isoDate(d){
 }
 function parseDateOnly(v){
   const s = String(v || '').slice(0, 10);
-  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const m = s.match(/^(\\d{4})-(\\d{2})-(\\d{2})$/);
   if (!m) return null;
   const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
   return Number.isNaN(d.getTime()) ? null : d;
@@ -5344,7 +5349,7 @@ function inSelectedRangeValue(value){
 function firstDateValue(row, keys = []){
   for (const key of keys) {
     const d = String(row?.[key] || '').slice(0, 10);
-    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+    if (/^\\d{4}-\\d{2}-\\d{2}$/.test(d)) return d;
   }
   return '';
 }
@@ -5979,6 +5984,10 @@ function calendarMonthStart(dateText){
   const d = parseDateOnly(dateText) || parseDateOnly(dataAnchorDate()) || new Date();
   return isoDate(new Date(d.getFullYear(), d.getMonth(), 1));
 }
+function addCalendarMonths(dateText, months){
+  const d = parseDateOnly(calendarMonthStart(dateText)) || parseDateOnly(dataAnchorDate()) || new Date();
+  return isoDate(new Date(d.getFullYear(), d.getMonth() + Number(months || 0), 1));
+}
 function monthTitle(dateText){
   const d = parseDateOnly(dateText) || parseDateOnly(dataAnchorDate()) || new Date();
   return d.getFullYear() + ' 年 ' + (d.getMonth() + 1) + ' 月';
@@ -6014,7 +6023,7 @@ function calendarBaseMonths(){
   const r = ensureDateRange();
   let startMonth = calendarMonthStart(state.calendarStartMonth || r.start);
   let endMonth = calendarMonthStart(state.calendarEndMonth || r.end);
-  if (startMonth === endMonth) endMonth = addMonths(startMonth, 1);
+  if (startMonth === endMonth) endMonth = addCalendarMonths(startMonth, 1);
   state.calendarStartMonth = startMonth;
   state.calendarEndMonth = endMonth;
   return {startMonth, endMonth};
@@ -6025,7 +6034,7 @@ function dateRangeToolbar(){
   const presetLabel = RANGE_PRESETS.find(([key]) => key === state.rangePreset)?.[1] || '自定义';
   return '<div class="range-toolbar" id="rangeToolbar">'+
     '<div class="range-toolbar-main">'+
-      '<button type="button" class="range-button" id="rangePopupToggle" aria-expanded="false" aria-controls="rangePopover">'+
+      '<button type="button" class="range-button" id="rangePopupToggle" aria-expanded="'+(state.rangePopoverOpen ? 'true' : 'false')+'" aria-controls="rangePopover">'+
         '<span>时间筛选</span><div><strong>'+escapeHtml(selectedRangeText())+'</strong><small>点击打开大号双日历；排行榜、趋势、货号销售均按这个时间段重算。</small></div>'+
       '</button>'+
       '<div class="range-preset-strip" aria-label="快捷时间">'+
@@ -6033,10 +6042,10 @@ function dateRangeToolbar(){
       '</div>'+
       '<div class="range-current-tags"><span class="tag info">'+escapeHtml(presetLabel)+'</span></div>'+
     '</div>'+
-    '<div class="range-popover" id="rangePopover" hidden>'+
+    '<div class="range-popover" id="rangePopover" '+(state.rangePopoverOpen ? '' : 'hidden')+'>'+
       '<div class="calendar-input-row">'+
-        '<label class="calendar-input-card"><span>开始日期</span><input id="rangeStart" type="date" value="'+escapeHtml(r.start)+'" /></label>'+
-        '<label class="calendar-input-card"><span>结束日期</span><input id="rangeEnd" type="date" value="'+escapeHtml(r.end)+'" /></label>'+
+        '<label class="calendar-input-card"><span>开始日期</span><input id="rangeStart" type="text" inputmode="numeric" pattern="\\d{4}-\\d{2}-\\d{2}" placeholder="YYYY-MM-DD" value="'+escapeHtml(r.start)+'" /></label>'+
+        '<label class="calendar-input-card"><span>结束日期</span><input id="rangeEnd" type="text" inputmode="numeric" pattern="\\d{4}-\\d{2}-\\d{2}" placeholder="YYYY-MM-DD" value="'+escapeHtml(r.end)+'" /></label>'+
       '</div>'+
       '<div class="range-calendar-grid">'+renderCalendarPanel(months.startMonth, 'start')+renderCalendarPanel(months.endMonth, 'end')+'</div>'+
       '<div class="calendar-pick-note">左侧选择开始日期，右侧选择结束日期；也可以直接改上方日期框。快捷按钮在外层，常用时间段不用打开弹窗。</div>'+
@@ -6056,20 +6065,25 @@ function renderTopRangeToolbar(){
   if (isActionFilterTab()) {
     dock.hidden = true;
     dock.innerHTML = '';
+    document.querySelectorAll('body > #rangePopover').forEach(el => el.remove());
     return;
   }
   dock.hidden = false;
+  document.querySelectorAll('body > #rangePopover').forEach(el => el.remove());
   dock.innerHTML = dateRangeToolbar();
 }
 function bindRangeToolbarControls(root = document){
   const rangeToggle = root.querySelector ? root.querySelector('#rangePopupToggle') : $('rangePopupToggle');
   const rangePopover = root.querySelector ? root.querySelector('#rangePopover') : $('rangePopover');
+  if (rangePopover && rangePopover.parentElement !== document.body) document.body.appendChild(rangePopover);
+  const popoverRoot = rangePopover || root;
   if (rangeToggle && rangePopover && !rangeToggle.dataset.boundRangeToggle) {
     rangeToggle.dataset.boundRangeToggle = '1';
     rangeToggle.addEventListener('click', e => {
       e.stopPropagation();
-      rangePopover.hidden = !rangePopover.hidden ? true : false;
-      rangeToggle.setAttribute('aria-expanded', String(!rangePopover.hidden));
+      state.rangePopoverOpen = !state.rangePopoverOpen;
+      rangePopover.hidden = !state.rangePopoverOpen;
+      rangeToggle.setAttribute('aria-expanded', String(state.rangePopoverOpen));
     });
     rangePopover.addEventListener('click', e => e.stopPropagation());
   }
@@ -6080,16 +6094,17 @@ function bindRangeToolbarControls(root = document){
       e.stopPropagation();
       const preset = btn.dataset.rangePreset || 'last30';
       const r = computePresetRange(preset, calendarToday());
+      state.rangePopoverOpen = false;
       state.rangePreset = preset;
       state.startDate = r.start;
       state.endDate = r.end;
       state.calendarStartMonth = calendarMonthStart(r.start);
-      state.calendarEndMonth = calendarMonthStart(r.end === r.start ? addMonths(r.start, 1) : r.end);
+      state.calendarEndMonth = calendarMonthStart(r.end === r.start ? addCalendarMonths(r.start, 1) : r.end);
       renderAll();
     });
   });
-  const startInput = root.querySelector ? root.querySelector('#rangeStart') : $('rangeStart');
-  const endInput = root.querySelector ? root.querySelector('#rangeEnd') : $('rangeEnd');
+  const startInput = popoverRoot.querySelector ? popoverRoot.querySelector('#rangeStart') : $('rangeStart');
+  const endInput = popoverRoot.querySelector ? popoverRoot.querySelector('#rangeEnd') : $('rangeEnd');
   if (startInput && !startInput.dataset.boundRangeInput) {
     startInput.dataset.boundRangeInput = '1';
     startInput.addEventListener('change', e => {
@@ -6108,7 +6123,7 @@ function bindRangeToolbarControls(root = document){
       renderAll();
     });
   }
-  root.querySelectorAll?.('[data-calendar-date]').forEach(btn => {
+  popoverRoot.querySelectorAll?.('[data-calendar-date]').forEach(btn => {
     if (btn.dataset.boundCalendarDate) return;
     btn.dataset.boundCalendarDate = '1';
     btn.addEventListener('click', e => {
@@ -6132,15 +6147,16 @@ function bindRangeToolbarControls(root = document){
       renderAll();
     });
   });
-  root.querySelectorAll?.('[data-calendar-shift]').forEach(btn => {
+  popoverRoot.querySelectorAll?.('[data-calendar-shift]').forEach(btn => {
     if (btn.dataset.boundCalendarShift) return;
     btn.dataset.boundCalendarShift = '1';
     btn.addEventListener('click', e => {
       e.stopPropagation();
       const role = btn.dataset.calendarShift || 'start';
       const delta = Number(btn.dataset.calendarDelta || 0);
-      if (role === 'end') state.calendarEndMonth = addMonths(state.calendarEndMonth || state.endDate, delta);
-      else state.calendarStartMonth = addMonths(state.calendarStartMonth || state.startDate, delta);
+      state.rangePopoverOpen = true;
+      if (role === 'end') state.calendarEndMonth = addCalendarMonths(state.calendarEndMonth || state.endDate, delta);
+      else state.calendarStartMonth = addCalendarMonths(state.calendarStartMonth || state.startDate, delta);
       renderAll();
     });
   });
@@ -12505,4 +12521,3 @@ main().catch(err => {
   console.error(err);
   process.exit(1);
 });
-
