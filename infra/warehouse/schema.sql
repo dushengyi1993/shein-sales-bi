@@ -2874,6 +2874,54 @@ SELECT
   return_package_statuses
 FROM base;
 
+CREATE OR REPLACE VIEW mart.product_display_by_match_key AS
+WITH sales_candidate AS (
+  SELECT
+    dim.product_match_key(standard_goods_sn) AS match_key,
+    standard_goods_sn AS display_standard_goods_sn,
+    'profit_order_item'::text AS display_source,
+    0 AS source_priority,
+    max(created_date)::date AS last_seen_date,
+    count(*)::bigint AS row_count,
+    sum(abs(coalesce(net_revenue_sar, gross_revenue_sar, 0)))::numeric AS amount_weight
+  FROM mart.profit_order_item
+  WHERE coalesce(standard_goods_sn,'') <> ''
+  GROUP BY dim.product_match_key(standard_goods_sn), standard_goods_sn
+),
+product_candidate AS (
+  SELECT
+    dim.product_match_key(standard_goods_sn) AS match_key,
+    standard_goods_sn AS display_standard_goods_sn,
+    'dim_product'::text AS display_source,
+    1 AS source_priority,
+    max(last_seen_date)::date AS last_seen_date,
+    0::bigint AS row_count,
+    0::numeric AS amount_weight
+  FROM dim.product
+  WHERE coalesce(standard_goods_sn,'') <> ''
+  GROUP BY dim.product_match_key(standard_goods_sn), standard_goods_sn
+),
+candidates AS (
+  SELECT * FROM sales_candidate
+  UNION ALL
+  SELECT * FROM product_candidate
+)
+SELECT DISTINCT ON (match_key)
+  match_key,
+  display_standard_goods_sn,
+  display_source,
+  last_seen_date
+FROM candidates
+WHERE coalesce(match_key,'') <> ''
+  AND coalesce(display_standard_goods_sn,'') <> ''
+ORDER BY
+  match_key,
+  source_priority,
+  last_seen_date DESC NULLS LAST,
+  row_count DESC,
+  amount_weight DESC NULLS LAST,
+  display_standard_goods_sn;
+
 CREATE OR REPLACE VIEW mart.et_storage_fee_daily AS
 WITH policy AS (
   SELECT * FROM dim.storage_fee_policy WHERE policy_key = 'et_default'
@@ -3081,7 +3129,7 @@ SELECT
   w.date,
   w.source_snapshot_date,
   w.stock_snapshot_method,
-  w.standard_goods_sn,
+  coalesce(pd.display_standard_goods_sn, w.standard_goods_sn) AS standard_goods_sn,
   w.match_key,
   w.warehouse_name,
   w.on_hand_qty AS quantity,
@@ -3095,7 +3143,9 @@ SELECT
   ('volume_stock_days_estimated:' || w.stock_snapshot_method)::text AS storage_allocation_method
 FROM weighted w
 JOIN daily_weight dw ON dw.date = w.date
-JOIN fee_daily f ON f.date = w.date;
+JOIN fee_daily f ON f.date = w.date
+LEFT JOIN mart.product_display_by_match_key pd
+  ON pd.match_key = w.match_key;
 
 CREATE OR REPLACE VIEW mart.storage_fee_product_daily AS
 WITH policy AS (
@@ -3182,7 +3232,7 @@ detail_rows AS (
     e.date,
     e.source_snapshot_date,
     e.stock_snapshot_method,
-    e.standard_goods_sn,
+    coalesce(pd.display_standard_goods_sn, e.standard_goods_sn, e.match_key) AS standard_goods_sn,
     e.match_key,
     e.warehouse_name,
     sum(e.quantity) AS quantity,
@@ -3197,15 +3247,17 @@ detail_rows AS (
     e.storage_allocation_method::text AS storage_allocation_method
   FROM detail_expanded e
   CROSS JOIN policy p
+  LEFT JOIN mart.product_display_by_match_key pd
+    ON pd.match_key = e.match_key
   WHERE coalesce(e.standard_goods_sn, e.match_key, '') <> ''
-  GROUP BY e.date, e.source_snapshot_date, e.stock_snapshot_method, e.standard_goods_sn, e.match_key, e.warehouse_name, e.storage_allocation_method
+  GROUP BY e.date, e.source_snapshot_date, e.stock_snapshot_method, coalesce(pd.display_standard_goods_sn, e.standard_goods_sn, e.match_key), e.match_key, e.warehouse_name, e.storage_allocation_method
 ),
 fallback_rows AS (
   SELECT
     e.date,
     e.source_snapshot_date,
     e.stock_snapshot_method,
-    e.standard_goods_sn,
+    coalesce(pd.display_standard_goods_sn, e.standard_goods_sn, e.match_key) AS standard_goods_sn,
     e.match_key,
     e.warehouse_name,
     e.quantity,
@@ -3219,6 +3271,8 @@ fallback_rows AS (
     e.actual_allocated_fee_sar,
     e.storage_allocation_method
   FROM mart.storage_fee_product_daily_estimated e
+  LEFT JOIN mart.product_display_by_match_key pd
+    ON pd.match_key = e.match_key
   LEFT JOIN detail_day d
     ON d.date = e.date
    AND coalesce(d.detail_rows,0) > 0
@@ -3233,12 +3287,12 @@ CREATE OR REPLACE VIEW mart.storage_fee_product_store_daily AS
 WITH product_fee AS (
   SELECT
     date,
-    dim.product_match_key(standard_goods_sn) AS match_key,
+    coalesce(nullif(match_key,''), dim.product_match_key(standard_goods_sn)) AS match_key,
     max(standard_goods_sn) AS standard_goods_sn,
     sum(actual_allocated_fee_sar) AS product_storage_fee_sar,
     string_agg(DISTINCT storage_allocation_method, ' / ') AS storage_fee_method
   FROM mart.storage_fee_product_daily
-  GROUP BY date, dim.product_match_key(standard_goods_sn)
+  GROUP BY date, coalesce(nullif(match_key,''), dim.product_match_key(standard_goods_sn))
 ),
 store_product_sales AS (
   SELECT
@@ -3531,14 +3585,14 @@ LEFT JOIN mart.product_unit_cost_by_match_key c
  AND c.match_key = dim.product_match_key(p.standard_goods_sn)
 LEFT JOIN (
   SELECT
-    dim.product_match_key(standard_goods_sn) AS match_key,
+    coalesce(nullif(match_key,''), dim.product_match_key(standard_goods_sn)) AS match_key,
     sum(actual_allocated_fee_sar) AS storage_fee_sar,
     string_agg(DISTINCT storage_allocation_method, ' / ') AS storage_fee_method,
     count(DISTINCT date) AS storage_fee_days,
     min(source_snapshot_date) AS storage_source_snapshot_min,
     max(source_snapshot_date) AS storage_source_snapshot_max
   FROM mart.storage_fee_product_daily
-  GROUP BY dim.product_match_key(standard_goods_sn)
+  GROUP BY coalesce(nullif(match_key,''), dim.product_match_key(standard_goods_sn))
 ) ps
   ON ps.match_key <> ''
  AND ps.match_key = dim.product_match_key(p.standard_goods_sn)
