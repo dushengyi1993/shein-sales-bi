@@ -848,6 +848,15 @@ dates AS (
       SELECT max(updated_at)
       FROM fact.monthly_storage_fee
     ),
+    'etStorageUpdatedAt', (
+      SELECT max(updated_at)
+      FROM fact.et_income_bill
+      WHERE sort_name = '仓储费'
+    ),
+    'etStorageDetailUpdatedAt', (
+      SELECT max(updated_at)
+      FROM fact.et_storage_fee_product_detail
+    ),
     'etUpdatedAt', (
       SELECT max(fetched_at)
       FROM raw.et_fetch_batch
@@ -1488,8 +1497,12 @@ profit_daily_store_product AS (
       round(sum(coalesce(rtv_received_quantity,0))::numeric, 0) AS rtv_received_quantity,
       round(sum(coalesce(rtv_received_to_09_quantity,0))::numeric, 0) AS rtv_received_to_09_quantity,
       round(sum(coalesce(profit_before_storage_sar,0))::numeric, 2) AS profit_before_storage_sar,
+      round(sum(coalesce(storage_fee_sar,0))::numeric, 2) AS storage_fee_sar,
+      round(sum(coalesce(profit_after_storage_sar, profit_before_storage_sar,0))::numeric, 2) AS profit_after_storage_sar,
       round(sum(coalesce(profit_if_rtv_received_resellable_sar,0))::numeric, 2) AS profit_if_rtv_received_resellable_sar,
       round(sum(coalesce(profit_if_rtv_09_resellable_sar,0))::numeric, 2) AS profit_if_rtv_09_resellable_sar,
+      round(sum(coalesce(profit_if_rtv_received_resellable_after_storage_sar, profit_if_rtv_received_resellable_sar, profit_before_storage_sar,0))::numeric, 2) AS profit_if_rtv_received_resellable_after_storage_sar,
+      round(sum(coalesce(profit_if_rtv_09_resellable_after_storage_sar, profit_if_rtv_09_resellable_sar, profit_before_storage_sar,0))::numeric, 2) AS profit_if_rtv_09_resellable_after_storage_sar,
       round(sum(coalesce(known_net_revenue_sar,0))::numeric, 2) AS known_net_revenue_sar,
       round(sum(coalesce(known_gross_revenue_sar,0))::numeric, 2) AS known_gross_revenue_sar,
       round(sum(coalesce(missing_cost_revenue_sar,0))::numeric, 2) AS missing_cost_revenue_sar,
@@ -1499,9 +1512,13 @@ profit_daily_store_product AS (
       CASE WHEN sum(coalesce(net_revenue_sar,0)) FILTER (WHERE missing_cost_lines = 0) > 0
         THEN round((sum(coalesce(profit_before_storage_sar,0)) / nullif(sum(coalesce(known_net_revenue_sar,0)),0))::numeric, 4)
         ELSE NULL END AS profit_margin_before_storage,
+      CASE WHEN sum(coalesce(net_revenue_sar,0)) FILTER (WHERE missing_cost_lines = 0) > 0
+        THEN round((sum(coalesce(profit_after_storage_sar, profit_before_storage_sar,0)) / nullif(sum(coalesce(known_net_revenue_sar,0)),0))::numeric, 4)
+        ELSE NULL END AS profit_margin_after_storage,
       CASE WHEN sum(coalesce(net_revenue_sar,0)) > 0
         THEN round((sum(coalesce(known_net_revenue_sar,0)) / nullif(sum(coalesce(net_revenue_sar,0)),0))::numeric, 4)
-        ELSE NULL END AS cost_coverage_revenue_rate
+        ELSE NULL END AS cost_coverage_revenue_rate,
+      string_agg(DISTINCT storage_fee_method, ' / ') FILTER (WHERE coalesce(storage_fee_method,'') <> '') AS storage_fee_method
     FROM mart.profit_daily_store_product
     WHERE coalesce(standard_goods_sn,'') <> ''
     GROUP BY date, store_key, group_key, standard_goods_sn
@@ -1540,7 +1557,7 @@ profit_month_group AS (
   ) t
 ),
 profit_product_summary AS (
-  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY profit_before_storage_sar DESC NULLS LAST, gross_revenue_sar DESC, standard_goods_sn), '[]'::jsonb) AS data
+  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY profit_after_storage_sar DESC NULLS LAST, gross_revenue_sar DESC, standard_goods_sn), '[]'::jsonb) AS data
   FROM (
     SELECT
       standard_goods_sn,
@@ -1554,9 +1571,18 @@ profit_product_summary AS (
       round(rtv_received_quantity::numeric, 0) AS rtv_received_quantity,
       round(rtv_received_to_09_quantity::numeric, 0) AS rtv_received_to_09_quantity,
       round(profit_before_storage_sar::numeric, 2) AS profit_before_storage_sar,
+      round(storage_fee_sar::numeric, 2) AS storage_fee_sar,
+      round(profit_after_storage_sar::numeric, 2) AS profit_after_storage_sar,
       round(profit_if_rtv_received_resellable_sar::numeric, 2) AS profit_if_rtv_received_resellable_sar,
       round(profit_if_rtv_09_resellable_sar::numeric, 2) AS profit_if_rtv_09_resellable_sar,
+      round(profit_if_rtv_received_resellable_after_storage_sar::numeric, 2) AS profit_if_rtv_received_resellable_after_storage_sar,
+      round(profit_if_rtv_09_resellable_after_storage_sar::numeric, 2) AS profit_if_rtv_09_resellable_after_storage_sar,
       round(profit_margin_before_storage::numeric, 4) AS profit_margin_before_storage,
+      round(profit_margin_after_storage::numeric, 4) AS profit_margin_after_storage,
+      storage_fee_method,
+      storage_fee_days,
+      storage_source_snapshot_min,
+      storage_source_snapshot_max,
       round(missing_cost_revenue_sar::numeric, 2) AS missing_cost_revenue_sar,
       round(missing_cost_quantity::numeric, 0) AS missing_cost_quantity,
       missing_cost_lines,
@@ -1589,8 +1615,49 @@ profit_product_summary AS (
       last_cost_imported_at,
       round(cost_coverage_revenue_rate::numeric, 4) AS cost_coverage_revenue_rate
     FROM mart.profit_product_summary
-    ORDER BY profit_before_storage_sar DESC NULLS LAST, gross_revenue_sar DESC, standard_goods_sn
+    ORDER BY profit_after_storage_sar DESC NULLS LAST, gross_revenue_sar DESC, standard_goods_sn
     LIMIT 500
+  ) t
+),
+product_storage_daily AS (
+  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY date, standard_goods_sn), '[]'::jsonb) AS data
+  FROM (
+    SELECT
+      date,
+      standard_goods_sn,
+      round(sum(coalesce(actual_allocated_fee_sar,0))::numeric, 2) AS storage_fee_sar,
+      string_agg(DISTINCT storage_allocation_method, ' / ') FILTER (WHERE coalesce(storage_allocation_method,'') <> '') AS storage_fee_method,
+      min(source_snapshot_date) AS source_snapshot_date_min,
+      max(source_snapshot_date) AS source_snapshot_date_max
+    FROM mart.storage_fee_product_daily
+    GROUP BY date, standard_goods_sn
+  ) t
+),
+product_store_storage_daily AS (
+  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY date, store_key, standard_goods_sn), '[]'::jsonb) AS data
+  FROM (
+    SELECT
+      date,
+      store_key,
+      group_key,
+      standard_goods_sn,
+      round(sum(coalesce(storage_fee_sar,0))::numeric, 2) AS storage_fee_sar,
+      string_agg(DISTINCT storage_fee_method, ' / ') FILTER (WHERE coalesce(storage_fee_method,'') <> '') AS storage_fee_method
+    FROM mart.storage_fee_product_store_daily
+    GROUP BY date, store_key, group_key, standard_goods_sn
+  ) t
+),
+store_storage_daily AS (
+  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY date, store_key), '[]'::jsonb) AS data
+  FROM (
+    SELECT
+      date,
+      store_key,
+      group_key,
+      round(sum(coalesce(allocated_storage_fee_sar,0))::numeric, 2) AS storage_fee_sar,
+      string_agg(DISTINCT allocation_method, ' / ') FILTER (WHERE coalesce(allocation_method,'') <> '') AS storage_fee_method
+    FROM mart.storage_fee_store_daily
+    GROUP BY date, store_key, group_key
   ) t
 ),
 inventory_depletion_products AS (
@@ -2429,7 +2496,10 @@ SELECT jsonb_build_object(
   'profit', jsonb_build_object(
     'dailyStoreProducts', (SELECT data FROM profit_daily_store_product),
     'monthGroups', (SELECT data FROM profit_month_group),
-    'products', (SELECT data FROM profit_product_summary)
+    'products', (SELECT data FROM profit_product_summary),
+    'productStorageDaily', (SELECT data FROM product_storage_daily),
+    'productStoreStorageDaily', (SELECT data FROM product_store_storage_daily),
+    'storeStorageDaily', (SELECT data FROM store_storage_daily)
   ),
   'inventoryDepletion', jsonb_build_object(
     'products', (SELECT data FROM inventory_depletion_products),
@@ -5616,7 +5686,7 @@ function salesAmountKey(){ return state.salesMode === 'gross' ? 'gross_sales_sar
 function quantityKey(){ return state.qtyMode === 'gross' ? 'gross_quantity' : 'quantity'; }
 function ordersKey(){ return state.qtyMode === 'gross' ? 'gross_orders' : 'orders'; }
 function profitValueKey(){ return state.profitMode === 'rtv' ? 'profitReceivedResellableSar' : 'profitSar'; }
-function profitRowValueKey(){ return state.profitMode === 'rtv' ? 'profit_if_rtv_received_resellable_sar' : 'profit_before_storage_sar'; }
+function profitRowValueKey(){ return state.profitMode === 'rtv' ? 'profit_if_rtv_received_resellable_after_storage_sar' : 'profit_after_storage_sar'; }
 function afterSalesDateKey(){ return state.returnsMode === 'order' ? 'order_created_date' : 'request_time'; }
 function metricModeToggle(key, items){
   const cur = state[key];
@@ -5689,7 +5759,33 @@ function profitDailyRows(start, end, scopeValue = state.store, respectProduct = 
     return true;
   });
 }
-function profitSummaryForRows(rows){
+function profitStorageForScope(start, end, scopeValue = state.store, respectProduct = true){
+  const q = respectProduct ? productScopeQuery() : '';
+  const scope = storeFilterKind(scopeValue);
+  let source = DATA.profit?.storeStorageDaily || [];
+  let useStoreScope = true;
+  if (q) {
+    source = scope.type === 'all'
+      ? (DATA.profit?.productStorageDaily || [])
+      : (DATA.profit?.productStoreStorageDaily || []);
+    useStoreScope = scope.type !== 'all';
+  }
+  let total = 0;
+  let matched = 0;
+  const methods = new Set();
+  for (const r of source || []) {
+    const d = String(r.date || '').slice(0, 10);
+    if (!d || d < start || d > end) continue;
+    if (useStoreScope && !storeMatchesScope(r, scopeValue)) continue;
+    if (q && !productQueryMatch(r, q)) continue;
+    total += Number(r.storage_fee_sar || 0);
+    matched += 1;
+    const method = String(r.storage_fee_method || '').trim();
+    if (method) methods.add(method);
+  }
+  return {total, matched, method:Array.from(methods).join(' / ') || 'none'};
+}
+function profitSummaryForRows(rows, opts = {}){
   const out = {
     grossRevenueSar:0,
     netRevenueSar:0,
@@ -5699,6 +5795,8 @@ function profitSummaryForRows(rows){
     rtv09RecoverableCostSar:0,
     rtvReceivedQuantity:0,
     rtvReceivedTo09Quantity:0,
+    storageFeeSar:0,
+    profitBeforeStorageSar:0,
     profitSar:0,
     profitReceivedResellableSar:0,
     profit09ResellableSar:0,
@@ -5710,6 +5808,9 @@ function profitSummaryForRows(rows){
     orders:0,
     quantity:0
   };
+  const range = opts.start && opts.end ? {start:opts.start, end:opts.end} : ensureDateRange();
+  const scopeValue = opts.scopeValue ?? state.store;
+  const respectProduct = opts.respectProduct !== false;
   for (const r of rows || []) {
     out.grossRevenueSar += Number(r.gross_revenue_sar || 0);
     out.netRevenueSar += Number(r.net_revenue_sar || 0);
@@ -5719,7 +5820,7 @@ function profitSummaryForRows(rows){
     out.rtv09RecoverableCostSar += Number(r.rtv_09_recoverable_cost_sar || 0);
     out.rtvReceivedQuantity += Number(r.rtv_received_quantity || 0);
     out.rtvReceivedTo09Quantity += Number(r.rtv_received_to_09_quantity || 0);
-    out.profitSar += Number(r.profit_before_storage_sar || 0);
+    out.profitBeforeStorageSar += Number(r.profit_before_storage_sar || 0);
     out.profitReceivedResellableSar += Number(r.profit_if_rtv_received_resellable_sar ?? r.profit_before_storage_sar ?? 0);
     out.profit09ResellableSar += Number(r.profit_if_rtv_09_resellable_sar ?? r.profit_before_storage_sar ?? 0);
     out.knownGrossRevenueSar += Number(r.known_net_revenue_sar ?? r.known_gross_revenue_sar ?? 0);
@@ -5730,13 +5831,20 @@ function profitSummaryForRows(rows){
     out.orders += Number(r.orders || 0);
     out.quantity += Number(r.quantity || 0);
   }
+  const storage = profitStorageForScope(range.start, range.end, scopeValue, respectProduct);
+  const bridgeFallback = rows && rows.length && storage.matched === 0 ? rows.reduce((sum, r) => sum + Number(r.storage_fee_sar || 0), 0) : 0;
+  out.storageFeeSar = storage.matched > 0 ? storage.total : bridgeFallback;
+  out.storageFeeMethod = storage.matched > 0 ? storage.method : (bridgeFallback ? 'store_product_sales_bridge:fallback' : 'none');
+  out.profitSar = out.profitBeforeStorageSar - out.storageFeeSar;
+  out.profitReceivedResellableSar -= out.storageFeeSar;
+  out.profit09ResellableSar -= out.storageFeeSar;
   out.costCoverageRate = out.netRevenueSar > 0 ? out.knownGrossRevenueSar / out.netRevenueSar : null;
   out.margin = out.netRevenueSar > 0 && out.knownGrossRevenueSar > 0 ? out.profitSar / out.netRevenueSar : null;
   out.hasAnyCost = out.knownGrossRevenueSar > 0 || out.productCostSar > 0;
   return out;
 }
 function homeProfitForScope(start, end, scopeValue = ''){
-  return profitSummaryForRows(profitDailyRows(start, end, scopeValue, true));
+  return profitSummaryForRows(profitDailyRows(start, end, scopeValue, true), {start, end, scopeValue, respectProduct:true});
 }
 function profitDisplayHtml(summary, opts = {}){
   const s = summary || {};
@@ -5744,7 +5852,7 @@ function profitDisplayHtml(summary, opts = {}){
     return '<span class="pending-profit">待成本表</span><span class="coverage-note">成本覆盖 0%，先导入成本表</span>';
   }
   const cls = Number(s.profitSar || 0) < 0 ? 'danger' : 'positive';
-  return '<span class="'+cls+'">'+escapeHtml(fmt.format(Number(s.profitSar || 0)))+'</span><span class="coverage-note">覆盖 '+pct(s.costCoverageRate)+' · 未扣月仓储</span>';
+  return '<span class="'+cls+'">'+escapeHtml(fmt.format(Number(s.profitSar || 0)))+'</span><span class="coverage-note">覆盖 '+pct(s.costCoverageRate)+' · 已扣仓储 '+money(s.storageFeeSar)+'</span>';
 }
 function profitMarginHtml(summary){
   const s = summary || {};
@@ -5833,7 +5941,7 @@ function renderKpis(){
     card('当前时段真实利润', profitLabel,
       metricModeToggle('profitMode', [{value:'loss', label:'全损保守'}, {value:'rtv', label:'RTV入仓测算'}])+
       matrix(3, head(['范围','SAR','RMB','利润率'])+rows.map(r => label(r.label)+value(profitDisplayHtml(r.profit))+value(r.profit?.hasAnyCost ? escapeHtml(fmt.format(profitMoney(r) * RMB_RATE)) : '<span class="pending-profit">待成本表</span>')+profitMarginHtml(r.profit)).join(''), 'profit-matrix'),
-      '全损保守：退货营收为0并扣成本；RTV入仓测算：ET已收退件按可二售回收成本测算。月仓储费只用于月度总利润，不拆到单货号。', 'profit');
+      '全损保守：退货营收为0并扣成本；RTV入仓测算：ET已收退件按可二售回收成本测算。仓储费已进入真实利润，货号层优先使用 ET 当日仓储费下载明细。', 'profit');
   document.querySelectorAll('[data-overview-jump]').forEach(btn => btn.addEventListener('click', e => {
     if (e.target?.classList?.contains('help') || e.target?.closest?.('[data-metric-mode-key]')) return;
     kpiJump(btn.dataset.overviewJump || 'business');
@@ -6452,15 +6560,16 @@ function buildProfitMonthSeries(){
       const d = String(r.date || '').slice(0, 10);
       const id = monthId(d);
       if (!id) continue;
-      const row = buckets.get(id) || {id, label:monthPeriodLabel(id, range), scope:0, total:0, DSY:0, LGM:0, coverageNumerator:0, coverageDenominator:0};
-      const v = Number(r.profit_before_storage_sar || 0);
+      const row = buckets.get(id) || {id, label:monthPeriodLabel(id, range), scope:0, total:0, DSY:0, LGM:0, storage:0, coverageNumerator:0, coverageDenominator:0};
+      const v = Number(r.profit_after_storage_sar ?? r.profit_before_storage_sar ?? 0);
       row.scope += v;
       row.total += v;
+      row.storage += Number(r.storage_fee_sar || 0);
       row.coverageNumerator += Number(r.known_net_revenue_sar ?? r.known_gross_revenue_sar ?? 0);
       row.coverageDenominator += Number(r.net_revenue_sar || 0);
       buckets.set(id, row);
     }
-    return Array.from(buckets.values()).sort((a,b)=>String(a.id).localeCompare(String(b.id))).map(r => ({...r, scope:Math.round(r.scope*100)/100, total:Math.round(r.total*100)/100, coverageRate:r.coverageDenominator ? r.coverageNumerator/r.coverageDenominator : null, beforeStorage:true}));
+    return Array.from(buckets.values()).sort((a,b)=>String(a.id).localeCompare(String(b.id))).map(r => ({...r, scope:Math.round(r.scope*100)/100, total:Math.round(r.total*100)/100, storage:Math.round(r.storage*100)/100, coverageRate:r.coverageDenominator ? r.coverageNumerator/r.coverageDenominator : null, beforeStorage:false}));
   }
   const rows = (DATA.profit?.monthGroups || []).filter(r => {
     const m = String(r.month_start || '').slice(0, 7);
@@ -6506,7 +6615,7 @@ function aggregateProfitMonthRowsFromDailyRows(rows){
       known_net_revenue_sar:0,
       known_gross_revenue_sar:0,
       gross_revenue_sar:0,
-      beforeStorage:true
+      beforeStorage:false
     };
     row.net_revenue_sar += Number(r.net_revenue_sar || 0);
     row.product_cost_sar += Number(r.product_cost_sar || 0);
@@ -6515,9 +6624,10 @@ function aggregateProfitMonthRowsFromDailyRows(rows){
     row.rtv_09_recoverable_cost_sar += Number(r.rtv_09_recoverable_cost_sar || 0);
     row.rtv_received_quantity += Number(r.rtv_received_quantity || 0);
     row.rtv_received_to_09_quantity += Number(r.rtv_received_to_09_quantity || 0);
-    row.profit_after_storage_sar += Number(r.profit_before_storage_sar || 0);
-    row.profit_if_rtv_received_resellable_after_storage_sar += Number(r.profit_if_rtv_received_resellable_sar ?? r.profit_before_storage_sar ?? 0);
-    row.profit_if_rtv_09_resellable_after_storage_sar += Number(r.profit_if_rtv_09_resellable_sar ?? r.profit_before_storage_sar ?? 0);
+    row.allocated_storage_fee_sar += Number(r.storage_fee_sar || 0);
+    row.profit_after_storage_sar += Number(r.profit_after_storage_sar ?? r.profit_before_storage_sar ?? 0);
+    row.profit_if_rtv_received_resellable_after_storage_sar += Number(r.profit_if_rtv_received_resellable_after_storage_sar ?? r.profit_if_rtv_received_resellable_sar ?? r.profit_before_storage_sar ?? 0);
+    row.profit_if_rtv_09_resellable_after_storage_sar += Number(r.profit_if_rtv_09_resellable_after_storage_sar ?? r.profit_if_rtv_09_resellable_sar ?? r.profit_before_storage_sar ?? 0);
     row.known_net_revenue_sar += Number(r.known_net_revenue_sar ?? r.known_gross_revenue_sar ?? 0);
     row.known_gross_revenue_sar += Number(r.known_gross_revenue_sar || 0);
     row.gross_revenue_sar += Number(r.gross_revenue_sar || 0);
@@ -6584,11 +6694,11 @@ function renderProfitLineChart(){
   const hitRects = series.map((r,i) => {
     const prev = i === 0 ? padL : (xFor(i - 1) + xFor(i)) / 2;
     const next = i === series.length - 1 ? (w - padR) : (xFor(i) + xFor(i + 1)) / 2;
-    const tip = [r.label].concat(keys.map(k => labels[k] + '：' + money(r[k]))).concat(['成本覆盖：' + pct(r.coverageRate), r.beforeStorage ? '口径：未扣月仓储' : '口径：已扣分摊月仓储']).join('\\n');
+    const tip = [r.label].concat(keys.map(k => labels[k] + '：' + money(r[k]))).concat(['成本覆盖：' + pct(r.coverageRate), '口径：已扣仓储']).join('\\n');
     return '<rect class="chart-hit" x="'+prev.toFixed(1)+'" y="'+padT+'" width="'+Math.max(8, next-prev).toFixed(1)+'" height="'+(h-padT-padB)+'" data-tip="'+escapeHtml(tip)+'"></rect>';
   }).join('');
   const latest = series.at(-1) || {};
-  const note = series.some(x => x.beforeStorage) ? '当前筛选到单店或货号，展示未扣仓储费的商品经营利润；仓储费只在月度总计/分组口径按净成交额分摊扣除。' : '月度总计与分组已扣按净成交额分摊的月仓储费。';
+  const note = '当前筛选展示含仓储利润；店铺/分组按净销售额分摊，货号层优先使用 ET 仓储费下载明细，缺明细日期才使用体积库存天数兜底。';
   const sliceNote = monthSliceNote(range);
   return '<div class="line-chart">'+
     '<svg viewBox="0 0 '+w+' '+h+'" role="img" aria-label="月利润趋势">'+gridTicks+
@@ -6735,11 +6845,11 @@ function renderFilters(){
   $('businessDate').textContent = dataStamp(DATA.dates?.businessDate, DATA.dates?.businessUpdatedAt);
   $('linkDate').textContent = dataStamp(DATA.dates?.linkDate, DATA.dates?.linkUpdatedAt);
   if ($('manualCostDate')) {
-    const costTs = DATA.dates?.manualCostFileUpdatedAt || DATA.dates?.manualCostUpdatedAt || DATA.dates?.manualStorageUpdatedAt || '';
+    const costTs = DATA.dates?.manualCostFileUpdatedAt || DATA.dates?.manualCostUpdatedAt || DATA.dates?.etStorageDetailUpdatedAt || DATA.dates?.etStorageUpdatedAt || DATA.dates?.manualStorageUpdatedAt || '';
     $('manualCostDate').textContent = costTs ? formatStamp(costTs) : '-';
     const costFiles = Array.isArray(DATA.dates?.manualCostFiles) ? DATA.dates.manualCostFiles : [];
     const costFileLine = costFiles.length ? costFiles.map(file => String(file.file || '') + '：' + shortTs(file.updatedAt)).join('\\n') : '-';
-    $('manualCostDate').title = '成本文件修改：' + (DATA.dates?.manualCostFileUpdatedAt ? shortTs(DATA.dates.manualCostFileUpdatedAt) : '-') + '\\n成本入仓刷新：' + (DATA.dates?.manualCostUpdatedAt ? shortTs(DATA.dates.manualCostUpdatedAt) : '-') + '\\n月仓储费：' + (DATA.dates?.manualStorageUpdatedAt ? shortTs(DATA.dates.manualStorageUpdatedAt) : '-') + '\\n\\n文件明细：\\n' + costFileLine;
+    $('manualCostDate').title = '成本文件修改：' + (DATA.dates?.manualCostFileUpdatedAt ? shortTs(DATA.dates.manualCostFileUpdatedAt) : '-') + '\\n成本入仓刷新：' + (DATA.dates?.manualCostUpdatedAt ? shortTs(DATA.dates.manualCostUpdatedAt) : '-') + '\\nET仓储费总账：' + (DATA.dates?.etStorageUpdatedAt ? shortTs(DATA.dates.etStorageUpdatedAt) : '-') + '\\nET仓储费明细：' + (DATA.dates?.etStorageDetailUpdatedAt ? shortTs(DATA.dates.etStorageDetailUpdatedAt) : '-') + '\\n旧手工月仓储费：' + (DATA.dates?.manualStorageUpdatedAt ? shortTs(DATA.dates.manualStorageUpdatedAt) : '-') + '\\n\\n文件明细：\\n' + costFileLine;
   }
   if ($('etDate')) {
     $('etDate').textContent = DATA.dates?.etUpdatedAt ? formatStamp(DATA.dates.etUpdatedAt) : '-';
@@ -10431,11 +10541,16 @@ function renderSelectionBenchmark(samples){
 function aggregateProfitProductsFromDailyRows(rows){
   const metaMap = profitCostMetaByProduct();
   const groups = new Map();
-  for (const r of rows || []) {
-    const key = String(r.standard_goods_sn || '').trim();
-    if (!key) continue;
-    const g = groups.get(key) || {
-      standard_goods_sn:key,
+  const range = ensureDateRange();
+  const scope = storeFilterKind();
+  const useStoreBridge = scope.type !== 'all';
+  function ensureGroup(key){
+    const clean = String(key || '').trim();
+    if (!clean) return null;
+    const existing = groups.get(clean);
+    if (existing) return existing;
+    const g = {
+      standard_goods_sn:clean,
       gross_revenue_sar:0,
       net_revenue_sar:0,
       quantity:0,
@@ -10455,8 +10570,17 @@ function aggregateProfitProductsFromDailyRows(rows){
       missing_cost_revenue_sar:0,
       missing_cost_quantity:0,
       missing_cost_lines:0,
-      reversal_lines:0
+      reversal_lines:0,
+      storage_fee_sar:0,
+      storageMethods:new Set()
     };
+    groups.set(clean, g);
+    return g;
+  }
+  for (const r of rows || []) {
+    const key = String(r.standard_goods_sn || '').trim();
+    if (!key) continue;
+    const g = ensureGroup(key);
     g.gross_revenue_sar += Number(r.gross_revenue_sar || 0);
     g.net_revenue_sar += Number(r.net_revenue_sar || 0);
     g.quantity += Number(r.quantity || 0);
@@ -10477,15 +10601,32 @@ function aggregateProfitProductsFromDailyRows(rows){
     g.missing_cost_quantity += Number(r.missing_cost_quantity || 0);
     g.missing_cost_lines += Number(r.missing_cost_lines || 0);
     g.reversal_lines += Number(r.reversal_lines || 0);
-    groups.set(key, g);
+  }
+  const q = productScopeQuery();
+  const storageRows = useStoreBridge ? (DATA.profit?.productStoreStorageDaily || []) : (DATA.profit?.productStorageDaily || []);
+  for (const r of storageRows) {
+    const d = String(r.date || '').slice(0, 10);
+    if (!d || d < range.start || d > range.end) continue;
+    if (useStoreBridge && !storeMatchesScope(r)) continue;
+    if (q && !productQueryMatch(r, q)) continue;
+    const g = ensureGroup(r.standard_goods_sn);
+    if (!g) continue;
+    const fee = Number(r.storage_fee_sar || 0);
+    g.storage_fee_sar += fee;
+    const method = String(r.storage_fee_method || '').trim();
+    if (method) g.storageMethods.add(method);
   }
   return Array.from(groups.values()).map(g => {
     const meta = metaMap.get(g.standard_goods_sn) || {};
     const coverage = g.net_revenue_sar > 0 ? g.known_net_revenue_sar / g.net_revenue_sar : null;
     const margin = g.net_revenue_sar > 0 && g.known_net_revenue_sar > 0 ? g.profit_before_storage_sar / g.net_revenue_sar : null;
+    const profitAfterStorage = g.profit_before_storage_sar - Number(g.storage_fee_sar || 0);
+    const marginAfterStorage = g.known_net_revenue_sar > 0 ? profitAfterStorage / g.known_net_revenue_sar : null;
+    const storageMethods = Array.from(g.storageMethods || []);
+    const {storageMethods: _storageMethods, ...plain} = g;
     return {
       ...meta,
-      ...g,
+      ...plain,
       unit_cost_sar: meta.unit_cost_sar,
       complete_batch_count: meta.complete_batch_count,
       ignored_batch_count: meta.ignored_batch_count,
@@ -10495,7 +10636,12 @@ function aggregateProfitProductsFromDailyRows(rows){
       avg_weight_kg: meta.avg_weight_kg,
       last_cost_imported_at: meta.last_cost_imported_at,
       cost_coverage_revenue_rate: coverage,
-      profit_margin_before_storage: margin
+      profit_margin_before_storage: margin,
+      profit_after_storage_sar: profitAfterStorage,
+      profit_if_rtv_received_resellable_after_storage_sar: g.profit_if_rtv_received_resellable_sar - Number(g.storage_fee_sar || 0),
+      profit_if_rtv_09_resellable_after_storage_sar: g.profit_if_rtv_09_resellable_sar - Number(g.storage_fee_sar || 0),
+      profit_margin_after_storage: marginAfterStorage,
+      storage_fee_method: storageMethods.join(' / ') || 'none'
     };
   });
 }
@@ -10534,7 +10680,7 @@ function renderProfitCalculator(){
       '<label>预估退货/派送失败率 %<input id="calcReturnRate" type="number" step="0.1" value="5"></label>'+
     '</div>'+
     '<div class="selection-output" id="calcProfitOutput"></div>'+
-    '<p class="sub">计算口径：单位成本=(采购+头程+其它)/1.8；退货期望成本=退货率 × (单位成本 + 13.88 SAR)，退货营收按 0 保守处理。体积目前只用于选品参考，不直接扣仓储到单品。</p>';
+    '<p class="sub">计算口径：单位成本=(采购+头程+其它)/1.8；退货期望成本=退货率 × (单位成本 + 13.88 SAR)，退货营收按 0 保守处理。仓储费在真实利润中优先按 ET 明细扣到货号。</p>';
   return html;
 }
 function updateProfitCalculator(){
@@ -10566,8 +10712,8 @@ function bindProfitCalculator(){
   updateProfitCalculator();
 }
 function profitActionText(r){
-  const margin = Number(r.profit_margin_before_storage ?? 0);
-  const profit = Number(r.profit_before_storage_sar || 0);
+  const margin = Number(r.profit_margin_after_storage ?? r.profit_margin_before_storage ?? 0);
+  const profit = Number(r.profit_after_storage_sar ?? r.profit_before_storage_sar ?? 0);
   const reversal = Number(r.reversal_lines || 0);
   const coverage = Number(r.cost_coverage_revenue_rate || 0);
   if (coverage < .9) return '<span class="tag mid">先补成本</span><br><span class="muted">覆盖 '+escapeHtml(pct(coverage))+'</span>';
@@ -10620,28 +10766,28 @@ function renderProfitPage(){
           '<div><b>收入</b><span>净成交 '+escapeHtml(money(summary.netRevenueSar))+'</span></div>'+
           '<div><b>成本</b><span>商品成本 '+escapeHtml(money(summary.productCostSar))+'</span></div>'+
           '<div><b>退货</b><span>反转 '+escapeHtml(num(summary.reversalLines))+' 行 · 退货费 '+escapeHtml(money(summary.returnFeeSar))+'</span></div>'+
-          '<div><b>仓储</b><span>单店/货号未拆；月总盘扣除</span></div>'+
+          '<div><b>仓储</b><span>已扣 '+escapeHtml(money(summary.storageFeeSar))+'；明细优先</span></div>'+
         '</div>'+
       '</section>'+
       '<section>'+
     '<div class="profit-summary-grid">'+
-      profitKpiCard('当前真实利润', hasCost ? money(summary.profitSar) : '待成本表', hasCost ? ('RMB '+fmt.format(Number(summary.profitSar||0)*RMB_RATE)+' · 未扣月仓储') : '导入成本表后自动替换首页粗估', hasCost ? (Number(summary.profitSar||0) >= 0 ? 'good' : 'bad') : 'warn')+
-      profitKpiCard('利润率', hasCost ? pct(summary.margin) : '-', '当前筛选口径；单店/货号不拆仓储费', hasCost ? (Number(summary.margin||0) >= .25 ? 'good' : Number(summary.margin||0) >= .1 ? 'warn' : 'bad') : 'warn')+
+      profitKpiCard('当前真实利润', hasCost ? money(summary.profitSar) : '待成本表', hasCost ? ('RMB '+fmt.format(Number(summary.profitSar||0)*RMB_RATE)+' · 已扣仓储 '+money(summary.storageFeeSar)) : '导入成本表后自动替换首页粗估', hasCost ? (Number(summary.profitSar||0) >= 0 ? 'good' : 'bad') : 'warn')+
+      profitKpiCard('利润率', hasCost ? pct(summary.margin) : '-', '当前筛选口径；已扣仓储费', hasCost ? (Number(summary.margin||0) >= .25 ? 'good' : Number(summary.margin||0) >= .1 ? 'warn' : 'bad') : 'warn')+
       profitKpiCard('成本覆盖', pct(summary.costCoverageRate), '缺成本净成交 '+money(summary.missingCostRevenueSar), Number(summary.costCoverageRate||0) >= .9 ? 'good' : 'warn')+
       profitKpiCard('退货保守扣减', money(summary.returnFeeSar), '反转 '+num(summary.reversalLines)+' 行；仅真实退货退款扣 13.88 SAR', Number(summary.returnFeeSar||0) ? 'bad' : 'good')+
       profitKpiCard('RTV 已收二售测算', hasCost ? money(summary.profitReceivedResellableSar) : '-', '比保守口径多 '+money(summary.rtvRecoverableCostSar)+'；已收 '+num(summary.rtvReceivedQuantity)+' 件', Number(summary.rtvRecoverableCostSar||0) ? 'good' : 'warn')+
     '</div>'+
     '<div class="store-flow">'+
-      '<div class="store-verdict"><h3>口径说明</h3><p>商品/店铺/货号层先算“未扣仓储费”的真实商品经营利润；月度总利润再扣月仓储费。仓储费是全仓总数，不能硬拆到每个货号。</p>'+
+      '<div class="store-verdict"><h3>口径说明</h3><p>仓储费已进入真实利润。店铺/DSY/LGM 按净销售额分摊；货号层优先使用 ET 当日仓储费下载明细，缺明细日期才按体积库存天数估算兜底。</p>'+
         '<div class="store-action-steps">'+
           '<div class="store-step"><b>成本批次</b><p>同货号完整批次总成本 / 发货总数；缺头程运输费的批次不计入均摊。</p></div>'+
           '<div class="store-step"><b>退货反转</b><p>退货/仅退款/派件失败营收按 0；仅真实退货退款额外扣 13.88 SAR。</p></div>'+
-          '<div class="store-step"><b>月仓储费</b><p>只算月总利润；DSY/LGM 按当月净成交额比例分摊，不拆到单货号。</p></div>'+
+          '<div class="store-step"><b>仓储费</b><p>ET 显示金额按 RMB，实际减半后折 SAR；货号明细优先，兜底口径必须标注。</p></div>'+
         '</div></div>'+
       '<div class="store-kpi-grid">'+
         '<div class="store-kpi"><span>已覆盖成本货号</span><strong>'+num(costProducts)+'</strong><small>完整批次</small></div>'+
         '<div class="store-kpi"><span>缺成本货号</span><strong>'+num(missingProducts)+'</strong><small>补表优先</small></div>'+
-        '<div class="store-kpi"><span>仓储费月份</span><strong>'+num(storageMonths)+'</strong><small>只进月总利润</small></div>'+
+        '<div class="store-kpi"><span>仓储费月份</span><strong>'+num(storageMonths)+'</strong><small>已进真实利润</small></div>'+
         '<div class="store-kpi"><span>成本覆盖净成交</span><strong>'+money(summary.knownGrossRevenueSar)+'</strong><small>可算利润部分</small></div>'+
         '<div class="store-kpi"><span>商品成本</span><strong>'+money(summary.productCostSar)+'</strong><small>完整批次均摊</small></div>'+
         '<div class="store-kpi"><span>净营收</span><strong>'+money(summary.netRevenueSar)+'</strong><small>退货营收按 0</small></div>'+
@@ -10653,7 +10799,7 @@ function renderProfitPage(){
       if (!(m >= monthId(cr.start) && m <= monthId(cr.end))) return false;
       return isScopedProfit || storeMatchesScope({store_key:'', group_key:r.group_key || ''});
     });
-  $('profitTrendPanel').innerHTML = renderProfitLineChart() + sectionTitleHtml('月度利润明细', isScopedProfit ? '当前店铺/分组/货号筛选下的月度商品经营利润；未拆月仓储费。' : '总计和分组月利润；仓储费按 DSY/LGM 净成交额比例分摊。') + table(profitMonthDetailRows, [
+  $('profitTrendPanel').innerHTML = renderProfitLineChart() + sectionTitleHtml('月度利润明细', isScopedProfit ? '当前店铺/分组/货号筛选下的含仓储真实利润。' : '总计和分组月利润；仓储费按 DSY/LGM 净成交额比例分摊。') + table(profitMonthDetailRows, [
       ['月份/组', r => '<b>'+escapeHtml(String(r.month_start || '').slice(0,7))+'</b><br><span class="tag info">'+escapeHtml(r.group_key || '-')+'</span>'],
       ['净营收', r => money(r.net_revenue_sar), 'num'],
       ['商品成本', r => money(r.product_cost_sar), 'num'],
@@ -10670,19 +10816,21 @@ function renderProfitPage(){
     '</div>';
   const profitMarginSplit = .20;
   const rankedProfitProducts = products
-    .filter(r => Number(r.cost_coverage_revenue_rate || 0) >= .9 && Number(r.net_revenue_sar || 0) > 0 && r.profit_margin_before_storage != null)
-    .sort((a,b)=>Number(b.profit_margin_before_storage ?? -999)-Number(a.profit_margin_before_storage ?? -999));
-  const winners = rankedProfitProducts.filter(r => Number(r.profit_margin_before_storage || 0) >= profitMarginSplit);
-  const losers = rankedProfitProducts.filter(r => Number(r.profit_margin_before_storage || 0) < profitMarginSplit)
-    .sort((a,b)=>Number(a.profit_margin_before_storage ?? 999)-Number(b.profit_margin_before_storage ?? 999));
+    .filter(r => Number(r.cost_coverage_revenue_rate || 0) >= .9 && Number(r.net_revenue_sar || 0) > 0 && (r.profit_margin_after_storage ?? r.profit_margin_before_storage) != null)
+    .sort((a,b)=>Number(b.profit_margin_after_storage ?? b.profit_margin_before_storage ?? -999)-Number(a.profit_margin_after_storage ?? a.profit_margin_before_storage ?? -999));
+  const winners = rankedProfitProducts.filter(r => Number(r.profit_margin_after_storage ?? r.profit_margin_before_storage ?? 0) >= profitMarginSplit);
+  const losers = rankedProfitProducts.filter(r => Number(r.profit_margin_after_storage ?? r.profit_margin_before_storage ?? 0) < profitMarginSplit)
+    .sort((a,b)=>Number(a.profit_margin_after_storage ?? a.profit_margin_before_storage ?? 999)-Number(b.profit_margin_after_storage ?? b.profit_margin_before_storage ?? 999));
   const gapRows = products.filter(r => Number(r.missing_cost_revenue_sar || 0) > 0 || (Number(r.net_revenue_sar || 0) > 0 && Number(r.cost_coverage_revenue_rate || 0) < .9))
     .sort((a,b)=>Number(b.missing_cost_revenue_sar||0)-Number(a.missing_cost_revenue_sar||0));
   const profitCols = [
     ['货号', r => '<button class="link-like" data-profit-product="'+escapeHtml(r.standard_goods_sn || '')+'"><b>'+escapeHtml(productDisplayName(r))+'</b></button>'],
     ['净成交/原销售', r => money(r.net_revenue_sar)+'<br><span class="muted">原 '+money(r.gross_revenue_sar)+'</span>', 'num'],
     ['成本/退货费', r => money(r.product_cost_sar)+'<br><span class="muted">退货费 '+money(r.return_delivery_fee_sar)+'</span>', 'num'],
-    ['利润/率', r => money(r.profit_before_storage_sar)+'<br><span class="muted">'+pct(r.profit_margin_before_storage)+'</span>', 'num'],
-    ['RTV二售测算', r => money(r.profit_if_rtv_received_resellable_sar ?? r.profit_before_storage_sar)+'<br><span class="muted">已收 '+num(r.rtv_received_quantity || 0)+' 件</span>', 'num'],
+    ['仓储费', r => money(r.storage_fee_sar)+'<br><span class="muted">'+escapeHtml(r.storage_fee_method || 'none')+'</span>', 'num'],
+    ['含仓储利润/率', r => money(r.profit_after_storage_sar ?? r.profit_before_storage_sar)+'<br><span class="muted">'+pct(r.profit_margin_after_storage ?? r.profit_margin_before_storage)+'</span>', 'num'],
+    ['未扣仓储利润', r => money(r.profit_before_storage_sar)+'<br><span class="muted">'+pct(r.profit_margin_before_storage)+'</span>', 'num'],
+    ['RTV二售测算', r => money(r.profit_if_rtv_received_resellable_after_storage_sar ?? r.profit_if_rtv_received_resellable_sar ?? r.profit_before_storage_sar)+'<br><span class="muted">已收 '+num(r.rtv_received_quantity || 0)+' 件</span>', 'num'],
     ['单位成本', r => r.unit_cost_sar == null ? '-' : money(r.unit_cost_sar), 'num'],
     ['建议动作', r => profitActionText(r)]
   ];
@@ -11610,10 +11758,10 @@ const PAGE_GUIDES = {
   },
   profit: {
     title: '成本 / 利润',
-    purpose: '回答一个问题：真实利润到底从哪里来？先补成本覆盖，再看月度总利润、分组利润和货号利润，仓储费只影响月总盘。',
+    purpose: '回答一个问题：真实利润到底从哪里来？先补成本覆盖，再看月度总利润、分组利润和货号利润，仓储费已进入真实利润。',
     steps: [
       ['先看覆盖', '成本表缺口会直接影响真实利润可信度；缺头程运费的批次会被保留但不计入单位成本。'],
-      ['再看月利润', '月度利润会扣商品成本、退货派送费和按净成交额分摊的月仓储费。'],
+      ['再看月利润', '月度利润会扣商品成本、退货派送费和按净成交额分摊的 ET 仓储费。'],
       ['最后做选品', '用单位成本、体积、售价和退货率模拟利润率，指导后续选品。']
     ],
     actions: [
@@ -11855,10 +12003,10 @@ function renderPageDecisionSummaries(){
   const missingProducts = prProducts.filter(r => Number(r.missing_cost_revenue_sar || 0) > 0 || Number(r.cost_coverage_revenue_rate || 0) < .9).length;
   sectionDecisionBlock('profit', {
     title:'成本 / 利润决策摘要',
-    subtitle:'当前时间段：' + rangeText + '。真实利润跟随顶部时间、店铺/分组和货号筛选；月仓储费只在月度总盘扣除。',
+    subtitle:'当前时间段：' + rangeText + '。真实利润跟随顶部时间、店铺/分组和货号筛选；仓储费已进入真实利润。',
     tag: pr.hasAnyCost ? ('覆盖 ' + pct(pr.costCoverageRate)) : '等待成本表',
     cards:[
-      {label:'当前真实利润', value:pr.hasAnyCost ? money(pr.profitSar) : '待成本表', hint:'净营收 - 商品成本 - 退货派送费；单店/货号口径未扣月仓储。', level:pr.hasAnyCost ? (Number(pr.profitSar||0) >= 0 ? 'good' : 'high') : 'mid'},
+      {label:'当前真实利润', value:pr.hasAnyCost ? money(pr.profitSar) : '待成本表', hint:'净营收 - 商品成本 - 退货派送费 - 仓储费。', level:pr.hasAnyCost ? (Number(pr.profitSar||0) >= 0 ? 'good' : 'high') : 'mid'},
       {label:'成本覆盖', value:pct(pr.costCoverageRate), hint:'只有有成本的净成交额才计入真实利润；缺成本不能硬算。', level:Number(pr.costCoverageRate||0) >= .9 ? 'good' : 'mid'},
       {label:'成本货号', value:num(costProducts) + ' 个', hint:'缺成本货号 '+num(missingProducts)+' 个；导入成本表后自动更新。', level:costProducts ? 'good' : 'mid'},
       {label:'退货费用', value:money(pr.returnFeeSar), hint:'退货或派送失败每单加 13.88 SAR，按保守毁损处理。', level:Number(pr.returnFeeSar||0) ? 'high' : 'good'}

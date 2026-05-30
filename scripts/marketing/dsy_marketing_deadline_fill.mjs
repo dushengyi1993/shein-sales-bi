@@ -13,7 +13,9 @@ import {normalizeGoodsSnDetailed} from '../../lib/product_sku_normalizer.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
 const STORES = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8')).stores;
-const COSTS = JSON.parse(await fs.readFile(path.join(ROOT, 'tmp', 'mbrs', 'marketing-cost-map.json'), 'utf8')).costMap;
+const COST_DOC = JSON.parse(await fs.readFile(path.join(ROOT, 'tmp', 'mbrs', 'marketing-cost-map.json'), 'utf8'));
+const COSTS = COST_DOC.costMap || {};
+const TRUE_COSTS = COST_DOC.trueCostMap || {};
 const OUT_DIR = path.join(ROOT, 'tmp', 'mbrs', 'deadline-fill-results');
 await fs.mkdir(OUT_DIR, {recursive: true});
 
@@ -698,7 +700,12 @@ function computeTarget(storeKey, activityId, row) {
   }
   let cost = null;
   if (base === null) {
+    const trueCostInfo = keys.map(k => TRUE_COSTS[k]).find(Boolean);
+    if (trueCostInfo && Number.isFinite(Number(trueCostInfo.trueUnitCostSar))) {
+      cost = Number(trueCostInfo.trueUnitCostSar);
+    }
     for (const k of keys) {
+      if (cost !== null && Number.isFinite(cost)) break;
       if (COSTS[k] !== undefined) {
         cost = Number(COSTS[k]);
         break;

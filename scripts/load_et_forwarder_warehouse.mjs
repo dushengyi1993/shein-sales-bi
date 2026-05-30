@@ -11,6 +11,8 @@ import {normalizeGoodsSnDetailed} from '../lib/product_sku_normalizer.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORE_PREFIX_RE = /^(DL|DX|FY|LQ|NM|HL|JY|ZL|TS|MZ|CX|YJ|XL|QY|QH)[-_]?0*/i;
+const STORAGE_BILLING_DISCOUNT = 0.5;
+const STORAGE_SAR_TO_RMB = 1.8;
 
 function parseArgs(argv) {
   const args = {
@@ -45,6 +47,22 @@ function num(v) {
   if (v === null || v === undefined || v === '') return null;
   const n = Number(String(v).replace(/,/g, '').replace(/%$/, ''));
   return Number.isFinite(n) ? n : null;
+}
+
+function numLoose(v) {
+  const direct = num(v);
+  if (direct !== null) return direct;
+  const m = String(v ?? '').replace(/,/g, '').match(/-?\d+(?:\.\d+)?/);
+  if (!m) return null;
+  const n = Number(m[0]);
+  return Number.isFinite(n) ? n : null;
+}
+
+function dateOnly(v) {
+  const s = String(v || '').trim();
+  const m = s.match(/\d{4}[-/]\d{1,2}[-/]\d{1,2}/);
+  if (!m) return null;
+  return m[0].split(/[-/]/).map((part, i) => i === 0 ? part.padStart(4, '0') : part.padStart(2, '0')).join('-');
 }
 
 function ts(v) {
@@ -240,6 +258,7 @@ function rawRowsForEndpoint(batch, endpoint, endpointData, sourceFile) {
     box_damaged: ['DLNO'],
     income_bill: ['IncomeBillId'],
     income_bill_item: ['__parent_id', 'SkuCode', 'GoodsTitle'],
+    storage_fee_product_detail: ['__parent_id', '日期', 'SKU(箱)号', '__source_row_no'],
     income_summary: ['Sort', 'SortName', 'CountryId'],
     income_payment: ['FId', 'PayId'],
     freight_rate: ['TransportId', 'CountryId', 'SortId'],
@@ -288,12 +307,13 @@ const C = {
   box_damaged: ['dlno','batch_id','box_id','oversea_id','ship_order_id','title','allocate_id','allocate_name','allocate_status','box_damaged_status','box_damaged_name','sort_name','barcode','standard_goods_sn','match_key','sku_qty','check_qty','differ','create_time','raw_summary'],
   income_bill: ['income_bill_id','batch_id','client_from_id','oversea_id','source_type','sort','sort_name','status','status_name','freight','tariff','other_income','cq_money','in_money','out_money','pay_id','pay_sort','ship_time','create_time','push_time','first_date','billing_period_date','remark','waybill_code','raw_summary'],
   income_bill_item: ['unique_key','batch_id','income_bill_id','goods_title','sku_code','standard_goods_sn','match_key','quantity','raw_summary'],
+  storage_fee_product_detail: ['unique_key','batch_id','income_bill_id','fee_date','warehouse_name','storage_type','storage_code','sku_code','standard_goods_sn','match_key','quantity','volume_m3_per_unit','volume_m3_total','rate_rmb_per_m3_day','storage_fee_rmb_before_discount','member_discount','shown_fee_rmb','actual_fee_rmb','actual_fee_sar','allocation_method','source_file','source_row_no','download_url','content_type','raw_summary'],
   income_summary: ['unique_key','batch_id','target_date','sort','sort_name','country_id','country_name','total_freight','total_tariff','total_other_income','total_cq_money','total_fee','total_in_money','total_out_money','total_unmatured','total_expire','total_overdue','raw_summary'],
   income_payment: ['f_id','batch_id','income_bill_id','pay_id','pay_sort','pay_money','currency','status','status_name','create_time','pay_time','invoice_no','raw_summary'],
   freight_rate: ['unique_key','batch_id','transport_id','transport_title','country_id','country_title','sort_id','sort_title','sort_status','tier_a','tier_b','tier_c','tier_d','tier_e','raw_summary'],
 };
 
-function mapEndpoint(endpoint, batch, endpointData) {
+function mapEndpoint(endpoint, batch, endpointData, sourceFile = '') {
   const rows = endpointData.rows || [];
   const b = batch.batchId;
   const d = batch.targetDate;
@@ -355,6 +375,48 @@ function mapEndpoint(endpoint, batch, endpointData) {
       return {table: 'fact.et_income_bill', columns: C.income_bill, conflict: ['income_bill_id'], rows: rows.map(r => ({income_bill_id: text(r.IncomeBillId), batch_id: b, client_from_id: text(r.ClientFromId), oversea_id: text(r.OverseaId), source_type: text(r.SourceType), sort: boolStatus(r.Sort), sort_name: text(r.SortName), status: boolStatus(r.Status), status_name: text(r.StatusName), freight: num(r.Freight), tariff: num(r.Tariff), other_income: num(r.OtherIncome), cq_money: num(r.CqMoney), in_money: num(r.InMoney), out_money: num(r.OutMoney), pay_id: text(r.PayId), pay_sort: text(r.PaySort), ship_time: ts(r.ShipTime), create_time: ts(r.Createtime), push_time: ts(r.PushTime), first_date: ts(r.FirstDate), billing_period_date: ts(r.BillingPeriodDate), remark: text(r.Remark), waybill_code: text(r.WaybillCode), raw_summary: compactJson(r)}))};
     case 'income_bill_item':
       return {table: 'fact.et_income_bill_item', columns: C.income_bill_item, conflict: ['unique_key'], rows: rows.map((r, i) => { const p = baseProduct({...r, SkuCode: r.SkuCode || r.Barcode}); const parent = text(r.__parent_id || r.IncomeBillId); return {unique_key: `${parent}:${r.SkuCode || r.GoodsTitle || i}`, batch_id: b, income_bill_id: parent, goods_title: text(r.GoodsTitle), sku_code: text(r.SkuCode), standard_goods_sn: p.standard_goods_sn, match_key: p.match_key, quantity: num(r.Quantity), raw_summary: compactJson(r)}; })};
+    case 'storage_fee_product_detail':
+      return {table: 'fact.et_storage_fee_product_detail', columns: C.storage_fee_product_detail, conflict: ['unique_key'], rows: rows.map((r, i) => {
+        const parent = text(r.__parent_id || r.IncomeBillId);
+        const storageCode = text(r['SKU(箱)号'] || r.StorageCode || r.SkuCode).trim();
+        const storageType = text(r['仓储方式'] || r.StorageType);
+        const feeDate = dateOnly(r['日期']) || dateOnly(r.__bill_ship_time) || dateOnly(r.__bill_create_time) || d;
+        const memberDiscountRaw = text(r['会员折扣'] || r.MemberDiscount).trim();
+        if (!parent || !feeDate || !storageCode || memberDiscountRaw === '合计') return null;
+        const isBox = /整箱/.test(storageType);
+        const p = isBox ? {standard_goods_sn: '', match_key: matchKey(storageCode)} : baseProduct({SkuCode: storageCode, Barcode: storageCode});
+        const shown = numLoose(r['折后总价'] ?? r.ShownFeeRmb);
+        const actualRmb = shown === null ? null : shown * STORAGE_BILLING_DISCOUNT;
+        const actualSar = actualRmb === null ? null : actualRmb / STORAGE_SAR_TO_RMB;
+        const sourceRow = Number(r.__source_row_no || i + 2);
+        return {
+          unique_key: `${parent}:${feeDate}:${storageCode}:${sourceRow || i + 2}`,
+          batch_id: b,
+          income_bill_id: parent,
+          fee_date: feeDate,
+          warehouse_name: text(r['仓库'] || r.WarehouseName),
+          storage_type: storageType,
+          storage_code: storageCode,
+          sku_code: isBox ? '' : storageCode,
+          standard_goods_sn: p.standard_goods_sn,
+          match_key: p.match_key,
+          quantity: numLoose(r['数量'] ?? r.Quantity),
+          volume_m3_per_unit: numLoose(r['每件(箱)体积(m3)'] ?? r.VolumeM3PerUnit),
+          volume_m3_total: numLoose(r['体积小计(m3)'] ?? r.VolumeM3Total),
+          rate_rmb_per_m3_day: numLoose(r['仓储费单价(元/m3*天)'] ?? r.RateRmbPerM3Day),
+          storage_fee_rmb_before_discount: numLoose(r['仓储费小计'] ?? r.StorageFeeRmbBeforeDiscount),
+          member_discount: numLoose(memberDiscountRaw),
+          shown_fee_rmb: shown,
+          actual_fee_rmb: actualRmb,
+          actual_fee_sar: actualSar,
+          allocation_method: isBox ? 'download_detail_box_unexpanded' : 'download_detail',
+          source_file: sourceFile,
+          source_row_no: Number.isFinite(sourceRow) ? sourceRow : i + 2,
+          download_url: text(r.__download_url),
+          content_type: text(r.__download_content_type),
+          raw_summary: compactJson(r),
+        };
+      }).filter(Boolean)};
     case 'income_summary':
       return {table: 'fact.et_income_bill_summary', columns: C.income_summary, conflict: ['unique_key'], rows: rows.map((r, i) => ({unique_key: `${b}:${r.Sort || r.SortName || i}:${r.CountryId || ''}`, batch_id: b, target_date: d, sort: boolStatus(r.Sort), sort_name: text(r.SortName), country_id: text(r.CountryId), country_name: text(r.CountryName), total_freight: num(r.TotalFreight), total_tariff: num(r.TotalTariff), total_other_income: num(r.TotalOtherIncome), total_cq_money: num(r.TotalCqMoney), total_fee: num(r.TotalFee), total_in_money: num(r.TotalInMoney), total_out_money: num(r.TotalOutMoney), total_unmatured: num(r.TotalUnmatured), total_expire: num(r.TotalExpire), total_overdue: num(r.TotalOverdue), raw_summary: compactJson(r)}))};
     case 'income_payment':
@@ -392,7 +454,7 @@ async function main() {
     if (!fssync.existsSync(full)) continue;
     const data = await readJson(full);
     rawRows.push(...rawRowsForEndpoint(manifest, endpoint, data, rel(full)));
-    const mapped = mapEndpoint(endpoint, manifest, data);
+    const mapped = mapEndpoint(endpoint, manifest, data, rel(full));
     if (mapped && mapped.rows.length) structured.push(mapped);
   }
   results.push(await upsertRows(args, 'raw.et_endpoint_row', C.raw_row, ['row_key'], rawRows));

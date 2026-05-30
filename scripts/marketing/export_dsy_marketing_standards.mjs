@@ -12,6 +12,7 @@ const TMP_DIR = path.join(ROOT, 'tmp', 'mbrs', 'standards');
 const STORES = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8')).stores;
 const COST_DOC = JSON.parse(await fs.readFile(path.join(ROOT, 'tmp', 'mbrs', 'marketing-cost-map.json'), 'utf8'));
 const COSTS = COST_DOC.costMap || {};
+const TRUE_COSTS = COST_DOC.trueCostMap || {};
 const BI = JSON.parse(await fs.readFile(path.join(ROOT, 'outputs', 'bi-portal', 'data.json'), 'utf8'));
 
 const args = parseArgs(process.argv.slice(2));
@@ -505,6 +506,17 @@ async function collectChooseRows(cdp, sessionId) {
 function lookupCost(keys) {
   for (const key of keys) {
     if (COSTS[key] !== undefined) return Number(COSTS[key]);
+    const c = compact(key);
+    if (COSTS[c] !== undefined) return Number(COSTS[c]);
+  }
+  return null;
+}
+
+function lookupTrueCost(keys) {
+  for (const key of keys) {
+    if (TRUE_COSTS[key]) return TRUE_COSTS[key];
+    const c = compact(key);
+    if (TRUE_COSTS[c]) return TRUE_COSTS[c];
   }
   return null;
 }
@@ -516,7 +528,11 @@ function classifyAndPrice(storeKey, activityId, row) {
   const keysCompact = keysRaw.map(compact).filter(Boolean);
   const fixed = keysCompact.map(k => fixedPriceRules.get(k)).find(v => v !== undefined);
   const depletion = depletionByStandard.get(compact(canonical)) || depletionByStandard.get(compact(row.supplierNo));
-  const cost = lookupCost(keysRaw) ?? (Number.isFinite(Number(depletion?.unit_cost_sar)) ? Number(depletion.unit_cost_sar) : null);
+  const trueCostInfo = lookupTrueCost(keysRaw);
+  const baseCost = lookupCost(keysRaw) ?? (Number.isFinite(Number(depletion?.unit_cost_sar)) ? Number(depletion.unit_cost_sar) : null);
+  const cost = Number.isFinite(Number(trueCostInfo?.trueUnitCostSar)) ? Number(trueCostInfo.trueUnitCostSar) : baseCost;
+  const storageUnitCostSar = Number.isFinite(Number(trueCostInfo?.storageUnitCostSar30d)) ? Number(trueCostInfo.storageUnitCostSar30d) : null;
+  const storageMethod = trueCostInfo?.storageMethod || '';
   const onHand = Number(depletion?.estimated_on_hand_quantity ?? 0);
   const daysOnHand = Number(depletion?.days_of_supply_on_hand ?? 0);
   const weightedDailySales = Number(depletion?.weighted_daily_gross_sales ?? 0);
@@ -565,6 +581,9 @@ function classifyAndPrice(storeKey, activityId, row) {
     canonical,
     normalized,
     cost,
+    baseCost,
+    storageUnitCostSar,
+    storageMethod,
     depletion,
     onHand,
     daysOnHand,
@@ -642,7 +661,10 @@ function summarizeBySku(rows) {
       '明细商品行数': group.length,
       '定价标准': rule,
       '审核用价格/利润率口径': standard,
-      '参考成本SAR': rangeText(group.map(r => r['成本SAR']), 1),
+      '参考成本SAR': rangeText(group.map(r => r['含仓储成本SAR'] || r['成本SAR']), 1),
+      '商品成本SAR': rangeText(group.map(r => r['商品成本SAR']), 1),
+      '仓储成本SAR/件': rangeText(group.map(r => r['仓储成本SAR/件']), 2),
+      '仓储口径': mostCommon(group.map(r => r['仓储口径'])),
       '在仓库存范围': rangeText(group.map(r => r['在仓剩余库存']), 0),
       '去化周期月范围': rangeText(group.map(r => r['去化周期月']), 1),
       '执行时预计活动价SAR范围': rangeText(group.map(r => r['建议活动价SAR']), 0),
@@ -704,6 +726,10 @@ for (const store of selectedStores) {
           '当前售价SAR': num(row.currentPrice),
           '平台最低降幅%': row.minDiscount,
           '成本SAR': num(priced.cost),
+          '商品成本SAR': num(priced.baseCost),
+          '仓储成本SAR/件': num(priced.storageUnitCostSar),
+          '含仓储成本SAR': num(priced.cost),
+          '仓储口径': priced.storageMethod || (priced.storageUnitCostSar === null ? '估算缺失' : ''),
           '在仓剩余库存': num(priced.onHand),
           '加权日均销量': num(priced.weightedDailySales),
           '去化周期天': num(priced.daysOnHand),
@@ -730,7 +756,7 @@ for (const store of selectedStores) {
 
 const headers = [
   '店铺','活动ID','活动名称','报名截止','活动开始','活动结束','行号','SKC','SKU','供方货号','标准货号',
-  '当前售价SAR','平台最低降幅%','成本SAR','在仓剩余库存','加权日均销量','去化周期天','去化周期月',
+  '当前售价SAR','平台最低降幅%','成本SAR','商品成本SAR','仓储成本SAR/件','含仓储成本SAR','仓储口径','在仓剩余库存','加权日均销量','去化周期天','去化周期月',
   '定价规则','建议目标利润率','建议活动价SAR','预计利润率','建议降幅%','平台折扣压价','随机/备注','异常/待复核','修改意见/备注',
 ];
 
@@ -749,7 +775,7 @@ await fs.writeFile(auditPath, JSON.stringify(audit, null, 2), 'utf8');
 const skuRows = summarizeBySku(allRows);
 const skuHeaders = [
   '标准货号','代表供方货号','适用店铺数','适用店铺','涉及活动数','活动ID','明细商品行数',
-  '定价标准','审核用价格/利润率口径','参考成本SAR','在仓库存范围','去化周期月范围',
+  '定价标准','审核用价格/利润率口径','参考成本SAR','商品成本SAR','仓储成本SAR/件','仓储口径','在仓库存范围','去化周期月范围',
   '执行时预计活动价SAR范围','平台压价情况','异常/待复核','修改意见/备注',
 ];
 const skuCsv = [

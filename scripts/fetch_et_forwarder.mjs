@@ -2,8 +2,9 @@
 /**
  * Read-only ET forwarder / warehouse backend fetcher.
  *
- * It reuses the dedicated Chrome profile login state and only calls list/detail
- * JSON endpoints. It never clicks or submits write actions in the ET backend.
+ * It reuses the dedicated Chrome profile login state and only calls read-only
+ * list/detail/export endpoints. It never clicks or submits write actions in the
+ * ET backend.
  */
 import fs from 'node:fs/promises';
 import fssync from 'node:fs';
@@ -594,6 +595,166 @@ function rowsFromJson(json) {
   return Array.isArray(json?.data) ? json.data : [];
 }
 
+function parseCsvText(text) {
+  const rows = [];
+  let row = [];
+  let cell = '';
+  let inQuotes = false;
+  const s = String(text || '').replace(/^\uFEFF/, '');
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inQuotes) {
+      if (ch === '"' && s[i + 1] === '"') {
+        cell += '"';
+        i++;
+      } else if (ch === '"') {
+        inQuotes = false;
+      } else {
+        cell += ch;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      row.push(cell);
+      cell = '';
+    } else if (ch === '\n') {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = '';
+    } else if (ch !== '\r') {
+      cell += ch;
+    }
+  }
+  if (cell !== '' || row.length) {
+    row.push(cell);
+    rows.push(row);
+  }
+  const header = (rows.shift() || []).map(h => String(h || '').trim());
+  if (!header.length) return [];
+  return rows
+    .filter(r => r.some(v => String(v || '').trim() !== ''))
+    .map(r => Object.fromEntries(header.map((h, i) => [h || `col_${i + 1}`, r[i] ?? ''])));
+}
+
+function isStorageFeeBill(row) {
+  const sortName = String(row?.SortName || row?.sort_name || '').trim();
+  if (sortName === '仓储费') return true;
+  const sort = Number(row?.Sort);
+  return Number.isFinite(sort) && sort >= 2 && sort <= 9 && /仓储/.test(sortName);
+}
+
+async function browserFetchStorageFeeCsv(cdp, args, incomeBillId) {
+  const expression = `(${async function downloadStorageFeeCsv(id, baseUrl) {
+    const sameOriginBase = (location && /^https?:/.test(location.origin)) ? location.origin : baseUrl;
+    const body = new URLSearchParams();
+    body.set('incomeBillId', id);
+    const post = await fetch(new URL('/Finance/IncomeBill/ExportStoreFee?t=' + Math.random(), sameOriginBase).href, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+      },
+      body,
+    });
+    const postText = await post.text();
+    let postJson = null;
+    try { postJson = JSON.parse(postText); } catch {}
+    if (!postJson || postJson.state !== 'success' || !postJson.message) {
+      return {ok: false, postStatus: post.status, postText: postText.slice(0, 800), postJson};
+    }
+    const fileUrl = new URL(postJson.message, sameOriginBase).href;
+    const file = await fetch(fileUrl + (fileUrl.includes('?') ? '&' : '?') + 't=' + Math.random(), {
+      credentials: 'include',
+      headers: {'X-Requested-With': 'XMLHttpRequest'},
+    });
+    const buf = await file.arrayBuffer();
+    let text = '';
+    let encoding = 'gb18030';
+    try {
+      text = new TextDecoder('gb18030').decode(buf);
+    } catch {
+      encoding = 'utf-8';
+      text = new TextDecoder('utf-8').decode(buf);
+    }
+    return {
+      ok: file.ok,
+      postStatus: post.status,
+      postJson,
+      fileStatus: file.status,
+      fileUrl: file.url,
+      contentType: file.headers.get('content-type') || '',
+      contentDisposition: file.headers.get('content-disposition') || '',
+      byteLength: buf.byteLength,
+      encoding,
+      text,
+    };
+  }})(${JSON.stringify(incomeBillId)}, ${JSON.stringify(args.baseUrl)})`;
+  const out = await cdp.eval(expression);
+  if (!out?.ok || typeof out.text !== 'string') {
+    throw new Error(`ExportStoreFee failed for ${incomeBillId}: ${JSON.stringify(out).slice(0, 1200)}`);
+  }
+  return out;
+}
+
+async function fetchStorageFeeDetails(cdp, args, listRows) {
+  const rows = [];
+  const errors = [];
+  if (args.skipDetails) return {rows, errors, totalParents: 0, parentCount: 0, detailOffset: 0, detailLimit: 0, skippedBefore: 0, skippedAfter: 0, skippedParents: 0};
+  const ids = [];
+  const parentById = new Map();
+  for (const row of listRows.filter(isStorageFeeBill)) {
+    const id = row?.IncomeBillId;
+    if (!id || parentById.has(id)) continue;
+    parentById.set(id, row);
+    ids.push(id);
+  }
+  const start = args.detailOffset || 0;
+  const end = args.maxDetails ? start + args.maxDetails : undefined;
+  const limited = ids.slice(start, end);
+  for (const id of limited) {
+    const parent = parentById.get(id) || {};
+    try {
+      const file = await browserFetchStorageFeeCsv(cdp, args, id);
+      const parsed = parseCsvText(file.text);
+      rows.push(...parsed.map((r, i) => ({
+        ...r,
+        __parent_id: id,
+        __source_row_no: i + 2,
+        __download_url: file.fileUrl || '',
+        __download_content_type: file.contentType || '',
+        __download_content_disposition: file.contentDisposition || '',
+        __download_byte_length: file.byteLength || 0,
+        __download_encoding: file.encoding || '',
+        __bill_sort_name: parent.SortName || '',
+        __bill_ship_time: parent.ShipTime || '',
+        __bill_create_time: parent.Createtime || '',
+        __bill_other_income: parent.OtherIncome ?? '',
+      })));
+    } catch (err) {
+      const message = err?.message || String(err);
+      errors.push({incomeBillId: id, message});
+      console.error(`[fetch_et_forwarder] WARN storage fee detail download failed incomeBillId=${id}: ${message}`);
+    }
+    await sleep(args.waitMs);
+  }
+  return {
+    rows,
+    errors,
+    totalParents: ids.length,
+    parentCount: limited.length,
+    detailOffset: start,
+    detailLimit: args.maxDetails || 0,
+    skippedBefore: Math.min(start, ids.length),
+    skippedAfter: Math.max(0, ids.length - start - limited.length),
+    skippedParents: Math.max(0, ids.length - limited.length),
+  };
+}
+
 async function fetchPaged(cdp, args, endpointKey, def, ctx) {
   const allRows = [];
   const pages = [];
@@ -824,6 +985,39 @@ async function main() {
           };
           manifest.files[detailKey] = detailFile;
         }
+      }
+      if (key === 'income_bill' && result.rows.length && !args.skipDetails) {
+        const detailResult = await fetchStorageFeeDetails(cdp, args, result.rows);
+        const detailKey = 'storage_fee_product_detail';
+        const detailFile = `${safeName(detailKey)}.json`;
+        await fs.writeFile(path.join(batchDir, detailFile), JSON.stringify({
+          endpoint: detailKey,
+          parentEndpoint: key,
+          fetchedAt: new Date().toISOString(),
+          totalParents: detailResult.totalParents,
+          parentCount: detailResult.parentCount,
+          detailOffset: detailResult.detailOffset,
+          detailLimit: detailResult.detailLimit,
+          skippedBefore: detailResult.skippedBefore,
+          skippedAfter: detailResult.skippedAfter,
+          skippedParents: detailResult.skippedParents,
+          errors: detailResult.errors,
+          rows: detailResult.rows,
+        }, null, 2), 'utf8');
+        manifest.endpoints[detailKey] = {
+          kind: 'detail_export',
+          parent: key,
+          rowCount: detailResult.rows.length,
+          totalParents: detailResult.totalParents,
+          parentCount: detailResult.parentCount,
+          detailOffset: detailResult.detailOffset,
+          detailLimit: detailResult.detailLimit,
+          skippedBefore: detailResult.skippedBefore,
+          skippedAfter: detailResult.skippedAfter,
+          skippedParents: detailResult.skippedParents,
+          errorCount: detailResult.errors.length,
+        };
+        manifest.files[detailKey] = detailFile;
       }
       await sleep(args.waitMs);
     }

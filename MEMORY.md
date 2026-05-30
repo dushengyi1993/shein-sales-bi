@@ -54,6 +54,7 @@
 - GitHub 中的 `outputs/bi-portal/index.html` / `data.json` 是灾备静态快照；服务器执行 `git reset --hard origin/main` 或类似部署后可能覆盖实时 BI 页面。每次服务器拉取/重置代码后，必须重跑 `scripts/cloud_bi_refresh.sh today intraday` 或 `shein-bi-cloud-today.service`，确认 `generatedAt` / `salesUpdatedAt` 更新到当前。BI 用户可见改动先在云端页面/服务输出验证，用户确认后再发布 GitHub release；本地验证不替代云端最终审核。
 - 本地历史规则仍可作回滚参考：RTV 复核耗时长是正常现象，滚动销售刷新不应等待完整 RTV；BI 门户生成必须在流水线末尾单次执行，默认 `SHEIN_BI_PORTAL_TIMEOUT_MS=900000`，不要恢复“流水线完成 / 简报 / 首次体检”多个状态点重复生成页面。
 - 飞书 Base / 看板写入仍受 `state/feishu-base-sync-paused.flag` 约束；飞书日报和 watchdog 已云端化，但不要默认认为本地日报/提醒任务仍在生产运行。
+- 飞书日报文字和日报图不得再附飞书 Base / 多维表格 / 原生看板链接；日报图店铺排行必须从 `config/stores.json` 当前启用店铺完整渲染，不能沿用旧 Top15/16 店截断。
 
 ## 数据与货号归并
 - 销售 / 订单历史已全量入 BI 仓库；链接、售后、履约、财务按价值和接口能力逐步补历史，库存只保留最新与滚动快照，不补开店以来全量。
@@ -125,7 +126,7 @@
 - 2026-05-29 云端 SQL 重审确认：主利润公式未发现少扣退货；5 月利润暂高主要因售后反转率仍低、成本率较低和退货快递费较少。看月利润必须同时看订单创建月利润和售后申请月回冲影响，未成熟月份不能当最终利润，详见 `docs/bi-profit-audit-2026-03-05.md`。
 - 成本表正式文件为 `inputs/costs/成本.xlsx`；`单台总成本（SAR）` 是单批单件完整成本，入库后按完整批次加权平均，匹配键走 `dim.product_match_key()`。
 - 成本/利润页必须受顶部时间、店铺/分组、货号/SKC 筛选影响；高/低利润分界线固定 `20%`。利润分组里 `TS`、`MZ` 开店以来都归 `DSY`。
-- 真实利润核心对象：`fact.product_cost_batch`、`fact.monthly_storage_fee`、`mart.product_unit_cost_current`、`mart.profit_order_item`、`mart.profit_daily_store_product`、`mart.profit_month_group`、`mart.profit_product_summary`。
+- 真实利润核心对象：`fact.product_cost_batch`、`fact.et_storage_fee_product_detail`、`dim.storage_fee_policy`、`mart.product_unit_cost_current`、`mart.et_storage_fee_daily`、`mart.storage_fee_store_daily`、`mart.storage_fee_product_daily`、`mart.profit_order_item`、`mart.profit_daily_store_product`、`mart.profit_month_group`、`mart.profit_product_summary`；`fact.monthly_storage_fee` 仅保留为旧手工/历史兜底表。
 
 ## 工具与避坑
 - SHEIN 销售抓取主链路自 `2026-05-11` 起为 Node WebAPI 直连优先：`config/stores.json` 当前 19 店 `salesTransport=auto`，`fetch_shein_sales.mjs --transport webapi|auto` 直调 `/gsp/orderPlus/listOrder` / `listOrderItem`；Chrome DevTools/CDP 主要用于导出/刷新 Cookie session、登录续期和回退。
@@ -142,7 +143,7 @@
 ## ET 货代仓核心口径
 - ET 货代后台使用独立 profile；云端正式链路读取服务器私有 `config/et_forwarder.local.json` 或环境变量账号密码，不把密码写入文档、仓库、日志或聊天。大部分列表/明细接口必须带 `X-Requested-With: XMLHttpRequest`。
 - ET 仓库核心含义：`09` 可售散件、`01` 整箱、`03_RTV` 退货、`04Damaged` 破损、`06` 报废。
-- ET 可增强库存、在途/到仓、发货申请单、箱明细、出库、RTV、损溢破损、物流/仓储财务复核；国内采购成本、头程/上架/下架成本、SKU 级仓储费仍以手工成本表或用户确认规则为准。
+- ET 可增强库存、在途/到仓、发货申请单、箱明细、出库、RTV、损溢破损、物流/仓储财务复核；仓储费利润口径以 ET 物流仓服账单 `仓储费` 为正式来源，实际扣费按显示金额减半后折 SAR，店铺/DSY/LGM 按净销售额分摊，货号层优先 ET `ExportStoreFee` 明细，缺明细日期才允许体积库存天数估算并标注兜底。
 - ET 抓取器支持分模块、列表先行和明细分块；匹配 SHEIN/ET 时宁可进待复核池，不能硬归并。自动登录由 `scripts/et_login_helper.py` + OCR 处理，失败时发飞书异常并保留上一版 ET 数据。
 - ET 货号归并：已确认 `7025 -> SK-7025A绞肉机`、`LQ榨汁机175 -> SK-JB-175离心式榨汁机`；`SM-520A电动缝纫机`、`CX1788手持搅拌器` 是新货号且当前在途；`p-DL-FZ-666/P-DL-FZ-666/p-DLFZ666/PDLFZ666` 是 FZ-666 包材，`报废` 是占位编码，不作为可售货号。未确认编码不要写死归并。
 - `8A04PD9`、`8A04QUP`、`KYD03172GF`、`KYD05552GF` 是其他货代发货批次，不应作为 ET 发货申请单缺失报警。

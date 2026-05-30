@@ -620,6 +620,40 @@ CREATE TABLE IF NOT EXISTS fact.et_income_payment (
   updated_at timestamptz DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS fact.et_storage_fee_product_detail (
+  unique_key text PRIMARY KEY,
+  batch_id text,
+  income_bill_id text NOT NULL REFERENCES fact.et_income_bill(income_bill_id),
+  fee_date date NOT NULL,
+  warehouse_name text,
+  storage_type text,
+  storage_code text NOT NULL,
+  sku_code text,
+  standard_goods_sn text,
+  match_key text,
+  quantity numeric,
+  volume_m3_per_unit numeric,
+  volume_m3_total numeric,
+  rate_rmb_per_m3_day numeric,
+  storage_fee_rmb_before_discount numeric,
+  member_discount numeric,
+  shown_fee_rmb numeric,
+  actual_fee_rmb numeric,
+  actual_fee_sar numeric,
+  allocation_method text NOT NULL DEFAULT 'download_detail',
+  source_file text,
+  source_row_no integer,
+  download_url text,
+  content_type text,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_et_storage_fee_product_detail_date ON fact.et_storage_fee_product_detail(fee_date);
+CREATE INDEX IF NOT EXISTS idx_et_storage_fee_product_detail_bill ON fact.et_storage_fee_product_detail(income_bill_id);
+CREATE INDEX IF NOT EXISTS idx_et_storage_fee_product_detail_match ON fact.et_storage_fee_product_detail(match_key);
+CREATE INDEX IF NOT EXISTS idx_et_storage_fee_product_detail_code ON fact.et_storage_fee_product_detail(storage_code);
+
 CREATE TABLE IF NOT EXISTS fact.et_freight_rate (
   unique_key text PRIMARY KEY,
   batch_id text,
@@ -1538,6 +1572,52 @@ CREATE TABLE IF NOT EXISTS fact.monthly_storage_fee (
 );
 
 CREATE INDEX IF NOT EXISTS idx_monthly_storage_fee_month ON fact.monthly_storage_fee(month_start);
+
+CREATE TABLE IF NOT EXISTS dim.storage_fee_policy (
+  policy_key text PRIMARY KEY,
+  currency_code text NOT NULL DEFAULT 'CNY',
+  sar_to_rmb numeric NOT NULL DEFAULT 1.8,
+  billing_discount numeric NOT NULL DEFAULT 0.5,
+  effective_from date NOT NULL DEFAULT '2025-01-01',
+  note text,
+  updated_at timestamptz DEFAULT now()
+);
+
+INSERT INTO dim.storage_fee_policy(policy_key, currency_code, sar_to_rmb, billing_discount, effective_from, note)
+VALUES ('et_default', 'CNY', 1.8, 0.5, '2025-01-01', 'ET仓储费显示金额按RMB；实际减半收取；利润按SAR展示。')
+ON CONFLICT (policy_key) DO UPDATE SET
+  currency_code = EXCLUDED.currency_code,
+  sar_to_rmb = EXCLUDED.sar_to_rmb,
+  billing_discount = EXCLUDED.billing_discount,
+  effective_from = EXCLUDED.effective_from,
+  note = EXCLUDED.note,
+  updated_at = now();
+
+CREATE TABLE IF NOT EXISTS dim.storage_warehouse_rate (
+  warehouse_match text PRIMARY KEY,
+  warehouse_label text NOT NULL,
+  rate_rmb_per_m3_day numeric NOT NULL,
+  warehouse_discount numeric NOT NULL DEFAULT 1,
+  billable boolean NOT NULL DEFAULT true,
+  priority integer NOT NULL DEFAULT 100,
+  note text,
+  updated_at timestamptz DEFAULT now()
+);
+
+INSERT INTO dim.storage_warehouse_rate(warehouse_match, warehouse_label, rate_rmb_per_m3_day, warehouse_discount, billable, priority, note)
+VALUES
+  ('%09%', 'ETRUH09散件仓', 8, 0.75, true, 10, '用户确认：09仓8元一方，实际0.75折；最终按ET每日总账校准。'),
+  ('%03%', 'ETRUH03_RTV', 8, 0.75, true, 20, 'RTV仓缺明细时按同费率估算，后续以ET导出明细修正。'),
+  ('%04%', 'ETRUH04Damaged', 8, 0.75, true, 30, '破损仓缺明细时按同费率估算，页面标注兜底口径。'),
+  ('%06%', 'ETRUH06报废', 8, 0.75, true, 40, '报废仓缺明细时按同费率估算，页面标注兜底口径。')
+ON CONFLICT (warehouse_match) DO UPDATE SET
+  warehouse_label = EXCLUDED.warehouse_label,
+  rate_rmb_per_m3_day = EXCLUDED.rate_rmb_per_m3_day,
+  warehouse_discount = EXCLUDED.warehouse_discount,
+  billable = EXCLUDED.billable,
+  priority = EXCLUDED.priority,
+  note = EXCLUDED.note,
+  updated_at = now();
 
 CREATE OR REPLACE VIEW mart.product_unit_cost_current AS
 SELECT
@@ -2794,46 +2874,512 @@ SELECT
   return_package_statuses
 FROM base;
 
-CREATE OR REPLACE VIEW mart.profit_daily_store_product AS
+CREATE OR REPLACE VIEW mart.et_storage_fee_daily AS
+WITH policy AS (
+  SELECT * FROM dim.storage_fee_policy WHERE policy_key = 'et_default'
+),
+base AS (
+  SELECT
+    coalesce(ship_time::date, create_time::date, push_time::date) AS fee_date,
+    income_bill_id,
+    status AS bill_status,
+    status_name AS bill_status_name,
+    coalesce(other_income,0) AS shown_fee_rmb,
+    out_money AS diagnostic_out_money_rmb,
+    billing_period_date::date AS billing_period_date,
+    raw_summary
+  FROM fact.et_income_bill
+  WHERE sort_name = '仓储费'
+)
 SELECT
-  created_date AS date,
-  store_key,
-  group_key,
-  standard_goods_sn,
-  count(*) AS order_lines,
-  count(DISTINCT order_key) AS orders,
-  sum(quantity) AS quantity,
-  sum(gross_revenue_sar) AS gross_revenue_sar,
-  sum(net_revenue_sar) AS net_revenue_sar,
-  sum(product_cost_sar) FILTER (WHERE NOT cost_missing) AS product_cost_sar,
-  sum(return_delivery_fee_sar) AS return_delivery_fee_sar,
-  sum(rtv_recoverable_cost_sar) FILTER (WHERE NOT cost_missing) AS rtv_recoverable_cost_sar,
-  sum(rtv_09_recoverable_cost_sar) FILTER (WHERE NOT cost_missing) AS rtv_09_recoverable_cost_sar,
-  sum(rtv_received_quantity) AS rtv_received_quantity,
-  sum(rtv_received_to_09_quantity) AS rtv_received_to_09_quantity,
-  sum(profit_before_storage_sar) FILTER (WHERE NOT cost_missing) AS profit_before_storage_sar,
-  sum(profit_if_rtv_received_resellable_sar) FILTER (WHERE NOT cost_missing) AS profit_if_rtv_received_resellable_sar,
-  sum(profit_if_rtv_09_resellable_sar) FILTER (WHERE NOT cost_missing) AS profit_if_rtv_09_resellable_sar,
-  sum(net_revenue_sar) FILTER (WHERE NOT cost_missing) AS known_net_revenue_sar,
-  sum(gross_revenue_sar) FILTER (WHERE NOT cost_missing) AS known_gross_revenue_sar,
-  sum(gross_revenue_sar) FILTER (WHERE cost_missing) AS missing_cost_revenue_sar,
-  sum(quantity) FILTER (WHERE cost_missing) AS missing_cost_quantity,
-  count(*) FILTER (WHERE cost_missing) AS missing_cost_lines,
-  count(*) FILTER (WHERE revenue_reversal) AS reversal_lines,
-  sum(return_delivery_fee_sar) FILTER (WHERE revenue_reversal) AS reversal_fee_sar,
+  b.fee_date,
+  b.income_bill_id,
+  b.bill_status,
+  b.bill_status_name,
+  b.shown_fee_rmb,
+  b.diagnostic_out_money_rmb,
+  b.billing_period_date,
+  p.billing_discount,
+  round((b.shown_fee_rmb * p.billing_discount)::numeric, 6) AS actual_fee_rmb,
+  round((b.shown_fee_rmb * p.billing_discount / nullif(p.sar_to_rmb,0))::numeric, 6) AS actual_fee_sar,
+  p.currency_code,
+  p.sar_to_rmb,
+  'et_income_bill'::text AS source,
+  b.raw_summary
+FROM base b
+CROSS JOIN policy p
+WHERE b.fee_date IS NOT NULL;
+
+CREATE OR REPLACE VIEW mart.storage_fee_store_daily AS
+WITH fee_daily AS (
+  SELECT fee_date AS date, sum(actual_fee_sar) AS actual_fee_sar
+  FROM mart.et_storage_fee_daily
+  GROUP BY fee_date
+),
+store_day AS (
+  SELECT
+    created_date::date AS date,
+    store_key,
+    group_key,
+    sum(net_revenue_sar) AS net_revenue_sar
+  FROM mart.profit_order_item
+  GROUP BY created_date::date, store_key, group_key
+),
+day_total AS (
+  SELECT date, sum(net_revenue_sar) AS day_net_revenue_sar
+  FROM store_day
+  GROUP BY date
+),
+store_month AS (
+  SELECT
+    date_trunc('month', date)::date AS month_start,
+    store_key,
+    group_key,
+    sum(net_revenue_sar) AS month_net_revenue_sar
+  FROM store_day
+  GROUP BY date_trunc('month', date)::date, store_key, group_key
+),
+month_total AS (
+  SELECT month_start, sum(month_net_revenue_sar) AS month_net_revenue_sar
+  FROM store_month
+  GROUP BY month_start
+)
+SELECT
+  sf.date,
+  sm.store_key,
+  sm.group_key,
+  coalesce(sd.net_revenue_sar,0) AS net_revenue_sar,
   CASE
-    WHEN sum(net_revenue_sar) FILTER (WHERE NOT cost_missing) > 0
-    THEN sum(profit_before_storage_sar) FILTER (WHERE NOT cost_missing)
-      / nullif(sum(net_revenue_sar) FILTER (WHERE NOT cost_missing), 0)
-    ELSE NULL
-  END AS profit_margin_before_storage,
+    WHEN coalesce(dt.day_net_revenue_sar,0) > 0 THEN coalesce(sd.net_revenue_sar,0) / nullif(dt.day_net_revenue_sar,0)
+    WHEN coalesce(mt.month_net_revenue_sar,0) > 0 THEN coalesce(sm.month_net_revenue_sar,0) / nullif(mt.month_net_revenue_sar,0)
+    ELSE 0
+  END AS revenue_share,
+  sf.actual_fee_sar * CASE
+    WHEN coalesce(dt.day_net_revenue_sar,0) > 0 THEN coalesce(sd.net_revenue_sar,0) / nullif(dt.day_net_revenue_sar,0)
+    WHEN coalesce(mt.month_net_revenue_sar,0) > 0 THEN coalesce(sm.month_net_revenue_sar,0) / nullif(mt.month_net_revenue_sar,0)
+    ELSE 0
+  END AS allocated_storage_fee_sar,
   CASE
-    WHEN sum(gross_revenue_sar) > 0
-    THEN sum(gross_revenue_sar) FILTER (WHERE NOT cost_missing) / nullif(sum(gross_revenue_sar), 0)
+    WHEN coalesce(dt.day_net_revenue_sar,0) > 0 THEN 'daily_net_revenue'
+    WHEN coalesce(mt.month_net_revenue_sar,0) > 0 THEN 'monthly_net_revenue_fallback'
+    ELSE 'unallocated_no_revenue'
+  END AS allocation_method
+FROM fee_daily sf
+JOIN store_month sm
+  ON sm.month_start = date_trunc('month', sf.date)::date
+LEFT JOIN store_day sd
+  ON sd.date = sf.date AND sd.store_key = sm.store_key
+LEFT JOIN day_total dt
+  ON dt.date = sf.date
+LEFT JOIN month_total mt
+  ON mt.month_start = sm.month_start;
+
+CREATE OR REPLACE VIEW mart.storage_fee_product_daily_estimated AS
+WITH fee_daily AS (
+  SELECT fee_date AS date, sum(actual_fee_sar) AS actual_fee_sar
+  FROM mart.et_storage_fee_daily
+  GROUP BY fee_date
+),
+latest_sku AS (
+  SELECT DISTINCT ON (match_key)
+    match_key,
+    standard_goods_sn,
+    CASE
+      WHEN sku_volume > 0 AND sku_volume < 500000 THEN sku_volume / 1000000.0
+      WHEN goods_volume > 0 AND goods_volume < 500000 THEN goods_volume / 1000000.0
+      ELSE NULL
+    END AS volume_m3_per_unit
+  FROM fact.et_sku_specification
+  WHERE coalesce(match_key,'') <> ''
+  ORDER BY match_key, source_batch_id DESC
+),
+stock AS (
+  SELECT snapshot_date AS date, storeroom_name, match_key, standard_goods_sn, sum(coalesce(real_quantity, quantity, 0)) AS on_hand_qty
+  FROM fact.et_store_stock_snapshot
+  WHERE coalesce(match_key,'') <> ''
+  GROUP BY snapshot_date, storeroom_name, match_key, standard_goods_sn
+  UNION ALL
+  SELECT snapshot_date AS date, storeroom_name, match_key, standard_goods_sn, sum(coalesce(real_quantity, quantity, 0)) AS on_hand_qty
+  FROM fact.et_box_stock_snapshot
+  WHERE coalesce(match_key,'') <> ''
+  GROUP BY snapshot_date, storeroom_name, match_key, standard_goods_sn
+),
+stock_rated_observed AS (
+  SELECT
+    s.date,
+    s.storeroom_name,
+    s.match_key,
+    max(s.standard_goods_sn) AS standard_goods_sn,
+    sum(s.on_hand_qty) AS on_hand_qty,
+    max(ls.volume_m3_per_unit) AS volume_m3_per_unit,
+    max(r.rate_rmb_per_m3_day) AS rate_rmb_per_m3_day,
+    max(r.warehouse_discount) AS warehouse_discount
+  FROM stock s
+  LEFT JOIN latest_sku ls ON ls.match_key = s.match_key
+  LEFT JOIN LATERAL (
+    SELECT *
+    FROM dim.storage_warehouse_rate wr
+    WHERE s.storeroom_name ILIKE wr.warehouse_match
+      AND wr.billable
+    ORDER BY wr.priority
+    LIMIT 1
+  ) r ON true
+  WHERE r.warehouse_match IS NOT NULL
+  GROUP BY s.date, s.storeroom_name, s.match_key
+),
+stock_for_fee AS (
+  SELECT
+    f.date,
+    pick.source_snapshot_date,
+    CASE
+      WHEN pick.source_snapshot_date = f.date THEN 'same_day_snapshot'
+      WHEN pick.source_snapshot_date < f.date THEN 'latest_prior_snapshot'
+      WHEN pick.source_snapshot_date > f.date THEN 'first_available_forward_snapshot'
+      ELSE 'missing_stock_snapshot'
+    END AS stock_snapshot_method,
+    s.storeroom_name,
+    s.match_key,
+    s.standard_goods_sn,
+    s.on_hand_qty,
+    s.volume_m3_per_unit,
+    s.rate_rmb_per_m3_day,
+    s.warehouse_discount
+  FROM fee_daily f
+  LEFT JOIN LATERAL (
+    SELECT coalesce(
+      (SELECT max(x.date) FROM stock_rated_observed x WHERE x.date <= f.date),
+      (SELECT min(x.date) FROM stock_rated_observed x WHERE x.date > f.date)
+    ) AS source_snapshot_date
+  ) pick ON true
+  JOIN stock_rated_observed s ON s.date = pick.source_snapshot_date
+),
+weighted AS (
+  SELECT
+    date,
+    source_snapshot_date,
+    stock_snapshot_method,
+    coalesce(nullif(standard_goods_sn,''), match_key) AS standard_goods_sn,
+    match_key,
+    storeroom_name AS warehouse_name,
+    on_hand_qty,
+    volume_m3_per_unit,
+    rate_rmb_per_m3_day,
+    warehouse_discount,
+    on_hand_qty * volume_m3_per_unit AS stock_m3_days,
+    on_hand_qty * volume_m3_per_unit * rate_rmb_per_m3_day * warehouse_discount AS estimated_fee_rmb_before_calibration
+  FROM stock_for_fee
+  WHERE coalesce(on_hand_qty,0) > 0
+    AND coalesce(volume_m3_per_unit,0) > 0
+    AND coalesce(rate_rmb_per_m3_day,0) > 0
+),
+daily_weight AS (
+  SELECT date, sum(estimated_fee_rmb_before_calibration) AS total_estimated_fee_rmb
+  FROM weighted
+  GROUP BY date
+)
+SELECT
+  w.date,
+  w.source_snapshot_date,
+  w.stock_snapshot_method,
+  w.standard_goods_sn,
+  w.match_key,
+  w.warehouse_name,
+  w.on_hand_qty AS quantity,
+  w.volume_m3_per_unit,
+  w.stock_m3_days AS volume_m3_total,
+  w.stock_m3_days,
+  w.rate_rmb_per_m3_day,
+  w.warehouse_discount,
+  w.estimated_fee_rmb_before_calibration,
+  f.actual_fee_sar * w.estimated_fee_rmb_before_calibration / nullif(dw.total_estimated_fee_rmb,0) AS actual_allocated_fee_sar,
+  ('volume_stock_days_estimated:' || w.stock_snapshot_method)::text AS storage_allocation_method
+FROM weighted w
+JOIN daily_weight dw ON dw.date = w.date
+JOIN fee_daily f ON f.date = w.date;
+
+CREATE OR REPLACE VIEW mart.storage_fee_product_daily AS
+WITH policy AS (
+  SELECT * FROM dim.storage_fee_policy WHERE policy_key = 'et_default'
+),
+fee_daily AS (
+  SELECT fee_date AS date, sum(shown_fee_rmb) AS shown_fee_rmb, sum(actual_fee_sar) AS actual_fee_sar
+  FROM mart.et_storage_fee_daily
+  GROUP BY fee_date
+),
+detail_day AS (
+  SELECT
+    d.fee_date AS date,
+    sum(coalesce(d.shown_fee_rmb,0)) AS detail_shown_fee_rmb,
+    max(f.shown_fee_rmb) AS fee_shown_fee_rmb,
+    abs(sum(coalesce(d.shown_fee_rmb,0)) - max(f.shown_fee_rmb)) <= 0.05 AS detail_complete
+  FROM fact.et_storage_fee_product_detail d
+  JOIN fee_daily f ON f.date = d.fee_date
+  GROUP BY d.fee_date
+),
+box_items AS (
+  SELECT
+    box_id,
+    coalesce(nullif(standard_goods_sn,''), match_key) AS standard_goods_sn,
+    match_key,
+    sum(coalesce(real_quantity, case_quantity, 0)) AS item_quantity
+  FROM fact.et_box_item
+  WHERE coalesce(box_id,'') <> ''
+    AND coalesce(standard_goods_sn, match_key, '') <> ''
+  GROUP BY box_id, coalesce(nullif(standard_goods_sn,''), match_key), match_key
+),
+box_totals AS (
+  SELECT
+    box_id,
+    sum(coalesce(item_quantity,0)) AS total_item_quantity,
+    count(*) AS item_count
+  FROM box_items
+  GROUP BY box_id
+),
+detail_expanded AS (
+  SELECT
+    d.fee_date AS date,
+    NULL::date AS source_snapshot_date,
+    NULL::text AS stock_snapshot_method,
+    CASE
+      WHEN bi.box_id IS NOT NULL THEN bi.standard_goods_sn
+      ELSE coalesce(nullif(d.standard_goods_sn,''), nullif(d.match_key,''), d.storage_code)
+    END AS standard_goods_sn,
+    CASE
+      WHEN bi.box_id IS NOT NULL THEN bi.match_key
+      ELSE coalesce(nullif(d.match_key,''), dim.product_match_key(d.standard_goods_sn), dim.product_match_key(d.storage_code))
+    END AS match_key,
+    d.warehouse_name,
+    CASE WHEN bi.box_id IS NOT NULL THEN bi.item_quantity ELSE d.quantity END AS quantity,
+    CASE WHEN bi.box_id IS NOT NULL THEN NULL::numeric ELSE d.volume_m3_per_unit END AS volume_m3_per_unit,
+    CASE
+      WHEN bi.box_id IS NOT NULL AND coalesce(bt.total_item_quantity,0) > 0 THEN d.volume_m3_total * bi.item_quantity / nullif(bt.total_item_quantity,0)
+      WHEN bi.box_id IS NOT NULL AND coalesce(bt.item_count,0) > 0 THEN d.volume_m3_total / nullif(bt.item_count,0)
+      ELSE d.volume_m3_total
+    END AS volume_m3_total,
+    d.rate_rmb_per_m3_day,
+    CASE
+      WHEN bi.box_id IS NOT NULL AND coalesce(bt.total_item_quantity,0) > 0 THEN d.shown_fee_rmb * bi.item_quantity / nullif(bt.total_item_quantity,0)
+      WHEN bi.box_id IS NOT NULL AND coalesce(bt.item_count,0) > 0 THEN d.shown_fee_rmb / nullif(bt.item_count,0)
+      ELSE d.shown_fee_rmb
+    END AS shown_fee_rmb
+  FROM fact.et_storage_fee_product_detail d
+  JOIN detail_day dd
+    ON dd.date = d.fee_date
+   AND dd.detail_complete
+  LEFT JOIN box_items bi
+    ON d.storage_type ILIKE '%整箱%'
+   AND bi.box_id = d.storage_code
+  LEFT JOIN box_totals bt
+    ON bt.box_id = d.storage_code
+  WHERE coalesce(d.storage_code,'') <> ''
+),
+detail_rows AS (
+  SELECT
+    e.date,
+    e.source_snapshot_date,
+    e.stock_snapshot_method,
+    e.standard_goods_sn,
+    e.match_key,
+    e.warehouse_name,
+    sum(e.quantity) AS quantity,
+    max(e.volume_m3_per_unit) AS volume_m3_per_unit,
+    sum(e.volume_m3_total) AS volume_m3_total,
+    sum(e.volume_m3_total) AS stock_m3_days,
+    max(e.rate_rmb_per_m3_day) AS rate_rmb_per_m3_day,
+    NULL::numeric AS warehouse_discount,
+    sum(e.shown_fee_rmb) AS shown_fee_rmb,
+    sum(e.shown_fee_rmb) * max(p.billing_discount) AS actual_fee_rmb,
+    sum(e.shown_fee_rmb) * max(p.billing_discount) / nullif(max(p.sar_to_rmb),0) AS actual_allocated_fee_sar,
+    'download_detail'::text AS storage_allocation_method
+  FROM detail_expanded e
+  CROSS JOIN policy p
+  WHERE coalesce(e.standard_goods_sn, e.match_key, '') <> ''
+  GROUP BY e.date, e.source_snapshot_date, e.stock_snapshot_method, e.standard_goods_sn, e.match_key, e.warehouse_name
+),
+fallback_rows AS (
+  SELECT
+    e.date,
+    e.source_snapshot_date,
+    e.stock_snapshot_method,
+    e.standard_goods_sn,
+    e.match_key,
+    e.warehouse_name,
+    e.quantity,
+    e.volume_m3_per_unit,
+    e.volume_m3_total,
+    e.stock_m3_days,
+    e.rate_rmb_per_m3_day,
+    e.warehouse_discount,
+    NULL::numeric AS shown_fee_rmb,
+    NULL::numeric AS actual_fee_rmb,
+    e.actual_allocated_fee_sar,
+    e.storage_allocation_method
+  FROM mart.storage_fee_product_daily_estimated e
+  LEFT JOIN detail_day d
+    ON d.date = e.date
+   AND d.detail_complete
+  WHERE d.date IS NULL
+)
+SELECT * FROM detail_rows
+UNION ALL
+SELECT * FROM fallback_rows;
+
+CREATE OR REPLACE VIEW mart.storage_fee_product_store_daily AS
+WITH product_fee AS (
+  SELECT
+    date,
+    dim.product_match_key(standard_goods_sn) AS match_key,
+    max(standard_goods_sn) AS standard_goods_sn,
+    sum(actual_allocated_fee_sar) AS product_storage_fee_sar,
+    string_agg(DISTINCT storage_allocation_method, ' / ') AS storage_fee_method
+  FROM mart.storage_fee_product_daily
+  GROUP BY date, dim.product_match_key(standard_goods_sn)
+),
+store_product_sales AS (
+  SELECT
+    created_date::date AS date,
+    store_key,
+    group_key,
+    standard_goods_sn,
+    dim.product_match_key(standard_goods_sn) AS match_key,
+    sum(net_revenue_sar) FILTER (WHERE NOT cost_missing) AS known_net_revenue_sar,
+    sum(quantity) AS quantity
+  FROM mart.profit_order_item
+  WHERE coalesce(standard_goods_sn,'') <> ''
+  GROUP BY created_date::date, store_key, group_key, standard_goods_sn, dim.product_match_key(standard_goods_sn)
+),
+product_day_sales AS (
+  SELECT
+    date,
+    match_key,
+    sum(coalesce(known_net_revenue_sar,0)) AS product_known_net_revenue_sar,
+    sum(coalesce(quantity,0)) AS product_quantity
+  FROM store_product_sales
+  GROUP BY date, match_key
+)
+SELECT
+  s.date,
+  s.store_key,
+  s.group_key,
+  s.standard_goods_sn,
+  f.product_storage_fee_sar * CASE
+    WHEN coalesce(t.product_known_net_revenue_sar,0) > 0 THEN coalesce(s.known_net_revenue_sar,0) / nullif(t.product_known_net_revenue_sar,0)
+    WHEN coalesce(t.product_quantity,0) > 0 THEN coalesce(s.quantity,0) / nullif(t.product_quantity,0)
+    ELSE 0
+  END AS storage_fee_sar,
+  f.storage_fee_method || ':store_product_sales_bridge' AS storage_fee_method
+FROM store_product_sales s
+JOIN product_fee f
+  ON f.date = s.date
+ AND f.match_key = s.match_key
+JOIN product_day_sales t
+  ON t.date = s.date
+ AND t.match_key = s.match_key;
+
+CREATE OR REPLACE VIEW mart.storage_fee_daily_reconciliation AS
+WITH fee AS (
+  SELECT
+    fee_date,
+    sum(shown_fee_rmb) AS shown_fee_rmb,
+    sum(actual_fee_rmb) AS actual_fee_rmb,
+    sum(actual_fee_sar) AS actual_fee_sar
+  FROM mart.et_storage_fee_daily
+  GROUP BY fee_date
+),
+store_alloc AS (
+  SELECT date AS fee_date, sum(allocated_storage_fee_sar) AS store_allocated_fee_sar
+  FROM mart.storage_fee_store_daily
+  GROUP BY date
+),
+product_alloc AS (
+  SELECT date AS fee_date, sum(actual_allocated_fee_sar) AS product_allocated_fee_sar
+  FROM mart.storage_fee_product_daily
+  GROUP BY date
+)
+SELECT
+  f.fee_date,
+  f.shown_fee_rmb,
+  f.actual_fee_rmb,
+  f.actual_fee_sar,
+  coalesce(sa.store_allocated_fee_sar,0) AS store_allocated_fee_sar,
+  coalesce(pa.product_allocated_fee_sar,0) AS product_allocated_fee_sar,
+  f.actual_fee_sar - coalesce(sa.store_allocated_fee_sar,0) AS store_allocation_delta_sar,
+  f.actual_fee_sar - coalesce(pa.product_allocated_fee_sar,0) AS product_allocation_delta_sar
+FROM fee f
+LEFT JOIN store_alloc sa ON sa.fee_date = f.fee_date
+LEFT JOIN product_alloc pa ON pa.fee_date = f.fee_date;
+
+CREATE OR REPLACE VIEW mart.profit_daily_store_product AS
+WITH base AS (
+  SELECT
+    created_date AS date,
+    store_key,
+    group_key,
+    standard_goods_sn,
+    count(*) AS order_lines,
+    count(DISTINCT order_key) AS orders,
+    sum(quantity) AS quantity,
+    sum(gross_revenue_sar) AS gross_revenue_sar,
+    sum(net_revenue_sar) AS net_revenue_sar,
+    sum(product_cost_sar) FILTER (WHERE NOT cost_missing) AS product_cost_sar,
+    sum(return_delivery_fee_sar) AS return_delivery_fee_sar,
+    sum(rtv_recoverable_cost_sar) FILTER (WHERE NOT cost_missing) AS rtv_recoverable_cost_sar,
+    sum(rtv_09_recoverable_cost_sar) FILTER (WHERE NOT cost_missing) AS rtv_09_recoverable_cost_sar,
+    sum(rtv_received_quantity) AS rtv_received_quantity,
+    sum(rtv_received_to_09_quantity) AS rtv_received_to_09_quantity,
+    sum(profit_before_storage_sar) FILTER (WHERE NOT cost_missing) AS profit_before_storage_sar,
+    sum(profit_if_rtv_received_resellable_sar) FILTER (WHERE NOT cost_missing) AS profit_if_rtv_received_resellable_sar,
+    sum(profit_if_rtv_09_resellable_sar) FILTER (WHERE NOT cost_missing) AS profit_if_rtv_09_resellable_sar,
+    sum(net_revenue_sar) FILTER (WHERE NOT cost_missing) AS known_net_revenue_sar,
+    sum(gross_revenue_sar) FILTER (WHERE NOT cost_missing) AS known_gross_revenue_sar,
+    sum(gross_revenue_sar) FILTER (WHERE cost_missing) AS missing_cost_revenue_sar,
+    sum(quantity) FILTER (WHERE cost_missing) AS missing_cost_quantity,
+    count(*) FILTER (WHERE cost_missing) AS missing_cost_lines,
+    count(*) FILTER (WHERE revenue_reversal) AS reversal_lines,
+    sum(return_delivery_fee_sar) FILTER (WHERE revenue_reversal) AS reversal_fee_sar,
+    CASE
+      WHEN sum(net_revenue_sar) FILTER (WHERE NOT cost_missing) > 0
+      THEN sum(profit_before_storage_sar) FILTER (WHERE NOT cost_missing)
+        / nullif(sum(net_revenue_sar) FILTER (WHERE NOT cost_missing), 0)
+      ELSE NULL
+    END AS profit_margin_before_storage,
+    CASE
+      WHEN sum(gross_revenue_sar) > 0
+      THEN sum(gross_revenue_sar) FILTER (WHERE NOT cost_missing) / nullif(sum(gross_revenue_sar), 0)
+      ELSE NULL
+    END AS cost_coverage_revenue_rate
+  FROM mart.profit_order_item
+  GROUP BY created_date, store_key, group_key, standard_goods_sn
+),
+storage AS (
+  SELECT
+    date,
+    store_key,
+    group_key,
+    dim.product_match_key(standard_goods_sn) AS match_key,
+    sum(storage_fee_sar) AS storage_fee_sar,
+    string_agg(DISTINCT storage_fee_method, ' / ') AS storage_fee_method
+  FROM mart.storage_fee_product_store_daily
+  GROUP BY date, store_key, group_key, dim.product_match_key(standard_goods_sn)
+)
+SELECT
+  b.*,
+  coalesce(s.storage_fee_sar,0) AS storage_fee_sar,
+  b.profit_before_storage_sar - coalesce(s.storage_fee_sar,0) AS profit_after_storage_sar,
+  CASE
+    WHEN b.known_net_revenue_sar > 0
+    THEN (b.profit_before_storage_sar - coalesce(s.storage_fee_sar,0)) / nullif(b.known_net_revenue_sar,0)
     ELSE NULL
-  END AS cost_coverage_revenue_rate
-FROM mart.profit_order_item
-GROUP BY created_date, store_key, group_key, standard_goods_sn;
+  END AS profit_margin_after_storage,
+  b.profit_if_rtv_received_resellable_sar - coalesce(s.storage_fee_sar,0) AS profit_if_rtv_received_resellable_after_storage_sar,
+  b.profit_if_rtv_09_resellable_sar - coalesce(s.storage_fee_sar,0) AS profit_if_rtv_09_resellable_after_storage_sar,
+  coalesce(s.storage_fee_method,'none') AS storage_fee_method
+FROM base b
+LEFT JOIN storage s
+  ON s.date = b.date
+ AND s.store_key = b.store_key
+ AND s.group_key = b.group_key
+ AND s.match_key = dim.product_match_key(b.standard_goods_sn);
 
 CREATE OR REPLACE VIEW mart.profit_month_group AS
 WITH group_month AS (
@@ -2862,6 +3408,22 @@ month_total AS (
   SELECT month_start, sum(net_revenue_sar) AS month_net_revenue_sar
   FROM group_month
   GROUP BY month_start
+),
+storage_group_month AS (
+  SELECT
+    date_trunc('month', date)::date AS month_start,
+    group_key,
+    sum(allocated_storage_fee_sar) AS allocated_storage_fee_sar,
+    string_agg(DISTINCT allocation_method, ' / ') AS storage_fee_method
+  FROM mart.storage_fee_store_daily
+  GROUP BY date_trunc('month', date)::date, group_key
+),
+storage_month_total AS (
+  SELECT
+    date_trunc('month', fee_date)::date AS month_start,
+    sum(actual_fee_sar) AS total_storage_fee_sar
+  FROM mart.et_storage_fee_daily
+  GROUP BY date_trunc('month', fee_date)::date
 )
 SELECT
   g.month_start,
@@ -2881,39 +3443,19 @@ SELECT
   g.missing_cost_revenue_sar,
   g.missing_cost_lines,
   g.reversal_lines,
-  coalesce(sf.total_fee_sar,0) AS month_storage_fee_sar,
-  CASE
-    WHEN coalesce(mt.month_net_revenue_sar,0) > 0
-    THEN coalesce(sf.total_fee_sar,0) * g.net_revenue_sar / nullif(mt.month_net_revenue_sar,0)
-    ELSE 0
-  END AS allocated_storage_fee_sar,
+  coalesce(smt.total_storage_fee_sar,0) AS month_storage_fee_sar,
+  coalesce(sgm.allocated_storage_fee_sar,0) AS allocated_storage_fee_sar,
   g.profit_before_storage_sar
-    - CASE
-        WHEN coalesce(mt.month_net_revenue_sar,0) > 0
-        THEN coalesce(sf.total_fee_sar,0) * g.net_revenue_sar / nullif(mt.month_net_revenue_sar,0)
-        ELSE 0
-      END AS profit_after_storage_sar,
+    - coalesce(sgm.allocated_storage_fee_sar,0) AS profit_after_storage_sar,
   g.profit_if_rtv_received_resellable_sar
-    - CASE
-        WHEN coalesce(mt.month_net_revenue_sar,0) > 0
-        THEN coalesce(sf.total_fee_sar,0) * g.net_revenue_sar / nullif(mt.month_net_revenue_sar,0)
-        ELSE 0
-      END AS profit_if_rtv_received_resellable_after_storage_sar,
+    - coalesce(sgm.allocated_storage_fee_sar,0) AS profit_if_rtv_received_resellable_after_storage_sar,
   g.profit_if_rtv_09_resellable_sar
-    - CASE
-        WHEN coalesce(mt.month_net_revenue_sar,0) > 0
-        THEN coalesce(sf.total_fee_sar,0) * g.net_revenue_sar / nullif(mt.month_net_revenue_sar,0)
-        ELSE 0
-      END AS profit_if_rtv_09_resellable_after_storage_sar,
+    - coalesce(sgm.allocated_storage_fee_sar,0) AS profit_if_rtv_09_resellable_after_storage_sar,
   CASE
     WHEN g.net_revenue_sar > 0
     THEN (
       g.profit_before_storage_sar
-      - CASE
-          WHEN coalesce(mt.month_net_revenue_sar,0) > 0
-          THEN coalesce(sf.total_fee_sar,0) * g.net_revenue_sar / nullif(mt.month_net_revenue_sar,0)
-          ELSE 0
-        END
+      - coalesce(sgm.allocated_storage_fee_sar,0)
     ) / nullif(g.net_revenue_sar,0)
     ELSE NULL
   END AS profit_margin_after_storage,
@@ -2923,7 +3465,10 @@ SELECT
   END AS cost_coverage_revenue_rate
 FROM group_month g
 JOIN month_total mt ON mt.month_start = g.month_start
-LEFT JOIN fact.monthly_storage_fee sf ON sf.month_start = g.month_start;
+LEFT JOIN storage_group_month sgm
+  ON sgm.month_start = g.month_start
+ AND sgm.group_key = g.group_key
+LEFT JOIN storage_month_total smt ON smt.month_start = g.month_start;
 
 CREATE OR REPLACE VIEW mart.profit_product_summary AS
 SELECT
@@ -2961,11 +3506,37 @@ SELECT
     WHEN sum(p.gross_revenue_sar) > 0
     THEN sum(p.known_gross_revenue_sar) / nullif(sum(p.gross_revenue_sar),0)
     ELSE NULL
-  END AS cost_coverage_revenue_rate
+  END AS cost_coverage_revenue_rate,
+  coalesce(max(ps.storage_fee_sar),0) AS storage_fee_sar,
+  sum(p.profit_before_storage_sar) - coalesce(max(ps.storage_fee_sar),0) AS profit_after_storage_sar,
+  CASE
+    WHEN sum(p.net_revenue_sar) FILTER (WHERE p.missing_cost_lines = 0) > 0
+    THEN (sum(p.profit_before_storage_sar) - coalesce(max(ps.storage_fee_sar),0)) / nullif(sum(p.known_net_revenue_sar),0)
+    ELSE NULL
+  END AS profit_margin_after_storage,
+  sum(p.profit_if_rtv_received_resellable_sar) - coalesce(max(ps.storage_fee_sar),0) AS profit_if_rtv_received_resellable_after_storage_sar,
+  sum(p.profit_if_rtv_09_resellable_sar) - coalesce(max(ps.storage_fee_sar),0) AS profit_if_rtv_09_resellable_after_storage_sar,
+  coalesce(max(ps.storage_fee_method),'none') AS storage_fee_method,
+  coalesce(max(ps.storage_fee_days),0) AS storage_fee_days,
+  max(ps.storage_source_snapshot_min) AS storage_source_snapshot_min,
+  max(ps.storage_source_snapshot_max) AS storage_source_snapshot_max
 FROM mart.profit_daily_store_product p
 LEFT JOIN mart.product_unit_cost_by_match_key c
   ON c.match_key <> ''
  AND c.match_key = dim.product_match_key(p.standard_goods_sn)
+LEFT JOIN (
+  SELECT
+    dim.product_match_key(standard_goods_sn) AS match_key,
+    sum(actual_allocated_fee_sar) AS storage_fee_sar,
+    string_agg(DISTINCT storage_allocation_method, ' / ') AS storage_fee_method,
+    count(DISTINCT date) AS storage_fee_days,
+    min(source_snapshot_date) AS storage_source_snapshot_min,
+    max(source_snapshot_date) AS storage_source_snapshot_max
+  FROM mart.storage_fee_product_daily
+  GROUP BY dim.product_match_key(standard_goods_sn)
+) ps
+  ON ps.match_key <> ''
+ AND ps.match_key = dim.product_match_key(p.standard_goods_sn)
 GROUP BY p.standard_goods_sn;
 
 CREATE OR REPLACE VIEW mart.inventory_depletion_product_current AS
