@@ -67,6 +67,19 @@ function psql(args, sql) {
     const inner = `sudo docker exec -i ${args.container} psql -U ${args.user} -d ${args.database} -v ON_ERROR_STOP=1 -A -F $'\\t'`;
     return run(['ssh', args.host, inner], sql);
   }
+  if (process.platform !== 'win32') {
+    const docker = [
+      'docker', 'exec', '-i', args.container,
+      'psql', '-U', args.user, '-d', args.database,
+      '-v', 'ON_ERROR_STOP=1',
+      '-A',
+      '-F', '\t',
+    ];
+    if (/^(1|true|yes)$/i.test(String(process.env.SHEIN_DOCKER_USE_SUDO || ''))) {
+      return run(['sudo', ...docker], sql);
+    }
+    return run(docker, sql);
+  }
   return run([
     'wsl',
     '-d', 'Ubuntu-24.04',
