@@ -276,7 +276,7 @@ ET 物流仓服账单里的 `仓储费` 是仓储成本正式来源，旧 `fact.
 - `fact.et_storage_fee_product_detail`：网页端 `ExportStoreFee` 下载的 SKU/箱号日仓储费明细；CSV 原表不入仓库、不提交，只保存规范化字段和来源审计字段。
 - `mart.et_storage_fee_daily`：按日汇总 ET 仓储费总账与实际扣费。
 - `mart.storage_fee_store_daily`：店铺/DSY/LGM 按净销售额分摊仓储费；当日无销售时回退月净销售额分摊。
-- `mart.storage_fee_product_daily`：货号层主路径优先使用 `ExportStoreFee` 明细；缺明细或明细不完整日期才用 `mart.storage_fee_product_daily_estimated` 体积 × 库存天数估算，并校准到 ET 每日实际仓储费总额。
+- `mart.storage_fee_product_daily`：货号层主路径优先使用 `ExportStoreFee` 明细；若历史明细合计与 ET 每日总账不一致，则保留明细的货号/箱号分布并按总账缩放，标记 `download_detail_scaled_to_bill`；只有完全缺明细日期才用 `mart.storage_fee_product_daily_estimated` 体积 × 库存天数估算，并校准到 ET 每日实际仓储费总额。
 - `mart.storage_fee_daily_reconciliation`：独立对比总账、店铺分摊和货号分摊，避免 join 后把每日总账按明细行数放大。
 
 利润视图保留 `profit_before_storage_sar` 作诊断，并新增 `storage_fee_sar`、`profit_after_storage_sar`、`profit_margin_after_storage`、`storage_fee_method`。店铺/分组利润使用净销售额分摊视角；货号利润使用明细优先视角，两者都应能回到同一 ET 每日总额，但不能在同一粒度里无说明混用。

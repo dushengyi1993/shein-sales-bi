@@ -3109,9 +3109,11 @@ fee_daily AS (
 detail_day AS (
   SELECT
     d.fee_date AS date,
+    count(*) AS detail_rows,
     sum(coalesce(d.shown_fee_rmb,0)) AS detail_shown_fee_rmb,
     max(f.shown_fee_rmb) AS fee_shown_fee_rmb,
-    abs(sum(coalesce(d.shown_fee_rmb,0)) - max(f.shown_fee_rmb)) <= 0.05 AS detail_complete
+    abs(sum(coalesce(d.shown_fee_rmb,0)) - max(f.shown_fee_rmb)) <= 0.05 AS detail_complete,
+    max(f.shown_fee_rmb) / nullif(sum(coalesce(d.shown_fee_rmb,0)),0) AS detail_bill_scale
   FROM fact.et_storage_fee_product_detail d
   JOIN fee_daily f ON f.date = d.fee_date
   GROUP BY d.fee_date
@@ -3149,6 +3151,7 @@ detail_expanded AS (
       ELSE coalesce(nullif(d.match_key,''), dim.product_match_key(d.standard_goods_sn), dim.product_match_key(d.storage_code))
     END AS match_key,
     d.warehouse_name,
+    CASE WHEN dd.detail_complete THEN 'download_detail' ELSE 'download_detail_scaled_to_bill' END AS storage_allocation_method,
     CASE WHEN bi.box_id IS NOT NULL THEN bi.item_quantity ELSE d.quantity END AS quantity,
     CASE WHEN bi.box_id IS NOT NULL THEN NULL::numeric ELSE d.volume_m3_per_unit END AS volume_m3_per_unit,
     CASE
@@ -3158,14 +3161,15 @@ detail_expanded AS (
     END AS volume_m3_total,
     d.rate_rmb_per_m3_day,
     CASE
-      WHEN bi.box_id IS NOT NULL AND coalesce(bt.total_item_quantity,0) > 0 THEN d.shown_fee_rmb * bi.item_quantity / nullif(bt.total_item_quantity,0)
-      WHEN bi.box_id IS NOT NULL AND coalesce(bt.item_count,0) > 0 THEN d.shown_fee_rmb / nullif(bt.item_count,0)
-      ELSE d.shown_fee_rmb
+      WHEN bi.box_id IS NOT NULL AND coalesce(bt.total_item_quantity,0) > 0 THEN d.shown_fee_rmb * coalesce(dd.detail_bill_scale,1) * bi.item_quantity / nullif(bt.total_item_quantity,0)
+      WHEN bi.box_id IS NOT NULL AND coalesce(bt.item_count,0) > 0 THEN d.shown_fee_rmb * coalesce(dd.detail_bill_scale,1) / nullif(bt.item_count,0)
+      ELSE d.shown_fee_rmb * coalesce(dd.detail_bill_scale,1)
     END AS shown_fee_rmb
   FROM fact.et_storage_fee_product_detail d
   JOIN detail_day dd
     ON dd.date = d.fee_date
-   AND dd.detail_complete
+   AND coalesce(dd.detail_rows,0) > 0
+   AND coalesce(dd.detail_shown_fee_rmb,0) <> 0
   LEFT JOIN box_items bi
     ON d.storage_type ILIKE '%整箱%'
    AND bi.box_id = d.storage_code
@@ -3190,11 +3194,11 @@ detail_rows AS (
     sum(e.shown_fee_rmb) AS shown_fee_rmb,
     sum(e.shown_fee_rmb) * max(p.billing_discount) AS actual_fee_rmb,
     sum(e.shown_fee_rmb) * max(p.billing_discount) / nullif(max(p.sar_to_rmb),0) AS actual_allocated_fee_sar,
-    'download_detail'::text AS storage_allocation_method
+    e.storage_allocation_method::text AS storage_allocation_method
   FROM detail_expanded e
   CROSS JOIN policy p
   WHERE coalesce(e.standard_goods_sn, e.match_key, '') <> ''
-  GROUP BY e.date, e.source_snapshot_date, e.stock_snapshot_method, e.standard_goods_sn, e.match_key, e.warehouse_name
+  GROUP BY e.date, e.source_snapshot_date, e.stock_snapshot_method, e.standard_goods_sn, e.match_key, e.warehouse_name, e.storage_allocation_method
 ),
 fallback_rows AS (
   SELECT
@@ -3217,7 +3221,8 @@ fallback_rows AS (
   FROM mart.storage_fee_product_daily_estimated e
   LEFT JOIN detail_day d
     ON d.date = e.date
-   AND d.detail_complete
+   AND coalesce(d.detail_rows,0) > 0
+   AND coalesce(d.detail_shown_fee_rmb,0) <> 0
   WHERE d.date IS NULL
 )
 SELECT * FROM detail_rows
