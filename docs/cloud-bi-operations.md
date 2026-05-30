@@ -11,6 +11,7 @@
 - 域名入口：`https://shein-bi.faceair.me/`；服务器内部仍由 Nginx `127.0.0.1:8080` 转发到 BI Portal。
 - GitHub 仓库 `main` 是云端代码来源；云端有值得保存的脚本、配置模板、门户静态产物或自动运营能力时，先同步回 GitHub，再部署到服务器。
 - 注意：`outputs/bi-portal/index.html` / `data.json` 会作为可恢复静态快照纳入 GitHub；服务器执行 `git reset --hard origin/main` 或类似部署后，可能把实时 BI 页面覆盖成仓库快照。每次服务器拉取/重置代码后，都要立即跑一次 `scripts/cloud_bi_refresh.sh today intraday` 或对应 systemd service，确认页面生成时间和销售源时间回到当前。
+- 云端 Git 同步红线：`/opt/shein-bi/app` 必须由 `sheinops:sheinops` 持有，不要用 `sudo git pull`。仓库 remote 使用 `git@github.com:dushengyi1993/shein-sales-bi.git`，`core.sshCommand` 必须指向 `/home/sheinops/.ssh/shein_bi_deploy`；不要指向 `/root/.ssh/...`，否则普通运维用户无法 fetch/pull。生产生成的 `outputs/bi-portal/data.json` / `index.html` 在服务器上用 `git update-index --skip-worktree` 标记为本地生成物，避免定时刷新后的实时页面把后续 `git pull --ff-only` 阻塞。若云端出现未提交热修复，先 `git stash push -u -m "pre-...deploy-..."` 保存，再部署远端 `main`。
 - 发布顺序：BI 用户可见改动先在云端页面或云端服务输出验证，用户确认后再进入 GitHub `main` / release。本地验证只能证明开发产物可运行，不能替代云端最终审核。
 - 当前 GitHub 发布边界：`2026.05.29` 是已发布 V1/main 版本，包含 V1 时间筛选弹窗修复、`2026-05-29` BI 静态快照和 `docs/bi-profit-audit-2026-03-05.md`；V2 仍为平行预览/开发，不纳入正式 release 或日常刷新。`2026.05.28` release 已修正为 LGM 新店与 OpenAPI onboarding 范围。
 
