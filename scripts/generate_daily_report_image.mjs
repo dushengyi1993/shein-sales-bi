@@ -196,15 +196,17 @@ function metricRow(blocks, y, mode) {
 }
 function ranking(rows, {x, y, title, mode = 'store', maxRows = 15}) {
   const rowH = mode === 'product' ? 42 : 32;
-  const labelW = mode === 'product' ? 390 : 112;
-  const barW = mode === 'product' ? 440 : 463;
+  const labelW = mode === 'product' ? 390 : 92;
+  const valueW = mode === 'product' ? 0 : 220;
+  const right = 1032;
+  const barW = mode === 'product' ? 440 : Math.max(520, right - x - labelW - 14 - valueW);
   const max = Math.max(1, ...rows.slice(0, maxRows).map(r => mode === 'product' ? r.qty : r.sar));
   let out = sectionTitle(x, y, title);
   rows.slice(0, maxRows).forEach((r, i) => {
     const yy = y + 38 + i * rowH;
     const label = mode === 'product' ? `${String(i + 1).padStart(2, '0')} ${r.sku}` : `${String(i + 1).padStart(2, '0')} ${r.storeKey}`;
     const value = mode === 'product' ? r.qty : r.sar;
-    const display = mode === 'product' ? `${r.qty} 件 / ${money(r.sar)} SAR` : `${money(r.sar)} SAR`;
+    const display = mode === 'product' ? `${r.qty} 件 / ${money(r.sar)} SAR` : `${money(r.sar)} SAR｜单 ${r.orders}｜量 ${r.qty}`;
     const bw = Math.round(barW * value / max);
     const fillId = mode === 'product' ? 'product' : (String(r.group).toUpperCase() === 'LGM' ? 'lgm' : 'dsy');
     out += `<text x="${x}" y="${yy + 18}" class="label">${esc(cut(label, mode === 'product' ? 46 : 12))}</text>
@@ -229,8 +231,8 @@ const todayBlocks = groupBlocks(cfg, args.groups, today);
 const yesterdayBlocks = groupBlocks(cfg, args.groups, yesterdayFull);
 const todayFetchText = isoToBjString(today.latestFetchTime) || `${date} ${asOf.slice(0, 5)}:00`;
 
-const todayStoreRows = 15;
-const yesterdayStoreRows = 15;
+const todayStoreRows = today.rankedStores.length;
+const yesterdayStoreRows = yesterdayFull.rankedStores.length;
 const yesterdayProductRows = Math.min(24, Math.max(12, yesterdayFull.rankedProducts.length));
 let y = 48;
 y += 95;
@@ -255,7 +257,7 @@ body += metricRow(todayBlocks, cy, 'sales');
 cy += 148;
 body += metricRow(todayBlocks, cy, 'orders');
 cy += 178;
-body += ranking(today.rankedStores, {x: 48, y: cy, title: '今日店铺排行', mode: 'store', maxRows: todayStoreRows});
+body += ranking(today.rankedStores, {x: 48, y: cy, title: `今日店铺排行（${todayStoreRows}店完整）`, mode: 'store', maxRows: todayStoreRows});
 cy += rankingHeight(today.rankedStores, todayStoreRows, 'store') + 56;
 body += sectionTitle(48, cy, '\u6628\u65e5\u5168\u5929', `\u6628\u65e5 ${ydate} \u5b8c\u6574\u81ea\u7136\u65e5`);
 cy += 26;
@@ -263,7 +265,7 @@ body += metricRow(yesterdayBlocks, cy, 'sales');
 cy += 148;
 body += metricRow(yesterdayBlocks, cy, 'orders');
 cy += 178;
-body += ranking(yesterdayFull.rankedStores, {x: 48, y: cy, title: '\u6628\u65e5\u5168\u5929\u5e97\u94fa\u6392\u884c', mode: 'store', maxRows: yesterdayStoreRows});
+body += ranking(yesterdayFull.rankedStores, {x: 48, y: cy, title: `\u6628\u65e5\u5168\u5929\u5e97\u94fa\u6392\u884c（${yesterdayStoreRows}\u5e97\u5b8c\u6574）`, mode: 'store', maxRows: yesterdayStoreRows});
 cy += rankingHeight(yesterdayFull.rankedStores, yesterdayStoreRows, 'store') + 52;
 body += ranking(yesterdayFull.rankedProducts, {x: 48, y: cy, title: '\u6628\u65e5\u5168\u5929\u4ea7\u54c1\u9500\u91cf\u6392\u884c', mode: 'product', maxRows: yesterdayProductRows});
 body += `<text x="48" y="${height - 38}" class="small">\u53e3\u5f84\uff1a\u8ba2\u5355\u521b\u5efa\u65f6\u95f4\uff5c\u5317\u4eac\u65f6\u95f4\u81ea\u7136\u65e5\uff5c\u4eca\u65e5\u6309\u5f53\u524d\u622a\u6b62\u65f6\u95f4\u7edf\u8ba1\uff1b\u6628\u65e5\u6309\u5b8c\u6574\u81ea\u7136\u65e5\u7edf\u8ba1\u3002</text>`;

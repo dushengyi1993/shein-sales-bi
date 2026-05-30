@@ -23,7 +23,6 @@ const FETCH_DIR = path.join(ROOT, 'outputs', 'shein_fetch');
 const PAYLOAD_DIR = path.join(ROOT, 'outputs', 'lark_payloads');
 const REPORT_DIR = path.join(ROOT, 'outputs', 'reports');
 const FEISHU_BASE_PAUSE_FLAG = path.join(ROOT, 'state', 'feishu-base-sync-paused.flag');
-const DEFAULT_FEISHU_BASE_URL = 'https://zcnm3ts63aph.feishu.cn/base/SnnQbrAu6aLzMWsnEICcy0cKnJh';
 const FX_SAR_TO_RMB = 1.8;
 
 function envTruthy(value) {
@@ -374,7 +373,7 @@ function formatMissingStores(dayData, showGroup = false) {
     .join(', ');
 }
 
-function buildMessage({groupLabel, today, yesterday, todayData, yesterdayData, topProducts, baseUrl, syncWarning = ''}) {
+function buildMessage({groupLabel, today, yesterday, todayData, yesterdayData, topProducts, syncWarning = ''}) {
   const generatedAt = localDateTimeString();
   const todayFetchAt = latestFetchTimeText(todayData);
   const yesterdayFetchAt = latestFetchTimeText(yesterdayData);
@@ -411,8 +410,7 @@ function buildMessage({groupLabel, today, yesterday, todayData, yesterdayData, t
     formatProductList(topProducts),
     '',
     syncWarning ? `【同步提醒】\n${syncWarning}\n` : '',
-    missingNote ? `【注意】\n${missingNote}\n` : '',
-    `多维表格：${baseUrl}`,
+    missingNote ? `【注意】\n${missingNote}` : '',
   ].filter(Boolean).join('\n');
 }
 
@@ -526,10 +524,7 @@ if (args.syncToday) {
 const yesterdayData = await loadReportDay(storesConfig, reportGroups, yesterday);
 const todayData = await loadReportDay(storesConfig, reportGroups, today);
 const topProducts = await loadTopProductsFromFetch(storesConfig, reportGroups, today, 5);
-const baseUrl = reportConfig.baseUrl
-  || state.baseCreateResponse?.data?.base?.url
-  || (state.baseToken ? `https://zcnm3ts63aph.feishu.cn/base/${state.baseToken}` : DEFAULT_FEISHU_BASE_URL);
-const message = buildMessage({groupLabel, today, yesterday, todayData, yesterdayData, topProducts, baseUrl, syncWarning: syncWarning.trim()});
+const message = buildMessage({groupLabel, today, yesterday, todayData, yesterdayData, topProducts, syncWarning: syncWarning.trim()});
 
 await fs.mkdir(REPORT_DIR, {recursive: true});
 const localReportFile = path.join(REPORT_DIR, `daily-lark-report-${today}.txt`);

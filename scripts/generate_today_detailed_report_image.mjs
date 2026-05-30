@@ -244,7 +244,7 @@ function metricGrid(summary, y) {
 function storeRanking(rows, x, y) {
   const sorted = [...rows].sort((a, b) => b.sar - a.sar || b.orders - a.orders || b.qty - a.qty || a.storeKey.localeCompare(b.storeKey));
   const max = Math.max(1, ...sorted.map(r => r.sar));
-  const rowH = 34, labelW = 92, barW = 565;
+  const rowH = 34, labelW = 92, barW = 815;
   let out = sectionTitle(x, y, `今日店铺排行（${sorted.length}店完整）`, '颜色区分 DSY / LGM，按销售额降序');
   sorted.forEach((r, i) => {
     const yy = y + 42 + i * rowH;
@@ -280,8 +280,9 @@ const cfg = await readJson(path.join(ROOT, 'config', 'stores.json'));
 const summary = await loadToday(cfg, args.groups, date);
 const fetchText = isoToBjString(summary.latestFetchTime) || '未找到';
 const productRows = Math.max(1, summary.products.length);
+const storeRows = summary.storeRows.length;
 const width = 1240;
-const height = Math.max(1650, 660 + 44 + 15 * 34 + 86 + productRows * 40 + 90);
+const height = Math.max(1650, 660 + 44 + storeRows * 34 + 86 + productRows * 40 + 90);
 await fs.mkdir(OUT_DIR, {recursive: true});
 const png = args.out ? path.resolve(args.out) : path.join(OUT_DIR, `today-detailed-report-${date}.png`);
 const htmlFile = png.replace(/\.png$/i, '.html');
@@ -295,7 +296,7 @@ cy += 26;
 body += metricGrid(summary, cy);
 cy += 2 * 124 + 22 + 64;
 body += storeRanking(summary.storeRows, 48, cy);
-cy += 44 + 15 * 34 + 74;
+cy += 44 + storeRows * 34 + 74;
 body += productRanking(summary.products, 48, cy);
 body += `<text x="48" y="${height - 38}" class="small">口径：订单创建时间｜北京时间自然日｜正金额商品明细汇总｜货号按标准货号归并｜1 SAR = 1.8 RMB。</text>`;
 
