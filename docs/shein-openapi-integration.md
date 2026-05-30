@@ -259,6 +259,30 @@ node scripts/link_ops_build_product_draft_from_webapi.mjs --source-store DL --so
 - 价格/核价不作为商品资料冲突。复制发品前按报价策略处理：默认可按 `50%` 利润率或同款其它店最高核价报价，并允许人工覆盖。
 
 
+
+## 2026-05-30 进展：DSY 组开放平台应用已批量提交
+
+已使用各店铺独立可见 Chrome profile，在 SHEIN 开放平台按既有口径创建 / 提交 DSY 组应用；未读取、保存或写入任何真实 `APP_ID`、`APP_SECRET_KEY`、店铺 `openKeyId` 或 `secretKey`。
+
+- 已审核通过：
+  - `HL-皓兰SHEIN运营中台`。
+  - `ZL-紫翎SHEIN运营中台`。
+- 已提交审核中：
+  - `DL-地利SHEIN运营中台`。
+  - `DX-冬玺SHEIN运营中台`。
+  - `FY-锋炎SHEIN运营中台`。
+  - `LQ-乐棋SHEIN运营中台`。
+  - `NM-南墨SHEIN运营中台`。
+  - `JY-钧羽SHEIN运营中台`。
+  - `TS-天实SHEIN运营中台`。
+  - `MZ-妙镇SHEIN运营中台`。
+- 合作模式：半托管。
+- 计划对接业务功能：商品管理、商品合规、订单管理、库存管理、财务管理。
+- 应用图标：来自本机桌面 `LOGO` 文件夹中按店铺命名的 PNG；图片均为 1:1 且小于 10MB。
+- 非敏感状态摘要：`outputs/reports/dsy-openapi-application-final-status-20260530-2043.json`。
+
+下一步必须等应用审核通过后，再逐店完成授权、换取店铺级密钥并写入本机忽略配置；在授权和多日双跑对账完成前，不得切换生产销售源。
+
 ## 2026-05-28 进展：ZL 开放平台应用已提交审核
 
 已在 ZL 店铺对应开放平台账号中创建并提交应用：
@@ -267,7 +291,7 @@ node scripts/link_ops_build_product_draft_from_webapi.mjs --source-store DL --so
 - 应用名：`ZL-紫翎SHEIN运营中台`。
 - 合作模式：半托管。
 - 业务功能：商品管理、商品合规、订单管理、库存管理、财务管理。
-- 当前状态：审核中。
+- 当前状态：审核通过（2026-05-30 通过 ZL profile 页面复核）。
 - IP 白名单已添加云服务器 `43.165.167.135` 和当时本机出口 `38.181.81.164`。
 
 该应用仍未写入任何真实密钥到仓库。审核通过并完成店铺授权后，按 HL 的接入方式把 ZL 加入 `.local` 配置，先走官方 OpenAPI / 当前生产销售源双跑对账，再决定是否替换生产数据入口。

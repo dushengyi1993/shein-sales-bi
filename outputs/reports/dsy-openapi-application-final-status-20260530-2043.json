@@ -1,0 +1,56 @@
+{
+  "results": [
+    {
+      "appName": "DL-地利SHEIN运营中台",
+      "store": "DL",
+      "status": "审核中"
+    },
+    {
+      "appName": "DX-冬玺SHEIN运营中台",
+      "store": "DX",
+      "status": "审核中"
+    },
+    {
+      "appName": "FY-锋炎SHEIN运营中台",
+      "store": "FY",
+      "status": "审核中"
+    },
+    {
+      "appName": "LQ-乐棋SHEIN运营中台",
+      "store": "LQ",
+      "status": "审核中"
+    },
+    {
+      "appName": "NM-南墨SHEIN运营中台",
+      "store": "NM",
+      "status": "审核中"
+    },
+    {
+      "appName": "HL-皓兰SHEIN运营中台",
+      "store": "HL",
+      "status": "审核通过"
+    },
+    {
+      "appName": "JY-钧羽SHEIN运营中台",
+      "store": "JY",
+      "status": "审核中"
+    },
+    {
+      "appName": "ZL-紫翎SHEIN运营中台",
+      "store": "ZL",
+      "status": "审核通过"
+    },
+    {
+      "appName": "TS-天实SHEIN运营中台",
+      "store": "TS",
+      "status": "审核中"
+    },
+    {
+      "appName": "MZ-妙镇SHEIN运营中台",
+      "store": "MZ",
+      "status": "审核中"
+    }
+  ],
+  "note": "Non-secret SHEIN OpenAPI application status verified from visible per-store Chrome profiles. No APP_ID/APP_SECRET/openKey/secretKey captured.",
+  "generatedAt": "2026-05-30T20:44:39+08:00"
+}
