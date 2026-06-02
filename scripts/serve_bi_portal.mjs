@@ -258,6 +258,13 @@ async function writeJsonFile(file, value) {
   await fs.rename(tmp, file);
 }
 
+async function writeJsonFileCompact(file, value) {
+  await fs.mkdir(path.dirname(file), {recursive: true});
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(value), 'utf8');
+  await fs.rename(tmp, file);
+}
+
 async function manualLoginStoreKeys() {
   const config = await readJsonFile(STORES_PATH, null);
   const stores = Array.isArray(config?.stores) ? config.stores : [];
@@ -1381,6 +1388,53 @@ async function readBiSectionCache(root, section, generatedAt) {
   return cached;
 }
 
+function appendCacheHitToJsonObjectBuffer(buffer, cacheHit) {
+  if (!Buffer.isBuffer(buffer)) return null;
+  let end = buffer.length;
+  while (end > 0) {
+    const c = buffer[end - 1];
+    if (c !== 0x20 && c !== 0x09 && c !== 0x0a && c !== 0x0d) break;
+    end--;
+  }
+  if (end < 2 || buffer[end - 1] !== 0x7d) return null;
+  return Buffer.concat([
+    buffer.subarray(0, end - 1),
+    Buffer.from(`,\n  "cacheHit": ${cacheHit ? 'true' : 'false'}\n}\n`, 'utf8'),
+  ]);
+}
+
+function extractJsonStringFieldFromHead(head, field) {
+  const re = new RegExp(`"${field}"\\s*:\\s*"([^"]*)"`);
+  return re.exec(head)?.[1] || '';
+}
+
+async function readBiSectionCacheRaw(root, section, generatedAt, cacheHit = true) {
+  const file = path.join(root, 'sections', `${section}.json`);
+  const buffer = await fs.readFile(file).catch(() => null);
+  if (!buffer || !buffer.length) return null;
+
+  // Section cache files put metadata before the heavy `data` object. Validate the
+  // freshness contract from the small head instead of JSON.parse-ing 10MB+ files
+  // on every request.
+  const head = buffer.subarray(0, Math.min(buffer.length, 8192)).toString('utf8');
+  const expectedGeneratedAt = String(generatedAt || '');
+  const cachedGeneratedAt = extractJsonStringFieldFromHead(head, 'generatedAt');
+  if (expectedGeneratedAt && cachedGeneratedAt !== expectedGeneratedAt) return null;
+  if (extractJsonStringFieldFromHead(head, 'section') !== section) return null;
+  if (!/"data"\s*:/.test(head)) return null;
+
+  const body = appendCacheHitToJsonObjectBuffer(buffer, cacheHit);
+  if (!body) return null;
+  return {
+    body,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'X-BI-Section-Cache-Hit': cacheHit ? 'true' : 'false',
+      'X-BI-Section-Mode': 'raw-cache',
+    },
+  };
+}
+
 async function writeBiSectionCache(root, section, generatedAt, data, run) {
   const dir = path.join(root, 'sections');
   await fs.mkdir(dir, {recursive: true});
@@ -1397,7 +1451,7 @@ async function writeBiSectionCache(root, section, generatedAt, data, run) {
       stderrTail: String(run.stderr || '').slice(-4000),
     } : null,
   };
-  await writeJsonFile(file, payload);
+  await writeJsonFileCompact(file, payload);
   return payload;
 }
 
@@ -1442,6 +1496,8 @@ async function loadBiSection(args, root, section, options = {}) {
     return {status: 400, payload: {ok: false, error: 'BI portal is not in api data mode', section, mode: meta.mode}};
   }
   if (!force) {
+    const rawCached = await readBiSectionCacheRaw(root, section, meta.generatedAt, true);
+    if (rawCached) return {status: 200, rawBody: rawCached.body, headers: rawCached.headers};
     const cached = await readBiSectionCache(root, section, meta.generatedAt);
     if (cached) return {status: 200, payload: {...cached, cacheHit: true}};
   }
@@ -1463,6 +1519,8 @@ async function loadBiSection(args, root, section, options = {}) {
     }));
   }
   const payload = await biSectionInFlight.get(key);
+  const rawGenerated = await readBiSectionCacheRaw(root, section, meta.generatedAt, false);
+  if (rawGenerated) return {status: 200, rawBody: rawGenerated.body, headers: rawGenerated.headers};
   return {status: 200, payload: {...payload, cacheHit: false}};
 }
 
@@ -1877,6 +1935,7 @@ async function main() {
           }
           try {
             const result = await loadBiSection(args, root, section, {force, allowGenerate});
+            if (result.rawBody) return send(res, result.status, result.rawBody, result.headers || {'Content-Type': 'application/json; charset=utf-8'});
             return sendJson(res, result.status, result.payload);
           } catch (err) {
             return sendJson(res, 500, {ok: false, section, error: err?.message || String(err || 'BI section failed')});

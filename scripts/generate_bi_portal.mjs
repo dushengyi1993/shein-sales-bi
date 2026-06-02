@@ -4248,7 +4248,7 @@ function requiredBiSectionsForTab(tab = state.tab || 'overview'){
 function backgroundBiSectionsForTab(tab = state.tab || 'overview'){
   if (!biPortalUsesApiSections()) return [];
   const map = {
-    overview:['rankings','actions','afterSales','financeData','profit']
+    overview:['rankings','actions','afterSales','financeData']
   };
   return (map[tab] || []).filter(section => BI_SECTION_KEYS.has(section));
 }
