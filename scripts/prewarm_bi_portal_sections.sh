@@ -4,7 +4,7 @@ set -Eeuo pipefail
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
 TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
 PORTAL_URL="${SHEIN_BI_PORTAL_URL:-http://127.0.0.1:8787}"
-SECTIONS="${SHEIN_BI_PORTAL_PREWARM_SECTIONS:-rankings,actions,afterSales,financeData,linksData,comments,orders,rtvData,waybills,profit}"
+SECTIONS="${SHEIN_BI_PORTAL_PREWARM_SECTIONS:-rankings,actions,afterSales,financeData,linksData,comments,orders,rtvData,waybills,profit,homeProfit}"
 LOG_DIR="${SHEIN_BI_PREWARM_LOG_DIR:-/srv/shein-bi/logs/cloud-portal-prewarm}"
 TIMEOUT_SECONDS="${SHEIN_BI_PREWARM_SECTION_TIMEOUT_SECONDS:-1200}"
 FORCE_REFRESH="${SHEIN_BI_PORTAL_PREWARM_FORCE:-0}"

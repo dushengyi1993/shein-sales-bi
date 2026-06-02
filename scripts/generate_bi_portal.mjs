@@ -77,6 +77,7 @@ function parseArgs(argv) {
 }
 
 const PORTAL_API_SECTION_KEYS = [
+  'homeProfit',
   'rankings',
   'profit',
   'actions',
@@ -4228,10 +4229,15 @@ function biSectionLoaded(section){
 function missingBiSections(sections){
   return (sections || []).filter(section => BI_SECTION_KEYS.has(section) && !biSectionLoaded(section));
 }
+function overviewRequiredBiSections(){
+  if ($('detailsFold')?.open) return OVERVIEW_DETAILS_SECTION_KEYS;
+  if (productScopeQuery()) return ['profit'];
+  return [];
+}
 function requiredBiSectionsForTab(tab = state.tab || 'overview'){
   if (!biPortalUsesApiSections()) return [];
   const map = {
-    overview:$('detailsFold')?.open ? OVERVIEW_DETAILS_SECTION_KEYS : [],
+    overview:overviewRequiredBiSections(),
     stores:['rankings','profit','actions','linksData','afterSales','financeData','waybills'],
     products:['rankings','profit','actions','linksData','orders','afterSales','financeData','comments'],
     links:['linksData','actions'],
@@ -4248,7 +4254,7 @@ function requiredBiSectionsForTab(tab = state.tab || 'overview'){
 function backgroundBiSectionsForTab(tab = state.tab || 'overview'){
   if (!biPortalUsesApiSections()) return [];
   const map = {
-    overview:['rankings','actions','afterSales','financeData']
+    overview:['homeProfit','rankings','actions','afterSales','financeData']
   };
   return (map[tab] || []).filter(section => BI_SECTION_KEYS.has(section));
 }
@@ -4271,7 +4277,7 @@ function showBiSectionLoading(sections){
     if ((state.tab || 'overview') === 'overview' && host.id === 'homeDashboard') host.appendChild(target);
     else host.prepend(target);
   }
-  const pending = sections.map(s => s === 'linksData' ? '链接/覆盖' : s === 'financeData' ? '财务明细' : s === 'rtvData' ? 'RTV追踪' : s).join('、');
+  const pending = sections.map(s => s === 'homeProfit' ? '首页利润' : s === 'linksData' ? '链接/覆盖' : s === 'financeData' ? '财务明细' : s === 'rtvData' ? 'RTV追踪' : s).join('、');
   target.innerHTML = '正在加载当前页面数据：' + escapeHtml(pending) + '。界面布局保持不变，数据按需从服务端读取。';
 }
 function clearBiSectionLoading(){
@@ -4310,28 +4316,30 @@ async function loadBiSections(sections){
 }
 let biBackgroundLoadActive = false;
 function startBiSectionBackgroundLoads(sections){
-  const pending = (sections || []).filter(section => !biSectionLoaded(section));
+  const pending = (sections || []).filter(section => !biSectionLoaded(section) && biSectionState[section]?.status !== 'error');
   if (!pending.length || biBackgroundLoadActive) return;
   biBackgroundLoadActive = true;
   (async () => {
+    let hadError = false;
     try {
       for (const section of pending) {
         if (biSectionLoaded(section)) continue;
-        await loadBiSection(section);
+        try {
+          await loadBiSection(section);
+        } catch (err) {
+          hadError = true;
+          console.warn('background BI section load failed', section, err);
+          continue;
+        }
+        renderFilters();
+        renderAll();
+      }
+      if (hadError) {
         renderFilters();
         renderAll();
       }
     } finally {
       biBackgroundLoadActive = false;
-    }
-  })().catch(err => {
-    const host = (state.tab || 'overview') === 'overview' ? ($('homeDashboard') || document.getElementById('overview')) : document.getElementById(state.tab || 'overview');
-    if (host && !document.getElementById('biSectionLoading')) {
-      const el = document.createElement('div');
-      el.id = 'biSectionLoading';
-      el.className = 'empty';
-      el.innerHTML = '后台数据加载失败：' + escapeHtml(err?.message || String(err || 'unknown')) + '。可刷新重试，或进入对应页面后按需加载。';
-      host.prepend(el);
     }
   });
 }
@@ -6049,6 +6057,106 @@ function profitStorageForScope(start, end, scopeValue = state.store, respectProd
   }
   return {total, matched, method:Array.from(methods).join(' / ') || 'none'};
 }
+function homeProfitSummaryAvailable(){
+  return Array.isArray(DATA.homeProfitSummary?.dailyScopes);
+}
+function homeProfitSummaryDateBounds(){
+  if (!homeProfitSummaryAvailable()) return null;
+  const dates = (DATA.homeProfitSummary?.dailyScopes || []).map(r => String(r.date || '').slice(0, 10)).filter(Boolean).sort();
+  if (!dates.length) return null;
+  return {min:dates[0], max:dates.at(-1)};
+}
+function homeProfitSummaryCoversRange(start, end){
+  const bounds = homeProfitSummaryDateBounds();
+  if (!bounds) return false;
+  return String(start || '') >= bounds.min && String(end || '') <= bounds.max;
+}
+function homeProfitSummaryCanSatisfyScope(range = null){
+  if (productScopeQuery() || !homeProfitSummaryAvailable()) return false;
+  if (!range) return true;
+  return homeProfitSummaryCoversRange(range.start, range.end);
+}
+function normalizedHomeProfitScopeValue(scopeValue = ''){
+  const scope = storeFilterKind(scopeValue);
+  if (scope.type === 'all') return '';
+  if (scope.type === 'group') return 'GROUP:' + scope.key;
+  return scope.key;
+}
+function homeProfitSummaryRows(start, end, scopeValue = ''){
+  if (!homeProfitSummaryCanSatisfyScope({start, end})) return null;
+  const scopeKey = normalizedHomeProfitScopeValue(scopeValue).toUpperCase();
+  return (DATA.homeProfitSummary?.dailyScopes || []).filter(r => {
+    const d = String(r.date || '').slice(0, 10);
+    if (!d || d < start || d > end) return false;
+    return String(r.scope_value || '').toUpperCase() === scopeKey;
+  });
+}
+function profitSummaryForAggregatedRows(rows){
+  const out = {
+    grossRevenueSar:0,
+    netRevenueSar:0,
+    productCostSar:0,
+    returnFeeSar:0,
+    rtvRecoverableCostSar:0,
+    rtv09RecoverableCostSar:0,
+    rtvReceivedQuantity:0,
+    rtvReceivedTo09Quantity:0,
+    storageFeeSar:0,
+    fallbackStorageFeeSar:0,
+    storageMatched:0,
+    profitBeforeStorageSar:0,
+    profitSar:0,
+    profitReceivedResellableSar:0,
+    profit09ResellableSar:0,
+    knownGrossRevenueSar:0,
+    missingCostRevenueSar:0,
+    missingCostQuantity:0,
+    missingCostLines:0,
+    reversalLines:0,
+    orders:0,
+    quantity:0
+  };
+  for (const r of rows || []) {
+    const storageFee = Number(r.storage_fee_sar || 0);
+    const fallbackStorageFee = Number(r.fallback_storage_fee_sar ?? r.storage_fee_sar ?? 0);
+    const storageMatched = Number(r.storage_matched || 0);
+    const beforeStorage = Number(r.profit_before_storage_sar || 0);
+    const rtvReceivedBefore = Number(r.profit_if_rtv_received_resellable_sar ?? beforeStorage);
+    const rtv09Before = Number(r.profit_if_rtv_09_resellable_sar ?? beforeStorage);
+    out.grossRevenueSar += Number(r.gross_revenue_sar || 0);
+    out.netRevenueSar += Number(r.net_revenue_sar || 0);
+    out.productCostSar += Number(r.product_cost_sar || 0);
+    out.returnFeeSar += Number(r.return_delivery_fee_sar || 0);
+    out.rtvRecoverableCostSar += Number(r.rtv_recoverable_cost_sar || 0);
+    out.rtv09RecoverableCostSar += Number(r.rtv_09_recoverable_cost_sar || 0);
+    out.rtvReceivedQuantity += Number(r.rtv_received_quantity || 0);
+    out.rtvReceivedTo09Quantity += Number(r.rtv_received_to_09_quantity || 0);
+    out.storageFeeSar += storageFee;
+    out.fallbackStorageFeeSar += fallbackStorageFee;
+    out.storageMatched += storageMatched;
+    out.profitBeforeStorageSar += beforeStorage;
+    out.profitReceivedResellableSar += rtvReceivedBefore;
+    out.profit09ResellableSar += rtv09Before;
+    out.knownGrossRevenueSar += Number(r.known_net_revenue_sar ?? r.known_gross_revenue_sar ?? 0);
+    out.missingCostRevenueSar += Number(r.missing_cost_revenue_sar || 0);
+    out.missingCostQuantity += Number(r.missing_cost_quantity || 0);
+    out.missingCostLines += Number(r.missing_cost_lines || 0);
+    out.reversalLines += Number(r.reversal_lines || 0);
+    out.orders += Number(r.orders || 0);
+    out.quantity += Number(r.quantity || 0);
+  }
+  const effectiveStorageFee = out.storageMatched > 0 ? out.storageFeeSar : out.fallbackStorageFeeSar;
+  out.storageFeeSar = effectiveStorageFee;
+  out.profitSar = out.profitBeforeStorageSar - effectiveStorageFee;
+  out.profitReceivedResellableSar -= effectiveStorageFee;
+  out.profit09ResellableSar -= effectiveStorageFee;
+  out.costCoverageRate = out.netRevenueSar > 0 ? out.knownGrossRevenueSar / out.netRevenueSar : null;
+  out.margin = out.netRevenueSar > 0 && out.knownGrossRevenueSar > 0 ? out.profitSar / out.netRevenueSar : null;
+  out.hasAnyCost = out.knownGrossRevenueSar > 0 || out.productCostSar > 0;
+  out.sourceGeneratedAt = DATA.homeProfitSummary?.sourceGeneratedAt || '';
+  out.staleSource = Boolean(DATA.homeProfitSummary?.staleSource);
+  return out;
+}
 function profitSummaryForRows(rows, opts = {}){
   const out = {
     grossRevenueSar:0,
@@ -6108,7 +6216,15 @@ function profitSummaryForRows(rows, opts = {}){
   return out;
 }
 function homeProfitForScope(start, end, scopeValue = ''){
+  const summaryRows = homeProfitSummaryRows(start, end, scopeValue);
+  if (summaryRows) return profitSummaryForAggregatedRows(summaryRows);
   return profitSummaryForRows(profitDailyRows(start, end, scopeValue, true), {start, end, scopeValue, respectProduct:true});
+}
+function homeProfitReadyForRender(){
+  if (!biPortalUsesApiSections()) return true;
+  const range = ensureDateRange();
+  if (homeProfitSummaryCanSatisfyScope(range)) return true;
+  return biSectionLoaded('profit');
 }
 function profitDisplayHtml(summary, opts = {}){
   const s = summary || {};
@@ -6116,7 +6232,8 @@ function profitDisplayHtml(summary, opts = {}){
     return '<span class="pending-profit">待成本表</span><span class="coverage-note">成本覆盖 0%，先导入成本表</span>';
   }
   const cls = Number(s.profitSar || 0) < 0 ? 'danger' : 'positive';
-  return '<span class="'+cls+'">'+escapeHtml(fmt.format(Number(s.profitSar || 0)))+'</span><span class="coverage-note">覆盖 '+pct(s.costCoverageRate)+' · 已扣仓储 '+money(s.storageFeeSar)+'</span>';
+  const sourceNote = s.staleSource && s.sourceGeneratedAt ? ' · 摘要源 ' + localTimeText(s.sourceGeneratedAt) : '';
+  return '<span class="'+cls+'">'+escapeHtml(fmt.format(Number(s.profitSar || 0)))+'</span><span class="coverage-note">覆盖 '+pct(s.costCoverageRate)+' · 已扣仓储 '+money(s.storageFeeSar)+escapeHtml(sourceNote)+'</span>';
 }
 function profitMarginHtml(summary){
   const s = summary || {};
@@ -6155,7 +6272,7 @@ function kpiJump(tab, patch = {}){
 function renderKpis(){
   const range = ensureDateRange();
   const rankingsLoading = biPortalUsesApiSections() && !biSectionLoaded('rankings');
-  const profitLoading = biPortalUsesApiSections() && !biSectionLoaded('profit');
+  const profitLoading = !homeProfitReadyForRender();
   const afterSalesLoading = biPortalUsesApiSections() && !biSectionLoaded('afterSales');
   const salesTitle = state.salesMode === 'gross' ? '当前时段总销售额' : '当前时段净销售额';
   const salesTip = state.salesMode === 'gross'
@@ -6166,6 +6283,11 @@ function renderKpis(){
     : '净订单/销量只统计最终仍保留成交额的订单，用于经营结果口径。';
   const afterLabel = state.returnsMode === 'order' ? '按订单创建时间 · 未取消售后' : '按售后申请时间';
   const profitLabel = state.profitMode === 'rtv' ? '按RTV已收入仓可二售测算' : '按退货全损保守估计';
+  const profitNeedsPrewarm = !biSectionLoaded('profit') && (
+    biSectionState.homeProfit?.status === 'error' ||
+    (homeProfitSummaryAvailable() && !homeProfitSummaryCoversRange(range.start, range.end))
+  );
+  const profitLoadingLabel = profitNeedsPrewarm ? '利润待预热' : '加载中';
   const rows = homeScopeRows().map(def => {
     const sales = homeSalesForScope(range.start, range.end, def.scopeValue);
     const after = homeAfterSalesForScope(range.start, range.end, def.scopeValue);
@@ -6208,7 +6330,7 @@ function renderKpis(){
       '已取消售后不计入；金额按订单实收/预计收入字段优先，避免售后列表展示价失真。')+
     card('当前时段真实利润', profitLabel,
       metricModeToggle('profitMode', [{value:'loss', label:'全损保守'}, {value:'rtv', label:'RTV入仓测算'}])+
-      matrix(3, head(['范围','SAR','RMB','利润率'])+rows.map(r => label(r.label)+(profitLoading ? loadingValue('加载中') : value(profitDisplayHtml(r.profit)))+(profitLoading ? loadingValue('加载中') : value(r.profit?.hasAnyCost ? escapeHtml(fmt.format(profitMoney(r) * RMB_RATE)) : '<span class="pending-profit">待成本表</span>'))+(profitLoading ? loadingValue('加载中') : profitMarginHtml(r.profit))).join(''), 'profit-matrix'),
+      matrix(3, head(['范围','SAR','RMB','利润率'])+rows.map(r => label(r.label)+(profitLoading ? loadingValue(profitLoadingLabel) : value(profitDisplayHtml(r.profit)))+(profitLoading ? loadingValue(profitLoadingLabel) : value(r.profit?.hasAnyCost ? escapeHtml(fmt.format(profitMoney(r) * RMB_RATE)) : '<span class="pending-profit">待成本表</span>'))+(profitLoading ? loadingValue(profitLoadingLabel) : profitMarginHtml(r.profit))).join(''), 'profit-matrix'),
       '全损保守：退货营收为0并扣成本；RTV入仓测算：ET已收退件按可二售回收成本测算。仓储费已进入真实利润，货号层优先使用 ET 当日仓储费下载明细。', 'profit');
   document.querySelectorAll('[data-overview-jump]').forEach(btn => btn.addEventListener('click', e => {
     if (e.target?.classList?.contains('help') || e.target?.closest?.('[data-metric-mode-key]')) return;

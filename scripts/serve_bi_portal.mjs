@@ -91,7 +91,7 @@ const LINK_OPS_MAX_UPLOAD_FILE_BYTES = 20 * 1024 * 1024;
 const LINK_OPS_MAX_UPLOAD_TOTAL_BYTES = 120 * 1024 * 1024;
 const DEFAULT_SHEIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC', 'DSY', 'LGM'];
 const DEFAULT_MANUAL_LOGIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
-const BI_PORTAL_SECTION_KEYS = new Set(['rankings', 'profit', 'actions', 'linksData', 'comments', 'orders', 'afterSales', 'financeData', 'rtvData', 'waybills']);
+const BI_PORTAL_SECTION_KEYS = new Set(['homeProfit', 'rankings', 'profit', 'actions', 'linksData', 'comments', 'orders', 'afterSales', 'financeData', 'rtvData', 'waybills']);
 const BI_PORTAL_SECTION_TIMEOUT_MS = Math.max(60_000, Number(process.env.SHEIN_BI_SECTION_TIMEOUT_MS || 900_000));
 const biSectionInFlight = new Map();
 const LINK_OPS_STORE_CAPABILITIES = {
@@ -1455,6 +1455,175 @@ async function writeBiSectionCache(root, section, generatedAt, data, run) {
   return payload;
 }
 
+function roundNumber(value, digits = 2) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return 0;
+  const m = 10 ** digits;
+  return Math.round(n * m) / m;
+}
+
+function homeProfitScopeOrder(scopeValue) {
+  const scope = String(scopeValue || '').toUpperCase();
+  if (!scope) return 0;
+  if (scope.startsWith('GROUP:')) return 1;
+  return 2;
+}
+
+function emptyHomeProfitScopeRow(date, scopeValue) {
+  return {
+    date,
+    scope_value: scopeValue,
+    scope_order: homeProfitScopeOrder(scopeValue),
+    gross_revenue_sar: 0,
+    net_revenue_sar: 0,
+    quantity: 0,
+    order_lines: 0,
+    orders: 0,
+    product_cost_sar: 0,
+    return_delivery_fee_sar: 0,
+    rtv_recoverable_cost_sar: 0,
+    rtv_09_recoverable_cost_sar: 0,
+    rtv_received_quantity: 0,
+    rtv_received_to_09_quantity: 0,
+    profit_before_storage_sar: 0,
+    storage_fee_sar: 0,
+    storage_matched: 0,
+    fallback_storage_fee_sar: 0,
+    profit_if_rtv_received_resellable_sar: 0,
+    profit_if_rtv_09_resellable_sar: 0,
+    known_net_revenue_sar: 0,
+    known_gross_revenue_sar: 0,
+    missing_cost_revenue_sar: 0,
+    missing_cost_quantity: 0,
+    missing_cost_lines: 0,
+    reversal_lines: 0,
+  };
+}
+
+function buildHomeProfitSummaryFromProfitData(profitData, sourceMeta = {}) {
+  const profit = profitData?.profit && typeof profitData.profit === 'object' ? profitData.profit : {};
+  const rows = Array.isArray(profit.dailyStoreProducts) ? profit.dailyStoreProducts : [];
+  const storageRows = Array.isArray(profit.storeStorageDaily) ? profit.storeStorageDaily : [];
+  const map = new Map();
+  const getRow = (date, scopeValue) => {
+    const key = `${date}|${scopeValue}`;
+    if (!map.has(key)) map.set(key, emptyHomeProfitScopeRow(date, scopeValue));
+    return map.get(key);
+  };
+  const addProfitRow = (scopeValue, r) => {
+    const date = String(r?.date || '').slice(0, 10);
+    if (!date) return;
+    const row = getRow(date, scopeValue);
+    row.gross_revenue_sar += Number(r.gross_revenue_sar || 0);
+    row.net_revenue_sar += Number(r.net_revenue_sar || 0);
+    row.quantity += Number(r.quantity || 0);
+    row.order_lines += Number(r.order_lines || 0);
+    row.orders += Number(r.orders || 0);
+    row.product_cost_sar += Number(r.product_cost_sar || 0);
+    row.return_delivery_fee_sar += Number(r.return_delivery_fee_sar || 0);
+    row.rtv_recoverable_cost_sar += Number(r.rtv_recoverable_cost_sar || 0);
+    row.rtv_09_recoverable_cost_sar += Number(r.rtv_09_recoverable_cost_sar || 0);
+    row.rtv_received_quantity += Number(r.rtv_received_quantity || 0);
+    row.rtv_received_to_09_quantity += Number(r.rtv_received_to_09_quantity || 0);
+    row.profit_before_storage_sar += Number(r.profit_before_storage_sar || 0);
+    row.fallback_storage_fee_sar += Number(r.storage_fee_sar || 0);
+    row.profit_if_rtv_received_resellable_sar += Number(r.profit_if_rtv_received_resellable_sar ?? r.profit_before_storage_sar ?? 0);
+    row.profit_if_rtv_09_resellable_sar += Number(r.profit_if_rtv_09_resellable_sar ?? r.profit_before_storage_sar ?? 0);
+    row.known_net_revenue_sar += Number(r.known_net_revenue_sar ?? r.known_gross_revenue_sar ?? 0);
+    row.known_gross_revenue_sar += Number(r.known_gross_revenue_sar ?? 0);
+    row.missing_cost_revenue_sar += Number(r.missing_cost_revenue_sar || 0);
+    row.missing_cost_quantity += Number(r.missing_cost_quantity || 0);
+    row.missing_cost_lines += Number(r.missing_cost_lines || 0);
+    row.reversal_lines += Number(r.reversal_lines || 0);
+  };
+  const addStorageRow = (scopeValue, r) => {
+    const date = String(r?.date || '').slice(0, 10);
+    if (!date) return;
+    const row = getRow(date, scopeValue);
+    row.storage_fee_sar += Number(r.storage_fee_sar || 0);
+    row.storage_matched += 1;
+  };
+  for (const r of rows) {
+    const store = String(r?.store_key || '').trim().toUpperCase();
+    if (!store) continue;
+    const group = String(r?.group_key || 'OTHER').trim().toUpperCase() || 'OTHER';
+    addProfitRow('', r);
+    addProfitRow(`GROUP:${group}`, r);
+    addProfitRow(store, r);
+  }
+  for (const r of storageRows) {
+    const store = String(r?.store_key || '').trim().toUpperCase();
+    if (!store) continue;
+    const group = String(r?.group_key || 'OTHER').trim().toUpperCase() || 'OTHER';
+    addStorageRow('', r);
+    addStorageRow(`GROUP:${group}`, r);
+    addStorageRow(store, r);
+  }
+  const moneyFields = [
+    'gross_revenue_sar',
+    'net_revenue_sar',
+    'product_cost_sar',
+    'return_delivery_fee_sar',
+    'rtv_recoverable_cost_sar',
+    'rtv_09_recoverable_cost_sar',
+    'profit_before_storage_sar',
+    'storage_fee_sar',
+    'fallback_storage_fee_sar',
+    'profit_if_rtv_received_resellable_sar',
+    'profit_if_rtv_09_resellable_sar',
+    'known_net_revenue_sar',
+    'known_gross_revenue_sar',
+    'missing_cost_revenue_sar',
+  ];
+  const countFields = ['quantity', 'order_lines', 'orders', 'rtv_received_quantity', 'rtv_received_to_09_quantity', 'missing_cost_quantity', 'missing_cost_lines', 'reversal_lines', 'storage_matched'];
+  const dailyScopes = Array.from(map.values()).map(row => {
+    const effectiveStorage = Number(row.storage_matched || 0) > 0 ? Number(row.storage_fee_sar || 0) : Number(row.fallback_storage_fee_sar || 0);
+    const out = {...row};
+    out.profit_after_storage_sar = Number(out.profit_before_storage_sar || 0) - effectiveStorage;
+    out.profit_if_rtv_received_resellable_after_storage_sar = Number(out.profit_if_rtv_received_resellable_sar || 0) - effectiveStorage;
+    out.profit_if_rtv_09_resellable_after_storage_sar = Number(out.profit_if_rtv_09_resellable_sar || 0) - effectiveStorage;
+    out.cost_coverage_revenue_rate = Number(out.net_revenue_sar || 0) > 0 ? roundNumber(Number(out.known_net_revenue_sar || 0) / Number(out.net_revenue_sar || 0), 4) : null;
+    out.profit_margin_after_storage = Number(out.known_net_revenue_sar || 0) > 0 ? roundNumber(out.profit_after_storage_sar / Number(out.known_net_revenue_sar || 0), 4) : null;
+    for (const field of moneyFields) out[field] = roundNumber(out[field], 2);
+    for (const field of ['profit_after_storage_sar', 'profit_if_rtv_received_resellable_after_storage_sar', 'profit_if_rtv_09_resellable_after_storage_sar']) out[field] = roundNumber(out[field], 2);
+    for (const field of countFields) out[field] = roundNumber(out[field], 0);
+    return out;
+  }).sort((a, b) => String(a.date).localeCompare(String(b.date)) || Number(a.scope_order || 0) - Number(b.scope_order || 0) || String(a.scope_value || '').localeCompare(String(b.scope_value || '')));
+  return {
+    homeProfitSummary: {
+      dailyScopes,
+      source: 'profit_section_cache',
+      sourceGeneratedAt: String(sourceMeta.sourceGeneratedAt || ''),
+      staleSource: Boolean(sourceMeta.staleSource),
+    },
+  };
+}
+
+async function readBiSectionCacheAnyGeneratedAt(root, section) {
+  const file = path.join(root, 'sections', `${section}.json`);
+  const cached = await readJsonFile(file, null);
+  if (!cached || typeof cached !== 'object') return null;
+  if (String(cached.section || '') !== section) return null;
+  if (!cached.data || typeof cached.data !== 'object') return null;
+  return cached;
+}
+
+async function deriveHomeProfitSectionFromProfitCache(root, generatedAt) {
+  const currentProfitCache = await readBiSectionCache(root, 'profit', generatedAt);
+  const profitCache = currentProfitCache || await readBiSectionCacheAnyGeneratedAt(root, 'profit');
+  if (!profitCache?.data?.profit) return null;
+  const sourceGeneratedAt = String(profitCache.generatedAt || '');
+  const data = buildHomeProfitSummaryFromProfitData(profitCache.data, {
+    sourceGeneratedAt,
+    staleSource: Boolean(generatedAt && sourceGeneratedAt && sourceGeneratedAt !== String(generatedAt || '')),
+  });
+  return writeBiSectionCache(root, 'homeProfit', generatedAt, data, {
+    code: 0,
+    timedOut: false,
+    stderr: '',
+  });
+}
+
 async function generateBiSection(args, root, section, generatedAt) {
   const run = await runChildProcess(process.execPath, [
     path.join(ROOT, 'scripts', 'generate_bi_portal.mjs'),
@@ -1494,6 +1663,55 @@ async function loadBiSection(args, root, section, options = {}) {
   const meta = await readBiPortalCoreMeta(root);
   if (meta.mode !== 'api' && !force) {
     return {status: 400, payload: {ok: false, error: 'BI portal is not in api data mode', section, mode: meta.mode}};
+  }
+  if (section === 'homeProfit') {
+    const cached = !force ? await readBiSectionCache(root, section, meta.generatedAt) : null;
+    const cachedSourceGeneratedAt = String(cached?.data?.homeProfitSummary?.sourceGeneratedAt || '');
+    if (cached && cachedSourceGeneratedAt === String(meta.generatedAt || '')) {
+      const rawCached = await readBiSectionCacheRaw(root, section, meta.generatedAt, true);
+      if (rawCached) return {status: 200, rawBody: rawCached.body, headers: rawCached.headers};
+      return {status: 200, payload: {...cached, cacheHit: true}};
+    }
+    if (cached && cachedSourceGeneratedAt !== String(meta.generatedAt || '')) {
+      const currentProfitCache = await readBiSectionCache(root, 'profit', meta.generatedAt);
+      if (!currentProfitCache) {
+        const rawCached = await readBiSectionCacheRaw(root, section, meta.generatedAt, true);
+        if (rawCached) return {status: 200, rawBody: rawCached.body, headers: rawCached.headers};
+        return {status: 200, payload: {...cached, cacheHit: true}};
+      }
+    }
+    if (!allowGenerate) {
+      return {
+        status: 503,
+        payload: {
+          ok: false,
+          error: 'BI section cache miss; generation is disabled in read-only or unauthenticated LAN mode',
+          section,
+          generatedAt: meta.generatedAt,
+        },
+      };
+    }
+    const key = `${root}|${section}|${meta.generatedAt || ''}|derive`;
+    if (!biSectionInFlight.has(key)) {
+      biSectionInFlight.set(key, deriveHomeProfitSectionFromProfitCache(root, meta.generatedAt).finally(() => {
+        biSectionInFlight.delete(key);
+      }));
+    }
+    const payload = await biSectionInFlight.get(key);
+    if (payload) {
+      const rawGenerated = await readBiSectionCacheRaw(root, section, meta.generatedAt, false);
+      if (rawGenerated) return {status: 200, rawBody: rawGenerated.body, headers: rawGenerated.headers};
+      return {status: 200, payload: {...payload, cacheHit: false}};
+    }
+    return {
+      status: 503,
+      payload: {
+        ok: false,
+        section,
+        generatedAt: meta.generatedAt,
+        error: 'homeProfit requires a profit section cache; prewarm or request profit first',
+      },
+    };
   }
   if (!force) {
     const rawCached = await readBiSectionCacheRaw(root, section, meta.generatedAt, true);
