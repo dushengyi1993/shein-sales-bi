@@ -531,7 +531,11 @@ function classifyAndPrice(storeKey, activityId, row) {
   const trueCostInfo = lookupTrueCost(keysRaw);
   const baseCost = lookupCost(keysRaw) ?? (Number.isFinite(Number(depletion?.unit_cost_sar)) ? Number(depletion.unit_cost_sar) : null);
   const cost = Number.isFinite(Number(trueCostInfo?.trueUnitCostSar)) ? Number(trueCostInfo.trueUnitCostSar) : baseCost;
-  const storageUnitCostSar = Number.isFinite(Number(trueCostInfo?.storageUnitCostSar30d)) ? Number(trueCostInfo.storageUnitCostSar30d) : null;
+  const storageUnitCostSar = Number.isFinite(Number(trueCostInfo?.storageUnitCostSar))
+    ? Number(trueCostInfo.storageUnitCostSar)
+    : Number.isFinite(Number(trueCostInfo?.storageUnitCostSar30d))
+      ? Number(trueCostInfo.storageUnitCostSar30d)
+      : null;
   const storageMethod = trueCostInfo?.storageMethod || '';
   const onHand = Number(depletion?.estimated_on_hand_quantity ?? 0);
   const daysOnHand = Number(depletion?.days_of_supply_on_hand ?? 0);

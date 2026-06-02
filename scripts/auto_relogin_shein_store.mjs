@@ -5,7 +5,7 @@
  * This script never reads or prints credential values. It only checks whether
  * text/password inputs have values and clicks the login button when possible.
  */
-import {spawn} from 'node:child_process';
+import {spawn, spawnSync} from 'node:child_process';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import fs from 'node:fs/promises';
@@ -31,7 +31,7 @@ function sleep(ms) {
 }
 
 function parseArgs(argv) {
-  const args = {visible: true, date: null, timeoutMs: 120000, checkOnly: false};
+  const args = {visible: true, date: null, timeoutMs: 120000, checkOnly: false, closeAfter: false};
   const stores = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -40,6 +40,7 @@ function parseArgs(argv) {
     else if (a === '--headless') args.visible = false;
     else if (a === '--visible') args.visible = true;
     else if (a === '--check-only') args.checkOnly = true;
+    else if (a === '--close-after') args.closeAfter = true;
     else if (!a.startsWith('--')) stores.push(...a.split(',').map(s => s.trim().toUpperCase()).filter(Boolean));
   }
   args.stores = stores;
@@ -52,6 +53,28 @@ function parseArgs(argv) {
     );
   }
   return args;
+}
+
+function psSingleQuote(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+function closeStoreChrome(store) {
+  if (process.platform !== 'win32') return;
+  const profileNeedle = `persistent-${store.profileKey}-profile`;
+  const script = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    `$needle = ${psSingleQuote(profileNeedle)}`,
+    "$procs = Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\" | Where-Object { $_.CommandLine -like \"*$needle*\" }",
+    "foreach ($p in $procs) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }",
+  ].join('\n');
+  spawnSync('powershell.exe', [
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-EncodedCommand',
+    Buffer.from(script, 'utf16le').toString('base64'),
+  ], {cwd: ROOT, stdio: 'ignore', timeout: 20_000});
 }
 
 async function launchStore(storeKey, visible) {
@@ -332,6 +355,8 @@ for (const store of selected) {
   } catch (err) {
     results.push({storeKey: store.storeKey, ok: false, error: String(err?.stack || err)});
     console.log(JSON.stringify({storeKey: store.storeKey, ok: false, error: String(err?.message || err)}));
+  } finally {
+    if (args.closeAfter) closeStoreChrome(store);
   }
 }
 

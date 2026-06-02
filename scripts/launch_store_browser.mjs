@@ -126,6 +126,9 @@ const args = [
   '--disable-background-timer-throttling',
   '--disable-renderer-backgrounding',
   '--disable-backgrounding-occluded-windows',
+  ...(!cliArgs.background && !cliArgs.headless ? [
+    '--start-maximized',
+  ] : []),
   ...(process.platform !== 'win32' ? [
     '--disable-dev-shm-usage',
     ...(typeof process.getuid === 'function' && process.getuid() === 0 ? ['--no-sandbox'] : []),

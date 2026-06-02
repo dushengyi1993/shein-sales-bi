@@ -919,7 +919,7 @@ products AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) AS data
   FROM (
     SELECT
-      standard_goods_sn,
+      dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
       round(sales_sar::numeric, 2) AS sales_sar,
       quantity, order_count, sale_store_count,
       on_shelf_store_count, missing_store_count, on_shelf_link_count,
@@ -963,7 +963,7 @@ link_health_base AS (
     l.group_key,
     l.store_key,
     l.shop_name,
-    l.standard_goods_sn,
+    dim.product_canonical_sn(l.standard_goods_sn) AS standard_goods_sn,
     l.raw_goods_sn,
     l.spu,
     l.skc,
@@ -1039,14 +1039,14 @@ link_health_base AS (
   LEFT JOIN fact.link_performance_daily p
     ON p.date = pl.perf_date AND p.store_key = l.store_key AND p.skc = l.skc
   LEFT JOIN (
-    SELECT l2.store_key, l2.standard_goods_sn, count(*) FILTER (WHERE l2.is_on_shelf) AS on_shelf_count
+    SELECT l2.store_key, dim.product_canonical_sn(l2.standard_goods_sn) AS standard_goods_sn, count(*) FILTER (WHERE l2.is_on_shelf) AS on_shelf_count
     FROM fact.link_master_snapshot l2
     JOIN store_latest_link sl2
       ON sl2.store_key = l2.store_key AND sl2.link_date = l2.snapshot_date
     WHERE coalesce(l2.is_hard_dead,false) = false
-    GROUP BY l2.store_key, l2.standard_goods_sn
+    GROUP BY l2.store_key, dim.product_canonical_sn(l2.standard_goods_sn)
   ) sp
-    ON sp.store_key = l.store_key AND sp.standard_goods_sn = l.standard_goods_sn
+    ON sp.store_key = l.store_key AND sp.standard_goods_sn = dim.product_canonical_sn(l.standard_goods_sn)
   WHERE coalesce(l.is_hard_dead,false) = false
 ),
 link_health_enriched AS (
@@ -1195,7 +1195,7 @@ comments AS (
   FROM (
     SELECT
       comment_date, comment_time, order_time,
-      store_key, group_key, standard_goods_sn, raw_goods_sn,
+      store_key, group_key, dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn, raw_goods_sn,
       skc, sku, goods_title, goods_attribute,
       goods_comment_star, goods_comment_star_name,
       nullif(goods_comment_content,'') AS goods_comment_content,
@@ -1215,14 +1215,15 @@ comment_summary AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) AS data
   FROM (
     SELECT
-      standard_goods_sn,
+      dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
       count(*) AS comment_count,
       count(*) FILTER (WHERE coalesce(goods_comment_star,5) <= 3) AS low_star_count,
       round(avg(goods_comment_star)::numeric, 2) AS avg_star,
       max(comment_date) AS latest_comment_date,
       count(DISTINCT store_key) AS store_count
     FROM fact.product_comment
-    GROUP BY standard_goods_sn
+    WHERE coalesce(standard_goods_sn,'') <> ''
+    GROUP BY dim.product_canonical_sn(standard_goods_sn)
     ORDER BY low_star_count DESC, comment_count DESC, latest_comment_date DESC
     LIMIT 220
   ) t
@@ -1484,7 +1485,7 @@ profit_daily_store_product AS (
       date::date AS date,
       store_key,
       group_key,
-      standard_goods_sn,
+      dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
       round(sum(coalesce(gross_revenue_sar,0))::numeric, 2) AS gross_revenue_sar,
       round(sum(coalesce(net_revenue_sar,0))::numeric, 2) AS net_revenue_sar,
       round(sum(coalesce(quantity,0))::numeric, 0) AS quantity,
@@ -1624,13 +1625,16 @@ product_storage_daily AS (
   FROM (
     SELECT
       date,
-      standard_goods_sn,
+      dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
       round(sum(coalesce(actual_allocated_fee_sar,0))::numeric, 2) AS storage_fee_sar,
+      round(sum(coalesce(quantity,0))::numeric, 2) AS storage_quantity,
+      round((sum(coalesce(actual_allocated_fee_sar,0)) / nullif(sum(coalesce(quantity,0)),0))::numeric, 6) AS storage_fee_per_unit_sar,
       string_agg(DISTINCT storage_allocation_method, ' / ') FILTER (WHERE coalesce(storage_allocation_method,'') <> '') AS storage_fee_method,
       min(source_snapshot_date) AS source_snapshot_date_min,
       max(source_snapshot_date) AS source_snapshot_date_max
     FROM mart.storage_fee_product_daily
-    GROUP BY date, standard_goods_sn
+    WHERE coalesce(standard_goods_sn,'') <> ''
+    GROUP BY date, dim.product_canonical_sn(standard_goods_sn)
   ) t
 ),
 product_store_storage_daily AS (
@@ -1640,11 +1644,12 @@ product_store_storage_daily AS (
       date,
       store_key,
       group_key,
-      standard_goods_sn,
+      dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
       round(sum(coalesce(storage_fee_sar,0))::numeric, 2) AS storage_fee_sar,
       string_agg(DISTINCT storage_fee_method, ' / ') FILTER (WHERE coalesce(storage_fee_method,'') <> '') AS storage_fee_method
     FROM mart.storage_fee_product_store_daily
-    GROUP BY date, store_key, group_key, standard_goods_sn
+    WHERE coalesce(standard_goods_sn,'') <> ''
+    GROUP BY date, store_key, group_key, dim.product_canonical_sn(standard_goods_sn)
   ) t
 ),
 store_storage_daily AS (
@@ -1669,7 +1674,7 @@ inventory_depletion_products AS (
   ), '[]'::jsonb) AS data
   FROM (
     SELECT
-      standard_goods_sn,
+      dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
       match_key,
       standard_goods_sn_list,
       raw_goods_sn_list,
@@ -1783,7 +1788,7 @@ inventory_depletion_batches AS (
       FROM src
     )
     SELECT
-      standard_goods_sn,
+      dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
       match_key,
       nullif(raw_summary->>'希音标准名','') AS goods_title,
       batch_no,
@@ -1864,7 +1869,7 @@ finance_goods_rows AS (
     f.group_key,
     f.order_no,
     fo.order_delivery_time,
-    coalesce(nullif(f.standard_goods_sn,''), nullif(oi.standard_goods_sn,'')) AS standard_goods_sn,
+    dim.product_canonical_sn(coalesce(nullif(f.standard_goods_sn,''), nullif(oi.standard_goods_sn,''))) AS standard_goods_sn,
     coalesce(nullif(f.raw_goods_sn,''), nullif(oi.raw_goods_sn,'')) AS raw_goods_sn,
     nullif(f.spu,'') AS spu,
     coalesce(nullif(f.skc,''), nullif(oi.skc,'')) AS skc,
@@ -1913,7 +1918,7 @@ inventory_alerts AS (
       snapshot_date,
       store_key,
       group_key,
-      standard_goods_sn,
+      dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
       nullif(skc_list,'') AS skc,
       nullif(shelf_statuses,'') AS shelf_statuses,
       round(coalesce(inventory_quantity,0)::numeric, 0) AS inventory_quantity,
@@ -1936,7 +1941,7 @@ orders AS (
   FROM (
     SELECT
       created_date, store_key, group_key, order_no, bill_no, order_create_time,
-      standard_goods_sn, skc, goods_title,
+      dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn, skc, goods_title,
       quantity, round(sales_sar::numeric, 2) AS sales_sar,
       goods_performance_status_desc
     FROM fact.order_item
@@ -1962,7 +1967,7 @@ after_sales AS (
       a.snapshot_date, a.store_key, a.group_key, a.request_time,
       om.order_created_date, om.order_create_time, om.order_sales_sar,
       a.aftersales_order_no, a.return_order_no, a.order_no,
-      a.standard_goods_sn, a.skc, a.goods_title,
+      dim.product_canonical_sn(a.standard_goods_sn) AS standard_goods_sn, a.skc, a.goods_title,
       a.quantity,
       round(coalesce(om.order_sales_sar, a.estimated_income_amount, a.price_amount_total, a.price_amount, 0)::numeric, 2) AS price_amount_total,
       round(coalesce(om.order_sales_sar, a.estimated_income_amount, a.price_amount_total, a.price_amount, 0)::numeric, 2) AS amount_sar,
@@ -1984,7 +1989,7 @@ after_sales_review AS (
       a.snapshot_date, a.store_key, a.group_key, a.request_time,
       om.order_created_date, om.order_create_time, om.order_sales_sar,
       a.aftersales_order_no, a.return_order_no, a.order_no,
-      a.standard_goods_sn, a.skc, a.goods_title,
+      dim.product_canonical_sn(a.standard_goods_sn) AS standard_goods_sn, a.skc, a.goods_title,
       a.quantity,
       round(coalesce(om.order_sales_sar, a.estimated_income_amount, a.price_amount_total, a.price_amount, 0)::numeric, 2) AS price_amount_total,
       round(coalesce(om.order_sales_sar, a.estimated_income_amount, a.price_amount_total, a.price_amount, 0)::numeric, 2) AS amount_sar,

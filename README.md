@@ -83,6 +83,7 @@
 - 销售有效性统一走 `lib/shein_sales_validity.mjs`：只把真正取消、揽收前取消等“未形成销售”的商品行从总销售额、订单数和销量中剔除；用户已退款、退货、派件失败等仍保留在总销售额里，再由净销售额、售后/利润层反转。后台原始金额仍保留在明细里用于追溯。历史本地 JSON summary 可用 `scripts/repair_shein_sales_summaries.mjs` 重算。
 - 利润口径：首页和成本/利润页使用真实利润；成本未覆盖时显示“待成本表 / 成本覆盖率”，不再用 `25%` 粗估冒充真实利润。仓储费正式来源是 ET 物流仓服账单 `仓储费`：显示金额按 RMB，实际扣费按显示金额 × `0.5` 后以 `1 SAR = 1.8 RMB` 折 SAR；店铺/DSY/LGM 按净销售额分摊，货号层优先使用 ET `ExportStoreFee` 当日明细；若历史明细合计与总账不一致，则保留货号分布并按总账缩放，只有完全缺明细日期才按 ET 体积 × 库存天数估算并标注口径。
 - ET 仓储费导出里的 `storage_code` / `sku_code` 必须保留原始值，例如 `DL-SK-999`；`match_key` 只作为内部归并键。面向 BI/利润展示的货号要通过 `mart.product_display_by_match_key` 回到销售或商品主档里的既有标准货号，不能把 ET 解析出的中间短码当成新商品暴露出来。
+- 营销活动确认表里的 `仓储费SAR/件` 不能用累计仓储费除以历史销量，也不能把全历史仓储费一刀切压到当前库存上；必须来自 BI `profit.productStorageDaily` 的“当前仍在仓库存移动平均累计仓储成本”：每日仓储费加入库存成本余额，库存数量减少时按当前平均成本剔除已出库产品携带的历史仓储成本。短码或无法确认的货号必须标记待归并暂停，不能按 0 仓储或猜测成本继续报名。
 - 成本/利润页的高利润 / 低利润货号分界线固定为 `20%` 利润率：`>= 20%` 为可加码，`< 20%` 为需要处理。
 - 当前正式成本文件为 `inputs/costs/成本.xlsx`；`单台总成本（SAR）` 是单批单件完整成本输入，系统先还原为批次总成本，再按同货号所有完整批次加权平均计算单位成本。
 - 用户可见的产品主标题统一使用 `product_display_name`：生成端由 `lib/product_display_name.mjs` 基于 `standard_goods_sn`、`config/product_catalog.json` 和可靠中文标题补齐“标准货号+中文品名”；搜索、筛选、归因和仓库 key 仍使用 `standard_goods_sn` / `dim.product_match_key()`。无可靠中文来源的异常短码不编造中文，保留原值并标记待确认。
@@ -207,11 +208,15 @@
   `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_openapi_hl_reconciliation.ps1 -Mode intraday`
 - 生成营销活动成本映射：
   `python scripts/marketing/build_marketing_cost_map.py`
+- 生成并验证按货号汇总的营销确认表：
+  `node scripts/marketing/build_marketing_sku_approval.mjs --date YYYY-MM-DD --version vN`
+  `node scripts/marketing/verify_marketing_sku_approval.mjs --date YYYY-MM-DD --version vN`
 - 导出 DSY 营销活动填报标准（只读，按货号汇总给用户审核；默认排除优惠券活动）：
   `node scripts/marketing/export_dsy_marketing_standards.mjs --stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open`
 - 辅助填报 DSY 全部未截止营销活动（只预填，不点最终提交；若本期有用户确认覆盖表，必须带 `--price-overrides`）：
   `node scripts/marketing/dsy_marketing_deadline_fill.mjs --stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open --price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD-approved.json --min-discount-fallback SK-13034`
 - 优惠券活动不要套普通营销活动脚本/路径；例如活动 `34810` 应从优惠券详情 `#/mbrs/marketing/coupon/detail/34810` 进入 `继续报名`，批量导入确认会直接真实提报，操作前先看 `docs/marketing-campaign-signup-pricing-rules.md` 的优惠券专项边界。
+- 新一期活动报名前必须先生成叠加安全审核文档，合并普通营销活动、优惠券、限时折扣、原始/当前价格、商品成本、仓储费摊销和含仓储费利润率；用户确认备注前不得报名或批量取消/重报限时折扣。
 - 生成成本表模板：
   `node scripts/create_cost_template.mjs`
 - 检查/导入成本表：

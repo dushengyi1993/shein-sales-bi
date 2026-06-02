@@ -198,6 +198,7 @@ function matchKey(value) {
   const key = String(value || '').toUpperCase().replace(/[^A-Z0-9]+/g, '');
   if (['2001', 'CM2001'].includes(key)) return '2001';
   if (['MZ7028', 'SK7028', '7028'].includes(key)) return 'SK7028';
+  if (['SK7032', 'SKYM7032'].includes(key)) return 'SKYM7032';
   return key;
 }
 

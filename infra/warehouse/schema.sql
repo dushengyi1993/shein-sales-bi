@@ -35,12 +35,139 @@ AS $$
     SELECT upper(regexp_replace(coalesce(value,''), '[^A-Za-z0-9]+', '', 'g')) AS key
   )
   SELECT CASE
-    WHEN key IN ('2001','CM2001') THEN '2001'
-    WHEN key IN ('BL02','GLBL02') THEN 'S1810'
-    WHEN key IN ('MZ7028','SK7028','7028') THEN 'SK7028'
+    WHEN key IN ('2001', 'CM2001') THEN '2001'
+    WHEN key IN ('BHRL09') THEN 'BHRL09'
+    WHEN key IN ('121', '121E', 'CM121E') THEN 'CM121E'
+    WHEN key IN ('CX1788') THEN 'CX1788'
+    WHEN key IN ('666', 'FZ666', 'FZ666BEIGE', 'MZ666') THEN 'FZ666'
+    WHEN key IN ('025', 'HS025') THEN 'HS025'
+    WHEN key IN ('JD389', 'LQ389') THEN 'JD389'
+    WHEN key IN ('KFJN02') THEN 'KFJN02'
+    WHEN key IN ('102', 'HY811', 'KJ102', 'SK102') THEN 'KJ102'
+    WHEN key IN ('KJ102S', 'SK102S') THEN 'KJ102S'
+    WHEN key IN ('LQPA4L', 'PA4', 'PA46L', 'PA4L', 'PL46L', 'PL46LPINK') THEN 'PA46L'
+    WHEN key IN ('1810', 'BL02', 'BL031', 'GLBL02', 'S1810', 'WK102') THEN 'S1810'
+    WHEN key IN ('03012', 'LQ03012', 'MK03012', 'SK03012') THEN 'SK03012'
+    WHEN key IN ('03038', 'SK03038') THEN 'SK03038'
+    WHEN key IN ('FY29', 'SK04029') THEN 'SK04029'
+    WHEN key IN ('04031', 'C06', 'C0604031', 'SK04031') THEN 'SK04031'
+    WHEN key IN ('088', 'SK088') THEN 'SK088'
+    WHEN key IN ('10075', 'SK10075') THEN 'SK10075'
+    WHEN key IN ('11004', 'CY808B', 'MZ11004', 'SK11004') THEN 'SK11004'
+    WHEN key IN ('11041', 'LQ11041', 'QY11041', 'SK11041') THEN 'SK11041'
+    WHEN key IN ('13014', 'SK13014') THEN 'SK13014'
+    WHEN key IN ('13015', 'SK13015') THEN 'SK13015'
+    WHEN key IN ('13034', 'SK13034') THEN 'SK13034'
+    WHEN key IN ('13065', 'FY065', 'SK13065') THEN 'SK13065'
+    WHEN key IN ('15013', 'SK15013') THEN 'SK15013'
+    WHEN key IN ('SK15030') THEN 'SK15030'
+    WHEN key IN ('DX60', 'SK15061') THEN 'SK15061'
+    WHEN key IN ('QY1711', 'SK1711') THEN 'SK1711'
+    WHEN key IN ('1713', '17134', 'MZ1713', 'QY1713', 'SK1713', 'SK17134', 'SK17134GREY') THEN 'SK17134'
+    WHEN key IN ('185', 'LQ185', 'MA185', 'QY185', 'SK185') THEN 'SK185'
+    WHEN key IN ('1914', 'SK1914') THEN 'SK1914'
+    WHEN key IN ('1924', 'SK1924') THEN 'SK1924'
+    WHEN key IN ('1928', 'SK1928') THEN 'SK1928'
+    WHEN key IN ('223', 'SK223') THEN 'SK223'
+    WHEN key IN ('270', 'SK270') THEN 'SK270'
+    WHEN key IN ('271', 'SK271') THEN 'SK271'
+    WHEN key IN ('272', 'SK272') THEN 'SK272'
+    WHEN key IN ('3378', 'QY3378', 'SK3378') THEN 'SK3378'
+    WHEN key IN ('446', 'SK446') THEN 'SK446'
+    WHEN key IN ('5110', 'SK5110') THEN 'SK5110'
+    WHEN key IN ('5118', 'SK5118') THEN 'SK5118'
+    WHEN key IN ('6810', 'CM6810', 'SK6810') THEN 'SK6810'
+    WHEN key IN ('DX6863', 'LQ63', 'SK6863') THEN 'SK6863'
+    WHEN key IN ('7015', 'SK7015') THEN 'SK7015'
+    WHEN key IN ('7025', 'MZ7025A', 'SK7025', 'SK7025A', 'SK7025BLACK') THEN 'SK7025A'
+    WHEN key IN ('7027', 'MZ7027', 'SK7027') THEN 'SK7027'
+    WHEN key IN ('7028', 'MZ7028', 'SK7028') THEN 'SK7028'
+    WHEN key IN ('777', 'SK777') THEN 'SK777'
+    WHEN key IN ('999', 'SK999') THEN 'SK999'
+    WHEN key IN ('3065', 'MZ3065', 'QY3065', 'SK3065', 'SKGT3065') THEN 'SKGT3065'
+    WHEN key IN ('175', 'LQ175', 'MZ175', 'SD175', 'SK175', 'SKJB175') THEN 'SKJB175'
+    WHEN key IN ('675', 'SK675', 'SKJFB675B') THEN 'SKJFB675B'
+    WHEN key IN ('794', 'SK794', 'SKJFB794') THEN 'SKJFB794'
+    WHEN key IN ('7032', 'SK7032', 'SKYM7032') THEN 'SKYM7032'
+    WHEN key IN ('6699', 'MZ6699', 'SK6699', 'SL6699') THEN 'SL6699'
+    WHEN key IN ('505', '505A', 'QY505', 'SM505A', 'TXSM505A') THEN 'SM505A'
+    WHEN key IN ('SM520A') THEN 'SM520A'
+    WHEN key IN ('961', 'SM961') THEN 'SM961'
+    WHEN key IN ('V22') THEN 'V22'
+    WHEN key IN ('1710', 'LQ1710', 'MZ1710', 'WK1710', 'WK17104') THEN 'WK17104'
     ELSE key
   END
   FROM k;
+$$;
+
+CREATE OR REPLACE FUNCTION dim.product_canonical_sn(value text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  SELECT CASE dim.product_match_key(value)
+    WHEN '2001' THEN '2001胶囊咖啡机'
+    WHEN 'BHRL09' THEN 'BHRL-09激光脱毛仪'
+    WHEN 'CM121E' THEN 'CM-121E美式咖啡机'
+    WHEN 'CX1788' THEN 'CX1788手持搅拌器'
+    WHEN 'FZ666' THEN 'FZ-666颈部按摩器'
+    WHEN 'HS025' THEN 'HS-025直发夹板'
+    WHEN 'JD389' THEN 'JD-389空气炸锅'
+    WHEN 'KFJN02' THEN 'KF-JN-02便携咖啡机'
+    WHEN 'KJ102' THEN 'KJ-102三明治机和早餐机'
+    WHEN 'KJ102S' THEN 'KJ-102S三明治机和早餐机'
+    WHEN 'PA46L' THEN 'PA4-6L便携式冰箱'
+    WHEN 'S1810' THEN 'S1810电热水壶'
+    WHEN 'SK03012' THEN 'SK-03012台式榨汁机'
+    WHEN 'SK03038' THEN 'SK-03038制冰机'
+    WHEN 'SK04029' THEN 'SK-04029半自动意式咖啡机'
+    WHEN 'SK04031' THEN 'SK-04031胶囊咖啡机'
+    WHEN 'SK088' THEN 'SK-088绞肉机'
+    WHEN 'SK10075' THEN 'SK-10075电油炸锅'
+    WHEN 'SK11004' THEN 'SK-11004蒸汽熨烫机'
+    WHEN 'SK11041' THEN 'SK-11041蒸汽熨烫机'
+    WHEN 'SK13014' THEN 'SK-13014杆式吸尘器'
+    WHEN 'SK13015' THEN 'SK-13015杆式吸尘器'
+    WHEN 'SK13034' THEN 'SK-13034杆式吸尘器'
+    WHEN 'SK13065' THEN 'SK-13065吸尘器'
+    WHEN 'SK15013' THEN 'SK-15013卷发钳和卷发棒'
+    WHEN 'SK15030' THEN 'SK-15030热风梳'
+    WHEN 'SK15061' THEN 'SK-15061热风梳'
+    WHEN 'SK1711' THEN 'SK-1711手持搅拌器'
+    WHEN 'SK17134' THEN 'SK-1713-4手持搅拌器'
+    WHEN 'SK185' THEN 'SK-185台式榨汁机'
+    WHEN 'SK1914' THEN 'SK-1914热风梳'
+    WHEN 'SK1924' THEN 'SK-1924直发夹板'
+    WHEN 'SK1928' THEN 'SK-1928直发夹板'
+    WHEN 'SK223' THEN 'SK-223三明治机和早餐机'
+    WHEN 'SK270' THEN 'SK-270厨师机'
+    WHEN 'SK271' THEN 'SK-271厨师机'
+    WHEN 'SK272' THEN 'SK-272厨师机'
+    WHEN 'SK3378' THEN 'SK-3378杆式吸尘器'
+    WHEN 'SK446' THEN 'SK-446电动刀与切片器'
+    WHEN 'SK5110' THEN 'SK-5110电磁炉'
+    WHEN 'SK5118' THEN 'SK-5118电磁炉'
+    WHEN 'SK6810' THEN 'SK-6810半自动意式咖啡机'
+    WHEN 'SK6863' THEN 'SK-6863半自动意式咖啡机'
+    WHEN 'SK7015' THEN 'SK-7015绞肉机'
+    WHEN 'SK7025A' THEN 'SK-7025A绞肉机'
+    WHEN 'SK7027' THEN 'SK-7027绞肉机'
+    WHEN 'SK7028' THEN 'SK-7028绞肉机'
+    WHEN 'SK777' THEN 'SK-777碎冰机和刨冰机'
+    WHEN 'SK999' THEN 'SK-999食品料理机'
+    WHEN 'SKGT3065' THEN 'SK-GT-3065蒸汽熨烫机'
+    WHEN 'SKJB175' THEN 'SK-JB-175离心式榨汁机'
+    WHEN 'SKJFB675B' THEN 'SK-JFB-675B卷发钳和卷发棒'
+    WHEN 'SKJFB794' THEN 'SK-JFB-794卷发钳和卷发棒'
+    WHEN 'SKYM7032' THEN 'SK-YM-7032绞肉机'
+    WHEN 'SL6699' THEN 'SL-6699蒸汽熨烫机'
+    WHEN 'SM505A' THEN 'SM-505A电动缝纫机'
+    WHEN 'SM520A' THEN 'SM-520A电动缝纫机'
+    WHEN 'SM961' THEN 'SM-961厨师机'
+    WHEN 'V22' THEN 'V22行车记录仪'
+    WHEN 'WK17104' THEN 'WK-1710-4手持搅拌器'
+    ELSE coalesce(value,'')
+  END;
 $$;
 
 CREATE TABLE IF NOT EXISTS dim.skc (
@@ -2711,7 +2838,7 @@ WITH base AS (
     oi.created_date,
     date_trunc('month', oi.created_date)::date AS month_start,
     oi.order_create_time,
-    oi.standard_goods_sn,
+    dim.product_canonical_sn(oi.standard_goods_sn) AS standard_goods_sn,
     oi.raw_goods_sn,
     oi.skc,
     oi.goods_title,
@@ -2760,10 +2887,18 @@ WITH base AS (
       AND x.revenue_reversal
       AND (
         (coalesce(x.skc,'') <> '' AND x.skc = oi.skc)
-        OR (coalesce(x.standard_goods_sn,'') <> '' AND x.standard_goods_sn = oi.standard_goods_sn)
+        OR (
+          coalesce(x.standard_goods_sn,'') <> ''
+          AND dim.product_match_key(x.standard_goods_sn) = dim.product_match_key(oi.standard_goods_sn)
+        )
         OR (coalesce(x.skc,'') = '' AND coalesce(x.standard_goods_sn,'') = '')
       )
-    ORDER BY CASE WHEN x.skc = oi.skc THEN 0 WHEN x.standard_goods_sn = oi.standard_goods_sn THEN 1 ELSE 2 END
+    ORDER BY CASE
+      WHEN x.skc = oi.skc THEN 0
+      WHEN x.standard_goods_sn = oi.standard_goods_sn THEN 1
+      WHEN dim.product_match_key(x.standard_goods_sn) = dim.product_match_key(oi.standard_goods_sn) THEN 2
+      ELSE 3
+    END
     LIMIT 1
   ) ai ON true
   LEFT JOIN LATERAL (
@@ -2774,10 +2909,18 @@ WITH base AS (
       AND x.rtv_received_quantity > 0
       AND (
         (coalesce(x.skc,'') <> '' AND x.skc = oi.skc)
-        OR (coalesce(x.standard_goods_sn,'') <> '' AND x.standard_goods_sn = oi.standard_goods_sn)
+        OR (
+          coalesce(x.standard_goods_sn,'') <> ''
+          AND dim.product_match_key(x.standard_goods_sn) = dim.product_match_key(oi.standard_goods_sn)
+        )
         OR (coalesce(x.skc,'') = '' AND coalesce(x.standard_goods_sn,'') = '')
       )
-    ORDER BY CASE WHEN x.skc = oi.skc THEN 0 WHEN x.standard_goods_sn = oi.standard_goods_sn THEN 1 ELSE 2 END
+    ORDER BY CASE
+      WHEN x.skc = oi.skc THEN 0
+      WHEN x.standard_goods_sn = oi.standard_goods_sn THEN 1
+      WHEN dim.product_match_key(x.standard_goods_sn) = dim.product_match_key(oi.standard_goods_sn) THEN 2
+      ELSE 3
+    END
     LIMIT 1
   ) rr ON true
 )
@@ -3172,12 +3315,12 @@ box_items AS (
   SELECT
     box_id,
     coalesce(nullif(standard_goods_sn,''), match_key) AS standard_goods_sn,
-    match_key,
+    coalesce(dim.product_match_key(standard_goods_sn), nullif(match_key,'')) AS match_key,
     sum(coalesce(real_quantity, case_quantity, 0)) AS item_quantity
   FROM fact.et_box_item
   WHERE coalesce(box_id,'') <> ''
     AND coalesce(standard_goods_sn, match_key, '') <> ''
-  GROUP BY box_id, coalesce(nullif(standard_goods_sn,''), match_key), match_key
+  GROUP BY box_id, coalesce(nullif(standard_goods_sn,''), match_key), coalesce(dim.product_match_key(standard_goods_sn), nullif(match_key,''))
 ),
 box_totals AS (
   SELECT
@@ -3198,7 +3341,7 @@ detail_expanded AS (
     END AS standard_goods_sn,
     CASE
       WHEN bi.box_id IS NOT NULL THEN bi.match_key
-      ELSE coalesce(nullif(d.match_key,''), dim.product_match_key(d.standard_goods_sn), dim.product_match_key(d.storage_code))
+      ELSE coalesce(dim.product_match_key(d.standard_goods_sn), dim.product_match_key(d.storage_code), nullif(d.match_key,''))
     END AS match_key,
     d.warehouse_name,
     CASE WHEN dd.detail_complete THEN 'download_detail' ELSE 'download_detail_scaled_to_bill' END AS storage_allocation_method,
@@ -3705,7 +3848,7 @@ keys AS (
   SELECT match_key FROM sales_agg
 )
 SELECT
-  coalesce(nullif(split_part(b.cost_standard_goods_sn_list, ' / ', 1), ''), nullif(split_part(s.sales_standard_goods_sn_list, ' / ', 1), ''), k.match_key) AS standard_goods_sn,
+  dim.product_canonical_sn(coalesce(nullif(split_part(b.cost_standard_goods_sn_list, ' / ', 1), ''), nullif(split_part(s.sales_standard_goods_sn_list, ' / ', 1), ''), k.match_key)) AS standard_goods_sn,
   k.match_key,
   coalesce(b.cost_standard_goods_sn_list, s.sales_standard_goods_sn_list) AS standard_goods_sn_list,
   b.raw_goods_sn_list,
@@ -3882,28 +4025,60 @@ latest_store_coverage AS (
 sales AS (
   SELECT
     store_key,
-    standard_goods_sn,
+    dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
     sum(sales_sar) AS sales_sar,
     sum(quantity) AS quantity,
     count(DISTINCT order_key) AS order_count
   FROM fact.order_item
   WHERE created_date = (SELECT date FROM latest_sales)
-  GROUP BY store_key, standard_goods_sn
+    AND coalesce(standard_goods_sn,'') <> ''
+  GROUP BY store_key, dim.product_canonical_sn(standard_goods_sn)
 ),
 actions AS (
   SELECT
     store_key,
-    standard_goods_sn,
+    dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
     count(*) AS action_count,
     count(*) FILTER (WHERE focus) AS focus_action_count,
     max(score) AS max_action_score
   FROM mart.link_action_candidate
   WHERE date = (SELECT max_date FROM latest_coverage)
-  GROUP BY store_key, standard_goods_sn
+    AND coalesce(standard_goods_sn,'') <> ''
+  GROUP BY store_key, dim.product_canonical_sn(standard_goods_sn)
+),
+coverage AS (
+  SELECT
+    c.date AS link_date,
+    (SELECT date FROM latest_sales) AS sales_date,
+    c.group_key,
+    c.store_key,
+    max(c.shop_name) FILTER (WHERE coalesce(c.shop_name,'') <> '') AS shop_name,
+    dim.product_canonical_sn(c.standard_goods_sn) AS standard_goods_sn,
+    coalesce(
+      max(c.coverage_status) FILTER (WHERE coalesce(c.has_on_shelf_link,false)),
+      max(c.coverage_status) FILTER (WHERE coalesce(c.need_supplement_link,false)),
+      max(c.coverage_status)
+    ) AS coverage_status,
+    bool_or(coalesce(c.has_on_shelf_link,false)) AS has_on_shelf_link,
+    bool_or(coalesce(c.need_supplement_link,false)) AS need_supplement_link,
+    sum(coalesce(c.link_count,0))::integer AS link_count,
+    sum(coalesce(c.on_shelf_count,0))::integer AS on_shelf_count,
+    sum(coalesce(c.wait_shelf_count,0))::integer AS wait_shelf_count,
+    sum(coalesce(c.sold_out_count,0))::integer AS sold_out_count,
+    sum(coalesce(c.out_shelf_count,0))::integer AS out_shelf_count,
+    bool_or(coalesce(c.duplicate_on_shelf,false)) AS duplicate_on_shelf,
+    max(c.best_skc) FILTER (WHERE coalesce(c.best_skc,'') <> '') AS best_skc,
+    max(coalesce(c.best_link_c30_sale,0)) AS best_link_c30_sale,
+    string_agg(DISTINCT nullif(c.skc_list,''), ' ') FILTER (WHERE nullif(c.skc_list,'') IS NOT NULL) AS skc_list
+  FROM fact.product_store_coverage c
+  JOIN latest_store_coverage lsc
+    ON lsc.store_key = c.store_key AND lsc.date = c.date
+  WHERE coalesce(dim.product_canonical_sn(c.standard_goods_sn),'') <> ''
+  GROUP BY c.date, c.group_key, c.store_key, dim.product_canonical_sn(c.standard_goods_sn)
 )
 SELECT
-  c.date AS link_date,
-  (SELECT date FROM latest_sales) AS sales_date,
+  c.link_date,
+  c.sales_date,
   c.group_key,
   c.store_key,
   c.shop_name,
@@ -3926,9 +4101,7 @@ SELECT
   coalesce(a.action_count, 0) AS action_count,
   coalesce(a.focus_action_count, 0) AS focus_action_count,
   coalesce(a.max_action_score, 0) AS max_action_score
-FROM fact.product_store_coverage c
-JOIN latest_store_coverage lsc
-  ON lsc.store_key = c.store_key AND lsc.date = c.date
+FROM coverage c
 LEFT JOIN sales s
   ON s.store_key = c.store_key AND s.standard_goods_sn = c.standard_goods_sn
 LEFT JOIN actions a
@@ -3974,19 +4147,20 @@ perf AS (
 store_product_link_count AS (
   SELECT
     store_key,
-    standard_goods_sn,
+    dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
     count(*) FILTER (WHERE is_on_shelf) AS on_shelf_count
   FROM fact.link_master_snapshot
   WHERE snapshot_date = (SELECT date FROM latest_link)
     AND coalesce(is_hard_dead,false) = false
-  GROUP BY store_key, standard_goods_sn
+    AND coalesce(standard_goods_sn,'') <> ''
+  GROUP BY store_key, dim.product_canonical_sn(standard_goods_sn)
 )
 SELECT
   l.snapshot_date AS link_date,
   l.group_key,
   l.store_key,
   l.shop_name,
-  l.standard_goods_sn,
+  dim.product_canonical_sn(l.standard_goods_sn) AS standard_goods_sn,
   l.raw_goods_sn,
   l.spu,
   l.skc,
@@ -4053,7 +4227,7 @@ FROM fact.link_master_snapshot l
 LEFT JOIN perf p
   ON p.date = l.snapshot_date AND p.store_key = l.store_key AND p.skc = l.skc
 LEFT JOIN store_product_link_count sp
-  ON sp.store_key = l.store_key AND sp.standard_goods_sn = l.standard_goods_sn
+  ON sp.store_key = l.store_key AND sp.standard_goods_sn = dim.product_canonical_sn(l.standard_goods_sn)
 WHERE l.snapshot_date = (SELECT date FROM latest_link)
   AND coalesce(l.is_hard_dead,false) = false;
 
@@ -4293,14 +4467,15 @@ CREATE OR REPLACE VIEW mart.bi_product_360_current AS
 WITH latest_business AS (SELECT max(snapshot_date) AS date FROM fact.home_finance_snapshot),
 sales AS (
   SELECT
-    standard_goods_sn,
+    dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
     sum(sales_sar) AS sales_sar,
     sum(quantity) AS quantity,
     count(DISTINCT order_key) AS order_count,
     count(DISTINCT store_key) AS sale_store_count
   FROM fact.order_item
   WHERE created_date = (SELECT max(created_date) FROM fact.order_item)
-  GROUP BY standard_goods_sn
+    AND coalesce(standard_goods_sn,'') <> ''
+  GROUP BY dim.product_canonical_sn(standard_goods_sn)
 ),
 coverage AS (
   SELECT
@@ -4318,17 +4493,18 @@ coverage AS (
 ),
 inventory AS (
   SELECT
-    standard_goods_sn,
+    dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
     sum(coalesce(usable_inventory,0)) AS usable_inventory,
     sum(coalesce(inventory_quantity,0)) AS display_inventory,
     count(*) FILTER (WHERE display_stock_low AND coalesce(shelf_statuses,'') LIKE '%ON_SHELF%') AS low_display_stock_count
   FROM fact.visible_inventory_snapshot
   WHERE snapshot_date = (SELECT date FROM latest_business)
-  GROUP BY standard_goods_sn
+    AND coalesce(standard_goods_sn,'') <> ''
+  GROUP BY dim.product_canonical_sn(standard_goods_sn)
 ),
 quality AS (
   SELECT
-    standard_goods_sn,
+    dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
     count(*) AS quality_skc_count,
     sum(coalesce(return_volume,0)) AS return_volume,
     sum(coalesce(quality_return_volume,0)) AS quality_return_volume,
@@ -4336,27 +4512,30 @@ quality AS (
     avg(show_bad_eval_rate) AS avg_bad_eval_rate
   FROM fact.quality_skc_snapshot
   WHERE snapshot_date = (SELECT date FROM latest_business)
-  GROUP BY standard_goods_sn
+    AND coalesce(standard_goods_sn,'') <> ''
+  GROUP BY dim.product_canonical_sn(standard_goods_sn)
 ),
 after_sales AS (
   SELECT
-    standard_goods_sn,
+    dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
     count(DISTINCT aftersales_order_no) AS after_sales_case_count,
     sum(coalesce(price_amount,0)) AS after_sales_amount_sar,
     string_agg(DISTINCT reason_names, ' / ') AS after_sales_reasons
   FROM fact.after_sales_item
   WHERE snapshot_date = (SELECT date FROM latest_business)
-  GROUP BY standard_goods_sn
+    AND coalesce(standard_goods_sn,'') <> ''
+  GROUP BY dim.product_canonical_sn(standard_goods_sn)
 ),
 comments AS (
   SELECT
-    standard_goods_sn,
+    dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
     count(*) AS comment_count,
     count(*) FILTER (WHERE goods_comment_star <= 3) AS low_star_comment_count,
     avg(goods_comment_star) AS avg_comment_star
   FROM fact.product_comment
   WHERE comment_date >= ((SELECT date FROM latest_business) - 90)
-  GROUP BY standard_goods_sn
+    AND coalesce(standard_goods_sn,'') <> ''
+  GROUP BY dim.product_canonical_sn(standard_goods_sn)
 )
 SELECT
   coalesce(s.standard_goods_sn, c.standard_goods_sn, i.standard_goods_sn, q.standard_goods_sn, a.standard_goods_sn, cm.standard_goods_sn) AS standard_goods_sn,
@@ -4411,7 +4590,7 @@ after_sales_group AS (
     snapshot_date AS date,
     store_key,
     group_key,
-    standard_goods_sn,
+    dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
     max(skc) AS skc,
     count(DISTINCT aftersales_order_no) AS case_count,
     sum(coalesce(price_amount, 0)) AS amount_sar,
@@ -4420,45 +4599,45 @@ after_sales_group AS (
   FROM fact.after_sales_item
   WHERE snapshot_date = (SELECT date FROM latest_after_sales)
     AND coalesce(standard_goods_sn, '') <> ''
-  GROUP BY snapshot_date, store_key, group_key, standard_goods_sn
+  GROUP BY snapshot_date, store_key, group_key, dim.product_canonical_sn(standard_goods_sn)
 ),
 link_sales_group AS (
   SELECT
     store_key,
-    standard_goods_sn,
+    dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
     sum(coalesce(c30_sale_cnt,0)) AS c30_sale_cnt
   FROM fact.link_performance_daily
   WHERE date = (SELECT date FROM latest_link_perf)
     AND coalesce(standard_goods_sn, '') <> ''
-  GROUP BY store_key, standard_goods_sn
+  GROUP BY store_key, dim.product_canonical_sn(standard_goods_sn)
 ),
 order_sales_30 AS (
   SELECT
     store_key,
-    standard_goods_sn,
+    dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
     sum(coalesce(quantity,0)) AS order_qty_30
   FROM fact.order_item
   WHERE created_date >= ((SELECT date FROM latest_inventory) - 30)
     AND coalesce(standard_goods_sn, '') <> ''
-  GROUP BY store_key, standard_goods_sn
+  GROUP BY store_key, dim.product_canonical_sn(standard_goods_sn)
 ),
 coverage_latest AS (
   SELECT
     store_key,
-    standard_goods_sn,
+    dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
     max(CASE WHEN coalesce(has_on_shelf_link,false) THEN 1 ELSE 0 END) AS has_on_shelf_link,
     max(coalesce(on_shelf_count,0)) AS on_shelf_count
   FROM fact.product_store_coverage
   WHERE date = (SELECT date FROM latest_coverage)
     AND coalesce(standard_goods_sn, '') <> ''
-  GROUP BY store_key, standard_goods_sn
+  GROUP BY store_key, dim.product_canonical_sn(standard_goods_sn)
 ),
 inventory_group AS (
   SELECT
     i.snapshot_date AS date,
     i.store_key,
     i.group_key,
-    i.standard_goods_sn,
+    dim.product_canonical_sn(i.standard_goods_sn) AS standard_goods_sn,
     string_agg(DISTINCT nullif(i.spu, ''), ',') AS spu_list,
     count(*) AS spu_rows,
     min(coalesce(i.usable_inventory, i.inventory_quantity, 0)) AS min_usable_inventory,
@@ -4471,13 +4650,13 @@ inventory_group AS (
     max(coalesce(ls.c30_sale_cnt,0)) AS c30_sale_cnt,
     max(coalesce(os.order_qty_30,0)) AS order_qty_30
   FROM fact.visible_inventory_snapshot i
-  LEFT JOIN link_sales_group ls ON ls.store_key = i.store_key AND ls.standard_goods_sn = i.standard_goods_sn
-  LEFT JOIN order_sales_30 os ON os.store_key = i.store_key AND os.standard_goods_sn = i.standard_goods_sn
-  LEFT JOIN coverage_latest c ON c.store_key = i.store_key AND c.standard_goods_sn = i.standard_goods_sn
+  LEFT JOIN link_sales_group ls ON ls.store_key = i.store_key AND ls.standard_goods_sn = dim.product_canonical_sn(i.standard_goods_sn)
+  LEFT JOIN order_sales_30 os ON os.store_key = i.store_key AND os.standard_goods_sn = dim.product_canonical_sn(i.standard_goods_sn)
+  LEFT JOIN coverage_latest c ON c.store_key = i.store_key AND c.standard_goods_sn = dim.product_canonical_sn(i.standard_goods_sn)
   WHERE i.snapshot_date = (SELECT date FROM latest_inventory)
     AND i.display_stock_low
     AND coalesce(i.standard_goods_sn, '') <> ''
-  GROUP BY i.snapshot_date, i.store_key, i.group_key, i.standard_goods_sn
+  GROUP BY i.snapshot_date, i.store_key, i.group_key, dim.product_canonical_sn(i.standard_goods_sn)
   HAVING bool_or(coalesce(i.shelf_statuses,'') LIKE '%ON_SHELF%')
      AND (max(coalesce(ls.c30_sale_cnt,0)) > 0 OR max(coalesce(os.order_qty_30,0)) > 0)
 ),
@@ -4487,7 +4666,7 @@ raw_actions AS (
     date,
     store_key,
     group_key,
-    standard_goods_sn,
+    dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
     skc,
     category,
     priority,
@@ -4532,7 +4711,7 @@ raw_actions AS (
       + coalesce(return_volume,0) * 2
       + coalesce(quality_return_rate,0) * 50
     )::numeric AS score,
-    coalesce(standard_goods_sn, skc) AS title,
+    coalesce(dim.product_canonical_sn(standard_goods_sn), skc) AS title,
     '质量退货、低星评价或质量等级出现异常。' AS reason,
     concat('quality_return_rate=', quality_return_rate, ', bad_eval_cnt=', bad_eval_cnt, ', return_volume=', return_volume, ', level=', goods_quality_level) AS evidence,
     '结合评论内容、退货原因、链接表现判断：优先优化详情/图片/质检；严重时考虑替换或下架。' AS next_step
@@ -4563,11 +4742,31 @@ raw_actions AS (
   FROM after_sales_group
   WHERE case_count >= 2 OR amount_sar >= 120
 ),
+canonical_actions AS (
+  SELECT
+    action_domain,
+    date,
+    store_key,
+    group_key,
+    dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
+    skc,
+    category,
+    priority,
+    score,
+    CASE
+      WHEN coalesce(title,'') = coalesce(standard_goods_sn,'') THEN dim.product_canonical_sn(standard_goods_sn)
+      ELSE title
+    END AS title,
+    reason,
+    evidence,
+    next_step
+  FROM raw_actions
+),
 domain_ranked AS (
   SELECT
     *,
     row_number() OVER (PARTITION BY action_domain, store_key ORDER BY score DESC, standard_goods_sn, skc) AS rn_domain_store
-  FROM raw_actions
+  FROM canonical_actions
   WHERE coalesce(standard_goods_sn, '') <> ''
     AND coalesce(score, 0) >= 60
 ),
