@@ -36,6 +36,8 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 echo "[cloud_openapi_hl] start date=$DATE root=$ROOT"
 cd "$ROOT"
 
+export SHEIN_BI_PORTAL_TIMEOUT_MS="${SHEIN_BI_PORTAL_TIMEOUT_MS:-1800000}"
+
 if [[ ! -s config/shein_openapi.local.json ]]; then
   echo "Missing config/shein_openapi.local.json on cloud server. This secret config is not stored in GitHub." >&2
   exit 69

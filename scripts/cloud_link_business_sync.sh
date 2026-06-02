@@ -93,7 +93,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 echo "[cloud_link_business_sync] start target=$TARGET date=$DATE root=$ROOT"
 cd "$ROOT"
 
-export SHEIN_BI_PORTAL_TIMEOUT_MS="${SHEIN_BI_PORTAL_TIMEOUT_MS:-900000}"
+export SHEIN_BI_PORTAL_TIMEOUT_MS="${SHEIN_BI_PORTAL_TIMEOUT_MS:-1800000}"
 
 trap close_store_browsers EXIT
 
