@@ -54,6 +54,9 @@ function parseArgs(argv) {
     user: 'shein',
     outDir: path.join(ROOT, 'outputs', 'bi-portal'),
     metabaseUrl: '',
+    dataMode: process.env.SHEIN_BI_PORTAL_DATA_MODE || 'legacy',
+    section: '',
+    jsonOnly: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -63,8 +66,116 @@ function parseArgs(argv) {
     else if (a === '--user') args.user = argv[++i];
     else if (a === '--out-dir') args.outDir = path.resolve(argv[++i]);
     else if (a === '--metabase-url') args.metabaseUrl = argv[++i];
+    else if (a === '--data-mode') args.dataMode = argv[++i];
+    else if (a === '--section') args.section = argv[++i];
+    else if (a === '--json-only') args.jsonOnly = true;
   }
+  args.dataMode = String(args.dataMode || 'legacy').trim().toLowerCase();
+  if (!['legacy', 'api'].includes(args.dataMode)) throw new Error(`Invalid --data-mode: ${args.dataMode}`);
+  args.section = String(args.section || '').trim();
   return args;
+}
+
+const PORTAL_API_SECTION_KEYS = [
+  'rankings',
+  'profit',
+  'actions',
+  'linksData',
+  'comments',
+  'orders',
+  'afterSales',
+  'financeData',
+  'rtvData',
+  'waybills',
+];
+
+const PORTAL_SECTION_SELECTS = {
+  core: `
+  'generatedAt', now(),
+  'dates', (SELECT data FROM dates),
+  'kpi', (SELECT data FROM kpi),
+  'stores', (SELECT data FROM stores),
+  'products', (SELECT data FROM products),
+  'finance', (SELECT data FROM finance),
+  'inventoryAlerts', (SELECT data FROM inventory_alerts),
+  'inventoryDepletion', jsonb_build_object(
+    'products', (SELECT data FROM inventory_depletion_products),
+    'batches', (SELECT data FROM inventory_depletion_batches),
+    'method', jsonb_build_object(
+      'stockBasis', '成本表批次 + 毛销量 FIFO 扣减',
+      'arrivalRule', '到仓/派送日期和头程运输费均存在才计入到仓库存；缺任一项计入在途或待确认',
+      'salesDeduction', '库存消耗按毛销量扣减，退货暂不加回，避免高估可售库存',
+      'velocityRule', '日均销量 = 近7天毛销量/7 × 40% + 近30天毛销量/30 × 60%'
+    )
+  ),
+  'campaigns', (SELECT data FROM campaigns),
+  'insights', (SELECT data FROM insights),
+  'trend', (SELECT data FROM trend_readiness)
+`,
+  rankings: `
+  'rankings', jsonb_build_object(
+    'salesSummary', (SELECT data FROM sales_period_summary),
+    'stores', (SELECT data FROM store_period_rank),
+    'products', (SELECT data FROM product_period_rank),
+    'dailyStores', (SELECT data FROM daily_store_sales),
+    'dailyProducts', (SELECT data FROM daily_product_sales),
+    'dailyProductGroups', (SELECT data FROM daily_product_group_sales),
+    'dailyStoreProducts', (SELECT data FROM daily_store_product_sales)
+  )
+`,
+  profit: `
+  'profit', jsonb_build_object(
+    'dailyStoreProducts', (SELECT data FROM profit_daily_store_product),
+    'monthGroups', (SELECT data FROM profit_month_group),
+    'products', (SELECT data FROM profit_product_summary),
+    'productStorageDaily', (SELECT data FROM product_storage_daily),
+    'productStoreStorageDaily', (SELECT data FROM product_store_storage_daily),
+    'storeStorageDaily', (SELECT data FROM store_storage_daily)
+  )
+`,
+  actions: `
+  'actions', (SELECT data FROM actions),
+  'actionDomain', (SELECT data FROM action_domain)
+`,
+  linksData: `
+  'links', (SELECT data FROM links),
+  'duplicateLinks', (SELECT data FROM duplicate_links),
+  'storeLinks', (SELECT data FROM store_links),
+  'matrix', (SELECT data FROM matrix)
+`,
+  comments: `
+  'comments', (SELECT data FROM comments),
+  'commentSummary', (SELECT data FROM comment_summary)
+`,
+  orders: `
+  'orders', (SELECT data FROM orders)
+`,
+  afterSales: `
+  'afterSales', (SELECT data FROM after_sales),
+  'afterSalesReview', (SELECT data FROM after_sales_review)
+`,
+  financeData: `
+  'financeOrders', (SELECT data FROM finance_orders),
+  'financeGoods', (SELECT data FROM finance_goods)
+`,
+  rtvData: `
+  'rtvReview', (SELECT data FROM rtv_review),
+  'rtvTrace', (SELECT data FROM rtv_trace)
+`,
+  waybills: `
+  'waybills', (SELECT data FROM waybills)
+`,
+};
+
+function buildSectionSql(section) {
+  const key = String(section || '').trim();
+  const selectBody = PORTAL_SECTION_SELECTS[key];
+  if (!selectBody) throw new Error(`Unknown BI portal section: ${key}`);
+  const sql = buildSql();
+  const marker = '\nSELECT jsonb_build_object(\n';
+  const idx = sql.lastIndexOf(marker);
+  if (idx < 0) throw new Error('Cannot find BI portal final SELECT marker');
+  return `${sql.slice(0, idx)}\nSELECT jsonb_build_object(\n${selectBody}\n)::text;\n`;
 }
 
 function shellQuote(value) {
@@ -4069,6 +4180,7 @@ const LINK_OPS_ASSETS_API = '/api/link-ops-assets';
 const LINK_OPS_EXECUTE_API = '/api/link-ops-execute';
 const OPS_AGENT_ASK_API = '/api/ops-agent/ask';
 const SERVICE_HEALTH_API = '/api/health';
+const BI_SECTION_API = '/api/bi/section/';
 const ACTION_STATE_SERVICE_PATH = 'state/bi_action_state.json';
 const actionStateStore = {
   mode: window.location.protocol === 'http:' || window.location.protocol === 'https:' ? 'service' : 'browser',
@@ -4090,6 +4202,153 @@ let serviceHealth = {
   user: null,
   checkedAt: ''
 };
+const BI_SECTION_KEYS = new Set(Array.isArray(DATA.__sections?.keys) ? DATA.__sections.keys : []);
+const BI_SECTION_LOADED = new Set(Array.isArray(DATA.__sections?.loaded) ? DATA.__sections.loaded : []);
+const biSectionState = {};
+const OVERVIEW_DETAILS_SECTION_KEYS = ['rankings','actions','linksData','orders','afterSales','financeData','comments','waybills','profit'];
+const BRIEFING_SECTION_KEYS = ['rankings','actions','afterSales','financeData'];
+function resetBiSectionRuntimeFromData(){
+  BI_SECTION_KEYS.clear();
+  (Array.isArray(DATA.__sections?.keys) ? DATA.__sections.keys : []).forEach(section => BI_SECTION_KEYS.add(section));
+  BI_SECTION_LOADED.clear();
+  (Array.isArray(DATA.__sections?.loaded) ? DATA.__sections.loaded : []).forEach(section => BI_SECTION_LOADED.add(section));
+  Object.keys(biSectionState).forEach(section => delete biSectionState[section]);
+  biBackgroundLoadActive = false;
+}
+function currentBiSectionGeneratedAt(){
+  return String(DATA.__sections?.generatedAt || DATA.generatedAt || '');
+}
+function biPortalUsesApiSections(){
+  return String(DATA.__sections?.mode || '').toLowerCase() === 'api' && BI_SECTION_KEYS.size > 0;
+}
+function biSectionLoaded(section){
+  if (!BI_SECTION_KEYS.has(section)) return true;
+  return BI_SECTION_LOADED.has(section);
+}
+function missingBiSections(sections){
+  return (sections || []).filter(section => BI_SECTION_KEYS.has(section) && !biSectionLoaded(section));
+}
+function requiredBiSectionsForTab(tab = state.tab || 'overview'){
+  if (!biPortalUsesApiSections()) return [];
+  const map = {
+    overview:$('detailsFold')?.open ? OVERVIEW_DETAILS_SECTION_KEYS : [],
+    stores:['rankings','profit','actions','linksData','afterSales','financeData','waybills'],
+    products:['rankings','profit','actions','linksData','orders','afterSales','financeData','comments'],
+    links:['linksData','actions'],
+    linkops:['linksData','actions'],
+    comments:['comments'],
+    business:['orders','afterSales','financeData','rtvData','waybills'],
+    profit:['profit','rankings','rtvData'],
+    inventory:['profit'],
+    actions:['actions','linksData','afterSales','financeData','waybills','orders'],
+    system:[]
+  };
+  return (map[tab] || []).filter(section => BI_SECTION_KEYS.has(section));
+}
+function backgroundBiSectionsForTab(tab = state.tab || 'overview'){
+  if (!biPortalUsesApiSections()) return [];
+  const map = {
+    overview:['rankings','actions','afterSales','financeData','profit']
+  };
+  return (map[tab] || []).filter(section => BI_SECTION_KEYS.has(section));
+}
+function missingBiSectionsForCurrentTab(){
+  return missingBiSections(requiredBiSectionsForTab());
+}
+function biSectionUrl(section){
+  const name = encodeURIComponent(section);
+  if (window.location.protocol === 'http:' || window.location.protocol === 'https:') return BI_SECTION_API + name;
+  return 'sections/' + name + '.json';
+}
+function showBiSectionLoading(sections){
+  const host = (state.tab || 'overview') === 'overview' ? ($('homeDashboard') || document.getElementById('overview')) : document.getElementById(state.tab || 'overview');
+  if (!host) return;
+  let target = document.getElementById('biSectionLoading');
+  if (!target) {
+    target = document.createElement('div');
+    target.id = 'biSectionLoading';
+    target.className = 'empty';
+    if ((state.tab || 'overview') === 'overview' && host.id === 'homeDashboard') host.appendChild(target);
+    else host.prepend(target);
+  }
+  const pending = sections.map(s => s === 'linksData' ? '链接/覆盖' : s === 'financeData' ? '财务明细' : s === 'rtvData' ? 'RTV追踪' : s).join('、');
+  target.innerHTML = '正在加载当前页面数据：' + escapeHtml(pending) + '。界面布局保持不变，数据按需从服务端读取。';
+}
+function clearBiSectionLoading(){
+  document.getElementById('biSectionLoading')?.remove();
+}
+async function loadBiSection(section){
+  if (biSectionLoaded(section)) return;
+  if (biSectionState[section]?.status === 'loading') return biSectionState[section].promise;
+  const promise = (async () => {
+    const res = await fetch(biSectionUrl(section), {cache:'no-store'});
+    if (!res.ok) throw new Error(section + ' HTTP ' + res.status);
+    const payload = await res.json();
+    const data = payload && payload.data && typeof payload.data === 'object' ? payload.data : payload;
+    const payloadGeneratedAt = payload && typeof payload === 'object' ? String(payload.generatedAt || '') : '';
+    const expectedGeneratedAt = currentBiSectionGeneratedAt();
+    if (biPortalUsesApiSections()) {
+      if (!payloadGeneratedAt) throw new Error(section + ' 缺少 generatedAt，已阻止合并以避免串用旧 section 数据');
+      if (expectedGeneratedAt && payloadGeneratedAt !== expectedGeneratedAt) {
+        throw new Error(section + ' generatedAt 不匹配：section=' + payloadGeneratedAt + ' core=' + expectedGeneratedAt);
+      }
+    }
+    Object.assign(DATA, data || {});
+    BI_SECTION_LOADED.add(section);
+    biSectionState[section] = {status:'loaded', loadedAt:new Date().toISOString()};
+  })();
+  biSectionState[section] = {status:'loading', promise};
+  try {
+    await promise;
+  } catch (err) {
+    biSectionState[section] = {status:'error', error:err?.message || String(err || 'unknown')};
+    throw err;
+  }
+}
+async function loadBiSections(sections){
+  for (const section of sections) await loadBiSection(section);
+}
+let biBackgroundLoadActive = false;
+function startBiSectionBackgroundLoads(sections){
+  const pending = (sections || []).filter(section => !biSectionLoaded(section));
+  if (!pending.length || biBackgroundLoadActive) return;
+  biBackgroundLoadActive = true;
+  (async () => {
+    try {
+      for (const section of pending) {
+        if (biSectionLoaded(section)) continue;
+        await loadBiSection(section);
+        renderFilters();
+        renderAll();
+      }
+    } finally {
+      biBackgroundLoadActive = false;
+    }
+  })().catch(err => {
+    const host = (state.tab || 'overview') === 'overview' ? ($('homeDashboard') || document.getElementById('overview')) : document.getElementById(state.tab || 'overview');
+    if (host && !document.getElementById('biSectionLoading')) {
+      const el = document.createElement('div');
+      el.id = 'biSectionLoading';
+      el.className = 'empty';
+      el.innerHTML = '后台数据加载失败：' + escapeHtml(err?.message || String(err || 'unknown')) + '。可刷新重试，或进入对应页面后按需加载。';
+      host.prepend(el);
+    }
+  });
+}
+function ensureBiSectionsForRender(){
+  startBiSectionBackgroundLoads(backgroundBiSectionsForTab());
+  const missing = missingBiSectionsForCurrentTab();
+  if (!missing.length) return true;
+  showBiSectionLoading(missing);
+  loadBiSections(missing).then(() => {
+    renderFilters();
+    renderAll();
+  }).catch(err => {
+    const target = document.getElementById('biSectionLoading');
+    if (target) target.innerHTML = '当前页面数据加载失败：' + escapeHtml(err?.message || String(err || 'unknown')) + '。可刷新重试，或用 legacy 模式回退。';
+  });
+  return false;
+}
 function normalizeActionState(value){
   const raw = value && value.actions && typeof value.actions === 'object' ? value.actions : (value || {});
   const next = {};
@@ -5895,6 +6154,9 @@ function kpiJump(tab, patch = {}){
 }
 function renderKpis(){
   const range = ensureDateRange();
+  const rankingsLoading = biPortalUsesApiSections() && !biSectionLoaded('rankings');
+  const profitLoading = biPortalUsesApiSections() && !biSectionLoaded('profit');
+  const afterSalesLoading = biPortalUsesApiSections() && !biSectionLoaded('afterSales');
   const salesTitle = state.salesMode === 'gross' ? '当前时段总销售额' : '当前时段净销售额';
   const salesTip = state.salesMode === 'gross'
     ? '总销售额按订单创建时间统计，不扣售后、退货、派送失败等反转订单。用于看原始成交规模。'
@@ -5925,6 +6187,7 @@ function renderKpis(){
   const value = html => '<div class="matrix-cell value">'+html+'</div>';
   const moneyValue = v => value(escapeHtml(fmt.format(Number(v || 0))));
   const rmbValue = v => value(escapeHtml(fmt.format(Number(v || 0) * RMB_RATE)));
+  const loadingValue = label => value('<span class="pending-profit">'+escapeHtml(label || '加载中')+'</span>');
   const card = (title, sub, body, tip, jump = 'business') =>
     '<div class="overview-matrix-card" role="button" tabindex="0" data-overview-jump="'+escapeHtml(jump)+'" aria-label="查看'+escapeHtml(title)+'">'+
       '<div class="matrix-card-head"><h4>'+escapeHtml(title)+' <em class="help" tabindex="0" data-tip="'+escapeHtml(tip)+'">?</em></h4><div class="sub">'+escapeHtml(sub)+'</div></div>'+body+
@@ -5933,19 +6196,19 @@ function renderKpis(){
   $('kpis').innerHTML =
     card(salesTitle, selectedRangeText(),
       metricModeToggle('salesMode', [{value:'net', label:'净销售额'}, {value:'gross', label:'总销售额'}])+
-      matrix(2, head(['范围','SAR','RMB'])+rows.map(r => label(r.label)+moneyValue(r.sales_sar)+rmbValue(r.sales_sar)).join('')),
+      matrix(2, head(['范围','SAR','RMB'])+rows.map(r => label(r.label)+(rankingsLoading ? loadingValue('加载中') : moneyValue(r.sales_sar))+(rankingsLoading ? loadingValue('加载中') : rmbValue(r.sales_sar))).join('')),
       salesTip+' RMB 按固定汇率 1 SAR = 1.8 估算。')+
     card('当前时段订单 / 销量 / 动销', selectedRangeText(),
       metricModeToggle('qtyMode', [{value:'net', label:'净销量'}, {value:'gross', label:'总销量'}])+
-      matrix(3, head(['范围','订单','销量','动销货号'])+rows.map(r => label(r.label)+value(num(r.orders)+' 单')+value(num(r.quantity)+' 件')+value(num(r.activeProducts)+' 个')).join('')),
+      matrix(3, head(['范围','订单','销量','动销货号'])+rows.map(r => label(r.label)+(rankingsLoading ? loadingValue('加载中') : value(num(r.orders)+' 单'))+(rankingsLoading ? loadingValue('加载中') : value(num(r.quantity)+' 件'))+(rankingsLoading ? loadingValue('加载中') : value(num(r.activeProducts)+' 个'))).join('')),
       qtyTip+' 动销货号是当前时段有对应销量的标准货号数量。')+
     card('当前时段退货 / 售后', afterLabel,
       metricModeToggle('returnsMode', [{value:'request', label:'售后申请时间'}, {value:'order', label:'订单创建时间'}])+
-      matrix(3, head(['范围','数量','SAR','RMB'])+rows.map(r => label(r.label)+value(num(r.returnCases)+' 单')+moneyValue(r.returnAmountSar)+rmbValue(r.returnAmountSar)).join('')),
+      matrix(3, head(['范围','数量','SAR','RMB'])+rows.map(r => label(r.label)+(afterSalesLoading || (state.returnsMode === 'order' && rankingsLoading) ? loadingValue('加载中') : value(num(r.returnCases)+' 单'))+(afterSalesLoading || (state.returnsMode === 'order' && rankingsLoading) ? loadingValue('加载中') : moneyValue(r.returnAmountSar))+(afterSalesLoading || (state.returnsMode === 'order' && rankingsLoading) ? loadingValue('加载中') : rmbValue(r.returnAmountSar))).join('')),
       '已取消售后不计入；金额按订单实收/预计收入字段优先，避免售后列表展示价失真。')+
     card('当前时段真实利润', profitLabel,
       metricModeToggle('profitMode', [{value:'loss', label:'全损保守'}, {value:'rtv', label:'RTV入仓测算'}])+
-      matrix(3, head(['范围','SAR','RMB','利润率'])+rows.map(r => label(r.label)+value(profitDisplayHtml(r.profit))+value(r.profit?.hasAnyCost ? escapeHtml(fmt.format(profitMoney(r) * RMB_RATE)) : '<span class="pending-profit">待成本表</span>')+profitMarginHtml(r.profit)).join(''), 'profit-matrix'),
+      matrix(3, head(['范围','SAR','RMB','利润率'])+rows.map(r => label(r.label)+(profitLoading ? loadingValue('加载中') : value(profitDisplayHtml(r.profit)))+(profitLoading ? loadingValue('加载中') : value(r.profit?.hasAnyCost ? escapeHtml(fmt.format(profitMoney(r) * RMB_RATE)) : '<span class="pending-profit">待成本表</span>'))+(profitLoading ? loadingValue('加载中') : profitMarginHtml(r.profit))).join(''), 'profit-matrix'),
       '全损保守：退货营收为0并扣成本；RTV入仓测算：ET已收退件按可二售回收成本测算。仓储费已进入真实利润，货号层优先使用 ET 当日仓储费下载明细。', 'profit');
   document.querySelectorAll('[data-overview-jump]').forEach(btn => btn.addEventListener('click', e => {
     if (e.target?.classList?.contains('help') || e.target?.closest?.('[data-metric-mode-key]')) return;
@@ -6747,6 +7010,8 @@ function homeSalesTrendSvg(){
 }
 function renderHomeDashboard(){
   const selectedRange = ensureDateRange();
+  const rankingsLoading = biPortalUsesApiSections() && !biSectionLoaded('rankings');
+  const actionsLoading = biPortalUsesApiSections() && !biSectionLoaded('actions');
   syncHomeScopeControls();
   ensureRankWindow();
   syncUrlHash();
@@ -6759,6 +7024,7 @@ function renderHomeDashboard(){
   const productByQty = [...productRankRows].sort((a,b)=>Number(b.quantity||0)-Number(a.quantity||0));
   const domainCounts = (DATA.actions || []).reduce((acc,a)=>{ const k = domainName(a.action_domain || 'other'); acc[k]=(acc[k]||0)+1; return acc; }, {});
   const domainRows = Object.entries(domainCounts).map(([label,count]) => ({label,count})).sort((a,b)=>b.count-a.count);
+  const sectionLoadingHtml = label => '<div class="empty">正在加载'+escapeHtml(label)+'，页面先显示 core 数据；加载完成后会自动刷新本区域。</div>';
   $('homeDashboardTag').textContent = '当前时间段 ' + periodRangeText(rankSummary) + ' · ' + homeScopeSubtitle();
   renderFloatingRangeToolbar();
   const groupEl = $('groupOverview');
@@ -6772,16 +7038,16 @@ function renderHomeDashboard(){
     '</div>'+
     '<div class="dashboard-section-title"><h3>排行榜</h3><div class="sub">店铺只显示 DL/DX 等代号，货号显示归并后的标准货号；排行榜按上方时间段重算。</div></div>'+
     '<div class="dashboard-grid equal">'+
-      panel('店铺净成交额排行', '当前范围 '+num(storeBySales.length)+' 店 · '+periodRangeText(rankSummary), rankList(storeBySales, {valueKey:'sales_sar', name:storeRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:r=>groupColor(storeGroupKey(r)), meta:r=>'订单 '+num(r.orders)+' · 销量 '+num(r.quantity)+' 件 · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+
-      panel('店铺净销量排行', '完整 '+num(storeByQty.length)+' 店 · 按净成交销量件数排序。', rankList(storeByQty, {valueKey:'quantity', name:storeRankName, format:v=>num(v)+' 件', subValue:r=>money(r.sales_sar), color:r=>groupColor(storeGroupKey(r)), meta:r=>'订单 '+num(r.orders)+' · 净成交 '+money(r.sales_sar)+' · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+
+      panel('店铺净成交额排行', rankingsLoading ? '当前范围明细加载中' : '当前范围 '+num(storeBySales.length)+' 店 · '+periodRangeText(rankSummary), rankingsLoading ? sectionLoadingHtml('店铺排行') : rankList(storeBySales, {valueKey:'sales_sar', name:storeRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:r=>groupColor(storeGroupKey(r)), meta:r=>'订单 '+num(r.orders)+' · 销量 '+num(r.quantity)+' 件 · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+
+      panel('店铺净销量排行', rankingsLoading ? '当前范围明细加载中' : '完整 '+num(storeByQty.length)+' 店 · 按净成交销量件数排序。', rankingsLoading ? sectionLoadingHtml('店铺销量排行') : rankList(storeByQty, {valueKey:'quantity', name:storeRankName, format:v=>num(v)+' 件', subValue:r=>money(r.sales_sar), color:r=>groupColor(storeGroupKey(r)), meta:r=>'订单 '+num(r.orders)+' · 净成交 '+money(r.sales_sar)+' · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+
     '</div>'+
     '<div class="dashboard-grid equal" style="margin-top:16px">'+
-      panel('产品净成交额排行', '当前范围 '+num(productBySales.length)+' 个标准货号 · 点击进入货号 360。', rankList(productBySales, {className:'product-rank', valueKey:'sales_sar', name:productRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:()=> '#db2777', meta:r=>productRankMeta(r, '销量 '+num(r.quantity)+' 件 · 订单 '+num(r.orders)+' · 覆盖 '+num(r.store_count)+' 店 · '+num(r.days)+' 天'), attr:r=>'data-home-product="'+escapeHtml(r.standard_goods_sn || '')+'"'}))+
-      panel('产品净销量排行', '完整 '+num(productByQty.length)+' 个标准货号 · 按净成交销量件数排序。', rankList(productByQty, {className:'product-rank', valueKey:'quantity', name:productRankName, format:v=>num(v)+' 件', subValue:r=>money(r.sales_sar), color:()=> '#a855f7', meta:r=>productRankMeta(r, '净成交 '+money(r.sales_sar)+' · 订单 '+num(r.orders)+' · 覆盖 '+num(r.store_count)+' 店 · '+num(r.days)+' 天'), attr:r=>'data-home-product="'+escapeHtml(r.standard_goods_sn || '')+'"'}))+
+      panel('产品净成交额排行', rankingsLoading ? '当前范围明细加载中' : '当前范围 '+num(productBySales.length)+' 个标准货号 · 点击进入货号 360。', rankingsLoading ? sectionLoadingHtml('产品销售排行') : rankList(productBySales, {className:'product-rank', valueKey:'sales_sar', name:productRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:()=> '#db2777', meta:r=>productRankMeta(r, '销量 '+num(r.quantity)+' 件 · 订单 '+num(r.orders)+' · 覆盖 '+num(r.store_count)+' 店 · '+num(r.days)+' 天'), attr:r=>'data-home-product="'+escapeHtml(r.standard_goods_sn || '')+'"'}))+
+      panel('产品净销量排行', rankingsLoading ? '当前范围明细加载中' : '完整 '+num(productByQty.length)+' 个标准货号 · 按净成交销量件数排序。', rankingsLoading ? sectionLoadingHtml('产品销量排行') : rankList(productByQty, {className:'product-rank', valueKey:'quantity', name:productRankName, format:v=>num(v)+' 件', subValue:r=>money(r.sales_sar), color:()=> '#a855f7', meta:r=>productRankMeta(r, '净成交 '+money(r.sales_sar)+' · 订单 '+num(r.orders)+' · 覆盖 '+num(r.store_count)+' 店 · '+num(r.days)+' 天'), attr:r=>'data-home-product="'+escapeHtml(r.standard_goods_sn || '')+'"'}))+
     '</div>'+
     '<div class="dashboard-section-title"><h3>动作与风险</h3><div class="sub">首页只看结构，具体处理进动作池。</div></div>'+
     '<div class="dashboard-grid equal">'+
-      panel('动作结构', '动作池精选清单的业务域分布。', homeBarList(domainRows, 'count', 'label', {format:v=>num(v)+' 条', color:()=> '#0891b2', attr:r=>'data-home-domain="'+escapeHtml(r.label || '')+'"'} )+'<button class="btn" style="margin-top:12px" data-home-actions="1">进入今日动作池</button>')+
+      panel('动作结构', actionsLoading ? '动作池加载中' : '动作池精选清单的业务域分布。', (actionsLoading ? sectionLoadingHtml('动作池') : homeBarList(domainRows, 'count', 'label', {format:v=>num(v)+' 条', color:()=> '#0891b2', attr:r=>'data-home-domain="'+escapeHtml(r.label || '')+'"'} ))+'<button class="btn" style="margin-top:12px" data-home-actions="1">进入今日动作池</button>')+
       panel('趋势准备', '只说明当前是否具备趋势分析条件，不重复展示净成交额。', homeSalesTrendSvg())+
     '</div>';
   bindRangeToolbarControls();
@@ -8208,6 +8474,24 @@ function buildBriefing(){
   };
 }
 function renderBriefing(){
+  const briefingMissing = biPortalUsesApiSections() ? missingBiSections(BRIEFING_SECTION_KEYS) : [];
+  if (briefingMissing.length) {
+    const pendingText = briefingMissing.map(s => s === 'financeData' ? '财务明细' : s === 'afterSales' ? '售后明细' : s === 'actions' ? '动作池' : s === 'rankings' ? '排行榜' : s).join('、');
+    $('dailyBriefing').innerHTML =
+      '<div class="briefing-main">'+
+        '<h4>SHEIN BI 今日经营简报</h4>'+
+        '<p>关键经营明细正在按需加载，先不展示数量，避免把未加载数据误报为 0。</p>'+
+        '<ul class="briefing-list"><li>'+escapeHtml(pendingText)+'加载完成后会自动刷新晨报。</li><li>当前页面的日期、店铺和系统状态来自 core 数据，可先确认数据新鲜度。</li></ul>'+
+      '</div>'+
+      '<div class="briefing-side">'+
+        '<div class="briefing-note"><span>明细加载</span><strong>进行中</strong></div>'+
+        '<div class="briefing-note"><span>销售日期</span><strong>'+escapeHtml(DATA.dates?.salesDate || '-')+'</strong></div>'+
+        '<div class="briefing-note"><span>业务日期</span><strong>'+escapeHtml(DATA.dates?.businessDate || '-')+'</strong></div>'+
+        '<div class="briefing-note"><span>链接日期</span><strong>'+escapeHtml(DATA.dates?.linkDate || '-')+'</strong></div>'+
+      '</div>';
+    $('markdownBriefingPreview').textContent = '关键经营明细仍在加载，完整 Markdown 晨报加载完成后再生成。';
+    return;
+  }
   const b = buildBriefing();
   const lines = b.lines;
   $('dailyBriefing').innerHTML =
@@ -8232,9 +8516,13 @@ function renderBriefing(){
   $('markdownBriefingPreview').textContent = fullBriefingText() || '完整 Markdown 晨报还没有生成；每日 BI 流水线完成后会自动生成。';
 }
 function briefingText(){
+  if (biPortalUsesApiSections() && missingBiSections(BRIEFING_SECTION_KEYS).length) {
+    return 'SHEIN BI 今日经营简报\\n关键经营明细正在按需加载，暂不输出数量，避免把未加载数据误报为 0。';
+  }
   return buildBriefing().lines.join('\\n');
 }
 function fullBriefingText(){
+  if (biPortalUsesApiSections() && missingBiSections(BRIEFING_SECTION_KEYS).length) return briefingText();
   return DATA.briefing?.content || briefingText();
 }
 function commandRoomRows(){
@@ -12118,6 +12406,8 @@ function renderAll(){
   document.body.dataset.currentTab = state.tab || 'overview';
   applyStateToControls();
   syncUrlHash();
+  if (!ensureBiSectionsForRender()) return;
+  clearBiSectionLoading();
   renderPageGuides();
   renderDataWarnings();
   renderFocusBar();
@@ -12403,6 +12693,7 @@ async function refreshPortalData(options = {}){
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const next = await res.json();
     DATA = next;
+    resetBiSectionRuntimeFromData();
     STORE_CODES = new Set((DATA.stores || []).map(s => s.store_key));
     STORE_CODES_ARRAY = orderedStoreCodes();
     portalDataLastReadAt = new Date();
@@ -12552,7 +12843,6 @@ window.addEventListener('hashchange', () => {
 });
 stateFromHash();
 initTheme();
-renderKpis();
 renderFilters();
 applyStateToControls();
 renderAll();
@@ -12569,6 +12859,22 @@ startPortalAutoRefresh();
 async function main() {
   markStage('main:start');
   const args = parseArgs(process.argv.slice(2));
+  if (args.section) {
+    markStage(`section:${args.section}:sql`);
+    const raw = await runPsql(args, buildSectionSql(args.section));
+    markStage(`section:${args.section}:parse`);
+    let sectionData = deepSanitize(JSON.parse(raw));
+    if (args.section === 'linksData') sectionData = await enrichPortalDataWithLocalLinkLabels(sectionData);
+    sectionData = enrichProductDisplayNames(sectionData);
+    markStage(`section:${args.section}:done`);
+    clearTimeout(portalGenerateTimer);
+    if (args.jsonOnly) {
+      process.stdout.write(JSON.stringify(sectionData));
+      return;
+    }
+    console.log(JSON.stringify({ok: true, section: args.section, data: sectionData}, null, 2));
+    return;
+  }
   markStage('metabase:url');
   const metabaseUrl = (args.metabaseUrl || await readMetabaseUrl() || 'http://localhost:3000').replace(/\/$/, '');
   markStage('read:audit');
@@ -12579,12 +12885,21 @@ async function main() {
   const briefing = await readLatestBriefingSummary();
   markStage('read:firstRunCheck');
   const firstRunCheck = await readLatestFirstRunCheckSummary();
-  const raw = await runPsql(args, buildSql());
+  const raw = await runPsql(args, args.dataMode === 'api' ? buildSectionSql('core') : buildSql());
   markStage('read:openapiReconciliation');
   const openapiReconciliation = await readOpenApiReconciliation(args);
   markStage('json:parse');
   const parsedData = deepSanitize(JSON.parse(raw));
   parsedData.openapiReconciliation = deepSanitize(openapiReconciliation);
+  if (args.dataMode === 'api') {
+    parsedData.__sections = {
+      mode: 'api',
+      keys: PORTAL_API_SECTION_KEYS,
+      loaded: ['core'],
+      generatedAt: parsedData.generatedAt || new Date().toISOString(),
+      cache: 'service',
+    };
+  }
   const data = enrichProductDisplayNames(await attachManualCostFileMeta(await enrichPortalDataWithLocalLinkLabels(parsedData)));
   markStage('sanitize');
   const safeAudit = deepSanitize(audit);
@@ -12605,6 +12920,7 @@ async function main() {
   clearTimeout(portalGenerateTimer);
   console.log(JSON.stringify({
     ok: true,
+    dataMode: args.dataMode,
     html: htmlFile,
     data: jsonFile,
     metabaseUrl,

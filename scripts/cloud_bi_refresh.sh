@@ -61,6 +61,7 @@ cd "$ROOT"
 
 export SHEIN_SALES_TRANSPORT="${SHEIN_SALES_TRANSPORT:-webapi}"
 export SHEIN_BI_PORTAL_TIMEOUT_MS="${SHEIN_BI_PORTAL_TIMEOUT_MS:-1800000}"
+export SHEIN_BI_PORTAL_DATA_MODE="${SHEIN_BI_PORTAL_DATA_MODE:-api}"
 
 node scripts/run_sales_sync_job.mjs \
   --date "$DATE" \
@@ -92,6 +93,11 @@ node scripts/generate_bi_portal.mjs \
 
 if command -v systemctl >/dev/null 2>&1; then
   systemctl is-active --quiet shein-bi-portal.service || systemctl start shein-bi-portal.service || true
+fi
+
+if [[ "$SHEIN_BI_PORTAL_DATA_MODE" == "api" && "${SHEIN_BI_PORTAL_PREWARM_DISABLED:-0}" != "1" ]]; then
+  nohup bash scripts/prewarm_bi_portal_sections.sh >/dev/null 2>&1 &
+  echo "[cloud_bi_refresh] portal section prewarm started pid=$!"
 fi
 
 check_portal_health

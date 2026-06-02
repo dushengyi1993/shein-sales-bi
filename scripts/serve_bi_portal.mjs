@@ -35,6 +35,10 @@ function parseArgs(argv) {
     manualLoginStateFile: process.env.SHEIN_MANUAL_LOGIN_STATE_FILE || '/srv/shein-bi/runtime/cloud_manual_login_sessions.json',
     authFile: path.join(ROOT, 'config', 'bi_users.local.json'),
     auditFile: path.join(ROOT, 'logs', 'bi_portal_action_audit.jsonl'),
+    distro: 'Ubuntu-24.04',
+    container: 'shein-warehouse-db',
+    database: 'shein_bi',
+    user: 'shein',
     readOnly: false,
     noAuth: false,
   };
@@ -50,6 +54,10 @@ function parseArgs(argv) {
     else if (a === '--manual-login-state-file') args.manualLoginStateFile = path.resolve(argv[++i]);
     else if (a === '--auth-file') args.authFile = path.resolve(argv[++i]);
     else if (a === '--audit-file') args.auditFile = path.resolve(argv[++i]);
+    else if (a === '--distro') args.distro = argv[++i];
+    else if (a === '--container') args.container = argv[++i];
+    else if (a === '--database') args.database = argv[++i];
+    else if (a === '--user') args.user = argv[++i];
     else if (a === '--read-only') args.readOnly = true;
     else if (a === '--no-auth') args.noAuth = true;
   }
@@ -83,6 +91,9 @@ const LINK_OPS_MAX_UPLOAD_FILE_BYTES = 20 * 1024 * 1024;
 const LINK_OPS_MAX_UPLOAD_TOTAL_BYTES = 120 * 1024 * 1024;
 const DEFAULT_SHEIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC', 'DSY', 'LGM'];
 const DEFAULT_MANUAL_LOGIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
+const BI_PORTAL_SECTION_KEYS = new Set(['rankings', 'profit', 'actions', 'linksData', 'comments', 'orders', 'afterSales', 'financeData', 'rtvData', 'waybills']);
+const BI_PORTAL_SECTION_TIMEOUT_MS = Math.max(60_000, Number(process.env.SHEIN_BI_SECTION_TIMEOUT_MS || 900_000));
+const biSectionInFlight = new Map();
 const LINK_OPS_STORE_CAPABILITIES = {
   HL: {
     openapiAuthorized: true,
@@ -1351,6 +1362,110 @@ function runChildProcess(command, args, options = {}) {
   });
 }
 
+async function readBiPortalCoreMeta(root) {
+  const data = await readJsonFile(path.join(root, 'data.json'), {});
+  return {
+    generatedAt: data?.generatedAt || data?.__sections?.generatedAt || '',
+    mode: data?.__sections?.mode || 'legacy',
+  };
+}
+
+async function readBiSectionCache(root, section, generatedAt) {
+  const file = path.join(root, 'sections', `${section}.json`);
+  const cached = await readJsonFile(file, null);
+  if (!cached || typeof cached !== 'object') return null;
+  const expectedGeneratedAt = String(generatedAt || '');
+  const cachedGeneratedAt = String(cached.generatedAt || '');
+  if (expectedGeneratedAt && cachedGeneratedAt !== expectedGeneratedAt) return null;
+  if (!cached.data || typeof cached.data !== 'object') return null;
+  return cached;
+}
+
+async function writeBiSectionCache(root, section, generatedAt, data, run) {
+  const dir = path.join(root, 'sections');
+  await fs.mkdir(dir, {recursive: true});
+  const file = path.join(dir, `${section}.json`);
+  const payload = {
+    ok: true,
+    section,
+    generatedAt: generatedAt || '',
+    cachedAt: new Date().toISOString(),
+    data,
+    run: run ? {
+      code: run.code,
+      timedOut: Boolean(run.timedOut),
+      stderrTail: String(run.stderr || '').slice(-4000),
+    } : null,
+  };
+  await writeJsonFile(file, payload);
+  return payload;
+}
+
+async function generateBiSection(args, root, section, generatedAt) {
+  const run = await runChildProcess(process.execPath, [
+    path.join(ROOT, 'scripts', 'generate_bi_portal.mjs'),
+    '--section', section,
+    '--json-only',
+    '--out-dir', root,
+    '--distro', args.distro,
+    '--container', args.container,
+    '--database', args.database,
+    '--user', args.user,
+  ], {
+    cwd: ROOT,
+    timeoutMs: BI_PORTAL_SECTION_TIMEOUT_MS,
+    env: {
+      SHEIN_BI_PORTAL_TIMEOUT_MS: String(Math.max(BI_PORTAL_SECTION_TIMEOUT_MS + 60_000, Number(process.env.SHEIN_BI_PORTAL_TIMEOUT_MS || 0) || 0)),
+    },
+  });
+  if (!run.ok) {
+    const tail = String(run.stderr || run.stdout || '').slice(-2000);
+    throw new Error(`BI section ${section} generation failed: code=${run.code} timedOut=${run.timedOut} ${tail}`);
+  }
+  let data;
+  try {
+    data = JSON.parse(run.stdout || '{}');
+  } catch (err) {
+    throw new Error(`BI section ${section} returned invalid JSON: ${err?.message || err}`);
+  }
+  return writeBiSectionCache(root, section, generatedAt, data, run);
+}
+
+async function loadBiSection(args, root, section, options = {}) {
+  const force = !!options.force;
+  const allowGenerate = options.allowGenerate !== false;
+  if (!BI_PORTAL_SECTION_KEYS.has(section)) {
+    return {status: 404, payload: {ok: false, error: 'Unknown BI section', section}};
+  }
+  const meta = await readBiPortalCoreMeta(root);
+  if (meta.mode !== 'api' && !force) {
+    return {status: 400, payload: {ok: false, error: 'BI portal is not in api data mode', section, mode: meta.mode}};
+  }
+  if (!force) {
+    const cached = await readBiSectionCache(root, section, meta.generatedAt);
+    if (cached) return {status: 200, payload: {...cached, cacheHit: true}};
+  }
+  if (!allowGenerate) {
+    return {
+      status: 503,
+      payload: {
+        ok: false,
+        error: 'BI section cache miss; generation is disabled in read-only or unauthenticated LAN mode',
+        section,
+        generatedAt: meta.generatedAt,
+      },
+    };
+  }
+  const key = `${root}|${section}|${meta.generatedAt || ''}`;
+  if (!biSectionInFlight.has(key)) {
+    biSectionInFlight.set(key, generateBiSection(args, root, section, meta.generatedAt).finally(() => {
+      biSectionInFlight.delete(key);
+    }));
+  }
+  const payload = await biSectionInFlight.get(key);
+  return {status: 200, payload: {...payload, cacheHit: false}};
+}
+
 async function askReadonlyOpsAgent(question, options = {}) {
   const text = String(question || '').trim();
   if (!text) throw new Error('Missing question');
@@ -1749,6 +1864,24 @@ async function main() {
             role: actor.role,
           } : null,
         });
+      }
+      {
+        const m = /^\/api\/bi\/section\/([^/]+)$/.exec(url.pathname);
+        if (m) {
+          if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+          const section = decodeURIComponent(m[1]);
+          const force = url.searchParams.get('refresh') === '1';
+          const allowGenerate = !(args.readOnly || (args.host === '0.0.0.0' && !authRequired));
+          if (force && !allowGenerate) {
+            return sendJson(res, 403, {ok: false, section, error: 'Section refresh is disabled in read-only or unauthenticated LAN mode'});
+          }
+          try {
+            const result = await loadBiSection(args, root, section, {force, allowGenerate});
+            return sendJson(res, result.status, result.payload);
+          } catch (err) {
+            return sendJson(res, 500, {ok: false, section, error: err?.message || String(err || 'BI section failed')});
+          }
+        }
       }
       if (url.pathname === '/favicon.ico') {
         return send(res, 204, '', {'Content-Type': 'image/x-icon'});
