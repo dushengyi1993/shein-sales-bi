@@ -4341,7 +4341,7 @@ function startBiSectionBackgroundLoads(sections){
     } finally {
       biBackgroundLoadActive = false;
     }
-  });
+  })();
 }
 function ensureBiSectionsForRender(){
   startBiSectionBackgroundLoads(backgroundBiSectionsForTab());
