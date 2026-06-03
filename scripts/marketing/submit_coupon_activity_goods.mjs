@@ -414,8 +414,26 @@ async function waitForTargetEnrolled(cdp, activityId, levelRuleId, targetSkcs, w
 async function loadTargetPlan(targetPlanPath) {
   if (!targetPlanPath) return null;
   const absolute = path.resolve(ROOT, targetPlanPath);
-  const json = JSON.parse(await fs.readFile(absolute, 'utf8'));
-  const items = Array.isArray(json) ? json : (json.items || []);
+  const seen = new Set();
+  const sources = [];
+  async function loadItems(file) {
+    const resolved = path.resolve(ROOT, file);
+    if (seen.has(resolved)) return [];
+    seen.add(resolved);
+    const json = JSON.parse(await fs.readFile(resolved, 'utf8'));
+    sources.push(resolved);
+    if (Array.isArray(json?.ordinaryPlanPaths)) {
+      const nested = [];
+      for (const planPath of json.ordinaryPlanPaths) {
+        nested.push(...await loadItems(planPath));
+      }
+      return nested;
+    }
+    if (Array.isArray(json)) return json;
+    if (Array.isArray(json?.items)) return json.items;
+    return [];
+  }
+  const items = await loadItems(absolute);
   const byStore = new Map();
   for (const item of items) {
     if (!item?.storeKey || !item?.skc || item.selected === false) continue;
@@ -423,7 +441,11 @@ async function loadTargetPlan(targetPlanPath) {
     if (!byStore.has(key)) byStore.set(key, new Set());
     byStore.get(key).add(String(item.skc));
   }
-  return {path: absolute, byStore};
+  const totalSkcs = [...byStore.values()].reduce((sum, set) => sum + set.size, 0);
+  if (!totalSkcs) {
+    throw new Error(`target plan has no selected SKCs: ${absolute}`);
+  }
+  return {path: absolute, sources, byStore};
 }
 
 function buildImportFile(storeKey, skcList) {
@@ -549,7 +571,7 @@ async function processStore(store, args, targetPlan) {
 
     const availableSkcs = beforeAvailable.list.map(x => x.skc).filter(Boolean);
     const enrolledSetBefore = new Set(beforeEnrolled.list.map(x => x.skc));
-    let targetSkcs = availableSkcs;
+    let targetSkcs = targetPlan ? [] : availableSkcs;
     const targetSetFromPlan = targetPlan?.byStore?.get(store.storeKey.toUpperCase()) || null;
     if (targetSetFromPlan) {
       targetSkcs = availableSkcs.filter(skc => targetSetFromPlan.has(skc));
@@ -569,7 +591,9 @@ async function processStore(store, args, targetPlan) {
 
     if (!targetSkcs.length) {
       result.ok = true;
-      result.reason = '15% 券档当前没有需要提交的目标商品';
+      result.reason = targetPlan && !targetSetFromPlan
+        ? 'target plan has no SKCs for this store; skipped instead of submitting all available goods'
+        : '15% 券档当前没有需要提交的目标商品';
       return result;
     }
     if (args.dryRun) {
