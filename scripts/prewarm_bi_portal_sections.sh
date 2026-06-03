@@ -4,7 +4,9 @@ set -Eeuo pipefail
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
 TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
 PORTAL_URL="${SHEIN_BI_PORTAL_URL:-http://127.0.0.1:8787}"
-SECTIONS="${SHEIN_BI_PORTAL_PREWARM_SECTIONS:-homeProfit,rankings,actions,afterSales,financeData,linksData,comments,orders,rtvData,waybills,profit,homeProfit}"
+# homeProfit is derived from the profit section cache, so profit must be
+# warmed before homeProfit; otherwise the homepage can keep showing stale profit.
+SECTIONS="${SHEIN_BI_PORTAL_PREWARM_SECTIONS:-profit,homeProfit,rankings,actions,afterSales,financeData,linksData,comments,orders,rtvData,waybills}"
 LOG_DIR="${SHEIN_BI_PREWARM_LOG_DIR:-/srv/shein-bi/logs/cloud-portal-prewarm}"
 TIMEOUT_SECONDS="${SHEIN_BI_PREWARM_SECTION_TIMEOUT_SECONDS:-1200}"
 FORCE_REFRESH="${SHEIN_BI_PORTAL_PREWARM_FORCE:-0}"
