@@ -64,7 +64,7 @@ flowchart LR
 - Metabase 运行在云端 Docker 内部，不在文档中写公网裸地址；本地旧 WSL 地址只作历史排障参考。
 - Metabase dashboard 编号仍可作为内部迁移参考，但不要使用旧本地 WSL IP 作为正式入口。
 
-## 当前运行态（2026-05-29）
+## 当前运行态（2026-06-03）
 
 BI 系统当前分为三层入口：
 
@@ -83,6 +83,7 @@ BI 系统当前分为三层入口：
    - 文件入口：`outputs/bi-portal/index.html`
    - 云端入口：`https://shein-bi.faceair.me/`，旧 IP `http://43.165.167.135/` 仅作兜底
    - 负责“每天先看什么、先处理什么、如何复制指令、如何标记处理状态”。
+   - API section cache 位于 `outputs/bi-portal/sections/`；派生 section 要遵守源缓存生命周期，例如 `homeProfit` 必须从当前 `profit` section 派生。
    - 本地 `127.0.0.1:8787` 和局域网入口已封存，不再作为正式入口。
    - 短期动作状态仍为服务端状态文件，长期应入 PostgreSQL，避免文件状态成为单点。
    - 系统状态页已接入 `mart.openapi_sales_reconciliation`，展示 HL 官方 OpenAPI 销售试点与当前生产销售源的对账状态；该试点暂不覆盖正式销售事实表。

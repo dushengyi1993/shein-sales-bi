@@ -99,7 +99,7 @@
 - 官方 OpenAPI 与后台 WebAPI 直连是两条不同链路：OpenAPI 需要开放平台应用、授权、`openKeyId` / `secretKey` 和 IP 白名单；后台 WebAPI 直连复用已登录 Cookie/session，当前已优先承接 19 店销售生产抓取。两类密钥/session 都禁止进入仓库。
 - CX 开放平台应用 `CX-椿霞SHEIN运营中台` 已在 `2026-05-10` 提交审核；ZL 开放平台应用 `ZL-紫翎SHEIN运营中台` 已在 `2026-05-28` 提交审核。两者均为半托管，业务功能选择商品管理、商品合规、订单管理、库存管理、财务管理；审核通过后再录入本地 `.local` 密钥并接入 API 双跑。
 - SHEIN OpenAPI 若返回 `openapi00002 IP is not in the whitelist`，优先检查服务器出口 IP `43.165.167.135` 是否在开放平台白名单；ZL 申请时还添加过本机出口 `38.181.81.164`，历史本机出口 `188.253.112.44` / `82.27.116.13` 只作排障参考。不要把 OpenAPI app secret、店铺 secret、openKeyId 写入聊天、文档或日志。
-- BI Portal 静态文件为 `outputs/bi-portal/index.html`，数据文件为 `outputs/bi-portal/data.json`，生成脚本为 `scripts/generate_bi_portal.mjs`；云端由 `scripts/cloud_bi_refresh.sh` 在每次刷新后生成并重启服务。
+- BI Portal 静态文件为 `outputs/bi-portal/index.html`，数据文件为 `outputs/bi-portal/data.json`，生成脚本为 `scripts/generate_bi_portal.mjs`；云端由 `scripts/cloud_bi_refresh.sh` 在每次刷新后生成并重启服务。API section cache 在 `outputs/bi-portal/sections/`，`homeProfit` 从当前 `profit` cache 派生，预热顺序必须先 `profit` 后 `homeProfit`；首页利润异常偏低时先查 `sourceGeneratedAt` / `staleSource`。
 - BI 门户 UI 冒烟检查脚本为 `scripts/check_bi_portal_ui.mjs`；本地封存后默认不要为“看一眼”重新打开本地前端，云端验证优先用 HTTP health、静态断言和日志。V1 时间筛选弹窗的关键不变量：日期输入是文本 `YYYY-MM-DD`，月份切换后弹窗保持打开并更新月份，绑定根节点必须是实际弹窗而不是旧 toolbar root。
 - GitHub 私有仓库已纳入 `outputs/bi-portal/index.html` 和 `outputs/bi-portal/data.json` 作为当前 BI 门户可复用产物；`outputs/` 其他抓取结果、报表、图片、审计结果仍默认忽略，迁移生产状态时单独备份。
 - V1 仍是当前正式 BI Portal；V2.1 是独立经营 BI 预览版，由 `scripts/generate_bi_portal_v2.mjs` 生成到 `outputs/bi-portal/v2/index.html`，只读复用 `outputs/bi-portal/data.json`，用户确认前不得替换 V1 或改生产调度。

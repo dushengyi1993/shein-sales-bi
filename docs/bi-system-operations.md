@@ -1,6 +1,6 @@
 # SHEIN BI 系统运行说明
 
-> 当前权威状态：2026-05-29。本地 BI 已封存，云端 BI 是正式入口；云端专用运维清单见 `docs/cloud-bi-operations.md`。本文保留业务口径、本地回滚和历史 Windows 运维参考。
+> 当前权威状态：2026-06-03。本地 BI 已封存，云端 BI 是正式入口；云端专用运维清单见 `docs/cloud-bi-operations.md`。本文保留业务口径、本地回滚和历史 Windows 运维参考。
 
 ## 1. 当前系统定位
 
@@ -89,6 +89,7 @@
 - 云端 `shein-bi-cloud-yesterday.timer` 刷新前一天最终版，并回核 D-2 稳定销售。
 - 云端 `shein-bi-cloud-today.timer` 每两小时刷新当天销售。
 - 滚动后置 BI 的验收重点是销售文件入仓和 BI Portal 更新时间；RTV 换单复核耗时不应作为“BI 没更新”的判断依据。
+- BI Portal API section 会在 `outputs/bi-portal/sections/` 缓存；首页利润 `homeProfit` 是从 `profit` section cache 派生，预热顺序必须先 `profit` 后 `homeProfit`。若页面首页利润异常偏低，先核对 `homeProfitSummary.sourceGeneratedAt` 与当前 `data.json.__sections.generatedAt` 是否一致，并确认 `staleSource=false`。
 - 如果某个店失败，但目标日期当前启用店铺销售源文件已经齐，BI 仍应刷新；云端 watchdog / 异常通知负责提醒失败店铺和服务异常。
 - 业务域单店失败不应阻断销售入仓和门户刷新，应在 BI 体检/提醒里标注。
 - `send_daily_lark_report.mjs` 仍保留；生产日报由云端 `shein-bi-cloud-daily-lark-report.timer` 调度，不要默认本地日报任务仍在生产运行。
@@ -245,6 +246,7 @@
 
 - 检查云端 BI 门户：打开 [https://shein-bi.faceair.me/#tab=system](https://shein-bi.faceair.me/#tab=system)。
 - 检查云端健康：未鉴权访问 `https://shein-bi.faceair.me/api/health` 应返回 `401`；带 Basic Auth 应返回 `200`。
+- 检查首页利润缓存：带 Basic Auth 访问 `https://shein-bi.faceair.me/api/bi/section/homeProfit`，确认 `data.homeProfitSummary.staleSource=false` 且 `sourceGeneratedAt` 等于当前 `data.json.__sections.generatedAt`；服务器侧可读 `/opt/shein-bi/app/outputs/bi-portal/sections/{profit,homeProfit}.json` 做同样核对。
 - 检查本地是否仍封存：`http://127.0.0.1:8787/api/health` 应无法连接；若能连上，说明本地 BI 被重新启动，需要确认是否为回滚。
 - 修改 BI 门户 UI 时，默认先后台验证：`node --check scripts/generate_bi_portal.mjs`、`$env:SHEIN_BI_PORTAL_TIMEOUT_MS='900000'; node scripts/generate_bi_portal.mjs`、静态检查 `outputs/bi-portal/index.html` / `data.json`。除非用户要求或必须排查浏览器交互问题，不主动打开前端。
 - 云端是最终审核面。涉及 V1 弹窗/筛选/页面交互时，发布前必须在云端页面或云端服务输出复核；时间筛选月份切换的关键证据是弹窗保持 `hidden=false`、`aria-expanded=true`，月份标题正确更新且无 console error/warn。

@@ -19,7 +19,7 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 上月看板：`SHEIN经营看板 v3-上月`，ID `blkWeyZhphgRZYim`，数据源 `看板数据-PREV-*`
 - 店铺：DSY=`DL DX FY LQ NM HL JY ZL TS MZ`；LGM=`CX YJ XL QY QH TZ JSH TZZ XC`。
 - 云端 BI 正式入口：`https://shein-bi.faceair.me/`，旧 IP `http://43.165.167.135/` 仅作兜底，Nginx Basic Auth 保护；本地 `8787` 服务和 `SHEIN-*` Windows 任务已封存禁用，除非明确回滚不要重启。
-- V1 是当前正式 BI Portal；`2026.05.29` release 是 V1/main 发布边界，包含时间筛选弹窗修复和利润重审。V2 仍是平行预览/开发，不进正式 release，也不纳入日常自动刷新。
+- V1 是当前正式 BI Portal；当前 V1/main 发布边界已到 `2026.06.03-home-profit-cache-hotfix`（同日 `2026.06.03-et-forwarder-hotfix` 处理 ET 刷新轻量化）。V2 仍是平行预览/开发，不进正式 release，也不纳入日常自动刷新。
 - 云端生产调度：`shein-bi-cloud-today.timer` 每两小时刷新当天销售、入仓并生成 BI Portal；`shein-bi-cloud-yesterday.timer` 每天 `00:10` 刷新前一天最终版并复核稳定日；`shein-bi-db-backup.timer` 每天 `02:30` 备份数据库；`shein-bi-cloud-rtv-verify.timer` 每天 `03:20` 跑完整 RTV；`shein-bi-cloud-session-manager.timer` 每天 `03:20` 巡检/恢复 19 店登录态；`shein-bi-cloud-et-forwarder.timer` 每天 `04:20` 跑 ET；`shein-bi-cloud-link-business.timer` 每天 `05:30` 跑链接/业务域；`shein-bi-cloud-openapi-hl.timer` 每天 `06:20` 跑 HL OpenAPI 双跑；`shein-bi-cloud-daily-lark-report.timer` 负责云端飞书日报；`shein-bi-cloud-watchdog.timer` 每小时巡检；`shein-bi-lark-sales-qa.service` 常驻只读问数。
 - HL OpenAPI 销售试点已建立并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` -> `fact.openapi_*` -> `mart.openapi_sales_reconciliation`；正式切换前继续累计多日 `matched`。CX / ZL 应用已提交审核，审核通过前不得录入 `.local` 密钥或切换生产源。
 - 当前 19 店销售生产抓取已改为 WebAPI 直连优先：`config/stores.json.salesTransport=auto`，session 文件在 `state/shein_webapi_sessions/*.local.json`，直连成功不启动浏览器；浏览器只作刷新 session、登录续期和回退。
@@ -134,6 +134,7 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - `config/lark_report.json` 必须是合法 UTF-8 JSON；如果日报发送/读取配置异常，先用 JSON parser 校验它。
 - 关键改动后跑逻辑体检，目标 `0 error / 0 warning`。
 - BI 用户可见改动先在云端页面或云端服务输出验证，用户确认后再发布 GitHub `main` / release；本地验证不能替代云端最终审核。
+- 首页利润异常偏低时先查 section cache，不要直接按页面数字下结论：`homeProfit` 从 `profit` 派生，`homeProfitSummary.sourceGeneratedAt` 必须等于当前 `data.json.__sections.generatedAt` 且 `staleSource=false`；预热顺序必须先 `profit` 后 `homeProfit`。
 - V1 时间筛选弹窗关键不变量：日期输入为文本 `YYYY-MM-DD`；点击月份切换后弹窗保持打开并更新月份，`aria-expanded=true`；按钮事件绑定实际弹窗 root，不能绑旧 toolbar root。
 
 ## ET 前台窗口规则

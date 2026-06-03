@@ -64,7 +64,8 @@
   - `backfill_bi_high_value_domains.ps1`
   - `generate_bi_portal.mjs`：V1 正式 BI 门户生成器；默认超时 `900` 秒，输出 `outputs/bi-portal/index.html` 与 `outputs/bi-portal/data.json`；生成前会通过 `lib/product_display_name.mjs` 补齐 `product_display_name` 和顶层 `productDisplayNames`。
   - `generate_bi_portal_v2.mjs`（V2.1 平行预览生成器；只读复用 `outputs/bi-portal/data.json`，输出到 `outputs/bi-portal/v2/`，不替换 V1、不接生产调度）
-  - `serve_bi_portal.mjs`
+  - `serve_bi_portal.mjs`：云端 BI Portal 服务，提供静态页、健康检查和 `/api/bi/section/:section`；`homeProfit` 是服务层从 `profit` section cache 派生的轻量首页利润摘要。
+  - `prewarm_bi_portal_sections.sh`：云端 Portal section 预热脚本；默认顺序必须先 `profit` 后 `homeProfit`，否则首页利润可能继续显示旧 `profit` 缓存。
   - `serve_bi_portal.ps1`
   - `open_bi_portal.ps1`
   - `check_bi_first_run.mjs`

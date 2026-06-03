@@ -1,6 +1,6 @@
 # SHEIN 销售统计与 BI 经营系统
 
-## 2026-05-30 当前权威状态
+## 2026-06-03 当前权威状态
 
 - 飞书多维表格 / 原生看板写入已临时暂停；云端 BI 系统作为当前主要经营入口继续运行。飞书日报、异常通知 watchdog 和只读问数机器人均已迁到云端独立飞书机器人链路；日报真实发送已验证，问数机器人已升级为云端 Codex CLI 只读网关，不再绑定本机 Codex 会话。
 - 本地 BI 已封存，云端 BI 是正式入口：`https://shein-bi.faceair.me/`（旧 IP 入口 `http://43.165.167.135/` 仅作兜底）。公网入口已启用 Basic Auth；账号密码只在运行环境交付，不写入仓库或文档。详见 `docs/cloud-bi-operations.md`。
@@ -42,11 +42,12 @@
   - 云端登录维护中心：`https://shein-bi.faceair.me/cloud-login-maintenance`，用于临时打开指定店铺云端浏览器登录窗口。
   - 云端代码目录：`/opt/shein-bi/app`
   - 本地 BI 门户文件快照：`outputs/bi-portal/index.html` / `outputs/bi-portal/data.json`
-  - V1 是当前正式 BI Portal；用户确认后的 V1/main 才发布 GitHub release。当前 V1 发布边界见 `2026.05.29` release，包含时间筛选弹窗修复和利润重审，不包含 V2 正式发布。
+  - V1 是当前正式 BI Portal；用户确认后的 V1/main 才发布 GitHub release。当前 V1/main 已发布到 `2026.06.03-home-profit-cache-hotfix`，其中 `2026.06.03-et-forwarder-hotfix` 修 ET 刷新轻量化，`2026.06.03-home-profit-cache-hotfix` 修首页利润缓存预热顺序；V2 仍不属于正式发布。
   - V2.1 独立设计预览仍是平行项目，由 `scripts/generate_bi_portal_v2.mjs` 生成；用户确认前不得替换 V1 或改生产调度。
   - 本机 `http://127.0.0.1:8787/` 和局域网 `http://DUSHENGYI-PC2:8787/` 已封存，不再作为正式入口。
   - Metabase 当前部署在云端 Docker 内部，由云端 Nginx/服务配置受控访问，不在 README 写公开裸地址。
 - 当前 BI 数据截面不再手工写死在 README；实时以 BI 门户系统状态页、`outputs/bi-portal/data.json`、云端 systemd 日志和数据库入仓时间为准。仓库中的 `outputs/bi-portal/` 只是灾备快照，服务器拉取/重置代码后必须重新跑云端 BI 刷新。
+- BI Portal API section cache 位于 `outputs/bi-portal/sections/`；首页利润 `homeProfit` 是从 `profit` section cache 派生，生产预热必须先跑 `profit` 再跑 `homeProfit`。若首页利润明显低于当前销售额，先核对 `profit.json.generatedAt`、`homeProfit.json.data.homeProfitSummary.sourceGeneratedAt` 和 `staleSource`，不要直接按页面旧数字判断业务真实利润。
 - 定时任务：
   - 云端 `shein-bi-cloud-today.timer`：`00:10/02:10/.../22:10` 每两小时刷新当天销售、入仓并生成 BI Portal。
   - 云端 `shein-bi-cloud-yesterday.timer`：每天 `00:10` 刷新前一天最终销售，并复核前两天稳定日。

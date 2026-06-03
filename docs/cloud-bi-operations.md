@@ -1,6 +1,6 @@
 # 云端 BI 运行说明
 
-> 当前权威状态：2026-05-29。本地 BI 已封存，云端 BI 是正式入口。
+> 当前权威状态：2026-06-03。本地 BI 已封存，云端 BI 是正式入口。
 
 ## 1. 当前入口
 
@@ -13,7 +13,7 @@
 - 注意：`outputs/bi-portal/index.html` / `data.json` 会作为可恢复静态快照纳入 GitHub；服务器执行 `git reset --hard origin/main` 或类似部署后，可能把实时 BI 页面覆盖成仓库快照。每次服务器拉取/重置代码后，都要立即跑一次 `scripts/cloud_bi_refresh.sh today intraday` 或对应 systemd service，确认页面生成时间和销售源时间回到当前。
 - 云端 Git 同步红线：`/opt/shein-bi/app` 必须由 `sheinops:sheinops` 持有，不要用 `sudo git pull`。仓库 remote 使用 `git@github.com:dushengyi1993/shein-sales-bi.git`，`core.sshCommand` 必须指向 `/home/sheinops/.ssh/shein_bi_deploy`；不要指向 `/root/.ssh/...`，否则普通运维用户无法 fetch/pull。生产生成的 `outputs/bi-portal/data.json` / `index.html` 在服务器上用 `git update-index --skip-worktree` 标记为本地生成物，避免定时刷新后的实时页面把后续 `git pull --ff-only` 阻塞。若云端出现未提交热修复，先 `git stash push -u -m "pre-...deploy-..."` 保存，再部署远端 `main`。
 - 发布顺序：BI 用户可见改动先在云端页面或云端服务输出验证，用户确认后再进入 GitHub `main` / release。本地验证只能证明开发产物可运行，不能替代云端最终审核。
-- 当前 GitHub 发布边界：`2026.05.29` 是已发布 V1/main 版本，包含 V1 时间筛选弹窗修复、`2026-05-29` BI 静态快照和 `docs/bi-profit-audit-2026-03-05.md`；V2 仍为平行预览/开发，不纳入正式 release 或日常刷新。`2026.05.28` release 已修正为 LGM 新店与 OpenAPI onboarding 范围。
+- 当前 GitHub 发布边界：V1/main 最新 release 为 `2026.06.03-home-profit-cache-hotfix`；同日 `2026.06.03-et-forwarder-hotfix` 处理 ET 刷新轻量化，`2026.06.03-home-profit-cache-hotfix` 处理 `profit -> homeProfit` 预热顺序。V2 仍为平行预览/开发，不纳入正式 release 或日常刷新。
 
 ### SSH 运维入口
 
@@ -59,6 +59,7 @@ ET、飞书日报、完整 RTV WebAPI 复核、链接/业务域日更、异常�
 
 - 当天刷新入口：`scripts/cloud_bi_refresh.sh today`
 - 前一天最终版入口：`scripts/cloud_bi_refresh.sh yesterday`
+- Portal section 预热入口：`scripts/prewarm_bi_portal_sections.sh`。默认顺序必须保持 `profit,homeProfit,...`，因为首页利润 `homeProfit` 只从 `profit` section cache 派生；如果先预热 `homeProfit`，它可能继续展示旧 `profit` 缓存里的少量订单。
 - 数据库备份入口：`scripts/cloud_db_backup.sh`
 - ET 云端入口：`scripts/cloud_et_forwarder_sync.sh today`
 - 飞书日报云端入口：`scripts/cloud_daily_lark_report.sh today`
@@ -125,6 +126,7 @@ GitHub 应保存：
 - ET 已验证可手动跑 `scripts/cloud_et_forwarder_sync.sh today`，能登录、抓取、入仓并刷新门户；失败时保留上一版 ET 数据，不应阻断销售 BI。
 - 飞书日报已验证可手动跑 `scripts/cloud_daily_lark_report.sh today`，文字和日报图能发送；成功后会写入当天 sent flag，避免同日 timer 重复发送。
 - 若 BI 侧栏显示的“页面生成 / 销售源”时间明显旧于当前调度，先检查是否刚部署覆盖了仓库静态快照；在服务器重跑 `shein-bi-cloud-today.service` 后，`outputs/bi-portal/data.json` 的 `generatedAt` 和 `salesUpdatedAt` 应更新到当天。
+- 若首页利润明显异常偏低，先用 Basic Auth 访问 `/api/bi/section/homeProfit` 或在服务器读 `outputs/bi-portal/sections/homeProfit.json`，确认 `homeProfitSummary.sourceGeneratedAt` 等于当前 `data.json.__sections.generatedAt` 且 `staleSource=false`。若 `profit` 已当前但 `homeProfit` 仍旧，可请求 `/api/bi/section/homeProfit?refresh=1`；若 `profit` 也旧，先刷新 `profit` section。
 - BI Portal 生成后，`outputs/bi-portal/data.json` 应包含顶层 `productDisplayNames`，且主要含 `standard_goods_sn` 的对象应有 `product_display_name`。如果页面或飞书问数机器人又裸显示 `SM-505A`、`SK-10075` 这类短码，先在服务器跑 `node scripts/test_product_display_name.mjs`，再重跑 `node scripts/generate_bi_portal.mjs` 或对应云端刷新 service。
 - 若飞书日报图中文显示方框，先在服务器检查 `fc-match 'Noto Sans CJK SC'`；修复字体后只需重新生成/下次发送日报图，不需要重发已发送的旧图，除非用户明确要求。
 - `cloud_bi_refresh.sh` 应在生成 BI Portal 前运行 `audit_bi_warehouse.mjs`，否则页面顶部会显示“数据体检：未找到体检文件”。体检有 warning 时仍生成页面，让 BI 直接展示 warning 内容。
