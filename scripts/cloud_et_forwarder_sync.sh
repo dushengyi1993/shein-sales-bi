@@ -99,11 +99,19 @@ fi
 node scripts/load_et_forwarder_warehouse.mjs --manifest "$MANIFEST_PATH"
 
 if [[ "${SHEIN_ET_REFRESH_PORTAL:-1}" == "1" ]]; then
-  node scripts/generate_bi_portal.mjs --metabase-url "$METABASE_URL"
+  PORTAL_DATA_MODE="${SHEIN_ET_PORTAL_DATA_MODE:-${SHEIN_BI_PORTAL_DATA_MODE:-api}}"
+  echo "[cloud_et_forwarder_sync] refresh BI portal data_mode=$PORTAL_DATA_MODE"
+  SHEIN_BI_PORTAL_DATA_MODE="$PORTAL_DATA_MODE" node scripts/generate_bi_portal.mjs \
+    --metabase-url "$METABASE_URL" \
+    --data-mode "$PORTAL_DATA_MODE"
   if command -v systemctl >/dev/null 2>&1; then
     systemctl restart shein-bi-portal.service || true
   fi
   check_portal_health
+  if [[ "$PORTAL_DATA_MODE" == "api" && "${SHEIN_BI_PORTAL_PREWARM_DISABLED:-0}" != "1" ]]; then
+    nohup bash scripts/prewarm_bi_portal_sections.sh >/dev/null 2>&1 &
+    echo "[cloud_et_forwarder_sync] portal section prewarm started pid=$!"
+  fi
 fi
 
 echo "[cloud_et_forwarder_sync] done date=$DATE manifest=$MANIFEST_PATH log=$LOG_FILE"

@@ -603,6 +603,14 @@ async function runPsql(args, sql) {
   return stdout.trim();
 }
 
+function parsePsqlJson(raw, label) {
+  const text = String(raw || '').trim();
+  if (!text) {
+    throw new Error(`${label} SQL returned empty output; check psql timeout, killed child process, or an empty stdout contract`);
+  }
+  return JSON.parse(text);
+}
+
 async function readOpenApiReconciliation(args) {
   const sql = `
 SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY date DESC, store_key), '[]'::jsonb)::text
@@ -638,7 +646,7 @@ FROM (
 `;
   try {
     const raw = await runPsql(args, sql);
-    return JSON.parse(raw || '[]');
+    return raw ? JSON.parse(raw) : [];
   } catch (err) {
     const message = String(err?.message || err || '');
     if (message.includes('openapi_sales_reconciliation') || message.includes('does not exist') || message.includes('relation')) {
@@ -12985,7 +12993,7 @@ async function main() {
     markStage(`section:${args.section}:sql`);
     const raw = await runPsql(args, buildSectionSql(args.section));
     markStage(`section:${args.section}:parse`);
-    let sectionData = deepSanitize(JSON.parse(raw));
+    let sectionData = deepSanitize(parsePsqlJson(raw, `BI portal section ${args.section}`));
     if (args.section === 'linksData') sectionData = await enrichPortalDataWithLocalLinkLabels(sectionData);
     sectionData = enrichProductDisplayNames(sectionData);
     markStage(`section:${args.section}:done`);
@@ -13011,7 +13019,7 @@ async function main() {
   markStage('read:openapiReconciliation');
   const openapiReconciliation = await readOpenApiReconciliation(args);
   markStage('json:parse');
-  const parsedData = deepSanitize(JSON.parse(raw));
+  const parsedData = deepSanitize(parsePsqlJson(raw, `BI portal main data_mode=${args.dataMode}`));
   parsedData.openapiReconciliation = deepSanitize(openapiReconciliation);
   if (args.dataMode === 'api') {
     parsedData.__sections = {
