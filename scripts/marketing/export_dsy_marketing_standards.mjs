@@ -105,6 +105,13 @@ function floor2(n) {
   return Math.floor((Number(n) + 1e-9) * 100) / 100;
 }
 
+function numValue(v) {
+  if (v === null || v === undefined || v === '') return null;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  const n = Number(String(v).replace('%', '').replace(',', '').trim());
+  return Number.isFinite(n) ? n : null;
+}
+
 function parseTime(s) {
   if (!s || s === '长期有效') return null;
   const raw = String(s).trim();
@@ -529,13 +536,13 @@ function classifyAndPrice(storeKey, activityId, row) {
   const fixed = keysCompact.map(k => fixedPriceRules.get(k)).find(v => v !== undefined);
   const depletion = depletionByStandard.get(compact(canonical)) || depletionByStandard.get(compact(row.supplierNo));
   const trueCostInfo = lookupTrueCost(keysRaw);
-  const baseCost = lookupCost(keysRaw) ?? (Number.isFinite(Number(depletion?.unit_cost_sar)) ? Number(depletion.unit_cost_sar) : null);
-  const cost = Number.isFinite(Number(trueCostInfo?.trueUnitCostSar)) ? Number(trueCostInfo.trueUnitCostSar) : baseCost;
-  const storageUnitCostSar = Number.isFinite(Number(trueCostInfo?.storageUnitCostSar))
-    ? Number(trueCostInfo.storageUnitCostSar)
-    : Number.isFinite(Number(trueCostInfo?.storageUnitCostSar30d))
-      ? Number(trueCostInfo.storageUnitCostSar30d)
-      : null;
+  const baseCost = lookupCost(keysRaw) ?? numValue(depletion?.unit_cost_sar);
+  const cost = numValue(trueCostInfo?.trueUnitCostSar)
+    ?? numValue(trueCostInfo?.unitCostSar)
+    ?? numValue(trueCostInfo?.productUnitCostSar)
+    ?? baseCost;
+  const storageUnitCostSar = numValue(trueCostInfo?.storageUnitCostSar)
+    ?? numValue(trueCostInfo?.storageUnitCostSar30d);
   const storageMethod = trueCostInfo?.storageMethod || '';
   const onHand = Number(depletion?.estimated_on_hand_quantity ?? 0);
   const daysOnHand = Number(depletion?.days_of_supply_on_hand ?? 0);

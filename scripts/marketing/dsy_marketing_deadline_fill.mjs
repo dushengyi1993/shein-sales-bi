@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // SHEIN 营销活动报名半自动助手：
 // - 只做商品勾选、活动价/降幅预填和页面复核。
-// - 不点击最终“提交报名”；最终提交必须由用户在可见前端人工确认。
+// - 默认不点击最终“提交报名”；只有显式传入 --submit 且选择/填价复核通过后才会提交。
 // - 运行前先执行 scripts/marketing/build_marketing_cost_map.py 生成本地成本映射。
 import fs from 'node:fs/promises';
 import fssync from 'node:fs';
@@ -58,6 +58,7 @@ const marginRules = new Map();
 const priceOverrideRules = new Map();
 const storePriceOverrideRules = new Map();
 const rowPriceOverrideRules = new Map();
+const selectionAllowRules = new Map();
 
 function registerRuleKeys(map, label, value) {
   const keys = [
@@ -71,9 +72,10 @@ function registerRuleKeys(map, label, value) {
 for (const [label, value] of fixedPriceBase) registerRuleKeys(fixedPriceRules, label, value);
 for (const [label, value] of marginRuleBase) registerRuleKeys(marginRules, label, value);
 await loadPriceOverrides();
+await loadSelectionPlan();
 
 function parseArgs(argv) {
-  const out = {stores: [], activityIds: [], hours: 48, allOpen: false, includeCoupon: false, dryRun: false, noClose: false, minDiscountFallback: [], priceOverrides: ''};
+  const out = {stores: [], activityIds: [], hours: 48, allOpen: false, includeCoupon: false, dryRun: false, noClose: false, submit: false, minDiscountFallback: [], priceOverrides: '', selectionPlan: ''};
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--stores') out.stores = String(argv[++i] || '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
@@ -83,8 +85,10 @@ function parseArgs(argv) {
     else if (a === '--include-coupon') out.includeCoupon = true;
     else if (a === '--dry-run') out.dryRun = true;
     else if (a === '--no-close') out.noClose = true;
+    else if (a === '--submit') out.submit = true;
     else if (a === '--min-discount-fallback') out.minDiscountFallback = String(argv[++i] || '').split(',').map(s => s.trim()).filter(Boolean);
     else if (a === '--price-overrides') out.priceOverrides = path.resolve(argv[++i] || '');
+    else if (a === '--selection-plan') out.selectionPlan = path.resolve(argv[++i] || '');
   }
   return out;
 }
@@ -125,12 +129,40 @@ async function loadPriceOverrides() {
   }
 }
 
+async function loadSelectionPlan() {
+  if (!args.selectionPlan) return;
+  const doc = JSON.parse(await fs.readFile(args.selectionPlan, 'utf8'));
+  const items = Array.isArray(doc.items) ? doc.items : [];
+  for (const item of items) {
+    if (item.selected === false) continue;
+    const storeKey = String(item.storeKey || '').trim().toUpperCase();
+    const activityId = Number(item.activityId || 0);
+    const skc = String(item.skc || '').trim().toLowerCase();
+    if (!storeKey || !activityId || !skc) continue;
+    const key = `${storeKey}:${activityId}`;
+    if (!selectionAllowRules.has(key)) selectionAllowRules.set(key, new Set());
+    selectionAllowRules.get(key).add(skc);
+  }
+}
+
+function selectionAllowList(storeKey, activityId) {
+  const set = selectionAllowRules.get(`${String(storeKey).trim().toUpperCase()}:${Number(activityId)}`);
+  return set ? [...set].sort() : null;
+}
+
 function round2(n) {
   return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 }
 
 function floor2(n) {
   return Math.floor((Number(n) + 1e-9) * 100) / 100;
+}
+
+function numValue(v) {
+  if (v === null || v === undefined || v === '') return null;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  const n = Number(String(v).replace('%', '').replace(',', '').trim());
+  return Number.isFinite(n) ? n : null;
 }
 
 function stableRandom(seed) {
@@ -494,7 +526,30 @@ function withinDeadline(a) {
   return end.getTime() <= deadlineMs;
 }
 
-async function selectAllGoodsAndNext(cdp, sessionId) {
+function specifiedActivities(liveActivities) {
+  if (!args.activityIds.length) return liveActivities.filter(withinDeadline);
+  const byId = new Map(liveActivities.map(a => [Number(a.activityId), a]));
+  return args.activityIds.map(activityId => byId.get(Number(activityId)) || {
+    activityId: Number(activityId),
+    name: `specified activity ${activityId}`,
+    backendCate: '',
+    label: '',
+    signStart: '',
+    signEnd: '',
+    eventStart: '',
+    eventEnd: '',
+    allowGoodsNum: 0,
+    applyGoodsNum: 0,
+    raw: null,
+    source: 'specified_activity_fallback',
+  });
+}
+
+function dueActivities(activities) {
+  return args.activityIds.length ? specifiedActivities(activities) : activities.filter(withinDeadline);
+}
+
+async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
   const ready = await waitFor(cdp, sessionId, `
     document.body && (document.body.innerText.includes('可报名商品') || document.body.innerText.includes('提报的活动价格'))
   `, 30_000);
@@ -513,6 +568,9 @@ async function selectAllGoodsAndNext(cdp, sessionId) {
   await sleep(500);
 
   const result = await evalJs(cdp, sessionId, `
+    const allowSkcs = Array.isArray(__arg?.allowSkcs) ? __arg.allowSkcs.map(x => String(x || '').trim().toLowerCase()).filter(Boolean) : null;
+    const allowSet = allowSkcs ? new Set(allowSkcs) : null;
+    const seenAllowed = new Set();
     const sleep = ms => new Promise(r => setTimeout(r, ms));
     const isDisabled = el => !el || el.disabled || el.getAttribute('aria-disabled') === 'true' ||
       !!el.closest('.ant-pagination-disabled,.soui-pagination-disabled,.disabled') ||
@@ -565,6 +623,10 @@ async function selectAllGoodsAndNext(cdp, sessionId) {
         totalGoods: Number((t.match(/总计\\s*(\\d+)\\s*个/) || [])[1] || 0),
       };
     };
+    const skcOfRow = tr => {
+      const rowText = tr?.innerText || '';
+      return String((rowText.match(/SKC:\\s*([a-z]{2}\\d+)/i) || [])[1] || '').trim().toLowerCase();
+    };
     const selectUncheckedVisibleRows = async () => {
       let clicks = 0;
       const rowChecks = [...document.querySelectorAll('tr input[type=checkbox]')]
@@ -575,6 +637,33 @@ async function selectAllGoodsAndNext(cdp, sessionId) {
         await sleep(100);
       }
       return clicks;
+    };
+    const ensureCheckedState = async (rowCb, shouldSelect) => {
+      let clicks = 0;
+      for (let attempt = 0; attempt < 3 && rowCb.checked !== shouldSelect; attempt++) {
+        fire(rowCb);
+        clicks++;
+        await sleep(180);
+      }
+      return clicks;
+    };
+    const alignVisibleRowsToAllowlist = async () => {
+      let clicks = 0;
+      let visibleRows = 0;
+      let visibleAllowed = 0;
+      for (const rowCb of [...document.querySelectorAll('tr input[type=checkbox]')].filter(x => !isDisabled(x))) {
+        const tr = rowCb.closest('tr');
+        const skc = skcOfRow(tr);
+        if (!skc) continue;
+        visibleRows++;
+        const shouldSelect = allowSet.has(skc);
+        if (shouldSelect) {
+          visibleAllowed++;
+          seenAllowed.add(skc);
+        }
+        clicks += await ensureCheckedState(rowCb, shouldSelect);
+      }
+      return {clicks, visibleRows, visibleAllowed};
     };
     const tableScroller = () => [...document.querySelectorAll('div,main,section')]
       .filter(el => el.querySelectorAll('tr input[type=checkbox]').length >= 2 && el.scrollHeight > el.clientHeight + 40)
@@ -588,9 +677,11 @@ async function selectAllGoodsAndNext(cdp, sessionId) {
         scroller.scrollTop = Math.min(top, max);
         scroller.dispatchEvent(new Event('scroll', {bubbles:true}));
         await sleep(260);
-        clicks += await selectUncheckedVisibleRows();
+        if (allowSet) clicks += (await alignVisibleRowsToAllowlist()).clicks;
+        else clicks += await selectUncheckedVisibleRows();
         const selectedNow = parseSelected().selectedCount;
-        if (totalGoods && selectedNow >= totalGoods) break;
+        if (allowSet && seenAllowed.size >= allowSet.size) break;
+        if (!allowSet && totalGoods && selectedNow >= totalGoods) break;
       }
       return clicks;
     };
@@ -601,28 +692,69 @@ async function selectAllGoodsAndNext(cdp, sessionId) {
     for (let page = 1; page <= totalPages; page++) {
       await gotoPage(page);
       await sleep(500);
-      const cb = headerCheckbox();
-      if (cb && !cb.checked) {
-        fire(cb);
-        selectedClicks++;
-        await sleep(600);
+      if (allowSet) {
+        selectedClicks += (await alignVisibleRowsToAllowlist()).clicks;
+      } else {
+        const cb = headerCheckbox();
+        if (cb && !cb.checked) {
+          fire(cb);
+          selectedClicks++;
+          await sleep(600);
+        }
+        selectedClicks += await selectUncheckedVisibleRows();
       }
-      selectedClicks += await selectUncheckedVisibleRows();
-      if (total.totalGoods && parseSelected().selectedCount < total.totalGoods) {
+      if ((allowSet && seenAllowed.size < allowSet.size) || (!allowSet && total.totalGoods && parseSelected().selectedCount < total.totalGoods)) {
         selectedClicks += await sweepVirtualRows(total.totalGoods);
       }
       pages++;
     }
+    if (allowSet) {
+      for (let round = 0; round < 2; round++) {
+        const selectedNow = parseSelected().selectedCount;
+        if (seenAllowed.size >= allowSet.size && selectedNow === allowSet.size) break;
+        seenAllowed.clear();
+        for (let page = 1; page <= totalPages; page++) {
+          await gotoPage(page);
+          await sleep(500);
+          selectedClicks += (await alignVisibleRowsToAllowlist()).clicks;
+          selectedClicks += await sweepVirtualRows(total.totalGoods);
+        }
+      }
+    }
     const selected = parseSelected();
+    const missingAllowedSkcs = allowSet ? [...allowSet].filter(skc => !seenAllowed.has(skc)).sort() : [];
+    const expectedSelectedCount = allowSet ? allowSet.size : total.totalGoods;
+    const selectedMatchesPlan = allowSet
+      ? missingAllowedSkcs.length === 0 && selected.selectedCount === expectedSelectedCount
+      : true;
     const nextStep = [...document.querySelectorAll('button')].find(b => b.innerText.trim() === '下一步');
-    const canNext = nextStep && !nextStep.disabled;
+    const canNext = nextStep && !nextStep.disabled && selectedMatchesPlan;
     if (canNext) fire(nextStep);
-    return {pages, totalPages, selectedClicks, clickedNext: Boolean(canNext), ...total, ...selected};
-  `);
+    return {
+      pages,
+      totalPages,
+      selectedClicks,
+      clickedNext: Boolean(canNext),
+      selectionMode: allowSet ? 'allowlist' : 'all',
+      expectedSelectedCount,
+      matchedAllowedCount: allowSet ? seenAllowed.size : null,
+      missingAllowedSkcs,
+      selectedMatchesPlan,
+      ...total,
+      ...selected,
+    };
+  `, {allowSkcs});
 
   const editReady = await waitFor(cdp, sessionId, `document.body && document.body.innerText.includes('提报的活动价格')`, 30_000);
-  const selectedOk = !result.totalGoods || result.selectedCount >= result.totalGoods;
-  return {...result, pageSize, ok: editReady && selectedOk, mode: editReady ? 'edit' : 'choose', reason: selectedOk ? undefined : `只选中 ${result.selectedCount}/${result.totalGoods} 个商品`};
+  const selectedOk = result.selectionMode === 'allowlist'
+    ? result.selectedMatchesPlan
+    : (!result.totalGoods || result.selectedCount >= result.totalGoods);
+  const reason = selectedOk
+    ? undefined
+    : (result.selectionMode === 'allowlist'
+      ? `选择计划不匹配：已选 ${result.selectedCount}/${result.expectedSelectedCount}，未找到 ${result.missingAllowedSkcs?.join(',') || '-'}`
+      : `只选中 ${result.selectedCount}/${result.totalGoods} 个商品`);
+  return {...result, pageSize, ok: editReady && selectedOk, mode: editReady ? 'edit' : 'choose', reason};
 }
 
 function computeTarget(storeKey, activityId, row) {
@@ -701,8 +833,12 @@ function computeTarget(storeKey, activityId, row) {
   let cost = null;
   if (base === null) {
     const trueCostInfo = keys.map(k => TRUE_COSTS[k]).find(Boolean);
-    if (trueCostInfo && Number.isFinite(Number(trueCostInfo.trueUnitCostSar))) {
-      cost = Number(trueCostInfo.trueUnitCostSar);
+    const trueUnitCost = numValue(trueCostInfo?.trueUnitCostSar);
+    const productUnitCost = numValue(trueCostInfo?.unitCostSar) ?? numValue(trueCostInfo?.productUnitCostSar);
+    if (trueUnitCost !== null && trueUnitCost > 0) {
+      cost = trueUnitCost;
+    } else if (productUnitCost !== null && productUnitCost > 0) {
+      cost = productUnitCost;
     }
     for (const k of keys) {
       if (cost !== null && Number.isFinite(cost)) break;
@@ -891,7 +1027,7 @@ async function scrollTo(cdp, sessionId, top) {
   `, top);
 }
 
-async function fillEditPage(cdp, sessionId, storeKey, activityId) {
+async function fillEditPage(cdp, sessionId, storeKey, activityId, allowSkcs = null) {
   const ready = await waitFor(cdp, sessionId, `document.body && document.body.innerText.includes('提报的活动价格')`, 30_000);
   if (!ready) return {ok: false, reason: '编辑页未加载'};
   const rowEditorReady = await waitFor(cdp, sessionId, `
@@ -913,6 +1049,8 @@ async function fillEditPage(cdp, sessionId, storeKey, activityId) {
   const missingCost = new Map();
   const filled = new Map();
   const seenRows = new Map();
+  const allowSet = allowSkcs ? new Set(allowSkcs.map(x => String(x || '').trim().toLowerCase()).filter(Boolean)) : null;
+  const outOfPlanRows = new Map();
   let top = 0;
   for (let guard = 0; guard < 120; guard++) {
     const scroll = await getScrollInfo(cdp, sessionId);
@@ -923,6 +1061,10 @@ async function fillEditPage(cdp, sessionId, storeKey, activityId) {
     const fills = [];
     for (const row of rows) {
       seenRows.set(row.idx, row);
+      if (allowSet && !allowSet.has(String(row.skc || '').trim().toLowerCase())) {
+        outOfPlanRows.set(row.idx, row);
+        continue;
+      }
       const computed = computeTarget(storeKey, activityId, row);
       if (!computed.ok) {
         missingCost.set(row.idx, {...row, ...computed});
@@ -1001,15 +1143,18 @@ async function fillEditPage(cdp, sessionId, storeKey, activityId) {
     }
   }
   const coverageCount = new Set([...targets.keys(), ...missingCost.keys()]).size;
-  const coverageOk = !expectedTotal || coverageCount >= expectedTotal;
+  const expectedPlanTotal = allowSet ? allowSet.size : expectedTotal;
+  const coverageOk = !expectedPlanTotal || coverageCount >= expectedPlanTotal;
   return {
-    ok: missingCost.size === 0 && mismatches.length === 0 && coverageOk,
+    ok: missingCost.size === 0 && mismatches.length === 0 && coverageOk && outOfPlanRows.size === 0,
     expectedTotal,
+    expectedPlanTotal,
     coverageCount,
     targetCount: targets.size,
     filledCount: filled.size,
     verifyCount: verifyRows.size,
     missingCost: [...missingCost.values()].sort((a,b) => a.idx - b.idx),
+    outOfPlanRows: [...outOfPlanRows.values()].sort((a,b) => a.idx - b.idx),
     mismatches,
     platformRewrites,
     platformAdjusted: [...targets.values()].filter(x => x.platformAdjusted),
@@ -1017,7 +1162,132 @@ async function fillEditPage(cdp, sessionId, storeKey, activityId) {
   };
 }
 
+async function submitSignup(cdp, sessionId) {
+  const clicked = await evalJs(cdp, sessionId, `
+    const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    const buttons = [...document.querySelectorAll('button,[role=button],.so-button,.soui-button,.ant-btn')]
+      .filter(visible);
+    const submit = buttons.find(b => (b.innerText || b.textContent || '').trim() === '提交报名' && !b.disabled && b.getAttribute('aria-disabled') !== 'true');
+    if (!submit) return {ok:false, reason:'未找到可点击的提交报名按钮'};
+    submit.scrollIntoView({block:'center', inline:'center'});
+    submit.click();
+    return {ok:true, clickedText:(submit.innerText || submit.textContent || '').trim()};
+  `);
+  if (!clicked?.ok) return clicked || {ok: false, reason: '提交按钮点击失败'};
+  await sleep(800);
+
+  const confirmed = {clicked:false, attempts: []};
+  for (let attempt = 1; attempt <= 12; attempt += 1) {
+    const confirmAttempt = await evalJs(cdp, sessionId, `
+    const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    const normalize = s => String(s || '').replace(/\\s+/g, '').trim();
+    const ackNeedle = '我已确认本次报名含有商品降幅超过50%的商品';
+    const bodyText = document.body?.innerText || '';
+    let ack = {needed:false, clicked:false};
+    if (bodyText.includes(ackNeedle)) {
+      const ackCandidates = [...document.querySelectorAll('label,[role=checkbox],input[type=checkbox],.so-checkbox,.soui-checkbox,.ant-checkbox-wrapper,.ant-checkbox')]
+        .filter(el => visible(el) || el.tagName === 'INPUT')
+        .map(el => ({el, text: normalize(el.innerText || el.textContent || el.getAttribute('aria-label') || ''), type: el.tagName, checked: el.checked || el.getAttribute('aria-checked') === 'true'}));
+      const byText = ackCandidates.find(x => x.text.includes(normalize(ackNeedle)) && !x.checked);
+      const checkbox = byText || ackCandidates.find(x => x.type === 'INPUT' && !x.checked) || ackCandidates.find(x => !x.checked);
+      if (checkbox?.el) {
+        const target = checkbox.el.closest('label') || checkbox.el;
+        target.scrollIntoView({block:'center', inline:'center'});
+        target.click();
+        ack = {needed:true, clicked:true, via:'checkbox', text:checkbox.text, type:checkbox.type};
+      } else {
+        const labels = [...document.querySelectorAll('label,span,div')]
+          .filter(visible)
+          .map(el => ({el, text: normalize(el.innerText || el.textContent || ''), area: el.getBoundingClientRect().width * el.getBoundingClientRect().height}))
+          .filter(x => x.text.includes(normalize(ackNeedle)))
+          .sort((a,b) => a.area - b.area);
+        if (labels[0]?.el) {
+          labels[0].el.scrollIntoView({block:'center', inline:'center'});
+          labels[0].el.click();
+          ack = {needed:true, clicked:true, via:'label', text:labels[0].text.slice(0, 80)};
+        } else {
+          ack = {needed:true, clicked:false, reason:'未找到低于5折确认勾选控件'};
+        }
+      }
+      await new Promise(r => setTimeout(r, 350));
+    }
+    const buttons = [...document.querySelectorAll('button,[role=button],.so-button,.soui-button,.ant-btn')]
+      .filter(visible)
+      .map(b => ({el:b, text:(b.innerText || b.textContent || '').trim(), norm:normalize(b.innerText || b.textContent || ''), disabled:!!b.disabled || b.getAttribute('aria-disabled') === 'true'}))
+      .filter(x => x.text && !x.disabled);
+    const confirm = buttons.find(x => /^(确认报名|确认|确定|提交)$/.test(x.text) || /确认.*报名/.test(x.norm));
+    if (!confirm) return {clicked:false, ack};
+    confirm.el.scrollIntoView({block:'center', inline:'center'});
+    confirm.el.click();
+    return {clicked:true, clickedText:confirm.text, ack};
+    `).catch(err => ({clicked:false, error:String(err?.message || err)}));
+    confirmed.attempts.push(confirmAttempt);
+    if (confirmAttempt?.clicked) {
+      confirmed.clicked = true;
+      confirmed.clickedText = confirmAttempt.clickedText;
+      confirmed.ack = confirmAttempt.ack;
+      break;
+    }
+    const interim = await evalJs(cdp, sessionId, `
+      const text = document.body?.innerText || '';
+      return {
+        url: location.href,
+        success: /\\/success(?:\\b|$)/.test(location.href) || /(提交成功|报名成功|活动报名成功)/.test(text),
+        error: /(失败|错误|异常|不能为空|请填写|请先|未填写|error)/i.test(text),
+        pendingConfirm: text.includes('确认报名') || text.includes('降幅已超过50%') || text.includes('低于5折'),
+      };
+    `).catch(() => ({}));
+    if (interim?.success || interim?.error) break;
+    await sleep(interim?.pendingConfirm ? 700 : 500);
+  }
+  await sleep(3000);
+
+  const state = await evalJs(cdp, sessionId, `
+    const text = document.body?.innerText || '';
+    const url = location.href;
+    const errorMatch = text.match(/(失败|错误|异常|不能为空|请填写|请先|未填写|error)/i);
+    const successMatch = text.match(/(提交成功|报名成功|成功)/);
+    const successUrl = /\\/success(?:\\b|$)/.test(url);
+    const pendingConfirm = text.includes('确认报名') || text.includes('降幅已超过50%') || text.includes('低于5折');
+    return {
+      url,
+      successUrl,
+      successText: successMatch ? successMatch[1] : '',
+      errorText: errorMatch ? errorMatch[1] : '',
+      pendingConfirm,
+      tail: text.slice(-500),
+    };
+  `).catch(err => ({errorText:String(err?.message || err)}));
+  const success = Boolean(state?.successUrl || state?.successText);
+  const errorText = state?.errorText || '';
+  const reason = errorText
+    ? `提交后页面出现异常提示：${errorText}`
+    : success
+      ? undefined
+      : state?.pendingConfirm
+        ? '提交后仍停留在二次确认弹窗，未到成功页'
+        : `提交后未确认成功页：${state?.url || ''}`;
+  return {
+    ok: !errorText && success,
+    submitted: success,
+    clicked,
+    confirmed,
+    state,
+    reason,
+  };
+}
+
 async function processActivity(cdp, store, activity) {
+  const allowSkcs = selectionAllowList(store.storeKey, activity.activityId);
+  if (args.selectionPlan && (!allowSkcs || !allowSkcs.length)) {
+    return {
+      ok: true,
+      skipped: true,
+      store: store.storeKey,
+      activity,
+      reason: 'selection-plan 中没有该店铺活动 allowlist，跳过以避免误全选',
+    };
+  }
   const url = `${LIST_URL.replace('/list', `/sign-up/config/${activity.activityId}`)}`;
   const {targetId, sessionId} = await newPage(cdp, url);
   const loaded = await waitFor(cdp, sessionId, `
@@ -1029,17 +1299,25 @@ async function processActivity(cdp, store, activity) {
   `, 35_000);
   if (!loaded) return {ok: false, store: store.storeKey, activity, targetId, reason: '活动页面未加载'};
 
-  const selection = await selectAllGoodsAndNext(cdp, sessionId);
+  const selection = await selectAllGoodsAndNext(cdp, sessionId, allowSkcs);
   if (!selection.ok) return {ok: false, store: store.storeKey, activity, targetId, selection, reason: selection.reason || '选择商品失败'};
 
-  const fill = await fillEditPage(cdp, sessionId, store.storeKey, activity.activityId);
+  const fill = await fillEditPage(cdp, sessionId, store.storeKey, activity.activityId, allowSkcs);
+  if (!fill.ok) {
+    const currentUrl = await evalJs(cdp, sessionId, `return location.href;`).catch(() => '');
+    return {ok: false, store: store.storeKey, activity, targetId, selection, fill, url: currentUrl, reason: '填价复核失败，未提交'};
+  }
+  const submit = args.submit ? await submitSignup(cdp, sessionId) : {ok: true, submitted: false, skipped: true, reason: '未传 --submit，按预填模式停留'};
   const currentUrl = await evalJs(cdp, sessionId, `return location.href;`).catch(() => '');
-  return {ok: fill.ok, store: store.storeKey, activity, targetId, selection, fill, url: currentUrl};
+  return {ok: fill.ok && submit.ok, store: store.storeKey, activity, targetId, selection, fill, submit, url: currentUrl, reason: submit.ok ? undefined : submit.reason};
 }
 
-const selectedStores = STORES.filter(s => s.groupKey === 'DSY' && s.enabled)
-  .filter(s => s.storeKey !== 'MZ' || args.stores.includes('MZ'))
-  .filter(s => !args.stores.length || args.stores.includes(s.storeKey));
+const selectedStores = STORES.filter(s => s.enabled)
+  .filter(s => {
+    if (args.stores.length) return args.stores.includes(s.storeKey);
+    if (s.groupKey !== 'DSY') return false;
+    return s.storeKey !== 'MZ';
+  });
 
 const summary = {
   createdAt: new Date().toISOString(),
@@ -1047,6 +1325,8 @@ const summary = {
   hours: args.hours,
   allOpen: args.allOpen,
   includeCoupon: args.includeCoupon,
+  submit: args.submit,
+  selectionPlan: args.selectionPlan || '',
   stores: [],
 };
 
@@ -1065,13 +1345,30 @@ for (const store of selectedStores) {
     const listPage = await newPage(cdp, LIST_URL);
     const activities = await fetchActivities(cdp, listPage.sessionId);
     await cdp.call('Target.closeTarget', {targetId: listPage.targetId}).catch(() => {});
-    const due = activities.filter(withinDeadline);
-    const storeResult = {store: store.storeKey, shopName: store.shopName, port: store.port, dueActivities: due, results: []};
+    const due = dueActivities(activities);
+    const plannedActivities = [];
+    const skippedActivities = [];
+    for (const activity of due) {
+      const allowSkcs = selectionAllowList(store.storeKey, activity.activityId);
+      if (args.selectionPlan && (!allowSkcs || !allowSkcs.length)) {
+        skippedActivities.push({
+          activityId: activity.activityId,
+          name: activity.name,
+          reason: 'selection-plan 中没有该店铺活动 allowlist，跳过以避免误全选',
+        });
+      } else {
+        plannedActivities.push(activity);
+      }
+    }
+    const storeResult = {store: store.storeKey, shopName: store.shopName, port: store.port, dueActivities: due, plannedActivities, skippedActivities, results: []};
     summary.stores.push(storeResult);
     const scopeLabel = args.allOpen ? '所有未截止可报名活动' : (args.activityIds.length ? '指定活动' : `${args.hours}小时内截止活动`);
     console.log(`[${store.storeKey}] ${scopeLabel}：${due.map(a => `${a.activityId}-${a.name}`).join('；') || '无'}`);
+    if (skippedActivities.length) {
+      console.log(`[${store.storeKey}] 跳过无 allowlist 活动：${skippedActivities.map(a => `${a.activityId}-${a.name}`).join('；')}`);
+    }
     const keepTargetIds = [];
-    for (const activity of due) {
+    for (const activity of plannedActivities) {
       console.log(`[${store.storeKey}] 处理 ${activity.activityId} ${activity.name}`);
       const result = await processActivity(cdp, store, activity).catch(err => ({ok: false, store: store.storeKey, activity, reason: err.message, stack: err.stack}));
       storeResult.results.push(result);

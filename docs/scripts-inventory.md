@@ -97,6 +97,10 @@
   - `marketing/build_marketing_cost_map.py`
   - `marketing/export_dsy_marketing_standards.mjs`：只读导出 DSY 营销活动填报标准。用户要先审核标准时，先跑 `--stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open`，排除优惠券活动，输出明细和“按标准货号一行”的审核表。
   - `marketing/dsy_marketing_deadline_fill.mjs`：DSY 营销活动报名半自动补填；只勾选商品、填活动价/降幅和复核，不点最终提交。重扫漏报时显式传 `--stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open`；脚本分页全量扫活动列表、选择页先切 `500 条/页`，完成后只保留需要用户提交的活动编辑页。本期价格覆盖表用 `--price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD-approved.json`，缺成本例外仅用 `--min-discount-fallback SK-13034`。
+  - `marketing/export_marketing_stack_review.mjs`：只读导出普通活动、优惠券和限时折扣叠加审核。配套优惠券复扫必须传 `--coupon-target-plan <plan.json>`，优先看 `15%券档已报是否等于普通计划`、`15%券档已报但不在普通计划数`，不要把“15% 可报未入已报集合”误判为漏报。
+  - `marketing/submit_coupon_activity_goods.mjs`：优惠券 `34810` 的 15% 档批量导入执行器。默认必须传 `--target-plan`，只报名普通营销活动计划与 15% 可报集合的交集；只有显式 `--allow-all-15pct-available` 才允许全可报报名。
+  - `marketing/cancel_coupon_extra_goods.mjs`：取消配套优惠券误报项。使用多档券真实接口 `/activity/multi-level/partake/cancel`，执行前二次校验普通活动计划，禁止取消配套计划内 SKC；真实执行需 `--execute`。
+  - `marketing/build_coupon_import_from_skc_list.py` + `marketing/templates/coupon-import-15pct-template.xlsx`：从 SKC 清单生成 SHEIN 优惠券批量导入模板，供 `submit_coupon_activity_goods.mjs` 上传。
 - OpenAPI 试点：
   - `cloud_openapi_hl_reconciliation.sh`：Linux 云端 HL OpenAPI 并行对账入口；由 `shein-bi-cloud-openapi-hl.timer` 调用，需 SHEIN 开放平台白名单包含云服务器出口 IP。
   - `check_shein_openapi_client.mjs`

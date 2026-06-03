@@ -20,6 +20,7 @@ import {normalizeGoodsSnDetailed} from '../../lib/product_sku_normalizer.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
+const COUPON_DETAIL_URL = activityId => `https://sso.geiwohuo.com/#/mbrs/marketing/coupon/detail/${activityId}`;
 const OUT_DIR = path.join(ROOT, 'outputs', 'reports');
 const TMP_ROOT = path.join(ROOT, 'tmp', 'mbrs');
 const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
@@ -35,6 +36,7 @@ const READ_ONLY_ENDPOINTS = [
   '/mrs-api-prefix/mbrs/activity/fetch_seller_act_info',
   '/mrs-api-prefix/mbrs/activity/query_supplier_goods_list_v2',
   '/mrs-api-prefix/mbrs/coupon/query_coupon_activity_usage_List',
+  '/mrs-api-prefix/mbrs/activity/multi-level/goods/query',
 ];
 
 const fixedPriceBase = [
@@ -72,6 +74,7 @@ const specialMarginRules = new Map();
 for (const [label, value] of specialMarginBase) registerRuleKeys(specialMarginRules, label, value);
 
 const args = parseArgs(process.argv.slice(2));
+const COUPON_TARGET_PLAN = await loadCouponTargetPlan(args.couponTargetPlan);
 const now = new Date();
 const dateTag = formatDate(now);
 const timestampTag = formatTimestamp(now);
@@ -132,7 +135,10 @@ const SUMMARY_HEADERS = [
 
 const COUPON_HEADERS = [
   '店铺','分组','优惠券活动ID','优惠券活动名称','报名截止','活动开始','活动结束','后台券档','商家承担%','平台承担%',
-  '风险测算最高券折扣%','站点','当前站点预算SAR','已用预算SAR','优惠券状态','可报名数量','已报名数量','规则来源','备注/风险',
+  '风险测算最高券折扣%','站点','当前站点预算SAR','已用预算SAR','优惠券状态','可报名数量','已报名数量',
+  '15%券档levelRuleId','15%券档可报集合数','15%券档已报/处理中集合数','15%券档剩余未入已报集合数','15%券档状态分布',
+  '15%券档普通活动计划数','15%券档普通计划已报数','15%券档已报但不在普通计划数','15%券档已报是否等于普通计划',
+  '规则来源','备注/风险',
 ];
 
 const LIMIT_HEADERS = ['店铺','SKC','标准货号','限时折扣名称','限时折扣价SAR','来源','数据日期','风险提示','修改意见/备注'];
@@ -188,7 +194,7 @@ await fs.writeFile(files.json, JSON.stringify({
   notes: [
     '本文件为只读审核输出；未报名、未提交、未取消或调价限时折扣。',
     '限时折扣价格若未从当前接口读到，会作为风险字段保留，不按安全通过。',
-    '优惠券商品适用范围若无法只读确认，按可能叠加风险提示，需用户复核。',
+    '多档优惠券活动会额外读取 15% 券档规则页商品集合；活动列表 apply/allow 仅保留作参考，不作为 15% 档最终报名验证口径。',
   ],
   summaryRows,
   detailRows,
@@ -222,6 +228,7 @@ function parseArgs(argv) {
     noLaunch: false,
     includeCouponGoods: false,
     couponWorstRatePct: null,
+    couponTargetPlan: null,
     sessionHttp: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -239,6 +246,7 @@ function parseArgs(argv) {
     else if (a === '--no-launch') out.noLaunch = true;
     else if (a === '--include-coupon-goods') out.includeCouponGoods = true;
     else if (a === '--coupon-worst-rate-pct') out.couponWorstRatePct = Number(argv[++i]);
+    else if (a === '--coupon-target-plan') out.couponTargetPlan = argv[++i];
     else if (a === '--session-http') out.sessionHttp = true;
   }
   if (!Number.isFinite(out.batchSize) || out.batchSize < 1) out.batchSize = 1;
@@ -246,6 +254,35 @@ function parseArgs(argv) {
   if (!Number.isFinite(out.hours) || out.hours <= 0) out.hours = 48;
   if (out.couponWorstRatePct !== null && !Number.isFinite(out.couponWorstRatePct)) out.couponWorstRatePct = null;
   return out;
+}
+
+async function loadCouponTargetPlan(planPath) {
+  if (!planPath) return null;
+  const absolute = path.resolve(ROOT, planPath);
+  const doc = await readJsonIfExists(absolute, null);
+  if (!doc) throw new Error(`coupon target plan not found: ${absolute}`);
+  const byStore = new Map();
+  const addItems = items => {
+    for (const item of items || []) {
+      if (!item?.storeKey || !item?.skc || item.selected === false) continue;
+      const storeKey = String(item.storeKey).toUpperCase();
+      if (!byStore.has(storeKey)) byStore.set(storeKey, new Set());
+      byStore.get(storeKey).add(String(item.skc).trim());
+    }
+  };
+  if (Array.isArray(doc.ordinaryPlanPaths)) {
+    for (const plan of doc.ordinaryPlanPaths) {
+      const planDoc = await readJsonIfExists(path.resolve(ROOT, plan), null);
+      addItems(Array.isArray(planDoc) ? planDoc : (planDoc?.items || []));
+    }
+  } else {
+    addItems(Array.isArray(doc) ? doc : (doc.items || doc.rows || []));
+  }
+  return {
+    path: absolute,
+    byStore,
+    stores: [...byStore.entries()].map(([storeKey, set]) => ({storeKey, count: set.size})),
+  };
 }
 
 async function scanStore(store) {
@@ -492,15 +529,31 @@ async function fetchCouponSummaryHttp(session, store, activity) {
     sessionFetchJson(session, '/mrs-api-prefix/mbrs/coupon/query_coupon_activity_usage_List?page_num=1&page_size=20', {activity_ids: [activity.activityId], query_status: 0}),
     sessionFetchJson(session, '/mrs-api-prefix/mbrs/activity/fetch_seller_act_info', {partake_act_id: activity.activityId}),
   ]);
-  return couponSummaryFromApi(store, activity, detailJson?.info || {}, usageJson?.info?.coupon_activity_usage_detail_list?.[0] || {}, sellerJson?.info || {});
+  return couponSummaryFromApi(store, activity, detailJson?.info || {}, usageJson?.info?.coupon_activity_usage_detail_list?.[0] || {}, sellerJson?.info || {}, null);
 }
 
-function couponSummaryFromApi(store, activity, detail = {}, usage = {}, seller = {}) {
+function couponSummaryFromApi(store, activity, detail = {}, usage = {}, seller = {}, coupon15Rule = null) {
   const rates = Array.isArray(detail.coupon_discount_rate_list) ? detail.coupon_discount_rate_list : [];
   const maxCouponRatePct = args.couponWorstRatePct ?? maxCouponRate(rates);
   const sellerSharePct = Number(detail.seller_subsidy_rate ?? 100);
   const merchantWorstRatePct = round2(maxCouponRatePct * (Number.isFinite(sellerSharePct) ? sellerSharePct : 100) / 100);
   const site = (usage.coupon_site_usage_info_list || []).find(x => x.site === 'shein-sa') || (usage.coupon_site_usage_info_list || [])[0] || {};
+  const has15Rule = coupon15Rule?.ok === true;
+  const targetSet = COUPON_TARGET_PLAN?.byStore?.get(String(store.storeKey).toUpperCase()) || null;
+  const enrolledActiveSkcs = new Set((coupon15Rule?.enrolledActiveSkcs || []).map(x => String(x).trim()).filter(Boolean));
+  const targetActiveCount = targetSet && has15Rule ? [...targetSet].filter(skc => enrolledActiveSkcs.has(skc)).length : '';
+  const nonTargetEnrolledSkcs = targetSet && has15Rule ? [...enrolledActiveSkcs].filter(skc => !targetSet.has(skc)) : [];
+  const targetAligned = targetSet && has15Rule
+    ? targetActiveCount === targetSet.size && nonTargetEnrolledSkcs.length === 0
+    : '';
+  const ruleSource = has15Rule
+    ? 'get_activity_detail + query_coupon_activity_usage_List + fetch_seller_act_info + multi-level/goods/query(15%)'
+    : 'get_activity_detail + query_coupon_activity_usage_List + fetch_seller_act_info';
+  const ruleNote = has15Rule
+    ? targetSet
+      ? `15%券档按规则页 active 已报集合验证；普通活动配套计划=${targetSet.size}，计划已报=${targetActiveCount}，非计划已报=${nonTargetEnrolledSkcs.length}。${targetAligned ? '已报集合与普通活动配套计划一致；可报未入已报集合视为未配套/不应报名。' : '需处理已报集合与普通活动配套计划不一致。'}`
+      : `15%券档按规则页已报/处理中集合验证；活动列表 apply/allow 对多档券可能不是最终报名口径。可报未入已报集合数=${coupon15Rule.remainingCount}，未加载普通活动配套计划，不能据此判断是否应报。`
+    : '只读读取券规则与预算；商品级适用范围未在本阶段提交或修改，明细按可能叠加风险提示。';
   return {
     '店铺': store.storeKey,
     '分组': store.groupKey,
@@ -519,9 +572,18 @@ function couponSummaryFromApi(store, activity, detail = {}, usage = {}, seller =
     '优惠券状态': usage.coupon_limit_setting_status ?? '',
     '可报名数量': activity.allowGoodsNum,
     '已报名数量': activity.applyGoodsNum,
-    '规则来源': 'get_activity_detail + query_coupon_activity_usage_List + fetch_seller_act_info',
-    '备注/风险': '只读读取券规则与预算；商品级适用范围未在本阶段提交或修改，明细按可能叠加风险提示。',
-    _raw: {activity, detail, usage, seller},
+    '15%券档levelRuleId': has15Rule ? coupon15Rule.levelRuleId : '',
+    '15%券档可报集合数': has15Rule ? coupon15Rule.availableCount : '',
+    '15%券档已报/处理中集合数': has15Rule ? coupon15Rule.enrolledCount : '',
+    '15%券档剩余未入已报集合数': has15Rule ? coupon15Rule.remainingCount : '',
+    '15%券档状态分布': has15Rule ? coupon15Rule.statusSummary : '',
+    '15%券档普通活动计划数': targetSet ? targetSet.size : '',
+    '15%券档普通计划已报数': targetSet && has15Rule ? targetActiveCount : '',
+    '15%券档已报但不在普通计划数': targetSet && has15Rule ? nonTargetEnrolledSkcs.length : '',
+    '15%券档已报是否等于普通计划': targetSet && has15Rule ? (targetAligned ? '是' : '否') : '',
+    '规则来源': ruleSource,
+    '备注/风险': ruleNote,
+    _raw: {activity, detail, usage, seller, coupon15Rule},
   };
 }
 
@@ -663,7 +725,23 @@ async function fetchActivityDetail(cdp, sessionId, activityId) {
 }
 
 async function fetchCouponSummary(cdp, sessionId, store, activity) {
-  const data = await evalJs(cdp, sessionId, `
+  let couponPage = null;
+  let activeSessionId = sessionId;
+  try {
+    couponPage = await newPage(cdp, COUPON_DETAIL_URL(activity.activityId));
+    activeSessionId = couponPage.sessionId;
+    await waitFor(cdp, activeSessionId, `
+      document.body && (
+        document.body.innerText.includes('优惠券') ||
+        document.body.innerText.includes('继续报名') ||
+        document.body.innerText.includes('活动详情')
+      )
+    `, 25_000);
+  } catch {
+    activeSessionId = sessionId;
+  }
+  try {
+  const data = await evalJs(cdp, activeSessionId, `
     const post = async (url, body) => {
       const res = await fetch(url, {
         method: 'POST',
@@ -679,13 +757,159 @@ async function fetchCouponSummary(cdp, sessionId, store, activity) {
     const seller = await post('/mrs-api-prefix/mbrs/activity/fetch_seller_act_info', {partake_act_id: activityId});
     return {detail, usage, seller};
   `, {activityId: activity.activityId});
+  const coupon15Rule = await fetchCoupon15PctRuleStats(cdp, activeSessionId, activity.activityId).catch(err => ({
+    ok: false,
+    error: err.message,
+  }));
   return couponSummaryFromApi(
     store,
     activity,
     data.detail?.info || {},
     data.usage?.info?.coupon_activity_usage_detail_list?.[0] || {},
     data.seller?.info || {},
+    coupon15Rule,
   );
+  } finally {
+    if (couponPage?.targetId) await cdp.call('Target.closeTarget', {targetId: couponPage.targetId}).catch(() => {});
+  }
+}
+
+async function fetchCoupon15PctRuleStats(cdp, sessionId, activityId) {
+  return await evalJs(cdp, sessionId, `
+    const activityId = Number(__arg.activityId);
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    const textOf = el => (el?.innerText || el?.textContent || '').trim();
+    const waitFor = async (predicate, timeoutMs = 35_000) => {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        if (predicate()) return true;
+        await sleep(500);
+      }
+      return false;
+    };
+    const headers = () => ({
+      'content-type': 'application/json;charset=UTF-8',
+      'Origin-Url': location.href,
+      'x-bbl-route': location.hash.replace(/^#/, ''),
+      'x-req-zone-id': 'Asia/Shanghai',
+      'x-lt-language': 'CN',
+      'LAN': 'CN',
+    });
+    const post = async (url, body) => {
+      const res = await fetch(url, {
+        method: 'POST',
+        credentials: 'include',
+        headers: headers(),
+        body: JSON.stringify(body || {}),
+      });
+      return await res.json();
+    };
+    const detailUrl = 'https://sso.geiwohuo.com/#/mbrs/marketing/coupon/detail/' + activityId;
+    if (!location.href.includes('/mbrs/marketing/coupon/detail/' + activityId) &&
+        !location.href.includes('/mbrs/marketing/coupon/rule/signup/' + activityId + '/')) {
+      location.href = detailUrl;
+      await waitFor(() => {
+        const text = document.body?.innerText || '';
+        return location.href.includes('/mbrs/marketing/coupon/detail/' + activityId) &&
+          (text.includes('继续报名') || text.includes('优惠券') || text.includes('活动详情'));
+      });
+    }
+    if (!location.href.includes('/mbrs/marketing/coupon/rule/signup/' + activityId + '/')) {
+      const buttons = [...document.querySelectorAll('button,[role=button]')]
+        .filter(visible)
+        .map(el => {
+          let node = el;
+          let ctx = '';
+          for (let i = 0; i < 6 && node; i += 1) {
+            ctx = textOf(node);
+            if (ctx.length > 20 && ctx.length < 2500) break;
+            node = node.parentElement;
+          }
+          return {el, text: textOf(el), ctx};
+        })
+        .filter(x => x.text === '继续报名' || x.text === '报名' || x.text === '去报名');
+      if (!buttons.length) {
+        return {ok: false, reason: 'continue signup button not found', href: location.href, text: (document.body?.innerText || '').slice(0, 1200)};
+      }
+      const preferred = buttons.find(x => x.ctx.includes('15') || x.ctx.includes('1%-15') || x.ctx.includes('1%-15%')) || buttons[0];
+      preferred.el.scrollIntoView({block: 'center', inline: 'center'});
+      preferred.el.click();
+      await waitFor(() => location.href.includes('/mbrs/marketing/coupon/rule/signup/' + activityId + '/'), 25_000);
+    }
+    const m = String(location.href || '').match(new RegExp('/coupon/rule/signup/' + activityId + '/(\\\\d+)'));
+    const levelRuleId = Number(m?.[1] || 0);
+    if (!levelRuleId) {
+      return {ok: false, reason: '15% rule signup route not reached', href: location.href};
+    }
+    const queryPage = async (pageModule, pageNum) => {
+      const json = await post('/mrs-api-prefix/mbrs/activity/multi-level/goods/query?page_num=' + pageNum + '&page_size=200', {
+        activity_id: activityId,
+        level_rule_id: levelRuleId,
+        page: 'COUPON',
+        page_module: pageModule,
+        product_code_list: [],
+        supplier_no_list: [],
+      });
+      const list = json?.info?.partake_goods_list || [];
+      return {
+        code: json?.code,
+        msg: json?.msg,
+        total: Number(json?.info?.total ?? list.length ?? 0),
+        list: list.map(x => ({
+          skc: x.skc || '',
+          supplierNo: x.supplier_no || '',
+          status: String(x.status ?? ''),
+          enrollTime: x.enroll_time || null,
+        })),
+      };
+    };
+    const queryAll = async pageModule => {
+      const all = [];
+      let total = 0;
+      let last = null;
+      for (let pageNum = 1; pageNum <= 100; pageNum += 1) {
+        last = await queryPage(pageModule, pageNum);
+        if (last.code !== '0' && last.code !== 0) return {...last, list: all};
+        total = last.total;
+        all.push(...last.list);
+        if (!last.list.length || all.length >= total) break;
+      }
+      const seen = new Set();
+      const deduped = [];
+      for (const item of all) {
+        if (!item.skc || seen.has(item.skc)) continue;
+        seen.add(item.skc);
+        deduped.push(item);
+      }
+      return {code: '0', msg: last?.msg || 'OK', total, list: deduped};
+    };
+    const available = await queryAll('MULTI_LEVEL_RULE_GOODS');
+    const enrolled = await queryAll('MULTI_LEVEL_RULE_ENROLLED_GOODS');
+    if ((available.code !== '0' && available.code !== 0) || (enrolled.code !== '0' && enrolled.code !== 0)) {
+      return {ok: false, levelRuleId, availableCode: available.code, availableMsg: available.msg, enrolledCode: enrolled.code, enrolledMsg: enrolled.msg};
+    }
+    const enrolledSet = new Set(enrolled.list.map(x => x.skc));
+    const remaining = available.list.map(x => x.skc).filter(skc => skc && !enrolledSet.has(skc));
+    const activeEnrolled = enrolled.list.filter(x => ['0', '1'].includes(String(x.status ?? '')));
+    const statusCounts = {};
+    for (const item of enrolled.list) statusCounts[item.status] = (statusCounts[item.status] || 0) + 1;
+    const statusSummary = Object.keys(statusCounts).sort().map(k => k + ':' + statusCounts[k]).join(';');
+    return {
+      ok: true,
+      levelRuleId,
+      availableTotal: available.total,
+      availableCount: available.list.length,
+      enrolledTotal: enrolled.total,
+      enrolledCount: enrolled.list.length,
+      remainingCount: remaining.length,
+      remainingSample: remaining.slice(0, 20),
+      availableSkcs: available.list.map(x => x.skc).filter(Boolean),
+      enrolledSkcs: enrolled.list.map(x => x.skc).filter(Boolean),
+      enrolledActiveSkcs: activeEnrolled.map(x => x.skc).filter(Boolean),
+      statusSummary,
+    };
+  `, {activityId});
 }
 
 async function collectOrdinaryGoodsRows(cdp, sessionId, activity) {
@@ -977,15 +1201,13 @@ function lookupDepletion(storeKey, canonical, supplierNo) {
 function lookupCostInfo(keys) {
   const trueCost = lookupTrueCost(keys);
   const fallbackCost = lookupCost(keys);
-  const productCostSar = Number.isFinite(Number(trueCost?.unitCostSar)) ? Number(trueCost.unitCostSar)
-    : Number.isFinite(Number(trueCost?.productUnitCostSar)) ? Number(trueCost.productUnitCostSar)
-    : fallbackCost;
-  const storageUnitCostSar = Number.isFinite(Number(trueCost?.storageUnitCostSar))
-    ? Number(trueCost.storageUnitCostSar)
-    : Number.isFinite(Number(trueCost?.storageUnitCostSar30d))
-      ? Number(trueCost.storageUnitCostSar30d)
-      : null;
-  const fullCostSar = Number.isFinite(Number(trueCost?.trueUnitCostSar)) ? Number(trueCost.trueUnitCostSar)
+  const productCostSar = numValue(trueCost?.unitCostSar)
+    ?? numValue(trueCost?.productUnitCostSar)
+    ?? fallbackCost;
+  const storageUnitCostSar = numValue(trueCost?.storageUnitCostSar)
+    ?? numValue(trueCost?.storageUnitCostSar30d);
+  const explicitFullCostSar = numValue(trueCost?.trueUnitCostSar);
+  const fullCostSar = explicitFullCostSar !== null ? explicitFullCostSar
     : (productCostSar !== null && storageUnitCostSar !== null ? round2(productCostSar + storageUnitCostSar) : productCostSar);
   return {
     productCostSar,
@@ -1100,6 +1322,7 @@ function renderMarkdown(summaryRows, detailRows, couponRows, limitRows, files) {
     `- BI 数据时间：${BI.generatedAt || ''}`,
     `- 链接活动标签日期：${BI.dates?.linkDate || ''}`,
     `- 成本来源：${COST_DOC.source || ''}`,
+    `- 优惠券配套计划：${COUPON_TARGET_PLAN ? path.relative(ROOT, COUPON_TARGET_PLAN.path) : '未加载；仅展示券档可报/已报集合，不判断是否应报'}`,
     '',
     '## 文件',
     '',
@@ -1114,6 +1337,7 @@ function renderMarkdown(summaryRows, detailRows, couponRows, limitRows, files) {
     '- 最低促销基准价先按当前可读到的 `当前售价` 与 `本次建议普通活动价` 取低值。',
     '- 若 BI 链路已发现同 SKC 存在 `限时折扣`，但本阶段未读到限时折扣价格，明细会标为高风险，不按安全通过。',
     '- 若同窗口存在优惠券活动，按券规则中可读到的最高商家承担折扣做风险测算；用户可在备注栏指定不用券或只用 15% 档。',
+    '- 多档优惠券活动报名验证优先看 `15%券档已报是否等于普通计划`、`15%券档普通活动计划数`、`15%券档已报但不在普通计划数`；`15%券档剩余未入已报集合数` 是“可报但未报”的平台集合，不等于本期应报目标。',
     '- 安全判断默认看 `含仓储费利润率`；仓储费缺失会标记风险，不能当 0 处理。',
     '',
     '## 风险明细预览',

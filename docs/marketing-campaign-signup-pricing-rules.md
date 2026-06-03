@@ -258,6 +258,40 @@
 - 2026-05-28 审计汇总：`tmp/mbrs/coupon-submissions-34810/all-dsy-summary-with-dl.json`，总计 `348` 个唯一 `15%` 券 SKC 已进入已报/处理中集合，批准清单剩余未报为 `0`。
 - 后续优惠券不再只按“目标价 - 本次普通活动价”决策；必须先扣除旧普通活动和限时折扣可能形成的最低促销基准价，再决定是否用券。若不用券更接近目标价，应明确标为“不建议用券”。
 
+### 2026-06-03 修正后的长期规则：配套券只跟普通活动计划走
+
+2026-06-03 报名复盘确认：优惠券执行器不能再把 `MULTI_LEVEL_RULE_GOODS` 的“15% 可报集合”直接当成应报目标。`可报` 只表示平台允许报名；本期配套优惠券的真实目标必须是“普通营销活动计划 SKC 与 15% 可报集合的交集”。
+
+长期规则如下：
+
+1. **目标集合**
+   - 配套优惠券目标 = `ordinary selection-plan` 中已选 SKC ∩ `MULTI_LEVEL_RULE_GOODS`。
+   - `MULTI_LEVEL_RULE_GOODS` 中不在普通活动计划里的 SKC，属于“可报但不应报”，不能自动报名。
+   - `MULTI_LEVEL_RULE_ENROLLED_GOODS` 的 active 已报集合最终必须等于普通活动计划集合；允许的终态是：
+     - `普通活动计划数 == 15%券档 active 已报数`
+     - `已报但不在普通计划数 == 0`
+2. **提交脚本安全闸**
+   - `scripts/marketing/submit_coupon_activity_goods.mjs` 默认必须传 `--target-plan`。
+   - 只有明确审计为“全 15% 可报都要报名”的独立优惠券活动，才允许显式加 `--allow-all-15pct-available`。
+   - 配套券的默认执行模式必须是 `plan-intersection-15pct-available`，不能退回 `all-15pct-available`。
+3. **只读复扫口径**
+   - `scripts/marketing/export_marketing_stack_review.mjs --coupon-target-plan <plan.json>` 会输出普通活动配套计划校验列。
+   - 优先看 `15%券档已报是否等于普通计划`、`15%券档普通活动计划数`、`15%券档已报但不在普通计划数`。
+   - `15%券档剩余未入已报集合数` 是“平台可报但未报”的集合，不等于本期应报目标；如果配套计划已覆盖，这个数大于 0 是正常现象。
+4. **取消误报**
+   - 多档券已报名商品页是 `#/mbrs/marketing/coupon/rule/goods/{activityId}/{levelRuleId}`。
+   - 取消接口是 `/mrs-api-prefix/mbrs/activity/multi-level/partake/cancel`，不是普通活动的 `batch_cancel_partake_goods` / `cancel_activity`。
+   - payload 必须来自已报集合里的真实字段：
+     - `partake_good_id`
+     - `partake_level_rule_id`
+     - `partake_rule_good_id`
+     - `skc`
+   - 执行前必须二次加载普通活动计划；任何出现在普通活动计划里的 SKC 禁止取消。
+5. **单店试点与回读**
+   - 真实取消前先用一个店、一个 SKC 验证接口，确认 `activeExtraRemaining=0` 且普通计划 active 数不下降。
+   - 批量取消后必须回读 `MULTI_LEVEL_RULE_ENROLLED_GOODS`，不能把“接口 code=0”当作最终成功。
+   - 登录页如果是空账号/密码表单，不要反复点 `登录`；应记录店铺登录阻塞，等用户恢复登录后继续。
+
 ## 九、当前已知特殊情况
 
 - `SM-505A电动缝纫机` / `TXSM-505A电动缝纫机`：
