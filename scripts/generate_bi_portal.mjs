@@ -4239,7 +4239,6 @@ function missingBiSections(sections){
 }
 function overviewRequiredBiSections(){
   if ($('detailsFold')?.open) return OVERVIEW_DETAILS_SECTION_KEYS;
-  if (productScopeQuery()) return ['profit'];
   return [];
 }
 function requiredBiSectionsForTab(tab = state.tab || 'overview'){
@@ -4262,7 +4261,7 @@ function requiredBiSectionsForTab(tab = state.tab || 'overview'){
 function backgroundBiSectionsForTab(tab = state.tab || 'overview'){
   if (!biPortalUsesApiSections()) return [];
   const map = {
-    overview:['homeProfit','rankings','actions','afterSales','financeData']
+    overview:['rankings','afterSales','homeProfit','actions']
   };
   return (map[tab] || []).filter(section => BI_SECTION_KEYS.has(section));
 }
@@ -4330,24 +4329,25 @@ function startBiSectionBackgroundLoads(sections){
   (async () => {
     let hadError = false;
     try {
-      for (const section of pending) {
-        if (biSectionLoaded(section)) continue;
+      await Promise.all(pending.map(async section => {
+        if (biSectionLoaded(section)) return;
         try {
           await loadBiSection(section);
         } catch (err) {
           hadError = true;
           console.warn('background BI section load failed', section, err);
-          continue;
+          return;
         }
         renderFilters();
         renderAll();
-      }
+      }));
       if (hadError) {
         renderFilters();
         renderAll();
       }
     } finally {
       biBackgroundLoadActive = false;
+      renderAll();
     }
   })();
 }
@@ -6081,6 +6081,10 @@ function homeProfitSummaryCoversRange(start, end){
 }
 function homeProfitSummaryCanSatisfyScope(range = null){
   if (productScopeQuery() || !homeProfitSummaryAvailable()) return false;
+  if (DATA.homeProfitSummary?.staleSource) return false;
+  const sourceGeneratedAt = String(DATA.homeProfitSummary?.sourceGeneratedAt || '');
+  const expectedGeneratedAt = currentBiSectionGeneratedAt();
+  if (expectedGeneratedAt && sourceGeneratedAt !== expectedGeneratedAt) return false;
   if (!range) return true;
   return homeProfitSummaryCoversRange(range.start, range.end);
 }

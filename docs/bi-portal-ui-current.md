@@ -41,7 +41,7 @@
 - 选择某个分组时，顶部矩阵显示该分组口径。
 - 选择某个单店时，顶部矩阵显示该店口径。
 - 选择某个货号时，所有指标和趋势按该货号在当前店铺/分组范围内重算。
-- 选择“货号 + 店铺”组合时，首页趋势和排行使用 `rankings.dailyStoreProducts` 的店铺×货号日粒度数据，不再只看全局货号汇总。
+- 选择“货号 + 店铺”组合时，首页趋势和排行使用 `rankings.dailyStoreProducts` 的店铺×货号日粒度数据，不再只看全局货号汇总；货号筛选不得把整个首页阻塞在较慢的 `profit` section 上，利润卡可单独显示“待预热”，但销售/订单/售后和排行应继续按已加载的 `rankings` / `afterSales` 更新。
 
 ## 2.1 产品显示名与后台 key
 
@@ -226,7 +226,7 @@
   - 静态检查 `outputs/bi-portal/data.json`
 - 只有用户明确要求，或必须排查浏览器交互、滚动、弹窗、控制台错误等问题时，才打开前端页面验证。
 - 云端 BI 已是正式入口；涉及弹窗、筛选、刷新状态等用户可见行为时，本地验证只能作为开发检查，最终审核应在云端可访问页面或云端服务输出上完成，再发布 GitHub release。
-- 涉及首页利润时，云端验收还必须核对 `/api/bi/section/homeProfit`：`homeProfitSummary.sourceGeneratedAt` 应等于当前 `data.json.__sections.generatedAt`，`staleSource=false`，且今日总利润应与当前 `profit` section 汇总一致。
+- 涉及首页利润时，云端验收还必须核对 `/api/bi/section/homeProfit`：`homeProfitSummary.sourceGeneratedAt` 应等于当前 `data.json.__sections.generatedAt`，`staleSource=false`，且今日总利润应与当前 `profit` section 汇总一致。若 `homeProfit` stale，页面应视为利润待预热，不得因为旧摘要加载快就当作当前利润。
 - 如果问题本身是页面布局、宽屏留白、对齐、卡片挤压、图表绘图区等视觉判断，且用户要求打开前端，应使用最大化 / 大视口验证；不要用未最大化小窗口或只看代码来判断宽屏效果。
 
 

@@ -59,7 +59,7 @@ ET、飞书日报、完整 RTV WebAPI 复核、链接/业务域日更、异常�
 
 - 当天刷新入口：`scripts/cloud_bi_refresh.sh today`
 - 前一天最终版入口：`scripts/cloud_bi_refresh.sh yesterday`
-- Portal section 预热入口：`scripts/prewarm_bi_portal_sections.sh`。默认顺序必须保持 `profit,homeProfit,...`，因为首页利润 `homeProfit` 只从 `profit` section cache 派生；如果先预热 `homeProfit`，它可能继续展示旧 `profit` 缓存里的少量订单。
+- Portal section 预热入口：`scripts/prewarm_bi_portal_sections.sh`。默认顺序先保障首页关键数据 `rankings,afterSales,homeProfit,actions,...`，再把较慢的 `profit` 放到后段，最后补跑一次 `homeProfit`。`homeProfit` 仍只从 `profit` section cache 派生；如果当前 `profit` 缺失或过旧，前端会把 `staleSource=true` / `sourceGeneratedAt` 不匹配的摘要视为不可用，不能拿旧利润当业务真相。
 - 数据库备份入口：`scripts/cloud_db_backup.sh`
 - ET 云端入口：`scripts/cloud_et_forwarder_sync.sh today`
 - 飞书日报云端入口：`scripts/cloud_daily_lark_report.sh today`
@@ -126,7 +126,7 @@ GitHub 应保存：
 - ET 已验证可手动跑 `scripts/cloud_et_forwarder_sync.sh today`，能登录、抓取、入仓并刷新门户；失败时保留上一版 ET 数据，不应阻断销售 BI。
 - 飞书日报已验证可手动跑 `scripts/cloud_daily_lark_report.sh today`，文字和日报图能发送；成功后会写入当天 sent flag，避免同日 timer 重复发送。
 - 若 BI 侧栏显示的“页面生成 / 销售源”时间明显旧于当前调度，先检查是否刚部署覆盖了仓库静态快照；在服务器重跑 `shein-bi-cloud-today.service` 后，`outputs/bi-portal/data.json` 的 `generatedAt` 和 `salesUpdatedAt` 应更新到当天。
-- 若首页利润明显异常偏低，先用 Basic Auth 访问 `/api/bi/section/homeProfit` 或在服务器读 `outputs/bi-portal/sections/homeProfit.json`，确认 `homeProfitSummary.sourceGeneratedAt` 等于当前 `data.json.__sections.generatedAt` 且 `staleSource=false`。若 `profit` 已当前但 `homeProfit` 仍旧，可请求 `/api/bi/section/homeProfit?refresh=1`；若 `profit` 也旧，先刷新 `profit` section。
+- 若首页利润明显异常偏低，先用 Basic Auth 访问 `/api/bi/section/homeProfit` 或在服务器读 `outputs/bi-portal/sections/homeProfit.json`，确认 `homeProfitSummary.sourceGeneratedAt` 等于当前 `data.json.__sections.generatedAt` 且 `staleSource=false`。若 `profit` 已当前但 `homeProfit` 仍旧，可请求 `/api/bi/section/homeProfit?refresh=1`；若 `profit` 也旧，应把 `profit` 刷新放到首页关键 section 之后处理，避免慢利润刷新阻塞销售/订单/售后首屏。
 - BI Portal 生成后，`outputs/bi-portal/data.json` 应包含顶层 `productDisplayNames`，且主要含 `standard_goods_sn` 的对象应有 `product_display_name`。如果页面或飞书问数机器人又裸显示 `SM-505A`、`SK-10075` 这类短码，先在服务器跑 `node scripts/test_product_display_name.mjs`，再重跑 `node scripts/generate_bi_portal.mjs` 或对应云端刷新 service。
 - 若飞书日报图中文显示方框，先在服务器检查 `fc-match 'Noto Sans CJK SC'`；修复字体后只需重新生成/下次发送日报图，不需要重发已发送的旧图，除非用户明确要求。
 - `cloud_bi_refresh.sh` 应在生成 BI Portal 前运行 `audit_bi_warehouse.mjs`，否则页面顶部会显示“数据体检：未找到体检文件”。体检有 warning 时仍生成页面，让 BI 直接展示 warning 内容。

@@ -89,7 +89,7 @@
 - 云端 `shein-bi-cloud-yesterday.timer` 刷新前一天最终版，并回核 D-2 稳定销售。
 - 云端 `shein-bi-cloud-today.timer` 每两小时刷新当天销售。
 - 滚动后置 BI 的验收重点是销售文件入仓和 BI Portal 更新时间；RTV 换单复核耗时不应作为“BI 没更新”的判断依据。
-- BI Portal API section 会在 `outputs/bi-portal/sections/` 缓存；首页利润 `homeProfit` 是从 `profit` section cache 派生，预热顺序必须先 `profit` 后 `homeProfit`。若页面首页利润异常偏低，先核对 `homeProfitSummary.sourceGeneratedAt` 与当前 `data.json.__sections.generatedAt` 是否一致，并确认 `staleSource=false`。
+- BI Portal API section 会在 `outputs/bi-portal/sections/` 缓存；首页利润 `homeProfit` 是从 `profit` section cache 派生。预热顺序要先保障首页销售/订单/售后关键 section（`rankings`、`afterSales`、`homeProfit`、`actions`），再把较慢的 `profit` 放到后段并成功后补跑一次 `homeProfit`。若页面首页利润异常偏低，先核对 `homeProfitSummary.sourceGeneratedAt` 与当前 `data.json.__sections.generatedAt` 是否一致，并确认 `staleSource=false`；否则页面应视为利润待预热，不能用旧利润判断业务。
 - 如果某个店失败，但目标日期当前启用店铺销售源文件已经齐，BI 仍应刷新；云端 watchdog / 异常通知负责提醒失败店铺和服务异常。
 - 业务域单店失败不应阻断销售入仓和门户刷新，应在 BI 体检/提醒里标注。
 - `send_daily_lark_report.mjs` 仍保留；生产日报由云端 `shein-bi-cloud-daily-lark-report.timer` 调度，不要默认本地日报任务仍在生产运行。

@@ -47,7 +47,7 @@
   - 本机 `http://127.0.0.1:8787/` 和局域网 `http://DUSHENGYI-PC2:8787/` 已封存，不再作为正式入口。
   - Metabase 当前部署在云端 Docker 内部，由云端 Nginx/服务配置受控访问，不在 README 写公开裸地址。
 - 当前 BI 数据截面不再手工写死在 README；实时以 BI 门户系统状态页、`outputs/bi-portal/data.json`、云端 systemd 日志和数据库入仓时间为准。仓库中的 `outputs/bi-portal/` 只是灾备快照，服务器拉取/重置代码后必须重新跑云端 BI 刷新。
-- BI Portal API section cache 位于 `outputs/bi-portal/sections/`；首页利润 `homeProfit` 是从 `profit` section cache 派生，生产预热必须先跑 `profit` 再跑 `homeProfit`。若首页利润明显低于当前销售额，先核对 `profit.json.generatedAt`、`homeProfit.json.data.homeProfitSummary.sourceGeneratedAt` 和 `staleSource`，不要直接按页面旧数字判断业务真实利润。
+- BI Portal API section cache 位于 `outputs/bi-portal/sections/`；首页利润 `homeProfit` 是从 `profit` section cache 派生，但生产预热要先保障首页销售/订单/售后关键 section（`rankings`、`afterSales`、`homeProfit`），再把较慢的 `profit` 放到后段并成功后补跑一次 `homeProfit`。若首页利润明显低于当前销售额，先核对 `profit.json.generatedAt`、`homeProfit.json.data.homeProfitSummary.sourceGeneratedAt` 和 `staleSource`，`staleSource=true` 时页面不能按旧利润判断业务真实利润。
 - 定时任务：
   - 云端 `shein-bi-cloud-today.timer`：`00:10/02:10/.../22:10` 每两小时刷新当天销售、入仓并生成 BI Portal。
   - 云端 `shein-bi-cloud-yesterday.timer`：每天 `00:10` 刷新前一天最终销售，并复核前两天稳定日。
