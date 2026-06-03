@@ -42,12 +42,12 @@
   - 云端登录维护中心：`https://shein-bi.faceair.me/cloud-login-maintenance`，用于临时打开指定店铺云端浏览器登录窗口。
   - 云端代码目录：`/opt/shein-bi/app`
   - 本地 BI 门户文件快照：`outputs/bi-portal/index.html` / `outputs/bi-portal/data.json`
-  - V1 是当前正式 BI Portal；用户确认后的 V1/main 才发布 GitHub release。当前 V1/main 已发布到 `2026.06.03-marketing-coupon-rules`，其中 `2026.06.03-et-forwarder-hotfix` 修 ET 刷新轻量化，`2026.06.03-home-profit-cache-hotfix` 修首页利润缓存预热顺序；V2 仍不属于正式发布。
+  - V1 是当前正式 BI Portal；用户确认后的 V1/main 才发布 GitHub release。当前 V1/main 已发布到 `2026.06.04-homepage-fast-filters`，后续首页性能补丁保持同一 V1/main 边界；V2 仍不属于正式发布。
   - V2.1 独立设计预览仍是平行项目，由 `scripts/generate_bi_portal_v2.mjs` 生成；用户确认前不得替换 V1 或改生产调度。
   - 本机 `http://127.0.0.1:8787/` 和局域网 `http://DUSHENGYI-PC2:8787/` 已封存，不再作为正式入口。
   - Metabase 当前部署在云端 Docker 内部，由云端 Nginx/服务配置受控访问，不在 README 写公开裸地址。
 - 当前 BI 数据截面不再手工写死在 README；实时以 BI 门户系统状态页、`outputs/bi-portal/data.json`、云端 systemd 日志和数据库入仓时间为准。仓库中的 `outputs/bi-portal/` 只是灾备快照，服务器拉取/重置代码后必须重新跑云端 BI 刷新。
-- BI Portal API section cache 位于 `outputs/bi-portal/sections/`；首页利润 `homeProfit` 是从 `profit` section cache 派生，但生产预热要先保障首页销售/订单/售后关键 section（`rankings`、`afterSales`、`homeProfit`），再把较慢的 `profit` 放到后段并成功后补跑一次 `homeProfit`。若首页利润明显低于当前销售额，先核对 `profit.json.generatedAt`、`homeProfit.json.data.homeProfitSummary.sourceGeneratedAt` 和 `staleSource`，`staleSource=true` 时页面不能按旧利润判断业务真实利润。
+- BI Portal API section cache 位于 `outputs/bi-portal/sections/`；首页首屏使用轻量 `homeRankings`（只含首页需要的日店铺、日货号、日店铺×货号粒度），完整 `rankings` 后置到详情/子页需要时再拉。服务端会为 section cache 生成 `.json.gz` sidecar，公网浏览器优先走 gzip。首页利润 `homeProfit` 仍从当前 `profit` section cache 派生；生产预热要先保障首页销售/订单/售后关键 section（`homeRankings`、`afterSales`、`homeProfit`、`actions`、`financeData`），再把较慢的 `rankings` / `profit` 放到后段并在 `profit` 成功后补跑一次 `homeProfit`。若首页利润明显低于当前销售额，先核对 `profit.json.generatedAt`、`homeProfit.json.data.homeProfitSummary.sourceGeneratedAt` 和 `staleSource`，`staleSource=true` 时页面不能按旧利润判断业务真实利润。
 - 定时任务：
   - 云端 `shein-bi-cloud-today.timer`：`00:10/02:10/.../22:10` 每两小时刷新当天销售、入仓并生成 BI Portal。
   - 云端 `shein-bi-cloud-yesterday.timer`：每天 `00:10` 刷新前一天最终销售，并复核前两天稳定日。

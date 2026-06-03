@@ -78,6 +78,7 @@ function parseArgs(argv) {
 
 const PORTAL_API_SECTION_KEYS = [
   'homeProfit',
+  'homeRankings',
   'rankings',
   'profit',
   'actions',
@@ -121,6 +122,13 @@ const PORTAL_SECTION_SELECTS = {
     'dailyStores', (SELECT data FROM daily_store_sales),
     'dailyProducts', (SELECT data FROM daily_product_sales),
     'dailyProductGroups', (SELECT data FROM daily_product_group_sales),
+    'dailyStoreProducts', (SELECT data FROM daily_store_product_sales)
+  )
+`,
+  homeRankings: `
+  'rankings', jsonb_build_object(
+    'dailyStores', (SELECT data FROM daily_store_sales),
+    'dailyProducts', (SELECT data FROM daily_product_sales),
     'dailyStoreProducts', (SELECT data FROM daily_store_product_sales)
   )
 `,
@@ -4215,7 +4223,7 @@ const BI_SECTION_KEYS = new Set(Array.isArray(DATA.__sections?.keys) ? DATA.__se
 const BI_SECTION_LOADED = new Set(Array.isArray(DATA.__sections?.loaded) ? DATA.__sections.loaded : []);
 const biSectionState = {};
 const OVERVIEW_DETAILS_SECTION_KEYS = ['rankings','actions','linksData','orders','afterSales','financeData','comments','waybills','profit'];
-const BRIEFING_SECTION_KEYS = ['rankings','actions','afterSales','financeData'];
+const BRIEFING_SECTION_KEYS = ['homeRankings','actions','afterSales','financeData'];
 function resetBiSectionRuntimeFromData(){
   BI_SECTION_KEYS.clear();
   (Array.isArray(DATA.__sections?.keys) ? DATA.__sections.keys : []).forEach(section => BI_SECTION_KEYS.add(section));
@@ -4234,8 +4242,15 @@ function biSectionLoaded(section){
   if (!BI_SECTION_KEYS.has(section)) return true;
   return BI_SECTION_LOADED.has(section);
 }
+function homeRankingsLoaded(){
+  return biSectionLoaded('homeRankings') || biSectionLoaded('rankings');
+}
+function biSectionReady(section){
+  if (section === 'homeRankings') return homeRankingsLoaded();
+  return biSectionLoaded(section);
+}
 function missingBiSections(sections){
-  return (sections || []).filter(section => BI_SECTION_KEYS.has(section) && !biSectionLoaded(section));
+  return (sections || []).filter(section => BI_SECTION_KEYS.has(section) && !biSectionReady(section));
 }
 function overviewRequiredBiSections(){
   if ($('detailsFold')?.open) return OVERVIEW_DETAILS_SECTION_KEYS;
@@ -4261,7 +4276,7 @@ function requiredBiSectionsForTab(tab = state.tab || 'overview'){
 function backgroundBiSectionsForTab(tab = state.tab || 'overview'){
   if (!biPortalUsesApiSections()) return [];
   const map = {
-    overview:['rankings','afterSales','homeProfit','actions']
+    overview:['homeRankings','afterSales','homeProfit','actions','financeData']
   };
   return (map[tab] || []).filter(section => BI_SECTION_KEYS.has(section));
 }
@@ -4284,14 +4299,14 @@ function showBiSectionLoading(sections){
     if ((state.tab || 'overview') === 'overview' && host.id === 'homeDashboard') host.appendChild(target);
     else host.prepend(target);
   }
-  const pending = sections.map(s => s === 'homeProfit' ? '首页利润' : s === 'linksData' ? '链接/覆盖' : s === 'financeData' ? '财务明细' : s === 'rtvData' ? 'RTV追踪' : s).join('、');
+  const pending = sections.map(s => s === 'homeProfit' ? '首页利润' : s === 'homeRankings' ? '首页销售/排行' : s === 'linksData' ? '链接/覆盖' : s === 'financeData' ? '财务明细' : s === 'rtvData' ? 'RTV追踪' : s).join('、');
   target.innerHTML = '正在加载当前页面数据：' + escapeHtml(pending) + '。界面布局保持不变，数据按需从服务端读取。';
 }
 function clearBiSectionLoading(){
   document.getElementById('biSectionLoading')?.remove();
 }
 async function loadBiSection(section){
-  if (biSectionLoaded(section)) return;
+  if (biSectionReady(section)) return;
   if (biSectionState[section]?.status === 'loading') return biSectionState[section].promise;
   const promise = (async () => {
     const res = await fetch(biSectionUrl(section), {cache:'no-store'});
@@ -4306,7 +4321,7 @@ async function loadBiSection(section){
         throw new Error(section + ' generatedAt 不匹配：section=' + payloadGeneratedAt + ' core=' + expectedGeneratedAt);
       }
     }
-    Object.assign(DATA, data || {});
+    mergeBiSectionData(data || {});
     BI_SECTION_LOADED.add(section);
     biSectionState[section] = {status:'loaded', loadedAt:new Date().toISOString()};
   })();
@@ -4322,15 +4337,37 @@ async function loadBiSections(sections){
   for (const section of sections) await loadBiSection(section);
 }
 let biBackgroundLoadActive = false;
+let biSectionRenderTimer = null;
+function mergeBiSectionData(data){
+  if (!data || typeof data !== 'object') return;
+  const rankings = data.rankings;
+  const rest = {...data};
+  delete rest.rankings;
+  Object.assign(DATA, rest);
+  if (rankings && typeof rankings === 'object') {
+    DATA.rankings = {
+      ...((DATA.rankings && typeof DATA.rankings === 'object') ? DATA.rankings : {}),
+      ...rankings,
+    };
+  }
+}
+function scheduleBiSectionRender(){
+  if (biSectionRenderTimer) return;
+  biSectionRenderTimer = setTimeout(() => {
+    biSectionRenderTimer = null;
+    renderFilters();
+    renderAll();
+  }, 180);
+}
 function startBiSectionBackgroundLoads(sections){
-  const pending = (sections || []).filter(section => !biSectionLoaded(section) && biSectionState[section]?.status !== 'error');
+  const pending = (sections || []).filter(section => !biSectionReady(section) && biSectionState[section]?.status !== 'error');
   if (!pending.length || biBackgroundLoadActive) return;
   biBackgroundLoadActive = true;
   (async () => {
     let hadError = false;
     try {
       await Promise.all(pending.map(async section => {
-        if (biSectionLoaded(section)) return;
+        if (biSectionReady(section)) return;
         try {
           await loadBiSection(section);
         } catch (err) {
@@ -4338,16 +4375,14 @@ function startBiSectionBackgroundLoads(sections){
           console.warn('background BI section load failed', section, err);
           return;
         }
-        renderFilters();
-        renderAll();
+        scheduleBiSectionRender();
       }));
       if (hadError) {
-        renderFilters();
-        renderAll();
+        scheduleBiSectionRender();
       }
     } finally {
       biBackgroundLoadActive = false;
-      renderAll();
+      scheduleBiSectionRender();
     }
   })();
 }
@@ -6283,7 +6318,7 @@ function kpiJump(tab, patch = {}){
 }
 function renderKpis(){
   const range = ensureDateRange();
-  const rankingsLoading = biPortalUsesApiSections() && !biSectionLoaded('rankings');
+  const rankingsLoading = biPortalUsesApiSections() && !homeRankingsLoaded();
   const profitLoading = !homeProfitReadyForRender();
   const afterSalesLoading = biPortalUsesApiSections() && !biSectionLoaded('afterSales');
   const salesTitle = state.salesMode === 'gross' ? '当前时段总销售额' : '当前时段净销售额';
@@ -7154,7 +7189,7 @@ function homeSalesTrendSvg(){
 }
 function renderHomeDashboard(){
   const selectedRange = ensureDateRange();
-  const rankingsLoading = biPortalUsesApiSections() && !biSectionLoaded('rankings');
+  const rankingsLoading = biPortalUsesApiSections() && !homeRankingsLoaded();
   const actionsLoading = biPortalUsesApiSections() && !biSectionLoaded('actions');
   syncHomeScopeControls();
   ensureRankWindow();
@@ -8620,7 +8655,7 @@ function buildBriefing(){
 function renderBriefing(){
   const briefingMissing = biPortalUsesApiSections() ? missingBiSections(BRIEFING_SECTION_KEYS) : [];
   if (briefingMissing.length) {
-    const pendingText = briefingMissing.map(s => s === 'financeData' ? '财务明细' : s === 'afterSales' ? '售后明细' : s === 'actions' ? '动作池' : s === 'rankings' ? '排行榜' : s).join('、');
+    const pendingText = briefingMissing.map(s => s === 'financeData' ? '财务明细' : s === 'afterSales' ? '售后明细' : s === 'actions' ? '动作池' : s === 'homeRankings' || s === 'rankings' ? '首页销售/排行' : s).join('、');
     $('dailyBriefing').innerHTML =
       '<div class="briefing-main">'+
         '<h4>SHEIN BI 今日经营简报</h4>'+

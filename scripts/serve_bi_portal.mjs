@@ -19,6 +19,7 @@ import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import crypto from 'node:crypto';
 import os from 'node:os';
+import {gzipSync} from 'node:zlib';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
@@ -91,7 +92,7 @@ const LINK_OPS_MAX_UPLOAD_FILE_BYTES = 20 * 1024 * 1024;
 const LINK_OPS_MAX_UPLOAD_TOTAL_BYTES = 120 * 1024 * 1024;
 const DEFAULT_SHEIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC', 'DSY', 'LGM'];
 const DEFAULT_MANUAL_LOGIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
-const BI_PORTAL_SECTION_KEYS = new Set(['homeProfit', 'rankings', 'profit', 'actions', 'linksData', 'comments', 'orders', 'afterSales', 'financeData', 'rtvData', 'waybills']);
+const BI_PORTAL_SECTION_KEYS = new Set(['homeProfit', 'homeRankings', 'rankings', 'profit', 'actions', 'linksData', 'comments', 'orders', 'afterSales', 'financeData', 'rtvData', 'waybills']);
 const BI_PORTAL_SECTION_TIMEOUT_MS = Math.max(60_000, Number(process.env.SHEIN_BI_SECTION_TIMEOUT_MS || 900_000));
 const biSectionInFlight = new Map();
 const LINK_OPS_STORE_CAPABILITIES = {
@@ -262,6 +263,13 @@ async function writeJsonFileCompact(file, value) {
   await fs.mkdir(path.dirname(file), {recursive: true});
   const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(value), 'utf8');
+  await fs.rename(tmp, file);
+}
+
+async function writeBufferFileAtomic(file, buffer) {
+  await fs.mkdir(path.dirname(file), {recursive: true});
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  await fs.writeFile(tmp, buffer);
   await fs.rename(tmp, file);
 }
 
@@ -1408,7 +1416,33 @@ function extractJsonStringFieldFromHead(head, field) {
   return re.exec(head)?.[1] || '';
 }
 
-async function readBiSectionCacheRaw(root, section, generatedAt, cacheHit = true) {
+function acceptsGzip(value) {
+  return /\bgzip\b/i.test(String(value || ''));
+}
+
+async function writeBiSectionGzipCache(file, rawBuffer) {
+  const gzipFile = `${file}.gz`;
+  const gzipped = gzipSync(rawBuffer, {level: 6});
+  await writeBufferFileAtomic(gzipFile, gzipped);
+  return gzipped;
+}
+
+async function readOrCreateBiSectionGzipCache(file, rawBuffer) {
+  const gzipFile = `${file}.gz`;
+  const [rawStat, gzipStat] = await Promise.all([
+    fs.stat(file).catch(() => null),
+    fs.stat(gzipFile).catch(() => null),
+  ]);
+  if (gzipStat?.size > 0 && (!rawStat || gzipStat.mtimeMs >= rawStat.mtimeMs)) {
+    const existing = await fs.readFile(gzipFile).catch(() => null);
+    if (existing?.length) return existing;
+  }
+  const gzipped = gzipSync(rawBuffer, {level: 6});
+  writeBufferFileAtomic(gzipFile, gzipped).catch(() => {});
+  return gzipped;
+}
+
+async function readBiSectionCacheRaw(root, section, generatedAt, cacheHit = true, options = {}) {
   const file = path.join(root, 'sections', `${section}.json`);
   const buffer = await fs.readFile(file).catch(() => null);
   if (!buffer || !buffer.length) return null;
@@ -1422,6 +1456,21 @@ async function readBiSectionCacheRaw(root, section, generatedAt, cacheHit = true
   if (expectedGeneratedAt && cachedGeneratedAt !== expectedGeneratedAt) return null;
   if (extractJsonStringFieldFromHead(head, 'section') !== section) return null;
   if (!/"data"\s*:/.test(head)) return null;
+
+  if (options.gzip) {
+    const body = await readOrCreateBiSectionGzipCache(file, buffer);
+    return {
+      body,
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Encoding': 'gzip',
+        'Content-Length': String(body.length),
+        'Vary': 'Accept-Encoding',
+        'X-BI-Section-Cache-Hit': cacheHit ? 'true' : 'false',
+        'X-BI-Section-Mode': 'raw-cache-gzip',
+      },
+    };
+  }
 
   const body = appendCacheHitToJsonObjectBuffer(buffer, cacheHit);
   if (!body) return null;
@@ -1451,7 +1500,13 @@ async function writeBiSectionCache(root, section, generatedAt, data, run) {
       stderrTail: String(run.stderr || '').slice(-4000),
     } : null,
   };
-  await writeJsonFileCompact(file, payload);
+  const raw = Buffer.from(JSON.stringify(payload), 'utf8');
+  await writeBufferFileAtomic(file, raw);
+  try {
+    await writeBiSectionGzipCache(file, raw);
+  } catch (err) {
+    console.warn('BI section gzip cache write failed', section, err?.message || err);
+  }
   return payload;
 }
 
@@ -1651,7 +1706,31 @@ async function generateBiSection(args, root, section, generatedAt) {
   } catch (err) {
     throw new Error(`BI section ${section} returned invalid JSON: ${err?.message || err}`);
   }
+  if (section === 'homeRankings') {
+    data = compactHomeRankingsSectionData(data);
+  }
   return writeBiSectionCache(root, section, generatedAt, data, run);
+}
+
+function compactHomeRankingsSectionData(data) {
+  if (!data?.rankings || typeof data.rankings !== 'object') return data;
+  const compact = {...data, rankings: {...data.rankings}};
+  for (const key of ['dailyProducts', 'dailyStoreProducts']) {
+    const rows = Array.isArray(compact.rankings[key]) ? compact.rankings[key] : null;
+    if (!rows) continue;
+    compact.rankings[key] = rows.map(row => {
+      if (!row || typeof row !== 'object') return row;
+      const {
+        goods_title: _goodsTitle,
+        skc_list: _skcList,
+        product_display_name: _productDisplayName,
+        product_display_name_source: _productDisplayNameSource,
+        ...rest
+      } = row;
+      return rest;
+    });
+  }
+  return compact;
 }
 
 async function loadBiSection(args, root, section, options = {}) {
@@ -1668,14 +1747,14 @@ async function loadBiSection(args, root, section, options = {}) {
     const cached = !force ? await readBiSectionCache(root, section, meta.generatedAt) : null;
     const cachedSourceGeneratedAt = String(cached?.data?.homeProfitSummary?.sourceGeneratedAt || '');
     if (cached && cachedSourceGeneratedAt === String(meta.generatedAt || '')) {
-      const rawCached = await readBiSectionCacheRaw(root, section, meta.generatedAt, true);
+      const rawCached = await readBiSectionCacheRaw(root, section, meta.generatedAt, true, options);
       if (rawCached) return {status: 200, rawBody: rawCached.body, headers: rawCached.headers};
       return {status: 200, payload: {...cached, cacheHit: true}};
     }
     if (cached && cachedSourceGeneratedAt !== String(meta.generatedAt || '')) {
       const currentProfitCache = await readBiSectionCache(root, 'profit', meta.generatedAt);
       if (!currentProfitCache) {
-        const rawCached = await readBiSectionCacheRaw(root, section, meta.generatedAt, true);
+        const rawCached = await readBiSectionCacheRaw(root, section, meta.generatedAt, true, options);
         if (rawCached) return {status: 200, rawBody: rawCached.body, headers: rawCached.headers};
         return {status: 200, payload: {...cached, cacheHit: true}};
       }
@@ -1699,7 +1778,7 @@ async function loadBiSection(args, root, section, options = {}) {
     }
     const payload = await biSectionInFlight.get(key);
     if (payload) {
-      const rawGenerated = await readBiSectionCacheRaw(root, section, meta.generatedAt, false);
+      const rawGenerated = await readBiSectionCacheRaw(root, section, meta.generatedAt, false, options);
       if (rawGenerated) return {status: 200, rawBody: rawGenerated.body, headers: rawGenerated.headers};
       return {status: 200, payload: {...payload, cacheHit: false}};
     }
@@ -1714,7 +1793,7 @@ async function loadBiSection(args, root, section, options = {}) {
     };
   }
   if (!force) {
-    const rawCached = await readBiSectionCacheRaw(root, section, meta.generatedAt, true);
+    const rawCached = await readBiSectionCacheRaw(root, section, meta.generatedAt, true, options);
     if (rawCached) return {status: 200, rawBody: rawCached.body, headers: rawCached.headers};
     const cached = await readBiSectionCache(root, section, meta.generatedAt);
     if (cached) return {status: 200, payload: {...cached, cacheHit: true}};
@@ -1737,7 +1816,7 @@ async function loadBiSection(args, root, section, options = {}) {
     }));
   }
   const payload = await biSectionInFlight.get(key);
-  const rawGenerated = await readBiSectionCacheRaw(root, section, meta.generatedAt, false);
+  const rawGenerated = await readBiSectionCacheRaw(root, section, meta.generatedAt, false, options);
   if (rawGenerated) return {status: 200, rawBody: rawGenerated.body, headers: rawGenerated.headers};
   return {status: 200, payload: {...payload, cacheHit: false}};
 }
@@ -2152,7 +2231,7 @@ async function main() {
             return sendJson(res, 403, {ok: false, section, error: 'Section refresh is disabled in read-only or unauthenticated LAN mode'});
           }
           try {
-            const result = await loadBiSection(args, root, section, {force, allowGenerate});
+            const result = await loadBiSection(args, root, section, {force, allowGenerate, gzip: acceptsGzip(req.headers['accept-encoding'])});
             if (result.rawBody) return send(res, result.status, result.rawBody, result.headers || {'Content-Type': 'application/json; charset=utf-8'});
             return sendJson(res, result.status, result.payload);
           } catch (err) {

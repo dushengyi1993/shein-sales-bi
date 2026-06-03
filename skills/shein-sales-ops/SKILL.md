@@ -134,7 +134,7 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - `config/lark_report.json` 必须是合法 UTF-8 JSON；如果日报发送/读取配置异常，先用 JSON parser 校验它。
 - 关键改动后跑逻辑体检，目标 `0 error / 0 warning`。
 - BI 用户可见改动先在云端页面或云端服务输出验证，用户确认后再发布 GitHub `main` / release；本地验证不能替代云端最终审核。
-- 首页利润异常偏低时先查 section cache，不要直接按页面数字下结论：`homeProfit` 从 `profit` 派生，`homeProfitSummary.sourceGeneratedAt` 必须等于当前 `data.json.__sections.generatedAt` 且 `staleSource=false`；预热要先保障首页销售/订单/售后关键 section，再把较慢的 `profit` 放到后段并成功后补跑 `homeProfit`，避免利润刷新阻塞首页其他指标。
+- 首页利润异常偏低时先查 section cache，不要直接按页面数字下结论：`homeProfit` 从 `profit` 派生，`homeProfitSummary.sourceGeneratedAt` 必须等于当前 `data.json.__sections.generatedAt` 且 `staleSource=false`；预热要先保障首页 `homeRankings/afterSales/homeProfit/actions/financeData`，再把完整 `rankings` 和较慢的 `profit` 放到后段并成功后补跑 `homeProfit`，避免利润刷新阻塞首页其他指标。若首页销售/订单/售后慢，先确认公网首屏没有拉完整 `rankings`，而是命中轻量 `homeRankings` gzip cache。
 - V1 时间筛选弹窗关键不变量：日期输入为文本 `YYYY-MM-DD`；点击月份切换后弹窗保持打开并更新月份，`aria-expanded=true`；按钮事件绑定实际弹窗 root，不能绑旧 toolbar root。
 
 ## ET 前台窗口规则
