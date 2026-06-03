@@ -6676,14 +6676,14 @@ function productRankName(r){
 function productRankMeta(r, extra = ''){
   return extra;
 }
-function productAverageNetPriceSar(r){
+function averageNetUnitPriceSar(r){
   const qty = Number(r?.quantity || 0);
   const sales = Number(r?.sales_sar || 0);
   if (!(qty > 0) || !(sales > 0)) return null;
   return sales / qty;
 }
-function productAverageNetPriceText(r){
-  const avg = productAverageNetPriceSar(r);
+function averageNetUnitPriceText(r){
+  const avg = averageNetUnitPriceSar(r);
   return avg == null ? '成交均价 —' : '成交均价 '+money(avg)+'/件';
 }
 function focusProductQueryFromHome(value){
@@ -7178,11 +7178,11 @@ function renderHomeDashboard(){
     '</div>'+
     '<div class="dashboard-section-title"><h3>排行榜</h3><div class="sub">店铺只显示 DL/DX 等代号，货号显示归并后的标准货号；排行榜按上方时间段重算。</div></div>'+
     '<div class="dashboard-grid equal">'+
-      panel('店铺净成交额排行', rankingsLoading ? '当前范围明细加载中' : '当前范围 '+num(storeBySales.length)+' 店 · '+periodRangeText(rankSummary), rankingsLoading ? sectionLoadingHtml('店铺排行') : rankList(storeBySales, {valueKey:'sales_sar', name:storeRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:r=>groupColor(storeGroupKey(r)), meta:r=>'订单 '+num(r.orders)+' · 销量 '+num(r.quantity)+' 件 · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+
+      panel('店铺净成交额排行', rankingsLoading ? '当前范围明细加载中' : '当前范围 '+num(storeBySales.length)+' 店 · '+periodRangeText(rankSummary), rankingsLoading ? sectionLoadingHtml('店铺排行') : rankList(storeBySales, {valueKey:'sales_sar', name:storeRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:r=>groupColor(storeGroupKey(r)), meta:r=>averageNetUnitPriceText(r)+' · 订单 '+num(r.orders)+' · 销量 '+num(r.quantity)+' 件 · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+
       panel('店铺净销量排行', rankingsLoading ? '当前范围明细加载中' : '完整 '+num(storeByQty.length)+' 店 · 按净成交销量件数排序。', rankingsLoading ? sectionLoadingHtml('店铺销量排行') : rankList(storeByQty, {valueKey:'quantity', name:storeRankName, format:v=>num(v)+' 件', subValue:r=>money(r.sales_sar), color:r=>groupColor(storeGroupKey(r)), meta:r=>'订单 '+num(r.orders)+' · 净成交 '+money(r.sales_sar)+' · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+
     '</div>'+
     '<div class="dashboard-grid equal" style="margin-top:16px">'+
-      panel('产品净成交额排行', rankingsLoading ? '当前范围明细加载中' : '当前范围 '+num(productBySales.length)+' 个标准货号 · 点击进入货号 360。', rankingsLoading ? sectionLoadingHtml('产品销售排行') : rankList(productBySales, {className:'product-rank', valueKey:'sales_sar', name:productRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:()=> '#db2777', meta:r=>productRankMeta(r, productAverageNetPriceText(r)+' · 销量 '+num(r.quantity)+' 件 · 订单 '+num(r.orders)+' · 覆盖 '+num(r.store_count)+' 店 · '+num(r.days)+' 天'), attr:r=>'data-home-product="'+escapeHtml(r.standard_goods_sn || '')+'"'}))+
+      panel('产品净成交额排行', rankingsLoading ? '当前范围明细加载中' : '当前范围 '+num(productBySales.length)+' 个标准货号 · 点击进入货号 360。', rankingsLoading ? sectionLoadingHtml('产品销售排行') : rankList(productBySales, {className:'product-rank', valueKey:'sales_sar', name:productRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:()=> '#db2777', meta:r=>productRankMeta(r, averageNetUnitPriceText(r)+' · 销量 '+num(r.quantity)+' 件 · 订单 '+num(r.orders)+' · 覆盖 '+num(r.store_count)+' 店 · '+num(r.days)+' 天'), attr:r=>'data-home-product="'+escapeHtml(r.standard_goods_sn || '')+'"'}))+
       panel('产品净销量排行', rankingsLoading ? '当前范围明细加载中' : '完整 '+num(productByQty.length)+' 个标准货号 · 按净成交销量件数排序。', rankingsLoading ? sectionLoadingHtml('产品销量排行') : rankList(productByQty, {className:'product-rank', valueKey:'quantity', name:productRankName, format:v=>num(v)+' 件', subValue:r=>money(r.sales_sar), color:()=> '#a855f7', meta:r=>productRankMeta(r, '净成交 '+money(r.sales_sar)+' · 订单 '+num(r.orders)+' · 覆盖 '+num(r.store_count)+' 店 · '+num(r.days)+' 天'), attr:r=>'data-home-product="'+escapeHtml(r.standard_goods_sn || '')+'"'}))+
     '</div>'+
     '<div class="dashboard-section-title"><h3>动作与风险</h3><div class="sub">首页只看结构，具体处理进动作池。</div></div>'+
