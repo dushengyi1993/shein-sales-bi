@@ -6100,28 +6100,91 @@ function profitDailyRows(start, end, scopeValue = state.store, respectProduct = 
     return true;
   });
 }
-function profitStorageForScope(start, end, scopeValue = state.store, respectProduct = true, opts = {}){
-  const q = respectProduct ? productScopeQuery() : '';
-  const scope = storeFilterKind(scopeValue);
-  let source = DATA.profit?.storeStorageDaily || [];
-  let useStoreScope = true;
-  if (q) {
-    // 当前筛选范围摘要基于 dailyStoreProducts/store-product 行重算，必须使用同一可加仓储桥接；
-    // 完整产品持有仓储费仍保留在 DATA.profit.products 等产品汇总视角，避免在同一矩阵里混用两种 lens。
-    const useProductStorageDaily = opts.productStorageLens === 'product';
-    source = scope.type === 'all' && useProductStorageDaily
-      ? (DATA.profit?.productStorageDaily || [])
-      : (DATA.profit?.productStoreStorageDaily || []);
-    useStoreScope = scope.type !== 'all';
+function productStorageProductKey(row){
+  return String(row?.standard_goods_sn || '').trim();
+}
+function productScopeProductSet(start, end, q = productScopeQuery()){
+  const set = new Set();
+  if (!q) return set;
+  for (const r of DATA.profit?.dailyStoreProducts || []) {
+    const d = String(r.date || '').slice(0, 10);
+    if (!d || d < start || d > end) continue;
+    if (!productQueryMatch(r, q)) continue;
+    const key = productStorageProductKey(r);
+    if (key) set.add(key);
   }
+  return set;
+}
+function productStorageRowMatches(row, q, productSet){
+  if (!q) return true;
+  const key = productStorageProductKey(row);
+  return (key && productSet?.has?.(key)) || productQueryMatch(row, q);
+}
+function productStorageAllocationWeight(row){
+  const revenue = Number(row.known_net_revenue_sar ?? row.net_revenue_sar ?? row.gross_revenue_sar ?? 0);
+  if (revenue > 0) return revenue;
+  const quantity = Number(row.quantity || row.gross_quantity || 0);
+  if (quantity > 0) return quantity;
+  const orders = Number(row.orders || row.gross_orders || 0);
+  return orders > 0 ? orders : 0;
+}
+function productStorageAllocationWeights(start, end, scopeValue, q, productSet){
+  const weights = new Map();
+  for (const r of DATA.profit?.dailyStoreProducts || []) {
+    const d = String(r.date || '').slice(0, 10);
+    if (!d || d < start || d > end) continue;
+    if (!productStorageRowMatches(r, q, productSet)) continue;
+    const key = productStorageProductKey(r);
+    if (!key) continue;
+    const w = productStorageAllocationWeight(r);
+    if (!(w > 0)) continue;
+    const row = weights.get(key) || {total:0, scoped:0};
+    row.total += w;
+    if (storeMatchesScope(r, scopeValue)) row.scoped += w;
+    weights.set(key, row);
+  }
+  return weights;
+}
+function allocatedProductStorageForScope(start, end, scopeValue, q){
+  const scope = storeFilterKind(scopeValue);
+  const productSet = productScopeProductSet(start, end, q);
+  const storageByProduct = new Map();
+  const methods = new Set();
+  let matched = 0;
+  for (const r of DATA.profit?.productStorageDaily || []) {
+    const d = String(r.date || '').slice(0, 10);
+    if (!d || d < start || d > end) continue;
+    if (!productStorageRowMatches(r, q, productSet)) continue;
+    const key = productStorageProductKey(r);
+    if (!key) continue;
+    storageByProduct.set(key, (storageByProduct.get(key) || 0) + Number(r.storage_fee_sar || 0));
+    matched += 1;
+    const method = String(r.storage_fee_method || '').trim();
+    if (method) methods.add(method);
+  }
+  if (scope.type === 'all') {
+    return {total:Array.from(storageByProduct.values()).reduce((sum, v) => sum + v, 0), matched, method:Array.from(methods).join(' / ') || 'product_storage_daily'};
+  }
+  const weights = productStorageAllocationWeights(start, end, scopeValue, q, productSet);
+  let total = 0;
+  for (const [key, storageFee] of storageByProduct.entries()) {
+    const w = weights.get(key);
+    if (!w || !(w.total > 0) || !(w.scoped > 0)) continue;
+    total += storageFee * (w.scoped / w.total);
+  }
+  return {total, matched, method:(Array.from(methods).join(' / ') || 'product_storage_daily') + ':allocated_by_scope_sales_weight'};
+}
+function profitStorageForScope(start, end, scopeValue = state.store, respectProduct = true){
+  const q = respectProduct ? productScopeQuery() : '';
+  if (q) return allocatedProductStorageForScope(start, end, scopeValue, q);
+  let source = DATA.profit?.storeStorageDaily || [];
   let total = 0;
   let matched = 0;
   const methods = new Set();
   for (const r of source || []) {
     const d = String(r.date || '').slice(0, 10);
     if (!d || d < start || d > end) continue;
-    if (useStoreScope && !storeMatchesScope(r, scopeValue)) continue;
-    if (q && !productQueryMatch(r, q)) continue;
+    if (!storeMatchesScope(r, scopeValue)) continue;
     total += Number(r.storage_fee_sar || 0);
     matched += 1;
     const method = String(r.storage_fee_method || '').trim();
@@ -6279,9 +6342,7 @@ function profitSummaryForRows(rows, opts = {}){
     out.orders += Number(r.orders || 0);
     out.quantity += Number(r.quantity || 0);
   }
-  const storage = profitStorageForScope(range.start, range.end, scopeValue, respectProduct, {
-    productStorageLens: opts.productStorageLens || ''
-  });
+  const storage = profitStorageForScope(range.start, range.end, scopeValue, respectProduct);
   const bridgeFallback = rows && rows.length && storage.matched === 0 ? rows.reduce((sum, r) => sum + Number(r.storage_fee_sar || 0), 0) : 0;
   out.storageFeeSar = storage.matched > 0 ? storage.total : bridgeFallback;
   out.storageFeeMethod = storage.matched > 0 ? storage.method : (bridgeFallback ? 'store_product_sales_bridge:fallback' : 'none');
