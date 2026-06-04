@@ -95,6 +95,16 @@ const DEFAULT_MANUAL_LOGIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY
 const BI_PORTAL_SECTION_KEYS = new Set(['homeProfit', 'homeRankings', 'rankings', 'profit', 'actions', 'linksData', 'comments', 'orders', 'afterSales', 'financeData', 'rtvData', 'waybills']);
 const BI_PORTAL_SECTION_TIMEOUT_MS = Math.max(60_000, Number(process.env.SHEIN_BI_SECTION_TIMEOUT_MS || 900_000));
 const biSectionInFlight = new Map();
+const DEFAULT_BI_PORTAL_CORE_WARMUP_SECTIONS = ['homeRankings', 'profit', 'homeProfit', 'afterSales', 'actions', 'financeData', 'rankings', 'linksData', 'comments', 'orders', 'rtvData', 'waybills'];
+const BI_PORTAL_CORE_WARMUP_INTERVAL_MS = Math.max(15_000, Number(process.env.SHEIN_BI_CORE_WARMUP_INTERVAL_MS || 60_000));
+const biPortalCoreWarmupState = {
+  generatedAt: '',
+  status: 'idle',
+  startedAt: 0,
+  finishedAt: 0,
+  inFlight: null,
+  lastError: '',
+};
 const LINK_OPS_STORE_CAPABILITIES = {
   HL: {
     openapiAuthorized: true,
@@ -1855,6 +1865,175 @@ async function loadBiSection(args, root, section, options = {}) {
   return {status: 200, payload: {...payload, cacheHit: false}};
 }
 
+
+function configuredBiPortalCoreWarmupSections() {
+  const raw = String(process.env.SHEIN_BI_CORE_WARMUP_SECTIONS || '').trim();
+  const candidates = raw
+    ? raw.split(',').map(x => x.trim()).filter(Boolean)
+    : DEFAULT_BI_PORTAL_CORE_WARMUP_SECTIONS;
+  const seen = new Set();
+  const sections = [];
+  for (const section of candidates) {
+    if (!BI_PORTAL_SECTION_KEYS.has(section) || seen.has(section)) continue;
+    seen.add(section);
+    sections.push(section);
+  }
+  return sections;
+}
+
+function logBiPortalCoreWarmup(message, extra = {}) {
+  const parts = Object.entries(extra)
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .map(([key, value]) => `${key}=${String(value)}`);
+  console.error(`[bi-core-warmup] ${message}${parts.length ? ` ${parts.join(' ')}` : ''}`);
+}
+
+async function scheduleBiPortalCoreWarmup(args, root, options = {}) {
+  if (process.env.SHEIN_BI_CORE_WARMUP_DISABLED === '1') {
+    return {scheduled: false, reason: 'disabled'};
+  }
+  const allowGenerate = options.allowGenerate !== false;
+  if (!allowGenerate) return {scheduled: false, reason: 'generation-disabled'};
+
+  let meta;
+  try {
+    meta = options.meta || await readBiPortalCoreMeta(root);
+  } catch (err) {
+    biPortalCoreWarmupState.lastError = err?.message || String(err || 'read core meta failed');
+    logBiPortalCoreWarmup('skip', {reason: 'read-meta-failed', error: biPortalCoreWarmupState.lastError});
+    return {scheduled: false, reason: 'read-meta-failed'};
+  }
+  const generatedAt = String(meta?.generatedAt || '');
+  if (meta?.mode !== 'api' || !generatedAt) {
+    return {scheduled: false, reason: 'not-api-mode', mode: meta?.mode || 'unknown'};
+  }
+  if (biPortalCoreWarmupState.inFlight) {
+    return {
+      scheduled: false,
+      reason: 'already-running',
+      generatedAt,
+      runningGeneratedAt: biPortalCoreWarmupState.generatedAt,
+    };
+  }
+  if (biPortalCoreWarmupState.generatedAt === generatedAt && biPortalCoreWarmupState.status === 'done') {
+    return {scheduled: false, reason: 'already-warm', generatedAt};
+  }
+
+  const sections = configuredBiPortalCoreWarmupSections();
+  if (!sections.length) return {scheduled: false, reason: 'no-sections', generatedAt};
+
+  const run = runBiPortalCoreWarmup(args, root, {generatedAt, mode: meta.mode}, {
+    ...options,
+    allowGenerate,
+    sections,
+  }).finally(() => {
+    if (biPortalCoreWarmupState.inFlight === run) biPortalCoreWarmupState.inFlight = null;
+  });
+  biPortalCoreWarmupState.inFlight = run;
+  return {scheduled: true, generatedAt, sections};
+}
+
+async function runBiPortalCoreWarmup(args, root, meta, options = {}) {
+  const generatedAt = String(meta?.generatedAt || '');
+  const sections = Array.isArray(options.sections) && options.sections.length
+    ? options.sections
+    : configuredBiPortalCoreWarmupSections();
+  const startedAt = Date.now();
+  biPortalCoreWarmupState.generatedAt = generatedAt;
+  biPortalCoreWarmupState.status = 'running';
+  biPortalCoreWarmupState.startedAt = startedAt;
+  biPortalCoreWarmupState.finishedAt = 0;
+  biPortalCoreWarmupState.lastError = '';
+  logBiPortalCoreWarmup('start', {
+    generatedAt,
+    reason: options.reason || 'watcher',
+    sections: sections.join(','),
+  });
+
+  const failures = [];
+  const results = [];
+  try {
+    for (const section of sections) {
+      const latestMeta = await readBiPortalCoreMeta(root).catch(() => meta);
+      const latestGeneratedAt = String(latestMeta?.generatedAt || '');
+      if (latestGeneratedAt && latestGeneratedAt !== generatedAt) {
+        biPortalCoreWarmupState.status = 'stale';
+        biPortalCoreWarmupState.lastError = `core generatedAt changed during warmup: ${generatedAt} -> ${latestGeneratedAt}`;
+        logBiPortalCoreWarmup('stop-stale', {
+          generatedAt,
+          latestGeneratedAt,
+          nextSection: section,
+        });
+        return {ok: false, stale: true, generatedAt, latestGeneratedAt, results, failures};
+      }
+
+      const sectionStartedAt = Date.now();
+      try {
+        const result = await loadBiSection(args, root, section, {
+          force: false,
+          allowGenerate: options.allowGenerate !== false,
+          gzip: false,
+        });
+        const durationMs = Date.now() - sectionStartedAt;
+        const ok = result?.status >= 200 && result.status < 300;
+        results.push({section, status: result?.status || 0, durationMs, ok});
+        logBiPortalCoreWarmup('section', {
+          section,
+          status: result?.status || 0,
+          durationMs,
+          cacheMode: result?.rawBody ? 'raw' : 'json',
+        });
+        if (!ok) failures.push({section, status: result?.status || 0, error: result?.payload?.error || 'non-2xx'});
+      } catch (err) {
+        const durationMs = Date.now() - sectionStartedAt;
+        const error = err?.message || String(err || 'section failed');
+        failures.push({section, status: 500, error});
+        logBiPortalCoreWarmup('section-failed', {section, durationMs, error: error.slice(0, 500)});
+      }
+    }
+  } catch (err) {
+    const error = err?.message || String(err || 'warmup failed');
+    failures.push({section: '*', status: 500, error});
+    logBiPortalCoreWarmup('failed', {generatedAt, error: error.slice(0, 500)});
+  } finally {
+    biPortalCoreWarmupState.finishedAt = Date.now();
+  }
+
+  if (failures.length) {
+    biPortalCoreWarmupState.status = 'error';
+    biPortalCoreWarmupState.lastError = failures.map(x => `${x.section}:${x.error || x.status}`).join('; ').slice(0, 1000);
+  } else {
+    biPortalCoreWarmupState.status = 'done';
+    biPortalCoreWarmupState.lastError = '';
+  }
+  const durationSec = Math.round((Date.now() - startedAt) / 1000);
+  logBiPortalCoreWarmup('done', {
+    generatedAt,
+    status: biPortalCoreWarmupState.status,
+    durationSec,
+    failures: failures.length,
+  });
+  return {ok: failures.length === 0, generatedAt, results, failures};
+}
+
+function startBiPortalCoreWarmupWatcher(args, root, options = {}) {
+  if (process.env.SHEIN_BI_CORE_WARMUP_DISABLED === '1') return null;
+  if (options.allowGenerate === false) {
+    logBiPortalCoreWarmup('disabled', {reason: 'generation-disabled'});
+    return null;
+  }
+  const tick = () => {
+    scheduleBiPortalCoreWarmup(args, root, {...options, reason: 'watcher'}).catch(err => {
+      biPortalCoreWarmupState.lastError = err?.message || String(err || 'schedule failed');
+      logBiPortalCoreWarmup('schedule-failed', {error: biPortalCoreWarmupState.lastError.slice(0, 500)});
+    });
+  };
+  tick();
+  const timer = setInterval(tick, BI_PORTAL_CORE_WARMUP_INTERVAL_MS);
+  if (typeof timer.unref === 'function') timer.unref();
+  return timer;
+}
+
 async function askReadonlyOpsAgent(question, options = {}) {
   const text = String(question || '').trim();
   if (!text) throw new Error('Missing question');
@@ -2220,6 +2399,7 @@ async function main() {
   if (authRequired && authUsers.length === 0) {
     throw new Error(`LAN collaboration requires at least one user in ${args.authFile} or infra/metabase/.admin.local.json`);
   }
+  const allowGenerateSections = !(args.readOnly || (args.host === '0.0.0.0' && !authRequired));
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -2247,6 +2427,15 @@ async function main() {
           writableLinkOpsChats: !args.readOnly,
           readOnly: args.readOnly,
           authRequired,
+          allowGenerateSections,
+          biCoreWarmup: {
+            generatedAt: biPortalCoreWarmupState.generatedAt,
+            status: biPortalCoreWarmupState.status,
+            startedAt: biPortalCoreWarmupState.startedAt ? new Date(biPortalCoreWarmupState.startedAt).toISOString() : null,
+            finishedAt: biPortalCoreWarmupState.finishedAt ? new Date(biPortalCoreWarmupState.finishedAt).toISOString() : null,
+            inFlight: Boolean(biPortalCoreWarmupState.inFlight),
+            lastError: biPortalCoreWarmupState.lastError,
+          },
           user: actor ? {
             username: actor.username,
             displayName: actor.displayName,
@@ -2260,7 +2449,7 @@ async function main() {
           if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
           const section = decodeURIComponent(m[1]);
           const force = url.searchParams.get('refresh') === '1';
-          const allowGenerate = !(args.readOnly || (args.host === '0.0.0.0' && !authRequired));
+          const allowGenerate = allowGenerateSections;
           if (force && !allowGenerate) {
             return sendJson(res, 403, {ok: false, section, error: 'Section refresh is disabled in read-only or unauthenticated LAN mode'});
           }
@@ -2915,6 +3104,12 @@ async function main() {
         }
         return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
       }
+      if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
+        scheduleBiPortalCoreWarmup(args, root, {allowGenerate: allowGenerateSections, reason: 'index'}).catch(err => {
+          biPortalCoreWarmupState.lastError = err?.message || String(err || 'schedule failed');
+          logBiPortalCoreWarmup('schedule-failed', {reason: 'index', error: biPortalCoreWarmupState.lastError.slice(0, 500)});
+        });
+      }
       let file = safePath(root, req.url || '/');
       if (!file) return send(res, 403, 'Forbidden', {'Content-Type': 'text/plain; charset=utf-8'});
       let stat;
@@ -2953,6 +3148,8 @@ async function main() {
     server.listen(args.port, args.host, resolve);
   });
 
+  startBiPortalCoreWarmupWatcher(args, root, {allowGenerate: allowGenerateSections});
+
   const urlHost = args.host === '0.0.0.0' ? '127.0.0.1' : args.host;
   console.log(JSON.stringify({
     ok: true,
@@ -2965,6 +3162,8 @@ async function main() {
     lanMode: args.host === '0.0.0.0',
     readOnly: args.readOnly,
     authRequired,
+    allowGenerateSections,
+    biCoreWarmupSections: configuredBiPortalCoreWarmupSections(),
     authUsers: authUsers.map(u => ({username: u.username, displayName: u.displayName, role: u.role, source: u.source})),
   }, null, 2));
 }
