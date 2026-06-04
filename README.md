@@ -86,6 +86,7 @@
 - ET 仓储费导出里的 `storage_code` / `sku_code` 必须保留原始值，例如 `DL-SK-999`；`match_key` 只作为内部归并键。面向 BI/利润展示的货号要通过 `mart.product_display_by_match_key` 回到销售或商品主档里的既有标准货号，不能把 ET 解析出的中间短码当成新商品暴露出来。
 - 营销活动确认表里的 `仓储费SAR/件` 不能用累计仓储费除以历史销量，也不能把全历史仓储费一刀切压到当前库存上；必须来自 BI `profit.productStorageDaily` 的“当前仍在仓库存移动平均累计仓储成本”：每日仓储费加入库存成本余额，库存数量减少时按当前平均成本剔除已出库产品携带的历史仓储成本。短码或无法确认的货号必须标记待归并暂停，不能按 0 仓储或猜测成本继续报名。
 - 配套优惠券活动只跟普通营销活动计划走：15% 券档目标是 `ordinary selection-plan ∩ MULTI_LEVEL_RULE_GOODS`，不是全部 15% 可报集合；只读复扫必须看 `15%券档已报是否等于普通计划` 与 `已报但不在普通计划数`。详见 `docs/marketing-campaign-signup-pricing-rules.md`。
+- 营销定价策略的机器可读入口是 `config/marketing_pricing_policy.json`：限时折扣必须作为兜底层存在但不得干扰目标成交价，默认从 `15%` 折扣起算；同货号 BI 正曝光量前五 SKC 可比其他链接低 `5` 个百分点目标利润率但不得低于 `15%` 底价，基础目标已为 `15%` 时前五保持 `15%`、其他链接提高到 `20%`；无正曝光指标不得猜前五。
 - 成本/利润页的高利润 / 低利润货号分界线固定为 `20%` 利润率：`>= 20%` 为可加码，`< 20%` 为需要处理。
 - 当前正式成本文件为 `inputs/costs/成本.xlsx`；`单台总成本（SAR）` 是单批单件完整成本输入，系统先还原为批次总成本，再按同货号所有完整批次加权平均计算单位成本。
 - 用户可见的产品主标题统一使用 `product_display_name`：生成端由 `lib/product_display_name.mjs` 基于 `standard_goods_sn`、`config/product_catalog.json` 和可靠中文标题补齐“标准货号+中文品名”；搜索、筛选、归因和仓库 key 仍使用 `standard_goods_sn` / `dim.product_match_key()`。无可靠中文来源的异常短码不编造中文，保留原值并标记待确认。
@@ -210,7 +211,7 @@
   `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_openapi_hl_reconciliation.ps1 -Mode intraday`
 - 生成营销活动成本映射：
   `python scripts/marketing/build_marketing_cost_map.py`
-- 生成并验证按货号汇总的营销确认表：
+- 生成并验证按货号汇总的营销确认表（会读取 `config/marketing_pricing_policy.json` 和 BI 曝光数据展示曝光前五价格差异）：
   `node scripts/marketing/build_marketing_sku_approval.mjs --date YYYY-MM-DD --version vN`
   `node scripts/marketing/verify_marketing_sku_approval.mjs --date YYYY-MM-DD --version vN`
 - 导出 DSY 营销活动填报标准（只读，按货号汇总给用户审核；默认排除优惠券活动）：

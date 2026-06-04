@@ -4,6 +4,12 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {normalizeGoodsSnDetailed} from '../../lib/product_sku_normalizer.mjs';
+import {
+  buildExposureTopLinkIndex,
+  loadMarketingPricingPolicy,
+  resolveExposureAdjustedMargin,
+  pctRatioText,
+} from '../../lib/marketing_pricing_policy.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
@@ -14,6 +20,8 @@ const COST_DOC = JSON.parse(await fs.readFile(path.join(ROOT, 'tmp', 'mbrs', 'ma
 const COSTS = COST_DOC.costMap || {};
 const TRUE_COSTS = COST_DOC.trueCostMap || {};
 const BI = JSON.parse(await fs.readFile(path.join(ROOT, 'outputs', 'bi-portal', 'data.json'), 'utf8'));
+const PRICING_POLICY = await loadMarketingPricingPolicy(path.join(ROOT, 'config', 'marketing_pricing_policy.json'));
+const EXPOSURE_INDEX = buildExposureTopLinkIndex(BI, PRICING_POLICY);
 
 const args = parseArgs(process.argv.slice(2));
 const now = new Date();
@@ -554,6 +562,7 @@ function classifyAndPrice(storeKey, activityId, row) {
   let basePrice = null;
   let randomNote = '';
   let needsReview = '';
+  let exposurePricing = null;
   if (fixed !== undefined) {
     rule = '用户明确固定价';
     basePrice = Number(fixed);
@@ -566,6 +575,23 @@ function classifyAndPrice(storeKey, activityId, row) {
     rule = '在仓库存去化>3且<=6个月：23%-27%利润率';
     targetMargin = randomBetween(seed, 0.23, 0.27);
     randomNote = '按店铺/活动/商品稳定随机';
+  }
+  if (basePrice === null && targetMargin !== null) {
+    exposurePricing = resolveExposureAdjustedMargin({
+      baseMargin: targetMargin,
+      canonical,
+      skc: row.skc,
+      policy: PRICING_POLICY,
+      exposureIndex: EXPOSURE_INDEX,
+    });
+    if (exposurePricing?.applied) {
+      targetMargin = exposurePricing.margin;
+      const topText = exposurePricing.isTopExposureLink ? '曝光前五链接' : '非曝光前五链接';
+      rule = `${rule}；${topText}利润率${pctRatioText(targetMargin)}`;
+      randomNote = [randomNote, `曝光排名规则：${exposurePricing.reason}`].filter(Boolean).join('；');
+    } else if (exposurePricing?.reason === 'exposure_data_unavailable') {
+      randomNote = [randomNote, '曝光数据缺失：未下调前五链接利润率'].filter(Boolean).join('；');
+    }
   }
 
   let targetPrice = null;
@@ -608,6 +634,7 @@ function classifyAndPrice(storeKey, activityId, row) {
     discountPct,
     randomNote,
     needsReview,
+    exposurePricing,
   };
 }
 
@@ -747,6 +774,9 @@ for (const store of selectedStores) {
           '去化周期月': priced.daysOnHand ? num(priced.daysOnHand / 30) : '',
           '定价规则': priced.rule,
           '建议目标利润率': priced.targetMargin === null ? '' : pct(priced.targetMargin),
+          '曝光排名': priced.exposurePricing?.rank?.rank ?? '',
+          '是否曝光前五': priced.exposurePricing?.rank?.isTopExposureLink ? '是' : (priced.exposurePricing?.rank?.hasExposureData ? '否' : ''),
+          '曝光规则原因': priced.exposurePricing?.reason || '',
           '建议活动价SAR': num(priced.targetPrice),
           '预计利润率': priced.projectedMargin === null ? '' : pct(priced.projectedMargin),
           '建议降幅%': priced.discountPct ?? '',
@@ -768,7 +798,7 @@ for (const store of selectedStores) {
 const headers = [
   '店铺','活动ID','活动名称','报名截止','活动开始','活动结束','行号','SKC','SKU','供方货号','标准货号',
   '当前售价SAR','平台最低降幅%','成本SAR','商品成本SAR','仓储成本SAR/件','含仓储成本SAR','仓储口径','在仓剩余库存','加权日均销量','去化周期天','去化周期月',
-  '定价规则','建议目标利润率','建议活动价SAR','预计利润率','建议降幅%','平台折扣压价','随机/备注','异常/待复核','修改意见/备注',
+  '定价规则','建议目标利润率','曝光排名','是否曝光前五','曝光规则原因','建议活动价SAR','预计利润率','建议降幅%','平台折扣压价','随机/备注','异常/待复核','修改意见/备注',
 ];
 
 const csv = [

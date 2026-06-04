@@ -9,6 +9,13 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {normalizeGoodsSnDetailed} from '../../lib/product_sku_normalizer.mjs';
+import {
+  buildExposureTopLinkIndex,
+  loadMarketingPricingPolicy,
+  pctConfigToRatio,
+  resolveExposureAdjustedMargin,
+  readJsonIfExists,
+} from '../../lib/marketing_pricing_policy.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
@@ -22,6 +29,9 @@ await fs.mkdir(OUT_DIR, {recursive: true});
 const args = parseArgs(process.argv.slice(2));
 const now = new Date();
 const deadlineMs = now.getTime() + (args.hours * 3600_000);
+const PRICING_POLICY = await loadMarketingPricingPolicy(args.pricingPolicy);
+const PRICING_BI = await readJsonIfExists(args.bi, null);
+const EXPOSURE_INDEX = buildExposureTopLinkIndex(PRICING_BI, PRICING_POLICY);
 
 const DEFAULT_MARGIN_TARGET = 0.30;
 const FIXED_PRICE_JITTER = {min: -2, max: 1};
@@ -75,7 +85,21 @@ await loadPriceOverrides();
 await loadSelectionPlan();
 
 function parseArgs(argv) {
-  const out = {stores: [], activityIds: [], hours: 48, allOpen: false, includeCoupon: false, dryRun: false, noClose: false, submit: false, minDiscountFallback: [], priceOverrides: '', selectionPlan: ''};
+  const out = {
+    stores: [],
+    activityIds: [],
+    hours: 48,
+    allOpen: false,
+    includeCoupon: false,
+    dryRun: false,
+    noClose: false,
+    submit: false,
+    minDiscountFallback: [],
+    priceOverrides: '',
+    selectionPlan: '',
+    pricingPolicy: path.join(ROOT, 'config', 'marketing_pricing_policy.json'),
+    bi: path.join(ROOT, 'outputs', 'bi-portal', 'data.json'),
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--stores') out.stores = String(argv[++i] || '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
@@ -89,6 +113,8 @@ function parseArgs(argv) {
     else if (a === '--min-discount-fallback') out.minDiscountFallback = String(argv[++i] || '').split(',').map(s => s.trim()).filter(Boolean);
     else if (a === '--price-overrides') out.priceOverrides = path.resolve(argv[++i] || '');
     else if (a === '--selection-plan') out.selectionPlan = path.resolve(argv[++i] || '');
+    else if (a === '--pricing-policy') out.pricingPolicy = path.resolve(argv[++i] || '');
+    else if (a === '--bi') out.bi = path.resolve(argv[++i] || '');
   }
   return out;
 }
@@ -824,11 +850,25 @@ function computeTarget(storeKey, activityId, row) {
   let base = null;
   let marginTarget = DEFAULT_MARGIN_TARGET;
   let marginUsed = null;
+  let exposurePricing = null;
   if (manualRule) {
     base = manualRule.base;
     ruleType = manualRule.ruleType;
     source = manualRule.source;
     marginTarget = manualRule.marginTarget;
+  }
+  if (ruleType === 'margin' && marginTarget !== null) {
+    exposurePricing = resolveExposureAdjustedMargin({
+      baseMargin: marginTarget,
+      canonical,
+      skc: row.skc,
+      policy: PRICING_POLICY,
+      exposureIndex: EXPOSURE_INDEX,
+    });
+    if (exposurePricing?.applied) {
+      marginTarget = exposurePricing.margin;
+      source = `${source}_${exposurePricing.isTopExposureLink ? 'exposure_top5' : 'exposure_other'}`;
+    }
   }
   let cost = null;
   if (base === null) {
@@ -875,7 +915,10 @@ function computeTarget(storeKey, activityId, row) {
       }
       return {ok: false, reason: '缺成本', supplierNo: supplier, canonical};
     }
-    marginUsed = Math.min(0.95, Math.max(0.01, marginTarget + randomBetween(seed, MARGIN_TARGET_JITTER.min, MARGIN_TARGET_JITTER.max)));
+    const floorMargin = pctConfigToRatio(PRICING_POLICY?.targetFloorMarginPct ?? PRICING_POLICY?.exposureTopLinks?.floorMarginPct ?? 15);
+    marginUsed = exposurePricing?.applied
+      ? marginTarget
+      : Math.min(0.95, Math.max(floorMargin || 0.01, marginTarget + randomBetween(seed, MARGIN_TARGET_JITTER.min, MARGIN_TARGET_JITTER.max)));
     base = cost / (1 - marginTarget);
   } else {
     base = Number(base);
@@ -911,6 +954,7 @@ function computeTarget(storeKey, activityId, row) {
     discountPct,
     minDiscount,
     platformAdjusted,
+    exposurePricing,
   };
 }
 

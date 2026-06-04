@@ -25,6 +25,7 @@ const OUT_DIR = path.join(ROOT, 'outputs', 'reports');
 const TMP_ROOT = path.join(ROOT, 'tmp', 'mbrs');
 const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
 const STORES = STORES_CONFIG.stores || [];
+const COUPON_LEVEL_RULES = await readJsonIfExists(path.join(ROOT, 'config', 'marketing_coupon_level_rules.json'), {activities: {}});
 const COST_DOC = await readJsonIfExists(path.join(ROOT, 'tmp', 'mbrs', 'marketing-cost-map.json'), {costMap: {}, trueCostMap: {}});
 const BI = await readJsonIfExists(path.join(ROOT, 'outputs', 'bi-portal', 'data.json'), {});
 const COSTS = COST_DOC.costMap || {};
@@ -547,7 +548,7 @@ function couponSummaryFromApi(store, activity, detail = {}, usage = {}, seller =
     ? targetActiveCount === targetSet.size && nonTargetEnrolledSkcs.length === 0
     : '';
   const ruleSource = has15Rule
-    ? 'get_activity_detail + query_coupon_activity_usage_List + fetch_seller_act_info + multi-level/goods/query(15%)'
+    ? `get_activity_detail + query_coupon_activity_usage_List + fetch_seller_act_info + multi-level/goods/query(15%)${coupon15Rule.levelRuleIdSource === 'config-fallback' ? ' + configured levelRuleId fallback' : ''}`
     : 'get_activity_detail + query_coupon_activity_usage_List + fetch_seller_act_info';
   const ruleNote = has15Rule
     ? targetSet
@@ -757,7 +758,7 @@ async function fetchCouponSummary(cdp, sessionId, store, activity) {
     const seller = await post('/mrs-api-prefix/mbrs/activity/fetch_seller_act_info', {partake_act_id: activityId});
     return {detail, usage, seller};
   `, {activityId: activity.activityId});
-  const coupon15Rule = await fetchCoupon15PctRuleStats(cdp, activeSessionId, activity.activityId).catch(err => ({
+  const coupon15Rule = await fetchCoupon15PctRuleStats(cdp, activeSessionId, store, activity.activityId).catch(err => ({
     ok: false,
     error: err.message,
   }));
@@ -774,9 +775,18 @@ async function fetchCouponSummary(cdp, sessionId, store, activity) {
   }
 }
 
-async function fetchCoupon15PctRuleStats(cdp, sessionId, activityId) {
+function configuredCouponLevelRuleId(storeKey, activityId) {
+  const activityRules = COUPON_LEVEL_RULES?.activities?.[String(activityId)] || {};
+  const storeRules = activityRules?.stores?.[String(storeKey || '').toUpperCase()] || {};
+  const id = Number(storeRules.levelRuleId || 0);
+  return Number.isFinite(id) && id > 0 ? id : 0;
+}
+
+async function fetchCoupon15PctRuleStats(cdp, sessionId, store, activityId) {
+  const fallbackLevelRuleId = configuredCouponLevelRuleId(store.storeKey, activityId);
   return await evalJs(cdp, sessionId, `
     const activityId = Number(__arg.activityId);
+    const fallbackLevelRuleId = Number(__arg.fallbackLevelRuleId || 0);
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
     const textOf = el => (el?.innerText || el?.textContent || '').trim();
@@ -837,8 +847,23 @@ async function fetchCoupon15PctRuleStats(cdp, sessionId, activityId) {
       preferred.el.click();
       await waitFor(() => location.href.includes('/mbrs/marketing/coupon/rule/signup/' + activityId + '/'), 25_000);
     }
-    const m = String(location.href || '').match(new RegExp('/coupon/rule/signup/' + activityId + '/(\\\\d+)'));
-    const levelRuleId = Number(m?.[1] || 0);
+    let m = String(location.href || '').match(new RegExp('/coupon/rule/signup/' + activityId + '/(\\\\d+)'));
+    let levelRuleId = Number(m?.[1] || 0);
+    let levelRuleIdSource = 'route';
+    let routeFallback = null;
+    if (!levelRuleId && fallbackLevelRuleId) {
+      routeFallback = {
+        reason: 'detail button did not reach rule signup route; using configured per-store levelRuleId',
+        fromHref: location.href,
+        fallbackLevelRuleId,
+      };
+      location.href = 'https://sso.geiwohuo.com/#/mbrs/marketing/coupon/rule/signup/' + activityId + '/' + fallbackLevelRuleId + '?from=detail';
+      await waitFor(() => location.href.includes('/mbrs/marketing/coupon/rule/signup/' + activityId + '/' + fallbackLevelRuleId), 8_000);
+      m = String(location.href || '').match(new RegExp('/coupon/rule/signup/' + activityId + '/(\\\\d+)'));
+      levelRuleId = Number(m?.[1] || fallbackLevelRuleId || 0);
+      levelRuleIdSource = 'config-fallback';
+      routeFallback.toHref = location.href;
+    }
     if (!levelRuleId) {
       return {ok: false, reason: '15% rule signup route not reached', href: location.href};
     }
@@ -898,6 +923,8 @@ async function fetchCoupon15PctRuleStats(cdp, sessionId, activityId) {
     return {
       ok: true,
       levelRuleId,
+      levelRuleIdSource,
+      routeFallback,
       availableTotal: available.total,
       availableCount: available.list.length,
       enrolledTotal: enrolled.total,
@@ -909,7 +936,7 @@ async function fetchCoupon15PctRuleStats(cdp, sessionId, activityId) {
       enrolledActiveSkcs: activeEnrolled.map(x => x.skc).filter(Boolean),
       statusSummary,
     };
-  `, {activityId});
+  `, {activityId, fallbackLevelRuleId});
 }
 
 async function collectOrdinaryGoodsRows(cdp, sessionId, activity) {

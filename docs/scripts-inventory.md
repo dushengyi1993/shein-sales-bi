@@ -95,11 +95,18 @@
   - `import_product_costs.mjs`
 - 营销活动半自动：
   - `marketing/build_marketing_cost_map.py`
-  - `marketing/export_dsy_marketing_standards.mjs`：只读导出 DSY 营销活动填报标准。用户要先审核标准时，先跑 `--stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open`，排除优惠券活动，输出明细和“按标准货号一行”的审核表。
-  - `marketing/dsy_marketing_deadline_fill.mjs`：DSY 营销活动报名半自动补填；只勾选商品、填活动价/降幅和复核，不点最终提交。重扫漏报时显式传 `--stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open`；脚本分页全量扫活动列表、选择页先切 `500 条/页`，完成后只保留需要用户提交的活动编辑页。本期价格覆盖表用 `--price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD-approved.json`，缺成本例外仅用 `--min-discount-fallback SK-13034`。
-  - `marketing/export_marketing_stack_review.mjs`：只读导出普通活动、优惠券和限时折扣叠加审核。配套优惠券复扫必须传 `--coupon-target-plan <plan.json>`，优先看 `15%券档已报是否等于普通计划`、`15%券档已报但不在普通计划数`，不要把“15% 可报未入已报集合”误判为漏报。
-  - `marketing/submit_coupon_activity_goods.mjs`：优惠券 `34810` 的 15% 档批量导入执行器。默认必须传 `--target-plan`，只报名普通营销活动计划与 15% 可报集合的交集；只有显式 `--allow-all-15pct-available` 才允许全可报报名。
+  - `marketing/export_dsy_marketing_standards.mjs`：只读导出 DSY 营销活动填报标准。用户要先审核标准时，先跑 `--stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open`，排除优惠券活动，输出明细和“按标准货号一行”的审核表；价格规则读取 `config/marketing_pricing_policy.json`，可按 BI 曝光量识别同货号曝光前五链接利润率差异。
+  - `marketing/build_marketing_sku_approval.mjs` / `marketing/verify_marketing_sku_approval.mjs`：按云端 BI / 成本映射生成并校验货号级确认表；确认表必须展示成本、仓储费/件、优惠券/限时折扣风险和曝光前五链接目标利润率差异。
+  - `marketing/dsy_marketing_deadline_fill.mjs`：DSY 营销活动报名半自动补填；只勾选商品、填活动价/降幅和复核，不点最终提交。重扫漏报时显式传 `--stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open`；脚本分页全量扫活动列表、选择页先切 `500 条/页`，完成后只保留需要用户提交的活动编辑页。本期价格覆盖表用 `--price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD-approved.json`，缺成本例外仅用 `--min-discount-fallback SK-13034`；未命中逐行覆盖价时同样读取 `config/marketing_pricing_policy.json` 和 BI 曝光数据执行曝光前五利润率规则。
+  - `marketing/export_marketing_stack_review.mjs`：只读导出普通活动、优惠券和限时折扣叠加审核。配套优惠券复扫必须传 `--coupon-target-plan <plan.json>`，优先看 `15%券档已报是否等于普通计划`、`15%券档已报但不在普通计划数`，不要把“15% 可报未入已报集合”误判为漏报；若优惠券详情页按钮偶发不跳转，会读取 `config/marketing_coupon_level_rules.json` 里的本店 `levelRuleId` 直达规则页继续回读。
+  - `marketing/submit_coupon_activity_goods.mjs`：优惠券 `34810` 的 15% 档执行器。默认必须传 `--target-plan`，只报名普通营销活动计划与 15% 可报集合的交集；只有显式 `--allow-all-15pct-available` 才允许全可报报名。真实提交走 direct multi-level `partake` API，必须带 `partake_rule_id + coupon_level_id + skc_info_list`；Excel/页面的“导入成功/商品提交成功”不作为最终证据，最终看已报集合回读。
   - `marketing/cancel_coupon_extra_goods.mjs`：取消配套优惠券误报项。使用多档券真实接口 `/activity/multi-level/partake/cancel`，执行前二次校验普通活动计划，禁止取消配套计划内 SKC；真实执行需 `--execute`。
+  - `marketing/scan_coupon_low_price_overlap_risks.mjs`：只读扫描 active 15% 券与 active/future 限时折扣叠加风险；限时折扣列表分页读取，取消候选必须来自 live 集合交叉，HL 漏报补救这类授权组合写入 `config/marketing_allowed_limited_coupon_overlaps.json` 并在 `validUntil` 前只保留明细、不进取消清单。
+  - `marketing/scan_coupon_old_ordinary_overlap_risks.mjs`：只读扫描 active 15% 券与旧普通营销活动叠加风险，用于排查“叠旧营销活动”导致实际价偏低；输出 `ACTIVE_COUPON_RISK_ROWS` 作为是否需要补救的核心计数。
+  - `marketing/end_limited_discounts_for_coupon_plan.mjs`：按风险清单终止会挡券或造成低价叠券的旧限时折扣；真实执行必须显式 `--execute`，默认拒绝结束含非目标 SKC 的混合限时折扣活动，除非逐场确认后加 `--allow-mixed-activity-end`；执行后要用上方扫描器复扫。
+  - `marketing/apply_hl_limited_discount_rescue.mjs`：HL 漏报普通营销活动后的限时折扣兜底执行器；先终止只包含目标 SKC 的冲突旧限时折扣，再按原普通活动价创建补救限时折扣。必须显式传 `--rescue <json>` 与 `--end-time "YYYY-MM-DD HH:mm:ss"`，默认 dry-run，真实写入必须显式 `--execute`，并会把平台/库存不可创建的 SKC 写入 `skippedUnreportable`。
+  - `marketing/scan_hl_limited_discount_conflicts.mjs`：HL 限时折扣补救后的只读冲突扫描，确认目标 SKC 是否被新限时折扣覆盖、是否还有重复/缺口；必须显式传 `--rescue <json>` 与 `--end-cutoff "YYYY-MM-DD HH:mm:ss"`，不保留一次性批次默认路径。
+  - `marketing/set_coupon_site_budget.mjs`：将优惠券活动站点预算补到目标额度；本期 `shein-sa` 默认目标为 `1000 SAR`。
   - `marketing/build_coupon_import_from_skc_list.py` + `marketing/templates/coupon-import-15pct-template.xlsx`：从 SKC 清单生成 SHEIN 优惠券批量导入模板，供 `submit_coupon_activity_goods.mjs` 上传。
 - OpenAPI 试点：
   - `cloud_openapi_hl_reconciliation.sh`：Linux 云端 HL OpenAPI 并行对账入口；由 `shein-bi-cloud-openapi-hl.timer` 调用，需 SHEIN 开放平台白名单包含云服务器出口 IP。
@@ -167,6 +174,7 @@
 
 - `lib/product_sku_normalizer.mjs`：标准货号归一化、目录和别名归并。
 - `lib/product_display_name.mjs`：面向 BI 前端和飞书问数机器人的展示名生成；只改显示，不改变 `standard_goods_sn`。
+- `lib/marketing_pricing_policy.mjs`：营销活动机器可读定价策略加载与曝光前五链接识别；负责把 `config/marketing_pricing_policy.json` 里的“限时折扣兜底 / 曝光前五利润率差异 / 15%底价”规则提供给审核表和填报脚本。
 
 ## 明确废弃或默认禁用
 

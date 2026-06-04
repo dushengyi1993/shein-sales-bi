@@ -6,10 +6,16 @@
  * Coupon activity 34810 is a multi-level coupon activity. It must not be
  * submitted through the ordinary sign-up config page. The verified route is:
  *   coupon detail -> continue signup -> coupon rule signup/{levelRuleId}
- * This script submits the fixed 15% coupon tier by importing SKCs from an
- * audited target plan intersected with the 15% rule's available goods list,
- * then verifies against the same rule's enrolled goods list. Submitting every
- * 15% available SKC is intentionally blocked unless explicitly overridden.
+ * This script submits the fixed 15% coupon tier from an audited target plan
+ * intersected with the 15% rule's available goods list, then verifies against
+ * the same rule's enrolled goods list. The verified write path is the
+ * multi-level `partake` API with both `partake_rule_id` and `coupon_level_id`;
+ * the Excel import success modal is only an async import acknowledgement and
+ * is not treated as enrollment proof. Submitting every 15% available SKC is
+ * intentionally blocked unless explicitly overridden.
+ * By default, target SKCs that currently have active/future limited-discount
+ * activity are also excluded so historical low-price discounts are not silently
+ * stacked with a newly submitted 15% coupon.
  */
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
@@ -25,6 +31,8 @@ const TEMPLATE_XLSX = path.join(ROOT, 'scripts', 'marketing', 'templates', 'coup
 const PY_HELPER = path.join(ROOT, 'scripts', 'marketing', 'build_coupon_import_from_skc_list.py');
 const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
 const STORES = STORES_CONFIG.stores || [];
+const COUPON_LEVEL_RULES = await readJsonIfExists(path.join(ROOT, 'config', 'marketing_coupon_level_rules.json'), {activities: {}});
+const ACTIVE_OR_FUTURE_LIMITED_STATES = new Set(['2', '3']);
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -42,6 +50,7 @@ function parseArgs(argv) {
     pageSize: 200,
     targetPlan: null,
     allowAll15PctAvailable: false,
+    allowLimitedDiscountOverlap: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -50,6 +59,7 @@ function parseArgs(argv) {
     else if (a === '--discount-max') out.discountMax = Number(argv[++i]);
     else if (a === '--target-plan') out.targetPlan = argv[++i];
     else if (a === '--allow-all-15pct-available') out.allowAll15PctAvailable = true;
+    else if (a === '--allow-limited-discount-overlap') out.allowLimitedDiscountOverlap = true;
     else if (a === '--dry-run' || a === '--no-submit') out.dryRun = true;
     else if (a === '--no-close' || a === '--keep-open') out.noClose = true;
     else if (a === '--no-launch') out.noLaunch = true;
@@ -72,6 +82,23 @@ function parseArgs(argv) {
 
 function splitStores(value) {
   return String(value || '').split(',').map(s => s.trim()).filter(Boolean);
+}
+
+async function readJsonIfExists(file, fallback) {
+  try {
+    const text = await fs.readFile(file, 'utf8');
+    return JSON.parse(text.replace(/^\uFEFF/, ''));
+  } catch (err) {
+    if (err?.code === 'ENOENT') return fallback;
+    throw err;
+  }
+}
+
+function configuredCouponLevelRuleId(storeKey, activityId) {
+  const activityRules = COUPON_LEVEL_RULES?.activities?.[String(activityId)] || {};
+  const storeRules = activityRules?.stores?.[String(storeKey || '').toUpperCase()] || {};
+  const id = Number(storeRules.levelRuleId || 0);
+  return Number.isFinite(id) && id > 0 ? id : 0;
 }
 
 function psSingleQuote(value) {
@@ -270,7 +297,7 @@ async function gotoCouponDetail(cdp, activityId) {
   return last || await snapshot(cdp).catch(err => ({error: err.message}));
 }
 
-async function clickContinueAndGetRuleId(cdp, activityId, discountMax) {
+async function clickContinueAndGetRuleId(cdp, activityId, discountMax, fallbackLevelRuleId = 0) {
   const info = await cdp.eval(`
     if (location.href.includes('/coupon/rule/signup/${activityId}/')) {
       return {found: true, href: location.href, alreadyOnSignup: true};
@@ -302,6 +329,32 @@ async function clickContinueAndGetRuleId(cdp, activityId, discountMax) {
     return {found: true, href: location.href, clickedText: preferred.text, clickedContext: preferred.ctx.slice(0, 1000), buttonCount: buttons.length};
   `);
   const m = String(info?.href || '').match(new RegExp(`/coupon/rule/signup/${activityId}/(\\d+)`));
+  if (!m && fallbackLevelRuleId) {
+    const fallbackInfo = await cdp.eval(`
+      location.href = __arg.url;
+      const started = Date.now();
+      while (Date.now() - started < 10_000) {
+        if (location.href.includes('/coupon/rule/signup/' + __arg.activityId + '/' + __arg.levelRuleId)) break;
+        await new Promise(r => setTimeout(r, 500));
+      }
+      return {href: location.href};
+    `, {
+      activityId,
+      levelRuleId: fallbackLevelRuleId,
+      url: `https://sso.geiwohuo.com/#/mbrs/marketing/coupon/rule/signup/${activityId}/${fallbackLevelRuleId}?from=detail`,
+    });
+    const fallbackMatch = String(fallbackInfo?.href || '').match(new RegExp(`/coupon/rule/signup/${activityId}/(\\d+)`));
+    if (fallbackMatch) {
+      return {
+        ...info,
+        fallbackFrom: 'config',
+        fallbackReason: 'continue signup button did not reach rule route; used configured per-store levelRuleId',
+        fallbackHref: fallbackInfo.href,
+        levelRuleId: Number(fallbackMatch[1]),
+        discountMax,
+      };
+    }
+  }
   if (!m) throw new Error(`continue signup route not reached: ${JSON.stringify(info)}`);
   return {...info, levelRuleId: Number(m[1]), discountMax};
 }
@@ -392,6 +445,205 @@ async function queryLevelGoodsAll(cdp, activityId, levelRuleId, pageModule, page
     deduped.push(item);
   }
   return {code: '0', msg: last?.msg || 'OK', total, list: deduped, pageModule};
+}
+
+async function queryActiveOrFutureLimitedDiscountSkcs(cdp) {
+  return await cdp.eval(`
+    const headers = {
+      'content-type': 'application/json;charset=UTF-8',
+      'Origin-Url': location.href,
+      'x-bbl-route': location.hash.replace(/^#/, '') || '/mbrs/marketing/coupon/detail',
+      'x-req-zone-id': 'Asia/Shanghai',
+      'x-lt-language': 'CN',
+      'LAN': 'CN',
+    };
+    async function post(path, body) {
+      const res = await fetch('/mrs-api-prefix' + path, {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+        body: JSON.stringify(body || {}),
+      });
+      const text = await res.text();
+      let json = null;
+      try { json = JSON.parse(text); } catch {}
+      return {http: res.status, code: json?.code, msg: json?.msg || text.slice(0, 300), info: json?.info ?? json};
+    }
+    function arrayFrom(value) {
+      if (Array.isArray(value)) return value;
+      if (Array.isArray(value?.data)) return value.data;
+      if (Array.isArray(value?.list)) return value.list;
+      if (Array.isArray(value?.records)) return value.records;
+      return [];
+    }
+    const limitedPageSize = 200;
+    const listPackets = [];
+    const activities = [];
+    let listCode = '0';
+    let listMsg = 'OK';
+    let total = null;
+    for (let pageNum = 1; pageNum <= 20; pageNum += 1) {
+      const listPacket = await post('/promotion/obm/query_obm_activity_list', {page_num:pageNum, page_size:limitedPageSize, system:'mrs', ref_tools_id:175});
+      const list = arrayFrom(listPacket.info);
+      const totalFromInfo = Number(listPacket.info?.total ?? listPacket.info?.total_count ?? listPacket.info?.page_info?.total ?? NaN);
+      if (Number.isFinite(totalFromInfo)) total = totalFromInfo;
+      listPackets.push({pageNum, code: listPacket.code, msg: listPacket.msg, count: list.length, total});
+      if (listPacket.code !== '0') {
+        listCode = listPacket.code;
+        listMsg = listPacket.msg;
+        break;
+      }
+      activities.push(...list);
+      if (!list.length || (total !== null && activities.length >= total) || list.length < limitedPageSize) break;
+    }
+    if (listCode !== '0') {
+      return {code: listCode, msg: listMsg, listPackets, activities: [], rows: []};
+    }
+    const now = Date.now();
+    const rows = [];
+    for (const activity of activities) {
+      const state = String(activity.state ?? '');
+      const endMs = activity.end_time ? Date.parse(String(activity.end_time).replace(' ', 'T') + '+08:00') : NaN;
+      const activeOrFuture = __arg.activeStates.includes(state) && (!Number.isFinite(endMs) || endMs >= now);
+      if (!activeOrFuture) continue;
+      const goodsPacket = await post('/promotion/simple_platform/query_activity_goods', {activity_id: activity.activity_id, page_num: 1, page_size: 1000});
+      if (goodsPacket.code !== '0') {
+        rows.push({activityId: activity.activity_id, activityName: activity.act_name || '', queryCode: goodsPacket.code, queryMsg: goodsPacket.msg, skc: ''});
+        continue;
+      }
+      for (const good of arrayFrom(goodsPacket.info)) {
+        const skc = String(good.skc || '').trim();
+        if (!skc) continue;
+        rows.push({
+          skc,
+          supplierNo: good.sku_supplier_no || '',
+          activityId: activity.activity_id,
+          activityName: activity.act_name || '',
+          state: activity.state,
+          startTime: activity.start_time || '',
+          endTime: activity.end_time || '',
+          limitedDiscountPrice: Number(good.product_act_price ?? NaN),
+        });
+      }
+    }
+    return {code: '0', msg: listMsg || 'OK', listPackets, activities: activities.length, rows};
+  `, {activeStates: [...ACTIVE_OR_FUTURE_LIMITED_STATES]});
+}
+
+async function queryCouponLevelId(cdp, activityId, levelRuleId) {
+  return await cdp.eval(`
+    const headers = {
+      'content-type': 'application/json;charset=UTF-8',
+      'Origin-Url': location.href,
+      'x-bbl-route': location.hash.replace(/^#/, ''),
+      'x-req-zone-id': 'Asia/Shanghai',
+      'x-lt-language': 'CN',
+      'LAN': 'CN',
+    };
+    async function post(path, body) {
+      const res = await fetch('/mrs-api-prefix' + path, {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+        body: JSON.stringify(body || {}),
+      });
+      const text = await res.text();
+      let json = null;
+      try { json = JSON.parse(text); } catch {}
+      return {http: res.status, code: json?.code, msg: json?.msg || text.slice(0, 300), info: json?.info ?? json};
+    }
+    function firstCouponLevelFromGoods(list) {
+      for (const good of list || []) {
+        const fromLevel = Number(good?.level?.marketing_activity_id);
+        if (Number.isFinite(fromLevel) && fromLevel > 0) return fromLevel;
+        for (const site of good?.site_price_list || good?.goods_site_price_info_list || []) {
+          for (const sku of site?.skc_price_warning?.sku_info_list || []) {
+            for (const coupon of sku?.price_info?.coupon_info_list || []) {
+              for (const id of coupon?.activity_id_list || []) {
+                const n = Number(id);
+                if (Number.isFinite(n) && n > 0) return n;
+              }
+            }
+          }
+        }
+      }
+      return null;
+    }
+    const modules = [
+      'MULTI_LEVEL_ENROLLMENT_RECORD',
+      'MULTI_LEVEL_ACTIVITY_ENROLLED_GOODS',
+      'MULTI_LEVEL_RULE_GOODS',
+      'MULTI_LEVEL_ACTIVITY_NOT_ENROLLED_GOODS',
+    ];
+    const attempts = [];
+    for (const pageModule of modules) {
+      const q = await post('/mbrs/activity/multi-level/goods/query?page_num=1&page_size=20', {
+        activity_id: __arg.activityId,
+        level_rule_id: __arg.levelRuleId,
+        page: 'COUPON',
+        page_module: pageModule,
+        product_code_list: [],
+        supplier_no_list: [],
+      });
+      const list = q.info?.partake_goods_list || [];
+      const couponLevelId = firstCouponLevelFromGoods(list);
+      attempts.push({pageModule, code: q.code, msg: q.msg, total: Number(q.info?.total ?? list.length ?? 0), couponLevelId});
+      if (couponLevelId) {
+        return {ok: true, couponLevelId, source: pageModule, attempts};
+      }
+    }
+    return {ok: false, couponLevelId: null, attempts};
+  `, {activityId, levelRuleId});
+}
+
+async function submitMultiLevelCouponGoods(cdp, activityId, levelRuleId, couponLevelId, skcs) {
+  return await cdp.eval(`
+    const headers = {
+      'content-type': 'application/json;charset=UTF-8',
+      'Origin-Url': location.href,
+      'x-bbl-route': location.hash.replace(/^#/, ''),
+      'x-req-zone-id': 'Asia/Shanghai',
+      'x-lt-language': 'CN',
+      'LAN': 'CN',
+    };
+    const payload = {
+      activity_id: __arg.activityId,
+      partake_rule: {
+        partake_rule_id: __arg.levelRuleId,
+        coupon_level_id: __arg.couponLevelId,
+      },
+      skc_info_list: __arg.skcs.map(skc => ({skc})),
+    };
+    const res = await fetch('/mrs-api-prefix/mbrs/activity/multi-level/partake', {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body: JSON.stringify(payload),
+    });
+    const text = await res.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch {}
+    const list = json?.info?.skc_partake_result_list || [];
+    const failed = list.filter(x => x?.error_code || x?.error_msg);
+    return {
+      ok: res.ok && String(json?.code) === '0' && failed.length === 0,
+      http: res.status,
+      code: json?.code,
+      msg: json?.msg || text.slice(0, 300),
+      info: json?.info || null,
+      request: {
+        activityId: __arg.activityId,
+        partakeRuleId: __arg.levelRuleId,
+        couponLevelId: __arg.couponLevelId,
+        skcCount: __arg.skcs.length,
+        sample: __arg.skcs.slice(0, 20),
+      },
+      resultCount: list.length,
+      failedCount: failed.length,
+      failedSample: failed.slice(0, 20).map(x => ({skc: x.skc, errorCode: x.error_code, errorMsg: x.error_msg, failInfo: x.fail_info || null})),
+      rawTextSample: text.slice(0, 1000),
+    };
+  `, {activityId, levelRuleId, couponLevelId, skcs});
 }
 
 async function waitForTargetEnrolled(cdp, activityId, levelRuleId, targetSkcs, waitMs, pageSize) {
@@ -553,7 +805,12 @@ async function processStore(store, args, targetPlan) {
       return result;
     }
     result.beforeActivity = await fetchActivity(cdp, args.activityId).catch(err => ({error: err.message}));
-    result.rule = await clickContinueAndGetRuleId(cdp, args.activityId, args.discountMax);
+    result.rule = await clickContinueAndGetRuleId(
+      cdp,
+      args.activityId,
+      args.discountMax,
+      configuredCouponLevelRuleId(store.storeKey, args.activityId),
+    );
     result.ruleSnapshot = await snapshot(cdp).catch(err => ({error: err.message}));
 
     const beforeAvailable = await queryLevelGoodsAll(cdp, args.activityId, result.rule.levelRuleId, 'MULTI_LEVEL_RULE_GOODS', args.pageSize);
@@ -580,10 +837,42 @@ async function processStore(store, args, targetPlan) {
       result.targetPlan = targetPlan ? {path: targetPlan.path, plannedSkcs: 0, matchedAvailable: 0} : null;
     }
     targetSkcs = [...new Set(targetSkcs)];
+    const targetBeforeLimitedGuard = targetSkcs;
+    result.limitedDiscountGuard = {
+      policy: args.allowLimitedDiscountOverlap ? 'allow-explicit-overlap' : 'exclude-active-or-future-limited-discount',
+      checked: false,
+      overlapCount: 0,
+      excludedCount: 0,
+      sample: [],
+    };
+    if (!args.allowLimitedDiscountOverlap) {
+      const limited = await queryActiveOrFutureLimitedDiscountSkcs(cdp);
+      result.limitedDiscountGuard.checked = true;
+      result.limitedDiscountGuard.query = {code: limited.code, msg: limited.msg, activityCount: limited.activities, rowCount: limited.rows?.length || 0, listPackets: limited.listPackets || []};
+      if (limited.code !== '0') {
+        result.reason = `限时折扣保护查询失败，停止提交优惠券: ${limited.msg || limited.code}`;
+        return result;
+      }
+      const limitedBySkc = new Map();
+      for (const row of limited.rows || []) {
+        if (!row.skc || limitedBySkc.has(row.skc)) continue;
+        limitedBySkc.set(row.skc, row);
+      }
+      const overlapRows = targetSkcs
+        .filter(skc => limitedBySkc.has(skc))
+        .map(skc => limitedBySkc.get(skc));
+      const overlapSet = new Set(overlapRows.map(row => row.skc));
+      targetSkcs = targetSkcs.filter(skc => !overlapSet.has(skc));
+      result.limitedDiscountGuard.overlapCount = overlapRows.length;
+      result.limitedDiscountGuard.excludedCount = overlapRows.length;
+      result.limitedDiscountGuard.sample = overlapRows.slice(0, 20);
+    }
     const toSubmit = targetSkcs.filter(skc => !enrolledSetBefore.has(skc));
     result.target = {
       mode: targetPlan ? 'plan-intersection-15pct-available' : 'explicit-all-15pct-available',
+      beforeLimitedDiscountGuard: targetBeforeLimitedGuard.length,
       targetCount: targetSkcs.length,
+      excludedByLimitedDiscountGuard: result.limitedDiscountGuard.excludedCount,
       alreadyEnrolled: targetSkcs.length - toSubmit.length,
       toSubmit: toSubmit.length,
       sample: targetSkcs.slice(0, 15),
@@ -593,6 +882,8 @@ async function processStore(store, args, targetPlan) {
       result.ok = true;
       result.reason = targetPlan && !targetSetFromPlan
         ? 'target plan has no SKCs for this store; skipped instead of submitting all available goods'
+        : result.limitedDiscountGuard.excludedCount > 0
+          ? '目标商品均被 active/future 限时折扣保护排除，未提交优惠券'
         : '15% 券档当前没有需要提交的目标商品';
       return result;
     }
@@ -603,8 +894,22 @@ async function processStore(store, args, targetPlan) {
       return result;
     }
     if (toSubmit.length > 0) {
-      result.file = buildImportFile(store.storeKey, toSubmit);
-      result.submit = await uploadAndSubmit(cdp, result.file.xlsxPath);
+      result.couponLevel = await queryCouponLevelId(cdp, args.activityId, result.rule.levelRuleId);
+      if (!result.couponLevel.ok || !result.couponLevel.couponLevelId) {
+        result.reason = `无法定位 15% 券档 coupon_level_id，停止提交: ${JSON.stringify(result.couponLevel.attempts || [])}`;
+        return result;
+      }
+      result.submit = await submitMultiLevelCouponGoods(
+        cdp,
+        args.activityId,
+        result.rule.levelRuleId,
+        result.couponLevel.couponLevelId,
+        toSubmit,
+      );
+      if (!result.submit.ok) {
+        result.reason = `multi-level 直接报名接口失败: code=${result.submit.code || '-'} msg=${result.submit.msg || '-'} failed=${result.submit.failedCount || 0}`;
+        return result;
+      }
     } else {
       result.submit = {ok: true, skipped: true, reason: '目标商品已在 15% 券档已报集合中'};
     }
@@ -659,11 +964,12 @@ for (const store of selectedStores) {
 summary.ok = summary.stores.every(s => s.ok);
 summary.totals = summary.stores.reduce((acc, s) => {
   acc.targetCount += s.target?.targetCount || 0;
+  acc.excludedByLimitedDiscountGuard += s.target?.excludedByLimitedDiscountGuard || 0;
   acc.toSubmit += s.target?.toSubmit || 0;
   acc.okStores += s.ok ? 1 : 0;
   acc.failedStores += s.ok ? 0 : 1;
   return acc;
-}, {targetCount: 0, toSubmit: 0, okStores: 0, failedStores: 0});
+}, {targetCount: 0, excludedByLimitedDiscountGuard: 0, toSubmit: 0, okStores: 0, failedStores: 0});
 const summaryFile = path.join(OUT_DIR, `summary-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
 await fs.writeFile(summaryFile, JSON.stringify(summary, null, 2), 'utf8');
 console.log(`\nSUMMARY ${summaryFile}`);

@@ -1,0 +1,27 @@
+{
+  "description": "Machine-readable long-term pricing policy for SHEIN ordinary marketing signup, coupon pairing, and limited-discount fallback. This file contains no credentials.",
+  "updatedAt": "2026-06-04",
+  "targetFloorMarginPct": 15,
+  "limitedDiscount": {
+    "mustExistForPlannedLinks": true,
+    "role": "fallback_price_tool",
+    "defaultDiscountRatePct": 15,
+    "defaultPriceFactor": 0.85,
+    "oldLimitedDiscountCanBeCancelledAndRecreated": true,
+    "mustNotInterfereTargetPrice": true,
+    "adjustWhenInterferes": true,
+    "priorityNote": "Limited discount is the lowest-priority rescue layer: keep ordinary marketing + 15% coupon as the primary price stack; cancel/recreate or adjust limited discounts when they would make the final price lower or higher than the intended target."
+  },
+  "exposureTopLinks": {
+    "enabled": true,
+    "topN": 5,
+    "metricFields": ["c30_eps_uv", "c7_eps_uv", "eps_uv"],
+    "onShelfOnly": true,
+    "marginDeltaPct": 5,
+    "floorMarginPct": 15,
+    "whenBaseAtOrBelowFloor": "keep_top_at_floor_raise_others_by_delta",
+    "whenBaseAboveFloor": "lower_top_links_by_delta",
+    "fixedPricePolicy": "do_not_override_fixed_price_or_row_override",
+    "sourceNote": "Top links are ranked per standard_goods_sn from positive BI storeLinks/links exposure fields. Rows with no positive exposure metric are not used for top-link ranking; if exposure data is unavailable, scripts keep the base margin and mark the exposure rule as not applied."
+  }
+}

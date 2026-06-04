@@ -45,6 +45,7 @@ function parseArgs(argv) {
     execute: false,
     noClose: false,
     noLaunch: false,
+    allowPlanRiskCancel: false,
     waitMs: 45_000,
     pageSize: 200,
   };
@@ -55,6 +56,7 @@ function parseArgs(argv) {
     else if (a === '--extra-list') out.extraList = argv[++i];
     else if (a === '--execute') out.execute = true;
     else if (a === '--dry-run' || a === '--no-execute') out.execute = false;
+    else if (a === '--allow-plan-risk-cancel') out.allowPlanRiskCancel = true;
     else if (a === '--no-close' || a === '--keep-open') out.noClose = true;
     else if (a === '--no-launch') out.noLaunch = true;
     else if (a === '--wait-ms') out.waitMs = Number(argv[++i]);
@@ -265,7 +267,9 @@ async function clickLoginOnce(cdp) {
     const buttons = [...document.querySelectorAll('button,[role=button],a')]
       .filter(visible)
       .map(el => ({el, text: textOf(el), disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true'}));
-    const btn = buttons.find(x => !x.disabled && x.text === '登录')
+    const btn = buttons.find(x => !x.disabled && x.text === '我已知晓，继续登录')
+      || buttons.find(x => !x.disabled && x.text.includes('继续登录') && x.text.length <= 20)
+      || buttons.find(x => !x.disabled && x.text === '登录')
       || buttons.find(x => !x.disabled && x.text.includes('登录') && x.text.length <= 12);
     if (!btn) return {found: false, href: location.href, buttons: buttons.map(x => x.text).filter(Boolean).slice(0, 20), tail: (document.body?.innerText || '').slice(-800)};
     btn.el.scrollIntoView({block: 'center', inline: 'center'});
@@ -291,21 +295,24 @@ async function recoverLoginIfNeeded(cdp, activityId, levelRuleId) {
   if (!before.isLogin) return {needed: false, before};
 
   const attempts = [];
-  attempts.push(await clickLoginOnce(cdp));
-  await sleep(4500);
-  let after = await cdp.eval(`
-    const text = document.body?.innerText || '';
-    return {href: location.href, isLogin: location.href.includes('/login/') || text.includes('请输入账号') || text.includes('请输入密码'), tail: text.slice(-1000)};
-  `);
-  if (after.isLogin) {
-    await cdp.eval(`location.reload(); return {href: location.href};`);
-    await sleep(3500);
-    attempts.push(await clickLoginOnce(cdp));
-    await sleep(6500);
+  let after = before;
+  for (let attemptNo = 1; attemptNo <= 4; attemptNo += 1) {
+    const clicked = await clickLoginOnce(cdp);
+    attempts.push({attemptNo, ...clicked});
+    await sleep(String(clicked.text || '').includes('继续登录') ? 2000 : 5000);
     after = await cdp.eval(`
       const text = document.body?.innerText || '';
-      return {href: location.href, isLogin: location.href.includes('/login/') || text.includes('请输入账号') || text.includes('请输入密码'), tail: text.slice(-1000)};
+      return {
+        href: location.href,
+        isLogin: location.href.includes('/login/') || text.includes('请输入账号') || text.includes('请输入密码') || (text.includes('账号登录') && text.includes('密码') && text.includes('登录')),
+        tail: text.slice(-1000),
+      };
     `);
+    if (!after.isLogin) break;
+    if (attemptNo === 2) {
+      await cdp.eval(`location.reload(); return {href: location.href};`);
+      await sleep(2500);
+    }
   }
   const page = await gotoCouponRule(cdp, activityId, levelRuleId);
   return {needed: true, before, attempts, after, page};
@@ -592,6 +599,7 @@ async function loadExtraAndPlans(extraListPath) {
   const extraDoc = await loadJson(absolute);
   const rows = Array.isArray(extraDoc) ? extraDoc : (extraDoc.rows || []);
   const ordinaryPlanPaths = Array.isArray(extraDoc.ordinaryPlanPaths) ? extraDoc.ordinaryPlanPaths : [];
+  const riskCancel = extraDoc.riskCancel === true || String(extraDoc.mode || '').includes('risk');
   const planByStore = new Map();
   for (const planPath of ordinaryPlanPaths) {
     const planDoc = await loadJson(planPath);
@@ -603,7 +611,7 @@ async function loadExtraAndPlans(extraListPath) {
       planByStore.get(storeKey).add(normalizeSkc(item.skc));
     }
   }
-  return {path: absolute, rows, ordinaryPlanPaths, planByStore};
+  return {path: absolute, rows, ordinaryPlanPaths, planByStore, riskCancel, purpose: extraDoc.purpose || ''};
 }
 
 function groupRowsByStore(rows, selectedStores, activityId) {
@@ -648,14 +656,22 @@ async function processStore(store, args, rows, planByStore, extraListPath) {
     }
 
     const unsafePlanRows = rows.filter(row => planSet.has(row.skc));
+    const riskRowsMissingReason = rows.filter(row => !String(row.riskReason || row.reason || '').trim());
+    const riskCancelAllowed = args.allowPlanRiskCancel && rows.every(row => String(row.riskReason || row.reason || '').trim());
     result.input = {
       extraRows: rows.length,
       plannedSkcs: planSet.size,
       unsafePlanRows: unsafePlanRows.length,
+      riskCancelAllowed,
       levelRuleIds: [...new Set(rows.map(row => Number(row.levelRuleId)).filter(Boolean))],
-      sample: rows.slice(0, 10).map(row => ({skc: row.skc, supplierNo: row.supplierNo, levelRuleId: row.levelRuleId, status: row.status})),
+      sample: rows.slice(0, 10).map(row => ({skc: row.skc, supplierNo: row.supplierNo, levelRuleId: row.levelRuleId, status: row.status, reason: row.riskReason || row.reason || ''})),
     };
-    if (unsafePlanRows.length) {
+    if (args.allowPlanRiskCancel && riskRowsMissingReason.length) {
+      result.reason = `safety stop: --allow-plan-risk-cancel requires every row to carry reason/riskReason; missing=${riskRowsMissingReason.length}`;
+      result.riskRowsMissingReason = riskRowsMissingReason.slice(0, 20);
+      return result;
+    }
+    if (unsafePlanRows.length && !riskCancelAllowed) {
       result.reason = `safety stop: ${unsafePlanRows.length} extra rows are also in ordinary signup plan`;
       result.unsafePlanRows = unsafePlanRows.slice(0, 20);
       return result;
@@ -698,6 +714,7 @@ async function processStore(store, args, rows, planByStore, extraListPath) {
 
     const bySkc = new Map(beforeEnrolled.list.map(item => [item.skc, item]));
     const targetSkcs = rows.map(row => row.skc);
+    const targetSet = new Set(targetSkcs.map(normalizeSkc));
     const recordList = await queryPartakeRecordsAll(cdp, args.activityId, targetSkcs, args.pageSize);
     result.partakeRecords = {
       code: recordList.code,
@@ -823,10 +840,20 @@ async function processStore(store, args, rows, planByStore, extraListPath) {
       plannedActiveBefore: plannedBefore.length,
       plannedLost: plannedBefore.filter(skc => !plannedAfter.includes(skc)).slice(0, 20),
     };
-    result.ok = !!result.wait.ok && plannedAfter.length >= plannedBefore.length;
-    result.reason = result.ok
-      ? `extra active SKCs cancelled; ordinary planned active count preserved (${plannedBefore.length} -> ${plannedAfter.length})`
-      : `verification failed: activeExtraRemaining=${result.wait.activeRemaining.length}, plannedActive ${plannedBefore.length}->${plannedAfter.length}`;
+    const plannedLost = plannedBefore.filter(skc => !plannedAfter.includes(skc));
+    const unexpectedPlannedLost = plannedLost.filter(skc => !targetSet.has(skc));
+    result.afterEnrolled.plannedLostUnexpected = unexpectedPlannedLost.slice(0, 20);
+    if (riskCancelAllowed) {
+      result.ok = !!result.wait.ok && unexpectedPlannedLost.length === 0;
+      result.reason = result.ok
+        ? `risk active SKCs cancelled; planned active count intentionally reduced (${plannedBefore.length} -> ${plannedAfter.length})`
+        : `verification failed: activeRemaining=${result.wait.activeRemaining.length}, unexpectedPlannedLost=${unexpectedPlannedLost.length}`;
+    } else {
+      result.ok = !!result.wait.ok && plannedAfter.length >= plannedBefore.length;
+      result.reason = result.ok
+        ? `extra active SKCs cancelled; ordinary planned active count preserved (${plannedBefore.length} -> ${plannedAfter.length})`
+        : `verification failed: activeExtraRemaining=${result.wait.activeRemaining.length}, plannedActive ${plannedBefore.length}->${plannedAfter.length}`;
+    }
     return result;
   } catch (err) {
     result.reason = err.message;
@@ -842,6 +869,7 @@ async function processStore(store, args, rows, planByStore, extraListPath) {
 await fs.mkdir(OUT_DIR, {recursive: true});
 const args = parseArgs(process.argv.slice(2));
 const extra = await loadExtraAndPlans(args.extraList);
+if (extra.riskCancel) args.allowPlanRiskCancel = true;
 const selectedStores = args.stores.map(key => {
   const store = STORES.find(s => String(s.storeKey).toUpperCase() === key.toUpperCase());
   if (!store) throw new Error(`Unknown store ${key}`);
@@ -854,6 +882,8 @@ const summary = {
   mode: args.execute ? 'execute' : 'dry-run',
   extraList: extra.path,
   ordinaryPlanPaths: extra.ordinaryPlanPaths,
+  riskCancel: extra.riskCancel,
+  purpose: extra.purpose,
   stores: [],
 };
 

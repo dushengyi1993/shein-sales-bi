@@ -1,0 +1,31 @@
+{
+  "description": "Stable per-store multi-level coupon rule ids for SHEIN coupon activity 34810. These ids are not credentials; they are used only as a read/submit route fallback when the coupon detail page button does not navigate reliably.",
+  "updatedAt": "2026-06-04",
+  "activities": {
+    "34810": {
+      "name": "Platform Coupon Recruitment Campaign",
+      "discountTier": "1-15%",
+      "stores": {
+        "DL": {"levelRuleId": 2942},
+        "DX": {"levelRuleId": 3003},
+        "FY": {"levelRuleId": 3010},
+        "LQ": {"levelRuleId": 3026},
+        "NM": {"levelRuleId": 3036},
+        "HL": {"levelRuleId": 3017},
+        "JY": {"levelRuleId": 3001},
+        "ZL": {"levelRuleId": 3004},
+        "TS": {"levelRuleId": 1994},
+        "MZ": {"levelRuleId": 2045},
+        "CX": {"levelRuleId": 2000},
+        "YJ": {"levelRuleId": 2034},
+        "XL": {"levelRuleId": 2031},
+        "QY": {"levelRuleId": 2040},
+        "QH": {"levelRuleId": 139},
+        "TZ": {"levelRuleId": 23220},
+        "JSH": {"levelRuleId": 26939},
+        "TZZ": {"levelRuleId": 30104},
+        "XC": {"levelRuleId": 26929}
+      }
+    }
+  }
+}

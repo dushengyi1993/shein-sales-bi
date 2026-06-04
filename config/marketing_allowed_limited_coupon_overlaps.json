@@ -1,0 +1,14 @@
+{
+  "description": "Machine-readable allowlist for intentionally authorized limited-discount + 15% coupon overlaps. Entries here are excluded from automatic risk-cancel candidate lists but still appear in read-only scan rows for audit.",
+  "entries": [
+    {
+      "storeKey": "HL",
+      "limitedDiscountActivityId": 72690600,
+      "limitedDiscountName": "HL漏报补救限时折扣20260604",
+      "couponActivityId": 34810,
+      "levelRuleId": 3017,
+      "reason": "User-authorized rescue for missed ordinary marketing signup: limited-discount price equals planned ordinary marketing activity price, then 15% coupon reaches the original expected final price.",
+      "validUntil": "2026-06-12 16:00:00"
+    }
+  ]
+}
