@@ -6100,13 +6100,16 @@ function profitDailyRows(start, end, scopeValue = state.store, respectProduct = 
     return true;
   });
 }
-function profitStorageForScope(start, end, scopeValue = state.store, respectProduct = true){
+function profitStorageForScope(start, end, scopeValue = state.store, respectProduct = true, opts = {}){
   const q = respectProduct ? productScopeQuery() : '';
   const scope = storeFilterKind(scopeValue);
   let source = DATA.profit?.storeStorageDaily || [];
   let useStoreScope = true;
   if (q) {
-    source = scope.type === 'all'
+    // 当前筛选范围摘要基于 dailyStoreProducts/store-product 行重算，必须使用同一可加仓储桥接；
+    // 完整产品持有仓储费仍保留在 DATA.profit.products 等产品汇总视角，避免在同一矩阵里混用两种 lens。
+    const useProductStorageDaily = opts.productStorageLens === 'product';
+    source = scope.type === 'all' && useProductStorageDaily
       ? (DATA.profit?.productStorageDaily || [])
       : (DATA.profit?.productStoreStorageDaily || []);
     useStoreScope = scope.type !== 'all';
@@ -6276,7 +6279,9 @@ function profitSummaryForRows(rows, opts = {}){
     out.orders += Number(r.orders || 0);
     out.quantity += Number(r.quantity || 0);
   }
-  const storage = profitStorageForScope(range.start, range.end, scopeValue, respectProduct);
+  const storage = profitStorageForScope(range.start, range.end, scopeValue, respectProduct, {
+    productStorageLens: opts.productStorageLens || ''
+  });
   const bridgeFallback = rows && rows.length && storage.matched === 0 ? rows.reduce((sum, r) => sum + Number(r.storage_fee_sar || 0), 0) : 0;
   out.storageFeeSar = storage.matched > 0 ? storage.total : bridgeFallback;
   out.storageFeeMethod = storage.matched > 0 ? storage.method : (bridgeFallback ? 'store_product_sales_bridge:fallback' : 'none');
