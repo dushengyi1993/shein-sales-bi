@@ -1679,7 +1679,37 @@ async function deriveHomeProfitSectionFromProfitCache(root, generatedAt) {
   });
 }
 
+async function refreshProfitMarts(args) {
+  if (process.env.SHEIN_BI_PROFIT_MART_REFRESH_DISABLED === '1') {
+    return {
+      code: 0,
+      timedOut: false,
+      stdout: '[refreshProfitMarts] disabled by SHEIN_BI_PROFIT_MART_REFRESH_DISABLED=1',
+      stderr: '',
+    };
+  }
+  const timeoutMs = Math.max(60_000, Number(process.env.SHEIN_BI_PROFIT_MART_REFRESH_TIMEOUT_MS || 600_000));
+  const run = await runChildProcess('bash', [
+    path.join(ROOT, 'scripts', 'refresh_profit_marts.sh'),
+  ], {
+    cwd: ROOT,
+    timeoutMs,
+    env: {
+      SHEIN_BI_DB_CONTAINER: args.container,
+      SHEIN_BI_DB_DATABASE: args.database,
+      SHEIN_BI_DB_USER: args.user,
+    },
+  });
+  if (!run.ok) {
+    const tail = String(run.stderr || run.stdout || '').slice(-4000);
+    throw new Error(`profit mart cache refresh failed: code=${run.code} timedOut=${run.timedOut} ${tail}`);
+  }
+  return run;
+}
+
 async function generateBiSection(args, root, section, generatedAt) {
+  const useProfitMartCache = section === 'profit' && process.env.SHEIN_BI_PROFIT_MART_CACHE_DISABLED !== '1';
+  const refreshRun = useProfitMartCache ? await refreshProfitMarts(args) : null;
   const run = await runChildProcess(process.execPath, [
     path.join(ROOT, 'scripts', 'generate_bi_portal.mjs'),
     '--section', section,
@@ -1694,6 +1724,7 @@ async function generateBiSection(args, root, section, generatedAt) {
     timeoutMs: BI_PORTAL_SECTION_TIMEOUT_MS,
     env: {
       SHEIN_BI_PORTAL_TIMEOUT_MS: String(Math.max(BI_PORTAL_SECTION_TIMEOUT_MS + 60_000, Number(process.env.SHEIN_BI_PORTAL_TIMEOUT_MS || 0) || 0)),
+      SHEIN_BI_PROFIT_MART_SOURCE: useProfitMartCache ? 'cache' : 'view',
     },
   });
   if (!run.ok) {
@@ -1709,7 +1740,10 @@ async function generateBiSection(args, root, section, generatedAt) {
   if (section === 'homeRankings') {
     data = compactHomeRankingsSectionData(data);
   }
-  return writeBiSectionCache(root, section, generatedAt, data, run);
+  return writeBiSectionCache(root, section, generatedAt, data, refreshRun ? {
+    ...run,
+    stderr: `${run.stderr || ''}\n${refreshRun.stdout || ''}\n${refreshRun.stderr || ''}`,
+  } : run);
 }
 
 function compactHomeRankingsSectionData(data) {

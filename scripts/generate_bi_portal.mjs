@@ -14,6 +14,11 @@ import {enrichProductDisplayNames} from '../lib/product_display_name.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORTAL_GENERATE_TIMEOUT_MS = Number(process.env.SHEIN_BI_PORTAL_TIMEOUT_MS || 900_000);
+const PROFIT_MART_SOURCE = String(process.env.SHEIN_BI_PROFIT_MART_SOURCE || 'view').trim().toLowerCase();
+if (!['view', 'cache'].includes(PROFIT_MART_SOURCE)) {
+  throw new Error(`Invalid SHEIN_BI_PROFIT_MART_SOURCE: ${PROFIT_MART_SOURCE}`);
+}
+const PROFIT_MART_CACHE_SUFFIX = PROFIT_MART_SOURCE === 'cache' ? '_cache' : '';
 const portalGenerateStartedAt = Date.now();
 let portalGenerateStage = 'bootstrap';
 const portalGenerateTimer = setTimeout(() => {
@@ -25,6 +30,10 @@ portalGenerateTimer.unref?.();
 function markStage(stage) {
   portalGenerateStage = stage;
   console.error(`[generate_bi_portal] ${new Date().toISOString()} ${stage}`);
+}
+
+function profitMart(name) {
+  return `mart.${name}${PROFIT_MART_CACHE_SUFFIX}`;
 }
 
 function sleep(ms) {
@@ -904,24 +913,31 @@ async function attachManualCostFileMeta(data) {
 }
 
 function buildSql() {
+  const profitOrderItem = profitMart('profit_order_item');
+  const profitDailyStoreProduct = profitMart('profit_daily_store_product');
+  const profitMonthGroup = profitMart('profit_month_group');
+  const profitProductSummary = profitMart('profit_product_summary');
+  const storageFeeProductDaily = profitMart('storage_fee_product_daily');
+  const storageFeeProductStoreDaily = profitMart('storage_fee_product_store_daily');
+  const storageFeeStoreDaily = profitMart('storage_fee_store_daily');
   return `
 WITH
 kpi AS (
   SELECT jsonb_build_object(
     'salesSar', (
       SELECT coalesce(sum(net_revenue_sar),0)
-      FROM mart.profit_order_item
+      FROM ${profitOrderItem}
       WHERE created_date = (SELECT max(sales_date) FROM mart.bi_business_store_current)
     ),
     'orders', (
       SELECT count(DISTINCT order_no)
-      FROM mart.profit_order_item
+      FROM ${profitOrderItem}
       WHERE created_date = (SELECT max(sales_date) FROM mart.bi_business_store_current)
         AND coalesce(net_revenue_sar,0) > 0
     ),
     'quantity', (
       SELECT coalesce(sum(quantity),0)
-      FROM mart.profit_order_item
+      FROM ${profitOrderItem}
       WHERE created_date = (SELECT max(sales_date) FROM mart.bi_business_store_current)
         AND coalesce(net_revenue_sar,0) > 0
     ),
@@ -1373,7 +1389,7 @@ sales_calendar AS (
   FROM fact.store_daily_sales
   UNION
   SELECT DISTINCT created_date::date AS date
-  FROM mart.profit_order_item
+  FROM ${profitOrderItem}
 ),
 net_order_item AS (
   SELECT
@@ -1391,7 +1407,7 @@ net_order_item AS (
     coalesce(net_revenue_sar,0) AS sales_sar,
     coalesce(gross_revenue_sar,0) AS gross_sales_sar,
     coalesce(revenue_reversal,false) AS revenue_reversal
-  FROM mart.profit_order_item
+  FROM ${profitOrderItem}
   WHERE coalesce(standard_goods_sn,'') <> ''
 ),
 net_daily_store_sales AS (
@@ -1648,7 +1664,7 @@ profit_daily_store_product AS (
         THEN round((sum(coalesce(known_net_revenue_sar,0)) / nullif(sum(coalesce(net_revenue_sar,0)),0))::numeric, 4)
         ELSE NULL END AS cost_coverage_revenue_rate,
       string_agg(DISTINCT storage_fee_method, ' / ') FILTER (WHERE coalesce(storage_fee_method,'') <> '') AS storage_fee_method
-    FROM mart.profit_daily_store_product
+    FROM ${profitDailyStoreProduct}
     WHERE coalesce(standard_goods_sn,'') <> ''
     GROUP BY date, store_key, group_key, standard_goods_sn
     ORDER BY date, store_key, standard_goods_sn
@@ -1681,7 +1697,7 @@ profit_month_group AS (
       round(missing_cost_revenue_sar::numeric, 2) AS missing_cost_revenue_sar,
       missing_cost_lines,
       reversal_lines
-    FROM mart.profit_month_group
+    FROM ${profitMonthGroup}
     ORDER BY month_start, group_key
   ) t
 ),
@@ -1727,23 +1743,23 @@ profit_product_summary AS (
         SELECT round((sum(coalesce(b.first_leg_freight_amount,0)) / nullif(sum(coalesce(b.shipped_quantity,0)),0))::numeric, 2)
         FROM fact.product_cost_batch b
         WHERE b.complete_batch
-          AND dim.product_match_key(b.standard_goods_sn) = dim.product_match_key(mart.profit_product_summary.standard_goods_sn)
+          AND dim.product_match_key(b.standard_goods_sn) = dim.product_match_key(profit_product_summary_source.standard_goods_sn)
       ) AS historical_first_leg_unit_cny,
       (
         SELECT round(((sum(coalesce(b.first_leg_freight_amount,0)) / nullif(sum(coalesce(b.shipped_quantity,0)),0)) / 1600.0 * 1000)::numeric, 2)
         FROM fact.product_cost_batch b
         WHERE b.complete_batch
-          AND dim.product_match_key(b.standard_goods_sn) = dim.product_match_key(mart.profit_product_summary.standard_goods_sn)
+          AND dim.product_match_key(b.standard_goods_sn) = dim.product_match_key(profit_product_summary_source.standard_goods_sn)
       ) AS inferred_volume_l_1600,
       (
         SELECT round(((sum(coalesce(b.first_leg_freight_amount,0)) / nullif(sum(coalesce(b.shipped_quantity,0)),0)) * (2000.0 / 1600.0))::numeric, 2)
         FROM fact.product_cost_batch b
         WHERE b.complete_batch
-          AND dim.product_match_key(b.standard_goods_sn) = dim.product_match_key(mart.profit_product_summary.standard_goods_sn)
+          AND dim.product_match_key(b.standard_goods_sn) = dim.product_match_key(profit_product_summary_source.standard_goods_sn)
       ) AS future_first_leg_unit_cny_at_2000,
       last_cost_imported_at,
       round(cost_coverage_revenue_rate::numeric, 4) AS cost_coverage_revenue_rate
-    FROM mart.profit_product_summary
+    FROM ${profitProductSummary} profit_product_summary_source
     ORDER BY profit_after_storage_sar DESC NULLS LAST, gross_revenue_sar DESC, standard_goods_sn
     LIMIT 500
   ) t
@@ -1760,7 +1776,7 @@ product_storage_daily AS (
       string_agg(DISTINCT storage_allocation_method, ' / ') FILTER (WHERE coalesce(storage_allocation_method,'') <> '') AS storage_fee_method,
       min(source_snapshot_date) AS source_snapshot_date_min,
       max(source_snapshot_date) AS source_snapshot_date_max
-    FROM mart.storage_fee_product_daily
+    FROM ${storageFeeProductDaily}
     WHERE coalesce(standard_goods_sn,'') <> ''
     GROUP BY date, dim.product_canonical_sn(standard_goods_sn)
   ) t
@@ -1775,7 +1791,7 @@ product_store_storage_daily AS (
       dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
       round(sum(coalesce(storage_fee_sar,0))::numeric, 2) AS storage_fee_sar,
       string_agg(DISTINCT storage_fee_method, ' / ') FILTER (WHERE coalesce(storage_fee_method,'') <> '') AS storage_fee_method
-    FROM mart.storage_fee_product_store_daily
+    FROM ${storageFeeProductStoreDaily}
     WHERE coalesce(standard_goods_sn,'') <> ''
     GROUP BY date, store_key, group_key, dim.product_canonical_sn(standard_goods_sn)
   ) t
@@ -1789,7 +1805,7 @@ store_storage_daily AS (
       group_key,
       round(sum(coalesce(allocated_storage_fee_sar,0))::numeric, 2) AS storage_fee_sar,
       string_agg(DISTINCT allocation_method, ' / ') FILTER (WHERE coalesce(allocation_method,'') <> '') AS storage_fee_method
-    FROM mart.storage_fee_store_daily
+    FROM ${storageFeeStoreDaily}
     GROUP BY date, store_key, group_key
   ) t
 ),
