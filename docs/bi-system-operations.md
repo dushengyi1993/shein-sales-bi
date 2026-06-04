@@ -89,7 +89,7 @@
 - 云端 `shein-bi-cloud-yesterday.timer` 刷新前一天最终版，并回核 D-2 稳定销售。
 - 云端 `shein-bi-cloud-today.timer` 每两小时刷新当天销售。
 - 滚动后置 BI 的验收重点是销售文件入仓和 BI Portal 更新时间；RTV 换单复核耗时不应作为“BI 没更新”的判断依据。
-- BI Portal API section 会在 `outputs/bi-portal/sections/` 缓存；首页首屏优先加载 `homeRankings`、`afterSales`、`homeProfit`、`actions`、`financeData`。`homeRankings` 只包含首页需要的日店铺、日货号、日店铺×货号粒度，并由服务端裁掉重复长文本后以 gzip sidecar 返回；完整 `rankings` 放到详情/子页需要时再拉。首页利润 `homeProfit` 仍从当前 `profit` section cache 派生。预热顺序要先保障首页关键 section，再把较慢的完整 `rankings` / `profit` 放到后段并在 `profit` 成功后补跑一次 `homeProfit`。若页面首页利润异常偏低，先核对 `homeProfitSummary.sourceGeneratedAt` 与当前 `data.json.__sections.generatedAt` 是否一致，并确认 `staleSource=false`；否则页面应视为利润待预热，不能用旧利润判断业务。
+- BI Portal API section 会在 `outputs/bi-portal/sections/` 缓存；首页首屏优先加载轻量 `homeRankings`，完整 `rankings` 放到详情/子页需要时再拉。`homeRankings` 只包含首页需要的日店铺、日货号、日店铺×货号粒度，并由服务端裁掉重复长文本后以 gzip sidecar 返回。`cloud_bi_refresh.sh` 会启动 section 预热脚本；`serve_bi_portal.mjs` 还会用 core `generatedAt` watcher 在服务启动和首页访问时兜底预热，避免新 core 后用户首开页面才生成慢 section。首页利润 `homeProfit` 仍从当前 `profit` section cache 派生；若页面首页利润异常偏低，先核对 `homeProfitSummary.sourceGeneratedAt` 与当前 `data.json.__sections.generatedAt` 是否一致，并确认 `staleSource=false`；否则页面应视为利润待预热，不能用旧利润判断业务。
 - 如果某个店失败，但目标日期当前启用店铺销售源文件已经齐，BI 仍应刷新；云端 watchdog / 异常通知负责提醒失败店铺和服务异常。
 - 业务域单店失败不应阻断销售入仓和门户刷新，应在 BI 体检/提醒里标注。
 - `send_daily_lark_report.mjs` 仍保留；生产日报由云端 `shein-bi-cloud-daily-lark-report.timer` 调度，不要默认本地日报任务仍在生产运行。

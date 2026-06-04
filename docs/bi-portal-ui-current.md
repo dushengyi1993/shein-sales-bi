@@ -228,7 +228,7 @@
   - 静态检查 `outputs/bi-portal/data.json`
 - 只有用户明确要求，或必须排查浏览器交互、滚动、弹窗、控制台错误等问题时，才打开前端页面验证。
 - 云端 BI 已是正式入口；涉及弹窗、筛选、刷新状态等用户可见行为时，本地验证只能作为开发检查，最终审核应在云端可访问页面或云端服务输出上完成，再发布 GitHub release。
-- 涉及首页利润时，云端验收还必须核对 `/api/bi/section/homeProfit`：`homeProfitSummary.sourceGeneratedAt` 应等于当前 `data.json.__sections.generatedAt`，`staleSource=false`，且今日总利润应与当前 `profit` section 汇总一致。若 `homeProfit` stale，页面应视为利润待预热，不得因为旧摘要加载快就当作当前利润。
+- 涉及首页利润或首屏长期“加载中”时，云端验收还必须核对 `/api/health` 的 `biCoreWarmup.status`，以及 `/api/bi/section/homeProfit`：`homeProfitSummary.sourceGeneratedAt` 应等于当前 `data.json.__sections.generatedAt`，`staleSource=false`，且今日总利润应与当前 `profit` section 汇总一致。若 `homeProfit` stale，页面应视为利润待预热，不得因为旧摘要加载快就当作当前利润。
 - 如果问题本身是页面布局、宽屏留白、对齐、卡片挤压、图表绘图区等视觉判断，且用户要求打开前端，应使用最大化 / 大视口验证；不要用未最大化小窗口或只看代码来判断宽屏效果。
 
 

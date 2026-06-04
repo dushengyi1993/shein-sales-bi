@@ -83,7 +83,7 @@ BI 系统当前分为三层入口：
    - 文件入口：`outputs/bi-portal/index.html`
    - 云端入口：`https://shein-bi.faceair.me/`，旧 IP `http://43.165.167.135/` 仅作兜底
    - 负责“每天先看什么、先处理什么、如何复制指令、如何标记处理状态”。
-   - API section cache 位于 `outputs/bi-portal/sections/`；派生 section 要遵守源缓存生命周期，例如 `homeProfit` 必须从当前 `profit` section 派生。
+   - API section cache 位于 `outputs/bi-portal/sections/`；派生 section 要遵守源缓存生命周期，例如 `homeProfit` 必须从当前 `profit` section 派生。`serve_bi_portal.mjs` 负责 section API、gzip/raw cache 返回，以及 core `generatedAt` 变化后的后台 warmup 兜底。
    - 本地 `127.0.0.1:8787` 和局域网入口已封存，不再作为正式入口。
    - 短期动作状态仍为服务端状态文件，长期应入 PostgreSQL，避免文件状态成为单点。
    - 系统状态页已接入 `mart.openapi_sales_reconciliation`，展示 HL 官方 OpenAPI 销售试点与当前生产销售源的对账状态；该试点暂不覆盖正式销售事实表。
