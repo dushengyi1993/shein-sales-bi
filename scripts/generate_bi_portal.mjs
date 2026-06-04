@@ -4289,10 +4289,20 @@ function requiredBiSectionsForTab(tab = state.tab || 'overview'){
   };
   return (map[tab] || []).filter(section => BI_SECTION_KEYS.has(section));
 }
+function overviewNeedsProfitSectionForHome(){
+  if (!biPortalUsesApiSections()) return false;
+  const range = ensureDateRange();
+  if (homeProfitSummaryCanSatisfyScope(range)) return false;
+  if (productScopeQuery()) return true;
+  if (homeProfitSummaryAvailable()) return true;
+  return biSectionState.homeProfit?.status === 'error';
+}
 function backgroundBiSectionsForTab(tab = state.tab || 'overview'){
   if (!biPortalUsesApiSections()) return [];
+  const overviewSections = ['homeRankings','afterSales','homeProfit','actions','financeData'];
+  if (tab === 'overview' && overviewNeedsProfitSectionForHome()) overviewSections.push('profit');
   const map = {
-    overview:['homeRankings','afterSales','homeProfit','actions','financeData']
+    overview:overviewSections
   };
   return (map[tab] || []).filter(section => BI_SECTION_KEYS.has(section));
 }
@@ -6350,7 +6360,8 @@ function renderKpis(){
     biSectionState.homeProfit?.status === 'error' ||
     (homeProfitSummaryAvailable() && !homeProfitSummaryCoversRange(range.start, range.end))
   );
-  const profitLoadingLabel = profitNeedsPrewarm ? '利润待预热' : '加载中';
+  const profitLoadFailed = biSectionState.profit?.status === 'error';
+  const profitLoadingLabel = profitLoadFailed ? '利润加载失败' : profitNeedsPrewarm ? '利润待预热' : '加载中';
   const rows = homeScopeRows().map(def => {
     const sales = homeSalesForScope(range.start, range.end, def.scopeValue);
     const after = homeAfterSalesForScope(range.start, range.end, def.scopeValue);
