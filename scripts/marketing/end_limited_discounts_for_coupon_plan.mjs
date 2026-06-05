@@ -1,23 +1,31 @@
 #!/usr/bin/env node
 /**
- * End active/future limited-discount activities that block planned 15% coupon signup.
+ * End active/future limited-discount activities that price-stack evidence proves
+ * would block planned 15% coupon signup.
  *
  * Project invariant:
  * Limited discounts are the lowest-priority promotion form. When a planned
- * ordinary-marketing + 15% coupon stack is blocked by an active/future limited
- * discount, the limited discount must be removed or adjusted before submitting
- * the coupon. The currently verified safe write path is activity-level
- * undo/end via `/promotion/obm/undo_or_end_obm_activity`; this script records
- * both target and non-target goods in each ended activity for auditability.
+ * ordinary-marketing + 15% coupon stack would be pushed below target by an
+ * active/future limited discount, the limited discount must be removed or
+ * adjusted before submitting the coupon. Mere overlap/riskReason is not enough:
+ * input rows must carry `priceDecision=coupon_final_below_target`. The currently
+ * verified safe write path is activity-level undo/end via
+ * `/promotion/obm/undo_or_end_obm_activity`; this script records both target and
+ * non-target goods in each ended activity for auditability.
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
+import {
+  requireStoreIdentitySnapshot,
+  storeIdentityEvalBody,
+} from '../../lib/shein_store_identity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
 const STORES = STORES_CONFIG.stores || [];
+const STORE_ACCOUNT_TRUTH = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'store_account_truth.json'), 'utf8'));
 const OUT_DIR = path.join(ROOT, 'tmp', 'marketing-signup', 'limited-discount-end-results');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
 const DEFAULT_SCAN_DIR = path.join(ROOT, 'tmp', 'marketing-signup', 'low-price-overlap-risk');
@@ -199,6 +207,16 @@ async function recoverLoginIfNeeded(cdp) {
   return {needed: true, before: state, attempts, after};
 }
 
+async function assertCurrentStoreIdentity(cdp, store, context) {
+  const identitySnapshot = await cdp.eval(storeIdentityEvalBody());
+  return requireStoreIdentitySnapshot({
+    store,
+    truth: STORE_ACCOUNT_TRUTH.stores?.[store.storeKey],
+    snapshot: identitySnapshot,
+    context,
+  });
+}
+
 function parseChinaDate(value) {
   if (!value) return null;
   const d = new Date(String(value).replace(' ', 'T') + '+08:00');
@@ -216,7 +234,8 @@ function loadTargets(scan, args) {
   const rows = (scan.stores || []).flatMap(s => s.risks || [])
     .filter(row => selected ? selected.has(String(row.storeKey).toUpperCase()) : true)
     .filter(row => args.includeAllowedOverlap || !row.allowedOverlap)
-    .filter(row => row.riskReason === 'planned_coupon_skc_has_active_or_future_limited_discount_but_coupon_not_active');
+    .filter(row => row.riskReason === 'planned_coupon_skc_has_active_or_future_limited_discount_but_coupon_not_active')
+    .filter(row => row.priceDecision === 'coupon_final_below_target' || row.priceGuard?.decision === 'coupon_final_below_target');
   const byStoreActivity = new Map();
   for (const row of rows) {
     const storeKey = String(row.storeKey).toUpperCase();
@@ -268,6 +287,7 @@ async function processStore(store, storeTargets, args) {
       result.reason = 'login page after automatic login recovery; skipped limited-discount end';
       return result;
     }
+    result.identity = await assertCurrentStoreIdentity(cdp, store, 'end_limited_discounts_for_coupon_plan');
 
     const live = await cdp.eval(`
       const headers = {

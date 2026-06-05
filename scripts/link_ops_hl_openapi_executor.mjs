@@ -9,6 +9,10 @@ import {
   inferSourceProductFromTask,
   summarizeDraftForExecutor,
 } from '../lib/link_ops_product_draft_mapper.mjs';
+import {
+  formatStoreIdentityError,
+  validateStoreIdentity,
+} from '../lib/shein_store_identity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CONFIG = path.join(ROOT, 'config', 'shein_openapi.local.json');
@@ -16,6 +20,9 @@ const DEFAULT_TASK_FILE = path.join(ROOT, 'state', 'bi_link_ops_tasks.json');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'logs', 'link-ops-openapi-executor');
 const TARGET_STORE = 'HL';
 const SUBMIT_CONFIRM_TEXT = 'SHEIN_HL_OPENAPI_SUBMIT';
+const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
+const STORES = STORES_CONFIG.stores || [];
+const STORE_ACCOUNT_TRUTH = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'store_account_truth.json'), 'utf8'));
 
 function parseArgs(argv) {
   const args = {
@@ -166,6 +173,71 @@ function resultRows(data) {
     getNested(data, 'info.brand_list'),
     getNested(data, 'data'),
   );
+}
+
+function collectOpenApiIdentity(value, out = null, depth = 0) {
+  const target = out || {
+    accountNos: new Set(),
+    userNames: new Set(),
+    mainUserNames: new Set(),
+    supplierUserNames: new Set(),
+    supplierIds: new Set(),
+    externalIds: new Set(),
+    emplids: new Set(),
+    companyNames: new Set(),
+    rawSources: new Set(),
+  };
+  if (!value || depth > 7) return target;
+  if (Array.isArray(value)) {
+    value.forEach(item => collectOpenApiIdentity(item, target, depth + 1));
+    return target;
+  }
+  if (typeof value !== 'object') return target;
+  target.rawSources.add(`openapi-depth-${depth}`);
+  const add = (setName, candidate) => {
+    if (candidate === null || candidate === undefined || candidate === '') return;
+    target[setName].add(String(candidate).trim());
+  };
+  add('userNames', value.userName || value.username || value.name || value.enName);
+  add('mainUserNames', value.mainUserName || value.main_user_name);
+  add('supplierUserNames', value.supplierUserName || value.supplier_user_name);
+  add('supplierIds', value.supplierId || value.supplier_id || value.merchantId || value.merchant_id);
+  add('externalIds', value.externalId || value.external_id);
+  add('emplids', value.emplid || value.empId);
+  add('companyNames', value.companyName || value.company_name || value.supplierName || value.supplier_name);
+  for (const candidate of [
+    value.accountNo,
+    value.account_no,
+    value.shopName,
+    value.shop_name,
+    value.userName,
+    value.username,
+    value.name,
+    value.enName,
+    value.mainUserName,
+    value.main_user_name,
+    value.supplierUserName,
+    value.supplier_user_name,
+  ]) {
+    if (/^GS\d+$/i.test(String(candidate || '').trim())) {
+      target.accountNos.add(String(candidate).trim().toUpperCase());
+    }
+  }
+  for (const [key, child] of Object.entries(value)) {
+    if (child && typeof child === 'object' && /(user|supplier|merchant|store|shop|seller|account|company|info|data)/i.test(key)) {
+      collectOpenApiIdentity(child, target, depth + 1);
+    }
+  }
+  return target;
+}
+
+function openApiIdentityToStorageIdentity(value) {
+  const collected = collectOpenApiIdentity(value);
+  return Object.fromEntries(Object.entries(collected).map(([key, set]) => [key, [...set]]));
+}
+
+function configuredStoreForIdentity(storeKey) {
+  return STORES.find(s => normalizeStoreKey(s.storeKey) === normalizeStoreKey(storeKey));
 }
 
 function summarizeSiteList(data) {
@@ -639,7 +711,29 @@ async function main() {
   }
 
   const {store, client} = await loadClient(args);
+  const configuredStore = configuredStoreForIdentity(targetStore);
+  if (!configuredStore) {
+    blockers.push(`config/stores.json 中不存在目标店铺 ${targetStore}，不能执行 OpenAPI 写入。`);
+  }
   const calls = [];
+  const storeInfo = await callOpenApi(client, {
+    name: 'query-store-info',
+    method: 'POST',
+    path: '/open-api/openapi-business-backend/query-store-info',
+    body: {},
+  });
+  calls.push(compactCallResult(storeInfo.name, storeInfo.path, storeInfo.method, {status: storeInfo.httpStatus, data: storeInfo.data}));
+  const openapiIdentity = configuredStore ? validateStoreIdentity({
+    store: configuredStore,
+    truth: STORE_ACCOUNT_TRUTH.stores?.[targetStore],
+    storageIdentity: openApiIdentityToStorageIdentity(storeInfo.data),
+    href: 'openapi:/open-api/openapi-business-backend/query-store-info',
+    context: 'link_ops_hl_openapi_executor',
+  }) : {ok: false, reason: 'missing_configured_store'};
+  evidence.storeIdentity = openapiIdentity;
+  if (!openapiIdentity.ok) {
+    blockers.push(formatStoreIdentityError(openapiIdentity));
+  }
   const publishPermission = await callOpenApi(client, {
     name: 'check-publish-permission',
     method: 'GET',
@@ -777,6 +871,7 @@ async function main() {
       sites,
       brands,
       warehouses,
+      storeIdentity: openapiIdentity,
     },
     payload: {
       found: Boolean(payloadFound?.payload),

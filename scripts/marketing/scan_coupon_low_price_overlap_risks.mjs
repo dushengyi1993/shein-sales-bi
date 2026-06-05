@@ -3,23 +3,29 @@
  * Read-only live scan for low-price overlap risks in coupon activity 34810.
  *
  * Project invariant:
- * Paired 15% coupon SKCs must not silently stack on top of a currently active
- * or future limited-discount price. Historical BI labels are only hints; this
- * scanner uses the live seller-center limited-discount list plus the live
- * multi-level coupon enrolled list before producing any cancel candidate.
+ * Paired 15% coupon SKCs are evaluated by final price, not by overlap label.
+ * Historical BI labels are only hints; this scanner uses the live seller-center
+ * limited-discount list plus the live multi-level coupon enrolled list, then
+ * compares limitedDiscountPrice * couponFactor against the audited
+ * finalTargetPrice before producing any cancel candidate.
  */
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
+import {
+  PRICE_GUARD_TOLERANCE_SAR,
+  classifyLimitedDiscountCouponStack,
+  loadCouponTargetEligibilityPlan,
+} from '../../lib/marketing_coupon_policy.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
 const COUPON_DETAIL_URL = id => `https://sso.geiwohuo.com/#/mbrs/marketing/coupon/detail/${id}`;
 const COUPON_GOODS_URL = (activityId, levelRuleId) => `https://sso.geiwohuo.com/#/mbrs/marketing/coupon/rule/goods/${activityId}/${levelRuleId}`;
 const ACTIVITY_ID_DEFAULT = 34810;
-const PLAN_PATH_DEFAULT = path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-submit-results', 'coupon-extra-vs-ordinary-plan-2026-06-03.json');
+const PLAN_PATH_DEFAULT = path.join(ROOT, 'tmp', 'marketing-signup', 'selection-plan-2026-06-03-ALL-ready.json');
 const LEVEL_RULE_HINT_DEFAULT = path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-cancel-results', 'final-coupon-active-plan-counts-2026-06-03.json');
 const ALLOWED_OVERLAP_DEFAULT = path.join(ROOT, 'config', 'marketing_allowed_limited_coupon_overlaps.json');
 const OUT_DIR = path.join(ROOT, 'tmp', 'marketing-signup', 'low-price-overlap-risk');
@@ -41,6 +47,7 @@ function parseArgs(argv) {
     stores: [],
     activityId: ACTIVITY_ID_DEFAULT,
     targetPlan: PLAN_PATH_DEFAULT,
+    priceOverrides: [],
     levelRuleHints: LEVEL_RULE_HINT_DEFAULT,
     allowedOverlapList: ALLOWED_OVERLAP_DEFAULT,
     noLaunch: false,
@@ -52,6 +59,7 @@ function parseArgs(argv) {
     if (a === '--stores') out.stores.push(...splitStores(argv[++i]));
     else if (a === '--activity-id') out.activityId = Number(argv[++i]);
     else if (a === '--target-plan') out.targetPlan = argv[++i];
+    else if (a === '--price-overrides' || a === '--coupon-price-overrides') out.priceOverrides.push(...splitStores(argv[++i]));
     else if (a === '--level-rule-hints') out.levelRuleHints = argv[++i];
     else if (a === '--allowed-overlap-list') out.allowedOverlapList = argv[++i];
     else if (a === '--no-allowed-overlap-list') out.allowedOverlapList = '';
@@ -484,7 +492,16 @@ async function readLiveCouponAndLimited(cdp, args, levelRuleId) {
     const limitedDetails = [];
     for (const activity of limitedActivities) {
       const goodsPacket = await post('/promotion/simple_platform/query_activity_goods', {activity_id: activity.activity_id, page_num: 1, page_size: 1000}, '/mbrs/marketing/list');
-      limitedDetails.push({activity, goods: arrayFrom(goodsPacket.info), goodsCode: goodsPacket.code, goodsMsg: goodsPacket.msg});
+      const goods = arrayFrom(goodsPacket.info);
+      const goodsTotal = Number(goodsPacket.info?.total ?? goodsPacket.info?.total_count ?? goodsPacket.info?.page_info?.total ?? goods.length ?? NaN);
+      limitedDetails.push({
+        activity,
+        goods,
+        goodsCode: goodsPacket.code,
+        goodsMsg: goodsPacket.msg,
+        goodsTotal: Number.isFinite(goodsTotal) ? goodsTotal : null,
+        goodsTruncated: Number.isFinite(goodsTotal) && goods.length < goodsTotal,
+      });
     }
     const couponPackets = [];
     if (__arg.levelRuleId) {
@@ -603,6 +620,21 @@ async function scanStore(store, args, planBySkc, levelRuleId, allowedOverlaps) {
       return result;
     }
     result.limitedActivityCount = live.limitedDetails?.length || 0;
+    const badLimitedGoodsQueries = (live.limitedDetails || [])
+      .filter(detail => String(detail.goodsCode) !== '0' || detail.goodsTruncated);
+    if (badLimitedGoodsQueries.length) {
+      result.limitedGoodsQueryFailures = badLimitedGoodsQueries.map(detail => ({
+        activityId: detail.activity?.activity_id,
+        activityName: detail.activity?.act_name || '',
+        code: detail.goodsCode,
+        msg: detail.goodsMsg,
+        count: detail.goods?.length || 0,
+        total: detail.goodsTotal,
+        truncated: !!detail.goodsTruncated,
+      })).slice(0, 20);
+      result.reason = `limited-discount goods query incomplete; fail closed before coupon risk decision: ${badLimitedGoodsQueries.length} activities`;
+      return result;
+    }
     result.coupon = {
       levelRuleId: effectiveLevelRuleId,
       packets: live.couponPackets || [],
@@ -620,6 +652,7 @@ async function scanStore(store, args, planBySkc, levelRuleId, allowedOverlaps) {
     result.coupon.activeCount = couponActive.size;
 
     const now = Date.now();
+    const limitedBySkc = new Map();
     for (const detail of live.limitedDetails || []) {
       const activity = detail.activity || {};
       const state = String(activity.state ?? '');
@@ -639,11 +672,6 @@ async function scanStore(store, args, planBySkc, levelRuleId, allowedOverlaps) {
           skc,
           supplierNo: good.sku_supplier_no || planRow.supplierNo || planRow.canonical || '',
           canonical: planRow.canonical || '',
-          riskReason: hasActiveCoupon
-            ? (allowedOverlap
-              ? 'allowed_active_15pct_coupon_overlaps_active_or_future_limited_discount'
-              : 'active_15pct_coupon_overlaps_active_or_future_limited_discount')
-            : 'planned_coupon_skc_has_active_or_future_limited_discount_but_coupon_not_active',
           allowedOverlap: !!allowedOverlap,
           allowedOverlapReason: allowedOverlap?.reason || '',
           allowedOverlapSource: allowedOverlap?._source || '',
@@ -659,10 +687,37 @@ async function scanStore(store, args, planBySkc, levelRuleId, allowedOverlaps) {
           attendNumSum: Number(good.attend_num_sum ?? NaN),
           ordinaryPlanActivityId: planRow.activityId || '',
           ordinaryPlanTargetPrice: planRow.targetPrice ?? '',
+          targetPrice: planRow.targetPrice ?? '',
+          planFinalTargetPrice: planRow.finalTargetPrice ?? '',
+          planCouponFactor: planRow.couponFactor ?? '',
+          priceEvidenceSource: planRow.sourcePriceOverride || planRow.sourcePlan || '',
         };
-        result.risks.push(row);
+        row.priceGuard = classifyLimitedDiscountCouponStack(row, planRow, {
+          fallbackDiscountPct: 15,
+          priceToleranceSar: PRICE_GUARD_TOLERANCE_SAR,
+        });
+        row.couponFactor = row.priceGuard.couponFactor ?? '';
+        row.currentBasePrice = row.priceGuard.limitedDiscountPrice ?? '';
+        row.finalWithCoupon = row.priceGuard.finalWithCoupon ?? '';
+        row.targetFinalPrice = row.priceGuard.finalTargetPrice ?? '';
+        row.diff = row.priceGuard.diff ?? '';
+        row.priceDecision = row.priceGuard.decision || '';
+        row.shouldCancelCoupon = !!row.priceGuard.shouldCancelCoupon;
+        row.riskReason = hasActiveCoupon
+          ? (row.shouldCancelCoupon
+            ? 'active_15pct_coupon_final_below_target_due_to_limited_discount'
+            : (row.priceDecision.startsWith('missing_')
+              ? 'active_15pct_coupon_limited_discount_overlap_missing_price_evidence'
+              : 'active_15pct_coupon_limited_discount_overlap_price_guard_allows'))
+          : 'planned_coupon_skc_has_active_or_future_limited_discount_but_coupon_not_active';
+
+        const prev = limitedBySkc.get(skc);
+        const rowPrice = Number.isFinite(row.limitedDiscountPrice) ? row.limitedDiscountPrice : Infinity;
+        const prevPrice = Number.isFinite(prev?.limitedDiscountPrice) ? prev.limitedDiscountPrice : Infinity;
+        if (!prev || rowPrice < prevPrice) limitedBySkc.set(skc, row);
       }
     }
+    result.risks = [...limitedBySkc.values()];
     result.ok = true;
     result.reason = `live scan ok; active coupon=${couponActive.size}, active/future limited overlap=${result.risks.length}`;
     return result;
@@ -690,7 +745,12 @@ function toCsv(rows, headers) {
 
 await fs.mkdir(OUT_DIR, {recursive: true});
 const args = parseArgs(process.argv.slice(2));
-const plan = await loadPlan(args.targetPlan);
+const plan = await loadCouponTargetEligibilityPlan({
+  root: ROOT,
+  planPath: args.targetPlan,
+  priceOverridesPaths: args.priceOverrides,
+  targetDiscountPct: 15,
+});
 const levelHints = await loadLevelRuleHints(args.levelRuleHints);
 const allowedOverlaps = await loadAllowedOverlaps(args.allowedOverlapList);
 const selectedStores = args.stores.map(key => {
@@ -703,14 +763,19 @@ const summary = {
   createdAt: new Date().toISOString(),
   activityId: args.activityId,
   targetPlan: path.relative(ROOT, plan.path),
+  priceOverrideSources: plan.priceOverrideSources.map(p => path.relative(ROOT, p)),
   levelRuleHints: args.levelRuleHints ? path.relative(ROOT, path.resolve(ROOT, args.levelRuleHints)) : '',
   allowedOverlapList: args.allowedOverlapList ? path.relative(ROOT, path.resolve(ROOT, args.allowedOverlapList)) : '',
   allowedOverlapEntries: allowedOverlaps.size,
+  priceGuardPolicy: 'cancel only when active coupon finalWithCoupon is below finalTargetPrice',
+  priceToleranceSar: PRICE_GUARD_TOLERANCE_SAR,
   stores: [],
 };
 
 for (const store of selectedStores) {
-  const planBySkc = plan.byStore.get(String(store.storeKey).toUpperCase()) || new Map();
+  const storeKey = String(store.storeKey).toUpperCase();
+  const planRows = (plan.rowsByStore.get(storeKey) || []).filter(row => row.allowed15);
+  const planBySkc = new Map(planRows.map(row => [row.skc, row]));
   const levelRuleId = levelHints.get(String(store.storeKey).toUpperCase()) || null;
   console.log(`[${store.storeKey}] scan coupon/limited overlap: plan=${planBySkc.size}, levelRuleId=${levelRuleId || '-'}`);
   const result = await scanStore(store, args, planBySkc, levelRuleId, allowedOverlaps);
@@ -719,8 +784,13 @@ for (const store of selectedStores) {
 }
 
 const riskRows = summary.stores.flatMap(s => s.risks || []);
+const priceDecisionCounts = {};
+for (const row of riskRows) {
+  const key = row.priceDecision || 'unknown';
+  priceDecisionCounts[key] = (priceDecisionCounts[key] || 0) + 1;
+}
 const cancelRows = riskRows
-  .filter(row => row.hasActiveCoupon && !row.allowedOverlap && row.levelRuleId)
+  .filter(row => row.hasActiveCoupon && row.shouldCancelCoupon && row.levelRuleId)
   .map(row => ({
     storeKey: row.storeKey,
     activityId: args.activityId,
@@ -729,6 +799,15 @@ const cancelRows = riskRows
     supplierNo: row.supplierNo,
     reason: row.riskReason,
     riskReason: row.riskReason,
+    shouldCancelCoupon: true,
+    priceDecision: row.priceDecision,
+    currentBasePrice: row.currentBasePrice,
+    limitedDiscountPrice: row.limitedDiscountPrice,
+    couponFactor: row.couponFactor,
+    finalWithCoupon: row.finalWithCoupon,
+    targetFinalPrice: row.targetFinalPrice,
+    diff: row.diff,
+    priceEvidenceSource: row.priceEvidenceSource,
     limitedDiscountActivityId: row.limitedDiscountActivityId,
     limitedDiscountName: row.limitedDiscountName,
     limitedDiscountEnd: row.limitedDiscountEnd,
@@ -739,7 +818,12 @@ const csvFile = path.join(OUT_DIR, `coupon-low-price-overlap-live-${stamp}.csv`)
 const cancelFile = path.join(OUT_DIR, `coupon-low-price-overlap-cancel-list-${stamp}.json`);
 
 summary.riskCount = riskRows.length;
+summary.priceDecisionCounts = priceDecisionCounts;
+summary.activeCouponOverlapCount = riskRows.filter(row => row.hasActiveCoupon).length;
 summary.allowedActiveOverlapCount = riskRows.filter(row => row.hasActiveCoupon && row.allowedOverlap).length;
+summary.activeCouponAllowedByPriceCount = riskRows.filter(row => row.hasActiveCoupon && row.priceGuard?.allowSubmit).length;
+summary.activeCouponBelowTargetCount = riskRows.filter(row => row.hasActiveCoupon && row.shouldCancelCoupon).length;
+summary.activeCouponMissingPriceEvidenceCount = riskRows.filter(row => row.hasActiveCoupon && String(row.priceDecision || '').startsWith('missing_')).length;
 summary.activeCouponRiskCount = cancelRows.length;
 summary.cancelList = {
   path: path.relative(ROOT, cancelFile),
@@ -748,18 +832,21 @@ summary.cancelList = {
 await fs.writeFile(jsonFile, JSON.stringify(summary, null, 2), 'utf8');
 await fs.writeFile(csvFile, toCsv(riskRows, [
   'storeKey', 'skc', 'supplierNo', 'canonical', 'riskReason', 'hasActiveCoupon',
-  'allowedOverlap', 'allowedOverlapReason', 'levelRuleId', 'limitedDiscountActivityId', 'limitedDiscountName', 'limitedDiscountState',
+  'allowedOverlap', 'allowedOverlapReason', 'priceDecision', 'currentBasePrice',
+  'couponFactor', 'finalWithCoupon', 'targetFinalPrice', 'diff', 'priceEvidenceSource',
+  'levelRuleId', 'limitedDiscountActivityId', 'limitedDiscountName', 'limitedDiscountState',
   'limitedDiscountStart', 'limitedDiscountEnd', 'limitedDiscountPrice', 'ordinaryPlanActivityId',
-  'ordinaryPlanTargetPrice',
+  'ordinaryPlanTargetPrice', 'targetPrice', 'planFinalTargetPrice', 'planCouponFactor',
 ]), 'utf8');
 await fs.writeFile(cancelFile, JSON.stringify({
   createdAt: summary.createdAt,
-  mode: 'risk-cancel-plan-overlap',
+  mode: 'risk-cancel-price-below-target',
   riskCancel: true,
-  purpose: 'cancel active 15pct coupon rows that overlap active/future limited-discount prices',
-  ordinaryPlanPaths: Array.isArray((await readJson(args.targetPlan)).ordinaryPlanPaths)
-    ? (await readJson(args.targetPlan)).ordinaryPlanPaths
-    : [path.relative(ROOT, plan.path)],
+  purpose: 'cancel active 15pct coupon rows only when limitedDiscountPrice * couponFactor is below finalTargetPrice',
+  priceGuardPolicy: summary.priceGuardPolicy,
+  priceToleranceSar: PRICE_GUARD_TOLERANCE_SAR,
+  ordinaryPlanPaths: plan.planSources.map(p => path.relative(ROOT, p)),
+  priceOverrideSources: plan.priceOverrideSources.map(p => path.relative(ROOT, p)),
   sourceScan: path.relative(ROOT, jsonFile),
   rows: cancelRows,
 }, null, 2), 'utf8');

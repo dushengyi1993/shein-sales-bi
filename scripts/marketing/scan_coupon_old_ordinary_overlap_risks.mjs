@@ -1,13 +1,11 @@
 #!/usr/bin/env node
 /**
- * Read-only live scan for old ordinary-marketing overlap risks in coupon activity 34810.
+ * Read-only live scan for old ordinary-marketing overlap observations in coupon activity 34810.
  *
  * Invariant:
- * The paired 15% coupon is allowed to stack only with the ordinary marketing
- * signup rows explicitly present in the current ordinary plan. If a live
- * active coupon also overlaps a live already-partaken ordinary marketing
- * activity row that is not in the plan, the coupon must be treated as a risk
- * candidate and cancelled through the multi-level coupon cancel workflow.
+ * Activity overlap is a candidate signal only. Real cancellation must be backed
+ * by price-stack evidence that the final price is below target. This script
+ * therefore writes observation rows, not an executable cancel list.
  */
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
@@ -417,7 +415,7 @@ for (const store of selectedStores) {
   console.log(`[${store.storeKey}] ${result.ok ? 'OK' : 'WARN'} risks=${result.risks?.length || 0} ${result.reason || ''}`);
 }
 const riskRows = summary.stores.flatMap(s => s.risks || []);
-const cancelRows = riskRows.filter(row => row.hasActiveCoupon && !row.authorizedCurrentPlan && row.levelRuleId).map(row => ({
+const observationRows = riskRows.filter(row => row.hasActiveCoupon && !row.authorizedCurrentPlan && row.levelRuleId).map(row => ({
   storeKey: row.storeKey,
   activityId: args.activityId,
   levelRuleId: row.levelRuleId,
@@ -429,20 +427,32 @@ const cancelRows = riskRows.filter(row => row.hasActiveCoupon && !row.authorized
   ordinaryMarketingActivityName: row.ordinaryMarketingActivityName,
   ordinaryMarketingEnd: row.ordinaryMarketingEnd,
 }));
+const cancelRows = [];
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const jsonFile = path.join(OUT_DIR, `coupon-old-ordinary-overlap-live-${stamp}.json`);
 const csvFile = path.join(OUT_DIR, `coupon-old-ordinary-overlap-live-${stamp}.csv`);
 const cancelFile = path.join(OUT_DIR, `coupon-old-ordinary-overlap-cancel-list-${stamp}.json`);
 summary.riskCount = riskRows.length;
 summary.authorizedActiveOverlapCount = riskRows.filter(row => row.hasActiveCoupon && row.authorizedCurrentPlan).length;
+summary.activeCouponObservationCount = observationRows.length;
 summary.activeCouponRiskCount = cancelRows.length;
 summary.cancelList = {path: path.relative(ROOT, cancelFile), rows: cancelRows.length};
 await fs.writeFile(jsonFile, JSON.stringify(summary, null, 2), 'utf8');
 await fs.writeFile(csvFile, toCsv(riskRows, ['storeKey','skc','supplierNo','canonical','riskReason','hasActiveCoupon','authorizedCurrentPlan','levelRuleId','ordinaryMarketingActivityId','ordinaryMarketingActivityName','ordinaryMarketingStart','ordinaryMarketingEnd','ordinaryMarketingPrice','auditStatus','goodsAuditStatus','ordinaryPlanActivityId','ordinaryPlanTargetPrice']), 'utf8');
-await fs.writeFile(cancelFile, JSON.stringify({createdAt: summary.createdAt, mode: 'risk-cancel-plan-overlap', riskCancel: true, purpose: 'cancel active 15pct coupon rows that overlap unplanned old ordinary marketing activity prices', ordinaryPlanPaths: Array.isArray((await readJson(args.targetPlan)).ordinaryPlanPaths) ? (await readJson(args.targetPlan)).ordinaryPlanPaths : [path.relative(ROOT, plan.path)], sourceScan: path.relative(ROOT, jsonFile), rows: cancelRows}, null, 2), 'utf8');
+await fs.writeFile(cancelFile, JSON.stringify({
+  createdAt: summary.createdAt,
+  mode: 'observation-only-old-ordinary-overlap',
+  riskCancel: false,
+  purpose: 'observe active 15pct coupon rows that overlap unplanned old ordinary marketing activity; do not cancel without price-stack evidence',
+  ordinaryPlanPaths: Array.isArray((await readJson(args.targetPlan)).ordinaryPlanPaths) ? (await readJson(args.targetPlan)).ordinaryPlanPaths : [path.relative(ROOT, plan.path)],
+  sourceScan: path.relative(ROOT, jsonFile),
+  observationRows,
+  rows: cancelRows,
+}, null, 2), 'utf8');
 console.log(`\nJSON ${jsonFile}`);
 console.log(`CSV ${csvFile}`);
 console.log(`CANCEL_LIST ${cancelFile}`);
 console.log(`RISK_ROWS ${riskRows.length}`);
 console.log(`AUTHORIZED_ACTIVE_OVERLAP_ROWS ${summary.authorizedActiveOverlapCount}`);
+console.log(`ACTIVE_COUPON_OBSERVATION_ROWS ${observationRows.length}`);
 console.log(`ACTIVE_COUPON_RISK_ROWS ${cancelRows.length}`);

@@ -1,11 +1,18 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {
+  requireStoreIdentitySnapshot,
+  storeIdentityEvalBody,
+} from '../../lib/shein_store_identity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp/marketing-signup/limited-discount-rescue');
 const DEFAULT_PORT = 9360;
 const TARGET_REF_TOOL_ID = 175;
+const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
+const STORES = STORES_CONFIG.stores || [];
+const STORE_ACCOUNT_TRUTH = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'store_account_truth.json'), 'utf8'));
 
 function parseArgs(argv) {
   const args = {
@@ -13,6 +20,7 @@ function parseArgs(argv) {
     rescue: '',
     outDir: DEFAULT_OUT_DIR,
     execute: false,
+    storeKey: 'HL',
     startDelayMinutes: 20,
     endTime: '',
   };
@@ -26,6 +34,9 @@ function parseArgs(argv) {
     else if (arg.startsWith('--rescue=')) args.rescue = path.resolve(arg.slice('--rescue='.length));
     else if (arg === '--out-dir') args.outDir = path.resolve(argv[++i]);
     else if (arg.startsWith('--out-dir=')) args.outDir = path.resolve(arg.slice('--out-dir='.length));
+    else if (arg === '--store' || arg === '--store-key') args.storeKey = String(argv[++i] || '').toUpperCase();
+    else if (arg.startsWith('--store=')) args.storeKey = String(arg.slice('--store='.length) || '').toUpperCase();
+    else if (arg.startsWith('--store-key=')) args.storeKey = String(arg.slice('--store-key='.length) || '').toUpperCase();
     else if (arg === '--start-delay-minutes') args.startDelayMinutes = Number(argv[++i]);
     else if (arg.startsWith('--start-delay-minutes=')) args.startDelayMinutes = Number(arg.slice('--start-delay-minutes='.length));
     else if (arg === '--end-time') args.endTime = argv[++i] || '';
@@ -33,6 +44,7 @@ function parseArgs(argv) {
     else throw new Error(`Unknown argument: ${arg}`);
   }
   if (!Number.isFinite(args.port) || args.port <= 0) throw new Error(`Invalid --port: ${args.port}`);
+  if (!args.storeKey) throw new Error('Missing --store-key for identity guard');
   if (!args.rescue) throw new Error('Missing --rescue <rescue-json>. Do not rely on a hard-coded one-off batch path.');
   if (!args.endTime) throw new Error('Missing --end-time "YYYY-MM-DD HH:mm:ss" for the limited-discount rescue window.');
   const end = new Date(String(args.endTime).replace(' ', 'T') + '+08:00');
@@ -124,6 +136,16 @@ async function connect(port) {
   return cdp;
 }
 
+async function assertCurrentStoreIdentity(cdp, store, context) {
+  const identitySnapshot = await cdp.eval(storeIdentityEvalBody());
+  return requireStoreIdentitySnapshot({
+    store,
+    truth: STORE_ACCOUNT_TRUTH.stores?.[store.storeKey],
+    snapshot: identitySnapshot,
+    context,
+  });
+}
+
 function normalizeTargetRows(rescue) {
   const rows = (rescue.rows || [])
     .filter(row => row && row.needsLimitedDiscount !== false)
@@ -161,10 +183,13 @@ const args = parseArgs(process.argv.slice(2));
 await fs.mkdir(args.outDir, {recursive: true});
 const rescue = JSON.parse(await fs.readFile(args.rescue, 'utf8'));
 const targetRows = normalizeTargetRows(rescue);
+const store = STORES.find(s => String(s.storeKey).toUpperCase() === args.storeKey);
+if (!store) throw new Error(`Unknown store for identity guard: ${args.storeKey}`);
 
 const cdp = await connect(args.port);
 let outPath;
 try {
+  const identity = await assertCurrentStoreIdentity(cdp, store, 'apply_hl_limited_discount_rescue');
   const result = await cdp.eval(
     `
     const {
@@ -806,8 +831,10 @@ try {
   outPath = path.join(args.outDir, `hl-limited-discount-rescue-apply-${args.execute ? 'execute' : 'dry-run'}-${stamp}.json`);
   await fs.writeFile(outPath, JSON.stringify({
     createdAt: new Date().toISOString(),
+    storeKey: store.storeKey,
     port: args.port,
     rescuePath: rel(args.rescue),
+    identity,
     ...result,
   }, null, 2), 'utf8');
 
@@ -846,6 +873,7 @@ try {
   outPath = path.join(args.outDir, `hl-limited-discount-rescue-apply-${args.execute ? 'execute' : 'dry-run'}-failed-${stamp}.json`);
   const doc = {
     createdAt: new Date().toISOString(),
+    storeKey: store.storeKey,
     port: args.port,
     rescuePath: rel(args.rescue),
     execute: args.execute,

@@ -15,10 +15,15 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
+import {
+  requireStoreIdentitySnapshot,
+  storeIdentityEvalBody,
+} from '../../lib/shein_store_identity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
 const STORES = STORES_CONFIG.stores || [];
+const STORE_ACCOUNT_TRUTH = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'store_account_truth.json'), 'utf8'));
 const OUT_DIR = path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-budget-results');
 const ACTIVITY_ID_DEFAULT = 34810;
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
@@ -203,6 +208,16 @@ async function recoverLoginIfNeeded(cdp) {
   return {needed: true, before: state, attempts, after};
 }
 
+async function assertCurrentStoreIdentity(cdp, store, context) {
+  const identitySnapshot = await cdp.eval(storeIdentityEvalBody());
+  return requireStoreIdentitySnapshot({
+    store,
+    truth: STORE_ACCOUNT_TRUTH.stores?.[store.storeKey],
+    snapshot: identitySnapshot,
+    context,
+  });
+}
+
 function siteBudgetFromBudgetInfo(info, site) {
   const detail = (info?.coupon_activity_budget_detail_list || [])[0] || {};
   return (detail.coupon_site_budget_info_list || []).find(x => x.site === site) || null;
@@ -237,6 +252,7 @@ async function setStoreBudget(store, args) {
       result.reason = 'login page after automatic login recovery; skipped budget update';
       return result;
     }
+    result.identity = await assertCurrentStoreIdentity(cdp, store, 'set_coupon_site_budget');
 
     const live = await cdp.eval(`
       const post = async (url, body) => {

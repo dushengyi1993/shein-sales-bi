@@ -151,7 +151,8 @@
 3. 使用 `scripts/auto_relogin_shein_store.mjs` 恢复登录态：
    - 示例：`node scripts/auto_relogin_shein_store.mjs DL,DX --date 2026-04-28 --visible`
    - 脚本只检查账号/密码输入框是否已有值，并点击登录按钮；不读取、不输出账号密码。
-   - 如果出现验证码、人机校验、短信验证，脚本不能绕过，应打开可见窗口让用户处理。
+   - 如果只是协议签署、公告、通知确认、`知道了` / `确认` / `同意` 等普通登录干扰弹窗，运维代理可在可见窗口/noVNC 中关闭或确认后再次点击登录，并在成功后导出/探测 session。
+   - 如果出现验证码、人机校验、短信验证、人脸、缺密码，或新的法律/资质/付费/授权范围承诺不明内容，脚本不能绕过，应打开可见窗口让用户处理。
 4. 登录恢复后，补跑当天同步：
    - 示例：`node scripts/run_sales_sync_job.mjs --date 2026-04-28 --status 当天同步 --group DSY --no-monthly --no-compact-display --no-dashboard`
 5. DSY 与 LGM 都成功后，再统一刷新派生展示层，避免半新半旧：

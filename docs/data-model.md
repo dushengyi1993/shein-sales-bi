@@ -42,6 +42,7 @@
 - 商品明细接口：`/gsp/orderPlus/listOrderItem`。
 - 销售额 SAR：商品明细 `groupList[].goodsList[].currencyPrice` 求和。
 - 有效订单数：至少一条商品明细 `currencyPrice > 0` 的订单数。
+- 收入口径禁线：页面上的商品总价、预计收入汇总金额、`summary.salesSar` 等汇总字段只能做展示/对账参考，不能作为订单成交金额或销售额真相源。
 
 关键字段：
 - 日期

@@ -4,10 +4,10 @@
  *
  * Project invariant:
  * Coupon activity 34810 is a multi-level coupon activity. For this campaign,
- * only SKCs that are paired with the ordinary marketing signup plan should
+ * only SKCs that price-overrides explicitly mark as 15% coupon-allowed should
  * remain in the fixed 15% coupon tier. This script cancels only SKCs listed in
- * the audited "extra vs ordinary plan" file, and refuses to cancel anything
- * that appears in the ordinary signup plans.
+ * the audited risk file, and refuses to cancel anything that appears in the
+ * shared coupon classifier's allowed15 protection set.
  *
  * Safety:
  * - Dry-run by default. Real cancellation requires --execute.
@@ -19,6 +19,15 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
+import {
+  PRICE_GUARD_TOLERANCE_SAR,
+  loadCouponTargetEligibilityPlan,
+  summarizeCouponTargetEligibilityPlan,
+} from '../../lib/marketing_coupon_policy.mjs';
+import {
+  requireStoreIdentitySnapshot,
+  storeIdentityEvalBody,
+} from '../../lib/shein_store_identity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const ACTIVITY_ID_DEFAULT = 34810;
@@ -27,7 +36,13 @@ const OUT_DIR = path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-cancel-result
 const COUPON_GOODS_URL = (activityId, levelRuleId) => `https://sso.geiwohuo.com/#/mbrs/marketing/coupon/rule/goods/${activityId}/${levelRuleId}`;
 const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
 const STORES = STORES_CONFIG.stores || [];
+const STORE_ACCOUNT_TRUTH = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'store_account_truth.json'), 'utf8'));
 const ACTIVE_STATUSES = new Set(['0', '1']);
+const PLAN_PRICE_CANCEL_DECISIONS = new Set([
+  'coupon_final_below_target',
+  'do_not_coupon_price_below_target',
+  'final_with_coupon_below_target',
+]);
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -35,6 +50,29 @@ function sleep(ms) {
 
 function splitStores(value) {
   return String(value || '').split(',').map(s => s.trim()).filter(Boolean);
+}
+
+function numberOrNull(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(String(value).replace(/,/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+
+function round2(value) {
+  return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+}
+
+function hasPlanPriceCancelEvidence(row) {
+  if (row?.shouldCancelCoupon !== true && row?.shouldCancelCoupon !== 'true') {
+    const decision = String(row?.priceDecision || row?.decision || '').trim();
+    if (!PLAN_PRICE_CANCEL_DECISIONS.has(decision)) return false;
+  }
+  const basePrice = numberOrNull(row?.currentBasePrice ?? row?.effectiveBasePrice ?? row?.limitedDiscountPrice);
+  const couponFactor = numberOrNull(row?.couponFactor);
+  const targetFinal = numberOrNull(row?.targetFinalPrice ?? row?.finalTargetPrice);
+  if (basePrice === null || couponFactor === null || targetFinal === null) return false;
+  const recalculatedFinalWithCoupon = round2(basePrice * couponFactor);
+  return recalculatedFinalWithCoupon < targetFinal - PRICE_GUARD_TOLERANCE_SAR;
 }
 
 function parseArgs(argv) {
@@ -46,6 +84,7 @@ function parseArgs(argv) {
     noClose: false,
     noLaunch: false,
     allowPlanRiskCancel: false,
+    priceOverrides: [],
     waitMs: 45_000,
     pageSize: 200,
   };
@@ -54,6 +93,7 @@ function parseArgs(argv) {
     if (a === '--stores') out.stores.push(...splitStores(argv[++i]));
     else if (a === '--activity-id') out.activityId = Number(argv[++i]);
     else if (a === '--extra-list') out.extraList = argv[++i];
+    else if (a === '--price-overrides' || a === '--coupon-price-overrides') out.priceOverrides.push(...splitStores(argv[++i]));
     else if (a === '--execute') out.execute = true;
     else if (a === '--dry-run' || a === '--no-execute') out.execute = false;
     else if (a === '--allow-plan-risk-cancel') out.allowPlanRiskCancel = true;
@@ -316,6 +356,16 @@ async function recoverLoginIfNeeded(cdp, activityId, levelRuleId) {
   }
   const page = await gotoCouponRule(cdp, activityId, levelRuleId);
   return {needed: true, before, attempts, after, page};
+}
+
+async function assertCurrentStoreIdentity(cdp, store, context) {
+  const identitySnapshot = await cdp.eval(storeIdentityEvalBody());
+  return requireStoreIdentitySnapshot({
+    store,
+    truth: STORE_ACCOUNT_TRUTH.stores?.[store.storeKey],
+    snapshot: identitySnapshot,
+    context,
+  });
 }
 
 function isActiveStatus(status) {
@@ -594,24 +644,45 @@ async function loadJson(file) {
   return JSON.parse(await fs.readFile(absolute, 'utf8'));
 }
 
-async function loadExtraAndPlans(extraListPath) {
+async function loadExtraAndPlans(extraListPath, args) {
   const absolute = path.resolve(ROOT, extraListPath);
   const extraDoc = await loadJson(absolute);
   const rows = Array.isArray(extraDoc) ? extraDoc : (extraDoc.rows || []);
   const ordinaryPlanPaths = Array.isArray(extraDoc.ordinaryPlanPaths) ? extraDoc.ordinaryPlanPaths : [];
   const riskCancel = extraDoc.riskCancel === true || String(extraDoc.mode || '').includes('risk');
   const planByStore = new Map();
-  for (const planPath of ordinaryPlanPaths) {
-    const planDoc = await loadJson(planPath);
-    const items = Array.isArray(planDoc) ? planDoc : (planDoc.items || []);
-    for (const item of items) {
-      if (!item?.storeKey || !item?.skc || item.selected === false) continue;
-      const storeKey = String(item.storeKey).toUpperCase();
-      if (!planByStore.has(storeKey)) planByStore.set(storeKey, new Set());
-      planByStore.get(storeKey).add(normalizeSkc(item.skc));
+  let couponPlan = null;
+  if (rows.length && !ordinaryPlanPaths.length) {
+    throw new Error('coupon cancel safety stop: extra list has rows but no ordinaryPlanPaths to derive allowed15 protection set');
+  }
+  if (ordinaryPlanPaths.length) {
+    couponPlan = await loadCouponTargetEligibilityPlan({
+      root: ROOT,
+      planPath: absolute,
+      priceOverridesPaths: args.priceOverrides,
+      targetDiscountPct: 15,
+    });
+    for (const [storeKey, allowedSet] of couponPlan.allowed15ByStore.entries()) {
+      planByStore.set(storeKey, new Set([...allowedSet].map(normalizeSkc)));
     }
   }
-  return {path: absolute, rows, ordinaryPlanPaths, planByStore, riskCancel, purpose: extraDoc.purpose || ''};
+  if (rows.length && (!couponPlan || !couponPlan.priceOverrideSources?.length)) {
+    throw new Error('coupon cancel safety stop: allowed15 protection set could not load paired price-overrides');
+  }
+  return {
+    path: absolute,
+    rows,
+    ordinaryPlanPaths,
+    planByStore,
+    couponPlan: couponPlan ? {
+      path: couponPlan.path,
+      planSources: couponPlan.planSources,
+      priceOverrideSources: couponPlan.priceOverrideSources,
+      stores: summarizeCouponTargetEligibilityPlan(couponPlan),
+    } : null,
+    riskCancel,
+    purpose: extraDoc.purpose || '',
+  };
 }
 
 function groupRowsByStore(rows, selectedStores, activityId) {
@@ -658,13 +729,25 @@ async function processStore(store, args, rows, planByStore, extraListPath) {
     const unsafePlanRows = rows.filter(row => planSet.has(row.skc));
     const riskRowsMissingReason = rows.filter(row => !String(row.riskReason || row.reason || '').trim());
     const riskCancelAllowed = args.allowPlanRiskCancel && rows.every(row => String(row.riskReason || row.reason || '').trim());
+    const unsafePlanRowsMissingPriceCancelEvidence = unsafePlanRows.filter(row => !hasPlanPriceCancelEvidence(row));
     result.input = {
       extraRows: rows.length,
-      plannedSkcs: planSet.size,
+      allowed15ProtectedSkcs: planSet.size,
       unsafePlanRows: unsafePlanRows.length,
+      unsafePlanRowsMissingPriceCancelEvidence: unsafePlanRowsMissingPriceCancelEvidence.length,
       riskCancelAllowed,
       levelRuleIds: [...new Set(rows.map(row => Number(row.levelRuleId)).filter(Boolean))],
-      sample: rows.slice(0, 10).map(row => ({skc: row.skc, supplierNo: row.supplierNo, levelRuleId: row.levelRuleId, status: row.status, reason: row.riskReason || row.reason || ''})),
+      sample: rows.slice(0, 10).map(row => ({
+        skc: row.skc,
+        supplierNo: row.supplierNo,
+        levelRuleId: row.levelRuleId,
+        status: row.status,
+        reason: row.riskReason || row.reason || '',
+        priceDecision: row.priceDecision || row.decision || '',
+        currentBasePrice: row.currentBasePrice ?? row.effectiveBasePrice ?? row.limitedDiscountPrice ?? '',
+        finalWithCoupon: row.finalWithCoupon ?? row.finalWith15 ?? row.couponFinalPrice ?? '',
+        targetFinalPrice: row.targetFinalPrice ?? row.finalTargetPrice ?? '',
+      })),
     };
     if (args.allowPlanRiskCancel && riskRowsMissingReason.length) {
       result.reason = `safety stop: --allow-plan-risk-cancel requires every row to carry reason/riskReason; missing=${riskRowsMissingReason.length}`;
@@ -672,9 +755,17 @@ async function processStore(store, args, rows, planByStore, extraListPath) {
       return result;
     }
     if (unsafePlanRows.length && !riskCancelAllowed) {
-      result.reason = `safety stop: ${unsafePlanRows.length} extra rows are also in ordinary signup plan`;
+      result.reason = `safety stop: ${unsafePlanRows.length} cancel rows are also in allowed15 coupon protection set`;
       result.unsafePlanRows = unsafePlanRows.slice(0, 20);
       return result;
+    }
+    if (unsafePlanRows.length && riskCancelAllowed && unsafePlanRowsMissingPriceCancelEvidence.length) {
+      result.reason = `safety stop: ${unsafePlanRowsMissingPriceCancelEvidence.length} allowed15 cancel rows lack explicit below-target price evidence`;
+      result.unsafePlanRowsMissingPriceCancelEvidence = unsafePlanRowsMissingPriceCancelEvidence.slice(0, 20);
+      return result;
+    }
+    if (unsafePlanRows.length && riskCancelAllowed) {
+      result.allowed15RiskRows = unsafePlanRows.slice(0, 20);
     }
     if (result.input.levelRuleIds.length !== 1) {
       result.reason = `safety stop: expected one 15% levelRuleId, got ${result.input.levelRuleIds.join(',') || '(none)'}`;
@@ -693,6 +784,7 @@ async function processStore(store, args, rows, planByStore, extraListPath) {
         return result;
       }
     }
+    result.identity = await assertCurrentStoreIdentity(cdp, store, 'cancel_coupon_extra_goods');
 
     let beforeEnrolled = await queryLevelGoodsAllRaw(cdp, args.activityId, levelRuleId, 'MULTI_LEVEL_RULE_ENROLLED_GOODS', args.pageSize);
     if (beforeEnrolled.code === '20302') {
@@ -784,6 +876,7 @@ async function processStore(store, args, rows, planByStore, extraListPath) {
       missingId: missingId.length,
       missingRecord: missingRecord.length,
       plannedActiveBefore: plannedBefore.length,
+      allowed15ActiveBefore: plannedBefore.length,
       goodsListSample: targets.slice(0, 10),
       missingSample: missing.slice(0, 10),
       inactiveSample: notActive.slice(0, 10),
@@ -835,9 +928,11 @@ async function processStore(store, args, rows, planByStore, extraListPath) {
       total: result.wait.enrolled?.total,
       count: afterList.length,
       plannedActiveAfter: plannedAfter.length,
+      allowed15ActiveAfter: plannedAfter.length,
       activeExtraRemaining: result.wait.activeRemaining.length,
       activeExtraRemainingSample: result.wait.activeRemaining.slice(0, 20),
       plannedActiveBefore: plannedBefore.length,
+      allowed15ActiveBefore: plannedBefore.length,
       plannedLost: plannedBefore.filter(skc => !plannedAfter.includes(skc)).slice(0, 20),
     };
     const plannedLost = plannedBefore.filter(skc => !plannedAfter.includes(skc));
@@ -846,13 +941,13 @@ async function processStore(store, args, rows, planByStore, extraListPath) {
     if (riskCancelAllowed) {
       result.ok = !!result.wait.ok && unexpectedPlannedLost.length === 0;
       result.reason = result.ok
-        ? `risk active SKCs cancelled; planned active count intentionally reduced (${plannedBefore.length} -> ${plannedAfter.length})`
+        ? `risk active SKCs cancelled; allowed15 active count intentionally reduced only for targeted risk rows (${plannedBefore.length} -> ${plannedAfter.length})`
         : `verification failed: activeRemaining=${result.wait.activeRemaining.length}, unexpectedPlannedLost=${unexpectedPlannedLost.length}`;
     } else {
       result.ok = !!result.wait.ok && plannedAfter.length >= plannedBefore.length;
       result.reason = result.ok
-        ? `extra active SKCs cancelled; ordinary planned active count preserved (${plannedBefore.length} -> ${plannedAfter.length})`
-        : `verification failed: activeExtraRemaining=${result.wait.activeRemaining.length}, plannedActive ${plannedBefore.length}->${plannedAfter.length}`;
+        ? `extra active SKCs cancelled; allowed15 active count preserved (${plannedBefore.length} -> ${plannedAfter.length})`
+        : `verification failed: activeExtraRemaining=${result.wait.activeRemaining.length}, allowed15Active ${plannedBefore.length}->${plannedAfter.length}`;
     }
     return result;
   } catch (err) {
@@ -868,7 +963,7 @@ async function processStore(store, args, rows, planByStore, extraListPath) {
 
 await fs.mkdir(OUT_DIR, {recursive: true});
 const args = parseArgs(process.argv.slice(2));
-const extra = await loadExtraAndPlans(args.extraList);
+const extra = await loadExtraAndPlans(args.extraList, args);
 if (extra.riskCancel) args.allowPlanRiskCancel = true;
 const selectedStores = args.stores.map(key => {
   const store = STORES.find(s => String(s.storeKey).toUpperCase() === key.toUpperCase());
@@ -882,6 +977,8 @@ const summary = {
   mode: args.execute ? 'execute' : 'dry-run',
   extraList: extra.path,
   ordinaryPlanPaths: extra.ordinaryPlanPaths,
+  protectionPolicy: 'allowed15_from_price_overrides_not_plain_ordinary_plan',
+  couponPlan: extra.couponPlan,
   riskCancel: extra.riskCancel,
   purpose: extra.purpose,
   stores: [],

@@ -17,6 +17,12 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {normalizeGoodsSnDetailed} from '../../lib/product_sku_normalizer.mjs';
+import {
+  couponPlanStoreView,
+  findCouponPlanRow,
+  loadCouponTargetEligibilityPlan,
+  summarizeCouponTargetEligibilityPlan,
+} from '../../lib/marketing_coupon_policy.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
@@ -75,7 +81,12 @@ const specialMarginRules = new Map();
 for (const [label, value] of specialMarginBase) registerRuleKeys(specialMarginRules, label, value);
 
 const args = parseArgs(process.argv.slice(2));
-const COUPON_TARGET_PLAN = await loadCouponTargetPlan(args.couponTargetPlan);
+const COUPON_TARGET_PLAN = args.couponTargetPlan ? await loadCouponTargetEligibilityPlan({
+  root: ROOT,
+  planPath: args.couponTargetPlan,
+  priceOverridesPaths: args.couponPriceOverrides,
+  targetDiscountPct: 15,
+}) : null;
 const now = new Date();
 const dateTag = formatDate(now);
 const timestampTag = formatTimestamp(now);
@@ -138,7 +149,8 @@ const COUPON_HEADERS = [
   '店铺','分组','优惠券活动ID','优惠券活动名称','报名截止','活动开始','活动结束','后台券档','商家承担%','平台承担%',
   '风险测算最高券折扣%','站点','当前站点预算SAR','已用预算SAR','优惠券状态','可报名数量','已报名数量',
   '15%券档levelRuleId','15%券档可报集合数','15%券档已报/处理中集合数','15%券档剩余未入已报集合数','15%券档状态分布',
-  '15%券档普通活动计划数','15%券档普通计划已报数','15%券档已报但不在普通计划数','15%券档已报是否等于普通计划',
+  '15%券档允许配套计划数','15%券档允许计划active数','15%券档禁止/未知计划数','15%券档禁止/未知仍active数',
+  '15%券档active但不在允许计划数','15%券档active是否符合允许计划','15%券档禁止/未知active样例',
   '规则来源','备注/风险',
 ];
 
@@ -196,7 +208,14 @@ await fs.writeFile(files.json, JSON.stringify({
     '本文件为只读审核输出；未报名、未提交、未取消或调价限时折扣。',
     '限时折扣价格若未从当前接口读到，会作为风险字段保留，不按安全通过。',
     '多档优惠券活动会额外读取 15% 券档规则页商品集合；活动列表 apply/allow 仅保留作参考，不作为 15% 档最终报名验证口径。',
+    '15% 优惠券配套计划从 price-overrides 的 couponFactor≈0.85 / 明确仅15%券规则派生；禁止叠券、未知、缺 price-overrides 行一律不允许报名。',
   ],
+  couponTargetPlan: COUPON_TARGET_PLAN ? {
+    path: COUPON_TARGET_PLAN.path,
+    planSources: COUPON_TARGET_PLAN.planSources,
+    priceOverrideSources: COUPON_TARGET_PLAN.priceOverrideSources,
+    stores: summarizeCouponTargetEligibilityPlan(COUPON_TARGET_PLAN),
+  } : null,
   summaryRows,
   detailRows,
   couponRows,
@@ -230,6 +249,7 @@ function parseArgs(argv) {
     includeCouponGoods: false,
     couponWorstRatePct: null,
     couponTargetPlan: null,
+    couponPriceOverrides: [],
     sessionHttp: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -248,6 +268,7 @@ function parseArgs(argv) {
     else if (a === '--include-coupon-goods') out.includeCouponGoods = true;
     else if (a === '--coupon-worst-rate-pct') out.couponWorstRatePct = Number(argv[++i]);
     else if (a === '--coupon-target-plan') out.couponTargetPlan = argv[++i];
+    else if (a === '--coupon-price-overrides' || a === '--price-overrides') out.couponPriceOverrides.push(...String(argv[++i] || '').split(',').map(s => s.trim()).filter(Boolean));
     else if (a === '--session-http') out.sessionHttp = true;
   }
   if (!Number.isFinite(out.batchSize) || out.batchSize < 1) out.batchSize = 1;
@@ -255,35 +276,6 @@ function parseArgs(argv) {
   if (!Number.isFinite(out.hours) || out.hours <= 0) out.hours = 48;
   if (out.couponWorstRatePct !== null && !Number.isFinite(out.couponWorstRatePct)) out.couponWorstRatePct = null;
   return out;
-}
-
-async function loadCouponTargetPlan(planPath) {
-  if (!planPath) return null;
-  const absolute = path.resolve(ROOT, planPath);
-  const doc = await readJsonIfExists(absolute, null);
-  if (!doc) throw new Error(`coupon target plan not found: ${absolute}`);
-  const byStore = new Map();
-  const addItems = items => {
-    for (const item of items || []) {
-      if (!item?.storeKey || !item?.skc || item.selected === false) continue;
-      const storeKey = String(item.storeKey).toUpperCase();
-      if (!byStore.has(storeKey)) byStore.set(storeKey, new Set());
-      byStore.get(storeKey).add(String(item.skc).trim());
-    }
-  };
-  if (Array.isArray(doc.ordinaryPlanPaths)) {
-    for (const plan of doc.ordinaryPlanPaths) {
-      const planDoc = await readJsonIfExists(path.resolve(ROOT, plan), null);
-      addItems(Array.isArray(planDoc) ? planDoc : (planDoc?.items || []));
-    }
-  } else {
-    addItems(Array.isArray(doc) ? doc : (doc.items || doc.rows || []));
-  }
-  return {
-    path: absolute,
-    byStore,
-    stores: [...byStore.entries()].map(([storeKey, set]) => ({storeKey, count: set.size})),
-  };
 }
 
 async function scanStore(store) {
@@ -540,21 +532,40 @@ function couponSummaryFromApi(store, activity, detail = {}, usage = {}, seller =
   const merchantWorstRatePct = round2(maxCouponRatePct * (Number.isFinite(sellerSharePct) ? sellerSharePct : 100) / 100);
   const site = (usage.coupon_site_usage_info_list || []).find(x => x.site === 'shein-sa') || (usage.coupon_site_usage_info_list || [])[0] || {};
   const has15Rule = coupon15Rule?.ok === true;
-  const targetSet = COUPON_TARGET_PLAN?.byStore?.get(String(store.storeKey).toUpperCase()) || null;
-  const enrolledActiveSkcs = new Set((coupon15Rule?.enrolledActiveSkcs || []).map(x => String(x).trim()).filter(Boolean));
+  const targetView = COUPON_TARGET_PLAN ? couponPlanStoreView(COUPON_TARGET_PLAN, store.storeKey) : null;
+  const targetSet = targetView?.allowedSet || null;
+  const activeRows = (coupon15Rule?.enrolledActiveRows || (coupon15Rule?.enrolledActiveSkcs || []).map(skc => ({skc})))
+    .filter(row => row?.skc);
+  const enrolledActiveSkcs = new Set(activeRows.map(x => String(x.skc).trim()).filter(Boolean));
   const targetActiveCount = targetSet && has15Rule ? [...targetSet].filter(skc => enrolledActiveSkcs.has(skc)).length : '';
-  const nonTargetEnrolledSkcs = targetSet && has15Rule ? [...enrolledActiveSkcs].filter(skc => !targetSet.has(skc)) : [];
+  const activeBlockedRows = [];
+  const nonTargetEnrolledRows = [];
+  if (targetView && has15Rule) {
+    for (const row of activeRows) {
+      const skc = String(row.skc || '').trim();
+      const planRow = findCouponPlanRow(COUPON_TARGET_PLAN, store.storeKey, skc);
+      if (!planRow) {
+        nonTargetEnrolledRows.push({...row, category: 'not_in_allowed_plan', reason: 'active_coupon_not_in_allowed15_plan'});
+      } else if (!planRow.allowed15) {
+        activeBlockedRows.push({...row, category: planRow.category, reason: planRow.reason, combo: planRow.combo, couponFactor: planRow.couponFactor});
+      }
+    }
+  }
   const targetAligned = targetSet && has15Rule
-    ? targetActiveCount === targetSet.size && nonTargetEnrolledSkcs.length === 0
+    ? targetActiveCount === targetSet.size && activeBlockedRows.length === 0 && nonTargetEnrolledRows.length === 0
     : '';
   const ruleSource = has15Rule
     ? `get_activity_detail + query_coupon_activity_usage_List + fetch_seller_act_info + multi-level/goods/query(15%)${coupon15Rule.levelRuleIdSource === 'config-fallback' ? ' + configured levelRuleId fallback' : ''}`
     : 'get_activity_detail + query_coupon_activity_usage_List + fetch_seller_act_info';
   const ruleNote = has15Rule
-    ? targetSet
-      ? `15%券档按规则页 active 已报集合验证；普通活动配套计划=${targetSet.size}，计划已报=${targetActiveCount}，非计划已报=${nonTargetEnrolledSkcs.length}。${targetAligned ? '已报集合与普通活动配套计划一致；可报未入已报集合视为未配套/不应报名。' : '需处理已报集合与普通活动配套计划不一致。'}`
-      : `15%券档按规则页已报/处理中集合验证；活动列表 apply/allow 对多档券可能不是最终报名口径。可报未入已报集合数=${coupon15Rule.remainingCount}，未加载普通活动配套计划，不能据此判断是否应报。`
+    ? targetView
+      ? `15%券档按规则页 active 已报集合验证；允许15%券计划=${targetSet.size}，允许计划active=${targetActiveCount}，禁止/未知计划active=${activeBlockedRows.length}，active但不在允许计划=${nonTargetEnrolledRows.length}。${targetAligned ? 'active集合与允许15%券计划一致；可报未入已报集合视为未配套/不应报名。' : '需处理 active 与允许15%券计划不一致；禁止/未知 active 是硬风险，不能被 extra=0 掩盖。'}`
+      : `15%券档按规则页已报/处理中集合验证；活动列表 apply/allow 对多档券可能不是最终报名口径。可报未入已报集合数=${coupon15Rule.remainingCount}，未加载允许15%券配套计划，不能据此判断是否应报。`
     : '只读读取券规则与预算；商品级适用范围未在本阶段提交或修改，明细按可能叠加风险提示。';
+  const activeBlockedSample = activeBlockedRows
+    .slice(0, 10)
+    .map(row => `${row.skc}${row.supplierNo ? '/' + row.supplierNo : ''}:${row.category}:${row.reason}`)
+    .join('；');
   return {
     '店铺': store.storeKey,
     '分组': store.groupKey,
@@ -578,13 +589,16 @@ function couponSummaryFromApi(store, activity, detail = {}, usage = {}, seller =
     '15%券档已报/处理中集合数': has15Rule ? coupon15Rule.enrolledCount : '',
     '15%券档剩余未入已报集合数': has15Rule ? coupon15Rule.remainingCount : '',
     '15%券档状态分布': has15Rule ? coupon15Rule.statusSummary : '',
-    '15%券档普通活动计划数': targetSet ? targetSet.size : '',
-    '15%券档普通计划已报数': targetSet && has15Rule ? targetActiveCount : '',
-    '15%券档已报但不在普通计划数': targetSet && has15Rule ? nonTargetEnrolledSkcs.length : '',
-    '15%券档已报是否等于普通计划': targetSet && has15Rule ? (targetAligned ? '是' : '否') : '',
+    '15%券档允许配套计划数': targetSet ? targetSet.size : '',
+    '15%券档允许计划active数': targetSet && has15Rule ? targetActiveCount : '',
+    '15%券档禁止/未知计划数': targetView ? targetView.blockedCount : '',
+    '15%券档禁止/未知仍active数': targetView && has15Rule ? activeBlockedRows.length : '',
+    '15%券档active但不在允许计划数': targetView && has15Rule ? nonTargetEnrolledRows.length : '',
+    '15%券档active是否符合允许计划': targetSet && has15Rule ? (targetAligned ? '是' : '否') : '',
+    '15%券档禁止/未知active样例': activeBlockedSample,
     '规则来源': ruleSource,
     '备注/风险': ruleNote,
-    _raw: {activity, detail, usage, seller, coupon15Rule},
+    _raw: {activity, detail, usage, seller, coupon15Rule, targetView: targetView ? {allCount: targetView.allCount, allowedCount: targetView.allowedCount, blockedCount: targetView.blockedCount, categoryCounts: targetView.categoryCounts} : null, activeBlockedRows, nonTargetEnrolledRows},
   };
 }
 
@@ -934,6 +948,7 @@ async function fetchCoupon15PctRuleStats(cdp, sessionId, store, activityId) {
       availableSkcs: available.list.map(x => x.skc).filter(Boolean),
       enrolledSkcs: enrolled.list.map(x => x.skc).filter(Boolean),
       enrolledActiveSkcs: activeEnrolled.map(x => x.skc).filter(Boolean),
+      enrolledActiveRows: activeEnrolled,
       statusSummary,
     };
   `, {activityId, fallbackLevelRuleId});
@@ -1330,6 +1345,8 @@ function renderMarkdown(summaryRows, detailRows, couponRows, limitRows, files) {
     return m !== null && m < 0.20;
   }).length;
   const missingCost = detailRows.filter(r => /成本缺失|仓储费缺失/.test(r['风险提示'] || '')).length;
+  const couponForbiddenActive = couponRows.reduce((sum, r) => sum + (numValue(r['15%券档禁止/未知仍active数']) || 0), 0);
+  const couponExtraActive = couponRows.reduce((sum, r) => sum + (numValue(r['15%券档active但不在允许计划数']) || 0), 0);
   const topRiskRows = detailRows
     .filter(r => r['风险提示'])
     .slice(0, 80);
@@ -1343,6 +1360,8 @@ function renderMarkdown(summaryRows, detailRows, couponRows, limitRows, files) {
     `- 标准货号行：${summaryRows.length}`,
     `- 优惠券规则行：${couponRows.length}`,
     `- 限时折扣风险标签行：${limitRows.length}`,
+    `- 15%券禁止/未知仍 active 数：${couponForbiddenActive}`,
+    `- 15%券 active 但不在允许计划数：${couponExtraActive}`,
     `- 有风险提示明细行：${risky}`,
     `- 含仓储费利润率低于 20% 行：${lowMargin}`,
     `- 缺成本/仓储费口径行：${missingCost}`,
@@ -1350,6 +1369,7 @@ function renderMarkdown(summaryRows, detailRows, couponRows, limitRows, files) {
     `- 链接活动标签日期：${BI.dates?.linkDate || ''}`,
     `- 成本来源：${COST_DOC.source || ''}`,
     `- 优惠券配套计划：${COUPON_TARGET_PLAN ? path.relative(ROOT, COUPON_TARGET_PLAN.path) : '未加载；仅展示券档可报/已报集合，不判断是否应报'}`,
+    `- 优惠券配套口径：${COUPON_TARGET_PLAN ? '仅 price-overrides 中 couponFactor≈0.85 或明确仅15%券的 SKC 允许进入 15%券计划；禁止叠券/未知/缺 price-overrides 行全部 fail closed。' : '未加载。'}`,
     '',
     '## 文件',
     '',
@@ -1364,7 +1384,8 @@ function renderMarkdown(summaryRows, detailRows, couponRows, limitRows, files) {
     '- 最低促销基准价先按当前可读到的 `当前售价` 与 `本次建议普通活动价` 取低值。',
     '- 若 BI 链路已发现同 SKC 存在 `限时折扣`，但本阶段未读到限时折扣价格，明细会标为高风险，不按安全通过。',
     '- 若同窗口存在优惠券活动，按券规则中可读到的最高商家承担折扣做风险测算；用户可在备注栏指定不用券或只用 15% 档。',
-    '- 多档优惠券活动报名验证优先看 `15%券档已报是否等于普通计划`、`15%券档普通活动计划数`、`15%券档已报但不在普通计划数`；`15%券档剩余未入已报集合数` 是“可报但未报”的平台集合，不等于本期应报目标。',
+    '- 多档优惠券活动报名验证优先看 `15%券档active是否符合允许计划`、`15%券档允许配套计划数`、`15%券档禁止/未知仍active数`、`15%券档active但不在允许计划数`；禁止/未知 active 是硬风险，不能被“extra=0”或旧普通计划口径掩盖。',
+    '- `15%券档剩余未入已报集合数` 是“平台可报但未报”的集合，不等于本期应报目标。',
     '- 安全判断默认看 `含仓储费利润率`；仓储费缺失会标记风险，不能当 0 处理。',
     '',
     '## 风险明细预览',

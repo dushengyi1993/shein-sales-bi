@@ -66,6 +66,9 @@ function parseArgs(argv) {
     dataMode: process.env.SHEIN_BI_PORTAL_DATA_MODE || 'legacy',
     section: '',
     jsonOnly: false,
+    previewVariant: '',
+    htmlOnlyFromData: '',
+    htmlFile: '',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -78,11 +81,22 @@ function parseArgs(argv) {
     else if (a === '--data-mode') args.dataMode = argv[++i];
     else if (a === '--section') args.section = argv[++i];
     else if (a === '--json-only') args.jsonOnly = true;
+    else if (a === '--preview-variant') args.previewVariant = argv[++i];
+    else if (a === '--html-only-from-data') args.htmlOnlyFromData = path.resolve(argv[++i]);
+    else if (a === '--html-file') args.htmlFile = path.resolve(argv[++i]);
   }
   args.dataMode = String(args.dataMode || 'legacy').trim().toLowerCase();
   if (!['legacy', 'api'].includes(args.dataMode)) throw new Error(`Invalid --data-mode: ${args.dataMode}`);
   args.section = String(args.section || '').trim();
+  args.previewVariant = String(args.previewVariant || '').trim();
   return args;
+}
+
+function isFormalPortalIndexPath(file, outDir) {
+  const resolved = path.resolve(file || '');
+  const formalIndex = path.resolve(outDir || path.join(ROOT, 'outputs', 'bi-portal'), 'index.html');
+  if (resolved === formalIndex) return true;
+  return path.basename(resolved).toLowerCase() === 'index.html' && path.basename(path.dirname(resolved)).toLowerCase() === 'bi-portal';
 }
 
 const PORTAL_API_SECTION_KEYS = [
@@ -2701,7 +2715,9 @@ function svgIcon(name) {
   return `<svg aria-hidden="true" ${common}>${paths[name] || paths.home}</svg>`;
 }
 
-function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) {
+function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck, options = {}) {
+  const previewVariant = String(options.previewVariant || '').trim();
+  const titleSuffix = previewVariant === 'no-groups' ? ' · 平行预览' : '';
   const json = JSON.stringify({...data, audit, pipeline, briefing, firstRunCheck}).replace(/</g, '\\u003c');
   const links = {
     home: `${metabaseUrl}/dashboard/13`,
@@ -2712,12 +2728,30 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     product: `${metabaseUrl}/dashboard/7`,
     skc: `${metabaseUrl}/dashboard/8`,
   };
+  const isNoGroupsPreview = previewVariant === 'no-groups';
+  const heroTitle = isNoGroupsPreview ? '先看全盘，再看排行，具体动作再下钻。' : '先看总盘，再看排行，具体动作再下钻。';
+  const heroCopy = isNoGroupsPreview
+    ? '平行预览版：所有店铺从开店开始归入全盘，不再展示旧口径；首页增加流量、库存/去化和多指标趋势。'
+    : '首页只保留最直观的经营看板：今日、月累计、分组、店铺排行、货号排行和动作结构。需要处理时再进入店铺、货号、SKC 或动作池。';
+  const overviewSub = isNoGroupsPreview
+    ? '先选时间段，再看同一口径下的全盘、趋势、流量、库存/去化和排行；本月数据只作为补充参照。'
+    : '先选时间段，再看同一口径下的总盘、分组、趋势和排行；本月数据只作为补充参照。';
+  const homeStoreFilterLabel = isNoGroupsPreview ? '首页店铺筛选' : '首页店铺或分组筛选';
+  const profitTrendSub = isNoGroupsPreview
+    ? '全盘只看总计；筛到单店或货号时看当前范围。月趋势按所选日期片段，不强行补整月。'
+    : '总计 / DSY / LGM 看全局；筛到单店或货号时看当前范围。月趋势按所选日期片段，不强行补整月。';
+  const inventoryAlertSub = isNoGroupsPreview
+    ? '按当前店铺销售速度测算去化天数；库存基数仍是全局物理批次。'
+    : '按当前店铺/分组销售速度测算去化天数；库存基数仍是全局物理批次。';
+  const inventoryDetailSub = isNoGroupsPreview
+    ? '一行一个标准货号；支持顶部货号/店铺筛选。店铺筛选只改变销售速度，不代表该店独占这些库存。'
+    : '一行一个标准货号；支持顶部货号/店铺/分组筛选。店铺筛选只改变销售速度，不代表该店独占这些库存。';
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>SHEIN BI 经营系统</title>
+  <title>SHEIN BI 经营系统${titleSuffix}</title>
   <style>
     :root{
       --bg:#050814; --surface:rgba(15,23,42,.72); --surface-2:rgba(30,41,59,.62);
@@ -3693,7 +3727,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
     <div class="toolbar" role="search">
       <div class="home-scope-toolbar" aria-label="首页筛选">
         <div class="search-wrap home-only-filter">${svgIcon('search')}<input id="homeProductFilter" aria-label="首页货号筛选" placeholder="首页货号筛选：标准货号 / SKC / 品名" autocomplete="off" /></div>
-        <select id="homeStoreFilter" class="home-only-filter" aria-label="首页店铺或分组筛选"><option value="">全部店铺</option></select>
+        <select id="homeStoreFilter" class="home-only-filter" aria-label="${homeStoreFilterLabel}"><option value="">全部店铺</option></select>
         <div class="home-scope-hint home-only-filter" id="homeScopeHint"></div>
       </div>
       <div class="search-wrap subpage-filter">${svgIcon('search')}<input id="q" aria-label="全局搜索" placeholder="全局搜索：店铺 / SKC / 动作原因" autocomplete="off" /></div>
@@ -3729,8 +3763,8 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
       <div class="hero-top">
         <div>
           <div class="eyebrow">OPERATING INTELLIGENCE</div>
-          <h2>先看总盘，再看排行，具体动作再下钻。</h2>
-          <p>首页只保留最直观的经营看板：今日、月累计、分组、店铺排行、货号排行和动作结构。需要处理时再进入店铺、货号、SKC 或动作池。</p>
+          <h2>${heroTitle}</h2>
+          <p>${heroCopy}</p>
         </div>
         <div class="quick-links">
           <a class="link-pill" href="${htmlEscape(links.finance)}" target="_blank">${svgIcon('metabase')}财务订单域</a>
@@ -3744,7 +3778,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
         <div class="overview-head">
           <div>
             <h3>经营总览仪表盘</h3>
-            <div class="sub">先选时间段，再看同一口径下的总盘、分组、趋势和排行；本月数据只作为补充参照。</div>
+            <div class="sub">${overviewSub}</div>
           </div>
           <span class="tag good" id="homeDashboardTag"></span>
         </div>
@@ -4033,7 +4067,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
         <div class="card-body" id="profitOverview"></div>
       </div>
       <div class="card" style="margin-bottom:16px" id="profitTrendCard">
-        <div class="card-h"><div><h3>月利润趋势</h3><div class="sub">总计 / DSY / LGM 看全局；筛到单店或货号时看当前范围。月趋势按所选日期片段，不强行补整月。</div></div></div>
+        <div class="card-h"><div><h3>月利润趋势</h3><div class="sub">${profitTrendSub}</div></div></div>
         <div class="card-body" id="profitTrendPanel"></div>
       </div>
       <div class="grid cols-2" style="margin-bottom:16px" id="profitRankGrid">
@@ -4068,7 +4102,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
       </div>
       <div class="grid cols-2" style="margin-bottom:16px">
         <div class="card" id="inventoryRiskCard">
-          <div class="card-h"><div><h3>补货 / 断货预警</h3><div class="sub">按当前店铺/分组销售速度测算去化天数；库存基数仍是全局物理批次。</div></div></div>
+          <div class="card-h"><div><h3>补货 / 断货预警</h3><div class="sub">${inventoryAlertSub}</div></div></div>
           <div class="card-body" id="inventoryRiskList"></div>
         </div>
         <div class="card" id="inventorySlowCard">
@@ -4077,7 +4111,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
         </div>
       </div>
       <div class="card" style="margin-bottom:16px" id="inventoryProductCard">
-        <div class="card-h"><div><h3>货号库存去化明细</h3><div class="sub">一行一个标准货号；支持顶部货号/店铺/分组筛选。店铺筛选只改变销售速度，不代表该店独占这些库存。</div></div></div>
+        <div class="card-h"><div><h3>货号库存去化明细</h3><div class="sub">${inventoryDetailSub}</div></div></div>
         <div class="card-body" id="inventoryProductTable"></div>
       </div>
       <details class="detail-section" id="inventoryBatchFold">
@@ -4126,6 +4160,9 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck) 
 <button class="theme-fab" id="themeToggleFab" type="button" aria-label="切换浅色或深色主题">浅色/深色</button>
 <script id="portal-data" type="application/json">${json}</script>
 <script>
+const PORTAL_PREVIEW_VARIANT = ${JSON.stringify(previewVariant)};
+const ACTIVE_PREVIEW_VARIANT = String(PORTAL_PREVIEW_VARIANT || '').trim();
+const NO_GROUPS_PREVIEW = ACTIVE_PREVIEW_VARIANT === 'no-groups';
 let DATA = JSON.parse(document.getElementById('portal-data').textContent);
 let STORE_CODES = new Set((DATA.stores || []).map(s => s.store_key));
 const STORE_ORDER = ['DL','DX','FY','LQ','NM','HL','JY','ZL','TS','MZ','CX','YJ','XL','QY','QH','TZ'];
@@ -4178,6 +4215,7 @@ function groupMeta(key){
 function groupColor(key){ return groupMeta(key).color; }
 function storeFilterKind(value = state.store){
   const v = String(value || '');
+  if (NO_GROUPS_PREVIEW && v.startsWith('GROUP:')) return {type:'all', key:'ALL'};
   if (v.startsWith('GROUP:')) return {type:'group', key:v.slice(6).toUpperCase()};
   if (v) return {type:'store', key:v.toUpperCase()};
   return {type:'all', key:'ALL'};
@@ -4200,10 +4238,11 @@ function actionDomainActive(){ return isActionFilterTab() ? state.domain : ''; }
 function actionRiskActive(){ return isActionFilterTab() ? state.risk : ''; }
 function actionStatusActive(){ return isActionFilterTab() ? state.status : ''; }
 function actionFocusActive(){ return isActionFilterTab() ? (state.focus || 'all') : 'all'; }
-let state = {tab:'overview', q:'', product:'', store:'', domain:'', risk:'', status:'', focus:'all', insight:'all', rankPeriod:'day', rankWindow:'', startDate:'', endDate:'', rangePreset:'today', trendMetric:'sales', salesMode:'net', qtyMode:'net', returnsMode:'request', profitMode:'loss'};
+let state = {tab:'overview', q:'', product:'', store:'', domain:'', risk:'', status:'', focus:'all', insight:'all', rankPeriod:'day', rankWindow:'', startDate:'', endDate:'', rangePreset:'today', trendMetric:'sales', trendMetrics:'', salesMode:'net', qtyMode:'net', returnsMode:'request', profitMode:'loss'};
 let lastRenderedTab = '';
 let shouldScrollToActiveTab = false;
-const STATE_KEYS = ['tab','q','product','store','domain','risk','status','focus','insight','rankPeriod','rankWindow','startDate','endDate','rangePreset','trendMetric','salesMode','qtyMode','returnsMode','profitMode'];
+const STATE_KEYS = ['tab','q','product','store','domain','risk','status','focus','insight','rankPeriod','rankWindow','startDate','endDate','rangePreset','trendMetric','trendMetrics','salesMode','qtyMode','returnsMode','profitMode'];
+const PREVIEW_DEFAULT_TREND_METRICS = 'sales';
 let applyingHash = false;
 const ACTION_STATE_KEY = 'SHEIN_BI_ACTION_STATE_V1';
 const ACTION_STATE_API = '/api/action-state';
@@ -4300,7 +4339,7 @@ function overviewNeedsProfitSectionForHome(){
 function backgroundBiSectionsForTab(tab = state.tab || 'overview'){
   if (!biPortalUsesApiSections()) return [];
   const overviewSections = ['homeRankings','afterSales','homeProfit','actions','financeData'];
-  if (tab === 'overview' && overviewNeedsProfitSectionForHome()) overviewSections.push('profit');
+  if (tab === 'overview' && (overviewNeedsProfitSectionForHome() || NO_GROUPS_PREVIEW)) overviewSections.push('profit');
   const map = {
     overview:overviewSections
   };
@@ -6017,6 +6056,7 @@ function homeScopeRows(){
   const scope = storeFilterKind();
   if (scope.type === 'group') return [{key:scope.key, label:groupMeta(scope.key).label, scopeValue:'GROUP:' + scope.key}];
   if (scope.type === 'store') return [{key:scope.key, label:scope.key, scopeValue:scope.key}];
+  if (NO_GROUPS_PREVIEW) return [{key:'ALL', label:'全部店铺', scopeValue:''}];
   return [
     {key:'ALL', label:'总计', scopeValue:''},
     {key:'DSY', label:'DSY 组', scopeValue:'GROUP:DSY'},
@@ -6062,9 +6102,48 @@ function activeProductCountForScope(start, end, scopeValue = ''){
   }
   return set.size;
 }
-function homeAfterSalesForScope(start, end, scopeValue = ''){
+function activeProductCountForScopeMode(start, end, scopeValue = '', mode = 'net'){
+  const set = new Set();
+  const qtyKey = mode === 'gross' ? 'gross_quantity' : 'quantity';
+  for (const r of DATA.rankings?.dailyStoreProducts || []) {
+    const d = String(r.date || '').slice(0, 10);
+    if (!d || d < start || d > end) continue;
+    if (!storeMatchesScope(r, scopeValue)) continue;
+    if (!productDailyMatch(r)) continue;
+    if (Number(r[qtyKey] ?? r.quantity ?? 0) > 0 && r.standard_goods_sn) set.add(r.standard_goods_sn);
+  }
+  return set.size;
+}
+function homeSalesForScopeMode(start, end, scopeValue = '', mode = 'net'){
   const hasProduct = Boolean(productScopeQuery());
-  if (state.returnsMode === 'order') {
+  const source = hasProduct ? (DATA.rankings?.dailyStoreProducts || []) : (DATA.rankings?.dailyStores || []);
+  const salesKey = mode === 'gross' ? 'gross_sales_sar' : 'sales_sar';
+  const orderKey = mode === 'gross' ? 'gross_orders' : 'orders';
+  const qtyKey = mode === 'gross' ? 'gross_quantity' : 'quantity';
+  const row = {sales_sar:0, orders:0, quantity:0, daysSet:new Set(), activeProducts:new Set()};
+  for (const r of source) {
+    const d = String(r.date || '').slice(0, 10);
+    if (!d || d < start || d > end) continue;
+    if (!storeMatchesScope(r, scopeValue)) continue;
+    if (hasProduct && !productDailyMatch(r)) continue;
+    const qty = Number(r[qtyKey] ?? r.quantity ?? 0);
+    row.sales_sar += Number(r[salesKey] ?? r.sales_sar ?? 0);
+    row.orders += Number(r[orderKey] ?? r.orders ?? 0);
+    row.quantity += qty;
+    row.daysSet.add(d);
+    if (qty > 0 && r.standard_goods_sn) row.activeProducts.add(r.standard_goods_sn);
+  }
+  return {
+    sales_sar:Math.round(row.sales_sar * 100) / 100,
+    orders:row.orders,
+    quantity:row.quantity,
+    activeProducts:activeProductCountForScopeMode(start, end, scopeValue, mode),
+    days:row.daysSet.size
+  };
+}
+function homeAfterSalesForScopeMode(start, end, scopeValue = '', mode = state.returnsMode){
+  const hasProduct = Boolean(productScopeQuery());
+  if (mode === 'order') {
     const source = hasProduct ? (DATA.rankings?.dailyStoreProducts || []) : (DATA.rankings?.dailyStores || []);
     const out = {cases:0, amount_sar:0};
     for (const r of source) {
@@ -6089,6 +6168,9 @@ function homeAfterSalesForScope(start, end, scopeValue = ''){
     cases: detailRows.length,
     amount_sar: detailRows.reduce((sum, r) => sum + Number(r.price_amount_total || r.amount_sar || r.refund_amount || 0), 0)
   };
+}
+function homeAfterSalesForScope(start, end, scopeValue = ''){
+  return homeAfterSalesForScopeMode(start, end, scopeValue, state.returnsMode);
 }
 function profitDailyRows(start, end, scopeValue = state.store, respectProduct = true){
   const q = productScopeQuery();
@@ -6408,7 +6490,136 @@ function kpiJump(tab, patch = {}){
   applyStateToControls();
   renderAll();
 }
+function profitAmountForMode(summary, mode = 'loss'){
+  const s = summary || {};
+  return Number(mode === 'rtv' ? (s.profitReceivedResellableSar ?? s.profitSar ?? 0) : (s.profitSar ?? 0));
+}
+function profitDisplayHtmlForMode(summary, mode = 'loss'){
+  const s = summary || {};
+  if (!s.hasAnyCost) {
+    return '<span class="pending-profit">待成本表</span><span class="coverage-note">成本覆盖 0%，先导入成本表</span>';
+  }
+  const amount = profitAmountForMode(s, mode);
+  const cls = amount < 0 ? 'danger' : 'positive';
+  const sourceNote = s.staleSource && s.sourceGeneratedAt ? ' · 摘要源 ' + localTimeText(s.sourceGeneratedAt) : '';
+  const modeNote = mode === 'rtv' ? 'RTV可二售' : '退货全损';
+  return '<span class="'+cls+'">'+escapeHtml(fmt.format(amount))+'</span><span class="coverage-note">'+escapeHtml(modeNote)+' · 覆盖 '+pct(s.costCoverageRate)+' · 已扣仓储 '+money(s.storageFeeSar)+escapeHtml(sourceNote)+'</span>';
+}
+function profitMarginHtmlForMode(summary, mode = 'loss'){
+  const s = summary || {};
+  if (!s.hasAnyCost || !(Number(s.netRevenueSar || 0) > 0)) return '<div class="matrix-cell value profit-margin-cell"><span class="pending-profit">待成本表</span></div>';
+  const margin = profitAmountForMode(s, mode) / Number(s.netRevenueSar || 0);
+  const cls = Number(margin || 0) >= .25 ? 'positive' : Number(margin || 0) >= .1 ? 'warn' : 'danger';
+  return '<div class="matrix-cell value profit-margin-cell"><span class="'+cls+'">'+escapeHtml(pct(margin))+'</span></div>';
+}
+function renderKpisNoGroupsPreview(){
+  const range = ensureDateRange();
+  const rankingsLoading = biPortalUsesApiSections() && !homeRankingsLoaded();
+  const profitLoading = !homeProfitReadyForRender();
+  const afterSalesLoading = biPortalUsesApiSections() && !biSectionLoaded('afterSales');
+  const profitNeedsPrewarm = !biSectionLoaded('profit') && (
+    biSectionState.homeProfit?.status === 'error' ||
+    (homeProfitSummaryAvailable() && !homeProfitSummaryCoversRange(range.start, range.end))
+  );
+  const profitLoadFailed = biSectionState.profit?.status === 'error';
+  const profitLoadingLabel = profitLoadFailed ? '利润加载失败' : profitNeedsPrewarm ? '利润待预热' : '加载中';
+  const scopeValue = storeFilterKind().type === 'store' ? state.store : '';
+  const net = homeSalesForScopeMode(range.start, range.end, scopeValue, 'net');
+  const gross = homeSalesForScopeMode(range.start, range.end, scopeValue, 'gross');
+  const afterRequest = homeAfterSalesForScopeMode(range.start, range.end, scopeValue, 'request');
+  const afterOrder = homeAfterSalesForScopeMode(range.start, range.end, scopeValue, 'order');
+  const profit = homeProfitForScope(range.start, range.end, scopeValue);
+  const matrix = (cols, rowsHtml, extraClass = '') => '<div class="metric-matrix cols-'+cols+(extraClass ? ' '+extraClass : '')+'">'+rowsHtml+'</div>';
+  const head = cells => cells.map(c => '<div class="matrix-cell head">'+escapeHtml(c)+'</div>').join('');
+  const label = txt => '<div class="matrix-cell label">'+escapeHtml(txt)+'</div>';
+  const value = html => '<div class="matrix-cell value">'+html+'</div>';
+  const moneyValue = v => value(escapeHtml(fmt.format(Number(v || 0))));
+  const rmbValue = v => value(escapeHtml(fmt.format(Number(v || 0) * RMB_RATE)));
+  const loadingValue = label => value('<span class="pending-profit">'+escapeHtml(label || '加载中')+'</span>');
+  const card = (title, sub, body, tip, jump = 'business') =>
+    '<div class="overview-matrix-card" role="button" tabindex="0" data-overview-jump="'+escapeHtml(jump)+'" aria-label="查看'+escapeHtml(title)+'">'+
+      '<div class="matrix-card-head"><h4>'+escapeHtml(title)+' <em class="help" tabindex="0" data-tip="'+escapeHtml(tip)+'">?</em></h4><div class="sub">'+escapeHtml(sub)+'</div></div>'+body+
+    '</div>';
+  const salesRows = [
+    {label:'总成交额', row:gross, tip:'订单创建时的原始成交规模，不扣后续反转'},
+    {label:'净成交额', row:net, tip:'扣除退货、仅退款、派送失败等反转订单后的真实经营口径'}
+  ];
+  const qtyRows = [
+    {label:'总订单/销量', row:gross},
+    {label:'净订单/销量', row:net}
+  ];
+  const afterRows = [
+    {label:'售后申请时间', row:afterRequest, loading:afterSalesLoading},
+    {label:'订单创建时间', row:afterOrder, loading:rankingsLoading}
+  ];
+  const profitRows = [
+    {label:'退货全损保守', mode:'loss'},
+    {label:'RTV入仓测算', mode:'rtv'}
+  ];
+  let trafficRows = previewTrafficRowsForRange(range.start, range.end);
+  let trafficFallbackLatest = false;
+  if (!trafficRows.length) {
+    trafficRows = (DATA.trend?.linkSeries || []).slice(-7);
+    trafficFallbackLatest = trafficRows.length > 0;
+  }
+  const trafficLatest = trafficRows.at(-1) || {};
+  const trafficTotal = trafficRows.reduce((acc, r) => {
+    acc.eps_uv += Number(r.eps_uv || 0);
+    acc.goods_uv += Number(r.goods_uv || 0);
+    acc.sale_cnt += Number(r.sale_cnt || 0);
+    return acc;
+  }, {eps_uv:0, goods_uv:0, sale_cnt:0});
+  const trafficRangeNote = trafficRows.length
+    ? ((trafficRows[0].date || '-') + ' ~ ' + (trafficLatest.date || '-') + (trafficFallbackLatest ? ' · 最新可用' : ''))
+    : '暂无链接表现日序列';
+  const trafficCardRows = [
+    {label:'曝光量', value:num(trafficTotal.eps_uv), note:trafficRangeNote},
+    {label:'访客量', value:num(trafficTotal.goods_uv), note:trafficRangeNote},
+    {label:'成交件数', value:num(trafficTotal.sale_cnt), note:trafficRangeNote},
+    {label:'最近点击/支付率', value:(trafficLatest.avg_click_rate == null ? '—' : pct(trafficLatest.avg_click_rate))+' / '+(trafficLatest.avg_pay_rate == null ? '—' : pct(trafficLatest.avg_pay_rate)), note:trafficLatest.date || '-'}
+  ];
+  const inventoryRows = previewInventoryProductRows();
+  const inventoryAlerts = previewInventoryAlertRows();
+  const inventoryTotalSupply = inventoryRows.reduce((s,r)=>s+Number(r.estimated_total_supply_quantity || 0),0);
+  const inventoryAvailable = inventoryRows.reduce((s,r)=>s+Number(r.et_estimated_available_qty || 0),0);
+  const inventoryOnHand = inventoryRows.reduce((s,r)=>s+Number(r.estimated_on_hand_quantity || 0),0);
+  const inventoryHighRisk = inventoryRows.filter(r => String(r.risk_level || '').toLowerCase() === 'high').length;
+  const inventorySnapshotDate = latestInventorySnapshotDate(inventoryRows);
+  const inventoryScopeNote = productScopeQuery() ? '当前货号筛选' : '全部货号';
+  const inventoryCardRows = [
+    {label:'货号数', value:num(inventoryRows.length)+' 个', note:inventoryScopeNote},
+    {label:'ET可售', value:num(inventoryAvailable)+' 件', note:inventorySnapshotDate},
+    {label:'在库估算', value:num(inventoryOnHand)+' 件', note:inventorySnapshotDate},
+    {label:'总供给（含在途）', value:num(inventoryTotalSupply)+' 件', note:'含在途'},
+    {label:'高风险 / 预警', value:num(inventoryHighRisk)+' / '+num(inventoryAlerts.length), note:'去化风险 / 展示库存预警'}
+  ];
+  const plainRows = rows => rows.map(r => label(r.label)+value(escapeHtml(r.value))+value('<span class="muted">'+escapeHtml(r.note)+'</span>')).join('');
+  $('kpis').innerHTML =
+    card('当前时段成交额', selectedRangeText()+' · '+homeScopeSubtitle(),
+      matrix(2, head(['口径','SAR','RMB'])+salesRows.map(r => label(r.label)+(rankingsLoading ? loadingValue('加载中') : moneyValue(r.row.sales_sar))+(rankingsLoading ? loadingValue('加载中') : rmbValue(r.row.sales_sar))).join('')),
+      '预览版按全部店铺口径展示；总成交额和净成交额在同一张卡里并列显示。RMB 按固定汇率 1 SAR = 1.8 估算。')+
+    card('当前时段订单 / 销量 / 动销', selectedRangeText()+' · '+homeScopeSubtitle(),
+      matrix(3, head(['口径','订单','销量','动销货号'])+qtyRows.map(r => label(r.label)+(rankingsLoading ? loadingValue('加载中') : value(num(r.row.orders)+' 单'))+(rankingsLoading ? loadingValue('加载中') : value(num(r.row.quantity)+' 件'))+(rankingsLoading ? loadingValue('加载中') : value(num(r.row.activeProducts)+' 个'))).join('')),
+      '总订单/销量用于看原始出单规模；净订单/销量只统计最终仍保留成交额的订单。')+
+    card('当前时段退货 / 售后', selectedRangeText()+' · 双口径',
+      matrix(3, head(['口径','数量','SAR','RMB'])+afterRows.map(r => label(r.label)+(r.loading ? loadingValue('加载中') : value(num(r.row.cases)+' 单'))+(r.loading ? loadingValue('加载中') : moneyValue(r.row.amount_sar))+(r.loading ? loadingValue('加载中') : rmbValue(r.row.amount_sar))).join('')),
+      '售后申请时间来自售后明细；订单创建时间来自销售订单净/总差额，已取消售后不计入申请时间口径。')+
+    card('当前时段真实利润', selectedRangeText()+' · 双测算',
+      matrix(3, head(['口径','SAR','RMB','利润率'])+profitRows.map(r => label(r.label)+(profitLoading ? loadingValue(profitLoadingLabel) : value(profitDisplayHtmlForMode(profit, r.mode)))+(profitLoading ? loadingValue(profitLoadingLabel) : value(profit.hasAnyCost ? escapeHtml(fmt.format(profitAmountForMode(profit, r.mode) * RMB_RATE)) : '<span class="pending-profit">待成本表</span>'))+(profitLoading ? loadingValue(profitLoadingLabel) : profitMarginHtmlForMode(profit, r.mode))).join(''), 'profit-matrix'),
+      '退货全损保守：退货营收为0并扣成本；RTV入仓测算：ET已收退件按可二售回收成本测算。仓储费已进入真实利润。', 'profit')+
+    card('当前时段流量', selectedRangeText()+' · 全盘链接',
+      '<div data-preview-table="traffic">'+matrix(2, head(['指标','数值','说明'])+plainRows(trafficCardRows))+'</div>',
+      '流量来自云端链接表现日序列；曝光、访客、成交件数按所选时间段汇总，点击率/支付率只展示最近业务日。', 'links')+
+    card('当前库存 / 去化', '当前快照 · '+inventoryScopeNote,
+      '<div data-preview-table="inventory">'+matrix(2, head(['指标','数量','说明'])+plainRows(inventoryCardRows))+'</div>',
+      '库存来自 ET 货代仓和成本批次汇总，是全盘物理库存；店铺筛选不硬拆库存基数。', 'inventory');
+  document.querySelectorAll('[data-overview-jump]').forEach(btn => btn.addEventListener('click', e => {
+    if (e.target?.classList?.contains('help')) return;
+    kpiJump(btn.dataset.overviewJump || 'business');
+  }));
+}
 function renderKpis(){
+  if (NO_GROUPS_PREVIEW) return renderKpisNoGroupsPreview();
   const range = ensureDateRange();
   const rankingsLoading = biPortalUsesApiSections() && !homeRankingsLoaded();
   const profitLoading = !homeProfitReadyForRender();
@@ -6467,7 +6678,7 @@ function renderKpis(){
     card('当前时段退货 / 售后', afterLabel,
       metricModeToggle('returnsMode', [{value:'request', label:'售后申请时间'}, {value:'order', label:'订单创建时间'}])+
       matrix(3, head(['范围','数量','SAR','RMB'])+rows.map(r => label(r.label)+(afterSalesLoading || (state.returnsMode === 'order' && rankingsLoading) ? loadingValue('加载中') : value(num(r.returnCases)+' 单'))+(afterSalesLoading || (state.returnsMode === 'order' && rankingsLoading) ? loadingValue('加载中') : moneyValue(r.returnAmountSar))+(afterSalesLoading || (state.returnsMode === 'order' && rankingsLoading) ? loadingValue('加载中') : rmbValue(r.returnAmountSar))).join('')),
-      '已取消售后不计入；金额按订单实收/预计收入字段优先，避免售后列表展示价失真。')+
+      '已取消售后不计入；订单收入只认订单商品行成交金额，不使用页面汇总或预计收入汇总。')+
     card('当前时段真实利润', profitLabel,
       metricModeToggle('profitMode', [{value:'loss', label:'全损保守'}, {value:'rtv', label:'RTV入仓测算'}])+
       matrix(3, head(['范围','SAR','RMB','利润率'])+rows.map(r => label(r.label)+(profitLoading ? loadingValue(profitLoadingLabel) : value(profitDisplayHtml(r.profit)))+(profitLoading ? loadingValue(profitLoadingLabel) : value(r.profit?.hasAnyCost ? escapeHtml(fmt.format(profitMoney(r) * RMB_RATE)) : '<span class="pending-profit">待成本表</span>'))+(profitLoading ? loadingValue(profitLoadingLabel) : profitMarginHtml(r.profit))).join(''), 'profit-matrix'),
@@ -6818,6 +7029,127 @@ function averageNetUnitPriceText(r){
   const avg = averageNetUnitPriceSar(r);
   return avg == null ? '成交均价 —' : '成交均价 '+money(avg)+'/件';
 }
+function previewTrafficRowsForRange(start, end){
+  return (DATA.trend?.linkSeries || []).filter(r => {
+    const d = String(r.date || '').slice(0, 10);
+    return d && d >= start && d <= end;
+  }).sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+}
+function renderPreviewTrafficPanel(start, end){
+  let rows = previewTrafficRowsForRange(start, end);
+  let fallbackLatest = false;
+  if (!rows.length) {
+    rows = (DATA.trend?.linkSeries || []).slice(-7);
+    fallbackLatest = rows.length > 0;
+  }
+  if (!rows.length) return panel('流量指标表', '云端 core 暂无链接表现日序列。', '<div class="empty">当前暂无曝光、访客、支付率数据。</div>');
+  const latest = rows.at(-1) || {};
+  const total = rows.reduce((acc, r) => {
+    acc.eps_uv += Number(r.eps_uv || 0);
+    acc.goods_uv += Number(r.goods_uv || 0);
+    acc.sale_cnt += Number(r.sale_cnt || 0);
+    return acc;
+  }, {eps_uv:0, goods_uv:0, sale_cnt:0});
+  const tableRows = [
+    {
+      label:fallbackLatest ? '最新可用汇总' : '近可用日汇总',
+      note:rows[0].date + ' ~ ' + latest.date + ' · ' + num(rows.length) + ' 天',
+      eps_uv:total.eps_uv,
+      goods_uv:total.goods_uv,
+      sale_cnt:total.sale_cnt,
+      avg_click_rate:null,
+      avg_pay_rate:null
+    },
+    {
+      label:'最近业务日',
+      note:latest.date || '-',
+      eps_uv:Number(latest.eps_uv || 0),
+      goods_uv:Number(latest.goods_uv || 0),
+      sale_cnt:Number(latest.sale_cnt || 0),
+      avg_click_rate:latest.avg_click_rate,
+      avg_pay_rate:latest.avg_pay_rate
+    }
+  ];
+  const sub = fallbackLatest
+    ? '当前时间段暂无链接表现日序列，暂展示最新可用窗口；比例只展示最近日原始均值。'
+    : '来自云端 core trend.linkSeries；比例只展示最近日原始均值，不把多天比例普通平均。';
+  return panel('流量指标表', sub,
+    '<div class="preview-table-block" data-preview-table="traffic">'+
+    '<div class="table-note"><b>流量指标表</b>：曝光、访客、成交件数，以及最近业务日点击率/支付率。</div>'+
+    table(tableRows, [
+      ['范围', r => '<b>'+escapeHtml(r.label)+'</b><div class="muted">'+escapeHtml(r.note)+'</div>'],
+      ['曝光量', r => num(r.eps_uv), 'num'],
+      ['访客量', r => num(r.goods_uv), 'num'],
+      ['成交件数', r => num(r.sale_cnt), 'num'],
+      ['点击率', r => r.avg_click_rate == null ? '<span class="muted">—</span>' : pct(r.avg_click_rate), 'num'],
+      ['支付率', r => r.avg_pay_rate == null ? '<span class="muted">—</span>' : pct(r.avg_pay_rate), 'num']
+    ], {limit:false})+
+    '</div>'
+  );
+}
+function previewInventoryProductRows(){
+  const q = productScopeQuery();
+  return (DATA.inventoryDepletion?.products || []).filter(r => !q || productQueryMatch(r, q));
+}
+function previewInventoryAlertRows(){
+  const q = productScopeQuery();
+  return (DATA.inventoryAlerts || []).filter(r => {
+    if (!storeMatchesScope(r)) return false;
+    if (q && !productQueryMatch(r, q)) return false;
+    return true;
+  });
+}
+function latestInventorySnapshotDate(rows = previewInventoryProductRows()){
+  const dates = [];
+  for (const r of rows || []) {
+    for (const key of ['et_store_snapshot_date','et_box_snapshot_date','last_sale_date','latest_arrived_date']) {
+      const d = String(r?.[key] || '').slice(0, 10);
+      if (d) dates.push(d);
+    }
+  }
+  if (dates.length) return dates.sort().at(-1);
+  return String(DATA.generatedAt || '').slice(0, 10) || '-';
+}
+function renderPreviewInventoryPanel(){
+  const rows = previewInventoryProductRows();
+  const alerts = previewInventoryAlertRows();
+  if (!rows.length) return panel('库存 / 去化指标表', '云端 core 暂无匹配货号的库存去化数据。', '<div class="empty">当前筛选下暂无库存/去化数据。</div>');
+  const totalSupply = rows.reduce((s,r)=>s+Number(r.estimated_total_supply_quantity || 0),0);
+  const available = rows.reduce((s,r)=>s+Number(r.et_estimated_available_qty || 0),0);
+  const onHand = rows.reduce((s,r)=>s+Number(r.estimated_on_hand_quantity || 0),0);
+  const highRisk = rows.filter(r => String(r.risk_level || '').toLowerCase() === 'high').length;
+  const sorted = [...rows].sort((a,b) => {
+    const ar = String(a.risk_level || '').toLowerCase() === 'high' ? 0 : 1;
+    const br = String(b.risk_level || '').toLowerCase() === 'high' ? 0 : 1;
+    if (ar !== br) return ar - br;
+    return Number(a.days_of_supply_with_incoming || 999999) - Number(b.days_of_supply_with_incoming || 999999);
+  });
+  const summary = '<div class="home-bars" style="margin-bottom:12px">'+
+    [
+      {label:'货号数', value:num(rows.length)+' 个'},
+      {label:'ET估算可售', value:num(available)+' 件'},
+      {label:'在库估算', value:num(onHand)+' 件'},
+      {label:'总供给（含在途）', value:num(totalSupply)+' 件'},
+      {label:'高风险去化', value:num(highRisk)+' 个'},
+      {label:'低展示库存预警', value:num(alerts.length)+' 条'}
+    ].map(x => '<div class="home-bar" style="grid-template-columns:minmax(130px,180px) 1fr auto"><b>'+escapeHtml(x.label)+'</b><i style="width:100%;--bar-color:#14b8a6"></i><span>'+escapeHtml(x.value)+'</span></div>').join('')+
+  '</div>';
+  return panel('库存 / 去化指标表', '库存是全盘物理库存，不按店铺硬拆；货号筛选会缩小范围。',
+    summary +
+    '<div class="preview-table-block" data-preview-table="inventory">'+
+    '<div class="table-note"><b>库存 / 去化指标表</b>：按货号展示 ET 可售、总供给、销量速度和去化天数。</div>'+
+    table(sorted, [
+      ['货号', r => '<b>'+escapeHtml(productDisplayName(r))+'</b><div class="muted">'+escapeHtml(r.standard_goods_sn || r.match_key || '-')+'</div>'],
+      ['ET可售', r => num(r.et_estimated_available_qty || 0), 'num'],
+      ['总供给', r => num(r.estimated_total_supply_quantity || 0), 'num'],
+      ['30日销量', r => num(r.gross_sold_30d || 0), 'num'],
+      ['日均销量', r => fmt.format(Number(r.weighted_daily_gross_sales || 0)), 'num'],
+      ['去化天数', r => '在库 '+num(r.days_of_supply_on_hand || 0)+' / 含在途 '+num(r.days_of_supply_with_incoming || 0), 'num'],
+      ['状态', r => '<span class="tag '+(String(r.risk_level || '').toLowerCase() === 'high' ? 'high' : 'mid')+'">'+escapeHtml(r.stock_status || r.risk_level || '-')+'</span>']
+    ], {limit:8})+
+    '</div>'
+  );
+}
 function focusProductQueryFromHome(value){
   const v = String(value || '').trim();
   state.product = v;
@@ -6937,18 +7269,39 @@ const TREND_METRICS = {
   returns:{label:'退货数量', unit:'单', money:false, aria:'退货数量趋势'},
   profit:{label:'利润额', unit:'SAR', money:true, aria:'利润额趋势'}
 };
+const PREVIEW_TREND_METRICS = {
+  sales:{label:'成交额', unit:'SAR', money:true, aria:'成交额趋势'},
+  quantity:{label:'销量', unit:'件', money:false, aria:'销量趋势'},
+  returns:{label:'售后', unit:'单', money:false, aria:'售后趋势'},
+  profit:{label:'利润', unit:'SAR', money:true, aria:'利润趋势'},
+  traffic:{label:'流量', unit:'', money:false, aria:'流量趋势'},
+  inventory:{label:'库存', unit:'件', money:false, aria:'库存趋势'}
+};
+function trendMetricCatalog(){
+  return NO_GROUPS_PREVIEW ? PREVIEW_TREND_METRICS : TREND_METRICS;
+}
 function trendMetricKey(){
-  return TREND_METRICS[state.trendMetric] ? state.trendMetric : 'sales';
+  const catalog = trendMetricCatalog();
+  return catalog[state.trendMetric] ? state.trendMetric : 'sales';
+}
+function selectedTrendMetricKeys(){
+  if (!NO_GROUPS_PREVIEW) return [trendMetricKey()];
+  return [trendMetricKey()];
 }
 function trendMetricButtons(){
+  const catalog = trendMetricCatalog();
+  const selected = new Set(selectedTrendMetricKeys());
   const cur = trendMetricKey();
-  return '<div class="trend-toggle" aria-label="趋势指标切换">'+Object.entries(TREND_METRICS).map(([key, meta]) =>
-    '<button type="button" class="'+(cur === key ? 'active' : '')+'" data-trend-metric="'+key+'">'+escapeHtml(meta.label)+'</button>'
+  return '<div class="trend-toggle" aria-label="趋势指标切换">'+Object.entries(catalog).map(([key, meta]) =>
+    '<button type="button" class="'+(NO_GROUPS_PREVIEW ? (selected.has(key) ? 'active' : '') : (cur === key ? 'active' : ''))+'" data-trend-metric="'+key+'">'+escapeHtml(meta.label)+'</button>'
   ).join('')+'</div>';
 }
 function trendValueText(v, metric = trendMetricKey()){
   const n = Number(v || 0);
-  return TREND_METRICS[metric]?.money ? money(n) : (num(n) + ' ' + (TREND_METRICS[metric]?.unit || ''));
+  const meta = trendMetricCatalog()[metric] || TREND_METRICS[metric] || {};
+  if (meta.money) return money(n);
+  if (meta.percent) return pct(n);
+  return num(n) + (meta.unit ? ' ' + meta.unit : '');
 }
 function buildMetricSeries(kind, metric = trendMetricKey()){
   if (metric === 'sales') return buildSalesSeries(kind);
@@ -7089,6 +7442,237 @@ function renderMetricLineChart(kind = 'day', metric = trendMetricKey()){
 function renderSalesLineChart(kind = 'day'){
   return renderMetricLineChart(kind, 'sales');
 }
+function previewTrendBucket(map, id, label){
+  const row = map.get(id) || {id, label};
+  map.set(id, row);
+  return row;
+}
+function previewTrendRowsFromMap(map){
+  return Array.from(map.values()).sort((a,b)=>String(a.id).localeCompare(String(b.id)));
+}
+function buildPreviewSalesOrQuantitySeries(kind, metric){
+  const range = chartRangeFor(kind);
+  const map = new Map();
+  const hasProduct = Boolean(productScopeQuery());
+  const source = hasProduct ? (DATA.rankings?.dailyStoreProducts || []) : (DATA.rankings?.dailyStores || []);
+  for (const r of source) {
+    const d = String(r.date || '').slice(0, 10);
+    if (!d || d < range.start || d > range.end) continue;
+    if (!storeMatchesScope(r)) continue;
+    if (hasProduct && !productDailyMatch(r)) continue;
+    const id = kind === 'month' ? monthId(d) : d;
+    const row = previewTrendBucket(map, id, kind === 'month' ? monthPeriodLabel(id, range) : d);
+    if (metric === 'sales') {
+      row.net = Number(row.net || 0) + Number(r.sales_sar || 0);
+      row.gross = Number(row.gross || 0) + Number(r.gross_sales_sar ?? r.sales_sar ?? 0);
+    } else {
+      row.net = Number(row.net || 0) + Number(r.quantity || 0);
+      row.gross = Number(row.gross || 0) + Number(r.gross_quantity ?? r.quantity ?? 0);
+    }
+  }
+  return {
+    series:previewTrendRowsFromMap(map).map(r => ({...r, net:Math.round(Number(r.net || 0) * 100) / 100, gross:Math.round(Number(r.gross || 0) * 100) / 100})),
+    lines:[
+      {key:'net', label:metric === 'sales' ? '净成交额' : '净销量', color:metric === 'sales' ? '#10b981' : '#60a5fa'},
+      {key:'gross', label:metric === 'sales' ? '总成交额' : '总销量', color:metric === 'sales' ? '#f59e0b' : '#a78bfa'}
+    ],
+    note:'按当前店铺/货号筛选范围重算；只保留全部店铺口径。'
+  };
+}
+function buildPreviewReturnsSeries(kind){
+  const range = chartRangeFor(kind);
+  const map = new Map();
+  const hasProduct = Boolean(productScopeQuery());
+  const source = hasProduct ? (DATA.rankings?.dailyStoreProducts || []) : (DATA.rankings?.dailyStores || []);
+  for (const r of source) {
+    const d = String(r.date || '').slice(0, 10);
+    if (!d || d < range.start || d > range.end) continue;
+    if (!storeMatchesScope(r)) continue;
+    if (hasProduct && !productDailyMatch(r)) continue;
+    const id = kind === 'month' ? monthId(d) : d;
+    const row = previewTrendBucket(map, id, kind === 'month' ? monthPeriodLabel(id, range) : d);
+    row.order = Number(row.order || 0) + Math.max(0, Number(r.gross_orders ?? r.orders ?? 0) - Number(r.orders || 0));
+  }
+  for (const r of DATA.afterSales || []) {
+    const d = String(r.request_time || r.snapshot_date || '').slice(0, 10);
+    if (!d || d < range.start || d > range.end) continue;
+    if (String(r.order_sub_status_name || '').trim() === '已取消') continue;
+    if (!storeMatchesScope(r)) continue;
+    if (hasProduct && !productMatch(r)) continue;
+    const id = kind === 'month' ? monthId(d) : d;
+    const row = previewTrendBucket(map, id, kind === 'month' ? monthPeriodLabel(id, range) : d);
+    row.request = Number(row.request || 0) + 1;
+  }
+  return {
+    series:previewTrendRowsFromMap(map),
+    lines:[
+      {key:'request', label:'售后申请时间', color:'#ef4444'},
+      {key:'order', label:'订单创建时间', color:'#f97316'}
+    ],
+    note:'申请时间来自售后明细；订单创建时间来自总订单与净订单差额。'
+  };
+}
+function buildPreviewProfitSeries(kind){
+  const range = chartRangeFor(kind);
+  const map = new Map();
+  for (const r of profitDailyRows(range.start, range.end, state.store, true)) {
+    const d = String(r.date || '').slice(0, 10);
+    if (!d) continue;
+    const id = kind === 'month' ? monthId(d) : d;
+    const row = previewTrendBucket(map, id, kind === 'month' ? monthPeriodLabel(id, range) : d);
+    row.loss = Number(row.loss || 0) + Number(r.profit_after_storage_sar ?? r.profit_before_storage_sar ?? 0);
+    row.rtv = Number(row.rtv || 0) + Number(r.profit_if_rtv_received_resellable_after_storage_sar ?? r.profit_if_rtv_received_resellable_sar ?? r.profit_before_storage_sar ?? 0);
+  }
+  return {
+    series:previewTrendRowsFromMap(map).map(r => ({...r, loss:Math.round(Number(r.loss || 0) * 100) / 100, rtv:Math.round(Number(r.rtv || 0) * 100) / 100})),
+    lines:[
+      {key:'loss', label:'退货全损保守', color:'#14b8a6'},
+      {key:'rtv', label:'RTV入仓测算', color:'#f97316'}
+    ],
+    note:'含仓储真实利润；两条线与顶部利润卡同口径。'
+  };
+}
+function buildPreviewTrafficSeries(kind){
+  const range = chartRangeFor(kind);
+  const map = new Map();
+  for (const r of DATA.trend?.linkSeries || []) {
+    const d = String(r.date || '').slice(0, 10);
+    if (!d || d < range.start || d > range.end) continue;
+    const id = kind === 'month' ? monthId(d) : d;
+    const row = previewTrendBucket(map, id, kind === 'month' ? monthPeriodLabel(id, range) : d);
+    row.eps_uv = Number(row.eps_uv || 0) + Number(r.eps_uv || 0);
+    row.goods_uv = Number(row.goods_uv || 0) + Number(r.goods_uv || 0);
+    row.sale_cnt = Number(row.sale_cnt || 0) + Number(r.sale_cnt || 0);
+  }
+  return {
+    series:previewTrendRowsFromMap(map).map(r => ({
+      ...r,
+      eps_uv:Math.round(Number(r.eps_uv || 0) * 100) / 100,
+      goods_uv:Math.round(Number(r.goods_uv || 0) * 100) / 100,
+      sale_cnt:Math.round(Number(r.sale_cnt || 0) * 100) / 100
+    })),
+    lines:[
+      {key:'eps_uv', label:'曝光量', color:'#06b6d4'},
+      {key:'goods_uv', label:'访客量', color:'#3b82f6'},
+      {key:'sale_cnt', label:'成交件数', color:'#8b5cf6'}
+    ],
+    note:'来自云端 core trend.linkSeries；点击率/支付率留在顶部流量表，不与绝对量混轴。'
+  };
+}
+function buildPreviewInventorySeries(kind){
+  const rows = previewInventoryProductRows();
+  if (!rows.length) return {series:[], lines:[], note:'当前筛选下暂无库存快照。'};
+  const snapshotDate = latestInventorySnapshotDate(rows);
+  const id = kind === 'month' ? (monthId(snapshotDate) || snapshotDate) : snapshotDate;
+  const labelText = kind === 'month' ? (monthId(snapshotDate) || snapshotDate) : snapshotDate;
+  const point = {
+    id,
+    label:labelText,
+    available:rows.reduce((s,r)=>s+Number(r.et_estimated_available_qty || 0),0),
+    on_hand:rows.reduce((s,r)=>s+Number(r.estimated_on_hand_quantity || 0),0),
+    total_supply:rows.reduce((s,r)=>s+Number(r.estimated_total_supply_quantity || 0),0)
+  };
+  return {
+    series:[point],
+    lines:[
+      {key:'available', label:'ET可售', color:'#14b8a6'},
+      {key:'on_hand', label:'在库估算', color:'#60a5fa'},
+      {key:'total_supply', label:'总供给', color:'#f59e0b'}
+    ],
+    note:'库存目前来自当前快照，不是历史库存趋势；有库存历史后可扩展为真实趋势。'
+  };
+}
+function buildPreviewMetricSeries(kind, metric){
+  if (metric === 'sales' || metric === 'quantity') return buildPreviewSalesOrQuantitySeries(kind, metric);
+  if (metric === 'returns') return buildPreviewReturnsSeries(kind);
+  if (metric === 'profit') return buildPreviewProfitSeries(kind);
+  if (metric === 'traffic') return buildPreviewTrafficSeries(kind);
+  if (metric === 'inventory') return buildPreviewInventorySeries(kind);
+  return {series:[], lines:[], note:''};
+}
+function renderPreviewMetricLineChart(kind = 'day', metric = 'sales'){
+  const catalog = trendMetricCatalog();
+  const meta = catalog[metric] || {};
+  const range = chartRangeFor(kind);
+  const built = buildPreviewMetricSeries(kind, metric);
+  const series = built.series || [];
+  const linesDef = built.lines || [];
+  if (!series.length || !linesDef.length) {
+    return '<div class="empty">当前时间段 '+escapeHtml(range.start)+' 至 '+escapeHtml(range.end)+' 暂无'+escapeHtml(meta.label || metric)+'趋势数据。</div>';
+  }
+  const keys = linesDef.map(x => x.key);
+  const colors = Object.fromEntries(linesDef.map(x => [x.key, x.color]));
+  const labels = Object.fromEntries(linesDef.map(x => [x.key, x.label]));
+  const values = series.flatMap(x => keys.map(k => Number(x[k] || 0)));
+  const maxRaw = Math.max(...values, meta.percent ? 0.01 : 1);
+  const minRaw = Math.min(...values, 0);
+  const max = meta.percent ? Math.max(0.01, Math.ceil(maxRaw * 100) / 100) : niceCeil(maxRaw);
+  const min = minRaw < 0 ? -niceCeil(Math.abs(minRaw)) : 0;
+  const span = Math.max(meta.percent ? 0.01 : 1, max - min);
+  const w = 1880, h = 310, padL = 92, padR = 28, padT = 24, padB = 52;
+  const xFor = (i) => series.length === 1 ? (padL + (w - padR)) / 2 : padL + (i / (series.length - 1)) * (w - padL - padR);
+  const yFor = (v) => padT + (1 - ((Number(v || 0) - min) / span)) * (h - padT - padB);
+  const ticks = meta.percent ? [0, max * .25, max * .5, max * .75, max] : [min, min + span * .25, min + span * .5, min + span * .75, max];
+  const gridTicks = ticks.map(val => {
+    const y = yFor(val);
+    return '<line class="grid-line" x1="'+padL+'" y1="'+y.toFixed(1)+'" x2="'+(w-padR)+'" y2="'+y.toFixed(1)+'"></line>'+
+      '<text class="axis" text-anchor="end" x="'+(padL-10)+'" y="'+(y+4).toFixed(1)+'">'+escapeHtml(trendValueText(val, metric))+'</text>';
+  }).join('');
+  const lineSvg = keys.map(k => {
+    const pts = series.map((r,i) => xFor(i).toFixed(1)+','+yFor(r[k]).toFixed(1)).join(' ');
+    const dots = series.map((r,i) => '<circle class="dot" cx="'+xFor(i).toFixed(1)+'" cy="'+yFor(r[k]).toFixed(1)+'" r="3.5" fill="'+colors[k]+'"><title>'+escapeHtml(labels[k]+' '+r.label+' '+trendValueText(r[k], metric))+'</title></circle>').join('');
+    return '<polyline class="series" points="'+pts+'" stroke="'+colors[k]+'"></polyline>'+dots;
+  }).join('');
+  const labelEvery = series.length <= 7 ? 1 : Math.ceil(series.length / 5);
+  const valueLabels = keys.map(k => series.map((r,i) => {
+    if (!(i === 0 || i === series.length - 1 || i % labelEvery === 0)) return '';
+    const v = Number(r[k] || 0);
+    if (!v && i !== 0 && i !== series.length - 1) return '';
+    const x = xFor(i);
+    const y = Math.max(14, yFor(v) - 9 - keys.indexOf(k) * 12);
+    const anchor = i === 0 ? 'start' : i === series.length - 1 ? 'end' : 'middle';
+    const text = meta.money ? fmt0.format(v) : meta.percent ? pct(v) : num(v);
+    return '<text class="value-label" text-anchor="'+anchor+'" x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" fill="'+colors[k]+'">'+escapeHtml(text)+'</text>';
+  }).join('')).join('');
+  const xLabels = series.length <= 8 ? series : series.filter((_,i)=> i === 0 || i === series.length - 1 || i % Math.ceil(series.length / 6) === 0);
+  const axisLabels = xLabels.map(r => {
+    const i = series.indexOf(r);
+    return '<text class="axis" text-anchor="'+(i === 0 ? 'start' : i === series.length - 1 ? 'end' : 'middle')+'" x="'+xFor(i).toFixed(1)+'" y="'+(h-8)+'">'+escapeHtml(r.label)+'</text>';
+  }).join('');
+  const hitRects = series.map((r,i) => {
+    const prev = i === 0 ? padL : (xFor(i - 1) + xFor(i)) / 2;
+    const next = i === series.length - 1 ? (w - padR) : (xFor(i) + xFor(i + 1)) / 2;
+    const tip = [r.label].concat(keys.map(k => labels[k] + '：' + trendValueText(r[k], metric))).join('\\n');
+    return '<rect class="chart-hit" x="'+prev.toFixed(1)+'" y="'+padT+'" width="'+Math.max(8, next-prev).toFixed(1)+'" height="'+(h-padT-padB)+'" data-tip="'+escapeHtml(tip)+'"></rect>';
+  }).join('');
+  const latest = series.at(-1) || {};
+  const sliceNote = kind === 'month' ? monthSliceNote(range) : '';
+  return '<div class="line-chart">'+
+    '<svg viewBox="0 0 '+w+' '+h+'" role="img" aria-label="'+escapeHtml((kind === 'month' ? '月' : '日') + (meta.aria || meta.label || '趋势'))+'">'+
+      gridTicks+
+      '<line class="axis-line" x1="'+padL+'" y1="'+padT+'" x2="'+padL+'" y2="'+(h-padB)+'"></line>'+
+      '<line class="axis-line" x1="'+padL+'" y1="'+(h-padB)+'" x2="'+(w-padR)+'" y2="'+(h-padB)+'"></line>'+
+      lineSvg+valueLabels+axisLabels+hitRects+
+    '</svg>'+
+    '<div class="chart-tip" aria-hidden="true"></div>'+
+    '<div class="chart-legend">'+keys.map(k=>'<span><i style="--c:'+colors[k]+'"></i>'+labels[k]+'：'+trendValueText(latest[k] || 0, metric)+'</span>').join('')+'</div>'+
+    '<p class="sub">时间段：'+escapeHtml(range.start)+' 至 '+escapeHtml(range.end)+'；当前显示 '+num(series.length)+' 个'+(kind === 'month' ? '月份' : '日期')+'。'+(built.note ? ' '+escapeHtml(built.note) : '')+(sliceNote ? ' '+escapeHtml(sliceNote) : '')+'</p>'+
+  '</div>';
+}
+function renderPreviewTrendPanels(kind = 'day', rankingsLoading = false, profitLoading = false, sectionLoadingHtml = null){
+  const catalog = trendMetricCatalog();
+  const loading = sectionLoadingHtml || (label => '<div class="empty">正在加载'+escapeHtml(label)+'。</div>');
+  return selectedTrendMetricKeys().map(metric => {
+    const meta = catalog[metric] || {};
+    if ((metric === 'sales' || metric === 'quantity' || metric === 'returns') && rankingsLoading) {
+      return panel((kind === 'month' ? '月趋势 · ' : '日趋势 · ') + (meta.label || metric), '销售/排行 section 加载中', loading('销售/排行趋势'));
+    }
+    if (metric === 'profit' && profitLoading) {
+      return panel((kind === 'month' ? '月趋势 · ' : '日趋势 · ') + (meta.label || metric), '利润 section 加载中', loading('利润趋势'));
+    }
+    return panel((kind === 'month' ? '月趋势 · ' : '日趋势 · ') + (meta.label || metric), homeScopeSubtitle(), renderPreviewMetricLineChart(kind, metric));
+  }).join('');
+}
 
 function buildProfitMonthSeries(){
   const range = chartRangeFor('month');
@@ -7195,8 +7779,8 @@ function renderProfitLineChart(){
   const range = chartRangeFor('month');
   const scope = storeFilterKind();
   const scoped = scope.type !== 'all' || Boolean(productScopeQuery());
-  const colors = scoped ? {scope:'#14b8a6'} : {total:'#10b981', DSY:'#2563eb', LGM:'#f97316'};
-  const labels = scoped ? {scope:homeScopeSubtitle()} : {total:'总计', DSY:'DSY', LGM:'LGM'};
+  const colors = NO_GROUPS_PREVIEW ? (scoped ? {scope:'#14b8a6'} : {total:'#10b981'}) : (scoped ? {scope:'#14b8a6'} : {total:'#10b981', DSY:'#2563eb', LGM:'#f97316'});
+  const labels = NO_GROUPS_PREVIEW ? (scoped ? {scope:homeScopeSubtitle()} : {total:'全部店铺'}) : (scoped ? {scope:homeScopeSubtitle()} : {total:'总计', DSY:'DSY', LGM:'LGM'});
   if (!series.length) return '<div class="empty">当前范围暂无可计算利润。请先导入成本表，或确认所选时间段有订单数据。</div>';
   const keys = Object.keys(colors);
   const values = series.flatMap(x => keys.map(k => Number(x[k] || 0)));
@@ -7238,7 +7822,9 @@ function renderProfitLineChart(){
     return '<rect class="chart-hit" x="'+prev.toFixed(1)+'" y="'+padT+'" width="'+Math.max(8, next-prev).toFixed(1)+'" height="'+(h-padT-padB)+'" data-tip="'+escapeHtml(tip)+'"></rect>';
   }).join('');
   const latest = series.at(-1) || {};
-  const note = '当前筛选展示含仓储利润；店铺/分组按净销售额分摊，货号层优先使用 ET 仓储费下载明细，缺明细日期才使用体积库存天数兜底。';
+  const note = NO_GROUPS_PREVIEW
+    ? '当前筛选展示含仓储利润；全盘只保留全部店铺口径，货号层优先使用 ET 仓储费下载明细，缺明细日期才使用体积库存天数兜底。'
+    : '当前筛选展示含仓储利润；店铺/分组按净销售额分摊，货号层优先使用 ET 仓储费下载明细，缺明细日期才使用体积库存天数兜底。';
   const sliceNote = monthSliceNote(range);
   return '<div class="line-chart">'+
     '<svg viewBox="0 0 '+w+' '+h+'" role="img" aria-label="月利润趋势">'+gridTicks+
@@ -7280,7 +7866,97 @@ function homeSalesTrendSvg(){
     '<text class="metric-axis" x="'+pad+'" y="'+(h-4)+'">'+escapeHtml(series[0].date || '')+'</text><text class="metric-axis" text-anchor="end" x="'+(w-pad)+'" y="'+(h-4)+'">'+escapeHtml(series[series.length-1].date || '')+'</text>'+
   '</svg></div>';
 }
+function renderHomeDashboardNoGroupsPreview(){
+  const selectedRange = ensureDateRange();
+  const rankingsLoading = biPortalUsesApiSections() && !homeRankingsLoaded();
+  const actionsLoading = biPortalUsesApiSections() && !biSectionLoaded('actions');
+  const profitLoading = !homeProfitReadyForRender();
+  const profitTrendLoading = biPortalUsesApiSections() && selectedTrendMetricKeys().includes('profit') && !biSectionLoaded('profit');
+  syncHomeScopeControls();
+  ensureRankWindow();
+  if (String(state.store || '').toUpperCase().startsWith('GROUP:')) state.store = '';
+  if (!PREVIEW_TREND_METRICS[state.trendMetric]) state.trendMetric = PREVIEW_DEFAULT_TREND_METRICS;
+  state.trendMetrics = '';
+  syncUrlHash();
+  const rankSummary = {start_date:selectedRange.start, end_date:selectedRange.end};
+  const storeRankRows = aggregateHomeStores(selectedRange.start, selectedRange.end);
+  const productRankRows = aggregateHomeProducts(selectedRange.start, selectedRange.end);
+  const storeBySales = [...storeRankRows].sort((a,b)=>Number(b.sales_sar||0)-Number(a.sales_sar||0));
+  const storeByQty = [...storeRankRows].sort((a,b)=>Number(b.quantity||0)-Number(a.quantity||0));
+  const productBySales = [...productRankRows].sort((a,b)=>Number(b.sales_sar||0)-Number(a.sales_sar||0));
+  const productByQty = [...productRankRows].sort((a,b)=>Number(b.quantity||0)-Number(a.quantity||0));
+  const domainCounts = (DATA.actions || []).reduce((acc,a)=>{ const k = domainName(a.action_domain || 'other'); acc[k]=(acc[k]||0)+1; return acc; }, {});
+  const domainRows = Object.entries(domainCounts).map(([label,count]) => ({label,count})).sort((a,b)=>b.count-a.count);
+  const sectionLoadingHtml = label => '<div class="empty">正在加载'+escapeHtml(label)+'，页面先显示 core 数据；加载完成后会自动刷新本区域。</div>';
+  $('homeDashboardTag').textContent = '平行预览 · 当前时间段 ' + periodRangeText(rankSummary) + ' · ' + homeScopeSubtitle();
+  renderFloatingRangeToolbar();
+  const groupEl = $('groupOverview');
+  if (groupEl) groupEl.innerHTML = '';
+  renderKpis();
+  $('homeDashboard').innerHTML =
+    '<div class="dashboard-section-title trend-panel-head"><div><h3>趋势</h3><div class="sub">平行预览：按钮只切换当前趋势指标；页面只保留一个日图和一个月图。</div></div>'+trendMetricButtons()+'</div>'+
+    '<div class="trend-stack">'+
+      renderPreviewTrendPanels('day', rankingsLoading, profitTrendLoading, sectionLoadingHtml)+
+      renderPreviewTrendPanels('month', rankingsLoading, profitTrendLoading, sectionLoadingHtml)+
+    '</div>'+
+    '<div class="dashboard-section-title"><h3>排行榜</h3><div class="sub">店铺只显示 DL/DX 等代号，货号显示归并后的标准货号；排行榜按上方时间段重算。</div></div>'+
+    '<div class="dashboard-grid equal">'+
+      panel('店铺净成交额排行', rankingsLoading ? '当前范围明细加载中' : '当前范围 '+num(storeBySales.length)+' 店 · '+periodRangeText(rankSummary), rankingsLoading ? sectionLoadingHtml('店铺排行') : rankList(storeBySales, {valueKey:'sales_sar', name:storeRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:()=> '#10b981', meta:r=>averageNetUnitPriceText(r)+' · 订单 '+num(r.orders)+' · 销量 '+num(r.quantity)+' 件 · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+
+      panel('店铺净销量排行', rankingsLoading ? '当前范围明细加载中' : '完整 '+num(storeByQty.length)+' 店 · 按净成交销量件数排序。', rankingsLoading ? sectionLoadingHtml('店铺销量排行') : rankList(storeByQty, {valueKey:'quantity', name:storeRankName, format:v=>num(v)+' 件', subValue:r=>money(r.sales_sar), color:()=> '#60a5fa', meta:r=>averageNetUnitPriceText(r)+' · 订单 '+num(r.orders)+' · 净成交 '+money(r.sales_sar)+' · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+
+    '</div>'+
+    '<div class="dashboard-grid equal" style="margin-top:16px">'+
+      panel('产品净成交额排行', rankingsLoading ? '当前范围明细加载中' : '当前范围 '+num(productBySales.length)+' 个标准货号 · 点击进入货号 360。', rankingsLoading ? sectionLoadingHtml('产品销售排行') : rankList(productBySales, {className:'product-rank', valueKey:'sales_sar', name:productRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:()=> '#db2777', meta:r=>productRankMeta(r, averageNetUnitPriceText(r)+' · 销量 '+num(r.quantity)+' 件 · 订单 '+num(r.orders)+' · 覆盖 '+num(r.store_count)+' 店 · '+num(r.days)+' 天'), attr:r=>'data-home-product="'+escapeHtml(r.standard_goods_sn || '')+'"'}))+
+      panel('产品净销量排行', rankingsLoading ? '当前范围明细加载中' : '完整 '+num(productByQty.length)+' 个标准货号 · 按净成交销量件数排序。', rankingsLoading ? sectionLoadingHtml('产品销量排行') : rankList(productByQty, {className:'product-rank', valueKey:'quantity', name:productRankName, format:v=>num(v)+' 件', subValue:r=>money(r.sales_sar), color:()=> '#a855f7', meta:r=>productRankMeta(r, averageNetUnitPriceText(r)+' · 净成交 '+money(r.sales_sar)+' · 订单 '+num(r.orders)+' · 覆盖 '+num(r.store_count)+' 店 · '+num(r.days)+' 天'), attr:r=>'data-home-product="'+escapeHtml(r.standard_goods_sn || '')+'"'}))+
+    '</div>'+
+    '<div class="dashboard-section-title"><h3>动作与风险</h3><div class="sub">首页只看结构，具体处理进动作池。</div></div>'+
+    '<div class="dashboard-grid equal">'+
+      panel('动作结构', actionsLoading ? '动作池加载中' : '动作池精选清单的业务域分布。', (actionsLoading ? sectionLoadingHtml('动作池') : homeBarList(domainRows, 'count', 'label', {format:v=>num(v)+' 条', color:()=> '#0891b2', attr:r=>'data-home-domain="'+escapeHtml(r.label || '')+'"'} ))+'<button class="btn" style="margin-top:12px" data-home-actions="1">进入今日动作池</button>')+
+      panel('趋势准备', '只说明当前是否具备趋势分析条件，不重复展示净成交额。', homeSalesTrendSvg())+
+    '</div>';
+  bindRangeToolbarControls();
+  document.querySelectorAll('[data-home-store]').forEach(btn => btn.addEventListener('click', () => {
+    state.store = btn.dataset.homeStore || '';
+    state.q = '';
+    state.product = '';
+    clearActionOnlyFilters();
+    jumpToTab('stores', {keepFilters:true});
+    renderAll();
+  }));
+  document.querySelectorAll('[data-home-product]').forEach(btn => btn.addEventListener('click', () => {
+    focusProductQueryFromHome(btn.dataset.homeProduct || '');
+    clearActionOnlyFilters();
+    jumpToTab('products', {keepFilters:true});
+    renderAll();
+  }));
+  document.querySelectorAll('[data-home-actions]').forEach(btn => btn.addEventListener('click', () => {
+    state.store = '';
+    state.product = '';
+    state.q = '';
+    jumpToTab('actions', {keepFilters:true});
+    renderAll();
+  }));
+  document.querySelectorAll('[data-home-domain]').forEach(btn => btn.addEventListener('click', () => {
+    const label = btn.dataset.homeDomain || '';
+    const row = (DATA.actions || []).find(a => domainName(a.action_domain || 'other') === label);
+    state.domain = row?.action_domain || '';
+    state.store = '';
+    state.product = '';
+    state.q = '';
+    jumpToTab('actions', {keepFilters:true});
+    renderAll();
+  }));
+  document.querySelectorAll('[data-trend-metric]').forEach(btn => btn.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    const key = btn.dataset.trendMetric || '';
+    if (!PREVIEW_TREND_METRICS[key]) return;
+    state.trendMetric = key;
+    state.trendMetrics = '';
+    renderAll();
+  }));
+}
 function renderHomeDashboard(){
+  if (NO_GROUPS_PREVIEW) return renderHomeDashboardNoGroupsPreview();
   const selectedRange = ensureDateRange();
   const rankingsLoading = biPortalUsesApiSections() && !homeRankingsLoaded();
   const actionsLoading = biPortalUsesApiSections() && !biSectionLoaded('actions');
@@ -7354,6 +8030,7 @@ function renderHomeDashboard(){
     jumpToTab('actions', {keepFilters:true});
     renderAll();
   }));
+  if (NO_GROUPS_PREVIEW) return;
   document.querySelectorAll('[data-trend-metric]').forEach(btn => btn.addEventListener('click', () => {
     state.trendMetric = btn.dataset.trendMetric || 'sales';
     renderAll();
@@ -7362,7 +8039,9 @@ function renderHomeDashboard(){
 
 function renderFilters(){
   const stores = orderedStoreCodes();
-  const storeOptions = '<option value="">全部店铺</option><option value="GROUP:DSY">DSY 组</option><option value="GROUP:LGM">LGM 组</option>' + stores.map(s => '<option value="'+s+'">'+s+'</option>').join('');
+  if (NO_GROUPS_PREVIEW && String(state.store || '').toUpperCase().startsWith('GROUP:')) state.store = '';
+  const groupOptions = NO_GROUPS_PREVIEW ? '' : '<option value="GROUP:DSY">DSY 组</option><option value="GROUP:LGM">LGM 组</option>';
+  const storeOptions = '<option value="">全部店铺</option>' + groupOptions + stores.map(s => '<option value="'+s+'">'+s+'</option>').join('');
   $('storeFilter').innerHTML = storeOptions;
   if ($('homeStoreFilter')) $('homeStoreFilter').innerHTML = storeOptions;
   const domains = [...new Set((DATA.actions || []).map(a => a.action_domain))].sort();
@@ -7797,6 +8476,11 @@ function stateFromHash(){
   }
   if (!['day','week','month','year'].includes(next.rankPeriod)) next.rankPeriod = 'day';
   if (!document.getElementById(next.tab)) next.tab = 'overview';
+  if (NO_GROUPS_PREVIEW) {
+    if (String(next.store || '').toUpperCase().startsWith('GROUP:')) next.store = '';
+    if (!PREVIEW_TREND_METRICS[next.trendMetric]) next.trendMetric = PREVIEW_DEFAULT_TREND_METRICS;
+    next.trendMetrics = '';
+  }
   state = next;
 }
 function hashFromState(){
@@ -7808,6 +8492,8 @@ function hashFromState(){
     if (isActionFilterTab() && actionIgnoredKeys.has(key)) continue;
     const value = state[key];
     if (!value) continue;
+    if (NO_GROUPS_PREVIEW && key === 'store' && String(value || '').toUpperCase().startsWith('GROUP:')) continue;
+    if (NO_GROUPS_PREVIEW && ['salesMode','qtyMode','returnsMode','profitMode','trendMetric','trendMetrics'].includes(key)) continue;
     if ((key === 'tab' && value === 'overview') || ((key === 'focus' || key === 'insight') && value === 'all') || (key === 'rankPeriod' && value === 'day')) continue;
     params.set(key, value);
   }
@@ -11288,6 +11974,50 @@ function profitActionText(r){
   if (margin >= .25 && profit > 0) return '<span class="tag good">可加码</span><br><span class="muted">利润率 '+escapeHtml(pct(margin))+'</span>';
   return '<span class="tag info">观察</span><br><span class="muted">继续跟踪</span>';
 }
+function aggregateNoGroupsProfitMonthRows(rows){
+  const numericFields = [
+    'gross_revenue_sar',
+    'net_revenue_sar',
+    'product_cost_sar',
+    'return_delivery_fee_sar',
+    'rtv_recoverable_cost_sar',
+    'rtv_09_recoverable_cost_sar',
+    'rtv_received_quantity',
+    'rtv_received_to_09_quantity',
+    'month_storage_fee_sar',
+    'allocated_storage_fee_sar',
+    'profit_before_storage_sar',
+    'profit_after_storage_sar',
+    'profit_if_rtv_received_resellable_sar',
+    'profit_if_rtv_received_resellable_after_storage_sar',
+    'profit_if_rtv_09_resellable_sar',
+    'profit_if_rtv_09_resellable_after_storage_sar',
+    'missing_cost_revenue_sar',
+    'missing_cost_lines',
+    'reversal_lines'
+  ];
+  const byMonth = new Map();
+  for (const r of rows || []) {
+    const month = String(r.month_start || '').slice(0, 7);
+    if (!month) continue;
+    const row = byMonth.get(month) || {month_start:month + '-01', group_key:'全部店铺', _coverageNumerator:0};
+    for (const f of numericFields) row[f] = Number(row[f] || 0) + Number(r[f] || 0);
+    const netRevenue = Number(r.net_revenue_sar || 0);
+    const rawCoverageRate = r.cost_coverage_revenue_rate;
+    const coverageRate = Number(rawCoverageRate);
+    if (rawCoverageRate != null && rawCoverageRate !== '' && Number.isFinite(coverageRate) && netRevenue > 0) row._coverageNumerator += coverageRate * netRevenue;
+    byMonth.set(month, row);
+  }
+  return Array.from(byMonth.values())
+    .sort((a,b)=>String(a.month_start).localeCompare(String(b.month_start)))
+    .map(row => {
+      row.cost_coverage_revenue_rate = Number(row.net_revenue_sar || 0) > 0 ? row._coverageNumerator / Number(row.net_revenue_sar || 0) : null;
+      row.profit_margin_after_storage = Number(row.net_revenue_sar || 0) > 0 ? Number(row.profit_after_storage_sar || 0) / Number(row.net_revenue_sar || 0) : null;
+      delete row._coverageNumerator;
+      for (const f of numericFields) row[f] = Math.round(Number(row[f] || 0) * 100) / 100;
+      return row;
+    });
+}
 function renderProfitPage(){
   const range = ensureDateRange();
   const rows = profitDailyRows(range.start, range.end, state.store, true);
@@ -11343,7 +12073,7 @@ function renderProfitPage(){
       profitKpiCard('RTV 已收二售测算', hasCost ? money(summary.profitReceivedResellableSar) : '-', '比保守口径多 '+money(summary.rtvRecoverableCostSar)+'；已收 '+num(summary.rtvReceivedQuantity)+' 件', Number(summary.rtvRecoverableCostSar||0) ? 'good' : 'warn')+
     '</div>'+
     '<div class="store-flow">'+
-      '<div class="store-verdict"><h3>口径说明</h3><p>仓储费已进入真实利润。店铺/DSY/LGM 按净销售额分摊；货号层优先使用 ET 当日仓储费下载明细，缺明细日期才按体积库存天数估算兜底。</p>'+
+      '<div class="store-verdict"><h3>口径说明</h3><p>'+escapeHtml(NO_GROUPS_PREVIEW ? '仓储费已进入真实利润。全盘只保留全部店铺口径；货号层优先使用 ET 当日仓储费下载明细，缺明细日期才按体积库存天数估算兜底。' : '仓储费已进入真实利润。店铺/DSY/LGM 按净销售额分摊；货号层优先使用 ET 当日仓储费下载明细，缺明细日期才按体积库存天数估算兜底。')+'</p>'+
         '<div class="store-action-steps">'+
           '<div class="store-step"><b>成本批次</b><p>同货号完整批次总成本 / 发货总数；缺头程运输费的批次不计入均摊。</p></div>'+
           '<div class="store-step"><b>退货反转</b><p>退货/仅退款/派件失败营收按 0；仅真实退货退款额外扣 13.88 SAR。</p></div>'+
@@ -11358,14 +12088,15 @@ function renderProfitPage(){
         '<div class="store-kpi"><span>净营收</span><strong>'+money(summary.netRevenueSar)+'</strong><small>退货营收按 0</small></div>'+
       '</div>'+
     '</div></section></div>';
-  const profitMonthDetailRows = monthRows.filter(r => {
+  let profitMonthDetailRows = monthRows.filter(r => {
       const m = String(r.month_start || '').slice(0,7);
       const cr = chartRangeFor('month');
       if (!(m >= monthId(cr.start) && m <= monthId(cr.end))) return false;
       return isScopedProfit || storeMatchesScope({store_key:'', group_key:r.group_key || ''});
     });
-  $('profitTrendPanel').innerHTML = renderProfitLineChart() + sectionTitleHtml('月度利润明细', isScopedProfit ? '当前店铺/分组/货号筛选下的含仓储真实利润。' : '总计和分组月利润；仓储费按 DSY/LGM 净成交额比例分摊。') + table(profitMonthDetailRows, [
-      ['月份/组', r => '<b>'+escapeHtml(String(r.month_start || '').slice(0,7))+'</b><br><span class="tag info">'+escapeHtml(r.group_key || '-')+'</span>'],
+  if (NO_GROUPS_PREVIEW && !isScopedProfit) profitMonthDetailRows = aggregateNoGroupsProfitMonthRows(profitMonthDetailRows);
+  $('profitTrendPanel').innerHTML = renderProfitLineChart() + sectionTitleHtml('月度利润明细', NO_GROUPS_PREVIEW ? (isScopedProfit ? '当前店铺/货号筛选下的含仓储真实利润。' : '全盘月利润；只保留全部店铺口径。') : (isScopedProfit ? '当前店铺/分组/货号筛选下的含仓储真实利润。' : '总计和分组月利润；仓储费按 DSY/LGM 净成交额比例分摊。')) + table(profitMonthDetailRows, [
+      [NO_GROUPS_PREVIEW ? '月份/范围' : '月份/组', r => '<b>'+escapeHtml(String(r.month_start || '').slice(0,7))+'</b><br><span class="tag info">'+escapeHtml(r.group_key || '-')+'</span>'],
       ['净营收', r => money(r.net_revenue_sar), 'num'],
       ['商品成本', r => money(r.product_cost_sar), 'num'],
       ['退货费', r => money(r.return_delivery_fee_sar), 'num'],
@@ -11401,10 +12132,10 @@ function renderProfitPage(){
   ];
   $('profitWinners').innerHTML = winners.length
     ? table(winners, profitCols, {limit:30})
-    : '<div class="empty">当前时间、店铺/分组、货号筛选下暂无利润率 ≥ 20% 的货号。</div>';
+    : '<div class="empty">当前时间、店铺'+(NO_GROUPS_PREVIEW ? '' : '/分组')+'、货号筛选下暂无利润率 ≥ 20% 的货号。</div>';
   $('profitLosers').innerHTML = losers.length
     ? table(losers, profitCols, {limit:30})
-    : '<div class="empty">当前时间、店铺/分组、货号筛选下暂无利润率 < 20% 的货号。</div>';
+    : '<div class="empty">当前时间、店铺'+(NO_GROUPS_PREVIEW ? '' : '/分组')+'、货号筛选下暂无利润率 < 20% 的货号。</div>';
   $('profitCostGaps').innerHTML =
     '<div class="table-note">成本文件放在 <span class="mono">inputs/costs/</span>；模板是 <span class="mono">inputs/costs/SHEIN成本表模板.xlsx</span>。如果一批货缺头程运输费，会显示为缺口但不会污染单位成本。</div>'+
     (gapRows.length ? table(gapRows, [
@@ -11608,7 +12339,7 @@ function renderInventoryPage(){
         '<div class="store-kpi"><span>高风险货号</span><strong>'+num(urgent)+'</strong><small>断货/14天内断货/实盘缺货</small></div>'+
       '</div>'+
     '</div>'+
-    '<div class="table-note">库存数优先来自 ET 货代仓实盘；店铺/分组筛选只改变“销售速度”和“去化天数”，不硬拆全局物理库存。</div>';
+    '<div class="table-note">'+escapeHtml(NO_GROUPS_PREVIEW ? '库存数优先来自 ET 货代仓实盘；店铺筛选只改变“销售速度”和“去化天数”，不硬拆全局物理库存。' : '库存数优先来自 ET 货代仓实盘；店铺/分组筛选只改变“销售速度”和“去化天数”，不硬拆全局物理库存。')+'</div>';
   const riskRows = rows
     .filter(r => inventoryRiskClass(r) === 'high' || Number(r.scoped_days_of_supply_on_hand ?? Infinity) <= 30 || Number(r.oversold_or_missing_batch_quantity || 0) > 0)
     .sort((a,b)=>(inventoryRiskClass(a)==='high'?-1:1) - (inventoryRiskClass(b)==='high'?-1:1) || Number(a.scoped_days_of_supply_on_hand ?? 99999)-Number(b.scoped_days_of_supply_on_hand ?? 99999))
@@ -12323,7 +13054,7 @@ const PAGE_GUIDES = {
   },
   profit: {
     title: '成本 / 利润',
-    purpose: '回答一个问题：真实利润到底从哪里来？先补成本覆盖，再看月度总利润、分组利润和货号利润，仓储费已进入真实利润。',
+    purpose: NO_GROUPS_PREVIEW ? '回答一个问题：真实利润到底从哪里来？先补成本覆盖，再看月度总利润、店铺利润和货号利润，仓储费已进入真实利润。' : '回答一个问题：真实利润到底从哪里来？先补成本覆盖，再看月度总利润、分组利润和货号利润，仓储费已进入真实利润。',
     steps: [
       ['先看覆盖', '成本表缺口会直接影响真实利润可信度；缺头程运费的批次会被保留但不计入单位成本。'],
       ['再看月利润', '月度利润会扣商品成本、退货派送费和按净成交额分摊的 ET 仓储费。'],
@@ -12340,7 +13071,7 @@ const PAGE_GUIDES = {
     purpose: '回答一个问题：按现在销售速度，这些货还够卖多久？这里用成本表批次推算经营库存，不等于真实仓库系统。',
     steps: [
       ['先看在库', '有到仓/派送日期且有头程费用的批次才计入到仓库存。'],
-      ['再看速度', '去化按毛销量扣库存，店铺/分组筛选只改变销售速度，不改变全局库存基数。'],
+      ['再看速度', NO_GROUPS_PREVIEW ? '去化按毛销量扣库存，店铺/货号筛选只改变销售速度，不改变全局库存基数。' : '去化按毛销量扣库存，店铺/分组筛选只改变销售速度，不改变全局库存基数。'],
       ['最后做动作', '断货风险看补货，在途看催到仓/录头程，低动销库存看活动清货或暂停补货。']
     ],
     actions: [
@@ -12568,7 +13299,7 @@ function renderPageDecisionSummaries(){
   const missingProducts = prProducts.filter(r => Number(r.missing_cost_revenue_sar || 0) > 0 || Number(r.cost_coverage_revenue_rate || 0) < .9).length;
   sectionDecisionBlock('profit', {
     title:'成本 / 利润决策摘要',
-    subtitle:'当前时间段：' + rangeText + '。真实利润跟随顶部时间、店铺/分组和货号筛选；仓储费已进入真实利润。',
+    subtitle:'当前时间段：' + rangeText + '。真实利润跟随顶部时间、' + (NO_GROUPS_PREVIEW ? '店铺和货号筛选' : '店铺/分组和货号筛选') + '；仓储费已进入真实利润。',
     tag: pr.hasAnyCost ? ('覆盖 ' + pct(pr.costCoverageRate)) : '等待成本表',
     cards:[
       {label:'当前真实利润', value:pr.hasAnyCost ? money(pr.profitSar) : '待成本表', hint:'净营收 - 商品成本 - 退货派送费 - 仓储费。', level:pr.hasAnyCost ? (Number(pr.profitSar||0) >= 0 ? 'good' : 'high') : 'mid'},
@@ -13112,6 +13843,7 @@ window.addEventListener('hashchange', () => {
   applyStateToControls();
   renderAll();
   applyingHash = false;
+  if (NO_GROUPS_PREVIEW) syncUrlHash();
 });
 stateFromHash();
 initTheme();
@@ -13149,6 +13881,40 @@ async function main() {
   }
   markStage('metabase:url');
   const metabaseUrl = (args.metabaseUrl || await readMetabaseUrl() || 'http://localhost:3000').replace(/\/$/, '');
+  if (args.htmlOnlyFromData) {
+    if (!args.htmlFile) {
+      throw new Error('--html-file is required with --html-only-from-data to avoid overwriting the formal portal entry');
+    }
+    if (isFormalPortalIndexPath(args.htmlFile, args.outDir)) {
+      throw new Error('--html-only-from-data refuses to write the formal BI portal index.html; choose a separate preview html file');
+    }
+    markStage('html-only:read-data');
+    const parsedData = deepSanitize(JSON.parse(await fs.readFile(args.htmlOnlyFromData, 'utf8')));
+    markStage('html-only:build');
+    const html = buildHtml(
+      parsedData,
+      metabaseUrl,
+      parsedData.audit,
+      parsedData.pipeline,
+      parsedData.briefing,
+      parsedData.firstRunCheck,
+      {previewVariant: args.previewVariant}
+    );
+    markStage('html-only:write');
+    await fs.mkdir(path.dirname(args.htmlFile), {recursive: true});
+    await writeFileWithRetry(args.htmlFile, html, 'utf8');
+    markStage('done');
+    clearTimeout(portalGenerateTimer);
+    console.log(JSON.stringify({
+      ok: true,
+      htmlOnly: true,
+      previewVariant: args.previewVariant || '',
+      sourceData: args.htmlOnlyFromData,
+      html: args.htmlFile,
+      generatedAt: parsedData.generatedAt || parsedData.__sections?.generatedAt || '',
+    }, null, 2));
+    return;
+  }
   markStage('read:audit');
   const audit = await readLatestAuditSummary();
   markStage('read:pipeline');

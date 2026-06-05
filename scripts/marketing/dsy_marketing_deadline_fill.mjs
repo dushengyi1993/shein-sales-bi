@@ -16,10 +16,15 @@ import {
   resolveExposureAdjustedMargin,
   readJsonIfExists,
 } from '../../lib/marketing_pricing_policy.mjs';
+import {
+  requireStoreIdentitySnapshot,
+  storeIdentityEvalBody,
+} from '../../lib/shein_store_identity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
 const STORES = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8')).stores;
+const STORE_ACCOUNT_TRUTH = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'store_account_truth.json'), 'utf8'));
 const COST_DOC = JSON.parse(await fs.readFile(path.join(ROOT, 'tmp', 'mbrs', 'marketing-cost-map.json'), 'utf8'));
 const COSTS = COST_DOC.costMap || {};
 const TRUE_COSTS = COST_DOC.trueCostMap || {};
@@ -389,6 +394,16 @@ async function evalJs(cdp, sessionId, body, arg = undefined) {
     throw new Error(res.exceptionDetails.text || JSON.stringify(res.exceptionDetails));
   }
   return res.result?.value;
+}
+
+async function assertCurrentStoreIdentity(cdp, sessionId, store, context) {
+  const identitySnapshot = await evalJs(cdp, sessionId, storeIdentityEvalBody());
+  return requireStoreIdentitySnapshot({
+    store,
+    truth: STORE_ACCOUNT_TRUTH.stores?.[store.storeKey],
+    snapshot: identitySnapshot,
+    context,
+  });
 }
 
 async function waitFor(cdp, sessionId, predicateBody, timeoutMs = 25_000) {
@@ -1387,6 +1402,8 @@ for (const store of selectedStores) {
   const cdp = await connectStore(store);
   try {
     const listPage = await newPage(cdp, LIST_URL);
+    await waitFor(cdp, listPage.sessionId, 'document.body', 30_000);
+    const identity = await assertCurrentStoreIdentity(cdp, listPage.sessionId, store, 'dsy_marketing_deadline_fill');
     const activities = await fetchActivities(cdp, listPage.sessionId);
     await cdp.call('Target.closeTarget', {targetId: listPage.targetId}).catch(() => {});
     const due = dueActivities(activities);
@@ -1404,7 +1421,7 @@ for (const store of selectedStores) {
         plannedActivities.push(activity);
       }
     }
-    const storeResult = {store: store.storeKey, shopName: store.shopName, port: store.port, dueActivities: due, plannedActivities, skippedActivities, results: []};
+    const storeResult = {store: store.storeKey, shopName: store.shopName, port: store.port, identity, dueActivities: due, plannedActivities, skippedActivities, results: []};
     summary.stores.push(storeResult);
     const scopeLabel = args.allOpen ? '所有未截止可报名活动' : (args.activityIds.length ? '指定活动' : `${args.hours}小时内截止活动`);
     console.log(`[${store.storeKey}] ${scopeLabel}：${due.map(a => `${a.activityId}-${a.name}`).join('；') || '无'}`);

@@ -13,15 +13,28 @@
  * the Excel import success modal is only an async import acknowledgement and
  * is not treated as enrollment proof. Submitting every 15% available SKC is
  * intentionally blocked unless explicitly overridden.
- * By default, target SKCs that currently have active/future limited-discount
- * activity are also excluded so historical low-price discounts are not silently
- * stacked with a newly submitted 15% coupon.
+ * Active/future limited-discount overlap is evaluated by price stack, not by
+ * label alone: planned 15% coupon rows are blocked only when
+ * limitedDiscountPrice * couponFactor would fall below the audited final target
+ * price, or when the required price evidence is missing.
  */
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
+import {
+  PRICE_GUARD_TOLERANCE_SAR,
+  classifyLimitedDiscountCouponStack,
+  couponPlanStoreView,
+  findCouponPlanRow,
+  loadCouponTargetEligibilityPlan,
+  summarizeCouponTargetEligibilityPlan,
+} from '../../lib/marketing_coupon_policy.mjs';
+import {
+  requireStoreIdentitySnapshot,
+  storeIdentityEvalBody,
+} from '../../lib/shein_store_identity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const ACTIVITY_ID_DEFAULT = 34810;
@@ -31,6 +44,7 @@ const TEMPLATE_XLSX = path.join(ROOT, 'scripts', 'marketing', 'templates', 'coup
 const PY_HELPER = path.join(ROOT, 'scripts', 'marketing', 'build_coupon_import_from_skc_list.py');
 const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
 const STORES = STORES_CONFIG.stores || [];
+const STORE_ACCOUNT_TRUTH = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'store_account_truth.json'), 'utf8'));
 const COUPON_LEVEL_RULES = await readJsonIfExists(path.join(ROOT, 'config', 'marketing_coupon_level_rules.json'), {activities: {}});
 const ACTIVE_OR_FUTURE_LIMITED_STATES = new Set(['2', '3']);
 
@@ -49,6 +63,7 @@ function parseArgs(argv) {
     waitMs: 60_000,
     pageSize: 200,
     targetPlan: null,
+    priceOverrides: [],
     allowAll15PctAvailable: false,
     allowLimitedDiscountOverlap: false,
   };
@@ -58,6 +73,7 @@ function parseArgs(argv) {
     else if (a === '--activity-id') out.activityId = Number(argv[++i]);
     else if (a === '--discount-max') out.discountMax = Number(argv[++i]);
     else if (a === '--target-plan') out.targetPlan = argv[++i];
+    else if (a === '--price-overrides' || a === '--coupon-price-overrides') out.priceOverrides.push(...splitStores(argv[++i]));
     else if (a === '--allow-all-15pct-available') out.allowAll15PctAvailable = true;
     else if (a === '--allow-limited-discount-overlap') out.allowLimitedDiscountOverlap = true;
     else if (a === '--dry-run' || a === '--no-submit') out.dryRun = true;
@@ -73,7 +89,7 @@ function parseArgs(argv) {
   if (out.activityId !== ACTIVITY_ID_DEFAULT) throw new Error('This script is currently only verified for activity 34810');
   if (out.discountMax !== 15) throw new Error('Only the fixed 15% coupon tier is allowed for activity 34810 in this workflow');
   if (!out.targetPlan && !out.allowAll15PctAvailable) {
-    throw new Error('Coupon signup now requires --target-plan so paired coupon SKCs stay aligned with the ordinary marketing signup plan. Use --allow-all-15pct-available only for an explicitly audited all-SKC coupon campaign.');
+    throw new Error('Coupon signup now requires --target-plan plus paired price-overrides/inferred price-overrides so only explicit 15% coupon SKCs are submitted. Use --allow-all-15pct-available only for an explicitly audited all-SKC coupon campaign.');
   }
   if (!Number.isFinite(out.waitMs) || out.waitMs < 10_000) out.waitMs = 60_000;
   if (!Number.isFinite(out.pageSize) || out.pageSize < 20) out.pageSize = 200;
@@ -280,6 +296,16 @@ async function snapshot(cdp) {
       tail: text.slice(-1500),
     };
   `);
+}
+
+async function assertCurrentStoreIdentity(cdp, store, context) {
+  const identitySnapshot = await cdp.eval(storeIdentityEvalBody());
+  return requireStoreIdentitySnapshot({
+    store,
+    truth: STORE_ACCOUNT_TRUTH.stores?.[store.storeKey],
+    snapshot: identitySnapshot,
+    context,
+  });
 }
 
 async function gotoCouponDetail(cdp, activityId) {
@@ -530,6 +556,12 @@ async function queryActiveOrFutureLimitedDiscountSkcs(cdp) {
   `, {activeStates: [...ACTIVE_OR_FUTURE_LIMITED_STATES]});
 }
 
+function numberOrNull(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(String(value).replace(/,/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+
 async function queryCouponLevelId(cdp, activityId, levelRuleId) {
   return await cdp.eval(`
     const headers = {
@@ -663,43 +695,6 @@ async function waitForTargetEnrolled(cdp, activityId, levelRuleId, targetSkcs, w
   return {ok: false, enrolled: latest, polls, remaining: [...targetSet].filter(skc => !enrolledSet.has(skc))};
 }
 
-async function loadTargetPlan(targetPlanPath) {
-  if (!targetPlanPath) return null;
-  const absolute = path.resolve(ROOT, targetPlanPath);
-  const seen = new Set();
-  const sources = [];
-  async function loadItems(file) {
-    const resolved = path.resolve(ROOT, file);
-    if (seen.has(resolved)) return [];
-    seen.add(resolved);
-    const json = JSON.parse(await fs.readFile(resolved, 'utf8'));
-    sources.push(resolved);
-    if (Array.isArray(json?.ordinaryPlanPaths)) {
-      const nested = [];
-      for (const planPath of json.ordinaryPlanPaths) {
-        nested.push(...await loadItems(planPath));
-      }
-      return nested;
-    }
-    if (Array.isArray(json)) return json;
-    if (Array.isArray(json?.items)) return json.items;
-    return [];
-  }
-  const items = await loadItems(absolute);
-  const byStore = new Map();
-  for (const item of items) {
-    if (!item?.storeKey || !item?.skc || item.selected === false) continue;
-    const key = String(item.storeKey).toUpperCase();
-    if (!byStore.has(key)) byStore.set(key, new Set());
-    byStore.get(key).add(String(item.skc));
-  }
-  const totalSkcs = [...byStore.values()].reduce((sum, set) => sum + set.size, 0);
-  if (!totalSkcs) {
-    throw new Error(`target plan has no selected SKCs: ${absolute}`);
-  }
-  return {path: absolute, sources, byStore};
-}
-
 function buildImportFile(storeKey, skcList) {
   if (!fsSync.existsSync(TEMPLATE_XLSX)) throw new Error(`missing coupon import template: ${TEMPLATE_XLSX}`);
   if (!fsSync.existsSync(PY_HELPER)) throw new Error(`missing coupon import helper: ${PY_HELPER}`);
@@ -804,6 +799,7 @@ async function processStore(store, args, targetPlan) {
       result.reason = '营销子系统显示登录页，需人工登录';
       return result;
     }
+    result.identity = await assertCurrentStoreIdentity(cdp, store, 'submit_coupon_activity_goods');
     result.beforeActivity = await fetchActivity(cdp, args.activityId).catch(err => ({error: err.message}));
     result.rule = await clickContinueAndGetRuleId(
       cdp,
@@ -829,21 +825,49 @@ async function processStore(store, args, targetPlan) {
     const availableSkcs = beforeAvailable.list.map(x => x.skc).filter(Boolean);
     const enrolledSetBefore = new Set(beforeEnrolled.list.map(x => x.skc));
     let targetSkcs = targetPlan ? [] : availableSkcs;
-    const targetSetFromPlan = targetPlan?.byStore?.get(store.storeKey.toUpperCase()) || null;
-    if (targetSetFromPlan) {
+    const targetPlanView = targetPlan ? couponPlanStoreView(targetPlan, store.storeKey) : null;
+    const targetSetFromPlan = targetPlanView?.allowedSet || null;
+    if (targetPlanView && targetSetFromPlan.size) {
       targetSkcs = availableSkcs.filter(skc => targetSetFromPlan.has(skc));
-      result.targetPlan = {path: targetPlan.path, plannedSkcs: targetSetFromPlan.size, matchedAvailable: targetSkcs.length};
+      result.targetPlan = {
+        path: targetPlan.path,
+        mode: 'coupon_allowed15_from_price_overrides',
+        ordinaryPlanSkcs: targetPlanView.allCount,
+        allowed15Skcs: targetPlanView.allowedCount,
+        blockedSkcs: targetPlanView.blockedCount,
+        categoryCounts: targetPlanView.categoryCounts,
+        matchedAvailable: targetSkcs.length,
+        blockedSample: targetPlanView.blockedRows.slice(0, 20),
+      };
     } else {
-      result.targetPlan = targetPlan ? {path: targetPlan.path, plannedSkcs: 0, matchedAvailable: 0} : null;
+      result.targetPlan = targetPlan ? {
+        path: targetPlan.path,
+        mode: 'coupon_allowed15_from_price_overrides',
+        ordinaryPlanSkcs: targetPlanView?.allCount || 0,
+        allowed15Skcs: targetPlanView?.allowedCount || 0,
+        blockedSkcs: targetPlanView?.blockedCount || 0,
+        categoryCounts: targetPlanView?.categoryCounts || {},
+        matchedAvailable: 0,
+        blockedSample: (targetPlanView?.blockedRows || []).slice(0, 20),
+      } : null;
     }
     targetSkcs = [...new Set(targetSkcs)];
     const targetBeforeLimitedGuard = targetSkcs;
     result.limitedDiscountGuard = {
-      policy: args.allowLimitedDiscountOverlap ? 'allow-explicit-overlap' : 'exclude-active-or-future-limited-discount',
+      policy: args.allowLimitedDiscountOverlap ? 'allow-explicit-overlap' : 'price-stack-target-guard',
       checked: false,
       overlapCount: 0,
       excludedCount: 0,
+      allowedByTargetPrice: 0,
+      excludedBelowTarget: 0,
+      missingPrice: 0,
+      priceToleranceSar: PRICE_GUARD_TOLERANCE_SAR,
+      bypassWarning: args.allowLimitedDiscountOverlap
+        ? '--allow-limited-discount-overlap bypasses price-stack-target-guard; use only with reviewed per-SKC evidence'
+        : '',
       sample: [],
+      allowedSample: [],
+      excludedSample: [],
     };
     if (!args.allowLimitedDiscountOverlap) {
       const limited = await queryActiveOrFutureLimitedDiscountSkcs(cdp);
@@ -855,21 +879,40 @@ async function processStore(store, args, targetPlan) {
       }
       const limitedBySkc = new Map();
       for (const row of limited.rows || []) {
-        if (!row.skc || limitedBySkc.has(row.skc)) continue;
-        limitedBySkc.set(row.skc, row);
+        if (!row.skc) continue;
+        const prev = limitedBySkc.get(row.skc);
+        const rowPrice = numberOrNull(row.limitedDiscountPrice);
+        const prevPrice = numberOrNull(prev?.limitedDiscountPrice);
+        if (!prev || (rowPrice !== null && (prevPrice === null || rowPrice < prevPrice))) {
+          limitedBySkc.set(row.skc, row);
+        }
       }
       const overlapRows = targetSkcs
         .filter(skc => limitedBySkc.has(skc))
-        .map(skc => limitedBySkc.get(skc));
-      const overlapSet = new Set(overlapRows.map(row => row.skc));
-      targetSkcs = targetSkcs.filter(skc => !overlapSet.has(skc));
+        .map(skc => {
+          const limitedRow = limitedBySkc.get(skc);
+          const planRow = targetPlan ? findCouponPlanRow(targetPlan, store.storeKey, skc) : null;
+          return {
+            ...limitedRow,
+            priceGuard: classifyLimitedDiscountCouponStack(limitedRow, planRow, args.discountMax),
+          };
+        });
+      const excludedRows = overlapRows.filter(row => !row.priceGuard.allowSubmit);
+      const allowedRows = overlapRows.filter(row => row.priceGuard.allowSubmit);
+      const excludedSet = new Set(excludedRows.map(row => row.skc));
+      targetSkcs = targetSkcs.filter(skc => !excludedSet.has(skc));
       result.limitedDiscountGuard.overlapCount = overlapRows.length;
-      result.limitedDiscountGuard.excludedCount = overlapRows.length;
+      result.limitedDiscountGuard.excludedCount = excludedRows.length;
+      result.limitedDiscountGuard.allowedByTargetPrice = allowedRows.length;
+      result.limitedDiscountGuard.excludedBelowTarget = excludedRows.filter(row => row.priceGuard.decision === 'coupon_final_below_target').length;
+      result.limitedDiscountGuard.missingPrice = excludedRows.filter(row => row.priceGuard.decision === 'missing_limited_discount_price' || row.priceGuard.decision === 'missing_final_target_price').length;
       result.limitedDiscountGuard.sample = overlapRows.slice(0, 20);
+      result.limitedDiscountGuard.allowedSample = allowedRows.slice(0, 20);
+      result.limitedDiscountGuard.excludedSample = excludedRows.slice(0, 20);
     }
     const toSubmit = targetSkcs.filter(skc => !enrolledSetBefore.has(skc));
     result.target = {
-      mode: targetPlan ? 'plan-intersection-15pct-available' : 'explicit-all-15pct-available',
+      mode: targetPlan ? 'coupon-allowed15-intersection-15pct-available' : 'explicit-all-15pct-available',
       beforeLimitedDiscountGuard: targetBeforeLimitedGuard.length,
       targetCount: targetSkcs.length,
       excludedByLimitedDiscountGuard: result.limitedDiscountGuard.excludedCount,
@@ -880,10 +923,10 @@ async function processStore(store, args, targetPlan) {
 
     if (!targetSkcs.length) {
       result.ok = true;
-      result.reason = targetPlan && !targetSetFromPlan
-        ? 'target plan has no SKCs for this store; skipped instead of submitting all available goods'
+      result.reason = targetPlan && (!targetPlanView || !targetSetFromPlan?.size)
+        ? 'target plan has no 15% coupon-allowed SKCs for this store; skipped instead of submitting all available goods'
         : result.limitedDiscountGuard.excludedCount > 0
-          ? '目标商品均被 active/future 限时折扣保护排除，未提交优惠券'
+          ? '目标商品均被价格栈守卫排除，未提交优惠券'
         : '15% 券档当前没有需要提交的目标商品';
       return result;
     }
@@ -934,7 +977,12 @@ async function processStore(store, args, targetPlan) {
 
 await fs.mkdir(OUT_DIR, {recursive: true});
 const args = parseArgs(process.argv.slice(2));
-const targetPlan = await loadTargetPlan(args.targetPlan);
+const targetPlan = args.targetPlan ? await loadCouponTargetEligibilityPlan({
+  root: ROOT,
+  planPath: args.targetPlan,
+  priceOverridesPaths: args.priceOverrides,
+  targetDiscountPct: args.discountMax,
+}) : null;
 const selectedStores = args.stores.map(key => {
   const store = STORES.find(s => s.storeKey.toUpperCase() === key.toUpperCase());
   if (!store) throw new Error(`Unknown store ${key}`);
@@ -946,7 +994,13 @@ const summary = {
   activityId: args.activityId,
   discountTier: '1-15%',
   dryRun: args.dryRun,
-  targetMode: targetPlan ? 'plan-intersection-15pct-available' : 'explicit-all-15pct-available',
+  targetMode: targetPlan ? 'coupon-allowed15-intersection-15pct-available' : 'explicit-all-15pct-available',
+  targetPlan: targetPlan ? {
+    path: targetPlan.path,
+    planSources: targetPlan.planSources,
+    priceOverrideSources: targetPlan.priceOverrideSources,
+    stores: summarizeCouponTargetEligibilityPlan(targetPlan),
+  } : null,
   stores: [],
 };
 

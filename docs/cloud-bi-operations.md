@@ -87,11 +87,12 @@ ET、飞书日报、完整 RTV WebAPI 复核、链接/业务域日更、异常�
 ### 云端临时人工登录入口
 
 - BI 页面“系统 / 登录维护中心”入口：`/cloud-login-maintenance`。
-- 用途：当某店 SHEIN / SBN / 子系统登录态失效、自动恢复失败、验证码/滑块必须人工处理时，在云服务器上临时启动该店独立 profile 的可见 Chrome，并通过 noVNC 嵌入到 BI 页面。
+- 用途：当某店 SHEIN / SBN / 子系统登录态失效、自动恢复失败、验证码/滑块必须人工处理，或被协议签署 / 公告 / 通知确认等普通登录弹窗挡住时，在云服务器上临时启动该店独立 profile 的可见 Chrome，并通过 noVNC 嵌入到 BI 页面。
 - 入口实现：`scripts/cloud_manual_login_session.mjs` 负责创建、列出、完成和关闭临时会话；BI Portal 通过 `/api/cloud-login/sessions` 和 `/cloud-login/session/:id` 提供受保护页面。
 - 服务器依赖：`xvfb`、`x11vnc`、`websockify`、`novnc`，均绑定本机端口；外网只经过现有 Basic Auth 的 BI/Nginx/Caddy 链路访问。
 - 临时会话只保存 session id、短期访问 token、过期时间、端口、PID、日志文件和完成状态；不把密码、cookie、localStorage、请求头或 SHEIN token 写入仓库、文档或聊天。
-- 操作流程：打开维护中心 -> 选店铺和页面 -> 打开云端登录窗口 -> 人工完成登录/验证码 -> 回维护中心点“我已完成并关闭”。完成动作会触发 `export_shein_browser_session.mjs --no-launch` 和 `bootstrap_shein_browser_session.mjs --no-launch` 验证，然后关闭 Chrome / x11vnc / websockify / Xvfb。
+- 操作流程：打开维护中心 -> 选店铺和页面 -> 打开云端登录窗口 -> 处理普通登录弹窗或人工完成登录/验证码 -> 回维护中心点“我已完成并关闭”。完成动作会触发 `export_shein_browser_session.mjs --no-launch` 和 `bootstrap_shein_browser_session.mjs --no-launch` 验证，然后关闭 Chrome / x11vnc / websockify / Xvfb。
+- 普通登录弹窗边界：协议签署、公告、通知确认、`知道了` / `确认` / `同意` 等不涉及店铺经营承诺、资质、付费、活动报名或授权范围变更的弹窗，可由运维代理在维护窗口中关闭/确认后再点登录；它们不等同于验证码阻塞。若弹窗内容是新的法律承诺、资质承诺、付费/结算、活动报名、授权范围变化，或出现验证码、滑块、短信、人脸、缺账号密码，则停下让用户处理。
 - Nginx 配置必须支持 WebSocket upgrade；仓库模板为 `infra/nginx/shein-bi.conf`，包含 `proxy_set_header Upgrade` 和 `proxy_set_header Connection "upgrade"`。
 - 日志与状态：状态文件 `/srv/shein-bi/runtime/cloud_manual_login_sessions.json`；日志目录 `/srv/shein-bi/logs/cloud-manual-login`。这些都是服务器私有运行态，不进 GitHub。
 - 若开启时提示某店 `CDP port ... is already open`：先确认是否有生产同步 service 正在运行。`cloud_manual_login_session.mjs` 会在确认没有生产同步 service 活跃时自动清理已完成/已关闭临时窗口留下的孤儿 Chrome/VNC 进程；若生产同步正在运行，应等待同步结束，不要强杀。
@@ -138,7 +139,7 @@ GitHub 应保存：
 - `shein-bi-cloud-session-manager.timer` 应保持 active；手动复跑用 `scripts/cloud_shein_session_manager.sh`。报告文件在 `outputs/reports/cloud-session-manager-latest.json` / `.md`，若失败会被 watchdog 按 service failed 逻辑提醒。
 - `shein-bi-cloud-link-business.service` 必须以 `User=sheinops` / `Group=sheinops` 运行，因为它会启动当前 19 店 SHEIN Chrome profile；不要改回 root，否则会生成 root-owned profile 文件并让 `shein-bi-cloud-session-manager.service` 第二天因 `EACCES` 失败。ET forwarder 仍保留 root 执行，因为入仓依赖 Docker/root 环境，且它不写 SHEIN 店铺 profile。
 - V1 时间筛选弹窗回归检查：在云端页面打开时间筛选后点击月份切换，弹窗应保持 `hidden=false`、`aria-expanded=true`，月份标题正确前后移动；日期输入框应为文本输入且 `pattern="\\d{4}-\\d{2}-\\d{2}"`，控制台不应出现 error/warn。
-- 登录态恢复统一走 `restore_shein_store_session.mjs`：先用服务器私有 `state/shein_browser_sessions/*.local.json` / `state/shein_webapi_sessions/*.local.json` bootstrap，再运行 `auto_relogin_shein_store.mjs` 验证 GSP order WebAPI 和 SBN 商品分析页；验证成功后必须立即调用 `export_shein_browser_session.mjs --no-launch` 刷新该店 browser session 导出，避免第二天继续回灌过期 SBN 状态。云端没有保存密码的店铺不能只靠 Chrome autofill 自愈，若 SBN 已过期且无保存密码，需要走 `/cloud-login-maintenance` 人工登录一次。
+- 登录态恢复统一走 `restore_shein_store_session.mjs`：先用服务器私有 `state/shein_browser_sessions/*.local.json` / `state/shein_webapi_sessions/*.local.json` bootstrap，再运行 `auto_relogin_shein_store.mjs` 验证 GSP order WebAPI 和 SBN 商品分析页；验证成功后必须立即调用 `export_shein_browser_session.mjs --no-launch` 刷新该店 browser session 导出，避免第二天继续回灌过期 SBN 状态。云端没有保存密码的店铺不能只靠 Chrome autofill 自愈，若 SBN 已过期且无保存密码，需要走 `/cloud-login-maintenance` 处理一次；若只是协议/通知弹窗阻塞，运维代理可先点掉弹窗并重试登录，不必直接判定为用户验证码阻塞。
 - 云端人工登录入口验证：`/cloud-login-maintenance` 返回 `200`；`/cloud-login/novnc/vnc.html` 返回 `200`；创建会话后 `/cloud-login/session/:id` 返回 `200` 且 WebSocket 升级返回 `101 Switching Protocols`；点“我已完成并关闭”后 export/probe 成功且不残留 Chrome/Xvfb/x11vnc/websockify 进程。
 - `shein-bi-lark-sales-qa.service` 应保持 active；可用 `node scripts/lark_sales_qa_bot.mjs --answer "今天销售多少"` 本地只读测试答案。群聊中若无回复，优先检查机器人是否已入群、应用可见范围和 `im.message.receive_v1`/发消息权限。
 - GitHub `main` 应包含最新可复用代码和文档；敏感运行态只保留在本地/云端私有目录。
@@ -183,4 +184,4 @@ CODEX_HOME=/home/sheinops/.codex SHEIN_QA_CODEX_GATEWAY_ENABLED=1 node scripts/l
 - 故障表现：销售 WebAPI 正常，但链接表现进入 SBN 商品分析页时被重定向到登录页，导致 `/sbn/new_goods/get_skc_diagnose_list` 抓不到 `x-gw-auth`，`shein-bi-cloud-link-business.service` 失败。
 - 修复：`scripts/bootstrap_shein_browser_session.mjs` 现在会把新鲜 WebAPI cookie 与浏览器导出的子系统 `localStorage/sessionStorage` 合并使用，避免只用 WebAPI cookie 时丢掉 SBN 子系统状态。
 - 兜底：`scripts/cloud_link_business_sync.sh` 支持部分店铺失败继续执行并记录 `state/cloud_ops_alerts/link-business-last-partial.json`；默认不把部分成功结果入仓刷新 BI，避免把不完整链接/业务域日期展示成全量成功。
-- 恢复手段：若云端 SBN 子系统态整体失效，可在本机用 `scripts/auto_relogin_shein_store.mjs` 恢复对应店铺、再用 `scripts/export_shein_browser_session.mjs` 导出 `state/shein_browser_sessions/*.local.json` 并同步到云端私有同名目录；这些 session 文件是敏感运行态，不进 GitHub。
+- 恢复手段：若云端 SBN 子系统态整体失效，可在本机用 `scripts/auto_relogin_shein_store.mjs` 恢复对应店铺、再用 `scripts/export_shein_browser_session.mjs` 导出 `state/shein_browser_sessions/*.local.json` 并同步到云端私有同名目录；这些 session 文件是敏感运行态，不进 GitHub。若失败页面其实是协议签署 / 公告 / 通知确认挡住登录按钮，应先在可见/noVNC 窗口中关闭或确认普通弹窗并再次点击登录，然后导出/回灌 session；不要只看 `login_not_restored` 就认定必须用户扫码。

@@ -4,7 +4,7 @@
 
 - 飞书多维表格 / 原生看板写入已临时暂停；云端 BI 系统作为当前主要经营入口继续运行。飞书日报、异常通知 watchdog 和只读问数机器人均已迁到云端独立飞书机器人链路；日报真实发送已验证，问数机器人已升级为云端 Codex CLI 只读网关，不再绑定本机 Codex 会话。
 - 本地 BI 已封存，云端 BI 是正式入口：`https://shein-bi.faceair.me/`（旧 IP 入口 `http://43.165.167.135/` 仅作兜底）。公网入口已启用 Basic Auth；账号密码只在运行环境交付，不写入仓库或文档。详见 `docs/cloud-bi-operations.md`。
-- 云端 BI 已提供临时人工登录维护入口 `/cloud-login-maintenance`：当 SHEIN / SBN 子系统登录态失效、自动恢复失败或遇到验证码/滑块时，可在云服务器短时打开该店独立 profile 的 noVNC 浏览器窗口；完成后必须点“我已完成并关闭”，脚本会导出/探测登录态并关闭临时进程。该入口的状态文件、日志和短期 token 都是服务器私有运行态，不进 GitHub。
+- 云端 BI 已提供临时登录维护入口 `/cloud-login-maintenance`：当 SHEIN / SBN 子系统登录态失效、自动恢复失败、遇到验证码/滑块，或被协议签署 / 公告 / 通知确认等普通登录弹窗挡住时，可在云服务器短时打开该店独立 profile 的 noVNC 浏览器窗口；普通登录干扰弹窗可由运维代理关闭/确认后再点登录，完成后必须点“我已完成并关闭”，脚本会导出/探测登录态并关闭临时进程。该入口的状态文件、日志和短期 token 都是服务器私有运行态，不进 GitHub。
 - 本地 `8787` 服务已停止，`SHEIN-*` Windows 计划任务已禁用；除非明确回滚，不要重新启动本地 BI 或本地抓数任务。
 - 销售同步完成后会后置刷新 BI；如果单店失败但目标日期当前启用店铺销售源文件已齐，BI 仍会刷新，并通过飞书消息提醒失败店铺。
 - SHEIN 销售生产入口已改为 Node WebAPI 直连优先：`config/stores.json` 的当前 19 店 `salesTransport=auto`，`run_sales_sync_job.mjs` 会先用 `state/shein_webapi_sessions/<店铺>.local.json` 的 Cookie session 直调 `/gsp/orderPlus/listOrder` 和 `/gsp/orderPlus/listOrderItem`；成功时不启动浏览器，失败时才刷新 session / 回退 Chrome。`2026-05-08` 16 店 WebAPI 抓取已与现有数据库对账一致。
@@ -20,7 +20,7 @@
 - RTV 换单号自动复核已接入 BI 流水线：`scripts/verify_shein_rtv_tracking.mjs` 直接读取 SHEIN 售后详情和退货物流详情，JT/JTE 走同运单直连，iMile/EMile 识别中英文换单证据；截至 `2026-05-09` 已确认 `132` 个 ET RTV 入仓单号。
 - RTV 收件后去向已进入 BI：`mart.et_rtv_destination_allocation` 追踪 09 可售、03_RTV、04 破损、06 报废和其它/未知去向；`mart.shein_return_rtv_trace` 在 `订单 / 售后` 页面展示每条 SHEIN 退货是否收到、收到后去了哪里。
 - HL OpenAPI 销售试点已跑通并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` 写入 `fact.openapi_*` 并行事实表与 `mart.openapi_sales_reconciliation` 对账表；BI 系统状态页显示 “SHEIN OpenAPI 试点对账”。正式切换生产销售表前继续累计多日 `matched`。
-- HL OpenAPI 销售试点曾在本地 Windows 任务中双跑，只写 `fact.openapi_*` 和 `mart.openapi_sales_reconciliation`，不覆盖生产销售事实表；本地 Windows 任务已封存，云端 systemd 双跑入口已部署，云服务器出口 IP `43.165.167.135` 已加入 SHEIN 开放平台白名单，云端双跑已成功。2026-05-30 本机可见 profile 复核：HL 与 ZL 开放平台应用已审核通过；DSY 其余 `DL/DX/FY/LQ/NM/JY/TS/MZ` 应用已提交审核中；CX 应用已提交审核。审核通过、逐店授权和双跑对账完成前，不得写入 `.local` 密钥或切换生产源。
+- HL OpenAPI 销售试点曾在本地 Windows 任务中双跑，只写 `fact.openapi_*` 和 `mart.openapi_sales_reconciliation`，不覆盖生产销售事实表；本地 Windows 任务已封存，云端 systemd 双跑入口已部署，云服务器出口 IP `43.165.167.135` 已加入 SHEIN 开放平台白名单，云端双跑已成功。2026-06-05 本机可见 profile 复核：HL 与 ZL 开放平台应用已审核通过；DSY 其余 `DL/DX/FY/LQ/NM/JY/TS/MZ`、LGM 剩余 `YJ/XL/QY/QH/TZ/JSH/TZZ/XC` 应用已提交审核中；CX 用户确认此前已完成。审核通过、逐店授权和双跑对账完成前，不得写入 `.local` 密钥或切换生产源。
 - 系统定位正在从“BI 数据分析”扩展为“自动运营驾驶舱”：先把可重复运营动作沉淀为脚本和规则，再按“建议/预填/复核/人工确认提交/审计留痕”的边界逐步开放自动化。2026-05-17 已上线“链接管理中台”基座：支持“一个会话对应一个任务工作台”，边聊边沉淀任务目标、数据依据、素材、执行步骤和进度；自然语言会话每轮都会按最新 BI JSON 动态查数，明确下架/换图/补链/报活动等动作命令会自动进入任务并在同一界面可见。2026-05-20 起，任务区已提供“开始执行 / 预检”和二次确认入口，点击后会真实调用 `/api/link-ops-execute` 写回进度与审计；默认仍只做受控预检 / dry-run，不会静默提交 SHEIN。
 
 本工作区用于 SHEIN 当前 19 店销售数据自动抓取、飞书多维表格统计、每日飞书日报、链接管理、营销活动报名辅助，以及正在并行建设的 PostgreSQL + Metabase + 云端 BI / 自动运营驾驶舱。
@@ -85,8 +85,9 @@
 - 利润口径：首页和成本/利润页使用真实利润；成本未覆盖时显示“待成本表 / 成本覆盖率”，不再用 `25%` 粗估冒充真实利润。仓储费正式来源是 ET 物流仓服账单 `仓储费`：显示金额按 RMB，实际扣费按显示金额 × `0.5` 后以 `1 SAR = 1.8 RMB` 折 SAR；店铺/DSY/LGM 按净销售额分摊，货号层优先使用 ET `ExportStoreFee` 当日明细；若历史明细合计与总账不一致，则保留货号分布并按总账缩放，只有完全缺明细日期才按 ET 体积 × 库存天数估算并标注口径。
 - ET 仓储费导出里的 `storage_code` / `sku_code` 必须保留原始值，例如 `DL-SK-999`；`match_key` 只作为内部归并键。面向 BI/利润展示的货号要通过 `mart.product_display_by_match_key` 回到销售或商品主档里的既有标准货号，不能把 ET 解析出的中间短码当成新商品暴露出来。
 - 营销活动确认表里的 `仓储费SAR/件` 不能用累计仓储费除以历史销量，也不能把全历史仓储费一刀切压到当前库存上；必须来自 BI `profit.productStorageDaily` 的“当前仍在仓库存移动平均累计仓储成本”：每日仓储费加入库存成本余额，库存数量减少时按当前平均成本剔除已出库产品携带的历史仓储成本。短码或无法确认的货号必须标记待归并暂停，不能按 0 仓储或猜测成本继续报名。
-- 配套优惠券活动只跟普通营销活动计划走：15% 券档目标是 `ordinary selection-plan ∩ MULTI_LEVEL_RULE_GOODS`，不是全部 15% 可报集合；只读复扫必须看 `15%券档已报是否等于普通计划` 与 `已报但不在普通计划数`。详见 `docs/marketing-campaign-signup-pricing-rules.md`。
+- 配套 15% 优惠券活动不能直接跟普通营销活动计划全量走：目标必须由 paired `price-overrides` 派生的 `allowed15 ∩ MULTI_LEVEL_RULE_GOODS` 决定，仅 `couponFactor≈0.85` 或明确“仅15%券”的 SKC 可报名；`couponFactor=1`、不叠券/券都禁止、缺覆盖价或冲突口径一律 fail closed。只读复扫必须看 `15%券档active是否符合允许计划`、`15%券档禁止/未知仍active数` 与 `15%券档active但不在允许计划数`。详见 `docs/marketing-campaign-signup-pricing-rules.md`。
 - 营销定价策略的机器可读入口是 `config/marketing_pricing_policy.json`：限时折扣必须作为兜底层存在但不得干扰目标成交价，默认从 `15%` 折扣起算；同货号 BI 正曝光量前五 SKC 可比其他链接低 `5` 个百分点目标利润率但不得低于 `15%` 底价，基础目标已为 `15%` 时前五保持 `15%`、其他链接提高到 `20%`；无正曝光指标不得猜前五。
+- 营销自动化的长期边界见 `docs/marketing-automation-roadmap.md`：度假季后补券、新链接纳入价格体系、券预算补 `1000 SAR`、低价成交查因、可报活动提前三天提醒、`30%/50%` 券研究和 BI 同事分店管理，都必须以价格栈证据为准；默认先只读 / dry-run / 复核，真实提交、取消、改价和补预算必须执行后 live 回读。
 - 成本/利润页的高利润 / 低利润货号分界线固定为 `20%` 利润率：`>= 20%` 为可加码，`< 20%` 为需要处理。
 - 当前正式成本文件为 `inputs/costs/成本.xlsx`；`单台总成本（SAR）` 是单批单件完整成本输入，系统先还原为批次总成本，再按同货号所有完整批次加权平均计算单位成本。
 - 用户可见的产品主标题统一使用 `product_display_name`：生成端由 `lib/product_display_name.mjs` 基于 `standard_goods_sn`、`config/product_catalog.json` 和可靠中文标题补齐“标准货号+中文品名”；搜索、筛选、归因和仓库 key 仍使用 `standard_goods_sn` / `dim.product_match_key()`。无可靠中文来源的异常短码不编造中文，保留原值并标记待确认。
@@ -97,7 +98,7 @@
 - 历史测试品 `2001/CM-2001` 有单独手工成本补充文件 `inputs/costs/历史手工成本补充.csv`，仅用于历史利润复核。
 - 今日动作池同一店铺、同一 SKC、同一业务域命中的多条规则合并成一张动作卡，显示“合并 N 条”和各规则信号；不同业务域仍分开处理。
 - 同一天同店铺重复运行必须更新同一条事实记录，不得重复累加。
-- 遇到 SHEIN `20302 子系统登录重定向`：先自动恢复登录并重新抓取；恢复失败时明确报错，不得把旧数据当最新数据。
+- 遇到 SHEIN `20302 子系统登录重定向`：先自动恢复登录并重新抓取；如果只是协议签署、公告、通知确认等普通登录弹窗遮挡，运维代理可用可见窗口/noVNC 关闭或确认后再点登录；若账号/密码已由浏览器保存值填充但脚本 DOM click 无效，可用真实鼠标点击登录按钮，恢复后必须在同一 profile 用 `--no-launch --no-close` 继续复扫/取消，不能重启 profile 后把刚恢复的子系统态打掉；若是验证码、滑块、短信、人脸、缺密码，或出现新的法律/付费/授权范围承诺不明内容，则停下让用户处理。恢复失败时明确报错，不得把旧数据当最新数据。
 - 不给单店保留猜测性的时区偏移；除非用户明确确认某店后台日期口径不同，否则按后台日期直接查询北京时间自然日。
 
 ## 展示表和看板策略
@@ -218,7 +219,7 @@
   `node scripts/marketing/export_dsy_marketing_standards.mjs --stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open`
 - 辅助填报 DSY 全部未截止营销活动（只预填，不点最终提交；若本期有用户确认覆盖表，必须带 `--price-overrides`）：
   `node scripts/marketing/dsy_marketing_deadline_fill.mjs --stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open --price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD-approved.json --min-discount-fallback SK-13034`
-- 优惠券活动不要套普通营销活动脚本/路径；例如活动 `34810` 应从优惠券详情 `#/mbrs/marketing/coupon/detail/34810` 进入 `继续报名`，批量导入确认会直接真实提报。配套券执行必须带普通活动计划，例如 `node scripts/marketing/submit_coupon_activity_goods.mjs --stores DL,DX,FY --target-plan tmp/marketing-signup/coupon-submit-results/coupon-extra-vs-ordinary-plan-2026-06-03.json`；只读复扫用 `node scripts/marketing/export_marketing_stack_review.mjs --coupon-target-plan tmp/marketing-signup/coupon-submit-results/coupon-extra-vs-ordinary-plan-2026-06-03.json`。
+- 优惠券活动不要套普通营销活动脚本/路径；例如活动 `34810` 应从优惠券详情 `#/mbrs/marketing/coupon/detail/34810` 进入 `继续报名`，批量导入确认会直接真实提报。配套 15% 券执行必须带目标计划并让脚本读取 paired `price-overrides`（显式 `--price-overrides` 或从 selection plan 自动推断），只有 `couponFactor≈0.85` / 明确“仅15%券”的 SKC 会进入券计划；`couponFactor=1`、`不叠券/券都禁止`、缺覆盖价或口径冲突一律 fail closed。例如 `node scripts/marketing/submit_coupon_activity_goods.mjs --stores DL,DX,FY --target-plan tmp/marketing-signup/coupon-submit-results/coupon-extra-vs-ordinary-plan-2026-06-03.json --price-overrides tmp/marketing-signup/price-overrides-2026-06-03-ALL-ready.json`；只读复扫用 `node scripts/marketing/export_marketing_stack_review.mjs --coupon-target-plan tmp/marketing-signup/coupon-submit-results/coupon-extra-vs-ordinary-plan-2026-06-03.json --coupon-price-overrides tmp/marketing-signup/price-overrides-2026-06-03-ALL-ready.json`。
 - 新一期活动报名前必须先生成叠加安全审核文档，合并普通营销活动、优惠券、限时折扣、原始/当前价格、商品成本、仓储费摊销和含仓储费利润率；用户确认备注前不得报名或批量取消/重报限时折扣。
 - 生成成本表模板：
   `node scripts/create_cost_template.mjs`
@@ -247,6 +248,7 @@
 - SHEIN 后台数据地图：`docs/shein-backend-survey.md`
 - SHEIN 官方 OpenAPI 接入计划：`docs/shein-openapi-integration.md`
 - 营销活动报名价格规则：`docs/marketing-campaign-signup-pricing-rules.md`
+- 营销折扣自动化路线图：`docs/marketing-automation-roadmap.md`
 - scripts 脚本清单与废弃边界：`docs/scripts-inventory.md`
 - 数据模型：`docs/data-model.md`
 - 实施路线：`docs/implementation-roadmap.md`

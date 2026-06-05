@@ -11,11 +11,12 @@
 - 销售源文件已改为 WebAPI 直连优先生成；Chrome profile 只作为 Cookie/session 刷新、登录续期和回退来源。
 - BI 后置刷新失败不应反向影响 SHEIN 抓数和飞书日报。
 - 暂停开关：`state/feishu-base-sync-paused.flag`。存在该文件时，跳过飞书事实表、产品表、月表、宽表和看板写入；删除该文件后可恢复写表链路。
+- 营销折扣自动化仍按“建议 / dry-run / 复核 / 授权执行 / live 回读”分层推进；长期路线图见 `docs/marketing-automation-roadmap.md`。BI 可以生成动作卡和同事分店任务，但真实提交、取消、改价、补预算必须先有价格栈证据和店铺身份校验。
 
 ## 2. 日常入口
 
 - 云端 BI 门户：[https://shein-bi.faceair.me/](https://shein-bi.faceair.me/)，旧 IP 入口 [http://43.165.167.135/](http://43.165.167.135/) 仅作兜底；已启用 Basic Auth，密码不得写入仓库或文档。
-- 云端登录维护中心：[https://shein-bi.faceair.me/cloud-login-maintenance](https://shein-bi.faceair.me/cloud-login-maintenance)。当 SHEIN / SBN 子系统登录态失效或遇到验证码/滑块时，用它临时打开指定店铺的云端浏览器窗口；完成后必须点“我已完成并关闭”。
+- 云端登录维护中心：[https://shein-bi.faceair.me/cloud-login-maintenance](https://shein-bi.faceair.me/cloud-login-maintenance)。当 SHEIN / SBN 子系统登录态失效、遇到验证码/滑块，或被协议签署 / 公告 / 通知确认等普通登录弹窗挡住时，用它临时打开指定店铺的云端浏览器窗口；普通登录干扰弹窗可由运维代理关闭/确认后再点登录，完成后必须点“我已完成并关闭”。
 - 本机 BI 门户和局域网协作入口已封存：`http://127.0.0.1:8787/`、`http://DUSHENGYI-PC2:8787/` 不再作为正式入口。
 - 本地门户文件：`outputs/bi-portal/index.html`
 - V1 是当前唯一正式生产门户；V2.1 是平行预览版，脚本 `scripts/generate_bi_portal_v2.mjs`，输出 `outputs/bi-portal/v2/index.html`。本地封存后不要为了预览主动重启本地服务；用户确认前不得替换 V1、不得改生产调度，日常运维仍以 V1 为准。
@@ -236,6 +237,7 @@
 - 不要因为 BI 开发中断飞书销售同步、链接同步、日报和正式看板刷新。
 - 不要删除 `267014` 历史失败记录。
 - 不要把密码、cookie、短信验证码写入文档、日志或聊天。
+- 不要把所有登录页都直接升级为“必须用户本人处理”：协议签署、公告、通知确认、`知道了` / `确认` / `同意` 这类普通登录干扰弹窗，可在可见窗口/noVNC 中由运维代理处理后再点登录；但验证码、滑块、短信、人脸、缺密码，以及新的法律/资质/付费/授权范围承诺不明内容必须停下让用户处理。
 - 不要重新开放本地公网或端口转发；长期团队访问走云端，公网域名和 HTTPS 已配置，后续重点补异地备份和更正式的账号权限。
 - 不要删除整个 `profiles/persistent-*-profile`；如需瘦身，只清 Chrome 可重建缓存，尤其是 `OptGuideOnDeviceModel`。
 - 不要把缺头程运费的成本批次强行计入单位成本。
