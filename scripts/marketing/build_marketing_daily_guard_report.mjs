@@ -17,6 +17,7 @@ import {
   DEFAULT_CLOUD_BI_MAX_BYTES as SHARED_DEFAULT_CLOUD_BI_MAX_BYTES,
   selectBiPortalSource as selectSharedBiPortalSource,
 } from '../../lib/bi_portal_source.mjs';
+import {summarizeCouponBudgetStatus} from '../../lib/marketing_coupon_budget_guard.mjs';
 import {summarizeStackReviewCoverage} from '../../lib/marketing_stack_review_coverage.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -957,6 +958,20 @@ function buildMarkdown(report) {
     }
   }
   lines.push('');
+  lines.push('## 优惠券预算');
+  lines.push('');
+  lines.push(`- activityId=${report.couponBudget.activityId ?? '-'}, site=${report.couponBudget.site || '-'}, targetBudget=${num(report.couponBudget.targetBudget)} ${report.couponBudget.currency || ''}, selectedSource=${report.couponBudget.selectedSource}`);
+  lines.push(`- verifiedAtTarget=${report.couponBudget.verifiedAtTargetCount}/${report.couponBudget.expectedStoreCount}, belowTarget=${report.couponBudget.belowTargetCount}, missingEvidence=${report.couponBudget.missingEvidenceCount}, writeFailureButAtTarget=${report.couponBudget.writeFailureButAtTargetCount}`);
+  if (report.couponBudget.belowTargetStores.length) {
+    lines.push(`- 低于预算：${report.couponBudget.belowTargetStores.map(s => `${s.storeKey}:${num(s.currentBudget)}`).join(', ')}`);
+  }
+  if (report.couponBudget.missingEvidenceStores.length) {
+    lines.push(`- 缺回读证据：${report.couponBudget.missingEvidenceStores.map(s => s.storeKey).join(', ')}`);
+  }
+  if (report.couponBudget.writeFailureButAtTargetStores.length) {
+    lines.push(`- 写入异常但回读达标：${report.couponBudget.writeFailureButAtTargetStores.map(s => `${s.storeKey}:${num(s.currentBudget)}${Object.keys(s.writeCodes || {}).length ? `(${JSON.stringify(s.writeCodes)})` : ''}`).join(', ')}`);
+  }
+  lines.push('');
   lines.push('## 订单价格审计');
   lines.push('');
   lines.push(`- files=${report.orderPriceAudit.files}, rows=${report.orderPriceAudit.rows}, below=${report.orderPriceAudit.below}, above=${report.orderPriceAudit.above}, outsideWindow=${report.orderPriceAudit.outsideWindow}, missingPlan=${report.orderPriceAudit.missingPlan}`);
@@ -1018,6 +1033,7 @@ async function main() {
   const oldLive = await read('oldOrdinaryOverlapLive', latestFile(path.join(ROOT, 'tmp', 'marketing-signup', 'old-ordinary-overlap-risk'), /^coupon-old-ordinary-overlap-live-.*\.json$/));
   const oldCancel = await read('oldOrdinaryOverlapCancelList', latestFile(path.join(ROOT, 'tmp', 'marketing-signup', 'old-ordinary-overlap-risk'), /^coupon-old-ordinary-overlap-cancel-list-.*\.json$/));
   const abovePlan = await read('aboveTargetActionPlan', latestFile(path.join(ROOT, 'tmp', 'marketing-signup', 'low-price-overlap-risk'), /^price-above-target-limited-discount-action-plan-.*\.json$/));
+  const budgetExecute = await read('couponBudgetExecute', latestFile(path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-budget-results'), /^coupon-site-budget-execute-.*\.json$/));
   const budgetDryRun = await read('couponBudgetDryRun', latestFile(path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-budget-results'), /^coupon-site-budget-dry-run-.*\.json$/));
   const stackReview = await read('marketingStackReview', latestFile(path.join(ROOT, 'outputs', 'reports'), /^marketing-stack-review-\d{4}-\d{2}-\d{2}\.json$/));
   const marketingStackReviewContext = normalizeMarketingStackReviewSource(stackReview, now, args.maxAgeHours);
@@ -1040,6 +1056,14 @@ async function main() {
   const biPortalFreshness = summarizeBiPortal(biPortal.data, biPortal.source);
   const t3MarketingCandidates = summarizeT3Candidates(stackReview.data, args.date);
   const marketingStackReviewCoverage = summarizeStackReviewCoverage(stackReview.data, storesConfig.data);
+  const couponBudget = summarizeCouponBudgetStatus({
+    executeDoc: budgetExecute.data,
+    executeSource: budgetExecute.source,
+    dryRunDoc: budgetDryRun.data,
+    dryRunSource: budgetDryRun.source,
+    storesConfigDoc: storesConfig.data,
+    targetBudget: 1000,
+  });
   const newSkcCandidates = summarizeNewSkcCandidates({
     biDoc: biPortal.data,
     biSource: biPortal.source,
@@ -1101,6 +1125,11 @@ async function main() {
   }
 
   for (const src of sources) {
+    const optionalBudgetDryRunCoveredByExecute = src.label === 'couponBudgetDryRun'
+      && couponBudget.selectedSource === 'execute';
+    if (optionalBudgetDryRunCoveredByExecute && ['missing', 'parse_error', 'stale'].includes(src.status)) {
+      continue;
+    }
     if (src.status === 'missing' && CRITICAL_SOURCE_LABELS.has(src.label)) {
       addBlocker(blockers, 'critical_source_missing', `${src.label} 缺失，不能生成 no-action 结论`, {path: src.path});
       unknownSources.push({label: src.label, path: src.path, status: src.status});
@@ -1164,8 +1193,34 @@ async function main() {
       evidence: {samples: newSkcCandidates.rows.filter(r => r.decision === 'unknown_shelf_age_needs_review').slice(0, 10)},
     });
   }
-  if (budgetDryRun.source.status === 'missing') {
-    // Budget is not always checked daily; keep unknown, not a blocker.
+  if (couponBudget.belowTargetCount > 0) {
+    addBlocker(
+      blockers,
+      'coupon_budget_below_target',
+      `${couponBudget.belowTargetCount} 个店铺优惠券周预算低于 ${couponBudget.targetBudget} ${couponBudget.currency}`,
+      {stores: couponBudget.belowTargetStores},
+    );
+  }
+  if (couponBudget.missingEvidenceCount > 0) {
+    addBlocker(
+      blockers,
+      'coupon_budget_missing_evidence',
+      `${couponBudget.missingEvidenceCount} 个店铺缺少优惠券预算 execute 回读证据`,
+      {
+        selectedSource: couponBudget.selectedSource,
+        stores: couponBudget.missingEvidenceStores,
+        executeSource: couponBudget.evidenceSource,
+        dryRunSource: couponBudget.dryRunSource,
+      },
+    );
+  }
+  if (couponBudget.writeFailureButAtTargetCount > 0) {
+    contextWarnings.push({
+      code: 'coupon_budget_write_failed_but_at_target',
+      label: 'couponBudget',
+      message: `${couponBudget.writeFailureButAtTargetCount} 个店铺写入返回异常，但 before/after 回读预算已达到 ${couponBudget.targetBudget} ${couponBudget.currency}；不阻断 no-action，但保留异常证据`,
+      evidence: {stores: couponBudget.writeFailureButAtTargetStores},
+    });
   }
   for (const cmd of suggestedDryRunCommands) {
     const violations = validateSuggestedCommand(cmd.command);
@@ -1201,6 +1256,7 @@ async function main() {
     marketingStackReviewFreshness: marketingStackReviewContext || null,
     marketingStackReviewCoverage,
     t3MarketingCandidates,
+    couponBudget,
     budgetDryRun: budgetDryRun.source.status === 'missing'
       ? {status: 'unknown', reason: 'no coupon budget dry-run source found'}
       : {status: budgetDryRun.source.status, path: budgetDryRun.source.path},

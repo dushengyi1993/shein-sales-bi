@@ -1,6 +1,6 @@
 # SHEIN 营销折扣自动化路线图
 
-> 当前状态：2026-06-05。本文只沉淀系统规则、动作边界和后续实现顺序；不写 SHEIN session、BI Basic Auth、OpenAPI 密钥或 `.local` 运行态。
+> 当前状态：2026-06-06。本文只沉淀系统规则、动作边界和后续实现顺序；不写 SHEIN session、BI Basic Auth、OpenAPI 密钥或 `.local` 运行态。
 
 ## 1. 核心不变量
 
@@ -39,9 +39,9 @@
 
 已存在 Codex heartbeat 自动任务 `shein`：
 
-- 名称：`SHEIN 度假季后补券复扫`
-- 计划：`2026-06-09 09:00` 左右触发一次，用于复扫预计 `2026-06-08` 结束的度假季/旧低价活动后是否可以补券。
-- 边界：只读扫描和生成 `15%` 券补券 dry-run 清单；不真实提交；继续禁止 `30%/50%` 券真实上线。
+- 名称：`SHEIN 营销价格栈每日巡检`
+- 计划：每日 `09:30` 左右触发；`2026-06-09` 起额外复扫预计 `2026-06-08` 结束的度假季/旧低价活动后是否可以补券。
+- 边界：先运行只读 `build_marketing_daily_guard_report.mjs`；只读扫描和生成 `15%` 券补券 dry-run 清单；不真实提交；继续禁止 `30%/50%` 券真实上线。
 - 口径：活动标签只做候选信号，真实决策必须先按时间窗口合并普通营销活动价、限时折扣价、当前售价等证据，计算 `最低有效基准价 × couponFactor` 与 `finalTargetPrice`；单独的 `限时折扣价 × couponFactor` 只能作为“限时折扣兜底层”候选，不能代表最终成交价。
 
 自动任务模式的硬边界：
@@ -58,7 +58,7 @@
 | --- | --- | --- | --- | --- | --- |
 | 度假季/旧低价活动结束后补券 | 活动预计结束后、或标签/已报集合变化 | live 优惠券已报集合、限时折扣 live 列表、旧普通活动观察扫描、`price-overrides` | 生成可补 `15%` 券清单和 dry-run | 不真实提交；除非用户在当轮明确授权 | `allowed15 active == plan`、禁止/未知 active 为 `0`、价格栈不低于目标 |
 | 新链接自动纳入价格体系 | 链接/业务域日更发现新上架 SKC | `outputs/shein_links`、BI `storeLinks`、商品成本、仓储费、曝光排名 | 生成“新链接待定价/待报限时折扣/待报券”动作卡 | 初期只提醒和 dry-run；真实报限时折扣/券需有成本、目标价、库存和用户授权 | 新链接动作卡、价格测算、live 已报/未报集合 |
-| 优惠券余额补额度 | 活动预算不足、额度用完、提交前预算低于阈值 | 优惠券活动站点预算接口 | 将本期 `shein-sa` 周预算补到 `1000 SAR` | 当前只对已授权的配套 `15%` 券活动可执行；补前后必须回读预算 | `modify_site_limit` 成功 + 预算回读为 `1000 SAR` |
+| 优惠券余额补额度 | 活动预算不足、额度用完、提交前预算低于阈值 | 优惠券活动站点预算接口 + execute 回读结果 | 将本期 `shein-sa` 周预算补到 `1000 SAR` | 当前只对已授权的配套 `15%` 券活动可执行；自动任务只报告，不真实补预算 | execute 后 `after.usageSite`/`after.budgetInfoSite` 优先回读为 `1000 SAR`；写入异常但回读达标只做提醒 |
 | 低价/高价成交查因 | 销售同步发现订单商品行 `currencyPrice` 偏离目标 | 订单商品行 `currencyPrice`、活动窗口、price-overrides、优惠券/限时折扣/普通活动 live 状态 | 输出根因分类和补救建议 | 不能用页面商品总价、预计收入汇总或预聚合销售额判断；未传活动窗口只作为线索 | `audit_order_prices_against_plan.mjs` 结果、订单行金额、活动来源 |
 | 可报活动提前三天提醒 | 活动报名截止时间进入 `T-3` | 营销活动列表全量分页、店铺身份 | 生成待报活动清单、缺成本/缺覆盖价/缺仓储费阻塞 | 不自动报名；用户确认备注和覆盖价后再执行 | 活动 ID、报名截止、可报商品数、阻塞原因 |
 | `30%/50%` 券研究 | 用户要求研究且普通活动可报 | 普通活动计划、券档、成本、目标价、平台最低折扣 | 只输出测算：哪些 SKC 理论可用更高券 | 禁止真实上线；必须保证普通活动已报、平台折扣满足、最终价不低于底价 | 研究表、利润红线、普通活动已报证据 |
@@ -82,6 +82,8 @@
 
 1. `known_excluded_needs_pricing`：计划里已明确 excluded，多数是缺目标价；先补成本/仓储/底价，不报券。
 2. `same_standard_goods_sn_needs_confirmation`：同店同标准货号已有别的 SKC 计划，但当前 SKC 缺精确计划；人工确认同款、同成本和同底价后，才可复制策略。
+3. `unplanned_new_on_shelf_skc_needs_pricing`：新上架 SKC 完全没有计划；先进入待定价，再决定普通活动、限时折扣兜底和 15% 券。
+4. `unknown_shelf_age_needs_review`：缺上架天数和可用 `link_date`，不能判断是否新链接；先刷新链接/BI 快照，不报券。
 
 ### 4.2 营销叠加审核的新鲜度拆分
 
@@ -95,8 +97,19 @@
 - `marketingStackReview` 活动扫描未超过 48 小时；
 - BI context 未超过日报阈值；
 - `selectedStores=19` 且 `missingStores=[]`。若有店铺缺失，即使 BI context 新鲜，也不能形成完整 no-action。
-3. `unplanned_new_on_shelf_skc_needs_pricing`：新上架 SKC 完全没有计划；先进入待定价，再决定普通活动、限时折扣兜底和 15% 券。
-4. `unknown_shelf_age_needs_review`：缺上架天数和可用 `link_date`，不能判断是否新链接；先刷新链接/BI 快照，不报券。
+
+### 4.3 优惠券预算守卫
+
+每日 guard 的 `couponBudget` 只认真实 `execute` 结果里的预算回读作为“已补到位”证据；`dry-run` 只能说明曾经观察到页面预算或可生成补额度建议，不能冒充真实完成。
+
+预算证据优先级固定为：
+
+1. `after.usageSite.coupon_usage_upper_limit`
+2. `after.budgetInfoSite.coupon_usage_upper_limit`
+3. `before.usageSite.coupon_usage_upper_limit`
+4. `before.budgetInfoSite.coupon_usage_upper_limit`
+
+因此如果 `after` 低于 `1000 SAR`，不能被 `before=1000` 掩盖；如果 `after` 缺失但 `before=1000`，可以标为回读达标但证据来源必须写清楚。预算低于 `1000 SAR` 或启用店铺缺 execute 回读证据时 fail closed，日报输出 `coupon_budget_below_target` / `coupon_budget_missing_evidence` blocker。类似 CX 这种写入返回 `1017`，但 before/after 回读均为 `1000 SAR` 的样本，不阻塞报名，只进入 `coupon_budget_write_failed_but_at_target` 上下文提醒，保留异常证据供后续排查。
 
 ## 5. 低价/高价成交查因模型
 
@@ -150,7 +163,7 @@
 
 1. 将现有只读扫描结果统一成“价格栈风险日报”：低于目标、偏高、缺证据、预算不足、登录阻塞分开计数。
 2. 把 `audit_order_prices_against_plan.mjs` 接到销售同步后置只读告警，先只报告不自动修。
-3. 把优惠券预算补 `1000 SAR` 做成可 dry-run / execute / live 回读的日常动作。
+3. 把优惠券预算补 `1000 SAR` 的真实 execute 操作接入人工授权动作池；当前日报已能结构化识别预算低于目标、缺回读证据、写入异常但回读达标。
 4. 把营销活动 `T-3` 提醒接入活动列表扫描和 BI 动作池。
 5. 新链接先进入“待定价/待报兜底限时折扣”队列，真实自动报名等价格栈稳定后再逐步放开。
 6. `30%/50%` 券只做研究表，不进入执行器默认路径。

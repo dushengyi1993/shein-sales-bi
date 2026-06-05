@@ -286,7 +286,7 @@
 - `商品提交成功`、`查看报名进度`、`导入成功` 只说明前端已接受导入/提交任务，不是最终报名完成证据。最终证据必须来自 `MULTI_LEVEL_RULE_ENROLLED_GOODS` / `MULTI_LEVEL_ENROLLMENT_RECORD` 的已报/处理中集合回读；若部分店长时间未进入已报集合，必须改用已验证的 direct multi-level `partake` API 或继续回读，不得只按弹窗成功结案。
 - 多档券 direct API 已验证入口为 `/mrs-api-prefix/mbrs/activity/multi-level/partake`。payload 必须同时包含 `activity_id`、`partake_rule.partake_rule_id`、`partake_rule.coupon_level_id` 和 `skc_info_list`；只传 `partake_rule_id` 会返回 `4018 参与规则不存在或未生效`，不能作为可重试成功路径。
 - 活动 `34810` 在 2026-05-28 执行批次只允许 `15%` 固定券档或不报券；不得生成 `30%/50%` 券，也不得生成小数券折扣。
-- 预算恢复走站点预算接口 `/mrs-api-prefix/mbrs/activity/multi-level/modify_site_limit`；所有本期参与店铺的 `shein-sa` 周预算默认按 `1000 SAR` 维护，额度不足或额度用完时先补到 `1000 SAR` 再继续复扫/报名。
+- 预算恢复走站点预算接口 `/mrs-api-prefix/mbrs/activity/multi-level/modify_site_limit`；所有本期参与店铺的 `shein-sa` 周预算默认按 `1000 SAR` 维护，额度不足或额度用完时先补到 `1000 SAR` 再继续复扫/报名。补预算完成证据只看 execute 后的 before/after 预算回读；`dry-run` 只能做观察/建议，不能替代真实补额度完成。若写入接口返回异常但回读预算已达 `1000 SAR`，按“预算达标但写入异常”记录，不重复盲写。
 - 商品验证优先用 `/mrs-api-prefix/mbrs/activity/multi-level/goods/query?page_num=1&page_size=200`：
   - `page_module='MULTI_LEVEL_RULE_GOODS'`：可报商品集合
   - `page_module='MULTI_LEVEL_RULE_ENROLLED_GOODS'`：已报/处理中商品集合

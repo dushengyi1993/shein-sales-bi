@@ -87,7 +87,7 @@
 - 营销活动确认表里的 `仓储费SAR/件` 不能用累计仓储费除以历史销量，也不能把全历史仓储费一刀切压到当前库存上；必须来自 BI `profit.productStorageDaily` 的“当前仍在仓库存移动平均累计仓储成本”：每日仓储费加入库存成本余额，库存数量减少时按当前平均成本剔除已出库产品携带的历史仓储成本。短码或无法确认的货号必须标记待归并暂停，不能按 0 仓储或猜测成本继续报名。
 - 配套 15% 优惠券活动不能直接跟普通营销活动计划全量走：目标必须由 paired `price-overrides` 派生的 `allowed15 ∩ MULTI_LEVEL_RULE_GOODS` 决定，仅 `couponFactor≈0.85` 或明确“仅15%券”的 SKC 可报名；`couponFactor=1`、不叠券/券都禁止、缺覆盖价或冲突口径一律 fail closed。只读复扫必须看 `15%券档active是否符合允许计划`、`15%券档禁止/未知仍active数` 与 `15%券档active但不在允许计划数`。详见 `docs/marketing-campaign-signup-pricing-rules.md`。
 - 营销定价策略的机器可读入口是 `config/marketing_pricing_policy.json`：限时折扣必须作为兜底层存在但不得干扰目标成交价，默认从 `15%` 折扣起算；同货号 BI 正曝光量前五 SKC 可比其他链接低 `5` 个百分点目标利润率但不得低于 `15%` 底价，基础目标已为 `15%` 时前五保持 `15%`、其他链接提高到 `20%`；无正曝光指标不得猜前五。
-- 营销自动化的长期边界见 `docs/marketing-automation-roadmap.md`：度假季后补券、新链接纳入价格体系、券预算补 `1000 SAR`、低价成交查因、可报活动提前三天提醒、`30%/50%` 券研究和 BI 同事分店管理，都必须以价格栈证据为准；默认先只读 / dry-run / 复核，真实提交、取消、改价和补预算必须执行后 live 回读。
+- 营销自动化的长期边界见 `docs/marketing-automation-roadmap.md`：度假季后补券、新链接纳入价格体系、券预算补 `1000 SAR`、低价成交查因、可报活动提前三天提醒、`30%/50%` 券研究和 BI 同事分店管理，都必须以价格栈证据为准；默认先只读 / dry-run / 复核，真实提交、取消、改价和补预算必须执行后 live 回读。券预算日报只把 `execute` 的 before/after 回读当完成证据，`dry-run` 不能冒充补额度成功。
 - 成本/利润页的高利润 / 低利润货号分界线固定为 `20%` 利润率：`>= 20%` 为可加码，`< 20%` 为需要处理。
 - 当前正式成本文件为 `inputs/costs/成本.xlsx`；`单台总成本（SAR）` 是单批单件完整成本输入，系统先还原为批次总成本，再按同货号所有完整批次加权平均计算单位成本。
 - 用户可见的产品主标题统一使用 `product_display_name`：生成端由 `lib/product_display_name.mjs` 基于 `standard_goods_sn`、`config/product_catalog.json` 和可靠中文标题补齐“标准货号+中文品名”；搜索、筛选、归因和仓库 key 仍使用 `standard_goods_sn` / `dim.product_match_key()`。无可靠中文来源的异常短码不编造中文，保留原值并标记待确认。
