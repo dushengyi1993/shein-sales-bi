@@ -11,6 +11,7 @@ import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {spawn} from 'node:child_process';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'outputs', 'reports');
@@ -21,6 +22,9 @@ const BI_PORTAL_DATA_DEFAULT = path.join(ROOT, 'outputs', 'bi-portal', 'data.jso
 const STORES_CONFIG_DEFAULT = path.join(ROOT, 'config', 'stores.json');
 const NEW_SKC_SHELF_AGE_DAYS = 30;
 const NEW_SKC_MAX_ROWS = 80;
+const DEFAULT_CLOUD_BI_ROOT = '/opt/shein-bi/app';
+const DEFAULT_CLOUD_BI_SSH_TIMEOUT_MS = 30_000;
+const DEFAULT_CLOUD_BI_MAX_BYTES = 120 * 1024 * 1024;
 const CRITICAL_SOURCE_LABELS = new Set([
   'couponSubmitLatestSummary',
   'lowPriceOverlapLive',
@@ -49,6 +53,10 @@ function parseArgs(argv) {
     targetPlan: TARGET_PLAN_DEFAULT,
     priceOverrides: PRICE_OVERRIDES_DEFAULT,
     storesConfig: STORES_CONFIG_DEFAULT,
+    cloudBiSsh: '',
+    cloudBiRoot: DEFAULT_CLOUD_BI_ROOT,
+    cloudBiSshTimeoutMs: DEFAULT_CLOUD_BI_SSH_TIMEOUT_MS,
+    cloudBiMaxBytes: DEFAULT_CLOUD_BI_MAX_BYTES,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -59,9 +67,15 @@ function parseArgs(argv) {
     else if (a === '--target-plan') args.targetPlan = path.resolve(argv[++i]);
     else if (a === '--price-overrides') args.priceOverrides = path.resolve(argv[++i]);
     else if (a === '--stores-config') args.storesConfig = path.resolve(argv[++i]);
+    else if (a === '--cloud-bi-ssh') args.cloudBiSsh = String(argv[++i] || '').trim();
+    else if (a === '--cloud-bi-root') args.cloudBiRoot = String(argv[++i] || '').trim();
+    else if (a === '--cloud-bi-ssh-timeout-ms') args.cloudBiSshTimeoutMs = Number(argv[++i]);
+    else if (a === '--cloud-bi-max-bytes') args.cloudBiMaxBytes = Number(argv[++i]);
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(args.date)) throw new Error(`Invalid --date ${args.date}; expected YYYY-MM-DD`);
   if (!Number.isFinite(args.maxAgeHours) || args.maxAgeHours <= 0) args.maxAgeHours = DEFAULT_MAX_AGE_HOURS;
+  if (!Number.isFinite(args.cloudBiSshTimeoutMs) || args.cloudBiSshTimeoutMs <= 0) args.cloudBiSshTimeoutMs = DEFAULT_CLOUD_BI_SSH_TIMEOUT_MS;
+  if (!Number.isFinite(args.cloudBiMaxBytes) || args.cloudBiMaxBytes <= 0) args.cloudBiMaxBytes = DEFAULT_CLOUD_BI_MAX_BYTES;
   return args;
 }
 
@@ -161,6 +175,166 @@ async function readSource(label, file, now, maxAgeHours) {
     source.error = err.message;
     return {source, data: null};
   }
+}
+
+function sourceFromData(label, sourcePath, data, now, maxAgeHours, extra = {}) {
+  const source = {
+    label,
+    path: sourcePath,
+    exists: true,
+    mtime: '',
+    generatedAt: data?.generatedAt || data?.source?.biGeneratedAt || '',
+    createdAt: data?.createdAt || data?.summary?.createdAt || '',
+    ageHours: null,
+    status: 'ok',
+    ...extra,
+  };
+  source.dataTimestamp = source.generatedAt || source.createdAt || '';
+  const dataDate = parseAnyDateTime(source.dataTimestamp);
+  source.dataAgeHours = dataDate ? ageHours(now, dataDate) : null;
+  source.artifactAgeHours = null;
+  source.ageHours = source.dataAgeHours;
+  if (source.dataAgeHours !== null && source.dataAgeHours > maxAgeHours) source.status = 'stale';
+  return source;
+}
+
+function validateCloudBiSshArgs(args) {
+  const host = String(args.cloudBiSsh || '').trim();
+  const root = String(args.cloudBiRoot || '').trim();
+  if (!host) return {ok: false, reason: 'empty_host'};
+  if (!/^[A-Za-z0-9._-]+$/.test(host)) return {ok: false, reason: 'invalid_host_alias', host};
+  if (!/^\/[A-Za-z0-9._/-]+$/.test(root)) return {ok: false, reason: 'invalid_cloud_bi_root', root};
+  return {ok: true, host, root, remotePath: `${root.replace(/\/+$/, '')}/outputs/bi-portal/data.json`};
+}
+
+function execFileLimited(command, args, {timeoutMs, maxBytes}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {shell: false});
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    let stdoutBytes = 0;
+    let killed = false;
+    const timer = setTimeout(() => {
+      killed = true;
+      child.kill('SIGKILL');
+      reject(new Error(`timeout after ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.stdout.on('data', chunk => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > maxBytes) {
+        killed = true;
+        child.kill('SIGKILL');
+        reject(new Error(`stdout exceeds max bytes ${maxBytes}`));
+        return;
+      }
+      stdoutChunks.push(chunk);
+    });
+    child.stderr.on('data', chunk => {
+      if (Buffer.concat(stderrChunks).length < 64 * 1024) stderrChunks.push(chunk);
+    });
+    child.on('error', err => {
+      clearTimeout(timer);
+      if (!killed) reject(err);
+    });
+    child.on('close', code => {
+      clearTimeout(timer);
+      if (killed) return;
+      const stdout = Buffer.concat(stdoutChunks).toString('utf8');
+      const stderr = Buffer.concat(stderrChunks).toString('utf8').trim();
+      if (code !== 0) {
+        reject(new Error(`exit=${code}${stderr ? ` stderr=${stderr.slice(0, 500)}` : ''}`));
+      } else {
+        resolve(stdout);
+      }
+    });
+  });
+}
+
+async function readCloudBiPortalSource(args, now, maxAgeHours) {
+  const validation = validateCloudBiSshArgs(args);
+  const baseSource = {
+    label: 'biPortalDataCloud',
+    path: validation.ok ? `ssh:${validation.host}:${validation.remotePath}` : '',
+    exists: false,
+    mtime: '',
+    generatedAt: '',
+    createdAt: '',
+    dataAgeHours: null,
+    artifactAgeHours: null,
+    ageHours: null,
+    status: 'invalid_config',
+  };
+  if (!validation.ok) {
+    return {source: {...baseSource, error: validation.reason}, data: null};
+  }
+  try {
+    const text = await execFileLimited('ssh', [validation.host, 'cat', validation.remotePath], {
+      timeoutMs: args.cloudBiSshTimeoutMs,
+      maxBytes: args.cloudBiMaxBytes,
+    });
+    let data = null;
+    try {
+      data = JSON.parse(text.replace(/^\uFEFF/, ''));
+    } catch (err) {
+      return {
+        source: {
+          ...baseSource,
+          path: `ssh:${validation.host}:${validation.remotePath}`,
+          status: 'parse_error',
+          error: err.message,
+        },
+        data: null,
+      };
+    }
+    const source = sourceFromData('biPortalData', `ssh:${validation.host}:${validation.remotePath}`, data, now, maxAgeHours, {
+      transport: 'ssh',
+      host: validation.host,
+      remotePath: validation.remotePath,
+      fallbackUsed: false,
+      maxBytes: args.cloudBiMaxBytes,
+    });
+    return {source, data};
+  } catch (err) {
+    return {
+      source: {
+        ...baseSource,
+        path: `ssh:${validation.host}:${validation.remotePath}`,
+        status: 'fetch_error',
+        error: err.message,
+      },
+      data: null,
+    };
+  }
+}
+
+async function selectBiPortalSource(args, now, maxAgeHours) {
+  if (!args.cloudBiSsh) {
+    const local = await readSource('biPortalData', args.biPortalData, now, maxAgeHours);
+    return {selected: local, diagnostics: []};
+  }
+  const cloud = await readCloudBiPortalSource(args, now, maxAgeHours);
+  if (cloud.data && cloud.source.status === 'ok') {
+    return {selected: cloud, diagnostics: [{type: 'cloud_selected', source: cloud.source}]};
+  }
+  const local = await readSource('biPortalData', args.biPortalData, now, maxAgeHours);
+  if (local.data && local.source.status === 'ok') {
+    local.source.fallbackUsed = true;
+    return {
+      selected: local,
+      diagnostics: [{type: 'cloud_fetch_failed_local_fresh', source: cloud.source}],
+    };
+  }
+  if (cloud.data) {
+    return {
+      selected: cloud,
+      diagnostics: [{type: 'cloud_selected_not_fresh', source: cloud.source}],
+    };
+  }
+  local.source.fallbackUsed = true;
+  return {
+    selected: local,
+    diagnostics: [{type: 'cloud_fetch_failed_local_not_fresh', source: cloud.source}],
+  };
 }
 
 function countBy(rows, field) {
@@ -800,6 +974,7 @@ function buildMarkdown(report) {
   lines.push(`- mode: \`${report.mode}\``);
   lines.push(`- generated: \`${report.createdAt}\``);
   lines.push(`- safety: readOnly=${report.safety.readOnly}, liveScan=${report.safety.liveScan}, writeActions=${report.safety.writeActions}`);
+  lines.push(`- biPortalData: \`${report.biPortalSourceSelection.selectedPath || '-'}\` status=${report.biPortalSourceSelection.selectedStatus || '-'} transport=${report.biPortalSourceSelection.selectedTransport || '-'}`);
   lines.push('');
   lines.push('## 状态摘要');
   lines.push('');
@@ -900,7 +1075,9 @@ async function main() {
     return item;
   };
 
-  const biPortal = await read('biPortalData', args.biPortalData);
+  const biPortalSelection = await selectBiPortalSource(args, now, args.maxAgeHours);
+  const biPortal = biPortalSelection.selected;
+  sources.push(biPortal.source);
   const targetPlan = await read('targetSelectionPlan', args.targetPlan);
   const priceOverrides = await read('priceOverridesPlan', args.priceOverrides);
   const storesConfig = await read('storesConfig', args.storesConfig);
@@ -952,6 +1129,31 @@ async function main() {
     blockedExecuteCommands: ['--execute', '--discount-max 30', '--discount-max 50'],
   };
 
+  for (const diagnostic of biPortalSelection.diagnostics || []) {
+    if (diagnostic.type === 'cloud_fetch_failed_local_fresh' || diagnostic.type === 'cloud_fetch_failed_local_not_fresh') {
+      sourceWarnings.push({
+        code: 'cloud_bi_fetch_failed',
+        label: 'biPortalData',
+        message: `云端 BI 快照读取失败，已${diagnostic.type === 'cloud_fetch_failed_local_fresh' ? '使用本地新鲜快照兜底' : '使用本地非新鲜/缺失快照兜底'}；不能把云端不可达静默当作无风险`,
+        evidence: {
+          path: diagnostic.source?.path || '',
+          status: diagnostic.source?.status || '',
+          error: diagnostic.source?.error || '',
+        },
+      });
+    } else if (diagnostic.type === 'cloud_selected_not_fresh') {
+      sourceWarnings.push({
+        code: 'cloud_bi_source_stale',
+        label: 'biPortalData',
+        message: '云端 BI 快照可读但超过新鲜度阈值，不能形成 no-action 结论',
+        evidence: {
+          path: diagnostic.source?.path || '',
+          dataAgeHours: diagnostic.source?.dataAgeHours ?? null,
+        },
+      });
+    }
+  }
+
   for (const src of sources) {
     if (src.status === 'missing' && CRITICAL_SOURCE_LABELS.has(src.label)) {
       addBlocker(blockers, 'critical_source_missing', `${src.label} 缺失，不能生成 no-action 结论`, {path: src.path});
@@ -973,6 +1175,7 @@ async function main() {
     }
   }
   if (couponSubmitDryRun.status === 'untrusted') addBlocker(blockers, 'coupon_submit_not_dry_run', '最新优惠券提交 summary 不是 dry-run，不能作为自动任务安全证据', {path: couponSubmitDryRun.summaryPath});
+  if (!biPortal.data) addBlocker(blockers, 'bi_portal_source_unavailable', '没有可解析的 BI Portal data.json，不能判断新链接、BI 标签或新鲜度', {path: biPortal.source?.path || ''});
   for (const f of couponSubmitDryRun.identityFailures || []) addBlocker(blockers, 'store_identity_failure', `${f.store} 身份校验失败`, f);
   if (lowPriceOverlap.belowTarget > 0) addBlocker(blockers, 'coupon_final_below_target', `低价叠券 below target=${lowPriceOverlap.belowTarget}`);
   if (lowPriceOverlap.missingEvidence > 0) addBlocker(blockers, 'coupon_missing_price_evidence', `低价叠券缺价格证据=${lowPriceOverlap.missingEvidence}`);
@@ -1022,6 +1225,18 @@ async function main() {
     newSkcCandidates,
     orderPriceAudit,
     biPortalFreshness,
+    biPortalSourceSelection: {
+      selectedPath: biPortal.source?.path || '',
+      selectedStatus: biPortal.source?.status || '',
+      selectedTransport: biPortal.source?.transport || 'local-file',
+      fallbackUsed: biPortal.source?.fallbackUsed === true,
+      diagnostics: (biPortalSelection.diagnostics || []).map(d => ({
+        type: d.type,
+        status: d.source?.status || '',
+        path: d.source?.path || '',
+        error: d.source?.error || '',
+      })),
+    },
     t3MarketingCandidates,
     budgetDryRun: budgetDryRun.source.status === 'missing'
       ? {status: 'unknown', reason: 'no coupon budget dry-run source found'}

@@ -67,10 +67,11 @@
 
 ### 4.1 新链接动作卡落地边界
 
-`scripts/marketing/build_marketing_daily_guard_report.mjs` 已把“新链接自动纳入价格体系”的第一阶段落到只读日报里，字段为 `newSkcCandidates`。它的口径故意保守：
+`scripts/marketing/build_marketing_daily_guard_report.mjs` 已把“新链接自动纳入价格体系”的第一阶段落到只读日报里，字段为 `newSkcCandidates`。本地 Codex 的每日 heartbeat 默认用 `--cloud-bi-ssh shein-bi-tencent --cloud-bi-root /opt/shein-bi/app` 只读读取云端权威 `outputs/bi-portal/data.json`；不写回本地 `outputs/`，只在报告里记录 `biPortalSourceSelection`。它的口径故意保守：
 
 - 精确匹配只能用 `storeKey + skc`。`standard_goods_sn` 只用于展示和提示“同店同标准货号已有计划”，不能证明新 SKC 已经有价格计划，也不能自动继承老 SKC 的活动价、券策略或底价。
 - BI `outputs/bi-portal/data.json` 过期时，候选只能标为 `stale_observation_only`，不得形成“无新增链接”的 no-action 结论。
+- 云端 BI 读取失败时，日报必须记录 `cloud_bi_fetch_failed`；若本地也缺失或过期，继续阻止 no-action，不能把云端不可达静默解释成无新链接。
 - `price-overrides`、selection plan、`config/stores.json` 缺失或解析失败时 fail closed：日报进入 blocker / unknownSources，不能说没有新链接。
 - 30 天内已上架且缺精确价格计划的 SKC 才进入动作卡；老于 30 天的缺计划链接只计入 `missingExactPlanOnShelf` 背景数，避免日报被历史遗留淹没。
 - 若 `shelf_age_days` 缺失，日报先用 `link_date` 按报告日期兜底推算；仍无法判断年龄的 SKC 进入 `unknown_shelf_age_needs_review`，并阻止 no-action。
