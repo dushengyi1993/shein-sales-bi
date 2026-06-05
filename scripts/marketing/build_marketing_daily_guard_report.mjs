@@ -25,6 +25,7 @@ const NEW_SKC_MAX_ROWS = 80;
 const DEFAULT_CLOUD_BI_ROOT = '/opt/shein-bi/app';
 const DEFAULT_CLOUD_BI_SSH_TIMEOUT_MS = 30_000;
 const DEFAULT_CLOUD_BI_MAX_BYTES = 120 * 1024 * 1024;
+const MARKETING_STACK_REVIEW_MAX_AGE_HOURS = 48;
 const CRITICAL_SOURCE_LABELS = new Set([
   'couponSubmitLatestSummary',
   'lowPriceOverlapLive',
@@ -334,6 +335,46 @@ async function selectBiPortalSource(args, now, maxAgeHours) {
   return {
     selected: local,
     diagnostics: [{type: 'cloud_fetch_failed_local_not_fresh', source: cloud.source}],
+  };
+}
+
+function normalizeMarketingStackReviewSource(item, now, maxAgeHours) {
+  if (!item?.source || item.source.status === 'missing' || item.source.status === 'parse_error') return null;
+  const data = item.data || {};
+  const source = item.source;
+  const createdAt = data.createdAt || source.createdAt || '';
+  const createdDate = parseAnyDateTime(createdAt);
+  const activityAgeHours = createdDate ? ageHours(now, createdDate) : source.artifactAgeHours;
+  const thresholdHours = Math.min(Number(maxAgeHours || DEFAULT_MAX_AGE_HOURS), MARKETING_STACK_REVIEW_MAX_AGE_HOURS);
+  const biContextGeneratedAt = data.source?.biGeneratedAt || '';
+  const biContextDate = parseAnyDateTime(biContextGeneratedAt);
+  const biContextAgeHours = biContextDate ? ageHours(now, biContextDate) : null;
+  source.generatedAt = data.generatedAt || '';
+  source.createdAt = createdAt;
+  source.dataTimestamp = createdAt || source.mtime || '';
+  source.dataAgeHours = activityAgeHours;
+  source.ageHours = activityAgeHours;
+  source.activityAgeHours = activityAgeHours;
+  source.activityFreshnessThresholdHours = thresholdHours;
+  source.biContextGeneratedAt = biContextGeneratedAt;
+  source.biContextAgeHours = biContextAgeHours;
+  source.biContextStale = biContextAgeHours !== null && biContextAgeHours > maxAgeHours;
+  source.biContextSource = data.source?.biLinkDate || data.source?.biLinkUpdatedAt || '';
+  if (
+    (source.artifactAgeHours !== null && source.artifactAgeHours > thresholdHours)
+    || (activityAgeHours !== null && activityAgeHours > thresholdHours)
+  ) {
+    source.status = 'stale';
+  } else {
+    source.status = 'ok';
+  }
+  return {
+    biContextGeneratedAt,
+    biContextAgeHours,
+    biContextStale: source.biContextStale,
+    biContextSource: source.biContextSource,
+    activityAgeHours,
+    activityFreshnessThresholdHours: thresholdHours,
   };
 }
 
@@ -993,6 +1034,12 @@ function buildMarkdown(report) {
     lines.push('');
     for (const w of report.sourceWarnings) lines.push(`- \`${w.code}\`：${w.message}`);
   }
+  if (report.contextWarnings?.length) {
+    lines.push('');
+    lines.push('## 上下文提醒（不阻断 no-action）');
+    lines.push('');
+    for (const w of report.contextWarnings) lines.push(`- \`${w.code}\`：${w.message}`);
+  }
   lines.push('');
   lines.push('## 价格栈');
   lines.push('');
@@ -1090,6 +1137,7 @@ async function main() {
   const abovePlan = await read('aboveTargetActionPlan', latestFile(path.join(ROOT, 'tmp', 'marketing-signup', 'low-price-overlap-risk'), /^price-above-target-limited-discount-action-plan-.*\.json$/));
   const budgetDryRun = await read('couponBudgetDryRun', latestFile(path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-budget-results'), /^coupon-site-budget-dry-run-.*\.json$/));
   const stackReview = await read('marketingStackReview', latestFile(path.join(ROOT, 'outputs', 'reports'), /^marketing-stack-review-\d{4}-\d{2}-\d{2}\.json$/));
+  const marketingStackReviewContext = normalizeMarketingStackReviewSource(stackReview, now, args.maxAgeHours);
 
   const orderAuditSelection = latestOrderAuditSelection();
   const orderFiles = orderAuditSelection.selectedFiles;
@@ -1119,6 +1167,7 @@ async function main() {
   const suggestedDryRunCommands = buildDryRunCommands(args.date);
   const blockers = [];
   const sourceWarnings = [];
+  const contextWarnings = [];
   const unknownSources = [];
 
   const safety = {
@@ -1128,6 +1177,19 @@ async function main() {
     dryRunCommandsOnly: true,
     blockedExecuteCommands: ['--execute', '--discount-max 30', '--discount-max 50'],
   };
+
+  if (marketingStackReviewContext?.biContextStale && biPortalFreshness.status === 'ok') {
+    contextWarnings.push({
+      code: 'marketing_stack_bi_context_stale',
+      label: 'marketingStackReview',
+      message: '营销叠加审核表的活动扫描本身按 createdAt 判断；其 BI 标签/链接上下文来自旧本地 BI，不作为新鲜 BI 证据',
+      evidence: {
+        biContextGeneratedAt: marketingStackReviewContext.biContextGeneratedAt,
+        biContextAgeHours: marketingStackReviewContext.biContextAgeHours,
+        selectedBiPortalGeneratedAt: biPortalFreshness.generatedAt,
+      },
+    });
+  }
 
   for (const diagnostic of biPortalSelection.diagnostics || []) {
     if (diagnostic.type === 'cloud_fetch_failed_local_fresh' || diagnostic.type === 'cloud_fetch_failed_local_not_fresh') {
@@ -1237,12 +1299,14 @@ async function main() {
         error: d.source?.error || '',
       })),
     },
+    marketingStackReviewFreshness: marketingStackReviewContext || null,
     t3MarketingCandidates,
     budgetDryRun: budgetDryRun.source.status === 'missing'
       ? {status: 'unknown', reason: 'no coupon budget dry-run source found'}
       : {status: budgetDryRun.source.status, path: budgetDryRun.source.path},
     blockers,
     sourceWarnings,
+    contextWarnings,
     unknownSources,
     changesSincePrevious: [],
     noActionSummary: '',
