@@ -41,6 +41,7 @@
    - 若 `叠加后最终成交价 < finalTargetPrice`（超过平台取整/`1 SAR` 容差），说明当前组合会低于目标价，应取消或调高最低优先级且可控的活动层（通常先处理优惠券或限时折扣），必要时临时下架止损。
    - 若 `叠加后最终成交价 ≈ finalTargetPrice`，说明组合正确，应保留或补回对应活动层。
    - 若 `叠加后最终成交价 > finalTargetPrice`，说明价格偏高；不应因为看到旧活动/限时折扣标签就取消优惠券，而应补齐或调整营销活动 / 限时折扣，让最终价贴近目标。
+   - **不能只用 `限时折扣价 × couponFactor` 作为最终成交价判断。** 如果同一时间窗口内普通营销活动价更低且可与优惠券叠加，最低促销基准价应来自普通营销活动，限时折扣价偏高本身不构成最终成交价偏高；反之，若只能证明某个计划普通活动 ID 未命中目标 SKC，也只能写“普通活动覆盖证据不完整 / 未找到计划普通活动覆盖”，不能直接得出“必须调限时折扣”。
    - 临时取消的优惠券必须进入“活动结束后复扫补券队列”，到期后重新读取当前基准价、已报集合和目标价，确认不会低于目标后再补回，不能盲目自动恢复。
    - 若脚本使用 `--allow-limited-discount-overlap` 这类人工覆盖参数，必须有逐 `SKC` 的价格证据；该参数只能临时用于已审核补救，不得作为默认自动化策略。
 4. 利润率必须同时展示两套：
@@ -256,7 +257,7 @@
 
 - 计划内可报链接原则上必须有一个可解释的限时折扣状态：要么已有不干扰目标价的限时折扣，要么取消/修改旧折扣后重建新的限时折扣；不能因为旧折扣取消过就把该链接永久跳过。
 - 默认限时折扣为 `15%` 折扣（即 `当前售价 × 0.85`），但 `15%` 只是默认起点，不是机械套用。
-- 核心校验永远是目标成交价：`限时折扣价` 不能低于本窗口普通营销活动价，也不能在叠加 `15%` 优惠券后把最终价压到目标价 / 利润红线以下；如果默认 `15%` 会干扰目标价，就必须调高或调低限时折扣价 / 折扣比例，使最终成交价回到预期。
+- 核心校验永远是目标成交价：先按时间窗口取 `min(当前售价, 普通营销活动价..., 限时折扣价...)` 作为最低促销基准价，再叠加优惠券测算。`限时折扣价 × couponFactor` 只能表示“限时折扣作为兜底层时”的结果；若普通营销活动价已经更低且可叠券，限时折扣价偏高不会影响最终价，不得据此要求改限时折扣。若普通营销活动缺失或未覆盖，限时折扣才承担兜底调价责任。
 - 当普通营销活动报名漏掉且报名期已结束时，限时折扣可以作为兜底补救：限时折扣价应等于原本计划的普通营销活动价，再配套 `15%` 优惠券实现原目标最终价；结束时间必须对齐漏报活动窗口，等下期普通活动恢复后再回到“普通活动 + 优惠券”为主。
 - 如果一个链接已有生效/未来生效限时折扣，先判断它是否干扰本期目标价；会干扰就取消或修改，再按新目标重建。一个链接不能同时依赖多个互相冲突的限时折扣。
 
@@ -310,8 +311,8 @@
    - `scripts/marketing/submit_coupon_activity_goods.mjs` 默认必须传 `--target-plan`。
    - 只有明确审计为“全 15% 可报都要报名”的独立优惠券活动，才允许显式加 `--allow-all-15pct-available`。
    - 配套券的默认执行模式必须是 `coupon-allowed15-intersection-15pct-available`，不能退回 `all-15pct-available`，也不能退回普通活动 plan 全量交集。
-   - `2026-06-05` 起，提交脚本默认会 live 读取当前/未来仍有效的限时折扣活动；目标 SKC 如果仍在 active/future 限时折扣里，必须按 `limitedDiscountPrice × couponFactor` 对比 `finalTargetPrice`。只有低于目标价或缺关键价格证据时才排除；命中目标或高于目标时允许继续报券，不能因“有旧限时折扣标签”机械跳过。
-   - `--allow-limited-discount-overlap` 只能作为已逐 `SKC` 复核的人工临时覆盖；默认策略仍是价格栈守卫。任何覆盖都要在输出里保留 `currentBasePrice/couponFactor/finalWithCoupon/targetFinalPrice/diff`。
+   - `2026-06-05` 起，提交脚本默认会 live 读取当前/未来仍有效的限时折扣活动；目标 SKC 如果仍在 active/future 限时折扣里，限时折扣扫描只能先给出兜底层测算。最终是否低于/命中/高于目标，必须合并同一时间窗口的普通营销活动价、当前售价和优惠券后，用最低有效基准价对比 `finalTargetPrice`。只有最终有效价低于目标价或关键价格证据缺失时才排除；命中目标或只是“限时折扣兜底层高于目标”时允许继续报券，不能因“有旧限时折扣标签”机械跳过。
+   - `--allow-limited-discount-overlap` 只能作为已逐 `SKC` 复核的人工临时覆盖；默认策略仍是价格栈守卫。任何覆盖都要在输出里保留 `effectiveBasePrice/effectiveBaseSource/couponFactor/effectiveFinalWithCoupon/targetFinalPrice/diff`；如果只有限时折扣价证据，必须标记为兜底层候选而不是最终成交价结论。
    - 如果本期计划内 SKC 因旧限时折扣被价格栈守卫排除，默认补救顺序是：先确认是否真的低于目标价；若低于，取消或修改旧限时折扣（限时折扣优先级最低、可随时取消/修改），再补报配套优惠券；若不低于，不能因为“有旧限时折扣”就跳过计划内优惠券。
 3. **只读复扫口径**
    - `scripts/marketing/export_marketing_stack_review.mjs --coupon-target-plan <plan.json>` 会输出 allowed15 配套计划校验列；可额外传 `--coupon-price-overrides <price-overrides.json>` 明确覆盖价来源。
@@ -326,9 +327,9 @@
       - `partake_rule_good_id`
       - `skc`
    - 取消脚本的“不能误取消”保护集必须是共享 classifier 的 `allowed15`，不是普通活动 selection plan；`allowed15` active 不得被 `riskReason` 绕过。
-   - 执行前必须二次加载 coupon classifier plan；任何出现在 `allowed15` 保护集里的 SKC，只有在取消侧重新计算 `currentBasePrice × couponFactor < targetFinalPrice - 1 SAR` 后才允许作为风险取消目标，否则安全停止。
+   - 执行前必须二次加载 coupon classifier plan；任何出现在 `allowed15` 保护集里的 SKC，只有在取消侧重新计算 `最低有效基准价 × couponFactor < targetFinalPrice - 1 SAR` 后才允许作为风险取消目标，否则安全停止。若取消侧只有限时折扣价证据、缺普通营销活动/当前售价证据，必须 fail closed，不得真实取消。
    - 若已确认“旧低价活动 / 限时折扣未结束，叠券会把最终价压低”的风险，必须走显式 `riskCancel` 清单：清单要能加载 paired `price-overrides` 并生成 `allowed15` 保护集、每行保留 `reason/riskReason` 和价格证据，且回读校验只能减少目标风险 SKC，不能误伤其它 `allowed15` 项。不得通过留空 `ordinaryPlanPaths` 或缺失 price-overrides 绕开安全闸。
-   - `scripts/marketing/scan_coupon_low_price_overlap_risks.mjs` 是低价叠券只读扫描入口：历史 BI 活动标签只能作为线索，取消候选必须来自 live `34810` active 已报券集合 ∩ live active/future 限时折扣集合，再经过 `limitedDiscountPrice × couponFactor < finalTargetPrice - 1 SAR` 判定。限时折扣列表和商品列表必须完整读取；若登录页、`20302`、限时折扣列表/商品列表查询失败、商品分页截断或券规则 ID 未取到，扫描结果必须标记为不可判定，不能把 active 券数或风险数当作 `0`。
+   - `scripts/marketing/scan_coupon_low_price_overlap_risks.mjs` 是低价叠券只读扫描入口：历史 BI 活动标签只能作为线索，取消候选必须来自 live `34810` active 已报券集合 ∩ live active/future 限时折扣集合。它读到的 `limitedDiscountPrice × couponFactor` 只代表限时折扣兜底层测算；低于目标时可作为 fail-closed 风险线索，高于目标时只能作为“兜底层偏高/需确认普通营销活动覆盖”的候选，不能直接判定最终成交价高于目标。限时折扣列表和商品列表必须完整读取；若登录页、`20302`、限时折扣列表/商品列表查询失败、商品分页截断或券规则 ID 未取到，扫描结果必须标记为不可判定，不能把 active 券数或风险数当作 `0`。
    - `scripts/marketing/scan_coupon_old_ordinary_overlap_risks.mjs` 是旧普通营销活动叠券只读观察入口；旧普通活动重叠本身不得生成可执行取消清单，必须补齐价格栈证据后再进入取消流程。
    - 用户明确授权的“限时折扣 + 优惠券”补救活动必须写入 `config/marketing_allowed_limited_coupon_overlaps.json`，且必须带 `validUntil`；过期后扫描器自动恢复为风险候选。扫描器仍会把这些行写入只读明细，但不会放进自动取消候选，避免把 HL 漏报补救活动误取消。
    - 终止旧限时折扣时，默认只允许结束“整场活动全部是目标 SKC”的限时折扣；如果 live 商品里还有非目标 SKC，必须安全停止，除非用户逐场明确授权 `--allow-mixed-activity-end` 或先拆分/重建活动，避免误伤其它商品价格。

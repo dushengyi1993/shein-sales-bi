@@ -217,9 +217,11 @@ function summarizeLowPriceOverlap(liveDoc, cancelDoc) {
   const stores = Array.isArray(liveDoc?.stores) ? liveDoc.stores : [];
   const priceDecisionCounts = liveDoc?.priceDecisionCounts || {};
   return {
+    meaning: 'limited_discount_coupon_scan; above means limited-fallback coupon final is above target, not final transaction price',
     belowTarget: Number(liveDoc?.activeCouponBelowTargetCount || 0),
     missingEvidence: Number(liveDoc?.activeCouponMissingPriceEvidenceCount || 0),
     matchesTarget: Number(priceDecisionCounts.coupon_final_matches_target || 0),
+    limitedFallbackAboveTarget: Number(priceDecisionCounts.coupon_final_above_target || 0),
     aboveTarget: Number(priceDecisionCounts.coupon_final_above_target || 0),
     cancelRows: Array.isArray(cancelDoc?.rows) ? cancelDoc.rows.length : 0,
     allStoresOk: stores.length > 0 ? stores.every(s => s.ok !== false) : null,
@@ -238,21 +240,174 @@ function summarizeOldOrdinaryOverlap(liveDoc, cancelDoc) {
   };
 }
 
+function numberOrNull(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function round2(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.round(n * 100) / 100 : null;
+}
+
+function classifyFallbackPriceStack(row) {
+  const couponFactor = numberOrNull(row.couponFactor);
+  const targetFinalPrice = numberOrNull(row.targetFinalPrice ?? row.finalTargetPrice);
+  const limitedDiscountPrice = numberOrNull(row.limitedDiscountPrice);
+  const ordinaryMarketingPrice = numberOrNull(
+    row.ordinaryMarketingPrice
+    ?? row.effectiveOrdinaryMarketingPrice
+    ?? row.ordinaryActivityPrice
+  );
+  const ordinaryCoverageConfirmedAbsent = row.ordinaryCoverageConfirmedAbsent === true
+    || row.noOrdinaryMarketingActivity === true;
+  const currentSellingPrice = numberOrNull(row.currentSellingPrice ?? row.currentPrice ?? row.salePrice);
+  const candidates = [];
+  if (ordinaryMarketingPrice !== null) {
+    candidates.push({source: 'ordinary_marketing', price: ordinaryMarketingPrice});
+  }
+  if (limitedDiscountPrice !== null) {
+    candidates.push({source: 'limited_discount', price: limitedDiscountPrice});
+  }
+  if (currentSellingPrice !== null) {
+    candidates.push({source: 'current_selling_price', price: currentSellingPrice});
+  }
+  const effective = candidates.length
+    ? candidates.reduce((best, item) => (item.price < best.price ? item : best), candidates[0])
+    : null;
+  const effectiveFinalWithCoupon = effective && couponFactor !== null
+    ? round2(effective.price * couponFactor)
+    : null;
+  const priceStackEvidenceComplete = ordinaryMarketingPrice !== null || ordinaryCoverageConfirmedAbsent;
+  let finalPriceStatus = 'price_stack_evidence_incomplete';
+  if (effectiveFinalWithCoupon !== null && targetFinalPrice !== null) {
+    if (effectiveFinalWithCoupon < targetFinalPrice - 1) finalPriceStatus = 'effective_final_below_target';
+    else if (effectiveFinalWithCoupon > targetFinalPrice + 1) finalPriceStatus = 'effective_final_above_target';
+    else finalPriceStatus = 'effective_final_matches_target';
+  }
+  if (!priceStackEvidenceComplete && effectiveFinalWithCoupon !== null && targetFinalPrice !== null) {
+    if (effectiveFinalWithCoupon < targetFinalPrice - 1) finalPriceStatus = 'limited_fallback_below_target_price_stack_incomplete';
+    else if (effectiveFinalWithCoupon > targetFinalPrice + 1) finalPriceStatus = 'limited_fallback_above_target_price_stack_incomplete';
+    else finalPriceStatus = 'limited_fallback_matches_target_price_stack_incomplete';
+  }
+  return {
+    candidates,
+    effectiveBasePrice: effective?.price ?? null,
+    effectiveBaseSource: effective?.source || '',
+    effectiveFinalWithCoupon,
+    finalPriceStatus,
+    priceStackEvidenceComplete,
+    ordinaryMarketingPrice,
+    ordinaryCoverageConfirmedAbsent,
+    limitedDiscountPrice,
+    currentSellingPrice,
+  };
+}
+
+function classifyOrdinaryEvidence(row, stack) {
+  const planActivityId = row.ordinaryPlanActivityId || '';
+  const liveCheck = String(row.ordinaryActivity42892LiveCheck || row.ordinaryActivityLiveCheck || '').trim();
+  const isPartakeMatches = Number(row.ordinaryActivity42892IsPartakeMatches || row.ordinaryActivityIsPartakeMatches || 0);
+  const availableMatches = Number(row.ordinaryActivity42892AvailableMatches || row.ordinaryActivityAvailableMatches || 0);
+  if (stack.ordinaryMarketingPrice !== null) {
+    return {
+      status: 'ordinary_price_evidence_present',
+      summary: `已读取普通营销活动价 ${stack.ordinaryMarketingPrice}`,
+      planActivityId,
+      isPartakeMatches,
+      availableMatches,
+    };
+  }
+  if (stack.ordinaryCoverageConfirmedAbsent) {
+    return {
+      status: 'ordinary_coverage_confirmed_absent',
+      summary: '已确认该时间窗口无普通营销活动覆盖；限时折扣可作为兜底基准价候选',
+      planActivityId,
+      isPartakeMatches,
+      availableMatches,
+    };
+  }
+  if (isPartakeMatches > 0 || availableMatches > 0) {
+    return {
+      status: 'checked_specific_activity_match_without_price',
+      summary: `计划普通活动 ${planActivityId || '-'} live check 命中商品，但缺普通活动价，不能只看限时折扣价`,
+      planActivityId,
+      isPartakeMatches,
+      availableMatches,
+    };
+  }
+  if (liveCheck.includes('no_target_skc')) {
+    return {
+      status: 'checked_specific_activity_no_match',
+      summary: `计划普通活动 ${planActivityId || '-'} live check 未命中目标 SKC；若普通活动确实未覆盖，限时折扣才是兜底候选`,
+      planActivityId,
+      isPartakeMatches,
+      availableMatches,
+    };
+  }
+  return {
+    status: 'ordinary_evidence_incomplete',
+    summary: '普通营销活动覆盖/价格证据不完整；不能仅凭限时折扣价判断最终成交价偏高',
+    planActivityId,
+    isPartakeMatches,
+    availableMatches,
+  };
+}
+
 function summarizeAboveTargetActions(doc) {
-  const rows = (doc?.rows || []).map(r => ({
-    storeKey: r.storeKey,
-    skc: r.skc,
-    canonical: r.canonical,
-    currentBasePrice: r.limitedDiscountPrice,
-    targetBaseNeeded: r.targetBaseNeeded,
-    finalWithCoupon: r.finalWithCoupon,
-    targetFinalPrice: r.targetFinalPrice,
-    diff: r.diff,
-    limitedDiscountEnd: r.limitedDiscountEnd,
-    suggestedAction: r.suggestedAction,
-    executeAutomatically: r.executeAutomatically === true,
-  }));
-  return {count: rows.length, rows};
+  const rows = (doc?.rows || []).map(r => {
+    const stack = classifyFallbackPriceStack(r);
+    const ordinaryEvidence = classifyOrdinaryEvidence(r, stack);
+    const limitedFallbackFinalWithCoupon = stack.limitedDiscountPrice !== null && numberOrNull(r.couponFactor) !== null
+      ? round2(stack.limitedDiscountPrice * numberOrNull(r.couponFactor))
+      : numberOrNull(r.finalWithCoupon);
+    const targetFinal = numberOrNull(r.targetFinalPrice);
+    const limitedFallbackDiff = limitedFallbackFinalWithCoupon !== null && targetFinal !== null
+      ? round2(limitedFallbackFinalWithCoupon - targetFinal)
+      : numberOrNull(r.diff);
+    const fallbackOnly = stack.effectiveBaseSource === 'limited_discount' || !stack.priceStackEvidenceComplete;
+    const suggestedAction = fallbackOnly
+      ? '先确认普通营销活动是否覆盖并形成更低可叠券基准价；若未覆盖，才调整限时折扣兜底到 targetBaseNeeded；保留 15% 券，不取消券'
+      : '已有更低有效基准价证据时，不得只因限时折扣价偏高而调整限时折扣；先按有效基准价复核最终成交价';
+    return {
+      storeKey: r.storeKey,
+      skc: r.skc,
+      canonical: r.canonical,
+      priceStackEvidenceComplete: stack.priceStackEvidenceComplete,
+      finalPriceStatus: stack.finalPriceStatus,
+      effectiveBaseSource: stack.effectiveBaseSource,
+      effectiveBasePrice: stack.effectiveBasePrice,
+      effectiveFinalWithCoupon: stack.effectiveFinalWithCoupon,
+      ordinaryEvidenceStatus: ordinaryEvidence.status,
+      ordinaryEvidenceSummary: ordinaryEvidence.summary,
+      ordinaryPlanActivityId: ordinaryEvidence.planActivityId,
+      ordinaryActivityIsPartakeMatches: ordinaryEvidence.isPartakeMatches,
+      ordinaryActivityAvailableMatches: ordinaryEvidence.availableMatches,
+      limitedFallbackPrice: stack.limitedDiscountPrice,
+      targetBaseNeeded: numberOrNull(r.targetBaseNeeded),
+      limitedFallbackFinalWithCoupon,
+      targetFinalPrice: targetFinal,
+      limitedFallbackDiff,
+      legacyFieldMeaning: 'currentBasePrice/finalWithCoupon/diff were removed from this summary because limited-discount fallback is not necessarily the final effective price',
+      limitedDiscountEnd: r.limitedDiscountEnd,
+      suggestedAction,
+      originalSuggestedAction: r.suggestedAction || '',
+      executeAutomatically: false,
+      reason: `${ordinaryEvidence.summary}；限时折扣价 × 券只能表示“兜底层”是否偏高，不等于最终成交价偏高。`,
+    };
+  });
+  return {
+    meaning: 'limited_discount_fallback_high_candidates_not_final_price_above_target',
+    count: rows.length,
+    legacyFieldMeaning: 'aboveTargetActions are limited-discount fallback candidates, not final transaction-price above-target conclusions',
+    incompletePriceStackEvidenceCount: rows.filter(r => !r.priceStackEvidenceComplete).length,
+    effectiveFinalAboveTargetCount: rows.filter(r => r.priceStackEvidenceComplete && r.finalPriceStatus === 'effective_final_above_target').length,
+    effectiveFinalMatchesTargetCount: rows.filter(r => r.priceStackEvidenceComplete && r.finalPriceStatus === 'effective_final_matches_target').length,
+    effectiveFinalBelowTargetCount: rows.filter(r => r.priceStackEvidenceComplete && r.finalPriceStatus === 'effective_final_below_target').length,
+    limitedFallbackBelowTargetIncompleteCount: rows.filter(r => r.finalPriceStatus === 'limited_fallback_below_target_price_stack_incomplete').length,
+    rows,
+  };
 }
 
 function summarizeBiPortal(doc, source) {
@@ -414,15 +569,15 @@ function buildMarkdown(report) {
   lines.push('');
   lines.push('## 价格栈');
   lines.push('');
-  lines.push(`- 低价限时折扣叠券：below=${report.lowPriceOverlap.belowTarget}, missing=${report.lowPriceOverlap.missingEvidence}, matches=${report.lowPriceOverlap.matchesTarget}, above=${report.lowPriceOverlap.aboveTarget}, cancelRows=${report.lowPriceOverlap.cancelRows}`);
+  lines.push(`- 限时折扣兜底层叠券扫描：below=${report.lowPriceOverlap.belowTarget}, missing=${report.lowPriceOverlap.missingEvidence}, matches=${report.lowPriceOverlap.matchesTarget}, fallbackAbove=${report.lowPriceOverlap.limitedFallbackAboveTarget}（非最终成交价结论）, cancelRows=${report.lowPriceOverlap.cancelRows}`);
   lines.push(`- 旧普通活动叠券：riskCancel=${report.oldOrdinaryOverlap.riskCancel}, cancelRows=${report.oldOrdinaryOverlap.cancelRows}, observationRows=${report.oldOrdinaryOverlap.observationRows}`);
-  lines.push(`- 偏高候选：${report.aboveTargetActions.count}`);
+  lines.push(`- 兜底限时折扣偏高候选（非最终成交价结论）：${report.aboveTargetActions.count}；证据不完整=${report.aboveTargetActions.incompletePriceStackEvidenceCount || 0}，有效最终价偏高=${report.aboveTargetActions.effectiveFinalAboveTargetCount || 0}`);
   if (report.aboveTargetActions.rows.length) {
     lines.push('');
-    lines.push('| 店铺 | SKC | 标准货号 | 当前基准价 | 建议基准价 | 券后价 | 目标价 | diff |');
-    lines.push('| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |');
+    lines.push('| 店铺 | SKC | 标准货号 | 普通活动证据 | 限时折扣价（仅兜底） | 兜底建议基准价 | 兜底券后价 | 目标价 | diff | 动作口径 |');
+    lines.push('| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |');
     for (const r of report.aboveTargetActions.rows.slice(0, 20)) {
-      lines.push(`| ${r.storeKey} | \`${r.skc}\` | ${r.canonical} | ${num(r.currentBasePrice)} | ${num(r.targetBaseNeeded)} | ${num(r.finalWithCoupon)} | ${num(r.targetFinalPrice)} | ${num(r.diff)} |`);
+      lines.push(`| ${r.storeKey} | \`${r.skc}\` | ${r.canonical} | ${r.ordinaryEvidenceStatus} | ${num(r.limitedFallbackPrice)} | ${num(r.targetBaseNeeded)} | ${num(r.limitedFallbackFinalWithCoupon)} | ${num(r.targetFinalPrice)} | ${num(r.limitedFallbackDiff)} | ${r.suggestedAction} |`);
     }
   }
   lines.push('');
@@ -544,6 +699,12 @@ async function main() {
   if (lowPriceOverlap.missingEvidence > 0) addBlocker(blockers, 'coupon_missing_price_evidence', `低价叠券缺价格证据=${lowPriceOverlap.missingEvidence}`);
   if (lowPriceOverlap.cancelRows > 0) addBlocker(blockers, 'low_price_cancel_rows_nonzero', `低价叠券取消候选 rows=${lowPriceOverlap.cancelRows}`);
   if (oldOrdinaryOverlap.riskCancel || oldOrdinaryOverlap.cancelRows > 0) addBlocker(blockers, 'old_ordinary_cancel_rows_nonzero', `旧普通活动 cancel rows=${oldOrdinaryOverlap.cancelRows}`);
+  if (aboveTargetActions.effectiveFinalBelowTargetCount > 0) {
+    addBlocker(blockers, 'effective_final_below_target_from_price_stack', `有效价格栈券后低于目标=${aboveTargetActions.effectiveFinalBelowTargetCount}`);
+  }
+  if (aboveTargetActions.limitedFallbackBelowTargetIncompleteCount > 0) {
+    addBlocker(blockers, 'limited_fallback_below_target_price_stack_incomplete', `限时折扣兜底层券后低于目标但价格栈证据不完整=${aboveTargetActions.limitedFallbackBelowTargetIncompleteCount}`);
+  }
   if (budgetDryRun.source.status === 'missing') {
     // Budget is not always checked daily; keep unknown, not a blocker.
   }
