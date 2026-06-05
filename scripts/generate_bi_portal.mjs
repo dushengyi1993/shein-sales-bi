@@ -106,6 +106,7 @@ const PORTAL_API_SECTION_KEYS = [
   'profit',
   'actions',
   'linksData',
+  'inventoryTrend',
   'comments',
   'orders',
   'afterSales',
@@ -174,6 +175,9 @@ const PORTAL_SECTION_SELECTS = {
   'duplicateLinks', (SELECT data FROM duplicate_links),
   'storeLinks', (SELECT data FROM store_links),
   'matrix', (SELECT data FROM matrix)
+`,
+  inventoryTrend: `
+  'inventoryTrend', (SELECT data FROM visible_inventory_trend)
 `,
   comments: `
   'comments', (SELECT data FROM comments),
@@ -2092,6 +2096,29 @@ inventory_alerts AS (
       AND coalesce(standard_goods_sn,'') <> ''
     ORDER BY store_key, coalesce(usable_inventory, inventory_quantity, 999999), standard_goods_sn, skc_list
     LIMIT 600
+  ) t
+),
+visible_inventory_trend AS (
+  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY date, standard_goods_sn), '[]'::jsonb) AS data
+  FROM (
+    SELECT
+      snapshot_date AS date,
+      standard_goods_sn,
+      string_agg(DISTINCT nullif(raw_goods_sn,''), ' / ') AS raw_goods_sn_list,
+      count(DISTINCT store_key) AS store_count,
+      count(*) AS skc_rows,
+      round(sum(coalesce(inventory_quantity,0))::numeric, 0) AS inventory_quantity,
+      round(sum(coalesce(usable_inventory, inventory_quantity, 0))::numeric, 0) AS usable_inventory,
+      round(sum(coalesce(order_locked_quantity,0))::numeric, 0) AS order_locked_quantity,
+      round(sum(coalesce(pay_locked_quantity,0))::numeric, 0) AS pay_locked_quantity,
+      count(*) FILTER (
+        WHERE coalesce(display_stock_low,false)
+          AND coalesce(shelf_statuses,'') LIKE '%ON_SHELF%'
+      ) AS low_display_stock_count
+    FROM fact.visible_inventory_snapshot
+    WHERE snapshot_date >= (SELECT max(snapshot_date) FROM fact.visible_inventory_snapshot) - interval '395 days'
+      AND coalesce(standard_goods_sn,'') <> ''
+    GROUP BY snapshot_date, standard_goods_sn
   ) t
 ),
 orders AS (
@@ -4339,7 +4366,8 @@ function overviewNeedsProfitSectionForHome(){
 function backgroundBiSectionsForTab(tab = state.tab || 'overview'){
   if (!biPortalUsesApiSections()) return [];
   const overviewSections = ['homeRankings','afterSales','homeProfit','actions','financeData'];
-  if (tab === 'overview' && (overviewNeedsProfitSectionForHome() || NO_GROUPS_PREVIEW)) overviewSections.push('profit');
+  if (tab === 'overview' && (overviewNeedsProfitSectionForHome() || (NO_GROUPS_PREVIEW && selectedTrendMetricKeys().includes('profit')))) overviewSections.push('profit');
+  if (tab === 'overview' && NO_GROUPS_PREVIEW && selectedTrendMetricKeys().includes('inventory')) overviewSections.push('inventoryTrend');
   const map = {
     overview:overviewSections
   };
@@ -6579,19 +6607,21 @@ function renderKpisNoGroupsPreview(){
     {label:'最近点击/支付率', value:(trafficLatest.avg_click_rate == null ? '—' : pct(trafficLatest.avg_click_rate))+' / '+(trafficLatest.avg_pay_rate == null ? '—' : pct(trafficLatest.avg_pay_rate)), note:trafficLatest.date || '-'}
   ];
   const inventoryRows = previewInventoryProductRows();
-  const inventoryAlerts = previewInventoryAlertRows();
   const inventoryTotalSupply = inventoryRows.reduce((s,r)=>s+Number(r.estimated_total_supply_quantity || 0),0);
   const inventoryAvailable = inventoryRows.reduce((s,r)=>s+Number(r.et_estimated_available_qty || 0),0);
   const inventoryOnHand = inventoryRows.reduce((s,r)=>s+Number(r.estimated_on_hand_quantity || 0),0);
-  const inventoryHighRisk = inventoryRows.filter(r => String(r.risk_level || '').toLowerCase() === 'high').length;
+  const inventoryIncoming = inventoryRows.reduce((s,r)=>s+Number(r.incoming_quantity || 0),0);
+  const inventoryDailySales = inventoryRows.reduce((s,r)=>s+Number(r.weighted_daily_gross_sales || 0),0);
+  const inventoryDaysWithIncoming = inventoryDailySales > 0 ? inventoryTotalSupply / inventoryDailySales : null;
   const inventorySnapshotDate = latestInventorySnapshotDate(inventoryRows);
   const inventoryScopeNote = productScopeQuery() ? '当前货号筛选' : '全部货号';
   const inventoryCardRows = [
     {label:'货号数', value:num(inventoryRows.length)+' 个', note:inventoryScopeNote},
-    {label:'ET可售', value:num(inventoryAvailable)+' 件', note:inventorySnapshotDate},
-    {label:'在库估算', value:num(inventoryOnHand)+' 件', note:inventorySnapshotDate},
-    {label:'总供给（含在途）', value:num(inventoryTotalSupply)+' 件', note:'含在途'},
-    {label:'高风险 / 预警', value:num(inventoryHighRisk)+' / '+num(inventoryAlerts.length), note:'去化风险 / 展示库存预警'}
+    {label:'ET可售', value:num(inventoryAvailable)+' 件', note:'ET实盘；不与在途相加'},
+    {label:'成本表在库', value:num(inventoryOnHand)+' 件', note:inventorySnapshotDate},
+    {label:'成本表在途', value:num(inventoryIncoming)+' 件', note:'已发未完整到仓/计费'},
+    {label:'成本表供给', value:num(inventoryTotalSupply)+' 件', note:'到仓 + 在途 - 已售'},
+    {label:'去化周期', value:inventoryDaysWithIncoming == null ? '—' : fmt.format(inventoryDaysWithIncoming)+' 天', note:inventoryDailySales > 0 ? '按 '+fmt.format(inventoryDailySales)+' 件/天' : '无动销速度'}
   ];
   const plainRows = rows => rows.map(r => label(r.label)+value(escapeHtml(r.value))+value('<span class="muted">'+escapeHtml(r.note)+'</span>')).join('');
   $('kpis').innerHTML =
@@ -6611,8 +6641,8 @@ function renderKpisNoGroupsPreview(){
       '<div data-preview-table="traffic">'+matrix(2, head(['指标','数值','说明'])+plainRows(trafficCardRows))+'</div>',
       '流量来自云端链接表现日序列；曝光、访客、成交件数按所选时间段汇总，点击率/支付率只展示最近业务日。', 'links')+
     card('当前库存 / 去化', '当前快照 · '+inventoryScopeNote,
-      '<div data-preview-table="inventory">'+matrix(2, head(['指标','数量','说明'])+plainRows(inventoryCardRows))+'</div>',
-      '库存来自 ET 货代仓和成本批次汇总，是全盘物理库存；店铺筛选不硬拆库存基数。', 'inventory');
+      '<div data-preview-table="inventory">'+matrix(2, head(['指标','数值','说明'])+plainRows(inventoryCardRows))+'</div>',
+      'ET可售来自货代仓实盘；成本表供给=到仓+在途-已售，不等于 ET可售+在途。去化周期按总供给/加权日销汇总，不平均各货号天数。', 'inventory');
   document.querySelectorAll('[data-overview-jump]').forEach(btn => btn.addEventListener('click', e => {
     if (e.target?.classList?.contains('help')) return;
     kpiJump(btn.dataset.overviewJump || 'business');
@@ -7110,6 +7140,17 @@ function latestInventorySnapshotDate(rows = previewInventoryProductRows()){
   if (dates.length) return dates.sort().at(-1);
   return String(DATA.generatedAt || '').slice(0, 10) || '-';
 }
+function previewVisibleInventoryTrendRows(){
+  const source = DATA.inventoryDepletion?.visibleTrend || DATA.inventoryTrend || [];
+  const q = productScopeQuery();
+  return (source || []).filter(r => !q || productQueryMatch(r, q));
+}
+function previewInventoryTrendSubtitle(){
+  const parts = ['全店铺展示库存'];
+  if (productScopeQuery()) parts.push('货号/SKC：' + String(state.product || '').trim());
+  if (storeFilterKind().type !== 'all') parts.push('库存趋势不按店铺拆分');
+  return parts.join(' · ');
+}
 function renderPreviewInventoryPanel(){
   const rows = previewInventoryProductRows();
   const alerts = previewInventoryAlertRows();
@@ -7560,6 +7601,48 @@ function buildPreviewTrafficSeries(kind){
   };
 }
 function buildPreviewInventorySeries(kind){
+  const range = chartRangeFor(kind);
+  const allTrendRows = DATA.inventoryDepletion?.visibleTrend || DATA.inventoryTrend || [];
+  if (allTrendRows.length) {
+    const trendRows = previewVisibleInventoryTrendRows();
+    const dailyMap = new Map();
+    for (const r of trendRows) {
+      const d = String(r.date || '').slice(0, 10);
+      if (!d || d < range.start || d > range.end) continue;
+      const row = dailyMap.get(d) || {id:d, label:d, usable_inventory:0, inventory_quantity:0, locked_inventory:0};
+      row.usable_inventory += Number(r.usable_inventory || 0);
+      row.inventory_quantity += Number(r.inventory_quantity || 0);
+      row.locked_inventory += Number(r.order_locked_quantity || 0) + Number(r.pay_locked_quantity || 0);
+      dailyMap.set(d, row);
+    }
+    const daily = Array.from(dailyMap.values())
+      .sort((a,b)=>String(a.id).localeCompare(String(b.id)))
+      .map(r => ({
+        ...r,
+        usable_inventory:Math.round(Number(r.usable_inventory || 0) * 100) / 100,
+        inventory_quantity:Math.round(Number(r.inventory_quantity || 0) * 100) / 100,
+        locked_inventory:Math.round(Number(r.locked_inventory || 0) * 100) / 100
+      }));
+    let series = daily;
+    if (kind === 'month') {
+      const monthMap = new Map();
+      for (const r of daily) {
+        const id = monthId(r.id);
+        if (!id) continue;
+        monthMap.set(id, {...r, id, label:monthPeriodLabel(id, range), snapshot_date:r.id});
+      }
+      series = Array.from(monthMap.values()).sort((a,b)=>String(a.id).localeCompare(String(b.id)));
+    }
+    return {
+      series,
+      lines:[
+        {key:'usable_inventory', label:'可售展示库存', color:'#14b8a6'},
+        {key:'inventory_quantity', label:'总展示库存', color:'#60a5fa'},
+        {key:'locked_inventory', label:'锁定库存', color:'#f59e0b'}
+      ],
+      note:'来自前台展示库存每日快照；按全店铺展示库存汇总，可按货号筛选，不按店铺拆分。该趋势不同于上方 ET/成本表供给口径。'+(kind === 'month' ? ' 月图取每月最新快照，不累加库存。' : '')
+    };
+  }
   const rows = previewInventoryProductRows();
   if (!rows.length) return {series:[], lines:[], note:'当前筛选下暂无库存快照。'};
   const snapshotDate = latestInventorySnapshotDate(rows);
@@ -7659,7 +7742,7 @@ function renderPreviewMetricLineChart(kind = 'day', metric = 'sales'){
     '<p class="sub">时间段：'+escapeHtml(range.start)+' 至 '+escapeHtml(range.end)+'；当前显示 '+num(series.length)+' 个'+(kind === 'month' ? '月份' : '日期')+'。'+(built.note ? ' '+escapeHtml(built.note) : '')+(sliceNote ? ' '+escapeHtml(sliceNote) : '')+'</p>'+
   '</div>';
 }
-function renderPreviewTrendPanels(kind = 'day', rankingsLoading = false, profitLoading = false, sectionLoadingHtml = null){
+function renderPreviewTrendPanels(kind = 'day', rankingsLoading = false, profitLoading = false, sectionLoadingHtml = null, inventoryTrendLoading = false){
   const catalog = trendMetricCatalog();
   const loading = sectionLoadingHtml || (label => '<div class="empty">正在加载'+escapeHtml(label)+'。</div>');
   return selectedTrendMetricKeys().map(metric => {
@@ -7670,7 +7753,10 @@ function renderPreviewTrendPanels(kind = 'day', rankingsLoading = false, profitL
     if (metric === 'profit' && profitLoading) {
       return panel((kind === 'month' ? '月趋势 · ' : '日趋势 · ') + (meta.label || metric), '利润 section 加载中', loading('利润趋势'));
     }
-    return panel((kind === 'month' ? '月趋势 · ' : '日趋势 · ') + (meta.label || metric), homeScopeSubtitle(), renderPreviewMetricLineChart(kind, metric));
+    if (metric === 'inventory' && inventoryTrendLoading) {
+      return panel((kind === 'month' ? '月趋势 · ' : '日趋势 · ') + (meta.label || metric), '库存趋势 section 加载中', loading('库存趋势'));
+    }
+    return panel((kind === 'month' ? '月趋势 · ' : '日趋势 · ') + (meta.label || metric), metric === 'inventory' ? previewInventoryTrendSubtitle() : homeScopeSubtitle(), renderPreviewMetricLineChart(kind, metric));
   }).join('');
 }
 
@@ -7872,6 +7958,8 @@ function renderHomeDashboardNoGroupsPreview(){
   const actionsLoading = biPortalUsesApiSections() && !biSectionLoaded('actions');
   const profitLoading = !homeProfitReadyForRender();
   const profitTrendLoading = biPortalUsesApiSections() && selectedTrendMetricKeys().includes('profit') && !biSectionLoaded('profit');
+  const hasEmbeddedInventoryTrend = Boolean((DATA.inventoryDepletion?.visibleTrend || DATA.inventoryTrend || []).length);
+  const inventoryTrendLoading = biPortalUsesApiSections() && selectedTrendMetricKeys().includes('inventory') && !hasEmbeddedInventoryTrend && !biSectionLoaded('inventoryTrend');
   syncHomeScopeControls();
   ensureRankWindow();
   if (String(state.store || '').toUpperCase().startsWith('GROUP:')) state.store = '';
@@ -7896,8 +7984,8 @@ function renderHomeDashboardNoGroupsPreview(){
   $('homeDashboard').innerHTML =
     '<div class="dashboard-section-title trend-panel-head"><div><h3>趋势</h3><div class="sub">平行预览：按钮只切换当前趋势指标；页面只保留一个日图和一个月图。</div></div>'+trendMetricButtons()+'</div>'+
     '<div class="trend-stack">'+
-      renderPreviewTrendPanels('day', rankingsLoading, profitTrendLoading, sectionLoadingHtml)+
-      renderPreviewTrendPanels('month', rankingsLoading, profitTrendLoading, sectionLoadingHtml)+
+      renderPreviewTrendPanels('day', rankingsLoading, profitTrendLoading, sectionLoadingHtml, inventoryTrendLoading)+
+      renderPreviewTrendPanels('month', rankingsLoading, profitTrendLoading, sectionLoadingHtml, inventoryTrendLoading)+
     '</div>'+
     '<div class="dashboard-section-title"><h3>排行榜</h3><div class="sub">店铺只显示 DL/DX 等代号，货号显示归并后的标准货号；排行榜按上方时间段重算。</div></div>'+
     '<div class="dashboard-grid equal">'+
