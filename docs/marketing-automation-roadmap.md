@@ -82,6 +82,19 @@
 
 1. `known_excluded_needs_pricing`：计划里已明确 excluded，多数是缺目标价；先补成本/仓储/底价，不报券。
 2. `same_standard_goods_sn_needs_confirmation`：同店同标准货号已有别的 SKC 计划，但当前 SKC 缺精确计划；人工确认同款、同成本和同底价后，才可复制策略。
+
+### 4.2 营销叠加审核的新鲜度拆分
+
+`marketingStackReview` 同时承担两类证据，必须拆开判断：
+
+- 活动扫描证据：来自 SHEIN 营销后台只读扫描，字段为 `activityScanCreatedAt/activityScanFinishedAt`（旧报告兼容 `createdAt`）。T-3 活动提醒、普通活动候选覆盖、店铺覆盖完整性都看这一层。`rebuild_marketing_stack_review_from_store_audits.mjs` 只能重组已有 store audit，`rebuiltAt` 不能替代活动扫描时间。
+- BI 标签上下文：来自 BI `storeLinks/links` 的活动标签、限时折扣标签、新链接和链接日期，字段为 `source.biGeneratedAt / biDataPath / biDataTransport / biFallbackUsed`。优先用 `--cloud-bi-ssh shein-bi-tencent --cloud-bi-root /opt/shein-bi/app` 只读读取云端权威快照；云端失败只有本地快照新鲜时才 fallback。
+
+日报 `build_marketing_daily_guard_report.mjs` 必须同时验证：
+
+- `marketingStackReview` 活动扫描未超过 48 小时；
+- BI context 未超过日报阈值；
+- `selectedStores=19` 且 `missingStores=[]`。若有店铺缺失，即使 BI context 新鲜，也不能形成完整 no-action。
 3. `unplanned_new_on_shelf_skc_needs_pricing`：新上架 SKC 完全没有计划；先进入待定价，再决定普通活动、限时折扣兜底和 15% 券。
 4. `unknown_shelf_age_needs_review`：缺上架天数和可用 `link_date`，不能判断是否新链接；先刷新链接/BI 快照，不报券。
 

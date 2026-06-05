@@ -318,6 +318,8 @@
    - 如果本期计划内 SKC 因旧限时折扣被价格栈守卫排除，默认补救顺序是：先确认是否真的低于目标价；若低于，取消或修改旧限时折扣（限时折扣优先级最低、可随时取消/修改），再补报配套优惠券；若不低于，不能因为“有旧限时折扣”就跳过计划内优惠券。
 3. **只读复扫口径**
    - `scripts/marketing/export_marketing_stack_review.mjs --coupon-target-plan <plan.json>` 会输出 allowed15 配套计划校验列；可额外传 `--coupon-price-overrides <price-overrides.json>` 明确覆盖价来源。
+   - 叠加审核的 BI 标签上下文默认应使用云端权威快照：`--cloud-bi-ssh shein-bi-tencent --cloud-bi-root /opt/shein-bi/app`，或显式 `--bi-portal-data <data.json>`。输出必须记录 `source.biGeneratedAt / biDataPath / biDataTransport / biFallbackUsed`；不得把本地灾备 `outputs/bi-portal/data.json` 当成实时云端事实。
+   - 若用 `rebuild_marketing_stack_review_from_store_audits.mjs` 从已有 store audit 重建，只能刷新 BI context 和汇总表，不能把 `rebuiltAt` 当活动扫描时间；T-3/普通活动候选的新鲜度必须看 `activityScanCreatedAt/activityScanFinishedAt`，并要求 `missingStores=[]`。
    - 优先看 `15%券档active是否符合允许计划`、`15%券档允许配套计划数`、`15%券档禁止/未知仍active数`、`15%券档active但不在允许计划数`。
    - `15%券档剩余未入已报集合数` 是“平台可报但未报”的集合，不等于本期应报目标；如果配套计划已覆盖，这个数大于 0 是正常现象。
 4. **取消误报**

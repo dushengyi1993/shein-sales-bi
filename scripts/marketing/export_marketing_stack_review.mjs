@@ -18,6 +18,13 @@ import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {normalizeGoodsSnDetailed} from '../../lib/product_sku_normalizer.mjs';
 import {
+  addBiPortalSourceArgs,
+  normalizeBiPortalSourceArgs,
+  selectBiPortalSource,
+  summarizeBiPortalSourceForReport,
+} from '../../lib/bi_portal_source.mjs';
+import {summarizeStoreAuditCoverage} from '../../lib/marketing_stack_review_coverage.mjs';
+import {
   couponPlanStoreView,
   findCouponPlanRow,
   loadCouponTargetEligibilityPlan,
@@ -33,7 +40,6 @@ const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'st
 const STORES = STORES_CONFIG.stores || [];
 const COUPON_LEVEL_RULES = await readJsonIfExists(path.join(ROOT, 'config', 'marketing_coupon_level_rules.json'), {activities: {}});
 const COST_DOC = await readJsonIfExists(path.join(ROOT, 'tmp', 'mbrs', 'marketing-cost-map.json'), {costMap: {}, trueCostMap: {}});
-const BI = await readJsonIfExists(path.join(ROOT, 'outputs', 'bi-portal', 'data.json'), {});
 const COSTS = COST_DOC.costMap || {};
 const TRUE_COSTS = COST_DOC.trueCostMap || {};
 
@@ -80,14 +86,29 @@ for (const [label, value] of fixedPriceBase) registerRuleKeys(fixedPriceRules, l
 const specialMarginRules = new Map();
 for (const [label, value] of specialMarginBase) registerRuleKeys(specialMarginRules, label, value);
 
-const args = parseArgs(process.argv.slice(2));
+const args = normalizeBiPortalSourceArgs(parseArgs(process.argv.slice(2)), ROOT);
+const now = new Date();
+const BI_SOURCE_SELECTION = await selectBiPortalSource({
+  root: ROOT,
+  biPortalData: args.biPortalData,
+  cloudBiSsh: args.cloudBiSsh,
+  cloudBiRoot: args.cloudBiRoot,
+  cloudBiSshTimeoutMs: args.cloudBiSshTimeoutMs,
+  cloudBiMaxBytes: args.cloudBiMaxBytes,
+  now,
+  maxAgeHours: args.biMaxAgeHours,
+});
+if (!BI_SOURCE_SELECTION.selected.data) {
+  throw new Error(`BI Portal data unavailable: ${BI_SOURCE_SELECTION.selected.source.status} ${BI_SOURCE_SELECTION.selected.source.error || ''}`.trim());
+}
+const BI = BI_SOURCE_SELECTION.selected.data;
+const BI_SOURCE_SUMMARY = summarizeBiPortalSourceForReport(BI_SOURCE_SELECTION);
 const COUPON_TARGET_PLAN = args.couponTargetPlan ? await loadCouponTargetEligibilityPlan({
   root: ROOT,
   planPath: args.couponTargetPlan,
   priceOverridesPaths: args.couponPriceOverrides,
   targetDiscountPct: 15,
 }) : null;
-const now = new Date();
 const dateTag = formatDate(now);
 const timestampTag = formatTimestamp(now);
 const runDir = path.join(TMP_ROOT, `marketing-stack-review-${timestampTag}`);
@@ -107,9 +128,7 @@ const audit = {
   args: {...args, stores: selectedStores.map(s => s.storeKey)},
   readOnlyEndpoints: READ_ONLY_ENDPOINTS,
   source: {
-    biGeneratedAt: BI.generatedAt || '',
-    biLinkDate: BI.dates?.linkDate || '',
-    biLinkUpdatedAt: BI.dates?.linkUpdatedAt || BI.dates?.linkWarehouseUpdatedAt || '',
+    ...BI_SOURCE_SUMMARY,
     costSource: COST_DOC.source || '',
     costBiSource: COST_DOC.biSource || '',
   },
@@ -184,6 +203,7 @@ for (const [batchIndex, batch] of batches.entries()) {
 
 const limitRows = buildLimitDiscountRows(linkIndex);
 const summaryRows = summarizeBySku(detailRows);
+const storeStatuses = audit.stores.map(s => summarizeStoreAuditCoverage(s, s.store));
 
 const base = path.join(OUT_DIR, `marketing-stack-review-${dateTag}`);
 const files = {
@@ -202,8 +222,13 @@ await writeCsv(files.couponCsv, couponRows, COUPON_HEADERS);
 await writeCsv(files.limitDiscountCsv, limitRows, LIMIT_HEADERS);
 await fs.writeFile(files.json, JSON.stringify({
   createdAt: now.toISOString(),
+  activityScanCreatedAt: now.toISOString(),
+  activityScanFinishedAt: new Date().toISOString(),
   source: audit.source,
+  biSourceDiagnostics: BI_SOURCE_SELECTION.diagnostics.map(d => ({type: d.type, source: d.source})),
   selectedStores: selectedStores.map(s => ({storeKey: s.storeKey, groupKey: s.groupKey, shopName: s.shopName})),
+  storeStatuses,
+  missingStores: storeStatuses.filter(s => !s.ok).map(s => s.storeKey),
   notes: [
     '本文件为只读审核输出；未报名、未提交、未取消或调价限时折扣。',
     '限时折扣价格若未从当前接口读到，会作为风险字段保留，不按安全通过。',
@@ -251,9 +276,20 @@ function parseArgs(argv) {
     couponTargetPlan: null,
     couponPriceOverrides: [],
     sessionHttp: false,
+    biPortalData: '',
+    cloudBiSsh: '',
+    cloudBiRoot: '',
+    cloudBiSshTimeoutMs: null,
+    cloudBiMaxBytes: null,
+    biMaxAgeHours: 72,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
+    const biArgIndex = addBiPortalSourceArgs(out, argv, i);
+    if (biArgIndex !== i) {
+      i = biArgIndex;
+      continue;
+    }
     if (a === '--stores') out.stores = String(argv[++i] || '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
     else if (a === '--batch-size') out.batchSize = Number(argv[++i] || 3);
     else if (a === '--hours') {
@@ -632,12 +668,18 @@ async function collectOrdinaryGoodsRowsHttp(session, activity) {
     };
   }
   const list = json?.info?.partake_goods_list || [];
-  const totalGoods = Number(json?.info?.total || list.length || 0);
+  const totalRaw = json?.info?.total;
+  const totalGoodsKnown = totalRaw !== undefined && totalRaw !== null && totalRaw !== '';
+  const totalGoods = totalGoodsKnown ? Number(totalRaw) : list.length;
+  const ok = list.length > 0
+    ? (!totalGoodsKnown || list.length >= totalGoods)
+    : (totalGoodsKnown && totalGoods === 0);
   return {
-    ok: !totalGoods || list.length >= totalGoods,
+    ok,
     totalGoods,
+    totalGoodsKnown,
     source: 'session-http query_supplier_goods_list_v2',
-    reason: totalGoods && list.length < totalGoods ? `接口只返回 ${list.length}/${totalGoods} 行` : '',
+    reason: ok ? '' : (totalGoodsKnown && totalGoods && list.length < totalGoods ? `接口只返回 ${list.length}/${totalGoods} 行` : '接口未返回商品且缺明确 total=0 证据'),
     rows: list.map((g, i) => normalizeGoodsRow(g, i)),
   };
 }
@@ -979,11 +1021,14 @@ async function collectOrdinaryGoodsRows(cdp, sessionId, activity) {
     });
     const json = await r.json();
     const list = json?.info?.partake_goods_list || [];
-    const totalGoods = Number(json?.info?.total || list.length || 0);
+    const totalRaw = json?.info?.total;
+    const totalGoodsKnown = totalRaw !== undefined && totalRaw !== null && totalRaw !== '';
+    const totalGoods = totalGoodsKnown ? Number(totalRaw) : list.length;
     return {
       code: json?.code,
       msg: json?.msg,
       totalGoods,
+      totalGoodsKnown,
       rows: list.map((g, i) => {
         const minDiscount = Number(g.final_min_sell_price_rate || g.min_sell_price_rate || g.min_special_sell_price_rate || g.lowest_sale_price_thirty_day_rate || 0);
         const current = Number(g.current_cost || g.current_cost_display?.value || g.shop_price || g.special_price || g.current_shop_price || 0);
@@ -1013,13 +1058,23 @@ async function collectOrdinaryGoodsRows(cdp, sessionId, activity) {
         };
       })
     };
-  `, {activityId: activity.activityId}).catch(err => ({code: 'ERR', msg: err.message, rows: [], totalGoods: 0}));
+  `, {activityId: activity.activityId}).catch(err => ({code: 'ERR', msg: err.message, rows: [], totalGoods: null, totalGoodsKnown: false}));
+  const codeOk = apiRows.code === '0' || apiRows.code === 0;
+  const rows = apiRows.rows || [];
+  const totalGoodsKnown = apiRows.totalGoodsKnown === true;
+  const totalGoods = totalGoodsKnown ? Number(apiRows.totalGoods) : (rows.length || null);
+  const ok = codeOk
+    ? (rows.length > 0 ? (!totalGoodsKnown || rows.length >= totalGoods) : (totalGoodsKnown && totalGoods === 0))
+    : false;
   return {
-    ok: !apiRows.totalGoods || apiRows.rows.length >= apiRows.totalGoods,
-    rows: apiRows.rows || [],
-    totalGoods: apiRows.totalGoods || 0,
+    ok,
+    rows,
+    totalGoods,
+    totalGoodsKnown,
     source: 'query_supplier_goods_list_v2',
-    reason: apiRows.rows?.length ? (apiRows.totalGoods && apiRows.rows.length < apiRows.totalGoods ? `接口只返回 ${apiRows.rows.length}/${apiRows.totalGoods} 行` : '') : (apiRows.msg || '接口未返回商品'),
+    reason: ok ? '' : (codeOk
+      ? (totalGoodsKnown && totalGoods && rows.length < totalGoods ? `接口只返回 ${rows.length}/${totalGoods} 行` : (apiRows.msg || '接口未返回商品且缺明确 total=0 证据'))
+      : `接口返回 code=${apiRows.code ?? ''} msg=${apiRows.msg || ''}`),
   };
 }
 
@@ -1293,7 +1348,7 @@ function buildLimitDiscountRows(index) {
       '标准货号': doc.standard || '',
       '限时折扣名称': names.join(' / '),
       '限时折扣价SAR': '',
-      '来源': 'outputs/bi-portal/data.json performance_activity_names',
+      '来源': `${BI_SOURCE_SUMMARY.biDataPath || 'outputs/bi-portal/data.json'} performance_activity_names`,
       '数据日期': doc.linkDate || BI.dates?.linkDate || '',
       '风险提示': '只读审核已发现限时折扣标签，但当前脚本未读取到限时折扣价；报名/用券前必须人工复核或专项扫描。',
       '修改意见/备注': '',
@@ -1366,6 +1421,7 @@ function renderMarkdown(summaryRows, detailRows, couponRows, limitRows, files) {
     `- 含仓储费利润率低于 20% 行：${lowMargin}`,
     `- 缺成本/仓储费口径行：${missingCost}`,
     `- BI 数据时间：${BI.generatedAt || ''}`,
+    `- BI 数据来源：${BI_SOURCE_SUMMARY.biDataPath || ''}（transport=${BI_SOURCE_SUMMARY.biDataTransport || ''}, fallback=${BI_SOURCE_SUMMARY.biFallbackUsed ? 'yes' : 'no'}, status=${BI_SOURCE_SUMMARY.biStatus || ''}）`,
     `- 链接活动标签日期：${BI.dates?.linkDate || ''}`,
     `- 成本来源：${COST_DOC.source || ''}`,
     `- 优惠券配套计划：${COUPON_TARGET_PLAN ? path.relative(ROOT, COUPON_TARGET_PLAN.path) : '未加载；仅展示券档可报/已报集合，不判断是否应报'}`,

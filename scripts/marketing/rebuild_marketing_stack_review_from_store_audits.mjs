@@ -10,15 +10,37 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {
+  addBiPortalSourceArgs,
+  normalizeBiPortalSourceArgs,
+  selectBiPortalSource,
+  summarizeBiPortalSourceForReport,
+} from '../../lib/bi_portal_source.mjs';
+import {summarizeStoreAuditCoverage} from '../../lib/marketing_stack_review_coverage.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const OUT_DIR = path.join(ROOT, 'outputs', 'reports');
-const BI = JSON.parse(await fs.readFile(path.join(ROOT, 'outputs', 'bi-portal', 'data.json'), 'utf8'));
 const COST_DOC = JSON.parse(await fs.readFile(path.join(ROOT, 'tmp', 'mbrs', 'marketing-cost-map.json'), 'utf8'));
 const storesConfig = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
 
 async function main() {
-const args = parseArgs(process.argv.slice(2));
+const args = normalizeBiPortalSourceArgs(parseArgs(process.argv.slice(2)), ROOT);
+const now = new Date();
+const BI_SOURCE_SELECTION = await selectBiPortalSource({
+  root: ROOT,
+  biPortalData: args.biPortalData,
+  cloudBiSsh: args.cloudBiSsh,
+  cloudBiRoot: args.cloudBiRoot,
+  cloudBiSshTimeoutMs: args.cloudBiSshTimeoutMs,
+  cloudBiMaxBytes: args.cloudBiMaxBytes,
+  now,
+  maxAgeHours: args.biMaxAgeHours,
+});
+if (!BI_SOURCE_SELECTION.selected.data) {
+  throw new Error(`BI Portal data unavailable: ${BI_SOURCE_SELECTION.selected.source.status} ${BI_SOURCE_SELECTION.selected.source.error || ''}`.trim());
+}
+const BI = BI_SOURCE_SELECTION.selected.data;
+const BI_SOURCE_SUMMARY = summarizeBiPortalSourceForReport(BI_SOURCE_SELECTION);
 const dateTag = args.date || formatDate(new Date());
 const storeOrder = args.stores.length ? args.stores : storesConfig.stores.filter(s => s.enabled).map(s => s.storeKey);
 const selectedStores = storesConfig.stores.filter(s => storeOrder.includes(s.storeKey));
@@ -26,6 +48,7 @@ const storeDocs = await loadStoreDocs(args.sourceDirs, storeOrder);
 const detailRows = [];
 const couponRows = [];
 const storeStatuses = [];
+const scanTimes = [];
 
 for (const storeKey of storeOrder) {
   const doc = storeDocs.get(storeKey);
@@ -35,20 +58,19 @@ for (const storeKey of storeOrder) {
   }
   const rows = doc.rows || [];
   const coupons = doc.couponSummaries || [];
+  for (const t of [doc.startedAt, doc.finishedAt, doc.createdAt]) {
+    const d = parseAnyDateTime(t);
+    if (d) scanTimes.push(d);
+  }
   detailRows.push(...rows.map(stripRaw));
   couponRows.push(...coupons.map(stripRaw));
-  const diag = (doc.activityFetchDiagnostics || []).map(x => [x.code, x.msg].filter(Boolean).join(' ')).filter(Boolean).join('；');
-  storeStatuses.push({
-    storeKey,
-    ok: Boolean(doc.ok && rows.length > 0),
-    rowCount: rows.length,
-    couponCount: coupons.length,
-    issue: rows.length ? '' : (diag || doc.error || 'no_rows'),
-  });
+  storeStatuses.push(summarizeStoreAuditCoverage(doc, storeKey));
 }
 
-const limitRows = buildLimitDiscountRows(BI);
+const limitRows = buildLimitDiscountRows(BI, BI_SOURCE_SUMMARY);
 const summaryRows = summarizeBySku(detailRows);
+const activityScanCreatedAt = scanTimes.length ? new Date(Math.min(...scanTimes.map(d => d.getTime()))).toISOString() : '';
+const activityScanFinishedAt = scanTimes.length ? new Date(Math.max(...scanTimes.map(d => d.getTime()))).toISOString() : '';
 const base = path.join(OUT_DIR, `marketing-stack-review-${dateTag}`);
 const files = {
   detailCsv: `${base}-detail.csv`,
@@ -65,14 +87,16 @@ await writeCsv(files.bySkuCsv, summaryRows, SUMMARY_HEADERS);
 await writeCsv(files.couponCsv, couponRows, COUPON_HEADERS);
 await writeCsv(files.limitDiscountCsv, limitRows, LIMIT_HEADERS);
 await fs.writeFile(files.json, JSON.stringify({
-  createdAt: new Date().toISOString(),
+  createdAt: activityScanCreatedAt || now.toISOString(),
+  activityScanCreatedAt,
+  activityScanFinishedAt,
+  rebuiltAt: now.toISOString(),
   rebuiltFrom: args.sourceDirs.map(d => path.relative(ROOT, d)),
   source: {
-    biGeneratedAt: BI.generatedAt || '',
-    biLinkDate: BI.dates?.linkDate || '',
-    biLinkUpdatedAt: BI.dates?.linkUpdatedAt || BI.dates?.linkWarehouseUpdatedAt || '',
+    ...BI_SOURCE_SUMMARY,
     costSource: COST_DOC.source || '',
   },
+  biSourceDiagnostics: BI_SOURCE_SELECTION.diagnostics.map(d => ({type: d.type, source: d.source})),
   selectedStores: selectedStores.map(s => ({storeKey: s.storeKey, groupKey: s.groupKey, shopName: s.shopName})),
   storeStatuses,
   missingStores: storeStatuses.filter(s => !s.ok).map(s => s.storeKey),
@@ -85,7 +109,20 @@ await fs.writeFile(files.json, JSON.stringify({
   couponRows,
   limitRows,
 }, null, 2), 'utf8');
-await fs.writeFile(files.md, renderMarkdown({dateTag, storeStatuses, summaryRows, detailRows, couponRows, limitRows, files}), 'utf8');
+await fs.writeFile(files.md, renderMarkdown({
+  dateTag,
+  storeStatuses,
+  summaryRows,
+  detailRows,
+  couponRows,
+  limitRows,
+  files,
+  bi: BI,
+  biSourceSummary: BI_SOURCE_SUMMARY,
+  activityScanCreatedAt,
+  activityScanFinishedAt,
+  rebuiltAt: now.toISOString(),
+}), 'utf8');
 
 console.log(JSON.stringify({
   dateTag,
@@ -96,20 +133,62 @@ console.log(JSON.stringify({
   summaryRows: summaryRows.length,
   couponRows: couponRows.length,
   limitRows: limitRows.length,
+  activityScanCreatedAt,
+  activityScanFinishedAt,
+  rebuiltAt: now.toISOString(),
+  biSource: BI_SOURCE_SUMMARY,
   files,
 }, null, 2));
 }
 
 function parseArgs(argv) {
-  const out = {sourceDirs: [], stores: [], date: ''};
+  const out = {
+    sourceDirs: [],
+    stores: [],
+    date: '',
+    biPortalData: '',
+    cloudBiSsh: '',
+    cloudBiRoot: '',
+    cloudBiSshTimeoutMs: null,
+    cloudBiMaxBytes: null,
+    biMaxAgeHours: 72,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
+    const biArgIndex = addBiPortalSourceArgs(out, argv, i);
+    if (biArgIndex !== i) {
+      i = biArgIndex;
+      continue;
+    }
     if (a === '--source-dirs') out.sourceDirs = String(argv[++i] || '').split(',').map(s => path.resolve(ROOT, s.trim())).filter(Boolean);
     else if (a === '--stores') out.stores = String(argv[++i] || '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
     else if (a === '--date') out.date = String(argv[++i] || '').trim();
   }
   if (!out.sourceDirs.length) throw new Error('Missing --source-dirs');
   return out;
+}
+
+function parseLocalDateTime(value) {
+  const s = String(value || '').trim();
+  if (!s) return null;
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if (!m) return null;
+  return new Date(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    Number(m[4] || 0),
+    Number(m[5] || 0),
+    Number(m[6] || 0),
+  );
+}
+
+function parseAnyDateTime(value) {
+  const s = String(value || '').trim();
+  if (!s) return null;
+  const parsed = new Date(s);
+  if (Number.isFinite(parsed.getTime())) return parsed;
+  return parseLocalDateTime(s);
 }
 
 async function loadStoreDocs(dirs, stores) {
@@ -132,7 +211,7 @@ function stripRaw(row) {
   return out;
 }
 
-function buildLimitDiscountRows(bi) {
+function buildLimitDiscountRows(bi, sourceSummary = {}) {
   const rows = [];
   const seen = new Set();
   for (const r of [...(bi.storeLinks || []), ...(bi.links || [])]) {
@@ -150,7 +229,7 @@ function buildLimitDiscountRows(bi) {
       '标准货号': standard,
       '限时折扣名称': names.join(' / '),
       '限时折扣价SAR': '',
-      '来源': 'outputs/bi-portal/data.json performance_activity_names',
+      '来源': `${sourceSummary.biDataPath || 'outputs/bi-portal/data.json'} performance_activity_names`,
       '数据日期': r.link_date || bi.dates?.linkDate || '',
       '风险提示': '只读审核已发现限时折扣标签，但当前脚本未读取到限时折扣价；报名/用券前必须人工复核或专项扫描。',
       '修改意见/备注': '',
@@ -195,7 +274,20 @@ function summarizeBySku(rows) {
   return out.sort((a, b) => String(a['标准货号']).localeCompare(String(b['标准货号']), 'zh-Hans-CN'));
 }
 
-function renderMarkdown({dateTag, storeStatuses, summaryRows, detailRows, couponRows, limitRows, files}) {
+function renderMarkdown({
+  dateTag,
+  storeStatuses,
+  summaryRows,
+  detailRows,
+  couponRows,
+  limitRows,
+  files,
+  bi = {},
+  biSourceSummary = {},
+  activityScanCreatedAt = '',
+  activityScanFinishedAt = '',
+  rebuiltAt = '',
+}) {
   const completed = storeStatuses.filter(s => s.ok);
   const missing = storeStatuses.filter(s => !s.ok);
   const risky = detailRows.filter(r => r['风险提示']).length;
@@ -220,8 +312,11 @@ function renderMarkdown({dateTag, storeStatuses, summaryRows, detailRows, coupon
     `- 有风险提示明细行：${risky}`,
     `- 含仓储费利润率低于 20% 行：${lowMargin}`,
     `- 缺成本/仓储费口径行：${missingCost}`,
-    `- BI 数据时间：${BI.generatedAt || ''}`,
-    `- 链接活动标签日期：${BI.dates?.linkDate || ''}`,
+    `- 活动扫描时间：${activityScanCreatedAt || '-'} ~ ${activityScanFinishedAt || '-'}`,
+    `- 重建时间：${rebuiltAt || '-'}`,
+    `- BI 数据时间：${bi.generatedAt || ''}`,
+    `- BI 数据来源：${biSourceSummary.biDataPath || ''}（transport=${biSourceSummary.biDataTransport || ''}, fallback=${biSourceSummary.biFallbackUsed ? 'yes' : 'no'}, status=${biSourceSummary.biStatus || ''}）`,
+    `- 链接活动标签日期：${bi.dates?.linkDate || ''}`,
     `- 成本来源：${COST_DOC.source || ''}`,
     '',
     '## 文件',
