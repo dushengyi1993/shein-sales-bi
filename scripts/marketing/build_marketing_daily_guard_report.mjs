@@ -23,9 +23,11 @@ import {
 } from '../../lib/marketing_coupon_policy.mjs';
 import {summarizeCouponBudgetStatus} from '../../lib/marketing_coupon_budget_guard.mjs';
 import {
+  buildMarketingStackDetailIndex,
   classifyKnownOrdinaryCouponStack,
   groupOrdinaryEvidenceBySkc,
   loadKnownOrdinaryPriceEvidence,
+  stackRowsHaveExistingOrdinaryMarketingLabel,
 } from '../../lib/marketing_ordinary_price_evidence.mjs';
 import {summarizeStackReviewCoverage} from '../../lib/marketing_stack_review_coverage.mjs';
 
@@ -60,6 +62,7 @@ const STALE_BLOCKER_SOURCE_LABELS = new Set([
   'lowPriceOverlapCancelList',
   'oldOrdinaryOverlapLive',
   'oldOrdinaryOverlapCancelList',
+  'marketingStackReview',
 ]);
 
 function parseArgs(argv) {
@@ -275,32 +278,6 @@ function countBy(rows, field) {
   return out;
 }
 
-function buildStackDetailIndex(stackDoc) {
-  const map = new Map();
-  const detailRows = Array.isArray(stackDoc?.detailRows) ? stackDoc.detailRows : [];
-  for (const row of detailRows) {
-    const storeKey = String(row['店铺'] || row.storeKey || row.store || '').trim().toUpperCase();
-    const skc = String(row.SKC || row.skc || '').trim();
-    if (!storeKey || !skc) continue;
-    const key = `${storeKey}__${skc}`;
-    if (!map.has(key)) map.set(key, []);
-    map.get(key).push(row);
-  }
-  return map;
-}
-
-function hasExistingOrdinaryMarketingLabel(stackRows) {
-  return (stackRows || []).some(row => {
-    const text = [
-      row?.['普通营销活动价/折扣'],
-      row?.['风险提示'],
-      row?.ordinaryMarketingSummary,
-      row?.risk,
-    ].filter(Boolean).join(' ');
-    return /既有(?:普通活动)?标签|既有普通营销活动|旧普通活动|度假季/.test(text);
-  });
-}
-
 function countOrderStatuses(orderAuditFiles) {
   const statusCounts = {};
   let rows = 0;
@@ -478,7 +455,7 @@ async function loadKnownOrdinaryCancelMitigation(reportDate) {
 }
 
 function summarizeKnownOrdinaryActivityGuard({couponPlan, ordinaryEvidenceByStore, stackDoc, cancelMitigation}) {
-  const detailIndex = buildStackDetailIndex(stackDoc);
+  const detailIndex = buildMarketingStackDetailIndex(stackDoc);
   const storeKeys = [...new Set([
     ...mapKeys(couponPlan?.rowsByStore),
     ...mapKeys(couponPlan?.allowed15ByStore || couponPlan?.byStore),
@@ -549,7 +526,7 @@ function summarizeKnownOrdinaryActivityGuard({couponPlan, ordinaryEvidenceByStor
         continue;
       }
 
-      if (hasExistingOrdinaryMarketingLabel(stackRows)) {
+      if (stackRowsHaveExistingOrdinaryMarketingLabel(stackRows)) {
         const out = {
           storeKey,
           skc: planRow.skc,
@@ -1549,7 +1526,19 @@ async function main() {
       if (CRITICAL_SOURCE_LABELS.has(src.label)) unknownSources.push({label: src.label, path: src.path, status: src.status});
     }
     if (src.status === 'stale' && STALE_BLOCKER_SOURCE_LABELS.has(src.label)) {
-      addBlocker(blockers, 'source_stale', `${src.label} 已超过 ${args.maxAgeHours} 小时`, {path: src.path, artifactAgeHours: src.artifactAgeHours, dataAgeHours: src.dataAgeHours});
+      const thresholdHours = Number.isFinite(Number(src.activityFreshnessThresholdHours))
+        ? Number(src.activityFreshnessThresholdHours)
+        : args.maxAgeHours;
+      const message = src.label === 'marketingStackReview'
+        ? `${src.label} 活动扫描已超过 ${thresholdHours} 小时，系统必须先刷新只读营销叠加审核/取证，不能自动执行或给 no-action`
+        : `${src.label} 已超过 ${thresholdHours} 小时`;
+      addBlocker(blockers, 'source_stale', message, {
+        path: src.path,
+        artifactAgeHours: src.artifactAgeHours,
+        dataAgeHours: src.dataAgeHours,
+        activityAgeHours: src.activityAgeHours,
+        thresholdHours,
+      });
     } else if (src.status === 'stale') {
       sourceWarnings.push({
         code: 'source_stale',

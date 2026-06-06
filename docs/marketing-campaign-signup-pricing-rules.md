@@ -327,8 +327,9 @@
    - `2026-06-05` 起，提交脚本默认会 live 读取当前/未来仍有效的限时折扣活动；目标 SKC 如果仍在 active/future 限时折扣里，限时折扣扫描只能先给出兜底层测算。最终是否低于/命中/高于目标，必须合并同一时间窗口的普通营销活动价、当前售价和优惠券后，用最低有效基准价对比 `finalTargetPrice`。只有最终有效价低于目标价或关键价格证据缺失时才排除；命中目标或只是“限时折扣兜底层高于目标”时允许继续报券，不能因“有旧限时折扣标签”机械跳过。
    - `--allow-limited-discount-overlap` 只能作为已逐 `SKC` 复核的人工临时覆盖；默认策略仍是价格栈守卫。任何覆盖都要在输出里保留 `effectiveBasePrice/effectiveBaseSource/couponFactor/effectiveFinalWithCoupon/targetFinalPrice/diff`；如果只有限时折扣价证据，必须标记为兜底层候选而不是最终成交价结论。
    - 如果本期计划内 SKC 因旧限时折扣被价格栈守卫排除，默认补救顺序是：先确认是否真的低于目标价；若低于，取消或修改旧限时折扣（限时折扣优先级最低、可随时取消/修改），再补报配套优惠券；若不低于，不能因为“有旧限时折扣”就跳过计划内优惠券。
+   - 提交脚本还必须加载最新 `marketing-stack-review` 和旧普通活动填报价证据；活动扫描超过 48 小时、stack review 不可用、旧活动价证据目录缺失/解析失败，或目标 SKC 有旧普通/度假季标签但没有旧活动价证据时，写路径 fail closed，不提交。缺证据的下一步是系统只读查价/刷新叠加审核，取不到才报告登录、接口或店铺身份阻塞。提交器遇到登录页或券集合接口 `20302` 时，也要先用真实鼠标点击登录/继续登录并重试，恢复失败才停止为登录阻塞。
 3. **只读复扫口径**
-   - `scripts/marketing/export_marketing_stack_review.mjs --coupon-target-plan <plan.json>` 会输出 allowed15 配套计划校验列；可额外传 `--coupon-price-overrides <price-overrides.json>` 明确覆盖价来源。
+   - `scripts/marketing/export_marketing_stack_review.mjs --coupon-target-plan <plan.json>` 会输出 allowed15 配套计划校验列；可额外传 `--coupon-price-overrides <price-overrides.json>` 明确覆盖价来源。遇到 MBRs `20302 子系统登录重定向` 时，脚本会进入登录页并用真实鼠标点击登录/继续登录后重试；仍失败才把具体店铺列为登录阻塞。
    - 叠加审核的 BI 标签上下文默认应使用云端权威快照：`--cloud-bi-ssh shein-bi-tencent --cloud-bi-root /opt/shein-bi/app`，或显式 `--bi-portal-data <data.json>`。输出必须记录 `source.biGeneratedAt / biDataPath / biDataTransport / biFallbackUsed`；不得把本地灾备 `outputs/bi-portal/data.json` 当成实时云端事实。
    - 若用 `rebuild_marketing_stack_review_from_store_audits.mjs` 从已有 store audit 重建，只能刷新 BI context 和汇总表，不能把 `rebuiltAt` 当活动扫描时间；T-3/普通活动候选的新鲜度必须看 `activityScanCreatedAt/activityScanFinishedAt`，并要求 `missingStores=[]`。
    - 优先看 `15%券档active是否符合允许计划`、`15%券档允许配套计划数`、`15%券档禁止/未知仍active数`、`15%券档active但不在允许计划数`。

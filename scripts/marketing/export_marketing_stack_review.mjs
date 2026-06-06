@@ -33,6 +33,8 @@ import {
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
+const encodeRedirect = url => Buffer.from(url, 'utf8').toString('base64');
+const MBR_LOGIN_URL = `https://sso.geiwohuo.com/#/login/GMPSSO/${encodeRedirect(LIST_URL)}`;
 const COUPON_DETAIL_URL = activityId => `https://sso.geiwohuo.com/#/mbrs/marketing/coupon/detail/${activityId}`;
 const OUT_DIR = path.join(ROOT, 'outputs', 'reports');
 const TMP_ROOT = path.join(ROOT, 'tmp', 'mbrs');
@@ -340,6 +342,7 @@ async function scanStore(store) {
     }
     cdp = await connectStore(store);
     listPage = await newPage(cdp, LIST_URL);
+    result.loginRecovery = await recoverLoginIfNeeded(cdp, listPage.sessionId);
     result.pageInfo = await evalJs(cdp, listPage.sessionId, `
       return {
         href: location.href,
@@ -347,8 +350,17 @@ async function scanStore(store) {
         bodyTextSample: String(document.body?.innerText || '').replace(/\\s+/g, ' ').slice(0, 300)
       };
     `).catch(err => ({error: err.message}));
-    const activities = await fetchActivities(cdp, listPage.sessionId);
+    let activities = await fetchActivities(cdp, listPage.sessionId);
+    if (activityDiagnosticsNeedLogin(fetchActivities.lastDiagnostics)) {
+      result.loginRecoveryAfter20302 = await recoverMbrsLoginAndRetry(cdp, listPage.sessionId);
+      activities = await fetchActivities(cdp, listPage.sessionId);
+    }
     result.activityFetchDiagnostics = fetchActivities.lastDiagnostics || [];
+    if (activityDiagnosticsFailed(result.activityFetchDiagnostics)) {
+      result.reason = `营销活动列表读取失败：${formatActivityDiagnostics(result.activityFetchDiagnostics)}`;
+      console.log(`[${store.storeKey}] activity list failed: ${result.reason}`);
+      return result;
+    }
     const scoped = activities.filter(withinScope);
     const ordinary = scoped.filter(a => !isCouponActivity(a));
     const coupons = scoped.filter(isCouponActivity);
@@ -766,6 +778,93 @@ async function fetchActivities(cdp, sessionId) {
     firstActivityName: p.list?.[0]?.activity_name || '',
   }));
   return list;
+}
+
+function activityDiagnosticsNeedLogin(diagnostics = []) {
+  return (diagnostics || []).some(d => String(d?.code || '').trim() === '20302');
+}
+
+function activityDiagnosticsFailed(diagnostics = []) {
+  return (diagnostics || []).some(d => {
+    const code = String(d?.code || '').trim();
+    return code && !(code === '0' || code.toUpperCase() === 'OK');
+  });
+}
+
+function formatActivityDiagnostics(diagnostics = []) {
+  return (diagnostics || [])
+    .filter(d => {
+      const code = String(d?.code || '').trim();
+      return code && !(code === '0' || code.toUpperCase() === 'OK');
+    })
+    .map(d => [d.page ? `page=${d.page}` : '', d.code, d.msg].filter(Boolean).join(' '))
+    .join('；') || 'unknown';
+}
+
+async function readPageLoginState(cdp, sessionId) {
+  return await evalJs(cdp, sessionId, `
+    const text = document.body?.innerText || '';
+    return {
+      href: location.href,
+      title: document.title || '',
+      isLogin: location.href.includes('/login/') || text.includes('请输入账号') || text.includes('请输入密码') || (text.includes('账号登录') && text.includes('密码') && text.includes('登录')),
+      tail: text.slice(-1000),
+    };
+  `).catch(err => ({href: '', title: '', isLogin: false, error: err.message, tail: ''}));
+}
+
+async function clickLoginOnce(cdp, sessionId) {
+  const target = await evalJs(cdp, sessionId, `
+    const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    const textOf = el => (el?.innerText || el?.textContent || '').trim();
+    const buttons = [...document.querySelectorAll('button,[role=button]')]
+      .filter(visible)
+      .map(el => ({el, text: textOf(el), disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true'}));
+    const btn = buttons.find(x => !x.disabled && x.text.includes('继续登录') && x.text.length <= 20)
+      || buttons.find(x => !x.disabled && x.text === '登录')
+      || buttons.find(x => !x.disabled && x.text.includes('登录') && x.text.length <= 12);
+    if (!btn) return {found: false, href: location.href, buttons: buttons.map(x => x.text).filter(Boolean).slice(0, 20), tail: (document.body?.innerText || '').slice(-800)};
+    btn.el.scrollIntoView({block: 'center', inline: 'center'});
+    const rect = btn.el.getBoundingClientRect();
+    return {found: true, href: location.href, text: btn.text, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+  `);
+  if (!target.found) return {clicked: false, ...target};
+  await cdp.call('Input.dispatchMouseEvent', {type: 'mouseMoved', x: target.x, y: target.y, button: 'none'}, sessionId);
+  await cdp.call('Input.dispatchMouseEvent', {type: 'mousePressed', x: target.x, y: target.y, button: 'left', clickCount: 1}, sessionId);
+  await cdp.call('Input.dispatchMouseEvent', {type: 'mouseReleased', x: target.x, y: target.y, button: 'left', clickCount: 1}, sessionId);
+  return {clicked: true, ...target};
+}
+
+async function recoverLoginIfNeeded(cdp, sessionId) {
+  const before = await readPageLoginState(cdp, sessionId);
+  if (!before.isLogin) return {needed: false, before, after: before};
+  const attempts = [];
+  let after = before;
+  for (let attemptNo = 1; attemptNo <= 4; attemptNo += 1) {
+    const clicked = await clickLoginOnce(cdp, sessionId);
+    attempts.push({attemptNo, ...clicked});
+    await sleep(String(clicked.text || '').includes('继续登录') ? 2000 : 5000);
+    after = await readPageLoginState(cdp, sessionId);
+    if (!after.isLogin) break;
+    if (attemptNo === 2) {
+      await evalJs(cdp, sessionId, `location.reload(); return {href: location.href};`);
+      await sleep(2500);
+      after = await readPageLoginState(cdp, sessionId);
+      if (!after.isLogin) break;
+    }
+  }
+  return {needed: true, before, attempts, after};
+}
+
+async function recoverMbrsLoginAndRetry(cdp, sessionId) {
+  const before = await readPageLoginState(cdp, sessionId);
+  await evalJs(cdp, sessionId, `location.href = __arg.url; return {href: location.href};`, {url: MBR_LOGIN_URL});
+  await sleep(3500);
+  const loginRecovery = await recoverLoginIfNeeded(cdp, sessionId);
+  await evalJs(cdp, sessionId, `location.href = __arg.url; return {href: location.href};`, {url: LIST_URL});
+  await sleep(3500);
+  const after = await readPageLoginState(cdp, sessionId);
+  return {needed: true, before, loginRecovery, after};
 }
 
 async function fetchActivityDetail(cdp, sessionId, activityId) {
@@ -1747,9 +1846,12 @@ function stripRowsForAudit(result) {
     groupKey: result.groupKey,
     ok: result.ok,
     error: result.error || '',
+    reason: result.reason || '',
     startedAt: result.startedAt,
     finishedAt: result.finishedAt,
     pageInfo: result.pageInfo || null,
+    loginRecovery: result.loginRecovery || null,
+    loginRecoveryAfter20302: result.loginRecoveryAfter20302 || null,
     activityFetchDiagnostics: result.activityFetchDiagnostics || [],
     activities: result.activities,
     couponSummaries: (result.couponSummaries || []).map(c => {

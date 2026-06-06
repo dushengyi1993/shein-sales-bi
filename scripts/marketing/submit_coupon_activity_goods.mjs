@@ -35,9 +35,11 @@ import {
   summarizeCouponTargetEligibilityPlan,
 } from '../../lib/marketing_coupon_policy.mjs';
 import {
+  buildMarketingStackDetailIndex,
   classifyKnownOrdinaryCouponStack,
   groupOrdinaryEvidenceBySkc,
   loadKnownOrdinaryPriceEvidence,
+  stackRowsHaveExistingOrdinaryMarketingLabel,
 } from '../../lib/marketing_ordinary_price_evidence.mjs';
 import {
   requireStoreIdentitySnapshot,
@@ -55,6 +57,7 @@ const STORES = STORES_CONFIG.stores || [];
 const STORE_ACCOUNT_TRUTH = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'store_account_truth.json'), 'utf8'));
 const COUPON_LEVEL_RULES = await readJsonIfExists(path.join(ROOT, 'config', 'marketing_coupon_level_rules.json'), {activities: {}});
 const ACTIVE_OR_FUTURE_LIMITED_STATES = new Set(['2', '3']);
+const MARKETING_STACK_REVIEW_MAX_AGE_HOURS = 48;
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -116,6 +119,94 @@ async function readJsonIfExists(file, fallback) {
     if (err?.code === 'ENOENT') return fallback;
     throw err;
   }
+}
+
+function rel(file) {
+  if (!file) return '';
+  return path.relative(ROOT, file).replaceAll('\\', '/');
+}
+
+function listFiles(dir, regex) {
+  if (!fsSync.existsSync(dir)) return [];
+  return fsSync.readdirSync(dir, {withFileTypes: true})
+    .filter(entry => entry.isFile() && regex.test(entry.name))
+    .map(entry => path.join(dir, entry.name))
+    .sort((a, b) => fsSync.statSync(b).mtimeMs - fsSync.statSync(a).mtimeMs);
+}
+
+function parseAnyDateTime(value) {
+  const s = String(value || '').trim();
+  if (!s) return null;
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(s)
+    ? `${s.replace(' ', 'T')}+08:00`
+    : s;
+  const d = new Date(normalized);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function ageHours(now, then) {
+  const d = then instanceof Date ? then : parseAnyDateTime(then);
+  if (!d || Number.isNaN(d.getTime())) return null;
+  return Math.round(((now.getTime() - d.getTime()) / 36_000)) / 100;
+}
+
+async function loadMarketingStackReviewForKnownOrdinaryGuard() {
+  const reportsDir = path.join(ROOT, 'outputs', 'reports');
+  const file = listFiles(reportsDir, /^marketing-stack-review-\d{4}-\d{2}-\d{2}\.json$/)[0] || '';
+  const source = {
+    label: 'marketingStackReview',
+    path: rel(file),
+    status: file ? 'ok' : 'missing',
+    activityScanCreatedAt: '',
+    activityScanFinishedAt: '',
+    rebuiltAt: '',
+    activityAgeHours: null,
+    thresholdHours: MARKETING_STACK_REVIEW_MAX_AGE_HOURS,
+    reason: '',
+  };
+  if (!file) {
+    source.reason = 'latest_marketing_stack_review_missing';
+    return {source, data: null, detailIndex: new Map(), usable: false};
+  }
+  try {
+    const data = await readJsonIfExists(file, null);
+    source.activityScanCreatedAt = data?.activityScanCreatedAt || data?.createdAt || '';
+    source.activityScanFinishedAt = data?.activityScanFinishedAt || '';
+    source.rebuiltAt = data?.rebuiltAt || '';
+    const activityDate = parseAnyDateTime(source.activityScanCreatedAt)
+      || (fsSync.existsSync(file) ? fsSync.statSync(file).mtime : null);
+    source.activityAgeHours = activityDate ? ageHours(new Date(), activityDate) : null;
+    if (source.activityAgeHours !== null && source.activityAgeHours > MARKETING_STACK_REVIEW_MAX_AGE_HOURS) {
+      source.status = 'stale';
+      source.reason = 'activity_scan_stale';
+      return {source, data, detailIndex: buildMarketingStackDetailIndex(data), usable: false};
+    }
+    return {source, data, detailIndex: buildMarketingStackDetailIndex(data), usable: true};
+  } catch (err) {
+    source.status = 'parse_error';
+    source.reason = err.message;
+    return {source, data: null, detailIndex: new Map(), usable: false};
+  }
+}
+
+function defaultKnownOrdinaryActivityGuard() {
+  return {
+    policy: 'known-active-or-future-ordinary-price-stack-guard',
+    checked: false,
+    evidenceCount: 0,
+    overlapCount: 0,
+    existingOrdinaryLabelCount: 0,
+    evidenceIncompleteCount: 0,
+    excludedCount: 0,
+    excludedBelowTarget: 0,
+    allowedByTargetPrice: 0,
+    missingFinalTargetPrice: 0,
+    evidenceUnavailableStop: false,
+    priceToleranceSar: PRICE_GUARD_TOLERANCE_SAR,
+    sample: [],
+    allowedSample: [],
+    excludedSample: [],
+  };
 }
 
 function configuredCouponLevelRuleId(storeKey, activityId) {
@@ -329,6 +420,61 @@ async function gotoCouponDetail(cdp, activityId) {
     if (last?.hasLogin || last?.hasCouponDetail) return last;
   }
   return last || await snapshot(cdp).catch(err => ({error: err.message}));
+}
+
+async function readPageLoginState(cdp) {
+  return await cdp.eval(`
+    const text = document.body?.innerText || '';
+    return {
+      href: location.href,
+      title: document.title || '',
+      isLogin: location.href.includes('/login/') || text.includes('请输入账号') || text.includes('请输入密码') || (text.includes('账号登录') && text.includes('密码') && text.includes('登录')),
+      tail: text.slice(-1000),
+    };
+  `).catch(err => ({href: '', title: '', isLogin: false, error: err.message, tail: ''}));
+}
+
+async function clickLoginOnce(cdp) {
+  const target = await cdp.eval(`
+    const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    const textOf = el => (el?.innerText || el?.textContent || '').trim();
+    const buttons = [...document.querySelectorAll('button,[role=button]')]
+      .filter(visible)
+      .map(el => ({el, text: textOf(el), disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true'}));
+    const btn = buttons.find(x => !x.disabled && x.text.includes('继续登录') && x.text.length <= 20)
+      || buttons.find(x => !x.disabled && x.text === '登录')
+      || buttons.find(x => !x.disabled && x.text.includes('登录') && x.text.length <= 12);
+    if (!btn) return {found: false, href: location.href, buttons: buttons.map(x => x.text).filter(Boolean).slice(0, 20), tail: (document.body?.innerText || '').slice(-800)};
+    btn.el.scrollIntoView({block: 'center', inline: 'center'});
+    const rect = btn.el.getBoundingClientRect();
+    return {found: true, href: location.href, text: btn.text, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+  `);
+  if (!target.found) return {clicked: false, ...target};
+  await cdp.call('Input.dispatchMouseEvent', {type: 'mouseMoved', x: target.x, y: target.y, button: 'none'});
+  await cdp.call('Input.dispatchMouseEvent', {type: 'mousePressed', x: target.x, y: target.y, button: 'left', clickCount: 1});
+  await cdp.call('Input.dispatchMouseEvent', {type: 'mouseReleased', x: target.x, y: target.y, button: 'left', clickCount: 1});
+  return {clicked: true, ...target};
+}
+
+async function recoverLoginIfNeeded(cdp) {
+  const before = await readPageLoginState(cdp);
+  if (!before.isLogin) return {needed: false, before, after: before};
+  const attempts = [];
+  let after = before;
+  for (let attemptNo = 1; attemptNo <= 4; attemptNo += 1) {
+    const clicked = await clickLoginOnce(cdp);
+    attempts.push({attemptNo, ...clicked});
+    await sleep(String(clicked.text || '').includes('继续登录') ? 2000 : 5000);
+    after = await readPageLoginState(cdp);
+    if (!after.isLogin) break;
+    if (attemptNo === 2) {
+      await cdp.eval(`location.reload(); return {href: location.href};`);
+      await sleep(2500);
+      after = await readPageLoginState(cdp);
+      if (!after.isLogin) break;
+    }
+  }
+  return {needed: true, before, attempts, after};
 }
 
 async function clickContinueAndGetRuleId(cdp, activityId, discountMax, fallbackLevelRuleId = 0) {
@@ -789,7 +935,7 @@ async function uploadAndSubmit(cdp, filePath) {
   throw new Error(`submit did not reach success modal: ${JSON.stringify(last)}`);
 }
 
-async function processStore(store, args, targetPlan) {
+async function processStore(store, args, targetPlan, knownOrdinaryGuardContext = null) {
   const result = {
     store: store.storeKey,
     shopName: store.shopName,
@@ -798,14 +944,55 @@ async function processStore(store, args, targetPlan) {
     startedAt: new Date().toISOString(),
     ok: false,
   };
+  if (targetPlan) {
+    result.knownOrdinaryActivityGuard = defaultKnownOrdinaryActivityGuard();
+    result.knownOrdinaryActivityGuard.stackReviewSource = knownOrdinaryGuardContext?.source || null;
+    if (!knownOrdinaryGuardContext?.usable) {
+      const view = couponPlanStoreView(targetPlan, store.storeKey);
+      result.targetPlan = {
+        path: targetPlan.path,
+        mode: 'coupon_allowed15_from_price_overrides',
+        ordinaryPlanSkcs: view.allCount,
+        allowed15Skcs: view.allowedCount,
+        blockedSkcs: view.blockedCount,
+        categoryCounts: view.categoryCounts,
+        matchedAvailable: 0,
+        blockedSample: view.blockedRows.slice(0, 20),
+      };
+      result.target = {
+        mode: 'coupon-allowed15-intersection-15pct-available',
+        beforeLimitedDiscountGuard: 0,
+        beforeKnownOrdinaryActivityGuard: view.allowedCount,
+        targetCount: 0,
+        excludedByLimitedDiscountGuard: 0,
+        excludedByKnownOrdinaryActivityGuard: view.allowedCount,
+        excludedByKnownOrdinaryEvidenceIncomplete: view.allowedCount,
+        safetyStop: true,
+        safetyStopReason: 'marketing_stack_review_unavailable_or_stale',
+        alreadyEnrolled: 0,
+        toSubmit: 0,
+        sample: [],
+      };
+      result.knownOrdinaryActivityGuard.checked = false;
+      result.knownOrdinaryActivityGuard.evidenceUnavailableStop = true;
+      result.knownOrdinaryActivityGuard.evidenceIncompleteCount = view.allowedCount;
+      result.knownOrdinaryActivityGuard.excludedCount = view.allowedCount;
+      result.reason = '旧普通活动/度假季价格栈证据不可用或活动扫描过期，系统必须先刷新只读营销叠加审核/取证；取不到时才报告登录、接口或店铺身份阻塞。为避免错报 15% 券，本店停止提交。';
+      return result;
+    }
+  }
   let cdp = null;
   try {
     await ensureBrowser(store, args.activityId, args);
     cdp = await connectStorePage(store);
     result.initialPage = await gotoCouponDetail(cdp, args.activityId);
     if (result.initialPage?.hasLogin) {
-      result.reason = '营销子系统显示登录页，需人工登录';
-      return result;
+      result.loginRecovery = await recoverLoginIfNeeded(cdp);
+      result.initialPage = await gotoCouponDetail(cdp, args.activityId);
+      if (result.initialPage?.hasLogin) {
+        result.reason = '营销子系统显示登录页，自动点登录后仍未恢复，需人工登录';
+        return result;
+      }
     }
     result.identity = await assertCurrentStoreIdentity(cdp, store, 'submit_coupon_activity_goods');
     result.beforeActivity = await fetchActivity(cdp, args.activityId).catch(err => ({error: err.message}));
@@ -817,8 +1004,16 @@ async function processStore(store, args, targetPlan) {
     );
     result.ruleSnapshot = await snapshot(cdp).catch(err => ({error: err.message}));
 
-    const beforeAvailable = await queryLevelGoodsAll(cdp, args.activityId, result.rule.levelRuleId, 'MULTI_LEVEL_RULE_GOODS', args.pageSize);
-    const beforeEnrolled = await queryLevelGoodsAll(cdp, args.activityId, result.rule.levelRuleId, 'MULTI_LEVEL_RULE_ENROLLED_GOODS', args.pageSize);
+    let beforeAvailable = await queryLevelGoodsAll(cdp, args.activityId, result.rule.levelRuleId, 'MULTI_LEVEL_RULE_GOODS', args.pageSize);
+    if (beforeAvailable.code === '20302') {
+      result.availableLoginRecovery = await recoverLoginIfNeeded(cdp);
+      beforeAvailable = await queryLevelGoodsAll(cdp, args.activityId, result.rule.levelRuleId, 'MULTI_LEVEL_RULE_GOODS', args.pageSize);
+    }
+    let beforeEnrolled = await queryLevelGoodsAll(cdp, args.activityId, result.rule.levelRuleId, 'MULTI_LEVEL_RULE_ENROLLED_GOODS', args.pageSize);
+    if (beforeEnrolled.code === '20302') {
+      result.enrolledLoginRecovery = await recoverLoginIfNeeded(cdp);
+      beforeEnrolled = await queryLevelGoodsAll(cdp, args.activityId, result.rule.levelRuleId, 'MULTI_LEVEL_RULE_ENROLLED_GOODS', args.pageSize);
+    }
     result.beforeAvailable = {code: beforeAvailable.code, msg: beforeAvailable.msg, total: beforeAvailable.total, count: beforeAvailable.list.length, sample: beforeAvailable.list.slice(0, 10)};
     result.beforeEnrolled = {code: beforeEnrolled.code, msg: beforeEnrolled.msg, total: beforeEnrolled.total, count: beforeEnrolled.list.length, sample: beforeEnrolled.list.slice(0, 10)};
     if (beforeAvailable.code !== '0') {
@@ -918,54 +1113,99 @@ async function processStore(store, args, targetPlan) {
       result.limitedDiscountGuard.allowedSample = allowedRows.slice(0, 20);
       result.limitedDiscountGuard.excludedSample = excludedRows.slice(0, 20);
     }
-    result.knownOrdinaryActivityGuard = {
-      policy: 'known-active-or-future-ordinary-price-stack-guard',
-      checked: false,
-      evidenceCount: 0,
-      overlapCount: 0,
-      excludedCount: 0,
-      excludedBelowTarget: 0,
-      allowedByTargetPrice: 0,
-      missingFinalTargetPrice: 0,
-      priceToleranceSar: PRICE_GUARD_TOLERANCE_SAR,
-      sample: [],
-      allowedSample: [],
-      excludedSample: [],
-    };
+    result.knownOrdinaryActivityGuard = result.knownOrdinaryActivityGuard || defaultKnownOrdinaryActivityGuard();
     if (targetPlan) {
       const ordinaryEvidence = await loadKnownOrdinaryPriceEvidence({root: ROOT, storeKey: store.storeKey});
       const ordinaryBySkc = groupOrdinaryEvidenceBySkc(ordinaryEvidence.rows);
       const targetBeforeKnownOrdinaryGuard = targetSkcs.slice();
       result.knownOrdinaryActivityGuard.checked = true;
       result.knownOrdinaryActivityGuard.evidenceCount = ordinaryEvidence.rows.length;
+      result.knownOrdinaryActivityGuard.stackReviewSource = knownOrdinaryGuardContext?.source || null;
       result.knownOrdinaryActivityGuard.source = {
         dir: path.relative(ROOT, ordinaryEvidence.dir),
         nowLocal: ordinaryEvidence.nowLocal,
+        diagnostics: ordinaryEvidence.diagnostics,
+        filesRead: ordinaryEvidence.filesRead,
+        parseErrorCount: ordinaryEvidence.parseErrorCount,
       };
-      const overlapRows = targetSkcs
-        .filter(skc => ordinaryBySkc.has(skc))
-        .map(skc => {
-          const planRow = findCouponPlanRow(targetPlan, store.storeKey, skc);
-          const evidenceRows = ordinaryBySkc.get(skc) || [];
+      const evidenceUnavailable = ordinaryEvidence.diagnostics.some(d => d.type === 'dir_missing')
+        || Number(ordinaryEvidence.parseErrorCount || 0) > 0;
+      const overlapRows = [];
+      const incompleteRows = [];
+      const unavailableRows = [];
+      for (const skc of targetSkcs) {
+        const planRow = findCouponPlanRow(targetPlan, store.storeKey, skc);
+        const evidenceRows = ordinaryBySkc.get(skc) || [];
+        const stackRows = knownOrdinaryGuardContext?.detailIndex?.get(`${store.storeKey}__${skc}`) || [];
+        const hasExistingOrdinaryLabel = stackRowsHaveExistingOrdinaryMarketingLabel(stackRows);
+        if (evidenceUnavailable) {
+          unavailableRows.push({
+            skc,
+            supplierNo: planRow?.supplierNo || '',
+            canonical: planRow?.canonical || '',
+            decision: 'known_ordinary_evidence_unavailable',
+            reason: 'deadline_fill_price_evidence_missing_or_parse_error',
+            stackReviewHasExistingOrdinaryLabel: hasExistingOrdinaryLabel,
+            stackReviewSamples: stackRows.slice(0, 3).map(stackRow => ({
+              activityId: stackRow['活动ID'] || '',
+              activityName: stackRow['活动名称'] || '',
+              eventStart: stackRow['普通活动开始'] || '',
+              eventEnd: stackRow['普通活动结束'] || '',
+              ordinarySummary: stackRow['普通营销活动价/折扣'] || '',
+              risk: stackRow['风险提示'] || '',
+            })),
+          });
+          continue;
+        }
+        if (evidenceRows.length) {
           const priceGuard = classifyKnownOrdinaryCouponStack(evidenceRows, planRow, args.discountMax);
-          return {
+          overlapRows.push({
             skc,
             supplierNo: planRow?.supplierNo || priceGuard.lowestOrdinaryEvidence?.supplierNo || '',
             canonical: planRow?.canonical || priceGuard.lowestOrdinaryEvidence?.canonical || '',
+            stackReviewHasExistingOrdinaryLabel: hasExistingOrdinaryLabel,
             priceGuard,
             evidenceRows: evidenceRows.slice(0, 5),
-          };
-        });
-      const excludedRows = overlapRows.filter(row => !row.priceGuard.allowSubmit);
+          });
+          continue;
+        }
+        if (hasExistingOrdinaryLabel) {
+          incompleteRows.push({
+            skc,
+            supplierNo: planRow?.supplierNo || '',
+            canonical: planRow?.canonical || '',
+            decision: 'known_ordinary_evidence_incomplete',
+            reason: 'stack_review_has_existing_ordinary_label_but_no_known_ordinary_price',
+            stackReviewSamples: stackRows.slice(0, 3).map(stackRow => ({
+              activityId: stackRow['活动ID'] || '',
+              activityName: stackRow['活动名称'] || '',
+              eventStart: stackRow['普通活动开始'] || '',
+              eventEnd: stackRow['普通活动结束'] || '',
+              ordinarySummary: stackRow['普通营销活动价/折扣'] || '',
+              risk: stackRow['风险提示'] || '',
+            })),
+          });
+        }
+      }
+      const excludedRows = [
+        ...overlapRows.filter(row => !row.priceGuard.allowSubmit),
+        ...incompleteRows,
+        ...unavailableRows,
+      ];
       const allowedRows = overlapRows.filter(row => row.priceGuard.allowSubmit);
       const excludedSet = new Set(excludedRows.map(row => row.skc));
       targetSkcs = targetSkcs.filter(skc => !excludedSet.has(skc));
       result.knownOrdinaryActivityGuard.overlapCount = overlapRows.length;
       result.knownOrdinaryActivityGuard.excludedCount = excludedRows.length;
-      result.knownOrdinaryActivityGuard.excludedBelowTarget = excludedRows.filter(row => row.priceGuard.decision === 'known_ordinary_final_below_target').length;
+      result.knownOrdinaryActivityGuard.existingOrdinaryLabelCount = incompleteRows.length
+        + overlapRows.filter(row => row.stackReviewHasExistingOrdinaryLabel).length
+        + unavailableRows.filter(row => row.stackReviewHasExistingOrdinaryLabel).length;
+      result.knownOrdinaryActivityGuard.evidenceIncompleteCount = incompleteRows.length + unavailableRows.length;
+      result.knownOrdinaryActivityGuard.evidenceUnavailableStop = unavailableRows.length > 0;
+      result.knownOrdinaryActivityGuard.excludedBelowTarget = excludedRows.filter(row => row.priceGuard?.decision === 'known_ordinary_final_below_target').length;
       result.knownOrdinaryActivityGuard.allowedByTargetPrice = allowedRows.length;
-      result.knownOrdinaryActivityGuard.missingFinalTargetPrice = excludedRows.filter(row => row.priceGuard.decision === 'missing_final_target_price').length;
-      result.knownOrdinaryActivityGuard.sample = overlapRows.slice(0, 20);
+      result.knownOrdinaryActivityGuard.missingFinalTargetPrice = excludedRows.filter(row => row.priceGuard?.decision === 'missing_final_target_price').length;
+      result.knownOrdinaryActivityGuard.sample = [...overlapRows, ...incompleteRows, ...unavailableRows].slice(0, 20);
       result.knownOrdinaryActivityGuard.allowedSample = allowedRows.slice(0, 20);
       result.knownOrdinaryActivityGuard.excludedSample = excludedRows.slice(0, 20);
       result.knownOrdinaryActivityGuard.beforeGuardCount = targetBeforeKnownOrdinaryGuard.length;
@@ -978,20 +1218,30 @@ async function processStore(store, args, targetPlan) {
       targetCount: targetSkcs.length,
       excludedByLimitedDiscountGuard: result.limitedDiscountGuard.excludedCount,
       excludedByKnownOrdinaryActivityGuard: result.knownOrdinaryActivityGuard.excludedCount,
+      excludedByKnownOrdinaryEvidenceIncomplete: result.knownOrdinaryActivityGuard.evidenceIncompleteCount,
       safetyStop: targetPlan && targetSkcs.length === 0 && (
         result.limitedDiscountGuard.excludedCount > 0
         || result.knownOrdinaryActivityGuard.excludedCount > 0
       ),
+      safetyStopReason: targetPlan && targetSkcs.length === 0 && result.knownOrdinaryActivityGuard.evidenceUnavailableStop
+        ? 'known_ordinary_evidence_unavailable'
+        : (targetPlan && targetSkcs.length === 0 && result.knownOrdinaryActivityGuard.evidenceIncompleteCount > 0
+          ? 'known_ordinary_evidence_incomplete'
+          : ''),
       alreadyEnrolled: targetSkcs.length - toSubmit.length,
       toSubmit: toSubmit.length,
       sample: targetSkcs.slice(0, 15),
     };
 
     if (!targetSkcs.length) {
-      result.ok = true;
+      result.ok = !result.target.safetyStop;
       result.reason = targetPlan && (!targetPlanView || !targetSetFromPlan?.size)
         ? 'target plan has no 15% coupon-allowed SKCs for this store; skipped instead of submitting all available goods'
-        : result.limitedDiscountGuard.excludedCount > 0
+        : result.knownOrdinaryActivityGuard.evidenceUnavailableStop
+          ? '旧普通活动价格栈证据不可用，系统必须先只读查价/刷新叠加审核；未提交优惠券'
+          : result.knownOrdinaryActivityGuard.evidenceIncompleteCount > 0
+            ? '目标商品存在旧普通/度假季标签但缺实际填报价证据，系统必须先只读查价；未提交优惠券'
+            : result.limitedDiscountGuard.excludedCount > 0
           ? '目标商品均被价格栈守卫排除，未提交优惠券'
           : result.knownOrdinaryActivityGuard.excludedCount > 0
             ? '目标商品均被旧普通活动价格栈守卫排除，未提交优惠券'
@@ -1051,6 +1301,9 @@ const targetPlan = args.targetPlan ? await loadCouponTargetEligibilityPlan({
   priceOverridesPaths: args.priceOverrides,
   targetDiscountPct: args.discountMax,
 }) : null;
+const knownOrdinaryGuardContext = targetPlan
+  ? await loadMarketingStackReviewForKnownOrdinaryGuard()
+  : null;
 const selectedStores = args.stores.map(key => {
   const store = STORES.find(s => s.storeKey.toUpperCase() === key.toUpperCase());
   if (!store) throw new Error(`Unknown store ${key}`);
@@ -1069,12 +1322,17 @@ const summary = {
     priceOverrideSources: targetPlan.priceOverrideSources,
     stores: summarizeCouponTargetEligibilityPlan(targetPlan),
   } : null,
+  knownOrdinaryActivityGuard: targetPlan ? {
+    stackReviewSource: knownOrdinaryGuardContext?.source || null,
+    failClosedIfUnavailable: true,
+    missingEvidenceAction: 'system_refresh_read_only_marketing_stack_review_or_deadline_fill_price_evidence_before_submit',
+  } : null,
   stores: [],
 };
 
 for (const store of selectedStores) {
   console.log(`\n[${store.storeKey}] 提交优惠券活动 ${args.activityId} 的 15% 券档可报名商品...`);
-  const result = await processStore(store, args, targetPlan);
+  const result = await processStore(store, args, targetPlan, knownOrdinaryGuardContext);
   summary.stores.push(result);
   const before = result.beforeEnrolled ? `${result.beforeEnrolled.count}/${result.beforeAvailable?.count ?? '-'}` : '-';
   const target = result.target ? `${result.target.alreadyEnrolled}+${result.target.toSubmit}/${result.target.targetCount}` : '-';
@@ -1088,11 +1346,22 @@ summary.totals = summary.stores.reduce((acc, s) => {
   acc.targetCount += s.target?.targetCount || 0;
   acc.excludedByLimitedDiscountGuard += s.target?.excludedByLimitedDiscountGuard || 0;
   acc.excludedByKnownOrdinaryActivityGuard += s.target?.excludedByKnownOrdinaryActivityGuard || 0;
+  acc.excludedByKnownOrdinaryEvidenceIncomplete += s.target?.excludedByKnownOrdinaryEvidenceIncomplete || 0;
+  acc.knownOrdinaryEvidenceUnavailableStops += s.knownOrdinaryActivityGuard?.evidenceUnavailableStop ? 1 : 0;
   acc.toSubmit += s.target?.toSubmit || 0;
   acc.okStores += s.ok ? 1 : 0;
   acc.failedStores += s.ok ? 0 : 1;
   return acc;
-}, {targetCount: 0, excludedByLimitedDiscountGuard: 0, excludedByKnownOrdinaryActivityGuard: 0, toSubmit: 0, okStores: 0, failedStores: 0});
+}, {
+  targetCount: 0,
+  excludedByLimitedDiscountGuard: 0,
+  excludedByKnownOrdinaryActivityGuard: 0,
+  excludedByKnownOrdinaryEvidenceIncomplete: 0,
+  knownOrdinaryEvidenceUnavailableStops: 0,
+  toSubmit: 0,
+  okStores: 0,
+  failedStores: 0,
+});
 const summaryFile = path.join(OUT_DIR, `summary-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
 await fs.writeFile(summaryFile, JSON.stringify(summary, null, 2), 'utf8');
 console.log(`\nSUMMARY ${summaryFile}`);

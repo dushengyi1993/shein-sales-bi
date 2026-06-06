@@ -50,7 +50,7 @@
 - 若调用 `scripts/marketing/submit_coupon_activity_goods.mjs`，必须带 `--dry-run` 或 `--no-submit`。
 - 禁止在 heartbeat 中向任何写入型脚本传 `--execute`，包括优惠券取消、券预算补额度、结束限时折扣、创建/修改限时折扣。
 - 标签仍存在时不能机械阻塞：低于目标价或缺价格证据才阻塞；命中目标可进补券 dry-run；若只有限时折扣兜底层高于目标，只能生成“先确认普通营销活动覆盖；未覆盖时再调限时折扣兜底”的建议，不能直接判定最终价偏高。
-- 旧普通活动填报价也属于价格栈真相源。每日 guard 的 `knownOrdinaryActivityGuard` 会读取仍在生效窗口内的旧普通活动填报价；若 `旧普通活动价 × couponFactor < finalTargetPrice - 1 SAR`，或有旧普通活动标签但缺填报价证据，必须阻止 no-action。
+- 旧普通活动填报价也属于价格栈真相源。每日 guard 的 `knownOrdinaryActivityGuard` 会读取仍在生效窗口内的旧普通活动填报价；若 `旧普通活动价 × couponFactor < finalTargetPrice - 1 SAR`，或有旧普通活动标签但缺填报价证据，必须阻止 no-action。真实 `submit_coupon_activity_goods.mjs` 写路径也必须使用同一守卫：活动扫描过期/不可用、旧活动价证据目录缺失/解析失败，或目标 SKC 有旧普通/度假季标签但缺旧活动价，直接停止提交。
 - 当 `knownOrdinaryActivityGuard` 非零时，自动任务应继续运行 `scripts/marketing/build_known_ordinary_coupon_risk_plan.mjs --date YYYY-MM-DD`，生成 `known-ordinary-coupon-risk-plan-YYYY-MM-DD.{json,csv,md}` 全量清单；Markdown 必须先给中文结论、按店铺汇总和明确动作，CSV 只作为脚本筛选输入。若问题是缺实际填报价，系统下一步是自动只读查价，不是把“缺证据”交给用户；只有登录、身份或平台接口阻塞才需要用户介入。清单只用于 live 复核和用户授权后的取消券/临时下架/补回，不是可执行取消指令。
 - 真实提交、取消、补预算、调限时折扣必须回到当前人工授权轮次执行，并在执行后 live 回读。
 
@@ -116,7 +116,7 @@
 
 日报 `build_marketing_daily_guard_report.mjs` 必须同时验证：
 
-- `marketingStackReview` 活动扫描未超过 48 小时；
+- `marketingStackReview` 活动扫描未超过 48 小时；超过 48 小时必须成为 blocker，系统先运行只读 `export_marketing_stack_review.mjs` 或用分批 store audit `rebuild_marketing_stack_review_from_store_audits.mjs` 重建，不能只给 warning 或 no-action；
 - BI context 未超过日报阈值；
 - `selectedStores=19` 且 `missingStores=[]`。若有店铺缺失，即使 BI context 新鲜，也不能形成完整 no-action。
 
