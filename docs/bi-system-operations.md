@@ -135,7 +135,7 @@
 - 旧 `profiles/persistent-hl-profile` 已删除。
 - 相关脚本和写表链路都应读取 `config/stores.json`，不要硬编码旧 HL profile 或旧端口。
 - LGM 组当前本身就是主账号，不需要替换。
-- 2026-05-10 已复核 16 店 profile 显示名与登录抓数，未发现错位；其中 `YJ=profileKey qy/port 9346`、`XL=profileKey yj/port 9344`、`QY=profileKey xl/port 9345` 是当前正确绑定。核验错位必须用稳定日期重抓对账数据库，不要只看页面文本。
+- 2026-06-05 已修正并覆盖旧的 YJ/XL/QY 交叉 profile 结论：当前正确绑定为 `YJ=profileKey yj/accountNo GS8146729/port 9346`、`XL=profileKey xl/accountNo GS9307061/port 9344`、`QY=profileKey qy/accountNo GS7451160/port 9345`。核验错位必须同时看 `config/stores.json`、`config/store_account_truth.json`、浏览器保存账号、实际登录后的店铺名/账号和 live 抓数归属，不能只看页面文本或旧 profile 目录名。
 
 ## 8. BI 门户当前 UI 规则
 

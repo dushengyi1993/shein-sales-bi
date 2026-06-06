@@ -579,6 +579,7 @@ function classifyAndPrice(storeKey, activityId, row) {
   if (basePrice === null && targetMargin !== null) {
     exposurePricing = resolveExposureAdjustedMargin({
       baseMargin: targetMargin,
+      storeKey,
       canonical,
       skc: row.skc,
       policy: PRICING_POLICY,

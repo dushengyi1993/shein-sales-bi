@@ -24,7 +24,7 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - HL OpenAPI 销售试点已建立并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` -> `fact.openapi_*` -> `mart.openapi_sales_reconciliation`；正式切换前继续累计多日 `matched`。CX / ZL 应用已提交审核，审核通过前不得录入 `.local` 密钥或切换生产源。
 - 当前 19 店销售生产抓取已改为 WebAPI 直连优先：`config/stores.json.salesTransport=auto`，session 文件在 `state/shein_webapi_sessions/*.local.json`，直连成功不启动浏览器；浏览器只作刷新 session、登录续期和回退。
 - ET 货代仓已接入仓库和 BI；云端 ET 同步已启用并验证成功。RTV 复核耗时长是正常现象，滚动销售刷新不应等待完整 RTV。
-- LGM profile 映射：`CX=profile cx/GS9489101`，`YJ=profile qy/GS7451160`，`XL=profile yj/GS8146729`，`QY=profile xl/GS9307061`，`QH=profile qh/GS8715910`，`TZ=profile tz/GS5636781`，`JSH=profile jsh`，`TZZ=profile tzz`，`XC=profile xc`。`YJ/XL/QY` 的 profileKey 名称不等于店铺代码是历史遗留但当前正确，不要按名称直觉互换；错位核验用稳定日期重抓对账数据库。
+- LGM profile 映射：`CX=profile cx/GS9489101`，`YJ=profile yj/GS8146729`，`XL=profile xl/GS9307061`，`QY=profile qy/GS7451160`，`QH=profile qh/GS8715910`，`TZ=profile tz/GS5636781`，`JSH=profile jsh/GS3308359`，`TZZ=profile tzz/GS7146778`，`XC=profile xc/GS2944318`。`YJ/XL/QY` 已在 2026-06-05 纠正为店铺代码与 profileKey 对齐；错位核验必须同时比对 `config/stores.json`、`config/store_account_truth.json`、浏览器保存账号、实际登录后的店铺名/账号和 live 抓数归属。
 
 ## 业务口径
 - 统计日：北京时间自然日。

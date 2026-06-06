@@ -26,7 +26,7 @@
 ## 店铺、账号与统计口径
 - 当前 19 店：DSY 组 `DL DX FY LQ NM HL JY ZL TS MZ`；LGM 组 `CX YJ XL QY QH TZ JSH TZZ XC`。新增 LGM 三店 `JSH/TZZ/XC` 已完成本地与云端登录、销售/链接/业务域入仓和 BI 刷新；三店 `accountUtcOffsetHours=8`，端口分别为 `9349/9350/9351`，profileKey 为 `jsh/tzz/xc`。
 - 当前 19 店登录态保存在 `profiles/persistent-*-profile`；不要删除整个 profile。若要瘦身，只清理 Chrome 可重建缓存，例如 `OptGuideOnDeviceModel`。
-- 2026-05-10 已复核 16 店 profile 显示名与登录抓数：`PROFILE_NAME.txt` / Chrome `Preferences` / `Local State` 均与配置一致；用稳定日期后台重抓对账未发现登录错位。`YJ=profileKey qy/port 9346`、`XL=profileKey yj/port 9344`、`QY=profileKey xl/port 9345` 是当前正确绑定，profileKey 名称是历史遗留，不要为了“看起来一致”改成 YJ/YJ、XL/XL、QY/QY。验证证据：`outputs/profile-audit/all-store-stable-refetch-verify-20260510/final-profile-login-verify-reviewed.json`。
+- 2026-06-05 已覆盖旧的 YJ/XL/QY 交叉 profile 结论：当前正确映射为 `YJ=profileKey yj/accountNo GS8146729/port 9346`、`XL=profileKey xl/accountNo GS9307061/port 9344`、`QY=profileKey qy/accountNo GS7451160/port 9345`。后续核验店铺错位必须同时比对 `config/stores.json`、`config/store_account_truth.json`、浏览器保存账号、实际登录后的店铺名/账号和 live 抓数归属；不能再用 `2026-05-10` 的 profile 目录名交叉结论指导生产操作。
 - 2026-05-08 已删除 8 个 `profiles/*/OptGuideOnDeviceModel` Chrome 可重建模型缓存，释放约 `31.81GB`；清理日志为 `outputs/cleanup/chrome-optguide-cache-delete-20260508-143959.json`。删除后当时店铺 profile、飞书 profile、ET profile 和 BI 入口均已验证仍存在。
 - HL 已切换为主账号：`profileKey=shein-main`，CDP 端口 `9360`，正式 profile 为 `profiles/persistent-shein-main-profile`；旧 `profiles/persistent-hl-profile` 已删除。
 - LGM 组当前本身就是主账号，不需要替换。

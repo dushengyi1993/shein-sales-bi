@@ -89,7 +89,12 @@ for (const [sku, group] of bySku.entries()) {
   const specialMargin = findRule(marginRules, keyList);
   const baseTargetMargin = fixed !== null ? null : (specialMargin ?? 0.30);
   const exposureTargets = baseTargetMargin === null ? null : marginTargetsForExposurePolicy(baseTargetMargin, pricingPolicy);
-  const topExposureRows = fixed !== null ? [] : exposureTopRowsForCanonical(exposureIndex, sku);
+  const topExposureRows = fixed !== null
+    ? []
+    : uniqBy(
+        exposureTopRowsForCanonical(exposureIndex, sku),
+        row => `${row.storeKey || ''}:${row.skc}`,
+      );
   const hasExposureRanking = topExposureRows.length > 0;
   const groupSkcs = new Set(group.map(r => String(r['SKC'] || '').trim()).filter(Boolean));
   const topExposureSkcsInGroup = topExposureRows.filter(row => groupSkcs.has(row.skc));
@@ -216,8 +221,8 @@ for (const [sku, group] of bySku.entries()) {
     '货号复核原因': skuReviewReasons.join(' / '),
     '系统目标': targetMode,
     '建议最终成交价SAR': fmt(targetFinal),
-    '曝光前五SKC': topExposureRows.map(row => `${row.rank}.${row.skc}${row.score ? `(${row.score})` : ''}`).join('；'),
-    '本表命中曝光前五SKC': topExposureSkcsInGroup.map(row => `${row.rank}.${row.skc}`).join('；'),
+    '曝光前五SKC': topExposureRows.map(row => `${row.storeKey || '-'}#${row.rank}.${row.skc}${row.score ? `(${row.score})` : ''}`).join('；'),
+    '本表命中曝光前五SKC': topExposureSkcsInGroup.map(row => `${row.storeKey || '-'}#${row.rank}.${row.skc}`).join('；'),
     '曝光规则目标利润率': exposureRuleText,
     '曝光前五建议最终成交价SAR': fmt(topExposureTargetFinal),
     '其他链接建议最终成交价SAR': fmt(targetFinal),
@@ -316,7 +321,7 @@ const sourceSummary = {
     exposureTopN: pricingPolicy.exposureTopLinks?.topN || 5,
     exposureMetricFields: pricingPolicy.exposureTopLinks?.metricFields || [],
     exposureSourceRows: exposureIndex.rowCount,
-    rule: '同货号曝光前五链接可比其他链接低5个百分点，但不得低于15%底价；若基础目标已在15%底线，则前五保持15%，其他链接提高到20%。固定价和逐行覆盖价优先。',
+    rule: '同一标准货号在所有店铺、所有链接中按 BI 曝光量取全局前五；前五链接可比其他链接低5个百分点，但不得低于15%底价；若基础目标已在15%底线，则前五保持15%，其他链接提高到20%。固定价和逐行覆盖价优先。',
   },
   output: {
     rows: confirmRows.length,
@@ -418,7 +423,7 @@ notes.getRange('A3:D9').values = [
   ['7', '本次修正', 'v4-v6 问题', 'v4 暴露出别名同步和销量分摊问题；v5/v6 仍没有剔除已出库产品携带的历史仓储成本；v7 改为当前在仓库存移动平均累计仓储口径，并把禁止券档写清楚。'],
 ];
 notes.getRange('A10:D10').values = [
-  ['8', '曝光前五', '价格差异', '同一货号按 BI 曝光量取前五 SKC：前五链接可比其他链接低5个百分点，但不能低于15%底价；若基础目标已是15%，前五保持15%，其他链接提高到20%。固定价和逐行覆盖价优先。'],
+  ['8', '曝光前五', '价格差异', '同一标准货号在所有店铺、所有链接中按 BI 曝光量取全局前五 SKC：前五链接可比其他链接低5个百分点，但不能低于15%底价；若基础目标已是15%，前五保持15%，其他链接提高到20%。固定价和逐行覆盖价优先。'],
 ];
 notes.getRange('A3:D9').format = {wrapText: true};
 notes.getRange('A10:D10').format = {wrapText: true};
@@ -544,6 +549,17 @@ function fmt(v) { const n = round2(v); return n === null ? '' : n; }
 function pct(v) { return isNum(v) ? `${round2(Number(v) * 100)}%` : ''; }
 function range(values) { const nums = values.filter(v => v !== null && v !== undefined && isNum(v)).map(Number); if (!nums.length) return ''; const min = round2(Math.min(...nums)); const max = round2(Math.max(...nums)); return min === max ? String(min) : `${min}-${max}`; }
 function uniq(values) { return [...new Set(values.filter(v => v !== null && v !== undefined && String(v) !== ''))]; }
+function uniqBy(values, keyFn) {
+  const out = [];
+  const seen = new Set();
+  for (const value of values) {
+    const key = keyFn(value);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
+}
 function mostCommon(values) { const counts = new Map(); for (const v of values.filter(Boolean)) counts.set(v, (counts.get(v) || 0) + 1); return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || ''; }
 function mostCommonObject(values) { const counts = new Map(); for (const v of values.filter(Boolean)) { const k = JSON.stringify(v); counts.set(k, (counts.get(k) || 0) + 1); } const top = [...counts.entries()].sort((a,b)=>b[1]-a[1])[0]?.[0]; return top ? JSON.parse(top) : null; }
 function csvEscape(v) { if (v === null || v === undefined) return ''; const s = String(v); return /[",\n\r]/.test(s) ? `"${s.replaceAll('"','""')}"` : s; }

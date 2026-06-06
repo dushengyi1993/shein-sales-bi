@@ -95,7 +95,7 @@
 
 当前 19 店 SHEIN 登录态保存在工作区内的独立 Chrome profile。不要删除整个 `persistent-*` 目录；登录态通常在 `Profile 1`、`Default`、`Network`、`Local Storage`、Cookies/Session 相关文件中。
 
-2026-05-10 已复核 16 店 profile 显示名与登录抓数：`PROFILE_NAME.txt`、Chrome `Preferences`、Chrome `Local State` 均与 `config/stores.json` 一致；用稳定日期后台重抓对账数据库，未发现登录错位。`YJ / XL / QY` 的 `profileKey` 名称与店铺代码不一致是历史遗留，不是错误。
+2026-06-05 已修正并覆盖旧的 YJ/XL/QY 交叉 profile 结论。当前正确映射必须与 `config/stores.json`、`config/store_account_truth.json`、浏览器保存账号、实际登录店铺名/账号和 live 抓数归属一致：`YJ=profileKey yj/accountNo GS8146729`、`XL=profileKey xl/accountNo GS9307061`、`QY=profileKey qy/accountNo GS7451160`。不得再按 `2026-05-10` 的交叉目录名结论操作生产 profile。
 
 当前店铺映射：
 
@@ -112,16 +112,16 @@
 | TS | `profiles/persistent-ts-profile` | 9341 |
 | MZ | `profiles/persistent-mz-profile` | 9342 |
 | CX | `profiles/persistent-cx-profile` | 9343 |
-| YJ | `profiles/persistent-qy-profile` | 9346 |
-| XL | `profiles/persistent-yj-profile` | 9344 |
-| QY | `profiles/persistent-xl-profile` | 9345 |
+| YJ | `profiles/persistent-yj-profile` | 9346 |
+| XL | `profiles/persistent-xl-profile` | 9344 |
+| QY | `profiles/persistent-qy-profile` | 9345 |
 | QH | `profiles/persistent-qh-profile` | 9347 |
 | TZ | `profiles/persistent-tz-profile` | 9348 |
 
 补充说明：
 
 - 旧 `profiles/persistent-hl-profile` 已删除；当前 HL 正式使用 `profiles/persistent-shein-main-profile`。
-- `YJ=profiles/persistent-qy-profile`、`XL=profiles/persistent-yj-profile`、`QY=profiles/persistent-xl-profile` 是当前正确生产绑定；不要仅按目录名直觉互换。
+- `YJ=profiles/persistent-yj-profile`、`XL=profiles/persistent-xl-profile`、`QY=profiles/persistent-qy-profile` 是当前正确生产绑定；若怀疑错位，必须按店铺账号真相和 live 登录/抓数归属复核，不能回滚到旧交叉绑定。
 - `profiles/persistent-feishu-profile` 是飞书网页登录态，用于看板富文本、卡片样式和页面自动化，不属于 SHEIN 店铺登录。
 - Chrome 自动生成的 `OptGuideOnDeviceModel` 是重复模型缓存，不是登录态。等同步任务和 Chrome 进程停止后，可只删除各 profile 下的 `OptGuideOnDeviceModel` 来释放约 30GB+。
 - 瘦身时不要动 `Profile 1`、`Default`、`Network`、`Local Storage`、Cookies/Session 相关文件。

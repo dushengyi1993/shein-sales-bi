@@ -875,6 +875,7 @@ function computeTarget(storeKey, activityId, row) {
   if (ruleType === 'margin' && marginTarget !== null) {
     exposurePricing = resolveExposureAdjustedMargin({
       baseMargin: marginTarget,
+      storeKey,
       canonical,
       skc: row.skc,
       policy: PRICING_POLICY,

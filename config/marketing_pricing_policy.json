@@ -1,7 +1,27 @@
 {
   "description": "Machine-readable long-term pricing policy for SHEIN ordinary marketing signup, coupon pairing, and limited-discount fallback. This file contains no credentials.",
-  "updatedAt": "2026-06-04",
+  "updatedAt": "2026-06-06",
   "targetFloorMarginPct": 15,
+  "ordinaryMarketing": {
+    "mustSignupDuringSignupWindow": true,
+    "signupWindowIsSeparateFromEventWindow": true,
+    "trafficSupportPriority": "must_signup_when_eligible",
+    "minimumDiscountSource": "activity_page_or_api_dynamic_5_10_vip",
+    "vipTierMandatory": true,
+    "platformForcedBelowTargetStatus": "below_target_due_to_platform_forced_discount",
+    "knownOrdinaryPriceEvidenceIsPartOfPriceStack": true
+  },
+  "coupon": {
+    "defaultExecutableRatePct": 15,
+    "higherCouponResearch": {
+      "enabled": true,
+      "ratesPct": [30, 50],
+      "mode": "research_only",
+      "executeAutomatically": false
+    },
+    "weeklySiteBudgetSar": 1000,
+    "mustPairWithTargetPlan": true
+  },
   "limitedDiscount": {
     "mustExistForPlannedLinks": true,
     "role": "fallback_price_tool",
@@ -15,6 +35,7 @@
   "exposureTopLinks": {
     "enabled": true,
     "topN": 5,
+    "groupScope": "global_standard_goods_sn",
     "metricFields": ["c30_eps_uv", "c7_eps_uv", "eps_uv"],
     "onShelfOnly": true,
     "marginDeltaPct": 5,
@@ -22,6 +43,6 @@
     "whenBaseAtOrBelowFloor": "keep_top_at_floor_raise_others_by_delta",
     "whenBaseAboveFloor": "lower_top_links_by_delta",
     "fixedPricePolicy": "do_not_override_fixed_price_or_row_override",
-    "sourceNote": "Top links are ranked per standard_goods_sn from positive BI storeLinks/links exposure fields. Rows with no positive exposure metric are not used for top-link ranking; if exposure data is unavailable, scripts keep the base margin and mark the exposure rule as not applied."
+    "sourceNote": "Top links are ranked globally per standard_goods_sn across all stores and all links from positive BI storeLinks/links exposure fields. Rows with no positive exposure metric are not used for top-link ranking; if exposure data is unavailable, scripts keep the base margin and mark the exposure rule as not applied."
   }
 }

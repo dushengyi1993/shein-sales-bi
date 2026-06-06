@@ -17,7 +17,16 @@ import {
   DEFAULT_CLOUD_BI_MAX_BYTES as SHARED_DEFAULT_CLOUD_BI_MAX_BYTES,
   selectBiPortalSource as selectSharedBiPortalSource,
 } from '../../lib/bi_portal_source.mjs';
+import {
+  couponPlanStoreView,
+  loadCouponTargetEligibilityPlan,
+} from '../../lib/marketing_coupon_policy.mjs';
 import {summarizeCouponBudgetStatus} from '../../lib/marketing_coupon_budget_guard.mjs';
+import {
+  classifyKnownOrdinaryCouponStack,
+  groupOrdinaryEvidenceBySkc,
+  loadKnownOrdinaryPriceEvidence,
+} from '../../lib/marketing_ordinary_price_evidence.mjs';
 import {summarizeStackReviewCoverage} from '../../lib/marketing_stack_review_coverage.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -27,6 +36,7 @@ const TARGET_PLAN_DEFAULT = path.join(ROOT, 'tmp', 'marketing-signup', 'selectio
 const PRICE_OVERRIDES_DEFAULT = path.join(ROOT, 'tmp', 'marketing-signup', 'price-overrides-2026-06-03-ALL-ready.json');
 const BI_PORTAL_DATA_DEFAULT = path.join(ROOT, 'outputs', 'bi-portal', 'data.json');
 const STORES_CONFIG_DEFAULT = path.join(ROOT, 'config', 'stores.json');
+const COUPON_CANCEL_RESULTS_DIR = path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-cancel-results');
 const NEW_SKC_SHELF_AGE_DAYS = 30;
 const NEW_SKC_MAX_ROWS = 80;
 const DEFAULT_CLOUD_BI_ROOT = SHARED_DEFAULT_CLOUD_BI_ROOT;
@@ -142,6 +152,10 @@ function listFiles(dir, regex) {
 
 function latestFile(dir, regex) {
   return listFiles(dir, regex)[0] || '';
+}
+
+function mapKeys(map) {
+  return map ? [...map.keys()] : [];
 }
 
 async function readJsonIfExists(file, fallback = null) {
@@ -261,6 +275,32 @@ function countBy(rows, field) {
   return out;
 }
 
+function buildStackDetailIndex(stackDoc) {
+  const map = new Map();
+  const detailRows = Array.isArray(stackDoc?.detailRows) ? stackDoc.detailRows : [];
+  for (const row of detailRows) {
+    const storeKey = String(row['店铺'] || row.storeKey || row.store || '').trim().toUpperCase();
+    const skc = String(row.SKC || row.skc || '').trim();
+    if (!storeKey || !skc) continue;
+    const key = `${storeKey}__${skc}`;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(row);
+  }
+  return map;
+}
+
+function hasExistingOrdinaryMarketingLabel(stackRows) {
+  return (stackRows || []).some(row => {
+    const text = [
+      row?.['普通营销活动价/折扣'],
+      row?.['风险提示'],
+      row?.ordinaryMarketingSummary,
+      row?.risk,
+    ].filter(Boolean).join(' ');
+    return /既有(?:普通活动)?标签|既有普通营销活动|旧普通活动|度假季/.test(text);
+  });
+}
+
 function countOrderStatuses(orderAuditFiles) {
   const statusCounts = {};
   let rows = 0;
@@ -341,6 +381,228 @@ function summarizeOldOrdinaryOverlap(liveDoc, cancelDoc) {
     riskRows: Number(liveDoc?.activeCouponRiskCount || 0),
     storeCount: Array.isArray(liveDoc?.stores) ? liveDoc.stores.length : 0,
     allStoresOk: Array.isArray(liveDoc?.stores) && liveDoc.stores.length ? liveDoc.stores.every(s => s.ok !== false) : null,
+  };
+}
+
+async function loadKnownOrdinaryCancelMitigation(reportDate) {
+  const pairs = [];
+  const addPair = (date, targetPath, verificationPath) => {
+    if (!targetPath) return;
+    if (date && date > reportDate) return;
+    if (pairs.some(pair => pair.targetPath === targetPath)) return;
+    pairs.push({date, targetPath, verificationPath});
+  };
+  if (fsSync.existsSync(COUPON_CANCEL_RESULTS_DIR)) {
+    for (const entry of fsSync.readdirSync(COUPON_CANCEL_RESULTS_DIR, {withFileTypes: true})) {
+      if (!entry.isFile()) continue;
+      const match = entry.name.match(/^known-ordinary-coupon-cancel-targets-(\d{4}-\d{2}-\d{2})\.json$/);
+      if (!match) continue;
+      const date = match[1];
+      addPair(
+        date,
+        path.join(COUPON_CANCEL_RESULTS_DIR, entry.name),
+        path.join(DEFAULT_OUT_DIR, `known-ordinary-coupon-post-cancel-verification-${date}.json`),
+      );
+    }
+  }
+  addPair(
+    reportDate,
+    path.join(COUPON_CANCEL_RESULTS_DIR, `known-ordinary-coupon-cancel-targets-${reportDate}.json`),
+    path.join(DEFAULT_OUT_DIR, `known-ordinary-coupon-post-cancel-verification-${reportDate}.json`),
+  );
+  pairs.sort((a, b) => String(a.date || '').localeCompare(String(b.date || ''))
+    || String(a.targetPath).localeCompare(String(b.targetPath)));
+  const mitigatedSkcs = new Set();
+  const verifiedPairs = [];
+  const incompletePairs = [];
+  let targetRowsCount = 0;
+  let verificationExists = 0;
+  let remainingCancelTargets = 0;
+  let failedStores = 0;
+  for (const pair of pairs) {
+    const targetDoc = await readJsonIfExists(pair.targetPath, null);
+    const verificationDoc = await readJsonIfExists(pair.verificationPath, null);
+    const targetRows = Array.isArray(targetDoc?.rows) ? targetDoc.rows : [];
+    if (!targetRows.length && !verificationDoc) continue;
+    targetRowsCount += targetRows.length;
+    if (verificationDoc) verificationExists += 1;
+    const remaining = Number(verificationDoc?.total?.remainingCancelTargets);
+    const failed = Number(verificationDoc?.total?.failedStores);
+    if (Number.isFinite(remaining)) remainingCancelTargets += remaining;
+    if (Number.isFinite(failed)) failedStores += failed;
+    const verified = Boolean(targetRows.length && verificationDoc && remaining === 0 && failed === 0);
+    if (verified) verifiedPairs.push({...pair, targetRows: targetRows.length});
+    else incompletePairs.push({
+      ...pair,
+      targetRows: targetRows.length,
+      verificationExists: Boolean(verificationDoc),
+      remainingCancelTargets: Number.isFinite(remaining) ? remaining : null,
+      failedStores: Number.isFinite(failed) ? failed : null,
+    });
+    if (!verified) continue;
+    for (const row of targetRows) {
+      const storeKey = String(row?.storeKey || '').toUpperCase();
+      const skc = String(row?.skc || '').trim();
+      if (storeKey && skc) mitigatedSkcs.add(`${storeKey}__${skc}`);
+    }
+  }
+  return {
+    status: verifiedPairs.length && !incompletePairs.length
+      ? 'verified_cancelled'
+      : (verifiedPairs.length ? 'verified_cancelled_with_incomplete_history' : (targetRowsCount || verificationExists ? 'incomplete' : 'missing')),
+    targetPath: verifiedPairs.length ? rel(verifiedPairs.at(-1).targetPath) : (pairs.at(-1)?.targetPath ? rel(pairs.at(-1).targetPath) : ''),
+    verificationPath: verifiedPairs.length ? rel(verifiedPairs.at(-1).verificationPath) : (pairs.at(-1)?.verificationPath ? rel(pairs.at(-1).verificationPath) : ''),
+    targetPaths: verifiedPairs.map(pair => rel(pair.targetPath)),
+    verificationPaths: verifiedPairs.map(pair => rel(pair.verificationPath)),
+    targetRows: targetRowsCount,
+    verificationExists,
+    verifiedPairs: verifiedPairs.map(pair => ({
+      date: pair.date,
+      targetPath: rel(pair.targetPath),
+      verificationPath: rel(pair.verificationPath),
+      targetRows: pair.targetRows,
+    })),
+    incompletePairs: incompletePairs.map(pair => ({
+      date: pair.date,
+      targetPath: rel(pair.targetPath),
+      verificationPath: rel(pair.verificationPath),
+      targetRows: pair.targetRows,
+      verificationExists: pair.verificationExists,
+      remainingCancelTargets: pair.remainingCancelTargets,
+      failedStores: pair.failedStores,
+    })),
+    remainingCancelTargets,
+    failedStores,
+    mitigatedSkcs,
+  };
+}
+
+function summarizeKnownOrdinaryActivityGuard({couponPlan, ordinaryEvidenceByStore, stackDoc, cancelMitigation}) {
+  const detailIndex = buildStackDetailIndex(stackDoc);
+  const storeKeys = [...new Set([
+    ...mapKeys(couponPlan?.rowsByStore),
+    ...mapKeys(couponPlan?.allowed15ByStore || couponPlan?.byStore),
+  ])].sort();
+  const rows = [];
+  const belowRows = [];
+  const incompleteRows = [];
+  const missingTargetRows = [];
+  const decisionCounts = {};
+  const belowByStore = {};
+  const evidenceTrustCounts = {};
+  const mitigatedRows = [];
+  const mitigatedByStore = {};
+  let allowed15PlanCount = 0;
+  let withKnownOrdinaryEvidenceCount = 0;
+  let noOrdinaryLabelCount = 0;
+
+  for (const storeKey of storeKeys) {
+    const view = couponPlanStoreView(couponPlan, storeKey);
+    const evidence = ordinaryEvidenceByStore.get(storeKey);
+    const bySkc = evidence?.bySkc || new Map();
+    for (const planRow of view.rows.filter(r => r.allowed15)) {
+      allowed15PlanCount += 1;
+      const key = `${storeKey}__${planRow.skc}`;
+      const stackRows = detailIndex.get(key) || [];
+      const evidenceRows = bySkc.get(planRow.skc) || [];
+      if (evidenceRows.length) {
+        withKnownOrdinaryEvidenceCount += 1;
+        const priceGuard = classifyKnownOrdinaryCouponStack(evidenceRows, planRow, {fallbackDiscountPct: 15});
+        decisionCounts[priceGuard.decision] = (decisionCounts[priceGuard.decision] || 0) + 1;
+        const out = {
+          storeKey,
+          skc: planRow.skc,
+          canonical: planRow.canonical,
+          activityId: planRow.activityId,
+          decision: priceGuard.decision,
+          lowestOrdinaryPrice: priceGuard.lowestOrdinaryPrice,
+          ordinaryActivityId: priceGuard.lowestOrdinaryEvidence?.activityId || '',
+          ordinaryActivityName: priceGuard.lowestOrdinaryEvidence?.activityName || '',
+          ordinaryEventStart: priceGuard.lowestOrdinaryEvidence?.eventStart || '',
+          ordinaryEventEnd: priceGuard.lowestOrdinaryEvidence?.eventEnd || '',
+          ordinaryEvidenceTrust: priceGuard.lowestOrdinaryEvidence?.evidenceTrust || '',
+          ordinaryEvidenceSource: priceGuard.lowestOrdinaryEvidence?.fillSource || '',
+          couponFactor: priceGuard.couponFactor,
+          finalWithCoupon: priceGuard.finalWithCoupon,
+          finalTargetPrice: priceGuard.finalTargetPrice,
+          diff: priceGuard.diff,
+          shouldCancelCoupon: priceGuard.shouldCancelCoupon,
+        };
+        if (!priceGuard.allowSubmit) rows.push(out);
+        if (priceGuard.decision === 'known_ordinary_final_below_target') {
+          const mitigationKey = `${storeKey}__${planRow.skc}`;
+          if (cancelMitigation?.mitigatedSkcs?.has(mitigationKey)) {
+            out.mitigationStatus = 'coupon_cancelled_verified';
+            out.mitigationSource = cancelMitigation.verificationPath;
+            mitigatedRows.push(out);
+            mitigatedByStore[storeKey] = (mitigatedByStore[storeKey] || 0) + 1;
+            const idx = rows.indexOf(out);
+            if (idx >= 0) rows.splice(idx, 1);
+          } else {
+            belowRows.push(out);
+            belowByStore[storeKey] = (belowByStore[storeKey] || 0) + 1;
+            const trust = out.ordinaryEvidenceTrust || 'unknown';
+            evidenceTrustCounts[trust] = (evidenceTrustCounts[trust] || 0) + 1;
+          }
+        }
+        if (priceGuard.decision === 'missing_final_target_price') missingTargetRows.push(out);
+        continue;
+      }
+
+      if (hasExistingOrdinaryMarketingLabel(stackRows)) {
+        const out = {
+          storeKey,
+          skc: planRow.skc,
+          canonical: planRow.canonical,
+          activityId: planRow.activityId,
+          decision: 'known_ordinary_evidence_incomplete',
+          reason: 'stack_review_has_existing_ordinary_label_but_no_known_ordinary_price',
+          couponFactor: planRow.couponFactor,
+          finalTargetPrice: planRow.finalTargetPrice,
+          stackReviewSamples: stackRows.slice(0, 3).map(row => ({
+            activityId: row['活动ID'] || '',
+            activityName: row['活动名称'] || '',
+            eventStart: row['普通活动开始'] || '',
+            eventEnd: row['普通活动结束'] || '',
+            ordinarySummary: row['普通营销活动价/折扣'] || '',
+            risk: row['风险提示'] || '',
+          })),
+        };
+        rows.push(out);
+        incompleteRows.push(out);
+      } else {
+        noOrdinaryLabelCount += 1;
+      }
+    }
+  }
+
+  return {
+    policy: 'allowed15_known_ordinary_activity_price_stack_guard',
+    meaning: '旧普通营销活动填报价也属于最低促销基准价；若其叠加15%券低于目标价，日报必须阻断',
+    allowed15PlanCount,
+    withKnownOrdinaryEvidenceCount,
+    noOrdinaryLabelCount,
+    belowTargetCount: belowRows.length,
+    mitigatedBelowTargetCount: mitigatedRows.length,
+    evidenceIncompleteCount: incompleteRows.length,
+    missingFinalTargetPriceCount: missingTargetRows.length,
+    decisionCounts,
+    belowByStore,
+    mitigatedByStore,
+    evidenceTrustCounts,
+    cancelMitigation: cancelMitigation ? {
+      status: cancelMitigation.status,
+      targetPath: cancelMitigation.targetPath,
+      verificationPath: cancelMitigation.verificationPath,
+      targetRows: cancelMitigation.targetRows,
+      remainingCancelTargets: cancelMitigation.remainingCancelTargets,
+      failedStores: cancelMitigation.failedStores,
+    } : null,
+    blockerRows: rows.slice(0, 500),
+    belowTargetRows: belowRows.slice(0, 500),
+    mitigatedBelowTargetRows: mitigatedRows.slice(0, 500),
+    evidenceIncompleteRows: incompleteRows.slice(0, 50),
+    missingFinalTargetPriceRows: missingTargetRows.slice(0, 50),
   };
 }
 
@@ -846,6 +1108,8 @@ function buildChangesSincePrevious(current, previous) {
     ['newSkcCandidates.needsConfirmation', current.newSkcCandidates?.needsConfirmation, previous.newSkcCandidates?.needsConfirmation],
     ['newSkcCandidates.needsAgeReview', current.newSkcCandidates?.needsAgeReview, previous.newSkcCandidates?.needsAgeReview],
     ['oldOrdinaryOverlap.cancelRows', current.oldOrdinaryOverlap?.cancelRows, previous.oldOrdinaryOverlap?.cancelRows],
+    ['knownOrdinaryActivityGuard.belowTargetCount', current.knownOrdinaryActivityGuard?.belowTargetCount, previous.knownOrdinaryActivityGuard?.belowTargetCount],
+    ['knownOrdinaryActivityGuard.evidenceIncompleteCount', current.knownOrdinaryActivityGuard?.evidenceIncompleteCount, previous.knownOrdinaryActivityGuard?.evidenceIncompleteCount],
     ['t3MarketingCandidates.count', current.t3MarketingCandidates?.length, previous.t3MarketingCandidates?.length],
   ];
   for (const [field, now, before] of pairs) {
@@ -882,120 +1146,204 @@ function addBlocker(blockers, code, message, evidence = {}) {
   blockers.push({code, message, evidence});
 }
 
+function humanCount(value, unit = '个') {
+  const n = Number(value || 0);
+  return `${n} ${unit}`;
+}
+
+function humanSourceWarningText(warning) {
+  const labelMap = {
+    marketingStackReview: '营销审核表',
+    couponSubmitLatestSummary: '优惠券提交结果',
+    lowPriceOverlapLive: '限时折扣叠券扫描',
+    lowPriceOverlapCancelList: '限时折扣叠券取消清单',
+    oldOrdinaryOverlapLive: '旧普通活动叠券扫描',
+    oldOrdinaryOverlapCancelList: '旧普通活动叠券取消清单',
+    targetSelectionPlan: '活动报名计划',
+    priceOverridesPlan: '目标价计划',
+    storesConfig: '店铺配置',
+    knownOrdinaryActivityEvidence: '旧普通活动填报价证据',
+  };
+  const label = labelMap[warning?.label] || warning?.label || '数据源';
+  if (warning?.code === 'source_stale') {
+    const hours = Number(warning?.evidence?.dataAgeHours ?? warning?.evidence?.artifactAgeHours);
+    const ageText = Number.isFinite(hours) ? `，大约 ${Math.round(hours)} 小时未刷新` : '';
+    return `${label}不是最新${ageText}；今天不阻塞价格止损结论，但后续报名/补券前要刷新。`;
+  }
+  return String(warning?.message || `${label}需要留意。`).replace(String(warning?.label || ''), label);
+}
+
+function storeCountText(counts = {}, limit = 8) {
+  const entries = Object.entries(counts || {}).filter(([, v]) => Number(v) > 0).sort((a, b) => Number(b[1]) - Number(a[1]) || String(a[0]).localeCompare(String(b[0])));
+  if (!entries.length) return '';
+  const shown = entries.slice(0, limit).map(([store, count]) => `${store} ${count}`).join('、');
+  return entries.length > limit ? `${shown} 等 ${entries.length} 店` : shown;
+}
+
+function humanBlockerText(blocker) {
+  const code = String(blocker?.code || '');
+  const msg = String(blocker?.message || '').trim();
+  const map = {
+    coupon_final_below_target: '有商品叠券后低于目标价，先止损，不能自动继续报名。',
+    coupon_missing_price_evidence: '有商品缺少价格证据，系统先自动回读价格；取不到才报告具体阻塞。',
+    low_price_cancel_rows_nonzero: '有低价/限时折扣叠券取消候选，先确认并取消错误优惠券。',
+    old_ordinary_cancel_rows_nonzero: '有旧普通活动和优惠券叠加风险，先按目标价复核。',
+    known_ordinary_coupon_final_below_target: '有旧普通活动价叠加 15% 券后低于目标价，应取消对应 15% 券。',
+    known_ordinary_missing_final_target_price: '有旧普通活动重叠但缺目标价，系统先回查计划价/覆盖价；取不到才报告具体阻塞。',
+    known_ordinary_evidence_incomplete: '有旧普通活动标签但缺实际填报价，系统必须自动只读查价；取不到才报告登录/接口/身份阻塞。',
+    coupon_budget_below_target: '有店铺优惠券预算低于 1000 SAR，需要补预算。',
+    coupon_budget_missing_evidence: '有店铺缺优惠券预算回读证据，不能确认预算安全。',
+    store_identity_failure: '店铺登录身份不匹配，必须先修账号/profile。',
+    source_stale: '关键数据过期，先刷新数据再判断。',
+    critical_source_missing: '关键数据缺失，不能形成安全结论。',
+    source_parse_error: '关键数据解析失败，先修数据源。',
+    marketing_stack_review_incomplete_store_coverage: '营销审核没有覆盖所有启用店铺，不能当作全局安全。',
+    unsafe_suggested_command: '自动建议命令不安全，禁止执行。',
+  };
+  return map[code] || msg || '存在未归类阻塞项，需要先人工复核。';
+}
+
+function buildHumanSummary(report) {
+  const actions = [];
+  const watches = [];
+  const ok = [];
+  const guard = report.knownOrdinaryActivityGuard || {};
+  const low = report.lowPriceOverlap || {};
+  const old = report.oldOrdinaryOverlap || {};
+  const above = report.aboveTargetActions || {};
+  const newSkc = report.newSkcCandidates || {};
+  const budget = report.couponBudget || {};
+  const orders = report.orderPriceAudit || {};
+
+  for (const blocker of report.blockers || []) {
+    actions.push({level: '必须处理', text: humanBlockerText(blocker)});
+  }
+  if (Number(guard.mitigatedBelowTargetCount || 0) > 0) {
+    const stores = storeCountText(guard.mitigatedByStore || {});
+    ok.push(`已确认并处理过 ${humanCount(guard.mitigatedBelowTargetCount, '个')}旧普通活动叠券低价风险${stores ? `（${stores}）` : ''}，当前不再阻塞。`);
+  }
+  if (Number(guard.belowTargetCount || 0) === 0 && Number(guard.evidenceIncompleteCount || 0) === 0 && Number(guard.missingFinalTargetPriceCount || 0) === 0) {
+    ok.push('旧普通活动 + 15% 券：当前没有未处理的低价或待取证风险。');
+  }
+  if (Number(low.belowTarget || 0) === 0 && Number(low.missingEvidence || 0) === 0 && Number(low.cancelRows || 0) === 0) {
+    ok.push('限时折扣兜底层：当前没有需要取消优惠券的低价叠加风险。');
+  }
+  if (!old.riskCancel && Number(old.cancelRows || 0) === 0) {
+    ok.push('旧普通活动 live 扫描：当前没有新的取消候选。');
+  }
+  if (Number(above.effectiveFinalBelowTargetCount || 0) > 0 || Number(above.limitedFallbackBelowTargetIncompleteCount || 0) > 0) {
+    actions.push({level: '必须处理', text: '有效价格栈或限时折扣兜底层显示可能低于目标价，系统先只读补齐普通活动证据，再决定取消或改折扣。'});
+  } else if (Number(above.count || 0) > 0) {
+    watches.push(`有 ${humanCount(above.count, '个')}限时折扣兜底偏高/证据观察项；这不等于最终成交价偏高，只作为后续补救线索。`);
+  }
+  if (Number(newSkc.needsPricing || 0) > 0 || Number(newSkc.needsConfirmation || 0) > 0 || Number(newSkc.needsCouponReview || 0) > 0) {
+    watches.push(`有新链接/新 SKC 需要定价或确认，先生成动作卡，不自动报名。`);
+  } else if (Number(newSkc.recentMissingExactPlanOnShelf || 0) === 0) {
+    ok.push('新上架链接：当前没有 30 天内上架且缺精确价格计划的候选。');
+  }
+  if (Array.isArray(report.t3MarketingCandidates) && report.t3MarketingCandidates.length) {
+    watches.push(`未来 3 天内有 ${humanCount(report.t3MarketingCandidates.length, '个')}普通营销活动报名提醒；只提醒，不自动填报。`);
+  } else {
+    ok.push('未来 3 天普通营销活动：暂无需要提醒的报名候选。');
+  }
+  if (Number(budget.belowTargetCount || 0) > 0) {
+    actions.push({level: '必须处理', text: `有 ${humanCount(budget.belowTargetCount, '个')}店铺优惠券预算低于 1000 SAR，需要补预算。`});
+  } else if (Number(budget.missingEvidenceCount || 0) > 0) {
+    actions.push({level: '必须处理', text: `有 ${humanCount(budget.missingEvidenceCount, '个')}店铺缺预算回读证据，先回读确认。`});
+  } else if (Number(budget.expectedStoreCount || 0) > 0) {
+    ok.push('优惠券预算：当前没有低于 1000 SAR 的店铺。');
+  }
+  if (Number(orders.below || 0) > 0 || Number(orders.above || 0) > 0) {
+    watches.push(`订单成交价审计发现 ${humanCount(Number(orders.below || 0) + Number(orders.above || 0), '条')}偏离线索；只按商品行成交价判断，不看页面汇总金额。`);
+  }
+  if (report.reportDate < '2026-06-09') {
+    watches.push('度假季/旧低价活动后补券还没到复扫窗口，今天不生成补券 dry-run。');
+  } else if (Array.isArray(report.suggestedDryRunCommands) && report.suggestedDryRunCommands.length) {
+    watches.push('已到补券复扫窗口，只生成 15% 券 dry-run；禁止 30%/50% 券真实上线。');
+  }
+  if (Array.isArray(report.sourceWarnings) && report.sourceWarnings.length) {
+    watches.push(`有 ${humanCount(report.sourceWarnings.length, '条')}数据源提醒，不阻塞价格结论，但需要留意。`);
+  }
+  if (Array.isArray(report.unknownSources) && report.unknownSources.length) {
+    actions.push({level: '必须处理', text: '有关键数据源不可用，不能自动执行。'});
+  }
+
+  const canAutoExecute = actions.length === 0 && (report.blockers || []).length === 0;
+  const conclusion = canAutoExecute
+    ? (watches.length ? '没有需要立即止损的风险；有少量观察/提醒项，暂不需要写入动作。' : '没有需要动作的风险，今天保持巡检即可。')
+    : `不能自动执行；先处理 ${humanCount(actions.length, '类')}问题。`;
+  const autoExecution = canAutoExecute
+    ? '当前日报仍是只读模式；将来要自动执行时，只能执行已经有明确证据、明确动作、可回读验证的低风险动作。'
+    : '当前不允许自动写入；系统必须先自动取证或止损。';
+  return {conclusion, autoExecution, actions, watches, ok: ok.slice(0, 8)};
+}
+
 function buildMarkdown(report) {
+  const summary = report.humanSummary || buildHumanSummary(report);
   const lines = [];
   lines.push(`# SHEIN 营销每日巡检 ${report.reportDate}`);
   lines.push('');
-  lines.push(`- mode: \`${report.mode}\``);
-  lines.push(`- generated: \`${report.createdAt}\``);
-  lines.push(`- safety: readOnly=${report.safety.readOnly}, liveScan=${report.safety.liveScan}, writeActions=${report.safety.writeActions}`);
-  lines.push(`- biPortalData: \`${report.biPortalSourceSelection.selectedPath || '-'}\` status=${report.biPortalSourceSelection.selectedStatus || '-'} transport=${report.biPortalSourceSelection.selectedTransport || '-'}`);
-  lines.push(`- marketingStackReview coverage: selectedStores=${report.marketingStackReviewCoverage?.selectedStoreCount ?? '-'}, enabledStores=${report.marketingStackReviewCoverage?.enabledStoreCount ?? '-'}, completedStores=${report.marketingStackReviewCoverage?.completedStoreCount ?? '-'}, missingStores=${report.marketingStackReviewCoverage?.missingStoreCount ?? '-'}, complete=${report.marketingStackReviewCoverage?.coverageComplete === true}`);
+  lines.push('## 先看结论');
   lines.push('');
-  lines.push('## 状态摘要');
+  lines.push(`- ${summary.conclusion}`);
+  lines.push(`- ${summary.autoExecution}`);
+  lines.push('- 本报告只读；没有真实提交、取消、补预算或改限时折扣。');
   lines.push('');
-  lines.push(report.noActionSummary || '未生成状态摘要。');
+  lines.push('## 需要做什么');
   lines.push('');
-  lines.push('## 阻塞 / 风险');
-  lines.push('');
-  if (!report.blockers.length) {
-    lines.push('- 无阻塞项。');
+  if (!summary.actions.length) {
+    lines.push('- 现在不用做止损动作。');
   } else {
-    for (const b of report.blockers) lines.push(`- \`${b.code}\`：${b.message}`);
+    for (const item of summary.actions.slice(0, 12)) lines.push(`- ${item.level}：${item.text}`);
+  }
+  lines.push('');
+  lines.push('## 需要留意');
+  lines.push('');
+  if (!summary.watches.length) {
+    lines.push('- 暂无需要额外留意的观察项。');
+  } else {
+    for (const text of summary.watches.slice(0, 12)) lines.push(`- ${text}`);
+  }
+  lines.push('');
+  lines.push('## 已确认安全/已处理');
+  lines.push('');
+  if (!summary.ok.length) {
+    lines.push('- 暂无额外安全项。');
+  } else {
+    for (const text of summary.ok.slice(0, 12)) lines.push(`- ${text}`);
+  }
+  lines.push('');
+  lines.push('## 今日关键状态');
+  lines.push('');
+  lines.push(`- 价格止损阻塞：${report.blockers.length ? `${humanCount(report.blockers.length, '个')}，不能自动执行` : '无'}`);
+  lines.push(`- 旧普通活动叠券：未处理低价 ${humanCount(report.knownOrdinaryActivityGuard.belowTargetCount, '个')}；待系统只读查价 ${humanCount(report.knownOrdinaryActivityGuard.evidenceIncompleteCount, '个')}；已取消止损 ${humanCount(report.knownOrdinaryActivityGuard.mitigatedBelowTargetCount || 0, '个')}`);
+  lines.push(`- 限时折扣叠券：低价 ${humanCount(report.lowPriceOverlap.belowTarget, '个')}；待系统补价证据 ${humanCount(report.lowPriceOverlap.missingEvidence, '个')}；取消候选 ${humanCount(report.lowPriceOverlap.cancelRows, '个')}`);
+  lines.push(`- 优惠券预算：低于 1000 SAR 的店铺 ${humanCount(report.couponBudget.belowTargetCount, '个')}；缺回读证据 ${humanCount(report.couponBudget.missingEvidenceCount, '个')}`);
+  lines.push(`- 新链接/新 SKC：需要定价 ${humanCount(report.newSkcCandidates.needsPricing, '个')}；需要确认 ${humanCount(report.newSkcCandidates.needsConfirmation, '个')}；需要补券复核 ${humanCount(report.newSkcCandidates.needsCouponReview, '个')}`);
+  lines.push(`- 未来 3 天普通活动提醒：${humanCount(report.t3MarketingCandidates.length, '个')}`);
+  lines.push('');
+  lines.push('## 证据文件');
+  lines.push('');
+  lines.push(`- 机器完整报告：\`outputs/reports/marketing-daily-guard-${report.reportDate}.json\``);
+  lines.push(`- 人话版报告：\`outputs/reports/marketing-daily-guard-${report.reportDate}.md\``);
+  if (report.knownOrdinaryActivityGuard.cancelMitigation?.verificationPath) {
+    lines.push(`- 已取消止损验证：\`${report.knownOrdinaryActivityGuard.cancelMitigation.verificationPath}\``);
+  }
+  if (report.biPortalSourceSelection?.selectedPath) {
+    lines.push(`- BI 数据源：\`${report.biPortalSourceSelection.selectedPath}\``);
   }
   if (report.sourceWarnings.length) {
     lines.push('');
     lines.push('## 数据源提醒');
     lines.push('');
-    for (const w of report.sourceWarnings) lines.push(`- \`${w.code}\`：${w.message}`);
-  }
-  if (report.contextWarnings?.length) {
-    lines.push('');
-    lines.push('## 上下文提醒（不阻断 no-action）');
-    lines.push('');
-    for (const w of report.contextWarnings) lines.push(`- \`${w.code}\`：${w.message}`);
+    for (const w of report.sourceWarnings.slice(0, 8)) lines.push(`- ${humanSourceWarningText(w)}`);
   }
   lines.push('');
-  lines.push('## 价格栈');
-  lines.push('');
-  lines.push(`- 限时折扣兜底层叠券扫描：below=${report.lowPriceOverlap.belowTarget}, missing=${report.lowPriceOverlap.missingEvidence}, matches=${report.lowPriceOverlap.matchesTarget}, fallbackAbove=${report.lowPriceOverlap.limitedFallbackAboveTarget}（非最终成交价结论）, cancelRows=${report.lowPriceOverlap.cancelRows}`);
-  lines.push(`- 旧普通活动叠券：riskCancel=${report.oldOrdinaryOverlap.riskCancel}, cancelRows=${report.oldOrdinaryOverlap.cancelRows}, observationRows=${report.oldOrdinaryOverlap.observationRows}`);
-  lines.push(`- 兜底限时折扣偏高候选（非最终成交价结论）：${report.aboveTargetActions.count}；证据不完整=${report.aboveTargetActions.incompletePriceStackEvidenceCount || 0}，有效最终价偏高=${report.aboveTargetActions.effectiveFinalAboveTargetCount || 0}`);
-  if (report.aboveTargetActions.rows.length) {
-    lines.push('');
-    lines.push('| 店铺 | SKC | 标准货号 | 普通活动证据 | 限时折扣价（仅兜底） | 兜底建议基准价 | 兜底券后价 | 目标价 | diff | 动作口径 |');
-    lines.push('| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |');
-    for (const r of report.aboveTargetActions.rows.slice(0, 20)) {
-      lines.push(`| ${r.storeKey} | \`${r.skc}\` | ${r.canonical} | ${r.ordinaryEvidenceStatus} | ${num(r.limitedFallbackPrice)} | ${num(r.targetBaseNeeded)} | ${num(r.limitedFallbackFinalWithCoupon)} | ${num(r.targetFinalPrice)} | ${num(r.limitedFallbackDiff)} | ${r.suggestedAction} |`);
-    }
-  }
-  lines.push('');
-  lines.push('## 新 SKC / 新链接候选');
-  lines.push('');
-  lines.push(`- sourceStatus=${report.newSkcCandidates.status}, linkDate=${report.newSkcCandidates.linkDate || '-'}, recentWindowDays=${report.newSkcCandidates.recentWindowDays}`);
-  lines.push(`- onShelf=${report.newSkcCandidates.onShelfRows}, exactPlanned=${report.newSkcCandidates.exactPlannedRows}, missingExactPlanOnShelf=${report.newSkcCandidates.missingExactPlanOnShelf}, recentMissing=${report.newSkcCandidates.recentMissingExactPlanOnShelf}, unknownAge=${report.newSkcCandidates.unknownAgeMissingExactPlanOnShelf}`);
-  lines.push(`- needsPricing=${report.newSkcCandidates.needsPricing}, needsConfirmation=${report.newSkcCandidates.needsConfirmation}, needsAgeReview=${report.newSkcCandidates.needsAgeReview}, needsCouponReview=${report.newSkcCandidates.needsCouponReview}, ignored=${report.newSkcCandidates.ignoredCount}`);
-  if (!report.newSkcCandidates.rows.length) {
-    lines.push('- 暂无 30 天内上架且缺精确价格计划的 SKC 候选。');
-  } else {
-    lines.push('');
-    lines.push('| 店铺 | SKC | 标准货号 | 上架天数 | C7曝光 | 库存 | 决策 | 动作 |');
-    lines.push('| --- | --- | --- | ---: | ---: | ---: | --- | --- |');
-    for (const r of report.newSkcCandidates.rows.slice(0, 30)) {
-      lines.push(`| ${r.storeKey} | \`${r.skc}\` | ${r.canonical} | ${num(r.shelfAgeDays)} | ${num(r.c7EpsUv)} | ${num(r.platformSaleableStock)} | ${r.decision} | ${r.action} |`);
-    }
-  }
-  lines.push('');
-  lines.push('## T-3 可报活动提醒');
-  lines.push('');
-  if (!report.t3MarketingCandidates.length) {
-    lines.push('- 暂无 T-3 截止活动候选。');
-  } else {
-    lines.push('| 店铺 | 活动ID | 报名截止 | 行数 | 缺成本 | 缺仓储 |');
-    lines.push('| --- | --- | --- | ---: | ---: | ---: |');
-    for (const r of report.t3MarketingCandidates.slice(0, 30)) {
-      lines.push(`| ${r.store} | ${r.activityId} | ${r.signupDeadline} | ${r.rows} | ${r.missingCostRows} | ${r.missingStorageRows} |`);
-    }
-  }
-  lines.push('');
-  lines.push('## 优惠券预算');
-  lines.push('');
-  lines.push(`- activityId=${report.couponBudget.activityId ?? '-'}, site=${report.couponBudget.site || '-'}, targetBudget=${num(report.couponBudget.targetBudget)} ${report.couponBudget.currency || ''}, selectedSource=${report.couponBudget.selectedSource}`);
-  lines.push(`- verifiedAtTarget=${report.couponBudget.verifiedAtTargetCount}/${report.couponBudget.expectedStoreCount}, belowTarget=${report.couponBudget.belowTargetCount}, missingEvidence=${report.couponBudget.missingEvidenceCount}, writeFailureButAtTarget=${report.couponBudget.writeFailureButAtTargetCount}`);
-  if (report.couponBudget.belowTargetStores.length) {
-    lines.push(`- 低于预算：${report.couponBudget.belowTargetStores.map(s => `${s.storeKey}:${num(s.currentBudget)}`).join(', ')}`);
-  }
-  if (report.couponBudget.missingEvidenceStores.length) {
-    lines.push(`- 缺回读证据：${report.couponBudget.missingEvidenceStores.map(s => s.storeKey).join(', ')}`);
-  }
-  if (report.couponBudget.writeFailureButAtTargetStores.length) {
-    lines.push(`- 写入异常但回读达标：${report.couponBudget.writeFailureButAtTargetStores.map(s => `${s.storeKey}:${num(s.currentBudget)}${Object.keys(s.writeCodes || {}).length ? `(${JSON.stringify(s.writeCodes)})` : ''}`).join(', ')}`);
-  }
-  lines.push('');
-  lines.push('## 订单价格审计');
-  lines.push('');
-  lines.push(`- files=${report.orderPriceAudit.files}, rows=${report.orderPriceAudit.rows}, below=${report.orderPriceAudit.below}, above=${report.orderPriceAudit.above}, outsideWindow=${report.orderPriceAudit.outsideWindow}, missingPlan=${report.orderPriceAudit.missingPlan}`);
-  if (report.orderPriceAudit.ignoredNoWindowFiles.length) {
-    lines.push(`- ignoredNoWindowFiles=${report.orderPriceAudit.ignoredNoWindowFiles.length}（缺活动窗口，未参与 below/above 统计）`);
-  }
-  lines.push('');
-  lines.push('## 建议 dry-run 命令');
-  lines.push('');
-  if (!report.suggestedDryRunCommands.length) {
-    lines.push('- 暂无建议命令。');
-  } else {
-    for (const c of report.suggestedDryRunCommands) lines.push(`- ${c.label}: \`${c.command}\``);
-  }
-  lines.push('');
-  lines.push('## 数据源');
-  lines.push('');
-  for (const s of report.sourceFiles) {
-    lines.push(`- ${s.label}: ${s.exists ? `\`${s.path}\`` : '(missing)'} status=${s.status} artifactAgeHours=${s.artifactAgeHours ?? '-'} dataAgeHours=${s.dataAgeHours ?? '-'}`);
-  }
+  lines.push('---');
+  lines.push('技术字段、完整明细、脚本命令只保存在 JSON 中；Markdown 默认不展开大表，避免误读。');
   lines.push('');
   return lines.join('\n');
 }
-
 function num(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n.toFixed(2) : '';
@@ -1037,6 +1385,62 @@ async function main() {
   const budgetDryRun = await read('couponBudgetDryRun', latestFile(path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-budget-results'), /^coupon-site-budget-dry-run-.*\.json$/));
   const stackReview = await read('marketingStackReview', latestFile(path.join(ROOT, 'outputs', 'reports'), /^marketing-stack-review-\d{4}-\d{2}-\d{2}\.json$/));
   const marketingStackReviewContext = normalizeMarketingStackReviewSource(stackReview, now, args.maxAgeHours);
+  const knownOrdinaryEvidenceDir = path.join(ROOT, 'tmp', 'mbrs', 'deadline-fill-results');
+  const knownOrdinaryEvidenceSource = {
+    label: 'knownOrdinaryActivityEvidence',
+    path: rel(knownOrdinaryEvidenceDir),
+    exists: fsSync.existsSync(knownOrdinaryEvidenceDir),
+    mtime: '',
+    generatedAt: '',
+    createdAt: '',
+    ageHours: null,
+    artifactAgeHours: null,
+    dataAgeHours: null,
+    status: fsSync.existsSync(knownOrdinaryEvidenceDir) ? 'ok' : 'missing',
+  };
+  if (knownOrdinaryEvidenceSource.exists) {
+    const files = listFiles(knownOrdinaryEvidenceDir, /\.json$/);
+    knownOrdinaryEvidenceSource.fileCount = files.length;
+    const latest = files[0] || '';
+    if (latest) {
+      const stat = fsSync.statSync(latest);
+      knownOrdinaryEvidenceSource.latestFile = rel(latest);
+      knownOrdinaryEvidenceSource.mtime = stat.mtime.toISOString();
+      knownOrdinaryEvidenceSource.artifactAgeHours = ageHours(now, stat.mtime);
+    }
+  }
+  sources.push(knownOrdinaryEvidenceSource);
+  let couponEligibilityPlan = null;
+  let couponEligibilityPlanError = '';
+  try {
+    couponEligibilityPlan = await loadCouponTargetEligibilityPlan({
+      root: ROOT,
+      planPath: args.targetPlan,
+      priceOverridesPaths: [args.priceOverrides],
+      targetDiscountPct: 15,
+    });
+  } catch (err) {
+    couponEligibilityPlanError = err.message;
+  }
+  const ordinaryEvidenceByStore = new Map();
+  if (couponEligibilityPlan && knownOrdinaryEvidenceSource.exists) {
+    const evidenceStoreKeys = [...new Set([
+      ...mapKeys(couponEligibilityPlan.rowsByStore),
+      ...mapKeys(couponEligibilityPlan.allowed15ByStore || couponEligibilityPlan.byStore),
+    ])].sort();
+    for (const storeKey of evidenceStoreKeys) {
+      const evidence = await loadKnownOrdinaryPriceEvidence({root: ROOT, storeKey});
+      ordinaryEvidenceByStore.set(storeKey, {
+        ...evidence,
+        bySkc: groupOrdinaryEvidenceBySkc(evidence.rows),
+      });
+    }
+    knownOrdinaryEvidenceSource.storeCount = evidenceStoreKeys.length;
+    knownOrdinaryEvidenceSource.rowCount = [...ordinaryEvidenceByStore.values()].reduce((n, e) => n + Number(e.rows?.length || 0), 0);
+    knownOrdinaryEvidenceSource.parseErrorCount = [...ordinaryEvidenceByStore.values()].reduce((n, e) => n + Number(e.parseErrorCount || 0), 0);
+    if (knownOrdinaryEvidenceSource.parseErrorCount > 0) knownOrdinaryEvidenceSource.status = 'parse_error';
+  }
+  const knownOrdinaryCancelMitigation = await loadKnownOrdinaryCancelMitigation(args.date);
 
   const orderAuditSelection = latestOrderAuditSelection();
   const orderFiles = orderAuditSelection.selectedFiles;
@@ -1051,6 +1455,12 @@ async function main() {
 
   const lowPriceOverlap = summarizeLowPriceOverlap(lowLive.data, lowCancel.data);
   const oldOrdinaryOverlap = summarizeOldOrdinaryOverlap(oldLive.data, oldCancel.data);
+  const knownOrdinaryActivityGuard = summarizeKnownOrdinaryActivityGuard({
+    couponPlan: couponEligibilityPlan,
+    ordinaryEvidenceByStore,
+    stackDoc: stackReview.data,
+    cancelMitigation: knownOrdinaryCancelMitigation,
+  });
   const aboveTargetActions = summarizeAboveTargetActions(abovePlan.data);
   const orderPriceAudit = countOrderStatuses(orderDocs);
   const biPortalFreshness = summarizeBiPortal(biPortal.data, biPortal.source);
@@ -1150,6 +1560,8 @@ async function main() {
     }
   }
   if (couponSubmitDryRun.status === 'untrusted') addBlocker(blockers, 'coupon_submit_not_dry_run', '最新优惠券提交 summary 不是 dry-run，不能作为自动任务安全证据', {path: couponSubmitDryRun.summaryPath});
+  if (couponEligibilityPlanError) addBlocker(blockers, 'coupon_target_plan_classifier_failed', '优惠券 allowed15 目标计划解析失败，不能判断旧普通活动叠券风险', {error: couponEligibilityPlanError});
+  if (knownOrdinaryEvidenceSource.status === 'missing') addBlocker(blockers, 'known_ordinary_evidence_missing', '旧普通营销活动填报价证据目录缺失，不能形成价格栈 no-action 结论', {path: knownOrdinaryEvidenceSource.path});
   if (!biPortal.data) addBlocker(blockers, 'bi_portal_source_unavailable', '没有可解析的 BI Portal data.json，不能判断新链接、BI 标签或新鲜度', {path: biPortal.source?.path || ''});
   if (!marketingStackReviewCoverage.coverageComplete) {
     addBlocker(
@@ -1171,6 +1583,30 @@ async function main() {
   if (lowPriceOverlap.missingEvidence > 0) addBlocker(blockers, 'coupon_missing_price_evidence', `低价叠券缺价格证据=${lowPriceOverlap.missingEvidence}`);
   if (lowPriceOverlap.cancelRows > 0) addBlocker(blockers, 'low_price_cancel_rows_nonzero', `低价叠券取消候选 rows=${lowPriceOverlap.cancelRows}`);
   if (oldOrdinaryOverlap.riskCancel || oldOrdinaryOverlap.cancelRows > 0) addBlocker(blockers, 'old_ordinary_cancel_rows_nonzero', `旧普通活动 cancel rows=${oldOrdinaryOverlap.cancelRows}`);
+  if (knownOrdinaryActivityGuard.belowTargetCount > 0) {
+    addBlocker(
+      blockers,
+      'known_ordinary_coupon_final_below_target',
+      `已知旧普通活动价叠加15%券低于目标=${knownOrdinaryActivityGuard.belowTargetCount}`,
+      {samples: knownOrdinaryActivityGuard.belowTargetRows.slice(0, 20)},
+    );
+  }
+  if (knownOrdinaryActivityGuard.missingFinalTargetPriceCount > 0) {
+    addBlocker(
+      blockers,
+      'known_ordinary_missing_final_target_price',
+      `已知旧普通活动重叠但缺 finalTargetPrice=${knownOrdinaryActivityGuard.missingFinalTargetPriceCount}`,
+      {samples: knownOrdinaryActivityGuard.missingFinalTargetPriceRows.slice(0, 20)},
+    );
+  }
+  if (knownOrdinaryActivityGuard.evidenceIncompleteCount > 0) {
+    addBlocker(
+      blockers,
+      'known_ordinary_evidence_incomplete',
+      `15%券计划商品存在旧普通活动标签但缺填报价证据=${knownOrdinaryActivityGuard.evidenceIncompleteCount}`,
+      {samples: knownOrdinaryActivityGuard.evidenceIncompleteRows.slice(0, 20)},
+    );
+  }
   if (aboveTargetActions.effectiveFinalBelowTargetCount > 0) {
     addBlocker(blockers, 'effective_final_below_target_from_price_stack', `有效价格栈券后低于目标=${aboveTargetActions.effectiveFinalBelowTargetCount}`);
   }
@@ -1237,6 +1673,7 @@ async function main() {
     couponSubmitDryRun,
     lowPriceOverlap,
     oldOrdinaryOverlap,
+    knownOrdinaryActivityGuard,
     aboveTargetActions,
     newSkcCandidates,
     orderPriceAudit,
@@ -1285,7 +1722,10 @@ async function main() {
     && !report.lowPriceOverlap.missingEvidence
     && !report.lowPriceOverlap.cancelRows
     && !report.oldOrdinaryOverlap.riskCancel
-    && !report.oldOrdinaryOverlap.cancelRows;
+    && !report.oldOrdinaryOverlap.cancelRows
+    && !report.knownOrdinaryActivityGuard.belowTargetCount
+    && !report.knownOrdinaryActivityGuard.evidenceIncompleteCount
+    && !report.knownOrdinaryActivityGuard.missingFinalTargetPriceCount;
   if (canNoAction) {
     report.noActionSummary = '当前已有证据未显示需要动作；仅保持每日巡检。';
   } else if (!report.blockers.length) {
@@ -1293,6 +1733,7 @@ async function main() {
   } else {
     report.noActionSummary = '存在阻塞项；需要刷新证据或人工处理后，才能形成安全的 no-action 结论。';
   }
+  report.humanSummary = buildHumanSummary(report);
 
   await fs.mkdir(args.outDir, {recursive: true});
   const jsonPath = path.join(args.outDir, `marketing-daily-guard-${args.date}.json`);

@@ -17,6 +17,9 @@
  * label alone: planned 15% coupon rows are blocked only when
  * limitedDiscountPrice * couponFactor would fall below the audited final target
  * price, or when the required price evidence is missing.
+ * Known active/future ordinary-marketing fill prices are also part of the same
+ * price stack. A lower old campaign price must block coupon submission when it
+ * would make the final price fall below the audited target.
  */
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
@@ -31,6 +34,11 @@ import {
   loadCouponTargetEligibilityPlan,
   summarizeCouponTargetEligibilityPlan,
 } from '../../lib/marketing_coupon_policy.mjs';
+import {
+  classifyKnownOrdinaryCouponStack,
+  groupOrdinaryEvidenceBySkc,
+  loadKnownOrdinaryPriceEvidence,
+} from '../../lib/marketing_ordinary_price_evidence.mjs';
 import {
   requireStoreIdentitySnapshot,
   storeIdentityEvalBody,
@@ -910,12 +918,70 @@ async function processStore(store, args, targetPlan) {
       result.limitedDiscountGuard.allowedSample = allowedRows.slice(0, 20);
       result.limitedDiscountGuard.excludedSample = excludedRows.slice(0, 20);
     }
+    result.knownOrdinaryActivityGuard = {
+      policy: 'known-active-or-future-ordinary-price-stack-guard',
+      checked: false,
+      evidenceCount: 0,
+      overlapCount: 0,
+      excludedCount: 0,
+      excludedBelowTarget: 0,
+      allowedByTargetPrice: 0,
+      missingFinalTargetPrice: 0,
+      priceToleranceSar: PRICE_GUARD_TOLERANCE_SAR,
+      sample: [],
+      allowedSample: [],
+      excludedSample: [],
+    };
+    if (targetPlan) {
+      const ordinaryEvidence = await loadKnownOrdinaryPriceEvidence({root: ROOT, storeKey: store.storeKey});
+      const ordinaryBySkc = groupOrdinaryEvidenceBySkc(ordinaryEvidence.rows);
+      const targetBeforeKnownOrdinaryGuard = targetSkcs.slice();
+      result.knownOrdinaryActivityGuard.checked = true;
+      result.knownOrdinaryActivityGuard.evidenceCount = ordinaryEvidence.rows.length;
+      result.knownOrdinaryActivityGuard.source = {
+        dir: path.relative(ROOT, ordinaryEvidence.dir),
+        nowLocal: ordinaryEvidence.nowLocal,
+      };
+      const overlapRows = targetSkcs
+        .filter(skc => ordinaryBySkc.has(skc))
+        .map(skc => {
+          const planRow = findCouponPlanRow(targetPlan, store.storeKey, skc);
+          const evidenceRows = ordinaryBySkc.get(skc) || [];
+          const priceGuard = classifyKnownOrdinaryCouponStack(evidenceRows, planRow, args.discountMax);
+          return {
+            skc,
+            supplierNo: planRow?.supplierNo || priceGuard.lowestOrdinaryEvidence?.supplierNo || '',
+            canonical: planRow?.canonical || priceGuard.lowestOrdinaryEvidence?.canonical || '',
+            priceGuard,
+            evidenceRows: evidenceRows.slice(0, 5),
+          };
+        });
+      const excludedRows = overlapRows.filter(row => !row.priceGuard.allowSubmit);
+      const allowedRows = overlapRows.filter(row => row.priceGuard.allowSubmit);
+      const excludedSet = new Set(excludedRows.map(row => row.skc));
+      targetSkcs = targetSkcs.filter(skc => !excludedSet.has(skc));
+      result.knownOrdinaryActivityGuard.overlapCount = overlapRows.length;
+      result.knownOrdinaryActivityGuard.excludedCount = excludedRows.length;
+      result.knownOrdinaryActivityGuard.excludedBelowTarget = excludedRows.filter(row => row.priceGuard.decision === 'known_ordinary_final_below_target').length;
+      result.knownOrdinaryActivityGuard.allowedByTargetPrice = allowedRows.length;
+      result.knownOrdinaryActivityGuard.missingFinalTargetPrice = excludedRows.filter(row => row.priceGuard.decision === 'missing_final_target_price').length;
+      result.knownOrdinaryActivityGuard.sample = overlapRows.slice(0, 20);
+      result.knownOrdinaryActivityGuard.allowedSample = allowedRows.slice(0, 20);
+      result.knownOrdinaryActivityGuard.excludedSample = excludedRows.slice(0, 20);
+      result.knownOrdinaryActivityGuard.beforeGuardCount = targetBeforeKnownOrdinaryGuard.length;
+    }
     const toSubmit = targetSkcs.filter(skc => !enrolledSetBefore.has(skc));
     result.target = {
       mode: targetPlan ? 'coupon-allowed15-intersection-15pct-available' : 'explicit-all-15pct-available',
       beforeLimitedDiscountGuard: targetBeforeLimitedGuard.length,
+      beforeKnownOrdinaryActivityGuard: result.knownOrdinaryActivityGuard.beforeGuardCount ?? targetSkcs.length,
       targetCount: targetSkcs.length,
       excludedByLimitedDiscountGuard: result.limitedDiscountGuard.excludedCount,
+      excludedByKnownOrdinaryActivityGuard: result.knownOrdinaryActivityGuard.excludedCount,
+      safetyStop: targetPlan && targetSkcs.length === 0 && (
+        result.limitedDiscountGuard.excludedCount > 0
+        || result.knownOrdinaryActivityGuard.excludedCount > 0
+      ),
       alreadyEnrolled: targetSkcs.length - toSubmit.length,
       toSubmit: toSubmit.length,
       sample: targetSkcs.slice(0, 15),
@@ -927,7 +993,9 @@ async function processStore(store, args, targetPlan) {
         ? 'target plan has no 15% coupon-allowed SKCs for this store; skipped instead of submitting all available goods'
         : result.limitedDiscountGuard.excludedCount > 0
           ? '目标商品均被价格栈守卫排除，未提交优惠券'
-        : '15% 券档当前没有需要提交的目标商品';
+          : result.knownOrdinaryActivityGuard.excludedCount > 0
+            ? '目标商品均被旧普通活动价格栈守卫排除，未提交优惠券'
+            : '15% 券档当前没有需要提交的目标商品';
       return result;
     }
     if (args.dryRun) {
@@ -1019,11 +1087,12 @@ summary.ok = summary.stores.every(s => s.ok);
 summary.totals = summary.stores.reduce((acc, s) => {
   acc.targetCount += s.target?.targetCount || 0;
   acc.excludedByLimitedDiscountGuard += s.target?.excludedByLimitedDiscountGuard || 0;
+  acc.excludedByKnownOrdinaryActivityGuard += s.target?.excludedByKnownOrdinaryActivityGuard || 0;
   acc.toSubmit += s.target?.toSubmit || 0;
   acc.okStores += s.ok ? 1 : 0;
   acc.failedStores += s.ok ? 0 : 1;
   return acc;
-}, {targetCount: 0, excludedByLimitedDiscountGuard: 0, toSubmit: 0, okStores: 0, failedStores: 0});
+}, {targetCount: 0, excludedByLimitedDiscountGuard: 0, excludedByKnownOrdinaryActivityGuard: 0, toSubmit: 0, okStores: 0, failedStores: 0});
 const summaryFile = path.join(OUT_DIR, `summary-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
 await fs.writeFile(summaryFile, JSON.stringify(summary, null, 2), 'utf8');
 console.log(`\nSUMMARY ${summaryFile}`);
