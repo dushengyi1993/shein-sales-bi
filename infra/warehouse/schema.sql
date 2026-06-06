@@ -1490,6 +1490,10 @@ CREATE TABLE IF NOT EXISTS fact.link_performance_daily (
 CREATE INDEX IF NOT EXISTS idx_link_perf_date_store ON fact.link_performance_daily(date, store_key);
 CREATE INDEX IF NOT EXISTS idx_link_perf_product ON fact.link_performance_daily(standard_goods_sn, date);
 CREATE INDEX IF NOT EXISTS idx_link_perf_skc ON fact.link_performance_daily(skc, date);
+CREATE INDEX IF NOT EXISTS idx_link_perf_product_traffic_daily
+  ON fact.link_performance_daily(date, store_key, standard_goods_sn)
+  INCLUDE (group_key, sale_cnt, pay_order_cnt, eps_uv, goods_uv, cart_uv, pay_uv, skc)
+  WHERE coalesce(standard_goods_sn,'') <> '';
 
 CREATE TABLE IF NOT EXISTS fact.product_store_coverage (
   unique_key text PRIMARY KEY,

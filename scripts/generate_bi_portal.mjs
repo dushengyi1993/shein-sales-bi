@@ -11,6 +11,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import {enrichProductDisplayNames} from '../lib/product_display_name.mjs';
+import {getAliasConfig} from '../lib/product_sku_normalizer.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORTAL_GENERATE_TIMEOUT_MS = Number(process.env.SHEIN_BI_PORTAL_TIMEOUT_MS || 900_000);
@@ -66,6 +67,7 @@ function parseArgs(argv) {
     dataMode: process.env.SHEIN_BI_PORTAL_DATA_MODE || 'legacy',
     section: '',
     jsonOnly: false,
+    homeVariant: process.env.SHEIN_BI_HOME_VARIANT || 'no-groups',
     previewVariant: '',
     htmlOnlyFromData: '',
     htmlFile: '',
@@ -81,6 +83,7 @@ function parseArgs(argv) {
     else if (a === '--data-mode') args.dataMode = argv[++i];
     else if (a === '--section') args.section = argv[++i];
     else if (a === '--json-only') args.jsonOnly = true;
+    else if (a === '--home-variant') args.homeVariant = argv[++i];
     else if (a === '--preview-variant') args.previewVariant = argv[++i];
     else if (a === '--html-only-from-data') args.htmlOnlyFromData = path.resolve(argv[++i]);
     else if (a === '--html-file') args.htmlFile = path.resolve(argv[++i]);
@@ -88,6 +91,9 @@ function parseArgs(argv) {
   args.dataMode = String(args.dataMode || 'legacy').trim().toLowerCase();
   if (!['legacy', 'api'].includes(args.dataMode)) throw new Error(`Invalid --data-mode: ${args.dataMode}`);
   args.section = String(args.section || '').trim();
+  args.homeVariant = String(args.homeVariant || '').trim().toLowerCase();
+  if (args.homeVariant === 'legacy') args.homeVariant = 'classic';
+  if (!['classic', 'no-groups'].includes(args.homeVariant)) throw new Error(`Invalid --home-variant: ${args.homeVariant}`);
   args.previewVariant = String(args.previewVariant || '').trim();
   return args;
 }
@@ -99,6 +105,15 @@ function isFormalPortalIndexPath(file, outDir) {
   return path.basename(resolved).toLowerCase() === 'index.html' && path.basename(path.dirname(resolved)).toLowerCase() === 'bi-portal';
 }
 
+function shouldWriteNoGroupsPreview() {
+  return String(process.env.SHEIN_BI_PREVIEW_NO_GROUPS_DISABLED || '').trim() !== '1';
+}
+
+function noGroupsPreviewHtmlFile(args) {
+  const configured = String(process.env.SHEIN_BI_PREVIEW_NO_GROUPS_FILE || '').trim();
+  return path.resolve(configured || path.join(args.outDir, 'preview-no-groups.html'));
+}
+
 const PORTAL_API_SECTION_KEYS = [
   'homeProfit',
   'homeRankings',
@@ -106,6 +121,7 @@ const PORTAL_API_SECTION_KEYS = [
   'profit',
   'actions',
   'linksData',
+  'productTrafficDaily',
   'inventoryTrend',
   'comments',
   'orders',
@@ -175,6 +191,9 @@ const PORTAL_SECTION_SELECTS = {
   'duplicateLinks', (SELECT data FROM duplicate_links),
   'storeLinks', (SELECT data FROM store_links),
   'matrix', (SELECT data FROM matrix)
+`,
+  productTrafficDaily: `
+  'productTrafficDaily', (SELECT data FROM product_traffic_daily)
 `,
   inventoryTrend: `
   'inventoryTrend', (SELECT data FROM visible_inventory_trend)
@@ -2538,6 +2557,31 @@ trend_link_series AS (
     ORDER BY date
   ) t
 ),
+product_traffic_daily AS (
+  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY date, store_key, standard_goods_sn), '[]'::jsonb) AS data
+  FROM (
+    SELECT
+      p.date,
+      p.store_key AS store_key,
+      max(coalesce(p.group_key, '')) AS group_key,
+      dim.product_canonical_sn(p.standard_goods_sn) AS standard_goods_sn,
+      round(sum(coalesce(p.sale_cnt, 0))::numeric, 2) AS sale_cnt,
+      round(sum(coalesce(p.pay_order_cnt, 0))::numeric, 2) AS pay_order_cnt,
+      round(sum(coalesce(p.eps_uv, 0))::numeric, 0) AS eps_uv,
+      round(sum(coalesce(p.goods_uv, 0))::numeric, 0) AS goods_uv,
+      round(sum(coalesce(p.cart_uv, 0))::numeric, 0) AS cart_uv,
+      round(sum(coalesce(p.pay_uv, 0))::numeric, 0) AS pay_uv,
+      CASE WHEN sum(coalesce(p.eps_uv, 0)) > 0 THEN round((sum(coalesce(p.goods_uv, 0)) / nullif(sum(coalesce(p.eps_uv, 0)), 0))::numeric, 4) ELSE NULL END AS click_rate,
+      CASE WHEN sum(coalesce(p.goods_uv, 0)) > 0 THEN round((sum(coalesce(p.pay_uv, 0)) / nullif(sum(coalesce(p.goods_uv, 0)), 0))::numeric, 4) ELSE NULL END AS pay_rate,
+      count(*) AS link_rows,
+      count(DISTINCT p.store_key) AS store_count,
+      count(DISTINCT p.skc) AS skc_count
+    FROM fact.link_performance_daily p
+    WHERE coalesce(p.standard_goods_sn, '') <> ''
+    GROUP BY p.date, p.store_key, dim.product_canonical_sn(p.standard_goods_sn)
+    ORDER BY p.date, p.store_key, dim.product_canonical_sn(p.standard_goods_sn)
+  ) t
+),
 trend_business_daily AS (
   SELECT
     snapshot_date AS date,
@@ -2742,10 +2786,32 @@ function svgIcon(name) {
   return `<svg aria-hidden="true" ${common}>${paths[name] || paths.home}</svg>`;
 }
 
+function buildProductAliasSearch(){
+  const out = {};
+  const cfg = getAliasConfig();
+  for (const entry of cfg.aliases || []) {
+    const canonical = String(entry?.canonical || '').trim();
+    if (!canonical) continue;
+    const aliases = (entry.aliases || []).map(alias => typeof alias === 'string' ? alias : alias?.value).filter(Boolean);
+    const text = [canonical, ...aliases].map(x => String(x || '').normalize('NFKC').trim()).filter(Boolean).join(' ');
+    if (text) out[canonical] = text;
+  }
+  return out;
+}
+function attachProductAliasSearch(data){
+  return {...(data || {}), productAliasSearch: buildProductAliasSearch()};
+}
+
 function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck, options = {}) {
   const previewVariant = String(options.previewVariant || '').trim();
-  const titleSuffix = previewVariant === 'no-groups' ? ' · 平行预览' : '';
-  const json = JSON.stringify({...data, audit, pipeline, briefing, firstRunCheck}).replace(/</g, '\\u003c');
+  const homeVariant = String(options.homeVariant || (previewVariant === 'no-groups' ? 'no-groups' : 'classic')).trim();
+  const isPreviewSurface = previewVariant === 'no-groups';
+  const isNoGroupsHome = homeVariant === 'no-groups' || isPreviewSurface;
+  const titleSuffix = isPreviewSurface ? ' · 平行预览' : '';
+  const noGroupsSurfaceLabelPrefix = isPreviewSurface ? '平行预览 · ' : '';
+  const noGroupsTrendSurfacePrefix = isPreviewSurface ? '平行预览：' : '';
+  const dataForHtml = attachProductAliasSearch(data);
+  const json = JSON.stringify({...dataForHtml, audit, pipeline, briefing, firstRunCheck}).replace(/</g, '\\u003c');
   const links = {
     home: `${metabaseUrl}/dashboard/13`,
     finance: `${metabaseUrl}/dashboard/14`,
@@ -2755,22 +2821,23 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck, 
     product: `${metabaseUrl}/dashboard/7`,
     skc: `${metabaseUrl}/dashboard/8`,
   };
-  const isNoGroupsPreview = previewVariant === 'no-groups';
-  const heroTitle = isNoGroupsPreview ? '先看全盘，再看排行，具体动作再下钻。' : '先看总盘，再看排行，具体动作再下钻。';
-  const heroCopy = isNoGroupsPreview
-    ? '平行预览版：所有店铺从开店开始归入全盘，不再展示旧口径；首页增加流量、库存/去化和多指标趋势。'
+  const heroTitle = isNoGroupsHome ? '先看全盘，再看排行，具体动作再下钻。' : '先看总盘，再看排行，具体动作再下钻。';
+  const heroCopy = isNoGroupsHome
+    ? (isPreviewSurface
+      ? '平行预览版：所有店铺从开店开始归入全盘，不再展示旧口径；首页增加流量、库存/去化和多指标趋势。'
+      : '所有店铺从开店开始归入全盘，不再展示旧分组口径；首页包含流量、库存/去化和多指标趋势。')
     : '首页只保留最直观的经营看板：今日、月累计、分组、店铺排行、货号排行和动作结构。需要处理时再进入店铺、货号、SKC 或动作池。';
-  const overviewSub = isNoGroupsPreview
+  const overviewSub = isNoGroupsHome
     ? '先选时间段，再看同一口径下的全盘、趋势、流量、库存/去化和排行；本月数据只作为补充参照。'
     : '先选时间段，再看同一口径下的总盘、分组、趋势和排行；本月数据只作为补充参照。';
-  const homeStoreFilterLabel = isNoGroupsPreview ? '首页店铺筛选' : '首页店铺或分组筛选';
-  const profitTrendSub = isNoGroupsPreview
+  const homeStoreFilterLabel = isNoGroupsHome ? '首页店铺筛选' : '首页店铺或分组筛选';
+  const profitTrendSub = isNoGroupsHome
     ? '全盘只看总计；筛到单店或货号时看当前范围。月趋势按所选日期片段，不强行补整月。'
     : '总计 / DSY / LGM 看全局；筛到单店或货号时看当前范围。月趋势按所选日期片段，不强行补整月。';
-  const inventoryAlertSub = isNoGroupsPreview
+  const inventoryAlertSub = isNoGroupsHome
     ? '按当前店铺销售速度测算去化天数；库存基数仍是全局物理批次。'
     : '按当前店铺/分组销售速度测算去化天数；库存基数仍是全局物理批次。';
-  const inventoryDetailSub = isNoGroupsPreview
+  const inventoryDetailSub = isNoGroupsHome
     ? '一行一个标准货号；支持顶部货号/店铺筛选。店铺筛选只改变销售速度，不代表该店独占这些库存。'
     : '一行一个标准货号；支持顶部货号/店铺/分组筛选。店铺筛选只改变销售速度，不代表该店独占这些库存。';
   return `<!doctype html>
@@ -4187,9 +4254,15 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck, 
 <button class="theme-fab" id="themeToggleFab" type="button" aria-label="切换浅色或深色主题">浅色/深色</button>
 <script id="portal-data" type="application/json">${json}</script>
 <script>
+const PORTAL_HOME_VARIANT = ${JSON.stringify(homeVariant)};
 const PORTAL_PREVIEW_VARIANT = ${JSON.stringify(previewVariant)};
+const ACTIVE_HOME_VARIANT = String(PORTAL_HOME_VARIANT || '').trim();
 const ACTIVE_PREVIEW_VARIANT = String(PORTAL_PREVIEW_VARIANT || '').trim();
-const NO_GROUPS_PREVIEW = ACTIVE_PREVIEW_VARIANT === 'no-groups';
+const NO_GROUPS_HOME = ACTIVE_HOME_VARIANT === 'no-groups' || ACTIVE_PREVIEW_VARIANT === 'no-groups';
+const NO_GROUPS_PREVIEW = NO_GROUPS_HOME; // Backwards-compatible name for the no-groups homepage behavior.
+const NO_GROUPS_PREVIEW_SURFACE = ACTIVE_PREVIEW_VARIANT === 'no-groups';
+const NO_GROUPS_SURFACE_LABEL_PREFIX = ${JSON.stringify(noGroupsSurfaceLabelPrefix)};
+const NO_GROUPS_TREND_SURFACE_PREFIX = ${JSON.stringify(noGroupsTrendSurfacePrefix)};
 let DATA = JSON.parse(document.getElementById('portal-data').textContent);
 let STORE_CODES = new Set((DATA.stores || []).map(s => s.store_key));
 const STORE_ORDER = ['DL','DX','FY','LQ','NM','HL','JY','ZL','TS','MZ','CX','YJ','XL','QY','QH','TZ'];
@@ -4368,6 +4441,7 @@ function backgroundBiSectionsForTab(tab = state.tab || 'overview'){
   const overviewSections = ['homeRankings','afterSales','homeProfit','actions','financeData'];
   if (tab === 'overview' && (overviewNeedsProfitSectionForHome() || (NO_GROUPS_PREVIEW && selectedTrendMetricKeys().includes('profit')))) overviewSections.push('profit');
   if (tab === 'overview' && NO_GROUPS_PREVIEW && selectedTrendMetricKeys().includes('inventory')) overviewSections.push('inventoryTrend');
+  if (tab === 'overview' && NO_GROUPS_PREVIEW && trafficScopeRequiresProductSection()) overviewSections.push('productTrafficDaily');
   const map = {
     overview:overviewSections
   };
@@ -4392,7 +4466,7 @@ function showBiSectionLoading(sections){
     if ((state.tab || 'overview') === 'overview' && host.id === 'homeDashboard') host.appendChild(target);
     else host.prepend(target);
   }
-  const pending = sections.map(s => s === 'homeProfit' ? '首页利润' : s === 'homeRankings' ? '首页销售/排行' : s === 'linksData' ? '链接/覆盖' : s === 'financeData' ? '财务明细' : s === 'rtvData' ? 'RTV追踪' : s).join('、');
+  const pending = sections.map(s => s === 'homeProfit' ? '首页利润' : s === 'homeRankings' ? '首页销售/排行' : s === 'linksData' ? '链接/覆盖' : s === 'productTrafficDaily' ? '货号级每日流量' : s === 'financeData' ? '财务明细' : s === 'rtvData' ? 'RTV追踪' : s).join('、');
   target.innerHTML = '正在加载当前页面数据：' + escapeHtml(pending) + '。界面布局保持不变，数据按需从服务端读取。';
 }
 function clearBiSectionLoading(){
@@ -5930,6 +6004,12 @@ function productQueryMatch(row, q = productScopeQuery()){
     row.raw_goods_sn_list
   ].map(x => String(x || '')).join(' ').toLowerCase();
   if (codeText.includes(q)) return true;
+  const aliasText = [
+    DATA.productAliasSearch?.[row.standard_goods_sn],
+    DATA.productAliasSearch?.[row.goods_sn],
+    DATA.productAliasSearch?.[row.product_sn]
+  ].map(x => String(x || '')).join(' ').toLowerCase();
+  if (aliasText && aliasText.includes(q)) return true;
 
   // 避免短数字/短编号（如 505）误命中 SKC 长编号中间片段；
   // 只有用户输入完整或较长 SKC 片段时，才把 SKC 字段纳入匹配。
@@ -6586,8 +6666,11 @@ function renderKpisNoGroupsPreview(){
   ];
   let trafficRows = previewTrafficRowsForRange(range.start, range.end);
   let trafficFallbackLatest = false;
-  if (!trafficRows.length) {
-    trafficRows = (DATA.trend?.linkSeries || []).slice(-7);
+  const trafficScoped = trafficScopeRequiresProductSection();
+  const trafficScopedStatus = trafficScopeDataStatusText();
+  const trafficPending = productTrafficSectionPending();
+  if (!trafficRows.length && !trafficScoped) {
+    trafficRows = (DATA.trend?.linkSeries || []).slice(-7).map(r => ({...r, source:'core'}));
     trafficFallbackLatest = trafficRows.length > 0;
   }
   const trafficLatest = trafficRows.at(-1) || {};
@@ -6599,12 +6682,13 @@ function renderKpisNoGroupsPreview(){
   }, {eps_uv:0, goods_uv:0, sale_cnt:0});
   const trafficRangeNote = trafficRows.length
     ? ((trafficRows[0].date || '-') + ' ~ ' + (trafficLatest.date || '-') + (trafficFallbackLatest ? ' · 最新可用' : ''))
-    : '暂无链接表现日序列';
+    : (trafficScopedStatus || (trafficScoped ? '当前筛选暂无货号级流量' : '暂无链接表现日序列'));
+  const trafficValueOrStatus = v => trafficRows.length ? num(v) : (trafficPending ? '加载中' : '—');
   const trafficCardRows = [
-    {label:'曝光量', value:num(trafficTotal.eps_uv), note:trafficRangeNote},
-    {label:'访客量', value:num(trafficTotal.goods_uv), note:trafficRangeNote},
-    {label:'成交件数', value:num(trafficTotal.sale_cnt), note:trafficRangeNote},
-    {label:'最近点击/支付率', value:(trafficLatest.avg_click_rate == null ? '—' : pct(trafficLatest.avg_click_rate))+' / '+(trafficLatest.avg_pay_rate == null ? '—' : pct(trafficLatest.avg_pay_rate)), note:trafficLatest.date || '-'}
+    {label:'曝光量', value:trafficValueOrStatus(trafficTotal.eps_uv), note:trafficRangeNote},
+    {label:'访客量', value:trafficValueOrStatus(trafficTotal.goods_uv), note:trafficRangeNote},
+    {label:'成交件数', value:trafficValueOrStatus(trafficTotal.sale_cnt), note:trafficRangeNote},
+    {label:'最近点击/支付率', value:trafficRows.length ? ((trafficLatest.avg_click_rate == null ? '—' : pct(trafficLatest.avg_click_rate))+' / '+(trafficLatest.avg_pay_rate == null ? '—' : pct(trafficLatest.avg_pay_rate))) : '—', note:trafficRows.length ? (trafficLatest.date || '-') : trafficRangeNote}
   ];
   const inventoryRows = previewInventoryProductRows();
   const inventoryTotalSupply = inventoryRows.reduce((s,r)=>s+Number(r.estimated_total_supply_quantity || 0),0);
@@ -6637,9 +6721,9 @@ function renderKpisNoGroupsPreview(){
     card('当前时段真实利润', selectedRangeText()+' · 双测算',
       matrix(3, head(['口径','SAR','RMB','利润率'])+profitRows.map(r => label(r.label)+(profitLoading ? loadingValue(profitLoadingLabel) : value(profitDisplayHtmlForMode(profit, r.mode)))+(profitLoading ? loadingValue(profitLoadingLabel) : value(profit.hasAnyCost ? escapeHtml(fmt.format(profitAmountForMode(profit, r.mode) * RMB_RATE)) : '<span class="pending-profit">待成本表</span>'))+(profitLoading ? loadingValue(profitLoadingLabel) : profitMarginHtmlForMode(profit, r.mode))).join(''), 'profit-matrix'),
       '退货全损保守：退货营收为0并扣成本；RTV入仓测算：ET已收退件按可二售回收成本测算。仓储费已进入真实利润。', 'profit')+
-    card('当前时段流量', selectedRangeText()+' · 全盘链接',
+    card('当前时段流量', selectedRangeText()+' · '+(trafficScoped ? homeScopeSubtitle() : '全盘链接'),
       '<div data-preview-table="traffic">'+matrix(2, head(['指标','数值','说明'])+plainRows(trafficCardRows))+'</div>',
-      '流量来自云端链接表现日序列；曝光、访客、成交件数按所选时间段汇总，点击率/支付率只展示最近业务日。', 'links')+
+      (trafficScoped ? '货号级流量来自 productTrafficDaily section；按当前店铺/货号和日期聚合，点击率/支付率按分子分母重算。' : '流量来自云端链接表现日序列；曝光、访客、成交件数按所选时间段汇总，点击率/支付率只展示最近业务日。'), 'links')+
     card('当前库存 / 去化', '当前快照 · '+inventoryScopeNote,
       '<div data-preview-table="inventory">'+matrix(2, head(['指标','数值','说明'])+plainRows(inventoryCardRows))+'</div>',
       'ET可售来自货代仓实盘；成本表供给=到仓+在途-已售，不等于 ET可售+在途。去化周期按总供给/加权日销汇总，不平均各货号天数。', 'inventory');
@@ -7059,17 +7143,89 @@ function averageNetUnitPriceText(r){
   const avg = averageNetUnitPriceSar(r);
   return avg == null ? '成交均价 —' : '成交均价 '+money(avg)+'/件';
 }
+function trafficScopeRequiresProductSection(){
+  if (!NO_GROUPS_PREVIEW) return false;
+  return Boolean(productScopeQuery()) || storeFilterKind().type !== 'all';
+}
+function productTrafficSectionKnown(){
+  return BI_SECTION_KEYS.has('productTrafficDaily') || Array.isArray(DATA.productTrafficDaily);
+}
+function productTrafficSectionLoaded(){
+  return Array.isArray(DATA.productTrafficDaily) || (productTrafficSectionKnown() && biSectionLoaded('productTrafficDaily'));
+}
+function productTrafficSectionPending(){
+  return trafficScopeRequiresProductSection() && productTrafficSectionKnown() && !productTrafficSectionLoaded() && biSectionState.productTrafficDaily?.status !== 'error';
+}
+function productTrafficSectionError(){
+  return trafficScopeRequiresProductSection() ? (biSectionState.productTrafficDaily?.error || '') : '';
+}
+function aggregateTrafficRows(rows, start, end){
+  const map = new Map();
+  for (const r of rows || []) {
+    const d = String(r.date || '').slice(0, 10);
+    if (!d || d < start || d > end) continue;
+    if (!storeMatchesScope(r)) continue;
+    if (productScopeQuery() && !productQueryMatch(r)) continue;
+    const row = map.get(d) || {date:d, eps_uv:0, goods_uv:0, sale_cnt:0, pay_order_cnt:0, cart_uv:0, pay_uv:0, link_rows:0, storesSet:new Set(), productsSet:new Set(), skc_count:0, source:'productTrafficDaily'};
+    row.eps_uv += Number(r.eps_uv || 0);
+    row.goods_uv += Number(r.goods_uv || 0);
+    row.sale_cnt += Number(r.sale_cnt || 0);
+    row.pay_order_cnt += Number(r.pay_order_cnt || 0);
+    row.cart_uv += Number(r.cart_uv || 0);
+    row.pay_uv += Number(r.pay_uv || 0);
+    row.link_rows += Number(r.link_rows || 0);
+    row.skc_count += Number(r.skc_count || 0);
+    if (r.store_key) row.storesSet.add(String(r.store_key || '').toUpperCase());
+    if (r.standard_goods_sn) row.productsSet.add(String(r.standard_goods_sn || ''));
+    map.set(d, row);
+  }
+  return Array.from(map.values()).sort((a,b)=>String(a.date).localeCompare(String(b.date))).map(r => ({
+    date:r.date,
+    eps_uv:Math.round(Number(r.eps_uv || 0)),
+    goods_uv:Math.round(Number(r.goods_uv || 0)),
+    sale_cnt:Math.round(Number(r.sale_cnt || 0) * 100) / 100,
+    pay_order_cnt:Math.round(Number(r.pay_order_cnt || 0) * 100) / 100,
+    cart_uv:Math.round(Number(r.cart_uv || 0)),
+    pay_uv:Math.round(Number(r.pay_uv || 0)),
+    click_rate:Number(r.eps_uv || 0) > 0 ? Number(r.goods_uv || 0) / Number(r.eps_uv || 0) : null,
+    pay_rate:Number(r.goods_uv || 0) > 0 ? Number(r.pay_uv || 0) / Number(r.goods_uv || 0) : null,
+    avg_click_rate:Number(r.eps_uv || 0) > 0 ? Number(r.goods_uv || 0) / Number(r.eps_uv || 0) : null,
+    avg_pay_rate:Number(r.goods_uv || 0) > 0 ? Number(r.pay_uv || 0) / Number(r.goods_uv || 0) : null,
+    store_count:r.storesSet.size,
+    product_count:r.productsSet.size,
+    skc_count:r.skc_count,
+    link_rows:r.link_rows,
+    source:r.source
+  }));
+}
 function previewTrafficRowsForRange(start, end){
+  if (trafficScopeRequiresProductSection()) {
+    if (!productTrafficSectionLoaded()) return [];
+    return aggregateTrafficRows(DATA.productTrafficDaily || [], start, end);
+  }
   return (DATA.trend?.linkSeries || []).filter(r => {
     const d = String(r.date || '').slice(0, 10);
     return d && d >= start && d <= end;
-  }).sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+  }).sort((a,b)=>String(a.date).localeCompare(String(b.date))).map(r => ({...r, source:'core'}));
+}
+function trafficScopeDataStatusText(){
+  if (!trafficScopeRequiresProductSection()) return '';
+  if (productTrafficSectionPending()) return '正在加载货号级每日流量';
+  const err = productTrafficSectionError();
+  if (err) return '货号级流量加载失败：' + err;
+  if (!productTrafficSectionKnown()) return '当前 core 尚未声明货号级流量 section，请刷新最新 BI 数据。';
+  return '';
 }
 function renderPreviewTrafficPanel(start, end){
   let rows = previewTrafficRowsForRange(start, end);
   let fallbackLatest = false;
+  const scopedStatus = trafficScopeDataStatusText();
+  if (!rows.length && trafficScopeRequiresProductSection()) {
+    const msg = scopedStatus || ('当前筛选下暂无货号级每日流量数据：' + homeScopeSubtitle());
+    return panel('流量指标表', '按当前店铺/货号筛选后的每日流量。', '<div class="empty">'+escapeHtml(msg)+'</div>');
+  }
   if (!rows.length) {
-    rows = (DATA.trend?.linkSeries || []).slice(-7);
+    rows = (DATA.trend?.linkSeries || []).slice(-7).map(r => ({...r, source:'core'}));
     fallbackLatest = rows.length > 0;
   }
   if (!rows.length) return panel('流量指标表', '云端 core 暂无链接表现日序列。', '<div class="empty">当前暂无曝光、访客、支付率数据。</div>');
@@ -7100,9 +7256,11 @@ function renderPreviewTrafficPanel(start, end){
       avg_pay_rate:latest.avg_pay_rate
     }
   ];
-  const sub = fallbackLatest
-    ? '当前时间段暂无链接表现日序列，暂展示最新可用窗口；比例只展示最近日原始均值。'
-    : '来自云端 core trend.linkSeries；比例只展示最近日原始均值，不把多天比例普通平均。';
+  const sub = trafficScopeRequiresProductSection()
+    ? '来自 productTrafficDaily section；按当前店铺/货号筛选后聚合，比例按访客/曝光、支付/访客重算。'
+    : (fallbackLatest
+      ? '当前时间段暂无链接表现日序列，暂展示最新可用窗口；比例只展示最近日原始均值。'
+      : '来自云端 core trend.linkSeries；比例只展示最近日原始均值，不把多天比例普通平均。');
   return panel('流量指标表', sub,
     '<div class="preview-table-block" data-preview-table="traffic">'+
     '<div class="table-note"><b>流量指标表</b>：曝光、访客、成交件数，以及最近业务日点击率/支付率。</div>'+
@@ -7576,7 +7734,7 @@ function buildPreviewProfitSeries(kind){
 function buildPreviewTrafficSeries(kind){
   const range = chartRangeFor(kind);
   const map = new Map();
-  for (const r of DATA.trend?.linkSeries || []) {
+  for (const r of previewTrafficRowsForRange(range.start, range.end)) {
     const d = String(r.date || '').slice(0, 10);
     if (!d || d < range.start || d > range.end) continue;
     const id = kind === 'month' ? monthId(d) : d;
@@ -7585,6 +7743,7 @@ function buildPreviewTrafficSeries(kind){
     row.goods_uv = Number(row.goods_uv || 0) + Number(r.goods_uv || 0);
     row.sale_cnt = Number(row.sale_cnt || 0) + Number(r.sale_cnt || 0);
   }
+  const scopedStatus = trafficScopeDataStatusText();
   return {
     series:previewTrendRowsFromMap(map).map(r => ({
       ...r,
@@ -7597,7 +7756,9 @@ function buildPreviewTrafficSeries(kind){
       {key:'goods_uv', label:'访客量', color:'#3b82f6'},
       {key:'sale_cnt', label:'成交件数', color:'#8b5cf6'}
     ],
-    note:'来自云端 core trend.linkSeries；点击率/支付率留在顶部流量表，不与绝对量混轴。'
+    note:trafficScopeRequiresProductSection()
+      ? (scopedStatus || '来自 productTrafficDaily section；按当前店铺/货号筛选后聚合。点击率/支付率留在顶部流量表，不与绝对量混轴。')
+      : '来自云端 core trend.linkSeries；点击率/支付率留在顶部流量表，不与绝对量混轴。'
   };
 }
 function buildPreviewInventorySeries(kind){
@@ -7742,7 +7903,7 @@ function renderPreviewMetricLineChart(kind = 'day', metric = 'sales'){
     '<p class="sub">时间段：'+escapeHtml(range.start)+' 至 '+escapeHtml(range.end)+'；当前显示 '+num(series.length)+' 个'+(kind === 'month' ? '月份' : '日期')+'。'+(built.note ? ' '+escapeHtml(built.note) : '')+(sliceNote ? ' '+escapeHtml(sliceNote) : '')+'</p>'+
   '</div>';
 }
-function renderPreviewTrendPanels(kind = 'day', rankingsLoading = false, profitLoading = false, sectionLoadingHtml = null, inventoryTrendLoading = false){
+function renderPreviewTrendPanels(kind = 'day', rankingsLoading = false, profitLoading = false, sectionLoadingHtml = null, inventoryTrendLoading = false, trafficTrendLoading = false){
   const catalog = trendMetricCatalog();
   const loading = sectionLoadingHtml || (label => '<div class="empty">正在加载'+escapeHtml(label)+'。</div>');
   return selectedTrendMetricKeys().map(metric => {
@@ -7755,6 +7916,9 @@ function renderPreviewTrendPanels(kind = 'day', rankingsLoading = false, profitL
     }
     if (metric === 'inventory' && inventoryTrendLoading) {
       return panel((kind === 'month' ? '月趋势 · ' : '日趋势 · ') + (meta.label || metric), '库存趋势 section 加载中', loading('库存趋势'));
+    }
+    if (metric === 'traffic' && trafficTrendLoading) {
+      return panel((kind === 'month' ? '月趋势 · ' : '日趋势 · ') + (meta.label || metric), '货号级流量 section 加载中', '<div class="empty">正在加载货号级每日流量，加载完成后会自动切换为当前店铺/货号口径。</div>');
     }
     return panel((kind === 'month' ? '月趋势 · ' : '日趋势 · ') + (meta.label || metric), metric === 'inventory' ? previewInventoryTrendSubtitle() : homeScopeSubtitle(), renderPreviewMetricLineChart(kind, metric));
   }).join('');
@@ -7960,6 +8124,7 @@ function renderHomeDashboardNoGroupsPreview(){
   const profitTrendLoading = biPortalUsesApiSections() && selectedTrendMetricKeys().includes('profit') && !biSectionLoaded('profit');
   const hasEmbeddedInventoryTrend = Boolean((DATA.inventoryDepletion?.visibleTrend || DATA.inventoryTrend || []).length);
   const inventoryTrendLoading = biPortalUsesApiSections() && selectedTrendMetricKeys().includes('inventory') && !hasEmbeddedInventoryTrend && !biSectionLoaded('inventoryTrend');
+  const trafficTrendLoading = selectedTrendMetricKeys().includes('traffic') && productTrafficSectionPending();
   syncHomeScopeControls();
   ensureRankWindow();
   if (String(state.store || '').toUpperCase().startsWith('GROUP:')) state.store = '';
@@ -7976,16 +8141,16 @@ function renderHomeDashboardNoGroupsPreview(){
   const domainCounts = (DATA.actions || []).reduce((acc,a)=>{ const k = domainName(a.action_domain || 'other'); acc[k]=(acc[k]||0)+1; return acc; }, {});
   const domainRows = Object.entries(domainCounts).map(([label,count]) => ({label,count})).sort((a,b)=>b.count-a.count);
   const sectionLoadingHtml = label => '<div class="empty">正在加载'+escapeHtml(label)+'，页面先显示 core 数据；加载完成后会自动刷新本区域。</div>';
-  $('homeDashboardTag').textContent = '平行预览 · 当前时间段 ' + periodRangeText(rankSummary) + ' · ' + homeScopeSubtitle();
+  $('homeDashboardTag').textContent = NO_GROUPS_SURFACE_LABEL_PREFIX + '当前时间段 ' + periodRangeText(rankSummary) + ' · ' + homeScopeSubtitle();
   renderFloatingRangeToolbar();
   const groupEl = $('groupOverview');
   if (groupEl) groupEl.innerHTML = '';
   renderKpis();
   $('homeDashboard').innerHTML =
-    '<div class="dashboard-section-title trend-panel-head"><div><h3>趋势</h3><div class="sub">平行预览：按钮只切换当前趋势指标；页面只保留一个日图和一个月图。</div></div>'+trendMetricButtons()+'</div>'+
+    '<div class="dashboard-section-title trend-panel-head"><div><h3>趋势</h3><div class="sub">'+NO_GROUPS_TREND_SURFACE_PREFIX+'按钮只切换当前趋势指标；页面只保留一个日图和一个月图。</div></div>'+trendMetricButtons()+'</div>'+
     '<div class="trend-stack">'+
-      renderPreviewTrendPanels('day', rankingsLoading, profitTrendLoading, sectionLoadingHtml, inventoryTrendLoading)+
-      renderPreviewTrendPanels('month', rankingsLoading, profitTrendLoading, sectionLoadingHtml, inventoryTrendLoading)+
+      renderPreviewTrendPanels('day', rankingsLoading, profitTrendLoading, sectionLoadingHtml, inventoryTrendLoading, trafficTrendLoading)+
+      renderPreviewTrendPanels('month', rankingsLoading, profitTrendLoading, sectionLoadingHtml, inventoryTrendLoading, trafficTrendLoading)+
     '</div>'+
     '<div class="dashboard-section-title"><h3>排行榜</h3><div class="sub">店铺只显示 DL/DX 等代号，货号显示归并后的标准货号；排行榜按上方时间段重算。</div></div>'+
     '<div class="dashboard-grid equal">'+
@@ -13957,7 +14122,7 @@ async function main() {
     markStage(`section:${args.section}:parse`);
     let sectionData = deepSanitize(parsePsqlJson(raw, `BI portal section ${args.section}`));
     if (args.section === 'linksData') sectionData = await enrichPortalDataWithLocalLinkLabels(sectionData);
-    sectionData = enrichProductDisplayNames(sectionData);
+    if (args.section !== 'productTrafficDaily') sectionData = enrichProductDisplayNames(sectionData);
     markStage(`section:${args.section}:done`);
     clearTimeout(portalGenerateTimer);
     if (args.jsonOnly) {
@@ -13986,7 +14151,7 @@ async function main() {
       parsedData.pipeline,
       parsedData.briefing,
       parsedData.firstRunCheck,
-      {previewVariant: args.previewVariant}
+      {homeVariant: args.homeVariant, previewVariant: args.previewVariant}
     );
     markStage('html-only:write');
     await fs.mkdir(path.dirname(args.htmlFile), {recursive: true});
@@ -13996,6 +14161,7 @@ async function main() {
     console.log(JSON.stringify({
       ok: true,
       htmlOnly: true,
+      homeVariant: args.homeVariant || '',
       previewVariant: args.previewVariant || '',
       sourceData: args.htmlOnlyFromData,
       html: args.htmlFile,
@@ -14026,12 +14192,19 @@ async function main() {
       cache: 'service',
     };
   }
-  const data = enrichProductDisplayNames(await attachManualCostFileMeta(await enrichPortalDataWithLocalLinkLabels(parsedData)));
+  const data = attachProductAliasSearch(enrichProductDisplayNames(await attachManualCostFileMeta(await enrichPortalDataWithLocalLinkLabels(parsedData))));
   markStage('sanitize');
   const safeAudit = deepSanitize(audit);
   const safePipeline = deepSanitize(pipeline);
   const safeBriefing = deepSanitize(briefing);
   const safeFirstRunCheck = deepSanitize(firstRunCheck);
+  let noGroupsPreviewFile = '';
+  if (shouldWriteNoGroupsPreview()) {
+    noGroupsPreviewFile = noGroupsPreviewHtmlFile(args);
+    if (isFormalPortalIndexPath(noGroupsPreviewFile, args.outDir)) {
+      throw new Error('No-groups preview output refuses to write the formal BI portal index.html');
+    }
+  }
   markStage('write:mkdir');
   await fs.mkdir(args.outDir, {recursive: true});
   const jsonFile = path.join(args.outDir, 'data.json');
@@ -14039,16 +14212,27 @@ async function main() {
   markStage('write:data');
   await writeFileWithRetry(jsonFile, JSON.stringify({...data, audit: safeAudit, pipeline: safePipeline, briefing: safeBriefing, firstRunCheck: safeFirstRunCheck}, null, 2), 'utf8');
   markStage('build:html');
-  const html = buildHtml(data, metabaseUrl, safeAudit, safePipeline, safeBriefing, safeFirstRunCheck);
+  const html = buildHtml(data, metabaseUrl, safeAudit, safePipeline, safeBriefing, safeFirstRunCheck, {homeVariant: args.homeVariant});
   markStage('write:html');
   await writeFileWithRetry(htmlFile, html, 'utf8');
+  if (noGroupsPreviewFile) {
+    markStage('build:preview:no-groups');
+    const noGroupsPreviewHtml = buildHtml(data, metabaseUrl, safeAudit, safePipeline, safeBriefing, safeFirstRunCheck, {homeVariant: 'no-groups', previewVariant: 'no-groups'});
+    markStage('write:preview:no-groups');
+    await writeFileWithRetry(noGroupsPreviewFile, noGroupsPreviewHtml, 'utf8');
+  }
   markStage('done');
   clearTimeout(portalGenerateTimer);
   console.log(JSON.stringify({
     ok: true,
     dataMode: args.dataMode,
+    homeVariant: args.homeVariant,
     html: htmlFile,
     data: jsonFile,
+    previews: noGroupsPreviewFile ? [{
+      variant: 'no-groups',
+      html: noGroupsPreviewFile,
+    }] : [],
     metabaseUrl,
     audit: safeAudit ? {
       file: safeAudit.file || '',
