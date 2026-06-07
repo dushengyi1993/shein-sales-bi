@@ -16,6 +16,12 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import {normalizeGoodsSnDetailed} from '../lib/product_sku_normalizer.mjs';
+import {
+  ORDER_PAYMENT_FLAG_COLUMNS,
+  ORDER_PAYMENT_FLAG_CREATE_SQL,
+  ORDER_PAYMENT_FLAG_TABLE,
+  extractPaymentFlagsFromSalesArtifact,
+} from '../lib/order_payment_flags.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -194,6 +200,7 @@ async function runPsqlScript(args, script) {
 async function ensureOpenApiTables(args) {
   const script = `
 BEGIN;
+${ORDER_PAYMENT_FLAG_CREATE_SQL}
 CREATE TABLE IF NOT EXISTS fact.openapi_store_daily_sales (LIKE fact.store_daily_sales INCLUDING DEFAULTS);
 CREATE TABLE IF NOT EXISTS fact.openapi_order_header (LIKE fact.order_header INCLUDING DEFAULTS);
 CREATE TABLE IF NOT EXISTS fact.openapi_order_item (LIKE fact.order_item INCLUDING DEFAULTS);
@@ -265,6 +272,7 @@ DELETE FROM fact.openapi_order_item WHERE (created_date, store_key) IN (${tupleL
 DELETE FROM fact.openapi_order_header WHERE (created_date, store_key) IN (${tupleList});
 DELETE FROM fact.openapi_store_daily_sales WHERE (date, store_key) IN (${tupleList});
 DELETE FROM mart.openapi_sales_reconciliation WHERE (date, store_key) IN (${tupleList});
+DELETE FROM fact.order_payment_flag WHERE (created_date, store_key) IN (${tupleList});
 COMMIT;
 `;
   if (args.dryRun) return {pairs: pairs.length, dryRun: true};
@@ -326,6 +334,11 @@ function buildFactRows(data, file) {
   }];
   const orders = [];
   const items = [];
+  const paymentFlags = extractPaymentFlagsFromSalesArtifact(data, {
+    date,
+    sourceFile: source,
+    sourceKind: 'openapi',
+  });
   for (const [idx, row] of asArray(data.orderRows).entries()) {
     const orderId = String(row.orderId || row.id || row.orderNo || idx);
     const orderKey = `${data.storeKey}__${orderId}`;
@@ -388,7 +401,7 @@ function buildFactRows(data, file) {
       raw_summary: compactJson(row),
     });
   }
-  return {date, daily, orders, items};
+  return {date, daily, orders, items, paymentFlags};
 }
 
 function summarizeArtifact(data) {
@@ -475,6 +488,7 @@ async function collectOpenApiSales(args) {
   const daily = [];
   const orders = [];
   const items = [];
+  const paymentFlags = [];
   const reconciliations = [];
   const loadedFiles = [];
   const pairs = [];
@@ -491,11 +505,12 @@ async function collectOpenApiSales(args) {
     daily.push(...factRows.daily);
     orders.push(...factRows.orders);
     items.push(...factRows.items);
+    paymentFlags.push(...factRows.paymentFlags);
     reconciliations.push(await buildReconciliationRow(args, factRows.date, file, data));
     loadedFiles.push(rel(file));
     pairs.push({date: factRows.date, store: args.store});
   }
-  return {daily, orders, items, reconciliations, loadedFiles, pairs};
+  return {daily, orders, items, paymentFlags, reconciliations, loadedFiles, pairs};
 }
 
 async function main() {
@@ -527,6 +542,13 @@ async function main() {
   ));
   results.push(await upsertRows(
     args,
+    ORDER_PAYMENT_FLAG_TABLE,
+    ORDER_PAYMENT_FLAG_COLUMNS,
+    ['order_key'],
+    sales.paymentFlags,
+  ));
+  results.push(await upsertRows(
+    args,
     'mart.openapi_sales_reconciliation',
     ['date','store_key','browser_source_file','api_source_file','browser_order_count','api_order_count','browser_positive_order_count','api_positive_order_count','browser_goods_line_count','api_goods_line_count','browser_quantity_positive_amount','api_quantity_positive_amount','browser_sales_sar','api_sales_sar','order_count_delta','positive_order_count_delta','goods_line_count_delta','quantity_positive_delta','sales_sar_delta','browser_only_order_count','api_only_order_count','browser_only_goods_count','api_only_goods_count','status','generated_at','raw_summary'],
     ['date','store_key'],
@@ -545,6 +567,7 @@ async function main() {
       daily: sales.daily.length,
       orders: sales.orders.length,
       items: sales.items.length,
+      paymentFlags: sales.paymentFlags.length,
       reconciliations: sales.reconciliations.length,
     },
     reconciliation: sales.reconciliations.map((r) => ({

@@ -12,6 +12,12 @@ import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import {normalizeGoodsSnDetailed} from '../lib/product_sku_normalizer.mjs';
 import {isValidSalesGoodsRow, summarizeSalesGoodsRows} from '../lib/shein_sales_validity.mjs';
+import {
+  ORDER_PAYMENT_FLAG_COLUMNS,
+  ORDER_PAYMENT_FLAG_CREATE_SQL,
+  ORDER_PAYMENT_FLAG_TABLE,
+  extractPaymentFlagsFromSalesArtifact,
+} from '../lib/order_payment_flags.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -182,6 +188,12 @@ async function runPsqlScript(args, script) {
   return {stdout, stderr};
 }
 
+async function ensureOrderPaymentFlagTable(args) {
+  if (args.dryRun) return {skipped: true, dryRun: true};
+  await runPsqlScript(args, `BEGIN;\n${ORDER_PAYMENT_FLAG_CREATE_SQL}\nCOMMIT;\n`);
+  return {ok: true};
+}
+
 async function upsertRows(args, table, columns, conflictColumns, rows) {
   const originalRowCount = rows.length;
   if (rows.length && conflictColumns.length) {
@@ -240,6 +252,7 @@ async function cleanupLoadedSlices(args, salesRows, linkRows, dashboard) {
   let script = 'BEGIN;\n';
   if (salesPairs.length) {
     const t = tupleList(salesPairs);
+    script += `DELETE FROM fact.order_payment_flag WHERE (created_date, store_key) IN (${t});\n`;
     script += `DELETE FROM fact.order_item WHERE (created_date, store_key) IN (${t});\n`;
     script += `DELETE FROM fact.order_header WHERE (created_date, store_key) IN (${t});\n`;
     script += `DELETE FROM fact.store_daily_sales WHERE (date, store_key) IN (${t});\n`;
@@ -318,6 +331,7 @@ async function collectSales(args, productMap, skcMap) {
   const daily = [];
   const orders = [];
   const items = [];
+  const paymentFlags = [];
   const catalog = [];
   for (const file of files) {
     let j;
@@ -351,6 +365,11 @@ async function collectSales(args, productMap, skcMap) {
       record_count: (j.goodsRows || []).length,
       raw_meta: compactJson({fetchTime: j.fetchTime, summary}),
     });
+    paymentFlags.push(...extractPaymentFlagsFromSalesArtifact(j, {
+      date,
+      sourceFile: source,
+      sourceKind: 'browser_webapi',
+    }));
     for (const [idx, row] of (j.orderRows || []).entries()) {
       const orderId = String(row.orderId || row.id || row.orderNo || idx);
       const orderKey = `${j.storeKey}__${orderId}`;
@@ -420,7 +439,7 @@ async function collectSales(args, productMap, skcMap) {
       addSkc(skcMap, {...row, standardGoodsSn: standard, date});
     }
   }
-  return {daily, orders, items, catalog, fileCount: files.length};
+  return {daily, orders, items, paymentFlags, catalog, fileCount: files.length};
 }
 
 async function collectLinks(args, productMap, skcMap) {
@@ -650,6 +669,7 @@ async function main() {
   const skcs = [...skcMap.values()];
   const catalog = [...sales.catalog, ...links.catalog];
 
+  const paymentFlagTable = await ensureOrderPaymentFlagTable(args);
   const cleanup = await cleanupLoadedSlices(args, sales.daily, links.master, dashboard);
 
   const batches = [
@@ -660,6 +680,7 @@ async function main() {
     ['fact.store_daily_sales', ['date','store_key','group_key','shop_name','valid_order_count','goods_line_count','quantity_all','quantity_positive_amount','sales_sar','sales_rmb','fetch_time','source_file','raw_summary'], ['date','store_key'], sales.daily],
     ['fact.order_header', ['order_key','store_key','group_key','order_id','order_no','bill_no','created_date','order_create_time','allocate_time','site','order_status','order_status_desc','perform_status','perform_status_desc','source_file','raw_summary'], ['order_key'], sales.orders],
     ['fact.order_item', ['order_item_key','order_key','store_key','group_key','order_id','order_no','bill_no','created_date','order_create_time','site','standard_goods_sn','raw_goods_sn','goods_id','entity_id','skc','sku_code','sku_sn','sku_suffix','goods_title','quantity','currency_code','currency_price','sales_sar','sales_rmb','goods_status','goods_performance_status','goods_performance_status_desc','source_file','raw_summary'], ['order_item_key'], sales.items],
+    [ORDER_PAYMENT_FLAG_TABLE, ORDER_PAYMENT_FLAG_COLUMNS, ['order_key'], sales.paymentFlags],
     ['fact.link_master_snapshot', ['unique_key','snapshot_date','store_key','group_key','shop_name','standard_goods_sn','raw_goods_sn','spu','skc','sku_codes','sale_name','image_url','product_name_cn','product_name_en','brand_name','shelf_status','shelf_status_name','is_on_shelf','is_wait_shelf','is_sold_out','is_out_shelf','is_hard_dead','wait_shelf_blocked','wait_shelf_block_reason','created_time','shelf_time','first_shelf_time','source_file','raw_summary'], ['unique_key'], links.master],
     ['fact.link_performance_daily', ['unique_key','date','store_key','group_key','shop_name','standard_goods_sn','raw_goods_sn','spu','skc','goods_name','image_url','sale_cnt','pay_order_cnt','eps_uv','goods_uv','click_rate','cart_uv','cart_pv','cart_rate','pay_uv','pay_rate','c7_sale_cnt','prev7_sale_cnt','c30_sale_cnt','quality_grade','comment_count','bad_comment_rate','return_order_count','return_item_count','activity_tag','activity_names','flow_diagnose_tabs','source_file','raw_summary'], ['unique_key'], links.perf],
     ['fact.product_store_coverage', ['unique_key','date','store_key','group_key','shop_name','standard_goods_sn','coverage_status','has_on_shelf_link','need_supplement_link','link_count','on_shelf_count','wait_shelf_count','sold_out_count','out_shelf_count','hard_dead_count','duplicate_on_shelf','best_skc','best_link_c30_sale','skc_list','recommendation','source_file','raw_summary'], ['unique_key'], links.coverage],
@@ -679,6 +700,7 @@ async function main() {
     salesFiles: sales.fileCount,
     linkFiles: links.fileCount,
     dashboardFile: fssync.existsSync(args.dashboardJson) ? rel(args.dashboardJson) : null,
+    paymentFlagTable,
     cleanup,
     results,
   }, null, 2));
