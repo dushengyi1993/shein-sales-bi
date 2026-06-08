@@ -1,23 +1,23 @@
 # BI 门户界面当前口径
 
-最后更新：2026-05-29
+最后更新：2026-06-09
 
 ## 1. 总体定位
 
 - BI 门户正式入口：`https://shein-bi.faceair.me/`；旧 IP `http://43.165.167.135/` 仅作兜底。
-- 本地 `http://127.0.0.1:8787/` 已封存，只作回滚/开发参考。
-- 本地文件：`outputs/bi-portal/index.html`
-- 数据文件：`outputs/bi-portal/data.json`
+- `http://127.0.0.1:8787/` 已封存，只作回滚/代码预览参考。
+- 仓库文件：`outputs/bi-portal/index.html` / `outputs/bi-portal/data.json` 只是灾备/兼容快照，不代表当前云端数据。
+- 数据判断和验收：只认云端 BI 门户、线上 `/api/bi/section/*`、云端 PostgreSQL warehouse、云端日志和 systemd 状态。
 - 生成脚本：`scripts/generate_bi_portal.mjs`
 - V1 是当前正式门户；`2026-05-12` 起新增 V2 平行预览版用于验收 Claude Design 风格，不替换 V1：
   - V1 正式入口：`https://shein-bi.faceair.me/`
   - V2 预览文件：`outputs/bi-portal/v2/index.html`；本地封存后不要为了预览主动重启本地服务。
   - V2 生成脚本：`scripts/generate_bi_portal_v2.mjs`
   - V2 输出目录：`outputs/bi-portal/v2/`
-  - V2 只读复用 `outputs/bi-portal/data.json`，不得在未确认前改动 V1 `outputs/bi-portal/index.html` 或生产调度。
-  - `2026-05-13` 晚间起 V2.1 改回独立经营 BI 预览，不再复制 V1 DOM；但仍只读复用同一份 `data.json`，用户确认前不得合并或替换 V1。
+  - V2 数据判断和验收必须走云端运行态/线上 section API；仓库快照只作页面启动兼容，不得当成当前业务数据。不得在未确认前改动 V1 `outputs/bi-portal/index.html` 或生产调度。
+  - `2026-05-13` 晚间起 V2.1 改回独立经营 BI 预览，不再复制 V1 DOM；用户确认前不得合并或替换 V1。
   - `2026-05-14` 起 V2.1 首页（`tab=overview`）的验收口径改为“功能和操作逻辑完整复刻 V1 首页，视觉重新设计”；其它 V2 子页面尚未完成 V1 全量复刻。
-  - V2 暂时不是日常生产刷新对象，不需要随着 SHEIN/BI 同步自动更新页面；只在用户明确下达 V2 开发、优化或验收任务时才重新生成或维护。
+  - V2 暂时不是日常生产刷新对象；页面结构只在用户明确下达 V2 开发、优化或验收任务时重新生成或维护，但数据验收必须连接云端运行态。
 - 首页只做“总览 + 趋势 + 排行 + 入口”，不堆所有业务明细。
 - 具体操作下沉到子页面：店铺视角、货号 360、SKC/链接、评价/口碑、订单/售后、成本/利润、实际库存/去化、今日动作池、系统状态。
 

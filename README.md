@@ -12,6 +12,7 @@
 - 链接表现改为每日后半夜一次，当前只写私有源文件 / PostgreSQL / BI；飞书链接管理表已废弃。旧 `0340` / `0510` 链接任务不要恢复。
 - 当前完整 BI 运行层仍是 PostgreSQL + Metabase + BI Portal：PostgreSQL 是核心数据仓库，Metabase 是正式深度分析/自由钻取层，BI Portal 是日常经营入口；在自研门户完全覆盖深钻前，云端迁移不能删除或跳过 Metabase。
 - 服务器从 GitHub 拉取/重置代码后，要立即重跑一次云端 BI 刷新；仓库里的 `outputs/bi-portal/` 是灾备快照，不能把它误当成服务器实时数据。
+- **BI 数据判断、开发验收和故障排查只认云端运行时：云端 PostgreSQL warehouse、云端 BI 门户、线上 `/api/bi/section/*`、云端日志和 systemd 状态。仓库里的 `outputs/bi-portal/*` 只是灾备/兼容快照，可能严重过期；不得用它判断当前业务数据、口径正确性或页面性能。**
 - HL 已切换为主账号 profile：`profiles/persistent-shein-main-profile`；旧 `profiles/persistent-hl-profile` 已删除。
 - `2026-06-05` 已按用户提供的账号真相修正 LGM 三店 profile / 账号映射：`YJ=profileKey yj/accountNo GS8146729/port 9346`、`XL=profileKey xl/accountNo GS9307061/port 9344`、`QY=profileKey qy/accountNo GS7451160/port 9345`。店铺身份真相以 `config/stores.json`、`config/store_account_truth.json`、浏览器保存账号和实际登录后的店铺名/账号一致为准；不得再沿用 `2026-05-10` 的交叉 profile 结论。
 - `2026-05-09 05:30` 链接/业务域任务、`2026-05-09 07:00` BI 每日流水线和白天滚动后置 BI 刷新是本地 Windows 历史验证记录；自 `2026-05-15` 本地任务封存后，不再作为生产调度。
@@ -29,7 +30,7 @@
 
 ## 当前运行状态（2026-05-18 云端切换后）
 
-以下为当前入口、调度和边界说明；实时数据以 `outputs/bi-portal/data.json`、云端日志和 BI 门户系统状态页为准。
+以下为当前入口、调度和边界说明；实时数据只以云端 BI 门户系统状态页、线上 `/api/bi/section/*`、云端 PostgreSQL warehouse、云端日志和 systemd 状态为准。仓库快照只用于灾备/兼容，不能用于当前业务判断。
 
 - 店铺范围：19 家店，`DSY` 组 10 家，`LGM` 组 9 家。
 - 当前店铺代码：`CX DL DX FY HL JSH JY LQ MZ NM QH QY TS TZ TZZ XC XL YJ ZL`（LGM 已新增 `JSH / TZZ / XC`）。
@@ -41,12 +42,12 @@
   - 云端 BI：`https://shein-bi.faceair.me/`，Basic Auth 保护；旧 IP 入口 `http://43.165.167.135/` 仅作兜底。
   - 云端登录维护中心：`https://shein-bi.faceair.me/cloud-login-maintenance`，用于临时打开指定店铺云端浏览器登录窗口。
   - 云端代码目录：`/opt/shein-bi/app`
-  - 本地 BI 门户文件快照：`outputs/bi-portal/index.html` / `outputs/bi-portal/data.json`
+  - 仓库 BI 门户灾备快照：`outputs/bi-portal/index.html` / `outputs/bi-portal/data.json`（不代表当前云端数据）
   - V1 是当前正式 BI Portal；用户确认后的 V1/main 才发布 GitHub release。当前 V1/main 已发布到 `2026.06.04-core-section-warmup-hotfix`，后续首页性能补丁保持同一 V1/main 边界；V2 仍不属于正式发布。
   - V2.1 独立设计预览仍是平行项目，由 `scripts/generate_bi_portal_v2.mjs` 生成；用户确认前不得替换 V1 或改生产调度。
   - 本机 `http://127.0.0.1:8787/` 和局域网 `http://DUSHENGYI-PC2:8787/` 已封存，不再作为正式入口。
   - Metabase 当前部署在云端 Docker 内部，由云端 Nginx/服务配置受控访问，不在 README 写公开裸地址。
-- 当前 BI 数据截面不再手工写死在 README；实时以 BI 门户系统状态页、`outputs/bi-portal/data.json`、云端 systemd 日志和数据库入仓时间为准。仓库中的 `outputs/bi-portal/` 只是灾备快照，服务器拉取/重置代码后必须重新跑云端 BI 刷新。
+- 当前 BI 数据截面不再手工写死在 README；实时只以云端 BI 门户系统状态页、线上 `/api/bi/section/*`、云端 PostgreSQL warehouse、云端 systemd 日志和数据库入仓时间为准。仓库中的 `outputs/bi-portal/` 只是灾备/兼容快照，服务器拉取/重置代码后必须重新跑云端 BI 刷新；开发和验收不得拿仓库快照当当前数据。
 - BI Portal API section cache 位于 `outputs/bi-portal/sections/`；首页首屏使用轻量 `homeRankings`（只含首页需要的日店铺、日货号、日店铺×货号粒度），完整 `rankings` 后置到详情/子页需要时再拉。服务端会为 section cache 生成 `.json.gz` sidecar，公网浏览器优先走 gzip。`cloud_bi_refresh.sh` 刷新 core 后会启动 `prewarm_bi_portal_sections.sh`；`serve_bi_portal.mjs` 还会在服务启动和首页访问时检测 `data.json.generatedAt`，后台兜底预热 section，避免等用户打开页面才现场生成。首页利润 `homeProfit` 必须从当前 `profit` section cache 派生；若首页利润明显低于当前销售额，先核对 `profit.json.generatedAt`、`homeProfit.json.data.homeProfitSummary.sourceGeneratedAt` 和 `staleSource`，`staleSource=true` 或 `sourceGeneratedAt` 不等于当前 core 时不能按旧利润判断业务真实利润。
 - 定时任务：
   - 云端 `shein-bi-cloud-today.timer`：`00:10/02:10/.../22:10` 每两小时刷新当天销售、入仓并生成 BI Portal。

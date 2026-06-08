@@ -18,8 +18,8 @@
 - 云端 BI 门户：[https://shein-bi.faceair.me/](https://shein-bi.faceair.me/)，旧 IP 入口 [http://43.165.167.135/](http://43.165.167.135/) 仅作兜底；已启用 Basic Auth，密码不得写入仓库或文档。
 - 云端登录维护中心：[https://shein-bi.faceair.me/cloud-login-maintenance](https://shein-bi.faceair.me/cloud-login-maintenance)。当 SHEIN / SBN 子系统登录态失效、遇到验证码/滑块，或被协议签署 / 公告 / 通知确认等普通登录弹窗挡住时，用它临时打开指定店铺的云端浏览器窗口；普通登录干扰弹窗可由运维代理关闭/确认后再点登录，完成后必须点“我已完成并关闭”。
 - 本机 BI 门户和局域网协作入口已封存：`http://127.0.0.1:8787/`、`http://DUSHENGYI-PC2:8787/` 不再作为正式入口。
-- 本地门户文件：`outputs/bi-portal/index.html`
-- V1 是当前唯一正式生产门户；V2.1 是平行预览版，脚本 `scripts/generate_bi_portal_v2.mjs`，输出 `outputs/bi-portal/v2/index.html`。本地封存后不要为了预览主动重启本地服务；用户确认前不得替换 V1、不得改生产调度，日常运维仍以 V1 为准。
+- 仓库门户灾备文件：`outputs/bi-portal/index.html`（不代表当前云端运行态）
+- V1 是当前唯一正式生产门户；V2 是平行预览版，脚本 `scripts/generate_bi_portal_v2.mjs`，输出 `outputs/bi-portal/v2/index.html`。V2 数据判断和验收必须走云端运行态/线上 section API；用户确认前不得替换 V1、不得改生产调度，日常运维仍以 V1 为准。
 - V1 门户由 `scripts/generate_bi_portal.mjs` 生成；`scripts/run_bi_daily_pipeline.ps1` 已合并为末尾单次生成页面，默认 `SHEIN_BI_PORTAL_TIMEOUT_MS=900000`，不要恢复成多个状态点重复生成。
 - 本地回滚时才启动本机网页服务：双击 `打开SHEIN-BI网页服务.cmd`。
 - 本地回滚时才启动局域网协作服务：双击 `打开SHEIN-BI局域网协作服务.cmd`。
@@ -31,7 +31,7 @@
 
 ## 3. 当前数据口径
 
-- 当前 BI 截面日期以门户系统状态页和 `outputs/bi-portal/data.json` 为准，不在本文写死；运维文档只记录口径和入口。
+- 当前 BI 截面日期和经营数据只以云端门户系统状态页、线上 `/api/bi/section/*`、云端 PostgreSQL warehouse、云端日志和 systemd 状态为准，不在本文写死；仓库快照不用于当前数据判断，运维文档只记录口径和入口。
 - 当前 BI 门户侧栏更新时间口径：销售取销售源数据抓取时间；售后/库存/财务取业务域源文件最大 `fetchTime`；链接表现取链接源文件最大 `fetchTime`；ET 货代仓取 ET 源文件/入仓批次时间。BI 入仓或页面重跑时间只作内部排障，不作为侧栏主要更新时间。
 - 销售抓取入口：当前 19 店 `salesTransport=auto`，先 WebAPI 直连，失败才回退浏览器；本地 session 在 `state/shein_webapi_sessions/*.local.json`，不进 GitHub。
 - 销售有效性口径：所有抓取、日报、产品统计、BI 入仓和飞书表格脚本必须共用 `lib/shein_sales_validity.mjs`。源头总销售只剔除真正取消、揽收前取消等未形成销售的商品行，例如 `pageStatus=CANCEL`、`goodsPerformanceStatus=6` 或订单/履约状态文本含取消；`用户已退款`、退货、派件失败等仍保留在总销售里，再由净销售额、售后/利润层反转。历史 summary 重算入口为 `scripts/repair_shein_sales_summaries.mjs`。

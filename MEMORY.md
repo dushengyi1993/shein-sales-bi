@@ -17,8 +17,8 @@
 - 工作区固定为 `E:\Codex WorkSpace\Shein销售统计`；SHEIN 脚本、配置、日志、输出、浏览器 profile、BI 门户和项目文档都优先放在这里或 D 盘，避免占用 C 盘。
 - Windows PowerShell 5.1 的 `$OutputEncoding` 默认是 `us-ascii`，会把中文管道到 `node/python/lark-cli` 时变成 `?`；本机已设置用户级 PowerShell profile 为 UTF-8，并把 CurrentUser 执行策略设为 `RemoteSigned` 以允许 profile 生效。
 - 项目 `.ps1` 必须 dot-source `scripts/use_utf8.ps1`，且文件保存为 UTF-8 with BOM，覆盖 `-NoProfile` 计划任务和 PS5.1 对无 BOM UTF-8 的误判；不要再用 PowerShell here-string 直接向 Node/Python 传中文生成代码，必要时用文件 UTF-8 BOM、`apply_patch` 或 Unicode escape。
-- 飞书多维表格 / 原生看板写入已按用户要求临时暂停；暂停开关为 `state/feishu-base-sync-paused.flag`。暂停期间继续抓 SHEIN 本地数据、刷新 BI、发送飞书文字日报 / 可视化日报和异常提醒。
-- BI 不从飞书反抓数据作为源头；源头是 SHEIN 后台抓取后的本地 JSON 与 PostgreSQL 数据仓库。
+- 飞书多维表格 / 原生看板写入已按用户要求临时暂停；暂停开关为 `state/feishu-base-sync-paused.flag`。暂停期间云端继续抓 SHEIN、刷新 BI、发送飞书文字日报 / 可视化日报和异常提醒。
+- BI 不从飞书反抓数据作为源头；当前业务数据真相源只在云端运行时：云端私有源文件、PostgreSQL warehouse、线上 BI 门户和 `/api/bi/section/*`。仓库内 `outputs/bi-portal/*` 只是灾备/兼容快照，不得用于当前业务判断、口径验收或性能结论。
 - 新建飞书 Base 数据表后，提醒用户手动扩容到 `20000` 行；默认 `2000` 行容易写满。
 - 正常抓取、同步、日报、watchdog 和 BI 任务必须后台/隐藏运行；非必要不要打开前端浏览器窗口或命令行窗口。只有登录、验证码、人机校验、用户明确要求看前端，或必须排查浏览器交互问题时才打开可见窗口；临时验证必须优先用静态检查、HTTP/API、CDP 后台连通或 hidden/offscreen，并在验证后关闭。
 - Chrome 程序路径优先使用 `C:\Program Files\Google\Chrome\Application\chrome.exe`；D 盘路径只作兜底候选。店铺登录态仍在工作区 `profiles/`，不要因为程序在 C 盘就把 profile 移回 C 盘。
@@ -96,16 +96,17 @@
 - 本系统长期定位不只是 BI 数据分析，也是自动运营驾驶舱；所有写操作默认按“建议/预填/用户复核/人工最终提交/审计留痕”推进，除非用户明确授权并已有回滚方案，否则不得直接提交不可逆运营动作。
 
 ## SHEIN BI 系统
+- BI 数据判断、开发验收和故障排查只认云端运行时：云端 PostgreSQL warehouse、云端 BI 门户、线上 `/api/bi/section/*`、云端日志和 systemd 状态；仓库快照可能严重过期，只能作为灾备/兼容产物，不能拿来判断当前经营数据。
 - 架构原则：`SHEIN 后台/WebAPI/OpenAPI 抓取 -> 私有源文件 / PostgreSQL 数据仓库 -> Metabase BI / BI Portal`。PostgreSQL 是核心数据仓库；Metabase 当前仍是正式深度分析/自由钻取层，BI Portal 是日常经营入口。没有完整替代前，不要建议直接删除或跳过 Metabase。
 - 2026-05-15 起本地 BI 已封存，云端 BI 为正式入口：`https://shein-bi.faceair.me/`，旧 IP `http://43.165.167.135/` 仅作兜底；Basic Auth 账号密码不写入仓库、文档或日志。本地 `8787` 服务已停止，`SHEIN-*` Windows 计划任务已禁用；除非明确回滚，不要重新启用本地 BI 或本地定时任务。云端可复用改动必须及时同步 GitHub，敏感 session/密钥/数据库 dump 仍不得提交。
 - HL OpenAPI 销售试点已建立并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` -> `scripts/load_shein_openapi_sales_warehouse.mjs` -> `fact.openapi_store_daily_sales` / `fact.openapi_order_header` / `fact.openapi_order_item` / `mart.openapi_sales_reconciliation`；系统状态页会显示 “SHEIN OpenAPI 试点对账”。正式切换生产事实表前必须继续确认多日 `matched`。
 - 官方 OpenAPI 与后台 WebAPI 直连是两条不同链路：OpenAPI 需要开放平台应用、授权、`openKeyId` / `secretKey` 和 IP 白名单；后台 WebAPI 直连复用已登录 Cookie/session，当前已优先承接 19 店销售生产抓取。两类密钥/session 都禁止进入仓库。
 - CX 开放平台应用 `CX-椿霞SHEIN运营中台` 已在 `2026-05-10` 提交审核；ZL 开放平台应用 `ZL-紫翎SHEIN运营中台` 已在 `2026-05-28` 提交审核。两者均为半托管，业务功能选择商品管理、商品合规、订单管理、库存管理、财务管理；审核通过后再录入本地 `.local` 密钥并接入 API 双跑。
 - SHEIN OpenAPI 若返回 `openapi00002 IP is not in the whitelist`，优先检查服务器出口 IP `43.165.167.135` 是否在开放平台白名单；ZL 申请时还添加过本机出口 `38.181.81.164`，历史本机出口 `188.253.112.44` / `82.27.116.13` 只作排障参考。不要把 OpenAPI app secret、店铺 secret、openKeyId 写入聊天、文档或日志。
-- BI Portal 静态文件为 `outputs/bi-portal/index.html`，数据文件为 `outputs/bi-portal/data.json`，生成脚本为 `scripts/generate_bi_portal.mjs`；云端由 `scripts/cloud_bi_refresh.sh` 刷新 core 并启动 `prewarm_bi_portal_sections.sh`，`serve_bi_portal.mjs` 还会在服务启动和首页访问时用 core `generatedAt` watcher 兜底后台预热 section。API section cache 在 `outputs/bi-portal/sections/`，首页首屏应命中轻量 `homeRankings`（不是完整 `rankings`）和 gzip sidecar；`homeProfit` 必须从当前 `profit` cache 派生，`sourceGeneratedAt` 必须等于当前 core 且 `staleSource=false`，旧源利润不能当成当前业务真相。
+- BI Portal 生成脚本为 `scripts/generate_bi_portal.mjs`；云端由 `scripts/cloud_bi_refresh.sh` 刷新 core 并启动 `prewarm_bi_portal_sections.sh`，`serve_bi_portal.mjs` 还会在服务启动和首页访问时用 core `generatedAt` watcher 兜底后台预热 section。线上运行态的 API section cache 在云端 `outputs/bi-portal/sections/`，首页首屏应命中轻量 `homeRankings`（不是完整 `rankings`）和 gzip sidecar；`homeProfit` 必须从当前 `profit` cache 派生，`sourceGeneratedAt` 必须等于当前 core 且 `staleSource=false`，旧源利润不能当成当前业务真相。仓库内 `outputs/bi-portal/index.html` / `data.json` 只是灾备/兼容快照。
 - BI 门户 UI 冒烟检查脚本为 `scripts/check_bi_portal_ui.mjs`；本地封存后默认不要为“看一眼”重新打开本地前端，云端验证优先用 HTTP health、静态断言和日志。V1 时间筛选弹窗的关键不变量：日期输入是文本 `YYYY-MM-DD`，月份切换后弹窗保持打开并更新月份，绑定根节点必须是实际弹窗而不是旧 toolbar root。
-- GitHub 私有仓库已纳入 `outputs/bi-portal/index.html` 和 `outputs/bi-portal/data.json` 作为当前 BI 门户可复用产物；`outputs/` 其他抓取结果、报表、图片、审计结果仍默认忽略，迁移生产状态时单独备份。
-- V1 仍是当前正式 BI Portal；V2.1 只是独立经营 BI 预览版，由 `scripts/generate_bi_portal_v2.mjs` 输出到 `outputs/bi-portal/v2/index.html`，只读复用 `outputs/bi-portal/data.json`，不进入日常刷新链路；用户明确验收前不得替换 V1、改生产调度或把 V2 整站视为可替换 V1。
+- GitHub 私有仓库已纳入 `outputs/bi-portal/index.html` 和 `outputs/bi-portal/data.json` 作为 BI 门户灾备/兼容快照；它们不代表当前云端经营数据。`outputs/` 其他抓取结果、报表、图片、审计结果仍默认忽略，迁移生产状态时单独备份。
+- V1 仍是当前正式 BI Portal；V2 只是独立经营 BI 预览版，由 `scripts/generate_bi_portal_v2.mjs` 输出到 `outputs/bi-portal/v2/index.html`。V2 数据判断和验收必须走云端运行态/线上 section API；仓库快照只作页面启动兼容。用户明确验收前不得替换 V1、改生产调度或把 V2 整站视为可替换 V1。
 - BI 门户侧栏“链接表现数据”更新时间必须显示链接源文件抓取时间，即 `outputs/shein_links/<店铺>/<链接日>.json` 的 `fetchTime` 最大值；“售后/库存/财务数据”也必须显示业务域源文件抓取时间，即 `outputs/shein_business_domains/<店铺>/<业务日>.json` 的 `fetchTime` 最大值；不要用 BI 重跑入仓时的 `updated_at` 冒充抓取时间。
 - 云端 Metabase / PostgreSQL 运行在腾讯云 Ubuntu + Docker；本地旧 WSL + Docker 数据盘仅作历史/回滚参考，长期生产不要再依赖本地 WSL。
 - 若本地旧 Docker / Postgres / Metabase 出现 `input/output error`，优先怀疑 `D:\SheinBI\docker-data\docker-data.ext4` 文件系统异常；恢复顺序是先停止 WSL / Docker，再做 volume 备份和 `e2fsck -fy`，最后重启容器并跑 BI audit，不要直接删除 Docker 数据。
