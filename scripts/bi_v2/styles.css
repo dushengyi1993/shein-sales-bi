@@ -194,6 +194,9 @@ th{position:sticky;top:0;background:#f5f0e8;color:#6d665d;font-size:11px;text-tr
 .dot{stroke:#fffdf8;stroke-width:2}
 .trend-bar{shape-rendering:geometricPrecision;filter:drop-shadow(0 8px 12px rgba(30,25,18,.10));transition:opacity .12s ease,filter .12s ease}
 .trend-bar:hover{opacity:.9;filter:drop-shadow(0 10px 16px rgba(30,25,18,.16))}
+.overlay-bar-chart .trend-bar-total{opacity:.34;filter:drop-shadow(0 5px 8px rgba(30,25,18,.06))}
+.overlay-bar-chart .trend-bar-net{opacity:.98;filter:drop-shadow(0 9px 14px rgba(30,25,18,.13))}
+.overlay-bar-chart .trend-bar-fallback{opacity:.78}
 .chart-hit{fill:rgba(0,0,0,0);pointer-events:all;cursor:crosshair}
 .chart-tooltip{position:fixed;z-index:9999;max-width:280px;border:1px solid rgba(255,255,255,.14);border-radius:14px;background:rgba(25,22,18,.96);color:#fffaf0;box-shadow:0 18px 44px rgba(20,16,10,.22);padding:9px 11px;font-size:12px;line-height:1.45;font-weight:720;font-variant-numeric:tabular-nums;pointer-events:none;opacity:0;transform:translateY(4px);transition:opacity .08s ease,transform .08s ease;white-space:pre-line}
 .chart-tooltip.visible{opacity:1;transform:translateY(0)}
@@ -204,6 +207,8 @@ th{position:sticky;top:0;background:#f5f0e8;color:#6d665d;font-size:11px;text-tr
 .chart-legend{display:flex;gap:8px;flex-wrap:wrap;margin:8px 4px 0}
 .chart-legend span{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;background:#fffdf8;padding:4px 8px;font-size:12px;color:#4d463e}
 .chart-legend i{width:8px;height:8px;border-radius:50%;background:var(--c)}
+.chart-legend .legend-total{color:#7f7569;background:#fbf7ee}
+.chart-legend .legend-diff{color:#6f655a;background:#f7f1e8}
 .rank-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
 .rank-panel{padding:16px}
 .rank-list{display:grid;gap:8px}
