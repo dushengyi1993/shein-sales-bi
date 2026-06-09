@@ -44,7 +44,7 @@ function renderHtml({storeConfig, css, clientJs}) {
 <aside class="sidebar">
   <div class="brand"><div class="mark">BI</div><h1>SHEIN 运营工作台</h1><p>V2 preview · cloud runtime first</p></div>
   <nav class="nav" id="nav"></nav>
-  <div class="side-note"><b id="crumb">正在连接…</b><span>正式入口不变；V2 仅作平行验收。</span></div>
+  <div class="side-note"><b id="crumb">正在连接…</b><span>正式入口不变；V2 仅作平行验收。</span><div id="sideStatus" class="side-status" aria-live="polite"></div></div>
 </aside>
 <main class="main">
   <div class="command"><div class="bar home-filter-bar">
