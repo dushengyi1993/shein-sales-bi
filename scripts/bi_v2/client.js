@@ -190,8 +190,8 @@ function storeQtyRanks(){return storeRanks().map(x=>({...x,value:x.quantity,valu
 function productRanks(){return Array.from(grp(psales(),r=>pkey(r)),([key,rs])=>{const sales=rs.reduce((a,r)=>a+netSales(r),0),qty=rs.reduce((a,r)=>a+netQty(r),0),orders=rs.reduce((a,r)=>a+netOrders(r),0),stores=dealStores(rs),days=dealDays(rs);return{key,label:prod(rs[0]),value:sales,sales_sar:sales,quantity:qty,orders,stores,days,meta:`${averageNetUnitPriceText({sales_sar:sales,quantity:qty})} · 销量 ${M(qty)} 件 · 订单 ${M(orders)} · 覆盖 ${M(stores)} 店 · 净成交 ${M(days)} 天`,metaHtml:rankMeta([['均价',avgUnitPrice({sales_sar:sales,quantity:qty}),'SAR'],['销量',M(qty),'件'],['订单',M(orders)],['覆盖',M(stores),'店'],['净成交',M(days),'天']]),valueText:money(sales),subValue:rmb(sales)}}).filter(hasPositiveRank).sort((a,b)=>b.value-a.value)}
 function productQtyRanks(){return productRanks().map(x=>({...x,value:x.quantity,valueText:M(x.quantity)+' 件',subValue:money(x.sales_sar),meta:`${averageNetUnitPriceText(x)} · 净成交 ${money(x.sales_sar)} · 订单 ${M(x.orders)} · 覆盖 ${M(x.stores)} 店 · 净成交 ${M(x.days)} 天`,metaHtml:rankMeta([['均价',avgUnitPrice(x),'SAR'],['净成交',M2(x.sales_sar),'SAR'],['订单',M(x.orders)],['覆盖',M(x.stores),'店'],['净成交',M(x.days),'天']])})).filter(x=>N(x.value)>0||N(x.sales_sar)>0).sort((a,b)=>b.value-a.value)}
 
-function metricMatrix(heads,rows,cols){return`<div class="metric-matrix cols-${cols}">${heads.map(h=>`<div class="matrix-cell head">${H(h)}</div>`).join('')}${rows.map(r=>`<div class="matrix-cell label">${H(r.label)}</div>${r.cells.map(c=>`<div class="matrix-cell value">${c}</div>`).join('')}`).join('')}</div>`}
-function metricCard(title,sub,heads,rows,tip){const help=tip?`<em class="help" title="${H(tip)}" aria-label="${H(tip)}" tabindex="0">?</em>`:'';return`<article class="overview-matrix-card"><div class="matrix-card-head"><div class="matrix-title-row"><h4>${H(title)}</h4>${help}</div><div class="sub">${H(sub)}</div></div>${metricMatrix(heads,rows,Math.max(1,heads.length-1))}</article>`}
+function metricMatrix(heads,rows,cols,extra=''){return`<div class="metric-matrix cols-${cols}${extra?` ${H(extra)}`:''}">${heads.map(h=>`<div class="matrix-cell head">${H(h)}</div>`).join('')}${rows.map(r=>`<div class="matrix-cell label">${H(r.label)}</div>${r.cells.map(c=>`<div class="matrix-cell value">${c}</div>`).join('')}`).join('')}</div>`}
+function metricCard(title,sub,heads,rows,tip,extra=''){const help=tip?` <em class="help" title="${H(tip)}" aria-label="${H(tip)}" tabindex="0">?</em>`:'';return`<article class="overview-matrix-card"><div class="matrix-card-head"><h4>${H(title)}${help}</h4><div class="sub">${H(sub)}</div></div>${metricMatrix(heads,rows,Math.max(1,heads.length-1),extra)}</article>`}
 function homeKpis(){const s=salesSummary(),req=retRequestSummary(),ordRet=retOrderSummary(),p=profSum(),tr=trafficSummary(),iv=inventorySummary();const rankingsLoading=sourceLoading('homeRankings',s.rows);const afterLoading=sourceLoading('afterSales',req.rows);const profitLoading=sourceLoading(String(S.q||'').trim()?'profit':'homeProfit',p.rows);const trafficLoading=sourceLoading('productTrafficDaily',tr.rows);const invLoading=sourceLoading('financeData',iv.rows);const active=v=>v==null?'—':M(v)+' 个';const profitLoss=p.loss,profitRtv=p.rtv;return`<section class="kpi-six">`+
 metricCard('当前时段成交额',selectedRangeText()+' · '+homeScopeSubtitle(),['口径','SAR','RMB'],[
 {label:'总成交额',cells:[htmlValue(money(s.gross),rankingsLoading),htmlValue(rmb(s.gross),rankingsLoading)]},
@@ -204,19 +204,13 @@ metricCard('当前时段退货 / 售后',selectedRangeText()+' · 双口径',['�
 {label:'订单创建时间',cells:[htmlValue(M(ordRet.cases)+' 单',rankingsLoading),htmlValue(money(ordRet.amount),rankingsLoading),htmlValue(rmb(ordRet.amount),rankingsLoading)]}], '申请时间用于发现当天售后异常；订单创建时间用于和订单成熟窗口复盘。')+
 metricCard('当前时段真实利润',selectedRangeText()+' · 双测算',['口径','SAR','RMB','利润率'],[
 {label:'退货全损保守',cells:[htmlValue(money(profitLoss),profitLoading),htmlValue(rmb(profitLoss),profitLoading),htmlValue(PCT(p.revenue?profitLoss/p.revenue:null),profitLoading)]},
-{label:'RTV入仓测算',cells:[htmlValue(money(profitRtv),profitLoading),htmlValue(rmb(profitRtv),profitLoading),htmlValue(PCT(p.revenue?profitRtv/p.revenue:null),profitLoading)]}], '仓储费已进入真实利润；货号搜索时优先使用完整 profit section，避免拿全店利润冒充货号利润。')+
+{label:'RTV入仓测算',cells:[htmlValue(money(profitRtv),profitLoading),htmlValue(rmb(profitRtv),profitLoading),htmlValue(PCT(p.revenue?profitRtv/p.revenue:null),profitLoading)]}], '仓储费已进入真实利润；货号搜索时优先使用完整 profit section，避免拿全店利润冒充货号利润。','profit-matrix')+
 metricCard('当前时段流量',selectedRangeText()+' · 日期×店铺×货号',['指标','数值','说明'],[
-{label:'曝光量',cells:[htmlValue(M(tr.exp),trafficLoading),htmlValue(tr.rows.length?(tr.latestAvailable?((tr.latestDate||'最新')+' · 最新可用'):(tr.fallback?'core 宽表':'productTrafficDaily 精确聚合')):'暂无明细',trafficLoading)]},
-{label:'访客量',cells:[htmlValue(M(tr.uv),trafficLoading),htmlValue('点击率 '+PCT(tr.click),trafficLoading)]},
-{label:'成交件数',cells:[htmlValue(M(tr.sale),trafficLoading),htmlValue('支付率 '+PCT(tr.pay),trafficLoading)]},
-{label:'最新日期',cells:[htmlValue(tr.latestDate||'—',trafficLoading),htmlValue(tr.latestAvailable?'选定期无明细，显示同筛选最新可用':(tr.fallback?'宽表 fallback':'按筛选重算'),trafficLoading)]}], '流量按当前日期、店铺/负责人、货号搜索聚合；点击率/支付率按分子分母重算。')+
-metricCard('当前库存 / 去化','当前快照 · '+inventoryScopeNote(),['指标','数值','说明'],[
-{label:'货号数',cells:[htmlValue(M(iv.count)+' 个',invLoading),htmlValue(inventoryScopeNote(),invLoading)]},
-{label:'ET可售',cells:[htmlValue(M(iv.available)+' 件',invLoading),htmlValue('ET实盘；不与在途相加',invLoading)]},
-{label:'成本表在库',cells:[htmlValue(M(iv.onhand)+' 件',invLoading),htmlValue(shortDate(iv.snapshot),invLoading)]},
-{label:'成本表在途',cells:[htmlValue(M(iv.incoming)+' 件',invLoading),htmlValue('已发未完整到仓/计费',invLoading)]},
-{label:'成本表供给',cells:[htmlValue(M(iv.totalSupply)+' 件',invLoading),htmlValue('到仓 + 在途 - 已售',invLoading)]},
-{label:'去化周期',cells:[htmlValue(iv.days==null?'—':M2(iv.days)+' 天',invLoading),htmlValue(iv.daily>0?'按 '+M2(iv.daily)+' 件/天':'无动销速度',invLoading)]}], '去化周期按总供给/加权日销汇总，不平均各货号天数。')+'</section>'}
+{label:'曝光 / 访客',cells:[htmlValue(M(tr.exp)+' / '+M(tr.uv),trafficLoading),htmlValue('点击率 '+PCT(tr.click),trafficLoading)]},
+{label:'成交 / 支付率',cells:[htmlValue(M(tr.sale)+' 件 / '+PCT(tr.pay),trafficLoading),htmlValue((tr.latestDate||'—')+(tr.latestAvailable?' · 最新可用':tr.fallback?' · core宽表':''),trafficLoading)]}], '流量按当前日期、店铺/负责人、货号搜索聚合；点击率/支付率按分子分母重算。')+
+metricCard('当前库存 / 去化','当前快照 · '+M(iv.count)+' 货号 · 全局库存',['指标','数值','说明'],[
+{label:'供给 / 可售',cells:[htmlValue(M(iv.totalSupply)+' / '+M(iv.available)+' 件',invLoading),htmlValue('在库 '+M(iv.onhand)+' · 在途 '+M(iv.incoming),invLoading)]},
+{label:'去化周期',cells:[htmlValue(iv.days==null?'—':M2(iv.days)+' 天',invLoading),htmlValue(iv.daily>0?'日销 '+M2(iv.daily)+' 件':'无动销速度',invLoading)]}], '去化周期按总供给/加权日销汇总，不平均各货号天数；ET可售和成本表供给是不同库存口径。')+'</section>'}
 
 const TREND_METRICS={sales:{label:'成交额',money:true},quantity:{label:'销量'},returns:{label:'售后'},profit:{label:'利润',money:true},traffic:{label:'流量'},inventory:{label:'库存'}};
 function trendMetricButtons(){return`<div class="trend-toggle">${Object.entries(TREND_METRICS).map(([k,m])=>`<button type="button" class="${S.trendMetric===k?'active':''}" data-trend-metric="${H(k)}">${H(m.label)}</button>`).join('')}</div>`}
