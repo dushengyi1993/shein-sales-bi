@@ -82,7 +82,7 @@
 - 统计日：北京时间自然日。
 - 时间口径：订单创建时间。
 - 汇率：`1 SAR = 1.8 RMB`。
-- 销售有效性统一走 `lib/shein_sales_validity.mjs`：只把真正取消、揽收前取消等“未形成销售”的商品行从总销售额、订单数和销量中剔除；用户已退款、退货、派件失败等仍保留在总销售额里，再由净销售额、售后/利润层反转。后台原始金额仍保留在明细里用于追溯。历史本地 JSON summary 可用 `scripts/repair_shein_sales_summaries.mjs` 重算。
+- 销售有效性统一走 `lib/shein_sales_validity.mjs`：只把真正取消、揽收前取消等“未形成销售”的商品行从总销售额、订单数和销量中剔除；用户已退款、退货、派件失败等仍保留在总销售额里，再由净销售额、售后/利润层反转。后台原始金额仍保留在明细里用于追溯。历史 summary 可用 `scripts/repair_shein_sales_summaries.mjs` 重算；该脚本仅作历史回滚/修复工具，不作为当前云端 BI 判断来源。
 - 利润口径：首页和成本/利润页使用真实利润；成本未覆盖时显示“待成本表 / 成本覆盖率”，不再用 `25%` 粗估冒充真实利润。仓储费正式来源是 ET 物流仓服账单 `仓储费`：显示金额按 RMB，实际扣费按显示金额 × `0.5` 后以 `1 SAR = 1.8 RMB` 折 SAR；店铺/DSY/LGM 按净销售额分摊，货号层优先使用 ET `ExportStoreFee` 当日明细；若历史明细合计与总账不一致，则保留货号分布并按总账缩放，只有完全缺明细日期才按 ET 体积 × 库存天数估算并标注口径。
 - ET 仓储费导出里的 `storage_code` / `sku_code` 必须保留原始值，例如 `DL-SK-999`；`match_key` 只作为内部归并键。面向 BI/利润展示的货号要通过 `mart.product_display_by_match_key` 回到销售或商品主档里的既有标准货号，不能把 ET 解析出的中间短码当成新商品暴露出来。
 - 营销活动确认表里的 `仓储费SAR/件` 不能用累计仓储费除以历史销量，也不能把全历史仓储费一刀切压到当前库存上；必须来自 BI `profit.productStorageDaily` 的“当前仍在仓库存移动平均累计仓储成本”：每日仓储费加入库存成本余额，库存数量减少时按当前平均成本剔除已出库产品携带的历史仓储成本。短码或无法确认的货号必须标记待归并暂停，不能按 0 仓储或猜测成本继续报名。
@@ -124,7 +124,7 @@
 - `infra/`：Metabase、PostgreSQL 数据仓库和 Docker 相关配置。
 - `skills/shein-sales-ops/`：项目专用 skill，保存业务口径和避坑经验。
 - `state/`：本地运行状态。
-- `outputs/`：抓取结果、报表、图片、审计结果；默认不进 GitHub，但 `outputs/bi-portal/index.html` 和 `outputs/bi-portal/data.json` 作为当前 BI 门户产物已纳入仓库，便于迁移和复用。
+- `outputs/`：抓取结果、报表、图片、审计结果；默认不进 GitHub。`outputs/bi-portal/index.html` 和 `outputs/bi-portal/data.json` 只作为 BI 门户灾备/兼容快照纳入仓库，便于迁移和代码预览；当前业务判断、验收和排障必须看云端运行态。
 - `logs/`：计划任务和运行日志。
 - `profiles/`：工作区内的 Chrome 店铺 profile；当前 19 店登录态保存在 `persistent-*-profile`，不要删除整个 profile。后续磁盘瘦身只清 `OptGuideOnDeviceModel` 等 Chrome 可重建缓存，详见 `docs/runtime-architecture.md`。  如需核验店铺是否错位，使用稳定日期后台重抓并对账数据库，不要只看页面文本。
 - `state/shein_webapi_sessions/`：WebAPI 直连复用的 Cookie session，本地敏感运行态，不进 GitHub；迁移时只能通过加密渠道或在新机器重新登录/刷新。

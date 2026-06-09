@@ -79,7 +79,7 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 销售当天同步（本地回滚参考）：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_intraday_dsy.ps1`
 - BI 每日流水线（本地回滚参考）：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_bi_daily_pipeline.ps1`
 - 生成 BI 门户：`$env:SHEIN_BI_PORTAL_TIMEOUT_MS='900000'; node scripts/generate_bi_portal.mjs`
-- 生成 V2.1 独立设计预览：`node scripts/generate_bi_portal_v2.mjs`；V2.1 只读复用 `outputs/bi-portal/data.json`，用户确认前不得替换 V1、进入 `main` release 或改生产调度。自 `2026-05-14` 起，V2 当前验收范围先限定首页：必须复刻 V1 首页功能/操作逻辑；其它子页尚未完成全量复刻。V2 暂时不跟随日常同步自动刷新，只有用户明确要求开发/优化/验收 V2 时才生成或维护。
+- 生成 V2 平行预览：`node scripts/generate_bi_portal_v2.mjs`；V2 输出 `outputs/bi-portal/v2/index.html`，运行态验收必须看云端页面和线上 `/api/bi/section/*`，仓库 `outputs/bi-portal/data.json` 只作预览兼容。用户确认前不得替换 V1、进入 `main` release 或改生产调度。V2 暂时不跟随日常同步自动刷新，只有用户明确要求开发/优化/验收 V2 时才生成或维护。
 - 云端 ET 每日同步：服务器执行 `bash scripts/cloud_et_forwarder_sync.sh today`；本地回滚参考才用 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_et_forwarder_daily.ps1`
 - 云端链接/业务域日更：服务器执行 `bash scripts/cloud_link_business_sync.sh yesterday`；不要回退到本机补抓冒充云端日更。
 - 云端登录态管家：服务器执行 `bash scripts/cloud_shein_session_manager.sh`；会顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态。
