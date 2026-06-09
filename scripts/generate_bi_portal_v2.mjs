@@ -47,12 +47,11 @@ function renderHtml({storeConfig, css, clientJs}) {
   <div class="side-note"><b id="crumb">正在连接…</b><span>正式入口不变；V2 仅作平行验收。</span></div>
 </aside>
 <main class="main">
-  <div class="command"><div class="bar">
-    <div class="field"><label for="q">搜索</label><input id="q" aria-label="搜索" placeholder="标准货号 / SKC / 商品名 / 订单号" autocomplete="off" /></div>
-    <div class="field"><label for="scope">范围</label><select id="scope" aria-label="范围"></select></div>
-    <div class="field"><label for="start">开始</label><input id="start" aria-label="开始日期" type="date" /></div>
-    <div class="field"><label for="end">结束</label><input id="end" aria-label="结束日期" type="date" /></div>
-    <div class="quick"><button data-preset="7">近7天</button><button data-preset="30">近30天</button><button data-preset="365">近一年</button><button id="clearFilters">清空</button></div>
+  <div class="command"><div class="bar home-filter-bar">
+    <div class="field search-field"><label for="q">搜索</label><input id="q" aria-label="搜索" placeholder="标准货号 / SKC / 商品名 / 订单号" autocomplete="off" /></div>
+    <div class="field scope-field"><label for="scope">店铺</label><select id="scope" aria-label="店铺或负责人范围"></select></div>
+    <div id="rangeDock" class="range-dock" aria-label="日期范围筛选"></div>
+    <div class="quick command-actions"><button id="clearFilters">清空</button></div>
   </div></div>
   <div id="view"></div>
   <div class="foot">BI V2 preview · data source of truth: cloud runtime / section API</div>
