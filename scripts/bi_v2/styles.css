@@ -159,39 +159,48 @@ th{position:sticky;top:0;background:#f5f0e8;color:#6d665d;font-size:11px;text-tr
 .matrix-card-head h4{margin:0;font-size:16px;letter-spacing:-.01em;line-height:1.2}
 .matrix-card-head .sub{margin:0;text-align:right;max-width:260px;line-height:1.32;font-size:11.5px;color:var(--muted)}
 .help{display:inline-grid;place-items:center;flex:0 0 auto;width:18px;height:18px;border:1px solid rgba(189,178,162,.9);border-radius:999px;font-style:normal;font-size:11px;font-weight:850;color:#6f6256;background:#fffaf2;box-shadow:inset 0 1px 0 rgba(255,255,255,.8);cursor:help}
-.metric-matrix{display:grid;border:1px solid rgba(226,217,203,.95);border-radius:18px;overflow:hidden;background:#fffdf8}
+.metric-matrix{display:grid;border:1px solid rgba(226,217,203,.95);border-radius:18px;overflow:hidden;background:#f7f1e8}
 .metric-matrix.cols-1{grid-template-columns:minmax(70px,.8fr) minmax(120px,1.2fr)}
 .metric-matrix.cols-2{grid-template-columns:minmax(70px,.7fr) repeat(2,minmax(120px,1fr))}
 .metric-matrix.cols-3{grid-template-columns:minmax(70px,.68fr) minmax(108px,1.05fr) minmax(108px,1.05fr) minmax(92px,.82fr)}
 .metric-matrix.profit-matrix{grid-template-columns:minmax(70px,.66fr) minmax(118px,1fr) minmax(118px,1fr) minmax(96px,.86fr)}
 .metric-matrix .matrix-cell{min-height:48px;padding:8px 9px;border-right:1px solid rgba(232,224,211,.86);border-bottom:1px solid rgba(232,224,211,.86);min-width:0;font-size:12px;line-height:1.18;background:transparent;display:flex;align-items:center;justify-content:center;text-align:center;flex-direction:column}
-.metric-matrix.cols-2 .matrix-cell:nth-child(3n),.metric-matrix.cols-3 .matrix-cell:nth-child(4n){border-right:0}
-.metric-matrix.cols-2 .matrix-cell:nth-last-child(-n+3),.metric-matrix.cols-3 .matrix-cell:nth-last-child(-n+4){border-bottom:0}
+.metric-matrix.cols-1 .matrix-cell:nth-child(2n),.metric-matrix.cols-2 .matrix-cell:nth-child(3n),.metric-matrix.cols-3 .matrix-cell:nth-child(4n){border-right:0}
+.metric-matrix.cols-1 .matrix-cell:nth-last-child(-n+2),.metric-matrix.cols-2 .matrix-cell:nth-last-child(-n+3),.metric-matrix.cols-3 .matrix-cell:nth-last-child(-n+4){border-bottom:0}
 
-.metric-matrix .head{min-height:38px;background:#f7f1e8;color:var(--muted);font-size:11.5px;font-weight:900;text-transform:none;letter-spacing:.02em}
+.metric-matrix .matrix-cell.head{min-height:38px;margin:0;gap:0;background:#f7f1e8;color:var(--muted);font-size:11.5px;font-weight:900;text-transform:none;letter-spacing:.02em}
+.metric-matrix .matrix-cell.head:first-child{border-top-left-radius:17px}
+.metric-matrix.cols-1 .matrix-cell.head:nth-child(2),.metric-matrix.cols-2 .matrix-cell.head:nth-child(3),.metric-matrix.cols-3 .matrix-cell.head:nth-child(4){border-top-right-radius:17px}
 .metric-matrix .label{color:var(--ink);background:#fff9f0;font-size:14px;font-weight:880;letter-spacing:-.01em}
-.metric-matrix .value{font-size:17px;font-weight:880;font-variant-numeric:tabular-nums;color:var(--ink);letter-spacing:-.03em;word-break:break-word}
+.metric-matrix .value{font-size:17px;font-weight:880;font-variant-numeric:tabular-nums;color:var(--ink);letter-spacing:-.03em;word-break:break-word;background:#fffdf8}
 .profit-matrix .matrix-cell.value{align-items:center;justify-content:center;text-align:center;font-size:17px}
 .metric-matrix.cols-1 .matrix-cell.value{font-size:20px}
+.metric-note{display:inline-block;font-size:12px;line-height:1.26;font-weight:760;color:var(--muted);letter-spacing:0}
+.traffic-matrix .matrix-cell.value,.inventory-matrix .matrix-cell.value{font-size:16px}
 .pending{color:#9a6500;font-weight:720}
 .trend-toggle{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
 .trend-toggle button{border:1px solid var(--line);border-radius:999px;background:#fffdf8;color:var(--muted);min-height:34px;padding:0 12px}
 .trend-toggle button.active{background:var(--ink);border-color:var(--ink);color:#fff}
 .trend-stack{display:grid;grid-template-columns:1fr;gap:14px}
 .trend-panel{padding:16px 18px 14px}
-.line-chart{border:1px solid var(--line);border-radius:18px;background:linear-gradient(180deg,#fffdf8,#f7f2ea);padding:10px 10px 12px;overflow:hidden}
+.line-chart{border:1px solid var(--line);border-radius:18px;background:linear-gradient(180deg,#fffdf8 0%,#fbf7ef 48%,#f3ecdf 100%);padding:10px 10px 12px;overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.72)}
 .line-chart svg{display:block;width:100%;height:auto;min-height:240px}
+.plot-band{fill:rgba(255,255,255,.44);stroke:rgba(231,222,209,.62);stroke-width:1}
 .grid-line{stroke:#e6ded2;stroke-width:1}
 .axis-line{stroke:#bfb5a7;stroke-width:1.2}
+.zero-line{stroke:#8a7d6c;stroke-width:1.5;stroke-dasharray:4 5;opacity:.55}
 .axis{fill:#8b8175;font-size:12px;font-variant-numeric:tabular-nums}
 .series{fill:none;stroke-width:3.2;stroke-linecap:round;stroke-linejoin:round;filter:drop-shadow(0 4px 10px rgba(32,32,29,.08))}
 .dot{stroke:#fffdf8;stroke-width:2}
+.trend-bar{shape-rendering:geometricPrecision;filter:drop-shadow(0 8px 12px rgba(30,25,18,.10));transition:opacity .12s ease,filter .12s ease}
+.trend-bar:hover{opacity:.9;filter:drop-shadow(0 10px 16px rgba(30,25,18,.16))}
 .chart-hit{fill:rgba(0,0,0,0);pointer-events:all;cursor:crosshair}
 .chart-tooltip{position:fixed;z-index:9999;max-width:280px;border:1px solid rgba(255,255,255,.14);border-radius:14px;background:rgba(25,22,18,.96);color:#fffaf0;box-shadow:0 18px 44px rgba(20,16,10,.22);padding:9px 11px;font-size:12px;line-height:1.45;font-weight:720;font-variant-numeric:tabular-nums;pointer-events:none;opacity:0;transform:translateY(4px);transition:opacity .08s ease,transform .08s ease;white-space:pre-line}
 .chart-tooltip.visible{opacity:1;transform:translateY(0)}
 
 
 .value-label{font-size:13px;font-weight:780;paint-order:stroke;stroke:#fffdf8;stroke-width:4px;stroke-linejoin:round;font-variant-numeric:tabular-nums}
+.bar-value-label{font-size:12px;stroke-width:4.5px}
 .chart-legend{display:flex;gap:8px;flex-wrap:wrap;margin:8px 4px 0}
 .chart-legend span{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;background:#fffdf8;padding:4px 8px;font-size:12px;color:#4d463e}
 .chart-legend i{width:8px;height:8px;border-radius:50%;background:var(--c)}
