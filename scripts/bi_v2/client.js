@@ -38,7 +38,7 @@ function pkey(r){return String(r?.standard_goods_sn||r?.goods_sn||r?.raw_goods_s
 
 function sk(r){return String(r?.store_key||r?.storeKey||'').trim().toUpperCase()}
 
-function dt(r){return ISO(r?.date||r?.stat_date||r?.created_date||r?.order_created_date||r?.link_date||r?.snapshot_date||r?.comment_date||r?.request_time||r?.order_create_time||r?.order_time||r?.created_at)}
+function dt(r){return ISO(r?.date||r?.stat_date||r?.request_time||r?.comment_date||r?.created_date||r?.order_created_date||r?.link_date||r?.order_create_time||r?.order_time||r?.created_at||r?.snapshot_date)}
 
 function scopeStores(){const s=String(S.scope||'ALL');if(s==='ALL')return new Set(stores);if(s.startsWith('OWNER:'))return new Set((owners.find(g=>g.key===s.slice(6).toUpperCase())?.stores)||[]);return new Set([s.toUpperCase()])}
 
