@@ -99,6 +99,17 @@ th{position:sticky;top:0;background:#f5f0e8;color:#6d665d;font-size:11px;text-tr
 .sects .ok{color:#166534}
 .sects .loading-chip{color:#9a6500}
 .sects .bad{color:#b42318}
+.sects .stale,.sects .refreshing{color:#9a3412;border-color:#fed7aa;background:#fff7ed;font-weight:820}
+.sects .refreshing{color:#7c2d12;background:#ffedd5}
+.stale-notice{border:1px solid #f59e0b;border-radius:20px;background:linear-gradient(135deg,#fffbeb,#fff7ed);box-shadow:0 16px 40px rgba(180,83,9,.10);padding:14px 16px;margin:0 0 16px;color:#7c2d12}
+.stale-notice strong{display:block;font-size:14px;margin-bottom:4px;color:#7c2d12}
+.stale-notice p{margin:0 0 10px;color:#92400e;font-size:12px;line-height:1.5}
+.stale-line{display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid rgba(245,158,11,.25);padding-top:8px;margin-top:8px}
+.stale-line span{display:block;font-size:12px;color:#78350f;min-width:0}
+.stale-line b{margin-right:8px;color:#b45309}
+.stale-line em{display:block;margin-top:2px;font-style:normal;color:#b42318}
+.stale-line .btn{min-height:28px;padding:0 10px;background:#fffaf0;border-color:#f1c27d;color:#7c2d12;white-space:nowrap}
+.stale-line .btn:disabled{opacity:.58;cursor:wait}
 .action{border:1px solid var(--line);border-radius:18px;background:#fffdf8;padding:15px;margin-bottom:10px}
 .tags{display:flex;gap:6px;flex-wrap:wrap}
 .tag{border:1px solid var(--line);border-radius:999px;padding:2px 8px;font-size:11px;background:#f6f1e9;color:var(--muted)}

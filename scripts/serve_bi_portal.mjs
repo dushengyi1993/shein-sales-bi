@@ -95,6 +95,8 @@ const DEFAULT_MANUAL_LOGIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY
 const BI_PORTAL_SECTION_KEYS = new Set(['homeProfit', 'homeRankings', 'rankings', 'profit', 'actions', 'linksData', 'productTrafficDaily', 'inventoryTrend', 'comments', 'orders', 'afterSales', 'financeData', 'rtvData', 'waybills']);
 const BI_PORTAL_SECTION_TIMEOUT_MS = Math.max(60_000, Number(process.env.SHEIN_BI_SECTION_TIMEOUT_MS || 900_000));
 const biSectionInFlight = new Map();
+let biSectionBackgroundQueue = Promise.resolve();
+let biProfitMartFreshnessPromise = null;
 const DEFAULT_BI_PORTAL_CORE_WARMUP_SECTIONS = ['homeRankings', 'profit', 'homeProfit', 'afterSales', 'actions', 'financeData', 'rankings', 'linksData', 'productTrafficDaily', 'inventoryTrend', 'comments', 'orders', 'rtvData', 'waybills'];
 const BI_PORTAL_CORE_WARMUP_INTERVAL_MS = Math.max(15_000, Number(process.env.SHEIN_BI_CORE_WARMUP_INTERVAL_MS || 60_000));
 const biPortalCoreWarmupState = {
@@ -1362,7 +1364,7 @@ function runChildProcess(command, args, options = {}) {
       cwd: options.cwd || ROOT,
       env: {...process.env, ...(options.env || {})},
       windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: [options.stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
     let stderr = '';
@@ -1376,6 +1378,18 @@ function runChildProcess(command, args, options = {}) {
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', d => { stdout += d; });
     child.stderr.on('data', d => { stderr += d; });
+    if (options.stdin) {
+      child.stdin.on('error', err => {
+        stderr += `\nstdin error: ${err?.message || err}`;
+      });
+      try {
+        child.stdin.write(String(options.stdin));
+        child.stdin.end();
+      } catch (err) {
+        stderr += `\nstdin write failed: ${err?.message || err}`;
+        try { child.kill('SIGTERM'); } catch {}
+      }
+    }
     child.on('error', err => {
       clearTimeout(timer);
       resolve({ok: false, code: -1, timedOut, stdout, stderr: String(err?.stack || err)});
@@ -1385,6 +1399,30 @@ function runChildProcess(command, args, options = {}) {
       resolve({ok: code === 0 && !timedOut, code, timedOut, stdout, stderr});
     });
   });
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function dockerPrefix() {
+  if (process.platform === 'win32') return 'sudo ';
+  if (typeof process.getuid === 'function' && process.getuid() === 0) return '';
+  return 'sudo ';
+}
+
+function psqlSpawnCommand(args, extraFlags = '') {
+  const psql = `${dockerPrefix()}docker exec -i ${shellQuote(args.container)} psql -U ${shellQuote(args.user)} -d ${shellQuote(args.database)} -v ON_ERROR_STOP=1${extraFlags}`;
+  if (process.platform === 'win32') {
+    return {
+      command: 'wsl',
+      args: ['-d', args.distro, '--', 'bash', '-lc', psql],
+    };
+  }
+  return {
+    command: 'bash',
+    args: ['-lc', psql],
+  };
 }
 
 async function readBiPortalCoreMeta(root) {
@@ -1696,6 +1734,7 @@ async function readBiSectionStaleRaw(root, section, currentGeneratedAt, options 
     extraFields: {
       staleSection: true,
       cacheStale: true,
+      refreshScheduled: Boolean(options.refreshScheduled),
       coreGeneratedAt: String(currentGeneratedAt || ''),
     },
   });
@@ -1712,14 +1751,38 @@ async function readBiSectionStaleRaw(root, section, currentGeneratedAt, options 
 
 function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt) {
   const key = `${root}|${section}|${generatedAt || ''}`;
-  if (biSectionInFlight.has(key)) return;
-  biSectionInFlight.set(key, generateBiSection(args, root, section, generatedAt)
-    .catch(err => {
-      console.warn('BI section background generation failed', section, err?.message || err);
-    })
-    .finally(() => {
-      biSectionInFlight.delete(key);
-    }));
+  if (biSectionInFlight.has(key)) return true;
+  const sameCoreWarmupInFlight = biPortalCoreWarmupState.inFlight
+    && (!generatedAt || biPortalCoreWarmupState.generatedAt === String(generatedAt || ''));
+  const waitForCoreWarmup = sameCoreWarmupInFlight
+    ? biPortalCoreWarmupState.inFlight.catch(() => {})
+    : Promise.resolve();
+  const previousQueue = biSectionBackgroundQueue.catch(() => {});
+  const run = waitForCoreWarmup.then(() => previousQueue).then(async () => {
+    const startedAt = Date.now();
+    logBiPortalCoreWarmup('section-background-start', {section, generatedAt});
+    const latestMeta = await readBiPortalCoreMeta(root).catch(() => null);
+    const latestGeneratedAt = String(latestMeta?.generatedAt || '');
+    if (latestGeneratedAt && generatedAt && latestGeneratedAt !== String(generatedAt || '')) {
+      logBiPortalCoreWarmup('section-background-skip', {section, reason: 'core-changed', generatedAt, latestGeneratedAt});
+      return null;
+    }
+    const currentCache = await readBiSectionCache(root, section, generatedAt).catch(() => null);
+    if (currentCache) {
+      logBiPortalCoreWarmup('section-background-skip', {section, reason: 'already-cached', generatedAt});
+      return currentCache;
+    }
+    const payload = await generateBiSection(args, root, section, generatedAt);
+    logBiPortalCoreWarmup('section-background-done', {section, generatedAt, durationMs: Date.now() - startedAt});
+    return payload;
+  }).catch(err => {
+    console.warn('BI section background generation failed', section, err?.message || err);
+  }).finally(() => {
+    biSectionInFlight.delete(key);
+  });
+  biSectionInFlight.set(key, run);
+  biSectionBackgroundQueue = run.catch(() => {});
+  return true;
 }
 
 async function deriveHomeProfitSectionFromProfitCache(root, generatedAt) {
@@ -1766,9 +1829,77 @@ async function refreshProfitMarts(args) {
   return run;
 }
 
+async function readProfitMartCacheFreshness(args) {
+  const sql = `
+SELECT jsonb_build_object(
+  'factOrderMax', (SELECT max(created_date) FROM fact.order_item),
+  'profitCacheMax', (SELECT max(created_date) FROM mart.profit_order_item_cache),
+  'profitCacheRows', (SELECT count(*) FROM mart.profit_order_item_cache),
+  'metaRefreshedAt', (SELECT max(refreshed_at) FROM mart.profit_mart_cache_meta WHERE cache_key='profit_marts' AND status='ok')
+)::text;
+`;
+  const psql = psqlSpawnCommand(args, ' -q -t -A');
+  const run = await runChildProcess(psql.command, psql.args, {
+    cwd: ROOT,
+    timeoutMs: Math.max(30_000, Number(process.env.SHEIN_BI_PROFIT_MART_FRESHNESS_TIMEOUT_MS || 60_000)),
+    stdin: sql,
+  });
+  if (!run.ok) {
+    const tail = String(run.stderr || run.stdout || '').slice(-1000);
+    throw new Error(`profit mart freshness check failed: code=${run.code} timedOut=${run.timedOut} ${tail}`);
+  }
+  return JSON.parse(String(run.stdout || '{}').trim() || '{}');
+}
+
+async function ensureProfitMartCacheFresh(args, generatedAt = '') {
+  if (process.env.SHEIN_BI_PROFIT_MART_REFRESH_DISABLED === '1') return null;
+  if (biProfitMartFreshnessPromise) return biProfitMartFreshnessPromise;
+  biProfitMartFreshnessPromise = (async () => {
+    let freshness;
+    try {
+      freshness = await readProfitMartCacheFreshness(args);
+    } catch (err) {
+      const refreshed = await refreshProfitMarts(args);
+      return {
+        ...refreshed,
+        stderr: `${refreshed.stderr || ''}\n[ensureProfitMartCacheFresh] freshness check failed; refreshed cache instead: ${err?.message || err}`,
+      };
+    }
+    const factOrderMax = String(freshness.factOrderMax || '').slice(0, 10);
+    const profitCacheMax = String(freshness.profitCacheMax || '').slice(0, 10);
+    const profitCacheRows = Number(freshness.profitCacheRows || 0);
+    const metaRefreshedAtMs = Date.parse(String(freshness.metaRefreshedAt || ''));
+    const generatedAtMs = Date.parse(String(generatedAt || ''));
+    const generatedFresh = !generatedAtMs || (Number.isFinite(metaRefreshedAtMs) && metaRefreshedAtMs >= generatedAtMs);
+    if (profitCacheRows > 0 && factOrderMax && profitCacheMax >= factOrderMax && generatedFresh) {
+      return {
+        code: 0,
+        timedOut: false,
+        stdout: `[ensureProfitMartCacheFresh] cache fresh factOrderMax=${factOrderMax} profitCacheMax=${profitCacheMax} rows=${profitCacheRows} metaRefreshedAt=${freshness.metaRefreshedAt || ''} coreGeneratedAt=${generatedAt || ''}`,
+        stderr: '',
+      };
+    }
+    return refreshProfitMarts(args);
+  })().finally(() => {
+    biProfitMartFreshnessPromise = null;
+  });
+  return biProfitMartFreshnessPromise;
+}
+
 async function generateBiSection(args, root, section, generatedAt) {
-  const useProfitMartCache = section === 'profit' && process.env.SHEIN_BI_PROFIT_MART_CACHE_DISABLED !== '1';
-  const refreshRun = useProfitMartCache ? await refreshProfitMarts(args) : null;
+  const profitBackedSections = new Set(['profit', 'homeProfit', 'homeRankings', 'rankings']);
+  const useProfitMartCache = profitBackedSections.has(section) && process.env.SHEIN_BI_PROFIT_MART_CACHE_DISABLED !== '1';
+  const sourceMode = useProfitMartCache ? 'cache' : 'view';
+  const refreshRun = sourceMode === 'cache' ? await ensureProfitMartCacheFresh(args, generatedAt) : null;
+  if (sourceMode === 'cache' && section === 'homeProfit') {
+    const currentProfitCache = await readBiSectionCache(root, 'profit', generatedAt);
+    if (!currentProfitCache) {
+      const generated = await generateBiSection(args, root, 'profit', generatedAt);
+      if (!generated?.data?.profit) {
+        throw new Error('homeProfit requires a fresh profit section cache');
+      }
+    }
+  }
   const run = await runChildProcess(process.execPath, [
     path.join(ROOT, 'scripts', 'generate_bi_portal.mjs'),
     '--section', section,
@@ -1783,7 +1914,7 @@ async function generateBiSection(args, root, section, generatedAt) {
     timeoutMs: BI_PORTAL_SECTION_TIMEOUT_MS,
     env: {
       SHEIN_BI_PORTAL_TIMEOUT_MS: String(Math.max(BI_PORTAL_SECTION_TIMEOUT_MS + 60_000, Number(process.env.SHEIN_BI_PORTAL_TIMEOUT_MS || 0) || 0)),
-      SHEIN_BI_PROFIT_MART_SOURCE: useProfitMartCache ? 'cache' : 'view',
+      SHEIN_BI_PROFIT_MART_SOURCE: sourceMode,
     },
   });
   if (!run.ok) {
@@ -1836,6 +1967,28 @@ async function loadBiSection(args, root, section, options = {}) {
   const meta = await readBiPortalCoreMeta(root);
   if (meta.mode !== 'api' && !force) {
     return {status: 400, payload: {ok: false, error: 'BI portal is not in api data mode', section, mode: meta.mode}};
+  }
+  if (force && options.asyncRefresh) {
+    if (!allowGenerate) {
+      return {status: 403, payload: {ok: false, section, error: 'Section refresh is disabled in read-only or unauthenticated LAN mode'}};
+    }
+    const refreshScheduled = scheduleBiSectionBackgroundGeneration(args, root, section, meta.generatedAt);
+    const currentRaw = await readBiSectionCacheRaw(root, section, meta.generatedAt, true, {
+      ...options,
+      extraFields: {refreshScheduled, coreGeneratedAt: meta.generatedAt},
+    });
+    if (currentRaw) {
+      return {status: 202, rawBody: currentRaw.body, headers: {...currentRaw.headers, 'X-BI-Section-Refresh-Scheduled': 'true'}};
+    }
+    const staleRaw = await readBiSectionStaleRaw(root, section, meta.generatedAt, {...options, refreshScheduled});
+    if (staleRaw) {
+      return {status: 202, rawBody: staleRaw.body, headers: {...staleRaw.headers, 'X-BI-Section-Refresh-Scheduled': 'true'}};
+    }
+    const stale = await readBiSectionCacheAnyGeneratedAt(root, section);
+    if (stale) {
+      return {status: 202, payload: {...stale, cacheHit: true, staleSection: true, cacheStale: true, refreshScheduled, coreGeneratedAt: meta.generatedAt}};
+    }
+    return {status: 202, payload: {ok: true, section, generatedAt: meta.generatedAt, data: {}, refreshScheduled, cacheHit: false}};
   }
   if (section === 'homeProfit') {
     const cached = !force ? await readBiSectionCache(root, section, meta.generatedAt) : null;
@@ -2035,8 +2188,9 @@ async function runBiPortalCoreWarmup(args, root, meta, options = {}) {
       const sectionStartedAt = Date.now();
       try {
         const result = await loadBiSection(args, root, section, {
-          force: false,
+          force: true,
           allowGenerate: options.allowGenerate !== false,
+          allowStale: false,
           gzip: false,
         });
         const durationMs = Date.now() - sectionStartedAt;
@@ -2514,12 +2668,13 @@ async function main() {
           if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
           const section = decodeURIComponent(m[1]);
           const force = url.searchParams.get('refresh') === '1';
+          const asyncRefresh = force && ['1', 'true', 'yes'].includes(String(url.searchParams.get('async') || '').toLowerCase());
           const allowGenerate = allowGenerateSections;
           if (force && !allowGenerate) {
             return sendJson(res, 403, {ok: false, section, error: 'Section refresh is disabled in read-only or unauthenticated LAN mode'});
           }
           try {
-            const result = await loadBiSection(args, root, section, {force, allowGenerate, gzip: acceptsGzip(req.headers['accept-encoding'])});
+            const result = await loadBiSection(args, root, section, {force, asyncRefresh, allowGenerate, gzip: acceptsGzip(req.headers['accept-encoding'])});
             if (result.rawBody) return send(res, result.status, result.rawBody, result.headers || {'Content-Type': 'application/json; charset=utf-8'});
             return sendJson(res, result.status, result.payload);
           } catch (err) {

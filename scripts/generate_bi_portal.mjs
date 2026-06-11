@@ -206,8 +206,7 @@ const PORTAL_SECTION_SELECTS = {
   'orders', (SELECT data FROM orders)
 `,
   afterSales: `
-  'afterSales', (SELECT data FROM after_sales),
-  'afterSalesReview', (SELECT data FROM after_sales_review)
+  'afterSales', (SELECT data FROM after_sales)
 `,
   financeData: `
   'financeOrders', (SELECT data FROM finance_orders),
@@ -630,7 +629,7 @@ async function readLatestFirstRunCheckSummary() {
 
 async function runPsql(args, sql) {
   markStage('psql:start');
-  const psql = psqlSpawnCommand(args, ' -t -A');
+  const psql = psqlSpawnCommand(args, ' -q -t -A');
   const child = spawn(psql.command, psql.args, {
     cwd: ROOT,
     windowsHide: true,
@@ -640,7 +639,8 @@ async function runPsql(args, sql) {
   const stderrChunks = [];
   child.stdout.on('data', d => { stdoutChunks.push(Buffer.from(d)); });
   child.stderr.on('data', d => { stderrChunks.push(Buffer.from(d)); });
-  child.stdin.write(sql);
+  const preamble = process.env.SHEIN_BI_PORTAL_PSQL_PREAMBLE || 'SET jit=off;';
+  child.stdin.write(`${preamble}\n${sql}`);
   child.stdin.end();
   const timer = setTimeout(() => {
     stderrChunks.push(Buffer.from(`\npsql timeout after ${Math.round(PORTAL_GENERATE_TIMEOUT_MS / 1000)}s stage=${portalGenerateStage}`));
@@ -2237,12 +2237,10 @@ et_outbound_candidates AS (
     e.create_time AS et_outbound_create_time,
     e.logistics_title AS et_logistics_title,
     e.storeroom_title AS et_storeroom_title,
-    e.file_url AS et_file_url,
     e.sku_count AS et_sku_count,
     e.box_count AS et_box_count,
     nullif(upper(f.shipper_code),'') AS et_shipper_code,
-    nullif(f.shipper_name,'') AS et_shipper_name,
-    nullif(f.detail_url,'') AS et_detail_url
+    nullif(f.shipper_name,'') AS et_shipper_name
   FROM fact.et_outbound e
   LEFT JOIN fact.et_outbound_form f
     ON f.outbound_id = e.outbound_id
@@ -2257,7 +2255,6 @@ et_outbound_latest AS (
     et_outbound_create_time,
     et_logistics_title,
     et_storeroom_title,
-    et_file_url,
     et_sku_count,
     et_box_count,
     et_shipper_code,
@@ -2272,8 +2269,7 @@ et_outbound_latest AS (
         WHEN 'WW' THEN '吴薇'
         WHEN 'LF' THEN '罗芳'
         ELSE NULL
-      END) AS et_shipper_name,
-    et_detail_url
+      END) AS et_shipper_name
   FROM et_outbound_candidates
   ORDER BY express_code_norm, coalesce(et_outbound_time, et_outbound_create_time) DESC NULLS LAST, et_outbound_id DESC NULLS LAST
 ),
@@ -2338,12 +2334,10 @@ order_item_enriched_base AS (
     e.et_outbound_create_time,
     e.et_logistics_title,
     e.et_storeroom_title,
-    e.et_file_url,
     e.et_sku_count,
     e.et_box_count,
     e.et_shipper_code,
-    e.et_shipper_name,
-    e.et_detail_url
+    e.et_shipper_name
   FROM order_rows r
   LEFT JOIN order_status_rechecks rs
     ON rs.order_item_key = r.order_item_key
@@ -2463,14 +2457,12 @@ orders AS (
       max(nullif(e.et_logistics_title,'')) AS et_logistics_title,
       max(nullif(e.et_shipper_code,'')) AS et_shipper_code,
       max(nullif(e.et_shipper_name,'')) AS et_shipper_name,
-      max(nullif(e.et_detail_url,'')) AS et_detail_url,
       d.status_distribution,
       CASE
         WHEN count(*) <= 1 THEN '[]'::jsonb
         ELSE jsonb_agg(jsonb_build_object(
           'standard_goods_sn', e.standard_goods_sn,
           'skc', e.skc,
-          'goods_title', NULL,
           'order_status_group', e.item_status_group
         ) ORDER BY coalesce(e.sales_sar,0) DESC NULLS LAST, e.standard_goods_sn, e.skc)
       END AS items
@@ -2503,6 +2495,48 @@ after_sales_payment_flags AS (
   FROM fact.order_payment_flag
   WHERE coalesce(order_no,'') <> ''
   GROUP BY store_key, order_no
+),
+rtv_trace_source AS MATERIALIZED (
+  SELECT
+    rt.*,
+    CASE rt.trace_status
+      WHEN '未匹配到ET收件' THEN 0
+      WHEN '已收-其它/未知去向' THEN 1
+      WHEN '已收-未解析去向' THEN 2
+      WHEN '已收-仍在03_RTV' THEN 3
+      WHEN '已收-破损04' THEN 4
+      WHEN '已收-报废06' THEN 5
+      WHEN '已收-可售09' THEN 6
+      ELSE 7
+    END AS trace_priority
+  FROM mart.shein_return_rtv_trace rt
+),
+after_sales_rtv_candidates AS (
+  SELECT
+    a.after_sales_item_key,
+    rt.*,
+    row_number() OVER (
+      PARTITION BY a.after_sales_item_key
+      ORDER BY
+        rt.trace_priority,
+        rt.rtv_latest_received_time DESC NULLS LAST,
+        rt.request_time DESC NULLS LAST
+    ) AS match_rank
+  FROM fact.after_sales_item a
+  JOIN rtv_trace_source rt
+    ON rt.store_key = a.store_key
+   AND (
+     (coalesce(a.aftersales_order_no,'') <> '' AND rt.aftersales_order_no = a.aftersales_order_no)
+     OR (coalesce(a.return_order_no,'') <> '' AND rt.return_order_no = a.return_order_no)
+     OR (coalesce(a.order_no,'') <> '' AND rt.order_no = a.order_no)
+   )
+  WHERE a.request_time IS NOT NULL
+    AND coalesce(a.order_sub_status_name,'') <> '已取消'
+),
+after_sales_rtv_best AS (
+  SELECT *
+  FROM after_sales_rtv_candidates
+  WHERE match_rank = 1
 ),
 after_sales_base AS (
   SELECT
@@ -2607,37 +2641,59 @@ after_sales_base AS (
       concat_ws(' ', coalesce(a.reason_names,''), coalesce(a.resolution_plan_name,''), coalesce(a.order_sub_status_name,''), coalesce(a.return_package_status_name,'')) AS reason_text,
       concat_ws(' ', coalesce(a.resolution_plan_name,''), coalesce(a.order_sub_status_name,''), coalesce(a.return_package_status_name,'')) AS status_text
   ) m ON true
-  LEFT JOIN LATERAL (
-    SELECT rt.*
-    FROM mart.shein_return_rtv_trace rt
-    WHERE rt.store_key = a.store_key
-      AND (
-        (coalesce(a.aftersales_order_no,'') <> '' AND rt.aftersales_order_no = a.aftersales_order_no)
-        OR (coalesce(a.return_order_no,'') <> '' AND rt.return_order_no = a.return_order_no)
-        OR (coalesce(a.order_no,'') <> '' AND rt.order_no = a.order_no)
-      )
-    ORDER BY
-      CASE rt.trace_status
-        WHEN '未匹配到ET收件' THEN 0
-        WHEN '已收-其它/未知去向' THEN 1
-        WHEN '已收-未解析去向' THEN 2
-        WHEN '已收-仍在03_RTV' THEN 3
-        WHEN '已收-破损04' THEN 4
-        WHEN '已收-报废06' THEN 5
-        WHEN '已收-可售09' THEN 6
-        ELSE 7
-      END,
-      rt.rtv_latest_received_time DESC NULLS LAST,
-      rt.request_time DESC NULLS LAST
-    LIMIT 1
-  ) rt ON true
+  LEFT JOIN after_sales_rtv_best rt
+    ON rt.after_sales_item_key = a.after_sales_item_key
   WHERE a.request_time IS NOT NULL
     AND coalesce(a.order_sub_status_name,'') <> '已取消'
 ),
 after_sales AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) AS data
   FROM (
-    SELECT *
+    SELECT
+      snapshot_date,
+      store_key,
+      group_key,
+      request_time,
+      order_created_date,
+      order_create_time,
+      order_sales_sar,
+      aftersales_order_no,
+      return_order_no,
+      order_no,
+      standard_goods_sn,
+      skc,
+      quantity,
+      price_amount_total,
+      amount_sar,
+      resolution_plan_name,
+      order_sub_status_name,
+      return_package_status_name,
+      reason_names,
+      appeal_status,
+      is_cod,
+      payment_label,
+      payment_method,
+      open_days,
+      status_group,
+      status_group_label,
+      is_open,
+      reason_group,
+      rtv_group,
+      rtv_trace_status,
+      rtv_recovery_status,
+      shein_return_express_numbers,
+      rtv_express_numbers,
+      et_return_order_ids,
+      rtv_warehouses,
+      rtv_latest_received_time,
+      rtv_received_quantity,
+      rtv_received_to_09_quantity,
+      final_09_quantity,
+      still_03_quantity,
+      final_damaged_quantity,
+      final_scrap_quantity,
+      destination_summary,
+      next_action
     FROM after_sales_base
     ORDER BY request_time DESC NULLS LAST, amount_sar DESC NULLS LAST
     LIMIT 8000

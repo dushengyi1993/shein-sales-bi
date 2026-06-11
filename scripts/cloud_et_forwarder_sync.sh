@@ -105,7 +105,11 @@ if [[ "${SHEIN_ET_REFRESH_PORTAL:-1}" == "1" ]]; then
     --metabase-url "$METABASE_URL" \
     --data-mode "$PORTAL_DATA_MODE"
   if command -v systemctl >/dev/null 2>&1; then
-    systemctl restart shein-bi-portal.service || true
+    # The portal service reads data.json / section caches at request time, so a
+    # full restart is not required after regenerating portal files. Restarting
+    # here can kill in-flight browser section requests every two hours when the
+    # ET forwarder runs, which looks like BI loading stalls or empty responses.
+    systemctl is-active --quiet shein-bi-portal.service || systemctl start shein-bi-portal.service || true
   fi
   check_portal_health
   if [[ "$PORTAL_DATA_MODE" == "api" && "${SHEIN_BI_PORTAL_PREWARM_DISABLED:-0}" != "1" ]]; then
