@@ -496,6 +496,22 @@ CREATE TABLE IF NOT EXISTS fact.et_outbound (
 CREATE INDEX IF NOT EXISTS idx_et_outbound_remark ON fact.et_outbound(remark);
 CREATE INDEX IF NOT EXISTS idx_et_outbound_time ON fact.et_outbound(outbound_time);
 
+CREATE TABLE IF NOT EXISTS fact.et_outbound_form (
+  outbound_id text PRIMARY KEY REFERENCES fact.et_outbound(outbound_id),
+  batch_id text,
+  receive_text text,
+  shipper_code text,
+  shipper_name text,
+  shipper_match text,
+  detail_url text,
+  detail_status text,
+  detail_content_type text,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_et_outbound_form_shipper ON fact.et_outbound_form(shipper_code);
+
 CREATE TABLE IF NOT EXISTS fact.et_outbound_item (
   unique_key text PRIMARY KEY,
   batch_id text,
@@ -1618,6 +1634,53 @@ CREATE TABLE IF NOT EXISTS ops.action (
   created_at timestamptz DEFAULT now(),
   updated_at timestamptz DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS ops.order_status_recheck_state (
+  order_item_key text PRIMARY KEY,
+  order_key text,
+  store_key text NOT NULL REFERENCES dim.store(store_key),
+  group_key text,
+  order_id text,
+  order_no text,
+  bill_no text,
+  created_date date NOT NULL,
+  order_create_time timestamp,
+  standard_goods_sn text,
+  raw_goods_sn text,
+  goods_id text,
+  entity_id text,
+  skc text,
+  sku_code text,
+  goods_title text,
+  latest_goods_status text,
+  latest_goods_performance_status text,
+  latest_goods_performance_status_desc text,
+  latest_page_status text,
+  latest_page_status_desc text,
+  latest_order_status text,
+  latest_order_status_desc text,
+  latest_perform_status text,
+  latest_perform_status_desc text,
+  lifecycle_status_group text NOT NULL,
+  is_terminal boolean DEFAULT false,
+  first_seen_at timestamptz DEFAULT now(),
+  last_checked_at timestamptz NOT NULL DEFAULT now(),
+  check_count integer NOT NULL DEFAULT 1,
+  consecutive_same_count integer NOT NULL DEFAULT 1,
+  terminal_at timestamptz,
+  source_file text,
+  transport text,
+  fetch_time timestamptz,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_order_status_recheck_date_store
+  ON ops.order_status_recheck_state(created_date, store_key);
+CREATE INDEX IF NOT EXISTS idx_order_status_recheck_order
+  ON ops.order_status_recheck_state(store_key, order_no);
+CREATE INDEX IF NOT EXISTS idx_order_status_recheck_group
+  ON ops.order_status_recheck_state(lifecycle_status_group, is_terminal, last_checked_at);
 
 CREATE TABLE IF NOT EXISTS ops.rtv_tracking_verification (
   verification_id text PRIMARY KEY,

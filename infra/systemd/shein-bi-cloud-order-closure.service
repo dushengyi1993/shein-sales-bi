@@ -1,0 +1,14 @@
+[Unit]
+Description=SHEIN BI cloud order lifecycle closure recheck
+Wants=network-online.target docker.service shein-bi-portal.service
+After=network-online.target docker.service shein-bi-portal.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/shein-bi/app
+Environment=HOME=/root
+Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_SALES_TRANSPORT=webapi
+TimeoutStartSec=10800
+ExecStart=/usr/bin/env node /opt/shein-bi/app/scripts/recheck_order_statuses.mjs --max-pairs 500 --min-age-days 2 --cooldown-hours 20 --transport webapi
+ExecStartPost=/usr/bin/env bash -lc 'curl -fsS --max-time 240 "http://127.0.0.1:8787/api/bi/section/orders?refresh=1" >/dev/null || true'

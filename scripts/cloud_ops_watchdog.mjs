@@ -18,6 +18,7 @@ const UNIT_NAMES = [
   'shein-bi-cloud-daily-lark-report.service',
   'shein-bi-cloud-openapi-hl.service',
   'shein-bi-cloud-rtv-verify.service',
+  'shein-bi-cloud-order-closure.service',
 ];
 const TIMER_NAMES = [
   'shein-bi-cloud-today.timer',
@@ -29,6 +30,7 @@ const TIMER_NAMES = [
   'shein-bi-cloud-daily-lark-report.timer',
   'shein-bi-cloud-openapi-hl.timer',
   'shein-bi-cloud-rtv-verify.timer',
+  'shein-bi-cloud-order-closure.timer',
   'shein-bi-cloud-watchdog.timer',
 ];
 
@@ -53,15 +55,32 @@ function parseArgs(argv) {
 
 function run(command, args, options = {}) {
   return new Promise(resolve => {
-    const child = spawn(command, args, {cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], ...options});
+    const {timeoutMs = 0, input = '', ...spawnOptions} = options;
+    const child = spawn(command, args, {cwd: ROOT, stdio: ['pipe', 'pipe', 'pipe'], ...spawnOptions});
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
+    const timer = timeoutMs > 0
+      ? setTimeout(() => {
+          timedOut = true;
+          stderr += `\nCommand timed out after ${timeoutMs}ms`;
+          child.kill('SIGTERM');
+        }, timeoutMs)
+      : null;
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', d => stdout += d);
     child.stderr.on('data', d => stderr += d);
-    child.on('error', err => resolve({ok: false, code: -1, stdout, stderr: String(err?.stack || err)}));
-    child.on('close', code => resolve({ok: code === 0, code, stdout, stderr}));
+    child.on('error', err => {
+      if (timer) clearTimeout(timer);
+      resolve({ok: false, code: -1, stdout, stderr: String(err?.stack || err), timedOut});
+    });
+    if (input) child.stdin.end(input);
+    else child.stdin.end();
+    child.on('close', code => {
+      if (timer) clearTimeout(timer);
+      resolve({ok: code === 0 && !timedOut, code: timedOut ? -2 : code, stdout, stderr, timedOut});
+    });
   });
 }
 
@@ -113,6 +132,93 @@ async function readPortalDates(file) {
   } catch (err) {
     return {error: String(err?.message || err), generatedAt: '', dates: {}};
   }
+}
+
+async function auditRecentCoverage() {
+  const res = await run(process.execPath, [
+    'scripts/audit_cloud_data_coverage.mjs',
+    '--recent-days', '1',
+    '--tables', 'sales,linkPerformance,productStoreCoverage',
+    '--expected-start', 'range-start',
+    '--json',
+    '--max-rows', '20',
+  ], {timeoutMs: Number(process.env.SHEIN_CLOUD_WATCHDOG_COVERAGE_TIMEOUT_MS || 30_000)});
+  if (!res.ok) {
+    return {
+      ok: false,
+      error: `coverage audit failed code=${res.code}: ${(res.stderr || res.stdout || '').slice(-1200)}`,
+    };
+  }
+  try {
+    return JSON.parse(res.stdout);
+  } catch (err) {
+    return {
+      ok: false,
+      error: `coverage audit JSON parse failed: ${String(err?.message || err)}; stdout=${String(res.stdout || '').slice(-1200)}`,
+    };
+  }
+}
+
+async function psqlJson(sql, timeoutMs = Number(process.env.SHEIN_CLOUD_WATCHDOG_DB_TIMEOUT_MS || 30_000)) {
+  const command = `${process.getuid?.() === 0 ? '' : 'sudo '}docker exec -i shein-warehouse-db psql -U shein -d shein_bi -v ON_ERROR_STOP=1 -A -t -q`;
+  const res = await run('bash', ['-lc', command], {input: sql, timeoutMs});
+  if (!res.ok) {
+    return {ok: false, error: `psql failed code=${res.code}: ${(res.stderr || res.stdout || '').slice(-1200)}`};
+  }
+  try {
+    return {ok: true, data: JSON.parse(String(res.stdout || '').trim() || '{}')};
+  } catch (err) {
+    return {ok: false, error: `psql JSON parse failed: ${String(err?.message || err)}; stdout=${String(res.stdout || '').slice(-1200)}`};
+  }
+}
+
+async function auditOrderClosure(args) {
+  const state = await readJsonIfExists(path.join(ROOT, 'state', 'order_status_recheck_last.json'));
+  const sql = `
+WITH effective AS (
+  SELECT
+    oi.order_item_key,
+    oi.created_date,
+    oi.store_key,
+    rs.order_item_key IS NOT NULL AS has_recheck,
+    coalesce(rs.is_terminal,false) AS is_terminal,
+    rs.last_checked_at,
+    coalesce(rs.lifecycle_status_group,
+      CASE
+        WHEN coalesce(oi.goods_performance_status_desc,'') ~ '(未妥投|退回|拒收)' THEN 'returning'
+        WHEN coalesce(oi.goods_performance_status_desc,'') ~ '(取消|关闭)' THEN 'cancelled'
+        WHEN coalesce(oi.goods_performance_status_desc,'') ~ '(已签收|已完成|妥投)' THEN 'done'
+        WHEN coalesce(oi.goods_performance_status_desc,'') ~ '(异常|失败|超时|风控|拦截|派件异常)' THEN 'abnormal'
+        WHEN coalesce(oi.goods_performance_status_desc,'') ~ '(尾程已发货|已发货|运输|揽收|包裹已揽收)' THEN 'shipped'
+        WHEN coalesce(oi.goods_performance_status_desc,'') ~ '(待处理|待发货|待揽收|待出库|待|下单成功|已打印面单)' THEN 'pending'
+        ELSE 'other'
+      END
+    ) AS status_group
+  FROM fact.order_item oi
+  LEFT JOIN ops.order_status_recheck_state rs
+    ON rs.order_item_key = oi.order_item_key
+  WHERE oi.created_date < current_date - interval '10 days'
+), summary AS (
+  SELECT
+    count(*) FILTER (WHERE NOT is_terminal AND status_group NOT IN ('done','cancelled','returning')) AS aged_open_items,
+    count(*) FILTER (WHERE NOT is_terminal AND status_group NOT IN ('done','cancelled','returning') AND NOT has_recheck) AS pending_recheck_items,
+    count(*) FILTER (WHERE NOT is_terminal AND status_group NOT IN ('done','cancelled','returning') AND has_recheck) AS platform_unclosed_items,
+    count(DISTINCT store_key || ':' || created_date::text) FILTER (WHERE NOT is_terminal AND status_group NOT IN ('done','cancelled','returning')) AS aged_open_pairs,
+    min(created_date) FILTER (WHERE NOT is_terminal AND status_group NOT IN ('done','cancelled','returning')) AS oldest_open_date,
+    max(last_checked_at) AS last_checked_at
+  FROM effective
+)
+SELECT json_build_object(
+  'agedOpenItems', coalesce(aged_open_items,0),
+  'pendingRecheckItems', coalesce(pending_recheck_items,0),
+  'platformUnclosedItems', coalesce(platform_unclosed_items,0),
+  'agedOpenPairs', coalesce(aged_open_pairs,0),
+  'oldestOpenDate', oldest_open_date,
+  'lastCheckedAt', last_checked_at
+)::text FROM summary;
+`;
+  const db = await psqlJson(sql);
+  return {state, db};
 }
 
 function makeIssueKey(issues) {
@@ -181,11 +287,51 @@ async function main() {
     if (etAge === null || etAge > 36) issues.push(`ET 货代仓过期：${portal.dates?.etUpdatedAt || '-'} age=${fmtHours(etAge)}，阈值=36h`);
   }
 
+  const coverage = await auditRecentCoverage();
+  if (coverage.error) {
+    issues.push(`BI 日期×店铺覆盖审计失败：${coverage.error}`);
+  } else {
+    for (const check of coverage.checks || []) {
+      for (const issue of check.issues || []) {
+        issues.push(`BI 覆盖不足：${issue}`);
+      }
+    }
+  }
+
+  const orderClosure = await auditOrderClosure(args);
+  if (orderClosure.state?.error) {
+    issues.push(`订单状态复查状态不可读：${orderClosure.state.error}`);
+  }
+  const stateFinishedAge = hoursSince(orderClosure.state?.finishedAt);
+  if (!orderClosure.state?.finishedAt) {
+    issues.push('订单状态复查尚未成功运行：state/order_status_recheck_last.json 缺少 finishedAt');
+  } else if (orderClosure.state?.dryRun === true) {
+    issues.push('订单状态复查最近一次只是 dry-run，尚未真正写入复查层');
+  } else if (stateFinishedAge !== null && stateFinishedAge > 26) {
+    issues.push(`订单状态复查过期：${orderClosure.state.finishedAt} age=${fmtHours(stateFinishedAge)}，阈值=26h`);
+  }
+  if (orderClosure.state && orderClosure.state.ok === false) {
+    issues.push(`订单状态复查最近一次失败：failedPairs=${orderClosure.state?.totals?.failedPairs ?? '-'} run=${orderClosure.state?.runId || '-'}`);
+  }
+  if (!orderClosure.db?.ok) {
+    issues.push(`订单闭环 DB 审计失败：${orderClosure.db?.error || 'unknown'}`);
+  } else {
+    const d = orderClosure.db.data || {};
+    if (Number(d.pendingRecheckItems || 0) > 0) {
+      issues.push(`订单闭环待复查：items=${d.pendingRecheckItems} pairs=${d.agedOpenPairs || 0} oldest=${d.oldestOpenDate || '-'}`);
+    }
+    // platformUnclosedItems means the recheck layer has fresh evidence, but SHEIN still returns
+    // a non-terminal status or no longer returns the historical order. Keep it in the JSON report
+    // for operations follow-up, but do not page Feishu unless pending/stale/failed checks above fire.
+  }
+
   const report = {
     ok: issues.length === 0,
     generatedAt: new Date().toISOString(),
     issues,
     portal,
+    coverage,
+    orderClosure,
     units,
     timers,
   };
@@ -197,12 +343,12 @@ async function main() {
   try { previous = (await fs.readFile(stateFile, 'utf8')).trim(); } catch {}
   let notified = false;
   let notifyResult = null;
-  if (issues.length && (args.force || issueKey !== previous)) {
+  if (!args.dryRun && issues.length && (args.force || issueKey !== previous)) {
     const text = issues.slice(0, 12).join('\n');
     notifyResult = await notify(args, text, logFile);
     notified = notifyResult.ok;
     if (notifyResult.ok) await fs.writeFile(stateFile, issueKey, 'utf8');
-  } else if (!issues.length) {
+  } else if (!args.dryRun && !issues.length) {
     await fs.writeFile(stateFile, 'OK', 'utf8');
   }
 

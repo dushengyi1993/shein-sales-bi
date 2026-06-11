@@ -43,7 +43,7 @@
 | `shein-bi-cloud-et-forwarder.timer` | 北京时间 `04:20` | 抓取 ET 货代仓、入仓，并刷新 BI Portal；需要服务器本地 ET 登录配置 |
 | `shein-bi-cloud-daily-lark-report.timer` | 北京时间 `08:35`，`10:35/12:35` 补偿重试 | 抓取当天销售后发送飞书日报和日报图；成功后写入当天 sent flag 防重复 |
 | `shein-bi-cloud-rtv-verify.timer` | 北京时间 `03:20` | 完整 RTV 换单复核 WebAPI 版，写入 `ops.rtv_tracking_verification`，不阻塞滚动销售刷新 |
-| `shein-bi-cloud-link-business.timer` | 北京时间 `05:30` | 顺序启动云端 headless Chrome 抓取前一完整日链接/业务域，入仓、体检并刷新 BI |
+| `shein-bi-cloud-link-business.timer` | 北京时间 `08:10` | 顺序启动云端 headless Chrome 抓取前一完整日链接/业务域，入仓、体检并刷新 BI；全店日指标仍全 0 时跳过入仓刷新 |
 | `shein-bi-cloud-session-manager.timer` | 北京时间 `03:20` | 云端登录态管家：顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，检查 profile 体积，生成报告 |
 | `shein-bi-cloud-openapi-hl.timer` | 北京时间 `06:20` | HL OpenAPI 并行抓取、入仓和对账；服务器 IP 白名单已配置 |
 | `shein-bi-cloud-watchdog.timer` | 每小时 | 检查云端服务、timer 和 BI 数据新鲜度，异常时发飞书提醒 |
@@ -64,9 +64,10 @@ ET、飞书日报、完整 RTV WebAPI 复核、链接/业务域日更、异常�
 - ET 云端入口：`scripts/cloud_et_forwarder_sync.sh today`
 - 飞书日报云端入口：`scripts/cloud_daily_lark_report.sh today`
 - 完整 RTV 复核云端入口：`scripts/cloud_rtv_verify.sh`
-- 链接/业务域日更云端入口：`scripts/cloud_link_business_sync.sh yesterday`
+- 链接/业务域日更云端入口：`scripts/cloud_link_business_sync.sh yesterday`；生产 timer 改为北京时间 `08:10`，并带全店日指标全 0 不入仓守卫。
 - HL OpenAPI 云端入口：`scripts/cloud_openapi_hl_reconciliation.sh`
 - 云端异常通知入口：`scripts/cloud_ops_watchdog.mjs`
+- 云端覆盖审计入口：`scripts/audit_cloud_data_coverage.mjs`。最新日防漏用 `--expected-start range-start`，历史断档排查用 `--expected-start first-seen`；后者按每个店自己的首个有效日期之后查中间断档，避免把店铺尚未开通/尚未接入前的日期误判为缺抓。
 - 飞书只读问数机器人（云端 Codex CLI 网关）入口：`scripts/cloud_lark_sales_qa_bot.sh` / `scripts/lark_sales_qa_bot.mjs`
 - 销售抓取仍优先使用 SHEIN 后台 WebAPI session；直连成功时不会启动浏览器。
 - 官方 OpenAPI 已有权限的数据域后续可逐步替换为 OpenAPI；WebAPI 仍作为当前生产销售抓取主链路。HL OpenAPI 云端双跑当前只写并行表，不覆盖生产销售事实表。

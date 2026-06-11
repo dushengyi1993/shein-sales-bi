@@ -56,8 +56,9 @@
   - 云端 `shein-bi-cloud-et-forwarder.timer`：每天 `04:20` 同步 ET；需服务器本地 ET 凭据和手动验证后启用。
   - 云端 `shein-bi-cloud-daily-lark-report.timer`：每天 `08:35` 发送日报，`10:35/12:35` 补偿重试；需服务器本地飞书配置和授权后启用。
   - 云端 `shein-bi-cloud-rtv-verify.timer`：每天 `03:20` 跑完整 RTV 换单复核 WebAPI 版，不阻塞滚动销售刷新。
-- 云端 `shein-bi-cloud-link-business.timer`：每天 `05:30` 顺序启动云端 headless Chrome 抓取前一完整日链接/业务域，入仓、体检并刷新 BI；单店失败会重启浏览器重试。
+- 云端 `shein-bi-cloud-link-business.timer`：每天 `08:10` 顺序启动云端 headless Chrome 抓取前一完整日链接/业务域，入仓、体检并刷新 BI；单店失败会重启浏览器重试；若全店日指标仍全 0，则跳过入仓刷新，避免把未出数日期写入 BI。
 - 云端 `shein-bi-cloud-session-manager.timer`：每天 `03:20` 顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并检查 profile 体积。
+- 云端覆盖审计使用 `scripts/audit_cloud_data_coverage.mjs`：查最新日防漏时用 `--expected-start range-start`，要求当前应覆盖店铺齐全；查历史断档时用 `--expected-start first-seen`，按每个店自己的首个有效日期之后检查中间是否断档，不能把店铺尚未开通/尚未接入前的日期误判为缺抓。
 - 2026-05-21 运维加固：链接/业务域服务统一以 `sheinops` 运行，避免 root 写 Chrome profile 后导致登录态管家 `EACCES`；登录态恢复改为先回灌 browser session、再验证 GSP + SBN；ET 验证码下载瞬时失败会进入重试，不再一次 `fetch failed` 就中断。
   - 云端 `shein-bi-cloud-openapi-hl.timer`：每天 `06:20` 跑 HL OpenAPI 并行对账；已可在云端成功抓取、入仓和生成 OpenAPI 对账。
   - 云端 `shein-bi-cloud-watchdog.timer`：每小时检查云端服务、timer 和 BI 数据新鲜度；销售/页面按 4.5 小时阈值，链接/业务域按 48 小时日更阈值。

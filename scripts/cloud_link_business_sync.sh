@@ -159,6 +159,81 @@ JSON
   fi
 fi
 
+set +e
+METRIC_READY_JSON="$(
+  DATE="$DATE" SUCCESS_STORES="${SUCCESS_STORES[*]}" node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+
+const date = process.env.DATE;
+const successStores = String(process.env.SUCCESS_STORES || '')
+  .split(/\s+/)
+  .map(s => s.trim())
+  .filter(Boolean);
+
+function num(value) {
+  if (value === null || value === undefined || value === '') return 0;
+  const n = Number(String(value).replace(/,/g, '').replace(/%$/, ''));
+  return Number.isFinite(n) ? n : 0;
+}
+
+const metrics = {
+  date,
+  successStores,
+  files: 0,
+  performanceRows: 0,
+  diagnoseDayRows: 0,
+  zeroDiagnoseDayStores: [],
+  epsUv: 0,
+  goodsUv: 0,
+  saleCnt: 0,
+  payOrderCnt: 0,
+};
+
+for (const store of successStores) {
+  const file = path.join(process.cwd(), 'outputs', 'shein_links', store, `${date}.json`);
+  if (!fs.existsSync(file)) continue;
+  const payload = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const rows = Array.isArray(payload.performanceRows) ? payload.performanceRows : [];
+  const diagnoseDay = num(payload.counts?.diagnoseDay);
+  metrics.files += 1;
+  metrics.performanceRows += rows.length;
+  metrics.diagnoseDayRows += diagnoseDay;
+  if (diagnoseDay === 0) metrics.zeroDiagnoseDayStores.push(store);
+  for (const row of rows) {
+    metrics.epsUv += num(row.epsUv ?? row.eps_uv);
+    metrics.goodsUv += num(row.goodsUv ?? row.goods_uv);
+    metrics.saleCnt += num(row.saleCnt ?? row.sale_cnt);
+    metrics.payOrderCnt += num(row.payOrderCnt ?? row.pay_order_cnt);
+  }
+}
+
+const metricSum = metrics.epsUv + metrics.goodsUv + metrics.saleCnt + metrics.payOrderCnt;
+const enoughStoresForGuard = successStores.length >= 10;
+const notReady = enoughStoresForGuard && metrics.performanceRows > 0 && (metrics.diagnoseDayRows === 0 || metricSum === 0);
+const ok = !notReady || ['1', 'true'].includes(String(process.env.SHEIN_LINK_BUSINESS_ALLOW_ALL_ZERO || '').toLowerCase());
+console.log(JSON.stringify({
+  ok,
+  reason: notReady ? 'daily_link_metrics_all_zero_or_not_ready' : '',
+  metrics,
+}));
+process.exit(ok ? 0 : 2);
+NODE
+)"
+METRIC_READY_STATUS=$?
+set -e
+echo "[cloud_link_business_sync] link metric readiness: $METRIC_READY_JSON"
+if [[ "$METRIC_READY_STATUS" != "0" ]]; then
+  mkdir -p "$ROOT/state/cloud_ops_alerts"
+  cat > "$ROOT/state/cloud_ops_alerts/link-business-last-metric-not-ready.json" <<JSON
+{"date":"$DATE","generatedAt":"$(TZ="$TZ_NAME" date --iso-8601=seconds)","logFile":"$LOG_FILE","readiness":$METRIC_READY_JSON}
+JSON
+  echo "[cloud_link_business_sync] link daily metrics are not ready; skip BI warehouse/portal refresh to avoid writing all-zero traffic date" >&2
+  check_portal_health
+  echo "[cloud_link_business_sync] done with metric-not-ready date=$DATE log=$LOG_FILE"
+  exit 0
+fi
+
 node scripts/generate_link_ops_web_dashboard.mjs \
   --date "$DATE" \
   --group ALL

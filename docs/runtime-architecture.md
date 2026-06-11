@@ -222,7 +222,8 @@
 
 # 2026-05-15 云端调度与本地封存
 
-- 生产调度已切到云端 systemd timer：`shein-bi-cloud-today.timer` 每两小时刷新当天销售、入仓并生成 BI Portal；`shein-bi-cloud-yesterday.timer` 每天 `00:10` 刷新前一天最终销售并复核前两天稳定日；`shein-bi-db-backup.timer` 每天 `02:30` 做数据库备份；`shein-bi-cloud-link-business.timer` 每天 `05:30` 顺序抓取前一完整日链接/业务域并刷新 BI。
+- 生产调度已切到云端 systemd timer：`shein-bi-cloud-today.timer` 每两小时刷新当天销售、入仓并生成 BI Portal；`shein-bi-cloud-yesterday.timer` 每天 `00:10` 刷新前一天最终销售并复核前两天稳定日；`shein-bi-db-backup.timer` 每天 `02:30` 做数据库备份；`shein-bi-cloud-link-business.timer` 每天 `08:10` 顺序抓取前一完整日链接/业务域并刷新 BI，且全店日指标仍全 0 时跳过入仓刷新。
+- 覆盖审计由 `scripts/audit_cloud_data_coverage.mjs` 提供：最新日防漏使用 `--expected-start range-start`，历史断档排查使用 `--expected-start first-seen`。后者按每个店首个有效日期之后查中间断档，避免把店铺尚未开通/尚未接入前的日期误判为缺抓。
 - 本地 `SHEIN-*` Windows 计划任务已封存禁用。`scheduled_intraday_dsy.ps1`、`scheduled_yesterday_final_dsy.ps1`、`scheduled_link_management_daily.ps1`、`scheduled_et_forwarder_daily.ps1`、`scheduled_bi_daily_pipeline.ps1` 等只保留为回滚/迁移参考，不再作为生产调度。
 - 云端当前自动覆盖销售 WebAPI、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、飞书日报、链接/业务域日更、完整 RTV 复核、异常通知和 HL OpenAPI 双跑。
 - 旧独立链接管理计划任务 `SHEIN-Sales-15Stores-LinkManagement-0340` / `SHEIN-Sales-15Stores-LinkManagement-0510` 已删除；`SHEIN-Sales-15Stores-LinkManagement-0530` 是本地历史任务，已封存。
@@ -258,4 +259,3 @@
 - 安全边界：外网仍只经过现有 Basic Auth；会话 token 只短时存在于服务器私有状态文件，完成/关闭后会清空 token 和入口 URL；不保存密码、cookie、localStorage 或请求头值到 GitHub、文档或聊天。
 - 资源边界：一次只允许一个临时登录窗口。若某店 CDP 端口被已完成/已关闭的临时窗口残留占用，脚本会在确认没有生产同步 service 运行时清理孤儿 Chrome/VNC 进程；若生产同步正在运行，则拒绝开启并提示等待。
 - 验证边界：创建会话后应能获得 noVNC `101 Switching Protocols`；点击“我已完成并关闭”后应完成 `export_shein_browser_session.mjs --no-launch` 与 `bootstrap_shein_browser_session.mjs --no-launch`，且不残留 Chrome/Xvfb/x11vnc/websockify 进程。
-

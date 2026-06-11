@@ -1,0 +1,11 @@
+[Unit]
+Description=Run SHEIN BI cloud order lifecycle closure recheck daily
+
+[Timer]
+OnCalendar=*-*-* 08:50:00
+Persistent=true
+RandomizedDelaySec=5m
+Unit=shein-bi-cloud-order-closure.service
+
+[Install]
+WantedBy=timers.target

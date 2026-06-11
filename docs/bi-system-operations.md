@@ -52,12 +52,12 @@
 | `03:20` | `shein-bi-cloud-rtv-verify.timer` | 完整 RTV 换单复核 WebAPI 版，不阻塞滚动销售刷新。 |
 | `03:20` | `shein-bi-cloud-session-manager.timer` | 顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并检查 profile 体积。 |
 | `04:20` | `shein-bi-cloud-et-forwarder.timer` | 同步 ET 货代仓、入仓并刷新 BI。 |
-| `05:30` | `shein-bi-cloud-link-business.timer` | 顺序抓取前一完整日链接/业务域，入仓、体检并刷新 BI。 |
+| `08:10` | `shein-bi-cloud-link-business.timer` | 顺序抓取前一完整日链接/业务域，入仓、体检并刷新 BI；全店日指标仍全 0 时跳过入仓刷新。 |
 | `06:20` | `shein-bi-cloud-openapi-hl.timer` | HL OpenAPI 并行对账。 |
 | `08:35` | `shein-bi-cloud-daily-lark-report.timer` | 发送飞书日报；`10:35/12:35` 补偿重试。 |
 | 每小时 | `shein-bi-cloud-watchdog.timer` | 检查云端服务、timer 和数据新鲜度，异常时提醒。 |
 
-云端当前自动覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、飞书日报、完整 RTV 复核、链接/业务域日更、异常通知、登录态巡检、只读问数机器人和 HL OpenAPI 双跑。
+云端当前自动覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、飞书日报、完整 RTV 复核、链接/业务域日更、异常通知、登录态巡检、只读问数机器人和 HL OpenAPI 双跑。覆盖审计使用 `scripts/audit_cloud_data_coverage.mjs`：查最新日防漏时用 `--expected-start range-start`，查历史断档时用 `--expected-start first-seen`。历史口径只检查每个店首个有效日期之后是否中间断档，不把店铺尚未开通/尚未接入前的日期算作缺抓。
 
 ### 4.2 本地历史任务 / 回滚参考
 
@@ -99,7 +99,7 @@
 ## 6. 链接表现更新规则
 
 - 链接表现每天更新一次即可，适合放在后半夜。
-- 本地历史任务 `SHEIN-Sales-15Stores-LinkManagement-0530` 已封存禁用；当前生产由云端 `shein-bi-cloud-link-business.timer` 每天 `05:30` 执行。
+- 本地历史任务 `SHEIN-Sales-15Stores-LinkManagement-0530` 已封存禁用；当前生产由云端 `shein-bi-cloud-link-business.timer` 每天 `08:10` 执行。
 - 云端手动补链接/业务域应在服务器运行 `scripts/cloud_link_business_sync.sh yesterday` 或指定日期；该入口按店顺序启动 headless Chrome，抓完即关闭浏览器，随后入仓、体检并刷新 BI。不要用本机补抓冒充云端日更。
 - BI 门户侧栏的“链接表现数据”更新时间应显示源文件抓取时间：`outputs/shein_links/<店铺>/<链接日>.json` 内 `fetchTime` 的最大值；“售后/库存/财务数据”更新时间应显示业务域源文件抓取时间：`outputs/shein_business_domains/<店铺>/<业务日>.json` 内 `fetchTime` 的最大值；BI 重跑重新入仓时产生的数据库 `updated_at` 只可作为内部排障字段，不作为主要更新时间展示。
 - 如果部分店失败：尽量同步成功店铺，并发送飞书异常提醒。

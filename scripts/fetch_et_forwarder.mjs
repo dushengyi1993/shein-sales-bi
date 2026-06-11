@@ -29,6 +29,7 @@ function parseArgs(argv) {
     maxDetails: 0,
     detailOffset: 0,
     detailConcurrency: 1,
+    detailNames: '',
     skipDetails: false,
     dailyInitialPages: 3,
     overlapRows: 5,
@@ -56,6 +57,7 @@ function parseArgs(argv) {
     else if (a === '--max-details') args.maxDetails = Number(argv[++i]);
     else if (a === '--detail-offset') args.detailOffset = Number(argv[++i]);
     else if (a === '--detail-concurrency') args.detailConcurrency = Number(argv[++i]);
+    else if (a === '--detail-names') args.detailNames = argv[++i] || '';
     else if (a === '--skip-details') args.skipDetails = true;
     else if (a === '--daily-initial-pages') args.dailyInitialPages = Number(argv[++i]);
     else if (a === '--overlap-rows') args.overlapRows = Number(argv[++i]);
@@ -88,6 +90,10 @@ function parseArgs(argv) {
     args.maxDetails = 50;
   }
   args.endpointList = String(args.endpoints || '')
+    .split(/[,\s]+/)
+    .map(s => s.trim())
+    .filter(Boolean);
+  args.detailNameList = String(args.detailNames || '')
     .split(/[,\s]+/)
     .map(s => s.trim())
     .filter(Boolean);
@@ -339,6 +345,29 @@ async function browserFetchJson(cdp, args, url) {
   return out.json;
 }
 
+async function browserFetchText(cdp, args, url) {
+  const absolute = url.startsWith('http') ? url : args.baseUrl + url;
+  const pathOrUrl = url.startsWith('http') ? absolute : url;
+  const script = `(async()=>{` +
+    `try{` +
+    `const raw=${JSON.stringify(pathOrUrl)};` +
+    `const sameOriginBase=(location&&/^https?:/.test(location.origin))?location.origin:${JSON.stringify(args.baseUrl)};` +
+    `const target=/^https?:/i.test(raw)?raw:new URL(raw,sameOriginBase).href;` +
+    `const r=await fetch(target, {credentials:'include', headers:{'Accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'}});` +
+    `const html=await r.text();` +
+    `let text=html;` +
+    `try{const doc=new DOMParser().parseFromString(html,'text/html'); text=(doc.body&&(doc.body.innerText||doc.body.textContent)||html)}catch(e){};` +
+    `text=String(text||'').replace(/\\u00a0/g,' ').replace(/[ \\t]+/g,' ').replace(/\\n[ \\t]+/g,'\\n').trim();` +
+    `return {ok:r.ok,status:r.status,url:r.url,contentType:r.headers.get('content-type'),text:text.slice(0,12000)};` +
+    `}catch(e){return {ok:false,status:0,url:${JSON.stringify(absolute)},contentType:'',text:String(e&&e.message||e),fetchError:String(e&&e.stack||e)}};` +
+  `})()`;
+  const out = await cdp.eval(script);
+  if (!out.ok) {
+    throw new Error(`ET text fetch failed status=${out.status} url=${absolute} head=${String(out.text || '').slice(0, 400)}`);
+  }
+  return out;
+}
+
 async function probeEtHome(cdp, args) {
   return cdp.eval(`(async()=>{` +
     `try{` +
@@ -507,6 +536,7 @@ const ENDPOINTS = {
     inWindow: row => dateInWindow(row.OutboundTime || row.Createtime, row.__ctx.rollingStart, row.__ctx.date),
     details: [
       {name: 'outbound_item', idField: 'OutboundId', url: (id, ctx) => withParams('/Delivery/Outbound/GetOutboundDetailViewGridJson', {page: 1, limit: ctx.detailLimit, outboundId: id})},
+      {name: 'outbound_form', idField: 'OutboundId', type: 'html', dailyMaxDetails: 0, url: id => withParams('/Delivery/Outbound/DetailForm', {oId: id}), parse: parseOutboundDetailForm},
     ],
   },
   return_order: {
@@ -593,6 +623,65 @@ function dateInWindow(value, start, end) {
 
 function rowsFromJson(json) {
   return Array.isArray(json?.data) ? json.data : [];
+}
+
+const SHIPPER_NAMES = {
+  DSY: '杜圣宜',
+  LGM: '刘广梅',
+  SWK: '史文凯',
+  LGH: '刘广洪',
+  CJY: '陈嘉茵',
+  GTH: '龚天浩',
+  YH: '杨欢',
+  WW: '吴薇',
+  LF: '罗芳',
+};
+
+function normalizedBodyText(value) {
+  return String(value || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\r\n?/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .trim();
+}
+
+function parseShipperFromText(value) {
+  const text = normalizedBodyText(value);
+  for (const [code, name] of Object.entries(SHIPPER_NAMES)) {
+    if (text.includes(name)) return {code, name, match: name};
+  }
+  const pattern = new RegExp(`(^|[^A-Z0-9])(${Object.keys(SHIPPER_NAMES).join('|')})(?=$|[^A-Z0-9])`, 'i');
+  const m = text.toUpperCase().match(pattern);
+  if (!m) return {code: '', name: '', match: ''};
+  const code = m[2].toUpperCase();
+  return {code, name: SHIPPER_NAMES[code] || '', match: m[2]};
+}
+
+function extractReceiveText(value) {
+  const text = normalizedBodyText(value);
+  if (!text) return '';
+  const lines = text.split(/\n+/).map(s => s.trim()).filter(Boolean);
+  const focused = lines.find(line => /(收货信息|收货人|收件|收货地址)/.test(line));
+  if (focused) return focused.slice(0, 800);
+  return text.slice(0, 800);
+}
+
+function parseOutboundDetailForm(id, out) {
+  const text = normalizedBodyText(out?.text);
+  const shipper = parseShipperFromText(text);
+  return {
+    __parent_id: id,
+    OutboundId: id,
+    DetailUrl: out?.url || '',
+    DetailStatus: out?.status ?? '',
+    DetailContentType: out?.contentType || '',
+    ReceiveText: extractReceiveText(text),
+    ShipperCode: shipper.code,
+    ShipperName: shipper.name,
+    ShipperMatch: shipper.match,
+    DetailTextHead: text.slice(0, 1200),
+  };
 }
 
 function parseCsvText(text) {
@@ -812,11 +901,15 @@ async function fetchPaged(cdp, args, endpointKey, def, ctx) {
 async function fetchDetails(cdp, args, def, listRows, ctx) {
   const detailResults = {};
   if (args.skipDetails) return detailResults;
-  for (const d of def.details || []) {
+  const details = (def.details || []).filter(d => !args.detailNameList?.length || args.detailNameList.includes(d.name));
+  for (const d of details) {
     const rows = [];
     const ids = [...new Set(listRows.map(r => r?.[d.idField]).filter(Boolean))];
     const start = args.detailOffset || 0;
-    const end = args.maxDetails ? start + args.maxDetails : undefined;
+    const effectiveMaxDetails = args.mode === 'daily' && Object.hasOwn(d, 'dailyMaxDetails')
+      ? Math.max(0, Number(d.dailyMaxDetails) || 0)
+      : args.maxDetails;
+    const end = effectiveMaxDetails ? start + effectiveMaxDetails : undefined;
     const limited = ids.slice(start, end);
     let cursor = 0;
     async function worker() {
@@ -824,8 +917,13 @@ async function fetchDetails(cdp, args, def, listRows, ctx) {
         const current = cursor++;
         if (current >= limited.length) return;
         const id = limited[current];
-        const json = await browserFetchJson(cdp, args, d.url(id, ctx));
-        rows.push(...rowsFromJson(json).map(r => ({...r, __parent_id: id})));
+        if (d.type === 'html') {
+          const out = await browserFetchText(cdp, args, d.url(id, ctx));
+          rows.push(d.parse ? d.parse(id, out, ctx) : {...out, __parent_id: id});
+        } else {
+          const json = await browserFetchJson(cdp, args, d.url(id, ctx));
+          rows.push(...rowsFromJson(json).map(r => ({...r, __parent_id: id})));
+        }
         await sleep(args.waitMs);
       }
     }
@@ -839,7 +937,7 @@ async function fetchDetails(cdp, args, def, listRows, ctx) {
       totalParents: ids.length,
       parentCount: limited.length,
       detailOffset: start,
-      detailLimit: args.maxDetails || 0,
+      detailLimit: effectiveMaxDetails || 0,
       skippedBefore: Math.min(start, ids.length),
       skippedAfter: Math.max(0, ids.length - start - limited.length),
       skippedParents: Math.max(0, ids.length - limited.length),
@@ -918,6 +1016,7 @@ async function main() {
       detailOffset: args.detailOffset,
       maxDetails: args.maxDetails,
       detailConcurrency: args.detailConcurrency,
+      detailNames: args.detailNameList,
     },
     windows: {
       rollingStart: ctx.rollingStart,

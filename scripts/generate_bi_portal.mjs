@@ -2140,17 +2140,374 @@ visible_inventory_trend AS (
     GROUP BY snapshot_date, standard_goods_sn
   ) t
 ),
+order_rows AS (
+  SELECT
+    coalesce(nullif(order_item_key,''), md5(concat_ws('|', store_key, coalesce(order_no,''), coalesce(bill_no,''), coalesce(standard_goods_sn,''), coalesce(skc,''), coalesce(order_create_time::text,''), coalesce(goods_title,'')))) AS order_item_key,
+    created_date, store_key, group_key, order_no, bill_no, order_create_time, updated_at,
+    dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn, skc, goods_title,
+    quantity, round(sales_sar::numeric, 2) AS sales_sar,
+    goods_performance_status_desc
+  FROM fact.order_item
+  ORDER BY created_date DESC NULLS LAST, order_create_time DESC NULLS LAST, sales_sar DESC NULLS LAST
+  LIMIT 12000
+),
+order_keys AS (
+  SELECT DISTINCT store_key, order_no
+  FROM order_rows
+  WHERE coalesce(order_no,'') <> ''
+),
+order_payment_flags AS (
+  SELECT
+    p.store_key,
+    p.order_no,
+    bool_or(coalesce(p.is_cod,false)) AS is_cod,
+    max(nullif(p.payment_label,'')) AS payment_label,
+    max(nullif(p.payment_method,'')) AS payment_method
+  FROM fact.order_payment_flag p
+  JOIN order_keys k
+    ON k.store_key = p.store_key
+   AND k.order_no = p.order_no
+  GROUP BY p.store_key, p.order_no
+),
+order_status_rechecks AS (
+  SELECT rs.*
+  FROM ops.order_status_recheck_state rs
+  JOIN order_rows r
+    ON r.order_item_key = rs.order_item_key
+),
+order_waybill_candidates AS (
+  SELECT
+    w.store_key,
+    trim(o.order_no) AS order_no,
+    w.group_key,
+    w.place_order_package_id,
+    w.express_code,
+    w.express_no,
+    w.warehouse_name,
+    w.provider_name,
+    w.show_status_desc AS waybill_status,
+    w.tag_desc,
+    w.collect_time,
+    w.print_time,
+    w.snapshot_date AS waybill_snapshot_date
+  FROM fact.waybill_package w
+  CROSS JOIN LATERAL regexp_split_to_table(coalesce(w.order_no_list,''), '[,，;；[:space:]]+') AS o(order_no)
+  JOIN order_keys k
+    ON k.store_key = w.store_key
+   AND k.order_no = trim(o.order_no)
+  WHERE trim(o.order_no) <> ''
+    AND w.snapshot_date >= (SELECT min(created_date) FROM order_rows) - interval '60 days'
+),
+order_waybill_counts AS (
+  SELECT
+    store_key,
+    order_no,
+    count(DISTINCT place_order_package_id) AS waybill_count
+  FROM order_waybill_candidates
+  GROUP BY store_key, order_no
+),
+order_waybill_latest AS (
+  SELECT DISTINCT ON (store_key, order_no)
+    store_key,
+    order_no,
+    group_key,
+    place_order_package_id,
+    express_code,
+    express_no,
+    warehouse_name,
+    provider_name,
+    waybill_status,
+    tag_desc,
+    collect_time,
+    print_time,
+    waybill_snapshot_date
+  FROM order_waybill_candidates
+  ORDER BY
+    store_key,
+    order_no,
+    coalesce(collect_time, print_time, waybill_snapshot_date::timestamp) DESC NULLS LAST,
+    place_order_package_id DESC NULLS LAST
+),
+et_outbound_candidates AS (
+  SELECT
+    regexp_replace(upper(coalesce(e.remark,'')), '[^0-9A-Z]', '', 'g') AS express_code_norm,
+    e.outbound_id AS et_outbound_id,
+    e.status_name AS et_outbound_status,
+    e.outbound_time AS et_outbound_time,
+    e.create_time AS et_outbound_create_time,
+    e.logistics_title AS et_logistics_title,
+    e.storeroom_title AS et_storeroom_title,
+    e.file_url AS et_file_url,
+    e.sku_count AS et_sku_count,
+    e.box_count AS et_box_count,
+    nullif(upper(f.shipper_code),'') AS et_shipper_code,
+    nullif(f.shipper_name,'') AS et_shipper_name,
+    nullif(f.detail_url,'') AS et_detail_url
+  FROM fact.et_outbound e
+  LEFT JOIN fact.et_outbound_form f
+    ON f.outbound_id = e.outbound_id
+  WHERE regexp_replace(upper(coalesce(e.remark,'')), '[^0-9A-Z]', '', 'g') <> ''
+),
+et_outbound_latest AS (
+  SELECT DISTINCT ON (express_code_norm)
+    express_code_norm,
+    et_outbound_id,
+    et_outbound_status,
+    et_outbound_time,
+    et_outbound_create_time,
+    et_logistics_title,
+    et_storeroom_title,
+    et_file_url,
+    et_sku_count,
+    et_box_count,
+    et_shipper_code,
+    coalesce(et_shipper_name, CASE et_shipper_code
+        WHEN 'DSY' THEN '杜圣宜'
+        WHEN 'LGM' THEN '刘广梅'
+        WHEN 'SWK' THEN '史文凯'
+        WHEN 'LGH' THEN '刘广洪'
+        WHEN 'CJY' THEN '陈嘉茵'
+        WHEN 'GTH' THEN '龚天浩'
+        WHEN 'YH' THEN '杨欢'
+        WHEN 'WW' THEN '吴薇'
+        WHEN 'LF' THEN '罗芳'
+        ELSE NULL
+      END) AS et_shipper_name,
+    et_detail_url
+  FROM et_outbound_candidates
+  ORDER BY express_code_norm, coalesce(et_outbound_time, et_outbound_create_time) DESC NULLS LAST, et_outbound_id DESC NULLS LAST
+),
+order_item_enriched_base AS (
+  SELECT
+    coalesce(nullif(r.order_no,''), nullif(r.bill_no,''), r.order_item_key) AS order_group_key,
+    r.order_item_key,
+    r.created_date,
+    r.store_key,
+    r.group_key,
+    r.order_no,
+    r.bill_no,
+    r.order_create_time,
+    coalesce(rs.last_checked_at, r.updated_at) AS updated_at,
+    r.standard_goods_sn,
+    r.skc,
+    r.goods_title,
+    r.quantity,
+    r.sales_sar,
+    st.status_desc AS goods_performance_status_desc,
+    r.goods_performance_status_desc AS original_goods_performance_status_desc,
+    st.status_desc AS perform_status_desc,
+    st.status_desc AS order_status_desc,
+    CASE
+      WHEN rs.is_terminal AND rs.lifecycle_status_group IN ('done','cancelled','returning') THEN rs.lifecycle_status_group
+      WHEN st.status_text ~ '(未妥投|退回|拒收)' THEN 'returning'
+      WHEN st.status_text ~ '(取消|关闭)' THEN 'cancelled'
+      WHEN st.status_text ~ '(已签收|已完成|妥投)' THEN 'done'
+      WHEN st.status_text ~ '(异常|失败|超时|风控|拦截|派件异常)' THEN 'abnormal'
+      WHEN st.status_text ~ '(尾程已发货|已发货|运输|揽收|包裹已揽收|待处理|待发货|待揽收|待出库|下单成功|已打印面单)'
+        AND r.created_date < (CURRENT_DATE - interval '10 days')
+        AND rs.order_item_key IS NOT NULL THEN 'platform_unclosed'
+      WHEN st.status_text ~ '(尾程已发货|已发货|运输|揽收|包裹已揽收|待处理|待发货|待揽收|待出库|下单成功|已打印面单)'
+        AND r.created_date < (CURRENT_DATE - interval '10 days') THEN 'pending_recheck'
+      WHEN st.status_text ~ '(尾程已发货|已发货|运输|揽收|包裹已揽收)' THEN 'shipped'
+      WHEN st.status_text ~ '(待处理|待发货|待揽收|待出库|待|下单成功|已打印面单)' THEN 'pending'
+      ELSE coalesce(nullif(rs.lifecycle_status_group,''), 'other')
+    END AS item_status_group,
+    CASE WHEN rs.order_item_key IS NULL THEN 'sales' ELSE 'recheck' END AS order_status_source,
+    rs.lifecycle_status_group AS recheck_status_group,
+    rs.last_checked_at AS status_checked_at,
+    rs.check_count AS status_check_count,
+    rs.consecutive_same_count AS status_consecutive_same_count,
+    coalesce(rs.is_terminal,false) AS status_is_terminal,
+    coalesce(p.is_cod,false) AS is_cod,
+    p.payment_label,
+    p.payment_method,
+    w.express_no,
+    w.express_code,
+    w.provider_name,
+    w.warehouse_name,
+    w.waybill_status,
+    w.tag_desc,
+    w.print_time,
+    w.collect_time,
+    w.place_order_package_id,
+    w.waybill_snapshot_date,
+    coalesce(wc.waybill_count,0) AS waybill_count,
+    e.et_outbound_id,
+    e.et_outbound_status,
+    e.et_outbound_time,
+    e.et_outbound_create_time,
+    e.et_logistics_title,
+    e.et_storeroom_title,
+    e.et_file_url,
+    e.et_sku_count,
+    e.et_box_count,
+    e.et_shipper_code,
+    e.et_shipper_name,
+    e.et_detail_url
+  FROM order_rows r
+  LEFT JOIN order_status_rechecks rs
+    ON rs.order_item_key = r.order_item_key
+  LEFT JOIN order_payment_flags p
+    ON p.store_key = r.store_key
+   AND p.order_no = r.order_no
+  LEFT JOIN order_waybill_latest w
+    ON w.store_key = r.store_key
+   AND w.order_no = r.order_no
+  LEFT JOIN LATERAL (
+    SELECT
+      coalesce(nullif(rs.latest_goods_performance_status_desc,''), r.goods_performance_status_desc, '') AS status_desc,
+      concat_ws(' ',
+        coalesce(nullif(rs.latest_goods_performance_status_desc,''), r.goods_performance_status_desc, ''),
+        coalesce(rs.latest_page_status_desc,''),
+        coalesce(rs.latest_order_status_desc,''),
+        coalesce(rs.latest_perform_status_desc,''),
+        coalesce(w.waybill_status,''),
+        coalesce(w.tag_desc,'')
+      ) AS status_text
+  ) st ON true
+  LEFT JOIN et_outbound_latest e
+    ON e.express_code_norm = regexp_replace(upper(coalesce(w.express_code,'')), '[^0-9A-Z]', '', 'g')
+  LEFT JOIN order_waybill_counts wc
+    ON wc.store_key = r.store_key
+   AND wc.order_no = r.order_no
+),
+order_item_enriched AS (
+  SELECT
+    b.*,
+    CASE b.item_status_group
+      WHEN 'abnormal' THEN 10
+      WHEN 'returning' THEN 20
+      WHEN 'platform_unclosed' THEN 30
+      WHEN 'pending_recheck' THEN 40
+      WHEN 'pending' THEN 50
+      WHEN 'shipped' THEN 60
+      WHEN 'cancelled' THEN 80
+      WHEN 'done' THEN 90
+      ELSE 70
+    END AS status_priority
+  FROM order_item_enriched_base b
+),
+order_status_distribution AS (
+  SELECT
+    store_key,
+    order_group_key,
+    jsonb_object_agg(item_status_group, item_count ORDER BY item_status_group) AS status_distribution
+  FROM (
+    SELECT store_key, order_group_key, item_status_group, count(*) AS item_count
+    FROM order_item_enriched
+    GROUP BY store_key, order_group_key, item_status_group
+  ) s
+  GROUP BY store_key, order_group_key
+),
 orders AS (
-  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) AS data
+  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY t.created_date DESC NULLS LAST, t.order_create_time DESC NULLS LAST, t.sales_sar DESC NULLS LAST), '[]'::jsonb) AS data
   FROM (
     SELECT
-      created_date, store_key, group_key, order_no, bill_no, order_create_time,
-      dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn, skc, goods_title,
-      quantity, round(sales_sar::numeric, 2) AS sales_sar,
-      goods_performance_status_desc
-    FROM fact.order_item
-    ORDER BY created_date DESC NULLS LAST, order_create_time DESC NULLS LAST, sales_sar DESC NULLS LAST
-    LIMIT 12000
+      (array_agg(e.order_item_key ORDER BY e.status_priority, coalesce(e.updated_at, e.order_create_time) DESC NULLS LAST, coalesce(e.sales_sar,0) DESC NULLS LAST))[1] AS order_item_key,
+      e.order_group_key,
+      min(e.created_date) AS created_date,
+      e.store_key,
+      (array_remove(array_agg(nullif(e.group_key,'') ORDER BY e.group_key), NULL))[1] AS group_key,
+      (array_remove(array_agg(nullif(e.order_no,'') ORDER BY e.order_no), NULL))[1] AS order_no,
+      (array_remove(array_agg(nullif(e.bill_no,'') ORDER BY e.bill_no), NULL))[1] AS bill_no,
+      min(e.order_create_time) AS order_create_time,
+      max(e.updated_at) AS updated_at,
+      (array_remove(array_agg(nullif(e.standard_goods_sn,'') ORDER BY coalesce(e.sales_sar,0) DESC NULLS LAST, e.standard_goods_sn), NULL))[1] AS standard_goods_sn,
+      (array_remove(array_agg(nullif(e.skc,'') ORDER BY coalesce(e.sales_sar,0) DESC NULLS LAST, e.skc), NULL))[1] AS skc,
+      (array_remove(array_agg(nullif(e.goods_title,'') ORDER BY coalesce(e.sales_sar,0) DESC NULLS LAST, e.goods_title), NULL))[1] AS goods_title,
+      count(*) AS item_count,
+      count(DISTINCT nullif(e.standard_goods_sn,'')) AS product_count,
+      CASE
+        WHEN count(DISTINCT nullif(e.standard_goods_sn,'')) > 1 THEN concat(count(DISTINCT nullif(e.standard_goods_sn,'')), '个货号 / ', round(sum(coalesce(e.quantity,0))::numeric,0), '件')
+        WHEN count(*) > 1 THEN concat(coalesce((array_remove(array_agg(nullif(e.standard_goods_sn,'') ORDER BY coalesce(e.sales_sar,0) DESC NULLS LAST), NULL))[1], '同货号'), ' / ', round(sum(coalesce(e.quantity,0))::numeric,0), '件')
+        ELSE coalesce((array_remove(array_agg(nullif(e.standard_goods_sn,'') ORDER BY coalesce(e.sales_sar,0) DESC NULLS LAST), NULL))[1], (array_remove(array_agg(nullif(e.goods_title,'') ORDER BY coalesce(e.sales_sar,0) DESC NULLS LAST), NULL))[1], '未识别商品')
+      END AS product_summary,
+      array_to_string(
+        (array_remove(array_agg(nullif(concat_ws(' · ', nullif(e.standard_goods_sn,''), nullif(e.skc,''), nullif(e.goods_title,'')), '') ORDER BY coalesce(e.sales_sar,0) DESC NULLS LAST, e.standard_goods_sn), NULL))[1:5],
+        '；'
+      ) AS product_detail_summary,
+      round(sum(coalesce(e.quantity,0))::numeric, 0) AS quantity,
+      round(sum(coalesce(e.sales_sar,0))::numeric, 2) AS sales_sar,
+      (array_agg(e.goods_performance_status_desc ORDER BY e.status_priority, coalesce(e.updated_at, e.order_create_time) DESC NULLS LAST))[1] AS goods_performance_status_desc,
+      (array_agg(e.original_goods_performance_status_desc ORDER BY e.status_priority, coalesce(e.updated_at, e.order_create_time) DESC NULLS LAST))[1] AS original_goods_performance_status_desc,
+      (array_agg(e.perform_status_desc ORDER BY e.status_priority, coalesce(e.updated_at, e.order_create_time) DESC NULLS LAST))[1] AS perform_status_desc,
+      (array_agg(e.order_status_desc ORDER BY e.status_priority, coalesce(e.updated_at, e.order_create_time) DESC NULLS LAST))[1] AS order_status_desc,
+      CASE
+        WHEN bool_or(e.item_status_group = 'abnormal') THEN 'abnormal'
+        WHEN bool_or(e.item_status_group = 'returning') THEN 'returning'
+        WHEN bool_or(e.item_status_group = 'platform_unclosed') THEN 'platform_unclosed'
+        WHEN bool_or(e.item_status_group = 'pending_recheck') THEN 'pending_recheck'
+        WHEN bool_or(e.item_status_group = 'pending') THEN 'pending'
+        WHEN bool_or(e.item_status_group = 'shipped') THEN 'shipped'
+        WHEN bool_and(e.item_status_group IN ('done','cancelled','returning')) AND count(DISTINCT e.item_status_group) > 1 THEN 'mixed'
+        WHEN bool_and(e.item_status_group = 'done') THEN 'done'
+        WHEN bool_and(e.item_status_group = 'cancelled') THEN 'cancelled'
+        WHEN bool_and(e.item_status_group = 'returning') THEN 'returning'
+        ELSE coalesce((array_agg(e.item_status_group ORDER BY e.status_priority))[1], 'other')
+      END AS order_status_group,
+      CASE WHEN bool_or(e.order_status_source = 'recheck') THEN 'recheck' ELSE 'sales' END AS order_status_source,
+      (array_remove(array_agg(nullif(e.recheck_status_group,'') ORDER BY e.status_priority), NULL))[1] AS recheck_status_group,
+      max(e.status_checked_at) AS status_checked_at,
+      max(e.status_check_count) AS status_check_count,
+      max(e.status_consecutive_same_count) AS status_consecutive_same_count,
+      bool_and(e.item_status_group IN ('done','cancelled','returning')) AS status_is_terminal,
+      bool_or(coalesce(e.is_cod,false)) AS is_cod,
+      max(nullif(e.payment_label,'')) AS payment_label,
+      max(nullif(e.payment_method,'')) AS payment_method,
+      max(nullif(e.express_no,'')) AS express_no,
+      max(nullif(e.express_code,'')) AS express_code,
+      max(nullif(e.provider_name,'')) AS provider_name,
+      max(nullif(e.warehouse_name,'')) AS warehouse_name,
+      max(nullif(e.waybill_status,'')) AS waybill_status,
+      max(nullif(e.tag_desc,'')) AS tag_desc,
+      max(e.print_time) AS print_time,
+      max(e.collect_time) AS collect_time,
+      max(nullif(e.place_order_package_id,'')) AS place_order_package_id,
+      max(e.waybill_snapshot_date) AS waybill_snapshot_date,
+      max(coalesce(e.waybill_count,0)) AS waybill_count,
+      max(nullif(e.et_outbound_id,'')) AS et_outbound_id,
+      max(nullif(e.et_outbound_status,'')) AS et_outbound_status,
+      max(e.et_outbound_time) AS et_outbound_time,
+      max(e.et_outbound_create_time) AS et_outbound_create_time,
+      max(nullif(e.et_logistics_title,'')) AS et_logistics_title,
+      max(nullif(e.et_storeroom_title,'')) AS et_storeroom_title,
+      max(nullif(e.et_file_url,'')) AS et_file_url,
+      max(e.et_sku_count) AS et_sku_count,
+      max(e.et_box_count) AS et_box_count,
+      max(nullif(e.et_shipper_code,'')) AS et_shipper_code,
+      max(nullif(e.et_shipper_name,'')) AS et_shipper_name,
+      max(nullif(e.et_detail_url,'')) AS et_detail_url,
+      d.status_distribution,
+      string_agg(DISTINCT concat_ws(' ', nullif(e.standard_goods_sn,''), nullif(e.skc,''), nullif(e.goods_title,'')), ' ') AS product_search_text,
+      concat_ws(' ',
+        e.store_key,
+        max(nullif(e.order_no,'')),
+        max(nullif(e.bill_no,'')),
+        max(nullif(e.express_no,'')),
+        max(nullif(e.express_code,'')),
+        max(nullif(e.et_outbound_id,'')),
+        string_agg(DISTINCT concat_ws(' ', nullif(e.standard_goods_sn,''), nullif(e.skc,''), nullif(e.goods_title,'')), ' ')
+      ) AS search_text,
+      jsonb_agg(jsonb_build_object(
+        'order_item_key', e.order_item_key,
+        'standard_goods_sn', e.standard_goods_sn,
+        'skc', e.skc,
+        'goods_title', e.goods_title,
+        'quantity', e.quantity,
+        'sales_sar', e.sales_sar,
+        'goods_performance_status_desc', e.goods_performance_status_desc,
+        'original_goods_performance_status_desc', e.original_goods_performance_status_desc,
+        'order_status_group', e.item_status_group,
+        'order_status_source', e.order_status_source,
+        'status_checked_at', e.status_checked_at,
+        'status_check_count', e.status_check_count
+      ) ORDER BY coalesce(e.sales_sar,0) DESC NULLS LAST, e.standard_goods_sn, e.skc) AS items
+    FROM order_item_enriched e
+    LEFT JOIN order_status_distribution d
+      ON d.store_key = e.store_key
+     AND d.order_group_key = e.order_group_key
+    GROUP BY e.store_key, e.order_group_key, d.status_distribution
+    ORDER BY min(e.created_date) DESC NULLS LAST, min(e.order_create_time) DESC NULLS LAST, sum(coalesce(e.sales_sar,0)) DESC NULLS LAST
   ) t
 ),
 after_sales_order_map AS (
@@ -2164,25 +2521,153 @@ after_sales_order_map AS (
   WHERE coalesce(order_no,'') <> ''
   GROUP BY store_key, order_no
 ),
+after_sales_payment_flags AS (
+  SELECT
+    store_key,
+    order_no,
+    bool_or(coalesce(is_cod,false)) AS is_cod,
+    max(nullif(payment_label,'')) AS payment_label,
+    max(nullif(payment_method,'')) AS payment_method
+  FROM fact.order_payment_flag
+  WHERE coalesce(order_no,'') <> ''
+  GROUP BY store_key, order_no
+),
+after_sales_base AS (
+  SELECT
+    a.snapshot_date,
+    a.store_key,
+    a.group_key,
+    a.request_time,
+    om.order_created_date,
+    om.order_create_time,
+    om.order_sales_sar,
+    a.aftersales_order_no,
+    a.return_order_no,
+    a.order_no,
+    dim.product_canonical_sn(a.standard_goods_sn) AS standard_goods_sn,
+    a.skc,
+    a.goods_title,
+    a.quantity,
+    round(coalesce(om.order_sales_sar, a.estimated_income_amount, a.price_amount_total, a.price_amount, 0)::numeric, 2) AS price_amount_total,
+    round(coalesce(om.order_sales_sar, a.estimated_income_amount, a.price_amount_total, a.price_amount, 0)::numeric, 2) AS amount_sar,
+    a.resolution_plan_name,
+    a.order_sub_status_name,
+    a.return_package_status_name,
+    a.reason_names,
+    a.appeal_status,
+    coalesce(p.is_cod,false) AS is_cod,
+    p.payment_label,
+    p.payment_method,
+    greatest(0, (current_date - a.request_time::date))::int AS open_days,
+    CASE
+      WHEN m.status_text ~ '(已取消|关闭)' THEN 'cancelled'
+      WHEN m.status_text ~ '(同意退款|已退款|已签收|已完成)' THEN 'settled'
+      WHEN m.status_text ~ '(待买家退货|待揽收|待寄回)' THEN 'waiting_buyer'
+      WHEN m.status_text ~ '(运输|在途|已揽收|揽收|待交接)' THEN 'in_transit'
+      WHEN m.status_text ~ '(待卖家|待平台|待审核|待处理|待仓库)' THEN 'platform_pending'
+      ELSE 'open'
+    END AS status_group,
+    CASE
+      WHEN m.status_text ~ '(已取消|关闭)' THEN '已取消'
+      WHEN m.status_text ~ '(同意退款|已退款|已签收|已完成)' THEN '已落定'
+      WHEN m.status_text ~ '(待买家退货|待揽收|待寄回)' THEN '待买家退货'
+      WHEN m.status_text ~ '(运输|在途|已揽收|揽收|待交接)' THEN '退货物流中'
+      WHEN m.status_text ~ '(待卖家|待平台|待审核|待处理|待仓库)' THEN '待平台/仓库处理'
+      ELSE '未落定'
+    END AS status_group_label,
+    NOT (m.status_text ~ '(已取消|关闭|同意退款|已退款|已签收|已完成)') AS is_open,
+    CASE
+      WHEN m.reason_text ~ '(COD|未妥投|拒收|派件|配送|物流|签收失败)' THEN '物流/COD'
+      WHEN m.reason_text ~ '(质量|故障|坏|损坏|破损|无法使用|不好用|不工作)' THEN '质量问题'
+      WHEN m.reason_text ~ '(不需要|不想要|买错|拍错|个人原因|无理由)' THEN '不需要/买错'
+      WHEN m.reason_text ~ '(描述|不符|图片|颜色|尺寸|规格|少件|缺件|配件)' THEN '描述/配件不符'
+      WHEN m.reason_text ~ '(价格|费用|运费)' THEN '价格/费用'
+      WHEN coalesce(a.reason_names,'') = '' THEN '未标注'
+      ELSE '其它原因'
+    END AS reason_group,
+    CASE
+      WHEN coalesce(rt.rtv_received_quantity,0) > 0 AND coalesce(rt.final_09_quantity,0) > 0 THEN 'received_resellable'
+      WHEN coalesce(rt.rtv_received_quantity,0) > 0 AND (coalesce(rt.final_damaged_quantity,0) > 0 OR coalesce(rt.final_scrap_quantity,0) > 0) THEN 'received_loss'
+      WHEN coalesce(rt.rtv_received_quantity,0) > 0 AND coalesce(rt.still_03_quantity,0) > 0 THEN 'received_pending'
+      WHEN coalesce(rt.rtv_received_quantity,0) > 0 THEN 'received_unknown'
+      WHEN coalesce(a.resolution_plan_name,'') LIKE '%退货%' THEN 'not_received'
+      ELSE 'not_applicable'
+    END AS rtv_group,
+    rt.trace_status AS rtv_trace_status,
+    rt.rtv_recovery_status,
+    rt.shein_return_express_numbers,
+    rt.rtv_express_numbers,
+    rt.et_return_order_ids,
+    rt.rtv_warehouses,
+    rt.rtv_latest_received_time,
+    rt.rtv_received_quantity,
+    rt.rtv_received_to_09_quantity,
+    rt.rtv_received_to_rtv_quantity,
+    rt.final_09_quantity,
+    rt.still_03_quantity,
+    rt.final_damaged_quantity,
+    rt.final_scrap_quantity,
+    rt.final_other_quantity,
+    rt.destination_summary,
+    CASE
+      WHEN m.status_text ~ '(待买家退货|待揽收|待寄回)' THEN '催买家/平台推进退货揽收，超过 7 天重点复核。'
+      WHEN m.status_text ~ '(运输|在途|已揽收|揽收|待交接)' THEN '关注退货物流是否入仓，必要时对照 RTV/ET。'
+      WHEN coalesce(rt.rtv_received_quantity,0) > 0 AND coalesce(rt.final_09_quantity,0) > 0 THEN '已回仓且有可售去向，可纳入二售测算观察。'
+      WHEN coalesce(rt.rtv_received_quantity,0) > 0 AND (coalesce(rt.final_damaged_quantity,0) > 0 OR coalesce(rt.final_scrap_quantity,0) > 0) THEN '已回仓但进入破损/报废，优先检查质量或包装。'
+      WHEN m.reason_text ~ '(质量|故障|坏|损坏|破损|无法使用|不好用|不工作)' THEN '质量原因售后，优先检查商品、包装、说明和差评。'
+      WHEN m.reason_text ~ '(描述|不符|图片|颜色|尺寸|规格|少件|缺件|配件)' THEN '描述/配件不符，优先检查详情页、图片和配件清单。'
+      ELSE '结合货号、店铺和原因排行判断是否需要整改。'
+    END AS next_action,
+    concat_ws(' ',
+      a.store_key, a.group_key, a.order_no, a.aftersales_order_no, a.return_order_no,
+      dim.product_canonical_sn(a.standard_goods_sn), a.skc, a.goods_title,
+      a.reason_names, a.resolution_plan_name, a.order_sub_status_name, a.return_package_status_name,
+      coalesce(p.payment_label,''), coalesce(p.payment_method,''),
+      coalesce(rt.shein_return_express_numbers,''), coalesce(rt.et_return_order_ids,'')
+    ) AS search_text
+  FROM fact.after_sales_item a
+  LEFT JOIN after_sales_order_map om
+    ON om.store_key = a.store_key AND om.order_no = a.order_no
+  LEFT JOIN after_sales_payment_flags p
+    ON p.store_key = a.store_key AND p.order_no = a.order_no
+  LEFT JOIN LATERAL (
+    SELECT
+      concat_ws(' ', coalesce(a.reason_names,''), coalesce(a.resolution_plan_name,''), coalesce(a.order_sub_status_name,''), coalesce(a.return_package_status_name,'')) AS reason_text,
+      concat_ws(' ', coalesce(a.resolution_plan_name,''), coalesce(a.order_sub_status_name,''), coalesce(a.return_package_status_name,'')) AS status_text
+  ) m ON true
+  LEFT JOIN LATERAL (
+    SELECT rt.*
+    FROM mart.shein_return_rtv_trace rt
+    WHERE rt.store_key = a.store_key
+      AND (
+        (coalesce(a.aftersales_order_no,'') <> '' AND rt.aftersales_order_no = a.aftersales_order_no)
+        OR (coalesce(a.return_order_no,'') <> '' AND rt.return_order_no = a.return_order_no)
+        OR (coalesce(a.order_no,'') <> '' AND rt.order_no = a.order_no)
+      )
+    ORDER BY
+      CASE rt.trace_status
+        WHEN '未匹配到ET收件' THEN 0
+        WHEN '已收-其它/未知去向' THEN 1
+        WHEN '已收-未解析去向' THEN 2
+        WHEN '已收-仍在03_RTV' THEN 3
+        WHEN '已收-破损04' THEN 4
+        WHEN '已收-报废06' THEN 5
+        WHEN '已收-可售09' THEN 6
+        ELSE 7
+      END,
+      rt.rtv_latest_received_time DESC NULLS LAST,
+      rt.request_time DESC NULLS LAST
+    LIMIT 1
+  ) rt ON true
+  WHERE a.request_time IS NOT NULL
+    AND coalesce(a.order_sub_status_name,'') <> '已取消'
+),
 after_sales AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) AS data
   FROM (
-    SELECT
-      a.snapshot_date, a.store_key, a.group_key, a.request_time,
-      om.order_created_date, om.order_create_time, om.order_sales_sar,
-      a.aftersales_order_no, a.return_order_no, a.order_no,
-      dim.product_canonical_sn(a.standard_goods_sn) AS standard_goods_sn, a.skc, a.goods_title,
-      a.quantity,
-      round(coalesce(om.order_sales_sar, a.estimated_income_amount, a.price_amount_total, a.price_amount, 0)::numeric, 2) AS price_amount_total,
-      round(coalesce(om.order_sales_sar, a.estimated_income_amount, a.price_amount_total, a.price_amount, 0)::numeric, 2) AS amount_sar,
-      a.resolution_plan_name, a.order_sub_status_name, a.return_package_status_name,
-      a.reason_names, a.appeal_status
-    FROM fact.after_sales_item a
-    LEFT JOIN after_sales_order_map om
-      ON om.store_key = a.store_key AND om.order_no = a.order_no
-    WHERE a.request_time IS NOT NULL
-      AND coalesce(a.order_sub_status_name,'') <> '已取消'
-    ORDER BY a.request_time DESC NULLS LAST, coalesce(om.order_sales_sar, a.estimated_income_amount, a.price_amount_total, a.price_amount, 0) DESC NULLS LAST
+    SELECT *
+    FROM after_sales_base
+    ORDER BY request_time DESC NULLS LAST, amount_sar DESC NULLS LAST
     LIMIT 8000
   ) t
 ),
@@ -2190,33 +2675,16 @@ after_sales_review AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) AS data
   FROM (
     SELECT
-      a.snapshot_date, a.store_key, a.group_key, a.request_time,
-      om.order_created_date, om.order_create_time, om.order_sales_sar,
-      a.aftersales_order_no, a.return_order_no, a.order_no,
-      dim.product_canonical_sn(a.standard_goods_sn) AS standard_goods_sn, a.skc, a.goods_title,
-      a.quantity,
-      round(coalesce(om.order_sales_sar, a.estimated_income_amount, a.price_amount_total, a.price_amount, 0)::numeric, 2) AS price_amount_total,
-      round(coalesce(om.order_sales_sar, a.estimated_income_amount, a.price_amount_total, a.price_amount, 0)::numeric, 2) AS amount_sar,
-      a.resolution_plan_name, a.order_sub_status_name, a.return_package_status_name,
-      a.reason_names, a.appeal_status,
-      greatest(0, (current_date - a.request_time::date))::int AS open_days,
+      b.*,
       CASE
-        WHEN coalesce(a.order_sub_status_name,'') = '已取消' THEN '已取消忽略'
-        WHEN coalesce(a.order_sub_status_name,'') LIKE '%同意退款%' OR coalesce(a.return_package_status_name,'') LIKE '%已签收%' THEN '已落定'
+        WHEN b.status_group = 'settled' THEN '已落定'
+        WHEN b.status_group = 'cancelled' THEN '已取消忽略'
         ELSE '待复核'
       END AS review_status,
-      CASE
-        WHEN coalesce(a.order_sub_status_name,'') LIKE '%待%' OR coalesce(a.return_package_status_name,'') LIKE '%待%' THEN '等待平台/买家/仓库推进'
-        WHEN coalesce(a.return_package_status_name,'') LIKE '%运输%' OR coalesce(a.return_package_status_name,'') LIKE '%揽收%' THEN '物流途中，需持续追踪'
-        ELSE '已按未取消售后计入退货；若后续取消，会在下次同步自动冲回'
-      END AS review_reason
-    FROM fact.after_sales_item a
-    LEFT JOIN after_sales_order_map om
-      ON om.store_key = a.store_key AND om.order_no = a.order_no
-    WHERE a.request_time IS NOT NULL
-      AND coalesce(a.order_sub_status_name,'') <> '已取消'
-      AND NOT (coalesce(a.order_sub_status_name,'') LIKE '%同意退款%' OR coalesce(a.return_package_status_name,'') LIKE '%已签收%')
-    ORDER BY a.request_time DESC NULLS LAST, open_days DESC, coalesce(om.order_sales_sar, a.estimated_income_amount, a.price_amount_total, a.price_amount, 0) DESC NULLS LAST
+      b.next_action AS review_reason
+    FROM after_sales_base b
+    WHERE b.is_open
+    ORDER BY b.request_time DESC NULLS LAST, b.open_days DESC, b.amount_sar DESC NULLS LAST
     LIMIT 1000
   ) t
 ),

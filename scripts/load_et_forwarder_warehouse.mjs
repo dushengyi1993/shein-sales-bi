@@ -13,6 +13,17 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORE_PREFIX_RE = /^(DL|DX|FY|LQ|NM|HL|JY|ZL|TS|MZ|CX|YJ|XL|QY|QH)[-_]?0*/i;
 const STORAGE_BILLING_DISCOUNT = 0.5;
 const STORAGE_SAR_TO_RMB = 1.8;
+const SHIPPER_NAMES = {
+  DSY: '杜圣宜',
+  LGM: '刘广梅',
+  SWK: '史文凯',
+  LGH: '刘广洪',
+  CJY: '陈嘉茵',
+  GTH: '龚天浩',
+  YH: '杨欢',
+  WW: '吴薇',
+  LF: '罗芳',
+};
 
 function parseArgs(argv) {
   const args = {
@@ -80,6 +91,11 @@ function text(v) {
 function boolStatus(v) {
   if (v === null || v === undefined || v === '') return '';
   return String(v);
+}
+
+function shipperCode(v) {
+  const code = String(v || '').trim().toUpperCase();
+  return Object.hasOwn(SHIPPER_NAMES, code) ? code : '';
 }
 
 function compactJson(value, maxLen = 18000) {
@@ -250,6 +266,7 @@ function rawRowsForEndpoint(batch, endpoint, endpointData, sourceFile) {
     box_item: ['__parent_id', 'FId', 'Barcode'],
     outbound: ['OutboundId'],
     outbound_item: ['__parent_id', 'FId', 'Barcode'],
+    outbound_form: ['__parent_id'],
     return_order: ['ReturnOrderId'],
     return_order_item: ['__parent_id', 'FId', 'Barcode'],
     allocate: ['AllocateId'],
@@ -299,6 +316,7 @@ const C = {
   box_item: ['unique_key','batch_id','box_id','f_id','goods_id','sku_id','barcode','sku_code','model_number','standard_goods_sn','match_key','goods_title','case_quantity','real_quantity','raw_summary'],
   outbound: ['outbound_id','batch_id','storeroom_id','storeroom_title','from_id','status','status_name','sku_count','box_count','create_time','reserve_time','outbound_time','logistics_title','remark','waybill_code','file_url','raw_summary'],
   outbound_item: ['unique_key','batch_id','outbound_id','f_id','sku_id','barcode','sku_code','standard_goods_sn','match_key','title_cn','title_en','quantity','raw_summary'],
+  outbound_form: ['outbound_id','batch_id','receive_text','shipper_code','shipper_name','shipper_match','detail_url','detail_status','detail_content_type','raw_summary'],
   return_order: ['return_order_id','batch_id','store_name_out','store_name_in','rtv','shipment_number','status','status_name','to_pickup_name','to_instock_name','is_worn_in_name','out_quantity','in_quantity','all_weight','reserve_time','create_time','operator','reason','reason_remark','raw_summary'],
   return_order_item: ['unique_key','batch_id','return_order_id','f_id','goods_id','sku_id','barcode','sku_code','standard_goods_sn','match_key','goods_title','quantity','instock','differ','create_time','remark','raw_summary'],
   allocate: ['allocate_id','batch_id','from_id','out_storeroom','out_storeroom_id','in_storeroom','in_storeroom_id','status','status_name','case_number','real_number','logistics_name','logistics_no','create_time','reserve_time','raw_summary'],
@@ -358,6 +376,30 @@ function mapEndpoint(endpoint, batch, endpointData, sourceFile = '') {
       return {table: 'fact.et_outbound', columns: C.outbound, conflict: ['outbound_id'], rows: rows.map(r => ({outbound_id: text(r.OutboundId), batch_id: b, storeroom_id: text(r.StoreroomId), storeroom_title: text(r.StoreroomTitle), from_id: text(r.FromId), status: boolStatus(r.Status), status_name: text(r.StatusName), sku_count: num(r.SkuCount), box_count: num(r.BoxCount), create_time: ts(r.Createtime), reserve_time: ts(r.ReserveTime), outbound_time: ts(r.OutboundTime), logistics_title: text(r.LogisticsTitle), remark: text(r.Remark), waybill_code: text(r.WaybillCode), file_url: text(r.FileUrl), raw_summary: compactJson(r)}))};
     case 'outbound_item':
       return {table: 'fact.et_outbound_item', columns: C.outbound_item, conflict: ['unique_key'], rows: rows.map((r, i) => { const p = baseProduct(r); const parent = text(r.__parent_id || r.OutboundId); return {unique_key: `${parent}:${r.FId || r.Barcode || i}`, batch_id: b, outbound_id: parent, f_id: text(r.FId), sku_id: text(r.SkuId), barcode: text(r.Barcode), sku_code: text(r.SkuCode), standard_goods_sn: p.standard_goods_sn, match_key: p.match_key, title_cn: text(r.TitleCn), title_en: text(r.TitleEn), quantity: num(r.Quantity), raw_summary: compactJson(r)}; })};
+    case 'outbound_form':
+      return {table: 'fact.et_outbound_form', columns: C.outbound_form, conflict: ['outbound_id'], rows: rows.map(r => {
+        const outboundId = text(r.__parent_id || r.OutboundId);
+        const code = shipperCode(r.ShipperCode);
+        return {
+          outbound_id: outboundId,
+          batch_id: b,
+          receive_text: text(r.ReceiveText),
+          shipper_code: code,
+          shipper_name: code ? SHIPPER_NAMES[code] : '',
+          shipper_match: text(r.ShipperMatch),
+          detail_url: text(r.DetailUrl),
+          detail_status: text(r.DetailStatus),
+          detail_content_type: text(r.DetailContentType),
+          raw_summary: compactJson({
+            OutboundId: outboundId,
+            DetailUrl: r.DetailUrl,
+            DetailStatus: r.DetailStatus,
+            DetailContentType: r.DetailContentType,
+            ShipperMatch: r.ShipperMatch,
+            DetailTextHead: r.DetailTextHead,
+          }),
+        };
+      }).filter(r => r.outbound_id)};
     case 'return_order':
       return {table: 'fact.et_return_order', columns: C.return_order, conflict: ['return_order_id'], rows: rows.map(r => ({return_order_id: text(r.ReturnOrderId), batch_id: b, store_name_out: text(r.StoreNameOut), store_name_in: text(r.StoreNameIn), rtv: text(r.RTV), shipment_number: text(r.ShipmentNumber), status: boolStatus(r.Status), status_name: text(r.StatusName), to_pickup_name: text(r.ToPickupName), to_instock_name: text(r.ToInStockName), is_worn_in_name: text(r.IsWornInName), out_quantity: num(r.OutQuantity), in_quantity: num(r.InQuantity), all_weight: num(r.AllWeight), reserve_time: ts(r.ReserveTime), create_time: ts(r.CreateTime), operator: text(r.Operator), reason: text(r.Reason), reason_remark: text(r.ReasonRemark), raw_summary: compactJson(r)}))};
     case 'return_order_item':

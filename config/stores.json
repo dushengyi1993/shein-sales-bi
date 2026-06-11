@@ -220,7 +220,7 @@
     {
       "storeKey": "ZL",
       "groupKey": "DSY",
-      "companyName": "紫钢",
+      "companyName": "紫翎",
       "merchantId": "12839379",
       "shopName": "GS1428388",
       "accountNo": "GS1428388",
@@ -229,7 +229,7 @@
       "productStatsEnabled": true,
       "profileKey": "zl",
       "port": 9340,
-      "profileName": "ZL - 紫钢 - GS1428388",
+      "profileName": "ZL - 紫翎 - GS1428388",
       "salesTransport": "auto"
     },
     {
