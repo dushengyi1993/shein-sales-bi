@@ -1,6 +1,6 @@
 # SHEIN 营销折扣自动化路线图
 
-> 当前状态：2026-06-06。本文只沉淀系统规则、动作边界和后续实现顺序；不写 SHEIN session、BI Basic Auth、OpenAPI 密钥或 `.local` 运行态。
+> 当前状态：2026-06-09。本文只沉淀系统规则、动作边界和后续实现顺序；不写 SHEIN session、BI Basic Auth、OpenAPI 密钥或 `.local` 运行态。
 
 ## 1. 核心不变量
 
@@ -35,6 +35,8 @@
 - `叠加后最终成交价 > finalTargetPrice + 1 SAR`：价格偏高，不应取消券；应检查普通营销活动是否漏报，或用限时折扣兜底到目标基准价。
 - 缺 `finalTargetPrice`、缺当前基准价、缺 coupon 档证据、限时折扣分页未读完、店铺身份不确定：全部 fail closed，不自动提交/取消。
 
+`finalTargetPrice` 必须来自当前有效策略，而不是历史默认值。若本期用户已经在审核表中确认某个货号按 `15%` 利润率、固定最终成交价或特殊券/活动组合执行，并且该确认已转换为当前 `selection-plan + price-overrides`，日报应将其视为 `expected`；不能再按旧 `30%` 默认利润率、旧 `ALL-ready` 覆盖文件或没有生效窗口的历史计划每天重复报警。若日报只能读到旧计划或同一 `storeKey + skc` 有冲突目标价，应报告“计划过期/冲突，需要刷新”，而不是直接把已批准的低利润策略判为错误。
+
 ## 3. 当前定时复扫
 
 已存在 Codex heartbeat 自动任务 `shein`：
@@ -47,9 +49,12 @@
 自动任务模式的硬边界：
 
 - 只能产出观察报告、dry-run 清单、阻塞原因和下一次复扫安排。
+- 复核频率按风险分层，不能为了“严谨”每天全量打开 19 个前端 profile。默认每日 heartbeat 只跑云端/文件级 guard，不 live 扫 SHEIN 后台；只有三类情况才允许打开前端：用户明确要求、存在需要立即止损且文件证据不足的具体店铺/SKC、或到达已约定补券窗口并且 guard 给出候选清单。即便打开，也必须按候选店铺最小集合和 3-5 店小批次执行，跑完关闭。
+- `source stale` 只表示证据需要刷新，不等于可以自动全店 live scan；如果没有低价止损、补券窗口或用户授权，日报只能报告“需补证据/等待窗口”，不得用全量前端扫描替代判断。
 - 若调用 `scripts/marketing/submit_coupon_activity_goods.mjs`，必须带 `--dry-run` 或 `--no-submit`。
 - 禁止在 heartbeat 中向任何写入型脚本传 `--execute`，包括优惠券取消、券预算补额度、结束限时折扣、创建/修改限时折扣。
 - 标签仍存在时不能机械阻塞：低于目标价或缺价格证据才阻塞；命中目标可进补券 dry-run；若只有限时折扣兜底层高于目标，只能生成“先确认普通营销活动覆盖；未覆盖时再调限时折扣兜底”的建议，不能直接判定最终价偏高。
+- 日报必须先校验目标计划是否是当前批次：计划文件过期、缺活动生效窗口、缺 `couponFactor/combo`、同一 `storeKey + skc` 目标冲突时，只能报告“计划证据需要刷新/清理”。已经在当前计划里批准的 `15%` 利润率或低价清货策略不是 blocker；实际成交价低于这版计划目标才是 blocker。
 - 旧普通活动填报价也属于价格栈真相源。每日 guard 的 `knownOrdinaryActivityGuard` 会读取仍在生效窗口内的旧普通活动填报价；若 `旧普通活动价 × couponFactor < finalTargetPrice - 1 SAR`，或有旧普通活动标签但缺填报价证据，必须阻止 no-action。真实 `submit_coupon_activity_goods.mjs` 写路径也必须使用同一守卫：活动扫描过期/不可用、旧活动价证据目录缺失/解析失败，或目标 SKC 有旧普通/度假季标签但缺旧活动价，直接停止提交。
 - 当 `knownOrdinaryActivityGuard` 非零时，自动任务应继续运行 `scripts/marketing/build_known_ordinary_coupon_risk_plan.mjs --date YYYY-MM-DD`，生成 `known-ordinary-coupon-risk-plan-YYYY-MM-DD.{json,csv,md}` 全量清单；Markdown 必须先给中文结论、按店铺汇总和明确动作，CSV 只作为脚本筛选输入。若问题是缺实际填报价，系统下一步是自动只读查价，不是把“缺证据”交给用户；只有登录、身份或平台接口阻塞才需要用户介入。清单只用于 live 复核和用户授权后的取消券/临时下架/补回，不是可执行取消指令。
 - 真实提交、取消、补预算、调限时折扣必须回到当前人工授权轮次执行，并在执行后 live 回读。
@@ -81,13 +86,24 @@
 | 度假季/旧低价活动结束后补券 | 活动预计结束后、或标签/已报集合变化 | live 优惠券已报集合、限时折扣 live 列表、旧普通活动观察扫描、`price-overrides` | 生成可补 `15%` 券清单和 dry-run | 不真实提交；除非用户在当轮明确授权 | `allowed15 active == plan`、禁止/未知 active 为 `0`、价格栈不低于目标 |
 | 新链接自动纳入价格体系 | 链接/业务域日更发现新上架 SKC | `outputs/shein_links`、BI `storeLinks`、商品成本、仓储费、曝光排名 | 生成“新链接待定价/待报限时折扣/待报券”动作卡 | 初期只提醒和 dry-run；真实报限时折扣/券需有成本、目标价、库存和用户授权 | 新链接动作卡、价格测算、live 已报/未报集合 |
 | 优惠券余额补额度 | 活动预算不足、额度用完、提交前预算低于阈值 | 优惠券活动站点预算接口 + execute 回读结果 | 将本期 `shein-sa` 周预算补到 `1000 SAR` | 当前只对已授权的配套 `15%` 券活动可执行；自动任务只报告，不真实补预算 | execute 后 `after.usageSite`/`after.budgetInfoSite` 优先回读为 `1000 SAR`；写入异常但回读达标只做提醒 |
-| 低价/高价成交查因 | 销售同步发现订单商品行 `currencyPrice` 偏离目标 | 订单商品行 `currencyPrice`、活动窗口、price-overrides、优惠券/限时折扣/普通活动 live 状态 | 输出根因分类和补救建议 | 不能用页面商品总价、预计收入汇总或预聚合销售额判断；未传活动窗口只作为线索 | `audit_order_prices_against_plan.mjs` 结果、订单行金额、活动来源 |
+| 低价/高价成交查因 | 销售同步发现订单商品行 `currencyPrice` 偏离当前有效策略目标 | 订单商品行 `currencyPrice`、活动窗口、当前批次 price-overrides、用户确认备注落盘结果、优惠券/限时折扣/普通活动 live 状态 | 输出根因分类和补救建议 | 不能用页面商品总价、预计收入汇总或预聚合销售额判断；未传活动窗口或计划过期/冲突时只作为线索，不把已批准低利润策略当异常 | `audit_order_prices_against_plan.mjs` 结果、订单行金额、活动来源、当前策略版本 |
 | 可报活动提前三天提醒 | 活动报名截止时间进入 `T-3` | 营销活动列表全量分页、店铺身份 | 生成待报活动清单、缺成本/缺覆盖价/缺仓储费阻塞 | 不自动报名；用户确认备注和覆盖价后再执行 | 活动 ID、报名截止、可报商品数、阻塞原因 |
 | `30%/50%` 券研究 | 用户要求研究且普通活动可报 | 普通活动计划、券档、成本、目标价、平台最低折扣、旧普通活动/限时折扣价 | 运行 `build_high_coupon_research_candidates.mjs` 只输出测算：哪些 SKC 理论可用更高券 | 禁止真实上线；不得生成提交命令；必须保证平台折扣满足、最终价不低于底价且无更低旧活动打穿 | 研究表、利润红线、平台最低降幅、旧活动证据 |
 | 三层价格栈日常巡检 | 每日销售/链接/业务域刷新后 | BI 数据、live 活动集合、订单审计 | 风险日报：低于目标、偏高、待系统取证、预算不足、登录阻塞 | 自动只读；缺价/待取证先自动查，真实修复走单独 dry-run/execute/rescan | 风险计数、店铺/SKC/货号、补救状态 |
 | 云端运营系统协同 | BI 自动运营驾驶舱上线后 | PostgreSQL、BI Portal API、任务状态表 | 给同事分配店铺、展示动作卡、记录处理状态 | 同事只能处理被分配店铺；真实提交前需要权限和二次确认 | 操作审计、负责人、状态、执行日志 |
 
-### 4.1 新链接动作卡落地边界
+### 4.1 巡检频率和前端资源边界
+
+日常巡检的目标是发现必须处理的风险，不是每天把所有前端 profile 重跑一遍。标准分层如下：
+
+1. **每日轻量层**：只运行 `build_marketing_daily_guard_report.mjs --cloud-bi-ssh shein-bi-tencent --cloud-bi-root /opt/shein-bi/app`，读取云端 BI、云端订单商品行、当前计划和已有证据文件；不启动浏览器，不调用 SHEIN 后台写接口。
+2. **定点补证层**：guard 出现具体店铺/SKC 的低价止损、漏报、身份异常或候选补券时，只扫这些店铺/活动，不扫无关店铺。
+3. **一次性验收层**：大批量真实提交完成后允许做一次全量回读，作为该批次最终验收；之后同一批次不重复全量，除非有新异常或用户要求。
+4. **窗口补券层**：到约定补券窗口后，先用 guard / known-risk plan 缩小候选范围，再分批 dry-run 和执行；补完后只为确认 `toSubmit=0` 做必要回读，不把“全量前端复核”做成日常动作。
+
+这条边界优先于“source freshness”噪音：文件过期可以阻止 no-action，但不能自动触发全店开浏览器。
+
+### 4.2 新链接动作卡落地边界
 
 `scripts/marketing/build_marketing_daily_guard_report.mjs` 已把“新链接自动纳入价格体系”的第一阶段落到只读日报里，字段为 `newSkcCandidates`。本地 Codex 的每日 heartbeat 默认用 `--cloud-bi-ssh shein-bi-tencent --cloud-bi-root /opt/shein-bi/app` 只读读取云端权威 `outputs/bi-portal/data.json`；不写回本地 `outputs/`，只在报告里记录 `biPortalSourceSelection`。它的口径故意保守：
 
@@ -107,7 +123,7 @@
 3. `unplanned_new_on_shelf_skc_needs_pricing`：新上架 SKC 完全没有计划；先进入待定价，再决定普通活动、限时折扣兜底和 15% 券。
 4. `unknown_shelf_age_needs_review`：缺上架天数和可用 `link_date`，不能判断是否新链接；先刷新链接/BI 快照，不报券。
 
-### 4.2 营销叠加审核的新鲜度拆分
+### 4.3 营销叠加审核的新鲜度拆分
 
 `marketingStackReview` 同时承担两类证据，必须拆开判断：
 

@@ -25,9 +25,21 @@ const cloudBi = JSON.parse(await fs.readFile(cloudBiPath, 'utf8'));
 const cloudCostDoc = JSON.parse(await fs.readFile(cloudCostPath, 'utf8'));
 const pricingPolicyPath = path.resolve(ROOT, cli.pricingPolicy || path.join('config', 'marketing_pricing_policy.json'));
 const pricingPolicy = await loadMarketingPricingPolicy(pricingPolicyPath);
-const exposureIndex = buildExposureTopLinkIndex(cloudBi, pricingPolicy);
 const cloudBiStat = fssync.statSync(cloudBiPath);
 const cloudCostStat = fssync.statSync(cloudCostPath);
+const exposureDataPath = cli.exposureData ? path.resolve(ROOT, cli.exposureData) : '';
+const exposureBi = exposureDataPath ? JSON.parse(await fs.readFile(exposureDataPath, 'utf8')) : cloudBi;
+const exposureDataStat = exposureDataPath && fssync.existsSync(exposureDataPath)
+  ? fssync.statSync(exposureDataPath)
+  : cloudBiStat;
+const signupPricingPolicy = withSignupCliOverrides(pricingPolicy, cli);
+const rawActivityRows = activityDoc.detailRows || [];
+const {doc: exposureBiForRanking, summary: exposureCanonicalBackfill} = enrichExposureBiWithPlanCanonicals(exposureBi, rawActivityRows);
+const exposureIndex = buildExposureTopLinkIndex(exposureBiForRanking, signupPricingPolicy);
+const targetFloorMargin = pctConfigToRatio(cli.targetFloorMarginPct ?? pricingPolicy.targetFloorMarginPct ?? 15);
+const selectionMarginBasis = normalizeSelectionMarginBasis(cli.selectionMarginBasis || 'full_cost_including_storage');
+const storageRequiredForSelection = selectionMarginBasis !== 'product_cost_excluding_storage';
+const EXECUTION_TAG = cli.executionTag || executionTagFromVersion(OUTPUT_VERSION);
 
 const TRUE_COSTS = cloudCostDoc.trueCostMap || {};
 const COSTS = cloudCostDoc.costMap || {};
@@ -54,7 +66,7 @@ const specialMarginBase = [
 const fixedRules = buildRuleMap(fixedPriceBase);
 const marginRules = buildRuleMap(specialMarginBase);
 
-const rawRows = activityDoc.detailRows || [];
+const rawRows = rawActivityRows;
 const rows = rawRows.map(normalizeReviewRow);
 
 const bySku = new Map();
@@ -65,6 +77,7 @@ for (const r of rows) {
 }
 
 const approvalRows = [];
+const executionRows = [];
 for (const [sku, group] of bySku.entries()) {
   const stores = uniq(group.map(r => r['店铺'])).sort();
   const activities = uniq(group.map(r => r['活动ID'])).sort((a, b) => Number(a) - Number(b));
@@ -88,7 +101,7 @@ for (const [sku, group] of bySku.entries()) {
   const fixed = findRule(fixedRules, keyList);
   const specialMargin = findRule(marginRules, keyList);
   const baseTargetMargin = fixed !== null ? null : (specialMargin ?? 0.30);
-  const exposureTargets = baseTargetMargin === null ? null : marginTargetsForExposurePolicy(baseTargetMargin, pricingPolicy);
+  const exposureTargets = baseTargetMargin === null ? null : marginTargetsForExposurePolicy(baseTargetMargin, signupPricingPolicy);
   const topExposureRows = fixed !== null
     ? []
     : uniqBy(
@@ -96,14 +109,17 @@ for (const [sku, group] of bySku.entries()) {
         row => `${row.storeKey || ''}:${row.skc}`,
       );
   const hasExposureRanking = topExposureRows.length > 0;
+  const exposureRankMetricText = hasExposureRanking ? (topExposureRows[0]?.rankMetricLabel || exposureMetricText(topExposureRows[0]?.rankMetricField)) : '';
   const groupSkcs = new Set(group.map(r => String(r['SKC'] || '').trim()).filter(Boolean));
   const topExposureSkcsInGroup = topExposureRows.filter(row => groupSkcs.has(row.skc));
+  const topExposureLinkKeys = new Set(topExposureRows.map(row => exposureLinkKey(row.storeKey, row.skc)));
+  const rowIsTopExposure = row => topExposureLinkKeys.has(exposureLinkKey(row['店铺'], row['SKC']));
   const targetMargin = fixed !== null ? null : (hasExposureRanking ? (exposureTargets?.otherMargin ?? baseTargetMargin) : baseTargetMargin);
   const topExposureMargin = fixed !== null || !hasExposureRanking ? null : (exposureTargets?.topMargin ?? null);
   const exposureRuleText = fixed !== null
     ? '固定价/逐行覆盖价优先，不自动套曝光利润率'
     : hasExposureRanking
-      ? `前五 ${pctRatioText(topExposureMargin)} / 其他 ${pctRatioText(targetMargin)}`
+      ? `${exposureRankMetricText}前五 ${pctRatioText(topExposureMargin)} / 其他 ${pctRatioText(targetMargin)}`
       : '曝光数据缺失：保持基础利润率';
   const targetMode = fixed !== null
     ? '固定最终成交价'
@@ -116,30 +132,62 @@ for (const [sku, group] of bySku.entries()) {
   const priceFor15Coupon = targetFinal !== null ? ceil2(targetFinal / 0.85) : null;
   const priceFor50Coupon = targetFinal !== null ? ceil2(targetFinal / 0.50) : null;
   const minPlatformCap = platformCaps.length ? Math.min(...platformCaps) : null;
-  const safeNoCouponAll = targetFinal !== null && minPlatformCap !== null && targetFinal <= minPlatformCap;
-  const safe15All = priceFor15Coupon !== null && minPlatformCap !== null && priceFor15Coupon <= minPlatformCap;
-  const activityPriceForStrategy = couponRows.length && safe15All ? priceFor15Coupon : targetFinal;
-  const couponFactorForStrategy = couponRows.length && safe15All ? 0.85 : 1;
-  const effectiveNoCouponPrices = group.map(r => {
-    const current = numValue(r['当前售价SAR']);
-    const minDiscount = numValue(r['平台最低降幅%']) ?? 0;
+  const rowTargetFinalFor = row => fixed !== null
+    ? fixed
+    : (rowIsTopExposure(row) && topExposureTargetFinal !== null ? topExposureTargetFinal : targetFinal);
+  const rowStrategyFor = row => {
+    const rowIntendedFinal = rowTargetFinalFor(row);
+    const current = numValue(row['当前售价SAR']);
+    const minDiscount = numValue(row['平台最低降幅%']) ?? 0;
     const cap = isNum(current) ? floor2(current * (1 - minDiscount / 100)) : null;
-    if (activityPriceForStrategy === null) return null;
-    return cap === null ? activityPriceForStrategy : Math.min(activityPriceForStrategy, cap);
-  }).filter(isNum);
-  const recFinals = effectiveNoCouponPrices.map(p => round2(p * couponFactorForStrategy));
+    const rowPriceFor15Coupon = rowIntendedFinal !== null ? ceil2(rowIntendedFinal / 0.85) : null;
+    const rowCanUse15Coupon = Boolean(couponRows.length && rowPriceFor15Coupon !== null && cap !== null && rowPriceFor15Coupon <= cap);
+    const couponFactor = rowCanUse15Coupon ? 0.85 : 1;
+    const uncappedActivityPrice = rowCanUse15Coupon ? rowPriceFor15Coupon : rowIntendedFinal;
+    const targetPrice = uncappedActivityPrice === null
+      ? null
+      : (cap === null ? uncappedActivityPrice : Math.min(uncappedActivityPrice, cap));
+    const finalTargetPrice = targetPrice === null ? null : round2(targetPrice * couponFactor);
+    return {
+      rowIntendedFinal,
+      rowPriceFor15Coupon,
+      rowCanUse15Coupon,
+      couponFactor,
+      uncappedActivityPrice,
+      targetPrice,
+      finalTargetPrice,
+      platformCap: cap,
+      minDiscount,
+    };
+  };
+  const rowStrategies = group.map(rowStrategyFor);
+  const safeNoCouponAll = rowStrategies.length
+    && rowStrategies.every(s => s.rowIntendedFinal !== null && s.platformCap !== null && s.rowIntendedFinal <= s.platformCap);
+  const safe15All = Boolean(couponRows.length)
+    && rowStrategies.length
+    && rowStrategies.every(s => s.rowPriceFor15Coupon !== null && s.platformCap !== null && s.rowPriceFor15Coupon <= s.platformCap);
+  const recFinals = rowStrategies.map(s => s.finalTargetPrice).filter(isNum);
+  const rowIntendedFinals = rowStrategies.map(s => s.rowIntendedFinal).filter(isNum);
+  const activityBasePrices = rowStrategies.map(s => s.targetPrice).filter(isNum);
   const targetProductMargins = [];
   const targetFullMargins = [];
+  const targetSafetyMargins = [];
   const cappedProductMargins = [];
   const cappedFullMargins = [];
+  const cappedSafetyMargins = [];
   for (const [idx, r] of group.entries()) {
-    const p = recFinals[idx];
+    const s = rowStrategies[idx];
+    const p = s?.finalTargetPrice;
+    const rowTargetFinal = s?.rowIntendedFinal;
     const productCost = r._cloudCost.productUnitCostSar;
     const fullCost = r._cloudCost.fullUnitCostSar;
+    const safetyCost = selectionMarginBasis === 'product_cost_excluding_storage' ? productCost : fullCost;
     if (isNum(p) && isNum(productCost) && Number(productCost) > 0 && p > 0) cappedProductMargins.push((p - productCost) / p);
     if (isNum(p) && isNum(fullCost) && Number(fullCost) > 0 && p > 0) cappedFullMargins.push((p - fullCost) / p);
-    if (isNum(targetFinal) && isNum(productCost) && Number(productCost) > 0 && targetFinal > 0) targetProductMargins.push((targetFinal - productCost) / targetFinal);
-    if (isNum(targetFinal) && isNum(fullCost) && Number(fullCost) > 0 && targetFinal > 0) targetFullMargins.push((targetFinal - fullCost) / targetFinal);
+    if (isNum(p) && isNum(safetyCost) && Number(safetyCost) > 0 && p > 0) cappedSafetyMargins.push((p - safetyCost) / p);
+    if (isNum(rowTargetFinal) && isNum(productCost) && Number(productCost) > 0 && rowTargetFinal > 0) targetProductMargins.push((rowTargetFinal - productCost) / rowTargetFinal);
+    if (isNum(rowTargetFinal) && isNum(fullCost) && Number(fullCost) > 0 && rowTargetFinal > 0) targetFullMargins.push((rowTargetFinal - fullCost) / rowTargetFinal);
+    if (isNum(rowTargetFinal) && isNum(safetyCost) && Number(safetyCost) > 0 && rowTargetFinal > 0) targetSafetyMargins.push((rowTargetFinal - safetyCost) / rowTargetFinal);
   }
 
   let couponStrategy = '不叠优惠券';
@@ -155,10 +203,13 @@ for (const [sku, group] of bySku.entries()) {
   } else if (missingCost) {
     status = '缺云端成本，需先确认';
     actionParts.push('缺云端成本：先不自动报，需你确认最终价');
-  } else if (storageMissing) {
+  } else if (storageMissing && storageRequiredForSelection) {
     status = '缺仓储口径，需复核';
     actionParts.push('云端未给出仓储/件，不能按0安全通过');
   } else {
+    if (storageMissing && !storageRequiredForSelection) {
+      actionParts.push('仓储费缺失不作为本轮自动剔除条件；筛选红线按不含仓储成本利润率');
+    }
     if (safeNoCouponAll) actionParts.push(`普通活动按目标价 ${fmt(targetFinal)} SAR 报`);
     else actionParts.push('普通活动需按店铺平台上限微调，低利润店筛掉/单独处理');
     if (fixed === null && hasExposureRanking) {
@@ -167,15 +218,15 @@ for (const [sku, group] of bySku.entries()) {
     if (couponRows.length) actionParts.push(couponStrategy);
     if (limitRows.length) actionParts.push('有旧限时折扣标签：未处理前不视为安全');
   }
-  if (!missingCost && !storageMissing && !safeNoCouponAll) status = '部分店需系统处理';
-  if (!missingCost && !storageMissing && limitRows.length) status = status === '可按货号确认' ? '限时折扣需注意' : `${status}+限时折扣`;
-  if (!missingCost && !storageMissing && targetFullMargins.length && Math.min(...targetFullMargins) < 0.15) status = '利润低于红线/需确认';
+  if (!missingCost && !(storageRequiredForSelection && storageMissing) && !safeNoCouponAll) status = '部分店需系统处理';
+  if (!missingCost && !(storageRequiredForSelection && storageMissing) && limitRows.length) status = status === '可按货号确认' ? '限时折扣需注意' : `${status}+限时折扣`;
+  if (!missingCost && targetSafetyMargins.length && Math.min(...targetSafetyMargins) < targetFloorMargin) status = '利润低于红线/需确认';
 
   const needConfirm = missingCost
     ? (skuNeedsReview ? '先确认这到底是什么货号' : '请填最终成交价或补云端成本')
     : skuNeedsReview
       ? '先确认这到底是什么货号'
-      : storageMissing
+      : storageMissing && storageRequiredForSelection
       ? '请确认仓储口径后再报'
       : fixed !== null
         ? `确认固定最终价 ${fmt(targetFinal)} SAR 是否继续`
@@ -185,17 +236,97 @@ for (const [sku, group] of bySku.entries()) {
   const compactCouponCombo = !couponRows.length
     ? '普通活动'
     : (safe15All ? '普通活动 + 仅15%券，禁止30/50%券' : '普通活动，不叠券；15/30/50%券都禁止');
-  const compactCombo = skuNeedsReview || missingCost || storageMissing
+  const compactCombo = skuNeedsReview || missingCost || (storageRequiredForSelection && storageMissing)
     ? '暂不自动报，等你确认'
     : [
         compactCouponCombo,
         limitRows.length ? '限时折扣先处理' : '',
       ].filter(Boolean).join('；');
-  const storeHandling = skuNeedsReview || missingCost || storageMissing
+  const storeHandling = skuNeedsReview || missingCost || (storageRequiredForSelection && storageMissing)
     ? '不自动处理'
     : safeNoCouponAll
       ? '同货号按目标价执行'
       : '我按店铺平台上限微调；低利润店剔除/单独处理';
+
+  const skuTargetSafetyMargin = targetSafetyMargins.length ? Math.min(...targetSafetyMargins) : null;
+  for (const [rowIdx, r] of group.entries()) {
+    const strategy = rowStrategies[rowIdx] || {};
+    const storeKey = String(r['店铺'] || '').trim().toUpperCase();
+    const activityId = Number(r['活动ID'] || 0);
+    const skc = String(r['SKC'] || '').trim();
+    const current = numValue(r['当前售价SAR']);
+    const minDiscount = strategy.minDiscount ?? (numValue(r['平台最低降幅%']) ?? 0);
+    const platformCap = strategy.platformCap ?? (isNum(current) ? floor2(current * (1 - minDiscount / 100)) : null);
+    const uncappedActivityPrice = strategy.uncappedActivityPrice ?? null;
+    const targetPrice = strategy.targetPrice ?? null;
+    const finalTargetPrice = strategy.finalTargetPrice ?? null;
+    const rowIntendedFinal = strategy.rowIntendedFinal ?? null;
+    const rowCouponFactor = strategy.couponFactor ?? 1;
+    const isTopExposureLink = rowIsTopExposure(r);
+    const productCost = r._cloudCost.productUnitCostSar;
+    const fullCost = r._cloudCost.fullUnitCostSar;
+    const marginAfterStorage = finalTargetPrice !== null && isNum(fullCost) && Number(fullCost) > 0 && finalTargetPrice > 0
+      ? (finalTargetPrice - Number(fullCost)) / finalTargetPrice
+      : null;
+    const marginBeforeStorage = finalTargetPrice !== null && isNum(productCost) && Number(productCost) > 0 && finalTargetPrice > 0
+      ? (finalTargetPrice - Number(productCost)) / finalTargetPrice
+      : null;
+    const marginForSelection = selectionMarginBasis === 'product_cost_excluding_storage'
+      ? marginBeforeStorage
+      : marginAfterStorage;
+    const excludeReasons = [];
+    if (!storeKey) excludeReasons.push('missing_store_key');
+    if (!activityId) excludeReasons.push('missing_activity_id');
+    if (!skc) excludeReasons.push('missing_skc');
+    if (skuNeedsReview) excludeReasons.push('canonical_needs_review');
+    if (missingCost) excludeReasons.push('missing_cloud_product_cost');
+    if (storageMissing && storageRequiredForSelection) excludeReasons.push('missing_cloud_storage_unit_cost');
+    if (rowIntendedFinal === null) excludeReasons.push('missing_target_final_price');
+    if (targetPrice === null || finalTargetPrice === null) excludeReasons.push('missing_row_target_price');
+    if (skuTargetSafetyMargin !== null && skuTargetSafetyMargin < targetFloorMargin - 1e-9) excludeReasons.push(`sku_target_${selectionMarginBasis}_margin_below_floor`);
+    if (marginForSelection !== null && marginForSelection < targetFloorMargin - 1e-9) excludeReasons.push(`row_${selectionMarginBasis}_margin_below_floor`);
+    if (marginForSelection === null && !missingCost && !(storageRequiredForSelection && storageMissing)) excludeReasons.push(`missing_row_${selectionMarginBasis}_margin`);
+    executionRows.push({
+      selected: excludeReasons.length === 0,
+      excludeReason: excludeReasons.join(';'),
+      storeKey,
+      activityId,
+      skc,
+      canonical: sku,
+      supplierNo: r['供方货号'] || '',
+      currentPrice: current,
+      platformMinDiscountPct: minDiscount,
+      platformAllowedMaxBasePrice: platformCap,
+      targetPrice: round2(targetPrice),
+      finalTargetPrice: round2(finalTargetPrice),
+      intendedFinalTargetPrice: round2(rowIntendedFinal),
+      couponFactor: rowCouponFactor,
+      combo: skuNeedsReview || missingCost || (storageRequiredForSelection && storageMissing)
+        ? '暂不自动报，等你确认'
+        : [
+            rowCouponFactor < 1 ? '普通活动 + 仅15%券，禁止30/50%券' : '普通活动',
+            limitRows.length ? '限时折扣先处理' : '',
+          ].filter(Boolean).join('；'),
+      cost: roundOrNull(productCost, 4),
+      storageUnitCostSar: roundOrNull(r._cloudCost.storageUnitCostSar, 4),
+      fullCost: roundOrNull(fullCost, 4),
+      marginBeforeStorage: roundOrNull(marginBeforeStorage, 4),
+      marginAfterStorage: roundOrNull(marginAfterStorage, 4),
+      marginForSelection: roundOrNull(marginForSelection, 4),
+      selectionMarginBasis,
+      isTopExposureLink,
+      rule: 'cloud_sku_approval_execution_price',
+      sourceStatus: status,
+      platformAdjusted: targetPrice !== null && uncappedActivityPrice !== null && platformCap !== null && targetPrice < uncappedActivityPrice - 0.001,
+      note: [
+        targetPrice !== null && uncappedActivityPrice !== null && platformCap !== null && targetPrice < uncappedActivityPrice - 0.001
+          ? `平台最低降幅上限 ${fmt(platformCap)} SAR 低于策略价 ${fmt(uncappedActivityPrice)} SAR`
+          : '',
+        isTopExposureLink ? `命中本标准货号${exposureRankMetricText || '曝光'}全局前五` : '',
+        rowCouponFactor < 1 ? `普通活动价 ${fmt(targetPrice)} × ${rowCouponFactor} = 目标成交价 ${fmt(finalTargetPrice)}` : '',
+      ].filter(Boolean).join('；'),
+    });
+  }
 
   const cloudProfit = mostCommonObject(group.map(r => r._cloudCost.profitRow).filter(Boolean));
   const storageFeeTotals = group.map(r => r._cloudCost.storageFeeSar).filter(v => v !== null && v !== undefined && Number(v) >= 0);
@@ -220,13 +351,13 @@ for (const [sku, group] of bySku.entries()) {
     '云端成本来源': sourceLabels.join(' / ') || 'missing',
     '货号复核原因': skuReviewReasons.join(' / '),
     '系统目标': targetMode,
-    '建议最终成交价SAR': fmt(targetFinal),
+    '建议最终成交价SAR': range(rowIntendedFinals),
     '曝光前五SKC': topExposureRows.map(row => `${row.storeKey || '-'}#${row.rank}.${row.skc}${row.score ? `(${row.score})` : ''}`).join('；'),
     '本表命中曝光前五SKC': topExposureSkcsInGroup.map(row => `${row.storeKey || '-'}#${row.rank}.${row.skc}`).join('；'),
     '曝光规则目标利润率': exposureRuleText,
     '曝光前五建议最终成交价SAR': fmt(topExposureTargetFinal),
     '其他链接建议最终成交价SAR': fmt(targetFinal),
-    '建议普通活动价SAR': missingCost ? '' : range(effectiveNoCouponPrices.length ? effectiveNoCouponPrices : oldSuggested),
+    '建议普通活动价SAR': missingCost ? '' : range(activityBasePrices.length ? activityBasePrices : oldSuggested),
     '如果只叠15%券普通活动价需≥SAR': couponRows.length ? fmt(priceFor15Coupon) : '',
     '如果叠50%券普通活动价需≥SAR': couponRows.length ? fmt(priceFor50Coupon) : '',
     '平台允许活动价上限范围SAR': range(platformCaps),
@@ -317,11 +448,17 @@ const sourceSummary = {
   pricingPolicy: {
     path: path.relative(ROOT, pricingPolicyPath),
     updatedAt: pricingPolicy.updatedAt || '',
-    exposureTopLinksEnabled: pricingPolicy.exposureTopLinks?.enabled !== false,
-    exposureTopN: pricingPolicy.exposureTopLinks?.topN || 5,
-    exposureMetricFields: pricingPolicy.exposureTopLinks?.metricFields || [],
+    exposureDataPath: exposureDataPath ? path.relative(ROOT, exposureDataPath) : path.relative(ROOT, cloudBiPath),
+    exposureDataMtime: exposureDataStat.mtime.toISOString(),
+    exposureTopLinksEnabled: signupPricingPolicy.exposureTopLinks?.enabled !== false,
+    exposureTopN: signupPricingPolicy.exposureTopLinks?.topN || 5,
+    exposureMetricFields: signupPricingPolicy.exposureTopLinks?.metricFields || [],
     exposureSourceRows: exposureIndex.rowCount,
-    rule: '同一标准货号在所有店铺、所有链接中按 BI 曝光量取全局前五；前五链接可比其他链接低5个百分点，但不得低于15%底价；若基础目标已在15%底线，则前五保持15%，其他链接提高到20%。固定价和逐行覆盖价优先。',
+    exposureCanonicalBackfill,
+    selectionMarginBasis,
+    selectionMarginRule: `${marginBasisText(selectionMarginBasis)} >= ${round2(targetFloorMargin * 100)}% 才进入自动 allowlist`,
+    exposureMetricTierCounts: countMapValues(exposureIndex.metricLabelByGroup),
+    rule: '同一标准货号在所有店铺、所有链接中取全局前五；先按正向7天曝光排名，只有当该标准货号全局没有任何正向7天曝光时，才降级按30天曝光/总曝光兜底。高曝光前五策略沿用原规则：前五链接可比其他链接低5个百分点，但不得低于15%底价；若基础目标已在15%底线，则前五保持15%，其他链接提高到20%。固定价和逐行覆盖价优先。',
   },
   output: {
     rows: confirmRows.length,
@@ -394,11 +531,17 @@ const sourceRows = [
   ['成本源文件', sourceSummary.cloudProductionSource.costSource],
   ['成本映射所用 BI', sourceSummary.cloudProductionSource.costBiSource],
   ['营销定价策略', sourceSummary.pricingPolicy.path],
+  ['曝光数据源', sourceSummary.pricingPolicy.exposureDataPath],
+  ['曝光数据 mtime', sourceSummary.pricingPolicy.exposureDataMtime],
+  ['曝光字段', (sourceSummary.pricingPolicy.exposureMetricFields || []).join(', ')],
+  ['曝光排名层级分布', Object.entries(sourceSummary.pricingPolicy.exposureMetricTierCounts || {}).map(([k, v]) => `${k}=${v}`).join('；')],
+  ['曝光货号回填', `用本次活动明细的 店铺+SKC 回填云端链接快照空货号：${sourceSummary.pricingPolicy.exposureCanonicalBackfill?.filledRows || 0} 行；未回填空货号：${sourceSummary.pricingPolicy.exposureCanonicalBackfill?.remainingBlankRows || 0} 行`],
   ['曝光前五规则', sourceSummary.pricingPolicy.rule],
+  ['自动剔除利润率口径', sourceSummary.pricingPolicy.selectionMarginRule],
   ['云端 trueCostCount', sourceSummary.cloudProductionSource.trueCostCount],
   ['活动扫描明细行数', rawRows.length],
   ['活动扫描店铺数', activityDoc.selectedStores?.length || 0],
-  ['说明', `${OUTPUT_VERSION} 成本、仓储费/件、含仓储成本、利润率均用云端生产 BI/成本映射重算；仓储费/件采用当前仍在仓库存的移动平均累计仓储成本：每日仓储费加入库存成本余额，库存数量减少时剔除已出库产品携带的历史仓储成本。`],
+  ['说明', `${OUTPUT_VERSION} 成本、仓储费/件、含仓储成本、利润率均用云端生产 BI/成本映射重算；仓储费/件继续展示为当前仍在仓库存的移动平均累计仓储成本，但本轮自动剔除红线使用 ${marginBasisText(selectionMarginBasis)}，不是含仓储利润率。`],
 ];
 sourceSheet.getRange('B:B').format.numberFormat = '@';
 sourceSheet.getRangeByIndexes(0, 0, sourceRows.length, 2).values = sourceRows;
@@ -415,7 +558,7 @@ notes.mergeCells('A1:D1');
 notes.getRange('A1:D1').format = {fill: '#1F4E78', font: {bold: true, color: '#FFFFFF'}};
 notes.getRange('A3:D9').values = [
   ['1', '先看', '给你确认', '每个标准货号一行，已补商品成本、仓储费/件、含仓储成本。'],
-  ['2', '利润率口径', '不含仓储 / 含仓储', '不含仓储利润率只扣商品成本；含仓储利润率扣商品成本+云端仓储费/件。仓储费>0 时含仓储利润率应更低。'],
+  ['2', '利润率口径', '不含仓储 / 含仓储', `不含仓储利润率只扣商品成本；含仓储利润率扣商品成本+云端仓储费/件。本轮自动剔除红线按 ${marginBasisText(selectionMarginBasis)} >= ${round2(targetFloorMargin * 100)}%。`],
   ['3', '云端来源', '云端来源', '成本和仓储来自 shein-bi-tencent 的生产 BI 快照和云端成本映射。'],
   ['4', '你确认什么', '建议最终成交价SAR', '接受就写同意；要改就填“你的确认最终价SAR”或“你的确认利润率%”。'],
   ['5', '店铺差异', '系统处理', '各店当前价、平台最低降幅差异由系统按范围处理；低利润或不达标店会筛掉/单独处理。'],
@@ -423,7 +566,7 @@ notes.getRange('A3:D9').values = [
   ['7', '本次修正', 'v4-v6 问题', 'v4 暴露出别名同步和销量分摊问题；v5/v6 仍没有剔除已出库产品携带的历史仓储成本；v7 改为当前在仓库存移动平均累计仓储口径，并把禁止券档写清楚。'],
 ];
 notes.getRange('A10:D10').values = [
-  ['8', '曝光前五', '价格差异', '同一标准货号在所有店铺、所有链接中按 BI 曝光量取全局前五 SKC：前五链接可比其他链接低5个百分点，但不能低于15%底价；若基础目标已是15%，前五保持15%，其他链接提高到20%。固定价和逐行覆盖价优先。'],
+  ['8', '曝光前五', '价格差异', '同一标准货号在所有店铺、所有链接中按本次云端7天曝光取全局前五 SKC：前五链接可比其他链接低5个百分点，但不能低于15%底价；若基础目标已是15%，前五保持15%，其他链接提高到20%。固定价和逐行覆盖价优先。'],
 ];
 notes.getRange('A3:D9').format = {wrapText: true};
 notes.getRange('A10:D10').format = {wrapText: true};
@@ -442,11 +585,22 @@ console.log(errors.ndjson);
 const xlsx = await SpreadsheetFile.exportXlsx(workbook);
 const xlsxPath = path.join(outDir, `marketing-sku-approval-${DATE_TAG}-${OUTPUT_VERSION}.xlsx`);
 await xlsx.save(xlsxPath);
+const executionArtifacts = await writeExecutionArtifacts(executionRows, {
+  dateTag: DATE_TAG,
+  outputVersion: OUTPUT_VERSION,
+  executionTag: EXECUTION_TAG,
+  sourceWorkbook: xlsxPath,
+  sourceReport: reportJson,
+  cloudBiPath,
+  cloudCostPath,
+  exposureDataPath,
+});
 sourceSummary.output.xlsxPath = path.relative(ROOT, xlsxPath);
 sourceSummary.output.previewPath = path.relative(ROOT, previewPath);
 sourceSummary.output.columns = confirmHeaders.length;
+sourceSummary.executionArtifacts = executionArtifacts.summary;
 await fs.writeFile(sourceSummaryPath, JSON.stringify(sourceSummary, null, 2), 'utf8');
-console.log(JSON.stringify({xlsxPath, csvPath, previewPath, sourceSummaryPath, rows: approvalRows.length, columns: confirmHeaders.length}, null, 2));
+console.log(JSON.stringify({xlsxPath, csvPath, previewPath, sourceSummaryPath, rows: approvalRows.length, columns: confirmHeaders.length, executionArtifacts: executionArtifacts.summary}, null, 2));
 
 function normalizeReviewRow(row) {
   const rawSupplier = row._raw?.row?.supplierNo || row['供方货号'] || row['标准货号'] || '';
@@ -565,6 +719,332 @@ function mostCommonObject(values) { const counts = new Map(); for (const v of va
 function csvEscape(v) { if (v === null || v === undefined) return ''; const s = String(v); return /[",\n\r]/.test(s) ? `"${s.replaceAll('"','""')}"` : s; }
 function colName(n) { let s = ''; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; }
 function safeTableSuffix(value) { return String(value || '').toUpperCase().replace(/[^A-Z0-9_]/g, '') || 'V'; }
+function withSignupCliOverrides(policy, args) {
+  const out = {
+    ...policy,
+    exposureTopLinks: {...(policy?.exposureTopLinks || {})},
+  };
+  const metricFields = parseList(args.exposureMetricFields);
+  if (metricFields.length) out.exposureTopLinks.metricFields = metricFields;
+  return out;
+}
+function enrichExposureBiWithPlanCanonicals(bi, activityRows) {
+  const canonicalByLink = new Map();
+  for (const row of activityRows || []) {
+    const storeKey = String(row?.['店铺'] || row?.storeKey || '').trim().toUpperCase();
+    const skc = String(row?.['SKC'] || row?.skc || '').trim();
+    const canonical = String(row?.['标准货号'] || row?.['供方货号'] || row?.canonical || '').trim();
+    if (!storeKey || !skc || !canonical) continue;
+    canonicalByLink.set(exposureLinkKey(storeKey, skc), canonical);
+  }
+  const summary = {
+    activityLinkMappings: canonicalByLink.size,
+    scannedRows: 0,
+    blankCanonicalRows: 0,
+    filledRows: 0,
+    remainingBlankRows: 0,
+  };
+  const enrichRow = row => {
+    summary.scannedRows += 1;
+    const direct = String(row?.standard_goods_sn || row?.standardGoodsSn || '').trim();
+    const raw = String(row?.raw_goods_sn || row?.rawGoodsSn || row?.supplierNo || row?.sku_supplier_no || '').trim();
+    if (direct || raw) return row;
+    summary.blankCanonicalRows += 1;
+    const storeKey = String(row?.store_key || row?.storeKey || row?.store || '').trim().toUpperCase();
+    const skc = String(row?.skc || '').trim();
+    const canonical = canonicalByLink.get(exposureLinkKey(storeKey, skc));
+    if (!canonical) {
+      summary.remainingBlankRows += 1;
+      return row;
+    }
+    summary.filledRows += 1;
+    return {
+      ...row,
+      standard_goods_sn: canonical,
+      standardGoodsSn: canonical,
+      exposureCanonicalBackfilledFromPlan: true,
+    };
+  };
+  return {
+    doc: {
+      ...(bi || {}),
+      storeLinks: Array.isArray(bi?.storeLinks) ? bi.storeLinks.map(enrichRow) : bi?.storeLinks,
+      links: Array.isArray(bi?.links) ? bi.links.map(enrichRow) : bi?.links,
+    },
+    summary,
+  };
+}
+function parseList(value) {
+  if (value === null || value === undefined || value === '') return [];
+  if (Array.isArray(value)) return value.map(v => String(v).trim()).filter(Boolean);
+  return String(value).split(',').map(v => v.trim()).filter(Boolean);
+}
+function normalizeSelectionMarginBasis(value) {
+  const v = String(value || '').trim().toLowerCase();
+  if (!v || v === 'full' || v === 'full_cost' || v === 'full_cost_including_storage' || v === 'including_storage') {
+    return 'full_cost_including_storage';
+  }
+  if (v === 'product' || v === 'product_cost' || v === 'product_cost_excluding_storage' || v === 'excluding_storage' || v === 'no_storage') {
+    return 'product_cost_excluding_storage';
+  }
+  throw new Error(`Unsupported --selection-margin-basis: ${value}`);
+}
+function marginBasisText(value) {
+  return value === 'product_cost_excluding_storage' ? '不含仓储成本利润率' : '含仓储成本利润率';
+}
+function exposureMetricText(field) {
+  const text = String(field || '');
+  if (/^c7/i.test(text)) return '7天曝光';
+  if (/^c30/i.test(text)) return '30天曝光兜底';
+  if (/eps/i.test(text)) return '总曝光兜底';
+  if (/goods/i.test(text)) return '商品曝光兜底';
+  return text || '曝光';
+}
+function countMapValues(map) {
+  const out = {};
+  if (!map || typeof map.values !== 'function') return out;
+  for (const value of map.values()) {
+    const key = String(value || '未知');
+    out[key] = (out[key] || 0) + 1;
+  }
+  return Object.fromEntries(Object.entries(out).sort(([a], [b]) => a.localeCompare(b, 'zh-Hans-CN')));
+}
+function exposureLinkKey(storeKey, skc) {
+  return `${String(storeKey || '').trim().toUpperCase()}::${String(skc || '').trim()}`;
+}
+function pctConfigToRatio(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return n > 1 ? n / 100 : n;
+}
+function executionTagFromVersion(version) {
+  const v = String(version || '').trim();
+  const m = v.match(/(?:^|-)t(\d+)$/i);
+  if (m) return `t${m[1]}`;
+  return v || 'plan';
+}
+async function writeExecutionArtifacts(rows, opts) {
+  const signupDir = path.join(ROOT, 'tmp', 'marketing-signup');
+  await fs.mkdir(signupDir, {recursive: true});
+  const reportsDir = path.join(ROOT, 'outputs', 'reports');
+  const selected = rows.filter(r => r.selected);
+  const excluded = rows.filter(r => !r.selected);
+  const byReason = {};
+  for (const r of excluded) {
+    const reason = r.excludeReason || 'unknown';
+    byReason[reason] = (byReason[reason] || 0) + 1;
+  }
+  const makeScope = (name, scopeRows, scopeExcluded, note) => {
+    const stores = uniq(scopeRows.map(r => r.storeKey)).sort();
+    const activityIds = uniq(scopeRows.map(r => r.activityId)).sort((a, b) => Number(a) - Number(b));
+    const selectedItems = scopeRows.map(r => ({
+      storeKey: r.storeKey,
+      activityId: r.activityId,
+      skc: r.skc,
+      canonical: r.canonical,
+      selected: true,
+      rule: r.rule,
+    }));
+    const priceItems = scopeRows.map(r => ({
+      storeKey: r.storeKey,
+      activityId: r.activityId,
+      skc: r.skc,
+      canonical: r.canonical,
+      targetPrice: r.targetPrice,
+      finalTargetPrice: r.finalTargetPrice,
+      intendedFinalTargetPrice: r.intendedFinalTargetPrice,
+      cost: r.cost,
+      fullCost: r.fullCost,
+      storageUnitCostSar: r.storageUnitCostSar,
+      marginBeforeStorage: r.marginBeforeStorage,
+      marginAfterStorage: r.marginAfterStorage,
+      marginForSelection: r.marginForSelection,
+      selectionMarginBasis: r.selectionMarginBasis,
+      isTopExposureLink: r.isTopExposureLink,
+      couponFactor: r.couponFactor,
+      minMarginFloor: targetFloorMargin,
+      rule: r.rule,
+      combo: r.combo,
+      note: r.note,
+      source: path.relative(ROOT, opts.sourceWorkbook),
+      confirmMatch: 'row_level_cloud_execution',
+    }));
+    const relWorkbook = path.relative(ROOT, opts.sourceWorkbook).replaceAll('\\', '/');
+    const relReport = path.relative(ROOT, opts.sourceReport).replaceAll('\\', '/');
+    return {
+      selection: {
+        createdAt: new Date().toISOString(),
+        sourceWorkbook: relWorkbook,
+        sourceReport: relReport,
+        activityIds,
+        stores,
+        selectionPolicy: {
+          rule: 'auto_safe_after_cloud_cost_review_with_configured_row_margin_floor',
+          note,
+          targetFloorMarginPct: round2(targetFloorMargin * 100),
+          selectionMarginBasis,
+          selectionMarginBasisText: marginBasisText(selectionMarginBasis),
+        },
+        totals: {
+          reviewRows: rows.length,
+          selectedRows: scopeRows.length,
+          excludedRows: scopeExcluded.length,
+          selectionItems: selectedItems.length,
+        },
+        scope: {
+          storeKeys: stores,
+          phase: `${opts.dateTag}-${opts.executionTag}-plan`,
+          submit: false,
+        },
+        mode: 'allowlist',
+        items: selectedItems,
+        excluded: scopeExcluded.map(excludedExecutionRow),
+      },
+      overrides: {
+        createdAt: new Date().toISOString(),
+        sourceWorkbook: relWorkbook,
+        parser: 'build_marketing_sku_approval_execution_artifacts',
+        sourceFiles: {
+          activityReport: relReport,
+          cloudBi: path.relative(ROOT, opts.cloudBiPath).replaceAll('\\', '/'),
+          cloudCost: path.relative(ROOT, opts.cloudCostPath).replaceAll('\\', '/'),
+          exposureData: opts.exposureDataPath ? path.relative(ROOT, opts.exposureDataPath).replaceAll('\\', '/') : '',
+        },
+        activityIds,
+        stores,
+        selectionPolicy: {
+          rule: 'row_level_cloud_execution_price',
+          targetPriceMeaning: 'ordinary marketing signup base price before coupon',
+          finalTargetPriceMeaning: 'expected customer transaction price after planned coupon factor',
+          targetFloorMarginPct: round2(targetFloorMargin * 100),
+          selectionMarginBasis,
+          selectionMarginBasisText: marginBasisText(selectionMarginBasis),
+        },
+        totals: {
+          reviewRows: rows.length,
+          selectedRows: scopeRows.length,
+          excludedRows: scopeExcluded.length,
+          priceOverrideItems: priceItems.length,
+        },
+        scope: {
+          storeKeys: stores,
+          phase: `${opts.dateTag}-${opts.executionTag}-plan`,
+        },
+        items: priceItems,
+        excluded: scopeExcluded.map(excludedExecutionRow),
+      },
+    };
+  };
+  const mainRows = selected.filter(r => r.storeKey !== 'JSH');
+  const jshRows = selected.filter(r => r.storeKey === 'JSH');
+  const mainExcluded = excluded.filter(r => r.storeKey !== 'JSH');
+  const jshExcluded = excluded.filter(r => r.storeKey === 'JSH');
+  const scopes = {
+    allSafe: makeScope('all-safe', selected, excluded, '全店安全清单：逐行剔除低利润/缺成本/缺仓储/待归并货号，并输出配套价格覆盖。'),
+    mainNoJsh: makeScope('main-no-jsh', mainRows, mainExcluded, '主执行清单：不含 JSH；逐行剔除低利润/缺成本/缺仓储/待归并货号，并输出配套价格覆盖。'),
+    jsh: makeScope('jsh', jshRows, jshExcluded, 'JSH 单列清单：逐行剔除低利润/缺成本/缺仓储/待归并货号，并输出配套价格覆盖。'),
+  };
+  const fileSpecs = {
+    allSafe: 'all-safe',
+    mainNoJsh: 'main-no-jsh',
+    jsh: 'jsh',
+  };
+  const paths = {};
+  for (const [key, suffix] of Object.entries(fileSpecs)) {
+    const selectionPath = path.join(signupDir, `selection-plan-${opts.dateTag}-${opts.executionTag}-${suffix}.json`);
+    const overridesPath = path.join(signupDir, `price-overrides-${opts.dateTag}-${opts.executionTag}-${suffix}.json`);
+    await fs.writeFile(selectionPath, JSON.stringify(scopes[key].selection, null, 2), 'utf8');
+    await fs.writeFile(overridesPath, JSON.stringify(scopes[key].overrides, null, 2), 'utf8');
+    paths[key] = {
+      selectionPlan: path.relative(ROOT, selectionPath).replaceAll('\\', '/'),
+      priceOverrides: path.relative(ROOT, overridesPath).replaceAll('\\', '/'),
+    };
+  }
+  const countBy = (items, key) => {
+    const out = {};
+    for (const item of items) {
+      const value = String(item[key] ?? '');
+      out[value] = (out[value] || 0) + 1;
+    }
+    return Object.fromEntries(Object.entries(out).sort(([a], [b]) => a.localeCompare(b)));
+  };
+  const summary = {
+    createdAt: new Date().toISOString(),
+    sourceWorkbook: path.relative(ROOT, opts.sourceWorkbook).replaceAll('\\', '/'),
+    sourceReport: path.relative(ROOT, opts.sourceReport).replaceAll('\\', '/'),
+    totalReviewRows: rows.length,
+    selectedAllSafeRows: selected.length,
+    selectedMainNoJshRows: mainRows.length,
+    selectedJshRows: jshRows.length,
+    excludedRows: excluded.length,
+    excludedByReason: byReason,
+    byActivityAllSafe: countBy(selected, 'activityId'),
+    byActivityMainNoJsh: countBy(mainRows, 'activityId'),
+    byStoreMainNoJsh: countBy(mainRows, 'storeKey'),
+    byStoreJsh: countBy(jshRows, 'storeKey'),
+    paths,
+    targetFloorMarginPct: round2(targetFloorMargin * 100),
+    selectionMarginBasis,
+    selectionMarginBasisText: marginBasisText(selectionMarginBasis),
+  };
+  const jsonPath = path.join(reportsDir, `marketing-signup-execution-plan-${opts.dateTag}-${opts.executionTag}.json`);
+  await fs.writeFile(jsonPath, JSON.stringify(summary, null, 2), 'utf8');
+  const mdPath = path.join(reportsDir, `marketing-signup-execution-plan-${opts.dateTag}-${opts.executionTag}.md`);
+  const topExcluded = excluded.slice(0, 30);
+  const md = [
+    `# 今日普通活动执行方案 ${opts.dateTag}`,
+    '',
+    '## 结论',
+    `- 活动：${Object.keys(summary.byActivityAllSafe).map(x => `\`${x}\``).join(' / ') || '无'}。`,
+    `- 安全候选：${selected.length} 行；主执行（不含 JSH）：${mainRows.length} 行；JSH 单列：${jshRows.length} 行；剔除：${excluded.length} 行。`,
+    `- 执行价已逐行写入 \`price-overrides\`：\`targetPrice\` 是普通活动填报价，\`finalTargetPrice\` 是叠券后的预计成交价。`,
+    `- 逐行安全线：${marginBasisText(selectionMarginBasis)} 必须 >= ${round2(targetFloorMargin * 100)}%，否则不进 allowlist。`,
+    '',
+    '## 主执行分布（不含 JSH）',
+    ...Object.entries(summary.byStoreMainNoJsh).map(([store, count]) => `- ${store}: ${count} 行`),
+    '',
+    '## 活动分布（全安全清单）',
+    ...Object.entries(summary.byActivityAllSafe).map(([activity, count]) => `- 活动 ${activity}: ${count} 行`),
+    '',
+    '## 剔除原因',
+    ...Object.entries(summary.excludedByReason).map(([reason, count]) => `- ${reason}: ${count} 行`),
+    '',
+    '## 剔除样例（前 30）',
+    ...topExcluded.map(r => `- ${r.storeKey} / ${r.activityId} / \`${r.skc}\` / ${r.canonical}: ${r.excludeReason}; 预计最终价 ${fmt(r.finalTargetPrice)} SAR，筛选利润 ${pct(r.marginForSelection)}（不含仓储 ${pct(r.marginBeforeStorage)} / 含仓储 ${pct(r.marginAfterStorage)}）`),
+    '',
+    '## 文件',
+    `- 主执行 allowlist：\`${paths.mainNoJsh.selectionPlan}\``,
+    `- 主执行价格覆盖：\`${paths.mainNoJsh.priceOverrides}\``,
+    `- JSH allowlist：\`${paths.jsh.selectionPlan}\``,
+    `- JSH 价格覆盖：\`${paths.jsh.priceOverrides}\``,
+    `- 全店 allowlist：\`${paths.allSafe.selectionPlan}\``,
+    `- 全店价格覆盖：\`${paths.allSafe.priceOverrides}\``,
+    `- JSON：\`${path.relative(ROOT, jsonPath).replaceAll('\\', '/')}\``,
+    '',
+  ].join('\n');
+  await fs.writeFile(mdPath, md, 'utf8');
+  summary.executionPlanJson = path.relative(ROOT, jsonPath).replaceAll('\\', '/');
+  summary.executionPlanMd = path.relative(ROOT, mdPath).replaceAll('\\', '/');
+  return {summary};
+}
+function excludedExecutionRow(row) {
+  return {
+    storeKey: row.storeKey,
+    activityId: row.activityId,
+    skc: row.skc,
+    canonical: row.canonical,
+    targetPrice: row.targetPrice,
+    finalTargetPrice: row.finalTargetPrice,
+    couponFactor: row.couponFactor,
+    marginBeforeStorage: row.marginBeforeStorage,
+    marginAfterStorage: row.marginAfterStorage,
+    marginForSelection: row.marginForSelection,
+    selectionMarginBasis: row.selectionMarginBasis,
+    isTopExposureLink: row.isTopExposureLink,
+    excludeReason: row.excludeReason,
+    note: row.note,
+  };
+}
 function parseArgs(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i++) {

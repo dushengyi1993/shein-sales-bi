@@ -410,10 +410,12 @@ async function loadAllowedOverlaps(file) {
     const validUntil = parseChinaDate(entry.validUntil);
     if (validUntil && validUntil.getTime() < Date.now()) continue;
     const storeKey = String(entry.storeKey || '*').toUpperCase();
-    const key = `${storeKey}|${activityId}`;
+    const skc = normalizeAllowedSkc(entry.skc) || '*';
+    const key = allowedOverlapKey(storeKey, activityId, skc);
     allowed.set(key, {
       ...entry,
       storeKey,
+      skc,
       limitedDiscountActivityId: activityId,
       validUntil: entry.validUntil || '',
       _source: path.relative(ROOT, absolute),
@@ -428,12 +430,58 @@ function parseChinaDate(value) {
   return Number.isFinite(d.getTime()) ? d : null;
 }
 
-function findAllowedOverlap(allowedOverlaps, storeKey, limitedDiscountActivityId) {
+function normalizeAllowedSkc(value) {
+  return String(value || '').trim();
+}
+
+function allowedOverlapKey(storeKey, limitedDiscountActivityId, skc = '*') {
+  return [
+    String(storeKey || '*').toUpperCase(),
+    Number(limitedDiscountActivityId),
+    normalizeAllowedSkc(skc) || '*',
+  ].join('|');
+}
+
+function findAllowedOverlap(allowedOverlaps, storeKey, limitedDiscountActivityId, skc = '') {
   const activityId = Number(limitedDiscountActivityId);
   if (!Number.isFinite(activityId) || activityId <= 0) return null;
-  return allowedOverlaps.get(`${String(storeKey).toUpperCase()}|${activityId}`)
-    || allowedOverlaps.get(`*|${activityId}`)
+  const normalizedStore = String(storeKey).toUpperCase();
+  const normalizedSkc = normalizeAllowedSkc(skc);
+  return (normalizedSkc ? allowedOverlaps.get(allowedOverlapKey(normalizedStore, activityId, normalizedSkc)) : null)
+    || (normalizedSkc ? allowedOverlaps.get(allowedOverlapKey('*', activityId, normalizedSkc)) : null)
+    || allowedOverlaps.get(allowedOverlapKey(normalizedStore, activityId, '*'))
+    || allowedOverlaps.get(allowedOverlapKey('*', activityId, '*'))
     || null;
+}
+
+function findApprovedBelowTargetOverlap(allowedOverlaps, row, args) {
+  const entry = findAllowedOverlap(allowedOverlaps, row.storeKey, row.limitedDiscountActivityId, row.skc);
+  if (!entry || entry.allowBelowTarget !== true) return null;
+  if (!normalizeAllowedSkc(entry.skc)) return null;
+  if (normalizeAllowedSkc(entry.skc) !== normalizeAllowedSkc(row.skc)) return null;
+  if (Number(entry.couponActivityId) !== Number(args.activityId)) return null;
+  if (Number(entry.levelRuleId) !== Number(row.levelRuleId)) return null;
+  const approvedFinalWithCoupon = Number(entry.approvedFinalWithCoupon);
+  const approvedTargetFinalPrice = Number(entry.approvedTargetFinalPrice);
+  const maxApprovedLossSar = Number(entry.maxApprovedLossSar);
+  if (!Number.isFinite(approvedFinalWithCoupon)
+    || !Number.isFinite(approvedTargetFinalPrice)
+    || !Number.isFinite(maxApprovedLossSar)) {
+    return null;
+  }
+  const finalWithCoupon = Number(row.finalWithCoupon);
+  const targetFinalPrice = Number(row.targetFinalPrice);
+  if (!Number.isFinite(finalWithCoupon) || !Number.isFinite(targetFinalPrice)) return null;
+  if (finalWithCoupon < approvedFinalWithCoupon - 0.01) return null;
+  const liveLoss = Number((targetFinalPrice - finalWithCoupon).toFixed(2));
+  if (liveLoss > maxApprovedLossSar + 0.01) return null;
+  return {
+    ...entry,
+    approvedFinalWithCoupon,
+    approvedTargetFinalPrice,
+    maxApprovedLossSar,
+    liveLoss,
+  };
 }
 
 async function readLiveCouponAndLimited(cdp, args, levelRuleId) {
@@ -664,7 +712,7 @@ async function scanStore(store, args, planBySkc, levelRuleId, allowedOverlaps) {
         const planRow = planBySkc.get(skc);
         if (!planRow) continue;
         const hasActiveCoupon = couponActive.has(skc);
-        const allowedOverlap = findAllowedOverlap(allowedOverlaps, store.storeKey, activity.activity_id);
+        const allowedOverlap = findAllowedOverlap(allowedOverlaps, store.storeKey, activity.activity_id, skc);
         const row = {
           storeKey: store.storeKey,
           activityId: args.activityId,
@@ -703,12 +751,36 @@ async function scanStore(store, args, planBySkc, levelRuleId, allowedOverlaps) {
         row.diff = row.priceGuard.diff ?? '';
         row.priceDecision = row.priceGuard.decision || '';
         row.shouldCancelCoupon = !!row.priceGuard.shouldCancelCoupon;
+        row.belowTargetApproved = false;
+        row.belowTargetApprovalReason = '';
+        row.belowTargetApprovalSource = '';
+        row.approvedValidUntil = '';
+        row.approvedFinalWithCoupon = '';
+        row.approvedTargetFinalPrice = '';
+        row.maxApprovedLossSar = '';
+        row.approvedLiveLossSar = '';
+        const belowTargetApproval = row.shouldCancelCoupon
+          ? findApprovedBelowTargetOverlap(allowedOverlaps, row, args)
+          : null;
+        if (belowTargetApproval) {
+          row.belowTargetApproved = true;
+          row.belowTargetApprovalReason = belowTargetApproval.reason || '';
+          row.belowTargetApprovalSource = belowTargetApproval._source || '';
+          row.approvedValidUntil = belowTargetApproval.validUntil || '';
+          row.approvedFinalWithCoupon = belowTargetApproval.approvedFinalWithCoupon;
+          row.approvedTargetFinalPrice = belowTargetApproval.approvedTargetFinalPrice;
+          row.maxApprovedLossSar = belowTargetApproval.maxApprovedLossSar;
+          row.approvedLiveLossSar = belowTargetApproval.liveLoss;
+          row.shouldCancelCoupon = false;
+        }
         row.riskReason = hasActiveCoupon
-          ? (row.shouldCancelCoupon
+          ? (row.belowTargetApproved
+            ? 'active_15pct_coupon_final_below_target_user_approved_loss_clearance'
+            : (row.shouldCancelCoupon
             ? 'active_15pct_coupon_final_below_target_due_to_limited_discount'
             : (row.priceDecision.startsWith('missing_')
               ? 'active_15pct_coupon_limited_discount_overlap_missing_price_evidence'
-              : 'active_15pct_coupon_limited_discount_overlap_price_guard_allows'))
+              : 'active_15pct_coupon_limited_discount_overlap_price_guard_allows')))
           : 'planned_coupon_skc_has_active_or_future_limited_discount_but_coupon_not_active';
 
         const prev = limitedBySkc.get(skc);
@@ -823,6 +895,7 @@ summary.activeCouponOverlapCount = riskRows.filter(row => row.hasActiveCoupon).l
 summary.allowedActiveOverlapCount = riskRows.filter(row => row.hasActiveCoupon && row.allowedOverlap).length;
 summary.activeCouponAllowedByPriceCount = riskRows.filter(row => row.hasActiveCoupon && row.priceGuard?.allowSubmit).length;
 summary.activeCouponBelowTargetCount = riskRows.filter(row => row.hasActiveCoupon && row.shouldCancelCoupon).length;
+summary.activeCouponBelowTargetApprovedCount = riskRows.filter(row => row.hasActiveCoupon && row.belowTargetApproved).length;
 summary.activeCouponMissingPriceEvidenceCount = riskRows.filter(row => row.hasActiveCoupon && String(row.priceDecision || '').startsWith('missing_')).length;
 summary.activeCouponRiskCount = cancelRows.length;
 summary.cancelList = {
@@ -832,7 +905,8 @@ summary.cancelList = {
 await fs.writeFile(jsonFile, JSON.stringify(summary, null, 2), 'utf8');
 await fs.writeFile(csvFile, toCsv(riskRows, [
   'storeKey', 'skc', 'supplierNo', 'canonical', 'riskReason', 'hasActiveCoupon',
-  'allowedOverlap', 'allowedOverlapReason', 'priceDecision', 'currentBasePrice',
+  'allowedOverlap', 'allowedOverlapReason', 'belowTargetApproved',
+  'belowTargetApprovalReason', 'approvedValidUntil', 'priceDecision', 'currentBasePrice',
   'couponFactor', 'finalWithCoupon', 'targetFinalPrice', 'diff', 'priceEvidenceSource',
   'levelRuleId', 'limitedDiscountActivityId', 'limitedDiscountName', 'limitedDiscountState',
   'limitedDiscountStart', 'limitedDiscountEnd', 'limitedDiscountPrice', 'ordinaryPlanActivityId',

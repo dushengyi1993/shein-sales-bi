@@ -23,6 +23,7 @@ function parseArgs(argv) {
     storeKey: 'HL',
     startDelayMinutes: 20,
     endTime: '',
+    activityNamePrefix: 'HL漏报补救限时折扣',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -41,12 +42,15 @@ function parseArgs(argv) {
     else if (arg.startsWith('--start-delay-minutes=')) args.startDelayMinutes = Number(arg.slice('--start-delay-minutes='.length));
     else if (arg === '--end-time') args.endTime = argv[++i] || '';
     else if (arg.startsWith('--end-time=')) args.endTime = arg.slice('--end-time='.length);
+    else if (arg === '--activity-name-prefix') args.activityNamePrefix = argv[++i] || '';
+    else if (arg.startsWith('--activity-name-prefix=')) args.activityNamePrefix = arg.slice('--activity-name-prefix='.length);
     else throw new Error(`Unknown argument: ${arg}`);
   }
   if (!Number.isFinite(args.port) || args.port <= 0) throw new Error(`Invalid --port: ${args.port}`);
   if (!args.storeKey) throw new Error('Missing --store-key for identity guard');
   if (!args.rescue) throw new Error('Missing --rescue <rescue-json>. Do not rely on a hard-coded one-off batch path.');
   if (!args.endTime) throw new Error('Missing --end-time "YYYY-MM-DD HH:mm:ss" for the limited-discount rescue window.');
+  if (!String(args.activityNamePrefix || '').trim()) throw new Error('Missing --activity-name-prefix for the limited-discount activity name.');
   const end = new Date(String(args.endTime).replace(' ', 'T') + '+08:00');
   if (!Number.isFinite(end.getTime())) throw new Error(`Invalid --end-time: ${args.endTime}`);
   if (!Number.isFinite(args.startDelayMinutes) || args.startDelayMinutes < 1) {
@@ -198,6 +202,7 @@ try {
       targetRefToolId,
       targetEndTime,
       startDelayMinutes,
+      activityNamePrefix,
     } = __arg;
 
     const headers = {'content-type': 'application/json;charset=UTF-8'};
@@ -388,7 +393,7 @@ try {
     function buildActivityBaseInfo() {
       const zoneStartTime = fmtDate(new Date(Date.now() + startDelayMinutes * 60 * 1000));
       return {
-        act_name: 'HL漏报补救限时折扣' + fmtDate(new Date()).slice(0, 10).replaceAll('-', ''),
+        act_name: activityNamePrefix + fmtDate(new Date()).slice(0, 10).replaceAll('-', ''),
         zone_start_time: zoneStartTime,
         zone_end_time: targetEndTime,
         time_zone: 'Asia/Shanghai',
@@ -824,6 +829,7 @@ try {
       targetRefToolId: TARGET_REF_TOOL_ID,
       targetEndTime: rescue.endTime || args.endTime,
       startDelayMinutes: args.startDelayMinutes,
+      activityNamePrefix: args.activityNamePrefix,
     },
   );
 

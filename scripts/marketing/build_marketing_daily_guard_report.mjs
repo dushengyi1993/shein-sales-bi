@@ -11,6 +11,7 @@ import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {spawn} from 'node:child_process';
 import {
   DEFAULT_CLOUD_BI_ROOT as SHARED_DEFAULT_CLOUD_BI_ROOT,
   DEFAULT_CLOUD_BI_SSH_TIMEOUT_MS as SHARED_DEFAULT_CLOUD_BI_SSH_TIMEOUT_MS,
@@ -34,17 +35,23 @@ import {summarizeStackReviewCoverage} from '../../lib/marketing_stack_review_cov
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'outputs', 'reports');
 const DEFAULT_MAX_AGE_HOURS = 72;
-const TARGET_PLAN_DEFAULT = path.join(ROOT, 'tmp', 'marketing-signup', 'selection-plan-2026-06-03-ALL-ready.json');
-const PRICE_OVERRIDES_DEFAULT = path.join(ROOT, 'tmp', 'marketing-signup', 'price-overrides-2026-06-03-ALL-ready.json');
+const MARKETING_SIGNUP_DIR = path.join(ROOT, 'tmp', 'marketing-signup');
+const TARGET_PLAN_LEGACY_DEFAULT = path.join(MARKETING_SIGNUP_DIR, 'selection-plan-2026-06-03-ALL-ready.json');
+const PRICE_OVERRIDES_LEGACY_DEFAULT = path.join(MARKETING_SIGNUP_DIR, 'price-overrides-2026-06-03-ALL-ready.json');
 const BI_PORTAL_DATA_DEFAULT = path.join(ROOT, 'outputs', 'bi-portal', 'data.json');
 const STORES_CONFIG_DEFAULT = path.join(ROOT, 'config', 'stores.json');
 const COUPON_CANCEL_RESULTS_DIR = path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-cancel-results');
+const DEADLINE_FILL_RESULTS_DIR = path.join(ROOT, 'tmp', 'mbrs', 'deadline-fill-results');
 const NEW_SKC_SHELF_AGE_DAYS = 30;
 const NEW_SKC_MAX_ROWS = 80;
 const DEFAULT_CLOUD_BI_ROOT = SHARED_DEFAULT_CLOUD_BI_ROOT;
 const DEFAULT_CLOUD_BI_SSH_TIMEOUT_MS = SHARED_DEFAULT_CLOUD_BI_SSH_TIMEOUT_MS;
 const DEFAULT_CLOUD_BI_MAX_BYTES = SHARED_DEFAULT_CLOUD_BI_MAX_BYTES;
 const MARKETING_STACK_REVIEW_MAX_AGE_HOURS = 48;
+const CLOUD_ORDER_LOOKBACK_DAYS = 1;
+const ORDER_PRICE_TOLERANCE_SAR = 1;
+const M12_COUPON_RESCAN_NOT_BEFORE_ISO = '2026-06-12T16:45:00+08:00';
+const M12_COUPON_RESCAN_NOT_BEFORE_TEXT = '2026-06-12 16:45:00 +08:00';
 const CRITICAL_SOURCE_LABELS = new Set([
   'couponSubmitLatestSummary',
   'lowPriceOverlapLive',
@@ -71,13 +78,16 @@ function parseArgs(argv) {
     outDir: DEFAULT_OUT_DIR,
     maxAgeHours: DEFAULT_MAX_AGE_HOURS,
     biPortalData: BI_PORTAL_DATA_DEFAULT,
-    targetPlan: TARGET_PLAN_DEFAULT,
-    priceOverrides: PRICE_OVERRIDES_DEFAULT,
+    targetPlan: '',
+    priceOverrides: '',
+    targetPlanExplicit: false,
+    priceOverridesExplicit: false,
     storesConfig: STORES_CONFIG_DEFAULT,
     cloudBiSsh: '',
     cloudBiRoot: DEFAULT_CLOUD_BI_ROOT,
     cloudBiSshTimeoutMs: DEFAULT_CLOUD_BI_SSH_TIMEOUT_MS,
     cloudBiMaxBytes: DEFAULT_CLOUD_BI_MAX_BYTES,
+    now: '',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -85,18 +95,33 @@ function parseArgs(argv) {
     else if (a === '--out-dir') args.outDir = path.resolve(argv[++i]);
     else if (a === '--max-age-hours') args.maxAgeHours = Number(argv[++i]);
     else if (a === '--bi-portal-data') args.biPortalData = path.resolve(argv[++i]);
-    else if (a === '--target-plan') args.targetPlan = path.resolve(argv[++i]);
-    else if (a === '--price-overrides') args.priceOverrides = path.resolve(argv[++i]);
+    else if (a === '--target-plan') {
+      args.targetPlan = path.resolve(argv[++i]);
+      args.targetPlanExplicit = true;
+    } else if (a === '--price-overrides') {
+      args.priceOverrides = path.resolve(argv[++i]);
+      args.priceOverridesExplicit = true;
+    }
     else if (a === '--stores-config') args.storesConfig = path.resolve(argv[++i]);
     else if (a === '--cloud-bi-ssh') args.cloudBiSsh = String(argv[++i] || '').trim();
     else if (a === '--cloud-bi-root') args.cloudBiRoot = String(argv[++i] || '').trim();
     else if (a === '--cloud-bi-ssh-timeout-ms') args.cloudBiSshTimeoutMs = Number(argv[++i]);
     else if (a === '--cloud-bi-max-bytes') args.cloudBiMaxBytes = Number(argv[++i]);
+    else if (a === '--now') args.now = String(argv[++i] || '').trim();
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(args.date)) throw new Error(`Invalid --date ${args.date}; expected YYYY-MM-DD`);
   if (!Number.isFinite(args.maxAgeHours) || args.maxAgeHours <= 0) args.maxAgeHours = DEFAULT_MAX_AGE_HOURS;
   if (!Number.isFinite(args.cloudBiSshTimeoutMs) || args.cloudBiSshTimeoutMs <= 0) args.cloudBiSshTimeoutMs = DEFAULT_CLOUD_BI_SSH_TIMEOUT_MS;
   if (!Number.isFinite(args.cloudBiMaxBytes) || args.cloudBiMaxBytes <= 0) args.cloudBiMaxBytes = DEFAULT_CLOUD_BI_MAX_BYTES;
+  if (args.now && !parseAnyDateTime(args.now)) throw new Error(`Invalid --now ${args.now}; expected parseable local/ISO datetime`);
+  args.planSelection = resolveCurrentMarketingPlanPair({
+    targetPlan: args.targetPlan,
+    priceOverrides: args.priceOverrides,
+    targetPlanExplicit: args.targetPlanExplicit,
+    priceOverridesExplicit: args.priceOverridesExplicit,
+  });
+  args.targetPlan = args.planSelection.targetPlan;
+  args.priceOverrides = args.planSelection.priceOverrides;
   return args;
 }
 
@@ -108,6 +133,11 @@ function formatLocalDate(d) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
 
+function formatLocalDateTime(d) {
+  if (!(d instanceof Date) || !Number.isFinite(d.getTime())) return '';
+  return `${formatLocalDate(d)} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
 function rel(file) {
   if (!file) return '';
   return path.relative(ROOT, file).replaceAll('\\', '/');
@@ -115,6 +145,182 @@ function rel(file) {
 
 function exists(file) {
   return Boolean(file && fsSync.existsSync(file));
+}
+
+function resolveCurrentMarketingPlanPair({
+  targetPlan = '',
+  priceOverrides = '',
+  targetPlanExplicit = false,
+  priceOverridesExplicit = false,
+} = {}) {
+  if (targetPlanExplicit && priceOverridesExplicit) {
+    return {targetPlan, priceOverrides, strategy: 'explicit_both'};
+  }
+  if (targetPlanExplicit) {
+    const inferred = inferPairedMarketingPlanPath(targetPlan, 'selection-plan', 'price-overrides');
+    if (!inferred) throw new Error(`--target-plan was provided but matching price-overrides file was not found: ${targetPlan}`);
+    return {
+      targetPlan,
+      priceOverrides: priceOverrides || inferred,
+      strategy: 'explicit_target_inferred_price',
+    };
+  }
+  if (priceOverridesExplicit) {
+    const inferred = inferPairedMarketingPlanPath(priceOverrides, 'price-overrides', 'selection-plan');
+    if (!inferred) throw new Error(`--price-overrides was provided but matching selection-plan file was not found: ${priceOverrides}`);
+    return {
+      targetPlan: targetPlan || inferred,
+      priceOverrides,
+      strategy: 'explicit_price_inferred_target',
+    };
+  }
+  const current = selectLatestMarketingPlanPair();
+  if (current) return {...current, strategy: 'auto_latest_current_pair'};
+  return {
+    targetPlan: TARGET_PLAN_LEGACY_DEFAULT,
+    priceOverrides: PRICE_OVERRIDES_LEGACY_DEFAULT,
+    strategy: 'legacy_fallback',
+  };
+}
+
+function inferPairedMarketingPlanPath(file, fromToken, toToken) {
+  const base = path.basename(file || '');
+  if (!base.includes(fromToken)) return '';
+  const candidate = path.join(path.dirname(file), base.replace(fromToken, toToken));
+  return exists(candidate) ? candidate : '';
+}
+
+function selectLatestMarketingPlanPair() {
+  if (!fsSync.existsSync(MARKETING_SIGNUP_DIR)) return null;
+  const candidates = [];
+  const rejectedCandidates = [];
+  const enabledStores = enabledStoreKeysForPlanSelection();
+  for (const entry of fsSync.readdirSync(MARKETING_SIGNUP_DIR, {withFileTypes: true})) {
+    if (!entry.isFile() || !/^selection-plan-.*\.json$/i.test(entry.name)) continue;
+    const targetPlan = path.join(MARKETING_SIGNUP_DIR, entry.name);
+    const priceOverrides = inferPairedMarketingPlanPath(targetPlan, 'selection-plan', 'price-overrides');
+    if (!priceOverrides) {
+      rejectedCandidates.push({targetPlan: rel(targetPlan), reason: 'missing_paired_price_overrides'});
+      continue;
+    }
+    const stat = fsSync.statSync(targetPlan);
+    const meta = marketingPlanCandidateMeta(targetPlan, priceOverrides, enabledStores);
+    if (meta.rejectReasons.length) {
+      rejectedCandidates.push({
+        targetPlan: rel(targetPlan),
+        priceOverrides: rel(priceOverrides),
+        rowCount: meta.rowCount,
+        rejectReasons: meta.rejectReasons,
+      });
+      continue;
+    }
+    candidates.push({targetPlan, priceOverrides, ...meta, mtimeMs: stat.mtimeMs});
+  }
+  candidates.sort((a, b) => b.score - a.score || b.mtimeMs - a.mtimeMs || String(a.targetPlan).localeCompare(String(b.targetPlan)));
+  const selected = candidates[0] || null;
+  return selected ? {...selected, rejectedCandidates: rejectedCandidates.slice(0, 50)} : null;
+}
+
+function marketingPlanCandidateMeta(file, priceFile, enabledStores = []) {
+  const name = path.basename(file).toLowerCase();
+  let score = 0;
+  const reasons = [];
+  const rejectReasons = [];
+  const add = (n, reason) => {
+    score += n;
+    reasons.push(`${n}:${reason}`);
+  };
+  const selectionDoc = readJsonSafe(file);
+  const priceDoc = readJsonSafe(priceFile);
+  if (!selectionDoc) rejectReasons.push('selection_parse_failed');
+  if (!priceDoc) rejectReasons.push('price_overrides_parse_failed');
+  if (selectionDoc?.scope?.repairOnly === true || priceDoc?.scope?.repairOnly === true) rejectReasons.push('scope_repair_only');
+  if (/\bpilot\b|sample|repair-|(?:^|-)jsh(?:-|\.json)|main-no-jsh|all-safe/i.test(name)) rejectReasons.push('partial_or_subset_filename');
+  const rowCount = itemRows(selectionDoc).length;
+  const priceRowCount = itemRows(priceDoc).length;
+  if (rowCount < 100) rejectReasons.push(`too_few_selection_rows_${rowCount}`);
+  if (priceRowCount < 100) rejectReasons.push(`too_few_price_rows_${priceRowCount}`);
+  if (rowCount !== priceRowCount) rejectReasons.push(`row_count_mismatch_${rowCount}_${priceRowCount}`);
+  const storeCoverage = storeCoverageFromPlan(selectionDoc);
+  if (enabledStores.length && !sameSet(storeCoverage, enabledStores)) {
+    rejectReasons.push(`store_coverage_mismatch_${storeCoverage.length}_of_${enabledStores.length}`);
+  }
+  const alignment = planKeyAlignment(selectionDoc, priceDoc);
+  if (!alignment.ok) rejectReasons.push(`key_alignment_mismatch_missingPrice_${alignment.missingPrice}_missingSelection_${alignment.missingSelection}`);
+  if (rowCount >= 500) add(300, `full_rows_${rowCount}`);
+  else if (rowCount >= 100) add(100, `medium_rows_${rowCount}`);
+  else add(-500, `partial_rows_${rowCount}`);
+  if (name.includes('repaired')) add(500, 'repaired');
+  if (name.includes('include-excluded-approved')) add(450, 'include_excluded_approved');
+  if (name.includes('t3-plus45488')) add(250, 't3_plus45488');
+  if (name.includes('coupon-visible')) add(100, 'coupon_visible');
+  if (name.includes('all-919')) add(100, 'all_919');
+  if (name.includes('all-ready')) add(-700, 'legacy_all_ready');
+  if (name.includes('pilot')) add(-700, 'pilot_partial');
+  if (name.includes('repair-')) add(-650, 'repair_only');
+  if (name.includes('-jsh')) add(-300, 'jsh_subset');
+  if (name.includes('main-no-jsh')) add(-300, 'main_no_jsh_subset');
+  if (name.includes('all-safe')) add(-150, 'pre_approved_safe_subset');
+  return {score, rowCount, priceRowCount, storeCoverage, keyAlignment: alignment, scoreReasons: reasons, rejectReasons};
+}
+
+function readJsonSafe(file) {
+  try {
+    return JSON.parse(fsSync.readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function itemRows(doc) {
+  if (Array.isArray(doc?.items)) return doc.items;
+  if (Array.isArray(doc?.selection)) return doc.selection;
+  if (Array.isArray(doc?.rows)) return doc.rows;
+  return [];
+}
+
+function storeCoverageFromPlan(doc) {
+  const declared = Array.isArray(doc?.scope?.storeKeys) ? doc.scope.storeKeys
+    : (Array.isArray(doc?.stores) ? doc.stores : []);
+  const fromRows = itemRows(doc).map(row => row?.storeKey || row?.store || '').filter(Boolean);
+  return [...new Set([...declared, ...fromRows].map(normalizeStoreKeyForPlanSelection).filter(Boolean))].sort();
+}
+
+function enabledStoreKeysForPlanSelection() {
+  try {
+    const doc = JSON.parse(fsSync.readFileSync(STORES_CONFIG_DEFAULT, 'utf8'));
+    return (doc.stores || []).filter(s => s.enabled !== false).map(s => normalizeStoreKeyForPlanSelection(s.storeKey)).filter(Boolean).sort();
+  } catch {
+    return [];
+  }
+}
+
+function planKeyAlignment(selectionDoc, priceDoc) {
+  const selectionKeys = new Set(itemRows(selectionDoc).map(planRowKey).filter(Boolean));
+  const priceKeys = new Set(itemRows(priceDoc).map(planRowKey).filter(Boolean));
+  let missingPrice = 0;
+  let missingSelection = 0;
+  for (const key of selectionKeys) if (!priceKeys.has(key)) missingPrice += 1;
+  for (const key of priceKeys) if (!selectionKeys.has(key)) missingSelection += 1;
+  return {ok: missingPrice === 0 && missingSelection === 0 && selectionKeys.size > 0, selectionKeys: selectionKeys.size, priceKeys: priceKeys.size, missingPrice, missingSelection};
+}
+
+function planRowKey(row) {
+  const storeKey = normalizeStoreKeyForPlanSelection(row?.storeKey || row?.store);
+  const activityId = Number(row?.activityId || row?.activity_id || 0);
+  const skc = String(row?.skc || row?.SKC || '').trim();
+  return storeKey && activityId && skc ? `${storeKey}__${activityId}__${skc}` : '';
+}
+
+function normalizeStoreKeyForPlanSelection(value) {
+  return String(value || '').trim().toUpperCase();
+}
+
+function sameSet(a = [], b = []) {
+  if (a.length !== b.length) return false;
+  const aa = [...a].sort();
+  const bb = [...b].sort();
+  return aa.every((value, idx) => value === bb[idx]);
 }
 
 function parseLocalDateTime(value) {
@@ -766,7 +972,12 @@ function summarizeBiPortal(doc, source) {
 
 function summarizeT3Candidates(stackDoc, reportDate) {
   const start = parseLocalDateTime(`${reportDate} 00:00:00`);
+  // Business meaning of "T-3" is calendar-day based in Asia/Shanghai:
+  // when the report runs on 2026-06-08, activities ending any time on
+  // 2026-06-11 must be visible. A strict 72-hour cutoff from midnight would
+  // stop at 2026-06-11 00:00:00 and miss common 23:59:59 signup deadlines.
   const end = new Date(start.getTime() + 3 * 24 * 60 * 60 * 1000);
+  end.setHours(23, 59, 59, 999);
   const grouped = new Map();
   for (const row of stackDoc?.detailRows || []) {
     const deadline = parseLocalDateTime(row['报名截止']);
@@ -1027,6 +1238,902 @@ function summarizeNewSkcCandidates({biDoc, biSource, selectionPlanDoc, priceOver
   };
 }
 
+function addDaysToLocalDate(dateStr, deltaDays) {
+  const d = parseLocalDateTime(`${dateStr} 00:00:00`);
+  if (!d) return '';
+  d.setDate(d.getDate() + Number(deltaDays || 0));
+  return formatLocalDate(d);
+}
+
+function reportDateLookbackDates(reportDate, lookbackDays = CLOUD_ORDER_LOOKBACK_DAYS) {
+  const dates = [];
+  for (let i = 0; i <= lookbackDays; i += 1) {
+    const date = addDaysToLocalDate(reportDate, -i);
+    if (date && !dates.includes(date)) dates.push(date);
+  }
+  return dates;
+}
+
+function enabledStoreKeysFromConfig(storesConfigDoc) {
+  return (storesConfigDoc?.stores || [])
+    .filter(store => store?.enabled !== false)
+    .map(store => normKey(store.storeKey || store.store || store.key))
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function shellQuote(value) {
+  return `'${String(value ?? '').replaceAll("'", "'\"'\"'")}'`;
+}
+
+function validateCloudOrderFetchArgs({cloudBiSsh, cloudBiRoot}) {
+  const host = String(cloudBiSsh || '').trim();
+  const root = String(cloudBiRoot || DEFAULT_CLOUD_BI_ROOT).trim();
+  if (!host) return {ok: false, reason: 'empty_host'};
+  if (!/^[A-Za-z0-9._-]+$/.test(host)) return {ok: false, reason: 'invalid_host_alias', host};
+  if (!/^\/[A-Za-z0-9._/-]+$/.test(root)) return {ok: false, reason: 'invalid_cloud_bi_root', root};
+  return {ok: true, host, root: root.replace(/\/+$/, '')};
+}
+
+function execLimited(command, args, {timeoutMs, maxBytes}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {shell: false});
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(value);
+    };
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch {}
+      finish(reject, new Error(`timeout after ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.stdout.on('data', chunk => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > maxBytes) {
+        try { child.kill('SIGKILL'); } catch {}
+        finish(reject, new Error(`stdout exceeds max bytes ${maxBytes}`));
+        return;
+      }
+      stdoutChunks.push(chunk);
+    });
+    child.stderr.on('data', chunk => {
+      stderrBytes += chunk.length;
+      if (stderrBytes <= 64 * 1024) stderrChunks.push(chunk);
+    });
+    child.on('error', err => finish(reject, err));
+    child.on('close', code => {
+      if (settled) return;
+      const stdout = Buffer.concat(stdoutChunks).toString('utf8');
+      const stderr = Buffer.concat(stderrChunks).toString('utf8').trim();
+      if (code !== 0) {
+        finish(reject, new Error(`exit=${code}${stderr ? ` stderr=${stderr.slice(0, 500)}` : ''}`));
+      } else {
+        finish(resolve, stdout);
+      }
+    });
+  });
+}
+
+async function readCloudSheinFetchOrderRows({
+  cloudBiSsh,
+  cloudBiRoot,
+  cloudBiSshTimeoutMs,
+  cloudBiMaxBytes,
+  stores,
+  dates,
+}) {
+  const validation = validateCloudOrderFetchArgs({cloudBiSsh, cloudBiRoot});
+  const base = {
+    transport: 'ssh',
+    host: validation.host || '',
+    root: validation.root || '',
+    status: validation.ok ? 'ok' : 'invalid_config',
+    error: validation.ok ? '' : validation.reason,
+    files: [],
+  };
+  if (!validation.ok) return base;
+  const safeStores = [...new Set((stores || []).map(normKey).filter(store => /^[A-Z0-9_-]+$/.test(store)))].sort();
+  const safeDates = [...new Set((dates || []).filter(date => /^\d{4}-\d{2}-\d{2}$/.test(date)))].sort().reverse();
+  const remoteScript = String.raw`
+import json, os, sys
+
+root = sys.argv[1].rstrip('/')
+stores = [s for s in sys.argv[2].split(',') if s]
+dates = [d for d in sys.argv[3].split(',') if d]
+
+def pick(d, *keys):
+    if not isinstance(d, dict):
+        return None
+    for key in keys:
+        if key in d and d.get(key) not in (None, ''):
+            return d.get(key)
+    return None
+
+def normalize_row(row, order, store, date):
+    merged = {}
+    if isinstance(order, dict):
+        merged.update(order)
+    if isinstance(row, dict):
+        merged.update(row)
+    return {
+        'storeKey': pick(merged, 'storeKey', 'store', 'store_key') or store,
+        'date': date,
+        'orderNo': pick(merged, 'orderNo', 'billno', 'order_no'),
+        'billno': pick(merged, 'billno', 'orderNo', 'order_no'),
+        'orderCreateTime': pick(merged, 'orderCreateTime', 'order_create_time'),
+        'orderCustomerTime': pick(merged, 'orderCustomerTime', 'order_customer_time'),
+        'allocateTimeFull': pick(merged, 'allocateTimeFull', 'g_zcs_allocateTime'),
+        'allocateTime': pick(merged, 'allocateTime'),
+        'skc': pick(merged, 'skc', 'skcName', 'skc_name'),
+        'goodsSn': pick(merged, 'goodsSn', 'goods_sn', 'standardGoodsSn'),
+        'skuCode': pick(merged, 'skuCode', 'sku_code'),
+        'skuSn': pick(merged, 'skuSn', 'sku_sn'),
+        'suffix': pick(merged, 'suffix'),
+        'entityId': pick(merged, 'entityId'),
+        'goodsId': pick(merged, 'goodsId'),
+        'orderId': pick(merged, 'orderId', 'id'),
+        'goodsTitle': pick(merged, 'goodsTitle', 'goods_title', 'productName'),
+        'number': pick(merged, 'number', 'quantity', 'goodsNumber', 'goods_number'),
+        'currencyPrice': pick(merged, 'currencyPrice', 'currency_price'),
+        'currencyCode': pick(merged, 'currencyCode', 'currency', 'currency_code'),
+        'isValidSale': pick(merged, 'isValidSale', 'validSale'),
+        'salesExclusionReason': pick(merged, 'salesExclusionReason'),
+        'orderStatus': pick(merged, 'orderStatus'),
+        'orderStatusDesc': pick(merged, 'orderStatusDesc'),
+        'performStatus': pick(merged, 'performStatus'),
+        'performStatusDesc': pick(merged, 'performStatusDesc'),
+        'goodsPerformanceStatus': pick(merged, 'goodsPerformanceStatus'),
+        'goodsPerformanceStatusDesc': pick(merged, 'goodsPerformanceStatusDesc'),
+        'newOrderGoodsStatus': pick(merged, 'newOrderGoodsStatus'),
+        'performanceTag': pick(merged, 'performanceTag'),
+        'site': pick(merged, 'site'),
+    }
+
+def extract_rows(doc, store, date):
+    rows = []
+    goods_rows = doc.get('goodsRows') if isinstance(doc, dict) else None
+    if isinstance(goods_rows, list):
+        for row in goods_rows:
+            if isinstance(row, dict):
+                rows.append(normalize_row(row, {}, store, date))
+    if rows:
+        return rows
+    orders = doc.get('orders') if isinstance(doc, dict) else None
+    if not isinstance(orders, list):
+        return rows
+    for order in orders:
+        if not isinstance(order, dict):
+            continue
+        groups = order.get('groupList') or order.get('groups') or []
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            goods_list = group.get('goodsList') or group.get('goods_rows') or group.get('goodsRows') or []
+            if not isinstance(goods_list, list):
+                continue
+            for row in goods_list:
+                if isinstance(row, dict):
+                    rows.append(normalize_row(row, order, store, date))
+    return rows
+
+out = {'files': []}
+for store in stores:
+    for date in dates:
+        remote_path = os.path.join(root, 'outputs', 'shein_fetch', store, date + '.json')
+        item = {
+            'storeKey': store,
+            'date': date,
+            'remotePath': remote_path,
+            'exists': os.path.exists(remote_path),
+            'ok': False,
+            'fetchTime': '',
+            'start': '',
+            'end': '',
+            'docStoreKey': '',
+            'rows': [],
+            'rowCount': 0,
+        }
+        if not item['exists']:
+            out['files'].append(item)
+            continue
+        try:
+            with open(remote_path, 'r', encoding='utf-8') as fh:
+                doc = json.load(fh)
+            item['ok'] = True
+            item['fetchTime'] = doc.get('fetchTime') or ''
+            item['start'] = doc.get('start') or ''
+            item['end'] = doc.get('end') or ''
+            item['docStoreKey'] = doc.get('storeKey') or ''
+            item['rows'] = extract_rows(doc, store, date)
+            item['rowCount'] = len(item['rows'])
+        except Exception as exc:
+            item['error'] = str(exc)
+        out['files'].append(item)
+print(json.dumps(out, ensure_ascii=False))
+`;
+  const command = [
+    'python3',
+    '-c',
+    shellQuote(remoteScript),
+    shellQuote(validation.root),
+    shellQuote(safeStores.join(',')),
+    shellQuote(safeDates.join(',')),
+  ].join(' ');
+  try {
+    const text = await execLimited('ssh', [validation.host, command], {
+      timeoutMs: cloudBiSshTimeoutMs,
+      maxBytes: cloudBiMaxBytes,
+    });
+    const data = JSON.parse(text.replace(/^\uFEFF/, ''));
+    return {
+      ...base,
+      status: 'ok',
+      stores: safeStores,
+      dates: safeDates,
+      files: Array.isArray(data.files) ? data.files : [],
+    };
+  } catch (err) {
+    return {
+      ...base,
+      status: 'fetch_error',
+      error: err.message,
+      stores: safeStores,
+      dates: safeDates,
+      files: [],
+    };
+  }
+}
+
+function planActivityKey(storeKey, activityId) {
+  const store = normKey(storeKey);
+  const activity = String(activityId || '').trim();
+  return store && activity ? `${store}::${activity}` : '';
+}
+
+function collectRequiredActivityKeys(...docs) {
+  const keys = new Set();
+  const activities = new Set();
+  for (const doc of docs) {
+    for (const row of doc?.items || []) {
+      const storeKey = normKey(row?.storeKey || row?.store || row?.['店铺']);
+      const activityId = String(row?.activityId || row?.['活动ID'] || '').trim();
+      if (!activityId) continue;
+      activities.add(activityId);
+      const key = planActivityKey(storeKey, activityId);
+      if (key) keys.add(key);
+    }
+  }
+  return {keys, activities};
+}
+
+function normalizeActivityWindowFromDoc(doc, sourcePath) {
+  const activity = doc?.activity || doc?.activityInfo || {};
+  const raw = activity.raw || doc?.raw || {};
+  const activityId = String(activity.activityId || activity.activity_id || raw.activity_id || doc?.activityId || '').trim();
+  const eventStart = activity.eventStart || activity.event_start || activity.startZoneTime || raw.start_zone_time || raw.eventStart || '';
+  const eventEnd = activity.eventEnd || activity.event_end || activity.endZoneTime || raw.end_zone_time || raw.eventEnd || '';
+  const startDate = parseAnyDateTime(eventStart);
+  const endDate = parseAnyDateTime(eventEnd);
+  if (!activityId || !eventStart || !eventEnd || !startDate || !endDate) return null;
+  return {
+    activityId,
+    activityName: activity.name || activity.activityName || raw.activity_name || '',
+    eventStart,
+    eventEnd,
+    startMs: startDate.getTime(),
+    endMs: endDate.getTime(),
+    sourcePath,
+  };
+}
+
+function loadActivityWindowEvidence(...docs) {
+  const required = collectRequiredActivityKeys(...docs);
+  const byStoreActivity = new Map();
+  const byActivity = new Map();
+  const inspected = [];
+  if (!fsSync.existsSync(DEADLINE_FILL_RESULTS_DIR)) {
+    return {
+      status: 'missing_dir',
+      sourceDir: rel(DEADLINE_FILL_RESULTS_DIR),
+      requiredStoreActivityCount: required.keys.size,
+      requiredActivityCount: required.activities.size,
+      foundStoreActivityCount: 0,
+      foundActivityCount: 0,
+      missingStoreActivityKeys: [...required.keys].sort(),
+      inspected,
+      byStoreActivity,
+      byActivity,
+    };
+  }
+  for (const file of listFiles(DEADLINE_FILL_RESULTS_DIR, /^[A-Z0-9]+-\d+\.json$/i)) {
+    const base = path.basename(file, '.json');
+    const match = base.match(/^([A-Z0-9]+)-(\d+)$/i);
+    if (!match) continue;
+    const storeKey = normKey(match[1]);
+    const activityId = String(match[2]);
+    const storeActivityKey = planActivityKey(storeKey, activityId);
+    if (
+      required.keys.size
+      && !required.keys.has(storeActivityKey)
+      && !required.activities.has(activityId)
+    ) {
+      continue;
+    }
+    try {
+      const doc = JSON.parse(fsSync.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+      const window = normalizeActivityWindowFromDoc(doc, rel(file));
+      inspected.push({
+        path: rel(file),
+        storeKey,
+        activityId,
+        ok: Boolean(window),
+        eventStart: window?.eventStart || '',
+        eventEnd: window?.eventEnd || '',
+      });
+      if (!window) continue;
+      const item = {...window, storeKey};
+      if (!byStoreActivity.has(storeActivityKey)) byStoreActivity.set(storeActivityKey, item);
+      if (!byActivity.has(activityId)) byActivity.set(activityId, item);
+    } catch (err) {
+      inspected.push({path: rel(file), storeKey, activityId, ok: false, error: err.message});
+    }
+  }
+  const missingStoreActivityKeys = [...required.keys]
+    .filter(key => !byStoreActivity.has(key))
+    .sort();
+  return {
+    status: missingStoreActivityKeys.length ? 'partial' : 'ok',
+    sourceDir: rel(DEADLINE_FILL_RESULTS_DIR),
+    requiredStoreActivityCount: required.keys.size,
+    requiredActivityCount: required.activities.size,
+    foundStoreActivityCount: byStoreActivity.size,
+    foundActivityCount: byActivity.size,
+    missingStoreActivityKeys,
+    inspected: inspected.slice(0, 80),
+    byStoreActivity,
+    byActivity,
+  };
+}
+
+function resolvePlanWindow(row, activityWindowEvidence) {
+  const rowStart = row?.planStartTime || row?.activityStartTime || row?.eventStart || '';
+  const rowEnd = row?.planEndTime || row?.activityEndTime || row?.eventEnd || '';
+  let start = rowStart;
+  let end = rowEnd;
+  let source = start || end ? 'price_overrides_row' : '';
+  const storeKey = normKey(row?.storeKey || row?.store || row?.['店铺']);
+  const activityId = String(row?.activityId || row?.['活动ID'] || '').trim();
+  if ((!start || !end) && activityWindowEvidence) {
+    const byStore = activityWindowEvidence.byStoreActivity?.get(planActivityKey(storeKey, activityId));
+    const byActivity = activityWindowEvidence.byActivity?.get(activityId);
+    const window = byStore || byActivity || null;
+    if (window) {
+      start = start || window.eventStart;
+      end = end || window.eventEnd;
+      source = byStore ? 'deadline_fill_store_activity' : 'deadline_fill_activity_fallback';
+    }
+  }
+  const startDate = parseAnyDateTime(start);
+  const endDate = parseAnyDateTime(end);
+  return {
+    hasPlanWindow: Boolean(start && end && startDate && endDate),
+    planStartTime: start || '',
+    planEndTime: end || '',
+    planStartMs: startDate ? startDate.getTime() : null,
+    planEndMs: endDate ? endDate.getTime() : null,
+    activityWindowSource: source,
+  };
+}
+
+function selectOrderPlanRow(candidateRows, orderTime) {
+  const candidates = Array.isArray(candidateRows) ? candidateRows : [];
+  if (!candidates.length) return {status: 'missing_plan', planRow: null};
+  const withWindows = candidates.filter(row => row?.hasPlanWindow && Number.isFinite(row.planStartMs) && Number.isFinite(row.planEndMs));
+  const missingWindow = candidates.filter(row => !row?.hasPlanWindow);
+  const orderDate = parseAnyDateTime(orderTime);
+  if (withWindows.length && !orderDate) {
+    return {status: 'missing_order_time_for_plan_window', planRow: withWindows[0], candidateCount: candidates.length};
+  }
+  if (withWindows.length && orderDate) {
+    const orderMs = orderDate.getTime();
+    const active = withWindows.filter(row => orderMs >= row.planStartMs && orderMs <= row.planEndMs);
+    if (active.length) {
+      active.sort((a, b) => Number(b.finalTargetPrice ?? -Infinity) - Number(a.finalTargetPrice ?? -Infinity));
+      return {status: 'active_window', planRow: active[0], candidateCount: candidates.length, activeCandidateCount: active.length};
+    }
+    withWindows.sort((a, b) => Number(a.planStartMs ?? Infinity) - Number(b.planStartMs ?? Infinity));
+    return {status: 'outside_plan_window', planRow: withWindows[0], candidateCount: candidates.length};
+  }
+  if (missingWindow.length) return {status: 'missing_plan_window', planRow: missingWindow[0], candidateCount: candidates.length};
+  return {status: 'missing_plan', planRow: candidates[0] || null, candidateCount: candidates.length};
+}
+
+function buildOrderTargetPlanIndex(priceOverridesDoc, priceOverridesSourcePath = '', activityWindowEvidence = null) {
+  const bySkc = new Map();
+  const rowsBySkc = new Map();
+  const duplicateKeys = [];
+  const duplicateConflicts = [];
+  const missingTargetRows = [];
+  for (const row of priceOverridesDoc?.items || []) {
+    const key = planItemKey(row);
+    if (!key || key.endsWith('::')) continue;
+    const finalTargetPrice = numberOrNull(row?.finalTargetPrice);
+    const window = resolvePlanWindow(row, activityWindowEvidence);
+    const item = {
+      key,
+      storeKey: normKey(row?.storeKey || row?.store || row?.['店铺']),
+      skc: normSku(row?.skc || row?.SKC || row?.['SKC']),
+      canonical: normSku(row?.canonical || row?.standard_goods_sn || row?.standardGoodsSn || row?.['标准货号']),
+      activityId: row?.activityId || '',
+      targetPrice: numberOrNull(row?.targetPrice),
+      finalTargetPrice,
+      couponFactor: numberOrNull(row?.couponFactor),
+      combo: row?.combo || '',
+      rule: row?.rule || '',
+      sourceCreatedAt: priceOverridesDoc?.createdAt || '',
+      sourceWorkbook: priceOverridesDoc?.sourceWorkbook || '',
+      sourcePath: priceOverridesSourcePath,
+      ...window,
+    };
+    if (!rowsBySkc.has(key)) rowsBySkc.set(key, []);
+    rowsBySkc.get(key).push(item);
+    if (finalTargetPrice === null) missingTargetRows.push({
+      storeKey: item.storeKey,
+      skc: item.skc,
+      canonical: item.canonical,
+      reason: 'missing_finalTargetPrice',
+    });
+    if (bySkc.has(key)) {
+      duplicateKeys.push(key);
+      const existing = bySkc.get(key);
+      const priceDiffers = Math.abs(Number(existing.finalTargetPrice ?? NaN) - Number(item.finalTargetPrice ?? NaN)) > 0.01;
+      const couponDiffers = Math.abs(Number(existing.couponFactor ?? NaN) - Number(item.couponFactor ?? NaN)) > 0.001;
+      if (priceDiffers || couponDiffers) {
+        duplicateConflicts.push({
+          key,
+          existing: {
+            activityId: existing.activityId,
+            finalTargetPrice: existing.finalTargetPrice,
+            couponFactor: existing.couponFactor,
+            combo: existing.combo,
+          },
+          duplicate: {
+            activityId: item.activityId,
+            finalTargetPrice: item.finalTargetPrice,
+            couponFactor: item.couponFactor,
+            combo: item.combo,
+          },
+          decision: 'use_conservative_highest_finalTargetPrice',
+        });
+      }
+      if (
+        item.finalTargetPrice !== null
+        && (existing.finalTargetPrice === null || item.finalTargetPrice > existing.finalTargetPrice)
+      ) {
+        bySkc.set(key, {...item, duplicateResolution: 'use_conservative_highest_finalTargetPrice'});
+      }
+      continue;
+    }
+    bySkc.set(key, item);
+  }
+  return {
+    sourceCreatedAt: priceOverridesDoc?.createdAt || '',
+    sourceWorkbook: priceOverridesDoc?.sourceWorkbook || '',
+    sourcePath: priceOverridesSourcePath,
+    rows: Array.isArray(priceOverridesDoc?.items) ? priceOverridesDoc.items.length : 0,
+    bySkc,
+    rowsBySkc,
+    duplicateKeys,
+    duplicateConflicts,
+    missingTargetRows,
+    activityWindowEvidence: activityWindowEvidence
+      ? {
+          status: activityWindowEvidence.status,
+          sourceDir: activityWindowEvidence.sourceDir,
+          requiredStoreActivityCount: activityWindowEvidence.requiredStoreActivityCount,
+          requiredActivityCount: activityWindowEvidence.requiredActivityCount,
+          foundStoreActivityCount: activityWindowEvidence.foundStoreActivityCount,
+          foundActivityCount: activityWindowEvidence.foundActivityCount,
+          missingStoreActivityKeys: activityWindowEvidence.missingStoreActivityKeys.slice(0, 50),
+          inspected: activityWindowEvidence.inspected.slice(0, 30),
+        }
+      : null,
+  };
+}
+
+function orderLineTime(row) {
+  return row.orderCustomerTime || row.orderCreateTime || row.allocateTimeFull || row.allocateTime || '';
+}
+
+function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOverridesSourcePath, activityWindowEvidence, now, maxAgeHours}) {
+  const plan = buildOrderTargetPlanIndex(priceOverridesDoc, priceOverridesSourcePath, activityWindowEvidence);
+  const statusCounts = {};
+  const byStore = {};
+  const rows = [];
+  const belowRows = [];
+  const aboveRows = [];
+  const dataQualityRows = [];
+  const unmatchedRows = [];
+  const missingFiles = [];
+  const parseErrorFiles = [];
+  const sourceMismatchFiles = [];
+  const staleFiles = [];
+  const duplicateRows = [];
+  const seenOrderLineKeys = new Set();
+  let cloudFiles = 0;
+  let cloudRows = 0;
+  let matchedPlanRows = 0;
+  let fetchTimeMin = '';
+  let fetchTimeMax = '';
+  const sourceFiles = [];
+  const addStatus = status => {
+    statusCounts[status] = (statusCounts[status] || 0) + 1;
+  };
+  const addByStore = (storeKey, status) => {
+    if (!storeKey) return;
+    const item = byStore[storeKey] || {rows: 0, below: 0, above: 0, outsideWindow: 0, unmatched: 0, missingPlan: 0, missingPlanWindow: 0, grainUnknown: 0, dataQuality: 0};
+    item.rows += 1;
+    if (status === 'below_target') item.below += 1;
+    if (status === 'above_target') item.above += 1;
+    if (status === 'outside_plan_window') item.outsideWindow += 1;
+    if (status === 'missing_plan') item.missingPlan += 1;
+    if (status === 'missing_plan_window') item.missingPlanWindow += 1;
+    if (status === 'unmatched_plan') item.unmatched += 1;
+    if (status === 'grain_unknown') item.grainUnknown += 1;
+    if (!['matches_target', 'below_target', 'above_target', 'outside_plan_window', 'unmatched_plan', 'invalid_sale_ignored'].includes(status)) item.dataQuality += 1;
+    byStore[storeKey] = item;
+  };
+
+  for (const file of cloudRowsDoc?.files || []) {
+    const remotePath = file.remotePath || '';
+    sourceFiles.push({
+      storeKey: file.storeKey,
+      date: file.date,
+      path: remotePath ? `ssh:${cloudRowsDoc.host || ''}:${remotePath}` : '',
+      exists: file.exists === true,
+      ok: file.ok === true,
+      rowCount: Number(file.rowCount || 0),
+      fetchTime: file.fetchTime || '',
+      error: file.error || '',
+    });
+    if (file.exists !== true) {
+      missingFiles.push({storeKey: file.storeKey, date: file.date, path: remotePath});
+      continue;
+    }
+    if (file.ok !== true) {
+      parseErrorFiles.push({storeKey: file.storeKey, date: file.date, path: remotePath, error: file.error || 'parse_error'});
+      continue;
+    }
+    cloudFiles += 1;
+    const docStoreKey = normKey(file.docStoreKey || file.storeKey);
+    const expectedStoreKey = normKey(file.storeKey);
+    if (!file.docStoreKey) {
+      sourceMismatchFiles.push({
+        storeKey: file.storeKey,
+        date: file.date,
+        path: remotePath,
+        reason: 'missing doc.storeKey',
+      });
+    } else if (docStoreKey && expectedStoreKey && docStoreKey !== expectedStoreKey) {
+      sourceMismatchFiles.push({
+        storeKey: file.storeKey,
+        date: file.date,
+        path: remotePath,
+        docStoreKey: file.docStoreKey,
+        reason: 'doc.storeKey does not match path store',
+      });
+    }
+    if (!file.start) {
+      sourceMismatchFiles.push({
+        storeKey: file.storeKey,
+        date: file.date,
+        path: remotePath,
+        reason: 'missing doc.start',
+      });
+    } else if (String(file.start || '').slice(0, 10) !== file.date) {
+      sourceMismatchFiles.push({
+        storeKey: file.storeKey,
+        date: file.date,
+        path: remotePath,
+        start: file.start || '',
+        reason: 'doc.start does not match path date',
+      });
+    }
+    const fetchTimeDate = parseAnyDateTime(file.fetchTime);
+    if (file.fetchTime) {
+      if (!fetchTimeMin || String(file.fetchTime) < fetchTimeMin) fetchTimeMin = String(file.fetchTime);
+      if (!fetchTimeMax || String(file.fetchTime) > fetchTimeMax) fetchTimeMax = String(file.fetchTime);
+    }
+    const fileAgeHours = fetchTimeDate ? ageHours(now, fetchTimeDate) : null;
+    if (!fetchTimeDate || (Number.isFinite(fileAgeHours) && fileAgeHours > maxAgeHours)) {
+      staleFiles.push({
+        storeKey: file.storeKey,
+        date: file.date,
+        path: remotePath,
+        fetchTime: file.fetchTime || '',
+        ageHours: fileAgeHours,
+        reason: fetchTimeDate ? 'fetchTime exceeds maxAgeHours' : 'missing_or_invalid_fetchTime',
+      });
+    }
+    for (const raw of file.rows || []) {
+      const storeKey = normKey(raw.storeKey || file.storeKey);
+      const skc = normSku(raw.skc || raw.skcName);
+      const price = numberOrNull(raw.currencyPrice);
+      const quantity = numberOrNull(raw.number ?? raw.quantity);
+      const currencyCode = String(raw.currencyCode || raw.currency || '').trim() || 'SAR';
+      const orderNo = String(raw.orderNo || raw.billno || '').trim();
+      const canonical = normSku(raw.goodsSn || raw.canonical || raw.standard_goods_sn);
+      const lineKey = [
+        storeKey,
+        orderNo || raw.orderId || '',
+        skc,
+        raw.entityId || raw.goodsId || raw.skuCode || raw.skuSn || '',
+        raw.suffix || '',
+        price === null ? '' : price,
+      ].join('::');
+      if (lineKey && seenOrderLineKeys.has(lineKey)) {
+        duplicateRows.push({storeKey, date: raw.date || file.date, orderNo, skc, skuCode: raw.skuCode || '', currencyPrice: price});
+        continue;
+      }
+      if (lineKey) seenOrderLineKeys.add(lineKey);
+      cloudRows += 1;
+      const isValidSale = raw.isValidSale;
+      let status = 'matches_target';
+      let reason = '';
+      let finalTargetPrice = null;
+      let deltaSar = null;
+      let planRow = null;
+      let planWindowStatus = '';
+      const orderTime = orderLineTime(raw);
+      if (!storeKey || !skc) {
+        status = 'missing_store_or_skc';
+        reason = '订单商品行缺店铺或 SKC，不能匹配目标价';
+      } else if (isValidSale === false || String(isValidSale).toLowerCase() === 'false') {
+        status = 'invalid_sale_ignored';
+        reason = raw.salesExclusionReason || 'isValidSale=false';
+      } else {
+        const planKey = `${storeKey}::${skc}`;
+        const planCandidates = plan.rowsBySkc.get(planKey) || [];
+        const selectedPlan = selectOrderPlanRow(planCandidates, orderTime);
+        planRow = selectedPlan.planRow || plan.bySkc.get(planKey) || null;
+        planWindowStatus = selectedPlan.status || '';
+        if (!planCandidates.length) {
+          status = 'unmatched_plan';
+          reason = '不在 price-overrides 精确目标价计划内；仅做背景计数，不参与低价/高价结论';
+        } else if (selectedPlan.status === 'outside_plan_window') {
+          status = 'outside_plan_window';
+          reason = '订单时间不在当前已执行活动目标价生效窗口内；只作历史线索，不参与低价/高价结论';
+        } else if (selectedPlan.status === 'missing_plan_window') {
+          status = 'missing_plan_window';
+          reason = '命中目标价计划，但缺活动生效窗口证据；不能把历史订单静默按当前目标比价';
+        } else if (selectedPlan.status === 'missing_order_time_for_plan_window') {
+          status = 'missing_order_time_for_plan_window';
+          reason = '命中带活动窗口的目标价计划，但订单商品行缺订单时间；不能判断是否在活动窗口内';
+        } else if (planRow.finalTargetPrice === null) {
+          status = 'missing_final_target_price';
+          reason = 'price-overrides 精确行缺 finalTargetPrice';
+        } else if (price === null) {
+          status = 'missing_currency_price';
+          reason = '命中目标价计划，但订单商品行缺 currencyPrice';
+        } else if (currencyCode !== 'SAR') {
+          status = 'unsupported_currency';
+          reason = `命中目标价计划，但币种为 ${currencyCode}，暂不能按 SAR 目标价比较`;
+        } else if (quantity !== null && quantity !== 1) {
+          status = 'grain_unknown';
+          reason = `命中目标价计划，但 number=${quantity}，不能确认 currencyPrice 是否单件成交价`;
+        } else {
+          matchedPlanRows += 1;
+          finalTargetPrice = planRow.finalTargetPrice;
+          deltaSar = Math.round((price - finalTargetPrice) * 100) / 100;
+          if (deltaSar < -ORDER_PRICE_TOLERANCE_SAR) {
+            status = 'below_target';
+            reason = '订单商品行成交价低于 finalTargetPrice';
+          } else if (deltaSar > ORDER_PRICE_TOLERANCE_SAR) {
+            status = 'above_target';
+            reason = '订单商品行成交价高于 finalTargetPrice';
+          }
+        }
+      }
+      addStatus(status);
+      addByStore(storeKey, status);
+      const outRow = {
+        source: 'cloud_shein_fetch_goodsRows',
+        storeKey,
+        date: raw.date || file.date,
+        orderNo,
+        billno: raw.billno || orderNo,
+        orderTime,
+        skc,
+        canonical: planRow?.canonical || canonical,
+        goodsSn: canonical,
+        skuCode: raw.skuCode || '',
+        skuSn: raw.skuSn || '',
+        suffix: raw.suffix || '',
+        sourcePath: remotePath ? `ssh:${cloudRowsDoc.host || ''}:${remotePath}` : '',
+        number: quantity,
+        currencyPrice: price,
+        actualUnitPriceUsed: quantity === null || quantity === 1 ? price : null,
+        currencyCode,
+        finalTargetPrice,
+        targetPrice: planRow?.targetPrice ?? null,
+        couponFactor: planRow?.couponFactor ?? null,
+        deltaSar,
+        toleranceSar: ORDER_PRICE_TOLERANCE_SAR,
+        activityId: planRow?.activityId || '',
+        combo: planRow?.combo || '',
+        duplicateResolution: planRow?.duplicateResolution || '',
+        planSourcePath: planRow?.sourcePath || priceOverridesSourcePath,
+        planSourceCreatedAt: planRow?.sourceCreatedAt || plan.sourceCreatedAt,
+        planHasWindow: planRow?.hasPlanWindow === true,
+        planStartTime: planRow?.planStartTime || '',
+        planEndTime: planRow?.planEndTime || '',
+        planWindowStatus,
+        activityWindowSource: planRow?.activityWindowSource || '',
+        status,
+        reason,
+        isValidSale,
+        orderStatusDesc: raw.orderStatusDesc || '',
+        performStatusDesc: raw.performStatusDesc || '',
+        performanceTag: raw.performanceTag ?? null,
+      };
+      rows.push(outRow);
+      if (status === 'below_target') belowRows.push(outRow);
+      else if (status === 'above_target') aboveRows.push(outRow);
+      else if (status === 'unmatched_plan') unmatchedRows.push(outRow);
+      else if (!['matches_target', 'invalid_sale_ignored', 'outside_plan_window'].includes(status)) dataQualityRows.push(outRow);
+    }
+  }
+  belowRows.sort((a, b) => Number(a.deltaSar ?? 0) - Number(b.deltaSar ?? 0));
+  aboveRows.sort((a, b) => Number(b.deltaSar ?? 0) - Number(a.deltaSar ?? 0));
+  dataQualityRows.sort((a, b) => String(a.storeKey).localeCompare(String(b.storeKey)) || String(a.orderTime).localeCompare(String(b.orderTime)));
+  const samples = [
+    ...belowRows,
+    ...aboveRows,
+    ...dataQualityRows,
+    ...rows.filter(row => row.status === 'matches_target'),
+  ].slice(0, 20);
+  return {
+    source: 'cloud_shein_fetch',
+    status: cloudRowsDoc?.status || 'unknown',
+    transport: cloudRowsDoc?.transport || 'ssh',
+    host: cloudRowsDoc?.host || '',
+    root: cloudRowsDoc?.root || '',
+    dates: cloudRowsDoc?.dates || [],
+    stores: cloudRowsDoc?.stores || [],
+    lookbackDays: CLOUD_ORDER_LOOKBACK_DAYS,
+    toleranceSar: ORDER_PRICE_TOLERANCE_SAR,
+    planSourcePath: priceOverridesSourcePath,
+    planSourceCreatedAt: plan.sourceCreatedAt,
+    planRows: plan.rows,
+    duplicatePlanKeys: plan.duplicateKeys.slice(0, 30),
+    duplicatePlanConflictCount: plan.duplicateConflicts.length,
+    duplicatePlanConflicts: plan.duplicateConflicts.slice(0, 50),
+    missingTargetPlanRows: plan.missingTargetRows.slice(0, 30),
+    activityWindowEvidence: plan.activityWindowEvidence,
+    expectedFiles: (cloudRowsDoc?.files || []).length,
+    cloudFiles,
+    readFiles: cloudFiles,
+    missingFileCount: missingFiles.length,
+    missingFiles: missingFiles.slice(0, 50),
+    parseErrorFileCount: parseErrorFiles.length,
+    parseErrorFiles: parseErrorFiles.slice(0, 20),
+    sourceMismatchFileCount: sourceMismatchFiles.length,
+    sourceMismatchFiles: sourceMismatchFiles.slice(0, 20),
+    staleFileCount: staleFiles.length,
+    staleFiles: staleFiles.slice(0, 20),
+    fetchTimeMin,
+    fetchTimeMax,
+    duplicateRowCount: duplicateRows.length,
+    duplicateRows: duplicateRows.slice(0, 20),
+    sourceFiles: sourceFiles.slice(0, 80),
+    rows: cloudRows,
+    auditedRows: rows.length,
+    matchedPlanRows,
+    unmatchedRows: unmatchedRows.length,
+    unmatchedSamples: unmatchedRows.slice(0, 30),
+    below: statusCounts.below_target || 0,
+    above: statusCounts.above_target || 0,
+    outsideWindow: statusCounts.outside_plan_window || 0,
+    missingPlan: 0,
+    missingPlanWindow: statusCounts.missing_plan_window || 0,
+    missingOrderTimeForPlanWindow: statusCounts.missing_order_time_for_plan_window || 0,
+    missingFinalTargetPrice: statusCounts.missing_final_target_price || 0,
+    missingPrice: statusCounts.missing_currency_price || 0,
+    grainUnknown: statusCounts.grain_unknown || 0,
+    unsupportedCurrency: statusCounts.unsupported_currency || 0,
+    invalidSaleIgnored: statusCounts.invalid_sale_ignored || 0,
+    dataQualityRows: dataQualityRows.length,
+    statusCounts,
+    byStore,
+    belowRows: belowRows.slice(0, 200),
+    aboveRows: aboveRows.slice(0, 200),
+    dataQualitySamples: dataQualityRows.slice(0, 200),
+    samples,
+    allRows: rows,
+    error: cloudRowsDoc?.error || '',
+  };
+}
+
+function buildOrderPriceAuditFromCloud(cloudAudit) {
+  return {
+    source: 'cloud_shein_fetch',
+    status: cloudAudit.status,
+    files: Number(cloudAudit.cloudFiles || 0),
+    rows: Number(cloudAudit.rows || 0),
+    auditedRows: Number(cloudAudit.auditedRows || 0),
+    matchedPlanRows: Number(cloudAudit.matchedPlanRows || 0),
+    unmatchedRows: Number(cloudAudit.unmatchedRows || 0),
+    below: Number(cloudAudit.below || 0),
+    above: Number(cloudAudit.above || 0),
+    outsideWindow: Number(cloudAudit.outsideWindow || 0),
+    grainUnknown: Number(cloudAudit.grainUnknown || 0),
+    missingPlan: 0,
+    missingPlanWindow: Number(cloudAudit.missingPlanWindow || 0),
+    missingOrderTimeForPlanWindow: Number(cloudAudit.missingOrderTimeForPlanWindow || 0),
+    missingFinalTargetPrice: Number(cloudAudit.missingFinalTargetPrice || 0),
+    missingPrice: Number(cloudAudit.missingPrice || 0),
+    unsupportedCurrency: Number(cloudAudit.unsupportedCurrency || 0),
+    dataQualityRows: Number(cloudAudit.dataQualityRows || 0),
+    statusCounts: {...(cloudAudit.statusCounts || {})},
+    samples: [
+      ...(cloudAudit.belowRows || []),
+      ...(cloudAudit.aboveRows || []),
+      ...(cloudAudit.dataQualitySamples || []),
+      ...(cloudAudit.samples || []),
+    ].slice(0, 30),
+    cloud: cloudAudit,
+  };
+}
+
+function selectMarketingStackReviewFile(storesConfigDoc) {
+  const files = listFiles(path.join(ROOT, 'outputs', 'reports'), /^marketing-stack-review-\d{4}-\d{2}-\d{2}\.json$/);
+  const inspected = [];
+  let fallback = files[0] || '';
+  for (const file of files.slice(0, 20)) {
+    let doc = null;
+    try {
+      doc = JSON.parse(fsSync.readFileSync(file, 'utf8'));
+    } catch (err) {
+      inspected.push({path: rel(file), status: 'parse_error', error: err.message});
+      continue;
+    }
+    const coverage = summarizeStackReviewCoverage(doc, storesConfigDoc);
+    inspected.push({
+      path: rel(file),
+      coverageComplete: coverage.coverageComplete,
+      selectedStoreCount: coverage.selectedStoreCount,
+      enabledStoreCount: coverage.enabledStoreCount,
+      completedStoreCount: coverage.completedStoreCount,
+      missingStores: coverage.missingStores,
+    });
+    if (coverage.coverageComplete) {
+      return {
+        file,
+        selectedPath: rel(file),
+        selectionReason: 'latest_complete_enabled_store_coverage',
+        inspected: inspected.slice(0, 10),
+        skippedNewerIncomplete: inspected.filter(item => item.path !== rel(file) && item.coverageComplete === false).slice(0, 10),
+      };
+    }
+    if (!fallback) fallback = file;
+  }
+  return {
+    file: fallback,
+    selectedPath: rel(fallback),
+    selectionReason: fallback ? 'fallback_latest_no_complete_coverage' : 'missing',
+    inspected: inspected.slice(0, 10),
+    skippedNewerIncomplete: [],
+  };
+}
+
 function latestOrderAuditSelection() {
   const dir = path.join(ROOT, 'tmp', 'marketing-signup', 'order-price-audit');
   const selected = new Map();
@@ -1109,13 +2216,30 @@ function validateSuggestedCommand(command) {
   return violations;
 }
 
-function buildDryRunCommands(reportDate) {
-  if (reportDate < '2026-06-09') return [];
+function couponRescanWindowStatus(now) {
+  const notBefore = parseAnyDateTime(M12_COUPON_RESCAN_NOT_BEFORE_ISO);
+  const open = Boolean(now && notBefore && now.getTime() >= notBefore.getTime());
+  return {
+    name: 'm12_batch43_remaining_34810_15pct',
+    notBeforeIso: M12_COUPON_RESCAN_NOT_BEFORE_ISO,
+    notBeforeUtc: notBefore ? notBefore.toISOString() : '',
+    notBeforeText: M12_COUPON_RESCAN_NOT_BEFORE_TEXT,
+    nowLocal: formatLocalDateTime(now),
+    nowIso: now instanceof Date && Number.isFinite(now.getTime()) ? now.toISOString() : '',
+    open,
+    reason: open
+      ? 'M12 Batch43 旧普通活动主要窗口已到，可先 dry-run 复核剩余 15% 券；仍被 2026-06-14 HL 旧活动阻断的目标继续 fail closed。'
+      : 'M12 Batch43 旧普通活动仍未到复扫补券窗口；窗口前禁止生成补券执行建议。',
+  };
+}
+
+function buildDryRunCommands({targetPlan, priceOverrides, couponRescanWindow}) {
+  if (!couponRescanWindow?.open) return [];
   const storesConfig = JSON.parse(fsSync.readFileSync(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
   const stores = (storesConfig.stores || []).filter(s => s.enabled !== false).map(s => s.storeKey).join(',');
   return [{
-    label: 'post-holiday-15pct-coupon-dry-run',
-    command: `node scripts/marketing/submit_coupon_activity_goods.mjs --stores ${stores} --target-plan ${rel(TARGET_PLAN_DEFAULT)} --price-overrides ${rel(PRICE_OVERRIDES_DEFAULT)} --dry-run`,
+    label: 'm12-remaining-34810-15pct-coupon-dry-run',
+    command: `node scripts/marketing/submit_coupon_activity_goods.mjs --stores ${stores} --activity-id 34810 --discount-max 15 --target-plan ${rel(targetPlan)} --price-overrides ${rel(priceOverrides)} --dry-run --no-close`,
   }];
 }
 
@@ -1140,6 +2264,7 @@ function humanSourceWarningText(warning) {
     priceOverridesPlan: '目标价计划',
     storesConfig: '店铺配置',
     knownOrdinaryActivityEvidence: '旧普通活动填报价证据',
+    orderPriceAudit: '订单商品行审计',
   };
   const label = labelMap[warning?.label] || warning?.label || '数据源';
   if (warning?.code === 'source_stale') {
@@ -1160,12 +2285,19 @@ function storeCountText(counts = {}, limit = 8) {
 function humanBlockerText(blocker) {
   const code = String(blocker?.code || '');
   const msg = String(blocker?.message || '').trim();
+  if (code === 'order_line_price_below_target') {
+    const samples = Array.isArray(blocker?.evidence?.samples) ? blocker.evidence.samples : [];
+    const shown = samples.slice(0, 3).map(row => `${row.storeKey || ''} ${row.canonical || row.goodsSn || row.skc || ''} 订单 ${row.orderNo || ''} 成交 ${num(row.currencyPrice)}，目标 ${num(row.finalTargetPrice)}，差 ${num(row.deltaSar)} SAR`).join('；');
+    return shown
+      ? `订单商品行成交价低于目标价：${shown}。必须查清活动/券/限时折扣来源并止损；本报告不会自动取消/补报。`
+      : '有订单商品行成交价低于目标价，必须立刻查因和止损；本报告不会自动取消/补报。';
+  }
   const map = {
     coupon_final_below_target: '有商品叠券后低于目标价，先止损，不能自动继续报名。',
     coupon_missing_price_evidence: '有商品缺少价格证据，系统先自动回读价格；取不到才报告具体阻塞。',
     low_price_cancel_rows_nonzero: '有低价/限时折扣叠券取消候选，先确认并取消错误优惠券。',
     old_ordinary_cancel_rows_nonzero: '有旧普通活动和优惠券叠加风险，先按目标价复核。',
-    known_ordinary_coupon_final_below_target: '有旧普通活动价叠加 15% 券后低于目标价，应取消对应 15% 券。',
+    known_ordinary_coupon_final_below_target: '有旧普通活动价叠加 15% 券后会低于目标价；旧活动结束前禁止补券，如已上线才取消对应 15% 券。',
     known_ordinary_missing_final_target_price: '有旧普通活动重叠但缺目标价，系统先回查计划价/覆盖价；取不到才报告具体阻塞。',
     known_ordinary_evidence_incomplete: '有旧普通活动标签但缺实际填报价，系统必须自动只读查价；取不到才报告登录/接口/身份阻塞。',
     coupon_budget_below_target: '有店铺优惠券预算低于 1000 SAR，需要补预算。',
@@ -1176,6 +2308,12 @@ function humanBlockerText(blocker) {
     source_parse_error: '关键数据解析失败，先修数据源。',
     marketing_stack_review_incomplete_store_coverage: '营销审核没有覆盖所有启用店铺，不能当作全局安全。',
     unsafe_suggested_command: '自动建议命令不安全，禁止执行。',
+    order_line_price_below_target: '有订单商品行成交价低于目标价，必须立刻查因和止损；本报告不会自动取消/补报。',
+    cloud_order_price_audit_unavailable: '云端订单商品行审计不可用，不能确认今天是否有低价成交。',
+    cloud_order_fetch_files_missing: '云端订单商品行文件缺失，不能把缺数据当成无风险。',
+    cloud_order_fetch_parse_error: '云端订单商品行文件解析失败，先修数据源。',
+    cloud_order_fetch_source_mismatch: '云端订单商品行文件店铺或日期错位，不能把错位数据当成无风险。',
+    cloud_order_fetch_stale: '云端订单商品行文件没有按时刷新，不能确认最新成交价风险。',
   };
   return map[code] || msg || '存在未归类阻塞项，需要先人工复核。';
 }
@@ -1230,13 +2368,21 @@ function buildHumanSummary(report) {
   } else if (Number(budget.expectedStoreCount || 0) > 0) {
     ok.push('优惠券预算：当前没有低于 1000 SAR 的店铺。');
   }
-  if (Number(orders.below || 0) > 0 || Number(orders.above || 0) > 0) {
-    watches.push(`订单成交价审计发现 ${humanCount(Number(orders.below || 0) + Number(orders.above || 0), '条')}偏离线索；只按商品行成交价判断，不看页面汇总金额。`);
+  if (Number(orders.above || 0) > 0) {
+    watches.push(`订单商品行成交价有 ${humanCount(orders.above, '条')}高于目标价线索；先查普通活动/限时折扣/券是否漏报，不自动取消任何活动。`);
   }
-  if (report.reportDate < '2026-06-09') {
-    watches.push('度假季/旧低价活动后补券还没到复扫窗口，今天不生成补券 dry-run。');
+  if (Number(orders.dataQualityRows || 0) > 0) {
+    watches.push(`订单商品行审计有 ${humanCount(orders.dataQualityRows, '条')}缺计划、缺价格或数量粒度不明的数据质量问题；不能当作无风险。`);
+  }
+  if (Number(orders.cloud?.matchedPlanRows || 0) > 0 && Number(orders.below || 0) === 0 && Number(orders.above || 0) === 0 && Number(orders.dataQualityRows || 0) === 0) {
+    ok.push(`云端订单商品行成交价：近 ${humanCount(orders.cloud.lookbackDays + 1, '天')}读取 ${humanCount(orders.cloud.rows, '行')}，其中 ${humanCount(orders.cloud.matchedPlanRows, '行')}命中目标价计划并完成比价，未发现低于/高于目标价。`);
+  }
+  const couponRescanWindow = report.couponRescanWindow || {};
+  if (!couponRescanWindow.open) {
+    const notBefore = couponRescanWindow.notBeforeText || M12_COUPON_RESCAN_NOT_BEFORE_TEXT;
+    watches.push(`M12 剩余 15% 补券还没到复扫窗口（${notBefore}），今天不生成补券 dry-run。`);
   } else if (Array.isArray(report.suggestedDryRunCommands) && report.suggestedDryRunCommands.length) {
-    watches.push('已到补券复扫窗口，只生成 15% 券 dry-run；禁止 30%/50% 券真实上线。');
+    watches.push('已到 M12 剩余 15% 补券复扫窗口，只生成 34810/15% 券 dry-run；禁止 30%/50% 券真实上线。');
   }
   if (Array.isArray(report.sourceWarnings) && report.sourceWarnings.length) {
     watches.push(`有 ${humanCount(report.sourceWarnings.length, '条')}数据源提醒，不阻塞价格结论，但需要留意。`);
@@ -1295,6 +2441,7 @@ function buildMarkdown(report) {
   lines.push(`- 价格止损阻塞：${report.blockers.length ? `${humanCount(report.blockers.length, '个')}，不能自动执行` : '无'}`);
   lines.push(`- 旧普通活动叠券：未处理低价 ${humanCount(report.knownOrdinaryActivityGuard.belowTargetCount, '个')}；待系统只读查价 ${humanCount(report.knownOrdinaryActivityGuard.evidenceIncompleteCount, '个')}；已取消止损 ${humanCount(report.knownOrdinaryActivityGuard.mitigatedBelowTargetCount || 0, '个')}`);
   lines.push(`- 限时折扣叠券：低价 ${humanCount(report.lowPriceOverlap.belowTarget, '个')}；待系统补价证据 ${humanCount(report.lowPriceOverlap.missingEvidence, '个')}；取消候选 ${humanCount(report.lowPriceOverlap.cancelRows, '个')}`);
+  lines.push(`- 订单商品行成交价：云端读取 ${humanCount(report.orderPriceAudit.cloud?.rows || 0, '行')}；活动窗口内命中目标并比价 ${humanCount(report.orderPriceAudit.cloud?.matchedPlanRows || 0, '行')}；窗口外历史线索 ${humanCount(report.orderPriceAudit.outsideWindow, '条')}；未命中计划背景数 ${humanCount(report.orderPriceAudit.cloud?.unmatchedRows || 0, '行')}；低于目标 ${humanCount(report.orderPriceAudit.below, '条')}；高于目标 ${humanCount(report.orderPriceAudit.above, '条')}；缺窗口/价格/粒度证据 ${humanCount(report.orderPriceAudit.dataQualityRows, '条')}`);
   lines.push(`- 优惠券预算：低于 1000 SAR 的店铺 ${humanCount(report.couponBudget.belowTargetCount, '个')}；缺回读证据 ${humanCount(report.couponBudget.missingEvidenceCount, '个')}`);
   lines.push(`- 新链接/新 SKC：需要定价 ${humanCount(report.newSkcCandidates.needsPricing, '个')}；需要确认 ${humanCount(report.newSkcCandidates.needsConfirmation, '个')}；需要补券复核 ${humanCount(report.newSkcCandidates.needsCouponReview, '个')}`);
   lines.push(`- 未来 3 天普通活动提醒：${humanCount(report.t3MarketingCandidates.length, '个')}`);
@@ -1328,7 +2475,7 @@ function num(value) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const now = new Date();
+  const now = args.now ? parseAnyDateTime(args.now) : new Date();
   const sources = [];
   const read = async (label, file) => {
     const item = await readSource(label, file, now, args.maxAgeHours);
@@ -1359,10 +2506,12 @@ async function main() {
   const oldCancel = await read('oldOrdinaryOverlapCancelList', latestFile(path.join(ROOT, 'tmp', 'marketing-signup', 'old-ordinary-overlap-risk'), /^coupon-old-ordinary-overlap-cancel-list-.*\.json$/));
   const abovePlan = await read('aboveTargetActionPlan', latestFile(path.join(ROOT, 'tmp', 'marketing-signup', 'low-price-overlap-risk'), /^price-above-target-limited-discount-action-plan-.*\.json$/));
   const budgetExecute = await read('couponBudgetExecute', latestFile(path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-budget-results'), /^coupon-site-budget-execute-.*\.json$/));
+  const budgetReadback = await read('couponBudgetReadback', latestFile(path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-budget-results'), /^coupon-site-budget-readback-.*\.json$/));
   const budgetDryRun = await read('couponBudgetDryRun', latestFile(path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-budget-results'), /^coupon-site-budget-dry-run-.*\.json$/));
-  const stackReview = await read('marketingStackReview', latestFile(path.join(ROOT, 'outputs', 'reports'), /^marketing-stack-review-\d{4}-\d{2}-\d{2}\.json$/));
+  const stackReviewSelection = selectMarketingStackReviewFile(storesConfig.data);
+  const stackReview = await read('marketingStackReview', stackReviewSelection.file);
   const marketingStackReviewContext = normalizeMarketingStackReviewSource(stackReview, now, args.maxAgeHours);
-  const knownOrdinaryEvidenceDir = path.join(ROOT, 'tmp', 'mbrs', 'deadline-fill-results');
+  const knownOrdinaryEvidenceDir = DEADLINE_FILL_RESULTS_DIR;
   const knownOrdinaryEvidenceSource = {
     label: 'knownOrdinaryActivityEvidence',
     path: rel(knownOrdinaryEvidenceDir),
@@ -1418,14 +2567,16 @@ async function main() {
     if (knownOrdinaryEvidenceSource.parseErrorCount > 0) knownOrdinaryEvidenceSource.status = 'parse_error';
   }
   const knownOrdinaryCancelMitigation = await loadKnownOrdinaryCancelMitigation(args.date);
+  const activityWindowEvidence = loadActivityWindowEvidence(targetPlan.data, priceOverrides.data);
 
-  const orderAuditSelection = latestOrderAuditSelection();
-  const orderFiles = orderAuditSelection.selectedFiles;
-  const orderDocs = [];
-  for (const file of orderFiles) {
-    const item = await read(`orderPriceAudit:${path.basename(file)}`, file);
-    if (item.data) orderDocs.push(item.data);
-  }
+  const cloudOrderRows = await readCloudSheinFetchOrderRows({
+    cloudBiSsh: args.cloudBiSsh,
+    cloudBiRoot: args.cloudBiRoot,
+    cloudBiSshTimeoutMs: args.cloudBiSshTimeoutMs,
+    cloudBiMaxBytes: args.cloudBiMaxBytes,
+    stores: enabledStoreKeysFromConfig(storesConfig.data),
+    dates: reportDateLookbackDates(args.date, CLOUD_ORDER_LOOKBACK_DAYS),
+  });
 
   const couponSubmitDryRun = summarizeCouponSubmit(couponSubmit.data);
   couponSubmitDryRun.summaryPath = rel(couponSubmitPath);
@@ -1439,13 +2590,23 @@ async function main() {
     cancelMitigation: knownOrdinaryCancelMitigation,
   });
   const aboveTargetActions = summarizeAboveTargetActions(abovePlan.data);
-  const orderPriceAudit = countOrderStatuses(orderDocs);
+  const cloudOrderPriceAudit = summarizeCloudOrderPriceAudit({
+    cloudRowsDoc: cloudOrderRows,
+    priceOverridesDoc: priceOverrides.data,
+    priceOverridesSourcePath: priceOverrides.source.path,
+    activityWindowEvidence,
+    now,
+    maxAgeHours: args.maxAgeHours,
+  });
+  const orderPriceAudit = buildOrderPriceAuditFromCloud(cloudOrderPriceAudit);
   const biPortalFreshness = summarizeBiPortal(biPortal.data, biPortal.source);
   const t3MarketingCandidates = summarizeT3Candidates(stackReview.data, args.date);
   const marketingStackReviewCoverage = summarizeStackReviewCoverage(stackReview.data, storesConfig.data);
   const couponBudget = summarizeCouponBudgetStatus({
     executeDoc: budgetExecute.data,
     executeSource: budgetExecute.source,
+    readbackDoc: budgetReadback.data,
+    readbackSource: budgetReadback.source,
     dryRunDoc: budgetDryRun.data,
     dryRunSource: budgetDryRun.source,
     storesConfigDoc: storesConfig.data,
@@ -1459,7 +2620,12 @@ async function main() {
     storesConfigDoc: storesConfig.data,
     reportDate: args.date,
   });
-  const suggestedDryRunCommands = buildDryRunCommands(args.date);
+  const couponRescanWindow = couponRescanWindowStatus(now);
+  const suggestedDryRunCommands = buildDryRunCommands({
+    targetPlan: args.targetPlan,
+    priceOverrides: args.priceOverrides,
+    couponRescanWindow,
+  });
   const blockers = [];
   const sourceWarnings = [];
   const contextWarnings = [];
@@ -1482,6 +2648,18 @@ async function main() {
         biContextGeneratedAt: marketingStackReviewContext.biContextGeneratedAt,
         biContextAgeHours: marketingStackReviewContext.biContextAgeHours,
         selectedBiPortalGeneratedAt: biPortalFreshness.generatedAt,
+      },
+    });
+  }
+  if ((stackReviewSelection.skippedNewerIncomplete || []).length) {
+    contextWarnings.push({
+      code: 'marketing_stack_skipped_newer_incomplete_review',
+      label: 'marketingStackReview',
+      message: '存在更新的单店/不完整营销栈调查文件；全局日报已跳过，改用覆盖全部启用店铺的报告',
+      evidence: {
+        selectedPath: stackReviewSelection.selectedPath,
+        selectionReason: stackReviewSelection.selectionReason,
+        skipped: stackReviewSelection.skippedNewerIncomplete,
       },
     });
   }
@@ -1512,9 +2690,11 @@ async function main() {
   }
 
   for (const src of sources) {
-    const optionalBudgetDryRunCoveredByExecute = src.label === 'couponBudgetDryRun'
-      && couponBudget.selectedSource === 'execute';
-    if (optionalBudgetDryRunCoveredByExecute && ['missing', 'parse_error', 'stale'].includes(src.status)) {
+    const optionalBudgetSourceCovered = (
+      (couponBudget.selectedSource === 'execute' && ['couponBudgetDryRun', 'couponBudgetReadback'].includes(src.label))
+      || (couponBudget.selectedSource === 'readback_current' && ['couponBudgetExecute', 'couponBudgetDryRun'].includes(src.label))
+    );
+    if (optionalBudgetSourceCovered && ['missing', 'parse_error', 'stale'].includes(src.status)) {
       continue;
     }
     if (src.status === 'missing' && CRITICAL_SOURCE_LABELS.has(src.label)) {
@@ -1566,6 +2746,77 @@ async function main() {
         issues: marketingStackReviewCoverage.issues,
       },
     );
+  }
+  if (orderPriceAudit.cloud.status !== 'ok') {
+    addBlocker(
+      blockers,
+      'cloud_order_price_audit_unavailable',
+      `云端订单商品行审计不可用：${orderPriceAudit.cloud.status}`,
+      {status: orderPriceAudit.cloud.status, error: orderPriceAudit.cloud.error || '', host: orderPriceAudit.cloud.host || '', root: orderPriceAudit.cloud.root || ''},
+    );
+  }
+  if (orderPriceAudit.cloud.missingFileCount > 0) {
+    addBlocker(
+      blockers,
+      'cloud_order_fetch_files_missing',
+      `云端订单商品行文件缺失=${orderPriceAudit.cloud.missingFileCount}`,
+      {samples: orderPriceAudit.cloud.missingFiles.slice(0, 20)},
+    );
+  }
+  if (orderPriceAudit.cloud.parseErrorFileCount > 0) {
+    addBlocker(
+      blockers,
+      'cloud_order_fetch_parse_error',
+      `云端订单商品行文件解析失败=${orderPriceAudit.cloud.parseErrorFileCount}`,
+      {samples: orderPriceAudit.cloud.parseErrorFiles.slice(0, 20)},
+    );
+  }
+  if (orderPriceAudit.cloud.sourceMismatchFileCount > 0) {
+    addBlocker(
+      blockers,
+      'cloud_order_fetch_source_mismatch',
+      `云端订单商品行文件店铺/日期错位=${orderPriceAudit.cloud.sourceMismatchFileCount}`,
+      {samples: orderPriceAudit.cloud.sourceMismatchFiles.slice(0, 20)},
+    );
+  }
+  if (orderPriceAudit.cloud.staleFileCount > 0) {
+    addBlocker(
+      blockers,
+      'cloud_order_fetch_stale',
+      `云端订单商品行文件 fetchTime 过期或缺失=${orderPriceAudit.cloud.staleFileCount}`,
+      {samples: orderPriceAudit.cloud.staleFiles.slice(0, 20), maxAgeHours: args.maxAgeHours},
+    );
+  }
+  if (orderPriceAudit.cloud.below > 0) {
+    addBlocker(
+      blockers,
+      'order_line_price_below_target',
+      `订单商品行成交价低于目标=${orderPriceAudit.cloud.below}`,
+      {samples: orderPriceAudit.cloud.belowRows.slice(0, 20)},
+    );
+  }
+  if (orderPriceAudit.cloud.dataQualityRows > 0) {
+    sourceWarnings.push({
+      code: 'cloud_order_price_data_quality',
+      label: 'orderPriceAudit',
+      message: `云端订单商品行审计有 ${orderPriceAudit.cloud.dataQualityRows} 行缺活动窗口、缺订单时间、缺价格或数量粒度不明；不能当作无风险`,
+      evidence: {samples: orderPriceAudit.cloud.dataQualitySamples.slice(0, 20)},
+    });
+  }
+  if (orderPriceAudit.cloud.duplicatePlanConflictCount > 0) {
+    sourceWarnings.push({
+      code: 'order_target_plan_duplicate_conflicts',
+      label: 'orderPriceAudit',
+      message: `目标价计划存在 ${orderPriceAudit.cloud.duplicatePlanConflictCount} 个重复 storeKey+skc 且关键目标不同；订单审计已保守使用最高 finalTargetPrice，仍需清理计划`,
+      evidence: {conflicts: orderPriceAudit.cloud.duplicatePlanConflicts.slice(0, 20), planSourcePath: orderPriceAudit.cloud.planSourcePath},
+    });
+  } else if (orderPriceAudit.cloud.duplicatePlanKeys.length > 0) {
+    contextWarnings.push({
+      code: 'order_target_plan_duplicate_keys_same_target',
+      label: 'orderPriceAudit',
+      message: `目标价计划存在 ${orderPriceAudit.cloud.duplicatePlanKeys.length} 个重复 storeKey+skc，但未发现 finalTargetPrice/couponFactor 冲突；后续应清理`,
+      evidence: {duplicateKeys: orderPriceAudit.cloud.duplicatePlanKeys.slice(0, 20), planSourcePath: orderPriceAudit.cloud.planSourcePath},
+    });
   }
   for (const f of couponSubmitDryRun.identityFailures || []) addBlocker(blockers, 'store_identity_failure', `${f.store} 身份校验失败`, f);
   if (lowPriceOverlap.belowTarget > 0) addBlocker(blockers, 'coupon_final_below_target', `低价叠券 below target=${lowPriceOverlap.belowTarget}`);
@@ -1630,7 +2881,7 @@ async function main() {
     addBlocker(
       blockers,
       'coupon_budget_missing_evidence',
-      `${couponBudget.missingEvidenceCount} 个店铺缺少优惠券预算 execute 回读证据`,
+      `${couponBudget.missingEvidenceCount} 个店铺缺少优惠券预算 fresh execute 或 read-only current 回读证据`,
       {
         selectedSource: couponBudget.selectedSource,
         stores: couponBudget.missingEvidenceStores,
@@ -1679,10 +2930,24 @@ async function main() {
         error: d.source?.error || '',
       })),
     },
+    targetPlanSelection: {
+      strategy: args.planSelection?.strategy || '',
+      targetPlan: rel(args.targetPlan),
+      priceOverrides: rel(args.priceOverrides),
+      rowCount: args.planSelection?.rowCount ?? null,
+      score: args.planSelection?.score ?? null,
+      scoreReasons: args.planSelection?.scoreReasons || [],
+      rejectedCandidates: args.planSelection?.rejectedCandidates || [],
+    },
     marketingStackReviewFreshness: marketingStackReviewContext || null,
+    marketingStackReviewSourceSelection: stackReviewSelection,
     marketingStackReviewCoverage,
     t3MarketingCandidates,
     couponBudget,
+    budgetReadback: budgetReadback.source.status === 'missing'
+      ? {status: 'unknown', reason: 'no coupon budget readback source found'}
+      : {status: budgetReadback.source.status, path: budgetReadback.source.path},
+    couponRescanWindow,
     budgetDryRun: budgetDryRun.source.status === 'missing'
       ? {status: 'unknown', reason: 'no coupon budget dry-run source found'}
       : {status: budgetDryRun.source.status, path: budgetDryRun.source.path},
@@ -1694,7 +2959,6 @@ async function main() {
     noActionSummary: '',
     suggestedDryRunCommands,
   };
-  report.orderPriceAudit.ignoredNoWindowFiles = orderAuditSelection.ignoredNoWindowFiles;
   report.changesSincePrevious = buildChangesSincePrevious(report, loadPreviousGuardReport(args.date));
   const canNoAction = !report.blockers.length
     && !report.sourceWarnings.length
@@ -1712,6 +2976,12 @@ async function main() {
     && !report.lowPriceOverlap.cancelRows
     && !report.oldOrdinaryOverlap.riskCancel
     && !report.oldOrdinaryOverlap.cancelRows
+    && !report.orderPriceAudit.below
+    && !report.orderPriceAudit.above
+    && !report.orderPriceAudit.dataQualityRows
+    && report.orderPriceAudit.cloud?.status === 'ok'
+    && !report.orderPriceAudit.cloud?.missingFileCount
+    && !report.orderPriceAudit.cloud?.parseErrorFileCount
     && !report.knownOrdinaryActivityGuard.belowTargetCount
     && !report.knownOrdinaryActivityGuard.evidenceIncompleteCount
     && !report.knownOrdinaryActivityGuard.missingFinalTargetPriceCount;

@@ -65,7 +65,7 @@ function classifySeverity(row) {
 
 function recommendation(row) {
   if (row.type === 'evidence_incomplete') return '系统自动 live 读取普通活动商品价/已报集合；取不到才报告登录/接口/身份阻塞。';
-  return '先 live 复核旧普通活动仍覆盖且 15% 券仍 active；若确认两者叠加低于目标，按用户授权取消该 SKC 15% 券或临时下架，旧活动结束后再复扫补回。';
+  return '旧普通活动结束前禁止补 15% 券；若 live 复核发现该 SKC 的 15% 券仍 active，才按用户授权取消该 SKC 15% 券或临时下架，旧活动结束后再复扫补回。';
 }
 
 function buildRows(report) {
@@ -127,13 +127,16 @@ function summarize(rows) {
   const byTrust = {};
   const bySeverity = {};
   const byType = {};
+  const byOrdinaryEventEnd = {};
   for (const row of rows) {
     byStore[row.storeKey] = (byStore[row.storeKey] || 0) + 1;
     byTrust[row.ordinaryEvidenceTrust] = (byTrust[row.ordinaryEvidenceTrust] || 0) + 1;
     bySeverity[row.severity] = (bySeverity[row.severity] || 0) + 1;
     byType[row.type] = (byType[row.type] || 0) + 1;
+    const eventEnd = row.ordinaryEventEnd || '(missing)';
+    byOrdinaryEventEnd[eventEnd] = (byOrdinaryEventEnd[eventEnd] || 0) + 1;
   }
-  return {totalRows: rows.length, byType, byStore, byTrust, bySeverity};
+  return {totalRows: rows.length, byType, byStore, byTrust, bySeverity, byOrdinaryEventEnd};
 }
 
 function toCsv(rows) {
@@ -175,7 +178,7 @@ function trustLabel(value) {
 
 function actionLabel(row) {
   if (row.type === 'evidence_incomplete') return '系统自动只读查价';
-  if (row.shouldCancelCoupon === true) return 'live 复核后取消对应 15% 券';
+  if (row.shouldCancelCoupon === true) return '暂缓补券；如券仍 active 才取消';
   return 'live 复核价格栈后再决定';
 }
 
@@ -195,12 +198,18 @@ function buildMarkdown(report) {
     const incompleteCount = report.rows.filter(row => row.type === 'evidence_incomplete').length;
     lines.push(`- 需要处理 ${report.rows.length} 条：其中 ${belowCount} 条是“旧普通活动价叠 15% 券后低于目标价”，${incompleteCount} 条是“有旧活动标签但缺实际填报价”。`);
     lines.push('- 缺实际填报价不是交给用户的结论；系统必须先自动只读查价。只有登录失效、店铺身份不确定或平台接口不可达时，才报告具体阻塞。');
-    lines.push('- 这些行不等于已经执行取消；真实动作前必须 live 复核旧活动仍覆盖、15% 券仍 active、店铺身份正确。');
+    lines.push('- 这些行不是“全部现在取消”的指令：默认动作是旧普通活动结束前阻断/暂缓补 15% 券；只有 live 复核发现 15% 券仍 active，才取消对应券或临时下架。');
   }
   lines.push('');
   lines.push('## 按店铺汇总');
   lines.push('');
   lines.push(`- ${formatCountMap(report.summary.byStore)}`);
+  if (report.rows.length) {
+    lines.push('');
+    lines.push('## 按旧活动结束时间');
+    lines.push('');
+    lines.push(`- ${formatCountMap(report.summary.byOrdinaryEventEnd)}`);
+  }
   lines.push('');
   lines.push('## 需要做什么');
   lines.push('');
@@ -209,7 +218,8 @@ function buildMarkdown(report) {
   } else {
     const belowStores = Object.entries(report.summary.byStore || {}).map(([store]) => store).join('、');
     lines.push(`- 先按店铺打开后台复核：${belowStores || '见下表'}。`);
-    lines.push('- 复核确认“旧普通活动价 × 券因子 < 目标价 - 1 SAR”且 15% 券仍 active 的，取消对应 SKC 的 15% 券；不要取消普通营销活动。');
+    lines.push('- 旧普通活动仍在生效窗口内时，先把对应 SKC 从补券队列里拦住，不要硬报 15% 券。');
+    lines.push('- 只有 live 复核确认“旧普通活动价 × 券因子 < 目标价 - 1 SAR”且 15% 券仍 active 的，才取消对应 SKC 的 15% 券；不要取消普通营销活动。');
     lines.push('- 只有旧活动标签但缺实际填报价的，系统先自动 live 查价；查不到时输出明确阻塞原因。证据补齐前禁止 no-action、禁止补券。');
     lines.push('- 旧普通活动结束后，必须重新进入补券复扫队列，确认不会低于目标价后再补回 15% 券。');
   }

@@ -7,6 +7,7 @@ script is committed so the workflow can be reproduced on another machine.
 """
 
 import json
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -32,7 +33,9 @@ def num(value):
         return None
     if isinstance(value, (int, float)):
         return float(value)
-    s = str(value).strip().replace(",", "")
+    s = re.sub(r"[^0-9.\-]", "", str(value).strip().replace(",", ""))
+    if s in {"", "-", ".", "-."}:
+        return None
     try:
         return float(s)
     except ValueError:

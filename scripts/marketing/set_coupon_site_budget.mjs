@@ -41,6 +41,7 @@ function parseArgs(argv) {
     site: 'shein-sa',
     currency: 'SAR',
     execute: false,
+    readOnly: false,
     noLaunch: false,
     noClose: false,
     alsoSetActivityLimit: true,
@@ -54,6 +55,10 @@ function parseArgs(argv) {
     else if (a === '--currency') out.currency = argv[++i];
     else if (a === '--execute') out.execute = true;
     else if (a === '--dry-run') out.execute = false;
+    else if (a === '--read-only' || a === '--verify-only') {
+      out.readOnly = true;
+      out.execute = false;
+    }
     else if (a === '--no-launch') out.noLaunch = true;
     else if (a === '--no-close' || a === '--keep-open') out.noClose = true;
     else if (a === '--no-activity-limit') out.alsoSetActivityLimit = false;
@@ -61,11 +66,57 @@ function parseArgs(argv) {
   }
   out.stores = [...new Set(out.stores.map(s => s.toUpperCase()))];
   if (!out.stores.length) out.stores = STORES.filter(s => s.enabled !== false).map(s => String(s.storeKey).toUpperCase());
+  if (out.readOnly && out.execute) throw new Error('--read-only/--verify-only cannot be combined with --execute');
   if (out.activityId !== ACTIVITY_ID_DEFAULT) throw new Error('Only coupon activity 34810 is verified for this workflow');
   if (!Number.isFinite(out.budget) || out.budget < 100) throw new Error('--budget must be >= 100 for coupon site budget');
   if (!out.site) throw new Error('--site is required');
   if (!out.currency) throw new Error('--currency is required');
   return out;
+}
+
+function num(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function fieldMatches(value, expected) {
+  return value === undefined || value === null || value === '' || String(value) === String(expected);
+}
+
+function summarizeReadbackBudget(before, args) {
+  const budgetInfoSite = before?.budgetInfoSite || null;
+  const usageSite = before?.usageSite || null;
+  const budgetInfoValue = num(budgetInfoSite?.coupon_usage_upper_limit);
+  const usageValue = num(usageSite?.coupon_usage_upper_limit);
+  const budgetInfoUsedAmount = num(budgetInfoSite?.coupon_used_amount);
+  const usageUsedAmount = num(usageSite?.coupon_used_amount);
+  const budgetInfoState = num(budgetInfoSite?.site_budget_state);
+  const usageState = num(usageSite?.site_budget_state);
+  const failures = [];
+  if (String(before?.budgetInfoCode) !== '0') failures.push(`budgetInfoCode=${before?.budgetInfoCode ?? 'missing'}`);
+  if (String(before?.usageCode) !== '0') failures.push(`usageCode=${before?.usageCode ?? 'missing'}`);
+  if (!budgetInfoSite) failures.push(`budgetInfo site ${args.site} missing`);
+  if (!usageSite) failures.push(`usage site ${args.site} missing`);
+  if (budgetInfoSite && !fieldMatches(budgetInfoSite.site, args.site)) failures.push(`budgetInfo site mismatch: ${budgetInfoSite.site}`);
+  if (usageSite && !fieldMatches(usageSite.site, args.site)) failures.push(`usage site mismatch: ${usageSite.site}`);
+  if (budgetInfoSite && !fieldMatches(budgetInfoSite.currency, args.currency)) failures.push(`budgetInfo currency mismatch: ${budgetInfoSite.currency}`);
+  if (usageSite && !fieldMatches(usageSite.currency, args.currency)) failures.push(`usage currency mismatch: ${usageSite.currency}`);
+  if (budgetInfoValue === null) failures.push('budgetInfo coupon_usage_upper_limit missing');
+  if (usageValue === null) failures.push('usage coupon_usage_upper_limit missing');
+  if (budgetInfoValue !== null && usageValue !== null && budgetInfoValue !== usageValue) failures.push(`budget mismatch budgetInfo=${budgetInfoValue} usage=${usageValue}`);
+  if (budgetInfoValue !== null && budgetInfoValue < Number(args.budget)) failures.push(`budgetInfo below target: ${budgetInfoValue}<${args.budget}`);
+  if (usageValue !== null && usageValue < Number(args.budget)) failures.push(`usage below target: ${usageValue}<${args.budget}`);
+  return {
+    ok: failures.length === 0,
+    targetBudget: Number(args.budget),
+    budgetInfoValue,
+    usageValue,
+    budgetInfoUsedAmount,
+    usageUsedAmount,
+    budgetInfoState,
+    usageState,
+    failures,
+  };
 }
 
 function closeExistingStoreChrome(store) {
@@ -237,6 +288,9 @@ async function setStoreBudget(store, args) {
     currency: args.currency,
     requestedBudget: args.budget,
     execute: args.execute,
+    readOnly: args.readOnly,
+    writeAttempted: false,
+    writeEndpointCalls: 0,
     ok: false,
   };
   let cdp = null;
@@ -296,12 +350,23 @@ async function setStoreBudget(store, args) {
       return result;
     }
 
+    if (args.readOnly) {
+      result.readback = summarizeReadbackBudget(result.before, args);
+      result.ok = result.readback.ok;
+      result.reason = result.ok
+        ? `read-only current site budget is at or above ${args.budget} ${args.currency}`
+        : `read-only current site budget evidence failed: ${result.readback.failures.join('; ')}`;
+      return result;
+    }
+
     if (!args.execute) {
       result.ok = true;
       result.reason = 'dry-run only; no budget update submitted';
       return result;
     }
 
+    result.writeAttempted = true;
+    result.writeEndpointCalls = args.alsoSetActivityLimit ? 2 : 1;
     const write = await cdp.eval(`
       const post = async (url, body) => {
         const res = await fetch(url, {
@@ -385,23 +450,30 @@ const summary = {
   site: args.site,
   currency: args.currency,
   budget: args.budget,
+  targetBudget: args.budget,
+  mode: args.readOnly ? 'readback' : (args.execute ? 'execute' : 'dry-run'),
   execute: args.execute,
+  readOnly: args.readOnly,
+  writeAttempted: args.execute,
+  writeEndpointCalls: 0,
   stores: [],
 };
 
 for (const store of selectedStores) {
-  console.log(`[${store.storeKey}] set coupon site budget ${args.site}=${args.budget}${args.execute ? ' EXECUTE' : ' DRY-RUN'}`);
+  console.log(`[${store.storeKey}] set coupon site budget ${args.site}=${args.budget}${args.readOnly ? ' READ-ONLY' : (args.execute ? ' EXECUTE' : ' DRY-RUN')}`);
   const result = await setStoreBudget(store, args);
   summary.stores.push(result);
+  summary.writeEndpointCalls += Number(result.writeEndpointCalls || 0);
   console.log(`[${store.storeKey}] ${result.ok ? 'OK' : 'WARN'} before=${result.before?.usageSite?.coupon_usage_upper_limit ?? '-'} after=${result.after?.usageSite?.coupon_usage_upper_limit ?? '-'} ${result.reason || ''}`);
 }
 
 summary.okCount = summary.stores.filter(s => s.ok).length;
 summary.failures = summary.stores.filter(s => !s.ok).map(s => ({storeKey: s.storeKey, reason: s.reason}));
 summary.updatedCount = summary.stores.filter(s => Number(s.after?.usageSite?.coupon_usage_upper_limit) === Number(args.budget)).length;
+summary.verifiedAtTargetCount = summary.stores.filter(s => s.readback?.ok === true || Number(s.after?.usageSite?.coupon_usage_upper_limit) === Number(args.budget)).length;
 
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-const outFile = path.join(OUT_DIR, `coupon-site-budget-${args.execute ? 'execute' : 'dry-run'}-${stamp}.json`);
+const outFile = path.join(OUT_DIR, `coupon-site-budget-${args.readOnly ? 'readback' : (args.execute ? 'execute' : 'dry-run')}-${stamp}.json`);
 await fs.writeFile(outFile, JSON.stringify(summary, null, 2), 'utf8');
 console.log(`\nJSON ${outFile}`);
 console.log(`OK ${summary.okCount}/${summary.stores.length}`);

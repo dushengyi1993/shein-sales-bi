@@ -1126,6 +1126,8 @@ async function processStore(store, args, targetPlan, knownOrdinaryGuardContext =
         nowLocal: ordinaryEvidence.nowLocal,
         diagnostics: ordinaryEvidence.diagnostics,
         filesRead: ordinaryEvidence.filesRead,
+        rawRowCount: ordinaryEvidence.rawRowCount,
+        collapsedCount: ordinaryEvidence.collapsedCount,
         parseErrorCount: ordinaryEvidence.parseErrorCount,
       };
       const evidenceUnavailable = ordinaryEvidence.diagnostics.some(d => d.type === 'dir_missing')

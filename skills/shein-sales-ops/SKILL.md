@@ -12,6 +12,13 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 
 读取后优先用脚本获取当前状态，不要把历史流水全塞进上下文。
 
+
+## 营销活动报名入口
+- 用户提到 `报活动`、`营销活动报名`、`普通活动`、`优惠券活动`、`15%券`、`限时折扣`、`价格栈`、`低价/高价成交`、`旧活动叠加`、`活动方案 Excel` 或活动 ID 如 `43914/43915/45488/34810` 时，优先同时使用 `shein-marketing-ops` skill。
+- 营销活动不能只看提交成功弹窗；必须按 `shein-marketing-ops` 的规范执行：云端/live 证据、用户审核 Excel、首店预填确认、分批提交、普通活动回读、优惠券 dry-run/提交、全局复核和自动补券。
+- 优惠券按 `店铺+SKC` 生效，不按普通活动隔离；普通活动、限时折扣和优惠券是同一价格栈，实际成交价必须对齐当前用户批准的 `finalTargetPrice`。
+- `34810` 是当前允许使用的优惠券活动 ID，自动/半自动报名只允许该活动里的 `15% OFF` 档；预算证据只接受 fresh execute 或严格只读 `readback_current`，缺证据时先只读回读，不得擅自 `--execute` 补预算。
+
 ## 当前资产
 - 工作区：`E:\Codex WorkSpace\Shein销售统计`
 - Base：`https://zcnm3ts63aph.feishu.cn/base/SnnQbrAu6aLzMWsnEICcy0cKnJh`（当前标题已标注多维表格同步暂停、日报正常）
@@ -20,7 +27,7 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 店铺：DSY=`DL DX FY LQ NM HL JY ZL TS MZ`；LGM=`CX YJ XL QY QH TZ JSH TZZ XC`。
 - 云端 BI 正式入口：`https://shein-bi.faceair.me/`，旧 IP `http://43.165.167.135/` 仅作兜底，Nginx Basic Auth 保护；本地 `8787` 服务和 `SHEIN-*` Windows 任务已封存禁用，除非明确回滚不要重启。
 - V1 是当前正式 BI Portal；当前 V1/main 发布边界已到 `2026.06.03-home-profit-cache-hotfix`（同日 `2026.06.03-et-forwarder-hotfix` 处理 ET 刷新轻量化）。V2 仍是平行预览/开发，不进正式 release，也不纳入日常自动刷新。
-- 云端生产调度：`shein-bi-cloud-today.timer` 每两小时刷新当天销售、入仓并生成 BI Portal；`shein-bi-cloud-yesterday.timer` 每天 `00:10` 刷新前一天最终版并复核稳定日；`shein-bi-db-backup.timer` 每天 `02:30` 备份数据库；`shein-bi-cloud-rtv-verify.timer` 每天 `03:20` 跑完整 RTV；`shein-bi-cloud-session-manager.timer` 每天 `03:20` 巡检/恢复 19 店登录态；`shein-bi-cloud-et-forwarder.timer` 每天 `04:20` 跑 ET；`shein-bi-cloud-link-business.timer` 每天 `05:30` 跑链接/业务域；`shein-bi-cloud-openapi-hl.timer` 每天 `06:20` 跑 HL OpenAPI 双跑；`shein-bi-cloud-daily-lark-report.timer` 负责云端飞书日报；`shein-bi-cloud-watchdog.timer` 每小时巡检；`shein-bi-lark-sales-qa.service` 常驻只读问数。
+- 云端生产调度：`shein-bi-cloud-today.timer` 每两小时刷新当天销售、入仓并生成 BI Portal；`shein-bi-cloud-yesterday.timer` 每天 `00:10` 刷新前一天最终版并复核稳定日；`shein-bi-db-backup.timer` 每天 `02:30` 备份数据库；`shein-bi-cloud-rtv-verify.timer` 每天 `03:20` 跑完整 RTV；`shein-bi-cloud-session-manager.timer` 每天 `03:20` 巡检/恢复 19 店登录态；`shein-bi-cloud-et-forwarder.timer` 每天 `04:20` 跑 ET；`shein-bi-cloud-link-business.timer` 每天 `08:10` 跑链接/业务域；`shein-bi-cloud-openapi-hl.timer` 每天 `06:20` 跑 HL OpenAPI 双跑；`shein-bi-cloud-daily-lark-report.timer` 负责云端飞书日报；`shein-bi-cloud-watchdog.timer` 每小时巡检；`shein-bi-lark-sales-qa.service` 常驻只读问数。
 - HL OpenAPI 销售试点已建立并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` -> `fact.openapi_*` -> `mart.openapi_sales_reconciliation`；正式切换前继续累计多日 `matched`。CX / ZL 应用已提交审核，审核通过前不得录入 `.local` 密钥或切换生产源。
 - 当前 19 店销售生产抓取已改为 WebAPI 直连优先：`config/stores.json.salesTransport=auto`，session 文件在 `state/shein_webapi_sessions/*.local.json`，直连成功不启动浏览器；浏览器只作刷新 session、登录续期和回退。
 - ET 货代仓已接入仓库和 BI；云端 ET 同步已启用并验证成功。RTV 复核耗时长是正常现象，滚动销售刷新不应等待完整 RTV。
@@ -79,14 +86,14 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 销售当天同步（本地回滚参考）：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_intraday_dsy.ps1`
 - BI 每日流水线（本地回滚参考）：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_bi_daily_pipeline.ps1`
 - 生成 BI 门户：`$env:SHEIN_BI_PORTAL_TIMEOUT_MS='900000'; node scripts/generate_bi_portal.mjs`
-- 生成 V2.1 独立设计预览：`node scripts/generate_bi_portal_v2.mjs`；V2.1 只读复用 `outputs/bi-portal/data.json`，用户确认前不得替换 V1、进入 `main` release 或改生产调度。自 `2026-05-14` 起，V2 当前验收范围先限定首页：必须复刻 V1 首页功能/操作逻辑；其它子页尚未完成全量复刻。V2 暂时不跟随日常同步自动刷新，只有用户明确要求开发/优化/验收 V2 时才生成或维护。
+- 生成 V2 平行预览：`node scripts/generate_bi_portal_v2.mjs`；V2 输出 `outputs/bi-portal/v2/index.html`，运行态验收必须看云端页面和线上 `/api/bi/section/*`，仓库 `outputs/bi-portal/data.json` 只作预览兼容。用户确认前不得替换 V1、进入 `main` release 或改生产调度。V2 暂时不跟随日常同步自动刷新，只有用户明确要求开发/优化/验收 V2 时才生成或维护。
 - 云端 ET 每日同步：服务器执行 `bash scripts/cloud_et_forwarder_sync.sh today`；本地回滚参考才用 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_et_forwarder_daily.ps1`
 - 云端链接/业务域日更：服务器执行 `bash scripts/cloud_link_business_sync.sh yesterday`；不要回退到本机补抓冒充云端日更。
 - 云端登录态管家：服务器执行 `bash scripts/cloud_shein_session_manager.sh`；会顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态。
 - 云端异常通知：服务器执行 `node scripts/cloud_ops_watchdog.mjs --dry-run` 先看巡检结果；销售/页面按 4.5 小时阈值，链接/业务域按 48 小时日更阈值。
 - 飞书只读问数机器人：服务器 systemd 常驻 `shein-bi-lark-sales-qa.service`，入口 `bash scripts/cloud_lark_sales_qa_bot.sh` / `node scripts/lark_sales_qa_bot.mjs --answer "今天销售多少"`；只能只读回答，不写数据库、飞书 Base 或 SHEIN 后台。
 - RTV 换单复核：`node scripts/verify_shein_rtv_tracking.mjs --priority high,medium,low --include-no-cases --limit 120 --case-limit 60 --max-runtime-ms 3600000`
-- 营销活动报名补填：规则见 `docs/marketing-campaign-signup-pricing-rules.md`。用户要先审核标准时，先跑 `node scripts/marketing/export_dsy_marketing_standards.mjs --stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open` 生成按货号汇总表；填报入口为 `node scripts/marketing/dsy_marketing_deadline_fill.mjs --stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open --price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD-approved.json --min-discount-fallback SK-13034`。活动列表必须分页全量扫，默认排除优惠券；选择商品页必须先切到 `500 条/页` 再全选并核对 `总计 N 个 = 已选商品 N 个`；只允许填价和复核，不得点击最终 `提交报名`；完成后只保留需要用户提交的活动编辑页。
+- 营销活动报名（legacy 提醒）：旧 DSY-only `export_dsy_marketing_standards.mjs` / `dsy_marketing_deadline_fill.mjs --all-open` 命令只能作历史线索或单步脚本参考，不能作为当前报活动流程入口。凡涉及普通营销活动、优惠券、限时折扣、价格栈、批量提交或低价/高价补救，一律先使用 `shein-marketing-ops`：以当前 `selection-plan + price-overrides`、云端/live 证据、首店确认、普通活动回读、15%券 dry-run/安全提交和全局复核为准；不得因这里的旧说明排除 `34810` 配套券，也不得用旧命令阻止用户已授权后的真实提交。
 - HL OpenAPI 销售试点：`node scripts/fetch_shein_openapi_sales.mjs HL --start YYYY-MM-DD --end YYYY-MM-DD` 后运行 `node scripts/load_shein_openapi_sales_warehouse.mjs --store HL --start YYYY-MM-DD --end YYYY-MM-DD`，只写 API 并行事实表和 `mart.openapi_sales_reconciliation`。
 - 月表：`node scripts/generate_monthly_sales_table.mjs --month YYYY-MM --include-lgm`
 - 年度/宽表：`node scripts/generate_compact_display_tables.mjs --group ALL --current-month YYYY-MM --recent-months 2`

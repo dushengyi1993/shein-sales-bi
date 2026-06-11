@@ -9,6 +9,21 @@
       "levelRuleId": 3017,
       "reason": "User-authorized rescue for missed ordinary marketing signup: limited-discount price equals planned ordinary marketing activity price, then 15% coupon reaches the original expected final price.",
       "validUntil": "2026-06-12 16:00:00"
+    },
+    {
+      "storeKey": "HL",
+      "limitedDiscountActivityId": 72690600,
+      "limitedDiscountName": "HL漏报补救限时折扣20260604",
+      "couponActivityId": 34810,
+      "levelRuleId": 3017,
+      "skc": "sb260122111100604826676",
+      "supplierNo": "FZ-666颈部按摩器",
+      "allowBelowTarget": true,
+      "approvedFinalWithCoupon": 45.77,
+      "approvedTargetFinalPrice": 52.96,
+      "maxApprovedLossSar": 7.19,
+      "reason": "User explicitly approved loss-making clearance for severe stagnant HL FZ-666; do not cancel this one 15% coupon while this rescue limited discount is active unless live price falls further than approved.",
+      "validUntil": "2026-06-12 16:00:00"
     }
   ]
 }
