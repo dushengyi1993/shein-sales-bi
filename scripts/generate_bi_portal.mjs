@@ -2414,7 +2414,7 @@ orders AS (
       max(e.updated_at) AS updated_at,
       (array_remove(array_agg(nullif(e.standard_goods_sn,'') ORDER BY coalesce(e.sales_sar,0) DESC NULLS LAST, e.standard_goods_sn), NULL))[1] AS standard_goods_sn,
       (array_remove(array_agg(nullif(e.skc,'') ORDER BY coalesce(e.sales_sar,0) DESC NULLS LAST, e.skc), NULL))[1] AS skc,
-      (array_remove(array_agg(nullif(e.goods_title,'') ORDER BY coalesce(e.sales_sar,0) DESC NULLS LAST, e.goods_title), NULL))[1] AS goods_title,
+      NULL::text AS goods_title,
       count(*) AS item_count,
       count(DISTINCT nullif(e.standard_goods_sn,'')) AS product_count,
       CASE
@@ -2423,14 +2423,11 @@ orders AS (
         ELSE coalesce((array_remove(array_agg(nullif(e.standard_goods_sn,'') ORDER BY coalesce(e.sales_sar,0) DESC NULLS LAST), NULL))[1], (array_remove(array_agg(nullif(e.goods_title,'') ORDER BY coalesce(e.sales_sar,0) DESC NULLS LAST), NULL))[1], '未识别商品')
       END AS product_summary,
       array_to_string(
-        (array_remove(array_agg(nullif(concat_ws(' · ', nullif(e.standard_goods_sn,''), nullif(e.skc,''), nullif(e.goods_title,'')), '') ORDER BY coalesce(e.sales_sar,0) DESC NULLS LAST, e.standard_goods_sn), NULL))[1:5],
+        (array_remove(array_agg(nullif(concat_ws(' · ', nullif(e.standard_goods_sn,''), nullif(e.skc,'')), '') ORDER BY coalesce(e.sales_sar,0) DESC NULLS LAST, e.standard_goods_sn), NULL))[1:5],
         '；'
       ) AS product_detail_summary,
       round(sum(coalesce(e.quantity,0))::numeric, 0) AS quantity,
       round(sum(coalesce(e.sales_sar,0))::numeric, 2) AS sales_sar,
-      (array_agg(e.goods_performance_status_desc ORDER BY e.status_priority, coalesce(e.updated_at, e.order_create_time) DESC NULLS LAST))[1] AS goods_performance_status_desc,
-      (array_agg(e.original_goods_performance_status_desc ORDER BY e.status_priority, coalesce(e.updated_at, e.order_create_time) DESC NULLS LAST))[1] AS original_goods_performance_status_desc,
-      (array_agg(e.perform_status_desc ORDER BY e.status_priority, coalesce(e.updated_at, e.order_create_time) DESC NULLS LAST))[1] AS perform_status_desc,
       (array_agg(e.order_status_desc ORDER BY e.status_priority, coalesce(e.updated_at, e.order_create_time) DESC NULLS LAST))[1] AS order_status_desc,
       CASE
         WHEN bool_or(e.item_status_group = 'abnormal') THEN 'abnormal'
@@ -2446,62 +2443,37 @@ orders AS (
         ELSE coalesce((array_agg(e.item_status_group ORDER BY e.status_priority))[1], 'other')
       END AS order_status_group,
       CASE WHEN bool_or(e.order_status_source = 'recheck') THEN 'recheck' ELSE 'sales' END AS order_status_source,
-      (array_remove(array_agg(nullif(e.recheck_status_group,'') ORDER BY e.status_priority), NULL))[1] AS recheck_status_group,
       max(e.status_checked_at) AS status_checked_at,
       max(e.status_check_count) AS status_check_count,
-      max(e.status_consecutive_same_count) AS status_consecutive_same_count,
-      bool_and(e.item_status_group IN ('done','cancelled','returning')) AS status_is_terminal,
       bool_or(coalesce(e.is_cod,false)) AS is_cod,
       max(nullif(e.payment_label,'')) AS payment_label,
       max(nullif(e.payment_method,'')) AS payment_method,
       max(nullif(e.express_no,'')) AS express_no,
       max(nullif(e.express_code,'')) AS express_code,
-      max(nullif(e.provider_name,'')) AS provider_name,
-      max(nullif(e.warehouse_name,'')) AS warehouse_name,
       max(nullif(e.waybill_status,'')) AS waybill_status,
       max(nullif(e.tag_desc,'')) AS tag_desc,
       max(e.print_time) AS print_time,
       max(e.collect_time) AS collect_time,
       max(nullif(e.place_order_package_id,'')) AS place_order_package_id,
-      max(e.waybill_snapshot_date) AS waybill_snapshot_date,
       max(coalesce(e.waybill_count,0)) AS waybill_count,
       max(nullif(e.et_outbound_id,'')) AS et_outbound_id,
       max(nullif(e.et_outbound_status,'')) AS et_outbound_status,
       max(e.et_outbound_time) AS et_outbound_time,
       max(e.et_outbound_create_time) AS et_outbound_create_time,
       max(nullif(e.et_logistics_title,'')) AS et_logistics_title,
-      max(nullif(e.et_storeroom_title,'')) AS et_storeroom_title,
-      max(nullif(e.et_file_url,'')) AS et_file_url,
-      max(e.et_sku_count) AS et_sku_count,
-      max(e.et_box_count) AS et_box_count,
       max(nullif(e.et_shipper_code,'')) AS et_shipper_code,
       max(nullif(e.et_shipper_name,'')) AS et_shipper_name,
       max(nullif(e.et_detail_url,'')) AS et_detail_url,
       d.status_distribution,
-      string_agg(DISTINCT concat_ws(' ', nullif(e.standard_goods_sn,''), nullif(e.skc,''), nullif(e.goods_title,'')), ' ') AS product_search_text,
-      concat_ws(' ',
-        e.store_key,
-        max(nullif(e.order_no,'')),
-        max(nullif(e.bill_no,'')),
-        max(nullif(e.express_no,'')),
-        max(nullif(e.express_code,'')),
-        max(nullif(e.et_outbound_id,'')),
-        string_agg(DISTINCT concat_ws(' ', nullif(e.standard_goods_sn,''), nullif(e.skc,''), nullif(e.goods_title,'')), ' ')
-      ) AS search_text,
-      jsonb_agg(jsonb_build_object(
-        'order_item_key', e.order_item_key,
-        'standard_goods_sn', e.standard_goods_sn,
-        'skc', e.skc,
-        'goods_title', e.goods_title,
-        'quantity', e.quantity,
-        'sales_sar', e.sales_sar,
-        'goods_performance_status_desc', e.goods_performance_status_desc,
-        'original_goods_performance_status_desc', e.original_goods_performance_status_desc,
-        'order_status_group', e.item_status_group,
-        'order_status_source', e.order_status_source,
-        'status_checked_at', e.status_checked_at,
-        'status_check_count', e.status_check_count
-      ) ORDER BY coalesce(e.sales_sar,0) DESC NULLS LAST, e.standard_goods_sn, e.skc) AS items
+      CASE
+        WHEN count(*) <= 1 THEN '[]'::jsonb
+        ELSE jsonb_agg(jsonb_build_object(
+          'standard_goods_sn', e.standard_goods_sn,
+          'skc', e.skc,
+          'goods_title', NULL,
+          'order_status_group', e.item_status_group
+        ) ORDER BY coalesce(e.sales_sar,0) DESC NULLS LAST, e.standard_goods_sn, e.skc)
+      END AS items
     FROM order_item_enriched e
     LEFT JOIN order_status_distribution d
       ON d.store_key = e.store_key

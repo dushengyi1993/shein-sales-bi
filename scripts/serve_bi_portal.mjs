@@ -1406,8 +1406,10 @@ async function readBiSectionCache(root, section, generatedAt) {
   return cached;
 }
 
-function appendCacheHitToJsonObjectBuffer(buffer, cacheHit) {
+function appendJsonFieldsToJsonObjectBuffer(buffer, fields = {}) {
   if (!Buffer.isBuffer(buffer)) return null;
+  const pairs = Object.entries(fields).filter(([, value]) => value !== undefined);
+  if (!pairs.length) return buffer;
   let end = buffer.length;
   while (end > 0) {
     const c = buffer[end - 1];
@@ -1415,10 +1417,17 @@ function appendCacheHitToJsonObjectBuffer(buffer, cacheHit) {
     end--;
   }
   if (end < 2 || buffer[end - 1] !== 0x7d) return null;
+  const extra = pairs.map(([key, value]) => {
+    return `,\n  ${JSON.stringify(key)}: ${JSON.stringify(value)}`;
+  }).join('');
   return Buffer.concat([
     buffer.subarray(0, end - 1),
-    Buffer.from(`,\n  "cacheHit": ${cacheHit ? 'true' : 'false'}\n}\n`, 'utf8'),
+    Buffer.from(`${extra}\n}\n`, 'utf8'),
   ]);
+}
+
+function appendCacheHitToJsonObjectBuffer(buffer, cacheHit, extraFields = {}) {
+  return appendJsonFieldsToJsonObjectBuffer(buffer, {cacheHit: Boolean(cacheHit), ...extraFields});
 }
 
 function extractJsonStringFieldFromHead(head, field) {
@@ -1467,8 +1476,14 @@ async function readBiSectionCacheRaw(root, section, generatedAt, cacheHit = true
   if (extractJsonStringFieldFromHead(head, 'section') !== section) return null;
   if (!/"data"\s*:/.test(head)) return null;
 
+  const extraFields = options.extraFields && typeof options.extraFields === 'object' ? options.extraFields : {};
+  const hasExtraFields = Object.keys(extraFields).length > 0;
+
   if (options.gzip) {
-    const body = await readOrCreateBiSectionGzipCache(file, buffer);
+    const rawBody = hasExtraFields ? appendCacheHitToJsonObjectBuffer(buffer, cacheHit, extraFields) : null;
+    const body = rawBody
+      ? gzipSync(rawBody, {level: 6})
+      : await readOrCreateBiSectionGzipCache(file, buffer);
     return {
       body,
       headers: {
@@ -1477,12 +1492,13 @@ async function readBiSectionCacheRaw(root, section, generatedAt, cacheHit = true
         'Content-Length': String(body.length),
         'Vary': 'Accept-Encoding',
         'X-BI-Section-Cache-Hit': cacheHit ? 'true' : 'false',
-        'X-BI-Section-Mode': 'raw-cache-gzip',
+        'X-BI-Section-Mode': hasExtraFields ? 'raw-cache-gzip-meta' : 'raw-cache-gzip',
+        ...(extraFields.staleSection ? {'X-BI-Section-Stale': 'true'} : {}),
       },
     };
   }
 
-  const body = appendCacheHitToJsonObjectBuffer(buffer, cacheHit);
+  const body = appendCacheHitToJsonObjectBuffer(buffer, cacheHit, extraFields);
   if (!body) return null;
   return {
     body,
@@ -1490,6 +1506,7 @@ async function readBiSectionCacheRaw(root, section, generatedAt, cacheHit = true
       'Content-Type': 'application/json; charset=utf-8',
       'X-BI-Section-Cache-Hit': cacheHit ? 'true' : 'false',
       'X-BI-Section-Mode': 'raw-cache',
+      ...(extraFields.staleSection ? {'X-BI-Section-Stale': 'true'} : {}),
     },
   };
 }
@@ -1673,6 +1690,38 @@ async function readBiSectionCacheAnyGeneratedAt(root, section) {
   return cached;
 }
 
+async function readBiSectionStaleRaw(root, section, currentGeneratedAt, options = {}) {
+  const stale = await readBiSectionCacheRaw(root, section, '', true, {
+    ...options,
+    extraFields: {
+      staleSection: true,
+      cacheStale: true,
+      coreGeneratedAt: String(currentGeneratedAt || ''),
+    },
+  });
+  if (!stale) return null;
+  return {
+    body: stale.body,
+    headers: {
+      ...stale.headers,
+      'X-BI-Section-Stale': 'true',
+      'Cache-Control': 'no-store',
+    },
+  };
+}
+
+function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt) {
+  const key = `${root}|${section}|${generatedAt || ''}`;
+  if (biSectionInFlight.has(key)) return;
+  biSectionInFlight.set(key, generateBiSection(args, root, section, generatedAt)
+    .catch(err => {
+      console.warn('BI section background generation failed', section, err?.message || err);
+    })
+    .finally(() => {
+      biSectionInFlight.delete(key);
+    }));
+}
+
 async function deriveHomeProfitSectionFromProfitCache(root, generatedAt) {
   const currentProfitCache = await readBiSectionCache(root, 'profit', generatedAt);
   const profitCache = currentProfitCache || await readBiSectionCacheAnyGeneratedAt(root, 'profit');
@@ -1780,6 +1829,7 @@ function compactHomeRankingsSectionData(data) {
 async function loadBiSection(args, root, section, options = {}) {
   const force = !!options.force;
   const allowGenerate = options.allowGenerate !== false;
+  const allowStale = options.allowStale !== false;
   if (!BI_PORTAL_SECTION_KEYS.has(section)) {
     return {status: 404, payload: {ok: false, error: 'Unknown BI section', section}};
   }
@@ -1843,6 +1893,14 @@ async function loadBiSection(args, root, section, options = {}) {
     if (cached) return {status: 200, payload: {...cached, cacheHit: true}};
   }
   if (!allowGenerate) {
+    if (!force && allowStale) {
+      const staleRaw = await readBiSectionStaleRaw(root, section, meta.generatedAt, options);
+      if (staleRaw) return {status: 200, rawBody: staleRaw.body, headers: staleRaw.headers};
+      const stale = await readBiSectionCacheAnyGeneratedAt(root, section);
+      if (stale) {
+        return {status: 200, payload: {...stale, cacheHit: true, staleSection: true, cacheStale: true, coreGeneratedAt: meta.generatedAt}};
+      }
+    }
     return {
       status: 503,
       payload: {
@@ -1854,6 +1912,13 @@ async function loadBiSection(args, root, section, options = {}) {
     };
   }
   const key = `${root}|${section}|${meta.generatedAt || ''}`;
+  if (!force && allowStale) {
+    const staleRaw = await readBiSectionStaleRaw(root, section, meta.generatedAt, options);
+    if (staleRaw) {
+      scheduleBiSectionBackgroundGeneration(args, root, section, meta.generatedAt);
+      return {status: 200, rawBody: staleRaw.body, headers: staleRaw.headers};
+    }
+  }
   if (!biSectionInFlight.has(key)) {
     biSectionInFlight.set(key, generateBiSection(args, root, section, meta.generatedAt).finally(() => {
       biSectionInFlight.delete(key);
