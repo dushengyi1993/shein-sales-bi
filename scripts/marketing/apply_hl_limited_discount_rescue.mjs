@@ -590,7 +590,6 @@ try {
     };
 
     const before = await queryCurrentLimitedDiscounts();
-    assertSafeToEnd(before.conflictActivities);
 
     const activityBase = buildActivityBaseInfo();
     const checkPacket = await post('/promotion/simple_platform/check_activity', activityBase);
@@ -669,6 +668,23 @@ try {
       after: null,
       ok: false,
     };
+
+    const unsafeExistingLimitedDiscounts = (() => {
+      try {
+        assertSafeToEnd(before.conflictActivities);
+        return [];
+      } catch (error) {
+        return error.unsafe || [{reason: error.message}];
+      }
+    })();
+    result.unsafeExistingLimitedDiscounts = unsafeExistingLimitedDiscounts;
+
+    if (unsafeExistingLimitedDiscounts.length) {
+      result.validationFailed = true;
+      result.ok = false;
+      result.reason = 'unsafe existing limited-discount activities; manual split/end required before creating replacement';
+      return result;
+    }
 
     if (validationFailed) {
       result.validationFailed = true;

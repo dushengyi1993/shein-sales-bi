@@ -105,8 +105,10 @@ function isFormalPortalIndexPath(file, outDir) {
   return path.basename(resolved).toLowerCase() === 'index.html' && path.basename(path.dirname(resolved)).toLowerCase() === 'bi-portal';
 }
 
-function shouldWriteNoGroupsPreview() {
-  return String(process.env.SHEIN_BI_PREVIEW_NO_GROUPS_DISABLED || '').trim() !== '1';
+function shouldWriteNoGroupsPreview(args = {}) {
+  if (String(process.env.SHEIN_BI_PREVIEW_NO_GROUPS_DISABLED || '').trim() === '1') return false;
+  if (String(process.env.SHEIN_BI_WRITE_PREVIEW_NO_GROUPS || '').trim() === '1') return true;
+  return String(args.homeVariant || '').trim().toLowerCase() !== 'no-groups';
 }
 
 function noGroupsPreviewHtmlFile(args) {
@@ -2118,13 +2120,15 @@ inventory_alerts AS (
   ) t
 ),
 visible_inventory_trend AS (
-  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY date, standard_goods_sn), '[]'::jsonb) AS data
+  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY date, store_key, standard_goods_sn), '[]'::jsonb) AS data
   FROM (
     SELECT
       snapshot_date AS date,
-      standard_goods_sn,
+      upper(coalesce(store_key,'')) AS store_key,
+      dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
+      string_agg(DISTINCT nullif(standard_goods_sn,''), ' / ') AS standard_goods_sn_list,
       string_agg(DISTINCT nullif(raw_goods_sn,''), ' / ') AS raw_goods_sn_list,
-      count(DISTINCT store_key) AS store_count,
+      count(DISTINCT upper(coalesce(store_key,''))) AS store_count,
       count(*) AS skc_rows,
       round(sum(coalesce(inventory_quantity,0))::numeric, 0) AS inventory_quantity,
       round(sum(coalesce(usable_inventory, inventory_quantity, 0))::numeric, 0) AS usable_inventory,
@@ -2137,7 +2141,8 @@ visible_inventory_trend AS (
     FROM fact.visible_inventory_snapshot
     WHERE snapshot_date >= (SELECT max(snapshot_date) FROM fact.visible_inventory_snapshot) - interval '395 days'
       AND coalesce(standard_goods_sn,'') <> ''
-    GROUP BY snapshot_date, standard_goods_sn
+      AND coalesce(store_key,'') <> ''
+    GROUP BY snapshot_date, upper(coalesce(store_key,'')), dim.product_canonical_sn(standard_goods_sn)
   ) t
 ),
 orders AS (
@@ -2802,6 +2807,70 @@ function attachProductAliasSearch(data){
   return {...(data || {}), productAliasSearch: buildProductAliasSearch()};
 }
 
+const DEFAULT_STORE_OWNER_GROUPS = Object.freeze([
+  {key:'GUANGHONG', name:'广洪', stores:['DL','TZZ','CX'], color:'#2563eb'},
+  {key:'YANGHUAN', name:'杨欢', stores:['DX','LQ','XC'], color:'#f97316'},
+  {key:'WUWEI', name:'吴薇', stores:['QY','JY','XL'], color:'#7c3aed'},
+  {key:'JIAYIN', name:'嘉茵', stores:['NM','YJ','MZ'], color:'#db2777'},
+  {key:'LUOFANG', name:'罗芳', stores:['FY','QH','ZL'], color:'#14b8a6'},
+  {key:'TIANHAO', name:'天浩', stores:['HL','TZ','TS'], color:'#84cc16'}
+]);
+
+function normalizeOwnerGroupKey(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .trim()
+    .replace(/[^A-Za-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toUpperCase();
+}
+
+function normalizeStoreOwnerGroups(rawGroups, source = 'config/stores.json') {
+  const groups = Array.isArray(rawGroups) && rawGroups.length ? rawGroups : DEFAULT_STORE_OWNER_GROUPS;
+  const out = [];
+  const seenKeys = new Set();
+  const seenStores = new Map();
+  for (const raw of groups) {
+    const key = normalizeOwnerGroupKey(raw?.key || raw?.name);
+    const name = String(raw?.name || raw?.label || key).normalize('NFKC').trim();
+    const stores = [...new Set((Array.isArray(raw?.stores) ? raw.stores : [])
+      .map(x => String(x || '').trim().toUpperCase())
+      .filter(Boolean))];
+    const color = /^#[0-9a-f]{6}$/i.test(String(raw?.color || '').trim()) ? String(raw.color).trim() : '#64748b';
+    if (!key || !name || !stores.length) {
+      throw new Error(`Invalid ownerGroups entry in ${source}: key/name/stores are required`);
+    }
+    if (seenKeys.has(key)) throw new Error(`Duplicate ownerGroups key in ${source}: ${key}`);
+    seenKeys.add(key);
+    for (const store of stores) {
+      if (store === 'JSH') throw new Error(`JSH must stay unassigned and cannot be listed in ownerGroups (${source})`);
+      const old = seenStores.get(store);
+      if (old) throw new Error(`Store ${store} appears in multiple ownerGroups (${old}, ${key}) in ${source}`);
+      seenStores.set(store, key);
+    }
+    out.push({key, name, stores, color});
+  }
+  return out;
+}
+
+async function readStoreOwnerGroups() {
+  const file = path.join(ROOT, 'config', 'stores.json');
+  try {
+    const config = JSON.parse(await fs.readFile(file, 'utf8'));
+    return normalizeStoreOwnerGroups(config.ownerGroups, path.relative(ROOT, file));
+  } catch (err) {
+    if (err?.code === 'ENOENT') return normalizeStoreOwnerGroups(DEFAULT_STORE_OWNER_GROUPS, 'default ownerGroups');
+    throw err;
+  }
+}
+
+async function attachStoreOwnerGroups(data) {
+  return {
+    ...(data || {}),
+    ownerGroups: await readStoreOwnerGroups(),
+  };
+}
+
 function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck, options = {}) {
   const previewVariant = String(options.previewVariant || '').trim();
   const homeVariant = String(options.homeVariant || (previewVariant === 'no-groups' ? 'no-groups' : 'classic')).trim();
@@ -2830,7 +2899,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck, 
   const overviewSub = isNoGroupsHome
     ? '先选时间段，再看同一口径下的全盘、趋势、流量、库存/去化和排行；本月数据只作为补充参照。'
     : '先选时间段，再看同一口径下的总盘、分组、趋势和排行；本月数据只作为补充参照。';
-  const homeStoreFilterLabel = isNoGroupsHome ? '首页店铺筛选' : '首页店铺或分组筛选';
+  const homeStoreFilterLabel = isNoGroupsHome ? '首页店铺或员工筛选' : '首页店铺、员工或分组筛选';
   const profitTrendSub = isNoGroupsHome
     ? '全盘只看总计；筛到单店或货号时看当前范围。月趋势按所选日期片段，不强行补整月。'
     : '总计 / DSY / LGM 看全局；筛到单店或货号时看当前范围。月趋势按所选日期片段，不强行补整月。';
@@ -3396,7 +3465,10 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck, 
     .link-like{border:0;background:transparent;color:inherit;padding:0;text-align:left;cursor:pointer;font:inherit}
     .link-like:hover{color:#38bdf8;text-decoration:underline;text-underline-offset:3px}
     .rank-no{display:grid;place-items:center;width:30px;height:30px;border-radius:999px;background:rgba(148,163,184,.14);color:var(--muted);font-family:var(--mono);font-weight:800}
+    .rank-name-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
     .rank-name{font-weight:800;line-height:1.35;white-space:normal;word-break:break-word}
+    .rank-badge{display:inline-flex;align-items:center;border:1px solid color-mix(in srgb,var(--badge-color,#64748b) 54%,transparent);border-radius:999px;background:color-mix(in srgb,var(--badge-color,#64748b) 14%,transparent);color:var(--text);font-size:11px;font-weight:800;line-height:1;padding:4px 7px}
+    body[data-theme="light"] .rank-badge{background:color-mix(in srgb,var(--badge-color,#64748b) 11%,#ffffff);color:#0f172a}
     .rank-meta{margin-top:3px;color:var(--muted);font-size:12px;line-height:1.4;white-space:normal;word-break:break-word;display:block;min-height:34px}
     .rank-value{font-family:var(--mono);font-weight:900;font-size:15px;text-align:right;font-variant-numeric:tabular-nums}
     .rank-subvalue{display:block;margin-top:3px;color:var(--muted);font-size:12px;font-weight:600;text-align:right}
@@ -4306,6 +4378,15 @@ const GROUP_META = {
   DSY:{key:'DSY', label:'DSY 组', desc:'DL/DX/FY/LQ/NM/HL/JY/ZL/TS/MZ', color:'#2563eb', cls:'dsy'},
   LGM:{key:'LGM', label:'LGM 组', desc:'CX/YJ/XL/QY/QH/TZ', color:'#f97316', cls:'lgm'}
 };
+const STORE_OWNER_GROUPS = (Array.isArray(DATA.ownerGroups) ? DATA.ownerGroups : []).map(g => {
+  const key = String(g?.key || g?.name || '').trim().toUpperCase();
+  const name = String(g?.name || g?.label || key).trim();
+  const stores = [...new Set((Array.isArray(g?.stores) ? g.stores : []).map(s => String(s || '').trim().toUpperCase()).filter(Boolean))];
+  const color = /^#[0-9a-f]{6}$/i.test(String(g?.color || '').trim()) ? String(g.color).trim() : '#64748b';
+  return key && name && stores.length ? {key, name, stores, color} : null;
+}).filter(Boolean);
+const STORE_OWNER_META = Object.fromEntries(STORE_OWNER_GROUPS.map(g => [g.key, g]));
+const STORE_OWNER_BY_STORE = Object.fromEntries(STORE_OWNER_GROUPS.flatMap(g => g.stores.map(store => [store, g.key])));
 function storeGroupKey(row){
   return String(row?.group_key || STORE_GROUP_FALLBACK[String(row?.store_key || '').toUpperCase()] || 'OTHER').toUpperCase();
 }
@@ -4313,16 +4394,36 @@ function groupMeta(key){
   return GROUP_META[String(key || '').toUpperCase()] || {key:String(key || 'OTHER'), label:String(key || 'OTHER'), desc:'未分组', color:'#94a3b8', cls:'other'};
 }
 function groupColor(key){ return groupMeta(key).color; }
+function ownerMeta(key){
+  const k = String(key || '').toUpperCase();
+  return STORE_OWNER_META[k] || {key:k || 'UNASSIGNED', name:k || '未分配', stores:[], color:'#94a3b8'};
+}
+function ownerScopeValue(key){ return 'OWNER:' + String(key || '').toUpperCase(); }
+function storeOwnerKey(row){
+  const store = String(row?.store_key || row?.storeKey || row || '').toUpperCase();
+  return STORE_OWNER_BY_STORE[store] || '';
+}
+function storeOwnerBadge(row){
+  const key = storeOwnerKey(row);
+  return key ? ownerMeta(key).name : '';
+}
+function storeOwnerColor(row, fallback = '#94a3b8'){
+  const key = storeOwnerKey(row);
+  return key ? ownerMeta(key).color : fallback;
+}
 function storeFilterKind(value = state.store){
   const v = String(value || '');
-  if (NO_GROUPS_PREVIEW && v.startsWith('GROUP:')) return {type:'all', key:'ALL'};
-  if (v.startsWith('GROUP:')) return {type:'group', key:v.slice(6).toUpperCase()};
+  const upper = v.toUpperCase();
+  if (NO_GROUPS_PREVIEW && upper.startsWith('GROUP:')) return {type:'all', key:'ALL'};
+  if (upper.startsWith('GROUP:')) return {type:'group', key:upper.slice(6)};
+  if (upper.startsWith('OWNER:')) return {type:'owner', key:upper.slice(6)};
   if (v) return {type:'store', key:v.toUpperCase()};
   return {type:'all', key:'ALL'};
 }
 function storeScopeLabel(value = state.store){
   const scope = storeFilterKind(value);
   if (scope.type === 'group') return groupMeta(scope.key).label;
+  if (scope.type === 'owner') return ownerMeta(scope.key).name + '负责';
   if (scope.type === 'store') return scope.key;
   return '全部店铺';
 }
@@ -4331,7 +4432,18 @@ function storeMatchesScope(row, value = state.store){
   if (scope.type === 'all') return true;
   const store = String(row?.store_key || '').toUpperCase();
   if (scope.type === 'store') return store === scope.key;
+  if (scope.type === 'owner') return storeOwnerKey(row) === scope.key;
   return storeGroupKey(row) === scope.key;
+}
+function scopeStoreKeys(scope = storeFilterKind()){
+  if (scope.type === 'store') return [scope.key];
+  if (scope.type === 'owner') return ownerMeta(scope.key).stores || [];
+  if (scope.type === 'group') return STORE_CODES_ARRAY.filter(store => storeGroupKey({store_key:store}) === scope.key);
+  return [];
+}
+function scopedStorePool(stores, scope = storeFilterKind()){
+  if (scope.type === 'all') return stores || [];
+  return (stores || []).filter(store => storeMatchesScope(store));
 }
 function isActionFilterTab(tab = state.tab){ return tab === 'actions'; }
 function actionDomainActive(){ return isActionFilterTab() ? state.domain : ''; }
@@ -6163,6 +6275,7 @@ function afterSalesGroupScopeSummary(){
 function homeScopeRows(){
   const scope = storeFilterKind();
   if (scope.type === 'group') return [{key:scope.key, label:groupMeta(scope.key).label, scopeValue:'GROUP:' + scope.key}];
+  if (scope.type === 'owner') return [{key:'OWNER:' + scope.key, label:ownerMeta(scope.key).name + '负责', scopeValue:ownerScopeValue(scope.key)}];
   if (scope.type === 'store') return [{key:scope.key, label:scope.key, scopeValue:scope.key}];
   if (NO_GROUPS_PREVIEW) return [{key:'ALL', label:'全部店铺', scopeValue:''}];
   return [
@@ -6405,19 +6518,20 @@ function homeProfitSummaryCanSatisfyScope(range = null){
   if (!range) return true;
   return homeProfitSummaryCoversRange(range.start, range.end);
 }
-function normalizedHomeProfitScopeValue(scopeValue = ''){
+function normalizedHomeProfitScopeValues(scopeValue = ''){
   const scope = storeFilterKind(scopeValue);
-  if (scope.type === 'all') return '';
-  if (scope.type === 'group') return 'GROUP:' + scope.key;
-  return scope.key;
+  if (scope.type === 'all') return [''];
+  if (scope.type === 'group') return ['GROUP:' + scope.key];
+  if (scope.type === 'owner') return scopeStoreKeys(scope);
+  return [scope.key];
 }
 function homeProfitSummaryRows(start, end, scopeValue = ''){
   if (!homeProfitSummaryCanSatisfyScope({start, end})) return null;
-  const scopeKey = normalizedHomeProfitScopeValue(scopeValue).toUpperCase();
+  const scopeKeys = new Set(normalizedHomeProfitScopeValues(scopeValue).map(x => String(x || '').toUpperCase()));
   return (DATA.homeProfitSummary?.dailyScopes || []).filter(r => {
     const d = String(r.date || '').slice(0, 10);
     if (!d || d < start || d > end) return false;
-    return String(r.scope_value || '').toUpperCase() === scopeKey;
+    return scopeKeys.has(String(r.scope_value || '').toUpperCase());
   });
 }
 function profitSummaryForAggregatedRows(rows){
@@ -6631,7 +6745,8 @@ function renderKpisNoGroupsPreview(){
   );
   const profitLoadFailed = biSectionState.profit?.status === 'error';
   const profitLoadingLabel = profitLoadFailed ? '利润加载失败' : profitNeedsPrewarm ? '利润待预热' : '加载中';
-  const scopeValue = storeFilterKind().type === 'store' ? state.store : '';
+  const scope = storeFilterKind();
+  const scopeValue = (scope.type === 'store' || scope.type === 'owner') ? state.store : '';
   const net = homeSalesForScopeMode(range.start, range.end, scopeValue, 'net');
   const gross = homeSalesForScopeMode(range.start, range.end, scopeValue, 'gross');
   const afterRequest = homeAfterSalesForScopeMode(range.start, range.end, scopeValue, 'request');
@@ -6698,7 +6813,7 @@ function renderKpisNoGroupsPreview(){
   const inventoryDailySales = inventoryRows.reduce((s,r)=>s+Number(r.weighted_daily_gross_sales || 0),0);
   const inventoryDaysWithIncoming = inventoryDailySales > 0 ? inventoryTotalSupply / inventoryDailySales : null;
   const inventorySnapshotDate = latestInventorySnapshotDate(inventoryRows);
-  const inventoryScopeNote = productScopeQuery() ? '当前货号筛选' : '全部货号';
+  const inventoryScopeNote = (productScopeQuery() ? '当前货号筛选' : '全部货号') + ' · 成本/ET库存不按店铺拆';
   const inventoryCardRows = [
     {label:'货号数', value:num(inventoryRows.length)+' 个', note:inventoryScopeNote},
     {label:'ET可售', value:num(inventoryAvailable)+' 件', note:'ET实盘；不与在途相加'},
@@ -6711,7 +6826,7 @@ function renderKpisNoGroupsPreview(){
   $('kpis').innerHTML =
     card('当前时段成交额', selectedRangeText()+' · '+homeScopeSubtitle(),
       matrix(2, head(['口径','SAR','RMB'])+salesRows.map(r => label(r.label)+(rankingsLoading ? loadingValue('加载中') : moneyValue(r.row.sales_sar))+(rankingsLoading ? loadingValue('加载中') : rmbValue(r.row.sales_sar))).join('')),
-      '预览版按全部店铺口径展示；总成交额和净成交额在同一张卡里并列显示。RMB 按固定汇率 1 SAR = 1.8 估算。')+
+      '首页按当前店铺/货号和日期筛选口径展示；总成交额和净成交额在同一张卡里并列显示。RMB 按固定汇率 1 SAR = 1.8 估算。')+
     card('当前时段订单 / 销量 / 动销', selectedRangeText()+' · '+homeScopeSubtitle(),
       matrix(3, head(['口径','订单','销量','动销货号'])+qtyRows.map(r => label(r.label)+(rankingsLoading ? loadingValue('加载中') : value(num(r.row.orders)+' 单'))+(rankingsLoading ? loadingValue('加载中') : value(num(r.row.quantity)+' 件'))+(rankingsLoading ? loadingValue('加载中') : value(num(r.row.activeProducts)+' 个'))).join('')),
       '总订单/销量用于看原始出单规模；净订单/销量只统计最终仍保留成交额的订单。')+
@@ -6726,7 +6841,7 @@ function renderKpisNoGroupsPreview(){
       (trafficScoped ? '货号级流量来自 productTrafficDaily section；按当前店铺/货号和日期聚合，点击率/支付率按分子分母重算。' : '流量来自云端链接表现日序列；曝光、访客、成交件数按所选时间段汇总，点击率/支付率只展示最近业务日。'), 'links')+
     card('当前库存 / 去化', '当前快照 · '+inventoryScopeNote,
       '<div data-preview-table="inventory">'+matrix(2, head(['指标','数值','说明'])+plainRows(inventoryCardRows))+'</div>',
-      'ET可售来自货代仓实盘；成本表供给=到仓+在途-已售，不等于 ET可售+在途。去化周期按总供给/加权日销汇总，不平均各货号天数。', 'inventory');
+      'ET可售和成本表供给是物理库存口径，不按店铺硬拆；店铺/货号筛选下的前台展示库存趋势来自 inventoryTrend section。成本表供给=到仓+在途-已售，不等于 ET可售+在途。', 'inventory');
   document.querySelectorAll('[data-overview-jump]').forEach(btn => btn.addEventListener('click', e => {
     if (e.target?.classList?.contains('help')) return;
     kpiJump(btn.dataset.overviewJump || 'business');
@@ -7301,12 +7416,19 @@ function latestInventorySnapshotDate(rows = previewInventoryProductRows()){
 function previewVisibleInventoryTrendRows(){
   const source = DATA.inventoryDepletion?.visibleTrend || DATA.inventoryTrend || [];
   const q = productScopeQuery();
-  return (source || []).filter(r => !q || productQueryMatch(r, q));
+  const hasStoreScope = (source || []).some(r => String(r?.store_key || '').trim());
+  return (source || []).filter(r => {
+    if (q && !productQueryMatch(r, q)) return false;
+    if (hasStoreScope && !storeMatchesScope(r)) return false;
+    return true;
+  });
 }
 function previewInventoryTrendSubtitle(){
-  const parts = ['全店铺展示库存'];
+  const source = DATA.inventoryDepletion?.visibleTrend || DATA.inventoryTrend || [];
+  const hasStoreScope = (source || []).some(r => String(r?.store_key || '').trim());
+  const parts = [hasStoreScope ? '前台展示库存（日×店铺×标准货号）' : '全店铺展示库存'];
+  if (storeFilterKind().type !== 'all') parts.push(hasStoreScope ? storeScopeLabel() : '库存趋势不按店铺拆分');
   if (productScopeQuery()) parts.push('货号/SKC：' + String(state.product || '').trim());
-  if (storeFilterKind().type !== 'all') parts.push('库存趋势不按店铺拆分');
   return parts.join(' · ');
 }
 function renderPreviewInventoryPanel(){
@@ -7377,9 +7499,12 @@ function rankList(rows, opts = {}){
     const subValue = opts.subValue ? opts.subValue(r) : '';
     const attr = opts.attr ? opts.attr(r) : '';
     const color = opts.color ? opts.color(r) : 'var(--cyan)';
+    const badge = opts.badge ? opts.badge(r) : '';
+    const badgeColor = opts.badgeColor ? opts.badgeColor(r) : color;
+    const badgeHtml = badge ? '<span class="rank-badge" style="--badge-color:'+escapeHtml(badgeColor)+'">'+escapeHtml(badge)+'</span>' : '';
     return '<button class="rank-item" '+attr+' style="--bar-color:'+escapeHtml(color)+'" title="'+escapeHtml(name)+'">'+
       '<span class="rank-no">'+(i+1)+'</span>'+
-      '<span><span class="rank-name">'+escapeHtml(name)+'</span><span class="rank-meta">'+escapeHtml(meta)+'</span><i style="display:block;width:'+pctWidth+'%;height:6px;border-radius:999px;background:var(--bar-color);margin-top:8px"></i></span>'+
+      '<span><span class="rank-name-row"><span class="rank-name">'+escapeHtml(name)+'</span>'+badgeHtml+'</span><span class="rank-meta">'+escapeHtml(meta)+'</span><i style="display:block;width:'+pctWidth+'%;height:6px;border-radius:999px;background:var(--bar-color);margin-top:8px"></i></span>'+
       '<span class="rank-value">'+escapeHtml(valueText)+'<span class="rank-subvalue">'+escapeHtml(subValue)+'</span></span>'+
     '</button>';
   }).join('') + '</div>';
@@ -7765,6 +7890,7 @@ function buildPreviewInventorySeries(kind){
   const range = chartRangeFor(kind);
   const allTrendRows = DATA.inventoryDepletion?.visibleTrend || DATA.inventoryTrend || [];
   if (allTrendRows.length) {
+    const hasStoreScope = allTrendRows.some(r => String(r?.store_key || '').trim());
     const trendRows = previewVisibleInventoryTrendRows();
     const dailyMap = new Map();
     for (const r of trendRows) {
@@ -7801,7 +7927,10 @@ function buildPreviewInventorySeries(kind){
         {key:'inventory_quantity', label:'总展示库存', color:'#60a5fa'},
         {key:'locked_inventory', label:'锁定库存', color:'#f59e0b'}
       ],
-      note:'来自前台展示库存每日快照；按全店铺展示库存汇总，可按货号筛选，不按店铺拆分。该趋势不同于上方 ET/成本表供给口径。'+(kind === 'month' ? ' 月图取每月最新快照，不累加库存。' : '')
+      note:(hasStoreScope
+        ? '来自前台展示库存每日快照；按当前店铺/货号筛选后汇总。该趋势不同于上方 ET/成本表供给口径。'
+        : '来自前台展示库存每日快照；按全店铺展示库存汇总，可按货号筛选，不按店铺拆分。该趋势不同于上方 ET/成本表供给口径。'
+      )+(kind === 'month' ? ' 月图取每月最新快照，不累加库存。' : '')
     };
   }
   const rows = previewInventoryProductRows();
@@ -7927,7 +8056,7 @@ function renderPreviewTrendPanels(kind = 'day', rankingsLoading = false, profitL
 function buildProfitMonthSeries(){
   const range = chartRangeFor('month');
   const scope = storeFilterKind();
-  const hasScopedProduct = Boolean(productScopeQuery()) || scope.type === 'store';
+  const hasScopedProduct = Boolean(productScopeQuery()) || scope.type === 'store' || scope.type === 'owner';
   if (hasScopedProduct) {
     const buckets = new Map();
     for (const r of profitDailyRows(range.start, range.end, state.store, true)) {
@@ -8154,8 +8283,8 @@ function renderHomeDashboardNoGroupsPreview(){
     '</div>'+
     '<div class="dashboard-section-title"><h3>排行榜</h3><div class="sub">店铺只显示 DL/DX 等代号，货号显示归并后的标准货号；排行榜按上方时间段重算。</div></div>'+
     '<div class="dashboard-grid equal">'+
-      panel('店铺净成交额排行', rankingsLoading ? '当前范围明细加载中' : '当前范围 '+num(storeBySales.length)+' 店 · '+periodRangeText(rankSummary), rankingsLoading ? sectionLoadingHtml('店铺排行') : rankList(storeBySales, {valueKey:'sales_sar', name:storeRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:()=> '#10b981', meta:r=>averageNetUnitPriceText(r)+' · 订单 '+num(r.orders)+' · 销量 '+num(r.quantity)+' 件 · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+
-      panel('店铺净销量排行', rankingsLoading ? '当前范围明细加载中' : '完整 '+num(storeByQty.length)+' 店 · 按净成交销量件数排序。', rankingsLoading ? sectionLoadingHtml('店铺销量排行') : rankList(storeByQty, {valueKey:'quantity', name:storeRankName, format:v=>num(v)+' 件', subValue:r=>money(r.sales_sar), color:()=> '#60a5fa', meta:r=>averageNetUnitPriceText(r)+' · 订单 '+num(r.orders)+' · 净成交 '+money(r.sales_sar)+' · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+
+      panel('店铺净成交额排行', rankingsLoading ? '当前范围明细加载中' : '当前范围 '+num(storeBySales.length)+' 店 · '+periodRangeText(rankSummary), rankingsLoading ? sectionLoadingHtml('店铺排行') : rankList(storeBySales, {valueKey:'sales_sar', name:storeRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:r=>storeOwnerColor(r, '#10b981'), badge:storeOwnerBadge, badgeColor:r=>storeOwnerColor(r), meta:r=>averageNetUnitPriceText(r)+' · 订单 '+num(r.orders)+' · 销量 '+num(r.quantity)+' 件 · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+
+      panel('店铺净销量排行', rankingsLoading ? '当前范围明细加载中' : '完整 '+num(storeByQty.length)+' 店 · 按净成交销量件数排序。', rankingsLoading ? sectionLoadingHtml('店铺销量排行') : rankList(storeByQty, {valueKey:'quantity', name:storeRankName, format:v=>num(v)+' 件', subValue:r=>money(r.sales_sar), color:r=>storeOwnerColor(r, '#60a5fa'), badge:storeOwnerBadge, badgeColor:r=>storeOwnerColor(r), meta:r=>averageNetUnitPriceText(r)+' · 订单 '+num(r.orders)+' · 净成交 '+money(r.sales_sar)+' · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+
     '</div>'+
     '<div class="dashboard-grid equal" style="margin-top:16px">'+
       panel('产品净成交额排行', rankingsLoading ? '当前范围明细加载中' : '当前范围 '+num(productBySales.length)+' 个标准货号 · 点击进入货号 360。', rankingsLoading ? sectionLoadingHtml('产品销售排行') : rankList(productBySales, {className:'product-rank', valueKey:'sales_sar', name:productRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:()=> '#db2777', meta:r=>productRankMeta(r, averageNetUnitPriceText(r)+' · 销量 '+num(r.quantity)+' 件 · 订单 '+num(r.orders)+' · 覆盖 '+num(r.store_count)+' 店 · '+num(r.days)+' 天'), attr:r=>'data-home-product="'+escapeHtml(r.standard_goods_sn || '')+'"'}))+
@@ -8239,8 +8368,8 @@ function renderHomeDashboard(){
     '</div>'+
     '<div class="dashboard-section-title"><h3>排行榜</h3><div class="sub">店铺只显示 DL/DX 等代号，货号显示归并后的标准货号；排行榜按上方时间段重算。</div></div>'+
     '<div class="dashboard-grid equal">'+
-      panel('店铺净成交额排行', rankingsLoading ? '当前范围明细加载中' : '当前范围 '+num(storeBySales.length)+' 店 · '+periodRangeText(rankSummary), rankingsLoading ? sectionLoadingHtml('店铺排行') : rankList(storeBySales, {valueKey:'sales_sar', name:storeRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:r=>groupColor(storeGroupKey(r)), meta:r=>averageNetUnitPriceText(r)+' · 订单 '+num(r.orders)+' · 销量 '+num(r.quantity)+' 件 · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+
-      panel('店铺净销量排行', rankingsLoading ? '当前范围明细加载中' : '完整 '+num(storeByQty.length)+' 店 · 按净成交销量件数排序。', rankingsLoading ? sectionLoadingHtml('店铺销量排行') : rankList(storeByQty, {valueKey:'quantity', name:storeRankName, format:v=>num(v)+' 件', subValue:r=>money(r.sales_sar), color:r=>groupColor(storeGroupKey(r)), meta:r=>'订单 '+num(r.orders)+' · 净成交 '+money(r.sales_sar)+' · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+
+      panel('店铺净成交额排行', rankingsLoading ? '当前范围明细加载中' : '当前范围 '+num(storeBySales.length)+' 店 · '+periodRangeText(rankSummary), rankingsLoading ? sectionLoadingHtml('店铺排行') : rankList(storeBySales, {valueKey:'sales_sar', name:storeRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:r=>storeOwnerColor(r, groupColor(storeGroupKey(r))), badge:storeOwnerBadge, badgeColor:r=>storeOwnerColor(r), meta:r=>averageNetUnitPriceText(r)+' · 订单 '+num(r.orders)+' · 销量 '+num(r.quantity)+' 件 · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+
+      panel('店铺净销量排行', rankingsLoading ? '当前范围明细加载中' : '完整 '+num(storeByQty.length)+' 店 · 按净成交销量件数排序。', rankingsLoading ? sectionLoadingHtml('店铺销量排行') : rankList(storeByQty, {valueKey:'quantity', name:storeRankName, format:v=>num(v)+' 件', subValue:r=>money(r.sales_sar), color:r=>storeOwnerColor(r, groupColor(storeGroupKey(r))), badge:storeOwnerBadge, badgeColor:r=>storeOwnerColor(r), meta:r=>'订单 '+num(r.orders)+' · 净成交 '+money(r.sales_sar)+' · '+num(r.days)+' 天', attr:r=>'data-home-store="'+escapeHtml(r.store_key || '')+'"'}))+
     '</div>'+
     '<div class="dashboard-grid equal" style="margin-top:16px">'+
       panel('产品净成交额排行', rankingsLoading ? '当前范围明细加载中' : '当前范围 '+num(productBySales.length)+' 个标准货号 · 点击进入货号 360。', rankingsLoading ? sectionLoadingHtml('产品销售排行') : rankList(productBySales, {className:'product-rank', valueKey:'sales_sar', name:productRankName, format:v=>money(v), subValue:r=>rmb(r.sales_sar), color:()=> '#db2777', meta:r=>productRankMeta(r, averageNetUnitPriceText(r)+' · 销量 '+num(r.quantity)+' 件 · 订单 '+num(r.orders)+' · 覆盖 '+num(r.store_count)+' 店 · '+num(r.days)+' 天'), attr:r=>'data-home-product="'+escapeHtml(r.standard_goods_sn || '')+'"'}))+
@@ -8293,8 +8422,11 @@ function renderHomeDashboard(){
 function renderFilters(){
   const stores = orderedStoreCodes();
   if (NO_GROUPS_PREVIEW && String(state.store || '').toUpperCase().startsWith('GROUP:')) state.store = '';
-  const groupOptions = NO_GROUPS_PREVIEW ? '' : '<option value="GROUP:DSY">DSY 组</option><option value="GROUP:LGM">LGM 组</option>';
-  const storeOptions = '<option value="">全部店铺</option>' + groupOptions + stores.map(s => '<option value="'+s+'">'+s+'</option>').join('');
+  const groupOptions = NO_GROUPS_PREVIEW ? '' : '<optgroup label="历史分组"><option value="GROUP:DSY">DSY 组</option><option value="GROUP:LGM">LGM 组</option></optgroup>';
+  const ownerOptions = STORE_OWNER_GROUPS.length
+    ? '<optgroup label="员工分组">' + STORE_OWNER_GROUPS.map(g => '<option value="'+escapeHtml(ownerScopeValue(g.key))+'">'+escapeHtml(g.name + '（' + g.stores.join('/') + '）')+'</option>').join('') + '</optgroup>'
+    : '';
+  const storeOptions = '<option value="">全部店铺</option>' + ownerOptions + groupOptions + '<optgroup label="单店">' + stores.map(s => '<option value="'+s+'">'+s+'</option>').join('') + '</optgroup>';
   $('storeFilter').innerHTML = storeOptions;
   if ($('homeStoreFilter')) $('homeStoreFilter').innerHTML = storeOptions;
   const domains = [...new Set((DATA.actions || []).map(a => a.action_domain))].sort();
@@ -10439,7 +10571,7 @@ function actionScoreExplain(a){
 function renderStoreCockpit(){
   const stores = DATA.stores || [];
   const scope = storeFilterKind();
-  const storePool = scope.type === 'group' ? stores.filter(s => storeGroupKey(s) === scope.key) : stores;
+  const storePool = scopedStorePool(stores, scope);
   const selected = scope.type === 'store'
     ? stores.find(s => s.store_key === scope.key)
     : [...storePool].sort((a,b)=>Number(b.risk_score||0)-Number(a.risk_score||0))[0];
@@ -10449,7 +10581,7 @@ function renderStoreCockpit(){
     return;
   }
   const store = selected.store_key;
-  $('storeCockpitTag').textContent = scope.type === 'store' ? store : scope.type === 'group' ? groupMeta(scope.key).label + '内默认最高风险 ' + store : '默认最高风险 ' + store;
+  $('storeCockpitTag').textContent = scope.type === 'store' ? store : scope.type !== 'all' ? storeScopeLabel() + '内默认最高风险 ' + store : '默认最高风险 ' + store;
   const rangeLabel = selectedRangeText();
   const rangeStore = aggregateDailyStores().find(x => x.store_key === store) || {};
   const periodSales = Number(rangeStore.sales_sar ?? selected.sales_sar ?? 0);
@@ -13405,7 +13537,7 @@ function focusedStore(){
   const stores = DATA.stores || [];
   const scope = storeFilterKind();
   if (scope.type === 'store') return stores.find(s => s.store_key === scope.key) || null;
-  const pool = scope.type === 'group' ? stores.filter(s => storeGroupKey(s) === scope.key) : stores;
+  const pool = scopedStorePool(stores, scope);
   return [...pool].sort((a,b)=>Number(b.risk_score||0)-Number(a.risk_score||0))[0] || null;
 }
 function focusedProduct(){
@@ -14142,7 +14274,7 @@ async function main() {
       throw new Error('--html-only-from-data refuses to write the formal BI portal index.html; choose a separate preview html file');
     }
     markStage('html-only:read-data');
-    const parsedData = deepSanitize(JSON.parse(await fs.readFile(args.htmlOnlyFromData, 'utf8')));
+    const parsedData = await attachStoreOwnerGroups(deepSanitize(JSON.parse(await fs.readFile(args.htmlOnlyFromData, 'utf8'))));
     markStage('html-only:build');
     const html = buildHtml(
       parsedData,
@@ -14192,14 +14324,14 @@ async function main() {
       cache: 'service',
     };
   }
-  const data = attachProductAliasSearch(enrichProductDisplayNames(await attachManualCostFileMeta(await enrichPortalDataWithLocalLinkLabels(parsedData))));
+  const data = attachProductAliasSearch(await attachStoreOwnerGroups(enrichProductDisplayNames(await attachManualCostFileMeta(await enrichPortalDataWithLocalLinkLabels(parsedData)))));
   markStage('sanitize');
   const safeAudit = deepSanitize(audit);
   const safePipeline = deepSanitize(pipeline);
   const safeBriefing = deepSanitize(briefing);
   const safeFirstRunCheck = deepSanitize(firstRunCheck);
   let noGroupsPreviewFile = '';
-  if (shouldWriteNoGroupsPreview()) {
+  if (shouldWriteNoGroupsPreview(args)) {
     noGroupsPreviewFile = noGroupsPreviewHtmlFile(args);
     if (isFormalPortalIndexPath(noGroupsPreviewFile, args.outDir)) {
       throw new Error('No-groups preview output refuses to write the formal BI portal index.html');

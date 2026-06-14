@@ -129,6 +129,9 @@ for (const [sku, group] of bySku.entries()) {
   const topExposureTargetFinal = fixed !== null || topExposureMargin === null
     ? null
     : (safeProductCost !== null ? ceil2(safeProductCost / (1 - topExposureMargin)) : null);
+  // 2026-06-14: coupons are not guaranteed to trigger. Keep historical
+  // what-if prices only for user-visible traffic-coupon research, never as the
+  // default guaranteed target price.
   const priceFor15Coupon = targetFinal !== null ? ceil2(targetFinal / 0.85) : null;
   const priceFor50Coupon = targetFinal !== null ? ceil2(targetFinal / 0.50) : null;
   const minPlatformCap = platformCaps.length ? Math.min(...platformCaps) : null;
@@ -141,13 +144,13 @@ for (const [sku, group] of bySku.entries()) {
     const minDiscount = numValue(row['平台最低降幅%']) ?? 0;
     const cap = isNum(current) ? floor2(current * (1 - minDiscount / 100)) : null;
     const rowPriceFor15Coupon = rowIntendedFinal !== null ? ceil2(rowIntendedFinal / 0.85) : null;
-    const rowCanUse15Coupon = Boolean(couponRows.length && rowPriceFor15Coupon !== null && cap !== null && rowPriceFor15Coupon <= cap);
-    const couponFactor = rowCanUse15Coupon ? 0.85 : 1;
-    const uncappedActivityPrice = rowCanUse15Coupon ? rowPriceFor15Coupon : rowIntendedFinal;
+    const rowCanUse15Coupon = false;
+    const couponFactor = 1;
+    const uncappedActivityPrice = rowIntendedFinal;
     const targetPrice = uncappedActivityPrice === null
       ? null
       : (cap === null ? uncappedActivityPrice : Math.min(uncappedActivityPrice, cap));
-    const finalTargetPrice = targetPrice === null ? null : round2(targetPrice * couponFactor);
+    const finalTargetPrice = targetPrice === null ? null : round2(targetPrice);
     return {
       rowIntendedFinal,
       rowPriceFor15Coupon,
@@ -163,9 +166,7 @@ for (const [sku, group] of bySku.entries()) {
   const rowStrategies = group.map(rowStrategyFor);
   const safeNoCouponAll = rowStrategies.length
     && rowStrategies.every(s => s.rowIntendedFinal !== null && s.platformCap !== null && s.rowIntendedFinal <= s.platformCap);
-  const safe15All = Boolean(couponRows.length)
-    && rowStrategies.length
-    && rowStrategies.every(s => s.rowPriceFor15Coupon !== null && s.platformCap !== null && s.rowPriceFor15Coupon <= s.platformCap);
+  const safe15All = false;
   const recFinals = rowStrategies.map(s => s.finalTargetPrice).filter(isNum);
   const rowIntendedFinals = rowStrategies.map(s => s.rowIntendedFinal).filter(isNum);
   const activityBasePrices = rowStrategies.map(s => s.targetPrice).filter(isNum);
@@ -192,8 +193,7 @@ for (const [sku, group] of bySku.entries()) {
 
   let couponStrategy = '不叠优惠券';
   if (!couponRows.length) couponStrategy = '无优惠券叠加';
-  else if (safe15All) couponStrategy = '可只叠15%券，禁止30/50%券';
-  else couponStrategy = '不要叠券；15/30/50%券都禁止';
+  else couponStrategy = '不把15%券作为价格保障；仅高曝光/滞销/清货试验另出流量券方案';
 
   const actionParts = [];
   let status = '可按货号确认';
@@ -235,7 +235,7 @@ for (const [sku, group] of bySku.entries()) {
           : `确认目标利润率 ${pct(targetMargin)} 或最终价 ${fmt(targetFinal)} SAR；曝光数据缺失，按基础利润率执行`;
   const compactCouponCombo = !couponRows.length
     ? '普通活动'
-    : (safe15All ? '普通活动 + 仅15%券，禁止30/50%券' : '普通活动，不叠券；15/30/50%券都禁止');
+    : '普通活动，不叠券；15/30/50%券都禁止；可选流量券另行审批';
   const compactCombo = skuNeedsReview || missingCost || (storageRequiredForSelection && storageMissing)
     ? '暂不自动报，等你确认'
     : [
@@ -304,7 +304,7 @@ for (const [sku, group] of bySku.entries()) {
       combo: skuNeedsReview || missingCost || (storageRequiredForSelection && storageMissing)
         ? '暂不自动报，等你确认'
         : [
-            rowCouponFactor < 1 ? '普通活动 + 仅15%券，禁止30/50%券' : '普通活动',
+            rowCouponFactor < 1 ? '可选流量15%券另行审批' : '普通活动',
             limitRows.length ? '限时折扣先处理' : '',
           ].filter(Boolean).join('；'),
       cost: roundOrNull(productCost, 4),
@@ -323,7 +323,7 @@ for (const [sku, group] of bySku.entries()) {
           ? `平台最低降幅上限 ${fmt(platformCap)} SAR 低于策略价 ${fmt(uncappedActivityPrice)} SAR`
           : '',
         isTopExposureLink ? `命中本标准货号${exposureRankMetricText || '曝光'}全局前五` : '',
-        rowCouponFactor < 1 ? `普通活动价 ${fmt(targetPrice)} × ${rowCouponFactor} = 目标成交价 ${fmt(finalTargetPrice)}` : '',
+        rowCouponFactor < 1 ? `可选流量券仅作触券下探测算，不作为保底成交价` : '',
       ].filter(Boolean).join('；'),
     });
   }
@@ -358,8 +358,8 @@ for (const [sku, group] of bySku.entries()) {
     '曝光前五建议最终成交价SAR': fmt(topExposureTargetFinal),
     '其他链接建议最终成交价SAR': fmt(targetFinal),
     '建议普通活动价SAR': missingCost ? '' : range(activityBasePrices.length ? activityBasePrices : oldSuggested),
-    '如果只叠15%券普通活动价需≥SAR': couponRows.length ? fmt(priceFor15Coupon) : '',
-    '如果叠50%券普通活动价需≥SAR': couponRows.length ? fmt(priceFor50Coupon) : '',
+    '15%券触发下探参考价SAR': couponRows.length ? fmt(priceFor15Coupon) : '',
+    '50%券研究下探参考价SAR': couponRows.length ? fmt(priceFor50Coupon) : '',
     '平台允许活动价上限范围SAR': range(platformCaps),
     '推荐活动组合': actionParts.join('；'),
     '组合后预计最终价SAR': missingCost ? '' : range(recFinals),
@@ -367,7 +367,7 @@ for (const [sku, group] of bySku.entries()) {
     '含仓储利润率': missingCost ? '' : (targetFullMargins.length ? pct(Math.min(...targetFullMargins)) : ''),
     '平台压价后最低不含仓储利润率': missingCost ? '' : (cappedProductMargins.length ? pct(Math.min(...cappedProductMargins)) : ''),
     '平台压价后最低含仓储利润率': missingCost ? '' : (cappedFullMargins.length ? pct(Math.min(...cappedFullMargins)) : ''),
-    '优惠券风险行数': couponRows.length,
+    '优惠券/可选流量券候选行数': couponRows.length,
     '限时折扣风险行数': limitRows.length,
     '你只需确认': needConfirm,
     '给你看-活动组合': compactCombo,

@@ -42,6 +42,12 @@ const PLAN_PRICE_CANCEL_DECISIONS = new Set([
   'coupon_final_below_target',
   'do_not_coupon_price_below_target',
   'final_with_coupon_below_target',
+  // New 2026-06-14 policy: a coupon is not guaranteed to trigger, so rows
+  // whose ordinary activity price only reaches target after a coupon must be
+  // cancelled from the coupon layer and covered by a guaranteed limited
+  // discount / ordinary price layer instead.
+  'coupon_not_guaranteed_final_above_target',
+  'coupon_non_guaranteed_base_above_target',
 ]);
 
 function sleep(ms) {
@@ -67,10 +73,27 @@ function hasPlanPriceCancelEvidence(row) {
     const decision = String(row?.priceDecision || row?.decision || '').trim();
     if (!PLAN_PRICE_CANCEL_DECISIONS.has(decision)) return false;
   }
+  const decision = String(row?.priceDecision || row?.decision || '').trim();
+  const targetFinal = numberOrNull(row?.targetFinalPrice ?? row?.finalTargetPrice);
+  if (targetFinal === null) return false;
+
+  if (decision === 'coupon_not_guaranteed_final_above_target' || decision === 'coupon_non_guaranteed_base_above_target') {
+    const guaranteedBasePrice = numberOrNull(
+      row?.guaranteedBasePriceWithoutCoupon ??
+      row?.basePriceWithoutCoupon ??
+      row?.targetPrice ??
+      row?.currentBasePrice ??
+      row?.effectiveBasePrice ??
+      row?.limitedDiscountPrice
+    );
+    const plannedCouponFactor = numberOrNull(row?.couponFactor);
+    if (guaranteedBasePrice === null || plannedCouponFactor === null || plannedCouponFactor >= 1) return false;
+    return guaranteedBasePrice > targetFinal + PRICE_GUARD_TOLERANCE_SAR;
+  }
+
   const basePrice = numberOrNull(row?.currentBasePrice ?? row?.effectiveBasePrice ?? row?.limitedDiscountPrice);
   const couponFactor = numberOrNull(row?.couponFactor);
-  const targetFinal = numberOrNull(row?.targetFinalPrice ?? row?.finalTargetPrice);
-  if (basePrice === null || couponFactor === null || targetFinal === null) return false;
+  if (basePrice === null || couponFactor === null) return false;
   const recalculatedFinalWithCoupon = round2(basePrice * couponFactor);
   return recalculatedFinalWithCoupon < targetFinal - PRICE_GUARD_TOLERANCE_SAR;
 }

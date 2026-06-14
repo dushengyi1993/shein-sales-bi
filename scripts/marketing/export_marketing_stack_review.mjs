@@ -246,7 +246,7 @@ await fs.writeFile(files.json, JSON.stringify({
       : '本次仅覆盖部分启用店铺，输出文件名自动追加 stores 后缀，不覆盖当天默认全量营销栈报告；每日 guard 不应把它当全量 no-action 依据。',
     '限时折扣价格若未从当前接口读到，会作为风险字段保留，不按安全通过。',
     '多档优惠券活动会额外读取 15% 券档规则页商品集合；活动列表 apply/allow 仅保留作参考，不作为 15% 档最终报名验证口径。',
-    '15% 优惠券配套计划从 price-overrides 的 couponFactor≈0.85 / 明确仅15%券规则派生；禁止叠券、未知、缺 price-overrides 行一律不允许报名。',
+    '15% 优惠券只允许从 price-overrides 里明确标记为高曝光支持、滞销高库存引流或清货试验的可选流量券策略派生；历史 couponFactor≈0.85 / 仅15%券价格保障口径默认阻断。',
   ],
   couponTargetPlan: COUPON_TARGET_PLAN ? {
     path: COUPON_TARGET_PLAN.path,
@@ -1563,7 +1563,7 @@ function renderMarkdown(summaryRows, detailRows, couponRows, limitRows, files) {
     `- 链接活动标签日期：${BI.dates?.linkDate || ''}`,
     `- 成本来源：${COST_DOC.source || ''}`,
     `- 优惠券配套计划：${COUPON_TARGET_PLAN ? path.relative(ROOT, COUPON_TARGET_PLAN.path) : '未加载；仅展示券档可报/已报集合，不判断是否应报'}`,
-    `- 优惠券配套口径：${COUPON_TARGET_PLAN ? '仅 price-overrides 中 couponFactor≈0.85 或明确仅15%券的 SKC 允许进入 15%券计划；禁止叠券/未知/缺 price-overrides 行全部 fail closed。' : '未加载。'}`,
+    `- 优惠券配套口径：${COUPON_TARGET_PLAN ? '仅 price-overrides 中明确标记为高曝光支持、滞销高库存引流或清货试验的可选流量券 SKC 允许进入 15%券计划；历史 couponFactor≈0.85 / 仅15%券价格保障口径全部 fail closed。' : '未加载。'}`,
     '',
     '## 文件',
     '',

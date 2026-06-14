@@ -129,5 +129,5 @@
 - 成本表导入：`scripts/import_product_costs.mjs`
 - BI 门户生成：`scripts/generate_bi_portal.mjs`
 - 相关测试：`scripts/test_product_display_name.mjs`、`scripts/test_product_match_key_schema.mjs`
-- 门户文件：`outputs/bi-portal/index.html`
-- 门户数据：`outputs/bi-portal/data.json`
+- 门户灾备快照：`outputs/bi-portal/index.html` / `outputs/bi-portal/data.json`
+- 当前库存/去化判断：以云端 BI 门户、线上 `/api/bi/section/*`、云端 PostgreSQL warehouse 和云端刷新日志为准，仓库快照只作本地预览/迁移兼容。

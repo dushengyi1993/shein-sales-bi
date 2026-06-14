@@ -166,19 +166,20 @@ async function loadFillEvidenceFor(storeKey, activityId) {
     const selectedMatchesPlan = selection.selectionMode === 'allowlist'
       ? selection.selectedMatchesPlan === true
       : true;
-    const ok = doc.ok === true
+    const priceEvidenceOk = doc.ok === true
       && selection.ok === true
       && fill.ok === true
       && selectedMatchesPlan
       && mismatches.length === 0
       && missingCost.length === 0
-      && fillOutOfPlanRows.length === 0
-      && extraAvailableCount === 0;
+      && fillOutOfPlanRows.length === 0;
+    const ok = priceEvidenceOk && extraAvailableCount === 0;
     return {
       source: path.relative(ROOT, file),
       exists: true,
       ok,
       reason: ok ? '' : 'fill_result_not_clean',
+      priceEvidenceOk,
       submitted: doc.submit?.submitted === true,
       store: doc.store || storeKey,
       activityId: Number(doc.activity?.activityId || doc.activityId || activityId),
@@ -594,7 +595,7 @@ function compareWithFillEvidence({actual, expected, fillEvidence, skc}) {
   }
   const fillRow = fillEvidence?.targetBySkc?.get(String(skc || '').trim()) || null;
   const fillCheck = comparePrice(fillRow?.targetPrice, expected);
-  if (fillEvidence?.ok && fillCheck.ok) {
+  if ((fillEvidence?.priceEvidenceOk || fillEvidence?.ok) && fillCheck.ok) {
     return {
       ok: true,
       reason: '',
@@ -737,6 +738,7 @@ async function verifyStore(store, planRows) {
           exists: fillEvidence.exists,
           ok: fillEvidence.ok,
           reason: fillEvidence.reason,
+          priceEvidenceOk: fillEvidence.priceEvidenceOk === true,
           submitted: fillEvidence.submitted,
           selection: fillEvidence.selection,
           fill: fillEvidence.fill,

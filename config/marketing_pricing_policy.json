@@ -1,6 +1,6 @@
 {
   "description": "Machine-readable long-term pricing policy for SHEIN ordinary marketing signup, coupon pairing, and limited-discount fallback. This file contains no credentials.",
-  "updatedAt": "2026-06-08",
+  "updatedAt": "2026-06-14",
   "targetFloorMarginPct": 15,
   "ordinaryMarketing": {
     "mustSignupDuringSignupWindow": true,
@@ -19,8 +19,12 @@
       "mode": "research_only",
       "executeAutomatically": false
     },
-    "weeklySiteBudgetSar": 1000,
-    "mustPairWithTargetPlan": true
+    "weeklySiteBudgetSar": null,
+    "defaultWeeklySiteBudgetSarDeprecated": 1000,
+    "mustPairWithTargetPlan": true,
+    "isGuaranteedPriceLayer": false,
+    "allowedUseCases": ["high_exposure_support", "slow_moving_high_inventory_traffic", "clearance_experiment"],
+    "priceGuaranteeUseCase": "forbidden"
   },
   "limitedDiscount": {
     "mustExistForPlannedLinks": true,
@@ -30,7 +34,7 @@
     "oldLimitedDiscountCanBeCancelledAndRecreated": true,
     "mustNotInterfereTargetPrice": true,
     "adjustWhenInterferes": true,
-    "priorityNote": "Limited discount is the lowest-priority rescue layer: keep ordinary marketing + 15% coupon as the primary price stack; cancel/recreate or adjust limited discounts when they would make the final price lower or higher than the intended target."
+    "priorityNote": "Limited discount is the guaranteed fallback price layer when ordinary marketing is not enough. Coupons are not guaranteed to trigger, so do not rely on ordinary marketing + 15% coupon as the primary guaranteed price stack; cancel/recreate or adjust limited discounts when the guaranteed base price would be lower or higher than the intended target."
   },
   "exposureTopLinks": {
     "enabled": true,

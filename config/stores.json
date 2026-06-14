@@ -49,6 +49,68 @@
       "XC"
     ]
   },
+  "ownerGroups": [
+    {
+      "key": "GUANGHONG",
+      "name": "广洪",
+      "stores": [
+        "DL",
+        "TZZ",
+        "CX"
+      ],
+      "color": "#2563eb"
+    },
+    {
+      "key": "YANGHUAN",
+      "name": "杨欢",
+      "stores": [
+        "DX",
+        "LQ",
+        "XC"
+      ],
+      "color": "#f97316"
+    },
+    {
+      "key": "WUWEI",
+      "name": "吴薇",
+      "stores": [
+        "QY",
+        "JY",
+        "XL"
+      ],
+      "color": "#7c3aed"
+    },
+    {
+      "key": "JIAYIN",
+      "name": "嘉茵",
+      "stores": [
+        "NM",
+        "YJ",
+        "MZ"
+      ],
+      "color": "#db2777"
+    },
+    {
+      "key": "LUOFANG",
+      "name": "罗芳",
+      "stores": [
+        "FY",
+        "QH",
+        "ZL"
+      ],
+      "color": "#14b8a6"
+    },
+    {
+      "key": "TIANHAO",
+      "name": "天浩",
+      "stores": [
+        "HL",
+        "TZ",
+        "TS"
+      ],
+      "color": "#84cc16"
+    }
+  ],
   "stores": [
     {
       "storeKey": "DL",
@@ -158,7 +220,7 @@
     {
       "storeKey": "ZL",
       "groupKey": "DSY",
-      "companyName": "紫钢",
+      "companyName": "紫翎",
       "merchantId": "12839379",
       "shopName": "GS1428388",
       "accountNo": "GS1428388",
@@ -167,7 +229,7 @@
       "productStatsEnabled": true,
       "profileKey": "zl",
       "port": 9340,
-      "profileName": "ZL - 紫钢 - GS1428388",
+      "profileName": "ZL - 紫翎 - GS1428388",
       "salesTransport": "auto"
     },
     {

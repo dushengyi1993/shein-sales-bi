@@ -19,6 +19,7 @@ import {
   selectBiPortalSource as selectSharedBiPortalSource,
 } from '../../lib/bi_portal_source.mjs';
 import {
+  classifyCouponEligibilityRow,
   couponPlanStoreView,
   loadCouponTargetEligibilityPlan,
 } from '../../lib/marketing_coupon_policy.mjs';
@@ -50,8 +51,6 @@ const DEFAULT_CLOUD_BI_MAX_BYTES = SHARED_DEFAULT_CLOUD_BI_MAX_BYTES;
 const MARKETING_STACK_REVIEW_MAX_AGE_HOURS = 48;
 const CLOUD_ORDER_LOOKBACK_DAYS = 1;
 const ORDER_PRICE_TOLERANCE_SAR = 1;
-const M12_COUPON_RESCAN_NOT_BEFORE_ISO = '2026-06-12T16:45:00+08:00';
-const M12_COUPON_RESCAN_NOT_BEFORE_TEXT = '2026-06-12 16:45:00 +08:00';
 const CRITICAL_SOURCE_LABELS = new Set([
   'couponSubmitLatestSummary',
   'lowPriceOverlapLive',
@@ -67,8 +66,6 @@ const STALE_BLOCKER_SOURCE_LABELS = new Set([
   'couponSubmitLatestSummary',
   'lowPriceOverlapLive',
   'lowPriceOverlapCancelList',
-  'oldOrdinaryOverlapLive',
-  'oldOrdinaryOverlapCancelList',
   'marketingStackReview',
 ]);
 
@@ -254,7 +251,10 @@ function marketingPlanCandidateMeta(file, priceFile, enabledStores = []) {
   if (name.includes('include-excluded-approved')) add(450, 'include_excluded_approved');
   if (name.includes('t3-plus45488')) add(250, 't3_plus45488');
   if (name.includes('coupon-visible')) add(100, 'coupon_visible');
-  if (name.includes('all-919')) add(100, 'all_919');
+  if (name.includes('all-934')) add(250, 'all_934_current_approved');
+  if (name.includes('43914-gapfill-high-exposure')) add(180, 'includes_43914_gapfill_high_exposure');
+  if (name.includes('all-925')) add(-100, 'superseded_all_925');
+  if (name.includes('all-919')) add(-200, 'superseded_all_919');
   if (name.includes('all-ready')) add(-700, 'legacy_all_ready');
   if (name.includes('pilot')) add(-700, 'pilot_partial');
   if (name.includes('repair-')) add(-650, 'repair_only');
@@ -361,6 +361,18 @@ function listFiles(dir, regex) {
 
 function latestFile(dir, regex) {
   return listFiles(dir, regex)[0] || '';
+}
+
+function latestReportFile(regex) {
+  return latestFile(DEFAULT_OUT_DIR, regex);
+}
+
+function rowActivityKey(row) {
+  return [
+    normKey(row?.storeKey || row?.store || row?.['店铺']),
+    String(Number(row?.activityId || row?.activity_id || row?.['活动ID'] || 0) || ''),
+    normSku(row?.skc || row?.SKC || row?.['SKC']),
+  ].join('::');
 }
 
 function mapKeys(map) {
@@ -970,7 +982,20 @@ function summarizeBiPortal(doc, source) {
   };
 }
 
-function summarizeT3Candidates(stackDoc, reportDate) {
+function collectDeadlineHandledKeys(gapfillResultDoc) {
+  const handled = new Set();
+  const addRows = rows => {
+    for (const row of rows || []) {
+      const key = rowActivityKey(row);
+      if (!key.includes('::::') && !key.endsWith('::')) handled.add(key);
+    }
+  };
+  addRows(gapfillResultDoc?.submittedRows);
+  addRows(gapfillResultDoc?.blockedRows);
+  return handled;
+}
+
+function summarizeT3Candidates(stackDoc, reportDate, handledDeadlineKeys = new Set()) {
   const start = parseLocalDateTime(`${reportDate} 00:00:00`);
   // Business meaning of "T-3" is calendar-day based in Asia/Shanghai:
   // when the report runs on 2026-06-08, activities ending any time on
@@ -979,10 +1004,15 @@ function summarizeT3Candidates(stackDoc, reportDate) {
   const end = new Date(start.getTime() + 3 * 24 * 60 * 60 * 1000);
   end.setHours(23, 59, 59, 999);
   const grouped = new Map();
+  let handledRows = 0;
   for (const row of stackDoc?.detailRows || []) {
     const deadline = parseLocalDateTime(row['报名截止']);
     if (!deadline || deadline < start || deadline > end) continue;
     if (String(row['活动类型'] || '').includes('优惠券')) continue;
+    if (handledDeadlineKeys.has(rowActivityKey(row))) {
+      handledRows += 1;
+      continue;
+    }
     const key = [row['店铺'], row['活动ID']].join('::');
     const item = grouped.get(key) || {
       store: row['店铺'],
@@ -1003,7 +1033,9 @@ function summarizeT3Candidates(stackDoc, reportDate) {
     if (item.canonicalSamples.length < 5 && row['标准货号']) item.canonicalSamples.push(row['标准货号']);
     grouped.set(key, item);
   }
-  return [...grouped.values()].sort((a, b) => String(a.signupDeadline).localeCompare(String(b.signupDeadline)));
+  const rows = [...grouped.values()].sort((a, b) => String(a.signupDeadline).localeCompare(String(b.signupDeadline)));
+  Object.defineProperty(rows, 'handledRows', {value: handledRows, enumerable: false});
+  return rows;
 }
 
 function normKey(value) {
@@ -1088,11 +1120,9 @@ function summarizeStandardPlanEvidence(item) {
 }
 
 function isFifteenCouponAllowed(row) {
-  const couponFactor = numberOrNull(row?.couponFactor);
   const finalTargetPrice = numberOrNull(row?.finalTargetPrice);
-  const combo = String(row?.combo || '').toLowerCase();
-  const forbidsCoupon = /禁止\s*15|15\s*%\s*券都禁止|15\/30\/50|不叠券|禁报券/.test(combo);
-  return Boolean(couponFactor !== null && Math.abs(couponFactor - 0.85) < 0.01 && finalTargetPrice !== null && !forbidsCoupon);
+  if (finalTargetPrice === null) return false;
+  return classifyCouponEligibilityRow(row, {targetDiscountPct: 15}).allowed15 === true;
 }
 
 function daysBetweenLocalDates(start, end) {
@@ -1203,8 +1233,8 @@ function summarizeNewSkcCandidates({biDoc, biSource, selectionPlanDoc, priceOver
       sameStandardPlan: summarizeStandardPlanEvidence(sameStandard),
       couponDryRunEligible,
       couponDryRunReason: couponDryRunEligible
-        ? '已有精确 15% 券价格证据，可进入 dry-run 评估'
-        : '缺精确 finalTargetPrice/couponFactor=0.85/allowed15 证据，不能生成 15% 券 dry-run 建议',
+        ? '已被共享券策略明确标记为可选流量 15% 券，可进入 dry-run 评估'
+        : '缺明确可选流量券标记；历史 couponFactor=0.85 不能再生成 15% 券 dry-run 建议',
     });
   }
   rows.sort((a, b) => {
@@ -1646,8 +1676,19 @@ function selectOrderPlanRow(candidateRows, orderTime) {
     const orderMs = orderDate.getTime();
     const active = withWindows.filter(row => orderMs >= row.planStartMs && orderMs <= row.planEndMs);
     if (active.length) {
-      active.sort((a, b) => Number(b.finalTargetPrice ?? -Infinity) - Number(a.finalTargetPrice ?? -Infinity));
-      return {status: 'active_window', planRow: active[0], candidateCount: candidates.length, activeCandidateCount: active.length};
+      active.sort((a, b) => {
+        const av = Number(a.finalTargetPrice ?? Infinity);
+        const bv = Number(b.finalTargetPrice ?? Infinity);
+        if (av !== bv) return av - bv;
+        return String(a.activityId || '').localeCompare(String(b.activityId || ''));
+      });
+      return {
+        status: 'active_window',
+        planRow: active[0],
+        candidateCount: candidates.length,
+        activeCandidateCount: active.length,
+        duplicateResolution: active.length > 1 ? 'use_lowest_active_finalTargetPrice_same_time_window' : '',
+      };
     }
     withWindows.sort((a, b) => Number(a.planStartMs ?? Infinity) - Number(b.planStartMs ?? Infinity));
     return {status: 'outside_plan_window', planRow: withWindows[0], candidateCount: candidates.length};
@@ -1753,12 +1794,80 @@ function orderLineTime(row) {
   return row.orderCustomerTime || row.orderCreateTime || row.allocateTimeFull || row.allocateTime || '';
 }
 
-function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOverridesSourcePath, activityWindowEvidence, now, maxAgeHours}) {
+function loadOrderPriceMitigationEvidence(reportDate) {
+  const mitigatedBySkc = new Map();
+  const evidenceFiles = [];
+  const add = (storeKey, skc, evidence) => {
+    const key = `${normKey(storeKey)}::${normSku(skc)}`;
+    if (!key || key === '::') return;
+    const atMs = parseAnyDateTime(evidence.mitigatedAt || evidence.createdAt)?.getTime() ?? null;
+    const current = mitigatedBySkc.get(key);
+    if (!current || (atMs !== null && (current.mitigatedAtMs === null || atMs > current.mitigatedAtMs))) {
+      mitigatedBySkc.set(key, {...evidence, mitigatedAtMs: atMs});
+    }
+  };
+
+  const endDir = path.join(MARKETING_SIGNUP_DIR, 'limited-discount-end-results');
+  for (const file of listFiles(endDir, /^limited-discount-end-execute-.*\.json$/)) {
+    const doc = readJsonSafe(file);
+    if (!doc) continue;
+    evidenceFiles.push(rel(file));
+    const createdAt = doc.createdAt || '';
+    for (const store of doc.stores || []) {
+      const storeKey = store.storeKey || '';
+      for (const activity of store.activities || []) {
+        for (const skc of activity.targetSkcs || []) {
+          add(storeKey, skc, {
+            type: 'limited_discount_ended',
+            source: rel(file),
+            mitigatedAt: createdAt,
+            activityId: activity.activity_id || '',
+            activityName: activity.act_name || '',
+          });
+        }
+      }
+      for (const activity of store.ended || []) {
+        for (const skc of activity.targetSkcs || []) {
+          add(storeKey, skc, {
+            type: 'limited_discount_ended',
+            source: rel(file),
+            mitigatedAt: createdAt,
+            activityId: activity.activity_id || '',
+          });
+        }
+      }
+    }
+  }
+
+  const fallbackStatusPath = path.join(DEFAULT_OUT_DIR, `coupon-non-guaranteed-limited-fallback-status-${reportDate}.json`);
+  const fallbackStatus = readJsonSafe(fallbackStatusPath);
+  if (fallbackStatus) {
+    evidenceFiles.push(rel(fallbackStatusPath));
+    for (const row of fallbackStatus.successRowsDetail || []) {
+      add(row.storeKey, row.skc, {
+        type: 'limited_discount_fallback_created',
+        source: rel(fallbackStatusPath),
+        mitigatedAt: fallbackStatus.createdAt || '',
+        activityId: row.activityId || '',
+        limitedDiscountPrice: row.limitedDiscountPrice ?? null,
+      });
+    }
+  }
+
+  return {
+    status: mitigatedBySkc.size ? 'ok' : 'empty',
+    mitigatedBySkc,
+    evidenceFiles: [...new Set(evidenceFiles)],
+  };
+}
+
+function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOverridesSourcePath, activityWindowEvidence, orderMitigationEvidence, now, maxAgeHours}) {
   const plan = buildOrderTargetPlanIndex(priceOverridesDoc, priceOverridesSourcePath, activityWindowEvidence);
   const statusCounts = {};
   const byStore = {};
   const rows = [];
   const belowRows = [];
+  const mitigatedBelowRows = [];
   const aboveRows = [];
   const dataQualityRows = [];
   const unmatchedRows = [];
@@ -1891,6 +2000,7 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
       let finalTargetPrice = null;
       let deltaSar = null;
       let planRow = null;
+      let selectedPlan = {planRow: null, status: '', duplicateResolution: ''};
       let planWindowStatus = '';
       const orderTime = orderLineTime(raw);
       if (!storeKey || !skc) {
@@ -1902,7 +2012,7 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
       } else {
         const planKey = `${storeKey}::${skc}`;
         const planCandidates = plan.rowsBySkc.get(planKey) || [];
-        const selectedPlan = selectOrderPlanRow(planCandidates, orderTime);
+        selectedPlan = selectOrderPlanRow(planCandidates, orderTime);
         planRow = selectedPlan.planRow || plan.bySkc.get(planKey) || null;
         planWindowStatus = selectedPlan.status || '';
         if (!planCandidates.length) {
@@ -1936,6 +2046,12 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
           if (deltaSar < -ORDER_PRICE_TOLERANCE_SAR) {
             status = 'below_target';
             reason = '订单商品行成交价低于 finalTargetPrice';
+            const mitigation = orderMitigationEvidence?.mitigatedBySkc?.get(`${storeKey}::${skc}`) || null;
+            const orderAtMs = parseAnyDateTime(orderTime)?.getTime() ?? null;
+            if (mitigation?.mitigatedAtMs !== null && mitigation?.mitigatedAtMs !== undefined && orderAtMs !== null && orderAtMs <= mitigation.mitigatedAtMs) {
+              status = 'below_target_mitigated_before_or_at_fix';
+              reason = '订单商品行成交价低于目标，但订单时间早于/不晚于已验证止损动作；作为历史线索继续观察，不作为当前 blocker';
+            }
           } else if (deltaSar > ORDER_PRICE_TOLERANCE_SAR) {
             status = 'above_target';
             reason = '订单商品行成交价高于 finalTargetPrice';
@@ -1969,7 +2085,7 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
         toleranceSar: ORDER_PRICE_TOLERANCE_SAR,
         activityId: planRow?.activityId || '',
         combo: planRow?.combo || '',
-        duplicateResolution: planRow?.duplicateResolution || '',
+        duplicateResolution: selectedPlan.duplicateResolution || planRow?.duplicateResolution || '',
         planSourcePath: planRow?.sourcePath || priceOverridesSourcePath,
         planSourceCreatedAt: planRow?.sourceCreatedAt || plan.sourceCreatedAt,
         planHasWindow: planRow?.hasPlanWindow === true,
@@ -1986,6 +2102,7 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
       };
       rows.push(outRow);
       if (status === 'below_target') belowRows.push(outRow);
+      else if (status === 'below_target_mitigated_before_or_at_fix') mitigatedBelowRows.push(outRow);
       else if (status === 'above_target') aboveRows.push(outRow);
       else if (status === 'unmatched_plan') unmatchedRows.push(outRow);
       else if (!['matches_target', 'invalid_sale_ignored', 'outside_plan_window'].includes(status)) dataQualityRows.push(outRow);
@@ -2018,6 +2135,11 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
     duplicatePlanConflicts: plan.duplicateConflicts.slice(0, 50),
     missingTargetPlanRows: plan.missingTargetRows.slice(0, 30),
     activityWindowEvidence: plan.activityWindowEvidence,
+    orderMitigationEvidence: orderMitigationEvidence ? {
+      status: orderMitigationEvidence.status,
+      evidenceFiles: orderMitigationEvidence.evidenceFiles,
+      mitigatedSkcCount: orderMitigationEvidence.mitigatedBySkc?.size || 0,
+    } : null,
     expectedFiles: (cloudRowsDoc?.files || []).length,
     cloudFiles,
     readFiles: cloudFiles,
@@ -2040,6 +2162,7 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
     unmatchedRows: unmatchedRows.length,
     unmatchedSamples: unmatchedRows.slice(0, 30),
     below: statusCounts.below_target || 0,
+    mitigatedBelow: statusCounts.below_target_mitigated_before_or_at_fix || 0,
     above: statusCounts.above_target || 0,
     outsideWindow: statusCounts.outside_plan_window || 0,
     missingPlan: 0,
@@ -2054,6 +2177,7 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
     statusCounts,
     byStore,
     belowRows: belowRows.slice(0, 200),
+    mitigatedBelowRows: mitigatedBelowRows.slice(0, 200),
     aboveRows: aboveRows.slice(0, 200),
     dataQualitySamples: dataQualityRows.slice(0, 200),
     samples,
@@ -2072,6 +2196,7 @@ function buildOrderPriceAuditFromCloud(cloudAudit) {
     matchedPlanRows: Number(cloudAudit.matchedPlanRows || 0),
     unmatchedRows: Number(cloudAudit.unmatchedRows || 0),
     below: Number(cloudAudit.below || 0),
+    mitigatedBelow: Number(cloudAudit.mitigatedBelow || 0),
     above: Number(cloudAudit.above || 0),
     outsideWindow: Number(cloudAudit.outsideWindow || 0),
     grainUnknown: Number(cloudAudit.grainUnknown || 0),
@@ -2086,9 +2211,11 @@ function buildOrderPriceAuditFromCloud(cloudAudit) {
     samples: [
       ...(cloudAudit.belowRows || []),
       ...(cloudAudit.aboveRows || []),
+      ...(cloudAudit.mitigatedBelowRows || []),
       ...(cloudAudit.dataQualitySamples || []),
       ...(cloudAudit.samples || []),
     ].slice(0, 30),
+    mitigatedBelowRows: cloudAudit.mitigatedBelowRows || [],
     cloud: cloudAudit,
   };
 }
@@ -2216,31 +2343,57 @@ function validateSuggestedCommand(command) {
   return violations;
 }
 
-function couponRescanWindowStatus(now) {
-  const notBefore = parseAnyDateTime(M12_COUPON_RESCAN_NOT_BEFORE_ISO);
-  const open = Boolean(now && notBefore && now.getTime() >= notBefore.getTime());
+function optionalTrafficCouponReviewStatus({couponEligibilityPlan}) {
+  const allowed15TrafficCount = (couponEligibilityPlan?.summary || [])
+    .reduce((sum, row) => sum + Number(row.allowed15Traffic || 0), 0);
   return {
-    name: 'm12_batch43_remaining_34810_15pct',
-    notBeforeIso: M12_COUPON_RESCAN_NOT_BEFORE_ISO,
-    notBeforeUtc: notBefore ? notBefore.toISOString() : '',
-    notBeforeText: M12_COUPON_RESCAN_NOT_BEFORE_TEXT,
-    nowLocal: formatLocalDateTime(now),
-    nowIso: now instanceof Date && Number.isFinite(now.getTime()) ? now.toISOString() : '',
-    open,
-    reason: open
-      ? 'M12 Batch43 旧普通活动主要窗口已到，可先 dry-run 复核剩余 15% 券；仍被 2026-06-14 HL 旧活动阻断的目标继续 fail closed。'
-      : 'M12 Batch43 旧普通活动仍未到复扫补券窗口；窗口前禁止生成补券执行建议。',
+    name: 'optional_traffic_coupon_review_window',
+    open: allowed15TrafficCount > 0,
+    allowed15TrafficCount,
+    reason: allowed15TrafficCount > 0
+      ? '当前计划存在明确可选流量券目标；只允许生成 dry-run 给用户确认，禁止把优惠券作为价格保障补回。'
+      : '当前计划没有明确可选流量券目标；价格保障不能依赖优惠券，禁止生成补券执行建议。',
   };
 }
 
-function buildDryRunCommands({targetPlan, priceOverrides, couponRescanWindow}) {
-  if (!couponRescanWindow?.open) return [];
+function buildDryRunCommands({targetPlan, priceOverrides, optionalTrafficCouponReview, couponEligibilityPlan}) {
+  if (!optionalTrafficCouponReview?.open) return [];
+  const allowed15TrafficCount = (couponEligibilityPlan?.summary || [])
+    .reduce((sum, row) => sum + Number(row.allowed15Traffic || 0), 0);
+  const allowed15Count = (couponEligibilityPlan?.summary || [])
+    .reduce((sum, row) => sum + Number(row.allowed15 || 0), 0);
+  if (allowed15TrafficCount <= 0 || allowed15Count <= 0) return [];
   const storesConfig = JSON.parse(fsSync.readFileSync(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
-  const stores = (storesConfig.stores || []).filter(s => s.enabled !== false).map(s => s.storeKey).join(',');
+  const allowedStores = new Set((couponEligibilityPlan?.summary || [])
+    .filter(row => Number(row.allowed15Traffic || 0) > 0)
+    .map(row => row.storeKey));
+  const stores = (storesConfig.stores || [])
+    .filter(s => s.enabled !== false && allowedStores.has(s.storeKey))
+    .map(s => s.storeKey)
+    .join(',');
+  if (!stores) return [];
   return [{
-    label: 'm12-remaining-34810-15pct-coupon-dry-run',
+    label: 'optional-traffic-34810-15pct-coupon-dry-run',
     command: `node scripts/marketing/submit_coupon_activity_goods.mjs --stores ${stores} --activity-id 34810 --discount-max 15 --target-plan ${rel(targetPlan)} --price-overrides ${rel(priceOverrides)} --dry-run --no-close`,
   }];
+}
+
+function summarizeCouponTrafficIntent(couponEligibilityPlan) {
+  const summary = couponEligibilityPlan?.summary || [];
+  const allowed15TrafficCount = summary.reduce((sum, row) => sum + Number(row.allowed15Traffic || 0), 0);
+  const allowed15Count = summary.reduce((sum, row) => sum + Number(row.allowed15 || 0), 0);
+  const stores = summary
+    .filter(row => Number(row.allowed15Traffic || 0) > 0)
+    .map(row => ({storeKey: row.storeKey, allowed15Traffic: Number(row.allowed15Traffic || 0)}));
+  return {
+    enabled: allowed15TrafficCount > 0,
+    allowed15TrafficCount,
+    allowed15Count,
+    stores,
+    note: allowed15TrafficCount > 0
+      ? '当前计划存在明确可选流量券目标，预算证据会影响能否提交 34810/15% 券。'
+      : '当前计划没有明确可选流量券目标；预算只作为观察项，不再阻塞价格止损。',
+  };
 }
 
 function addBlocker(blockers, code, message, evidence = {}) {
@@ -2280,6 +2433,89 @@ function storeCountText(counts = {}, limit = 8) {
   if (!entries.length) return '';
   const shown = entries.slice(0, limit).map(([store, count]) => `${store} ${count}`).join('、');
   return entries.length > limit ? `${shown} 等 ${entries.length} 店` : shown;
+}
+
+function summarizeCouponNonGuaranteedFallbackGaps(sourceItem) {
+  const data = sourceItem?.data;
+  const rows = Array.isArray(data?.rows) ? data.rows : [];
+  const byBucket = data?.byBucket && typeof data.byBucket === 'object'
+    ? data.byBucket
+    : rows.reduce((acc, row) => {
+      const bucket = row.bucket || '未归类';
+      acc[bucket] = (acc[bucket] || 0) + 1;
+      return acc;
+    }, {});
+  const byStore = data?.byStore && typeof data.byStore === 'object'
+    ? data.byStore
+    : rows.reduce((acc, row) => {
+      const store = row.storeKey || 'UNKNOWN';
+      acc[store] = (acc[store] || 0) + 1;
+      return acc;
+    }, {});
+  const lowOrderRows = Array.isArray(data?.lowOrderRows) ? data.lowOrderRows : [];
+  return {
+    status: sourceItem?.source?.status || 'missing',
+    sourcePath: sourceItem?.source?.path || '',
+    total: Number(data?.total ?? rows.length ?? 0),
+    byBucket,
+    byStore,
+    lowOrderHitCount: lowOrderRows.length,
+    lowOrderSamples: lowOrderRows.slice(0, 10),
+    samples: rows.slice(0, 10).map(row => ({
+      storeKey: row.storeKey || '',
+      skc: row.skc || '',
+      canonical: row.canonical || '',
+      bucket: row.bucket || '',
+      action: row.action || '',
+      reason: row.reason || row.note || '',
+    })),
+  };
+}
+
+function summarizeOrdinaryEnrollmentOpenIssues(sourceItem) {
+  const data = sourceItem?.data;
+  const summary = data?.summary || {};
+  const rows = Array.isArray(data?.rows) ? data.rows : [];
+  const issueRows = rows.filter(row => {
+    const enrolled = String(row.enrolledOrUnderReview || '').toLowerCase() === 'true' || row.enrolledOrUnderReview === true;
+    const priceOk = String(row.priceOk || '').toLowerCase() === 'true' || row.priceOk === true;
+    return !enrolled || !priceOk || row.issue || !row.fillEvidence;
+  });
+  return {
+    status: sourceItem?.source?.status || 'missing',
+    sourcePath: sourceItem?.source?.path || '',
+    plannedRows: Number(summary.plannedRows || rows.length || 0),
+    enrolledOrUnderReview: Number(summary.enrolledOrUnderReview || rows.filter(row => String(row.enrolledOrUnderReview || '').toLowerCase() === 'true' || row.enrolledOrUnderReview === true).length || 0),
+    fillVerified: Number(summary.fillVerified || 0),
+    platformAdjusted: Number(summary.platformAdjusted || 0),
+    missingFillEvidence: Number(summary.missingFillEvidence || 0),
+    issueCount: issueRows.length,
+    issueRows: issueRows.slice(0, 20).map(row => ({
+      storeKey: row.storeKey || '',
+      activityId: row.activityId || '',
+      skc: row.skc || '',
+      canonical: row.canonical || '',
+      expectedActivityPrice: row.expectedActivityPrice || '',
+      actualActivityPrice: row.actualActivityPrice || '',
+      issue: row.issue || '',
+      state: row.state || '',
+      hasFillEvidence: Boolean(row.fillEvidence),
+    })),
+  };
+}
+
+function summarizeOrdinaryEnrollmentSupplementOpenIssues(sourceItem) {
+  const data = sourceItem?.data;
+  const summary = data?.summary || {};
+  return {
+    status: sourceItem?.source?.status || 'missing',
+    sourcePath: sourceItem?.source?.path || '',
+    pricePendingRows: Number(summary.xcPricePendingRows || 0),
+    extraAvailableRows: Number(summary.extraAvailableRows || 0),
+    action: summary.action || '',
+    pricePendingSamples: Array.isArray(data?.pricePendingRows) ? data.pricePendingRows.slice(0, 10) : [],
+    extraAvailableSamples: Array.isArray(data?.extraAvailableRows) ? data.extraAvailableRows.slice(0, 10) : [],
+  };
 }
 
 function humanBlockerText(blocker) {
@@ -2329,6 +2565,9 @@ function buildHumanSummary(report) {
   const newSkc = report.newSkcCandidates || {};
   const budget = report.couponBudget || {};
   const orders = report.orderPriceAudit || {};
+  const fallbackGaps = report.couponNonGuaranteedFallbackGaps || {};
+  const ordinaryIssues = report.ordinaryEnrollmentOpenIssues || {};
+  const ordinarySupplementIssues = report.ordinaryEnrollmentSupplementOpenIssues || {};
 
   for (const blocker of report.blockers || []) {
     actions.push({level: '必须处理', text: humanBlockerText(blocker)});
@@ -2356,17 +2595,38 @@ function buildHumanSummary(report) {
   } else if (Number(newSkc.recentMissingExactPlanOnShelf || 0) === 0) {
     ok.push('新上架链接：当前没有 30 天内上架且缺精确价格计划的候选。');
   }
-  if (Array.isArray(report.t3MarketingCandidates) && report.t3MarketingCandidates.length) {
-    watches.push(`未来 3 天内有 ${humanCount(report.t3MarketingCandidates.length, '个')}普通营销活动报名提醒；只提醒，不自动填报。`);
-  } else {
-    ok.push('未来 3 天普通营销活动：暂无需要提醒的报名候选。');
+  if (Number(fallbackGaps.total || 0) > 0) {
+    const storeText = storeCountText(fallbackGaps.byStore || {}, 6);
+    watches.push(`优惠券非保底迁移后仍有 ${humanCount(fallbackGaps.total, '个')}限时折扣兜底缺口${storeText ? `（${storeText}）` : ''}；多为库存/平台规则/已有折扣冲突，不能硬写，但需要后续继续观察。`);
   }
-  if (Number(budget.belowTargetCount || 0) > 0) {
-    actions.push({level: '必须处理', text: `有 ${humanCount(budget.belowTargetCount, '个')}店铺优惠券预算低于 1000 SAR，需要补预算。`});
-  } else if (Number(budget.missingEvidenceCount || 0) > 0) {
-    actions.push({level: '必须处理', text: `有 ${humanCount(budget.missingEvidenceCount, '个')}店铺缺预算回读证据，先回读确认。`});
-  } else if (Number(budget.expectedStoreCount || 0) > 0) {
-    ok.push('优惠券预算：当前没有低于 1000 SAR 的店铺。');
+  if (Number(ordinaryIssues.issueCount || 0) > 0 || Number(ordinaryIssues.missingFillEvidence || 0) > 0) {
+    watches.push(`普通活动补报还有 ${humanCount(ordinaryIssues.issueCount, '行')}价格/填价证据待回读，其中缺本轮填价证据 ${humanCount(ordinaryIssues.missingFillEvidence, '行')}；已报集合存在不等于价格完全验收。`);
+  }
+  if (Number(ordinarySupplementIssues.pricePendingRows || 0) > 0 || Number(ordinarySupplementIssues.extraAvailableRows || 0) > 0) {
+    watches.push(`XC/45219 补报还有 ${humanCount(ordinarySupplementIssues.pricePendingRows, '行')}活动价待回读、${humanCount(ordinarySupplementIssues.extraAvailableRows, '行')}计划外可报因缺成本/标准目录证据阻断；不能当作价格完全验收。`);
+  }
+  if (Array.isArray(report.t3MarketingCandidates) && report.t3MarketingCandidates.length) {
+    const handledText = Number(report.t3MarketingHandledRows?.handledRows || 0) > 0
+      ? `（已扣除本轮补报/阻断 ${humanCount(report.t3MarketingHandledRows.handledRows, '行')}）`
+      : '';
+    watches.push(`未来 3 天内有 ${humanCount(report.t3MarketingCandidates.length, '个')}普通营销活动报名提醒${handledText}；只提醒，不自动填报。`);
+  } else {
+    const handledText = Number(report.t3MarketingHandledRows?.handledRows || 0) > 0
+      ? `；本轮补报/阻断 ${humanCount(report.t3MarketingHandledRows.handledRows, '行')}已扣除`
+      : '';
+    ok.push(`未来 3 天普通营销活动：暂无需要提醒的报名候选${handledText}。`);
+  }
+  const couponTrafficIntent = report.couponTrafficIntent || {};
+  if (couponTrafficIntent.enabled) {
+    if (Number(budget.belowTargetCount || 0) > 0) {
+      actions.push({level: '必须处理', text: `有 ${humanCount(budget.belowTargetCount, '个')}店铺优惠券预算低于当前流量券预算目标，需要先确认预算方案。`});
+    } else if (Number(budget.missingEvidenceCount || 0) > 0) {
+      actions.push({level: '必须处理', text: `有 ${humanCount(budget.missingEvidenceCount, '个')}店铺缺可选流量券预算回读证据；要提交流量券前必须先回读确认。`});
+    } else if (Number(budget.expectedStoreCount || 0) > 0) {
+      ok.push('可选流量券预算：当前没有低于目标预算的店铺。');
+    }
+  } else if (Number(budget.belowTargetCount || 0) > 0 || Number(budget.missingEvidenceCount || 0) > 0) {
+    watches.push('优惠券预算证据不完整/过期，但当前没有明确可选流量券目标；它不再阻塞价格止损，只在后续真正要上流量券前回读。');
   }
   if (Number(orders.above || 0) > 0) {
     watches.push(`订单商品行成交价有 ${humanCount(orders.above, '条')}高于目标价线索；先查普通活动/限时折扣/券是否漏报，不自动取消任何活动。`);
@@ -2377,12 +2637,13 @@ function buildHumanSummary(report) {
   if (Number(orders.cloud?.matchedPlanRows || 0) > 0 && Number(orders.below || 0) === 0 && Number(orders.above || 0) === 0 && Number(orders.dataQualityRows || 0) === 0) {
     ok.push(`云端订单商品行成交价：近 ${humanCount(orders.cloud.lookbackDays + 1, '天')}读取 ${humanCount(orders.cloud.rows, '行')}，其中 ${humanCount(orders.cloud.matchedPlanRows, '行')}命中目标价计划并完成比价，未发现低于/高于目标价。`);
   }
-  const couponRescanWindow = report.couponRescanWindow || {};
-  if (!couponRescanWindow.open) {
-    const notBefore = couponRescanWindow.notBeforeText || M12_COUPON_RESCAN_NOT_BEFORE_TEXT;
-    watches.push(`M12 剩余 15% 补券还没到复扫窗口（${notBefore}），今天不生成补券 dry-run。`);
+  const optionalTrafficCouponReview = report.optionalTrafficCouponReview || {};
+  if (!optionalTrafficCouponReview.open) {
+    watches.push('当前计划没有明确可选 15% 流量券目标；价格保障不能依赖优惠券，今天不生成补券 dry-run。');
   } else if (Array.isArray(report.suggestedDryRunCommands) && report.suggestedDryRunCommands.length) {
-    watches.push('已到 M12 剩余 15% 补券复扫窗口，只生成 34810/15% 券 dry-run；禁止 30%/50% 券真实上线。');
+    watches.push('当前计划存在明确可选 15% 流量券目标；只生成 34810/15% 券 dry-run 供用户确认，不能把优惠券当价格保障层。');
+  } else if (optionalTrafficCouponReview.open) {
+    ok.push('优惠券价格保障迁移：当前没有需要补回的价格保障券；优惠券不再作为目标成交价保底层。');
   }
   if (Array.isArray(report.sourceWarnings) && report.sourceWarnings.length) {
     watches.push(`有 ${humanCount(report.sourceWarnings.length, '条')}数据源提醒，不阻塞价格结论，但需要留意。`);
@@ -2442,9 +2703,14 @@ function buildMarkdown(report) {
   lines.push(`- 旧普通活动叠券：未处理低价 ${humanCount(report.knownOrdinaryActivityGuard.belowTargetCount, '个')}；待系统只读查价 ${humanCount(report.knownOrdinaryActivityGuard.evidenceIncompleteCount, '个')}；已取消止损 ${humanCount(report.knownOrdinaryActivityGuard.mitigatedBelowTargetCount || 0, '个')}`);
   lines.push(`- 限时折扣叠券：低价 ${humanCount(report.lowPriceOverlap.belowTarget, '个')}；待系统补价证据 ${humanCount(report.lowPriceOverlap.missingEvidence, '个')}；取消候选 ${humanCount(report.lowPriceOverlap.cancelRows, '个')}`);
   lines.push(`- 订单商品行成交价：云端读取 ${humanCount(report.orderPriceAudit.cloud?.rows || 0, '行')}；活动窗口内命中目标并比价 ${humanCount(report.orderPriceAudit.cloud?.matchedPlanRows || 0, '行')}；窗口外历史线索 ${humanCount(report.orderPriceAudit.outsideWindow, '条')}；未命中计划背景数 ${humanCount(report.orderPriceAudit.cloud?.unmatchedRows || 0, '行')}；低于目标 ${humanCount(report.orderPriceAudit.below, '条')}；高于目标 ${humanCount(report.orderPriceAudit.above, '条')}；缺窗口/价格/粒度证据 ${humanCount(report.orderPriceAudit.dataQualityRows, '条')}`);
-  lines.push(`- 优惠券预算：低于 1000 SAR 的店铺 ${humanCount(report.couponBudget.belowTargetCount, '个')}；缺回读证据 ${humanCount(report.couponBudget.missingEvidenceCount, '个')}`);
+  const couponTrafficIntent = report.couponTrafficIntent || {};
+  const budgetPrefix = couponTrafficIntent.enabled ? '可选流量券预算' : '优惠券预算观察';
+  lines.push(`- ${budgetPrefix}：明确流量券目标 ${humanCount(couponTrafficIntent.allowed15TrafficCount || 0, '个')}；低于预算目标的店铺 ${humanCount(report.couponBudget.belowTargetCount, '个')}；缺回读证据 ${humanCount(report.couponBudget.missingEvidenceCount, '个')}`);
+  lines.push(`- 优惠券非保底迁移兜底：限时折扣缺口 ${humanCount(report.couponNonGuaranteedFallbackGaps?.total || 0, '个')}；直接命中低价订单 ${humanCount(report.couponNonGuaranteedFallbackGaps?.lowOrderHitCount || 0, '个')}`);
+  lines.push(`- 普通活动补报回读：计划 ${humanCount(report.ordinaryEnrollmentOpenIssues?.plannedRows || 0, '行')}；已报/审核中 ${humanCount(report.ordinaryEnrollmentOpenIssues?.enrolledOrUnderReview || 0, '行')}；价格/证据待回读 ${humanCount(report.ordinaryEnrollmentOpenIssues?.issueCount || 0, '行')}；缺本轮填价证据 ${humanCount(report.ordinaryEnrollmentOpenIssues?.missingFillEvidence || 0, '行')}`);
+  lines.push(`- XC/45219 补报遗留：活动价待回读 ${humanCount(report.ordinaryEnrollmentSupplementOpenIssues?.pricePendingRows || 0, '行')}；缺成本/标准目录阻断 ${humanCount(report.ordinaryEnrollmentSupplementOpenIssues?.extraAvailableRows || 0, '行')}`);
   lines.push(`- 新链接/新 SKC：需要定价 ${humanCount(report.newSkcCandidates.needsPricing, '个')}；需要确认 ${humanCount(report.newSkcCandidates.needsConfirmation, '个')}；需要补券复核 ${humanCount(report.newSkcCandidates.needsCouponReview, '个')}`);
-  lines.push(`- 未来 3 天普通活动提醒：${humanCount(report.t3MarketingCandidates.length, '个')}`);
+  lines.push(`- 未来 3 天普通活动提醒：${humanCount(report.t3MarketingCandidates.length, '个')}；已扣除补报/阻断 ${humanCount(report.t3MarketingHandledRows?.handledRows || 0, '行')}`);
   lines.push('');
   lines.push('## 证据文件');
   lines.push('');
@@ -2508,6 +2774,22 @@ async function main() {
   const budgetExecute = await read('couponBudgetExecute', latestFile(path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-budget-results'), /^coupon-site-budget-execute-.*\.json$/));
   const budgetReadback = await read('couponBudgetReadback', latestFile(path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-budget-results'), /^coupon-site-budget-readback-.*\.json$/));
   const budgetDryRun = await read('couponBudgetDryRun', latestFile(path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-budget-results'), /^coupon-site-budget-dry-run-.*\.json$/));
+  const couponNonGuaranteedFallbackGapSource = await read(
+    'couponNonGuaranteedFallbackGaps',
+    latestReportFile(/^coupon-non-guaranteed-limited-fallback-remaining-triage-.*\.json$/),
+  );
+  const ordinaryEnrollmentOpenIssueSource = await read(
+    'ordinaryEnrollmentOpenIssues',
+    latestReportFile(/^remaining-open-extra-cloud-enriched-submit-result-.*\.json$/),
+  );
+  const ordinaryEnrollmentSupplementOpenIssueSource = await read(
+    'ordinaryEnrollmentSupplementOpenIssues',
+    latestReportFile(/^xc-45219-open-issues-.*\.json$/),
+  );
+  const deadlineGapfillResultSource = await read(
+    'ordinaryDeadlineGapfillResult',
+    latestReportFile(/^remaining-\d{4}-\d{2}-\d{2}-deadline-gapfill-result-.*\.json$/),
+  );
   const stackReviewSelection = selectMarketingStackReviewFile(storesConfig.data);
   const stackReview = await read('marketingStackReview', stackReviewSelection.file);
   const marketingStackReviewContext = normalizeMarketingStackReviewSource(stackReview, now, args.maxAgeHours);
@@ -2567,6 +2849,7 @@ async function main() {
     if (knownOrdinaryEvidenceSource.parseErrorCount > 0) knownOrdinaryEvidenceSource.status = 'parse_error';
   }
   const knownOrdinaryCancelMitigation = await loadKnownOrdinaryCancelMitigation(args.date);
+  const orderPriceMitigationEvidence = loadOrderPriceMitigationEvidence(args.date);
   const activityWindowEvidence = loadActivityWindowEvidence(targetPlan.data, priceOverrides.data);
 
   const cloudOrderRows = await readCloudSheinFetchOrderRows({
@@ -2595,12 +2878,19 @@ async function main() {
     priceOverridesDoc: priceOverrides.data,
     priceOverridesSourcePath: priceOverrides.source.path,
     activityWindowEvidence,
+    orderMitigationEvidence: orderPriceMitigationEvidence,
     now,
     maxAgeHours: args.maxAgeHours,
   });
   const orderPriceAudit = buildOrderPriceAuditFromCloud(cloudOrderPriceAudit);
   const biPortalFreshness = summarizeBiPortal(biPortal.data, biPortal.source);
-  const t3MarketingCandidates = summarizeT3Candidates(stackReview.data, args.date);
+  const deadlineHandledKeys = collectDeadlineHandledKeys(deadlineGapfillResultSource.data);
+  const t3MarketingCandidates = summarizeT3Candidates(stackReview.data, args.date, deadlineHandledKeys);
+  const t3MarketingHandledRows = {
+    sourcePath: deadlineGapfillResultSource.source.path || '',
+    handledRows: Number(t3MarketingCandidates.handledRows || 0),
+    handledKeyCount: deadlineHandledKeys.size,
+  };
   const marketingStackReviewCoverage = summarizeStackReviewCoverage(stackReview.data, storesConfig.data);
   const couponBudget = summarizeCouponBudgetStatus({
     executeDoc: budgetExecute.data,
@@ -2620,11 +2910,16 @@ async function main() {
     storesConfigDoc: storesConfig.data,
     reportDate: args.date,
   });
-  const couponRescanWindow = couponRescanWindowStatus(now);
+  const couponTrafficIntent = summarizeCouponTrafficIntent(couponEligibilityPlan);
+  const optionalTrafficCouponReview = optionalTrafficCouponReviewStatus({couponEligibilityPlan});
+  const couponNonGuaranteedFallbackGaps = summarizeCouponNonGuaranteedFallbackGaps(couponNonGuaranteedFallbackGapSource);
+  const ordinaryEnrollmentOpenIssues = summarizeOrdinaryEnrollmentOpenIssues(ordinaryEnrollmentOpenIssueSource);
+  const ordinaryEnrollmentSupplementOpenIssues = summarizeOrdinaryEnrollmentSupplementOpenIssues(ordinaryEnrollmentSupplementOpenIssueSource);
   const suggestedDryRunCommands = buildDryRunCommands({
     targetPlan: args.targetPlan,
     priceOverrides: args.priceOverrides,
-    couponRescanWindow,
+    optionalTrafficCouponReview,
+    couponEligibilityPlan,
   });
   const blockers = [];
   const sourceWarnings = [];
@@ -2869,19 +3164,61 @@ async function main() {
       evidence: {samples: newSkcCandidates.rows.filter(r => r.decision === 'unknown_shelf_age_needs_review').slice(0, 10)},
     });
   }
-  if (couponBudget.belowTargetCount > 0) {
+  if (couponNonGuaranteedFallbackGaps.total > 0) {
+    contextWarnings.push({
+      code: 'coupon_non_guaranteed_limited_fallback_gaps_remaining',
+      label: 'couponNonGuaranteedFallbackGaps',
+      message: `优惠券非保底迁移后仍有 ${couponNonGuaranteedFallbackGaps.total} 个店铺+SKC 未完成限时折扣兜底；多为库存/平台规则/已有折扣冲突，不能硬写，但必须继续观察`,
+      evidence: {
+        sourcePath: couponNonGuaranteedFallbackGaps.sourcePath,
+        byBucket: couponNonGuaranteedFallbackGaps.byBucket,
+        byStore: couponNonGuaranteedFallbackGaps.byStore,
+        lowOrderHitCount: couponNonGuaranteedFallbackGaps.lowOrderHitCount,
+        samples: couponNonGuaranteedFallbackGaps.samples,
+      },
+    });
+  }
+  if (ordinaryEnrollmentOpenIssues.issueCount > 0 || ordinaryEnrollmentOpenIssues.missingFillEvidence > 0) {
+    contextWarnings.push({
+      code: 'ordinary_enrollment_price_evidence_open_issues',
+      label: 'ordinaryEnrollmentOpenIssues',
+      message: `普通活动补报仍有 ${ordinaryEnrollmentOpenIssues.issueCount} 行价格/填价证据待回读，其中缺本轮填价证据 ${ordinaryEnrollmentOpenIssues.missingFillEvidence} 行；不影响已报集合存在，但不能当作价格完全验收`,
+      evidence: {
+        sourcePath: ordinaryEnrollmentOpenIssues.sourcePath,
+        plannedRows: ordinaryEnrollmentOpenIssues.plannedRows,
+        enrolledOrUnderReview: ordinaryEnrollmentOpenIssues.enrolledOrUnderReview,
+        fillVerified: ordinaryEnrollmentOpenIssues.fillVerified,
+        platformAdjusted: ordinaryEnrollmentOpenIssues.platformAdjusted,
+        issueRows: ordinaryEnrollmentOpenIssues.issueRows,
+      },
+    });
+  }
+  if (ordinaryEnrollmentSupplementOpenIssues.pricePendingRows > 0 || ordinaryEnrollmentSupplementOpenIssues.extraAvailableRows > 0) {
+    contextWarnings.push({
+      code: 'ordinary_enrollment_supplement_open_issues',
+      label: 'ordinaryEnrollmentSupplementOpenIssues',
+      message: `XC/45219 补报仍有 ${ordinaryEnrollmentSupplementOpenIssues.pricePendingRows} 行活动价待回读、${ordinaryEnrollmentSupplementOpenIssues.extraAvailableRows} 行计划外可报但缺成本/标准目录证据；不能当作价格完全验收`,
+      evidence: {
+        sourcePath: ordinaryEnrollmentSupplementOpenIssues.sourcePath,
+        action: ordinaryEnrollmentSupplementOpenIssues.action,
+        pricePendingSamples: ordinaryEnrollmentSupplementOpenIssues.pricePendingSamples,
+        extraAvailableSamples: ordinaryEnrollmentSupplementOpenIssues.extraAvailableSamples,
+      },
+    });
+  }
+  if (couponTrafficIntent.enabled && couponBudget.belowTargetCount > 0) {
     addBlocker(
       blockers,
       'coupon_budget_below_target',
-      `${couponBudget.belowTargetCount} 个店铺优惠券周预算低于 ${couponBudget.targetBudget} ${couponBudget.currency}`,
+      `${couponBudget.belowTargetCount} 个店铺可选流量券预算低于 ${couponBudget.targetBudget} ${couponBudget.currency}`,
       {stores: couponBudget.belowTargetStores},
     );
   }
-  if (couponBudget.missingEvidenceCount > 0) {
+  if (couponTrafficIntent.enabled && couponBudget.missingEvidenceCount > 0) {
     addBlocker(
       blockers,
       'coupon_budget_missing_evidence',
-      `${couponBudget.missingEvidenceCount} 个店铺缺少优惠券预算 fresh execute 或 read-only current 回读证据`,
+      `${couponBudget.missingEvidenceCount} 个店铺缺少可选流量券预算 fresh execute 或 read-only current 回读证据`,
       {
         selectedSource: couponBudget.selectedSource,
         stores: couponBudget.missingEvidenceStores,
@@ -2889,6 +3226,18 @@ async function main() {
         dryRunSource: couponBudget.dryRunSource,
       },
     );
+  }
+  if (!couponTrafficIntent.enabled && (couponBudget.belowTargetCount > 0 || couponBudget.missingEvidenceCount > 0)) {
+    contextWarnings.push({
+      code: 'coupon_budget_observation_only_without_traffic_coupon_targets',
+      label: 'couponBudget',
+      message: '当前计划没有明确可选流量券目标；优惠券预算缺证据/低预算只作为观察项，不阻塞价格止损或普通活动判断。',
+      evidence: {
+        belowTargetCount: couponBudget.belowTargetCount,
+        missingEvidenceCount: couponBudget.missingEvidenceCount,
+        selectedSource: couponBudget.selectedSource,
+      },
+    });
   }
   if (couponBudget.writeFailureButAtTargetCount > 0) {
     contextWarnings.push({
@@ -2943,11 +3292,16 @@ async function main() {
     marketingStackReviewSourceSelection: stackReviewSelection,
     marketingStackReviewCoverage,
     t3MarketingCandidates,
+    t3MarketingHandledRows,
     couponBudget,
+    couponTrafficIntent,
+    couponNonGuaranteedFallbackGaps,
+    ordinaryEnrollmentOpenIssues,
+    ordinaryEnrollmentSupplementOpenIssues,
     budgetReadback: budgetReadback.source.status === 'missing'
       ? {status: 'unknown', reason: 'no coupon budget readback source found'}
       : {status: budgetReadback.source.status, path: budgetReadback.source.path},
-    couponRescanWindow,
+    optionalTrafficCouponReview,
     budgetDryRun: budgetDryRun.source.status === 'missing'
       ? {status: 'unknown', reason: 'no coupon budget dry-run source found'}
       : {status: budgetDryRun.source.status, path: budgetDryRun.source.path},
@@ -2970,6 +3324,11 @@ async function main() {
     && !report.newSkcCandidates.needsConfirmation
     && !report.newSkcCandidates.needsAgeReview
     && !report.newSkcCandidates.needsCouponReview
+    && !report.couponNonGuaranteedFallbackGaps.total
+    && !report.ordinaryEnrollmentOpenIssues.issueCount
+    && !report.ordinaryEnrollmentOpenIssues.missingFillEvidence
+    && !report.ordinaryEnrollmentSupplementOpenIssues.pricePendingRows
+    && !report.ordinaryEnrollmentSupplementOpenIssues.extraAvailableRows
     && !report.aboveTargetActions.count
     && !report.lowPriceOverlap.belowTarget
     && !report.lowPriceOverlap.missingEvidence

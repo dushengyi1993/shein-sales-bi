@@ -12,6 +12,7 @@
 - 链接表现改为每日后半夜一次，当前只写私有源文件 / PostgreSQL / BI；飞书链接管理表已废弃。旧 `0340` / `0510` 链接任务不要恢复。
 - 当前完整 BI 运行层仍是 PostgreSQL + Metabase + BI Portal：PostgreSQL 是核心数据仓库，Metabase 是正式深度分析/自由钻取层，BI Portal 是日常经营入口；在自研门户完全覆盖深钻前，云端迁移不能删除或跳过 Metabase。
 - 服务器从 GitHub 拉取/重置代码后，要立即重跑一次云端 BI 刷新；仓库里的 `outputs/bi-portal/` 是灾备快照，不能把它误当成服务器实时数据。
+- **BI 数据判断、开发验收和故障排查只认云端运行时：云端 PostgreSQL warehouse、云端 BI 门户、线上 `/api/bi/section/*`、云端日志和 systemd 状态。仓库里的 `outputs/bi-portal/*` 只是灾备/兼容快照，可能严重过期；不得用它判断当前业务数据、口径正确性或页面性能。**
 - HL 已切换为主账号 profile：`profiles/persistent-shein-main-profile`；旧 `profiles/persistent-hl-profile` 已删除。
 - `2026-06-05` 已按用户提供的账号真相修正 LGM 三店 profile / 账号映射：`YJ=profileKey yj/accountNo GS8146729/port 9346`、`XL=profileKey xl/accountNo GS9307061/port 9344`、`QY=profileKey qy/accountNo GS7451160/port 9345`。店铺身份真相以 `config/stores.json`、`config/store_account_truth.json`、浏览器保存账号和实际登录后的店铺名/账号一致为准；不得再沿用 `2026-05-10` 的交叉 profile 结论。
 - `2026-05-09 05:30` 链接/业务域任务、`2026-05-09 07:00` BI 每日流水线和白天滚动后置 BI 刷新是本地 Windows 历史验证记录；自 `2026-05-15` 本地任务封存后，不再作为生产调度。
@@ -29,7 +30,7 @@
 
 ## 当前运行状态（2026-05-18 云端切换后）
 
-以下为当前入口、调度和边界说明；实时数据以 `outputs/bi-portal/data.json`、云端日志和 BI 门户系统状态页为准。
+以下为当前入口、调度和边界说明；实时数据只以云端 BI 门户系统状态页、线上 `/api/bi/section/*`、云端 PostgreSQL warehouse、云端日志和 systemd 状态为准。仓库快照只用于灾备/兼容，不能用于当前业务判断。
 
 - 店铺范围：19 家店，`DSY` 组 10 家，`LGM` 组 9 家。
 - 当前店铺代码：`CX DL DX FY HL JSH JY LQ MZ NM QH QY TS TZ TZZ XC XL YJ ZL`（LGM 已新增 `JSH / TZZ / XC`）。
@@ -41,12 +42,12 @@
   - 云端 BI：`https://shein-bi.faceair.me/`，Basic Auth 保护；旧 IP 入口 `http://43.165.167.135/` 仅作兜底。
   - 云端登录维护中心：`https://shein-bi.faceair.me/cloud-login-maintenance`，用于临时打开指定店铺云端浏览器登录窗口。
   - 云端代码目录：`/opt/shein-bi/app`
-  - 本地 BI 门户文件快照：`outputs/bi-portal/index.html` / `outputs/bi-portal/data.json`
+  - 仓库 BI 门户灾备快照：`outputs/bi-portal/index.html` / `outputs/bi-portal/data.json`（不代表当前云端数据）
   - V1 是当前正式 BI Portal；用户确认后的 V1/main 才发布 GitHub release。当前 V1/main 已发布到 `2026.06.04-core-section-warmup-hotfix`，后续首页性能补丁保持同一 V1/main 边界；V2 仍不属于正式发布。
   - V2.1 独立设计预览仍是平行项目，由 `scripts/generate_bi_portal_v2.mjs` 生成；用户确认前不得替换 V1 或改生产调度。
   - 本机 `http://127.0.0.1:8787/` 和局域网 `http://DUSHENGYI-PC2:8787/` 已封存，不再作为正式入口。
   - Metabase 当前部署在云端 Docker 内部，由云端 Nginx/服务配置受控访问，不在 README 写公开裸地址。
-- 当前 BI 数据截面不再手工写死在 README；实时以 BI 门户系统状态页、`outputs/bi-portal/data.json`、云端 systemd 日志和数据库入仓时间为准。仓库中的 `outputs/bi-portal/` 只是灾备快照，服务器拉取/重置代码后必须重新跑云端 BI 刷新。
+- 当前 BI 数据截面不再手工写死在 README；实时只以云端 BI 门户系统状态页、线上 `/api/bi/section/*`、云端 PostgreSQL warehouse、云端 systemd 日志和数据库入仓时间为准。仓库中的 `outputs/bi-portal/` 只是灾备/兼容快照，服务器拉取/重置代码后必须重新跑云端 BI 刷新；开发和验收不得拿仓库快照当当前数据。
 - BI Portal API section cache 位于 `outputs/bi-portal/sections/`；首页首屏使用轻量 `homeRankings`（只含首页需要的日店铺、日货号、日店铺×货号粒度），完整 `rankings` 后置到详情/子页需要时再拉。服务端会为 section cache 生成 `.json.gz` sidecar，公网浏览器优先走 gzip。`cloud_bi_refresh.sh` 刷新 core 后会启动 `prewarm_bi_portal_sections.sh`；`serve_bi_portal.mjs` 还会在服务启动和首页访问时检测 `data.json.generatedAt`，后台兜底预热 section，避免等用户打开页面才现场生成。首页利润 `homeProfit` 必须从当前 `profit` section cache 派生；若首页利润明显低于当前销售额，先核对 `profit.json.generatedAt`、`homeProfit.json.data.homeProfitSummary.sourceGeneratedAt` 和 `staleSource`，`staleSource=true` 或 `sourceGeneratedAt` 不等于当前 core 时不能按旧利润判断业务真实利润。
 - 定时任务：
   - 云端 `shein-bi-cloud-today.timer`：`00:10/02:10/.../22:10` 每两小时刷新当天销售、入仓并生成 BI Portal。
@@ -55,7 +56,7 @@
   - 云端 `shein-bi-cloud-et-forwarder.timer`：每天 `04:20` 同步 ET；需服务器本地 ET 凭据和手动验证后启用。
   - 云端 `shein-bi-cloud-daily-lark-report.timer`：每天 `08:35` 发送日报，`10:35/12:35` 补偿重试；需服务器本地飞书配置和授权后启用。
   - 云端 `shein-bi-cloud-rtv-verify.timer`：每天 `03:20` 跑完整 RTV 换单复核 WebAPI 版，不阻塞滚动销售刷新。
-- 云端 `shein-bi-cloud-link-business.timer`：每天 `05:30` 顺序启动云端 headless Chrome 抓取前一完整日链接/业务域，入仓、体检并刷新 BI；单店失败会重启浏览器重试。
+- 云端 `shein-bi-cloud-link-business.timer`：每天 `08:10` 顺序启动云端 headless Chrome 抓取前一完整日链接/业务域，入仓、体检并刷新 BI；单店失败会重启浏览器重试。
 - 云端 `shein-bi-cloud-session-manager.timer`：每天 `03:20` 顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并检查 profile 体积。
 - 2026-05-21 运维加固：链接/业务域服务统一以 `sheinops` 运行，避免 root 写 Chrome profile 后导致登录态管家 `EACCES`；登录态恢复改为先回灌 browser session、再验证 GSP + SBN；ET 验证码下载瞬时失败会进入重试，不再一次 `fetch failed` 就中断。
   - 云端 `shein-bi-cloud-openapi-hl.timer`：每天 `06:20` 跑 HL OpenAPI 并行对账；已可在云端成功抓取、入仓和生成 OpenAPI 对账。
@@ -81,13 +82,15 @@
 - 统计日：北京时间自然日。
 - 时间口径：订单创建时间。
 - 汇率：`1 SAR = 1.8 RMB`。
-- 销售有效性统一走 `lib/shein_sales_validity.mjs`：只把真正取消、揽收前取消等“未形成销售”的商品行从总销售额、订单数和销量中剔除；用户已退款、退货、派件失败等仍保留在总销售额里，再由净销售额、售后/利润层反转。后台原始金额仍保留在明细里用于追溯。历史本地 JSON summary 可用 `scripts/repair_shein_sales_summaries.mjs` 重算。
+- 销售有效性统一走 `lib/shein_sales_validity.mjs`：只把真正取消、揽收前取消等“未形成销售”的商品行从总销售额、订单数和销量中剔除；用户已退款、退货、派件失败等仍保留在总销售额里，再由净销售额、售后/利润层反转。后台原始金额仍保留在明细里用于追溯。历史 summary 可用 `scripts/repair_shein_sales_summaries.mjs` 重算；该脚本仅作历史回滚/修复工具，不作为当前云端 BI 判断来源。
 - 利润口径：首页和成本/利润页使用真实利润；成本未覆盖时显示“待成本表 / 成本覆盖率”，不再用 `25%` 粗估冒充真实利润。仓储费正式来源是 ET 物流仓服账单 `仓储费`：显示金额按 RMB，实际扣费按显示金额 × `0.5` 后以 `1 SAR = 1.8 RMB` 折 SAR；店铺/DSY/LGM 按净销售额分摊，货号层优先使用 ET `ExportStoreFee` 当日明细；若历史明细合计与总账不一致，则保留货号分布并按总账缩放，只有完全缺明细日期才按 ET 体积 × 库存天数估算并标注口径。
 - ET 仓储费导出里的 `storage_code` / `sku_code` 必须保留原始值，例如 `DL-SK-999`；`match_key` 只作为内部归并键。面向 BI/利润展示的货号要通过 `mart.product_display_by_match_key` 回到销售或商品主档里的既有标准货号，不能把 ET 解析出的中间短码当成新商品暴露出来。
 - 营销活动确认表里的 `仓储费SAR/件` 不能用累计仓储费除以历史销量，也不能把全历史仓储费一刀切压到当前库存上；必须来自 BI `profit.productStorageDaily` 的“当前仍在仓库存移动平均累计仓储成本”：每日仓储费加入库存成本余额，库存数量减少时按当前平均成本剔除已出库产品携带的历史仓储成本。短码或无法确认的货号必须标记待归并暂停，不能按 0 仓储或猜测成本继续报名。
-- 配套 15% 优惠券活动不能直接跟普通营销活动计划全量走：目标必须由 paired `price-overrides` 派生的 `allowed15 ∩ MULTI_LEVEL_RULE_GOODS` 决定，仅 `couponFactor≈0.85` 或明确“仅15%券”的 SKC 可报名；`couponFactor=1`、不叠券/券都禁止、缺覆盖价或冲突口径一律 fail closed。只读复扫必须看 `15%券档active是否符合允许计划`、`15%券档禁止/未知仍active数` 与 `15%券档active但不在允许计划数`。详见 `docs/marketing-campaign-signup-pricing-rules.md`。
+- `2026-06-14` 起优惠券不再作为价格保障层：`15%` 券不是每单必然触发，不能用“普通活动价 × 0.85”作为保底成交价。保底成交价必须由当前售价、普通营销活动价或限时折扣价直接命中当前有效 `finalTargetPrice`；优惠券只允许作为明确标记的高曝光支持、全店高库存滞销品引流或清货试验层，且触券后的风险下探价不得低于底价/利润线。详见 `docs/marketing-campaign-signup-pricing-rules.md`。
 - 营销定价策略的机器可读入口是 `config/marketing_pricing_policy.json`：限时折扣必须作为兜底层存在但不得干扰目标成交价，默认从 `15%` 折扣起算；同一标准货号在所有店铺、所有链接中按 BI 正曝光量取全局前五 SKC，前五可比其他链接低 `5` 个百分点目标利润率但不得低于 `15%` 底价，基础目标已为 `15%` 时前五保持 `15%`、其他链接提高到 `20%`；无正曝光指标不得猜前五，不能按单店拆出多个“前五”。
-- 营销自动化的长期边界见 `docs/marketing-automation-roadmap.md`：度假季后补券、新链接纳入价格体系、券预算补 `1000 SAR`、低价成交查因、可报活动提前三天提醒、`30%/50%` 券研究和 BI 同事分店管理，都必须以价格栈证据为准；默认先只读 / dry-run / 复核，真实提交、取消、改价和补预算必须执行后 live 回读。券预算日报只把 `execute` 的 before/after 回读当完成证据，`dry-run` 不能冒充补额度成功；`30%/50%` 只允许用 `scripts/marketing/build_high_coupon_research_candidates.mjs` 生成 research-only 报告，不进入真实提交路径。
+- 营销日报/巡检必须按“当前有效策略”判定，而不是拿历史计划、统一利润率或旧 `ALL-ready` 覆盖文件反复报警。本期用户确认的逐行覆盖价、指定固定价、指定利润率（例如某货号本期批准 `15%` 利润率）和生效窗口必须先写入当前 `selection-plan + price-overrides`；巡检只在真实成交价低于这版 `finalTargetPrice`、活动层偏离这版策略，或当前计划缺失/过期/冲突时才报问题。已确认的低利润策略应标为 `expected`，不能每天当异常重复通知。
+- 给用户确认的报活动方案必须是 Excel 人话版，不能只给 CSV/JSON/几百行明细。至少包含“说明”“按货号汇总”“店铺差异明细”“报名明细”“剔除项/阻塞项”“低价补救/风险项”“15%券流量试验计划（如适用）”等 sheet；除说明页外必须有 `备注/修改意见` 列。按货号汇总必须展示预期利润率、预期最终价、普通活动填报价、是否使用可选 15% 流量券、券触发后的下探价、曝光前五命中/非命中、剔除原因和同货号不同店差异。用户确认前不得提交。
+- 营销自动化的长期边界见 `docs/marketing-automation-roadmap.md`：新链接纳入价格体系、限时折扣兜底、低价/高价成交查因、可报活动提前三天提醒、可选 15% 流量券预算研究、`30%/50%` 券研究和 BI 同事分店管理，都必须以价格栈证据为准；默认先只读 / dry-run / 复核，真实提交、取消、改价和补预算必须执行后 live 回读。券预算不再默认每店 `1000 SAR`，必须按高曝光/滞销流量券方案估算；`30%/50%` 只允许用 `scripts/marketing/build_high_coupon_research_candidates.mjs` 生成 research-only 报告，不进入真实提交路径。
 - 成本/利润页的高利润 / 低利润货号分界线固定为 `20%` 利润率：`>= 20%` 为可加码，`< 20%` 为需要处理。
 - 当前正式成本文件为 `inputs/costs/成本.xlsx`；`单台总成本（SAR）` 是单批单件完整成本输入，系统先还原为批次总成本，再按同货号所有完整批次加权平均计算单位成本。
 - 用户可见的产品主标题统一使用 `product_display_name`：生成端由 `lib/product_display_name.mjs` 基于 `standard_goods_sn`、`config/product_catalog.json` 和可靠中文标题补齐“标准货号+中文品名”；搜索、筛选、归因和仓库 key 仍使用 `standard_goods_sn` / `dim.product_match_key()`。无可靠中文来源的异常短码不编造中文，保留原值并标记待确认。
@@ -123,7 +126,7 @@
 - `infra/`：Metabase、PostgreSQL 数据仓库和 Docker 相关配置。
 - `skills/shein-sales-ops/`：项目专用 skill，保存业务口径和避坑经验。
 - `state/`：本地运行状态。
-- `outputs/`：抓取结果、报表、图片、审计结果；默认不进 GitHub，但 `outputs/bi-portal/index.html` 和 `outputs/bi-portal/data.json` 作为当前 BI 门户产物已纳入仓库，便于迁移和复用。
+- `outputs/`：抓取结果、报表、图片、审计结果；默认不进 GitHub。`outputs/bi-portal/index.html` 和 `outputs/bi-portal/data.json` 只作为 BI 门户灾备/兼容快照纳入仓库，便于迁移和本地预览；当前业务判断、验收和排障必须看云端运行态。
 - `logs/`：计划任务和运行日志。
 - `profiles/`：工作区内的 Chrome 店铺 profile；当前 19 店登录态保存在 `persistent-*-profile`，不要删除整个 profile。后续磁盘瘦身只清 `OptGuideOnDeviceModel` 等 Chrome 可重建缓存，详见 `docs/runtime-architecture.md`。  如需核验店铺是否错位，使用稳定日期后台重抓并对账数据库，不要只看页面文本。
 - `state/shein_webapi_sessions/`：WebAPI 直连复用的 Cookie session，本地敏感运行态，不进 GitHub；迁移时只能通过加密渠道或在新机器重新登录/刷新。
@@ -219,7 +222,7 @@
   `node scripts/marketing/export_dsy_marketing_standards.mjs --stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open`
 - 辅助填报 DSY 全部未截止营销活动（只预填，不点最终提交；若本期有用户确认覆盖表，必须带 `--price-overrides`）：
   `node scripts/marketing/dsy_marketing_deadline_fill.mjs --stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open --price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD-approved.json --min-discount-fallback SK-13034`
-- 优惠券活动不要套普通营销活动脚本/路径；例如活动 `34810` 应从优惠券详情 `#/mbrs/marketing/coupon/detail/34810` 进入 `继续报名`，批量导入确认会直接真实提报。配套 15% 券执行必须带目标计划并让脚本读取 paired `price-overrides`（显式 `--price-overrides` 或从 selection plan 自动推断），只有 `couponFactor≈0.85` / 明确“仅15%券”的 SKC 会进入券计划；`couponFactor=1`、`不叠券/券都禁止`、缺覆盖价或口径冲突一律 fail closed；提交器还会读取最新 `marketing-stack-review` 和旧普通活动填报价，若活动扫描过期/不可用，或目标 SKC 有旧普通/度假季标签但缺旧活动价证据，会停止提交并要求系统先只读取证。例如 `node scripts/marketing/submit_coupon_activity_goods.mjs --stores DL,DX,FY --target-plan tmp/marketing-signup/coupon-submit-results/coupon-extra-vs-ordinary-plan-2026-06-03.json --price-overrides tmp/marketing-signup/price-overrides-2026-06-03-ALL-ready.json`；只读复扫用 `node scripts/marketing/export_marketing_stack_review.mjs --coupon-target-plan tmp/marketing-signup/coupon-submit-results/coupon-extra-vs-ordinary-plan-2026-06-03.json --coupon-price-overrides tmp/marketing-signup/price-overrides-2026-06-03-ALL-ready.json --cloud-bi-ssh shein-bi-tencent --cloud-bi-root /opt/shein-bi/app`。复扫/重建报告必须区分 `activityScanCreatedAt` 和 `rebuiltAt`，不得用重建时间伪装活动扫描新鲜。
+- 优惠券活动不要套普通营销活动脚本/路径；例如活动 `34810` 应从优惠券详情 `#/mbrs/marketing/coupon/detail/34810` 进入 `继续报名`，批量导入确认会直接真实提报。`2026-06-14` 后 15% 券执行必须带当前批次目标计划和 paired `price-overrides`，且只有显式标记为高曝光支持、全店高库存滞销引流或清货试验的 SKC 才允许进入券计划；历史 `couponFactor≈0.85` / “普通活动 + 仅15%券”只表示旧价格保障口径，默认 blocked。提交器还会读取最新 `marketing-stack-review` 和旧普通活动填报价，若活动扫描过期/不可用，或目标 SKC 有旧普通/度假季标签但缺旧活动价证据，会停止提交并要求系统先只读取证。例如 `node scripts/marketing/submit_coupon_activity_goods.mjs --stores DL,DX,FY --target-plan tmp/marketing-signup/coupon-submit-results/coupon-traffic-plan-YYYY-MM-DD-current.json --price-overrides tmp/marketing-signup/price-overrides-YYYY-MM-DD-current.json --dry-run`。旧 `ALL-ready` 或“价格保障补券”示例不得照抄用于当前报名/补券；复扫/重建报告必须区分 `activityScanCreatedAt` 和 `rebuiltAt`，不得用重建时间伪装活动扫描新鲜。
 - 新一期活动报名前必须先生成叠加安全审核文档，合并普通营销活动、优惠券、限时折扣、原始/当前价格、商品成本、仓储费摊销和含仓储费利润率；用户确认备注前不得报名或批量取消/重报限时折扣。
 - 生成成本表模板：
   `node scripts/create_cost_template.mjs`

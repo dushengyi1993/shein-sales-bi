@@ -1,23 +1,23 @@
 # BI 门户界面当前口径
 
-最后更新：2026-05-29
+最后更新：2026-06-09
 
 ## 1. 总体定位
 
 - BI 门户正式入口：`https://shein-bi.faceair.me/`；旧 IP `http://43.165.167.135/` 仅作兜底。
-- 本地 `http://127.0.0.1:8787/` 已封存，只作回滚/开发参考。
-- 本地文件：`outputs/bi-portal/index.html`
-- 数据文件：`outputs/bi-portal/data.json`
+- `http://127.0.0.1:8787/` 已封存，只作回滚/代码预览参考。
+- 仓库文件：`outputs/bi-portal/index.html` / `outputs/bi-portal/data.json` 只是灾备/兼容快照，不代表当前云端数据。
+- 数据判断和验收：只认云端 BI 门户、线上 `/api/bi/section/*`、云端 PostgreSQL warehouse、云端日志和 systemd 状态。
 - 生成脚本：`scripts/generate_bi_portal.mjs`
 - V1 是当前正式门户；`2026-05-12` 起新增 V2 平行预览版用于验收 Claude Design 风格，不替换 V1：
   - V1 正式入口：`https://shein-bi.faceair.me/`
   - V2 预览文件：`outputs/bi-portal/v2/index.html`；本地封存后不要为了预览主动重启本地服务。
   - V2 生成脚本：`scripts/generate_bi_portal_v2.mjs`
   - V2 输出目录：`outputs/bi-portal/v2/`
-  - V2 只读复用 `outputs/bi-portal/data.json`，不得在未确认前改动 V1 `outputs/bi-portal/index.html` 或生产调度。
-  - `2026-05-13` 晚间起 V2.1 改回独立经营 BI 预览，不再复制 V1 DOM；但仍只读复用同一份 `data.json`，用户确认前不得合并或替换 V1。
+  - V2 数据判断和验收必须走云端运行态/线上 section API；仓库快照只作页面启动兼容，不得当成当前业务数据。不得在未确认前改动 V1 `outputs/bi-portal/index.html` 或生产调度。
+  - `2026-05-13` 晚间起 V2.1 改回独立经营 BI 预览，不再复制 V1 DOM；用户确认前不得合并或替换 V1。
   - `2026-05-14` 起 V2.1 首页（`tab=overview`）的验收口径改为“功能和操作逻辑完整复刻 V1 首页，视觉重新设计”；其它 V2 子页面尚未完成 V1 全量复刻。
-  - V2 暂时不是日常生产刷新对象，不需要随着 SHEIN/BI 同步自动更新页面；只在用户明确下达 V2 开发、优化或验收任务时才重新生成或维护。
+  - V2 暂时不是日常生产刷新对象；页面结构只在用户明确下达 V2 开发、优化或验收任务时重新生成或维护，但数据验收必须连接云端运行态。
 - 首页只做“总览 + 趋势 + 排行 + 入口”，不堆所有业务明细。
 - 具体操作下沉到子页面：店铺视角、货号 360、SKC/链接、评价/口碑、订单/售后、成本/利润、实际库存/去化、今日动作池、系统状态。
 
@@ -206,7 +206,7 @@
 
 ## 11.1 V2.1 独立经营 BI 预览原则
 
-- V2.1 当前目标是独立经营 BI 预览版：不复制 V1 DOM，不做简单换肤；只读取 `outputs/bi-portal/data.json`。
+- V2.1 当前目标是独立经营 BI 预览版：不复制 V1 DOM，不做简单换肤；本地预览可读仓库 `outputs/bi-portal/data.json` 快照，但当前业务判断和最终验收必须走云端运行态 / 线上 section API。
 - 视觉方向：暖白底、炭黑字、低饱和状态色、紧凑页头、低噪声背景、收敛圆角和阴影。
 - V2.1 首页当前验收标准是“功能和操作逻辑完整复刻 V1 首页，视觉重新设计”：顶部货号/品名/SKC 搜索、店铺/分组、时间筛选、四个经营矩阵、净/总销售额切换、净/总销量切换、退货时间口径切换、利润口径切换、日/月趋势、趋势指标切换、店铺/货号排行下钻、深浅主题都必须可用。
 - V2.1 首屏优先展示“今日经营总览 + 动作优先级 + 核心指标 + 趋势”，避免营销落地页式大空白。
@@ -225,7 +225,7 @@
   - `node scripts/generate_bi_portal.mjs`
   - `node scripts/check_bi_portal_ui.mjs --json`
   - 静态检查 `outputs/bi-portal/index.html`
-  - 静态检查 `outputs/bi-portal/data.json`
+  - 静态检查 `outputs/bi-portal/data.json` 是否能支撑本地预览；当前数据正确性仍以云端运行态为准
 - 只有用户明确要求，或必须排查浏览器交互、滚动、弹窗、控制台错误等问题时，才打开前端页面验证。
 - 云端 BI 已是正式入口；涉及弹窗、筛选、刷新状态等用户可见行为时，本地验证只能作为开发检查，最终审核应在云端可访问页面或云端服务输出上完成，再发布 GitHub release。
 - 涉及首页利润或首屏长期“加载中”时，云端验收还必须核对 `/api/health` 的 `biCoreWarmup.status`，以及 `/api/bi/section/homeProfit`：`homeProfitSummary.sourceGeneratedAt` 应等于当前 `data.json.__sections.generatedAt`，`staleSource=false`，且今日总利润应与当前 `profit` section 汇总一致。若 `homeProfit` stale，页面应视为利润待预热，不得因为旧摘要加载快就当作当前利润。
@@ -253,7 +253,7 @@
 
 - V1 正式入口为云端 `https://shein-bi.faceair.me/`，旧 IP `http://43.165.167.135/` 仅作兜底；本地 `127.0.0.1:8787` 已封存。
 - V2.1 预览由 `scripts/generate_bi_portal_v2.mjs` 生成到 `outputs/bi-portal/v2/index.html`；本地封存后不要为了预览主动重启本地服务。
-- V2.1 只读取现有 `outputs/bi-portal/data.json`，不改变抓数、入仓、日报或 V1 调度。
+- V2.1 本地预览只读取现有 `outputs/bi-portal/data.json` 快照，不改变抓数、入仓、日报或 V1 调度；线上验收仍看云端运行态。
 - 本轮视觉方向从“V1 套皮”改为独立经营 BI：降噪、提密、去装饰，减少大面积空白、过重阴影和过大圆角。
 - 子页统一使用紧凑页头，避免每个页面一进入就被大 hero 占满；动作池证据字段必须转成中文业务表达，不直接暴露 `weakC30/bestC30/cases/amount/status` 这类代码字段。
 - 当前 V2.1 仍为验收版，用户确认前不得合并或替换 V1。
@@ -262,7 +262,7 @@
 
 - 本轮只完成 V2 首页（`tab=overview`）重做，不代表 V2 整站已完成。
 - V2 首页必须完整继承 V1 首页的业务操作逻辑：顶部全局筛选、四个矩阵口径切换、日/月趋势指标切换、店铺/货号排行下钻和深浅主题。
-- V2 仍由 `scripts/generate_bi_portal_v2.mjs` 生成到 `outputs/bi-portal/v2/index.html`，只读 `outputs/bi-portal/data.json`；不得写入 V1 `outputs/bi-portal/index.html`。
+- V2 仍由 `scripts/generate_bi_portal_v2.mjs` 生成到 `outputs/bi-portal/v2/index.html`，本地只读仓库 `outputs/bi-portal/data.json` 快照；不得写入 V1 `outputs/bi-portal/index.html`，也不得用本地快照替代云端验收。
 - V2 暂时不要求跟随每天/滚动同步自动刷新；它是平行慢开发项目，不是当前生产链路的一部分。
 - 已验证：`node --check scripts/generate_bi_portal_v2.mjs`、重新生成、`/v2/` HTTP 200、浏览器打开指定 hash 无控制台错误；截图证据为 `outputs/bi-portal/v2-overview-v1-logic-check-2.png`。
 
@@ -272,7 +272,7 @@
 - 当前已上线能力：自然语言运营指令提交、服务端任务记录 API `/api/link-ops-tasks`、任务状态/备注/负责人/IP/UA 留痕，以及任务卡片下方基于现有链接/覆盖矩阵的店铺级建议。
 - 当前建议来源仍是 BI 已有数据：店铺×货号覆盖、链接表现、同款最佳链接、缺链接/弱链接线索；它不是最终执行器。
 - 已完成并部署的能力：BI 页面通过受控 `/api/ops-agent/ask` 调用云端 Codex CLI 只读问答；链接管理中台已重构为“会话即任务工作台”的工作流。页面采用近似 Codex 的三栏结构：左侧会话列表和推荐指令，中间连续对话，右侧随当前会话实时变化的任务工作台；一个会话对应一个任务草案或已绑定任务，边聊边更新任务目标、执行对象、需要材料、执行方式、数据依据和操作记录。其它任务记录只在右侧工作台里折叠查看，不能再成为主流程。
-- 2026-05-17 已补对话动态查数和明确命令自动入池：服务端会把最新一句和最近会话上下文传给只读问数网关，网关每轮重新从当前 `outputs/bi-portal/data.json` 压缩出店铺、货号、SKC、曝光/访客/销量等相关数据；最新一句明确换店/换货号时以最新为准，“这个链接 / 2,223 这个 / 刚才那个”等指代不完整时才沿用上文。若用户发出下架、换图、改标题、补链、报活动、限时折扣等明确动作命令，回复不能只说“没权限不能执行”，系统必须自动创建链接运营任务并提示等待人工确认/执行器预检。
+- 2026-05-17 已补对话动态查数和明确命令自动入池：云端服务端会把最新一句和最近会话上下文传给只读问数网关，网关每轮从云端运行态 BI 快照 / section 数据压缩出店铺、货号、SKC、曝光/访客/销量等相关数据；本地 `outputs/bi-portal/data.json` 只可用于本地预览兜底。最新一句明确换店/换货号时以最新为准，“这个链接 / 2,223 这个 / 刚才那个”等指代不完整时才沿用上文。若用户发出下架、换图、改标题、补链、报活动、限时折扣等明确动作命令，回复不能只说“没权限不能执行”，系统必须自动创建链接运营任务并提示等待人工确认/执行器预检。
 - 本机素材边界：云端 BI 不能直接读取用户本机的标题文件、商品图或本机 skill。短期执行路径是先把图片/标题/规则上传或同步到云端任务素材包，再由云端执行器调用 SHEIN API/WebAPI/headless 执行；缺素材或缺接口权限时任务停在执行准备，不静默写 SHEIN。
 - 2026-05-17 已补第一版素材与执行器基座：`/api/link-ops-assets` 支持把图片、PDF 证书、TXT/CSV/JSON 标题或规则文件上传到任务素材包；本机批量同步可用 `scripts/upload_link_ops_assets.mjs`。`/api/link-ops-execute` 负责受控执行前检查、执行器调度和审计回写；第一版不会静默提交 SHEIN，也不会把未执行的写操作显示为成功。换图等明确依赖本机素材的动作仍会缺素材阻断；`copy_product_draft` 会先尝试从源店商品快照复制图片/证书，源快照不足时再阻断。
 - 2026-05-18 补充：链接管理中台会区分“店铺已有 OpenAPI 授权”和“具体写适配器 / payload 是否可执行”。HL 已有 OpenAPI 授权和只读/销售对账能力，相关补链/复制上品命令会进入任务池与 HL API 执行准备；若具体写适配器或发布 payload 不完整，执行器会在预检阶段阻断真实提交，不得笼统回复“HL 没有权限”或谎称已提交审核。
