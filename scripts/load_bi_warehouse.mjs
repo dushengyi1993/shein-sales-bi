@@ -120,6 +120,7 @@ function normalizeStandardGoodsSn(value, context = {}) {
   const norm = normalizeGoodsSnDetailed(raw, {
     goodsTitle: context.goodsTitle || context.goodsName || context.saleName || context.productNameCn || context.product_name_cn || context.title || '',
   });
+  if (norm.ignored) return '';
   return norm.canonical || raw || '';
 }
 
@@ -497,6 +498,7 @@ async function collectLinks(args, productMap, skcMap) {
         created_time: ts(row.createdTime || row.createTime),
         shelf_time: ts(row.shelfTime || row.publishTime),
         first_shelf_time: ts(row.firstShelfTime),
+        expect_shelf_time: ts(row.expectShelfTime || row.expectedShelfTime),
         source_file: source,
         raw_summary: compactJson(row),
       });
@@ -681,7 +683,7 @@ async function main() {
     ['fact.order_header', ['order_key','store_key','group_key','order_id','order_no','bill_no','created_date','order_create_time','allocate_time','site','order_status','order_status_desc','perform_status','perform_status_desc','source_file','raw_summary'], ['order_key'], sales.orders],
     ['fact.order_item', ['order_item_key','order_key','store_key','group_key','order_id','order_no','bill_no','created_date','order_create_time','site','standard_goods_sn','raw_goods_sn','goods_id','entity_id','skc','sku_code','sku_sn','sku_suffix','goods_title','quantity','currency_code','currency_price','sales_sar','sales_rmb','goods_status','goods_performance_status','goods_performance_status_desc','source_file','raw_summary'], ['order_item_key'], sales.items],
     [ORDER_PAYMENT_FLAG_TABLE, ORDER_PAYMENT_FLAG_COLUMNS, ['order_key'], sales.paymentFlags],
-    ['fact.link_master_snapshot', ['unique_key','snapshot_date','store_key','group_key','shop_name','standard_goods_sn','raw_goods_sn','spu','skc','sku_codes','sale_name','image_url','product_name_cn','product_name_en','brand_name','shelf_status','shelf_status_name','is_on_shelf','is_wait_shelf','is_sold_out','is_out_shelf','is_hard_dead','wait_shelf_blocked','wait_shelf_block_reason','created_time','shelf_time','first_shelf_time','source_file','raw_summary'], ['unique_key'], links.master],
+    ['fact.link_master_snapshot', ['unique_key','snapshot_date','store_key','group_key','shop_name','standard_goods_sn','raw_goods_sn','spu','skc','sku_codes','sale_name','image_url','product_name_cn','product_name_en','brand_name','shelf_status','shelf_status_name','is_on_shelf','is_wait_shelf','is_sold_out','is_out_shelf','is_hard_dead','wait_shelf_blocked','wait_shelf_block_reason','created_time','shelf_time','first_shelf_time','expect_shelf_time','source_file','raw_summary'], ['unique_key'], links.master],
     ['fact.link_performance_daily', ['unique_key','date','store_key','group_key','shop_name','standard_goods_sn','raw_goods_sn','spu','skc','goods_name','image_url','sale_cnt','pay_order_cnt','eps_uv','goods_uv','click_rate','cart_uv','cart_pv','cart_rate','pay_uv','pay_rate','c7_sale_cnt','prev7_sale_cnt','c30_sale_cnt','quality_grade','comment_count','bad_comment_rate','return_order_count','return_item_count','activity_tag','activity_names','flow_diagnose_tabs','source_file','raw_summary'], ['unique_key'], links.perf],
     ['fact.product_store_coverage', ['unique_key','date','store_key','group_key','shop_name','standard_goods_sn','coverage_status','has_on_shelf_link','need_supplement_link','link_count','on_shelf_count','wait_shelf_count','sold_out_count','out_shelf_count','hard_dead_count','duplicate_on_shelf','best_skc','best_link_c30_sale','skc_list','recommendation','source_file','raw_summary'], ['unique_key'], links.coverage],
     ['fact.link_suggestion', ['unique_key','date','store_key','group_key','shop_name','target_type','target_key','standard_goods_sn','skc','rule_code','suggestion_type','priority','reason','action','evidence','source_file','raw_summary'], ['unique_key'], links.suggestions],

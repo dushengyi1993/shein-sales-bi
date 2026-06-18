@@ -46,7 +46,15 @@ fi
 
 node scripts/fetch_shein_openapi_sales.mjs HL --date "$DATE"
 node scripts/load_shein_openapi_sales_warehouse.mjs --store HL --date "$DATE"
+
+if [[ "${SHEIN_OPENAPI_HL_REFRESH_PORTAL:-1}" != "1" && "${SHEIN_OPENAPI_HL_REFRESH_PORTAL:-1}" != "true" ]]; then
+  echo "[cloud_openapi_hl] warehouse load done; skip portal refresh because SHEIN_OPENAPI_HL_REFRESH_PORTAL=${SHEIN_OPENAPI_HL_REFRESH_PORTAL:-}"
+  echo "[cloud_openapi_hl] done date=$DATE log=$LOG_FILE"
+  exit 0
+fi
+
 node scripts/generate_bi_portal.mjs --metabase-url "$METABASE_URL"
+node scripts/generate_bi_portal_v2.mjs
 
 if command -v systemctl >/dev/null 2>&1; then
   systemctl is-active --quiet shein-bi-portal.service || systemctl start shein-bi-portal.service || true

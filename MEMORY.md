@@ -47,7 +47,7 @@
 ## 计划任务
 - 2026-05-15 起生产调度转为云端 systemd timer：`shein-bi-cloud-today.timer` 在北京时间 `00:10/02:10/.../22:10` 每两小时刷新当天销售、入仓并生成 BI Portal；`shein-bi-cloud-yesterday.timer` 每天 `00:10` 刷新前一天最终销售并复核前两天稳定日；`shein-bi-db-backup.timer` 每天 `02:30` 备份业务库和 Metabase 元数据库。
 - 本地 `SHEIN-*` Windows 计划任务已全部禁用，保留为回滚/迁移参考，不再作为生产调度。除非用户明确回滚，不要重新启用 `SHEIN-Sales-15Stores-Intraday-Daytime`、`SHEIN-BI-Daily-Pipeline-0700`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-Sales-ETForwarder-0420` 或 HL OpenAPI 本地任务。
-- 云端自动化已覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成、数据库备份、ET 同步、飞书日报、完整 RTV 复核、链接/业务域日更、异常通知 watchdog、只读飞书问数机器人和 HL OpenAPI 双跑；本地 Windows 任务只作回滚参考。
+- 云端自动化已覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成、数据库备份、ET 同步、飞书日报、完整 RTV 复核、统一日更补采、异常通知 watchdog 和只读飞书问数机器人；HL OpenAPI 销售双跑已退出生产调度，本地 Windows 任务只作回滚参考。
 - ET 和飞书日报已启用云端 Linux 入口：`scripts/cloud_et_forwarder_sync.sh` / `shein-bi-cloud-et-forwarder.timer`、`scripts/cloud_daily_lark_report.sh` / `shein-bi-cloud-daily-lark-report.timer`。ET 服务器侧使用私有 `config/et_forwarder.local.json` 或环境变量账号密码，不能复用 Windows Chrome 保存密码；ET 入仓依赖 Docker/root 环境，服务仍保留 root 执行，但验证码下载的一次性 `fetch failed` 必须进入重试而不是直接中断。飞书日报服务器侧使用独立飞书 CLI 应用/机器人与私有 `config/lark_report.json`，旧应用的 `open_id` 不能直接给新应用用，换机器人时需用 `union_id` 重新映射收件人 `open_id`。上述 secret/token/收件人完整 ID 不进 GitHub、文档或聊天。2026-05-16 云端 ET 全量同步和云端飞书日报真实发送均已验证成功。
 - 链接/业务域已启用云端 Linux 入口：`scripts/cloud_link_business_sync.sh` / `shein-bi-cloud-link-business.timer`，每天 `08:10` 顺序跑前一完整日；它通过 `scripts/restore_shein_store_session.mjs` 用服务器私有 `state/shein_browser_sessions/*.local.json` / `state/shein_webapi_sessions/*.local.json` 初始化 headless Chrome，并验证 GSP + SBN 后再抓取、入仓、体检并刷新 BI；若全店日指标仍全 0，则跳过入仓刷新，避免把未出数日期写入 BI。`shein-bi-cloud-link-business.service` 必须以 `sheinops` 运行，不能用 root 写 SHEIN 店铺 profile，否则次日 `shein-bi-cloud-session-manager.service` 会因 root-owned profile 报 `EACCES`。不要再用本机隐藏补抓冒充云端日更；纯 Node 零浏览器直连只是后续优化。
 - 云端覆盖审计口径：最新日防漏用 `scripts/audit_cloud_data_coverage.mjs --expected-start range-start`，要求当前应覆盖店铺齐全；历史断档排查用 `--expected-start first-seen`，只检查每个店首个有效日期之后是否中间断档，不得把店铺未开通/未接入前的日期当成缺抓。销售按 first-seen 复验无历史中间断档；链接/流量若出现 first-seen 后缺店才需要补。
@@ -99,15 +99,15 @@
 ## SHEIN BI 系统
 - BI 数据判断、开发验收和故障排查只认云端运行时：云端 PostgreSQL warehouse、云端 BI 门户、线上 `/api/bi/section/*`、云端日志和 systemd 状态；仓库快照可能严重过期，只能作为灾备/兼容产物，不能拿来判断当前经营数据。
 - 架构原则：`SHEIN 后台/WebAPI/OpenAPI 抓取 -> 私有源文件 / PostgreSQL 数据仓库 -> Metabase BI / BI Portal`。PostgreSQL 是核心数据仓库；Metabase 当前仍是正式深度分析/自由钻取层，BI Portal 是日常经营入口。没有完整替代前，不要建议直接删除或跳过 Metabase。
-- 2026-05-15 起本地 BI 已封存，云端 BI 为正式入口：`https://shein-bi.faceair.me/`，旧 IP `http://43.165.167.135/` 仅作兜底；Basic Auth 账号密码不写入仓库、文档或日志。本地 `8787` 服务已停止，`SHEIN-*` Windows 计划任务已禁用；除非明确回滚，不要重新启用本地 BI 或本地定时任务。云端可复用改动必须及时同步 GitHub，敏感 session/密钥/数据库 dump 仍不得提交。
-- HL OpenAPI 销售试点已建立并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` -> `scripts/load_shein_openapi_sales_warehouse.mjs` -> `fact.openapi_store_daily_sales` / `fact.openapi_order_header` / `fact.openapi_order_item` / `mart.openapi_sales_reconciliation`；系统状态页会显示 “SHEIN OpenAPI 试点对账”。正式切换生产事实表前必须继续确认多日 `matched`。
+- 2026-05-15 起本地 BI 已封存，云端 BI 为正式入口：`https://shein-bi.dushengyi.xyz/`，旧 IP `http://43.165.167.135/` 仅作兜底；Basic Auth 账号密码不写入仓库、文档或日志。本地 `8787` 服务已停止，`SHEIN-*` Windows 计划任务已禁用；除非明确回滚，不要重新启用本地 BI 或本地定时任务。云端可复用改动必须及时同步 GitHub，敏感 session/密钥/数据库 dump 仍不得提交。
+- HL OpenAPI 销售试点曾建立并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` -> `scripts/load_shein_openapi_sales_warehouse.mjs` -> `fact.openapi_store_daily_sales` / `fact.openapi_order_header` / `fact.openapi_order_item` / `mart.openapi_sales_reconciliation`；现已退出生产调度和系统状态页，历史并行表仅保留为手动诊断参考。
 - 官方 OpenAPI 与后台 WebAPI 直连是两条不同链路：OpenAPI 需要开放平台应用、授权、`openKeyId` / `secretKey` 和 IP 白名单；后台 WebAPI 直连复用已登录 Cookie/session，当前已优先承接 19 店销售生产抓取。两类密钥/session 都禁止进入仓库。
 - CX 开放平台应用 `CX-椿霞SHEIN运营中台` 已在 `2026-05-10` 提交审核；ZL 开放平台应用 `ZL-紫翎SHEIN运营中台` 已在 `2026-05-28` 提交审核。两者均为半托管，业务功能选择商品管理、商品合规、订单管理、库存管理、财务管理；审核通过后再录入本地 `.local` 密钥并接入 API 双跑。
 - SHEIN OpenAPI 若返回 `openapi00002 IP is not in the whitelist`，优先检查服务器出口 IP `43.165.167.135` 是否在开放平台白名单；ZL 申请时还添加过本机出口 `38.181.81.164`，历史本机出口 `188.253.112.44` / `82.27.116.13` 只作排障参考。不要把 OpenAPI app secret、店铺 secret、openKeyId 写入聊天、文档或日志。
 - BI Portal 生成脚本为 `scripts/generate_bi_portal.mjs`；云端由 `scripts/cloud_bi_refresh.sh` 刷新 core 并启动 `prewarm_bi_portal_sections.sh`，`serve_bi_portal.mjs` 还会在服务启动和首页访问时用 core `generatedAt` watcher 兜底后台预热 section。线上运行态的 API section cache 在云端 `outputs/bi-portal/sections/`，首页首屏应命中轻量 `homeRankings`（不是完整 `rankings`）和 gzip sidecar；`homeProfit` 必须从当前 `profit` cache 派生，`sourceGeneratedAt` 必须等于当前 core 且 `staleSource=false`，旧源利润不能当成当前业务真相。仓库内 `outputs/bi-portal/index.html` / `data.json` 只是灾备/兼容快照。
 - BI 门户 UI 冒烟检查脚本为 `scripts/check_bi_portal_ui.mjs`；本地封存后默认不要为“看一眼”重新打开本地前端，云端验证优先用 HTTP health、静态断言和日志。V1 时间筛选弹窗的关键不变量：日期输入是文本 `YYYY-MM-DD`，月份切换后弹窗保持打开并更新月份，绑定根节点必须是实际弹窗而不是旧 toolbar root。
 - GitHub 私有仓库已纳入 `outputs/bi-portal/index.html` 和 `outputs/bi-portal/data.json` 作为 BI 门户灾备/兼容快照；它们不代表当前云端经营数据。`outputs/` 其他抓取结果、报表、图片、审计结果仍默认忽略，迁移生产状态时单独备份。
-- V1 仍是当前正式 BI Portal；V2 只是独立经营 BI 预览版，由 `scripts/generate_bi_portal_v2.mjs` 输出到 `outputs/bi-portal/v2/index.html`。V2 数据判断和验收必须走云端运行态/线上 section API；仓库快照只作页面启动兼容。用户明确验收前不得替换 V1、改生产调度或把 V2 整站视为可替换 V1。
+- V2 已是当前正式 BI Portal，根路径由 `scripts/generate_bi_portal.mjs` 生成的 `outputs/bi-portal/index.html` 承载；V1 已封存到 `/v1/`，只作历史回溯和短期对照，不再更新。V2 数据判断和验收必须走云端运行态/线上 section API；仓库快照只作页面启动兼容。
 - BI 门户侧栏“链接表现数据”更新时间必须显示链接源文件抓取时间，即 `outputs/shein_links/<店铺>/<链接日>.json` 的 `fetchTime` 最大值；“售后/库存/财务数据”也必须显示业务域源文件抓取时间，即 `outputs/shein_business_domains/<店铺>/<业务日>.json` 的 `fetchTime` 最大值；不要用 BI 重跑入仓时的 `updated_at` 冒充抓取时间。
 - 云端 Metabase / PostgreSQL 运行在腾讯云 Ubuntu + Docker；本地旧 WSL + Docker 数据盘仅作历史/回滚参考，长期生产不要再依赖本地 WSL。
 - 若本地旧 Docker / Postgres / Metabase 出现 `input/output error`，优先怀疑 `D:\SheinBI\docker-data\docker-data.ext4` 文件系统异常；恢复顺序是先停止 WSL / Docker，再做 volume 备份和 `e2fsck -fy`，最后重启容器并跑 BI audit，不要直接删除 Docker 数据。
@@ -156,8 +156,8 @@
 - RTV 利润主口径保守：退货/仅退款/派送失败等反转订单主利润仍按营收 0 并扣成本/必要费用；ET 已收 RTV 只新增“可二次销售测算”，不替代主利润。
 
 ## 云端生产、RTV、问数机器人与链接管理口径
-- 云端 SSH 本机别名 `ssh shein-bi-tencent`，用户 `sheinops`，key-only；`https://shein-bi.faceair.me/` 通过 HAProxy 在 443 分流 SSH/HTTPS，Caddy 管 TLS，nginx + Basic Auth 转 BI Portal。不要绕过网关直接暴露 Node。
-- 云端自动化已覆盖销售 WebAPI、BI、数据库备份、ET、飞书日报、完整 RTV 复核、链接/业务域日更、watchdog、只读飞书问数和 HL OpenAPI 双跑；本地 Windows 任务只作回滚参考。watchdog 阈值：销售/BI `4.5h`、ET `36h`、业务域/链接日更 `48h`，不要把低频日更当销售高频失败。
+- 云端 SSH 本机别名 `ssh shein-bi-tencent`，用户 `sheinops`，key-only；`https://shein-bi.dushengyi.xyz/` 通过 HAProxy 在 443 分流 SSH/HTTPS，Caddy 管 TLS，nginx + Basic Auth 转 BI Portal。不要绕过网关直接暴露 Node。
+- 云端自动化已覆盖销售 WebAPI、BI、数据库备份、ET、飞书日报、完整 RTV 复核、统一日更补采、watchdog 和只读飞书问数；HL OpenAPI 销售双跑已退出生产调度，本地 Windows 任务只作回滚参考。watchdog 阈值：销售/BI `4.5h`、ET `36h`、业务域/链接日更 `48h`，不要把低频日更当销售高频失败。
 - 链接/业务域当前生产是云端顺序 headless Chrome + 私有登录态日更；纯 Node 零浏览器直连仍是后续优化。若浏览器兜底，建议并发 1、最多 2，不能全店同时开。
 - 2026-05-19 链接/业务域日更报错根因是 SBN 商品分析子系统登录态丢失：销售 WebAPI 正常不代表 SBN 可用。`bootstrap_shein_browser_session.mjs` 必须合并新鲜 WebAPI cookie 与浏览器导出的子系统 storage；`cloud_link_business_sync.sh` 部分失败时默认不入仓刷新 BI，避免把不完整结果展示成全量成功。若云端 SBN 态失效，优先从本机已保存密码自动登录并导出 `state/shein_browser_sessions/*.local.json` 同步到云端私有目录，session 不进 GitHub。
 - 云端 Codex / 飞书问数机器人为受控只读网关：`shein-bi-lark-sales-qa.service` -> `scripts/lark_sales_qa_bot.mjs` -> `codex exec --sandbox read-only`，`CODEX_HOME=/home/sheinops/.codex`；不绑定本机 Codex App，本机关机不影响。`auth.json`、`config.toml`、第三方凭据只在服务器私有目录，不进 GitHub、文档或日志；飞书/BI 不能裸调用 shell 或 Codex CLI。

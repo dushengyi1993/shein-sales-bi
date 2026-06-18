@@ -4,20 +4,20 @@
 
 ## 1. 总体定位
 
-- BI 门户正式入口：`https://shein-bi.faceair.me/`；旧 IP `http://43.165.167.135/` 仅作兜底。
+- BI 门户正式入口：`https://shein-bi.dushengyi.xyz/`；旧 IP `http://43.165.167.135/` 仅作兜底。
 - `http://127.0.0.1:8787/` 已封存，只作回滚/代码预览参考。
 - 仓库文件：`outputs/bi-portal/index.html` / `outputs/bi-portal/data.json` 只是灾备/兼容快照，不代表当前云端数据。
 - 数据判断和验收：只认云端 BI 门户、线上 `/api/bi/section/*`、云端 PostgreSQL warehouse、云端日志和 systemd 状态。
 - 生成脚本：`scripts/generate_bi_portal.mjs`
-- V1 是当前正式门户；`2026-05-12` 起新增 V2 平行预览版用于验收 Claude Design 风格，不替换 V1：
-  - V1 正式入口：`https://shein-bi.faceair.me/`
-  - V2 预览文件：`outputs/bi-portal/v2/index.html`；本地封存后不要为了预览主动重启本地服务。
-  - V2 生成脚本：`scripts/generate_bi_portal_v2.mjs`
-  - V2 输出目录：`outputs/bi-portal/v2/`
+- V2 是当前正式门户；V1 已封存到 `/v1/`，以下保留早期 V2 平行预览阶段的历史设计记录：
+  - V1 封存入口：`https://shein-bi.dushengyi.xyz/v1/`
+  - V1 封存入口：`https://shein-bi.dushengyi.xyz/v1/`
+  - 当前正式生成脚本：`scripts/generate_bi_portal.mjs`
+  - 历史 V2 预览脚本 `scripts/generate_bi_portal_v2.mjs` 仅作迁移参考。
   - V2 数据判断和验收必须走云端运行态/线上 section API；仓库快照只作页面启动兼容，不得当成当前业务数据。不得在未确认前改动 V1 `outputs/bi-portal/index.html` 或生产调度。
   - `2026-05-13` 晚间起 V2.1 改回独立经营 BI 预览，不再复制 V1 DOM；用户确认前不得合并或替换 V1。
   - `2026-05-14` 起 V2.1 首页（`tab=overview`）的验收口径改为“功能和操作逻辑完整复刻 V1 首页，视觉重新设计”；其它 V2 子页面尚未完成 V1 全量复刻。
-  - V2 暂时不是日常生产刷新对象；页面结构只在用户明确下达 V2 开发、优化或验收任务时重新生成或维护，但数据验收必须连接云端运行态。
+  - V2 现在跟随正式云端刷新链路；页面结构优化直接在正式 V2 上维护，数据验收必须连接云端运行态。
 - 首页只做“总览 + 趋势 + 排行 + 入口”，不堆所有业务明细。
 - 具体操作下沉到子页面：店铺视角、货号 360、SKC/链接、评价/口碑、订单/售后、成本/利润、实际库存/去化、今日动作池、系统状态。
 
@@ -212,7 +212,7 @@
 - V2.1 首屏优先展示“今日经营总览 + 动作优先级 + 核心指标 + 趋势”，避免营销落地页式大空白。
 - 子页面统一使用紧凑页头，说明本页回答什么问题；不再用巨大 hero 占据首屏。
 - 其它 V2 子页面仍是预览实现，尚未按 V1 全量复刻；不得声明 V2 整站已经可替换 V1。
-- V2.1 仍是平行预览版，不改数据口径、不替换 V1、不改生产调度；也不进入日常自动同步刷新链路。没有用户明确任务时，V2 放置不动即可；用户确认后才能讨论是否切换为正式门户。
+- 历史说明：V2.1 曾作为平行预览版；当前已切为正式门户，后续页面优化直接在正式 V2 上进行，V1 不再更新。
 
 ## 12. 门户修改验证规则
 
@@ -251,19 +251,19 @@
 
 ## 2026-05-13 V2.1 独立设计预览口径
 
-- V1 正式入口为云端 `https://shein-bi.faceair.me/`，旧 IP `http://43.165.167.135/` 仅作兜底；本地 `127.0.0.1:8787` 已封存。
-- V2.1 预览由 `scripts/generate_bi_portal_v2.mjs` 生成到 `outputs/bi-portal/v2/index.html`；本地封存后不要为了预览主动重启本地服务。
-- V2.1 只读取现有 `outputs/bi-portal/data.json`，不改变抓数、入仓、日报或 V1 调度。
+- V2 正式入口为云端 `https://shein-bi.dushengyi.xyz/`，V1 封存入口为 `/v1/`；旧 IP `http://43.165.167.135/` 仅作兜底；本地 `127.0.0.1:8787` 已封存。
+- 历史 V2.1 预览曾由 `scripts/generate_bi_portal_v2.mjs` 生成到 `outputs/bi-portal/v2/index.html`；当前正式入口已迁到根路径。
+- 当前正式 V2 跟随云端抓数、入仓、日报和 section 刷新链路；V1 不再参与日常调度。
 - 本轮视觉方向从“V1 套皮”改为独立经营 BI：降噪、提密、去装饰，减少大面积空白、过重阴影和过大圆角。
 - 子页统一使用紧凑页头，避免每个页面一进入就被大 hero 占满；动作池证据字段必须转成中文业务表达，不直接暴露 `weakC30/bestC30/cases/amount/status` 这类代码字段。
-- 当前 V2.1 仍为验收版，用户确认前不得合并或替换 V1。
+- 当前 V2 已定为正式版；V1 只保留封存入口和 archive release。
 
 ## 2026-05-14 V2 首页复刻口径
 
 - 本轮只完成 V2 首页（`tab=overview`）重做，不代表 V2 整站已完成。
 - V2 首页必须完整继承 V1 首页的业务操作逻辑：顶部全局筛选、四个矩阵口径切换、日/月趋势指标切换、店铺/货号排行下钻和深浅主题。
-- V2 仍由 `scripts/generate_bi_portal_v2.mjs` 生成到 `outputs/bi-portal/v2/index.html`，只读 `outputs/bi-portal/data.json`；不得写入 V1 `outputs/bi-portal/index.html`。
-- V2 暂时不要求跟随每天/滚动同步自动刷新；它是平行慢开发项目，不是当前生产链路的一部分。
+- V2 正式入口由 `scripts/generate_bi_portal.mjs` 生成到 `outputs/bi-portal/index.html`；历史 `outputs/bi-portal/v2/` 仅作迁移参考。
+- V2 当前跟随正式云端刷新链路；页面验收以线上 section API 和云端服务输出为准。
 - 已验证：`node --check scripts/generate_bi_portal_v2.mjs`、重新生成、`/v2/` HTTP 200、浏览器打开指定 hash 无控制台错误；截图证据为 `outputs/bi-portal/v2-overview-v1-logic-check-2.png`。
 
 ## 2026-05-17 链接管理中台基座

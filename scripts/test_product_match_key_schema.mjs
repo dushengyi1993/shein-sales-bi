@@ -18,7 +18,7 @@ assert.ok(canonicalFunctionMatch, 'dim.product_canonical_sn function exists in s
 
 const body = functionMatch[0];
 const mappings = [];
-const mappingRe = /WHEN\s+key\s+IN\s*\(([^)]+)\)\s+THEN\s+'([^']+)'/g;
+const mappingRe = /WHEN\s+key\s+IN\s*\(([^)]+)\)\s+THEN\s+'([^']*)'/g;
 for (const match of body.matchAll(mappingRe)) {
   const keys = [...match[1].matchAll(/'([^']+)'/g)].map(x => x[1]);
   mappings.push({keys, target: match[2]});
@@ -26,7 +26,7 @@ for (const match of body.matchAll(mappingRe)) {
 
 const canonicalBody = canonicalFunctionMatch[0];
 const canonicalMappings = [];
-const canonicalMappingRe = /WHEN\s+'([^']+)'\s+THEN\s+'([^']+)'/g;
+const canonicalMappingRe = /WHEN\s+'([^']*)'\s+THEN\s+'([^']*)'/g;
 for (const match of canonicalBody.matchAll(canonicalMappingRe)) {
   canonicalMappings.push({matchKey: match[1], canonical: match[2]});
 }
@@ -67,6 +67,10 @@ const cases = [
   ['SK-YM-7032绞肉机', 'SKYM7032'],
   ['WK-1710-4', 'WK17104'],
   ['KJ-102横条三明治机', 'KJ102'],
+  ['KJ-102S三明治机', 'KJ102S'],
+  ['KJ-102三明治机', 'KJ102'],
+  ['SK-1714', 'SK17145'],
+  ['1714', 'SK17145'],
   ['PA4-6L小冰箱', 'PA46L'],
   ['SK-446切片机', 'SK446'],
   ['SK-3065', 'SKGT3065'],
@@ -75,6 +79,10 @@ const cases = [
   ['SK-JFB-675B卷发钳和卷发棒', 'SKJFB675B'],
   ['SK-13065布衣清洗机', 'SK13065'],
   ['SK-13065吸尘器', 'SK13065'],
+  ['389', 'JD389'],
+  ['YJ389空气炸锅', 'JD389'],
+  ['ZL389空气炸锅', 'JD389'],
+  ['EN 62368-1:2014+A11:2017', ''],
   ['093', '093'],
 ];
 
@@ -89,6 +97,10 @@ const canonicalCases = [
   ['WK-1710-4手持搅拌器', 'WK-1710-4手持搅拌器'],
   ['KJ-102横条三明治机', 'KJ-102三明治机和早餐机'],
   ['KJ-102三明治机和早餐机', 'KJ-102三明治机和早餐机'],
+  ['KJ-102S三明治机', 'KJ-102S三明治机和早餐机'],
+  ['KJ-102三明治机', 'KJ-102三明治机和早餐机'],
+  ['SK-1714', 'SK-1714-5手持搅拌器'],
+  ['1714', 'SK-1714-5手持搅拌器'],
   ['PA4-6L小冰箱', 'PA4-6L便携式冰箱'],
   ['PA4-6L便携式冰箱', 'PA4-6L便携式冰箱'],
   ['SK-446切片机', 'SK-446电动刀与切片器'],
@@ -96,6 +108,10 @@ const canonicalCases = [
   ['SK-3065', 'SK-GT-3065蒸汽熨烫机'],
   ['SK-675', 'SK-JFB-675B卷发钳和卷发棒'],
   ['SK-13065布衣清洗机', 'SK-13065吸尘器'],
+  ['389', 'JD-389空气炸锅'],
+  ['YJ389空气炸锅', 'JD-389空气炸锅'],
+  ['ZL389空气炸锅', 'JD-389空气炸锅'],
+  ['EN 62368-1:2014+A11:2017', ''],
   ['093', '093'],
 ];
 

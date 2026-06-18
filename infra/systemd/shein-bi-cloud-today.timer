@@ -2,8 +2,8 @@
 Description=Run SHEIN BI cloud intraday refresh every two hours around the clock
 
 [Timer]
-OnCalendar=*-*-* 00,02,04,06,08,10,12,14,16,18,20,22:10:00
-Persistent=true
+OnCalendar=*-*-* 00,02,06,08,10,12,14,16,18,20,22:00:00
+Persistent=false
 Unit=shein-bi-cloud-today.service
 
 [Install]

@@ -9,4 +9,9 @@ WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/root
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=SHEIN_SALES_TRANSPORT=webapi
+TimeoutStartSec=7200
+MemoryHigh=1500M
+MemoryMax=2500M
+OOMPolicy=stop
+KillMode=control-group
 ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_bi_refresh.sh today intraday

@@ -28,7 +28,16 @@ function buildMaps() {
   const cfg = JSON.parse(fs.readFileSync(ALIAS_PATH, 'utf8').replace(/^\uFEFF/, ''));
   const aliasToCanonicalKey = new Map();
   const canonicalKeyToSn = new Map();
+  const ignoredKeys = new Map();
   const conflicts = [];
+
+  for (const entry of cfg.ignoredAliases || []) {
+    for (const alias of aliasValues(entry)) {
+      const aliasKey = compact(alias);
+      if (!aliasKey) continue;
+      ignoredKeys.set(aliasKey, entry.reason || 'ignored_non_product_alias');
+    }
+  }
 
   for (const entry of cfg.aliases || []) {
     if (entry.status && entry.status !== 'active') continue;
@@ -61,16 +70,20 @@ function buildMaps() {
     console.error(JSON.stringify({error: 'product alias compact-key conflicts', conflicts}, null, 2));
     process.exit(2);
   }
-  return {aliasToCanonicalKey, canonicalKeyToSn};
+  return {aliasToCanonicalKey, canonicalKeyToSn, ignoredKeys};
 }
 
-function renderProductMatchKeyFunction(aliasToCanonicalKey) {
+function renderProductMatchKeyFunction(aliasToCanonicalKey, ignoredKeys) {
   const groups = new Map();
   for (const [aliasKey, canonicalKey] of aliasToCanonicalKey.entries()) {
     if (!groups.has(canonicalKey)) groups.set(canonicalKey, []);
     groups.get(canonicalKey).push(aliasKey);
   }
   const lines = [];
+  const ignored = [...ignoredKeys.keys()].sort();
+  if (ignored.length) {
+    lines.push(`    WHEN key IN (${ignored.map(sqlString).join(', ')}) THEN ''`);
+  }
   for (const [canonicalKey, keys] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     const uniqKeys = [...new Set(keys)].sort();
     lines.push(`    WHEN key IN (${uniqKeys.map(sqlString).join(', ')}) THEN ${sqlString(canonicalKey)}`);
@@ -93,6 +106,7 @@ $$;`;
 
 function renderProductCanonicalFunction(canonicalKeyToSn) {
   const lines = [];
+  lines.push(`    WHEN '' THEN ''`);
   for (const [canonicalKey, canonical] of [...canonicalKeyToSn.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     lines.push(`    WHEN ${sqlString(canonicalKey)} THEN ${sqlString(canonical)}`);
   }
@@ -109,11 +123,12 @@ $$;`;
 }
 
 function renderFunctions() {
-  const {aliasToCanonicalKey, canonicalKeyToSn} = buildMaps();
+  const {aliasToCanonicalKey, canonicalKeyToSn, ignoredKeys} = buildMaps();
   return {
-    sql: `${renderProductMatchKeyFunction(aliasToCanonicalKey)}\n\n${renderProductCanonicalFunction(canonicalKeyToSn)}`,
+    sql: `${renderProductMatchKeyFunction(aliasToCanonicalKey, ignoredKeys)}\n\n${renderProductCanonicalFunction(canonicalKeyToSn)}`,
     aliasCount: aliasToCanonicalKey.size,
     canonicalCount: canonicalKeyToSn.size,
+    ignoredCount: ignoredKeys.size,
   };
 }
 
@@ -138,6 +153,7 @@ if (!args.has('--quiet')) {
     aliasPath: path.relative(ROOT, ALIAS_PATH),
     aliasCount: rendered.aliasCount,
     canonicalCount: rendered.canonicalCount,
+    ignoredCount: rendered.ignoredCount,
     wrote: args.has('--write'),
   }, null, 2));
 }

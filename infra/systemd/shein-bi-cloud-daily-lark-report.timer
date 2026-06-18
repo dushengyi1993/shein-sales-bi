@@ -2,8 +2,8 @@
 Description=Run SHEIN BI cloud daily Lark report with catch-up retries
 
 [Timer]
-OnCalendar=*-*-* 08,10,12:35:00
-Persistent=true
+OnCalendar=*-*-* 09,11,13:35:00
+Persistent=false
 Unit=shein-bi-cloud-daily-lark-report.service
 
 [Install]

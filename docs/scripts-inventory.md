@@ -62,8 +62,8 @@
   - `fetch_shein_business_domains.mjs`
   - `load_bi_business_domains.mjs`
   - `backfill_bi_high_value_domains.ps1`
-  - `generate_bi_portal.mjs`：V1 正式 BI 门户生成器；默认超时 `900` 秒，输出 `outputs/bi-portal/index.html` 与 `outputs/bi-portal/data.json`；生成前会通过 `lib/product_display_name.mjs` 补齐 `product_display_name` 和顶层 `productDisplayNames`。
-  - `generate_bi_portal_v2.mjs`（V2 平行预览生成器；组装 `outputs/bi-portal/v2/index.html`，页面运行时以云端 section API / 云端运行态验收；仓库 `data.json` 只作预览兼容，不替换 V1、不接生产调度）
+  - `generate_bi_portal.mjs`：当前 V2 正式 BI 门户生成器；默认超时 `900` 秒，输出 `outputs/bi-portal/index.html` 与 `outputs/bi-portal/data.json`；生成前会通过 `lib/product_display_name.mjs` 补齐 `product_display_name` 和顶层 `productDisplayNames`。
+  - `generate_bi_portal_v2.mjs`：历史 V2 平行预览生成器，当前仅作迁移参考；正式入口以后以 `generate_bi_portal.mjs` / `outputs/bi-portal/index.html` 为准。
   - `serve_bi_portal.mjs`：云端 BI Portal 服务，提供静态页、健康检查和 `/api/bi/section/:section`；缓存命中时可直接返回 raw section JSON 或 gzip sidecar；`homeProfit` 是服务层从当前 `profit` section cache 派生的轻量首页利润摘要；`homeRankings` 会裁掉首页不用的重复商品长文本后缓存；服务启动和首页访问会触发 core `generatedAt` watcher 兜底预热 section，健康接口暴露 `biCoreWarmup` 状态。
   - `prewarm_bi_portal_sections.sh`：云端 Portal section 预热脚本，由 `cloud_bi_refresh.sh` 在 api data mode 下后台启动；默认先预热首页关键 section，并在 `profit` 成功后补跑 `homeProfit`。前端会拒绝 `staleSource=true` 或 `sourceGeneratedAt` 不匹配的旧利润摘要；若脚本未及时跑完，`serve_bi_portal.mjs` 的 core warmup watcher 会兜底。
   - `serve_bi_portal.ps1`
@@ -74,7 +74,7 @@
   - `generate_bi_briefing.mjs`
 - ET 货代仓 / RTV：
   - `cloud_et_forwarder_sync.sh`：Linux 云端 ET 同步入口；抓取、入仓并刷新 BI Portal。依赖服务器本地 `config/et_forwarder.local.json` 或 `ET_FORWARDER_USERNAME/ET_FORWARDER_PASSWORD`，密钥不进 GitHub。
-  - `cloud_rtv_verify.sh`：Linux 云端完整 RTV 换单复核入口；由 `shein-bi-cloud-rtv-verify.timer` 调用，默认使用 WebAPI transport，不阻塞滚动销售刷新。
+  - `cloud_rtv_verify.sh`：Linux 云端完整 RTV 换单复核入口；生产由 `cloud_daily_refresh.sh` 统一日更补采批次调用，默认使用 WebAPI transport，不阻塞两小时销售刷新。
   - `fetch_et_forwarder.mjs`
     - Windows 下复用本地 ET Chrome profile；Linux 下使用 headless Chrome/Chromium、`--no-sandbox`、`--disable-dev-shm-usage`，通过 ET 本地凭据和 OCR 自动登录。
   - `load_et_forwarder_warehouse.mjs`
@@ -115,7 +115,7 @@
   - `marketing/set_coupon_site_budget.mjs`：将优惠券活动站点预算补到目标额度；本期 `shein-sa` 默认目标为 `1000 SAR`。真实执行后必须保留 before/after 预算回读结果；若接口返回异常但回读已是 `1000 SAR`，按“写入异常但预算达标”记录，不能继续盲目重复写入。
   - `marketing/build_coupon_import_from_skc_list.py` + `marketing/templates/coupon-import-15pct-template.xlsx`：从 SKC 清单生成 SHEIN 优惠券批量导入模板，供 `submit_coupon_activity_goods.mjs` 上传。
 - OpenAPI 试点：
-  - `cloud_openapi_hl_reconciliation.sh`：Linux 云端 HL OpenAPI 并行对账入口；由 `shein-bi-cloud-openapi-hl.timer` 调用，需 SHEIN 开放平台白名单包含云服务器出口 IP。
+  - `cloud_openapi_hl_reconciliation.sh`：HL OpenAPI 销售并行对账的显式手动诊断入口；已退出生产日更批次，需 SHEIN 开放平台白名单包含云服务器出口 IP。
   - `check_shein_openapi_client.mjs`
   - `probe_shein_openapi_test_call.mjs`
   - `shein_openapi_authorize_hl.mjs`
@@ -146,7 +146,8 @@
 - `lark_sales_qa_bot.mjs`：云端只读飞书问数机器人和网页链接管理会话的核心问数逻辑；每轮从 BI Portal JSON 动态压缩销售、店铺、货号、链接/覆盖上下文并回复，不写数据库、飞书 Base 或 SHEIN 后台；产品文本和图表 label 优先使用 `product_display_name` / `productDisplayNames`。
 - `cloud_shein_session_manager.mjs` / `cloud_shein_session_manager.sh`：云端登录态管家；顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并输出 profile 体积报告。
 - `cloud_manual_login_session.mjs`：云端临时人工登录窗口管理器；按店启动 Xvfb + Chrome + x11vnc + websockify/noVNC，完成后导出/探测登录态并关闭临时进程。状态、短期 token 和日志都属于服务器私有运行态，不提交 GitHub。
-- `cloud_link_business_sync.sh`：云端链接/业务域日更入口；按店顺序 bootstrap 浏览器会话、抓链接和业务域、入仓、体检并刷新 BI。
+- `cloud_daily_refresh.sh`：云端统一日更补采入口；集中执行每天一次即可的慢变/复核采集，包括链接/业务域日更、营销活动/限时折扣/优惠券价格线索补采、RTV 换单复核、体检和 BI 刷新。HL OpenAPI 销售对账默认不跑。
+- `cloud_link_business_sync.sh`：云端链接/业务域低层入口；按店顺序 bootstrap 浏览器会话、抓链接和业务域、入仓。生产调度由 `cloud_daily_refresh.sh` 调用它，避免日更任务分散。
 - `bootstrap_shein_browser_session.mjs`：把服务器私有 SHEIN WebAPI/browser session 注入云端 headless Chrome profile，并用订单接口只读探测登录态。
 - `export_shein_browser_session.mjs`：从已登录 Chrome profile 导出 SHEIN 浏览器会话状态到 `state/shein_browser_sessions/*.local.json`；输出属于敏感运行态，不提交 GitHub。
 - `check_workspace_skill.ps1`

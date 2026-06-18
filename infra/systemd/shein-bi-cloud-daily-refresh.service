@@ -1,0 +1,36 @@
+[Unit]
+Description=SHEIN BI cloud daily slow-changing data refresh
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+User=sheinops
+Group=sheinops
+WorkingDirectory=/opt/shein-bi/app
+Environment=HOME=/home/sheinops
+Environment=TZ=Asia/Shanghai
+Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_BI_DAILY_LOG_DIR=/srv/shein-bi/logs/cloud-daily-refresh
+Environment=SHEIN_BI_DAILY_WAIT_BUSY_TIMEOUT_SEC=3600
+Environment="SHEIN_BI_DAILY_WAIT_SERVICES=shein-bi-cloud-today.service shein-bi-cloud-yesterday.service shein-bi-cloud-et-forwarder.service shein-bi-cloud-session-manager.service shein-bi-db-backup.service"
+Environment=SHEIN_BI_DAILY_MIN_AVAILABLE_MEM_MIB=2500
+Environment=SHEIN_LINK_BUSINESS_STORE_ATTEMPTS=2
+Environment=SHEIN_BI_MARKETING_PRICE_SCAN_TIMEOUT_SEC=1800
+Environment=SHEIN_BI_MARKETING_PRICE_SCAN_KILL_AFTER_SEC=60
+Environment=SHEIN_RTV_LIMIT=160
+Environment=SHEIN_RTV_CASE_LIMIT=12
+TimeoutStartSec=14400
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUWeight=50
+MemoryHigh=2200M
+MemoryMax=2800M
+OOMPolicy=stop
+KillMode=control-group
+ExecStartPre=/usr/bin/env node /opt/shein-bi/app/scripts/cleanup_shein_store_browsers.mjs --all --only-headless --kill-after-sec 5
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_daily_refresh.sh yesterday
+ExecStopPost=/usr/bin/env node /opt/shein-bi/app/scripts/cleanup_shein_store_browsers.mjs --all --only-headless --kill-after-sec 5
+
+

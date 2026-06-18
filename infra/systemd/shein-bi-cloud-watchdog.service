@@ -8,4 +8,6 @@ Type=oneshot
 WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/root
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+TimeoutStartSec=300
+Nice=10
 ExecStart=/usr/bin/env node /opt/shein-bi/app/scripts/cloud_ops_watchdog.mjs

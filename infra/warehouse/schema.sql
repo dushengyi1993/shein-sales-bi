@@ -35,13 +35,15 @@ AS $$
     SELECT upper(regexp_replace(coalesce(value,''), '[^A-Za-z0-9]+', '', 'g')) AS key
   )
   SELECT CASE
+    WHEN key IN ('EN6236812014A112017', 'PDLFZ666') THEN ''
     WHEN key IN ('2001', 'CM2001') THEN '2001'
     WHEN key IN ('BHRL09') THEN 'BHRL09'
     WHEN key IN ('121', '121E', 'CM121E') THEN 'CM121E'
     WHEN key IN ('CX1788') THEN 'CX1788'
     WHEN key IN ('666', 'FZ666', 'FZ666BEIGE', 'MZ666') THEN 'FZ666'
+    WHEN key IN ('GREPC12A', 'NMGREPC12A') THEN 'GREPC12A'
     WHEN key IN ('025', 'HS025') THEN 'HS025'
-    WHEN key IN ('JD389', 'LQ389') THEN 'JD389'
+    WHEN key IN ('389', 'JD389', 'LQ389', 'NM389', 'YJ389', 'ZL389') THEN 'JD389'
     WHEN key IN ('KFJN02') THEN 'KFJN02'
     WHEN key IN ('102', 'HY811', 'KJ102', 'SK102') THEN 'KJ102'
     WHEN key IN ('KJ102S', 'SK102S') THEN 'KJ102S'
@@ -51,7 +53,7 @@ AS $$
     WHEN key IN ('03038', 'SK03038') THEN 'SK03038'
     WHEN key IN ('FY29', 'SK04029') THEN 'SK04029'
     WHEN key IN ('04031', 'C06', 'C0604031', 'SK04031') THEN 'SK04031'
-    WHEN key IN ('088', 'SK088') THEN 'SK088'
+    WHEN key IN ('088', 'NMSK088', 'SK088') THEN 'SK088'
     WHEN key IN ('10075', 'SK10075') THEN 'SK10075'
     WHEN key IN ('11004', 'CY808B', 'MZ11004', 'SK11004') THEN 'SK11004'
     WHEN key IN ('11041', 'LQ11041', 'QY11041', 'SK11041') THEN 'SK11041'
@@ -64,18 +66,19 @@ AS $$
     WHEN key IN ('DX60', 'SK15061') THEN 'SK15061'
     WHEN key IN ('QY1711', 'SK1711') THEN 'SK1711'
     WHEN key IN ('1713', '17134', 'MZ1713', 'QY1713', 'SK1713', 'SK17134', 'SK17134GREY') THEN 'SK17134'
+    WHEN key IN ('1714', 'SK1714', 'SK17145') THEN 'SK17145'
     WHEN key IN ('185', 'LQ185', 'MA185', 'QY185', 'SK185') THEN 'SK185'
-    WHEN key IN ('1914', 'SK1914') THEN 'SK1914'
-    WHEN key IN ('1924', 'SK1924') THEN 'SK1924'
+    WHEN key IN ('1914', 'QHSK1914', 'SK1914') THEN 'SK1914'
+    WHEN key IN ('1924', 'MZSK1924', 'QHSK1924', 'SK1924') THEN 'SK1924'
     WHEN key IN ('1928', 'SK1928') THEN 'SK1928'
     WHEN key IN ('223', 'SK223') THEN 'SK223'
-    WHEN key IN ('270', 'SK270') THEN 'SK270'
+    WHEN key IN ('270', 'SK270', 'YJSK270') THEN 'SK270'
     WHEN key IN ('271', 'SK271') THEN 'SK271'
     WHEN key IN ('272', 'SK272') THEN 'SK272'
     WHEN key IN ('3378', 'QY3378', 'SK3378') THEN 'SK3378'
     WHEN key IN ('446', 'SK446') THEN 'SK446'
-    WHEN key IN ('5110', 'SK5110') THEN 'SK5110'
-    WHEN key IN ('5118', 'SK5118') THEN 'SK5118'
+    WHEN key IN ('5110', 'NMSK5110', 'SK5110') THEN 'SK5110'
+    WHEN key IN ('5118', 'NMSK5118', 'SK5118') THEN 'SK5118'
     WHEN key IN ('6810', 'CM6810', 'SK6810') THEN 'SK6810'
     WHEN key IN ('DX6863', 'LQ63', 'SK6863') THEN 'SK6863'
     WHEN key IN ('7015', 'SK7015') THEN 'SK7015'
@@ -87,11 +90,12 @@ AS $$
     WHEN key IN ('3065', 'MZ3065', 'QY3065', 'SK3065', 'SKGT3065') THEN 'SKGT3065'
     WHEN key IN ('175', 'LQ175', 'MZ175', 'SD175', 'SK175', 'SKJB175') THEN 'SKJB175'
     WHEN key IN ('675', 'SK675', 'SKJFB675B') THEN 'SKJFB675B'
-    WHEN key IN ('794', 'SK794', 'SKJFB794') THEN 'SKJFB794'
-    WHEN key IN ('7032', 'SK7032', 'SKYM7032') THEN 'SKYM7032'
+    WHEN key IN ('794', 'NMSKJFB794', 'SK794', 'SKJFB794') THEN 'SKJFB794'
+    WHEN key IN ('7032', 'NMSKYM7032', 'SK7032', 'SKYM7032') THEN 'SKYM7032'
     WHEN key IN ('6699', 'MZ6699', 'SK6699', 'SL6699') THEN 'SL6699'
     WHEN key IN ('505', '505A', 'QY505', 'SM505A', 'TXSM505A') THEN 'SM505A'
-    WHEN key IN ('SM520A') THEN 'SM520A'
+    WHEN key IN ('520', '520A', 'NMSM520A', 'SM520', 'SM520A') THEN 'SM520A'
+    WHEN key IN ('SM825', 'YASM825', 'YASM825A', 'YJSM825') THEN 'SM825'
     WHEN key IN ('961', 'SM961') THEN 'SM961'
     WHEN key IN ('V22') THEN 'V22'
     WHEN key IN ('1710', 'LQ1710', 'MZ1710', 'WK1710', 'WK17104') THEN 'WK17104'
@@ -106,11 +110,13 @@ LANGUAGE sql
 IMMUTABLE
 AS $$
   SELECT CASE dim.product_match_key(value)
+    WHEN '' THEN ''
     WHEN '2001' THEN '2001胶囊咖啡机'
     WHEN 'BHRL09' THEN 'BHRL-09激光脱毛仪'
     WHEN 'CM121E' THEN 'CM-121E美式咖啡机'
     WHEN 'CX1788' THEN 'CX1788手持搅拌器'
     WHEN 'FZ666' THEN 'FZ-666颈部按摩器'
+    WHEN 'GREPC12A' THEN 'GR-EPC12A电压力锅'
     WHEN 'HS025' THEN 'HS-025直发夹板'
     WHEN 'JD389' THEN 'JD-389空气炸锅'
     WHEN 'KFJN02' THEN 'KF-JN-02便携咖啡机'
@@ -135,6 +141,7 @@ AS $$
     WHEN 'SK15061' THEN 'SK-15061热风梳'
     WHEN 'SK1711' THEN 'SK-1711手持搅拌器'
     WHEN 'SK17134' THEN 'SK-1713-4手持搅拌器'
+    WHEN 'SK17145' THEN 'SK-1714-5手持搅拌器'
     WHEN 'SK185' THEN 'SK-185台式榨汁机'
     WHEN 'SK1914' THEN 'SK-1914热风梳'
     WHEN 'SK1924' THEN 'SK-1924直发夹板'
@@ -163,6 +170,7 @@ AS $$
     WHEN 'SL6699' THEN 'SL-6699蒸汽熨烫机'
     WHEN 'SM505A' THEN 'SM-505A电动缝纫机'
     WHEN 'SM520A' THEN 'SM-520A电动缝纫机'
+    WHEN 'SM825' THEN 'SM-825电动缝纫机'
     WHEN 'SM961' THEN 'SM-961厨师机'
     WHEN 'V22' THEN 'V22行车记录仪'
     WHEN 'WK17104' THEN 'WK-1710-4手持搅拌器'
@@ -1456,6 +1464,7 @@ CREATE TABLE IF NOT EXISTS fact.link_master_snapshot (
   created_time timestamp,
   shelf_time timestamp,
   first_shelf_time timestamp,
+  expect_shelf_time timestamp,
   source_file text,
   raw_summary jsonb DEFAULT '{}'::jsonb,
   updated_at timestamptz DEFAULT now()
@@ -1464,6 +1473,7 @@ CREATE TABLE IF NOT EXISTS fact.link_master_snapshot (
 CREATE INDEX IF NOT EXISTS idx_link_master_date_store ON fact.link_master_snapshot(snapshot_date, store_key);
 CREATE INDEX IF NOT EXISTS idx_link_master_product ON fact.link_master_snapshot(standard_goods_sn, snapshot_date);
 CREATE INDEX IF NOT EXISTS idx_link_master_skc ON fact.link_master_snapshot(skc, snapshot_date);
+ALTER TABLE fact.link_master_snapshot ADD COLUMN IF NOT EXISTS expect_shelf_time timestamp;
 
 CREATE TABLE IF NOT EXISTS fact.link_performance_daily (
   unique_key text PRIMARY KEY,

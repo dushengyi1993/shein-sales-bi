@@ -38,11 +38,10 @@ const CHROME_CANDIDATES = [
 const BUSY_SYNC_SERVICES = [
   'shein-bi-cloud-today.service',
   'shein-bi-cloud-yesterday.service',
-  'shein-bi-cloud-link-business.service',
+  'shein-bi-cloud-daily-refresh.service',
   'shein-bi-cloud-session-manager.service',
   'shein-bi-cloud-et-forwarder.service',
   'shein-bi-cloud-rtv-verify.service',
-  'shein-bi-cloud-openapi-hl.service',
 ];
 
 function parseArgs(argv) {

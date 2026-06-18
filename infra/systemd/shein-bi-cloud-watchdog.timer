@@ -3,7 +3,7 @@ Description=Run SHEIN BI cloud ops watchdog hourly
 
 [Timer]
 OnCalendar=*-*-* *:25:00
-Persistent=true
+Persistent=false
 Unit=shein-bi-cloud-watchdog.service
 
 [Install]

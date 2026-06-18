@@ -7,4 +7,13 @@ After=docker.service
 Type=oneshot
 WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/root
+TimeoutStartSec=1200
+Nice=19
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUWeight=20
+MemoryHigh=500M
+MemoryMax=1000M
+OOMPolicy=stop
+KillMode=control-group
 ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_db_backup.sh

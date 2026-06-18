@@ -10,6 +10,10 @@ PORTAL_HEALTH_URL="${PORTAL_HEALTH_URL:-}"
 PORTAL_INDEX_PATH="${PORTAL_INDEX_PATH:-$ROOT/outputs/bi-portal/index.html}"
 PORTAL_DATA_PATH="${PORTAL_DATA_PATH:-$ROOT/outputs/bi-portal/data.json}"
 LOCK_FILE="${SHEIN_ET_LOCK_FILE:-/tmp/shein-bi-cloud-et-forwarder.lock}"
+PORTAL_REFRESH_LOCK_FILE="${SHEIN_BI_PORTAL_REFRESH_LOCK_FILE:-/tmp/shein-bi-portal-refresh.lock}"
+PORTAL_REFRESH_LOCK_WAIT_SEC="${SHEIN_BI_PORTAL_REFRESH_LOCK_WAIT_SEC:-1800}"
+WAIT_SERVICES="${SHEIN_ET_WAIT_SERVICES:-shein-bi-cloud-today.service shein-bi-cloud-yesterday.service shein-bi-cloud-session-manager.service shein-bi-db-backup.service}"
+SKIP_IF_SERVICES="${SHEIN_ET_SKIP_IF_SERVICES:-shein-bi-cloud-daily-refresh.service}"
 
 resolve_date() {
   local target="$1"
@@ -55,6 +59,47 @@ notify_issue() {
   fi
 }
 
+
+is_service_active() {
+  local service="$1"
+  command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet "$service"
+}
+
+active_services_from_list() {
+  local active=()
+  local service
+  for service in $1; do
+    if is_service_active "$service"; then
+      active+=("$service")
+    fi
+  done
+  printf '%s\n' "${active[*]}"
+}
+
+protect_et_capacity() {
+  local active
+  active="$(active_services_from_list "$SKIP_IF_SERVICES")"
+  if [[ -n "$active" ]]; then
+    echo "[cloud_et_forwarder_sync] SKIP capacity: services active=$active; daily slow refresh has priority, next ET timer will retry"
+    exit 0
+  fi
+  local timeout="${SHEIN_ET_WAIT_BUSY_TIMEOUT_SEC:-2700}"
+  local interval="${SHEIN_ET_WAIT_BUSY_INTERVAL_SEC:-30}"
+  local elapsed=0
+  while true; do
+    active="$(active_services_from_list "$WAIT_SERVICES")"
+    if [[ -z "$active" ]]; then
+      return 0
+    fi
+    if (( elapsed >= timeout )); then
+      echo "[cloud_et_forwarder_sync] SKIP busy services still active after ${timeout}s: $active; next ET timer will retry"
+      exit 0
+    fi
+    echo "[cloud_et_forwarder_sync] wait busy services: $active elapsed=${elapsed}s"
+    sleep "$interval"
+    elapsed=$((elapsed + interval))
+  done
+}
 check_portal_health() {
   if [[ ! -s "$PORTAL_INDEX_PATH" ]]; then
     echo "BI Portal index is missing or empty: $PORTAL_INDEX_PATH" >&2
@@ -81,6 +126,7 @@ trap on_error ERR
 
 echo "[cloud_et_forwarder_sync] start date=$DATE root=$ROOT"
 cd "$ROOT"
+protect_et_capacity
 
 node scripts/fetch_et_forwarder.mjs \
   --mode daily \
@@ -100,22 +146,50 @@ node scripts/load_et_forwarder_warehouse.mjs --manifest "$MANIFEST_PATH"
 
 if [[ "${SHEIN_ET_REFRESH_PORTAL:-1}" == "1" ]]; then
   PORTAL_DATA_MODE="${SHEIN_ET_PORTAL_DATA_MODE:-${SHEIN_BI_PORTAL_DATA_MODE:-api}}"
-  echo "[cloud_et_forwarder_sync] refresh BI portal data_mode=$PORTAL_DATA_MODE"
-  SHEIN_BI_PORTAL_DATA_MODE="$PORTAL_DATA_MODE" node scripts/generate_bi_portal.mjs \
-    --metabase-url "$METABASE_URL" \
-    --data-mode "$PORTAL_DATA_MODE"
-  if command -v systemctl >/dev/null 2>&1; then
-    # The portal service reads data.json / section caches at request time, so a
-    # full restart is not required after regenerating portal files. Restarting
-    # here can kill in-flight browser section requests every two hours when the
-    # ET forwarder runs, which looks like BI loading stalls or empty responses.
-    systemctl is-active --quiet shein-bi-portal.service || systemctl start shein-bi-portal.service || true
-  fi
-  check_portal_health
-  if [[ "$PORTAL_DATA_MODE" == "api" && "${SHEIN_BI_PORTAL_PREWARM_DISABLED:-0}" != "1" ]]; then
-    nohup bash scripts/prewarm_bi_portal_sections.sh >/dev/null 2>&1 &
-    echo "[cloud_et_forwarder_sync] portal section prewarm started pid=$!"
-  fi
+  PORTAL_REFRESH_MODE="${SHEIN_ET_REFRESH_PORTAL_MODE:-sections}"
+  PORTAL_REFRESH_SECTIONS="${SHEIN_ET_REFRESH_SECTIONS:-orders,waybills,afterSales}"
+  {
+    if ! flock -w "$PORTAL_REFRESH_LOCK_WAIT_SEC" 8; then
+      echo "[cloud_et_forwarder_sync] portal refresh lock busy after ${PORTAL_REFRESH_LOCK_WAIT_SEC}s; skip portal refresh this run"
+    else
+      if command -v systemctl >/dev/null 2>&1; then
+        systemctl is-active --quiet shein-bi-portal.service || systemctl start shein-bi-portal.service || true
+      fi
+      check_portal_health
+      case "$PORTAL_REFRESH_MODE" in
+        full)
+          echo "[cloud_et_forwarder_sync] full BI portal refresh data_mode=$PORTAL_DATA_MODE"
+          SHEIN_BI_PORTAL_DATA_MODE="$PORTAL_DATA_MODE" node scripts/generate_bi_portal.mjs \
+            --metabase-url "$METABASE_URL" \
+            --data-mode "$PORTAL_DATA_MODE"
+          node scripts/generate_bi_portal_v2.mjs
+          if [[ "$PORTAL_DATA_MODE" == "api" && "${SHEIN_BI_PORTAL_PREWARM_DISABLED:-0}" != "1" ]]; then
+            SHEIN_BI_PORTAL_PREWARM_SECTIONS="$PORTAL_REFRESH_SECTIONS" \
+            SHEIN_BI_PORTAL_PREWARM_ASYNC="${SHEIN_BI_PORTAL_PREWARM_ASYNC:-1}" \
+            nohup bash scripts/prewarm_bi_portal_sections.sh >/dev/null 2>&1 &
+            echo "[cloud_et_forwarder_sync] portal section prewarm started pid=$! sections=$PORTAL_REFRESH_SECTIONS"
+          fi
+          ;;
+        sections|section|light|lightweight)
+          if [[ "${SHEIN_BI_PORTAL_PREWARM_DISABLED:-0}" == "1" ]]; then
+            echo "[cloud_et_forwarder_sync] lightweight section refresh disabled by SHEIN_BI_PORTAL_PREWARM_DISABLED=1"
+          else
+            echo "[cloud_et_forwarder_sync] lightweight section refresh sections=$PORTAL_REFRESH_SECTIONS"
+            SHEIN_BI_PORTAL_PREWARM_SECTIONS="$PORTAL_REFRESH_SECTIONS" \
+            SHEIN_BI_PORTAL_PREWARM_ASYNC="${SHEIN_BI_PORTAL_PREWARM_ASYNC:-1}" \
+            bash scripts/prewarm_bi_portal_sections.sh
+          fi
+          ;;
+        none|off|0|false)
+          echo "[cloud_et_forwarder_sync] portal refresh skipped by SHEIN_ET_REFRESH_PORTAL_MODE=$PORTAL_REFRESH_MODE"
+          ;;
+        *)
+          echo "Unsupported SHEIN_ET_REFRESH_PORTAL_MODE=$PORTAL_REFRESH_MODE" >&2
+          exit 64
+          ;;
+      esac
+    fi
+  } 8>"$PORTAL_REFRESH_LOCK_FILE"
 fi
 
 echo "[cloud_et_forwarder_sync] done date=$DATE manifest=$MANIFEST_PATH log=$LOG_FILE"

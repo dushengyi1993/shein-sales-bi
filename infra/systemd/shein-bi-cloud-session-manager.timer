@@ -2,8 +2,8 @@
 Description=Run SHEIN BI cloud login/session manager daily
 
 [Timer]
-OnCalendar=*-*-* 03:20:00
-Persistent=true
+OnCalendar=*-*-* 02:20:00
+Persistent=false
 Unit=shein-bi-cloud-session-manager.service
 
 [Install]

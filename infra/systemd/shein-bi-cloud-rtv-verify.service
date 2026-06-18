@@ -10,4 +10,14 @@ Environment=HOME=/root
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=SHEIN_RTV_TRANSPORT=webapi
 Environment=SHEIN_RTV_VERIFY_TIMEOUT_MS=3600000
+Environment=SHEIN_RTV_LIMIT=160
+Environment=SHEIN_RTV_CASE_LIMIT=12
+TimeoutStartSec=7200
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+MemoryHigh=1000M
+MemoryMax=1500M
+OOMPolicy=stop
+KillMode=control-group
 ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_rtv_verify.sh

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run SHEIN BI cloud daily slow-changing data refresh
+
+[Timer]
+OnCalendar=*-*-* 03:40:00
+Persistent=false
+Unit=shein-bi-cloud-daily-refresh.service
+
+[Install]
+WantedBy=timers.target
+

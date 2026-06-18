@@ -3,7 +3,7 @@
 ## 2026-06-03 当前权威状态
 
 - 飞书多维表格 / 原生看板写入已临时暂停；云端 BI 系统作为当前主要经营入口继续运行。飞书日报、异常通知 watchdog 和只读问数机器人均已迁到云端独立飞书机器人链路；日报真实发送已验证，问数机器人已升级为云端 Codex CLI 只读网关，不再绑定本机 Codex 会话。
-- 本地 BI 已封存，云端 BI 是正式入口：`https://shein-bi.faceair.me/`（旧 IP 入口 `http://43.165.167.135/` 仅作兜底）。公网入口已启用 Basic Auth；账号密码只在运行环境交付，不写入仓库或文档。详见 `docs/cloud-bi-operations.md`。
+- 本地 BI 已封存，云端 BI 是正式入口：`https://shein-bi.dushengyi.xyz/`（旧 IP 入口 `http://43.165.167.135/` 仅作兜底）。公网入口已启用 Basic Auth；账号密码只在运行环境交付，不写入仓库或文档。详见 `docs/cloud-bi-operations.md`。
 - 云端 BI 已提供临时登录维护入口 `/cloud-login-maintenance`：当 SHEIN / SBN 子系统登录态失效、自动恢复失败、遇到验证码/滑块，或被协议签署 / 公告 / 通知确认等普通登录弹窗挡住时，可在云服务器短时打开该店独立 profile 的 noVNC 浏览器窗口；普通登录干扰弹窗可由运维代理关闭/确认后再点登录，完成后必须点“我已完成并关闭”，脚本会导出/探测登录态并关闭临时进程。该入口的状态文件、日志和短期 token 都是服务器私有运行态，不进 GitHub。
 - 本地 `8787` 服务已停止，`SHEIN-*` Windows 计划任务已禁用；除非明确回滚，不要重新启动本地 BI 或本地抓数任务。
 - 销售同步完成后会后置刷新 BI；如果单店失败但目标日期当前启用店铺销售源文件已齐，BI 仍会刷新，并通过飞书消息提醒失败店铺。
@@ -20,8 +20,8 @@
 - ET 货代仓已接入数据仓库和 BI，能抓库存、RTV、出库、发货申请单、财务等；云端已启用 Linux headless Chrome + ET 本地凭据 + OCR 自动登录入口并完成真实同步验证，不能直接复用 Windows Chrome 保存密码。
 - RTV 换单号自动复核已接入 BI 流水线：`scripts/verify_shein_rtv_tracking.mjs` 直接读取 SHEIN 售后详情和退货物流详情，JT/JTE 走同运单直连，iMile/EMile 识别中英文换单证据；截至 `2026-05-09` 已确认 `132` 个 ET RTV 入仓单号。
 - RTV 收件后去向已进入 BI：`mart.et_rtv_destination_allocation` 追踪 09 可售、03_RTV、04 破损、06 报废和其它/未知去向；`mart.shein_return_rtv_trace` 在 `订单 / 售后` 页面展示每条 SHEIN 退货是否收到、收到后去了哪里。
-- HL OpenAPI 销售试点已跑通并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` 写入 `fact.openapi_*` 并行事实表与 `mart.openapi_sales_reconciliation` 对账表；BI 系统状态页显示 “SHEIN OpenAPI 试点对账”。正式切换生产销售表前继续累计多日 `matched`。
-- HL OpenAPI 销售试点曾在本地 Windows 任务中双跑，只写 `fact.openapi_*` 和 `mart.openapi_sales_reconciliation`，不覆盖生产销售事实表；本地 Windows 任务已封存，云端 systemd 双跑入口已部署，云服务器出口 IP `43.165.167.135` 已加入 SHEIN 开放平台白名单，云端双跑已成功。2026-06-05 本机可见 profile 复核：HL 与 ZL 开放平台应用已审核通过；DSY 其余 `DL/DX/FY/LQ/NM/JY/TS/MZ`、LGM 剩余 `YJ/XL/QY/QH/TZ/JSH/TZZ/XC` 应用已提交审核中；CX 用户确认此前已完成。审核通过、逐店授权和双跑对账完成前，不得写入 `.local` 密钥或切换生产源。
+- HL OpenAPI 销售试点已跑通过并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` 写入 `fact.openapi_*` 并行事实表与 `mart.openapi_sales_reconciliation` 对账表；该销售对账已按业务要求退出生产调度和 BI 系统状态页，历史并行表仅保留为手动诊断参考。
+- HL OpenAPI 销售试点曾在本地 Windows 任务和云端 systemd 中双跑，只写 `fact.openapi_*` 和 `mart.openapi_sales_reconciliation`，不覆盖生产销售事实表；现已退出生产双跑。2026-06-05 本机可见 profile 复核：HL 与 ZL 开放平台应用已审核通过；DSY 其余 `DL/DX/FY/LQ/NM/JY/TS/MZ`、LGM 剩余 `YJ/XL/QY/QH/TZ/JSH/TZZ/XC` 应用已提交审核中；CX 用户确认此前已完成。审核通过、逐店授权和双跑对账完成前，不得写入 `.local` 密钥或切换生产源。
 - 系统定位正在从“BI 数据分析”扩展为“自动运营驾驶舱”：先把可重复运营动作沉淀为脚本和规则，再按“建议/预填/复核/人工确认提交/审计留痕”的边界逐步开放自动化。2026-05-17 已上线“链接管理中台”基座：支持“一个会话对应一个任务工作台”，边聊边沉淀任务目标、数据依据、素材、执行步骤和进度；自然语言会话每轮都会按最新 BI JSON 动态查数，明确下架/换图/补链/报活动等动作命令会自动进入任务并在同一界面可见。2026-05-20 起，任务区已提供“开始执行 / 预检”和二次确认入口，点击后会真实调用 `/api/link-ops-execute` 写回进度与审计；默认仍只做受控预检 / dry-run，不会静默提交 SHEIN。
 
 本工作区用于 SHEIN 当前 19 店销售数据自动抓取、飞书多维表格统计、每日飞书日报、链接管理、营销活动报名辅助，以及正在并行建设的 PostgreSQL + Metabase + 云端 BI / 自动运营驾驶舱。
@@ -39,12 +39,12 @@
   - 当月主看板：`SHEIN经营看板 v3-主看板`（`blkFn3qHrwdsrJyX`）
   - 上月看板：`SHEIN经营看板 v3-上月`（`blkWeyZhphgRZYim`）
 - 当前 BI 入口：
-  - 云端 BI：`https://shein-bi.faceair.me/`，Basic Auth 保护；旧 IP 入口 `http://43.165.167.135/` 仅作兜底。
-  - 云端登录维护中心：`https://shein-bi.faceair.me/cloud-login-maintenance`，用于临时打开指定店铺云端浏览器登录窗口。
+  - 云端 BI：`https://shein-bi.dushengyi.xyz/`，Basic Auth 保护；旧 IP 入口 `http://43.165.167.135/` 仅作兜底。
+  - 云端登录维护中心：`https://shein-bi.dushengyi.xyz/cloud-login-maintenance`，用于临时打开指定店铺云端浏览器登录窗口。
   - 云端代码目录：`/opt/shein-bi/app`
   - 仓库 BI 门户灾备快照：`outputs/bi-portal/index.html` / `outputs/bi-portal/data.json`（不代表当前云端数据）
-  - V1 是当前正式 BI Portal；用户确认后的 V1/main 才发布 GitHub release。当前 V1/main 已发布到 `2026.06.04-core-section-warmup-hotfix`，后续首页性能补丁保持同一 V1/main 边界；V2 仍不属于正式发布。
-  - V2.1 独立设计预览仍是平行项目，由 `scripts/generate_bi_portal_v2.mjs` 生成；用户确认前不得替换 V1 或改生产调度。
+  - V2 是当前正式 BI Portal，根路径 `https://shein-bi.dushengyi.xyz/` 由 `outputs/bi-portal/index.html` 承载；V1 已封存到 `/v1/`，只作历史回溯和短期对照，不再更新。
+  - V1 最终纪念版由 GitHub archive release 固化；后续 BI 页面和生产调度只维护 V2。
   - 本机 `http://127.0.0.1:8787/` 和局域网 `http://DUSHENGYI-PC2:8787/` 已封存，不再作为正式入口。
   - Metabase 当前部署在云端 Docker 内部，由云端 Nginx/服务配置受控访问，不在 README 写公开裸地址。
 - 当前 BI 数据截面不再手工写死在 README；实时只以云端 BI 门户系统状态页、线上 `/api/bi/section/*`、云端 PostgreSQL warehouse、云端 systemd 日志和数据库入仓时间为准。仓库中的 `outputs/bi-portal/` 只是灾备/兼容快照，服务器拉取/重置代码后必须重新跑云端 BI 刷新；开发和验收不得拿仓库快照当当前数据。
@@ -60,7 +60,6 @@
 - 云端 `shein-bi-cloud-session-manager.timer`：每天 `03:20` 顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并检查 profile 体积。
 - 云端覆盖审计使用 `scripts/audit_cloud_data_coverage.mjs`：查最新日防漏时用 `--expected-start range-start`，要求当前应覆盖店铺齐全；查历史断档时用 `--expected-start first-seen`，按每个店自己的首个有效日期之后检查中间是否断档，不能把店铺尚未开通/尚未接入前的日期误判为缺抓。
 - 2026-05-21 运维加固：链接/业务域服务统一以 `sheinops` 运行，避免 root 写 Chrome profile 后导致登录态管家 `EACCES`；登录态恢复改为先回灌 browser session、再验证 GSP + SBN；ET 验证码下载瞬时失败会进入重试，不再一次 `fetch failed` 就中断。
-  - 云端 `shein-bi-cloud-openapi-hl.timer`：每天 `06:20` 跑 HL OpenAPI 并行对账；已可在云端成功抓取、入仓和生成 OpenAPI 对账。
   - 云端 `shein-bi-cloud-watchdog.timer`：每小时检查云端服务、timer 和 BI 数据新鲜度；销售/页面按 4.5 小时阈值，链接/业务域按 48 小时日更阈值。
   - 云端 `shein-bi-lark-sales-qa.service`：常驻只读飞书问数机器人，通过 `/home/sheinops/.codex` 的 Codex CLI 配置执行受控只读问答，只读取 BI Portal 压缩上下文，不写数据库、飞书 Base 或 SHEIN 后台。
   - 本地 `SHEIN-*` Windows 计划任务已禁用，保留为回滚参考，不再作为生产调度。
@@ -71,7 +70,7 @@
   - `SHEIN-Sales-ETForwarder-0420`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-BI-Daily-Pipeline-0700` 等是本地历史任务，已禁用，保留为回滚/迁移参考。
   - `2026-05-02 07:00` 的 `267014` 是已修复的历史失败记录，保留作排障证据。
 - 团队访问边界：
-  - 当前团队访问转为云端入口 `https://shein-bi.faceair.me/`，旧 IP `http://43.165.167.135/` 仅作兜底，受 Basic Auth 保护。
+  - 当前团队访问转为云端入口 `https://shein-bi.dushengyi.xyz/`，旧 IP `http://43.165.167.135/` 仅作兜底，受 Basic Auth 保护。
   - 本地局域网协作入口已封存；`8787` 服务停止，本地计划任务禁用。
   - 原 Windows 防火墙规则需要管理员权限才能禁用；只要本地没有服务监听 `8787`，局域网不会再打开本地 BI。
   - 同事可标记动作状态、填写负责人和备注；短期仍沿用云端服务侧状态文件，长期应迁入 PostgreSQL，避免文件状态成为单点。
@@ -147,7 +146,7 @@
 - 云端日报图若中文变方框，先确认服务器已安装中文字体并能匹配 `Noto Sans CJK SC`；代码字体栈以 Noto CJK 为 Linux 首选。
 - 云端手动跑完整 RTV 换单复核 WebAPI 版（在服务器执行）：
   `bash scripts/cloud_rtv_verify.sh`
-- 云端手动跑 HL OpenAPI 并行对账（在服务器执行；服务器 IP 白名单已配置）：
+- HL OpenAPI 销售对账已退出生产调度；如需历史诊断，可在服务器显式手动运行：
   `bash scripts/cloud_openapi_hl_reconciliation.sh`
 - 云端手动跑 watchdog（在服务器执行）：
   `node scripts/cloud_ops_watchdog.mjs --dry-run`
@@ -206,12 +205,9 @@
   `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_et_forwarder_daily.ps1`
 - 手动运行 RTV 换单复核（耗时正常，按批次跑；`--max-runtime-ms 3600000` 是 60 分钟防挂死保护）：
   `node scripts/verify_shein_rtv_tracking.mjs --priority high,medium,low --include-no-cases --limit 120 --case-limit 60 --max-runtime-ms 3600000`
-- 抓取 HL OpenAPI 销售试点数据：
+- HL OpenAPI 销售对账脚本仅保留为手动诊断入口，不作为生产调度或 BI 状态验收项：
   `node scripts/fetch_shein_openapi_sales.mjs HL --start YYYY-MM-DD --end YYYY-MM-DD`
-- 将 HL OpenAPI 销售写入并行表并生成对账：
   `node scripts/load_shein_openapi_sales_warehouse.mjs --store HL --start YYYY-MM-DD --end YYYY-MM-DD`
-- 手动运行 HL OpenAPI 对账入口：
-  `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_openapi_hl_reconciliation.ps1 -Mode intraday`
 - 生成营销活动成本映射：
   `python scripts/marketing/build_marketing_cost_map.py`
 - 生成并验证按货号汇总的营销确认表（会读取 `config/marketing_pricing_policy.json` 和 BI 曝光数据展示曝光前五价格差异）：

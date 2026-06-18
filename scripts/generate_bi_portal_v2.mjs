@@ -1,19 +1,59 @@
 #!/usr/bin/env node
 /**
- * Generate SHEIN BI V2 preview shell.
+ * Generate SHEIN BI V2 production shell.
  *
- * Writes only outputs/bi-portal/v2/index.html. The generated page loads
- * business data from the cloud BI runtime / section API; repository artifacts
- * are only a compatibility bootstrap and must not be used as current data.
+ * The cloud BI runtime owns current data through /api/bi/section/*. This script
+ * owns the HTML shell layout: V2 is the default portal index, while the legacy
+ * V1 shell is preserved under outputs/bi-portal/v1/index.html for temporary
+ * fallback until it is formally archived.
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const outDir = path.join(ROOT, 'outputs', 'bi-portal', 'v2');
-const outFile = path.join(outDir, 'index.html');
 const assetDir = path.join(ROOT, 'scripts', 'bi_v2');
+
+function parseArgs(argv) {
+  const args = {
+    outFile: path.join(ROOT, 'outputs', 'bi-portal', 'index.html'),
+    compatV2File: path.join(ROOT, 'outputs', 'bi-portal', 'v2', 'index.html'),
+    legacySource: path.join(ROOT, 'outputs', 'bi-portal', 'index.html'),
+    legacyTarget: path.join(ROOT, 'outputs', 'bi-portal', 'v1', 'index.html'),
+    preserveLegacy: true,
+  };
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (a === '--out-file') args.outFile = path.resolve(argv[++i]);
+    else if (a === '--compat-v2-file') args.compatV2File = path.resolve(argv[++i]);
+    else if (a === '--legacy-source') args.legacySource = path.resolve(argv[++i]);
+    else if (a === '--legacy-target') args.legacyTarget = path.resolve(argv[++i]);
+    else if (a === '--no-preserve-legacy') args.preserveLegacy = false;
+  }
+  return args;
+}
+
+function looksLikeV2Shell(html) {
+  return /<title>\s*SHEIN BI V2|V2 正式入口|BI V2 preview|SHEIN BI V2 · 运营工作台/i.test(String(html || ''));
+}
+
+async function preserveLegacyShell(args) {
+  if (!args.preserveLegacy || !args.legacySource || !args.legacyTarget) {
+    return {preserved: false, reason: 'disabled'};
+  }
+  let html = '';
+  try {
+    html = await fs.readFile(args.legacySource, 'utf8');
+  } catch {
+    return {preserved: false, reason: 'missing-source'};
+  }
+  if (looksLikeV2Shell(html)) {
+    return {preserved: false, reason: 'source-is-v2'};
+  }
+  await fs.mkdir(path.dirname(args.legacyTarget), {recursive: true});
+  await fs.writeFile(args.legacyTarget, html, 'utf8');
+  return {preserved: true, source: args.legacySource, target: args.legacyTarget};
+}
 
 async function readJson(file, fallback) {
   try {
@@ -37,14 +77,14 @@ function renderHtml({storeConfig, css, clientJs}) {
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>SHEIN BI V2 · 运营工作台</title>
+<title>SHEIN BI · 运营工作台</title>
 <style>${css}</style>
 </head>
 <body>
 <aside class="sidebar">
-  <div class="brand"><div class="mark">BI</div><h1>SHEIN 运营工作台</h1><p>V2 preview · cloud runtime first</p></div>
+  <div class="brand"><div class="mark">BI</div><h1>SHEIN 运营工作台</h1><p>正式入口 · cloud runtime first</p></div>
   <nav class="nav" id="nav"></nav>
-  <div class="side-note"><b id="crumb">正在连接…</b><span>正式入口不变；V2 仅作平行验收。</span><div id="sideStatus" class="side-status" aria-live="polite"></div></div>
+  <div class="side-note"><b id="crumb">正在连接…</b><span>V2 正式入口；V1 临时备份在 /v1/。</span><div id="sideStatus" class="side-status" aria-live="polite"></div></div>
 </aside>
 <main class="main">
   <div class="command"><div class="bar home-filter-bar">
@@ -54,7 +94,7 @@ function renderHtml({storeConfig, css, clientJs}) {
     <div class="quick command-actions"><button id="clearFilters">清空</button></div>
   </div></div>
   <div id="view"></div>
-  <div class="foot">BI V2 preview · data source of truth: cloud runtime / section API</div>
+  <div class="foot">BI V2 · data source of truth: cloud runtime / section API · V1 backup: /v1/</div>
 </main>
 <script>window.__SHEIN_STORE_CONFIG__=${safeInlineJson(storeConfig)};</script>
 <script>${safeInlineScript(clientJs)}</script>
@@ -68,6 +108,15 @@ const [storeConfig, css, clientJs] = await Promise.all([
   fs.readFile(path.join(assetDir, 'client.js'), 'utf8'),
 ]);
 
-await fs.mkdir(outDir, {recursive: true});
-await fs.writeFile(outFile, renderHtml({storeConfig, css, clientJs}), 'utf8');
-console.log(`[generate_bi_portal_v2] wrote ${outFile}`);
+const args = parseArgs(process.argv.slice(2));
+const legacy = await preserveLegacyShell(args);
+const html = renderHtml({storeConfig, css, clientJs});
+const wrote = [];
+for (const target of [args.outFile, args.compatV2File]) {
+  if (!target) continue;
+  if (wrote.includes(target)) continue;
+  await fs.mkdir(path.dirname(target), {recursive: true});
+  await fs.writeFile(target, html, 'utf8');
+  wrote.push(target);
+}
+console.log(JSON.stringify({ok: true, wrote, legacy}, null, 2));

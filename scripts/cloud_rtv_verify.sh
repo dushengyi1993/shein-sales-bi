@@ -26,7 +26,14 @@ node scripts/verify_shein_rtv_tracking.mjs \
   --max-runtime-ms "$MAX_RUNTIME_MS" \
   --json
 
+if [[ "${SHEIN_RTV_REFRESH_PORTAL:-1}" != "1" && "${SHEIN_RTV_REFRESH_PORTAL:-1}" != "true" ]]; then
+  echo "[cloud_rtv_verify] verification done; skip portal refresh because SHEIN_RTV_REFRESH_PORTAL=${SHEIN_RTV_REFRESH_PORTAL:-}"
+  echo "[cloud_rtv_verify] done log=$LOG_FILE"
+  exit 0
+fi
+
 node scripts/generate_bi_portal.mjs --metabase-url "$METABASE_URL"
+node scripts/generate_bi_portal_v2.mjs
 
 if command -v systemctl >/dev/null 2>&1; then
   systemctl is-active --quiet shein-bi-portal.service || systemctl start shein-bi-portal.service || true

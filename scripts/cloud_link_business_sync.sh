@@ -233,6 +233,7 @@ JSON
   echo "[cloud_link_business_sync] done with metric-not-ready date=$DATE log=$LOG_FILE"
   exit 0
 fi
+rm -f "$ROOT/state/cloud_ops_alerts/link-business-last-metric-not-ready.json" 2>/dev/null || true
 
 node scripts/generate_link_ops_web_dashboard.mjs \
   --date "$DATE" \
@@ -246,10 +247,23 @@ node scripts/load_bi_warehouse.mjs \
 node scripts/load_bi_business_domains.mjs \
   --date "$DATE"
 
+node scripts/marketing/export_marketing_price_leads_for_bi.mjs || true
+
+if [[ "${SHEIN_LINK_BUSINESS_REFRESH_PORTAL:-1}" != "1" && "${SHEIN_LINK_BUSINESS_REFRESH_PORTAL:-1}" != "true" ]]; then
+  echo "[cloud_link_business_sync] warehouse load done; skip portal refresh because SHEIN_LINK_BUSINESS_REFRESH_PORTAL=${SHEIN_LINK_BUSINESS_REFRESH_PORTAL:-}"
+  if [[ "${#FAILED_STORES[@]}" -eq 0 ]]; then
+    rm -f "$ROOT/state/cloud_ops_alerts/link-business-last-partial.json" 2>/dev/null || true
+  fi
+  echo "[cloud_link_business_sync] done date=$DATE log=$LOG_FILE"
+  exit 0
+fi
+
 node scripts/audit_bi_warehouse.mjs
 
 node scripts/generate_bi_portal.mjs \
   --metabase-url "$METABASE_URL"
+
+node scripts/generate_bi_portal_v2.mjs
 
 if command -v systemctl >/dev/null 2>&1; then
   systemctl is-active --quiet shein-bi-portal.service || systemctl start shein-bi-portal.service || true

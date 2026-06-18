@@ -97,7 +97,7 @@ const BI_PORTAL_SECTION_TIMEOUT_MS = Math.max(60_000, Number(process.env.SHEIN_B
 const biSectionInFlight = new Map();
 let biSectionBackgroundQueue = Promise.resolve();
 let biProfitMartFreshnessPromise = null;
-const DEFAULT_BI_PORTAL_CORE_WARMUP_SECTIONS = ['homeRankings', 'profit', 'homeProfit', 'afterSales', 'actions', 'financeData', 'rankings', 'linksData', 'productTrafficDaily', 'inventoryTrend', 'comments', 'orders', 'rtvData', 'waybills'];
+const DEFAULT_BI_PORTAL_CORE_WARMUP_SECTIONS = ['homeRankings', 'profit', 'homeProfit', 'afterSales', 'orders', 'waybills'];
 const BI_PORTAL_CORE_WARMUP_INTERVAL_MS = Math.max(15_000, Number(process.env.SHEIN_BI_CORE_WARMUP_INTERVAL_MS || 60_000));
 const biPortalCoreWarmupState = {
   generatedAt: '',
@@ -1749,16 +1749,11 @@ async function readBiSectionStaleRaw(root, section, currentGeneratedAt, options 
   };
 }
 
-function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt) {
+function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt, options = {}) {
   const key = `${root}|${section}|${generatedAt || ''}`;
   if (biSectionInFlight.has(key)) return true;
-  const sameCoreWarmupInFlight = biPortalCoreWarmupState.inFlight
-    && (!generatedAt || biPortalCoreWarmupState.generatedAt === String(generatedAt || ''));
-  const waitForCoreWarmup = sameCoreWarmupInFlight
-    ? biPortalCoreWarmupState.inFlight.catch(() => {})
-    : Promise.resolve();
   const previousQueue = biSectionBackgroundQueue.catch(() => {});
-  const run = waitForCoreWarmup.then(() => previousQueue).then(async () => {
+  const run = previousQueue.then(async () => {
     const startedAt = Date.now();
     logBiPortalCoreWarmup('section-background-start', {section, generatedAt});
     const latestMeta = await readBiPortalCoreMeta(root).catch(() => null);
@@ -2187,11 +2182,19 @@ async function runBiPortalCoreWarmup(args, root, meta, options = {}) {
 
       const sectionStartedAt = Date.now();
       try {
+        const existingCache = await readBiSectionCache(root, section, generatedAt).catch(() => null);
+        const existingHomeProfitSource = String(existingCache?.data?.homeProfitSummary?.sourceGeneratedAt || '');
+        if (existingCache && (section !== 'homeProfit' || existingHomeProfitSource === generatedAt)) {
+          results.push({section, status: 200, durationMs: Date.now() - sectionStartedAt, ok: true, cacheHit: true});
+          logBiPortalCoreWarmup('section-skip-cache', {section, generatedAt});
+          continue;
+        }
         const result = await loadBiSection(args, root, section, {
           force: true,
           allowGenerate: options.allowGenerate !== false,
           allowStale: false,
           gzip: false,
+          skipCoreWarmupWait: true,
         });
         const durationMs = Date.now() - sectionStartedAt;
         const ok = result?.status >= 200 && result.status < 300;

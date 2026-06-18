@@ -13,11 +13,9 @@ const UNIT_NAMES = [
   'shein-bi-cloud-yesterday.service',
   'shein-bi-db-backup.service',
   'shein-bi-cloud-et-forwarder.service',
-  'shein-bi-cloud-link-business.service',
+  'shein-bi-cloud-daily-refresh.service',
   'shein-bi-cloud-session-manager.service',
   'shein-bi-cloud-daily-lark-report.service',
-  'shein-bi-cloud-openapi-hl.service',
-  'shein-bi-cloud-rtv-verify.service',
   'shein-bi-cloud-order-closure.service',
 ];
 const TIMER_NAMES = [
@@ -25,11 +23,9 @@ const TIMER_NAMES = [
   'shein-bi-cloud-yesterday.timer',
   'shein-bi-db-backup.timer',
   'shein-bi-cloud-et-forwarder.timer',
-  'shein-bi-cloud-link-business.timer',
+  'shein-bi-cloud-daily-refresh.timer',
   'shein-bi-cloud-session-manager.timer',
   'shein-bi-cloud-daily-lark-report.timer',
-  'shein-bi-cloud-openapi-hl.timer',
-  'shein-bi-cloud-rtv-verify.timer',
   'shein-bi-cloud-order-closure.timer',
   'shein-bi-cloud-watchdog.timer',
 ];
@@ -85,7 +81,7 @@ function run(command, args, options = {}) {
 }
 
 async function systemctlShow(name) {
-  const res = await run('systemctl', ['show', name, '--no-pager', '--property=LoadState,ActiveState,SubState,Result,ExecMainStatus,StateChangeTimestamp,ExecMainStartTimestamp,ExecMainExitTimestamp']);
+  const res = await run('systemctl', ['show', name, '--no-pager', '--property=LoadState,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,StateChangeTimestamp,ExecMainStartTimestamp,ExecMainExitTimestamp']);
   const data = {};
   for (const line of String(res.stdout || '').split(/\r?\n/)) {
     const idx = line.indexOf('=');
@@ -120,6 +116,31 @@ async function readJsonIfExists(file) {
     if (err?.code === 'ENOENT') return null;
     return {error: String(err?.message || err)};
   }
+}
+
+function serviceExitAckKey(status) {
+  return [
+    status.name || '',
+    status.ExecMainExitTimestamp || status.StateChangeTimestamp || '',
+    status.ExecMainCode || '',
+    status.ExecMainStatus || '',
+  ].join('|');
+}
+
+async function readServiceExitAcks() {
+  const file = path.join(ROOT, 'state', 'cloud_ops_alerts', 'service-exit-acks.json');
+  const data = await readJsonIfExists(file);
+  if (!data || data.error) return new Set();
+  const raw = Array.isArray(data.acks) ? data.acks : [];
+  return new Set(raw.map(entry => {
+    if (typeof entry === 'string') return entry;
+    return [
+      entry.unit || entry.name || '',
+      entry.execMainExitTimestamp || entry.ExecMainExitTimestamp || entry.stateChangeTimestamp || '',
+      entry.execMainCode ?? entry.ExecMainCode ?? '',
+      entry.execMainStatus ?? entry.ExecMainStatus ?? '',
+    ].join('|');
+  }).filter(Boolean));
 }
 
 async function readPortalDates(file) {
@@ -157,6 +178,52 @@ async function auditRecentCoverage() {
       error: `coverage audit JSON parse failed: ${String(err?.message || err)}; stdout=${String(res.stdout || '').slice(-1200)}`,
     };
   }
+}
+
+async function auditOrphanStoreBrowsers() {
+  const maxAgeMin = Number(process.env.SHEIN_CLOUD_WATCHDOG_ORPHAN_CHROME_MAX_AGE_MIN || 90);
+  const res = await run(process.execPath, [
+    'scripts/cleanup_shein_store_browsers.mjs',
+    '--all',
+    '--only-headless',
+    '--dry-run',
+    '--json',
+  ], {timeoutMs: Number(process.env.SHEIN_CLOUD_WATCHDOG_CHROME_AUDIT_TIMEOUT_MS || 20_000)});
+  if (!res.ok) {
+    return {
+      ok: false,
+      error: `store browser audit failed code=${res.code}: ${(res.stderr || res.stdout || '').slice(-1200)}`,
+    };
+  }
+  let data;
+  try {
+    data = JSON.parse(res.stdout);
+  } catch (err) {
+    return {
+      ok: false,
+      error: `store browser audit JSON parse failed: ${String(err?.message || err)}; stdout=${String(res.stdout || '').slice(-1200)}`,
+    };
+  }
+  if (process.platform === 'win32') return {ok: true, maxAgeMin, orphanCount: 0, processes: []};
+  const nowTicks = Number((await fs.readFile('/proc/uptime', 'utf8')).split(/\s+/)[0] || 0);
+  const ticksPerSecond = Number(process.env.CLK_TCK || 100);
+  const processes = [];
+  for (const proc of data.before || []) {
+    const raw = await fs.readFile(`/proc/${proc.pid}/stat`, 'utf8').catch(() => '');
+    const parts = raw ? raw.slice(raw.lastIndexOf(')') + 2).trim().split(/\s+/) : [];
+    const startTicks = Number(parts[19] || 0);
+    const ageMin = startTicks > 0 ? Math.max(0, (nowTicks - (startTicks / ticksPerSecond)) / 60) : null;
+    const isOrphan = Number(proc.ppid || 0) === 1;
+    if (isOrphan && (ageMin === null || ageMin >= maxAgeMin)) {
+      processes.push({...proc, ageMin});
+    }
+  }
+  return {
+    ok: true,
+    maxAgeMin,
+    orphanCount: processes.length,
+    processes,
+  };
 }
 
 async function psqlJson(sql, timeoutMs = Number(process.env.SHEIN_CLOUD_WATCHDOG_DB_TIMEOUT_MS || 30_000)) {
@@ -244,13 +311,19 @@ async function main() {
   const logFile = path.join(args.logDir, `watchdog-${stamp}.json`);
 
   const issues = [];
+  const serviceExitAcks = await readServiceExitAcks();
   const units = [];
   for (const unit of UNIT_NAMES) {
     const status = await systemctlShow(unit);
     units.push(status);
     if (status.LoadState === 'not-found') continue;
-    if (status.ActiveState === 'failed' || (status.Result && !['success', ''].includes(status.Result))) {
-      issues.push(`服务异常：${unit} state=${status.ActiveState || '-'} result=${status.Result || '-'} exit=${status.ExecMainStatus || '-'}`);
+    const exitStatus = String(status.ExecMainStatus || '');
+    const abnormalExit = status.ActiveState !== 'active' && exitStatus && exitStatus !== '0';
+    const abnormalState = status.ActiveState === 'failed' || (status.Result && !['success', ''].includes(status.Result));
+    const acknowledgedExit = abnormalExit && !abnormalState && serviceExitAcks.has(serviceExitAckKey(status));
+    status.serviceExitAcknowledged = acknowledgedExit;
+    if (abnormalState || (abnormalExit && !acknowledgedExit)) {
+      issues.push(`服务异常：${unit} state=${status.ActiveState || '-'} result=${status.Result || '-'} exit=${status.ExecMainStatus || '-'} code=${status.ExecMainCode || '-'}`);
     }
   }
   const timers = [];
@@ -268,6 +341,12 @@ async function main() {
     issues.push(`链接/业务域部分失败状态不可读：${partialLinkBusiness.error}`);
   } else if (partialLinkBusiness?.failedStores) {
     issues.push(`链接/业务域日更部分店铺失败：date=${partialLinkBusiness.date || '-'} failed=${partialLinkBusiness.failedStores || '-'} log=${partialLinkBusiness.logFile || '-'}`);
+  }
+  const dailyRefresh = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'daily-refresh-last.json'));
+  if (dailyRefresh?.error) {
+    issues.push(`日更补采状态不可读：${dailyRefresh.error}`);
+  } else if (dailyRefresh?.status && dailyRefresh.status !== 'ok' && !String(dailyRefresh.status).startsWith('skipped')) {
+    issues.push(`日更补采异常：date=${dailyRefresh.date || '-'} status=${dailyRefresh.status} message=${dailyRefresh.message || '-'} log=${dailyRefresh.logFile || '-'}`);
   }
 
   const portal = await readPortalDates(args.portalData);
@@ -296,6 +375,17 @@ async function main() {
         issues.push(`BI 覆盖不足：${issue}`);
       }
     }
+  }
+
+  const orphanStoreBrowsers = await auditOrphanStoreBrowsers();
+  if (orphanStoreBrowsers.error) {
+    issues.push(`SHEIN 店铺浏览器残留审计失败：${orphanStoreBrowsers.error}`);
+  } else if (Number(orphanStoreBrowsers.orphanCount || 0) > 0) {
+    const sample = (orphanStoreBrowsers.processes || [])
+      .slice(0, 6)
+      .map(p => `${p.storeKey}:pid=${p.pid},age=${fmtHours((p.ageMin || 0) / 60)},rss=${Math.round((p.rssKb || 0) / 1024)}MiB`)
+      .join('; ');
+    issues.push(`SHEIN 店铺浏览器残留：count=${orphanStoreBrowsers.orphanCount} threshold=${orphanStoreBrowsers.maxAgeMin}min ${sample}`);
   }
 
   const orderClosure = await auditOrderClosure(args);
@@ -331,6 +421,7 @@ async function main() {
     issues,
     portal,
     coverage,
+    orphanStoreBrowsers,
     orderClosure,
     units,
     timers,

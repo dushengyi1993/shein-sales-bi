@@ -116,8 +116,21 @@ function num(n, fallback = 0) {
 }
 function nullableNum(n) {
   if (n === null || n === undefined || n === '' || n === '-') return null;
+  if (typeof n === 'object') {
+    for (const key of ['amount', 'value', 'price', 'salePrice', 'sale_price', 'centAmount', 'cent_amount']) {
+      const v = nullableNum(n?.[key]);
+      if (v !== null) return /cent/i.test(key) ? v / 100 : v;
+    }
+    for (const v of Object.values(n)) {
+      const parsed = nullableNum(v);
+      if (parsed !== null) return parsed;
+    }
+    return null;
+  }
   const x = Number(String(n).replace(/,/g, '').replace(/%$/, ''));
-  return Number.isFinite(x) ? x : null;
+  if (Number.isFinite(x)) return x;
+  const m = String(n).replace(/,/g, '').match(/-?\d+(?:\.\d+)?/);
+  return m ? Number(m[0]) : null;
 }
 function firstNonEmpty(...values) {
   for (const v of values) {
@@ -388,6 +401,52 @@ async function fetchStockup(send, pageSize) {
   return {count: rows.length, total, rows};
 }
 
+function buildReleasedPagePriceRequest(productRows) {
+  const bySpu = new Map();
+  for (const product of productRows || []) {
+    const spuName = String(product?.spu_name || product?.spu || '').trim();
+    if (!spuName) continue;
+    const skcNames = bySpu.get(spuName) || new Set();
+    for (const skc of product.skc_info_list || []) {
+      const skcName = String(skc?.skc_name || skc?.skc || '').trim();
+      if (skcName) skcNames.add(skcName);
+    }
+    if (skcNames.size) bySpu.set(spuName, skcNames);
+  }
+  return [...bySpu.entries()].map(([spuName, skcNames]) => ({
+    spu_name: spuName,
+    skc_name_list: [...skcNames].map(skcName => ({skc_name: skcName})),
+  }));
+}
+
+function chunkArray(items, size) {
+  const chunks = [];
+  for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
+  return chunks;
+}
+
+async function fetchReleasedPagePrices(send, productRows, pageSize = 80) {
+  const requestRows = buildReleasedPagePriceRequest(productRows);
+  const priceBySpu = new Map();
+  for (const chunk of chunkArray(requestRows, pageSize)) {
+    if (!chunk.length) continue;
+    const json = await pageFetch(send, '/spmp-api-prefix/spmp/product/query_cost_price_for_released_page', {spu_skc_list: chunk});
+    for (const row of json.info?.data || []) {
+      const spuName = String(row?.spu_name || '').trim();
+      if (!spuName) continue;
+      priceBySpu.set(spuName, {
+        spu: spuName,
+        originalSupplyPriceRange: String(row.cost_range || '').trim(),
+        originalSupplyPriceCurrency: String(row.currency || '').trim(),
+        originalSupplyPriceMin: nullableNum(row.min_cost),
+        originalSupplyPriceMax: nullableNum(row.max_cost),
+        originalSupplyPriceSource: 'spmp.product.query_cost_price_for_released_page',
+      });
+    }
+  }
+  return priceBySpu;
+}
+
 async function fetchDiagnoseWindow(send, dateStart, dateEnd, pageSize, sbnHeaders = {}) {
   const rows = [];
   let pageNum = 1;
@@ -449,11 +508,12 @@ function normalizeSupplierCode(value, title = '') {
   const detailed = normalizeGoodsSnDetailed(value || '', {goodsTitle: title});
   return detailed;
 }
-function flattenProductRows(store, date, productStatuses) {
+function flattenProductRows(store, date, productStatuses, releasedPriceBySpu = new Map()) {
   const rows = [];
   for (const statusBlock of productStatuses) {
     const status = statusBlock.status;
     for (const product of statusBlock.rows || []) {
+      const releasedPrice = releasedPriceBySpu.get(product.spu_name || product.spu || '') || {};
       for (const skc of product.skc_info_list || []) {
         const rawGoodsSn = String(skc.supplier_code || '').trim();
         const norm = normalizeSupplierCode(rawGoodsSn, product.product_name_ch || product.product_name_en || product.product_name_multi || '');
@@ -504,6 +564,11 @@ function flattenProductRows(store, date, productStatuses) {
           publishTime: product.publish_time || '',
           firstShelfTime: product.first_shelf_time || '',
           expectShelfTime: product.expect_shelf_time || '',
+          originalSupplyPriceRange: releasedPrice.originalSupplyPriceRange || '',
+          originalSupplyPriceCurrency: releasedPrice.originalSupplyPriceCurrency || '',
+          originalSupplyPriceMin: releasedPrice.originalSupplyPriceMin ?? null,
+          originalSupplyPriceMax: releasedPrice.originalSupplyPriceMax ?? null,
+          originalSupplyPriceSource: releasedPrice.originalSupplyPriceSource || '',
           productTags: labelNames(product.tag_info_list),
           skcTags: labelNames(skc.tag_info_list),
           rawSummary: compactJson({product, skc}, 3000),
@@ -555,11 +620,12 @@ function aggregateSkuList(skuList = []) {
     maxPurchasePrice: max('purchasePrice'),
   };
 }
-function flattenInventoryRows(store, date, stockRows) {
+function flattenInventoryRows(store, date, stockRows, releasedPriceBySpu = new Map()) {
   return (stockRows || []).map(row => {
     const rawGoodsSn = String(row.supplierCode || '').trim();
     const norm = normalizeSupplierCode(rawGoodsSn, '');
     const skuAgg = aggregateSkuList(row.skuList || []);
+    const releasedPrice = releasedPriceBySpu.get(row.spu || '') || {};
     const stockWarnName = row.stockWarnStatus?.name || '';
     // 2026-05-01 复核：备货信息里的 stock / stockSaleDays 不是用户在链接后台看到的
     // “可调整展示库存”口径。例如 sv25082988192111895 在此接口返回 0，但后台实际
@@ -611,6 +677,11 @@ function flattenInventoryRows(store, date, stockRows) {
       priceRange: [skuAgg.minPrice, skuAgg.maxPrice].filter(x => x !== null).join('~'),
       finalPriceRange: [skuAgg.minFinalPrice, skuAgg.maxFinalPrice].filter(x => x !== null).join('~'),
       purchasePriceRange: [skuAgg.minPurchasePrice, skuAgg.maxPurchasePrice].filter(x => x !== null).join('~'),
+      originalSupplyPriceRange: releasedPrice.originalSupplyPriceRange || '',
+      originalSupplyPriceCurrency: releasedPrice.originalSupplyPriceCurrency || '',
+      originalSupplyPriceMin: releasedPrice.originalSupplyPriceMin ?? null,
+      originalSupplyPriceMax: releasedPrice.originalSupplyPriceMax ?? null,
+      originalSupplyPriceSource: releasedPrice.originalSupplyPriceSource || '',
       displayStockLow: lowByQty || lowByDays || lowByWarn,
       displayStockWarningReason: [
         lowByQty ? `展示库存<=10（${skuAgg.displayStock}）` : null,
@@ -979,6 +1050,7 @@ async function fetchStore(store, args) {
       const rows = productAll.rows.filter(x => x.shelf_status === status);
       return {status, count: rows.length, total: rows.length, rows};
     });
+    const releasedPriceBySpu = await fetchReleasedPagePrices(send, productAll.rows);
     const stockup = await fetchStockup(send, args.pageSize);
     const date = args.date;
     const diagnose = {
@@ -996,8 +1068,8 @@ async function fetchStore(store, args) {
       }
     }
 
-    const linkRows = flattenProductRows(store, date, productStatuses);
-    const inventoryRows = flattenInventoryRows(store, date, stockup.rows);
+    const linkRows = flattenProductRows(store, date, productStatuses, releasedPriceBySpu);
+    const inventoryRows = flattenInventoryRows(store, date, stockup.rows, releasedPriceBySpu);
     const performanceRows = flattenPerformanceRows(store, date, diagnose, flow);
     const coverageRows = buildCoverageRows(store, date, linkRows, performanceRows);
     const suggestionRows = buildSuggestionRows(store, date, linkRows, performanceRows, inventoryRows, coverageRows);
@@ -1021,6 +1093,7 @@ async function fetchStore(store, args) {
         diagnosePrev7: diagnose.prev7.count,
         diagnoseC30: diagnose.c30.count,
         flowDiagnose: flow.rows.length,
+        releasedPrices: releasedPriceBySpu.size,
         linkRows: linkRows.length,
         inventoryRows: inventoryRows.length,
         performanceRows: performanceRows.length,
@@ -1033,6 +1106,7 @@ async function fetchStore(store, args) {
       linkRows,
       performanceRows,
       inventoryRows,
+      releasedPriceRows: [...releasedPriceBySpu.values()],
       coverageRows,
       suggestionRows,
       dashboardRows,

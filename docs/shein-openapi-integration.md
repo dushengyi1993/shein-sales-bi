@@ -150,7 +150,7 @@ node scripts/load_bi_warehouse.mjs --sales-dir outputs/shein_openapi_fetch --sal
 - HL 店铺已完成真实授权。
 - 只读接入已验证：站点 / 币种、商品列表、订单列表 / 详情、库存、财务对账、退货。
 - 初步订单销售对账已通过。
-- 当前已完成：HL OpenAPI 销售数据写入 API 并行层，并在 BI 系统状态页展示 OpenAPI / 当前生产销售源对账。下一步继续累计多日 `matched`，并在已申请权限审核通过后扩展库存、退货、财务、SFS 等更多业务域。
+- 历史已完成：HL OpenAPI 销售数据写入 API 并行层，并曾在 BI 系统状态页展示 OpenAPI / 当前生产销售源对账。2026-06-17 起该销售对账已按业务要求退出生产调度和系统状态页；并行表仅保留为显式手动诊断参考，后续官方 OpenAPI 能力仍可按业务域独立评估。
 - 2026-05-18 起，链接管理中台已把 HL 识别为“OpenAPI 已授权店铺”，不会再把 HL 补链/复制上品请求笼统回复为“无权限”。2026-05-20 后，HL `copy_product_draft` 任务可从 BI 当前会话直接进入 `/api/link-ops-execute`，由 `scripts/link_ops_hl_openapi_executor.mjs` 做 OpenAPI 权限、站点、品牌、仓库和 payload 预检；真实 `publishOrEdit` 仍必须 payload 完整且用户二次确认。
 
 ### P3：当前启用店铺分批替换
@@ -196,9 +196,9 @@ node scripts/generate_bi_portal.mjs
 - 2026-05-06：浏览器销售 `0 SAR`，OpenAPI 销售 `0 SAR`，差异 `0`。
 - 两天订单数、正销售订单数、商品行数、销售额、浏览器独有订单数、API 独有订单数均一致。
 - `outputs/bi-portal/data.json` 已包含 `openapiReconciliation`。
-- `outputs/bi-portal/index.html` 的系统状态页已展示 “SHEIN OpenAPI 试点对账” 卡片。
+- `outputs/bi-portal/index.html` 曾在系统状态页展示 “SHEIN OpenAPI 试点对账” 卡片；2026-06-17 起该卡片默认关闭，不再作为生产验收项。
 
-当前结论：HL 销售入口已经具备“官方 OpenAPI 与当前生产销售源双跑、并行入仓、BI 可见对账”的最小闭环；正式切换生产事实表前，仍需继续积累多日 matched 结果，并等待已申请权限审核完成后再扩展销量、SFS、库存、财务等更多业务域。
+历史结论：HL 销售入口曾具备“官方 OpenAPI 与当前生产销售源双跑、并行入仓、BI 可见对账”的最小闭环；2026-06-17 起该销售对账退出生产调度，并等待已申请权限审核完成后再扩展销量、SFS、库存、财务等更多业务域。
 
 ## 2026-05-19 进展：HL 商品写执行器预检接入
 

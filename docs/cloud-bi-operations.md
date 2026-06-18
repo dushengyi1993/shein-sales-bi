@@ -4,16 +4,16 @@
 
 ## 1. 当前入口
 
-- 云端 BI：`https://shein-bi.faceair.me/`；旧 IP 入口 `http://43.165.167.135/` 仅作兜底。
+- 云端 BI：`https://shein-bi.dushengyi.xyz/`；旧 IP 入口 `http://43.165.167.135/` 仅作兜底。
 - 访问保护：Nginx Basic Auth 已启用；账号密码只在私下运行环境交付，不写入仓库、文档或日志。
 - 云服务器：腾讯云 Lighthouse 东京，Ubuntu 24.04 x86_64，代码目录 `/opt/shein-bi/app`。
 - 服务组成：HAProxy/Caddy 负责公网 443 分流与 TLS，Nginx 在服务器本机 `127.0.0.1:8080` 保留 Basic Auth 并反代到 BI Portal `127.0.0.1:8787`；PostgreSQL + Metabase 由 Docker Compose 承载。
-- 域名入口：`https://shein-bi.faceair.me/`；服务器内部仍由 Nginx `127.0.0.1:8080` 转发到 BI Portal。
+- 域名入口：`https://shein-bi.dushengyi.xyz/`；服务器内部仍由 Nginx `127.0.0.1:8080` 转发到 BI Portal。
 - GitHub 仓库 `main` 是云端代码来源；云端有值得保存的脚本、配置模板、门户静态产物或自动运营能力时，先同步回 GitHub，再部署到服务器。
 - 注意：`outputs/bi-portal/index.html` / `data.json` 会作为可恢复静态快照纳入 GitHub；服务器执行 `git reset --hard origin/main` 或类似部署后，可能把实时 BI 页面覆盖成仓库快照。每次服务器拉取/重置代码后，都要立即跑一次 `scripts/cloud_bi_refresh.sh today intraday` 或对应 systemd service，确认页面生成时间和销售源时间回到当前。
 - 云端 Git 同步红线：`/opt/shein-bi/app` 必须由 `sheinops:sheinops` 持有，不要用 `sudo git pull`。仓库 remote 使用 `git@github.com:dushengyi1993/shein-sales-bi.git`，`core.sshCommand` 必须指向 `/home/sheinops/.ssh/shein_bi_deploy`；不要指向 `/root/.ssh/...`，否则普通运维用户无法 fetch/pull。生产生成的 `outputs/bi-portal/data.json` / `index.html` 在服务器上用 `git update-index --skip-worktree` 标记为本地生成物，避免定时刷新后的实时页面把后续 `git pull --ff-only` 阻塞。若云端出现未提交热修复，先 `git stash push -u -m "pre-...deploy-..."` 保存，再部署远端 `main`。
 - 发布顺序：BI 用户可见改动先在云端页面或云端服务输出验证，用户确认后再进入 GitHub `main` / release。本地验证只能证明开发产物可运行，不能替代云端最终审核。
-- 当前 GitHub 发布边界：V1/main 最新 release 为 `2026.06.04-core-section-warmup-hotfix`；后续首页性能补丁仍属于 V1/main。V2 仍为平行预览/开发，不纳入正式 release 或日常刷新。
+- 当前 GitHub 发布边界：V2 是正式 release 线；V1 只保留 final/archive 纪念版，不再纳入日常刷新或后续功能更新。
 
 ### SSH 运维入口
 
@@ -37,19 +37,26 @@
 
 | 任务 | 时间 | 作用 |
 | --- | --- | --- |
-| `shein-bi-cloud-today.timer` | 北京时间 `00:10/02:10/.../22:10` | 每两小时刷新当天销售、入仓并生成 BI Portal |
-| `shein-bi-cloud-yesterday.timer` | 北京时间 `00:10` | 刷新前一天最终销售，并复核前两天稳定日 |
+| `shein-bi-cloud-today.timer` | 北京时间 `00:00/02:00/.../22:00` | 每两小时整点刷新当天销售、入仓并生成 BI Portal |
+| `shein-bi-cloud-yesterday.timer` | 北京时间 `00:40` | 刷新前一天最终销售，并复核前两天稳定日 |
 | `shein-bi-db-backup.timer` | 北京时间 `02:30` | 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto` |
-| `shein-bi-cloud-et-forwarder.timer` | 北京时间 `04:20` | 抓取 ET 货代仓、入仓，并刷新 BI Portal；需要服务器本地 ET 登录配置 |
-| `shein-bi-cloud-daily-lark-report.timer` | 北京时间 `08:35`，`10:35/12:35` 补偿重试 | 抓取当天销售后发送飞书日报和日报图；成功后写入当天 sent flag 防重复 |
-| `shein-bi-cloud-rtv-verify.timer` | 北京时间 `03:20` | 完整 RTV 换单复核 WebAPI 版，写入 `ops.rtv_tracking_verification`，不阻塞滚动销售刷新 |
-| `shein-bi-cloud-link-business.timer` | 北京时间 `08:10` | 顺序启动云端 headless Chrome 抓取前一完整日链接/业务域，入仓、体检并刷新 BI；全店日指标仍全 0 时跳过入仓刷新 |
-| `shein-bi-cloud-session-manager.timer` | 北京时间 `03:20` | 云端登录态管家：顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，检查 profile 体积，生成报告 |
-| `shein-bi-cloud-openapi-hl.timer` | 北京时间 `06:20` | HL OpenAPI 并行抓取、入仓和对账；服务器 IP 白名单已配置 |
+| `shein-bi-cloud-et-forwarder.timer` | 北京时间 `01:20/03:20/.../23:20` | 高频抓取 ET 货代仓/出库单、入仓，只轻量刷新订单/物流/售后相关 section；需要服务器本地 ET 登录配置 |
+| `shein-bi-cloud-daily-lark-report.timer` | 北京时间 `09:35`，`11:35/13:35` 补偿重试 | 抓取当天销售后发送飞书日报和日报图；成功后写入当天 sent flag 防重复 |
+| `shein-bi-cloud-daily-refresh.timer` | 北京时间 `08:10` | 统一日更补采：顺序抓取前一完整日链接/业务域，补采营销活动/限时折扣/优惠券价格线索，并串行执行 RTV 换单复核；统一体检并刷新 BI；全店日指标仍全 0 时跳过链接/业务域入仓刷新；HL OpenAPI 销售对账已退出生产日更 |
+| `shein-bi-cloud-session-manager.timer` | 北京时间 `04:45` | 云端登录态管家：顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，检查 profile 体积，生成报告 |
 | `shein-bi-cloud-watchdog.timer` | 每小时 | 检查云端服务、timer 和 BI 数据新鲜度，异常时发飞书提醒 |
 | `shein-bi-lark-sales-qa.service` | 常驻服务 | 飞书只读问数机器人（云端 Codex CLI 网关），读取 BI Portal JSON 后回复消息，不写数据 |
 
-ET、飞书日报、完整 RTV WebAPI 复核、链接/业务域日更、异常通知 watchdog、只读问数机器人（云端 Codex CLI 网关）和 HL OpenAPI 双跑的 Linux systemd 入口已启用并通过手动验证。链接/业务域是低频日更数据，不按销售高频刷新看待；当前生产路径是云端顺序 headless Chrome + 私有会话状态，纯 Node 零浏览器直连仍是后续优化。不要误以为本地 `SHEIN-*` Windows 任务仍在生产运行。
+ET、飞书日报、统一日更补采、异常通知 watchdog、只读问数机器人（云端 Codex CLI 网关）等 Linux systemd 入口已启用并通过手动验证。链接/业务域、营销价栈线索和 RTV WebAPI 复核属于日更补采批次，不按销售高频刷新看待；HL OpenAPI 销售对账已退出生产批次；当前生产路径是云端顺序 headless Chrome + 私有会话状态，纯 Node 零浏览器直连仍是后续优化。不要误以为本地 `SHEIN-*` Windows 任务仍在生产运行。
+
+### 生产资源排班边界
+
+- 高频销售刷新和 ET 出库单刷新保持独立：销售每两小时整点跑，ET 每奇数小时 `20` 分跑；ET 默认只刷新相关 section，不再每两小时全量生成 BI Portal。
+- 慢变补采只放在 `shein-bi-cloud-daily-refresh.timer`：链接/业务域、商品列表/库存/流量日更、营销活动/限时折扣/优惠券价格线索、RTV 换单复核都集中在这个批次内串行执行，不允许重新拆成多个同日重任务 timer。
+- 重任务 timer 均不做开机补跑（`Persistent=false`）。服务器重启错过窗口时，由 watchdog 的数据过期/日更状态暴露，再人工选择低峰补跑，避免重启后销售、ET、日更、登录态管家同时恢复执行。
+- `daily-refresh` 启动前会等待销售/昨日销售/ET 写入任务结束，并检查 `MemAvailable`。可用内存低于阈值时写 `skipped_low_memory` 状态后跳过本轮；宁可让慢变数据晚一点，也不能拖慢销售刷新和 BI 页面。
+- `daily-refresh`、ET、登录态管家、销售刷新、昨日销售、订单闭环、RTV 校验均有 `MemoryHigh` / `MemoryMax` / `OOMPolicy=stop` 护栏；如果单个任务越界，应失败并告警，不能把整台服务器拖到 OOM。
+- 旧分散 timer `shein-bi-cloud-link-business.timer`、`shein-bi-cloud-rtv-verify.timer`、`shein-bi-cloud-openapi-hl.timer` 已在生产机 `masked`，不要只看旧 unit 文件存在就重新启用。
 
 2026-05-16 链接/业务域已完成云端闭环：`scripts/cloud_link_business_sync.sh` 会按店顺序执行 `restore_shein_store_session.mjs`、`fetch_shein_links.mjs` 和 `fetch_shein_business_domains.mjs`，失败店铺会关闭并重启该店浏览器重试，全部完成后入仓、运行 BI 体检并生成门户。验证日志 `/srv/shein-bi/logs/cloud-link-business/link-business-2026-05-15-20260516-163901.log` 显示 16 店全部 `done`；BI `dates.linkDate=2026-05-15`、`dates.businessDate=2026-05-15`，体检 `warnings=0/errors=0`。这不是本机补抓；后续不要重新启用本地 Windows 链接/业务域任务作为长期生产。
 
@@ -63,14 +70,12 @@ ET、飞书日报、完整 RTV WebAPI 复核、链接/业务域日更、异常�
 - 数据库备份入口：`scripts/cloud_db_backup.sh`
 - ET 云端入口：`scripts/cloud_et_forwarder_sync.sh today`
 - 飞书日报云端入口：`scripts/cloud_daily_lark_report.sh today`
-- 完整 RTV 复核云端入口：`scripts/cloud_rtv_verify.sh`
-- 链接/业务域日更云端入口：`scripts/cloud_link_business_sync.sh yesterday`；生产 timer 改为北京时间 `08:10`，并带全店日指标全 0 不入仓守卫。
-- HL OpenAPI 云端入口：`scripts/cloud_openapi_hl_reconciliation.sh`
+- 统一日更补采云端入口：`scripts/cloud_daily_refresh.sh yesterday`；生产 timer 为北京时间 `08:10`。它内部调用 `scripts/cloud_link_business_sync.sh` 做链接/业务域日更，集中补采营销活动/限时折扣/优惠券价格线索，并串行执行 `scripts/cloud_rtv_verify.sh`。`scripts/cloud_openapi_hl_reconciliation.sh` 仅保留为显式手动诊断入口。底层脚本仍保留为手动诊断入口，链接/业务域带全店日指标全 0 不入仓守卫。该入口不应在白天手动全量补跑 19 店；若必须补跑，先确认当前没有销售/ET/门户生成任务，并检查可用内存。
 - 云端异常通知入口：`scripts/cloud_ops_watchdog.mjs`
 - 云端覆盖审计入口：`scripts/audit_cloud_data_coverage.mjs`。最新日防漏用 `--expected-start range-start`，历史断档排查用 `--expected-start first-seen`；后者按每个店自己的首个有效日期之后查中间断档，避免把店铺尚未开通/尚未接入前的日期误判为缺抓。
 - 飞书只读问数机器人（云端 Codex CLI 网关）入口：`scripts/cloud_lark_sales_qa_bot.sh` / `scripts/lark_sales_qa_bot.mjs`
 - 销售抓取仍优先使用 SHEIN 后台 WebAPI session；直连成功时不会启动浏览器。
-- 官方 OpenAPI 已有权限的数据域后续可逐步替换为 OpenAPI；WebAPI 仍作为当前生产销售抓取主链路。HL OpenAPI 云端双跑当前只写并行表，不覆盖生产销售事实表。
+- 官方 OpenAPI 已有权限的数据域后续可逐步替换为 OpenAPI；WebAPI 仍作为当前生产销售抓取主链路。HL OpenAPI 销售对账已按业务要求退出云端双跑；历史并行表保留，不覆盖生产销售事实表。
 - ET 已改为 Linux headless Chrome + 账号密码/OCR 自动登录模式；Windows Chrome 保存密码不能直接迁到 Linux，服务器必须单独保存 `config/et_forwarder.local.json` 或等价环境变量。
 - 飞书日报依赖服务器本地 `config/lark_report.json`、`lark-cli` 和独立飞书机器人授权；旧应用 `open_id` 不能直接复用到新应用，必要时用 `union_id` 映射。飞书 Base / 看板写入仍受暂停开关控制，日报发送与 Base 写入分开处理。
 - 飞书日报图在 Linux headless Chrome 下依赖中文字体；服务器必须安装 `fonts-noto-cjk` / `fontconfig` 并能通过 `fc-match 'Noto Sans CJK SC'` 匹配到 Noto CJK，否则中文会渲染成方框。
@@ -133,12 +138,10 @@ GitHub 应保存：
 - 若飞书日报图中文显示方框，先在服务器检查 `fc-match 'Noto Sans CJK SC'`；修复字体后只需重新生成/下次发送日报图，不需要重发已发送的旧图，除非用户明确要求。
 - `cloud_bi_refresh.sh` 应在生成 BI Portal 前运行 `audit_bi_warehouse.mjs`，否则页面顶部会显示“数据体检：未找到体检文件”。体检有 warning 时仍生成页面，让 BI 直接展示 warning 内容。
 - `ssh shein-bi-tencent` 应能直接登录服务器并具有免密 `sudo` 运维能力；如果后续 HTTPS 占用 443，先迁移 SSH 端口。
-- `shein-bi-cloud-rtv-verify.timer` 应保持 active；烟测可用 `node scripts/verify_shein_rtv_tracking.mjs --transport webapi --limit 3 --case-limit 3 --json`。
-- `shein-bi-cloud-openapi-hl.timer` 应保持 active；若后续再失败，先看 service 日志；此前 `openapi00002` 白名单问题已于 2026-05-16 修复。
 - `shein-bi-cloud-watchdog.timer` 应保持 active；销售/页面过期按 4.5 小时提醒，链接/业务域过期按 48 小时提醒。
-- `shein-bi-cloud-link-business.timer` 应保持 active；手动复跑用 `scripts/cloud_link_business_sync.sh yesterday`。若单店卡在 SBN `x-gw-auth`，优先看该店 attempt 重试日志，不要回退到本机补抓冒充云端日更。
+- `shein-bi-cloud-daily-refresh.timer` 应保持 active；手动复跑用 `scripts/cloud_daily_refresh.sh yesterday`。若单店卡在 SBN `x-gw-auth`，优先看该店 attempt 重试日志；若 RTV 子步骤失败，先看底层脚本日志；HL OpenAPI 销售对账不再是生产日更子步骤；不要回退到本机补抓冒充云端日更。旧的 `shein-bi-cloud-link-business.timer`、`shein-bi-cloud-openapi-hl.timer`、`shein-bi-cloud-rtv-verify.timer` 应保持 masked，避免日更补采重复跑。
 - `shein-bi-cloud-session-manager.timer` 应保持 active；手动复跑用 `scripts/cloud_shein_session_manager.sh`。报告文件在 `outputs/reports/cloud-session-manager-latest.json` / `.md`，若失败会被 watchdog 按 service failed 逻辑提醒。
-- `shein-bi-cloud-link-business.service` 必须以 `User=sheinops` / `Group=sheinops` 运行，因为它会启动当前 19 店 SHEIN Chrome profile；不要改回 root，否则会生成 root-owned profile 文件并让 `shein-bi-cloud-session-manager.service` 第二天因 `EACCES` 失败。ET forwarder 仍保留 root 执行，因为入仓依赖 Docker/root 环境，且它不写 SHEIN 店铺 profile。
+- `shein-bi-cloud-daily-refresh.service` 必须以 `User=sheinops` / `Group=sheinops` 运行，因为它会启动当前 19 店 SHEIN Chrome profile；不要改回 root，否则会生成 root-owned profile 文件并让 `shein-bi-cloud-session-manager.service` 第二天因 `EACCES` 失败。ET forwarder 仍保留 root 执行，因为入仓依赖 Docker/root 环境，且它不写 SHEIN 店铺 profile。
 - V1 时间筛选弹窗回归检查：在云端页面打开时间筛选后点击月份切换，弹窗应保持 `hidden=false`、`aria-expanded=true`，月份标题正确前后移动；日期输入框应为文本输入且 `pattern="\\d{4}-\\d{2}-\\d{2}"`，控制台不应出现 error/warn。
 - 登录态恢复统一走 `restore_shein_store_session.mjs`：先用服务器私有 `state/shein_browser_sessions/*.local.json` / `state/shein_webapi_sessions/*.local.json` bootstrap，再运行 `auto_relogin_shein_store.mjs` 验证 GSP order WebAPI 和 SBN 商品分析页；验证成功后必须立即调用 `export_shein_browser_session.mjs --no-launch` 刷新该店 browser session 导出，避免第二天继续回灌过期 SBN 状态。云端没有保存密码的店铺不能只靠 Chrome autofill 自愈，若 SBN 已过期且无保存密码，需要走 `/cloud-login-maintenance` 处理一次；若只是协议/通知弹窗阻塞，运维代理可先点掉弹窗并重试登录，不必直接判定为用户验证码阻塞。
 - 云端人工登录入口验证：`/cloud-login-maintenance` 返回 `200`；`/cloud-login/novnc/vnc.html` 返回 `200`；创建会话后 `/cloud-login/session/:id` 返回 `200` 且 WebSocket 升级返回 `101 Switching Protocols`；点“我已完成并关闭”后 export/probe 成功且不残留 Chrome/Xvfb/x11vnc/websockify 进程。

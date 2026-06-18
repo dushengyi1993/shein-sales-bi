@@ -20,6 +20,7 @@ if (!['view', 'cache'].includes(PROFIT_MART_SOURCE)) {
   throw new Error(`Invalid SHEIN_BI_PROFIT_MART_SOURCE: ${PROFIT_MART_SOURCE}`);
 }
 const PROFIT_MART_CACHE_SUFFIX = PROFIT_MART_SOURCE === 'cache' ? '_cache' : '';
+const OPENAPI_RECONCILIATION_PANEL_ENABLED = ['1', 'true', 'yes'].includes(String(process.env.SHEIN_BI_OPENAPI_RECONCILIATION_PANEL || '').trim().toLowerCase());
 const portalGenerateStartedAt = Date.now();
 let portalGenerateStage = 'bootstrap';
 const portalGenerateTimer = setTimeout(() => {
@@ -666,6 +667,7 @@ function parsePsqlJson(raw, label) {
 }
 
 async function readOpenApiReconciliation(args) {
+  if (!OPENAPI_RECONCILIATION_PANEL_ENABLED) return [];
   const sql = `
 SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY date DESC, store_key), '[]'::jsonb)::text
 FROM (
@@ -725,6 +727,33 @@ function sanitizeTextValue(s) {
     .trim();
 }
 
+function numberOrNull(value) {
+  if (value == null || value === '') return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  const text = String(value).replace(/,/g, '').trim();
+  if (!text) return null;
+  const match = text.match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const n = Number(match[0]);
+  return Number.isFinite(n) ? n : null;
+}
+
+function nonEmptyObjectEntries(obj) {
+  return Object.entries(obj || {}).filter(([, value]) => {
+    if (value == null) return false;
+    if (typeof value === 'number') return Number.isFinite(value);
+    if (Array.isArray(value)) return value.length > 0;
+    if (typeof value === 'object') return true;
+    return String(value).trim() !== '';
+  });
+}
+
+function marketingPriceLeadKey(storeKey, skc) {
+  const store = sanitizeTextValue(storeKey).toUpperCase();
+  const id = sanitizeTextValue(skc);
+  return store && id ? `${store}__${id}` : '';
+}
+
 function deepSanitize(value) {
   if (typeof value === 'string') return sanitizeTextValue(value);
   if (Array.isArray(value)) return value.map(deepSanitize);
@@ -754,6 +783,309 @@ function uniqueNonEmpty(values) {
   return out;
 }
 
+async function fileStatOrNull(file) {
+  try {
+    return await fs.stat(file);
+  } catch {
+    return null;
+  }
+}
+
+async function readJsonOrNull(file) {
+  try {
+    return JSON.parse(await fs.readFile(file, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function marketingSourceRoots() {
+  const roots = [];
+  const add = value => {
+    const v = String(value || '').trim();
+    if (!v) return;
+    const resolved = path.resolve(v);
+    if (!roots.includes(resolved)) roots.push(resolved);
+  };
+  add(process.env.SHEIN_BI_MARKETING_SOURCE_ROOT);
+  add(ROOT);
+  const base = path.basename(ROOT);
+  if (/-bi-v2$/i.test(base)) add(path.join(path.dirname(ROOT), base.replace(/-bi-v2$/i, '')));
+  return roots;
+}
+
+async function listFilesRecursive(dir, predicate, limit = 2000) {
+  const out = [];
+  async function walk(current) {
+    if (out.length >= limit) return;
+    let entries = [];
+    try {
+      entries = await fs.readdir(current, {withFileTypes: true});
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (out.length >= limit) break;
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full);
+      } else if (!predicate || predicate(full, entry.name)) {
+        const stat = await fileStatOrNull(full);
+        if (stat) out.push({file: full, stat});
+      }
+    }
+  }
+  await walk(dir);
+  return out;
+}
+
+async function latestMarketingStackReviewDir(root) {
+  const base = path.join(root, 'tmp', 'mbrs');
+  let entries = [];
+  try {
+    entries = await fs.readdir(base, {withFileTypes: true});
+  } catch {
+    return null;
+  }
+  const dirs = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^marketing-stack-review-/i.test(entry.name)) continue;
+    const full = path.join(base, entry.name);
+    const stat = await fileStatOrNull(full);
+    if (stat) dirs.push({dir: full, stat});
+  }
+  dirs.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs || b.dir.localeCompare(a.dir));
+  return dirs[0] || null;
+}
+
+function relativeSourcePath(file) {
+  const roots = marketingSourceRoots().sort((a, b) => b.length - a.length);
+  for (const root of roots) {
+    const rel = path.relative(root, file);
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return rel.replace(/\\/g, '/');
+  }
+  return path.relative(ROOT, file).replace(/\\/g, '/');
+}
+
+function marketingEvidenceTypeLooksCurrent(type, kind) {
+  const text = String(type || '');
+  if (kind === 'ordinary') return /current_ordinary_marketing_live_scan|active_ordinary|active_activity|current_activity|current_marketing/i.test(text);
+  if (kind === 'limited') return /current_limited_discount_live_scan|active_limited_discount_live_scan|active_limited|current_discount/i.test(text);
+  return false;
+}
+
+function normalizeMarketingPriceLead(lead) {
+  const next = {...lead};
+  const type = next.marketing_price_evidence_type;
+  if (next.marketing_suggested_ordinary_price_sar != null && marketingEvidenceTypeLooksCurrent(type, 'ordinary')) {
+    next.marketing_ordinary_price_is_current = true;
+  }
+  if (next.marketing_limited_discount_price_sar != null && marketingEvidenceTypeLooksCurrent(type, 'limited')) {
+    next.marketing_limited_discount_is_current = true;
+  }
+  return next;
+}
+
+function mergeMarketingPriceLead(map, lead) {
+  const key = marketingPriceLeadKey(lead.store_key, lead.skc);
+  if (!key) return;
+  const previous = map.get(key);
+  const next = Object.fromEntries(nonEmptyObjectEntries(normalizeMarketingPriceLead(lead)));
+  const source = {
+    type: next.marketing_price_evidence_type || '',
+    file: next.marketing_price_source_file || '',
+    at: next.marketing_price_source_at || '',
+  };
+  if (!previous) {
+    map.set(key, {
+      ...next,
+      marketing_price_evidence_count: 1,
+      marketing_price_sources: source.file ? [source] : [],
+    });
+    return;
+  }
+  const merged = {...previous};
+  for (const [field, value] of nonEmptyObjectEntries(next)) {
+    if (field === 'marketing_price_note' && merged[field]) {
+      if (!String(merged[field]).includes(String(value))) merged[field] = `${merged[field]}；${value}`;
+      continue;
+    }
+    if (field === 'marketing_price_source_file' || field === 'marketing_price_source_at' || field === 'marketing_price_evidence_type') {
+      const currentAt = String(merged.marketing_price_source_at || '');
+      const incomingAt = String(next.marketing_price_source_at || '');
+      const currentRank = Number(merged.marketing_price_source_rank || 0);
+      const incomingRank = Number(next.marketing_price_source_rank || 0);
+      if (incomingRank > currentRank || (incomingRank === currentRank && incomingAt > currentAt)) merged[field] = value;
+      continue;
+    }
+    merged[field] = value;
+  }
+  merged.marketing_price_evidence_count = Number(previous.marketing_price_evidence_count || 1) + 1;
+  const sources = Array.isArray(previous.marketing_price_sources) ? previous.marketing_price_sources.slice() : [];
+  if (source.file && !sources.some(x => x.file === source.file && x.type === source.type)) sources.push(source);
+  merged.marketing_price_sources = sources.slice(-8);
+  map.set(key, merged);
+}
+
+async function readPackagedMarketingPriceLeads(root, map, summary) {
+  const candidates = [
+    path.join(root, 'outputs', 'bi-portal', 'marketing-price-leads.json'),
+    path.join(root, 'tmp', 'marketing-price-leads.latest.json'),
+  ];
+  for (const file of candidates) {
+    const payload = await readJsonOrNull(file);
+    const rows = Array.isArray(payload?.rows) ? payload.rows : (Array.isArray(payload) ? payload : []);
+    if (!rows.length) continue;
+    const stat = await fileStatOrNull(file);
+    for (const row of rows) {
+      mergeMarketingPriceLead(map, {
+        ...row,
+        store_key: row.store_key || row.storeKey,
+        marketing_price_source_file: row.marketing_price_source_file || relativeSourcePath(file),
+        marketing_price_source_at: row.marketing_price_source_at || payload.generatedAt || stat?.mtime?.toISOString?.() || '',
+        marketing_price_evidence_type: row.marketing_price_evidence_type || 'packaged_marketing_price_lead',
+        marketing_price_source_rank: Number(row.marketing_price_source_rank || 30),
+      });
+    }
+    summary.sources.push({
+      type: 'packaged',
+      file: relativeSourcePath(file),
+      rows: rows.length,
+      updatedAt: stat?.mtime?.toISOString?.() || '',
+    });
+  }
+}
+
+async function readMarketingStackReviewPriceLeads(root, map, summary) {
+  const latest = await latestMarketingStackReviewDir(root);
+  if (!latest) return;
+  let files = [];
+  try {
+    files = (await fs.readdir(latest.dir))
+      .filter(name => /^store-[A-Z0-9]+\.json$/i.test(name))
+      .map(name => path.join(latest.dir, name));
+  } catch {
+    return;
+  }
+  let rowCount = 0;
+  for (const file of files) {
+    const doc = await readJsonOrNull(file);
+    const rows = Array.isArray(doc?.rows) ? doc.rows : [];
+    rowCount += rows.length;
+    for (const row of rows) {
+      const storeKey = row['店铺'] || doc?.store;
+      const skc = row['SKC'];
+      if (!storeKey || !skc) continue;
+      mergeMarketingPriceLead(map, {
+        store_key: storeKey,
+        skc,
+        standard_goods_sn: row['标准货号'] || row['供方货号'] || '',
+        marketing_current_price_sar: numberOrNull(row['当前售价SAR']),
+        marketing_current_price_source: row['价格字段来源'] || '',
+        marketing_suggested_ordinary_price_sar: numberOrNull(row['本次建议普通活动价SAR']),
+        marketing_suggested_ordinary_discount_pct: numberOrNull(row['本次建议普通活动折扣%']),
+        marketing_ordinary_price_is_current: false,
+        marketing_ordinary_summary: row['普通营销活动价/折扣'] || '',
+        marketing_limited_discount_name: row['限时折扣名称'] || '',
+        marketing_limited_discount_price_sar: numberOrNull(row['限时折扣价SAR']),
+        marketing_limited_discount_is_current: false,
+        marketing_lowest_base_price_sar: numberOrNull(row['最低促销基准价SAR']),
+        marketing_final_stack_price_sar: numberOrNull(row['叠加后最终成交价SAR']),
+        marketing_coupon_summary: row['优惠券活动ID/名称'] || row['优惠券券档/风险折扣'] || '',
+        marketing_activity_id: row['活动ID'] || '',
+        marketing_activity_name: row['活动名称'] || '',
+        marketing_signup_deadline: row['报名截止'] || '',
+        marketing_activity_start: row['普通活动开始'] || '',
+        marketing_activity_end: row['普通活动结束'] || '',
+        marketing_price_note: row['风险提示'] || row['修改意见/备注'] || '',
+        marketing_price_source_file: relativeSourcePath(file),
+        marketing_price_source_at: doc?.finishedAt || doc?.createdAt || latest.stat.mtime.toISOString(),
+        marketing_price_evidence_type: 'marketing_stack_review',
+        marketing_price_source_rank: 20,
+      });
+    }
+  }
+  summary.sources.push({
+    type: 'marketing_stack_review',
+    dir: relativeSourcePath(latest.dir),
+    files: files.length,
+    rows: rowCount,
+    updatedAt: latest.stat.mtime.toISOString(),
+  });
+}
+
+async function readPriceOverrideLeads(root, map, summary) {
+  const base = path.join(root, 'tmp', 'marketing-signup');
+  const files = await listFilesRecursive(base, (file, name) => /^price-overrides.*\.json$/i.test(name), 800);
+  files.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+  let rowCount = 0;
+  for (const item of files.slice(0, 40)) {
+    const doc = await readJsonOrNull(item.file);
+    const rows = Array.isArray(doc?.items) ? doc.items : (Array.isArray(doc?.rows) ? doc.rows : []);
+    rowCount += rows.length;
+    for (const row of rows) {
+      const storeKey = row.storeKey || row.store_key;
+      const skc = row.skc || row.SKC;
+      if (!storeKey || !skc) continue;
+      mergeMarketingPriceLead(map, {
+        store_key: storeKey,
+        skc,
+        standard_goods_sn: row.canonical || row.goodsSn || row.standard_goods_sn || '',
+        marketing_current_price_sar: numberOrNull(row.currentPrice || row.current_price_sar),
+        marketing_suggested_ordinary_price_sar: numberOrNull(row.ordinaryMarketingPrice || row.ordinaryActivityPrice || row.targetPrice || row.finalTargetPrice),
+        marketing_ordinary_price_is_current: false,
+        marketing_final_target_price_sar: numberOrNull(row.finalTargetPrice || row.targetPrice),
+        marketing_coupon_factor: numberOrNull(row.couponFactor),
+        marketing_limited_discount_price_sar: numberOrNull(row.limitedDiscountPrice),
+        marketing_limited_discount_is_current: false,
+        marketing_activity_id: row.activityId || '',
+        marketing_price_note: [row.combo, row.note, row.rule].filter(Boolean).join('；'),
+        marketing_price_source_file: relativeSourcePath(item.file),
+        marketing_price_source_at: doc?.createdAt || item.stat.mtime.toISOString(),
+        marketing_price_evidence_type: 'price_overrides_plan',
+        marketing_price_source_rank: 25,
+      });
+    }
+  }
+  if (files.length) {
+    summary.sources.push({
+      type: 'price_overrides',
+      files: Math.min(files.length, 40),
+      rows: rowCount,
+      updatedAt: files[0].stat.mtime.toISOString(),
+      newestFile: relativeSourcePath(files[0].file),
+    });
+  }
+}
+
+async function readLatestMarketingPriceLeads() {
+  const map = new Map();
+  const summary = {
+    generatedAt: new Date().toISOString(),
+    label: '营销价格线索',
+    caveat: '来自最近一次活动扫描/报名价格栈产物；用于商品列表辅助判断，不等同于实时链接售价或最终成交价。',
+    sources: [],
+  };
+  for (const root of marketingSourceRoots()) {
+    await readPackagedMarketingPriceLeads(root, map, summary);
+    await readMarketingStackReviewPriceLeads(root, map, summary);
+    await readPriceOverrideLeads(root, map, summary);
+  }
+  summary.rowCount = map.size;
+  return {map, summary};
+}
+
+function enrichLinkRecordWithMarketingPriceLead(record, priceLeadMap) {
+  if (!record?.skc) return record;
+  const key = marketingPriceLeadKey(record.store_key || record.storeKey || '', record.skc);
+  const lead = key ? priceLeadMap.get(key) : null;
+  if (!lead) return record;
+  return {
+    ...record,
+    ...Object.fromEntries(Object.entries(lead).filter(([k, v]) => k.startsWith('marketing_') && v !== undefined && v !== null && v !== '')),
+  };
+}
+
 function saleTrendLabelFromRate(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return '';
@@ -781,6 +1113,17 @@ async function readLatestLinkInventoryMeta(linkDate) {
         file = path.join(storeDir, files[0]);
       }
       const payload = JSON.parse(await fs.readFile(file, 'utf8'));
+      for (const row of payload.linkRows || []) {
+        if (!row?.skc) continue;
+        const key = `${row.storeKey || storeKey}__${row.skc}`;
+        const old = meta.get(key) || {};
+        meta.set(key, {
+          ...old,
+          original_supply_price_range_sar: sanitizeTextValue(row.originalSupplyPriceRange) || old.original_supply_price_range_sar || '',
+          original_supply_price_source: sanitizeTextValue(row.originalSupplyPriceSource) || old.original_supply_price_source || '',
+          current_price_source_at: payload.fetchTime || row.date || old.current_price_source_at || '',
+        });
+      }
       for (const row of payload.inventoryRows || []) {
         if (!row?.skc) continue;
         const key = `${row.storeKey || storeKey}__${row.skc}`;
@@ -796,8 +1139,19 @@ async function readLatestLinkInventoryMeta(linkDate) {
           sale_model: sanitizeTextValue(row.saleModel),
           inventory_quality_grade: sanitizeTextValue(row.qualityGrade),
           shelf_days: row.shelfDays ?? old.shelf_days ?? null,
+          inventory_c7d_sale_cnt: row.c7dSaleCnt ?? old.inventory_c7d_sale_cnt ?? null,
+          inventory_c30d_sale_cnt: row.c30dSaleCnt ?? old.inventory_c30d_sale_cnt ?? null,
+          platform_total_sale_volume: row.totalSaleVolume ?? old.platform_total_sale_volume ?? null,
+          visible_inventory_date: row.date || old.visible_inventory_date || '',
           platform_display_stock: row.platformDisplayStock ?? old.platform_display_stock ?? null,
           platform_saleable_stock: row.platformSaleableStock ?? old.platform_saleable_stock ?? null,
+          current_price_range_sar: sanitizeTextValue(row.finalPriceRange) || old.current_price_range_sar || '',
+          list_price_range_sar: sanitizeTextValue(row.priceRange) || old.list_price_range_sar || '',
+          purchase_price_range_sar: sanitizeTextValue(row.purchasePriceRange) || old.purchase_price_range_sar || '',
+          original_supply_price_range_sar: sanitizeTextValue(row.originalSupplyPriceRange) || old.original_supply_price_range_sar || '',
+          original_supply_price_source: sanitizeTextValue(row.originalSupplyPriceSource) || old.original_supply_price_source || '',
+          current_price_source: sanitizeTextValue(row.finalPriceRange) ? 'finalPriceRange' : (sanitizeTextValue(row.priceRange) ? 'priceRange' : (old.current_price_source || '')),
+          current_price_source_at: payload.fetchTime || row.date || old.current_price_source_at || '',
         });
       }
       for (const row of payload.performanceRows || []) {
@@ -836,13 +1190,7 @@ function enrichLinkRecordWithInventoryMeta(record, meta) {
     extra.inventory_operate_labels,
     extra.inventory_rights_labels,
     extra.performance_new_goods_tag,
-    extra.performance_sale_trend_label,
     extra.performance_total_quality_level,
-    extra.performance_flow_diagnose_tabs,
-    record.activity_label,
-    extra.performance_activity_tag,
-    extra.performance_activity_names,
-    extra.performance_official_operate_buttons,
   ]);
   return {
     ...record,
@@ -886,23 +1234,21 @@ async function enrichPortalDataWithLocalLinkLabels(data) {
     sourceDatePatch.linkWarehouseUpdatedAt = data?.dates?.linkUpdatedAt || '';
   }
 
-  const meta = await readLatestLinkInventoryMeta(linkDate);
-  if (!meta.size) {
-    return {
-      ...data,
-      dates: {
-        ...(data.dates || {}),
-        ...sourceDatePatch,
-      },
-    };
-  }
-  const enrichArray = rows => Array.isArray(rows) ? rows.map(row => enrichLinkRecordWithInventoryMeta(row, meta)) : rows;
+  const [meta, marketingPriceLeads] = await Promise.all([
+    readLatestLinkInventoryMeta(linkDate),
+    readLatestMarketingPriceLeads(),
+  ]);
+  const priceLeadMap = marketingPriceLeads.map || new Map();
+  const enrichArray = rows => Array.isArray(rows)
+    ? rows.map(row => enrichLinkRecordWithMarketingPriceLead(enrichLinkRecordWithInventoryMeta(row, meta), priceLeadMap))
+    : rows;
   return {
     ...data,
     dates: {
       ...(data.dates || {}),
       ...sourceDatePatch,
     },
+    marketingPriceLeads: marketingPriceLeads.summary,
     links: enrichArray(data.links),
     storeLinks: enrichArray(data.storeLinks),
     duplicateLinks: enrichArray(data.duplicateLinks),
@@ -1138,6 +1484,48 @@ store_latest_perf AS (
   FROM fact.link_performance_daily
   GROUP BY store_key
 ),
+store_latest_visible_inventory AS (
+  SELECT store_key, max(snapshot_date) AS inventory_date
+  FROM fact.visible_inventory_snapshot
+  GROUP BY store_key
+),
+visible_inventory_current AS (
+  SELECT
+    v.store_key,
+    v.spu,
+    max(v.snapshot_date) AS visible_inventory_date,
+    sum(coalesce(v.usable_inventory, 0)) AS visible_usable_inventory,
+    sum(coalesce(v.inventory_quantity, 0)) AS visible_inventory_quantity,
+    sum(coalesce(v.order_locked_quantity, 0)) AS visible_order_locked_quantity,
+    sum(coalesce(v.pay_locked_quantity, 0)) AS visible_pay_locked_quantity,
+    string_agg(DISTINCT nullif(v.shelf_statuses,''), ' / ') AS visible_shelf_statuses
+  FROM fact.visible_inventory_snapshot v
+  JOIN store_latest_visible_inventory svi
+    ON svi.store_key = v.store_key AND svi.inventory_date = v.snapshot_date
+  GROUP BY v.store_key, v.spu
+),
+link_lifetime_sales AS (
+  SELECT
+    store_key,
+    skc,
+    sum(coalesce(quantity,0)) FILTER (WHERE coalesce(gross_revenue_sar,0) > 0) AS total_sale_volume,
+    count(DISTINCT order_no) FILTER (WHERE coalesce(gross_revenue_sar,0) > 0) AS total_sale_order_count,
+    max(created_date) FILTER (WHERE coalesce(gross_revenue_sar,0) > 0) AS last_sale_date
+  FROM ${profitOrderItem}
+  WHERE coalesce(skc,'') <> ''
+  GROUP BY store_key, skc
+),
+product_lifetime_sales AS (
+  SELECT
+    store_key,
+    dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
+    sum(coalesce(quantity,0)) FILTER (WHERE coalesce(gross_revenue_sar,0) > 0) AS product_total_sale_volume,
+    count(DISTINCT order_no) FILTER (WHERE coalesce(gross_revenue_sar,0) > 0) AS product_total_sale_order_count,
+    max(created_date) FILTER (WHERE coalesce(gross_revenue_sar,0) > 0) AS product_last_sale_date
+  FROM ${profitOrderItem}
+  WHERE coalesce(standard_goods_sn,'') <> ''
+  GROUP BY store_key, dim.product_canonical_sn(standard_goods_sn)
+),
 link_health_base AS (
   SELECT
     l.snapshot_date AS link_date,
@@ -1151,6 +1539,10 @@ link_health_base AS (
     l.sale_name,
     l.product_name_cn,
     l.image_url,
+    l.first_shelf_time,
+    l.created_time,
+    l.shelf_time,
+    coalesce(l.expect_shelf_time, CASE WHEN coalesce(l.raw_summary->>'expectShelfTime','') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}' THEN (l.raw_summary->>'expectShelfTime')::timestamp ELSE NULL END) AS expect_shelf_time,
     l.shelf_status,
     l.shelf_status_name,
     l.is_on_shelf,
@@ -1167,6 +1559,12 @@ link_health_base AS (
     coalesce(p.c7_sale_cnt, 0) AS c7_sale_cnt,
     coalesce(p.prev7_sale_cnt, 0) AS prev7_sale_cnt,
     coalesce(p.c30_sale_cnt, 0) AS c30_sale_cnt,
+    coalesce(ls.total_sale_volume, 0) AS total_sale_volume,
+    coalesce(ls.total_sale_order_count, 0) AS total_sale_order_count,
+    ls.last_sale_date,
+    coalesce(pls.product_total_sale_volume, 0) AS product_total_sale_volume,
+    coalesce(pls.product_total_sale_order_count, 0) AS product_total_sale_order_count,
+    pls.product_last_sale_date,
     coalesce(p.eps_uv, 0) AS eps_uv,
     coalesce(p.goods_uv, 0) AS goods_uv,
     coalesce(p.click_rate, 0) AS click_rate,
@@ -1179,6 +1577,12 @@ link_health_base AS (
     coalesce(p.bad_comment_rate, 0) AS bad_comment_rate,
     coalesce(p.return_order_count, 0) AS return_order_count,
     coalesce(p.return_item_count, 0) AS return_item_count,
+    vic.visible_inventory_date,
+    vic.visible_usable_inventory,
+    vic.visible_inventory_quantity,
+    vic.visible_order_locked_quantity,
+    vic.visible_pay_locked_quantity,
+    vic.visible_shelf_statuses,
     coalesce(sp.on_shelf_count, 0) AS same_product_on_shelf_count,
     (
       l.is_on_shelf
@@ -1219,6 +1623,12 @@ link_health_base AS (
     ON pl.store_key = l.store_key
   LEFT JOIN fact.link_performance_daily p
     ON p.date = pl.perf_date AND p.store_key = l.store_key AND p.skc = l.skc
+  LEFT JOIN link_lifetime_sales ls
+    ON ls.store_key = l.store_key AND ls.skc = l.skc
+  LEFT JOIN product_lifetime_sales pls
+    ON pls.store_key = l.store_key AND pls.standard_goods_sn = dim.product_canonical_sn(l.standard_goods_sn)
+  LEFT JOIN visible_inventory_current vic
+    ON vic.store_key = l.store_key AND vic.spu = l.spu
   LEFT JOIN (
     SELECT l2.store_key, dim.product_canonical_sn(l2.standard_goods_sn) AS standard_goods_sn, count(*) FILTER (WHERE l2.is_on_shelf) AS on_shelf_count
     FROM fact.link_master_snapshot l2
@@ -1229,6 +1639,9 @@ link_health_base AS (
   ) sp
     ON sp.store_key = l.store_key AND sp.standard_goods_sn = dim.product_canonical_sn(l.standard_goods_sn)
   WHERE coalesce(l.is_hard_dead,false) = false
+    AND coalesce(l.standard_goods_sn,'') <> ''
+    AND l.standard_goods_sn !~* '^(EN|IEC)[[:space:]]*[0-9]'
+    AND l.standard_goods_sn !~* '[0-9]{4}[+]A[0-9]+'
 ),
 link_health_enriched AS (
   SELECT
@@ -1279,16 +1692,24 @@ links AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) AS data
   FROM (
     SELECT
-      link_date, store_key, group_key, standard_goods_sn, skc, product_name_cn,
+      link_date, store_key, group_key, standard_goods_sn, raw_goods_sn, skc, spu, sale_name, product_name_cn,
+      nullif(image_url,'') AS image_url,
+      first_shelf_time, created_time, shelf_time, expect_shelf_time,
+      visible_inventory_date,
+      round(visible_usable_inventory::numeric, 0) AS visible_usable_inventory,
+      round(visible_inventory_quantity::numeric, 0) AS visible_inventory_quantity,
+      round(visible_order_locked_quantity::numeric, 0) AS visible_order_locked_quantity,
+      round(visible_pay_locked_quantity::numeric, 0) AS visible_pay_locked_quantity,
+      visible_shelf_statuses,
       shelf_status_name, shelf_age_days,
-      sale_cnt, c7_sale_cnt, c30_sale_cnt,
+      sale_cnt, c7_sale_cnt, c30_sale_cnt, total_sale_volume, total_sale_order_count, last_sale_date, product_total_sale_volume, product_total_sale_order_count, product_last_sale_date,
       eps_uv, goods_uv, click_rate, pay_rate,
       c7_eps_uv, c7_goods_uv, c7_pay_rate, c30_eps_uv, c30_goods_uv, c30_pay_rate,
       quality_grade, comment_count, bad_comment_rate, return_order_count,
       same_product_on_shelf_count, retire_candidate,
       high_exposure_low_click, high_visit_low_pay, wait_shelf_block_candidate,
       health_bucket, skc_label, activity_label, shein_tag_code, category4_name,
-      is_on_shelf, is_wait_shelf
+      is_on_shelf, is_wait_shelf, is_sold_out, is_out_shelf, wait_shelf_blocked, wait_shelf_block_reason
     FROM link_health_enriched
     WHERE retire_candidate
        OR high_exposure_low_click
@@ -1308,16 +1729,24 @@ duplicate_links AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) AS data
   FROM (
     SELECT
-      link_date, store_key, group_key, standard_goods_sn, skc, product_name_cn,
+      link_date, store_key, group_key, standard_goods_sn, raw_goods_sn, skc, spu, sale_name, product_name_cn,
+      nullif(image_url,'') AS image_url,
+      first_shelf_time, created_time, shelf_time, expect_shelf_time,
+      visible_inventory_date,
+      round(visible_usable_inventory::numeric, 0) AS visible_usable_inventory,
+      round(visible_inventory_quantity::numeric, 0) AS visible_inventory_quantity,
+      round(visible_order_locked_quantity::numeric, 0) AS visible_order_locked_quantity,
+      round(visible_pay_locked_quantity::numeric, 0) AS visible_pay_locked_quantity,
+      visible_shelf_statuses,
       shelf_status_name, shelf_age_days,
-      sale_cnt, c7_sale_cnt, c30_sale_cnt,
+      sale_cnt, c7_sale_cnt, c30_sale_cnt, total_sale_volume, total_sale_order_count, last_sale_date, product_total_sale_volume, product_total_sale_order_count, product_last_sale_date,
       eps_uv, goods_uv, click_rate, pay_rate,
       c7_eps_uv, c7_goods_uv, c7_pay_rate, c30_eps_uv, c30_goods_uv, c30_pay_rate,
       quality_grade, comment_count, bad_comment_rate, return_order_count,
       same_product_on_shelf_count, retire_candidate,
       high_exposure_low_click, high_visit_low_pay, wait_shelf_block_candidate,
       health_bucket, skc_label, activity_label, shein_tag_code, category4_name,
-      is_on_shelf, is_wait_shelf,
+      is_on_shelf, is_wait_shelf, is_sold_out, is_out_shelf, wait_shelf_blocked, wait_shelf_block_reason,
       max(coalesce(c30_sale_cnt,0)) OVER (PARTITION BY store_key, standard_goods_sn) AS group_best_c30,
       row_number() OVER (
         PARTITION BY store_key, standard_goods_sn
@@ -1334,16 +1763,24 @@ store_links AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) AS data
   FROM (
     SELECT
-      link_date, store_key, group_key, standard_goods_sn, skc, product_name_cn,
+      link_date, store_key, group_key, standard_goods_sn, raw_goods_sn, skc, spu, sale_name, product_name_cn,
+      nullif(image_url,'') AS image_url,
+      first_shelf_time, created_time, shelf_time, expect_shelf_time,
+      visible_inventory_date,
+      round(visible_usable_inventory::numeric, 0) AS visible_usable_inventory,
+      round(visible_inventory_quantity::numeric, 0) AS visible_inventory_quantity,
+      round(visible_order_locked_quantity::numeric, 0) AS visible_order_locked_quantity,
+      round(visible_pay_locked_quantity::numeric, 0) AS visible_pay_locked_quantity,
+      visible_shelf_statuses,
       shelf_status_name, shelf_age_days,
-      sale_cnt, c7_sale_cnt, c30_sale_cnt,
+      sale_cnt, c7_sale_cnt, c30_sale_cnt, total_sale_volume, total_sale_order_count, last_sale_date, product_total_sale_volume, product_total_sale_order_count, product_last_sale_date,
       eps_uv, goods_uv, click_rate, pay_rate,
       c7_eps_uv, c7_goods_uv, c7_pay_rate, c30_eps_uv, c30_goods_uv, c30_pay_rate,
       quality_grade, comment_count, bad_comment_rate, return_order_count,
       same_product_on_shelf_count, retire_candidate,
       high_exposure_low_click, high_visit_low_pay, wait_shelf_block_candidate,
       health_bucket, skc_label, activity_label, shein_tag_code, category4_name,
-      is_on_shelf, is_wait_shelf
+      is_on_shelf, is_wait_shelf, is_sold_out, is_out_shelf, wait_shelf_blocked, wait_shelf_block_reason
     FROM link_health_enriched
     WHERE coalesce(skc,'') <> ''
     ORDER BY store_key, coalesce(c30_sale_cnt,0) DESC, coalesce(c30_goods_uv, goods_uv, 0) DESC, skc
@@ -1357,16 +1794,19 @@ matrix AS (
       store_key, group_key, standard_goods_sn, coverage_status,
       link_date,
       has_on_shelf_link, need_supplement_link, link_count, on_shelf_count,
-      wait_shelf_count, sold_out_count, duplicate_on_shelf,
-      best_skc, best_link_c30_sale,
+      wait_shelf_count, sold_out_count, out_shelf_count, duplicate_on_shelf,
+      best_skc, skc_list, best_link_c30_sale,
       round(sales_sar::numeric, 2) AS sales_sar,
       quantity, action_count, focus_action_count, round(max_action_score::numeric, 1) AS max_action_score
     FROM mart.bi_store_product_matrix_current
-    WHERE need_supplement_link
+    WHERE coalesce(standard_goods_sn,'') <> ''
+      AND standard_goods_sn !~* '^(EN|IEC)[[:space:]]*[0-9]'
+      AND standard_goods_sn !~* '[0-9]{4}[+]A[0-9]+'
+      AND (need_supplement_link
        OR has_on_shelf_link
        OR link_count > 0
        OR action_count > 0
-       OR sales_sar > 0
+       OR sales_sar > 0)
     ORDER BY coalesce(max_action_score,0) DESC, sales_sar DESC, store_key, standard_goods_sn
     LIMIT 2400
   ) t
@@ -2554,8 +2994,8 @@ after_sales_base AS (
     a.skc,
     a.goods_title,
     a.quantity,
-    round(coalesce(om.order_sales_sar, a.estimated_income_amount, a.price_amount_total, a.price_amount, 0)::numeric, 2) AS price_amount_total,
-    round(coalesce(om.order_sales_sar, a.estimated_income_amount, a.price_amount_total, a.price_amount, 0)::numeric, 2) AS amount_sar,
+    round(coalesce(a.estimated_income_amount, a.price_amount_total, a.price_amount, om.order_sales_sar, 0)::numeric, 2) AS price_amount_total,
+    round(coalesce(a.estimated_income_amount, a.price_amount_total, a.price_amount, om.order_sales_sar, 0)::numeric, 2) AS amount_sar,
     a.resolution_plan_name,
     a.order_sub_status_name,
     a.return_package_status_name,
@@ -2646,6 +3086,67 @@ after_sales_base AS (
   WHERE a.request_time IS NOT NULL
     AND coalesce(a.order_sub_status_name,'') <> '已取消'
 ),
+after_sales_grouped AS (
+  SELECT
+    max(snapshot_date) AS snapshot_date,
+    store_key,
+    group_key,
+    request_time,
+    order_created_date,
+    order_create_time,
+    order_sales_sar,
+    aftersales_order_no,
+    return_order_no,
+    order_no,
+    standard_goods_sn,
+    nullif(skc,'') AS skc,
+    min(nullif(goods_title,'')) AS goods_title,
+    sum(coalesce(quantity,0)) AS quantity,
+    round(sum(coalesce(price_amount_total,0))::numeric, 2) AS price_amount_total,
+    round(sum(coalesce(amount_sar,0))::numeric, 2) AS amount_sar,
+    resolution_plan_name,
+    order_sub_status_name,
+    return_package_status_name,
+    reason_names,
+    appeal_status,
+    is_cod,
+    payment_label,
+    payment_method,
+    open_days,
+    status_group,
+    status_group_label,
+    is_open,
+    reason_group,
+    rtv_group,
+    rtv_trace_status,
+    rtv_recovery_status,
+    shein_return_express_numbers,
+    rtv_express_numbers,
+    et_return_order_ids,
+    rtv_warehouses,
+    rtv_latest_received_time,
+    max(coalesce(rtv_received_quantity,0)) AS rtv_received_quantity,
+    max(coalesce(rtv_received_to_09_quantity,0)) AS rtv_received_to_09_quantity,
+    max(coalesce(rtv_received_to_rtv_quantity,0)) AS rtv_received_to_rtv_quantity,
+    max(coalesce(final_09_quantity,0)) AS final_09_quantity,
+    max(coalesce(still_03_quantity,0)) AS still_03_quantity,
+    max(coalesce(final_damaged_quantity,0)) AS final_damaged_quantity,
+    max(coalesce(final_scrap_quantity,0)) AS final_scrap_quantity,
+    max(coalesce(final_other_quantity,0)) AS final_other_quantity,
+    destination_summary,
+    next_action,
+    max(search_text) AS search_text
+  FROM after_sales_base
+  GROUP BY
+    store_key, group_key, request_time, order_created_date, order_create_time, order_sales_sar,
+    aftersales_order_no, return_order_no, order_no, standard_goods_sn, nullif(skc,''),
+    resolution_plan_name, order_sub_status_name, return_package_status_name, reason_names,
+    appeal_status, is_cod, payment_label, payment_method, open_days, status_group,
+    status_group_label, is_open, reason_group, rtv_group, rtv_trace_status,
+    rtv_recovery_status, shein_return_express_numbers, rtv_express_numbers,
+    et_return_order_ids, rtv_warehouses, rtv_latest_received_time,
+    destination_summary, next_action
+),
 after_sales AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) AS data
   FROM (
@@ -2694,7 +3195,7 @@ after_sales AS (
       final_scrap_quantity,
       destination_summary,
       next_action
-    FROM after_sales_base
+    FROM after_sales_grouped
     ORDER BY request_time DESC NULLS LAST, amount_sar DESC NULLS LAST
     LIMIT 8000
   ) t
@@ -2710,7 +3211,7 @@ after_sales_review AS (
         ELSE '待复核'
       END AS review_status,
       b.next_action AS review_reason
-    FROM after_sales_base b
+    FROM after_sales_grouped b
     WHERE b.is_open
     ORDER BY b.request_time DESC NULLS LAST, b.open_days DESC, b.amount_sar DESC NULLS LAST
     LIMIT 1000
