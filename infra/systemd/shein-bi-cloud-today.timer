@@ -1,5 +1,5 @@
 [Unit]
-Description=Run SHEIN BI cloud intraday refresh every two hours around the clock
+Description=Run SHEIN BI cloud intraday refresh every two hours on the hour
 
 [Timer]
 OnCalendar=*-*-* 00,02,06,08,10,12,14,16,18,20,22:00:00

@@ -116,6 +116,7 @@ const timestampTag = formatTimestamp(now);
 const runDir = path.join(TMP_ROOT, `marketing-stack-review-${timestampTag}`);
 const selectedStores = STORES.filter(s => s.enabled)
   .filter(s => !args.stores.length || args.stores.includes(String(s.storeKey).toUpperCase()));
+const enabledStores = STORES.filter(s => s.enabled);
 
 if (!selectedStores.length) {
   throw new Error(`No enabled stores selected. --stores=${args.stores.join(',') || '(empty)'}`);
@@ -207,7 +208,8 @@ const limitRows = buildLimitDiscountRows(linkIndex);
 const summaryRows = summarizeBySku(detailRows);
 const storeStatuses = audit.stores.map(s => summarizeStoreAuditCoverage(s, s.store));
 
-const base = path.join(OUT_DIR, `marketing-stack-review-${dateTag}`);
+const outputNaming = resolveStackReviewOutputNaming(dateTag, selectedStores, enabledStores);
+const base = outputNaming.basePath;
 const files = {
   detailCsv: `${base}-detail.csv`,
   bySkuCsv: `${base}-by-sku.csv`,
@@ -229,13 +231,22 @@ await fs.writeFile(files.json, JSON.stringify({
   source: audit.source,
   biSourceDiagnostics: BI_SOURCE_SELECTION.diagnostics.map(d => ({type: d.type, source: d.source})),
   selectedStores: selectedStores.map(s => ({storeKey: s.storeKey, groupKey: s.groupKey, shopName: s.shopName})),
+  coverage: {
+    enabledStoreCount: outputNaming.enabledStoreCount,
+    selectedStoreCount: outputNaming.selectedStoreCount,
+    completeEnabledStoreCoverage: outputNaming.completeEnabledStoreCoverage,
+    outputName: outputNaming.outputName,
+  },
   storeStatuses,
   missingStores: storeStatuses.filter(s => !s.ok).map(s => s.storeKey),
   notes: [
     '本文件为只读审核输出；未报名、未提交、未取消或调价限时折扣。',
+    outputNaming.completeEnabledStoreCoverage
+      ? '本次覆盖全部启用店铺，可作为当天默认全量营销栈报告。'
+      : '本次仅覆盖部分启用店铺，输出文件名自动追加 stores 后缀，不覆盖当天默认全量营销栈报告；每日 guard 不应把它当全量 no-action 依据。',
     '限时折扣价格若未从当前接口读到，会作为风险字段保留，不按安全通过。',
     '多档优惠券活动会额外读取 15% 券档规则页商品集合；活动列表 apply/allow 仅保留作参考，不作为 15% 档最终报名验证口径。',
-    '15% 优惠券配套计划从 price-overrides 的 couponFactor≈0.85 / 明确仅15%券规则派生；禁止叠券、未知、缺 price-overrides 行一律不允许报名。',
+    '15% 优惠券只允许从 price-overrides 里明确标记为高曝光支持、滞销高库存引流或清货试验的可选流量券策略派生；历史 couponFactor≈0.85 / 仅15%券价格保障口径默认阻断。',
   ],
   couponTargetPlan: COUPON_TARGET_PLAN ? {
     path: COUPON_TARGET_PLAN.path,
@@ -314,6 +325,32 @@ function parseArgs(argv) {
   if (!Number.isFinite(out.hours) || out.hours <= 0) out.hours = 48;
   if (out.couponWorstRatePct !== null && !Number.isFinite(out.couponWorstRatePct)) out.couponWorstRatePct = null;
   return out;
+}
+
+function resolveStackReviewOutputNaming(dateTag, selectedStores, enabledStores) {
+  const selectedKeys = selectedStores.map(s => cleanStoreKey(s.storeKey)).filter(Boolean).sort();
+  const enabledKeys = enabledStores.map(s => cleanStoreKey(s.storeKey)).filter(Boolean).sort();
+  const completeEnabledStoreCoverage = selectedKeys.length === enabledKeys.length
+    && selectedKeys.every((key, idx) => key === enabledKeys[idx]);
+  const outputName = completeEnabledStoreCoverage
+    ? `marketing-stack-review-${dateTag}`
+    : `marketing-stack-review-${dateTag}-stores-${safeOutputStoreSuffix(selectedKeys)}`;
+  return {
+    outputName,
+    basePath: path.join(OUT_DIR, outputName),
+    selectedStoreCount: selectedKeys.length,
+    enabledStoreCount: enabledKeys.length,
+    completeEnabledStoreCoverage,
+  };
+}
+
+function cleanStoreKey(value) {
+  return String(value || '').trim().toUpperCase();
+}
+
+function safeOutputStoreSuffix(storeKeys) {
+  const suffix = storeKeys.map(key => key.replace(/[^A-Z0-9_-]/g, '')).filter(Boolean).join('-');
+  return suffix || 'partial';
 }
 
 async function scanStore(store) {
@@ -1493,6 +1530,7 @@ function summarizeBySku(rows) {
 }
 
 function renderMarkdown(summaryRows, detailRows, couponRows, limitRows, files) {
+  const outputNaming = resolveStackReviewOutputNaming(dateTag, selectedStores, enabledStores);
   const risky = detailRows.filter(r => r['风险提示']).length;
   const lowMargin = detailRows.filter(r => {
     const m = parsePct(r['含仓储费利润率']);
@@ -1506,9 +1544,10 @@ function renderMarkdown(summaryRows, detailRows, couponRows, limitRows, files) {
     .slice(0, 80);
   const previewHeaders = ['店铺','活动ID','标准货号','当前售价SAR','本次建议普通活动价SAR','优惠券券档/风险折扣','叠加后最终成交价SAR','含仓储费利润率','风险提示','修改意见/备注'];
   return [
-    `# 19 店营销活动叠加安全审核（${dateTag}）`,
+    `# 营销活动叠加安全审核（${dateTag}）`,
     '',
     '- 状态：只读扫描输出；未报名、未提交、未取消或调价限时折扣。',
+    `- 覆盖模式：${outputNaming.completeEnabledStoreCoverage ? '全部启用店铺' : `部分店铺（不会覆盖当天全量报告，输出名 ${outputNaming.outputName}）`}`,
     `- 覆盖店铺：${selectedStores.map(s => s.storeKey).join(', ')}`,
     `- 明细行：${detailRows.length}`,
     `- 标准货号行：${summaryRows.length}`,
@@ -1524,7 +1563,7 @@ function renderMarkdown(summaryRows, detailRows, couponRows, limitRows, files) {
     `- 链接活动标签日期：${BI.dates?.linkDate || ''}`,
     `- 成本来源：${COST_DOC.source || ''}`,
     `- 优惠券配套计划：${COUPON_TARGET_PLAN ? path.relative(ROOT, COUPON_TARGET_PLAN.path) : '未加载；仅展示券档可报/已报集合，不判断是否应报'}`,
-    `- 优惠券配套口径：${COUPON_TARGET_PLAN ? '仅 price-overrides 中 couponFactor≈0.85 或明确仅15%券的 SKC 允许进入 15%券计划；禁止叠券/未知/缺 price-overrides 行全部 fail closed。' : '未加载。'}`,
+    `- 优惠券配套口径：${COUPON_TARGET_PLAN ? '仅 price-overrides 中明确标记为高曝光支持、滞销高库存引流或清货试验的可选流量券 SKC 允许进入 15%券计划；历史 couponFactor≈0.85 / 仅15%券价格保障口径全部 fail closed。' : '未加载。'}`,
     '',
     '## 文件',
     '',

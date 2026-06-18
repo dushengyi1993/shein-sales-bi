@@ -11,7 +11,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT_DIR = path.join(ROOT, 'outputs', 'reports');
 const FETCH_DIR = path.join(ROOT, 'outputs', 'shein_fetch');
 const FX = 1.8;
-const DAILY_REPORT_FONT_STACK = "'Noto Sans CJK SC','Noto Sans SC','WenQuanYi Micro Hei','Microsoft YaHei','PingFang SC',Arial,sans-serif";
+const FONT_STACK = "'Noto Sans CJK SC','Noto Sans SC','WenQuanYi Micro Hei','Microsoft YaHei','PingFang SC',Arial,sans-serif";
+const MONO_STACK = "'DIN Alternate','Arial Narrow','Roboto Mono','Consolas',Arial,sans-serif";
+const OWNER_FALLBACK = {key: 'UNASSIGNED', name: '未分配', color: '#64748b', stores: []};
 
 function parseArgs(argv) {
   const args = {date: null, groups: ['DSY', 'LGM'], out: null, asOf: null};
@@ -27,18 +29,22 @@ function parseArgs(argv) {
 
 function pad2(n) { return String(n).padStart(2, '0'); }
 function round2(n) { return Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100; }
-function money(n) { return Number(n || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}); }
+function money(n, digits = 2) { return Number(n || 0).toLocaleString('en-US', {minimumFractionDigits: digits, maximumFractionDigits: digits}); }
+function int(n) { return Number(n || 0).toLocaleString('en-US', {maximumFractionDigits: 0}); }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c])); }
 function cut(s, max) { s = String(s || ''); return s.length > max ? `${s.slice(0, max - 1)}…` : s; }
+function avg(n, d) { return d ? round2(Number(n || 0) / Number(d || 0)) : 0; }
+function pct(n, d) { return d ? `${Math.round(Number(n || 0) * 1000 / Number(d || 0)) / 10}%` : '0%'; }
+function cleanColor(value, fallback = '#64748b') { return /^#[0-9a-f]{6}$/i.test(String(value || '')) ? String(value) : fallback; }
 function seconds(t) {
   const m = String(t || '').match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
   return m ? Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3] || 0) : 24 * 3600 - 1;
 }
-function bjParts() {
+function bjParts(date = new Date()) {
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-  }).formatToParts(new Date()).reduce((a, p) => { if (p.type !== 'literal') a[p.type] = p.value; return a; }, {});
+  }).formatToParts(date).reduce((a, p) => { if (p.type !== 'literal') a[p.type] = p.value; return a; }, {});
 }
 function bjDate(offset = 0) {
   const p = bjParts();
@@ -52,8 +58,8 @@ function isoToBjString(value) {
   if (!value) return null;
   const d = new Date(value);
   if (!Number.isFinite(d.getTime())) return null;
-  const parts = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false}).formatToParts(d).reduce((a, p) => { if (p.type !== 'literal') a[p.type] = p.value; return a; }, {});
-  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+  const p = bjParts(d);
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`;
 }
 function prevDate(date) {
   const d = new Date(`${date}T00:00:00Z`);
@@ -63,6 +69,11 @@ function prevDate(date) {
 async function readJson(file, fallback = null) {
   try { return JSON.parse(await fs.readFile(file, 'utf8')); }
   catch (err) { if (err.code === 'ENOENT') return fallback; throw err; }
+}
+async function readStoreDay(storeKey, date) {
+  const file = path.join(FETCH_DIR, storeKey, `${date}.json`);
+  try { return {file, missingFile: false, obj: JSON.parse(await fs.readFile(file, 'utf8'))}; }
+  catch (err) { if (err.code === 'ENOENT') return {file, missingFile: true, obj: {}}; throw err; }
 }
 function run(cmd, args) {
   return new Promise((resolve, reject) => {
@@ -78,22 +89,41 @@ async function renderPng(htmlFile, pngFile, width, height) {
   const chrome = requireChromeExecutable('Chrome/Chromium for daily report rendering');
   const tmp = path.join(ROOT, 'profiles', 'daily-report-render');
   await fs.mkdir(tmp, {recursive: true});
-  const fileUrl = process.platform === 'win32'
-    ? `file:///${htmlFile.replace(/\\/g, '/')}`
-    : `file://${htmlFile}`;
+  const fileUrl = process.platform === 'win32' ? `file:///${htmlFile.replace(/\\/g, '/')}` : `file://${htmlFile}`;
   const chromeArgs = [
     `--user-data-dir=${tmp}`, '--headless=new', '--disable-gpu', '--hide-scrollbars', '--disable-dev-shm-usage',
-    '--force-device-scale-factor=1', `--window-size=${width},${height}`,
-    `--screenshot=${pngFile}`,
+    '--force-device-scale-factor=1', `--window-size=${width},${height}`, `--screenshot=${pngFile}`,
   ];
   if (process.platform !== 'win32') chromeArgs.push('--no-sandbox');
   chromeArgs.push(fileUrl);
   await run(chrome, chromeArgs);
 }
+function storeByKey(cfg, key) {
+  return cfg.stores.find(s => String(s.storeKey).toUpperCase() === String(key).toUpperCase());
+}
 function storesForGroups(cfg, groups) {
-  return groups.flatMap(groupKey => (cfg.groups?.[groupKey] || [])
-    .map(storeKey => cfg.stores.find(s => s.storeKey === storeKey))
-    .filter(Boolean));
+  const seen = new Set();
+  const stores = [];
+  for (const groupKey of groups) {
+    for (const storeKey of cfg.groups?.[groupKey] || []) {
+      const key = String(storeKey).toUpperCase();
+      if (seen.has(key)) continue;
+      const store = storeByKey(cfg, key);
+      if (store) {
+        seen.add(key);
+        stores.push(store);
+      }
+    }
+  }
+  return stores;
+}
+function ownerLookup(cfg) {
+  const map = new Map();
+  for (const group of cfg.ownerGroups || []) {
+    const owner = {...group, color: cleanColor(group.color)};
+    for (const storeKey of group.stores || []) map.set(String(storeKey).toUpperCase(), owner);
+  }
+  return map;
 }
 function includeBefore(item, asOfSec) {
   const t = String(item.orderCreateTime || item.allocateTimeFull || item.allocateTime || '');
@@ -101,122 +131,224 @@ function includeBefore(item, asOfSec) {
   return !m || seconds(m[1]) <= asOfSec;
 }
 function itemOrderKey(item) { return item.orderNo || item.orderId || item.orderSn || item.orderCode || ''; }
-async function daySummary(stores, date, {asOfSec = null} = {}) {
-  const storeMap = new Map();
+function itemSku(item) {
+  const raw = String(item.goodsSn || item.skuSn || item.skuCode || item.skcName || '').trim();
+  return normalizeGoodsSn(raw, {goodsTitle: item.goodsTitle}) || raw || '未识别货号';
+}
+function summarizeCoverage(rows) {
+  const total = rows.length;
+  const ready = rows.filter(r => !r.missing).length;
+  const missing = rows.filter(r => r.missing).map(r => r.storeKey);
+  return {total, ready, missing, text: `${ready}/${total} 店`};
+}
+function addProduct(productMap, sku, storeRow, qty, sar, orderKey) {
+  const row = productMap.get(sku) || {sku, qty: 0, sar: 0, orders: new Set(), stores: new Set()};
+  row.qty += qty;
+  row.sar = round2(row.sar + sar);
+  if (orderKey) row.orders.add(orderKey);
+  row.stores.add(storeRow.storeKey);
+  productMap.set(sku, row);
+}
+async function daySummary(cfg, stores, date, {asOfSec = null} = {}) {
+  const owners = ownerLookup(cfg);
+  const rows = [];
   const products = new Map();
   const fetchTimes = [];
   for (const store of stores) {
-    storeMap.set(store.storeKey, {storeKey: store.storeKey, group: store.groupKey || store.group || '', sar: 0, orders: new Set(), qty: 0});
-    const obj = await readJson(path.join(FETCH_DIR, store.storeKey, `${date}.json`), {});
+    const owner = owners.get(String(store.storeKey).toUpperCase()) || OWNER_FALLBACK;
+    const row = {
+      storeKey: store.storeKey,
+      group: store.groupKey || store.group || '',
+      ownerKey: owner.key,
+      ownerName: owner.name,
+      ownerColor: cleanColor(owner.color),
+      sar: 0,
+      rmb: 0,
+      ordersSet: new Set(),
+      orders: 0,
+      qty: 0,
+      missing: false,
+      fetchTime: null,
+    };
+    const {missingFile, obj} = await readStoreDay(store.storeKey, date);
+    const goodsRows = Array.isArray(obj.goodsRows) ? obj.goodsRows : [];
+    row.missing = missingFile || (!obj.summary && !goodsRows.length);
+    row.fetchTime = obj.fetchTime || null;
     if (obj.fetchTime) fetchTimes.push(obj.fetchTime);
-    for (const item of obj.goodsRows || []) {
-      if (!isValidSalesGoodsRow(item)) continue;
-      const qty = salesQuantity(item);
-      const sar = salesAmountSar(item);
-      if (qty <= 0 || sar <= 0) continue;
-      if (asOfSec !== null && !includeBefore(item, asOfSec)) continue;
-      const row = storeMap.get(store.storeKey);
-      row.sar = round2(row.sar + sar);
-      row.qty += qty;
-      const orderKey = itemOrderKey(item);
-      if (orderKey) row.orders.add(orderKey);
-      if (store.productStatsEnabled === false) continue;
-      const sku = normalizeGoodsSn(String(item.goodsSn || item.skuSn || item.skuCode || item.skcName || ''), {goodsTitle: item.goodsTitle});
-      if (!sku) continue;
-      const product = products.get(sku) || {sku, qty: 0, sar: 0};
-      product.qty += qty;
-      product.sar = round2(product.sar + sar);
-      products.set(sku, product);
+
+    if (goodsRows.length) {
+      for (const item of goodsRows) {
+        if (!isValidSalesGoodsRow(item)) continue;
+        if (asOfSec !== null && !includeBefore(item, asOfSec)) continue;
+        const qty = salesQuantity(item);
+        const sar = salesAmountSar(item);
+        if (qty <= 0 || sar <= 0) continue;
+        row.sar = round2(row.sar + sar);
+        row.qty += qty;
+        const orderKey = itemOrderKey(item);
+        if (orderKey) row.ordersSet.add(orderKey);
+        if (store.productStatsEnabled !== false) addProduct(products, itemSku(item), row, qty, sar, orderKey);
+      }
+      row.orders = row.ordersSet.size;
+    } else if (obj.summary) {
+      row.sar = round2(obj.summary.salesSar || 0);
+      row.orders = Number(obj.summary.positiveAmountOrderCount || 0);
+      row.qty = Number(obj.summary.quantityPositiveAmount || 0);
     }
+    row.rmb = round2(row.sar * FX);
+    rows.push(row);
   }
-  const rows = [...storeMap.values()].map(r => ({...r, orders: r.orders.size}));
   const totalSar = round2(rows.reduce((sum, r) => sum + r.sar, 0));
+  const productRows = [...products.values()].map(p => ({...p, orders: p.orders.size, stores: p.stores.size}))
+    .sort((a, b) => b.qty - a.qty || b.sar - a.sar || a.sku.localeCompare(b.sku, 'zh-CN'));
   return {
     date,
-    rows,
+    rows: rows.map(({ordersSet, ...r}) => r),
     totalSar,
     totalRmb: round2(totalSar * FX),
     orders: rows.reduce((sum, r) => sum + r.orders, 0),
     qty: rows.reduce((sum, r) => sum + r.qty, 0),
-    rankedStores: [...rows].sort((a, b) => b.sar - a.sar || b.orders - a.orders || a.storeKey.localeCompare(b.storeKey)),
-    rankedProducts: [...products.values()].sort((a, b) => b.qty - a.qty || b.sar - a.sar || a.sku.localeCompare(b.sku, 'zh-CN')),
+    activeProducts: productRows.filter(p => p.qty > 0).length,
+    rankedStores: rows.map(({ordersSet, ...r}) => r).sort((a, b) => b.sar - a.sar || b.orders - a.orders || b.qty - a.qty || a.storeKey.localeCompare(b.storeKey)),
+    rankedProducts: productRows,
     latestFetchTime: fetchTimes.map(t => new Date(t)).filter(d => Number.isFinite(d.getTime())).sort((a, b) => b - a)[0]?.toISOString() || null,
   };
 }
-function groupBlocks(cfg, groupKeys, summary) {
-  const all = {label: '全部', sar: summary.totalSar, rmb: summary.totalRmb, orders: summary.orders, qty: summary.qty};
-  const groups = groupKeys.map(groupKey => {
-    const keys = new Set(cfg.groups?.[groupKey] || []);
-    const rows = summary.rows.filter(r => keys.has(r.storeKey));
+
+function ownerBlocks(cfg, stores, summary) {
+  const selected = new Set(stores.map(s => s.storeKey));
+  const owners = [...(cfg.ownerGroups || []).map(g => ({...g, color: cleanColor(g.color)}))];
+  const assigned = new Set(owners.flatMap(g => g.stores || []));
+  const unassignedStores = stores.map(s => s.storeKey).filter(k => !assigned.has(k));
+  if (unassignedStores.length) owners.push({...OWNER_FALLBACK, stores: unassignedStores});
+  return owners.map(owner => {
+    const storeKeys = (owner.stores || []).filter(k => selected.has(k));
+    const rows = summary.rows.filter(r => storeKeys.includes(r.storeKey));
     const sar = round2(rows.reduce((sum, r) => sum + r.sar, 0));
-    return {label: groupKey, sar, rmb: round2(sar * FX), orders: rows.reduce((sum, r) => sum + r.orders, 0), qty: rows.reduce((sum, r) => sum + r.qty, 0)};
-  });
-  return [all, ...groups];
+    return {
+      key: owner.key,
+      name: owner.name,
+      color: cleanColor(owner.color),
+      stores: storeKeys,
+      sar,
+      rmb: round2(sar * FX),
+      orders: rows.reduce((sum, r) => sum + r.orders, 0),
+      qty: rows.reduce((sum, r) => sum + r.qty, 0),
+      ready: rows.filter(r => !r.missing).length,
+      total: rows.length,
+    };
+  }).filter(o => o.total > 0);
 }
 
 const defs = `<defs>
-  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#07111f"/><stop offset="0.55" stop-color="#111827"/><stop offset="1" stop-color="#241238"/></linearGradient>
-  <linearGradient id="all" x1="0" x2="1"><stop offset="0" stop-color="#10b981"/><stop offset="1" stop-color="#34d399"/></linearGradient>
-  <linearGradient id="product" x1="0" x2="1"><stop offset="0" stop-color="#a78bfa"/><stop offset="1" stop-color="#f472b6"/></linearGradient>
-  <linearGradient id="dsy" x1="0" x2="1"><stop offset="0" stop-color="#2563eb"/><stop offset="1" stop-color="#60a5fa"/></linearGradient>
-  <linearGradient id="lgm" x1="0" x2="1"><stop offset="0" stop-color="#f97316"/><stop offset="1" stop-color="#fb923c"/></linearGradient>
+  <linearGradient id="hero" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0f172a"/><stop offset="0.66" stop-color="#1e293b"/><stop offset="1" stop-color="#312e81"/></linearGradient>
+  <linearGradient id="blue" x1="0" x2="1"><stop offset="0" stop-color="#2563eb"/><stop offset="1" stop-color="#60a5fa"/></linearGradient>
+  <linearGradient id="orange" x1="0" x2="1"><stop offset="0" stop-color="#f97316"/><stop offset="1" stop-color="#fb923c"/></linearGradient>
+  <linearGradient id="green" x1="0" x2="1"><stop offset="0" stop-color="#059669"/><stop offset="1" stop-color="#34d399"/></linearGradient>
+  <linearGradient id="purple" x1="0" x2="1"><stop offset="0" stop-color="#7c3aed"/><stop offset="1" stop-color="#c084fc"/></linearGradient>
   <style>
-    .title{font:800 46px ${DAILY_REPORT_FONT_STACK};fill:#f8fafc}
-    .sub{font:400 19px ${DAILY_REPORT_FONT_STACK};fill:#cbd5e1}
-    .section{font:800 28px ${DAILY_REPORT_FONT_STACK};fill:#fff}
-    .cardTitle{font:700 18px ${DAILY_REPORT_FONT_STACK};fill:#c4b5fd}
-    .num{font:800 35px ${DAILY_REPORT_FONT_STACK};fill:#fff}
-    .small{font:400 16px ${DAILY_REPORT_FONT_STACK};fill:#94a3b8}
-    .label{font:600 18px ${DAILY_REPORT_FONT_STACK};fill:#e2e8f0}
-    .val{font:700 17px ${DAILY_REPORT_FONT_STACK};fill:#f8fafc}
+    .title{font:800 46px ${FONT_STACK};fill:#fff;letter-spacing:-.5px}
+    .heroSub{font:400 18px ${FONT_STACK};fill:#cbd5e1}
+    .section{font:800 27px ${FONT_STACK};fill:#0f172a}
+    .note{font:400 15px ${FONT_STACK};fill:#64748b}
+    .cardLabel{font:700 15px ${FONT_STACK};fill:#64748b}
+    .cardNum{font:800 30px ${MONO_STACK};fill:#0f172a}
+    .cardSub{font:500 14px ${FONT_STACK};fill:#64748b}
+    .rowLabel{font:700 16px ${FONT_STACK};fill:#0f172a}
+    .rowMeta{font:600 13px ${FONT_STACK};fill:#64748b}
+    .rowVal{font:800 15px ${MONO_STACK};fill:#0f172a}
+    .tiny{font:600 12px ${FONT_STACK};fill:#64748b}
+    .mono{font:800 15px ${MONO_STACK};fill:#0f172a}
   </style>
 </defs>`;
-function sectionTitle(x, y, text, note = '') {
-  return `<text x="${x}" y="${y}" class="section">${esc(text)}</text>${note ? `<text x="${x + 250}" y="${y}" class="sub">${esc(note)}</text>` : ''}`;
+function sectionTitle(x, y, title, note = '') {
+  return `<text x="${x}" y="${y}" class="section">${esc(title)}</text>${note ? `<text x="${x + 360}" y="${y}" class="note">${esc(note)}</text>` : ''}`;
 }
-function scopeStyle(label) {
-  if (String(label).toUpperCase() === 'DSY') return {bg:'#0b2454cc', stroke:'#2563eb', title:'#93c5fd', grad:'dsy'};
-  if (String(label).toUpperCase() === 'LGM') return {bg:'#3b1b0acc', stroke:'#f97316', title:'#fdba74', grad:'lgm'};
-  return {bg:'#052e25cc', stroke:'#10b981', title:'#86efac', grad:'all'};
+function pill(x, y, text, color, w = null) {
+  const width = w || Math.max(48, String(text).length * 15 + 18);
+  return `<rect x="${x}" y="${y}" width="${width}" height="24" rx="12" fill="${cleanColor(color)}" opacity=".12" stroke="${cleanColor(color)}" stroke-width="1"/>
+    <text x="${x + width / 2}" y="${y + 16}" text-anchor="middle" class="tiny" style="fill:${cleanColor(color)}">${esc(text)}</text>`;
 }
-function metricCard(x, y, w, block, mode) {
-  const style = scopeStyle(block.label);
-  const title = `${block.label}${mode === 'sales' ? '销售额' : '订单 / 销量'}`;
-  const main = mode === 'sales' ? money(block.sar) : `${block.orders} / ${block.qty}`;
-  const sub = mode === 'sales' ? `SAR / ${money(block.rmb)} RMB` : '有效订单 / 产品件数';
-  return `<rect x="${x}" y="${y}" width="${w}" height="124" rx="24" fill="${style.bg}" stroke="${style.stroke}" stroke-width="1.6"/>
-    <rect x="${x}" y="${y}" width="7" height="124" rx="4" fill="url(#${style.grad})"/>
-    <text x="${x + 22}" y="${y + 39}" class="cardTitle" style="fill:${style.title}">${esc(title)}</text>
-    <text x="${x + 22}" y="${y + 84}" class="num">${esc(main)}</text>
-    <text x="${x + 24}" y="${y + 112}" class="small">${esc(sub)}</text>`;
+function kpiCard(x, y, w, label, main, sub, accent = '#2563eb') {
+  return `<rect x="${x}" y="${y}" width="${w}" height="118" rx="22" fill="#ffffff" stroke="#e2e8f0"/>
+    <rect x="${x}" y="${y}" width="6" height="118" rx="3" fill="${cleanColor(accent)}"/>
+    <text x="${x + 22}" y="${y + 35}" class="cardLabel">${esc(label)}</text>
+    <text x="${x + 22}" y="${y + 73}" class="cardNum">${esc(main)}</text>
+    <text x="${x + 22}" y="${y + 99}" class="cardSub">${esc(sub)}</text>`;
 }
-function metricRow(blocks, y, mode) {
-  const x0 = 48, gap = 24, w = 312;
-  return blocks.slice(0, 3).map((b, i) => metricCard(x0 + i * (w + gap), y, w, b, mode)).join('');
-}
-function ranking(rows, {x, y, title, mode = 'store', maxRows = 15}) {
-  const rowH = mode === 'product' ? 42 : 32;
-  const labelW = mode === 'product' ? 390 : 92;
-  const valueW = mode === 'product' ? 0 : 220;
-  const right = 1032;
-  const barW = mode === 'product' ? 440 : Math.max(520, right - x - labelW - 14 - valueW);
-  const max = Math.max(1, ...rows.slice(0, maxRows).map(r => mode === 'product' ? r.qty : r.sar));
-  let out = sectionTitle(x, y, title);
-  rows.slice(0, maxRows).forEach((r, i) => {
-    const yy = y + 38 + i * rowH;
-    const label = mode === 'product' ? `${String(i + 1).padStart(2, '0')} ${r.sku}` : `${String(i + 1).padStart(2, '0')} ${r.storeKey}`;
-    const value = mode === 'product' ? r.qty : r.sar;
-    const display = mode === 'product' ? `${r.qty} 件 / ${money(r.sar)} SAR` : `${money(r.sar)} SAR｜单 ${r.orders}｜量 ${r.qty}`;
-    const bw = Math.round(barW * value / max);
-    const fillId = mode === 'product' ? 'product' : (String(r.group).toUpperCase() === 'LGM' ? 'lgm' : 'dsy');
-    out += `<text x="${x}" y="${yy + 18}" class="label">${esc(cut(label, mode === 'product' ? 46 : 12))}</text>
-      <rect x="${x + labelW}" y="${yy + 4}" width="${barW}" height="18" rx="9" fill="#172033"/>
-      <rect x="${x + labelW}" y="${yy + 4}" width="${bw}" height="18" rx="9" fill="url(#${fillId})"/>
-      <text x="${x + labelW + barW + 14}" y="${yy + 18}" class="val">${esc(display)}</text>`;
+function ownerTable(rows, {x, y, width, totalSar}) {
+  const rowH = 39;
+  const max = Math.max(1, ...rows.map(r => r.sar));
+  let out = ''; // section title is rendered by caller
+  const boxY = y + 18;
+  const h = 46 + rows.length * rowH;
+  out += `<rect x="${x}" y="${boxY}" width="${width}" height="${h}" rx="22" fill="#fff" stroke="#e2e8f0"/>`;
+  out += `<text x="${x + 24}" y="${boxY + 32}" class="rowMeta">负责人 / 店铺覆盖</text><text x="${x + width - 245}" y="${boxY + 32}" class="rowMeta">销售额</text><text x="${x + width - 110}" y="${boxY + 32}" class="rowMeta">订单 / 销量</text>`;
+  rows.forEach((r, i) => {
+    const yy = boxY + 46 + i * rowH;
+    const barW = Math.round(210 * r.sar / max);
+    out += `<line x1="${x + 18}" y1="${yy - 8}" x2="${x + width - 18}" y2="${yy - 8}" stroke="#f1f5f9"/>
+      <circle cx="${x + 30}" cy="${yy + 8}" r="7" fill="${r.color}"/>
+      <text x="${x + 48}" y="${yy + 13}" class="rowLabel">${esc(r.name)}</text>
+      <text x="${x + 116}" y="${yy + 13}" class="rowMeta">${r.ready}/${r.total} 店｜${pct(r.sar, totalSar)}</text>
+      <rect x="${x + 248}" y="${yy}" width="210" height="14" rx="7" fill="#e2e8f0"/>
+      <rect x="${x + 248}" y="${yy}" width="${barW}" height="14" rx="7" fill="${r.color}"/>
+      <text x="${x + width - 245}" y="${yy + 13}" class="rowVal">${money(r.sar)}</text>
+      <text x="${x + width - 110}" y="${yy + 13}" class="rowMeta">${int(r.orders)} / ${int(r.qty)}</text>`;
   });
-  return out;
+  return {svg: out, height: h + 32};
 }
-function rankingHeight(rows, maxRows, mode) { return 50 + Math.min(rows.length, maxRows) * (mode === 'product' ? 42 : 32); }
+function storeRanking(rows, {x, y, width, title, note, maxRows = rows.length}) {
+  const visible = rows.slice(0, maxRows);
+  const rowH = 35;
+  const max = Math.max(1, ...visible.map(r => r.sar));
+  let out = sectionTitle(x, y, title, note);
+  const boxY = y + 18;
+  const h = 48 + visible.length * rowH;
+  out += `<rect x="${x}" y="${boxY}" width="${width}" height="${h}" rx="22" fill="#fff" stroke="#e2e8f0"/>`;
+  out += `<text x="${x + 24}" y="${boxY + 32}" class="rowMeta">店铺</text><text x="${x + 128}" y="${boxY + 32}" class="rowMeta">负责人</text><text x="${x + width - 300}" y="${boxY + 32}" class="rowMeta">销售额 / 订单 / 销量</text>`;
+  visible.forEach((r, i) => {
+    const yy = boxY + 48 + i * rowH;
+    const barX = x + 245;
+    const barW = width - 563;
+    const bw = Math.max(r.sar > 0 ? 4 : 0, Math.round(barW * r.sar / max));
+    out += `<line x1="${x + 18}" y1="${yy - 9}" x2="${x + width - 18}" y2="${yy - 9}" stroke="#f8fafc"/>
+      <text x="${x + 24}" y="${yy + 13}" class="rowLabel">${String(i + 1).padStart(2, '0')} ${esc(r.storeKey)}</text>
+      ${pill(x + 108, yy - 6, r.ownerName || '未分配', r.ownerColor || '#64748b', 92)}
+      <rect x="${barX}" y="${yy}" width="${barW}" height="14" rx="7" fill="#e2e8f0"/>
+      <rect x="${barX}" y="${yy}" width="${bw}" height="14" rx="7" fill="${r.ownerColor || '#64748b'}"/>
+      <text x="${x + width - 300}" y="${yy + 13}" class="rowVal">${money(r.sar)} SAR｜${int(r.orders)} 单｜${int(r.qty)} 件</text>`;
+  });
+  return {svg: out, height: h + 34};
+}
+function productRanking(rows, {x, y, width, title, note, maxRows = 12}) {
+  const visible = rows.slice(0, maxRows);
+  const rowH = 37;
+  const max = Math.max(1, ...visible.map(r => r.qty));
+  let out = sectionTitle(x, y, title, note);
+  const boxY = y + 18;
+  const h = 48 + visible.length * rowH;
+  out += `<rect x="${x}" y="${boxY}" width="${width}" height="${h}" rx="22" fill="#fff" stroke="#e2e8f0"/>`;
+  out += `<text x="${x + 24}" y="${boxY + 32}" class="rowMeta">标准货号</text><text x="${x + width - 330}" y="${boxY + 32}" class="rowMeta">销量 / 销售额 / 店铺</text>`;
+  visible.forEach((r, i) => {
+    const yy = boxY + 48 + i * rowH;
+    const barX = x + 430;
+    const barW = width - 770;
+    const bw = Math.max(r.qty > 0 ? 4 : 0, Math.round(barW * r.qty / max));
+    out += `<line x1="${x + 18}" y1="${yy - 9}" x2="${x + width - 18}" y2="${yy - 9}" stroke="#f8fafc"/>
+      <text x="${x + 24}" y="${yy + 13}" class="rowLabel">${esc(cut(`${String(i + 1).padStart(2, '0')} ${r.sku}`, 36))}</text>
+      <rect x="${barX}" y="${yy}" width="${barW}" height="14" rx="7" fill="#e2e8f0"/>
+      <rect x="${barX}" y="${yy}" width="${bw}" height="14" rx="7" fill="url(#purple)"/>
+      <text x="${x + width - 330}" y="${yy + 13}" class="rowVal">${int(r.qty)} 件｜${money(r.sar)} SAR｜${int(r.stores)} 店</text>`;
+  });
+  if (!visible.length) out += `<text x="${x + 24}" y="${boxY + 76}" class="rowMeta">暂无产品明细数据</text>`;
+  return {svg: out, height: h + 34};
+}
+function deltaLine(today, yesterday) {
+  const diff = round2(today.totalSar - yesterday.totalSar);
+  const sign = diff >= 0 ? '+' : '';
+  return `${money(today.totalSar)} SAR，较昨日全天 ${sign}${money(diff)} SAR`;
+}
 
 const args = parseArgs(process.argv.slice(2));
 const date = args.date || bjDate();
@@ -225,52 +357,85 @@ const asOf = args.asOf || bjTime();
 const asOfSec = seconds(asOf);
 const cfg = await readJson(path.join(ROOT, 'config', 'stores.json'));
 const stores = storesForGroups(cfg, args.groups);
-const today = await daySummary(stores, date, {asOfSec});
-const yesterdayFull = await daySummary(stores, ydate);
-const todayBlocks = groupBlocks(cfg, args.groups, today);
-const yesterdayBlocks = groupBlocks(cfg, args.groups, yesterdayFull);
-const todayFetchText = isoToBjString(today.latestFetchTime) || `${date} ${asOf.slice(0, 5)}:00`;
+const today = await daySummary(cfg, stores, date, {asOfSec});
+const yesterdayFull = await daySummary(cfg, stores, ydate);
+const ownerRows = ownerBlocks(cfg, stores, today).sort((a, b) => b.sar - a.sar || a.name.localeCompare(b.name, 'zh-CN'));
+const todayCoverage = summarizeCoverage(today.rows);
+const yesterdayCoverage = summarizeCoverage(yesterdayFull.rows);
+const fetchText = isoToBjString(today.latestFetchTime) || '未找到今日抓取时间';
+const healthColor = todayCoverage.ready === todayCoverage.total ? '#059669' : (todayCoverage.ready ? '#f97316' : '#dc2626');
+const missingText = todayCoverage.missing.length ? `缺失：${todayCoverage.missing.join('、')}` : '所有店铺已有今日明细';
 
-const todayStoreRows = today.rankedStores.length;
-const yesterdayStoreRows = yesterdayFull.rankedStores.length;
-const yesterdayProductRows = Math.min(24, Math.max(12, yesterdayFull.rankedProducts.length));
-let y = 48;
-y += 95;
-y += 44 + 124 + 24 + 124 + 42;
-y += rankingHeight(today.rankedStores, todayStoreRows, 'store') + 52;
-y += 44 + 124 + 24 + 124 + 42;
-y += rankingHeight(yesterdayFull.rankedStores, yesterdayStoreRows, 'store') + 48;
-y += rankingHeight(yesterdayFull.rankedProducts, yesterdayProductRows, 'product') + 80;
-const height = Math.max(1900, y);
-const width = 1080;
+const width = 1280;
+let cy = 40;
+let body = '';
+body += `<rect x="32" y="${cy}" width="1216" height="156" rx="30" fill="url(#hero)"/>`;
+body += `<text x="64" y="${cy + 58}" class="title">SHEIN 经营日报</text>`;
+body += `<text x="66" y="${cy + 96}" class="heroSub">${esc(date)}｜截至 ${esc(asOf.slice(0, 5))}｜最新抓取 ${esc(fetchText)}｜生成 ${esc(bjNow())}（北京时间）</text>`;
+body += `<rect x="1010" y="${cy + 42}" width="196" height="42" rx="21" fill="${healthColor}" opacity=".18" stroke="${healthColor}"/>
+  <text x="1108" y="${cy + 69}" text-anchor="middle" style="font:800 18px ${FONT_STACK};fill:#fff">覆盖 ${todayCoverage.text}</text>`;
+body += `<text x="66" y="${cy + 130}" class="heroSub">口径：订单创建时间｜正金额商品明细｜标准货号归并｜全店铺负责人分组｜1 SAR = 1.8 RMB</text>`;
+cy += 196;
+
+body += sectionTitle(48, cy, '今日核心指标', '今日为截至当前时间，昨日为完整自然日，仅作参考');
+cy += 24;
+const cardGap = 16;
+const cardW = Math.floor((width - 96 - cardGap * 4) / 5);
+const cards = [
+  ['总成交额', `${money(today.totalSar)} SAR`, `${money(today.totalRmb)} RMB`, '#2563eb'],
+  ['有效订单', `${int(today.orders)} 单`, `客单 ${money(avg(today.totalSar, today.orders))} SAR`, '#f97316'],
+  ['产品销量', `${int(today.qty)} 件`, `件均 ${money(avg(today.totalSar, today.qty))} SAR`, '#7c3aed'],
+  ['动销货号', `${int(today.activeProducts)} 个`, `昨日 ${int(yesterdayFull.activeProducts)} 个`, '#db2777'],
+  ['数据覆盖', todayCoverage.text, missingText, healthColor],
+];
+cards.forEach((c, i) => { body += kpiCard(48 + i * (cardW + cardGap), cy, cardW, c[0], c[1], c[2], c[3]); });
+cy += 148;
+
+body += sectionTitle(48, cy, '负责人分组概览', `全店铺 ${today.rows.length} 店｜今日总额：${deltaLine(today, yesterdayFull)}｜昨日覆盖 ${yesterdayCoverage.text}`);
+cy += 36;
+const owner = ownerTable(ownerRows, {x: 48, y: cy, width: 1184, totalSar: today.totalSar});
+body += owner.svg;
+cy += owner.height;
+
+const todayStore = storeRanking(today.rankedStores, {x: 48, y: cy, width: 1184, title: `今日店铺排行（${today.rows.length} 店）`, note: '颜色按负责人区分，按销售额降序'});
+body += todayStore.svg;
+cy += todayStore.height;
+
+const yesterdayStore = storeRanking(yesterdayFull.rankedStores, {x: 48, y: cy, width: 1184, title: '昨日完整店铺 Top 10', note: `${ydate} 完整自然日，帮助判断今天起量情况`, maxRows: 10});
+body += yesterdayStore.svg;
+cy += yesterdayStore.height;
+
+const yesterdayProducts = productRanking(yesterdayFull.rankedProducts, {x: 48, y: cy, width: 1184, title: '昨日完整产品销量 Top 12', note: '用于次日补货、活动和链接动作优先级', maxRows: 12});
+body += yesterdayProducts.svg;
+cy += yesterdayProducts.height;
+
+const footerY = cy + 8;
+body += `<rect x="48" y="${footerY}" width="1184" height="82" rx="22" fill="#fff7ed" stroke="#fed7aa"/>
+  <text x="72" y="${footerY + 32}" style="font:800 16px ${FONT_STACK};fill:#9a3412">数据健康提示</text>
+  <text x="72" y="${footerY + 58}" class="note" style="fill:#9a3412">今日覆盖 ${todayCoverage.text}；${esc(missingText)}。如出现缺失，日报图保留已成功店铺数据，不把单店失败扩散成整条中断。</text>`;
+cy += 126;
+
+const height = Math.max(1850, cy);
 await fs.mkdir(OUT_DIR, {recursive: true});
 const png = args.out ? path.resolve(args.out) : path.join(OUT_DIR, `daily-visual-report-${date}.png`);
 const htmlFile = png.replace(/\.png$/i, '.html');
-
-let body = '';
-body += `<text x="48" y="72" class="title">SHEIN 经营日报</text>`;
-body += `<text x="50" y="110" class="sub">数据抓取时间：${esc(todayFetchText)} ｜ 统计截至：${esc(date)} ${esc(asOf.slice(0, 5))} ｜ 生成时间：${esc(bjNow())}（北京时间）</text>`;
-let cy = 152;
-body += sectionTitle(48, cy, '今日截至当前', '销售额、订单和销量分别展示 全部 / DSY / LGM');
-cy += 26;
-body += metricRow(todayBlocks, cy, 'sales');
-cy += 148;
-body += metricRow(todayBlocks, cy, 'orders');
-cy += 178;
-body += ranking(today.rankedStores, {x: 48, y: cy, title: `今日店铺排行（${todayStoreRows}店完整）`, mode: 'store', maxRows: todayStoreRows});
-cy += rankingHeight(today.rankedStores, todayStoreRows, 'store') + 56;
-body += sectionTitle(48, cy, '\u6628\u65e5\u5168\u5929', `\u6628\u65e5 ${ydate} \u5b8c\u6574\u81ea\u7136\u65e5`);
-cy += 26;
-body += metricRow(yesterdayBlocks, cy, 'sales');
-cy += 148;
-body += metricRow(yesterdayBlocks, cy, 'orders');
-cy += 178;
-body += ranking(yesterdayFull.rankedStores, {x: 48, y: cy, title: `\u6628\u65e5\u5168\u5929\u5e97\u94fa\u6392\u884c（${yesterdayStoreRows}\u5e97\u5b8c\u6574）`, mode: 'store', maxRows: yesterdayStoreRows});
-cy += rankingHeight(yesterdayFull.rankedStores, yesterdayStoreRows, 'store') + 52;
-body += ranking(yesterdayFull.rankedProducts, {x: 48, y: cy, title: '\u6628\u65e5\u5168\u5929\u4ea7\u54c1\u9500\u91cf\u6392\u884c', mode: 'product', maxRows: yesterdayProductRows});
-body += `<text x="48" y="${height - 38}" class="small">\u53e3\u5f84\uff1a\u8ba2\u5355\u521b\u5efa\u65f6\u95f4\uff5c\u5317\u4eac\u65f6\u95f4\u81ea\u7136\u65e5\uff5c\u4eca\u65e5\u6309\u5f53\u524d\u622a\u6b62\u65f6\u95f4\u7edf\u8ba1\uff1b\u6628\u65e5\u6309\u5b8c\u6574\u81ea\u7136\u65e5\u7edf\u8ba1\u3002</text>`;
-
-const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${defs}<rect width="${width}" height="${height}" fill="url(#bg)"/><circle cx="930" cy="130" r="165" fill="#7c3aed" opacity=".20"/><circle cx="130" cy="${height - 130}" r="210" fill="#06b6d4" opacity=".13"/>${body}</svg>`;
-await fs.writeFile(htmlFile, `<!doctype html><meta charset="utf-8"><style>body{margin:0;background:#08111f}svg{display:block}</style>${svg}`, 'utf8');
+const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${defs}<rect width="${width}" height="${height}" fill="#f8fafc"/><circle cx="1180" cy="230" r="190" fill="#dbeafe" opacity=".65"/><circle cx="80" cy="${height - 160}" r="220" fill="#ffedd5" opacity=".8"/>${body}</svg>`;
+await fs.writeFile(htmlFile, `<!doctype html><meta charset="utf-8"><style>body{margin:0;background:#f8fafc}svg{display:block}</style>${svg}`, 'utf8');
 await renderPng(htmlFile, png, width, height);
-console.log(JSON.stringify({ok: true, date, yesterday: ydate, asOf, png, html: htmlFile, height, todaySar: today.totalSar, yesterdayFullSar: yesterdayFull.totalSar, todayStores: today.rankedStores.length, yesterdayProducts: yesterdayFull.rankedProducts.length}, null, 2));
+console.log(JSON.stringify({
+  ok: true,
+  date,
+  yesterday: ydate,
+  asOf,
+  png,
+  html: htmlFile,
+  width,
+  height,
+  todaySar: today.totalSar,
+  yesterdayFullSar: yesterdayFull.totalSar,
+  todayStores: today.rows.length,
+  todayCoverage,
+  yesterdayCoverage,
+  ownerRows: ownerRows.length,
+  productRows: yesterdayFull.rankedProducts.length,
+}, null, 2));

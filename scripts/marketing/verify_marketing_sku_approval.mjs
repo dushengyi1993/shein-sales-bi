@@ -100,8 +100,8 @@ for (const issue of issues) {
   }
 
   if (/利润率应该是30/.test(note)) {
-    const price = asNumber(row['建议最终成交价SAR']);
-    const productCost = asNumber(row['商品成本SAR（不含仓储）']);
+    const price = minNumber(row['建议最终成交价SAR']);
+    const productCost = maxNumber(row['商品成本SAR（不含仓储）']);
     const shown = asPercent(row['不含仓储利润率']);
     const expected = price && productCost !== null ? (price - productCost) / price : null;
     if (expected === null || shown === null || Math.abs(expected - shown) > 0.002) {
@@ -127,10 +127,10 @@ for (const row of rows) {
   const sku = String(row['标准货号'] || '').trim();
   const status = String(row['系统结论'] || '');
   const combo = String(row['建议活动组合'] || '');
-  const storage = asNumber(row['仓储费SAR/件']);
-  const productCost = asNumber(row['商品成本SAR（不含仓储）']);
-  const fullCost = asNumber(row['含仓储成本SAR']);
-  const price = asNumber(row['建议最终成交价SAR']);
+  const storage = maxNumber(row['仓储费SAR/件']);
+  const productCost = maxNumber(row['商品成本SAR（不含仓储）']);
+  const fullCost = maxNumber(row['含仓储成本SAR']);
+  const price = minNumber(row['建议最终成交价SAR']);
   const productMargin = asPercent(row['不含仓储利润率']);
   const fullMargin = asPercent(row['含仓储利润率']);
   const normalized = normalizeGoodsSnDetailed(sku);
@@ -249,6 +249,26 @@ function asNumber(value) {
   if (value === null || value === undefined || value === '') return null;
   const n = Number(String(value).replace(/[%SAR,\s]/g, ''));
   return Number.isFinite(n) ? n : null;
+}
+
+function numberRange(value) {
+  if (value === null || value === undefined || value === '') return [];
+  const text = String(value).replace(/[%SAR,\s]/g, '').trim();
+  if (!text) return [];
+  return text
+    .split('-')
+    .map(part => Number(part))
+    .filter(Number.isFinite);
+}
+
+function minNumber(value) {
+  const values = numberRange(value);
+  return values.length ? Math.min(...values) : null;
+}
+
+function maxNumber(value) {
+  const values = numberRange(value);
+  return values.length ? Math.max(...values) : null;
 }
 
 function asPercent(value) {

@@ -228,7 +228,7 @@ function buildStorageRow(row, sourceFile, sourceSheet, idx) {
 }
 
 async function parseWorkbookWithPython(file) {
-  const py = fssync.existsSync(DEFAULT_PYTHON) ? DEFAULT_PYTHON : 'python';
+  const py = pythonCommand();
   const code = String.raw`
 import json, sys, os, csv
 file = sys.argv[1]
@@ -273,6 +273,20 @@ print(json.dumps(out, ensure_ascii=False))
   return JSON.parse(res.stdout || '[]');
 }
 
+function commandExists(command) {
+  const res = spawnSync(command, ['--version'], {encoding: 'utf8', windowsHide: true, timeout: 10_000});
+  return res.status === 0;
+}
+
+function pythonCommand() {
+  if (process.platform === 'win32' && fssync.existsSync(DEFAULT_PYTHON)) return DEFAULT_PYTHON;
+  const candidates = process.platform === 'win32' ? ['python', 'python3'] : ['python3', 'python'];
+  for (const candidate of candidates) {
+    if (commandExists(candidate)) return candidate;
+  }
+  throw new Error(`Python runtime not found; tried ${candidates.join(', ')}`);
+}
+
 function csvEscape(v) {
   if (v === null || v === undefined || v === '') return '';
   const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
@@ -289,13 +303,8 @@ function qIdent(ident) {
 }
 
 async function runPsqlScript(args, script) {
-  const child = spawn('wsl', [
-    '-d', args.distro,
-    '--',
-    'bash',
-    '-lc',
-    `sudo docker exec -i ${args.container} psql -U ${args.user} -d ${args.database} -v ON_ERROR_STOP=1`,
-  ], {cwd: ROOT, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe']});
+  const psql = psqlSpawnCommand(args);
+  const child = spawn(psql.command, psql.args, {cwd: ROOT, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe']});
   let stdout = '';
   let stderr = '';
   child.stdout.on('data', d => { stdout += d.toString(); });
@@ -305,6 +314,30 @@ async function runPsqlScript(args, script) {
   const code = await new Promise(resolve => child.on('close', resolve));
   if (code !== 0) throw new Error(`psql failed (${code})\n${stderr}\n${stdout.slice(-2000)}`);
   return stdout.trim();
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function dockerPrefix() {
+  if (process.platform === 'win32') return 'sudo ';
+  if (typeof process.getuid === 'function' && process.getuid() === 0) return '';
+  return 'sudo ';
+}
+
+function psqlSpawnCommand(args) {
+  const psql = `${dockerPrefix()}docker exec -i ${shellQuote(args.container)} psql -U ${shellQuote(args.user)} -d ${shellQuote(args.database)} -v ON_ERROR_STOP=1`;
+  if (process.platform === 'win32') {
+    return {
+      command: 'wsl',
+      args: ['-d', args.distro, '--', 'bash', '-lc', psql],
+    };
+  }
+  return {
+    command: 'bash',
+    args: ['-lc', psql],
+  };
 }
 
 function sqlLiteral(value) {

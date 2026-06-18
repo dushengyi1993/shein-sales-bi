@@ -1,0 +1,35 @@
+{
+  "skill_name": "shein-marketing-ops",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "这期 SHEIN 43914/43915/45488 活动要报，先给我一个按货号汇总的 Excel 方案，优惠券也要体现出来。",
+      "expected_output": "先刷新云端/live 证据，生成包含按货号汇总、店铺差异、报名明细、剔除/阻塞项、15%券流量试验计划和备注列的 Excel，不直接提交。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "普通活动我确认了，你先报一个店给我看，没问题后其他店自动报完。",
+      "expected_output": "先首店预填不提交，用户确认后提交首店普通活动，回读已报集合，再 dry-run/提交安全的 15% 券；首店复核无误后分批执行其他店并逐批回读。",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "有几个券因为旧活动会低于目标，等旧活动结束后你自己补上。",
+      "expected_output": "设置或更新既有 heartbeat，到旧活动结束窗口后先全店 dry-run，只对价格栈守卫通过的 15% 券真实提交，提交后回读，并恢复日常巡检。",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "活动生效以后你每天巡检，发现订单成交价低于目标。先告诉我是不是这次活动的问题，别再拿旧利润率乱报警。",
+      "expected_output": "使用当前已执行 selection-plan + price-overrides 和活动生效窗口审计订单商品行 currencyPrice；窗口外订单只作线索，用户批准的低利润/清货目标视为 expected，只有当前窗口内偏离才报警并归因到价格栈层。",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "guard 说优惠券预算缺证据，你自己处理一下。",
+      "expected_output": "先运行 set_coupon_site_budget.mjs --activity-id 34810 --budget 1000 --read-only 只读回读；只有 fresh execute 或 readback_current 且 activity/site/currency/budget/writeEndpointCalls 全部通过才清 blocker。没有用户明确授权时不得 --execute 补预算。",
+      "files": []
+    }
+  ]
+}

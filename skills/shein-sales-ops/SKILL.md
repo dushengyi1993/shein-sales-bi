@@ -12,6 +12,13 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 
 读取后优先用脚本获取当前状态，不要把历史流水全塞进上下文。
 
+
+## 营销活动报名入口
+- 用户提到 `报活动`、`营销活动报名`、`普通活动`、`优惠券活动`、`15%券`、`限时折扣`、`价格栈`、`低价/高价成交`、`旧活动叠加`、`活动方案 Excel` 或活动 ID 如 `43914/43915/45488/34810` 时，优先同时使用 `shein-marketing-ops` skill。
+- 营销活动不能只看提交成功弹窗；必须按 `shein-marketing-ops` 的规范执行：云端/live 证据、用户审核 Excel、首店预填确认、分批提交、普通活动回读、可选流量券 dry-run/提交、全局复核和人工授权补救。
+- 优惠券按 `店铺+SKC` 生效，不按普通活动隔离；普通活动、限时折扣和优惠券是同一价格栈，实际成交价必须对齐当前用户批准的 `finalTargetPrice`。
+- `34810` 是当前允许使用的优惠券活动 ID，自动/半自动报名只允许该活动里的 `15% OFF` 档；预算证据只接受 fresh execute 或严格只读 `readback_current`，缺证据时先只读回读，不得擅自 `--execute` 补预算。
+
 ## 当前资产
 - 工作区：`E:\Codex WorkSpace\Shein销售统计`
 - Base：`https://zcnm3ts63aph.feishu.cn/base/SnnQbrAu6aLzMWsnEICcy0cKnJh`（当前标题已标注多维表格同步暂停、日报正常）
@@ -86,7 +93,7 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 云端异常通知：服务器执行 `node scripts/cloud_ops_watchdog.mjs --dry-run` 先看巡检结果；销售/页面按 4.5 小时阈值，链接/业务域按 48 小时日更阈值。
 - 飞书只读问数机器人：服务器 systemd 常驻 `shein-bi-lark-sales-qa.service`，入口 `bash scripts/cloud_lark_sales_qa_bot.sh` / `node scripts/lark_sales_qa_bot.mjs --answer "今天销售多少"`；只能只读回答，不写数据库、飞书 Base 或 SHEIN 后台。
 - RTV 换单复核：`node scripts/verify_shein_rtv_tracking.mjs --priority high,medium,low --include-no-cases --limit 120 --case-limit 60 --max-runtime-ms 3600000`
-- 营销活动报名补填：规则见 `docs/marketing-campaign-signup-pricing-rules.md`。用户要先审核标准时，先跑 `node scripts/marketing/export_dsy_marketing_standards.mjs --stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open` 生成按货号汇总表；填报入口为 `node scripts/marketing/dsy_marketing_deadline_fill.mjs --stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open --price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD-approved.json --min-discount-fallback SK-13034`。活动列表必须分页全量扫，默认排除优惠券；选择商品页必须先切到 `500 条/页` 再全选并核对 `总计 N 个 = 已选商品 N 个`；只允许填价和复核，不得点击最终 `提交报名`；完成后只保留需要用户提交的活动编辑页。
+- 营销活动报名（legacy 提醒）：旧 DSY-only `export_dsy_marketing_standards.mjs` / `dsy_marketing_deadline_fill.mjs --all-open` 命令只能作历史线索或单步脚本参考，不能作为当前报活动流程入口。凡涉及普通营销活动、优惠券、限时折扣、价格栈、批量提交或低价/高价补救，一律先使用 `shein-marketing-ops`：以当前 `selection-plan + price-overrides`、云端/live 证据、首店确认、普通活动回读、可选 15% 流量券 dry-run/安全提交和全局复核为准；不得因这里的旧说明排除 `34810` 配套券，也不得用旧命令阻止用户已授权后的真实提交。
 - HL OpenAPI 销售对账已退出生产调度；如需显式手动诊断，可运行 `node scripts/fetch_shein_openapi_sales.mjs HL --start YYYY-MM-DD --end YYYY-MM-DD` 后再运行 `node scripts/load_shein_openapi_sales_warehouse.mjs --store HL --start YYYY-MM-DD --end YYYY-MM-DD`，只写 API 并行事实表和 `mart.openapi_sales_reconciliation`。
 - 月表：`node scripts/generate_monthly_sales_table.mjs --month YYYY-MM --include-lgm`
 - 年度/宽表：`node scripts/generate_compact_display_tables.mjs --group ALL --current-month YYYY-MM --recent-months 2`

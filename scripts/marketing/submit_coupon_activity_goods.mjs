@@ -150,13 +150,48 @@ function ageHours(now, then) {
   return Math.round(((now.getTime() - d.getTime()) / 36_000)) / 100;
 }
 
-async function loadMarketingStackReviewForKnownOrdinaryGuard() {
+function selectedStoreKeysFromStackReview(data) {
+  const keys = new Set();
+  for (const row of data?.selectedStores || []) {
+    const key = String(row?.storeKey || '').trim().toUpperCase();
+    if (key) keys.add(key);
+  }
+  for (const row of data?.storeStatuses || []) {
+    const key = String(row?.storeKey || row?.store || '').trim().toUpperCase();
+    if (key && row?.ok !== false) keys.add(key);
+  }
+  return keys;
+}
+
+function coversAllStores(data, storeKeys = []) {
+  if (!storeKeys.length) return true;
+  const covered = selectedStoreKeysFromStackReview(data);
+  return storeKeys.every(key => covered.has(String(key || '').toUpperCase()));
+}
+
+async function loadMarketingStackReviewForKnownOrdinaryGuard(storeKeys = []) {
   const reportsDir = path.join(ROOT, 'outputs', 'reports');
-  const file = listFiles(reportsDir, /^marketing-stack-review-\d{4}-\d{2}-\d{2}\.json$/)[0] || '';
+  const requestedStoreKeys = [...new Set((storeKeys || []).map(s => String(s || '').trim().toUpperCase()).filter(Boolean))];
+  const candidateFiles = listFiles(reportsDir, /^marketing-stack-review-\d{4}-\d{2}-\d{2}(?:-stores-[A-Z0-9-]+)?\.json$/);
+  let file = '';
+  let data = null;
+  let coverageStoreKeys = new Set();
+  for (const candidate of candidateFiles) {
+    const candidateData = await readJsonIfExists(candidate, null);
+    if (!candidateData) continue;
+    if (!coversAllStores(candidateData, requestedStoreKeys)) continue;
+    file = candidate;
+    data = candidateData;
+    coverageStoreKeys = selectedStoreKeysFromStackReview(candidateData);
+    break;
+  }
   const source = {
     label: 'marketingStackReview',
     path: rel(file),
     status: file ? 'ok' : 'missing',
+    partialCoverage: file ? /-stores-/.test(path.basename(file)) : false,
+    requestedStores: requestedStoreKeys,
+    coveredStores: [...coverageStoreKeys].sort(),
     activityScanCreatedAt: '',
     activityScanFinishedAt: '',
     rebuiltAt: '',
@@ -165,11 +200,12 @@ async function loadMarketingStackReviewForKnownOrdinaryGuard() {
     reason: '',
   };
   if (!file) {
-    source.reason = 'latest_marketing_stack_review_missing';
+    source.reason = requestedStoreKeys.length
+      ? 'latest_marketing_stack_review_missing_or_not_covering_selected_stores'
+      : 'latest_marketing_stack_review_missing';
     return {source, data: null, detailIndex: new Map(), usable: false};
   }
   try {
-    const data = await readJsonIfExists(file, null);
     source.activityScanCreatedAt = data?.activityScanCreatedAt || data?.createdAt || '';
     source.activityScanFinishedAt = data?.activityScanFinishedAt || '';
     source.rebuiltAt = data?.rebuiltAt || '';
@@ -1126,6 +1162,8 @@ async function processStore(store, args, targetPlan, knownOrdinaryGuardContext =
         nowLocal: ordinaryEvidence.nowLocal,
         diagnostics: ordinaryEvidence.diagnostics,
         filesRead: ordinaryEvidence.filesRead,
+        rawRowCount: ordinaryEvidence.rawRowCount,
+        collapsedCount: ordinaryEvidence.collapsedCount,
         parseErrorCount: ordinaryEvidence.parseErrorCount,
       };
       const evidenceUnavailable = ordinaryEvidence.diagnostics.some(d => d.type === 'dir_missing')
@@ -1301,14 +1339,14 @@ const targetPlan = args.targetPlan ? await loadCouponTargetEligibilityPlan({
   priceOverridesPaths: args.priceOverrides,
   targetDiscountPct: args.discountMax,
 }) : null;
-const knownOrdinaryGuardContext = targetPlan
-  ? await loadMarketingStackReviewForKnownOrdinaryGuard()
-  : null;
 const selectedStores = args.stores.map(key => {
   const store = STORES.find(s => s.storeKey.toUpperCase() === key.toUpperCase());
   if (!store) throw new Error(`Unknown store ${key}`);
   return store;
 });
+const knownOrdinaryGuardContext = targetPlan
+  ? await loadMarketingStackReviewForKnownOrdinaryGuard(selectedStores.map(s => s.storeKey))
+  : null;
 
 const summary = {
   createdAt: new Date().toISOString(),
