@@ -86,7 +86,7 @@ def build() -> Path:
     summary = wb.active
     summary.title = "说明"
     summary.sheet_view.showGridLines = False
-    summary.append(["SHEIN BI V2 标准货号 / 别名审计表", "", "", ""])
+    summary.append(["SHEIN BI 主系统 标准货号 / 别名审计表", "", "", ""])
     summary.merge_cells("A1:D1")
     summary["A1"].fill = PatternFill("solid", fgColor="201B16")
     summary["A1"].font = Font(name="Microsoft YaHei UI", size=16, bold=True, color="FFF7E8")

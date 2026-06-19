@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Export a compact, non-secret marketing price lead snapshot for BI V2.
+ * Export a compact, non-secret marketing price lead snapshot for BI 主系统.
  *
  * The source artifacts under tmp/mbrs and tmp/marketing-signup are operational
  * outputs and are intentionally not committed. BI only needs a bounded

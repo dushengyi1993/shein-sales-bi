@@ -162,7 +162,7 @@ if [[ "${SHEIN_ET_REFRESH_PORTAL:-1}" == "1" ]]; then
           SHEIN_BI_PORTAL_DATA_MODE="$PORTAL_DATA_MODE" node scripts/generate_bi_portal.mjs \
             --metabase-url "$METABASE_URL" \
             --data-mode "$PORTAL_DATA_MODE"
-          node scripts/generate_bi_portal_v2.mjs
+          node scripts/generate_bi_portal_shell.mjs
           if [[ "$PORTAL_DATA_MODE" == "api" && "${SHEIN_BI_PORTAL_PREWARM_DISABLED:-0}" != "1" ]]; then
             SHEIN_BI_PORTAL_PREWARM_SECTIONS="$PORTAL_REFRESH_SECTIONS" \
             SHEIN_BI_PORTAL_PREWARM_ASYNC="${SHEIN_BI_PORTAL_PREWARM_ASYNC:-1}" \

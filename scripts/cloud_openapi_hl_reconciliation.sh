@@ -54,7 +54,7 @@ if [[ "${SHEIN_OPENAPI_HL_REFRESH_PORTAL:-1}" != "1" && "${SHEIN_OPENAPI_HL_REFR
 fi
 
 node scripts/generate_bi_portal.mjs --metabase-url "$METABASE_URL"
-node scripts/generate_bi_portal_v2.mjs
+node scripts/generate_bi_portal_shell.mjs
 
 if command -v systemctl >/dev/null 2>&1; then
   systemctl is-active --quiet shein-bi-portal.service || systemctl start shein-bi-portal.service || true

@@ -2689,7 +2689,12 @@ async function main() {
         return send(res, 204, '', {'Content-Type': 'image/x-icon'});
       }
       if (url.pathname === '/v1' || url.pathname.startsWith('/v1/')) {
-        return send(res, 404, 'V1 has been archived in GitHub release 2026.06.18-v1-final-archive and is no longer served online.', {'Content-Type': 'text/plain; charset=utf-8'});
+        return send(res, 410, '旧版 BI 已封存，不再提供线上入口；请访问 / 使用当前 BI 主系统。', {'Content-Type': 'text/plain; charset=utf-8'});
+      }
+      if (url.pathname === '/v2' || url.pathname.startsWith('/v2/')) {
+        res.writeHead(301, {'Location': '/'});
+        res.end();
+        return;
       }
       if (url.pathname === '/cloud-login-maintenance') {
         return send(res, 200, await manualLoginMaintenanceHtml(), {'Content-Type': 'text/html; charset=utf-8'});

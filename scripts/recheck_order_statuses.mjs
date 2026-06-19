@@ -5,7 +5,7 @@
  * The sales warehouse keeps the original order/item sales facts.  This job builds a
  * mutable lifecycle evidence layer in ops.order_status_recheck_state by re-fetching
  * current SHEIN order status for date-store slices that still have non-terminal
- * orders.  The V2 orders section can then prefer this lifecycle layer for status
+ * orders.  The orders section can then prefer this lifecycle layer for status
  * display while sales/profit facts remain stable.
  *
  * Examples:

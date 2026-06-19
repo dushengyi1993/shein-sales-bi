@@ -165,14 +165,18 @@ const PORTAL_SECTION_SELECTS = {
     'dailyStores', (SELECT data FROM daily_store_sales),
     'dailyProducts', (SELECT data FROM daily_product_sales),
     'dailyProductGroups', (SELECT data FROM daily_product_group_sales),
-    'dailyStoreProducts', (SELECT data FROM daily_store_product_sales)
+    'dailyStoreProducts', (SELECT data FROM daily_store_product_sales),
+    'dailyPaymentSummary', (SELECT data FROM daily_payment_summary),
+    'dailyStoreProductPaymentSummary', (SELECT data FROM daily_store_product_payment_summary)
   )
 `,
   homeRankings: `
   'rankings', jsonb_build_object(
     'dailyStores', (SELECT data FROM daily_store_sales),
     'dailyProducts', (SELECT data FROM daily_product_sales),
-    'dailyStoreProducts', (SELECT data FROM daily_store_product_sales)
+    'dailyStoreProducts', (SELECT data FROM daily_store_product_sales),
+    'dailyPaymentSummary', (SELECT data FROM daily_payment_summary),
+    'dailyStoreProductPaymentSummary', (SELECT data FROM daily_store_product_payment_summary)
   )
 `,
   profit: `
@@ -1872,22 +1876,30 @@ sales_calendar AS (
 ),
 net_order_item AS (
   SELECT
-    created_date::date AS date,
-    store_key,
-    group_key,
-    standard_goods_sn,
-    raw_goods_sn,
-    skc,
-    goods_title,
-    order_no,
-    order_key,
-    CASE WHEN coalesce(gross_revenue_sar,0) > 0 THEN coalesce(quantity,0) ELSE 0 END AS gross_quantity,
-    CASE WHEN coalesce(net_revenue_sar,0) > 0 THEN coalesce(quantity,0) ELSE 0 END AS quantity,
-    coalesce(net_revenue_sar,0) AS sales_sar,
-    coalesce(gross_revenue_sar,0) AS gross_sales_sar,
-    coalesce(revenue_reversal,false) AS revenue_reversal
-  FROM ${profitOrderItem}
-  WHERE coalesce(standard_goods_sn,'') <> ''
+    oi.created_date::date AS date,
+    oi.store_key,
+    oi.group_key,
+    oi.standard_goods_sn,
+    oi.raw_goods_sn,
+    oi.skc,
+    oi.goods_title,
+    oi.order_no,
+    oi.order_key,
+    coalesce(p.is_cod,false) AS is_cod,
+    CASE WHEN coalesce(oi.gross_revenue_sar,0) > 0 THEN coalesce(oi.quantity,0) ELSE 0 END AS gross_quantity,
+    CASE WHEN coalesce(oi.net_revenue_sar,0) > 0 THEN coalesce(oi.quantity,0) ELSE 0 END AS quantity,
+    coalesce(oi.net_revenue_sar,0) AS sales_sar,
+    coalesce(oi.gross_revenue_sar,0) AS gross_sales_sar,
+    coalesce(oi.revenue_reversal,false) AS revenue_reversal
+  FROM ${profitOrderItem} oi
+  LEFT JOIN (
+    SELECT store_key, order_no, bool_or(coalesce(is_cod,false)) AS is_cod
+    FROM fact.order_payment_flag
+    WHERE coalesce(order_no,'') <> ''
+    GROUP BY store_key, order_no
+  ) p ON p.store_key = oi.store_key
+     AND p.order_no = oi.order_no
+  WHERE coalesce(oi.standard_goods_sn,'') <> ''
 ),
 net_daily_store_sales AS (
   SELECT
@@ -1904,6 +1916,46 @@ net_daily_store_sales AS (
   FROM net_order_item n
   LEFT JOIN dim.store s USING (store_key)
   GROUP BY date, store_key
+),
+daily_payment_summary AS (
+  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY date, store_key, is_cod DESC), '[]'::jsonb) AS data
+  FROM (
+    SELECT
+      date::date AS date,
+      store_key,
+      bool_or(coalesce(is_cod,false)) AS is_cod,
+      round(sum(coalesce(sales_sar,0))::numeric, 2) AS sales_sar,
+      round(sum(coalesce(gross_sales_sar,0))::numeric, 2) AS gross_sales_sar,
+      count(DISTINCT order_no) FILTER (WHERE coalesce(sales_sar,0) > 0) AS orders,
+      count(DISTINCT order_no) FILTER (WHERE coalesce(gross_sales_sar,0) > 0) AS gross_orders,
+      round(sum(coalesce(quantity,0))::numeric, 0) AS quantity,
+      round(sum(coalesce(gross_quantity,0))::numeric, 0) AS gross_quantity
+    FROM net_order_item
+    WHERE coalesce(order_no,'') <> ''
+      AND coalesce(store_key,'') <> ''
+    GROUP BY date, store_key, coalesce(is_cod,false)
+    ORDER BY date, store_key, coalesce(is_cod,false) DESC
+  ) t
+),
+daily_store_product_payment_summary AS (
+  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY date, store_key, standard_goods_sn, is_cod DESC), '[]'::jsonb) AS data
+  FROM (
+    SELECT
+      date::date AS date,
+      store_key,
+      standard_goods_sn,
+      bool_or(coalesce(is_cod,false)) AS is_cod,
+      round(sum(coalesce(sales_sar,0))::numeric, 2) AS sales_sar,
+      round(sum(coalesce(gross_sales_sar,0))::numeric, 2) AS gross_sales_sar,
+      count(DISTINCT order_no) FILTER (WHERE coalesce(sales_sar,0) > 0) AS orders,
+      count(DISTINCT order_no) FILTER (WHERE coalesce(gross_sales_sar,0) > 0) AS gross_orders
+    FROM net_order_item
+    WHERE coalesce(order_no,'') <> ''
+      AND coalesce(store_key,'') <> ''
+      AND coalesce(standard_goods_sn,'') <> ''
+    GROUP BY date, store_key, standard_goods_sn, coalesce(is_cod,false)
+    ORDER BY date, store_key, standard_goods_sn, coalesce(is_cod,false) DESC
+  ) t
 ),
 period_defs AS (
   SELECT
@@ -3727,7 +3779,9 @@ SELECT jsonb_build_object(
     'dailyStores', (SELECT data FROM daily_store_sales),
     'dailyProducts', (SELECT data FROM daily_product_sales),
     'dailyProductGroups', (SELECT data FROM daily_product_group_sales),
-    'dailyStoreProducts', (SELECT data FROM daily_store_product_sales)
+    'dailyStoreProducts', (SELECT data FROM daily_store_product_sales),
+    'dailyPaymentSummary', (SELECT data FROM daily_payment_summary),
+    'dailyStoreProductPaymentSummary', (SELECT data FROM daily_store_product_payment_summary)
   ),
   'profit', jsonb_build_object(
     'dailyStoreProducts', (SELECT data FROM profit_daily_store_product),
@@ -4292,12 +4346,14 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck, 
     .metric-matrix.cols-2{grid-template-columns:minmax(70px,.7fr) repeat(2,minmax(120px,1fr))}
     .metric-matrix.cols-3{grid-template-columns:minmax(70px,.68fr) minmax(108px,1.05fr) minmax(108px,1.05fr) minmax(92px,.82fr)}
     .metric-matrix.cols-4{grid-template-columns:minmax(70px,.68fr) minmax(86px,.9fr) repeat(3,minmax(92px,1fr))}
+    .metric-matrix.cols-5{grid-template-columns:minmax(76px,.74fr) minmax(72px,.78fr) minmax(82px,.86fr) minmax(82px,.86fr) minmax(76px,.76fr) minmax(76px,.76fr)}
     .metric-matrix.profit-matrix{grid-template-columns:minmax(70px,.66fr) minmax(118px,1fr) minmax(118px,1fr) minmax(96px,.86fr)}
     .matrix-cell{min-height:50px;padding:10px;border-right:1px solid rgba(148,163,184,.14);border-bottom:1px solid rgba(148,163,184,.14);display:flex;align-items:center;justify-content:center;text-align:center;flex-direction:column;line-height:1.16}
-    .metric-matrix.cols-1 .matrix-cell:nth-child(2n),.metric-matrix.cols-2 .matrix-cell:nth-child(3n),.metric-matrix.cols-3 .matrix-cell:nth-child(4n),.metric-matrix.cols-4 .matrix-cell:nth-child(5n){border-right:0}
+    .metric-matrix.cols-1 .matrix-cell:nth-child(2n),.metric-matrix.cols-2 .matrix-cell:nth-child(3n),.metric-matrix.cols-3 .matrix-cell:nth-child(4n),.metric-matrix.cols-4 .matrix-cell:nth-child(5n),.metric-matrix.cols-5 .matrix-cell:nth-child(6n){border-right:0}
     .matrix-cell:nth-last-child(-n+2){border-bottom:0}
     .metric-matrix.cols-2 .matrix-cell:nth-last-child(-n+3),.metric-matrix.cols-3 .matrix-cell:nth-last-child(-n+4){border-bottom:0}
     .metric-matrix.cols-4 .matrix-cell:nth-last-child(-n+5){border-bottom:0}
+    .metric-matrix.cols-5 .matrix-cell:nth-last-child(-n+6){border-bottom:0}
     .matrix-cell.label{font-weight:950;color:var(--text);justify-content:flex-start;text-align:left;background:rgba(148,163,184,.045)}
     .matrix-cell.head{font-size:12px;color:var(--muted);font-weight:950;background:rgba(148,163,184,.09);letter-spacing:.04em}
     .matrix-cell.value{font-family:var(--mono);font-size:21px;font-weight:950;font-variant-numeric:tabular-nums;color:var(--text);letter-spacing:-.035em}
@@ -4312,6 +4368,9 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck, 
     .metric-matrix .matrix-cell.head{min-height:44px;font-size:12px;border-radius:0;background:rgba(148,163,184,.09);color:var(--muted)}
     .metric-matrix .matrix-cell.value{font-size:21px;font-weight:950;letter-spacing:-.035em;background:transparent}
     .metric-matrix.cols-1 .matrix-cell.value{font-size:24px}
+    .metric-matrix.cols-5 .matrix-cell{padding:9px 7px}
+    .metric-matrix.cols-5 .matrix-cell.label{font-size:14px}
+    .metric-matrix.cols-5 .matrix-cell.value{font-size:16px;letter-spacing:-.025em}
     .ops-command{display:grid;grid-template-columns:minmax(320px,.9fr) minmax(520px,1.35fr);gap:16px;margin-bottom:16px;align-items:stretch}
     .ops-verdict{border:1px solid rgba(96,165,250,.26);border-radius:26px;background:linear-gradient(145deg,rgba(37,99,235,.17),rgba(15,23,42,.48));padding:18px;display:flex;flex-direction:column;justify-content:space-between;min-height:100%}
     body[data-theme="light"] .ops-verdict{background:linear-gradient(145deg,#eff6ff,#fff);border-color:#bfdbfe}
@@ -5453,7 +5512,7 @@ let shouldScrollToActiveTab = false;
 const STATE_KEYS = ['tab','q','product','store','domain','risk','status','focus','insight','rankPeriod','rankWindow','startDate','endDate','rangePreset','trendMetric','trendMetrics','salesMode','qtyMode','returnsMode','profitMode'];
 const PREVIEW_DEFAULT_TREND_METRICS = 'sales';
 let applyingHash = false;
-const ACTION_STATE_KEY = 'SHEIN_BI_ACTION_STATE_V1';
+const ACTION_STATE_KEY = 'SHEIN_BI_ACTION_STATE';
 const ACTION_STATE_API = '/api/action-state';
 const LINK_OPS_TASKS_API = '/api/link-ops-tasks';
 const LINK_OPS_CHATS_API = '/api/link-ops-chats';
@@ -15337,13 +15396,8 @@ async function main() {
   markStage('write:mkdir');
   await fs.mkdir(args.outDir, {recursive: true});
   const jsonFile = path.join(args.outDir, 'data.json');
-  const htmlFile = path.join(args.outDir, 'index.html');
   markStage('write:data');
   await writeFileWithRetry(jsonFile, JSON.stringify({...data, audit: safeAudit, pipeline: safePipeline, briefing: safeBriefing, firstRunCheck: safeFirstRunCheck}, null, 2), 'utf8');
-  markStage('build:html');
-  const html = buildHtml(data, metabaseUrl, safeAudit, safePipeline, safeBriefing, safeFirstRunCheck, {homeVariant: args.homeVariant});
-  markStage('write:html');
-  await writeFileWithRetry(htmlFile, html, 'utf8');
   if (noGroupsPreviewFile) {
     markStage('build:preview:no-groups');
     const noGroupsPreviewHtml = buildHtml(data, metabaseUrl, safeAudit, safePipeline, safeBriefing, safeFirstRunCheck, {homeVariant: 'no-groups', previewVariant: 'no-groups'});
@@ -15356,7 +15410,8 @@ async function main() {
     ok: true,
     dataMode: args.dataMode,
     homeVariant: args.homeVariant,
-    html: htmlFile,
+    html: null,
+    htmlSkipped: 'formal BI index.html is owned by generate_bi_portal_shell.mjs/current shell',
     data: jsonFile,
     previews: noGroupsPreviewFile ? [{
       variant: 'no-groups',

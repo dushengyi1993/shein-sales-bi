@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Read-only SHEIN current marketing price scanner for BI V2.
+ * Read-only SHEIN current marketing price scanner for BI 主系统.
  *
  * It opens/uses each store's logged-in browser profile, reads current/future
  * ordinary marketing activity goods, active/future limited-discount goods, and

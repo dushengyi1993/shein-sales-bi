@@ -1,22 +1,22 @@
 #!/usr/bin/env node
 /**
- * Generate SHEIN BI V2 production shell.
+ * Generate the current SHEIN BI production shell.
  *
  * The cloud BI runtime owns current data through /api/bi/section/*. This script
- * owns the HTML shell layout. V2 is the only live portal; the legacy V1 shell
- * is recoverable only from the GitHub final archive release.
+ * owns the HTML shell layout. This is the only live BI portal; older shells
+ * are recoverable only from archived GitHub releases.
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const assetDir = path.join(ROOT, 'scripts', 'bi_v2');
+const assetDir = path.join(ROOT, 'scripts', 'bi_app');
 
 function parseArgs(argv) {
   const args = {
     outFile: path.join(ROOT, 'outputs', 'bi-portal', 'index.html'),
-    compatV2File: path.join(ROOT, 'outputs', 'bi-portal', 'v2', 'index.html'),
+    compatV2File: '',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -65,7 +65,7 @@ function renderHtml({storeConfig, css, clientJs}) {
     <div class="quick command-actions"><button id="clearFilters">清空</button></div>
   </div></div>
   <div id="view"></div>
-  <div class="foot">BI V2 · data source of truth: cloud runtime / section API</div>
+  <div class="foot">BI 主系统 · data source of truth: cloud runtime / section API</div>
 </main>
 <script>window.__SHEIN_STORE_CONFIG__=${safeInlineJson(storeConfig)};</script>
 <script>${safeInlineScript(clientJs)}</script>
