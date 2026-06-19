@@ -7,7 +7,7 @@
 - 销售抓取主入口已改为 Node WebAPI 直连优先；当前 19 店 `salesTransport=auto`，成功时不启动浏览器，浏览器只保留为 Cookie/session 刷新、登录续期和回退工具。
 - 暂停开关为 `state/feishu-base-sync-paused.flag`；存在该文件时跳过飞书事实表、产品表、月表、宽表和看板写入，删除后可恢复。
 - 云端当前自动覆盖销售 WebAPI、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、飞书日报、统一日更补采、异常通知、登录态巡检和只读问数机器人。HL OpenAPI 销售对账已退出生产双跑。
-- 当前正式门户为 V2；V1 只保留 `/v1/` 封存入口和 GitHub final/archive release，不再进入正式 release 或日常刷新。
+- 当前正式门户为 V2；V1 已从线上 `/v1/` 下线，只保留 GitHub final/archive release `2026.06.18-v1-final-archive` 作为恢复点，不再进入正式 release 或日常刷新。
 - SHEIN 临时人工登录维护入口已云端化：BI `/cloud-login-maintenance` 通过 noVNC 打开指定店铺独立 profile 的短时 Chrome 窗口，完成后导出/探测 session 并关闭临时进程。
 - BI Portal 生成端会用 `lib/product_display_name.mjs` 给 `data.json` 补齐 `product_display_name` / `productDisplayNames`；前端页面和云端飞书问数机器人共用该显示名，后台归因 key 仍保持 `standard_goods_sn`。
 - HL 正式 profile 为 `profiles/persistent-shein-main-profile`，CDP 端口 `9360`；旧 `profiles/persistent-hl-profile` 已删除。

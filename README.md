@@ -43,8 +43,8 @@
   - 云端登录维护中心：`https://shein-bi.dushengyi.xyz/cloud-login-maintenance`，用于临时打开指定店铺云端浏览器登录窗口。
   - 云端代码目录：`/opt/shein-bi/app`
   - 仓库 BI 门户灾备快照：`outputs/bi-portal/index.html` / `outputs/bi-portal/data.json`（不代表当前云端数据）
-  - V2 是当前正式 BI Portal，根路径 `https://shein-bi.dushengyi.xyz/` 由 `outputs/bi-portal/index.html` 承载；V1 已封存到 `/v1/`，只作历史回溯和短期对照，不再更新。
-  - V1 最终纪念版由 GitHub archive release 固化；后续 BI 页面和生产调度只维护 V2。
+  - V2 是当前正式 BI Portal，根路径 `https://shein-bi.dushengyi.xyz/` 由 `outputs/bi-portal/index.html` 承载；V1 已从线上 `/v1/` 下线，只能从 GitHub release tag `2026.06.18-v1-final-archive` 恢复。
+  - V1 最终纪念版由 GitHub archive release 固化；后续 BI 页面和生产调度只维护 V2，线上不再提供 V1 入口。
   - 本机 `http://127.0.0.1:8787/` 和局域网 `http://DUSHENGYI-PC2:8787/` 已封存，不再作为正式入口。
   - Metabase 当前部署在云端 Docker 内部，由云端 Nginx/服务配置受控访问，不在 README 写公开裸地址。
 - 当前 BI 数据截面不再手工写死在 README；实时只以云端 BI 门户系统状态页、线上 `/api/bi/section/*`、云端 PostgreSQL warehouse、云端 systemd 日志和数据库入仓时间为准。仓库中的 `outputs/bi-portal/` 只是灾备/兼容快照，服务器拉取/重置代码后必须重新跑云端 BI 刷新；开发和验收不得拿仓库快照当当前数据。

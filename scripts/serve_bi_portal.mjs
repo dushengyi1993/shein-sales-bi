@@ -2688,6 +2688,9 @@ async function main() {
       if (url.pathname === '/favicon.ico') {
         return send(res, 204, '', {'Content-Type': 'image/x-icon'});
       }
+      if (url.pathname === '/v1' || url.pathname.startsWith('/v1/')) {
+        return send(res, 404, 'V1 has been archived in GitHub release 2026.06.18-v1-final-archive and is no longer served online.', {'Content-Type': 'text/plain; charset=utf-8'});
+      }
       if (url.pathname === '/cloud-login-maintenance') {
         return send(res, 200, await manualLoginMaintenanceHtml(), {'Content-Type': 'text/html; charset=utf-8'});
       }

@@ -9,12 +9,11 @@
 - 仓库文件：`outputs/bi-portal/index.html` / `outputs/bi-portal/data.json` 只是灾备/兼容快照，不代表当前云端数据。
 - 数据判断和验收：只认云端 BI 门户、线上 `/api/bi/section/*`、云端 PostgreSQL warehouse、云端日志和 systemd 状态。
 - 生成脚本：`scripts/generate_bi_portal.mjs`
-- V2 是当前正式门户；V1 已封存到 `/v1/`，以下保留早期 V2 平行预览阶段的历史设计记录：
-  - V1 封存入口：`https://shein-bi.dushengyi.xyz/v1/`
-  - V1 封存入口：`https://shein-bi.dushengyi.xyz/v1/`
+- V2 是当前正式门户；V1 已从线上 `/v1/` 下线，只能从 GitHub release tag `2026.06.18-v1-final-archive` 恢复；以下保留早期 V2 平行预览阶段的历史设计记录：
+  - V1 恢复点：GitHub release tag `2026.06.18-v1-final-archive`；线上不再提供 `/v1/`。
   - 当前正式生成脚本：`scripts/generate_bi_portal.mjs`
   - 历史 V2 预览脚本 `scripts/generate_bi_portal_v2.mjs` 仅作迁移参考。
-  - V2 数据判断和验收必须走云端运行态/线上 section API；仓库快照只作页面启动兼容，不得当成当前业务数据。不得在未确认前改动 V1 `outputs/bi-portal/index.html` 或生产调度。
+  - V2 数据判断和验收必须走云端运行态/线上 section API；仓库快照只作页面启动兼容，不得当成当前业务数据。V1 只允许从 GitHub final archive 临时恢复到隔离环境，不进入生产调度。
   - `2026-05-13` 晚间起 V2.1 改回独立经营 BI 预览，不再复制 V1 DOM；用户确认前不得合并或替换 V1。
   - `2026-05-14` 起 V2.1 首页（`tab=overview`）的验收口径改为“功能和操作逻辑完整复刻 V1 首页，视觉重新设计”；其它 V2 子页面尚未完成 V1 全量复刻。
   - V2 现在跟随正式云端刷新链路；页面结构优化直接在正式 V2 上维护，数据验收必须连接云端运行态。
@@ -251,12 +250,12 @@
 
 ## 2026-05-13 V2.1 独立设计预览口径
 
-- V2 正式入口为云端 `https://shein-bi.dushengyi.xyz/`，V1 封存入口为 `/v1/`；旧 IP `http://43.165.167.135/` 仅作兜底；本地 `127.0.0.1:8787` 已封存。
+- V2 正式入口为云端 `https://shein-bi.dushengyi.xyz/`；V1 线上 `/v1/` 已下线，仅可从 GitHub release tag `2026.06.18-v1-final-archive` 恢复到隔离环境；旧 IP `http://43.165.167.135/` 仅作兜底；本地 `127.0.0.1:8787` 已封存。
 - 历史 V2.1 预览曾由 `scripts/generate_bi_portal_v2.mjs` 生成到 `outputs/bi-portal/v2/index.html`；当前正式入口已迁到根路径。
 - 当前正式 V2 跟随云端抓数、入仓、日报和 section 刷新链路；V1 不再参与日常调度。
 - 本轮视觉方向从“V1 套皮”改为独立经营 BI：降噪、提密、去装饰，减少大面积空白、过重阴影和过大圆角。
 - 子页统一使用紧凑页头，避免每个页面一进入就被大 hero 占满；动作池证据字段必须转成中文业务表达，不直接暴露 `weakC30/bestC30/cases/amount/status` 这类代码字段。
-- 当前 V2 已定为正式版；V1 只保留封存入口和 archive release。
+- 当前 V2 已定为正式版；V1 只保留 GitHub archive release，线上入口已删除。
 
 ## 2026-05-14 V2 首页复刻口径
 
@@ -264,7 +263,7 @@
 - V2 首页必须完整继承 V1 首页的业务操作逻辑：顶部全局筛选、四个矩阵口径切换、日/月趋势指标切换、店铺/货号排行下钻和深浅主题。
 - V2 正式入口由 `scripts/generate_bi_portal.mjs` 生成到 `outputs/bi-portal/index.html`；历史 `outputs/bi-portal/v2/` 仅作迁移参考。
 - V2 当前跟随正式云端刷新链路；页面验收以线上 section API 和云端服务输出为准。
-- 已验证：`node --check scripts/generate_bi_portal_v2.mjs`、重新生成、`/v2/` HTTP 200、浏览器打开指定 hash 无控制台错误；截图证据为 `outputs/bi-portal/v2-overview-v1-logic-check-2.png`。
+- 历史验证：`node --check scripts/generate_bi_portal_v2.mjs`、重新生成、`/v2/` HTTP 200、浏览器打开指定 hash 无控制台错误；截图证据为 `outputs/bi-portal/v2-overview-v1-logic-check-2.png`。当前正式入口为根路径，`/v1/` 不再服务。
 
 ## 2026-05-17 链接管理中台基座
 

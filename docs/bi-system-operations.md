@@ -19,7 +19,7 @@
 - 云端登录维护中心：[https://shein-bi.dushengyi.xyz/cloud-login-maintenance](https://shein-bi.dushengyi.xyz/cloud-login-maintenance)。当 SHEIN / SBN 子系统登录态失效、遇到验证码/滑块，或被协议签署 / 公告 / 通知确认等普通登录弹窗挡住时，用它临时打开指定店铺的云端浏览器窗口；普通登录干扰弹窗可由运维代理关闭/确认后再点登录，完成后必须点“我已完成并关闭”。
 - 本机 BI 门户和局域网协作入口已封存：`http://127.0.0.1:8787/`、`http://DUSHENGYI-PC2:8787/` 不再作为正式入口。
 - 仓库门户灾备文件：`outputs/bi-portal/index.html`（不代表当前云端运行态）
-- V2 是当前唯一正式生产门户；V1 已封存到 `/v1/`，只作历史回溯和短期对照，不再作为日常运维对象。V2 数据判断和验收必须走云端运行态/线上 section API。
+- V2 是当前唯一正式生产门户；V1 已从线上 `/v1/` 下线，只保留 GitHub release tag `2026.06.18-v1-final-archive` 作为恢复点，不再作为日常运维对象。V2 数据判断和验收必须走云端运行态/线上 section API。
 - 当前 V2 门户由 `scripts/generate_bi_portal.mjs` 生成；`scripts/run_bi_daily_pipeline.ps1` 只作本地回滚参考，生产刷新以云端 systemd/service 为准。
 - 本地回滚时才启动本机网页服务：双击 `打开SHEIN-BI网页服务.cmd`。
 - 本地回滚时才启动局域网协作服务：双击 `打开SHEIN-BI局域网协作服务.cmd`。

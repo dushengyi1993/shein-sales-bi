@@ -13,7 +13,7 @@
 - 注意：`outputs/bi-portal/index.html` / `data.json` 会作为可恢复静态快照纳入 GitHub；服务器执行 `git reset --hard origin/main` 或类似部署后，可能把实时 BI 页面覆盖成仓库快照。每次服务器拉取/重置代码后，都要立即跑一次 `scripts/cloud_bi_refresh.sh today intraday` 或对应 systemd service，确认页面生成时间和销售源时间回到当前。
 - 云端 Git 同步红线：`/opt/shein-bi/app` 必须由 `sheinops:sheinops` 持有，不要用 `sudo git pull`。仓库 remote 使用 `git@github.com:dushengyi1993/shein-sales-bi.git`，`core.sshCommand` 必须指向 `/home/sheinops/.ssh/shein_bi_deploy`；不要指向 `/root/.ssh/...`，否则普通运维用户无法 fetch/pull。生产生成的 `outputs/bi-portal/data.json` / `index.html` 在服务器上用 `git update-index --skip-worktree` 标记为本地生成物，避免定时刷新后的实时页面把后续 `git pull --ff-only` 阻塞。若云端出现未提交热修复，先 `git stash push -u -m "pre-...deploy-..."` 保存，再部署远端 `main`。
 - 发布顺序：BI 用户可见改动先在云端页面或云端服务输出验证，用户确认后再进入 GitHub `main` / release。本地验证只能证明开发产物可运行，不能替代云端最终审核。
-- 当前 GitHub 发布边界：V2 是正式 release 线；V1 只保留 final/archive 纪念版，不再纳入日常刷新或后续功能更新。
+- 当前 GitHub 发布边界：V2 是正式 release 线；V1 只保留 GitHub final/archive 纪念版 `2026.06.18-v1-final-archive`，线上 `/v1/` 不再提供访问，也不再纳入日常刷新或后续功能更新。
 
 ### SSH 运维入口
 
@@ -142,7 +142,7 @@ GitHub 应保存：
 - `shein-bi-cloud-daily-refresh.timer` 应保持 active；手动复跑用 `scripts/cloud_daily_refresh.sh yesterday`。若单店卡在 SBN `x-gw-auth`，优先看该店 attempt 重试日志；若 RTV 子步骤失败，先看底层脚本日志；HL OpenAPI 销售对账不再是生产日更子步骤；不要回退到本机补抓冒充云端日更。旧的 `shein-bi-cloud-link-business.timer`、`shein-bi-cloud-openapi-hl.timer`、`shein-bi-cloud-rtv-verify.timer` 应保持 masked，避免日更补采重复跑。
 - `shein-bi-cloud-session-manager.timer` 应保持 active；手动复跑用 `scripts/cloud_shein_session_manager.sh`。报告文件在 `outputs/reports/cloud-session-manager-latest.json` / `.md`，若失败会被 watchdog 按 service failed 逻辑提醒。
 - `shein-bi-cloud-daily-refresh.service` 必须以 `User=sheinops` / `Group=sheinops` 运行，因为它会启动当前 19 店 SHEIN Chrome profile；不要改回 root，否则会生成 root-owned profile 文件并让 `shein-bi-cloud-session-manager.service` 第二天因 `EACCES` 失败。ET forwarder 仍保留 root 执行，因为入仓依赖 Docker/root 环境，且它不写 SHEIN 店铺 profile。
-- V1 时间筛选弹窗回归检查：在云端页面打开时间筛选后点击月份切换，弹窗应保持 `hidden=false`、`aria-expanded=true`，月份标题正确前后移动；日期输入框应为文本输入且 `pattern="\\d{4}-\\d{2}-\\d{2}"`，控制台不应出现 error/warn。
+- 历史 V1 时间筛选弹窗回归检查已随 V1 线上下线而停止；如需排查旧版，只能从 GitHub release tag `2026.06.18-v1-final-archive` 临时恢复到隔离环境。
 - 登录态恢复统一走 `restore_shein_store_session.mjs`：先用服务器私有 `state/shein_browser_sessions/*.local.json` / `state/shein_webapi_sessions/*.local.json` bootstrap，再运行 `auto_relogin_shein_store.mjs` 验证 GSP order WebAPI 和 SBN 商品分析页；验证成功后必须立即调用 `export_shein_browser_session.mjs --no-launch` 刷新该店 browser session 导出，避免第二天继续回灌过期 SBN 状态。云端没有保存密码的店铺不能只靠 Chrome autofill 自愈，若 SBN 已过期且无保存密码，需要走 `/cloud-login-maintenance` 处理一次；若只是协议/通知弹窗阻塞，运维代理可先点掉弹窗并重试登录，不必直接判定为用户验证码阻塞。
 - 云端人工登录入口验证：`/cloud-login-maintenance` 返回 `200`；`/cloud-login/novnc/vnc.html` 返回 `200`；创建会话后 `/cloud-login/session/:id` 返回 `200` 且 WebSocket 升级返回 `101 Switching Protocols`；点“我已完成并关闭”后 export/probe 成功且不残留 Chrome/Xvfb/x11vnc/websockify 进程。
 - `shein-bi-lark-sales-qa.service` 应保持 active；可用 `node scripts/lark_sales_qa_bot.mjs --answer "今天销售多少"` 本地只读测试答案。群聊中若无回复，优先检查机器人是否已入群、应用可见范围和 `im.message.receive_v1`/发消息权限。
