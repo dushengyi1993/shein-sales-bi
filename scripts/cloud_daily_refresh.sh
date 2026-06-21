@@ -10,9 +10,24 @@ PORTAL_HEALTH_URL="${PORTAL_HEALTH_URL:-}"
 PORTAL_INDEX_PATH="${PORTAL_INDEX_PATH:-$ROOT/outputs/bi-portal/index.html}"
 PORTAL_DATA_PATH="${PORTAL_DATA_PATH:-$ROOT/outputs/bi-portal/data.json}"
 LOCK_FILE="${SHEIN_BI_DAILY_LOCK_FILE:-/tmp/shein-bi-cloud-daily-refresh.lock}"
-BUSY_WRITER_SERVICES="${SHEIN_BI_DAILY_WAIT_SERVICES:-shein-bi-cloud-today.service shein-bi-cloud-yesterday.service shein-bi-cloud-et-forwarder.service}"
-PORTAL_REFRESH_LOCK_FILE="${SHEIN_BI_PORTAL_REFRESH_LOCK_FILE:-/tmp/shein-bi-portal-refresh.lock}"
+LARK_REPORT_LOCK_FILE="${SHEIN_LARK_REPORT_LOCK_FILE:-/tmp/shein-bi-cloud-daily-lark-report.lock}"
+LARK_REPORT_LOCK_WAIT_SEC="${SHEIN_BI_DAILY_WAIT_LARK_REPORT_LOCK_SEC:-3600}"
+BUSY_WRITER_SERVICES="${SHEIN_BI_DAILY_WAIT_SERVICES:-shein-bi-cloud-today.service shein-bi-cloud-yesterday.service shein-bi-cloud-et-forwarder.service shein-bi-cloud-daily-lark-report.service}"
+PORTAL_REFRESH_LOCK_FILE="${SHEIN_BI_PORTAL_REFRESH_LOCK_FILE:-$ROOT/state/locks/shein-bi-portal-refresh.lock}"
 PORTAL_REFRESH_LOCK_WAIT_SEC="${SHEIN_BI_PORTAL_REFRESH_LOCK_WAIT_SEC:-1800}"
+
+prepare_shared_lock_file() {
+  local file="$1"
+  local dir
+  dir="$(dirname "$file")"
+  mkdir -p "$dir"
+  chgrp users "$dir" 2>/dev/null || true
+  chmod 2775 "$dir" 2>/dev/null || chmod 0777 "$dir" 2>/dev/null || true
+  if [[ ! -e "$file" ]]; then
+    (umask 000; : >"$file")
+  fi
+  chmod 0666 "$file" 2>/dev/null || true
+}
 
 resolve_date() {
   local target="$1"
@@ -51,7 +66,7 @@ check_portal_health() {
 
 close_store_browsers() {
   cd "$ROOT"
-  node scripts/cleanup_shein_store_browsers.mjs --all --kill-after-sec 5 || true
+  node scripts/cleanup_shein_store_browsers.mjs --all --cleanup-chrome-tmp --kill-after-sec 5 || true
 }
 
 write_daily_alert() {
@@ -125,6 +140,23 @@ wait_for_busy_writers() {
   done
 }
 
+wait_for_lark_report_lock() {
+  if [[ -z "$LARK_REPORT_LOCK_FILE" ]]; then
+    return 0
+  fi
+  if [[ ! -e "$LARK_REPORT_LOCK_FILE" ]]; then
+    (umask 000; : >"$LARK_REPORT_LOCK_FILE") 2>/dev/null || true
+  fi
+  echo "[cloud_daily_refresh] wait for Lark daily report lock if active file=$LARK_REPORT_LOCK_FILE"
+  exec 7>"$LARK_REPORT_LOCK_FILE"
+  if ! flock -w "$LARK_REPORT_LOCK_WAIT_SEC" 7; then
+    write_daily_alert "skipped_lark_report_busy" "daily refresh skipped because daily Lark report lock is still active after ${LARK_REPORT_LOCK_WAIT_SEC}s"
+    echo "[cloud_daily_refresh] SKIP daily Lark report still active after ${LARK_REPORT_LOCK_WAIT_SEC}s; run daily refresh after report completes" >&2
+    exit 0
+  fi
+  echo "[cloud_daily_refresh] Lark daily report lock is clear"
+}
+
 available_mem_mib() {
   awk '/MemAvailable:/ { printf "%d\n", $2 / 1024; found=1 } END { if (!found) print 0 }' /proc/meminfo 2>/dev/null || echo 0
 }
@@ -169,7 +201,12 @@ export SHEIN_BI_PORTAL_DATA_MODE="${SHEIN_BI_PORTAL_DATA_MODE:-api}"
 DAILY_WARNINGS=()
 
 wait_for_busy_writers
+wait_for_lark_report_lock
 ensure_capacity_for_slow_refresh
+
+echo "[cloud_daily_refresh] cleanup stale store browsers after lock acquisition"
+close_store_browsers
+
 
 echo "[cloud_daily_refresh] step=link-business date=$DATE"
 if ! SHEIN_LINK_BUSINESS_REFRESH_PORTAL=0 bash scripts/cloud_link_business_sync.sh "$DATE"; then
@@ -238,6 +275,7 @@ else
   echo "[cloud_daily_refresh] RTV verify disabled by SHEIN_BI_DAILY_RTV_VERIFY"
 fi
 
+prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
 {
   if ! flock -w "$PORTAL_REFRESH_LOCK_WAIT_SEC" 8; then
     DAILY_WARNINGS+=("portal refresh lock busy")
@@ -253,7 +291,8 @@ fi
     fi
 
     node scripts/generate_bi_portal.mjs \
-      --metabase-url "$METABASE_URL"
+      --metabase-url "$METABASE_URL" \
+      --data-mode "$SHEIN_BI_PORTAL_DATA_MODE"
 
     node scripts/generate_bi_portal_shell.mjs
 
@@ -266,7 +305,7 @@ fi
       echo "[cloud_daily_refresh] portal section prewarm started pid=$!"
     fi
   fi
-} 8>"$PORTAL_REFRESH_LOCK_FILE"
+} 8>>"$PORTAL_REFRESH_LOCK_FILE"
 
 check_portal_health
 

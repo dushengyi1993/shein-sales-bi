@@ -248,6 +248,14 @@ function marketingPlanCandidateMeta(file, priceFile, enabledStores = []) {
   else if (rowCount >= 100) add(100, `medium_rows_${rowCount}`);
   else add(-500, `partial_rows_${rowCount}`);
   if (name.includes('repaired')) add(500, 'repaired');
+  // 2026-06-14 后优惠券不再是保底价层。每日 guard 必须优先使用
+  // 已迁移到“不配券 / 普通活动或限时折扣直接保底”的最新全量计划；
+  // 否则旧 all-934/coupon-visible 计划会把 6/16 之后已报的新 SKC
+  // 误判成未覆盖候选，进而诱发重复限时折扣兜底。
+  if (name.includes('no-coupon')) add(1000, 'post_coupon_non_guaranteed_no_coupon_plan');
+  if (name.includes('45162-45163')) add(350, 'latest_45162_45163_executed_plan');
+  if (name.includes('user-remarks')) add(200, 'user_remark_adjusted_plan');
+  if (name.includes('gapfill7')) add(150, 'latest_live_gapfill7_plan');
   if (name.includes('include-excluded-approved')) add(450, 'include_excluded_approved');
   if (name.includes('t3-plus45488')) add(250, 't3_plus45488');
   if (name.includes('coupon-visible')) add(100, 'coupon_visible');

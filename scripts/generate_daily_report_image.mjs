@@ -16,7 +16,7 @@ const MONO_STACK = "'DIN Alternate','Arial Narrow','Roboto Mono','Consolas',Aria
 const OWNER_FALLBACK = {key: 'UNASSIGNED', name: '未分配', color: '#64748b', stores: []};
 
 function parseArgs(argv) {
-  const args = {date: null, groups: ['DSY', 'LGM'], out: null, asOf: null};
+  const args = {date: null, groups: ['ALL'], out: null, asOf: null};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--date') args.date = argv[++i];
@@ -105,7 +105,11 @@ function storesForGroups(cfg, groups) {
   const seen = new Set();
   const stores = [];
   for (const groupKey of groups) {
-    for (const storeKey of cfg.groups?.[groupKey] || []) {
+    const keyName = String(groupKey || '').toUpperCase();
+    const groupStores = keyName === 'ALL'
+      ? (cfg.stores || []).filter(s => s.enabled !== false).map(s => s.storeKey)
+      : (cfg.groups?.[keyName] || []);
+    for (const storeKey of groupStores) {
       const key = String(storeKey).toUpperCase();
       if (seen.has(key)) continue;
       const store = storeByKey(cfg, key);
@@ -159,6 +163,7 @@ async function daySummary(cfg, stores, date, {asOfSec = null} = {}) {
     const row = {
       storeKey: store.storeKey,
       group: store.groupKey || store.group || '',
+      companyName: store.companyName || '',
       ownerKey: owner.key,
       ownerName: owner.name,
       ownerColor: cleanColor(owner.color),
@@ -241,24 +246,27 @@ function ownerBlocks(cfg, stores, summary) {
 }
 
 const defs = `<defs>
-  <linearGradient id="hero" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0f172a"/><stop offset="0.66" stop-color="#1e293b"/><stop offset="1" stop-color="#312e81"/></linearGradient>
+  <linearGradient id="hero" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fffdf8"/><stop offset=".58" stop-color="#f6f1e9"/><stop offset="1" stop-color="#efe6da"/></linearGradient>
+  <linearGradient id="heroAccent" x1="0" x2="1"><stop offset="0" stop-color="#7357ff"/><stop offset="1" stop-color="#f97316"/></linearGradient>
   <linearGradient id="blue" x1="0" x2="1"><stop offset="0" stop-color="#2563eb"/><stop offset="1" stop-color="#60a5fa"/></linearGradient>
   <linearGradient id="orange" x1="0" x2="1"><stop offset="0" stop-color="#f97316"/><stop offset="1" stop-color="#fb923c"/></linearGradient>
   <linearGradient id="green" x1="0" x2="1"><stop offset="0" stop-color="#059669"/><stop offset="1" stop-color="#34d399"/></linearGradient>
   <linearGradient id="purple" x1="0" x2="1"><stop offset="0" stop-color="#7c3aed"/><stop offset="1" stop-color="#c084fc"/></linearGradient>
+  <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#2f271c" flood-opacity=".09"/></filter>
   <style>
-    .title{font:800 46px ${FONT_STACK};fill:#fff;letter-spacing:-.5px}
-    .heroSub{font:400 18px ${FONT_STACK};fill:#cbd5e1}
-    .section{font:800 27px ${FONT_STACK};fill:#0f172a}
-    .note{font:400 15px ${FONT_STACK};fill:#64748b}
-    .cardLabel{font:700 15px ${FONT_STACK};fill:#64748b}
-    .cardNum{font:800 30px ${MONO_STACK};fill:#0f172a}
-    .cardSub{font:500 14px ${FONT_STACK};fill:#64748b}
-    .rowLabel{font:700 16px ${FONT_STACK};fill:#0f172a}
-    .rowMeta{font:600 13px ${FONT_STACK};fill:#64748b}
-    .rowVal{font:800 15px ${MONO_STACK};fill:#0f172a}
-    .tiny{font:600 12px ${FONT_STACK};fill:#64748b}
-    .mono{font:800 15px ${MONO_STACK};fill:#0f172a}
+    .title{font:850 47px ${FONT_STACK};fill:#20201d;letter-spacing:-1.8px}
+    .heroSub{font:500 17px ${FONT_STACK};fill:#716b62}
+    .eyebrow{font:800 12px ${FONT_STACK};fill:#7357ff;letter-spacing:2.2px}
+    .section{font:850 27px ${FONT_STACK};fill:#20201d;letter-spacing:-.8px}
+    .note{font:500 15px ${FONT_STACK};fill:#716b62}
+    .cardLabel{font:800 14px ${FONT_STACK};fill:#716b62}
+    .cardNum{font:850 28px ${MONO_STACK};fill:#20201d}
+    .cardSub{font:550 13px ${FONT_STACK};fill:#716b62}
+    .rowLabel{font:780 15.5px ${FONT_STACK};fill:#20201d}
+    .rowMeta{font:600 12.5px ${FONT_STACK};fill:#716b62}
+    .rowVal{font:850 14.5px ${MONO_STACK};fill:#20201d}
+    .tiny{font:700 11.5px ${FONT_STACK};fill:#716b62}
+    .mono{font:850 15px ${MONO_STACK};fill:#20201d}
   </style>
 </defs>`;
 function sectionTitle(x, y, title, note = '') {
@@ -270,7 +278,7 @@ function pill(x, y, text, color, w = null) {
     <text x="${x + width / 2}" y="${y + 16}" text-anchor="middle" class="tiny" style="fill:${cleanColor(color)}">${esc(text)}</text>`;
 }
 function kpiCard(x, y, w, label, main, sub, accent = '#2563eb') {
-  return `<rect x="${x}" y="${y}" width="${w}" height="118" rx="22" fill="#ffffff" stroke="#e2e8f0"/>
+  return `<rect x="${x}" y="${y}" width="${w}" height="118" rx="22" fill="#fffdf8" stroke="#ded7cc" filter="url(#softShadow)"/>
     <rect x="${x}" y="${y}" width="6" height="118" rx="3" fill="${cleanColor(accent)}"/>
     <text x="${x + 22}" y="${y + 35}" class="cardLabel">${esc(label)}</text>
     <text x="${x + 22}" y="${y + 73}" class="cardNum">${esc(main)}</text>
@@ -282,7 +290,7 @@ function ownerTable(rows, {x, y, width, totalSar}) {
   let out = ''; // section title is rendered by caller
   const boxY = y + 18;
   const h = 46 + rows.length * rowH;
-  out += `<rect x="${x}" y="${boxY}" width="${width}" height="${h}" rx="22" fill="#fff" stroke="#e2e8f0"/>`;
+  out += `<rect x="${x}" y="${boxY}" width="${width}" height="${h}" rx="22" fill="#fffdf8" stroke="#ded7cc" filter="url(#softShadow)"/>`;
   out += `<text x="${x + 24}" y="${boxY + 32}" class="rowMeta">负责人 / 店铺覆盖</text><text x="${x + width - 245}" y="${boxY + 32}" class="rowMeta">销售额</text><text x="${x + width - 110}" y="${boxY + 32}" class="rowMeta">订单 / 销量</text>`;
   rows.forEach((r, i) => {
     const yy = boxY + 46 + i * rowH;
@@ -291,7 +299,7 @@ function ownerTable(rows, {x, y, width, totalSar}) {
       <circle cx="${x + 30}" cy="${yy + 8}" r="7" fill="${r.color}"/>
       <text x="${x + 48}" y="${yy + 13}" class="rowLabel">${esc(r.name)}</text>
       <text x="${x + 116}" y="${yy + 13}" class="rowMeta">${r.ready}/${r.total} 店｜${pct(r.sar, totalSar)}</text>
-      <rect x="${x + 248}" y="${yy}" width="210" height="14" rx="7" fill="#e2e8f0"/>
+      <rect x="${x + 248}" y="${yy}" width="210" height="14" rx="7" fill="#eee7dc"/>
       <rect x="${x + 248}" y="${yy}" width="${barW}" height="14" rx="7" fill="${r.color}"/>
       <text x="${x + width - 245}" y="${yy + 13}" class="rowVal">${money(r.sar)}</text>
       <text x="${x + width - 110}" y="${yy + 13}" class="rowMeta">${int(r.orders)} / ${int(r.qty)}</text>`;
@@ -305,7 +313,7 @@ function storeRanking(rows, {x, y, width, title, note, maxRows = rows.length}) {
   let out = sectionTitle(x, y, title, note);
   const boxY = y + 18;
   const h = 48 + visible.length * rowH;
-  out += `<rect x="${x}" y="${boxY}" width="${width}" height="${h}" rx="22" fill="#fff" stroke="#e2e8f0"/>`;
+  out += `<rect x="${x}" y="${boxY}" width="${width}" height="${h}" rx="22" fill="#fffdf8" stroke="#ded7cc" filter="url(#softShadow)"/>`;
   out += `<text x="${x + 24}" y="${boxY + 32}" class="rowMeta">店铺</text><text x="${x + 128}" y="${boxY + 32}" class="rowMeta">负责人</text><text x="${x + width - 300}" y="${boxY + 32}" class="rowMeta">销售额 / 订单 / 销量</text>`;
   visible.forEach((r, i) => {
     const yy = boxY + 48 + i * rowH;
@@ -313,9 +321,9 @@ function storeRanking(rows, {x, y, width, title, note, maxRows = rows.length}) {
     const barW = width - 563;
     const bw = Math.max(r.sar > 0 ? 4 : 0, Math.round(barW * r.sar / max));
     out += `<line x1="${x + 18}" y1="${yy - 9}" x2="${x + width - 18}" y2="${yy - 9}" stroke="#f8fafc"/>
-      <text x="${x + 24}" y="${yy + 13}" class="rowLabel">${String(i + 1).padStart(2, '0')} ${esc(r.storeKey)}</text>
+      <text x="${x + 24}" y="${yy + 13}" class="rowLabel">${String(i + 1).padStart(2, '0')} ${esc(r.companyName ? `${r.storeKey} · ${r.companyName}` : r.storeKey)}</text>
       ${pill(x + 108, yy - 6, r.ownerName || '未分配', r.ownerColor || '#64748b', 92)}
-      <rect x="${barX}" y="${yy}" width="${barW}" height="14" rx="7" fill="#e2e8f0"/>
+      <rect x="${barX}" y="${yy}" width="${barW}" height="14" rx="7" fill="#eee7dc"/>
       <rect x="${barX}" y="${yy}" width="${bw}" height="14" rx="7" fill="${r.ownerColor || '#64748b'}"/>
       <text x="${x + width - 300}" y="${yy + 13}" class="rowVal">${money(r.sar)} SAR｜${int(r.orders)} 单｜${int(r.qty)} 件</text>`;
   });
@@ -328,7 +336,7 @@ function productRanking(rows, {x, y, width, title, note, maxRows = 12}) {
   let out = sectionTitle(x, y, title, note);
   const boxY = y + 18;
   const h = 48 + visible.length * rowH;
-  out += `<rect x="${x}" y="${boxY}" width="${width}" height="${h}" rx="22" fill="#fff" stroke="#e2e8f0"/>`;
+  out += `<rect x="${x}" y="${boxY}" width="${width}" height="${h}" rx="22" fill="#fffdf8" stroke="#ded7cc" filter="url(#softShadow)"/>`;
   out += `<text x="${x + 24}" y="${boxY + 32}" class="rowMeta">标准货号</text><text x="${x + width - 330}" y="${boxY + 32}" class="rowMeta">销量 / 销售额 / 店铺</text>`;
   visible.forEach((r, i) => {
     const yy = boxY + 48 + i * rowH;
@@ -337,7 +345,7 @@ function productRanking(rows, {x, y, width, title, note, maxRows = 12}) {
     const bw = Math.max(r.qty > 0 ? 4 : 0, Math.round(barW * r.qty / max));
     out += `<line x1="${x + 18}" y1="${yy - 9}" x2="${x + width - 18}" y2="${yy - 9}" stroke="#f8fafc"/>
       <text x="${x + 24}" y="${yy + 13}" class="rowLabel">${esc(cut(`${String(i + 1).padStart(2, '0')} ${r.sku}`, 36))}</text>
-      <rect x="${barX}" y="${yy}" width="${barW}" height="14" rx="7" fill="#e2e8f0"/>
+      <rect x="${barX}" y="${yy}" width="${barW}" height="14" rx="7" fill="#eee7dc"/>
       <rect x="${barX}" y="${yy}" width="${bw}" height="14" rx="7" fill="url(#purple)"/>
       <text x="${x + width - 330}" y="${yy + 13}" class="rowVal">${int(r.qty)} 件｜${money(r.sar)} SAR｜${int(r.stores)} 店</text>`;
   });
@@ -370,23 +378,28 @@ const width = 1280;
 let cy = 40;
 let body = '';
 body += `<rect x="32" y="${cy}" width="1216" height="156" rx="30" fill="url(#hero)"/>`;
-body += `<text x="64" y="${cy + 58}" class="title">SHEIN 经营日报</text>`;
-body += `<text x="66" y="${cy + 96}" class="heroSub">${esc(date)}｜截至 ${esc(asOf.slice(0, 5))}｜最新抓取 ${esc(fetchText)}｜生成 ${esc(bjNow())}（北京时间）</text>`;
+body += `<rect x="32" y="${cy}" width="1216" height="156" rx="30" fill="none" stroke="#ded7cc"/>`;
+body += `<rect x="64" y="${cy + 34}" width="94" height="24" rx="12" fill="#ede7ff"/><text x="111" y="${cy + 51}" text-anchor="middle" class="eyebrow">BI V2</text>`;
+body += `<text x="64" y="${cy + 92}" class="title">SHEIN 全店经营晨报</text>`;
 body += `<rect x="1010" y="${cy + 42}" width="196" height="42" rx="21" fill="${healthColor}" opacity=".18" stroke="${healthColor}"/>
-  <text x="1108" y="${cy + 69}" text-anchor="middle" style="font:800 18px ${FONT_STACK};fill:#fff">覆盖 ${todayCoverage.text}</text>`;
-body += `<text x="66" y="${cy + 130}" class="heroSub">口径：订单创建时间｜正金额商品明细｜标准货号归并｜全店铺负责人分组｜1 SAR = 1.8 RMB</text>`;
+  <text x="1108" y="${cy + 69}" text-anchor="middle" style="font:850 18px ${FONT_STACK};fill:${healthColor}">覆盖 ${todayCoverage.text}</text>`;
+body += `<text x="66" y="${cy + 124}" class="heroSub">${esc(date)}｜截至 ${esc(asOf.slice(0, 5))}｜最新抓取 ${esc(fetchText)}｜生成 ${esc(bjNow())}（北京时间）</text>`;
+body += `<text x="66" y="${cy + 145}" class="heroSub">口径：订单创建时间｜正金额商品明细｜标准货号归并｜全店负责人分组｜1 SAR = 1.8 RMB</text>`;
 cy += 196;
 
-body += sectionTitle(48, cy, '今日核心指标', '今日为截至当前时间，昨日为完整自然日，仅作参考');
+body += sectionTitle(48, cy, '今日最新 vs 昨日完整', '今日为截至当前时间，昨日为完整自然日；两者并列展示，不混作同一口径');
 cy += 24;
 const cardGap = 16;
-const cardW = Math.floor((width - 96 - cardGap * 4) / 5);
+const cardW = Math.floor((width - 96 - cardGap * 5) / 6);
+const todayDelta = round2(today.totalSar - yesterdayFull.totalSar);
+const todayDeltaSign = todayDelta >= 0 ? '+' : '';
 const cards = [
-  ['总成交额', `${money(today.totalSar)} SAR`, `${money(today.totalRmb)} RMB`, '#2563eb'],
-  ['有效订单', `${int(today.orders)} 单`, `客单 ${money(avg(today.totalSar, today.orders))} SAR`, '#f97316'],
-  ['产品销量', `${int(today.qty)} 件`, `件均 ${money(avg(today.totalSar, today.qty))} SAR`, '#7c3aed'],
-  ['动销货号', `${int(today.activeProducts)} 个`, `昨日 ${int(yesterdayFull.activeProducts)} 个`, '#db2777'],
-  ['数据覆盖', todayCoverage.text, missingText, healthColor],
+  ['今日成交额', `${money(today.totalSar)} SAR`, `${money(today.totalRmb)} RMB`, '#7357ff'],
+  ['今日订单', `${int(today.orders)} 单`, `客单 ${money(avg(today.totalSar, today.orders))} SAR`, '#f97316'],
+  ['今日销量', `${int(today.qty)} 件`, `件均 ${money(avg(today.totalSar, today.qty))} SAR`, '#db2777'],
+  ['昨日成交额', `${money(yesterdayFull.totalSar)} SAR`, `${money(yesterdayFull.totalRmb)} RMB`, '#20201d'],
+  ['昨日订单', `${int(yesterdayFull.orders)} 单`, `销量 ${int(yesterdayFull.qty)} 件`, '#14b8a6'],
+  ['今日进度', `${todayDeltaSign}${money(todayDelta)}`, `相对昨日全天`, todayDelta >= 0 ? '#059669' : '#dc2626'],
 ];
 cards.forEach((c, i) => { body += kpiCard(48 + i * (cardW + cardGap), cy, cardW, c[0], c[1], c[2], c[3]); });
 cy += 148;
@@ -400,6 +413,10 @@ cy += owner.height;
 const todayStore = storeRanking(today.rankedStores, {x: 48, y: cy, width: 1184, title: `今日店铺排行（${today.rows.length} 店）`, note: '颜色按负责人区分，按销售额降序'});
 body += todayStore.svg;
 cy += todayStore.height;
+
+const todayProducts = productRanking(today.rankedProducts, {x: 48, y: cy, width: 1184, title: '今日热卖产品 Top 12', note: '截至当前时间，给今天补货、活动和运营动作排序', maxRows: 12});
+body += todayProducts.svg;
+cy += todayProducts.height;
 
 const yesterdayStore = storeRanking(yesterdayFull.rankedStores, {x: 48, y: cy, width: 1184, title: '昨日完整店铺 Top 10', note: `${ydate} 完整自然日，帮助判断今天起量情况`, maxRows: 10});
 body += yesterdayStore.svg;

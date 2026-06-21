@@ -120,6 +120,7 @@ for STORE in $STORES; do
       && node scripts/fetch_shein_business_domains.mjs \
         --store "$STORE" \
         --date "$DATE" \
+        --domains "${SHEIN_BUSINESS_DOMAINS:-home,afterSales,waybill,fulfillment,productInventory,management,marketing,quality,comments}" \
         --wait-ms "${SHEIN_BUSINESS_WAIT_MS:-2000}" \
         --max-pages "${SHEIN_BUSINESS_MAX_PAGES:-20}" \
         --store-attempts "${SHEIN_BUSINESS_STORE_ATTEMPTS:-2}" \

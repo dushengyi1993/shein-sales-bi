@@ -24,6 +24,7 @@ const PAYLOAD_DIR = path.join(ROOT, 'outputs', 'lark_payloads');
 const REPORT_DIR = path.join(ROOT, 'outputs', 'reports');
 const FEISHU_BASE_PAUSE_FLAG = path.join(ROOT, 'state', 'feishu-base-sync-paused.flag');
 const FX_SAR_TO_RMB = 1.8;
+const OWNER_FALLBACK = {key: 'UNASSIGNED', name: '未分配', color: '#64748b', stores: []};
 
 function envTruthy(value) {
   return /^(1|true|yes|on)$/i.test(String(value || '').trim());
@@ -341,16 +342,92 @@ async function loadTopProductsFromFetch(storesConfig, groupKeys, date, limit = 5
     .slice(0, limit);
 }
 
+async function loadTopProductsForDayFromFetch(storesConfig, groupKeys, date, limit = 5) {
+  const stores = groupKeys.flatMap(groupKey => selectedStores(storesConfig, groupKey)).filter(s => s.productStatsEnabled !== false);
+  const byProduct = new Map();
+  for (const store of stores) {
+    const obj = await loadJsonIfExists(path.join(FETCH_DIR, store.storeKey, `${date}.json`));
+    for (const g of obj?.goodsRows || []) {
+      if (!isValidSalesGoodsRow(g)) continue;
+      const rawGoodsSn = String(g.goodsSn || g.skuSn || g.skuCode || g.skcName || '').trim();
+      const goodsSn = normalizeGoodsSn(rawGoodsSn, {goodsTitle: g.goodsTitle});
+      const qty = salesQuantity(g);
+      const sar = salesAmountSar(g);
+      if (!goodsSn || qty <= 0 || sar <= 0) continue;
+      if (!byProduct.has(goodsSn)) byProduct.set(goodsSn, {goodsSn, goodsTitle: String(g.goodsTitle || '').slice(0, 500), totalQty: 0, totalSar: 0});
+      const row = byProduct.get(goodsSn);
+      row.totalQty += qty;
+      row.totalSar = round2(row.totalSar + sar);
+      if (!row.goodsTitle && g.goodsTitle) row.goodsTitle = String(g.goodsTitle).slice(0, 500);
+    }
+  }
+  return [...byProduct.values()]
+    .sort((a, b) => b.totalQty - a.totalQty || b.totalSar - a.totalSar || a.goodsSn.localeCompare(b.goodsSn, 'zh-CN'))
+    .slice(0, limit);
+}
+
 function formatMoney(n) {
   return Number(n || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
 }
 
-function formatStoreList(rows, showGroup = false) {
+function storeDisplayNameFromConfig(storesConfig, storeKey) {
+  const key = String(storeKey || '').toUpperCase();
+  const store = storesConfig.stores?.find(s => String(s.storeKey).toUpperCase() === key);
+  const cn = String(store?.companyName || '').trim();
+  return cn ? `${key} · ${cn}` : key;
+}
+
+function ownerLookup(storesConfig) {
+  const map = new Map();
+  for (const group of storesConfig.ownerGroups || []) {
+    for (const storeKey of group.stores || []) map.set(String(storeKey).toUpperCase(), {...group});
+  }
+  return map;
+}
+
+function ownerNameForStore(storesConfig, storeKey) {
+  return ownerLookup(storesConfig).get(String(storeKey).toUpperCase())?.name || OWNER_FALLBACK.name;
+}
+
+function ownerSummary(storesConfig, dayData) {
+  const owners = ownerLookup(storesConfig);
+  const byOwner = new Map();
+  for (const row of dayData.rows || []) {
+    const owner = owners.get(String(row.storeKey).toUpperCase()) || OWNER_FALLBACK;
+    const key = owner.key || owner.name;
+    if (!byOwner.has(key)) byOwner.set(key, {name: owner.name, stores: new Set(), salesSar: 0, salesRmb: 0, orders: 0, qty: 0, missing: 0});
+    const item = byOwner.get(key);
+    item.stores.add(row.storeKey);
+    item.salesSar = round2(item.salesSar + Number(row.salesSar || 0));
+    item.salesRmb = round2(item.salesRmb + Number(row.salesRmb || 0));
+    item.orders += Number(row.orders || 0);
+    item.qty += Number(row.qty || 0);
+    if (row.missing) item.missing += 1;
+  }
+  return [...byOwner.values()].sort((a, b) => b.salesSar - a.salesSar || a.name.localeCompare(b.name, 'zh-CN'));
+}
+
+function formatOwnerSummary(storesConfig, dayData) {
+  const rows = ownerSummary(storesConfig, dayData);
+  if (!rows.length) return '暂无负责人分组数据';
+  return rows.map(r => {
+    const ready = r.stores.size - r.missing;
+    const coverage = r.missing ? `${ready}/${r.stores.size} 店` : `${r.stores.size} 店`;
+    return `${r.name}：${formatMoney(r.salesSar)} SAR（${r.orders} 单，${r.qty} 件，${coverage}）`;
+  }).join('\n');
+}
+
+function reportLabelForGroups(groups) {
+  const normalized = (groups || []).map(g => String(g).toUpperCase()).filter(Boolean);
+  if (!normalized.length || normalized.includes('ALL')) return '全店';
+  return '选定店铺';
+}
+
+function formatStoreList(storesConfig, rows) {
   if (!rows.length) return '暂无店铺数据';
   return rows.map((r, i) => {
     const missing = r.missing ? '，明细缺失' : '';
-    const group = showGroup && r.groupKey ? `${r.groupKey}/` : '';
-    return `${i + 1}. ${group}${r.storeKey} ${formatMoney(r.salesSar)} SAR（订单 ${r.orders}，销量 ${r.qty}${missing}）`;
+    return `${i + 1}. ${storeDisplayNameFromConfig(storesConfig, r.storeKey)}｜${ownerNameForStore(storesConfig, r.storeKey)}｜${formatMoney(r.salesSar)} SAR（订单 ${r.orders}，销量 ${r.qty}${missing}）`;
   }).join('\n');
 }
 
@@ -359,55 +436,51 @@ function formatProductList(rows) {
   return rows.map((r, i) => `${i + 1}. ${r.goodsSn}：${r.totalQty} 件，${formatMoney(r.totalSar)} SAR`).join('\n');
 }
 
-function formatGroupSummary(dayData) {
-  if (!dayData.groups || dayData.groups.length <= 1) return '';
-  return dayData.groups.map(g =>
-    `${g.groupKey}小计：${formatMoney(g.totalSar)} SAR / ${formatMoney(g.totalRmb)} RMB（订单 ${g.orders}，销量 ${g.qty}）`
-  ).join('\n');
-}
-
-function formatMissingStores(dayData, showGroup = false) {
+function formatMissingStores(storesConfig, dayData) {
   return dayData.rows
     .filter(r => r.missing)
-    .map(r => showGroup && r.groupKey ? `${r.groupKey}:${r.storeKey}` : r.storeKey)
+    .map(r => storeDisplayNameFromConfig(storesConfig, r.storeKey))
     .join(', ');
 }
 
-function buildMessage({groupLabel, today, yesterday, todayData, yesterdayData, topProducts, syncWarning = ''}) {
+function buildMessage({storesConfig, groupLabel, today, yesterday, todayData, yesterdayData, todayProducts, yesterdayProducts, syncWarning = ''}) {
   const generatedAt = localDateTimeString();
   const todayFetchAt = latestFetchTimeText(todayData);
   const yesterdayFetchAt = latestFetchTimeText(yesterdayData);
-  const multiGroup = (todayData.groups?.length || 0) > 1 || (yesterdayData.groups?.length || 0) > 1;
-  const yesterdayMissing = formatMissingStores(yesterdayData, multiGroup);
-  const todayMissing = formatMissingStores(todayData, multiGroup);
+  const yesterdayMissing = formatMissingStores(storesConfig, yesterdayData);
+  const todayMissing = formatMissingStores(storesConfig, todayData);
   const missingNote = [
     yesterdayMissing ? `昨日缺少明细：${yesterdayMissing}` : '',
     todayMissing ? `今日缺少明细：${todayMissing}` : '',
   ].filter(Boolean).join('\n');
-  const yesterdayGroupSummary = formatGroupSummary(yesterdayData);
-  const todayGroupSummary = formatGroupSummary(todayData);
+  const todayDelta = round2(todayData.totalSar - yesterdayData.totalSar);
+  const todayDeltaText = `${todayDelta >= 0 ? '+' : ''}${formatMoney(todayDelta)} SAR（今日截至当前 vs 昨日全天，仅作进度参考）`;
   return [
-    `SHEIN ${groupLabel} 业绩简报`,
+    `SHEIN ${groupLabel}经营晨报`,
     `生成时间：${generatedAt}（北京时间）`,
-    `今日数据抓取时间：${todayFetchAt}（北京时间）`,
-    `昨日数据抓取时间：${yesterdayFetchAt}（北京时间）`,
+    `今日最新抓取：${todayFetchAt}（北京时间）`,
+    `昨日完整抓取：${yesterdayFetchAt}（北京时间）`,
     '',
-    `【昨日完整业绩｜${yesterday}】`,
-    `${multiGroup ? '全部店销售额' : '销售额'}：${formatMoney(yesterdayData.totalSar)} SAR / ${formatMoney(yesterdayData.totalRmb)} RMB`,
-    `${multiGroup ? '全部店有效订单' : '有效订单'}：${yesterdayData.orders}，产品销量：${yesterdayData.qty}`,
-    yesterdayGroupSummary ? `分组汇总：\n${yesterdayGroupSummary}` : '',
-    '店铺排行：',
-    formatStoreList(yesterdayData.rankedStores, multiGroup),
+    `【今日最新｜${today}】`,
+    `销售额：${formatMoney(todayData.totalSar)} SAR / ${formatMoney(todayData.totalRmb)} RMB`,
+    `有效订单：${todayData.orders}，产品销量：${todayData.qty}`,
+    `与昨日全天差额：${todayDeltaText}`,
+    '负责人小计：',
+    formatOwnerSummary(storesConfig, todayData),
+    '今日店铺排行：',
+    formatStoreList(storesConfig, todayData.rankedStores),
+    '今日热卖产品 Top 5：',
+    formatProductList(todayProducts),
     '',
-    `【今日最新业绩｜${today}】`,
-    `${multiGroup ? '全部店销售额' : '销售额'}：${formatMoney(todayData.totalSar)} SAR / ${formatMoney(todayData.totalRmb)} RMB`,
-    `${multiGroup ? '全部店有效订单' : '有效订单'}：${todayData.orders}，产品销量：${todayData.qty}`,
-    todayGroupSummary ? `分组汇总：\n${todayGroupSummary}` : '',
-    '店铺排行：',
-    formatStoreList(todayData.rankedStores, multiGroup),
-    '',
-    '【本月热卖产品 Top 5】',
-    formatProductList(topProducts),
+    `【昨日完整｜${yesterday}】`,
+    `销售额：${formatMoney(yesterdayData.totalSar)} SAR / ${formatMoney(yesterdayData.totalRmb)} RMB`,
+    `有效订单：${yesterdayData.orders}，产品销量：${yesterdayData.qty}`,
+    '负责人小计：',
+    formatOwnerSummary(storesConfig, yesterdayData),
+    '昨日店铺排行：',
+    formatStoreList(storesConfig, yesterdayData.rankedStores),
+    '昨日热卖产品 Top 5：',
+    formatProductList(yesterdayProducts),
     '',
     syncWarning ? `【同步提醒】\n${syncWarning}\n` : '',
     missingNote ? `【注意】\n${missingNote}` : '',
@@ -460,7 +533,7 @@ const state = await loadJsonIfExists(STATE_PATH) || {};
 const feishuBasePaused = envTruthy(process.env.SHEIN_FEISHU_BASE_PAUSED)
   || await fileExists(FEISHU_BASE_PAUSE_FLAG);
 args.as = args.as || reportConfig.defaultIdentity || 'user';
-args.group = args.group || 'DSY';
+args.group = args.group || 'ALL';
 if (!['user', 'bot'].includes(args.as)) {
   throw new Error(`Invalid report identity: ${args.as}. Expected user or bot.`);
 }
@@ -480,7 +553,7 @@ let syncResult = null;
 let syncWarning = '';
 let syncDashboardRefresh = null;
 const reportGroups = selectedReportGroups(storesConfig, args, reportConfig);
-const groupLabel = reportGroups.join('/');
+const groupLabel = reportLabelForGroups(reportGroups);
 if (args.syncToday) {
   const syncResults = [];
   for (const groupKey of reportGroups) {
@@ -523,8 +596,9 @@ if (args.syncToday) {
 
 const yesterdayData = await loadReportDay(storesConfig, reportGroups, yesterday);
 const todayData = await loadReportDay(storesConfig, reportGroups, today);
-const topProducts = await loadTopProductsFromFetch(storesConfig, reportGroups, today, 5);
-const message = buildMessage({groupLabel, today, yesterday, todayData, yesterdayData, topProducts, syncWarning: syncWarning.trim()});
+const todayProducts = await loadTopProductsForDayFromFetch(storesConfig, reportGroups, today, 5);
+const yesterdayProducts = await loadTopProductsForDayFromFetch(storesConfig, reportGroups, yesterday, 5);
+const message = buildMessage({storesConfig, groupLabel, today, yesterday, todayData, yesterdayData, todayProducts, yesterdayProducts, syncWarning: syncWarning.trim()});
 
 await fs.mkdir(REPORT_DIR, {recursive: true});
 const localReportFile = path.join(REPORT_DIR, `daily-lark-report-${today}.txt`);
@@ -615,7 +689,8 @@ console.log(JSON.stringify({
   syncWarning: syncWarning.trim() || null,
   yesterdayTotalSar: yesterdayData.totalSar,
   todayTotalSar: todayData.totalSar,
-  topProductCount: topProducts.length,
+  todayTopProductCount: todayProducts.length,
+  yesterdayTopProductCount: yesterdayProducts.length,
   visual: args.visual,
   visualFile: visualResult?.parsed?.png ? path.relative(ROOT, visualResult.parsed.png) : null,
   monthlyVisual: Boolean(monthlyVisualResult),

@@ -1143,7 +1143,10 @@ async function processStore(store, args, targetPlan, knownOrdinaryGuardContext =
       result.limitedDiscountGuard.overlapCount = overlapRows.length;
       result.limitedDiscountGuard.excludedCount = excludedRows.length;
       result.limitedDiscountGuard.allowedByTargetPrice = allowedRows.length;
-      result.limitedDiscountGuard.excludedBelowTarget = excludedRows.filter(row => row.priceGuard.decision === 'coupon_final_below_target').length;
+      result.limitedDiscountGuard.excludedBelowTarget = excludedRows.filter(row => [
+        'coupon_final_below_target',
+        'coupon_final_below_safety_floor',
+      ].includes(row.priceGuard.decision)).length;
       result.limitedDiscountGuard.missingPrice = excludedRows.filter(row => row.priceGuard.decision === 'missing_limited_discount_price' || row.priceGuard.decision === 'missing_final_target_price').length;
       result.limitedDiscountGuard.sample = overlapRows.slice(0, 20);
       result.limitedDiscountGuard.allowedSample = allowedRows.slice(0, 20);
@@ -1240,7 +1243,10 @@ async function processStore(store, args, targetPlan, knownOrdinaryGuardContext =
         + unavailableRows.filter(row => row.stackReviewHasExistingOrdinaryLabel).length;
       result.knownOrdinaryActivityGuard.evidenceIncompleteCount = incompleteRows.length + unavailableRows.length;
       result.knownOrdinaryActivityGuard.evidenceUnavailableStop = unavailableRows.length > 0;
-      result.knownOrdinaryActivityGuard.excludedBelowTarget = excludedRows.filter(row => row.priceGuard?.decision === 'known_ordinary_final_below_target').length;
+      result.knownOrdinaryActivityGuard.excludedBelowTarget = excludedRows.filter(row => [
+        'known_ordinary_final_below_target',
+        'known_ordinary_final_below_safety_floor',
+      ].includes(row.priceGuard?.decision)).length;
       result.knownOrdinaryActivityGuard.allowedByTargetPrice = allowedRows.length;
       result.knownOrdinaryActivityGuard.missingFinalTargetPrice = excludedRows.filter(row => row.priceGuard?.decision === 'missing_final_target_price').length;
       result.knownOrdinaryActivityGuard.sample = [...overlapRows, ...incompleteRows, ...unavailableRows].slice(0, 20);

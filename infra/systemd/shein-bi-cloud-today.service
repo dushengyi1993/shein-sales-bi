@@ -9,6 +9,7 @@ WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/root
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=SHEIN_SALES_TRANSPORT=webapi
+Environment=SHEIN_BI_PORTAL_REFRESH_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-portal-refresh.lock
 TimeoutStartSec=7200
 MemoryHigh=1500M
 MemoryMax=2500M

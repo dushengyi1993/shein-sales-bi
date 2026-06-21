@@ -4,7 +4,8 @@ services:
   metabase:
     image: metabase/metabase:latest
     container_name: shein-metabase
-    restart: unless-stopped
+    profiles: ["manual-metabase"]
+    restart: "no"
     ports:
       - "${METABASE_PORT:-3000}:3000"
     environment:

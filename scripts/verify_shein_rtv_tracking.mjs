@@ -136,7 +136,29 @@ async function runNode(script, args = [], timeoutMs = 240000) {
 
 async function runPsql(args, sql) {
   const useWsl = process.platform === 'win32';
-  const command = useWsl ? 'wsl' : 'docker';
+  const useSudoDocker =
+    !useWsl &&
+    process.platform !== 'win32' &&
+    typeof process.getuid === 'function' &&
+    process.getuid() !== 0 &&
+    process.env.SHEIN_DOCKER_NO_SUDO !== '1';
+  const command = useWsl ? 'wsl' : useSudoDocker ? 'sudo' : 'docker';
+  const dockerArgs = [
+    'exec',
+    '-i',
+    args.container,
+    'psql',
+    '-U',
+    args.user,
+    '-d',
+    args.database,
+    '-v',
+    'ON_ERROR_STOP=1',
+    '-t',
+    '-A',
+    '-P',
+    'pager=off',
+  ];
   const commandArgs = useWsl
     ? [
         '-d',
@@ -146,22 +168,9 @@ async function runPsql(args, sql) {
         '-lc',
         `sudo docker exec -i ${args.container} psql -U ${args.user} -d ${args.database} -v ON_ERROR_STOP=1 -t -A -P pager=off`,
       ]
-    : [
-        'exec',
-        '-i',
-        args.container,
-        'psql',
-        '-U',
-        args.user,
-        '-d',
-        args.database,
-        '-v',
-        'ON_ERROR_STOP=1',
-        '-t',
-        '-A',
-        '-P',
-        'pager=off',
-      ];
+    : useSudoDocker
+      ? ['-n', 'docker', ...dockerArgs]
+      : dockerArgs;
   const child = spawn(command, commandArgs, {
     cwd: ROOT,
     windowsHide: true,

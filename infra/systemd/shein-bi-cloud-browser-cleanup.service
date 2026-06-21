@@ -1,0 +1,13 @@
+[Unit]
+Description=SHEIN BI cleanup stale headless store Chrome processes
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=sheinops
+Group=sheinops
+WorkingDirectory=/opt/shein-bi/app
+Environment=HOME=/home/sheinops
+Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+ExecStart=/usr/bin/env node /opt/shein-bi/app/scripts/cleanup_shein_store_browsers.mjs --all --only-headless --cleanup-chrome-tmp --kill-after-sec 10

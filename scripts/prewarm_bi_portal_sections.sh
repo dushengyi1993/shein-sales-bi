@@ -10,14 +10,15 @@ PORTAL_URL="${SHEIN_BI_PORTAL_URL:-http://127.0.0.1:8787}"
 # before and after profit: the first pass serves a fast summary if the current
 # profit cache already exists, while the second pass refreshes it after a
 # successful profit warm. The frontend refuses stale homeProfit summaries.
-SECTIONS="${SHEIN_BI_PORTAL_PREWARM_SECTIONS:-homeRankings,afterSales,orders,homeProfit,actions,financeData,linksData,productTrafficDaily,inventoryTrend,comments,rtvData,waybills,rankings,profit,homeProfit}"
+SECTIONS="${SHEIN_BI_PORTAL_PREWARM_SECTIONS:-homeRankings,afterSales,orders,homeProfit,actions,linksData,productTrafficDaily,comments,rtvData,waybills,rankings,profit,homeProfit}"
 LOG_DIR="${SHEIN_BI_PREWARM_LOG_DIR:-/srv/shein-bi/logs/cloud-portal-prewarm}"
 TIMEOUT_SECONDS="${SHEIN_BI_PREWARM_SECTION_TIMEOUT_SECONDS:-1200}"
 FORCE_REFRESH="${SHEIN_BI_PORTAL_PREWARM_FORCE:-1}"
 ASYNC_REFRESH="${SHEIN_BI_PORTAL_PREWARM_ASYNC:-1}"
-LOCK_FILE="${SHEIN_BI_PORTAL_PREWARM_LOCK_FILE:-/tmp/shein-bi-portal-prewarm.lock}"
+LOCK_FILE="${SHEIN_BI_PORTAL_PREWARM_LOCK_FILE:-$ROOT/state/locks/shein-bi-portal-prewarm.lock}"
 
 mkdir -p "$LOG_DIR"
+mkdir -p "$(dirname "$LOCK_FILE")"
 STAMP="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)"
 LOG_FILE="$LOG_DIR/prewarm-${STAMP}.log"
 

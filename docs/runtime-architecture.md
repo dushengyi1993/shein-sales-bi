@@ -1,12 +1,12 @@
 # 运行环境架构
 
-## 2026-06-03 当前运行环境摘要
+## 2026-06-20 当前运行环境摘要
 
 - SHEIN 销售抓数、BI 后置刷新和数据库备份已切到云端 systemd；本地 BI 和 `SHEIN-*` Windows 计划任务已封存禁用。
-- 飞书多维表格 / 原生看板写入已临时暂停；飞书日报、异常通知 watchdog 和只读问数机器人已云端化并验证。
+- 飞书多维表格 / 原生看板写入已临时暂停；异常通知 watchdog 和只读问数机器人已云端化并验证。飞书日报脚本保留为手动入口，自动发送当前已停用。
 - 销售抓取主入口已改为 Node WebAPI 直连优先；当前 19 店 `salesTransport=auto`，成功时不启动浏览器，浏览器只保留为 Cookie/session 刷新、登录续期和回退工具。
 - 暂停开关为 `state/feishu-base-sync-paused.flag`；存在该文件时跳过飞书事实表、产品表、月表、宽表和看板写入，删除后可恢复。
-- 云端当前自动覆盖销售 WebAPI、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、飞书日报、统一日更补采、异常通知、登录态巡检和只读问数机器人。HL OpenAPI 销售对账已退出生产双跑。
+- 云端当前自动覆盖销售 WebAPI、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、晨间销售+统一日更补采、异常通知、登录态巡检、残留浏览器清理和只读问数机器人。HL OpenAPI 销售对账已退出生产双跑。
 - 当前正式门户为 V2；V1 已从线上 `/v1/` 下线，只保留 GitHub final/archive release `2026.06.18-v1-final-archive` 作为恢复点，不再进入正式 release 或日常刷新。
 - SHEIN 临时人工登录维护入口已云端化：BI `/cloud-login-maintenance` 通过 noVNC 打开指定店铺独立 profile 的短时 Chrome 窗口，完成后导出/探测 session 并关闭临时进程。
 - BI Portal 生成端会用 `lib/product_display_name.mjs` 给 `data.json` 补齐 `product_display_name` / `productDisplayNames`；前端页面和云端飞书问数机器人共用该显示名，后台归因 key 仍保持 `standard_goods_sn`。
@@ -29,10 +29,13 @@
 
 ## 当前云端 systemd 调度（北京时间）
 
-- `shein-bi-cloud-today.timer`：`00:00/02:00/.../22:00` 每两小时整点刷新当天销售、入仓并生成 BI Portal。
-- `shein-bi-cloud-yesterday.timer`：每天 `00:10` 刷新前一天最终销售，并复核前两天稳定日。
-- `shein-bi-db-backup.timer`：每天 `02:30` 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto`。
-- `shein-bi-cloud-session-manager.timer`：每天 `03:20` 顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态。
+- `shein-bi-cloud-today.timer`：`00:00/02:00/04:00/06:00/10:00/.../22:00` 每两小时整点刷新当天销售、入仓并生成 BI Portal；`08:00` 由晨间链路接管。
+- `shein-bi-cloud-morning-chain.timer`：每天 `08:00` 先刷新当天销售，再启动 `shein-bi-cloud-daily-refresh.service`；当前 `SHEIN_BI_MORNING_SEND_LARK_REPORT=0`，飞书日报自动发送停用。
+- `shein-bi-cloud-yesterday.timer`：每天 `03:00` 刷新前一天最终销售，并复核前两天稳定日。
+- `shein-bi-db-backup.timer`：每天 `02:40` 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto`。
+- `shein-bi-cloud-et-forwarder.timer`：奇数小时 `:20` 高频同步 ET 货代仓/出库单，只轻量刷新订单/物流/售后相关 section。
+- `shein-bi-cloud-session-manager.timer`：每天 `02:20` 顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态。
+- `shein-bi-cloud-browser-cleanup.timer`：每 30 分钟清理超时残留店铺浏览器。
 - 会写当前 19 店 SHEIN Chrome profile 的云端任务必须以 `sheinops` 运行；`shein-bi-cloud-daily-refresh.service` 不能用 root，否则会留下 root-owned profile 文件，导致登录态管家次日 `EACCES`。登录态恢复入口为 `restore_shein_store_session.mjs`，先回灌 browser/WebAPI session，再验证 GSP + SBN。
 - 本地 `SHEIN-*` Windows 计划任务已全部禁用，只保留为回滚和 Linux 迁移参考。
 
@@ -222,10 +225,10 @@
 
 # 2026-05-15 云端调度与本地封存
 
-- 生产调度已切到云端 systemd timer：`shein-bi-cloud-today.timer` 每两小时整点刷新当天销售、入仓并生成 BI Portal；`shein-bi-cloud-yesterday.timer` 每天 `00:10` 刷新前一天最终销售并复核前两天稳定日；`shein-bi-db-backup.timer` 每天 `02:30` 做数据库备份；`shein-bi-cloud-daily-refresh.timer` 每天 `08:10` 统一做日更补采（链接/业务域 + 营销活动/限时折扣/优惠券价格线索 + RTV 换单复核）并刷新 BI，且全店日指标仍全 0 时跳过链接/业务域入仓刷新。
+- 生产调度已切到云端 systemd timer：`shein-bi-cloud-today.timer` 在 `00/02/04/06/10/12/14/16/18/20/22:00` 刷新当天销售、入仓并生成 BI Portal；`08:00` 由 `shein-bi-cloud-morning-chain.timer` 接管，先刷新当天销售，再启动 `shein-bi-cloud-daily-refresh.service` 统一做日更补采（链接/业务域 + 营销活动/限时折扣/优惠券价格线索 + RTV 换单复核）并刷新 BI，且全店日指标仍全 0 时跳过链接/业务域入仓刷新；`shein-bi-cloud-yesterday.timer` 每天 `03:00` 刷新前一天最终销售并复核稳定日；`shein-bi-db-backup.timer` 每天 `02:40` 做数据库备份。
 - 覆盖审计由 `scripts/audit_cloud_data_coverage.mjs` 提供：最新日防漏使用 `--expected-start range-start`，历史断档排查使用 `--expected-start first-seen`。后者按每个店首个有效日期之后查中间断档，避免把店铺尚未开通/尚未接入前的日期误判为缺抓。
 - 本地 `SHEIN-*` Windows 计划任务已封存禁用。`scheduled_intraday_dsy.ps1`、`scheduled_yesterday_final_dsy.ps1`、`scheduled_link_management_daily.ps1`、`scheduled_et_forwarder_daily.ps1`、`scheduled_bi_daily_pipeline.ps1` 等只保留为回滚/迁移参考，不再作为生产调度。
-- 云端当前自动覆盖销售 WebAPI、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、飞书日报、统一日更补采和异常通知；HL OpenAPI 销售对账已退出生产双跑。
+- 云端当前自动覆盖销售 WebAPI、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、晨间销售+统一日更补采、异常通知、登录态巡检、残留浏览器清理和只读问数机器人；飞书日报自动发送已停用；HL OpenAPI 销售对账已退出生产双跑。
 - 旧独立链接管理计划任务 `SHEIN-Sales-15Stores-LinkManagement-0340` / `SHEIN-Sales-15Stores-LinkManagement-0510` 已删除；`SHEIN-Sales-15Stores-LinkManagement-0530` 是本地历史任务，已封存。
 - HL 旧子账号 profile `profiles/persistent-hl-profile` 已删除；正式 HL profile 为 `profiles/persistent-shein-main-profile`，CDP 端口 `9360`。
 - 飞书定时任务和写表链路都通过 `config/stores.json` 获取 HL profile；当前生产脚本中没有旧 HL profile、旧端口 `9338` 或 `profileKey=hl` 引用。

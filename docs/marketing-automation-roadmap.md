@@ -113,6 +113,7 @@
 - BI `outputs/bi-portal/data.json` 过期时，候选只能标为 `stale_observation_only`，不得形成“无新增链接”的 no-action 结论。
 - 云端 BI 读取失败时，日报必须记录 `cloud_bi_fetch_failed`；若本地也缺失或过期，继续阻止 no-action，不能把云端不可达静默解释成无新链接。
 - `price-overrides`、selection plan、`config/stores.json` 缺失或解析失败时 fail closed：日报进入 blocker / unknownSources，不能说没有新链接。
+- 生成新链接候选前必须先验证 guard 选中的目标计划是当前最新已执行全量计划，尤其要优先选择 `2026-06-14` 后不依赖优惠券保底的批次。旧 `all-934`、旧 `ALL-ready` 或历史批次计划会把已在新计划覆盖的 SKC 误报为“新链接缺兜底”；这种情况下只允许修正计划选择并重跑 guard，不得直接开前端创建限时折扣。
 - 30 天内已上架且缺精确价格计划的 SKC 才进入动作卡；老于 30 天的缺计划链接只计入 `missingExactPlanOnShelf` 背景数，避免日报被历史遗留淹没。
 - 若 `shelf_age_days` 缺失，日报先用 `link_date` 按报告日期兜底推算；仍无法判断年龄的 SKC 进入 `unknown_shelf_age_needs_review`，并阻止 no-action。
 - 已禁报券、`couponFactor=1`、缺 `finalTargetPrice`、已在 `excluded` 的 SKC，只能给“待定价/待确认”动作，不得生成 `15%` 券 dry-run 建议。

@@ -15,7 +15,7 @@ const UNIT_NAMES = [
   'shein-bi-cloud-et-forwarder.service',
   'shein-bi-cloud-daily-refresh.service',
   'shein-bi-cloud-session-manager.service',
-  'shein-bi-cloud-daily-lark-report.service',
+  'shein-bi-cloud-morning-chain.service',
   'shein-bi-cloud-order-closure.service',
 ];
 const TIMER_NAMES = [
@@ -23,9 +23,8 @@ const TIMER_NAMES = [
   'shein-bi-cloud-yesterday.timer',
   'shein-bi-db-backup.timer',
   'shein-bi-cloud-et-forwarder.timer',
-  'shein-bi-cloud-daily-refresh.timer',
+  'shein-bi-cloud-morning-chain.timer',
   'shein-bi-cloud-session-manager.timer',
-  'shein-bi-cloud-daily-lark-report.timer',
   'shein-bi-cloud-order-closure.timer',
   'shein-bi-cloud-watchdog.timer',
 ];
@@ -318,8 +317,9 @@ async function main() {
     units.push(status);
     if (status.LoadState === 'not-found') continue;
     const exitStatus = String(status.ExecMainStatus || '');
-    const abnormalExit = status.ActiveState !== 'active' && exitStatus && exitStatus !== '0';
-    const abnormalState = status.ActiveState === 'failed' || (status.Result && !['success', ''].includes(status.Result));
+    const resultOk = !status.Result || status.Result === 'success';
+    const abnormalExit = status.ActiveState !== 'active' && !resultOk && exitStatus && exitStatus !== '0';
+    const abnormalState = status.ActiveState === 'failed' || !resultOk;
     const acknowledgedExit = abnormalExit && !abnormalState && serviceExitAcks.has(serviceExitAckKey(status));
     status.serviceExitAcknowledged = acknowledgedExit;
     if (abnormalState || (abnormalExit && !acknowledgedExit)) {

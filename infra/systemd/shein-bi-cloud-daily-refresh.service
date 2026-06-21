@@ -11,6 +11,7 @@ WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/home/sheinops
 Environment=TZ=Asia/Shanghai
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_BI_PORTAL_REFRESH_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-portal-refresh.lock
 Environment=SHEIN_BI_DAILY_LOG_DIR=/srv/shein-bi/logs/cloud-daily-refresh
 Environment=SHEIN_BI_DAILY_WAIT_BUSY_TIMEOUT_SEC=3600
 Environment="SHEIN_BI_DAILY_WAIT_SERVICES=shein-bi-cloud-today.service shein-bi-cloud-yesterday.service shein-bi-cloud-et-forwarder.service shein-bi-cloud-session-manager.service shein-bi-db-backup.service"
@@ -29,8 +30,4 @@ MemoryHigh=2200M
 MemoryMax=2800M
 OOMPolicy=stop
 KillMode=control-group
-ExecStartPre=/usr/bin/env node /opt/shein-bi/app/scripts/cleanup_shein_store_browsers.mjs --all --only-headless --kill-after-sec 5
 ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_daily_refresh.sh yesterday
-ExecStopPost=/usr/bin/env node /opt/shein-bi/app/scripts/cleanup_shein_store_browsers.mjs --all --only-headless --kill-after-sec 5
-
-

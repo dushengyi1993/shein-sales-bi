@@ -31,7 +31,9 @@ function parseArgs(argv) {
     detailConcurrency: 1,
     detailNames: '',
     skipDetails: false,
+    detailAll: false,
     dailyInitialPages: 3,
+    shipLookbackDays: 7,
     overlapRows: 5,
     minPages: 1,
     waitMs: 250,
@@ -40,6 +42,8 @@ function parseArgs(argv) {
     visible: false,
     statePath: path.join(ROOT, 'state', 'et_forwarder_sync_state.json'),
     endpoints: '',
+    includeFinance: false,
+    storageFeeOnly: false,
     updateState: true,
     dryRun: false,
   };
@@ -59,12 +63,17 @@ function parseArgs(argv) {
     else if (a === '--detail-concurrency') args.detailConcurrency = Number(argv[++i]);
     else if (a === '--detail-names') args.detailNames = argv[++i] || '';
     else if (a === '--skip-details') args.skipDetails = true;
+    else if (a === '--detail-all') args.detailAll = true;
     else if (a === '--daily-initial-pages') args.dailyInitialPages = Number(argv[++i]);
+    else if (a === '--ship-lookback-days') args.shipLookbackDays = Number(argv[++i]);
     else if (a === '--overlap-rows') args.overlapRows = Number(argv[++i]);
     else if (a === '--min-pages') args.minPages = Number(argv[++i]);
     else if (a === '--wait-ms') args.waitMs = Number(argv[++i]);
     else if (a === '--state-path') args.statePath = path.resolve(argv[++i]);
     else if (a === '--endpoints') args.endpoints = argv[++i] || '';
+    else if (a === '--include-finance') args.includeFinance = true;
+    else if (a === '--no-finance') args.includeFinance = false;
+    else if (a === '--storage-fee-only') { args.storageFeeOnly = true; args.includeFinance = true; }
     else if (a === '--no-state-update') args.updateState = false;
     else if (a === '--update-state') args.updateState = true;
     else if (a === '--no-launch') args.launch = false;
@@ -78,6 +87,7 @@ function parseArgs(argv) {
   args.maxDetails = Math.max(0, Number(args.maxDetails) || 0);
   args.detailOffset = Math.max(0, Number(args.detailOffset) || 0);
   args.detailConcurrency = Math.max(1, Math.min(8, Number(args.detailConcurrency) || 1));
+  args.shipLookbackDays = Math.max(1, Number(args.shipLookbackDays) || 7);
   if (!['daily', 'backfill', 'smoke'].includes(args.mode)) {
     throw new Error(`Unsupported mode: ${args.mode}`);
   }
@@ -89,6 +99,7 @@ function parseArgs(argv) {
   } else if (args.mode === 'daily' && !args.maxDetails) {
     args.maxDetails = 50;
   }
+  if (args.detailAll) args.maxDetails = 0;
   args.endpointList = String(args.endpoints || '')
     .split(/[,\s]+/)
     .map(s => s.trim())
@@ -142,6 +153,7 @@ function pythonCandidates() {
         'py',
       ]
       : [
+        path.join(ROOT, '.venv-et', 'bin', 'python'),
         'python3',
         'python',
       ]),
@@ -837,7 +849,7 @@ async function fetchStorageFeeDetails(cdp, args, listRows) {
     totalParents: ids.length,
     parentCount: limited.length,
     detailOffset: start,
-    detailLimit: args.maxDetails || 0,
+    detailLimit: args.detailAll ? 0 : (args.maxDetails || 0),
     skippedBefore: Math.min(start, ids.length),
     skippedAfter: Math.max(0, ids.length - start - limited.length),
     skippedParents: Math.max(0, ids.length - limited.length),
@@ -909,7 +921,7 @@ async function fetchDetails(cdp, args, def, listRows, ctx) {
     const effectiveMaxDetails = args.mode === 'daily' && Object.hasOwn(d, 'dailyMaxDetails')
       ? Math.max(0, Number(d.dailyMaxDetails) || 0)
       : args.maxDetails;
-    const end = effectiveMaxDetails ? start + effectiveMaxDetails : undefined;
+    const end = (args.detailAll || effectiveMaxDetails === 0) ? undefined : start + effectiveMaxDetails;
     const limited = ids.slice(start, end);
     let cursor = 0;
     async function worker() {
@@ -937,7 +949,7 @@ async function fetchDetails(cdp, args, def, listRows, ctx) {
       totalParents: ids.length,
       parentCount: limited.length,
       detailOffset: start,
-      detailLimit: effectiveMaxDetails || 0,
+      detailLimit: (args.detailAll || effectiveMaxDetails === 0) ? 0 : effectiveMaxDetails,
       skippedBefore: Math.min(start, ids.length),
       skippedAfter: Math.max(0, ids.length - start - limited.length),
       skippedParents: Math.max(0, ids.length - limited.length),
@@ -948,10 +960,11 @@ async function fetchDetails(cdp, args, def, listRows, ctx) {
 
 function buildContext(args) {
   const backfillStart = args.startDate || '2020-01-01';
+  const shipStart = args.mode === 'backfill' ? backfillStart : addDays(args.date, -args.shipLookbackDays);
   return {
     date: args.date,
     rollingStart: args.mode === 'backfill' ? backfillStart : addDays(args.date, -2),
-    shipStart: args.mode === 'backfill' ? backfillStart : addDays(args.date, -7),
+    shipStart,
     financeStart: args.mode === 'backfill' ? backfillStart : firstDayOfPrevMonth(args.date),
     currentMonthStart: firstDayOfMonth(args.date),
     limit: args.limit,
@@ -960,14 +973,16 @@ function buildContext(args) {
 }
 
 function endpointKeysForMode(args) {
+  const financeKeys = new Set(['income_bill', 'income_summary', 'income_payment', 'freight_rate']);
   const all = Object.keys(ENDPOINTS);
-  const keys = args.mode === 'smoke'
-    ? ['goods', 'sku_specification', 'store_stock', 'box_stock', 'stock_running', 'ship_order', 'outbound', 'return_order', 'box_damaged', 'income_bill', 'freight_rate']
-    : all;
+  let keys = args.mode === 'smoke'
+    ? ['goods', 'sku_specification', 'store_stock', 'box_stock', 'stock_running', 'ship_order', 'outbound', 'return_order', 'box_damaged']
+    : all.filter(k => args.includeFinance || !financeKeys.has(k));
+  if (args.storageFeeOnly) keys = ['income_bill'];
   if (args.endpointList?.length) {
     const unknown = args.endpointList.filter(k => !ENDPOINTS[k]);
     if (unknown.length) throw new Error(`Unknown ET endpoints: ${unknown.join(', ')}`);
-    return keys.filter(k => args.endpointList.includes(k));
+    keys = keys.filter(k => args.endpointList.includes(k));
   }
   return keys;
 }
@@ -1015,6 +1030,9 @@ async function main() {
       skipDetails: args.skipDetails,
       detailOffset: args.detailOffset,
       maxDetails: args.maxDetails,
+      detailAll: args.detailAll,
+      includeFinance: args.includeFinance,
+      storageFeeOnly: args.storageFeeOnly,
       detailConcurrency: args.detailConcurrency,
       detailNames: args.detailNameList,
     },

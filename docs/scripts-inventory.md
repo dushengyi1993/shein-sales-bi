@@ -9,6 +9,7 @@
 - `cloud_bi_refresh.sh`
 - `cloud_db_backup.sh`
 - `cloud_et_forwarder_sync.sh`
+- `cloud_morning_chain.sh`
 - `cloud_daily_lark_report.sh`
 - `cloud_rtv_verify.sh`
 - `cloud_openapi_hl_reconciliation.sh`
@@ -148,7 +149,8 @@
 - `lark_sales_qa_bot.mjs`：云端只读飞书问数机器人和网页链接管理会话的核心问数逻辑；每轮从 BI Portal JSON 动态压缩销售、店铺、货号、链接/覆盖上下文并回复，不写数据库、飞书 Base 或 SHEIN 后台；产品文本和图表 label 优先使用 `product_display_name` / `productDisplayNames`。
 - `cloud_shein_session_manager.mjs` / `cloud_shein_session_manager.sh`：云端登录态管家；顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并输出 profile 体积报告。
 - `cloud_manual_login_session.mjs`：云端临时人工登录窗口管理器；按店启动 Xvfb + Chrome + x11vnc + websockify/noVNC，完成后导出/探测登录态并关闭临时进程。状态、短期 token 和日志都属于服务器私有运行态，不提交 GitHub。
-- `cloud_daily_refresh.sh`：云端统一日更补采入口；集中执行每天一次即可的慢变/复核采集，包括链接/业务域日更、营销活动/限时折扣/优惠券价格线索补采、RTV 换单复核、体检和 BI 刷新。HL OpenAPI 销售对账默认不跑。
+- `cloud_morning_chain.sh`：云端晨间串行链路入口；08:00 先跑当天销售刷新，再启动统一日更。当前 `SHEIN_BI_MORNING_SEND_LARK_REPORT=0`，默认不发送日报。
+- `cloud_daily_refresh.sh`：云端统一日更补采入口；集中执行每天一次即可的慢变/复核采集，包括链接/业务域日更、营销活动/限时折扣/优惠券价格线索补采、RTV 换单复核、体检和 BI 刷新。HL OpenAPI 销售对账默认不跑，生产由 morning chain 触发。
 - `cloud_link_business_sync.sh`：云端链接/业务域低层入口；按店顺序 bootstrap 浏览器会话、抓链接和业务域、入仓。生产调度由 `cloud_daily_refresh.sh` 调用它，避免日更任务分散。
 - `bootstrap_shein_browser_session.mjs`：把服务器私有 SHEIN WebAPI/browser session 注入云端 headless Chrome profile，并用订单接口只读探测登录态。
 - `export_shein_browser_session.mjs`：从已登录 Chrome profile 导出 SHEIN 浏览器会话状态到 `state/shein_browser_sessions/*.local.json`；输出属于敏感运行态，不提交 GitHub。
@@ -200,12 +202,12 @@
   - 状态：旧/实验看板脚本。
   - 暂保留作历史参考，不用于日常。
 - `scheduled_daily_report_dsy.ps1`
-  - 状态：固定 `09:00` 日报任务包装器，当前默认不安装。
-  - 原因：日报已改为早上 `08:10` 同步成功后自动发送，上午后续成功同步可补发一次并用 flag 防重。
-  - 只有用户明确要求恢复独立固定日报任务时，才通过 `install_windows_scheduled_tasks.ps1 -IncludeDailyReport` 安装。
+  - 状态：旧 `09:00` 日报任务包装器，当前默认不安装。
+  - 原因：飞书日报自动发送已停用；生产只保留 `scripts/cloud_daily_lark_report.sh today` / `send_daily_lark_report.mjs` 作为手动临时发送入口。
+  - 只有用户明确要求恢复独立定时日报任务，并重新确认日报内容设计后，才通过 `install_windows_scheduled_tasks.ps1 -IncludeDailyReport` 安装。
 - `generate_lark_ops_report_doc.mjs`
   - 状态：飞书文档版经营入口兜底脚本。
-  - 原因：原用于飞书 Base Dashboard 不稳定时生成普通飞书文档；当前主入口已转为云端 BI 门户，飞书日报也已云端化。
+  - 原因：原用于飞书 Base Dashboard 不稳定时生成普通飞书文档；当前主入口已转为云端 BI 门户，飞书日报只保留手动入口。
   - 暂保留作历史参考，不用于日常自动任务。
 
 ## 临时探索 / 排障探针，后续可考虑归档

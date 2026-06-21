@@ -68,7 +68,7 @@ AS $$
     WHEN key IN ('1713', '17134', 'MZ1713', 'QY1713', 'SK1713', 'SK17134', 'SK17134GREY') THEN 'SK17134'
     WHEN key IN ('1714', 'SK1714', 'SK17145') THEN 'SK17145'
     WHEN key IN ('185', 'LQ185', 'MA185', 'QY185', 'SK185') THEN 'SK185'
-    WHEN key IN ('1914', 'QHSK1914', 'SK1914') THEN 'SK1914'
+    WHEN key IN ('1914', 'QHSK1914', 'RW2017F', 'SK1914') THEN 'SK1914'
     WHEN key IN ('1924', 'MZSK1924', 'QHSK1924', 'SK1924') THEN 'SK1924'
     WHEN key IN ('1928', 'SK1928') THEN 'SK1928'
     WHEN key IN ('223', 'SK223') THEN 'SK223'
@@ -81,7 +81,7 @@ AS $$
     WHEN key IN ('5118', 'NMSK5118', 'SK5118') THEN 'SK5118'
     WHEN key IN ('6810', 'CM6810', 'SK6810') THEN 'SK6810'
     WHEN key IN ('DX6863', 'KFJ683901', 'LQ63', 'SK6863') THEN 'SK6863'
-    WHEN key IN ('7015', 'SK7015') THEN 'SK7015'
+    WHEN key IN ('7015', 'SK7015', 'YSJ053') THEN 'SK7015'
     WHEN key IN ('7025', 'MZ7025A', 'SK7025', 'SK7025A', 'SK7025BLACK') THEN 'SK7025A'
     WHEN key IN ('7027', 'MZ7027', 'SK7027') THEN 'SK7027'
     WHEN key IN ('7028', 'MZ7028', 'SK7028') THEN 'SK7028'
@@ -1004,6 +1004,7 @@ CREATE TABLE IF NOT EXISTS fact.order_item (
 CREATE INDEX IF NOT EXISTS idx_order_item_date_store ON fact.order_item(created_date, store_key);
 CREATE INDEX IF NOT EXISTS idx_order_item_product ON fact.order_item(standard_goods_sn, created_date);
 CREATE INDEX IF NOT EXISTS idx_order_item_skc ON fact.order_item(skc, created_date);
+CREATE INDEX IF NOT EXISTS idx_order_item_order_no ON fact.order_item(order_no);
 
 CREATE TABLE IF NOT EXISTS fact.home_finance_snapshot (
   unique_key text PRIMARY KEY,
@@ -1073,6 +1074,7 @@ CREATE TABLE IF NOT EXISTS fact.after_sales_item (
 
 CREATE INDEX IF NOT EXISTS idx_after_sales_date_store ON fact.after_sales_item(snapshot_date, store_key);
 CREATE INDEX IF NOT EXISTS idx_after_sales_order ON fact.after_sales_item(order_no, store_key);
+CREATE INDEX IF NOT EXISTS idx_after_sales_order_no ON fact.after_sales_item(order_no);
 CREATE INDEX IF NOT EXISTS idx_after_sales_product ON fact.after_sales_item(standard_goods_sn, snapshot_date);
 
 CREATE TABLE IF NOT EXISTS fact.waybill_package (
@@ -2961,8 +2963,7 @@ WITH base AS (
   LEFT JOIN LATERAL (
     SELECT *
     FROM mart.profit_after_sales_impact x
-    WHERE x.store_key = oi.store_key
-      AND x.order_no = oi.order_no
+    WHERE x.order_no = oi.order_no
       AND x.revenue_reversal
       AND (
         (coalesce(x.skc,'') <> '' AND x.skc = oi.skc)
@@ -2973,18 +2974,20 @@ WITH base AS (
         OR (coalesce(x.skc,'') = '' AND coalesce(x.standard_goods_sn,'') = '')
       )
     ORDER BY CASE
+      WHEN x.store_key = oi.store_key AND x.skc = oi.skc THEN -1
       WHEN x.skc = oi.skc THEN 0
-      WHEN x.standard_goods_sn = oi.standard_goods_sn THEN 1
-      WHEN dim.product_match_key(x.standard_goods_sn) = dim.product_match_key(oi.standard_goods_sn) THEN 2
-      ELSE 3
+      WHEN x.store_key = oi.store_key AND x.standard_goods_sn = oi.standard_goods_sn THEN 1
+      WHEN x.standard_goods_sn = oi.standard_goods_sn THEN 2
+      WHEN x.store_key = oi.store_key AND dim.product_match_key(x.standard_goods_sn) = dim.product_match_key(oi.standard_goods_sn) THEN 3
+      WHEN dim.product_match_key(x.standard_goods_sn) = dim.product_match_key(oi.standard_goods_sn) THEN 4
+      ELSE 5
     END
     LIMIT 1
   ) ai ON true
   LEFT JOIN LATERAL (
     SELECT *
     FROM mart.rtv_recovery_impact x
-    WHERE x.store_key = oi.store_key
-      AND x.order_no = oi.order_no
+    WHERE x.order_no = oi.order_no
       AND x.rtv_received_quantity > 0
       AND (
         (coalesce(x.skc,'') <> '' AND x.skc = oi.skc)
@@ -2995,10 +2998,13 @@ WITH base AS (
         OR (coalesce(x.skc,'') = '' AND coalesce(x.standard_goods_sn,'') = '')
       )
     ORDER BY CASE
+      WHEN x.store_key = oi.store_key AND x.skc = oi.skc THEN -1
       WHEN x.skc = oi.skc THEN 0
-      WHEN x.standard_goods_sn = oi.standard_goods_sn THEN 1
-      WHEN dim.product_match_key(x.standard_goods_sn) = dim.product_match_key(oi.standard_goods_sn) THEN 2
-      ELSE 3
+      WHEN x.store_key = oi.store_key AND x.standard_goods_sn = oi.standard_goods_sn THEN 1
+      WHEN x.standard_goods_sn = oi.standard_goods_sn THEN 2
+      WHEN x.store_key = oi.store_key AND dim.product_match_key(x.standard_goods_sn) = dim.product_match_key(oi.standard_goods_sn) THEN 3
+      WHEN dim.product_match_key(x.standard_goods_sn) = dim.product_match_key(oi.standard_goods_sn) THEN 4
+      ELSE 5
     END
     LIMIT 1
   ) rr ON true
@@ -3950,17 +3956,17 @@ SELECT
   coalesce(s.gross_sold_7d,0) AS gross_sold_7d,
   coalesce(s.gross_sold_14d,0) AS gross_sold_14d,
   coalesce(s.gross_sold_30d,0) AS gross_sold_30d,
-  (0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)) AS weighted_daily_gross_sales,
+    (0.7 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.3 * (coalesce(s.gross_sold_30d,0) / 30.0)) AS weighted_daily_gross_sales,
   CASE
-    WHEN (0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)) > 0
+    WHEN (0.7 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.3 * (coalesce(s.gross_sold_30d,0) / 30.0)) > 0
     THEN greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0)
-      / nullif((0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)),0)
+      / nullif((0.7 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.3 * (coalesce(s.gross_sold_30d,0) / 30.0)),0)
     ELSE NULL
   END AS days_of_supply_on_hand,
   CASE
-    WHEN (0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)) > 0
+    WHEN (0.7 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.3 * (coalesce(s.gross_sold_30d,0) / 30.0)) > 0
     THEN greatest(coalesce(b.arrived_quantity,0) + coalesce(b.incoming_quantity,0) - coalesce(s.gross_sold_quantity,0), 0)
-      / nullif((0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)),0)
+      / nullif((0.7 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.3 * (coalesce(s.gross_sold_30d,0) / 30.0)),0)
     ELSE NULL
   END AS days_of_supply_with_incoming,
   s.last_sale_date,
@@ -3982,15 +3988,15 @@ SELECT
     WHEN greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0) = 0 AND coalesce(b.incoming_quantity,0) > 0 THEN '等补货/在途承接'
     WHEN greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0) = 0 AND coalesce(s.gross_sold_quantity,0) > 0 THEN '已售罄/疑似缺货'
     WHEN coalesce(s.gross_sold_30d,0) = 0 AND greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0) > 0 THEN '低动销库存'
-    WHEN (0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)) > 0
+    WHEN (0.7 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.3 * (coalesce(s.gross_sold_30d,0) / 30.0)) > 0
       AND greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0)
-        / nullif((0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)),0) <= 14 THEN '14天内断货'
-    WHEN (0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)) > 0
+        / nullif((0.7 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.3 * (coalesce(s.gross_sold_30d,0) / 30.0)),0) <= 14 THEN '14天内断货'
+    WHEN (0.7 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.3 * (coalesce(s.gross_sold_30d,0) / 30.0)) > 0
       AND greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0)
-        / nullif((0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)),0) <= 30 THEN '30天内需补货'
-    WHEN (0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)) > 0
+        / nullif((0.7 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.3 * (coalesce(s.gross_sold_30d,0) / 30.0)),0) <= 30 THEN '30天内需补货'
+    WHEN (0.7 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.3 * (coalesce(s.gross_sold_30d,0) / 30.0)) > 0
       AND greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0)
-        / nullif((0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)),0) > 120 THEN '库存偏慢'
+        / nullif((0.7 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.3 * (coalesce(s.gross_sold_30d,0) / 30.0)),0) > 120 THEN '库存偏慢'
     ELSE '健康'
   END AS stock_status,
   CASE
@@ -3998,12 +4004,12 @@ SELECT
     WHEN coalesce(b.arrived_quantity,0) = 0 AND coalesce(b.incoming_quantity,0) > 0 THEN 'mid'
     WHEN greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0) = 0 AND coalesce(s.gross_sold_quantity,0) > 0 THEN 'high'
     WHEN coalesce(s.gross_sold_30d,0) = 0 AND greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0) > 0 THEN 'mid'
-    WHEN (0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)) > 0
+    WHEN (0.7 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.3 * (coalesce(s.gross_sold_30d,0) / 30.0)) > 0
       AND greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0)
-        / nullif((0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)),0) <= 14 THEN 'high'
-    WHEN (0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)) > 0
+        / nullif((0.7 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.3 * (coalesce(s.gross_sold_30d,0) / 30.0)),0) <= 14 THEN 'high'
+    WHEN (0.7 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.3 * (coalesce(s.gross_sold_30d,0) / 30.0)) > 0
       AND greatest(coalesce(b.arrived_quantity,0) - coalesce(s.gross_sold_quantity,0), 0)
-        / nullif((0.4 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.6 * (coalesce(s.gross_sold_30d,0) / 30.0)),0) <= 30 THEN 'mid'
+        / nullif((0.7 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.3 * (coalesce(s.gross_sold_30d,0) / 30.0)),0) <= 30 THEN 'mid'
     ELSE 'low'
   END AS risk_level
 FROM keys k

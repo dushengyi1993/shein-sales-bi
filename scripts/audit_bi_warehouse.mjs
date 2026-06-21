@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 /**
- * Lightweight health check for the SHEIN BI warehouse and Metabase.
+ * Lightweight health check for the SHEIN BI warehouse.
  *
  * This script is intentionally read-only. It is designed to run after the BI
  * pipeline so we can detect stale stores, broken ingestion, or an unusable
- * action queue before the user opens Metabase.
+ * action queue before the user opens the BI portal. Metabase is retired from
+ * the production BI path; it can still be checked explicitly with
+ * --check-metabase when debugging archived dashboards.
  */
 import fs from 'node:fs/promises';
 import fssync from 'node:fs';
@@ -22,6 +24,7 @@ function parseArgs(argv) {
     user: 'shein',
     outDir: path.join(ROOT, 'outputs', 'bi_audit'),
     json: false,
+    checkMetabase: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -31,6 +34,7 @@ function parseArgs(argv) {
     else if (a === '--user') args.user = argv[++i];
     else if (a === '--out-dir') args.outDir = path.resolve(argv[++i]);
     else if (a === '--json') args.json = true;
+    else if (a === '--check-metabase') args.checkMetabase = true;
   }
   return args;
 }
@@ -91,7 +95,14 @@ async function readMetabaseSession() {
   return JSON.parse(await fs.readFile(file, 'utf8'));
 }
 
-async function checkMetabase() {
+async function checkMetabase(args) {
+  if (!args.checkMetabase) {
+    return {
+      ok: null,
+      skipped: true,
+      reason: 'Metabase 已退出生产 BI 入口；默认不再作为仓库体检依赖。',
+    };
+  }
   const session = await readMetabaseSession();
   const url = (session?.metabaseUrl || 'http://localhost:3000').replace(/\/$/, '');
   try {
@@ -107,7 +118,12 @@ function evaluate(summary, metabase) {
   const warnings = [];
   const errors = [];
 
-  if (!metabase.ok) warnings.push(`Metabase 健康检查失败：${metabase.error || metabase.body || metabase.status}`);
+  if (metabase && metabase.skipped) {
+    // Metabase is an archived/manual dashboard surface now. Do not warn unless
+    // the operator explicitly asks for --check-metabase and it fails.
+  } else if (metabase && !metabase.ok) {
+    warnings.push(`Metabase 健康检查失败：${metabase.error || metabase.body || metabase.status}`);
+  }
 
   const s = summary || {};
   const latest = s.latestDates || {};
@@ -217,7 +233,7 @@ SELECT payload::text FROM summary;
 `;
   const raw = await runPsql(args, sql);
   const summary = JSON.parse(raw);
-  const metabase = await checkMetabase();
+  const metabase = await checkMetabase(args);
   const evaluation = evaluate(summary, metabase);
   const report = {
     ok: evaluation.ok,

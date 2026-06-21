@@ -1,0 +1,28 @@
+[Unit]
+Description=SHEIN BI Portal Node service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=sheinops
+Group=sheinops
+WorkingDirectory=/opt/shein-bi/app
+Environment=NODE_ENV=production
+Environment=CODEX_HOME=/home/sheinops/.codex
+Environment=SHEIN_QA_CODEX_GATEWAY_ENABLED=1
+Environment=SHEIN_QA_LLM_ENABLED=1
+Environment=SHEIN_QA_LLM_TIMEOUT_MS=45000
+Environment=SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS=600000
+Environment=SHEIN_QA_CODEX_MODEL=gpt-5.5
+Environment=SHEIN_QA_CODEX_REASONING_EFFORT=xhigh
+Environment=SHEIN_BI_OPS_AGENT_TIMEOUT_MS=650000
+ExecStart=/usr/bin/node scripts/serve_bi_portal.mjs --host 127.0.0.1 --port 8787 --state-file /srv/shein-bi/runtime/bi_action_state.json --link-ops-task-file /srv/shein-bi/runtime/bi_link_ops_tasks.json --link-ops-chat-file /srv/shein-bi/runtime/bi_link_ops_chats.json --link-ops-asset-dir /srv/shein-bi/runtime/bi_link_ops_assets --audit-file /srv/shein-bi/logs/bi_portal_action_audit.jsonl
+Restart=always
+RestartSec=5
+MemoryHigh=1200M
+MemoryMax=2200M
+OOMPolicy=stop
+
+[Install]
+WantedBy=multi-user.target

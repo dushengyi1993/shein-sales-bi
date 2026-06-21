@@ -44,6 +44,12 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 echo "[cloud_daily_lark_report] start date=$DATE root=$ROOT"
 cd "$ROOT"
 
+if [[ "${SHEIN_LARK_REPORT_DISABLED:-0}" == "1" || "${SHEIN_LARK_REPORT_DISABLED:-0}" == "true" ]]; then
+  echo "[cloud_daily_lark_report] disabled by SHEIN_LARK_REPORT_DISABLED; skip send date=$DATE"
+  printf 'disabled_at=%s\nlog=%s\nreason=SHEIN_LARK_REPORT_DISABLED\n' "$(TZ="$TZ_NAME" date --iso-8601=seconds)" "$LOG_FILE" > "$SENT_FLAG"
+  exit 0
+fi
+
 if [[ -f "$SENT_FLAG" && "${SHEIN_LARK_REPORT_FORCE:-0}" != "1" ]]; then
   echo "[cloud_daily_lark_report] already sent for date=$DATE flag=$SENT_FLAG"
   exit 0
@@ -63,9 +69,14 @@ export SHEIN_SALES_TRANSPORT="${SHEIN_SALES_TRANSPORT:-webapi}"
 export SHEIN_REPORT_SYNC_NO_LAUNCH="${SHEIN_REPORT_SYNC_NO_LAUNCH:-1}"
 export SHEIN_FEISHU_BASE_PAUSED="${SHEIN_FEISHU_BASE_PAUSED:-1}"
 
+REPORT_SYNC_ARGS=()
+if [[ "${SHEIN_LARK_REPORT_SYNC_TODAY:-1}" == "1" || "${SHEIN_LARK_REPORT_SYNC_TODAY:-1}" == "true" ]]; then
+  REPORT_SYNC_ARGS+=(--sync-today)
+fi
+
 node scripts/send_daily_lark_report.mjs \
   --date "$DATE" \
-  --sync-today \
+  "${REPORT_SYNC_ARGS[@]}" \
   --send \
   --visual \
   --no-monthly-visual

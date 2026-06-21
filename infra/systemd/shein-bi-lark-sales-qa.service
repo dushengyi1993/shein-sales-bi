@@ -8,9 +8,19 @@ Type=simple
 WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/root
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=CODEX_HOME=/home/sheinops/.codex
+Environment=SHEIN_QA_LLM_ENABLED=1
+Environment=SHEIN_QA_LLM_TIMEOUT_MS=45000
+Environment=SHEIN_QA_CODEX_GATEWAY_ENABLED=1
+Environment=SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS=600000
+Environment=SHEIN_QA_CODEX_MODEL=gpt-5.5
+Environment=SHEIN_QA_CODEX_REASONING_EFFORT=xhigh
 ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_lark_sales_qa_bot.sh
 Restart=always
 RestartSec=10
+MemoryHigh=512M
+MemoryMax=900M
+OOMPolicy=stop
 
 [Install]
 WantedBy=multi-user.target

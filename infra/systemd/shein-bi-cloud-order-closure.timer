@@ -2,7 +2,7 @@
 Description=Run SHEIN BI cloud order lifecycle closure recheck daily
 
 [Timer]
-OnCalendar=*-*-* 05:50:00
+OnCalendar=*-*-* 06:30:00
 Persistent=false
 RandomizedDelaySec=5m
 Unit=shein-bi-cloud-order-closure.service

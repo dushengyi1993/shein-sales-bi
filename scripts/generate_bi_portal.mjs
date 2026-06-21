@@ -129,7 +129,6 @@ const PORTAL_API_SECTION_KEYS = [
   'comments',
   'orders',
   'afterSales',
-  'financeData',
   'rtvData',
   'waybills',
 ];
@@ -141,16 +140,16 @@ const PORTAL_SECTION_SELECTS = {
   'kpi', (SELECT data FROM kpi),
   'stores', (SELECT data FROM stores),
   'products', (SELECT data FROM products),
-  'finance', (SELECT data FROM finance),
   'inventoryAlerts', (SELECT data FROM inventory_alerts),
   'inventoryDepletion', jsonb_build_object(
     'products', (SELECT data FROM inventory_depletion_products),
-    'batches', (SELECT data FROM inventory_depletion_batches),
+    'shipments', (SELECT data FROM inventory_et_shipments),
+    'batches', '[]'::jsonb,
     'method', jsonb_build_object(
-      'stockBasis', '成本表批次 + 毛销量 FIFO 扣减',
-      'arrivalRule', '到仓/派送日期和头程运输费均存在才计入到仓库存；缺任一项计入在途或待确认',
-      'salesDeduction', '库存消耗按毛销量扣减，退货暂不加回，避免高估可售库存',
-      'velocityRule', '日均销量 = 近7天毛销量/7 × 40% + 近30天毛销量/30 × 60%'
+      'stockBasis', 'ET 实际库存为准：09散件仓 + 01整箱仓为可售；SHEIN 店铺库存只作为已上架链接虚拟库存参考',
+      'shipmentBasis', '在途来自 ET 发货申请单；ET 状态 12 视为已到仓/已完成，其他状态视为在途或未入仓',
+      'salesDeduction', '去化按历史毛销量和最近销量计算，不用 SHEIN 虚拟库存推算真实库存',
+      'velocityRule', '加权日销 = 近7天毛销量/7 × 70% + 近30天毛销量/30 × 30%'
     )
   ),
   'campaigns', (SELECT data FROM campaigns),
@@ -203,7 +202,17 @@ const PORTAL_SECTION_SELECTS = {
   'productTrafficDaily', (SELECT data FROM product_traffic_daily)
 `,
   inventoryTrend: `
-  'inventoryTrend', (SELECT data FROM visible_inventory_trend)
+  'inventoryDepletion', jsonb_build_object(
+    'products', (SELECT data FROM inventory_depletion_products),
+    'shipments', (SELECT data FROM inventory_et_shipments),
+    'batches', '[]'::jsonb,
+    'method', jsonb_build_object(
+      'stockBasis', 'ET 实际库存为准：09散件仓 + 01整箱仓为可售；SHEIN 店铺库存只作为已上架链接虚拟库存参考',
+      'shipmentBasis', '在途来自 ET 发货申请单；ET 状态 12 视为已到仓/已完成，其他状态视为在途或未入仓',
+      'salesDeduction', '去化按历史毛销量和最近销量计算，不用 SHEIN 虚拟库存推算真实库存',
+      'velocityRule', '加权日销 = 近7天毛销量/7 × 70% + 近30天毛销量/30 × 30%'
+    )
+  )
 `,
   comments: `
   'comments', (SELECT data FROM comments),
@@ -214,10 +223,6 @@ const PORTAL_SECTION_SELECTS = {
 `,
   afterSales: `
   'afterSales', (SELECT data FROM after_sales)
-`,
-  financeData: `
-  'financeOrders', (SELECT data FROM finance_orders),
-  'financeGoods', (SELECT data FROM finance_goods)
 `,
   rtvData: `
   'rtvReview', (SELECT data FROM rtv_review),
@@ -2340,93 +2345,330 @@ store_storage_daily AS (
     GROUP BY date, store_key, group_key
   ) t
 ),
+inventory_et_ship_order_enriched AS (
+  WITH base AS (
+    SELECT
+      o.*,
+      (substring(o.raw_summary->>'ETD_ETA' from 'To\\s+([0-9]{4}-[0-9]{2}-[0-9]{2})'))::date AS eta_end_date,
+      (
+        o.ship_time IS NOT NULL
+        OR o.into_time IS NOT NULL
+        OR o.end_time IS NOT NULL
+        OR nullif(o.waybill_code,'') IS NOT NULL
+        OR nullif(o.raw_summary->>'LogisticsNo','') IS NOT NULL
+      ) AS has_physical_ship_evidence
+    FROM fact.et_ship_order o
+  )
+  SELECT
+    base.*,
+    (
+      coalesce(base.status,'') <> '12'
+      AND (
+        base.eta_end_date >= current_date - 3
+        OR (
+          base.has_physical_ship_evidence
+          AND coalesce(base.eta_end_date, base.ship_time::date + 60, base.check_time::date + 75, base.create_time::date + 90) >= current_date - 3
+        )
+      )
+    ) AS has_effective_in_transit_evidence
+  FROM base
+),
+inventory_et_ship_product AS (
+  SELECT
+    coalesce(nullif(dim.product_match_key(i.standard_goods_sn),''), nullif(dim.product_match_key(i.match_key),''), nullif(i.match_key,'')) AS match_key,
+    dim.product_canonical_sn(coalesce(nullif(dim.product_match_key(max(i.standard_goods_sn)),''), nullif(dim.product_match_key(max(i.match_key)),''), max(i.standard_goods_sn), max(i.match_key))) AS standard_goods_sn,
+    sum(coalesce(i.quantity,0)) AS historical_supply_quantity,
+    sum(coalesce(i.quantity,0)) FILTER (
+      WHERE coalesce(o.status,'') <> '12'
+        AND o.has_effective_in_transit_evidence
+    ) AS in_transit_quantity,
+    sum(coalesce(i.quantity,0)) FILTER (
+      WHERE coalesce(o.status,'') <> '12'
+        AND NOT o.has_effective_in_transit_evidence
+    ) AS pending_review_quantity,
+    sum(coalesce(i.quantity,0)) FILTER (WHERE coalesce(o.status,'') = '12') AS arrived_quantity,
+    count(DISTINCT i.ship_order_id) AS ship_order_count,
+    count(DISTINCT i.ship_order_id) FILTER (
+      WHERE coalesce(o.status,'') <> '12'
+        AND NOT o.has_effective_in_transit_evidence
+    ) AS pending_review_order_count,
+    max(o.create_time)::date AS latest_application_date,
+    max(o.create_time) FILTER (
+      WHERE coalesce(o.status,'') <> '12'
+        AND o.has_effective_in_transit_evidence
+    )::date AS latest_in_transit_date,
+    max(o.create_time) FILTER (
+      WHERE coalesce(o.status,'') <> '12'
+        AND NOT o.has_effective_in_transit_evidence
+    )::date AS latest_pending_review_date,
+    max(coalesce(o.into_time,o.end_time,o.ship_time,o.check_time,o.create_time))::date AS latest_event_date,
+    string_agg(DISTINCT concat('状态', coalesce(nullif(o.status,''),'未知')), ' / ' ORDER BY concat('状态', coalesce(nullif(o.status,''),'未知'))) AS status_summary
+  FROM fact.et_ship_order_item i
+  JOIN inventory_et_ship_order_enriched o USING (ship_order_id)
+  WHERE coalesce(nullif(dim.product_match_key(i.standard_goods_sn),''), nullif(dim.product_match_key(i.match_key),''), nullif(i.match_key,''), '') <> ''
+  GROUP BY coalesce(nullif(dim.product_match_key(i.standard_goods_sn),''), nullif(dim.product_match_key(i.match_key),''), nullif(i.match_key,''))
+),
+inventory_storage_product AS (
+  WITH anchor AS (
+    SELECT max(date) AS max_date
+    FROM ${storageFeeProductDaily}
+  )
+  SELECT
+    dim.product_match_key(standard_goods_sn) AS match_key,
+    sum(coalesce(actual_allocated_fee_sar,0)) FILTER (WHERE date >= (SELECT max_date FROM anchor) - interval '29 days') AS storage_fee_30d_sar,
+    max(date) AS latest_fee_date
+  FROM ${storageFeeProductDaily}
+  WHERE coalesce(dim.product_match_key(standard_goods_sn),'') <> ''
+  GROUP BY dim.product_match_key(standard_goods_sn)
+),
+inventory_sales_product AS (
+  WITH anchor AS (
+    SELECT max(created_date) AS max_date
+    FROM ${profitOrderItem}
+  ), src AS (
+    SELECT
+      dim.product_match_key(standard_goods_sn) AS match_key,
+      standard_goods_sn,
+      goods_title,
+      created_date,
+      CASE WHEN coalesce(gross_revenue_sar,0) > 0 THEN coalesce(quantity,0) ELSE 0 END AS gross_quantity,
+      CASE WHEN coalesce(net_revenue_sar,0) > 0 THEN coalesce(quantity,0) ELSE 0 END AS net_quantity
+    FROM ${profitOrderItem}
+    WHERE coalesce(dim.product_match_key(standard_goods_sn),'') <> ''
+  )
+  SELECT
+    match_key,
+    string_agg(DISTINCT standard_goods_sn, ' / ' ORDER BY standard_goods_sn) AS sales_standard_goods_sn_list,
+    max(goods_title) FILTER (WHERE coalesce(goods_title,'') <> '') AS sales_product_name,
+    sum(gross_quantity) AS gross_sold_quantity,
+    sum(net_quantity) AS net_sold_quantity,
+    sum(gross_quantity) FILTER (WHERE created_date >= (SELECT max_date FROM anchor) - interval '6 days') AS gross_sold_7d,
+    sum(gross_quantity) FILTER (WHERE created_date >= (SELECT max_date FROM anchor) - interval '29 days') AS gross_sold_30d,
+    max(created_date) FILTER (WHERE gross_quantity > 0) AS last_sale_date,
+    min(created_date) FILTER (WHERE gross_quantity > 0) AS first_sale_date
+  FROM src
+  GROUP BY match_key
+),
 inventory_depletion_products AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY
-    CASE risk_level WHEN 'high' THEN 0 WHEN 'mid' THEN 1 ELSE 2 END,
-    days_of_supply_on_hand ASC NULLS LAST,
-    weighted_daily_gross_sales DESC,
-    standard_goods_sn
+    t.et_estimated_available_qty DESC,
+    t.et_ship_in_transit_quantity DESC,
+    t.gross_sold_quantity DESC,
+    t.standard_goods_sn
   ), '[]'::jsonb) AS data
   FROM (
-    SELECT
-      dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
-      match_key,
-      standard_goods_sn_list,
-      raw_goods_sn_list,
-      goods_title,
-      batch_count,
-      arrived_batch_count,
-      incoming_batch_count,
-      not_shipped_batch_count,
-      round(arrived_quantity::numeric, 0) AS arrived_quantity,
-      round(incoming_quantity::numeric, 0) AS incoming_quantity,
-      round(not_shipped_quantity::numeric, 0) AS not_shipped_quantity,
-      round(gross_sold_quantity::numeric, 0) AS gross_sold_quantity,
-      round(net_sold_quantity::numeric, 0) AS net_sold_quantity,
-      round(reversal_quantity::numeric, 0) AS reversal_quantity,
-      reversal_lines,
-      round(estimated_on_hand_quantity::numeric, 0) AS estimated_on_hand_quantity,
-      round(estimated_total_supply_quantity::numeric, 0) AS estimated_total_supply_quantity,
-      round(oversold_or_missing_batch_quantity::numeric, 0) AS oversold_or_missing_batch_quantity,
-      round(depletion_rate::numeric, 4) AS depletion_rate,
-      round(gross_sold_7d::numeric, 0) AS gross_sold_7d,
-      round(gross_sold_14d::numeric, 0) AS gross_sold_14d,
-      round(gross_sold_30d::numeric, 0) AS gross_sold_30d,
-      round(weighted_daily_gross_sales::numeric, 2) AS weighted_daily_gross_sales,
-      round(days_of_supply_on_hand::numeric, 1) AS days_of_supply_on_hand,
-      round(days_of_supply_with_incoming::numeric, 1) AS days_of_supply_with_incoming,
-      last_sale_date,
-      first_sale_date,
-      first_shipped_date,
-      latest_shipped_date,
-      first_arrived_date,
-      latest_arrived_date,
-      round(arrived_cost_sar::numeric, 2) AS arrived_cost_sar,
-      round(unit_cost_sar::numeric, 2) AS unit_cost_sar,
-      round(avg_purchase_unit_price::numeric, 2) AS avg_purchase_unit_price,
-      round(avg_volume_l::numeric, 2) AS avg_volume_l,
-      round(avg_weight_kg::numeric, 2) AS avg_weight_kg,
-      ignored_reasons,
-      stock_status,
-      risk_level,
-      (et_estimated_available_qty IS NOT NULL) AS has_et_inventory,
-      round(coalesce(et_loose_sellable_qty,0)::numeric, 0) AS et_loose_sellable_qty,
-      round(coalesce(et_full_carton_qty,0)::numeric, 0) AS et_full_carton_qty,
-      round(coalesce(et_rtv_qty,0)::numeric, 0) AS et_rtv_qty,
-      round(coalesce(et_damaged_qty,0)::numeric, 0) AS et_damaged_qty,
-      round(coalesce(et_scrap_qty,0)::numeric, 0) AS et_scrap_qty,
-      round(coalesce(et_estimated_available_qty,0)::numeric, 0) AS et_estimated_available_qty,
-      round(coalesce(et_pending_process_qty,0)::numeric, 0) AS et_pending_process_qty,
-      round(coalesce(et_box_count,0)::numeric, 0) AS et_box_count,
-      et_loose_warehouses,
-      et_box_warehouses,
-      et_store_snapshot_date,
-      et_box_snapshot_date
-    FROM (
+    WITH keys AS (
+      SELECT match_key FROM mart.et_product_inventory_current WHERE coalesce(match_key,'') <> ''
+      UNION
+      SELECT match_key FROM inventory_et_ship_product WHERE coalesce(match_key,'') <> ''
+      UNION
+      SELECT match_key FROM inventory_sales_product WHERE coalesce(match_key,'') <> ''
+    ), joined AS (
       SELECT
-        p.*,
-        et.loose_sellable_qty AS et_loose_sellable_qty,
-        et.full_carton_qty AS et_full_carton_qty,
-        et.rtv_qty AS et_rtv_qty,
-        et.damaged_qty AS et_damaged_qty,
-        et.scrap_qty AS et_scrap_qty,
-        et.estimated_available_qty AS et_estimated_available_qty,
-        et.pending_process_qty AS et_pending_process_qty,
-        et.box_count AS et_box_count,
+        k.match_key,
+        coalesce(et.standard_goods_sn, ship.standard_goods_sn, nullif(split_part(s.sales_standard_goods_sn_list, ' / ', 1), ''), k.match_key) AS standard_goods_sn,
+        coalesce(et.sample_title_cn, s.sales_product_name, '') AS goods_title,
+        s.sales_standard_goods_sn_list AS standard_goods_sn_list,
+        coalesce(s.gross_sold_quantity,0) AS gross_sold_quantity,
+        coalesce(s.net_sold_quantity,0) AS net_sold_quantity,
+        coalesce(s.gross_sold_7d,0) AS gross_sold_7d,
+        coalesce(s.gross_sold_30d,0) AS gross_sold_30d,
+        s.last_sale_date,
+        s.first_sale_date,
+        coalesce(et.loose_sellable_qty,0) AS et_loose_sellable_qty,
+        coalesce(et.full_carton_qty,0) AS et_full_carton_qty,
+        coalesce(et.rtv_qty,0) AS et_rtv_qty,
+        coalesce(et.damaged_qty,0) AS et_damaged_qty,
+        coalesce(et.scrap_qty,0) AS et_scrap_qty,
+        coalesce(et.estimated_available_qty,0) AS et_estimated_available_qty,
+        coalesce(et.pending_process_qty,0) AS et_pending_process_qty,
+        coalesce(et.box_count,0) AS et_box_count,
         et.loose_warehouses AS et_loose_warehouses,
         et.box_warehouses AS et_box_warehouses,
         et.store_snapshot_date AS et_store_snapshot_date,
-        et.box_snapshot_date AS et_box_snapshot_date
-      FROM mart.inventory_depletion_product_current p
-      LEFT JOIN mart.et_product_inventory_current et
-        ON et.match_key = p.match_key
-    ) inv
+        et.box_snapshot_date AS et_box_snapshot_date,
+        coalesce(ship.historical_supply_quantity,0) AS et_historical_supply_quantity,
+        coalesce(ship.in_transit_quantity,0) AS et_ship_in_transit_quantity,
+        coalesce(ship.pending_review_quantity,0) AS et_ship_pending_review_quantity,
+        coalesce(ship.arrived_quantity,0) AS et_ship_arrived_quantity,
+        ship.ship_order_count AS et_ship_order_count,
+        ship.pending_review_order_count AS et_ship_pending_review_order_count,
+        ship.latest_application_date AS et_ship_latest_application_date,
+        ship.latest_in_transit_date AS et_ship_latest_in_transit_date,
+        ship.latest_pending_review_date AS et_ship_latest_pending_review_date,
+        ship.latest_event_date AS et_ship_latest_event_date,
+        ship.status_summary AS et_ship_status_summary,
+        coalesce(storage.storage_fee_30d_sar,0) AS et_storage_fee_30d_sar,
+        storage.latest_fee_date AS et_storage_fee_latest_date
+      FROM keys k
+      LEFT JOIN mart.et_product_inventory_current et ON et.match_key = k.match_key
+      LEFT JOIN inventory_et_ship_product ship ON ship.match_key = k.match_key
+      LEFT JOIN inventory_sales_product s ON s.match_key = k.match_key
+      LEFT JOIN inventory_storage_product storage ON storage.match_key = k.match_key
+    ), calc AS (
+      SELECT *,
+        ((coalesce(gross_sold_7d,0) / 7.0 * 0.7) + (coalesce(gross_sold_30d,0) / 30.0 * 0.3)) AS weighted_daily_gross_sales,
+        (coalesce(et_estimated_available_qty,0) + coalesce(et_ship_in_transit_quantity,0)) AS et_current_total_supply_quantity
+      FROM joined
+    )
+    SELECT
+      dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
+      match_key,
+      coalesce(standard_goods_sn_list, standard_goods_sn) AS standard_goods_sn_list,
+      NULL::text AS raw_goods_sn_list,
+      goods_title,
+      0::bigint AS batch_count,
+      0::bigint AS arrived_batch_count,
+      0::bigint AS incoming_batch_count,
+      0::bigint AS not_shipped_batch_count,
+      round(et_estimated_available_qty::numeric, 0) AS arrived_quantity,
+      round(et_ship_in_transit_quantity::numeric, 0) AS incoming_quantity,
+      0::numeric AS not_shipped_quantity,
+      round(gross_sold_quantity::numeric, 0) AS gross_sold_quantity,
+      round(net_sold_quantity::numeric, 0) AS net_sold_quantity,
+      0::numeric AS reversal_quantity,
+      0::bigint AS reversal_lines,
+      round(et_estimated_available_qty::numeric, 0) AS estimated_on_hand_quantity,
+      round(et_current_total_supply_quantity::numeric, 0) AS estimated_total_supply_quantity,
+      0::numeric AS oversold_or_missing_batch_quantity,
+      CASE
+        WHEN coalesce(et_historical_supply_quantity,0) > 0
+        THEN round((gross_sold_quantity / nullif(coalesce(et_historical_supply_quantity,0),0))::numeric, 4)
+        ELSE NULL
+      END AS depletion_rate,
+      round(gross_sold_7d::numeric, 0) AS gross_sold_7d,
+      round(gross_sold_30d::numeric, 0) AS gross_sold_30d,
+      round(gross_sold_30d::numeric, 0) AS gross_sold_14d,
+      round(weighted_daily_gross_sales::numeric, 2) AS weighted_daily_gross_sales,
+      round(CASE WHEN weighted_daily_gross_sales > 0 THEN et_estimated_available_qty / NULLIF(weighted_daily_gross_sales,0) ELSE NULL END::numeric, 1) AS days_of_supply_on_hand,
+      round(CASE WHEN weighted_daily_gross_sales > 0 THEN et_current_total_supply_quantity / NULLIF(weighted_daily_gross_sales,0) ELSE NULL END::numeric, 1) AS days_of_supply_with_incoming,
+      last_sale_date,
+      first_sale_date,
+      et_ship_latest_application_date AS first_shipped_date,
+      coalesce(et_ship_latest_in_transit_date, et_ship_latest_application_date) AS latest_shipped_date,
+      et_ship_latest_event_date AS first_arrived_date,
+      et_ship_latest_event_date AS latest_arrived_date,
+      0::numeric AS arrived_cost_sar,
+      NULL::numeric AS unit_cost_sar,
+      NULL::numeric AS avg_purchase_unit_price,
+      NULL::numeric AS avg_volume_l,
+      NULL::numeric AS avg_weight_kg,
+      NULL::text AS ignored_reasons,
+      CASE
+        WHEN coalesce(et_estimated_available_qty,0) <= 0 AND coalesce(et_ship_in_transit_quantity,0) <= 0 AND coalesce(et_historical_supply_quantity,0) > 0 THEN '已断货'
+        WHEN coalesce(et_estimated_available_qty,0) <= 0 AND coalesce(et_ship_in_transit_quantity,0) > 0 THEN '有在途'
+        WHEN coalesce(et_estimated_available_qty,0) > 0 AND weighted_daily_gross_sales > 0 AND et_estimated_available_qty / NULLIF(weighted_daily_gross_sales,0) <= 30 THEN '即将断货'
+        WHEN coalesce(et_ship_in_transit_quantity,0) > 0 THEN '有在途'
+        WHEN coalesce(et_estimated_available_qty,0) > 0 AND coalesce(gross_sold_30d,0) <= 0 THEN '完全卖不动'
+        ELSE '正常'
+      END AS stock_status,
+      CASE
+        WHEN coalesce(et_estimated_available_qty,0) <= 0 AND coalesce(et_historical_supply_quantity,0) > 0 THEN 'high'
+        WHEN coalesce(et_estimated_available_qty,0) > 0 AND weighted_daily_gross_sales > 0 AND et_estimated_available_qty / NULLIF(weighted_daily_gross_sales,0) <= 30 THEN 'high'
+        WHEN coalesce(et_ship_in_transit_quantity,0) > 0 OR (coalesce(et_estimated_available_qty,0) > 0 AND coalesce(gross_sold_30d,0) <= 0) THEN 'mid'
+        ELSE 'low'
+      END AS risk_level,
+      (et_estimated_available_qty IS NOT NULL) AS has_et_inventory,
+      round(et_loose_sellable_qty::numeric, 0) AS et_loose_sellable_qty,
+      round(et_full_carton_qty::numeric, 0) AS et_full_carton_qty,
+      round(et_rtv_qty::numeric, 0) AS et_rtv_qty,
+      round(et_damaged_qty::numeric, 0) AS et_damaged_qty,
+      round(et_scrap_qty::numeric, 0) AS et_scrap_qty,
+      round(et_estimated_available_qty::numeric, 0) AS et_estimated_available_qty,
+      round(et_pending_process_qty::numeric, 0) AS et_pending_process_qty,
+      round(et_box_count::numeric, 0) AS et_box_count,
+      et_loose_warehouses,
+      et_box_warehouses,
+      et_store_snapshot_date,
+      et_box_snapshot_date,
+      round(et_historical_supply_quantity::numeric, 0) AS et_declared_shipped_quantity,
+      round(et_historical_supply_quantity::numeric, 0) AS et_historical_supply_quantity,
+      round(greatest(coalesce(et_estimated_available_qty,0) + coalesce(et_ship_in_transit_quantity,0) + coalesce(gross_sold_quantity,0) - coalesce(et_historical_supply_quantity,0), 0)::numeric, 0) AS et_ship_capture_gap_quantity,
+      round(et_ship_in_transit_quantity::numeric, 0) AS et_ship_in_transit_quantity,
+      round(et_ship_pending_review_quantity::numeric, 0) AS et_ship_pending_review_quantity,
+      round(et_ship_arrived_quantity::numeric, 0) AS et_ship_arrived_quantity,
+      round(et_current_total_supply_quantity::numeric, 0) AS et_current_total_supply_quantity,
+      et_ship_order_count,
+      et_ship_pending_review_order_count,
+      et_ship_latest_application_date,
+      et_ship_latest_in_transit_date,
+      et_ship_latest_pending_review_date,
+      et_ship_latest_event_date,
+      et_ship_status_summary,
+      round(et_storage_fee_30d_sar::numeric, 2) AS et_storage_fee_30d_sar,
+      et_storage_fee_latest_date
+    FROM calc
+    WHERE coalesce(et_historical_supply_quantity,0) > 0
+       OR coalesce(et_estimated_available_qty,0) > 0
+       OR coalesce(et_ship_in_transit_quantity,0) > 0
+       OR coalesce(et_ship_pending_review_quantity,0) > 0
+       OR coalesce(gross_sold_quantity,0) > 0
     ORDER BY
-      CASE risk_level WHEN 'high' THEN 0 WHEN 'mid' THEN 1 ELSE 2 END,
-      days_of_supply_on_hand ASC NULLS LAST,
+      CASE
+        WHEN coalesce(et_estimated_available_qty,0) <= 0 AND coalesce(et_historical_supply_quantity,0) > 0 THEN 0
+        WHEN coalesce(et_estimated_available_qty,0) > 0 AND weighted_daily_gross_sales > 0 AND et_estimated_available_qty / NULLIF(weighted_daily_gross_sales,0) <= 30 THEN 0
+        WHEN coalesce(et_ship_in_transit_quantity,0) > 0 OR (coalesce(et_estimated_available_qty,0) > 0 AND coalesce(gross_sold_30d,0) <= 0) THEN 1
+        ELSE 2
+      END,
+      CASE WHEN weighted_daily_gross_sales > 0 THEN et_estimated_available_qty / NULLIF(weighted_daily_gross_sales,0) ELSE NULL END ASC NULLS LAST,
       weighted_daily_gross_sales DESC,
       standard_goods_sn
     LIMIT 800
+  ) t
+),
+inventory_et_shipments AS (
+  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY shipment_sort, create_time DESC NULLS LAST, ship_order_id), '[]'::jsonb) AS data
+  FROM (
+    SELECT
+      i.ship_order_id,
+      dim.product_canonical_sn(i.standard_goods_sn) AS standard_goods_sn,
+      coalesce(nullif(dim.product_match_key(i.standard_goods_sn),''), nullif(dim.product_match_key(i.match_key),''), nullif(i.match_key,'')) AS match_key,
+      coalesce(nullif(i.goods_title,''), nullif(i.title_cn,''), nullif(i.title_en,''), '') AS goods_title,
+      i.sku_code,
+      i.barcode,
+      round(coalesce(i.quantity,0)::numeric, 0) AS quantity,
+      round(coalesce(i.cost_price,0)::numeric, 2) AS cost_price,
+      round(coalesce(i.price,0)::numeric, 2) AS supply_price,
+      o.status AS ship_status_code,
+      coalesce(nullif(o.status_name,''), CASE
+        WHEN coalesce(o.status,'') = '12' THEN '已到仓/已完成'
+        WHEN o.has_effective_in_transit_evidence THEN '在途/未入仓'
+        ELSE '待复核/ETA过期或无有效发运证据'
+      END) AS ship_status_name,
+      CASE
+        WHEN coalesce(o.status,'') = '12' THEN 'arrived'
+        WHEN o.has_effective_in_transit_evidence THEN 'open'
+        ELSE 'review'
+      END AS shipment_group,
+      CASE
+        WHEN o.has_effective_in_transit_evidence THEN 0
+        WHEN coalesce(o.status,'') = '12' THEN 2
+        ELSE 1
+      END AS shipment_sort,
+      o.storeroom_title,
+      o.transport_title,
+      round(coalesce(o.case_number,0)::numeric, 0) AS case_number,
+      round(coalesce(o.send_box_count,0)::numeric, 0) AS send_box_count,
+      round(coalesce(o.all_box_number,0)::numeric, 0) AS all_box_number,
+      round(coalesce(o.send_quantity,0)::numeric, 0) AS order_send_quantity,
+      round(coalesce(o.inland_quantity,0)::numeric, 0) AS order_inland_quantity,
+      round(coalesce(o.overseas_quantity,0)::numeric, 0) AS order_overseas_quantity,
+      round(coalesce(o.platform_quantity,0)::numeric, 0) AS order_platform_quantity,
+      o.create_time,
+      o.check_time,
+      o.ship_time,
+      o.into_time,
+      o.end_time,
+      o.waybill_code,
+      nullif(o.raw_summary->>'ETD_ETA','') AS etd_eta,
+      o.eta_end_date,
+      o.has_effective_in_transit_evidence,
+      nullif(o.raw_summary->>'RemainingTime','') AS remaining_time
+    FROM fact.et_ship_order_item i
+    JOIN inventory_et_ship_order_enriched o USING (ship_order_id)
+    WHERE coalesce(nullif(dim.product_match_key(i.standard_goods_sn),''), nullif(i.match_key,''), '') <> ''
+    ORDER BY CASE WHEN coalesce(o.status,'') = '12' THEN 1 ELSE 0 END, o.create_time DESC NULLS LAST, i.ship_order_id
+    LIMIT 5000
   ) t
 ),
 inventory_depletion_batches AS (
@@ -2973,25 +3215,25 @@ orders AS (
 ),
 after_sales_order_map AS (
   SELECT
-    store_key,
     order_no,
+    min(store_key) AS order_store_key,
     min(created_date)::date AS order_created_date,
     min(order_create_time) AS order_create_time,
     round(sum(coalesce(sales_sar,0))::numeric, 2) AS order_sales_sar
   FROM fact.order_item
   WHERE coalesce(order_no,'') <> ''
-  GROUP BY store_key, order_no
+  GROUP BY order_no
 ),
 after_sales_payment_flags AS (
   SELECT
-    store_key,
     order_no,
+    min(store_key) AS order_store_key,
     bool_or(coalesce(is_cod,false)) AS is_cod,
     max(nullif(payment_label,'')) AS payment_label,
     max(nullif(payment_method,'')) AS payment_method
   FROM fact.order_payment_flag
   WHERE coalesce(order_no,'') <> ''
-  GROUP BY store_key, order_no
+  GROUP BY order_no
 ),
 rtv_trace_source AS MATERIALIZED (
   SELECT
@@ -3130,9 +3372,9 @@ after_sales_base AS (
     ) AS search_text
   FROM fact.after_sales_item a
   LEFT JOIN after_sales_order_map om
-    ON om.store_key = a.store_key AND om.order_no = a.order_no
+    ON om.order_no = a.order_no
   LEFT JOIN after_sales_payment_flags p
-    ON p.store_key = a.store_key AND p.order_no = a.order_no
+    ON p.order_no = a.order_no
   LEFT JOIN LATERAL (
     SELECT
       concat_ws(' ', coalesce(a.reason_names,''), coalesce(a.resolution_plan_name,''), coalesce(a.order_sub_status_name,''), coalesce(a.return_package_status_name,'')) AS reason_text,
@@ -3793,12 +4035,12 @@ SELECT jsonb_build_object(
   ),
   'inventoryDepletion', jsonb_build_object(
     'products', (SELECT data FROM inventory_depletion_products),
-    'batches', (SELECT data FROM inventory_depletion_batches),
+    'batches', '[]'::jsonb,
     'method', jsonb_build_object(
       'stockBasis', '成本表批次 + 毛销量 FIFO 扣减',
       'arrivalRule', '到仓/派送日期和头程运输费均存在才计入到仓库存；缺任一项计入在途或待确认',
       'salesDeduction', '库存消耗按毛销量扣减，退货暂不加回，避免高估可售库存',
-      'velocityRule', '日均销量 = 近7天毛销量/7 × 40% + 近30天毛销量/30 × 60%'
+      'velocityRule', '日均销量 = 近7天毛销量/7 × 70% + 近30天毛销量/30 × 30%'
     )
   ),
   'actions', (SELECT data FROM actions),
@@ -3809,7 +4051,6 @@ SELECT jsonb_build_object(
   'comments', (SELECT data FROM comments),
   'commentSummary', (SELECT data FROM comment_summary),
   'actionDomain', (SELECT data FROM action_domain),
-  'finance', (SELECT data FROM finance),
   'financeOrders', (SELECT data FROM finance_orders),
   'financeGoods', (SELECT data FROM finance_goods),
   'inventoryAlerts', (SELECT data FROM inventory_alerts),
@@ -5545,8 +5786,8 @@ let serviceHealth = {
 const BI_SECTION_KEYS = new Set(Array.isArray(DATA.__sections?.keys) ? DATA.__sections.keys : []);
 const BI_SECTION_LOADED = new Set(Array.isArray(DATA.__sections?.loaded) ? DATA.__sections.loaded : []);
 const biSectionState = {};
-const OVERVIEW_DETAILS_SECTION_KEYS = ['rankings','actions','linksData','orders','afterSales','financeData','comments','waybills','profit'];
-const BRIEFING_SECTION_KEYS = ['homeRankings','actions','afterSales','financeData'];
+const OVERVIEW_DETAILS_SECTION_KEYS = ['rankings','actions','linksData','orders','afterSales','comments','waybills','profit'];
+const BRIEFING_SECTION_KEYS = ['homeRankings','actions','afterSales'];
 function resetBiSectionRuntimeFromData(){
   BI_SECTION_KEYS.clear();
   (Array.isArray(DATA.__sections?.keys) ? DATA.__sections.keys : []).forEach(section => BI_SECTION_KEYS.add(section));
@@ -5583,15 +5824,15 @@ function requiredBiSectionsForTab(tab = state.tab || 'overview'){
   if (!biPortalUsesApiSections()) return [];
   const map = {
     overview:overviewRequiredBiSections(),
-    stores:['rankings','profit','actions','linksData','afterSales','financeData','waybills'],
-    products:['rankings','profit','actions','linksData','orders','afterSales','financeData','comments'],
+    stores:['rankings','profit','actions','linksData','afterSales','waybills'],
+    products:['rankings','profit','actions','linksData','orders','afterSales','comments'],
     links:['linksData','actions'],
     linkops:['linksData','actions'],
     comments:['comments'],
-    business:['orders','afterSales','financeData','rtvData','waybills'],
+    business:['orders','afterSales','rtvData','waybills'],
     profit:['profit','rankings','rtvData'],
     inventory:['profit'],
-    actions:['actions','linksData','afterSales','financeData','waybills','orders'],
+    actions:['actions','linksData','afterSales','waybills','orders'],
     system:[]
   };
   return (map[tab] || []).filter(section => BI_SECTION_KEYS.has(section));
@@ -5606,7 +5847,7 @@ function overviewNeedsProfitSectionForHome(){
 }
 function backgroundBiSectionsForTab(tab = state.tab || 'overview'){
   if (!biPortalUsesApiSections()) return [];
-  const overviewSections = ['homeRankings','afterSales','homeProfit','actions','financeData'];
+  const overviewSections = ['homeRankings','afterSales','homeProfit','actions'];
   if (tab === 'overview' && (overviewNeedsProfitSectionForHome() || (NO_GROUPS_PREVIEW && selectedTrendMetricKeys().includes('profit')))) overviewSections.push('profit');
   if (tab === 'overview' && NO_GROUPS_PREVIEW && selectedTrendMetricKeys().includes('inventory')) overviewSections.push('inventoryTrend');
   if (tab === 'overview' && NO_GROUPS_PREVIEW && trafficScopeRequiresProductSection()) overviewSections.push('productTrafficDaily');
@@ -5634,7 +5875,7 @@ function showBiSectionLoading(sections){
     if ((state.tab || 'overview') === 'overview' && host.id === 'homeDashboard') host.appendChild(target);
     else host.prepend(target);
   }
-  const pending = sections.map(s => s === 'homeProfit' ? '首页利润' : s === 'homeRankings' ? '首页销售/排行' : s === 'linksData' ? '链接/覆盖' : s === 'productTrafficDaily' ? '货号级每日流量' : s === 'financeData' ? '财务明细' : s === 'rtvData' ? 'RTV追踪' : s).join('、');
+  const pending = sections.map(s => s === 'homeProfit' ? '首页利润' : s === 'homeRankings' ? '首页销售/排行' : s === 'linksData' ? '链接/覆盖' : s === 'productTrafficDaily' ? '货号级每日流量' : s === 'rtvData' ? 'RTV追踪' : s).join('、');
   target.innerHTML = '正在加载当前页面数据：' + escapeHtml(pending) + '。界面布局保持不变，数据按需从服务端读取。';
 }
 function clearBiSectionLoading(){
@@ -7897,7 +8138,7 @@ function renderKpisNoGroupsPreview(){
       (trafficScoped ? '货号级流量来自 productTrafficDaily section；按当前店铺/货号和日期聚合，点击率/支付率按分子分母重算。' : '流量来自云端链接表现日序列；曝光、访客、成交件数按所选时间段汇总，点击率/支付率只展示最近业务日。'), 'links')+
     card('当前库存 / 去化', '当前快照 · '+inventoryScopeNote,
       '<div data-preview-table="inventory">'+matrix(2, head(['指标','数值','说明'])+plainRows(inventoryCardRows))+'</div>',
-      'ET可售和成本表供给是物理库存口径，不按店铺硬拆；店铺/货号筛选下的前台展示库存趋势来自 inventoryTrend section。成本表供给=到仓+在途-已售，不等于 ET可售+在途。', 'inventory');
+      '库存以 ET 实盘和 ET 发货申请单为准；SHEIN 店铺库存只用于已上架链接矩阵。ET发货单累计若小于 当前ET库存+有效在途+历史销量，会作为库存/销量匹配待核暴露，不再拿库存+销量反推发货量，也不误判为发货单缺采。', 'inventory');
   document.querySelectorAll('[data-overview-jump]').forEach(btn => btn.addEventListener('click', e => {
     if (e.target?.classList?.contains('help')) return;
     kpiJump(btn.dataset.overviewJump || 'business');
@@ -9592,7 +9833,7 @@ function domainHealthRows(){
   const task = pipeline.task || {};
   const latestLog = pipeline.latestLog || {};
   const linkLag = d.linkDate && (d.salesDate || d.businessDate) && (d.linkDate < (d.salesDate || d.businessDate) || d.linkDate < (d.businessDate || d.salesDate));
-  const financeCoverage = Number(DATA.financeOrders?.length || 0) > 0 ? 1 : 0;
+  const financeCoverage = 0;
   const taskPendingFirstRun = isTaskPendingFirstRun(task);
   const rows = [
     {
@@ -9626,9 +9867,6 @@ function domainHealthRows(){
       tab:'business'
     },
     {
-      key:'finance', label:'财务明细', status: financeCoverage >= 15 ? 'good' : (financeCoverage > 0 ? 'warn' : 'bad'),
-      value: num(DATA.financeOrders?.length || 0) + ' 在途单 / ' + num(DATA.financeGoods?.length || 0) + ' 商品',
-      detail: financeCoverage > 0 ? 'gsfs 明细当前覆盖 HL 1/' + num(TOTAL_STORE_COUNT) + ' 店；其它店未接入前，不要把财务明细空值当 0。' : '暂未抓到 gsfs 财务明细。',
       tab:'business'
     },
     {
@@ -9715,9 +9953,6 @@ function trendReadinessRows(){
       tab:'business'
     },
     {
-      key:'finance', label:'gsfs 财务明细趋势', days:Number(t.financeDays || 0), need:7, series:t.financeSeries || [], metric:'estimate_income_sar',
-      value:(t.financeSeries || []).length ? money((t.financeSeries || []).at(-1)?.estimate_income_sar) : '-',
-      detail:'目前只覆盖 HL 财务明细；扩到全部店前，只能作为阶段性财务趋势，不代表全店。',
       tab:'business'
     }
   ];
@@ -10875,7 +11110,7 @@ function buildBriefing(){
 function renderBriefing(){
   const briefingMissing = biPortalUsesApiSections() ? missingBiSections(BRIEFING_SECTION_KEYS) : [];
   if (briefingMissing.length) {
-    const pendingText = briefingMissing.map(s => s === 'financeData' ? '财务明细' : s === 'afterSales' ? '售后明细' : s === 'actions' ? '动作池' : s === 'homeRankings' || s === 'rankings' ? '首页销售/排行' : s).join('、');
+    const pendingText = briefingMissing.map(s => s === 'afterSales' ? '售后明细' : s === 'actions' ? '动作池' : s === 'homeRankings' || s === 'rankings' ? '首页销售/排行' : s).join('、');
     $('dailyBriefing').innerHTML =
       '<div class="briefing-main">'+
         '<h4>SHEIN BI 今日经营简报</h4>'+
@@ -13646,7 +13881,7 @@ function inventoryRowsWithScope(){
     .map(r => {
       const s7 = inventoryScopeGrossSales(r, start7, anchor);
       const s30 = inventoryScopeGrossSales(r, start30, anchor);
-      const scopedDaily = 0.4 * (Number(s7.quantity || 0) / 7) + 0.6 * (Number(s30.quantity || 0) / 30);
+      const scopedDaily = 0.7 * (Number(s7.quantity || 0) / 7) + 0.3 * (Number(s30.quantity || 0) / 30);
       const onHand = inventoryOnHandQty(r);
       const incoming = Number(r.incoming_quantity || 0);
       const scopedDays = scopedDaily > 0 ? onHand / scopedDaily : null;
@@ -13776,7 +14011,7 @@ function renderInventoryPage(){
         '<div class="store-kpi"><span>待处理仓</span><strong>'+num(totalEtPending)+'</strong><small>03 RTV / 04破损 / 06报废，不计入可售</small></div>'+
         '<div class="store-kpi"><span>成本表在途</span><strong>'+num(totalIncoming)+'</strong><small>有发货但缺到仓或头程费；未发 '+num(totalNotShipped)+'</small></div>'+
         '<div class="store-kpi"><span>近30天毛销量</span><strong>'+num(sold30)+'</strong><small>'+escapeHtml(scopeText)+' · 店铺筛选只影响销售速度</small></div>'+
-        '<div class="store-kpi"><span>加权日销</span><strong>'+fmt.format(daily)+'</strong><small>7天40% + 30天60%</small></div>'+
+        '<div class="store-kpi"><span>加权日销</span><strong>'+fmt.format(daily)+'</strong><small>7天70% + 30天30%</small></div>'+
         '<div class="store-kpi"><span>高风险货号</span><strong>'+num(urgent)+'</strong><small>断货/14天内断货/实盘缺货</small></div>'+
       '</div>'+
     '</div>'+
@@ -14726,7 +14961,7 @@ function renderPageDecisionSummaries(){
       cards:[
         {label:'ET可售库存', value:num(onHand)+' 件', hint:'09散件仓 + 01整箱仓；无ET数据时回退成本表估算。', level:onHand ? 'info' : 'mid'},
         {label:'成本表在途', value:num(incoming)+' 件', hint:'有发货但缺到仓或缺头程费，暂不计入ET可售。', level:incoming ? 'mid' : 'good'},
-        {label:'加权日销', value:fmt.format(daily)+' 件/天', hint:'近7天40% + 近30天60%，用于估算去化周期。', level:daily ? 'good' : 'mid'},
+        {label:'加权日销', value:fmt.format(daily)+' 件/天', hint:'近7天70% + 近30天30%，用于估算去化周期。', level:daily ? 'good' : 'mid'},
         {label:'高风险货号', value:num(high)+' 个', hint:'疑似缺货、14天内断货或批次缺口。低动销 '+num(slow)+' 个。', level:high ? 'high' : 'good'}
       ],
       next:'先处理高风险补货，再看低动销库存是否需要活动清货；对异常货号先核对成本表是否漏批次。',
@@ -15465,9 +15700,6 @@ async function main() {
       actions: data.actions?.length || 0,
       links: data.links?.length || 0,
       matrix: data.matrix?.length || 0,
-      finance: data.finance?.length || 0,
-      financeOrders: data.financeOrders?.length || 0,
-      financeGoods: data.financeGoods?.length || 0,
       orders: data.orders?.length || 0,
       afterSales: data.afterSales?.length || 0,
       rtvReview: data.rtvReview?.length || 0,

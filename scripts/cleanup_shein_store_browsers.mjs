@@ -13,13 +13,22 @@ import {spawnSync} from 'node:child_process';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 function parseArgs(argv) {
-  const args = {all: false, stores: [], onlyHeadless: false, dryRun: false, json: false, killAfterSec: 5};
+  const args = {
+    all: false,
+    stores: [],
+    onlyHeadless: false,
+    cleanupChromeTmp: false,
+    dryRun: false,
+    json: false,
+    killAfterSec: 5,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--all') args.all = true;
     else if (a === '--store') args.stores.push(String(argv[++i] || '').trim().toUpperCase());
     else if (a === '--stores') args.stores.push(...String(argv[++i] || '').split(',').map(x => x.trim().toUpperCase()).filter(Boolean));
     else if (a === '--only-headless') args.onlyHeadless = true;
+    else if (a === '--cleanup-chrome-tmp') args.cleanupChromeTmp = true;
     else if (a === '--dry-run') args.dryRun = true;
     else if (a === '--json') args.json = true;
     else if (a === '--kill-after-sec') args.killAfterSec = Number(argv[++i] || args.killAfterSec);
@@ -104,6 +113,53 @@ function cleanupLinux(matches, args) {
   return killed;
 }
 
+function liveChromeProcessCount() {
+  return fs.readdirSync('/proc')
+    .filter(x => /^\d+$/.test(x))
+    .map(pid => readText(`/proc/${pid}/comm`).trim())
+    .filter(name => /^(chrome|chromium|chromium-browser|google-chrome|google-chrome-stable)$/i.test(name))
+    .length;
+}
+
+function cleanupChromeTmpDirs(args) {
+  if (process.platform === 'win32' || !args.cleanupChromeTmp) {
+    return {enabled: Boolean(args.cleanupChromeTmp), skipped: process.platform === 'win32' ? 'unsupported-platform' : 'disabled', beforeCount: 0, afterCount: 0, removed: []};
+  }
+  const liveCount = liveChromeProcessCount();
+  const tmpRoot = '/tmp';
+  const isChromeTmp = name => /^\.?com\.google\.Chrome\.[A-Za-z0-9_-]+$/.test(name);
+  const before = fs.readdirSync(tmpRoot)
+    .filter(isChromeTmp)
+    .map(name => path.join(tmpRoot, name))
+    .filter(p => {
+      try { return fs.statSync(p).isDirectory(); } catch { return false; }
+    })
+    .sort();
+  if (liveCount > 0) {
+    return {enabled: true, skipped: 'live-chrome-processes', liveCount, beforeCount: before.length, afterCount: before.length, removed: []};
+  }
+  const removed = [];
+  for (const dir of before) {
+    if (args.dryRun) {
+      removed.push({path: dir, dryRun: true});
+      continue;
+    }
+    try {
+      fs.rmSync(dir, {recursive: true, force: true});
+      removed.push({path: dir});
+    } catch (err) {
+      removed.push({path: dir, error: err?.code || String(err?.message || err)});
+    }
+  }
+  const after = fs.readdirSync(tmpRoot)
+    .filter(isChromeTmp)
+    .map(name => path.join(tmpRoot, name))
+    .filter(p => {
+      try { return fs.statSync(p).isDirectory(); } catch { return false; }
+    });
+  return {enabled: true, liveCount, beforeCount: before.length, afterCount: after.length, removed};
+}
+
 function cleanupWindows(stores, args) {
   if (args.dryRun) return {matches: [], killed: [], note: `dry-run stores=${stores.map(s => s.storeKey).join(',')}`};
   const res = spawnSync('powershell.exe', [
@@ -122,13 +178,14 @@ const args = parseArgs(process.argv.slice(2));
 const stores = selectedStores(args);
 let report;
 if (process.platform === 'win32') {
-  report = {ok: true, platform: process.platform, stores: stores.map(s => s.storeKey), ...cleanupWindows(stores, args)};
+  report = {ok: true, platform: process.platform, stores: stores.map(s => s.storeKey), ...cleanupWindows(stores, args), chromeTmp: cleanupChromeTmpDirs(args)};
 } else {
   const before = linuxMatches(stores, args);
   const killed = cleanupLinux(before, args);
   const after = args.dryRun ? before : linuxMatches(stores, args);
+  const chromeTmp = cleanupChromeTmpDirs(args);
   report = {
-    ok: after.length === 0 || args.dryRun,
+    ok: (after.length === 0 || args.dryRun) && (!chromeTmp.enabled || chromeTmp.afterCount === 0 || chromeTmp.skipped === 'live-chrome-processes' || args.dryRun),
     platform: process.platform,
     stores: stores.map(s => s.storeKey),
     onlyHeadless: args.onlyHeadless,
@@ -138,6 +195,7 @@ if (process.platform === 'win32') {
     before: before.map(p => ({pid: p.pid, ppid: p.ppid, rssKb: p.rssKb, storeKey: p.storeKey, cmdline: p.cmdline.slice(0, 500)})),
     after: after.map(p => ({pid: p.pid, ppid: p.ppid, rssKb: p.rssKb, storeKey: p.storeKey, cmdline: p.cmdline.slice(0, 500)})),
     killed,
+    chromeTmp,
   };
 }
 
@@ -145,5 +203,9 @@ if (args.json) console.log(JSON.stringify(report, null, 2));
 else {
   console.log(`[cleanup_shein_store_browsers] stores=${report.stores.join(',')} before=${report.beforeCount ?? 0} after=${report.afterCount ?? 0} dryRun=${Boolean(args.dryRun)}`);
   for (const item of report.before || []) console.log(`- ${item.storeKey} pid=${item.pid} ppid=${item.ppid} rssKb=${item.rssKb}`);
+  if (report.chromeTmp?.enabled) {
+    const suffix = report.chromeTmp.skipped ? ` skipped=${report.chromeTmp.skipped}` : '';
+    console.log(`[cleanup_shein_store_browsers] chromeTmp before=${report.chromeTmp.beforeCount ?? 0} after=${report.chromeTmp.afterCount ?? 0}${suffix}`);
+  }
 }
 if (!report.ok) process.exitCode = 1;

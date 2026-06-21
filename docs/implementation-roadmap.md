@@ -1,6 +1,6 @@
 # 实施路线与当前阶段
 
-> 2026-05-29 更新：本地局域网试用和 GitHub 托管已完成；本地 BI 已封存，云端 BI `https://shein-bi.dushengyi.xyz/` 是正式入口，旧 IP `http://43.165.167.135/` 仅作兜底。销售、ET、飞书日报、异常通知、RTV 完整复核、链接/业务域日更、登录态巡检和只读问数机器人均已有云端 systemd 入口；HL OpenAPI 销售双跑已按业务要求退出生产调度；下面早期阶段保留为路线回顾。
+> 2026-05-29 更新：本地局域网试用和 GitHub 托管已完成；本地 BI 已封存，云端 BI `https://shein-bi.dushengyi.xyz/` 是正式入口，旧 IP `http://43.165.167.135/` 仅作兜底。销售、ET、飞书日报手动入口、异常通知、RTV 完整复核、链接/业务域日更、登录态巡检和只读问数机器人均已有云端 systemd 入口；HL OpenAPI 销售双跑已按业务要求退出生产调度；下面早期阶段保留为路线回顾。
 
 ## 已完成主线
 
@@ -21,9 +21,10 @@
 - 月表由 `店铺日报事实` 重算生成。
 - 只保留当月和上个月的独立月表，更早月份进入年度汇总。
 - 当前云端 systemd 调度：
-  - `shein-bi-cloud-today.timer` 每两小时刷新当天销售、入仓并生成 BI Portal；
-  - `shein-bi-cloud-yesterday.timer` 每天 `00:10` 刷新前一天最终销售并复核稳定日；
-  - `shein-bi-db-backup.timer` 每天 `02:30` 备份数据库；
+  - `shein-bi-cloud-today.timer` 在 `00/02/04/06/10/12/14/16/18/20/22:00` 刷新当天销售、入仓并生成 BI Portal；
+  - `shein-bi-cloud-morning-chain.timer` 每天 `08:00` 先刷新销售，再启动慢变日更；当前飞书日报自动发送已停用；
+  - `shein-bi-cloud-yesterday.timer` 每天 `03:00` 刷新前一天最终销售并复核稳定日；
+  - `shein-bi-db-backup.timer` 每天 `02:40` 备份数据库；
   - 本地 Windows 计划任务已封存禁用，只作回滚/迁移参考。
 
 ### M5：产品销量体系
@@ -81,7 +82,7 @@
 
 - 目标：把系统从本地电脑迁移到云端服务器长期运行。
 - 当前状态：腾讯云服务器已部署，云端 BI 入口已启用 Basic Auth，本地 BI 已封存。
-- 已完成：销售 WebAPI 云端刷新、BI Portal 生成、PostgreSQL/Metabase 底座、数据库自动备份、ET 同步、飞书日报、异常通知、RTV 完整复核和链接/业务域日更。HL OpenAPI 销售双跑曾完成试点，现已退出生产调度。
+- 已完成：销售 WebAPI 云端刷新、BI Portal 生成、PostgreSQL/Metabase 底座、数据库自动备份、ET 同步、飞书日报手动入口、异常通知、RTV 完整复核和链接/业务域日更。飞书日报自动发送当前停用；HL OpenAPI 销售双跑曾完成试点，现已退出生产调度。
 - 待完成：域名/HTTPS、异地备份、动作状态入库、SSH 从临时 `443` 迁到正式高位端口、链接/业务域纯 Node 零浏览器直连优化。
 - 验收：云端真实 timer 连续稳定运行；备份可恢复；异常能告警；出现问题可回滚到本地或上一版。
 

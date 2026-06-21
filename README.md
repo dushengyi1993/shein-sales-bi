@@ -1,14 +1,14 @@
 # SHEIN 销售统计与 BI 经营系统
 
-## 2026-06-03 当前权威状态
+## 2026-06-20 当前权威状态
 
-- 飞书多维表格 / 原生看板写入已临时暂停；云端 BI 系统作为当前主要经营入口继续运行。飞书日报、异常通知 watchdog 和只读问数机器人均已迁到云端独立飞书机器人链路；日报真实发送已验证，问数机器人已升级为云端 Codex CLI 只读网关，不再绑定本机 Codex 会话。
+- 飞书多维表格 / 原生看板写入已临时暂停；云端 BI 系统作为当前主要经营入口继续运行。飞书日报脚本、异常通知 watchdog 和只读问数机器人均已迁到云端独立飞书机器人链路；日报真实发送链路已验证但自动发送当前停用，问数机器人已升级为云端 Codex CLI 只读网关，不再绑定本机 Codex 会话。
 - 本地 BI 已封存，云端 BI 是正式入口：`https://shein-bi.dushengyi.xyz/`（旧 IP 入口 `http://43.165.167.135/` 仅作兜底）。公网入口已启用 Basic Auth；账号密码只在运行环境交付，不写入仓库或文档。详见 `docs/cloud-bi-operations.md`。
 - 云端 BI 已提供临时登录维护入口 `/cloud-login-maintenance`：当 SHEIN / SBN 子系统登录态失效、自动恢复失败、遇到验证码/滑块，或被协议签署 / 公告 / 通知确认等普通登录弹窗挡住时，可在云服务器短时打开该店独立 profile 的 noVNC 浏览器窗口；普通登录干扰弹窗可由运维代理关闭/确认后再点登录，完成后必须点“我已完成并关闭”，脚本会导出/探测登录态并关闭临时进程。该入口的状态文件、日志和短期 token 都是服务器私有运行态，不进 GitHub。
 - 本地 `8787` 服务已停止，`SHEIN-*` Windows 计划任务已禁用；除非明确回滚，不要重新启动本地 BI 或本地抓数任务。
 - 销售同步完成后会后置刷新 BI；如果单店失败但目标日期当前启用店铺销售源文件已齐，BI 仍会刷新，并通过飞书消息提醒失败店铺。
 - SHEIN 销售生产入口已改为 Node WebAPI 直连优先：`config/stores.json` 的当前 19 店 `salesTransport=auto`，`run_sales_sync_job.mjs` 会先用 `state/shein_webapi_sessions/<店铺>.local.json` 的 Cookie session 直调 `/gsp/orderPlus/listOrder` 和 `/gsp/orderPlus/listOrderItem`；成功时不启动浏览器，失败时才刷新 session / 回退 Chrome。`2026-05-08` 16 店 WebAPI 抓取已与现有数据库对账一致。
-- 云端当天销售刷新已改为全天每两小时一次：`00:10/02:10/.../22:10`；前一天最终版和 D-2 稳定复核仍在 `00:10`，数据库自动备份在 `02:30`。云端 SSH 直连已恢复，当前本机别名为 `ssh shein-bi-tencent`。
+- 云端当天销售刷新按北京时间整点每两小时运行：`00/02/04/06/10/12/14/16/18/20/22:00`；`08:00` 由晨间链路接管，先刷新当天销售，再启动慢变日更。前一天最终版在 `03:00`，数据库自动备份在 `02:40`。云端 SSH 直连别名为 `ssh shein-bi-tencent`。
 - 链接表现改为每日后半夜一次，当前只写私有源文件 / PostgreSQL / BI；飞书链接管理表已废弃。旧 `0340` / `0510` 链接任务不要恢复。
 - 当前完整 BI 运行层仍是 PostgreSQL + Metabase + BI Portal：PostgreSQL 是核心数据仓库，Metabase 是正式深度分析/自由钻取层，BI Portal 是日常经营入口；在自研门户完全覆盖深钻前，云端迁移不能删除或跳过 Metabase。
 - 服务器从 GitHub 拉取/重置代码后，要立即重跑一次云端 BI 刷新；仓库里的 `outputs/bi-portal/` 是灾备快照，不能把它误当成服务器实时数据。
@@ -17,16 +17,16 @@
 - `2026-06-05` 已按用户提供的账号真相修正 LGM 三店 profile / 账号映射：`YJ=profileKey yj/accountNo GS8146729/port 9346`、`XL=profileKey xl/accountNo GS9307061/port 9344`、`QY=profileKey qy/accountNo GS7451160/port 9345`。店铺身份真相以 `config/stores.json`、`config/store_account_truth.json`、浏览器保存账号和实际登录后的店铺名/账号一致为准；不得再沿用 `2026-05-10` 的交叉 profile 结论。
 - `2026-05-09 05:30` 链接/业务域任务、`2026-05-09 07:00` BI 每日流水线和白天滚动后置 BI 刷新是本地 Windows 历史验证记录；自 `2026-05-15` 本地任务封存后，不再作为生产调度。
 - `2026-05-13` 已明确 BI/RTV 调度边界：RTV 换单自动复核本来就耗时，不应被当成滚动 BI 未更新。云端滚动刷新优先做销售 WebAPI、入仓和 BI Portal 生成；完整 RTV 复核、链接/业务域日更均已新增云端独立 timer，链接/业务域仍按低频日更边界处理，不按销售高频阈值报警。
-- ET 货代仓已接入数据仓库和 BI，能抓库存、RTV、出库、发货申请单、财务等；云端已启用 Linux headless Chrome + ET 本地凭据 + OCR 自动登录入口并完成真实同步验证，不能直接复用 Windows Chrome 保存密码。
+- ET 货代仓已接入数据仓库和 BI，能抓库存、RTV、出库、发货申请单和必要财务/仓储证据；云端已启用 Linux headless Chrome + ET 本地凭据 + OCR 自动登录入口并完成真实同步验证，不能直接复用 Windows Chrome 保存密码。当前高频 ET 任务默认不抓旧财务明细 endpoint，也不再生成旧 `financeData` section；仓储费/历史账单只在利润链路或显式诊断中使用。
 - RTV 换单号自动复核已接入 BI 流水线：`scripts/verify_shein_rtv_tracking.mjs` 直接读取 SHEIN 售后详情和退货物流详情，JT/JTE 走同运单直连，iMile/EMile 识别中英文换单证据；截至 `2026-05-09` 已确认 `132` 个 ET RTV 入仓单号。
 - RTV 收件后去向已进入 BI：`mart.et_rtv_destination_allocation` 追踪 09 可售、03_RTV、04 破损、06 报废和其它/未知去向；`mart.shein_return_rtv_trace` 在 `订单 / 售后` 页面展示每条 SHEIN 退货是否收到、收到后去了哪里。
 - HL OpenAPI 销售试点已跑通过并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` 写入 `fact.openapi_*` 并行事实表与 `mart.openapi_sales_reconciliation` 对账表；该销售对账已按业务要求退出生产调度和 BI 系统状态页，历史并行表仅保留为手动诊断参考。
 - HL OpenAPI 销售试点曾在本地 Windows 任务和云端 systemd 中双跑，只写 `fact.openapi_*` 和 `mart.openapi_sales_reconciliation`，不覆盖生产销售事实表；现已退出生产双跑。2026-06-05 本机可见 profile 复核：HL 与 ZL 开放平台应用已审核通过；DSY 其余 `DL/DX/FY/LQ/NM/JY/TS/MZ`、LGM 剩余 `YJ/XL/QY/QH/TZ/JSH/TZZ/XC` 应用已提交审核中；CX 用户确认此前已完成。审核通过、逐店授权和双跑对账完成前，不得写入 `.local` 密钥或切换生产源。
 - 系统定位正在从“BI 数据分析”扩展为“自动运营驾驶舱”：先把可重复运营动作沉淀为脚本和规则，再按“建议/预填/复核/人工确认提交/审计留痕”的边界逐步开放自动化。2026-05-17 已上线“链接管理中台”基座：支持“一个会话对应一个任务工作台”，边聊边沉淀任务目标、数据依据、素材、执行步骤和进度；自然语言会话每轮都会按最新 BI JSON 动态查数，明确下架/换图/补链/报活动等动作命令会自动进入任务并在同一界面可见。2026-05-20 起，任务区已提供“开始执行 / 预检”和二次确认入口，点击后会真实调用 `/api/link-ops-execute` 写回进度与审计；默认仍只做受控预检 / dry-run，不会静默提交 SHEIN。
 
-本工作区用于 SHEIN 当前 19 店销售数据自动抓取、飞书多维表格统计、每日飞书日报、链接管理、营销活动报名辅助，以及正在并行建设的 PostgreSQL + Metabase + 云端 BI / 自动运营驾驶舱。
+本工作区用于 SHEIN 当前 19 店销售数据自动抓取、飞书多维表格统计、飞书日报手动入口、链接管理、营销活动报名辅助，以及正在并行建设的 PostgreSQL + Metabase + 云端 BI / 自动运营驾驶舱。
 
-当前原则：**SHEIN 抓数、BI 刷新、ET 同步、飞书日报、异常通知和只读问数机器人在云端继续运行；飞书多维表格 / 看板写入先暂停，待用户确认再恢复。**
+当前原则：**SHEIN 抓数、BI 刷新、ET 同步、异常通知和只读问数机器人在云端继续运行；飞书日报只保留手动入口，自动发送已停用；飞书多维表格 / 看板写入先暂停，待用户确认再恢复。**
 
 ## 当前运行状态（2026-05-18 云端切换后）
 
@@ -50,23 +50,23 @@
 - 当前 BI 数据截面不再手工写死在 README；实时只以云端 BI 门户系统状态页、线上 `/api/bi/section/*`、云端 PostgreSQL warehouse、云端 systemd 日志和数据库入仓时间为准。仓库中的 `outputs/bi-portal/` 只是灾备/兼容快照，服务器拉取/重置代码后必须重新跑云端 BI 刷新；开发和验收不得拿仓库快照当当前数据。
 - BI Portal API section cache 位于 `outputs/bi-portal/sections/`；首页首屏使用轻量 `homeRankings`（只含首页需要的日店铺、日货号、日店铺×货号粒度），完整 `rankings` 后置到详情/子页需要时再拉。服务端会为 section cache 生成 `.json.gz` sidecar，公网浏览器优先走 gzip。`cloud_bi_refresh.sh` 刷新 core 后会启动 `prewarm_bi_portal_sections.sh`；`serve_bi_portal.mjs` 还会在服务启动和首页访问时检测 `data.json.generatedAt`，后台兜底预热 section，避免等用户打开页面才现场生成。首页利润 `homeProfit` 必须从当前 `profit` section cache 派生；若首页利润明显低于当前销售额，先核对 `profit.json.generatedAt`、`homeProfit.json.data.homeProfitSummary.sourceGeneratedAt` 和 `staleSource`，`staleSource=true` 或 `sourceGeneratedAt` 不等于当前 core 时不能按旧利润判断业务真实利润。
 - 定时任务：
-  - 云端 `shein-bi-cloud-today.timer`：`00:10/02:10/.../22:10` 每两小时刷新当天销售、入仓并生成 BI Portal。
-  - 云端 `shein-bi-cloud-yesterday.timer`：每天 `00:10` 刷新前一天最终销售，并复核前两天稳定日。
-  - 云端 `shein-bi-db-backup.timer`：每天 `02:30` 备份业务库和 Metabase 元数据库，默认保留 `14` 天。
-  - 云端 `shein-bi-cloud-et-forwarder.timer`：每天 `04:20` 同步 ET；需服务器本地 ET 凭据和手动验证后启用。
-  - 云端 `shein-bi-cloud-daily-lark-report.timer`：每天 `08:35` 发送日报，`10:35/12:35` 补偿重试；需服务器本地飞书配置和授权后启用。
-  - 云端 `shein-bi-cloud-rtv-verify.timer`：每天 `03:20` 跑完整 RTV 换单复核 WebAPI 版，不阻塞滚动销售刷新。
-- 云端 `shein-bi-cloud-link-business.timer`：每天 `08:10` 顺序启动云端 headless Chrome 抓取前一完整日链接/业务域，入仓、体检并刷新 BI；单店失败会重启浏览器重试；若全店日指标仍全 0，则跳过入仓刷新，避免把未出数日期写入 BI。
-- 云端 `shein-bi-cloud-session-manager.timer`：每天 `03:20` 顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并检查 profile 体积。
+  - 云端 `shein-bi-cloud-today.timer`：`00/02/04/06/10/12/14/16/18/20/22:00` 每两小时刷新当天销售、入仓并生成 BI Portal；`08:00` 让给晨间链路。
+  - 云端 `shein-bi-cloud-morning-chain.timer`：每天 `08:00` 先刷新当天销售，再启动慢变日更；当前 `SHEIN_BI_MORNING_SEND_LARK_REPORT=0`，飞书日报自动发送已停用。
+  - 云端 `shein-bi-cloud-yesterday.timer`：每天 `03:00` 刷新前一天最终销售，并复核前两天稳定日。
+  - 云端 `shein-bi-db-backup.timer`：每天 `02:40` 备份业务库和 Metabase 元数据库，默认保留 `14` 天。
+  - 云端 `shein-bi-cloud-et-forwarder.timer`：`01/03/05/07/09/11/13/15/17/19/21/23:20` 高频同步 ET 货代仓/出库单，入仓后只轻量刷新订单/物流/售后相关 section。
+  - 云端 `shein-bi-cloud-session-manager.timer`：每天 `02:20` 顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并检查 profile 体积。
+  - 云端 `shein-bi-cloud-browser-cleanup.timer`：每 30 分钟清理超时残留店铺浏览器，避免 headless Chrome 堆积拖垮服务器。
+- 慢变日更不再拆多个独立 timer：链接/业务域、商品/库存/流量、营销活动/限时折扣/优惠券价格线索、RTV 换单复核都由 `shein-bi-cloud-daily-refresh.service` 串行执行；旧 `shein-bi-cloud-link-business.timer`、`shein-bi-cloud-rtv-verify.timer`、`shein-bi-cloud-openapi-hl.timer` 在生产机保持 masked，不要重新启用。
 - 云端覆盖审计使用 `scripts/audit_cloud_data_coverage.mjs`：查最新日防漏时用 `--expected-start range-start`，要求当前应覆盖店铺齐全；查历史断档时用 `--expected-start first-seen`，按每个店自己的首个有效日期之后检查中间是否断档，不能把店铺尚未开通/尚未接入前的日期误判为缺抓。
 - 2026-05-21 运维加固：链接/业务域服务统一以 `sheinops` 运行，避免 root 写 Chrome profile 后导致登录态管家 `EACCES`；登录态恢复改为先回灌 browser session、再验证 GSP + SBN；ET 验证码下载瞬时失败会进入重试，不再一次 `fetch failed` 就中断。
   - 云端 `shein-bi-cloud-watchdog.timer`：每小时检查云端服务、timer 和 BI 数据新鲜度；销售/页面按 4.5 小时阈值，链接/业务域按 48 小时日更阈值。
   - 云端 `shein-bi-lark-sales-qa.service`：常驻只读飞书问数机器人，通过 `/home/sheinops/.codex` 的 Codex CLI 配置执行受控只读问答，只读取 BI Portal 压缩上下文，不写数据库、飞书 Base 或 SHEIN 后台。
   - 本地 `SHEIN-*` Windows 计划任务已禁用，保留为回滚参考，不再作为生产调度。
-  - 链接/业务域本地 Windows 日更任务已封存；当前生产改由云端 `shein-bi-cloud-link-business.timer` 顺序抓取，不再依赖本机补数。纯 Node 零浏览器直连仍是后续优化，不影响当前云端日更。
-- 当前飞书 Base 暂停规则：存在 `state/feishu-base-sync-paused.flag` 时，跳过飞书事实表、产品表、月表、年度/周月宽表、当月主看板和上月看板写入。云端飞书日报、异常通知和只读问数机器人只走消息/图片回复，不写 Base。
+  - 链接/业务域本地 Windows 日更任务已封存；当前生产由晨间链路触发 `shein-bi-cloud-daily-refresh.service` 顺序抓取，不再依赖本机补数。纯 Node 零浏览器直连仍是后续优化，不影响当前云端日更。
+- 当前飞书 Base 暂停规则：存在 `state/feishu-base-sync-paused.flag` 时，跳过飞书事实表、产品表、月表、年度/周月宽表、当月主看板和上月看板写入。云端飞书日报手动入口、异常通知和只读问数机器人只走消息/图片回复，不写 Base。
 - 当前自动任务状态：
-  - 云端 `shein-bi-cloud-today.timer` / `shein-bi-cloud-yesterday.timer` / `shein-bi-db-backup.timer` / `shein-bi-cloud-link-business.timer` 是当前生产调度。
+  - 云端 `shein-bi-cloud-today.timer` / `shein-bi-cloud-morning-chain.timer` / `shein-bi-cloud-yesterday.timer` / `shein-bi-db-backup.timer` / `shein-bi-cloud-et-forwarder.timer` / `shein-bi-cloud-session-manager.timer` / `shein-bi-cloud-browser-cleanup.timer` 是当前生产调度。
   - `SHEIN-Sales-ETForwarder-0420`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-BI-Daily-Pipeline-0700` 等是本地历史任务，已禁用，保留为回滚/迁移参考。
   - `2026-05-02 07:00` 的 `267014` 是已修复的历史失败记录，保留作排障证据。
 - 团队访问边界：
@@ -89,6 +89,7 @@
 - `2026-06-14` 起优惠券不再作为价格保障层：`15%` 券不是每单必然触发，不能用“普通活动价 × 0.85”作为保底成交价。保底成交价必须由当前售价、普通营销活动价或限时折扣价直接命中当前有效 `finalTargetPrice`；优惠券只允许作为明确标记的高曝光支持、全店高库存滞销品引流或清货试验层，且触券后的风险下探价不得低于底价/利润线。详见 `docs/marketing-campaign-signup-pricing-rules.md`。
 - 营销定价策略的机器可读入口是 `config/marketing_pricing_policy.json`：限时折扣必须作为兜底层存在但不得干扰目标成交价，默认从 `15%` 折扣起算；同一标准货号在所有店铺、所有链接中按 BI 正曝光量取全局前五 SKC，前五可比其他链接低 `5` 个百分点目标利润率但不得低于 `15%` 底价，基础目标已为 `15%` 时前五保持 `15%`、其他链接提高到 `20%`；无正曝光指标不得猜前五，不能按单店拆出多个“前五”。
 - 营销日报/巡检必须按“当前有效策略”判定，而不是拿历史计划、统一利润率或旧 `ALL-ready` 覆盖文件反复报警。本期用户确认的逐行覆盖价、指定固定价、指定利润率（例如某货号本期批准 `15%` 利润率）和生效窗口必须先写入当前 `selection-plan + price-overrides`；巡检只在真实成交价低于这版 `finalTargetPrice`、活动层偏离这版策略，或当前计划缺失/过期/冲突时才报问题。已确认的低利润策略应标为 `expected`，不能每天当异常重复通知。
+- 新链接 / 新 SKC 巡检必须先确认 guard 选中的是最新已执行全量计划，尤其是 `2026-06-14` 后不依赖优惠券保底的 `selection-plan + price-overrides`。如果误用旧 `all-934`、旧 `ALL-ready` 或历史批次计划，可能把已覆盖 SKC 误报为“新链接缺兜底”；此时先修正计划选择并重跑 guard，不能直接创建限时折扣或优惠券。
 - 给用户确认的报活动方案必须是 Excel 人话版，不能只给 CSV/JSON/几百行明细。至少包含“说明”“按货号汇总”“店铺差异明细”“报名明细”“剔除项/阻塞项”“低价补救/风险项”“15%券流量试验计划（如适用）”等 sheet；除说明页外必须有 `备注/修改意见` 列。按货号汇总必须展示预期利润率、预期最终价、普通活动填报价、是否使用可选 15% 流量券、券触发后的下探价、曝光前五命中/非命中、剔除原因和同货号不同店差异。用户确认前不得提交。
 - 营销自动化的长期边界见 `docs/marketing-automation-roadmap.md`：新链接纳入价格体系、限时折扣兜底、低价/高价成交查因、可报活动提前三天提醒、可选 15% 流量券预算研究、`30%/50%` 券研究和 BI 同事分店管理，都必须以价格栈证据为准；默认先只读 / dry-run / 复核，真实提交、取消、改价和补预算必须执行后 live 回读。券预算不再默认每店 `1000 SAR`，必须按高曝光/滞销流量券方案估算；`30%/50%` 只允许用 `scripts/marketing/build_high_coupon_research_candidates.mjs` 生成 research-only 报告，不进入真实提交路径。
 - 成本/利润页的高利润 / 低利润货号分界线固定为 `20%` 利润率：`>= 20%` 为可加码，`< 20%` 为需要处理。
@@ -173,7 +174,7 @@
   `node scripts/fetch_shein_sales.mjs DL --date 2026-04-29 --transport browser`
 - 跑全店当天同步：
   `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_intraday_dsy.ps1`
-- 发送日报：
+- 手动发送日报（自动发送已停用，仅在用户明确要求临时发送时使用）：
   `node scripts/send_daily_lark_report.mjs --send --visual`
 - 刷新年度汇总和宽表：
   `node scripts/generate_compact_display_tables.mjs --group ALL --current-month 2026-05 --recent-months 2`
@@ -199,8 +200,7 @@
   `node scripts/check_bi_first_run.mjs`
 - 重新生成本地 BI 门户：
   `node scripts/generate_bi_portal.mjs`
-- 重新生成 V2.1 独立设计预览（当前验收范围先限定首页完整复刻 V1 首页逻辑）：
-  `node scripts/generate_bi_portal_v2.mjs`
+- 历史 V2 预览脚本 `scripts/generate_bi_portal_v2.mjs` 仅作迁移参考；当前正式门户统一使用 `scripts/generate_bi_portal.mjs`。
 - BI 门户 UI 冒烟检查：
   `node scripts/check_bi_portal_ui.mjs --json`
 - 本地手动运行 ET 货代仓同步（历史回滚/排障参考）：

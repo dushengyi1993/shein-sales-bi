@@ -19,7 +19,7 @@ flowchart LR
 ## 设计原则
 
 1. **飞书先保留，不再作为新 BI 的源头**
-   - 飞书日报继续作为推送渠道；飞书多维表格 / 看板写入当前已临时暂停。
+   - 飞书日报脚本只保留手动推送入口，自动发送当前停用；飞书多维表格 / 看板写入当前已临时暂停。
    - 新 BI 不从飞书反抓数据，而是从 SHEIN 抓取后直接入仓。
 
 2. **数据仓库才是真正底座**
@@ -35,7 +35,7 @@ flowchart LR
    - 本机 WSL + Docker + D 盘数据盘只保留为开发、排障和短期回滚参考。
 
 5. **生产链路逐步 API 化，不冒险硬迁移**
-   - 云端 systemd 已覆盖销售 WebAPI、入仓、BI Portal 生成、数据库备份、ET、飞书日报、统一日更补采、异常通知、登录态巡检和只读问数机器人；HL OpenAPI 销售对账已退出生产双跑，后续替换链路仍必须逐项验证后切换。
+   - 云端 systemd 已覆盖销售 WebAPI、入仓、BI Portal 生成、数据库备份、ET、飞书日报手动入口、统一日更补采、异常通知、登录态巡检和只读问数机器人；飞书日报自动发送已停用，HL OpenAPI 销售对账已退出生产双跑，后续替换链路仍必须逐项验证后切换。
    - SHEIN 销售抓取已改为 WebAPI 直连优先，Chrome 登录态保留为 Cookie/session 刷新和失败回退；官方 OpenAPI 继续并行试点，不直接覆盖生产事实表。
 
 ## 当前服务
@@ -70,7 +70,7 @@ BI 系统当前分为三层入口：
 
 1. **飞书生产链路**
    - Base 表格 / Dashboard 写入由 `state/feishu-base-sync-paused.flag` 暂停。
-   - 飞书日报、异常通知 watchdog 和只读问数机器人已云端化并验证；本地历史监听/提醒任务只作回滚参考。
+   - 飞书日报脚本、异常通知 watchdog 和只读问数机器人已云端化并验证；日报自动发送当前停用，本地历史监听/提醒任务只作回滚参考。
    - SHEIN 抓数和 BI 刷新不得因飞书 Base 暂停而中断。
    - 销售源文件当前由 WebAPI 直连优先生成；直连失败时才回退 Chrome。
 
@@ -95,10 +95,11 @@ BI 系统当前分为三层入口：
 
 当前自动任务状态：
 
-- 云端 `shein-bi-cloud-today.timer`：北京时间 `00:00/02:00/.../22:00`，刷新当天销售、入仓并生成 BI Portal。
-- 云端 `shein-bi-cloud-yesterday.timer`：每天 `00:10`，刷新前一天最终销售并复核前两天稳定日。
-- 云端 `shein-bi-db-backup.timer`：每天 `02:30`，备份业务库和 Metabase 元数据库。
-- 云端 `shein-bi-cloud-session-manager.timer`、`shein-bi-cloud-et-forwarder.timer`、`shein-bi-cloud-daily-refresh.timer`、`shein-bi-cloud-daily-lark-report.timer`、`shein-bi-cloud-watchdog.timer` 和 `shein-bi-lark-sales-qa.service` 分别承担登录态巡检、ET 高频出库/货代、统一日更补采（链接/业务域、营销价栈线索、OpenAPI 双跑、RTV 复核）、飞书日报、异常通知和只读问数。
+- 云端 `shein-bi-cloud-today.timer`：北京时间 `00/02/04/06/10/12/14/16/18/20/22:00`，刷新当天销售、入仓并生成 BI Portal；`08:00` 由晨间链路接管。
+- 云端 `shein-bi-cloud-morning-chain.timer`：每天 `08:00`，先刷新当天销售，再启动 `shein-bi-cloud-daily-refresh.service` 做统一日更补采；当前飞书日报自动发送已停用。
+- 云端 `shein-bi-cloud-yesterday.timer`：每天 `03:00`，刷新前一天最终销售并复核前两天稳定日。
+- 云端 `shein-bi-db-backup.timer`：每天 `02:40`，备份业务库和 Metabase 元数据库。
+- 云端 `shein-bi-cloud-session-manager.timer`、`shein-bi-cloud-et-forwarder.timer`、`shein-bi-cloud-browser-cleanup.timer`、`shein-bi-cloud-watchdog.timer` 和 `shein-bi-lark-sales-qa.service` 分别承担登录态巡检、ET 高频出库/货代、残留浏览器清理、异常通知和只读问数。旧 `daily-lark-report/link-business/rtv-verify/openapi-hl` 分散 timer 不再是生产调度。
 - 本地 `SHEIN-BI-Daily-Pipeline-0700`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-Sales-ETForwarder-0420` 等 Windows 任务已封存禁用，仅保留为回滚/迁移参考。
 
 ## 数据分层
@@ -321,7 +322,7 @@ BI 系统当前分为三层入口：
 
 短期：
 
-- 每天按时抓取、刷新 BI、发飞书日报；
+- 每天按时抓取、刷新 BI；飞书日报仅保留手动临时发送入口；
 - 飞书多维表格 / 看板写入暂停保留查档；
 - 新 BI 系统做旁路验证。
 
@@ -333,4 +334,4 @@ BI 系统当前分为三层入口：
 长期：
 
 - 如果 BI + 操作台稳定，飞书看板可以逐步下线；
-- 飞书日报可保留为推送渠道，而不是数据底座。
+- 飞书日报可作为手动推送渠道保留，而不是数据底座；若要恢复自动发送，需重新确认内容设计和 timer。

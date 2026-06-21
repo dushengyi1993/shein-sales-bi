@@ -46,6 +46,17 @@ const DOMAIN_KEYS = [
   'quality',
   'comments',
 ];
+const DEFAULT_DOMAIN_KEYS = [
+  'home',
+  'afterSales',
+  'waybill',
+  'fulfillment',
+  'productInventory',
+  'management',
+  'marketing',
+  'quality',
+  'comments',
+];
 const DEFAULT_COMMENT_LOOKBACK_DAYS = 14;
 const DEFAULT_FINANCE_LOOKBACK_DAYS = 89;
 
@@ -87,6 +98,12 @@ function parseArgs(argv) {
     }
     else if (a === '--json') args.json = true;
   }
+  const selectedDomains = args.domains || new Set(DEFAULT_DOMAIN_KEYS);
+  const unknownDomains = [...selectedDomains].filter(key => !DOMAIN_KEYS.includes(key));
+  if (unknownDomains.length) {
+    throw new Error(`Unknown business domains: ${unknownDomains.join(', ')}`);
+  }
+  args.domains = selectedDomains;
   return args;
 }
 

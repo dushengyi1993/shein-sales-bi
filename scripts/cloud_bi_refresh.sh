@@ -11,8 +11,21 @@ PORTAL_HEALTH_URL="${PORTAL_HEALTH_URL:-}"
 PORTAL_INDEX_PATH="${PORTAL_INDEX_PATH:-$ROOT/outputs/bi-portal/index.html}"
 PORTAL_DATA_PATH="${PORTAL_DATA_PATH:-$ROOT/outputs/bi-portal/data.json}"
 LOCK_FILE="${SHEIN_BI_REFRESH_LOCK_FILE:-/tmp/shein-bi-cloud-sales-refresh.lock}"
-PORTAL_REFRESH_LOCK_FILE="${SHEIN_BI_PORTAL_REFRESH_LOCK_FILE:-/tmp/shein-bi-portal-refresh.lock}"
+PORTAL_REFRESH_LOCK_FILE="${SHEIN_BI_PORTAL_REFRESH_LOCK_FILE:-$ROOT/state/locks/shein-bi-portal-refresh.lock}"
 PORTAL_REFRESH_LOCK_WAIT_SEC="${SHEIN_BI_PORTAL_REFRESH_LOCK_WAIT_SEC:-1800}"
+
+prepare_shared_lock_file() {
+  local file="$1"
+  local dir
+  dir="$(dirname "$file")"
+  mkdir -p "$dir"
+  chgrp users "$dir" 2>/dev/null || true
+  chmod 2775 "$dir" 2>/dev/null || chmod 0777 "$dir" 2>/dev/null || true
+  if [[ ! -e "$file" ]]; then
+    (umask 000; : >"$file")
+  fi
+  chmod 0666 "$file" 2>/dev/null || true
+}
 
 resolve_date() {
   local target="$1"
@@ -60,7 +73,7 @@ LOG_FILE="$LOG_DIR/${MODE}-${DATE}-${STAMP}.log"
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
   echo "[cloud_bi_refresh] another sales refresh is running; skip target=$TARGET date=$DATE mode=$MODE"
-  exit 0
+  exit "${SHEIN_BI_REFRESH_BUSY_EXIT_CODE:-0}"
 fi
 
 exec > >(tee -a "$LOG_FILE") 2>&1
@@ -94,6 +107,7 @@ node scripts/load_bi_warehouse.mjs \
 # 慢变补采统一由 cloud_daily_refresh.sh 调度。
 node scripts/marketing/export_marketing_price_leads_for_bi.mjs || true
 
+prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
 {
   if ! flock -w "$PORTAL_REFRESH_LOCK_WAIT_SEC" 8; then
     echo "[cloud_bi_refresh] portal refresh lock busy after ${PORTAL_REFRESH_LOCK_WAIT_SEC}s; skip portal generation/prewarm this run"
@@ -106,9 +120,12 @@ node scripts/marketing/export_marketing_price_leads_for_bi.mjs || true
       echo "[cloud_bi_refresh] BI audit finished with status=$AUDIT_STATUS; continue portal generation so the page can show the audit result"
     fi
 
+    # V2 production is a lightweight shell + on-demand section API. Refresh
+    # only the small API core data.json here so watchdog/data status sees the
+    # latest sales run; do not run the legacy all-in-one portal SQL.
     node scripts/generate_bi_portal.mjs \
-      --metabase-url "$METABASE_URL"
-
+      --metabase-url "$METABASE_URL" \
+      --data-mode "$SHEIN_BI_PORTAL_DATA_MODE"
     node scripts/generate_bi_portal_shell.mjs
 
     if command -v systemctl >/dev/null 2>&1; then
@@ -120,7 +137,7 @@ node scripts/marketing/export_marketing_price_leads_for_bi.mjs || true
       echo "[cloud_bi_refresh] portal section prewarm started pid=$!"
     fi
   fi
-} 8>"$PORTAL_REFRESH_LOCK_FILE"
+} 8>>"$PORTAL_REFRESH_LOCK_FILE"
 
 check_portal_health
 

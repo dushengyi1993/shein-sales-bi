@@ -141,7 +141,7 @@ function psqlSpawnSpec(args) {
     };
   }
   const dockerArgs = ['exec', '-i', args.container, 'psql', '-U', args.user, '-d', args.database, '-v', 'ON_ERROR_STOP=1'];
-  if (envTruthy(process.env.SHEIN_DOCKER_USE_SUDO)) {
+  if (envTruthy(process.env.SHEIN_DOCKER_USE_SUDO) || (typeof process.getuid === 'function' && process.getuid() !== 0)) {
     return {cmd: 'sudo', args: ['docker', ...dockerArgs]};
   }
   return {cmd: process.env.SHEIN_DOCKER_BIN || 'docker', args: dockerArgs};

@@ -63,7 +63,7 @@
 
 ## 与飞书双线运行关系
 
-当前 SHEIN 抓数、BI 后置刷新和飞书日报仍按计划运行；飞书 Base / 原生看板写入由 `state/feishu-base-sync-paused.flag` 临时暂停。销售抓取成功后，会后置刷新 BI：
+当前 SHEIN 抓数和 BI 后置刷新按云端计划运行；飞书日报自动发送已停用，仅保留手动入口；飞书 Base / 原生看板写入由 `state/feishu-base-sync-paused.flag` 临时暂停。销售抓取成功后，会后置刷新 BI：
 
 - `scripts/scheduled_yesterday_final_dsy.ps1`
 - `scripts/scheduled_intraday_dsy.ps1`
