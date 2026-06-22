@@ -67,6 +67,16 @@
 - **GitHub release 是源码交接基线，不自动代表云端已部署；云端当前代码也不自动代表可提交源码。**
 - 下一 agent 第一件事不是部署，而是审计云端运行态并制定 reconcile 方案。
 
+## 4.1 部署纪律：不能再让云端和 GitHub 分叉
+
+本次暴露的核心教训是：云端长期停在老 commit 上继续手动改/运行，而 GitHub 后续发版没有同步部署，最终导致“GitHub 最新”和“云端真实生产”分叉。以后必须按下面规则执行：
+
+- **云端热修必须回填 GitHub**：只要在 `/opt/shein-bi/app` 改了源码、脚本、配置模板、systemd 模板或文档，验证通过后必须提交到 GitHub；不能把生产热修只留在服务器。
+- **GitHub release 必须说明部署状态**：release 说明里必须写清楚是“已部署并验证云端”还是“仅源码/交接基线，未部署云端”。不能再让接手者猜。
+- **交接前必须做一致性检查**：至少确认 `git fetch --prune --tags`、`git rev-list --left-right --count HEAD...origin/main`、`git status --short`、关键 service 状态和 BI health。若 `HEAD != origin/main` 或存在源码脏改，必须先 reconcile 或明确列为 blocker。
+- **云端运行产物不进 Git**：`.venv-*`、session、profile、日志、数据库 dump、临时上传、运行态 JSON 必须留在服务器私有目录或被 `.gitignore` 排除；不要用 `git add -A` 解决状态混乱。
+- **标准部署顺序**：GitHub 提交/发版 -> 云端备份当前工作区 -> 云端拉取/切换到目标 commit -> 重启/刷新必要服务 -> 验证 BI/日志/定时器 -> 记录部署结果。任何一步失败都要保留回滚点。
+
 ## 5. 下一 agent 第一任务：云端差异审计
 
 连接服务器后先只读审计：

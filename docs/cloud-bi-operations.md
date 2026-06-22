@@ -13,6 +13,7 @@
 - 注意：`outputs/bi-portal/index.html` / `data.json` 会作为可恢复静态快照纳入 GitHub；服务器执行 `git reset --hard origin/main` 或类似部署后，可能把实时 BI 页面覆盖成仓库快照。每次服务器拉取/重置代码后，都要立即跑一次 `scripts/cloud_bi_refresh.sh today intraday` 或对应 systemd service，确认页面生成时间和销售源时间回到当前。
 - 云端 Git 同步红线：`/opt/shein-bi/app` 必须由 `sheinops:sheinops` 持有，不要用 `sudo git pull`。仓库 remote 使用 `git@github.com:dushengyi1993/shein-sales-bi.git`，`core.sshCommand` 必须指向 `/home/sheinops/.ssh/shein_bi_deploy`；不要指向 `/root/.ssh/...`，否则普通运维用户无法 fetch/pull。生产生成的 `outputs/bi-portal/data.json` / `index.html` 在服务器上用 `git update-index --skip-worktree` 标记为本地生成物，避免定时刷新后的实时页面把后续 `git pull --ff-only` 阻塞。若云端出现未提交热修复，先分类哪些应回填 GitHub、哪些是运行产物；在完成清单、备份和回滚方案前，不得 `git add -A`、`git reset --hard`、`git clean -fdx` 或强行让云端追 `origin/main`。
 - 发布顺序：BI 用户可见改动先在云端页面或云端服务输出验证，用户确认后再进入 GitHub `main` / release。本地验证只能证明开发产物可运行，不能替代云端最终审核。
+- 部署纪律：云端不得长期停在老 commit 上手动漂移。任何云端源码热修必须回填 GitHub；任何 GitHub release 必须写明“已部署云端”或“仅源码基线未部署”；交接前必须确认 `HEAD == origin/main`、无源码脏改、关键服务和 BI health 已验证。`.venv-*`、profile、session、日志、dump、临时上传等运行产物必须排除在 Git 之外。
 - 当前 GitHub 发布边界：V2 是正式 release 线；V1 只保留 GitHub final/archive 纪念版 `2026.06.18-v1-final-archive`，线上 `/v1/` 不再提供访问，也不再纳入日常刷新或后续功能更新。
 
 ### SSH 运维入口

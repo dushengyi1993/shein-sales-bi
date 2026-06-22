@@ -53,6 +53,9 @@ infra/metabase/.session.local.json
 
 # Dependencies and caches
 node_modules/
+.venv/
+.venv-*/
+venv/
 .pnpm-store/
 .npm/
 .yarn/
