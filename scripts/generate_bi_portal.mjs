@@ -4079,28 +4079,38 @@ trend_link_series AS (
   ) t
 ),
 product_traffic_daily AS (
-  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY date, store_key, standard_goods_sn), '[]'::jsonb) AS data
+  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY date, store_key, standard_goods_sn, skc), '[]'::jsonb) AS data
   FROM (
     SELECT
       p.date,
       p.store_key AS store_key,
-      max(coalesce(p.group_key, '')) AS group_key,
       dim.product_canonical_sn(p.standard_goods_sn) AS standard_goods_sn,
+      max(nullif(p.raw_goods_sn, '')) AS raw_goods_sn,
+      nullif(p.skc, '') AS skc,
+      max(nullif(l.shelf_status, '')) AS shelf_status,
+      max(nullif(l.shelf_status_name, '')) AS shelf_status_name,
+      bool_or(coalesce(l.is_on_shelf, false)) AS is_on_shelf,
+      bool_or(coalesce(l.is_wait_shelf, false)) AS is_wait_shelf,
+      bool_or(coalesce(l.is_sold_out, false)) AS is_sold_out,
+      bool_or(coalesce(l.is_out_shelf, false)) AS is_out_shelf,
       round(sum(coalesce(p.sale_cnt, 0))::numeric, 2) AS sale_cnt,
       round(sum(coalesce(p.pay_order_cnt, 0))::numeric, 2) AS pay_order_cnt,
       round(sum(coalesce(p.eps_uv, 0))::numeric, 0) AS eps_uv,
       round(sum(coalesce(p.goods_uv, 0))::numeric, 0) AS goods_uv,
-      round(sum(coalesce(p.cart_uv, 0))::numeric, 0) AS cart_uv,
-      round(sum(coalesce(p.pay_uv, 0))::numeric, 0) AS pay_uv,
-      CASE WHEN sum(coalesce(p.eps_uv, 0)) > 0 THEN round((sum(coalesce(p.goods_uv, 0)) / nullif(sum(coalesce(p.eps_uv, 0)), 0))::numeric, 4) ELSE NULL END AS click_rate,
-      CASE WHEN sum(coalesce(p.goods_uv, 0)) > 0 THEN round((sum(coalesce(p.pay_uv, 0)) / nullif(sum(coalesce(p.goods_uv, 0)), 0))::numeric, 4) ELSE NULL END AS pay_rate,
-      count(*) AS link_rows,
-      count(DISTINCT p.store_key) AS store_count,
-      count(DISTINCT p.skc) AS skc_count
+      round(sum(coalesce(p.cart_uv, 0))::numeric, 0) AS cart_uv
     FROM fact.link_performance_daily p
+    LEFT JOIN store_latest_link sll
+      ON sll.store_key = p.store_key
+    LEFT JOIN fact.link_master_snapshot l
+      ON l.snapshot_date = sll.link_date
+     AND l.store_key = p.store_key
+     AND l.skc = p.skc
+     AND coalesce(l.is_hard_dead,false) = false
     WHERE coalesce(p.standard_goods_sn, '') <> ''
-    GROUP BY p.date, p.store_key, dim.product_canonical_sn(p.standard_goods_sn)
-    ORDER BY p.date, p.store_key, dim.product_canonical_sn(p.standard_goods_sn)
+      AND coalesce(dim.product_canonical_sn(p.standard_goods_sn), '') <> ''
+      AND coalesce(p.skc, '') <> ''
+    GROUP BY p.date, p.store_key, dim.product_canonical_sn(p.standard_goods_sn), nullif(p.skc, '')
+    ORDER BY p.date, p.store_key, dim.product_canonical_sn(p.standard_goods_sn), nullif(p.skc, '')
   ) t
 ),
 trend_business_daily AS (
