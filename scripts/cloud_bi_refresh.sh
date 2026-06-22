@@ -10,7 +10,7 @@ METABASE_URL="${METABASE_URL:-http://127.0.0.1:3000}"
 PORTAL_HEALTH_URL="${PORTAL_HEALTH_URL:-}"
 PORTAL_INDEX_PATH="${PORTAL_INDEX_PATH:-$ROOT/outputs/bi-portal/index.html}"
 PORTAL_DATA_PATH="${PORTAL_DATA_PATH:-$ROOT/outputs/bi-portal/data.json}"
-LOCK_FILE="${SHEIN_BI_REFRESH_LOCK_FILE:-/tmp/shein-bi-cloud-sales-refresh.lock}"
+LOCK_FILE="${SHEIN_BI_REFRESH_LOCK_FILE:-$ROOT/state/locks/shein-bi-cloud-sales-refresh.lock}"
 PORTAL_REFRESH_LOCK_FILE="${SHEIN_BI_PORTAL_REFRESH_LOCK_FILE:-$ROOT/state/locks/shein-bi-portal-refresh.lock}"
 PORTAL_REFRESH_LOCK_WAIT_SEC="${SHEIN_BI_PORTAL_REFRESH_LOCK_WAIT_SEC:-1800}"
 
@@ -70,6 +70,7 @@ STAMP="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/${MODE}-${DATE}-${STAMP}.log"
 
+prepare_shared_lock_file "$LOCK_FILE"
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
   echo "[cloud_bi_refresh] another sales refresh is running; skip target=$TARGET date=$DATE mode=$MODE"
