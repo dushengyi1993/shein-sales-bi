@@ -13,6 +13,7 @@
 - 当前完整 BI 运行层仍是 PostgreSQL + Metabase + BI Portal：PostgreSQL 是核心数据仓库，Metabase 是正式深度分析/自由钻取层，BI Portal 是日常经营入口；在自研门户完全覆盖深钻前，云端迁移不能删除或跳过 Metabase。
 - 服务器从 GitHub 拉取/重置代码后，要立即重跑一次云端 BI 刷新；仓库里的 `outputs/bi-portal/` 是灾备快照，不能把它误当成服务器实时数据。
 - **BI 数据判断、开发验收和故障排查只认云端运行时：云端 PostgreSQL warehouse、云端 BI 门户、线上 `/api/bi/section/*`、云端日志和 systemd 状态。仓库里的 `outputs/bi-portal/*` 只是灾备/兼容快照，可能严重过期；不得用它判断当前业务数据、口径正确性或页面性能。**
+- 交给其他 agent 前必须先读 `docs/agent-handoff-cloud-first.md`：GitHub `main` / release 是干净源码基线，但不自动等于云端已部署版本；云端 `/opt/shein-bi/app` 是生产运行权威且有运行差异，不能未经审计直接 `pull/reset/add-all`。
 - HL 已切换为主账号 profile：`profiles/persistent-shein-main-profile`；旧 `profiles/persistent-hl-profile` 已删除。
 - `2026-06-05` 已按用户提供的账号真相修正 LGM 三店 profile / 账号映射：`YJ=profileKey yj/accountNo GS8146729/port 9346`、`XL=profileKey xl/accountNo GS9307061/port 9344`、`QY=profileKey qy/accountNo GS7451160/port 9345`。店铺身份真相以 `config/stores.json`、`config/store_account_truth.json`、浏览器保存账号和实际登录后的店铺名/账号一致为准；不得再沿用 `2026-05-10` 的交叉 profile 结论。
 - `2026-05-09 05:30` 链接/业务域任务、`2026-05-09 07:00` BI 每日流水线和白天滚动后置 BI 刷新是本地 Windows 历史验证记录；自 `2026-05-15` 本地任务封存后，不再作为生产调度。
@@ -240,6 +241,7 @@
 ## 关键文档
 
 - 运行环境架构：`docs/runtime-architecture.md`
+- 其他 agent 云端优先交接：`docs/agent-handoff-cloud-first.md`
 - 应急恢复备份边界：`docs/emergency-recovery-backup.md`
 - BI 系统架构：`docs/bi-system-architecture.md`
 - BI 运维说明：`docs/bi-system-operations.md`

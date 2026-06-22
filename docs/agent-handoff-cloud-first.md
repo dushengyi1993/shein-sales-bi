@@ -1,7 +1,7 @@
 # SHEIN BI Agent 交接说明（云端优先）
 
 > 更新时间：2026-06-22
-> 交接定位：这是给后续 agent 的项目入口说明。当前 GitHub release 是“交接源码基线”，不等同于云端已经部署到该 commit。生产验收必须以云端运行态为准。
+> 交接定位：这是给后续 agent 的项目入口说明。当前 GitHub release 是“交接源码基线”，**不等同于云端已经部署到该 commit**。生产验收必须以云端运行态为准。
 
 ## 1. 当前系统定位
 
@@ -54,15 +54,17 @@
 
 截至 2026-06-22 交接前核对：
 
-- 本地 `main` 与 GitHub `origin/main` 对齐后用于整理交接 release。
-- 云端 `/opt/shein-bi/app` 是生产运行权威，但 Git 工作区长期有运行产物、热修、备份、venv、临时文件和历史差异。
-- 云端曾出现：`origin/main` 比云端 HEAD 新很多提交，同时云端工作区相对 `origin/main` 有大量 tracked diff 和 untracked 文件。
+- GitHub `main` / release `2026.06.22-agent-handoff-baseline` 指向 `00e8035b19aab499af32a7b77b6658921597c1a6`，本地工作区与 `origin/main` 对齐且无未提交改动。
+- 云端 `/opt/shein-bi/app` 是生产运行权威，但当前不是 GitHub 最新 commit：2026-06-22 22:14 只读审计显示云端 `HEAD=a722a6bfbb9f39b8bcab000e7feaa2ee52f42423`，`origin/main=00e8035b19aab499af32a7b77b6658921597c1a6`，`HEAD...origin/main=0/53`。
+- 云端工作区仍有大量 tracked diff 和未跟踪运行产物：`git status` 显示多处 `M/D/??`，未跟踪文件约 `2538` 个，其中包含 `.venv-et/` 等不应提交的运行环境。
+- 这说明 GitHub 目前是“最干净、可恢复、可交接的源码基线”，但不能声称它已经覆盖云端生产目录，也不能反过来说云端差异都应上传。
 
 因此：
 
 - **禁止在云端直接 `git add -A`。**
 - **禁止在未备份、未审计前对云端执行 `git reset --hard`、`git clean -fdx` 或强制 pull。**
-- **GitHub release 是源码交接基线，不自动代表云端已部署。**
+- **禁止把 GitHub release 直接部署到云端来“清干净”，除非已经完成差异分类、备份和回滚方案。**
+- **GitHub release 是源码交接基线，不自动代表云端已部署；云端当前代码也不自动代表可提交源码。**
 - 下一 agent 第一件事不是部署，而是审计云端运行态并制定 reconcile 方案。
 
 ## 5. 下一 agent 第一任务：云端差异审计
@@ -107,6 +109,8 @@ curl -I http://127.0.0.1:8787/ || true
 - 哪些是备份 / venv / 临时上传，应排除；
 - 哪些是误删或过期文件，应恢复或迁移；
 - 哪些 systemd 文件是仓库模板，哪些才是服务器实际启用状态。
+
+在分类完成前，推荐只做只读巡检和小范围验证；任何“同步云端 / 部署 GitHub / 清理工作区”都必须先给出文件清单和回滚路径。
 
 ## 6. 生产架构与公网入口
 
