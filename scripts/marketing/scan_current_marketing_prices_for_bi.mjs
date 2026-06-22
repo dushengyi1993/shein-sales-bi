@@ -12,6 +12,7 @@ import fsSync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
+import {recoverSheinLoginIfNeeded} from '../../lib/shein_login_recovery.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
@@ -176,34 +177,18 @@ async function connectStorePage(store) {
   await cdp.connect();
   return cdp;
 }
-async function readPageLoginState(cdp) {
-  return await cdp.eval(`
-    const text = document.body?.innerText || '';
-    return {href: location.href, title: document.title, isLogin: location.href.includes('/login/') || (text.includes('账号登录') && text.includes('密码') && text.includes('登录')), textTail: text.slice(-500)};
-  `);
-}
 async function recoverLoginIfNeeded(cdp) {
-  const before = await readPageLoginState(cdp);
-  if (!before.isLogin) return {needed:false, before, after:before};
-  const attempts = [];
-  let after = before;
-  for (let i = 0; i < 2 && after.isLogin; i += 1) {
-    const clicked = await cdp.eval(`
-      const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-      const btn = [...document.querySelectorAll('button,[role=button],a')].filter(visible).find(el => /登录|登入|Sign in/i.test((el.innerText||el.textContent||'').trim()));
-      if (btn) { btn.click(); return true; }
-      return false;
-    `).catch(() => false);
-    attempts.push({clicked});
-    await sleep(2600);
-    after = await readPageLoginState(cdp);
-  }
-  return {needed:true, before, attempts, after};
+  return await recoverSheinLoginIfNeeded({
+    evaluate: (body, arg) => cdp.eval(body, arg),
+    reload: () => cdp.call('Page.reload', {ignoreCache: true}).catch(() => cdp.eval(`location.reload(); return {href: location.href};`)),
+    sleep,
+    maxAttempts: 3,
+  });
 }
 async function gotoMarketingList(cdp) {
   await cdp.eval(`location.href = __arg.url; return location.href;`, {url: LIST_URL});
   await sleep(2500);
-  return await readPageLoginState(cdp);
+  return await recoverLoginIfNeeded(cdp);
 }
 async function loadLevelRuleHints(file) {
   const hints = new Map();
@@ -307,9 +292,11 @@ function bestActivityPrice(item) {
 function normalizeRows(store, live, levelRuleId, args) {
   const couponActive = new Set((live.couponRows || []).filter(g => ACTIVE_COUPON_STATUSES.has(String(g.status ?? ''))).map(g => String(g.skc || '').trim()).filter(Boolean));
   const rows = [];
+  const rowsWithPriceLayer = new Set();
   for (const item of live.ordinaryRows || []) {
     const skc = String(item.skc || '').trim();
     if (!skc) continue;
+    rowsWithPriceLayer.add(skc);
     const a = item.__activity || {};
     const current = isCurrent(a.start, a.end);
     rows.push({
@@ -332,6 +319,7 @@ function normalizeRows(store, live, levelRuleId, args) {
   for (const good of live.limitedRows || []) {
     const skc = String(good.skc || '').trim();
     if (!skc) continue;
+    rowsWithPriceLayer.add(skc);
     const a = good.__activity || {};
     const current = isCurrent(a.start, a.end);
     rows.push({
@@ -350,6 +338,22 @@ function normalizeRows(store, live, levelRuleId, args) {
       marketing_price_source_at: new Date().toISOString(),
     });
   }
+  for (const good of live.couponRows || []) {
+    const skc = String(good.skc || '').trim();
+    if (!skc || !ACTIVE_COUPON_STATUSES.has(String(good.status ?? '')) || rowsWithPriceLayer.has(skc)) continue;
+    rows.push({
+      store_key: store.storeKey,
+      skc,
+      standard_goods_sn: good.supplier_no || good.supplierNo || good.sku_supplier_no || '',
+      marketing_coupon_factor: 0.85,
+      marketing_coupon_summary: '15%券',
+      marketing_coupon_activity_id: args.couponActivityId,
+      marketing_coupon_level_rule_id: levelRuleId || '',
+      marketing_price_evidence_type: 'current_coupon_only_live_scan',
+      marketing_price_source_rank: 18,
+      marketing_price_source_at: new Date().toISOString(),
+    });
+  }
   return rows;
 }
 async function scanStore(store, args, levelHints) {
@@ -360,9 +364,11 @@ async function scanStore(store, args, levelHints) {
     const ensured = await ensureBrowser(store, args);
     launched = ensured.launched;
     cdp = await connectStorePage(store);
-    const page = await gotoMarketingList(cdp);
-    result.loginRecovery = await recoverLoginIfNeeded(cdp);
-    if (result.loginRecovery.after?.isLogin || page.isLogin) {
+    result.loginRecovery = await gotoMarketingList(cdp);
+    // Only the post-recovery state is authoritative here. The page can start on
+    // the login route, then a saved session / password-manager click can recover
+    // it. Do not fail just because the pre-recovery page was a login page.
+    if (result.loginRecovery.after?.isLogin) {
       result.reason = 'login page; skipped read-only price scan';
       return result;
     }
@@ -402,7 +408,7 @@ await fs.mkdir(args.outDir, {recursive: true});
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const jsonPath = args.out || path.join(args.outDir, `current-marketing-price-live-${stamp}.json`);
 const csvPath = jsonPath.replace(/\.json$/i, '.csv');
-const csvHeaders = ['store_key','skc','standard_goods_sn','marketing_suggested_ordinary_price_sar','marketing_ordinary_price_is_current','marketing_limited_discount_price_sar','marketing_limited_discount_is_current','marketing_activity_id','marketing_activity_name','marketing_activity_start','marketing_activity_end','marketing_limited_discount_name','marketing_limited_discount_start','marketing_limited_discount_end','marketing_coupon_summary','marketing_price_evidence_type','marketing_price_source_rank','marketing_price_source_at'];
+const csvHeaders = ['store_key','skc','standard_goods_sn','marketing_suggested_ordinary_price_sar','marketing_ordinary_price_is_current','marketing_limited_discount_price_sar','marketing_limited_discount_is_current','marketing_activity_id','marketing_activity_name','marketing_activity_start','marketing_activity_end','marketing_limited_discount_name','marketing_limited_discount_start','marketing_limited_discount_end','marketing_coupon_summary','marketing_coupon_activity_id','marketing_coupon_level_rule_id','marketing_price_evidence_type','marketing_price_source_rank','marketing_price_source_at'];
 const summary = {
   ok: false,
   partial: true,

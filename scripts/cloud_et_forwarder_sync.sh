@@ -240,7 +240,7 @@ node scripts/load_et_forwarder_warehouse.mjs --manifest "$MANIFEST_PATH"
 if [[ "${SHEIN_ET_REFRESH_PORTAL:-1}" == "1" ]]; then
   PORTAL_DATA_MODE="${SHEIN_ET_PORTAL_DATA_MODE:-${SHEIN_BI_PORTAL_DATA_MODE:-api}}"
   PORTAL_REFRESH_MODE="${SHEIN_ET_REFRESH_PORTAL_MODE:-sections}"
-  PORTAL_REFRESH_SECTIONS="${SHEIN_ET_REFRESH_SECTIONS:-orders,waybills,afterSales}"
+  PORTAL_REFRESH_SECTIONS="${SHEIN_ET_REFRESH_SECTIONS:-orders,waybills,afterSales,inventoryTrend}"
   prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
   {
     if ! flock -w "$PORTAL_REFRESH_LOCK_WAIT_SEC" 8; then

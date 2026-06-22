@@ -12,7 +12,7 @@ Environment=SHEIN_BI_PORTAL_REFRESH_LOCK_FILE=/opt/shein-bi/app/state/locks/shei
 Environment=SHEIN_PYTHON=/opt/shein-bi/app/.venv-et/bin/python
 Environment=SHEIN_ET_LOG_DIR=/srv/shein-bi/logs/cloud-et-forwarder
 Environment=SHEIN_ET_REFRESH_PORTAL_MODE=sections
-Environment=SHEIN_ET_REFRESH_SECTIONS=orders,waybills,afterSales
+Environment=SHEIN_ET_REFRESH_SECTIONS=orders,waybills,afterSales,inventoryTrend
 Environment=SHEIN_BI_PORTAL_REFRESH_LOCK_WAIT_SEC=120
 Environment=SHEIN_BI_PORTAL_PREWARM_ASYNC=1
 Environment="SHEIN_ET_WAIT_SERVICES=shein-bi-cloud-today.service shein-bi-cloud-yesterday.service shein-bi-cloud-session-manager.service shein-bi-db-backup.service"

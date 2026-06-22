@@ -34,6 +34,23 @@ async function readJson(file, fallback) {
   }
 }
 
+function buildProductAliasSearch(aliasConfig) {
+  const out = {};
+  for (const entry of aliasConfig?.aliases || []) {
+    const canonical = String(entry?.canonical || '').trim();
+    if (!canonical) continue;
+    const aliases = (entry.aliases || [])
+      .map(alias => typeof alias === 'string' ? alias : alias?.value)
+      .filter(Boolean);
+    const text = [canonical, ...aliases]
+      .map(x => String(x || '').normalize('NFKC').trim())
+      .filter(Boolean)
+      .join(' ');
+    if (text) out[canonical] = text;
+  }
+  return out;
+}
+
 function safeInlineJson(value) {
   return JSON.stringify(value).replace(/</g, '\u003c');
 }
@@ -73,11 +90,16 @@ function renderHtml({storeConfig, css, clientJs}) {
 </html>`;
 }
 
-const [storeConfig, css, clientJs] = await Promise.all([
+const [storeConfigRaw, productAliases, css, clientJs] = await Promise.all([
   readJson(path.join(ROOT, 'config', 'stores.json'), {stores: [], ownerGroups: [], groups: {}}),
+  readJson(path.join(ROOT, 'config', 'product_aliases.json'), {aliases: []}),
   fs.readFile(path.join(assetDir, 'styles.css'), 'utf8'),
   fs.readFile(path.join(assetDir, 'client.js'), 'utf8'),
 ]);
+const storeConfig = {
+  ...storeConfigRaw,
+  productAliasSearch: buildProductAliasSearch(productAliases),
+};
 
 const args = parseArgs(process.argv.slice(2));
 const html = renderHtml({storeConfig, css, clientJs});

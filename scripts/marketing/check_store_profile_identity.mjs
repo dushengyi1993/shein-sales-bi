@@ -12,6 +12,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {extractShopNameFromText, validateStoreIdentity} from '../../lib/shein_store_identity.mjs';
+import {recoverSheinLoginIfNeeded} from '../../lib/shein_login_recovery.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
@@ -216,24 +217,6 @@ async function readPage(cdp) {
   `);
 }
 
-async function clickLoginOnce(cdp) {
-  return await cdp.eval(`
-    const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-    const textOf = el => (el?.innerText || el?.textContent || '').trim();
-    const buttons = [...document.querySelectorAll('button,[role=button],a')]
-      .filter(visible)
-      .map(el => ({el, text: textOf(el), disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true'}));
-    const target = buttons.find(x => !x.disabled && x.text === '我已知晓，继续登录')
-      || buttons.find(x => !x.disabled && x.text.includes('继续登录') && x.text.length <= 20)
-      || buttons.find(x => !x.disabled && x.text === '登录')
-      || buttons.find(x => !x.disabled && x.text.includes('登录') && x.text.length <= 12);
-    if (!target) return {clicked: false, buttons: buttons.map(x => x.text).filter(Boolean).slice(0, 20)};
-    target.el.scrollIntoView({block: 'center', inline: 'center'});
-    target.el.click();
-    return {clicked: true, text: target.text};
-  `);
-}
-
 async function auditStore(store, args) {
   const result = {
     storeKey: store.storeKey,
@@ -256,8 +239,12 @@ async function auditStore(store, args) {
     let page = await readPage(cdp);
     result.beforeLogin = {href: page.href, title: page.title, isLogin: page.isLogin};
     if (page.isLogin) {
-      result.loginClick = await clickLoginOnce(cdp);
-      await sleep(4500);
+      result.loginRecovery = await recoverSheinLoginIfNeeded({
+        evaluate: (body, arg) => cdp.eval(body, arg),
+        reload: () => cdp.call('Page.reload', {ignoreCache: true}).catch(() => cdp.eval(`location.reload(); return {href: location.href};`)),
+        sleep,
+        maxAttempts: 3,
+      });
       page = await readPage(cdp);
     }
     const textForIdentity = `${page.textHead || ''}\n${page.textTail || ''}`;

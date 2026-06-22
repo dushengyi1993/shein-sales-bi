@@ -28,6 +28,7 @@ import {
   requireStoreIdentitySnapshot,
   storeIdentityEvalBody,
 } from '../../lib/shein_store_identity.mjs';
+import {recoverSheinLoginIfNeeded} from '../../lib/shein_login_recovery.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const ACTIVITY_ID_DEFAULT = 34810;
@@ -69,6 +70,14 @@ function round2(value) {
 }
 
 function hasPlanPriceCancelEvidence(row) {
+  if (
+    row?.forceCancelCoupon === true ||
+    row?.forceCancelCoupon === 'true' ||
+    row?.cancelReason === 'user_authorized_limited_discount_priority' ||
+    row?.riskReason === 'user_authorized_limited_discount_priority'
+  ) {
+    return true;
+  }
   if (row?.shouldCancelCoupon !== true && row?.shouldCancelCoupon !== 'true') {
     const decision = String(row?.priceDecision || row?.decision || '').trim();
     if (!PLAN_PRICE_CANCEL_DECISIONS.has(decision)) return false;
@@ -323,62 +332,16 @@ async function gotoCouponRule(cdp, activityId, levelRuleId) {
   return last;
 }
 
-async function clickLoginOnce(cdp) {
-  const target = await cdp.eval(`
-    const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-    const textOf = el => (el?.innerText || el?.textContent || '').trim();
-    const buttons = [...document.querySelectorAll('button,[role=button],a')]
-      .filter(visible)
-      .map(el => ({el, text: textOf(el), disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true'}));
-    const btn = buttons.find(x => !x.disabled && x.text === '我已知晓，继续登录')
-      || buttons.find(x => !x.disabled && x.text.includes('继续登录') && x.text.length <= 20)
-      || buttons.find(x => !x.disabled && x.text === '登录')
-      || buttons.find(x => !x.disabled && x.text.includes('登录') && x.text.length <= 12);
-    if (!btn) return {found: false, href: location.href, buttons: buttons.map(x => x.text).filter(Boolean).slice(0, 20), tail: (document.body?.innerText || '').slice(-800)};
-    btn.el.scrollIntoView({block: 'center', inline: 'center'});
-    const rect = btn.el.getBoundingClientRect();
-    return {found: true, href: location.href, text: btn.text, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
-  `);
-  if (!target.found) return {clicked: false, ...target};
-  await cdp.call('Input.dispatchMouseEvent', {type: 'mouseMoved', x: target.x, y: target.y, button: 'none'});
-  await cdp.call('Input.dispatchMouseEvent', {type: 'mousePressed', x: target.x, y: target.y, button: 'left', clickCount: 1});
-  await cdp.call('Input.dispatchMouseEvent', {type: 'mouseReleased', x: target.x, y: target.y, button: 'left', clickCount: 1});
-  return {clicked: true, ...target};
-}
-
 async function recoverLoginIfNeeded(cdp, activityId, levelRuleId) {
-  const before = await cdp.eval(`
-    const text = document.body?.innerText || '';
-    return {
-      href: location.href,
-      isLogin: location.href.includes('/login/') || text.includes('请输入账号') || text.includes('请输入密码') || (text.includes('账号登录') && text.includes('密码') && text.includes('登录')),
-      tail: text.slice(-1000),
-    };
-  `);
-  if (!before.isLogin) return {needed: false, before};
-
-  const attempts = [];
-  let after = before;
-  for (let attemptNo = 1; attemptNo <= 4; attemptNo += 1) {
-    const clicked = await clickLoginOnce(cdp);
-    attempts.push({attemptNo, ...clicked});
-    await sleep(String(clicked.text || '').includes('继续登录') ? 2000 : 5000);
-    after = await cdp.eval(`
-      const text = document.body?.innerText || '';
-      return {
-        href: location.href,
-        isLogin: location.href.includes('/login/') || text.includes('请输入账号') || text.includes('请输入密码') || (text.includes('账号登录') && text.includes('密码') && text.includes('登录')),
-        tail: text.slice(-1000),
-      };
-    `);
-    if (!after.isLogin) break;
-    if (attemptNo === 2) {
-      await cdp.eval(`location.reload(); return {href: location.href};`);
-      await sleep(2500);
-    }
-  }
-  const page = await gotoCouponRule(cdp, activityId, levelRuleId);
-  return {needed: true, before, attempts, after, page};
+  const recovery = await recoverSheinLoginIfNeeded({
+    evaluate: (body, arg) => cdp.eval(body, arg),
+    dispatchMouseEvent: params => cdp.call('Input.dispatchMouseEvent', params),
+    reload: () => cdp.call('Page.reload', {ignoreCache: true}).catch(() => cdp.eval(`location.reload(); return {href: location.href};`)),
+    sleep,
+    maxAttempts: 4,
+  });
+  const page = recovery.ok ? await gotoCouponRule(cdp, activityId, levelRuleId) : recovery.after;
+  return {...recovery, page};
 }
 
 async function assertCurrentStoreIdentity(cdp, store, context) {

@@ -5,6 +5,7 @@ import {
   requireStoreIdentitySnapshot,
   storeIdentityEvalBody,
 } from '../../lib/shein_store_identity.mjs';
+import {recoverSheinLoginIfNeeded} from '../../lib/shein_login_recovery.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp/marketing-signup/limited-discount-rescue');
@@ -24,6 +25,7 @@ function parseArgs(argv) {
     startDelayMinutes: 20,
     endTime: '',
     activityNamePrefix: 'HL漏报补救限时折扣',
+    replaceActivityIds: [],
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -44,6 +46,15 @@ function parseArgs(argv) {
     else if (arg.startsWith('--end-time=')) args.endTime = arg.slice('--end-time='.length);
     else if (arg === '--activity-name-prefix') args.activityNamePrefix = argv[++i] || '';
     else if (arg.startsWith('--activity-name-prefix=')) args.activityNamePrefix = arg.slice('--activity-name-prefix='.length);
+    else if (arg === '--replace-activity-id' || arg === '--replace-activity-ids') {
+      args.replaceActivityIds.push(...String(argv[++i] || '').split(',').map(value => Number(value.trim())).filter(Number.isFinite));
+    }
+    else if (arg.startsWith('--replace-activity-id=')) {
+      args.replaceActivityIds.push(...String(arg.slice('--replace-activity-id='.length) || '').split(',').map(value => Number(value.trim())).filter(Number.isFinite));
+    }
+    else if (arg.startsWith('--replace-activity-ids=')) {
+      args.replaceActivityIds.push(...String(arg.slice('--replace-activity-ids='.length) || '').split(',').map(value => Number(value.trim())).filter(Number.isFinite));
+    }
     else throw new Error(`Unknown argument: ${arg}`);
   }
   if (!Number.isFinite(args.port) || args.port <= 0) throw new Error(`Invalid --port: ${args.port}`);
@@ -56,6 +67,7 @@ function parseArgs(argv) {
   if (!Number.isFinite(args.startDelayMinutes) || args.startDelayMinutes < 1) {
     throw new Error(`Invalid --start-delay-minutes: ${args.startDelayMinutes}`);
   }
+  args.replaceActivityIds = [...new Set(args.replaceActivityIds.map(Number).filter(Number.isFinite))];
   return args;
 }
 
@@ -63,6 +75,10 @@ async function httpJson(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`${url} ${res.status}`);
   return await res.json();
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 class Cdp {
@@ -150,6 +166,16 @@ async function assertCurrentStoreIdentity(cdp, store, context) {
   });
 }
 
+async function recoverLoginIfNeeded(cdp) {
+  return await recoverSheinLoginIfNeeded({
+    evaluate: (body, arg) => cdp.eval(body, arg),
+    dispatchMouseEvent: params => cdp.call('Input.dispatchMouseEvent', params),
+    reload: () => cdp.call('Page.reload', {ignoreCache: true}).catch(() => cdp.eval(`location.reload(); return {href: location.href};`)),
+    sleep,
+    maxAttempts: 3,
+  });
+}
+
 function normalizeTargetRows(rescue) {
   const rows = (rescue.rows || [])
     .filter(row => row && row.needsLimitedDiscount !== false)
@@ -193,6 +219,12 @@ if (!store) throw new Error(`Unknown store for identity guard: ${args.storeKey}`
 const cdp = await connect(args.port);
 let outPath;
 try {
+  const loginRecovery = await recoverLoginIfNeeded(cdp);
+  if (!loginRecovery.ok) {
+    const err = new Error('营销子系统显示登录页，自动点登录后仍未恢复，需人工登录');
+    err.loginRecovery = loginRecovery;
+    throw err;
+  }
   const identity = await assertCurrentStoreIdentity(cdp, store, 'apply_hl_limited_discount_rescue');
   const result = await cdp.eval(
     `
@@ -203,12 +235,14 @@ try {
       targetEndTime,
       startDelayMinutes,
       activityNamePrefix,
+      replaceActivityIds,
     } = __arg;
 
     const headers = {'content-type': 'application/json;charset=UTF-8'};
     const targetSkcs = targetRows.map(row => row.skc);
     const targetSet = new Set(targetSkcs);
     const targetBySkc = new Map(targetRows.map(row => [row.skc, row]));
+    const replaceActivityIdSet = new Set((replaceActivityIds || []).map(Number).filter(Number.isFinite));
     const windowEnd = new Date(targetEndTime.replace(' ', 'T') + '+08:00');
 
     function pad(value) {
@@ -447,25 +481,42 @@ try {
         const addSkuList = Array.isArray(good.sku_info_list)
           ? good.sku_info_list.map(sku => {
               const skuSupplyInfo = sku.supply_price_info || {};
-              const skuRow = isSaleAttribute
-                ? {
-                    id: sku.id,
-                    cost_price: Number(skuSupplyInfo.supply_price),
-                    sku: sku.sku,
-                    max_product_act_price: Number(skuSupplyInfo.max_supply_price),
-                    product_act_price: price,
-                  }
-                : {
-                    id: sku.id,
-                    cost_price: 0,
-                    sku: sku.sku,
-                    max_product_act_price: 0,
-                    product_act_price: 0,
-                  };
+              const skuSupplyPrice = Number.isFinite(Number(skuSupplyInfo.supply_price))
+                ? Number(skuSupplyInfo.supply_price)
+                : supplyPrice;
+              const skuMaxSupplyPrice = Number.isFinite(Number(skuSupplyInfo.max_supply_price))
+                ? Number(skuSupplyInfo.max_supply_price)
+                : maxSupplyPrice;
+              // create_activity is submitted with pricing_type=Sku. In that mode the
+              // backend reads the real effective price from add_sku_list, even for
+              // single-SKU / non-sale-attribute goods. Leaving SKU prices as 0 can
+              // make the page readback show the parent SKC target price while the
+              // actual SKU falls back to the platform's default discount.
+              const skuRow = {
+                id: sku.id,
+                cost_price: skuSupplyPrice,
+                sku: sku.sku,
+                max_product_act_price: skuMaxSupplyPrice,
+                product_act_price: price,
+              };
               Object.keys(skuRow).forEach(key => skuRow[key] === undefined && delete skuRow[key]);
               return skuRow;
             })
           : [];
+        if (!addSkuList.length) {
+          invalid.push({skc: target.skc, reason: 'missing sku_info_list for Sku pricing payload'});
+        }
+        for (const skuRow of addSkuList) {
+          if (!Number.isFinite(Number(skuRow.product_act_price)) || Math.abs(Number(skuRow.product_act_price) - price) > 0.0001) {
+            invalid.push({
+              skc: target.skc,
+              reason: 'sku product_act_price mismatch',
+              sku: skuRow.sku,
+              skuProductActPrice: skuRow.product_act_price,
+              targetPrice: price,
+            });
+          }
+        }
 
         // Match the frontend hk(originData, tableData, pricing_type) create payload:
         // new goods are submitted through add_* SKU buckets, not the intermediate
@@ -504,6 +555,41 @@ try {
         });
       }
       return {missing, invalid, addRows, detailRows};
+    }
+
+    function checkSkuPricePayload(addRows, sourceTargetRows = targetRows) {
+      const sourceTargetBySkc = new Map(sourceTargetRows.map(row => [row.skc, row]));
+      const mismatches = [];
+      let skuRowsChecked = 0;
+      for (const row of addRows || []) {
+        const expected = Number(row.product_act_price || 0) > 0
+          ? Number(row.product_act_price)
+          : Number(sourceTargetBySkc.get(row.skc)?.limitedDiscountPrice);
+        const skuRows = Array.isArray(row.add_sku_list) ? row.add_sku_list : [];
+        skuRowsChecked += skuRows.length;
+        if (!skuRows.length) {
+          mismatches.push({skc: row.skc, reason: 'missing add_sku_list'});
+          continue;
+        }
+        for (const sku of skuRows) {
+          const skuPrice = Number(sku.product_act_price);
+          if (!Number.isFinite(skuPrice) || Math.abs(skuPrice - expected) > 0.0001) {
+            mismatches.push({
+              skc: row.skc,
+              sku: sku.sku,
+              reason: 'sku price does not equal target limited discount price',
+              expected,
+              skuProductActPrice: sku.product_act_price,
+            });
+          }
+        }
+      }
+      return {
+        ok: mismatches.length === 0,
+        goodsRowsChecked: (addRows || []).length,
+        skuRowsChecked,
+        mismatches,
+      };
     }
 
     function groupInvalidBySkc(invalidRows) {
@@ -662,12 +748,20 @@ try {
       createResponse: null,
       createdActivityId: null,
       createdActivity: null,
+      replaceActivityIds: [...replaceActivityIdSet],
       targetCountForCreate: targetRows.length,
       skippedUnreportable: [],
       postEndValidation: null,
       after: null,
       ok: false,
     };
+    result.skuPricePayloadGuard = checkSkuPricePayload(goodsBuild.addRows);
+    if (!result.skuPricePayloadGuard.ok) {
+      result.validationFailed = true;
+      result.ok = false;
+      result.reason = 'sku-level limited-discount price payload guard failed; aborting before write';
+      return result;
+    }
 
     const unsafeExistingLimitedDiscounts = (() => {
       try {
@@ -697,8 +791,24 @@ try {
       return result;
     }
 
-    const conflictActivityIds = before.conflictActivities.map(entry => Number(entry.activity.activity_id));
-    for (const entry of before.conflictActivities) {
+    const conflictActivityIds = before.conflictActivities
+      .map(entry => Number(entry.activity.activity_id))
+      .filter(activityId => !replaceActivityIdSet.size || replaceActivityIdSet.has(activityId));
+    const nonReplaceConflictActivityIds = before.conflictActivities
+      .map(entry => Number(entry.activity.activity_id))
+      .filter(activityId => replaceActivityIdSet.size && !replaceActivityIdSet.has(activityId));
+    if (nonReplaceConflictActivityIds.length) {
+      const err = new Error('Target SKCs overlap non-replacement limited-discount activities; aborting create');
+      err.nonReplaceConflictActivityIds = nonReplaceConflictActivityIds;
+      throw err;
+    }
+    const missingReplacementIds = [...replaceActivityIdSet].filter(activityId => !conflictActivityIds.includes(activityId));
+    if (replaceActivityIdSet.size && missingReplacementIds.length) {
+      const err = new Error('Requested replacement activity is not active/future conflict for target SKCs; aborting create');
+      err.missingReplacementIds = missingReplacementIds;
+      throw err;
+    }
+    for (const entry of before.conflictActivities.filter(item => conflictActivityIds.includes(Number(item.activity.activity_id)))) {
       const state = Number(entry.activity.state);
       const actionState = state === 3 ? 6 : 5;
       const packet = await post('/promotion/obm/undo_or_end_obm_activity', {
@@ -785,6 +895,12 @@ try {
       add_cost_and_stock_info_list: executableGoodsBuild.addRows,
     };
     result.createPayload = createPayload;
+    result.finalSkuPricePayloadGuard = checkSkuPricePayload(executableGoodsBuild.addRows, executableTargetRows);
+    if (!result.finalSkuPricePayloadGuard.ok) {
+      const err = new Error('Final sku-level limited-discount price payload guard failed; aborting create');
+      err.finalSkuPricePayloadGuard = result.finalSkuPricePayloadGuard;
+      throw err;
+    }
 
     if (result.targetCountForCreate <= 0) {
       const err = new Error('No executable limited-discount target rows remain after post-end validation');
@@ -846,6 +962,7 @@ try {
       targetEndTime: rescue.endTime || args.endTime,
       startDelayMinutes: args.startDelayMinutes,
       activityNamePrefix: args.activityNamePrefix,
+      replaceActivityIds: args.replaceActivityIds,
     },
   );
 
@@ -857,6 +974,7 @@ try {
     port: args.port,
     rescuePath: rel(args.rescue),
     identity,
+    loginRecovery,
     ...result,
   }, null, 2), 'utf8');
 
@@ -907,6 +1025,7 @@ try {
       unsafe: error.unsafe,
       validation: error.validation,
       endedCheck: error.endedCheck,
+      loginRecovery: error.loginRecovery,
     },
   };
   await fs.writeFile(outPath, JSON.stringify(doc, null, 2), 'utf8');

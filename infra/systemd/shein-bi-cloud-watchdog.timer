@@ -1,8 +1,8 @@
 [Unit]
-Description=Run SHEIN BI cloud ops watchdog hourly
+Description=Run SHEIN BI cloud ops watchdog hourly after ET/sales windows
 
 [Timer]
-OnCalendar=*-*-* *:25:00
+OnCalendar=*-*-* *:50:00
 Persistent=false
 Unit=shein-bi-cloud-watchdog.service
 

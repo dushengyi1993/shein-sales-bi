@@ -2346,26 +2346,154 @@ store_storage_daily AS (
   ) t
 ),
 inventory_et_ship_order_enriched AS (
-  WITH base AS (
+  WITH box_rollup AS (
+    SELECT
+      b.ship_order_id,
+      count(*) AS box_count,
+      min(nullif(b.raw_summary->>'GNReceiveTime','')::timestamp) AS domestic_warehouse_in_time,
+      min(b.go_time) AS domestic_warehouse_out_time,
+      min(nullif(b.raw_summary->>'ToTime','')::timestamp) AS eta_time,
+      min(nullif(b.raw_summary->>'HWReceiptTime','')::timestamp) AS overseas_receipt_time,
+      min(nullif(b.raw_summary->>'HWReceiveTime','')::timestamp) AS overseas_warehouse_in_time,
+      string_agg(DISTINCT nullif(b.logistics_status,''), ' / ' ORDER BY nullif(b.logistics_status,'')) AS logistics_status_summary,
+      string_agg(DISTINCT nullif(b.status_name,''), ' / ' ORDER BY nullif(b.status_name,'')) AS box_status_summary,
+      string_agg(DISTINCT nullif(b.city_name,''), ' / ' ORDER BY nullif(b.city_name,'')) AS destination_city_summary,
+      string_agg(DISTINCT nullif(b.storeroom_name,''), ' / ' ORDER BY nullif(b.storeroom_name,'')) AS destination_storeroom_summary,
+      string_agg(DISTINCT nullif(b.transport_name,''), ' / ' ORDER BY nullif(b.transport_name,'')) AS transport_name_summary,
+      min(b.get_time) AS box_get_time
+    FROM fact.et_box b
+    WHERE coalesce(b.ship_order_id,'') <> ''
+    GROUP BY b.ship_order_id
+  ),
+  track_events AS (
+    SELECT
+      t.ship_order_id,
+      t.send_city,
+      t.arrive_city,
+      t.box_qty,
+      t.status AS track_status,
+      t.status_name AS track_status_name,
+      t.sign_time,
+      e.ord,
+      CASE
+        WHEN nullif(e.item->>'TheDate','') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}' THEN (e.item->>'TheDate')::timestamp
+        WHEN nullif(e.item->>'TheDate','') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN (e.item->>'TheDate')::timestamp
+        ELSE NULL
+      END AS event_time,
+      nullif(e.item->>'Address','') AS event_location,
+      nullif(e.item->>'Content','') AS event_detail,
+      e.item AS raw_event
+    FROM fact.et_ship_order_track t
+    LEFT JOIN LATERAL jsonb_array_elements(coalesce(t.tracks, '[]'::jsonb)) WITH ORDINALITY AS e(item, ord) ON true
+  ),
+  track_rollup AS (
+    SELECT
+      ship_order_id,
+      max(send_city) FILTER (WHERE nullif(send_city,'') IS NOT NULL) AS track_send_city,
+      max(arrive_city) FILTER (WHERE nullif(arrive_city,'') IS NOT NULL) AS track_arrive_city,
+      max(box_qty) AS track_box_qty,
+      max(track_status) FILTER (WHERE nullif(track_status,'') IS NOT NULL) AS track_status,
+      max(track_status_name) FILTER (WHERE nullif(track_status_name,'') IS NOT NULL) AS track_status_name,
+      max(sign_time) FILTER (WHERE sign_time IS NOT NULL) AS track_sign_time,
+      min(event_time) FILTER (WHERE event_detail ILIKE '%Arrived at Foshan warehouse%') AS track_domestic_warehouse_in_time,
+      min(event_time) FILTER (WHERE event_detail ILIKE '%Left Foshan warehouse%' OR event_detail ILIKE '%Departed to%') AS track_domestic_warehouse_out_time,
+      min(event_time) FILTER (WHERE event_detail ILIKE '%Arrived at Riyadh warehouse%') AS track_overseas_warehouse_in_time,
+      max(event_time) FILTER (WHERE event_detail ILIKE '%SHIPMENT RECEIVED%') AS track_overseas_receipt_time,
+      max(event_time) FILTER (WHERE event_detail ILIKE '%Finished customs clearance%') AS track_customs_finished_time,
+      coalesce(jsonb_agg(
+        jsonb_build_object(
+          'time', event_time,
+          'location', event_location,
+          'detail', event_detail,
+          'kind', 'et_track'
+        ) ORDER BY event_time, ord
+      ) FILTER (WHERE event_time IS NOT NULL), '[]'::jsonb) AS full_tracking_events
+    FROM track_events
+    GROUP BY ship_order_id
+  ),
+  base AS (
     SELECT
       o.*,
-      (substring(o.raw_summary->>'ETD_ETA' from 'To\\s+([0-9]{4}-[0-9]{2}-[0-9]{2})'))::date AS eta_end_date,
+      box_rollup.box_count AS et_box_event_count,
+      box_rollup.domestic_warehouse_in_time,
+      box_rollup.domestic_warehouse_out_time,
+      box_rollup.eta_time AS box_eta_time,
+      box_rollup.overseas_receipt_time,
+      box_rollup.overseas_warehouse_in_time,
+      box_rollup.logistics_status_summary,
+      box_rollup.box_status_summary,
+      box_rollup.destination_city_summary,
+      box_rollup.destination_storeroom_summary,
+      box_rollup.transport_name_summary,
+      box_rollup.box_get_time,
+      track_rollup.track_send_city,
+      track_rollup.track_arrive_city,
+      track_rollup.track_box_qty,
+      track_rollup.track_status,
+      track_rollup.track_status_name,
+      track_rollup.track_sign_time,
+      track_rollup.track_domestic_warehouse_in_time,
+      track_rollup.track_domestic_warehouse_out_time,
+      track_rollup.track_overseas_warehouse_in_time,
+      track_rollup.track_overseas_receipt_time,
+      track_rollup.track_customs_finished_time,
+      track_rollup.full_tracking_events,
+      (substring(o.raw_summary->>'ETD_ETA' from '^\\s*([0-9]{4}-[0-9]{2}-[0-9]{2})'))::date AS etd_start_date,
+      coalesce(
+        (substring(o.raw_summary->>'ETD_ETA' from 'To\\s+([0-9]{4}-[0-9]{2}-[0-9]{2})'))::date,
+        box_rollup.eta_time::date
+      ) AS eta_end_date,
       (
         o.ship_time IS NOT NULL
         OR o.into_time IS NOT NULL
         OR o.end_time IS NOT NULL
+        OR box_rollup.domestic_warehouse_in_time IS NOT NULL
+        OR box_rollup.domestic_warehouse_out_time IS NOT NULL
+        OR box_rollup.overseas_receipt_time IS NOT NULL
+        OR box_rollup.overseas_warehouse_in_time IS NOT NULL
+        OR track_rollup.track_domestic_warehouse_in_time IS NOT NULL
+        OR track_rollup.track_domestic_warehouse_out_time IS NOT NULL
+        OR track_rollup.track_overseas_receipt_time IS NOT NULL
+        OR track_rollup.track_overseas_warehouse_in_time IS NOT NULL
         OR nullif(o.waybill_code,'') IS NOT NULL
         OR nullif(o.raw_summary->>'LogisticsNo','') IS NOT NULL
       ) AS has_physical_ship_evidence
     FROM fact.et_ship_order o
+    LEFT JOIN box_rollup USING (ship_order_id)
+    LEFT JOIN track_rollup USING (ship_order_id)
   )
   SELECT
     base.*,
-    (
-      coalesce(base.status,'') <> '12'
-      AND (
-        base.eta_end_date >= current_date - 3
-        OR (
+      coalesce(base.track_domestic_warehouse_in_time, base.domestic_warehouse_in_time, base.box_get_time, base.check_time, base.ship_time, base.create_time) AS shipment_departure_basis_time,
+      coalesce(base.track_overseas_warehouse_in_time, base.track_overseas_receipt_time, base.overseas_warehouse_in_time, base.overseas_receipt_time, base.into_time, base.end_time) AS shipment_arrival_basis_time,
+      (
+        coalesce(base.status,'') = '12'
+        OR base.into_time IS NOT NULL
+        OR base.end_time IS NOT NULL
+        OR base.track_sign_time IS NOT NULL
+        OR base.track_overseas_warehouse_in_time IS NOT NULL
+        OR base.track_overseas_receipt_time IS NOT NULL
+        OR base.overseas_warehouse_in_time IS NOT NULL
+        OR base.overseas_receipt_time IS NOT NULL
+        OR coalesce(base.box_status_summary,'') ~* '(已完结|已签收|签收|收货|入仓|received|arrived)'
+        OR coalesce(base.track_status_name,'') ~* '(已完结|已签收|签收|收货|入仓|received|arrived)'
+      ) AS has_arrival_evidence,
+      (
+        coalesce(base.status,'') <> '12'
+        AND NOT (
+          base.into_time IS NOT NULL
+          OR base.end_time IS NOT NULL
+          OR base.track_sign_time IS NOT NULL
+          OR base.track_overseas_warehouse_in_time IS NOT NULL
+          OR base.track_overseas_receipt_time IS NOT NULL
+          OR base.overseas_warehouse_in_time IS NOT NULL
+          OR base.overseas_receipt_time IS NOT NULL
+          OR coalesce(base.box_status_summary,'') ~* '(已完结|已签收|签收|收货|入仓|received|arrived)'
+          OR coalesce(base.track_status_name,'') ~* '(已完结|已签收|签收|收货|入仓|received|arrived)'
+        )
+        AND (
+          base.eta_end_date >= current_date - 3
+          OR (
           base.has_physical_ship_evidence
           AND coalesce(base.eta_end_date, base.ship_time::date + 60, base.check_time::date + 75, base.create_time::date + 90) >= current_date - 3
         )
@@ -2380,28 +2508,33 @@ inventory_et_ship_product AS (
     sum(coalesce(i.quantity,0)) AS historical_supply_quantity,
     sum(coalesce(i.quantity,0)) FILTER (
       WHERE coalesce(o.status,'') <> '12'
+        AND NOT o.has_arrival_evidence
         AND o.has_effective_in_transit_evidence
     ) AS in_transit_quantity,
     sum(coalesce(i.quantity,0)) FILTER (
       WHERE coalesce(o.status,'') <> '12'
+        AND NOT o.has_arrival_evidence
         AND NOT o.has_effective_in_transit_evidence
     ) AS pending_review_quantity,
-    sum(coalesce(i.quantity,0)) FILTER (WHERE coalesce(o.status,'') = '12') AS arrived_quantity,
+    sum(coalesce(i.quantity,0)) FILTER (WHERE coalesce(o.status,'') = '12' OR o.has_arrival_evidence) AS arrived_quantity,
     count(DISTINCT i.ship_order_id) AS ship_order_count,
     count(DISTINCT i.ship_order_id) FILTER (
       WHERE coalesce(o.status,'') <> '12'
+        AND NOT o.has_arrival_evidence
         AND NOT o.has_effective_in_transit_evidence
     ) AS pending_review_order_count,
     max(o.create_time)::date AS latest_application_date,
-    max(o.create_time) FILTER (
+    max(coalesce(o.shipment_departure_basis_time, o.create_time)) FILTER (
       WHERE coalesce(o.status,'') <> '12'
+        AND NOT o.has_arrival_evidence
         AND o.has_effective_in_transit_evidence
     )::date AS latest_in_transit_date,
     max(o.create_time) FILTER (
       WHERE coalesce(o.status,'') <> '12'
+        AND NOT o.has_arrival_evidence
         AND NOT o.has_effective_in_transit_evidence
     )::date AS latest_pending_review_date,
-    max(coalesce(o.into_time,o.end_time,o.ship_time,o.check_time,o.create_time))::date AS latest_event_date,
+    max(coalesce(o.shipment_arrival_basis_time,o.shipment_departure_basis_time,o.into_time,o.end_time,o.ship_time,o.check_time,o.create_time))::date AS latest_event_date,
     string_agg(DISTINCT concat('状态', coalesce(nullif(o.status,''),'未知')), ' / ' ORDER BY concat('状态', coalesce(nullif(o.status,''),'未知'))) AS status_summary
   FROM fact.et_ship_order_item i
   JOIN inventory_et_ship_order_enriched o USING (ship_order_id)
@@ -2449,6 +2582,22 @@ inventory_sales_product AS (
   FROM src
   GROUP BY match_key
 ),
+inventory_cost_product AS (
+  SELECT
+    dim.product_match_key(standard_goods_sn) AS match_key,
+    string_agg(DISTINCT standard_goods_sn, ' / ' ORDER BY standard_goods_sn) AS cost_standard_goods_sn_list,
+    count(*) AS cost_batch_count,
+    sum(coalesce(shipped_quantity,0)) AS cost_shipped_quantity,
+    sum(coalesce(shipped_quantity,0)) FILTER (WHERE arrived_date IS NOT NULL) AS cost_arrived_quantity,
+    sum(coalesce(shipped_quantity,0)) FILTER (WHERE shipped_date IS NOT NULL AND arrived_date IS NULL) AS cost_incoming_quantity,
+    min(shipped_date) AS cost_first_shipped_date,
+    max(shipped_date) AS cost_latest_shipped_date,
+    max(arrived_date) AS cost_latest_arrived_date,
+    string_agg(DISTINCT nullif(batch_no,''), ', ' ORDER BY nullif(batch_no,'')) FILTER (WHERE coalesce(batch_no,'') <> '') AS cost_batch_nos
+  FROM fact.product_cost_batch
+  WHERE coalesce(dim.product_match_key(standard_goods_sn),'') <> ''
+  GROUP BY dim.product_match_key(standard_goods_sn)
+),
 inventory_depletion_products AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY
     t.et_estimated_available_qty DESC,
@@ -2463,12 +2612,14 @@ inventory_depletion_products AS (
       SELECT match_key FROM inventory_et_ship_product WHERE coalesce(match_key,'') <> ''
       UNION
       SELECT match_key FROM inventory_sales_product WHERE coalesce(match_key,'') <> ''
+      UNION
+      SELECT match_key FROM inventory_cost_product WHERE coalesce(match_key,'') <> ''
     ), joined AS (
       SELECT
         k.match_key,
-        coalesce(et.standard_goods_sn, ship.standard_goods_sn, nullif(split_part(s.sales_standard_goods_sn_list, ' / ', 1), ''), k.match_key) AS standard_goods_sn,
+        coalesce(et.standard_goods_sn, ship.standard_goods_sn, nullif(split_part(s.sales_standard_goods_sn_list, ' / ', 1), ''), nullif(split_part(cost.cost_standard_goods_sn_list, ' / ', 1), ''), k.match_key) AS standard_goods_sn,
         coalesce(et.sample_title_cn, s.sales_product_name, '') AS goods_title,
-        s.sales_standard_goods_sn_list AS standard_goods_sn_list,
+        coalesce(s.sales_standard_goods_sn_list, cost.cost_standard_goods_sn_list) AS standard_goods_sn_list,
         coalesce(s.gross_sold_quantity,0) AS gross_sold_quantity,
         coalesce(s.net_sold_quantity,0) AS net_sold_quantity,
         coalesce(s.gross_sold_7d,0) AS gross_sold_7d,
@@ -2498,17 +2649,28 @@ inventory_depletion_products AS (
         ship.latest_pending_review_date AS et_ship_latest_pending_review_date,
         ship.latest_event_date AS et_ship_latest_event_date,
         ship.status_summary AS et_ship_status_summary,
+        coalesce(cost.cost_batch_count,0) AS cost_batch_count,
+        coalesce(cost.cost_shipped_quantity,0) AS cost_shipped_quantity,
+        coalesce(cost.cost_arrived_quantity,0) AS cost_arrived_quantity,
+        coalesce(cost.cost_incoming_quantity,0) AS cost_incoming_quantity,
+        cost.cost_first_shipped_date,
+        cost.cost_latest_shipped_date,
+        cost.cost_latest_arrived_date,
+        cost.cost_batch_nos,
+        cost.cost_standard_goods_sn_list,
         coalesce(storage.storage_fee_30d_sar,0) AS et_storage_fee_30d_sar,
         storage.latest_fee_date AS et_storage_fee_latest_date
       FROM keys k
       LEFT JOIN mart.et_product_inventory_current et ON et.match_key = k.match_key
       LEFT JOIN inventory_et_ship_product ship ON ship.match_key = k.match_key
       LEFT JOIN inventory_sales_product s ON s.match_key = k.match_key
+      LEFT JOIN inventory_cost_product cost ON cost.match_key = k.match_key
       LEFT JOIN inventory_storage_product storage ON storage.match_key = k.match_key
     ), calc AS (
       SELECT *,
         ((coalesce(gross_sold_7d,0) / 7.0 * 0.7) + (coalesce(gross_sold_30d,0) / 30.0 * 0.3)) AS weighted_daily_gross_sales,
-        (coalesce(et_estimated_available_qty,0) + coalesce(et_ship_in_transit_quantity,0)) AS et_current_total_supply_quantity
+        (coalesce(et_estimated_available_qty,0) + coalesce(et_ship_in_transit_quantity,0)) AS et_current_total_supply_quantity,
+        greatest(coalesce(et_historical_supply_quantity,0), coalesce(cost_shipped_quantity,0)) AS supply_evidence_quantity
       FROM joined
     )
     SELECT
@@ -2544,10 +2706,10 @@ inventory_depletion_products AS (
       round(CASE WHEN weighted_daily_gross_sales > 0 THEN et_current_total_supply_quantity / NULLIF(weighted_daily_gross_sales,0) ELSE NULL END::numeric, 1) AS days_of_supply_with_incoming,
       last_sale_date,
       first_sale_date,
-      et_ship_latest_application_date AS first_shipped_date,
-      coalesce(et_ship_latest_in_transit_date, et_ship_latest_application_date) AS latest_shipped_date,
-      et_ship_latest_event_date AS first_arrived_date,
-      et_ship_latest_event_date AS latest_arrived_date,
+      coalesce(cost_first_shipped_date, et_ship_latest_application_date) AS first_shipped_date,
+      coalesce(cost_latest_shipped_date, et_ship_latest_in_transit_date, et_ship_latest_application_date) AS latest_shipped_date,
+      coalesce(cost_latest_arrived_date, et_ship_latest_event_date) AS first_arrived_date,
+      coalesce(cost_latest_arrived_date, et_ship_latest_event_date) AS latest_arrived_date,
       0::numeric AS arrived_cost_sar,
       NULL::numeric AS unit_cost_sar,
       NULL::numeric AS avg_purchase_unit_price,
@@ -2583,7 +2745,18 @@ inventory_depletion_products AS (
       et_box_snapshot_date,
       round(et_historical_supply_quantity::numeric, 0) AS et_declared_shipped_quantity,
       round(et_historical_supply_quantity::numeric, 0) AS et_historical_supply_quantity,
+      round(cost_shipped_quantity::numeric, 0) AS cost_table_shipped_quantity,
+      round(cost_arrived_quantity::numeric, 0) AS cost_table_arrived_quantity,
+      round(cost_incoming_quantity::numeric, 0) AS cost_table_incoming_quantity,
+      cost_batch_count,
+      cost_first_shipped_date,
+      cost_latest_shipped_date,
+      cost_latest_arrived_date,
+      cost_batch_nos,
+      cost_standard_goods_sn_list,
+      round(supply_evidence_quantity::numeric, 0) AS supply_evidence_quantity,
       round(greatest(coalesce(et_estimated_available_qty,0) + coalesce(et_ship_in_transit_quantity,0) + coalesce(gross_sold_quantity,0) - coalesce(et_historical_supply_quantity,0), 0)::numeric, 0) AS et_ship_capture_gap_quantity,
+      round(greatest(coalesce(et_estimated_available_qty,0) + coalesce(et_ship_in_transit_quantity,0) + coalesce(gross_sold_quantity,0) - coalesce(supply_evidence_quantity,0), 0)::numeric, 0) AS supply_reconcile_gap_quantity,
       round(et_ship_in_transit_quantity::numeric, 0) AS et_ship_in_transit_quantity,
       round(et_ship_pending_review_quantity::numeric, 0) AS et_ship_pending_review_quantity,
       round(et_ship_arrived_quantity::numeric, 0) AS et_ship_arrived_quantity,
@@ -2602,6 +2775,7 @@ inventory_depletion_products AS (
        OR coalesce(et_estimated_available_qty,0) > 0
        OR coalesce(et_ship_in_transit_quantity,0) > 0
        OR coalesce(et_ship_pending_review_quantity,0) > 0
+       OR coalesce(cost_shipped_quantity,0) > 0
        OR coalesce(gross_sold_quantity,0) > 0
     ORDER BY
       CASE
@@ -2630,21 +2804,23 @@ inventory_et_shipments AS (
       round(coalesce(i.cost_price,0)::numeric, 2) AS cost_price,
       round(coalesce(i.price,0)::numeric, 2) AS supply_price,
       o.status AS ship_status_code,
-      coalesce(nullif(o.status_name,''), CASE
-        WHEN coalesce(o.status,'') = '12' THEN '已到仓/已完成'
-        WHEN o.has_effective_in_transit_evidence THEN '在途/未入仓'
-        ELSE '待复核/ETA过期或无有效发运证据'
-      END) AS ship_status_name,
       CASE
-        WHEN coalesce(o.status,'') = '12' THEN 'arrived'
+        WHEN coalesce(o.status,'') = '12' THEN coalesce(nullif(o.status_name,''), '已到仓/已完成')
+        WHEN o.has_arrival_evidence THEN '已到仓/有到仓证据'
+        WHEN o.has_effective_in_transit_evidence THEN coalesce(nullif(o.status_name,''), '在途/未入仓')
+        ELSE coalesce(nullif(o.status_name,''), '待复核/缺少到仓或有效在途证据')
+      END AS ship_status_name,
+      CASE
+        WHEN coalesce(o.status,'') = '12' OR o.has_arrival_evidence THEN 'arrived'
         WHEN o.has_effective_in_transit_evidence THEN 'open'
         ELSE 'review'
       END AS shipment_group,
       CASE
         WHEN o.has_effective_in_transit_evidence THEN 0
-        WHEN coalesce(o.status,'') = '12' THEN 2
+        WHEN coalesce(o.status,'') = '12' OR o.has_arrival_evidence THEN 2
         ELSE 1
       END AS shipment_sort,
+      o.has_arrival_evidence,
       o.storeroom_title,
       o.transport_title,
       round(coalesce(o.case_number,0)::numeric, 0) AS case_number,
@@ -2659,11 +2835,60 @@ inventory_et_shipments AS (
       o.ship_time,
       o.into_time,
       o.end_time,
+      o.shipment_departure_basis_time,
+      o.shipment_arrival_basis_time,
+      o.domestic_warehouse_in_time,
+      o.domestic_warehouse_out_time,
+      o.overseas_receipt_time,
+      o.overseas_warehouse_in_time,
+      o.box_eta_time,
+      o.etd_start_date,
+      o.et_box_event_count,
+      o.logistics_status_summary,
+      o.box_status_summary,
+      o.destination_city_summary,
+      o.destination_storeroom_summary,
+      o.transport_name_summary,
+      o.track_send_city,
+      o.track_arrive_city,
+      o.track_box_qty,
+      o.track_status,
+      o.track_status_name,
+      o.track_sign_time,
+      o.track_domestic_warehouse_in_time,
+      o.track_domestic_warehouse_out_time,
+      o.track_overseas_warehouse_in_time,
+      o.track_overseas_receipt_time,
+      o.full_tracking_events,
       o.waybill_code,
       nullif(o.raw_summary->>'ETD_ETA','') AS etd_eta,
       o.eta_end_date,
       o.has_effective_in_transit_evidence,
-      nullif(o.raw_summary->>'RemainingTime','') AS remaining_time
+      nullif(o.raw_summary->>'RemainingTime','') AS remaining_time,
+      CASE
+        WHEN jsonb_array_length(coalesce(o.full_tracking_events, '[]'::jsonb)) > 0 THEN o.full_tracking_events
+        ELSE coalesce((
+          SELECT jsonb_agg(
+            jsonb_build_object(
+              'time', v.event_time,
+              'location', v.location,
+              'detail', v.detail,
+              'kind', v.kind
+            )
+            ORDER BY v.event_time, v.rank
+          )
+          FROM (
+            VALUES
+              (1, o.etd_start_date::timestamp, 'ETD', 'ETD 预计发运', 'etd'),
+              (2, o.domestic_warehouse_in_time, '国内仓', '国内仓入仓', 'domestic_in'),
+              (3, o.domestic_warehouse_out_time, '国内仓', concat_ws(' · ', '国内仓发出', nullif(o.logistics_status_summary,'')), 'domestic_out'),
+              (4, coalesce(o.box_eta_time, o.eta_end_date::timestamp), coalesce(nullif(o.destination_city_summary,''), nullif(o.storeroom_title,''), '海外仓'), 'ETA 预计到仓', 'eta'),
+              (5, o.overseas_receipt_time, coalesce(nullif(o.destination_storeroom_summary,''), nullif(o.storeroom_title,''), '海外仓'), '海外仓收货', 'overseas_receipt'),
+              (6, o.overseas_warehouse_in_time, coalesce(nullif(o.destination_storeroom_summary,''), nullif(o.storeroom_title,''), '海外仓'), '海外仓入仓', 'overseas_in')
+          ) AS v(rank, event_time, location, detail, kind)
+          WHERE v.event_time IS NOT NULL
+        ), '[]'::jsonb)
+      END AS tracking_events
     FROM fact.et_ship_order_item i
     JOIN inventory_et_ship_order_enriched o USING (ship_order_id)
     WHERE coalesce(nullif(dim.product_match_key(i.standard_goods_sn),''), nullif(i.match_key,''), '') <> ''

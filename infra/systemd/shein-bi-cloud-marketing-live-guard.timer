@@ -1,0 +1,10 @@
+[Unit]
+Description=Run SHEIN BI cloud marketing live guard daily
+
+[Timer]
+OnCalendar=*-*-* 10:30:00
+Persistent=false
+Unit=shein-bi-cloud-marketing-live-guard.service
+
+[Install]
+WantedBy=timers.target

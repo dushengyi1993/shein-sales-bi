@@ -446,6 +446,22 @@ CREATE TABLE IF NOT EXISTS fact.et_ship_order_box (
   updated_at timestamptz DEFAULT now()
 );
 
+
+CREATE TABLE IF NOT EXISTS fact.et_ship_order_track (
+  ship_order_id text PRIMARY KEY REFERENCES fact.et_ship_order(ship_order_id),
+  batch_id text,
+  send_city text,
+  arrive_city text,
+  box_qty numeric,
+  status text,
+  status_name text,
+  sign_time timestamp,
+  tracks jsonb DEFAULT '[]'::jsonb,
+  raw_summary jsonb DEFAULT '{}'::jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+
+
 CREATE TABLE IF NOT EXISTS fact.et_box (
   box_id text PRIMARY KEY,
   batch_id text,

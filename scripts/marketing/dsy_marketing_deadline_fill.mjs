@@ -20,6 +20,7 @@ import {
   requireStoreIdentitySnapshot,
   storeIdentityEvalBody,
 } from '../../lib/shein_store_identity.mjs';
+import {recoverSheinLoginIfNeeded} from '../../lib/shein_login_recovery.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
@@ -429,76 +430,14 @@ async function assertCurrentStoreIdentity(cdp, sessionId, store, context) {
   });
 }
 
-async function readPageLoginState(cdp, sessionId) {
-  return await evalJs(cdp, sessionId, `
-    const text = document.body?.innerText || '';
-    return {
-      href: location.href,
-      title: document.title || '',
-      isLogin: location.href.includes('/login/')
-        || text.includes('请输入账号')
-        || text.includes('请输入密码')
-        || (text.includes('账号登录') && text.includes('密码') && text.includes('登录')),
-      tail: text.slice(-1000),
-    };
-  `).catch(err => ({href: '', title: '', isLogin: false, error: err.message, tail: ''}));
-}
-
-async function clickLoginOnce(cdp, sessionId) {
-  const target = await evalJs(cdp, sessionId, `
-    const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-    const textOf = el => String(el?.innerText || el?.textContent || '').replace(/\\s+/g, ' ').trim();
-    const buttons = [...document.querySelectorAll('button,[role=button],a')]
-      .filter(visible)
-      .map(el => ({el, text: textOf(el), disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true'}));
-    const btn = buttons.find(x => !x.disabled && x.text.includes('继续登录') && x.text.length <= 20)
-      || buttons.find(x => !x.disabled && x.text === '登录')
-      || buttons.find(x => !x.disabled && x.text.includes('登录') && x.text.length <= 12);
-    if (!btn) {
-      return {
-        found: false,
-        href: location.href,
-        buttons: buttons.map(x => x.text).filter(Boolean).slice(0, 20),
-        tail: (document.body?.innerText || '').slice(-800),
-      };
-    }
-    btn.el.scrollIntoView({block: 'center', inline: 'center'});
-    const rect = btn.el.getBoundingClientRect();
-    return {found: true, href: location.href, text: btn.text, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
-  `);
-  if (!target?.found) return {clicked: false, ...target};
-  await cdp.call('Input.dispatchMouseEvent', {type: 'mouseMoved', x: target.x, y: target.y, button: 'none'}, sessionId);
-  await cdp.call('Input.dispatchMouseEvent', {type: 'mousePressed', x: target.x, y: target.y, button: 'left', clickCount: 1}, sessionId);
-  await cdp.call('Input.dispatchMouseEvent', {type: 'mouseReleased', x: target.x, y: target.y, button: 'left', clickCount: 1}, sessionId);
-  return {clicked: true, ...target};
-}
-
 async function recoverLoginIfNeeded(cdp, sessionId) {
-  const attempts = [];
-  let before = await readPageLoginState(cdp, sessionId);
-  for (let wait = 0; wait < 10 && !before.isLogin && !(before.tail || '').trim(); wait += 1) {
-    await sleep(500);
-    before = await readPageLoginState(cdp, sessionId);
-  }
-  let state = before;
-  if (!state.isLogin) return {needed: false, ok: true, before, attempts};
-
-  for (let attempt = 1; attempt <= 2 && state.isLogin; attempt += 1) {
-    if (attempt > 1) {
-      await cdp.call('Page.reload', {ignoreCache: true}, sessionId).catch(async () => {
-        await evalJs(cdp, sessionId, `location.reload(); return {href: location.href};`).catch(() => null);
-      });
-      await sleep(2500);
-      state = await readPageLoginState(cdp, sessionId);
-      if (!state.isLogin) break;
-    }
-    const click = await clickLoginOnce(cdp, sessionId);
-    await sleep(4500);
-    state = await readPageLoginState(cdp, sessionId);
-    attempts.push({attempt, click, after: state});
-  }
-
-  return {needed: true, ok: !state.isLogin, before, attempts, after: state};
+  return await recoverSheinLoginIfNeeded({
+    evaluate: (body, arg) => evalJs(cdp, sessionId, body, arg),
+    dispatchMouseEvent: params => cdp.call('Input.dispatchMouseEvent', params, sessionId),
+    reload: () => cdp.call('Page.reload', {ignoreCache: true}, sessionId).catch(() => evalJs(cdp, sessionId, `location.reload(); return {href: location.href};`)),
+    sleep,
+    maxAttempts: 3,
+  });
 }
 
 async function waitForActivityOrLogin(cdp, sessionId, timeoutMs = 35_000) {

@@ -357,6 +357,28 @@ async function browserFetchJson(cdp, args, url) {
   return out.json;
 }
 
+async function browserPostJson(cdp, args, url, bodyParams = {}) {
+  const absolute = url.startsWith('http') ? url : args.baseUrl + url;
+  const pathOrUrl = url.startsWith('http') ? absolute : url;
+  const script = `(async()=>{` +
+    `try{` +
+    `const raw=${JSON.stringify(pathOrUrl)};` +
+    `const params=${JSON.stringify(bodyParams)};` +
+    `const sameOriginBase=(location&&/^https?:/.test(location.origin))?location.origin:${JSON.stringify(args.baseUrl)};` +
+    `const target=/^https?:/i.test(raw)?raw:new URL(raw,sameOriginBase).href;` +
+    `const body=new URLSearchParams(); Object.entries(params||{}).forEach(([k,v])=>body.set(k,String(v==null?'':v)));` +
+    `const r=await fetch(target,{method:'POST',credentials:'include',headers:{'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8','X-Requested-With':'XMLHttpRequest','Accept':'application/json, text/javascript, */*; q=0.01'},body});` +
+    `const text=await r.text(); let json=null; try{json=JSON.parse(text)}catch(e){};` +
+    `return {ok:r.ok,status:r.status,url:r.url,contentType:r.headers.get('content-type'),text:text.slice(0,400),json};` +
+    `}catch(e){return {ok:false,status:0,url:${JSON.stringify(absolute)},contentType:'',text:String(e&&e.message||e),json:null,fetchError:String(e&&e.stack||e)}};` +
+  `})()`;
+  const out = await cdp.eval(script);
+  if (!out.ok || !out.json) {
+    throw new Error(`ET POST failed status=${out.status} url=${absolute} head=${out.text}`);
+  }
+  return out.json;
+}
+
 async function browserFetchText(cdp, args, url) {
   const absolute = url.startsWith('http') ? url : args.baseUrl + url;
   const pathOrUrl = url.startsWith('http') ? absolute : url;
@@ -531,6 +553,7 @@ const ENDPOINTS = {
     details: [
       {name: 'ship_order_item', idField: 'ShipOrderId', url: (id, ctx) => withParams('/Delivery/ShipOrder/GetShipOrderDetailForm', {page: 1, limit: ctx.detailLimit, shipOrderId: id})},
       {name: 'ship_order_box', idField: 'ShipOrderId', url: (id, ctx) => withParams('/Delivery/ShipOrder/GetBoxDetailForm', {page: 1, limit: ctx.detailLimit, shipOrderId: id})},
+      {name: 'ship_order_track', idField: 'ShipOrderId', method: 'post', url: (id, ctx) => withParams('/Delivery/ShipOrder/GetTrackDetailForm', {}), body: (id, ctx) => ({shipOrderId: id})},
     ],
   },
   box_list: {
@@ -932,6 +955,10 @@ async function fetchDetails(cdp, args, def, listRows, ctx) {
         if (d.type === 'html') {
           const out = await browserFetchText(cdp, args, d.url(id, ctx));
           rows.push(d.parse ? d.parse(id, out, ctx) : {...out, __parent_id: id});
+        } else if (d.method === 'post') {
+          const json = await browserPostJson(cdp, args, d.url(id, ctx), d.body ? d.body(id, ctx) : {});
+          const base = json?.data && typeof json.data === 'object' ? json.data : {raw: json};
+          rows.push({...base, __parent_id: id, __state: json?.state || '', __message: json?.message || ''});
         } else {
           const json = await browserFetchJson(cdp, args, d.url(id, ctx));
           rows.push(...rowsFromJson(json).map(r => ({...r, __parent_id: id})));

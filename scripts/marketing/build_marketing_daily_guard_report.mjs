@@ -287,6 +287,10 @@ function itemRows(doc) {
   return [];
 }
 
+function planRows(doc) {
+  return itemRows(doc).filter(row => row && typeof row === 'object');
+}
+
 function storeCoverageFromPlan(doc) {
   const declared = Array.isArray(doc?.scope?.storeKeys) ? doc.scope.storeKeys
     : (Array.isArray(doc?.stores) ? doc.stores : []);

@@ -18,6 +18,7 @@ import {
   requireStoreIdentitySnapshot,
   storeIdentityEvalBody,
 } from '../../lib/shein_store_identity.mjs';
+import {recoverSheinLoginIfNeeded} from '../../lib/shein_login_recovery.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
@@ -344,47 +345,14 @@ async function connectStorePage(store) {
   return cdp;
 }
 
-async function readPageLoginState(cdp) {
-  return await cdp.eval(`
-    const text = document.body?.innerText || '';
-    return {
-      href: location.href,
-      title: document.title || '',
-      isLogin: location.href.includes('/login/') || text.includes('请输入账号') || text.includes('请输入密码') || (text.includes('账号登录') && text.includes('密码') && text.includes('登录')),
-      tail: text.slice(-1000),
-    };
-  `).catch(err => ({href: '', title: '', isLogin: false, error: err.message, tail: ''}));
-}
-
-async function clickLoginOnce(cdp) {
-  const target = await cdp.eval(`
-    const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-    const textOf = el => (el?.innerText || el?.textContent || '').trim();
-    const buttons = [...document.querySelectorAll('button,[role=button],a')]
-      .filter(visible)
-      .map(el => ({el, text: textOf(el), disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true'}));
-    const btn = buttons.find(x => !x.disabled && x.text.includes('继续登录') && x.text.length <= 20)
-      || buttons.find(x => !x.disabled && x.text === '登录')
-      || buttons.find(x => !x.disabled && x.text.includes('登录') && x.text.length <= 12);
-    if (!btn) return {found: false, href: location.href, buttons: buttons.map(x => x.text).filter(Boolean).slice(0, 20), tail: (document.body?.innerText || '').slice(-800)};
-    btn.el.scrollIntoView({block: 'center', inline: 'center'});
-    const rect = btn.el.getBoundingClientRect();
-    return {found: true, href: location.href, text: btn.text, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
-  `);
-  if (!target.found) return {clicked: false, ...target};
-  await cdp.call('Input.dispatchMouseEvent', {type: 'mouseMoved', x: target.x, y: target.y, button: 'none'});
-  await cdp.call('Input.dispatchMouseEvent', {type: 'mousePressed', x: target.x, y: target.y, button: 'left', clickCount: 1});
-  await cdp.call('Input.dispatchMouseEvent', {type: 'mouseReleased', x: target.x, y: target.y, button: 'left', clickCount: 1});
-  return {clicked: true, ...target};
-}
-
 async function recoverLoginIfNeeded(cdp) {
-  const before = await readPageLoginState(cdp);
-  if (!before.isLogin) return {needed: false, before};
-  const click = await clickLoginOnce(cdp);
-  await sleep(4500);
-  const after = await readPageLoginState(cdp);
-  return {needed: true, before, click, after, ok: !after.isLogin};
+  return await recoverSheinLoginIfNeeded({
+    evaluate: (body, arg) => cdp.eval(body, arg),
+    dispatchMouseEvent: params => cdp.call('Input.dispatchMouseEvent', params),
+    reload: () => cdp.call('Page.reload', {ignoreCache: true}).catch(() => cdp.eval(`location.reload(); return {href: location.href};`)),
+    sleep,
+    maxAttempts: 3,
+  });
 }
 
 async function gotoMarketingList(cdp) {

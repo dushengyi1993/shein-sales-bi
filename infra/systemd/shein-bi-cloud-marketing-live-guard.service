@@ -1,0 +1,28 @@
+[Unit]
+Description=SHEIN BI cloud marketing live guard scan
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=sheinops
+Group=sheinops
+WorkingDirectory=/opt/shein-bi/app
+Environment=HOME=/home/sheinops
+Environment=TZ=Asia/Shanghai
+Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_BI_MARKETING_LIVE_LOG_DIR=/srv/shein-bi/logs/cloud-marketing-live-guard
+Environment=SHEIN_BI_MARKETING_LIVE_SCAN_TIMEOUT_SEC=2400
+Environment=SHEIN_BI_MARKETING_LIVE_SCAN_KILL_AFTER_SEC=60
+TimeoutStartSec=3600
+Nice=12
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUWeight=40
+MemoryHigh=1800M
+MemoryMax=2400M
+OOMPolicy=stop
+KillMode=control-group
+ExecStartPre=-/usr/bin/env node /opt/shein-bi/app/scripts/cleanup_shein_store_browsers.mjs --all --cleanup-chrome-tmp --kill-after-sec 5
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_marketing_live_guard.sh
+ExecStartPost=-/usr/bin/env node /opt/shein-bi/app/scripts/cleanup_shein_store_browsers.mjs --all --cleanup-chrome-tmp --kill-after-sec 5
