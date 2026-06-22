@@ -54,8 +54,8 @@
 
 截至 2026-06-22 交接前核对：
 
-- GitHub `main` / release `2026.06.22-agent-handoff-baseline` 指向 `00e8035b19aab499af32a7b77b6658921597c1a6`，本地工作区与 `origin/main` 对齐且无未提交改动。
-- 云端 `/opt/shein-bi/app` 是生产运行权威，但当前不是 GitHub 最新 commit：2026-06-22 22:14 只读审计显示云端 `HEAD=a722a6bfbb9f39b8bcab000e7feaa2ee52f42423`，`origin/main=00e8035b19aab499af32a7b77b6658921597c1a6`，`HEAD...origin/main=0/53`。
+- GitHub `main` / release `2026.06.22-agent-handoff-v2` 指向 `5b687297b5db26ff4c5ca56c1115cbf78eb4a146`，本地工作区与 `origin/main` 对齐且无未提交改动。
+- 云端 `/opt/shein-bi/app` 是生产运行权威，但当前不是 GitHub 最新 commit：2026-06-22 22:14 只读审计显示云端 `HEAD=a722a6bfbb9f39b8bcab000e7feaa2ee52f42423`；随后 `origin/main` 已更新到 `5b687297b5db26ff4c5ca56c1115cbf78eb4a146`，云端相对远端仍落后 `53` 个提交。
 - 云端工作区仍有大量 tracked diff 和未跟踪运行产物：`git status` 显示多处 `M/D/??`，未跟踪文件约 `2538` 个，其中包含 `.venv-et/` 等不应提交的运行环境。
 - 这说明 GitHub 目前是“最干净、可恢复、可交接的源码基线”，但不能声称它已经覆盖云端生产目录，也不能反过来说云端差异都应上传。
 
