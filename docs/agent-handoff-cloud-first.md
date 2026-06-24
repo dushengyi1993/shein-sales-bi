@@ -1,6 +1,6 @@
 # SHEIN BI Agent 交接说明（云端优先）
 
-> 更新时间：2026-06-22
+> 更新时间：2026-06-24
 > 交接定位：这是给后续 agent 的项目入口说明。当前 GitHub release 是“交接源码基线”，**不等同于云端已经部署到该 commit**。生产验收必须以云端运行态为准。
 
 ## 1. 当前系统定位
@@ -52,12 +52,12 @@
 
 ## 4. 云端是验收权威，不是干净发布源
 
-截至 2026-06-22 交接前核对：
+截至 2026-06-24 交接前核对：
 
-- GitHub `main` / release `2026.06.22-agent-handoff-v2` 指向 `5b687297b5db26ff4c5ca56c1115cbf78eb4a146`，本地工作区与 `origin/main` 对齐且无未提交改动。
-- 云端 `/opt/shein-bi/app` 是生产运行权威，但当前不是 GitHub 最新 commit：2026-06-22 22:14 只读审计显示云端 `HEAD=a722a6bfbb9f39b8bcab000e7feaa2ee52f42423`；随后 `origin/main` 已更新到 `5b687297b5db26ff4c5ca56c1115cbf78eb4a146`，云端相对远端仍落后 `53` 个提交。
-- 云端工作区仍有大量 tracked diff 和未跟踪运行产物：`git status` 显示多处 `M/D/??`，未跟踪文件约 `2538` 个，其中包含 `.venv-et/` 等不应提交的运行环境。
-- 这说明 GitHub 目前是“最干净、可恢复、可交接的源码基线”，但不能声称它已经覆盖云端生产目录，也不能反过来说云端差异都应上传。
+- GitHub `main` / release `2026.06.23-bi-traffic-detail` 指向 `3f25f7c2d87b822e8d564c8ff094c3f5252036e0`，包含流量页 SKC 明细优化和云端销售刷新锁修复。
+- 云端 `/opt/shein-bi/app` 是生产运行权威，但当前仍不是 GitHub 最新 commit：2026-06-24 只读审计显示云端 `HEAD=5025d89`，且 `scripts/bi_app/client.js`、`scripts/bi_app/styles.css`、`scripts/cloud_bi_refresh.sh`、`scripts/generate_bi_portal.mjs`、`scripts/generate_bi_portal_shell.mjs` 等 tracked 文件有生产热修差异。
+- 云端运行态已验证：正式域名未鉴权返回 `401`，`shein-bi-cloud-today.service` 锁修复后 `Result=success`，`cloud_ops_watchdog.mjs --dry-run` 返回 `ok=true / issues=[]`，`productTrafficDaily` section 返回 `200` 且包含 SKC 和链接状态字段。
+- 这说明 GitHub 目前是“最干净、可恢复、可交接的源码基线”，但不能声称它完全覆盖云端生产目录，也不能反过来说云端差异都应上传。当前已知可回填的 2026-06-23 热修已经进入 GitHub；剩余云端差异仍需按运行产物 / 生产热修 / 过期文件分层审计。
 
 因此：
 
@@ -165,6 +165,16 @@ bash scripts/cloud_bi_refresh.sh today intraday
 ```bash
 bash scripts/cloud_bi_refresh.sh yesterday final
 ```
+
+销售刷新锁检查：
+
+```bash
+systemctl show shein-bi-cloud-today.service -p Environment
+ls -l /opt/shein-bi/app/state/locks/shein-bi-cloud-sales-refresh.lock
+node scripts/cloud_ops_watchdog.mjs --dry-run
+```
+
+`SHEIN_BI_REFRESH_LOCK_FILE` 应指向 `/opt/shein-bi/app/state/locks/shein-bi-cloud-sales-refresh.lock`。如果日志出现 `/tmp/shein-bi-cloud-sales-refresh.lock: Permission denied`，不要只删 `/tmp` 文件；应确认 `scripts/cloud_bi_refresh.sh` 在 `flock` 前调用 `prepare_shared_lock_file "$LOCK_FILE"`，并重载 systemd。
 
 检查飞书问数机器人：
 

@@ -1,6 +1,6 @@
 # 云端 BI 运行说明
 
-> 当前权威状态：2026-06-20。V2 是唯一正式 BI 入口；本地 BI 已封存，V1 仅保留 GitHub archive 恢复点。
+> 当前权威状态：2026-06-24。V2 是唯一正式 BI 入口；本地 BI 已封存，V1 仅保留 GitHub archive 恢复点。
 
 ## 1. 当前入口
 
@@ -9,7 +9,7 @@
 - 云服务器：腾讯云 Lighthouse 东京，Ubuntu 24.04 x86_64，代码目录 `/opt/shein-bi/app`。
 - 服务组成：HAProxy/Caddy 负责公网 443 分流与 TLS，Nginx 在服务器本机 `127.0.0.1:8080` 保留 Basic Auth 并反代到 BI Portal `127.0.0.1:8787`；PostgreSQL + Metabase 由 Docker Compose 承载。
 - 域名入口：`https://shein-bi.dushengyi.xyz/`；服务器内部仍由 Nginx `127.0.0.1:8080` 转发到 BI Portal。
-- GitHub 仓库 `main` 是源码恢复基线；云端有值得保存的脚本、配置模板、门户静态产物或自动运营能力时，先同步回 GitHub，再部署到服务器。注意：截至 2026-06-22 交接核对，GitHub `main` / release `2026.06.22-agent-handoff-v2` 在 `5b687297b5db26ff4c5ca56c1115cbf78eb4a146`，但云端 `/opt/shein-bi/app` 仍在 `a722a6bfbb9f39b8bcab000e7feaa2ee52f42423` 且有大量 tracked/untracked 运行差异；因此 GitHub 是“干净源码基线”，不是“已部署生产版本”。
+- GitHub 仓库 `main` 是源码恢复基线；云端有值得保存的脚本、配置模板、门户静态产物或自动运营能力时，先同步回 GitHub，再部署到服务器。注意：截至 2026-06-24 交接核对，GitHub release `2026.06.23-bi-traffic-detail` 指向 `3f25f7c`，但云端 `/opt/shein-bi/app` 仍显示 `HEAD=5025d89` 且有 tracked 运行差异；其中流量页和刷新锁热修文件已同步到生产。GitHub 是“干净源码基线”，云端运行态是“业务真相”，两者不一致时不能直接 `pull/reset/add-all`。
 - 注意：`outputs/bi-portal/index.html` / `data.json` 会作为可恢复静态快照纳入 GitHub；服务器执行 `git reset --hard origin/main` 或类似部署后，可能把实时 BI 页面覆盖成仓库快照。每次服务器拉取/重置代码后，都要立即跑一次 `scripts/cloud_bi_refresh.sh today intraday` 或对应 systemd service，确认页面生成时间和销售源时间回到当前。
 - 云端 Git 同步红线：`/opt/shein-bi/app` 必须由 `sheinops:sheinops` 持有，不要用 `sudo git pull`。仓库 remote 使用 `git@github.com:dushengyi1993/shein-sales-bi.git`，`core.sshCommand` 必须指向 `/home/sheinops/.ssh/shein_bi_deploy`；不要指向 `/root/.ssh/...`，否则普通运维用户无法 fetch/pull。生产生成的 `outputs/bi-portal/data.json` / `index.html` 在服务器上用 `git update-index --skip-worktree` 标记为本地生成物，避免定时刷新后的实时页面把后续 `git pull --ff-only` 阻塞。若云端出现未提交热修复，先分类哪些应回填 GitHub、哪些是运行产物；在完成清单、备份和回滚方案前，不得 `git add -A`、`git reset --hard`、`git clean -fdx` 或强行让云端追 `origin/main`。
 - 发布顺序：BI 用户可见改动先在云端页面或云端服务输出验证，用户确认后再进入 GitHub `main` / release。本地验证只能证明开发产物可运行，不能替代云端最终审核。
@@ -57,6 +57,7 @@ ET、统一日更补采、异常通知 watchdog、只读问数机器人（云端
 - 重任务 timer 均不做开机补跑（`Persistent=false`）。服务器重启错过窗口时，由 watchdog 的数据过期/日更状态暴露，再人工选择低峰补跑，避免重启后销售、ET、日更、登录态管家同时恢复执行。
 - `daily-refresh` 启动前会等待销售/昨日销售/ET 写入任务结束，并检查 `MemAvailable`。可用内存低于阈值时写 `skipped_low_memory` 状态后跳过本轮；宁可让慢变数据晚一点，也不能拖慢销售刷新和 BI 页面。
 - `daily-refresh`、ET、登录态管家、销售刷新、昨日销售、订单闭环、RTV 校验均有 `MemoryHigh` / `MemoryMax` / `OOMPolicy=stop` 护栏；如果单个任务越界，应失败并告警，不能把整台服务器拖到 OOM。
+- 销售刷新锁由 `SHEIN_BI_REFRESH_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-sales-refresh.lock` 管理，`scripts/cloud_bi_refresh.sh` 会在 `flock` 前调用 `prepare_shared_lock_file "$LOCK_FILE"`。不要使用 `/tmp/shein-bi-cloud-sales-refresh.lock` 作为长期锁文件；历史 `/tmp` 残留曾导致 `shein-bi-cloud-today.service` 启动阶段 `Permission denied`，修复标准是迁回 app `state/locks`、`systemctl daemon-reload`、`systemctl reset-failed`，再跑 `node scripts/cloud_ops_watchdog.mjs --dry-run` 得到 `issues=[]`。
 - 2026-06-20 已确认旧 `financeData` section 下线：线上 `/api/bi/section/financeData` 应返回 `404`；`/v1/` 应返回 `410`，`/v2/` 只跳转到根路径。不要为 V1/旧财务页面恢复预热、缓存或 timer。
 - `inventoryTrend` 不是 ET 实盘库存，而是 SHEIN 前台展示库存趋势。2026-06-20 云端实测 `inventoryTrend.json` 约 `242KB`、gzip 约 `20KB`；若后续怀疑 21MB 大 section，先查线上 `outputs/bi-portal/sections/` 真实体积，不按旧印象处理。
 - 旧分散 timer `shein-bi-cloud-link-business.timer`、`shein-bi-cloud-rtv-verify.timer`、`shein-bi-cloud-openapi-hl.timer` 已在生产机 `masked`，不要只看旧 unit 文件存在就重新启用。
@@ -70,6 +71,7 @@ ET、统一日更补采、异常通知 watchdog、只读问数机器人（云端
 - 当天刷新入口：`scripts/cloud_bi_refresh.sh today`
 - 前一天最终版入口：`scripts/cloud_bi_refresh.sh yesterday`
 - Portal section 预热有两层：`cloud_bi_refresh.sh` 生成 core 后会后台启动 `scripts/prewarm_bi_portal_sections.sh`；`serve_bi_portal.mjs` 还会在服务启动和首页访问时检测 `data.json.generatedAt`，通过 core warmup watcher 兜底预热 section，防止用户打开页面时才现场生成。`homeRankings` 是首页销售/排行轻量 section，服务端会裁掉首页不用的重复 `goods_title` / `skc_list` 文本并写 `.json.gz` sidecar；完整 `rankings` 仍保留给详情/子页。`homeProfit` 只从当前 `profit` section cache 派生；如果当前 `profit` 缺失或过旧，前端会把 `staleSource=true` / `sourceGeneratedAt` 不匹配的摘要视为不可用，不能拿旧利润当业务真相。
+- `productTrafficDaily` section 当前是日期 × 店铺 × 标准货号 × SKC 粒度，并从最新链接主快照带出 `shelf_status_name`、`is_on_shelf`、`is_sold_out`、`is_out_shelf` 等字段。流量页前端按顶部时间范围聚合成店铺 × 标准货号 × SKC 明细，默认只看已上架链接；若要追溯历史某日当时的上架状态，需要另做日期对齐的历史状态层，不能把当前快照解释成历史状态事实。
 - 数据库备份入口：`scripts/cloud_db_backup.sh`
 - ET 云端入口：`scripts/cloud_et_forwarder_sync.sh today`
 - 飞书日报云端入口：`scripts/cloud_daily_lark_report.sh today` 仅保留为手动临时发送；正式自动发送当前关闭，`scripts/cloud_morning_chain.sh` 默认跳过日报后直接启动慢变日更。
@@ -132,6 +134,7 @@ GitHub 应保存：
 - 云端未鉴权访问 `/api/health` 应返回 `401`。
 - 带 Basic Auth 访问 `/api/health` 应返回 `200` 且 `ok=true`。
 - `shein-bi-cloud-today.timer` 应按每两小时真实触发。
+- `shein-bi-cloud-today.service` 的环境变量应包含 `SHEIN_BI_REFRESH_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-sales-refresh.lock`；锁文件应可被 root / sheinops 写入。若 watchdog 只剩 `today.service failed`，先查 `journalctl -u shein-bi-cloud-today.service` 是否为锁文件权限问题。
 - `shein-bi-db-backup.timer` 应每日生成 `shein_bi.dump` 与 `metabase.dump`。
 - ET 已验证可手动跑 `scripts/cloud_et_forwarder_sync.sh today`，能登录、抓取、入仓并刷新门户；失败时保留上一版 ET 数据，不应阻断销售 BI。
 - 飞书日报已验证可手动跑 `scripts/cloud_daily_lark_report.sh today`，文字和日报图能发送；成功后会写入当天 sent flag，避免同日 timer 重复发送。

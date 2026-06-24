@@ -85,6 +85,8 @@ description: SHEIN 营销活动报名、优惠券、限时折扣和价格栈守�
 
 使用当前项目规则和用户确认后的最新计划，不要临场发明利润率。
 
+- 后续每次生成/填报普通营销活动方案，必须以上一次用户确认并已经真实执行或等待执行的“最终版” `selection-plan + price-overrides` 为基准，继承其中的用户备注、固定价、特殊利润率、允许低于默认红线的例外、货号归并和小数微调；不能回到旧草稿、默认利润率或重新扫描后的默认策略从头重算。新一轮云端/后台数据只用于发现新增链接、活动页新增可报行、曝光 Top5 变化、平台最低降幅、成本/库存变化和旧证据失效，并且必须在 source summary / 执行方案里写明 baseline 文件路径。找不到可靠上期最终版时，先报告 blocker，不能直接出可执行方案。
+- 普通活动填报价不要批量使用整百/整数固定价。用户已确认：固定价或用户备注价可以在不越过平台价格上限、目标价底线和利润/成本安全线的前提下做几毛钱级别的小数微调，例如 `160` 可填成 `159.57` 或 `160.28`。执行前必须检查 `price-overrides` 中目标行不存在整数价；若仍有整数价，先生成 `jitter` 修正版并用修正版预填/提交，不能沿用未微调旧文件。
 - 曝光前五：维度是“同一个标准货号在所有店铺、所有链接中的 7 天曝光 Top 5”，不是每店前五。
 - 高曝光力度：如果原本目标利润率较高，可以让全局曝光 Top 5 的链接利润率降低 5 个点，但不能低于底价/利润底线；如果原本目标利润率已经低，例如 15%，不要继续压低 Top 5，而是把其他链接利润率提高 5 个点。
 - 剔除项若用户明确批准可报，按用户批准的利润/成本口径进入方案；未批准前必须单列，不得暗中并入。
@@ -222,9 +224,11 @@ node scripts/marketing/submit_coupon_activity_goods.mjs --stores <allStores> --a
 
 验收口径：
 
-- 普通活动：计划行全部在已报/审核中集合，缺失 0，价格不一致 0，页面计划外可报名 `extraAvailableRows=0`。
+- 普通活动：计划行全部在已报/审核中集合，缺失 0，硬性价格不一致 0，页面计划外可报名 `extraAvailableRows=0`。
+- 验收必须显式使用当前最终版 `selection-plan + price-overrides`；若单店结果文件被演示预填/不提交覆盖，不能据此判定未提交，应以 live 回读或可继承的成功回读证据闭合。
+- 已报接口不回传活动价时，可以用同一 `store + activity + skc` 的提交前填价复核文件作为价格证据；但必须标出 `priceUnavailableButFillVerified`。平台最低降幅造成的小幅压价（例如差额低于 `1 SAR`）不算硬性错价，仍要记录来源。
 - 优惠券：价格保障券应为 `0`；可选流量券当前可立即安全新增 `toSubmit=0`；剩余未报必须有明确阻断层和结束时间。
-- 产物要有人话版汇总，例如 `outputs/reports/marketing-m12-coupon-final-status-YYYY-MM-DD.md/json/csv`。
+- 产物要有人话版汇总，例如 `outputs/reports/marketing-signup-<activities>-final-status-YYYY-MM-DD.md/json` 或 `outputs/reports/marketing-m12-coupon-final-status-YYYY-MM-DD.md/json/csv`。
 
 ### 7. 活动生效后验收
 

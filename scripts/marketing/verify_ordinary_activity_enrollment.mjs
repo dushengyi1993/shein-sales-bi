@@ -124,9 +124,124 @@ function loadPlan(selectionDoc, priceDoc) {
   return {rows, missingPriceOverride};
 }
 
+function evaluateFillEvidenceDoc(doc, sourceFile, storeKey, activityId) {
+  const selection = doc.selection || {};
+  const fill = doc.fill || {};
+  const mismatches = Array.isArray(fill.mismatches) ? fill.mismatches : [];
+  const missingCost = Array.isArray(fill.missingCost) ? fill.missingCost : [];
+  const fillOutOfPlanRows = Array.isArray(fill.outOfPlanRows) ? fill.outOfPlanRows : [];
+  const selectionOutOfPlanRows = Array.isArray(selection.outOfPlanRows) ? selection.outOfPlanRows : [];
+  const selectedExpected = Number(selection.expectedSelectedCount ?? NaN);
+  const selectionTotalGoods = Number(selection.totalGoods ?? NaN);
+  const extraAvailableCountFromTotals = selection.selectionMode === 'allowlist'
+    && Number.isFinite(selectionTotalGoods)
+    && Number.isFinite(selectedExpected)
+    ? Math.max(0, selectionTotalGoods - selectedExpected)
+    : 0;
+  const extraAvailableCount = Math.max(selectionOutOfPlanRows.length, extraAvailableCountFromTotals);
+  const targets = Array.isArray(fill.targets) ? fill.targets : [];
+  const targetBySkc = new Map();
+  for (const row of targets) {
+    const skc = String(row?.skc || '').trim();
+    if (!skc) continue;
+    targetBySkc.set(skc, {
+      skc,
+      supplierNo: row.supplierNo || '',
+      canonical: row.canonical || '',
+      targetPrice: Number(row.targetPrice ?? NaN),
+      targetPriceText: row.targetPriceText || '',
+    });
+  }
+  const selectedMatchesPlan = selection.selectionMode === 'allowlist'
+    ? selection.selectedMatchesPlan === true
+    : true;
+  const priceEvidenceOk = doc.ok === true
+    && selection.ok === true
+    && fill.ok === true
+    && selectedMatchesPlan
+    && mismatches.length === 0
+    && missingCost.length === 0
+    && fillOutOfPlanRows.length === 0;
+  const ok = priceEvidenceOk && extraAvailableCount === 0;
+  return {
+    source: path.relative(ROOT, sourceFile),
+    exists: true,
+    ok,
+    reason: ok ? '' : 'fill_result_not_clean',
+    priceEvidenceOk,
+    submitted: doc.submit?.submitted === true,
+    store: doc.store || storeKey,
+    activityId: Number(doc.activity?.activityId || doc.activityId || activityId),
+    selection: {
+      ok: selection.ok === true,
+      selectedCount: selection.selectedCount ?? null,
+      expectedSelectedCount: selection.expectedSelectedCount ?? null,
+      totalGoods: selection.totalGoods ?? null,
+      missingAllowedSkcs: selection.missingAllowedSkcs || [],
+      selectedMatchesPlan,
+      extraAvailableCount,
+      outOfPlanRows: selectionOutOfPlanRows.slice(0, 20),
+    },
+    fill: {
+      ok: fill.ok === true,
+      targetCount: fill.targetCount ?? null,
+      expectedTotal: fill.expectedTotal ?? null,
+      mismatchCount: mismatches.length,
+      missingCostCount: missingCost.length,
+      outOfPlanRowsCount: fillOutOfPlanRows.length,
+    },
+    extraAvailableCount,
+    extraAvailableRows: selectionOutOfPlanRows.slice(0, 20),
+    targetBySkc,
+  };
+}
+
+function extractFillResultDocFor(doc, storeKey, activityId, sourceFile) {
+  const upperStore = String(storeKey || '').trim().toUpperCase();
+  const targetActivityId = Number(activityId || 0);
+  const directStore = String(doc?.store || doc?.storeKey || '').trim().toUpperCase();
+  const directActivityId = Number(doc?.activity?.activityId || doc?.activityId || 0);
+  if (directStore === upperStore && directActivityId === targetActivityId) {
+    return {doc, sourceFile};
+  }
+  for (const storeDoc of Array.isArray(doc?.stores) ? doc.stores : []) {
+    const storeDocKey = String(storeDoc?.store || storeDoc?.storeKey || '').trim().toUpperCase();
+    if (storeDocKey !== upperStore) continue;
+    for (const result of Array.isArray(storeDoc?.results) ? storeDoc.results : []) {
+      const resultActivityId = Number(result?.activity?.activityId || result?.activityId || 0);
+      if (resultActivityId !== targetActivityId) continue;
+      return {
+        doc: {
+          ...result,
+          store: storeDocKey,
+          summarySource: path.relative(ROOT, sourceFile),
+        },
+        sourceFile,
+      };
+    }
+  }
+  return null;
+}
+
 async function loadFillEvidenceFor(storeKey, activityId) {
   const file = path.join(args.fillResultsDir, `${String(storeKey).toUpperCase()}-${Number(activityId)}.json`);
-  if (!fsSync.existsSync(file)) {
+  const candidates = [];
+  if (fsSync.existsSync(file)) candidates.push(file);
+  try {
+    const names = await fs.readdir(args.fillResultsDir);
+    for (const name of names) {
+      if (/^summary-.*\.json$/i.test(name)) candidates.push(path.join(args.fillResultsDir, name));
+    }
+  } catch {}
+  const uniqueCandidates = [...new Set(candidates)].sort((a, b) => {
+    const aDirect = a === file ? 0 : 1;
+    const bDirect = b === file ? 0 : 1;
+    if (aDirect !== bDirect) return aDirect - bDirect;
+    const am = fsSync.existsSync(a) ? fsSync.statSync(a).mtimeMs : 0;
+    const bm = fsSync.existsSync(b) ? fsSync.statSync(b).mtimeMs : 0;
+    return bm - am;
+  });
+  if (!uniqueCandidates.length) {
     return {
       source: path.relative(ROOT, file),
       exists: false,
@@ -135,83 +250,87 @@ async function loadFillEvidenceFor(storeKey, activityId) {
       targetBySkc: new Map(),
     };
   }
-  try {
-    const doc = await readJson(file);
-    const selection = doc.selection || {};
-    const fill = doc.fill || {};
-    const mismatches = Array.isArray(fill.mismatches) ? fill.mismatches : [];
-    const missingCost = Array.isArray(fill.missingCost) ? fill.missingCost : [];
-    const fillOutOfPlanRows = Array.isArray(fill.outOfPlanRows) ? fill.outOfPlanRows : [];
-    const selectionOutOfPlanRows = Array.isArray(selection.outOfPlanRows) ? selection.outOfPlanRows : [];
-    const selectedExpected = Number(selection.expectedSelectedCount ?? NaN);
-    const selectionTotalGoods = Number(selection.totalGoods ?? NaN);
-    const extraAvailableCountFromTotals = selection.selectionMode === 'allowlist'
-      && Number.isFinite(selectionTotalGoods)
-      && Number.isFinite(selectedExpected)
-      ? Math.max(0, selectionTotalGoods - selectedExpected)
-      : 0;
-    const extraAvailableCount = Math.max(selectionOutOfPlanRows.length, extraAvailableCountFromTotals);
-    const targets = Array.isArray(fill.targets) ? fill.targets : [];
-    const targetBySkc = new Map();
-    for (const row of targets) {
-      const skc = String(row?.skc || '').trim();
-      if (!skc) continue;
-      targetBySkc.set(skc, {
-        skc,
-        supplierNo: row.supplierNo || '',
-        canonical: row.canonical || '',
-        targetPrice: Number(row.targetPrice ?? NaN),
-        targetPriceText: row.targetPriceText || '',
-      });
+  const cleanEvidenceList = [];
+  let fallback = null;
+  let firstError = null;
+  for (const candidate of uniqueCandidates) {
+    try {
+      const doc = await readJson(candidate);
+      const extracted = extractFillResultDocFor(doc, storeKey, activityId, candidate);
+      if (!extracted) continue;
+      const evidence = evaluateFillEvidenceDoc(extracted.doc, extracted.sourceFile, storeKey, activityId);
+      if (evidence.priceEvidenceOk) cleanEvidenceList.push(evidence);
+      fallback ||= evidence;
+    } catch (err) {
+      firstError ||= {file: candidate, err};
     }
-    const selectedMatchesPlan = selection.selectionMode === 'allowlist'
-      ? selection.selectedMatchesPlan === true
-      : true;
-    const priceEvidenceOk = doc.ok === true
-      && selection.ok === true
-      && fill.ok === true
-      && selectedMatchesPlan
-      && mismatches.length === 0
-      && missingCost.length === 0
-      && fillOutOfPlanRows.length === 0;
-    const ok = priceEvidenceOk && extraAvailableCount === 0;
-    return {
-      source: path.relative(ROOT, file),
-      exists: true,
-      ok,
-      reason: ok ? '' : 'fill_result_not_clean',
-      priceEvidenceOk,
-      submitted: doc.submit?.submitted === true,
-      store: doc.store || storeKey,
-      activityId: Number(doc.activity?.activityId || doc.activityId || activityId),
+  }
+  if (cleanEvidenceList.length) {
+    const merged = {
+      ...cleanEvidenceList[0],
+      source: cleanEvidenceList.map(x => x.source).join(';'),
+      submitted: cleanEvidenceList.some(x => x.submitted),
+      ok: cleanEvidenceList.every(x => x.ok),
+      reason: '',
+      priceEvidenceOk: true,
+      targetBySkc: new Map(),
       selection: {
-        ok: selection.ok === true,
-        selectedCount: selection.selectedCount ?? null,
-        expectedSelectedCount: selection.expectedSelectedCount ?? null,
-        totalGoods: selection.totalGoods ?? null,
-        missingAllowedSkcs: selection.missingAllowedSkcs || [],
-        selectedMatchesPlan,
-        extraAvailableCount,
-        outOfPlanRows: selectionOutOfPlanRows.slice(0, 20),
+        ...cleanEvidenceList[0].selection,
+        selectedCount: 0,
+        expectedSelectedCount: 0,
+        totalGoods: 0,
+        missingAllowedSkcs: [],
+        extraAvailableCount: 0,
+        outOfPlanRows: [],
       },
       fill: {
-        ok: fill.ok === true,
-        targetCount: fill.targetCount ?? null,
-        expectedTotal: fill.expectedTotal ?? null,
-        mismatchCount: mismatches.length,
-        missingCostCount: missingCost.length,
-        outOfPlanRowsCount: fillOutOfPlanRows.length,
+        ...cleanEvidenceList[0].fill,
+        targetCount: 0,
+        expectedTotal: 0,
+        mismatchCount: 0,
+        missingCostCount: 0,
+        outOfPlanRowsCount: 0,
       },
-      extraAvailableCount,
-      extraAvailableRows: selectionOutOfPlanRows.slice(0, 20),
-      targetBySkc,
+      extraAvailableCount: 0,
+      extraAvailableRows: [],
     };
+    for (const evidence of cleanEvidenceList) {
+      for (const [skc, row] of evidence.targetBySkc.entries()) {
+        if (!merged.targetBySkc.has(skc)) merged.targetBySkc.set(skc, row);
+      }
+      merged.selection.selectedCount += Number(evidence.selection?.selectedCount || 0);
+      merged.selection.expectedSelectedCount += Number(evidence.selection?.expectedSelectedCount || 0);
+      merged.selection.totalGoods += Number(evidence.selection?.totalGoods || 0);
+      merged.fill.targetCount += Number(evidence.fill?.targetCount || 0);
+      merged.fill.expectedTotal += Number(evidence.fill?.expectedTotal || 0);
+      // Historical fill evidence is only a price fallback. Extra-available rows from older
+      // pre-submit runs may have been handled by a later supplement, so they must not
+      // keep blocking current enrollment verification after rows are already enrolled.
+    }
+    merged.extraAvailableCount = 0;
+    merged.extraAvailableRows = [];
+    merged.ok = merged.priceEvidenceOk;
+    return merged;
+  }
+  if (fallback) return fallback;
+  if (firstError) {
+    return {
+      source: path.relative(ROOT, firstError.file),
+      exists: true,
+      ok: false,
+      reason: `fill_result_read_failed: ${firstError.err.message}`,
+      targetBySkc: new Map(),
+    };
+  }
+  try {
+    const doc = await readJson(file);
+    return evaluateFillEvidenceDoc(doc, file, storeKey, activityId);
   } catch (err) {
     return {
       source: path.relative(ROOT, file),
-      exists: true,
+      exists: fsSync.existsSync(file),
       ok: false,
-      reason: `fill_result_read_failed: ${err.message}`,
+      reason: fsSync.existsSync(file) ? `fill_result_read_failed: ${err.message}` : 'fill_result_missing',
       targetBySkc: new Map(),
     };
   }

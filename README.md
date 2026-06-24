@@ -1,6 +1,6 @@
 # SHEIN 销售统计与 BI 经营系统
 
-## 2026-06-20 当前权威状态
+## 2026-06-24 当前权威状态
 
 - 飞书多维表格 / 原生看板写入已临时暂停；云端 BI 系统作为当前主要经营入口继续运行。飞书日报脚本、异常通知 watchdog 和只读问数机器人均已迁到云端独立飞书机器人链路；日报真实发送链路已验证但自动发送当前停用，问数机器人已升级为云端 Codex CLI 只读网关，不再绑定本机 Codex 会话。
 - 本地 BI 已封存，云端 BI 是正式入口：`https://shein-bi.dushengyi.xyz/`（旧 IP 入口 `http://43.165.167.135/` 仅作兜底）。公网入口已启用 Basic Auth；账号密码只在运行环境交付，不写入仓库或文档。详见 `docs/cloud-bi-operations.md`。
@@ -15,6 +15,7 @@
 - **BI 数据判断、开发验收和故障排查只认云端运行时：云端 PostgreSQL warehouse、云端 BI 门户、线上 `/api/bi/section/*`、云端日志和 systemd 状态。仓库里的 `outputs/bi-portal/*` 只是灾备/兼容快照，可能严重过期；不得用它判断当前业务数据、口径正确性或页面性能。**
 - 交给其他 agent 前必须先读 `docs/agent-handoff-cloud-first.md`：GitHub `main` / release 是干净源码基线，但不自动等于云端已部署版本；云端 `/opt/shein-bi/app` 是生产运行权威且有运行差异，不能未经审计直接 `pull/reset/add-all`。
 - 云端部署纪律：禁止长期在云端老 commit 上手动改代码再只发 GitHub。任何云端热修都必须回填 GitHub；任何 GitHub release 后必须明确标注“已部署到云端”或“仅源码基线未部署”；交接前必须核对 `HEAD == origin/main`、工作区无源码脏改、服务验证通过。
+- 当前最新 GitHub 发布边界：`2026.06.23-bi-traffic-detail` 指向 `3f25f7c`，包含流量页 SKC 明细优化和 `shein-bi-cloud-today.service` 刷新锁修复。2026-06-24 复核时云端生产目录仍是历史 `HEAD=5025d89` + 已同步热修文件；业务验收以云端运行态、线上 section API 和 watchdog 为准，不能只看云端 Git HEAD。
 - HL 已切换为主账号 profile：`profiles/persistent-shein-main-profile`；旧 `profiles/persistent-hl-profile` 已删除。
 - `2026-06-05` 已按用户提供的账号真相修正 LGM 三店 profile / 账号映射：`YJ=profileKey yj/accountNo GS8146729/port 9346`、`XL=profileKey xl/accountNo GS9307061/port 9344`、`QY=profileKey qy/accountNo GS7451160/port 9345`。店铺身份真相以 `config/stores.json`、`config/store_account_truth.json`、浏览器保存账号和实际登录后的店铺名/账号一致为准；不得再沿用 `2026-05-10` 的交叉 profile 结论。
 - `2026-05-09 05:30` 链接/业务域任务、`2026-05-09 07:00` BI 每日流水线和白天滚动后置 BI 刷新是本地 Windows 历史验证记录；自 `2026-05-15` 本地任务封存后，不再作为生产调度。
@@ -50,7 +51,7 @@
   - 本机 `http://127.0.0.1:8787/` 和局域网 `http://DUSHENGYI-PC2:8787/` 已封存，不再作为正式入口。
   - Metabase 当前部署在云端 Docker 内部，由云端 Nginx/服务配置受控访问，不在 README 写公开裸地址。
 - 当前 BI 数据截面不再手工写死在 README；实时只以云端 BI 门户系统状态页、线上 `/api/bi/section/*`、云端 PostgreSQL warehouse、云端 systemd 日志和数据库入仓时间为准。仓库中的 `outputs/bi-portal/` 只是灾备/兼容快照，服务器拉取/重置代码后必须重新跑云端 BI 刷新；开发和验收不得拿仓库快照当当前数据。
-- BI Portal API section cache 位于 `outputs/bi-portal/sections/`；首页首屏使用轻量 `homeRankings`（只含首页需要的日店铺、日货号、日店铺×货号粒度），完整 `rankings` 后置到详情/子页需要时再拉。服务端会为 section cache 生成 `.json.gz` sidecar，公网浏览器优先走 gzip。`cloud_bi_refresh.sh` 刷新 core 后会启动 `prewarm_bi_portal_sections.sh`；`serve_bi_portal.mjs` 还会在服务启动和首页访问时检测 `data.json.generatedAt`，后台兜底预热 section，避免等用户打开页面才现场生成。首页利润 `homeProfit` 必须从当前 `profit` section cache 派生；若首页利润明显低于当前销售额，先核对 `profit.json.generatedAt`、`homeProfit.json.data.homeProfitSummary.sourceGeneratedAt` 和 `staleSource`，`staleSource=true` 或 `sourceGeneratedAt` 不等于当前 core 时不能按旧利润判断业务真实利润。
+- BI Portal API section cache 位于 `outputs/bi-portal/sections/`；首页首屏使用轻量 `homeRankings`（只含首页需要的日店铺、日货号、日店铺×货号粒度），完整 `rankings` 后置到详情/子页需要时再拉。服务端会为 section cache 生成 `.json.gz` sidecar，公网浏览器优先走 gzip。`productTrafficDaily` 当前下发日期 × 店铺 × 标准货号 × SKC 粒度，并带最新链接上架状态字段；流量页明细按顶部时间段聚合成店铺 × 标准货号 × SKC，默认只看已上架链接。`cloud_bi_refresh.sh` 刷新 core 后会启动 `prewarm_bi_portal_sections.sh`；`serve_bi_portal.mjs` 还会在服务启动和首页访问时检测 `data.json.generatedAt`，后台兜底预热 section，避免等用户打开页面才现场生成。首页利润 `homeProfit` 必须从当前 `profit` section cache 派生；若首页利润明显低于当前销售额，先核对 `profit.json.generatedAt`、`homeProfit.json.data.homeProfitSummary.sourceGeneratedAt` 和 `staleSource`，`staleSource=true` 或 `sourceGeneratedAt` 不等于当前 core 时不能按旧利润判断业务真实利润。
 - 定时任务：
   - 云端 `shein-bi-cloud-today.timer`：`00/02/04/06/10/12/14/16/18/20/22:00` 每两小时刷新当天销售、入仓并生成 BI Portal；`08:00` 让给晨间链路。
   - 云端 `shein-bi-cloud-morning-chain.timer`：每天 `08:00` 先刷新当天销售，再启动慢变日更；当前 `SHEIN_BI_MORNING_SEND_LARK_REPORT=0`，飞书日报自动发送已停用。
@@ -59,6 +60,7 @@
   - 云端 `shein-bi-cloud-et-forwarder.timer`：`01/03/05/07/09/11/13/15/17/19/21/23:20` 高频同步 ET 货代仓/出库单，入仓后只轻量刷新订单/物流/售后相关 section。
   - 云端 `shein-bi-cloud-session-manager.timer`：每天 `02:20` 顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并检查 profile 体积。
   - 云端 `shein-bi-cloud-browser-cleanup.timer`：每 30 分钟清理超时残留店铺浏览器，避免 headless Chrome 堆积拖垮服务器。
+- `shein-bi-cloud-today.service` 的销售刷新锁必须使用 `/opt/shein-bi/app/state/locks/shein-bi-cloud-sales-refresh.lock`，不要再回退到 `/tmp/shein-bi-cloud-sales-refresh.lock`。若 `today.service` 启动即失败并提示 `/tmp/... Permission denied`，优先检查 `SHEIN_BI_REFRESH_LOCK_FILE` 和 `scripts/cloud_bi_refresh.sh` 是否包含 `prepare_shared_lock_file "$LOCK_FILE"`，修复后执行 `systemctl daemon-reload`、`systemctl reset-failed`，再用 `node scripts/cloud_ops_watchdog.mjs --dry-run` 确认 `issues=[]`。
 - 慢变日更不再拆多个独立 timer：链接/业务域、商品/库存/流量、营销活动/限时折扣/优惠券价格线索、RTV 换单复核都由 `shein-bi-cloud-daily-refresh.service` 串行执行；旧 `shein-bi-cloud-link-business.timer`、`shein-bi-cloud-rtv-verify.timer`、`shein-bi-cloud-openapi-hl.timer` 在生产机保持 masked，不要重新启用。
 - 云端覆盖审计使用 `scripts/audit_cloud_data_coverage.mjs`：查最新日防漏时用 `--expected-start range-start`，要求当前应覆盖店铺齐全；查历史断档时用 `--expected-start first-seen`，按每个店自己的首个有效日期之后检查中间是否断档，不能把店铺尚未开通/尚未接入前的日期误判为缺抓。
 - 2026-05-21 运维加固：链接/业务域服务统一以 `sheinops` 运行，避免 root 写 Chrome profile 后导致登录态管家 `EACCES`；登录态恢复改为先回灌 browser session、再验证 GSP + SBN；ET 验证码下载瞬时失败会进入重试，不再一次 `fetch failed` 就中断。

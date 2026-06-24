@@ -40,6 +40,9 @@ const targetFloorMargin = pctConfigToRatio(cli.targetFloorMarginPct ?? pricingPo
 const selectionMarginBasis = normalizeSelectionMarginBasis(cli.selectionMarginBasis || 'full_cost_including_storage');
 const storageRequiredForSelection = selectionMarginBasis !== 'product_cost_excluding_storage';
 const EXECUTION_TAG = cli.executionTag || executionTagFromVersion(OUTPUT_VERSION);
+const baselinePolicy = cli.baselinePriceOverrides
+  ? await loadBaselinePricePolicy(path.resolve(ROOT, cli.baselinePriceOverrides), cli.baselineUserRemarks ? path.resolve(ROOT, cli.baselineUserRemarks) : '')
+  : null;
 
 const TRUE_COSTS = cloudCostDoc.trueCostMap || {};
 const COSTS = cloudCostDoc.costMap || {};
@@ -100,9 +103,13 @@ for (const [sku, group] of bySku.entries()) {
   const keyList = [sku, ...group.map(r => r['供方货号'])].filter(Boolean);
   const fixed = findRule(fixedRules, keyList);
   const specialMargin = findRule(marginRules, keyList);
-  const baseTargetMargin = fixed !== null ? null : (specialMargin ?? 0.30);
+  const baselineRule = findBaselineRule(baselinePolicy, keyList);
+  const baselineIsFixedPrice = baselineRule?.type === 'fixed_sar';
+  const baselineIsMargin = baselineRule?.type === 'margin_pct';
+  const hasFixedPrice = baselineIsFixedPrice || (!baselineRule && fixed !== null);
+  const baseTargetMargin = hasFixedPrice ? null : (baselineIsMargin ? baselineRule.otherMargin : (specialMargin ?? 0.30));
   const exposureTargets = baseTargetMargin === null ? null : marginTargetsForExposurePolicy(baseTargetMargin, signupPricingPolicy);
-  const topExposureRows = fixed !== null
+  const topExposureRows = fixed !== null && !baselineRule
     ? []
     : uniqBy(
         exposureTopRowsForCanonical(exposureIndex, sku),
@@ -114,30 +121,46 @@ for (const [sku, group] of bySku.entries()) {
   const topExposureSkcsInGroup = topExposureRows.filter(row => groupSkcs.has(row.skc));
   const topExposureLinkKeys = new Set(topExposureRows.map(row => exposureLinkKey(row.storeKey, row.skc)));
   const rowIsTopExposure = row => topExposureLinkKeys.has(exposureLinkKey(row['店铺'], row['SKC']));
-  const targetMargin = fixed !== null ? null : (hasExposureRanking ? (exposureTargets?.otherMargin ?? baseTargetMargin) : baseTargetMargin);
-  const topExposureMargin = fixed !== null || !hasExposureRanking ? null : (exposureTargets?.topMargin ?? null);
-  const exposureRuleText = fixed !== null
+  const targetMargin = hasFixedPrice ? null : (baselineIsMargin ? baselineRule.otherMargin : (hasExposureRanking ? (exposureTargets?.otherMargin ?? baseTargetMargin) : baseTargetMargin));
+  const topExposureMargin = hasFixedPrice
+    ? null
+    : (baselineIsMargin
+        ? (baselineRule.topMargin ?? baselineRule.otherMargin)
+        : (!hasExposureRanking ? null : (exposureTargets?.topMargin ?? null)));
+  const exposureRuleText = baselineIsFixedPrice
+    ? `继承上期确认价：7天曝光前五 ${fmt(baselineRule.topPrice ?? baselineRule.otherPrice)} SAR / 其他 ${fmt(baselineRule.otherPrice)} SAR`
+    : baselineIsMargin
+      ? `继承上期确认利润率：7天曝光前五 ${pctRatioText(topExposureMargin)} / 其他 ${pctRatioText(targetMargin)}`
+      : fixed !== null
     ? '固定价/逐行覆盖价优先，不自动套曝光利润率'
     : hasExposureRanking
       ? `${exposureRankMetricText}前五 ${pctRatioText(topExposureMargin)} / 其他 ${pctRatioText(targetMargin)}`
       : '曝光数据缺失：保持基础利润率';
-  const targetMode = fixed !== null
-    ? '固定最终成交价'
+  const targetMode = hasFixedPrice
+    ? (baselineIsFixedPrice ? '继承上期确认固定价' : '固定最终成交价')
     : `${specialMargin !== null ? `目标利润率 ${pct(specialMargin)}` : '默认目标利润率 30%'}；曝光规则：${exposureRuleText}`;
   const safeProductCost = productCostValues.length ? Math.max(...productCostValues) : null;
-  const targetFinal = fixed !== null ? fixed : (safeProductCost !== null ? ceil2(safeProductCost / (1 - targetMargin)) : null);
-  const topExposureTargetFinal = fixed !== null || topExposureMargin === null
-    ? null
-    : (safeProductCost !== null ? ceil2(safeProductCost / (1 - topExposureMargin)) : null);
+  const targetFinal = baselineIsFixedPrice
+    ? baselineRule.otherPrice
+    : (!baselineRule && fixed !== null)
+      ? fixed
+      : (safeProductCost !== null ? ceil2(safeProductCost / (1 - targetMargin)) : null);
+  const topExposureTargetFinal = baselineIsFixedPrice
+    ? (baselineRule.topPrice ?? baselineRule.otherPrice)
+    : ((!baselineRule && fixed !== null) || topExposureMargin === null
+        ? null
+        : (safeProductCost !== null ? ceil2(safeProductCost / (1 - topExposureMargin)) : null));
   // 2026-06-14: coupons are not guaranteed to trigger. Keep historical
   // what-if prices only for user-visible traffic-coupon research, never as the
   // default guaranteed target price.
   const priceFor15Coupon = targetFinal !== null ? ceil2(targetFinal / 0.85) : null;
   const priceFor50Coupon = targetFinal !== null ? ceil2(targetFinal / 0.50) : null;
   const minPlatformCap = platformCaps.length ? Math.min(...platformCaps) : null;
-  const rowTargetFinalFor = row => fixed !== null
-    ? fixed
-    : (rowIsTopExposure(row) && topExposureTargetFinal !== null ? topExposureTargetFinal : targetFinal);
+  const rowTargetFinalFor = row => baselineIsFixedPrice
+    ? (rowIsTopExposure(row) && topExposureTargetFinal !== null ? topExposureTargetFinal : targetFinal)
+    : (!baselineRule && fixed !== null)
+      ? fixed
+      : (rowIsTopExposure(row) && topExposureTargetFinal !== null ? topExposureTargetFinal : targetFinal);
   const rowStrategyFor = row => {
     const rowIntendedFinal = rowTargetFinalFor(row);
     const current = numValue(row['当前售价SAR']);
@@ -164,6 +187,11 @@ for (const [sku, group] of bySku.entries()) {
     };
   };
   const rowStrategies = group.map(rowStrategyFor);
+  const inheritedRuleName = baselineIsFixedPrice
+    ? 'baseline_user_confirmed_fixed_price_no_coupon'
+    : baselineIsMargin
+      ? 'baseline_user_confirmed_margin_no_coupon'
+      : null;
   const safeNoCouponAll = rowStrategies.length
     && rowStrategies.every(s => s.rowIntendedFinal !== null && s.platformCap !== null && s.rowIntendedFinal <= s.platformCap);
   const safe15All = false;
@@ -228,9 +256,9 @@ for (const [sku, group] of bySku.entries()) {
       ? '先确认这到底是什么货号'
       : storageMissing && storageRequiredForSelection
       ? '请确认仓储口径后再报'
-      : fixed !== null
+      : hasFixedPrice
         ? `确认固定最终价 ${fmt(targetFinal)} SAR 是否继续`
-        : hasExposureRanking
+      : hasExposureRanking
           ? `确认默认/非曝光前五目标利润率 ${pct(targetMargin)} 或最终价 ${fmt(targetFinal)} SAR；曝光前五链接可按 ${pctRatioText(topExposureMargin)} / ${fmt(topExposureTargetFinal)} SAR`
           : `确认目标利润率 ${pct(targetMargin)} 或最终价 ${fmt(targetFinal)} SAR；曝光数据缺失，按基础利润率执行`;
   const compactCouponCombo = !couponRows.length
@@ -283,8 +311,9 @@ for (const [sku, group] of bySku.entries()) {
     if (storageMissing && storageRequiredForSelection) excludeReasons.push('missing_cloud_storage_unit_cost');
     if (rowIntendedFinal === null) excludeReasons.push('missing_target_final_price');
     if (targetPrice === null || finalTargetPrice === null) excludeReasons.push('missing_row_target_price');
-    if (skuTargetSafetyMargin !== null && skuTargetSafetyMargin < targetFloorMargin - 1e-9) excludeReasons.push(`sku_target_${selectionMarginBasis}_margin_below_floor`);
-    if (marginForSelection !== null && marginForSelection < targetFloorMargin - 1e-9) excludeReasons.push(`row_${selectionMarginBasis}_margin_below_floor`);
+    const baselineAllowsBelowFloor = Boolean(baselineRule?.allowBelowFloor || baselineRule?.allowBelowFloorLinkKeys?.has(exposureLinkKey(storeKey, skc)));
+    if (!baselineAllowsBelowFloor && skuTargetSafetyMargin !== null && skuTargetSafetyMargin < targetFloorMargin - 1e-9) excludeReasons.push(`sku_target_${selectionMarginBasis}_margin_below_floor`);
+    if (!baselineAllowsBelowFloor && marginForSelection !== null && marginForSelection < targetFloorMargin - 1e-9) excludeReasons.push(`row_${selectionMarginBasis}_margin_below_floor`);
     if (marginForSelection === null && !missingCost && !(storageRequiredForSelection && storageMissing)) excludeReasons.push(`missing_row_${selectionMarginBasis}_margin`);
     executionRows.push({
       selected: excludeReasons.length === 0,
@@ -315,7 +344,7 @@ for (const [sku, group] of bySku.entries()) {
       marginForSelection: roundOrNull(marginForSelection, 4),
       selectionMarginBasis,
       isTopExposureLink,
-      rule: 'cloud_sku_approval_execution_price',
+      rule: inheritedRuleName || 'cloud_sku_approval_execution_price',
       sourceStatus: status,
       platformAdjusted: targetPrice !== null && uncappedActivityPrice !== null && platformCap !== null && targetPrice < uncappedActivityPrice - 0.001,
       note: [
@@ -323,6 +352,8 @@ for (const [sku, group] of bySku.entries()) {
           ? `平台最低降幅上限 ${fmt(platformCap)} SAR 低于策略价 ${fmt(uncappedActivityPrice)} SAR`
           : '',
         isTopExposureLink ? `命中本标准货号${exposureRankMetricText || '曝光'}全局前五` : '',
+        baselineRule ? `继承上期最终版策略：${baselineRule.summary}` : '',
+        baselineAllowsBelowFloor && marginForSelection !== null && marginForSelection < targetFloorMargin - 1e-9 ? `继承上期确认：低于${round2(targetFloorMargin * 100)}%红线也允许按平台/清货价报名` : '',
         rowCouponFactor < 1 ? `可选流量券仅作触券下探测算，不作为保底成交价` : '',
       ].filter(Boolean).join('；'),
     });
@@ -459,6 +490,9 @@ const sourceSummary = {
     selectionMarginRule: `${marginBasisText(selectionMarginBasis)} >= ${round2(targetFloorMargin * 100)}% 才进入自动 allowlist`,
     exposureMetricTierCounts: countMapValues(exposureIndex.metricLabelByGroup),
     rule: '同一标准货号在所有店铺、所有链接中取全局前五；先按正向7天曝光排名，只有当该标准货号全局没有任何正向7天曝光时，才降级按30天曝光/总曝光兜底。高曝光前五策略沿用原规则：前五链接可比其他链接低5个百分点，但不得低于15%底价；若基础目标已在15%底线，则前五保持15%，其他链接提高到20%。固定价和逐行覆盖价优先。',
+    baselinePriceOverrides: baselinePolicy ? path.relative(ROOT, baselinePolicy.filePath) : '',
+    baselineUserRemarks: cli.baselineUserRemarks ? path.relative(ROOT, path.resolve(ROOT, cli.baselineUserRemarks)) : '',
+    baselineRuleCount: baselinePolicy?.summaries?.length || 0,
   },
   output: {
     rows: confirmRows.length,
@@ -607,7 +641,10 @@ function normalizeReviewRow(row) {
   const goodsTitle = row._raw?.row?.goodsName || row['商品标题/中文名'] || '';
   const normalized = normalizeGoodsSnDetailed(rawSupplier, {goodsTitle});
   const canonical = normalized.canonical || row['标准货号'] || rawSupplier;
-  const cloudCost = lookupCloudCostInfo([canonical, rawSupplier, row['供方货号'], row['标准货号'], modelCode(canonical), modelCode(rawSupplier)]);
+  const cloudCostFromMap = lookupCloudCostInfo([canonical, rawSupplier, row['供方货号'], row['标准货号'], modelCode(canonical), modelCode(rawSupplier)]);
+  const cloudCost = cloudCostFromMap?.productUnitCostSar !== null && cloudCostFromMap?.productUnitCostSar !== undefined
+    ? cloudCostFromMap
+    : (costInfoFromActivityRow(row) || cloudCostFromMap);
   return {
     ...row,
     '供方货号': rawSupplier || row['供方货号'] || '',
@@ -671,6 +708,32 @@ function lookupCloudCostInfo(keys) {
     storageMethod,
     source,
     profitRow,
+  };
+}
+
+
+function costInfoFromActivityRow(row) {
+  const rawCost = row?._raw?.cost || row?._raw?.row?.cost || {};
+  const productUnitCostSar = positiveOrNull(rawCost.productCostSar)
+    ?? positiveOrNull(rawCost.unitCostSar)
+    ?? positiveOrNull(row?.['商品完整成本SAR']);
+  const storageUnitCostSar = numValue(rawCost.storageUnitCostSar);
+  const fullUnitCostSar = positiveOrNull(rawCost.fullCostSar)
+    ?? positiveOrNull(rawCost.trueUnitCostSar)
+    ?? (productUnitCostSar !== null && storageUnitCostSar !== null ? Number(productUnitCostSar) + Number(storageUnitCostSar) : productUnitCostSar);
+  if (productUnitCostSar === null) return null;
+  return {
+    productUnitCostSar: roundOrNull(productUnitCostSar, 4),
+    storageUnitCostSar: roundOrNull(storageUnitCostSar, 4),
+    fullUnitCostSar: roundOrNull(fullUnitCostSar, 4),
+    storageFeeSar: roundOrNull(rawCost.storageFeeSar, 4),
+    quantityBasis: roundOrNull(rawCost.quantityBasis, 4),
+    storageRecent30FeeSar: roundOrNull(rawCost.storageRecent30FeeSar, 4),
+    storageRecent30Days: roundOrNull(rawCost.storageRecent30Days, 4),
+    storageUnitBasis: rawCost.storageUnitBasis || '',
+    storageMethod: rawCost.storageMethod || (storageUnitCostSar === null ? 'missing' : 'activity_review_row_cost'),
+    source: rawCost.source ? `activity_review_row:${rawCost.source}` : 'activity_review_row_cost',
+    profitRow: null,
   };
 }
 
@@ -811,6 +874,203 @@ function countMapValues(map) {
 }
 function exposureLinkKey(storeKey, skc) {
   return `${String(storeKey || '').trim().toUpperCase()}::${String(skc || '').trim()}`;
+}
+async function loadBaselinePricePolicy(filePath, userRemarksPath = '') {
+  const doc = JSON.parse(await fs.readFile(filePath, 'utf8'));
+  const userRemarkRules = userRemarksPath ? await loadUserRemarkRules(userRemarksPath) : new Map();
+  const items = Array.isArray(doc?.items) ? doc.items : [];
+  const byCanonical = new Map();
+  for (const row of items) {
+    const canonical = String(row?.canonical || '').trim();
+    if (!canonical) continue;
+    const key = compact(canonical);
+    if (!byCanonical.has(key)) byCanonical.set(key, []);
+    byCanonical.get(key).push(row);
+  }
+  const rules = new Map();
+  const summaries = [];
+  for (const [key, rowsForCanonical] of byCanonical.entries()) {
+    const canonical = mostCommon(rowsForCanonical.map(r => r.canonical)) || rowsForCanonical[0]?.canonical || key;
+    const inferred = inferBaselineRule(canonical, rowsForCanonical, userRemarkRules.get(compact(canonical)) || null);
+    if (!inferred) continue;
+    for (const alias of [canonical, modelCode(canonical), compact(canonical)].filter(Boolean)) {
+      rules.set(compact(alias), inferred);
+    }
+    summaries.push({
+      canonical,
+      type: inferred.type,
+      topPrice: inferred.topPrice ?? null,
+      otherPrice: inferred.otherPrice ?? null,
+      topMargin: inferred.topMargin ?? null,
+      otherMargin: inferred.otherMargin ?? null,
+      allowBelowFloor: inferred.allowBelowFloor,
+      rowCount: rowsForCanonical.length,
+      sourceRules: inferred.sourceRules,
+    });
+  }
+  return {
+    filePath,
+    sourceWorkbook: doc?.sourceWorkbook || '',
+    rules,
+    summaries,
+  };
+}
+
+async function loadUserRemarkRules(filePath) {
+  const doc = JSON.parse(await fs.readFile(filePath, 'utf8'));
+  const rows = Array.isArray(doc?.remarkRules)
+    ? doc.remarkRules
+    : (Array.isArray(doc?.rows) ? doc.rows.map(r => parseRemarkRule(r.canonical, r.remark)).filter(Boolean) : []);
+  const out = new Map();
+  for (const row of rows) {
+    const parsed = row?.type && row?.canonical ? row : parseRemarkRule(row?.canonical, row?.remark);
+    if (!parsed?.canonical || !parsed?.type) continue;
+    out.set(compact(parsed.canonical), parsed);
+  }
+  return out;
+}
+function parseRemarkRule(canonical, remark) {
+  const text = String(remark || '').trim();
+  const name = String(canonical || '').trim();
+  if (!name || !text) return null;
+  const fixed = text.match(/前五\s*([0-9]+(?:\.[0-9]+)?)\s*SAR\s*[\/／]\s*其他\s*([0-9]+(?:\.[0-9]+)?)\s*SAR/i);
+  if (fixed) return {canonical: name, remark: text, type: 'fixedPrice', top: Number(fixed[1]), other: Number(fixed[2])};
+  const margin = text.match(/前五\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*[\/／]\s*其他\s*([0-9]+(?:\.[0-9]+)?)\s*%/i);
+  if (margin) return {canonical: name, remark: text, type: 'margin', top: Number(margin[1]) / 100, other: Number(margin[2]) / 100};
+  return null;
+}
+
+function inferBaselineRule(canonical, rowsForCanonical, userRemarkRule = null) {
+  const meaningful = rowsForCanonical.filter(r => isNum(r?.targetPrice) && isNum(r?.finalTargetPrice));
+  if (!meaningful.length) return null;
+  const sourceRules = uniq(meaningful.map(r => r.rule).filter(Boolean));
+  const hasUserRule = meaningful.some(r =>
+    /user|fixed|jitter|approved|gapfill/i.test(String(r.rule || '')) || /用户备注|固定价|小数微调|用户明确同意/i.test(String(r.note || '')),
+  );
+  if (!hasUserRule) return null;
+  const topRows = meaningful.filter(r => r.isTopExposureLink);
+  const otherRows = meaningful.filter(r => !r.isTopExposureLink);
+  const topMargins = robustUniqueNumbers(topRows.map(r => r.marginBeforeStorage), 4);
+  const otherMargins = robustUniqueNumbers(otherRows.map(r => r.marginBeforeStorage), 4);
+  const topPrices = robustUniqueNumbers(topRows.map(r => r.intendedFinalTargetPrice ?? r.finalTargetPrice), 2);
+  const otherPrices = robustUniqueNumbers(otherRows.map(r => r.intendedFinalTargetPrice ?? r.finalTargetPrice), 2);
+  const allPrices = robustUniqueNumbers(meaningful.map(r => r.intendedFinalTargetPrice ?? r.finalTargetPrice), 2);
+  const userRemarkBelowFloor = userRemarkRule?.type === 'margin'
+    ? [userRemarkRule.top, userRemarkRule.other].some(v => isNum(v) && v < targetFloorMargin - 1e-9)
+    : false;
+  const baselineSelectedBelowFloor = meaningful.some(r =>
+    (isNum(r.marginForSelection) && r.marginForSelection < targetFloorMargin - 1e-9) ||
+    (isNum(r.marginBeforeStorage) && r.marginBeforeStorage < targetFloorMargin - 1e-9)
+  );
+  const allowBelowFloor = userRemarkBelowFloor || baselineSelectedBelowFloor || meaningful.some(r =>
+    /user_approved_platform_margin_below_15/i.test(String(r.rule || '')) ||
+    /低于15%|低于 15%|低于.*红线.*允许|用户明确同意/i.test(String(r.note || '')),
+  );
+  const allowBelowFloorLinkKeys = new Set(meaningful
+    .filter(r => /user_approved_platform_margin_below_15/i.test(String(r.rule || '')) || /用户明确同意/i.test(String(r.note || '')))
+    .map(r => exposureLinkKey(r.storeKey, r.skc)));
+  const notes = uniq(meaningful.map(r => r.note).filter(Boolean)).slice(0, 3);
+  const summaryParts = [];
+  if (userRemarkRule?.remark) summaryParts.push(`用户备注：${userRemarkRule.remark}`);
+  if (notes.length && !summaryParts.length) summaryParts.push(notes[0].replace(/；固定价按用户要求做小数微调：.*$/, ''));
+
+  if (userRemarkRule?.type === 'fixedPrice') {
+    return {
+      type: 'fixed_sar',
+      canonical,
+      topPrice: userRemarkRule.top,
+      otherPrice: userRemarkRule.other,
+      allowBelowFloor,
+      allowBelowFloorLinkKeys,
+      sourceRules: ['baseline_user_remark_fixed_price'],
+      summary: summaryParts[0] || `用户备注固定价：前五 ${fmt(userRemarkRule.top)} / 其他 ${fmt(userRemarkRule.other)} SAR`,
+    };
+  }
+  if (userRemarkRule?.type === 'margin') {
+    return {
+      type: 'margin_pct',
+      canonical,
+      topMargin: userRemarkRule.top,
+      otherMargin: userRemarkRule.other,
+      allowBelowFloor,
+      allowBelowFloorLinkKeys,
+      sourceRules: ['baseline_user_remark_margin'],
+      summary: summaryParts[0] || `用户备注利润率：前五 ${pctRatioText(userRemarkRule.top)} / 其他 ${pctRatioText(userRemarkRule.other)}`,
+    };
+  }
+
+  const fixedLike = meaningful.some(r => /fixed|jitter/i.test(String(r.rule || '')) || /固定价|SAR/i.test(String(r.note || '')));
+  if (fixedLike && allPrices.length <= 24) {
+    const topPrice = topPrices.length ? representativeLow(topPrices) : null;
+    const otherPrice = otherPrices.length ? representativeMedian(otherPrices) : (allPrices.length ? representativeMedian(allPrices) : null);
+    if (otherPrice !== null) {
+      return {
+        type: 'fixed_sar',
+        canonical,
+        topPrice,
+        otherPrice,
+        allowBelowFloor,
+        allowBelowFloorLinkKeys,
+        sourceRules,
+        summary: summaryParts[0] || `固定价继承：前五 ${fmt(topPrice ?? otherPrice)} / 其他 ${fmt(otherPrice)} SAR`,
+      };
+    }
+  }
+  if (topMargins.length || otherMargins.length) {
+    const topMargin = topMargins.length ? representativeLow(topMargins) : null;
+    const otherMargin = otherMargins.length ? representativeHigh(otherMargins) : (topMargin ?? representativeHigh(robustUniqueNumbers(meaningful.map(r => r.marginBeforeStorage), 4)));
+    if (isNum(otherMargin)) {
+      return {
+        type: 'margin_pct',
+        canonical,
+        topMargin: topMargin ?? otherMargin,
+        otherMargin,
+        allowBelowFloor,
+        allowBelowFloorLinkKeys,
+        sourceRules,
+        summary: summaryParts[0] || `利润率继承：前五 ${pctRatioText(topMargin ?? otherMargin)} / 其他 ${pctRatioText(otherMargin)}`,
+      };
+    }
+  }
+  return null;
+}
+function findBaselineRule(policy, keys) {
+  if (!policy?.rules) return null;
+  for (const key of keys) {
+    const candidates = [key, modelCode(key), compact(key)].map(compact).filter(Boolean);
+    for (const candidate of candidates) {
+      if (policy.rules.has(candidate)) return policy.rules.get(candidate);
+    }
+  }
+  return null;
+}
+function robustUniqueNumbers(values, digits = 2) {
+  const out = [];
+  const seen = new Set();
+  for (const value of values) {
+    const rounded = roundOrNull(value, digits);
+    if (rounded === null) continue;
+    const key = String(rounded);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(rounded);
+  }
+  return out.sort((a, b) => a - b);
+}
+function representativeLow(values) {
+  const nums = values.filter(isNum).map(Number).sort((a, b) => a - b);
+  if (!nums.length) return null;
+  return nums[0];
+}
+function representativeHigh(values) {
+  const nums = values.filter(isNum).map(Number).sort((a, b) => a - b);
+  if (!nums.length) return null;
+  return nums[nums.length - 1];
+}
+function representativeMedian(values) {
+  const nums = values.filter(isNum).map(Number).sort((a, b) => a - b);
+  if (!nums.length) return null;
+  return nums[Math.floor(nums.length / 2)];
 }
 function pctConfigToRatio(value) {
   const n = Number(value);

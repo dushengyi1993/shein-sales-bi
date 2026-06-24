@@ -307,6 +307,21 @@ function launchVisible(store) {
   }
 }
 
+async function waitForDebugPort(store, timeoutMs = 20_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      await httpJson(`http://127.0.0.1:${store.port}/json/version`);
+      return true;
+    } catch (err) {
+      lastError = err;
+      await sleep(500);
+    }
+  }
+  throw new Error(`Chrome debug port not ready for ${store.storeKey} on ${store.port}: ${lastError?.message || 'timeout'}`);
+}
+
 function bringStoreWindowToFront(store) {
   if (process.platform !== 'win32') return;
   const profileNeedle = `persistent-${store.profileKey}-profile`;
@@ -386,6 +401,7 @@ class Cdp {
 }
 
 async function connectStore(store) {
+  await waitForDebugPort(store);
   const version = await httpJson(`http://127.0.0.1:${store.port}/json/version`);
   const cdp = new Cdp(version.webSocketDebuggerUrl);
   cdp.port = store.port;
@@ -1095,6 +1111,8 @@ function computeTarget(storeKey, activityId, row) {
 async function collectVisibleRows(cdp, sessionId) {
   return await evalJs(cdp, sessionId, `
     const rows = [];
+    let lastSkc = '';
+    let lastSupplierNo = '';
     for (const tr of document.querySelectorAll('tr')) {
       const cells = [...tr.querySelectorAll('td')].map(td => td.innerText || '');
       if (cells.length < 6) continue;
@@ -1102,8 +1120,12 @@ async function collectVisibleRows(cdp, sessionId) {
       const idx = Number(((cells[0] || rowText).match(/\\d+/) || [])[0]);
       const info = rowText;
       const inputs = [...tr.querySelectorAll('input')];
-      const skc = (info.match(/SKC:\\s*([a-z]{2}\\d+)/i) || [])[1] || '';
-      const supplierNo = (info.match(/供方货号:\\s*([^\\n\\t]+)/) || [])[1]?.trim() || '';
+      const explicitSkc = (info.match(/SKC:\\s*([a-z]{2}\\d+)/i) || [])[1] || '';
+      const explicitSupplierNo = (info.match(/供方货号:\\s*([^\\n\\t]+)/) || [])[1]?.trim() || '';
+      if (explicitSkc) lastSkc = explicitSkc;
+      if (explicitSupplierNo) lastSupplierNo = explicitSupplierNo;
+      const skc = explicitSkc || lastSkc || '';
+      const supplierNo = explicitSupplierNo || lastSupplierNo || '';
       const priceCell = cells.find(c => /SAR\\s*[\\d.]+/i.test(c)) || '';
       const currentPrice = Number((priceCell.match(/SAR\\s*([\\d.]+)/i) || (cells[3] || '').match(/([\\d.]+)/) || [])[1] || 0);
       const textInputs = inputs.filter(x => /^(text|number)$/.test(x.type || 'text'));
@@ -1125,7 +1147,13 @@ async function collectVisibleRows(cdp, sessionId) {
 async function fillVisibleRows(cdp, sessionId, fills) {
   return await evalJs(cdp, sessionId, `
     const fills = new Map(__arg.map(x => [String(x.key || x.skc || x.idx).toLowerCase(), x]));
+    const bySkc = new Map(__arg.filter(x => x.skc).map(x => [String(x.skc).toLowerCase(), x]));
     const sleep = ms => new Promise(r => setTimeout(r, ms));
+    const floor2 = n => Math.floor(Number(n || 0) * 100 + 1e-9) / 100;
+    const currentPriceFromRow = (cells, rowText) => {
+      const priceCell = cells.find(c => /SAR\\s*[\\d.]+/i.test(c)) || '';
+      return Number((priceCell.match(/SAR\\s*([\\d.]+)/i) || (cells[3] || '').match(/([\\d.]+)/) || (rowText || '').match(/SAR\\s*([\\d.]+)/i) || [])[1] || 0);
+    };
     const setNativeValue = (el, value) => {
       const v = String(value);
       const proto = Object.getPrototypeOf(el);
@@ -1142,19 +1170,29 @@ async function fillVisibleRows(cdp, sessionId, fills) {
       el.dispatchEvent(new Event('change', {bubbles:true}));
     };
     const done = [];
+    let lastSkc = '';
     for (const tr of document.querySelectorAll('tr')) {
       const cells = [...tr.querySelectorAll('td')].map(td => td.innerText || '');
       const rowText = tr.innerText || cells.join('\\n');
       const idx = Number(((cells[0] || rowText).match(/\\d+/) || [])[0]);
-      const skc = (rowText.match(/SKC:\\s*([a-z]{2}\\d+)/i) || [])[1] || '';
+      const explicitSkc = (rowText.match(/SKC:\\s*([a-z]{2}\\d+)/i) || [])[1] || '';
+      if (explicitSkc) lastSkc = explicitSkc;
+      const skc = explicitSkc || lastSkc || '';
       const key = String(skc || idx).toLowerCase();
-      if (!fills.has(key)) continue;
+      if (!fills.has(key) && !bySkc.has(key)) continue;
 
       const inputs = [...tr.querySelectorAll('input')];
       const textInputs = inputs.filter(x => /^(text|number)$/.test(x.type || 'text'));
       const radioInputs = inputs.filter(x => x.type === 'radio');
       if (textInputs.length < 1) continue;
-      const f = fills.get(key);
+      const baseFill = fills.get(key) || bySkc.get(key);
+      const f = {...baseFill};
+      const rowCurrentPrice = currentPriceFromRow(cells, rowText);
+      if (rowCurrentPrice > 0 && f.targetPrice > 0) {
+        f.currentPrice = rowCurrentPrice;
+        f.discountPct = Math.max(Number(f.minDiscount || 10), Math.floor((1 - Number(f.targetPrice) / rowCurrentPrice) * 100 + 1e-9));
+        f.targetPriceText = floor2(rowCurrentPrice * (1 - f.discountPct / 100)).toFixed(2);
+      }
       if (f.editMode === 'vip_discount') {
         clickInput(radioInputs[1] || radioInputs[0]);
         await sleep(30);
@@ -1162,19 +1200,26 @@ async function fillVisibleRows(cdp, sessionId, fills) {
         const discountInput = freshTextInputs.find(x => !String(x.className || '').includes('ant-input-number-input')) || freshTextInputs[0];
         setNativeValue(discountInput, String(f.discountPct));
         await sleep(160);
-        done.push({idx, key, skc, price: f.targetPriceText, discount: String(f.discountPct), editMode: f.editMode});
+        done.push({idx, key, skc, price: f.targetPriceText, discount: String(f.discountPct), editMode: f.editMode, inheritedSkc: !explicitSkc});
       } else {
-        const priceInput = textInputs[0];
-        const discountInput = textInputs[1] || inputs[1];
-        setNativeValue(discountInput, String(f.discountPct));
-        await sleep(30);
-        setNativeValue(priceInput, f.targetPriceText);
-        await sleep(220);
-        if (f.ruleType === 'fixed_price') {
-          setNativeValue(priceInput, f.targetPriceText);
-          await sleep(80);
+        const pairs = [];
+        for (let i = 0; i < textInputs.length; i += 2) {
+          const priceInput = textInputs[i];
+          const discountInput = textInputs[i + 1] || inputs[i + 1];
+          if (priceInput && discountInput) pairs.push({priceInput, discountInput});
         }
-        done.push({idx, key, skc, price: f.targetPriceText, discount: String(f.discountPct), editMode: f.editMode || 'price'});
+        if (!pairs.length) pairs.push({priceInput: textInputs[0], discountInput: textInputs[1] || inputs[1]});
+        for (const pair of pairs) {
+          setNativeValue(pair.discountInput, String(f.discountPct));
+          await sleep(30);
+          setNativeValue(pair.priceInput, f.targetPriceText);
+          await sleep(120);
+          if (f.ruleType === 'fixed_price') {
+            setNativeValue(pair.priceInput, f.targetPriceText);
+            await sleep(60);
+          }
+        }
+        done.push({idx, key, skc, price: f.targetPriceText, discount: String(f.discountPct), editMode: f.editMode || 'price', filledInputPairs: pairs.length, inheritedSkc: !explicitSkc});
       }
     }
     return done;
@@ -1573,7 +1618,7 @@ for (const store of selectedStores) {
       console.log(`[${store.storeKey}] 处理 ${activity.activityId} ${activity.name}`);
       const result = await processActivity(cdp, store, activity).catch(err => ({ok: false, store: store.storeKey, activity, reason: err.message, stack: err.stack}));
       storeResult.results.push(result);
-      if (result.ok && result.targetId) keepTargetIds.push(result.targetId);
+      if (result.targetId && (result.ok || args.noClose)) keepTargetIds.push(result.targetId);
       const file = path.join(OUT_DIR, `${store.storeKey}-${activity.activityId}.json`);
       await fs.writeFile(file, JSON.stringify(result, null, 2), 'utf8');
       console.log(`[${store.storeKey}] ${activity.activityId} ${result.ok ? '完成' : '异常'} ${result.reason || ''}`);
