@@ -174,6 +174,15 @@ try {
   check('safe write remains disabled in smoke', result.summary.safeWriteEnabled, false);
   check('real submit whitelist remains disabled in smoke', result.summary.whitelistEnabled, false);
 
+  const operatorDoctor = await runCli(['--session-file', operatorSessionFile, 'doctor']);
+  expectCliOk('operator doctor', operatorDoctor);
+  result.summary.operatorDoctorChecks = Array.isArray(operatorDoctor.json?.checks) ? operatorDoctor.json.checks.length : 0;
+  result.summary.operatorDoctorUser = operatorDoctor.json?.user?.username || '';
+  result.summary.operatorDoctorSafeWrite = operatorDoctor.json?.safety?.safeWriteOperations?.enabled ?? null;
+  check('operator doctor has checks', result.summary.operatorDoctorChecks, n => n >= 5);
+  check('operator doctor sees logged-in user', result.summary.operatorDoctorUser, 'operator_cli_smoke');
+  check('operator doctor does not enable safe write', result.summary.operatorDoctorSafeWrite, false);
+
   const operatorCreateDx = await runCli([
     '--session-file', operatorSessionFile,
     'create',

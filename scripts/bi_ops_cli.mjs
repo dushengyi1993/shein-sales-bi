@@ -85,6 +85,7 @@ function help() {
 
 Usage:
   node scripts/bi_ops_cli.mjs login --username <账号> --password <密码>
+  node scripts/bi_ops_cli.mjs doctor
   node scripts/bi_ops_cli.mjs me
   node scripts/bi_ops_cli.mjs capabilities
   node scripts/bi_ops_cli.mjs tasks
@@ -107,6 +108,7 @@ Options:
 
 Safety:
   - 密码只用于 login 请求，不写入 session 文件。
+  - doctor 只做本机/云端连通性和权限自检，不创建任务、不触发预检、不执行 SHEIN 写。
   - 所有任务创建/预检/执行/审计都走云端账号权限和审计。
   - execute 仍需服务端确认任务已预检通过，并且确认文本精确匹配。
   - resolve 只用于已提交待回读/需人工处理任务的人工核销；服务端只允许全店管理账号执行。`;
@@ -239,6 +241,24 @@ function print(data, pretty = false) {
     }
     return;
   }
+  if (Array.isArray(data?.checks) && data?.generatedAt) {
+    console.log(`BI Ops Doctor：${data.ok ? '通过' : '未通过'}  ${data.baseUrl || ''}`);
+    if (data.user) {
+      console.log(`当前账号：${data.user.username || '-'} · ${data.user.displayName || '-'} · ${data.user.role || '-'}`);
+      console.log(`写权限：${Array.isArray(data.user.writeStores) ? data.user.writeStores.join(',') : '-'}`);
+    }
+    if (data.counts) {
+      console.log(`OpenAPI：${data.counts.authorized || 0}/${data.counts.total || 0} 已授权，${data.counts.readReady || 0} 只读可用，${data.counts.writeConfirmable || 0} 可真实提交`);
+    }
+    const safe = data.safety?.safeWriteOperations || {};
+    const whitelist = data.safety?.realSubmitWhitelist || {};
+    console.log(`真实写：总闸门=${safe.enabled ? '开启' : '关闭'}，试点白名单=${whitelist.enabled ? `开启(${whitelist.ruleCount || 0}条)` : '关闭'}，静默写=${data.safety?.canSilentWrite ? '是' : '否'}`);
+    for (const check of data.checks) {
+      console.log(`${check.ok ? '✓' : '✗'} ${check.label}${check.error ? `：${check.error}` : ''}`);
+    }
+    console.log(data.nextStep || '');
+    return;
+  }
   console.log(JSON.stringify(data, null, 2));
 }
 
@@ -249,6 +269,109 @@ function taskTargets(args) {
   if (args.writeStores.length) targets.writeStores = [...new Set(args.writeStores)];
   if (args.products.length) targets.productRefs = [...new Set(args.products)];
   return targets;
+}
+
+async function doctorCheck(label, fn, {critical = true} = {}) {
+  try {
+    const value = await fn();
+    return {label, ok: true, critical, ...value};
+  } catch (err) {
+    return {
+      label,
+      ok: false,
+      critical,
+      error: err?.message || String(err),
+      status: err?.status || null,
+      response: err?.response ? {
+        ok: err.response.ok,
+        error: err.response.error || '',
+        status: err.response.status || null,
+      } : null,
+    };
+  }
+}
+
+async function runDoctor(args) {
+  const checks = [];
+  const nodeMajor = Number(String(process.versions.node || '').split('.')[0] || 0);
+  const session = await readSession(args.sessionFile);
+  let sessionText = '';
+  try {
+    sessionText = await fs.readFile(args.sessionFile, 'utf8');
+  } catch {}
+
+  checks.push({
+    label: 'local-node',
+    ok: nodeMajor >= 20,
+    critical: true,
+    node: process.version,
+    message: nodeMajor >= 20 ? 'Node.js 版本符合建议要求。' : '建议安装 Node.js 20 或更高版本。',
+  });
+  checks.push({
+    label: 'session-file',
+    ok: Boolean(session.cookie),
+    critical: true,
+    sessionFile: args.sessionFile,
+    exists: Boolean(sessionText),
+    baseUrl: session.baseUrl || '',
+    savedAt: session.savedAt || '',
+    storesPlaintextPassword: /"password"\s*:|password=|owner-cli-pass|operator-cli-pass/i.test(sessionText),
+  });
+  if (checks.at(-1).storesPlaintextPassword) checks.at(-1).ok = false;
+
+  let meJson = null;
+  let capabilitiesJson = null;
+  checks.push(await doctorCheck('auth-me', async () => {
+    const {json} = await request(args, '/api/auth/me');
+    meJson = json;
+    const user = json.user || {};
+    return {
+      username: user.username || '',
+      displayName: user.displayName || '',
+      role: user.role || '',
+      readStores: user.readStores || [],
+      writeStores: user.writeStores || [],
+    };
+  }));
+  checks.push(await doctorCheck('openapi-capabilities', async () => {
+    const {json} = await request(args, '/api/openapi-capabilities');
+    capabilitiesJson = json;
+    return {
+      totalStores: json.counts?.total || json.rows?.length || 0,
+      authorizedStores: json.counts?.authorized || 0,
+      readReadyStores: json.counts?.readReady || 0,
+      writeConfirmableStores: json.counts?.writeConfirmable || 0,
+      safeWriteEnabled: Boolean(json.safety?.safeWriteOperations?.enabled),
+      realSubmitWhitelistEnabled: Boolean(json.safety?.realSubmitWhitelist?.enabled),
+      canSilentWrite: Boolean(json.safety?.canSilentWrite),
+    };
+  }));
+  checks.push(await doctorCheck('task-pool', async () => {
+    const {json} = await request(args, '/api/link-ops-tasks?limit=1');
+    return {
+      reachable: true,
+      taskCountVisible: Array.isArray(json.data?.tasks) ? json.data.tasks.length : 0,
+    };
+  }));
+
+  const ok = checks.every(check => check.ok || !check.critical);
+  return {
+    ok,
+    generatedAt: new Date().toISOString(),
+    baseUrl: args.baseUrl,
+    sessionFile: args.sessionFile,
+    user: meJson?.user || null,
+    safety: capabilitiesJson?.safety ? {
+      safeWriteOperations: capabilitiesJson.safety.safeWriteOperations,
+      realSubmitWhitelist: capabilitiesJson.safety.realSubmitWhitelist,
+      canSilentWrite: Boolean(capabilitiesJson.safety.canSilentWrite),
+    } : null,
+    counts: capabilitiesJson?.counts || null,
+    checks,
+    nextStep: ok
+      ? '本机 CLI 到云端 BI 的账号、权限和只读接口自检通过。创建/预检/执行仍按服务端权限、确认文本和审计边界执行。'
+      : '按 failed checks 处理：通常是未登录、session 过期、Node 版本过低或云端接口不可达。',
+  };
 }
 
 async function main() {
@@ -283,6 +406,12 @@ async function main() {
     await request(args, '/api/logout', {method: 'POST'}).catch(() => null);
     await fs.rm(args.sessionFile, {force: true}).catch(() => {});
     print({ok: true, sessionFile: args.sessionFile, loggedOut: true});
+    return;
+  }
+  if (args.command === 'doctor') {
+    const report = await runDoctor(args);
+    print(report, !args.json);
+    if (!report.ok) process.exitCode = 1;
     return;
   }
   if (args.command === 'me') {

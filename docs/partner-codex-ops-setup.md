@@ -80,7 +80,22 @@ node scripts/bi_ops_cli.mjs logout
 
 ## 安装后自检
 
-确认云端自动运营接口能访问：
+先跑一键自检：
+
+```powershell
+node scripts/bi_ops_cli.mjs doctor
+```
+
+`doctor` 只做本机和云端只读检查，不创建任务、不预检、不执行 SHEIN 写操作。它会检查：
+
+- 本机 `Node.js` 版本是否满足建议要求；
+- 本机会话文件是否存在，且没有保存明文密码；
+- 当前 BI 登录账号是谁、角色是什么、能写哪些店；
+- 云端 OpenAPI 能力总账能否访问；
+- 任务池接口是否可访问；
+- 真实写总闸门和真实写试点白名单当前状态。
+
+如果需要单独确认云端自动运营接口能访问：
 
 ```powershell
 node scripts/bi_ops_cli.mjs capabilities
