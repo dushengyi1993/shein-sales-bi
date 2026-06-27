@@ -30,7 +30,7 @@ const CHART_DIR = process.env.SHEIN_QA_CHART_DIR || path.join(STATE_DIR, 'charts
 const CONVERSATION_DIR = process.env.SHEIN_QA_CONVERSATION_DIR || path.join(STATE_DIR, 'conversations');
 const CONVERSATION_TTL_MS = Math.max(0, Number(process.env.SHEIN_QA_CONVERSATION_TTL_MS || 0));
 const LINK_OPS_TASK_FILE = process.env.SHEIN_QA_LINK_OPS_TASK_FILE || path.join(ROOT, 'state', 'bi_link_ops_tasks.json');
-const OWNER_ONLY_OPS_WRITE = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_OWNER_ONLY_OPS_WRITE || '1').toLowerCase());
+const LARK_LINK_OPS_TASK_WRITE_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_LINK_OPS_TASK_WRITE_ENABLED || '0').toLowerCase());
 const STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ'];
 
 function parseArgList(raw) {
@@ -1678,7 +1678,7 @@ function classifySafety(text, event = {}, conversation = null) {
     decision: 'allow',
     mode: inheritedEcom ? 'conversation_followup_allowed' : 'readonly_analysis',
     reason: inheritedEcom ? 'recent_ecommerce_context' : 'ecommerce_ops_allowed',
-    ownerOnlyOpsWrite: OWNER_ONLY_OPS_WRITE,
+    larkLinkOpsTaskWriteEnabled: LARK_LINK_OPS_TASK_WRITE_ENABLED,
     isEcommerce: effectiveIsEcom,
     inheritedEcommerceContext: inheritedEcom,
     isOpsWrite,
@@ -1721,11 +1721,11 @@ function classifySafety(text, event = {}, conversation = null) {
   if (isOpsWrite) {
     return {
       ...policy,
-      mode: OWNER_ONLY_OPS_WRITE ? 'ops_write_owner_only_allowed' : 'ops_write_needs_auth',
-      reason: OWNER_ONLY_OPS_WRITE ? 'owner_only_ops_write_allowed' : 'ops_write_disabled_until_auth',
-      blocked: !OWNER_ONLY_OPS_WRITE,
-      decision: OWNER_ONLY_OPS_WRITE ? 'allow' : 'block',
-      blockMessage: OWNER_ONLY_OPS_WRITE ? '' : '当前运营写动作需要员工账号系统/权限校验后才能开放；我可以先生成方案和任务草稿。',
+      mode: LARK_LINK_OPS_TASK_WRITE_ENABLED ? 'ops_write_task_allowed' : 'ops_write_readonly_advice',
+      reason: LARK_LINK_OPS_TASK_WRITE_ENABLED ? 'lark_task_creation_enabled' : 'lark_readonly_only',
+      blocked: false,
+      decision: 'allow',
+      blockMessage: '',
     };
   }
   if (isDraftOrResearch) {
@@ -1776,17 +1776,17 @@ function buildLarkLinkOpsTask({command, event, policy, answer}) {
     version: 1,
     status: 'draft',
     progress: 10,
-    source: 'lark_qa_owner_only',
+    source: 'lark_qa_optional_task',
     chatSessionId: event.chat_id || event.sender_id || '',
     command,
     intents,
     targets,
     preview: {
-      summary: `来自飞书的受控运营动作：${intents.map(linkOpsIntentLabel).join(' / ')}。当前 owner-only 模式允许进入任务池；执行前仍走链接管理中台预检和审计。`,
+      summary: `来自飞书的运营动作建议：${intents.map(linkOpsIntentLabel).join(' / ')}。生产默认飞书只读；仅显式开启任务写入时才进入任务池，执行前仍走 BI 预检和审计。`,
       riskNotes: [
-        '当前只创建/更新链接运营任务，不直接绕过中台静默修改 SHEIN。',
+        '生产默认飞书只读，不直接创建/更新链接运营任务。',
         '真实执行仍需执行器检查目标店铺、货号/SKC、素材、价格、库存、证书/资质和接口权限。',
-        '后续接入团队后，这里需要接员工账号系统和角色权限。',
+        '如未来开启飞书建任务，需要先接员工账号、角色权限和审计边界。',
       ],
       agentAnswer: String(answer || '').slice(0, 12000),
       agentMode: policy.mode,
@@ -1797,14 +1797,14 @@ function buildLarkLinkOpsTask({command, event, policy, answer}) {
       source: 'lark_sales_qa_bot',
       chatType: event.chat_type || '',
       messageId: event.message_id || event.id || '',
-      ownerOnlyOpsWrite: OWNER_ONLY_OPS_WRITE,
+      larkLinkOpsTaskWriteEnabled: LARK_LINK_OPS_TASK_WRITE_ENABLED,
     },
     createdAt: now,
     updatedAt: now,
     execution: {
-      mode: 'owner_only_controlled_ops',
+      mode: 'optional_lark_task_creation',
       enabled: true,
-      note: '当前按用户要求默认开白运营写动作；执行仍必须通过链接管理中台/执行器，不开放系统/BI/服务器/代码修改。',
+      note: '生产默认飞书只读；只有显式开启飞书任务写入时，才允许创建任务，执行仍必须回到 BI/执行器预检确认。',
     },
     history: [{
       at: now,
@@ -1817,7 +1817,7 @@ function buildLarkLinkOpsTask({command, event, policy, answer}) {
 }
 
 async function createLarkLinkOpsTask({command, event, policy, answer, dryRun = false}) {
-  if (!policy?.isOpsWrite || policy.blocked) return null;
+  if (!policy?.isOpsWrite || policy.blocked || !LARK_LINK_OPS_TASK_WRITE_ENABLED) return null;
   const task = buildLarkLinkOpsTask({command, event, policy, answer});
   if (dryRun) return {...task, dryRun: true};
   const store = normalizeLinkOpsTaskStore(await readJsonFile(LINK_OPS_TASK_FILE, {version: 1, updatedAt: null, tasks: []}));
@@ -2231,14 +2231,14 @@ async function callReadonlyLlm(question, context) {
               text: [
                 '你是 SHEIN 沙特半托管运营数据助手；回答阶段只基于数据和上层网关上下文，不直接改后台。',
                 '你只能处理 SHEIN/电商运营相关问题：销售、店铺、货号、链接表现、覆盖、ET/成本表库存、去化、售后/利润、标题、图片、活动、价格、运营动作等。',
-                '当前安全边界：禁止修改 BI/数据库/服务器/代码/GitHub/配置/密钥；允许 SHEIN 链接/商品运营写动作进入受控任务池、预检、审计和执行器链路。',
-                '如果 securityPolicy.mode=ops_write_owner_only_allowed，说明当前 owner-only 模式允许运营写动作入任务池；你可以说已进入/可进入受控任务和预检，但不能声称已经静默改了 SHEIN。',
+                '当前安全边界：禁止修改 BI/数据库/服务器/代码/GitHub/配置/密钥；飞书当前只做可读问数和运营建议，不创建链接运营任务。需要补链、改标题、换图、下架、报活动时，请回到 BI 自动化运营页建任务、预检和确认。',
+                '如果 securityPolicy.mode=ops_write_readonly_advice，说明飞书当前只读：你可以给出建议和下一步，但不能说已建任务；请提示用户到 BI 自动化运营页创建任务并预检确认。',
                 '标题优化、卖点、关键词、竞品参考等需求允许使用公开网页资料做只读调研；不得登录、绕过权限、抓取内部/敏感信息，也不得输出 token/cookie/密码/密钥。',
                 '每次回答都必须基于本轮 JSON 重新查数；最新用户消息换了店铺、货号、SKC 或指标时，以最新消息为准，指代不完整时再结合上文。',
                 '不要编造未提供的数据；缺数据就明确说缺哪类数据。',
                 '上下文里的 inventory.products 是 ET/成本表实物库存与去化口径，platformStockAlerts 是 SHEIN 平台展示库存；不要把二者混为一谈。只要 inventory 里有数据，就不能说“看不到 ET 库存”。',
                 '不要给出修改 BI 系统、服务器、代码、密钥、账号、非 SHEIN 业务的建议。',
-                '涉及上品、改标题、换图、下架、活动报名、限时折扣等运营写操作时，必须强调通过链接管理中台/飞书任务链路执行和留痕；如果上下文含 linkOpsTask，就带上任务号。',
+                '涉及上品、改标题、换图、下架、活动报名、限时折扣等运营写操作时，必须强调飞书只读，实际建任务/预检/确认要回到 BI 自动化运营页。',
                 '不要把“回答阶段不直接执行”误说成“店铺没有权限”。若上下文说明 HL 已有 OpenAPI 授权，应承认 HL 可进入 API 执行准备；只有真实写适配器未实现/预检未通过时，才说卡在适配器或预检。',
                 '遇到“这个链接/2,223 这个/刚才那个”等指代时，优先用上下文里的 SKC、店铺、货号、曝光/访客/销量数字定位，不要因为最新一句没写全就否定上轮数据。',
                 '如果用户要求画图、图表、柱状图或可视化，不要说不能画；上层网关会基于受控 BI 数据附上图片图表，你只负责给出简短解读。',
@@ -2337,13 +2337,13 @@ async function callReadonlyCodexGateway(question, context) {
   const prompt = [
     '你是 SHEIN 沙特半托管运营数据智能体，运行在受控网关里；回答阶段只读数据，不直接改后台。',
     '你只能处理 SHEIN/电商运营相关问题：销售、店铺、货号、链接表现、覆盖、库存、去化、售后/利润、标题、图片、活动、价格、运营动作等。',
-    '当前安全边界：禁止修改 BI/数据库/服务器/代码/GitHub/配置/密钥；允许 SHEIN 链接/商品运营写动作进入受控任务池、预检、审计和执行器链路。',
-    '如果 securityPolicy.mode=ops_write_owner_only_allowed，说明当前 owner-only 模式允许运营写动作入任务池；你可以说已进入/可进入受控任务和预检，但不能声称已经静默改了 SHEIN。',
+    '当前安全边界：禁止修改 BI/数据库/服务器/代码/GitHub/配置/密钥；飞书当前只做可读问数和运营建议，不创建链接运营任务。需要补链、改标题、换图、下架、报活动时，请回到 BI 自动化运营页建任务、预检和确认。',
+    '如果 securityPolicy.mode=ops_write_readonly_advice，说明飞书当前只读：你可以给出建议和下一步，但不能说已建任务；请提示用户到 BI 自动化运营页创建任务并预检确认。',
     '标题优化、卖点、关键词、竞品参考等需求允许使用公开网页资料做只读调研；不得登录、绕过权限、抓取内部/敏感信息，也不得输出 token/cookie/密码/密钥。',
     '每次回答都必须基于本轮提供的最新 BI JSON 上下文重新查数；如果最新用户消息换了店铺、货号、SKC 或指标，以最新消息为准，指代不完整时再结合上文。',
     '你可以根据下面提供的 BI JSON 上下文回答；只有标题/关键词/竞品/公开资料调研类问题才允许读取公开网页，除此之外不要调用外部网站；不允许修改文件，不允许绕过上层执行器直接执行 SHEIN 写操作。',
     '上下文里的 inventory.products 是 ET/成本表实物库存与去化口径，platformStockAlerts 是 SHEIN 平台展示库存；不要把二者混为一谈。只要 inventory 里有数据，就不能说“看不到 ET 库存”。',
-    '如果用户问上品、改标题、换图、下架、活动、限时折扣，不能说已经静默执行；但如果上下文提示系统会入任务池/已识别为动作命令，应说明已进入待确认动作/任务，等待执行器预检。',
+    '如果用户问上品、改标题、换图、下架、活动、限时折扣，不能说已经静默执行，也不能说已在飞书建任务；应说明飞书只读，并建议回到 BI 自动化运营页生成任务、预检和确认。',
     '不要把“当前回答不直接执行”说成“没有权限”。如果上下文说明 HL 已有 OpenAPI 授权，应承认 HL 可进入 API 执行准备；如果商品发布/提交审核写适配器未实现，只能说卡在适配器/预检，不能泛化为 HL 没权限。',
     '遇到“这个链接/2,223 这个/刚才那个”等指代时，优先用上下文里的 SKC、店铺、货号、曝光/访客/销量数字定位，不要因为最新一句没写全就否定上轮已经查到的数据。',
     '如果用户要求画图、图表、柱状图或可视化，不要说不能画；上层网关会基于受控 BI 数据附上图片图表，你只负责给出简短解读。',
@@ -2505,7 +2505,7 @@ function answerPolicyFallback(text, data, policy = {}) {
     return [
       `已识别为 SHEIN 受控运营动作：${intents}。`,
       `目标：${[stores.length ? `店铺 ${stores.join(',')}` : '', product ? `货号/SKC ${productDisplayName(product, data)}` : ''].filter(Boolean).join('；') || '还需要在任务里补齐具体目标'}`,
-      '当前 owner-only 模式允许飞书创建运营任务；真实执行仍会走链接管理中台/执行器预检和审计，不会绕过中台静默改 SHEIN。',
+      '飞书当前只读，不创建运营任务；请在 BI 自动化运营页生成任务，后续会走预检、确认、审计和回读，不会静默改 SHEIN。',
       freshness,
     ].join('\n');
   }
@@ -2537,7 +2537,6 @@ async function answerQuestionSmart(text, data, policy = {}, linkOpsTask = null, 
     decision: policy.decision || '',
     mode: policy.mode || '',
     reason: policy.reason || '',
-    ownerOnlyOpsWrite: !!policy.ownerOnlyOpsWrite,
     needsPublicWeb: !!policy.needsPublicWeb,
     intents: policy.intents || [],
     targets: policy.targets || {},
@@ -2658,7 +2657,7 @@ async function handleEvent(event, options = {}) {
     dryRun: !!options.dryRun,
   });
   const taskNote = linkOpsTask
-    ? `\n\n运营任务：已${linkOpsTask.dryRun ? '模拟' : ''}加入链接运营任务池 ${linkOpsTask.id}。当前是 owner-only 受控模式；后续接团队时需要接员工账号和权限。`
+    ? `\n\n运营任务：已${linkOpsTask.dryRun ? '模拟' : ''}加入链接运营任务池 ${linkOpsTask.id}。注意：生产默认飞书只读；只有显式开启 SHEIN_QA_LINK_OPS_TASK_WRITE_ENABLED 时才会从飞书建任务。`
     : '';
   const answer = (chartSpec
     ? `${baseAnswer}\n\n图表：已按当前 BI 数据生成受控图表，图片见下一条。`

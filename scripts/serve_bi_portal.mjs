@@ -1846,6 +1846,7 @@ function inferLinkOpsTargets(command) {
     .map(x => x.toUpperCase())
     .filter(x => SHEIN_STORE_KEYS.has(x)))].slice(0, 24);
   const copyToMatch = /(?:从|复制|拷贝|参考)?\s*\b([A-Z]{2,3})\b[\s\S]{0,48}?(?:到|至|给|复制到|拷贝到|上到|铺到)\s*\b([A-Z]{2,3})\b/i.exec(text);
+  const copyLike = /复制|拷贝|参考|补.*链接|补链|上链接|创建链接|发布商品|刊登/.test(text) || /\b(copy|draft|create|publish)\b/i.test(text);
   const sourceStores = [];
   const writeStores = [];
   if (copyToMatch) {
@@ -1854,11 +1855,18 @@ function inferLinkOpsTargets(command) {
     if (SHEIN_STORE_KEYS.has(source)) sourceStores.push(source);
     if (SHEIN_STORE_KEYS.has(target)) writeStores.push(target);
   }
-  const skuMatches = [...new Set((text.match(/\b(?:[A-Z]{1,6}-?\d{1,8}[A-Z]?(?:-[A-Z0-9]+)?(?:[\u4e00-\u9fa5A-Za-z0-9-]*)?|(?:sv|sb)\d{8,})\b/giu) || [])
+  if (copyLike && storeMatches.length === 1 && !sourceStores.length && !writeStores.length) {
+    sourceStores.push(storeMatches[0]);
+    writeStores.push(storeMatches[0]);
+  }
+  const alnumMatches = text.match(/\b(?:[A-Z]{1,6}-?\d{1,8}[A-Z]?(?:-[A-Z0-9]+)?(?:[\u4e00-\u9fa5A-Za-z0-9-]*)?|(?:sv|sb)\d{8,})\b/giu) || [];
+  const numericProductMatches = (text.match(/(?<!\d)(\d{3,6}[A-Z]?)(?=\s*(?:缝纫机|咖啡机|空气炸锅|热风梳|厨师机|脱毛仪|榨汁机|绞肉机|吸尘器|电磁炉|按摩器|链接|货号|产品|品))/giu) || [])
+    .map(x => x.match(/\d{3,6}[A-Z]?/i)?.[0] || '');
+  const skuMatches = [...new Set([...alnumMatches, ...numericProductMatches]
     .map(x => x
       .replace(/[，。；、,.]+$/g, '')
       .replace(/(各店|全店|所有店|差链接|弱链接|死链接|缺链接|链接|建议|下架|换图|补新|补链|覆盖).*$/u, ''))
-    .filter(x => /\d/.test(x)))].slice(0, 24);
+    .filter(x => /\d/.test(x) && !/^19$/.test(x)))].slice(0, 24);
   return {
     stores: storeMatches,
     sourceStores,
@@ -1962,7 +1970,7 @@ function linkOpsCapabilityNotes(intents = [], targets = {}) {
   const openApiStores = stores.filter(store => openApiStoreCapability(store).authorized);
   const adapterStores = stores.filter(store => openApiStoreCapability(store).productPublishAdapter);
   if (openApiStores.length) {
-    notes.push(`${openApiStores.join(',')} 已检测到 OpenAPI 授权配置；当前任务应进入 API dry-run 预检/执行准备，缺发布 payload 时说明缺类目、属性、图片、SKU、成本、库存等资料，不能说“没有权限”，也不能谎称已提交审核。`);
+    notes.push(`${openApiStores.join(',')} 已检测到 OpenAPI 授权配置；复制/补链任务会在 dry-run 中优先从源链接/WebAPI 快照自动还原类目、属性、图片、SKU、供货价、库存和尺寸重量；只有自动还原失败时才提示补源店、源 SKC 或发布资料，不能一上来就说“缺 payload”。`);
   }
   if (adapterStores.length) {
     notes.push(`${adapterStores.join(',')} 已可做商品发布/编辑 OpenAPI 受控预检；默认仍只做 dry-run/人工确认，不静默提交 SHEIN。`);
@@ -2145,7 +2153,7 @@ function updateLinkOpsTaskFromChatCommand(task, body, actor, req) {
 function linkOpsRiskNotes(intents, targets = {}) {
   const notes = ['当前只是建立任务草案，不会自动修改 SHEIN 后台。'];
   if (intents.includes('copy_product_draft')) {
-    notes.push('复制上品需执行前检查：源 SKC、类目参数、证书/资质、图片、价格、库存100、计划上架时间。');
+    notes.push('复制上品会先按源店/源 SKC 或 BI 中曝光/销量最高的候选源链接自动还原发布参数；dry-run 会检查类目、属性、图片、SKU、价格、库存100、尺寸重量和计划上架时间。');
   }
   if (intents.includes('update_title') || intents.includes('update_images')) {
     notes.push('标题/图片会影响流量承接，初期必须人工确认素材和目标链接。');
@@ -5810,7 +5818,7 @@ async function main() {
                       ? '本条最新用户消息是对上文方案的确认执行。系统会继承上文用户意图和智能体定位，把同一会话加入或更新到链接运营任务池。'
                       : '本条最新用户消息已识别为明确运营动作命令。系统会自动把它加入链接运营任务池，等待人工确认/执行器预检。',
                     '你的回复不能声称已经执行，也不要只说“没有权限所以不能”；应明确说“已加入待确认动作/任务，执行前还会核对目标、素材、权限和风险”。',
-                    '如果目标店铺属于 19 店已授权范围，应说明该店 OpenAPI 已授权且只读探针通过；当前写动作会进入 dry-run 预检，真实提交仍取决于 payload 完整性、动作适配器、人工确认和回读，不能笼统说“没有权限”。',
+                    '如果目标店铺属于 19 店已授权范围，应说明该店 OpenAPI 已授权且只读探针通过；复制/补链会在 dry-run 中优先从源链接自动取类目、属性、图片、SKU、价格、库存、尺寸重量等参数，只有自动还原失败才需要补资料；不能一上来就说缺 payload 或没有权限。',
                   ]
                 : [
                     '每一轮都要根据整段会话和最新 BI JSON 上下文重新查数；如果最新用户消息换了店铺、货号或指标，以最新消息为准，缺省时再沿用上文。',

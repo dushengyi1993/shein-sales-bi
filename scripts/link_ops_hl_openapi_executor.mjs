@@ -397,10 +397,11 @@ function explicitSkcRefs(task) {
   return [...new Set((text.match(/\b(s[avb]\d{8,})\b/ig) || []).map(x => x.trim()))];
 }
 
-function sourceCandidateScore(row, {targetStore, storeHints, productHints, explicitSkcs}) {
+function sourceCandidateScore(row, {targetStore, storeHints, productHints, explicitSkcs, allowSameStoreSource = false}) {
   const store = normalizeStoreKey(row?.store_key || row?.storeKey);
   const skc = safeString(row?.skc, 120);
-  if (!store || !skc || store === normalizeStoreKey(targetStore)) return -Infinity;
+  if (!store || !skc) return -Infinity;
+  if (store === normalizeStoreKey(targetStore) && !allowSameStoreSource) return -Infinity;
   const standard = safeString(row?.standard_goods_sn || row?.standardGoodsSn || row?.raw_goods_sn || row?.rawGoodsSn, 400);
   const hay = compactRef([standard, skc, row?.product_name_cn, row?.productNameCn, row?.goods_sn, row?.rawGoodsSn].filter(Boolean).join(' '));
   let score = 0;
@@ -427,7 +428,18 @@ async function inferSourceCandidatesFromBi(task, {targetStore}) {
   const data = await readJsonIfExists(path.join(ROOT, 'outputs', 'bi-portal', 'data.json'));
   const rows = asArray(data?.storeLinks || data?.links);
   if (!rows.length) return [];
-  const storeHints = taskStores(task).filter(x => x && x !== normalizeStoreKey(targetStore));
+  const explicitSourceStores = [...new Set([
+    ...asArray(task?.targets?.sourceStores),
+    ...asArray(task?.targets?.readStores),
+    ...asArray(task?.sourceStores),
+    ...asArray(task?.readStores),
+    task?.sourceStore,
+  ].map(normalizeStoreKey).filter(Boolean))];
+  const normalizedTarget = normalizeStoreKey(targetStore);
+  const allowSameStoreSource = explicitSourceStores.includes(normalizedTarget);
+  const storeHints = explicitSourceStores.length
+    ? explicitSourceStores
+    : taskStores(task).filter(x => x && x !== normalizedTarget);
   const productHints = taskProductRefs(task).filter(x => !/^s[avb]\d{8,}$/i.test(x));
   const skcHints = explicitSkcRefs(task);
   const scored = rows
@@ -436,7 +448,7 @@ async function inferSourceCandidatesFromBi(task, {targetStore}) {
       sourceSkc: safeString(row?.skc, 120),
       standardGoodsSn: safeString(row?.standard_goods_sn || row?.standardGoodsSn, 240),
       source: 'bi_portal_store_link',
-      score: sourceCandidateScore(row, {targetStore, storeHints, productHints, explicitSkcs: skcHints}),
+      score: sourceCandidateScore(row, {targetStore, storeHints, productHints, explicitSkcs: skcHints, allowSameStoreSource}),
     }))
     .filter(x => x.sourceStore && x.sourceSkc && Number.isFinite(x.score) && x.score > 0)
     .sort((a, b) => b.score - a.score);
@@ -1084,7 +1096,7 @@ async function main() {
   const payloadFound = await findOrBuildPublishPayload(task, {targetStore});
   let payloadSummary = null;
   let safeDefaults = [];
-  let payloadValidation = {ok: false, blockers: ['缺 OpenAPI 发布 payload：需要先从源 SKC 后台详情映射出类目、属性、图片、SKU、供货价、库存和尺寸重量。'], warnings: []};
+  let payloadValidation = {ok: false, blockers: ['未能自动生成 OpenAPI 发布 payload：系统已尝试从源店/源 SKC 的链接快照还原类目、属性、图片、SKU、供货价、库存和尺寸重量；请补充更明确的源店、源 SKC，或先同步该源链接详情。'], warnings: []};
   let publishPayload = null;
   let payloadHash = '';
   if (payloadFound?.payload) {

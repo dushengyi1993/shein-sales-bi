@@ -21,6 +21,7 @@ const CHECK_FILES = [
   'scripts/bi_app/client.js',
   'scripts/test_bi_ops_permissions.mjs',
   'scripts/test_bi_ops_cli_flow.mjs',
+  'scripts/test_bi_ops_chat_inference.mjs',
   'scripts/test_bi_ops_write_whitelist_scope.mjs',
   'scripts/check_bi_ops_production_safety.mjs',
   'scripts/test_bi_ops_production_safety.mjs',
@@ -39,6 +40,7 @@ const DIFF_CHECK_FILES = [
   'scripts/link_ops_maintenance_openapi_executor.mjs',
   'scripts/test_bi_ops_permissions.mjs',
   'scripts/test_bi_ops_cli_flow.mjs',
+  'scripts/test_bi_ops_chat_inference.mjs',
   'scripts/test_bi_ops_write_whitelist_scope.mjs',
   'scripts/check_bi_ops_production_safety.mjs',
   'scripts/test_bi_ops_production_safety.mjs',
@@ -120,6 +122,7 @@ async function main() {
   }
   results.push({name: 'permission matrix smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_permissions.mjs']))});
   results.push({name: 'CLI flow smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_cli_flow.mjs']))});
+  results.push({name: 'chat inference smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_chat_inference.mjs']))});
   results.push({name: 'real-write whitelist scope smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_write_whitelist_scope.mjs']))});
   results.push({name: 'production real-write safety smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_production_safety.mjs']))});
   results.push({name: 'copy_product_draft success lifecycle smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs']))});
@@ -141,6 +144,7 @@ async function main() {
     staleConfirm,
     notes: [
       'permission and CLI flow smokes use isolated temporary auth/task/audit files',
+      'chat inference smoke proves one chat send can create a current-session same-store copy task without calling the LLM or SHEIN',
       'whitelist scope smoke enables safeWriteOperations only inside an isolated temporary portal',
       'production safety smoke checks locked and narrow-pilot configs through temporary files only',
       'copy_product_draft success smoke uses a local fake OpenAPI server only',
