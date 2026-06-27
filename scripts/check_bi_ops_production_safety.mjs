@@ -25,12 +25,14 @@ const DEFAULT_WRITE_WHITELIST_FILE = process.env.SHEIN_BI_OPS_WRITE_WHITELIST_FI
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
 const ALLOWED_REAL_SUBMIT_OPERATIONS = new Set([
   'copy_product_draft',
+  'activate_link',
   'retire_link',
   'update_title',
   'update_images',
   'update_inventory',
   'update_supply_price',
   'update_product_price',
+  'certificate_review',
 ]);
 
 function parseArgs(argv) {

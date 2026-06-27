@@ -122,14 +122,14 @@
 
 2. 营销活动 / 限时折扣 / 优惠券
    - 目前主要来自 SHEIN 后台/营销扫描产物。
-   - 策略：若开放平台有营销接口，先接“只读活动报名与生效价”；写报名必须单独设计，不与商品上下架混在一起。
+   - 当前官方公开 OpenAPI 目录未发现普通营销活动报名、限时折扣、优惠券报名的写接口；因此 `campaign_signup` / `flash_discount` 不列入“官方 API 可实现动作”，继续走本地营销运营流程、价格栈守卫和人工确认。若 SHEIN 后续开放官方营销写接口，再按同一套 dry-run / 白名单 / 确认文本 / 回读审计接入。
 
 3. 商品上下架 / 发布 / 编辑
    - OpenAPI 有商品管理和 `publishOrEdit` 方向，但 payload 完整性复杂。
    - 策略：先做 dry-run 执行器和草稿/预检；真实发布、编辑、上下架必须二次确认。
    - `copy_product_draft` 作为首个真实写试点候选时，提交后回读不能只看商品列表第一页，也不能用平台 SKU / 源 SKC / 货号文本这类弱证据直接判定成功；必须分页扫描，并优先用目标商家 SKU / 商家货号强指纹匹配。只有强指纹命中才可自动闭环为完成；弱匹配、未命中或查询失败都要保持任务锁定，等待全店管理账号人工核销。
-   - `retire_link` / `update_inventory` / `update_supply_price` / `update_product_price` / `update_title` / `update_images` 已接入 `scripts/link_ops_maintenance_openapi_executor.mjs`：先 dry-run 定位链接、解析 SKU、生成官方 OpenAPI payload 并锁定 `payloadHash`，真实提交仍必须走总闸门、真实写白名单、确认文本和回读/人工核销。
-   - `update_images` 不自动猜图片层级；只有提供完整 SHEIN `partialEdit` 图片 JSON 时才生成换图 payload。普通图片文件或外链必须先经图片上传/外链转换拿到 SHEIN 图片 URL，再放入 partialEdit JSON。
+   - `activate_link` / `retire_link` / `update_inventory` / `update_supply_price` / `update_product_price` / `update_title` / `update_images` / `certificate_review` 已接入 `scripts/link_ops_maintenance_openapi_executor.mjs`：先 dry-run 定位链接、解析 SKU、生成官方 OpenAPI payload 并锁定 `payloadHash`，真实提交仍必须走总闸门、真实写白名单、确认文本和回读/人工核销。
+   - `update_images` 不自动猜图片层级；只有提供完整 SHEIN `partialEdit` 图片 JSON 时才生成换图 payload。普通图片文件或外链必须先经图片上传/外链转换拿到 SHEIN 图片 URL，再放入 partialEdit JSON。`certificate_review` 不自动判成功；证书 payload 提交后默认进入人工核销，避免把平台审核中误当完成。
 
 ### C 类：暂不承诺 API 替换
 
@@ -307,7 +307,7 @@
 第二阶段再做：
 
 - 订单/退货/商品/库存 OpenAPI 双跑入仓，覆盖全部已授权店铺。
-- 真实上下架小流量试点，只选择已授权、预检通过、风险低的动作。
+- 真实上架/下架小流量试点，只选择已授权、预检通过、风险低的动作。
 
 第三阶段再做：
 
@@ -379,7 +379,7 @@
 
 ### M6：小范围真实写试点
 
-- 只选 1 个已授权店铺、1 个低风险动作。当前推荐首个试点动作是 `copy_product_draft`（复制上品 / 补链接），因为它是新增草稿/待审核类动作；`retire_link`、`update_title`、`update_images` 会影响存量在售链接，未具备官方维护接口、旧值备份和可靠回读前不得放行。
+- 只选 1 个已授权店铺、1 个低风险动作。当前推荐首个试点动作仍是 `copy_product_draft`（复制上品 / 补链接），因为它是新增草稿/待审核类动作；`activate_link`、`retire_link`、`update_title`、`update_images` 会影响存量链接，虽已具备官方维护执行器，但生产真实写仍必须先配置窄范围总闸门、真实写白名单、旧值备份和可靠回读/人工核销。
 - 人工确认后执行。
 - 执行后回读和审计完整。
 - 通过 `config/bi_ops_write_whitelist.local.json` 明确绑定“人 + 店 + 动作”，默认空白名单；不要直接打开全局所有店铺/所有动作。

@@ -100,6 +100,13 @@ function normalizeOperationName(value) {
     ['down', 'retire_link'],
     ['off_shelf', 'retire_link'],
     ['offline', 'retire_link'],
+    ['activate', 'activate_link'],
+    ['activate_product', 'activate_link'],
+    ['up', 'activate_link'],
+    ['on_shelf', 'activate_link'],
+    ['online', 'activate_link'],
+    ['relist', 'activate_link'],
+    ['restore_listing', 'activate_link'],
     ['title', 'update_title'],
     ['image', 'update_images'],
     ['images', 'update_images'],
@@ -123,6 +130,7 @@ Usage:
   node scripts/bi_ops_cli.mjs login --username <账号> --password <密码>
   node scripts/bi_ops_cli.mjs doctor
   node scripts/bi_ops_cli.mjs doctor --operation copy_product_draft --target-stores HL
+  node scripts/bi_ops_cli.mjs doctor --operation activate_link --stores DL --require-real-submit
   node scripts/bi_ops_cli.mjs doctor --operation retire_link --stores DL --require-real-submit
   node scripts/bi_ops_cli.mjs me
   node scripts/bi_ops_cli.mjs capabilities
@@ -145,7 +153,7 @@ Options:
   --session-file   默认 ${DEFAULT_SESSION_FILE}
   --source-stores  跨店复制时只读来源店铺
   --target-stores  跨店复制时真实写入目标店铺；不填则沿用 --stores
-  --operation      doctor 用；可填 copy_product_draft / retire_link / update_title / update_images
+  --operation      doctor 用；可填 copy_product_draft / activate_link / retire_link / update_title / update_images / update_inventory / update_supply_price / update_product_price / certificate_review
   --require-real-submit  doctor 用；要求所选店铺+动作已可真实提交，否则退出非 0
   --doc-evidence / --store-probe / --readback-evidence
                    maintenance-readiness 用；维护真实写的脱敏证据文件

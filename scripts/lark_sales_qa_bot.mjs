@@ -1603,14 +1603,19 @@ function appendConversationTurn(conversation, event, {policy, answer, chartSpec,
 const INFRA_ACTION_RE = /重启|部署|发布版本|发版|改代码|修改代码|提交代码|提交git|git\s+push|push|pull|reset|删库|清库|迁移数据库|执行SQL|跑SQL|改表|drop\s+table|truncate|systemctl|sudo|ssh|shell|命令行|定时器|timer|service|docker|nginx|caddy|metabase|postgres|数据库|服务器|BI系统|BI门户|源码|仓库|github|配置文件|auth\.json|config\.toml/i;
 const SECRET_RE = /token|cookie|密码|密钥|secret|app[_ -]?secret|auth\.json|config\.toml|凭据|验证码|session/i;
 const ECOM_DOMAIN_RE = /SHEIN|shein|希音|沙特|半托|电商|运营|店铺|货号|SKU|sku|SKC|skc|商品|产品|链接|上架|下架|标题|主图|图片|套图|卖点|五点|描述|关键词|竞品|竞对|搜索词|流量|曝光|访客|点击|支付|转化|销售|销量|订单|利润|成本|退货|退款|售后|库存|ET|et|货代|去化|补货|活动|报名|折扣|促销|定价|价格|BI|bi|图表|画图|信息图|日报|看板|动作池|任务池/;
-const OPS_WRITE_RE = /改标题|换标题|优化标题并(替换|执行|提交)|换图|更换图片|改主图|上传图片|补链接|补链|创建链接|复制上品|上品|上链接|发布商品|刊登|提交审核|下架|归档|删除链接|停掉链接|报活动|活动报名|报名活动|设置折扣|限时折扣|改价|调价|改价格|改库存|补证书|补资质|执行|开始处理|加入任务池|加入动作池/;
+const OPS_WRITE_RE = /改标题|换标题|优化标题并(替换|执行|提交)|换图|更换图片|改主图|上传图片|补链接|补链|创建链接|复制上品|上品|上链接|发布商品|刊登|提交审核|恢复上架|重新上架|再次上架|改为上架|设为上架|设置上架|恢复在售|下架|归档|删除链接|停掉链接|报活动|活动报名|报名活动|设置折扣|限时折扣|改价|调价|改价格|改库存|补证书|补资质|执行|开始处理|加入任务池|加入动作池/;
 const DRAFT_OR_RESEARCH_RE = /优化标题|标题优化|写标题|生成标题|改写标题|卖点|五点|描述|文案|关键词|竞品|竞对|参考|调研|搜索|查一下|找一下|分析.*标题|图片方案|套图方案/;
 
 function inferLinkOpsIntent(command) {
   const text = String(command || '').trim();
   const lower = text.toLowerCase();
   const intents = [];
-  if (/补|复制|上品|上架|草稿|覆盖|缺链接|缺链/.test(text) || /\b(copy|draft|create|publish|coverage)\b/.test(lower)) intents.push('copy_product_draft');
+  const activateLinkIntent = /恢复上架|重新上架|再次上架|改为上架|设为上架|设置上架|恢复在售|改回在售|上架回来/.test(text)
+    || /\b(activate_link|on_shelf|onshelf|relist|restore_listing)\b/.test(lower);
+  const copyProductIntent = /补|复制|上品|草稿|覆盖|缺链接|缺链|创建草稿|创建链接|上链接|发链接|发布商品|刊登|提交审核/.test(text)
+    || /\b(copy|draft|create|publish|coverage)\b/.test(lower);
+  if (activateLinkIntent) intents.push('activate_link');
+  if (copyProductIntent) intents.push('copy_product_draft');
   if (/标题|title/.test(lower)) intents.push('update_title');
   if (/主图|图片|套图|image|photo|pic/.test(lower)) intents.push('update_images');
   if (/下架|死链|淘汰|归档|停掉|移除|删除链接/.test(text)) intents.push('retire_link');
@@ -1624,6 +1629,7 @@ function inferLinkOpsIntent(command) {
 function linkOpsIntentLabel(intent) {
   return ({
     copy_product_draft: '补链接/复制上品',
+    activate_link: '恢复/重新上架',
     update_title: '换标题',
     update_images: '换图',
     retire_link: '下架/归档链接',

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Isolated fake-OpenAPI smoke for link maintenance executor.
- * It verifies retire_link/update_inventory/update_supply_price/update_product_price/update_title
+ * It verifies activate_link/retire_link/update_inventory/update_supply_price/update_product_price/update_title
  * without touching real SHEIN.
  */
 import fs from 'node:fs/promises';
@@ -87,8 +87,10 @@ const fake = http.createServer(async (req, res) => {
   }
   if (pathname === '/open-api/goods/modify-skc-shelf') {
     const row = body.json?.skc_site_info_list?.[0] || {};
-    if (row.shelf_state !== 2 || row.skc_name !== 'sv-smoke-skc') return sendJson(res, {code: '400', msg: 'bad retire payload'}, 200);
-    return sendJson(res, {code: '0', msg: 'OK', traceId: 'trace-retire'});
+    const okRetire = row.shelf_state === 2 && row.skc_name === 'sv-smoke-skc';
+    const okActivate = row.shelf_state === 1 && row.skc_name === 'sv-smoke-inactive-skc';
+    if (!okRetire && !okActivate) return sendJson(res, {code: '400', msg: 'bad shelf payload'}, 200);
+    return sendJson(res, {code: '0', msg: 'OK', traceId: okActivate ? 'trace-activate' : 'trace-retire'});
   }
   if (pathname === '/open-api/stock/change-inventory/v2') {
     const row = body.json?.updateSkuInventoryQuantityRequests?.[0] || {};
@@ -111,11 +113,18 @@ const fake = http.createServer(async (req, res) => {
     if (!isTitle && !isImage) return sendJson(res, {code: '400', msg: 'bad partialEdit payload'}, 200);
     return sendJson(res, {code: '0', msg: 'OK', traceId: isImage ? 'trace-image' : 'trace-title'});
   }
+  if (pathname === '/open-api/goods/save-certificate-pool-skc-bind') {
+    if (body.json?.skc_name !== 'sv-smoke-skc' || body.json?.certificate_pool_id !== 'CERTPOOL-SMOKE') return sendJson(res, {code: '400', msg: 'bad certificate bind payload'}, 200);
+    return sendJson(res, {code: '0', msg: 'OK', traceId: 'trace-certificate'});
+  }
   if (pathname === '/open-api/stock/stock-query') {
     return sendJson(res, {code: '0', msg: 'OK', info: [{skuCode: 'sku-smoke-001', usableInventory: 100}]});
   }
   if (pathname === '/open-api/openapi-business-backend/product/query') {
-    return sendJson(res, {code: '0', msg: 'OK', info: {data: [{skcName: 'sv-smoke-skc', spuName: 'spu-smoke', supplierCode: 'TEST-PRODUCT', skuCodeList: ['sku-smoke-001']}]}});
+    return sendJson(res, {code: '0', msg: 'OK', info: {data: [
+      {skcName: 'sv-smoke-skc', spuName: 'spu-smoke', supplierCode: 'TEST-PRODUCT', skuCodeList: ['sku-smoke-001']},
+      {skcName: 'sv-smoke-inactive-skc', spuName: 'spu-inactive-smoke', supplierCode: 'TEST-INACTIVE', skuCodeList: ['sku-smoke-002']},
+    ]}});
   }
   return sendJson(res, {code: '404', msg: `Unhandled ${pathname}`}, 404);
 });
@@ -129,11 +138,17 @@ try {
   });
   const biDir = path.join(tmpRoot, 'bi-portal');
   await writeJson('bi-portal/sections/linksData.json', {
-    data: {storeLinks: [{store_key: 'SMK', skc: 'sv-smoke-skc', spu: 'spu-smoke', standard_goods_sn: 'TEST-PRODUCT', is_on_shelf: true, shelf_status_name: '已上架'}]},
+    data: {storeLinks: [
+      {store_key: 'SMK', skc: 'sv-smoke-skc', spu: 'spu-smoke', standard_goods_sn: 'TEST-PRODUCT', is_on_shelf: true, shelf_status_name: '已上架'},
+      {store_key: 'SMK', skc: 'sv-smoke-inactive-skc', spu: 'spu-inactive-smoke', standard_goods_sn: 'TEST-INACTIVE', is_on_shelf: false, shelf_status_name: '已下架'},
+    ]},
   });
   const productCacheDir = path.join(tmpRoot, 'products');
   await writeJson('products/SMK/latest.json', {
-    normalizedRows: [{storeKey: 'SMK', skc: 'sv-smoke-skc', spu: 'spu-smoke', supplierCode: 'TEST-PRODUCT', skuCodes: '["sku-smoke-001"]', costSar: 70, sheinUsableInventory: 30}],
+    normalizedRows: [
+      {storeKey: 'SMK', skc: 'sv-smoke-skc', spu: 'spu-smoke', supplierCode: 'TEST-PRODUCT', skuCodes: '["sku-smoke-001"]', costSar: 70, sheinUsableInventory: 30},
+      {storeKey: 'SMK', skc: 'sv-smoke-inactive-skc', spu: 'spu-inactive-smoke', supplierCode: 'TEST-INACTIVE', skuCodes: '["sku-smoke-002"]', costSar: 70, sheinUsableInventory: 0},
+    ],
   });
   const task = {
     id: 'maintenance-smoke',
@@ -186,6 +201,57 @@ try {
   check('execute called partialEdit twice for title and image', execPaths.filter(p => p === '/open-api/goods/product/partialEdit').length, 2);
   check('execute reused payload hash', exec.json?.payload?.payloadHash || '', hash);
   check('saved output file exists', fssync.existsSync(path.join(ROOT, exec.json?.savedTo || '')), true);
+
+  const activateTask = {
+    id: 'activate-smoke',
+    status: 'waiting_review',
+    command: '把 SMK 的 TEST-INACTIVE 恢复上架',
+    targets: {stores: ['SMK'], productRefs: ['TEST-INACTIVE']},
+    intents: ['activate_link'],
+  };
+  const activateDryFile = await writeJson('task-activate-dry.json', {version: 1, tasks: [activateTask]});
+  calls.length = 0;
+  const activateDry = await runNode([...commonArgs, '--task-id', 'activate-smoke', '--task-json', activateDryFile, '--dry-run']);
+  check('activate dry-run exits 0', activateDry.code, 0);
+  check('activate dry-run ok', activateDry.json?.ok, true);
+  check('activate dry-run operation', activateDry.json?.payload?.summary?.operations?.[0], 'activate_link');
+  check('activate dry-run uses shelf state 1', activateDry.json?.payload?.submitPlan?.payloads?.[0]?.body?.skc_site_info_list?.[0]?.shelf_state, 1);
+  check('activate dry-run does not write', calls.some(c => c.path === '/open-api/goods/modify-skc-shelf'), false);
+  const activateHash = activateDry.json?.payload?.payloadHash || '';
+  const activateExecFile = await writeJson('task-activate-exec.json', {version: 1, executionContext: {expectedPayloadHash: activateHash}, tasks: [activateTask]});
+  calls.length = 0;
+  const activateExec = await runNode([...commonArgs, '--task-id', 'activate-smoke', '--task-json', activateExecFile, '--execute', '--confirm', CONFIRM_TEXT]);
+  check('activate execute exits 0', activateExec.code, 0);
+  check('activate execute state submitted', activateExec.json?.state, 'submitted');
+  check('activate execute calls shelf endpoint', calls.some(c => c.path === '/open-api/goods/modify-skc-shelf'), true);
+  check('activate execute payload shelf state 1', calls.find(c => c.path === '/open-api/goods/modify-skc-shelf')?.body?.skc_site_info_list?.[0]?.shelf_state, 1);
+  check('activate execute readback ok', activateExec.json?.readback?.ok, true);
+
+  const certTask = {
+    id: 'certificate-smoke',
+    status: 'waiting_review',
+    command: '给 SMK 的 TEST-PRODUCT 绑定证书池',
+    targets: {stores: ['SMK'], productRefs: ['TEST-PRODUCT']},
+    certificatePayloads: [{endpoint: '/open-api/goods/save-certificate-pool-skc-bind', body: {skc_name: 'sv-smoke-skc', certificate_pool_id: 'CERTPOOL-SMOKE'}}],
+    intents: ['certificate_review'],
+  };
+  const certDryFile = await writeJson('task-cert-dry.json', {version: 1, tasks: [certTask]});
+  calls.length = 0;
+  const certDry = await runNode([...commonArgs, '--task-id', 'certificate-smoke', '--task-json', certDryFile, '--dry-run']);
+  check('certificate dry-run exits 0', certDry.code, 0);
+  check('certificate dry-run ok', certDry.json?.ok, true);
+  check('certificate dry-run payload hash present', Boolean(certDry.json?.payload?.payloadHash), true);
+  check('certificate dry-run does not write', calls.some(c => c.path === '/open-api/goods/save-certificate-pool-skc-bind'), false);
+  const certHash = certDry.json?.payload?.payloadHash || '';
+  const certExecFile = await writeJson('task-cert-exec.json', {version: 1, executionContext: {expectedPayloadHash: certHash}, tasks: [certTask]});
+  calls.length = 0;
+  const certExec = await runNode([...commonArgs, '--task-id', 'certificate-smoke', '--task-json', certExecFile, '--execute', '--confirm', CONFIRM_TEXT]);
+  check('certificate execute exits 0', certExec.code, 0);
+  check('certificate execute state submitted', certExec.json?.state, 'submitted');
+  check('certificate execute publish code', certExec.json?.publishResult?.code, '0');
+  check('certificate execute calls bind endpoint', calls.some(c => c.path === '/open-api/goods/save-certificate-pool-skc-bind'), true);
+  check('certificate execute requires manual review', certExec.json?.readback?.status || '', s => String(s).includes('certificate_submitted_manual_review_required'));
+  check('certificate execute not auto ok', certExec.json?.ok, false);
   ok = checks.every(c => c.pass);
 } finally {
   await new Promise(resolve => fake.close(resolve));

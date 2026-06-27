@@ -3,7 +3,7 @@
  * SHEIN OpenAPI link-maintenance executor.
  *
  * Supports dry-run and guarded execute for maintenance actions that are backed
- * by official OpenAPI endpoints: retire_link, update_inventory,
+ * by official OpenAPI endpoints: activate_link, retire_link, update_inventory,
  * update_supply_price, update_product_price, update_title, update_images.
  * It never silently writes: execute requires the server-side task state, a
  * dry-run payload hash, safe write gates and the explicit confirm text.
@@ -24,6 +24,10 @@ const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'st
 const STORE_ACCOUNT_TRUTH = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'store_account_truth.json'), 'utf8'));
 
 const ACTIONS = {
+  activate_link: {
+    endpoint: '/open-api/goods/modify-skc-shelf',
+    readbackKind: 'product',
+  },
   retire_link: {
     endpoint: '/open-api/goods/modify-skc-shelf',
     readbackKind: 'product',
@@ -48,7 +52,20 @@ const ACTIONS = {
     endpoint: '/open-api/goods/product/partialEdit',
     readbackKind: 'product',
   },
+  certificate_review: {
+    endpoint: '/open-api/goods/get-certificate-rule',
+    readbackKind: 'manual',
+  },
 };
+const CERTIFICATE_ALLOWED_ENDPOINTS = new Set([
+  '/open-api/goods/get-certificate-rule',
+  '/open-api/goods/certificate/get-all-certificate-type-list-v2',
+  '/open-api/goods/upload-certificate-file',
+  '/open-api/goods/save-or-update-certificate-pool',
+  '/open-api/goods/save-or-update-supplier-certificate',
+  '/open-api/goods/save-certificate-pool-skc-bind',
+  '/open-api/goods-compliance/update-skc-warning-certificate',
+]);
 const MAINTENANCE_INTENTS = new Set(Object.keys(ACTIONS));
 
 function parseArgs(argv) {
@@ -157,15 +174,42 @@ function compactCallResult(name,pathText,method,response){ return {name,path:pat
 async function callOpenApi(client, {name, path:pathText, method='POST', body, query}){ const response=await client.request(pathText,{method,body,query,headers:{language:'zh-cn'}}); return {...compactCallResult(name,pathText,method,response), data:response.data}; }
 function summarizeSiteList(data){ const rows=[]; const q=[data]; const seen=new Set(); while(q.length&&rows.length<300){ const cur=q.shift(); if(!cur||typeof cur!=='object'||seen.has(cur)) continue; seen.add(cur); if(Array.isArray(cur)){ q.push(...cur); continue; } const site=safeString(cur.siteAbbr||cur.site_abbr||cur.site||cur.subSite||cur.sub_site||cur.siteCode||cur.site_code,80); const currency=safeString(cur.currency||cur.currencyCode||cur.currency_code,20).toUpperCase(); if(site) rows.push({siteAbbr:site,currency}); q.push(...Object.values(cur)); } return rows; }
 async function getDefaultSite(client,calls,warnings){ try{ const r=await callOpenApi(client,{name:'query-site-list',path:'/open-api/goods/query-site-list',body:{}}); calls.push(compactCallResult(r.name,r.path,r.method,{status:r.httpStatus,data:r.data})); const sites=summarizeSiteList(r.data); const sa=sites.find(x=>String(x.siteAbbr).toLowerCase()==='shein-sa')||sites.find(x=>String(x.currency).toUpperCase()==='SAR')||sites[0]; if(!sa) warnings.push('站点列表为空，默认使用 shein-sa/SAR 但执行前必须人工复核。'); return {site:sa?.siteAbbr||'shein-sa', currency:sa?.currency||'SAR', sites:sites.slice(0,20)}; }catch(e){ warnings.push(`站点列表探针失败：${safeString(e.message||e)}；默认使用 shein-sa/SAR。`); return {site:'shein-sa',currency:'SAR',sites:[]}; } }
+function normalizeCertificatePayloadsFromJsonAssets(task, warnings){
+  const out=[];
+  const sources=[];
+  const pushPayload=(payload, source)=>{
+    if(!payload||typeof payload!=='object') return;
+    const endpoint=safeString(payload.endpoint||payload.path||payload.openPath||'',200);
+    const body=payload.body||payload.payload||payload.requestBody||null;
+    if(!endpoint||!body||typeof body!=='object') return;
+    if(!CERTIFICATE_ALLOWED_ENDPOINTS.has(endpoint)) { warnings.push(`证书 payload endpoint 不在允许列表，已忽略：${endpoint}`); return; }
+    out.push({endpoint,body,label:safeString(payload.label||payload.operation||'certificate_payload',120)});
+    sources.push(source||'json');
+  };
+  for(const value of Array.isArray(task?._jsonAssets)?task._jsonAssets:[]){
+    const json=value?.json;
+    for(const payload of asArray(json?.certificatePayloads||json?.certificate_payloads)) pushPayload(payload,value.file||value.assetId||'json-asset');
+    pushPayload(json?.certificatePayload||json?.certificate_payload,value.file||value.assetId||'json-asset');
+    if(json?.endpoint&&json?.body) pushPayload(json,value.file||value.assetId||'json-asset');
+  }
+  for(const payload of asArray(task?.certificatePayloads||task?.targets?.certificatePayloads)) pushPayload(payload,'task.certificatePayloads');
+  pushPayload(task?.certificatePayload||task?.targets?.certificatePayload,'task.certificatePayload');
+  if(out.length) warnings.push(`证书动作将使用已提供的官方 OpenAPI JSON payload：${unique(sources).join('、')}；提交后默认需要人工核销审核状态。`);
+  return out;
+}
 function resolveTargets({task, store, linkRows, productRows}){ const refs=taskProductRefs(task); const matches=[]; const missing=[]; for(const ref of refs){ const candidates=linkRows.filter(r=>linkRowStore(r)===store&&rowMatches(r,ref)).sort((a,b)=>Number(linkRowOnShelf(b))-Number(linkRowOnShelf(a))).slice(0,20); if(!candidates.length){ missing.push(ref); continue; } for(const row of candidates){ const skc=linkRowSkc(row), spu=linkRowSpu(row), standard=linkRowStandard(row); const prod=productRows.find(p=>productRowMatches(p,{skc,spu,standard}))||{}; matches.push({ref, storeKey:store, skc, spu, standardGoodsSn:standard, isOnShelf:linkRowOnShelf(row), skuCodes:parseSkuCodes(prod.skuCodes||prod.skuCodeList||prod.sku_code_list||prod.skuCode), supplierCode:safeString(prod.supplierCode||prod.supplier_code||standard,160), costSar:Number(prod.costSar||row.original_supply_price_range_sar||0)||null, sheinUsableInventory:Number(prod.sheinUsableInventory||row.visible_usable_inventory||row.visible_inventory_quantity||0)||0, productRowFound:Boolean(Object.keys(prod).length)}); }
   }
   const uniq=[]; const seen=new Set(); for(const m of matches){ const key=`${m.storeKey}|${m.skc}|${m.standardGoodsSn}`; if(seen.has(key)) continue; seen.add(key); uniq.push(m); }
   return {refs, matches:uniq, missing}; }
-function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEditPayloads=[]}){
+function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEditPayloads=[],certificatePayloads=[]}){
   const command=String(task?.command||task?.text||''); const out=[];
   for(const intent of intents){
     const endpoint=ACTIONS[intent].endpoint;
-    if(intent==='retire_link'){
+    if(intent==='activate_link'){
+      const inactive=matches.filter(m=>m.isOnShelf!==true);
+      if(!inactive.length) blockers.push('上架任务没有匹配到待上架/已下架/非在售链接。');
+      out.push({operation:intent, endpoint, body:{skc_site_info_list:inactive.map(m=>({shelf_state:1, site_list:[siteInfo.site], skc_name:m.skc}))}, targetLinks:inactive});
+    } else if(intent==='retire_link'){
       const active=matches.filter(m=>m.isOnShelf!==false);
       if(!active.length) blockers.push('下架任务没有匹配到已上架链接。');
       out.push({operation:intent, endpoint, body:{skc_site_info_list:active.map(m=>({shelf_state:2, site_list:[siteInfo.site], skc_name:m.skc}))}, targetLinks:active});
@@ -195,6 +239,11 @@ function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEdi
       if(!imagePlans.length) blockers.push('换图任务缺少完整 SHEIN partialEdit 图片 JSON：需提供 spu_name + image_info/skc_list/site_detail_image_info_list，或先通过图片上传/外链转换取得 SHEIN 图片 URL 后再提交。');
       for(const body of imagePlans){ out.push({operation:intent, endpoint, body, targetLinks:matches}); }
       if(!imagePlans.length) out.push({operation:intent, endpoint, body:{}, targetLinks:matches});
+    } else if(intent==='certificate_review'){
+      const certPlans=Array.isArray(certificatePayloads)?certificatePayloads:[];
+      if(!certPlans.length) blockers.push('证书/资质任务缺少官方 OpenAPI JSON payload：需提供 certificatePayloads[{endpoint,body}]，endpoint 必须在证书允许列表内。');
+      for(const plan of certPlans){ out.push({operation:intent, endpoint:plan.endpoint, body:plan.body, targetLinks:matches, label:plan.label}); }
+      if(!certPlans.length) out.push({operation:intent, endpoint, body:{}, targetLinks:matches});
     }
   }
   for(const p of out){ if(!Object.keys(p.body||{}).length) warnings.push(`${p.operation} 未生成可提交 payload。`); }
@@ -205,7 +254,9 @@ async function readbackStock(client, matches, calls){ const skuCodes=unique(matc
 async function readbackForIntents(client, intents, matches, calls){
   const groups=[];
   if(intents.includes('update_inventory')) groups.push(await readbackStock(client,matches,calls));
-  if(intents.some(x=>x!=='update_inventory')) groups.push(await readbackProduct(client,matches,calls));
+  const productReadbackIntents=intents.filter(x=>!['update_inventory','certificate_review'].includes(x));
+  if(productReadbackIntents.length) groups.push(await readbackProduct(client,matches,calls));
+  if(intents.includes('certificate_review')) groups.push({ok:false,status:'certificate_submitted_manual_review_required',matchedRows:[],calls,warnings:['证书/资质提交后需人工确认平台审核状态，不能自动判成功。']});
   if(!groups.length) return {ok:false,status:'not_run',matchedRows:[],calls};
   const ok=groups.every(g=>g.ok);
   const matchedRows=groups.flatMap(g=>Array.isArray(g.matchedRows)?g.matchedRows:[]);
@@ -228,7 +279,8 @@ async function main(){
   if(resolved.missing.length) blockers.push(`未定位到目标货号/SKC：${resolved.missing.join('、')}`);
   if(!resolved.matches.length) blockers.push('没有可执行目标链接。');
   const imageEditPayloads=normalizeImageEditPayloadsFromJsonAssets(taskWithJsonAssets,resolved.matches,warnings);
-  const payloads=buildPayloads({task:taskWithJsonAssets,intents,matches:resolved.matches,siteInfo,blockers,warnings,imageEditPayloads});
+  const certificatePayloads=normalizeCertificatePayloadsFromJsonAssets(taskWithJsonAssets,warnings);
+  const payloads=buildPayloads({task:taskWithJsonAssets,intents,matches:resolved.matches,siteInfo,blockers,warnings,imageEditPayloads,certificatePayloads});
   const submitPlan={storeKey:store,intents,payloads:payloads.map(p=>({operation:p.operation,endpoint:p.endpoint,body:p.body,targetSkcs:p.targetLinks.map(x=>x.skc).filter(Boolean)}))};
   const payloadHash=payloads.some(p=>Object.keys(p.body||{}).length)?sha256Stable(submitPlan):'';
   if(args.mode==='execute'){

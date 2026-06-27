@@ -167,14 +167,23 @@ const OPENAPI_WRITE_DOMAIN_LABELS = {
 };
 
 const LINK_MAINTENANCE_INTENTS = new Set([
+  'activate_link',
   'retire_link',
   'update_title',
   'update_images',
   'update_inventory',
   'update_supply_price',
   'update_product_price',
+  'certificate_review',
 ]);
 const LINK_OPS_MAINTENANCE_OFFICIAL_CANDIDATES = {
+  activate_link: {
+    endpoint: '/open-api/goods/modify-skc-shelf',
+    label: '商品上下架',
+    docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001253',
+    evidence: 'SHEIN 官方公开文档目录确认该接口为“商品上下架”；schema 字段包含 skc_site_info_list / shelf_state / site_list / skc_name，shelf_state=1 为上架。',
+    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + dry-run payload hash + 回读/人工核销。'],
+  },
   retire_link: {
     endpoint: '/open-api/goods/modify-skc-shelf',
     label: '商品上下架',
@@ -217,6 +226,13 @@ const LINK_OPS_MAINTENANCE_OFFICIAL_CANDIDATES = {
     evidence: 'SHEIN 官方公开文档目录确认该接口为“更新商品售价”；schema 字段包含 productPriceList / productCode / currencyCode / shopPrice / site。',
     missing: ['商品售价 API 同时写 shopPrice/specialPrice；生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + dry-run payload hash + 回读/人工核销。'],
   },
+  certificate_review: {
+    endpoint: '/open-api/goods/save-certificate-pool-skc-bind',
+    label: '证书/资质维护',
+    docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001477',
+    evidence: 'SHEIN 官方公开文档目录确认存在证书要求查询、证书文件上传、证书池创建/编辑、店铺证书池创建/编辑、SKC 绑定商品证书池等接口。',
+    missing: ['证书动作需提供 certificatePayloads[{endpoint,body}] 且 endpoint 在证书允许列表；提交后默认人工核销审核状态，不自动判成功。'],
+  },
 };
 
 const LINK_OPS_ACTION_CAPABILITY_DEFS = [
@@ -230,6 +246,15 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     confirmableState: 'openapi_product_preflight_ready',
     requiredConfirmText: LINK_OPS_OPENAPI_SUBMIT_CONFIRM_TEXT,
     reason: '可做 OpenAPI 商品发布/编辑 payload 预检；真实 publishOrEdit 只在 payload 完整、任务待复核、显式确认文本同时满足时才会提交。',
+  },
+  {
+    key: 'activate_link',
+    label: '恢复 / 重新上架',
+    intent: 'activate_link',
+    stage: 'link_maintenance_dry_run',
+    precheck: true,
+    realSubmit: false,
+    reason: '已接入官方商品上下架 OpenAPI 执行器；默认 dry-run 锁定 payload，真实上架必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
   },
   {
     key: 'retire_link',
@@ -292,7 +317,7 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'task_only',
     precheck: false,
     realSubmit: false,
-    reason: '营销报名仍走本地/运营专用流程，尚未接入 BI 自动运营真实提交。',
+    reason: '官方公开 OpenAPI 目录当前无营销报名写接口证据；该动作不列入官方 API 可实现范围，继续走已有本地营销运营流程和人工确认。',
   },
   {
     key: 'flash_discount',
@@ -301,16 +326,16 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'task_only',
     precheck: false,
     realSubmit: false,
-    reason: '限时折扣仍走本地/运营专用流程，尚未接入 BI 自动运营真实提交。',
+    reason: '官方公开 OpenAPI 目录当前无限时折扣写接口证据；该动作不列入官方 API 可实现范围，继续走已有本地营销运营流程和人工确认。',
   },
   {
     key: 'certificate_review',
     label: '证书 / 资质',
     intent: 'certificate_review',
-    stage: 'task_only',
-    precheck: false,
+    stage: 'link_maintenance_dry_run',
+    precheck: true,
     realSubmit: false,
-    reason: '资质证书目前只进入任务池和素材管理，尚未接入 SHEIN 真实上传/提交接口。',
+    reason: '已接入官方证书/资质 OpenAPI JSON payload 执行器；真实提交仍必须命中总闸门、白名单、payload hash 和确认文本，提交后默认人工核销审核状态。',
   },
 ];
 
@@ -965,8 +990,14 @@ function linkOpsActionCapabilitiesForStore(storeKey, cap = openApiStoreCapabilit
       precheckSupported = false;
       realSubmitSupported = false;
       state = 'task_only_no_adapter';
-      realSubmitBlockers.push('该动作当前只有任务池/人工流程，没有自动执行适配器');
-      nextStep = '先补动作专属预检和执行器，再讨论真实提交。';
+      if (def.key === 'campaign_signup' || def.key === 'flash_discount') {
+        realSubmitBlockers.push('官方公开 OpenAPI 目录当前无该营销写接口证据');
+        realSubmitBlockers.push('该动作继续走已有本地营销运营流程和人工确认，不通过官方 OpenAPI 总闸门伪装成可提交');
+        nextStep = '若后续 SHEIN 开放营销报名/限时折扣官方接口，再按 dry-run、白名单、确认文本、回读/人工核销重新接入。';
+      } else {
+        realSubmitBlockers.push('该动作当前只有任务池/人工流程，没有自动执行适配器');
+        nextStep = '先补动作专属预检和执行器，再讨论真实提交。';
+      }
     }
     return {
       key: def.key,
@@ -1755,7 +1786,12 @@ function inferLinkOpsIntent(command) {
   const text = String(command || '').trim();
   const lower = text.toLowerCase();
   const intents = [];
-  if (/补|复制|上品|上架|草稿|覆盖|缺链接|缺链/.test(text) || /\b(copy|draft|create|publish|coverage)\b/.test(lower)) intents.push('copy_product_draft');
+  const activateLinkIntent = /恢复上架|重新上架|再次上架|改为上架|设为上架|设置上架|恢复在售|改回在售|上架回来/.test(text)
+    || /\b(activate_link|on_shelf|onshelf|relist|restore_listing)\b/.test(lower);
+  const copyProductIntent = /补|复制|上品|草稿|覆盖|缺链接|缺链|创建草稿|创建链接|上链接|发链接|发布商品|刊登|提交审核/.test(text)
+    || /\b(copy|draft|create|publish|coverage)\b/.test(lower);
+  if (activateLinkIntent) intents.push('activate_link');
+  if (copyProductIntent) intents.push('copy_product_draft');
   if (/标题|title/.test(lower)) intents.push('update_title');
   if (/主图|图片|套图|image|photo|pic/.test(lower)) intents.push('update_images');
   if (/库存|补库存|改库存|虚拟库存|stock|inventory/.test(lower)) intents.push('update_inventory');
@@ -1778,6 +1814,7 @@ function linkOpsIntentLabel(intent) {
     update_inventory: '改库存',
     update_supply_price: '改供货价',
     update_product_price: '改商品售价',
+    activate_link: '恢复/重新上架',
     retire_link: '下架/归档链接',
     campaign_signup: '报营销活动',
     flash_discount: '限时折扣',
@@ -1918,7 +1955,7 @@ function buildLinkOpsCapabilitySummary(targets = {}) {
 }
 
 function linkOpsCapabilityNotes(intents = [], targets = {}) {
-  const writeIntents = ['copy_product_draft', 'update_title', 'update_images', 'update_inventory', 'update_supply_price', 'update_product_price', 'retire_link', 'campaign_signup', 'flash_discount', 'certificate_review'];
+  const writeIntents = ['copy_product_draft', 'update_title', 'update_images', 'update_inventory', 'update_supply_price', 'update_product_price', 'activate_link', 'retire_link', 'campaign_signup', 'flash_discount', 'certificate_review'];
   if (!intents.some(x => writeIntents.includes(x))) return [];
   const stores = normalizeConcreteStoreKeys(normalizeLinkOpsTargetSet(targets).stores);
   const notes = [];
@@ -1969,12 +2006,12 @@ function isLinkOpsActionCommand(command) {
   const lower = text.toLowerCase();
   const intents = inferLinkOpsIntent(text).filter(x => x !== 'manual_review');
   if (!intents.length) return false;
-  const actionVerb = /下架|归档|停掉|移除|删除链接|换图|更换图片|改标题|换标题|补链接|补链|复制|复制上品|创建草稿|创建链接|上品|上链接|发链接|发布商品|刊登|提交审核|报活动|报名|限时折扣|设置折扣|补证书|补资质|上传证书/.test(text)
-    || /\b(retire|remove|archive|replace image|update title|create draft|create link|publish|submit review|campaign|discount)\b/.test(lower);
+  const actionVerb = /恢复上架|重新上架|再次上架|改为上架|设为上架|设置上架|恢复在售|下架|归档|停掉|移除|删除链接|换图|更换图片|改标题|换标题|补链接|补链|复制|复制上品|创建草稿|创建链接|上品|上链接|发链接|发布商品|刊登|提交审核|报活动|报名|限时折扣|设置折扣|补证书|补资质|上传证书/.test(text)
+    || /\b(activate_link|on_shelf|onshelf|relist|restore_listing|retire|remove|archive|replace image|update title|create draft|create link|publish|submit review|campaign|discount)\b/.test(lower);
   if (!actionVerb) return false;
   const strongCommand = /把|将|要求|安排|加入任务池|加入动作池|执行|处理|现在|立即|直接|提交审核/.test(text)
-    || /^(下架|归档|换图|改标题|补链接|补链|报活动|报名|设置折扣|补证书|补资质)/.test(text);
-  const giveCommand = /给.+(重新生成|生成|换|更换|改|下架|报|报名|设置|补)/.test(text);
+    || /^(恢复上架|重新上架|再次上架|上架|下架|归档|换图|改标题|补链接|补链|报活动|报名|设置折扣|补证书|补资质)/.test(text);
+  const giveCommand = /给.+(重新生成|生成|换|更换|改|上架|下架|报|报名|设置|补)/.test(text);
   const exploratory = /建议|分析|看看|找出|哪些|哪个|是否|能否|能不能|可以吗|怎么|如何|为什么|原因/.test(text);
   if (exploratory && !strongCommand && !giveCommand) return false;
   return strongCommand || giveCommand || !exploratory;
@@ -2010,7 +2047,7 @@ function hasActionableLinkOpsContext(session) {
     .join('\n');
   const intents = inferLinkOpsIntent(text).filter(x => x !== 'manual_review');
   if (!intents.length) return false;
-  return /下架|归档|停掉|移除|删除链接|换图|更换图片|改标题|换标题|补链接|补链|复制|上品|上链接|发链接|发布商品|刊登|提交审核|报活动|报名|限时折扣|设置折扣|补证书|补资质|上传证书|任务|动作/.test(text);
+  return /恢复上架|重新上架|再次上架|改为上架|设为上架|设置上架|恢复在售|下架|归档|停掉|移除|删除链接|换图|更换图片|改标题|换标题|补链接|补链|复制|上品|上链接|发链接|发布商品|刊登|提交审核|报活动|报名|限时折扣|设置折扣|补证书|补资质|上传证书|任务|动作/.test(text);
 }
 
 function compactChatLine(value, max = 420) {
@@ -2112,6 +2149,9 @@ function linkOpsRiskNotes(intents, targets = {}) {
   }
   if (intents.includes('update_title') || intents.includes('update_images')) {
     notes.push('标题/图片会影响流量承接，初期必须人工确认素材和目标链接。');
+  }
+  if (intents.includes('activate_link')) {
+    notes.push('恢复上架前必须确认店铺虚拟库存、售价/供货价、活动价和证书/资质状态，否则只做 dry-run 不提交。');
   }
   if (intents.includes('campaign_signup') || intents.includes('flash_discount')) {
     notes.push('活动/限时折扣需校验成本、最低利润率、限量、有效期和是否与官方活动冲突。');
@@ -2565,8 +2605,8 @@ function runPreflightForLinkOpsTask(task) {
   if (needs.includes('image') && intents.includes('copy_product_draft') && !assets.some(a => a.kind === 'image')) {
     warnings.push('复制上品未上传图片素材；系统会优先尝试从源店商品快照复制图片，源快照不足时再阻断。');
   }
-  if (needs.includes('certificate') && !assets.some(a => a.kind === 'certificate' || a.mime === 'application/pdf')) {
-    blockers.push('缺少证书/资质文件。');
+  if (needs.includes('certificate') && !assets.some(a => a.kind === 'certificate' || a.kind === 'text' || a.mime === 'application/pdf' || a.mime === 'application/json') && !task?.certificatePayload && !task?.targets?.certificatePayload && !Array.isArray(task?.certificatePayloads) && !Array.isArray(task?.targets?.certificatePayloads)) {
+    blockers.push('缺少证书/资质材料：请上传 PDF/JSON，或提供 certificatePayloads[{endpoint,body}]。');
   }
   if (needs.includes('title_text_or_rule') && !assets.some(a => a.kind === 'text')) {
     warnings.push('标题类任务未上传标题文本/规则文件；如果标题已写在会话或任务说明里，可人工确认后继续。');
@@ -2577,7 +2617,7 @@ function runPreflightForLinkOpsTask(task) {
     warnings.push(`${storesMissingProductAdapter.join(',')} OpenAPI 已授权，但最近只读探针未证明可用；本任务可留在草案/待复核，需先修复探针后再做商品发布 dry-run。`);
   }
   const nonOpenApiStores = stores.filter(store => !openApiStoreCapability(store).authorized);
-  if (intents.some(x => ['copy_product_draft', 'update_title', 'update_images', 'update_inventory', 'update_supply_price', 'update_product_price', 'retire_link', 'campaign_signup', 'flash_discount', 'certificate_review'].includes(x)) && nonOpenApiStores.length) {
+  if (intents.some(x => ['copy_product_draft', 'update_title', 'update_images', 'update_inventory', 'update_supply_price', 'update_product_price', 'activate_link', 'retire_link', 'campaign_signup', 'flash_discount', 'certificate_review'].includes(x)) && nonOpenApiStores.length) {
     warnings.push(`${nonOpenApiStores.join(',')} 暂无官方 OpenAPI 授权记录；后续执行需走云端 WebAPI/headless 受控路径或先完成该店 OpenAPI 接入。`);
   }
   if (authorizedStores.length && !stores.some(store => openApiStoreCapability(store).productPublishAdapter)) {
@@ -2784,6 +2824,12 @@ async function runLinkMaintenancePrechecks(task, args, body = {}) {
         const sample = groupRows.find(linkOpsRowIsOnShelf) || groupRows[0] || {};
         blockers.push(`${linkOpsRowStore(sample)} / ${linkOpsRowStandard(sample) || linkOpsRowSkc(sample)} 下架后将没有已上架承接链接；必须先确认替代链接或改为补链任务。`);
       }
+    }
+  }
+  if (maintenanceIntents.includes('activate_link') && uniqueMatches.length) {
+    const inactiveMatches = uniqueMatches.filter(item => !linkOpsRowIsOnShelf(item.row));
+    if (!inactiveMatches.length) {
+      warnings.push('恢复上架任务匹配到的链接当前都已是已上架状态；执行器会阻断无目标 payload，避免重复提交。');
     }
   }
   if (maintenanceIntents.includes('update_title') && !hasTitleMaintenanceMaterial(task)) {
@@ -5773,7 +5819,7 @@ async function main() {
                 '这是 SHEIN 链接管理中台的一段运营会话。请只围绕 SHEIN 数据、链接管理、标题/图片/活动/补链建议回答。',
                 '云端 AI 统一记忆规则：同一中台会话保存并传递原始会话文本，不在业务层手动摘要压缩；真正触及模型上下文上限时，由模型/调用层处理，最新用户消息永远优先。',
                 '云端 AI 统一权限边界：允许电商运营分析、受控图表、标题/卖点/图片方案草稿、公开竞品参考、以及链接/商品运营任务草案；敏感登录材料和底层维护类请求只能拒绝说明，不能展示细节，也不能在聊天里直接改经营看板底层系统。',
-                '明确的 SHEIN 链接/商品运营写动作（改标题、换图、补链接、下架、报活动等）只能进入同一会话任务池、预检和审计，不允许绕过中台静默写后台。',
+                '明确的 SHEIN 链接/商品运营写动作（改标题、换图、补链接、上架/下架、报活动等）只能进入同一会话任务池、预检和审计，不允许绕过中台静默写后台。',
                 '如果信息还不够，先问需要补充什么；如果已经可以形成任务，请给出清晰的下一步和风险边界。',
                 '遇到“这个链接/这个品/2,223 这个”等指代时，必须结合上文已出现的店铺、货号、SKC、曝光/访客/销量数字重新定位；不能因为最新一句没写全就否定上轮数据。',
                 '会话已识别目标：' + summarizeLinkOpsTargets(conversationTargets),

@@ -142,7 +142,7 @@ async function main() {
       'production safety smoke checks locked and narrow-pilot configs through temporary files only',
       'copy_product_draft success smoke uses a local fake OpenAPI server only',
       'copy_product_draft weak-readback smoke proves weak evidence cannot auto-close a write task',
-      'maintenance executor smoke uses a local fake OpenAPI server to verify retire/inventory/supply-price/product-price/title/image payloads and readback',
+    'maintenance executor smoke uses a local fake OpenAPI server to verify activate/retire/inventory/supply-price/product-price/title/image/certificate payloads and readback',
       'official doc detail parser smoke uses offline fixtures and never prints/saves cookies',
       'maintenance readiness smoke requires schema, per-store permission and strong readback before pilot_ready',
       'safeWriteOperations and real-submit whitelist are asserted disabled inside smoke flows',
