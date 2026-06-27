@@ -183,6 +183,33 @@ try {
   check('operator doctor sees logged-in user', result.summary.operatorDoctorUser, 'operator_cli_smoke');
   check('operator doctor does not enable safe write', result.summary.operatorDoctorSafeWrite, false);
 
+  const operatorDoctorRetireDx = await runCli(['--session-file', operatorSessionFile, 'doctor', '--operation', 'retire_link', '--stores', 'DX']);
+  expectCliOk('operator doctor retire DX', operatorDoctorRetireDx);
+  const retireDxReadiness = operatorDoctorRetireDx.json?.requestedActionReadiness || {};
+  const retireDxItem = retireDxReadiness.items?.[0] || {};
+  result.summary.operatorDoctorRetireDx = {
+    allCanDryRun: retireDxReadiness.allCanDryRun,
+    allCanRealSubmitAfterPreflight: retireDxReadiness.allCanRealSubmitAfterPreflight,
+    item: {
+      storeKey: retireDxItem.storeKey,
+      canCreateTask: retireDxItem.canCreateTask,
+      canDryRun: retireDxItem.canDryRun,
+      canRealSubmitAfterPreflight: retireDxItem.canRealSubmitAfterPreflight,
+    },
+  };
+  check('operator doctor retire DX store', retireDxItem.storeKey, 'DX');
+  check('operator doctor retire DX can create task', retireDxItem.canCreateTask, true);
+  check('operator doctor retire DX can dry-run', retireDxItem.canDryRun, true);
+  check('operator doctor retire DX cannot real-submit yet', retireDxItem.canRealSubmitAfterPreflight, false);
+
+  const operatorDoctorRetireDxRequire = await runCli(['--session-file', operatorSessionFile, 'doctor', '--operation', 'retire_link', '--stores', 'DX', '--require-real-submit']);
+  result.summary.operatorDoctorRetireDxRequireCode = operatorDoctorRetireDxRequire.code;
+  result.summary.operatorDoctorRetireDxRequireOk = operatorDoctorRetireDxRequire.json?.ok ?? null;
+  result.summary.operatorDoctorRetireDxRequireReadiness = operatorDoctorRetireDxRequire.json?.requestedActionReadiness?.okForRequestedLevel ?? null;
+  check('operator doctor retire DX require real exits nonzero', operatorDoctorRetireDxRequire.code, c => c !== 0);
+  check('operator doctor retire DX require real report not ok', result.summary.operatorDoctorRetireDxRequireOk, false);
+  check('operator doctor retire DX require real readiness false', result.summary.operatorDoctorRetireDxRequireReadiness, false);
+
   const operatorCreateDx = await runCli([
     '--session-file', operatorSessionFile,
     'create',

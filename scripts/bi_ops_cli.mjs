@@ -31,6 +31,7 @@ function parseArgs(argv) {
     sourceStores: [],
     writeStores: [],
     products: [],
+    operation: '',
     mode: 'dry-run',
     confirm: '',
     status: '',
@@ -38,6 +39,7 @@ function parseArgs(argv) {
     limit: 40,
     json: true,
     passwordStdin: false,
+    requireRealSubmit: false,
   };
   const rest = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -53,12 +55,14 @@ function parseArgs(argv) {
     else if (a === '--source-store' || a === '--source-stores' || a === '--read-store' || a === '--read-stores') args.sourceStores.push(...splitList(argv[++i]));
     else if (a === '--target-store' || a === '--target-stores' || a === '--write-store' || a === '--write-stores') args.writeStores.push(...splitList(argv[++i]));
     else if (a === '--product' || a === '--products' || a === '--ref') args.products.push(...splitList(argv[++i]));
+    else if (a === '--operation' || a === '--action' || a === '--intent') args.operation = normalizeOperationName(argv[++i]);
     else if (a === '--mode') args.mode = String(argv[++i] || 'dry-run').trim();
     else if (a === '--confirm') args.confirm = String(argv[++i] || '').trim();
     else if (a === '--status') args.status = String(argv[++i] || '').trim();
     else if (a === '--note') args.note = String(argv[++i] || '').trim();
     else if (a === '--limit') args.limit = Number(argv[++i] || 40);
     else if (a === '--pretty') args.json = false;
+    else if (a === '--require-real-submit' || a === '--require-execute') args.requireRealSubmit = true;
     else if (a === '--help' || a === '-h') {
       args.command = 'help';
     } else if (!args.command) {
@@ -71,6 +75,29 @@ function parseArgs(argv) {
   args.baseUrl = String(args.baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '');
   args.command ||= 'help';
   return args;
+}
+
+function normalizeOperationName(value) {
+  const raw = String(value || '').trim();
+  const lower = raw.toLowerCase().replace(/[\s-]+/g, '_');
+  const aliases = new Map([
+    ['copy', 'copy_product_draft'],
+    ['copy_product', 'copy_product_draft'],
+    ['copy_draft', 'copy_product_draft'],
+    ['create_link', 'copy_product_draft'],
+    ['publish', 'copy_product_draft'],
+    ['retire', 'retire_link'],
+    ['retire_product', 'retire_link'],
+    ['down', 'retire_link'],
+    ['off_shelf', 'retire_link'],
+    ['offline', 'retire_link'],
+    ['title', 'update_title'],
+    ['image', 'update_images'],
+    ['images', 'update_images'],
+    ['photo', 'update_images'],
+    ['photos', 'update_images'],
+  ]);
+  return aliases.get(lower) || lower;
 }
 
 function splitList(value) {
@@ -86,6 +113,8 @@ function help() {
 Usage:
   node scripts/bi_ops_cli.mjs login --username <账号> --password <密码>
   node scripts/bi_ops_cli.mjs doctor
+  node scripts/bi_ops_cli.mjs doctor --operation copy_product_draft --target-stores HL
+  node scripts/bi_ops_cli.mjs doctor --operation retire_link --stores DL --require-real-submit
   node scripts/bi_ops_cli.mjs me
   node scripts/bi_ops_cli.mjs capabilities
   node scripts/bi_ops_cli.mjs tasks
@@ -105,6 +134,8 @@ Options:
   --session-file   默认 ${DEFAULT_SESSION_FILE}
   --source-stores  跨店复制时只读来源店铺
   --target-stores  跨店复制时真实写入目标店铺；不填则沿用 --stores
+  --operation      doctor 用；可填 copy_product_draft / retire_link / update_title / update_images
+  --require-real-submit  doctor 用；要求所选店铺+动作已可真实提交，否则退出非 0
 
 Safety:
   - 密码只用于 login 请求，不写入 session 文件。
@@ -253,6 +284,14 @@ function print(data, pretty = false) {
     const safe = data.safety?.safeWriteOperations || {};
     const whitelist = data.safety?.realSubmitWhitelist || {};
     console.log(`真实写：总闸门=${safe.enabled ? '开启' : '关闭'}，试点白名单=${whitelist.enabled ? `开启(${whitelist.ruleCount || 0}条)` : '关闭'}，静默写=${data.safety?.canSilentWrite ? '是' : '否'}`);
+    if (data.requestedActionReadiness) {
+      const readiness = data.requestedActionReadiness;
+      console.log(`动作诊断：${readiness.operation} · ${readiness.requireRealSubmit ? '要求真实提交' : '要求可 dry-run'} · dry-run=${readiness.allCanDryRun ? '是' : '否'} · 真实提交=${readiness.allCanRealSubmitAfterPreflight ? '是' : '否'}`);
+      for (const item of readiness.items || []) {
+        const blockerText = Array.isArray(item.blockers) && item.blockers.length ? `；阻断=${item.blockers.join('/')}` : '';
+        console.log(`  - ${item.storeKey}: 建任务=${item.canCreateTask ? '是' : '否'}，dry-run=${item.canDryRun ? '是' : '否'}，真实提交=${item.canRealSubmitAfterPreflight ? '是' : '否'}${blockerText}`);
+      }
+    }
     for (const check of data.checks) {
       console.log(`${check.ok ? '✓' : '✗'} ${check.label}${check.error ? `：${check.error}` : ''}`);
     }
@@ -269,6 +308,84 @@ function taskTargets(args) {
   if (args.writeStores.length) targets.writeStores = [...new Set(args.writeStores)];
   if (args.products.length) targets.productRefs = [...new Set(args.products)];
   return targets;
+}
+
+function hasStoreAccess(user, field, storeKey) {
+  const list = Array.isArray(user?.[field]) ? user[field].map(x => String(x || '').trim().toUpperCase()).filter(Boolean) : [];
+  return list.includes('*') || list.includes(String(storeKey || '').trim().toUpperCase());
+}
+
+function requestedDoctorStores(args, capabilitiesJson) {
+  const explicit = [...new Set([
+    ...(args.writeStores || []),
+    ...(args.stores || []),
+  ].map(x => String(x || '').trim().toUpperCase()).filter(Boolean))];
+  if (explicit.length) return explicit;
+  if (!args.operation) return [];
+  return (Array.isArray(capabilitiesJson?.rows) ? capabilitiesJson.rows : [])
+    .map(row => String(row.storeKey || '').trim().toUpperCase())
+    .filter(Boolean);
+}
+
+function buildActionReadiness(args, meJson, capabilitiesJson) {
+  if (!args.operation) return null;
+  const rows = Array.isArray(capabilitiesJson?.rows) ? capabilitiesJson.rows : [];
+  const rowsByStore = new Map(rows.map(row => [String(row.storeKey || '').trim().toUpperCase(), row]));
+  const user = meJson?.user || {};
+  const sourceStores = [...new Set((args.sourceStores || []).map(x => String(x || '').trim().toUpperCase()).filter(Boolean))];
+  const stores = requestedDoctorStores(args, capabilitiesJson);
+  const items = stores.map(storeKey => {
+    const row = rowsByStore.get(storeKey) || null;
+    const actions = Array.isArray(row?.actionCapabilities) ? row.actionCapabilities : [];
+    const action = actions.find(x => String(x.key || x.intent || '').trim() === args.operation) || null;
+    const accountCanWrite = hasStoreAccess(user, 'writeStores', storeKey);
+    const accountCanReadTargets = hasStoreAccess(user, 'readStores', storeKey);
+    const unreadableSources = sourceStores.filter(src => !hasStoreAccess(user, 'readStores', src));
+    const sourceReadable = unreadableSources.length === 0;
+    const precheckSupported = Boolean(action?.precheckSupported);
+    const realSubmitSupported = Boolean(action?.realSubmitSupported);
+    const blockers = [];
+    if (!row) blockers.push('能力总账里没有这个店铺');
+    if (row && !action) blockers.push(`能力总账里没有动作 ${args.operation}`);
+    if (!accountCanReadTargets) blockers.push('当前账号没有目标店铺读权限');
+    if (!accountCanWrite) blockers.push('当前账号没有目标店铺写权限');
+    if (!sourceReadable) blockers.push(`当前账号没有来源店铺读权限：${unreadableSources.join(',')}`);
+    if (action && !precheckSupported) blockers.push('该动作当前不支持自动预检');
+    if (action && precheckSupported && !realSubmitSupported) blockers.push(...(Array.isArray(action.realSubmitBlockers) && action.realSubmitBlockers.length
+      ? action.realSubmitBlockers
+      : ['该动作当前只支持 dry-run/预检，不支持真实提交']));
+    const canCreateTask = accountCanWrite && accountCanReadTargets && sourceReadable;
+    const canDryRun = canCreateTask && precheckSupported;
+    const canRealSubmitAfterPreflight = canDryRun && realSubmitSupported;
+    return {
+      storeKey,
+      operation: args.operation,
+      accountCanWrite,
+      accountCanReadTargets,
+      sourceStores,
+      sourceReadable,
+      precheckSupported,
+      realSubmitSupported,
+      canCreateTask,
+      canDryRun,
+      canRealSubmitAfterPreflight,
+      state: action?.state || '',
+      reason: action?.reason || row?.note || '',
+      nextStep: action?.nextStep || '',
+      blockers: [...new Set(blockers)],
+    };
+  });
+  const allCanRealSubmit = items.length > 0 && items.every(x => x.canRealSubmitAfterPreflight);
+  const allCanDryRun = items.length > 0 && items.every(x => x.canDryRun);
+  return {
+    operation: args.operation,
+    requestedStores: stores,
+    requireRealSubmit: args.requireRealSubmit,
+    allCanDryRun,
+    allCanRealSubmitAfterPreflight: allCanRealSubmit,
+    okForRequestedLevel: args.requireRealSubmit ? allCanRealSubmit : allCanDryRun,
+    items,
+  };
 }
 
 async function doctorCheck(label, fn, {critical = true} = {}) {
@@ -354,6 +471,19 @@ async function runDoctor(args) {
     };
   }));
 
+  const actionReadiness = buildActionReadiness(args, meJson, capabilitiesJson);
+  if (actionReadiness) {
+    checks.push({
+      label: args.requireRealSubmit ? 'action-real-submit-readiness' : 'action-dry-run-readiness',
+      ok: actionReadiness.okForRequestedLevel,
+      critical: Boolean(args.requireRealSubmit),
+      operation: actionReadiness.operation,
+      requestedStores: actionReadiness.requestedStores,
+      allCanDryRun: actionReadiness.allCanDryRun,
+      allCanRealSubmitAfterPreflight: actionReadiness.allCanRealSubmitAfterPreflight,
+    });
+  }
+
   const ok = checks.every(check => check.ok || !check.critical);
   return {
     ok,
@@ -367,9 +497,14 @@ async function runDoctor(args) {
       canSilentWrite: Boolean(capabilitiesJson.safety.canSilentWrite),
     } : null,
     counts: capabilitiesJson?.counts || null,
+    requestedActionReadiness: actionReadiness,
     checks,
     nextStep: ok
-      ? '本机 CLI 到云端 BI 的账号、权限和只读接口自检通过。创建/预检/执行仍按服务端权限、确认文本和审计边界执行。'
+      ? (actionReadiness
+        ? (actionReadiness.okForRequestedLevel
+          ? '所选账号/店铺/动作达到请求的可用级别；真实提交仍必须先 dry-run、进入待复核、输入确认文本并通过服务端回读。'
+          : '本机 CLI 连通正常，但所选账号/店铺/动作没有达到请求的可用级别；查看 requestedActionReadiness.items[].blockers。')
+        : '本机 CLI 到云端 BI 的账号、权限和只读接口自检通过。创建/预检/执行仍按服务端权限、确认文本和审计边界执行。')
       : '按 failed checks 处理：通常是未登录、session 过期、Node 版本过低或云端接口不可达。',
   };
 }

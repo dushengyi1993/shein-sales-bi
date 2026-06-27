@@ -95,6 +95,17 @@ node scripts/bi_ops_cli.mjs doctor
 - 任务池接口是否可访问；
 - 真实写总闸门和真实写试点白名单当前状态。
 
+也可以在正式操作前检查某个账号对“某个店 + 某个动作”到底到哪一步可用：
+
+```powershell
+node scripts/bi_ops_cli.mjs doctor --operation retire_link --stores DL
+node scripts/bi_ops_cli.mjs doctor --operation copy_product_draft --source-stores CX --target-stores HL
+node scripts/bi_ops_cli.mjs doctor --operation copy_product_draft --target-stores HL --require-real-submit
+```
+
+- 不带 `--require-real-submit` 时，只要求能建任务 / dry-run；适合普通运营确认“我能不能先做预检”。
+- 带 `--require-real-submit` 时，会要求该账号、店铺和动作已经具备真实提交能力；如果仍被总闸门、白名单、账号写权限或动作适配器挡住，命令会退出非 0，并在 `requestedActionReadiness.items[].blockers` 里列出原因。
+
 如果需要单独确认云端自动运营接口能访问：
 
 ```powershell
