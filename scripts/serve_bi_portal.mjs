@@ -3049,6 +3049,7 @@ async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey
   }, null, 2)}\n`, 'utf8');
   const childArgs = [
     path.join(ROOT, 'scripts', 'link_ops_hl_openapi_executor.mjs'),
+    '--config', SHEIN_OPENAPI_LOCAL_CONFIG_FILE,
     '--task-json', taskSnapshotFile,
     '--task-id', String(task.id || ''),
     '--store', targetStore,
@@ -5139,7 +5140,23 @@ async function main() {
           try {
             updated = patchLinkOpsTask(current.tasks[idx], body, actor, req);
           } catch (err) {
-            return sendJson(res, 400, {ok: false, error: err?.message || String(err || 'Invalid patch')});
+            const error = err?.message || String(err || 'Invalid patch');
+            await appendAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'link-ops-task-update-denied',
+              actor,
+              ...requestMeta(req),
+              task: {
+                id,
+                status: current.tasks[idx]?.status || '',
+                stores: taskTargetStores(current.tasks[idx]),
+                writeStores: taskWriteStores(current.tasks[idx]),
+                sourceStores: taskSourceStores(current.tasks[idx]),
+              },
+              denied: {ok: false, error},
+            });
+            const deniedStatus = /只有全店管理账号|权限|denied|forbidden|unauthorized/i.test(error) ? 403 : 400;
+            return sendJson(res, deniedStatus, {ok: false, error});
           }
           const tasks = current.tasks.slice();
           tasks[idx] = updated;

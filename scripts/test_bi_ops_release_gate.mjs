@@ -21,6 +21,9 @@ const CHECK_FILES = [
   'scripts/test_bi_ops_permissions.mjs',
   'scripts/test_bi_ops_cli_flow.mjs',
   'scripts/test_bi_ops_write_whitelist_scope.mjs',
+  'scripts/check_bi_ops_production_safety.mjs',
+  'scripts/test_bi_ops_production_safety.mjs',
+  'scripts/test_bi_ops_copy_product_success_flow.mjs',
 ];
 const DIFF_CHECK_FILES = [
   'scripts/serve_bi_portal.mjs',
@@ -29,6 +32,9 @@ const DIFF_CHECK_FILES = [
   'scripts/test_bi_ops_permissions.mjs',
   'scripts/test_bi_ops_cli_flow.mjs',
   'scripts/test_bi_ops_write_whitelist_scope.mjs',
+  'scripts/check_bi_ops_production_safety.mjs',
+  'scripts/test_bi_ops_production_safety.mjs',
+  'scripts/test_bi_ops_copy_product_success_flow.mjs',
   'docs/partner-codex-ops-setup.md',
   'docs/bi-ops-openapi-automation-plan.md',
   'docs/shein-openapi-integration.md',
@@ -101,6 +107,9 @@ async function main() {
   results.push({name: 'permission matrix smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_permissions.mjs']))});
   results.push({name: 'CLI flow smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_cli_flow.mjs']))});
   results.push({name: 'real-write whitelist scope smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_write_whitelist_scope.mjs']))});
+  results.push({name: 'production real-write safety smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_production_safety.mjs']))});
+  results.push({name: 'copy_product_draft success lifecycle smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs']))});
+  results.push({name: 'copy_product_draft weak-readback guard smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs', '--weak-readback']))});
 
   if (await pathExists('.git')) {
     results.push({name: 'git diff --check automation scope', ...(await run('git', ['diff', '--check', '--', ...DIFF_CHECK_FILES]))});
@@ -115,6 +124,9 @@ async function main() {
     notes: [
       'permission and CLI flow smokes use isolated temporary auth/task/audit files',
       'whitelist scope smoke enables safeWriteOperations only inside an isolated temporary portal',
+      'production safety smoke checks locked and narrow-pilot configs through temporary files only',
+      'copy_product_draft success smoke uses a local fake OpenAPI server only',
+      'copy_product_draft weak-readback smoke proves weak evidence cannot auto-close a write task',
       'safeWriteOperations and real-submit whitelist are asserted disabled inside smoke flows',
       'this gate does not submit real SHEIN writes',
     ],

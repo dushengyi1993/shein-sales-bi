@@ -288,6 +288,8 @@ node scripts/bi_ops_cli.mjs logout
 - 员工离职或岗位调整时，先改 BI 账号权限或禁用账号。
 - 定期抽查审计记录，尤其是上下架、改价、复制链接、批量维护等写操作。
 - 真实写试点白名单只放在云端私有 `config/bi_ops_write_whitelist.local.json`，不要提交 GitHub；仓库里的 `config/bi_ops_write_whitelist.example.json` 只是格式样例。
+- 普通发版或日常巡检时，建议在云端跑 `node scripts/check_bi_ops_production_safety.mjs --expect locked --pretty`，确认生产真实写仍处于锁定态。
+- 如果要开启首个真实写试点，先只放行 `copy_product_draft`，并在云端跑 `node scripts/check_bi_ops_production_safety.mjs --expect pilot --require-store <店铺> --require-operation copy_product_draft --require-user <BI账号> --pretty`。这一步只读，不会调用 SHEIN；通过后仍必须先 dry-run、人工确认、带 `SHEIN_OPENAPI_SUBMIT` 执行并回读。
 
 ## 管理员验收脚本
 
@@ -298,9 +300,13 @@ node scripts/test_bi_ops_release_gate.mjs
 node scripts/test_bi_ops_permissions.mjs
 node scripts/test_bi_ops_cli_flow.mjs
 node scripts/test_bi_ops_write_whitelist_scope.mjs
+node scripts/test_bi_ops_production_safety.mjs
+node scripts/test_bi_ops_copy_product_success_flow.mjs
 ```
 
 - `test_bi_ops_release_gate.mjs` 是发版前总入口，会串联语法检查、权限矩阵 smoke、CLI flow smoke、真实写白名单作用域 smoke、`git diff --check` 和旧确认文本扫描。
 - `test_bi_ops_permissions.mjs` 验证服务端权限矩阵：普通运营可写自己店、不可写非负责店，跨店复制只校验写入店铺，全店管理账号可写全部店铺，`local-system` 不能写自动运营入口。
 - `test_bi_ops_cli_flow.mjs` 验证合伙人 / 本机 Codex App 的 CLI 调用链：`login`、`me`、`capabilities`、`create`、`preflight`、`audit`、`logout`，并确认 session 文件不保存明文密码、预检不触发真实写。
 - `test_bi_ops_write_whitelist_scope.mjs` 会在隔离临时门户里临时开启 `safeWriteOperations` 和一条真实写白名单，验证只有指定“人 + 店 + 动作”能命中；其他账号、店铺和动作仍被挡住，并且在缺少 dry-run、`waiting_review`、payload hash 等条件时不会真实提交。
+- `test_bi_ops_production_safety.mjs` 验证生产安全检查器本身：锁定态通过、窄范围试点通过，`*` 通配、角色泛放、存量维护动作放行和总闸门大于白名单都会失败。
+- `test_bi_ops_copy_product_success_flow.mjs` 使用本地假 OpenAPI 服务验证 `copy_product_draft` 成功闭环：任务创建、JSON payload 附件、dry-run 锁定 payload hash、显式确认执行、publish 成功、商品查询强指纹回读、任务自动 `done`。它不会调用真实 SHEIN；release gate 还会额外用 `--weak-readback` 跑一次，证明只有平台 SKU / 源 SKC / 货号文本等弱证据时，任务必须进入人工核销，不能自动判成功。
