@@ -397,11 +397,11 @@ function explicitSkcRefs(task) {
   return [...new Set((text.match(/\b(s[avb]\d{8,})\b/ig) || []).map(x => x.trim()))];
 }
 
-function sourceCandidateScore(row, {targetStore, storeHints, productHints, explicitSkcs, allowSameStoreSource = false}) {
+function sourceCandidateScore(row, {storeHints, sourceStoreAllowList = [], productHints, explicitSkcs}) {
   const store = normalizeStoreKey(row?.store_key || row?.storeKey);
   const skc = safeString(row?.skc, 120);
   if (!store || !skc) return -Infinity;
-  if (store === normalizeStoreKey(targetStore) && !allowSameStoreSource) return -Infinity;
+  if (sourceStoreAllowList.length && !sourceStoreAllowList.includes(store)) return -Infinity;
   const standard = safeString(row?.standard_goods_sn || row?.standardGoodsSn || row?.raw_goods_sn || row?.rawGoodsSn, 400);
   const hay = compactRef([standard, skc, row?.product_name_cn, row?.productNameCn, row?.goods_sn, row?.rawGoodsSn].filter(Boolean).join(' '));
   let score = 0;
@@ -435,11 +435,9 @@ async function inferSourceCandidatesFromBi(task, {targetStore}) {
     ...asArray(task?.readStores),
     task?.sourceStore,
   ].map(normalizeStoreKey).filter(Boolean))];
-  const normalizedTarget = normalizeStoreKey(targetStore);
-  const allowSameStoreSource = explicitSourceStores.includes(normalizedTarget);
   const storeHints = explicitSourceStores.length
     ? explicitSourceStores
-    : taskStores(task).filter(x => x && x !== normalizedTarget);
+    : taskStores(task);
   const productHints = taskProductRefs(task).filter(x => !/^s[avb]\d{8,}$/i.test(x));
   const skcHints = explicitSkcRefs(task);
   const scored = rows
@@ -448,7 +446,7 @@ async function inferSourceCandidatesFromBi(task, {targetStore}) {
       sourceSkc: safeString(row?.skc, 120),
       standardGoodsSn: safeString(row?.standard_goods_sn || row?.standardGoodsSn, 240),
       source: 'bi_portal_store_link',
-      score: sourceCandidateScore(row, {targetStore, storeHints, productHints, explicitSkcs: skcHints, allowSameStoreSource}),
+      score: sourceCandidateScore(row, {storeHints, sourceStoreAllowList: explicitSourceStores, productHints, explicitSkcs: skcHints}),
     }))
     .filter(x => x.sourceStore && x.sourceSkc && Number.isFinite(x.score) && x.score > 0)
     .sort((a, b) => b.score - a.score);

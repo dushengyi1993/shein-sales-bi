@@ -22,6 +22,7 @@ const CHECK_FILES = [
   'scripts/test_bi_ops_permissions.mjs',
   'scripts/test_bi_ops_cli_flow.mjs',
   'scripts/test_bi_ops_chat_inference.mjs',
+  'scripts/test_bi_ops_source_candidate_policy.mjs',
   'scripts/test_bi_ops_write_whitelist_scope.mjs',
   'scripts/check_bi_ops_production_safety.mjs',
   'scripts/test_bi_ops_production_safety.mjs',
@@ -41,6 +42,7 @@ const DIFF_CHECK_FILES = [
   'scripts/test_bi_ops_permissions.mjs',
   'scripts/test_bi_ops_cli_flow.mjs',
   'scripts/test_bi_ops_chat_inference.mjs',
+  'scripts/test_bi_ops_source_candidate_policy.mjs',
   'scripts/test_bi_ops_write_whitelist_scope.mjs',
   'scripts/check_bi_ops_production_safety.mjs',
   'scripts/test_bi_ops_production_safety.mjs',
@@ -123,6 +125,7 @@ async function main() {
   results.push({name: 'permission matrix smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_permissions.mjs']))});
   results.push({name: 'CLI flow smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_cli_flow.mjs']))});
   results.push({name: 'chat inference smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_chat_inference.mjs']))});
+  results.push({name: 'source candidate policy smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_source_candidate_policy.mjs']))});
   results.push({name: 'real-write whitelist scope smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_write_whitelist_scope.mjs']))});
   results.push({name: 'production real-write safety smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_production_safety.mjs']))});
   results.push({name: 'copy_product_draft success lifecycle smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs']))});
@@ -145,6 +148,7 @@ async function main() {
     notes: [
       'permission and CLI flow smokes use isolated temporary auth/task/audit files',
       'chat inference smoke proves one chat send can create a current-session same-store copy task without calling the LLM or SHEIN',
+      'source candidate policy smoke proves explicit cross-store sources are respected while same-store source links remain valid when no source is explicit',
       'whitelist scope smoke enables safeWriteOperations only inside an isolated temporary portal',
       'production safety smoke checks locked and narrow-pilot configs through temporary files only',
       'copy_product_draft success smoke uses a local fake OpenAPI server only',
