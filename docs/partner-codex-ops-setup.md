@@ -105,6 +105,7 @@ node scripts/bi_ops_cli.mjs doctor --operation copy_product_draft --target-store
 
 - 不带 `--require-real-submit` 时，只要求能建任务 / dry-run；适合普通运营确认“我能不能先做预检”。
 - 带 `--require-real-submit` 时，会要求该账号、店铺和动作已经具备真实提交能力；如果仍被总闸门、白名单、账号写权限或动作适配器挡住，命令会退出非 0，并在 `requestedActionReadiness.items[].blockers` 里列出原因。
+- 如果 blockers 里出现官方候选接口，例如 `retire_link` 对应 `/open-api/goods/modify-skc-shelf`，只代表已找到可能的 SHEIN 官方接口；在请求参数、权限包、执行后回读字段和异常锁定都验证前，仍然只能 dry-run，不能真实下架。
 
 如果需要单独确认云端自动运营接口能访问：
 

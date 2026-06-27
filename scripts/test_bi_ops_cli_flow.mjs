@@ -195,12 +195,15 @@ try {
       canCreateTask: retireDxItem.canCreateTask,
       canDryRun: retireDxItem.canDryRun,
       canRealSubmitAfterPreflight: retireDxItem.canRealSubmitAfterPreflight,
+      blockers: retireDxItem.blockers || [],
     },
   };
   check('operator doctor retire DX store', retireDxItem.storeKey, 'DX');
   check('operator doctor retire DX can create task', retireDxItem.canCreateTask, true);
   check('operator doctor retire DX can dry-run', retireDxItem.canDryRun, true);
   check('operator doctor retire DX cannot real-submit yet', retireDxItem.canRealSubmitAfterPreflight, false);
+  check('operator doctor retire DX names official shelf candidate', retireDxItem.blockers || [], xs => Array.isArray(xs) && xs.some(x => String(x).includes('/open-api/goods/modify-skc-shelf')));
+  check('operator doctor retire DX names readback gap', retireDxItem.blockers || [], xs => Array.isArray(xs) && xs.some(x => String(x).includes('回读')));
 
   const operatorDoctorRetireDxRequire = await runCli(['--session-file', operatorSessionFile, 'doctor', '--operation', 'retire_link', '--stores', 'DX', '--require-real-submit']);
   result.summary.operatorDoctorRetireDxRequireCode = operatorDoctorRetireDxRequire.code;

@@ -167,6 +167,29 @@ const OPENAPI_WRITE_DOMAIN_LABELS = {
 };
 
 const LINK_MAINTENANCE_INTENTS = new Set(['retire_link', 'update_title', 'update_images']);
+const LINK_OPS_MAINTENANCE_OFFICIAL_CANDIDATES = {
+  retire_link: {
+    endpoint: '/open-api/goods/modify-skc-shelf',
+    label: '商品上下架',
+    docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001629',
+    evidence: 'SHEIN 官方文档索引显示该接口为“商品上下架”；搜索索引还提示下架需设置 shelf_state=2。',
+    missing: ['请求参数 schema 未从登录态官方详情页确认', '权限包/店铺授权范围未逐店验证', '执行后商品列表/详情回读字段未验证'],
+  },
+  update_title: {
+    endpoint: '/open-api/goods/product/publishOrEdit',
+    label: '商品发布/编辑',
+    docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001707',
+    evidence: '已验证 publishOrEdit 是商品发布/编辑接口，但当前只作为 copy_product_draft 的完整 payload 执行器使用。',
+    missing: ['改标题最小 payload 未验证', '仅改标题是否影响图片/库存/价格/站点等字段未验证', '执行后标题回读字段未验证'],
+  },
+  update_images: {
+    endpoint: '/open-api/goods/product/publishOrEdit',
+    label: '商品发布/编辑',
+    docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001707',
+    evidence: '已验证 publishOrEdit 是商品发布/编辑接口，但当前只作为 copy_product_draft 的完整 payload 执行器使用。',
+    missing: ['换图最小 payload 未验证', '仅换图是否影响标题/库存/价格/站点等字段未验证', '执行后图片回读字段未验证'],
+  },
+};
 
 const LINK_OPS_ACTION_CAPABILITY_DEFS = [
   {
@@ -187,7 +210,7 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'link_maintenance_dry_run',
     precheck: true,
     realSubmit: false,
-    reason: '已能定位目标链接、校验写权限和唯一承接风险；官方维护写接口与回读尚未接入，所以不会真实下架。',
+    reason: '已能定位目标链接、校验写权限和唯一承接风险；已发现官方候选接口 /open-api/goods/modify-skc-shelf，但参数、权限和回读未验证，所以不会真实下架。',
   },
   {
     key: 'update_title',
@@ -196,7 +219,7 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'link_maintenance_dry_run',
     precheck: true,
     realSubmit: false,
-    reason: '已能校验目标链接、写权限和标题素材；官方改标题接口与回读尚未接入，所以不会真实改标题。',
+    reason: '已能校验目标链接、写权限和标题素材；publishOrEdit 可能可编辑商品，但改标题最小 payload 与回读未验证，所以不会真实改标题。',
   },
   {
     key: 'update_images',
@@ -205,7 +228,7 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'link_maintenance_dry_run',
     precheck: true,
     realSubmit: false,
-    reason: '已能校验目标链接、写权限和图片素材；官方换图接口与回读尚未接入，所以不会真实换图。',
+    reason: '已能校验目标链接、写权限和图片素材；publishOrEdit 可能可编辑商品，但换图最小 payload 与回读未验证，所以不会真实换图。',
   },
   {
     key: 'campaign_signup',
@@ -851,9 +874,16 @@ function linkOpsActionCapabilitiesForStore(storeKey, cap = openApiStoreCapabilit
       precheckSupported = true;
       realSubmitSupported = false;
       state = 'dry_run_only_no_real_submit';
-      realSubmitBlockers.push('尚未接入 SHEIN 官方维护写接口');
-      realSubmitBlockers.push('尚未验证维护动作执行后回读字段');
-      nextStep = '先研究并验证官方维护写接口；在接口、payload、回读都确认前，只允许目标定位和风险 dry-run。';
+      const candidate = LINK_OPS_MAINTENANCE_OFFICIAL_CANDIDATES[def.intent] || null;
+      if (candidate) {
+        realSubmitBlockers.push(`官方候选接口 ${candidate.endpoint}（${candidate.label}）尚未完成安全验证`);
+        for (const item of candidate.missing || []) realSubmitBlockers.push(item);
+        nextStep = `先用隔离探针验证 ${candidate.endpoint} 的参数、权限包和执行后商品列表/详情回读；在 payload、回读和异常锁定都确认前，只允许目标定位和风险 dry-run。`;
+      } else {
+        realSubmitBlockers.push('尚未接入 SHEIN 官方维护写接口');
+        realSubmitBlockers.push('尚未验证维护动作执行后回读字段');
+        nextStep = '先研究并验证官方维护写接口；在接口、payload、回读都确认前，只允许目标定位和风险 dry-run。';
+      }
     } else {
       precheckSupported = false;
       realSubmitSupported = false;
@@ -876,6 +906,7 @@ function linkOpsActionCapabilitiesForStore(storeKey, cap = openApiStoreCapabilit
       confirmableState: realSubmitSupported ? (def.confirmableState || '') : '',
       nextStep,
       reason,
+      officialCandidate: LINK_OPS_MAINTENANCE_OFFICIAL_CANDIDATES[def.intent] || null,
     };
   });
 }
