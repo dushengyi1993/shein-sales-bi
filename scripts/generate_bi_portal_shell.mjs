@@ -70,6 +70,13 @@ function renderHtml({storeConfig, css, clientJs}) {
 </head>
 <body>
 <aside class="sidebar">
+  <div class="brand" aria-label="SHEIN BI">
+    <div class="mark" aria-hidden="true">BI</div>
+    <div>
+      <h1>SHEIN BI</h1>
+      <p>运营工作台</p>
+    </div>
+  </div>
   <nav class="nav" id="nav"></nav>
   <div id="accountBox" class="account-box" aria-live="polite"></div>
   <div class="side-note"><b id="crumb">正在连接…</b><span>正式入口 · cloud runtime first</span><div id="sideStatus" class="side-status" aria-live="polite"></div></div>
