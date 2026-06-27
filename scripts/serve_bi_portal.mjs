@@ -102,7 +102,8 @@ const DEFAULT_SHEIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL'
 const DEFAULT_MANUAL_LOGIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
 const BI_PORTAL_SECTION_KEYS = new Set(['homeProfit', 'homeRankings', 'rankings', 'profit', 'actions', 'linksData', 'productTrafficDaily', 'inventoryTrend', 'comments', 'orders', 'afterSales', 'rtvData', 'waybills']);
 const BI_PORTAL_SECTION_TIMEOUT_MS = Math.max(60_000, Number(process.env.SHEIN_BI_SECTION_TIMEOUT_MS || 900_000));
-const OPENAPI_READ_PROBE_SUMMARY_FILE = path.join(ROOT, 'state', 'openapi-probes', 'read-probes.latest.json');
+const OPENAPI_READ_PROBE_SUMMARY_FILE = process.env.SHEIN_OPENAPI_READ_PROBE_SUMMARY_FILE
+  || path.join(ROOT, 'state', 'openapi-probes', 'read-probes.latest.json');
 const OPENAPI_SALES_RECONCILIATION_SUMMARY_FILE = path.join(ROOT, 'state', 'openapi-probes', 'sales-reconciliation.latest.json');
 const OPENAPI_RETURN_RECONCILIATION_SUMMARY_FILE = path.join(ROOT, 'state', 'openapi-probes', 'return-reconciliation.latest.json');
 const OPENAPI_PRODUCT_RECONCILIATION_SUMMARY_FILE = path.join(ROOT, 'state', 'openapi-probes', 'product-reconciliation.latest.json');
@@ -887,8 +888,7 @@ function openApiStoreCapability(storeKey) {
   const productPublishPrecheckAdapter = authorized && verifiedRead;
   const safeWrite = safeWriteOperationAllowed(config, {operation: 'copy_product_draft', storeKey: key});
   const whitelistConfigured = biOpsWriteWhitelistConfigured({operation: 'copy_product_draft', storeKey: key});
-  const productPublishExecuteAdapter = authorized
-    && Boolean(staticCap.productPublishAdapter)
+  const productPublishExecuteAdapter = productPublishPrecheckAdapter
     && safeWrite.allowed
     && whitelistConfigured.configured;
   return {
@@ -948,11 +948,11 @@ function linkOpsActionCapabilitiesForStore(storeKey, cap = openApiStoreCapabilit
             : '店铺尚未完成 OpenAPI 授权，不能进入商品发布 dry-run。';
       if (!cap.authorized) realSubmitBlockers.push('店铺未完成 OpenAPI 授权/密钥配置');
       if (cap.authorized && !cap.verifiedRead) realSubmitBlockers.push('最近只读探针/商品能力尚未证明可用');
-      if (precheckSupported && cap.staticCap?.productPublishAdapter && !cap.safeWrite?.enabled) realSubmitBlockers.push('真实写总闸门未开启：safeWriteOperations.enabled=false');
-      if (precheckSupported && cap.staticCap?.productPublishAdapter && cap.safeWrite?.enabled && !cap.safeWrite?.operationAllowed) realSubmitBlockers.push('真实写动作未进入 safeWriteOperations.allowedOperations 白名单');
-      if (precheckSupported && cap.staticCap?.productPublishAdapter && cap.safeWrite?.enabled && !cap.safeWrite?.storeAllowed) realSubmitBlockers.push('目标店铺未进入 safeWriteOperations.allowedStores 白名单');
-      if (precheckSupported && cap.staticCap?.productPublishAdapter && cap.safeWrite?.allowed && !cap.realSubmitWhitelist?.enabled) realSubmitBlockers.push('真实写试点白名单未启用：bi_ops_write_whitelist.local.json enabled=false');
-      if (precheckSupported && cap.staticCap?.productPublishAdapter && cap.safeWrite?.allowed && cap.realSubmitWhitelist?.enabled && !cap.realSubmitWhitelist?.configured) realSubmitBlockers.push('真实写试点白名单未配置该店铺+动作+账号');
+      if (precheckSupported && !cap.safeWrite?.enabled) realSubmitBlockers.push('真实写总闸门未开启：safeWriteOperations.enabled=false');
+      if (precheckSupported && cap.safeWrite?.enabled && !cap.safeWrite?.operationAllowed) realSubmitBlockers.push('真实写动作未进入 safeWriteOperations.allowedOperations 白名单');
+      if (precheckSupported && cap.safeWrite?.enabled && !cap.safeWrite?.storeAllowed) realSubmitBlockers.push('目标店铺未进入 safeWriteOperations.allowedStores 白名单');
+      if (precheckSupported && cap.safeWrite?.allowed && !cap.realSubmitWhitelist?.enabled) realSubmitBlockers.push('真实写试点白名单未启用：bi_ops_write_whitelist.local.json enabled=false');
+      if (precheckSupported && cap.safeWrite?.allowed && cap.realSubmitWhitelist?.enabled && !cap.realSubmitWhitelist?.configured) realSubmitBlockers.push('真实写试点白名单未配置该店铺+动作+账号');
       if (precheckSupported && !cap.productPublishExecuteAdapter) realSubmitBlockers.push('商品发布/编辑真实提交适配器未对该店放行');
       nextStep = realSubmitSupported
         ? '先创建任务并跑 dry-run；只有任务回到待复核且 payload 完整时，网页/CLI 才可带确认文本执行。'

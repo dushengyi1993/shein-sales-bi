@@ -25,6 +25,7 @@ const CHECK_FILES = [
   'scripts/check_bi_ops_production_safety.mjs',
   'scripts/test_bi_ops_production_safety.mjs',
   'scripts/test_bi_ops_copy_product_success_flow.mjs',
+  'scripts/test_bi_ops_copy_product_all_stores_capability.mjs',
   'scripts/test_bi_ops_maintenance_executor_flow.mjs',
   'scripts/verify_shein_openapi_doc_detail.mjs',
   'scripts/test_shein_openapi_doc_detail_parser.mjs',
@@ -42,6 +43,7 @@ const DIFF_CHECK_FILES = [
   'scripts/check_bi_ops_production_safety.mjs',
   'scripts/test_bi_ops_production_safety.mjs',
   'scripts/test_bi_ops_copy_product_success_flow.mjs',
+  'scripts/test_bi_ops_copy_product_all_stores_capability.mjs',
   'scripts/test_bi_ops_maintenance_executor_flow.mjs',
   'scripts/verify_shein_openapi_doc_detail.mjs',
   'scripts/test_shein_openapi_doc_detail_parser.mjs',
@@ -122,6 +124,7 @@ async function main() {
   results.push({name: 'production real-write safety smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_production_safety.mjs']))});
   results.push({name: 'copy_product_draft success lifecycle smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs']))});
   results.push({name: 'copy_product_draft weak-readback guard smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs', '--weak-readback']))});
+  results.push({name: 'copy_product_draft all-stores capability smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_all_stores_capability.mjs']))});
   results.push({name: 'maintenance executor fake OpenAPI smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_maintenance_executor_flow.mjs']))});
   results.push({name: 'official doc detail parser smoke', ...(await run(process.execPath, ['scripts/test_shein_openapi_doc_detail_parser.mjs']))});
   results.push({name: 'maintenance readiness smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_maintenance_readiness.mjs']))});
@@ -142,6 +145,7 @@ async function main() {
       'production safety smoke checks locked and narrow-pilot configs through temporary files only',
       'copy_product_draft success smoke uses a local fake OpenAPI server only',
       'copy_product_draft weak-readback smoke proves weak evidence cannot auto-close a write task',
+      'copy_product_draft all-stores capability smoke proves non-HL stores can become confirmable when authorized, probed, gated and whitelisted',
     'maintenance executor smoke uses a local fake OpenAPI server to verify activate/retire/inventory/supply-price/product-price/title/image/certificate payloads and readback',
       'official doc detail parser smoke uses offline fixtures and never prints/saves cookies',
       'maintenance readiness smoke requires schema, per-store permission and strong readback before pilot_ready',
