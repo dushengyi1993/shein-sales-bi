@@ -320,9 +320,9 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
 - 按货号汇总的确认表由 `scripts/marketing/build_marketing_sku_approval.mjs --date YYYY-MM-DD --version vN` 生成；交付前必须跑 `scripts/marketing/verify_marketing_sku_approval.mjs --date YYYY-MM-DD --version vN`。校验至少覆盖：用户标注回归、全表仓储费/件正数、含仓储利润率不高于不含仓储利润率、利润率与建议最终成交价同口径、券策略明确“仅 15%”或“15/30/50 都禁止”、旧别名不独立出现。
 - 重扫漏报或用户质疑漏报时，不要只处理上一次报错活动；必须逐店重新扫描 DSY 店铺（含 `MZ`，除非用户明确排除）在时间窗内仍可报名的活动，发现新增抓入商品就补填。
 - 报名方案生成时，BI/链接抓取可能尚未覆盖全部可报名 SKC；执行页才出现的新 SKC 必须补进系统，不得当作“计划外所以跳过”：
-  - 若活动页 `totalGoods > expectedSelectedCount`、`selection.outOfPlanRows` 非空，或已报数量与可报总数存在不在计划内的差额，必须生成 supplement `selection-plan` / `price-overrides`。
+  - 若活动页 `totalGoods > expectedSelectedCount`、`selection.outOfPlanRows` 非空，或后台活动列表 `已报数量 < 可报总数`（即 `applyGoodsNum < allowGoodsNum`）存在不在当前最终计划里的差额，必须生成 supplement `selection-plan` / `price-overrides`；不能因为计划内 `missingRows=0` 就宣布没漏。
   - 新 SKC 优先克隆同店同 SKC 已批准活动的 `targetPrice/finalTargetPrice/couponFactor/combo`；没有既有批准价时才按当前定价、曝光和底价规则即时算价，算不清则 fail closed。
-  - 补报后必须合并新的全量 repaired plan，并让 `verify_ordinary_activity_enrollment.mjs` 回读到 `missingRows=0`、`priceMismatchRows=0`、`extraAvailableRows=0`。
+  - 补报后必须合并新的全量 repaired plan，并让 `verify_ordinary_activity_enrollment.mjs` 回读到 `missingRows=0`、`priceMismatchRows=0`、`extraAvailableRows=0`、`activityListGapRows=0`。
 - 若本期已生成价格覆盖表，执行时必须带 `--price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD.json`，否则新品保护价、清货底线和本期用户确认价不会全部生效。
 - 若本期价格覆盖表包含 `storeKey + activityId + skc`，它必须作为最高优先级逐行覆盖价执行，不能被全局固定价或利润率规则覆盖。
 - `SK-13034` 这类用户明确允许“默认最低折扣先填”的缺成本例外，执行时用 `--min-discount-fallback SK-13034`，不得扩展到其它缺成本货号。
@@ -330,7 +330,7 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
 - 复核要分层，不要无脑频繁全量打开 19 个前端 profile：
   - 大批量真实提交刚完成时，可以做一次全量回读作为最终验收。
   - 用户指出漏报、脚本发现 `extraAvailableRows`、或只补少量店铺时，默认只回读受影响店铺/活动；其它店铺沿用最近一次已通过的全量回读证据。
-  - 最终验收必须显式绑定当前最终版 `selection-plan + price-overrides`，逐店证明计划行已报/审核中、缺失 0、计划外可报 0、硬性错价 0；如果某个单店提交结果文件被演示预填或不提交流程覆盖，不能用它反推“未提交”，必须回到 live 回读或可继承成功回读证据。
+  - 最终验收必须显式绑定当前最终版 `selection-plan + price-overrides`，逐店证明计划行已报/审核中、缺失 0、计划外可报 0、已报/可报差额 0、硬性错价 0；如果某个单店提交结果文件被演示预填或不提交流程覆盖，不能用它反推“未提交”，必须回到 live 回读或可继承成功回读证据。
   - `verify_ordinary_activity_enrollment.mjs` 遇到已报接口不回传活动价时，可用同一 `store + activity + skc` 的提交前填价复核文件作为价格证据，并在汇总中标出 `priceUnavailableButFillVerified`。平台最低降幅/整数折扣把页面价小幅压到计划价以下且差额低于 `1 SAR` 时，记录为平台压价来源，不当作硬性错价；超过容差或没有填价证据才进入 blocker。
   - 日常巡检默认只读云端 BI、订单商品行和既有 scan/dry-run/readback 报告；不得仅因为某个报告过期就全店开前端。必须开前端时按 3-5 店小批次执行，跑完立即关闭。
 - 建议填写顺序：

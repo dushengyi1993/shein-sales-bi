@@ -28,7 +28,7 @@ function parseArgs(argv) {
       console.log(`Usage:
   node scripts/probe_shein_openapi_hl.mjs [--store HL]
 
-只读探针：调用 HL 店铺已授权的 SHEIN OpenAPI，保存原始结果到 tmp/，控制台只输出状态摘要。`);
+只读探针：调用指定店铺已授权的 SHEIN OpenAPI，保存原始结果到 tmp/，控制台只输出状态摘要。`);
       process.exit(0);
     } else {
       throw new Error(`Unknown argument: ${a}`);
@@ -236,7 +236,7 @@ const output = {
   },
   results,
 };
-const outPath = args.out || path.join(ROOT, 'tmp', 'shein-openapi-runtime', `hl-probe-${stampForFile()}.local.json`);
+const outPath = args.out || path.join(ROOT, 'tmp', 'shein-openapi-runtime', `${String(args.store || 'store').toLowerCase()}-probe-${stampForFile()}.local.json`);
 await writeJson(outPath, output);
 
 const summary = results.map((r) => ({

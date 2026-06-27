@@ -55,7 +55,7 @@
 | 每 30 分钟 | `shein-bi-cloud-browser-cleanup.timer` | 清理超时残留店铺浏览器，避免 headless Chrome 堆积。 |
 | 每小时 | `shein-bi-cloud-watchdog.timer` | 检查云端服务、timer 和数据新鲜度，异常时提醒。 |
 
-云端当前自动覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、晨间销售+日更链路、异常通知、登录态巡检和只读问数机器人；飞书日报自动发送当前已停用。HL OpenAPI 销售对账已退出生产调度。覆盖审计使用 `scripts/audit_cloud_data_coverage.mjs`：查最新日防漏时用 `--expected-start range-start`，查历史断档时用 `--expected-start first-seen`。历史口径只检查每个店首个有效日期之后是否中间断档，不把店铺尚未开通/尚未接入前的日期算作缺抓。
+云端当前自动覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、晨间销售+日更链路、异常通知、登录态巡检和只读问数机器人；飞书日报自动发送当前已停用。OpenAPI 销售对账已升级为 19 店并行双跑层，仍不替换生产销售源。覆盖审计使用 `scripts/audit_cloud_data_coverage.mjs`：查最新日防漏时用 `--expected-start range-start`，查历史断档时用 `--expected-start first-seen`。历史口径只检查每个店首个有效日期之后是否中间断档，不把店铺尚未开通/尚未接入前的日期算作缺抓。
 
 ### 4.2 本地历史任务 / 回滚参考
 
@@ -252,7 +252,7 @@
 - 检查本地是否仍封存：`http://127.0.0.1:8787/api/health` 应无法连接；若能连上，说明本地 BI 被重新启动，需要确认是否为回滚。
 - 修改 BI 门户 UI 时，默认先后台验证：`node --check scripts/generate_bi_portal.mjs`、`$env:SHEIN_BI_PORTAL_TIMEOUT_MS='900000'; node scripts/generate_bi_portal.mjs`、静态检查 `outputs/bi-portal/index.html` / `data.json`。除非用户要求或必须排查浏览器交互问题，不主动打开前端。
 - 云端是最终审核面。涉及 V2 弹窗/筛选/页面交互时，发布前必须在云端页面或云端服务输出复核；时间筛选月份切换的关键证据是弹窗保持 `hidden=false`、`aria-expanded=true`，月份标题正确更新且无 console error/warn。
-- HL OpenAPI 销售对账已退出生产调度和系统状态页；保留 `fetch_shein_openapi_sales.mjs` / `load_shein_openapi_sales_warehouse.mjs` 作为显式手动诊断入口，不再作为日常验收项。
+- OpenAPI 销售对账当前为 19 店并行双跑层；`fetch_shein_openapi_sales.mjs` / `load_shein_openapi_sales_warehouse.mjs` / `run_shein_openapi_sales_reconciliation.mjs` 只写 `fact.openapi_*` 与 `mart.openapi_sales_reconciliation`，不作为正式销售源，切换前必须看连续日期 matched/warning 情况。
 - 检查 WebAPI 销售直连：`node scripts/fetch_shein_sales.mjs HL --date YYYY-MM-DD --transport webapi --json`，再和 `outputs/shein_fetch/HL/YYYY-MM-DD.json` 或数据库切片对账。
 - 检查取消单口径：先 dry-run `node scripts/repair_shein_sales_summaries.mjs --start YYYY-MM-DD --end YYYY-MM-DD`；确认后再加 `--write`。写回后运行 `node scripts/audit_shein_sales_logic.mjs --month YYYY-MM --date YYYY-MM-DD --offline`。
 - 检查成本文件解析但不入库：`node .\scripts\import_product_costs.mjs --dry-run`。

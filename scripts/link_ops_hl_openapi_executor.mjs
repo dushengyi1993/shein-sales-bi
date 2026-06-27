@@ -19,7 +19,7 @@ const DEFAULT_CONFIG = path.join(ROOT, 'config', 'shein_openapi.local.json');
 const DEFAULT_TASK_FILE = path.join(ROOT, 'state', 'bi_link_ops_tasks.json');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'logs', 'link-ops-openapi-executor');
 const TARGET_STORE = 'HL';
-const SUBMIT_CONFIRM_TEXT = 'SHEIN_HL_OPENAPI_SUBMIT';
+const SUBMIT_CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
 const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
 const STORES = STORES_CONFIG.stores || [];
 const STORE_ACCOUNT_TRUTH = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'store_account_truth.json'), 'utf8'));
@@ -51,11 +51,11 @@ function parseArgs(argv) {
     else if (a === '--quiet') args.quiet = true;
     else if (a === '--help' || a === '-h') {
       console.log(`Usage:
-  node scripts/link_ops_hl_openapi_executor.mjs --task-id <id> [--dry-run]
+  node scripts/link_ops_hl_openapi_executor.mjs --task-id <id> [--dry-run] [--store HL]
   node scripts/link_ops_hl_openapi_executor.mjs --task-json task.json --execute --confirm ${SUBMIT_CONFIRM_TEXT}
 
 用途：
-  HL 商品写执行器。默认只做真实 OpenAPI 权限、站点、品牌、仓库和发布 payload 预检；
+  SHEIN OpenAPI 商品写执行器。默认只做真实 OpenAPI 权限、站点、品牌、仓库和发布 payload 预检；
   只有显式 --execute 且带确认文本、payload 完整时，才调用 publishOrEdit。`);
       process.exit(0);
     } else {
@@ -109,6 +109,17 @@ function jsonClone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
 
+function stableJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
+}
+
+function sha256Stable(value) {
+  return crypto.createHash('sha256').update(stableJson(value), 'utf8').digest('hex');
+}
+
 function appendUnique(target, values) {
   const seen = new Set(target);
   for (const value of asArray(values)) {
@@ -145,11 +156,11 @@ async function loadTask(args) {
   const source = args.taskJson ? args.taskJson : args.taskFile;
   const store = normalizeTaskStore(await readJson(source));
   if (!args.taskId && store.tasks.length === 1) {
-    return {source, task: store.tasks[0], taskStore: store};
+    return {source, task: store.tasks[0], taskStore: store, executionContext: store.executionContext || null};
   }
   const task = store.tasks.find(t => String(t?.id || '') === args.taskId);
   if (!task) throw new Error(`Task not found: ${args.taskId || '(missing --task-id)'}`);
-  return {source, task, taskStore: store};
+  return {source, task, taskStore: store, executionContext: store.executionContext || null};
 }
 
 function getNested(obj, pathText) {
@@ -234,6 +245,19 @@ function collectOpenApiIdentity(value, out = null, depth = 0) {
 function openApiIdentityToStorageIdentity(value) {
   const collected = collectOpenApiIdentity(value);
   return Object.fromEntries(Object.entries(collected).map(([key, set]) => [key, [...set]]));
+}
+
+function openApiStoreIdentityMatchesMerchant(identityCheck) {
+  if (!identityCheck || identityCheck.ok) return Boolean(identityCheck?.ok);
+  const expectedMerchantId = String(identityCheck.expectedMerchantId || '').trim();
+  if (!expectedMerchantId) return false;
+  const merchantOk = identityCheck.merchantOk === true
+    || (Array.isArray(identityCheck.merchantCandidates) && identityCheck.merchantCandidates.includes(expectedMerchantId));
+  const accountConflicts = Array.isArray(identityCheck.accountConflicts) ? identityCheck.accountConflicts : [];
+  const merchantConflicts = Array.isArray(identityCheck.merchantConflicts) ? identityCheck.merchantConflicts : [];
+  const accountCandidates = Array.isArray(identityCheck.accountCandidates) ? identityCheck.accountCandidates : [];
+  const hasConcreteAccountCandidate = accountCandidates.some(value => /^GS\d+$/i.test(String(value || '').trim()));
+  return merchantOk && !accountConflicts.length && !merchantConflicts.length && !hasConcreteAccountCandidate;
 }
 
 function configuredStoreForIdentity(storeKey) {
@@ -322,7 +346,11 @@ async function callOpenApi(client, {name, method = 'POST', path: pathText, query
 function taskStores(task) {
   const stores = [
     ...asArray(task?.targets?.stores),
+    ...asArray(task?.targets?.writeStores),
+    ...asArray(task?.targets?.targetStores),
     ...asArray(task?.stores),
+    ...asArray(task?.writeStores),
+    ...asArray(task?.targetStores),
     task?.store,
     task?.targetStore,
   ].map(normalizeStoreKey).filter(Boolean);
@@ -613,13 +641,13 @@ function validatePublishPayload(payload) {
   if (!arr('product_attribute_list', 'productAttributeList').length) blockers.push('缺 product_attribute_list：需要类目属性模板和源商品参数。');
   const siteList = arr('site_list', 'siteList');
   if (!siteList.length) {
-    blockers.push('缺 site_list：HL 沙特站应包含 shein / shein-sa。');
+    blockers.push('缺 site_list：沙特站应包含 shein / shein-sa。');
   } else if (!siteList.some(site => {
     const mainSite = String(site?.main_site ?? site?.mainSite ?? '').toLowerCase();
     const subSites = asArray(site?.sub_site_list || site?.subSiteList).map(v => String(v).toLowerCase());
     return mainSite === 'shein' && subSites.includes('shein-sa');
   })) {
-    blockers.push('发布站点未包含 shein-sa：HL 草稿/发布前必须勾选 SHEIN 沙特站。');
+    blockers.push('发布站点未包含 shein-sa：草稿/发布前必须勾选 SHEIN 沙特站。');
   }
   const skcList = arr('skc_list', 'skcList');
   if (!skcList.length) blockers.push('缺 skc_list：需要 SKC 图片、销售属性和 SKU 列表。');
@@ -670,6 +698,268 @@ function extractPayloadSummary(payload) {
   };
 }
 
+function openApiProductRows(data) {
+  return asArray(data?.info?.data || data?.info?.list || data?.data);
+}
+
+function rowTextForReadback(row) {
+  const parts = [];
+  const queue = [row];
+  const seen = new Set();
+  while (queue.length && parts.length < 240) {
+    const cur = queue.shift();
+    if (cur === null || cur === undefined) continue;
+    if (typeof cur === 'string' || typeof cur === 'number' || typeof cur === 'boolean') {
+      const text = safeString(cur, 500);
+      if (text) parts.push(text);
+      continue;
+    }
+    if (typeof cur !== 'object' || seen.has(cur)) continue;
+    seen.add(cur);
+    for (const value of Object.values(cur)) {
+      if (Array.isArray(value)) queue.push(...value.slice(0, 60));
+      else if (value && typeof value === 'object') queue.push(value);
+      else {
+        const text = safeString(value, 500);
+        if (text) parts.push(text);
+      }
+    }
+  }
+  return compactRef(parts.join(' '));
+}
+
+function compactProductReadbackRow(row) {
+  return {
+    spuName: safeString(row?.spuName || row?.spu_name || row?.spu || row?.productCode || '', 120),
+    skcName: safeString(row?.skcName || row?.skc_name || row?.skc || '', 120),
+    supplierCode: safeString(row?.supplierCode || row?.supplier_code || '', 120),
+    skuCodeList: asArray(row?.skuCodeList || row?.sku_code_list || row?.skuCodes).map(x => safeString(x, 80)).filter(Boolean).slice(0, 20),
+    productName: safeString(row?.productName || row?.product_name || row?.productNameEn || row?.productNameZh || '', 240),
+    rawKeys: Object.keys(row || {}).slice(0, 40),
+  };
+}
+
+function matchProductReadbackRows(rows, fingerprint) {
+  const supplierSkus = asArray(fingerprint?.targetSupplierSkus).map(compactRef).filter(Boolean);
+  const supplierCodes = asArray(fingerprint?.targetSupplierCodes).map(compactRef).filter(Boolean);
+  const platformSkuCodes = asArray(fingerprint?.targetPlatformSkuCodes).map(compactRef).filter(Boolean);
+  const platformSkcNames = asArray(fingerprint?.targetPlatformSkcNames).map(compactRef).filter(Boolean);
+  const productRefs = asArray(fingerprint?.taskProductRefs).map(compactRef).filter(Boolean);
+  const sourceSkc = compactRef(fingerprint?.inferredSourceSkc || '');
+  const matches = [];
+  const weakMatches = [];
+  for (const row of rows) {
+    const hay = rowTextForReadback(row);
+    const strongReasons = [];
+    const weakReasons = [];
+    for (const sku of supplierSkus) {
+      if (sku && hay.includes(sku)) strongReasons.push(`supplierSku:${sku}`);
+    }
+    for (const code of supplierCodes) {
+      if (code && hay.includes(code)) strongReasons.push(`supplierCode:${code}`);
+    }
+    for (const code of platformSkuCodes) {
+      if (code && hay.includes(code)) weakReasons.push(`platformSkuCode:${code}`);
+    }
+    for (const skcName of platformSkcNames) {
+      if (skcName && hay.includes(skcName)) weakReasons.push(`platformSkcName:${skcName}`);
+    }
+    for (const ref of productRefs) {
+      if (ref && hay.includes(ref)) weakReasons.push(`productRef:${ref}`);
+    }
+    if (sourceSkc && hay.includes(sourceSkc)) weakReasons.push(`sourceSkc:${sourceSkc}`);
+    if (!strongReasons.length && !weakReasons.length) continue;
+    const compact = {
+      ...compactProductReadbackRow(row),
+      matchReasons: [...new Set([...strongReasons, ...weakReasons])].slice(0, 12),
+      strongMatchReasons: [...new Set(strongReasons)].slice(0, 12),
+      weakMatchReasons: [...new Set(weakReasons)].slice(0, 12),
+      reliableForSubmittedReadback: strongReasons.length > 0,
+    };
+    if (strongReasons.length) matches.push(compact);
+    else weakMatches.push(compact);
+    if (matches.length >= 20) break;
+  }
+  return {
+    strong: matches,
+    weak: weakMatches.slice(0, 20),
+  };
+}
+
+async function readbackPublishedProduct(client, fingerprint, {enabled = false} = {}) {
+  const startedAt = new Date().toISOString();
+  const calls = [];
+  const targetSupplierSkus = asArray(fingerprint?.targetSupplierSkus).filter(Boolean);
+  const targetSupplierCodes = asArray(fingerprint?.targetSupplierCodes).filter(Boolean);
+  const targetPlatformSkuCodes = asArray(fingerprint?.targetPlatformSkuCodes).filter(Boolean);
+  const targetPlatformSkcNames = asArray(fingerprint?.targetPlatformSkcNames).filter(Boolean);
+  const taskProductRefs = asArray(fingerprint?.taskProductRefs).filter(Boolean);
+  const pageSize = Math.max(1, Math.min(100, Number(process.env.SHEIN_LINK_OPS_READBACK_PAGE_SIZE || 100)));
+  const maxPages = Math.max(1, Math.min(20, Number(process.env.SHEIN_LINK_OPS_READBACK_MAX_PAGES || 5)));
+  const queryHints = [...new Set([
+    ...targetSupplierSkus,
+    ...targetSupplierCodes,
+    ...targetPlatformSkuCodes,
+    ...targetPlatformSkcNames,
+    fingerprint?.inferredSourceSkc,
+    ...taskProductRefs,
+  ].map(x => safeString(x, 120)).filter(Boolean))].slice(0, 20);
+  const plan = {
+    endpoint: '/open-api/openapi-business-backend/product/query',
+    method: 'POST',
+    pageSize,
+    maxPages,
+    queryHints,
+    targetSupplierSkuCount: targetSupplierSkus.length,
+    targetSupplierCodeCount: targetSupplierCodes.length,
+    targetPlatformSkuCodeCount: targetPlatformSkuCodes.length,
+    targetPlatformSkcNameCount: targetPlatformSkcNames.length,
+    reliableMatchRequires: 'targetSupplierSkus 或 targetSupplierCodes 命中；平台 SKU、源 SKC、货号文本只作弱证据。',
+  };
+  if (!enabled) {
+    return {
+      ok: false,
+      status: 'planned_not_run',
+      startedAt,
+      endedAt: new Date().toISOString(),
+      plan,
+      calls,
+      matchedRows: [],
+      note: 'dry-run 或未提交成功时只生成回读计划，不调用商品查询回读。',
+    };
+  }
+  if (!targetSupplierSkus.length && !targetSupplierCodes.length) {
+    return {
+      ok: false,
+      status: 'insufficient_strong_fingerprint',
+      startedAt,
+      endedAt: new Date().toISOString(),
+      plan,
+      calls,
+      matchedRows: [],
+      weakMatchedRows: [],
+      note: '提交成功但缺少可可靠回读的目标商家 SKU / 商家货号；平台 SKU、源 SKC 或货号文本不能单独证明新链接已生成，任务需要人工核销。',
+    };
+  }
+  try {
+    const allWeakMatches = [];
+    let scannedRows = 0;
+    let lastRowsCount = 0;
+    for (let pageNum = 1; pageNum <= maxPages; pageNum += 1) {
+      const response = await client.request('/open-api/openapi-business-backend/product/query', {
+        method: 'POST',
+        body: {pageNum, pageSize},
+        headers: {language: 'zh-cn'},
+      });
+      calls.push(compactCallResult(`product-query-readback-page-${pageNum}`, '/open-api/openapi-business-backend/product/query', 'POST', response));
+      if (!response.ok || String(response.data?.code) !== '0') {
+        return {
+          ok: false,
+          status: 'query_failed',
+          startedAt,
+          endedAt: new Date().toISOString(),
+          plan,
+          calls,
+          scannedRows,
+          matchedRows: [],
+          weakMatchedRows: allWeakMatches.slice(0, 20),
+          error: safeString(response.data?.msg || response.statusText || response.text || 'product query failed', 500),
+        };
+      }
+      const rows = openApiProductRows(response.data);
+      lastRowsCount = rows.length;
+      scannedRows += rows.length;
+      const matched = matchProductReadbackRows(rows, fingerprint);
+      allWeakMatches.push(...matched.weak);
+      if (matched.strong.length) {
+        return {
+          ok: true,
+          status: 'matched_strong_fingerprint_in_product_query',
+          startedAt,
+          endedAt: new Date().toISOString(),
+          plan,
+          calls,
+          scannedRows,
+          matchedRows: matched.strong,
+          weakMatchedRows: allWeakMatches.slice(0, 20),
+          note: '已在 OpenAPI 商品列表回读中找到目标商家 SKU / 商家货号强指纹匹配的商品行；仍需结合 SHEIN 审核状态判断最终上架结果。',
+        };
+      }
+      if (!rows.length || rows.length < pageSize) break;
+    }
+    return {
+      ok: false,
+      status: allWeakMatches.length ? 'weak_match_only' : 'not_found_in_scanned_pages',
+      startedAt,
+      endedAt: new Date().toISOString(),
+      plan,
+      calls,
+      scannedRows,
+      lastRowsCount,
+      matchedRows: [],
+      weakMatchedRows: allWeakMatches.slice(0, 20),
+      note: allWeakMatches.length
+        ? '只找到平台 SKU、源 SKC 或货号文本等弱证据；不能单独证明新链接已生成，任务保持锁定并需人工核销。'
+        : '已按分页扫描商品列表但未找到目标商家 SKU / 商家货号强指纹；可能仍在异步审核/列表延迟，也可能需要更精确的审核/详情回读接口。',
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      status: 'readback_error',
+      startedAt,
+      endedAt: new Date().toISOString(),
+      plan,
+      calls,
+      matchedRows: [],
+      weakMatchedRows: [],
+      error: safeString(err?.message || err, 800),
+    };
+  }
+}
+
+function extractReadbackFingerprint({payload, payloadFound, targetStore, task, publishResult}) {
+  const skcList = asArray(payload?.skc_list || payload?.skcList);
+  const skuRows = skcList.flatMap(skc => asArray(skc?.sku_list || skc?.skuList));
+  const targetSupplierSkus = [...new Set(skuRows
+    .map(sku => safeString(sku?.supplier_sku ?? sku?.supplierSku, 120))
+    .filter(Boolean))]
+    .slice(0, 80);
+  const targetPlatformSkuCodes = [...new Set(skuRows
+    .map(sku => safeString(sku?.sku_code ?? sku?.skuCode, 120))
+    .filter(Boolean))]
+    .slice(0, 80);
+  const targetSupplierCodes = [...new Set(skcList
+    .map(skc => safeString(skc?.supplier_code ?? skc?.supplierCode, 120))
+    .filter(Boolean))]
+    .slice(0, 20);
+  const targetPlatformSkcNames = [...new Set(skcList
+    .map(skc => safeString(skc?.skc_name ?? skc?.skcName, 120))
+    .filter(Boolean))]
+    .slice(0, 20);
+  const inferred = payloadFound?.inferred || {};
+  const generatedDraft = payloadFound?.generatedDraft || {};
+  return {
+    targetStore,
+    taskId: task?.id || '',
+    taskProductRefs: taskProductRefs(task),
+    inferredSourceStore: normalizeStoreKey(inferred.sourceStore || generatedDraft.sourceStore || task?.sourceStore || ''),
+    inferredSourceSkc: safeString(inferred.sourceSkc || generatedDraft.sourceSkc || task?.sourceSkc || task?.skc || '', 120),
+    categoryId: payload?.category_id ?? payload?.categoryId ?? null,
+    productTypeId: payload?.product_type_id ?? payload?.productTypeId ?? null,
+    targetSupplierCodes,
+    targetSupplierSkus,
+    targetSupplierSkuCount: targetSupplierSkus.length,
+    targetPlatformSkuCodes,
+    targetPlatformSkuCodeCount: targetPlatformSkuCodes.length,
+    targetPlatformSkcNames,
+    targetPlatformSkcNameCount: targetPlatformSkcNames.length,
+    publishTraceId: publishResult?.traceId || null,
+    publishInfoPresent: publishResult?.info !== undefined && publishResult?.info !== null,
+    readbackStatus: publishResult?.code === '0' ? 'submitted_pending_product_readback' : 'not_submitted_or_blocked',
+    readbackHint: '回读优先用 targetStore + targetSupplierSkus/targetSupplierCodes + categoryId + publishTraceId 关联 SHEIN 商品列表、审核记录或任务回执。',
+  };
+}
+
 async function loadClient(args) {
   const config = await readJson(args.config);
   const store = asArray(config.stores).find(s => normalizeStoreKey(s?.storeKey) === normalizeStoreKey(args.store));
@@ -691,7 +981,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const startedAt = new Date().toISOString();
   const runId = `lho_${isoStamp()}_${crypto.randomBytes(4).toString('hex')}`;
-  const {source, task} = await loadTask(args);
+  const {source, task, executionContext} = await loadTask(args);
   const stores = taskStores(task);
   const intents = taskIntents(task);
   const productRefs = taskProductRefs(task);
@@ -704,7 +994,7 @@ async function main() {
     blockers.push(`任务目标店铺未包含 ${targetStore}，本执行器不会处理其它店。`);
   }
   if (!intents.includes('copy_product_draft')) {
-    warnings.push('任务 intent 未包含 copy_product_draft；本执行器只负责 HL 复制/补链发品路径。');
+    warnings.push('任务 intent 未包含 copy_product_draft；本执行器只负责 OpenAPI 复制/补链发品路径。');
   }
   if (String(task?.status || '') !== 'confirmed' && String(task?.status || '') !== 'in_progress' && String(task?.status || '') !== 'waiting_review') {
     blockers.push('任务尚未确认成任务，不能进入 SHEIN 写执行。');
@@ -730,9 +1020,16 @@ async function main() {
     href: 'openapi:/open-api/openapi-business-backend/query-store-info',
     context: 'link_ops_hl_openapi_executor',
   }) : {ok: false, reason: 'missing_configured_store'};
-  evidence.storeIdentity = openapiIdentity;
-  if (!openapiIdentity.ok) {
+  const openapiIdentityAcceptedByMerchant = openApiStoreIdentityMatchesMerchant(openapiIdentity);
+  evidence.storeIdentity = {
+    ...openapiIdentity,
+    ok: openapiIdentity.ok || openapiIdentityAcceptedByMerchant,
+    acceptedByMerchantOnly: openapiIdentityAcceptedByMerchant && !openapiIdentity.ok,
+  };
+  if (!openapiIdentity.ok && !openapiIdentityAcceptedByMerchant) {
     blockers.push(formatStoreIdentityError(openapiIdentity));
+  } else if (openapiIdentityAcceptedByMerchant) {
+    warnings.push(`${targetStore} OpenAPI 店铺信息未返回 GS账号，但 merchantId=${openapiIdentity.expectedMerchantId} 已匹配；若后续接口返回冲突 GS账号仍会阻断。`);
   }
   const publishPermission = await callOpenApi(client, {
     name: 'check-publish-permission',
@@ -744,7 +1041,7 @@ async function main() {
   evidence.canPublishProduct = canPublish;
   evidence.publishPermissionReason = publishPermission.data?.info?.reason ?? null;
   if (publishPermission.code !== '0' || !canPublish) {
-    blockers.push(`HL 店铺当前不可发品：${safeString(publishPermission.data?.msg || publishPermission.data?.info?.reason || '未知原因')}`);
+    blockers.push(`${targetStore} 店铺当前不可发品：${safeString(publishPermission.data?.msg || publishPermission.data?.info?.reason || '未知原因')}`);
   }
 
   const siteResult = await callOpenApi(client, {
@@ -789,6 +1086,7 @@ async function main() {
   let safeDefaults = [];
   let payloadValidation = {ok: false, blockers: ['缺 OpenAPI 发布 payload：需要先从源 SKC 后台详情映射出类目、属性、图片、SKU、供货价、库存和尺寸重量。'], warnings: []};
   let publishPayload = null;
+  let payloadHash = '';
   if (payloadFound?.payload) {
     appendUnique(warnings, payloadFound.mappingWarnings);
     const applied = applySafeDefaults(payloadFound.payload, {sites, brands});
@@ -796,6 +1094,7 @@ async function main() {
     safeDefaults = applied.applied;
     payloadValidation = validatePublishPayload(publishPayload);
     payloadSummary = extractPayloadSummary(publishPayload);
+    payloadHash = sha256Stable(publishPayload);
     appendUnique(warnings, payloadValidation.warnings);
     appendUnique(blockers, payloadValidation.blockers);
   } else {
@@ -810,6 +1109,18 @@ async function main() {
   if (args.mode === 'execute') {
     if (args.confirm !== SUBMIT_CONFIRM_TEXT) {
       blockers.push(`真实提交必须显式传入 --confirm ${SUBMIT_CONFIRM_TEXT}`);
+    }
+    const expectedHash = safeString(
+      executionContext?.expectedPayloadHash
+      || executionContext?.request?.expectedPayloadHash
+      || executionContext?.request?.payloadHash
+      || '',
+      120,
+    );
+    if (!expectedHash) {
+      blockers.push('真实提交缺少 dry-run 锁定的 payload hash，不能提交未经锁定的发布 payload。');
+    } else if (!payloadHash || payloadHash !== expectedHash) {
+      blockers.push(`真实提交 payload hash 与 dry-run 锁定值不一致：expected=${expectedHash || 'missing'} actual=${payloadHash || 'missing'}`);
     }
   }
 
@@ -841,6 +1152,17 @@ async function main() {
       blockers.push(`publishOrEdit 返回失败：${safeString(publishResult.msg || publishResult.code || '未知错误')}`);
     }
   }
+  const readbackFingerprint = extractReadbackFingerprint({
+    payload: publishPayload,
+    payloadFound,
+    targetStore,
+    task,
+    publishResult,
+  });
+  const readback = await readbackPublishedProduct(client, readbackFingerprint, {
+    enabled: publishResult?.code === '0',
+  });
+  readbackFingerprint.readbackStatus = readback.status;
 
   const state = args.mode === 'execute'
     ? (publishResult?.code === '0' ? 'submitted' : 'blocked')
@@ -862,6 +1184,18 @@ async function main() {
       productRefs,
       intents,
     },
+    executorContext: executionContext ? {
+      actor: executionContext.actor || null,
+      requestMeta: executionContext.requestMeta || null,
+      parentTaskId: executionContext.parentTaskId || task?.id || '',
+      targetStores: executionContext.targetStores || [],
+      productRefs: executionContext.productRefs || productRefs,
+      intents: executionContext.intents || intents,
+      requestedMode: executionContext.requestedMode || args.mode,
+      targetStore: executionContext.targetStore || targetStore,
+      parentIssuedAt: executionContext.parentIssuedAt || '',
+      issuedAt: executionContext.issuedAt || '',
+    } : null,
     openapi: {
       baseUrl: client.baseUrl,
       openKeyId: mask(store.openKeyId),
@@ -879,12 +1213,16 @@ async function main() {
       assetId: payloadFound?.assetId || null,
       assetName: payloadFound?.assetName || null,
       safeDefaults,
+      payloadHash,
+      payloadHashAlgorithm: payloadHash ? 'sha256-stable-json-v1' : '',
       summary: payloadSummary,
       validation: payloadValidation,
       generatedDraft: payloadFound?.generatedDraft || null,
       generationError: payloadFound?.generationError || null,
       inferredSource: payloadFound?.inferred || null,
     },
+    readbackFingerprint,
+    readback,
     blockers,
     warnings,
     publishResult,

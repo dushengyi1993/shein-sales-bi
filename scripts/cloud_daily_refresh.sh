@@ -251,16 +251,40 @@ node scripts/marketing/export_marketing_price_leads_for_bi.mjs || {
   echo "[cloud_daily_refresh] WARN marketing price lead export failed; continue portal generation with existing snapshot" >&2
 }
 
-if [[ "${SHEIN_BI_DAILY_OPENAPI_HL:-0}" == "1" || "${SHEIN_BI_DAILY_OPENAPI_HL:-0}" == "true" ]]; then
-  echo "[cloud_daily_refresh] step=openapi-hl-reconciliation date=$DATE"
-  if SHEIN_OPENAPI_HL_REFRESH_PORTAL=0 SHEIN_BI_PORTAL_PREWARM_DISABLED=1 bash scripts/cloud_openapi_hl_reconciliation.sh "$DATE"; then
-    echo "[cloud_daily_refresh] openapi HL reconciliation done"
+if [[ "${SHEIN_BI_DAILY_OPENAPI_RECONCILIATION:-0}" == "1" || "${SHEIN_BI_DAILY_OPENAPI_RECONCILIATION:-0}" == "true" ]]; then
+  echo "[cloud_daily_refresh] step=openapi-reconciliation date=$DATE"
+  if SHEIN_OPENAPI_RECONCILE_REFRESH_PORTAL=0 SHEIN_BI_PORTAL_PREWARM_DISABLED=1 bash scripts/cloud_openapi_reconciliation.sh "$DATE"; then
+    echo "[cloud_daily_refresh] openapi reconciliation done"
   else
-    DAILY_WARNINGS+=("openapi HL reconciliation failed")
-    echo "[cloud_daily_refresh] WARN openapi HL reconciliation failed; continue other daily supplements and keep previous reconciliation data" >&2
+    DAILY_WARNINGS+=("openapi reconciliation failed")
+    echo "[cloud_daily_refresh] WARN openapi reconciliation failed; continue other daily supplements and keep previous reconciliation data" >&2
   fi
 else
-  echo "[cloud_daily_refresh] openapi HL reconciliation retired; set SHEIN_BI_DAILY_OPENAPI_HL=1 only for explicit manual diagnostics"
+  echo "[cloud_daily_refresh] openapi reconciliation disabled by SHEIN_BI_DAILY_OPENAPI_RECONCILIATION"
+fi
+
+if [[ "${SHEIN_BI_DAILY_OPENAPI_RETURN_RECONCILIATION:-0}" == "1" || "${SHEIN_BI_DAILY_OPENAPI_RETURN_RECONCILIATION:-0}" == "true" ]]; then
+  echo "[cloud_daily_refresh] step=openapi-return-reconciliation date=$DATE"
+  if SHEIN_BI_PORTAL_PREWARM_DISABLED=1 bash scripts/cloud_openapi_return_reconciliation.sh "$DATE"; then
+    echo "[cloud_daily_refresh] openapi return reconciliation done"
+  else
+    DAILY_WARNINGS+=("openapi return reconciliation failed")
+    echo "[cloud_daily_refresh] WARN openapi return reconciliation failed; continue other daily supplements and keep previous return reconciliation data" >&2
+  fi
+else
+  echo "[cloud_daily_refresh] openapi return reconciliation disabled by SHEIN_BI_DAILY_OPENAPI_RETURN_RECONCILIATION"
+fi
+
+if [[ "${SHEIN_BI_DAILY_OPENAPI_PRODUCT_RECONCILIATION:-0}" == "1" || "${SHEIN_BI_DAILY_OPENAPI_PRODUCT_RECONCILIATION:-0}" == "true" ]]; then
+  echo "[cloud_daily_refresh] step=openapi-product-reconciliation"
+  if SHEIN_BI_PORTAL_PREWARM_DISABLED=1 bash scripts/cloud_openapi_product_reconciliation.sh; then
+    echo "[cloud_daily_refresh] openapi product reconciliation done"
+  else
+    DAILY_WARNINGS+=("openapi product reconciliation failed")
+    echo "[cloud_daily_refresh] WARN openapi product reconciliation failed; continue portal generation and keep previous product reconciliation data" >&2
+  fi
+else
+  echo "[cloud_daily_refresh] openapi product reconciliation disabled by SHEIN_BI_DAILY_OPENAPI_PRODUCT_RECONCILIATION"
 fi
 
 if [[ "${SHEIN_BI_DAILY_RTV_VERIFY:-1}" == "1" || "${SHEIN_BI_DAILY_RTV_VERIFY:-1}" == "true" ]]; then

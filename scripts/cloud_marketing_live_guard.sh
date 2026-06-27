@@ -12,6 +12,8 @@ PAGE_SIZE="${SHEIN_BI_MARKETING_LIVE_PAGE_SIZE:-500}"
 SCAN_TIMEOUT_SEC="${SHEIN_BI_MARKETING_LIVE_SCAN_TIMEOUT_SEC:-2400}"
 SCAN_KILL_AFTER_SEC="${SHEIN_BI_MARKETING_LIVE_SCAN_KILL_AFTER_SEC:-60}"
 GUARD_MAX_AGE_HOURS="${SHEIN_BI_MARKETING_LIVE_GUARD_MAX_AGE_HOURS:-96}"
+GUARD_CLOUD_BI_SSH="${SHEIN_BI_MARKETING_LIVE_CLOUD_BI_SSH:-local}"
+GUARD_CLOUD_BI_ROOT="${SHEIN_BI_MARKETING_LIVE_CLOUD_BI_ROOT:-$ROOT}"
 MIN_AVAILABLE_MEM_MIB="${SHEIN_BI_MARKETING_LIVE_MIN_AVAILABLE_MEM_MIB:-2200}"
 BUSY_SERVICES="${SHEIN_BI_MARKETING_LIVE_BUSY_SERVICES:-shein-bi-cloud-today.service shein-bi-cloud-yesterday.service shein-bi-cloud-et-forwarder.service shein-bi-cloud-daily-refresh.service shein-bi-cloud-session-manager.service shein-bi-cloud-morning-chain.service shein-bi-cloud-order-closure.service shein-bi-db-backup.service}"
 
@@ -164,7 +166,9 @@ cleanup_store_browsers
 GUARD_STATUS=0
 if node scripts/marketing/build_marketing_daily_guard_report.mjs \
   --date "$DATE" \
-  --max-age-hours "$GUARD_MAX_AGE_HOURS"; then
+  --max-age-hours "$GUARD_MAX_AGE_HOURS" \
+  --cloud-bi-ssh "$GUARD_CLOUD_BI_SSH" \
+  --cloud-bi-root "$GUARD_CLOUD_BI_ROOT"; then
   echo "[cloud_marketing_live_guard] guard report done guard=$GUARD_OUT"
 else
   GUARD_STATUS=$?

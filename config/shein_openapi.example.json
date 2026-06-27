@@ -11,14 +11,21 @@
     "prod": "openapi-sem.sheincorp.com"
   },
   "app": {
-    "appId": "填写开放平台应用 APP_ID；不要提交真实值",
-    "appSecretKey": "填写开放平台应用 APP_SECRET_KEY；不要提交真实值"
+    "appId": "默认开放平台应用 APP_ID；不要提交真实值",
+    "appSecretKey": "默认开放平台应用 APP_SECRET_KEY；不要提交真实值"
+  },
+  "apps": {
+    "示例应用KEY": {
+      "appId": "当不同店铺属于不同开放平台应用主体时，在这里填写该应用 APP_ID；不要提交真实值",
+      "appSecretKey": "当不同店铺属于不同开放平台应用主体时，在这里填写该应用 APP_SECRET_KEY；不要提交真实值"
+    }
   },
   "stores": [
     {
       "storeKey": "DL",
       "shopName": "示例店铺名",
       "enabled": false,
+      "appKey": "示例应用KEY",
       "openKeyId": "店铺授权获得；不要提交真实值",
       "secretKey": "解密后的店铺 secretKey；不要提交真实值",
       "encryptedSecretKey": "平台返回的加密 secretKey，可选；不要提交真实值",
@@ -29,6 +36,8 @@
   "safeWriteOperations": {
     "enabled": false,
     "requireDryRun": true,
-    "allowedOperations": []
+    "allowedOperations": [],
+    "allowedStores": [],
+    "notes": "第一层物理总闸门：只控制哪些店铺+动作具备真实写适配器。即使这里开启，仍必须同时命中 config/bi_ops_write_whitelist.local.json 的人+店+动作试点白名单。"
   }
 }

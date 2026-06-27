@@ -38,6 +38,8 @@
 5. 用应用级 `APP_SECRET_KEY` 解密返回的 `secretKey`。
 6. 后续普通 API 调用使用店铺级 `openKeyId` + 解密后的 `secretKey` 生成签名。
 
+19 店全量接入时要额外注意：不同店铺可能属于不同开放平台应用主体。私有配置支持全局默认 `app`，也支持 `apps.<appKey>` 或店铺级 `stores[].appId/appSecretKey` 覆盖；授权换密钥时必须使用该店对应应用的密钥，不能把 HL 应用密钥默认复用给所有店。
+
 注意：`/open-api/auth/get-by-token` 比较特殊，此时还没有店铺级密钥，签名要用应用级 `APP_ID` 和 `APP_SECRET_KEY`，请求头使用 `x-lt-appid`。
 
 ## API 请求头
@@ -150,7 +152,7 @@ node scripts/load_bi_warehouse.mjs --sales-dir outputs/shein_openapi_fetch --sal
 - HL 店铺已完成真实授权。
 - 只读接入已验证：站点 / 币种、商品列表、订单列表 / 详情、库存、财务对账、退货。
 - 初步订单销售对账已通过。
-- 历史已完成：HL OpenAPI 销售数据写入 API 并行层，并曾在 BI 系统状态页展示 OpenAPI / 当前生产销售源对账。2026-06-17 起该销售对账已按业务要求退出生产调度和系统状态页；并行表仅保留为显式手动诊断参考，后续官方 OpenAPI 能力仍可按业务域独立评估。
+- 历史已更新：HL 单店 OpenAPI 销售试点已升级为 19 店 OpenAPI 销售双跑并行层。官方 OpenAPI 结果只写 `fact.openapi_*`、`fact.openapi_order_payment_flag` 和 `mart.openapi_sales_reconciliation`，不覆盖正式销售事实表；切生产源前仍需连续日期对账。
 - 2026-05-18 起，链接管理中台已把 HL 识别为“OpenAPI 已授权店铺”，不会再把 HL 补链/复制上品请求笼统回复为“无权限”。2026-05-20 后，HL `copy_product_draft` 任务可从 BI 当前会话直接进入 `/api/link-ops-execute`，由 `scripts/link_ops_hl_openapi_executor.mjs` 做 OpenAPI 权限、站点、品牌、仓库和 payload 预检；真实 `publishOrEdit` 仍必须 payload 完整且用户二次确认。
 
 ### P3：当前启用店铺分批替换
@@ -159,6 +161,18 @@ node scripts/load_bi_warehouse.mjs --sales-dir outputs/shein_openapi_fetch --sal
 - 同一数据域先双跑：官方 OpenAPI 与当前生产销售源（WebAPI 直连优先，必要时浏览器回退）并行一段时间。
 - 对账稳定后，将该数据域切到 API。
 - 浏览器 profile 仅保留为登录、Cookie/session 刷新、排障和回退工具。
+
+2026-06-26 更新：19 店店铺级 OpenAPI 授权已完成，分批替换阶段从“授权接入”推进到“数据域双跑”。销售、退货退款、商品/链接基础资料均已有隔离并行层；生产源仍未切换。总账当前显示销售双跑 `salesReconciliationReady=19`、商品/链接 `productReconciliationReady=19`，退货退款仍有历史窗口 warning 需继续观察；`writeConfirmable=0` 是真实写操作安全边界，不是接入失败。
+
+商品/链接并行层边界：
+
+- 抓取脚本：`scripts/fetch_shein_openapi_products.mjs`，只调用商品列表、商品详情和 SKU 虚拟库存查询。
+- 入仓脚本：`scripts/load_shein_openapi_products_warehouse.mjs`，只写 `fact.openapi_product_link` 和 `mart.openapi_product_reconciliation`。
+- 调度脚本：`scripts/cloud_openapi_product_reconciliation.sh`；生产 `shein-bi-cloud-daily-refresh.service` 已开启 `SHEIN_BI_DAILY_OPENAPI_PRODUCT_RECONCILIATION=1`，每天随慢变日更写入隔离对账层，不切商品/库存生产源。
+- 云端验证：2026-06-26 19 店全量抓取/入库成功，商品列表、详情、库存分片均成功；正式 `/api/openapi-capabilities` 显示 `productReconciliationReady=19` 且密钥泄露扫描为 false。
+- 仍不能切生产的原因：OpenAPI 商品状态目前只适合按“是否已上架”二值对账；现有浏览器源有 `待上架 / 已上架 / 已售罄 / 已下架` 四档。OpenAPI 的四档状态差异只可作为 evidence，不可直接替代商品列表页、库存页或流量页的链接状态。
+- 库存边界：OpenAPI `stock-query` 是 SHEIN 店铺虚拟库存证据，不是 ET 实际库存；不得替代 ET 可售、在库、在途、发货申请单或仓储费口径。
+- 价格边界：OpenAPI / 商品详情中的供货价是基础证据，不是营销折后价；不得替代营销活动、限时折扣、优惠券叠加后的前台折后价。
 
 ### P4：运营自动化
 
@@ -173,9 +187,9 @@ node scripts/load_bi_warehouse.mjs --sales-dir outputs/shein_openapi_fetch --sal
 
 所有写操作都必须具备：权限开关、操作者留痕、执行前预览、执行后对账、失败重试边界和人工回滚方案。
 
-## 2026-05-06 进展：HL OpenAPI 并行入仓与 BI 对账展示
+## 2026-05-06 / 2026-06-25 进展：OpenAPI 并行入仓与 BI 对账展示
 
-本阶段已把 HL 的 OpenAPI 销售数据写入并行表，不覆盖生产销售事实表：
+本阶段已把 OpenAPI 销售数据写入并行表，不覆盖生产销售事实表。2026-06-25 起支持 19 店统一调度：
 
 - `fact.openapi_store_daily_sales`
 - `fact.openapi_order_header`
@@ -185,9 +199,9 @@ node scripts/load_bi_warehouse.mjs --sales-dir outputs/shein_openapi_fetch --sal
 可复跑脚本：
 
 ```powershell
-node scripts/fetch_shein_openapi_sales.mjs HL --start 2026-05-05 --end 2026-05-06
-node scripts/load_shein_openapi_sales_warehouse.mjs --store HL --start 2026-05-05 --end 2026-05-06
-node scripts/generate_bi_portal.mjs
+node scripts/run_shein_openapi_sales_reconciliation.mjs --date YYYY-MM-DD
+node scripts/run_shein_openapi_returns_reconciliation.mjs --date YYYY-MM-DD
+node scripts/run_shein_openapi_products_reconciliation.mjs
 ```
 
 验证结果：
@@ -198,7 +212,7 @@ node scripts/generate_bi_portal.mjs
 - `outputs/bi-portal/data.json` 已包含 `openapiReconciliation`。
 - `outputs/bi-portal/index.html` 曾在系统状态页展示 “SHEIN OpenAPI 试点对账” 卡片；2026-06-17 起该卡片默认关闭，不再作为生产验收项。
 
-历史结论：HL 销售入口曾具备“官方 OpenAPI 与当前生产销售源双跑、并行入仓、BI 可见对账”的最小闭环；2026-06-17 起该销售对账退出生产调度，并等待已申请权限审核完成后再扩展销量、SFS、库存、财务等更多业务域。
+历史结论：HL 销售入口曾具备“官方 OpenAPI 与当前生产销售源双跑、并行入仓、BI 可见对账”的最小闭环；该 HL-only 入口已被 19 店销售/退货/商品隔离双跑层取代。
 
 ## 2026-05-19 进展：HL 商品写执行器预检接入
 
@@ -224,7 +238,7 @@ node scripts/link_ops_hl_openapi_executor.mjs --task-id <任务ID> --dry-run
 - 目标店铺包含 `HL`；
 - intent 包含 `copy_product_draft`；
 - 发布 payload 完整，包含类目、属性、站点、SKC 图片、销售属性、SKU、供货价/成本、库存、尺寸重量和上架方式等字段；
-- 命令显式传入 `--execute --confirm SHEIN_HL_OPENAPI_SUBMIT`。
+- 命令显式传入 `--execute --confirm SHEIN_OPENAPI_SUBMIT`，且任务命中服务端 `safeWriteOperations` 总闸门和 `config/bi_ops_write_whitelist.local.json` 的“人 + 店 + 动作”真实写试点白名单。
 
 当前边界：执行器已经不再停留在“HL 没有权限 / 适配器未实现”，但 BI 现有链接表现数据不足以直接还原完整商品发布 payload。复制 DL 等非 OpenAPI 店铺的已上 SKC 到 HL 时，还需要“源商品详情抓取/映射器”把源后台详情转换成 `publishOrEdit` 所需 payload；否则执行器会阻断并说明缺失类目、属性、SKU、成本、库存和尺寸重量等资料。图片素材对 `copy_product_draft` 不再作为第一层硬阻断，执行器会先尝试从源商品快照复制，源快照不足时再阻断。
 
@@ -260,7 +274,7 @@ node scripts/link_ops_build_product_draft_from_webapi.mjs --source-store DL --so
 
 
 
-## 2026-06-05 进展：LGM 组剩余开放平台应用已提交审核
+## 历史归档：2026-06-05 LGM 组剩余开放平台应用提交审核
 
 用户已完成 LGM 组剩余店铺开放平台注册与认证；本轮使用各店铺独立可见 Chrome profile 和桌面 `LOGO` 文件夹中按店铺命名的 PNG，按 DSY 同一口径创建 / 提交应用。未读取、保存或写入任何真实 `APP_ID`、`APP_SECRET_KEY`、店铺 `openKeyId`、`secretKey` 或授权 `tempToken`。
 
@@ -304,7 +318,7 @@ node scripts/link_ops_build_product_draft_from_webapi.mjs --source-store DL --so
 
 下一步必须等应用审核通过后，再逐店完成授权、换取店铺级密钥并写入本机忽略配置；在授权和多日双跑对账完成前，不得切换生产销售源。
 
-## 2026-05-28 进展：ZL 开放平台应用已提交审核
+## 历史归档：2026-05-28 ZL 开放平台应用提交审核
 
 已在 ZL 店铺对应开放平台账号中创建并提交应用：
 
@@ -317,7 +331,7 @@ node scripts/link_ops_build_product_draft_from_webapi.mjs --source-store DL --so
 
 该应用仍未写入任何真实密钥到仓库。审核通过并完成店铺授权后，按 HL 的接入方式把 ZL 加入 `.local` 配置，先走官方 OpenAPI / 当前生产销售源双跑对账，再决定是否替换生产数据入口。
 
-## 2026-05-10 进展：CX 开放平台应用已提交审核
+## 历史归档：2026-05-10 CX 开放平台应用提交审核
 
 已在 CX 店铺对应开放平台账号中创建并提交应用：
 
@@ -328,9 +342,9 @@ node scripts/link_ops_build_product_draft_from_webapi.mjs --source-store DL --so
 
 该应用仍未写入任何真实密钥到仓库。审核通过并完成店铺授权后，按 HL 的接入方式把 CX 加入 `.local` 配置，先走官方 OpenAPI / 当前生产销售源双跑对账，再决定是否替换生产数据入口。
 
-## 2026-05-07 进展：HL OpenAPI 固定双跑计划任务
+## 历史归档：2026-05-07 HL OpenAPI 固定双跑计划任务
 
-已把 HL 官方 OpenAPI 销售试点从手动/不定期核对改为固定计划任务双跑：
+历史说明：以下 Windows 计划任务是早期 HL 单店试点任务，当前已被云端 19 店 `cloud_openapi_*_reconciliation.sh` 与 `shein-bi-cloud-daily-refresh.service` 取代：
 
 - `SHEIN-Sales-OpenAPI-HL-YesterdayFinal-0025`：每天 `00:25` 抓取并对账前一天最终版销售。
 - `SHEIN-Sales-OpenAPI-HL-Intraday-1225`：每天 `12:25` 抓取并对账当天日内销售。

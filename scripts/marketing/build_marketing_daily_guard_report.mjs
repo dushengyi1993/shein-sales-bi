@@ -1317,6 +1317,10 @@ function validateCloudOrderFetchArgs({cloudBiSsh, cloudBiRoot}) {
   return {ok: true, host, root: root.replace(/\/+$/, '')};
 }
 
+function isLocalCloudHost(host) {
+  return ['local', 'localhost', '127.0.0.1'].includes(String(host || '').trim().toLowerCase());
+}
+
 function execLimited(command, args, {timeoutMs, maxBytes}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {shell: false});
@@ -1371,8 +1375,9 @@ async function readCloudSheinFetchOrderRows({
   dates,
 }) {
   const validation = validateCloudOrderFetchArgs({cloudBiSsh, cloudBiRoot});
+  const useLocalFiles = validation.ok && isLocalCloudHost(validation.host);
   const base = {
-    transport: 'ssh',
+    transport: useLocalFiles ? 'local-file' : 'ssh',
     host: validation.host || '',
     root: validation.root || '',
     status: validation.ok ? 'ok' : 'invalid_config',
@@ -1510,10 +1515,15 @@ print(json.dumps(out, ensure_ascii=False))
     shellQuote(safeDates.join(',')),
   ].join(' ');
   try {
-    const text = await execLimited('ssh', [validation.host, command], {
-      timeoutMs: cloudBiSshTimeoutMs,
-      maxBytes: cloudBiMaxBytes,
-    });
+    const text = useLocalFiles
+      ? await execLimited('python3', ['-c', remoteScript, validation.root, safeStores.join(','), safeDates.join(',')], {
+        timeoutMs: cloudBiSshTimeoutMs,
+        maxBytes: cloudBiMaxBytes,
+      })
+      : await execLimited('ssh', [validation.host, command], {
+        timeoutMs: cloudBiSshTimeoutMs,
+        maxBytes: cloudBiMaxBytes,
+      });
     const data = JSON.parse(text.replace(/^\uFEFF/, ''));
     return {
       ...base,
@@ -2447,6 +2457,97 @@ function storeCountText(counts = {}, limit = 8) {
   return entries.length > limit ? `${shown} 等 ${entries.length} 店` : shown;
 }
 
+function reasonCountText(counts = {}, limit = 4) {
+  const entries = Object.entries(counts || {})
+    .filter(([, v]) => Number(v) > 0)
+    .sort((a, b) => Number(b[1]) - Number(a[1]) || String(a[0]).localeCompare(String(b[0])));
+  if (!entries.length) return '';
+  const shown = entries.slice(0, limit).map(([reason, count]) => `${count} 个：${reason}`).join('；');
+  return entries.length > limit ? `${shown} 等 ${entries.length} 类` : shown;
+}
+
+function summarizeMandatoryLimitedDiscountStatus({liveScanSource, gapResultSource, fallbackGaps}) {
+  const liveDoc = liveScanSource?.data || {};
+  const liveStores = Array.isArray(liveDoc.stores) ? liveDoc.stores : [];
+  const liveRows = Array.isArray(liveDoc.rows) ? liveDoc.rows : [];
+  const liveOkStores = liveStores.filter(store => store?.ok).length;
+  const liveFailedStores = liveStores.length ? liveStores.length - liveOkStores : 0;
+  const limitedRows = liveRows.filter(row => row.marketing_limited_discount_price_sar !== undefined
+    && row.marketing_limited_discount_price_sar !== null
+    && row.marketing_limited_discount_price_sar !== '').length;
+  const couponOnlyRows = liveRows.filter(row => String(row.marketing_price_evidence_type || '') === 'current_coupon_only_live_scan').length;
+
+  const gapDoc = gapResultSource?.data || {};
+  const executedCount = Number(gapDoc.executedCount || 0);
+  const blockedCount = Number(gapDoc.blockedCount || 0);
+  const initialGap = Number(gapDoc.initialGap || 0);
+  const remainingGapByAfterScan = Number(gapDoc.remainingGapByAfterScan || gapDoc.remaining?.length || 0);
+  const byStoreExec = gapDoc.byStoreExec && typeof gapDoc.byStoreExec === 'object' ? gapDoc.byStoreExec : {};
+  const byStoreBlocked = gapDoc.byStoreBlocked && typeof gapDoc.byStoreBlocked === 'object' ? gapDoc.byStoreBlocked : {};
+  const reasonSummary = gapDoc.reasonSummary && typeof gapDoc.reasonSummary === 'object' ? gapDoc.reasonSummary : {};
+  const fallbackTotal = Number(fallbackGaps?.total || 0);
+  const fallbackByStore = fallbackGaps?.byStore || {};
+  const fallbackByBucket = fallbackGaps?.byBucket || {};
+
+  const liveEvidenceText = liveScanSource?.source?.status === 'ok'
+    ? `今天已跑 SHEIN 后台 live scan，覆盖 ${liveOkStores}/${liveStores.length || 0} 店，读到当前限时折扣 ${humanCount(limitedRows, '行')}；不是只看 BI。`
+    : '今天没有新鲜的 SHEIN 后台 live scan 证据，不能只凭 BI 判断限时折扣是否已报。';
+  const autoRepairText = gapResultSource?.source?.exists
+    ? `最近一次漏限时折扣处理：发现 ${humanCount(initialGap, '个')}缺口，安全自动补上 ${humanCount(executedCount, '个')}${storeCountText(byStoreExec, 6) ? `（${storeCountText(byStoreExec, 6)}）` : ''}，剩余 ${humanCount(blockedCount || remainingGapByAfterScan, '个')}未硬写。`
+    : '还没有找到最近一次漏限时折扣补报结果文件。';
+  const remainingText = (blockedCount || fallbackTotal)
+    ? `剩余未报/未兜底主要是平台或库存阻断，不是正常放弃：${reasonCountText(reasonSummary, 4) || storeCountText(fallbackByBucket, 4) || '需要查看明细'}。按店铺看：${storeCountText(byStoreBlocked, 8) || storeCountText(fallbackByStore, 8) || '暂无店铺分布'}。`
+    : '当前没有历史遗留的限时折扣兜底缺口。';
+  const actionText = (blockedCount || fallbackTotal)
+    ? '后续处理口径：库存/平台状态恢复后继续自动复扫；能 dry-run 通过的直接补，仍被平台拒绝的继续列阻断，不硬写。'
+    : '后续处理口径：继续每日 live scan；发现新链接或漏兜底且校验安全时自动补。';
+
+  return {
+    live: {
+      status: liveScanSource?.source?.status || 'missing',
+      path: liveScanSource?.source?.path || '',
+      createdAt: liveDoc.createdAt || liveDoc.generatedAt || '',
+      ok: Boolean(liveDoc.ok),
+      partial: Boolean(liveDoc.partial),
+      storeCount: liveStores.length,
+      okStoreCount: liveOkStores,
+      failedStoreCount: liveFailedStores,
+      rowCount: Number(liveDoc.rowCount || liveRows.length || 0),
+      currentRows: Number(liveDoc.currentRows || 0),
+      futureRows: Number(liveDoc.futureRows || 0),
+      limitedRows,
+      couponOnlyRows,
+    },
+    latestAutoRepair: {
+      status: gapResultSource?.source?.status || 'missing',
+      path: gapResultSource?.source?.path || '',
+      createdAt: gapDoc.createdAt || '',
+      initialGap,
+      executedCount,
+      blockedCount,
+      remainingGapByAfterScan,
+      afterLimitedRows: Number(gapDoc.afterLimitedRows || 0),
+      byStoreExec,
+      byStoreBlocked,
+      reasonSummary,
+      executedSamples: Array.isArray(gapDoc.executed) ? gapDoc.executed.slice(0, 10) : [],
+      blockedSamples: Array.isArray(gapDoc.blocked) ? gapDoc.blocked.slice(0, 10) : [],
+    },
+    remainingLegacyFallback: {
+      total: fallbackTotal,
+      byStore: fallbackByStore,
+      byBucket: fallbackByBucket,
+      lowOrderHitCount: Number(fallbackGaps?.lowOrderHitCount || 0),
+    },
+    human: {
+      liveEvidenceText,
+      autoRepairText,
+      remainingText,
+      actionText,
+    },
+  };
+}
+
 function summarizeCouponNonGuaranteedFallbackGaps(sourceItem) {
   const data = sourceItem?.data;
   const rows = Array.isArray(data?.rows) ? data.rows : [];
@@ -2578,6 +2679,7 @@ function buildHumanSummary(report) {
   const budget = report.couponBudget || {};
   const orders = report.orderPriceAudit || {};
   const fallbackGaps = report.couponNonGuaranteedFallbackGaps || {};
+  const mandatoryLimited = report.mandatoryLimitedDiscountStatus || {};
   const ordinaryIssues = report.ordinaryEnrollmentOpenIssues || {};
   const ordinarySupplementIssues = report.ordinaryEnrollmentSupplementOpenIssues || {};
 
@@ -2609,7 +2711,11 @@ function buildHumanSummary(report) {
   }
   if (Number(fallbackGaps.total || 0) > 0) {
     const storeText = storeCountText(fallbackGaps.byStore || {}, 6);
-    watches.push(`优惠券非保底迁移后仍有 ${humanCount(fallbackGaps.total, '个')}限时折扣兜底缺口${storeText ? `（${storeText}）` : ''}；多为库存/平台规则/已有折扣冲突，不能硬写，但需要后续继续观察。`);
+    const latestRepair = mandatoryLimited.latestAutoRepair || {};
+    const executedText = Number(latestRepair.executedCount || 0) > 0
+      ? `；最近已自动补 ${humanCount(latestRepair.executedCount, '个')}`
+      : '';
+    watches.push(`限时折扣必报：仍有 ${humanCount(fallbackGaps.total, '个')}兜底缺口${storeText ? `（${storeText}）` : ''}${executedText}；剩余多为库存/平台规则/已有折扣冲突，不能硬写，但需要后续继续观察。`);
   }
   if (Number(ordinaryIssues.issueCount || 0) > 0 || Number(ordinaryIssues.missingFillEvidence || 0) > 0) {
     watches.push(`普通活动补报还有 ${humanCount(ordinaryIssues.issueCount, '行')}价格/填价证据待回读，其中缺本轮填价证据 ${humanCount(ordinaryIssues.missingFillEvidence, '行')}；已报集合存在不等于价格完全验收。`);
@@ -2709,6 +2815,15 @@ function buildMarkdown(report) {
     for (const text of summary.ok.slice(0, 12)) lines.push(`- ${text}`);
   }
   lines.push('');
+  lines.push('## 限时折扣兜底情况');
+  lines.push('');
+  const mandatoryLimited = report.mandatoryLimitedDiscountStatus || {};
+  const mandatoryHuman = mandatoryLimited.human || {};
+  lines.push(`- 巡检：${mandatoryHuman.liveEvidenceText || '未生成限时折扣巡检摘要。'}`);
+  lines.push(`- 自动补报：${mandatoryHuman.autoRepairText || '未生成限时折扣补报摘要。'}`);
+  lines.push(`- 剩余缺口：${mandatoryHuman.remainingText || '未生成限时折扣缺口摘要。'}`);
+  lines.push(`- 后续动作：${mandatoryHuman.actionText || '继续按必报兜底规则巡检。'}`);
+  lines.push('');
   lines.push('## 今日关键状态');
   lines.push('');
   lines.push(`- 价格止损阻塞：${report.blockers.length ? `${humanCount(report.blockers.length, '个')}，不能自动执行` : '无'}`);
@@ -2718,7 +2833,7 @@ function buildMarkdown(report) {
   const couponTrafficIntent = report.couponTrafficIntent || {};
   const budgetPrefix = couponTrafficIntent.enabled ? '可选流量券预算' : '优惠券预算观察';
   lines.push(`- ${budgetPrefix}：明确流量券目标 ${humanCount(couponTrafficIntent.allowed15TrafficCount || 0, '个')}；低于预算目标的店铺 ${humanCount(report.couponBudget.belowTargetCount, '个')}；缺回读证据 ${humanCount(report.couponBudget.missingEvidenceCount, '个')}`);
-  lines.push(`- 优惠券非保底迁移兜底：限时折扣缺口 ${humanCount(report.couponNonGuaranteedFallbackGaps?.total || 0, '个')}；直接命中低价订单 ${humanCount(report.couponNonGuaranteedFallbackGaps?.lowOrderHitCount || 0, '个')}`);
+  lines.push(`- 限时折扣必报兜底：live 当前限时折扣 ${humanCount(report.mandatoryLimitedDiscountStatus?.live?.limitedRows || 0, '行')}；最近自动补报 ${humanCount(report.mandatoryLimitedDiscountStatus?.latestAutoRepair?.executedCount || 0, '个')}；剩余阻断 ${humanCount(report.mandatoryLimitedDiscountStatus?.latestAutoRepair?.blockedCount || report.couponNonGuaranteedFallbackGaps?.total || 0, '个')}；直接命中低价订单 ${humanCount(report.couponNonGuaranteedFallbackGaps?.lowOrderHitCount || 0, '个')}`);
   lines.push(`- 普通活动补报回读：计划 ${humanCount(report.ordinaryEnrollmentOpenIssues?.plannedRows || 0, '行')}；已报/审核中 ${humanCount(report.ordinaryEnrollmentOpenIssues?.enrolledOrUnderReview || 0, '行')}；价格/证据待回读 ${humanCount(report.ordinaryEnrollmentOpenIssues?.issueCount || 0, '行')}；缺本轮填价证据 ${humanCount(report.ordinaryEnrollmentOpenIssues?.missingFillEvidence || 0, '行')}`);
   lines.push(`- XC/45219 补报遗留：活动价待回读 ${humanCount(report.ordinaryEnrollmentSupplementOpenIssues?.pricePendingRows || 0, '行')}；缺成本/标准目录阻断 ${humanCount(report.ordinaryEnrollmentSupplementOpenIssues?.extraAvailableRows || 0, '行')}`);
   lines.push(`- 新链接/新 SKC：需要定价 ${humanCount(report.newSkcCandidates.needsPricing, '个')}；需要确认 ${humanCount(report.newSkcCandidates.needsConfirmation, '个')}；需要补券复核 ${humanCount(report.newSkcCandidates.needsCouponReview, '个')}`);
@@ -2764,7 +2879,7 @@ async function main() {
   const biPortalSelection = await selectSharedBiPortalSource({
     root: ROOT,
     biPortalData: args.biPortalData,
-    cloudBiSsh: args.cloudBiSsh,
+    cloudBiSsh: isLocalCloudHost(args.cloudBiSsh) ? '' : args.cloudBiSsh,
     cloudBiRoot: args.cloudBiRoot,
     cloudBiSshTimeoutMs: args.cloudBiSshTimeoutMs,
     cloudBiMaxBytes: args.cloudBiMaxBytes,
@@ -2789,6 +2904,18 @@ async function main() {
   const couponNonGuaranteedFallbackGapSource = await read(
     'couponNonGuaranteedFallbackGaps',
     latestReportFile(/^coupon-non-guaranteed-limited-fallback-remaining-triage-.*\.json$/),
+  );
+  const currentMarketingLiveScanSource = await readSource(
+    'currentMarketingLiveScan',
+    latestFile(path.join(ROOT, 'tmp', 'marketing-signup', 'current-price-live'), /^current-marketing-price-live-.*\.json$/),
+    now,
+    args.maxAgeHours,
+  );
+  const mandatoryLimitedGapFinalSource = await readSource(
+    'mandatoryLimitedGapFinalResult',
+    latestReportFile(/^mandatory-limited-gap-final-result-.*\.json$/),
+    now,
+    args.maxAgeHours,
   );
   const ordinaryEnrollmentOpenIssueSource = await read(
     'ordinaryEnrollmentOpenIssues',
@@ -2925,6 +3052,11 @@ async function main() {
   const couponTrafficIntent = summarizeCouponTrafficIntent(couponEligibilityPlan);
   const optionalTrafficCouponReview = optionalTrafficCouponReviewStatus({couponEligibilityPlan});
   const couponNonGuaranteedFallbackGaps = summarizeCouponNonGuaranteedFallbackGaps(couponNonGuaranteedFallbackGapSource);
+  const mandatoryLimitedDiscountStatus = summarizeMandatoryLimitedDiscountStatus({
+    liveScanSource: currentMarketingLiveScanSource,
+    gapResultSource: mandatoryLimitedGapFinalSource,
+    fallbackGaps: couponNonGuaranteedFallbackGaps,
+  });
   const ordinaryEnrollmentOpenIssues = summarizeOrdinaryEnrollmentOpenIssues(ordinaryEnrollmentOpenIssueSource);
   const ordinaryEnrollmentSupplementOpenIssues = summarizeOrdinaryEnrollmentSupplementOpenIssues(ordinaryEnrollmentSupplementOpenIssueSource);
   const suggestedDryRunCommands = buildDryRunCommands({
@@ -3308,6 +3440,7 @@ async function main() {
     couponBudget,
     couponTrafficIntent,
     couponNonGuaranteedFallbackGaps,
+    mandatoryLimitedDiscountStatus,
     ordinaryEnrollmentOpenIssues,
     ordinaryEnrollmentSupplementOpenIssues,
     budgetReadback: budgetReadback.source.status === 'missing'

@@ -1,0 +1,26 @@
+{
+  "enabled": false,
+  "rules": [
+    {
+      "id": "example-hl-copy-product-draft-owner-only",
+      "enabled": false,
+      "realSubmit": false,
+      "stores": ["HL"],
+      "operations": ["copy_product_draft"],
+      "allowedUsers": ["示例账号名"],
+      "allowedOwnerKeys": ["示例负责人KEY"],
+      "allowedRoles": ["owner", "admin"],
+      "note": "第二层真实写试点白名单：必须同时匹配人 + 店 + 动作。真实生产文件使用 config/bi_ops_write_whitelist.local.json，不要提交真实账号白名单。"
+    }
+  ],
+  "HL": {
+    "copy_product_draft": {
+      "enabled": false,
+      "realSubmit": false,
+      "allowedUsers": ["示例账号名"],
+      "allowedOwnerKeys": ["示例负责人KEY"],
+      "allowedRoles": ["owner", "admin"],
+      "note": "也支持按店铺嵌套写法。只有 enabled=true 且 realSubmit=true 才会成为有效真实写规则。"
+    }
+  }
+}

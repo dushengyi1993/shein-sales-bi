@@ -27,8 +27,8 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 店铺：DSY=`DL DX FY LQ NM HL JY ZL TS MZ`；LGM=`CX YJ XL QY QH TZ JSH TZZ XC`。
 - 云端 BI 正式入口：`https://shein-bi.dushengyi.xyz/`，旧 IP `http://43.165.167.135/` 仅作兜底，Nginx Basic Auth 保护；本地 `8787` 服务和 `SHEIN-*` Windows 任务已封存禁用，除非明确回滚不要重启。
 - V2 是当前正式 BI Portal；V1 已封存到 `/v1/` 和 GitHub final/archive release，不再进入正式 release，也不纳入日常自动刷新。
-- 云端生产调度：`shein-bi-cloud-today.timer` 每两小时刷新当天销售、入仓并生成 BI Portal；`shein-bi-cloud-yesterday.timer` 每天 `00:10` 刷新前一天最终版并复核稳定日；`shein-bi-db-backup.timer` 每天 `02:30` 备份数据库；`shein-bi-cloud-session-manager.timer` 每天巡检/恢复 19 店登录态；`shein-bi-cloud-et-forwarder.timer` 每两小时跑 ET；`shein-bi-cloud-daily-refresh.timer` 每天 `08:10` 统一日更链接/业务域、营销价栈线索和 RTV；`shein-bi-cloud-daily-lark-report.timer` 负责云端飞书日报；`shein-bi-cloud-watchdog.timer` 每小时巡检；`shein-bi-lark-sales-qa.service` 常驻只读问数。
-- HL OpenAPI 销售试点曾建立并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` -> `fact.openapi_*` -> `mart.openapi_sales_reconciliation`；现已按业务要求退出生产调度和系统状态页，历史并行表仅保留为手动诊断参考。CX / ZL 应用已提交审核，审核通过前不得录入 `.local` 密钥或切换生产源。
+- 云端生产调度：`shein-bi-cloud-today.timer` 每两小时整点刷新当天销售、入仓并生成 BI Portal；`shein-bi-cloud-yesterday.timer` 每天 `03:00` 刷新前一天最终版并复核稳定日；`shein-bi-db-backup.timer` 每天 `02:40` 备份数据库；`shein-bi-cloud-session-manager.timer` 每天巡检/恢复 19 店登录态；`shein-bi-cloud-et-forwarder.timer` 每奇数小时 `:20` 跑 ET；`shein-bi-cloud-morning-chain.timer` 每天 `08:00` 先跑销售再启动 `shein-bi-cloud-daily-refresh.service`；飞书日报自动发送已停用，无 `daily-lark-report.timer`；`shein-bi-cloud-watchdog.timer` 每小时巡检；`shein-bi-lark-sales-qa.service` 常驻只读问数。
+- 19 店 SHEIN 官方 OpenAPI 已完成店铺级授权、云端白名单和只读探针；销售订单、退货退款、商品/链接基础资料均进入隔离并行双跑层，并由 `shein-bi-cloud-daily-refresh.service` 的 `SHEIN_BI_DAILY_OPENAPI_*` 开关自动更新。OpenAPI 只写 `fact.openapi_*` / `mart.openapi_*_reconciliation`，不切生产源，不执行 SHEIN 写操作。
 - 当前 19 店销售生产抓取已改为 WebAPI 直连优先：`config/stores.json.salesTransport=auto`，session 文件在 `state/shein_webapi_sessions/*.local.json`，直连成功不启动浏览器；浏览器只作刷新 session、登录续期和回退。
 - ET 货代仓已接入仓库和 BI；云端 ET 同步已启用并验证成功。RTV 复核耗时长是正常现象，滚动销售刷新不应等待完整 RTV。
 - LGM profile 映射：`CX=profile cx/GS9489101`，`YJ=profile yj/GS8146729`，`XL=profile xl/GS9307061`，`QY=profile qy/GS7451160`，`QH=profile qh/GS8715910`，`TZ=profile tz/GS5636781`，`JSH=profile jsh/GS3308359`，`TZZ=profile tzz/GS7146778`，`XC=profile xc/GS2944318`。`YJ/XL/QY` 已在 2026-06-05 纠正为店铺代码与 profileKey 对齐；错位核验必须同时比对 `config/stores.json`、`config/store_account_truth.json`、浏览器保存账号、实际登录后的店铺名/账号和 live 抓数归属。
@@ -50,7 +50,7 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 不做猜测性单店时区偏移；HL 的错误 `accountUtcOffsetHours=3` 已删除并回补。
 
 ## 定时任务
-- 当前生产调度在云端 systemd：`shein-bi-cloud-today.timer`、`shein-bi-cloud-yesterday.timer`、`shein-bi-db-backup.timer`、`shein-bi-cloud-session-manager.timer`、`shein-bi-cloud-et-forwarder.timer`、`shein-bi-cloud-daily-refresh.timer`、`shein-bi-cloud-daily-lark-report.timer`、`shein-bi-cloud-watchdog.timer`、`shein-bi-lark-sales-qa.service`。云端当前自动覆盖销售 WebAPI、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、飞书日报、统一日更补采、登录态巡检、异常通知和只读问数机器人。HL OpenAPI 销售双跑已退出生产调度。
+- 当前生产调度在云端 systemd：`shein-bi-cloud-today.timer`、`shein-bi-cloud-morning-chain.timer`、`shein-bi-cloud-yesterday.timer`、`shein-bi-db-backup.timer`、`shein-bi-cloud-session-manager.timer`、`shein-bi-cloud-et-forwarder.timer`、`shein-bi-cloud-browser-cleanup.timer`、`shein-bi-cloud-watchdog.timer`、`shein-bi-lark-sales-qa.service`。云端当前自动覆盖销售 WebAPI、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、统一日更补采、19 店 OpenAPI 隔离双跑、登录态巡检、异常通知和只读问数机器人；飞书日报只保留手动入口。
 - 本地 `SHEIN-*` Windows 任务已于 `2026-05-15` 封存禁用，保留为回滚/迁移参考；除非明确回滚，不要重新启用 `SHEIN-Sales-15Stores-Intraday-Daytime`、`SHEIN-BI-Daily-Pipeline-0700`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-Sales-ETForwarder-0420` 或 HL OpenAPI 本地任务。
 - 不要默认本地日报、watchdog、ET、链接/业务域或 OpenAPI Windows 任务仍在生产运行；云端飞书日报和只读问数使用独立机器人/应用，换机器人时需重新映射收件人 `open_id`。
 - 历史规则仍保留：V1 门户生成放在流水线末尾单次执行，默认 `SHEIN_BI_PORTAL_TIMEOUT_MS=900000`，不要恢复多个状态点重复生成页面；RTV 复核耗时长不是滚动 BI 失败。
@@ -94,7 +94,7 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 飞书只读问数机器人：服务器 systemd 常驻 `shein-bi-lark-sales-qa.service`，入口 `bash scripts/cloud_lark_sales_qa_bot.sh` / `node scripts/lark_sales_qa_bot.mjs --answer "今天销售多少"`；只能只读回答，不写数据库、飞书 Base 或 SHEIN 后台。
 - RTV 换单复核：`node scripts/verify_shein_rtv_tracking.mjs --priority high,medium,low --include-no-cases --limit 120 --case-limit 60 --max-runtime-ms 3600000`
 - 营销活动报名（legacy 提醒）：旧 DSY-only `export_dsy_marketing_standards.mjs` / `dsy_marketing_deadline_fill.mjs --all-open` 命令只能作历史线索或单步脚本参考，不能作为当前报活动流程入口。凡涉及普通营销活动、优惠券、限时折扣、价格栈、批量提交或低价/高价补救，一律先使用 `shein-marketing-ops`：以当前 `selection-plan + price-overrides`、云端/live 证据、首店确认、普通活动回读、可选 15% 流量券 dry-run/安全提交和全局复核为准；不得因这里的旧说明排除 `34810` 配套券，也不得用旧命令阻止用户已授权后的真实提交。
-- HL OpenAPI 销售对账已退出生产调度；如需显式手动诊断，可运行 `node scripts/fetch_shein_openapi_sales.mjs HL --start YYYY-MM-DD --end YYYY-MM-DD` 后再运行 `node scripts/load_shein_openapi_sales_warehouse.mjs --store HL --start YYYY-MM-DD --end YYYY-MM-DD`，只写 API 并行事实表和 `mart.openapi_sales_reconciliation`。
+- OpenAPI 19 店双跑手动诊断：`node scripts/run_shein_openapi_sales_reconciliation.mjs --date YYYY-MM-DD`、`node scripts/run_shein_openapi_returns_reconciliation.mjs --date YYYY-MM-DD`、`node scripts/run_shein_openapi_products_reconciliation.mjs`；只写隔离并行层，不切生产事实源。
 - 月表：`node scripts/generate_monthly_sales_table.mjs --month YYYY-MM --include-lgm`
 - 年度/宽表：`node scripts/generate_compact_display_tables.mjs --group ALL --current-month YYYY-MM --recent-months 2`
 - 当月看板：`node scripts/setup_lark_dashboard_main_v3.mjs --month YYYY-MM`

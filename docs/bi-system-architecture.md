@@ -35,7 +35,7 @@ flowchart LR
    - 本机 WSL + Docker + D 盘数据盘只保留为开发、排障和短期回滚参考。
 
 5. **生产链路逐步 API 化，不冒险硬迁移**
-   - 云端 systemd 已覆盖销售 WebAPI、入仓、BI Portal 生成、数据库备份、ET、飞书日报手动入口、统一日更补采、异常通知、登录态巡检和只读问数机器人；飞书日报自动发送已停用，HL OpenAPI 销售对账已退出生产双跑，后续替换链路仍必须逐项验证后切换。
+   - 云端 systemd 已覆盖销售 WebAPI、入仓、BI Portal 生成、数据库备份、ET、飞书日报手动入口、统一日更补采、异常通知、登录态巡检和只读问数机器人；飞书日报自动发送已停用，19 店 OpenAPI 销售/退货/商品对账已进入隔离双跑层，后续替换链路仍必须逐项验证后切换。
    - SHEIN 销售抓取已改为 WebAPI 直连优先，Chrome 登录态保留为 Cookie/session 刷新和失败回退；官方 OpenAPI 继续并行试点，不直接覆盖生产事实表。
 
 ## 当前服务
@@ -86,7 +86,7 @@ BI 系统当前分为三层入口：
    - API section cache 位于 `outputs/bi-portal/sections/`；派生 section 要遵守源缓存生命周期，例如 `homeProfit` 必须从当前 `profit` section 派生。`serve_bi_portal.mjs` 负责 section API、gzip/raw cache 返回，以及 core `generatedAt` 变化后的后台 warmup 兜底。
    - 本地 `127.0.0.1:8787` 和局域网入口已封存，不再作为正式入口。
    - 短期动作状态仍为服务端状态文件，长期应入 PostgreSQL，避免文件状态成为单点。
-   - `mart.openapi_sales_reconciliation` 保留历史 HL 官方 OpenAPI 销售试点数据；该试点已退出系统状态页和生产调度，且不覆盖正式销售事实表。
+   - `mart.openapi_sales_reconciliation` 是 19 店 OpenAPI 销售隔离双跑对账表；它不覆盖正式销售事实表，切生产源前必须看连续日期 matched/warning 趋势。
 
 当前团队访问状态：
 

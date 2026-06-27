@@ -115,11 +115,11 @@ description: SHEIN 营销活动报名、优惠券、限时折扣和价格栈守�
 
 方案生成依赖云端 BI / 链接抓取 / 活动扫描，但这些源可能在报名前未覆盖所有可报名 SKC。执行页或回读页才出现的新 SKC，不是“可以忽略的差异”，必须立刻补进系统：
 
-- 只要活动页 `totalGoods > allowlist expectedSelectedCount`、`selection.outOfPlanRows` 非空，或活动列表显示 `已报数量 < 可报总数` 且差额不在当前计划里，就视为漏报候选。
+- 只要活动页 `totalGoods > allowlist expectedSelectedCount`、`selection.outOfPlanRows` 非空，或活动列表显示 `已报数量 < 可报总数`（`applyGoodsNum < allowGoodsNum`）且差额不在当前最终计划里，就视为漏报候选；不能只看计划内 `missingRows=0` 就宣布没漏。
 - 先读取新增 SKC、供方货号、当前价和平台最低降幅；能归并到同店同 SKC 已批准活动的，优先克隆同店同 SKC 的 `targetPrice/finalTargetPrice/couponFactor/combo`，避免同一链接在不同普通活动里价格栈漂移。
 - 若没有同店同 SKC 既有批准价，再按当前定价/曝光规则即时算价；算不清或缺成本时 fail closed，不硬报。
 - 补报必须生成新的 supplement `selection-plan` / `price-overrides`，并合并出新的全量 repaired plan；后续 guard、可选流量券和订单审计必须改用最新全量 plan。
-- 补报后必须回读已报/审核中集合，并要求 `missingRows=0`、`priceMismatchRows=0`、`extraAvailableRows=0`。
+- 补报后必须回读已报/审核中集合，并要求 `missingRows=0`、`priceMismatchRows=0`、`extraAvailableRows=0`、`activityListGapRows=0`。
 
 ### 1. 准备和刷新
 
@@ -224,7 +224,7 @@ node scripts/marketing/submit_coupon_activity_goods.mjs --stores <allStores> --a
 
 验收口径：
 
-- 普通活动：计划行全部在已报/审核中集合，缺失 0，硬性价格不一致 0，页面计划外可报名 `extraAvailableRows=0`。
+- 普通活动：计划行全部在已报/审核中集合，缺失 0，硬性价格不一致 0，页面计划外可报名 `extraAvailableRows=0`，后台已报/可报差额 `activityListGapRows=0`。
 - 验收必须显式使用当前最终版 `selection-plan + price-overrides`；若单店结果文件被演示预填/不提交覆盖，不能据此判定未提交，应以 live 回读或可继承的成功回读证据闭合。
 - 已报接口不回传活动价时，可以用同一 `store + activity + skc` 的提交前填价复核文件作为价格证据；但必须标出 `priceUnavailableButFillVerified`。平台最低降幅造成的小幅压价（例如差额低于 `1 SAR`）不算硬性错价，仍要记录来源。
 - 优惠券：价格保障券应为 `0`；可选流量券当前可立即安全新增 `toSubmit=0`；剩余未报必须有明确阻断层和结束时间。

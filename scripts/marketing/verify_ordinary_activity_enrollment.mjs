@@ -791,15 +791,24 @@ async function verifyStore(store, planRows) {
       const mismatches = activityRows.filter(row => row.enrolledOrUnderReview && !row.priceOk);
       const priceUnavailableButFillVerified = activityRows.filter(row => row.priceUnavailableButFillVerified).length;
       const badPackets = latestSummary.badPackets || [];
-      const extraAvailableCount = Number(fillEvidence.extraAvailableCount || 0);
+      const allowGoodsNum = latest?.activityListHit?.allowGoodsNum ?? null;
+      const applyGoodsNum = latest?.activityListHit?.applyGoodsNum ?? null;
+      const activityListGapCount = Number.isFinite(Number(allowGoodsNum))
+        ? Math.max(
+            0,
+            Number(allowGoodsNum || 0) - rowsForActivity.length,
+            Number(allowGoodsNum || 0) - activityRows.filter(row => row.enrolledOrUnderReview).length,
+          )
+        : 0;
+      const extraAvailableCount = Math.max(Number(fillEvidence.extraAvailableCount || 0), activityListGapCount);
       result.activities.push({
         activityId,
         activityName: latest?.activityListHit?.name || '',
         signEnd: latest?.activityListHit?.signEnd || '',
         eventStart: latest?.activityListHit?.eventStart || '',
         eventEnd: latest?.activityListHit?.eventEnd || '',
-        allowGoodsNum: latest?.activityListHit?.allowGoodsNum ?? null,
-        applyGoodsNum: latest?.activityListHit?.applyGoodsNum ?? null,
+        allowGoodsNum,
+        applyGoodsNum,
         plannedCount: rowsForActivity.length,
         targetSkcCount: targetSkcs.length,
         matchedCount: activityRows.filter(row => row.enrolledOrUnderReview).length,
@@ -807,6 +816,7 @@ async function verifyStore(store, planRows) {
         priceMismatchCount: mismatches.length,
         priceUnavailableButFillVerified,
         extraAvailableCount,
+        activityListGapCount,
         extraAvailableRows: fillEvidence.extraAvailableRows || [],
         badPacketCount: badPackets.length,
         ok: missing.length === 0 && mismatches.length === 0 && badPackets.length === 0 && extraAvailableCount === 0,
@@ -836,7 +846,7 @@ async function verifyStore(store, planRows) {
     }
     result.ok = result.activities.every(activity => activity.ok);
     if (!result.ok) {
-      const failed = result.activities.filter(activity => !activity.ok).map(activity => `${activity.activityId}:missing=${activity.missingCount},priceMismatch=${activity.priceMismatchCount},extraAvailable=${activity.extraAvailableCount || 0},badPackets=${activity.badPacketCount}`);
+      const failed = result.activities.filter(activity => !activity.ok).map(activity => `${activity.activityId}:missing=${activity.missingCount},priceMismatch=${activity.priceMismatchCount},extraAvailable=${activity.extraAvailableCount || 0},activityListGap=${activity.activityListGapCount || 0},badPackets=${activity.badPacketCount}`);
       result.reason = `ordinary enrollment verification failed: ${failed.join('; ')}`;
     }
   } catch (err) {
@@ -906,6 +916,7 @@ const summary = {
   priceMismatchRows: allRows.filter(row => row.enrolledOrUnderReview && !row.priceOk).length,
   priceUnavailableButFillVerifiedRows: allRows.filter(row => row.priceUnavailableButFillVerified).length,
   extraAvailableRows: storeResults.flatMap(store => store.activities || []).reduce((sum, activity) => sum + Number(activity.extraAvailableCount || 0), 0),
+  activityListGapRows: storeResults.flatMap(store => store.activities || []).reduce((sum, activity) => sum + Number(activity.activityListGapCount || 0), 0),
   badPacketActivities: storeResults.flatMap(store => store.activities || []).filter(activity => (activity.badPacketCount || 0) > 0).length,
   byStore: Object.fromEntries(storeResults.map(store => [
     store.storeKey,
@@ -916,6 +927,7 @@ const summary = {
       priceMismatchRows: (store.rows || []).filter(row => row.enrolledOrUnderReview && !row.priceOk).length,
       priceUnavailableButFillVerifiedRows: (store.rows || []).filter(row => row.priceUnavailableButFillVerified).length,
       extraAvailableRows: (store.activities || []).reduce((sum, activity) => sum + Number(activity.extraAvailableCount || 0), 0),
+      activityListGapRows: (store.activities || []).reduce((sum, activity) => sum + Number(activity.activityListGapCount || 0), 0),
       reason: store.reason || '',
     },
   ])),
@@ -977,7 +989,7 @@ const md = [
   '## 结论',
   summary.ok
     ? `- 通过：计划 ${summary.plannedRows} 行均已在普通活动已报/审核中集合，活动价与本轮计划一致。`
-    : `- 未通过：缺失 ${summary.missingRows} 行，活动价不一致 ${summary.priceMismatchRows} 行，页面仍有计划外可报名 ${summary.extraAvailableRows || 0} 行，接口异常活动 ${summary.badPacketActivities} 个。`,
+    : `- 未通过：缺失 ${summary.missingRows} 行，活动价不一致 ${summary.priceMismatchRows} 行，页面仍有计划外可报名 ${summary.extraAvailableRows || 0} 行（其中已报/可报差额 ${summary.activityListGapRows || 0} 行），接口异常活动 ${summary.badPacketActivities} 个。`,
   summary.priceUnavailableButFillVerifiedRows
     ? `- 注意：${summary.priceUnavailableButFillVerifiedRows} 行已报接口未回传活动价，价格证据来自提交前填价复核文件；这不视为失败。`
     : '- 已报接口回传了可直接比对的活动价。',
@@ -996,6 +1008,7 @@ const md = [
     {key: 'missingCount', label: '缺失'},
     {key: 'priceMismatchCount', label: '价格不一致'},
     {key: 'extraAvailableCount', label: '页面计划外可报'},
+    {key: 'activityListGapCount', label: '已报/可报差额'},
     {key: 'priceUnavailableButFillVerified', label: '价证来自填价复核'},
     {key: 'ok', label: 'OK'},
   ]),

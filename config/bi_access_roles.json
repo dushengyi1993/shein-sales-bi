@@ -1,0 +1,78 @@
+{
+  "defaults": {
+    "admin": {
+      "readStores": ["*"],
+      "writeStores": ["*"]
+    },
+    "owner": {
+      "readStores": ["*"],
+      "writeStores": ["*"]
+    },
+    "operator": {
+      "readStores": ["*"],
+      "writeStores": []
+    }
+  },
+  "users": {
+    "杜圣宜": {
+      "displayName": "杜圣宜",
+      "role": "owner",
+      "readStores": ["*"],
+      "writeStores": ["*"]
+    },
+    "刘广梅": {
+      "displayName": "刘广梅",
+      "role": "owner",
+      "readStores": ["*"],
+      "writeStores": ["*"]
+    },
+    "史文凯": {
+      "displayName": "史文凯",
+      "role": "owner",
+      "readStores": ["*"],
+      "writeStores": ["*"]
+    },
+    "刘广洪": {
+      "displayName": "刘广洪",
+      "role": "operator",
+      "ownerKey": "GUANGHONG",
+      "readStores": ["*"],
+      "writeStores": ["DL", "TZZ", "CX"]
+    },
+    "杨欢": {
+      "displayName": "杨欢",
+      "role": "operator",
+      "ownerKey": "YANGHUAN",
+      "readStores": ["*"],
+      "writeStores": ["DX", "LQ", "XC"]
+    },
+    "吴薇": {
+      "displayName": "吴薇",
+      "role": "operator",
+      "ownerKey": "WUWEI",
+      "readStores": ["*"],
+      "writeStores": ["QY", "JY", "XL"]
+    },
+    "陈嘉茵": {
+      "displayName": "陈嘉茵",
+      "role": "operator",
+      "ownerKey": "JIAYIN",
+      "readStores": ["*"],
+      "writeStores": ["NM", "YJ", "MZ"]
+    },
+    "罗芳": {
+      "displayName": "罗芳",
+      "role": "operator",
+      "ownerKey": "LUOFANG",
+      "readStores": ["*"],
+      "writeStores": ["FY", "QH", "ZL"]
+    },
+    "龚天浩": {
+      "displayName": "龚天浩",
+      "role": "operator",
+      "ownerKey": "TIANHAO",
+      "readStores": ["*"],
+      "writeStores": ["HL", "TZ", "TS"]
+    }
+  }
+}

@@ -18,12 +18,39 @@ import {spawn} from 'node:child_process';
 import {normalizeGoodsSnDetailed} from '../lib/product_sku_normalizer.mjs';
 import {
   ORDER_PAYMENT_FLAG_COLUMNS,
-  ORDER_PAYMENT_FLAG_CREATE_SQL,
-  ORDER_PAYMENT_FLAG_TABLE,
   extractPaymentFlagsFromSalesArtifact,
 } from '../lib/order_payment_flags.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const OPENAPI_ORDER_PAYMENT_FLAG_TABLE = 'fact.openapi_order_payment_flag';
+const OPENAPI_ORDER_PAYMENT_FLAG_CREATE_SQL = `
+CREATE TABLE IF NOT EXISTS fact.openapi_order_payment_flag (
+  order_key text PRIMARY KEY,
+  store_key text NOT NULL,
+  group_key text,
+  order_id text,
+  order_no text,
+  bill_no text,
+  created_date date,
+  order_create_time timestamp without time zone,
+  is_cod boolean,
+  payment_method text,
+  payment_code text,
+  payment_label text,
+  payment_source text,
+  source_kind text NOT NULL,
+  source_file text,
+  raw_evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS openapi_order_payment_flag_store_date_idx
+  ON fact.openapi_order_payment_flag (store_key, created_date);
+CREATE INDEX IF NOT EXISTS openapi_order_payment_flag_is_cod_date_idx
+  ON fact.openapi_order_payment_flag (is_cod, created_date)
+  WHERE is_cod IS TRUE;
+CREATE INDEX IF NOT EXISTS openapi_order_payment_flag_order_no_idx
+  ON fact.openapi_order_payment_flag (store_key, order_no);
+`;
 
 function parseArgs(argv) {
   const args = {
@@ -155,7 +182,7 @@ function sqlLiteral(v) {
 
 async function runPsqlScript(args, script) {
   const useWsl = process.platform === 'win32';
-  const command = useWsl ? 'wsl' : 'docker';
+  const command = useWsl ? 'wsl' : (process.env.SHEIN_BI_DOCKER_COMMAND || 'sudo');
   const commandArgs = useWsl
     ? [
         '-d',
@@ -165,7 +192,22 @@ async function runPsqlScript(args, script) {
         '-lc',
         `sudo docker exec -i ${args.container} psql -U ${args.user} -d ${args.database} -v ON_ERROR_STOP=1`,
       ]
-    : [
+    : command === 'sudo'
+      ? [
+        '-n',
+        'docker',
+        'exec',
+        '-i',
+        args.container,
+        'psql',
+        '-U',
+        args.user,
+        '-d',
+        args.database,
+        '-v',
+        'ON_ERROR_STOP=1',
+      ]
+      : [
         'exec',
         '-i',
         args.container,
@@ -200,7 +242,7 @@ async function runPsqlScript(args, script) {
 async function ensureOpenApiTables(args) {
   const script = `
 BEGIN;
-${ORDER_PAYMENT_FLAG_CREATE_SQL}
+${OPENAPI_ORDER_PAYMENT_FLAG_CREATE_SQL}
 CREATE TABLE IF NOT EXISTS fact.openapi_store_daily_sales (LIKE fact.store_daily_sales INCLUDING DEFAULTS);
 CREATE TABLE IF NOT EXISTS fact.openapi_order_header (LIKE fact.order_header INCLUDING DEFAULTS);
 CREATE TABLE IF NOT EXISTS fact.openapi_order_item (LIKE fact.order_item INCLUDING DEFAULTS);
@@ -266,13 +308,8 @@ COMMIT;
 
 async function cleanupLoadedSlices(args, pairs) {
   if (!pairs.length) return {pairs: 0, skipped: true};
-  const tupleList = pairs.map((p) => `(${sqlLiteral(p.date)}::date, ${sqlLiteral(p.store)})`).join(', ');
   const script = `BEGIN;
-DELETE FROM fact.openapi_order_item WHERE (created_date, store_key) IN (${tupleList});
-DELETE FROM fact.openapi_order_header WHERE (created_date, store_key) IN (${tupleList});
-DELETE FROM fact.openapi_store_daily_sales WHERE (date, store_key) IN (${tupleList});
-DELETE FROM mart.openapi_sales_reconciliation WHERE (date, store_key) IN (${tupleList});
-DELETE FROM fact.order_payment_flag WHERE (created_date, store_key) IN (${tupleList});
+${buildCleanupSql(pairs)}
 COMMIT;
 `;
   if (args.dryRun) return {pairs: pairs.length, dryRun: true};
@@ -280,7 +317,17 @@ COMMIT;
   return {pairs: pairs.length};
 }
 
-async function upsertRows(args, table, columns, conflictColumns, rows) {
+function buildCleanupSql(pairs) {
+  const tupleList = pairs.map((p) => `(${sqlLiteral(p.date)}::date, ${sqlLiteral(p.store)})`).join(', ');
+  return `DELETE FROM fact.openapi_order_item WHERE (created_date, store_key) IN (${tupleList});
+DELETE FROM fact.openapi_order_header WHERE (created_date, store_key) IN (${tupleList});
+DELETE FROM fact.openapi_store_daily_sales WHERE (date, store_key) IN (${tupleList});
+DELETE FROM mart.openapi_sales_reconciliation WHERE (date, store_key) IN (${tupleList});
+DELETE FROM fact.openapi_order_payment_flag WHERE (created_date, store_key) IN (${tupleList});
+`;
+}
+
+function buildUpsertRowsSql(table, columns, conflictColumns, rows) {
   const originalRowCount = rows.length;
   if (rows.length && conflictColumns.length) {
     const byConflictKey = new Map();
@@ -290,7 +337,8 @@ async function upsertRows(args, table, columns, conflictColumns, rows) {
     }
     rows = [...byConflictKey.values()];
   }
-  if (!rows.length) return {table, rows: 0, skipped: true};
+  const result = {table, rows: rows.length, inputRows: originalRowCount, dedupedRows: originalRowCount - rows.length};
+  if (!rows.length) return {script: '', result: {...result, skipped: true}};
   const stage = tempName(table);
   const nonConflict = columns.filter((c) => !conflictColumns.includes(c) && c !== 'updated_at');
   const updateSet = [
@@ -299,7 +347,6 @@ async function upsertRows(args, table, columns, conflictColumns, rows) {
   ].filter(Boolean).join(',\n    ');
   const sqlColumns = columns.map(qIdent).join(', ');
   let script = '';
-  script += 'BEGIN;\n';
   script += `CREATE TEMP TABLE "${stage}" (LIKE ${qIdent(table)} INCLUDING DEFAULTS) ON COMMIT DROP;\n`;
   script += `COPY "${stage}" (${sqlColumns}) FROM STDIN WITH (FORMAT csv, NULL '');\n`;
   for (const row of rows) script += csvLine(columns.map((c) => row[c]));
@@ -307,10 +354,67 @@ async function upsertRows(args, table, columns, conflictColumns, rows) {
   script += `INSERT INTO ${qIdent(table)} (${sqlColumns})\n`;
   script += `SELECT ${sqlColumns} FROM "${stage}"\n`;
   script += `ON CONFLICT (${conflictColumns.map(qIdent).join(', ')}) DO UPDATE SET\n    ${updateSet};\n`;
+  return {script, result};
+}
+
+async function upsertRows(args, table, columns, conflictColumns, rows) {
+  const {script, result} = buildUpsertRowsSql(table, columns, conflictColumns, rows);
+  if (!script) return result;
+  if (args.dryRun) return {...result, dryRun: true};
+  const wrapped = `BEGIN;\n${script}COMMIT;\n`;
+  await runPsqlScript(args, wrapped);
+  return result;
+}
+
+function openApiSalesLoadSpecs(sales) {
+  return [
+    {
+      table: 'fact.openapi_store_daily_sales',
+      columns: ['date','store_key','group_key','shop_name','valid_order_count','goods_line_count','quantity_all','quantity_positive_amount','sales_sar','sales_rmb','fetch_time','source_file','raw_summary'],
+      conflictColumns: ['date','store_key'],
+      rows: sales.daily,
+    },
+    {
+      table: 'fact.openapi_order_header',
+      columns: ['order_key','store_key','group_key','order_id','order_no','bill_no','created_date','order_create_time','allocate_time','site','order_status','order_status_desc','perform_status','perform_status_desc','source_file','raw_summary'],
+      conflictColumns: ['order_key'],
+      rows: sales.orders,
+    },
+    {
+      table: 'fact.openapi_order_item',
+      columns: ['order_item_key','order_key','store_key','group_key','order_id','order_no','bill_no','created_date','order_create_time','site','standard_goods_sn','raw_goods_sn','goods_id','entity_id','skc','sku_code','sku_sn','sku_suffix','goods_title','quantity','currency_code','currency_price','sales_sar','sales_rmb','goods_status','goods_performance_status','goods_performance_status_desc','source_file','raw_summary'],
+      conflictColumns: ['order_item_key'],
+      rows: sales.items,
+    },
+    {
+      table: OPENAPI_ORDER_PAYMENT_FLAG_TABLE,
+      columns: ORDER_PAYMENT_FLAG_COLUMNS,
+      conflictColumns: ['order_key'],
+      rows: sales.paymentFlags,
+    },
+    {
+      table: 'mart.openapi_sales_reconciliation',
+      columns: ['date','store_key','browser_source_file','api_source_file','browser_order_count','api_order_count','browser_positive_order_count','api_positive_order_count','browser_goods_line_count','api_goods_line_count','browser_quantity_positive_amount','api_quantity_positive_amount','browser_sales_sar','api_sales_sar','order_count_delta','positive_order_count_delta','goods_line_count_delta','quantity_positive_delta','sales_sar_delta','browser_only_order_count','api_only_order_count','browser_only_goods_count','api_only_goods_count','status','generated_at','raw_summary'],
+      conflictColumns: ['date','store_key'],
+      rows: sales.reconciliations,
+    },
+  ];
+}
+
+async function loadOpenApiSalesAtomically(args, sales) {
+  const cleanup = args.dryRun ? {pairs: sales.pairs.length, dryRun: true} : {pairs: sales.pairs.length};
+  let script = 'BEGIN;\n';
+  script += buildCleanupSql(sales.pairs);
+  const results = [];
+  for (const spec of openApiSalesLoadSpecs(sales)) {
+    const built = buildUpsertRowsSql(spec.table, spec.columns, spec.conflictColumns, spec.rows);
+    script += built.script;
+    results.push(args.dryRun ? {...built.result, dryRun: true} : built.result);
+  }
   script += 'COMMIT;\n';
-  if (args.dryRun) return {table, rows: rows.length, inputRows: originalRowCount, dedupedRows: originalRowCount - rows.length, dryRun: true};
+  if (args.dryRun) return {cleanup, results};
   await runPsqlScript(args, script);
-  return {table, rows: rows.length, inputRows: originalRowCount, dedupedRows: originalRowCount - rows.length};
+  return {cleanup, results};
 }
 
 function buildFactRows(data, file) {
@@ -517,43 +621,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const sales = await collectOpenApiSales(args);
   const ensure = await ensureOpenApiTables(args);
-  const cleanup = await cleanupLoadedSlices(args, sales.pairs);
-  const results = [];
-  results.push(await upsertRows(
-    args,
-    'fact.openapi_store_daily_sales',
-    ['date','store_key','group_key','shop_name','valid_order_count','goods_line_count','quantity_all','quantity_positive_amount','sales_sar','sales_rmb','fetch_time','source_file','raw_summary'],
-    ['date','store_key'],
-    sales.daily,
-  ));
-  results.push(await upsertRows(
-    args,
-    'fact.openapi_order_header',
-    ['order_key','store_key','group_key','order_id','order_no','bill_no','created_date','order_create_time','allocate_time','site','order_status','order_status_desc','perform_status','perform_status_desc','source_file','raw_summary'],
-    ['order_key'],
-    sales.orders,
-  ));
-  results.push(await upsertRows(
-    args,
-    'fact.openapi_order_item',
-    ['order_item_key','order_key','store_key','group_key','order_id','order_no','bill_no','created_date','order_create_time','site','standard_goods_sn','raw_goods_sn','goods_id','entity_id','skc','sku_code','sku_sn','sku_suffix','goods_title','quantity','currency_code','currency_price','sales_sar','sales_rmb','goods_status','goods_performance_status','goods_performance_status_desc','source_file','raw_summary'],
-    ['order_item_key'],
-    sales.items,
-  ));
-  results.push(await upsertRows(
-    args,
-    ORDER_PAYMENT_FLAG_TABLE,
-    ORDER_PAYMENT_FLAG_COLUMNS,
-    ['order_key'],
-    sales.paymentFlags,
-  ));
-  results.push(await upsertRows(
-    args,
-    'mart.openapi_sales_reconciliation',
-    ['date','store_key','browser_source_file','api_source_file','browser_order_count','api_order_count','browser_positive_order_count','api_positive_order_count','browser_goods_line_count','api_goods_line_count','browser_quantity_positive_amount','api_quantity_positive_amount','browser_sales_sar','api_sales_sar','order_count_delta','positive_order_count_delta','goods_line_count_delta','quantity_positive_delta','sales_sar_delta','browser_only_order_count','api_only_order_count','browser_only_goods_count','api_only_goods_count','status','generated_at','raw_summary'],
-    ['date','store_key'],
-    sales.reconciliations,
-  ));
+  const {cleanup, results} = await loadOpenApiSalesAtomically(args, sales);
 
   console.log(JSON.stringify({
     ok: true,

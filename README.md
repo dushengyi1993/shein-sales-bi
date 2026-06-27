@@ -15,7 +15,7 @@
 - **BI 数据判断、开发验收和故障排查只认云端运行时：云端 PostgreSQL warehouse、云端 BI 门户、线上 `/api/bi/section/*`、云端日志和 systemd 状态。仓库里的 `outputs/bi-portal/*` 只是灾备/兼容快照，可能严重过期；不得用它判断当前业务数据、口径正确性或页面性能。**
 - 交给其他 agent 前必须先读 `docs/agent-handoff-cloud-first.md`：GitHub `main` / release 是干净源码基线，但不自动等于云端已部署版本；云端 `/opt/shein-bi/app` 是生产运行权威且有运行差异，不能未经审计直接 `pull/reset/add-all`。
 - 云端部署纪律：禁止长期在云端老 commit 上手动改代码再只发 GitHub。任何云端热修都必须回填 GitHub；任何 GitHub release 后必须明确标注“已部署到云端”或“仅源码基线未部署”；交接前必须核对 `HEAD == origin/main`、工作区无源码脏改、服务验证通过。
-- 当前最新 GitHub 发布边界：`2026.06.23-bi-traffic-detail` 指向 `3f25f7c`，包含流量页 SKC 明细优化和 `shein-bi-cloud-today.service` 刷新锁修复。2026-06-24 复核时云端生产目录仍是历史 `HEAD=5025d89` + 已同步热修文件；业务验收以云端运行态、线上 section API 和 watchdog 为准，不能只看云端 Git HEAD。
+- 当前最新 GitHub 发布边界：`2026.06.24-bi-marketing-rules` 指向 `e7ecc36`，包含流量页 SKC 明细、销售刷新锁、正式域名、部分货号归并和营销报名基线继承 / 整数价微调规则。该 release 只是干净源码恢复边界；业务验收以云端运行态、线上 section API 和 watchdog 为准，不能只看 GitHub tag 或云端 Git HEAD。
 - HL 已切换为主账号 profile：`profiles/persistent-shein-main-profile`；旧 `profiles/persistent-hl-profile` 已删除。
 - `2026-06-05` 已按用户提供的账号真相修正 LGM 三店 profile / 账号映射：`YJ=profileKey yj/accountNo GS8146729/port 9346`、`XL=profileKey xl/accountNo GS9307061/port 9344`、`QY=profileKey qy/accountNo GS7451160/port 9345`。店铺身份真相以 `config/stores.json`、`config/store_account_truth.json`、浏览器保存账号和实际登录后的店铺名/账号一致为准；不得再沿用 `2026-05-10` 的交叉 profile 结论。
 - `2026-05-09 05:30` 链接/业务域任务、`2026-05-09 07:00` BI 每日流水线和白天滚动后置 BI 刷新是本地 Windows 历史验证记录；自 `2026-05-15` 本地任务封存后，不再作为生产调度。
@@ -23,8 +23,8 @@
 - ET 货代仓已接入数据仓库和 BI，能抓库存、RTV、出库、发货申请单和必要财务/仓储证据；云端已启用 Linux headless Chrome + ET 本地凭据 + OCR 自动登录入口并完成真实同步验证，不能直接复用 Windows Chrome 保存密码。当前高频 ET 任务默认不抓旧财务明细 endpoint，也不再生成旧 `financeData` section；仓储费/历史账单只在利润链路或显式诊断中使用。
 - RTV 换单号自动复核已接入 BI 流水线：`scripts/verify_shein_rtv_tracking.mjs` 直接读取 SHEIN 售后详情和退货物流详情，JT/JTE 走同运单直连，iMile/EMile 识别中英文换单证据；截至 `2026-05-09` 已确认 `132` 个 ET RTV 入仓单号。
 - RTV 收件后去向已进入 BI：`mart.et_rtv_destination_allocation` 追踪 09 可售、03_RTV、04 破损、06 报废和其它/未知去向；`mart.shein_return_rtv_trace` 在 `订单 / 售后` 页面展示每条 SHEIN 退货是否收到、收到后去了哪里。
-- HL OpenAPI 销售试点已跑通过并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` 写入 `fact.openapi_*` 并行事实表与 `mart.openapi_sales_reconciliation` 对账表；该销售对账已按业务要求退出生产调度和 BI 系统状态页，历史并行表仅保留为手动诊断参考。
-- HL OpenAPI 销售试点曾在本地 Windows 任务和云端 systemd 中双跑，只写 `fact.openapi_*` 和 `mart.openapi_sales_reconciliation`，不覆盖生产销售事实表；现已退出生产双跑。2026-06-05 本机可见 profile 复核：HL 与 ZL 开放平台应用已审核通过；DSY 其余 `DL/DX/FY/LQ/NM/JY/TS/MZ`、LGM 剩余 `YJ/XL/QY/QH/TZ/JSH/TZZ/XC` 应用已提交审核中；CX 用户确认此前已完成。审核通过、逐店授权和双跑对账完成前，不得写入 `.local` 密钥或切换生产源。
+- 19 店 SHEIN 官方 OpenAPI 已完成店铺级授权、云端白名单和只读探针；销售订单、退货退款、商品/链接基础资料均已进入隔离并行双跑层。生产日更已开启 `SHEIN_BI_DAILY_OPENAPI_RECONCILIATION=1`、`SHEIN_BI_DAILY_OPENAPI_RETURN_RECONCILIATION=1`、`SHEIN_BI_DAILY_OPENAPI_PRODUCT_RECONCILIATION=1`，只写 `fact.openapi_*` / `mart.openapi_*_reconciliation`，不覆盖正式销售/售后/商品事实表，也不执行 SHEIN 写操作。
+- OpenAPI 当前边界：销售双跑 19 店 ready；退货退款还有历史窗口 warning 需继续观察；商品/链接 OpenAPI 只能稳定对账“是否已上架”二值，不能替代浏览器源四档 `待上架/已上架/已售罄/已下架`，OpenAPI `stock-query` 也不能替代 ET 实际库存。
 - 系统定位正在从“BI 数据分析”扩展为“自动运营驾驶舱”：先把可重复运营动作沉淀为脚本和规则，再按“建议/预填/复核/人工确认提交/审计留痕”的边界逐步开放自动化。2026-05-17 已上线“链接管理中台”基座：支持“一个会话对应一个任务工作台”，边聊边沉淀任务目标、数据依据、素材、执行步骤和进度；自然语言会话每轮都会按最新 BI JSON 动态查数，明确下架/换图/补链/报活动等动作命令会自动进入任务并在同一界面可见。2026-05-20 起，任务区已提供“开始执行 / 预检”和二次确认入口，点击后会真实调用 `/api/link-ops-execute` 写回进度与审计；默认仍只做受控预检 / dry-run，不会静默提交 SHEIN。
 
 本工作区用于 SHEIN 当前 19 店销售数据自动抓取、飞书多维表格统计、飞书日报手动入口、链接管理、营销活动报名辅助，以及正在并行建设的 PostgreSQL + Metabase + 云端 BI / 自动运营驾驶舱。
@@ -153,8 +153,10 @@
 - 云端日报图若中文变方框，先确认服务器已安装中文字体并能匹配 `Noto Sans CJK SC`；代码字体栈以 Noto CJK 为 Linux 首选。
 - 云端手动跑完整 RTV 换单复核 WebAPI 版（在服务器执行）：
   `bash scripts/cloud_rtv_verify.sh`
-- HL OpenAPI 销售对账已退出生产调度；如需历史诊断，可在服务器显式手动运行：
-  `bash scripts/cloud_openapi_hl_reconciliation.sh`
+- OpenAPI 19 店并行双跑已接入生产日更；如需手动诊断，可在服务器显式运行：
+  `bash scripts/cloud_openapi_reconciliation.sh YYYY-MM-DD`
+  `bash scripts/cloud_openapi_return_reconciliation.sh YYYY-MM-DD`
+  `bash scripts/cloud_openapi_product_reconciliation.sh`
 - 云端手动跑 watchdog（在服务器执行）：
   `node scripts/cloud_ops_watchdog.mjs --dry-run`
 - 云端只读测试飞书问数机器人回答（在服务器 `/opt/shein-bi/app` 执行）：
@@ -211,9 +213,10 @@
   `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_et_forwarder_daily.ps1`
 - 手动运行 RTV 换单复核（耗时正常，按批次跑；`--max-runtime-ms 3600000` 是 60 分钟防挂死保护）：
   `node scripts/verify_shein_rtv_tracking.mjs --priority high,medium,low --include-no-cases --limit 120 --case-limit 60 --max-runtime-ms 3600000`
-- HL OpenAPI 销售对账脚本仅保留为手动诊断入口，不作为生产调度或 BI 状态验收项：
-  `node scripts/fetch_shein_openapi_sales.mjs HL --start YYYY-MM-DD --end YYYY-MM-DD`
-  `node scripts/load_shein_openapi_sales_warehouse.mjs --store HL --start YYYY-MM-DD --end YYYY-MM-DD`
+- OpenAPI 19 店双跑诊断只写隔离并行层，不切生产源：
+  `node scripts/run_shein_openapi_sales_reconciliation.mjs --date YYYY-MM-DD`
+  `node scripts/run_shein_openapi_returns_reconciliation.mjs --date YYYY-MM-DD`
+  `node scripts/run_shein_openapi_products_reconciliation.mjs`
 - 生成营销活动成本映射：
   `python scripts/marketing/build_marketing_cost_map.py`
 - 生成并验证按货号汇总的营销确认表（会读取 `config/marketing_pricing_policy.json` 和 BI 曝光数据展示曝光前五价格差异）：

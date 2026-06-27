@@ -6832,7 +6832,7 @@ async function startLinkOpsExecutor(id, options = {}){
     const res = await fetch(LINK_OPS_EXECUTE_API, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(execute ? {id, mode:'execute', confirm:'SHEIN_HL_OPENAPI_SUBMIT'} : {id, autoConfirm:true})
+      body:JSON.stringify(execute ? {id, mode:'execute', confirm:'SHEIN_OPENAPI_SUBMIT'} : {id, autoConfirm:true})
     });
     const payload = await res.json().catch(() => ({}));
     if (!res.ok || !payload.ok) throw new Error(payload.error || ('HTTP ' + res.status));
