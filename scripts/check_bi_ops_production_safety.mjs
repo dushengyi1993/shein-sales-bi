@@ -23,8 +23,15 @@ const DEFAULT_OPENAPI_CONFIG_FILE = process.env.SHEIN_OPENAPI_CONFIG_FILE
 const DEFAULT_WRITE_WHITELIST_FILE = process.env.SHEIN_BI_OPS_WRITE_WHITELIST_FILE
   || path.join(ROOT, 'config', 'bi_ops_write_whitelist.local.json');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
-const ALLOWED_REAL_SUBMIT_OPERATIONS = new Set(['copy_product_draft']);
-const FORBIDDEN_REAL_SUBMIT_OPERATIONS = new Set(['retire_link', 'update_title', 'update_images']);
+const ALLOWED_REAL_SUBMIT_OPERATIONS = new Set([
+  'copy_product_draft',
+  'retire_link',
+  'update_title',
+  'update_images',
+  'update_inventory',
+  'update_supply_price',
+  'update_product_price',
+]);
 
 function parseArgs(argv) {
   const args = {
@@ -246,9 +253,7 @@ function auditConfig({safeWrite, whitelist, knownStores, tracked, openapiFile, w
     if (!safeWrite.allowedOperations.length) errors.push('safeWriteOperations.allowedOperations 为空；启用真实写时必须明确动作。');
     if (safeWrite.allowedOperations.includes('*')) errors.push('safeWriteOperations.allowedOperations 不能使用 *，试点必须列出具体动作。');
     const unsupportedSafeOps = safeWrite.allowedOperations.filter(op => !ALLOWED_REAL_SUBMIT_OPERATIONS.has(op));
-    if (unsupportedSafeOps.length) errors.push(`safeWriteOperations.allowedOperations 包含当前不得真实提交的动作：${unsupportedSafeOps.join(',')}`);
-    const forbiddenSafeOps = safeWrite.allowedOperations.filter(op => FORBIDDEN_REAL_SUBMIT_OPERATIONS.has(op));
-    if (forbiddenSafeOps.length) errors.push(`存量维护动作仍只允许 dry-run，不得进入真实写总闸门：${forbiddenSafeOps.join(',')}`);
+    if (unsupportedSafeOps.length) errors.push(`safeWriteOperations.allowedOperations 包含尚未实现真实提交适配器的动作：${unsupportedSafeOps.join(',')}`);
 
     if (!whitelist.enabled) errors.push('safeWriteOperations 已开启，但真实写试点白名单 enabled=false。');
     if (whitelist.enabled && !whitelist.enabledRules.length) errors.push('真实写试点白名单已开启，但没有 enabled=true 且 realSubmit=true 的有效规则。');
@@ -262,9 +267,7 @@ function auditConfig({safeWrite, whitelist, knownStores, tracked, openapiFile, w
     if (!rule.operations.length) errors.push(`白名单规则 ${rule.id} 未明确 operations。`);
     if (rule.operations.includes('*')) errors.push(`白名单规则 ${rule.id} 不能使用 operations=*。`);
     const unsupportedRuleOps = rule.operations.filter(op => !ALLOWED_REAL_SUBMIT_OPERATIONS.has(op));
-    if (unsupportedRuleOps.length) errors.push(`白名单规则 ${rule.id} 包含当前不得真实提交的动作：${unsupportedRuleOps.join(',')}`);
-    const forbiddenRuleOps = rule.operations.filter(op => FORBIDDEN_REAL_SUBMIT_OPERATIONS.has(op));
-    if (forbiddenRuleOps.length) errors.push(`白名单规则 ${rule.id} 试图放行存量维护动作：${forbiddenRuleOps.join(',')}`);
+    if (unsupportedRuleOps.length) errors.push(`白名单规则 ${rule.id} 包含尚未实现真实提交适配器的动作：${unsupportedRuleOps.join(',')}`);
     if (!rule.users.length && !rule.ownerKeys.length) {
       errors.push(`白名单规则 ${rule.id} 缺少 allowedUsers/allowedOwnerKeys；不能只靠角色泛放真实写。`);
     }

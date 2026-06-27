@@ -187,6 +187,41 @@ node scripts/load_bi_warehouse.mjs --sales-dir outputs/shein_openapi_fetch --sal
 
 所有写操作都必须具备：权限开关、操作者留痕、执行前预览、执行后对账、失败重试边界和人工回滚方案。
 
+2026-06-27 补充：维护类写动作已从“候选接口”升级为受控 OpenAPI 适配器。
+
+- 已接入动作与官方文档：
+  - `retire_link`：`3001253 /open-api/goods/modify-skc-shelf`，下架使用 `shelf_state=2`。
+  - `update_inventory`：`3001738 /open-api/stock/change-inventory/v2`，按 SKU 写虚拟库存并用 `/open-api/stock/stock-query` 回读。
+  - `update_supply_price`：`3001681 /open-api/goods/update-cost`，按 SKC/SKU 写供货价。
+  - `update_product_price`：`3001407 /open-api/openapi-business-backend/product/price/save`，同时写 `shopPrice` 与 `specialPrice`，避免未传 `specialPrice` 被平台解析为 `0`。
+  - `update_title` / `update_images`：`3001810 /open-api/goods/product/partialEdit`。换图只接受完整 SHEIN 图片 JSON（`spu_name + image_info/skc_list/site_detail_image_info_list`），普通图片上传/外链转换需先取得 SHEIN 图片 URL。
+- 执行边界：所有动作默认只 dry-run，生成并锁定 `payloadHash`；真实提交必须同时满足 BI 账号写权限、`safeWriteOperations`、真实写白名单、人 + 店 + 动作、任务处于 `waiting_review`、确认文本 `SHEIN_OPENAPI_SUBMIT`、提交后回读或人工核销。
+- 官方文档验证入口示例：
+
+```powershell
+node scripts/verify_shein_openapi_doc_detail.mjs `
+  --doc-id 3001253 `
+  --endpoint /open-api/goods/modify-skc-shelf `
+  --out tmp/shein-openapi-doc-detail/modify-skc-shelf.local.json `
+  --require-verified `
+  --pretty
+```
+
+- 维护执行器隔离验收入口：
+
+```powershell
+node scripts/test_bi_ops_maintenance_executor_flow.mjs
+node scripts/test_bi_ops_release_gate.mjs
+```
+
+- 生产放行前仍建议跑 readiness 和安全检查：
+
+```powershell
+node scripts/check_bi_ops_maintenance_readiness.mjs --operation retire_link --expect blocked --pretty
+node scripts/check_bi_ops_production_safety.mjs --expect locked
+```
+
+
 ## 2026-05-06 / 2026-06-25 进展：OpenAPI 并行入仓与 BI 对账展示
 
 本阶段已把 OpenAPI 销售数据写入并行表，不覆盖生产销售事实表。2026-06-25 起支持 19 店统一调度：

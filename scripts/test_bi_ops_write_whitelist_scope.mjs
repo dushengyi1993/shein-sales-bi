@@ -82,9 +82,14 @@ function writeAuditFromExecute(json) {
   return json?.execution?.writeAudit || json?.task?.execution?.writeAudit || json?.task?.writeAudit || null;
 }
 
-function whitelistCheckFor(writeAudit, storeKey) {
+function whitelistCheckFor(writeAudit, storeKey, operation = '') {
   const key = String(storeKey || '').trim().toUpperCase();
-  return asArray(writeAudit?.realSubmitWhitelistChecks).find(check => String(check?.storeKey || '').trim().toUpperCase() === key) || null;
+  const op = String(operation || '').trim().toLowerCase();
+  return asArray(writeAudit?.realSubmitWhitelistChecks).find(check => {
+    const storeMatches = String(check?.storeKey || '').trim().toUpperCase() === key;
+    const opMatches = !op || String(check?.operation || '').trim().toLowerCase() === op;
+    return storeMatches && opMatches;
+  }) || null;
 }
 
 function executionBlockersFromJson(json) {
@@ -319,7 +324,7 @@ try {
   const ownerHl = await createTask(ownerCookie, createCopyBody('owner HL copy', {stores: ['HL'], productRefs: ['PA4-6L']}));
   const ownerExec = await executeTask(ownerCookie, ownerHl.id);
   const ownerAudit = writeAuditFromExecute(ownerExec.json);
-  const ownerHlCheck = whitelistCheckFor(ownerAudit, 'HL');
+  const ownerHlCheck = whitelistCheckFor(ownerAudit, 'HL', 'copy_product_draft');
   result.summary.ownerExecuteStatus = ownerExec.status;
   result.summary.ownerWhitelistCheck = ownerHlCheck;
   result.summary.ownerWriteAudit = {
@@ -343,7 +348,7 @@ try {
   const operatorHl = await createTask(operatorCookie, createCopyBody('operator HL copy denied by whitelist', {stores: ['HL'], productRefs: ['PA4-6L']}));
   const operatorExec = await executeTask(operatorCookie, operatorHl.id);
   const operatorAudit = writeAuditFromExecute(operatorExec.json);
-  const operatorHlCheck = whitelistCheckFor(operatorAudit, 'HL');
+  const operatorHlCheck = whitelistCheckFor(operatorAudit, 'HL', 'copy_product_draft');
   result.summary.operatorExecuteStatus = operatorExec.status;
   result.summary.operatorWhitelistCheck = operatorHlCheck;
   result.summary.operatorWriteAudit = {
@@ -366,7 +371,7 @@ try {
   const ownerDx = await createTask(ownerCookie, createCopyBody('owner DX copy outside safe scope', {stores: ['DX'], productRefs: ['PA4-6L']}));
   const ownerDxExec = await executeTask(ownerCookie, ownerDx.id);
   const ownerDxAudit = writeAuditFromExecute(ownerDxExec.json);
-  const ownerDxCheck = whitelistCheckFor(ownerDxAudit, 'DX');
+  const ownerDxCheck = whitelistCheckFor(ownerDxAudit, 'DX', 'copy_product_draft');
   result.summary.ownerDxExecuteStatus = ownerDxExec.status;
   result.summary.ownerDxWhitelistCheck = ownerDxCheck;
   result.summary.ownerDxWriteAudit = {
@@ -398,11 +403,13 @@ try {
     blockers: executionBlockersFromJson(ownerTitleExec.json),
   };
   check('owner title execute request returns task update', ownerTitleExec.status, 200);
-  check('owner title has no copy whitelist checks', asArray(ownerTitleAudit?.realSubmitWhitelistChecks).length, 0);
+  const ownerTitleCheck = whitelistCheckFor(ownerTitleAudit, 'HL', 'update_title');
+  check('owner title has update_title whitelist check', Boolean(ownerTitleCheck), true);
+  check('owner title update_title whitelist denied', Boolean(ownerTitleCheck?.allowed), false);
   check('owner title not execute allowed', Boolean(ownerTitleAudit?.executeAllowed), false);
   check('owner title did not issue execute', Boolean(ownerTitleAudit?.issuedExecuteToExecutor), false);
   check('owner title did not attempt SHEIN write', Boolean(ownerTitleAudit?.sheinWriteAttempted || ownerTitleAudit?.actualWriteSubmitted), false);
-  check('owner title blockers mention no real submit adapter', blockerTextFromJson(ownerTitleExec.json), text => /不包含|尚未接入|真实提交适配器/.test(String(text || '')));
+  check('owner title blockers mention action gate or whitelist', blockerTextFromJson(ownerTitleExec.json), text => /总闸门|allowedOperations|白名单|payload hash|维护预检/.test(String(text || '')));
 
   const auditText = fssync.existsSync(auditFile) ? await fs.readFile(auditFile, 'utf8') : '';
   result.summary.taskCount = JSON.parse(await fs.readFile(taskFile, 'utf8')).tasks.length;

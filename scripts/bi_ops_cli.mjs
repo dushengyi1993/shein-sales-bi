@@ -11,6 +11,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import {fileURLToPath} from 'node:url';
+import {spawn} from 'node:child_process';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_BASE_URL = process.env.SHEIN_BI_BASE_URL || 'https://shein-bi.dushengyi.xyz';
@@ -36,6 +37,10 @@ function parseArgs(argv) {
     confirm: '',
     status: '',
     note: '',
+    docEvidenceFile: '',
+    storeProbeFile: '',
+    readbackEvidenceFile: '',
+    expect: '',
     limit: 40,
     json: true,
     passwordStdin: false,
@@ -60,6 +65,10 @@ function parseArgs(argv) {
     else if (a === '--confirm') args.confirm = String(argv[++i] || '').trim();
     else if (a === '--status') args.status = String(argv[++i] || '').trim();
     else if (a === '--note') args.note = String(argv[++i] || '').trim();
+    else if (a === '--doc-evidence') args.docEvidenceFile = path.resolve(String(argv[++i] || ''));
+    else if (a === '--store-probe') args.storeProbeFile = path.resolve(String(argv[++i] || ''));
+    else if (a === '--readback-evidence') args.readbackEvidenceFile = path.resolve(String(argv[++i] || ''));
+    else if (a === '--expect') args.expect = String(argv[++i] || '').trim();
     else if (a === '--limit') args.limit = Number(argv[++i] || 40);
     else if (a === '--pretty') args.json = false;
     else if (a === '--require-real-submit' || a === '--require-execute') args.requireRealSubmit = true;
@@ -117,6 +126,8 @@ Usage:
   node scripts/bi_ops_cli.mjs doctor --operation retire_link --stores DL --require-real-submit
   node scripts/bi_ops_cli.mjs me
   node scripts/bi_ops_cli.mjs capabilities
+  node scripts/bi_ops_cli.mjs maintenance-readiness --operation retire_link --expect blocked
+  node scripts/bi_ops_cli.mjs maintenance-readiness --operation retire_link --doc-evidence <schema.json> --store-probe <probe.json> --readback-evidence <readback.json> --expect pilot_ready
   node scripts/bi_ops_cli.mjs tasks
   node scripts/bi_ops_cli.mjs create --text "把 520a 在 DL 生成下架预检" --stores DL --products 520a
   node scripts/bi_ops_cli.mjs create --text "复制 CX 的 SM-961 到 HL" --source-stores CX --target-stores HL --products SM-961
@@ -136,10 +147,14 @@ Options:
   --target-stores  跨店复制时真实写入目标店铺；不填则沿用 --stores
   --operation      doctor 用；可填 copy_product_draft / retire_link / update_title / update_images
   --require-real-submit  doctor 用；要求所选店铺+动作已可真实提交，否则退出非 0
+  --doc-evidence / --store-probe / --readback-evidence
+                   maintenance-readiness 用；维护真实写的脱敏证据文件
+  --expect         maintenance-readiness 用；blocked / schema_ready / pilot_ready
 
 Safety:
   - 密码只用于 login 请求，不写入 session 文件。
   - doctor 只做本机/云端连通性和权限自检，不创建任务、不触发预检、不执行 SHEIN 写。
+  - maintenance-readiness 只读检查脱敏证据，不连接 SHEIN，不打开真实写。
   - 所有任务创建/预检/执行/审计都走云端账号权限和审计。
   - execute 仍需服务端确认任务已预检通过，并且确认文本精确匹配。
   - resolve 只用于已提交待回读/需人工处理任务的人工核销；服务端只允许全店管理账号执行。`;
@@ -509,6 +524,30 @@ async function runDoctor(args) {
   };
 }
 
+function runLocalNodeScript(scriptRel, scriptArgs = []) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [scriptRel, ...scriptArgs], {cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe']});
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', d => { stdout += d.toString(); });
+    child.stderr.on('data', d => { stderr += d.toString(); });
+    child.on('close', code => resolve({code, stdout, stderr}));
+  });
+}
+
+async function runMaintenanceReadiness(args) {
+  const commandArgs = ['--operation', args.operation || 'retire_link'];
+  if (args.docEvidenceFile) commandArgs.push('--doc-evidence', args.docEvidenceFile);
+  if (args.storeProbeFile) commandArgs.push('--store-probe', args.storeProbeFile);
+  if (args.readbackEvidenceFile) commandArgs.push('--readback-evidence', args.readbackEvidenceFile);
+  if (args.expect) commandArgs.push('--expect', args.expect);
+  if (!args.json) commandArgs.push('--pretty');
+  const result = await runLocalNodeScript('scripts/check_bi_ops_maintenance_readiness.mjs', commandArgs);
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  process.exitCode = result.code || 0;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.command === 'help') {
@@ -547,6 +586,10 @@ async function main() {
     const report = await runDoctor(args);
     print(report, !args.json);
     if (!report.ok) process.exitCode = 1;
+    return;
+  }
+  if (args.command === 'maintenance-readiness' || args.command === 'maintenance_readiness') {
+    await runMaintenanceReadiness(args);
     return;
   }
   if (args.command === 'me') {

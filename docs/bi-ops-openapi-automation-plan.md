@@ -128,6 +128,8 @@
    - OpenAPI 有商品管理和 `publishOrEdit` 方向，但 payload 完整性复杂。
    - 策略：先做 dry-run 执行器和草稿/预检；真实发布、编辑、上下架必须二次确认。
    - `copy_product_draft` 作为首个真实写试点候选时，提交后回读不能只看商品列表第一页，也不能用平台 SKU / 源 SKC / 货号文本这类弱证据直接判定成功；必须分页扫描，并优先用目标商家 SKU / 商家货号强指纹匹配。只有强指纹命中才可自动闭环为完成；弱匹配、未命中或查询失败都要保持任务锁定，等待全店管理账号人工核销。
+   - `retire_link` / `update_inventory` / `update_supply_price` / `update_product_price` / `update_title` / `update_images` 已接入 `scripts/link_ops_maintenance_openapi_executor.mjs`：先 dry-run 定位链接、解析 SKU、生成官方 OpenAPI payload 并锁定 `payloadHash`，真实提交仍必须走总闸门、真实写白名单、确认文本和回读/人工核销。
+   - `update_images` 不自动猜图片层级；只有提供完整 SHEIN `partialEdit` 图片 JSON 时才生成换图 payload。普通图片文件或外链必须先经图片上传/外链转换拿到 SHEIN 图片 URL，再放入 partialEdit JSON。
 
 ### C 类：暂不承诺 API 替换
 
@@ -382,6 +384,7 @@
 - 执行后回读和审计完整。
 - 通过 `config/bi_ops_write_whitelist.local.json` 明确绑定“人 + 店 + 动作”，默认空白名单；不要直接打开全局所有店铺/所有动作。
 - 任何发版或试点白名单变更前，必须先跑 `node scripts/test_bi_ops_release_gate.mjs`。其中 `test_bi_ops_write_whitelist_scope.mjs` 会在隔离临时门户里临时开启 `safeWriteOperations` 和一条真实写白名单，验证只有指定“人 + 店 + 动作”能命中；其他账号、店铺和动作仍被阻断，并且在缺少 dry-run、`waiting_review`、payload hash 等条件时不会真实提交。
+- 维护类写动作发版前还必须跑官方文档详情解析和 readiness smoke。`test_bi_ops_release_gate.mjs` 已纳入 `test_shein_openapi_doc_detail_parser.mjs` 和 `test_bi_ops_maintenance_readiness.mjs`：前者使用离线 fixture 验证 `/open-api/goods/modify-skc-shelf` 的 endpoint 和 `shelf_state` 识别逻辑，后者验证只有 schema + 逐店权限 + 强回读三类脱敏证据齐全时才会到 `pilot_ready`，且含敏感字段的证据会被拒绝。真实 schema 验证则通过 `verify_shein_openapi_doc_detail.mjs --cookie-file <登录态Cookie文件> --require-verified` 单独跑，结果只写入 `tmp/` 忽略目录。
 
 ## 10. 用户确认点
 

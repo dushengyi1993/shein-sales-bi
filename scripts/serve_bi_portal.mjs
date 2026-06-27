@@ -166,28 +166,56 @@ const OPENAPI_WRITE_DOMAIN_LABELS = {
   marketing_precheck: '营销报名预检',
 };
 
-const LINK_MAINTENANCE_INTENTS = new Set(['retire_link', 'update_title', 'update_images']);
+const LINK_MAINTENANCE_INTENTS = new Set([
+  'retire_link',
+  'update_title',
+  'update_images',
+  'update_inventory',
+  'update_supply_price',
+  'update_product_price',
+]);
 const LINK_OPS_MAINTENANCE_OFFICIAL_CANDIDATES = {
   retire_link: {
     endpoint: '/open-api/goods/modify-skc-shelf',
     label: '商品上下架',
-    docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001629',
-    evidence: 'SHEIN 官方文档索引显示该接口为“商品上下架”；搜索索引还提示下架需设置 shelf_state=2。',
-    missing: ['请求参数 schema 未从登录态官方详情页确认', '权限包/店铺授权范围未逐店验证', '执行后商品列表/详情回读字段未验证'],
+    docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001253',
+    evidence: 'SHEIN 官方公开文档目录确认该接口为“商品上下架”；schema 字段包含 skc_site_info_list / shelf_state / site_list / skc_name。',
+    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + dry-run payload hash + 回读/人工核销。'],
   },
   update_title: {
-    endpoint: '/open-api/goods/product/publishOrEdit',
-    label: '商品发布/编辑',
-    docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001707',
-    evidence: '已验证 publishOrEdit 是商品发布/编辑接口，但当前只作为 copy_product_draft 的完整 payload 执行器使用。',
-    missing: ['改标题最小 payload 未验证', '仅改标题是否影响图片/库存/价格/站点等字段未验证', '执行后标题回读字段未验证'],
+    endpoint: '/open-api/goods/product/partialEdit',
+    label: '商品局部编辑',
+    docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001810',
+    evidence: 'SHEIN 官方文档索引显示存在 Product Partial Edit（商品局部编辑）接口，更适合存量链接标题维护。',
+    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + dry-run payload hash + 回读/人工核销。'],
   },
   update_images: {
-    endpoint: '/open-api/goods/product/publishOrEdit',
-    label: '商品发布/编辑',
-    docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001707',
-    evidence: '已验证 publishOrEdit 是商品发布/编辑接口，但当前只作为 copy_product_draft 的完整 payload 执行器使用。',
-    missing: ['换图最小 payload 未验证', '仅换图是否影响标题/库存/价格/站点等字段未验证', '执行后图片回读字段未验证'],
+    endpoint: '/open-api/goods/product/partialEdit',
+    label: '商品局部编辑',
+    docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001810',
+    evidence: 'SHEIN 官方文档索引显示存在 Product Partial Edit（商品局部编辑）接口，更适合存量链接图片维护。',
+    missing: ['换图需提供完整 SHEIN partialEdit 图片 JSON，生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + dry-run payload hash + 回读/人工核销。'],
+  },
+  update_inventory: {
+    endpoint: '/open-api/stock/change-inventory/v2',
+    label: '库存更新',
+    docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001738',
+    evidence: 'SHEIN 官方公开文档目录确认该接口为“更新商家库存接口v2”；schema 字段包含 updateSkuInventoryQuantityRequests / skuCode / invType / changeType / changeQuantity。',
+    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + dry-run payload hash + 库存回读/人工核销。'],
+  },
+  update_supply_price: {
+    endpoint: '/open-api/goods/update-cost',
+    label: '供货价更新',
+    docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001681',
+    evidence: 'SHEIN 官方文档索引显示存在 Cost Price Update / 供货价更新接口。',
+    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + dry-run payload hash + 回读/人工核销。'],
+  },
+  update_product_price: {
+    endpoint: '/open-api/openapi-business-backend/product/price/save',
+    label: '商品售价更新',
+    docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001407',
+    evidence: 'SHEIN 官方公开文档目录确认该接口为“更新商品售价”；schema 字段包含 productPriceList / productCode / currencyCode / shopPrice / site。',
+    missing: ['商品售价 API 同时写 shopPrice/specialPrice；生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + dry-run payload hash + 回读/人工核销。'],
   },
 };
 
@@ -210,7 +238,7 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'link_maintenance_dry_run',
     precheck: true,
     realSubmit: false,
-    reason: '已能定位目标链接、校验写权限和唯一承接风险；已发现官方候选接口 /open-api/goods/modify-skc-shelf，但参数、权限和回读未验证，所以不会真实下架。',
+    reason: '已接入官方商品上下架 OpenAPI 执行器；默认 dry-run 锁定 payload，真实下架必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
   },
   {
     key: 'update_title',
@@ -219,7 +247,7 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'link_maintenance_dry_run',
     precheck: true,
     realSubmit: false,
-    reason: '已能校验目标链接、写权限和标题素材；publishOrEdit 可能可编辑商品，但改标题最小 payload 与回读未验证，所以不会真实改标题。',
+    reason: '已接入官方商品局部编辑 OpenAPI 执行器；默认 dry-run 锁定标题 payload，真实改标题必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
   },
   {
     key: 'update_images',
@@ -228,7 +256,34 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'link_maintenance_dry_run',
     precheck: true,
     realSubmit: false,
-    reason: '已能校验目标链接、写权限和图片素材；publishOrEdit 可能可编辑商品，但换图最小 payload 与回读未验证，所以不会真实换图。',
+    reason: '已接入官方商品局部编辑 OpenAPI 执行器；换图要求提供完整 SHEIN partialEdit 图片 JSON，真实换图必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
+  },
+  {
+    key: 'update_inventory',
+    label: '改店铺虚拟库存',
+    intent: 'update_inventory',
+    stage: 'link_maintenance_dry_run',
+    precheck: true,
+    realSubmit: false,
+    reason: '已接入官方库存更新 OpenAPI 执行器；默认 dry-run 锁定库存 payload，真实改库存必须命中总闸门、白名单、确认文本并完成库存回读/人工核销。',
+  },
+  {
+    key: 'update_supply_price',
+    label: '改供货价',
+    intent: 'update_supply_price',
+    stage: 'link_maintenance_dry_run',
+    precheck: true,
+    realSubmit: false,
+    reason: '已接入官方供货价更新 OpenAPI 执行器；默认 dry-run 锁定供货价 payload，真实改供货价必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
+  },
+  {
+    key: 'update_product_price',
+    label: '改商品售价',
+    intent: 'update_product_price',
+    stage: 'link_maintenance_dry_run',
+    precheck: true,
+    realSubmit: false,
+    reason: '已接入官方商品售价更新 OpenAPI 执行器；默认 dry-run 锁定售价 payload，真实改售价必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
   },
   {
     key: 'campaign_signup',
@@ -829,6 +884,17 @@ function openApiStoreCapability(storeKey) {
   };
 }
 
+function openApiRealSubmitControlForOperation(operation, storeKey) {
+  const {config} = openApiConfiguredStoresSync();
+  const safeWrite = safeWriteOperationAllowed(config, {operation, storeKey});
+  const whitelistConfigured = biOpsWriteWhitelistConfigured({operation, storeKey});
+  return {
+    safeWrite,
+    whitelistConfigured,
+    enabled: Boolean(safeWrite.allowed && whitelistConfigured.configured),
+  };
+}
+
 function linkOpsActionCapabilitiesForStore(storeKey, cap = openApiStoreCapability(storeKey)) {
   return LINK_OPS_ACTION_CAPABILITY_DEFS.map(def => {
     let precheckSupported = Boolean(def.precheck);
@@ -872,13 +938,24 @@ function linkOpsActionCapabilitiesForStore(storeKey, cap = openApiStoreCapabilit
             : '先完成该店 OpenAPI 授权和云端私有密钥配置。';
     } else if (LINK_MAINTENANCE_INTENTS.has(def.intent)) {
       precheckSupported = true;
-      realSubmitSupported = false;
-      state = 'dry_run_only_no_real_submit';
+      const control = openApiRealSubmitControlForOperation(def.intent, storeKey);
+      realSubmitSupported = Boolean(cap.authorized && cap.verifiedRead && control.enabled);
+      state = realSubmitSupported ? 'confirmable_after_preflight' : 'dry_run_until_action_gate_enabled';
       const candidate = LINK_OPS_MAINTENANCE_OFFICIAL_CANDIDATES[def.intent] || null;
       if (candidate) {
-        realSubmitBlockers.push(`官方候选接口 ${candidate.endpoint}（${candidate.label}）尚未完成安全验证`);
-        for (const item of candidate.missing || []) realSubmitBlockers.push(item);
-        nextStep = `先用隔离探针验证 ${candidate.endpoint} 的参数、权限包和执行后商品列表/详情回读；在 payload、回读和异常锁定都确认前，只允许目标定位和风险 dry-run。`;
+        if (!cap.authorized) realSubmitBlockers.push('店铺未完成 OpenAPI 授权/密钥配置');
+        if (cap.authorized && !cap.verifiedRead) realSubmitBlockers.push('最近只读探针/商品能力尚未证明可用');
+        if (!control.safeWrite.enabled) realSubmitBlockers.push('真实写总闸门未开启：safeWriteOperations.enabled=false');
+        if (control.safeWrite.enabled && !control.safeWrite.operationAllowed) realSubmitBlockers.push(`真实写动作未进入 safeWriteOperations.allowedOperations 白名单：${def.intent}`);
+        if (control.safeWrite.enabled && !control.safeWrite.storeAllowed) realSubmitBlockers.push(`目标店铺未进入 safeWriteOperations.allowedStores 白名单：${storeKey}`);
+        if (control.safeWrite.enabled && !control.whitelistConfigured.configured) realSubmitBlockers.push('未配置真实写试点白名单（人+店+动作）');
+        if (!realSubmitSupported) {
+          realSubmitBlockers.push(`官方接口 ${candidate.endpoint}（${candidate.label}）已纳入执行器，但尚未满足生产真实写门禁`);
+          for (const item of candidate.missing || []) realSubmitBlockers.push(item);
+        }
+        nextStep = realSubmitSupported
+          ? '先完成 dry-run 锁定 payload，再由有权限账号输入确认文本真实提交；提交后必须强回读或人工核销。'
+          : `先为 ${def.intent} 配置窄范围 safeWriteOperations 和真实写白名单，并完成 dry-run payload 锁定。`;
       } else {
         realSubmitBlockers.push('尚未接入 SHEIN 官方维护写接口');
         realSubmitBlockers.push('尚未验证维护动作执行后回读字段');
@@ -1681,6 +1758,10 @@ function inferLinkOpsIntent(command) {
   if (/补|复制|上品|上架|草稿|覆盖|缺链接|缺链/.test(text) || /\b(copy|draft|create|publish|coverage)\b/.test(lower)) intents.push('copy_product_draft');
   if (/标题|title/.test(lower)) intents.push('update_title');
   if (/主图|图片|套图|image|photo|pic/.test(lower)) intents.push('update_images');
+  if (/库存|补库存|改库存|虚拟库存|stock|inventory/.test(lower)) intents.push('update_inventory');
+  const supplyPriceIntent = /供货价|成本价|cost price|supply price|cost\b/.test(lower);
+  if (supplyPriceIntent) intents.push('update_supply_price');
+  if (!supplyPriceIntent && /售价|原价|销售价|商品价|price/.test(lower)) intents.push('update_product_price');
   if (/下架|死链|淘汰|归档|停掉|移除|删除链接/.test(text)) intents.push('retire_link');
   if (/营销|活动|报名/.test(text)) intents.push('campaign_signup');
   if (/限时|折扣|秒杀|促销|discount/.test(lower)) intents.push('flash_discount');
@@ -1694,6 +1775,9 @@ function linkOpsIntentLabel(intent) {
     copy_product_draft: '补链接/复制上品',
     update_title: '换标题',
     update_images: '换图',
+    update_inventory: '改库存',
+    update_supply_price: '改供货价',
+    update_product_price: '改商品售价',
     retire_link: '下架/归档链接',
     campaign_signup: '报营销活动',
     flash_discount: '限时折扣',
@@ -1834,7 +1918,7 @@ function buildLinkOpsCapabilitySummary(targets = {}) {
 }
 
 function linkOpsCapabilityNotes(intents = [], targets = {}) {
-  const writeIntents = ['copy_product_draft', 'update_title', 'update_images', 'retire_link', 'campaign_signup', 'flash_discount', 'certificate_review'];
+  const writeIntents = ['copy_product_draft', 'update_title', 'update_images', 'update_inventory', 'update_supply_price', 'update_product_price', 'retire_link', 'campaign_signup', 'flash_discount', 'certificate_review'];
   if (!intents.some(x => writeIntents.includes(x))) return [];
   const stores = normalizeConcreteStoreKeys(normalizeLinkOpsTargetSet(targets).stores);
   const notes = [];
@@ -2359,6 +2443,7 @@ function linkOpsTaskNeedsMaterial(task) {
   if (intents.includes('copy_product_draft')) needs.push('image_or_certificate');
   if (intents.includes('certificate_review')) needs.push('certificate');
   if (intents.includes('update_title')) needs.push('title_text_or_rule');
+  if (intents.includes('update_inventory') || intents.includes('update_supply_price') || intents.includes('update_product_price')) needs.push('title_text_or_rule');
   return needs;
 }
 
@@ -2492,7 +2577,7 @@ function runPreflightForLinkOpsTask(task) {
     warnings.push(`${storesMissingProductAdapter.join(',')} OpenAPI 已授权，但最近只读探针未证明可用；本任务可留在草案/待复核，需先修复探针后再做商品发布 dry-run。`);
   }
   const nonOpenApiStores = stores.filter(store => !openApiStoreCapability(store).authorized);
-  if (intents.some(x => ['copy_product_draft', 'update_title', 'update_images', 'retire_link', 'campaign_signup', 'flash_discount', 'certificate_review'].includes(x)) && nonOpenApiStores.length) {
+  if (intents.some(x => ['copy_product_draft', 'update_title', 'update_images', 'update_inventory', 'update_supply_price', 'update_product_price', 'retire_link', 'campaign_signup', 'flash_discount', 'certificate_review'].includes(x)) && nonOpenApiStores.length) {
     warnings.push(`${nonOpenApiStores.join(',')} 暂无官方 OpenAPI 授权记录；后续执行需走云端 WebAPI/headless 受控路径或先完成该店 OpenAPI 接入。`);
   }
   if (authorizedStores.length && !stores.some(store => openApiStoreCapability(store).productPublishAdapter)) {
@@ -2707,7 +2792,7 @@ async function runLinkMaintenancePrechecks(task, args, body = {}) {
   if (maintenanceIntents.includes('update_images') && !hasImageMaintenanceMaterial(task)) {
     blockers.push('换图任务缺少图片素材：请先上传图片后再预检。');
   }
-  blockers.push('链接维护真实写接口尚未接入：当前只完成目标定位、权限和材料 dry-run，不会提交 SHEIN。');
+  blockers.push('旧链接维护本地预检已被 OpenAPI 维护执行器替代；请通过受控执行器生成 payload hash 后再进入真实提交门禁。');
   const matchedLinks = uniqueMatches.map(item => ({
     ref: item.ref,
     ...summarizeMaintenanceLink(item.row),
@@ -2748,7 +2833,7 @@ async function runLinkMaintenancePrechecks(task, args, body = {}) {
       matchedLinks: matchedLinks.slice(0, 80),
       snapshotFile: path.relative(ROOT, file).replace(/\\/g, '/'),
       maintenanceIntents,
-      submitBoundary: '未确认 SHEIN 官方维护写接口前，系统只做 dry-run 预检，不真实上下架/改标题/换图。',
+      submitBoundary: '旧本地预检不负责真实提交；维护写动作必须走 OpenAPI 维护执行器、payload hash、白名单和回读门禁。',
     },
     readbackFingerprint,
     blockers,
@@ -2757,7 +2842,7 @@ async function runLinkMaintenancePrechecks(task, args, body = {}) {
       canSilentWrite: false,
       realSubmit: false,
       executeSupported: false,
-      note: '维护动作当前只有 dry-run 适配器；真实提交必须后续按具体官方接口单独接入、确认和回读。',
+      note: '旧本地预检仅保留兼容；维护写真实提交必须走 OpenAPI 维护执行器、确认文本、白名单和回读。',
     },
   };
   return [{
@@ -3030,6 +3115,22 @@ function payloadHashForStoreFromTaskExecution(task, storeKey = '') {
   return hash || '';
 }
 
+function payloadHashForMaintenanceFromTaskExecution(task, storeKey = '', operation = '') {
+  const target = String(storeKey || '').trim().toUpperCase();
+  const op = String(operation || '').trim().toLowerCase();
+  const runs = Array.isArray(task?.execution?.linkMaintenanceExecutors)
+    ? task.execution.linkMaintenanceExecutors
+    : [];
+  const match = runs.find(run => {
+    const storeMatches = String(run?.storeKey || '').trim().toUpperCase() === target
+      || String(run?.storeKey || '').split(',').map(x => x.trim().toUpperCase()).includes(target);
+    const operations = Array.isArray(run?.payload?.summary?.operations) ? run.payload.summary.operations.map(x => String(x).toLowerCase()) : [];
+    return storeMatches && (!op || operations.includes(op));
+  }) || (runs.length === 1 ? runs[0] : null);
+  const hash = String(match?.payload?.payloadHash || '').trim();
+  return hash || '';
+}
+
 async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey = '', executionContext = {}) {
   const targetStore = String(storeKey || '').trim().toUpperCase();
   if (!targetStore) throw new Error('Missing OpenAPI product executor target store');
@@ -3143,6 +3244,127 @@ async function runOpenApiProductExecutors(task, args, body = {}) {
   return out;
 }
 
+function openApiMaintenanceExecutorTargetStores(task) {
+  const intents = Array.isArray(task?.intents) ? task.intents : [];
+  if (!intents.some(intent => LINK_MAINTENANCE_INTENTS.has(intent))) return [];
+  return normalizeConcreteStoreKeys(taskWriteStores(task));
+}
+
+async function runOpenApiMaintenanceExecutorForStore(task, args, body = {}, storeKey = '', executionContext = {}) {
+  const targetStore = String(storeKey || '').trim().toUpperCase();
+  if (!targetStore) throw new Error('Missing OpenAPI maintenance executor target store');
+  const actorForGate = body.actorForWriteGate || null;
+  const denied = actorForGate ? requireWriteStores(actorForGate, [targetStore]) : null;
+  if (denied) {
+    return {
+      ok: false,
+      mode: 'dry-run',
+      storeKey: targetStore,
+      code: null,
+      timedOut: false,
+      result: {
+        ok: false,
+        state: 'blocked',
+        blockers: [`${targetStore} 维护执行器启动前权限复核失败：${denied.error}`],
+        warnings: [],
+        permissionDenied: denied,
+      },
+      stderrTail: '',
+    };
+  }
+  const intents = Array.isArray(task?.intents) ? task.intents.filter(intent => LINK_MAINTENANCE_INTENTS.has(intent)) : [];
+  const cap = openApiStoreCapability(targetStore);
+  const requestedExecute = String(body.mode || body.executionMode || '').toLowerCase() === 'execute' || body.execute === true;
+  const allActionsEnabled = intents.length > 0 && intents.every(intent => {
+    const control = openApiRealSubmitControlForOperation(intent, targetStore);
+    return cap.authorized && cap.verifiedRead && control.enabled;
+  });
+  const mode = requestedExecute && allActionsEnabled ? 'execute' : 'dry-run';
+  const {actorForWriteGate: _actorForWriteGate, ...safeBodyForSnapshot} = body && typeof body === 'object' ? body : {};
+  const expectedPayloadHash = mode === 'execute'
+    ? (intents.map(intent => payloadHashForMaintenanceFromTaskExecution(task, targetStore, intent)).find(Boolean) || '')
+    : '';
+  const taskSnapshotDir = path.join(ROOT, 'tmp', 'link-ops-maintenance-task-json');
+  const taskSnapshotFile = path.join(taskSnapshotDir, `${safeTaskId(task.id)}-${crypto.randomBytes(4).toString('hex')}.json`);
+  await fs.mkdir(taskSnapshotDir, {recursive: true});
+  await fs.writeFile(taskSnapshotFile, `${JSON.stringify({
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    executionContext: {
+      ...executionContext,
+      request: safeBodyForSnapshot,
+      targetStore,
+      requestedMode: mode,
+      expectedPayloadHash,
+      payloadHashSource: expectedPayloadHash ? 'task.execution.linkMaintenanceExecutors' : '',
+      issuedAt: new Date().toISOString(),
+    },
+    tasks: [task],
+  }, null, 2)}\n`, 'utf8');
+  const childArgs = [
+    path.join(ROOT, 'scripts', 'link_ops_maintenance_openapi_executor.mjs'),
+    '--config', SHEIN_OPENAPI_LOCAL_CONFIG_FILE,
+    '--task-json', taskSnapshotFile,
+    '--task-id', String(task.id || ''),
+    '--store', targetStore,
+    '--dir', args.dir || path.join(ROOT, 'outputs', 'bi-portal'),
+    mode === 'execute' ? '--execute' : '--dry-run',
+  ];
+  if (mode === 'execute') childArgs.push('--confirm', String(body.confirm || body.confirmText || ''));
+  let result;
+  try {
+    result = await runChildProcess(process.execPath, childArgs, {
+      cwd: ROOT,
+      timeoutMs: Number(process.env.SHEIN_LINK_OPS_OPENAPI_EXECUTOR_TIMEOUT_MS || 180_000),
+    });
+  } finally {
+    await fs.rm(taskSnapshotFile, {force: true}).catch(() => {});
+  }
+  const parsed = parseChildJsonOutput(result.stdout);
+  if (parsed) {
+    return {
+      ok: Boolean(parsed.ok),
+      mode,
+      storeKey: targetStore,
+      code: result.code,
+      timedOut: result.timedOut,
+      result: parsed,
+      stderrTail: String(result.stderr || '').slice(-1200),
+    };
+  }
+  return {
+    ok: false,
+    mode,
+    storeKey: targetStore,
+    code: result.code,
+    timedOut: result.timedOut,
+    result: {
+      ok: false,
+      state: mode === 'execute' ? 'suspicious_write_attempted' : (result.timedOut ? 'timeout' : 'error'),
+      blockers: mode === 'execute'
+        ? []
+        : [`${targetStore} OpenAPI 维护执行器未返回可解析结果：code=${result.code}${result.timedOut ? ' timeout=true' : ''}`],
+      warnings: mode === 'execute'
+        ? [`${targetStore} OpenAPI 维护执行器在真实提交模式下未返回可解析结果：code=${result.code}${result.timedOut ? ' timeout=true' : ''}。无法确认 SHEIN 是否已接收写请求，任务已锁定，禁止重复提交，需人工核销。`]
+        : [],
+      suspiciousWriteAttempted: mode === 'execute',
+      submittedPossibly: mode === 'execute',
+      rawStdoutTail: String(result.stdout || '').slice(-1200),
+      rawStderrTail: String(result.stderr || '').slice(-1200),
+    },
+    stderrTail: String(result.stderr || '').slice(-1200),
+  };
+}
+
+async function runOpenApiMaintenanceExecutors(task, args, body = {}) {
+  const stores = openApiMaintenanceExecutorTargetStores(task);
+  const out = [];
+  for (const store of stores) {
+    out.push(await runOpenApiMaintenanceExecutorForStore(task, args, body, store, body.executionContext || {}));
+  }
+  return out;
+}
+
 async function startControlledLinkOpsExecution(task, actor, req, args, body = {}) {
   const originalStatus = String(task?.status || 'draft');
   const now = new Date().toISOString();
@@ -3158,9 +3380,16 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
   const writeStores = taskWriteStores(task);
   const productRefs = normalizeLinkOpsTargetSet(task?.targets || {}).productRefs;
   const intents = Array.isArray(task?.intents) ? task.intents : [];
-  const realSubmitWhitelistChecks = intents.includes('copy_product_draft')
-    ? writeStores.map(store => biOpsWriteWhitelistAllowedForActor(actor, {operation: 'copy_product_draft', storeKey: store}))
-    : [];
+  const maintenanceIntents = intents.filter(intent => LINK_MAINTENANCE_INTENTS.has(intent));
+  const hasProductPublishIntent = intents.includes('copy_product_draft');
+  const hasMaintenanceIntent = maintenanceIntents.length > 0;
+  const realSubmitOperations = [
+    ...(hasProductPublishIntent ? ['copy_product_draft'] : []),
+    ...maintenanceIntents,
+  ];
+  const realSubmitWhitelistChecks = realSubmitOperations.flatMap(operation =>
+    writeStores.map(store => biOpsWriteWhitelistAllowedForActor(actor, {operation, storeKey: store}))
+  );
   const autoConfirmed = originalStatus === 'draft';
   const runnableTask = autoConfirmed
     ? {
@@ -3174,9 +3403,12 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
   const preflight = runPreflightForLinkOpsTask(runnableTask);
   if (requestedMode === 'execute') {
     const unsupportedExecuteIntents = intents
-      .filter(intent => intent !== 'copy_product_draft' && intent !== 'manual_review');
-    if (!intents.includes('copy_product_draft')) {
+      .filter(intent => intent !== 'copy_product_draft' && intent !== 'manual_review' && !LINK_MAINTENANCE_INTENTS.has(intent));
+    if (!hasProductPublishIntent && !hasMaintenanceIntent) {
       preflight.blockers.push('当前任务不包含已接入真实提交适配器的动作；只能 dry-run、建任务或补材料。');
+    }
+    if (hasProductPublishIntent && hasMaintenanceIntent) {
+      preflight.blockers.push('复制上品和链接维护写动作必须拆成两个任务分别真实提交，避免一次确认覆盖不同生命周期动作。');
     }
     if (unsupportedExecuteIntents.length) {
       preflight.blockers.push(`以下动作尚未接入真实提交适配器：${unsupportedExecuteIntents.map(linkOpsIntentLabel).join('、')}；不能和真实 SHEIN 写提交混在同一次执行里。`);
@@ -3187,15 +3419,15 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     if (originalStatus !== 'waiting_review') {
       preflight.blockers.push('真实提交必须先完成一次 dry-run 预检，并停在“待复核”状态。');
     }
-    if (task?.execution?.state !== 'openapi_product_preflight_ready' || task?.execution?.preflight?.ok !== true) {
-      preflight.blockers.push('真实提交前缺少已通过的 OpenAPI 商品预检证据。');
-    }
-    if (intents.includes('copy_product_draft')) {
+    if (hasProductPublishIntent) {
+      if (task?.execution?.state !== 'openapi_product_preflight_ready' || task?.execution?.preflight?.ok !== true) {
+        preflight.blockers.push('真实提交前缺少已通过的 OpenAPI 商品预检证据。');
+      }
       const notEnabledStores = writeStores.filter(store => !openApiStoreCapability(store).productPublishExecuteAdapter);
       if (notEnabledStores.length) {
         preflight.blockers.push(`${notEnabledStores.join(',')} 商品发布/编辑真实提交未被服务端总闸门放行；本次只能重新 dry-run。`);
       }
-      const whitelistDenied = realSubmitWhitelistChecks.filter(check => !check.allowed);
+      const whitelistDenied = realSubmitWhitelistChecks.filter(check => check.operation === 'copy_product_draft' && !check.allowed);
       if (whitelistDenied.length) {
         preflight.blockers.push(`${whitelistDenied.map(check => check.storeKey).join(',')} 未命中真实写试点白名单（人+店+动作），不能真实提交。`);
       }
@@ -3204,11 +3436,40 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
         preflight.blockers.push(`${storesMissingPayloadHash.join(',')} 缺少上一次 dry-run 锁定的 payload hash，不能真实提交。`);
       }
     }
+    if (hasMaintenanceIntent) {
+      if (task?.execution?.state !== 'link_maintenance_preflight_ready' || task?.execution?.preflight?.ok !== true) {
+        preflight.blockers.push('真实提交前缺少已通过的 OpenAPI 维护预检证据。');
+      }
+      for (const store of writeStores) {
+        const cap = openApiStoreCapability(store);
+        if (!cap.authorized) preflight.blockers.push(`${store} 未完成 OpenAPI 授权/密钥配置，不能真实执行维护写动作。`);
+        if (cap.authorized && !cap.verifiedRead) preflight.blockers.push(`${store} 最近只读探针未证明可用，不能真实执行维护写动作。`);
+        for (const operation of maintenanceIntents) {
+          const control = openApiRealSubmitControlForOperation(operation, store);
+          if (!control.safeWrite.allowed) {
+            const reasons = [];
+            if (!control.safeWrite.enabled) reasons.push('真实写总闸门未开启');
+            if (control.safeWrite.enabled && !control.safeWrite.operationAllowed) reasons.push(`动作 ${operation} 未进入 allowedOperations`);
+            if (control.safeWrite.enabled && !control.safeWrite.storeAllowed) reasons.push(`店铺 ${store} 未进入 allowedStores`);
+            preflight.blockers.push(`${store}/${linkOpsIntentLabel(operation)} 未被服务端真实写总闸门放行：${reasons.join('，') || 'safeWriteOperations 不允许'}`);
+          }
+          const whitelist = realSubmitWhitelistChecks.find(check => check.operation === operation && check.storeKey === store);
+          if (!whitelist?.allowed) {
+            preflight.blockers.push(`${store}/${linkOpsIntentLabel(operation)} 未命中真实写试点白名单（人+店+动作），不能真实提交。`);
+          }
+          if (!payloadHashForMaintenanceFromTaskExecution(task, store, operation)) {
+            preflight.blockers.push(`${store}/${linkOpsIntentLabel(operation)} 缺少上一次 dry-run 锁定的 payload hash，不能真实提交。`);
+          }
+        }
+      }
+    }
     executeAllowed = confirmTextPresent
       && originalStatus === 'waiting_review'
-      && task?.execution?.state === 'openapi_product_preflight_ready'
-      && task?.execution?.preflight?.ok === true
-      && preflight.blockers.length === 0;
+      && preflight.blockers.length === 0
+      && (
+        (hasProductPublishIntent && task?.execution?.state === 'openapi_product_preflight_ready' && task?.execution?.preflight?.ok === true)
+        || (hasMaintenanceIntent && task?.execution?.state === 'link_maintenance_preflight_ready' && task?.execution?.preflight?.ok === true)
+      );
   }
   const executionContext = {
     actor: auditActor,
@@ -3226,24 +3487,25 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
   const openApiProductExecutors = await runOpenApiProductExecutors(runnableTask, args, {
     ...body,
     actorForWriteGate: actor,
-    mode: executeAllowed ? 'execute' : 'dry-run',
-    executionMode: executeAllowed ? 'execute' : 'dry-run',
-    execute: executeAllowed,
-    confirm: executeAllowed ? confirmText : '',
-    confirmText: executeAllowed ? confirmText : '',
+    mode: executeAllowed && hasProductPublishIntent ? 'execute' : 'dry-run',
+    executionMode: executeAllowed && hasProductPublishIntent ? 'execute' : 'dry-run',
+    execute: executeAllowed && hasProductPublishIntent,
+    confirm: executeAllowed && hasProductPublishIntent ? confirmText : '',
+    confirmText: executeAllowed && hasProductPublishIntent ? confirmText : '',
     executionContext,
   });
-  const linkMaintenancePrechecks = await runLinkMaintenancePrechecks(runnableTask, args, {
+  const openApiMaintenanceExecutors = await runOpenApiMaintenanceExecutors(runnableTask, args, {
     ...body,
     actorForWriteGate: actor,
-    mode: 'dry-run',
-    executionMode: 'dry-run',
-    execute: false,
-    confirm: '',
-    confirmText: '',
+    mode: executeAllowed && hasMaintenanceIntent ? 'execute' : 'dry-run',
+    executionMode: executeAllowed && hasMaintenanceIntent ? 'execute' : 'dry-run',
+    execute: executeAllowed && hasMaintenanceIntent,
+    confirm: executeAllowed && hasMaintenanceIntent ? confirmText : '',
+    confirmText: executeAllowed && hasMaintenanceIntent ? confirmText : '',
     executionContext,
   });
-  const executorRuns = [...openApiProductExecutors, ...linkMaintenancePrechecks];
+  const linkMaintenancePrechecks = openApiMaintenanceExecutors;
+  const executorRuns = [...openApiProductExecutors, ...openApiMaintenanceExecutors];
   const executorResults = executorRuns.map(x => x.result).filter(Boolean);
   const issuedExecuteToExecutor = executorRuns.some(x => String(x?.mode || '') === 'execute');
   const sheinWriteAttempted = executorResults.some(x => Boolean(x?.publishResult));
@@ -3259,7 +3521,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
   const ok = combinedBlockers.length === 0;
   const runId = `lor_${now.replace(/[-:.TZ]/g, '').slice(0, 14)}_${crypto.randomBytes(4).toString('hex')}`;
   const hasOpenApiProductExecutor = openApiProductExecutors.length > 0;
-  const hasLinkMaintenancePrecheck = linkMaintenancePrechecks.length > 0;
+  const hasOpenApiMaintenanceExecutor = openApiMaintenanceExecutors.length > 0;
   const submitted = executorResults.some(x => x?.state === 'submitted');
   const executorState = submitted
     ? 'submitted'
@@ -3267,7 +3529,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       ? 'suspicious_write_attempted'
     : hasOpenApiProductExecutor
       ? (ok ? 'openapi_product_preflight_ready' : 'blocked')
-      : hasLinkMaintenancePrecheck
+      : hasOpenApiMaintenanceExecutor
         ? (ok ? 'link_maintenance_preflight_ready' : 'blocked')
         : (ok ? 'ready_for_prefill' : 'blocked');
   const lifecycleTransition = classifyLinkOpsLifecycle({
@@ -3280,7 +3542,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     executorResults,
     originalStatus,
   });
-  const nextStatus = lifecycleTransition.toStatus || (hasOpenApiProductExecutor || hasLinkMaintenancePrecheck
+  const nextStatus = lifecycleTransition.toStatus || (hasOpenApiProductExecutor || hasOpenApiMaintenanceExecutor
       ? 'waiting_review'
       : (ok ? 'in_progress' : 'waiting_review'));
   const nextProgress = submitted
@@ -3290,7 +3552,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     : suspiciousWriteAttempted
       ? Math.max(normalizeProgress(task.progress, 0), 85)
     : ok
-      ? Math.max(normalizeProgress(task.progress, 0), hasOpenApiProductExecutor ? 70 : 65)
+      ? Math.max(normalizeProgress(task.progress, 0), hasOpenApiProductExecutor ? 70 : (hasOpenApiMaintenanceExecutor ? 68 : 65))
       : Math.max(normalizeProgress(task.progress, 0), 45);
   const writeAudit = buildLinkOpsExecutionWriteAudit({
     task: runnableTask,
@@ -3309,6 +3571,50 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       lifecycleTransition,
       realSubmitWhitelistChecks,
     });
+  const mapProductExecutor = (executorRun, index) => {
+    const executorResult = executorRun.result || {};
+    return {
+      storeKey: executorResult.storeKey || executorRun.storeKey || '',
+      ok: Boolean(executorResult.ok),
+      mode: executorRun.mode || '',
+      state: executorResult.state || '',
+      runId: executorResult.runId || '',
+      savedTo: executorResult.savedTo || '',
+      payload: executorResult.payload || null,
+      openapi: executorResult.openapi ? {
+        canPublishProduct: executorResult.openapi.canPublishProduct,
+        publishPermissionReason: executorResult.openapi.publishPermissionReason,
+        sites: executorResult.openapi.sites,
+        brands: executorResult.openapi.brands,
+        warehouses: executorResult.openapi.warehouses,
+        calls: executorResult.openapi.calls,
+      } : null,
+      publishResult: executorResult.publishResult || null,
+      readbackFingerprint: executorResult.readbackFingerprint || null,
+      readback: executorResult.readback || null,
+      safety: executorResult.safety || null,
+      index,
+    };
+  };
+  const mapMaintenanceExecutor = (executorRun, index) => {
+    const executorResult = executorRun.result || {};
+    return {
+      storeKey: executorResult.storeKey || executorRun.storeKey || '',
+      ok: Boolean(executorResult.ok),
+      mode: executorRun.mode || '',
+      state: executorResult.state || '',
+      runId: executorResult.runId || '',
+      savedTo: executorResult.savedTo || '',
+      adapterKind: executorResult.adapterKind || '',
+      payload: executorResult.payload || null,
+      adapterEvidence: executorResult.adapterEvidence || null,
+      publishResult: executorResult.publishResult || null,
+      readbackFingerprint: executorResult.readbackFingerprint || null,
+      readback: executorResult.readback || null,
+      safety: executorResult.safety || null,
+      index,
+    };
+  };
   const next = {
     ...runnableTask,
     status: nextStatus,
@@ -3319,12 +3625,14 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
         ? lifecycleTransition.note
       : ok && hasOpenApiProductExecutor
         ? 'OpenAPI 商品执行器 dry-run 预检通过；仍需最终执行确认，系统不会静默提交 SHEIN。'
-        : ok
-          ? '受控执行器已完成前置检查；当前停在执行准备/预填阶段，不会静默提交 SHEIN。'
-          : `执行器阻断：${combinedBlockers.join('；')}`,
+        : ok && hasOpenApiMaintenanceExecutor
+          ? 'OpenAPI 维护执行器 dry-run 预检通过；仍需最终执行确认，系统不会静默提交 SHEIN。'
+          : ok
+            ? '受控执行器已完成前置检查；当前停在执行准备/预填阶段，不会静默提交 SHEIN。'
+            : `执行器阻断：${combinedBlockers.join('；')}`,
     execution: {
       ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
-      mode: hasOpenApiProductExecutor ? 'openapi_product_executor' : (hasLinkMaintenancePrecheck ? 'link_maintenance_precheck' : 'controlled_prefill'),
+      mode: hasOpenApiProductExecutor ? 'openapi_product_executor' : (hasOpenApiMaintenanceExecutor ? 'openapi_maintenance_executor' : 'controlled_prefill'),
       enabled: true,
       runId,
       state: executorState,
@@ -3336,49 +3644,12 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
         blockers: combinedBlockers,
         warnings: combinedWarnings,
       },
-      openApiProductExecutors: openApiProductExecutors.map((executorRun, index) => {
-        const executorResult = executorRun.result || {};
-        return {
-          storeKey: executorResult.storeKey || executorRun.storeKey || '',
-          ok: Boolean(executorResult.ok),
-          mode: executorRun.mode || '',
-          state: executorResult.state || '',
-          runId: executorResult.runId || '',
-          savedTo: executorResult.savedTo || '',
-          payload: executorResult.payload || null,
-          openapi: executorResult.openapi ? {
-            canPublishProduct: executorResult.openapi.canPublishProduct,
-            publishPermissionReason: executorResult.openapi.publishPermissionReason,
-            sites: executorResult.openapi.sites,
-            brands: executorResult.openapi.brands,
-            warehouses: executorResult.openapi.warehouses,
-            calls: executorResult.openapi.calls,
-          } : null,
-          publishResult: executorResult.publishResult || null,
-          readbackFingerprint: executorResult.readbackFingerprint || null,
-          readback: executorResult.readback || null,
-          safety: executorResult.safety || null,
-          index,
-        };
-      }),
-      linkMaintenancePrechecks: linkMaintenancePrechecks.map((executorRun, index) => {
-        const executorResult = executorRun.result || {};
-        return {
-          storeKey: executorResult.storeKey || executorRun.storeKey || '',
-          ok: Boolean(executorResult.ok),
-          mode: executorRun.mode || '',
-          state: executorResult.state || '',
-          runId: executorResult.runId || '',
-          adapterKind: executorResult.adapterKind || '',
-          adapterEvidence: executorResult.adapterEvidence || null,
-          readbackFingerprint: executorResult.readbackFingerprint || null,
-          safety: executorResult.safety || null,
-          index,
-        };
-      }),
+      openApiProductExecutors: openApiProductExecutors.map(mapProductExecutor),
+      linkMaintenanceExecutors: openApiMaintenanceExecutors.map(mapMaintenanceExecutor),
+      linkMaintenancePrechecks: openApiMaintenanceExecutors.map(mapMaintenanceExecutor),
       hlOpenApiExecutor: executorResults.length === 1 ? {
         ok: Boolean(executorResults[0].ok),
-        mode: openApiProductExecutors[0]?.mode || '',
+        mode: executorRuns[0]?.mode || '',
         state: executorResults[0].state || '',
         runId: executorResults[0].runId || '',
         savedTo: executorResults[0].savedTo || '',
@@ -3391,6 +3662,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
           warehouses: executorResults[0].openapi.warehouses,
           calls: executorResults[0].openapi.calls,
         } : null,
+        adapterEvidence: executorResults[0].adapterEvidence || null,
         publishResult: executorResults[0].publishResult || null,
         readbackFingerprint: executorResults[0].readbackFingerprint || null,
         readback: executorResults[0].readback || null,
@@ -3416,9 +3688,9 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       lifecycle: lifecycleTransition,
       note: hasOpenApiProductExecutor
         ? 'OpenAPI 商品执行器已接入。默认只做预检；真实 publishOrEdit 必须任务已确认、payload 完整、显式 execute 和确认文本同时满足。'
-        : hasLinkMaintenancePrecheck
-          ? '链接维护 dry-run 适配器已接入：只做目标定位、权限和材料检查；未确认官方写接口前不会真实上下架/改标题/换图。'
-        : '第一版只做材料/权限/防重检查和执行准备；正式 SHEIN 提交必须后续接具体适配器并保留人工确认。',
+        : hasOpenApiMaintenanceExecutor
+          ? 'OpenAPI 维护执行器已接入。默认只做预检；真实提交必须命中服务端总闸门、真实写白名单、dry-run payload hash 和确认文本，提交后必须回读或人工核销。'
+          : '第一版只做材料/权限/防重检查和执行准备；正式 SHEIN 提交必须后续接具体适配器并保留人工确认。',
     },
     lifecycle: lifecycleTransition,
     executionHistory: appendExecutionHistory(runnableTask, {
@@ -3459,7 +3731,12 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     }),
     updatedAt: now,
   };
-  next.history = appendTaskHistory(next, ok ? (submitted ? 'openapi_product_submitted' : (hasOpenApiProductExecutor ? 'openapi_product_preflight_ready' : 'start_controlled_executor')) : 'executor_blocked', actor, req, {
+  const historyEvent = ok
+    ? (submitted
+      ? (hasOpenApiMaintenanceExecutor ? 'openapi_maintenance_submitted' : 'openapi_product_submitted')
+      : (hasOpenApiProductExecutor ? 'openapi_product_preflight_ready' : (hasOpenApiMaintenanceExecutor ? 'link_maintenance_preflight_ready' : 'start_controlled_executor')))
+    : 'executor_blocked';
+  next.history = appendTaskHistory(next, historyEvent, actor, req, {
     status: next.status,
     progress: normalizeProgress(next.progress, 0),
     runId,
@@ -3489,7 +3766,28 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
         } : null,
       };
     }),
-    linkMaintenancePrechecks: linkMaintenancePrechecks.map(executorRun => {
+    linkMaintenanceExecutors: openApiMaintenanceExecutors.map(executorRun => {
+      const executorResult = executorRun.result || {};
+      return {
+        storeKey: executorResult.storeKey || '',
+        state: executorResult.state || '',
+        runId: executorResult.runId || '',
+        savedTo: executorResult.savedTo || '',
+        adapterKind: executorResult.adapterKind || '',
+        payloadFound: Boolean(executorResult.payload?.found),
+        payloadHash: executorResult.payload?.payloadHash || '',
+        operations: executorResult.payload?.summary?.operations || [],
+        matchedLinksCount: Number(executorResult.adapterEvidence?.matchedLinksCount || 0),
+        realSubmit: Boolean(executorResult.adapterEvidence?.realSubmit),
+        publishResult: executorResult.publishResult ? {
+          code: executorResult.publishResult.code,
+          msg: executorResult.publishResult.msg,
+          traceId: executorResult.publishResult.traceId,
+        } : null,
+        readbackStatus: executorResult.readback?.status || '',
+      };
+    }),
+    linkMaintenancePrechecks: openApiMaintenanceExecutors.map(executorRun => {
       const executorResult = executorRun.result || {};
       return {
         storeKey: executorResult.storeKey || '',

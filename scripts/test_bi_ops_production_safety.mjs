@@ -115,30 +115,56 @@ async function main() {
     assert.equal(wildcard.json.ok, false);
     assert.match(wildcard.stdout, /不能使用 \*/);
 
-    const forbiddenAction = await runCase(tmp, 'forbidden-action', {
+    const maintenancePilot = await runCase(tmp, 'maintenance-pilot', {
       openapi: {
+        stores: [{storeKey: 'HL', enabled: true, openKeyId: 'dummy', secretKey: 'dummy'}],
         safeWriteOperations: {
           enabled: true,
           requireDryRun: true,
-          allowedOperations: ['retire_link'],
+          allowedOperations: ['retire_link', 'update_inventory'],
           allowedStores: ['HL'],
         },
       },
       whitelist: {
         enabled: true,
         rules: [{
-          id: 'bad-retire',
+          id: 'owner-hl-maintenance',
           enabled: true,
           realSubmit: true,
           stores: ['HL'],
-          operations: ['retire_link'],
+          operations: ['retire_link', 'update_inventory'],
+          allowedUsers: ['owner_smoke'],
+        }],
+      },
+      args: ['--expect', 'pilot', '--require-store', 'HL', '--require-operation', 'retire_link', '--require-operation', 'update_inventory', '--require-user', 'owner_smoke'],
+    });
+    assert.equal(maintenancePilot.json.ok, true);
+    assert.equal(maintenancePilot.json.state, 'pilot_ready');
+
+    const unsupportedAction = await runCase(tmp, 'unsupported-action', {
+      openapi: {
+        safeWriteOperations: {
+          enabled: true,
+          requireDryRun: true,
+          allowedOperations: ['campaign_signup'],
+          allowedStores: ['HL'],
+        },
+      },
+      whitelist: {
+        enabled: true,
+        rules: [{
+          id: 'bad-campaign',
+          enabled: true,
+          realSubmit: true,
+          stores: ['HL'],
+          operations: ['campaign_signup'],
           allowedUsers: ['owner_smoke'],
         }],
       },
       expectCode: 1,
     });
-    assert.equal(forbiddenAction.json.ok, false);
-    assert.match(forbiddenAction.stdout, /存量维护动作仍只允许 dry-run|当前不得真实提交/);
+    assert.equal(unsupportedAction.json.ok, false);
+    assert.match(unsupportedAction.stdout, /尚未实现真实提交适配器/);
 
     const rolesOnly = await runCase(tmp, 'roles-only', {
       openapi: {
@@ -192,7 +218,7 @@ async function main() {
 
     console.log(JSON.stringify({
       ok: true,
-      cases: ['locked', 'pilot', 'wildcard', 'forbidden-action', 'roles-only', 'safe-broader'],
+      cases: ['locked', 'pilot', 'maintenance-pilot', 'wildcard', 'unsupported-action', 'roles-only', 'safe-broader'],
       tmpCleaned: true,
     }, null, 2));
   } finally {

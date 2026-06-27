@@ -16,6 +16,7 @@ const CHECK_FILES = [
   'scripts/serve_bi_portal.mjs',
   'scripts/bi_ops_cli.mjs',
   'scripts/link_ops_hl_openapi_executor.mjs',
+  'scripts/link_ops_maintenance_openapi_executor.mjs',
   'scripts/generate_bi_portal.mjs',
   'scripts/bi_app/client.js',
   'scripts/test_bi_ops_permissions.mjs',
@@ -24,17 +25,28 @@ const CHECK_FILES = [
   'scripts/check_bi_ops_production_safety.mjs',
   'scripts/test_bi_ops_production_safety.mjs',
   'scripts/test_bi_ops_copy_product_success_flow.mjs',
+  'scripts/test_bi_ops_maintenance_executor_flow.mjs',
+  'scripts/verify_shein_openapi_doc_detail.mjs',
+  'scripts/test_shein_openapi_doc_detail_parser.mjs',
+  'scripts/check_bi_ops_maintenance_readiness.mjs',
+  'scripts/test_bi_ops_maintenance_readiness.mjs',
 ];
 const DIFF_CHECK_FILES = [
   'scripts/serve_bi_portal.mjs',
   'scripts/bi_ops_cli.mjs',
   'scripts/link_ops_hl_openapi_executor.mjs',
+  'scripts/link_ops_maintenance_openapi_executor.mjs',
   'scripts/test_bi_ops_permissions.mjs',
   'scripts/test_bi_ops_cli_flow.mjs',
   'scripts/test_bi_ops_write_whitelist_scope.mjs',
   'scripts/check_bi_ops_production_safety.mjs',
   'scripts/test_bi_ops_production_safety.mjs',
   'scripts/test_bi_ops_copy_product_success_flow.mjs',
+  'scripts/test_bi_ops_maintenance_executor_flow.mjs',
+  'scripts/verify_shein_openapi_doc_detail.mjs',
+  'scripts/test_shein_openapi_doc_detail_parser.mjs',
+  'scripts/check_bi_ops_maintenance_readiness.mjs',
+  'scripts/test_bi_ops_maintenance_readiness.mjs',
   'docs/partner-codex-ops-setup.md',
   'docs/bi-ops-openapi-automation-plan.md',
   'docs/shein-openapi-integration.md',
@@ -110,6 +122,9 @@ async function main() {
   results.push({name: 'production real-write safety smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_production_safety.mjs']))});
   results.push({name: 'copy_product_draft success lifecycle smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs']))});
   results.push({name: 'copy_product_draft weak-readback guard smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs', '--weak-readback']))});
+  results.push({name: 'maintenance executor fake OpenAPI smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_maintenance_executor_flow.mjs']))});
+  results.push({name: 'official doc detail parser smoke', ...(await run(process.execPath, ['scripts/test_shein_openapi_doc_detail_parser.mjs']))});
+  results.push({name: 'maintenance readiness smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_maintenance_readiness.mjs']))});
 
   if (await pathExists('.git')) {
     results.push({name: 'git diff --check automation scope', ...(await run('git', ['diff', '--check', '--', ...DIFF_CHECK_FILES]))});
@@ -127,6 +142,9 @@ async function main() {
       'production safety smoke checks locked and narrow-pilot configs through temporary files only',
       'copy_product_draft success smoke uses a local fake OpenAPI server only',
       'copy_product_draft weak-readback smoke proves weak evidence cannot auto-close a write task',
+      'maintenance executor smoke uses a local fake OpenAPI server to verify retire/inventory/supply-price/product-price/title/image payloads and readback',
+      'official doc detail parser smoke uses offline fixtures and never prints/saves cookies',
+      'maintenance readiness smoke requires schema, per-store permission and strong readback before pilot_ready',
       'safeWriteOperations and real-submit whitelist are asserted disabled inside smoke flows',
       'this gate does not submit real SHEIN writes',
     ],
