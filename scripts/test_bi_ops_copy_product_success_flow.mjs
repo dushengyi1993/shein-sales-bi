@@ -24,6 +24,11 @@ import {fileURLToPath} from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const KEEP_TEMP = process.argv.includes('--keep-temp');
 const WEAK_READBACK_ONLY = process.argv.includes('--weak-readback');
+const PREVALID_FAIL = process.argv.includes('--prevalid-fail');
+const PREVALID_RETRY = process.argv.includes('--prevalid-retry');
+const GENERIC_PRODUCT = process.argv.includes('--generic-product');
+const CHAT_NATURAL = process.argv.includes('--chat-natural');
+const SEARCH_PRODUCT_READBACK = process.argv.includes('--search-product-readback');
 const CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
 const tmpBase = path.join(ROOT, 'tmp');
 await fs.mkdir(tmpBase, {recursive: true});
@@ -59,6 +64,11 @@ function extractTaskId(json) {
   return json?.task?.id || json?.data?.tasks?.[0]?.id || '';
 }
 
+async function rawTaskById(id) {
+  const data = JSON.parse(await fs.readFile(taskFile, 'utf8').catch(() => '{"tasks":[]}'));
+  return asArray(data?.tasks).find(task => String(task?.id || '') === String(id || '')) || null;
+}
+
 function writeAuditFromExecute(json) {
   return json?.execution?.writeAudit || json?.task?.execution?.writeAudit || json?.task?.writeAudit || null;
 }
@@ -91,8 +101,29 @@ function sendJson(res, value, status = 200) {
   res.end(JSON.stringify(value));
 }
 
-const targetSupplierCode = 'HL-COPY-SUCCESS-SKC';
-const targetSupplierSku = 'HL-COPY-SUCCESS-SKU-001';
+const productCase = GENERIC_PRODUCT ? {
+  targetSupplierCode: 'HL-GENERIC-COPY-SKC',
+  targetSupplierSku: 'HL-GENERIC-COPY-SKU-001',
+  command: '复制上品/补链接 SK-9000空气炸锅 到 HL',
+  productRefs: ['SK-9000空气炸锅', 'SK-9000'],
+  englishName: 'Generic copy smoke product',
+  arName: 'منتج اختبار عام',
+  zhName: 'SK-9000空气炸锅',
+  productModel: 'SK-9000',
+  requireInputCurrent: false,
+} : {
+  targetSupplierCode: 'HL-COPY-SUCCESS-SKC',
+  targetSupplierSku: 'HL-COPY-SUCCESS-SKU-001',
+  command: '复制上品/补链接 SM-505A缝纫机 到 HL',
+  productRefs: ['SM-505A电动缝纫机', '505'],
+  englishName: 'Copy success smoke product',
+  arName: 'ماكينة خياطة اختبار',
+  zhName: 'SM-505A电动缝纫机',
+  productModel: 'TXSM-505A',
+  requireInputCurrent: true,
+};
+const targetSupplierCode = productCase.targetSupplierCode;
+const targetSupplierSku = productCase.targetSupplierSku;
 const publishTraceId = 'trace-copy-success-smoke';
 const publishPayload = {
   category_id: 123456,
@@ -100,20 +131,27 @@ const publishPayload = {
   source_system: 'OpenAPI',
   brand_code: 'BRAND_SMOKE',
   site_list: [{main_site: 'shein', sub_site_list: ['shein-sa']}],
-  multi_language_name_list: [{language: 'en', product_name: 'Copy success smoke product'}],
-  product_attribute_list: [{attribute_id: 101, attribute_value_id: 202}],
+  multi_language_name_list: [
+    {language: 'en', product_name: productCase.englishName},
+    {language: 'ar', product_name: productCase.arName},
+  ],
+  product_attribute_list: [
+    {attribute_id: 101, attribute_value_id: 202},
+    {attribute_id: 1000546, attribute_value_id: 0, attribute_value: productCase.productModel},
+  ],
   shelf_way: 2,
   hope_on_sale_date: '2036-06-27 10:00:00',
   skc_list: [{
     supplier_code: targetSupplierCode,
-    skc_name: 'SMOKE-COPY-SKC',
+    skc_name: productCase.targetSupplierCode,
     image_info: {
       image_info_list: [{
         image_type: 1,
+        image_sort: 1,
         image_url: 'https://example.invalid/smoke-main.jpg',
       }],
     },
-    sale_attribute: [{attribute_id: 301, attribute_value_id: 401}],
+    sale_attribute: {attribute_id: 301, attribute_value_id: 401},
     sku_list: [{
       supplier_sku: targetSupplierSku,
       mall_state: 1,
@@ -129,6 +167,7 @@ const publishPayload = {
 
 const fakeOpenApiPort = await getFreePort();
 const fakeOpenApiCalls = [];
+let publishAttemptCount = 0;
 const fakeOpenApi = http.createServer(async (req, res) => {
   const body = await requestBody(req);
   fakeOpenApiCalls.push({method: req.method, path: req.url.split('?')[0], url: req.url, body: body.json || body.text});
@@ -181,16 +220,182 @@ const fakeOpenApi = http.createServer(async (req, res) => {
     });
   }
   if (pathname === '/open-api/goods/product/publishOrEdit') {
+    publishAttemptCount += 1;
     const strongPayload = body.json || {};
+    const defaultTitle = (strongPayload?.multi_language_name_list || []).find(row => String(row?.language || '').toLowerCase() === 'ar');
+    if (!defaultTitle?.name) {
+      return sendJson(res, {code: '400', msg: 'default ar title missing', traceId: publishTraceId}, 200);
+    }
+    if (Array.isArray(strongPayload?.skc_list?.[0]?.sale_attribute)) {
+      return sendJson(res, {code: '400', msg: 'sale_attribute must be object, not array', traceId: publishTraceId}, 200);
+    }
+    const imageRows = strongPayload?.skc_list?.[0]?.image_info?.image_info_list || [];
+    const allowedImageTypes = new Set([1, 2, 5, 6]);
+    if (!imageRows.length || imageRows.some(row => !allowedImageTypes.has(Number(row?.image_type)))) {
+      return sendJson(res, {code: '400', msg: 'SKC image_type must be one of 1/2/5/6', traceId: publishTraceId}, 200);
+    }
+    if (imageRows.filter(row => Number(row?.image_type) === 1).length !== 1 || Number(imageRows.find(row => Number(row?.image_type) === 1)?.image_sort) !== 1) {
+      return sendJson(res, {code: '400', msg: 'SKC image main type must be exactly one and sort=1', traceId: publishTraceId}, 200);
+    }
     if (strongPayload?.skc_list?.[0]?.supplier_code !== targetSupplierCode) {
       return sendJson(res, {code: '400', msg: 'unexpected supplier code', traceId: publishTraceId}, 200);
+    }
+    const attrs = strongPayload?.product_attribute_list || [];
+    const inputCurrent = attrs.find(row => Number(row?.attribute_id) === 1002323);
+    const productModel = attrs.find(row => Number(row?.attribute_id) === 1000546);
+    if (productCase.requireInputCurrent) {
+      if (inputCurrent?.attribute_extra_value !== '1200' || Number(inputCurrent?.attribute_value_id) !== 304302428) {
+        return sendJson(res, {code: '400', msg: 'manual input current override missing or malformed', traceId: publishTraceId}, 200);
+      }
+    } else if (inputCurrent) {
+      return sendJson(res, {code: '400', msg: 'generic product unexpectedly received SM-505 input current', traceId: publishTraceId}, 200);
+    }
+    if (productModel?.attribute_extra_value !== productCase.productModel || productModel?.attribute_value_id !== undefined || productModel?.attribute_value !== undefined) {
+      return sendJson(res, {code: '400', msg: 'text product attribute not normalized to attribute_extra_value', traceId: publishTraceId}, 200);
+    }
+    if (Number(strongPayload?.shelf_way) !== 2 || !strongPayload?.hope_on_sale_date) {
+      return sendJson(res, {code: '400', msg: 'new link must be scheduled ten years later at payload level', traceId: publishTraceId}, 200);
+    }
+    if (Number(strongPayload?.skc_list?.[0]?.shelf_way) !== 2 || !strongPayload?.skc_list?.[0]?.hope_on_sale_date) {
+      return sendJson(res, {code: '400', msg: 'new link must be scheduled ten years later at skc level', traceId: publishTraceId}, 200);
+    }
+    if (PREVALID_FAIL || (PREVALID_RETRY && publishAttemptCount === 1)) {
+      return sendJson(res, {
+        code: '0',
+        msg: 'OK',
+        traceId: publishTraceId,
+        info: {
+          success: false,
+          pre_valid_result: [
+            {module: 'baseInfo', form_name: '商品标题', messages: ['商品标题不能为空']},
+            {module: 'attribute', form_name: '商品属性', messages: ['产品型号，为必填项']},
+          ],
+        },
+      });
     }
     return sendJson(res, {
       code: '0',
       msg: 'OK',
       traceId: publishTraceId,
-      info: {taskNo: 'PUB-SMOKE-001'},
+      info: {
+        success: true,
+        taskNo: 'PUB-SMOKE-001',
+        spu_name: 'v-smoke-copy-product',
+        skc_list: [{
+          skc_name: 'sv-smoke-copy-product',
+          sku_list: [{sku_code: 'sku-smoke-copy-product'}],
+        }],
+        version: 'SPMP-SMOKE-001',
+      },
     });
+  }
+  if (pathname === '/open-api/goods/query-publish-fill-in-standard') {
+    return sendJson(res, {
+      code: '0',
+      msg: 'OK',
+      info: {
+        default_language: 'ar',
+        default_language_title_max_length: 325,
+        language_title_max_length_list: [
+          {language: 'ar', max_length: 325},
+          {language: 'en', max_length: 250},
+        ],
+        currency: 'SAR',
+        fill_in_standard_list: [],
+      },
+    });
+  }
+  if (pathname === '/open-api/goods/query-attribute-template') {
+    return sendJson(res, {
+      code: '0',
+      msg: 'OK',
+      info: {
+        data: [{
+          product_type_id: 789,
+          attribute_infos: [
+            {attribute_id: 1000546, attribute_name: 'Product Model', attribute_mode: 0, attribute_type: 4, attribute_status: 2, attribute_value_info_list: []},
+            {
+              attribute_id: 1002323,
+              attribute_name: 'Input current',
+              attribute_mode: 4,
+              attribute_type: 4,
+              attribute_status: 2,
+              attribute_value_info_list: [
+                {attribute_value_id: 304302428, attribute_value: 'mA'},
+                {attribute_value_id: 304301999, attribute_value: 'A'},
+              ],
+            },
+          ],
+        }],
+      },
+    });
+  }
+  if (pathname === '/open-api/goods/spu-info') {
+    const requestedSpu = String(body.json?.spuName || '').trim();
+    if (requestedSpu === 'v-smoke-copy-product' && !WEAK_READBACK_ONLY && !SEARCH_PRODUCT_READBACK) {
+      return sendJson(res, {
+        code: '0',
+        msg: 'OK',
+        info: {
+          spuName: 'v-smoke-copy-product',
+          skcInfoList: [{
+            skcName: 'sv-smoke-copy-product',
+            supplierCode: targetSupplierCode,
+            skuInfoList: [{
+              skuCode: 'sku-smoke-copy-product',
+              supplierSku: targetSupplierSku,
+            }],
+            productMultiNameList: [
+              {language: 'en', productName: productCase.englishName},
+              {language: 'ar', productName: productCase.arabicName},
+            ],
+          }],
+        },
+      });
+    }
+    return sendJson(res, {
+      code: '404',
+      msg: `spu-info not found in smoke: ${requestedSpu}`,
+      info: null,
+    }, 200);
+  }
+  if (pathname === '/open-api/goods/searchProduct') {
+    if (SEARCH_PRODUCT_READBACK && !WEAK_READBACK_ONLY) {
+      const skcNames = asArray(body.json?.skcNameList).map(String);
+      const spuNames = asArray(body.json?.spuNameList).map(String);
+      const skuCodes = asArray(body.json?.skuCodeList).map(String);
+      const supplierCodes = asArray(body.json?.skcSupplierCodeList).map(String);
+      const supplierSkus = asArray(body.json?.supplierSkuList).map(String);
+      const shouldMatch =
+        spuNames.includes('v-smoke-copy-product') ||
+        skcNames.includes('sv-smoke-copy-product') ||
+        skuCodes.includes('sku-smoke-copy-product') ||
+        supplierCodes.includes(targetSupplierCode) ||
+        supplierSkus.includes(targetSupplierSku);
+      if (shouldMatch) {
+        return sendJson(res, {
+          code: '0',
+          msg: 'OK',
+          info: {
+            list: [{
+              spuName: 'v-smoke-copy-product',
+              spuShelfStatus: 2,
+              skcList: [{
+                skcName: 'sv-smoke-copy-product',
+                skcShelfStatus: 2,
+                supplierCode: targetSupplierCode,
+                skuList: [{
+                  skuCode: 'sku-smoke-copy-product',
+                  supplierSku: targetSupplierSku,
+                }],
+              }],
+            }],
+            count: 1,
+          },
+        });
+      }
+    }
+    return sendJson(res, {code: '0', msg: 'OK', info: {list: [], count: 0}});
   }
   if (pathname === '/open-api/openapi-business-backend/product/query') {
     return sendJson(res, {
@@ -199,13 +404,13 @@ const fakeOpenApi = http.createServer(async (req, res) => {
       info: {
         data: [{
           spuName: 'Smoke SPU',
-          skcName: 'SMOKE-COPY-SKC',
+          skcName: WEAK_READBACK_ONLY ? productCase.zhName : productCase.targetSupplierCode,
           ...(WEAK_READBACK_ONLY ? {} : {
             supplierCode: targetSupplierCode,
             supplierSku: targetSupplierSku,
           }),
           skuCodeList: ['PLATFORM-SKU-SMOKE'],
-          productName: 'Copy success smoke product',
+          productName: WEAK_READBACK_ONLY ? productCase.zhName : productCase.englishName,
         }],
       },
     });
@@ -352,7 +557,7 @@ async function login(username, password) {
   return cookie;
 }
 
-const result = {ok: false, scenario: WEAK_READBACK_ONLY ? 'weak-readback-only' : 'strong-readback-success', tmpRoot, fakeOpenApiPort, portalPort, summary: {}, checks: []};
+const result = {ok: false, scenario: `${CHAT_NATURAL ? 'chat-natural-' : ''}${GENERIC_PRODUCT ? 'generic-product-' : ''}${WEAK_READBACK_ONLY ? 'weak-readback-only' : PREVALID_FAIL ? 'prevalid-fail' : PREVALID_RETRY ? 'prevalid-retry' : 'strong-readback-success'}`, tmpRoot, fakeOpenApiPort, portalPort, summary: {}, checks: []};
 function check(label, actual, expected) {
   const pass = typeof expected === 'function' ? expected(actual) : actual === expected;
   result.checks.push({label, actual, expected: typeof expected === 'function' ? expected.name || 'predicate' : expected, pass});
@@ -360,6 +565,9 @@ function check(label, actual, expected) {
 }
 
 try {
+  if (PREVALID_RETRY && !CHAT_NATURAL) {
+    throw new Error('--prevalid-retry is only meaningful with --chat-natural');
+  }
   await waitReady();
   const cookie = await login('owner_copy_success', 'owner-pass');
   const operatorCookie = await login('operator_copy_success', 'operator-pass');
@@ -370,18 +578,42 @@ try {
   check('capabilities status', caps.status, 200);
   check('HL copy is confirmable in isolated pilot config', Boolean(hlCopy?.realSubmitSupported), true);
 
-  const created = await req('/api/link-ops-tasks', {
-    method: 'POST',
-    cookie,
-    body: {
-      source: 'copy_success_smoke',
-      command: '复制上品/补链接 PA4-6L 到 HL',
-      targets: {stores: ['HL'], productRefs: ['PA4-6L']},
-    },
-  });
-  const taskId = extractTaskId(created.json);
-  check('create task status', created.status, 200);
-  check('task id present', Boolean(taskId), true);
+  let taskId = '';
+  let chatSessionId = '';
+  let created = null;
+  if (CHAT_NATURAL) {
+    const naturalCommand = GENERIC_PRODUCT
+      ? '帮我给 HL 的 SK-9000空气炸锅补一条链接，直接复制所有店铺里流量最高的那条链接'
+      : '帮我给 HL 的 505 缝纫机补一条链接，直接复制所有店铺里流量最高的那条链接';
+    created = await req('/api/link-ops-chats', {
+      method: 'POST',
+      cookie,
+      body: {message: naturalCommand, askAgent: false},
+    });
+    taskId = created.json?.autoTask?.id || '';
+    chatSessionId = created.json?.session?.id || '';
+    check('chat create status', created.status, 200);
+    check('chat task id present', Boolean(taskId), true);
+    check('chat session id present', Boolean(chatSessionId), true);
+    check('chat created copy intent', created.json?.autoTask?.intents || [], xs => asArray(xs).includes('copy_product_draft'));
+    check('chat created target HL only', created.json?.autoTask?.targets?.writeStores || created.json?.autoTask?.targets?.stores || [], xs => asArray(xs).length === 1 && String(xs[0]).toUpperCase() === 'HL');
+  } else {
+    created = await req('/api/link-ops-tasks', {
+      method: 'POST',
+      cookie,
+      body: {
+        source: 'copy_success_smoke',
+        command: productCase.command,
+        targets: {
+          stores: ['HL'],
+          productRefs: productCase.productRefs,
+        },
+      },
+    });
+    taskId = extractTaskId(created.json);
+    check('create task status', created.status, 200);
+    check('task id present', Boolean(taskId), true);
+  }
 
   const uploaded = await req('/api/link-ops-assets', {
     method: 'POST',
@@ -398,29 +630,60 @@ try {
   check('upload payload status', uploaded.status, 200);
   check('uploaded one payload asset', asArray(uploaded.json?.assets).length, 1);
 
-  const dryRun = await req('/api/link-ops-execute', {
-    method: 'POST',
-    cookie,
-    body: {id: taskId, mode: 'dry-run', source: 'copy_success_smoke'},
-  });
-  const dryRunTask = dryRun.json?.task || {};
-  const dryRunEvidence = executorEvidenceFromAudit(dryRun.json?.execution?.writeAudit || dryRunTask?.execution?.writeAudit, 'HL');
-  const dryRunPayloadHash = dryRunEvidence?.payloadHash || dryRunTask?.execution?.openApiProductExecutors?.[0]?.payload?.payloadHash || '';
-  check('dry-run status', dryRun.status, 200);
+  let dryRun = null;
+  let dryRunTask = uploaded.json?.task || {};
+  if (!CHAT_NATURAL) {
+    dryRun = await req('/api/link-ops-execute', {
+      method: 'POST',
+      cookie,
+      body: {id: taskId, mode: 'dry-run', source: 'copy_success_smoke'},
+    });
+    dryRunTask = dryRun.json?.task || {};
+  }
+  const dryRunRawTask = await rawTaskById(taskId);
+  const dryRunEvidence = executorEvidenceFromAudit(dryRunRawTask?.execution?.writeAudit || dryRun?.json?.execution?.writeAudit || dryRunTask?.execution?.writeAudit, 'HL');
+  const dryRunPayloadHash = dryRunEvidence?.payloadHash || dryRunRawTask?.execution?.openApiProductExecutors?.[0]?.payload?.payloadHash || dryRunTask?.execution?.openApiProductExecutors?.[0]?.payload?.payloadHash || '';
+  check('dry-run status', CHAT_NATURAL ? uploaded.status : dryRun.status, 200);
   check('dry-run task waiting_review', dryRunTask.status, 'waiting_review');
   check('dry-run locks payload hash', Boolean(dryRunPayloadHash), true);
-  check('dry-run does not publish', Boolean(dryRun.json?.execution?.writeAudit?.sheinWriteAttempted), false);
+  check('dry-run does not publish', Boolean((dryRun?.json?.execution?.writeAudit || dryRunRawTask?.execution?.writeAudit)?.sheinWriteAttempted), false);
 
-  const executed = await req('/api/link-ops-execute', {
-    method: 'POST',
-    cookie,
-    body: {id: taskId, mode: 'execute', confirm: CONFIRM_TEXT, source: 'copy_success_smoke'},
-  });
-  const writeAudit = writeAuditFromExecute(executed.json);
-  const lifecycle = taskLifecycle(executed.json);
+  let executed = CHAT_NATURAL
+    ? await req('/api/link-ops-chats', {
+      method: 'POST',
+      cookie,
+      body: {sessionId: chatSessionId, message: '干啊。', askAgent: false},
+    })
+    : await req('/api/link-ops-execute', {
+      method: 'POST',
+      cookie,
+      body: {id: taskId, mode: 'execute', confirm: CONFIRM_TEXT, source: 'copy_success_smoke'},
+    });
+  if (PREVALID_RETRY) {
+    const firstRetryRawTask = await rawTaskById(taskId);
+    const firstRetryLifecycle = firstRetryRawTask?.lifecycle || firstRetryRawTask?.execution?.lifecycle || null;
+    const firstRetryAnswer = asArray(executed.json?.session?.messages).at(-1)?.content || '';
+    result.summary.firstRetryAnswer = firstRetryAnswer;
+    result.summary.firstRetryStatus = firstRetryRawTask?.status || '';
+    result.summary.firstRetryLifecycleStatus = firstRetryLifecycle?.status || firstRetryLifecycle?.lifecycleStatus || '';
+    check('prevalid-retry first confirm status', executed.status, 200);
+    check('prevalid-retry first confirm reaches pre-valid failure', firstRetryLifecycle?.status || firstRetryLifecycle?.lifecycleStatus || '', 'publish_pre_valid_failed');
+    check('prevalid-retry first confirm does not close task', firstRetryRawTask?.status || '', 'waiting_review');
+    executed = await req('/api/link-ops-chats', {
+      method: 'POST',
+      cookie,
+      body: {sessionId: chatSessionId, message: '干吧', askAgent: false},
+    });
+  }
+  const executedRawTask = await rawTaskById(taskId);
+  const writeAudit = executedRawTask?.execution?.writeAudit || writeAuditFromExecute(executed.json);
+  const lifecycle = executedRawTask?.lifecycle || executedRawTask?.execution?.lifecycle || taskLifecycle(executed.json);
   const execEvidence = executorEvidenceFromAudit(writeAudit, 'HL');
+  const executedTask = executedRawTask || executed.json?.task || {};
+  const chatAnswer = CHAT_NATURAL ? asArray(executed.json?.session?.messages).at(-1)?.content || '' : '';
   result.summary.executedStatus = executed.status;
-  result.summary.taskStatus = executed.json?.task?.status || '';
+  result.summary.chatAnswer = chatAnswer;
+  result.summary.taskStatus = executedTask?.status || '';
   result.summary.lifecycleStatus = lifecycle?.status || lifecycle?.lifecycleStatus || '';
   result.summary.writeAudit = {
     requestedRealSubmit: Boolean(writeAudit?.requestedRealSubmit),
@@ -434,14 +697,31 @@ try {
   };
   result.summary.execEvidence = execEvidence;
   check('execute status', executed.status, 200);
+  if (CHAT_NATURAL) {
+    check('chat natural execute answers in conversation', chatAnswer, text => /收到，我按你这句|SHEIN 已返回|没有创建成功|需要补充|已完成/.test(String(text)));
+    check('chat natural execute no internal confirm token', chatAnswer, text => !/SHEIN_OPENAPI_SUBMIT|payload hash|dry-run|查看审计|飞书|回到\s*BI|任务池|验证器/i.test(String(text)));
+  }
   check('execute allowed', Boolean(writeAudit?.executeAllowed), true);
   check('execute issued to child executor', Boolean(writeAudit?.issuedExecuteToExecutor), true);
   check('execute attempted SHEIN write against fake server', Boolean(writeAudit?.sheinWriteAttempted), true);
-  check('execute actual write submitted flag', Boolean(writeAudit?.actualWriteSubmitted), true);
+  if (PREVALID_FAIL) {
+    check('pre-valid actual write not submitted', Boolean(writeAudit?.actualWriteSubmitted), false);
+    check('pre-valid task remains reviewable', executedTask?.status || '', 'waiting_review');
+    check('pre-valid lifecycle status', lifecycle?.status || lifecycle?.lifecycleStatus || '', 'publish_pre_valid_failed');
+    check('pre-valid lifecycle unlocked', Boolean(lifecycle?.locked), false);
+    check('pre-valid no manual resolve needed', Boolean(lifecycle?.needsManualResolve), false);
+    check('pre-valid final state', writeAudit?.finalState || '', 'publish_pre_valid_failed');
+    check('pre-valid blocker recorded', Number(writeAudit?.blockerCount || 0), n => n >= 1);
+    check('pre-valid executor evidence state', execEvidence?.state || '', 'publish_pre_valid_failed');
+    check('pre-valid executor ok false', Boolean(execEvidence?.ok), false);
+    check('pre-valid readback skipped', execEvidence?.readback?.status || '', 'planned_not_run');
+  } else {
+    check('execute actual write submitted flag', Boolean(writeAudit?.actualWriteSubmitted), true);
+  }
   if (WEAK_READBACK_ONLY) {
     check('weak-only writeAudit lifecycle locked', Boolean(writeAudit?.lifecycleLocked), true);
     check('weak-only writeAudit requires manual resolve', Boolean(writeAudit?.requiresManualResolve), true);
-    check('weak-only task needs manual resolve', executed.json?.task?.status || '', 'needs_manual_resolve');
+    check('weak-only task needs manual resolve', executedTask?.status || '', 'needs_manual_resolve');
     check('weak-only lifecycle failed not matched', lifecycle?.status || lifecycle?.lifecycleStatus || '', 'submitted_readback_failed');
     check('weak-only lifecycle locked', Boolean(lifecycle?.locked), true);
     check('weak-only manual resolve required', Boolean(lifecycle?.needsManualResolve), true);
@@ -449,14 +729,33 @@ try {
     check('weak-only readback status', execEvidence?.readback?.status || '', 'weak_match_only');
     check('weak-only no strong matches', Number(execEvidence?.readback?.matchedCount || 0), 0);
     check('weak-only has weak matches', Number(execEvidence?.readback?.weakMatchedCount || 0), n => n >= 1);
-  } else {
+    if (CHAT_NATURAL) {
+      check('chat weak-readback answer says submitted but manual resolve', chatAnswer, text => /已返回创建成功|已返回提交成功/.test(String(text || '')) && /人工确认|人工核销|回读没有|自动回读/.test(String(text || '')) && /不会重复提交|避免重复/.test(String(text || '')));
+      check('chat weak-readback answer includes returned ids', chatAnswer, text => /sv-smoke-copy-product/.test(String(text || '')) && /trace-copy-success-smoke/.test(String(text || '')));
+      check('chat weak-readback answer does not promise background push', chatAnswer, text => !/确认后会直接/.test(String(text || '')));
+      const publishCountBeforeLockedRetry = fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/product/publishOrEdit').length;
+      const lockedRetry = await req('/api/link-ops-chats', {
+        method: 'POST',
+        cookie,
+        body: {sessionId: chatSessionId, message: '干吧', askAgent: false},
+      });
+      const lockedRetryRawTask = await rawTaskById(taskId);
+      const lockedRetryAnswer = asArray(lockedRetry.json?.session?.messages).at(-1)?.content || '';
+      result.summary.lockedRetryStatus = lockedRetry.status;
+      result.summary.lockedRetryAnswer = lockedRetryAnswer;
+      check('chat locked lifecycle retry status', lockedRetry.status, 200);
+      check('chat locked lifecycle answer refuses duplicate submit', lockedRetryAnswer, text => /已经提交过|不会重新|人工确认|核销/.test(String(text || '')));
+      check('chat locked lifecycle task remains manual resolve', lockedRetryRawTask?.status || '', 'needs_manual_resolve');
+      check('chat locked lifecycle no extra publish', fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/product/publishOrEdit').length, publishCountBeforeLockedRetry);
+    }
+  } else if (!PREVALID_FAIL) {
     check('no blockers after matched readback', Number(writeAudit?.blockerCount || 0), 0);
-    check('task auto done after strong readback', executed.json?.task?.status || '', 'done');
+    check('task auto done after strong readback', executedTask?.status || '', 'done');
     check('lifecycle matched strong readback', lifecycle?.status || lifecycle?.lifecycleStatus || '', 'submitted_readback_matched');
     check('lifecycle not locked', Boolean(lifecycle?.locked), false);
     check('no manual resolve needed', Boolean(lifecycle?.needsManualResolve), false);
     check('executor readback ok', Boolean(execEvidence?.readback?.ok), true);
-    check('executor readback status strong matched', execEvidence?.readback?.status || '', 'matched_strong_fingerprint_in_product_query');
+    check('executor readback status strong matched', execEvidence?.readback?.status || '', status => ['matched_strong_fingerprint_in_product_query', 'matched_publish_spu_in_spu_info', 'matched_publish_identifier_in_search_product'].includes(String(status || '')));
     check('executor readback matched count', Number(execEvidence?.readback?.matchedCount || 0), 1);
     check('executor readback weak matched count', Number(execEvidence?.readback?.weakMatchedCount || 0), 0);
   }
@@ -464,8 +763,38 @@ try {
   check('publish trace id retained', execEvidence?.publishResult?.traceId || '', publishTraceId);
 
   result.summary.fakeOpenApiCallPaths = fakeOpenApiCalls.map(call => call.path);
-  check('fake publish endpoint called once', fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/product/publishOrEdit').length, 1);
-  check('fake readback endpoint called', fakeOpenApiCalls.some(call => call.path === '/open-api/openapi-business-backend/product/query'), true);
+  check('fake publish endpoint called expected times', fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/product/publishOrEdit').length, PREVALID_RETRY ? 2 : 1);
+  check('fake readback endpoint called', fakeOpenApiCalls.some(call => call.path === '/open-api/openapi-business-backend/product/query' || call.path === '/open-api/goods/spu-info'), PREVALID_FAIL ? false : true);
+  if (!PREVALID_FAIL && !WEAK_READBACK_ONLY) {
+    check('fake publish-spu readback called first', fakeOpenApiCalls.some(call => call.path === '/open-api/goods/spu-info' && call.body?.spuName === 'v-smoke-copy-product'), true);
+    if (SEARCH_PRODUCT_READBACK) {
+      check('fake searchProduct readback matched', fakeOpenApiCalls.some(call => call.path === '/open-api/goods/searchProduct'), true);
+      check('fake searchProduct uses official pageSize limit', fakeOpenApiCalls
+        .filter(call => call.path === '/open-api/goods/searchProduct')
+        .every(call => Number(call.body?.pageSize) <= 10), true);
+    }
+  }
+  const publishCall = fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/product/publishOrEdit').at(-1);
+  check('publish sale_attribute is object', Array.isArray(publishCall?.body?.skc_list?.[0]?.sale_attribute), false);
+  check('publish skc image_type allowed', publishCall?.body?.skc_list?.[0]?.image_info?.image_info_list?.every(row => [1, 2, 5, 6].includes(Number(row?.image_type))), true);
+  check('publish skc main image exactly one', publishCall?.body?.skc_list?.[0]?.image_info?.image_info_list?.filter(row => Number(row?.image_type) === 1).length, 1);
+  const publishedAttrs = asArray(publishCall?.body?.product_attribute_list);
+  const publishedInputCurrent = publishedAttrs.find(row => Number(row?.attribute_id) === 1002323);
+  const publishedProductModel = publishedAttrs.find(row => Number(row?.attribute_id) === 1000546);
+  const publishedArName = asArray(publishCall?.body?.multi_language_name_list).find(row => String(row?.language || '').toLowerCase() === 'ar');
+  check('publish default ar title copied', publishedArName?.name || '', productCase.arName);
+  if (productCase.requireInputCurrent) {
+    check('publish SM-505 input current applied', publishedInputCurrent?.attribute_extra_value || '', '1200');
+    check('publish SM-505 input current unit value id from official template', Number(publishedInputCurrent?.attribute_value_id), 304302428);
+  } else {
+    check('publish generic product does not receive SM-505 input current', Boolean(publishedInputCurrent), false);
+  }
+  check('publish text attribute uses extra value', publishedProductModel?.attribute_extra_value || '', productCase.productModel);
+  check('publish text attribute removes zero value id', publishedProductModel?.attribute_value_id, undefined);
+  check('publish new link scheduled at payload level', publishCall?.body?.shelf_way, 2);
+  check('publish new link schedule date present', Boolean(publishCall?.body?.hope_on_sale_date), true);
+  check('publish skc shelf_way copied to skc level', publishCall?.body?.skc_list?.[0]?.shelf_way, 2);
+  check('publish skc schedule date copied to skc level', Boolean(publishCall?.body?.skc_list?.[0]?.hope_on_sale_date), true);
 
   if (WEAK_READBACK_ONLY) {
     const operatorResolveDenied = await req('/api/link-ops-tasks', {
@@ -493,15 +822,16 @@ try {
         event: 'manual_lifecycle_resolve_smoke_owner_done',
       },
     });
+    const ownerResolvedRawTask = await rawTaskById(taskId);
     result.summary.ownerResolveStatus = ownerResolve.status;
-    result.summary.ownerResolvedTaskStatus = ownerResolve.json?.task?.status || '';
-    result.summary.ownerResolvedLifecycleStatus = ownerResolve.json?.task?.lifecycle?.status || '';
-    result.summary.ownerResolvedBy = ownerResolve.json?.task?.lifecycle?.manualResolution?.user || '';
+    result.summary.ownerResolvedTaskStatus = ownerResolvedRawTask?.status || ownerResolve.json?.task?.status || '';
+    result.summary.ownerResolvedLifecycleStatus = ownerResolvedRawTask?.lifecycle?.status || ownerResolve.json?.task?.lifecycle?.status || '';
+    result.summary.ownerResolvedBy = ownerResolvedRawTask?.lifecycle?.manualResolution?.user || '';
     check('owner manual resolve status', ownerResolve.status, 200);
-    check('owner manual resolve task done', ownerResolve.json?.task?.status || '', 'done');
-    check('owner manual resolve lifecycle status', ownerResolve.json?.task?.lifecycle?.status || '', 'manual_resolved_done');
-    check('owner manual resolve user recorded', ownerResolve.json?.task?.lifecycle?.manualResolution?.user || '', 'owner_copy_success');
-    check('owner manual resolve execution history appended', asArray(ownerResolve.json?.task?.executionHistory).some(row => row.event === 'manual_lifecycle_resolve'), true);
+    check('owner manual resolve task done', ownerResolvedRawTask?.status || ownerResolve.json?.task?.status || '', 'done');
+    check('owner manual resolve lifecycle status', ownerResolvedRawTask?.lifecycle?.status || ownerResolve.json?.task?.lifecycle?.status || '', 'manual_resolved_done');
+    check('owner manual resolve user recorded', ownerResolvedRawTask?.lifecycle?.manualResolution?.user || '', 'owner_copy_success');
+    check('owner manual resolve execution history appended', asArray(ownerResolvedRawTask?.executionHistory).some(row => row.event === 'manual_lifecycle_resolve'), true);
 
     const audit = await req(`/api/link-ops-audit?taskId=${encodeURIComponent(taskId)}&limit=50`, {cookie});
     const auditTypes = asArray(audit.json?.entries).map(entry => entry.type);

@@ -3,7 +3,7 @@
 ## 2026-06-24 当前权威状态
 
 - 飞书多维表格 / 原生看板写入已临时暂停；云端 BI 系统作为当前主要经营入口继续运行。飞书日报脚本、异常通知 watchdog 和只读问数机器人均已迁到云端独立飞书机器人链路；日报真实发送链路已验证但自动发送当前停用，问数机器人已升级为云端 Codex CLI 只读网关，不再绑定本机 Codex 会话。
-- 本地 BI 已封存，云端 BI 是正式入口：`https://shein-bi.dushengyi.xyz/`（旧 IP 入口 `http://43.165.167.135/` 仅作兜底）。公网入口已启用 Basic Auth；账号密码只在运行环境交付，不写入仓库或文档。详见 `docs/cloud-bi-operations.md`。
+- 本地 BI 已封存，云端 BI 是正式入口：`https://shein-bi.dushengyi.xyz/`（旧 IP 入口 `http://43.165.167.135/` 仅作兜底）。公网入口已改为 BI 应用内登录页 + `bi_session` HttpOnly Cookie；账号密码只在运行环境交付，不写入仓库或文档。详见 `docs/cloud-bi-operations.md`。
 - 云端 BI 已提供临时登录维护入口 `/cloud-login-maintenance`：当 SHEIN / SBN 子系统登录态失效、自动恢复失败、遇到验证码/滑块，或被协议签署 / 公告 / 通知确认等普通登录弹窗挡住时，可在云服务器短时打开该店独立 profile 的 noVNC 浏览器窗口；普通登录干扰弹窗可由运维代理关闭/确认后再点登录，完成后必须点“我已完成并关闭”，脚本会导出/探测登录态并关闭临时进程。该入口的状态文件、日志和短期 token 都是服务器私有运行态，不进 GitHub。
 - 本地 `8787` 服务已停止，`SHEIN-*` Windows 计划任务已禁用；除非明确回滚，不要重新启动本地 BI 或本地抓数任务。
 - 销售同步完成后会后置刷新 BI；如果单店失败但目标日期当前启用店铺销售源文件已齐，BI 仍会刷新，并通过飞书消息提醒失败店铺。
@@ -23,8 +23,8 @@
 - ET 货代仓已接入数据仓库和 BI，能抓库存、RTV、出库、发货申请单和必要财务/仓储证据；云端已启用 Linux headless Chrome + ET 本地凭据 + OCR 自动登录入口并完成真实同步验证，不能直接复用 Windows Chrome 保存密码。当前高频 ET 任务默认不抓旧财务明细 endpoint，也不再生成旧 `financeData` section；仓储费/历史账单只在利润链路或显式诊断中使用。
 - RTV 换单号自动复核已接入 BI 流水线：`scripts/verify_shein_rtv_tracking.mjs` 直接读取 SHEIN 售后详情和退货物流详情，JT/JTE 走同运单直连，iMile/EMile 识别中英文换单证据；截至 `2026-05-09` 已确认 `132` 个 ET RTV 入仓单号。
 - RTV 收件后去向已进入 BI：`mart.et_rtv_destination_allocation` 追踪 09 可售、03_RTV、04 破损、06 报废和其它/未知去向；`mart.shein_return_rtv_trace` 在 `订单 / 售后` 页面展示每条 SHEIN 退货是否收到、收到后去了哪里。
-- 19 店 SHEIN 官方 OpenAPI 已完成店铺级授权、云端白名单和只读探针；销售订单、退货退款、商品/链接基础资料均已进入隔离并行双跑层。生产日更已开启 `SHEIN_BI_DAILY_OPENAPI_RECONCILIATION=1`、`SHEIN_BI_DAILY_OPENAPI_RETURN_RECONCILIATION=1`、`SHEIN_BI_DAILY_OPENAPI_PRODUCT_RECONCILIATION=1`，只写 `fact.openapi_*` / `mart.openapi_*_reconciliation`，不覆盖正式销售/售后/商品事实表，也不执行 SHEIN 写操作。
-- OpenAPI 当前边界：销售双跑 19 店 ready；退货退款还有历史窗口 warning 需继续观察；商品/链接 OpenAPI 只能稳定对账“是否已上架”二值，不能替代浏览器源四档 `待上架/已上架/已售罄/已下架`，OpenAPI `stock-query` 也不能替代 ET 实际库存。
+- 19 店 SHEIN 官方 OpenAPI 已完成店铺级授权、云端白名单和只读探针；销售订单、退货退款、商品/链接基础资料均已进入隔离并行双跑层。生产日更已开启 `SHEIN_BI_DAILY_OPENAPI_RECONCILIATION=1`、`SHEIN_BI_DAILY_OPENAPI_RETURN_RECONCILIATION=1`、`SHEIN_BI_DAILY_OPENAPI_PRODUCT_RECONCILIATION=1`，只写 `fact.openapi_*` / `mart.openapi_*_reconciliation`，不覆盖正式销售/售后/商品事实表。自动化运营页另有受控写执行链，已接入 `copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review` 等官方 OpenAPI 动作；真实提交必须同时满足 BI 账号写权限、`safeWriteOperations`、真实写白名单、人 + 店 + 动作、dry-run `payloadHash`、任务 `waiting_review`、确认和回读/审计。
+- OpenAPI 当前边界：销售/商品双跑 19 店 ready；退货退款还有历史窗口 warning 需继续观察；商品/链接 OpenAPI 只能稳定对账“是否已上架”二值，不能替代浏览器源四档 `待上架/已上架/已售罄/已下架`；OpenAPI `stock-query` 也不能替代 ET 实际库存。网页端最终提交走同一聊天里的自然语言确认（如“可以执行 / 提交吧 / 照做”），服务端内部映射为安全确认码 `SHEIN_OPENAPI_SUBMIT`；CLI 仍需显式传 `--confirm SHEIN_OPENAPI_SUBMIT`。
 - 系统定位正在从“BI 数据分析”扩展为“自动运营驾驶舱”：先把可重复运营动作沉淀为脚本和规则，再按“建议/预填/复核/人工确认提交/审计留痕”的边界逐步开放自动化。2026-05-17 已上线“链接管理中台”基座：支持“一个会话对应一个任务工作台”，边聊边沉淀任务目标、数据依据、素材、执行步骤和进度；自然语言会话每轮都会按最新 BI JSON 动态查数，明确下架/换图/补链/报活动等动作命令会自动进入任务并在同一界面可见。2026-05-20 起，任务区已提供“开始执行 / 预检”和二次确认入口，点击后会真实调用 `/api/link-ops-execute` 写回进度与审计；默认仍只做受控预检 / dry-run，不会静默提交 SHEIN。
 
 本工作区用于 SHEIN 当前 19 店销售数据自动抓取、飞书多维表格统计、飞书日报手动入口、链接管理、营销活动报名辅助，以及正在并行建设的 PostgreSQL + Metabase + 云端 BI / 自动运营驾驶舱。
@@ -42,7 +42,7 @@
   - 当月主看板：`SHEIN经营看板 v3-主看板`（`blkFn3qHrwdsrJyX`）
   - 上月看板：`SHEIN经营看板 v3-上月`（`blkWeyZhphgRZYim`）
 - 当前 BI 入口：
-  - 云端 BI：`https://shein-bi.dushengyi.xyz/`，Basic Auth 保护；旧 IP 入口 `http://43.165.167.135/` 仅作兜底。
+  - 云端 BI：`https://shein-bi.dushengyi.xyz/`，BI 应用内登录保护；未登录访问页面会跳转 `/login`，`/api/auth/me` 未登录返回 `401`；旧 IP 入口 `http://43.165.167.135/` 仅作兜底。
   - 云端登录维护中心：`https://shein-bi.dushengyi.xyz/cloud-login-maintenance`，用于临时打开指定店铺云端浏览器登录窗口。
   - 云端代码目录：`/opt/shein-bi/app`
   - 仓库 BI 门户灾备快照：`outputs/bi-portal/index.html` / `outputs/bi-portal/data.json`（不代表当前云端数据）
@@ -74,7 +74,7 @@
   - `SHEIN-Sales-ETForwarder-0420`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-BI-Daily-Pipeline-0700` 等是本地历史任务，已禁用，保留为回滚/迁移参考。
   - `2026-05-02 07:00` 的 `267014` 是已修复的历史失败记录，保留作排障证据。
 - 团队访问边界：
-  - 当前团队访问转为云端入口 `https://shein-bi.dushengyi.xyz/`，旧 IP `http://43.165.167.135/` 仅作兜底，受 Basic Auth 保护。
+  - 当前团队访问转为云端入口 `https://shein-bi.dushengyi.xyz/`，旧 IP `http://43.165.167.135/` 仅作兜底，受 BI 应用内登录和账号权限保护。
   - 本地局域网协作入口已封存；`8787` 服务停止，本地计划任务禁用。
   - 原 Windows 防火墙规则需要管理员权限才能禁用；只要本地没有服务监听 `8787`，局域网不会再打开本地 BI。
   - 同事可标记动作状态、填写负责人和备注；短期仍沿用云端服务侧状态文件，长期应迁入 PostgreSQL，避免文件状态成为单点。
@@ -92,6 +92,7 @@
 - 营销活动确认表里的 `仓储费SAR/件` 不能用累计仓储费除以历史销量，也不能把全历史仓储费一刀切压到当前库存上；必须来自 BI `profit.productStorageDaily` 的“当前仍在仓库存移动平均累计仓储成本”：每日仓储费加入库存成本余额，库存数量减少时按当前平均成本剔除已出库产品携带的历史仓储成本。短码或无法确认的货号必须标记待归并暂停，不能按 0 仓储或猜测成本继续报名。
 - `2026-06-14` 起优惠券不再作为价格保障层：`15%` 券不是每单必然触发，不能用“普通活动价 × 0.85”作为保底成交价。保底成交价必须由当前售价、普通营销活动价或限时折扣价直接命中当前有效 `finalTargetPrice`；优惠券只允许作为明确标记的高曝光支持、全店高库存滞销品引流或清货试验层，且触券后的风险下探价不得低于底价/利润线。详见 `docs/marketing-campaign-signup-pricing-rules.md`。
 - 营销定价策略的机器可读入口是 `config/marketing_pricing_policy.json`：限时折扣必须作为兜底层存在但不得干扰目标成交价，默认从 `15%` 折扣起算；同一标准货号在所有店铺、所有链接中按 BI 正曝光量取全局前五 SKC，前五可比其他链接低 `5` 个百分点目标利润率但不得低于 `15%` 底价，基础目标已为 `15%` 时前五保持 `15%`、其他链接提高到 `20%`；无正曝光指标不得猜前五，不能按单店拆出多个“前五”。
+- `2026-06-28` 起新增新上架 7 天规则：所有上架 7 天内、尚未报过普通营销活动的在售链接，巡检发现后必须立即按“全局曝光前五”力度报一周限时折扣；若已有旧限时折扣但不是一周窗口/前五力度，且旧活动只包含目标 SKC，dry-run 安全后取消/结束旧活动并重报。新上架 7 天内链接首次报 New Arrivals / 新品 / 超级新品类普通活动时，也按曝光前五力度定价。
 - 营销日报/巡检必须按“当前有效策略”判定，而不是拿历史计划、统一利润率或旧 `ALL-ready` 覆盖文件反复报警。本期用户确认的逐行覆盖价、指定固定价、指定利润率（例如某货号本期批准 `15%` 利润率）和生效窗口必须先写入当前 `selection-plan + price-overrides`；巡检只在真实成交价低于这版 `finalTargetPrice`、活动层偏离这版策略，或当前计划缺失/过期/冲突时才报问题。已确认的低利润策略应标为 `expected`，不能每天当异常重复通知。
 - 新链接 / 新 SKC 巡检必须先确认 guard 选中的是最新已执行全量计划，尤其是 `2026-06-14` 后不依赖优惠券保底的 `selection-plan + price-overrides`。如果误用旧 `all-934`、旧 `ALL-ready` 或历史批次计划，可能把已覆盖 SKC 误报为“新链接缺兜底”；此时先修正计划选择并重跑 guard，不能直接创建限时折扣或优惠券。
 - 给用户确认的报活动方案必须是 Excel 人话版，不能只给 CSV/JSON/几百行明细。至少包含“说明”“按货号汇总”“店铺差异明细”“报名明细”“剔除项/阻塞项”“低价补救/风险项”“15%券流量试验计划（如适用）”等 sheet；除说明页外必须有 `备注/修改意见` 列。按货号汇总必须展示预期利润率、预期最终价、普通活动填报价、是否使用可选 15% 流量券、券触发后的下探价、曝光前五命中/非命中、剔除原因和同货号不同店差异。用户确认前不得提交。

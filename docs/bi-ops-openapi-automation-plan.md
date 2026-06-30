@@ -1,17 +1,31 @@
-# BI 自动化运营页 × SHEIN OpenAPI 接入方案（草案）
+# BI 自动化运营页 × SHEIN OpenAPI 接入方案（当前口径）
 
-> 状态：2026-06-24 已确认开工。用户确认 OpenAPI 接入可以 19 店一次性推进，不再按 2→5→19 分批；本文仍坚持密钥隔离、dry-run、人工确认、审计回读和生产数据双跑对账边界，不保存任何 SHEIN 账号、密码、APP_SECRET、openKeyId、secretKey、tempToken 或 Cookie。
+> 状态：2026-06-28 已进入 V2 可试用收口阶段。V2 自动运营工作台只属于 BI 门户和云端 Codex CLI 自然语言会话，不再和飞书入口、V1 页面或旧“任务池/验证器”产品心智绑定。19 店 OpenAPI 授权、云端白名单、只读探针和写操作资料检查链路已完成；`copy_product_draft` 不再是单店适配，而是按店铺能力、payload mapper、自然语言确认映射、真实写白名单和回读/审计受控执行。本文仍坚持密钥隔离、资料检查、人工自然语言确认、审计回读和生产数据双跑对账边界，不保存任何 SHEIN 账号、密码、APP_SECRET、openKeyId、secretKey、tempToken 或 Cookie。
 
 ## 1. 目标
 
 把 BI 的“自动化运营”页重构成类似 Codex Desktop 的 AI 对话式工作台：
 
 - 用户用自然语言发指令，例如“把 389 空气炸锅在缺货店铺下架”“把 520a 在 DL/DX 上架”“查一下近 7 天 COD 退货异常的 SKC”。
-- 云端 Codex CLI / 执行器先理解意图、查证数据、生成计划、做预检。
-- 写操作默认只进入 `dry-run` / 任务池，不直接提交 SHEIN。
-- 真正影响 SHEIN 的动作必须经过人工确认、权限校验、payload 预检、执行审计、执行后回读。
+- 云端 Codex CLI / 执行器先理解意图、查证数据、生成计划、做资料检查。
+- 用户可见层只有同一个 BI 会话：用户继续用自然语言补字段、确认执行或要求重试；不要让普通员工理解 `dry-run`、任务池、验证器或固定确认码。
+- 真正影响 SHEIN 的动作必须经过人工自然语言确认、权限校验、发布资料检查、执行审计、执行后回读。
 - 真实写放行必须同时经过两层门：`safeWriteOperations` 物理总闸门（店铺 + 动作）和 `config/bi_ops_write_whitelist.local.json` 试点白名单（人 + 店 + 动作）。任何一层未命中，都只能 dry-run。
 - 19 家店铺一次性纳入官方 OpenAPI 接入总账、授权换密钥和只读探针；可用 OpenAPI 稳定替代的数据域仍必须先双跑对账，再切生产。
+
+### 会话事实边界（2026-06-29 补充）
+
+- **用户消息才是事实来源**：店铺、货号、补充字段、确认执行都只能从用户消息、任务结构、OpenAPI/BI 数据和执行器证据进入状态机；助手回复只能展示，不允许反向写入 `targets`。例如助手说“源链接是 QY”，不能把 QY 变成目标写店。
+- **源店和目标店必须分离**：`sourceStores` 只表示读来源链接；`writeStores` / `stores` 才表示要写的目标店。跨店复制时若源店混入多写店，执行前必须剔除源店，除非用户明确把源店也列为目标写店。
+- **复制上品里的标题不是改标题动作**：用户说“标题直接复制源链接/沿用源标题”，这是发布 payload 的字段补齐，不是 `update_title` 维护动作，不能把补链任务混进改标题执行器。
+- **新链接默认不自动上架**：所有新上品、复制上品、补链接等从未上过架的新链接，发布 payload 必须默认 `shelf_way=2` 并写入约十年后的 `hope_on_sale_date`；短期内不能自动上架。只有维护已有链接的 `activate_link` / `retire_link` 等上下架动作才按用户指令改变现有链接状态。
+- **明确动作优先走 BI 状态机**：补链、复制上品、改价、上下架、补字段、自然语言确认等明确运营动作不得先交给旧问答模型生成建议；必须先创建/更新当前会话任务、检查资料、再用人话返回缺口或结果。
+- **505 只是验收样例，不是特判对象**：`DL 505` 只能用来验证通用链路；自动运营页必须支持所有已接入 OpenAPI 动作走同一条自然语言状态机，包括 `copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。不能给单个货号、单个类目或单个店铺写死流程。
+- **平台缺字段按属性 ID 通用闭环**：`publishOrEdit` 返回“某属性(id)必填”时，后续用户在同一聊天里补“按 800W 算 / 电流 1200mA”等自然语言，系统要从上次平台提示里识别属性 ID、写入当前任务事实并重新资料检查；不能只靠 `SM-505A` 的输入电流特判。
+- **复制上品成功流必须有非 505 回归**：release gate 必须同时覆盖 `SM-505A/505` 样例和非 505 普通货号，证明通用 `copy_product_draft` 生命周期不是靠缝纫机专用默认值跑通；非 505 场景不得自动带入 `输入电流=1200mA`。
+- **维护动作也必须即时检查**：用户说“改库存/改价/上下架/改标题/换图/补证书”时，聊天应立即定位目标链接、生成对应 OpenAPI 维护 payload 和检查快照，并用人话说明“已定位哪些链接、还差什么、能否一句话确认执行”；不能只给补链动作做即时资料检查。
+- **上传资料后必须回到同一个聊天闭环**：换图、证书等需要补资料的动作，上传图片/PDF/JSON 后要自动重新检查当前处理，并继续在聊天里说明“资料是否通过 / 还缺什么 / 能否一句话执行”；不能要求员工重复创建任务或理解后台验证器。
+- **旧任务也要执行前再归一化**：即使运行态文件里保留了历史坏状态，`startControlledLinkOpsExecution` 也必须在 dry-run/execute 前重新合并当前聊天事实并归一化 intent、源店、目标店、人工参数和 payload hash。
 
 ## 2. 当前证据与现状
 
@@ -53,24 +67,21 @@
 - 开放能力：Webhook、OpenApi。
 - 合作流程：账号申请 → 创建应用 → 应用审核 → 对接授权 → 对接解决方案。
 
-### 19 店接入现状
+### 19 店接入现状（2026-06-28）
 
-本地当前 `config/shein_openapi.local.json` 只显示：
+当前状态不再是“只证明 HL 启用”：
 
-- `HL`：真实启用授权。
-- `DL`：示例/禁用条目。
+- 19 店店铺级 OpenAPI 授权、云端 IP 白名单、只读探针和脱敏能力总账已完成；`/api/openapi-capabilities` 是当前店铺能力总账入口。
+- 销售订单、退货退款、商品/链接基础资料仍写隔离并行层，不覆盖正式事实表；事实源切换仍要按数据域继续看连续对账趋势和历史 warning。
+- 自动化运营写链路已接入官方 OpenAPI 动作：`copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。
+- `copy_product_draft` 已从单店适配推进到 19 店能力 smoke：源链接参数优先从 OpenAPI 商品列表 + `spu-info` / 商品详情 mapper 还原，不要求用户人工补完整发布 payload；强指纹回读未命中时只能进入人工核销，不能弱匹配自动判成功。
+- `copy_product_draft` / 新链接发布默认只创建十年后定时上架的新链接，防止补链后短期自动上架；测试必须覆盖 payload 级和 SKC 级 `shelf_way=2` / `hope_on_sale_date`。
+- TZ/JSH/TZZ/XC 等 `query-store-info` 不返回 GS 账号的店铺，只允许在 `config/stores.json` / `config/store_account_truth.json` 的静态 `merchantId` 与实际候选一致、且没有 GS 账号冲突时使用 fallback；不得运行时自动回填或放宽身份校验。
+- 网页端最终确认不再显示固定确认框；用户在同一聊天里说“可以执行 / 提交吧 / 照做”等自然语言，服务端只在唯一当前事项、资料检查通过、权限和白名单命中时，内部映射到安全确认码。CLI/脚本仍必须显式传 `--confirm SHEIN_OPENAPI_SUBMIT`，防止绕过网页会话边界。
 
-因此不能宣称 19 店已接入。下一步必须逐店完成审核状态复核、授权换密钥、配置写入和双跑验证。
-
-根据项目配置，当前 19 店为：
+当前 19 店为：
 
 `CX, DL, DX, FY, HL, JSH, JY, LQ, MZ, NM, QH, QY, TS, TZ, TZZ, XC, XL, YJ, ZL`。
-
-历史文档显示：
-
-- `HL` 已真实授权。
-- `ZL` 应用已审核通过，但是否已完成授权/换密钥仍需复核。
-- DSY 组和 LGM 组大部分应用已提交审核或用户后续注册认证完成，但当前本地安全配置未体现 19 店真实授权。
 
 ## 3. API 替换现有抓数的分级策略
 
@@ -111,7 +122,7 @@
 - 退货退款：已进入 OpenAPI 并行层，只写 `fact.openapi_return_order`、`fact.openapi_return_item`、`mart.openapi_return_reconciliation`，不覆盖生产售后事实。
 - 商品/链接基础资料：已进入 OpenAPI 并行层，只写 `fact.openapi_product_link`、`mart.openapi_product_reconciliation`，不覆盖 `fact.link_master_snapshot`、商品页、库存页或任何生产维表。
 - OpenAPI 总账：`/api/openapi-capabilities` 只返回脱敏状态、对账摘要和密钥存在布尔值；不得返回 `APP_SECRET`、`openKeyId`、`secretKey`、`tempToken`、Cookie 或任何可还原密钥的信息。
-- 调度：销售订单、退货退款、商品/链接 OpenAPI 对账均已接入 `scripts/cloud_daily_refresh.sh`；生产 `shein-bi-cloud-daily-refresh.service` 已开启 `SHEIN_BI_DAILY_OPENAPI_RECONCILIATION=1`、`SHEIN_BI_DAILY_OPENAPI_RETURN_RECONCILIATION=1`、`SHEIN_BI_DAILY_OPENAPI_PRODUCT_RECONCILIATION=1`。这些步骤只写隔离并行对账层，不切生产事实源，也不执行 SHEIN 写操作。
+- 调度：销售订单、退货退款、商品/链接 OpenAPI 对账均已接入 `scripts/cloud_daily_refresh.sh`；生产 `shein-bi-cloud-daily-refresh.service` 已开启 `SHEIN_BI_DAILY_OPENAPI_RECONCILIATION=1`、`SHEIN_BI_DAILY_OPENAPI_RETURN_RECONCILIATION=1`、`SHEIN_BI_DAILY_OPENAPI_PRODUCT_RECONCILIATION=1`。这些数据对账步骤只写隔离并行对账层，不切生产事实源；自动化运营写操作走独立任务池、权限、白名单、确认和审计链路。
 - 空间：商品原始抓取文件位于忽略目录 `outputs/shein_openapi_products/`，脚本默认每店只保留最近 2 个时间戳快照和 `latest.json`，避免云盘长期膨胀。
 
 ### B 类：可用 API 辅助，但不能马上完全替换
@@ -192,20 +203,19 @@
 
 ### 页面形态
 
-整体模仿 Codex Desktop，而不是传统表格页，但采用“双轨”模式：
+整体模仿 Codex Desktop，而不是传统表格页；面向普通员工时必须以“聊天即操作入口”为主，不暴露技术验证器。
 
-- 左侧：会话列表 / 最近任务 / 常用指令模板。
-- 中间：AI 对话区。
+- 左侧：会话列表 / 当前登录账号 / 可管店铺摘要。
+- 中间：AI 对话区 + 当前任务确认区。
   - 用户自然语言输入。
   - AI 先回答“理解到的目标、影响范围、需要的数据、风险”。
-  - 如果是写操作，生成执行计划卡片。
-- 右侧：任务池 / 上下文面板。
-  - 写操作提案自动进入右侧任务池。
-  - 右侧展示 `Sandbox / Dry-run` 预检状态，例如“权限通过”“缺重量尺寸阻断”“正在生效活动中，禁止下架”。
-  - 只有在右侧任务卡手动点击 `Execute` 后，才允许进入真实执行。
-  - 当前筛选范围：店铺、负责人、货号、SKC、日期。
-  - API 能力状态：每店 read/write 状态。
-  - 相关证据：订单、库存、链接、营销、售后、评价摘要。
+  - 如果是写操作，直接在对话下方显示人话任务卡：系统已检查什么、还缺什么、下一步点什么。
+  - 平台预校验、payload hash、白名单、OpenAPI trace 等后台证据继续记录，但默认不堆给普通员工；只在审计/排障里展开。
+- 真实提交前，网页端最终确认不再要求固定输入框；用户在同一聊天里说“可以执行 / 提交吧 / 照做”等自然语言，服务端在唯一当前事项、资料检查通过、权限和白名单命中时内部映射到安全确认码。
+- 右侧：当前会话任务进度 / 上下文摘要。
+  - 只展示当前会话相关任务，不展示全局历史任务堆。
+  - 只看进度和结果，不在右侧放执行按钮，避免员工在多个入口之间迷路。
+  - 当前筛选范围、店铺能力、订单/库存/链接/营销/售后/评价证据作为上下文摘要或审计入口展示。
 - 底部：输入框。
   - 支持文字指令。
   - 后续可支持上传标题/图片/Excel 等素材，但素材必须先进入云端任务包。
@@ -322,10 +332,10 @@
 
 - API secret、openKeyId、secretKey、tempToken、Cookie 不进 GitHub、不进前端、不进日志明文。
 - 不同店铺若属于不同开放平台应用主体，必须使用各自 `APP_ID/APP_SECRET_KEY` 换密钥；不得把 HL 应用密钥默认复用给全部店铺。
-- 写操作不得由 AI 直接自动提交。
-- 自然语言不能等同于授权；必须转换成可审计任务卡片，再确认。
-- 写接口必须先 dry-run，后 execute。
-- execute 必须有显式确认文本或页面按钮确认。
+- 写操作不得静默提交；用户必须在同一 BI 会话里用自然语言明确确认，服务端再映射成内部安全确认码。
+- 自然语言不能绕过授权；必须转换成结构化会话事实、资料检查快照、payload hash 和审计记录后，才允许进入真实执行。
+- 写接口必须先完成不提交的资料检查，再 execute。
+- 网页端不再显示固定确认文本或按钮式验证器；CLI/脚本仍必须显式传确认参数，避免绕过网页登录会话边界。
 - 执行前必须保存证据快照，执行后必须回读。
 - 如果执行器在真实提交模式下中断或结果不可解析，不能把任务退回 `waiting_review`；必须进入需人工核销状态，审计里标记 `suspiciousWriteAttempted` / `submittedPossibly` / `requiresManualResolve`。
 - 回读只接受目标商家 SKU / 商家货号强指纹自动闭环；弱匹配数量可进入审计辅助排查，但不能自动判定成功。
@@ -340,59 +350,35 @@
 
 当前不能承诺：
 
-- “19 店 API 已全部接入”——当前配置只证明 HL 启用。
+- “OpenAPI 已替换全部生产事实源 / 可静默执行全部真实写”——19 店授权、探针、资料检查和受控写适配器已完成，但事实源切换和真实提交仍按数据域、动作、店铺、账号和白名单受控放行。
 - “OpenAPI 可以立刻替换全部现有抓取”——流量、营销、ET、利润输入仍有缺口。
-- “AI 可以直接自动上下架”——必须先 dry-run、确认、审计、回读。
+- “AI 可以绕过确认直接自动上下架”——不允许。用户在聊天里明确确认后，系统才会用内部确认码执行，并记录审计和回读结果。
 - “商品复制/发布一定可一键完成”——payload 完整性、证书、类目属性、图片、站点、品牌和仓库都可能阻断。
 - “利润页可以完全由 SHEIN OpenAPI 生成”——利润依赖 ET、成本和项目自有口径。
 
-## 9. 建议实施里程碑
+## 9. 当前上线验收口径
 
-### M1：OpenAPI 接入总账
+### 已完成并纳入 release gate
 
-- 新建能力 registry。
-- 把 19 店审核/授权/白名单/只读探针状态可视化。
-- 先不做写操作。
+- OpenAPI 接入总账：19 店授权、云端 IP 白名单、只读探针、读写能力和账号权限统一展示。
+- BI 自动化运营页：只保留 Codex 式聊天入口；右侧只展示当前会话进度，不让普通员工理解任务池、验证器、固定确认码或后台审计按钮。
+- 官方 OpenAPI 可写动作：`copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review` 已进入受控执行链路。
+- 非 505 通用链路：改库存、改供货价、改商品售价、改标题、上下架、换图和证书/资质均已通过独立聊天 smoke；上传资料后会自动重新检查并回写当前会话。505 只作为补链验收样例，不允许成为特判对象。
+- 安全边界：资料检查、payload hash、账号权限、店铺权限、真实写白名单、执行审计和回读/人工核销仍在后台强制执行。
+- 发版前必须跑 `node scripts/test_bi_ops_release_gate.mjs`；该 gate 覆盖权限矩阵、CLI flow、白名单作用域、前端聊天-only 静态检查、正式 `outputs/bi-portal/index.html` 与 `scripts/bi_app/client.js` 同步检查、补链/维护执行器、OpenAPI readiness 和自然语言聊天路由。凡是修改 `scripts/bi_app/client.js` 或 `scripts/bi_app/styles.css`，都必须重新生成 `outputs/bi-portal/index.html`，否则不能发布。
 
-### M2：自动化运营页 shell
+### 仍不属于官方 OpenAPI 可写范围
 
-- 页面改成 Codex Desktop 式对话框。
-- 接只读问数和任务卡片。
-- 支持生成 dry-run 计划，不 execute。
-
-### M3：19 店 OpenAPI 授权与只读探针
-
-- 对 19 店一次性完成开放平台授权、换取店铺密钥、写入私有配置。
-- 对已授权店铺跑只读探针；未授权/失败店铺在总账里明确标记。
-- 不切生产。
-
-### M4：19 店订单/退货/商品/库存并行入仓
-
-- 写并行事实表。
-- BI 系统健康页展示 OpenAPI 对账状态。
-- 连续 14 天稳定后，逐域切换。
-
-### M5：上下架 dry-run 执行器
-
-- 先支持“识别要动哪些链接 + 生成计划 + 预检”。
-- 页面展示阻断原因。
-
-### M6：小范围真实写试点
-
-- 只选 1 个已授权店铺、1 个低风险动作。当前推荐首个试点动作仍是 `copy_product_draft`（复制上品 / 补链接），因为它是新增草稿/待审核类动作；`activate_link`、`retire_link`、`update_title`、`update_images` 会影响存量链接，虽已具备官方维护执行器，但生产真实写仍必须先配置窄范围总闸门、真实写白名单、旧值备份和可靠回读/人工核销。
-- 人工确认后执行。
-- 执行后回读和审计完整。
-- 通过 `config/bi_ops_write_whitelist.local.json` 明确绑定“人 + 店 + 动作”，默认空白名单；不要直接打开全局所有店铺/所有动作。
-- 任何发版或试点白名单变更前，必须先跑 `node scripts/test_bi_ops_release_gate.mjs`。其中 `test_bi_ops_write_whitelist_scope.mjs` 会在隔离临时门户里临时开启 `safeWriteOperations` 和一条真实写白名单，验证只有指定“人 + 店 + 动作”能命中；其他账号、店铺和动作仍被阻断，并且在缺少 dry-run、`waiting_review`、payload hash 等条件时不会真实提交。
-- 维护类写动作发版前还必须跑官方文档详情解析和 readiness smoke。`test_bi_ops_release_gate.mjs` 已纳入 `test_shein_openapi_doc_detail_parser.mjs` 和 `test_bi_ops_maintenance_readiness.mjs`：前者使用离线 fixture 验证 `/open-api/goods/modify-skc-shelf` 的 endpoint 和 `shelf_state` 识别逻辑，后者验证只有 schema + 逐店权限 + 强回读三类脱敏证据齐全时才会到 `pilot_ready`，且含敏感字段的证据会被拒绝。真实 schema 验证则通过 `verify_shein_openapi_doc_detail.mjs --cookie-file <登录态Cookie文件> --require-verified` 单独跑，结果只写入 `tmp/` 忽略目录。
+- 营销活动报名、限时折扣、优惠券报名目前没有已验证的 SHEIN 官方 OpenAPI 写接口证据，不能伪装成同一套 OpenAPI 真实提交能力。
+- 这些动作可以在 BI 聊天里生成建议、候选和操作说明；真实报名仍走已有营销运营流程，后续如官方开放接口，再按同一套资料检查、白名单、确认和回读机制接入。
 
 ## 10. 用户确认点
 
 建议先确认以下方向后再开工：
 
-1. 已确认先做“OpenAPI 接入总账 + Codex 式对话 shell + dry-run 任务卡片”，不直接真实上下架。
-2. 已确认 API 接入可 19 店全量推进，不用分批；但 OpenAPI 替换抓数仍走“并行层双跑对账 → 单域切换”，不一次性全切。
-3. 写操作确认方式后续再定，当前默认页面按钮 + dry-run + 审计回读。
+1. 已确认 V2 自动化运营页以 BI 内聊天为唯一用户操作入口，不再沿用飞书/V1/旧任务池产品心智。
+2. 已确认 API 接入按 19 店全量推进；官方 OpenAPI 能实现的写动作全部接入同一套受控执行链路。
+3. 已确认网页端用自然语言确认执行；后台仍强制资料检查、内部确认码、审计和回读。
 
 ## 11. Reviewer 补充意见
 
@@ -400,7 +386,7 @@
 
 - OpenAPI 销售替换要至少 14 天双跑，不能因 HL 早期两天 matched 就直接替换。
 - 用户已推翻 `2 → 5 → 19` 接入节奏：接入总账、授权和探针按 19 店一次性推进；reviewer 原有保守意见只保留为“生产数据切换和真实写操作必须双跑/确认/回读”的安全边界。
-- 自然语言只能生成结构化 Intent 和任务草稿；不能直连真实写接口。
-- 页面应采用“左侧对话 + 右侧 dry-run 任务池”的双轨模式。
+- 自然语言必须先生成结构化 Intent、资料检查快照和 payload hash；只有同一会话里唯一当前事项满足权限、白名单和确认条件时，才允许由服务端执行真实写接口。
+- 页面应采用“聊天主导 + 当前任务进度侧栏”的模式：后台 dry-run / 预校验 / 审计保留，普通员工界面只展示人话结论、缺口和确认动作。
 - 真实写操作必须记录 payload、traceId/code、操作者、回读结果。
 - 不能承诺完全摆脱 WebAPI/headless；营销、流量、商品编辑细节和验证码/风控仍可能需要浏览器 fallback。

@@ -17,12 +17,26 @@ const CHECK_FILES = [
   'scripts/bi_ops_cli.mjs',
   'scripts/link_ops_hl_openapi_executor.mjs',
   'scripts/link_ops_maintenance_openapi_executor.mjs',
+  'scripts/fetch_shein_openapi_products.mjs',
+  'scripts/load_shein_openapi_products_warehouse.mjs',
+  'scripts/link_ops_build_product_master_candidate_from_openapi.mjs',
+  'scripts/probe_shein_openapi_hl.mjs',
+  'lib/link_ops_product_draft_mapper.mjs',
   'scripts/generate_bi_portal.mjs',
   'scripts/bi_app/client.js',
   'scripts/test_bi_ops_permissions.mjs',
   'scripts/test_bi_ops_cli_flow.mjs',
   'scripts/test_bi_ops_chat_inference.mjs',
+  'scripts/test_bi_ops_bad_transcript_replay.mjs',
+  'scripts/test_bi_ops_chat_action_matrix.mjs',
+  'scripts/test_bi_ops_chat_maintenance_flow.mjs',
+  'scripts/test_bi_ops_task_projection.mjs',
+  'scripts/test_bi_ops_frontend_confirm_feedback.mjs',
+  'scripts/test_bi_ops_portal_shell_sync.mjs',
   'scripts/test_bi_ops_source_candidate_policy.mjs',
+  'scripts/test_link_ops_product_draft_openapi_detail.mjs',
+  'scripts/test_link_ops_executor_live_source_titles.mjs',
+  'scripts/test_shein_store_identity_merchant_fallback.mjs',
   'scripts/test_bi_ops_write_whitelist_scope.mjs',
   'scripts/check_bi_ops_production_safety.mjs',
   'scripts/test_bi_ops_production_safety.mjs',
@@ -39,10 +53,27 @@ const DIFF_CHECK_FILES = [
   'scripts/bi_ops_cli.mjs',
   'scripts/link_ops_hl_openapi_executor.mjs',
   'scripts/link_ops_maintenance_openapi_executor.mjs',
+  'scripts/fetch_shein_openapi_products.mjs',
+  'scripts/load_shein_openapi_products_warehouse.mjs',
+  'scripts/link_ops_build_product_master_candidate_from_openapi.mjs',
+  'scripts/probe_shein_openapi_hl.mjs',
+  'lib/link_ops_product_draft_mapper.mjs',
   'scripts/test_bi_ops_permissions.mjs',
   'scripts/test_bi_ops_cli_flow.mjs',
   'scripts/test_bi_ops_chat_inference.mjs',
+  'scripts/test_bi_ops_bad_transcript_replay.mjs',
+  'scripts/test_bi_ops_chat_action_matrix.mjs',
+  'scripts/test_bi_ops_chat_maintenance_flow.mjs',
+  'scripts/test_bi_ops_task_projection.mjs',
+  'scripts/test_bi_ops_frontend_confirm_feedback.mjs',
+  'scripts/test_bi_ops_portal_shell_sync.mjs',
+  'outputs/bi-portal/index.html',
+  'scripts/bi_app/client.js',
+  'scripts/bi_app/styles.css',
   'scripts/test_bi_ops_source_candidate_policy.mjs',
+  'scripts/test_link_ops_product_draft_openapi_detail.mjs',
+  'scripts/test_link_ops_executor_live_source_titles.mjs',
+  'scripts/test_shein_store_identity_merchant_fallback.mjs',
   'scripts/test_bi_ops_write_whitelist_scope.mjs',
   'scripts/check_bi_ops_production_safety.mjs',
   'scripts/test_bi_ops_production_safety.mjs',
@@ -125,11 +156,26 @@ async function main() {
   results.push({name: 'permission matrix smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_permissions.mjs']))});
   results.push({name: 'CLI flow smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_cli_flow.mjs']))});
   results.push({name: 'chat inference smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_chat_inference.mjs']))});
+  results.push({name: 'bad transcript replay smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_bad_transcript_replay.mjs']))});
+  results.push({name: 'chat action matrix smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_chat_action_matrix.mjs']))});
+  results.push({name: 'chat maintenance flow smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_chat_maintenance_flow.mjs']))});
+  results.push({name: 'task projection smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_task_projection.mjs']))});
+  results.push({name: 'ops frontend confirm feedback smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_frontend_confirm_feedback.mjs']))});
+  results.push({name: 'ops portal shell sync smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_portal_shell_sync.mjs']))});
   results.push({name: 'source candidate policy smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_source_candidate_policy.mjs']))});
+  results.push({name: 'OpenAPI product-detail payload mapper smoke', ...(await run(process.execPath, ['scripts/test_link_ops_product_draft_openapi_detail.mjs']))});
+  results.push({name: 'OpenAPI live source title enrichment smoke', ...(await run(process.execPath, ['scripts/test_link_ops_executor_live_source_titles.mjs']))});
+  results.push({name: 'store identity merchant fallback smoke', ...(await run(process.execPath, ['scripts/test_shein_store_identity_merchant_fallback.mjs']))});
   results.push({name: 'real-write whitelist scope smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_write_whitelist_scope.mjs']))});
   results.push({name: 'production real-write safety smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_production_safety.mjs']))});
   results.push({name: 'copy_product_draft success lifecycle smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs']))});
+  results.push({name: 'copy_product_draft searchProduct readback smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs', '--search-product-readback']))});
+  results.push({name: 'copy_product_draft generic product lifecycle smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs', '--generic-product']))});
+  results.push({name: 'copy_product_draft chat natural generic lifecycle smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs', '--generic-product', '--chat-natural']))});
+  results.push({name: 'copy_product_draft pre-valid failure lifecycle smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs', '--prevalid-fail']))});
+  results.push({name: 'copy_product_draft chat pre-valid retry lifecycle smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs', '--chat-natural', '--prevalid-retry']))});
   results.push({name: 'copy_product_draft weak-readback guard smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs', '--weak-readback']))});
+  results.push({name: 'copy_product_draft chat locked lifecycle guard smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs', '--chat-natural', '--weak-readback']))});
   results.push({name: 'copy_product_draft all-stores capability smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_all_stores_capability.mjs']))});
   results.push({name: 'maintenance executor fake OpenAPI smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_maintenance_executor_flow.mjs']))});
   results.push({name: 'official doc detail parser smoke', ...(await run(process.execPath, ['scripts/test_shein_openapi_doc_detail_parser.mjs']))});
@@ -148,16 +194,30 @@ async function main() {
     notes: [
       'permission and CLI flow smokes use isolated temporary auth/task/audit files',
       'chat inference smoke proves one chat send can create a current-session same-store copy task without calling the LLM or SHEIN',
+      'bad transcript replay smoke proves old Feishu/V1/read-only/task-pool assistant prose cannot pollute source/target facts, natural confirmation or user-facing browser responses',
+      'chat action matrix smoke proves copy, shelf, title, image, inventory, price and certificate commands all enter the same BI chat state machine through askAgent=true',
+      'chat maintenance flow smoke proves non-copy actions enter the same natural-language chat path, then natural confirmation can execute against an isolated fake OpenAPI server and read back success',
+      'task projection smoke proves the automation page receives only safe task progress summaries, not historical internals, confirm tokens or old cross-entry wording',
+      'ops frontend confirm feedback smoke proves the page stays chat-only, slow actions show busy feedback, task evidence is summarized, and Markdown rendering has readable structure',
+      'ops portal shell sync smoke proves the generated production HTML carries the current-session task filtering and no stale global task loader',
       'source candidate policy smoke proves explicit cross-store sources are respected while same-store source links remain valid when no source is explicit',
+      'OpenAPI product-detail mapper smoke proves copy_product_draft dynamically maps spu-info attributes, SKU dimensions and cost without inventing supplier_sku',
+      'OpenAPI live source title enrichment smoke proves stale source caches missing Arabic titles are repaired from official spu-info before publish validation',
+      'store identity merchant fallback smoke proves merchant-only OpenAPI identity is accepted only when static truth matches and no GS/merchant conflicts exist',
       'whitelist scope smoke enables safeWriteOperations only inside an isolated temporary portal',
       'production safety smoke checks locked and narrow-pilot configs through temporary files only',
       'copy_product_draft success smoke uses a local fake OpenAPI server only',
+      'copy_product_draft generic product smoke proves the success path is not tied to SM-505A/505-specific defaults',
+      'copy_product_draft chat natural generic smoke proves create/check/natural confirm/submit/readback all run through the BI chat entry, not only task APIs',
+      'copy_product_draft pre-valid smoke proves code=0/success=false is not treated as created/submitted',
+      'copy_product_draft chat pre-valid retry smoke proves a later natural-language confirm can refresh a formerly failed task and continue execution in the same turn when checks pass',
       'copy_product_draft weak-readback smoke proves weak evidence cannot auto-close a write task',
+      'copy_product_draft chat locked lifecycle smoke proves submitted/needs-manual-resolve tasks cannot be rechecked or resubmitted from chat',
       'copy_product_draft all-stores capability smoke proves non-HL stores can become confirmable when authorized, probed, gated and whitelisted',
-    'maintenance executor smoke uses a local fake OpenAPI server to verify activate/retire/inventory/supply-price/product-price/title/image/certificate payloads and readback',
+      'maintenance executor smoke uses a local fake OpenAPI server to verify activate/retire/inventory/supply-price/product-price/title/image/certificate payloads and readback',
       'official doc detail parser smoke uses offline fixtures and never prints/saves cookies',
       'maintenance readiness smoke requires schema, per-store permission and strong readback before pilot_ready',
-      'safeWriteOperations and real-submit whitelist are asserted disabled inside smoke flows',
+      'production safety smoke asserts production-style configs remain locked unless explicitly configured; write-enabled smokes use temporary fake OpenAPI only',
       'this gate does not submit real SHEIN writes',
     ],
   };

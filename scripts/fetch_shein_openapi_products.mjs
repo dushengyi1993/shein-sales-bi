@@ -217,8 +217,8 @@ function normalizeProductRows({storeKey, productRows, detailResults, stockBySku,
       const stockRows = skuCodes.map(sku => stockBySku.get(sku)).filter(Boolean);
       const productNameEn = firstByLanguage(skcInfo?.productMultiNameList, ['en', 'us'], 'productName')
         || firstByLanguage(detail?.productMultiNameList, ['en', 'us'], 'productName');
-      const productNameZh = firstByLanguage(skcInfo?.productMultiNameList, ['zh-cn', 'cn'], 'productName')
-        || firstByLanguage(detail?.productMultiNameList, ['zh-cn', 'cn'], 'productName');
+      const productNameAr = firstByLanguage(skcInfo?.productMultiNameList, ['ar', 'ar-sa'], 'productName')
+        || firstByLanguage(detail?.productMultiNameList, ['ar', 'ar-sa'], 'productName');
       const supplierCode = compact(skcInfo?.supplierCode || detail?.supplierCode || '');
       const shelfStatusCode = shelf?.shelfStatus === undefined || shelf?.shelfStatus === null ? '' : String(shelf.shelfStatus);
       rows.push({
@@ -229,7 +229,7 @@ function normalizeProductRows({storeKey, productRows, detailResults, stockBySku,
         skuCodes,
         supplierCode,
         productNameEn,
-        productNameZh,
+        productNameAr,
         categoryId: compact(detail?.categoryId),
         productTypeId: compact(detail?.productTypeId),
         brandCode: compact(detail?.brandCode),
@@ -275,7 +275,7 @@ async function fetchProductList(client, args) {
 async function fetchDetail(client, spuName) {
   try {
     const response = await client.request('/open-api/goods/spu-info', {
-      body: {spuName, languageList: ['en', 'zh-cn']},
+      body: {spuName, languageList: ['en', 'ar']},
     });
     const ok = response.ok && String(response.data?.code) === '0';
     return {

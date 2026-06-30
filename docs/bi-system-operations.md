@@ -15,7 +15,7 @@
 
 ## 2. 日常入口
 
-- 云端 BI 门户：[https://shein-bi.dushengyi.xyz/](https://shein-bi.dushengyi.xyz/)，旧 IP 入口 [http://43.165.167.135/](http://43.165.167.135/) 仅作兜底；已启用 Basic Auth，密码不得写入仓库或文档。
+- 云端 BI 门户：[https://shein-bi.dushengyi.xyz/](https://shein-bi.dushengyi.xyz/)，旧 IP 入口 [http://43.165.167.135/](http://43.165.167.135/) 仅作兜底；已启用 BI 应用内登录，密码不得写入仓库或文档。
 - 云端登录维护中心：[https://shein-bi.dushengyi.xyz/cloud-login-maintenance](https://shein-bi.dushengyi.xyz/cloud-login-maintenance)。当 SHEIN / SBN 子系统登录态失效、遇到验证码/滑块，或被协议签署 / 公告 / 通知确认等普通登录弹窗挡住时，用它临时打开指定店铺的云端浏览器窗口；普通登录干扰弹窗可由运维代理关闭/确认后再点登录，完成后必须点“我已完成并关闭”。
 - 本机 BI 门户和局域网协作入口已封存：`http://127.0.0.1:8787/`、`http://DUSHENGYI-PC2:8787/` 不再作为正式入口。
 - 仓库门户灾备文件：`outputs/bi-portal/index.html`（不代表当前云端运行态）
@@ -223,7 +223,7 @@
 
 ## 10. 团队访问边界
 
-- 当前团队入口为云端 `https://shein-bi.dushengyi.xyz/`，旧 IP `http://43.165.167.135/` 仅作兜底，通过 Basic Auth 限制访问。
+- 当前团队入口为云端 `https://shein-bi.dushengyi.xyz/`，旧 IP `http://43.165.167.135/` 仅作兜底，通过 BI 应用内登录和账号权限限制访问。
 - 本地局域网协作入口已封存；本地 `8787` 无监听服务，Windows 计划任务已禁用。
 - 原 Windows 防火墙规则 `SHEIN BI Portal LAN 8787 ReadOnly` 若仍显示启用，不代表本地 BI 已开放；关闭规则需要管理员权限。
 - 同事可标记动作状态、填写负责人和备注；共享状态写入 `state/bi_action_state.json`，每次写入会记录 `updatedBy` / `updatedByUser`，当前以访问 IP 留痕；审计日志追加到 `logs/bi_portal_action_audit.jsonl`。
@@ -247,8 +247,8 @@
 ## 12. 常用验证
 
 - 检查云端 BI 门户：打开 [https://shein-bi.dushengyi.xyz/#tab=system](https://shein-bi.dushengyi.xyz/#tab=system)。
-- 检查云端健康：未鉴权访问 `https://shein-bi.dushengyi.xyz/api/health` 应返回 `401`；带 Basic Auth 应返回 `200`。
-- 检查首页利润缓存：带 Basic Auth 访问 `https://shein-bi.dushengyi.xyz/api/bi/section/homeProfit`，确认 `data.homeProfitSummary.staleSource=false` 且 `sourceGeneratedAt` 等于当前 `data.json.__sections.generatedAt`；服务器侧可读 `/opt/shein-bi/app/outputs/bi-portal/sections/{profit,homeProfit}.json` 做同样核对。
+- 检查云端健康：未登录公网访问 `https://shein-bi.dushengyi.xyz/api/health` 应返回 `401` 或跳转登录；服务器本机或带有效 BI 登录会话访问应返回 `200`。
+- 检查首页利润缓存：带有效 BI 登录会话访问 `https://shein-bi.dushengyi.xyz/api/bi/section/homeProfit`，确认 `data.homeProfitSummary.staleSource=false` 且 `sourceGeneratedAt` 等于当前 `data.json.__sections.generatedAt`；服务器侧可读 `/opt/shein-bi/app/outputs/bi-portal/sections/{profit,homeProfit}.json` 做同样核对。
 - 检查本地是否仍封存：`http://127.0.0.1:8787/api/health` 应无法连接；若能连上，说明本地 BI 被重新启动，需要确认是否为回滚。
 - 修改 BI 门户 UI 时，默认先后台验证：`node --check scripts/generate_bi_portal.mjs`、`$env:SHEIN_BI_PORTAL_TIMEOUT_MS='900000'; node scripts/generate_bi_portal.mjs`、静态检查 `outputs/bi-portal/index.html` / `data.json`。除非用户要求或必须排查浏览器交互问题，不主动打开前端。
 - 云端是最终审核面。涉及 V2 弹窗/筛选/页面交互时，发布前必须在云端页面或云端服务输出复核；时间筛选月份切换的关键证据是弹窗保持 `hidden=false`、`aria-expanded=true`，月份标题正确更新且无 console error/warn。

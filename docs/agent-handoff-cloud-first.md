@@ -23,7 +23,7 @@
 - 云端运行用户：`sheinops`
 - 本机 SSH 别名：`ssh shein-bi-tencent`
 
-公网访问有 Basic Auth。账号密码只由用户私下交付，不得写入 GitHub、文档、日志或聊天。
+公网访问使用 BI 应用内登录和账号权限。账号密码只由用户私下交付，不得写入 GitHub、文档、日志或聊天。
 
 ## 3. 服务器上已有系统
 
@@ -130,7 +130,7 @@ curl -I http://127.0.0.1:8787/ || true
 公网 443
   -> HAProxy
   -> Caddy
-  -> Nginx Basic Auth
+  -> Nginx / BI 应用内登录
   -> BI Portal 127.0.0.1:8787
 ```
 
@@ -226,7 +226,7 @@ bash scripts/cloud_bi_refresh.sh today intraday
 - Cookie / session；
 - `.env.local`；
 - 数据库密码；
-- Basic Auth 密码；
+- BI 登录密码；
 - OpenAI / Codex / 第三方模型 token；
 - SHEIN / 飞书 / ET / OpenAPI secret；
 - `/home/sheinops/.codex/auth.json`；

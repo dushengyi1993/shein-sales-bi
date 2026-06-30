@@ -212,6 +212,8 @@
 
   - `marketing/build_known_ordinary_coupon_risk_plan.mjs`：从每日 guard 的 `knownOrdinaryActivityGuard` 生成旧普通活动低价叠券全量风险清单 `known-ordinary-coupon-risk-plan-YYYY-MM-DD.{json,csv,md}`。该脚本只读，不调用 SHEIN；Markdown 先给中文结论、按店铺汇总、需要做什么和优先复核样例，CSV 保留给脚本/筛选使用；输出按 `submitted/filled_price_candidate/unverified` 等证据信任级别、店铺和价差排序，给后续 live 复核、用户授权取消券或临时下架使用。
 
+  - `marketing/build_new_listing_limited_discount_plan.mjs`：新上架 `7` 天限时折扣兜底计划生成器。读取 BI linksData、当前最终版 `price-overrides` 和 `config/marketing_pricing_policy.json`，只筛选“上架 7 天内、在售、未报普通活动”的精确 `storeKey + skc`，按全局曝光 Top5 力度生成一周限时折扣 rescue JSON；已有旧限时折扣的目标会标记为 `replace_existing_limited_discount`，供执行器在 dry-run 安全后结束旧目标活动并重建。脚本本身只读、不调用 SHEIN、不执行写入；输出 `outputs/reports/new-listing-7d-limited-discount-plan-YYYY-MM-DD.{json,md}` 和 `tmp/marketing-signup/limited-discount-fallback/new-listing-7d-YYYY-MM-DD/`。
+
   - `marketing/build_high_coupon_research_candidates.mjs`：`30%/50%` 优惠券 research-only 候选生成器。读取本期 selection plan、`price-overrides`、最新 `marketing-stack-review` 和已知旧普通活动填报价，反推高券所需普通活动/限时折扣基准价，检查平台最低降幅、成本/仓储利润底线、旧普通活动/限时折扣打穿风险。输出 `outputs/reports/marketing-high-coupon-research-YYYY-MM-DD.{json,csv,md}`；不生成命令，不调用 SHEIN，不允许真实上线。
 
   - `marketing/submit_coupon_activity_goods.mjs`：优惠券 `34810` 的 15% 档执行器。默认必须传 `--target-plan`，且目标集合由共享 classifier 从 `price-overrides` 派生：只有明确标记为高曝光支持、滞销高库存引流或清货试验的 SKC 才能报名；历史 `couponFactor≈0.85` 或 combo “仅15%券”默认视为价格保障旧口径并阻断；`couponFactor=1`、`不叠券/券都禁止`、缺覆盖价或同一 `store+skc` 口径冲突都 fail closed。提交前会同时检查 active/future 限时折扣和已知旧普通活动填报价；若任一最低基准价叠券后低于 `finalTargetPrice`，目标 SKC 会被价格栈守卫排除；若最新 `marketing-stack-review` 过期/不可用、旧活动价证据目录缺失/解析失败，或目标 SKC 有旧普通/度假季标签但缺旧活动价证据，真实写路径 fail closed，不提交；遇到登录页或券集合接口 `20302` 会先用真实鼠标点击登录/继续登录并重试，恢复失败才报告登录阻塞。只有显式 `--allow-all-15pct-available` 才允许全可报报名。真实提交走 direct multi-level `partake` API，必须带 `partake_rule_id + coupon_level_id + skc_info_list`；Excel/页面的“导入成功/商品提交成功”不作为最终证据，最终看已报集合回读。
@@ -308,7 +310,7 @@
 
 - `cloud_morning_chain.sh`：云端晨间串行链路入口；08:00 先跑当天销售刷新，再启动统一日更。当前 `SHEIN_BI_MORNING_SEND_LARK_REPORT=0`，默认不发送日报。
 
-- `cloud_daily_refresh.sh`：云端统一日更补采入口；集中执行每天一次即可的慢变/复核采集，包括链接/业务域日更、营销活动/限时折扣/优惠券价格线索补采、RTV 换单复核、体检和 BI 刷新。OpenAPI 销售、退货退款、商品/链接双跑在生产日更中已开启；仅写并行对账层，不切生产事实源，不执行 SHEIN 写操作。
+- `cloud_daily_refresh.sh`：云端统一日更补采入口；集中执行每天一次即可的慢变/复核采集，包括链接/业务域日更、营销活动/限时折扣/优惠券价格线索补采、RTV 换单复核、体检和 BI 刷新。OpenAPI 销售、退货退款、商品/链接双跑在生产日更中已开启；仅写并行对账层，不切生产事实源。自动化运营真实写另走任务池、权限、白名单、确认和审计链路。
 
 - `cloud_link_business_sync.sh`：云端链接/业务域低层入口；按店顺序 bootstrap 浏览器会话、抓链接和业务域、入仓。生产调度由 `cloud_daily_refresh.sh` 调用它，避免日更任务分散。
 
@@ -319,6 +321,20 @@
 - `check_workspace_skill.ps1`
 
 - `watchdog_sales_automation.mjs`
+
+
+## 自动化运营 / OpenAPI smoke 与发版门禁
+
+- `test_bi_ops_release_gate.mjs`：自动化运营发版前总门禁；串联语法检查、权限矩阵、CLI flow、白名单作用域、前端确认/反馈、OpenAPI 商品详情 mapper、店铺身份 fallback、维护写执行器、复制上品强/弱回读、生产安全和旧确认文本扫描。
+
+- `test_bi_ops_frontend_confirm_feedback.mjs`：静态验证自动化运营页中文 `确认` 映射、按钮 busy/done/error 反馈、证据面板不遮挡聊天和 Markdown 渲染辅助函数。
+
+- `test_link_ops_product_draft_openapi_detail.mjs`：用离线 OpenAPI 商品详情 fixture 验证 `copy_product_draft` payload mapper 能还原类目、属性、图片、SKU、供货价、库存和尺寸重量等关键字段。
+
+- `test_shein_store_identity_merchant_fallback.mjs`：验证店铺身份校验的 `merchantId` fallback 只在静态真相匹配且无 GS 冲突时允许，避免 `account_mismatch` 被误放宽。
+
+- `test_bi_ops_copy_product_all_stores_capability.mjs`：验证 `copy_product_draft` 不再局限 HL；在授权、探针、总闸门、白名单和 payload 能力齐全时，非 HL 店也能进入可确认链路。
+
 
 
 

@@ -133,7 +133,7 @@ const LINK_OPS_STORE_CAPABILITIES = {
     productPublishAdapter: true,
     readDomains: ['store_info', 'site_currency', 'warehouse', 'product', 'stock', 'order', 'return', 'finance'],
     writeDomains: ['product_publish_precheck'],
-    note: 'HL 已完成 SHEIN OpenAPI 真实授权，并已验证商品/订单/库存等只读接口和销售对账；商品发布/编辑执行器已接入受控预检，真实提交仍要求 payload 完整和显式确认。',
+    note: 'HL 已完成 SHEIN OpenAPI 真实授权，并已验证商品/订单/库存等只读接口和销售对账；商品发布/编辑执行器已接入受控系统检查，真实提交仍要求 payload 完整和显式确认。',
   },
 };
 const LINK_OPS_OPENAPI_SUBMIT_CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
@@ -162,9 +162,9 @@ const OPENAPI_READ_DOMAIN_LABELS = {
   finance: '财务对账',
 };
 const OPENAPI_WRITE_DOMAIN_LABELS = {
-  product_publish_precheck: '商品发布/编辑预检',
-  product_status_precheck: '上下架预检',
-  marketing_precheck: '营销报名预检',
+  product_publish_precheck: '商品发布/编辑系统检查',
+  product_status_precheck: '上下架系统检查',
+  marketing_precheck: '营销报名系统检查',
 };
 
 const LINK_MAINTENANCE_INTENTS = new Set([
@@ -183,49 +183,49 @@ const LINK_OPS_MAINTENANCE_OFFICIAL_CANDIDATES = {
     label: '商品上下架',
     docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001253',
     evidence: 'SHEIN 官方公开文档目录确认该接口为“商品上下架”；schema 字段包含 skc_site_info_list / shelf_state / site_list / skc_name，shelf_state=1 为上架。',
-    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + dry-run payload hash + 回读/人工核销。'],
+    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + 系统检查 payload hash + 回读/人工核销。'],
   },
   retire_link: {
     endpoint: '/open-api/goods/modify-skc-shelf',
     label: '商品上下架',
     docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001253',
     evidence: 'SHEIN 官方公开文档目录确认该接口为“商品上下架”；schema 字段包含 skc_site_info_list / shelf_state / site_list / skc_name。',
-    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + dry-run payload hash + 回读/人工核销。'],
+    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + 系统检查 payload hash + 回读/人工核销。'],
   },
   update_title: {
     endpoint: '/open-api/goods/product/partialEdit',
     label: '商品局部编辑',
     docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001810',
     evidence: 'SHEIN 官方文档索引显示存在 Product Partial Edit（商品局部编辑）接口，更适合存量链接标题维护。',
-    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + dry-run payload hash + 回读/人工核销。'],
+    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + 系统检查 payload hash + 回读/人工核销。'],
   },
   update_images: {
     endpoint: '/open-api/goods/product/partialEdit',
     label: '商品局部编辑',
     docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001810',
     evidence: 'SHEIN 官方文档索引显示存在 Product Partial Edit（商品局部编辑）接口，更适合存量链接图片维护。',
-    missing: ['换图需提供完整 SHEIN partialEdit 图片 JSON，生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + dry-run payload hash + 回读/人工核销。'],
+    missing: ['换图需提供完整 SHEIN partialEdit 图片 JSON，生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + 系统检查 payload hash + 回读/人工核销。'],
   },
   update_inventory: {
     endpoint: '/open-api/stock/change-inventory/v2',
     label: '库存更新',
     docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001738',
     evidence: 'SHEIN 官方公开文档目录确认该接口为“更新商家库存接口v2”；schema 字段包含 updateSkuInventoryQuantityRequests / skuCode / invType / changeType / changeQuantity。',
-    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + dry-run payload hash + 库存回读/人工核销。'],
+    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + 系统检查 payload hash + 库存回读/人工核销。'],
   },
   update_supply_price: {
     endpoint: '/open-api/goods/update-cost',
     label: '供货价更新',
     docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001681',
     evidence: 'SHEIN 官方文档索引显示存在 Cost Price Update / 供货价更新接口。',
-    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + dry-run payload hash + 回读/人工核销。'],
+    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + 系统检查 payload hash + 回读/人工核销。'],
   },
   update_product_price: {
     endpoint: '/open-api/openapi-business-backend/product/price/save',
     label: '商品售价更新',
     docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001407',
     evidence: 'SHEIN 官方公开文档目录确认该接口为“更新商品售价”；schema 字段包含 productPriceList / productCode / currencyCode / shopPrice / site。',
-    missing: ['商品售价 API 同时写 shopPrice/specialPrice；生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + dry-run payload hash + 回读/人工核销。'],
+    missing: ['商品售价 API 同时写 shopPrice/specialPrice；生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + 系统检查 payload hash + 回读/人工核销。'],
   },
   certificate_review: {
     endpoint: '/open-api/goods/save-certificate-pool-skc-bind',
@@ -246,7 +246,7 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     realSubmit: false,
     confirmableState: 'openapi_product_preflight_ready',
     requiredConfirmText: LINK_OPS_OPENAPI_SUBMIT_CONFIRM_TEXT,
-    reason: '可做 OpenAPI 商品发布/编辑 payload 预检；真实 publishOrEdit 只在 payload 完整、任务待复核、显式确认文本同时满足时才会提交。',
+    reason: '可做 OpenAPI 商品发布/编辑 payload 系统检查；真实 publishOrEdit 只在 payload 完整、任务等你确认、显式确认文本同时满足时才会提交。',
   },
   {
     key: 'activate_link',
@@ -255,7 +255,7 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'link_maintenance_dry_run',
     precheck: true,
     realSubmit: false,
-    reason: '已接入官方商品上下架 OpenAPI 执行器；默认 dry-run 锁定 payload，真实上架必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
+    reason: '已接入官方商品上下架 OpenAPI 执行器；默认 系统检查 锁定 payload，真实上架必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
   },
   {
     key: 'retire_link',
@@ -264,7 +264,7 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'link_maintenance_dry_run',
     precheck: true,
     realSubmit: false,
-    reason: '已接入官方商品上下架 OpenAPI 执行器；默认 dry-run 锁定 payload，真实下架必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
+    reason: '已接入官方商品上下架 OpenAPI 执行器；默认 系统检查 锁定 payload，真实下架必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
   },
   {
     key: 'update_title',
@@ -273,7 +273,7 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'link_maintenance_dry_run',
     precheck: true,
     realSubmit: false,
-    reason: '已接入官方商品局部编辑 OpenAPI 执行器；默认 dry-run 锁定标题 payload，真实改标题必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
+    reason: '已接入官方商品局部编辑 OpenAPI 执行器；默认 系统检查 锁定标题 payload，真实改标题必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
   },
   {
     key: 'update_images',
@@ -291,7 +291,7 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'link_maintenance_dry_run',
     precheck: true,
     realSubmit: false,
-    reason: '已接入官方库存更新 OpenAPI 执行器；默认 dry-run 锁定库存 payload，真实改库存必须命中总闸门、白名单、确认文本并完成库存回读/人工核销。',
+    reason: '已接入官方库存更新 OpenAPI 执行器；默认 系统检查 锁定库存 payload，真实改库存必须命中总闸门、白名单、确认文本并完成库存回读/人工核销。',
   },
   {
     key: 'update_supply_price',
@@ -300,7 +300,7 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'link_maintenance_dry_run',
     precheck: true,
     realSubmit: false,
-    reason: '已接入官方供货价更新 OpenAPI 执行器；默认 dry-run 锁定供货价 payload，真实改供货价必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
+    reason: '已接入官方供货价更新 OpenAPI 执行器；默认 系统检查 锁定供货价 payload，真实改供货价必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
   },
   {
     key: 'update_product_price',
@@ -309,7 +309,7 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'link_maintenance_dry_run',
     precheck: true,
     realSubmit: false,
-    reason: '已接入官方商品售价更新 OpenAPI 执行器；默认 dry-run 锁定售价 payload，真实改售价必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
+    reason: '已接入官方商品售价更新 OpenAPI 执行器；默认 系统检查 锁定售价 payload，真实改售价必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
   },
   {
     key: 'campaign_signup',
@@ -344,8 +344,8 @@ const LINK_OPS_REAL_SUBMIT_REQUIREMENTS = [
   '具体 BI 登录账号',
   '目标店铺写权限',
   '动作具备真实提交适配器',
-  'dry-run 预检通过',
-  '任务停在待复核状态',
+  '系统检查通过',
+  '任务停在等你确认状态',
   LINK_OPS_OPENAPI_SUBMIT_CONFIRM_TEXT,
   '执行后回读证据',
 ];
@@ -376,6 +376,7 @@ const LINK_OPS_ALLOWED_UPLOAD_MIME = new Set([
   'text/plain',
   'text/csv',
   'application/json',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 ]);
 const CLOUD_AI_MEMORY_TTL_MS = Math.max(0, Number(process.env.SHEIN_CLOUD_AI_MEMORY_TTL_MS || 0));
 const CLOUD_AI_MEMORY_POLICY = Object.freeze({
@@ -457,6 +458,7 @@ function uploadExtensionFor(mime, name = '') {
     'text/plain': '.txt',
     'text/csv': '.csv',
     'application/json': '.json',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
   };
   const allowedExt = new Set(Object.values(byMime));
   return allowedExt.has(ext) ? ext : (byMime[mime] || '.bin');
@@ -476,6 +478,9 @@ function hasUploadMagic(buffer, mime) {
       return trimmed.startsWith('{') || trimmed.startsWith('[');
     }
     return true;
+  }
+  if (mime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
+    return buffer.length >= 4 && buffer[0] === 0x50 && buffer[1] === 0x4b && (buffer[2] === 0x03 || buffer[2] === 0x05 || buffer[2] === 0x07) && (buffer[3] === 0x04 || buffer[3] === 0x06 || buffer[3] === 0x08);
   }
   return false;
 }
@@ -940,12 +945,12 @@ function linkOpsActionCapabilitiesForStore(storeKey, cap = openApiStoreCapabilit
             ? 'authorized_pending_probe'
             : 'pending_authorization';
       reason = realSubmitSupported
-        ? '已具备商品发布/编辑执行适配器；仍必须 payload 完整、任务待复核、显式确认文本和回读证据齐全才可提交。'
+        ? '已具备商品发布/编辑执行适配器；仍必须 payload 完整、任务等你确认、显式确认文本和回读证据齐全才可提交。'
         : precheckSupported
-          ? '已具备商品发布/编辑 dry-run 预检；真实提交适配器未对该店放行。'
+          ? '已具备商品发布/编辑 系统检查；真实提交适配器未对该店放行。'
           : cap.authorized
-            ? '已授权但只读探针/商品双跑尚未证明可用，暂不能进入商品发布 dry-run。'
-            : '店铺尚未完成 OpenAPI 授权，不能进入商品发布 dry-run。';
+            ? '已授权但只读探针/商品双跑尚未证明可用，暂不能进入商品发布 系统检查。'
+            : '店铺尚未完成 OpenAPI 授权，不能进入商品发布 系统检查。';
       if (!cap.authorized) realSubmitBlockers.push('店铺未完成 OpenAPI 授权/密钥配置');
       if (cap.authorized && !cap.verifiedRead) realSubmitBlockers.push('最近只读探针/商品能力尚未证明可用');
       if (precheckSupported && !cap.safeWrite?.enabled) realSubmitBlockers.push('真实写总闸门未开启：safeWriteOperations.enabled=false');
@@ -955,11 +960,11 @@ function linkOpsActionCapabilitiesForStore(storeKey, cap = openApiStoreCapabilit
       if (precheckSupported && cap.safeWrite?.allowed && cap.realSubmitWhitelist?.enabled && !cap.realSubmitWhitelist?.configured) realSubmitBlockers.push('真实写试点白名单未配置该店铺+动作+账号');
       if (precheckSupported && !cap.productPublishExecuteAdapter) realSubmitBlockers.push('商品发布/编辑真实提交适配器未对该店放行');
       nextStep = realSubmitSupported
-        ? '先创建任务并跑 dry-run；只有任务回到待复核且 payload 完整时，网页/CLI 才可带确认文本执行。'
+        ? '先在会话里说明要做什么；系统检查资料完整后，你在聊天里同意即可提交。'
         : precheckSupported
-          ? '继续完善 payload 与执行器放行条件；当前只允许 dry-run 预检。'
+          ? '继续完善 payload 与执行器放行条件；当前只允许 系统检查。'
           : cap.authorized
-            ? '先跑/修复只读探针和商品双跑，再进入商品发布 dry-run。'
+            ? '先跑/修复只读探针和商品双跑，再进入商品发布 系统检查。'
             : '先完成该店 OpenAPI 授权和云端私有密钥配置。';
     } else if (LINK_MAINTENANCE_INTENTS.has(def.intent)) {
       precheckSupported = true;
@@ -979,12 +984,12 @@ function linkOpsActionCapabilitiesForStore(storeKey, cap = openApiStoreCapabilit
           for (const item of candidate.missing || []) realSubmitBlockers.push(item);
         }
         nextStep = realSubmitSupported
-          ? '先完成 dry-run 锁定 payload，再由有权限账号输入确认文本真实提交；提交后必须强回读或人工核销。'
-          : `先为 ${def.intent} 配置窄范围 safeWriteOperations 和真实写白名单，并完成 dry-run payload 锁定。`;
+          ? '先完成 系统检查 锁定 payload，再由有权限账号输入确认文本真实提交；提交后必须强回读或人工核销。'
+          : `先为 ${def.intent} 配置窄范围 safeWriteOperations 和真实写白名单，并完成 系统检查 payload 锁定。`;
       } else {
         realSubmitBlockers.push('尚未接入 SHEIN 官方维护写接口');
         realSubmitBlockers.push('尚未验证维护动作执行后回读字段');
-        nextStep = '先研究并验证官方维护写接口；在接口、payload、回读都确认前，只允许目标定位和风险 dry-run。';
+        nextStep = '先研究并验证官方维护写接口；在接口、payload、回读都确认前，只允许目标定位和风险 系统检查。';
       }
     } else {
       precheckSupported = false;
@@ -993,10 +998,10 @@ function linkOpsActionCapabilitiesForStore(storeKey, cap = openApiStoreCapabilit
       if (def.key === 'campaign_signup' || def.key === 'flash_discount') {
         realSubmitBlockers.push('官方公开 OpenAPI 目录当前无该营销写接口证据');
         realSubmitBlockers.push('该动作继续走已有本地营销运营流程和人工确认，不通过官方 OpenAPI 总闸门伪装成可提交');
-        nextStep = '若后续 SHEIN 开放营销报名/限时折扣官方接口，再按 dry-run、白名单、确认文本、回读/人工核销重新接入。';
+        nextStep = '若后续 SHEIN 开放营销报名/限时折扣官方接口，再按 系统检查、白名单、确认文本、回读/人工核销重新接入。';
       } else {
-        realSubmitBlockers.push('该动作当前只有任务池/人工流程，没有自动执行适配器');
-        nextStep = '先补动作专属预检和执行器，再讨论真实提交。';
+        realSubmitBlockers.push('该动作当前还没有自动执行适配器，只能先按人工流程处理');
+        nextStep = '先补动作专属系统检查和执行器，再讨论真实提交。';
       }
     }
     return {
@@ -1096,7 +1101,7 @@ function openApiCapabilityLedger() {
         encryptedCredential: maskCredentialPresence(local?.encryptedSecretKey),
       },
       note: staticCap.note || (probeReadReady
-        ? `云端只读探针已通过（${probeSummary.summary?.generatedAt || 'unknown'}），销售双跑${salesReconciliation ? ` ${salesReconciliation.date || ''}=${salesReconciliation.status || 'unknown'}` : '待调度'}，退货双跑${returnReconciliation ? ` ${returnReconciliation.date || ''}=${returnReconciliation.status || 'unknown'}` : '待调度'}，商品基础资料双跑${productReconciliation ? `=${productReconciliation.status || 'unknown'}` : '待调度'}；商品发布/编辑可进入 OpenAPI dry-run 权限与 payload 预检，真实写操作仍需单独适配、人工确认和回读。`
+        ? `云端只读探针已通过（${probeSummary.summary?.generatedAt || 'unknown'}），销售双跑${salesReconciliation ? ` ${salesReconciliation.date || ''}=${salesReconciliation.status || 'unknown'}` : '待调度'}，退货双跑${returnReconciliation ? ` ${returnReconciliation.date || ''}=${returnReconciliation.status || 'unknown'}` : '待调度'}，商品基础资料双跑${productReconciliation ? `=${productReconciliation.status || 'unknown'}` : '待调度'}；商品发布/编辑可进入 OpenAPI 系统检查 权限与 payload 系统检查，真实写操作仍需单独适配、人工确认和回读。`
         : authorized
           ? (probeResult && !openApiProbeResultIsReadReady(probeResult)
             ? `已授权，但最近云端只读探针未通过：${probeResult.status || 'unknown'}。`
@@ -1175,6 +1180,190 @@ function openApiCapabilityLedger() {
       realSubmitWhitelist,
       maintenanceWrites: 'dry_run_only_until_official_endpoint_and_readback_verified',
       productionSourceSwitch: 'dual_run_reconcile_before_cutover',
+    },
+    rows,
+  };
+}
+
+function projectOpenApiCapabilityStateForClient(action) {
+  if (action?.realSubmitSupported) return 'ready';
+  if (action?.precheckSupported) return 'can_prepare';
+  return 'not_available';
+}
+
+function projectOpenApiCapabilityReasonForClient(action) {
+  if (!action || typeof action !== 'object') return '';
+  if (action.realSubmitSupported) {
+    return '已接通：你在聊天里说要做什么，系统会检查资料，得到你同意后提交并回读结果。';
+  }
+  if (action.precheckSupported) {
+    return '可先检查资料；真实操作还未对当前店铺/动作开放。';
+  }
+  if (action.key === 'campaign_signup' || action.key === 'flash_discount') {
+    return 'SHEIN 当前没有开放这类官方写接口，暂不伪装成可自动提交。';
+  }
+  return '这个动作还没接入自动执行能力。';
+}
+
+function projectOpenApiCapabilityNextStepForClient(action) {
+  if (!action || typeof action !== 'object') return '';
+  if (action.realSubmitSupported) return '直接在聊天里安排，系统会把缺口、确认和结果都放回同一个会话。';
+  if (action.precheckSupported) return '可以先让系统检查资料；等安全规则和执行能力齐全后再开放提交。';
+  if (action.key === 'campaign_signup' || action.key === 'flash_discount') return '继续按现有营销流程处理；等官方接口明确后再接入。';
+  return '需要先补动作执行器和结果回读。';
+}
+
+function projectOpenApiCapabilityBlockerForClient(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  if (/未完成.*授权|密钥配置|pending_authorization/i.test(text)) return '店铺还没完成授权。';
+  if (/只读探针|商品能力|read/i.test(text)) return '店铺接口连通性还没确认。';
+  if (/safeWriteOperations|总闸门|allowedOperations|allowedStores|白名单|whitelist|bi_ops_write_whitelist/i.test(text)) return '当前账号、店铺或动作还没被安全规则放行。';
+  if (/payload|hash|确认文本|SHEIN_[A-Z_]*OPENAPI_SUBMIT|dry[-_ ]?run/i.test(text)) return '还需要完成提交前资料检查和结果确认。';
+  if (/真实提交适配器|执行器|官方接口/i.test(text)) return '这个动作的自动执行能力还没对当前店铺开放。';
+  return sanitizeLinkOpsClientText(text, 180);
+}
+
+function projectOpenApiActionCapabilityForClient(action) {
+  const blockers = [...new Set(asArray(action?.realSubmitBlockers)
+    .map(projectOpenApiCapabilityBlockerForClient)
+    .filter(Boolean))]
+    .slice(0, 6);
+  const officialCandidate = action?.officialCandidate && typeof action.officialCandidate === 'object'
+    ? {
+        label: sanitizeLinkOpsClientText(action.officialCandidate.label || '', 120),
+        docUrl: String(action.officialCandidate.docUrl || '').trim(),
+        endpoint: sanitizeLinkOpsClientText(action.officialCandidate.endpoint || '', 160),
+      }
+    : null;
+  return {
+    key: String(action?.key || '').trim(),
+    label: sanitizeLinkOpsClientText(action?.label || '', 80),
+    intent: String(action?.intent || '').trim(),
+    state: projectOpenApiCapabilityStateForClient(action),
+    precheckSupported: Boolean(action?.precheckSupported),
+    realSubmitSupported: Boolean(action?.realSubmitSupported),
+    canSilentWrite: false,
+    realSubmitBlockers: action?.realSubmitSupported ? [] : blockers,
+    nextStep: projectOpenApiCapabilityNextStepForClient(action),
+    reason: projectOpenApiCapabilityReasonForClient(action),
+    officialCandidate,
+  };
+}
+
+function projectOpenApiCapabilityDefinitionsForClient(defs) {
+  return asArray(defs).map(def => ({
+    key: String(def?.key || '').trim(),
+    label: sanitizeLinkOpsClientText(def?.label || '', 80),
+    intent: String(def?.intent || '').trim(),
+    precheck: Boolean(def?.precheck),
+    realSubmit: false,
+    reason: projectOpenApiCapabilityReasonForClient({
+      key: def?.key,
+      precheckSupported: Boolean(def?.precheck),
+      realSubmitSupported: false,
+    }),
+  })).filter(row => row.key);
+}
+
+function projectOpenApiCapabilityRowForClient(row) {
+  if (!row || typeof row !== 'object') return null;
+  const actionCapabilities = asArray(row.actionCapabilities)
+    .map(projectOpenApiActionCapabilityForClient)
+    .filter(action => action.key);
+  return {
+    storeKey: String(row.storeKey || '').trim().toUpperCase(),
+    storeName: sanitizeLinkOpsClientText(row.storeName || '', 80),
+    status: String(row.status || '').trim(),
+    configured: Boolean(row.configured),
+    enabled: Boolean(row.enabled),
+    authorized: Boolean(row.authorized),
+    verifiedRead: Boolean(row.verifiedRead),
+    salesReconciliation: Boolean(row.salesReconciliation),
+    salesReconciliationLatest: row.salesReconciliationLatest || null,
+    returnReconciliation: Boolean(row.returnReconciliation),
+    returnReconciliationLatest: row.returnReconciliationLatest || null,
+    productReconciliation: Boolean(row.productReconciliation),
+    productReconciliationLatest: row.productReconciliationLatest || null,
+    writePrecheckReady: Boolean(row.writePrecheckReady),
+    writeConfirmable: Boolean(row.writeConfirmable),
+    canSilentWrite: false,
+    actionCapabilities,
+    safeWriteEnabled: Boolean(row.safeWriteEnabled),
+    safeWrite: {
+      enabled: Boolean(row.safeWrite?.enabled),
+      operationAllowed: Boolean(row.safeWrite?.operationAllowed),
+      storeAllowed: Boolean(row.safeWrite?.storeAllowed),
+    },
+    realSubmitWhitelist: {
+      enabled: Boolean(row.realSubmitWhitelist?.enabled),
+      configured: Boolean(row.realSubmitWhitelist?.configured),
+      ruleCount: Number(row.realSubmitWhitelist?.ruleCount || 0) || 0,
+      matchedRuleCount: Number(row.realSubmitWhitelist?.matchedRuleCount || 0) || 0,
+    },
+    readDomains: asArray(row.readDomains).map(x => String(x || '').trim()).filter(Boolean),
+    readDomainLabels: asArray(row.readDomainLabels).map(x => sanitizeLinkOpsClientText(x, 80)).filter(Boolean),
+    writeDomains: asArray(row.writeDomains).map(x => String(x || '').trim()).filter(Boolean),
+    writeDomainLabels: asArray(row.writeDomainLabels).map(x => sanitizeLinkOpsClientText(x, 80)).filter(Boolean),
+    authorizedAt: row.authorizedAt || null,
+    shopName: sanitizeLinkOpsClientText(row.shopName || '', 120),
+    profileKey: sanitizeLinkOpsClientText(row.profileKey || '', 80),
+    credentialPresence: {
+      apiCredential: {present: Boolean(row.credentialPresence?.apiCredential?.present)},
+      encryptedCredential: {present: Boolean(row.credentialPresence?.encryptedCredential?.present)},
+    },
+    note: row.authorized
+      ? (row.verifiedRead
+        ? '店铺已接通；可在聊天里安排已开放的运营动作。'
+        : '店铺已授权，接口连通性还在确认。')
+      : '店铺还没完成授权。',
+  };
+}
+
+function projectOpenApiCapabilityLedgerForClient(ledger) {
+  const rows = asArray(ledger?.rows)
+    .map(projectOpenApiCapabilityRowForClient)
+    .filter(Boolean);
+  return {
+    ok: ledger?.ok !== false,
+    generatedAt: ledger?.generatedAt || new Date().toISOString(),
+    environment: ledger?.environment || 'prod',
+    probeSummary: ledger?.probeSummary || null,
+    salesReconciliationSummary: ledger?.salesReconciliationSummary || null,
+    returnReconciliationSummary: ledger?.returnReconciliationSummary || null,
+    productReconciliationSummary: ledger?.productReconciliationSummary || null,
+    market: ledger?.market || 'SA',
+    cooperationMode: ledger?.cooperationMode || '半托管',
+    apiBase: ledger?.apiBase || '',
+    allStoreKeys: asArray(ledger?.allStoreKeys).map(x => String(x || '').trim().toUpperCase()).filter(Boolean),
+    counts: ledger?.counts || {
+      total: rows.length,
+      authorized: rows.filter(r => r.authorized).length,
+      readReady: rows.filter(r => r.verifiedRead).length,
+      writePrecheckReady: rows.filter(r => r.writePrecheckReady).length,
+      writeConfirmable: rows.filter(r => r.writeConfirmable).length,
+    },
+    readDomainLabels: ledger?.readDomainLabels || OPENAPI_READ_DOMAIN_LABELS,
+    writeDomainLabels: ledger?.writeDomainLabels || OPENAPI_WRITE_DOMAIN_LABELS,
+    actionCapabilityDefinitions: projectOpenApiCapabilityDefinitionsForClient(ledger?.actionCapabilityDefinitions),
+    safety: {
+      naturalLanguageWrites: 'chat_controlled_checked_execution',
+      secretsInResponse: false,
+      canSilentWrite: false,
+      realSubmitRequires: ['账号有权限', '资料检查通过', '你在聊天里明确同意', '提交后回读或人工确认结果'],
+      safeWriteOperations: {
+        enabled: Boolean(ledger?.safety?.safeWriteOperations?.enabled),
+        allowedOperations: asArray(ledger?.safety?.safeWriteOperations?.allowedOperations).map(x => String(x || '').trim()).filter(Boolean),
+        allowedStores: asArray(ledger?.safety?.safeWriteOperations?.allowedStores).map(x => String(x || '').trim().toUpperCase()).filter(Boolean),
+      },
+      realSubmitWhitelist: {
+        enabled: Boolean(ledger?.safety?.realSubmitWhitelist?.enabled),
+        ruleCount: Number(ledger?.safety?.realSubmitWhitelist?.ruleCount || 0) || 0,
+        operations: asArray(ledger?.safety?.realSubmitWhitelist?.operations).map(x => String(x || '').trim()).filter(Boolean),
+        stores: asArray(ledger?.safety?.realSubmitWhitelist?.stores).map(x => String(x || '').trim().toUpperCase()).filter(Boolean),
+      },
+      maintenanceWrites: 'chat_controlled_checked_execution',
+      productionSourceSwitch: 'cloud_current',
     },
     rows,
   };
@@ -1646,7 +1835,7 @@ function loginPageHtml({error = '', next = '/', user = ''} = {}) {
 .card{padding:30px}.card h2{margin:0 0 8px;font-size:26px;letter-spacing:-.04em}.sub{margin:0 0 24px;color:var(--muted);line-height:1.6}.field{margin:14px 0}.field label{display:block;font-size:13px;font-weight:800;color:#51463b;margin:0 0 8px}.field input{width:100%;border:1px solid var(--line);border-radius:16px;padding:14px 15px;font-size:16px;background:#fff;color:var(--ink);outline:none}.field input:focus{border-color:var(--brand);box-shadow:0 0 0 4px rgba(115,87,255,.12)}
 .btn{width:100%;border:0;border-radius:16px;background:linear-gradient(135deg,var(--brand),#8b5cf6);color:#fff;font-weight:900;font-size:16px;padding:14px 18px;cursor:pointer;margin-top:16px;box-shadow:0 12px 34px rgba(115,87,255,.28)}.btn:hover{filter:brightness(1.04)}.err{background:#fff0f0;border:1px solid #ffd1d1;color:#b42318;padding:12px 14px;border-radius:14px;margin-bottom:14px;font-weight:700}.foot{margin-top:18px;color:var(--muted);font-size:12px;line-height:1.6}
 @media(max-width:820px){.shell{grid-template-columns:1fr}.hero{min-height:auto}.hero h1{font-size:36px}}
-</style></head><body><main class="shell"><section class="hero"><div><div class="eyebrow">SHEIN BI · Ops Console</div><h1>经营数据和自动运营，统一从这里进入。</h1><p>登录后可以查看全部店铺数据；自动运营写操作会按账号权限控制店铺范围，并写入审计日志。</p><div class="chips"><span>全店数据可读</span><span>店铺写权限隔离</span><span>操作可追溯</span><span>Codex 受控网关</span></div></div><p>安全边界：不会静默修改 SHEIN，写动作必须进入任务池、预检、确认、执行器和回读链路。</p></section><section class="card"><h2>登录 BI</h2><p class="sub">使用你的 BI 账号进入。原公网账号密码继续有效，只是不再使用浏览器弹框。</p>${error ? `<div class="err">${htmlEscape(error)}</div>` : ''}<form method="post" action="/api/login"><input type="hidden" name="next" value="${htmlEscape(safeNext)}"/><div class="field"><label>账号</label><input name="username" autocomplete="username" value="${htmlEscape(user)}" autofocus required/></div><div class="field"><label>密码</label><input name="password" type="password" autocomplete="current-password" required/></div><button class="btn" type="submit">进入系统</button></form><div class="foot">如果你能看到这个页面，说明公网 Basic Auth 已经不再拦截；后续权限会在系统内识别到具体操作者。</div></section></main></body></html>`;
+</style></head><body><main class="shell"><section class="hero"><div><div class="eyebrow">SHEIN BI · Ops Console</div><h1>经营数据和自动运营，统一从这里进入。</h1><p>登录后可以查看全部店铺数据；自动运营写操作会按账号权限控制店铺范围，并写入记录日志。</p><div class="chips"><span>全店数据可读</span><span>店铺写权限隔离</span><span>操作可追溯</span><span>Codex 受控网关</span></div></div><p>安全边界：不会静默修改 SHEIN，写动作会进入当前会话处理；系统会自动检查资料、按账号权限拦截越界、提交后回读结果。</p></section><section class="card"><h2>登录 BI</h2><p class="sub">使用你的 BI 账号进入。原公网账号密码继续有效，只是不再使用浏览器弹框。</p>${error ? `<div class="err">${htmlEscape(error)}</div>` : ''}<form method="post" action="/api/login"><input type="hidden" name="next" value="${htmlEscape(safeNext)}"/><div class="field"><label>账号</label><input name="username" autocomplete="username" value="${htmlEscape(user)}" autofocus required/></div><div class="field"><label>密码</label><input name="password" type="password" autocomplete="current-password" required/></div><button class="btn" type="submit">进入系统</button></form><div class="foot">如果你能看到这个页面，说明公网 Basic Auth 已经不再拦截；后续权限会在系统内识别到具体操作者。</div></section></main></body></html>`;
 }
 
 function normalizeRemoteAddress(req) {
@@ -1782,17 +1971,39 @@ function actorAuditContext(actor, req) {
   };
 }
 
+function isCopySourceTitleHint(text, copyProductIntent = false) {
+  if (!copyProductIntent) return false;
+  const sourceText = String(text || '');
+  return /标题[\s\S]{0,24}(?:复制|沿用|照搬|直接用|用|取|来自|源链接|那条)/.test(sourceText)
+    || /(?:复制|沿用|照搬|直接用|用|取)[\s\S]{0,24}标题/.test(sourceText)
+    || /title[\s\S]{0,24}(?:copy|same|source|use)/i.test(sourceText);
+}
+
+function isExplicitUpdateTitleIntent(text) {
+  return /改标题|换标题|标题\s*(?:改成|改为|换成|设为|设置为|=|：|:)|title\s*(?:to|=|:)/i.test(String(text || ''));
+}
+
+function normalizeIntentsForCommand(intents = [], command = '') {
+  const out = [...new Set(asArray(intents).map(x => String(x || '').trim()).filter(Boolean))];
+  if (out.includes('copy_product_draft') && out.includes('update_title') && isCopySourceTitleHint(command, true) && !isExplicitUpdateTitleIntent(command)) {
+    return out.filter(x => x !== 'update_title');
+  }
+  return out.length ? out : ['manual_review'];
+}
+
 function inferLinkOpsIntent(command) {
   const text = String(command || '').trim();
   const lower = text.toLowerCase();
   const intents = [];
   const activateLinkIntent = /恢复上架|重新上架|再次上架|改为上架|设为上架|设置上架|恢复在售|改回在售|上架回来/.test(text)
     || /\b(activate_link|on_shelf|onshelf|relist|restore_listing)\b/.test(lower);
-  const copyProductIntent = /补|复制|上品|草稿|覆盖|缺链接|缺链|创建草稿|创建链接|上链接|发链接|发布商品|刊登|提交审核/.test(text)
+  const copyProductIntent = /补(?:一|1)?(?:个|条|款)?(?:新)?(?:链接|链|商品|上品)|补链|缺链接|缺链|复制|拷贝|参考|上品|草稿|覆盖|创建草稿|创建链接|上链接|发链接|发布商品|刊登|提交审核/.test(text)
     || /\b(copy|draft|create|publish|coverage)\b/.test(lower);
   if (activateLinkIntent) intents.push('activate_link');
   if (copyProductIntent) intents.push('copy_product_draft');
-  if (/标题|title/.test(lower)) intents.push('update_title');
+  const copySourceTitleHint = isCopySourceTitleHint(text, copyProductIntent);
+  const explicitUpdateTitleIntent = isExplicitUpdateTitleIntent(text);
+  if ((/标题|title/.test(lower) && !copySourceTitleHint) || explicitUpdateTitleIntent) intents.push('update_title');
   if (/主图|图片|套图|image|photo|pic/.test(lower)) intents.push('update_images');
   if (/库存|补库存|改库存|虚拟库存|stock|inventory/.test(lower)) intents.push('update_inventory');
   const supplyPriceIntent = /供货价|成本价|cost price|supply price|cost\b/.test(lower);
@@ -1803,7 +2014,7 @@ function inferLinkOpsIntent(command) {
   if (/限时|折扣|秒杀|促销|discount/.test(lower)) intents.push('flash_discount');
   if (/证书|资质|合规/.test(text)) intents.push('certificate_review');
   if (!intents.length) intents.push('manual_review');
-  return intents;
+  return normalizeIntentsForCommand(intents, text);
 }
 
 function linkOpsIntentLabel(intent) {
@@ -1827,22 +2038,25 @@ function linkOpsStatusLabel(status) {
   return ({
     chatting: '会话中',
     sending: '发送中',
-    task_created: '已建任务',
+    task_created: '已开始处理',
     draft: '草案',
     confirmed: '待开始',
     in_progress: '执行中',
-    waiting_review: '待复核',
+    waiting_review: '等你确认',
     done: '完成',
     archived: '归档',
   })[status] || String(status || '');
 }
 
-function inferLinkOpsTargets(command) {
+function inferLinkOpsTargets(command, options = {}) {
+  const includeAttributeOverrides = options.includeAttributeOverrides !== false;
   const text = String(command || '');
-  const allStoresRequested = /全店|所有店|全部店|19\s*店|十九\s*店|各店|每个店/.test(text);
+  const allStoreMentioned = /全店|所有店|所有店铺|全部店|全部店铺|19\s*店|十九\s*店|各店|每个店/.test(text);
+  const allStoresAsSourceScope = /(?:全店|所有店|所有店铺|全部店|全部店铺|19\s*店|十九\s*店|各店|每个店)(?:里|中|内|范围|里面)?[\s\S]{0,36}?(?:流量|曝光|销量|最高|最好|现有|已有|源链接|挑|选|找)/.test(text);
+  const allStoresRequested = allStoreMentioned && !allStoresAsSourceScope;
   const storeMatches = allStoresRequested
     ? DEFAULT_MANUAL_LOGIN_STORE_KEYS
-    : [...new Set((text.match(/\b[A-Z]{2,3}\b/g) || [])
+    : [...new Set((text.match(/\b[A-Z]{2,3}\b/gi) || [])
     .map(x => x.toUpperCase())
     .filter(x => SHEIN_STORE_KEYS.has(x)))].slice(0, 24);
   const copyToMatch = /(?:从|复制|拷贝|参考)?\s*\b([A-Z]{2,3})\b[\s\S]{0,48}?(?:到|至|给|复制到|拷贝到|上到|铺到)\s*\b([A-Z]{2,3})\b/i.exec(text);
@@ -1856,23 +2070,218 @@ function inferLinkOpsTargets(command) {
     if (SHEIN_STORE_KEYS.has(target)) writeStores.push(target);
   }
   if (copyLike && storeMatches.length === 1 && !sourceStores.length && !writeStores.length) {
-    sourceStores.push(storeMatches[0]);
+    if (!allStoresAsSourceScope) sourceStores.push(storeMatches[0]);
     writeStores.push(storeMatches[0]);
   }
+  const namedProductMatches = text.match(/\b[A-Z]{1,6}-?\d{1,8}[A-Z]?(?:-[A-Z0-9]+)?[\u4e00-\u9fa5]{1,24}?(?=(?:补|复制|改|换|上架|下架|，|,|。|；|;|\s|$))/giu) || [];
   const alnumMatches = text.match(/\b(?:[A-Z]{1,6}-?\d{1,8}[A-Z]?(?:-[A-Z0-9]+)?(?:[\u4e00-\u9fa5A-Za-z0-9-]*)?|(?:sv|sb)\d{8,})\b/giu) || [];
   const numericProductMatches = (text.match(/(?<!\d)(\d{3,6}[A-Z]?)(?=\s*(?:缝纫机|咖啡机|空气炸锅|热风梳|厨师机|脱毛仪|榨汁机|绞肉机|吸尘器|电磁炉|按摩器|链接|货号|产品|品))/giu) || [])
     .map(x => x.match(/\d{3,6}[A-Z]?/i)?.[0] || '');
-  const skuMatches = [...new Set([...alnumMatches, ...numericProductMatches]
+  const skuMatches = [...new Set([...namedProductMatches, ...alnumMatches, ...numericProductMatches]
     .map(x => x
       .replace(/[，。；、,.]+$/g, '')
-      .replace(/(各店|全店|所有店|差链接|弱链接|死链接|缺链接|链接|建议|下架|换图|补新|补链|覆盖).*$/u, ''))
+      .replace(/(各店|全店|所有店|差链接|弱链接|死链接|缺链接|链接|建议|库存|虚拟库存|供货价|成本价|售价|原价|销售价|商品价|价格|标题|上架|下架|换图|补新|补链|覆盖|改成|改为|设置|设为|更新为|调到|调成).*$/u, ''))
     .filter(x => /\d/.test(x) && !/^19$/.test(x)))].slice(0, 24);
   return {
     stores: storeMatches,
     sourceStores,
     writeStores,
+    sourceScope: allStoresAsSourceScope ? 'all_stores' : '',
     productRefs: skuMatches,
+    attributeOverrides: includeAttributeOverrides ? inferLinkOpsAttributeOverrides(text, {task: options.attributeContextTask || null}) : [],
   };
+}
+
+function normalizeInputCurrentOverrideValue(value, unit = 'mA') {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const numeric = Number(raw.replace(/,/g, ''));
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  const normalizedUnit = String(unit || 'mA').trim().toLowerCase();
+  const milliamps = normalizedUnit === 'a' || normalizedUnit === '安'
+    ? Math.round(numeric * 1000)
+    : Math.round(numeric);
+  if (!Number.isFinite(milliamps) || milliamps <= 0) return null;
+  return {
+    attribute_extra_value: String(milliamps),
+    attribute_unit: 'mA',
+    display_value: `${milliamps}mA`,
+  };
+}
+
+function cleanManualAttributeOverrideValue(value) {
+  return String(value || '')
+    .replace(/^[\s"'“”‘’]+|[\s"'“”‘’]+$/g, '')
+    .replace(/(?:就行|即可|可以|吧|哈|啊|呀|算|处理)$/u, '')
+    .replace(/[，。；;,.]+$/g, '')
+    .trim()
+    .slice(0, 500);
+}
+
+function normalizeGenericAttributeOverrideValue(attributeId, rawValue) {
+  const cleaned = cleanManualAttributeOverrideValue(rawValue);
+  if (!cleaned) return null;
+  if (Number(attributeId) === 1002323) {
+    const normalized = normalizeInputCurrentOverrideValue(
+      (cleaned.match(/[0-9]+(?:\.[0-9]+)?/) || [''])[0] || cleaned,
+      /(?:^|[^a-z])a(?:$|[^a-z])|安/i.test(cleaned) && !/mA|毫安/i.test(cleaned) ? 'A' : 'mA',
+    );
+    return normalized?.attribute_extra_value || null;
+  }
+  return cleaned;
+}
+
+function collectPreValidTextRowsFromTask(task) {
+  const rows = [];
+  const collectInfo = info => {
+    if (!info || typeof info !== 'object') return;
+    for (const row of asArray(info.pre_valid_result || info.preValidResult)) {
+      const form = String(row?.form_name || row?.form || row?.module || '').trim();
+      for (const message of asArray(row?.messages || row?.message)) {
+        const text = String(message || '').trim();
+        if (text) rows.push(form ? `${form}：${text}` : text);
+      }
+    }
+  };
+  for (const run of asArray(task?.execution?.openApiProductExecutors)) {
+    collectInfo(run?.publishResult?.info);
+    collectInfo(run?.result?.publishResult?.info);
+  }
+  for (const row of asArray(task?.execution?.writeAudit?.executorEvidence)) {
+    collectInfo(row?.publishResult?.info);
+  }
+  rows.push(
+    ...asArray(task?.preflight?.blockers),
+    ...asArray(task?.execution?.preflight?.blockers),
+    ...asArray(task?.blockers),
+  );
+  return rows.map(x => String(x || '').trim()).filter(Boolean);
+}
+
+function collectRequiredAttributeHintsFromTask(task) {
+  const hints = [];
+  const seen = new Set();
+  const add = (label, attributeId) => {
+    const id = Number(attributeId);
+    const cleanLabel = String(label || '')
+      .replace(/^[\s:：，,。；;、]+|[\s:：，,。；;、]+$/g, '')
+      .replace(/^所以/u, '')
+      .trim()
+      .slice(0, 80);
+    if (!cleanLabel || !Number.isFinite(id) || id <= 0) return;
+    const key = `${id}|${cleanLabel}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    hints.push({attribute_id: id, label: cleanLabel});
+  };
+  for (const text of collectPreValidTextRowsFromTask(task)) {
+    const source = String(text || '');
+    for (const match of source.matchAll(/(?:所以|，|,|；|;|。|：|:|\s|^)([^()，,。；;:：\s]{1,40})\((\d{3,})\)\s*(?:为)?必填/gu)) {
+      add(match[1], match[2]);
+    }
+    for (const match of source.matchAll(/([^()，,。；;:：\s]{1,40})\((\d{3,})\)[^，,。；;\n]{0,24}(?:必填|必须填|需要填|不能为空|缺少|未填写)/gu)) {
+      add(match[1], match[2]);
+    }
+  }
+  return hints.slice(0, 12);
+}
+
+function inferContextualAttributeOverrides(text, task) {
+  const sourceText = String(text || '');
+  const hints = collectRequiredAttributeHintsFromTask(task);
+  if (!hints.length) return [];
+  const overrides = [];
+  const push = (hint, rawValue) => {
+    const value = normalizeGenericAttributeOverrideValue(hint.attribute_id, rawValue);
+    if (!value) return;
+    overrides.push({
+      attribute_id: hint.attribute_id,
+      attributeId: hint.attribute_id,
+      attribute_extra_value: value,
+      attributeExtraValue: value,
+      attribute_unit: Number(hint.attribute_id) === 1002323 ? 'mA' : '',
+      display_value: Number(hint.attribute_id) === 1002323 ? `${value}mA` : value,
+      label: hint.label,
+      source: 'chat_prevalid_required_attribute',
+    });
+  };
+  for (const hint of hints) {
+    const label = hint.label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const named = new RegExp(`${label}(?:\\s*(?:按|用|填|填写|写|写成|写为|设为|设置为|是|为|=|：|:)\\s*)?([^，。；;\\n]+)`, 'iu').exec(sourceText);
+    if (named) push(hint, named[1]);
+  }
+  const already = new Set(overrides.map(row => Number(row.attribute_id)));
+  const missingHints = hints.filter(hint => !already.has(Number(hint.attribute_id)));
+  if (missingHints.length === 1) {
+    const valueOnly = /(?:按|用|填|填写|写|写成|写为|设为|设置为|是|为|=|：|:)\s*([^，。；;\n]+)/iu.exec(sourceText)
+      || /^([^，。；;\n]{1,80})$/u.exec(sourceText.trim());
+    if (valueOnly) push(missingHints[0], valueOnly[1]);
+  }
+  return normalizeLinkOpsAttributeOverrides(overrides);
+}
+
+function inferLinkOpsAttributeOverrides(text, options = {}) {
+  const sourceText = String(text || '');
+  const overrides = [];
+  const pushInputCurrent = (rawValue, rawUnit, source = 'chat_manual_override') => {
+    const normalized = normalizeInputCurrentOverrideValue(rawValue, rawUnit);
+    if (!normalized?.attribute_extra_value) return;
+    overrides.push({
+      attribute_id: 1002323,
+      attributeId: 1002323,
+      attribute_extra_value: normalized.attribute_extra_value,
+      attributeExtraValue: normalized.attribute_extra_value,
+      attribute_unit: normalized.attribute_unit,
+      display_value: normalized.display_value,
+      label: '输入电流',
+      source,
+    });
+  };
+  const patterns = [
+    /(?:输入电流|电流)(?:\s*(?:按|用|填|写|设为|设置为|是|为|=|：|:)\s*)?([0-9]+(?:\.[0-9]+)?)\s*(mA|毫安|A|安)\b/giu,
+    /([0-9]+(?:\.[0-9]+)?)\s*(mA|毫安|A|安)\s*(?:作为|当作|按|填到|写到|写入)?\s*(?:输入电流|电流)/giu,
+  ];
+  for (const pattern of patterns) {
+    for (const match of sourceText.matchAll(pattern)) {
+      pushInputCurrent(match[1], /^(a|安)$/i.test(match[2] || '') ? 'A' : 'mA');
+    }
+  }
+  return normalizeLinkOpsAttributeOverrides([
+    ...overrides,
+    ...inferContextualAttributeOverrides(sourceText, options.task),
+  ]);
+}
+
+function normalizeLinkOpsAttributeOverrides(value = []) {
+  const rows = Array.isArray(value)
+    ? value
+    : typeof value === 'object' && value
+      ? Object.entries(value).map(([attributeId, attributeValue]) => ({attributeId, attributeValue}))
+      : [];
+  const byId = new Map();
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const attributeId = Number(row.attribute_id ?? row.attributeId ?? row.id);
+    if (!Number.isFinite(attributeId) || attributeId <= 0) continue;
+    const attributeValue = String(
+      row.attribute_extra_value
+      ?? row.attributeExtraValue
+      ?? row.attribute_value
+      ?? row.attributeValue
+      ?? row.value
+      ?? ''
+    ).trim();
+    if (!attributeValue) continue;
+    byId.set(attributeId, {
+      attribute_id: attributeId,
+      attribute_extra_value: attributeValue.slice(0, 500),
+      attribute_unit: String(row.attribute_unit || row.attributeUnit || '').trim().slice(0, 40),
+      display_value: String(row.display_value || row.displayValue || '').trim().slice(0, 120),
+      label: String(row.label || '').trim().slice(0, 80),
+      source: String(row.source || 'manual_override').trim().slice(0, 80),
+    });
+  }
+  return [...byId.values()].slice(0, 24);
 }
 
 function normalizeLinkOpsTargetSet(targets = {}) {
@@ -1896,6 +2305,13 @@ function normalizeLinkOpsTargetSet(targets = {}) {
     : typeof targets?.productRefs === 'string'
       ? targets.productRefs.split(/[,\s，、]+/)
       : [];
+  const attributeOverrides = normalizeLinkOpsAttributeOverrides(
+    targets?.attributeOverrides
+    || targets?.attribute_overrides
+    || targets?.manualAttributeOverrides
+    || targets?.manual_attribute_overrides
+    || []
+  );
   const clean = (arr, max) => [...new Set(arr
     .map(x => String(x || '').trim())
     .filter(Boolean))]
@@ -1904,27 +2320,82 @@ function normalizeLinkOpsTargetSet(targets = {}) {
     stores: clean(stores, 32),
     sourceStores: clean(sourceStores, 32),
     writeStores: clean(writeStores, 32),
+    sourceScope: ['all_stores', 'target_stores'].includes(String(targets?.sourceScope || targets?.source_scope || '').trim())
+      ? String(targets.sourceScope || targets.source_scope).trim()
+      : '',
     productRefs: clean(productRefs, 48),
+    attributeOverrides,
   };
 }
 
 function mergeLinkOpsTargets(...items) {
+  const normalized = items.map(x => normalizeLinkOpsTargetSet(x));
   return normalizeLinkOpsTargetSet({
-    stores: items.flatMap(x => normalizeLinkOpsTargetSet(x).stores),
-    sourceStores: items.flatMap(x => normalizeLinkOpsTargetSet(x).sourceStores),
-    writeStores: items.flatMap(x => normalizeLinkOpsTargetSet(x).writeStores),
-    productRefs: items.flatMap(x => normalizeLinkOpsTargetSet(x).productRefs),
+    stores: normalized.flatMap(x => x.stores),
+    sourceStores: normalized.flatMap(x => x.sourceStores),
+    writeStores: normalized.flatMap(x => x.writeStores),
+    sourceScope: normalized.find(x => x.sourceScope)?.sourceScope || '',
+    productRefs: normalized.flatMap(x => x.productRefs),
+    attributeOverrides: normalized.flatMap(x => x.attributeOverrides),
   });
 }
 
+function normalizeTargetsForIntents(intents = [], targets = {}) {
+  const normalized = normalizeLinkOpsTargetSet(targets);
+  const intentSet = new Set(asArray(intents).map(x => String(x || '').trim()).filter(Boolean));
+  const sourceStoreSet = new Set(normalizeConcreteStoreKeys(normalized.sourceStores));
+  const rawWrites = normalizeConcreteStoreKeys(normalized.writeStores);
+  const sourcePrunedWrites = rawWrites.length > 1
+    ? rawWrites.filter(store => !sourceStoreSet.has(store))
+    : rawWrites;
+  const writes = sourcePrunedWrites.length ? sourcePrunedWrites : rawWrites;
+  const stores = normalizeConcreteStoreKeys(normalized.stores);
+  const hasWritableIntent = intentSet.has('copy_product_draft')
+    || ['campaign_signup', 'flash_discount'].some(intent => intentSet.has(intent))
+    || [...intentSet].some(intent => LINK_MAINTENANCE_INTENTS.has(intent));
+  if (writes.length) {
+    return normalizeLinkOpsTargetSet({
+      ...normalized,
+      stores: writes,
+      writeStores: writes,
+      sourceStores: normalized.sourceStores,
+    });
+  }
+  if (hasWritableIntent && stores.length) {
+    return normalizeLinkOpsTargetSet({
+      ...normalized,
+      stores,
+      writeStores: stores,
+      sourceStores: normalized.sourceStores,
+    });
+  }
+  return normalized;
+}
+
 function inferTargetsFromChatSession(session) {
-  const text = recentCloudAiMessages(session?.messages)
+  const messages = recentCloudAiMessages(session?.messages);
+  const userText = messages
+    .filter(m => m?.role === 'user')
     .map(m => String(m?.content || ''))
     .join('\n');
   return mergeLinkOpsTargets(
     session?.targets && typeof session.targets === 'object' ? session.targets : {},
-    inferLinkOpsTargets(text)
+    inferLinkOpsTargets(userText, {includeAttributeOverrides: false}),
+    {attributeOverrides: inferLinkOpsAttributeOverrides(userText)}
   );
+}
+
+async function inferTargetsFromTaskChatSession(args, task) {
+  const sessionId = String(task?.chatSessionId || task?.chat?.sessionId || '').trim();
+  if (!sessionId || !args?.linkOpsChatFile) return {};
+  try {
+    const data = normalizeLinkOpsChatStore(await readJsonFile(args.linkOpsChatFile, {version: 1, updatedAt: null, sessions: []}));
+    const session = data.sessions.find(row => String(row?.id || '') === sessionId);
+    if (!session) return {};
+    return inferTargetsFromChatSession(session);
+  } catch {
+    return {};
+  }
 }
 
 function summarizeLinkOpsTargets(targets = {}) {
@@ -1932,6 +2403,9 @@ function summarizeLinkOpsTargets(targets = {}) {
   const parts = [];
   if (t.stores.length) parts.push(`店铺=${t.stores.join(',')}`);
   if (t.productRefs.length) parts.push(`货号/SKC=${t.productRefs.join(',')}`);
+  if (t.attributeOverrides.length) {
+    parts.push(`人工参数=${t.attributeOverrides.map(row => `${row.label || row.attribute_id}=${row.attribute_extra_value}`).join(',')}`);
+  }
   return parts.join('；') || '暂未识别到明确店铺或货号/SKC';
 }
 
@@ -1953,10 +2427,10 @@ function buildLinkOpsCapabilitySummary(targets = {}) {
   return stores.map(store => {
     const cap = openApiStoreCapability(store);
     if (cap.verifiedRead) {
-      return `${store}: OpenAPI 已授权且云端只读探针通过；商品发布/编辑可进入 dry-run 权限、站点、品牌、仓库和 payload 预检；真实提交仍需显式确认和回读。`;
+      return `${store}: OpenAPI 已授权且云端只读探针通过；商品发布/编辑可以检查权限、站点、品牌、仓库和发布资料；真实提交仍需你确认并回读结果。`;
     }
     if (cap.authorized) {
-      return `${store}: 已检测到 OpenAPI 私有授权配置；尚未完成云端只读探针/对账登记，写操作只可进入 dry-run 预检。`;
+      return `${store}: 已检测到 OpenAPI 私有授权配置；尚未完成云端只读探针/对账登记，写操作只能先做系统检查。`;
     }
     return `${store}: 暂未登记官方 OpenAPI 授权；写操作需先走云端 WebAPI/headless 受控执行，或完成该店 OpenAPI 接入。`;
   }).join('\n');
@@ -1970,10 +2444,10 @@ function linkOpsCapabilityNotes(intents = [], targets = {}) {
   const openApiStores = stores.filter(store => openApiStoreCapability(store).authorized);
   const adapterStores = stores.filter(store => openApiStoreCapability(store).productPublishAdapter);
   if (openApiStores.length) {
-    notes.push(`${openApiStores.join(',')} 已检测到 OpenAPI 授权配置；复制/补链任务会在 dry-run 中优先从源链接/WebAPI 快照自动还原类目、属性、图片、SKU、供货价、库存和尺寸重量；只有自动还原失败时才提示补源店、源 SKC 或发布资料，不能一上来就说“缺 payload”。`);
+    notes.push(`${openApiStores.join(',')} 已检测到 OpenAPI 授权配置；复制/补链任务会优先从源链接/WebAPI 快照自动还原类目、属性、图片、SKU、供货价、库存和尺寸重量；只有自动还原失败时才提示补源店、源 SKC 或发布资料，不能一上来就说“缺发布资料”。`);
   }
   if (adapterStores.length) {
-    notes.push(`${adapterStores.join(',')} 已可做商品发布/编辑 OpenAPI 受控预检；默认仍只做 dry-run/人工确认，不静默提交 SHEIN。`);
+    notes.push(`${adapterStores.join(',')} 已可做商品发布/编辑系统检查；默认只在你确认后提交，不静默提交 SHEIN。`);
   }
   const notOpenApiStores = stores.filter(store => !openApiStoreCapability(store).authorized);
   if (notOpenApiStores.length) {
@@ -2014,11 +2488,15 @@ function isLinkOpsActionCommand(command) {
   const lower = text.toLowerCase();
   const intents = inferLinkOpsIntent(text).filter(x => x !== 'manual_review');
   if (!intents.length) return false;
-  const actionVerb = /恢复上架|重新上架|再次上架|改为上架|设为上架|设置上架|恢复在售|下架|归档|停掉|移除|删除链接|换图|更换图片|改标题|换标题|补链接|补链|复制|复制上品|创建草稿|创建链接|上品|上链接|发链接|发布商品|刊登|提交审核|报活动|报名|限时折扣|设置折扣|补证书|补资质|上传证书/.test(text)
+  const actionVerb = /恢复上架|重新上架|再次上架|改为上架|设为上架|设置上架|恢复在售|下架|归档|停掉|移除|删除链接|换图|换主图|换图片|换套图|更换图片|更换主图|替换图片|上传图片|改标题|换标题|标题改|改库存|设置库存|库存改|改供货价|改成本价|改售价|改商品价|改价格|设置价格|调价|补(?:一|1)?(?:个|条|款)?(?:新)?(?:链接|链|商品|上品)|补链接|补链|复制|复制上品|创建草稿|创建链接|上品|上链接|发链接|发布商品|刊登|提交审核|报活动|报名|限时折扣|设置折扣|补证书|补资质|上传证书/.test(text)
+    || /(?:标题|title)\s*(?:改成|改为|更新为|设置为|设为|换成|到|=|：|:)/i.test(text)
+    || /(?:改成|改为|更新为|设置为|设为|换成)\s*[^，。；\n]{0,80}(?:标题|title)/i.test(text)
+    || /(?:库存|虚拟库存|供货价|成本价|售价|原价|销售价|商品价|价格)\s*(?:改成|改为|更新为|设置为|设为|到|=|：|:)/.test(text)
+    || /(?:改成|改为|更新为|设置为|设为|调到|调成)\s*[^，。；\n]{0,24}(?:库存|虚拟库存|供货价|成本价|售价|原价|销售价|商品价|价格)/.test(text)
     || /\b(activate_link|on_shelf|onshelf|relist|restore_listing|retire|remove|archive|replace image|update title|create draft|create link|publish|submit review|campaign|discount)\b/.test(lower);
   if (!actionVerb) return false;
-  const strongCommand = /把|将|要求|安排|加入任务池|加入动作池|执行|处理|现在|立即|直接|提交审核/.test(text)
-    || /^(恢复上架|重新上架|再次上架|上架|下架|归档|换图|改标题|补链接|补链|报活动|报名|设置折扣|补证书|补资质)/.test(text);
+  const strongCommand = /把|将|要求|安排|加入当前任务|加入动作池|执行|处理|现在|立即|直接|提交审核/.test(text)
+    || /^(恢复上架|重新上架|再次上架|上架|下架|归档|换图|改标题|改库存|设置库存|改供货价|改成本价|改售价|改商品价|改价格|设置价格|调价|补(?:一|1)?(?:个|条|款)?(?:新)?(?:链接|链|商品|上品)|补链接|补链|报活动|报名|设置折扣|补证书|补资质)/.test(text);
   const giveCommand = /给.+(重新生成|生成|换|更换|改|上架|下架|报|报名|设置|补)/.test(text);
   const exploratory = /建议|分析|看看|找出|哪些|哪个|是否|能否|能不能|可以吗|怎么|如何|为什么|原因/.test(text);
   if (exploratory && !strongCommand && !giveCommand) return false;
@@ -2027,10 +2505,11 @@ function isLinkOpsActionCommand(command) {
 
 function isConfirmExecuteChatCommand(command) {
   const text = String(command || '').trim();
-  if (!text || text.length > 80) return false;
+  if (!text || text.length > 120) return false;
   if (/？|\?|能否|能不能|可以吗|是否|为什么|怎么|如何/.test(text)) return false;
-  return /^(确认|同意|可以|行|好|好的|ok|OK|执行|开始|提交|照做|按这个|按上面|就这样|走|去做)([，,。\s！!]*)(执行|开始|提交|审核|处理|做|吧|了|$)/.test(text)
-    || /确认.*(执行|提交|审核|处理)|同意.*(执行|提交|审核|处理)|(执行|提交|审核|处理).*吧/.test(text);
+  if (/^(干|做|执行|提交|发|走|开干|开始干|赶紧干|快干|马上干|直接干)([啊呀啦吧呗嘛。，,！!\s]*)$/.test(text)) return true;
+  return /^(确认|同意|可以|行|好|好的|ok|OK|执行|开始|提交|照做|按这个|按上面|就这样|走|去做|发吧|提交吧|执行吧|可以干|可以做|干吧|做吧|开干|开始干|开始做|去干)([，,。\s！!]*)(执行|开始|提交|审核|处理|做|干|发|吧|了|$)/.test(text)
+    || /(确认|同意|可以|行|好|好的|ok|OK|按这个|按上面|就这样).*(执行|提交|审核|处理|做|干|发)|(执行|提交|审核|处理|做|干|发).*[吧啊呀啦]|那就.*(执行|提交|做|干|发)/.test(text);
 }
 
 function messageTimeMs(message) {
@@ -2051,6 +2530,7 @@ function hasActionableLinkOpsContext(session) {
   const messages = recentCloudAiMessages(session?.messages);
   const prior = messages.slice(0, -1).slice(-10);
   const text = prior
+    .filter(m => m?.role === 'user')
     .map(m => String(m?.content || ''))
     .join('\n');
   const intents = inferLinkOpsIntent(text).filter(x => x !== 'manual_review');
@@ -2073,15 +2553,9 @@ function buildConfirmedLinkOpsCommandFromSession(session, latestMessage) {
     .map(m => compactChatLine(m.content))
     .filter(x => x && !isConfirmExecuteChatCommand(x))
     .slice(-4);
-  const assistantLines = prior
-    .filter(m => m?.role === 'assistant')
-    .map(m => compactChatLine(m.content, 700))
-    .filter(Boolean)
-    .slice(-2);
   const command = [
     `确认执行：${compactChatLine(latestMessage, 120)}`,
     userLines.length ? `上文用户意图：\n${userLines.map(x => `- ${x}`).join('\n')}` : '',
-    assistantLines.length ? `上文智能体定位：\n${assistantLines.map(x => `- ${x}`).join('\n')}` : '',
   ].filter(Boolean).join('\n\n');
   return command.slice(0, 2000);
 }
@@ -2101,12 +2575,65 @@ function findDuplicateAutoTask(tasks, sessionId, command) {
 function findReusableChatTask(tasks, sessionId) {
   const sid = String(sessionId || '');
   if (!sid) return null;
+  return activeChatTasks(tasks, sid)[0] || null;
+}
+
+function activeChatTasks(tasks, sessionId) {
+  const sid = String(sessionId || '');
+  if (!sid) return [];
   return (Array.isArray(tasks) ? tasks : [])
     .filter(t =>
       String(t.chatSessionId || '') === sid &&
       !['done', 'archived'].includes(String(t.status || ''))
     )
-    .sort((a, b) => String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')))[0] || null;
+    .sort((a, b) => String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')));
+}
+
+function chatTaskDisplayName(task) {
+  const refs = normalizeLinkOpsTargetSet(task?.targets || {}).productRefs;
+  const stores = taskWriteStores(task);
+  const intents = asArray(task?.intents).map(linkOpsIntentLabel).filter(Boolean);
+  return [
+    refs.length ? refs.slice(0, 2).join('/') : '',
+    stores.length ? `${stores.slice(0, 3).join('/')}店` : '',
+    intents.length ? intents.slice(0, 2).join('/') : '',
+  ].filter(Boolean).join(' · ') || String(task?.id || '').slice(0, 18) || '当前处理';
+}
+
+function taskHasProductPublishPayloadHashes(task, writeStores) {
+  const stores = normalizeConcreteStoreKeys(writeStores);
+  return stores.length > 0 && stores.every(store => payloadHashForStoreFromTaskExecution(task, store));
+}
+
+function taskHasMaintenancePayloadHashes(task, writeStores, maintenanceIntents) {
+  const stores = normalizeConcreteStoreKeys(writeStores);
+  const ops = asArray(maintenanceIntents).map(x => String(x || '').trim()).filter(Boolean);
+  if (!stores.length || !ops.length) return false;
+  return stores.every(store => ops.every(op => payloadHashForMaintenanceFromTaskExecution(task, store, op)));
+}
+
+function chatNaturalExecutionEligibility(task) {
+  const status = String(task?.status || '');
+  const state = String(task?.execution?.state || '');
+  const preflightOk = task?.execution?.preflight?.ok === true;
+  const intents = asArray(task?.intents).map(x => String(x || '').trim()).filter(Boolean);
+  const writeStores = taskWriteStores(task);
+  const hasProductPublish = intents.includes('copy_product_draft');
+  const maintenanceIntents = intents.filter(intent => LINK_MAINTENANCE_INTENTS.has(intent));
+  const stateMatches = (hasProductPublish && state === 'openapi_product_preflight_ready')
+    || (maintenanceIntents.length > 0 && state === 'link_maintenance_preflight_ready');
+  const hashesOk = (hasProductPublish && taskHasProductPublishPayloadHashes(task, writeStores))
+    || (maintenanceIntents.length > 0 && taskHasMaintenancePayloadHashes(task, writeStores, maintenanceIntents));
+  const reasons = [];
+  if (status !== 'waiting_review') reasons.push('还没停在等你一句话执行的状态');
+  if (!stateMatches) reasons.push('资料还没查到可提交状态');
+  if (!preflightOk) reasons.push('资料检查还没通过');
+  if (!hashesOk) reasons.push('缺少这次资料检查快照');
+  return {ok: status === 'waiting_review' && stateMatches && preflightOk && hashesOk, reasons};
+}
+
+function eligibleChatNaturalExecutionTasks(tasks, sessionId) {
+  return activeChatTasks(tasks, sessionId).filter(task => chatNaturalExecutionEligibility(task).ok);
 }
 
 function updateLinkOpsTaskFromChatCommand(task, body, actor, req) {
@@ -2115,18 +2642,19 @@ function updateLinkOpsTaskFromChatCommand(task, body, actor, req) {
   if (command.length > 2000) throw new Error('Command too long');
   const now = new Date().toISOString();
   const previousIntents = Array.isArray(task.intents) ? task.intents : [];
-  const intents = [...new Set([...previousIntents, ...inferLinkOpsIntent(command)])];
-  const targets = mergeLinkOpsTargets(
+  const intents = normalizeIntentsForCommand([...previousIntents, ...inferLinkOpsIntent(command)], command);
+  const targets = normalizeTargetsForIntents(intents, mergeLinkOpsTargets(
     task.targets && typeof task.targets === 'object' ? task.targets : {},
     inferLinkOpsTargets(command),
     body.targets && typeof body.targets === 'object' ? body.targets : {}
-  );
+  ));
   const preview = {
     ...(task.preview && typeof task.preview === 'object' ? task.preview : {}),
     summary: `随会话更新：${intents.map(linkOpsIntentLabel).join(' / ')}；任务持续合并最新指令，不为同一会话重复开新任务。`,
     riskNotes: linkOpsRiskNotes(intents, targets),
     capabilitySummary: buildLinkOpsCapabilitySummary(targets),
-    agentAnswer: typeof body.agentAnswer === 'string' ? body.agentAnswer.slice(0, 12000) : (task.preview?.agentAnswer || ''),
+    agentAnswer: '',
+    structuredAnswer: '',
     agentMode: typeof body.agentMode === 'string' ? body.agentMode.slice(0, 80) : (task.preview?.agentMode || ''),
     agentDurationMs: Number.isFinite(Number(body.agentDurationMs)) ? Number(body.agentDurationMs) : (task.preview?.agentDurationMs || 0),
   };
@@ -2151,15 +2679,15 @@ function updateLinkOpsTaskFromChatCommand(task, body, actor, req) {
 }
 
 function linkOpsRiskNotes(intents, targets = {}) {
-  const notes = ['当前只是建立任务草案，不会自动修改 SHEIN 后台。'];
+  const notes = ['当前只是理解需求和检查资料，不会自动修改 SHEIN 后台。'];
   if (intents.includes('copy_product_draft')) {
-    notes.push('复制上品会先按源店/源 SKC 或 BI 中曝光/销量最高的候选源链接自动还原发布参数；dry-run 会检查类目、属性、图片、SKU、价格、库存100、尺寸重量和计划上架时间。');
+    notes.push('复制上品会先按源店/源 SKC 或 BI 中曝光/销量最高的候选源链接自动还原发布参数；系统会检查类目、属性、图片、SKU、价格、库存100、尺寸重量和计划上架时间。');
   }
   if (intents.includes('update_title') || intents.includes('update_images')) {
     notes.push('标题/图片会影响流量承接，初期必须人工确认素材和目标链接。');
   }
   if (intents.includes('activate_link')) {
-    notes.push('恢复上架前必须确认店铺虚拟库存、售价/供货价、活动价和证书/资质状态，否则只做 dry-run 不提交。');
+    notes.push('恢复上架前必须确认店铺虚拟库存、售价/供货价、活动价和证书/资质状态，否则只检查不提交。');
   }
   if (intents.includes('campaign_signup') || intents.includes('flash_discount')) {
     notes.push('活动/限时折扣需校验成本、最低利润率、限量、有效期和是否与官方活动冲突。');
@@ -2176,11 +2704,11 @@ function buildLinkOpsTaskFromCommand(body, actor, req) {
   if (!command) throw new Error('Missing command');
   if (command.length > 2000) throw new Error('Command too long');
   const now = new Date().toISOString();
-  const intents = inferLinkOpsIntent(command);
-  const targets = mergeLinkOpsTargets(
-    inferLinkOpsTargets(command),
-    body.targets && typeof body.targets === 'object' ? body.targets : {}
-  );
+  const intents = normalizeIntentsForCommand(inferLinkOpsIntent(command), command);
+  const targets = normalizeTargetsForIntents(intents, mergeLinkOpsTargets(
+    body.targets && typeof body.targets === 'object' ? body.targets : {},
+    inferLinkOpsTargets(command)
+  ));
   const id = `lot_${now.replace(/[-:.TZ]/g, '').slice(0, 14)}_${crypto.randomBytes(4).toString('hex')}`;
   return {
     id,
@@ -2193,10 +2721,11 @@ function buildLinkOpsTaskFromCommand(body, actor, req) {
     intents,
     targets,
     preview: {
-      summary: `识别为：${intents.join(' / ')}；任务池只承载可执行事项，确认后再检查材料并进入执行队列。`,
+      summary: `识别为：${intents.join(' / ')}；当前会话会跟进这件事；系统会先查源链接、资料缺口和店铺权限。`,
       riskNotes: linkOpsRiskNotes(intents, targets),
       capabilitySummary: buildLinkOpsCapabilitySummary(targets),
-      agentAnswer: typeof body.agentAnswer === 'string' ? body.agentAnswer.slice(0, 12000) : '',
+      agentAnswer: '',
+      structuredAnswer: '',
       agentMode: typeof body.agentMode === 'string' ? body.agentMode.slice(0, 80) : '',
       agentDurationMs: Number.isFinite(Number(body.agentDurationMs)) ? Number(body.agentDurationMs) : 0,
       nextChecks: [
@@ -2233,6 +2762,323 @@ function normalizeLinkOpsTaskStore(value) {
     version: 1,
     updatedAt: value?.updatedAt || null,
     tasks: tasks.filter(x => x && typeof x === 'object').slice(0, 1000),
+  };
+}
+
+function linkOpsClientTextHasInternalLeak(value) {
+  const text = compactChatLine(value, 20000);
+  const crossEntryNeedles = [
+    String.fromCharCode(39134, 20070),
+    ['只', '读', '建议'].join(''),
+    ['验证', '器'].join(''),
+    ['查看', '审计'].join(''),
+    ['我已经调用过', ' SHEIN ', '写接口'].join(''),
+    ['系统', '已', '锁住', '任务'].join(''),
+    ['系统已经把', '内部检查结果', '收口到聊天里'].join(''),
+    ['请按聊天里的', '缺口继续'].join(''),
+  ];
+  const hasCrossEntryLeak = crossEntryNeedles.some(needle => text.includes(needle))
+    || /回到\s*BI/i.test(text)
+    || /SHEIN_[A-Z_]*OPENAPI_SUBMIT|SHEIN_OPENAPI_SUBMIT|dry[- ]?run|payload hash|store identity mismatch|account_and_merchant_mismatch/i.test(text);
+  return hasCrossEntryLeak;
+}
+
+function stripLinkOpsInternalLeakLines(value) {
+  const text = String(value || '');
+  if (!text.trim()) return '';
+  const lines = text.split('\n');
+  const kept = [];
+  let dropped = 0;
+  for (const line of lines) {
+    if (linkOpsClientTextHasInternalLeak(line)) {
+      dropped += 1;
+      continue;
+    }
+    kept.push(line);
+  }
+  const cleaned = kept
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return {cleaned, dropped};
+}
+
+function fallbackLinkOpsClientText() {
+  return '我已收到，会继续在这个会话里处理；如果还差资料，我会直接列出具体字段，如果可以执行，我会直接说明状态和结果。';
+}
+
+function sanitizeLinkOpsClientText(value, max = 600) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const text = compactChatLine(raw, max)
+    .replace(/HL\s*仓库列表/g, '目标店仓库列表')
+    .replace(/OpenAPI/g, '接口')
+    .replace(/dry[- ]?run|Dry[- ]?run|预检/g, '资料检查')
+    .replace(/payload hash/ig, '本次检查快照');
+  if (linkOpsClientTextHasInternalLeak(text)) {
+    const stripped = stripLinkOpsInternalLeakLines(text);
+    return stripped.cleaned || fallbackLinkOpsClientText();
+  }
+  return text;
+}
+
+function sanitizeLinkOpsClientMarkdown(value, max = 16000) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const text = raw
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/HL\s*仓库列表/g, '目标店仓库列表')
+    .replace(/OpenAPI/g, '接口')
+    .replace(/dry[- ]?run|Dry[- ]?run|预检/g, '资料检查')
+    .replace(/payload hash/ig, '本次检查快照')
+    .slice(0, max);
+  if (linkOpsClientTextHasInternalLeak(text)) {
+    const stripped = stripLinkOpsInternalLeakLines(text);
+    return stripped.cleaned || fallbackLinkOpsClientText();
+  }
+  return text;
+}
+
+function projectLinkOpsClientMessages(values, max = 600) {
+  return asArray(values)
+    .map(value => sanitizeLinkOpsClientText(value, max))
+    .filter(Boolean)
+    .slice(0, 8);
+}
+
+function projectLinkOpsClientMode(value) {
+  const s = String(value || '').trim();
+  if (!s) return '';
+  if (/dry[- ]?run/i.test(s)) return 'check';
+  if (/execute/i.test(s)) return 'execute';
+  return sanitizeLinkOpsClientText(s, 80);
+}
+
+function projectLinkOpsPreflightForClient(preflight) {
+  if (!preflight || typeof preflight !== 'object') return null;
+  return {
+    ok: preflight.ok === true,
+    blockers: cleanHumanBlockerList(preflight.blockers)
+      .map(x => sanitizeLinkOpsClientText(x, 600))
+      .filter(Boolean)
+      .slice(0, 8),
+    warnings: cleanHumanBlockerList(preflight.warnings)
+      .map(x => sanitizeLinkOpsClientText(x, 600))
+      .filter(Boolean)
+      .slice(0, 8),
+  };
+}
+
+function projectLinkOpsPublishResultForClient(publishResult) {
+  if (!publishResult || typeof publishResult !== 'object') return null;
+  const info = publishResult.info && typeof publishResult.info === 'object' ? publishResult.info : {};
+  const preValid = asArray(info.pre_valid_result || info.preValidResult).map(row => {
+    const sourceMessages = asArray(row?.messages || row?.message)
+      .map(message => sanitizeLinkOpsClientText(message, 600))
+      .filter(Boolean);
+    return {
+      form_name: sanitizeLinkOpsClientText(row?.form_name || row?.form || row?.module || '平台提示', 120),
+      messages: [...new Set(sourceMessages)].slice(0, 6),
+    };
+  }).filter(row => row.messages.length);
+  return {
+    code: publishResult.code == null ? '' : String(publishResult.code),
+    msg: sanitizeLinkOpsClientText(publishResult.msg || '', 240),
+    info: {
+      success: info.success === true,
+      pre_valid_result: preValid,
+    },
+  };
+}
+
+function projectLinkOpsProductExecutorForClient(executor) {
+  if (!executor || typeof executor !== 'object') return null;
+  const publishResult = executor.publishResult || executor.result?.publishResult || null;
+  return {
+    storeKey: String(executor.storeKey || executor.result?.storeKey || '').toUpperCase(),
+    sourceStore: String(executor.sourceStore || executor.result?.sourceStore || '').toUpperCase(),
+    sourceSkc: sanitizeLinkOpsClientText(executor.sourceSkc || executor.result?.sourceSkc || '', 120),
+    mode: projectLinkOpsClientMode(executor.mode || executor.result?.mode || ''),
+    state: String(executor.state || executor.status || executor.result?.state || ''),
+    status: String(executor.status || executor.result?.status || ''),
+    publishResult: projectLinkOpsPublishResultForClient(publishResult),
+  };
+}
+
+function projectLinkOpsMaintenanceExecutorForClient(executor) {
+  if (!executor || typeof executor !== 'object') return null;
+  const result = executor.result && typeof executor.result === 'object' ? executor.result : executor;
+  const payload = result.payload && typeof result.payload === 'object'
+    ? result.payload
+    : executor.payload && typeof executor.payload === 'object'
+      ? executor.payload
+      : {};
+  const operations = asArray(executor.operations || result.operations || result.payload?.summary?.operations || executor.payload?.summary?.operations)
+    .map(x => String(x || '').trim())
+    .filter(Boolean)
+    .slice(0, 12);
+  const matchedLinksCount = Number(result.matchedLinksCount ?? result.adapterEvidence?.matchedLinksCount ?? executor.adapterEvidence?.matchedLinksCount ?? 0) || 0;
+  return {
+    storeKey: String(result.storeKey || '').toUpperCase(),
+    mode: projectLinkOpsClientMode(result.mode || executor.mode || ''),
+    state: String(result.state || executor.state || executor.status || ''),
+    status: String(result.status || executor.status || ''),
+    adapterKind: sanitizeLinkOpsClientText(result.adapterKind || executor.adapterKind || '', 120),
+    matchedLinksCount,
+    adapterEvidence: {matchedLinksCount},
+    payload: {
+      found: Boolean(payload.found || payload.payloadHash || operations.length),
+      summary: {operations},
+    },
+    publishResult: projectLinkOpsPublishResultForClient(result.publishResult || executor.publishResult || null),
+    readbackStatus: sanitizeLinkOpsClientText(result.readbackStatus || result.readback?.status || executor.readbackStatus || '', 120),
+  };
+}
+
+function projectLinkOpsExecutionForClient(execution) {
+  if (!execution || typeof execution !== 'object') return null;
+  const writeAudit = execution.writeAudit && typeof execution.writeAudit === 'object' ? execution.writeAudit : {};
+  const productExecutors = asArray(execution.openApiProductExecutors)
+    .map(projectLinkOpsProductExecutorForClient)
+    .filter(Boolean);
+  const maintenancePrechecks = asArray(execution.linkMaintenancePrechecks)
+    .map(projectLinkOpsMaintenanceExecutorForClient)
+    .filter(Boolean);
+  const maintenanceExecutors = asArray(execution.linkMaintenanceExecutors)
+    .map(projectLinkOpsMaintenanceExecutorForClient)
+    .filter(Boolean);
+  return {
+    mode: projectLinkOpsClientMode(execution.mode || ''),
+    state: String(execution.state || ''),
+    preflight: projectLinkOpsPreflightForClient(execution.preflight),
+    writeAudit: {
+      requestedMode: projectLinkOpsClientMode(writeAudit.requestedMode || ''),
+      submitted: Boolean(writeAudit.submitted || writeAudit.actualWriteSubmitted),
+      executeAllowed: Boolean(writeAudit.executeAllowed),
+      actualWriteSubmitted: Boolean(writeAudit.actualWriteSubmitted),
+      issuedExecuteToExecutor: Boolean(writeAudit.issuedExecuteToExecutor),
+      sheinWriteAttempted: Boolean(writeAudit.sheinWriteAttempted),
+    },
+    openApiProductExecutors: productExecutors,
+    linkMaintenancePrechecks: maintenancePrechecks,
+    linkMaintenanceExecutors: maintenanceExecutors,
+  };
+}
+
+function projectLinkOpsTargetsForClient(targets, intents = []) {
+  const intentList = asArray(intents).map(x => String(x || '').trim()).filter(Boolean);
+  const normalized = normalizeTargetsForIntents(intentList, targets || {});
+  const hasCopyProduct = intentList.includes('copy_product_draft');
+  const rawProductRefs = asArray(normalized.productRefs)
+    .map(x => compactChatLine(x, 120))
+    .filter(Boolean);
+  const nonSourceProductRefs = rawProductRefs.filter(x => !/^(?:sv|sb)\d{8,}$/i.test(String(x || '').trim()));
+  const productRefs = hasCopyProduct && nonSourceProductRefs.length ? nonSourceProductRefs : rawProductRefs;
+  return {
+    stores: normalizeConcreteStoreKeys(normalized.stores),
+    writeStores: normalizeConcreteStoreKeys(normalized.writeStores),
+    sourceStores: normalizeConcreteStoreKeys(normalized.sourceStores),
+    productRefs: productRefs.slice(0, 12),
+    sourceScope: sanitizeLinkOpsClientText(normalized.sourceScope || '', 80),
+    attributeOverrides: asArray(normalized.attributeOverrides).map(item => ({
+      attribute_id: item?.attribute_id ?? item?.attributeId ?? null,
+      label: sanitizeLinkOpsClientText(item?.label || item?.attribute_name || item?.name || '', 120),
+      attribute_extra_value: sanitizeLinkOpsClientText(item?.attribute_extra_value || item?.value || item?.display_value || item?.displayValue || '', 120),
+      display_value: sanitizeLinkOpsClientText(item?.display_value || item?.displayValue || item?.attribute_extra_value || item?.value || '', 120),
+      attribute_unit: sanitizeLinkOpsClientText(item?.attribute_unit || item?.unit || '', 40),
+    })).filter(item => item.label || item.display_value).slice(0, 12),
+  };
+}
+
+function projectLinkOpsTaskForClient(task) {
+  const execution = projectLinkOpsExecutionForClient(task?.execution);
+  const preflight = projectLinkOpsPreflightForClient(task?.preflight) || execution?.preflight || null;
+  const intents = asArray(task?.intents).map(x => String(x || '').trim()).filter(Boolean).slice(0, 12);
+  return {
+    id: String(task?.id || ''),
+    title: sanitizeLinkOpsClientText(task?.title || '', 160),
+    status: String(task?.status || ''),
+    progress: normalizeProgress(task?.progress, 0),
+    intents,
+    targets: projectLinkOpsTargetsForClient(task?.targets || {}, intents),
+    chatSessionId: String(task?.chatSessionId || task?.chat?.sessionId || ''),
+    createdAt: task?.createdAt || '',
+    updatedAt: task?.updatedAt || '',
+    lifecycle: task?.lifecycle && typeof task.lifecycle === 'object' ? {
+      lifecycleStatus: String(task.lifecycle.lifecycleStatus || task.lifecycle.status || ''),
+      status: String(task.lifecycle.status || task.lifecycle.lifecycleStatus || ''),
+    } : null,
+    preflight,
+    execution,
+    assets: asArray(task?.assets).map(projectLinkOpsAssetForClient).slice(0, 30),
+  };
+}
+
+function projectLinkOpsTaskStoreForClient(value, {limit = 120} = {}) {
+  const store = normalizeLinkOpsTaskStore(value);
+  const max = Math.max(1, Math.min(500, Number(limit || 120)));
+  return {
+    version: store.version,
+    updatedAt: store.updatedAt,
+    tasks: store.tasks.slice(0, max).map(projectLinkOpsTaskForClient),
+  };
+}
+
+function projectLinkOpsAssetForClient(asset) {
+  if (!asset || typeof asset !== 'object') return null;
+  return {
+    id: String(asset.id || ''),
+    name: sanitizeLinkOpsClientText(asset.name || asset.originalName || '', 180),
+    kind: sanitizeLinkOpsClientText(asset.kind || '', 60),
+    mime: sanitizeLinkOpsClientText(asset.mime || asset.type || '', 120),
+    size: Number(asset.size ?? asset.bytes ?? 0) || 0,
+    createdAt: asset.createdAt || asset.uploadedAt || '',
+  };
+}
+
+function projectLinkOpsChatMessageForClient(message) {
+  if (!message || typeof message !== 'object') return null;
+  const role = String(message.role || '').trim() === 'user' ? 'user' : 'assistant';
+  const meta = message.meta && typeof message.meta === 'object' ? {
+    mode: sanitizeLinkOpsClientText(message.meta.mode || '', 60),
+    autoTaskId: String(message.meta.autoTaskId || ''),
+  } : null;
+  return {
+    id: String(message.id || ''),
+    role,
+    content: role === 'assistant'
+      ? sanitizeLinkOpsClientMarkdown(message.content || '', 16000)
+      : String(message.content || '').slice(0, 4000),
+    at: message.at || message.createdAt || '',
+    ...(meta && (meta.mode || meta.autoTaskId) ? {meta} : {}),
+  };
+}
+
+function projectLinkOpsChatSessionForClient(session) {
+  if (!session || typeof session !== 'object') return null;
+  return {
+    id: String(session.id || ''),
+    version: Number(session.version || 1) || 1,
+    status: sanitizeLinkOpsClientText(session.status || '', 40),
+    title: sanitizeLinkOpsClientText(session.title || '', 120),
+    autoTitle: session.autoTitle !== false,
+    targets: projectLinkOpsTargetsForClient(session.targets || {}),
+    memoryPolicy: CLOUD_AI_MEMORY_POLICY,
+    createdAt: session.createdAt || '',
+    updatedAt: session.updatedAt || '',
+    messages: asArray(session.messages).map(projectLinkOpsChatMessageForClient).filter(Boolean).slice(-80),
+  };
+}
+
+function projectLinkOpsChatStoreForClient(value, {limit = 80} = {}) {
+  const store = normalizeLinkOpsChatStore(value);
+  const max = Math.max(1, Math.min(300, Number(limit || 80)));
+  return {
+    version: store.version,
+    updatedAt: store.updatedAt,
+    memoryPolicy: CLOUD_AI_MEMORY_POLICY,
+    sessions: store.sessions.slice(0, max).map(projectLinkOpsChatSessionForClient).filter(Boolean),
   };
 }
 
@@ -2275,10 +3121,10 @@ function buildChatSessionFromMessage(body, actor, req) {
   if (message.length > 4000) throw new Error('Message too long');
   const now = new Date().toISOString();
   const id = `los_${now.replace(/[-:.TZ]/g, '').slice(0, 14)}_${crypto.randomBytes(4).toString('hex')}`;
-  const targets = mergeLinkOpsTargets(
+  const targets = normalizeTargetsForIntents(inferLinkOpsIntent(message), mergeLinkOpsTargets(
     inferLinkOpsTargets(message),
     body.targets && typeof body.targets === 'object' ? body.targets : {}
-  );
+  ));
   return {
     id,
     version: 1,
@@ -2309,10 +3155,10 @@ function appendChatMessage(session, body, actor, req) {
   const now = new Date().toISOString();
   const messages = Array.isArray(session.messages) ? session.messages.slice() : [];
   messages.push({id: `msg_${crypto.randomBytes(5).toString('hex')}`, role: 'user', content, at: now});
-  const targets = mergeLinkOpsTargets(
+  const targets = normalizeTargetsForIntents(inferLinkOpsIntent(content), mergeLinkOpsTargets(
     session.targets && typeof session.targets === 'object' ? session.targets : {},
     inferLinkOpsTargets(content)
-  );
+  ));
   const titleText = messages.filter(m => m.role === 'user').map(m => m.content).slice(0, 2).join('\n');
   return {
     ...session,
@@ -2335,10 +3181,7 @@ function appendAssistantChatMessage(session, answer, meta = {}) {
     ...session,
     updatedAt: now,
     memoryPolicy: CLOUD_AI_MEMORY_POLICY,
-    targets: mergeLinkOpsTargets(
-      session.targets && typeof session.targets === 'object' ? session.targets : {},
-      inferLinkOpsTargets(answer)
-    ),
+    targets: session.targets && typeof session.targets === 'object' ? session.targets : {},
     messages,
   };
 }
@@ -2461,8 +3304,8 @@ function patchLinkOpsTask(task, body, actor, req) {
       ...(task.preview && typeof task.preview === 'object' ? task.preview : {}),
       ...body.preview,
     };
-    if (typeof next.preview.agentAnswer === 'string') next.preview.agentAnswer = next.preview.agentAnswer.slice(0, 16000);
-    if (typeof next.preview.structuredAnswer === 'string') next.preview.structuredAnswer = next.preview.structuredAnswer.slice(0, 16000);
+    next.preview.agentAnswer = '';
+    next.preview.structuredAnswer = '';
     if (Array.isArray(next.preview.titleCandidates)) next.preview.titleCandidates = next.preview.titleCandidates.slice(0, 20).map(x => String(x).slice(0, 240));
   }
   next.history = appendTaskHistory(next, event, actor, req, {
@@ -2491,7 +3334,6 @@ function linkOpsTaskNeedsMaterial(task) {
   if (intents.includes('copy_product_draft')) needs.push('image_or_certificate');
   if (intents.includes('certificate_review')) needs.push('certificate');
   if (intents.includes('update_title')) needs.push('title_text_or_rule');
-  if (intents.includes('update_inventory') || intents.includes('update_supply_price') || intents.includes('update_product_price')) needs.push('title_text_or_rule');
   return needs;
 }
 
@@ -2499,6 +3341,7 @@ function assetKindForMime(mime) {
   if (String(mime || '').startsWith('image/')) return 'image';
   if (mime === 'application/pdf') return 'certificate';
   if (mime === 'text/plain' || mime === 'text/csv' || mime === 'application/json') return 'text';
+  if (mime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') return 'spreadsheet';
   return 'file';
 }
 
@@ -2532,7 +3375,7 @@ async function attachLinkOpsAssets({store, taskId, files, args, actor, req}) {
   const {id, tasks, idx} = findLinkOpsTaskOrThrow(store, taskId);
   const normalizedFiles = Array.isArray(files) ? files : [];
   if (!normalizedFiles.length) throw new Error('Missing files');
-  if (normalizedFiles.length > 40) throw new Error('Too many files');
+  if (normalizedFiles.length > 40) throw new Error('一次最多上传 40 个文件');
   let totalBytes = 0;
   const baseDir = path.resolve(args.linkOpsAssetDir);
   const taskDir = assertInsideDir(baseDir, path.join(baseDir, id));
@@ -2542,15 +3385,15 @@ async function attachLinkOpsAssets({store, taskId, files, args, actor, req}) {
   try {
     for (const file of normalizedFiles) {
       const mime = String(file?.type || '').toLowerCase().trim();
-      if (!LINK_OPS_ALLOWED_UPLOAD_MIME.has(mime)) throw new Error(`Unsupported file type: ${mime || 'unknown'}`);
+      if (!LINK_OPS_ALLOWED_UPLOAD_MIME.has(mime)) throw new Error(`不支持的文件类型：${mime || 'unknown'}。支持 JPG/PNG/WebP、PDF、TXT/CSV/JSON、XLSX。`);
       const raw = String(file?.dataBase64 || file?.base64 || '').replace(/^data:[^;]+;base64,/, '');
       if (!raw) throw new Error('Missing file content');
       const buffer = Buffer.from(raw, 'base64');
       if (!buffer.length) throw new Error('Empty file');
-      if (buffer.length > LINK_OPS_MAX_UPLOAD_FILE_BYTES) throw new Error(`File too large: ${file?.name || 'asset'}`);
+      if (buffer.length > LINK_OPS_MAX_UPLOAD_FILE_BYTES) throw new Error(`文件太大：${file?.name || 'asset'}，单个文件不能超过 20MB`);
       totalBytes += buffer.length;
-      if (totalBytes > LINK_OPS_MAX_UPLOAD_TOTAL_BYTES) throw new Error('Upload batch too large');
-      if (!hasUploadMagic(buffer, mime)) throw new Error(`File content does not match type: ${file?.name || mime}`);
+      if (totalBytes > LINK_OPS_MAX_UPLOAD_TOTAL_BYTES) throw new Error('本次上传总大小超过 120MB');
+      if (!hasUploadMagic(buffer, mime)) throw new Error(`文件内容和类型不匹配：${file?.name || mime}`);
       const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
       const ext = uploadExtensionFor(mime, file?.name || '');
       const stem = safeFileStem(path.basename(String(file?.name || 'asset'), path.extname(String(file?.name || ''))), 'asset');
@@ -2585,6 +3428,20 @@ async function attachLinkOpsAssets({store, taskId, files, args, actor, req}) {
   };
 }
 
+async function appendLinkOpsChatAssistantMessageForTask(args, task, answer, meta = {}) {
+  const sessionId = String(task?.chatSessionId || task?.sessionId || task?.targets?.chatSessionId || '').trim();
+  const content = String(answer || '').trim();
+  if (!sessionId || !content) return {ok: false, reason: 'missing_session_or_answer'};
+  const current = normalizeLinkOpsChatStore(await readJsonFile(args.linkOpsChatFile, {version: 1, updatedAt: null, sessions: []}));
+  const idx = current.sessions.findIndex(s => String(s.id || '') === sessionId);
+  if (idx < 0) return {ok: false, reason: 'session_not_found'};
+  const sessions = current.sessions.slice();
+  sessions[idx] = appendAssistantChatMessage(sessions[idx], content, meta);
+  const next = {version: 1, updatedAt: new Date().toISOString(), memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions};
+  await writeJsonFile(args.linkOpsChatFile, next);
+  return {ok: true, session: sessions[idx], store: next};
+}
+
 async function removeLinkOpsTaskAssetDir(taskId, args) {
   const id = safeTaskId(taskId);
   const baseDir = path.resolve(args.linkOpsAssetDir);
@@ -2596,22 +3453,23 @@ function runPreflightForLinkOpsTask(task) {
   const blockers = [];
   const warnings = [];
   const assets = Array.isArray(task.assets) ? task.assets : [];
+  const hasJsonAsset = assets.some(a => String(a?.mime || '').toLowerCase() === 'application/json' || /\.json$/i.test(String(a?.originalName || a?.storedRelativePath || '')));
   const needs = linkOpsTaskNeedsMaterial(task);
   const intents = Array.isArray(task?.intents) ? task.intents : [];
   const targets = normalizeLinkOpsTargetSet(task?.targets || {});
   const stores = normalizeConcreteStoreKeys(targets.stores);
   const status = String(task.status || 'draft');
   if (!['confirmed', 'in_progress', 'waiting_review'].includes(status)) {
-    blockers.push('任务必须先点“确认成任务”，不能从草案直接执行。');
+    blockers.push('我还没有把这件事整理成可执行处理；你直接在聊天里明确要做什么，我会继续往下查。');
   }
-  if (needs.includes('image') && !intents.includes('copy_product_draft') && !assets.some(a => a.kind === 'image')) {
-    blockers.push('缺少图片素材：请先上传或同步商品图。');
+  if (needs.includes('image') && !intents.includes('copy_product_draft') && !assets.some(a => a.kind === 'image') && !hasJsonAsset) {
+    blockers.push('缺少图片素材：请上传图片，或上传系统导出的图片资料 JSON。');
   }
   if (needs.includes('image_or_certificate') && !assets.some(a => a.kind === 'image' || a.kind === 'certificate' || a.mime === 'application/json')) {
-    warnings.push('复制上品暂未上传图片/证书/发布 payload；若执行器不能从源商品详情还原素材，会在 OpenAPI 预检中继续阻断。');
+    warnings.push('复制上品暂未上传图片/证书/发布资料；如果系统不能从源商品详情还原素材，会提示你补。');
   }
   if (needs.includes('image') && intents.includes('copy_product_draft') && !assets.some(a => a.kind === 'image')) {
-    warnings.push('复制上品未上传图片素材；系统会优先尝试从源店商品快照复制图片，源快照不足时再阻断。');
+    warnings.push('复制上品未上传图片素材；系统会优先尝试从源店商品快照复制图片，源快照不足时再提示你补。');
   }
   if (needs.includes('certificate') && !assets.some(a => a.kind === 'certificate' || a.kind === 'text' || a.mime === 'application/pdf' || a.mime === 'application/json') && !task?.certificatePayload && !task?.targets?.certificatePayload && !Array.isArray(task?.certificatePayloads) && !Array.isArray(task?.targets?.certificatePayloads)) {
     blockers.push('缺少证书/资质材料：请上传 PDF/JSON，或提供 certificatePayloads[{endpoint,body}]。');
@@ -2622,14 +3480,14 @@ function runPreflightForLinkOpsTask(task) {
   const authorizedStores = stores.filter(store => openApiStoreCapability(store).authorized);
   const storesMissingProductAdapter = stores.filter(store => openApiStoreCapability(store).authorized && !openApiStoreCapability(store).productPublishAdapter);
   if (intents.includes('copy_product_draft') && storesMissingProductAdapter.length) {
-    warnings.push(`${storesMissingProductAdapter.join(',')} OpenAPI 已授权，但最近只读探针未证明可用；本任务可留在草案/待复核，需先修复探针后再做商品发布 dry-run。`);
+    warnings.push(`${storesMissingProductAdapter.join(',')} OpenAPI 已授权，但最近只读探针未证明可用；本任务会先停在会话里，需先修复店铺连通性后再继续。`);
   }
   const nonOpenApiStores = stores.filter(store => !openApiStoreCapability(store).authorized);
   if (intents.some(x => ['copy_product_draft', 'update_title', 'update_images', 'update_inventory', 'update_supply_price', 'update_product_price', 'activate_link', 'retire_link', 'campaign_signup', 'flash_discount', 'certificate_review'].includes(x)) && nonOpenApiStores.length) {
     warnings.push(`${nonOpenApiStores.join(',')} 暂无官方 OpenAPI 授权记录；后续执行需走云端 WebAPI/headless 受控路径或先完成该店 OpenAPI 接入。`);
   }
   if (authorizedStores.length && !stores.some(store => openApiStoreCapability(store).productPublishAdapter)) {
-    warnings.push(`${authorizedStores.join(',')} 已具备授权配置，但当前动作暂无可真实提交的适配器；系统只做 dry-run/预检，不会静默写后台。`);
+    warnings.push(`${authorizedStores.join(',')} 已具备授权配置，但当前动作暂无可真实提交的适配器；系统只检查，不会静默写后台。`);
   }
   if (!Array.isArray(task.history)) warnings.push('任务缺少历史记录，建议先刷新任务状态。');
   return {
@@ -2646,6 +3504,466 @@ function openApiProductExecutorTargetStores(task) {
   const stores = normalizeConcreteStoreKeys(taskWriteStores(task));
   if (!intents.includes('copy_product_draft')) return [];
   return stores.filter(store => openApiStoreCapability(store).productPublishPrecheckAdapter);
+}
+
+function shouldRunImmediateChatSystemCheck(task) {
+  const intents = Array.isArray(task?.intents) ? task.intents : [];
+  const hasProductPublish = intents.includes('copy_product_draft') && openApiProductExecutorTargetStores(task).length > 0;
+  const hasMaintenanceAction = intents.some(intent => LINK_MAINTENANCE_INTENTS.has(intent)) && openApiMaintenanceExecutorTargetStores(task).length > 0;
+  return hasProductPublish || hasMaintenanceAction;
+}
+
+function executionPreValidMessagesFromRun(run) {
+  const rows = asArray(run?.publishResult?.info?.pre_valid_result || run?.publishResult?.info?.preValidResult);
+  const out = [];
+  for (const row of rows) {
+    const label = String(row?.form_name || row?.form || row?.module || '平台规则').trim();
+    for (const msg of asArray(row?.messages || row?.message)) {
+      const text = String(msg || '').trim();
+      if (text) out.push(`${label}：${text}`);
+    }
+  }
+  if (!out.length && run?.publishResult?.info?.success === false) {
+    out.push('平台返回未通过，但没有给出具体字段明细。');
+  }
+  return [...new Set(out)];
+}
+
+function humanSourceMetricLine(source = {}) {
+  const m = source.metrics && typeof source.metrics === 'object' ? source.metrics : {};
+  const parts = [];
+  if (Number(m.c30SaleCnt || 0)) parts.push(`近30天销量 ${m.c30SaleCnt}`);
+  if (Number(m.c7SaleCnt || 0)) parts.push(`近7天销量 ${m.c7SaleCnt}`);
+  if (Number(m.c30GoodsUv || 0)) parts.push(`近30天商品访客 ${m.c30GoodsUv}`);
+  if (Number(m.c30EpsUv || 0)) parts.push(`近30天曝光/访问 ${m.c30EpsUv}`);
+  if (Number(m.totalSaleVolume || 0)) parts.push(`历史销量 ${m.totalSaleVolume}`);
+  if (m.lastSaleDate) parts.push(`最近成交 ${String(m.lastSaleDate).slice(0, 10)}`);
+  return parts.join('，') || `候选分 ${Number(source.score || 0).toFixed(0)}`;
+}
+
+function cleanHumanBlockerMessage(value) {
+  return String(value || '')
+    .replace(/dry-run|Dry-run|预检/g, '资料检查')
+    .replace(/系统检查/g, '资料检查')
+    .replace(/payload hash/g, '本次检查快照')
+    .replace(/payload/g, '发布资料')
+    .replace(/OpenAPI/g, '接口')
+    .replace(/SHEIN publishOrEdit/g, 'SHEIN 创建/编辑接口')
+    .replace(/真实提交必须显式输入确认文本\s*SHEIN_OPENAPI_SUBMIT。?/g, '我需要你在聊天里明确说“可以执行/提交吧/照做”。')
+    .replace(/真实提交必须先完成一次\s*资料检查，并停在“等你确认”状态。?/g, '我需要先把资料查完整，确认没有硬性缺口后才能提交。')
+    .replace(/真实提交前缺少已通过的\s*接口\s*商品资料检查证据。?/g, '商品资料还没检查通过。')
+    .replace(/真实提交前缺少已通过的\s*OpenAPI\s*商品系统检查证据。?/g, '商品资料还没检查通过。')
+    .replace(/([A-Z]{2,4})\s*商品发布\/编辑真实提交未被服务端总闸门放行；本次只能重新\s*资料检查。?/g, '$1 现在还没放开直接提交，我会先把资料查完整。')
+    .replace(/([A-Z]{2,4})\s*未命中真实写试点白名单（人\+店\+动作），不能真实提交。?/g, '$1 这个账号/店铺/动作暂时不在可提交范围。')
+    .replace(/([A-Z]{2,4})\s*缺少上一次\s*资料检查\s*锁定的\s*本次检查快照，不能真实提交。?/g, '$1 缺少刚才那次资料检查快照，需要先重新查一遍。')
+    .replace(/缺少上一次\s*资料检查\s*锁定的发布资料 hash/g, '缺少刚才那次资料检查的快照')
+    .replace(/；{2,}/g, '；')
+    .replace(/。{2,}/g, '。')
+    .trim();
+}
+
+function cleanHumanBlockerList(values) {
+  return uniqueMessages(asArray(values))
+    .map(cleanHumanBlockerMessage)
+    .map(x => String(x || '').replace(/[。；;,\s]+$/g, '').trim())
+    .filter(Boolean);
+}
+
+function linkOpsHumanStatus(task) {
+  const status = String(task?.status || '');
+  const state = String(task?.execution?.state || task?.lifecycle?.lifecycleStatus || '');
+  if (status === 'done') return '完成';
+  if (status === 'submitted_but_readback_pending' || state === 'submitted') return '已提交，正在确认结果';
+  if (status === 'needs_manual_resolve' || /readback_failed|suspicious/.test(state)) return '已提交，但需要人工确认结果';
+  if (state === 'publish_pre_valid_failed') return 'SHEIN 没通过，需要补充';
+  if (state === 'openapi_product_preflight_ready' || state === 'link_maintenance_preflight_ready') return '资料已通过，等你一句话确认执行';
+  if (state === 'blocked') return '卡住了，需要补充';
+  if (status === 'waiting_review') return '等你确认执行';
+  if (status === 'confirmed' || status === 'in_progress') return '正在处理';
+  return '已收到';
+}
+
+function linkOpsPublishResultSucceeded(result = {}) {
+  if (!result || typeof result !== 'object') return false;
+  if (String(result.code ?? '') !== '0') return false;
+  const info = result.info && typeof result.info === 'object' ? result.info : null;
+  if (info && info.success === false) return false;
+  return Boolean(info?.success === true || info?.spu_name || asArray(info?.skc_list).length || result.submitted === true);
+}
+
+function linkOpsPublishResultSummaryFromExecutors(execs = []) {
+  const summary = {
+    spuNames: [],
+    skcNames: [],
+    skuCodes: [],
+    versions: [],
+    taskNos: [],
+    traceIds: [],
+  };
+  for (const executor of asArray(execs)) {
+    const result = executor?.publishResult && typeof executor.publishResult === 'object' ? executor.publishResult : null;
+    if (!result) continue;
+    if (result.traceId) summary.traceIds.push(String(result.traceId));
+    const info = result.info && typeof result.info === 'object' ? result.info : null;
+    if (!info) continue;
+    if (info.spu_name) summary.spuNames.push(String(info.spu_name));
+    if (info.spuName) summary.spuNames.push(String(info.spuName));
+    if (info.version) summary.versions.push(String(info.version));
+    if (info.taskNo) summary.taskNos.push(String(info.taskNo));
+    if (info.task_no) summary.taskNos.push(String(info.task_no));
+    for (const skc of asArray(info.skc_list || info.skcList)) {
+      if (skc?.skc_name) summary.skcNames.push(String(skc.skc_name));
+      if (skc?.skcName) summary.skcNames.push(String(skc.skcName));
+      for (const sku of asArray(skc?.sku_list || skc?.skuList)) {
+        if (sku?.sku_code) summary.skuCodes.push(String(sku.sku_code));
+        if (sku?.skuCode) summary.skuCodes.push(String(sku.skuCode));
+      }
+    }
+  }
+  const unique = values => [...new Set(values.map(x => String(x || '').trim()).filter(Boolean))];
+  for (const key of Object.keys(summary)) summary[key] = unique(summary[key]);
+  return summary;
+}
+
+function formatLinkOpsPublishResultSummary(summary = {}) {
+  const parts = [];
+  if (asArray(summary.spuNames).length) parts.push(`SPU：${summary.spuNames.slice(0, 3).join('、')}`);
+  if (asArray(summary.skcNames).length) parts.push(`SKC：${summary.skcNames.slice(0, 5).join('、')}`);
+  if (asArray(summary.skuCodes).length) parts.push(`SKU：${summary.skuCodes.slice(0, 5).join('、')}`);
+  if (asArray(summary.versions).length) parts.push(`版本：${summary.versions.slice(0, 2).join('、')}`);
+  if (!parts.length && asArray(summary.taskNos).length) parts.push(`平台任务号：${summary.taskNos.slice(0, 3).join('、')}`);
+  if (asArray(summary.traceIds).length) parts.push(`traceId：${summary.traceIds.slice(0, 2).join('、')}`);
+  return parts;
+}
+
+function buildChatExecutionAnswer(task, {userMessage = ''} = {}) {
+  const execs = [
+    ...asArray(task?.execution?.openApiProductExecutors),
+    ...asArray(task?.execution?.linkMaintenanceExecutors || task?.execution?.linkMaintenancePrechecks),
+  ];
+  const intents = asArray(task?.intents).map(x => String(x || '').trim()).filter(Boolean);
+  const hasProductPublishIntent = intents.includes('copy_product_draft');
+  const maintenanceLabels = intents
+    .filter(intent => LINK_MAINTENANCE_INTENTS.has(intent))
+    .map(linkOpsIntentLabel);
+  const maintenanceText = maintenanceLabels.length ? maintenanceLabels.join('、') : '维护动作';
+  const lifecycleStatus = String(task?.lifecycle?.lifecycleStatus || task?.lifecycle?.status || '');
+  const lifecycleReadbacks = asArray(task?.lifecycle?.readbacks);
+  const readbackMatched = lifecycleStatus === 'submitted_readback_matched'
+    || (lifecycleReadbacks.length > 0 && lifecycleReadbacks.every(row => row?.ok && /matched/i.test(String(row?.status || '')) && Number(row?.matchedCount || 0) > 0));
+  const pre = task?.execution?.preflight || {};
+  const blockers = cleanHumanBlockerList([
+    ...asArray(pre.blockers),
+    ...execs.flatMap(x => asArray(x?.payload?.validation?.blockers)),
+    ...execs.flatMap(x => asArray(x?.blockers)),
+    ...execs.flatMap(executionPreValidMessagesFromRun),
+  ]);
+  const submitted = Boolean(task?.execution?.actualWriteSubmitted || task?.execution?.writeAudit?.actualWriteSubmitted);
+  const writeAttempted = Boolean(task?.execution?.sheinWriteAttempted || task?.execution?.writeAudit?.sheinWriteAttempted);
+  const state = String(task?.execution?.state || task?.lifecycle?.lifecycleStatus || '');
+  const needsManualResolve = Boolean(task?.lifecycle?.needsManualResolve || task?.execution?.lifecycle?.needsManualResolve || task?.execution?.writeAudit?.requiresManualResolve || task?.needsManualResolve);
+  const readbackFailed = lifecycleStatus === 'submitted_readback_failed'
+    || state === 'submitted_readback_failed'
+    || needsManualResolve
+    || String(task?.status || '') === 'needs_manual_resolve'
+    || execs.some(x => x?.readback && x.readback.ok === false && /not_found|weak|failed/i.test(String(x.readback.status || '')));
+  const publishSummary = linkOpsPublishResultSummaryFromExecutors(execs);
+  const publishSummaryLines = formatLinkOpsPublishResultSummary(publishSummary);
+  const publishPreValidFailed = !submitted && hasProductPublishIntent && (
+    state === 'publish_pre_valid_failed'
+    || execs.some(x => String(x?.state || '') === 'publish_pre_valid_failed')
+    || execs.some(x => {
+      const result = x?.publishResult && typeof x.publishResult === 'object' ? x.publishResult : null;
+      const info = result?.info && typeof result.info === 'object' ? result.info : null;
+      return result
+        && String(result.code ?? '') === '0'
+        && Boolean(info)
+        && (info.success === false || asArray(info.pre_valid_result).length > 0);
+    })
+  );
+  const status = linkOpsHumanStatus(task);
+  const lines = [];
+  lines.push(`收到，我按你这句“${compactChatLine(userMessage, 80)}”继续处理。`);
+  lines.push(`当前状态：${status}。`);
+  if (publishPreValidFailed) {
+    const missing = blockers.length ? blockers.slice(0, 5).join('；') : '平台没有给出具体字段，我会继续按商品资料重新检查。';
+    lines.push(`SHEIN 这次没有创建新链接，平台还要求补充：${missing}。`);
+    lines.push('我会按这些字段重新整理发布资料；你也可以直接在聊天里补一句字段值，我收到后会重新检查。');
+  } else if (submitted) {
+    if (readbackMatched) {
+      lines.push(hasProductPublishIntent
+        ? 'SHEIN 已返回提交成功，回读也已匹配到新链接，这件事已完成。'
+        : `SHEIN 已返回提交成功，回读也已匹配到目标链接，${maintenanceText}已完成。`);
+    } else if (intents.includes('certificate_review')) {
+      lines.push('SHEIN 已返回提交成功；证书/资质类结果需要等平台审核或人工确认。我已把这次提交留在当前会话里跟进，不会重复提交。');
+    } else if (readbackFailed) {
+      if (publishSummaryLines.length) {
+        lines.push([
+          hasProductPublishIntent ? 'SHEIN 已返回创建成功，平台返回的新商品信息：' : `SHEIN 已返回提交成功，平台返回的 ${maintenanceText} 信息：`,
+          ...publishSummaryLines.map(line => `- ${line}`),
+        ].join('\n'));
+      } else {
+        lines.push(hasProductPublishIntent
+          ? 'SHEIN 已返回创建成功，但平台没有在返回里给出完整的新链接编号。'
+          : `SHEIN 已返回提交成功，但平台没有在返回里给出完整的 ${maintenanceText} 编号。`);
+      }
+      lines.push(hasProductPublishIntent
+        ? '自动回读没有在商品列表/审核记录里强匹配到这条新链接，所以我已把任务锁住，等你在 SHEIN 后台人工确认或核销；我不会重复提交，避免重复铺货。'
+        : `自动回读没有强匹配到目标链接状态，所以我已把任务锁住，等你人工确认或核销；我不会重复提交，避免重复执行 ${maintenanceText}。`);
+    } else {
+      lines.push(hasProductPublishIntent
+        ? 'SHEIN 已返回提交成功，我正在核对新链接是否已经出现在商品列表或审核记录里。确认后会直接把新链接结果发在这里。'
+        : `SHEIN 已返回提交成功，我正在回读目标链接状态，确认 ${maintenanceText} 是否已经生效。`);
+    }
+  } else if (writeAttempted) {
+    lines.push('这次没有确认创建成功。我会先复查平台返回和商品列表；确认前不会重复提交，避免重复铺货。');
+  } else if (blockers.length) {
+    lines.push(`还差：${blockers.slice(0, 5).join('；')}。`);
+    lines.push('你不用点别的按钮，直接在聊天里补缺的字段或说明怎么处理，我会接着往下做。');
+  } else if (String(task?.execution?.state || '') === 'openapi_product_preflight_ready' || String(task?.execution?.state || '') === 'link_maintenance_preflight_ready') {
+    lines.push('资料已经查完，可以提交。你如果要继续，就直接说“可以执行”或“提交吧”。');
+  } else {
+    lines.push('我已经把任务推进了一步；后续缺口和结果都会继续在这个会话里说清楚。');
+  }
+  return lines.join('\n\n');
+}
+
+async function executeChatNaturalLanguageTask({task, taskData, session, userMessage, actor, req, args}) {
+  const current = normalizeLinkOpsTaskStore(taskData || {version: 1, updatedAt: null, tasks: []});
+  if (taskRequiresOwnerLifecycleResolve(task)) {
+    const deniedLifecycle = {
+      ok: false,
+      error: '该任务已进入提交后待回读/需人工处理状态，禁止重新检查或重复提交；请由全店管理账号人工核销为完成或归档。',
+      taskId: task?.id || '',
+      status: task?.status || '',
+      lifecycleStatus: task?.lifecycle?.lifecycleStatus || task?.lifecycle?.status || '',
+    };
+    await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-chat-natural-execute-denied-lifecycle', actor, ...requestMeta(req), session: {id: session?.id || ''}, task: {id: task?.id || '', stores: taskTargetStores(task), writeStores: taskWriteStores(task)}, denied: deniedLifecycle});
+    return {handled: true, task, taskData: current, answer: '这件事已经提交过，正在等平台结果或需要人工确认。为了避免重复创建/重复修改，我不会重新提交；请让全店管理账号先核销为完成或归档。'};
+  }
+  const denied = requireWriteStores(actor, taskWriteStores(task));
+  if (denied) {
+    await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-chat-natural-execute-denied', actor, ...requestMeta(req), session: {id: session?.id || ''}, task: {id: task.id, stores: taskTargetStores(task), writeStores: taskWriteStores(task)}, denied});
+    return {handled: true, task, taskData: current, answer: `我不能替这个账号执行这件事：${denied.error || denied.reason || '没有目标店铺写权限'}。`};
+  }
+  const id = String(task.id || '').trim();
+  if (id && linkOpsExecutionLocks.has(id)) {
+    return {handled: true, task, taskData: current, answer: '这件事正在处理上一条指令。你不用刷新，也不用重复发；结果回来后会自动更新到这个会话里。'};
+  }
+  if (id) linkOpsExecutionLocks.add(id);
+  try {
+    const updated = await startControlledLinkOpsExecution(task, actor, req, args, {
+      mode: 'execute',
+      executionMode: 'execute',
+      confirm: LINK_OPS_OPENAPI_SUBMIT_CONFIRM_TEXT,
+      confirmText: LINK_OPS_OPENAPI_SUBMIT_CONFIRM_TEXT,
+      source: 'chat_natural_language_execute',
+    });
+    const tasks = current.tasks.slice();
+    const idx = tasks.findIndex(t => String(t.id || '') === String(updated.id || ''));
+    if (idx >= 0) tasks[idx] = updated;
+    else tasks.unshift(updated);
+    const nextData = {version: 1, updatedAt: new Date().toISOString(), tasks: tasks.slice(0, 1000)};
+    await writeJsonFile(args.linkOpsTaskFile, nextData);
+    await appendAudit(args.auditFile, {
+      at: new Date().toISOString(),
+      type: 'link-ops-chat-natural-execute',
+      actor,
+      ...requestMeta(req),
+      session: {id: session?.id || ''},
+      task: {
+        id: updated.id,
+        status: updated.status,
+        state: updated.execution?.state || '',
+        stores: taskTargetStores(updated),
+        writeStores: taskWriteStores(updated),
+      },
+      naturalLanguageConfirm: compactChatLine(userMessage, 200),
+      submitted: Boolean(updated.execution?.actualWriteSubmitted || updated.execution?.writeAudit?.actualWriteSubmitted),
+    });
+    return {handled: true, task: updated, taskData: nextData, answer: buildChatExecutionAnswer(updated, {userMessage})};
+  } catch (err) {
+    return {handled: true, task, taskData: current, answer: `我收到你的确认了，但执行没有跑完：${String(err?.message || err || 'unknown error')}。\n\n这件事没有被重复提交；你可以继续在聊天里补充或让我重试。`};
+  } finally {
+    if (id) linkOpsExecutionLocks.delete(id);
+  }
+}
+
+async function runChatNaturalLanguageExecutionIfPossible({session, userMessage, taskData, actor, req, args}) {
+  const current = normalizeLinkOpsTaskStore(taskData || {version: 1, updatedAt: null, tasks: []});
+  const activeTasks = activeChatTasks(current.tasks, session?.id);
+  const eligibleTasks = eligibleChatNaturalExecutionTasks(current.tasks, session?.id);
+  if (!activeTasks.length) {
+    return {
+      handled: true,
+      task: null,
+      taskData: current,
+      answer: '我收到你这句话了，但这个会话里还没有明确要处理的事情。你直接说要做什么，比如“给 DL 的 505 缝纫机补一条链接，复制所有店里流量最高的那条”，我会先查源链接和缺口。',
+    };
+  }
+  if (eligibleTasks.length !== 1) {
+    if (eligibleTasks.length > 1) {
+      const names = eligibleTasks.slice(0, 4).map(chatTaskDisplayName).join('；');
+      await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-chat-natural-execute-ambiguous', actor, ...requestMeta(req), session: {id: session?.id || ''}, taskCount: eligibleTasks.length, tasks: eligibleTasks.slice(0, 10).map(t => ({id: t.id, name: chatTaskDisplayName(t), status: t.status, state: t.execution?.state || ''}))});
+      return {handled: true, task: eligibleTasks[0], taskData: current, answer: `这个会话里有 ${eligibleTasks.length} 件事都已经查完，我不能猜你要执行哪一个。你直接说清楚要继续哪件事，或者新开一个会话，例如“继续 ${names.split('；')[0] || '第一件'}”。`};
+    }
+    if (activeTasks.length === 1) {
+      const task = activeTasks[0];
+      const eligibility = chatNaturalExecutionEligibility(task);
+      await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-chat-natural-execute-needs-check', actor, ...requestMeta(req), session: {id: session?.id || ''}, task: {id: task.id, status: task.status, state: task.execution?.state || '', reasons: eligibility.reasons}});
+      const checked = await runImmediateChatSystemCheckIfPossible({task, taskData: current, actor, req, args, updated: true});
+      if (checked.task && chatNaturalExecutionEligibility(checked.task).ok) {
+        await appendAudit(args.auditFile, {
+          at: new Date().toISOString(),
+          type: 'link-ops-chat-natural-execute-after-refresh',
+          actor,
+          ...requestMeta(req),
+          session: {id: session?.id || ''},
+          task: {id: checked.task.id, status: checked.task.status, state: checked.task.execution?.state || ''},
+          naturalLanguageConfirm: compactChatLine(userMessage, 200),
+        });
+        return await executeChatNaturalLanguageTask({task: checked.task, taskData: checked.taskData, session, userMessage, actor, req, args});
+      }
+      if (checked.answer) return {handled: true, task: checked.task, taskData: checked.taskData, answer: checked.answer};
+      const reason = eligibility.reasons.length ? eligibility.reasons.join('；') : '还没形成唯一可提交任务';
+      return {handled: true, task, taskData: current, answer: `我先不提交：${reason}。你不用点按钮，继续在聊天里补字段或说清楚要处理哪一条，我会先把资料查完整。`};
+    }
+    const names = activeTasks.slice(0, 5).map(chatTaskDisplayName).join('；');
+    await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-chat-natural-execute-no-eligible', actor, ...requestMeta(req), session: {id: session?.id || ''}, taskCount: activeTasks.length, tasks: activeTasks.slice(0, 10).map(t => ({id: t.id, name: chatTaskDisplayName(t), status: t.status, state: t.execution?.state || '', reasons: chatNaturalExecutionEligibility(t).reasons}))});
+    return {handled: true, task: activeTasks[0], taskData: current, answer: `我先不提交：这个会话里有 ${activeTasks.length} 件未完成事项，但没有唯一一件处于“资料已查完、等你一句话执行”的状态。你可以直接说要继续哪一个，例如：${names || '指定店铺和货号'}。`};
+  }
+  const task = eligibleTasks[0];
+  return await executeChatNaturalLanguageTask({task, taskData: current, session, userMessage, actor, req, args});
+}
+
+function buildChatSystemCheckAnswer(task, {updated = false} = {}) {
+  const productExecs = asArray(task?.execution?.openApiProductExecutors);
+  const maintenanceExecs = asArray(task?.execution?.linkMaintenanceExecutors || task?.execution?.linkMaintenancePrechecks);
+  const execs = [...productExecs, ...maintenanceExecs];
+  const first = productExecs[0] || {};
+  const source = first?.payload?.inferredSource || task?.execution?.hlOpenApiExecutor?.payload?.inferredSource || null;
+  const targetStores = normalizeConcreteStoreKeys(taskWriteStores(task));
+  const refs = normalizeLinkOpsTargetSet(task?.targets || {}).productRefs;
+  const intents = asArray(task?.intents).map(x => String(x || '').trim()).filter(Boolean);
+  const maintenanceIntents = intents.filter(intent => LINK_MAINTENANCE_INTENTS.has(intent));
+  const maintenanceOperations = uniqueMessages(maintenanceExecs.flatMap(exec => asArray(exec?.payload?.summary?.operations)))
+    .filter(Boolean);
+  const maintenanceMatchedLinks = maintenanceExecs.flatMap(exec => asArray(exec?.adapterEvidence?.matchedLinks));
+  const blockers = cleanHumanBlockerList([
+    ...asArray(task?.execution?.preflight?.blockers),
+    ...execs.flatMap(x => asArray(x?.payload?.validation?.blockers)),
+    ...execs.flatMap(x => asArray(x?.blockers)),
+    ...execs.flatMap(executionPreValidMessagesFromRun),
+  ]);
+  const warnings = cleanHumanBlockerList([
+    ...asArray(task?.execution?.preflight?.warnings),
+    ...execs.flatMap(x => asArray(x?.payload?.validation?.warnings)),
+    ...execs.flatMap(x => asArray(x?.warnings)),
+  ]);
+  const state = String(task?.execution?.state || '');
+  const ready = ['openapi_product_preflight_ready', 'link_maintenance_preflight_ready'].includes(state)
+    && task?.execution?.preflight?.ok === true;
+  const hasCopyProduct = intents.includes('copy_product_draft');
+  const lines = [];
+  lines.push(updated ? '我已按你刚补充的信息重新检查了一遍。' : '收到，我先替你查了资料和执行缺口。');
+  if (targetStores.length || refs.length) {
+    lines.push(`目标：${targetStores.length ? targetStores.join('/') + ' 店' : '未锁定店铺'}${refs.length ? ` · ${refs.join(' / ')}` : ''}`);
+  }
+  if (hasCopyProduct) {
+    if (source?.sourceStore && source?.sourceSkc) {
+      const product = source.standardGoodsSn || source.metrics?.rawGoodsSn || '';
+      lines.push(`我选中的源链接：${source.sourceStore} 店 · ${source.sourceSkc}${product ? ` · ${product}` : ''}。`);
+      lines.push(`选择依据：这是当前候选里综合流量/销量最高的一条；${humanSourceMetricLine(source)}。`);
+    } else {
+      lines.push('我还没有选定可复制的源链接：当前数据里没找到足够明确的同货号在售 SKC。');
+    }
+  }
+  if (maintenanceIntents.length) {
+    const opNames = (maintenanceOperations.length ? maintenanceOperations : maintenanceIntents)
+      .map(linkOpsIntentLabel)
+      .filter(Boolean);
+    lines.push(`我要执行的维护动作：${opNames.join('、')}。`);
+    if (maintenanceMatchedLinks.length) {
+      const sample = maintenanceMatchedLinks.slice(0, 4).map(row => [
+        row.storeKey || row.store || '',
+        row.skc || row.skcName || '',
+        row.standardGoodsSn || row.standard_goods_sn || '',
+        row.shelfStatusName || row.shelf_status_name || '',
+      ].filter(Boolean).join(' · ')).filter(Boolean);
+      lines.push(`已定位到 ${maintenanceMatchedLinks.length} 条目标链接${sample.length ? `：${sample.join('；')}` : ''}。`);
+    }
+  }
+  if (blockers.length) {
+    lines.push(`还差：${blockers.slice(0, 5).join('；')}。`);
+    lines.push('你直接在聊天里补一句缺失字段或说明处理方式。我收到后会自动重新检查。');
+  } else if (ready) {
+    lines.push('目前资料已经够了，资料检查通过。');
+    lines.push(hasCopyProduct
+      ? '如果要创建这条新链接，你直接在聊天里说“可以执行”“提交吧”或“照做”，我会提交到 SHEIN，并把结果回读给你。'
+      : '如果要执行这次维护，你直接在聊天里说“可以执行”“提交吧”或“照做”，我会提交到 SHEIN，并把结果回读给你。');
+  } else if (warnings.length) {
+    lines.push(`提醒：${warnings.slice(0, 4).join('；')}。`);
+    lines.push('没有硬阻断；如果你认可这些默认值，直接在聊天里说“可以执行”或“提交吧”。');
+  } else {
+    lines.push('我已经开始处理，会继续在这个会话里跟进。');
+  }
+  return lines.join('\n\n');
+}
+
+async function runImmediateChatSystemCheckIfPossible({task, taskData, actor, req, args, updated = false}) {
+  if (!task || !shouldRunImmediateChatSystemCheck(task)) {
+    return {task, taskData, answer: ''};
+  }
+  if (taskRequiresOwnerLifecycleResolve(task)) {
+    await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-chat-immediate-system-check-denied-lifecycle', actor, ...requestMeta(req), task: {id: task?.id || '', status: task?.status || '', lifecycleStatus: task?.lifecycle?.lifecycleStatus || task?.lifecycle?.status || '', stores: taskTargetStores(task), writeStores: taskWriteStores(task)}});
+    return {
+      task,
+      taskData,
+      answer: '这件事已经提交过，正在等平台结果或需要人工确认。为了避免重复创建/重复修改，我不会重新检查或重新提交；请让全店管理账号先核销为完成或归档。',
+    };
+  }
+  const lockId = String(task.id || '').trim();
+  if (lockId && linkOpsExecutionLocks.has(lockId)) {
+    return {
+      task,
+      taskData,
+      answer: '我已收到，这件事正在处理上一条指令。等结果回来后会自动更新到这个会话里，你不用刷新页面或重复点击。',
+    };
+  }
+  if (lockId) linkOpsExecutionLocks.add(lockId);
+  try {
+    const checked = await startControlledLinkOpsExecution(task, actor, req, args, {
+      mode: 'dry-run',
+      executionMode: 'dry-run',
+      source: 'chat_immediate_system_check',
+    });
+    const current = normalizeLinkOpsTaskStore(taskData || {tasks: []});
+    const tasks = current.tasks.length ? current.tasks.slice() : [checked];
+    const idx = tasks.findIndex(t => String(t.id || '') === String(checked.id || ''));
+    if (idx >= 0) tasks[idx] = checked;
+    else tasks.unshift(checked);
+    const nextData = {version: 1, updatedAt: new Date().toISOString(), tasks: tasks.slice(0, 1000)};
+    await writeJsonFile(args.linkOpsTaskFile, nextData);
+    await appendAudit(args.auditFile, {
+      at: new Date().toISOString(),
+      type: 'link-ops-chat-immediate-system-check',
+      actor,
+      ...requestMeta(req),
+      task: {
+        id: checked.id,
+        status: checked.status,
+        state: checked.execution?.state || '',
+        stores: taskTargetStores(checked),
+        writeStores: taskWriteStores(checked),
+      },
+    });
+    return {task: checked, taskData: nextData, answer: buildChatSystemCheckAnswer(checked, {updated})};
+  } catch (err) {
+    const answer = `我已收到，但刚才自动检查没有跑完：${String(err?.message || err || 'unknown error')}。\n\n你不用重新说需求，稍后我会继续按当前会话处理。`;
+    return {task, taskData, answer};
+  } finally {
+    if (lockId) linkOpsExecutionLocks.delete(lockId);
+  }
 }
 
 
@@ -2782,7 +4100,7 @@ async function runLinkMaintenancePrechecks(task, args, body = {}) {
   const runId = `lmp_${now.replace(/[-:.TZ]/g, '').slice(0, 14)}_${crypto.randomBytes(4).toString('hex')}`;
   const blockers = [];
   const warnings = [];
-  if (denied) blockers.push(`维护预检启动前权限复核失败：${denied.error}`);
+  if (denied) blockers.push(`维护系统检查启动前权限复核失败：${denied.error}`);
   if (!stores.length) blockers.push('维护动作必须明确目标店铺。');
   if (!productRefs.length) blockers.push('维护动作必须明确目标货号或 SKC。');
   const {file, rows, error} = await loadLinkOpsStoreLinks(args);
@@ -2844,9 +4162,9 @@ async function runLinkMaintenancePrechecks(task, args, body = {}) {
     blockers.push('换标题任务缺少新标题或标题规则：请在指令中写明“标题改成…”或上传文本/JSON 素材。');
   }
   if (maintenanceIntents.includes('update_images') && !hasImageMaintenanceMaterial(task)) {
-    blockers.push('换图任务缺少图片素材：请先上传图片后再预检。');
+    blockers.push('换图任务缺少图片素材：请先上传图片后再系统检查。');
   }
-  blockers.push('旧链接维护本地预检已被 OpenAPI 维护执行器替代；请通过受控执行器生成 payload hash 后再进入真实提交门禁。');
+  blockers.push('旧链接维护本地系统检查已被 OpenAPI 维护执行器替代；请通过受控执行器生成 payload hash 后再进入真实提交门禁。');
   const matchedLinks = uniqueMatches.map(item => ({
     ref: item.ref,
     ...summarizeMaintenanceLink(item.row),
@@ -2887,7 +4205,7 @@ async function runLinkMaintenancePrechecks(task, args, body = {}) {
       matchedLinks: matchedLinks.slice(0, 80),
       snapshotFile: path.relative(ROOT, file).replace(/\\/g, '/'),
       maintenanceIntents,
-      submitBoundary: '旧本地预检不负责真实提交；维护写动作必须走 OpenAPI 维护执行器、payload hash、白名单和回读门禁。',
+      submitBoundary: '旧本地系统检查不负责真实提交；维护写动作必须走 OpenAPI 维护执行器、payload hash、白名单和回读门禁。',
     },
     readbackFingerprint,
     blockers,
@@ -2896,7 +4214,7 @@ async function runLinkMaintenancePrechecks(task, args, body = {}) {
       canSilentWrite: false,
       realSubmit: false,
       executeSupported: false,
-      note: '旧本地预检仅保留兼容；维护写真实提交必须走 OpenAPI 维护执行器、确认文本、白名单和回读。',
+      note: '旧本地系统检查仅保留兼容；维护写真实提交必须走 OpenAPI 维护执行器、确认文本、白名单和回读。',
     },
   };
   return [{
@@ -3068,6 +4386,24 @@ function classifyLinkOpsLifecycle({
       note: 'SHEIN 真实写执行器在提交模式下异常中断或超时，无法确认 SHEIN 是否已接收写请求；任务已锁定，禁止重复提交，需全店管理账号人工核销。',
     };
   }
+  if (executorState === 'publish_pre_valid_failed') {
+    return {
+      version: 1,
+      fromStatus: originalStatus,
+      toStatus: 'waiting_review',
+      status: 'publish_pre_valid_failed',
+      lifecycleStatus: 'publish_pre_valid_failed',
+      terminal: false,
+      locked: false,
+      needsManualResolve: false,
+      requestedMode,
+      executorState,
+      submitted: false,
+      submittedPossibly: false,
+      readbacks,
+      note: 'SHEIN publishOrEdit 已返回平台预校验失败，平台未创建成功新链接；请修复发布资料字段后重新检查/提交。',
+    };
+  }
   if (submitted) {
     const allMatched = readbacks.length > 0
       && readbacks.every(row => row.ok && /matched/i.test(row.status || '') && row.matchedCount > 0);
@@ -3137,8 +4473,8 @@ function classifyLinkOpsLifecycle({
     submitted: false,
     readbacks,
     note: requestedMode === 'execute'
-      ? '本次没有完成 SHEIN 真实写提交；保留在待复核/预检状态，需先解决阻断后重新 dry-run。'
-      : '本次为 dry-run/预检，没有调用 SHEIN 真实写接口。',
+      ? '本次没有完成 SHEIN 真实写提交；保留在等你确认/系统检查状态，需先解决阻断后重新 系统检查。'
+      : '本次为 系统检查/系统检查，没有调用 SHEIN 真实写接口。',
   };
 }
 
@@ -3276,7 +4612,7 @@ async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey
         state: mode === 'execute' ? 'suspicious_write_attempted' : (result.timedOut ? 'timeout' : 'error'),
         blockers: mode === 'execute'
           ? []
-          : [`${targetStore} OpenAPI 商品预检执行器未返回可解析结果：code=${result.code}${result.timedOut ? ' timeout=true' : ''}`],
+          : [`${targetStore} OpenAPI 商品系统检查执行器未返回可解析结果：code=${result.code}${result.timedOut ? ' timeout=true' : ''}`],
         warnings: mode === 'execute'
           ? [`${targetStore} OpenAPI 商品执行器在真实提交模式下未返回可解析结果：code=${result.code}${result.timedOut ? ' timeout=true' : ''}。无法确认 SHEIN 是否已接收写请求，任务已锁定，禁止重复提交，需人工核销。`]
           : [],
@@ -3422,6 +4758,21 @@ async function runOpenApiMaintenanceExecutors(task, args, body = {}) {
 async function startControlledLinkOpsExecution(task, actor, req, args, body = {}) {
   const originalStatus = String(task?.status || 'draft');
   const now = new Date().toISOString();
+  const intents = normalizeIntentsForCommand(Array.isArray(task?.intents) ? task.intents : [], task?.command || '');
+  const chatTargets = await inferTargetsFromTaskChatSession(args, task);
+  const mergedTargets = normalizeTargetsForIntents(intents, mergeLinkOpsTargets(task?.targets || {}, chatTargets));
+  const normalizedOriginalTargets = normalizeTargetsForIntents(intents, task?.targets || {});
+  if (JSON.stringify(mergedTargets) !== JSON.stringify(normalizedOriginalTargets) || JSON.stringify(intents) !== JSON.stringify(Array.isArray(task?.intents) ? task.intents : [])) {
+    task = {
+      ...task,
+      intents,
+      targets: mergedTargets,
+      executionHints: {
+        ...(task?.executionHints && typeof task.executionHints === 'object' ? task.executionHints : {}),
+        chatTargetsMergedAt: now,
+      },
+    };
+  }
   const rawRequestedMode = String(body.mode || body.executionMode || (body.execute === true ? 'execute' : 'dry-run') || 'dry-run').toLowerCase();
   const requestedMode = rawRequestedMode === 'execute' ? 'execute' : 'dry-run';
   const confirmText = String(body.confirm || body.confirmText || '').trim();
@@ -3433,7 +4784,6 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
   const sourceStores = taskSourceStores(task);
   const writeStores = taskWriteStores(task);
   const productRefs = normalizeLinkOpsTargetSet(task?.targets || {}).productRefs;
-  const intents = Array.isArray(task?.intents) ? task.intents : [];
   const maintenanceIntents = intents.filter(intent => LINK_MAINTENANCE_INTENTS.has(intent));
   const hasProductPublishIntent = intents.includes('copy_product_draft');
   const hasMaintenanceIntent = maintenanceIntents.length > 0;
@@ -3450,7 +4800,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       ...task,
       status: 'confirmed',
       progress: Math.max(normalizeProgress(task.progress, 0), 30),
-      note: task.note || '用户点击开始执行，系统已自动确认成可执行任务并进入预检。',
+      note: task.note || '用户要求开始执行，系统已进入资料检查。',
       updatedAt: now,
     }
     : task;
@@ -3459,7 +4809,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     const unsupportedExecuteIntents = intents
       .filter(intent => intent !== 'copy_product_draft' && intent !== 'manual_review' && !LINK_MAINTENANCE_INTENTS.has(intent));
     if (!hasProductPublishIntent && !hasMaintenanceIntent) {
-      preflight.blockers.push('当前任务不包含已接入真实提交适配器的动作；只能 dry-run、建任务或补材料。');
+      preflight.blockers.push('这件事还没有接入可提交动作；我只能先检查资料或让你补材料。');
     }
     if (hasProductPublishIntent && hasMaintenanceIntent) {
       preflight.blockers.push('复制上品和链接维护写动作必须拆成两个任务分别真实提交，避免一次确认覆盖不同生命周期动作。');
@@ -3471,15 +4821,15 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       preflight.blockers.push(`真实提交必须显式输入确认文本 ${LINK_OPS_OPENAPI_SUBMIT_CONFIRM_TEXT}。`);
     }
     if (originalStatus !== 'waiting_review') {
-      preflight.blockers.push('真实提交必须先完成一次 dry-run 预检，并停在“待复核”状态。');
+      preflight.blockers.push('真实提交必须先完成一次 系统检查，并停在“等你确认”状态。');
     }
     if (hasProductPublishIntent) {
       if (task?.execution?.state !== 'openapi_product_preflight_ready' || task?.execution?.preflight?.ok !== true) {
-        preflight.blockers.push('真实提交前缺少已通过的 OpenAPI 商品预检证据。');
+        preflight.blockers.push('真实提交前缺少已通过的 OpenAPI 商品系统检查证据。');
       }
       const notEnabledStores = writeStores.filter(store => !openApiStoreCapability(store).productPublishExecuteAdapter);
       if (notEnabledStores.length) {
-        preflight.blockers.push(`${notEnabledStores.join(',')} 商品发布/编辑真实提交未被服务端总闸门放行；本次只能重新 dry-run。`);
+        preflight.blockers.push(`${notEnabledStores.join(',')} 商品发布/编辑真实提交未被服务端总闸门放行；本次只能重新 系统检查。`);
       }
       const whitelistDenied = realSubmitWhitelistChecks.filter(check => check.operation === 'copy_product_draft' && !check.allowed);
       if (whitelistDenied.length) {
@@ -3487,12 +4837,12 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       }
       const storesMissingPayloadHash = writeStores.filter(store => !payloadHashForStoreFromTaskExecution(task, store));
       if (storesMissingPayloadHash.length) {
-        preflight.blockers.push(`${storesMissingPayloadHash.join(',')} 缺少上一次 dry-run 锁定的 payload hash，不能真实提交。`);
+        preflight.blockers.push(`${storesMissingPayloadHash.join(',')} 缺少上一次 系统检查 锁定的 payload hash，不能真实提交。`);
       }
     }
     if (hasMaintenanceIntent) {
       if (task?.execution?.state !== 'link_maintenance_preflight_ready' || task?.execution?.preflight?.ok !== true) {
-        preflight.blockers.push('真实提交前缺少已通过的 OpenAPI 维护预检证据。');
+        preflight.blockers.push('真实提交前缺少已通过的 OpenAPI 维护系统检查证据。');
       }
       for (const store of writeStores) {
         const cap = openApiStoreCapability(store);
@@ -3512,7 +4862,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
             preflight.blockers.push(`${store}/${linkOpsIntentLabel(operation)} 未命中真实写试点白名单（人+店+动作），不能真实提交。`);
           }
           if (!payloadHashForMaintenanceFromTaskExecution(task, store, operation)) {
-            preflight.blockers.push(`${store}/${linkOpsIntentLabel(operation)} 缺少上一次 dry-run 锁定的 payload hash，不能真实提交。`);
+            preflight.blockers.push(`${store}/${linkOpsIntentLabel(operation)} 缺少上一次 系统检查 锁定的 payload hash，不能真实提交。`);
           }
         }
       }
@@ -3533,6 +4883,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     sourceStores,
     writeStores,
     productRefs,
+    attributeOverrides: normalizeLinkOpsTargetSet(task?.targets || {}).attributeOverrides,
     intents,
     requestedMode,
     realSubmitWhitelistChecks,
@@ -3577,10 +4928,13 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
   const hasOpenApiProductExecutor = openApiProductExecutors.length > 0;
   const hasOpenApiMaintenanceExecutor = openApiMaintenanceExecutors.length > 0;
   const submitted = executorResults.some(x => x?.state === 'submitted');
+  const publishPreValidFailed = executorResults.some(x => x?.state === 'publish_pre_valid_failed' || x?.publishResult?.info?.success === false);
   const executorState = submitted
     ? 'submitted'
     : suspiciousWriteAttempted
       ? 'suspicious_write_attempted'
+      : publishPreValidFailed
+        ? 'publish_pre_valid_failed'
     : hasOpenApiProductExecutor
       ? (ok ? 'openapi_product_preflight_ready' : 'blocked')
       : hasOpenApiMaintenanceExecutor
@@ -3605,6 +4959,8 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       : Math.max(normalizeProgress(task.progress, 0), lifecycleTransition.needsManualResolve ? 85 : 82))
     : suspiciousWriteAttempted
       ? Math.max(normalizeProgress(task.progress, 0), 85)
+    : publishPreValidFailed
+      ? Math.max(normalizeProgress(task.progress, 0), 62)
     : ok
       ? Math.max(normalizeProgress(task.progress, 0), hasOpenApiProductExecutor ? 70 : (hasOpenApiMaintenanceExecutor ? 68 : 65))
       : Math.max(normalizeProgress(task.progress, 0), 45);
@@ -3677,10 +5033,12 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       ? lifecycleTransition.note
       : suspiciousWriteAttempted
         ? lifecycleTransition.note
+        : publishPreValidFailed
+          ? lifecycleTransition.note
       : ok && hasOpenApiProductExecutor
-        ? 'OpenAPI 商品执行器 dry-run 预检通过；仍需最终执行确认，系统不会静默提交 SHEIN。'
+        ? 'OpenAPI 商品执行器 系统检查通过；仍需最终执行确认，系统不会静默提交 SHEIN。'
         : ok && hasOpenApiMaintenanceExecutor
-          ? 'OpenAPI 维护执行器 dry-run 预检通过；仍需最终执行确认，系统不会静默提交 SHEIN。'
+          ? 'OpenAPI 维护执行器 系统检查通过；仍需最终执行确认，系统不会静默提交 SHEIN。'
           : ok
             ? '受控执行器已完成前置检查；当前停在执行准备/预填阶段，不会静默提交 SHEIN。'
             : `执行器阻断：${combinedBlockers.join('；')}`,
@@ -3738,12 +5096,12 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
         ? '已调用 SHEIN 写接口并收到提交成功状态；后续仍需回读确认 SHEIN 侧最终状态。'
         : requestedMode === 'execute'
           ? '本次没有完成 SHEIN 真实写提交；请查看 blockers、executeAllowed、issuedExecuteToExecutor 和 sheinWriteAttempted。'
-          : '本次为 dry-run/预检，没有调用 SHEIN 真实写接口。',
+          : '本次为 系统检查/系统检查，没有调用 SHEIN 真实写接口。',
       lifecycle: lifecycleTransition,
       note: hasOpenApiProductExecutor
-        ? 'OpenAPI 商品执行器已接入。默认只做预检；真实 publishOrEdit 必须任务已确认、payload 完整、显式 execute 和确认文本同时满足。'
+        ? 'OpenAPI 商品执行器已接入。默认只做系统检查；真实 publishOrEdit 必须任务已确认、payload 完整、显式 execute 和确认文本同时满足。'
         : hasOpenApiMaintenanceExecutor
-          ? 'OpenAPI 维护执行器已接入。默认只做预检；真实提交必须命中服务端总闸门、真实写白名单、dry-run payload hash 和确认文本，提交后必须回读或人工核销。'
+          ? 'OpenAPI 维护执行器已接入。默认只做系统检查；真实提交必须命中服务端总闸门、真实写白名单、系统检查 payload hash 和确认文本，提交后必须回读或人工核销。'
           : '第一版只做材料/权限/防重检查和执行准备；正式 SHEIN 提交必须后续接具体适配器并保留人工确认。',
     },
     lifecycle: lifecycleTransition,
@@ -5389,7 +6747,7 @@ async function main() {
       }
       if (url.pathname === '/api/openapi-capabilities') {
         if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
-        return sendJson(res, 200, openApiCapabilityLedger());
+        return sendJson(res, 200, projectOpenApiCapabilityLedgerForClient(openApiCapabilityLedger()));
       }
       if (url.pathname === '/api/action-state') {
         if (req.method === 'GET') {
@@ -5448,7 +6806,24 @@ async function main() {
         if (req.method === 'GET') {
           const current = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
           const limit = Math.max(1, Math.min(500, Number(url.searchParams.get('limit') || 120)));
-          return sendJson(res, 200, {ok: true, data: {...current, tasks: current.tasks.slice(0, limit)}});
+          const sessionId = String(url.searchParams.get('sessionId') || url.searchParams.get('chatSessionId') || '').trim();
+          if (sessionId) {
+            const messageTaskIds = new Set();
+            try {
+              const chatStore = normalizeLinkOpsChatStore(await readJsonFile(args.linkOpsChatFile, {version: 1, updatedAt: null, sessions: []}));
+              const session = chatStore.sessions.find(row => String(row?.id || '') === sessionId);
+              for (const message of asArray(session?.messages)) {
+                const id = String(message?.meta?.autoTaskId || '').trim();
+                if (id) messageTaskIds.add(id);
+              }
+            } catch {}
+            const scoped = {
+              ...current,
+              tasks: current.tasks.filter(task => String(task?.chatSessionId || task?.chat?.sessionId || '') === sessionId || messageTaskIds.has(String(task?.id || ''))),
+            };
+            return sendJson(res, 200, {ok: true, data: projectLinkOpsTaskStoreForClient(scoped, {limit})});
+          }
+          return sendJson(res, 200, {ok: true, data: projectLinkOpsTaskStoreForClient(current, {limit})});
         }
         if (req.method === 'POST') {
           if (args.readOnly) {
@@ -5492,7 +6867,11 @@ async function main() {
               commandLength: task.command.length,
             },
           });
-          return sendJson(res, 200, {ok: true, data: next, task});
+          return sendJson(res, 200, {
+            ok: true,
+            data: projectLinkOpsTaskStoreForClient(next, {limit: 500}),
+            task: projectLinkOpsTaskForClient(task),
+          });
         }
         if (req.method === 'PATCH') {
           if (args.readOnly) {
@@ -5557,7 +6936,11 @@ async function main() {
               progress: normalizeProgress(updated.progress, 0),
             },
           });
-          return sendJson(res, 200, {ok: true, data: next, task: updated});
+          return sendJson(res, 200, {
+            ok: true,
+            data: projectLinkOpsTaskStoreForClient(next, {limit: 500}),
+            task: projectLinkOpsTaskForClient(updated),
+          });
         }
         if (req.method === 'DELETE') {
           if (args.readOnly) {
@@ -5607,7 +6990,11 @@ async function main() {
             ...requestMeta(req),
             task: {id, status: task.status, commandLength: String(task.command || '').length, assetsDeleted},
           });
-          return sendJson(res, 200, {ok: true, data: next, deleted: {id}});
+          return sendJson(res, 200, {
+            ok: true,
+            data: projectLinkOpsTaskStoreForClient(next, {limit: 500}),
+            deleted: {id},
+          });
         }
         return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
       }
@@ -5651,20 +7038,57 @@ async function main() {
           } catch (err) {
             return sendJson(res, 400, {ok: false, error: err?.message || String(err || 'Upload failed')});
           }
-          await writeJsonFile(args.linkOpsTaskFile, result.store);
+          let responseStore = result.store;
+          let responseTask = result.task;
+          let uploadCheckAnswer = '';
+          try {
+            const checkResult = await runImmediateChatSystemCheckIfPossible({
+              task: result.task,
+              taskData: result.store,
+              actor,
+              req,
+              args,
+              updated: true,
+            });
+            responseStore = checkResult.taskData || result.store;
+            responseTask = checkResult.task || result.task;
+            uploadCheckAnswer = checkResult.answer || '';
+          } catch (err) {
+            uploadCheckAnswer = `我已收到你上传的资料，但重新检查时没有跑完：${String(err?.message || err || 'unknown error')}。你可以继续在聊天里补充或让我重试。`;
+          }
+          await writeJsonFile(args.linkOpsTaskFile, responseStore);
+          let projectedChatSession = null;
+          if (uploadCheckAnswer) {
+            try {
+              const chatAppend = await appendLinkOpsChatAssistantMessageForTask(
+                args,
+                responseTask,
+                `我已收到你上传的 ${result.assets.length} 个文件。\n\n${uploadCheckAnswer}`,
+                {mode: 'bi-ops-upload-check', autoTaskId: responseTask?.id || ''}
+              );
+              projectedChatSession = chatAppend.session ? projectLinkOpsChatSessionForClient(chatAppend.session) : null;
+            } catch {}
+          }
           await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'link-ops-assets-upload',
             actor,
             ...requestMeta(req),
             task: {
-              id: result.task.id,
-              status: result.task.status,
+              id: responseTask.id,
+              status: responseTask.status,
               assetCount: result.assets.length,
+              systemCheckState: responseTask.execution?.state || '',
             },
             assets: result.assets.map(a => ({id: a.id, kind: a.kind, mime: a.mime, bytes: a.bytes, sha256: a.sha256})),
           });
-          return sendJson(res, 200, {ok: true, data: result.store, task: result.task, assets: result.assets});
+          return sendJson(res, 200, {
+            ok: true,
+            data: projectLinkOpsTaskStoreForClient(responseStore, {limit: 500}),
+            task: projectLinkOpsTaskForClient(responseTask),
+            assets: result.assets.map(projectLinkOpsAssetForClient).filter(Boolean),
+            session: projectedChatSession,
+          });
         }
         return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
       }
@@ -5686,7 +7110,7 @@ async function main() {
           if (taskRequiresOwnerLifecycleResolve(current.tasks[idx])) {
             const deniedLifecycle = {
               ok: false,
-              error: '该任务已进入提交后待回读/需人工处理状态，禁止重新预检或执行；请由全店管理账号人工核销为完成或归档。',
+              error: '该任务已进入提交后待回读/需人工处理状态，禁止重新系统检查或执行；请由全店管理账号人工核销为完成或归档。',
               taskId: id,
               status: current.tasks[idx].status || '',
               lifecycleStatus: current.tasks[idx].lifecycle?.lifecycleStatus || current.tasks[idx].lifecycle?.status || '',
@@ -5700,7 +7124,7 @@ async function main() {
             return sendJson(res, 403, denied);
           }
           if (linkOpsExecutionLocks.has(id)) {
-            const deniedLock = {ok: false, error: '该自动运营任务正在执行/预检中，请等待当前请求结束后再重试', taskId: id};
+            const deniedLock = {ok: false, error: '该自动运营任务正在执行/系统检查中，请等待当前请求结束后再重试', taskId: id};
             await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-execute-denied', actor, ...requestMeta(req), task: {id, stores: taskTargetStores(current.tasks[idx]), writeStores: taskWriteStores(current.tasks[idx]), sourceStores: taskSourceStores(current.tasks[idx])}, denied: deniedLock});
             return sendJson(res, 409, deniedLock);
           }
@@ -5732,7 +7156,12 @@ async function main() {
                 writeAudit: updated.execution?.writeAudit || null,
               },
             });
-            return sendJson(res, 200, {ok: true, data: next, task: updated, execution: updated.execution});
+            return sendJson(res, 200, {
+              ok: true,
+              data: projectLinkOpsTaskStoreForClient(next, {limit: 500}),
+              task: projectLinkOpsTaskForClient(updated),
+              execution: projectLinkOpsExecutionForClient(updated.execution),
+            });
           } finally {
             linkOpsExecutionLocks.delete(id);
           }
@@ -5750,7 +7179,7 @@ async function main() {
           const denied = requireWriteStores(actor, taskWriteStores(task));
           if (denied) return sendJson(res, 403, denied);
         } else if (!canWriteAllStores(actor)) {
-          return sendJson(res, 403, {ok: false, error: '只有全店管理账号可以查看全局自动运营审计'});
+          return sendJson(res, 403, {ok: false, error: '只有全店管理账号可以查看全局自动运营记录'});
         }
         const entries = await readLinkOpsAuditEntries(args.auditFile, {taskId, limit});
         return sendJson(res, 200, {ok: true, taskId, entries});
@@ -5759,7 +7188,7 @@ async function main() {
         if (req.method === 'GET') {
           const current = normalizeLinkOpsChatStore(await readJsonFile(args.linkOpsChatFile, {version: 1, updatedAt: null, sessions: []}));
           const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit') || 80)));
-          return sendJson(res, 200, {ok: true, data: {...current, sessions: current.sessions.slice(0, limit)}});
+          return sendJson(res, 200, {ok: true, data: projectLinkOpsChatStoreForClient(current, {limit})});
         }
         if (req.method === 'POST') {
           if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
@@ -5790,10 +7219,17 @@ async function main() {
               session = buildChatSessionFromMessage(body, actor, req);
               created = true;
             }
+            let attributeContextTask = null;
+            try {
+              const contextTaskData = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
+              attributeContextTask = findReusableChatTask(contextTaskData.tasks, session.id);
+            } catch {}
             const conversationTargets = inferTargetsFromChatSession(session);
+            const userMessageTargets = inferLinkOpsTargets(userMessage, {attributeContextTask});
+            const userAttributeOverrides = normalizeLinkOpsTargetSet(userMessageTargets).attributeOverrides;
             const explicitActionCommand = isLinkOpsActionCommand(userMessage);
             const confirmExecuteCommand = isConfirmExecuteChatCommand(userMessage);
-            const shouldAutoTask = !body.noAutoTask && (explicitActionCommand || (confirmExecuteCommand && hasActionableLinkOpsContext(session)));
+            const shouldAutoTask = explicitActionCommand || (confirmExecuteCommand && hasActionableLinkOpsContext(session));
             const effectiveTaskCommand = explicitActionCommand
               ? userMessage
               : shouldAutoTask
@@ -5809,16 +7245,33 @@ async function main() {
             let agentAnswer = '';
             let agentDurationMs = 0;
             let codexResumed = false;
-            if (body.askAgent !== false) {
+            let naturalExecutionHandled = false;
+            if (confirmExecuteCommand && !explicitActionCommand) {
+              taskData = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
+              const executionResult = await runChatNaturalLanguageExecutionIfPossible({
+                session,
+                userMessage,
+                taskData,
+                actor,
+                req,
+                args,
+              });
+              naturalExecutionHandled = Boolean(executionResult.handled);
+              autoTask = executionResult.task;
+              taskData = executionResult.taskData;
+              agentAnswer = executionResult.answer || '';
+            }
+            const shouldAskOpsAgent = body.askAgent !== false && !shouldAutoTask && !userAttributeOverrides.length;
+            if (!naturalExecutionHandled && shouldAskOpsAgent) {
               const rememberedMessages = recentCloudAiMessages(session.messages);
               const conversation = rememberedMessages.map(m => `${m.role === 'assistant' ? '智能体' : '用户'}：${m.content}`).join('\n');
               const extraRules = shouldAutoTask
                 ? [
                     confirmExecuteCommand
-                      ? '本条最新用户消息是对上文方案的确认执行。系统会继承上文用户意图和智能体定位，把同一会话加入或更新到链接运营任务池。'
-                      : '本条最新用户消息已识别为明确运营动作命令。系统会自动把它加入链接运营任务池，等待人工确认/执行器预检。',
-                    '你的回复不能声称已经执行，也不要只说“没有权限所以不能”；应明确说“已加入待确认动作/任务，执行前还会核对目标、素材、权限和风险”。',
-                    '如果目标店铺属于 19 店已授权范围，应说明该店 OpenAPI 已授权且只读探针通过；复制/补链会在 dry-run 中优先从源链接自动取类目、属性、图片、SKU、价格、库存、尺寸重量等参数，只有自动还原失败才需要补资料；不能一上来就说缺 payload 或没有权限。',
+                      ? '本条最新用户消息是对上文方案的确认执行。系统会继承上文用户意图和智能体定位，在同一会话里继续处理。'
+                      : '本条最新用户消息已识别为明确运营动作命令。系统会在当前会话里开始处理，并立刻做一次不提交 SHEIN 的资料检查。',
+                    '你的回复不能声称已经执行，也不要只说“没有权限所以不能”；应像 Codex 一样说明“我先查了什么、选中了哪个源链接、还缺什么、用户补哪一句就能继续”。',
+                    '如果目标店铺属于 19 店已授权范围，应说明该店 OpenAPI 已授权且只读探针通过；复制/补链会优先从源链接自动取类目、属性、图片、SKU、价格、库存、尺寸重量等参数，只有自动还原失败才需要补资料；不能一上来就说缺 payload 或没有权限。',
                   ]
                 : [
                     '每一轮都要根据整段会话和最新 BI JSON 上下文重新查数；如果最新用户消息换了店铺、货号或指标，以最新消息为准，缺省时再沿用上文。',
@@ -5827,7 +7280,7 @@ async function main() {
                 '这是 SHEIN 链接管理中台的一段运营会话。请只围绕 SHEIN 数据、链接管理、标题/图片/活动/补链建议回答。',
                 '云端 AI 统一记忆规则：同一中台会话保存并传递原始会话文本，不在业务层手动摘要压缩；真正触及模型上下文上限时，由模型/调用层处理，最新用户消息永远优先。',
                 '云端 AI 统一权限边界：允许电商运营分析、受控图表、标题/卖点/图片方案草稿、公开竞品参考、以及链接/商品运营任务草案；敏感登录材料和底层维护类请求只能拒绝说明，不能展示细节，也不能在聊天里直接改经营看板底层系统。',
-                '明确的 SHEIN 链接/商品运营写动作（改标题、换图、补链接、上架/下架、报活动等）只能进入同一会话任务池、预检和审计，不允许绕过中台静默写后台。',
+                '明确的 SHEIN 链接/商品运营写动作（改标题、换图、补链接、上架/下架、报活动等）只能在同一会话里受控处理和资料检查，不允许绕过中台静默写后台。',
                 '如果信息还不够，先问需要补充什么；如果已经可以形成任务，请给出清晰的下一步和风险边界。',
                 '遇到“这个链接/这个品/2,223 这个”等指代时，必须结合上文已出现的店铺、货号、SKC、曝光/访客/销量数字重新定位；不能因为最新一句没写全就否定上轮数据。',
                 '会话已识别目标：' + summarizeLinkOpsTargets(conversationTargets),
@@ -5842,7 +7295,7 @@ async function main() {
               codexResumed = Boolean(result.codexResumed);
               if (result.codexSessionId) session.codexSessionId = result.codexSessionId;
             }
-            if (shouldAutoTask) {
+            if (!naturalExecutionHandled && shouldAutoTask) {
               const taskStore = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
               const duplicate = findDuplicateAutoTask(taskStore.tasks, session.id, effectiveTaskCommand);
               const reusable = duplicate || findReusableChatTask(taskStore.tasks, session.id);
@@ -5862,7 +7315,7 @@ async function main() {
                   chatSessionId: session.id,
                   targets: conversationTargets,
                   agentAnswer,
-                  agentMode: agentAnswer ? 'readonly-codex-gateway' : '',
+                  agentMode: agentAnswer ? 'bi-ops-chat' : '',
                   agentDurationMs,
                 }, actor, req);
                 const denied = requireWriteStores(actor, taskWriteStores(autoTask));
@@ -5897,7 +7350,7 @@ async function main() {
                   chatSessionId: session.id,
                   targets: conversationTargets,
                   agentAnswer,
-                  agentMode: agentAnswer ? 'readonly-codex-gateway' : '',
+                  agentMode: agentAnswer ? 'bi-ops-chat' : '',
                   agentDurationMs,
                 }, actor, req);
                 const denied = requireWriteStores(actor, taskWriteStores(autoTask));
@@ -5907,16 +7360,16 @@ async function main() {
                 }
                 autoTask.status = 'confirmed';
                 autoTask.progress = Math.max(normalizeProgress(autoTask.progress, 10), 30);
-                autoTask.note = '来自运营会话的明确指令，已自动进入待执行任务；真正执行前仍会检查目标、素材、权限和风险，不会静默改 SHEIN。';
+                autoTask.note = '来自运营会话的明确指令；系统会先查源链接、资料缺口和店铺权限，不会静默改 SHEIN。';
                 autoTask.execution = {
                   ...(autoTask.execution || {}),
                   mode: 'manual_confirm_first',
                   enabled: false,
-                  note: '已收到明确运营命令；当前执行器仍只做受控预检/准备，真实写后台需通过执行器校验和人工边界。',
+                  note: '已收到明确运营命令；先做不提交的资料检查，真实写后台仍需你在聊天里确认，并回读结果。',
                 };
                 autoTask.preview = {
                   ...(autoTask.preview || {}),
-                  summary: `来自会话的明确动作：${autoTask.intents.map(linkOpsIntentLabel).join(' / ')}；已自动加入任务池，等待执行前预检。`,
+                  summary: `来自会话的明确动作：${autoTask.intents.map(linkOpsIntentLabel).join(' / ')}；系统会在会话里说明源链接、缺口和下一步。`,
                 };
                 autoTask.history = appendTaskHistory(autoTask, 'auto_created_from_chat_command', actor, req, {
                   status: autoTask.status,
@@ -5945,14 +7398,101 @@ async function main() {
                   },
                 });
               }
+              const checkResult = await runImmediateChatSystemCheckIfPossible({
+                task: autoTask,
+                taskData,
+                actor,
+                req,
+                args,
+                updated: Boolean(reusable && !duplicate),
+              });
+              autoTask = checkResult.task;
+              taskData = checkResult.taskData;
               const autoTaskNote = reusable && !duplicate
-                ? `已更新当前会话的链接运营任务：${autoTask.id}（${linkOpsStatusLabel(autoTask.status)}）。不会重复开新任务；执行前仍会核对目标、素材、权限和风险。`
-                : `已自动加入链接运营任务池：${autoTask.id}（${linkOpsStatusLabel(autoTask.status)}）。执行前仍会核对目标、素材、权限和风险，不会静默改 SHEIN。`;
-              agentAnswer = agentAnswer ? `${agentAnswer}\n\n${autoTaskNote}` : autoTaskNote;
+                ? '收到，我已把这句补充合并到当前处理里，不会重复开新任务。你继续在聊天里补字段或说“执行吧”即可。'
+                : '收到，我已开始处理这件事。系统会在这个会话里说明选中的对象、资料缺口和下一步。';
+              const humanCheckAnswer = checkResult.answer || autoTaskNote;
+              agentAnswer = agentAnswer ? `${agentAnswer}\n\n${humanCheckAnswer}` : humanCheckAnswer;
+            }
+            if (!naturalExecutionHandled && !shouldAutoTask && userAttributeOverrides.length) {
+              const taskStore = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
+              const reusable = findReusableChatTask(taskStore.tasks, session.id);
+              if (reusable) {
+                const denied = requireWriteStores(actor, taskWriteStores(reusable));
+                if (denied) {
+                  await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-chat-attribute-update-denied', actor, ...requestMeta(req), session: {id: session.id}, task: {id: reusable.id}, denied});
+                  return sendJson(res, 403, denied);
+                }
+                const mergedTargets = mergeLinkOpsTargets(reusable.targets || {}, {attributeOverrides: userAttributeOverrides});
+                if (JSON.stringify(normalizeLinkOpsTargetSet(reusable.targets || {})) !== JSON.stringify(mergedTargets)) {
+                  const idx = taskStore.tasks.findIndex(t => String(t.id || '') === String(reusable.id || ''));
+                  const nowForOverride = new Date().toISOString();
+                  const updatedTask = {
+                    ...reusable,
+                    targets: mergedTargets,
+                    note: '会话已补充商品参数；系统会重新检查发布资料并刷新当前处理。',
+                    execution: {
+                      ...(reusable.execution && typeof reusable.execution === 'object' ? reusable.execution : {}),
+                      state: 'needs_repreflight',
+                      preflight: {
+                        ...(reusable.execution?.preflight && typeof reusable.execution.preflight === 'object' ? reusable.execution.preflight : {}),
+                        ok: false,
+                        blockers: uniqueMessages([
+                          ...asArray(reusable.execution?.preflight?.blockers),
+                          '会话人工参数已更新，需要重新检查资料后才能提交。',
+                        ]),
+                      },
+                    },
+                    executionHistory: appendExecutionHistory(reusable, {
+                      event: 'chat_manual_attribute_override',
+                      at: nowForOverride,
+                      sessionId: session.id,
+                      message: compactChatLine(userMessage, 260),
+                      attributeOverrides: userAttributeOverrides,
+                      actor: actorAuditContext(actor, req),
+                      requestMeta: requestMeta(req),
+                    }),
+                    history: appendTaskHistory(reusable, 'chat_manual_attribute_override', actor, req, {
+                      sessionId: session.id,
+                      attributeOverrides: userAttributeOverrides,
+                    }),
+                    updatedAt: nowForOverride,
+                  };
+                  const tasks = taskStore.tasks.slice();
+                  if (idx >= 0) tasks[idx] = updatedTask;
+                  taskData = {version: 1, updatedAt: nowForOverride, tasks};
+                  await writeJsonFile(args.linkOpsTaskFile, taskData);
+                  autoTask = updatedTask;
+                  await appendAudit(args.auditFile, {
+                    at: nowForOverride,
+                    type: 'link-ops-chat-manual-attribute-override',
+                    actor,
+                    ...requestMeta(req),
+                    session: {id: session.id},
+                    task: {id: updatedTask.id, status: updatedTask.status},
+                    attributeOverrides: userAttributeOverrides,
+                  });
+                  const checkResult = await runImmediateChatSystemCheckIfPossible({
+                    task: updatedTask,
+                    taskData,
+                    actor,
+                    req,
+                    args,
+                    updated: true,
+                  });
+                  autoTask = checkResult.task;
+                  taskData = checkResult.taskData;
+                  if (checkResult.answer) {
+                    agentAnswer = agentAnswer ? `${agentAnswer}\n\n${checkResult.answer}` : checkResult.answer;
+                  }
+                }
+              } else if (!agentAnswer) {
+                agentAnswer = '我收到了这个补充参数，但当前会话里还没有明确要处理的商品/链接。你直接说要做什么，例如“给 DL 的 505 缝纫机补一条链接”，我会把这个参数一起带入检查。';
+              }
             }
             if (agentAnswer) {
               session = appendAssistantChatMessage(session, agentAnswer, {
-                mode: body.askAgent === false ? 'system-auto-task' : 'readonly-codex-gateway',
+                mode: 'bi-ops-chat',
                 durationMs: agentDurationMs,
                 codexSessionId: session.codexSessionId || '',
                 codexResumed,
@@ -5974,7 +7514,13 @@ async function main() {
             ...requestMeta(req),
             session: {id: session.id, created, messageCount: Array.isArray(session.messages) ? session.messages.length : 0},
           });
-          return sendJson(res, 200, {ok: true, data: next, session, autoTask, taskData});
+          return sendJson(res, 200, {
+            ok: true,
+            data: projectLinkOpsChatStoreForClient(next, {limit: 300}),
+            session: projectLinkOpsChatSessionForClient(session),
+            autoTask: autoTask ? projectLinkOpsTaskForClient(autoTask) : null,
+            taskData: taskData ? projectLinkOpsTaskStoreForClient(taskData, {limit: 500}) : null,
+          });
         }
         if (req.method === 'PATCH') {
           if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
@@ -6002,7 +7548,11 @@ async function main() {
           sessions[idx] = session;
           const next = {version: 1, updatedAt: new Date().toISOString(), memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions};
           await writeJsonFile(args.linkOpsChatFile, next);
-          return sendJson(res, 200, {ok: true, data: next, session});
+          return sendJson(res, 200, {
+            ok: true,
+            data: projectLinkOpsChatStoreForClient(next, {limit: 300}),
+            session: projectLinkOpsChatSessionForClient(session),
+          });
         }
         if (req.method === 'DELETE') {
           if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
@@ -6038,7 +7588,19 @@ async function main() {
               codexSessionDelete,
             },
           });
-          return sendJson(res, 200, {ok: true, data: next, deleted: {id, existed: Boolean(deletedSession), codexSession: codexSessionDelete}});
+          return sendJson(res, 200, {
+            ok: true,
+            data: projectLinkOpsChatStoreForClient(next, {limit: 300}),
+            deleted: {
+              id,
+              existed: Boolean(deletedSession),
+              codexSession: {
+                ok: codexSessionDelete.ok !== false,
+                skipped: Boolean(codexSessionDelete.skipped),
+                deletedFiles: Array.isArray(codexSessionDelete.deletedFiles) ? codexSessionDelete.deletedFiles.length : 0,
+              },
+            },
+          });
         }
         return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
       }
@@ -6069,7 +7631,7 @@ async function main() {
             });
             return sendJson(res, 200, {
               ok: true,
-              mode: 'readonly-codex-gateway',
+              mode: 'bi-ops-chat',
               answer: result.answer,
               durationMs: Date.now() - startedAt,
             });

@@ -183,7 +183,7 @@ if (firstSpuName) {
     name: 'spu-info-first-product',
     method: 'POST',
     path: '/open-api/goods/spu-info',
-    body: {spuName: firstSpuName, languageList: ['en', 'zh-cn']},
+    body: {spuName: firstSpuName, languageList: ['en', 'ar']},
   }));
 }
 if (firstSkuCode) {

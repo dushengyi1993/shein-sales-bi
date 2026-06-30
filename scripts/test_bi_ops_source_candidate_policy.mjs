@@ -14,6 +14,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import vm from 'node:vm';
 import {fileURLToPath} from 'node:url';
+import {inferSourceProductFromTask} from '../lib/link_ops_product_draft_mapper.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const file = path.join(ROOT, 'scripts', 'link_ops_hl_openapi_executor.mjs');
@@ -73,9 +74,31 @@ check(
   v => Number.isFinite(v) && v > 0,
 );
 
+const explicitSameStore = inferSourceProductFromTask({
+  targets: {sourceStores: ['DL'], stores: ['DL'], productRefs: ['505']},
+  sourceSkc: 'sv260206143706406150869',
+}, {targetStore: 'DL'});
+check(
+  'explicit same-store sourceStore/sourceSkc is preserved',
+  explicitSameStore,
+  v => v.sourceStore === 'DL' && v.sourceSkc === 'sv260206143706406150869',
+);
+
+const explicitThreeLetterStore = inferSourceProductFromTask({
+  targets: {sourceStores: ['JSH'], stores: ['DL']},
+  sourceSkc: 'sv260206143706406150869',
+}, {targetStore: 'DL'});
+check(
+  'explicit three-letter source store is valid',
+  explicitThreeLetterStore,
+  v => v.sourceStore === 'JSH' && v.sourceSkc === 'sv260206143706406150869',
+);
+
 const ok = checks.every(x => x.pass)
   && !/store\s*===\s*normalizeStoreKey\(targetStore\)/.test(source)
-  && /sourceStoreAllowList\.length\s*&&\s*!sourceStoreAllowList\.includes\(store\)/.test(source);
+  && /sourceStoreAllowList\.length\s*&&\s*!sourceStoreAllowList\.includes\(store\)/.test(source)
+  && /sections['"`]\s*,\s*['"`]linksData\.json/.test(source)
+  && /function biPortalLinkRows/.test(source);
 
 console.log(JSON.stringify({
   ok,
@@ -83,6 +106,8 @@ console.log(JSON.stringify({
   staticChecks: {
     noTargetStoreBlanketExclusion: !/store\s*===\s*normalizeStoreKey\(targetStore\)/.test(source),
     explicitSourceAllowListPresent: /sourceStoreAllowList\.length\s*&&\s*!sourceStoreAllowList\.includes\(store\)/.test(source),
+    readsSectionLinksData: /sections['"`]\s*,\s*['"`]linksData\.json/.test(source),
+    biPortalLinkRowsHelperPresent: /function biPortalLinkRows/.test(source),
   },
 }, null, 2));
 if (!ok) process.exit(1);

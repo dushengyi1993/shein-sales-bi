@@ -4,8 +4,11 @@ import path from 'node:path';
 import { SpreadsheetFile, Workbook } from '@oai/artifact-tool';
 import { normalizeGoodsSnDetailed } from '../../lib/product_sku_normalizer.mjs';
 import {
+  buildLinkRowIndexFromBi,
   buildExposureTopLinkIndex,
   exposureTopRowsForCanonical,
+  isNewListingOrdinaryMarketingActivity,
+  isRecentNewListingLink,
   loadMarketingPricingPolicy,
   marginTargetsForExposurePolicy,
   pctRatioText,
@@ -36,6 +39,7 @@ const signupPricingPolicy = withSignupCliOverrides(pricingPolicy, cli);
 const rawActivityRows = activityDoc.detailRows || [];
 const {doc: exposureBiForRanking, summary: exposureCanonicalBackfill} = enrichExposureBiWithPlanCanonicals(exposureBi, rawActivityRows);
 const exposureIndex = buildExposureTopLinkIndex(exposureBiForRanking, signupPricingPolicy);
+const exposureLinkIndex = buildLinkRowIndexFromBi(exposureBiForRanking);
 const targetFloorMargin = pctConfigToRatio(cli.targetFloorMarginPct ?? pricingPolicy.targetFloorMarginPct ?? 15);
 const selectionMarginBasis = normalizeSelectionMarginBasis(cli.selectionMarginBasis || 'full_cost_including_storage');
 const storageRequiredForSelection = selectionMarginBasis !== 'product_cost_excluding_storage';
@@ -120,13 +124,32 @@ for (const [sku, group] of bySku.entries()) {
   const groupSkcs = new Set(group.map(r => String(r['SKC'] || '').trim()).filter(Boolean));
   const topExposureSkcsInGroup = topExposureRows.filter(row => groupSkcs.has(row.skc));
   const topExposureLinkKeys = new Set(topExposureRows.map(row => exposureLinkKey(row.storeKey, row.skc)));
-  const rowIsTopExposure = row => topExposureLinkKeys.has(exposureLinkKey(row['店铺'], row['SKC']));
+  const rowNewListingTopTreatmentInfo = row => {
+    const storeKey = String(row['店铺'] || '').trim().toUpperCase();
+    const skc = String(row['SKC'] || '').trim();
+    const link = exposureLinkIndex.byLinkKey.get(exposureLinkKey(storeKey, skc)) || null;
+    const newListing = isRecentNewListingLink(link, signupPricingPolicy, DATE_TAG);
+    const activityMatched = isNewListingOrdinaryMarketingActivity(row, signupPricingPolicy);
+    return {
+      applies: Boolean(activityMatched && newListing.applies),
+      activityMatched,
+      link,
+      ...newListing,
+    };
+  };
+  const newListingTopTreatmentByLink = new Map(group.map(row => [exposureLinkKey(row['店铺'], row['SKC']), rowNewListingTopTreatmentInfo(row)]));
+  const newListingTopTreatmentRows = group.filter(row => newListingTopTreatmentByLink.get(exposureLinkKey(row['店铺'], row['SKC']))?.applies);
+  const hasNewListingTopTreatment = newListingTopTreatmentRows.length > 0;
+  const rowIsTopExposure = row => {
+    const linkKey = exposureLinkKey(row['店铺'], row['SKC']);
+    return topExposureLinkKeys.has(linkKey) || Boolean(newListingTopTreatmentByLink.get(linkKey)?.applies);
+  };
   const targetMargin = hasFixedPrice ? null : (baselineIsMargin ? baselineRule.otherMargin : (hasExposureRanking ? (exposureTargets?.otherMargin ?? baseTargetMargin) : baseTargetMargin));
   const topExposureMargin = hasFixedPrice
     ? null
     : (baselineIsMargin
         ? (baselineRule.topMargin ?? baselineRule.otherMargin)
-        : (!hasExposureRanking ? null : (exposureTargets?.topMargin ?? null)));
+        : (!(hasExposureRanking || hasNewListingTopTreatment) ? null : (exposureTargets?.topMargin ?? null)));
   const exposureRuleText = baselineIsFixedPrice
     ? `继承上期确认价：7天曝光前五 ${fmt(baselineRule.topPrice ?? baselineRule.otherPrice)} SAR / 其他 ${fmt(baselineRule.otherPrice)} SAR`
     : baselineIsMargin
@@ -135,6 +158,8 @@ for (const [sku, group] of bySku.entries()) {
     ? '固定价/逐行覆盖价优先，不自动套曝光利润率'
     : hasExposureRanking
       ? `${exposureRankMetricText}前五 ${pctRatioText(topExposureMargin)} / 其他 ${pctRatioText(targetMargin)}`
+      : hasNewListingTopTreatment
+        ? `新上架7天内新品活动按曝光前五力度 ${pctRatioText(topExposureMargin)} / 其他 ${pctRatioText(targetMargin)}`
       : '曝光数据缺失：保持基础利润率';
   const targetMode = hasFixedPrice
     ? (baselineIsFixedPrice ? '继承上期确认固定价' : '固定最终成交价')
@@ -240,7 +265,7 @@ for (const [sku, group] of bySku.entries()) {
     }
     if (safeNoCouponAll) actionParts.push(`普通活动按目标价 ${fmt(targetFinal)} SAR 报`);
     else actionParts.push('普通活动需按店铺平台上限微调，低利润店筛掉/单独处理');
-    if (fixed === null && hasExposureRanking) {
+    if (fixed === null && (hasExposureRanking || hasNewListingTopTreatment)) {
       actionParts.push(`曝光前五链接目标利润率 ${pctRatioText(topExposureMargin)}，其他链接 ${pctRatioText(targetMargin)}；不得低于15%底价`);
     }
     if (couponRows.length) actionParts.push(couponStrategy);
@@ -290,7 +315,10 @@ for (const [sku, group] of bySku.entries()) {
     const finalTargetPrice = strategy.finalTargetPrice ?? null;
     const rowIntendedFinal = strategy.rowIntendedFinal ?? null;
     const rowCouponFactor = strategy.couponFactor ?? 1;
+    const rowLinkKey = exposureLinkKey(storeKey, skc);
+    const actualTopExposureLink = topExposureLinkKeys.has(rowLinkKey);
     const isTopExposureLink = rowIsTopExposure(r);
+    const newListingTopTreatment = newListingTopTreatmentByLink.get(rowLinkKey) || {};
     const productCost = r._cloudCost.productUnitCostSar;
     const fullCost = r._cloudCost.fullUnitCostSar;
     const marginAfterStorage = finalTargetPrice !== null && isNum(fullCost) && Number(fullCost) > 0 && finalTargetPrice > 0
@@ -344,6 +372,9 @@ for (const [sku, group] of bySku.entries()) {
       marginForSelection: roundOrNull(marginForSelection, 4),
       selectionMarginBasis,
       isTopExposureLink,
+      newListingTopTreatment: Boolean(newListingTopTreatment.applies),
+      newListingShelfAgeDays: newListingTopTreatment.shelfAgeDays ?? null,
+      newListingShelfAgeSource: newListingTopTreatment.shelfAgeSource || '',
       rule: inheritedRuleName || 'cloud_sku_approval_execution_price',
       sourceStatus: status,
       platformAdjusted: targetPrice !== null && uncappedActivityPrice !== null && platformCap !== null && targetPrice < uncappedActivityPrice - 0.001,
@@ -351,7 +382,8 @@ for (const [sku, group] of bySku.entries()) {
         targetPrice !== null && uncappedActivityPrice !== null && platformCap !== null && targetPrice < uncappedActivityPrice - 0.001
           ? `平台最低降幅上限 ${fmt(platformCap)} SAR 低于策略价 ${fmt(uncappedActivityPrice)} SAR`
           : '',
-        isTopExposureLink ? `命中本标准货号${exposureRankMetricText || '曝光'}全局前五` : '',
+        actualTopExposureLink ? `命中本标准货号${exposureRankMetricText || '曝光'}全局前五` : '',
+        newListingTopTreatment.applies ? `新上架${newListingTopTreatment.shelfAgeDays}天且首次报新品活动，按曝光前五力度` : '',
         baselineRule ? `继承上期最终版策略：${baselineRule.summary}` : '',
         baselineAllowsBelowFloor && marginForSelection !== null && marginForSelection < targetFloorMargin - 1e-9 ? `继承上期确认：低于${round2(targetFloorMargin * 100)}%红线也允许按平台/清货价报名` : '',
         rowCouponFactor < 1 ? `可选流量券仅作触券下探测算，不作为保底成交价` : '',
@@ -385,6 +417,7 @@ for (const [sku, group] of bySku.entries()) {
     '建议最终成交价SAR': range(rowIntendedFinals),
     '曝光前五SKC': topExposureRows.map(row => `${row.storeKey || '-'}#${row.rank}.${row.skc}${row.score ? `(${row.score})` : ''}`).join('；'),
     '本表命中曝光前五SKC': topExposureSkcsInGroup.map(row => `${row.storeKey || '-'}#${row.rank}.${row.skc}`).join('；'),
+    '新上架7天内按前五力度SKC': newListingTopTreatmentRows.map(r => `${r['店铺']}#${r['SKC']}`).join('；'),
     '曝光规则目标利润率': exposureRuleText,
     '曝光前五建议最终成交价SAR': fmt(topExposureTargetFinal),
     '其他链接建议最终成交价SAR': fmt(targetFinal),
@@ -416,6 +449,7 @@ const confirmHeaders = [
   '系统结论','标准货号','覆盖店铺数','建议活动组合',
   '商品成本SAR（不含仓储）','仓储费SAR/件','含仓储成本SAR','建议最终成交价SAR',
   '曝光规则目标利润率','曝光前五建议最终成交价SAR','其他链接建议最终成交价SAR',
+  '新上架7天内按前五力度SKC',
   '不含仓储利润率','含仓储利润率','仓储口径','店铺差异我怎么处理','需要你确认',
   '你的确认最终价SAR','你的确认利润率%','备注/是否同意'
 ];
@@ -423,7 +457,7 @@ const detailHeaders = [
   '系统结论','标准货号','代表供方货号','覆盖店铺数','覆盖店铺','活动ID','当前售价范围SAR',
   '商品成本SAR（不含仓储）','仓储费SAR/件','含仓储成本SAR','仓储口径','云端仓储总费SAR','云端仓储数量基准',
   '云端历史不含仓储利润率','云端历史含仓储利润率','云端成本来源','货号复核原因','系统目标','建议最终成交价SAR',
-  '曝光前五SKC','本表命中曝光前五SKC','曝光规则目标利润率','曝光前五建议最终成交价SAR','其他链接建议最终成交价SAR','建议普通活动价SAR',
+  '曝光前五SKC','本表命中曝光前五SKC','新上架7天内按前五力度SKC','曝光规则目标利润率','曝光前五建议最终成交价SAR','其他链接建议最终成交价SAR','建议普通活动价SAR',
   '如果只叠15%券普通活动价需≥SAR','如果叠50%券普通活动价需≥SAR','平台允许活动价上限范围SAR','推荐活动组合',
   '组合后预计最终价SAR','不含仓储利润率','含仓储利润率','平台压价后最低不含仓储利润率','平台压价后最低含仓储利润率',
   '优惠券风险行数','限时折扣风险行数','你只需确认','备注/是否同意'
@@ -440,6 +474,7 @@ const confirmRows = approvalRows.map(r => ({
   '曝光规则目标利润率': r['曝光规则目标利润率'],
   '曝光前五建议最终成交价SAR': r['曝光前五建议最终成交价SAR'],
   '其他链接建议最终成交价SAR': r['其他链接建议最终成交价SAR'],
+  '新上架7天内按前五力度SKC': r['新上架7天内按前五力度SKC'],
   '不含仓储利润率': r['不含仓储利润率'],
   '含仓储利润率': r['含仓储利润率'],
   '仓储口径': r['仓储口径'],

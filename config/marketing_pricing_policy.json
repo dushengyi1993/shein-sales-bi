@@ -1,6 +1,6 @@
 {
   "description": "Machine-readable long-term pricing policy for SHEIN ordinary marketing signup, coupon pairing, and limited-discount fallback. This file contains no credentials.",
-  "updatedAt": "2026-06-14",
+  "updatedAt": "2026-06-28",
   "targetFloorMarginPct": 15,
   "ordinaryMarketing": {
     "mustSignupDuringSignupWindow": true,
@@ -48,5 +48,24 @@
     "whenBaseAboveFloor": "lower_top_links_by_delta",
     "fixedPricePolicy": "do_not_override_fixed_price_or_row_override",
     "sourceNote": "Top links are ranked globally per standard_goods_sn across all stores and all links. Ranking uses positive 7-day exposure first; only when a whole standard_goods_sn has no positive 7-day exposure does it fall back to 30-day/total exposure. Rows with no positive metric in the selected fallback tier are not used for top-link ranking; if exposure data is unavailable, scripts keep the base margin and mark the exposure rule as not applied."
+  },
+  "newListingWithin7Days": {
+    "enabled": true,
+    "windowDays": 7,
+    "onShelfOnly": true,
+    "requireNoOrdinaryMarketing": true,
+    "pricingTreatment": "same_as_global_exposure_top5",
+    "limitedDiscount": {
+      "autoFallbackWhenNoOrdinaryMarketing": true,
+      "durationDays": 7,
+      "replaceExistingLimitedDiscountWhenNotTopTier": true,
+      "activityNamePrefix": "新上架7天高曝光兜底限时折扣",
+      "ruleNote": "所有新上架7天内、尚未报过普通营销活动的在售链接，巡检到后立即按全局曝光Top5力度报一周限时折扣；已有旧限时折扣但不符合该力度/窗口的，安全取消后重报。"
+    },
+    "ordinaryMarketing": {
+      "applyTopTreatmentForFirstNewListingSignup": true,
+      "activityNamePatterns": ["New Arrivals", "新品", "超级新品"],
+      "ruleNote": "新上架7天内链接首次进入新品/超级新品类普通营销活动时，也按全局曝光Top5力度定价，而不是普通链接力度。"
+    }
   }
 }

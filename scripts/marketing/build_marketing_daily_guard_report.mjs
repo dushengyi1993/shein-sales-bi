@@ -32,6 +32,13 @@ import {
   stackRowsHaveExistingOrdinaryMarketingLabel,
 } from '../../lib/marketing_ordinary_price_evidence.mjs';
 import {summarizeStackReviewCoverage} from '../../lib/marketing_stack_review_coverage.mjs';
+import {
+  DEFAULT_MARKETING_PRICING_POLICY,
+  hasOrdinaryMarketingEvidence,
+  isRecentNewListingLink,
+  loadMarketingPricingPolicy,
+  unwrapBiLinksData,
+} from '../../lib/marketing_pricing_policy.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'outputs', 'reports');
@@ -40,10 +47,13 @@ const MARKETING_SIGNUP_DIR = path.join(ROOT, 'tmp', 'marketing-signup');
 const TARGET_PLAN_LEGACY_DEFAULT = path.join(MARKETING_SIGNUP_DIR, 'selection-plan-2026-06-03-ALL-ready.json');
 const PRICE_OVERRIDES_LEGACY_DEFAULT = path.join(MARKETING_SIGNUP_DIR, 'price-overrides-2026-06-03-ALL-ready.json');
 const BI_PORTAL_DATA_DEFAULT = path.join(ROOT, 'outputs', 'bi-portal', 'data.json');
+const BI_PORTAL_LINKS_DATA_DEFAULT = path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'linksData.json');
+const MARKETING_PRICING_POLICY_DEFAULT = path.join(ROOT, 'config', 'marketing_pricing_policy.json');
 const STORES_CONFIG_DEFAULT = path.join(ROOT, 'config', 'stores.json');
 const COUPON_CANCEL_RESULTS_DIR = path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-cancel-results');
 const DEADLINE_FILL_RESULTS_DIR = path.join(ROOT, 'tmp', 'mbrs', 'deadline-fill-results');
 const NEW_SKC_SHELF_AGE_DAYS = 30;
+const NEW_LISTING_LIMITED_MAX_ROWS = 60;
 const NEW_SKC_MAX_ROWS = 80;
 const DEFAULT_CLOUD_BI_ROOT = SHARED_DEFAULT_CLOUD_BI_ROOT;
 const DEFAULT_CLOUD_BI_SSH_TIMEOUT_MS = SHARED_DEFAULT_CLOUD_BI_SSH_TIMEOUT_MS;
@@ -232,7 +242,16 @@ function marketingPlanCandidateMeta(file, priceFile, enabledStores = []) {
   if (!selectionDoc) rejectReasons.push('selection_parse_failed');
   if (!priceDoc) rejectReasons.push('price_overrides_parse_failed');
   if (selectionDoc?.scope?.repairOnly === true || priceDoc?.scope?.repairOnly === true) rejectReasons.push('scope_repair_only');
-  if (/\bpilot\b|sample|repair-|(?:^|-)jsh(?:-|\.json)|main-no-jsh|all-safe/i.test(name)) rejectReasons.push('partial_or_subset_filename');
+  const explicitCurrentBaseline = Boolean(
+    selectionDoc?.baselineForNextOrdinaryActivity
+    || priceDoc?.baselineForNextOrdinaryActivity
+    || selectionDoc?.baselineForLimitedDiscountFallback
+    || priceDoc?.baselineForLimitedDiscountFallback
+  );
+  const partialNamePattern = /\bpilot\b|sample|repair-|(?:^|-)jsh(?:-|\.json)|main-no-jsh/i;
+  if (partialNamePattern.test(name) || (name.includes('all-safe') && !explicitCurrentBaseline)) {
+    rejectReasons.push('partial_or_subset_filename');
+  }
   const rowCount = itemRows(selectionDoc).length;
   const priceRowCount = itemRows(priceDoc).length;
   if (rowCount < 100) rejectReasons.push(`too_few_selection_rows_${rowCount}`);
@@ -247,6 +266,7 @@ function marketingPlanCandidateMeta(file, priceFile, enabledStores = []) {
   if (rowCount >= 500) add(300, `full_rows_${rowCount}`);
   else if (rowCount >= 100) add(100, `medium_rows_${rowCount}`);
   else add(-500, `partial_rows_${rowCount}`);
+  if (explicitCurrentBaseline) add(5000, 'explicit_current_baseline');
   if (name.includes('repaired')) add(500, 'repaired');
   // 2026-06-14 后优惠券不再是保底价层。每日 guard 必须优先使用
   // 已迁移到“不配券 / 普通活动或限时折扣直接保底”的最新全量计划；
@@ -254,7 +274,7 @@ function marketingPlanCandidateMeta(file, priceFile, enabledStores = []) {
   // 误判成未覆盖候选，进而诱发重复限时折扣兜底。
   if (name.includes('no-coupon')) add(1000, 'post_coupon_non_guaranteed_no_coupon_plan');
   if (name.includes('45162-45163')) add(350, 'latest_45162_45163_executed_plan');
-  if (name.includes('user-remarks')) add(200, 'user_remark_adjusted_plan');
+  if (name.includes('user-remarks') || name.includes('userremarks')) add(200, 'user_remark_adjusted_plan');
   if (name.includes('gapfill7')) add(150, 'latest_live_gapfill7_plan');
   if (name.includes('include-excluded-approved')) add(450, 'include_excluded_approved');
   if (name.includes('t3-plus45488')) add(250, 't3_plus45488');
@@ -268,7 +288,7 @@ function marketingPlanCandidateMeta(file, priceFile, enabledStores = []) {
   if (name.includes('repair-')) add(-650, 'repair_only');
   if (name.includes('-jsh')) add(-300, 'jsh_subset');
   if (name.includes('main-no-jsh')) add(-300, 'main_no_jsh_subset');
-  if (name.includes('all-safe')) add(-150, 'pre_approved_safe_subset');
+  if (name.includes('all-safe')) add(explicitCurrentBaseline ? 100 : -150, explicitCurrentBaseline ? 'current_baseline_all_safe' : 'pre_approved_safe_subset');
   return {score, rowCount, priceRowCount, storeCoverage, keyAlignment: alignment, scoreReasons: reasons, rejectReasons};
 }
 
@@ -1153,8 +1173,60 @@ function inferShelfAgeDays(link, reportDate) {
   return {value: null, source: 'missing'};
 }
 
-function summarizeNewSkcCandidates({biDoc, biSource, selectionPlanDoc, priceOverridesDoc, storesConfigDoc, reportDate}) {
-  const links = Array.isArray(biDoc?.storeLinks) ? biDoc.storeLinks : [];
+function collectLiveLimitedDiscountEvidence(liveScanSource) {
+  const source = liveScanSource?.source || {};
+  const doc = liveScanSource?.data || {};
+  const rows = Array.isArray(doc.rows) ? doc.rows : [];
+  const bySkc = new Map();
+  const sourceStatus = source.status || 'missing';
+  if (sourceStatus !== 'ok' || doc.ok === false) {
+    return {status: sourceStatus, path: source.path || '', bySkc};
+  }
+  for (const row of rows) {
+    const storeKey = normKey(row.store_key || row.storeKey || row.store);
+    const skc = normSku(row.skc || row.SKC);
+    if (!storeKey || !skc) continue;
+    const limitedPrice = numberOrNull(
+      row.marketing_limited_discount_price_sar
+      ?? row.marketing_limited_discount_price
+      ?? row.limitedDiscountPrice
+      ?? row.limited_discount_price_sar
+    );
+    const isLimitedEvidence = (
+      row.marketing_limited_discount_is_current === true
+      || row.marketing_limited_discount_is_current === 1
+      || row.marketing_limited_discount_is_current === '1'
+      || /limited/i.test(String(row.marketing_price_evidence_type || row.evidenceType || ''))
+      || limitedPrice !== null
+    );
+    if (!isLimitedEvidence) continue;
+    const key = `${storeKey}::${skc}`;
+    if (!bySkc.has(key)) bySkc.set(key, []);
+    bySkc.get(key).push({
+      price: limitedPrice,
+      name: row.marketing_limited_discount_name || row.limitedDiscountName || row.activityName || '',
+      start: row.marketing_limited_discount_start || row.limitedDiscountStart || '',
+      end: row.marketing_limited_discount_end || row.limitedDiscountEnd || '',
+      evidenceType: row.marketing_price_evidence_type || row.evidenceType || '',
+      sourceAt: row.marketing_price_source_at || row.sourceAt || doc.createdAt || doc.generatedAt || '',
+    });
+  }
+  return {status: sourceStatus, path: source.path || '', bySkc};
+}
+
+function isLiveNewListingLimitedDiscountCovered(rows) {
+  return (rows || []).some(row => /新上架.*限时折扣|高曝光兜底限时折扣|new\s*listing/i.test(String(row.name || '')));
+}
+
+function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSource, selectionPlanDoc, priceOverridesDoc, storesConfigDoc, pricingPolicy, reportDate, currentMarketingLiveScanSource}) {
+  const unwrappedLinksData = unwrapBiLinksData(linksDataDoc);
+  const unwrappedBiDoc = unwrapBiLinksData(biDoc);
+  const links = Array.isArray(unwrappedLinksData.storeLinks) && unwrappedLinksData.storeLinks.length
+    ? unwrappedLinksData.storeLinks
+    : (Array.isArray(unwrappedBiDoc.storeLinks) ? unwrappedBiDoc.storeLinks : []);
+  const effectiveBiSource = (Array.isArray(unwrappedLinksData.storeLinks) && unwrappedLinksData.storeLinks.length)
+    ? linksDataSource
+    : biSource;
   const enabledStores = new Set();
   const knownStores = new Set();
   for (const store of storesConfigDoc?.stores || []) {
@@ -1173,6 +1245,9 @@ function summarizeNewSkcCandidates({biDoc, biSource, selectionPlanDoc, priceOver
   let unknownAgeMissingExactPlanOnShelf = 0;
   let exactPlannedRows = 0;
   let exactExcludedRows = 0;
+  const newListingLimitedRows = [];
+  const newListingPolicy = pricingPolicy || DEFAULT_MARKETING_PRICING_POLICY;
+  const liveLimitedEvidence = collectLiveLimitedDiscountEvidence(currentMarketingLiveScanSource);
 
   for (const link of links) {
     const storeKey = normKey(link.store_key || link.storeKey || link.store);
@@ -1193,7 +1268,50 @@ function summarizeNewSkcCandidates({biDoc, biSource, selectionPlanDoc, priceOver
       ignored.push({storeKey, skc, canonical, reason: 'disabled_store'});
       continue;
     }
+    const recentNewListing = isRecentNewListingLink(link, newListingPolicy, reportDate);
     const exactKey = `${storeKey}::${skc}`;
+    if (recentNewListing.applies) {
+      const liveLimitedRows = liveLimitedEvidence.bySkc.get(exactKey) || [];
+      const liveLimitedCovered = isLiveNewListingLimitedDiscountCovered(liveLimitedRows);
+      const liveLimitedPrice = liveLimitedRows.length ? numberOrNull(liveLimitedRows[0].price) : null;
+      const limitedPrice = numberOrNull(
+        liveLimitedPrice
+        ?? link.marketing_limited_discount_price_sar
+        ?? link.marketing_limited_discount_price
+        ?? link.limitedDiscountPrice
+      );
+      const hasCurrentLimitedDiscount = (
+        liveLimitedRows.length > 0
+        || link.marketing_limited_discount_is_current === true
+        || link.marketing_limited_discount_is_current === 1
+        || link.marketing_limited_discount_is_current === '1'
+        || limitedPrice !== null
+      );
+      const actionRequired = !liveLimitedCovered;
+      newListingLimitedRows.push({
+        storeKey,
+        skc,
+        canonical,
+        shelfAgeDays: recentNewListing.shelfAgeDays,
+        shelfAgeSource: recentNewListing.shelfAgeSource,
+        c7EpsUv: numberOrNull(link.c7_eps_uv ?? link.c7EpsUv),
+        currentPrice: numberOrNull(link.current_price_sar ?? link.currentPriceSar ?? link.current_price),
+        limitedDiscountPrice: limitedPrice,
+        hasCurrentLimitedDiscount,
+        liveLimitedDiscountEvidenceCount: liveLimitedRows.length,
+        liveLimitedDiscountCovered: liveLimitedCovered,
+        liveLimitedDiscountNames: [...new Set(liveLimitedRows.map(row => row.name).filter(Boolean))],
+        liveLimitedDiscountSource: liveLimitedEvidence.path || '',
+        ordinaryMarketingEvidence: hasOrdinaryMarketingEvidence(link),
+        performanceActivityNames: link.performance_activity_names || '',
+        actionRequired,
+        action: liveLimitedCovered
+          ? 'live scan 已证明新上架7天一周兜底限时折扣已覆盖，无需重复写入'
+          : hasCurrentLimitedDiscount
+          ? '已有旧限时折扣：按新规则需复核是否为一周窗口+曝光前五力度，不符合则安全取消重报'
+          : '缺限时折扣：按新规则需立即自动报一周限时折扣，价格按曝光前五力度',
+      });
+    }
     if (plan.selectedBySkc.has(exactKey) || plan.overrideBySkc.has(exactKey)) {
       exactPlannedRows += 1;
       continue;
@@ -1255,13 +1373,39 @@ function summarizeNewSkcCandidates({biDoc, biSource, selectionPlanDoc, priceOver
     if (bv !== av) return bv - av;
     return String(a.storeKey).localeCompare(String(b.storeKey)) || String(a.skc).localeCompare(String(b.skc));
   });
-  const stale = biSource?.status === 'stale';
+  newListingLimitedRows.sort((a, b) => {
+    const av = Number(a.c7EpsUv || 0);
+    const bv = Number(b.c7EpsUv || 0);
+    if (bv !== av) return bv - av;
+    return String(a.storeKey).localeCompare(String(b.storeKey)) || String(a.skc).localeCompare(String(b.skc));
+  });
+  const stale = effectiveBiSource?.status === 'stale';
+  const actionRows = newListingLimitedRows.filter(row => row.actionRequired !== false);
+  const coveredNoActionRows = newListingLimitedRows.filter(row => row.actionRequired === false);
+  const missingLimitedRows = actionRows.filter(row => !row.hasCurrentLimitedDiscount);
+  const existingLimitedRows = actionRows.filter(row => row.hasCurrentLimitedDiscount);
   return {
     status: stale ? 'stale_observation_only' : 'ok',
-    source: biSource?.path || '',
-    sourceGeneratedAt: biDoc?.generatedAt || '',
-    linkDate: biDoc?.dates?.linkDate || '',
+    source: effectiveBiSource?.path || '',
+    sourceGeneratedAt: (Array.isArray(unwrappedLinksData.storeLinks) && unwrappedLinksData.storeLinks.length)
+      ? (linksDataDoc?.generatedAt || unwrappedLinksData.generatedAt || '')
+      : (biDoc?.generatedAt || unwrappedBiDoc.generatedAt || ''),
+    linkDate: unwrappedLinksData?.dates?.linkDate || unwrappedBiDoc?.dates?.linkDate || '',
     recentWindowDays: NEW_SKC_SHELF_AGE_DAYS,
+    newListingWithin7DaysLimitedDiscount: {
+      enabled: newListingPolicy?.newListingWithin7Days?.enabled !== false,
+      windowDays: Number(newListingPolicy?.newListingWithin7Days?.windowDays || 7),
+      source: effectiveBiSource?.path || '',
+      totalRows: newListingLimitedRows.length,
+      missingLimitedDiscountCount: missingLimitedRows.length,
+      existingLimitedDiscountRebuildCount: existingLimitedRows.length,
+      liveCoveredNoActionCount: coveredNoActionRows.length,
+      liveLimitedDiscountSource: liveLimitedEvidence.path || '',
+      actionCount: actionRows.length,
+      byStore: countBy(actionRows, 'storeKey'),
+      rows: actionRows.slice(0, NEW_LISTING_LIMITED_MAX_ROWS),
+      coveredRows: coveredNoActionRows.slice(0, NEW_LISTING_LIMITED_MAX_ROWS),
+    },
     storeLinksRows: links.length,
     onShelfRows,
     exactPlannedRows,
@@ -2709,6 +2853,15 @@ function buildHumanSummary(report) {
   } else if (Number(newSkc.recentMissingExactPlanOnShelf || 0) === 0) {
     ok.push('新上架链接：当前没有 30 天内上架且缺精确价格计划的候选。');
   }
+  const newListingLimited = newSkc.newListingWithin7DaysLimitedDiscount || {};
+  if (Number(newListingLimited.actionCount || 0) > 0) {
+    actions.push({
+      level: '必须处理',
+      text: `新上架 7 天内且未报普通活动的链接有 ${humanCount(newListingLimited.actionCount, '个')}：缺限时折扣 ${humanCount(newListingLimited.missingLimitedDiscountCount, '个')}，已有旧限时折扣但需按“一周窗口+曝光前五力度”复核/重报 ${humanCount(newListingLimited.existingLimitedDiscountRebuildCount, '个')}。这类按规则应自动生成限时折扣兜底并回读。`,
+    });
+  } else if (newListingLimited.enabled !== false) {
+    ok.push('新上架 7 天限时折扣：没有未报普通活动且需要兜底/重报的链接。');
+  }
   if (Number(fallbackGaps.total || 0) > 0) {
     const storeText = storeCountText(fallbackGaps.byStore || {}, 6);
     const latestRepair = mandatoryLimited.latestAutoRepair || {};
@@ -2834,6 +2987,8 @@ function buildMarkdown(report) {
   const budgetPrefix = couponTrafficIntent.enabled ? '可选流量券预算' : '优惠券预算观察';
   lines.push(`- ${budgetPrefix}：明确流量券目标 ${humanCount(couponTrafficIntent.allowed15TrafficCount || 0, '个')}；低于预算目标的店铺 ${humanCount(report.couponBudget.belowTargetCount, '个')}；缺回读证据 ${humanCount(report.couponBudget.missingEvidenceCount, '个')}`);
   lines.push(`- 限时折扣必报兜底：live 当前限时折扣 ${humanCount(report.mandatoryLimitedDiscountStatus?.live?.limitedRows || 0, '行')}；最近自动补报 ${humanCount(report.mandatoryLimitedDiscountStatus?.latestAutoRepair?.executedCount || 0, '个')}；剩余阻断 ${humanCount(report.mandatoryLimitedDiscountStatus?.latestAutoRepair?.blockedCount || report.couponNonGuaranteedFallbackGaps?.total || 0, '个')}；直接命中低价订单 ${humanCount(report.couponNonGuaranteedFallbackGaps?.lowOrderHitCount || 0, '个')}`);
+  const newListingLimited = report.newSkcCandidates?.newListingWithin7DaysLimitedDiscount || {};
+  lines.push(`- 新上架7天限时折扣：待处理 ${humanCount(newListingLimited.actionCount || 0, '个')}；live 已证明覆盖无需重复写入 ${humanCount(newListingLimited.liveCoveredNoActionCount || 0, '个')}；缺限时折扣 ${humanCount(newListingLimited.missingLimitedDiscountCount || 0, '个')}；已有旧限时折扣需按前五力度/一周窗口复核重报 ${humanCount(newListingLimited.existingLimitedDiscountRebuildCount || 0, '个')}`);
   lines.push(`- 普通活动补报回读：计划 ${humanCount(report.ordinaryEnrollmentOpenIssues?.plannedRows || 0, '行')}；已报/审核中 ${humanCount(report.ordinaryEnrollmentOpenIssues?.enrolledOrUnderReview || 0, '行')}；价格/证据待回读 ${humanCount(report.ordinaryEnrollmentOpenIssues?.issueCount || 0, '行')}；缺本轮填价证据 ${humanCount(report.ordinaryEnrollmentOpenIssues?.missingFillEvidence || 0, '行')}`);
   lines.push(`- XC/45219 补报遗留：活动价待回读 ${humanCount(report.ordinaryEnrollmentSupplementOpenIssues?.pricePendingRows || 0, '行')}；缺成本/标准目录阻断 ${humanCount(report.ordinaryEnrollmentSupplementOpenIssues?.extraAvailableRows || 0, '行')}`);
   lines.push(`- 新链接/新 SKC：需要定价 ${humanCount(report.newSkcCandidates.needsPricing, '个')}；需要确认 ${humanCount(report.newSkcCandidates.needsConfirmation, '个')}；需要补券复核 ${humanCount(report.newSkcCandidates.needsCouponReview, '个')}`);
@@ -2888,6 +3043,8 @@ async function main() {
   });
   const biPortal = biPortalSelection.selected;
   sources.push(biPortal.source);
+  const biPortalLinksData = await read('biPortalLinksData', BI_PORTAL_LINKS_DATA_DEFAULT);
+  const marketingPricingPolicy = await loadMarketingPricingPolicy(MARKETING_PRICING_POLICY_DEFAULT);
   const targetPlan = await read('targetSelectionPlan', args.targetPlan);
   const priceOverrides = await read('priceOverridesPlan', args.priceOverrides);
   const storesConfig = await read('storesConfig', args.storesConfig);
@@ -3044,10 +3201,14 @@ async function main() {
   const newSkcCandidates = summarizeNewSkcCandidates({
     biDoc: biPortal.data,
     biSource: biPortal.source,
+    linksDataDoc: biPortalLinksData.data,
+    linksDataSource: biPortalLinksData.source,
     selectionPlanDoc: targetPlan.data,
     priceOverridesDoc: priceOverrides.data,
     storesConfigDoc: storesConfig.data,
+    pricingPolicy: marketingPricingPolicy,
     reportDate: args.date,
+    currentMarketingLiveScanSource,
   });
   const couponTrafficIntent = summarizeCouponTrafficIntent(couponEligibilityPlan);
   const optionalTrafficCouponReview = optionalTrafficCouponReviewStatus({couponEligibilityPlan});

@@ -69,7 +69,7 @@ const CERTIFICATE_ALLOWED_ENDPOINTS = new Set([
 const MAINTENANCE_INTENTS = new Set(Object.keys(ACTIONS));
 
 function parseArgs(argv) {
-  const args = {config: DEFAULT_CONFIG, taskFile: DEFAULT_TASK_FILE, taskId: '', taskJson: '', mode: 'dry-run', outDir: DEFAULT_OUT_DIR, store: '', confirm: '', dir: '', productCacheDir: path.join(ROOT, 'outputs', 'shein_openapi_products'), quiet: false};
+  const args = {config: DEFAULT_CONFIG, taskFile: DEFAULT_TASK_FILE, taskId: '', taskJson: '', mode: 'dry-run', outDir: DEFAULT_OUT_DIR, store: '', confirm: '', dir: '', productCacheDir: process.env.SHEIN_OPENAPI_PRODUCT_CACHE_DIR || path.join(ROOT, 'outputs', 'shein_openapi_products'), quiet: false};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--config') args.config = path.resolve(argv[++i]);
@@ -102,6 +102,77 @@ function sha256Stable(v){ return crypto.createHash('sha256').update(stableJson(v
 function compactRef(v){ return String(v||'').toLowerCase().replace(/[\s_\-（）()【】\[\]，,。.;；:：/\\]+/g,''); }
 function unique(xs){ return [...new Set(xs.filter(Boolean))]; }
 function nowId(){ return new Date().toISOString().replace(/[-:.TZ]/g,'').slice(0,14); }
+function collectOpenApiIdentity(value, target = null, depth = 0){
+  target = target || {
+    accountNos: new Set(),
+    userNames: new Set(),
+    mainUserNames: new Set(),
+    supplierUserNames: new Set(),
+    supplierIds: new Set(),
+    externalIds: new Set(),
+    emplids: new Set(),
+    companyNames: new Set(),
+    rawSources: new Set(),
+  };
+  if(!value || depth > 7) return target;
+  if(Array.isArray(value)){
+    value.forEach(item => collectOpenApiIdentity(item, target, depth + 1));
+    return target;
+  }
+  if(typeof value !== 'object') return target;
+  target.rawSources.add(`openapi-depth-${depth}`);
+  const add = (setName, candidate) => {
+    if(candidate === null || candidate === undefined || candidate === '') return;
+    target[setName].add(String(candidate).trim());
+  };
+  add('userNames', value.userName || value.username || value.name || value.enName);
+  add('mainUserNames', value.mainUserName || value.main_user_name);
+  add('supplierUserNames', value.supplierUserName || value.supplier_user_name);
+  add('supplierIds', value.supplierId || value.supplier_id || value.merchantId || value.merchant_id || value.mallCode || value.mall_code);
+  add('externalIds', value.externalId || value.external_id);
+  add('emplids', value.emplid || value.empId);
+  add('companyNames', value.companyName || value.company_name || value.supplierName || value.supplier_name || value.storeTitle || value.store_title || value.shopTitle || value.shop_title);
+  for(const candidate of [
+    value.accountNo,
+    value.account_no,
+    value.shopName,
+    value.shop_name,
+    value.storeTitle,
+    value.store_title,
+    value.userName,
+    value.username,
+    value.name,
+    value.enName,
+    value.mainUserName,
+    value.main_user_name,
+    value.supplierUserName,
+    value.supplier_user_name,
+  ]){
+    if(/^GS\d+$/i.test(String(candidate || '').trim())) target.accountNos.add(String(candidate).trim().toUpperCase());
+  }
+  for(const [key, child] of Object.entries(value)){
+    if(child && typeof child === 'object' && /(user|supplier|merchant|store|shop|seller|account|company|info|data|mall)/i.test(key)){
+      collectOpenApiIdentity(child, target, depth + 1);
+    }
+  }
+  return target;
+}
+function openApiIdentityToStorageIdentity(value){
+  const collected = collectOpenApiIdentity(value);
+  return Object.fromEntries(Object.entries(collected).map(([key, set]) => [key, [...set]]));
+}
+function openApiStoreIdentityMatchesMerchant(identityCheck){
+  if(!identityCheck || identityCheck.ok) return Boolean(identityCheck?.ok);
+  const expectedMerchantId = String(identityCheck.expectedMerchantId || '').trim();
+  if(!expectedMerchantId) return false;
+  const merchantOk = identityCheck.merchantOk === true
+    || (Array.isArray(identityCheck.merchantCandidates) && identityCheck.merchantCandidates.includes(expectedMerchantId));
+  const accountConflicts = Array.isArray(identityCheck.accountConflicts) ? identityCheck.accountConflicts : [];
+  const merchantConflicts = Array.isArray(identityCheck.merchantConflicts) ? identityCheck.merchantConflicts : [];
+  const accountCandidates = Array.isArray(identityCheck.accountCandidates) ? identityCheck.accountCandidates : [];
+  const hasConcreteAccountCandidate = accountCandidates.some(value => /^GS\d+$/i.test(String(value || '').trim()));
+  return merchantOk && !accountConflicts.length && !merchantConflicts.length && !hasConcreteAccountCandidate;
+}
 function parseNumberFromText(text){ const m=String(text||'').match(/(?:改成|改为|更新为|设置为|设为|到|=|：|:)\s*([0-9]+(?:\.[0-9]{1,2})?)/i) || String(text||'').match(/([0-9]+(?:\.[0-9]{1,2})?)\s*(?:sar|库存|件|个|台|$)/i); return m?Number(m[1]):NaN; }
 function parseNumberForIntent(intent, text){
   const raw=String(text||'');
@@ -114,6 +185,7 @@ function parseNumberForIntent(intent, text){
   return parseNumberFromText(raw);
 }
 function parseTitleFromText(text){ const m=String(text||'').match(/(?:标题|title).{0,16}(?:改成|改为|换成|更新为|改到|=>|：|:)\s*[“"']?(.+?)[”"']?\s*$/i); return m?safeString(m[1],1000):''; }
+function languageForTitle(title){ return /[\u0600-\u06FF]/.test(String(title||'')) ? 'ar' : 'en'; }
 async function readJson(file){ return JSON.parse(await fs.readFile(file,'utf8')); }
 async function writeJson(file,data){ await fs.mkdir(path.dirname(file),{recursive:true}); await fs.writeFile(file, `${JSON.stringify(data,null,2)}\n`, 'utf8'); }
 function normalizeTaskStore(data){ if(Array.isArray(data?.tasks)) return data; if(data?.id) return {version:1,tasks:[data]}; throw new Error('Task JSON must be a task object or {tasks:[...]}'); }
@@ -130,7 +202,7 @@ function rowMatches(row, ref){ const q=compactRef(ref); if(!q) return false; ret
 function extractRows(payload){ const data=payload?.data&&typeof payload.data==='object'?payload.data:payload; if(Array.isArray(data?.storeLinks)) return data.storeLinks; if(Array.isArray(data?.links)) return data.links; return []; }
 async function loadLinkRows(args){ const root=args.dir||path.join(ROOT,'outputs','bi-portal'); const candidates=[path.join(root,'sections','linksData.json'), path.join(root,'data.json')]; const errors=[]; for(const file of candidates){ try{ const j=await readJson(file); const rows=extractRows(j); if(rows.length) return {file, rows}; errors.push(`${rel(file)}:0 rows`);}catch(e){errors.push(`${rel(file)}:${e.message}`);} } return {file:candidates[0], rows:[], error:errors.join('；')}; }
 function parseSkuCodes(value){ if(Array.isArray(value)) return value.map(x=>safeString(x,80)).filter(Boolean); if(typeof value==='string'){ try{ const j=JSON.parse(value); if(Array.isArray(j)) return j.map(x=>safeString(x,80)).filter(Boolean); }catch{} return value.split(/[;,\s]+/).map(x=>safeString(x,80)).filter(Boolean); } return []; }
-function productRowMatches(row, {skc,spu,standard}){ const refs=[row?.skc,row?.skcName,row?.skc_name,row?.spu,row?.spuName,row?.spu_name,row?.supplierCode,row?.supplier_code,row?.supplier_code,row?.productNameZh,row?.productNameEn].map(compactRef); const qs=[skc,spu,standard].map(compactRef).filter(Boolean); return qs.some(q=>refs.some(x=>x&& (x===q||x.includes(q)||q.includes(x)))); }
+function productRowMatches(row, {skc,spu,standard}){ const refs=[row?.skc,row?.skcName,row?.skc_name,row?.spu,row?.spuName,row?.spu_name,row?.supplierCode,row?.supplier_code,row?.supplier_code,row?.productNameAr,row?.productNameEn].map(compactRef); const qs=[skc,spu,standard].map(compactRef).filter(Boolean); return qs.some(q=>refs.some(x=>x&& (x===q||x.includes(q)||q.includes(x)))); }
 async function loadProductRows(store,args={}){ const file=path.join(args.productCacheDir||path.join(ROOT,'outputs','shein_openapi_products'),store,'latest.json'); try{ const j=await readJson(file); return {file, rows:Array.isArray(j.normalizedRows)?j.normalizedRows:[]}; }catch(e){ return {file, rows:[], error:e.message}; } }
 async function loadJsonAssetPayloads(task){
   const out=[];
@@ -171,7 +243,7 @@ function normalizeImageEditPayloadsFromJsonAssets(task, matches, warnings){
 }
 async function loadClient(args){ const config=await readJson(args.config); const stores=Array.isArray(config.stores)?config.stores:Object.entries(config.stores||{}).map(([storeKey,v])=>({storeKey,...v})); const store=stores.find(s=>normalizeStoreKey(s?.storeKey||s?.key||s?.store)===normalizeStoreKey(args.store)); if(!store?.openKeyId||!store?.secretKey) throw new Error(`未在 ${rel(args.config)} 找到 ${args.store} 的 openKeyId/secretKey`); return {config, store, client:new SheinOpenApiClient({baseUrl:config.apiBaseUrls?.prodSemiManaged||SHEIN_OPENAPI_BASE_URLS.prodSemiManaged, openKeyId:store.openKeyId, secretKey:store.secretKey})}; }
 function compactCallResult(name,pathText,method,response){ return {name,path:pathText,method,httpStatus:response.status??response.httpStatus??null,code:response.data?.code??response.code??null,msg:safeString(response.data?.msg??response.msg??'',300),traceId:response.data?.traceId??response.traceId??null}; }
-async function callOpenApi(client, {name, path:pathText, method='POST', body, query}){ const response=await client.request(pathText,{method,body,query,headers:{language:'zh-cn'}}); return {...compactCallResult(name,pathText,method,response), data:response.data}; }
+async function callOpenApi(client, {name, path:pathText, method='POST', body, query}){ const response=await client.request(pathText,{method,body,query,headers:{language:'en'}}); return {...compactCallResult(name,pathText,method,response), data:response.data}; }
 function summarizeSiteList(data){ const rows=[]; const q=[data]; const seen=new Set(); while(q.length&&rows.length<300){ const cur=q.shift(); if(!cur||typeof cur!=='object'||seen.has(cur)) continue; seen.add(cur); if(Array.isArray(cur)){ q.push(...cur); continue; } const site=safeString(cur.siteAbbr||cur.site_abbr||cur.site||cur.subSite||cur.sub_site||cur.siteCode||cur.site_code,80); const currency=safeString(cur.currency||cur.currencyCode||cur.currency_code,20).toUpperCase(); if(site) rows.push({siteAbbr:site,currency}); q.push(...Object.values(cur)); } return rows; }
 async function getDefaultSite(client,calls,warnings){ try{ const r=await callOpenApi(client,{name:'query-site-list',path:'/open-api/goods/query-site-list',body:{}}); calls.push(compactCallResult(r.name,r.path,r.method,{status:r.httpStatus,data:r.data})); const sites=summarizeSiteList(r.data); const sa=sites.find(x=>String(x.siteAbbr).toLowerCase()==='shein-sa')||sites.find(x=>String(x.currency).toUpperCase()==='SAR')||sites[0]; if(!sa) warnings.push('站点列表为空，默认使用 shein-sa/SAR 但执行前必须人工复核。'); return {site:sa?.siteAbbr||'shein-sa', currency:sa?.currency||'SAR', sites:sites.slice(0,20)}; }catch(e){ warnings.push(`站点列表探针失败：${safeString(e.message||e)}；默认使用 shein-sa/SAR。`); return {site:'shein-sa',currency:'SAR',sites:[]}; } }
 function normalizeCertificatePayloadsFromJsonAssets(task, warnings){
@@ -233,7 +305,7 @@ function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEdi
       const title=parseTitleFromText(command); if(!title) blockers.push('改标题任务缺少新标题，例如“标题改成 XXX”。');
       const spuGroups=[...new Map(matches.map(m=>[m.spu,m])).values()].filter(m=>m.spu);
       if(!spuGroups.length) blockers.push('改标题任务未解析到 SPU，无法构建 partialEdit payload。');
-      for(const m of spuGroups){ out.push({operation:intent, endpoint, body:{spu_name:m.spu, multi_language_name_list:[{language:'zh-cn', name:title}]}, targetLinks:[m]}); }
+      for(const m of spuGroups){ out.push({operation:intent, endpoint, body:{spu_name:m.spu, multi_language_name_list:[{language:languageForTitle(title), name:title}]}, targetLinks:[m]}); }
     } else if(intent==='update_images'){
       const imagePlans=Array.isArray(imageEditPayloads)?imageEditPayloads:[];
       if(!imagePlans.length) blockers.push('换图任务缺少完整 SHEIN partialEdit 图片 JSON：需提供 spu_name + image_info/skc_list/site_detail_image_info_list，或先通过图片上传/外链转换取得 SHEIN 图片 URL 后再提交。');
@@ -249,8 +321,8 @@ function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEdi
   for(const p of out){ if(!Object.keys(p.body||{}).length) warnings.push(`${p.operation} 未生成可提交 payload。`); }
   return out;
 }
-async function readbackProduct(client, matches, calls){ const response=await client.request('/open-api/openapi-business-backend/product/query',{method:'POST',body:{pageNum:1,pageSize:100},headers:{language:'zh-cn'}}); calls.push(compactCallResult('product-query-readback','/open-api/openapi-business-backend/product/query','POST',response)); const rows=[]; const q=[response.data]; const seen=new Set(); while(q.length&&rows.length<500){ const cur=q.shift(); if(!cur||typeof cur!=='object'||seen.has(cur)) continue; seen.add(cur); if(Array.isArray(cur)){q.push(...cur); continue;} if(cur.skcName||cur.skc_name||cur.spuName||cur.spu_name||cur.supplierCode||cur.supplier_code||cur.skuCodeList||cur.skuCodes) rows.push(cur); q.push(...Object.values(cur)); } const matched=matches.filter(m=>rows.some(r=>productRowMatches(r,{skc:m.skc,spu:m.spu,standard:m.standardGoodsSn}))); return {ok:matched.length>0, status:matched.length?'matched_product_query':'not_matched_product_query', scannedRows:rows.length, matchedRows:matched.slice(0,20), calls}; }
-async function readbackStock(client, matches, calls){ const skuCodes=unique(matches.flatMap(m=>m.skuCodes)); if(!skuCodes.length) return {ok:false,status:'missing_sku_codes',matchedRows:[],calls}; const response=await client.request('/open-api/stock/stock-query',{method:'POST',body:{skuCodes},headers:{language:'zh-cn'}}); calls.push(compactCallResult('stock-query-readback','/open-api/stock/stock-query','POST',response)); const ok=String(response.data?.code)==='0'; return {ok, status:ok?'matched_stock_query':'stock_query_failed', skuCodes:skuCodes.slice(0,100), matchedRows:ok?matches.slice(0,20):[], calls}; }
+async function readbackProduct(client, matches, calls){ const response=await client.request('/open-api/openapi-business-backend/product/query',{method:'POST',body:{pageNum:1,pageSize:100},headers:{language:'en'}}); calls.push(compactCallResult('product-query-readback','/open-api/openapi-business-backend/product/query','POST',response)); const rows=[]; const q=[response.data]; const seen=new Set(); while(q.length&&rows.length<500){ const cur=q.shift(); if(!cur||typeof cur!=='object'||seen.has(cur)) continue; seen.add(cur); if(Array.isArray(cur)){q.push(...cur); continue;} if(cur.skcName||cur.skc_name||cur.spuName||cur.spu_name||cur.supplierCode||cur.supplier_code||cur.skuCodeList||cur.skuCodes) rows.push(cur); q.push(...Object.values(cur)); } const matched=matches.filter(m=>rows.some(r=>productRowMatches(r,{skc:m.skc,spu:m.spu,standard:m.standardGoodsSn}))); return {ok:matched.length>0, status:matched.length?'matched_product_query':'not_matched_product_query', scannedRows:rows.length, matchedRows:matched.slice(0,20), calls}; }
+async function readbackStock(client, matches, calls){ const skuCodes=unique(matches.flatMap(m=>m.skuCodes)); if(!skuCodes.length) return {ok:false,status:'missing_sku_codes',matchedRows:[],calls}; const response=await client.request('/open-api/stock/stock-query',{method:'POST',body:{skuCodes},headers:{language:'en'}}); calls.push(compactCallResult('stock-query-readback','/open-api/stock/stock-query','POST',response)); const ok=String(response.data?.code)==='0'; return {ok, status:ok?'matched_stock_query':'stock_query_failed', skuCodes:skuCodes.slice(0,100), matchedRows:ok?matches.slice(0,20):[], calls}; }
 async function readbackForIntents(client, intents, matches, calls){
   const groups=[];
   if(intents.includes('update_inventory')) groups.push(await readbackStock(client,matches,calls));
@@ -269,7 +341,18 @@ async function main(){
   const storeInfo=await callOpenApi(client,{name:'store-info',path:'/open-api/openapi-business-backend/query-store-info',body:{}}).catch(e=>({error:e}));
   if(storeInfo.error) warnings.push(`店铺信息探针失败：${safeString(storeInfo.error.message||storeInfo.error)}`); else calls.push(compactCallResult(storeInfo.name,storeInfo.path,storeInfo.method,{status:storeInfo.httpStatus,data:storeInfo.data}));
   const truth=STORE_ACCOUNT_TRUTH.stores?.[store];
-  if(truth && storeInfo.data){ const identity=validateStoreIdentity({store:configuredStore, truth, storageIdentity: {storeTitle: storeInfo.data?.info?.storeTitle || storeInfo.data?.info?.shopName || '', mallCode: storeInfo.data?.info?.mallCode || ''}, href:'openapi:/open-api/openapi-business-backend/query-store-info'}); if(!identity.ok) blockers.push(formatStoreIdentityError(identity)); }
+  if(truth && storeInfo.data){
+    const identity=validateStoreIdentity({
+      store:configuredStore,
+      truth,
+      storageIdentity: openApiIdentityToStorageIdentity(storeInfo.data),
+      href:'openapi:/open-api/openapi-business-backend/query-store-info',
+      context:'link_ops_maintenance_openapi_executor',
+    });
+    const acceptedByMerchantOnly=openApiStoreIdentityMatchesMerchant(identity);
+    if(!identity.ok && !acceptedByMerchantOnly) blockers.push(formatStoreIdentityError(identity));
+    else if(acceptedByMerchantOnly) warnings.push(`${store} OpenAPI 店铺信息未返回 GS账号，但 merchantId=${identity.expectedMerchantId} 已匹配；若后续接口返回冲突 GS账号仍会阻断。`);
+  }
   const siteInfo=await getDefaultSite(client,calls,warnings);
   const linkLoad=await loadLinkRows(args); if(linkLoad.error) blockers.push(`无法读取 BI 链接快照：${linkLoad.error}`);
   const productLoad=await loadProductRows(store,args); if(productLoad.error) warnings.push(`OpenAPI 商品缓存不可读，将只用链接快照：${productLoad.error}`);
@@ -291,7 +374,7 @@ async function main(){
   }
   let submitResults=[]; let actualWriteSubmitted=false;
   if(args.mode==='execute' && blockers.length===0){
-    for(const p of payloads){ const response=await client.request(p.endpoint,{method:'POST',body:p.body,headers:{language:'zh-cn'}}); const compact=compactCallResult(p.operation,p.endpoint,'POST',response); calls.push(compact); submitResults.push({...compact, operation:p.operation}); if(String(response.data?.code)!=='0') blockers.push(`${p.operation} 返回失败：${safeString(response.data?.msg||response.data?.code||'未知错误')}`); }
+    for(const p of payloads){ const response=await client.request(p.endpoint,{method:'POST',body:p.body,headers:{language:'en'}}); const compact=compactCallResult(p.operation,p.endpoint,'POST',response); calls.push(compact); submitResults.push({...compact, operation:p.operation}); if(String(response.data?.code)!=='0') blockers.push(`${p.operation} 返回失败：${safeString(response.data?.msg||response.data?.code||'未知错误')}`); }
     actualWriteSubmitted=submitResults.some(r=>String(r.code)==='0');
   }
   const readbackCalls=[]; let readback={ok:false,status:args.mode==='execute'?'not_run':'planned_not_run',calls:readbackCalls};

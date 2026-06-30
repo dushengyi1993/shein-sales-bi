@@ -23,6 +23,13 @@ const SUBMIT_CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
 const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
 const STORES = STORES_CONFIG.stores || [];
 const STORE_ACCOUNT_TRUTH = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'store_account_truth.json'), 'utf8'));
+const ALLOWED_SKC_IMAGE_TYPES = new Set([1, 2, 5, 6]);
+const SKC_IMAGE_TYPE_LABELS = new Map([
+  [1, '主图'],
+  [2, '细节图'],
+  [5, '方块图'],
+  [6, '色块图'],
+]);
 
 function parseArgs(argv) {
   const args = {
@@ -86,6 +93,26 @@ function tenYearsLaterBeijing(date = new Date()) {
   bj.setUTCHours(10, 0, 0, 0);
   const pad = n => String(n).padStart(2, '0');
   return `${bj.getUTCFullYear()}-${pad(bj.getUTCMonth() + 1)}-${pad(bj.getUTCDate())} ${pad(bj.getUTCHours())}:${pad(bj.getUTCMinutes())}:${pad(bj.getUTCSeconds())}`;
+}
+
+function stableTaskBaseDate(task = null, executionContext = null) {
+  for (const value of [
+    task?.createdAt,
+    task?.created_at,
+    task?.created,
+    executionContext?.taskCreatedAt,
+    executionContext?.createdAt,
+    executionContext?.issuedAt,
+  ]) {
+    if (!value) continue;
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return new Date();
+}
+
+function newLinkHopeOnSaleDate(task = null, executionContext = null) {
+  return tenYearsLaterBeijing(stableTaskBaseDate(task, executionContext));
 }
 
 function asArray(value) {
@@ -335,11 +362,29 @@ function compactCallResult(name, pathText, method, response) {
   };
 }
 
-async function callOpenApi(client, {name, method = 'POST', path: pathText, query, body, headers = {language: 'zh-cn'}}) {
+async function callOpenApi(client, {name, method = 'POST', path: pathText, query, body, headers = {language: 'en'}}) {
   const response = await client.request(pathText, {method, query, body, headers});
   return {
     ...compactCallResult(name, pathText, method, response),
     data: response.data,
+  };
+}
+
+function openApiStoreConfig(config, storeKey) {
+  const key = normalizeStoreKey(storeKey);
+  return asArray(config?.stores).find(s => normalizeStoreKey(s?.storeKey) === key) || null;
+}
+
+function openApiClientForStore(config, storeKey) {
+  const store = openApiStoreConfig(config, storeKey);
+  if (!store?.openKeyId || !store?.secretKey) return null;
+  return {
+    store,
+    client: new SheinOpenApiClient({
+      baseUrl: config.apiBaseUrls?.prodSemiManaged || SHEIN_OPENAPI_BASE_URLS.prodSemiManaged,
+      openKeyId: store.openKeyId,
+      secretKey: store.secretKey,
+    }),
   };
 }
 
@@ -377,6 +422,19 @@ async function readJsonIfExists(file) {
   } catch {
     return null;
   }
+}
+
+function biPortalLinkRows(data) {
+  const candidates = [
+    data?.storeLinks,
+    data?.links,
+    data?.data?.storeLinks,
+    data?.data?.links,
+  ];
+  for (const value of candidates) {
+    if (Array.isArray(value) && value.length) return value;
+  }
+  return [];
 }
 
 function compactRef(value) {
@@ -424,9 +482,31 @@ function sourceCandidateScore(row, {storeHints, sourceStoreAllowList = [], produ
   return score;
 }
 
+function sourceCandidateMetrics(row) {
+  return {
+    shelfStatusName: safeString(row?.shelf_status_name || row?.shelfStatusName || '', 80),
+    rawGoodsSn: safeString(row?.raw_goods_sn || row?.rawGoodsSn || row?.goods_sn || row?.goodsSn || '', 240),
+    productName: safeString(row?.product_name_cn || row?.productNameCn || row?.product_display_name || row?.productDisplayName || '', 240),
+    c7SaleCnt: Number(row?.c7_sale_cnt ?? row?.c7SaleCnt ?? 0) || 0,
+    c30SaleCnt: Number(row?.c30_sale_cnt ?? row?.c30SaleCnt ?? 0) || 0,
+    c7GoodsUv: Number(row?.c7_goods_uv ?? row?.c7GoodsUv ?? 0) || 0,
+    c30GoodsUv: Number(row?.c30_goods_uv ?? row?.c30GoodsUv ?? 0) || 0,
+    c7EpsUv: Number(row?.c7_eps_uv ?? row?.c7EpsUv ?? 0) || 0,
+    c30EpsUv: Number(row?.c30_eps_uv ?? row?.c30EpsUv ?? 0) || 0,
+    totalSaleVolume: Number(row?.total_sale_volume ?? row?.totalSaleVolume ?? row?.platform_total_sale_volume ?? 0) || 0,
+    lastSaleDate: safeString(row?.last_sale_date || row?.lastSaleDate || '', 40),
+  };
+}
+
 async function inferSourceCandidatesFromBi(task, {targetStore}) {
-  const data = await readJsonIfExists(path.join(ROOT, 'outputs', 'bi-portal', 'data.json'));
-  const rows = asArray(data?.storeLinks || data?.links);
+  const rows = [];
+  for (const file of [
+    path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'linksData.json'),
+    path.join(ROOT, 'outputs', 'bi-portal', 'data.json'),
+  ]) {
+    const data = await readJsonIfExists(file);
+    rows.push(...biPortalLinkRows(data));
+  }
   if (!rows.length) return [];
   const explicitSourceStores = [...new Set([
     ...asArray(task?.targets?.sourceStores),
@@ -435,9 +515,10 @@ async function inferSourceCandidatesFromBi(task, {targetStore}) {
     ...asArray(task?.readStores),
     task?.sourceStore,
   ].map(normalizeStoreKey).filter(Boolean))];
+  const sourceScope = String(task?.targets?.sourceScope || task?.sourceScope || '').trim().toLowerCase();
   const storeHints = explicitSourceStores.length
     ? explicitSourceStores
-    : taskStores(task);
+    : (sourceScope === 'all_stores' ? [] : taskStores(task));
   const productHints = taskProductRefs(task).filter(x => !/^s[avb]\d{8,}$/i.test(x));
   const skcHints = explicitSkcRefs(task);
   const scored = rows
@@ -447,6 +528,7 @@ async function inferSourceCandidatesFromBi(task, {targetStore}) {
       standardGoodsSn: safeString(row?.standard_goods_sn || row?.standardGoodsSn, 240),
       source: 'bi_portal_store_link',
       score: sourceCandidateScore(row, {storeHints, sourceStoreAllowList: explicitSourceStores, productHints, explicitSkcs: skcHints}),
+      metrics: sourceCandidateMetrics(row),
     }))
     .filter(x => x.sourceStore && x.sourceSkc && Number.isFinite(x.score) && x.score > 0)
     .sort((a, b) => b.score - a.score);
@@ -586,6 +668,7 @@ async function findOrBuildPublishPayload(task, {targetStore}) {
           sourceSkc: x.sourceSkc,
           standardGoodsSn: x.standardGoodsSn || '',
           score: x.score ?? null,
+          metrics: x.metrics || null,
         })),
       };
     } catch (err) {
@@ -601,12 +684,33 @@ async function findOrBuildPublishPayload(task, {targetStore}) {
       sourceSkc: x.sourceSkc,
       standardGoodsSn: x.standardGoodsSn || '',
       score: x.score ?? null,
+      metrics: x.metrics || null,
     })),
     generationError: errors.slice(0, 8).join('；') || '未能从候选源链接生成发布 payload。',
   };
 }
 
-function applySafeDefaults(payload, {sites, brands}) {
+function taskTextForKnownRules(task, executionContext = {}) {
+  return [
+    task?.command,
+    task?.title,
+    ...asArray(task?.productRefs || task?.targets?.productRefs),
+    ...asArray(task?.targets?.productRefs),
+    ...asArray(executionContext?.productRefs),
+    ...asArray(executionContext?.targets?.productRefs),
+    executionContext?.sourceSkc,
+    executionContext?.targets?.sourceSkc,
+  ].map(v => safeString(v, 300)).filter(Boolean).join(' ');
+}
+
+function isKnownSm505SewingMachineTask(task, executionContext = {}) {
+  const text = taskTextForKnownRules(task, executionContext);
+  return /SM-?505A/i.test(text)
+    || /(?:^|[^0-9])505(?:[^0-9]|$)/.test(text) && /缝纫机/.test(text)
+    || /sv25082869650540305/i.test(text);
+}
+
+function applySafeDefaults(payload, {sites, brands, task = null, executionContext = null} = {}) {
   const next = jsonClone(payload || {});
   const applied = [];
   if (!next.source_system && !next.sourceSystem) {
@@ -625,15 +729,635 @@ function applySafeDefaults(payload, {sites, brands}) {
     next.brand_code = brands[0].brandCode;
     applied.push(`brand_code=${brands[0].brandName || brands[0].brandCode}`);
   }
-  if ((next.shelf_way === undefined || next.shelfWay === undefined) && !('shelf_way' in next) && !('shelfWay' in next)) {
+  const scheduledHopeOnSaleDate = newLinkHopeOnSaleDate(task, executionContext);
+  const currentShelfWay = next.shelf_way ?? next.shelfWay;
+  if (Number(currentShelfWay) !== 2) {
     next.shelf_way = 2;
-    applied.push('shelf_way=2');
+    if ('shelfWay' in next) delete next.shelfWay;
+    applied.push(currentShelfWay === undefined ? 'shelf_way=2.new_link_scheduled' : 'shelf_way=2.override_new_link_scheduled');
+  } else if (!('shelf_way' in next) && 'shelfWay' in next) {
+    next.shelf_way = next.shelfWay;
+    delete next.shelfWay;
+    applied.push('shelf_way.normalize_snake_case');
   }
-  if ((next.shelf_way === 2 || next.shelfWay === 2) && !next.hope_on_sale_date && !next.hopeOnSaleDate) {
-    next.hope_on_sale_date = tenYearsLaterBeijing();
-    applied.push('hope_on_sale_date=10年后北京时间10:00');
+  if (!next.hope_on_sale_date && next.hopeOnSaleDate) {
+    next.hope_on_sale_date = next.hopeOnSaleDate;
+    delete next.hopeOnSaleDate;
+    applied.push('hope_on_sale_date.normalize_snake_case');
   }
+  if (!next.hope_on_sale_date) {
+    next.hope_on_sale_date = scheduledHopeOnSaleDate;
+    applied.push('hope_on_sale_date=ten_years_later_new_link_scheduled');
+  }
+  const shelfWay = next.shelf_way ?? next.shelfWay ?? 2;
+  const hopeOnSaleDate = next.hope_on_sale_date ?? next.hopeOnSaleDate ?? scheduledHopeOnSaleDate;
+  const skcList = asArray(next.skc_list || next.skcList).filter(row => row && typeof row === 'object');
+  for (const skc of skcList) {
+    const skcShelfWay = skc.shelf_way ?? skc.shelfWay;
+    if (Number(skcShelfWay) !== 2) {
+      skc.shelf_way = shelfWay;
+      if ('shelfWay' in skc) delete skc.shelfWay;
+      applied.push(skcShelfWay === undefined ? 'skc_list.shelf_way' : 'skc_list.shelf_way.override_new_link_scheduled');
+    } else if (!('shelf_way' in skc) && 'shelfWay' in skc) {
+      skc.shelf_way = skc.shelfWay;
+      delete skc.shelfWay;
+      applied.push('skc_list.shelf_way.normalize_snake_case');
+    }
+    if (String(skc.shelf_way ?? skc.shelfWay) === '2' && hopeOnSaleDate && !skc.hope_on_sale_date && !skc.hopeOnSaleDate) {
+      skc.hope_on_sale_date = hopeOnSaleDate;
+      applied.push('skc_list.hope_on_sale_date');
+    }
+  }
+  const normalizedNames = normalizePublishNames(next);
+  if (normalizedNames.applied.length) applied.push(...normalizedNames.applied);
+  const normalizedAttributes = normalizePublishProductAttributes(next);
+  if (normalizedAttributes.applied.length) applied.push(...normalizedAttributes.applied);
   return {payload: next, applied};
+}
+
+function normalizePublishNames(payload) {
+  const applied = [];
+  const rows = asArray(payload?.multi_language_name_list || payload?.multiLanguageNameList)
+    .filter(row => row && typeof row === 'object');
+  const byLanguage = new Map();
+  let removedBlank = false;
+  let copiedProductName = false;
+  for (const row of rows) {
+    const language = safeString(row.language || row.lang || row.languageCode || '', 40).toLowerCase();
+    const name = safeString(row.name || row.product_name || row.productName || row.value || '', 500);
+    if (!language || !name) {
+      removedBlank = true;
+      continue;
+    }
+    if (!row.name && (row.product_name || row.productName || row.value)) copiedProductName = true;
+    if (!byLanguage.has(language)) byLanguage.set(language, {language, name});
+  }
+  const normalized = [...byLanguage.values()];
+  if (removedBlank) applied.push('multi_language_name_list.remove_blank_names');
+  if (copiedProductName) applied.push('multi_language_name_list.name_from_product_name');
+  if (normalized.length || payload.multi_language_name_list || payload.multiLanguageNameList) {
+    payload.multi_language_name_list = normalized;
+    if (payload.multiLanguageNameList) delete payload.multiLanguageNameList;
+  }
+  return {applied: [...new Set(applied)]};
+}
+
+function payloadNameLanguages(payload) {
+  return new Set(asArray(payload?.multi_language_name_list || payload?.multiLanguageNameList)
+    .map(row => safeString(row?.language || row?.lang || row?.languageCode || '', 40).toLowerCase())
+    .filter(Boolean));
+}
+
+function openApiSpuInfoSkcList(info) {
+  return asArray(info?.skcInfoList || info?.skc_info_list || info?.skcList || info?.skc_list);
+}
+
+function openApiSpuInfoSkcName(row) {
+  return safeString(row?.skcName || row?.skc_name || row?.skc || row?.supplierCode || row?.supplier_code, 160);
+}
+
+function namesFromOpenApiSpuInfo(info, sourceSkc = '') {
+  const skcRows = openApiSpuInfoSkcList(info);
+  const matchedSkc = skcRows.find(row => openApiSpuInfoSkcName(row) === sourceSkc) || skcRows[0] || null;
+  const rows = [
+    ...asArray(matchedSkc?.productMultiNameList || matchedSkc?.product_multi_name_list),
+    ...asArray(info?.productMultiNameList || info?.product_multi_name_list),
+  ];
+  const byLanguage = new Map();
+  for (const row of rows) {
+    const language = safeString(row?.language || row?.lang || row?.languageCode || '', 40).toLowerCase();
+    const name = safeString(row?.name || row?.productName || row?.product_name || row?.value || '', 1000);
+    if (!language || !name || byLanguage.has(language)) continue;
+    byLanguage.set(language, {language, name});
+  }
+  return [...byLanguage.values()];
+}
+
+function mergePayloadNames(payload, names) {
+  const next = jsonClone(payload || {});
+  const rows = asArray(next.multi_language_name_list || next.multiLanguageNameList)
+    .filter(row => row && typeof row === 'object')
+    .map(row => ({...row}));
+  const byLanguage = new Map();
+  for (const row of rows) {
+    const language = safeString(row.language || row.lang || row.languageCode || '', 40).toLowerCase();
+    if (!language) continue;
+    byLanguage.set(language, row);
+  }
+  const applied = [];
+  for (const row of asArray(names)) {
+    const language = safeString(row?.language || '', 40).toLowerCase();
+    const name = safeString(row?.name || '', 1000);
+    if (!language || !name) continue;
+    const existing = byLanguage.get(language);
+    const existingName = safeString(existing?.name || existing?.product_name || existing?.productName || existing?.value || '', 1000);
+    if (existing && existingName) continue;
+    const normalized = {language, name};
+    if (existing) Object.assign(existing, normalized);
+    else {
+      rows.push(normalized);
+      byLanguage.set(language, normalized);
+    }
+    applied.push(`multi_language_name_list.${language}.from_source_spu_info`);
+  }
+  next.multi_language_name_list = rows;
+  if (next.multiLanguageNameList) delete next.multiLanguageNameList;
+  return {payload: next, applied: [...new Set(applied)]};
+}
+
+async function enrichPayloadNamesFromLiveSourceOpenApi(config, payload, payloadFound) {
+  const sourceStore = normalizeStoreKey(
+    payloadFound?.inferred?.sourceStore
+    || payloadFound?.generatedDraft?.sourceStore
+    || payloadFound?.canonicalDraft?.source?.storeKey
+  );
+  const sourceSkc = safeString(
+    payloadFound?.inferred?.sourceSkc
+    || payloadFound?.generatedDraft?.sourceSkc
+    || payloadFound?.canonicalDraft?.openApiDetail?.skcName
+    || '',
+    160
+  );
+  const spuName = safeString(
+    payloadFound?.generatedDraft?.openApiDetail?.spuName
+    || payloadFound?.canonicalDraft?.openApiDetail?.spuName
+    || payloadFound?.canonicalDraft?.product?.spu
+    || '',
+    160
+  );
+  if (!sourceStore || !spuName) {
+    return {
+      payload,
+      applied: [],
+      warnings: [],
+      evidence: {status: 'skipped_missing_source_store_or_spu', sourceStore, sourceSkc, spuName},
+      call: null,
+    };
+  }
+  const existingLanguages = payloadNameLanguages(payload);
+  if (existingLanguages.has('en') && existingLanguages.has('ar')) {
+    return {
+      payload,
+      applied: [],
+      warnings: [],
+      evidence: {status: 'skipped_payload_already_has_en_ar', sourceStore, sourceSkc, spuName},
+      call: null,
+    };
+  }
+  const source = openApiClientForStore(config, sourceStore);
+  if (!source?.client) {
+    return {
+      payload,
+      applied: [],
+      warnings: [`源店 ${sourceStore} 未配置可用 OpenAPI 只读凭据，无法现场补源链接多语言标题。`],
+      evidence: {status: 'skipped_missing_source_openapi_credentials', sourceStore, sourceSkc, spuName},
+      call: null,
+    };
+  }
+  let response = null;
+  try {
+    response = await source.client.request('/open-api/goods/spu-info', {
+      method: 'POST',
+      body: {spuName, languageList: ['en', 'ar']},
+      headers: {language: 'en'},
+    });
+  } catch (err) {
+    return {
+      payload,
+      applied: [],
+      warnings: [`现场读取源链接多语言标题失败：${sourceStore}/${spuName} ${safeString(err?.message || err, 300)}`],
+      evidence: {status: 'query_failed', sourceStore, sourceSkc, spuName, error: safeString(err?.message || err, 300)},
+      call: null,
+    };
+  }
+  const call = compactCallResult('source-spu-info-live', '/open-api/goods/spu-info', 'POST', response);
+  const evidence = {
+    status: response.ok && String(response.data?.code) === '0' ? 'ok' : 'not_ok',
+    sourceStore,
+    sourceSkc,
+    spuName,
+    httpStatus: response.status,
+    code: response.data?.code ?? null,
+    msg: response.data?.msg ?? null,
+  };
+  if (!response.ok || String(response.data?.code) !== '0') {
+    return {
+      payload,
+      applied: [],
+      warnings: [`现场读取源链接多语言标题失败：code=${safeString(response.data?.code || '', 80)} msg=${safeString(response.data?.msg || response.statusText || '', 300)}`],
+      evidence,
+      call,
+    };
+  }
+  const names = namesFromOpenApiSpuInfo(response.data?.info || {}, sourceSkc);
+  evidence.languages = names.map(row => row.language);
+  const merged = mergePayloadNames(payload, names);
+  if (!merged.applied.length) {
+    return {
+      payload,
+      applied: [],
+      warnings: [],
+      evidence: {...evidence, status: 'ok_no_new_names'},
+      call,
+    };
+  }
+  return {
+    payload: merged.payload,
+    applied: merged.applied,
+    warnings: [],
+    evidence,
+    call,
+  };
+}
+
+function payloadCategoryId(payload) {
+  const id = normalizeAttributeId(payload?.category_id ?? payload?.categoryId);
+  return id || null;
+}
+
+function titleMaxLengthMap(info) {
+  const out = new Map();
+  for (const row of asArray(info?.language_title_max_length_list || info?.languageTitleMaxLengthList)) {
+    const language = safeString(row?.language || row?.lang || '', 40).toLowerCase();
+    const max = Number(row?.max_length ?? row?.maxLength);
+    if (language && Number.isFinite(max) && max > 0) out.set(language, Math.trunc(max));
+  }
+  const defaultLanguage = safeString(info?.default_language || info?.defaultLanguage || '', 40).toLowerCase();
+  const defaultMax = Number(info?.default_language_title_max_length ?? info?.defaultLanguageTitleMaxLength);
+  if (defaultLanguage && Number.isFinite(defaultMax) && defaultMax > 0 && !out.has(defaultLanguage)) out.set(defaultLanguage, Math.trunc(defaultMax));
+  return out;
+}
+
+async function applyPublishFillInStandardRules(client, payload) {
+  const categoryId = payloadCategoryId(payload);
+  if (!categoryId) return {payload, applied: [], warnings: [], blockers: [], evidence: {status: 'skipped_missing_category_id'}, call: null};
+  let response = null;
+  try {
+    response = await client.request('/open-api/goods/query-publish-fill-in-standard', {
+      method: 'POST',
+      body: {category_id: categoryId},
+      headers: {language: 'en'},
+    });
+  } catch (err) {
+    return {
+      payload,
+      applied: [],
+      warnings: [`查询商品发布字段规范失败：${safeString(err?.message || err, 300)}`],
+      blockers: [],
+      evidence: {status: 'query_failed', categoryId, error: safeString(err?.message || err, 300)},
+      call: null,
+    };
+  }
+  const call = compactCallResult('query-publish-fill-in-standard', '/open-api/goods/query-publish-fill-in-standard', 'POST', response);
+  const info = response.data?.info || {};
+  const defaultLanguage = safeString(info.default_language || info.defaultLanguage || '', 40).toLowerCase();
+  const maxByLanguage = titleMaxLengthMap(info);
+  const evidence = {
+    status: response.ok && String(response.data?.code) === '0' ? 'ok' : 'not_ok',
+    categoryId,
+    httpStatus: response.status,
+    code: response.data?.code ?? null,
+    msg: response.data?.msg ?? null,
+    defaultLanguage,
+    titleMaxLength: Object.fromEntries(maxByLanguage.entries()),
+  };
+  if (!response.ok || String(response.data?.code) !== '0') {
+    return {
+      payload,
+      applied: [],
+      warnings: [`查询商品发布字段规范失败：code=${safeString(response.data?.code || '', 80)} msg=${safeString(response.data?.msg || response.statusText || '', 300)}`],
+      blockers: [],
+      evidence,
+      call,
+    };
+  }
+  const next = jsonClone(payload || {});
+  const names = asArray(next.multi_language_name_list || next.multiLanguageNameList)
+    .filter(row => row && typeof row === 'object')
+    .map(row => ({...row}));
+  const applied = [];
+  const blockers = [];
+  for (const row of names) {
+    const language = safeString(row.language || row.lang || row.languageCode || '', 40).toLowerCase();
+    const max = maxByLanguage.get(language);
+    const name = safeString(row.name || row.product_name || row.productName || row.value || '', 2000);
+    if (max && name.length > max) {
+      row.name = name.slice(0, max);
+      applied.push(`multi_language_name_list.${language}.truncate_${max}`);
+    }
+  }
+  if (defaultLanguage) {
+    const hasDefaultTitle = names.some(row => {
+      const language = safeString(row.language || row.lang || row.languageCode || '', 40).toLowerCase();
+      return language === defaultLanguage && Boolean(safeString(row.name || row.product_name || row.productName || row.value || '', 2000));
+    });
+    if (!hasDefaultTitle) {
+      blockers.push(`缺默认语种 ${defaultLanguage} 商品标题：请同步源链接 ${defaultLanguage} 标题，或在聊天里补充 ${defaultLanguage} 标题后再提交。`);
+    }
+  }
+  next.multi_language_name_list = names;
+  if (next.multiLanguageNameList) delete next.multiLanguageNameList;
+  return {payload: next, applied: [...new Set(applied)], warnings: [], blockers, evidence, call};
+}
+
+function normalizeAttributeId(value) {
+  const id = Number(value);
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
+
+function collectPayloadSaleAttributeIds(payload) {
+  const out = new Set();
+  const add = row => {
+    const id = normalizeAttributeId(row?.attribute_id ?? row?.attributeId);
+    if (id) out.add(id);
+  };
+  for (const skc of asArray(payload?.skc_list || payload?.skcList)) {
+    if (!skc || typeof skc !== 'object') continue;
+    add(skc.sale_attribute || skc.saleAttribute);
+    for (const row of asArray(skc.sale_attribute_list || skc.saleAttributeList)) add(row);
+    for (const sku of asArray(skc.sku_list || skc.skuList)) {
+      for (const row of asArray(sku?.sale_attribute_list || sku?.saleAttributeList)) add(row);
+      for (const row of asArray(sku?.product_sku_attribute_list || sku?.productSkuAttributeList)) add(row);
+    }
+  }
+  return out;
+}
+
+function normalizePublishProductAttributes(payload) {
+  const applied = [];
+  const saleAttributeIds = collectPayloadSaleAttributeIds(payload);
+  const list = asArray(payload?.product_attribute_list || payload?.productAttributeList)
+    .filter(row => row && typeof row === 'object')
+    .map(row => ({...row}))
+    .filter(row => {
+      const id = normalizeAttributeId(row.attribute_id ?? row.attributeId);
+      if (id && saleAttributeIds.has(id)) {
+        applied.push('product_attribute_list.remove_sale_attribute');
+        return false;
+      }
+      return true;
+    });
+  if (!list.length) {
+    payload.product_attribute_list = list;
+    if (payload.productAttributeList) delete payload.productAttributeList;
+    return {applied: [...new Set(applied)]};
+  }
+  for (const row of list) {
+    const extraValue = safeString(row.attribute_extra_value ?? row.attributeExtraValue ?? row.attribute_value ?? row.attributeValue ?? '', 500);
+    if (extraValue && !row.attribute_extra_value) {
+      row.attribute_extra_value = extraValue;
+      applied.push('product_attribute_list.attribute_extra_value');
+    }
+    if (extraValue && (String(row.attribute_value_id ?? row.attributeValueId ?? '') === '0')) {
+      delete row.attribute_value_id;
+      delete row.attributeValueId;
+      applied.push('product_attribute_list.remove_zero_attribute_value_id');
+    }
+    delete row.attribute_value;
+    delete row.attributeValue;
+    delete row.attributeExtraValue;
+  }
+  payload.product_attribute_list = list;
+  if (payload.productAttributeList) delete payload.productAttributeList;
+  return {applied: [...new Set(applied)]};
+}
+
+function normalizeInputCurrentExtraValue(value, unit = '') {
+  const text = safeString(value, 120);
+  const match = text.match(/([0-9]+(?:\.[0-9]+)?)/);
+  if (!match) return text;
+  const numeric = Number(match[1]);
+  if (!Number.isFinite(numeric) || numeric <= 0) return text;
+  const unitText = `${unit || text}`.toLowerCase();
+  const milliamps = /(^|[^m])a\b|安/.test(unitText) && !/ma|毫安/.test(unitText)
+    ? Math.round(numeric * 1000)
+    : Math.round(numeric);
+  return String(milliamps);
+}
+
+function normalizeManualAttributeOverride(row) {
+  if (!row || typeof row !== 'object') return null;
+  const attributeId = normalizeAttributeId(row.attribute_id ?? row.attributeId ?? row.id);
+  const rawUnit = safeString(row.attribute_unit ?? row.attributeUnit ?? row.unit ?? '', 40);
+  let attributeExtraValue = safeString(
+    row.attribute_extra_value
+    ?? row.attributeExtraValue
+    ?? row.attribute_value
+    ?? row.attributeValue
+    ?? row.value
+    ?? '',
+    500
+  );
+  let attributeUnit = rawUnit;
+  if (attributeId === 1002323) {
+    attributeExtraValue = normalizeInputCurrentExtraValue(attributeExtraValue, row.attribute_unit || row.attributeUnit || '');
+    attributeUnit = 'mA';
+  }
+  if (!attributeId || !attributeExtraValue) return null;
+  return {
+    attribute_id: attributeId,
+    attribute_extra_value: attributeExtraValue,
+    attribute_unit: attributeUnit,
+    label: safeString(row.label || '', 80),
+    source: safeString(row.source || 'manual_override', 80),
+  };
+}
+
+function collectManualAttributeOverrides(task, executionContext) {
+  const rows = [
+    ...asArray(task?.targets?.attributeOverrides || task?.targets?.attribute_overrides),
+    ...asArray(task?.manualAttributeOverrides || task?.manual_attribute_overrides),
+    ...asArray(task?.attributeOverrides || task?.attribute_overrides),
+    ...asArray(executionContext?.attributeOverrides || executionContext?.attribute_overrides),
+    ...asArray(executionContext?.targets?.attributeOverrides || executionContext?.targets?.attribute_overrides),
+  ].map(normalizeManualAttributeOverride).filter(Boolean);
+  if (isKnownSm505SewingMachineTask(task, executionContext) && !rows.some(row => Number(row.attribute_id) === 1002323)) {
+    rows.push({
+      attribute_id: 1002323,
+      attribute_extra_value: '1200',
+      attribute_unit: 'mA',
+      label: '输入电流',
+      source: 'known_sm505_user_rule',
+    });
+  }
+  const byId = new Map();
+  for (const row of rows) byId.set(row.attribute_id, row);
+  return [...byId.values()];
+}
+
+function applyManualAttributeOverrides(payload, task, executionContext) {
+  const overrides = collectManualAttributeOverrides(task, executionContext);
+  if (!overrides.length) return {payload, applied: [], overrides: []};
+  const next = jsonClone(payload || {});
+  const list = asArray(next.product_attribute_list || next.productAttributeList)
+    .filter(row => row && typeof row === 'object')
+    .map(row => ({...row}));
+  const applied = [];
+  for (const override of overrides) {
+    const existing = list.find(row => normalizeAttributeId(row.attribute_id ?? row.attributeId) === override.attribute_id);
+    const row = existing || {attribute_id: override.attribute_id};
+    row.attribute_id = override.attribute_id;
+    row.attribute_extra_value = override.attribute_extra_value;
+    if (override.attribute_unit) row.__manual_attribute_unit = override.attribute_unit;
+    delete row.attribute_value_id;
+    delete row.attributeValueId;
+    delete row.attribute_value;
+    delete row.attributeValue;
+    if (!existing) list.push(row);
+    applied.push(`${override.label || override.attribute_id}=${override.attribute_extra_value}`);
+  }
+  next.product_attribute_list = list;
+  if (next.productAttributeList) delete next.productAttributeList;
+  return {payload: next, applied, overrides};
+}
+
+function payloadProductTypeId(payload) {
+  const id = normalizeAttributeId(payload?.product_type_id ?? payload?.productTypeId);
+  return id || null;
+}
+
+function normalizeTemplateAttributeRows(data) {
+  const out = [];
+  function visit(node) {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item);
+      return;
+    }
+    const attributeId = normalizeAttributeId(node.attribute_id ?? node.attributeId);
+    if (attributeId && (node.attribute_mode !== undefined || node.attributeMode !== undefined || node.attribute_value_info_list || node.attributeValueInfoList)) {
+      out.push({
+        attribute_id: attributeId,
+        attribute_name: safeString(node.attribute_name ?? node.attributeName ?? node.attribute_name_en ?? node.attributeNameEn ?? '', 160),
+        attribute_mode: Number(node.attribute_mode ?? node.attributeMode),
+        attribute_type: Number(node.attribute_type ?? node.attributeType),
+        attribute_status: Number(node.attribute_status ?? node.attributeStatus),
+        attribute_value_info_list: asArray(node.attribute_value_info_list || node.attributeValueInfoList).map(value => ({
+          attribute_value_id: normalizeAttributeId(value?.attribute_value_id ?? value?.attributeValueId),
+          attribute_value: safeString(value?.attribute_value ?? value?.attributeValue ?? value?.attribute_value_en ?? value?.attributeValueEn ?? '', 120),
+          is_custom_attribute_value: Boolean(value?.is_custom_attribute_value ?? value?.isCustomAttributeValue),
+        })).filter(value => value.attribute_value_id || value.attribute_value),
+      });
+    }
+    for (const value of Object.values(node)) {
+      if (value && typeof value === 'object') visit(value);
+    }
+  }
+  visit(data?.info || data);
+  const byId = new Map();
+  for (const row of out) if (!byId.has(row.attribute_id)) byId.set(row.attribute_id, row);
+  return [...byId.values()];
+}
+
+function chooseAttributeValueIdForManualUnit(templateRow, row) {
+  const unit = safeString(row.__manual_attribute_unit || row.attribute_unit || row.attributeUnit || '', 40).toLowerCase();
+  if (!unit) return null;
+  const normalizedUnit = unit.replace(/\s+/g, '');
+  const values = asArray(templateRow?.attribute_value_info_list);
+  const exact = values.find(value => safeString(value.attribute_value, 40).toLowerCase().replace(/\s+/g, '') === normalizedUnit);
+  if (exact?.attribute_value_id) return exact.attribute_value_id;
+  return null;
+}
+
+async function applyAttributeTemplateRules(client, payload) {
+  const productTypeId = payloadProductTypeId(payload);
+  if (!productTypeId) return {payload, applied: [], warnings: [], blockers: [], evidence: {status: 'skipped_missing_product_type_id'}, call: null};
+  let response = null;
+  try {
+    response = await client.request('/open-api/goods/query-attribute-template', {
+      method: 'POST',
+      body: {product_type_id_list: [productTypeId]},
+      headers: {language: 'en'},
+    });
+  } catch (err) {
+    return {
+      payload,
+      applied: [],
+      warnings: [`查询商品属性模板失败：${safeString(err?.message || err, 300)}`],
+      blockers: [],
+      evidence: {status: 'query_failed', productTypeId, error: safeString(err?.message || err, 300)},
+      call: null,
+    };
+  }
+  const call = compactCallResult('query-attribute-template', '/open-api/goods/query-attribute-template', 'POST', response);
+  const evidence = {
+    status: response.ok && String(response.data?.code) === '0' ? 'ok' : 'not_ok',
+    productTypeId,
+    httpStatus: response.status,
+    code: response.data?.code ?? null,
+    msg: response.data?.msg ?? null,
+  };
+  if (!response.ok || String(response.data?.code) !== '0') {
+    return {
+      payload,
+      applied: [],
+      warnings: [`查询商品属性模板失败：code=${safeString(response.data?.code || '', 80)} msg=${safeString(response.data?.msg || response.statusText || '', 300)}`],
+      blockers: [],
+      evidence,
+      call,
+    };
+  }
+  const templates = normalizeTemplateAttributeRows(response.data);
+  const byId = new Map(templates.map(row => [row.attribute_id, row]));
+  const next = jsonClone(payload || {});
+  const list = asArray(next.product_attribute_list || next.productAttributeList)
+    .filter(row => row && typeof row === 'object')
+    .map(row => ({...row}));
+  const applied = [];
+  const blockers = [];
+  const warnings = [];
+  for (const row of list) {
+    const attributeId = normalizeAttributeId(row.attribute_id ?? row.attributeId);
+    const template = attributeId ? byId.get(attributeId) : null;
+    const mode = Number(template?.attribute_mode);
+    const hasExtra = Boolean(safeString(row.attribute_extra_value ?? row.attributeExtraValue ?? '', 500));
+    const valueId = normalizeAttributeId(row.attribute_value_id ?? row.attributeValueId);
+    if (template && hasExtra && mode === 4 && !valueId) {
+      const resolvedValueId = chooseAttributeValueIdForManualUnit(template, row);
+      if (resolvedValueId) {
+        row.attribute_value_id = resolvedValueId;
+        applied.push(`attribute_template:${attributeId}.attribute_value_id=${resolvedValueId}`);
+      } else {
+        blockers.push(`${template.attribute_name || attributeId} 是“下拉+手动输入”属性，已填写 ${row.attribute_extra_value}，但未能从官方属性模板匹配单位/属性值 ID。`);
+      }
+    }
+    delete row.__manual_attribute_unit;
+    delete row.attribute_unit;
+    delete row.attributeUnit;
+    delete row.attributeExtraValue;
+    delete row.attributeValueId;
+    delete row.attributeValue;
+    if (hasExtra && mode === 0) {
+      delete row.attribute_value_id;
+      applied.push(`attribute_template:${attributeId}.manual_input_no_value_id`);
+    }
+  }
+  next.product_attribute_list = list;
+  if (next.productAttributeList) delete next.productAttributeList;
+  return {
+    payload: next,
+    applied: [...new Set(applied)],
+    warnings: [...new Set(warnings)],
+    blockers: [...new Set(blockers)],
+    evidence: {
+      ...evidence,
+      attributeCount: templates.length,
+      enrichedAttributeIds: applied.map(item => item.split(':')[1]?.split('.')[0]).filter(Boolean),
+    },
+    call,
+  };
+}
+
+function normalizePublishImageType(value) {
+  if (value === undefined || value === null || String(value).trim() === '') return null;
+  const n = Number(value);
+  if (Number.isFinite(n)) return n;
+  const text = String(value).trim().toUpperCase();
+  if (text === 'MAIN') return 1;
+  if (text === 'DETAIL') return 2;
+  if (text === 'SQUARE') return 5;
+  if (text === 'COLOR' || text === 'COLOR_BLOCK' || text === 'SWATCH') return 6;
+  return null;
 }
 
 function validatePublishPayload(payload) {
@@ -666,7 +1390,27 @@ function validatePublishPayload(payload) {
     const imageInfo = skc?.image_info || skc?.imageInfo || {};
     const imageList = asArray(imageInfo?.image_info_list || imageInfo?.imageInfoList);
     if (!imageList.length) blockers.push(`${prefix} 缺 image_info.image_info_list：需要主图/详情图素材或源商品图片映射。`);
-    const saleAttrs = asArray(skc?.sale_attribute || skc?.saleAttribute);
+    let mainImageCount = 0;
+    for (const [j, image] of imageList.entries()) {
+      const imagePrefix = `${prefix}.image_info.image_info_list[${j}]`;
+      const imageType = normalizePublishImageType(image?.image_type ?? image?.imageType);
+      if (imageType === null) {
+        blockers.push(`${imagePrefix} 缺 image_type：publishOrEdit 的 SKC 图必须标明 1主图/2细节图/5方块图/6色块图。`);
+      } else if (!ALLOWED_SKC_IMAGE_TYPES.has(imageType)) {
+        blockers.push(`${imagePrefix} image_type=${imageType} 非法：SKC 图只允许 ${[...SKC_IMAGE_TYPE_LABELS].map(([value, label]) => `${value}${label}`).join('/')}。`);
+      } else if (imageType === 1) {
+        mainImageCount += 1;
+        const imageSort = Number(image?.image_sort ?? image?.imageSort);
+        if (imageSort !== 1) blockers.push(`${imagePrefix} 主图 image_type=1 时 image_sort 必须为 1。`);
+      }
+      if (!image?.image_url && !image?.imageUrl) blockers.push(`${imagePrefix} 缺 image_url。`);
+    }
+    if (imageList.length && mainImageCount !== 1) blockers.push(`${prefix} SKC 图必须且只能有 1 张主图 image_type=1，当前 ${mainImageCount} 张。`);
+    const saleAttrValue = skc?.sale_attribute || skc?.saleAttribute;
+    if (Array.isArray(saleAttrValue)) {
+      blockers.push(`${prefix} sale_attribute 结构错误：SHEIN publishOrEdit 要求单个对象，不能传数组。`);
+    }
+    const saleAttrs = asArray(saleAttrValue);
     if (!saleAttrs.length) blockers.push(`${prefix} 缺 sale_attribute：需要颜色/规格等销售属性。`);
     const skuList = asArray(skc?.sku_list || skc?.skuList);
     if (!skuList.length) blockers.push(`${prefix} 缺 sku_list：需要 SKU 规格、成本、库存、尺寸重量。`);
@@ -690,6 +1434,32 @@ function validatePublishPayload(payload) {
   return {ok: blockers.length === 0, blockers, warnings};
 }
 
+function publishInfoHasExplicitSuccess(info) {
+  return Boolean(info && typeof info === 'object' && !Array.isArray(info) && Object.hasOwn(info, 'success'));
+}
+
+function publishResultSucceeded(result) {
+  if (!result || String(result.code ?? '') !== '0') return false;
+  if (publishInfoHasExplicitSuccess(result.info)) return result.info.success === true;
+  return true;
+}
+
+function publishPreValidMessages(info) {
+  const rows = asArray(info?.pre_valid_result || info?.preValidResult);
+  const messages = [];
+  for (const row of rows) {
+    const label = safeString(row?.form_name || row?.form || row?.module || '平台预校验', 80);
+    for (const msg of asArray(row?.messages || row?.message)) {
+      const text = safeString(msg, 300);
+      if (text) messages.push(`${label}：${text}`);
+    }
+  }
+  if (!messages.length && publishInfoHasExplicitSuccess(info) && info.success === false) {
+    messages.push('平台返回 success=false，但未返回具体预校验明细。');
+  }
+  return [...new Set(messages)];
+}
+
 function extractPayloadSummary(payload) {
   const skcList = asArray(payload?.skc_list || payload?.skcList);
   const skuCount = skcList.reduce((sum, skc) => sum + asArray(skc?.sku_list || skc?.skuList).length, 0);
@@ -710,6 +1480,16 @@ function extractPayloadSummary(payload) {
 
 function openApiProductRows(data) {
   return asArray(data?.info?.data || data?.info?.list || data?.data);
+}
+
+function openApiSearchProductRows(data) {
+  return asArray(
+    data?.info?.data ||
+    data?.info?.list ||
+    data?.info?.records ||
+    data?.info?.rows ||
+    data?.data,
+  );
 }
 
 function rowTextForReadback(row) {
@@ -744,7 +1524,7 @@ function compactProductReadbackRow(row) {
     skcName: safeString(row?.skcName || row?.skc_name || row?.skc || '', 120),
     supplierCode: safeString(row?.supplierCode || row?.supplier_code || '', 120),
     skuCodeList: asArray(row?.skuCodeList || row?.sku_code_list || row?.skuCodes).map(x => safeString(x, 80)).filter(Boolean).slice(0, 20),
-    productName: safeString(row?.productName || row?.product_name || row?.productNameEn || row?.productNameZh || '', 240),
+    productName: safeString(row?.productName || row?.product_name || row?.productNameEn || row?.productNameAr || '', 240),
     rawKeys: Object.keys(row || {}).slice(0, 40),
   };
 }
@@ -754,6 +1534,9 @@ function matchProductReadbackRows(rows, fingerprint) {
   const supplierCodes = asArray(fingerprint?.targetSupplierCodes).map(compactRef).filter(Boolean);
   const platformSkuCodes = asArray(fingerprint?.targetPlatformSkuCodes).map(compactRef).filter(Boolean);
   const platformSkcNames = asArray(fingerprint?.targetPlatformSkcNames).map(compactRef).filter(Boolean);
+  const publishSpuNames = asArray(fingerprint?.publishSpuNames).map(compactRef).filter(Boolean);
+  const publishSkcNames = asArray(fingerprint?.publishSkcNames).map(compactRef).filter(Boolean);
+  const publishSkuCodes = asArray(fingerprint?.publishSkuCodes).map(compactRef).filter(Boolean);
   const productRefs = asArray(fingerprint?.taskProductRefs).map(compactRef).filter(Boolean);
   const sourceSkc = compactRef(fingerprint?.inferredSourceSkc || '');
   const matches = [];
@@ -767,6 +1550,15 @@ function matchProductReadbackRows(rows, fingerprint) {
     }
     for (const code of supplierCodes) {
       if (code && hay.includes(code)) strongReasons.push(`supplierCode:${code}`);
+    }
+    for (const spuName of publishSpuNames) {
+      if (spuName && hay.includes(spuName)) strongReasons.push(`publishSpuName:${spuName}`);
+    }
+    for (const skcName of publishSkcNames) {
+      if (skcName && hay.includes(skcName)) strongReasons.push(`publishSkcName:${skcName}`);
+    }
+    for (const skuCode of publishSkuCodes) {
+      if (skuCode && hay.includes(skuCode)) strongReasons.push(`publishSkuCode:${skuCode}`);
     }
     for (const code of platformSkuCodes) {
       if (code && hay.includes(code)) weakReasons.push(`platformSkuCode:${code}`);
@@ -803,10 +1595,16 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false} =
   const targetSupplierCodes = asArray(fingerprint?.targetSupplierCodes).filter(Boolean);
   const targetPlatformSkuCodes = asArray(fingerprint?.targetPlatformSkuCodes).filter(Boolean);
   const targetPlatformSkcNames = asArray(fingerprint?.targetPlatformSkcNames).filter(Boolean);
+  const publishSpuNames = asArray(fingerprint?.publishSpuNames).filter(Boolean);
+  const publishSkcNames = asArray(fingerprint?.publishSkcNames).filter(Boolean);
+  const publishSkuCodes = asArray(fingerprint?.publishSkuCodes).filter(Boolean);
   const taskProductRefs = asArray(fingerprint?.taskProductRefs).filter(Boolean);
   const pageSize = Math.max(1, Math.min(100, Number(process.env.SHEIN_LINK_OPS_READBACK_PAGE_SIZE || 100)));
   const maxPages = Math.max(1, Math.min(20, Number(process.env.SHEIN_LINK_OPS_READBACK_MAX_PAGES || 5)));
   const queryHints = [...new Set([
+    ...publishSpuNames,
+    ...publishSkcNames,
+    ...publishSkuCodes,
     ...targetSupplierSkus,
     ...targetSupplierCodes,
     ...targetPlatformSkuCodes,
@@ -815,6 +1613,11 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false} =
     ...taskProductRefs,
   ].map(x => safeString(x, 120)).filter(Boolean))].slice(0, 20);
   const plan = {
+    endpoints: [
+      '/open-api/goods/spu-info',
+      '/open-api/goods/searchProduct',
+      '/open-api/openapi-business-backend/product/query',
+    ],
     endpoint: '/open-api/openapi-business-backend/product/query',
     method: 'POST',
     pageSize,
@@ -822,9 +1625,12 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false} =
     queryHints,
     targetSupplierSkuCount: targetSupplierSkus.length,
     targetSupplierCodeCount: targetSupplierCodes.length,
+    publishSpuNameCount: publishSpuNames.length,
+    publishSkcNameCount: publishSkcNames.length,
+    publishSkuCodeCount: publishSkuCodes.length,
     targetPlatformSkuCodeCount: targetPlatformSkuCodes.length,
     targetPlatformSkcNameCount: targetPlatformSkcNames.length,
-    reliableMatchRequires: 'targetSupplierSkus 或 targetSupplierCodes 命中；平台 SKU、源 SKC、货号文本只作弱证据。',
+    reliableMatchRequires: 'publishOrEdit 返回的 SPU/SKC/SKU 或目标商家 SKU/商家货号命中；源 SKC、货号文本只作弱证据。',
   };
   if (!enabled) {
     return {
@@ -838,7 +1644,7 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false} =
       note: 'dry-run 或未提交成功时只生成回读计划，不调用商品查询回读。',
     };
   }
-  if (!targetSupplierSkus.length && !targetSupplierCodes.length) {
+  if (!targetSupplierSkus.length && !targetSupplierCodes.length && !publishSpuNames.length && !publishSkcNames.length && !publishSkuCodes.length) {
     return {
       ok: false,
       status: 'insufficient_strong_fingerprint',
@@ -848,18 +1654,96 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false} =
       calls,
       matchedRows: [],
       weakMatchedRows: [],
-      note: '提交成功但缺少可可靠回读的目标商家 SKU / 商家货号；平台 SKU、源 SKC 或货号文本不能单独证明新链接已生成，任务需要人工核销。',
+      note: '提交成功但缺少可可靠回读的 publishOrEdit 返回编号或目标商家 SKU / 商家货号；源 SKC 或货号文本不能单独证明新链接已生成，任务需要人工核销。',
     };
   }
   try {
+    for (const spuName of publishSpuNames.slice(0, 5)) {
+      const response = await client.request('/open-api/goods/spu-info', {
+        method: 'POST',
+        body: {spuName, languageList: ['en', 'ar']},
+        headers: {language: 'en'},
+      });
+      calls.push(compactCallResult(`spu-info-readback-${spuName}`, '/open-api/goods/spu-info', 'POST', response));
+      if (!response.ok || String(response.data?.code) !== '0') continue;
+      const info = response.data?.info && typeof response.data.info === 'object' ? response.data.info : null;
+      if (!info) continue;
+      const matched = matchProductReadbackRows([info], fingerprint);
+      if (matched.strong.length) {
+        return {
+          ok: true,
+          status: 'matched_publish_spu_in_spu_info',
+          startedAt,
+          endedAt: new Date().toISOString(),
+          plan,
+          calls,
+          scannedRows: 1,
+          matchedRows: matched.strong,
+          weakMatchedRows: matched.weak,
+          note: '已用 publishOrEdit 返回的 SPU 编号调用官方 spu-info，并强匹配到平台返回的新 SPU/SKC/SKU；该证据可证明 SHEIN 已接收并生成商品记录，后续仍需结合审核状态判断是否已上架。',
+        };
+      }
+    }
     const allWeakMatches = [];
+    const searchProductAttempts = [
+      ...publishSpuNames.slice(0, 10).map(spuName => ({
+        name: `search-product-by-spu-${spuName}`,
+        body: {pageNum: 1, pageSize: 10, spuNameList: [spuName], languageList: ['en', 'ar']},
+      })),
+      ...publishSkcNames.slice(0, 20).map(skcName => ({
+        name: `search-product-by-skc-${skcName}`,
+        body: {pageNum: 1, pageSize: 10, skcNameList: [skcName], languageList: ['en', 'ar']},
+      })),
+      ...publishSkuCodes.slice(0, 20).map(skuCode => ({
+        name: `search-product-by-sku-${skuCode}`,
+        body: {pageNum: 1, pageSize: 10, skuCodeList: [skuCode], languageList: ['en', 'ar']},
+      })),
+      ...targetSupplierCodes.slice(0, 20).map(code => ({
+        name: `search-product-by-supplier-code-${code}`,
+        body: {pageNum: 1, pageSize: 10, skcSupplierCodeList: [code], languageList: ['en', 'ar']},
+      })),
+      ...targetSupplierSkus.slice(0, 20).map(sku => ({
+        name: `search-product-by-supplier-sku-${sku}`,
+        body: {pageNum: 1, pageSize: 10, supplierSkuList: [sku], languageList: ['en', 'ar']},
+      })),
+    ];
+    const seenSearchBodies = new Set();
+    for (const attempt of searchProductAttempts) {
+      const key = JSON.stringify(attempt.body);
+      if (seenSearchBodies.has(key)) continue;
+      seenSearchBodies.add(key);
+      const response = await client.request('/open-api/goods/searchProduct', {
+        method: 'POST',
+        body: attempt.body,
+        headers: {language: 'en'},
+      });
+      calls.push(compactCallResult(attempt.name, '/open-api/goods/searchProduct', 'POST', response));
+      if (!response.ok || String(response.data?.code) !== '0') continue;
+      const rows = openApiSearchProductRows(response.data);
+      const matched = matchProductReadbackRows(rows, fingerprint);
+      allWeakMatches.push(...matched.weak);
+      if (matched.strong.length) {
+        return {
+          ok: true,
+          status: 'matched_publish_identifier_in_search_product',
+          startedAt,
+          endedAt: new Date().toISOString(),
+          plan,
+          calls,
+          scannedRows: rows.length,
+          matchedRows: matched.strong,
+          weakMatchedRows: allWeakMatches.slice(0, 20),
+          note: '已用 publishOrEdit 返回的 SPU/SKC/SKU 或目标商家编号调用官方 searchProduct，并强匹配到新商品记录；该证据可证明 SHEIN 已接收并可被官方商品综合查询命中，后续仍需结合审核/上架状态判断是否已前台可售。',
+        };
+      }
+    }
     let scannedRows = 0;
     let lastRowsCount = 0;
     for (let pageNum = 1; pageNum <= maxPages; pageNum += 1) {
       const response = await client.request('/open-api/openapi-business-backend/product/query', {
         method: 'POST',
         body: {pageNum, pageSize},
-        headers: {language: 'zh-cn'},
+        headers: {language: 'en'},
       });
       calls.push(compactCallResult(`product-query-readback-page-${pageNum}`, '/open-api/openapi-business-backend/product/query', 'POST', response));
       if (!response.ok || String(response.data?.code) !== '0') {
@@ -930,6 +1814,20 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false} =
 function extractReadbackFingerprint({payload, payloadFound, targetStore, task, publishResult}) {
   const skcList = asArray(payload?.skc_list || payload?.skcList);
   const skuRows = skcList.flatMap(skc => asArray(skc?.sku_list || skc?.skuList));
+  const publishInfo = publishResult?.info && typeof publishResult.info === 'object' ? publishResult.info : {};
+  const publishSkcRows = asArray(publishInfo?.skc_list || publishInfo?.skcList);
+  const publishSkuRows = publishSkcRows.flatMap(skc => asArray(skc?.sku_list || skc?.skuList));
+  const publishSpuNames = [...new Set([
+    safeString(publishInfo?.spu_name ?? publishInfo?.spuName, 120),
+  ].filter(Boolean))].slice(0, 20);
+  const publishSkcNames = [...new Set(publishSkcRows
+    .map(skc => safeString(skc?.skc_name ?? skc?.skcName, 120))
+    .filter(Boolean))]
+    .slice(0, 40);
+  const publishSkuCodes = [...new Set(publishSkuRows
+    .map(sku => safeString(sku?.sku_code ?? sku?.skuCode, 120))
+    .filter(Boolean))]
+    .slice(0, 80);
   const targetSupplierSkus = [...new Set(skuRows
     .map(sku => safeString(sku?.supplier_sku ?? sku?.supplierSku, 120))
     .filter(Boolean))]
@@ -956,6 +1854,12 @@ function extractReadbackFingerprint({payload, payloadFound, targetStore, task, p
     inferredSourceSkc: safeString(inferred.sourceSkc || generatedDraft.sourceSkc || task?.sourceSkc || task?.skc || '', 120),
     categoryId: payload?.category_id ?? payload?.categoryId ?? null,
     productTypeId: payload?.product_type_id ?? payload?.productTypeId ?? null,
+    publishSpuNames,
+    publishSpuNameCount: publishSpuNames.length,
+    publishSkcNames,
+    publishSkcNameCount: publishSkcNames.length,
+    publishSkuCodes,
+    publishSkuCodeCount: publishSkuCodes.length,
     targetSupplierCodes,
     targetSupplierSkus,
     targetSupplierSkuCount: targetSupplierSkus.length,
@@ -1010,7 +1914,7 @@ async function main() {
     blockers.push('任务尚未确认成任务，不能进入 SHEIN 写执行。');
   }
 
-  const {store, client} = await loadClient(args);
+  const {config, store, client} = await loadClient(args);
   const configuredStore = configuredStoreForIdentity(targetStore);
   if (!configuredStore) {
     blockers.push(`config/stores.json 中不存在目标店铺 ${targetStore}，不能执行 OpenAPI 写入。`);
@@ -1094,14 +1998,37 @@ async function main() {
   const payloadFound = await findOrBuildPublishPayload(task, {targetStore});
   let payloadSummary = null;
   let safeDefaults = [];
+  let manualAttributeOverrides = [];
   let payloadValidation = {ok: false, blockers: ['未能自动生成 OpenAPI 发布 payload：系统已尝试从源店/源 SKC 的链接快照还原类目、属性、图片、SKU、供货价、库存和尺寸重量；请补充更明确的源店、源 SKC，或先同步该源链接详情。'], warnings: []};
   let publishPayload = null;
   let payloadHash = '';
   if (payloadFound?.payload) {
     appendUnique(warnings, payloadFound.mappingWarnings);
-    const applied = applySafeDefaults(payloadFound.payload, {sites, brands});
-    publishPayload = applied.payload;
-    safeDefaults = applied.applied;
+    const applied = applySafeDefaults(payloadFound.payload, {sites, brands, task, executionContext});
+    const manualApplied = applyManualAttributeOverrides(applied.payload, task, executionContext);
+    const liveSourceNames = await enrichPayloadNamesFromLiveSourceOpenApi(config, manualApplied.payload, payloadFound);
+    if (liveSourceNames.call) calls.push(liveSourceNames.call);
+    const publishStandardApplied = await applyPublishFillInStandardRules(client, liveSourceNames.payload);
+    if (publishStandardApplied.call) calls.push(publishStandardApplied.call);
+    const templateApplied = await applyAttributeTemplateRules(client, publishStandardApplied.payload);
+    if (templateApplied.call) calls.push(templateApplied.call);
+    publishPayload = templateApplied.payload;
+    safeDefaults = [
+      ...applied.applied,
+      ...manualApplied.applied.map(x => `manual_attribute:${x}`),
+      ...liveSourceNames.applied,
+      ...publishStandardApplied.applied,
+      ...templateApplied.applied,
+    ];
+    manualAttributeOverrides = manualApplied.overrides;
+    evidence.sourceLiveSpuInfo = liveSourceNames.evidence;
+    evidence.publishFillInStandard = publishStandardApplied.evidence;
+    evidence.attributeTemplate = templateApplied.evidence;
+    appendUnique(warnings, liveSourceNames.warnings);
+    appendUnique(warnings, publishStandardApplied.warnings);
+    appendUnique(blockers, publishStandardApplied.blockers);
+    appendUnique(warnings, templateApplied.warnings);
+    appendUnique(blockers, templateApplied.blockers);
     payloadValidation = validatePublishPayload(publishPayload);
     payloadSummary = extractPayloadSummary(publishPayload);
     payloadHash = sha256Stable(publishPayload);
@@ -1140,7 +2067,7 @@ async function main() {
     const response = await client.request('/open-api/goods/product/publishOrEdit', {
       method: 'POST',
       body: publishPayload,
-      headers: {language: 'zh-cn'},
+      headers: {language: 'en'},
     });
     publishResult = {
       httpStatus: response.status,
@@ -1160,8 +2087,13 @@ async function main() {
     });
     if (publishResult.code !== '0') {
       blockers.push(`publishOrEdit 返回失败：${safeString(publishResult.msg || publishResult.code || '未知错误')}`);
+    } else if (!publishResultSucceeded(publishResult)) {
+      const preValidMessages = publishPreValidMessages(publishResult.info);
+      blockers.push(`publishOrEdit 平台预校验失败，未创建新链接：${preValidMessages.join('；') || safeString(publishResult.msg || '未知原因')}`);
     }
   }
+  const publishSucceeded = publishResultSucceeded(publishResult);
+  const publishPreValidFailed = Boolean(publishResult && String(publishResult.code ?? '') === '0' && !publishSucceeded);
   const readbackFingerprint = extractReadbackFingerprint({
     payload: publishPayload,
     payloadFound,
@@ -1170,12 +2102,12 @@ async function main() {
     publishResult,
   });
   const readback = await readbackPublishedProduct(client, readbackFingerprint, {
-    enabled: publishResult?.code === '0',
+    enabled: publishSucceeded,
   });
   readbackFingerprint.readbackStatus = readback.status;
 
   const state = args.mode === 'execute'
-    ? (publishResult?.code === '0' ? 'submitted' : 'blocked')
+    ? (publishSucceeded ? 'submitted' : (publishPreValidFailed ? 'publish_pre_valid_failed' : 'blocked'))
     : (readyForSubmit ? 'ready_for_submit' : 'blocked');
   const output = {
     ok: blockers.length === 0,
@@ -1200,6 +2132,7 @@ async function main() {
       parentTaskId: executionContext.parentTaskId || task?.id || '',
       targetStores: executionContext.targetStores || [],
       productRefs: executionContext.productRefs || productRefs,
+      attributeOverrides: executionContext.attributeOverrides || [],
       intents: executionContext.intents || intents,
       requestedMode: executionContext.requestedMode || args.mode,
       targetStore: executionContext.targetStore || targetStore,
@@ -1217,12 +2150,14 @@ async function main() {
       warehouses,
       storeIdentity: openapiIdentity,
     },
+    evidence,
     payload: {
       found: Boolean(payloadFound?.payload),
       source: payloadFound?.source || null,
       assetId: payloadFound?.assetId || null,
       assetName: payloadFound?.assetName || null,
       safeDefaults,
+      manualAttributeOverrides,
       payloadHash,
       payloadHashAlgorithm: payloadHash ? 'sha256-stable-json-v1' : '',
       summary: payloadSummary,

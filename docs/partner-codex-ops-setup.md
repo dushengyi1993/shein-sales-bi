@@ -106,7 +106,7 @@ node scripts/bi_ops_cli.mjs doctor --operation copy_product_draft --target-store
 
 - 不带 `--require-real-submit` 时，只要求能建任务 / dry-run；适合普通运营确认“我能不能先做预检”。
 - 带 `--require-real-submit` 时，会要求该账号、店铺和动作已经具备真实提交能力；如果仍被总闸门、白名单、账号写权限或动作适配器挡住，命令会退出非 0，并在 `requestedActionReadiness.items[].blockers` 里列出原因。
-- 目前已接入的官方 OpenAPI 写适配器包括：`copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。它们默认只做 dry-run；真实执行必须同时满足账号写权限、`safeWriteOperations`、真实写白名单、人 + 店 + 动作、上一次 dry-run 的 `payloadHash`、`waiting_review` 状态和确认文本 `SHEIN_OPENAPI_SUBMIT`。
+- 目前已接入的官方 OpenAPI 写适配器包括：`copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。它们默认只做 dry-run；真实执行必须同时满足账号写权限、`safeWriteOperations`、真实写白名单、人 + 店 + 动作、上一次 dry-run 的 `payloadHash`、`waiting_review` 状态和确认文本 `SHEIN_OPENAPI_SUBMIT`。网页端不会要求用户输入英文安全码或固定确认框，而是在同一聊天里用“可以执行 / 提交吧 / 照做”等自然语言确认；服务端内部映射成安全确认码，CLI/脚本仍使用 `SHEIN_OPENAPI_SUBMIT`。
 - 维护类适配器使用官方文档：商品上下架 `3001253 /open-api/goods/modify-skc-shelf`（`activate_link` 使用 `shelf_state=1`，`retire_link` 使用 `shelf_state=2`），库存 `3001738 /open-api/stock/change-inventory/v2`，供货价 `3001681 /open-api/goods/update-cost`，售价 `3001407 /open-api/openapi-business-backend/product/price/save`，局部编辑 `3001810 /open-api/goods/product/partialEdit`；证书/资质包含 `3001477 /open-api/goods/save-or-update-certificate-pool`、`3001183 /open-api/goods/save-certificate-pool-skc-bind` 等证书接口。`update_images` 要求提供完整 SHEIN `partialEdit` 图片 JSON（`spu_name + image_info/skc_list/site_detail_image_info_list`），避免错误清空图片层级；`certificate_review` 要求提供 `certificatePayloads[{endpoint,body}]`，提交后默认人工核销审核状态。
 - `campaign_signup` / `flash_discount` 当前不走官方 OpenAPI：公开目录未发现营销报名、限时折扣、优惠券报名写接口证据，所以它们继续走本地营销运营流程、价格栈守卫和人工确认，不会在 OpenAPI 总账里伪装成“可真实提交”。
 - 管理员验证维护写前，可先用 `node scripts/verify_shein_openapi_doc_detail.mjs --doc-id 3001253 --endpoint /open-api/goods/modify-skc-shelf --require-verified --pretty` 拉取脱敏 schema 证据，再用 `node scripts/check_bi_ops_maintenance_readiness.mjs --operation retire_link --doc-evidence <schema证据> --store-probe <逐店权限证据> --readback-evidence <回读证据> --expect pilot_ready --pretty` 做总检查。证据文件只放忽略目录；脚本不会打印或保存 Cookie，也不会调用 SHEIN 业务写接口。
@@ -254,9 +254,9 @@ node scripts/bi_ops_cli.mjs login --username 他的BI账号
 
 说明当前账号没有目标店铺的写权限，或者操作被服务端安全策略挡住了。
 
-### 输入确认文本后仍然没有真实提交
+### 网页聊天说“提交吧”后仍然没有真实提交
 
-这是正常安全机制。除了账号写权限和确认文本，还必须命中云端私有的真实写试点白名单。没有白名单时，系统只做预检，不会碰 SHEIN 后台。
+这是正常安全机制。除了账号写权限和自然语言确认，还必须命中云端私有的真实写试点白名单。没有白名单时，系统只做资料检查，不会碰 SHEIN 后台。CLI/脚本路径仍需要显式 `--confirm SHEIN_OPENAPI_SUBMIT`。
 
 ### 提示 `Task not found`
 
@@ -316,15 +316,21 @@ node scripts/test_bi_ops_release_gate.mjs
 node scripts/test_bi_ops_permissions.mjs
 node scripts/test_bi_ops_cli_flow.mjs
 node scripts/test_bi_ops_write_whitelist_scope.mjs
+node scripts/test_bi_ops_frontend_confirm_feedback.mjs
+node scripts/test_link_ops_product_draft_openapi_detail.mjs
+node scripts/test_shein_store_identity_merchant_fallback.mjs
 node scripts/test_bi_ops_production_safety.mjs
 node scripts/test_bi_ops_copy_product_success_flow.mjs
 node scripts/test_bi_ops_maintenance_executor_flow.mjs
 ```
 
-- `test_bi_ops_release_gate.mjs` 是发版前总入口，会串联语法检查、权限矩阵 smoke、CLI flow smoke、真实写白名单作用域 smoke、`git diff --check` 和旧确认文本扫描。
+- `test_bi_ops_release_gate.mjs` 是发版前总入口，会串联语法检查、权限矩阵 smoke、CLI flow smoke、真实写白名单作用域 smoke、前端中文确认/反馈 smoke、商品详情 mapper smoke、店铺身份 merchantId fallback smoke、`git diff --check` 和旧确认文本扫描。
 - `test_bi_ops_permissions.mjs` 验证服务端权限矩阵：普通运营可写自己店、不可写非负责店，跨店复制只校验写入店铺，全店管理账号可写全部店铺，`local-system` 不能写自动运营入口。
 - `test_bi_ops_cli_flow.mjs` 验证合伙人 / 本机 Codex App 的 CLI 调用链：`login`、`me`、`capabilities`、`create`、`preflight`、`audit`、`logout`，并确认 session 文件不保存明文密码、预检不触发真实写。
 - `test_bi_ops_write_whitelist_scope.mjs` 会在隔离临时门户里临时开启 `safeWriteOperations` 和一条真实写白名单，验证只有指定“人 + 店 + 动作”能命中；其他账号、店铺和动作仍被挡住，并且在缺少 dry-run、`waiting_review`、payload hash 等条件时不会真实提交。
+- `test_bi_ops_frontend_confirm_feedback.mjs` 静态验证自动化运营页前端：网页端中文 `确认` 会映射到安全确认码，执行按钮有忙碌/完成/失败反馈，任务证据不覆盖聊天内容，回答可按 Markdown 分段展示。
+- `test_link_ops_product_draft_openapi_detail.mjs` 使用离线 fixture 验证 `copy_product_draft` 能从 OpenAPI 商品详情 / `spu-info` 映射类目、属性、图片、SKU、供货价、尺寸重量等发布 payload 关键字段，不要求用户手工补完整 payload。
+- `test_shein_store_identity_merchant_fallback.mjs` 验证 TZ/JSH/TZZ/XC 等 `query-store-info` 不返回 GS 账号时，只能在静态真相表 `merchantId` 匹配且没有 GS 冲突时使用 fallback；不得运行时自动回填或放宽店铺身份校验。
 - `test_bi_ops_production_safety.mjs` 验证生产安全检查器本身：锁定态通过、复制上品试点通过、维护写试点通过，`*` 通配、角色泛放、未实现动作放行和总闸门大于白名单都会失败。
 - `test_bi_ops_copy_product_success_flow.mjs` 使用本地假 OpenAPI 服务验证 `copy_product_draft` 成功闭环：任务创建、JSON payload 附件、dry-run 锁定 payload hash、显式确认执行、publish 成功、商品查询强指纹回读、任务自动 `done`。它不会调用真实 SHEIN；release gate 还会额外用 `--weak-readback` 跑一次，证明只有平台 SKU / 源 SKC / 货号文本等弱证据时，任务必须进入人工核销，不能自动判成功。
 - `test_bi_ops_maintenance_executor_flow.mjs` 使用本地假 OpenAPI 服务验证维护写执行器：恢复上架、下架、库存、供货价、售价、改标题、换图、证书绑定完整 payload、dry-run hash 锁定、显式确认 execute、库存 + 商品回读。它不会调用真实 SHEIN。

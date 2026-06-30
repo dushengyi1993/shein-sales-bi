@@ -78,6 +78,11 @@ function extractTaskId(json) {
   return json?.task?.id || json?.data?.tasks?.[0]?.id || '';
 }
 
+async function rawTaskById(id) {
+  const data = JSON.parse(await fs.readFile(taskFile, 'utf8').catch(() => '{"tasks":[]}'));
+  return asArray(data?.tasks).find(task => String(task?.id || '') === String(id || '')) || null;
+}
+
 function writeAuditFromExecute(json) {
   return json?.execution?.writeAudit || json?.task?.execution?.writeAudit || json?.task?.writeAudit || null;
 }
@@ -323,8 +328,9 @@ try {
 
   const ownerHl = await createTask(ownerCookie, createCopyBody('owner HL copy', {stores: ['HL'], productRefs: ['PA4-6L']}));
   const ownerExec = await executeTask(ownerCookie, ownerHl.id);
-  const ownerAudit = writeAuditFromExecute(ownerExec.json);
-  const ownerHlCheck = whitelistCheckFor(ownerAudit, 'HL', 'copy_product_draft');
+  const ownerRawTask = await rawTaskById(ownerHl.id);
+  const ownerAudit = ownerRawTask?.execution?.writeAudit || writeAuditFromExecute(ownerExec.json) || null;
+  const ownerHlCheck = whitelistCheckFor(ownerRawTask?.execution?.writeAudit || ownerAudit, 'HL', 'copy_product_draft');
   result.summary.ownerExecuteStatus = ownerExec.status;
   result.summary.ownerWhitelistCheck = ownerHlCheck;
   result.summary.ownerWriteAudit = {
@@ -334,7 +340,7 @@ try {
     sheinWriteAttempted: Boolean(ownerAudit?.sheinWriteAttempted),
     actualWriteSubmitted: Boolean(ownerAudit?.actualWriteSubmitted),
     blockerCount: Number(ownerAudit?.blockerCount || 0),
-    blockers: executionBlockersFromJson(ownerExec.json),
+    blockers: asArray(ownerRawTask?.execution?.preflight?.blockers || executionBlockersFromJson(ownerExec.json)),
   };
   check('owner execute request returns task update', ownerExec.status, 200);
   check('owner HL whitelist allowed', Boolean(ownerHlCheck?.allowed), true);
@@ -343,12 +349,13 @@ try {
   check('owner still blocked by other execution gates', Boolean(ownerAudit?.executeAllowed), false);
   check('owner did not issue execute to child executor', Boolean(ownerAudit?.issuedExecuteToExecutor), false);
   check('owner did not attempt SHEIN write', Boolean(ownerAudit?.sheinWriteAttempted || ownerAudit?.actualWriteSubmitted), false);
-  check('owner blocker mentions not waiting_review', blockerTextFromJson(ownerExec.json), text => /待复核|waiting_review|dry-run|payload hash/.test(String(text || '')));
+  check('owner blocker mentions not waiting_review', asArray(ownerRawTask?.execution?.preflight?.blockers || executionBlockersFromJson(ownerExec.json)).join('；'), text => /待复核|waiting_review|dry-run|payload hash/.test(String(text || '')));
 
   const operatorHl = await createTask(operatorCookie, createCopyBody('operator HL copy denied by whitelist', {stores: ['HL'], productRefs: ['PA4-6L']}));
   const operatorExec = await executeTask(operatorCookie, operatorHl.id);
-  const operatorAudit = writeAuditFromExecute(operatorExec.json);
-  const operatorHlCheck = whitelistCheckFor(operatorAudit, 'HL', 'copy_product_draft');
+  const operatorRawTask = await rawTaskById(operatorHl.id);
+  const operatorAudit = operatorRawTask?.execution?.writeAudit || writeAuditFromExecute(operatorExec.json) || null;
+  const operatorHlCheck = whitelistCheckFor(operatorRawTask?.execution?.writeAudit || operatorAudit, 'HL', 'copy_product_draft');
   result.summary.operatorExecuteStatus = operatorExec.status;
   result.summary.operatorWhitelistCheck = operatorHlCheck;
   result.summary.operatorWriteAudit = {
@@ -358,7 +365,7 @@ try {
     sheinWriteAttempted: Boolean(operatorAudit?.sheinWriteAttempted),
     actualWriteSubmitted: Boolean(operatorAudit?.actualWriteSubmitted),
     blockerCount: Number(operatorAudit?.blockerCount || 0),
-    blockers: executionBlockersFromJson(operatorExec.json),
+    blockers: asArray(operatorRawTask?.execution?.preflight?.blockers || executionBlockersFromJson(operatorExec.json)),
   };
   check('operator execute request returns task update', operatorExec.status, 200);
   check('operator HL whitelist denied despite store write permission', Boolean(operatorHlCheck?.allowed), false);
@@ -366,12 +373,13 @@ try {
   check('operator not execute allowed', Boolean(operatorAudit?.executeAllowed), false);
   check('operator did not issue execute to child executor', Boolean(operatorAudit?.issuedExecuteToExecutor), false);
   check('operator did not attempt SHEIN write', Boolean(operatorAudit?.sheinWriteAttempted || operatorAudit?.actualWriteSubmitted), false);
-  check('operator blockers mention whitelist', blockerTextFromJson(operatorExec.json), text => /白名单/.test(String(text || '')));
+  check('operator blockers mention whitelist', asArray(operatorRawTask?.execution?.preflight?.blockers || executionBlockersFromJson(operatorExec.json)).join('；'), text => /白名单/.test(String(text || '')));
 
   const ownerDx = await createTask(ownerCookie, createCopyBody('owner DX copy outside safe scope', {stores: ['DX'], productRefs: ['PA4-6L']}));
   const ownerDxExec = await executeTask(ownerCookie, ownerDx.id);
-  const ownerDxAudit = writeAuditFromExecute(ownerDxExec.json);
-  const ownerDxCheck = whitelistCheckFor(ownerDxAudit, 'DX', 'copy_product_draft');
+  const ownerDxRawTask = await rawTaskById(ownerDx.id);
+  const ownerDxAudit = ownerDxRawTask?.execution?.writeAudit || writeAuditFromExecute(ownerDxExec.json) || null;
+  const ownerDxCheck = whitelistCheckFor(ownerDxRawTask?.execution?.writeAudit || ownerDxAudit, 'DX', 'copy_product_draft');
   result.summary.ownerDxExecuteStatus = ownerDxExec.status;
   result.summary.ownerDxWhitelistCheck = ownerDxCheck;
   result.summary.ownerDxWriteAudit = {
@@ -380,36 +388,37 @@ try {
     sheinWriteAttempted: Boolean(ownerDxAudit?.sheinWriteAttempted),
     actualWriteSubmitted: Boolean(ownerDxAudit?.actualWriteSubmitted),
     blockerCount: Number(ownerDxAudit?.blockerCount || 0),
-    blockers: executionBlockersFromJson(ownerDxExec.json),
+    blockers: asArray(ownerDxRawTask?.execution?.preflight?.blockers || executionBlockersFromJson(ownerDxExec.json)),
   };
   check('owner DX execute request returns task update', ownerDxExec.status, 200);
   check('owner DX whitelist denied because store/action not matched', Boolean(ownerDxCheck?.allowed), false);
   check('owner DX not execute allowed', Boolean(ownerDxAudit?.executeAllowed), false);
   check('owner DX did not issue execute', Boolean(ownerDxAudit?.issuedExecuteToExecutor), false);
   check('owner DX did not attempt SHEIN write', Boolean(ownerDxAudit?.sheinWriteAttempted || ownerDxAudit?.actualWriteSubmitted), false);
-  check('owner DX blockers mention gate or whitelist', blockerTextFromJson(ownerDxExec.json), text => /总闸门|白名单|真实提交/.test(String(text || '')));
+  check('owner DX blockers mention gate or whitelist', asArray(ownerDxRawTask?.execution?.preflight?.blockers || executionBlockersFromJson(ownerDxExec.json)).join('；'), text => /总闸门|白名单|真实提交/.test(String(text || '')));
 
   const ownerTitle = await createTask(ownerCookie, createTitleBody('owner HL title unsupported op', {stores: ['HL'], productRefs: ['PA4-6L']}));
   const ownerTitleExec = await executeTask(ownerCookie, ownerTitle.id);
-  const ownerTitleAudit = writeAuditFromExecute(ownerTitleExec.json);
+  const ownerTitleRawTask = await rawTaskById(ownerTitle.id);
+  const ownerTitleAudit = ownerTitleRawTask?.execution?.writeAudit || writeAuditFromExecute(ownerTitleExec.json) || null;
   result.summary.ownerTitleExecuteStatus = ownerTitleExec.status;
   result.summary.ownerTitleWriteAudit = {
     executeAllowed: Boolean(ownerTitleAudit?.executeAllowed),
     issuedExecuteToExecutor: Boolean(ownerTitleAudit?.issuedExecuteToExecutor),
     sheinWriteAttempted: Boolean(ownerTitleAudit?.sheinWriteAttempted),
     actualWriteSubmitted: Boolean(ownerTitleAudit?.actualWriteSubmitted),
-    whitelistChecks: asArray(ownerTitleAudit?.realSubmitWhitelistChecks),
+    whitelistChecks: asArray(ownerTitleRawTask?.execution?.writeAudit?.realSubmitWhitelistChecks || ownerTitleAudit?.realSubmitWhitelistChecks),
     blockerCount: Number(ownerTitleAudit?.blockerCount || 0),
-    blockers: executionBlockersFromJson(ownerTitleExec.json),
+    blockers: asArray(ownerTitleRawTask?.execution?.preflight?.blockers || executionBlockersFromJson(ownerTitleExec.json)),
   };
   check('owner title execute request returns task update', ownerTitleExec.status, 200);
-  const ownerTitleCheck = whitelistCheckFor(ownerTitleAudit, 'HL', 'update_title');
+  const ownerTitleCheck = whitelistCheckFor(ownerTitleRawTask?.execution?.writeAudit || ownerTitleAudit, 'HL', 'update_title');
   check('owner title has update_title whitelist check', Boolean(ownerTitleCheck), true);
   check('owner title update_title whitelist denied', Boolean(ownerTitleCheck?.allowed), false);
   check('owner title not execute allowed', Boolean(ownerTitleAudit?.executeAllowed), false);
   check('owner title did not issue execute', Boolean(ownerTitleAudit?.issuedExecuteToExecutor), false);
   check('owner title did not attempt SHEIN write', Boolean(ownerTitleAudit?.sheinWriteAttempted || ownerTitleAudit?.actualWriteSubmitted), false);
-  check('owner title blockers mention action gate or whitelist', blockerTextFromJson(ownerTitleExec.json), text => /总闸门|allowedOperations|白名单|payload hash|维护预检/.test(String(text || '')));
+  check('owner title blockers mention action gate or whitelist', asArray(ownerTitleRawTask?.execution?.preflight?.blockers || executionBlockersFromJson(ownerTitleExec.json)).join('；'), text => /总闸门|allowedOperations|白名单|payload hash|维护预检/.test(String(text || '')));
 
   const auditText = fssync.existsSync(auditFile) ? await fs.readFile(auditFile, 'utf8') : '';
   result.summary.taskCount = JSON.parse(await fs.readFile(taskFile, 'utf8')).tasks.length;

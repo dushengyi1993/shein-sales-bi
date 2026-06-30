@@ -780,7 +780,16 @@ try {
       return result;
     }
 
-    if (validationFailed) {
+    const validationOnlyCurrentLimitedConflict =
+      goodsBuild.missing.length === 0 &&
+      goodsBuild.addRows.length === targetRows.length &&
+      goodsBuild.invalid.length > 0 &&
+      goodsBuild.invalid.every(row => row.reason === 'query_goods error_code' && row.error_code === 'mrs-simple_platform_limit_discounts-0006') &&
+      before.conflictActivities.length > 0 &&
+      before.conflictActivities.every(entry => Number(entry.extraCount || 0) === 0);
+    result.validationOnlyCurrentLimitedConflict = validationOnlyCurrentLimitedConflict;
+
+    if (validationFailed && !validationOnlyCurrentLimitedConflict) {
       result.validationFailed = true;
       if (!execute) return result;
     }
@@ -788,6 +797,9 @@ try {
     if (!execute) {
       result.ok = true;
       result.dryRunOnly = true;
+      if (validationOnlyCurrentLimitedConflict) {
+        result.reason = 'dry-run replacement candidate: only current limited-discount conflict 0006 remains; execute will end safe target-only old activity then revalidate before create';
+      }
       return result;
     }
 

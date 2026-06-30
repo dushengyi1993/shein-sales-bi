@@ -100,8 +100,8 @@
 ## SHEIN BI 系统
 - BI 数据判断、开发验收和故障排查只认云端运行时：云端 PostgreSQL warehouse、云端 BI 门户、线上 `/api/bi/section/*`、云端日志和 systemd 状态；仓库快照可能严重过期，只能作为灾备/兼容产物，不能拿来判断当前经营数据。
 - 架构原则：`SHEIN 后台/WebAPI/OpenAPI 抓取 -> 私有源文件 / PostgreSQL 数据仓库 -> Metabase BI / BI Portal`。PostgreSQL 是核心数据仓库；Metabase 当前仍是正式深度分析/自由钻取层，BI Portal 是日常经营入口。没有完整替代前，不要建议直接删除或跳过 Metabase。
-- 2026-05-15 起本地 BI 已封存，云端 BI 为正式入口：`https://shein-bi.dushengyi.xyz/`，旧 IP `http://43.165.167.135/` 仅作兜底；Basic Auth 账号密码不写入仓库、文档或日志。本地 `8787` 服务已停止，`SHEIN-*` Windows 计划任务已禁用；除非明确回滚，不要重新启用本地 BI 或本地定时任务。云端可复用改动必须及时同步 GitHub，敏感 session/密钥/数据库 dump 仍不得提交。
-- HL OpenAPI 销售试点曾建立并行链路：`outputs/shein_openapi_fetch/HL/YYYY-MM-DD.json` -> `scripts/load_shein_openapi_sales_warehouse.mjs` -> `fact.openapi_store_daily_sales` / `fact.openapi_order_header` / `fact.openapi_order_item` / `mart.openapi_sales_reconciliation`；现已退出生产调度和系统状态页，历史并行表仅保留为手动诊断参考。
+- 2026-05-15 起本地 BI 已封存，云端 BI 为正式入口：`https://shein-bi.dushengyi.xyz/`，旧 IP `http://43.165.167.135/` 仅作兜底；公网权限模型已切到 BI 应用内登录页 + `bi_session` HttpOnly Cookie，不再把旧网关口令当正式入口保护。账号密码不写入仓库、文档或日志。本地 `8787` 服务已停止，`SHEIN-*` Windows 计划任务已禁用；除非明确回滚，不要重新启用本地 BI 或本地定时任务。云端可复用改动必须及时同步 GitHub，敏感 session/密钥/数据库 dump 仍不得提交。
+- OpenAPI 销售/退货/商品当前以 19 店隔离并行层为准；旧 单店 销售试点只作历史诊断参考，不能再据此回答“只有 HL 接入”。正式事实源仍未一刀切切换，需按数据域和连续对账趋势判断。
 - 官方 OpenAPI 与后台 WebAPI 直连是两条不同链路：OpenAPI 需要开放平台应用、授权、`openKeyId` / `secretKey` 和 IP 白名单；后台 WebAPI 直连复用已登录 Cookie/session，当前已优先承接 19 店销售生产抓取。两类密钥/session 都禁止进入仓库。
 - CX 开放平台应用 `CX-椿霞SHEIN运营中台` 已在 `2026-05-10` 提交审核；ZL 开放平台应用 `ZL-紫翎SHEIN运营中台` 已在 `2026-05-28` 提交审核。两者均为半托管，业务功能选择商品管理、商品合规、订单管理、库存管理、财务管理；审核通过后再录入本地 `.local` 密钥并接入 API 双跑。
 - SHEIN OpenAPI 若返回 `openapi00002 IP is not in the whitelist`，优先检查服务器出口 IP `43.165.167.135` 是否在开放平台白名单；ZL 申请时还添加过本机出口 `38.181.81.164`，历史本机出口 `188.253.112.44` / `82.27.116.13` 只作排障参考。不要把 OpenAPI app secret、店铺 secret、openKeyId 写入聊天、文档或日志。
@@ -159,7 +159,7 @@
 - RTV 利润主口径保守：退货/仅退款/派送失败等反转订单主利润仍按营收 0 并扣成本/必要费用；ET 已收 RTV 只新增“可二次销售测算”，不替代主利润。
 
 ## 云端生产、RTV、问数机器人与链接管理口径
-- 云端 SSH 本机别名 `ssh shein-bi-tencent`，用户 `sheinops`，key-only；`https://shein-bi.dushengyi.xyz/` 通过 HAProxy 在 443 分流 SSH/HTTPS，Caddy 管 TLS，nginx + Basic Auth 转 BI Portal。不要绕过网关直接暴露 Node。
+- 云端 SSH 本机别名 `ssh shein-bi-tencent`，用户 `sheinops`，key-only；`https://shein-bi.dushengyi.xyz/` 通过 HAProxy 在 443 分流 SSH/HTTPS，Caddy 管 TLS，nginx/Caddy 转 BI Portal，身份认证由 BI 应用内登录页和 `bi_session` 承担。不要绕过网关直接暴露 Node，也不要恢复旧网关口令作为主权限模型。
 - 云端自动化已覆盖销售 WebAPI、BI、数据库备份、ET、飞书日报手动入口、完整 RTV 复核、统一日更补采、watchdog 和只读飞书问数；飞书日报自动发送已停用，HL OpenAPI 销售双跑已退出生产调度，本地 Windows 任务只作回滚参考。watchdog 阈值：销售/BI `4.5h`、ET `36h`、业务域/链接日更 `48h`，不要把低频日更当销售高频失败。
 - 链接/业务域当前生产是云端顺序 headless Chrome + 私有登录态日更；纯 Node 零浏览器直连仍是后续优化。若浏览器兜底，建议并发 1、最多 2，不能全店同时开。
 - 2026-05-19 链接/业务域日更报错根因是 SBN 商品分析子系统登录态丢失：销售 WebAPI 正常不代表 SBN 可用。`bootstrap_shein_browser_session.mjs` 必须合并新鲜 WebAPI cookie 与浏览器导出的子系统 storage；`cloud_link_business_sync.sh` 部分失败时默认不入仓刷新 BI，避免把不完整结果展示成全量成功。若云端 SBN 态失效，优先从本机已保存密码自动登录并导出 `state/shein_browser_sessions/*.local.json` 同步到云端私有目录，session 不进 GitHub。
@@ -169,8 +169,8 @@
 - 2026-05-19 云端 Codex 已修复：可从本机私有 auth 覆盖 `/home/sheinops/.codex/auth.json`，服务器已安装 `bubblewrap`、修正 sessions 权限、设置 `kernel.apparmor_restrict_unprivileged_userns=0`、将 `codex_hooks` 改为 `hooks`；`codex exec --sandbox read-only --skip-git-repo-check "只回复 OK"` 返回 OK，短暂 `Reconnecting...` 只按网络抖动处理。
 - RTV 换单复核不能只靠 SHEIN 售后列表原始退货物流号；iMile/EMile/JT/JTE 等必须结合 SHEIN 物流详情换单轨迹和 ET RTV 反向候选。`mart.rtv_manual_review_candidates`、`ops.rtv_tracking_verification`、`mart.et_rtv_destination_allocation`、`mart.shein_return_rtv_trace` 是当前复核/展示主链路；未经人工确认的候选不改变主利润。
 - BI Portal 链接管理中台是“会话即任务工作台”：自然语言每轮按最新一句和会话上下文从当前 `outputs/bi-portal/data.json` 动态取数；明确动作命令（下架、换图、改标题、补链、报活动等）必须创建/更新同一会话任务并留 IP/UA/备注/审计，不能只回复“没权限”。用户点“开始执行 / 预检”后才进入 `/api/link-ops-execute`。
-- 链接管理素材上传走 `/api/link-ops-assets` 白名单和任务隔离私有目录；`/api/link-ops-execute` 做自动确认、素材/权限边界、HL 子执行器调度、进度和审计回写。HL 写执行器 `scripts/link_ops_hl_openapi_executor.mjs` 已验证 `canPublishProduct=true`、站点 `shein-sa/SAR`、品牌 `SOKANY`；默认 dry-run，真实 `publishOrEdit` 必须 payload 完整且显式二次确认。`copy_product_draft` 会先尝试从源商品快照复制图片/证书，源商品候选必须命中明确 SKC 或货号文本后才按销量排序。
-- 商品复制架构：不等源店 OpenAPI；短期“源店 WebAPI/云端登录态读取商品详情 -> canonical draft -> 目标店 HL OpenAPI/商品子系统写草稿”，后续源店有 OpenAPI 时只替换源读取器。2026-05-19 已用 DL 商品编辑页 `/spmp/product/get_similar_product_detail` 复制 `S1810电热水壶` 到 HL `/spmp/product/save_draft` 草稿 `v2603291437289685`，只保存草稿，未提交审核/发布。
+- 链接管理素材上传走 `/api/link-ops-assets` 白名单和任务隔离私有目录；`/api/link-ops-execute` 做自动确认、素材/权限边界、19 店 OpenAPI 执行器调度、进度和审计回写。网页端最终提交走同一聊天里的自然语言确认（如“可以执行 / 提交吧 / 照做”），服务端内部映射为安全码 `SHEIN_OPENAPI_SUBMIT`；CLI/脚本仍显式传该安全码。真实写必须命中账号权限、`safeWriteOperations`、真实写白名单、人 + 店 + 动作、dry-run `payloadHash`、`waiting_review` 和回读/人工核销。
+- 商品复制架构当前优先走官方 OpenAPI 商品详情 / `spu-info` mapper 还原 canonical draft，再由目标店 OpenAPI 受控提交；`copy_product_draft` 已不再局限 HL。若源商品详情不足，可回退 WebAPI/云端登录态读取，但不能让用户手工拼完整 payload；强指纹回读未命中时只能人工核销，弱匹配不能自动判成功。
 - SPMP 商品编辑页写草稿时必须强制勾选目标发布站点；HL 沙特至少要写入 `site_list=[{main_site:"shein", sub_site_list:["shein-sa"]}]`。不能继承源店 `get_similar_product_detail` 返回的空 `site_list`，否则草稿页面“发布站点”会漏勾，提交审核前还需人工补选。
 - 商品资料母库不保存图片文件或图片 URL，图片只在任务执行时临时复制/换链/清理；平台 `skc` / `skuCode` 只作追溯，不能冒充商家 `supplierSku`。不同店铺核价/供货价差异不是商品参数冲突，发品前按报价策略处理（默认 50% 利润率或同款其它店最高核价，允许人工覆盖）。
 - 云端 BI 临时人工登录入口 `/cloud-login-maintenance` 只用于登录态失效、验证码/滑块等人工维护；状态、日志和 noVNC 短期 token 是服务器私有运行态，不进 GitHub。生产同步活跃时不要强杀浏览器/VNC。

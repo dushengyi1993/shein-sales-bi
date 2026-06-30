@@ -282,6 +282,7 @@ function parseArgs(argv) {
     hours: 48,
     allOpen: true,
     visible: true,
+    headless: false,
     noClose: false,
     noLaunch: false,
     includeCouponGoods: false,
@@ -310,8 +311,14 @@ function parseArgs(argv) {
       out.allOpen = false;
     }
     else if (a === '--all-open') out.allOpen = true;
-    else if (a === '--headless') out.visible = false;
-    else if (a === '--visible') out.visible = true;
+    else if (a === '--headless') {
+      out.headless = true;
+      out.visible = false;
+    }
+    else if (a === '--visible') {
+      out.visible = true;
+      out.headless = false;
+    }
     else if (a === '--no-close') out.noClose = true;
     else if (a === '--no-launch') out.noLaunch = true;
     else if (a === '--include-coupon-goods') out.includeCouponGoods = true;
@@ -1606,7 +1613,16 @@ function psSingleQuote(value) {
 }
 
 function closeExistingStoreChrome(store) {
-  if (process.platform !== 'win32') return;
+  if (process.platform !== 'win32') {
+    spawnSync(process.execPath, [
+      path.join(ROOT, 'scripts', 'cleanup_shein_store_browsers.mjs'),
+      '--store',
+      store.storeKey,
+      '--kill-after-sec',
+      '5',
+    ], {cwd: ROOT, stdio: 'ignore', timeout: 20_000});
+    return;
+  }
   const profileNeedle = `persistent-${store.profileKey}-profile`;
   const script = [
     "$ErrorActionPreference = 'SilentlyContinue'",
@@ -1624,10 +1640,11 @@ function closeExistingStoreChrome(store) {
 }
 
 function launchStore(store) {
+  const mode = args.headless ? '--headless' : (args.visible ? '--visible' : '--background');
   const params = [
     path.join(ROOT, 'scripts', 'launch_store_browser.mjs'),
     store.storeKey,
-    args.visible ? '--visible' : '--background',
+    mode,
     '--url',
     LIST_URL,
   ];
@@ -1639,6 +1656,20 @@ async function httpJson(url, opts = {}) {
   const res = await fetch(url, {signal: AbortSignal.timeout(6000), ...opts});
   if (!res.ok) throw new Error(`${url} HTTP ${res.status}`);
   return await res.json();
+}
+
+async function waitForCdpPort(store, {timeoutMs = 25_000, intervalMs = 800} = {}) {
+  const started = Date.now();
+  let lastError = null;
+  while (Date.now() - started <= timeoutMs) {
+    try {
+      return await httpJson(`http://127.0.0.1:${store.port}/json/version`);
+    } catch (err) {
+      lastError = err;
+      await sleep(intervalMs);
+    }
+  }
+  throw new Error(`CDP port not ready for ${store.storeKey} on ${store.port}: ${lastError?.message || 'timeout'}`);
 }
 
 class Cdp {
@@ -1684,7 +1715,7 @@ class Cdp {
 }
 
 async function connectStore(store) {
-  const version = await httpJson(`http://127.0.0.1:${store.port}/json/version`);
+  const version = await waitForCdpPort(store);
   const cdp = new Cdp(version.webSocketDebuggerUrl);
   await cdp.connect();
   await cdp.call('Target.setDiscoverTargets', {discover: true});

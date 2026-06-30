@@ -213,7 +213,6 @@ try {
       state: action?.state || '',
       realSubmitSupported: Boolean(action?.realSubmitSupported),
       blockerCount: asArray(action?.realSubmitBlockers).length,
-      requiredConfirmText: action?.requiredConfirmText || '',
     };
   });
   const failedStores = copyRows.filter(row =>
@@ -222,9 +221,8 @@ try {
     || !row.verifiedRead
     || !row.writePrecheckReady
     || !row.realSubmitSupported
-    || row.state !== 'confirmable_after_preflight'
+    || row.state !== 'ready'
     || row.blockerCount !== 0
-    || row.requiredConfirmText !== 'SHEIN_OPENAPI_SUBMIT'
   );
   result.summary = {
     capsStatus: caps.status,

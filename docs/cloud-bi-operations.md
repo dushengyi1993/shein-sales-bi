@@ -11,11 +11,11 @@
 
 - 云端 BI：`https://shein-bi.dushengyi.xyz/`；旧 IP 入口 `http://43.165.167.135/` 仅作兜底。
 
-- 访问保护：Nginx Basic Auth 已启用；账号密码只在私下运行环境交付，不写入仓库、文档或日志。
+- 访问保护：BI Portal 使用应用内登录页 + `bi_session` HttpOnly Cookie；账号密码只在私下运行环境交付，不写入仓库、文档或日志。
 
 - 云服务器：腾讯云 Lighthouse 东京，Ubuntu 24.04 x86_64，代码目录 `/opt/shein-bi/app`。
 
-- 服务组成：HAProxy/Caddy 负责公网 443 分流与 TLS，Nginx 在服务器本机 `127.0.0.1:8080` 保留 Basic Auth 并反代到 BI Portal `127.0.0.1:8787`；PostgreSQL + Metabase 由 Docker Compose 承载。
+- 服务组成：HAProxy/Caddy 负责公网 443 分流与 TLS，Nginx 在服务器本机 `127.0.0.1:8080` 反代到 BI Portal `127.0.0.1:8787`；身份认证由 BI Portal 应用内登录承担，PostgreSQL + Metabase 由 Docker Compose 承载。
 
 - 域名入口：`https://shein-bi.dushengyi.xyz/`；服务器内部仍由 Nginx `127.0.0.1:8080` 转发到 BI Portal。
 
@@ -190,7 +190,7 @@ ET、统一日更补采、异常通知 watchdog、只读问数机器人（云端
 
 - 入口实现：`scripts/cloud_manual_login_session.mjs` 负责创建、列出、完成和关闭临时会话；BI Portal 通过 `/api/cloud-login/sessions` 和 `/cloud-login/session/:id` 提供受保护页面。
 
-- 服务器依赖：`xvfb`、`x11vnc`、`websockify`、`novnc`，均绑定本机端口；外网只经过现有 Basic Auth 的 BI/Nginx/Caddy 链路访问。
+- 服务器依赖：`xvfb`、`x11vnc`、`websockify`、`novnc`，均绑定本机端口；外网只经过现有 BI/Nginx/Caddy 入口和 BI 应用内登录链路访问。
 
 - 临时会话只保存 session id、短期访问 token、过期时间、端口、PID、日志文件和完成状态；不把密码、cookie、localStorage、请求头或 SHEIN token 写入仓库、文档或聊天。
 
@@ -204,7 +204,7 @@ ET、统一日更补采、异常通知 watchdog、只读问数机器人（云端
 
 - 若开启时提示某店 `CDP port ... is already open`：先确认是否有生产同步 service 正在运行。`cloud_manual_login_session.mjs` 会在确认没有生产同步 service 活跃时自动清理已完成/已关闭临时窗口留下的孤儿 Chrome/VNC 进程；若生产同步正在运行，应等待同步结束，不要强杀。
 
-- 当前限制：一次只允许一个临时登录窗口；过期或完成后不能再进入窗口，需重新开启。登录维护入口仍依赖 BI Basic Auth，正式账号系统后再做更细权限。
+- 当前限制：一次只允许一个临时登录窗口；过期或完成后不能再进入窗口，需重新开启。登录维护入口依赖 BI 应用内登录和账号权限。
 
 
 
@@ -224,7 +224,7 @@ ET、统一日更补采、异常通知 watchdog、只读问数机器人（云端
 
 - `config/et_forwarder.local.json`
 
-- Metabase 管理员密码、数据库真实密码、Basic Auth 密码
+- Metabase 管理员密码、数据库真实密码、BI 登录密码
 
 - 浏览器 profile、Cookie、OpenAPI secret、ET 密码、飞书 token、临时上传 token
 
@@ -254,7 +254,7 @@ GitHub 应保存：
 
 - 云端未鉴权访问 `/api/health` 应返回 `401`。
 
-- 带 Basic Auth 访问 `/api/health` 应返回 `200` 且 `ok=true`。
+- 服务器本机访问 `/api/health` 或带有效 BI 登录会话访问应返回 `200` 且 `ok=true`；未登录公网访问应返回 `401` 或跳转登录。
 
 - `shein-bi-cloud-today.timer` 应按每两小时真实触发。
 - `shein-bi-cloud-today.service` 的环境变量应包含 `SHEIN_BI_REFRESH_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-sales-refresh.lock`；锁文件应可被 root / sheinops 写入。若 watchdog 只剩 `today.service failed`，先查 `journalctl -u shein-bi-cloud-today.service` 是否为锁文件权限问题。
@@ -266,7 +266,7 @@ GitHub 应保存：
 
 - 若 BI 侧栏显示的“页面生成 / 销售源”时间明显旧于当前调度，先检查是否刚部署覆盖了仓库静态快照；在服务器重跑 `shein-bi-cloud-today.service` 后，`outputs/bi-portal/data.json` 的 `generatedAt` 和 `salesUpdatedAt` 应更新到当天。
 
-- 若首页长期“加载中”或利润明显异常偏低，先用 Basic Auth 访问 `/api/health` 确认 `biCoreWarmup.status`，再访问 `/api/bi/section/homeProfit` 或在服务器读 `outputs/bi-portal/sections/homeProfit.json`，确认 `homeProfitSummary.sourceGeneratedAt` 等于当前 `data.json.__sections.generatedAt` 且 `staleSource=false`。若任一 section 旧于 core，可请求对应 `/api/bi/section/<section>?refresh=1` 或等待 portal 服务 warmup；不要用旧 section 数字判断业务。
+- 若首页长期“加载中”或利润明显异常偏低，先用服务器本机或有效 BI 登录会话访问 `/api/health` 确认 `biCoreWarmup.status`，再访问 `/api/bi/section/homeProfit` 或在服务器读 `outputs/bi-portal/sections/homeProfit.json`，确认 `homeProfitSummary.sourceGeneratedAt` 等于当前 `data.json.__sections.generatedAt` 且 `staleSource=false`。若任一 section 旧于 core，可请求对应 `/api/bi/section/<section>?refresh=1` 或等待 portal 服务 warmup；不要用旧 section 数字判断业务。
 
 - BI Portal 生成后，`outputs/bi-portal/data.json` 应包含顶层 `productDisplayNames`，且主要含 `standard_goods_sn` 的对象应有 `product_display_name`。如果页面或飞书问数机器人又裸显示 `SM-505A`、`SK-10075` 这类短码，先在服务器跑 `node scripts/test_product_display_name.mjs`，再重跑 `node scripts/generate_bi_portal.mjs` 或对应云端刷新 service。
 
@@ -278,7 +278,7 @@ GitHub 应保存：
 
 - `shein-bi-cloud-watchdog.timer` 应保持 active；销售/页面过期按 4.5 小时提醒，链接/业务域过期按 48 小时提醒。
 
-- `shein-bi-cloud-morning-chain.timer` 应保持 active；慢变日更由它启动 `shein-bi-cloud-daily-refresh.service`。手动复跑用 `scripts/cloud_daily_refresh.sh yesterday`。若单店卡在 SBN `x-gw-auth`，优先看该店 attempt 重试日志；若 RTV 子步骤失败，先看底层脚本日志；旧 HL-only OpenAPI 销售对账不再是生产日更子步骤；当前 19 店 OpenAPI 销售、退货退款、商品/链接双跑对账由 `shein-bi-cloud-daily-refresh.service` 串行执行，只写隔离对账层。不要回退到本机补抓冒充云端日更。旧的 `shein-bi-cloud-link-business.timer`、`shein-bi-cloud-openapi-hl.timer`、`shein-bi-cloud-rtv-verify.timer` 应保持 masked，避免日更补采重复跑。
+- `shein-bi-cloud-morning-chain.timer` 应保持 active；慢变日更由它启动 `shein-bi-cloud-daily-refresh.service`。手动复跑用 `scripts/cloud_daily_refresh.sh yesterday`。若单店卡在 SBN `x-gw-auth`，优先看该店 attempt 重试日志；若 RTV 子步骤失败，先看底层脚本日志；旧单店 OpenAPI 销售对账不再是生产日更子步骤；当前 19 店 OpenAPI 销售、退货退款、商品/链接双跑对账由 `shein-bi-cloud-daily-refresh.service` 串行执行，只写隔离对账层。不要回退到本机补抓冒充云端日更。旧的 `shein-bi-cloud-link-business.timer`、`shein-bi-cloud-openapi-hl.timer`、`shein-bi-cloud-rtv-verify.timer` 应保持 masked，避免日更补采重复跑。
 
 - `shein-bi-cloud-session-manager.timer` 应保持 active；手动复跑用 `scripts/cloud_shein_session_manager.sh`。报告文件在 `outputs/reports/cloud-session-manager-latest.json` / `.md`，若失败会被 watchdog 按 service failed 逻辑提醒。
 

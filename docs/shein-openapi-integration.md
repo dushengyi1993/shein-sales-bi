@@ -2,7 +2,7 @@
 
 > 当前项目正在从“登录浏览器抓取 SHEIN 后台数据”逐步切换到 SHEIN 官方开放平台 API。本文记录当前已确认的官方规则、应用创建口径、本地配置边界和分阶段接入计划。
 
-> 2026-05-11 补充：当前项目同时存在两条“API 化”链路。`SHEIN 官方 OpenAPI` 需要开放平台应用、授权和签名，HL 仍是并行试点；`SHEIN 后台 WebAPI 直连` 复用已登录 Cookie/session 调后台接口，已用于当前 19 店销售生产抓取的无浏览器直连优先。两者不要混为一谈，密钥和 Cookie session 都不得进入 GitHub。
+> 2026-06-28 补充：当前项目同时存在两条“API 化”链路。`SHEIN 官方 OpenAPI` 需要开放平台应用、授权和签名，19 店已完成授权/探针/隔离对账与受控写预检；`SHEIN 后台 WebAPI 直连` 复用已登录 Cookie/session 调后台接口，仍用于当前销售生产抓取的无浏览器直连优先。两者不要混为一谈，密钥和 Cookie session 都不得进入 GitHub。
 
 ## 当前已确认信息
 
@@ -14,6 +14,16 @@
 - 半托管正式 API 域名：`https://openapi.sheincorp.com`。
 - 测试环境 API 域名：`https://openapi-test01.sheincorp.cn`。
 - 授权域名和 API 调用域名不是同一个域名。
+
+## 当前收口（2026-06-28）
+
+- 19 店官方 OpenAPI 授权、云端白名单、只读探针和脱敏能力总账已完成；销售、退货退款、商品/链接基础资料仍写 `fact.openapi_*` / `mart.openapi_*_reconciliation` 隔离层，不直接覆盖生产事实源。
+- 自动化运营受控写适配器已接入 `copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。真实提交必须走 BI 账号写权限、`safeWriteOperations`、真实写白名单、人 + 店 + 动作、dry-run `payloadHash`、任务 `waiting_review`、确认和回读/审计。
+- `copy_product_draft` 已使用 OpenAPI 商品详情 / `spu-info` mapper 还原类目、属性、图片、SKU、供货价、库存和尺寸重量等关键发布字段；强指纹回读未命中时只能人工核销，不能用平台 SKU、源 SKC 或货号文本弱匹配自动判完成。
+- 新上品、复制上品、补链接等从未上过架的新链接默认 `shelf_way=2`，并写入约十年后的 `hope_on_sale_date`；短期内不能自动上架。维护已有链接的 `activate_link` / `retire_link` 才按用户指令改变现有链接状态。
+- TZ/JSH/TZZ/XC 等店铺身份校验允许静态 `merchantId` fallback，但只能在配置真相匹配且无 GS 账号冲突时使用；不得运行时自动回填或放宽 `account_mismatch`。
+- 网页端最终提交不再显示固定确认框；用户在同一聊天里说“可以执行 / 提交吧 / 照做”等自然语言，服务端在唯一当前事项、资料检查通过、权限和白名单命中时内部映射为安全码 `SHEIN_OPENAPI_SUBMIT`。CLI 和脚本仍必须显式传安全码。
+- 当前 release gate 覆盖前端确认/反馈、OpenAPI 商品详情 mapper、店铺身份 merchantId fallback、权限矩阵、CLI flow、真实写白名单作用域、生产安全、复制上品成功/弱回读和维护写执行器 smoke。
 
 ## 应用创建建议
 
@@ -27,7 +37,7 @@
 - 库存管理：查询和调整库存。
 - 财务管理：收入账单、对账单。
 
-第一阶段代码只做“读数据 + 对账 + 入仓”，不自动执行价格、库存、上下架、发货等写操作。写操作后续必须单独加开关、日志、人工确认和回滚策略。
+读数据 / 对账 / 入仓已形成 19 店隔离并行层；价格、库存、上下架、复制上品、标题/图片、证书等写操作必须走自动化运营任务池，不得绕过 `safeWriteOperations`、真实写白名单、dry-run `payloadHash`、确认、回读和审计。
 
 ## 授权与密钥流程
 
@@ -249,7 +259,7 @@ node scripts/run_shein_openapi_products_reconciliation.mjs
 - `outputs/bi-portal/data.json` 已包含 `openapiReconciliation`。
 - `outputs/bi-portal/index.html` 曾在系统状态页展示 “SHEIN OpenAPI 试点对账” 卡片；2026-06-17 起该卡片默认关闭，不再作为生产验收项。
 
-历史结论：HL 销售入口曾具备“官方 OpenAPI 与当前生产销售源双跑、并行入仓、BI 可见对账”的最小闭环；该 HL-only 入口已被 19 店销售/退货/商品隔离双跑层取代。
+历史结论：HL 销售入口曾具备“官方 OpenAPI 与当前生产销售源双跑、并行入仓、BI 可见对账”的最小闭环；该 单店 入口已被 19 店销售/退货/商品隔离双跑层取代。
 
 ## 2026-05-19 进展：HL 商品写执行器预检接入
 

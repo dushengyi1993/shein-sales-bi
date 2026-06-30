@@ -172,7 +172,7 @@ CREATE TABLE IF NOT EXISTS fact.openapi_product_link (
   supplier_code text,
   standard_goods_sn text,
   product_name_en text,
-  product_name_zh text,
+  product_name_ar text,
   category_id text,
   product_type_id text,
   brand_code text,
@@ -217,6 +217,8 @@ CREATE TABLE IF NOT EXISTS mart.openapi_product_reconciliation (
 );
 ALTER TABLE mart.openapi_product_reconciliation
   ADD COLUMN IF NOT EXISTS exact_status_mismatch_count integer;
+ALTER TABLE fact.openapi_product_link
+  ADD COLUMN IF NOT EXISTS product_name_ar text;
 COMMIT;
 `;
   if (args.dryRun) return {skipped: true, dryRun: true};
@@ -269,7 +271,7 @@ function buildProductRows(data, file) {
   const byStoreSkc = new Map();
   for (const row of asArray(data.normalizedRows)) {
     const goods = compact(row.supplierCode);
-    const detail = normalizeGoodsSnDetailed(goods, {goodsTitle: row.productNameZh || row.productNameEn});
+    const detail = normalizeGoodsSnDetailed(goods, {goodsTitle: row.productNameAr || row.productNameEn});
     const key = `${String(row.storeKey || data.storeKey || '').trim().toUpperCase()}\u001F${compact(row.skc)}`;
     if (!key.trim() || byStoreSkc.has(key)) continue;
     byStoreSkc.set(key, {
@@ -282,7 +284,7 @@ function buildProductRows(data, file) {
       supplier_code: goods,
       standard_goods_sn: detail.canonical || goods,
       product_name_en: compact(row.productNameEn),
-      product_name_zh: compact(row.productNameZh),
+      product_name_ar: compact(row.productNameAr),
       category_id: compact(row.categoryId),
       product_type_id: compact(row.productTypeId),
       brand_code: compact(row.brandCode),
@@ -445,7 +447,7 @@ ON CONFLICT (store_key) DO UPDATE SET
 async function loadProductsAtomically(args, productRows, sourceFile) {
   const columns = [
     'store_key', 'skc', 'fetched_at', 'source_file', 'spu', 'sku_codes',
-    'supplier_code', 'standard_goods_sn', 'product_name_en', 'product_name_zh',
+    'supplier_code', 'standard_goods_sn', 'product_name_en', 'product_name_ar',
     'category_id', 'product_type_id', 'brand_code', 'shelf_status_code',
     'shelf_status_name', 'first_shelf_time', 'last_shelf_time', 'last_update_time',
     'sku_count', 'cost_sar', 'cost_cny', 'image_url', 'shein_usable_inventory',

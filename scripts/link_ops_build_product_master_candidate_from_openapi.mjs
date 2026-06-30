@@ -98,7 +98,7 @@ function firstStringByKeys(obj, keys) {
 }
 
 async function call(client, {method = 'POST', path: pathText, body, query}) {
-  const response = await client.request(pathText, {method, body, query, headers: {language: 'zh-cn'}});
+  const response = await client.request(pathText, {method, body, query, headers: {language: 'en'}});
   if (response.data?.code !== '0') {
     throw new Error(`${pathText} 返回 ${response.data?.code}: ${response.data?.msg || ''}`);
   }
@@ -129,7 +129,7 @@ async function main() {
   if (!spuName) throw new Error('OpenAPI 商品列表没有返回可用 spuName，请手动传 --spu-name。');
   const spuInfoResponse = await call(client, {
     path: '/open-api/goods/spu-info',
-    body: {spuName, languageList: ['en', 'zh-cn']},
+    body: {spuName, languageList: ['en', 'ar']},
   });
   const spuInfo = spuInfoResponse.info || {};
   const candidate = buildProductMasterCandidateFromOpenApiSpuInfo(spuInfo, {storeKey: args.store});
