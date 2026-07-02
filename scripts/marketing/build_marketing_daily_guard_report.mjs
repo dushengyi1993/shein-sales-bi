@@ -248,6 +248,17 @@ function marketingPlanCandidateMeta(file, priceFile, enabledStores = []) {
     || selectionDoc?.baselineForLimitedDiscountFallback
     || priceDoc?.baselineForLimitedDiscountFallback
   );
+  // P1-#2: prefer planMetadata over filename guessing
+  const planMeta = selectionDoc?.planMetadata || priceDoc?.planMetadata || null;
+  if (planMeta?.status === 'current_baseline' && !planMeta?.supersededBy) {
+    add(8000, 'plan_metadata_current_baseline');
+  }
+  if (planMeta?.supersededBy) {
+    rejectReasons.push('plan_metadata_superseded');
+  }
+  if (planMeta?.activityBatch) {
+    add(500, `plan_metadata_batch_${planMeta.activityBatch}`);
+  }
   const partialNamePattern = /\bpilot\b|sample|repair-|(?:^|-)jsh(?:-|\.json)|main-no-jsh/i;
   if (partialNamePattern.test(name) || (name.includes('all-safe') && !explicitCurrentBaseline)) {
     rejectReasons.push('partial_or_subset_filename');
