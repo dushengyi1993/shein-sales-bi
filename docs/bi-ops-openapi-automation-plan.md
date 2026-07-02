@@ -25,6 +25,7 @@
 - **复制上品成功流必须有非 505 回归**：release gate 必须同时覆盖 `SM-505A/505` 样例和非 505 普通货号，证明通用 `copy_product_draft` 生命周期不是靠缝纫机专用默认值跑通；非 505 场景不得自动带入 `输入电流=1200mA`。
 - **维护动作也必须即时检查**：用户说“改库存/改价/上下架/改标题/换图/补证书”时，聊天应立即定位目标链接、生成对应 OpenAPI 维护 payload 和检查快照，并用人话说明“已定位哪些链接、还差什么、能否一句话确认执行”；不能只给补链动作做即时资料检查。
 - **上传资料后必须回到同一个聊天闭环**：换图、证书等需要补资料的动作，上传图片/PDF/JSON 后要自动重新检查当前处理，并继续在聊天里说明“资料是否通过 / 还缺什么 / 能否一句话执行”；不能要求员工重复创建任务或理解后台验证器。
+- **图片素材由 AI 辅助排序，但不能黑箱提交**：用户上传新链接或换图素材后，系统可以根据图片内容判断轮播主图、细节图、方形图和 SKU/色块图顺序；但提交前必须在同一聊天里给出可读的排序结果、质量/冲突提示和调整入口。AI 不得凭图片发明不存在的商品参数、认证或功能。
 - **旧任务也要执行前再归一化**：即使运行态文件里保留了历史坏状态，`startControlledLinkOpsExecution` 也必须在 dry-run/execute 前重新合并当前聊天事实并归一化 intent、源店、目标店、人工参数和 payload hash。
 
 ## 2. 当前证据与现状
@@ -140,7 +141,7 @@
    - 策略：先做 dry-run 执行器和草稿/预检；真实发布、编辑、上下架必须二次确认。
    - `copy_product_draft` 作为首个真实写试点候选时，提交后回读不能只看商品列表第一页，也不能用平台 SKU / 源 SKC / 货号文本这类弱证据直接判定成功；必须分页扫描，并优先用目标商家 SKU / 商家货号强指纹匹配。只有强指纹命中才可自动闭环为完成；弱匹配、未命中或查询失败都要保持任务锁定，等待全店管理账号人工核销。
    - `activate_link` / `retire_link` / `update_inventory` / `update_supply_price` / `update_product_price` / `update_title` / `update_images` / `certificate_review` 已接入 `scripts/link_ops_maintenance_openapi_executor.mjs`：先 dry-run 定位链接、解析 SKU、生成官方 OpenAPI payload 并锁定 `payloadHash`，真实提交仍必须走总闸门、真实写白名单、确认文本和回读/人工核销。
-   - `update_images` 不自动猜图片层级；只有提供完整 SHEIN `partialEdit` 图片 JSON 时才生成换图 payload。普通图片文件或外链必须先经图片上传/外链转换拿到 SHEIN 图片 URL，再放入 partialEdit JSON。`certificate_review` 不自动判成功；证书 payload 提交后默认进入人工核销，避免把平台审核中误当完成。
+   - `update_images` 的用户体验目标是“上传图片 + 自然语言调整”，不是让员工手写 `partialEdit` JSON。执行层仍必须把图片素材转换成 SHEIN 可接受的图片 URL 和 `partialEdit` 图片字段后再提交；在图片上传/转换链路未生成完整字段前，普通图片文件只能作为会话素材和资料缺口，不能直接静默换图。`certificate_review` 不自动判成功；证书 payload 提交后默认进入人工核销，避免把平台审核中误当完成。
 
 ### C 类：暂不承诺 API 替换
 
@@ -218,7 +219,7 @@
   - 当前筛选范围、店铺能力、订单/库存/链接/营销/售后/评价证据作为上下文摘要或审计入口展示。
 - 底部：输入框。
   - 支持文字指令。
-  - 后续可支持上传标题/图片/Excel 等素材，但素材必须先进入云端任务包。
+  - 支持把标题、图片、Excel/CSV/JSON、PDF 证书等素材先上传到云端会话/任务素材包；图片素材可以先由 AI 做内容理解、去重、质量检查和顺序建议，但真实写仍以结构化任务事实、图片字段、权限、确认和回读为准。
 
 ### 对话流程
 
@@ -354,6 +355,7 @@
 - “OpenAPI 可以立刻替换全部现有抓取”——流量、营销、ET、利润输入仍有缺口。
 - “AI 可以绕过确认直接自动上下架”——不允许。用户在聊天里明确确认后，系统才会用内部确认码执行，并记录审计和回读结果。
 - “商品复制/发布一定可一键完成”——payload 完整性、证书、类目属性、图片、站点、品牌和仓库都可能阻断。
+- “AI 看图后可以直接无确认换图/上新”——不允许。AI 可判断图片顺序和质量，但必须先生成可审查的图片结构，目标标准为轮播主图 1 张、细节图最多 11 张、方形图 1 张、SKU/色块图 1 张；用户可用自然语言调整后才进入提交链路。
 - “利润页可以完全由 SHEIN OpenAPI 生成”——利润依赖 ET、成本和项目自有口径。
 
 ## 9. 当前上线验收口径
@@ -364,6 +366,7 @@
 - BI 自动化运营页：只保留 Codex 式聊天入口；右侧只展示当前会话进度，不让普通员工理解任务池、验证器、固定确认码或后台审计按钮。
 - 官方 OpenAPI 可写动作：`copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review` 已进入受控执行链路。
 - 非 505 通用链路：改库存、改供货价、改商品售价、改标题、上下架、换图和证书/资质均已通过独立聊天 smoke；上传资料后会自动重新检查并回写当前会话。505 只作为补链验收样例，不允许成为特判对象。
+- 图片上传体验验收：用户不需要理解 `partialEdit` 图片 JSON；页面应能接收图片素材、展示已上传文件和 AI 排序建议，并允许用自然语言调整主图/细节图/方形图/SKU 图分配。执行器只有在生成完整 SHEIN 图片字段、权限和确认均满足后才可提交。
 - 安全边界：资料检查、payload hash、账号权限、店铺权限、真实写白名单、执行审计和回读/人工核销仍在后台强制执行。
 - 发版前必须跑 `node scripts/test_bi_ops_release_gate.mjs`；该 gate 覆盖权限矩阵、CLI flow、白名单作用域、前端聊天-only 静态检查、正式 `outputs/bi-portal/index.html` 与 `scripts/bi_app/client.js` 同步检查、补链/维护执行器、OpenAPI readiness 和自然语言聊天路由。凡是修改 `scripts/bi_app/client.js` 或 `scripts/bi_app/styles.css`，都必须重新生成 `outputs/bi-portal/index.html`，否则不能发布。
 

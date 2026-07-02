@@ -9,7 +9,7 @@
 
 
 
-- 云端 BI：`https://shein-bi.dushengyi.xyz/`；旧 IP 入口 `http://43.165.167.135/` 仅作兜底。
+- 云端 BI：`https://sa.dushengyi.cc/`；旧 IP 入口 `http://43.165.167.135/` 仅作兜底。
 
 - 访问保护：BI Portal 使用应用内登录页 + `bi_session` HttpOnly Cookie；账号密码只在私下运行环境交付，不写入仓库、文档或日志。
 
@@ -17,7 +17,7 @@
 
 - 服务组成：HAProxy/Caddy 负责公网 443 分流与 TLS，Nginx 在服务器本机 `127.0.0.1:8080` 反代到 BI Portal `127.0.0.1:8787`；身份认证由 BI Portal 应用内登录承担，PostgreSQL + Metabase 由 Docker Compose 承载。
 
-- 域名入口：`https://shein-bi.dushengyi.xyz/`；服务器内部仍由 Nginx `127.0.0.1:8080` 转发到 BI Portal。
+- 域名入口：`https://sa.dushengyi.cc/`；服务器内部仍由 Nginx `127.0.0.1:8080` 转发到 BI Portal。
 
 - GitHub 仓库 `main` 是源码恢复基线；云端有值得保存的脚本、配置模板、门户静态产物或自动运营能力时，先同步回 GitHub，再部署到服务器。注意：截至 2026-06-24 交接核对，GitHub release `2026.06.23-bi-traffic-detail` 指向 `3f25f7c`，但云端 `/opt/shein-bi/app` 仍显示 `HEAD=5025d89` 且有 tracked 运行差异；其中流量页和刷新锁热修文件已同步到生产。GitHub 是“干净源码基线”，云端运行态是“业务真相”，两者不一致时不能直接 `pull/reset/add-all`。
 - 注意：`outputs/bi-portal/index.html` / `data.json` 会作为可恢复静态快照纳入 GitHub；服务器执行 `git reset --hard origin/main` 或类似部署后，可能把实时 BI 页面覆盖成仓库快照。每次服务器拉取/重置代码后，都要立即跑一次 `scripts/cloud_bi_refresh.sh today intraday` 或对应 systemd service，确认页面生成时间和销售源时间回到当前。

@@ -402,6 +402,12 @@ function safeTaskId(value) {
   return s;
 }
 
+function safeLinkOpsChatSessionId(value) {
+  const s = String(value || '').trim();
+  if (!/^[A-Za-z0-9_-]{8,120}$/.test(s)) throw new Error('Invalid chat session id');
+  return s;
+}
+
 function safeCodexSessionId(value) {
   const s = String(value || '').trim();
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return '';
@@ -3067,6 +3073,7 @@ function projectLinkOpsChatSessionForClient(session) {
     memoryPolicy: CLOUD_AI_MEMORY_POLICY,
     createdAt: session.createdAt || '',
     updatedAt: session.updatedAt || '',
+    assets: asArray(session.assets).map(projectLinkOpsAssetForClient).filter(Boolean).slice(0, 30),
     messages: asArray(session.messages).map(projectLinkOpsChatMessageForClient).filter(Boolean).slice(-80),
   };
 }
@@ -3148,6 +3155,28 @@ function buildChatSessionFromMessage(body, actor, req) {
   };
 }
 
+function buildUploadChatSession(actor, req) {
+  const now = new Date().toISOString();
+  const id = `los_${now.replace(/[-:.TZ]/g, '').slice(0, 14)}_${crypto.randomBytes(4).toString('hex')}`;
+  return {
+    id,
+    version: 1,
+    status: 'chatting',
+    title: '上传资料',
+    autoTitle: true,
+    targets: {},
+    assets: [],
+    memoryPolicy: CLOUD_AI_MEMORY_POLICY,
+    codexSessionId: '',
+    requestedBy: actorLabel(actor, req),
+    requestedByUser: actorUser(actor, req),
+    requestMeta: requestMeta(req),
+    createdAt: now,
+    updatedAt: now,
+    messages: [],
+  };
+}
+
 function appendChatMessage(session, body, actor, req) {
   const content = String(body.message || body.command || body.text || '').trim();
   if (!content) throw new Error('Missing message');
@@ -3184,6 +3213,71 @@ function appendAssistantChatMessage(session, answer, meta = {}) {
     targets: session.targets && typeof session.targets === 'object' ? session.targets : {},
     messages,
   };
+}
+
+function summarizeLinkOpsSessionAssets(session) {
+  const assets = asArray(session?.assets).filter(a => a && (a.originalName || a.name || a.mime));
+  if (!assets.length) return '暂无';
+  return assets.slice(0, 12).map(a => {
+    const name = sanitizeLinkOpsClientText(a.originalName || a.name || '文件', 120);
+    const kind = sanitizeLinkOpsClientText(a.kind || assetKindForMime(a.mime || '') || 'file', 40);
+    const bytes = Number(a.bytes ?? a.size ?? 0) || 0;
+    return `${name}（${kind}${bytes ? `, ${bytes} bytes` : ''}）`;
+  }).join('；');
+}
+
+function attachAssetsToChatSession(session, assets, {message = '', meta = {}} = {}) {
+  const incoming = asArray(assets).filter(a => a && a.id);
+  const existing = asArray(session?.assets).filter(a => a && a.id);
+  const seen = new Set();
+  const mergedAssets = [...incoming, ...existing].filter(asset => {
+    const id = String(asset.id || '');
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  }).slice(0, 230);
+  const base = {
+    ...session,
+    status: 'chatting',
+    updatedAt: new Date().toISOString(),
+    memoryPolicy: CLOUD_AI_MEMORY_POLICY,
+    targets: session?.targets && typeof session.targets === 'object' ? session.targets : {},
+    assets: mergedAssets,
+  };
+  return message ? appendAssistantChatMessage(base, message, meta) : base;
+}
+
+function mergeLinkOpsSessionAssetsIntoTask(task, session, actor, req) {
+  const sessionAssets = asArray(session?.assets).filter(a => a && a.id);
+  if (!sessionAssets.length || !task?.id) return task;
+  const existing = asArray(task.assets).filter(a => a && a.id);
+  const existingIds = new Set(existing.map(a => String(a.id || '')));
+  const inherited = sessionAssets
+    .filter(a => !existingIds.has(String(a.id || '')))
+    .map(a => ({
+      ...a,
+      taskId: String(task.id || ''),
+      linkedFromSessionId: String(session?.id || a.sessionId || ''),
+    }));
+  if (!inherited.length) return task;
+  const nextTask = {
+    ...task,
+    assets: [...inherited, ...existing].slice(0, 230),
+    updatedAt: new Date().toISOString(),
+  };
+  nextTask.history = appendTaskHistory(nextTask, 'attach_chat_session_assets', actor, req, {
+    sessionId: String(session?.id || ''),
+    assetCount: inherited.length,
+  });
+  return nextTask;
+}
+
+function replaceLinkOpsTaskInStore(store, task) {
+  const tasks = asArray(store?.tasks).slice();
+  const idx = tasks.findIndex(t => String(t?.id || '') === String(task?.id || ''));
+  if (idx < 0) return store;
+  tasks[idx] = task;
+  return {version: 1, updatedAt: new Date().toISOString(), tasks};
 }
 
 const LINK_OPS_ALLOWED_STATUSES = new Set([
@@ -3345,11 +3439,12 @@ function assetKindForMime(mime) {
   return 'file';
 }
 
-function buildAssetRecord({taskId, file, buffer, storedPath, actor, req}) {
+function buildAssetRecord({taskId = '', sessionId = '', file, buffer, storedPath, actor, req}) {
   const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
   return {
     id: `loa_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
     taskId,
+    sessionId,
     originalName: String(file.name || 'asset').slice(0, 180),
     mime: String(file.type || '').toLowerCase().trim(),
     kind: assetKindForMime(String(file.type || '').toLowerCase().trim()),
@@ -3363,23 +3458,16 @@ function buildAssetRecord({taskId, file, buffer, storedPath, actor, req}) {
   };
 }
 
-function findLinkOpsTaskOrThrow(store, taskId) {
-  const id = safeTaskId(taskId);
-  const tasks = Array.isArray(store?.tasks) ? store.tasks.slice() : [];
-  const idx = tasks.findIndex(t => String(t.id || '') === id);
-  if (idx < 0) throw new Error('Task not found');
-  return {id, tasks, idx, task: tasks[idx]};
-}
-
-async function attachLinkOpsAssets({store, taskId, files, args, actor, req}) {
-  const {id, tasks, idx} = findLinkOpsTaskOrThrow(store, taskId);
+async function storeLinkOpsUploadedFiles({bucketId, taskId = '', sessionId = '', files, args, actor, req}) {
+  const safeBucket = safeFileStem(bucketId, 'upload');
+  if (!safeBucket) throw new Error('Invalid upload bucket');
   const normalizedFiles = Array.isArray(files) ? files : [];
   if (!normalizedFiles.length) throw new Error('Missing files');
   if (normalizedFiles.length > 40) throw new Error('一次最多上传 40 个文件');
   let totalBytes = 0;
   const baseDir = path.resolve(args.linkOpsAssetDir);
-  const taskDir = assertInsideDir(baseDir, path.join(baseDir, id));
-  await fs.mkdir(taskDir, {recursive: true});
+  const bucketDir = assertInsideDir(baseDir, path.join(baseDir, safeBucket));
+  await fs.mkdir(bucketDir, {recursive: true});
   const added = [];
   const writtenPaths = [];
   try {
@@ -3398,15 +3486,29 @@ async function attachLinkOpsAssets({store, taskId, files, args, actor, req}) {
       const ext = uploadExtensionFor(mime, file?.name || '');
       const stem = safeFileStem(path.basename(String(file?.name || 'asset'), path.extname(String(file?.name || ''))), 'asset');
       const storedName = `${sha256.slice(0, 16)}-${stem}${ext}`;
-      const storedPath = assertInsideDir(taskDir, path.join(taskDir, storedName));
+      const storedPath = assertInsideDir(bucketDir, path.join(bucketDir, storedName));
       await fs.writeFile(storedPath, buffer);
       writtenPaths.push(storedPath);
-      added.push(buildAssetRecord({taskId: id, file: {...file, type: mime}, buffer, storedPath, actor, req}));
+      added.push(buildAssetRecord({taskId, sessionId, file: {...file, type: mime}, buffer, storedPath, actor, req}));
     }
   } catch (err) {
     await Promise.allSettled(writtenPaths.map(file => fs.rm(file, {force: true})));
     throw err;
   }
+  return {assets: added, totalBytes};
+}
+
+function findLinkOpsTaskOrThrow(store, taskId) {
+  const id = safeTaskId(taskId);
+  const tasks = Array.isArray(store?.tasks) ? store.tasks.slice() : [];
+  const idx = tasks.findIndex(t => String(t.id || '') === id);
+  if (idx < 0) throw new Error('Task not found');
+  return {id, tasks, idx, task: tasks[idx]};
+}
+
+async function attachLinkOpsAssets({store, taskId, sessionId = '', files, args, actor, req}) {
+  const {id, tasks, idx} = findLinkOpsTaskOrThrow(store, taskId);
+  const {assets: added, totalBytes} = await storeLinkOpsUploadedFiles({bucketId: id, taskId: id, sessionId, files, args, actor, req});
   const task = tasks[idx];
   const assets = Array.isArray(task.assets) ? task.assets.slice(-200) : [];
   const nextTask = {
@@ -7013,79 +7115,123 @@ async function main() {
             return sendJson(res, 400, {ok: false, error: err?.message || String(err || 'Invalid upload')});
           }
           const current = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
-          let targetTask;
-          try {
-            targetTask = findLinkOpsTaskOrThrow(current, body.taskId || body.id).task;
-          } catch (err) {
-            const message = err?.message || String(err || 'Task not found');
-            return sendJson(res, message === 'Invalid task id' ? 400 : 404, {ok: false, error: message});
+          const taskRef = String(body.taskId || body.id || '').trim();
+          let targetTask = null;
+          if (taskRef) {
+            try {
+              targetTask = findLinkOpsTaskOrThrow(current, taskRef).task;
+            } catch (err) {
+              const message = err?.message || String(err || 'Task not found');
+              return sendJson(res, message === 'Invalid task id' ? 400 : 404, {ok: false, error: message});
+            }
+            const denied = requireWriteStores(actor, taskWriteStores(targetTask));
+            if (denied) {
+              await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-assets-upload-denied', actor, ...requestMeta(req), task: {id: targetTask.id, stores: taskTargetStores(targetTask), writeStores: taskWriteStores(targetTask), sourceStores: taskSourceStores(targetTask)}, denied});
+              return sendJson(res, 403, denied);
+            }
           }
-          const denied = requireWriteStores(actor, taskWriteStores(targetTask));
-          if (denied) {
-            await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-assets-upload-denied', actor, ...requestMeta(req), task: {id: targetTask.id, stores: taskTargetStores(targetTask), writeStores: taskWriteStores(targetTask), sourceStores: taskSourceStores(targetTask)}, denied});
-            return sendJson(res, 403, denied);
+
+          const chatCurrent = normalizeLinkOpsChatStore(await readJsonFile(args.linkOpsChatFile, {version: 1, updatedAt: null, sessions: []}));
+          let sessionId = String(body.sessionId || body.chatSessionId || targetTask?.chatSessionId || targetTask?.chat?.sessionId || targetTask?.targets?.chatSessionId || '').trim();
+          let chatSession = null;
+          let chatCreated = false;
+          if (sessionId) {
+            try { sessionId = safeLinkOpsChatSessionId(sessionId); } catch (err) {
+              return sendJson(res, 400, {ok: false, error: err?.message || 'Invalid chat session id'});
+            }
+            chatSession = chatCurrent.sessions.find(s => String(s.id || '') === sessionId) || null;
+            if (!chatSession) return sendJson(res, 404, {ok: false, error: 'Chat session not found'});
+          } else {
+            chatSession = buildUploadChatSession(actor, req);
+            sessionId = chatSession.id;
+            chatCreated = true;
           }
+
           let result;
+          let responseStore = current;
+          let responseTask = targetTask;
+          let uploadCheckAnswer = '';
           try {
-            result = await attachLinkOpsAssets({
-              store: current,
-              taskId: body.taskId || body.id,
-              files: body.files,
-              args,
-              actor,
-              req,
-            });
+            if (targetTask) {
+              result = await attachLinkOpsAssets({
+                store: current,
+                taskId: targetTask.id,
+                sessionId,
+                files: body.files,
+                args,
+                actor,
+                req,
+              });
+              responseStore = result.store;
+              responseTask = result.task;
+              try {
+                const checkResult = await runImmediateChatSystemCheckIfPossible({
+                  task: result.task,
+                  taskData: result.store,
+                  actor,
+                  req,
+                  args,
+                  updated: true,
+                });
+                responseStore = checkResult.taskData || result.store;
+                responseTask = checkResult.task || result.task;
+                uploadCheckAnswer = checkResult.answer || '';
+              } catch (err) {
+                uploadCheckAnswer = `我已收到你上传的资料，但重新检查时没有跑完：${String(err?.message || err || 'unknown error')}。你可以继续在聊天里补充或让我重试。`;
+              }
+              await writeJsonFile(args.linkOpsTaskFile, responseStore);
+            } else {
+              const stored = await storeLinkOpsUploadedFiles({
+                bucketId: `session-${sessionId}`,
+                sessionId,
+                files: body.files,
+                args,
+                actor,
+                req,
+              });
+              result = {assets: stored.assets, totalBytes: stored.totalBytes};
+            }
           } catch (err) {
             return sendJson(res, 400, {ok: false, error: err?.message || String(err || 'Upload failed')});
           }
-          let responseStore = result.store;
-          let responseTask = result.task;
-          let uploadCheckAnswer = '';
-          try {
-            const checkResult = await runImmediateChatSystemCheckIfPossible({
-              task: result.task,
-              taskData: result.store,
-              actor,
-              req,
-              args,
-              updated: true,
-            });
-            responseStore = checkResult.taskData || result.store;
-            responseTask = checkResult.task || result.task;
-            uploadCheckAnswer = checkResult.answer || '';
-          } catch (err) {
-            uploadCheckAnswer = `我已收到你上传的资料，但重新检查时没有跑完：${String(err?.message || err || 'unknown error')}。你可以继续在聊天里补充或让我重试。`;
-          }
-          await writeJsonFile(args.linkOpsTaskFile, responseStore);
-          let projectedChatSession = null;
-          if (uploadCheckAnswer) {
-            try {
-              const chatAppend = await appendLinkOpsChatAssistantMessageForTask(
-                args,
-                responseTask,
-                `我已收到你上传的 ${result.assets.length} 个文件。\n\n${uploadCheckAnswer}`,
-                {mode: 'bi-ops-upload-check', autoTaskId: responseTask?.id || ''}
-              );
-              projectedChatSession = chatAppend.session ? projectLinkOpsChatSessionForClient(chatAppend.session) : null;
-            } catch {}
-          }
+
+          const assetNames = result.assets.map(a => a.originalName || a.name || '文件').slice(0, 6).join('、');
+          const sessionMessage = targetTask
+            ? `我已收到你上传的 ${result.assets.length} 个文件${assetNames ? `：${assetNames}` : ''}。${uploadCheckAnswer ? `
+
+${uploadCheckAnswer}` : `
+
+我已经把这些文件同步到当前处理事项里。你可以继续在聊天里补充，或让我重新检查。`}`
+            : `我已收到你上传的 ${result.assets.length} 个文件${assetNames ? `：${assetNames}` : ''}。
+
+这些文件已放到当前会话资料里。你可以直接继续说要处理什么，我会把这些文件作为上下文一起参考；还不会提交或修改 SHEIN。`;
+          chatSession = attachAssetsToChatSession(chatSession, result.assets, {
+            message: sessionMessage,
+            meta: {mode: targetTask ? 'bi-ops-upload-check' : 'bi-ops-session-upload', autoTaskId: responseTask?.id || ''},
+          });
+          const sessions = chatCreated
+            ? [chatSession, ...chatCurrent.sessions].slice(0, 300)
+            : chatCurrent.sessions.map(s => String(s.id || '') === chatSession.id ? chatSession : s);
+          const nextChatStore = {version: 1, updatedAt: new Date().toISOString(), memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions};
+          await writeJsonFile(args.linkOpsChatFile, nextChatStore);
+          const projectedChatSession = projectLinkOpsChatSessionForClient(chatSession);
           await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'link-ops-assets-upload',
             actor,
             ...requestMeta(req),
             task: {
-              id: responseTask.id,
-              status: responseTask.status,
+              id: responseTask?.id || '',
+              status: responseTask?.status || 'session_upload',
               assetCount: result.assets.length,
-              systemCheckState: responseTask.execution?.state || '',
+              systemCheckState: responseTask?.execution?.state || '',
             },
             assets: result.assets.map(a => ({id: a.id, kind: a.kind, mime: a.mime, bytes: a.bytes, sha256: a.sha256})),
           });
           return sendJson(res, 200, {
             ok: true,
             data: projectLinkOpsTaskStoreForClient(responseStore, {limit: 500}),
-            task: projectLinkOpsTaskForClient(responseTask),
+            task: responseTask ? projectLinkOpsTaskForClient(responseTask) : null,
             assets: result.assets.map(projectLinkOpsAssetForClient).filter(Boolean),
             session: projectedChatSession,
           });
@@ -7284,6 +7430,7 @@ async function main() {
                 '如果信息还不够，先问需要补充什么；如果已经可以形成任务，请给出清晰的下一步和风险边界。',
                 '遇到“这个链接/这个品/2,223 这个”等指代时，必须结合上文已出现的店铺、货号、SKC、曝光/访客/销量数字重新定位；不能因为最新一句没写全就否定上轮数据。',
                 '会话已识别目标：' + summarizeLinkOpsTargets(conversationTargets),
+                '会话已上传资料：' + summarizeLinkOpsSessionAssets(session),
                 '会话目标执行能力：\n' + buildLinkOpsCapabilitySummary(conversationTargets),
                 ...extraRules,
                 rememberedMessages.length ? conversation : '当前没有可继承的短期上下文，请按最新用户消息独立处理。',
@@ -7397,6 +7544,12 @@ async function main() {
                     commandLength: autoTask.command.length,
                   },
                 });
+              }
+              const taskWithSessionAssets = mergeLinkOpsSessionAssetsIntoTask(autoTask, session, actor, req);
+              if (taskWithSessionAssets !== autoTask) {
+                autoTask = taskWithSessionAssets;
+                taskData = replaceLinkOpsTaskInStore(taskData, autoTask);
+                await writeJsonFile(args.linkOpsTaskFile, taskData);
               }
               const checkResult = await runImmediateChatSystemCheckIfPossible({
                 task: autoTask,

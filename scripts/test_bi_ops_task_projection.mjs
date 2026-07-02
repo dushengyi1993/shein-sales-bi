@@ -389,6 +389,42 @@ try {
   check('assets POST hides sha256/path', JSON.stringify(uploaded.json || {}), x => !/sha256|storedRelativePath|storedName/.test(x));
   assertNoRawTaskLeak('POST /api/link-ops-assets', uploaded.json);
 
+  const sessionUploaded = await req(baseUrl, '/api/link-ops-assets', {
+    method: 'POST',
+    cookie,
+    body: {
+      files: [{
+        name: 'session-upload-note.txt',
+        type: 'text/plain',
+        dataBase64: Buffer.from('session level upload smoke', 'utf8').toString('base64'),
+      }],
+    },
+  });
+  const uploadedSessionId = String(sessionUploaded.json?.session?.id || '');
+  check('session assets POST status', sessionUploaded.status, 200);
+  check('session assets POST creates/returns session', Boolean(uploadedSessionId), true);
+  check('session assets POST does not require task', sessionUploaded.json?.task, null);
+  check('session assets POST projects asset in session', sessionUploaded.json?.session?.assets?.some?.(a => a.name === 'session-upload-note.txt' && a.kind === 'text'), true);
+  check('session assets POST writes human chat message', sessionUploaded.json?.session?.messages?.at?.(-1)?.content || '', x => /当前会话资料|已放到当前会话资料/.test(String(x)));
+  check('session assets POST hides sha256/path', JSON.stringify(sessionUploaded.json || {}), x => !/sha256|storedRelativePath|storedName/.test(x));
+  assertNoRawTaskLeak('POST /api/link-ops-assets session-only', sessionUploaded.json);
+
+  const chatWithSessionAsset = await req(baseUrl, '/api/link-ops-chats', {
+    method: 'POST',
+    cookie,
+    body: {
+      sessionId: uploadedSessionId,
+      message: '把 DX 的 SK-1234 库存改成 100',
+      askAgent: false,
+    },
+  });
+  const sessionAssetTask = chatWithSessionAsset.json?.autoTask || {};
+  check('chat after session upload status', chatWithSessionAsset.status, 200);
+  check('chat after session upload creates task', Boolean(sessionAssetTask.id), true);
+  check('chat after session upload inherits uploaded asset', sessionAssetTask.assets?.some?.(a => a.name === 'session-upload-note.txt' && a.kind === 'text'), true);
+  check('chat after session upload keeps asset in session projection', chatWithSessionAsset.json?.session?.assets?.some?.(a => a.name === 'session-upload-note.txt'), true);
+  assertNoRawTaskLeak('POST /api/link-ops-chats after session upload', chatWithSessionAsset.json);
+
   const executed = await req(baseUrl, '/api/link-ops-execute', {
     method: 'POST',
     cookie,
@@ -399,9 +435,10 @@ try {
   assertNoRawTaskLeak('POST /api/link-ops-execute', executed.json);
 
   const chats = await req(baseUrl, '/api/link-ops-chats?limit=10', {cookie});
+  const projectionChatSession = (chats.json?.data?.sessions || []).find(row => row?.id === 'los_projection_0001') || {};
   check('chats GET status', chats.status, 200);
   check('chats GET assistant old wording sanitized', JSON.stringify(chats.json || {}), x => !/飞书|只读建议|回到 BI|SHEIN_OPENAPI_SUBMIT|payload hash|查看审计|raw-codex-session/.test(x));
-  check('chats GET keeps autoTaskId meta', chats.json?.data?.sessions?.[0]?.messages?.[1]?.meta?.autoTaskId || '', 'lot_projection_0001');
+  check('chats GET keeps autoTaskId meta', projectionChatSession?.messages?.[1]?.meta?.autoTaskId || '', 'lot_projection_0001');
 
   const chatPost = await req(baseUrl, '/api/link-ops-chats', {
     method: 'POST',

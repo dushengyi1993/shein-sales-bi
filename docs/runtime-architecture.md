@@ -250,14 +250,14 @@
 
 ## 2026-05-17 公网域名入口
 
-- 正式域名入口为 `https://shein-bi.dushengyi.xyz/`，DNS 指向腾讯云服务器 `43.165.167.135`。
+- 正式域名入口为 `https://sa.dushengyi.cc/`；当前公网解析可经过 Cloudflare，再回源到腾讯云服务器 `43.165.167.135`。
 - 服务器 443 端口同时承担 SSH 运维入口和 HTTPS 入口：`HAProxy` 在 443 做协议分流，SSH 流量转到本机 sshd `127.0.0.1:22`，HTTPS 流量转到 Caddy `127.0.0.1:10443`。
-- Caddy 负责 `shein-bi.dushengyi.xyz` 的自动 TLS 证书和 HTTP -> HTTPS 跳转；nginx 退到本机 `127.0.0.1:8080` 并反代到 BI Portal `127.0.0.1:8787`，身份认证由 BI Portal 应用内登录承担。旧 `shein-bi.faceair.me` 不再作为正式入口。
+- HAProxy 承接公网 `443` 并转到 Caddy `10443`；Caddy 负责 `sa.dushengyi.cc` 的自动 TLS 证书和 HTTP -> HTTPS 跳转；nginx 退到本机 `127.0.0.1:8080` 并反代到 BI Portal `127.0.0.1:8787`，身份认证由 BI Portal 应用内登录承担。旧 `shein-bi.faceair.me` 和 `shein-bi.dushengyi.xyz` 不再作为正式入口。
 - 对应配置模板：`infra/haproxy/haproxy-ssh-https.cfg`、`infra/caddy/Caddyfile.shein-bi`。不要直接让 Node 服务暴露公网。
 
 ## 2026-05-18 云端临时人工登录入口
 
-- 入口：`https://shein-bi.dushengyi.xyz/cloud-login-maintenance`，也可从 BI “系统 / 登录维护中心”进入。
+- 入口：`https://sa.dushengyi.cc/cloud-login-maintenance`，也可从 BI “系统 / 登录维护中心”进入。
 - 实现链路：`scripts/cloud_manual_login_session.mjs` 启动 `Xvfb + Chrome + x11vnc + websockify/noVNC`，`scripts/serve_bi_portal.mjs` 提供 `/api/cloud-login/sessions`、`/cloud-login/session/:id` 和 noVNC WebSocket 代理。
 - 安全边界：外网仍只经过现有 HTTPS 网关和 BI 应用内登录；临时维护会话 token 只短时存在于服务器私有状态文件，完成/关闭后会清空 token 和入口 URL；不保存密码、cookie、localStorage 或请求头值到 GitHub、文档或聊天。
 - 资源边界：一次只允许一个临时登录窗口。若某店 CDP 端口被已完成/已关闭的临时窗口残留占用，脚本会在确认没有生产同步 service 运行时清理孤儿 Chrome/VNC 进程；若生产同步正在运行，则拒绝开启并提示等待。

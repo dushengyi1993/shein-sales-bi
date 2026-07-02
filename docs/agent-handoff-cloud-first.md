@@ -16,9 +16,9 @@
 
 ## 2. 当前生产入口
 
-- 正式 BI 域名：`https://shein-bi.dushengyi.xyz/`
+- 正式 BI 域名：`https://sa.dushengyi.cc/`
 - 旧 IP 兜底：`http://43.165.167.135/`
-- 云端登录维护入口：`https://shein-bi.dushengyi.xyz/cloud-login-maintenance`
+- 云端登录维护入口：`https://sa.dushengyi.cc/cloud-login-maintenance`
 - 云端代码目录：`/opt/shein-bi/app`
 - 云端运行用户：`sheinops`
 - 本机 SSH 别名：`ssh shein-bi-tencent`
@@ -33,7 +33,7 @@
 
 - 目录：`/opt/shein-bi/app`
 - 内部端口：`127.0.0.1:8787`
-- 域名：`https://shein-bi.dushengyi.xyz/`
+- 域名：`https://sa.dushengyi.cc/`
 - 典型服务：
   - `shein-bi-portal.service`
   - `shein-bi-cloud-today.timer`
@@ -108,7 +108,7 @@ ss -lntp | grep -E '8787|8790|910|920' || true
 确认公网入口：
 
 ```bash
-curl -I https://shein-bi.dushengyi.xyz/ || true
+curl -I https://sa.dushengyi.cc/ || true
 curl -I http://127.0.0.1:8787/ || true
 ```
 
@@ -141,7 +141,7 @@ curl -I http://127.0.0.1:8787/ || true
 - 目录：`/opt/projects/<project-name>/`
 - 内部端口：`127.0.0.1:9100-9299`
 - 服务名：`project-<name>.service`
-- 子域名：`<name>.dushengyi.xyz`
+- 子域名：`<name>.dushengyi.cc`
 
 禁止新项目占用：
 
@@ -241,7 +241,7 @@ bash scripts/cloud_bi_refresh.sh today intraday
 ## 10. 不要恢复旧架构
 
 - 本地 BI 已封存，不要重新启用本地 `8787` 或 Windows `SHEIN-*` 计划任务。
-- 正式 BI 入口只有 `https://shein-bi.dushengyi.xyz/`。
+- 正式 BI 入口只有 `https://sa.dushengyi.cc/`。
 - V2 是当前正式 BI Portal；V1 只保留 GitHub archive release 恢复点，不进入生产调度。
 - 不要把仓库 `outputs/bi-portal/*` 当成当前业务数据。
 - 不要把低频链接/业务域日更按销售高频阈值误报。

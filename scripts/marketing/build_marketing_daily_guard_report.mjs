@@ -1356,6 +1356,7 @@ function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSour
       c7EpsUv: numberOrNull(link.c7_eps_uv),
       c30EpsUv: numberOrNull(link.c30_eps_uv),
       platformSaleableStock: numberOrNull(link.platform_saleable_stock),
+      platformSaleableStockEvidence: 'bi_linksData_signal_only_not_live_inventory_guard',
       performanceActivityNames: link.performance_activity_names || '',
       healthBucket: link.health_bucket || '',
       exactPlan: false,
@@ -2640,7 +2641,7 @@ function summarizeMandatoryLimitedDiscountStatus({liveScanSource, gapResultSourc
     ? `最近一次漏限时折扣处理：发现 ${humanCount(initialGap, '个')}缺口，安全自动补上 ${humanCount(executedCount, '个')}${storeCountText(byStoreExec, 6) ? `（${storeCountText(byStoreExec, 6)}）` : ''}，剩余 ${humanCount(blockedCount || remainingGapByAfterScan, '个')}未硬写。`
     : '还没有找到最近一次漏限时折扣补报结果文件。';
   const remainingText = (blockedCount || fallbackTotal)
-    ? `剩余未报/未兜底主要是平台或库存阻断，不是正常放弃：${reasonCountText(reasonSummary, 4) || storeCountText(fallbackByBucket, 4) || '需要查看明细'}。按店铺看：${storeCountText(byStoreBlocked, 8) || storeCountText(fallbackByStore, 8) || '暂无店铺分布'}。`
+    ? `剩余未报/未兜底主要是历史 live/dry-run 已确认的平台或库存阻断，不是正常放弃：${reasonCountText(reasonSummary, 4) || storeCountText(fallbackByBucket, 4) || '需要查看明细'}。按店铺看：${storeCountText(byStoreBlocked, 8) || storeCountText(fallbackByStore, 8) || '暂无店铺分布'}。`
     : '当前没有历史遗留的限时折扣兜底缺口。';
   const actionText = (blockedCount || fallbackTotal)
     ? '后续处理口径：库存/平台状态恢复后继续自动复扫；能 dry-run 通过的直接补，仍被平台拒绝的继续列阻断，不硬写。'
@@ -2857,7 +2858,7 @@ function buildHumanSummary(report) {
   if (Number(newListingLimited.actionCount || 0) > 0) {
     actions.push({
       level: '必须处理',
-      text: `新上架 7 天内且未报普通活动的链接有 ${humanCount(newListingLimited.actionCount, '个')}：缺限时折扣 ${humanCount(newListingLimited.missingLimitedDiscountCount, '个')}，已有旧限时折扣但需按“一周窗口+曝光前五力度”复核/重报 ${humanCount(newListingLimited.existingLimitedDiscountRebuildCount, '个')}。这类按规则应自动生成限时折扣兜底并回读。`,
+      text: `新上架 7 天内且未报普通活动的链接有 ${humanCount(newListingLimited.actionCount, '个')}：缺限时折扣 ${humanCount(newListingLimited.missingLimitedDiscountCount, '个')}，已有旧限时折扣但需按“一周窗口+曝光前五力度”复核/重报 ${humanCount(newListingLimited.existingLimitedDiscountRebuildCount, '个')}。这类按规则应自动生成限时折扣兜底并回读；BI 库存字段只能作为线索，不能替代营销后台 live/dry-run 库存校验。`,
     });
   } else if (newListingLimited.enabled !== false) {
     ok.push('新上架 7 天限时折扣：没有未报普通活动且需要兜底/重报的链接。');
@@ -2868,7 +2869,7 @@ function buildHumanSummary(report) {
     const executedText = Number(latestRepair.executedCount || 0) > 0
       ? `；最近已自动补 ${humanCount(latestRepair.executedCount, '个')}`
       : '';
-    watches.push(`限时折扣必报：仍有 ${humanCount(fallbackGaps.total, '个')}兜底缺口${storeText ? `（${storeText}）` : ''}${executedText}；剩余多为库存/平台规则/已有折扣冲突，不能硬写，但需要后续继续观察。`);
+    watches.push(`限时折扣必报：仍有 ${humanCount(fallbackGaps.total, '个')}兜底缺口${storeText ? `（${storeText}）` : ''}${executedText}；剩余多为历史 live/dry-run 已确认的库存/平台规则/已有折扣冲突，不能硬写，但需要后续继续观察。`);
   }
   if (Number(ordinaryIssues.issueCount || 0) > 0 || Number(ordinaryIssues.missingFillEvidence || 0) > 0) {
     watches.push(`普通活动补报还有 ${humanCount(ordinaryIssues.issueCount, '行')}价格/填价证据待回读，其中缺本轮填价证据 ${humanCount(ordinaryIssues.missingFillEvidence, '行')}；已报集合存在不等于价格完全验收。`);

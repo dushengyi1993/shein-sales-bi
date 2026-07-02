@@ -12,6 +12,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const client = await fs.readFile(path.join(ROOT, 'scripts/bi_app/client.js'), 'utf8');
 const css = await fs.readFile(path.join(ROOT, 'scripts/bi_app/styles.css'), 'utf8');
 const portalServer = await fs.readFile(path.join(ROOT, 'scripts/serve_bi_portal.mjs'), 'utf8');
+const portalHtml = await fs.readFile(path.join(ROOT, 'outputs/bi-portal/index.html'), 'utf8');
 const failures = [];
 function ok(cond, msg) { if (!cond) failures.push(msg); }
 
@@ -34,10 +35,12 @@ ok(client.includes('平台没通过，需要补充') && client.includes('未创�
 ok(client.includes('店铺能力') && client.includes('可操作') && client.includes('opsTaskProgressOnly'), 'operator-facing capability/progress wording is not simplified');
 ok(client.includes('如果要执行，就直接说“可以执行”“提交吧”“照做”'), 'chat-only natural confirmation hint missing');
 ok(client.includes('把 DX 某条 SKC 库存改成 100') && client.includes('下架缺货链接'), 'chat prompt still looks copy-only instead of generic ops');
-ok(client.includes('ops-upload-picker') && client.includes('type="file"') && client.includes('accept="${H(OPS_UPLOAD_ACCEPT)}"'), 'upload control is not a native file input picker');
-ok(!client.includes('input.click()'), 'upload still depends on programmatic file input click');
-ok(client.includes('data-ops-upload-missing="1"') && client.includes('function explainOpsUploadMissing'), 'upload without current task has no visible human feedback');
-ok(client.includes('function opsTaskAssetsHtml') && client.includes('已上传文件'), 'uploaded files are not rendered in current task panel');
+ok(client.includes('data-ops-upload="1"') && client.includes('function chooseOpsFiles') && client.includes('input.showPicker') && client.includes('input.click()'), 'upload button does not synchronously open a real file input from a user gesture');
+ok(client.includes("if(b?.dataset?.opsUpload){chooseOpsFiles();return}if(!e.target.closest('#rangeDock')"), 'upload click is not handled before render-prone global click branches');
+ok(client.includes('ops-upload-file-input') && client.includes('type="file"') && client.includes('accept="${H(OPS_UPLOAD_ACCEPT)}"'), 'upload control is not backed by a real file input picker');
+ok(!client.includes('data-ops-upload-missing="1"') && !client.includes('function explainOpsUploadMissing') && !client.includes('先在聊天里说清楚要处理什么'), 'upload still incorrectly requires an existing task');
+ok(client.includes('function opsSessionAssetsHtml') && client.includes('会话资料') && client.includes('可以先上传图片、表格或文档'), 'uploaded files are not rendered as session-level context');
+ok(client.includes('function opsTaskAssetsHtml') && client.includes('当前处理附件'), 'task assets are not rendered when a task exists');
 ok(client.includes('OPS_UPLOAD_LIMIT_TEXT') && client.includes('XLSX') && client.includes('20MB') && client.includes('120MB'), 'upload limits/formats are not visible in frontend');
 for (const phrase of ['飞书', 'V1', '任务池', '确认成任务', '可预检 ', '完成 dry-run', '只能问数、生成任务或 dry-run', '查看审计', '正在读取这条任务的审计记录', '系统会先建任务并预检', '最后确认', '确认提交', 'data-ops-final-execute', 'data-ops-execute', 'data-ops-audit', 'data-ops-resolve', 'executeOpsTask', 'loadOpsAudit', 'resolveOpsTask', '任务 ', '当前任务', '生成任务草稿', 'askOnly', 'noAutoTask', 'opsDryrun', '只问数', '只回答']) {
   ok(!client.includes(phrase), `operator-facing technical wording leaked: ${phrase}`);
@@ -49,8 +52,10 @@ ok(portalServer.includes('stripLinkOpsInternalLeakLines'), 'server no longer str
 ok(portalServer.includes('fallbackLinkOpsClientText'), 'server lacks a user-facing fallback when a whole answer is internal noise');
 ok(client.includes('[一二三四五六七八九十]+、') || client.includes('一二三四五六七八九十'), 'Markdown parser does not recognize Chinese ordered lists');
 ok(client.includes('blockquote') && client.includes('opsMarkdownTable'), 'Markdown parser lacks blockquote/table support');
+ok(client.includes("replaceAll(String.fromCharCode(13),'').split(String.fromCharCode(10))"), 'Markdown newline normalization must not use a regex that can become /\\n?/g in embedded HTML');
+ok(!portalHtml.includes('replace(/\\n?/g'), 'embedded portal Markdown parser inserts a newline at every character');
 
-for (const cls of ['.ops-busy-banner', '.ops-evidence-item', '.ops-upload-label.disabled', '.ops-upload-picker .ops-upload-input', '.ops-assets', '.ops-asset-pill', '.ops-md-table-wrap', '.ops-task-control.conversational', '.ops-task-card.progress-only', '.ops-session.pending']) {
+for (const cls of ['.ops-busy-banner', '.ops-evidence-item', '.ops-upload-label:disabled', '.ops-upload-file-input', '.ops-assets', '.ops-asset-pill', '.ops-md-table-wrap', '.ops-task-control.conversational', '.ops-task-card.progress-only', '.ops-session.pending']) {
   ok(css.includes(cls), `missing CSS selector ${cls}`);
 }
 ok(/\.ops-task-evidence\{[^}]*grid-template-columns:repeat\(auto-fit,minmax/.test(css), 'task evidence is not grid-based');
@@ -59,6 +64,11 @@ ok(css.includes('overflow-x:hidden!important'), 'right rail horizontal overflow 
 ok(css.includes('blockquote') && css.includes('.ops-markdown table'), 'Markdown visual styles missing');
 ok(css.includes('.ops-msg.user .ops-markdown{color:#fffaf0}'), 'user chat bubble Markdown text color override missing');
 ok(css.includes('.ops-msg.user .ops-markdown strong{color:#fff}'), 'user chat bubble strong text override missing');
+ok(/\.ops-msg\{[^}]*width:calc\(100% - 36px\)[^}]*max-width:820px[^}]*min-width:260px[^}]*flex:0 0 auto/.test(css), 'chat message bubble lacks explicit readable width and can collapse to one character per line');
+ok(/\.ops-msg\.assistant\{[^}]*width:calc\(100% - 36px\)[^}]*max-width:820px[^}]*min-width:320px/.test(css), 'assistant chat bubble is not forced to a readable width');
+ok(/\.ops-msg\.user\{[^}]*width:fit-content[^}]*max-width:76%[^}]*min-width:180px/.test(css), 'user chat bubble can collapse to one character per line');
+ok(css.includes('.ops-msg,.ops-msg.assistant{width:100%;max-width:100%;min-width:0}.ops-msg.user{width:100%;max-width:100%;min-width:0}'), 'narrow viewport chat bubbles are not clamped to container width');
+ok(/\.ops-markdown\{[^}]*display:block[^}]*width:100%/.test(css), 'chat Markdown container can collapse under grid/flex sizing');
 
 if (failures.length) {
   console.error(JSON.stringify({ok: false, failures}, null, 2));

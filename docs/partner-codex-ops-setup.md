@@ -13,7 +13,7 @@
 
 ## 你需要提前给他的东西
 
-- 正式 BI 地址：`https://shein-bi.dushengyi.xyz/`
+- 正式 BI 地址：`https://sa.dushengyi.cc/`
 - 一个 BI 账号和密码。
   - 合伙人/管理员账号：可读全部店铺，可写全部店铺。
   - 普通运营账号：可读全部店铺，只能写自己负责的店铺。
@@ -107,7 +107,7 @@ node scripts/bi_ops_cli.mjs doctor --operation copy_product_draft --target-store
 - 不带 `--require-real-submit` 时，只要求能建任务 / dry-run；适合普通运营确认“我能不能先做预检”。
 - 带 `--require-real-submit` 时，会要求该账号、店铺和动作已经具备真实提交能力；如果仍被总闸门、白名单、账号写权限或动作适配器挡住，命令会退出非 0，并在 `requestedActionReadiness.items[].blockers` 里列出原因。
 - 目前已接入的官方 OpenAPI 写适配器包括：`copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。它们默认只做 dry-run；真实执行必须同时满足账号写权限、`safeWriteOperations`、真实写白名单、人 + 店 + 动作、上一次 dry-run 的 `payloadHash`、`waiting_review` 状态和确认文本 `SHEIN_OPENAPI_SUBMIT`。网页端不会要求用户输入英文安全码或固定确认框，而是在同一聊天里用“可以执行 / 提交吧 / 照做”等自然语言确认；服务端内部映射成安全确认码，CLI/脚本仍使用 `SHEIN_OPENAPI_SUBMIT`。
-- 维护类适配器使用官方文档：商品上下架 `3001253 /open-api/goods/modify-skc-shelf`（`activate_link` 使用 `shelf_state=1`，`retire_link` 使用 `shelf_state=2`），库存 `3001738 /open-api/stock/change-inventory/v2`，供货价 `3001681 /open-api/goods/update-cost`，售价 `3001407 /open-api/openapi-business-backend/product/price/save`，局部编辑 `3001810 /open-api/goods/product/partialEdit`；证书/资质包含 `3001477 /open-api/goods/save-or-update-certificate-pool`、`3001183 /open-api/goods/save-certificate-pool-skc-bind` 等证书接口。`update_images` 要求提供完整 SHEIN `partialEdit` 图片 JSON（`spu_name + image_info/skc_list/site_detail_image_info_list`），避免错误清空图片层级；`certificate_review` 要求提供 `certificatePayloads[{endpoint,body}]`，提交后默认人工核销审核状态。
+- 维护类适配器使用官方文档：商品上下架 `3001253 /open-api/goods/modify-skc-shelf`（`activate_link` 使用 `shelf_state=1`，`retire_link` 使用 `shelf_state=2`），库存 `3001738 /open-api/stock/change-inventory/v2`，供货价 `3001681 /open-api/goods/update-cost`，售价 `3001407 /open-api/openapi-business-backend/product/price/save`，局部编辑 `3001810 /open-api/goods/product/partialEdit`；证书/资质包含 `3001477 /open-api/goods/save-or-update-certificate-pool`、`3001183 /open-api/goods/save-certificate-pool-skc-bind` 等证书接口。网页端 `update_images` 不能要求普通员工手写 `partialEdit` JSON：用户上传图片后，系统应在聊天里展示 AI 排序和资料缺口，再由执行层转换成 SHEIN 需要的图片 URL 与 `partialEdit` 字段；若转换不完整，任务停在资料检查。CLI/脚本仍可传完整结构化 payload 做管理员验收。`certificate_review` 要求提供 `certificatePayloads[{endpoint,body}]`，提交后默认人工核销审核状态。
 - `campaign_signup` / `flash_discount` 当前不走官方 OpenAPI：公开目录未发现营销报名、限时折扣、优惠券报名写接口证据，所以它们继续走本地营销运营流程、价格栈守卫和人工确认，不会在 OpenAPI 总账里伪装成“可真实提交”。
 - 管理员验证维护写前，可先用 `node scripts/verify_shein_openapi_doc_detail.mjs --doc-id 3001253 --endpoint /open-api/goods/modify-skc-shelf --require-verified --pretty` 拉取脱敏 schema 证据，再用 `node scripts/check_bi_ops_maintenance_readiness.mjs --operation retire_link --doc-evidence <schema证据> --store-probe <逐店权限证据> --readback-evidence <回读证据> --expect pilot_ready --pretty` 做总检查。证据文件只放忽略目录；脚本不会打印或保存 Cookie，也不会调用 SHEIN 业务写接口。
 
@@ -223,7 +223,7 @@ node scripts/bi_ops_cli.mjs resolve --task-id <任务ID> --status archived --not
 
 同一个账号也可以直接登录：
 
-[https://shein-bi.dushengyi.xyz/](https://shein-bi.dushengyi.xyz/)
+[https://sa.dushengyi.cc/](https://sa.dushengyi.cc/)
 
 网页端和 Codex App 调用的是同一套云端权限和审计链路。也就是说：
 
@@ -269,6 +269,16 @@ node scripts/bi_ops_cli.mjs tasks --pretty
 ### 预检没通过
 
 按返回的阻断原因处理，比如补素材、修正店铺、修正货号、补登录态、补价格或重新创建任务。不要跳过预检直接执行。
+
+### 上新或换图要上传图片
+
+网页端的目标体验是直接在当前自动运营会话上传图片，然后继续用自然语言沟通：
+
+- 新链接或复制上品需要重新配图时，上传图片后系统应把文件挂到当前会话资料，并尝试判断图片用途。
+- 默认目标图片结构为：轮播主图 1 张、细节图最多 11 张、方形图 1 张、SKU 图 / 色块图 1 张。
+- AI 可以根据图片内容给出排序建议、重复图/低质图/错品风险提示；用户可以继续说“把第 3 张做主图”“第 5 张不要”“细节图 2 和 6 交换”。
+- 图片理解不能替代商品事实。AI 不得根据图片发明不存在的功率、认证、配件或功能；发现图片和链接资料冲突时必须停下来提示。
+- 真正提交 SHEIN 前，后台仍要把图片转成 SHEIN 可接受的图片 URL 和 `partialEdit` / 发布 payload 图片字段；缺字段时只提示缺口，不会静默换图或发布。
 
 ### 任务显示“已提交待回读”或“需人工处理”
 

@@ -23,11 +23,13 @@ for (const required of [
   'pendingSession',
   'opsTaskProgressOnly',
   '如果要执行，就直接说“可以执行”“提交吧”“照做”',
-  'ops-upload-picker',
-  'function explainOpsUploadMissing',
-  'data-ops-upload-missing="1"',
+  'data-ops-upload="1"',
+  'function chooseOpsFiles',
+  'ops-upload-file-input',
+  'function opsSessionAssetsHtml',
+  '会话资料',
   'function opsTaskAssetsHtml',
-  '已上传文件',
+  '当前处理附件',
   'OPS_UPLOAD_LIMIT_TEXT',
 ]) {
   ok(client.includes(required), `source client missing required ops marker: ${required}`);
@@ -44,8 +46,11 @@ for (const stale of [
   '飞书',
   '只读建议',
   '回到 BI 自动化运营页',
-  'input.click()',
-  'data-ops-upload="1"',
+  'ops-upload-picker',
+  'data-ops-upload-missing="1"',
+  'function explainOpsUploadMissing',
+  '先在聊天里说清楚要处理什么',
+  '先创建处理',
 ]) {
   ok(!html.includes(stale), `generated portal shell still contains stale/operator-facing wording: ${stale}`);
 }

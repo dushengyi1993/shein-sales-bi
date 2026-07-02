@@ -60,7 +60,7 @@ flowchart LR
 
 访问：
 
-- 云端 BI Portal：`https://shein-bi.dushengyi.xyz/`，旧 IP `http://43.165.167.135/` 仅作兜底，BI 应用内登录保护。
+- 云端 BI Portal：`https://sa.dushengyi.cc/`，旧 IP `http://43.165.167.135/` 仅作兜底，BI 应用内登录保护。
 - Metabase 运行在云端 Docker 内部，不在文档中写公网裸地址；本地旧 WSL 地址只作历史排障参考。
 - Metabase dashboard 编号仍可作为内部迁移参考，但不要使用旧本地 WSL IP 作为正式入口。
 
@@ -81,7 +81,7 @@ BI 系统当前分为三层入口：
 
 3. **云端 BI 经营门户**
    - 文件入口：`outputs/bi-portal/index.html`
-   - 云端入口：`https://shein-bi.dushengyi.xyz/`，旧 IP `http://43.165.167.135/` 仅作兜底
+   - 云端入口：`https://sa.dushengyi.cc/`，旧 IP `http://43.165.167.135/` 仅作兜底
    - 负责“每天先看什么、先处理什么、如何复制指令、如何标记处理状态”。
    - API section cache 位于 `outputs/bi-portal/sections/`；派生 section 要遵守源缓存生命周期，例如 `homeProfit` 必须从当前 `profit` section 派生。`serve_bi_portal.mjs` 负责 section API、gzip/raw cache 返回，以及 core `generatedAt` 变化后的后台 warmup 兜底。
    - 本地 `127.0.0.1:8787` 和局域网入口已封存，不再作为正式入口。

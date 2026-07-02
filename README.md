@@ -3,7 +3,7 @@
 ## 2026-06-24 当前权威状态
 
 - 飞书多维表格 / 原生看板写入已临时暂停；云端 BI 系统作为当前主要经营入口继续运行。飞书日报脚本、异常通知 watchdog 和只读问数机器人均已迁到云端独立飞书机器人链路；日报真实发送链路已验证但自动发送当前停用，问数机器人已升级为云端 Codex CLI 只读网关，不再绑定本机 Codex 会话。
-- 本地 BI 已封存，云端 BI 是正式入口：`https://shein-bi.dushengyi.xyz/`（旧 IP 入口 `http://43.165.167.135/` 仅作兜底）。公网入口已改为 BI 应用内登录页 + `bi_session` HttpOnly Cookie；账号密码只在运行环境交付，不写入仓库或文档。详见 `docs/cloud-bi-operations.md`。
+- 本地 BI 已封存，云端 BI 是正式入口：`https://sa.dushengyi.cc/`（旧 IP 入口 `http://43.165.167.135/` 仅作兜底）。公网入口已改为 BI 应用内登录页 + `bi_session` HttpOnly Cookie；账号密码只在运行环境交付，不写入仓库或文档。详见 `docs/cloud-bi-operations.md`。
 - 云端 BI 已提供临时登录维护入口 `/cloud-login-maintenance`：当 SHEIN / SBN 子系统登录态失效、自动恢复失败、遇到验证码/滑块，或被协议签署 / 公告 / 通知确认等普通登录弹窗挡住时，可在云服务器短时打开该店独立 profile 的 noVNC 浏览器窗口；普通登录干扰弹窗可由运维代理关闭/确认后再点登录，完成后必须点“我已完成并关闭”，脚本会导出/探测登录态并关闭临时进程。该入口的状态文件、日志和短期 token 都是服务器私有运行态，不进 GitHub。
 - 本地 `8787` 服务已停止，`SHEIN-*` Windows 计划任务已禁用；除非明确回滚，不要重新启动本地 BI 或本地抓数任务。
 - 销售同步完成后会后置刷新 BI；如果单店失败但目标日期当前启用店铺销售源文件已齐，BI 仍会刷新，并通过飞书消息提醒失败店铺。
@@ -42,11 +42,11 @@
   - 当月主看板：`SHEIN经营看板 v3-主看板`（`blkFn3qHrwdsrJyX`）
   - 上月看板：`SHEIN经营看板 v3-上月`（`blkWeyZhphgRZYim`）
 - 当前 BI 入口：
-  - 云端 BI：`https://shein-bi.dushengyi.xyz/`，BI 应用内登录保护；未登录访问页面会跳转 `/login`，`/api/auth/me` 未登录返回 `401`；旧 IP 入口 `http://43.165.167.135/` 仅作兜底。
-  - 云端登录维护中心：`https://shein-bi.dushengyi.xyz/cloud-login-maintenance`，用于临时打开指定店铺云端浏览器登录窗口。
+  - 云端 BI：`https://sa.dushengyi.cc/`，BI 应用内登录保护；未登录访问页面会跳转 `/login`，`/api/auth/me` 未登录返回 `401`；旧 IP 入口 `http://43.165.167.135/` 仅作兜底。
+  - 云端登录维护中心：`https://sa.dushengyi.cc/cloud-login-maintenance`，用于临时打开指定店铺云端浏览器登录窗口。
   - 云端代码目录：`/opt/shein-bi/app`
   - 仓库 BI 门户灾备快照：`outputs/bi-portal/index.html` / `outputs/bi-portal/data.json`（不代表当前云端数据）
-  - V2 是当前正式 BI Portal，根路径 `https://shein-bi.dushengyi.xyz/` 由 `outputs/bi-portal/index.html` 承载；V1 已从线上 `/v1/` 下线，只能从 GitHub release tag `2026.06.18-v1-final-archive` 恢复。
+  - V2 是当前正式 BI Portal，根路径 `https://sa.dushengyi.cc/` 由 `outputs/bi-portal/index.html` 承载；V1 已从线上 `/v1/` 下线，只能从 GitHub release tag `2026.06.18-v1-final-archive` 恢复。
   - V1 最终纪念版由 GitHub archive release 固化；后续 BI 页面和生产调度只维护 V2，线上不再提供 V1 入口。
   - 本机 `http://127.0.0.1:8787/` 和局域网 `http://DUSHENGYI-PC2:8787/` 已封存，不再作为正式入口。
   - Metabase 当前部署在云端 Docker 内部，由云端 Nginx/服务配置受控访问，不在 README 写公开裸地址。
@@ -74,7 +74,7 @@
   - `SHEIN-Sales-ETForwarder-0420`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-BI-Daily-Pipeline-0700` 等是本地历史任务，已禁用，保留为回滚/迁移参考。
   - `2026-05-02 07:00` 的 `267014` 是已修复的历史失败记录，保留作排障证据。
 - 团队访问边界：
-  - 当前团队访问转为云端入口 `https://shein-bi.dushengyi.xyz/`，旧 IP `http://43.165.167.135/` 仅作兜底，受 BI 应用内登录和账号权限保护。
+  - 当前团队访问转为云端入口 `https://sa.dushengyi.cc/`，旧 IP `http://43.165.167.135/` 仅作兜底，受 BI 应用内登录和账号权限保护。
   - 本地局域网协作入口已封存；`8787` 服务停止，本地计划任务禁用。
   - 原 Windows 防火墙规则需要管理员权限才能禁用；只要本地没有服务监听 `8787`，局域网不会再打开本地 BI。
   - 同事可标记动作状态、填写负责人和备注；短期仍沿用云端服务侧状态文件，长期应迁入 PostgreSQL，避免文件状态成为单点。
