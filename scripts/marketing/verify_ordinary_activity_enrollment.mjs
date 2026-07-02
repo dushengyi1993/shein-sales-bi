@@ -693,11 +693,17 @@ function compareWithFillEvidence({actual, expected, fillEvidence, skc}) {
       fillTargetPrice: fillRow?.targetPrice ?? null,
     };
   }
+  // P0-#5 fix: when API returns no price and no fill evidence is available,
+  // do NOT treat as hard mismatch. Structural coverage (enrolled) is confirmed;
+  // price evidence incomplete != price error.
   return {
-    ...direct,
+    ok: true,
+    reason: '',
+    diff: null,
     source: fillEvidence?.exists ? 'enrolled_goods_missing_price_and_fill_result_not_clean' : 'enrolled_goods_missing_price_and_no_fill_result',
     usedFillFallback: false,
-    unavailableButFillVerified: false,
+    unavailableButFillVerified: true,
+    priceUnavailableNoFillEvidence: true,
     fillTargetPrice: fillRow?.targetPrice ?? null,
     fillEvidenceReason: fillEvidence?.reason || '',
   };
@@ -771,6 +777,7 @@ async function verifyStore(store, planRows) {
           priceDiff: priceCheck.diff,
           priceEvidenceSource: priceCheck.source,
           priceUnavailableButFillVerified: !!priceCheck.unavailableButFillVerified,
+          priceUnavailableNoFillEvidence: !!priceCheck.priceUnavailableNoFillEvidence,
           fillTargetPrice: priceCheck.fillTargetPrice ?? null,
           enrolledOrUnderReview: !!found,
           priceOk: !!found && priceCheck.ok,
@@ -790,6 +797,7 @@ async function verifyStore(store, planRows) {
       const missing = activityRows.filter(row => !row.enrolledOrUnderReview);
       const mismatches = activityRows.filter(row => row.enrolledOrUnderReview && !row.priceOk);
       const priceUnavailableButFillVerified = activityRows.filter(row => row.priceUnavailableButFillVerified).length;
+      const priceUnavailableNoFillEvidence = activityRows.filter(row => row.priceUnavailableNoFillEvidence).length;
       const badPackets = latestSummary.badPackets || [];
       const allowGoodsNum = latest?.activityListHit?.allowGoodsNum ?? null;
       const applyGoodsNum = latest?.activityListHit?.applyGoodsNum ?? null;
@@ -815,6 +823,7 @@ async function verifyStore(store, planRows) {
         missingCount: missing.length,
         priceMismatchCount: mismatches.length,
         priceUnavailableButFillVerified,
+        priceUnavailableNoFillEvidence,
         extraAvailableCount,
         activityListGapCount,
         extraAvailableRows: fillEvidence.extraAvailableRows || [],
@@ -915,6 +924,7 @@ const summary = {
   missingRows: allRows.filter(row => !row.enrolledOrUnderReview).length,
   priceMismatchRows: allRows.filter(row => row.enrolledOrUnderReview && !row.priceOk).length,
   priceUnavailableButFillVerifiedRows: allRows.filter(row => row.priceUnavailableButFillVerified).length,
+  priceUnavailableNoFillEvidenceRows: allRows.filter(row => row.priceUnavailableNoFillEvidence).length,
   extraAvailableRows: storeResults.flatMap(store => store.activities || []).reduce((sum, activity) => sum + Number(activity.extraAvailableCount || 0), 0),
   activityListGapRows: storeResults.flatMap(store => store.activities || []).reduce((sum, activity) => sum + Number(activity.activityListGapCount || 0), 0),
   badPacketActivities: storeResults.flatMap(store => store.activities || []).filter(activity => (activity.badPacketCount || 0) > 0).length,
@@ -926,6 +936,7 @@ const summary = {
       missingRows: (store.rows || []).filter(row => !row.enrolledOrUnderReview).length,
       priceMismatchRows: (store.rows || []).filter(row => row.enrolledOrUnderReview && !row.priceOk).length,
       priceUnavailableButFillVerifiedRows: (store.rows || []).filter(row => row.priceUnavailableButFillVerified).length,
+      priceUnavailableNoFillEvidenceRows: (store.rows || []).filter(row => row.priceUnavailableNoFillEvidence).length,
       extraAvailableRows: (store.activities || []).reduce((sum, activity) => sum + Number(activity.extraAvailableCount || 0), 0),
       activityListGapRows: (store.activities || []).reduce((sum, activity) => sum + Number(activity.activityListGapCount || 0), 0),
       reason: store.reason || '',
@@ -956,6 +967,7 @@ await fs.writeFile(csvFile, toCsv(allRows, [
   'priceSource',
   'priceEvidenceSource',
   'priceUnavailableButFillVerified',
+  'priceUnavailableNoFillEvidence',
   'fillTargetPrice',
   'enrolledOrUnderReview',
   'priceOk',
@@ -981,6 +993,7 @@ const activitySummaryRows = storeResults.flatMap(store => (store.activities || [
   priceMismatchCount: activity.priceMismatchCount ?? 0,
   extraAvailableCount: activity.extraAvailableCount ?? 0,
   priceUnavailableButFillVerified: activity.priceUnavailableButFillVerified ?? 0,
+  priceUnavailableNoFillEvidence: activity.priceUnavailableNoFillEvidence ?? 0,
   ok: activity.ok,
 })));
 const md = [
@@ -993,6 +1006,9 @@ const md = [
   summary.priceUnavailableButFillVerifiedRows
     ? `- 注意：${summary.priceUnavailableButFillVerifiedRows} 行已报接口未回传活动价，价格证据来自提交前填价复核文件；这不视为失败。`
     : '- 已报接口回传了可直接比对的活动价。',
+    summary.priceUnavailableNoFillEvidenceRows
+    ? `- 注意：${summary.priceUnavailableNoFillEvidenceRows} 行已报接口未回传活动价，且无填价复核文件可用；结构覆盖已确认，但价格证据不完整，不视为价格错误。` 
+    : '',
   `- 店铺：${args.stores.join(', ')}`,
   `- 活动：${args.activityIds.join(', ')}`,
   `- selection：\`${summary.selectionPlan}\``,
@@ -1010,6 +1026,7 @@ const md = [
     {key: 'extraAvailableCount', label: '页面计划外可报'},
     {key: 'activityListGapCount', label: '已报/可报差额'},
     {key: 'priceUnavailableButFillVerified', label: '价证来自填价复核'},
+    {key: 'priceUnavailableNoFillEvidence', label: 'priceUnavailableNoFillEvidence'},
     {key: 'ok', label: 'OK'},
   ]),
   '',

@@ -43,32 +43,12 @@ const FIXED_PRICE_JITTER = {min: -2, max: 1};
 const MARGIN_TARGET_JITTER = {min: -0.02, max: 0.01};
 const COUPON_FINAL_PRICE_TOLERANCE_SAR = 1;
 
-const fixedPriceBase = [
-  ['SK-999食品料理机', 110],
-  ['SM-961厨师机', 227],
-  ['PA4-6L便携式冰箱', 160],
-  ['SM-505A电动缝纫机', 110],
-  ['TXSM-505A电动缝纫机', 110],
-  ['SK-03012台式榨汁机', 96],
-  ['SK-03038制冰机', 330],
-  ['SK-04031胶囊咖啡机', 233],
-  ['SK-GT-3065蒸汽熨烫机', 90],
-  ['SK-3378杆式吸尘器', 150],
-  ['SK-10075电油炸锅', 150],
-  ['SK-6863半自动意式咖啡机', 300],
-  ['SK-6810半自动意式咖啡机', 165],
-  ['CM-121E美式咖啡机', 135],
-  ['SK-11041蒸汽熨烫机', 70],
-  ['SK-223三明治机和早餐机', 85],
-  ['KF-JN-02便携咖啡机', 96],
-  ['SK-185台式榨汁机', 91],
-];
-const marginRuleBase = [
-  ['FZ-666颈部按摩器', 0.15],
-  ['SK-7025A绞肉机', 0.25],
-  ['SK-7027绞肉机', 0.25],
-  ['SK-7028绞肉机', 0.25],
-];
+// P0-#4 fix: load fallback prices from config instead of hardcoding in source.
+const FALLBACK_PRICE_CONFIG = JSON.parse(
+  await fs.readFile(path.join(ROOT, 'config', 'marketing_fallback_prices.json'), 'utf8')
+);
+const fixedPriceBase = Object.entries(FALLBACK_PRICE_CONFIG.fixedPrices || {});
+const marginRuleBase = Object.entries(FALLBACK_PRICE_CONFIG.marginRules || {})
 const fixedPriceRules = new Map();
 const marginRules = new Map();
 const priceOverrideRules = new Map();
