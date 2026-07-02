@@ -238,6 +238,18 @@
 
   - `marketing/build_coupon_import_from_skc_list.py` + `marketing/templates/coupon-import-15pct-template.xlsx`：从 SKC 清单生成 SHEIN 优惠券批量导入模板，供 `submit_coupon_activity_goods.mjs` 上传。
 
+  - `marketing/smoke_marketing_classifiers.mjs`：营销分类器 smoke 测试，覆盖 `classifyCouponEligibilityRow`、`classifyLimitedDiscountCouponStack`、`plannedCouponFactor`、`plannedFinalTargetPrice`、`isOptionalTrafficCouponPlanRow`、`marginTargetsForExposurePolicy`、`pctConfigToRatio` 共 23 个测试用例。
+
+  - `cloud_read_order_files.py`：从云端 `outputs/shein_fetch/<store>/<date>.json` 读取订单商品行，供 `build_marketing_daily_guard_report.mjs` 调用。2026-07-02 从 guard 脚本内联 Python 抽出为独立文件。
+
+- 营销共享模块（2026-07-02 重构新增）：
+
+  - `lib/marketing_plan_selector.mjs`：营销计划选择模块，从 `build_marketing_daily_guard_report.mjs` 抽出。优先使用 `planMetadata` 元数据选择当前基准计划，降级到文件名打分。
+  - `lib/shein_browser.mjs`：共享浏览器交互层（`httpJson`/`sleep`/`isCdpOpen`/`connectStorePage`/`ensureBrowser`/`closeExistingStoreChrome`/`bringStoreWindowToFront`），新脚本 import 即可，不需要 copy-paste。
+  - `lib/marketing_utils.mjs`：共享工具函数（`numberOrNull`/`round2`/`round4`/`floor2`/`normalizeStoreKey`/`compact`/`splitList`/`parseLocalDateTime`/`listFiles`/`readJsonIfExists` 等）。
+  - `config/marketing_fallback_prices.json`：营销填报 fallback 固定价和利润率配置，从 `dsy_marketing_deadline_fill.mjs` 源码硬编码移出。
+  - `config/cloud_marketing_busy_services.json`：云端营销巡检防撞车服务列表，从 `cloud_marketing_live_guard.sh` 硬编码移出。
+
 - OpenAPI 试点：
 
   - `cloud_openapi_reconciliation.sh`：19 店 OpenAPI 销售双跑并行对账入口；默认低并发写入 `fact.openapi_*` / `mart.openapi_sales_reconciliation`，不替换正式销售事实表。

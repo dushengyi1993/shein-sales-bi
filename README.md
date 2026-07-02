@@ -15,7 +15,7 @@
 - **BI 数据判断、开发验收和故障排查只认云端运行时：云端 PostgreSQL warehouse、云端 BI 门户、线上 `/api/bi/section/*`、云端日志和 systemd 状态。仓库里的 `outputs/bi-portal/*` 只是灾备/兼容快照，可能严重过期；不得用它判断当前业务数据、口径正确性或页面性能。**
 - 交给其他 agent 前必须先读 `docs/agent-handoff-cloud-first.md`：GitHub `main` / release 是干净源码基线，但不自动等于云端已部署版本；云端 `/opt/shein-bi/app` 是生产运行权威且有运行差异，不能未经审计直接 `pull/reset/add-all`。
 - 云端部署纪律：禁止长期在云端老 commit 上手动改代码再只发 GitHub。任何云端热修都必须回填 GitHub；任何 GitHub release 后必须明确标注“已部署到云端”或“仅源码基线未部署”；交接前必须核对 `HEAD == origin/main`、工作区无源码脏改、服务验证通过。
-- 当前最新 GitHub 发布边界：`2026.06.24-bi-marketing-rules` 指向 `e7ecc36`，包含流量页 SKC 明细、销售刷新锁、正式域名、部分货号归并和营销报名基线继承 / 整数价微调规则。该 release 只是干净源码恢复边界；业务验收以云端运行态、线上 section API 和 watchdog 为准，不能只看 GitHub tag 或云端 Git HEAD。
+- 当前最新 GitHub 发布边界：`2026.07.02-marketing-system-refactor` 指向 `282b689`，包含营销系统代码审查后的全部修复：verify 价格回读 mismatch 修复、硬编码定价规则移到 config、计划选择 planMetadata 打分、共享浏览器/工具模块、优惠券结构化 couponPolicy 字段、订单审计重复键区分、内联 Python 抽出、BUSY_SERVICES 配置化、smoke 测试补充、guard 计划选择逻辑抽出。回滚点：`2026.07.02-pre-marketing-refactor-backup` 指向 `29dcef5`。业务验收以云端运行态、线上 section API 和 watchdog 为准。
 - HL 已切换为主账号 profile：`profiles/persistent-shein-main-profile`；旧 `profiles/persistent-hl-profile` 已删除。
 - `2026-06-05` 已按用户提供的账号真相修正 LGM 三店 profile / 账号映射：`YJ=profileKey yj/accountNo GS8146729/port 9346`、`XL=profileKey xl/accountNo GS9307061/port 9344`、`QY=profileKey qy/accountNo GS7451160/port 9345`。店铺身份真相以 `config/stores.json`、`config/store_account_truth.json`、浏览器保存账号和实际登录后的店铺名/账号一致为准；不得再沿用 `2026-05-10` 的交叉 profile 结论。
 - `2026-05-09 05:30` 链接/业务域任务、`2026-05-09 07:00` BI 每日流水线和白天滚动后置 BI 刷新是本地 Windows 历史验证记录；自 `2026-05-15` 本地任务封存后，不再作为生产调度。

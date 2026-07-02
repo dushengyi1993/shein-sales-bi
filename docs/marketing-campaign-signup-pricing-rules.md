@@ -493,3 +493,22 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
   - `SA Potential Bestsellers Promo – Batch 39 / 40228`
   - `SA New Arrivals Promo_Batch 39 / 40227`
   已由用户人工提交，后续不要重复处理已提交页。
+
+## 十一、系统重构记录（2026-07-02）
+
+### 代码审查与修复
+
+2026-07-02 对营销系统做了完整代码审查（第一性原理 + 对抗式审查），发现并修复了 12 个问题：
+
+- **P0：verify 价格回读全量 mismatch** — 已报接口不回传活动价且无填价证据时，不再判为 mismatch，改为 priceUnavailableNoFillEvidence，结构覆盖和价格证据完整性分开验收。
+- **P0：硬编码定价规则** — 18 个固定价和 4 个利润率从 dsy_marketing_deadline_fill.mjs 源码移到 config/marketing_fallback_prices.json。
+- **P1：guard 脚本拆分** — 计划选择逻辑抽到 lib/marketing_plan_selector.mjs，guard 从 3,545 行降到 ~3,255 行。
+- **P1：计划选择 planMetadata** — 计划 JSON 有 planMetadata.status=current_baseline 时得 8000 分，supersededBy 非空直接拒绝。
+- **P1：共享浏览器/工具模块** — 新建 lib/shein_browser.mjs 和 lib/marketing_utils.mjs，新脚本 import 即可。
+- **P2：优惠券结构化 couponPolicy** — ow.couponPolicy 字段（	raffic/orbidden/price_guarantee）优先于正则。
+- **P2：订单审计重复键** — 跨活动同 SKC 不同价格不再报为冲突。
+- **P3：内联 Python 抽出** — scripts/cloud_read_order_files.py。
+- **P3：BUSY_SERVICES 配置化** — config/cloud_marketing_busy_services.json。
+- **P3：smoke 测试** — scripts/marketing/smoke_marketing_classifiers.mjs，23 个测试。
+
+回滚点：GitHub release 2026.07.02-pre-marketing-refactor-backup。
