@@ -257,6 +257,8 @@ function psSingleQuote(value) {
 }
 
 function closeExistingStoreChrome(store) {
+  // P3-#11: on Linux/cloud, browser cleanup is handled by cleanup_shein_store_browsers.mjs
+  // This function only handles Windows local profile cleanup.
   if (process.platform !== 'win32') return;
   const profileNeedle = `persistent-${store.profileKey}-profile`;
   const script = [

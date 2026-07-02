@@ -1,0 +1,13 @@
+{
+  "description": "Cloud services that should not be active when marketing live guard runs. No credentials.",
+  "busyServices": [
+    "shein-bi-cloud-today.service",
+    "shein-bi-cloud-yesterday.service",
+    "shein-bi-cloud-et-forwarder.service",
+    "shein-bi-cloud-daily-refresh.service",
+    "shein-bi-cloud-session-manager.service",
+    "shein-bi-cloud-morning-chain.service",
+    "shein-bi-cloud-order-closure.service",
+    "shein-bi-db-backup.service"
+  ]
+}

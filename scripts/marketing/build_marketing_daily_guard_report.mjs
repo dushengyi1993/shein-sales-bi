@@ -40,6 +40,15 @@ import {
   unwrapBiLinksData,
 } from '../../lib/marketing_pricing_policy.mjs';
 
+import {resolveCurrentMarketingPlanPair} from '../../lib/marketing_plan_selector.mjs';
+function readJsonSafe(file) {
+  try {
+    return JSON.parse(fsSync.readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'outputs', 'reports');
 const DEFAULT_MAX_AGE_HOURS = 72;
@@ -154,217 +163,6 @@ function exists(file) {
   return Boolean(file && fsSync.existsSync(file));
 }
 
-function resolveCurrentMarketingPlanPair({
-  targetPlan = '',
-  priceOverrides = '',
-  targetPlanExplicit = false,
-  priceOverridesExplicit = false,
-} = {}) {
-  if (targetPlanExplicit && priceOverridesExplicit) {
-    return {targetPlan, priceOverrides, strategy: 'explicit_both'};
-  }
-  if (targetPlanExplicit) {
-    const inferred = inferPairedMarketingPlanPath(targetPlan, 'selection-plan', 'price-overrides');
-    if (!inferred) throw new Error(`--target-plan was provided but matching price-overrides file was not found: ${targetPlan}`);
-    return {
-      targetPlan,
-      priceOverrides: priceOverrides || inferred,
-      strategy: 'explicit_target_inferred_price',
-    };
-  }
-  if (priceOverridesExplicit) {
-    const inferred = inferPairedMarketingPlanPath(priceOverrides, 'price-overrides', 'selection-plan');
-    if (!inferred) throw new Error(`--price-overrides was provided but matching selection-plan file was not found: ${priceOverrides}`);
-    return {
-      targetPlan: targetPlan || inferred,
-      priceOverrides,
-      strategy: 'explicit_price_inferred_target',
-    };
-  }
-  const current = selectLatestMarketingPlanPair();
-  if (current) return {...current, strategy: 'auto_latest_current_pair'};
-  return {
-    targetPlan: TARGET_PLAN_LEGACY_DEFAULT,
-    priceOverrides: PRICE_OVERRIDES_LEGACY_DEFAULT,
-    strategy: 'legacy_fallback',
-  };
-}
-
-function inferPairedMarketingPlanPath(file, fromToken, toToken) {
-  const base = path.basename(file || '');
-  if (!base.includes(fromToken)) return '';
-  const candidate = path.join(path.dirname(file), base.replace(fromToken, toToken));
-  return exists(candidate) ? candidate : '';
-}
-
-function selectLatestMarketingPlanPair() {
-  if (!fsSync.existsSync(MARKETING_SIGNUP_DIR)) return null;
-  const candidates = [];
-  const rejectedCandidates = [];
-  const enabledStores = enabledStoreKeysForPlanSelection();
-  for (const entry of fsSync.readdirSync(MARKETING_SIGNUP_DIR, {withFileTypes: true})) {
-    if (!entry.isFile() || !/^selection-plan-.*\.json$/i.test(entry.name)) continue;
-    const targetPlan = path.join(MARKETING_SIGNUP_DIR, entry.name);
-    const priceOverrides = inferPairedMarketingPlanPath(targetPlan, 'selection-plan', 'price-overrides');
-    if (!priceOverrides) {
-      rejectedCandidates.push({targetPlan: rel(targetPlan), reason: 'missing_paired_price_overrides'});
-      continue;
-    }
-    const stat = fsSync.statSync(targetPlan);
-    const meta = marketingPlanCandidateMeta(targetPlan, priceOverrides, enabledStores);
-    if (meta.rejectReasons.length) {
-      rejectedCandidates.push({
-        targetPlan: rel(targetPlan),
-        priceOverrides: rel(priceOverrides),
-        rowCount: meta.rowCount,
-        rejectReasons: meta.rejectReasons,
-      });
-      continue;
-    }
-    candidates.push({targetPlan, priceOverrides, ...meta, mtimeMs: stat.mtimeMs});
-  }
-  candidates.sort((a, b) => b.score - a.score || b.mtimeMs - a.mtimeMs || String(a.targetPlan).localeCompare(String(b.targetPlan)));
-  const selected = candidates[0] || null;
-  return selected ? {...selected, rejectedCandidates: rejectedCandidates.slice(0, 50)} : null;
-}
-
-function marketingPlanCandidateMeta(file, priceFile, enabledStores = []) {
-  const name = path.basename(file).toLowerCase();
-  let score = 0;
-  const reasons = [];
-  const rejectReasons = [];
-  const add = (n, reason) => {
-    score += n;
-    reasons.push(`${n}:${reason}`);
-  };
-  const selectionDoc = readJsonSafe(file);
-  const priceDoc = readJsonSafe(priceFile);
-  if (!selectionDoc) rejectReasons.push('selection_parse_failed');
-  if (!priceDoc) rejectReasons.push('price_overrides_parse_failed');
-  if (selectionDoc?.scope?.repairOnly === true || priceDoc?.scope?.repairOnly === true) rejectReasons.push('scope_repair_only');
-  const explicitCurrentBaseline = Boolean(
-    selectionDoc?.baselineForNextOrdinaryActivity
-    || priceDoc?.baselineForNextOrdinaryActivity
-    || selectionDoc?.baselineForLimitedDiscountFallback
-    || priceDoc?.baselineForLimitedDiscountFallback
-  );
-  // P1-#2: prefer planMetadata over filename guessing
-  const planMeta = selectionDoc?.planMetadata || priceDoc?.planMetadata || null;
-  if (planMeta?.status === 'current_baseline' && !planMeta?.supersededBy) {
-    add(8000, 'plan_metadata_current_baseline');
-  }
-  if (planMeta?.supersededBy) {
-    rejectReasons.push('plan_metadata_superseded');
-  }
-  if (planMeta?.activityBatch) {
-    add(500, `plan_metadata_batch_${planMeta.activityBatch}`);
-  }
-  const partialNamePattern = /\bpilot\b|sample|repair-|(?:^|-)jsh(?:-|\.json)|main-no-jsh/i;
-  if (partialNamePattern.test(name) || (name.includes('all-safe') && !explicitCurrentBaseline)) {
-    rejectReasons.push('partial_or_subset_filename');
-  }
-  const rowCount = itemRows(selectionDoc).length;
-  const priceRowCount = itemRows(priceDoc).length;
-  if (rowCount < 100) rejectReasons.push(`too_few_selection_rows_${rowCount}`);
-  if (priceRowCount < 100) rejectReasons.push(`too_few_price_rows_${priceRowCount}`);
-  if (rowCount !== priceRowCount) rejectReasons.push(`row_count_mismatch_${rowCount}_${priceRowCount}`);
-  const storeCoverage = storeCoverageFromPlan(selectionDoc);
-  if (enabledStores.length && !sameSet(storeCoverage, enabledStores)) {
-    rejectReasons.push(`store_coverage_mismatch_${storeCoverage.length}_of_${enabledStores.length}`);
-  }
-  const alignment = planKeyAlignment(selectionDoc, priceDoc);
-  if (!alignment.ok) rejectReasons.push(`key_alignment_mismatch_missingPrice_${alignment.missingPrice}_missingSelection_${alignment.missingSelection}`);
-  if (rowCount >= 500) add(300, `full_rows_${rowCount}`);
-  else if (rowCount >= 100) add(100, `medium_rows_${rowCount}`);
-  else add(-500, `partial_rows_${rowCount}`);
-  if (explicitCurrentBaseline) add(5000, 'explicit_current_baseline');
-  if (name.includes('repaired')) add(500, 'repaired');
-  // 2026-06-14 后优惠券不再是保底价层。每日 guard 必须优先使用
-  // 已迁移到“不配券 / 普通活动或限时折扣直接保底”的最新全量计划；
-  // 否则旧 all-934/coupon-visible 计划会把 6/16 之后已报的新 SKC
-  // 误判成未覆盖候选，进而诱发重复限时折扣兜底。
-  if (name.includes('no-coupon')) add(1000, 'post_coupon_non_guaranteed_no_coupon_plan');
-  if (name.includes('45162-45163')) add(350, 'latest_45162_45163_executed_plan');
-  if (name.includes('user-remarks') || name.includes('userremarks')) add(200, 'user_remark_adjusted_plan');
-  if (name.includes('gapfill7')) add(150, 'latest_live_gapfill7_plan');
-  if (name.includes('include-excluded-approved')) add(450, 'include_excluded_approved');
-  if (name.includes('t3-plus45488')) add(250, 't3_plus45488');
-  if (name.includes('coupon-visible')) add(100, 'coupon_visible');
-  if (name.includes('all-934')) add(250, 'all_934_current_approved');
-  if (name.includes('43914-gapfill-high-exposure')) add(180, 'includes_43914_gapfill_high_exposure');
-  if (name.includes('all-925')) add(-100, 'superseded_all_925');
-  if (name.includes('all-919')) add(-200, 'superseded_all_919');
-  if (name.includes('all-ready')) add(-700, 'legacy_all_ready');
-  if (name.includes('pilot')) add(-700, 'pilot_partial');
-  if (name.includes('repair-')) add(-650, 'repair_only');
-  if (name.includes('-jsh')) add(-300, 'jsh_subset');
-  if (name.includes('main-no-jsh')) add(-300, 'main_no_jsh_subset');
-  if (name.includes('all-safe')) add(explicitCurrentBaseline ? 100 : -150, explicitCurrentBaseline ? 'current_baseline_all_safe' : 'pre_approved_safe_subset');
-  return {score, rowCount, priceRowCount, storeCoverage, keyAlignment: alignment, scoreReasons: reasons, rejectReasons};
-}
-
-function readJsonSafe(file) {
-  try {
-    return JSON.parse(fsSync.readFileSync(file, 'utf8'));
-  } catch {
-    return null;
-  }
-}
-
-function itemRows(doc) {
-  if (Array.isArray(doc?.items)) return doc.items;
-  if (Array.isArray(doc?.selection)) return doc.selection;
-  if (Array.isArray(doc?.rows)) return doc.rows;
-  return [];
-}
-
-function planRows(doc) {
-  return itemRows(doc).filter(row => row && typeof row === 'object');
-}
-
-function storeCoverageFromPlan(doc) {
-  const declared = Array.isArray(doc?.scope?.storeKeys) ? doc.scope.storeKeys
-    : (Array.isArray(doc?.stores) ? doc.stores : []);
-  const fromRows = itemRows(doc).map(row => row?.storeKey || row?.store || '').filter(Boolean);
-  return [...new Set([...declared, ...fromRows].map(normalizeStoreKeyForPlanSelection).filter(Boolean))].sort();
-}
-
-function enabledStoreKeysForPlanSelection() {
-  try {
-    const doc = JSON.parse(fsSync.readFileSync(STORES_CONFIG_DEFAULT, 'utf8'));
-    return (doc.stores || []).filter(s => s.enabled !== false).map(s => normalizeStoreKeyForPlanSelection(s.storeKey)).filter(Boolean).sort();
-  } catch {
-    return [];
-  }
-}
-
-function planKeyAlignment(selectionDoc, priceDoc) {
-  const selectionKeys = new Set(itemRows(selectionDoc).map(planRowKey).filter(Boolean));
-  const priceKeys = new Set(itemRows(priceDoc).map(planRowKey).filter(Boolean));
-  let missingPrice = 0;
-  let missingSelection = 0;
-  for (const key of selectionKeys) if (!priceKeys.has(key)) missingPrice += 1;
-  for (const key of priceKeys) if (!selectionKeys.has(key)) missingSelection += 1;
-  return {ok: missingPrice === 0 && missingSelection === 0 && selectionKeys.size > 0, selectionKeys: selectionKeys.size, priceKeys: priceKeys.size, missingPrice, missingSelection};
-}
-
-function planRowKey(row) {
-  const storeKey = normalizeStoreKeyForPlanSelection(row?.storeKey || row?.store);
-  const activityId = Number(row?.activityId || row?.activity_id || 0);
-  const skc = String(row?.skc || row?.SKC || '').trim();
-  return storeKey && activityId && skc ? `${storeKey}__${activityId}__${skc}` : '';
-}
-
-function normalizeStoreKeyForPlanSelection(value) {
-  return String(value || '').trim().toUpperCase();
-}
-
-function sameSet(a = [], b = []) {
-  if (a.length !== b.length) return false;
-  const aa = [...a].sort();
-  const bb = [...b].sort();
-  return aa.every((value, idx) => value === bb[idx]);
-}
 
 function parseLocalDateTime(value) {
   const s = String(value || '').trim();
@@ -1543,125 +1341,8 @@ async function readCloudSheinFetchOrderRows({
   if (!validation.ok) return base;
   const safeStores = [...new Set((stores || []).map(normKey).filter(store => /^[A-Z0-9_-]+$/.test(store)))].sort();
   const safeDates = [...new Set((dates || []).filter(date => /^\d{4}-\d{2}-\d{2}$/.test(date)))].sort().reverse();
-  const remoteScript = String.raw`
-import json, os, sys
-
-root = sys.argv[1].rstrip('/')
-stores = [s for s in sys.argv[2].split(',') if s]
-dates = [d for d in sys.argv[3].split(',') if d]
-
-def pick(d, *keys):
-    if not isinstance(d, dict):
-        return None
-    for key in keys:
-        if key in d and d.get(key) not in (None, ''):
-            return d.get(key)
-    return None
-
-def normalize_row(row, order, store, date):
-    merged = {}
-    if isinstance(order, dict):
-        merged.update(order)
-    if isinstance(row, dict):
-        merged.update(row)
-    return {
-        'storeKey': pick(merged, 'storeKey', 'store', 'store_key') or store,
-        'date': date,
-        'orderNo': pick(merged, 'orderNo', 'billno', 'order_no'),
-        'billno': pick(merged, 'billno', 'orderNo', 'order_no'),
-        'orderCreateTime': pick(merged, 'orderCreateTime', 'order_create_time'),
-        'orderCustomerTime': pick(merged, 'orderCustomerTime', 'order_customer_time'),
-        'allocateTimeFull': pick(merged, 'allocateTimeFull', 'g_zcs_allocateTime'),
-        'allocateTime': pick(merged, 'allocateTime'),
-        'skc': pick(merged, 'skc', 'skcName', 'skc_name'),
-        'goodsSn': pick(merged, 'goodsSn', 'goods_sn', 'standardGoodsSn'),
-        'skuCode': pick(merged, 'skuCode', 'sku_code'),
-        'skuSn': pick(merged, 'skuSn', 'sku_sn'),
-        'suffix': pick(merged, 'suffix'),
-        'entityId': pick(merged, 'entityId'),
-        'goodsId': pick(merged, 'goodsId'),
-        'orderId': pick(merged, 'orderId', 'id'),
-        'goodsTitle': pick(merged, 'goodsTitle', 'goods_title', 'productName'),
-        'number': pick(merged, 'number', 'quantity', 'goodsNumber', 'goods_number'),
-        'currencyPrice': pick(merged, 'currencyPrice', 'currency_price'),
-        'currencyCode': pick(merged, 'currencyCode', 'currency', 'currency_code'),
-        'isValidSale': pick(merged, 'isValidSale', 'validSale'),
-        'salesExclusionReason': pick(merged, 'salesExclusionReason'),
-        'orderStatus': pick(merged, 'orderStatus'),
-        'orderStatusDesc': pick(merged, 'orderStatusDesc'),
-        'performStatus': pick(merged, 'performStatus'),
-        'performStatusDesc': pick(merged, 'performStatusDesc'),
-        'goodsPerformanceStatus': pick(merged, 'goodsPerformanceStatus'),
-        'goodsPerformanceStatusDesc': pick(merged, 'goodsPerformanceStatusDesc'),
-        'newOrderGoodsStatus': pick(merged, 'newOrderGoodsStatus'),
-        'performanceTag': pick(merged, 'performanceTag'),
-        'site': pick(merged, 'site'),
-    }
-
-def extract_rows(doc, store, date):
-    rows = []
-    goods_rows = doc.get('goodsRows') if isinstance(doc, dict) else None
-    if isinstance(goods_rows, list):
-        for row in goods_rows:
-            if isinstance(row, dict):
-                rows.append(normalize_row(row, {}, store, date))
-    if rows:
-        return rows
-    orders = doc.get('orders') if isinstance(doc, dict) else None
-    if not isinstance(orders, list):
-        return rows
-    for order in orders:
-        if not isinstance(order, dict):
-            continue
-        groups = order.get('groupList') or order.get('groups') or []
-        if not isinstance(groups, list):
-            continue
-        for group in groups:
-            if not isinstance(group, dict):
-                continue
-            goods_list = group.get('goodsList') or group.get('goods_rows') or group.get('goodsRows') or []
-            if not isinstance(goods_list, list):
-                continue
-            for row in goods_list:
-                if isinstance(row, dict):
-                    rows.append(normalize_row(row, order, store, date))
-    return rows
-
-out = {'files': []}
-for store in stores:
-    for date in dates:
-        remote_path = os.path.join(root, 'outputs', 'shein_fetch', store, date + '.json')
-        item = {
-            'storeKey': store,
-            'date': date,
-            'remotePath': remote_path,
-            'exists': os.path.exists(remote_path),
-            'ok': False,
-            'fetchTime': '',
-            'start': '',
-            'end': '',
-            'docStoreKey': '',
-            'rows': [],
-            'rowCount': 0,
-        }
-        if not item['exists']:
-            out['files'].append(item)
-            continue
-        try:
-            with open(remote_path, 'r', encoding='utf-8') as fh:
-                doc = json.load(fh)
-            item['ok'] = True
-            item['fetchTime'] = doc.get('fetchTime') or ''
-            item['start'] = doc.get('start') or ''
-            item['end'] = doc.get('end') or ''
-            item['docStoreKey'] = doc.get('storeKey') or ''
-            item['rows'] = extract_rows(doc, store, date)
-            item['rowCount'] = len(item['rows'])
-        except Exception as exc:
-            item['error'] = str(exc)
-        out['files'].append(item)
-print(json.dumps(out, ensure_ascii=False))
-`;
+  const remoteScriptPath = path.join(ROOT, 'scripts', 'cloud_read_order_files.py');
+  const remoteScript = fsSync.readFileSync(remoteScriptPath, 'utf8');
   const command = [
     'python3',
     '-c',
@@ -1915,7 +1596,11 @@ function buildOrderTargetPlanIndex(priceOverridesDoc, priceOverridesSourcePath =
       const existing = bySkc.get(key);
       const priceDiffers = Math.abs(Number(existing.finalTargetPrice ?? NaN) - Number(item.finalTargetPrice ?? NaN)) > 0.01;
       const couponDiffers = Math.abs(Number(existing.couponFactor ?? NaN) - Number(item.couponFactor ?? NaN)) > 0.001;
-      if (priceDiffers || couponDiffers) {
+      // P2-#7: only report as conflict if same activityId has different price.
+      // Same SKC in different activities (e.g. 46353 vs 46354) with different prices
+      // is expected, not a conflict.
+      const sameActivity = String(existing.activityId || '') === String(item.activityId || '');
+      if ((priceDiffers || couponDiffers) && sameActivity) {
         duplicateConflicts.push({
           key,
           existing: {
@@ -3419,14 +3104,14 @@ async function main() {
     sourceWarnings.push({
       code: 'order_target_plan_duplicate_conflicts',
       label: 'orderPriceAudit',
-      message: `目标价计划存在 ${orderPriceAudit.cloud.duplicatePlanConflictCount} 个重复 storeKey+skc 且关键目标不同；订单审计已保守使用最高 finalTargetPrice，仍需清理计划`,
+      message: `目标价计划存在 ${orderPriceAudit.cloud.duplicatePlanConflictCount} 个同活动内重复 storeKey+skc 且目标价不同；订单审计已保守使用最高 finalTargetPrice，仍需清理计划`,
       evidence: {conflicts: orderPriceAudit.cloud.duplicatePlanConflicts.slice(0, 20), planSourcePath: orderPriceAudit.cloud.planSourcePath},
     });
   } else if (orderPriceAudit.cloud.duplicatePlanKeys.length > 0) {
     contextWarnings.push({
       code: 'order_target_plan_duplicate_keys_same_target',
       label: 'orderPriceAudit',
-      message: `目标价计划存在 ${orderPriceAudit.cloud.duplicatePlanKeys.length} 个重复 storeKey+skc，但未发现 finalTargetPrice/couponFactor 冲突；后续应清理`,
+      message: `目标价计划存在 ${orderPriceAudit.cloud.duplicatePlanKeys.length} 个跨活动重复 storeKey+skc（不同 activityId），这是正常的同款多活动报名，不需要清理`,
       evidence: {duplicateKeys: orderPriceAudit.cloud.duplicatePlanKeys.slice(0, 20), planSourcePath: orderPriceAudit.cloud.planSourcePath},
     });
   }

@@ -15,7 +15,14 @@ GUARD_MAX_AGE_HOURS="${SHEIN_BI_MARKETING_LIVE_GUARD_MAX_AGE_HOURS:-96}"
 GUARD_CLOUD_BI_SSH="${SHEIN_BI_MARKETING_LIVE_CLOUD_BI_SSH:-local}"
 GUARD_CLOUD_BI_ROOT="${SHEIN_BI_MARKETING_LIVE_CLOUD_BI_ROOT:-$ROOT}"
 MIN_AVAILABLE_MEM_MIB="${SHEIN_BI_MARKETING_LIVE_MIN_AVAILABLE_MEM_MIB:-2200}"
-BUSY_SERVICES="${SHEIN_BI_MARKETING_LIVE_BUSY_SERVICES:-shein-bi-cloud-today.service shein-bi-cloud-yesterday.service shein-bi-cloud-et-forwarder.service shein-bi-cloud-daily-refresh.service shein-bi-cloud-session-manager.service shein-bi-cloud-morning-chain.service shein-bi-cloud-order-closure.service shein-bi-db-backup.service}"
+# P3-#9: load busy services from config file, fallback to env var or hardcoded default
+BUSY_SERVICES_CONFIG="$ROOT/config/cloud_marketing_busy_services.json"
+if [[ -z "${SHEIN_BI_MARKETING_LIVE_BUSY_SERVICES:-}" ]] && [[ -f "$BUSY_SERVICES_CONFIG" ]]; then
+  BUSY_SERVICES="$(python3 -c "import json; print(' '.join(json.load(open('$BUSY_SERVICES_CONFIG')).get('busyServices',[])))" 2>/dev/null)"
+fi
+if [[ -z "$BUSY_SERVICES" ]]; then
+  BUSY_SERVICES="${SHEIN_BI_MARKETING_LIVE_BUSY_SERVICES:-shein-bi-cloud-today.service shein-bi-cloud-yesterday.service shein-bi-cloud-et-forwarder.service shein-bi-cloud-daily-refresh.service shein-bi-cloud-session-manager.service shein-bi-cloud-morning-chain.service shein-bi-cloud-order-closure.service shein-bi-db-backup.service}"
+fi
 
 resolve_today() {
   TZ="$TZ_NAME" date +%F
