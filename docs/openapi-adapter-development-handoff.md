@@ -43,6 +43,8 @@ node scripts/bi_ops_cli.mjs publish-standard --store FY --category <末级分类
 node scripts/bi_ops_cli.mjs shelf-quota --store FY [--mode execute]
 node scripts/bi_ops_cli.mjs order-fulfillment --operation export-address --store FY --order-no <订单号>
 node scripts/bi_ops_cli.mjs openapi-call --doc-id <docId> --store FY --body-json '{}'
+node scripts/bi_ops_cli.mjs openapi-call --doc-id <GET docId> --store FY --query-json '{"id":"..."}'
+node scripts/bi_ops_cli.mjs openapi-catalog-plan --format summary [--out plan.json]
 ```
 
 默认 `dry-run`。`execute` 规则：
@@ -52,6 +54,7 @@ node scripts/bi_ops_cli.mjs openapi-call --doc-id <docId> --store FY --body-json
 - 订单履约使用独立确认文本 `SHEIN_ORDER_FULFILLMENT_SUBMIT`。
 - 目录驱动写接口使用 `SHEIN_OPENAPI_GENERIC_WRITE_SUBMIT`。
 - 自动运营页受控写仍使用 `SHEIN_OPENAPI_SUBMIT` 和任务审计链路。
+- `openapi-catalog-plan` 只读本地官方目录和 schema，不联网、不需要店铺密钥，用于把所有官方接口归入：已专用/并行、JSON GET、JSON POST/写、文件专用、WebHook 设计态、当前范围外。
 
 ## 4. 适配器模式
 
@@ -69,8 +72,9 @@ JSON 接口使用 `SheinOpenApiClient.request()`；multipart/file 接口使用 `
 - 默认 dry-run 不联网；execute 必须显式要求。
 - 所有 execute 前必须校验店铺身份，不能只相信 CLI `--store`。
 - 写操作必须 dry-run → 人工确认 → payload hash 锁定 → execute → 审计/回读。
-- `openapi-call` 只是 JSON 兜底，不替代高频/高风险接口专用适配器。
-- WebHook 当前仅设计未启用；真实开发必须先做验签、解密、幂等和落库。
+- `openapi-call` 只是 JSON 兜底，不替代高频/高风险接口专用适配器；GET 接口必须用 `--query-json/--query-file`，POST 接口用 `--body-json/--body-file`。
+- `openapi-call` 会读取离线详情 schema 检测 `blob/file/multipart`，文件接口会被阻断并要求专用 adapter。
+- WebHook 当前仅设计未启用，本轮没有开发 receiver；真实开发必须先做验签、解密、幂等和落库。
 
 ## 6. 官方 schema 证据
 
@@ -89,8 +93,8 @@ node scripts/generate_api_schema_index.mjs
 ## 7. 后续开发路线
 
 - 高频换图/上新/回读继续走专用 adapter，并接入 `test_bi_ops_release_gate.mjs`。
-- 合规、RRP、采购单等低频 JSON 接口可先用 `openapi-call` 验证，再沉淀专用 adapter。
-- 文件上传、批量导入、WebHook 不走 `openapi-call`；必须单独实现并测试边界。
+- 合规、RRP、采购单等低频 JSON 接口可先用 `openapi-call` 验证，再沉淀专用 adapter；执行前先用 `openapi-catalog-plan` 看该 docId 所属 lane。
+- 文件上传、批量导入、WebHook 不走 `openapi-call`；必须单独实现并测试边界。当前本地 catalog 口径：239 个官方条目中，15 个低频 GET JSON、90 个低频 POST/写 JSON 可由目录兜底预检，5 个文件接口要求专用 adapter，22 个 WebHook 保持设计态，75 个当前范围外。
 - 对任何真实写新增能力，先补 fake OpenAPI 测试，再考虑真实 execute。
 
 ## 8. 发版检查

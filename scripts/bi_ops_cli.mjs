@@ -56,6 +56,9 @@ function parseArgs(argv) {
     outputFile: '',
     openapiConfigFile: '',
     openapiStoreTruthFile: '',
+    format: '',
+    queryJson: '',
+    queryFile: '',
     categoryId: '',
     pageNum: 1,
     pageSize: 10,
@@ -112,6 +115,7 @@ function parseArgs(argv) {
     else if (a === '--image-type' || a === '--type') args.imageType = Number(argv[++i] || 0);
     else if (a === '--image-dir' || a === '--dir') args.imageDir = path.resolve(String(argv[++i] || ''));
     else if (a === '--out' || a === '--output') args.outputFile = path.resolve(String(argv[++i] || ''));
+    else if (a === '--format') args.format = String(argv[++i] || '').trim();
     else if (a === '--openapi-config') args.openapiConfigFile = path.resolve(String(argv[++i] || ''));
     else if (a === '--store-truth' || a === '--openapi-store-truth') args.openapiStoreTruthFile = path.resolve(String(argv[++i] || ''));
     else if (a === '--category' || a === '--category-id') args.categoryId = String(argv[++i] || '').trim();
@@ -134,6 +138,8 @@ function parseArgs(argv) {
     else if (a === '--endpoint') args.endpoint = String(argv[++i] || '').trim();
     else if (a === '--body-json') args.bodyJson = String(argv[++i] || '');
     else if (a === '--body-file') args.bodyFile = path.resolve(String(argv[++i] || ''));
+    else if (a === '--query-json') args.queryJson = String(argv[++i] || '');
+    else if (a === '--query-file') args.queryFile = path.resolve(String(argv[++i] || ''));
     else if (a === '--help' || a === '-h') {
       args.command = 'help';
     } else if (!args.command) {
@@ -207,6 +213,8 @@ Usage:
   node scripts/bi_ops_cli.mjs shelf-quota --store FY [--mode dry-run|execute]
   node scripts/bi_ops_cli.mjs order-fulfillment --operation export-address --store FY --order-no <order>
   node scripts/bi_ops_cli.mjs openapi-call --doc-id <docId> --store FY --body-json '{}'
+  node scripts/bi_ops_cli.mjs openapi-call --doc-id <GET docId> --store FY --query-json '{"id":"..."}'
+  node scripts/bi_ops_cli.mjs openapi-catalog-plan --format summary [--out plan.json]
   node scripts/bi_ops_cli.mjs tasks
   node scripts/bi_ops_cli.mjs create --text "把 520a 在 DL 生成下架预检" --stores DL --products 520a
   node scripts/bi_ops_cli.mjs create --text "复制 CX 的 SM-961 到 HL" --source-stores CX --target-stores HL --products SM-961
@@ -245,7 +253,8 @@ Safety:
   - upload-pic / transform-pic 委托本地 OpenAPI 图片工具；默认 dry-run，execute 会先做店铺身份探针。
   - audit-status / search-product / publish-standard 是只读 OpenAPI 工具；默认 dry-run，execute 会先做店铺身份探针。
   - order-fulfillment 是高风险订单履约工具；execute 必须额外提供确认文本和 dry-run payload hash。
-  - openapi-call 是目录驱动 JSON 兜底工具；文件上传/WebHook 会被阻断，写接口 execute 必须确认文本和 payload hash。
+  - openapi-call 是目录驱动 JSON 兜底工具；GET 用 --query-json/--query-file，POST 用 --body-json/--body-file；文件上传/WebHook 会被阻断，写接口 execute 必须确认文本和 payload hash。
+  - openapi-catalog-plan 只读取本地官方目录/schema，输出全量接口归位矩阵，不联网、不启用 WebHook receiver。
   - 所有任务创建/预检/执行/审计都走云端账号权限和审计。
   - execute 仍需服务端确认任务已预检通过，并且确认文本精确匹配。
   - resolve 只用于已提交待回读/需人工处理任务的人工核销；服务端只允许全店管理账号执行。`;
@@ -720,6 +729,16 @@ async function runOrderFulfillmentExecutor(args) {
   process.exitCode = result.code || 0;
 }
 
+async function runCatalogPlan(args) {
+  const commandArgs = ['plan'];
+  if (args.format) commandArgs.push('--format', args.format);
+  if (args.outputFile) commandArgs.push('--out', args.outputFile);
+  const result = await runLocalNodeScript('scripts/openapi_catalog_executor.mjs', commandArgs);
+  process.stdout.write(result.stdout);
+  process.stderr.write(result.stderr);
+  if (result.code !== 0) throw new Error(`openapi_catalog_executor plan failed with code ${result.code}`);
+}
+
 async function runCatalogExecutor(args) {
   const store = [...new Set([...(args.stores || []), ...(args.writeStores || [])])][0] || '';
   if (!store) throw new Error('openapi-call requires --store <店铺>');
@@ -729,6 +748,8 @@ async function runCatalogExecutor(args) {
   if (args.endpoint) commandArgs.push('--endpoint', args.endpoint);
   if (args.bodyFile) commandArgs.push('--body-file', args.bodyFile);
   else commandArgs.push('--body-json', args.bodyJson || '{}');
+  if (args.queryFile) commandArgs.push('--query-file', args.queryFile);
+  else if (args.queryJson) commandArgs.push('--query-json', args.queryJson);
   if (args.confirm) commandArgs.push('--confirm', args.confirm);
   if (args.payloadHash) commandArgs.push('--payload-hash', args.payloadHash);
   if (args.openapiConfigFile) commandArgs.push('--config', args.openapiConfigFile);
@@ -813,6 +834,10 @@ async function main() {
   }
   if (args.command === 'order-fulfillment' || args.command === 'order_fulfillment') {
     await runOrderFulfillmentExecutor(args);
+    return;
+  }
+  if (args.command === 'openapi-catalog-plan' || args.command === 'openapi_catalog_plan') {
+    await runCatalogPlan(args);
     return;
   }
   if (args.command === 'openapi-call' || args.command === 'openapi_call') {

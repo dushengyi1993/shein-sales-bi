@@ -41,13 +41,16 @@ node scripts/bi_ops_cli.mjs publish-standard --store FY --category <末级分类
 node scripts/bi_ops_cli.mjs shelf-quota --store FY [--mode execute]
 node scripts/bi_ops_cli.mjs order-fulfillment --operation export-address --store FY --order-no <订单号>
 node scripts/bi_ops_cli.mjs openapi-call --doc-id <docId> --store FY --body-json '{}'
+node scripts/bi_ops_cli.mjs openapi-call --doc-id <GET docId> --store FY --query-json '{"id":"..."}'
+node scripts/bi_ops_cli.mjs openapi-catalog-plan --format summary [--out plan.json]
 ```
 
 默认均为 `dry-run`。真实 `execute` 的边界：
 
 - 图片上传/外链转换/只读回读：execute 前校验店铺身份。
 - 订单履约：必须 `--confirm SHEIN_ORDER_FULFILLMENT_SUBMIT` + dry-run `payloadHash` + 店铺身份探针。
-- 目录驱动 `openapi-call`：只支持官方 JSON OpenAPI；写接口必须 `--confirm SHEIN_OPENAPI_GENERIC_WRITE_SUBMIT` + dry-run `payloadHash`；multipart/file/WebHook 被阻断。
+- 目录驱动 `openapi-call`：只支持官方 JSON OpenAPI；GET 用 `--query-json/--query-file`，POST 用 `--body-json/--body-file`；写接口必须 `--confirm SHEIN_OPENAPI_GENERIC_WRITE_SUBMIT` + dry-run `payloadHash`；multipart/file/WebHook 被阻断。
+- `openapi-catalog-plan`：只读本地官方目录和详情 schema，输出所有接口的归位矩阵，不联网、不需要店铺密钥、不启用 WebHook receiver。
 - 自动运营页已有写链路仍使用 `SHEIN_OPENAPI_SUBMIT`、真实写白名单、任务 `waiting_review`、审计和回读，不被 CLI 兜底命令绕过。
 
 ### 2.3 已落地适配器与测试
@@ -59,7 +62,7 @@ node scripts/bi_ops_cli.mjs openapi-call --doc-id <docId> --store FY --body-json
 | 图包角色规划 | `lib/link_ops_image_role_planner.mjs` | `scripts/test_link_ops_image_role_planner.mjs` |
 | 审核状态/商品查询/发品规范/上架额度 | `lib/openapi_adapters/query_*.mjs`, `search_product.mjs`, `scripts/openapi_readonly_executor.mjs` | `scripts/test_openapi_readonly_executor.mjs` |
 | 订单履约 | `lib/openapi_adapters/order_fulfillment.mjs`, `scripts/openapi_order_fulfillment_executor.mjs` | `scripts/test_openapi_order_fulfillment_executor.mjs` |
-| 目录驱动 JSON 兜底 | `scripts/openapi_catalog_executor.mjs` | `scripts/test_openapi_catalog_executor.mjs` |
+| 目录驱动 JSON 兜底 + 全量 catalog 归位矩阵 | `scripts/openapi_catalog_executor.mjs` | `scripts/test_openapi_catalog_executor.mjs` |
 
 ---
 
@@ -99,8 +102,9 @@ node scripts/generate_api_schema_index.mjs
 优先级从“专用适配器”到“目录驱动兜底”：
 
 1. 高频、高风险、需要业务回读的接口，继续新增 `lib/openapi_adapters/<name>.mjs` + 专用 executor + fake OpenAPI 测试。
-2. 低频 JSON 接口可先用 `openapi-call` dry-run 验证 schema；确认稳定后再沉淀专用适配器。
-3. WebHook 不要直接接飞书群：先做云端 receiver，完成验签、解密、幂等、落库和快速 2xx，再由云端机器人转发飞书通知。
+2. 低频 JSON 接口可先用 `openapi-catalog-plan` 判断 lane，再用 `openapi-call` dry-run 验证 schema；确认稳定后再沉淀专用适配器。
+3. 文件上传、批量导入和含 `blob/file/multipart` 的接口不得走 `openapi-call`；当前 catalog 计划会把它们标为 `dedicated_file_adapter_required`。
+4. WebHook 不要直接接飞书群：先做云端 receiver，完成验签、解密、幂等、落库和快速 2xx，再由云端机器人转发飞书通知。本轮未开发、未启用 receiver。
 4. 订单履约、采购单、RRP、合规证书等真实写动作，必须保留 dry-run hash、确认文本、店铺身份探针和人工审计。
 
 ---
