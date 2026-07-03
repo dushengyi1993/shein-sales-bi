@@ -1,0 +1,201 @@
+{
+  "docId": "3001312",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查shein合作物流预估运费",
+    "userDocName": "查shein合作物流预估运费",
+    "endpoint": "/open-api/openapi-business-backend/purchase-estimated-fee",
+    "method": "POST",
+    "docName": "post_open-api_openapi-business-backend_purchase-estimated-fee",
+    "version": 2,
+    "updateTime": "2025-07-21 15:35:34",
+    "changeContent": "新上接口",
+    "qpsContent": "50",
+    "modes": [
+      2,
+      3,
+      8
+    ],
+    "modeNames": [
+      "全托管",
+      "SHEIN自营",
+      "POP"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "通过该接口查询shein合作物流的预估运费，适用于全托管、shein自营模式；",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "addressId",
+        "type": "integer",
+        "required": true,
+        "description": "发货地址id；从发货基本信息查询接口中获取；"
+      },
+      {
+        "name": "agedProductCode",
+        "type": "string",
+        "required": true,
+        "description": "时效产品编码；从物流产品查询接口获取；"
+      },
+      {
+        "name": "expressInfoList",
+        "type": "object",
+        "required": true,
+        "description": "查询物流公司信息；建议入参该时效产品下的所有物流公司；",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "companyCode",
+            "type": "string",
+            "required": true,
+            "description": "物流公司编码；从物流产品查询接口companyCode字段获取；"
+          },
+          {
+            "name": "isRecommend",
+            "type": "boolean",
+            "required": true,
+            "description": "是否推荐物流公司；若物流公司是推荐物流的情况下必传；不传或乱传会影响费用的查询结果，但不会影响实际下单的费用）；"
+          }
+        ]
+      },
+      {
+        "name": "orderNoList",
+        "type": "string",
+        "required": true,
+        "description": "订单号列表；全托管的场景该字段必填；",
+        "multiple": 1
+      },
+      {
+        "name": "orderType",
+        "type": "integer",
+        "required": true,
+        "description": "订单类型；1:急采/ 2:备货"
+      },
+      {
+        "name": "weight",
+        "type": "double",
+        "required": true,
+        "description": "重量；单位kg，支持小数点后4位；取实物克重或抛重的最大值计算；"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "成功：0"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "成功：OK"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "description": "返回的查询信息",
+        "children": [
+          {
+            "name": "successList",
+            "type": "object",
+            "description": "查询成功的物流公司",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "companyCode",
+                "type": "string",
+                "description": "物流公司编码"
+              },
+              {
+                "name": "convertedEstimatedDeduction",
+                "type": "double",
+                "description": "预估扣款，2位小数；预估运费=预估扣款（convertedEstimatedDeduction）-平台权益免扣金额（rightsExemptionAmount）；"
+              },
+              {
+                "name": "currency",
+                "type": "string",
+                "description": "币种"
+              },
+              {
+                "name": "exemptionAmount",
+                "type": "double",
+                "description": "平台权益免扣金额"
+              },
+              {
+                "name": "isRecommend",
+                "type": "boolean",
+                "description": "是否推荐物流"
+              },
+              {
+                "name": "rightsType",
+                "type": "integer",
+                "description": "平台权益免扣类型"
+              }
+            ]
+          },
+          {
+            "name": "failedList",
+            "type": "object",
+            "description": "预估运费查询失败列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "code",
+                "type": "string",
+                "description": "错误编码"
+              },
+              {
+                "name": "companyCode",
+                "type": "string",
+                "description": "物流公司编码"
+              },
+              {
+                "name": "reason",
+                "type": "string",
+                "description": "失败原因"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.cn/open-api/idms/review-orders' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1753080399011' \\ --data-raw '{ \"agedProductCode\": \"SNV\", \"weight\": \"19.80\", \"orderType\": 1, \"addressId\": 21189702, \"orderNoList\": [ \"PB2506250000027\" ], \"expressInfoList\": [ { \"companyCode\": \"chemen\", \"isRecommend\": true }, { \"companyCode\": \"kuayue\", \"isRecommend\": false }, { \"companyCode\": \"TMS-anjun\", \"isRecommend\": false }, { \"companyCode\": \"EULOG\", \"isRecommend\": false } ] }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"successList\": [], \"failedList\": [ { \"code\": \"COSTESTIMATION0003\", \"companyCode\": \"chemen\", \"reason\": \"获取物流运费失败\" }, { \"code\": \"COSTESTIMATION0003\", \"companyCode\": \"kuayue\", \"reason\": \"获取物流运费失败\" }, { \"code\": \"COSTESTIMATION0003\", \"companyCode\": \"TMS-anjun\", \"reason\": \"获取物流运费失败\" }, { \"code\": \"COSTESTIMATION0003\", \"companyCode\": \"EULOG\", \"reason\": \"获取物流运费失败\" } ] }, \"traceId\": \"c2a98c0db5911d25\" }",
+  "errorCode": null
+}

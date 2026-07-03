@@ -1,0 +1,174 @@
+{
+  "docId": "3001861",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "上传证书文件",
+    "userDocName": "上传证书文件",
+    "endpoint": "/open-api/goods/upload-certificate-file",
+    "method": "POST",
+    "docName": "post_open-api_goods_upload-certificate-file",
+    "version": 7,
+    "updateTime": "2026-06-29 19:52:53",
+    "changeContent": "2026年7月开放平台已推出资质证书新接口，建议对接新接口，详细方案请参考文档：https://open.sheincorp.com/documents/system/05911185-74f1-48d6-a620-fdfb756f6a86",
+    "qpsContent": "40",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "该API支持将本地文件转成SHEIN要求的在线URL。2026年7月开放平台已推出资质证书新接口，建议对接新接口，详细方案请参考文档。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "language",
+        "type": "string",
+        "required": true,
+        "description": "language"
+      },
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json",
+        "defaultValue": "multipart/form-data"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "file",
+        "type": "string",
+        "required": true,
+        "description": "file；单个20M以内、格式为PDF/PNG/JPG/JPEG的文件上传",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "响应异常时的bbl相关信息",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "key",
+                    "type": "string"
+                  },
+                  {
+                    "name": "npid",
+                    "type": "string"
+                  },
+                  {
+                    "name": "tag",
+                    "type": "string"
+                  },
+                  {
+                    "name": "value",
+                    "type": "string"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "certificateUrl",
+            "type": "string",
+            "required": false,
+            "description": "证书url地址",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/goods/upload-certificate-file' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-timestamp: 1751009780680' \\ --header 'language: zh-cn' \\ --header 'Host: openapi.sheincorp.com' \\ --form 'file=@\"cmMtdXBsb2FkLTE3NTA4MzM4OTk3NzgtMTY=/test file.jpeg\"'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"certificateUrl\": \"https://pqms-1259571579.cos.ap-nanjing.myqcloud.com/gpc2905843696225904640.jpeg?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=20250627T073621Z&X-Amz-SignedHeaders=host&X-Amz-Expires=432000&X-Amz-Credential=AKIDIPGrBE0VjgOpztXu1sSmqnY5NPBiz1nJ/20250627/ap-nanjing/s3/aws4_request&X-Amz-Signature=228e2d5c60193375b823ea28ab7b2524ebec2965a248793925d92abcf6e6fe40\", \"imageMd5\": \"1706e04c14c7d08d16f788327d9cea4a\" }, \"bbl\": null, \"traceId\": \"6d46a5a85bbe5869\" }",
+  "errorCode": null
+}

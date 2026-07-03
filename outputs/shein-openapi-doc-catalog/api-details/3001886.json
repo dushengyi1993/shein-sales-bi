@@ -1,0 +1,136 @@
+{
+  "docId": "3001886",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "价格证明材料上传",
+    "userDocName": "价格证明材料上传",
+    "endpoint": "/open-api/goods/discuss/upload-discuss-file",
+    "method": "POST",
+    "docName": "",
+    "version": 5,
+    "updateTime": "2026-07-02 20:28:04",
+    "changeContent": "文档归属类目更新",
+    "qpsContent": "10",
+    "modes": [
+      1,
+      2,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "上传议价单、更新成本价、SKU建议零售价中需要使用的文件。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：158339876400"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object",
+    "children": [
+      {
+        "name": "type",
+        "type": "integer",
+        "required": true,
+        "description": "上传场景。1=议价单辅助材料；4=SKU建议零售价证明材料；5=成本价涨价辅助材料。"
+      }
+    ]
+  },
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "file",
+        "type": "blob",
+        "required": true,
+        "description": "本地文件。type=1（议价单辅助材料）时，仅支持图片，最大10M。type=4（SKU建议零售价证明材料）时，仅支持jpg、jpeg、png、pdf，，最大10M。type=5（成本价涨价辅助材料）时，支持上传 jpg / jpeg / png / pdf / csv / xls / xlsx，最大10M。"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应码",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "响应信息",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "description": "上传结果",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "objectKey",
+            "type": "string",
+            "description": "文件唯一标识key。",
+            "example": "dpas251106-3815674784289616639.jpeg",
+            "multiple": 0
+          },
+          {
+            "name": "url",
+            "type": "string",
+            "description": "文件url。",
+            "example": "https://file.ltwebstatic.com/dpas-prod/dpas251106-3815674784289616639.jpeg?Expires=1765002380&Signature=0157a7787059b6e09aec4d8ac63c7460&AccessKeyId=dpas",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "bbl",
+        "type": "json",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "追踪码",
+        "example": "1c419793c5f28764",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

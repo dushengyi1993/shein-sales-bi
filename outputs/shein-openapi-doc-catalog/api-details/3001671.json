@@ -1,0 +1,132 @@
+{
+  "docId": "3001671",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询任务结果V1",
+    "userDocName": "查询任务结果",
+    "endpoint": "/open-api/ccst/v1/composite/queryTask",
+    "method": "GET",
+    "docName": "get_open-api_ccst_v1_composite_queryTask",
+    "version": 8,
+    "updateTime": "2026-04-07 21:39:00",
+    "changeContent": "更新接口名称",
+    "qpsContent": "50",
+    "modes": [
+      2,
+      5
+    ],
+    "modeNames": [
+      "全托管",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "接口请求通讯成功统一返回 httpcode 200返回body code错误码描述：100004:Id字段为必填项120002:商家id不匹配100008:任务未找到130002:该IP已达到1分钟60次限制100002:请求异常9999:未知系统错误",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-language",
+        "type": "string",
+        "description": "指定出参语种，默认中文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object",
+    "children": [
+      {
+        "name": "id",
+        "type": "string",
+        "required": true,
+        "description": "从接口/ccst/openapi/v1/composite/task中获取id",
+        "label": "任务id"
+      }
+    ]
+  },
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述,成功：OK"
+      },
+      {
+        "name": "data",
+        "type": "object",
+        "children": [
+          {
+            "name": "compositeId",
+            "type": "string",
+            "required": true,
+            "description": "订单模板ID⽤于合成⽣产图⽚"
+          },
+          {
+            "name": "customInfoId",
+            "type": "string",
+            "required": true,
+            "description": "定制数据ID，用户定制数据的唯一标识符"
+          },
+          {
+            "name": "failedReason",
+            "type": "string",
+            "description": "失败原因"
+          },
+          {
+            "name": "id",
+            "type": "string",
+            "required": true,
+            "description": "对应入参的任务id"
+          },
+          {
+            "name": "resources",
+            "type": "string",
+            "description": "输出结果资源地址",
+            "multiple": 1
+          },
+          {
+            "name": "status",
+            "type": "integer",
+            "required": true,
+            "description": "状态 0=⽆,1=处理中,2=成功,3=失败"
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "curl --location --request GET 'https://openapi-test01.sheincorp.cn/open-api/ccst/v1/composite/queryTask?id=2559732325967204352' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1730380016945' \\ --header 'Cookie: <OFFICIAL_EXAMPLE_COOKIE_REDACTED>' \\ --data-raw '{ \"type\": 2, \"data\": [ {\"orderNo\":\"J240319600007\", \"supplierSku\":\"b8d\", \"printNumber\":\"1\" } ] }'",
+  "responseExample": "code\": \"0\", \"message\": \"OK\", \"data\": { \"id\": \"2559732325967204352\", \"customInfoId\": \"58d3dcb1f269463da29dc4a2957cd7a7\", \"compositeId\": \"738329\", \"status\": 2, \"failedReason\": \"\", \"resources\": [ \"http://filetest.ltwebstatic.com/filetest/2024/10/31/a1/17303799381799911581.png\" ] }, \"traceId\": \"5c56bc7b2e5af064\" }",
+  "errorCode": null
+}

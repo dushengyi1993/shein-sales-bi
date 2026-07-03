@@ -1,0 +1,224 @@
+{
+  "docId": "3001249",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "店铺查询站点列表",
+    "userDocName": "查询店铺站点和币种信息（新）",
+    "endpoint": "/open-api/goods/query-site-list",
+    "method": "POST",
+    "docName": "post_open-api_goods_query-site-list",
+    "version": 15,
+    "updateTime": "2025-07-17 14:45:31",
+    "changeContent": "更新curl",
+    "qpsContent": "40",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "该API支持查询店铺售卖的站点和币种信息",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json;charset=UTF-8",
+        "defaultValue": "application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "bbl",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "result(success: 0)",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "data",
+            "type": "object",
+            "required": false,
+            "description": "data",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "main_site",
+                "type": "string",
+                "required": false,
+                "description": "主站点",
+                "multiple": 0
+              },
+              {
+                "name": "main_site_name",
+                "type": "string",
+                "required": false,
+                "description": "主站点名称",
+                "multiple": 0
+              },
+              {
+                "name": "sub_site_list",
+                "type": "object",
+                "required": false,
+                "description": "子站点",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "currency",
+                    "type": "string",
+                    "required": false,
+                    "description": "币种",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "site_abbr",
+                    "type": "string",
+                    "required": false,
+                    "description": "站点缩写",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "site_name",
+                    "type": "string",
+                    "required": false,
+                    "description": "站点名称",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "site_status",
+                    "type": "integer",
+                    "description": "站点店铺状态：0：未启用，1：启用"
+                  },
+                  {
+                    "name": "store_type",
+                    "type": "integer",
+                    "required": false,
+                    "description": "店铺模式：1-平台类型，2-自营类型",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "symbol_left",
+                    "type": "string",
+                    "required": false,
+                    "description": "货币左侧符号",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "symbol_right",
+                    "type": "string",
+                    "required": false,
+                    "description": "货币右侧符号",
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "meta",
+            "type": "object",
+            "required": false,
+            "description": "meta",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "count",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "customObj",
+                "type": "object",
+                "required": false,
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "Error description, success: OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi-test01.sheincorp.cn/open-api/goods/query-site-list' \\ --header 'language: zh-cn' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-timestamp: 1752733538805' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi-test01.sheincorp.cn' \\ --data-raw ''",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"data\": [ { \"main_site\": \"shein\", \"main_site_name\": \"SHEIN\", \"sub_site_list\": [ { \"site_name\": \"SHEIN法国站\", \"site_abbr\": \"shein-fr\", \"site_status\": 1, \"store_type\": 1, \"currency\": \"EUR\", \"symbol_left\": \"\", \"symbol_right\": \"€\" }, { \"site_name\": \"SHEIN西班牙站\", \"site_abbr\": \"shein-es\", \"site_status\": 1, \"store_type\": 1, \"currency\": \"EUR\", \"symbol_left\": \"\", \"symbol_right\": \"€\" }, { \"site_name\": \"SHEIN德国站\", \"site_abbr\": \"shein-de\", \"site_status\": 1, \"store_type\": 1, \"currency\": \"EUR\", \"symbol_left\": \"\", \"symbol_right\": \"€\" }, { \"site_name\": \"SHEIN意大利站\", \"site_abbr\": \"shein-it\", \"site_status\": 1, \"store_type\": 1, \"currency\": \"EUR\", \"symbol_left\": \"\", \"symbol_right\": \"€\" }, { \"site_name\": \"SHEIN荷兰站\", \"site_abbr\": \"shein-nl\", \"site_status\": 1, \"store_type\": 1, \"currency\": \"EUR\", \"symbol_left\": \"\", \"symbol_right\": \"€\" }, { \"site_name\": \"SHEIN波兰站\", \"site_abbr\": \"shein-pl\", \"site_status\": 1, \"store_type\": 1, \"currency\": \"PLN\", \"symbol_left\": \"\", \"symbol_right\": \"zł\" }, { \"site_name\": \"SHEIN奥地利站\", \"site_abbr\": \"shein-at\", \"site_status\": 1, \"store_type\": 1, \"currency\": \"EUR\", \"symbol_left\": \"\", \"symbol_right\": \"€\" } ] } ], \"meta\": { \"count\": 1, \"customObj\": null } }, \"bbl\": null, \"traceId\": \"bbfb5e663a06cfee\" }",
+  "errorCode": null
+}

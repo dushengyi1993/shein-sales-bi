@@ -1,0 +1,175 @@
+{
+  "docId": "3001360",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "图片链接转换",
+    "userDocName": "图片链接转换",
+    "endpoint": "/open-api/goods/transform-pic",
+    "method": "POST",
+    "docName": "post_open-api_goods_transform-pic",
+    "version": 20,
+    "updateTime": "2025-08-12 11:32:52",
+    "changeContent": "更新文档描述",
+    "qpsContent": "60",
+    "modes": [
+      1,
+      2,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "支持将外部的图片地址转换成SHEIN可用的图片地址，各类型图片需满足下方要求，否则无法转换，建议开发者将图片在本地处理完成后再调用接口。- 主图（type=1)、细节图（type=2)：像素满足1340px*1785px，或宽高比例1:1，像素范围900px-2200px；格式JPG/JPEG/PNG；大小≤3MB- 方形图（type=5）：宽高比例1:1；像素范围900*900~2200*2200 px；格式JPG/JPEG/PNG；大小≤3MB- 色块图（type=6）：宽高比例1:1；像素80×80 px；格式JPG/JPEG/PNG；大小≤3MB - 详情图（type=7）：宽高比例3:4，像素大于900px； 格式JPG/JPEG/PNG；大小≤3MB每个店铺的各个分类下，需要传什么类型的图、可以传几张图，可通过文档确认：商品图片。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "language",
+        "type": "string",
+        "required": true,
+        "description": "默认返回中文多语言信息，支持语种：英语:en 法语: fr 西班牙语:es 德语:de 中文简体:zh-cn 泰语:th 巴西葡语:pt-br"
+      },
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "image_type",
+        "type": "integer",
+        "required": true,
+        "description": "图片类型(1:主图; 2:细节图; 5:方块图; 6:色块图; 7:详情图) 。各个类型的图片要求参考文档顶部的描述。",
+        "multiple": 0
+      },
+      {
+        "name": "original_url",
+        "type": "string",
+        "required": true,
+        "description": "图片地址。",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "bbl",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1
+              }
+            ]
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "成功: 0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "failure_reason",
+            "type": "string",
+            "required": false,
+            "description": "失败原因",
+            "multiple": 0
+          },
+          {
+            "name": "original",
+            "type": "string",
+            "required": true,
+            "description": "图片链接",
+            "multiple": 0
+          },
+          {
+            "name": "transformed",
+            "type": "string",
+            "required": false,
+            "description": "转换后的图片链接",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述, 成功: OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi-test01.sheincorp.cn/open-api/goods/transform-pic' \\ --header 'language: zh-cn' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-timestamp: 1752733538805' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi-test01.sheincorp.cn' \\ --data-raw '{ \"image_type\": 2, \"original_url\": \"http://imgdeal-test01.shein.com/images3_pi/2023/11/15/fe/17000325694031071724_square.jpg\" }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"original\": \"http://imgdeal-test01.shein.com/images3_pi/2023/11/15/fe/17000325694031071724_square.jpg\", \"transformed\": \"\", \"failure_reason\": \"图片下载异常\" }, \"bbl\": null }",
+  "errorCode": null
+}

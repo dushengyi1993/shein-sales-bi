@@ -1,0 +1,114 @@
+{
+  "docId": "3001672",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "创建⽣产模板任务V1",
+    "userDocName": "创建⽣产模板任务",
+    "endpoint": "/open-api/ccst/v1/composite/task",
+    "method": "POST",
+    "docName": "post_open-api_ccst_v1_composite_task",
+    "version": 11,
+    "updateTime": "2026-04-07 21:45:59",
+    "changeContent": "更新接口说明",
+    "qpsContent": "50",
+    "modes": [
+      2,
+      5
+    ],
+    "modeNames": [
+      "全托管",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "使用定制商品id（customInfoId）+ 模版id（compositeId）生成最终定制生产任务，需要异步查询结果",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-language",
+        "type": "string",
+        "description": "指定出参语种，默认中文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "compositeId",
+        "type": "string",
+        "required": true,
+        "description": "订单模板ID⽤于合成⽣产图⽚"
+      },
+      {
+        "name": "customInfoId",
+        "type": "string",
+        "required": true,
+        "description": "定制数据ID，用户定制数据的唯一标识符"
+      },
+      {
+        "name": "needUpdate",
+        "type": "boolean",
+        "description": "是否使用更新后的compositeId，如果传true则返回最新的值，传false则返回用户加购物车时的值。默认为false。"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0"
+      },
+      {
+        "name": "data",
+        "type": "object",
+        "children": [
+          {
+            "name": "id",
+            "type": "string",
+            "required": true,
+            "description": "任务id"
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述,成功：OK"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi-test01.sheincorp.cn/open-api/ccst/v1/composite/task' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1730379935947' \\ --header 'Cookie: <OFFICIAL_EXAMPLE_COOKIE_REDACTED>' \\ --data-raw '{ \"customInfoId\":\"58d3dcb1f269463da29dc4a2957cd7a7\", \"compositeId\":738329 }'",
+  "responseExample": "code\": \"0\", \"message\": \"OK\", \"data\": { \"id\": \"2559732325967204352\" }, \"traceId\": \"b2380962c514ebe0\" }",
+  "errorCode": null
+}

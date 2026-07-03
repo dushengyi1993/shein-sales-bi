@@ -1,0 +1,383 @@
+{
+  "docId": "3001756",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询发货单列表",
+    "userDocName": "查询发货单列表",
+    "endpoint": "/open-api/shipping/delivery",
+    "method": "GET",
+    "docName": "get_open-api_shipping_delivery",
+    "version": 13,
+    "updateTime": "2026-06-03 15:36:09",
+    "changeContent": "新增参数",
+    "qpsContent": "100",
+    "modes": [
+      1,
+      2,
+      3,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "SHEIN自营",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "查询发货单列表",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-language",
+        "type": "string",
+        "description": "指定出参语种，默认中文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object",
+    "children": [
+      {
+        "name": "deliveryCode",
+        "type": "string",
+        "required": false,
+        "description": "发货单号",
+        "label": "发货单号"
+      },
+      {
+        "name": "startTime",
+        "type": "string",
+        "required": false,
+        "description": "根据发货单创建时间查询；日期格式 yyyy-MM-dd HH:mm:ss",
+        "label": "发货单创建时间开始"
+      },
+      {
+        "name": "endTime",
+        "type": "string",
+        "required": false,
+        "description": "根据发货单创建时间查询；日期格式 yyyy-MM-dd HH:mm:ss",
+        "label": "发货单创建时间结束"
+      },
+      {
+        "name": "page",
+        "type": "integer",
+        "required": false,
+        "description": "页码",
+        "label": "页数"
+      },
+      {
+        "name": "perPage",
+        "type": "integer",
+        "required": false,
+        "description": "每页数量，最大200",
+        "label": "每页大小"
+      }
+    ]
+  },
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "count",
+            "type": "int64",
+            "required": false,
+            "description": "总记录数",
+            "multiple": 0
+          },
+          {
+            "name": "list",
+            "type": "object",
+            "required": false,
+            "description": "分页数组",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "addTime",
+                "type": "datetime",
+                "required": false,
+                "description": "发货时间，发货日期",
+                "multiple": 0
+              },
+              {
+                "name": "deliveryCode",
+                "type": "string",
+                "required": false,
+                "description": "发货单号",
+                "multiple": 0
+              },
+              {
+                "name": "deliveryOrderDataList",
+                "type": "object",
+                "required": false,
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "deliveryQuantity",
+                    "type": "integer",
+                    "required": false,
+                    "description": "尺码维度发货数量",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "orderNo",
+                    "type": "string",
+                    "required": false,
+                    "description": "订单号",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "skc",
+                    "type": "string",
+                    "required": true,
+                    "description": "skc",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "skuCode",
+                    "type": "string",
+                    "required": false,
+                    "description": "sku编码-暂未使用",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "deliveryType",
+                "type": "integer",
+                "required": false,
+                "description": "发货方式：1快递，2送货上门，3定点收货",
+                "multiple": 0
+              },
+              {
+                "name": "deliveryTypeName",
+                "type": "string",
+                "required": false,
+                "description": "发货方式：快递",
+                "multiple": 0
+              },
+              {
+                "name": "expressCode",
+                "type": "string",
+                "required": false,
+                "description": "物流单号",
+                "multiple": 0
+              },
+              {
+                "name": "expressCompanyName",
+                "type": "string",
+                "required": false,
+                "description": "快递公司名称",
+                "multiple": 0
+              },
+              {
+                "name": "expressId",
+                "type": "string",
+                "required": false,
+                "description": "快递公司",
+                "multiple": 0
+              },
+              {
+                "name": "logisticsLabelPrintFlag",
+                "type": "integer",
+                "description": "是否需要打印物流商面单：1=支持（如INPOST），2=不支持（如普通快递）"
+              },
+              {
+                "name": "packageWeight",
+                "type": "double",
+                "required": false,
+                "description": "包裹重量",
+                "multiple": 0
+              },
+              {
+                "name": "preReceiptTime",
+                "type": "datetime",
+                "required": false,
+                "description": "预计到货时间",
+                "multiple": 0
+              },
+              {
+                "name": "receiptTime",
+                "type": "datetime",
+                "required": false,
+                "description": "实际到货时间",
+                "multiple": 0
+              },
+              {
+                "name": "reserveParcelTime",
+                "type": "datetime",
+                "required": false,
+                "description": "预约取件时间",
+                "multiple": 0
+              },
+              {
+                "name": "sendPackage",
+                "type": "integer",
+                "required": false,
+                "description": "包裹总数",
+                "multiple": 0
+              },
+              {
+                "name": "supplierWarehouseId",
+                "type": "int64",
+                "required": false,
+                "description": "仓库id",
+                "multiple": 0
+              },
+              {
+                "name": "supplierWarehouseName",
+                "type": "string",
+                "required": false,
+                "description": "仓库名称",
+                "multiple": 0
+              },
+              {
+                "name": "takeParcelTime",
+                "type": "datetime",
+                "required": false,
+                "description": "实际取件时间",
+                "multiple": 0
+              },
+              {
+                "name": "consolidationInfo",
+                "type": "object",
+                "description": "集货物流信息",
+                "children": [
+                  {
+                    "name": "address",
+                    "type": "string",
+                    "description": "集货仓收货地址"
+                  },
+                  {
+                    "name": "carrierName",
+                    "type": "string",
+                    "description": "集货物流，承运方名称（物流公司名称）"
+                  },
+                  {
+                    "name": "deliveryType",
+                    "type": "integer",
+                    "description": "发货方式： 1：shein合作物流 2：商家自行委托第三方发货"
+                  },
+                  {
+                    "name": "deliveryTypeName",
+                    "type": "string",
+                    "description": "集货物流，送货方式名称"
+                  },
+                  {
+                    "name": "expressCode",
+                    "type": "string",
+                    "description": "集货物流，运单号"
+                  },
+                  {
+                    "name": "expressId",
+                    "type": "string",
+                    "description": "集货物流，物流公司code"
+                  },
+                  {
+                    "name": "person",
+                    "type": "string",
+                    "description": "集货仓收货人"
+                  },
+                  {
+                    "name": "phone",
+                    "type": "string",
+                    "description": "集货仓联系电话"
+                  },
+                  {
+                    "name": "reserveParcelTime",
+                    "type": "datetime",
+                    "description": "集货物流，预约取件时间"
+                  },
+                  {
+                    "name": "thirdPartyChannel",
+                    "type": "int64",
+                    "description": "集货物流的渠道 如果有返回值的情况，表示SHEIN代下单的渠道 如果返回0，则表示商家自行下单"
+                  },
+                  {
+                    "name": "thirdPartyChannelName",
+                    "type": "integer",
+                    "description": "集货物流，渠道名"
+                  },
+                  {
+                    "name": "thirdPartyOrderMethod",
+                    "type": "integer",
+                    "description": "货代下单方式： 1：SHEIN代下单 2：商家自行下单"
+                  },
+                  {
+                    "name": "warehouseId",
+                    "type": "int64",
+                    "description": "集货仓ID"
+                  },
+                  {
+                    "name": "warehouseName",
+                    "type": "string",
+                    "description": "集货仓名"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK；支持指定语种出参；",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request GET 'https://openapi.sheincorp.cn/open-api/shipping/delivery?deliveryCode=20250430100099' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570681772' \\ --data-raw ''",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"count\": 296, \"list\": [ { \"deliveryCode\": \"20240124100007\", \"deliveryType\": 1, \"deliveryTypeName\": \"快递/物流送货\", \"expressId\": \"chemen\", \"expressCompanyName\": \"车门\", \"expressCode\": \"S0085029226880\", \"sendPackage\": 10, \"packageWeight\": 0.00, \"takeParcelTime\": null, \"reserveParcelTime\": \"2024-01-25 18:33\", \"addTime\": \"2024-01-24 13:50:38\", \"preReceiptTime\": \"1970-01-01 08:00:01\", \"receiptTime\": \"1970-01-01 08:00:01\", \"supplierWarehouseId\": 78377, \"supplierWarehouseName\": \"323432\", \"deliveryOrderDataList\": [ { \"skc\": \"se2204266637766551\", \"skuCode\": \"I0103yilwrnq\", \"orderNo\": \"B231102500137-1\", \"deliveryQuantity\": 710 }, { \"skc\": \"se2204266637766551\", \"skuCode\": \"I0103yilyuw3\", \"orderNo\": \"B231102500137-1\", \"deliveryQuantity\": 710 }, { \"skc\": \"se2204266637766551\", \"skuCode\": \"I0103yim0j0g\", \"orderNo\": \"B231102500137-1\", \"deliveryQuantity\": 710 }, { \"skc\": \"se2204266637766551\", \"skuCode\": \"I0103yim24bo\", \"orderNo\": \"B231102500137-1\", \"deliveryQuantity\": 710 }, { \"skc\": \"se2204266637766551\", \"skuCode\": \"I0103yim4075\", \"orderNo\": \"B231102500137-1\", \"deliveryQuantity\": 710 }, { \"skc\": \"se2204266637766551\", \"skuCode\": \"I0103yim5nov\", \"orderNo\": \"B231102500137-1\", \"deliveryQuantity\": 710 }, { \"skc\": \"se2204266637766551\", \"skuCode\": \"I0103yim79g5\", \"orderNo\": \"B231102500137-1\", \"deliveryQuantity\": 710 }, { \"skc\": \"se2204266637766551\", \"skuCode\": \"I0103yim8u9s\", \"orderNo\": \"B231102500137-1\", \"deliveryQuantity\": 710 }, { \"skc\": \"se2204266637766551\", \"skuCode\": \"I0103yimaioa\", \"orderNo\": \"B231102500137-1\", \"deliveryQuantity\": 710 }, { \"skc\": \"se2204266637766551\", \"skuCode\": \"I0103yimc0zi\", \"orderNo\": \"B231102500137-1\", \"deliveryQuantity\": 710 }, { \"skc\": \"se2204266637766551\", \"skuCode\": \"I0103yimdlcs\", \"orderNo\": \"B231102500137-1\", \"deliveryQuantity\": 710 }, { \"skc\": \"se2204266637766551\", \"skuCode\": \"I0103yimf5oe\", \"orderNo\": \"B231102500137-1\", \"deliveryQuantity\": 710 }, { \"skc\": \"se2204266637766551\", \"skuCode\": \"I0103yimiv2c\", \"orderNo\": \"B231102500137-1\", \"deliveryQuantity\": 710 } ] }, { \"deliveryCode\": \"20240124100002\", \"deliveryType\": 2, \"deliveryTypeName\": \"送货上门\", \"expressId\": \"\", \"expressCompanyName\": \"\", \"expressCode\": \"\", \"sendPackage\": 2, \"packageWeight\": 2.00, \"takeParcelTime\": null, \"reserveParcelTime\": null, \"addTime\": \"2024-01-24 11:12:22\", \"preReceiptTime\": \"1970-01-01 08:00:01\", \"receiptTime\": \"1970-01-01 08:00:01\", \"supplierWarehouseId\": 78377, \"supplierWarehouseName\": \"323432\", \"deliveryOrderDataList\": [ { \"skc\": \"ss23110643492437\", \"skuCode\": \"I3jrx7cgrjdu\", \"orderNo\": \"B240102500419\", \"deliveryQuantity\": 5 } ] } ] }, \"bbl\": null }",
+  "errorCode": null
+}

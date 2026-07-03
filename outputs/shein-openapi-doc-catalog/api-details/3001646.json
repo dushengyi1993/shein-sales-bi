@@ -1,0 +1,225 @@
+{
+  "docId": "3001646",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "收货仓信息查询",
+    "userDocName": "收货仓信息查询",
+    "endpoint": "/open-api/shipping/warehouse",
+    "method": "GET",
+    "docName": "get_open-api_shipping_warehouse",
+    "version": 17,
+    "updateTime": "2026-03-30 17:12:59",
+    "changeContent": "更新集货相关参数",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      2,
+      3,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "SHEIN自营",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "通过该接口获取备货单的平台收货仓地址信息（适用全托管、SHEIN自营模式）；",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-language",
+        "type": "string",
+        "description": "指定出参语种，默认中文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object",
+    "children": [
+      {
+        "name": "addressId",
+        "type": "int64",
+        "required": true,
+        "description": "从发货基本信息查询接口获取；"
+      },
+      {
+        "name": "coding",
+        "type": "string",
+        "required": false,
+        "description": "车队编码"
+      },
+      {
+        "name": "expressMode",
+        "type": "string",
+        "required": false,
+        "description": "快递编码"
+      },
+      {
+        "name": "orderType",
+        "type": "integer",
+        "required": true,
+        "description": "订单类型；1:急采；2：备货"
+      },
+      {
+        "name": "sendType",
+        "type": "integer",
+        "required": true,
+        "description": "发货方式；从发货基本信息查询接口获取；"
+      },
+      {
+        "name": "orderNoList",
+        "type": "string",
+        "description": "采购单号；建议填写，会影响地址的准确性；最多入参200个；",
+        "multiple": 1
+      },
+      {
+        "name": "shippingRoute",
+        "type": "integer",
+        "description": "发货路径： 1：直送 2：集货 默认值为1，直送"
+      }
+    ]
+  },
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "subWareHouseId",
+            "type": "integer",
+            "required": false,
+            "description": "子仓id",
+            "multiple": 0
+          },
+          {
+            "name": "subWarehouseName",
+            "type": "string",
+            "required": false,
+            "description": "子仓名称",
+            "multiple": 0
+          },
+          {
+            "name": "warehouseAddress",
+            "type": "string",
+            "required": false,
+            "description": "收货仓详细地址",
+            "multiple": 0
+          },
+          {
+            "name": "warehouseContact",
+            "type": "string",
+            "required": false,
+            "description": "仓联系人",
+            "multiple": 0
+          },
+          {
+            "name": "warehousePhone",
+            "type": "string",
+            "required": false,
+            "description": "样衣仓联系电话",
+            "multiple": 0
+          },
+          {
+            "name": "consolidationSubWareHouseId",
+            "type": "integer",
+            "description": "集货仓子仓id，仅发货路径为集货时有值"
+          },
+          {
+            "name": "consolidationSubWarehouseName",
+            "type": "string",
+            "description": "集货仓子仓名称，仅发货路径为集货时有值"
+          },
+          {
+            "name": "consolidationWarehouseAddress",
+            "type": "string",
+            "description": "集货仓收件详细地址，仅发货路径为集货时有值"
+          },
+          {
+            "name": "consolidationWarehouseCityArea",
+            "type": "string",
+            "description": "集货仓收件区，仅发货路径为集货时有值"
+          },
+          {
+            "name": "consolidationWarehouseCityName",
+            "type": "string",
+            "description": "集货仓收件城市，仅发货路径为集货时有值"
+          },
+          {
+            "name": "consolidationWarehouseContact",
+            "type": "string",
+            "description": "集货仓仓联系人，仅发货路径为集货时有值"
+          },
+          {
+            "name": "consolidationWarehousePhone",
+            "type": "string",
+            "description": "集货仓仓联系方式，仅发货路径为集货时有值"
+          },
+          {
+            "name": "consolidationWarehouseProvinceName",
+            "type": "string",
+            "description": "集货仓收件省（直辖市），仅发货路径为集货时有值"
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK；（全托管模式支持指定语种出参）；",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request GET 'https://openapi.sheincorp.cn/open-api/shipping/warehouse?addressId=4721&expressMode=shunfeng&orderType=1&sendType=1&orderNoList=1234566,234566,2345667' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570729613' \\ --header 'language: EN' \\ --data-raw ''",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"subWareHouseId\": 4, \"subWarehouseName\": \"佛山佳明仓\", \"warehouseAddress\": \"广东 深圳市 大鹏 12345\", \"warehouseContact\": \"佳明仓\", \"warehousePhone\": \"15222222222\" }, \"bbl\": null }",
+  "errorCode": null
+}

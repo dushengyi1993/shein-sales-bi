@@ -1,0 +1,300 @@
+{
+  "docId": "3001474",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "提供外部ERP花型开发分页查询接口",
+    "userDocName": "提供外部ERP花型开发分页查询接口",
+    "endpoint": "/open-api/mdp/flower/get-pattern-dev-page-list",
+    "method": "POST",
+    "docName": "",
+    "version": 1,
+    "updateTime": "2025-12-09 11:42:15",
+    "changeContent": "初版",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "description": "花型开发-对外分页查询请求",
+    "label": "PatternDevOutPageReq",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "createdTimeEnd",
+        "type": "bigint",
+        "required": true,
+        "description": "单据生成结束时间（时间戳）最大查询时间1个月",
+        "example": "1761580800000\t",
+        "multiple": 0
+      },
+      {
+        "name": "createdTimeStart",
+        "type": "bigint",
+        "required": true,
+        "description": "单据生成开始时间（时间戳）最大查询时间1个月",
+        "example": "1764259199000\t",
+        "multiple": 0
+      },
+      {
+        "name": "pageNum",
+        "type": "integer",
+        "required": true,
+        "description": "页码，分页时必填",
+        "example": "1",
+        "multiple": 0
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "required": false,
+        "description": "每页数量",
+        "example": "20",
+        "multiple": 0
+      },
+      {
+        "name": "status",
+        "type": "integer",
+        "required": true,
+        "description": "状态 2:绘图中 3:待审核 4:已完成 5-已取消",
+        "multiple": 0
+      },
+      {
+        "name": "subTaskNo",
+        "type": "string",
+        "required": false,
+        "description": "子任务单号",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "接口返回基础数据",
+    "label": "ApiResultOfPageResultOfPatternDevOutPageResp",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": false,
+        "description": "响应码，成功：0",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "detailMsg",
+        "type": "string",
+        "required": false,
+        "description": "详细信息",
+        "example": "详细信息",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "分页结果对象",
+        "label": "PageResultOfPatternDevOutPageResp",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "count",
+            "type": "int64",
+            "required": false,
+            "description": "总行数",
+            "multiple": 0
+          },
+          {
+            "name": "list",
+            "type": "object",
+            "required": false,
+            "description": "数据列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "brandGroupName",
+                "type": "string",
+                "required": false,
+                "description": "品牌组",
+                "multiple": 0
+              },
+              {
+                "name": "createdBy",
+                "type": "string",
+                "required": false,
+                "description": "创建人",
+                "multiple": 0
+              },
+              {
+                "name": "createdTime",
+                "type": "datetime",
+                "required": false,
+                "description": "创建时间",
+                "multiple": 0
+              },
+              {
+                "name": "description",
+                "type": "string",
+                "required": false,
+                "description": "描述",
+                "multiple": 0
+              },
+              {
+                "name": "designGroup",
+                "type": "string",
+                "required": false,
+                "description": "设计组",
+                "multiple": 0
+              },
+              {
+                "name": "designRemark",
+                "type": "string",
+                "required": false,
+                "description": "设计要求",
+                "multiple": 0
+              },
+              {
+                "name": "developType",
+                "type": "integer",
+                "required": false,
+                "description": "开发类型: 1企划 2对款",
+                "multiple": 0
+              },
+              {
+                "name": "developTypeName",
+                "type": "string",
+                "required": false,
+                "description": "开发类型描述",
+                "multiple": 0
+              },
+              {
+                "name": "isColorMatchingName",
+                "type": "string",
+                "required": false,
+                "description": "是否调色",
+                "multiple": 0
+              },
+              {
+                "name": "merchandiser",
+                "type": "string",
+                "required": false,
+                "description": "跟单员",
+                "multiple": 0
+              },
+              {
+                "name": "originalMaterialList",
+                "type": "object",
+                "required": false,
+                "description": "参考底布信息集合",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "originalMaterialName",
+                    "type": "string",
+                    "required": false,
+                    "description": "参考底布名称",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "originalMaterialSku",
+                    "type": "string",
+                    "required": false,
+                    "description": "参考底布sku",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "plmPatternCode",
+                "type": "string",
+                "required": false,
+                "description": "花型号",
+                "multiple": 0
+              },
+              {
+                "name": "referenceImgList",
+                "type": "string",
+                "required": false,
+                "description": "参考图",
+                "multiple": 1
+              },
+              {
+                "name": "referencePatternCode",
+                "type": "string",
+                "required": false,
+                "description": "参考花型号",
+                "multiple": 0
+              },
+              {
+                "name": "remark",
+                "type": "string",
+                "required": false,
+                "description": "备注",
+                "multiple": 0
+              },
+              {
+                "name": "subTaskNo",
+                "type": "string",
+                "required": false,
+                "description": "子任务单号",
+                "multiple": 0
+              },
+              {
+                "name": "transparentBottomImage",
+                "type": "string",
+                "required": false,
+                "description": "透明底图",
+                "multiple": 0
+              },
+              {
+                "name": "twiceCarftNameList",
+                "type": "string",
+                "required": false,
+                "description": "二次工艺名称集合",
+                "multiple": 1
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "前端展示的描述信息",
+        "example": "前端展示的描述信息",
+        "multiple": 0
+      },
+      {
+        "name": "time",
+        "type": "datetime",
+        "required": false,
+        "description": "响应时间",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

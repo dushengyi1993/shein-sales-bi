@@ -1,0 +1,169 @@
+{
+  "docId": "3001598",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "order ship channel query",
+    "userDocName": "商家维度查渠道信息",
+    "endpoint": "/open-api/order/express-channel",
+    "method": "POST",
+    "docName": "post_open-api_order_express-channel",
+    "version": 19,
+    "updateTime": "2026-03-04 16:19:18",
+    "changeContent": "增加traceid参数",
+    "qpsContent": "50",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "该API支持自主运营，半托管卖家查询自履约场景下可用的物流信息；对接前请查看解决方案：ERP订单履约方案；注意：接口返回的是商家维度的可用物流渠道，并不是SHEIN平台所有可用的物流渠道；",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "warehouseAddressCode",
+        "type": "string",
+        "description": "仓库地址编码；不填的情况下只返回商家自发货渠道；输入的情况下可以准确匹配该地址和销售站点下可用的自发货和shein合作物流的物流的渠道；值从接口查询仓库地址接口获取"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "success： 0",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误信息",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "warehouseAddressCode",
+            "type": "string",
+            "description": "仓库地址编码",
+            "example": "WH2505093344009216",
+            "multiple": 0
+          },
+          {
+            "name": "expressChannels",
+            "type": "object",
+            "required": true,
+            "description": "可用自发货渠道商列表；商家自发货场景使用",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "site",
+                "type": "string",
+                "description": "可用站点",
+                "example": "shein-us",
+                "multiple": 0
+              },
+              {
+                "name": "expressIdCode",
+                "type": "string",
+                "description": "渠道商名称 例如:UPS、Amazon Logistic等",
+                "example": "CDL",
+                "multiple": 0
+              },
+              {
+                "name": "expressChannelCode",
+                "type": "string",
+                "description": "渠道商产品编码",
+                "example": "USpS-P-LAX-BP2-4",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "platformLogisticsChannels",
+            "type": "object",
+            "required": true,
+            "description": "平台合作物流列表；在线下单场景使用；",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "expressId",
+                "type": "integer",
+                "description": "物流商id",
+                "example": "138",
+                "multiple": 0
+              },
+              {
+                "name": "expressIdCode",
+                "type": "string",
+                "description": "渠道商名称；",
+                "example": "cassie的快速小屋",
+                "multiple": 0
+              },
+              {
+                "name": "site",
+                "type": "string",
+                "description": "物流可配送国家/地区；平台将结合卖家发货仓的地理位置及合作物流的可配送国家/地区范围判定每个发货仓的可选物流服务",
+                "example": "shein-us",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/order/express-channel' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570849017' \\ --data-raw '{ \"warehouseAddressCode\":\"WH2505093344009216\" }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"warehouseAddressCode\": \"WH2505093344009216\", \"expressChannels\": [ { \"site\": \"shein-us\", \"expressIdCode\": \"CDL\", \"expressChannelCode\": \"USpS-P-LAX-BP2-4\", \"returnExpressCode\": null, \"returnExpressName\": null }, { \"site\": \"shein-us\", \"expressIdCode\": \"DHL ecommerce\", \"expressChannelCode\": \"USpS-P-JFK-BP2-16\", \"returnExpressCode\": null, \"returnExpressName\": null }, { \"site\": \"shein-us\", \"expressIdCode\": \"FedEx\", \"expressChannelCode\": \"213131237250214-Na\", \"returnExpressCode\": null, \"returnExpressName\": null }, { \"site\": \"shein-us\", \"expressIdCode\": \"GLS\", \"expressChannelCode\": null, \"returnExpressCode\": null, \"returnExpressName\": null }, { \"site\": \"shein-us\", \"expressIdCode\": \"LASERSHIP\", \"expressChannelCode\": \"USpS-P-JFK-BP2-15\", \"returnExpressCode\": null, \"returnExpressName\": null }, { \"site\": \"shein-us\", \"expressIdCode\": \"liusijia000\", \"expressChannelCode\": null, \"returnExpressCode\": null, \"returnExpressName\": null }, { \"site\": \"shein-us\", \"expressIdCode\": \"liusijia0001\", \"expressChannelCode\": null, \"returnExpressCode\": null, \"returnExpressName\": null }, { \"site\": \"shein-us\", \"expressIdCode\": \"liusijiaceshi02\", \"expressChannelCode\": \"ssjj\", \"returnExpressCode\": null, \"returnExpressName\": null }, { \"site\": \"shein-us\", \"expressIdCode\": \"LSO\", \"expressChannelCode\": \"USpS-P-LAX-BP2-9\", \"returnExpressCode\": null, \"returnExpressName\": null }, { \"site\": \"shein-us\", \"expressIdCode\": \"Nacex\", \"expressChannelCode\": \"AAOguqing-LHR-SS-P-C1\", \"returnExpressCode\": null, \"returnExpressName\": null }, { \"site\": \"shein-us\", \"expressIdCode\": \"Speedx\", \"expressChannelCode\": \"Ug2313\", \"returnExpressCode\": null, \"returnExpressName\": null }, { \"site\": \"shein-us\", \"expressIdCode\": \"Test Us NoCategory\", \"expressChannelCode\": \"Test-Us-NoCategory\", \"returnExpressCode\": null, \"returnExpressName\": null }, { \"site\": \"shein-us\", \"expressIdCode\": \"UDS\", \"expressChannelCode\": \"USpS-F-DFW-BP2-6\", \"returnExpressCode\": null, \"returnExpressName\": null }, { \"site\": \"shein-us\", \"expressIdCode\": \"Uni\", \"expressChannelCode\": \"USpS-F-JFK-BP2-17\", \"returnExpressCode\": null, \"returnExpressName\": null }, { \"site\": \"shein-us\", \"expressIdCode\": \"UPS\", \"expressChannelCode\": \"D2D-N250318-Na\", \"returnExpressCode\": null, \"returnExpressName\": null }, { \"site\": \"shein-us\", \"expressIdCode\": \"USPS\", \"expressChannelCode\": \"USpS-P-JFK-BP2-1\", \"returnExpressCode\": null, \"returnExpressName\": null } ], \"platformLogisticsChannels\": [ { \"expressId\": 138, \"expressIdCode\": \"cassie的快速小屋\", \"site\": \"shein-us\" } ] }, \"bbl\": {}, \"traceId\": \"2ae5f7e9d773db60\" }",
+  "errorCode": null
+}

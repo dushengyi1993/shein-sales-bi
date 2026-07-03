@@ -1,0 +1,130 @@
+{
+  "docId": "3001544",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "获取店铺上架额度",
+    "userDocName": "获取店铺上架额度",
+    "endpoint": "/open-api/goods/query-shelf-quota",
+    "method": "POST",
+    "docName": "",
+    "version": 1,
+    "updateTime": "2026-01-12 10:19:43",
+    "changeContent": "初版",
+    "qpsContent": "40",
+    "modes": [
+      1,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "平台对店铺可上架的商品SKC数量有管控，请在调用商品上架接口之前先查询店铺可上架额度，有额度时再操作上架。仅自运营、半托管模式的商家会被管控上架额度。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "默认返回中文多语言信息，支持语种：英语:en 法语: fr 西班牙语:es 德语:de 中文简体:zh-cn 泰语:th 巴西葡语:pt-br"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应编码 成功：0",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "响应信息。成功：OK",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "description": "详细信息",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "need",
+            "type": "boolean",
+            "description": "店铺是否被管控上架额度。true=被管控，剩余可用额度（remain_count）大于0时，代表还能上架SKC；false=不被管控，即店铺可上架SKC数没有限制；",
+            "example": "true",
+            "multiple": 0
+          },
+          {
+            "name": "total_quota_count",
+            "type": "integer",
+            "description": "总的可上架SKC数量。",
+            "example": "2000",
+            "multiple": 0
+          },
+          {
+            "name": "on_shelf_count",
+            "type": "integer",
+            "description": "已上架的SKC数量",
+            "example": "0",
+            "multiple": 0
+          },
+          {
+            "name": "remain_count",
+            "type": "integer",
+            "description": "剩余可上架SKC数量",
+            "example": "2000",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "追踪码",
+        "example": "63b1dabf446528dc",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

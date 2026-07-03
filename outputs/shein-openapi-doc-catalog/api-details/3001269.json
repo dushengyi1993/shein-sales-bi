@@ -1,0 +1,204 @@
+{
+  "docId": "3001269",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "请求订单列表",
+    "userDocName": "请求订单列表",
+    "endpoint": "/open-api/order/order-list",
+    "method": "POST",
+    "docName": "post_open-api_order_order-list",
+    "version": 23,
+    "updateTime": "2025-07-21 11:27:01",
+    "changeContent": "更新请求示例",
+    "qpsContent": "100",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "通过该接口获取订单列表；该接口适用自主运营，半托管的应用；也可以使用webhook中的订单同步通知感知最新的订单信息；支持通过订单的创建时间和更新时间查询；查询条件startTime和endTime的时间范围限制为48小时，查询结果总数限制为10000条；如查询范围内的订单超过10000条，需要取最后一次查询的最后一笔的订单创建时间作为下一个查询的 \"startTime\"。注意：接口请求时间和响应时间的时区为 UTC+8（北京时间）",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "queryType",
+        "type": "integer",
+        "required": true,
+        "description": "查询类型：1：根据订单下发时间查询/2：根据订单更新时间查询（当下发订单时会将下发时间同步到更新时间）",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "startTime",
+        "type": "string",
+        "required": true,
+        "description": "开始时间;示例：2024-12-12 15:38:29（UTC+8）",
+        "example": "2023-01-30 15:38:29",
+        "multiple": 0
+      },
+      {
+        "name": "endTime",
+        "type": "string",
+        "required": true,
+        "description": "结束时间;示例：2024-12-12 15:38:29（UTC+8）",
+        "example": "2023-01-30 15:38:29",
+        "multiple": 0
+      },
+      {
+        "name": "page",
+        "type": "integer",
+        "required": true,
+        "description": "分页的页数",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "required": true,
+        "description": "每页返回的条数；请设置1～30的整数",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "orderStatus",
+        "type": "integer",
+        "description": "订单状态：1：待处理/ 2：待发货/ 3：待shein发货/ 4：已发货/ 5：已签收/ 6：用户已退款/ 7：待揽收/ 8：已报损/ 9：已拒收",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "queryOrderType",
+        "type": "integer",
+        "description": "查询对应发货仓类型的订单；1:认证仓发货订单/ 2:SHEIN仓发货订单 / 3:商家仓发货订单/ 4: 所有订单；不传的情况下，巴西商家会返回商家仓发货订单，其他国家市场会返回SHEIN仓发货、商家仓发货订单"
+      },
+      {
+        "name": "cteInvoiceStatus",
+        "type": "integer",
+        "description": "巴西市场CTE开票状态；1:订单下所有包裹（取消的除外）已完成开票/ 2:订单下的包裹存在未完成开票"
+      },
+      {
+        "name": "nfeInvoiceStatus",
+        "type": "integer",
+        "description": "巴西市场NFE开票状态;1：已完成NFE开票/ 2：未完成NFE开票（对于巴西卖家，当订单发票信息通过回传发票信息同步后，状态从2变为1）/ 3：待重传NFE发票/ 4：无需开NFE发票"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "integer",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误信息描述",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "description": "响应数据",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "count",
+            "type": "integer",
+            "description": "响应条数",
+            "example": "1",
+            "multiple": 0
+          },
+          {
+            "name": "orderList",
+            "type": "object",
+            "required": true,
+            "description": "订单信息列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "orderNo",
+                "type": "string",
+                "description": "订单号",
+                "example": "GSHNMD35M00HHAC",
+                "multiple": 0
+              },
+              {
+                "name": "orderStatus",
+                "type": "string",
+                "description": "订单状态：1：待处理/ 2：待发货/ 3：待shein发货/ 4：已发货/ 5：已签收/ 6：用户已退款/ 7：待揽收/ 8：已报损/ 9：已拒收",
+                "example": "1",
+                "multiple": 0
+              },
+              {
+                "name": "orderCreateTime",
+                "type": "string",
+                "description": "订单下发时间（UTC+8）；示例2023-04-19 03:37:01",
+                "example": "2022-02-22 17:26:46",
+                "multiple": 0
+              },
+              {
+                "name": "orderUpdateTime",
+                "type": "string",
+                "description": "订单更新时间（UTC+8）；示例2023-04-19 03:37:01；（当下发订单时会将下发时间同步到更新时间）",
+                "example": "2022-05-16 20:11:12",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/order/order-list' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570849017' \\ --data-raw '{ \"queryType\": 1, \"startTime\": \"2023-08-09 12:00:00\", \"endTime\": \"2023-08-10 23:59:59\", \"page\": 1, \"pageSize\": 30, \"orderStatus\": 1 }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"count\": 2, \"orderList\": [ { \"orderNo\": \"GSON8H44Y0004CU\", \"orderStatus\": \"1\", \"orderCreateTime\": \"2023-08-09 18:03:04\", \"orderUpdateTime\": \"2023-08-10 17:29:34\" }, { \"orderNo\": \"H23081033497436161\", \"orderStatus\": \"1\", \"orderCreateTime\": \"2023-08-10 17:45:01\", \"orderUpdateTime\": \"2023-08-11 14:36:34\" } ] } }",
+  "errorCode": null
+}

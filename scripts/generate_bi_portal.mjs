@@ -1358,25 +1358,35 @@ kpi AS (
   ) AS data
   FROM mart.bi_business_store_current
 ),
+date_sources AS (
+  SELECT
+    (SELECT max(sales_date) FROM mart.bi_business_store_current) AS sales_date,
+    (SELECT max(link_date) FROM mart.bi_business_store_current) AS mart_link_date,
+    (SELECT max(date) FROM fact.link_performance_daily) AS fact_link_date,
+    (SELECT max(business_snapshot_date) FROM mart.bi_business_store_current) AS business_snapshot_date
+),
 dates AS (
   SELECT jsonb_build_object(
-    'salesDate', max(sales_date),
-    'linkDate', max(link_date),
-    'businessDate', max(business_snapshot_date),
+    'salesDate', max(ds.sales_date),
+    'linkDate', max(coalesce(ds.mart_link_date, ds.fact_link_date)),
+    'martLinkDate', max(ds.mart_link_date),
+    'factLinkDate', max(ds.fact_link_date),
+    'linkDateFallbackUsed', max(ds.mart_link_date) IS NULL AND max(ds.fact_link_date) IS NOT NULL,
+    'businessDate', max(ds.business_snapshot_date),
     'salesUpdatedAt', (
       SELECT max(fetch_time)
       FROM fact.store_daily_sales
-      WHERE date = (SELECT max(sales_date) FROM mart.bi_business_store_current)
+      WHERE date = (SELECT sales_date FROM date_sources)
     ),
     'businessUpdatedAt', (
       SELECT max(updated_at)
       FROM fact.home_finance_snapshot
-      WHERE snapshot_date = (SELECT max(business_snapshot_date) FROM mart.bi_business_store_current)
+      WHERE snapshot_date = (SELECT business_snapshot_date FROM date_sources)
     ),
     'linkUpdatedAt', (
       SELECT max(updated_at)
       FROM fact.link_performance_daily
-      WHERE date = (SELECT max(link_date) FROM mart.bi_business_store_current)
+      WHERE date = (SELECT coalesce(mart_link_date, fact_link_date) FROM date_sources)
     ),
     'manualCostUpdatedAt', (
       SELECT max(coalesce(updated_at, imported_at))
@@ -1408,7 +1418,7 @@ dates AS (
       LIMIT 1
     )
   ) AS data
-  FROM mart.bi_business_store_current
+  FROM date_sources ds
 ),
 after_sales_event_daily AS (
   SELECT

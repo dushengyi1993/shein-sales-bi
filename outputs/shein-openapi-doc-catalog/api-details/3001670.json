@@ -1,0 +1,124 @@
+{
+  "docId": "3001670",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "获取模版数据V1",
+    "userDocName": "获取模版数据",
+    "endpoint": "/open-api/ccst/v1/custom-info/templates",
+    "method": "GET",
+    "docName": "get_open-api_ccst_v1_custom-info_templates",
+    "version": 11,
+    "updateTime": "2026-04-07 21:38:25",
+    "changeContent": "更新接口名称",
+    "qpsContent": "50",
+    "modes": [
+      2,
+      5
+    ],
+    "modeNames": [
+      "全托管",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "接口请求通讯成功统一返回 httpcode 200返回body code错误码描述：100001:CustomInfoId字段是为必填项120001:未找到模版数据120002:商家ID不匹配130002:该IP已达到1分钟60次限制100002:请求异常9999:未知系统错误",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-language",
+        "type": "string",
+        "description": "指定出参语种，默认中文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object",
+    "children": [
+      {
+        "name": "customInfoId",
+        "type": "string",
+        "required": true,
+        "description": "定制数据ID，从采购单信息上获取"
+      },
+      {
+        "name": "needUpdate",
+        "type": "string",
+        "description": "是否使用更新后的值，如果传true则返回最新的值，传false则返回用户加购物车时的值。默认为false。"
+      }
+    ]
+  },
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应编码 成功：0"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述,成功：OK"
+      },
+      {
+        "name": "data",
+        "type": "object",
+        "children": [
+          {
+            "name": "customInfoId",
+            "type": "string",
+            "description": "定制数据ID，用户定制数据的唯一标识符"
+          },
+          {
+            "name": "template",
+            "type": "object",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "compositeId",
+                "type": "string",
+                "required": true,
+                "description": "订单模板ID⽤于合成⽣产图⽚"
+              },
+              {
+                "name": "title",
+                "type": "string",
+                "description": "模板标题"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "curl --location --request GET 'https://openapi-test01.sheincorp.cn/open-api/ccst/v1/custom-info/templates?customInfoId=58d3dcb1f269463da29dc4a2957cd7a7' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1730379827105' \\ --data-raw ''",
+  "responseExample": "code\": \"0\", \"message\": \"OK\", \"data\": { \"customInfoId\": \"58d3dcb1f269463da29dc4a2957cd7a7\", \"template\": [ { \"title\": \"jing测试(1)\", \"compositeId\": \"738329\" } ] }, \"traceId\": \"87aaa3af324c707a\" }",
+  "errorCode": null
+}

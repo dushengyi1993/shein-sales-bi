@@ -1,0 +1,168 @@
+{
+  "docId": "3001434",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "接收外部ERP完结订单",
+    "userDocName": "接收外部ERP完结订单",
+    "endpoint": "/open-api/mdp/order/goods/external/receive-external-erp-complete-order",
+    "method": "POST",
+    "docName": "",
+    "version": 1,
+    "updateTime": "2025-10-15 16:20:00",
+    "changeContent": "新增MDP接口",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "description": "接收外部ERP完结订单请求体",
+    "label": "ExternalErpCompleteOrderReq",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "completeOrderList",
+        "type": "object",
+        "required": true,
+        "description": "完结订单信息列表",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "commodityName",
+            "type": "string",
+            "required": true,
+            "description": "商品名称",
+            "multiple": 0
+          },
+          {
+            "name": "commodityType",
+            "type": "integer",
+            "required": false,
+            "description": "商品类型",
+            "multiple": 0
+          },
+          {
+            "name": "customerName",
+            "type": "string",
+            "required": true,
+            "description": "客户名称",
+            "multiple": 0
+          },
+          {
+            "name": "orderNum",
+            "type": "double",
+            "required": true,
+            "description": "销售数量",
+            "multiple": 0
+          },
+          {
+            "name": "requirementNo",
+            "type": "string",
+            "required": true,
+            "description": "需求单号",
+            "multiple": 0
+          },
+          {
+            "name": "salePrice",
+            "type": "double",
+            "required": true,
+            "description": "销售单价",
+            "multiple": 0
+          },
+          {
+            "name": "unit",
+            "type": "integer",
+            "required": true,
+            "description": "单位",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "userCode",
+        "type": "string",
+        "required": false,
+        "description": "操作人的用户Code",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "接口返回基础数据",
+    "label": "ApiResultOfExternalErpCompleteOrderResp",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": false,
+        "description": "响应码，成功：0",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "detailMsg",
+        "type": "string",
+        "required": false,
+        "description": "详细信息",
+        "example": "详细信息",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "接收外部ERP完结订单响应体",
+        "label": "ExternalErpCompleteOrderResp",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "processNoList",
+            "type": "string",
+            "required": false,
+            "description": "加工单号列表",
+            "multiple": 1
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "前端展示的描述信息",
+        "example": "前端展示的描述信息",
+        "multiple": 0
+      },
+      {
+        "name": "time",
+        "type": "datetime",
+        "required": false,
+        "description": "响应时间",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

@@ -1,0 +1,226 @@
+{
+  "docId": "3001805",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询商品可退库存数",
+    "userDocName": "查询商品可退库存数",
+    "endpoint": "/open-api/purchase/returnable-inventory",
+    "method": "POST",
+    "docName": "",
+    "version": 3,
+    "updateTime": "2026-06-12 10:39:19",
+    "changeContent": "清除字段描述中的空格",
+    "qpsContent": "50",
+    "modes": [
+      2
+    ],
+    "modeNames": [
+      "全托管"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "查询指定商品在仓库中可退货或报废的库存数量",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "applyType",
+        "type": "integer",
+        "required": true,
+        "description": "申请类型：1=退货 2=报废",
+        "multiple": 0
+      },
+      {
+        "name": "queryType",
+        "type": "integer",
+        "required": true,
+        "description": "发起维度：1=SKC；2=采购单号(开发者可忽略)；3=平台SKU",
+        "multiple": 0
+      },
+      {
+        "name": "sellerOrderNos",
+        "type": "string",
+        "description": "采购单号列表，queryType=2时必传，最多50个；开发者可忽略，API暂不支持通过采购单发起",
+        "multiple": 1
+      },
+      {
+        "name": "skcNames",
+        "type": "string",
+        "description": "SKC列表，发起维度=SKC时必传，最多50个",
+        "multiple": 1
+      },
+      {
+        "name": "skuCodes",
+        "type": "string",
+        "description": "平台SKU列表，发起维度=平台SKU时必传，最多50个",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "required": true,
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "data",
+            "type": "object",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "detailInfoList",
+                "type": "object",
+                "description": "SKU明细",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "platformSku",
+                    "type": "string",
+                    "description": "平台SKU",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "sellerOrderNo",
+                    "type": "string",
+                    "description": "卖家采购单号",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "warehouseInfoList",
+                    "type": "object",
+                    "description": "仓库库存明细",
+                    "multiple": 1,
+                    "children": [
+                      {
+                        "name": "ownershipInventoryList",
+                        "type": "object",
+                        "description": "业务归属库存明细",
+                        "multiple": 1,
+                        "children": [
+                          {
+                            "name": "inventoryNum",
+                            "type": "integer",
+                            "description": "库存数",
+                            "multiple": 0
+                          },
+                          {
+                            "name": "ownerCode",
+                            "type": "string",
+                            "description": "货主",
+                            "multiple": 0
+                          },
+                          {
+                            "name": "ownershipType",
+                            "type": "string",
+                            "description": "业务归属（SHEIN归属/商家归属）",
+                            "multiple": 0
+                          }
+                        ]
+                      },
+                      {
+                        "name": "warehouseId",
+                        "type": "integer",
+                        "description": "仓库ID",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "warehouseName",
+                        "type": "string",
+                        "description": "仓库名称",
+                        "multiple": 0
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "sellerOrderNo",
+                "type": "string",
+                "description": "卖家采购单号",
+                "multiple": 0
+              },
+              {
+                "name": "skcName",
+                "type": "string",
+                "description": "SKC",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "meta",
+            "type": "object",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "count",
+                "type": "integer",
+                "multiple": 0
+              },
+              {
+                "name": "customObj",
+                "type": "object",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

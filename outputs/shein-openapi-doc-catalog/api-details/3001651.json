@@ -1,0 +1,615 @@
+{
+  "docId": "3001651",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "订单接口-获取采购单信息",
+    "userDocName": "获取采购单信息",
+    "endpoint": "/open-api/order/purchase-order-infos",
+    "method": "GET",
+    "docName": "get_open-api_order_purchase-order-infos",
+    "version": 45,
+    "updateTime": "2026-03-31 10:29:19",
+    "changeContent": "调整排版",
+    "qpsContent": "50",
+    "modes": [
+      1,
+      2,
+      3,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "SHEIN自营",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "该接口适用于全托管、SHEIN自营以及POP三种店铺类型，可用来获取对应店铺的采购单列表，并进一步查询每个采购单的详细信息。通过该接口，可以查询到普通备货单和急采单两类采购单。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-language",
+        "type": "string",
+        "required": true,
+        "description": "指定出参语种，默认中文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object",
+    "children": [
+      {
+        "name": "orderNos",
+        "type": "string",
+        "description": "采购单号，支持批量以','间隔，一次最多请求200采购单号"
+      },
+      {
+        "name": "skcs",
+        "type": "string",
+        "description": "skc列表"
+      },
+      {
+        "name": "type",
+        "type": "integer",
+        "description": "采购单类型；1：急采/ 2：备货"
+      },
+      {
+        "name": "supplierCodes",
+        "type": "string",
+        "description": "商家货号数组"
+      },
+      {
+        "name": "combineTimeStart",
+        "type": "string",
+        "description": "备货单或急采单下发时间--开始; Date格式 2018-05-23 10:29:59； 查询不能超过60天"
+      },
+      {
+        "name": "combineTimeEnd",
+        "type": "string",
+        "description": "备货单或急采单下发时间--结束; Date格式 2018-05-23 10:29:59； 查询不能超过60天"
+      },
+      {
+        "name": "pageNumber",
+        "type": "integer",
+        "description": "页码"
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "description": "一页大小，最大200条"
+      },
+      {
+        "name": "updateTimeStart",
+        "type": "string",
+        "description": "备货单或急采单更新时间--开始; Date格式 2018-05-23 10:29:59； 查询不能超过60天"
+      },
+      {
+        "name": "updateTimeEnd",
+        "type": "string",
+        "description": "备货单或急采单更新时间--结束; Date格式 2018-05-23 10:29:59； 查询不能超过60天"
+      },
+      {
+        "name": "selectJitMother",
+        "type": "integer",
+        "description": "Jit母单查询标识；1：返回所有采购单（含Jit母单）/ 2或不传：返回除Jit母单外的其他采购单（不含Jit母单）"
+      }
+    ]
+  },
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": false,
+        "description": "状态码",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK；支持指定语种出参；",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "响应信息",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "count",
+            "type": "double",
+            "required": false,
+            "description": "总数",
+            "multiple": 0
+          },
+          {
+            "name": "pageNo",
+            "type": "double",
+            "required": false,
+            "description": "页码",
+            "multiple": 0
+          },
+          {
+            "name": "pageSize",
+            "type": "double",
+            "required": false,
+            "description": "页面数量",
+            "multiple": 0
+          },
+          {
+            "name": "list",
+            "type": "object",
+            "required": false,
+            "description": "数据列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "orderNo",
+                "type": "string",
+                "required": false,
+                "description": "订单编号",
+                "multiple": 0
+              },
+              {
+                "name": "typeName",
+                "type": "string",
+                "required": false,
+                "description": "订单类型，1：急采，2：备货",
+                "multiple": 0
+              },
+              {
+                "name": "type",
+                "type": "int64",
+                "description": "备货单类型，1：急采，2：备货"
+              },
+              {
+                "name": "orderExtends",
+                "type": "object",
+                "required": false,
+                "description": "详情信息",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "skc",
+                    "type": "string",
+                    "required": false,
+                    "description": "SHEIN skc",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "price",
+                    "type": "double",
+                    "required": false,
+                    "description": "结算价格",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "skuCode",
+                    "type": "string",
+                    "description": "SHEIN sku"
+                  },
+                  {
+                    "name": "suffixZh",
+                    "type": "string",
+                    "description": "属性集是属性值的拼接，如Blue-L，最多三个属性值拼接"
+                  },
+                  {
+                    "name": "needQuantity",
+                    "type": "integer",
+                    "description": "需求数量"
+                  },
+                  {
+                    "name": "orderQuantity",
+                    "type": "integer",
+                    "required": false,
+                    "description": "下单数量",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "deliveryQuantity",
+                    "type": "integer",
+                    "required": false,
+                    "description": "送货数量",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "receiptQuantity",
+                    "type": "integer",
+                    "required": false,
+                    "description": "收货数量",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "storageQuantity",
+                    "type": "integer",
+                    "required": false,
+                    "description": "入仓数量",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "defectiveQuantity",
+                    "type": "integer",
+                    "required": false,
+                    "description": "次品数量",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "supplierCode",
+                    "type": "string",
+                    "required": false,
+                    "description": "商家货号（skc纬度）",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "remark",
+                    "type": "string",
+                    "required": false,
+                    "description": "备注",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "imgPath",
+                    "type": "string",
+                    "required": false,
+                    "description": "SKC图片",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "skuImg",
+                    "type": "string",
+                    "description": "sku图片；该字段仅全托管可用；"
+                  },
+                  {
+                    "name": "requestDeliveryQuantity",
+                    "type": "string",
+                    "description": "JIT母单中已下子备货单数量（适用Jit场景）；"
+                  },
+                  {
+                    "name": "noRequestDeliveryQuantity",
+                    "type": "string",
+                    "description": "JIT母单中未下子备货单数量（适用Jit场景）；"
+                  },
+                  {
+                    "name": "alreadyDeliveryQuantity",
+                    "type": "string",
+                    "description": "JIT母单中子备货单的总已发货单数量（适用Jit场景）；"
+                  },
+                  {
+                    "name": "supplierSku",
+                    "type": "string",
+                    "description": "商家sku"
+                  }
+                ]
+              },
+              {
+                "name": "currencyName",
+                "type": "string",
+                "required": false,
+                "description": "币种名称；全托管（代运营）模式支持指定语种出参；",
+                "multiple": 0
+              },
+              {
+                "name": "currency",
+                "type": "string",
+                "description": "币种代码"
+              },
+              {
+                "name": "currencyId",
+                "type": "integer",
+                "description": "币种Id"
+              },
+              {
+                "name": "isPriorProductionName",
+                "type": "string",
+                "description": "是否优先生产（枚举值：是、否；适用Jit场景）；"
+              },
+              {
+                "name": "isJitMotherName",
+                "type": "string",
+                "description": "是否JIT母单（枚举值：是、否）场景示例：JIT母单是预下单，需要发货时，比如需要发货100，会产生一个JIT子单（即普通订单）数量100。"
+              },
+              {
+                "name": "updateTime",
+                "type": "datetime",
+                "description": "更新时间；状态发生变更的采购单的时间"
+              },
+              {
+                "name": "supplierName",
+                "type": "string",
+                "required": false,
+                "description": "商家名称",
+                "multiple": 0
+              },
+              {
+                "name": "orderSupervisor",
+                "type": "string",
+                "required": false,
+                "description": "跟单员（适用Jit场景）；",
+                "multiple": 0
+              },
+              {
+                "name": "addUid",
+                "type": "string",
+                "required": false,
+                "description": "添加人（适用Jit场景）；",
+                "multiple": 0
+              },
+              {
+                "name": "requestDeliveryTime",
+                "type": "datetime",
+                "required": false,
+                "description": "要求发货时间（适用Jit场景）；",
+                "multiple": 0
+              },
+              {
+                "name": "orderLabelInfo",
+                "type": "object",
+                "description": "备货单标签信息（暂只支持全托管模式返回）",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "orderLabel",
+                    "type": "integer",
+                    "description": "备货单标签枚举值；"
+                  },
+                  {
+                    "name": "orderLabelName",
+                    "type": "string",
+                    "description": "备货单标签名称；如“安检”等信息；支持按指定语种出参；"
+                  }
+                ]
+              },
+              {
+                "name": "goodsLevel",
+                "type": "object",
+                "description": "备货单商品层次信息（暂只支持全托管模式返回）",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "goodsLevel",
+                    "type": "integer",
+                    "description": "商品层次名称枚举值；"
+                  },
+                  {
+                    "name": "goodsLevelName",
+                    "type": "string",
+                    "description": "商品层次名称；如“备货款A”，“新款A”等信息；支持按指定语种出参；"
+                  }
+                ]
+              },
+              {
+                "name": "requestReceiptTime",
+                "type": "datetime",
+                "required": true,
+                "description": "要求收货时间，采购单下发后有值（备货&急采） 要求送至SHEIN仓的最晚时间"
+              },
+              {
+                "name": "requestTakeParcelTime",
+                "type": "string",
+                "description": "要求取件时间，急采单下发后有值，备货单可能返回为空；送货方式选择“SHEIN合作物流”，商家超过该时效会交货给到物流，将会面临罚款"
+              },
+              {
+                "name": "addTime",
+                "type": "string",
+                "required": false,
+                "description": "备货单的创建时间",
+                "multiple": 0
+              },
+              {
+                "name": "allocateTime",
+                "type": "string",
+                "required": false,
+                "description": "备货单的下发时间",
+                "multiple": 0
+              },
+              {
+                "name": "reserveTime",
+                "type": "string",
+                "required": false,
+                "description": "预约送货时间；全托管（代运营）模式无需关注",
+                "multiple": 0
+              },
+              {
+                "name": "receiptTime",
+                "type": "string",
+                "required": false,
+                "description": "SHEIN仓库收货时间",
+                "multiple": 0
+              },
+              {
+                "name": "checkTime",
+                "type": "string",
+                "required": false,
+                "description": "质检完成时间",
+                "multiple": 0
+              },
+              {
+                "name": "storageTime",
+                "type": "string",
+                "required": false,
+                "description": "仓库确认入库的时间",
+                "multiple": 0
+              },
+              {
+                "name": "returnTime",
+                "type": "string",
+                "required": false,
+                "description": "退货时间；质检失败，订单状态变为「已退货」，代表SHEIN确认要进行退货",
+                "multiple": 0
+              },
+              {
+                "name": "firstMarkName",
+                "type": "string",
+                "required": false,
+                "description": "首单标识；首单要求发货80%以上，自主上新的订单首单要求订单所有尺码的送货数量>=1",
+                "multiple": 0
+              },
+              {
+                "name": "firstMark",
+                "type": "boolean",
+                "description": "首单标识"
+              },
+              {
+                "name": "prepareTypeName",
+                "type": "string",
+                "required": false,
+                "description": "备货类型名称 ，当采购单类型是备货时有值；备货类型一致才可以合单发货；当值=[JIT备货]时，代表该采购单为Jit采购单；",
+                "multiple": 0
+              },
+              {
+                "name": "prepareTypeId",
+                "type": "integer",
+                "description": "备货类型值 ，当采购单类型是备货时有值；备货类型一致才可以合单发货；当值=[9]时代表该备货单为Jit子单；"
+              },
+              {
+                "name": "categoryName",
+                "type": "string",
+                "required": false,
+                "description": "订单类型名称 (ODM单 线上单 线下单)；全托管（代运营）模式无需关注",
+                "multiple": 0
+              },
+              {
+                "name": "orderMarkName",
+                "type": "string",
+                "required": false,
+                "description": "订单标识名称 (正常备货 样衣订单 退货再入仓)；全托管（代运营）模式无需关注",
+                "multiple": 0
+              },
+              {
+                "name": "warehouseName",
+                "type": "string",
+                "required": false,
+                "description": "收货仓库id对应的仓库名称",
+                "multiple": 0
+              },
+              {
+                "name": "urgentTypeName",
+                "type": "string",
+                "description": "紧急类型 (普通 紧急 特急)；表示订单的紧急程度"
+              },
+              {
+                "name": "urgentType",
+                "type": "integer",
+                "description": "紧急标识；仅全托管（代运营）模式返回；"
+              },
+              {
+                "name": "storageId",
+                "type": "string",
+                "description": "SHEIN收货仓库id"
+              },
+              {
+                "name": "recommendedSubWarehouseId",
+                "type": "string",
+                "description": "预估收货仓id；只有一个枚举ID=1347（华东质检仓）或者0（华东转运仓）或者空，预估收货仓ID一致时才能合单发货；"
+              },
+              {
+                "name": "countryMarket",
+                "type": "int64",
+                "description": "预销国家市场；0：默认/ 1：南大区/ 2：北大区；当type=2时才会返回，1和2的备货单不能合单发货，0可以和1或2合单发货；"
+              },
+              {
+                "name": "requestCompleteTime",
+                "type": "string",
+                "description": "要求完工时间（适用Jit场景）；"
+              },
+              {
+                "name": "isProductionCompletionName",
+                "type": "string",
+                "description": "是否生产完成（适用Jit场景）；"
+              },
+              {
+                "name": "isAllDeliveryName",
+                "type": "string",
+                "description": "是否完全要求发货（适用Jit场景）；"
+              },
+              {
+                "name": "isDeliveryName",
+                "type": "string",
+                "description": "是否送货（适用Jit场景）；"
+              },
+              {
+                "name": "status",
+                "type": "integer",
+                "description": "订单状态；1:待下单/ 2:已下单/ 3:发货中/ 4:已送货/ 5:已收货/ 6:已查验/ 7:已退货/ 8:已完成/ 9:无货下架/ 10:已作废/ 11:待审核/ 12:分单中/ 13:待退货全托管（代运营）模式只有2、3、4、5、7、8、10状态；"
+              },
+              {
+                "name": "statusName",
+                "type": "string",
+                "description": "状态名称；全托管（代运营）模式支持指定语种出参；"
+              },
+              {
+                "name": "deliveryTime",
+                "type": "datetime",
+                "description": "发货时间"
+              },
+              {
+                "name": "customInfoId",
+                "type": "string",
+                "description": "仅限订单为C端定制有数据，客单定制信息id"
+              },
+              {
+                "name": "customInfo",
+                "type": "json",
+                "description": "仅限订单为C端定制有数据，客单定制信息"
+              },
+              {
+                "name": "attributeVersion",
+                "type": "integer",
+                "description": "成份版本号；（当前仅OEM，ODM商家有返回值）"
+              },
+              {
+                "name": "isIncrementOnWay",
+                "type": "integer",
+                "description": "是否增值中；1:是/ 2:否；（当前仅OEM，ODM商家有返回值）"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request GET 'https://openapi.sheincorp.cn/open-api/order/purchase-order-infos?orderNos=PB2505200000635' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570729613' \\ --header 'language: EN' \\ --data-raw ''",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"count\": 1, \"pageNo\": 1, \"pageSize\": 20, \"list\": [ { \"orderNo\": \"PB2505200000635\", \"typeName\": \"急采\", \"currencyName\": \"人民币元\", \"currency\": null, \"supplierName\": \"H12\", \"orderSupervisor\": \"练红秀\", \"addUid\": \"dms-root\", \"requestDeliveryTime\": \"2025-04-23 23:59:59\", \"orderLabelInfo\": [ { \"orderLabel\": 163, \"orderLabelName\": \"\" }, { \"orderLabel\": 13, \"orderLabelName\": \"安检\" }, { \"orderLabel\": 193, \"orderLabelName\": \"履约评估考核订单\" } ], \"goodsLevel\": [ { \"goodsLevel\": 228, \"goodsLevelName\": \"退供款\" } ], \"addTime\": \"2025-04-23 06:17:38\", \"allocateTime\": \"2025-04-23 06:21:05\", \"reserveTime\": \"1970-01-01 08:00:01\", \"receiptTime\": \"1970-01-01 08:00:01\", \"checkTime\": \"1970-01-01 08:00:01\", \"storageTime\": \"2025-04-24 21:44:48\", \"returnTime\": \"1970-01-01 08:00:01\", \"requestTakeParcelTime\": \"2025-04-23 23:59:59\", \"requestReceiptTime\": null, \"firstMarkName\": \"否\", \"prepareTypeName\": \"备货单\", \"categoryName\": \"1急采\", \"orderMarkName\": \"正常备货\", \"warehouseName\": \"佛山仓\", \"urgentTypeName\": \"\", \"urgentType\": null, \"storageId\": 1, \"recommendedSubWarehouseId\": 0, \"requestCompleteTime\": null, \"isProductionCompletionName\": null, \"isAllDeliveryName\": null, \"isDeliveryName\": null, \"currencyId\": 156, \"firstMark\": 2, \"orderMarkId\": 733, \"prepareTypeId\": 17, \"category\": 0, \"type\": 1, \"status\": 8, \"statusName\": \"已完成\", \"updateTime\": \"2025-04-25 01:21:59\", \"isJitMotherName\": \"否\", \"isPriorProductionName\": null, \"orderExtends\": [ { \"skc\": \"s255904\", \"price\": 73, \"needQuantity\": null, \"orderQuantity\": 1, \"deliveryQuantity\": 1, \"receiptQuantity\": 0, \"storageQuantity\": 1, \"defectiveQuantity\": 0, \"supplierCode\": \"SWLC1265-5BR28\", \"remark\": \"\", \"imgPath\": \"https://img.ltwebstatic.com/images3_spmp/2025/03/14/e2/1741946708842dfe053372c941778f161b55e09e60.jpg\", \"skuImg\": \"\", \"requestDeliveryQuantity\": null, \"noRequestDeliveryQuantity\": null, \"alreadyDeliveryQuantity\": null, \"supplierSku\": \"SBR28\", \"skuCode\": \"I2840edmz\", \"suffixZh\": \"棕色-28 inch\" } ], \"deliveryTime\": \"2025-04-23 17:13:16\", \"customInfoId\": \"\", \"customInfo\": null } ] }, \"bbl\": { }, \"traceId\": \"b30354e8da18ea2e\" }",
+  "errorCode": null
+}

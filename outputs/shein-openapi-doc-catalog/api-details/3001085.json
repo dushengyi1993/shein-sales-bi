@@ -1,0 +1,898 @@
+{
+  "docId": "3001085",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "商品详情查询（新）",
+    "userDocName": "sku商品详情查询（即将作废）",
+    "endpoint": "/open-api/openapi-business-backend/product/full-detail",
+    "method": "POST",
+    "docName": "post_open-api_openapi-business-backend_product_full-detail",
+    "version": 31,
+    "updateTime": "2025-05-06 16:08:52",
+    "changeContent": "更新描述",
+    "qpsContent": "60",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "该API支持通过skucode查询sku详细信息，该接口目前暂停维护，请对接spu商品详情查询(新)接口，如需查询库存，请对接库存查询接口。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "skuCodes",
+        "type": "string",
+        "required": true,
+        "description": "skucode, 最大支持传100个，skucode是SHEIN生成的系统编码",
+        "multiple": 1
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "required": false,
+        "description": "语种, 默认中文简体: zh-cn支持语种:英语:en 法语:fr 西班牙语:es 德语:de 中文简体:zh-cn 泰语:th 巴西葡语:pt-br",
+        "defaultValue": "zh-cn",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": false,
+        "description": "return code (0:success)",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 1,
+        "children": [
+          {
+            "name": "skuCode",
+            "type": "string",
+            "required": true,
+            "description": "skuCode是SHEIN生成的系统编码",
+            "multiple": 0
+          },
+          {
+            "name": "spuName",
+            "type": "string",
+            "required": false,
+            "description": "spuName是SHEIN生成的系统编码",
+            "multiple": 0
+          },
+          {
+            "name": "skcName",
+            "type": "string",
+            "required": false,
+            "description": "skcName是SHEIN生成的系统编码, skc means stock keeping color, the sku by color is skc",
+            "multiple": 0
+          },
+          {
+            "name": "productName",
+            "type": "object",
+            "required": false,
+            "description": "商品名称",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "productName",
+                "type": "string",
+                "required": false,
+                "description": "商品名称",
+                "multiple": 0
+              },
+              {
+                "name": "language",
+                "type": "string",
+                "required": false,
+                "description": "语言",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "productDesc",
+            "type": "object",
+            "required": false,
+            "description": "商品描述",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "productDesc",
+                "type": "string",
+                "required": false,
+                "description": "商品描述",
+                "multiple": 0
+              },
+              {
+                "name": "language",
+                "type": "string",
+                "required": false,
+                "description": "语言",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "productNumber",
+            "type": "string",
+            "required": false,
+            "description": "货号",
+            "multiple": 0
+          },
+          {
+            "name": "sellerSku",
+            "type": "string",
+            "description": "商家sku"
+          },
+          {
+            "name": "goodsInventory",
+            "type": "object",
+            "required": false,
+            "description": "商品库存",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "inventoryQuantity",
+                "type": "integer",
+                "required": false,
+                "description": "库存数；只返回部分备货到shein仓或不备货到shein仓的商品库存",
+                "multiple": 0
+              },
+              {
+                "name": "lockedQuantity",
+                "type": "integer",
+                "required": false,
+                "description": "已销售未出库锁定库存数",
+                "multiple": 0
+              },
+              {
+                "name": "usableInventory",
+                "type": "integer",
+                "required": false,
+                "description": "可用库存",
+                "multiple": 0
+              },
+              {
+                "name": "tempLockQuantity",
+                "type": "integer",
+                "description": "已下单未支付锁定库存数"
+              },
+              {
+                "name": "warehouseInventoryList",
+                "type": "object",
+                "description": "各仓库库存详情",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "warehouseCode",
+                    "type": "string",
+                    "description": "仓库编码"
+                  },
+                  {
+                    "name": "warehouseType",
+                    "type": "string",
+                    "description": "仓库类型"
+                  },
+                  {
+                    "name": "inventoryQuantity",
+                    "type": "integer",
+                    "description": "库存数;只返回部分备货到shein仓或不备货到shein仓的商品库存"
+                  },
+                  {
+                    "name": "lockedQuantity",
+                    "type": "integer",
+                    "description": "已销售未出库锁定库存数"
+                  },
+                  {
+                    "name": "usableInventory",
+                    "type": "integer",
+                    "description": "可用库存"
+                  },
+                  {
+                    "name": "tempLockQuantity",
+                    "type": "integer",
+                    "description": "已下单未支付锁定库存数"
+                  }
+                ]
+              },
+              {
+                "name": "skuCode",
+                "type": "string",
+                "description": "skucode，skucode是SHEIN生成的系统编码"
+              }
+            ]
+          },
+          {
+            "name": "attributeLists",
+            "type": "object",
+            "required": false,
+            "description": "SKC属性",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "attributeId",
+                "type": "long",
+                "required": false,
+                "description": "属性ID",
+                "multiple": 0
+              },
+              {
+                "name": "attributeValueMulti",
+                "type": "object",
+                "required": false,
+                "description": "属性值多语言"
+              },
+              {
+                "name": "attributeAdditionList",
+                "type": "object",
+                "required": false,
+                "description": "属性附加列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "additionAttrValueMulti",
+                    "type": "object",
+                    "required": false,
+                    "description": "语言",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "additionValue",
+                    "type": "string",
+                    "required": false,
+                    "description": "属性名称(按语种返回，默认返回中文)",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "additionAttrValueId",
+                    "type": "string"
+                  },
+                  {
+                    "name": "additionAttrMulti",
+                    "type": "object"
+                  },
+                  {
+                    "name": "additionAttrId",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "name": "attributeValueId",
+                "type": "string",
+                "required": false,
+                "description": "属性值ID",
+                "multiple": 0
+              },
+              {
+                "name": "attributeMulti",
+                "type": "object",
+                "required": false,
+                "description": "属性多语言",
+                "multiple": 0,
+                "children": [
+                  {
+                    "name": "language",
+                    "type": "string",
+                    "required": false,
+                    "description": "语言",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "attributeMulti",
+                    "type": "string",
+                    "required": false,
+                    "description": "属性值(按语种返回，默认返回中文)",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "attributeType",
+                "type": "string",
+                "required": false,
+                "description": "属性类型",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "skuAttributeLists",
+            "type": "object",
+            "required": false,
+            "description": "商品sku属性",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "attributeValueMulti",
+                "type": "object",
+                "required": false,
+                "description": "属性值多语言",
+                "multiple": 0,
+                "children": [
+                  {
+                    "name": "attributeValueMulti",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "language",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "attributeValueId",
+                "type": "string",
+                "required": false,
+                "description": "属性值ID(默认)",
+                "multiple": 0
+              },
+              {
+                "name": "attributeMulti",
+                "type": "object",
+                "required": false,
+                "description": "属性名称(多语言）",
+                "multiple": 0,
+                "children": [
+                  {
+                    "name": "attributeMulti",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "language",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "attributeId",
+                "type": "string",
+                "required": false,
+                "description": "属性id",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "saleAttribute",
+            "type": "object",
+            "required": false,
+            "description": "商品销售属性",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "attributeValueMulti",
+                "type": "object",
+                "required": false,
+                "description": "属性值多语言",
+                "multiple": 0,
+                "children": [
+                  {
+                    "name": "language",
+                    "type": "string",
+                    "required": false,
+                    "description": "语言",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "attributeValueMulti",
+                    "type": "string",
+                    "required": false,
+                    "description": "属性值",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "attributeId",
+                "type": "string",
+                "required": false,
+                "description": "属性id",
+                "multiple": 0
+              },
+              {
+                "name": "attributeMulti",
+                "type": "object",
+                "required": false,
+                "description": "属性名称(多语言）",
+                "multiple": 0,
+                "children": [
+                  {
+                    "name": "language",
+                    "type": "string",
+                    "required": false,
+                    "description": "语言",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "attributeMulti",
+                    "type": "string",
+                    "required": false,
+                    "description": "属性名称",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "attributeValueId",
+                "type": "string",
+                "required": false,
+                "description": "属性值id",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "currentPrices",
+            "type": "object",
+            "required": false,
+            "description": "价格",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "shopPrice",
+                "type": "double",
+                "required": false,
+                "description": "商品原价",
+                "multiple": 0
+              },
+              {
+                "name": "specialPrice",
+                "type": "double",
+                "required": false,
+                "description": "商品特价",
+                "multiple": 0
+              },
+              {
+                "name": "site",
+                "type": "string",
+                "required": false,
+                "description": "站点",
+                "multiple": 0
+              },
+              {
+                "name": "specialPriceStart",
+                "type": "datetime",
+                "required": false,
+                "description": "商品特价开始时间",
+                "multiple": 0
+              },
+              {
+                "name": "specialPriceEnd",
+                "type": "datetime",
+                "required": false,
+                "description": "商品特价结束时间",
+                "multiple": 0
+              },
+              {
+                "name": "salePrice",
+                "type": "double",
+                "required": false,
+                "description": "最终生效的价格，原价或者特价中的一个",
+                "multiple": 0
+              },
+              {
+                "name": "terminal",
+                "type": "string",
+                "required": false,
+                "description": "所属渠道",
+                "multiple": 0
+              },
+              {
+                "name": "currency",
+                "type": "string",
+                "required": false,
+                "description": "币种",
+                "multiple": 0
+              },
+              {
+                "name": "suggestedRetailPrice",
+                "type": "object",
+                "description": "建议零售价信息",
+                "children": [
+                  {
+                    "name": "srpPrice",
+                    "type": "string",
+                    "description": "价格"
+                  },
+                  {
+                    "name": "currency",
+                    "type": "string",
+                    "description": "币种"
+                  }
+                ]
+              },
+              {
+                "name": "multiCurrencyCostList",
+                "type": "object",
+                "description": "价格信息 /Price info",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "cost",
+                    "type": "string",
+                    "description": "供货价（代运营和半托管模式返回该数据）"
+                  },
+                  {
+                    "name": "currency",
+                    "type": "string",
+                    "description": "币种"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "categoryName",
+            "type": "string",
+            "required": false,
+            "description": "商品分类名称",
+            "multiple": 0
+          },
+          {
+            "name": "categoryId",
+            "type": "string",
+            "required": false,
+            "description": "商品分类id",
+            "multiple": 0
+          },
+          {
+            "name": "imageList",
+            "type": "object",
+            "required": false,
+            "description": "图片",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "imageType",
+                "type": "string",
+                "required": false,
+                "description": "图片类型such as: MAIN/DETAIL/SQUARE/PIECE",
+                "multiple": 0
+              },
+              {
+                "name": "sort",
+                "type": "integer",
+                "required": false,
+                "description": "排序",
+                "multiple": 0
+              },
+              {
+                "name": "imageMediumUrl",
+                "type": "string",
+                "required": false,
+                "description": "中等图图片链接",
+                "multiple": 0
+              },
+              {
+                "name": "imageSmallUrl",
+                "type": "string",
+                "required": false,
+                "description": "小图链接",
+                "multiple": 0
+              },
+              {
+                "name": "imageUrl",
+                "type": "string",
+                "required": false,
+                "description": "原图链接",
+                "multiple": 0
+              },
+              {
+                "name": "imageItemId",
+                "type": "long",
+                "description": "图片id"
+              },
+              {
+                "name": "groupCode",
+                "type": "string",
+                "description": "图片组编码"
+              }
+            ]
+          },
+          {
+            "name": "skuDimensionsInfo",
+            "type": "object",
+            "required": false,
+            "description": "尺寸属性",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "length",
+                "type": "string",
+                "required": false,
+                "description": "包装尺寸（长）(cm)",
+                "multiple": 0
+              },
+              {
+                "name": "width",
+                "type": "string",
+                "required": false,
+                "description": "包装尺寸（宽）(cm)",
+                "multiple": 0
+              },
+              {
+                "name": "height",
+                "type": "string",
+                "required": false,
+                "description": "包装尺寸（高）(cm)",
+                "multiple": 0
+              },
+              {
+                "name": "weight",
+                "type": "string",
+                "required": false,
+                "description": "重量 （g）",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "shelfDetails",
+            "type": "object",
+            "required": false,
+            "description": "上下架信息",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "isOnShelf",
+                "type": "boolean",
+                "required": false,
+                "description": "是否上架 / is On Shelf，ture代表上架，false代表下架",
+                "multiple": 0
+              },
+              {
+                "name": "lastUpdateTime",
+                "type": "string",
+                "required": false,
+                "description": "最近更新时间",
+                "multiple": 0
+              },
+              {
+                "name": "site",
+                "type": "string",
+                "required": false,
+                "description": "站点",
+                "multiple": 0
+              },
+              {
+                "name": "stockMode",
+                "type": "string",
+                "required": false,
+                "description": "销售状态,0:实际;1:虚拟",
+                "multiple": 0
+              },
+              {
+                "name": "isRecycled",
+                "type": "string"
+              }
+            ]
+          },
+          {
+            "name": "productTypeId",
+            "type": "string",
+            "required": false,
+            "description": "商品类型",
+            "multiple": 0
+          },
+          {
+            "name": "brandCode",
+            "type": "string",
+            "description": "商品品牌"
+          },
+          {
+            "name": "stopPurchase",
+            "type": "string",
+            "required": true,
+            "description": "采购状态 1：可采 2：停采"
+          },
+          {
+            "name": "mallStateList",
+            "type": "object",
+            "required": true,
+            "multiple": 1,
+            "children": [
+              {
+                "name": "mallState",
+                "type": "string",
+                "required": true,
+                "description": "SKU商城销售状态 1：在售 2：停售"
+              }
+            ]
+          },
+          {
+            "name": "siteDetailImageInfoList",
+            "type": "object",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "imageGroupCode",
+                "type": "string",
+                "description": "图片组编码"
+              },
+              {
+                "name": "imageInfoList",
+                "type": "object",
+                "description": "详情图列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "imageItemId",
+                    "type": "long",
+                    "description": "图片id"
+                  },
+                  {
+                    "name": "imageSort",
+                    "type": "integer",
+                    "description": "图片排序"
+                  },
+                  {
+                    "name": "imageUrl",
+                    "type": "string",
+                    "description": "图片地址"
+                  }
+                ]
+              },
+              {
+                "name": "siteList",
+                "type": "object",
+                "description": "站点列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "channel",
+                    "type": "string",
+                    "description": "渠道"
+                  },
+                  {
+                    "name": "mainSite",
+                    "type": "string",
+                    "description": "主站点"
+                  },
+                  {
+                    "name": "site",
+                    "type": "string",
+                    "description": "子站点"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "proofOfStockList",
+            "type": "object",
+            "description": "库存证明文件",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "fileName",
+                "type": "string",
+                "description": "库存证明文件名"
+              },
+              {
+                "name": "type",
+                "type": "integer",
+                "description": "库存证明类型(1:图片;2:PDF)"
+              },
+              {
+                "name": "url",
+                "type": "string",
+                "description": "库存证明文件地址"
+              }
+            ]
+          },
+          {
+            "name": "competingProductLink",
+            "type": "string",
+            "description": "竞品商品链接地址"
+          },
+          {
+            "name": "sampleInfo",
+            "type": "object",
+            "description": "样品信息",
+            "children": [
+              {
+                "name": "reserveSampleFlag",
+                "type": "string",
+                "description": "是否留样，1:是，2:否"
+              },
+              {
+                "name": "spotFlag",
+                "type": "string",
+                "description": "是否现货，1:是，2:否"
+              },
+              {
+                "name": "sampleJudgeType",
+                "type": "string",
+                "description": "审版类型，2:大货样衣"
+              },
+              {
+                "name": "sampleCode",
+                "type": "string",
+                "description": "样衣的平台商品code，只有主销售属性时返回skc_name，有次销售属性时返回sku_code"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "error message",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi-test01.sheincorp.cn/open-api/openapi-business-backend/product/full-detail' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-timestamp: 1692620638880' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --data-raw '{ \"skuCodes\": [ \"I967uum2xi2q\" ], \"language\": \"en\" }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": [{ \"spuName\": \"w2301056886\", \"categoryId\": 2233, \"categoryName\": \"大码毛衣半身裙\", \"skuDimensionsInfo\": { \"length\": \"12.00\", \"width\": \"12.00\", \"weight\": \"12\", \"height\": \"12.00\" }, \"isSaleAttribute\": 1, \"productNumber\": \"123\", \"productTypeId\": 1031, \"skcName\": \"sw23010568863917\", \"skcCode\": \"O07f497x809b\", \"brandCode\": \"\", \"productName\": { \"language\": \"zh-cn\", \"productName\": \"商品测试详情图0626\" }, \"goodsInventory\": { \"inventoryQuantity\": 0, \"lockedQuantity\": 0, \"tempLockQuantity\": 0, \"sellerSku\": null, \"usableInventory\": 0, \"skuCode\": \"I07f497xa731\", \"warehouseInventoryList\": [] }, \"shelfDetails\": null, \"productDesc\": { \"productDesc\": \"\", \"language\": \"zh-cn\" }, \"currentPrices\": [{ \"productCode\": \"I07f497xa731\", \"site\": \"shein-www\", \"shopPrice\": 12.00, \"currency\": \"USD\", \"terminal\": null, \"specialPrice\": 12.00, \"specialPriceStart\": null, \"salePrice\": 12.00, \"specialPriceEnd\": null, \"suggestedRetailPrice\": null, \"multiCurrencyCostList\": [{ \"cost\": 12.00, \"currency\": \"CNY\" }] }], \"sellerSku\": \"\", \"imageList\": [{ \"imageItemId\": 4177814, \"groupCode\": \"G3ck0j5himvq\", \"imageUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/01/05/1672915851294102400.jpeg\", \"imageMediumUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/01/05/1672915851294102400_thumbnail_405x552.jpeg\", \"sort\": 1, \"imageSmallUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/01/05/1672915851294102400_thumbnail_220x293.jpeg\", \"imageType\": \"MAIN\" }, { \"imageItemId\": 2147510583, \"groupCode\": \"G3ck0j5himvq\", \"imageUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/06/26/16877583224104183094.jpg\", \"imageMediumUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/06/26/16877583224104183094_thumbnail_405x552.jpg\", \"sort\": 2, \"imageSmallUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/06/26/16877583224104183094_thumbnail_220x293.jpg\", \"imageType\": \"DETAIL\" }, { \"imageItemId\": 4177815, \"groupCode\": \"G3ck0j5himvq\", \"imageUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/01/05/16729158581743044934.jpeg\", \"imageMediumUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/01/05/16729158581743044934_thumbnail_405x552.jpeg\", \"sort\": 3, \"imageSmallUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/01/05/16729158581743044934_thumbnail_220x293.jpeg\", \"imageType\": \"SQUARE\" }, { \"imageItemId\": 4177816, \"groupCode\": \"G3ck0j5himvq\", \"imageUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/01/05/16729158633401920931.jpeg\", \"imageMediumUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/01/05/16729158633401920931_thumbnail_405x552.jpeg\", \"sort\": 4, \"imageSmallUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/01/05/16729158633401920931_thumbnail_220x293.jpeg\", \"imageType\": \"PIECE\" }], \"skuCode\": \"I07f497xa731\", \"attributeLists\": [{ \"attributeValueMulti\": { \"attributeValueMulti\": \"否\", \"language\": \"zh-cn\" }, \"attributeAdditionList\": [], \"attributeId\": 9, \"attributeMulti\": { \"attributeMulti\": \"腰带修改属性名\", \"language\": \"zh-cn\" }, \"attributeType\": 4, \"attributeValueId\": 459 }, { \"attributeValueMulti\": { \"attributeValueMulti\": \"雨靴\", \"language\": \"zh-cn\" }, \"attributeAdditionList\": [], \"attributeId\": 1000455, \"attributeMulti\": { \"attributeMulti\": \"关务种类\", \"language\": \"zh-cn\" }, \"attributeType\": 4, \"attributeValueId\": 1002593 }], \"saleAttribute\": { \"attributeValueMulti\": { \"attributeValueMulti\": \"S\", \"language\": \"zh-cn\" }, \"attributeId\": 87, \"attributeMulti\": { \"attributeMulti\": \"尺寸\", \"language\": \"zh-cn\" }, \"attributeValueId\": 568 }, \"skuAttributeLists\": [{ \"attributeValueMulti\": { \"attributeValueMulti\": \"高腰\", \"language\": \"zh-cn\" }, \"attributeId\": 1000253, \"attributeMulti\": { \"attributeMulti\": \"腰高\", \"language\": \"zh-cn\" }, \"attributeValueId\": 1001537 }], \"stopPurchase\": 1, \"mallStateList\": [{ \"mallState\": 1 }], \"siteDetailImageInfoList\": [{ \"imageGroupCode\": \"G4101b6x0x2q\", \"imageInfoList\": [{ \"imageItemId\": 1147525967, \"imageSort\": 1, \"imageUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/06/27/16878497173382906927.jpg\" }, { \"imageItemId\": 1147525968, \"imageSort\": 2, \"imageUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/06/27/1687849716132016602.jpg\" }, { \"imageItemId\": 1147525969, \"imageSort\": 3, \"imageUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/06/27/16878497172100198531.jpg\" }, { \"imageItemId\": 1147525972, \"imageSort\": 4, \"imageUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/06/27/16878497171538544330.jpg\" }, { \"imageItemId\": 1147525970, \"imageSort\": 5, \"imageUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/06/27/168784971786427267.jpg\" }, { \"imageItemId\": 1147525973, \"imageSort\": 6, \"imageUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/06/27/16878497172692858196.jpg\" }, { \"imageItemId\": 1147525971, \"imageSort\": 7, \"imageUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/06/27/16878497171257169109.jpg\" }, { \"imageItemId\": 1147525974, \"imageSort\": 8, \"imageUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/06/27/1687849717267425053.jpg\" }, { \"imageItemId\": 1147525966, \"imageSort\": 9, \"imageUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/06/27/16878497172530412707.jpg\" }, { \"imageItemId\": 1147525975, \"imageSort\": 10, \"imageUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/06/27/16878497181300119333.jpg\" }], \"siteList\": [{ \"channel\": \"\", \"mainSite\": \"rw\", \"site\": \"rw-fr\" }] }, { \"imageGroupCode\": \"G1gn3ar0kuri\", \"imageInfoList\": [{ \"imageItemId\": 1147525978, \"imageSort\": 1, \"imageUrl\": \"http://imgdeal-test01.shein.com/images3_pi/2023/06/27/16878503612266741411.jpg\" }], \"siteList\": [{ \"channel\": \"\", \"mainSite\": \"shein\", \"site\": \"shein-roe\" }, { \"channel\": \"\", \"mainSite\": \"shein\", \"site\": \"shein-euqs\" }, { \"channel\": \"\", \"mainSite\": \"shein\", \"site\": \"shein-uk\" }, { \"channel\": \"\", \"mainSite\": \"shein\", \"site\": \"shein-ca\" }, { \"channel\": \"\", \"mainSite\": \"shein\", \"site\": \"shein-ma\" }] }], \"proofOfStockList\": null, \"sampleInfo\": { \"reserveSampleFlag\": 0, \"sampleCode\": \"\", \"spotFlag\": 0, \"sampleJudgeType\": 2 }, \"competingProductLink\": null }] }",
+  "errorCode": null
+}

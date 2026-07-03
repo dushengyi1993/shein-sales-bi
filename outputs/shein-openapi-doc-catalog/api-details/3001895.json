@@ -1,0 +1,284 @@
+{
+  "docId": "3001895",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "提交建议零售价",
+    "userDocName": "提交建议零售价",
+    "endpoint": "/open-api/goods-recommend-retail-price/batch-save",
+    "method": "POST",
+    "docName": "",
+    "version": 3,
+    "updateTime": "2026-07-02 20:38:59",
+    "changeContent": "更新为商品",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      2,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "支持新增/更新商品的建议零售价，建议零售价发起新增/更新后，会进入审核流程。注意：更新建议零售价是全量覆盖逻辑，请在提交时务必传入所有需要的信息，可以在更新前先查询商品当前的建议零售价信息，原数据会被清空。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "x-lt-signature",
+        "type": "int64",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "响应msg的语种。不传时默认为英语，枚举值支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "label": "提交RRP调价请求（开放平台）",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "skc_rrp_list",
+        "type": "object",
+        "required": true,
+        "description": "SKC信息列表。单次最多同时提交10个SKC。提交前请查询SKC的建议零售价填写规则：/open-api/goods/query-recommend-retail-price-rule建议零售价的详细说明参考文档： https://open.sheincorp.com/documents/system/bf5a59ca-d378-4417-a359-f07cc89bf96b",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "skc_name",
+            "type": "string",
+            "required": true,
+            "description": "SKC平台编码",
+            "example": "skc123456",
+            "multiple": 0
+          },
+          {
+            "name": "sku_rrp_info_list",
+            "type": "object",
+            "required": true,
+            "description": "SKU信息列表。",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "currency",
+                "type": "string",
+                "required": true,
+                "description": "币种",
+                "example": "EUR",
+                "multiple": 0
+              },
+              {
+                "name": "site",
+                "type": "string",
+                "required": false,
+                "description": "站点缩写。分站点规则下填写站点名，不分站点规则下不用写站点",
+                "example": "DE",
+                "multiple": 0
+              },
+              {
+                "name": "sku_code",
+                "type": "string",
+                "required": true,
+                "description": "SKU平台编码",
+                "example": "sku123456",
+                "multiple": 0
+              },
+              {
+                "name": "suggested_retail_price",
+                "type": "double",
+                "required": false,
+                "description": "调整后的建议零售价，不填表示清空.不同币种的精度要求不同，精度要求参考FAQ",
+                "example": "99.99",
+                "multiple": 0
+              },
+              {
+                "name": "type_one_proof",
+                "type": "object",
+                "required": false,
+                "description": "类型一证明材料",
+                "label": "证明材料",
+                "multiple": 0,
+                "children": [
+                  {
+                    "name": "attachments",
+                    "type": "string",
+                    "required": false,
+                    "description": "证明材料附件列表，图片或PDF的URL， 上传材料不能超过6个。URL需要使用SHEIN链接，使用接口转换获取：/open-api/goods/discuss/upload-discuss-file",
+                    "multiple": 1
+                  },
+                  {
+                    "name": "proof_link",
+                    "type": "string",
+                    "required": false,
+                    "description": "网站地址，不超过1000个字符",
+                    "example": "https://example.com/proof",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "type_two_proof",
+                "type": "object",
+                "required": false,
+                "description": "类型二证明材料",
+                "label": "证明材料",
+                "multiple": 0,
+                "children": [
+                  {
+                    "name": "attachments",
+                    "type": "string",
+                    "required": false,
+                    "description": "证明材料附件列表，图片或PDF的URL， 上传材料不能超过6个。URL需要使用SHEIN链接，使用接口转换获取：/open-api/goods/discuss/upload-discuss-file",
+                    "multiple": 1
+                  },
+                  {
+                    "name": "proof_link",
+                    "type": "string",
+                    "required": false,
+                    "description": "网站地址，不超过1000个字符",
+                    "example": "https://example.com/proof",
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "spu_name",
+            "type": "string",
+            "required": false,
+            "description": "SPU平台编码",
+            "example": "spu123456",
+            "multiple": 0
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfSubmitOpenApiRespOfOpenApiAdjustResult",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "响应信息",
+        "label": "SubmitOpenApiRespOfOpenApiAdjustResult",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "failed_list",
+            "type": "object",
+            "required": false,
+            "description": "失败列表。提交操作是SKC维度，若SKC下有一个SKU提交信息不符合要求则会整体失败，失败信息会给到【SKU+站点】颗粒度。",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "code",
+                "type": "string",
+                "required": false,
+                "description": "失败错误码",
+                "multiple": 0
+              },
+              {
+                "name": "reason",
+                "type": "string",
+                "required": false,
+                "description": "失败原因",
+                "multiple": 0
+              },
+              {
+                "name": "site",
+                "type": "string",
+                "required": false,
+                "description": "站点代码",
+                "multiple": 0
+              },
+              {
+                "name": "skc_name",
+                "type": "string",
+                "required": false,
+                "description": "SKC平台编码",
+                "multiple": 0
+              },
+              {
+                "name": "sku_code",
+                "type": "string",
+                "required": false,
+                "description": "SKU平台编码",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "success_list",
+            "type": "object",
+            "required": false,
+            "description": "成功列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "skc_name",
+                "type": "string",
+                "required": false,
+                "description": "SKC平台编码",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "追踪码"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

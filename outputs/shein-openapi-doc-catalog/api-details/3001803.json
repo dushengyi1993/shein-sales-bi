@@ -1,0 +1,417 @@
+{
+  "docId": "3001803",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询商家退货地址",
+    "userDocName": "查询商家退货地址",
+    "endpoint": "/open-api/purchase/query-return-address",
+    "method": "POST",
+    "docName": "",
+    "version": 5,
+    "updateTime": "2026-06-12 10:36:33",
+    "changeContent": "清掉描述的空格",
+    "qpsContent": "50",
+    "modes": [
+      2
+    ],
+    "modeNames": [
+      "全托管"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "获取商家可用的退货收货地址列表",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "addressIdList",
+        "type": "integer",
+        "description": "卖家地址唯一ID集合,如果入参此ID 列表不为空，只会返回此ID列表中所有 id 对应的地址明细",
+        "example": "43",
+        "multiple": 1
+      },
+      {
+        "name": "filterSharedAddress",
+        "type": "boolean",
+        "description": "是否过滤共享地址 true:过滤 false:不过滤(默认不过滤)；开发者可忽略",
+        "example": "false",
+        "multiple": 0
+      },
+      {
+        "name": "fuzzyQuery",
+        "type": "string",
+        "description": "模糊搜索,地址简称、手机区号和联系人的全模糊搜索",
+        "example": "random_fuzzyQuery",
+        "multiple": 0
+      },
+      {
+        "name": "orderBySharedAddress",
+        "type": "boolean",
+        "description": "是否按商群共享地址排序，当入参该值并且是true时，会把共享地址排在前面,如果不传按默认排序；开发者可忽略",
+        "example": "false",
+        "multiple": 0
+      },
+      {
+        "name": "pageNum",
+        "type": "integer",
+        "description": "页码,默认第一页",
+        "example": "7",
+        "multiple": 0
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "description": "每页条数,默认10条",
+        "example": "79",
+        "multiple": 0
+      },
+      {
+        "name": "serviceSiteCodeList",
+        "type": "string",
+        "description": "VSS增值系统提供的服务点ID集合,1、VSS增值系统提供的服务点ID 2、如果入参此ID，只会返回此ID对应的地址明细（不区分服务点启用or禁用状态）；开发者可忽略",
+        "example": "random_serviceSiteCodeList",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码，成功：0",
+        "example": "random_code",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述,成功：OK",
+        "example": "random_msg",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "required": true,
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "data",
+            "type": "object",
+            "required": true,
+            "multiple": 1,
+            "children": [
+              {
+                "name": "address1",
+                "type": "string",
+                "description": "地址1(国内和国外商家使用的地址)",
+                "example": "random_address1",
+                "multiple": 0
+              },
+              {
+                "name": "address2",
+                "type": "string",
+                "description": "地址2(国外商家使用的地址，地址1和地址2进行拼接使用)",
+                "example": "random_address2",
+                "multiple": 0
+              },
+              {
+                "name": "addressAbnormal",
+                "type": "integer",
+                "description": "地址异常情况：1-已处理 2-待处理",
+                "example": "26",
+                "multiple": 0
+              },
+              {
+                "name": "addressDetail",
+                "type": "string",
+                "description": "拼接后的地址详情",
+                "example": "random_addressDetail",
+                "multiple": 0
+              },
+              {
+                "name": "addressId",
+                "type": "integer",
+                "description": "物流客户地址唯一ID",
+                "example": "6",
+                "multiple": 0
+              },
+              {
+                "name": "addressLabel",
+                "type": "string",
+                "description": "地址标签",
+                "example": "random_addressLabel",
+                "multiple": 0
+              },
+              {
+                "name": "cityId",
+                "type": "integer",
+                "description": "城市id",
+                "example": "54",
+                "multiple": 0
+              },
+              {
+                "name": "cityName",
+                "type": "string",
+                "description": "城市名称",
+                "example": "random_cityName",
+                "multiple": 0
+              },
+              {
+                "name": "countryCode",
+                "type": "string",
+                "description": "国家二字码",
+                "example": "random_countryCode",
+                "multiple": 0
+              },
+              {
+                "name": "countryId",
+                "type": "integer",
+                "description": "国家ID",
+                "example": "18",
+                "multiple": 0
+              },
+              {
+                "name": "countryName",
+                "type": "string",
+                "description": "国家名称",
+                "example": "random_countryName",
+                "multiple": 0
+              },
+              {
+                "name": "districtId",
+                "type": "integer",
+                "description": "地区id",
+                "example": "87",
+                "multiple": 0
+              },
+              {
+                "name": "districtName",
+                "type": "string",
+                "description": "地区名称",
+                "example": "random_districtName",
+                "multiple": 0
+              },
+              {
+                "name": "isDefaultAddress",
+                "type": "integer",
+                "description": "是否默认发货地址1：是；2否",
+                "example": "91",
+                "multiple": 0
+              },
+              {
+                "name": "isDefaultPickupAddress",
+                "type": "integer",
+                "description": "是否默认收货地址1：是；2:否",
+                "example": "58",
+                "multiple": 0
+              },
+              {
+                "name": "isDefaultReturnAddress",
+                "type": "integer",
+                "description": "是否默认退货地址1：是；2:否",
+                "example": "93",
+                "multiple": 0
+              },
+              {
+                "name": "isSharedAddress",
+                "type": "integer",
+                "description": "是否商群共享地址1：是；2:否",
+                "example": "7",
+                "multiple": 0
+              },
+              {
+                "name": "lastLevelAddressId",
+                "type": "integer",
+                "description": "地址最末级ID",
+                "example": "83",
+                "multiple": 0
+              },
+              {
+                "name": "merchantCode",
+                "type": "string",
+                "description": "商家全球唯一编码",
+                "example": "random_merchantCode",
+                "multiple": 0
+              },
+              {
+                "name": "phoneAreaCode",
+                "type": "string",
+                "description": "手机区号",
+                "example": "random_phoneAreaCode",
+                "multiple": 0
+              },
+              {
+                "name": "postCode",
+                "type": "string",
+                "description": "邮编",
+                "example": "random_postCode",
+                "multiple": 0
+              },
+              {
+                "name": "postcodeId",
+                "type": "integer",
+                "description": "邮编ID",
+                "example": "47",
+                "multiple": 0
+              },
+              {
+                "name": "sellerContract",
+                "type": "string",
+                "description": "商家联系人",
+                "example": "random_sellerContract",
+                "multiple": 0
+              },
+              {
+                "name": "sellerContractEmail",
+                "type": "string",
+                "description": "商家联系人邮箱",
+                "example": "random_sellerContractEmail",
+                "multiple": 0
+              },
+              {
+                "name": "sellerContractFirstName",
+                "type": "string",
+                "description": "商家联系人-名",
+                "example": "random_sellerContractFirstName",
+                "multiple": 0
+              },
+              {
+                "name": "sellerContractLastName",
+                "type": "string",
+                "description": "商家联系人-姓",
+                "example": "random_sellerContractLastName",
+                "multiple": 0
+              },
+              {
+                "name": "sellerContractPhone",
+                "type": "string",
+                "description": "商家联系人电话",
+                "example": "random_sellerContractPhone",
+                "multiple": 0
+              },
+              {
+                "name": "sellerId",
+                "type": "integer",
+                "description": "商家ID,供应商外部id",
+                "example": "9",
+                "multiple": 0
+              },
+              {
+                "name": "sellerSiteNo",
+                "type": "string",
+                "description": "服务站点编码",
+                "example": "random_sellerSiteNo",
+                "multiple": 0
+              },
+              {
+                "name": "snapshotVersion",
+                "type": "string",
+                "description": "地址最新版本号（按照版本号查询的时候返回的是入参的版本号)",
+                "example": "random_snapshotVersion",
+                "multiple": 0
+              },
+              {
+                "name": "stateId",
+                "type": "integer",
+                "description": "州省id",
+                "example": "82",
+                "multiple": 0
+              },
+              {
+                "name": "stateName",
+                "type": "string",
+                "description": "州省名称",
+                "example": "random_stateName",
+                "multiple": 0
+              },
+              {
+                "name": "streetId",
+                "type": "integer",
+                "description": "街道id",
+                "example": "43",
+                "multiple": 0
+              },
+              {
+                "name": "streetName",
+                "type": "string",
+                "description": "街道名称",
+                "example": "random_streetName",
+                "multiple": 0
+              },
+              {
+                "name": "supplierType",
+                "type": "integer",
+                "description": "商家类型采购：1-生产；2-增值；6-平台",
+                "example": "13",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "meta",
+            "type": "object",
+            "required": true,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "count",
+                "type": "integer",
+                "example": "49",
+                "multiple": 0
+              },
+              {
+                "name": "customObj",
+                "type": "object",
+                "required": true,
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

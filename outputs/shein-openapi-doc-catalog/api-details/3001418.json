@@ -1,0 +1,133 @@
+{
+  "docId": "3001418",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "提供更新MDP转印任务结束",
+    "userDocName": "提供更新MDP转印任务结束",
+    "endpoint": "/open-api/mdp/product/transfer-print-task/finish",
+    "method": "POST",
+    "docName": "post_open-api_mdp_product_transfer-print-task_finish",
+    "version": 2,
+    "updateTime": "2025-10-15 14:53:00",
+    "changeContent": "更新MDP接口文档",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object"
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "orderNo",
+        "type": "string",
+        "required": true,
+        "description": "加工单号/异常单号/生产异常单号",
+        "label": "加工单号/异常单号/生产异常单号"
+      },
+      {
+        "name": "userCode",
+        "type": "string",
+        "description": "操作人的用户Code",
+        "label": "操作人的用户Code"
+      },
+      {
+        "name": "operateTime",
+        "type": "string",
+        "required": true,
+        "description": "操作时间，2025-01-01 01:00:00",
+        "label": "操作时间"
+      },
+      {
+        "name": "transferPrintNumList",
+        "type": "object",
+        "description": "实际转印米数（不需要后整时必填，需要后整不填）",
+        "label": "实际转印米数（不需要后整时必填，需要后整不填）",
+        "children": [
+          {
+            "name": "actualPrintNum",
+            "type": "decimal",
+            "required": true,
+            "description": "转印米数",
+            "label": "转印米数"
+          },
+          {
+            "name": "serialNo",
+            "type": "integer",
+            "required": true,
+            "description": "序号",
+            "label": "序号"
+          },
+          {
+            "name": "tankNo",
+            "type": "string",
+            "description": "缸号",
+            "label": "缸号"
+          }
+        ]
+      },
+      {
+        "name": "wasteNum",
+        "type": "double",
+        "description": "损耗 ，支持小数点2位",
+        "label": "损耗\t"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "状态码。0正常返回，非0错误返回"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "描述信息"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "description": "接口数据data",
+        "children": [
+          {
+            "name": "orderNo",
+            "type": "string",
+            "description": "加工单号/异常单号/生产异常单号",
+            "label": "加工单号/异常单号/生产异常单号"
+          },
+          {
+            "name": "barcodeList",
+            "type": "object",
+            "description": "条码列表",
+            "children": [
+              {
+                "name": "barcode",
+                "type": "string",
+                "description": "条编码",
+                "label": "条编码"
+              },
+              {
+                "name": "num",
+                "type": "decimal",
+                "description": "数量",
+                "label": "数量"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

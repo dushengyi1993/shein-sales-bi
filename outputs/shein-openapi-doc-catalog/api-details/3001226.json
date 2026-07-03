@@ -1,0 +1,152 @@
+{
+  "docId": "3001226",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询Feed文件",
+    "userDocName": "查询Feed文件",
+    "endpoint": "/open-api/sem/feed/getFeedDocument",
+    "method": "GET",
+    "docName": "get_open-api_sem_feed_getFeedDocument",
+    "version": 4,
+    "updateTime": "2025-07-15 22:12:46",
+    "changeContent": "1",
+    "qpsContent": "10",
+    "modes": [
+      1
+    ],
+    "modeNames": [
+      "自运营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "url是1小时有效，如超时请重新调用接口获取",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object",
+    "children": [
+      {
+        "name": "feedDocumentId",
+        "type": "string",
+        "required": true,
+        "description": "feedDocumentId；示例：/open-api/sem/feed/getFeedDocument?feedDocumentId=MzgxMDk0NDVfMTBfNDI0XzE3MzM1NDQxMzkyMTY=.json"
+      }
+    ]
+  },
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "响应异常时的bbl相关信息",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1
+              }
+            ]
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "result",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "feedDocumentId",
+                "type": "string",
+                "required": false,
+                "description": "创建的文件名称（目前仅支持JSON）",
+                "multiple": 0
+              },
+              {
+                "name": "url",
+                "type": "string",
+                "required": false,
+                "description": "下载文件的地址（目前仅支持JSON文件）",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request GET 'https://openapi.sheincorp.cn/open-api/sem/feed/getFeedDocument?feedDocumentId=MzgxMDk0NDVfMTBfNDI0XzE3MzM1NDQxMzkyMTY=.json' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570681772' \\ --data-raw ''",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"result\": { \"feedDocumentId\": \"MzgxMDk0NDVfMTBfNDI0XzE3MzM1NDQxMzkyMTY=.json\", \"url\": \"https://ssmp-openapi.oss-cn-shenzhen.aliyuncs.com/MzgxMDk0NDVfMTBfNDI0XzE3MzM1NDQxMzkyMTY%3D.json?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=LTAI5tRoCW5YFGVY6MxxWKBM%2F20241207%2Fcn-shenzhen%2Fs3%2Faws4_request&X-Amz-Date=20241207T063926Z&X-Amz-Expires=1800&X-Amz-SignedHeaders=host&X-Amz-Signature=f4f7d126bad44e6a3d195f938fbb51d24e455bd242976cb0c350b6e028b41ec1\" } }, \"bbl\": null, \"traceId\": \"e81b64a20c0419d9\" }",
+  "errorCode": null
+}

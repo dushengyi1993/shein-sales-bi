@@ -159,7 +159,7 @@ async function auditRecentCoverage() {
     'scripts/audit_cloud_data_coverage.mjs',
     '--recent-days', '1',
     '--tables', 'sales,linkPerformance,productStoreCoverage',
-    '--expected-start', 'range-start',
+    '--expected-start', 'first-seen',
     '--json',
     '--max-rows', '20',
   ], {timeoutMs: Number(process.env.SHEIN_CLOUD_WATCHDOG_COVERAGE_TIMEOUT_MS || 30_000)});

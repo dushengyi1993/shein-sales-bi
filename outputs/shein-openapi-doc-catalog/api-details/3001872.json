@@ -1,0 +1,270 @@
+{
+  "docId": "3001872",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "根据商品信息批量创建成品排单计划和生产任务",
+    "userDocName": "根据商品信息批量创建成品排单计划和生产任务",
+    "endpoint": "/open-api/sims/srp/tasks-create-by-products",
+    "method": "POST",
+    "docName": "",
+    "version": 2,
+    "updateTime": "2026-06-29 20:20:02",
+    "changeContent": "soapi文档更新",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识openKeyId，获取方式请查阅：授权手册"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "请求签名，生成规则请查阅：签名规则"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "支持返回的多语言报错信息，默认返回中文多语言信息"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "label": "根据商品信息批量创建成品排单计划和生产任务请求",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "taskCreateItems",
+        "type": "object",
+        "required": false,
+        "description": "任务创建列表",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "attributeItems",
+            "type": "object",
+            "required": true,
+            "description": "自定义尺码排单数量，不传默认使用排单计划中的排单数量",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "attributeCode",
+                "type": "string",
+                "required": true,
+                "description": "半成品编码",
+                "multiple": 0
+              },
+              {
+                "name": "planningNum",
+                "type": "integer",
+                "required": true,
+                "description": "计划数",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "deliveryTime",
+            "type": "datetime",
+            "required": true,
+            "description": "交货期，yyyy-MM-dd HH:mm:ss",
+            "multiple": 0
+          },
+          {
+            "name": "firstMark",
+            "type": "integer",
+            "required": true,
+            "description": "首单(1:首单,2:返单,3:首返)",
+            "multiple": 0
+          },
+          {
+            "name": "followerUid",
+            "type": "int64",
+            "required": false,
+            "description": "跟进人ID",
+            "multiple": 0
+          },
+          {
+            "name": "progressCode",
+            "type": "string",
+            "required": false,
+            "description": "初始进度code（可选，不传则使用配置的第一个进度节点）",
+            "multiple": 0
+          },
+          {
+            "name": "progressRequirements",
+            "type": "object",
+            "required": false,
+            "description": "作业要求",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "deliveryTime",
+                "type": "datetime",
+                "required": false,
+                "description": "进度交期，yyyy-MM-dd HH:mm:ss",
+                "multiple": 0
+              },
+              {
+                "name": "operatorId",
+                "type": "int64",
+                "required": false,
+                "description": "工厂组织ID",
+                "multiple": 0
+              },
+              {
+                "name": "progressCode",
+                "type": "string",
+                "required": true,
+                "description": "进度code",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "remark",
+            "type": "string",
+            "required": false,
+            "description": "备注",
+            "multiple": 0
+          },
+          {
+            "name": "requiredCompleteTime",
+            "type": "datetime",
+            "required": true,
+            "description": "要求完成时间，yyyy-MM-dd HH:mm:ss",
+            "multiple": 0
+          },
+          {
+            "name": "scanBundle",
+            "type": "integer",
+            "required": false,
+            "description": "扫菲是否开启(1:是,0:否)，默认0",
+            "multiple": 0
+          },
+          {
+            "name": "skc",
+            "type": "string",
+            "required": false,
+            "description": "SKC",
+            "multiple": 0
+          },
+          {
+            "name": "taskPriority",
+            "type": "integer",
+            "required": false,
+            "description": "任务优先级(低:10,中:20,高:30)，默认0",
+            "multiple": 0
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfVoid",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "响应异常时的bbl相关信息",
+        "label": "BblMeta",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "key",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "npid",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "tag",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "value",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

@@ -1,0 +1,358 @@
+{
+  "docId": "3001467",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "同步订单信息（状态，发货）",
+    "userDocName": "给外部供应商调用- 同步订单信息（状态，发货）",
+    "endpoint": "/open-api/mdp/order/goods/sync-order-info",
+    "method": "POST",
+    "docName": "post_open-api_mdp_order_goods_sync-order-info",
+    "version": 3,
+    "updateTime": "2025-12-03 15:45:28",
+    "changeContent": "业务研发要求更新",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": null,
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "orderNoList",
+        "type": "string",
+        "required": true,
+        "description": "加工单号，（发货支持多个，最多20个，转印完成和烧花完成仅支持单个）",
+        "multiple": 1
+      },
+      {
+        "name": "orderStatus",
+        "type": "integer",
+        "required": true,
+        "description": "订单同步状态，1、转印完成、2、烧花完成 3、发货"
+      },
+      {
+        "name": "userCode",
+        "type": "string",
+        "description": "操作人的用户Code"
+      },
+      {
+        "name": "operateTime",
+        "type": "string",
+        "required": true,
+        "description": "操作时间"
+      },
+      {
+        "name": "transferPrintList",
+        "type": "object",
+        "description": "转印条数，仅当转印完成时必填",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "serialNo",
+            "type": "integer",
+            "required": true,
+            "description": "转印序号"
+          },
+          {
+            "name": "num",
+            "type": "decimal",
+            "required": true,
+            "description": "转印米数"
+          }
+        ]
+      },
+      {
+        "name": "bagInfoList",
+        "type": "object",
+        "description": "烧花袋信息列表,仅当烧花完成时必填",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "sizeInfoList",
+            "type": "object",
+            "required": true,
+            "multiple": 1,
+            "children": [
+              {
+                "name": "size",
+                "type": "string",
+                "required": true,
+                "description": "尺码"
+              },
+              {
+                "name": "quantity",
+                "type": "string",
+                "required": true,
+                "description": "数量"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "bagInfoList",
+            "type": "object",
+            "required": true,
+            "description": "烧花，袋信息列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "barCode",
+                "type": "string",
+                "description": "捆袋编码",
+                "example": "28920",
+                "multiple": 0
+              },
+              {
+                "name": "sizeInfoList",
+                "type": "object",
+                "required": true,
+                "description": "尺码信息",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "quantity",
+                    "type": "integer",
+                    "description": "数量",
+                    "example": "39109",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "size",
+                    "type": "string",
+                    "description": "尺码",
+                    "example": "accusamus unde molestias sunt quo ducimus",
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "burnDeliveryInfo",
+            "type": "object",
+            "required": true,
+            "description": "烧花送货单",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "burnDeliveryInfoDetailRespList",
+                "type": "object",
+                "required": true,
+                "description": "烧花送货明细列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "burnFlowerDetail",
+                    "type": "string",
+                    "description": "烧花明细",
+                    "example": "dolore est quas voluptatibus minus dolor modi natus minima eos et repellendus quos dolores quod",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "burnFlowerPrice",
+                    "type": "double",
+                    "description": "烧花价格",
+                    "example": "114.7",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "burnFlowerTotalPrice",
+                    "type": "double",
+                    "description": "烧花实际总价",
+                    "example": "5239.52",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "produceOrderId",
+                    "type": "string",
+                    "description": "订单号",
+                    "example": "62664",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "deliveryNo",
+                "type": "string",
+                "description": "送货单号",
+                "example": "facere ratione unde aliquid qui aut",
+                "multiple": 0
+              },
+              {
+                "name": "deliveryVoucherUrl",
+                "type": "string",
+                "description": "送货凭证url",
+                "example": "perspiciatis accusantium et aliquam corporis ducimus omnis corporis accusamus occaecati enim",
+                "multiple": 0
+              },
+              {
+                "name": "garmentFactory",
+                "type": "string",
+                "description": "成衣加工厂名称",
+                "example": "corporis ut repudiandae impedit ipsa non qui esse non fugiat provident enim corporis architecto dolor quae enim beatae quam",
+                "multiple": 0
+              },
+              {
+                "name": "signUrl",
+                "type": "string",
+                "description": "签收地址地址",
+                "example": "ipsam consequatur delectus amet quis",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "deliveryInfo",
+            "type": "object",
+            "required": true,
+            "description": "成品送货单",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "deliveryInfoDetailRespList",
+                "type": "object",
+                "required": true,
+                "description": "成品送货明细列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "clothNo",
+                    "type": "string",
+                    "description": "布号",
+                    "example": "corporis aut accusantium et nesciunt placeat vero voluptatem necessitatibus eligendi fugiat labore neque",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "count",
+                    "type": "double",
+                    "description": "计划总价",
+                    "example": "57629.49",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "deliveryNum",
+                    "type": "double",
+                    "description": "送货数量",
+                    "example": "6382.13",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "produceOrderId",
+                    "type": "string",
+                    "description": "订单号",
+                    "example": "31472",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "quotedPrice",
+                    "type": "double",
+                    "description": "计划报价",
+                    "example": "30622.8",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "deliveryNo",
+                "type": "string",
+                "description": "送货单号",
+                "example": "sunt ut fuga distinctio et deserunt rem totam atque dignissimos numquam omnis reiciendis aut ut assumenda sed qui odio",
+                "multiple": 0
+              },
+              {
+                "name": "deliveryVoucherUrl",
+                "type": "string",
+                "description": "送货凭证url",
+                "example": "sed voluptate perspiciatis nobis voluptatum deserunt exercitationem doloribus temporibus ut quia rerum repellat",
+                "multiple": 0
+              },
+              {
+                "name": "garmentFactory",
+                "type": "string",
+                "description": "成衣加工厂名称",
+                "example": "eius et nulla architecto excepturi possimus vel",
+                "multiple": 0
+              },
+              {
+                "name": "signUrl",
+                "type": "string",
+                "description": "签收地址地址",
+                "example": "quis ea in saepe repellendus et quis nemo dolores aut vel iure reiciendis excepturi unde nesciunt hic voluptatem natus architecto",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "orderNo",
+            "type": "string",
+            "description": "加工单号",
+            "example": "nulla adipisci voluptatum nam fugit modi ea ipsa mollitia inventore",
+            "multiple": 0
+          },
+          {
+            "name": "transferPrintList",
+            "type": "object",
+            "required": true,
+            "description": "转印条数，仅当转印完成时必填",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "clothGuid",
+                "type": "string",
+                "description": "条编码",
+                "example": "23526",
+                "multiple": 0
+              },
+              {
+                "name": "num",
+                "type": "double",
+                "description": "数量",
+                "example": "47313.54",
+                "multiple": 0
+              },
+              {
+                "name": "serialNo",
+                "type": "string",
+                "description": "序号",
+                "example": "aut nemo et quam quo esse itaque et odio eum aut exercitationem soluta sed",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "example": "前端展示的描述信息",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

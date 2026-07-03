@@ -1,0 +1,104 @@
+{
+  "docId": "3000496",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "物流商网点回调接口",
+    "userDocName": "物流商网点回调接口",
+    "endpoint": "/open-api/cargo/express-website-message",
+    "method": "POST",
+    "docName": "post_open-api_cargo_express-website-message",
+    "version": 3,
+    "updateTime": "2024-10-15 10:24:46",
+    "changeContent": "新增traceId",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "更新： 2021-11-19 1）opType 非必填，由SHEIN后台校验是新增还是修改。 2）如果province，city，region，detail这几个字段需要变更且字段要置为空了，请传“”这个字符串。字段值=null一律视为不修改。",
+  "requestHeader": null,
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "opType",
+        "type": "integer",
+        "description": "(非必填，由SHEIN后台校验)操作类型 1-新增，2-修改 除了网点编号都可以改"
+      },
+      {
+        "name": "siteCode",
+        "type": "string",
+        "required": true,
+        "description": "网点编号"
+      },
+      {
+        "name": "siteName",
+        "type": "string",
+        "required": true,
+        "description": "网点名称"
+      },
+      {
+        "name": "province",
+        "type": "string",
+        "description": "省份"
+      },
+      {
+        "name": "city",
+        "type": "string",
+        "description": "城市"
+      },
+      {
+        "name": "region",
+        "type": "string",
+        "description": "区县"
+      },
+      {
+        "name": "detail",
+        "type": "string",
+        "description": "详细地址"
+      },
+      {
+        "name": "status",
+        "type": "integer",
+        "required": true,
+        "description": "是否营业 1-是，2-否"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "0-成功 非0-失败"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": true,
+        "description": "错误信息"
+      },
+      {
+        "name": "info",
+        "type": "object"
+      },
+      {
+        "name": "error",
+        "type": "string",
+        "description": "error信息"
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "SHEIN后台校验)操作类型 1-新增，2-修改 除了网点编号都可以改 \"opType\": null, \"siteCode\": \"网点编号\", \"siteName\": \"网点名称\", \"province\": null, \"city\": null, \"region\": null, \"detail\": null, // 是否营业 1-是，2-否 \"status\": 1 }",
+  "responseExample": "code\": \"0\", \"msg\": \"success\", \"info\": null, \"error\": \"\" }",
+  "errorCode": null
+}

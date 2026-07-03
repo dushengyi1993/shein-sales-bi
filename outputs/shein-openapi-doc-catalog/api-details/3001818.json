@@ -1,0 +1,260 @@
+{
+  "docId": "3001818",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "库位列表数据",
+    "userDocName": "库位列表数据",
+    "endpoint": "/open-api/sims/location-query",
+    "method": "POST",
+    "docName": "",
+    "version": 2,
+    "updateTime": "2026-06-15 14:54:40",
+    "changeContent": "调整请求头参数",
+    "qpsContent": "",
+    "modes": [
+      3
+    ],
+    "modeNames": [
+      "SHEIN自营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识openKeyId，获取方式请查阅：授权手册"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "请求签名，生成规则请查阅：签名规则"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "支持返回的多语言报错信息，默认返回中文多语言信息"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "label": "OpenApiLocationQueryRequest",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "page",
+        "type": "integer",
+        "required": false,
+        "description": "页码，每页200",
+        "multiple": 0
+      },
+      {
+        "name": "warehouseIdList",
+        "type": "int64",
+        "required": false,
+        "description": "仓库ID",
+        "multiple": 1
+      },
+      {
+        "name": "warehouseProductTypeList",
+        "type": "integer",
+        "required": false,
+        "description": "仓库类型,1-成品,2-半成品",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfOpenApiLocationQueryResponse",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "响应异常时的bbl相关信息",
+        "label": "BblMeta",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "key",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "npid",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "tag",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "value",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "label": "OpenApiLocationQueryResponse",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "list",
+            "type": "object",
+            "required": false,
+            "description": "list",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "isIdle",
+                "type": "boolean",
+                "required": false,
+                "description": "空闲状态 true 空闲 false 占用中",
+                "example": "false",
+                "multiple": 0
+              },
+              {
+                "name": "isUsed",
+                "type": "boolean",
+                "required": false,
+                "description": "是否启用 0-否,1-是",
+                "example": "false",
+                "multiple": 0
+              },
+              {
+                "name": "locationId",
+                "type": "int64",
+                "required": false,
+                "description": "库位ID",
+                "multiple": 0
+              },
+              {
+                "name": "locationName",
+                "type": "string",
+                "required": false,
+                "description": "库位编码/库位名称",
+                "multiple": 0
+              },
+              {
+                "name": "locationType",
+                "type": "integer",
+                "required": false,
+                "description": "库位类型：1-JIT库位(大货库位)/2-样衣库位/3-尾货库位/4-胚衣库位/5-面辅料库位/6-备货库位(成衣库位)",
+                "multiple": 0
+              },
+              {
+                "name": "locationTypeName",
+                "type": "string",
+                "required": false,
+                "description": "库位类型名称",
+                "multiple": 0
+              },
+              {
+                "name": "warehouseId",
+                "type": "int64",
+                "required": false,
+                "description": "仓库id",
+                "multiple": 0
+              },
+              {
+                "name": "warehouseName",
+                "type": "string",
+                "required": false,
+                "description": "仓库名称",
+                "multiple": 0
+              },
+              {
+                "name": "warehouseProductType",
+                "type": "integer",
+                "required": false,
+                "description": "仓库类型,1-成品,2-半成品",
+                "multiple": 0
+              },
+              {
+                "name": "warehouseProductTypeName",
+                "type": "string",
+                "required": false,
+                "description": "仓库类型名称",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

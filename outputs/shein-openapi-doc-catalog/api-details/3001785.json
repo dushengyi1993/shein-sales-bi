@@ -1,0 +1,908 @@
+{
+  "docId": "3001785",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "请求订单详情",
+    "userDocName": "请求订单详情",
+    "endpoint": "/open-api/order/order-detail",
+    "method": "POST",
+    "docName": "post_open-api_order_order-detail",
+    "version": 80,
+    "updateTime": "2026-06-08 22:45:03",
+    "changeContent": "V80",
+    "qpsContent": "300",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "通过该接口获取自主运营、半托管商家的订单详情；接口中返回的时间均为北京时间（UTC+8）；如何对接订单请查看ERP订单履约方案；",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "orderNoList",
+        "type": "string",
+        "required": true,
+        "description": "订单号列表；最多30条；",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应码",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误信息描述",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "description": "响应数据",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "orderNo",
+            "type": "string",
+            "description": "订单号",
+            "example": "GSHNN960700HHA8",
+            "multiple": 0
+          },
+          {
+            "name": "unProcessReason",
+            "type": "integer",
+            "description": "订单问题说明；1、5、7、8: 系统处理/ 2: 订单存在问题，客服正在验证处理/ 3: 巴西订单需要同步发票/ 4: 订单未生成包裹/未预测成功/ 6、9: 部分商品缺货/ 10、11: 尚未设置卖家仓库/ 12: 需要调用 API 确认拆包或取消拆包/13：CTE发票开票中，可以接入webhook：invoice_status_notice，发票开具成功后会有消息通知",
+            "multiple": 1
+          },
+          {
+            "name": "isOverLimitOrder",
+            "type": "integer",
+            "description": "是否为超限拆包订单;1：是/ 2：否；等于1，卖家需要确认拆包或取消拆包"
+          },
+          {
+            "name": "orderType",
+            "type": "integer",
+            "description": "是否是换货订单；1：正常订单/ 2：换货订单/ 4：认证仓转自发货订单(认证仓无货或者其它问题)/ 5：认证仓订单（类型5的订单为认证仓的订单，请勿导出地址、打印面单或上传运单号）；换货场景说明；",
+            "example": "1",
+            "multiple": 0
+          },
+          {
+            "name": "optionalLogisticsList",
+            "type": "integer",
+            "description": "可选物流发货方式；1：平台合作物流发货/ 2：商家自发货；若两种发货方式均支持时，返回[1,2]；",
+            "example": "1",
+            "multiple": 1
+          },
+          {
+            "name": "orderLogisticsType",
+            "type": "integer",
+            "description": "订单已选发货方式（用来记录当前订单已选的发货方式）；0：未选/ 1：已选平台合作物流发货/ 2：已选商家自发货发货",
+            "example": "0"
+          },
+          {
+            "name": "orderPlaceType",
+            "type": "integer",
+            "description": "是否平台指定物流；使用SHEIN合作物流的情况下，是否平台指定物流；1：平台指定物流/ 2：商家自选物流",
+            "example": "2"
+          },
+          {
+            "name": "receiveMsg",
+            "type": "object",
+            "description": "订单收件区域信息,非平台指定物流时有值；",
+            "children": [
+              {
+                "name": "city",
+                "type": "string",
+                "description": "城市"
+              },
+              {
+                "name": "country",
+                "type": "string",
+                "description": "国家"
+              },
+              {
+                "name": "province",
+                "type": "string",
+                "description": "州（省）"
+              },
+              {
+                "name": "postCode",
+                "type": "string",
+                "description": "邮编"
+              }
+            ]
+          },
+          {
+            "name": "performanceType",
+            "type": "string",
+            "description": "订单履约方式；1: 订单由SHEIN整合物流渠道履行/ 2: 订单由非SHEIN整合物流渠道履行，卖家直接将订单履行给买家；（即将废弃，请使用新字段optionalLogisticsList）"
+          },
+          {
+            "name": "orderStatus",
+            "type": "integer",
+            "description": "订单状态；1：待处理/ 2：待发货/ 4：已发货/ 5：已签收/ 6：用户已退款/ 7：待揽收/ 8：已报损（使用SHEIN集成物流履约的场景下，物流商报告包裹破损或丢失）/ 9：已拒收（买家拒收包裹）；",
+            "example": "1",
+            "multiple": 0
+          },
+          {
+            "name": "isCod",
+            "type": "integer",
+            "description": "是否为货到付款订单；1：是/ 2：否；现在只有泰国，中东开展该业务；",
+            "example": "2",
+            "multiple": 0
+          },
+          {
+            "name": "orderTag",
+            "type": "integer",
+            "description": "订单标签；0：正常订单/ 1：问题订单/ 4：特殊订单/ 5：紧急订单",
+            "example": "0",
+            "multiple": 0
+          },
+          {
+            "name": "printOrderStatus",
+            "type": "integer",
+            "description": "订单是否可处理；1：可处理/ 2：不可处理；等于1则可进行“打印面单”和“导出地址”操作，否则需要根据unProcessReason的值进行处理；",
+            "example": "2",
+            "multiple": 0
+          },
+          {
+            "name": "invoiceStatus",
+            "type": "integer",
+            "description": "发票上传状态;1：已开票/ 2：未开票（对于巴西卖家，当订单发票信息通过回传发票信息同步后，状态从2变为1）/ 3：待重传/ 4：无需开票",
+            "example": "2",
+            "multiple": 0
+          },
+          {
+            "name": "settleActuallyPrice",
+            "type": "decimal",
+            "description": "销售价格。仅品牌商家返回该信息"
+          },
+          {
+            "name": "orderGoodsInfoList",
+            "type": "object",
+            "required": true,
+            "description": "订单商品信息",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "goodsId",
+                "type": "bigint",
+                "description": "每件商品的唯一ID。如果一个 SKU 有多件，每一件的goodsId都是唯一的",
+                "example": "2226462748377089",
+                "multiple": 0
+              },
+              {
+                "name": "skuCode",
+                "type": "string",
+                "description": "SHEIN sku编码",
+                "example": "I95gom5fbt1s",
+                "multiple": 0
+              },
+              {
+                "name": "skc",
+                "type": "string",
+                "description": "SHEIN skc编码",
+                "example": "sM22031112223613",
+                "multiple": 0
+              },
+              {
+                "name": "goodsSn",
+                "type": "string",
+                "description": "商家spu编码",
+                "example": "1",
+                "multiple": 0
+              },
+              {
+                "name": "sellerSku",
+                "type": "string",
+                "description": "商家sku编码",
+                "multiple": 0
+              },
+              {
+                "name": "goodsStatus",
+                "type": "integer",
+                "description": "（已弃用！！）商品状态",
+                "example": "1",
+                "multiple": 0
+              },
+              {
+                "name": "newGoodsStatus",
+                "type": "integer",
+                "description": "订单商品状态；1：待处理/ 2：待发货/ 4：已发货/ 5：已签收/ 6：用户已退款/ 7：待揽收/ 8：已报损/ 9：已拒收"
+              },
+              {
+                "name": "skuAttribute",
+                "type": "object",
+                "required": true,
+                "description": "多语种的SKU属性信息",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "attrValueId",
+                    "type": "string",
+                    "description": "属性值ID集合",
+                    "example": "78,1000105",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "attrName",
+                    "type": "string",
+                    "description": "属性值名称集合",
+                    "example": "杏色-春",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "language",
+                    "type": "string",
+                    "description": "语种",
+                    "example": "CN",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "timeOutList",
+                "type": "object",
+                "description": "商品超时自动取消信息； 商家自发货的场景会同时返回1，2，100枚举值； SHEIN集成物流揽收的场景会同时返回，1，7，100枚举值；",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "timeOutTime",
+                    "type": "datetime",
+                    "description": "超时取消时间；格式：yyyy-MM-dd'T'HH:mm:ss.SSSZ"
+                  },
+                  {
+                    "name": "timeOutType",
+                    "type": "integer",
+                    "description": "当typeOutType=1，代表的是：商品是待处理状态（newGoodsStatus=1）时，若在时间内没有流转到待发货（newGoodsStatus=2）的自动取消时间； 当typeOutType=2且performanceType=2，代表的是：商家自发货时，客单是待发货状态（newGoodsStatus=2）若在时间内没有流转到已发货（newGoodsStatus=4）的自动取消时间； 当typeOutType=7且performanceType=1，代表的是SHEIN物流发货时，客单是待发货状态（newGoodsStatus=2）若在时间内没有流转到已发货（newGoodsStatus=4）的自动取消时间； 当枚举=100时，代表的是，没有流转到已签收（newGoodsStatus=5）的自动取消时间；"
+                  }
+                ]
+              },
+              {
+                "name": "goodsTitle",
+                "type": "string",
+                "description": "产品名称；卖家在SHEIN商城展示的SPU名称"
+              },
+              {
+                "name": "spuPicURL",
+                "type": "string",
+                "description": "SPU主图URL",
+                "example": "http://imgdeal-test01.shein.com/gspCenter/2022/03/11/1341-1876.jpg",
+                "multiple": 0
+              },
+              {
+                "name": "goodsWeight",
+                "type": "integer",
+                "description": "商品重量",
+                "example": "211111",
+                "multiple": 0
+              },
+              {
+                "name": "storageTag",
+                "type": "integer",
+                "description": "库存标签：1：已占库存（无异常）/ 2：无库存可占（库存占用异常）/ 3：无货（不履约，不再占用库存）",
+                "example": "1",
+                "multiple": 0
+              },
+              {
+                "name": "performanceTag",
+                "type": "integer",
+                "description": "发货标识： 1：已发货/ 2：未发货/ 3：已签收",
+                "example": "0",
+                "multiple": 0
+              },
+              {
+                "name": "goodsExchangeTag",
+                "type": "long",
+                "description": "商品换货标识：1：未换货/ 2：被换商品/ 3：换来商品/ 4：删除换货；换货FAQ",
+                "example": "1",
+                "multiple": 0
+              },
+              {
+                "name": "beExchangeEntityId",
+                "type": "bigint",
+                "description": "被换商品ID",
+                "example": "0",
+                "multiple": 0
+              },
+              {
+                "name": "orderCurrency",
+                "type": "string",
+                "description": "客户下单币种",
+                "example": "USD",
+                "multiple": 0
+              },
+              {
+                "name": "saleCurrency",
+                "type": "string",
+                "description": "销售币种（仅适用半托管）"
+              },
+              {
+                "name": "sellerCurrencyPrice",
+                "type": "decimal",
+                "description": "订单的商品价格，前台销售价格（半托管商家可忽略）",
+                "example": "34.2",
+                "multiple": 0
+              },
+              {
+                "name": "costPrice",
+                "type": "decimal",
+                "description": "商品供货价，仅适用半托管模式"
+              },
+              {
+                "name": "orderCurrencyStoreCouponPrice",
+                "type": "decimal",
+                "description": "店铺优惠券金额；",
+                "example": "0",
+                "multiple": 0
+              },
+              {
+                "name": "orderCurrencyPromotionPrice",
+                "type": "decimal",
+                "description": "活动优惠金额（半托管商家可忽略）",
+                "example": "0",
+                "multiple": 0
+              },
+              {
+                "name": "settleCurrencyPromotionPrice",
+                "type": "decimal",
+                "description": "活动提报优惠金额；商品因参加营销活动或使用促销工具，供货价降低的金额，仅适用半托管模式"
+              },
+              {
+                "name": "commission",
+                "type": "decimal",
+                "description": "佣金，仅适用自主运营模式",
+                "example": "0.342",
+                "multiple": 0
+              },
+              {
+                "name": "commissionRate",
+                "type": "decimal",
+                "description": "佣金比例，仅适用自主运营模式",
+                "example": "0.01",
+                "multiple": 0
+              },
+              {
+                "name": "serviceCharge",
+                "type": "decimal",
+                "description": "可忽略",
+                "example": "0",
+                "multiple": 0
+              },
+              {
+                "name": "performanceServiceCharge",
+                "type": "decimal",
+                "description": "SHEIN 向卖家收取的履单服务费用",
+                "example": "0",
+                "multiple": 0
+              },
+              {
+                "name": "estimatedIncome",
+                "type": "decimal",
+                "description": "预计收入；1、自主运营模式下，预计收入=sellerCurrencyPrice-orderCurrencyStoreCouponPrice-orderCurrencyPromotionPrice-performanceServiceCharge-commission2、半托管模式且平台代缴欧洲vat税费，预计收入=costPrice-settleCurrencyPromotionPrice-performanceServiceCharge-orderCurrencyStoreCouponPrice3、半托管模式且商家自行缴纳欧洲vat税费，预计收入= =costPrice-settleCurrencyPromotionPrice-performanceServiceCharge-orderCurrencyStoreCouponPrice+sellerRealTax",
+                "example": "33.85",
+                "multiple": 0
+              },
+              {
+                "name": "spuName",
+                "type": "string",
+                "description": "SHEIN spu编码"
+              },
+              {
+                "name": "saleTax",
+                "type": "decimal",
+                "description": "消费税，在美国，根据美国税法，向买家征收的消费税。由shein代收代缴，不纳入预计收入结算"
+              },
+              {
+                "name": "sellerRealTax",
+                "type": "decimal",
+                "description": "欧洲vat税费（平台代扣代缴且会给予补贴，商家可忽略）"
+              },
+              {
+                "name": "mxTaxPrice",
+                "type": "decimal",
+                "description": "墨西哥卖家税费；"
+              },
+              {
+                "name": "commissionSaleTax",
+                "type": "decimal",
+                "description": "佣金消费税，仅适用自主运营"
+              },
+              {
+                "name": "warehouseCode",
+                "type": "string",
+                "description": "商家仓ID"
+              },
+              {
+                "name": "warehouseName",
+                "type": "string",
+                "description": "商家仓名称"
+              },
+              {
+                "name": "sellerCurrencyDiscountPrice",
+                "type": "decimal",
+                "description": "商品折后价，仅自主运营模式返回"
+              },
+              {
+                "name": "unpackingGroupNo",
+                "type": "string",
+                "description": "拆包分组号；当订单有绑定“超限拆包订单标签”， 且已获取TMS拆包建议或卖家已进行自主拆包，该字段才有值"
+              },
+              {
+                "name": "unpackingGroupInvoiceStatus",
+                "type": "string",
+                "description": "发票状态;1：已开票/ 2：未开票/ 3：待重新上传/ 对于 BR 卖家，当订单发票信息通过回传发票信息同步后，状态将从 2（未开票）变为 1（已开票）"
+              },
+              {
+                "name": "customizationFlag",
+                "type": "integer",
+                "required": true,
+                "description": "是否定制商品；1：普通品;/ 2：定制品"
+              },
+              {
+                "name": "customizationInfo",
+                "type": "object",
+                "description": "定制品明细(customizationFlag=2时有值)",
+                "children": [
+                  {
+                    "name": "customInfoId",
+                    "type": "string",
+                    "description": "定制加购ID"
+                  },
+                  {
+                    "name": "texts",
+                    "type": "string",
+                    "description": "定制文本信息",
+                    "multiple": 1
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "orderLabels",
+            "type": "string",
+            "description": "订单标签：easy_delivery_uncollected-易引起妥投未收争议",
+            "multiple": 1
+          },
+          {
+            "name": "packageWaybillList",
+            "type": "object",
+            "required": true,
+            "description": "包裹的运单信息",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "packageNo",
+                "type": "string",
+                "description": "包裹号码",
+                "example": "G220317503939074",
+                "multiple": 0
+              },
+              {
+                "name": "deliveryNo",
+                "type": "string",
+                "description": "运单包裹号；一般情况下运单包裹号=包裹号，但在合并订单发货时，运输号和包裹号不同；可使用该字段打印在线下单的面单；"
+              },
+              {
+                "name": "waybillNo",
+                "type": "string",
+                "description": "运单号",
+                "multiple": 0
+              },
+              {
+                "name": "carrier",
+                "type": "string",
+                "description": "物流商名称",
+                "multiple": 0
+              },
+              {
+                "name": "carrierCode",
+                "type": "string",
+                "description": "物流商的唯一编码"
+              },
+              {
+                "name": "productInventoryList",
+                "type": "object",
+                "required": true,
+                "description": "订单商品ID列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "productId",
+                    "type": "string",
+                    "description": "若“包裹号”有值，则取包裹号下所有的商品ID 若“包裹号”为空，则判断“拆包分组号”是否有值， a）若有值，则取拆包分组号下的所有商品ID b）若无值，则无需返回",
+                    "example": "1462",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "packageLabel",
+                "type": "string",
+                "description": "返回该包裹最新的标签；1：丢件包裹/ 2：滞留包裹/",
+                "multiple": 0
+              },
+              {
+                "name": "sortingCode",
+                "type": "string",
+                "description": "分拣代码，无需关注"
+              },
+              {
+                "name": "expressSortingCode",
+                "type": "string",
+                "description": "渠道商简码"
+              },
+              {
+                "name": "isCutOffSeller",
+                "type": "int64",
+                "description": "标记这个订单是否是截单"
+              }
+            ]
+          },
+          {
+            "name": "packageInvoiceProblems",
+            "type": "object",
+            "description": "订单包裹发票问题",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "problemCode",
+                "type": "string",
+                "description": "问题code"
+              },
+              {
+                "name": "problemDescEnglish",
+                "type": "string",
+                "description": "问题描述（英文）"
+              },
+              {
+                "name": "problemField",
+                "type": "string",
+                "description": "问题字段"
+              },
+              {
+                "name": "proposalEnglish",
+                "type": "string",
+                "description": "建议方案（英文）"
+              },
+              {
+                "name": "packageNo",
+                "type": "string",
+                "description": "卖家包裹号"
+              }
+            ]
+          },
+          {
+            "name": "orderCurrency",
+            "type": "string",
+            "description": "订单货币",
+            "example": "USD",
+            "multiple": 0
+          },
+          {
+            "name": "saleCurrency",
+            "type": "string",
+            "description": "销售币种"
+          },
+          {
+            "name": "productTotalPrice",
+            "type": "decimal",
+            "description": "商品总金额",
+            "example": "68.4",
+            "multiple": 0
+          },
+          {
+            "name": "totalCostPrice",
+            "type": "decimal",
+            "description": "供货价总金额，仅适用半托管模式"
+          },
+          {
+            "name": "storeDiscountTotalPrice",
+            "type": "decimal",
+            "description": "店铺优惠券总金额；",
+            "example": "0",
+            "multiple": 0
+          },
+          {
+            "name": "promotionDiscountTotalPrice",
+            "type": "decimal",
+            "description": "活动优惠总金额",
+            "example": "0",
+            "multiple": 0
+          },
+          {
+            "name": "totalSettleCurrencyPromotionPrice",
+            "type": "decimal",
+            "description": "活动提报优惠总金额，仅适用半托管模式"
+          },
+          {
+            "name": "totalCommission",
+            "type": "decimal",
+            "description": "总佣金，仅适用自主运营模式",
+            "example": "0.684",
+            "multiple": 0
+          },
+          {
+            "name": "totalServiceCharge",
+            "type": "decimal",
+            "description": "可忽略",
+            "example": "0",
+            "multiple": 0
+          },
+          {
+            "name": "totalPerformanceServiceCharge",
+            "type": "decimal",
+            "description": "总履约服务费",
+            "example": "0",
+            "multiple": 0
+          },
+          {
+            "name": "estimatedGrossIncome",
+            "type": "decimal",
+            "description": "预计总收入",
+            "example": "67.7",
+            "multiple": 0
+          },
+          {
+            "name": "totalSaleTax",
+            "type": "decimal",
+            "description": "总消费税"
+          },
+          {
+            "name": "totalSellerRealTax",
+            "type": "decimal",
+            "description": "总欧洲VAT税费"
+          },
+          {
+            "name": "totalMxTaxPrice",
+            "type": "decimal",
+            "description": "总墨西哥卖家税费"
+          },
+          {
+            "name": "sellerShippingFee",
+            "type": "decimal",
+            "description": "买家支付的运费，平台返回给商家的收入（仅部分模式下的商家会返回）；"
+          },
+          {
+            "name": "orderAllocateTime",
+            "type": "string",
+            "description": "订单下发时间（格式：yyyy-MM-dd'T'HH:mm:ss.SSSZ）",
+            "example": "2022-03-17 06:05:16.000-0300",
+            "multiple": 0
+          },
+          {
+            "name": "requestDeliveryTime",
+            "type": "string",
+            "description": "已废弃！！",
+            "example": "2022-03-17 06:05:16.000-0300",
+            "multiple": 0
+          },
+          {
+            "name": "printingTime",
+            "type": "string",
+            "description": "打印面单时间",
+            "multiple": 0
+          },
+          {
+            "name": "scheduleDeliveryTime",
+            "type": "string",
+            "description": "预约发货时间（格式：yyyy-MM-dd'T'HH:mm:ss.SSSZ），仅使用SHEIN集成物流发货场景",
+            "multiple": 0
+          },
+          {
+            "name": "pickUpTime",
+            "type": "string",
+            "description": "物流取件时间（格式：yyyy-MM-dd'T'HH:mm:ss.SSSZ）",
+            "multiple": 0
+          },
+          {
+            "name": "orderReceiptTime",
+            "type": "string",
+            "description": "买家签收时间（格式：yyyy-MM-dd'T'HH:mm:ss.SSSZ）",
+            "multiple": 0
+          },
+          {
+            "name": "orderReturnTime",
+            "type": "string",
+            "description": "订单退款时间（格式：yyyy-MM-dd'T'HH:mm:ss.SSSZ）",
+            "multiple": 0
+          },
+          {
+            "name": "orderMsgUpdateTime",
+            "type": "string",
+            "description": "订单信息更新时间（格式：yyyy-MM-dd'T'HH:mm:ss.SSSZ）",
+            "multiple": 0
+          },
+          {
+            "name": "orderTime",
+            "type": "string",
+            "description": "下单时间（格式：yyyy-MM-dd'T'HH:mm:ss.SSSZ）"
+          },
+          {
+            "name": "paymentTime",
+            "type": "string",
+            "description": "付款时间（格式：yyyy-MM-dd'T'HH:mm:ss.SSSZ）"
+          },
+          {
+            "name": "deliveryServiceType",
+            "type": "integer",
+            "description": "订单配送服务类型(1:送货上门, 2:送货到店)"
+          },
+          {
+            "name": "performanceBillingType",
+            "type": "integer",
+            "description": "履约服务费计费维度：0-默认值1-商品2-包裹(仅需要收履约服务费的订单会返回，非在线下单订单，会返回空；存在部分历史订单返回为空)"
+          },
+          {
+            "name": "sellerDeliveryTime",
+            "type": "string",
+            "description": "卖家交货时间（格式：yyyy-MM-dd'T'HH:mm:ss.SSSZ）"
+          },
+          {
+            "name": "warehouseDeliveryTime",
+            "type": "string",
+            "description": "仓库交货时间（格式：yyyy-MM-dd'T'HH:mm:ss.SSSZ）"
+          },
+          {
+            "name": "orderRejectionTime",
+            "type": "string",
+            "description": "订单拒绝签收时间（格式：yyyy-MM-dd'T'HH:mm:ss.SSSZ）"
+          },
+          {
+            "name": "orderReportedLossTime",
+            "type": "string",
+            "description": "订单报损时间（格式：yyyy-MM-dd'T'HH:mm:ss.SSSZ）"
+          },
+          {
+            "name": "billNo",
+            "type": "string",
+            "description": "原订单号；换单的场景下可以关联到原始订单号；"
+          },
+          {
+            "name": "salesArea",
+            "type": "integer",
+            "description": "销售范围；1：本土销售/ 2：跨境销售"
+          },
+          {
+            "name": "stockMode",
+            "type": "integer",
+            "description": "库存模式；1：SHEIN自营库存/ 2：库存到SHEIN仓库（SHEIN履行服务）/ 3：不入库存到SHEIN仓库"
+          },
+          {
+            "name": "salesSite",
+            "type": "string",
+            "description": "销售站点；如：shein-br"
+          },
+          {
+            "name": "storeCode",
+            "type": "integer",
+            "description": "店铺code"
+          },
+          {
+            "name": "expectedCollectTime",
+            "type": "string",
+            "description": "期望揽收时间（格式：yyyy-MM-dd'T'HH:mm:ss.SSSZ）"
+          },
+          {
+            "name": "requestPrintTime",
+            "type": "string",
+            "description": "要求打单时间（格式：yyyy-MM-dd'T'HH:mm:ss.SSSZ）,使用详情见FAQ"
+          },
+          {
+            "name": "requestHandoverTime",
+            "type": "string",
+            "description": "要求揽收时间（格式：yyyy-MM-dd'T'HH:mm:ss.SSSZ）,使用详情见FAQ"
+          },
+          {
+            "name": "requestSignTime",
+            "type": "string",
+            "description": "要求签收时间（格式：yyyy-MM-dd'T'HH:mm:ss.SSSZ）"
+          },
+          {
+            "name": "needDeliveryTime",
+            "type": "string",
+            "description": "要求发货时间（格式：yyyy-MM-dd'T'HH:mm:ss.SSSZ）"
+          },
+          {
+            "name": "cteInvoiceStatus",
+            "type": "integer",
+            "description": "巴西市场CTE开票状态；1:订单下所有包裹（取消的除外）已完成开票/ 2:订单下的包裹存在未完成开票"
+          },
+          {
+            "name": "paymentInfo",
+            "type": "object",
+            "children": [
+              {
+                "name": "payNo",
+                "type": "string",
+                "description": "主支付单号"
+              },
+              {
+                "name": "payMethod",
+                "type": "string",
+                "description": "支付方式03:CREDIT 04:DEBIT 17:pix 18:PayPal 01:boleto 99:others"
+              },
+              {
+                "name": "installmentFlag",
+                "type": "integer",
+                "description": "分期标识 1:分期 0:不分期"
+              },
+              {
+                "name": "cardType",
+                "type": "string",
+                "description": "卡种 01:visa 02:mastercard 03:AMERICAN_EXPRESS 04:Sorocred 05:Diners Club 06:Elo 07:Hipercard 08:Aura 09:Cabal 99:others"
+              },
+              {
+                "name": "channelPayNo",
+                "type": "string",
+                "description": "渠道单号"
+              },
+              {
+                "name": "cnpj",
+                "type": "string",
+                "description": "固定值 Moda Mundial (Subacquirer) CNPJ number: 50617696000178"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/order/order-detail' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570849017' \\ --data-raw '{ \"orderNoList\": [ \"GSONPE05Y0004Q7\" ] }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": [ { \"orderNo\": \"GSO1CL53800M5D4\", \"orderType\": 1, \"orderPlaceType\": 2, \"optionalLogisticsList\": [ 1, 2 ], \"orderLogisticsType\": 0, \"receiveMsg\": { \"country\": \"United States\", \"province\": \"puerto rico\", \"city\": \"Jeddah\", \"postCode\": \"39900-000\" }, \"performanceType\": 2, \"orderStatus\": 1, \"isCod\": 2, \"isOverLimitOrder\": 2, \"unpackingStatus\": null, \"orderTag\": 0, \"deliveryType\": 1, \"printOrderStatus\": 1, \"invoiceStatus\": 4, \"orderGoodsInfoList\": [ { \"goodsId\": 5230236437987443003, \"skuCode\": \"I73dnsqbbier\", \"skc\": \"sa25060976623960851\", \"goodsSn\": \"dangao wen 01\", \"sellerSku\": \"12312312312333\", \"goodsStatus\": 1, \"newGoodsStatus\": 1, \"skuAttribute\": [ { \"attrValueId\": \"2147488295\", \"attrName\": \"藏蓝色\", \"language\": \"CN\" }, { \"attrValueId\": \"2147488295\", \"attrName\": \"Navy\", \"language\": \"US\" }, { \"attrValueId\": \"2147488295\", \"attrName\": \"Navy\", \"language\": \"PT\" }, { \"attrValueId\": \"2147488295\", \"attrName\": \"Navy\", \"language\": \"TH\" }, { \"attrValueId\": \"2147488295\", \"attrName\": \"Navy\", \"language\": \"ES\" }, { \"attrValueId\": \"2147488295\", \"attrName\": \"Navy\", \"language\": \"IT\" }, { \"attrValueId\": \"2147488295\", \"attrName\": \"Navy\", \"language\": \"PL\" }, { \"attrValueId\": \"2147488295\", \"attrName\": \"Navy\", \"language\": \"TR\" } ], \"goodsTitle\": \"GoodsName111111111111\", \"spuPicURL\": \"http://imgdeal-test01.shein.com/pi_img/2021/11/03/16359230894287290938_thumbnail_220x293.jpg\", \"goodsWeight\": 500.0, \"storageTag\": 1, \"performanceTag\": 2, \"goodsExchangeTag\": 1, \"unpackingGroupNo\": \"\", \"unpackingGroupInvoiceStatus\": null, \"beExchangeEntityId\": 0, \"orderCurrency\": \"USD\", \"saleCurrency\": null, \"sellerCurrencyPrice\": 12.98, \"costPrice\": null, \"orderCurrencyStoreCouponPrice\": 0.0, \"orderCurrencyPromotionPrice\": 0.0, \"settleCurrencyPromotionPrice\": null, \"commission\": 0.0, \"commissionRate\": 0.0, \"serviceCharge\": null, \"performanceServiceCharge\": 0.0, \"estimatedIncome\": 12.98, \"spuName\": \"a250609766239\", \"saleTax\": 0.37, \"sellerRealTax\": 0.0, \"commissionSaleTax\": null, \"warehouseCode\": \"PS2251996304\", \"warehouseName\": \"U.S.\", \"sellerCurrencyDiscountPrice\": 17.33, \"mxTaxPrice\": 0.0, \"timeOutList\": [ { \"timeOutType\": 1, \"timeOutTime\": \"2025-07-25T19:22:31.000+0800\" }, { \"timeOutType\": 100, \"timeOutTime\": \"2025-07-28T06:22:31.000+0800\" } ], \"customizationFlag\": 1, \"customizationInfo\": {}, \"freightSource\": 0 }, { \"goodsId\": 5230236437987443004, \"skuCode\": \"I73dnsqbbier\", \"skc\": \"sa25060976623960851\", \"goodsSn\": \"dangao wen 01\", \"sellerSku\": \"12312312312333\", \"goodsStatus\": 1, \"newGoodsStatus\": 1, \"skuAttribute\": [ { \"attrValueId\": \"2147488295\", \"attrName\": \"藏蓝色\", \"language\": \"CN\" }, { \"attrValueId\": \"2147488295\", \"attrName\": \"Navy\", \"language\": \"US\" }, { \"attrValueId\": \"2147488295\", \"attrName\": \"Navy\", \"language\": \"PT\" }, { \"attrValueId\": \"2147488295\", \"attrName\": \"Navy\", \"language\": \"TH\" }, { \"attrValueId\": \"2147488295\", \"attrName\": \"Navy\", \"language\": \"ES\" }, { \"attrValueId\": \"2147488295\", \"attrName\": \"Navy\", \"language\": \"IT\" }, { \"attrValueId\": \"2147488295\", \"attrName\": \"Navy\", \"language\": \"PL\" }, { \"attrValueId\": \"2147488295\", \"attrName\": \"Navy\", \"language\": \"TR\" } ], \"goodsTitle\": \"GoodsName111111111111\", \"spuPicURL\": \"http://imgdeal-test01.shein.com/pi_img/2021/11/03/16359230894287290938_thumbnail_220x293.jpg\", \"goodsWeight\": 500.0, \"storageTag\": 1, \"performanceTag\": 2, \"goodsExchangeTag\": 1, \"unpackingGroupNo\": \"\", \"unpackingGroupInvoiceStatus\": null, \"beExchangeEntityId\": 0, \"orderCurrency\": \"USD\", \"saleCurrency\": null, \"sellerCurrencyPrice\": 12.98, \"costPrice\": null, \"orderCurrencyStoreCouponPrice\": 0.0, \"orderCurrencyPromotionPrice\": 0.0, \"settleCurrencyPromotionPrice\": null, \"commission\": 0.0, \"commissionRate\": 0.0, \"serviceCharge\": null, \"performanceServiceCharge\": 0.0, \"estimatedIncome\": 12.98, \"spuName\": \"a250609766239\", \"saleTax\": 0.37, \"sellerRealTax\": 0.0, \"commissionSaleTax\": null, \"warehouseCode\": \"PS2251996304\", \"warehouseName\": \"U.S.\", \"sellerCurrencyDiscountPrice\": 17.33, \"mxTaxPrice\": 0.0, \"timeOutList\": [ { \"timeOutType\": 1, \"timeOutTime\": \"2025-07-25T19:22:31.000+0800\" }, { \"timeOutType\": 100, \"timeOutTime\": \"2025-07-28T06:22:31.000+0800\" } ], \"customizationFlag\": 1, \"customizationInfo\": {}, \"freightSource\": 0 } ], \"packageWaybillList\": [ { \"packageNo\": \"GU25072532795729922\", \"deliveryNo\": \"GU25072532795729922\", \"waybillNo\": \"\", \"carrier\": \"\", \"carrierCode\": \"\", \"expressShortName\": null, \"productInventoryList\": [ { \"productId\": \"5230236437987443003\" }, { \"productId\": \"5230236437987443004\" } ], \"packageLabel\": \"\", \"sortingCode\": \"\", \"expressSortingCode\": \"\", \"isCutOffSeller\": 2, \"performanceServiceCharge\": 0 } ], \"orderCurrency\": \"USD\", \"saleCurrency\": null, \"productTotalPrice\": 25.96, \"totalCostPrice\": null, \"storeDiscountTotalPrice\": 0.0, \"promotionDiscountTotalPrice\": 0.0, \"totalSettleCurrencyPromotionPrice\": null, \"totalCommission\": 0.0, \"totalServiceCharge\": null, \"totalPerformanceServiceCharge\": 0, \"sellerShippingFee\": null, \"estimatedGrossIncome\": 25.96, \"totalSaleTax\": 0.74, \"totalSellerRealTax\": 0.0, \"totalMxTaxPrice\": 0.0, \"orderTime\": \"2025-07-25T17:22:11.000+0800\", \"paymentTime\": \"2025-07-25T17:22:13.000+0800\", \"orderAllocateTime\": \"2025-07-25T17:22:31.000+0800\", \"requestDeliveryTime\": \"2025-07-25T18:22:31.000+0800\", \"requestPrintTime\": null, \"requestHandoverTime\": null, \"requestSignTime\": \"2025-07-27T05:22:31.000+0800\", \"sellerDeliveryTime\": \"\", \"warehouseDeliveryTime\": \"\", \"printingTime\": \"\", \"scheduleDeliveryTime\": \"\", \"pickUpTime\": \"\", \"orderReceiptTime\": \"\", \"orderRejectionTime\": \"\", \"orderReportedLossTime\": \"\", \"orderReturnTime\": \"\", \"orderMsgUpdateTime\": \"2025-07-25T17:28:40.319+0800\", \"billNo\": \"GSO1CL53800M5D4\", \"salesArea\": 1, \"stockMode\": 3, \"salesSite\": \"shein-us\", \"storeCode\": 5318181723, \"declareCollectionPattern\": 2, \"settleActuallyPrice\": 0.0, \"unProcessReason\": [], \"packageInvoiceProblems\": [], \"expectedCollectTime\": \"\", \"cteInvoiceStatus\": 2, \"addTime\": \"2025-07-25T17:22:32.000+0800\" } ], \"bbl\": {}, \"traceId\": \"fa07cda05e678290\" }",
+  "errorCode": null
+}

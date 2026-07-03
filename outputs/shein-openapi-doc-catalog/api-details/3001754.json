@@ -1,0 +1,104 @@
+{
+  "docId": "3001754",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "打印物流面单",
+    "userDocName": "打印物流面单",
+    "endpoint": "/open-api/pfmp/print-purchase-logisticsLabel",
+    "method": "POST",
+    "docName": "",
+    "version": 2,
+    "updateTime": "2026-06-03 15:24:20",
+    "changeContent": "更新文档内容",
+    "qpsContent": "50",
+    "modes": [
+      2,
+      3,
+      8
+    ],
+    "modeNames": [
+      "全托管",
+      "SHEIN自营",
+      "POP"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "用于下载物流商面单PDF。在创建发货单之后，如果查询发货单接口（/open-api/shipping/delivery）logisticsLabelPrintFlag参数为1，则需要打印物流商面单。创建发货单之后，可以接收采购单合作物流通知（logistics_forecast_result_notice），当预报物流结果（reportResult）为1时，则预报成功，可以打印物流面单。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-language",
+        "type": "string",
+        "description": "指定出参语种，默认中文；支持语种包括，英语：US，法语：FR，西班牙语：ES，德语：DE，中文简体：CN，泰语：TH，巴西葡语：PT，土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "deliveryNo",
+        "type": "string",
+        "required": true,
+        "description": "发货单号"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码成功：0"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "children": [
+          {
+            "name": "url",
+            "type": "string",
+            "description": "物流商面单PDF下载链接"
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述,成功：OK"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

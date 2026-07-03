@@ -1,0 +1,170 @@
+{
+  "docId": "3001262",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "认证仓调用-上传物流运单接口",
+    "userDocName": "认证仓调用-上传物流运单接口",
+    "endpoint": "/open-api/order/openapi/auth/order/express-upload",
+    "method": "POST",
+    "docName": "post_open-api_order_openapi_auth_order_express-upload",
+    "version": 5,
+    "updateTime": "2025-07-18 14:10:32",
+    "changeContent": "增加请求与返回示例。",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "认证仓上传物流运单",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "traffic-mark",
+        "type": "string",
+        "required": true,
+        "description": "订单的流量标识",
+        "defaultValue": "订单的流量标识",
+        "label": "流量标识\t"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "orderGoodsExpressInfos",
+        "type": "object",
+        "required": true,
+        "label": "订单商品运单信息列表",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "expressCode",
+            "type": "string",
+            "required": true,
+            "description": "长度100",
+            "label": "物流运单号",
+            "multiple": 0
+          },
+          {
+            "name": "authChannelCode",
+            "type": "string",
+            "required": true,
+            "description": "长度100",
+            "label": "认证仓物流渠道编码",
+            "multiple": 0
+          },
+          {
+            "name": "authWarehouseCode",
+            "type": "string",
+            "required": true,
+            "description": "长度100",
+            "label": "认证仓物理渠道编码",
+            "multiple": 0
+          },
+          {
+            "name": "goodsId",
+            "type": "bigint",
+            "required": true,
+            "label": "平台订单商品Id"
+          },
+          {
+            "name": "authExpressName",
+            "type": "string",
+            "required": true,
+            "description": "长度100",
+            "label": "认证仓物流商编码",
+            "multiple": 0
+          },
+          {
+            "name": "isDelete",
+            "type": "integer",
+            "required": true,
+            "label": "是否删除 1-是：删除订单商品运单的绑定关系;2-否：更新该订单商品ID的运单号",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "sheinWarehouseSerialNo",
+        "type": "string",
+        "required": true,
+        "description": "长度100",
+        "label": "平台批次号",
+        "multiple": 0
+      },
+      {
+        "name": "billno",
+        "type": "string",
+        "required": true,
+        "description": "长度100",
+        "label": "单号"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 1,
+        "children": [
+          {
+            "name": "goodsId",
+            "type": "int64",
+            "required": false,
+            "label": "平台订单商品Id",
+            "multiple": 0
+          },
+          {
+            "name": "errorMessages",
+            "type": "string",
+            "required": false,
+            "label": "失败原因说明列表",
+            "multiple": 1
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.cn/open-api/order/openapi/auth/order/express-upload' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570681772' \\ --header 'uberctx-traffic-mark: iosshus' \\ --header 'x-lt-clientCode:TEST' \\ --data-raw '{ \"sheinWarehouseSerialNo\": \"PU25071732969199617\", \"billno\": \"GSO1C737S000HS8\", \"orderGoodsExpressInfos\": [ { \"goodsId\": \"523023111111111\", \"expressCode\": \"1493538620000000000\", \"authExpressName\": \"Fedex\", \"customerCode\": \"YYTEST\", \"authChannelCode\": \"channel_test\", \"authWarehouseCode\": \"AAAA\", \"isDelete\": 2 }, { \"goodsId\": \"523023643722222222\", \"expressCode\": \"1493538620000000000\", \"authExpressName\": \"Fedex\", \"customerCode\": \"YYTEST\", \"authChannelCode\": \"channel_test\", \"authWarehouseCode\": \"AAAA\", \"isDelete\": 2 } ] }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { } }",
+  "errorCode": null
+}

@@ -1,0 +1,102 @@
+{
+  "docId": "3000505",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "【新】物流轨迹回调",
+    "userDocName": "【新】物流轨迹回调",
+    "endpoint": "/open-api/cargo/logistics-trajectory-callback",
+    "method": "POST",
+    "docName": "post_open-api_cargo_logistics-trajectory-callback",
+    "version": 4,
+    "updateTime": "2024-10-15 10:45:26",
+    "changeContent": "新增traceId",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "# 我司运单-物流状态 | 节点名称 | 节点值 | 描述 | | -------- | -------- | -------- | | 待取货 | 100 | | | 取货签到 | 200 | | | 更新货好时间 | 210 | | | 已取货 | 300 | | | 到达分拨（始发地） | 400 | | | 运输中 | 500 | | | 到达分拨（终点） | 600 | | | 开始派送 | 700 | | | 派送异常 | 800 | | | 派送签到 | 900 | | | 已签收 | 1000 | | | 已取消 | 1100 | | | 拦截退回 | 1200 | | | 拒收 | 1300 | | | 遗失 | 1400 | | 请求体的information的最新json结构： ``` { //箱号单 \"boxNos\":[ \"箱号1\", \"箱号2\", \"箱号3\" ], //第三方合作的物流号 \"thirdPartyTrackingNumber\": \"YT20220803000001\" } ```",
+  "requestHeader": null,
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "data",
+        "type": "object",
+        "required": true,
+        "description": "data",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "trackingNumber",
+            "type": "string",
+            "required": true,
+            "description": "运单号"
+          },
+          {
+            "name": "step",
+            "type": "string",
+            "description": "路由步骤，如“签收完毕”"
+          },
+          {
+            "name": "time",
+            "type": "string",
+            "required": true,
+            "description": "路由发生时间,如 \"2021-08-14 08:23:17\""
+          },
+          {
+            "name": "nodeId",
+            "type": "string",
+            "required": true,
+            "description": "路由节点ID，如1000"
+          },
+          {
+            "name": "desc",
+            "type": "string",
+            "description": "路由节点描述"
+          },
+          {
+            "name": "information",
+            "type": "string",
+            "description": "json字符串，差异化字段，没有则不填，具体见描述"
+          },
+          {
+            "name": "plateNo",
+            "type": "string",
+            "description": "物流回传车牌号，如路由节点ID=1000时回传，则为签收车牌号"
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应编码，0成功，-1失败, 其他失败"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述，成功：OK"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "description": "响应结果"
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "data\": [ { \"trackingNumber\": \"qD232301\", \"step\": null, \"time\": \"2023-09-12 12:12:12\", \"nodeId\": \"1000\", \"desc\": \"路由节点描述\", \"information\": null } ] }",
+  "responseExample": "code\": \"0\", \"msg\": \"success\", \"info\": null }",
+  "errorCode": null
+}

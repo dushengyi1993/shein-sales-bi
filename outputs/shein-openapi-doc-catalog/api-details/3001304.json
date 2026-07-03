@@ -1,0 +1,207 @@
+{
+  "docId": "3001304",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "采购商库存更新(新)",
+    "userDocName": "全托管/SHEIN自营商家库存更新",
+    "endpoint": "/open-api/goods/stock-update",
+    "method": "POST",
+    "docName": "post_open-api_goods_stock-update",
+    "version": 7,
+    "updateTime": "2025-07-21 11:32:54",
+    "changeContent": "更新请求示例",
+    "qpsContent": "100",
+    "modes": [
+      2,
+      3,
+      8
+    ],
+    "modeNames": [
+      "全托管",
+      "SHEIN自营",
+      "POP"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "该API用于更新代运营（又称全托管、简易平台）和SHEIN自营商家的库存，接口支持全量方式更新；⚠️注意：自主运营和半托管模式应用请勿使用；",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "stock",
+        "type": "object",
+        "required": true,
+        "description": "库存出入库信息 单次记录数不超过200条",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "skc",
+            "type": "string",
+            "required": true,
+            "description": "SHEIN平台生成的SKC，相当于商品发布的skc_name",
+            "multiple": 0
+          },
+          {
+            "name": "shein_sku",
+            "type": "string",
+            "required": true,
+            "description": "SHEIN平台生成的SKU，相当于商品发布的skucode",
+            "multiple": 0
+          },
+          {
+            "name": "remark",
+            "type": "string",
+            "required": false,
+            "description": "备注 不超过100个字符",
+            "multiple": 0
+          },
+          {
+            "name": "available_number",
+            "type": "string",
+            "required": true,
+            "description": "实际库存数量；"
+          },
+          {
+            "name": "stock_type",
+            "type": "string",
+            "required": true,
+            "description": "默认传3，全量覆盖"
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "integer",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "example": "提交出入库成功",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "batch_number",
+            "type": "string",
+            "description": "批次号 根据批次号查询时 可用到",
+            "example": "201907170001",
+            "multiple": 0
+          },
+          {
+            "name": "fail_number",
+            "type": "integer",
+            "description": "失败数目"
+          },
+          {
+            "name": "fail_list",
+            "type": "object",
+            "description": "失败明细数组",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "stock_type",
+                "type": "integer",
+                "description": "3为全量同步库存"
+              },
+              {
+                "name": "sku",
+                "type": "string",
+                "description": "商品sku与入参一致"
+              },
+              {
+                "name": "skc",
+                "type": "string",
+                "description": "商品skc"
+              },
+              {
+                "name": "shein_sku",
+                "type": "string",
+                "description": "shein 平台sku"
+              },
+              {
+                "name": "attribute",
+                "type": "string",
+                "description": "属性集"
+              },
+              {
+                "name": "access_number",
+                "type": "integer",
+                "description": "出入库数目"
+              },
+              {
+                "name": "remark",
+                "type": "string",
+                "description": "出入库备注"
+              },
+              {
+                "name": "fail_code",
+                "type": "string",
+                "description": "出入库错误码"
+              },
+              {
+                "name": "fail_msg",
+                "type": "string",
+                "description": "出入库错误原因"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/goods/stock-update' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570817402' \\ --data-raw '{ \"stock\": [{ \"stock_type\": 3, \"skc\": \"sx2410224003123100\", \"shein_sku\": \"I83ty0f2d502\", \"available_number\": 18 }, { \"stock_type\": 3, \"skc\": \"sx2410224003123100\", \"shein_sku\": \"I83ty0f2h5hc\", \"available_number\": 16 }, { \"stock_type\": 3, \"skc\": \"sx2410224003123100\", \"shein_sku\": \"I83ty0f2ks18\", \"available_number\": 7 }, { \"stock_type\": 3, \"skc\": \"sx2410224003123100\", \"shein_sku\": \"I83ty0f2o8d4\", \"available_number\": 0 }{ \"stock_type\": 3, \"skc\": \"sx2410220100534309\", \"shein_sku\": \"I83txx7ku2my\", \"available_number\": 12 }, { \"stock_type\": 3, \"skc\": \"sx2410220100534309\", \"shein_sku\": \"I83txx7kyffc\", \"available_number\": 8 }, { \"stock_type\": 3, \"skc\": \"sx2410220100534309\", \"shein_sku\": \"I83txx7l2vdw\", \"available_number\": 1 }, { \"stock_type\": 3, \"skc\": \"sx2410220100534309\", \"shein_sku\": \"I83txx7l6a2o\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410221254070290\", \"shein_sku\": \"I23txvm9lzi4\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410221254070290\", \"shein_sku\": \"I23txvm9qgsn\", \"available_number\": 4 }, { \"stock_type\": 3, \"skc\": \"sx2410221254070290\", \"shein_sku\": \"I23txvm96qgl\", \"available_number\": 12 }, { \"stock_type\": 3, \"skc\": \"sx2410221254070290\", \"shein_sku\": \"I23txvm9aryk\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410221254070290\", \"shein_sku\": \"I23txvm9emg9\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410221254070290\", \"shein_sku\": \"I23txvm9i56p\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410221254034919\", \"shein_sku\": \"I23txvmbfoe9\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410221254034919\", \"shein_sku\": \"I23txvmbjrjf\", \"available_number\": 4 }, { \"stock_type\": 3, \"skc\": \"sx2410221254034919\", \"shein_sku\": \"I23txvmavt8m\", \"available_number\": 12 }, { \"stock_type\": 3, \"skc\": \"sx2410221254034919\", \"shein_sku\": \"I23txvmb0jj8\", \"available_number\": 6 }, { \"stock_type\": 3, \"skc\": \"sx2410221254034919\", \"shein_sku\": \"I23txvmb4qxl\", \"available_number\": 4 }, { \"stock_type\": 3, \"skc\": \"sx2410221254034919\", \"shein_sku\": \"I23txvmbarhr\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410221254011559\", \"shein_sku\": \"I23txvmd3fup\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410221254011559\", \"shein_sku\": \"I23txvmd7gcl\", \"available_number\": 1 }, { \"stock_type\": 3, \"skc\": \"sx2410221254011559\", \"shein_sku\": \"I23txvmcj05d\", \"available_number\": 1 }, { \"stock_type\": 3, \"skc\": \"sx2410221254011559\", \"shein_sku\": \"I23txvmcnkfh\", \"available_number\": 6 }, { \"stock_type\": 3, \"skc\": \"sx2410221254011559\", \"shein_sku\": \"I23txvmcsr69\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410221254011559\", \"shein_sku\": \"I23txvmcymd2\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410221254075505\", \"shein_sku\": \"I23txvmdzc81\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410222799301842\", \"shein_sku\": \"I13xg8k2fsea\", \"available_number\": 8 }, { \"stock_type\": 3, \"skc\": \"sx2410222799301842\", \"shein_sku\": \"I13xg8k2ldy1\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410222799301842\", \"shein_sku\": \"I13xg8k2rs9p\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410222799336681\", \"shein_sku\": \"I13xg8k3t5tr\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410222799343532\", \"shein_sku\": \"I13xg8k4nh8r\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410222799346161\", \"shein_sku\": \"I13xg8k5q5cc\", \"available_number\": 1 }, { \"stock_type\": 3, \"skc\": \"sx2410222799346161\", \"shein_sku\": \"I13xg8k5uf66\", \"available_number\": 7 }, { \"stock_type\": 3, \"skc\": \"sx2410222799346161\", \"shein_sku\": \"I13xg8k55pi5\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410222799346161\", \"shein_sku\": \"I13xg8k5a7ge\", \"available_number\": 12 }, { \"stock_type\": 3, \"skc\": \"sx2410222799346161\", \"shein_sku\": \"I13xg8k5ezw6\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410222799346161\", \"shein_sku\": \"I13xg8k5kavv\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410222799344440\", \"shein_sku\": \"I13xg8k6krmx\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410222799344440\", \"shein_sku\": \"I13xg8k6orhm\", \"available_number\": 8 }, { \"stock_type\": 3, \"skc\": \"sx2410222799344440\", \"shein_sku\": \"I13xg8k64fmt\", \"available_number\": 10 }, { \"stock_type\": 3, \"skc\": \"sx2410222799344440\", \"shein_sku\": \"I13xg8k67yqg\", \"available_number\": 8 }, { \"stock_type\": 3, \"skc\": \"sx2410222799344440\", \"shein_sku\": \"I13xg8k6dudg\", \"available_number\": 5 }, { \"stock_type\": 3, \"skc\": \"sx2410222799344440\", \"shein_sku\": \"I13xg8k6hoxy\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410235191171176\", \"shein_sku\": \"I33ulkf11oph\", \"available_number\": 1 }, { \"stock_type\": 3, \"skc\": \"sx2410235191171176\", \"shein_sku\": \"I33ulkf16pez\", \"available_number\": 25 }, { \"stock_type\": 3, \"skc\": \"sx2410235191171176\", \"shein_sku\": \"I33ulkf0g2bc\", \"available_number\": 42 }, { \"stock_type\": 3, \"skc\": \"sx2410235191171176\", \"shein_sku\": \"I33ulkf0mf9t\", \"available_number\": 48 }, { \"stock_type\": 3, \"skc\": \"sx2410235191171176\", \"shein_sku\": \"I33ulkf0qyki\", \"available_number\": 9 }, { \"stock_type\": 3, \"skc\": \"sx2410235191171176\", \"shein_sku\": \"I33ulkf0w10s\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410235191116114\", \"shein_sku\": \"I33ulkf27799\", \"available_number\": 0 }, { \"stock_type\": 3, \"skc\": \"sx2410235191116114\", \"shein_sku\": \"I33ulkf2dwfz\", \"available_number\": 4 }, { \"stock_type\": 3, \"skc\": \"sx2410235191116114\", \"shein_sku\": \"I33ulkf1fsuw\", \"available_number\": 8 }, { \"stock_type\": 3, \"skc\": \"sx2410235191164731\", \"shein_sku\": \"I33ulkf49jar\", \"available_number\": 0 }] }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"batch_number\": \"202412251833184\", \"fail_num\": 0, \"fail_list\": [ ] }, \"bbl\": null, \"traceId\": \"185259a2759646b2\" }",
+  "errorCode": null
+}

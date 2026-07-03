@@ -1,0 +1,202 @@
+{
+  "docId": "3001340",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "物流产品查询",
+    "userDocName": "物流产品查询",
+    "endpoint": "/open-api/shipping/express-company-list-v2",
+    "method": "POST",
+    "docName": "post_open-api_shipping_express-company-list-v2",
+    "version": 9,
+    "updateTime": "2025-07-30 11:23:56",
+    "changeContent": "更新推荐物流例子",
+    "qpsContent": "50",
+    "modes": [
+      1,
+      2,
+      3,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "SHEIN自营",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "通过该接口查询SHEIN合作物流的时效产品以及对应的物流公司；",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-language",
+        "type": "string",
+        "description": "指定出参语种，默认中文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "addressId",
+        "type": "int64",
+        "required": true,
+        "description": "发货地址ID，从接口获取"
+      },
+      {
+        "name": "deliveryType",
+        "type": "string",
+        "required": true,
+        "description": "发货方式，固定给1"
+      },
+      {
+        "name": "orderType",
+        "type": "string",
+        "required": true,
+        "description": "采购单类型 1：急采 /2：备货"
+      },
+      {
+        "name": "reserveParcelTime",
+        "type": "string",
+        "required": true,
+        "description": "预约取货时间(yyyy-MM-dd HH:mm:ss)"
+      },
+      {
+        "name": "purchaseOrders",
+        "type": "object",
+        "required": true,
+        "description": "采购单明细",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "orderNo",
+            "type": "string",
+            "required": true,
+            "description": "采购单号"
+          },
+          {
+            "name": "skuInfos",
+            "type": "object",
+            "required": true,
+            "description": "采购单商品明细",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "qty",
+                "type": "integer",
+                "required": true,
+                "description": "采购单发货数量"
+              },
+              {
+                "name": "skuCode",
+                "type": "string",
+                "required": true,
+                "description": "SHEIN sku编码"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应编码 成功：0"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述,成功：OK；支持指定语种出参；"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "children": [
+          {
+            "name": "shippingMethods",
+            "type": "object",
+            "description": "时效产品",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "agedProductCode",
+                "type": "string",
+                "description": "时效产品编码"
+              },
+              {
+                "name": "agedProductName",
+                "type": "string",
+                "description": "时效产品名称；支持指定语种出参；"
+              },
+              {
+                "name": "expressInfos",
+                "type": "object",
+                "description": "物流公司",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "companyCode",
+                    "type": "string",
+                    "description": "物流编码"
+                  },
+                  {
+                    "name": "companyName",
+                    "type": "string",
+                    "description": "物流公司名称"
+                  },
+                  {
+                    "name": "isRecommend",
+                    "type": "boolean",
+                    "description": "是否推荐物流"
+                  }
+                ]
+              },
+              {
+                "name": "purchaseOrders",
+                "type": "string",
+                "description": "分堆采购单号",
+                "multiple": 1
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.cn/open-api/shipping/express-company-list-v2' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570817402' \\ --data-raw '{ \"type\": 2, \"addressId\": \"19687\", \"reserveParcelTime\": \"2024-08-31 10:29:59\", \"deliveryType\": 1, \"orderType\": 1, \"purchaseOrders\": [ {\"orderNo\":\"J241210600019\", \"skuInfos\": [ { \"qty\": 1, \"skuCode\": \"I62fjn9xnam8\" } ] }, {\"orderNo\":\"J241210600017\", \"skuInfos\": [ { \"qty\": 1, \"skuCode\": \"I62fjn9xnam8\" } ] }, {\"orderNo\":\"J241210600021\", \"skuInfos\": [ { \"qty\": 1, \"skuCode\": \"I62fjn9xnam8\" } ] } ] }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"shippingMethods\": [ { \"agedProductCode\": \"GEF\", \"agedProductName\": \"默认时效产品\", \"purchaseOrders\": [ \"B241217500033\", \"B241217500031\", \"B241217500032\" ], \"expressInfos\": [ { \"companyName\": \"顺丰\", \"companyCode\": \"shunfeng\", \"isSupport\": true, \"isRecommend\": false }, { \"companyName\": \"车门\", \"companyCode\": \"chemen\", \"isSupport\": true, \"isRecommend\": true }, { \"companyName\": \"跨越\", \"companyCode\": \"kuayue\", \"isSupport\": true, \"isRecommend\": false }, { \"companyName\": \"Anjun\", \"companyCode\": \"TMS-anjun\", \"isSupport\": true, \"isRecommend\": false } ] } ] }, \"bbl\": null, \"traceId\": \"7caca8b96ad583a3\" }",
+  "errorCode": null
+}

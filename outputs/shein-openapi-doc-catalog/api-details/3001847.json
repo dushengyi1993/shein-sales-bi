@@ -1,0 +1,170 @@
+{
+  "docId": "3001847",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询智能拆包结果接口",
+    "userDocName": "查询智能拆包结果接口",
+    "endpoint": "/open-api/purchase/intelligent-packing-result",
+    "method": "POST",
+    "docName": "",
+    "version": 1,
+    "updateTime": "2026-06-29 11:31:01",
+    "changeContent": "新增接口",
+    "qpsContent": "30",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "用于采购单发货之前，查询平台智能拆包的结果，可以帮助开发者判断如何创建发货单",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-language",
+        "type": "string",
+        "description": "指定出参语种，默认中文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "sellerOrderNos",
+        "type": "string",
+        "required": true,
+        "description": "订单号集合，单次请求最多1000个订单号"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "info",
+        "type": "object",
+        "description": "智能拆包响应体",
+        "children": [
+          {
+            "name": "groups",
+            "type": "object",
+            "description": "发货分组",
+            "children": [
+              {
+                "name": "goodsNum",
+                "type": "string",
+                "description": "商品件数"
+              },
+              {
+                "name": "orderNum",
+                "type": "string",
+                "description": "订单数"
+              },
+              {
+                "name": "orders",
+                "type": "object",
+                "description": "订单信息",
+                "children": [
+                  {
+                    "name": "countryMarket",
+                    "type": "integer",
+                    "description": "国家市场：0:空，1:南大区（欧洲市场），2:北大区（美国市场）"
+                  },
+                  {
+                    "name": "sellerOrderNo",
+                    "type": "string",
+                    "description": "订单号"
+                  },
+                  {
+                    "name": "state",
+                    "type": "integer",
+                    "description": "订单状态（1:分单中,2:待发货,3:已送货,4:已收货,5:已退货,6:已完成,7:已上架,8:已作废）"
+                  }
+                ]
+              },
+              {
+                "name": "rules",
+                "type": "object",
+                "description": "拆包规则明细",
+                "children": [
+                  {
+                    "name": "ruleCode",
+                    "type": "integer",
+                    "description": "拆包规则,1:公司主体,2:订单大仓,3:订单类型,4:结算方式,5:备货类型,6:账单币种,7:国家市场,8:商品品类,9:预估收货仓"
+                  },
+                  {
+                    "name": "ruleDesc",
+                    "type": "string",
+                    "description": "拆包规则描述,如:预估收货仓,国家线,成衣类型"
+                  },
+                  {
+                    "name": "ruleValue",
+                    "type": "object",
+                    "description": "拆包规则具体的值,如1347,1,2"
+                  },
+                  {
+                    "name": "ruleValueDesc",
+                    "type": "string",
+                    "description": "拆包规则具体的值描述,如:华东质检仓,欧洲市场,成衣"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "undeliverableOrders",
+            "type": "object",
+            "description": "不可发货的订单列表",
+            "children": [
+              {
+                "name": "sellerOrderNo",
+                "type": "string",
+                "description": "订单号"
+              },
+              {
+                "name": "undeliverableReasons",
+                "type": "string",
+                "description": "不可发货原因列表",
+                "multiple": 1
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述,成功：OK"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

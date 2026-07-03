@@ -1,0 +1,131 @@
+{
+  "docId": "3001283",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "退货单-退货单签收",
+    "userDocName": "退货单签收",
+    "endpoint": "/open-api/return-order/sign-return-order",
+    "method": "POST",
+    "docName": "post_open-api_return-order_sign-return-order",
+    "version": 10,
+    "updateTime": "2025-07-21 11:30:46",
+    "changeContent": "更新请求示例",
+    "qpsContent": "40",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "通过该接口签收退货商品；",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "returnOrderNo",
+        "type": "string",
+        "required": true,
+        "description": "退货单号",
+        "example": "N8VTE00002",
+        "multiple": 0
+      },
+      {
+        "name": "goodsIdList",
+        "type": "integer",
+        "required": true,
+        "description": "签收的退货商品Id列表",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": false,
+        "example": "9999004",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "example": "退货单商品不属于同一个退货单",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "returnOrderNo",
+            "type": "string",
+            "required": false,
+            "description": "退货单号",
+            "multiple": 0
+          },
+          {
+            "name": "goodsIdList",
+            "type": "long",
+            "required": false,
+            "description": "签收的退货商品Id列表",
+            "multiple": 1
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/return-order/sign-return-order' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570817402' \\ --data-raw '{ \"returnOrderNo\": \"NRMFM000MT\", \"goodsIdList\": [4277386877782017] }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"returnOrderNo\": \"NRMFM000MT\", \"goodsIdList\": [ 4277386877782017 ] } }",
+  "errorCode": null
+}

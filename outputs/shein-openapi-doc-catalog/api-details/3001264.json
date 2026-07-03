@@ -1,0 +1,117 @@
+{
+  "docId": "3001264",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "认证仓调用-作废出库单接口",
+    "userDocName": "认证仓调用-作废出库单接口",
+    "endpoint": "/open-api/order/openapi/auth/order/outbound-cancel",
+    "method": "POST",
+    "docName": "post_open-api_order_openapi_auth_order_outbound-cancel",
+    "version": 4,
+    "updateTime": "2025-07-18 14:10:39",
+    "changeContent": "增加请求与返回示例。",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "认证仓作废出库单",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "traffic-mark",
+        "type": "string",
+        "required": true,
+        "description": "订单的流量标识",
+        "label": "订单的流量标识"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "cancelReason",
+        "type": "integer",
+        "required": true,
+        "description": "发货方取消原因枚举 1仓库库存不足 2收件地址错误或不完整 3物流商无法配送 4买家恶意下单 5平台强制取消，认证仓拦截成功 6其他",
+        "label": "取消原因",
+        "multiple": 0
+      },
+      {
+        "name": "sheinWarehouseSerialNo",
+        "type": "string",
+        "required": true,
+        "description": "长度100",
+        "label": "平台批次号",
+        "multiple": 0
+      },
+      {
+        "name": "outboundOrderNo",
+        "type": "string",
+        "required": true,
+        "description": "长度100",
+        "label": "出库单号",
+        "multiple": 0
+      },
+      {
+        "name": "remark",
+        "type": "string",
+        "required": false,
+        "description": "长度512",
+        "label": "取消原因说明",
+        "multiple": 0
+      },
+      {
+        "name": "billno",
+        "type": "string",
+        "required": true,
+        "description": "长度100",
+        "label": "平台订单号"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.cn/open-api/order/openapi/auth/order/outbound-cancel' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570681772' \\ --header 'uberctx-traffic-mark: iosshus' \\ --header 'x-lt-clientCode:TEST' \\ --data-raw '{ \"sheinWarehouseSerialNo\": \"PU25071732961111111\", \"billno\": \"GSO1C737S111111\", \"outboundOrderNo\": \"DO25071709303111111\", \"cancelReason\": 5, \"remark\": \"****\" }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { } }",
+  "errorCode": null
+}

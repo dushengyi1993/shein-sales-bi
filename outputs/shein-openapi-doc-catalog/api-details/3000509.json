@@ -1,0 +1,180 @@
+{
+  "docId": "3000509",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "MES-FAC-004 二次工艺接口",
+    "userDocName": "MES-FAC-004 二次工艺接口",
+    "endpoint": "/open-api/mes/get-second-precess",
+    "method": "POST",
+    "docName": "post_open-api_mes_get-second-precess",
+    "version": 2,
+    "updateTime": "2024-10-15 10:54:09",
+    "changeContent": "新增traceId",
+    "qpsContent": "",
+    "modes": [
+      3
+    ],
+    "modeNames": [
+      "SHEIN自营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "acceptOrderEndTime",
+        "type": "string",
+        "required": false,
+        "description": "接单结束时间",
+        "example": "2022-06-27 08:06:13",
+        "multiple": 0
+      },
+      {
+        "name": "acceptOrderStartTime",
+        "type": "string",
+        "required": false,
+        "description": "接单起始时间",
+        "example": "2022-07-19 12:48:01",
+        "multiple": 0
+      },
+      {
+        "name": "factoryIdList",
+        "type": "integer",
+        "required": false,
+        "description": "工厂id集合",
+        "multiple": 1
+      },
+      {
+        "name": "produceOrderIdList",
+        "type": "integer",
+        "required": false,
+        "description": "订单编号",
+        "multiple": 1
+      },
+      {
+        "name": "skc",
+        "type": "string",
+        "required": false,
+        "description": "sku",
+        "example": "eum ratione odio odit earum pariatur iure laborum explicabo nostrum",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "integer",
+        "required": false,
+        "description": "状态码",
+        "example": "53064",
+        "multiple": 0
+      },
+      {
+        "name": "detailMsg",
+        "type": "string",
+        "required": false,
+        "description": "执行结果详细信息",
+        "example": "possimus laudantium est odio aut accusamus unde ab",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "description": "执行结果数据",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "produceOrderId",
+            "type": "integer",
+            "required": false,
+            "description": "订单号",
+            "example": "6395",
+            "multiple": 0
+          },
+          {
+            "name": "secondProcessInfo",
+            "type": "object",
+            "required": true,
+            "description": "二次工艺信息",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "craftFactory",
+                "type": "string",
+                "required": false,
+                "description": "供应商名称",
+                "example": "dolorem debitis impedit quia excepturi voluptatibus minus perferendis dolorum ea occaecati iste rerum ut facilis aliquam aut aut nemo debitis qui",
+                "multiple": 0
+              },
+              {
+                "name": "craftRecordCode",
+                "type": "string",
+                "required": false,
+                "description": "工艺单号",
+                "example": "42259",
+                "multiple": 0
+              },
+              {
+                "name": "purchasePrice",
+                "type": "double",
+                "required": false,
+                "description": "采购价",
+                "example": "40906.13",
+                "multiple": 0
+              },
+              {
+                "name": "type",
+                "type": "string",
+                "required": false,
+                "description": "类型",
+                "example": "id quo voluptas fugit sapiente quis autem qui inventore sit blanditiis eius voluptatum",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "执行结果提示信息",
+        "example": "quia vel tempore ut alias dolorem",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "produceOrderIdList\":[8292325,19383746], \"acceptOrderStartTime\":\"2023-09-01\", \"acceptOrderEndTime\":\"2023-09-30\" }",
+  "responseExample": "code\": 0, \"info\": [ { \"produceOrderId\": 8292325, \"secondProcessInfo\": [ { \"craftFactory\": \"宝丽洗水厂\", \"craftRecordCode\": \"GY6355563\", \"purchasePrice\": 36.0, \"type\": \"定位裁剪\" } ] }, { \"produceOrderId\": 19383746, \"secondProcessInfo\": [ { \"craftFactory\": \"裁片片-测试\", \"craftRecordCode\": \"GY6792156\", \"purchasePrice\": 0.01, \"type\": \"染色\" } ] } ], \"msg\": \"success\" }",
+  "errorCode": null
+}

@@ -1,0 +1,296 @@
+{
+  "docId": "3001385",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "打印合规标签",
+    "userDocName": "打印合规标签",
+    "endpoint": "/open-api/goods-compliance/label-print",
+    "method": "POST",
+    "docName": "post_open-api_goods-compliance_label-print",
+    "version": 21,
+    "updateTime": "2025-09-05 16:59:54",
+    "changeContent": "修改场景名",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      2,
+      3,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "SHEIN自营",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "此接口支持打印商品相关的标签，标签中会包含多种信息，包括：环保标、GPSR、制造商、商品条码。打印标签前，请先通过接口/open-api/goods-compliance/get-label-template查询每个SKC可用的标签模板，每个模板中包含不同信息，每个信息需提供的入参不同。不同标签类型的图片示例参考文档。商家后台的标签打印流程可参考文档。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "description": "req",
+    "label": "OpenPlatformPrintReq",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "labelDetailList",
+        "type": "object",
+        "required": false,
+        "description": "打印规则列表。即提供具体要打印什么内容的标签。单次最多支持10组规则，过多容易响应超时。打印标签前，请先通过接口/open-api/goods-compliance/get-label-template查询每个SKC可用的标签模板，每个模板中包含不同信息，每个信息需提供的入参不同。",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "labelType",
+            "type": "integer",
+            "required": true,
+            "description": "标签类型。各类型打印示例查看文档底部FAQ。1-环保标：通常包含环保信息2-GPSR标：通常包含GPSR信息（可能也会有环保标、商品条码、制造商信息）3-商家自定义：包含内容不定，此类标签由商家在后台自行创建。具体包含信息可查询/open-api/goods-compliance/get-label-template。4-GPSR+环保标：通常包含GPSR、环保信息。5-商品条码合并标：通常包含商品条码（可能也会有环保标、商品条码、制造商信息）",
+            "multiple": 0
+          },
+          {
+            "name": "labelCode",
+            "type": "string",
+            "description": "打印的标签模板编码。通过/open-api/goods-compliance/get-label-template查询获取非必填，不传值时系统会根据入参的skc和labelType去匹配出skc可打印的所有标签模板进行打印。"
+          },
+          {
+            "name": "printNumber",
+            "type": "integer",
+            "description": "标签打印数量。非必填，只有在入参labelCode的情况下，printNumer才会生效。不传值时默认每个标签打印1份。"
+          },
+          {
+            "name": "packageTypeId",
+            "type": "int64",
+            "description": "此字段后续会废弃，请改用packageMaterialList入参（支持在一个标签内打印多个环保材料）。"
+          },
+          {
+            "name": "packageMaterialId",
+            "type": "int64",
+            "description": "此字段后续会废弃，请改用packageMaterialList入参（支持在一个标签内打印多个环保材料）。"
+          },
+          {
+            "name": "packageMaterialList",
+            "type": "object",
+            "description": "环保材料列表。支持一个标签内打印多个环保材料，最多10个材料。标签内包含环保信息时，需要入参此列表。通常labelType=1/2/4/5时均可入参此信息，但最终打印结果中是否会有环保材料信息，取决于标签模板中是否有环保材料的变量信息。",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "packageTypeId",
+                "type": "int64",
+                "description": "环保材料类型ID。可通过接口获取全量环保耗材信息（新）获取。通常labelType=1/2/4/5时均可入参，但最终打印结果中是否会有环保材料信息，取决于标签模板中是否有环保材料的变量信息。"
+              },
+              {
+                "name": "packageMaterialId",
+                "type": "int64",
+                "description": "环保材料ID。可通过接口获取全量环保耗材信息（新）获取。通常labelType=1/2/4/5时均可入参，但最终打印结果中是否会有环保材料信息，取决于标签模板中是否有环保材料的变量信息。"
+              }
+            ]
+          },
+          {
+            "name": "skc",
+            "type": "string",
+            "required": true,
+            "description": "平台生成的SKC唯一编码。必填，不论什么类型的标签都需要提供。"
+          },
+          {
+            "name": "skuCode",
+            "type": "string",
+            "description": "商品条码中显示的sku。标签内包含条码信息时，skucode和suppliersku选择一个入参即可，通常labelType=2/4/5时均可入参，但最终打印结果中是否会有商品条码信息，取决于标签模板中是否有商品条码的变量信息。"
+          },
+          {
+            "name": "supplierSku",
+            "type": "string",
+            "description": "商品条码中显示的sku。标签内包含条码信息时，skucode和suppliersku选择一个入参即可，通常labelType=2/4/5时均可入参，但最终打印结果中是否会有商品条码信息，取决于标签模板中是否有商品条码的变量信息。"
+          },
+          {
+            "name": "orderNo",
+            "type": "string",
+            "description": "商品条码中显示的采购单号。标签内包含条码信息时使用，非必填，不传值则单号位置显示空。通常labelType=2/4/5时均可入参，但最终打印结果中是否会有商品条码信息，取决于标签模板中是否有商品条码的变量信息。"
+          },
+          {
+            "name": "originCountry",
+            "type": "string",
+            "required": false,
+            "description": "原产地。标签内包含GPSR信息时使用，由商家自定义输入值，填写国家名称。通常labelType=2/4/5是均可入参。",
+            "multiple": 0
+          },
+          {
+            "name": "productBatchNo",
+            "type": "string",
+            "required": false,
+            "description": "产品批次号。标签内包含GPSR信息时使用，由商家自定义输入值。通常labelType=2/4/5是均可入参。",
+            "multiple": 0
+          },
+          {
+            "name": "warning",
+            "type": "string",
+            "description": "警示语。标签内包含GPSR信息时使用，由商家自定义输入值。通常labelType=2/4/5是均可入参。"
+          },
+          {
+            "name": "uid",
+            "type": "string",
+            "required": true,
+            "description": "打印规则的定位ID。每一行的定位ID不可重复。由开发者自定义输入，用于在返回中判断哪条规则打印失败，哪条打印成功。",
+            "multiple": 0
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfOpenPlatformPrintResp",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "打印结果列表",
+        "label": "OpenPlatformPrintResp",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "failedList",
+            "type": "object",
+            "required": false,
+            "description": "失败列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "code",
+                "type": "string",
+                "required": false,
+                "description": "失败code",
+                "multiple": 1
+              },
+              {
+                "name": "labelType",
+                "type": "integer",
+                "required": false,
+                "description": "标签类型",
+                "multiple": 0
+              },
+              {
+                "name": "reason",
+                "type": "string",
+                "required": false,
+                "description": "失败原因",
+                "multiple": 1
+              },
+              {
+                "name": "uid",
+                "type": "string",
+                "required": false,
+                "description": "失败行的定位ID。一组打印规则可能匹配出多个标签，因此返回结果中会有多行相同UID出现。",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "successList",
+            "type": "object",
+            "required": false,
+            "description": "成功列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "labelLength",
+                "type": "integer",
+                "required": false,
+                "description": "标签尺寸-长",
+                "multiple": 0
+              },
+              {
+                "name": "labelType",
+                "type": "integer",
+                "required": false,
+                "description": "标签类型",
+                "multiple": 0
+              },
+              {
+                "name": "labelUrl",
+                "type": "string",
+                "required": false,
+                "description": "标签PDF URL。当入参中包含labelCode和printNumber（且大于1）时，URL中会包含多个内容一样的标签内容。",
+                "multiple": 0
+              },
+              {
+                "name": "labelWidth",
+                "type": "integer",
+                "required": false,
+                "description": "标签尺寸-宽",
+                "multiple": 0
+              },
+              {
+                "name": "labelCode",
+                "type": "string",
+                "description": "标签模板code"
+              },
+              {
+                "name": "uid",
+                "type": "string",
+                "required": false,
+                "description": "成功行的定位ID。一组打印规则可能匹配出多个标签，因此返回结果中会有多行相同UID出现。",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'http://openapi-test01.sheincorp.cn/open-api/goods-compliance/label-print' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-timestamp: 1755507118894' \\ --header 'language: zh-cn' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi-test01.sheincorp.cn' \\ --data-raw '{ \"labelDetailList\":[ { \"labelCode\":\"1752493613919\", \"labelType\":1, \"skc\":\"sa25080185896920018\", \"productBatchNo\":\"123\", \"originCountry\":\"china\", \"warning\":\"warning test\", \"packageMaterialList\":[ { \"package_material_id\":191, \"package_type_id\":113 }, { \"package_material_id\":408, \"package_type_id\":113 } ], \"printNumber\":2, \"skuCode\":\"I9pfmig3wu1d\", \"uid\":1}, {\"labelType\":4, \"productBatchNo\":\"123\", \"originCountry\":\"china\", \"warning\":\"warning test\", \"skc\":\"sa25080185896920018\", \"packageMaterialList\":[ { \"packageMaterialId\":191, \"packageTypeId\":113 }, { \"packageMaterialId\":408, \"packageTypeId\":113 } ], \"uid\":2}, { \"labelCode\":\"1754474187729\", \"labelType\":5, \"printNumber\":2, \"skuCode\":\"I9pfmig3wu1d\", \"uid\":3 } ] }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"successList\": [ { \"uid\": \"1\", \"labelType\": 1, \"labelUrl\": \"https://ssmp-public-test-ali.oss-cn-shenzhen.aliyuncs.com/pdf2-test/pcrs/2025/8/18/1755507126981-5f362dde5df7dc267d95b9f7988a476f.oss.pdf?AWSAccessKeyId=LTAI5tRyBdX9kWZcVCLyWMTF&Expires=1756111930&Signature=BV0gkj8Bmb3Am4wKNJbm85iN6B4%3D\", \"labelCode\": \"1752493613919\", \"labelWidth\": 110, \"labelLength\": 100 }, { \"uid\": \"2\", \"labelType\": 4, \"labelUrl\": \"https://ssmp-public-test-ali.oss-cn-shenzhen.aliyuncs.com/pdf2-test/pcrs/2025/8/18/1755507126976-6cfdb1f258b4027043610479c465e332.oss.pdf?AWSAccessKeyId=LTAI5tRyBdX9kWZcVCLyWMTF&Expires=1756111928&Signature=uR1Dd6TAxymErg70TUjs29%2FH%2FNg%3D\", \"labelCode\": \"1750405331884\", \"labelWidth\": 120, \"labelLength\": 80 }, { \"uid\": \"2\", \"labelType\": 4, \"labelUrl\": \"https://ssmp-public-test-ali.oss-cn-shenzhen.aliyuncs.com/pdf2-test/pcrs/2025/8/18/1755507126970-bcd255cbffdc685fbc7aaa69aebc2797.oss.pdf?AWSAccessKeyId=LTAI5tRyBdX9kWZcVCLyWMTF&Expires=1756111928&Signature=OQExWxlvUTI37PX%2F6jX0vbNuGuo%3D\", \"labelCode\": \"1747028949999\", \"labelWidth\": 60, \"labelLength\": 80 }, { \"uid\": \"3\", \"labelType\": 5, \"labelUrl\": \"https://ssmp-public-test-ali.oss-cn-shenzhen.aliyuncs.com/pdf2-test/pcrs/2025/8/18/1755507127002-38481feca56aac488ab0e36758ed3e56.oss.pdf?AWSAccessKeyId=LTAI5tRyBdX9kWZcVCLyWMTF&Expires=1756111930&Signature=QLWPee3CGs3rAK3iK%2BJ67aQGfTA%3D\", \"labelCode\": \"1754474187729\", \"labelWidth\": 60, \"labelLength\": 80 } ], \"failedList\": [] }, \"bbl\": null, \"traceId\": \"9e6264bb12fac88d\" }",
+  "errorCode": null
+}

@@ -1,0 +1,4417 @@
+{
+  "schemaVersion": "shein-openapi-api-details/v1",
+  "generatedAt": "2026-07-03T04:59:45.653Z",
+  "totalCount": 217,
+  "semiTrustCount": 217,
+  "errorCount": 0,
+  "interfaces": [
+    {
+      "docId": "3001621",
+      "title": "查询对账单详情",
+      "endpoint": "/open-api/finance/get-check-order-detail",
+      "method": "GET",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001625",
+      "title": "查询报账单列表",
+      "endpoint": "/open-api/finance/report-order-list",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 7,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001626",
+      "title": "报账单列表",
+      "endpoint": "/open-api/finance/report-list",
+      "method": "POST",
+      "modes": [
+        2,
+        8
+      ],
+      "modeNames": [
+        "全托管",
+        "POP"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 7,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001628",
+      "title": "报账单补扣款收支列表",
+      "endpoint": "/open-api/finance/report-adjustment-detail",
+      "method": "POST",
+      "modes": [
+        2,
+        8
+      ],
+      "modeNames": [
+        "全托管",
+        "POP"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 3,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001631",
+      "title": "查询对账单列表",
+      "endpoint": "/open-api/finance/get-check-order-list",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 11,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001674",
+      "title": "报账单销售款收支列表",
+      "endpoint": "/open-api/finance/report-sales-detail",
+      "method": "POST",
+      "modes": [
+        2,
+        8
+      ],
+      "modeNames": [
+        "全托管",
+        "POP"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 3,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001293",
+      "title": "发货单维度打印面单",
+      "endpoint": "/open-api/shipping/delivery/print-package",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        3,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "SHEIN自营",
+        "半托管",
+        "POP"
+      ],
+      "qps": "100",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001294",
+      "title": "备货单审核列表",
+      "endpoint": "/open-api/idms/review-orders",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        3,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "SHEIN自营",
+        "半托管",
+        "POP"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 7,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001300",
+      "title": "物流公司信息查询（废弃）",
+      "endpoint": "/open-api/shipping/express-company-list",
+      "method": "GET",
+      "modes": [],
+      "modeNames": [],
+      "qps": "30",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 0,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001312",
+      "title": "查shein合作物流预估运费",
+      "endpoint": "/open-api/openapi-business-backend/purchase-estimated-fee",
+      "method": "POST",
+      "modes": [
+        2,
+        3,
+        8
+      ],
+      "modeNames": [
+        "全托管",
+        "SHEIN自营",
+        "POP"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 6,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001340",
+      "title": "物流产品查询",
+      "endpoint": "/open-api/shipping/express-company-list-v2",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        3,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "SHEIN自营",
+        "半托管",
+        "POP"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 5,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001443",
+      "title": "查询商品备货信息列表",
+      "endpoint": "/open-api/openapi-business-backend/stock-goods-list",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        3,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "SHEIN自营",
+        "半托管",
+        "POP"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 2,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001537",
+      "title": "手工下备货单",
+      "endpoint": "/open-api/idms/create-order",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        3,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "SHEIN自营",
+        "半托管",
+        "POP"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 2
+    },
+    {
+      "docId": "3001646",
+      "title": "收货仓信息查询",
+      "endpoint": "/open-api/shipping/warehouse",
+      "method": "GET",
+      "modes": [
+        1,
+        2,
+        3,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "SHEIN自营",
+        "半托管",
+        "POP"
+      ],
+      "qps": "20",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001647",
+      "title": "货代列表+渠道查询",
+      "endpoint": "/open-api/pfmp/shipping/thirdPartyAndChannelList",
+      "method": "POST",
+      "modes": [
+        2,
+        3,
+        8
+      ],
+      "modeNames": [
+        "全托管",
+        "SHEIN自营",
+        "POP"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 3,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001650",
+      "title": "修改和取消发货单订单信息",
+      "endpoint": "/open-api/shipping/modify-delivery-order-info",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        3,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "SHEIN自营",
+        "半托管",
+        "POP"
+      ],
+      "qps": "100",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 5,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001651",
+      "title": "订单接口-获取采购单信息",
+      "endpoint": "/open-api/order/purchase-order-infos",
+      "method": "GET",
+      "modes": [
+        1,
+        2,
+        3,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "SHEIN自营",
+        "半托管",
+        "POP"
+      ],
+      "qps": "50",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001653",
+      "title": "商品打印条码",
+      "endpoint": "/open-api/goods/print-barcode",
+      "method": "POST",
+      "modes": [
+        2,
+        3,
+        8
+      ],
+      "modeNames": [
+        "全托管",
+        "SHEIN自营",
+        "POP"
+      ],
+      "qps": "15",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 3,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001654",
+      "title": "发货基本信息查询接口",
+      "endpoint": "/open-api/shipping/basic",
+      "method": "GET",
+      "modes": [
+        1,
+        2,
+        3,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "SHEIN自营",
+        "半托管",
+        "POP"
+      ],
+      "qps": "50",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001659",
+      "title": "订单打印箱唛或包裹【旧接口】【逐步废弃】",
+      "endpoint": "/open-api/order/print-package",
+      "method": "POST",
+      "modes": [
+        2,
+        3,
+        8
+      ],
+      "modeNames": [
+        "全托管",
+        "SHEIN自营",
+        "POP"
+      ],
+      "qps": "30",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001660",
+      "title": "订单接口-查询SHEIN仓库的收件信息（即将废弃，建议使用",
+      "endpoint": "/open-api/order/storage-receiver-info",
+      "method": "GET",
+      "modes": [
+        2,
+        3,
+        8
+      ],
+      "modeNames": [
+        "全托管",
+        "SHEIN自营",
+        "POP"
+      ],
+      "qps": "50",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001679",
+      "title": "国内发货",
+      "endpoint": "/open-api/shipping/orderToShipping",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        3,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "SHEIN自营",
+        "半托管",
+        "POP"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 16,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001754",
+      "title": "打印物流面单",
+      "endpoint": "/open-api/pfmp/print-purchase-logisticsLabel",
+      "method": "POST",
+      "modes": [
+        2,
+        3,
+        8
+      ],
+      "modeNames": [
+        "全托管",
+        "SHEIN自营",
+        "POP"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001756",
+      "title": "查询发货单列表",
+      "endpoint": "/open-api/shipping/delivery",
+      "method": "GET",
+      "modes": [
+        1,
+        2,
+        3,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "SHEIN自营",
+        "半托管",
+        "POP"
+      ],
+      "qps": "100",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001813",
+      "title": "JIT母单及子单对应关系查询接口",
+      "endpoint": "/open-api/order/get-mothe-child-orders",
+      "method": "GET",
+      "modes": [
+        2,
+        3,
+        8
+      ],
+      "modeNames": [
+        "全托管",
+        "SHEIN自营",
+        "POP"
+      ],
+      "qps": "40",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001847",
+      "title": "查询智能拆包结果接口",
+      "endpoint": "/open-api/purchase/intelligent-packing-result",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "30",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 2
+    },
+    {
+      "docId": "3001771",
+      "title": "查询商家可选择的处理方式",
+      "endpoint": "/open-api/purchase/return-disposals",
+      "method": "GET",
+      "modes": [
+        2
+      ],
+      "modeNames": [
+        "全托管"
+      ],
+      "qps": "50",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 0,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001774",
+      "title": "查询退货方式",
+      "endpoint": "/open-api/purchase/return-pickup-methods",
+      "method": "POST",
+      "modes": [
+        2
+      ],
+      "modeNames": [
+        "全托管"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001779",
+      "title": "查询退货与报废单包裹明细",
+      "endpoint": "/open-api/purchase/return-package-detail",
+      "method": "POST",
+      "modes": [
+        2
+      ],
+      "modeNames": [
+        "全托管"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 3,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001780",
+      "title": "查询退货与报废单商品明细",
+      "endpoint": "/open-api/purchase/return-product-detail",
+      "method": "POST",
+      "modes": [
+        2
+      ],
+      "modeNames": [
+        "全托管"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 3,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001781",
+      "title": "修改退货单的退货方式",
+      "endpoint": "/open-api/purchase/update-pickup-methods",
+      "method": "POST",
+      "modes": [
+        2
+      ],
+      "modeNames": [
+        "全托管"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 5,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001796",
+      "title": "查询退货可选择的物流",
+      "endpoint": "/open-api/purchase/return-carriers",
+      "method": "POST",
+      "modes": [
+        2
+      ],
+      "modeNames": [
+        "全托管"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 3,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001798",
+      "title": "查询退货申请单商品明细",
+      "endpoint": "/open-api/purchase/return-application-detail",
+      "method": "POST",
+      "modes": [
+        2
+      ],
+      "modeNames": [
+        "全托管"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 8,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001802",
+      "title": "查询退货申请单列表",
+      "endpoint": "/open-api/purchase/return-application-list",
+      "method": "POST",
+      "modes": [
+        2
+      ],
+      "modeNames": [
+        "全托管"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 8,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001803",
+      "title": "查询商家退货地址",
+      "endpoint": "/open-api/purchase/query-return-address",
+      "method": "POST",
+      "modes": [
+        2
+      ],
+      "modeNames": [
+        "全托管"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 7,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001804",
+      "title": "确认退货申请单",
+      "endpoint": "/open-api/purchase/confirm-return-application",
+      "method": "POST",
+      "modes": [
+        2
+      ],
+      "modeNames": [
+        "全托管"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 7,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001805",
+      "title": "查询商品可退库存数",
+      "endpoint": "/open-api/purchase/returnable-inventory",
+      "method": "POST",
+      "modes": [
+        2
+      ],
+      "modeNames": [
+        "全托管"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 5,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001806",
+      "title": "创建退货申请单",
+      "endpoint": "/open-api/purchase/create-return-application",
+      "method": "POST",
+      "modes": [
+        2
+      ],
+      "modeNames": [
+        "全托管"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 4,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001826",
+      "title": "查询退货与报废单列表",
+      "endpoint": "/open-api/purchase/return-list",
+      "method": "POST",
+      "modes": [
+        2
+      ],
+      "modeNames": [
+        "全托管"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 8,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001144",
+      "title": "查询公告列表",
+      "endpoint": "/open-api/ssls/announcement/get-anno-list",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 2,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001145",
+      "title": "获取公告详情",
+      "endpoint": "/open-api/ssls/announcement/get-anno-detail",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001499",
+      "title": "查询店铺信息",
+      "endpoint": "/open-api/openapi-business-backend/query-store-info",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001665",
+      "title": "查询加车结构信息",
+      "endpoint": "/open-api/ccst/v1/custom-info/queryAddCartInfo",
+      "method": "POST",
+      "modes": [
+        2,
+        5
+      ],
+      "modeNames": [
+        "全托管",
+        "半托管"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001668",
+      "title": "获取定制数据 V1",
+      "endpoint": "/open-api/ccst/v1/custom-infos",
+      "method": "GET",
+      "modes": [
+        2,
+        5
+      ],
+      "modeNames": [
+        "全托管",
+        "半托管"
+      ],
+      "qps": "50",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001670",
+      "title": "获取模版数据V1",
+      "endpoint": "/open-api/ccst/v1/custom-info/templates",
+      "method": "GET",
+      "modes": [
+        2,
+        5
+      ],
+      "modeNames": [
+        "全托管",
+        "半托管"
+      ],
+      "qps": "50",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001671",
+      "title": "查询任务结果V1",
+      "endpoint": "/open-api/ccst/v1/composite/queryTask",
+      "method": "GET",
+      "modes": [
+        2,
+        5
+      ],
+      "modeNames": [
+        "全托管",
+        "半托管"
+      ],
+      "qps": "50",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001672",
+      "title": "创建⽣产模板任务V1",
+      "endpoint": "/open-api/ccst/v1/composite/task",
+      "method": "POST",
+      "modes": [
+        2,
+        5
+      ],
+      "modeNames": [
+        "全托管",
+        "半托管"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 3,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001172",
+      "title": "绑定SKC和代理公司",
+      "endpoint": "/open-api/goods-compliance/save-skc-agency",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 3,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001176",
+      "title": "上传实拍图图片",
+      "endpoint": "/open-api/goods-compliance/upload-skc-label-picture",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001373",
+      "title": "查询SKC可用的标签模板",
+      "endpoint": "/open-api/goods-compliance/get-label-template",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001385",
+      "title": "打印合规标签",
+      "endpoint": "/open-api/goods-compliance/label-print",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        3,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "SHEIN自营",
+        "半托管",
+        "POP"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001394",
+      "title": "查询SKC的实拍图要求",
+      "endpoint": "/open-api/goods-compliance/skc-label-list",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 6,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001399",
+      "title": "绑定SKC和实拍图",
+      "endpoint": "/open-api/goods-compliance/skc-save-label",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 4,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001848",
+      "title": "查询代理公司列表",
+      "endpoint": "/open-api/goods-compliance/agency-list",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 4,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001849",
+      "title": "查询SKC的合规信息要求",
+      "endpoint": "/open-api/goods-compliance-requirements/list",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 5,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001850",
+      "title": "查询资质证书列表",
+      "endpoint": "/open-api/goods-certificates/search",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 6,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001852",
+      "title": "上传证书文件",
+      "endpoint": "/open-api/goods-certificate-files/upload",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001853",
+      "title": "创建/编辑资质证书",
+      "endpoint": "/open-api/goods-certificates/save",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 5,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001854",
+      "title": "SKC绑定资质证书",
+      "endpoint": "/open-api/goods-certificates/bind",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 2,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001855",
+      "title": "查询SKC的代理公司绑定要求",
+      "endpoint": "/open-api/goods-compliance/skc-agency-detail",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 6,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001856",
+      "title": "查询SKC的警告语绑定状态",
+      "endpoint": "/open-api/goods-compliance/query-skc-warning-status",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 5,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001857",
+      "title": "查询警告语证书的填写规则",
+      "endpoint": "/open-api/goods-compliance/query-warning-certificate-rules",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "40",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 0,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001858",
+      "title": "更新SKC的警告语",
+      "endpoint": "/open-api/goods-compliance/update-skc-warning-certificate",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 3,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001877",
+      "title": "查询资质证书填写规则",
+      "endpoint": "/open-api/goods-certificate-schemas/detail",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 2,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001902",
+      "title": "获取全量耗材类型和耗材材质信息-V2",
+      "endpoint": "/open-api/goods-quality/environmental-label-rule/material-quality-tree-v2",
+      "method": "GET",
+      "modes": [
+        1,
+        2,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管"
+      ],
+      "qps": "40",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001883",
+      "title": "更新商品售价",
+      "endpoint": "/open-api/openapi-business-backend/product/price/save",
+      "method": "POST",
+      "modes": [
+        1
+      ],
+      "modeNames": [
+        "自运营"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001884",
+      "title": "更新供货价",
+      "endpoint": "/open-api/goods/update-cost",
+      "method": "POST",
+      "modes": [
+        2,
+        5
+      ],
+      "modeNames": [
+        "全托管",
+        "半托管"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 2,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001885",
+      "title": "获取涨价原因枚举值",
+      "endpoint": "/open-api/goods/query-change-price-reason",
+      "method": "POST",
+      "modes": [
+        2,
+        5
+      ],
+      "modeNames": [
+        "全托管",
+        "半托管"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001886",
+      "title": "价格证明材料上传",
+      "endpoint": "/open-api/goods/discuss/upload-discuss-file",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管"
+      ],
+      "qps": "10",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001890",
+      "title": "查询建议零售价审核记录",
+      "endpoint": "/open-api/goods-recommend-retail-price-audit/search",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 5,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001891",
+      "title": "获取议价单列表",
+      "endpoint": "/open-api/goods/discuss/query-discuss-list",
+      "method": "POST",
+      "modes": [
+        2,
+        5
+      ],
+      "modeNames": [
+        "全托管",
+        "半托管"
+      ],
+      "qps": "10",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 3,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001892",
+      "title": "处理议价单",
+      "endpoint": "/open-api/goods/discuss/process-discuss",
+      "method": "POST",
+      "modes": [
+        2,
+        5
+      ],
+      "modeNames": [
+        "全托管",
+        "半托管"
+      ],
+      "qps": "10",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 2,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001893",
+      "title": "查询建议零售价列表",
+      "endpoint": "/open-api/goods-recommend-retail-price/search",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001894",
+      "title": "获取SKU建议零售价规则",
+      "endpoint": "/open-api/goods/query-recommend-retail-price-rule",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001895",
+      "title": "提交建议零售价",
+      "endpoint": "/open-api/goods-recommend-retail-price/batch-save",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001269",
+      "title": "请求订单列表",
+      "endpoint": "/open-api/order/order-list",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "100",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 9,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001274",
+      "title": "批量上传运单号",
+      "endpoint": "/open-api/order/import-batch-multiple-express",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "100",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 2,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001279",
+      "title": "Cancel splitting order packages",
+      "endpoint": "/open-api/order/unpacking-group-remove",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001280",
+      "title": "Confirm splitting order packages",
+      "endpoint": "/open-api/order/unpacking-group-confirm",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001415",
+      "title": "确认无货接口",
+      "endpoint": "/open-api/order/confirm-no-stock",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 3,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001466",
+      "title": "导出地址接口",
+      "endpoint": "/open-api/order/export-address",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "300",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 2,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001527",
+      "title": "回传发票信息",
+      "endpoint": "/open-api/order/sync-invoice-info",
+      "method": "POST",
+      "modes": [
+        1
+      ],
+      "modeNames": [
+        "自运营"
+      ],
+      "qps": "100",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001598",
+      "title": "order ship channel query",
+      "endpoint": "/open-api/order/express-channel",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001600",
+      "title": "在线下单",
+      "endpoint": "/open-api/gsp/place-express-order",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "80",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 3,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001602",
+      "title": "切换导出地址发货",
+      "endpoint": "/open-api/gsp/switch-self-shipping",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "80",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001603",
+      "title": "打印面单接口",
+      "endpoint": "/open-api/order/print-express-info",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 3,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001655",
+      "title": "查询订单可用物流信息",
+      "endpoint": "/open-api/gsp/order-mapping-channels",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 5,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001785",
+      "title": "请求订单详情",
+      "endpoint": "/open-api/order/order-detail",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "300",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001786",
+      "title": "查询仓库地址",
+      "endpoint": "/open-api/gsp/warehouse-address",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "80",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001814",
+      "title": "客单物流轨迹查询",
+      "endpoint": "/open-api/gsp/logistics-track",
+      "method": "GET",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "80",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001815",
+      "title": "查询订单可用发货仓库",
+      "endpoint": "/open-api/gsp/available-shipping-warehouse",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001880",
+      "title": "查询下单结果",
+      "endpoint": "/open-api/gsp/check-express-order",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "80",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 2,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001304",
+      "title": "采购商库存更新(新)",
+      "endpoint": "/open-api/goods/stock-update",
+      "method": "POST",
+      "modes": [
+        2,
+        3,
+        8
+      ],
+      "modeNames": [
+        "全托管",
+        "SHEIN自营",
+        "POP"
+      ],
+      "qps": "100",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001305",
+      "title": "根据SKU查询销量",
+      "endpoint": "/open-api/goods/query-sku-sales",
+      "method": "POST",
+      "modes": [
+        2,
+        3,
+        5,
+        8
+      ],
+      "modeNames": [
+        "全托管",
+        "SHEIN自营",
+        "半托管",
+        "POP"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001691",
+      "title": "商家仓库列表查询",
+      "endpoint": "/open-api/msc/warehouse/list",
+      "method": "GET",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "50",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001692",
+      "title": "修改库存接口",
+      "endpoint": "/open-api/gsp/goods/change-inventory",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001695",
+      "title": "商家仓/SFS仓库存查询",
+      "endpoint": "/open-api/stock/stock-query",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        3,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "SHEIN自营",
+        "半托管",
+        "POP"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 5,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001738",
+      "title": "更新商家库存接口v2",
+      "endpoint": "/open-api/stock/change-inventory/v2",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "50",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001520",
+      "title": "用户授权-根据临时token获取api key和secret key",
+      "endpoint": "/open-api/auth/get-by-token",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        3,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "SHEIN自营",
+        "半托管",
+        "POP"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3000489",
+      "title": "供应商库存-出库同步接口",
+      "endpoint": "/open-api/material/out-inventory",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 2,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3000490",
+      "title": "供应商订单-发货信息",
+      "endpoint": "/open-api/material/sales-order-deliver-info",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 6,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3000491",
+      "title": "供应商库存-库存同步接口",
+      "endpoint": "/open-api/material/sync-inventory",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 13,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3000492",
+      "title": "供应商质检-验布报告",
+      "endpoint": "/open-api/material/receive-cloth-report",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 15,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3000493",
+      "title": "供应商库存-入库同步接口",
+      "endpoint": "/open-api/material/in-inventory",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 13,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001378",
+      "title": "发起快速加供任务",
+      "endpoint": "/open-api/material/mesCreateAddSupp",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 9,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001865",
+      "title": "查询任务节点配置",
+      "endpoint": "/open-api/sims/srp/progress-node-query",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 0,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001866",
+      "title": "查询任务进度交期配置",
+      "endpoint": "/open-api/sims/srp/timeline-query",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 0,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001867",
+      "title": "查询作业流程配置",
+      "endpoint": "/open-api/sims/srp/procedure-query",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 0,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001868",
+      "title": "分页查询排产计划",
+      "endpoint": "/open-api/sims/srp/production-plan-query",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 20,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001869",
+      "title": "分页查询生产任务",
+      "endpoint": "/open-api/sims/srp/task-query",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 22,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001870",
+      "title": "根据排单计划批量创建成品生产任务",
+      "endpoint": "/open-api/sims/srp/tasks-create-by-production-nos",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001871",
+      "title": "根据排单计划批量创建半成品生产任务",
+      "endpoint": "/open-api/sims/srp/sfp-tasks-create-by-production-nos",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001872",
+      "title": "根据商品信息批量创建成品排单计划和生产任务",
+      "endpoint": "/open-api/sims/srp/tasks-create-by-products",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001873",
+      "title": "根据商品信息批量创建半成品排单计划和生产任务",
+      "endpoint": "/open-api/sims/srp/sfp-tasks-create-by-sfps",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001874",
+      "title": "更新生产任务接口",
+      "endpoint": "/open-api/sims/srp/task-update",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 5,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001262",
+      "title": "认证仓调用-上传物流运单接口",
+      "endpoint": "/open-api/order/openapi/auth/order/express-upload",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 3,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001263",
+      "title": "认证仓调用-回调出库单创建结果接口",
+      "endpoint": "/open-api/order/openapi/auth/order/outbound-result",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 8,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001264",
+      "title": "认证仓调用-作废出库单接口",
+      "endpoint": "/open-api/order/openapi/auth/order/outbound-cancel",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 5,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001265",
+      "title": "认证仓调用-接收认证仓服务商仓库渠道变更接口",
+      "endpoint": "/open-api/lsps-java/auth/entity-change",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 5,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001085",
+      "title": "商品详情查询（新）",
+      "endpoint": "/open-api/openapi-business-backend/product/full-detail",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "60",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 2,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001239",
+      "title": "商品列表接口",
+      "endpoint": "/open-api/openapi-business-backend/product/query",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "100",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 6,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001249",
+      "title": "店铺查询站点列表",
+      "endpoint": "/open-api/goods/query-site-list",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "40",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001253",
+      "title": "商品上下架",
+      "endpoint": "/open-api/goods/modify-skc-shelf",
+      "method": "POST",
+      "modes": [
+        1,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管",
+        "POP"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001254",
+      "title": "查找站点+语种+币种接口",
+      "endpoint": "/open-api/openapi-business-backend/site/query",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 2,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001359",
+      "title": "本地图片上传",
+      "endpoint": "/open-api/goods/upload-pic",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 2,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001360",
+      "title": "图片链接转换",
+      "endpoint": "/open-api/goods/transform-pic",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管"
+      ],
+      "qps": "60",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 2,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001363",
+      "title": "图片或文本识别推荐分类",
+      "endpoint": "/open-api/goods/image-category-suggestion",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 2,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001368",
+      "title": "查询商品审核状态",
+      "endpoint": "/open-api/goods/query-document-state",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "70",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001369",
+      "title": "查询是否支持自定义属性值",
+      "endpoint": "/open-api/goods/get-custom-attribute-permission-config",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        3,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "SHEIN自营",
+        "半托管"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001380",
+      "title": "确认商品是否可编辑",
+      "endpoint": "/open-api/goods/product/check-edit-permission",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001437",
+      "title": "查询商家sku是否已存在",
+      "endpoint": "/open-api/goods/product/check-supplierSku-repeated",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管"
+      ],
+      "qps": "60",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001483",
+      "title": "添加自定义属性值",
+      "endpoint": "/open-api/goods/add-custom-attribute-value",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 4,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001485",
+      "title": "商品接口-根据条码批量获取SKC与尺码",
+      "endpoint": "/open-api/goods/batch-skc-size",
+      "method": "POST",
+      "modes": [
+        2,
+        3
+      ],
+      "modeNames": [
+        "全托管",
+        "SHEIN自营"
+      ],
+      "qps": "60",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001486",
+      "title": "商品接口-全量查询SKC/SKU/设计款号关系列表",
+      "endpoint": "/open-api/goods/number-list",
+      "method": "GET",
+      "modes": [
+        2,
+        3
+      ],
+      "modeNames": [
+        "全托管",
+        "SHEIN自营"
+      ],
+      "qps": "120",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001544",
+      "title": "获取店铺上架额度",
+      "endpoint": "/open-api/goods/query-shelf-quota",
+      "method": "POST",
+      "modes": [
+        1,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管",
+        "POP"
+      ],
+      "qps": "40",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 0,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001589",
+      "title": "确认店铺是否可发品",
+      "endpoint": "/open-api/goods/product/check-publish-permission",
+      "method": "GET",
+      "modes": [
+        1,
+        2,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管"
+      ],
+      "qps": "40",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001594",
+      "title": "店铺查商品末级分类",
+      "endpoint": "/open-api/goods/query-category-tree",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "40",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001634",
+      "title": "商品综合查询",
+      "endpoint": "/open-api/goods/searchProduct",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 14,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001680",
+      "title": "查询关联属性填写规则",
+      "endpoint": "/open-api/goods/get-associated-attribute-rules",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管"
+      ],
+      "qps": "60",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001810",
+      "title": "商品部分编辑（门户可见版，字段少于内部接口）",
+      "endpoint": "/open-api/goods/product/partialEdit",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 13,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001812",
+      "title": "商品发布/编辑",
+      "endpoint": "/open-api/goods/product/publishOrEdit",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 19,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001859",
+      "title": "获取证书要求及证书信息",
+      "endpoint": "/open-api/goods/get-certificate-rule",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 6,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001860",
+      "title": "查询证书所需上传资料（新）",
+      "endpoint": "/open-api/goods/certificate/get-all-certificate-type-list-v2",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "20",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001861",
+      "title": "上传证书文件",
+      "endpoint": "/open-api/goods/upload-certificate-file",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001862",
+      "title": "新增或修改SKC维度证书池",
+      "endpoint": "/open-api/goods/save-or-update-certificate-pool",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 6,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001863",
+      "title": "新增或修改供应商维度证书",
+      "endpoint": "/open-api/goods/save-or-update-supplier-certificate",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 4,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001864",
+      "title": "SKC绑定证书池",
+      "endpoint": "/open-api/goods/save-certificate-pool-skc-bind",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001896",
+      "title": "商品撤回",
+      "endpoint": "/open-api/goods/revoke-product",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管"
+      ],
+      "qps": "20",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001897",
+      "title": "spu查商品详情(新)",
+      "endpoint": "/open-api/goods/spu-info",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5,
+        8
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管",
+        "POP"
+      ],
+      "qps": "100",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 2,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001898",
+      "title": "商品发布字段规范",
+      "endpoint": "/open-api/goods/query-publish-fill-in-standard",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 2,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001899",
+      "title": "店铺查可选属性",
+      "endpoint": "/open-api/goods/query-attribute-template",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管"
+      ],
+      "qps": "80",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001900",
+      "title": "店铺查品牌列表",
+      "endpoint": "/open-api/goods/query-brand-list",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管"
+      ],
+      "qps": "40",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001901",
+      "title": "获取店铺可用IP列表",
+      "endpoint": "/open-api/goods/query-ip-list",
+      "method": "POST",
+      "modes": [
+        1,
+        2,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "全托管",
+        "半托管"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 2,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001281",
+      "title": "退货单-查询退货单列表",
+      "endpoint": "/open-api/return-order/list",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "100",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 6,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001282",
+      "title": "退货单-退货单详情查询",
+      "endpoint": "/open-api/return-order/details",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001283",
+      "title": "退货单-退货单签收",
+      "endpoint": "/open-api/return-order/sign-return-order",
+      "method": "POST",
+      "modes": [
+        1,
+        5
+      ],
+      "modeNames": [
+        "自运营",
+        "半托管"
+      ],
+      "qps": "40",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 2,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3000496",
+      "title": "物流商网点回调接口",
+      "endpoint": "/open-api/cargo/express-website-message",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 8,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3000498",
+      "title": "顺丰运单未揽收包裹明细回调接口",
+      "endpoint": "/open-api/cargo/qc-outside-cancel-sf-express",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 2,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3000499",
+      "title": "物流商接口-物流商运单回调",
+      "endpoint": "/open-api/cargo/express-notify",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 5,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3000501",
+      "title": "物流商推送轨迹数据-统一接口",
+      "endpoint": "/open-api/cargo/track-notify",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3000502",
+      "title": "物流商推送轨迹数据-trackingmore",
+      "endpoint": "/open-api/cargo/track-notify-trackingmore",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": true,
+      "requestFieldCount": 4,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3000503",
+      "title": "上传结算异常举证",
+      "endpoint": "/open-api/cargo/quote-return",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 4,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3000504",
+      "title": "揽收超时/取消运单原因回传",
+      "endpoint": "/open-api/cargo/timeout-cancel-reason-return",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 0,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3000505",
+      "title": "【新】物流轨迹回调",
+      "endpoint": "/open-api/cargo/logistics-trajectory-callback",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3000928",
+      "title": "【新】物流重量回调",
+      "endpoint": "/open-api/cargo/weight-callback",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001045",
+      "title": "车牌信息回调",
+      "endpoint": "/open-api/cargo/platenum-callback",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 7,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001498",
+      "title": "物流接口-获取快递公司信息",
+      "endpoint": "/open-api/order/express-infos",
+      "method": "GET",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001226",
+      "title": "查询Feed文件",
+      "endpoint": "/open-api/sem/feed/getFeedDocument",
+      "method": "GET",
+      "modes": [
+        1
+      ],
+      "modeNames": [
+        "自运营"
+      ],
+      "qps": "10",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001227",
+      "title": "上传Feed文件",
+      "endpoint": "/open-api/sem/feed/uploadDocumentContent",
+      "method": "POST",
+      "modes": [
+        1
+      ],
+      "modeNames": [
+        "自运营"
+      ],
+      "qps": "10",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001229",
+      "title": "创建Feed文件",
+      "endpoint": "/open-api/sem/feed/createFeedDocument",
+      "method": "POST",
+      "modes": [
+        1
+      ],
+      "modeNames": [
+        "自运营"
+      ],
+      "qps": "10",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001230",
+      "title": "创建Feed任务",
+      "endpoint": "/open-api/sem/feed/createFeed",
+      "method": "POST",
+      "modes": [
+        1
+      ],
+      "modeNames": [
+        "自运营"
+      ],
+      "qps": "10",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 3,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001233",
+      "title": "取消Feed任务",
+      "endpoint": "/open-api/sem/feed/cancelFeed",
+      "method": "POST",
+      "modes": [
+        1
+      ],
+      "modeNames": [
+        "自运营"
+      ],
+      "qps": "10",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001234",
+      "title": "查看Feed任务",
+      "endpoint": "/open-api/sem/feed/getFeed",
+      "method": "GET",
+      "modes": [
+        1
+      ],
+      "modeNames": [
+        "自运营"
+      ],
+      "qps": "10",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001417",
+      "title": "微信小程序登陆",
+      "endpoint": "/open-api/mdp/wx-mini-program/login",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001418",
+      "title": "提供更新MDP转印任务结束",
+      "endpoint": "/open-api/mdp/product/transfer-print-task/finish",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 5,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001419",
+      "title": "提供更新MDP转印任务开始",
+      "endpoint": "/open-api/mdp/product/transfer-print-task/begin",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 3,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001420",
+      "title": "提供扫码排产创建波次",
+      "endpoint": "/open-api/mdp/product/schedule/allocation-confirm",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 3,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001421",
+      "title": "提供更新MDP打印任务开始",
+      "endpoint": "/open-api/mdp/product/print-task/begin",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 6,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001422",
+      "title": "提供更新MDP打印任务完成",
+      "endpoint": "/open-api/mdp/product/print-task/finish",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 8,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001424",
+      "title": "重录订单米数和裁片",
+      "endpoint": "/open-api/mdp/order/goods/reenter-order-info",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 6,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001425",
+      "title": "根据名称获取可用的印花厂",
+      "endpoint": "/open-api/mdp/order/customer-requirement/get-factory-list",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001426",
+      "title": "根据印花厂code获取客户信息",
+      "endpoint": "/open-api/mdp/order/customer-requirement/get-factory-customer-list",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001427",
+      "title": "创建待补全审核的客户需求",
+      "endpoint": "/open-api/mdp/order/customer-requirement/create-customer-requirement",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 6,
+      "responseFieldCount": 2
+    },
+    {
+      "docId": "3001429",
+      "title": "获取大货订单信息",
+      "endpoint": "/open-api/mdp/get-order-info-list",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 15,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001430",
+      "title": "挂卡聚合操作（上架or出库or移位）",
+      "endpoint": "/open-api/mdp/hangcard/operate",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 5,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001431",
+      "title": "新增或更新挂卡信息",
+      "endpoint": "/open-api/mdp/hang-card/add-or-update",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 2,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001432",
+      "title": "获取打印设备列表 ",
+      "endpoint": "/open-api/mdp/basic-configure/production-equipment/get-print-equipmentList",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 0,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001433",
+      "title": "添加或取消设备异常",
+      "endpoint": "/open-api/mdp/basic-configure/production-equipment/add-or-cancel-equipment-exception",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 3,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001434",
+      "title": "接收外部ERP完结订单",
+      "endpoint": "/open-api/mdp/order/goods/external/receive-external-erp-complete-order",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 2,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001467",
+      "title": "同步订单信息（状态，发货）",
+      "endpoint": "/open-api/mdp/order/goods/sync-order-info",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 6,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3001469",
+      "title": "提供外部ERP版料任务查询接口",
+      "endpoint": "/open-api/mdp/process/get-process-develop-info-list",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 6,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001470",
+      "title": "外部查询操作日志（供小程序调用）",
+      "endpoint": "/open-api/mdp/order/external/get-order-log-list",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001474",
+      "title": "提供外部ERP花型开发分页查询接口",
+      "endpoint": "/open-api/mdp/flower/get-pattern-dev-page-list",
+      "method": "POST",
+      "modes": [],
+      "modeNames": [],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 6,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3000508",
+      "title": "MES-FAC-003 领料信息接口",
+      "endpoint": "/open-api/mes/get-material-info",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 5,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3000509",
+      "title": "MES-FAC-004 二次工艺接口",
+      "endpoint": "/open-api/mes/get-second-precess",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 5,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3000510",
+      "title": "MES-FAC-005 大货bom接口",
+      "endpoint": "/open-api/mes/get-big-goods-bom",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3000511",
+      "title": "扎信息查询接口",
+      "endpoint": "/open-api/mes/bundle-info",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3000512",
+      "title": "查询物料异常详细接口",
+      "endpoint": "/open-api/mes/material-anomalous/list",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 3,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3000513",
+      "title": "查询采购单详细接口",
+      "endpoint": "/open-api/mes/purchase-detail-info-list",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3000514",
+      "title": "按时间查询生产制单号",
+      "endpoint": "/open-api/mes/query-produce-order-ids",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 2,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3000515",
+      "title": "查询发货单信息",
+      "endpoint": "/open-api/mes/deliver-order/list",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 5,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3000517",
+      "title": "裁床完成",
+      "endpoint": "/open-api/mes/end-cut-bed",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 3,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3000518",
+      "title": "车缝完工",
+      "endpoint": "/open-api/mes/sew-end",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 2,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3000519",
+      "title": "更新供应商尾货",
+      "endpoint": "/open-api/mes/order-inventory-surplus/update",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 2,
+      "responseFieldCount": 3
+    },
+    {
+      "docId": "3000520",
+      "title": "MES-FAC-001 订单数据获取接口",
+      "endpoint": "/open-api/mes/get-order-info",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3000521",
+      "title": "查询生产订单",
+      "endpoint": "/open-api/mes/get-produce-order-info",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 1,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3000522",
+      "title": "查询供应商尾货",
+      "endpoint": "/open-api/mes/order-inventory-surplus/list",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 3,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001816",
+      "title": "入库单列表查询",
+      "endpoint": "/open-api/sims/inbound-order-query",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 5,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001817",
+      "title": "出库订单列表查询",
+      "endpoint": "/open-api/sims/outbound-order-query",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 5,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001818",
+      "title": "库位列表数据",
+      "endpoint": "/open-api/sims/location-query",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 3,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001819",
+      "title": "库存结余列表查询",
+      "endpoint": "/open-api/sims/stock-query",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001820",
+      "title": "自营供应商库存更新",
+      "endpoint": "/open-api/sims/stock-update",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 1
+    },
+    {
+      "docId": "3001821",
+      "title": "自营供应商入库单确认",
+      "endpoint": "/open-api/sims/inbound-order-confirm",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 3,
+      "responseFieldCount": 1
+    },
+    {
+      "docId": "3001822",
+      "title": "MES-FAC-002 采购信息接口",
+      "endpoint": "/open-api/mes/get-purchase-info",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 5,
+      "responseFieldCount": 5
+    },
+    {
+      "docId": "3001824",
+      "title": "分页查询商家SKC列表",
+      "endpoint": "/open-api/spss/skc-page-query",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 4,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001876",
+      "title": "批量查询SKC信息",
+      "endpoint": "/open-api/spss/skc-info-query",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": true,
+      "hasResponseBody": true,
+      "hasRequestExample": false,
+      "hasResponseExample": false,
+      "requestFieldCount": 1,
+      "responseFieldCount": 4
+    },
+    {
+      "docId": "3001882",
+      "title": "根据订单号查询订单信息",
+      "endpoint": "/open-api/mes/query-produce-order-info-by-id",
+      "method": "POST",
+      "modes": [
+        3
+      ],
+      "modeNames": [
+        "SHEIN自营"
+      ],
+      "qps": "",
+      "hasRequestBody": false,
+      "hasResponseBody": true,
+      "hasRequestExample": true,
+      "hasResponseExample": true,
+      "requestFieldCount": 0,
+      "responseFieldCount": 5
+    }
+  ],
+  "errors": []
+}

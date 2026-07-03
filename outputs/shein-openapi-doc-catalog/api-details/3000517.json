@@ -1,0 +1,128 @@
+{
+  "docId": "3000517",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "裁床完成",
+    "userDocName": "裁床完成",
+    "endpoint": "/open-api/mes/end-cut-bed",
+    "method": "POST",
+    "docName": "post_open-api_mes_end-cut-bed",
+    "version": 2,
+    "updateTime": "2024-10-15 11:04:12",
+    "changeContent": "新增traceId",
+    "qpsContent": "",
+    "modes": [
+      3
+    ],
+    "modeNames": [
+      "SHEIN自营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "produceOrderId",
+        "type": "integer",
+        "required": false,
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "operatorNames",
+        "type": "string",
+        "required": false,
+        "multiple": 1
+      },
+      {
+        "name": "bundleDetailList",
+        "type": "object",
+        "required": true,
+        "multiple": 1,
+        "children": [
+          {
+            "name": "size",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          },
+          {
+            "name": "number",
+            "type": "integer",
+            "required": false,
+            "example": "0",
+            "multiple": 0
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "produceOrderId",
+        "type": "integer",
+        "required": false,
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "bundleDetailList",
+        "type": "object",
+        "required": true,
+        "multiple": 1,
+        "children": [
+          {
+            "name": "bundleNum",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          },
+          {
+            "name": "size",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          },
+          {
+            "name": "number",
+            "type": "integer",
+            "required": false,
+            "example": "0",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "produceOrderId\":19399708, \"bundleDetailList\":[ { \"size\":\"S\", \"number\":20 } ], \"operatorNames\":[\"张三\",\"李四\"] }",
+  "responseExample": "code\": 0, \"info\": { \"produceOrderId\":19399708, \"bundleDetailList\":[ { \"bundleNum\":\"19399708-P1-B01\", \"size\":\"S\", \"number\":20 } ] }, \"msg\": \"success\" }",
+  "errorCode": null
+}

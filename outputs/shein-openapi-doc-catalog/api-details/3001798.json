@@ -1,0 +1,290 @@
+{
+  "docId": "3001798",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询退货申请单商品明细",
+    "userDocName": "查询退货申请单商品明细",
+    "endpoint": "/open-api/purchase/return-application-detail",
+    "method": "POST",
+    "docName": "",
+    "version": 3,
+    "updateTime": "2026-06-09 14:51:56",
+    "changeContent": "更新请求头",
+    "qpsContent": "50",
+    "modes": [
+      2
+    ],
+    "modeNames": [
+      "全托管"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "查询指定退货申请单的商品明细",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "bblLang",
+        "type": "string",
+        "example": "random_bblLang",
+        "multiple": 0
+      },
+      {
+        "name": "page",
+        "type": "integer",
+        "description": "页码，不传默认1",
+        "example": "12",
+        "multiple": 0
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "description": "分页大小，1-100，不传默认20",
+        "example": "12",
+        "multiple": 0
+      },
+      {
+        "name": "returnPlanNo",
+        "type": "string",
+        "required": true,
+        "description": "退货申请单",
+        "example": "random_returnPlanNo",
+        "multiple": 0
+      },
+      {
+        "name": "skcNames",
+        "type": "string",
+        "description": "SKC",
+        "example": "random_skcNames",
+        "multiple": 1
+      },
+      {
+        "name": "skuCodes",
+        "type": "string",
+        "description": "平台SKU",
+        "example": "random_skuCodes",
+        "multiple": 1
+      },
+      {
+        "name": "supplierCode",
+        "type": "string",
+        "description": "货号",
+        "example": "random_supplierCode",
+        "multiple": 0
+      },
+      {
+        "name": "supplierSkus",
+        "type": "string",
+        "description": "商家SKU",
+        "example": "random_supplierSkus",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码，成功：0",
+        "example": "random_code",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": true,
+        "description": "错误描述,成功：OK",
+        "example": "random_msg",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "required": true,
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "data",
+            "type": "object",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "detailInfoList",
+                "type": "object",
+                "description": "明细",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "orderType",
+                    "type": "integer",
+                    "description": "订单类型",
+                    "example": "84",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "platformSku",
+                    "type": "string",
+                    "description": "平台SKU",
+                    "example": "random_platformSku",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "quantity",
+                    "type": "integer",
+                    "description": "申请数量",
+                    "example": "76",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "sellerOrderNo",
+                    "type": "string",
+                    "description": "采购单号",
+                    "example": "random_sellerOrderNo",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "subSuffixZh",
+                    "type": "string",
+                    "description": "商品属性集",
+                    "example": "random_subSuffixZh",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "supplierSku",
+                    "type": "string",
+                    "description": "商家SKU",
+                    "example": "random_supplierSku",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "warehouseId",
+                    "type": "integer",
+                    "description": "备货仓库ID",
+                    "example": "54",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "warehouseName",
+                    "type": "string",
+                    "description": "备货仓库名称",
+                    "example": "random_warehouseName",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "goodsThumb",
+                "type": "string",
+                "description": "商品主图",
+                "example": "random_goodsThumb",
+                "multiple": 1
+              },
+              {
+                "name": "skcCopyFlag",
+                "type": "integer",
+                "description": "是否专供SHEIN：1-是，2-否",
+                "example": "69",
+                "multiple": 0
+              },
+              {
+                "name": "skcMarkFlagName",
+                "type": "string",
+                "description": "skc退供标识",
+                "example": "random_skcMarkFlagName",
+                "multiple": 0
+              },
+              {
+                "name": "skcName",
+                "type": "string",
+                "description": "SKC",
+                "example": "random_skcName",
+                "multiple": 0
+              },
+              {
+                "name": "skcSlowMovingFlag",
+                "type": "integer",
+                "description": "是否是不动销skc：1-是，2-否",
+                "example": "33",
+                "multiple": 0
+              },
+              {
+                "name": "supplierCode",
+                "type": "string",
+                "description": "货号",
+                "example": "random_supplierCode",
+                "multiple": 0
+              },
+              {
+                "name": "totalApplyQuantity",
+                "type": "integer",
+                "description": "合计",
+                "example": "72",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "meta",
+            "type": "object",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "count",
+                "type": "integer",
+                "example": "14",
+                "multiple": 0
+              },
+              {
+                "name": "customObj",
+                "type": "object",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

@@ -1,0 +1,123 @@
+{
+  "docId": "3001537",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "手工下备货单",
+    "userDocName": "手工下备货单",
+    "endpoint": "/open-api/idms/create-order",
+    "method": "POST",
+    "docName": "post_open-api_idms_create-order",
+    "version": 5,
+    "updateTime": "2026-01-07 23:06:02",
+    "changeContent": "111",
+    "qpsContent": "50",
+    "modes": [
+      1,
+      2,
+      3,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "SHEIN自营",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "该接口用于商家创建备货单（创建的备货单需等待平台审核），适用于部分全托管、自运营及半托管模式的商家。需要注意的是，备货单是指 SHEIN 面向供应商的采购订单，并非面向消费者的客单。如果需获取消费者相关的订单信息，请使用订单列表接口：/open-api/order/order-list",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "paramList",
+        "type": "object",
+        "required": true,
+        "description": "下单参数",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "skc",
+            "type": "string",
+            "required": true,
+            "description": "shein skc 编码"
+          },
+          {
+            "name": "skuCodeList",
+            "type": "object",
+            "required": true,
+            "description": "sku下单参数",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "skuCode",
+                "type": "string",
+                "required": true,
+                "description": "shein sku 编码"
+              },
+              {
+                "name": "orderCount",
+                "type": "integer",
+                "required": true,
+                "description": "下单数量"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "成功：0"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": true,
+        "description": "成功：OK"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.cn/open-api/idms/create-order' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752156234723' \\ --data-raw '{ \"paramList\":[ {\"skc\":\"ss25042044640264012\", \"skuCodeList\":[ { \"skuCode\":\"I5cmbaujgtlf\", \"orderCount\":\"100\" } ] } ] }'",
+  "responseExample": "code\": \"04905\", \"msg\": \"ss25042044640264012商品层次非备货款，不允许下单\", \"info\": null, \"bbl\": null, \"error\": null, \"traceId\": \"b4f652db618c2cd6\" }",
+  "errorCode": null
+}

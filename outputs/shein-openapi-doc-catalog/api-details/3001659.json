@@ -1,0 +1,126 @@
+{
+  "docId": "3001659",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "订单打印箱唛或包裹【旧接口】【逐步废弃】",
+    "userDocName": "打印箱唛或包裹面单",
+    "endpoint": "/open-api/order/print-package",
+    "method": "POST",
+    "docName": "post_open-api_order_print-package",
+    "version": 12,
+    "updateTime": "2026-04-07 20:28:19",
+    "changeContent": "更新接口说明",
+    "qpsContent": "30",
+    "modes": [
+      2,
+      3,
+      8
+    ],
+    "modeNames": [
+      "全托管",
+      "SHEIN自营",
+      "POP"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "该接口已逐步废弃，推荐优先对接【发货单维度打印面单接口】",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "orderNo",
+        "type": "string",
+        "required": true,
+        "description": "发货单其中一个订单号",
+        "defaultValue": "B22388923",
+        "label": "订单号"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "0成功，1失败",
+        "label": "返回码"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": true,
+        "label": "错误信息"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "children": [
+          {
+            "name": "orderNoList",
+            "type": "string",
+            "required": true,
+            "description": "同个发货单的订单列表,如订单A,B一起发货,入参订单A查询,此字段会显示订单A,B",
+            "label": "订单号列表",
+            "multiple": 1
+          },
+          {
+            "name": "packingType",
+            "type": "string",
+            "required": true,
+            "description": "如果是包裹方式发货,pdf为包裹单. 如为箱唛发货,pdf为箱唛单",
+            "label": "发货类型,1:包裹, 2:箱唛"
+          },
+          {
+            "name": "url",
+            "type": "string",
+            "required": true,
+            "description": "面单url",
+            "label": "打印内容PDF下载链接"
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "orderNo\": \"J230517600016\" }",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"packingType\": 1, \"orderNoList\": [ \"B230309500033\", \"B230309500034\", \"B230313500015\", \"B230313500016\", \"B230313500017\", \"B230314500012\", \"B230314500013\", \"P230314500023\", \"P230314500024\", \"P230314500025\", \"B230316500030\", \"B230316500030-1\", \"P230317500004\", \"P230317500005\", \"P230317500006\", \"P230317500007\", \"P230317500008\", \"P230317500009\", \"B230317500037\", \"B230317500038\", \"B230317500039\", \"B230317500040\", \"B230317500041\", \"B230317500042\", \"P230317500010\", \"B230317500047\", \"B230317500048\", \"B230317500049\", \"B230317500052\", \"P230317500011\", \"P230317500012\", \"B230317500055\", \"P230317500013\", \"P230317500014\", \"B230317500056\", \"P230317500015\", \"B230317500057\", \"B230317500059\", \"B230317500060\", \"B230317500061\", \"B230317500062\", \"B230317500064\", \"B230317500065\", \"P230317500016\", \"P230317500017\", \"B230317500066\", \"B230317500067\", \"P230317500018\", \"P230317500019\", \"B230317500068\", \"B230317500069\", \"P230317500020\", \"P230317500021\", \"P230317500022\", \"P230317500023\", \"B230317500071\", \"B230317500072\", \"P230317500024\", \"P230317500025\", \"B230317500073\", \"P230317500026\", \"B230317500074\", \"B230317500075\", \"B230320500079\", \"P230320500002\", \"P230320500003\", \"B230320500083\",",
+  "errorCode": null
+}

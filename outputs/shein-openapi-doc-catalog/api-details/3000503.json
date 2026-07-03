@@ -1,0 +1,104 @@
+{
+  "docId": "3000503",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "上传结算异常举证",
+    "userDocName": "上传结算异常举证",
+    "endpoint": "/open-api/cargo/quote-return",
+    "method": "POST",
+    "docName": "post_open-api_cargo_quote-return",
+    "version": 4,
+    "updateTime": "2024-10-15 10:42:16",
+    "changeContent": "新增traceId",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "该接口用于物流商上传运单号异常的举证信息，举证信息不超过500字符，相关附件最多上传10个文件。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "operateType",
+        "type": "integer",
+        "required": true,
+        "description": "操作类型，枚举值：3-结算举证",
+        "multiple": 0
+      },
+      {
+        "name": "quoteAttachment",
+        "type": "string",
+        "required": false,
+        "description": "附件，支持回传多个附件链接（最多不超个10个，每个附件大小不超过10M）链接对应文件的格式限制：jpg、jpeg、png、xlsx、xls、pdf、docx、doc、zip、txt",
+        "multiple": 1
+      },
+      {
+        "name": "remark",
+        "type": "string",
+        "required": false,
+        "description": "备注，限制不超过500字符（备注和附件至少填一个）",
+        "multiple": 0
+      },
+      {
+        "name": "trackingNumbers",
+        "type": "string",
+        "required": true,
+        "description": "运单号",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

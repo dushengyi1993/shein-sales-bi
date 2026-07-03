@@ -1,0 +1,148 @@
+{
+  "docId": "3001603",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "打印面单接口",
+    "userDocName": "打印面单接口",
+    "endpoint": "/open-api/order/print-express-info",
+    "method": "POST",
+    "docName": "post_open-api_order_print-express-info",
+    "version": 14,
+    "updateTime": "2026-03-04 16:31:12",
+    "changeContent": "增加traceid",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "使用 SHEIN 合作物流履约时，开发者可以调用该接口打印面单。请注意，面单 url 的有效期为 1 小时，ERP 需要及时下载并保存该面单；同时，QPS 不要超过 20。如何判断是否可以打印面单？开发者调用订单详情接口。如果 optionalLogisticsList=1，则说明订单需使用 SHEIN 物流商履约若 orderPlaceType=1，表示订单必须使用平台指定物流，开发者在获取到订单（且无退款、换货等异常情况下）后即可调用该接口打印面单；若 optionalLogisticsList=1 且 orderPlaceType=2，则说明订单需商家指定 SHEIN 合作物流（完成在线下单），开发者即可调用该接口打印面单。需注意的是，完成在线下单不是指调用在线下单接口成功。由于 SHEIN 与合作物流采用异步下单流程，开发者需先调用查询下单结果接口，当 handleResult=2（下单成功），才可以调用该接口打印面单",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "orderNo",
+        "type": "string",
+        "description": "订单号(平台指定物流的场景下，入参订单+包裹号获取面单)",
+        "example": "nam ex culpa repudiandae rerum nam aut fuga at",
+        "multiple": 0
+      },
+      {
+        "name": "packageNo",
+        "type": "string",
+        "description": "包裹号(平台指定物流的场景下，入参订单+包裹号获取面单)",
+        "example": "hic excepturi ut voluptatibus dicta accusamus qui architecto eius odit aut porro ullam optio voluptatibus sed enim asperiores est voluptatem",
+        "multiple": 1
+      },
+      {
+        "name": "deliveryNo",
+        "type": "string",
+        "description": "运单包裹号(在线下单的场景下，入参该字段打印面单)；从请求订单详情接口获取；"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应码",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述信息",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "description": "响应数据",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "orderNo",
+            "type": "json",
+            "description": "订单号(仅平台指定渠道订单返回)",
+            "multiple": 0
+          },
+          {
+            "name": "packageNo",
+            "type": "json",
+            "description": "包裹号(仅平台指定渠道订单返回)",
+            "multiple": 0
+          },
+          {
+            "name": "filePdfUrl",
+            "type": "string",
+            "description": "面单的 URL 格式为 PDF，有效期为一小时",
+            "example": "https://ssmp-public-test-ali.oss-cn-shenzhen.aliyuncs.com/pdf2-test/unkown/2025/7/28/1753695097282-1753723897282-0de81ee5a7a7eb14c316fe909091975a.oss.pdf?AWSAccessKeyId=LTAI5tRyBdX9kWZcVCLyWMTF&Expires=1753723898&Signature=Jq31Z8lJk3NlZ90i2YNYCfgvShw%3D",
+            "multiple": 0
+          },
+          {
+            "name": "remark",
+            "type": "json",
+            "description": "备注；仅巴西或墨西哥超限拆分订单会返回",
+            "multiple": 0
+          },
+          {
+            "name": "deliveryNo",
+            "type": "string",
+            "description": "运单包裹号(在线下单的场景返回)",
+            "example": "GU25072532795729922",
+            "multiple": 0
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/order/print-express-info' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570849017' \\ --data-raw '{ \"orderNo\": \"GSONAM44T00NWYG\", \"packageNo\": [ \"GC23111521875392514\" ] }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": [ { \"orderNo\": \"GSONAM44T00NWYG\", \"packageNo\": \"GC23111521875392514\", \"filePdfUrl\": \"https://html2pdf.oss-cn-shenzhen.aliyuncs.com/pdf2-test/unkown/2023/11/15/1700037991818-1700066791818-121182f5a8ee863d126db23608788fd9.oss.pdf?AWSAccessKeyId=LTAI5tLUgHZGZqEUN2t8bPCR&Expires=1700066792&Signature=K2JWsHXH6z6msbTFvrfkcnKBN5Q%3D\" } ], \"bbl\": {} }",
+  "errorCode": null
+}

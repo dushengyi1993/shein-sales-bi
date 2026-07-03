@@ -1,0 +1,153 @@
+{
+  "docId": "3001263",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "认证仓调用-回调出库单创建结果接口",
+    "userDocName": "认证仓调用-回调出库单创建结果接口",
+    "endpoint": "/open-api/order/openapi/auth/order/outbound-result",
+    "method": "POST",
+    "docName": "post_open-api_order_openapi_auth_order_outbound-result",
+    "version": 4,
+    "updateTime": "2025-07-18 14:10:36",
+    "changeContent": "增加请求与返回示例。",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "认证仓回调出库单创建结果",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "traffic-mark",
+        "type": "string",
+        "required": true,
+        "description": "订单的流量标识",
+        "defaultValue": "订单的流量标识",
+        "label": "流量标识"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "failReason",
+        "type": "string",
+        "required": false,
+        "description": "创建失败原因",
+        "multiple": 0
+      },
+      {
+        "name": "failReasonCode",
+        "type": "string",
+        "required": false,
+        "description": "失败原因code",
+        "multiple": 0
+      },
+      {
+        "name": "sheinWarehouseSerialNo",
+        "type": "string",
+        "required": true,
+        "description": "平台批次号，长度100",
+        "multiple": 0
+      },
+      {
+        "name": "outboundOrderNo",
+        "type": "string",
+        "required": false,
+        "description": "出库订单号",
+        "multiple": 0
+      },
+      {
+        "name": "result",
+        "type": "integer",
+        "required": true,
+        "description": "出库单创建结果：1-成功，2-失败",
+        "multiple": 0
+      },
+      {
+        "name": "billno",
+        "type": "string",
+        "description": "订单号"
+      },
+      {
+        "name": "isUnpack",
+        "type": "integer",
+        "description": "是否拆包：1-是，2-否"
+      },
+      {
+        "name": "outboundOrderResults",
+        "type": "object",
+        "description": "当是否拆包=是的时候，出库结果不能为空",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "outboundOrderNo",
+            "type": "string",
+            "description": "出库订单号"
+          },
+          {
+            "name": "goodsIds",
+            "type": "long",
+            "description": "出库商品集合",
+            "multiple": 1
+          },
+          {
+            "name": "authChannelCode",
+            "type": "string",
+            "description": "认证仓物流渠道编码"
+          },
+          {
+            "name": "authWarehouseCode",
+            "type": "string",
+            "description": "认证仓物理编码"
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码，成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述，成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.cn/open-api/order/openapi/auth/order/outbound-result' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570681772' \\ --header 'uberctx-traffic-mark: iosshus' \\ --header 'x-lt-clientCode:TEST' \\ --data-raw '{ \"sheinWarehouseSerialNo\": \"PU25071111111111\", \"result\": 1, \"failReasonCode\": \"\", \"failReason\": \"\", \"outboundOrderNo\": \"DO250717093111111111\", \"billno\": \"GSO111111111\" }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { } }",
+  "errorCode": null
+}

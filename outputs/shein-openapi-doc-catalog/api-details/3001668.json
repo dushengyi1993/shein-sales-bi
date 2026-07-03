@@ -1,0 +1,190 @@
+{
+  "docId": "3001668",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "获取定制数据 V1",
+    "userDocName": "获取定制数据",
+    "endpoint": "/open-api/ccst/v1/custom-infos",
+    "method": "GET",
+    "docName": "get_open-api_ccst_v1_custom-infos",
+    "version": 12,
+    "updateTime": "2026-04-07 21:37:12",
+    "changeContent": "更新接口说明",
+    "qpsContent": "50",
+    "modes": [
+      2,
+      5
+    ],
+    "modeNames": [
+      "全托管",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "使用定制商品id（customInfoId）查询定制数据",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-language",
+        "type": "string",
+        "description": "指定出参语种，默认中文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object",
+    "children": [
+      {
+        "name": "customInfoId",
+        "type": "string",
+        "required": true,
+        "description": "用户定制信息的唯一标识符"
+      },
+      {
+        "name": "lang",
+        "type": "string",
+        "required": true,
+        "description": "语种输入，影响label字段的语种输出；枚举：英语(美国) en_US , 德语 de_DE , 法语 fr_FR , 葡萄牙语(巴西) pt_BR , 西班牙语 es_ES , 日语 ja_JP , 意大利语 it_IT , 荷兰语 nl_NL , 繁体中文 zh_TW , 简体中文 zh_CN , 希伯来语(以色列) he_IL , 俄语 ru_RU , 阿拉伯语 ar_AR , 泰语 th_TH , 印度尼西亚语 id_ID , 土耳其语 tr_TR , 越南语 vi_VI , 瑞典语 sv_SV , 波兰语 pl_PL , 葡萄牙语 pt_PT , 韩语 ko_KR , 希腊语 el_GR , 捷克语 cs_CZ , 罗马尼亚语 ro_RO , 斯洛伐克语 sk_SK , 匈牙利语 hu_HU , 保加利亚语 bg_BG"
+      }
+    ]
+  },
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应编码 成功：0"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述,成功：OK"
+      },
+      {
+        "name": "data",
+        "type": "object",
+        "children": [
+          {
+            "name": "customInfo",
+            "type": "object",
+            "description": "定制信息的具体内容",
+            "children": [
+              {
+                "name": "preview",
+                "type": "object",
+                "children": [
+                  {
+                    "name": "effects",
+                    "type": "string",
+                    "description": "预览图（产品形态与用户定制信息结合的图）",
+                    "multiple": 1
+                  },
+                  {
+                    "name": "images",
+                    "type": "string",
+                    "description": "图片类型的定制信息",
+                    "multiple": 1
+                  },
+                  {
+                    "name": "texts",
+                    "type": "string",
+                    "description": "文字类型的定制信息",
+                    "multiple": 1
+                  }
+                ]
+              },
+              {
+                "name": "stores",
+                "type": "object",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "id",
+                    "type": "string",
+                    "description": "存储项的唯一标识符"
+                  },
+                  {
+                    "name": "key",
+                    "type": "string",
+                    "description": "存储项的键"
+                  },
+                  {
+                    "name": "label",
+                    "type": "string",
+                    "description": "组件的 label"
+                  },
+                  {
+                    "name": "moduleType",
+                    "type": "string",
+                    "description": "模块类型"
+                  },
+                  {
+                    "name": "propertyName",
+                    "type": "string",
+                    "description": "属性名称"
+                  },
+                  {
+                    "name": "type",
+                    "type": "string",
+                    "description": "数据类型"
+                  },
+                  {
+                    "name": "value",
+                    "type": "object",
+                    "description": "存储项的值"
+                  }
+                ]
+              },
+              {
+                "name": "customizerId",
+                "type": "string",
+                "description": "定制搭建的id"
+              },
+              {
+                "name": "customizerVersion",
+                "type": "int64",
+                "description": "定制搭建的版本"
+              }
+            ]
+          },
+          {
+            "name": "id",
+            "type": "string",
+            "description": "用户定制信息的唯一标识符"
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "curl --location --request GET 'https://openapi-test01.sheincorp.cn/open-api/ccst/v1/custom-infos?customInfoId=58d3dcb1f269463da29dc4a2957cd7a7&lang=zh_CN' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1730379652833' \\ --header 'Cookie: <OFFICIAL_EXAMPLE_COOKIE_REDACTED>' \\ --data-raw ''",
+  "responseExample": "code\": \"0\", \"message\": \"OK\", \"data\": { \"id\": \"58d3dcb1f269463da29dc4a2957cd7a7\", \"customInfo\": { \"preview\": { \"effects\": [ \"https://imgdeal-test01.shein.com/images3_ccc/2024/10/31/d7/17303796092517292289.webp\" ], \"images\": [ \"https://imgdeal-test01.shein.com/images3_ccc/2024/10/31/17/17303795945296602.webp\" ], \"texts\": [ \"123113\" ] }, \"stores\": [ { \"id\": \"738329\", \"key\": \"image\", \"label\": \"2D 预览\", \"moduleType\": \"preview\", \"propertyName\": \"2d-preview\", \"type\": \"image\", \"value\": \"https://imgdeal-test01.shein.com/images3_ccc/2024/10/31/d7/17303796092517292289.webp\" }, { \"id\": \"345989\", \"key\": \"face\", \"label\": \"图片上传\", \"moduleType\": \"photo_upload\", \"propertyName\": \"photo-upload\", \"type\": \"faceattr[]\", \"value\": [] }, { \"id\": \"345989\", \"key\": \"source\", \"label\": \"图片上传\", \"moduleType\": \"photo_upload\", \"propertyName\": \"photo-upload\", \"type\": \"image[]\", \"value\": [ \"https://imgdeal-test01.shein.com/images3_ccc/2024/10/31/17/17303795945296602.webp\" ] }, { \"id\": \"345989\", \"key\": \"value\", \"label\": \"图片上传\", \"moduleType\": \"photo_upload\", \"propertyName\": \"photo-upload\", \"type\": \"image[]\", \"value\": [ \"https://imgdeal-test01.shein.com/images3_ccc/2024/10/31/17/17303795945296602.webp\" ] }, { \"id\": \"749240\", \"key\": \"value\", \"label\": \"文本输入框\", \"moduleType\": \"text\", \"propertyName\": \"text\", \"type\": \"string\", \"value\": \"123113\" } ] } }, \"traceId\": \"21538f8b133b7745\" }",
+  "errorCode": null
+}

@@ -1,0 +1,128 @@
+{
+  "docId": "3001854",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "SKC绑定资质证书",
+    "userDocName": "SKC绑定资质证书",
+    "endpoint": "/open-api/goods-certificates/bind",
+    "method": "POST",
+    "docName": "",
+    "version": 2,
+    "updateTime": "2026-06-29 19:37:34",
+    "changeContent": "新接口上线",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "商品绑定资质证书。资质证书接口完整方案，详见文档。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "required": false,
+        "description": "响应msg的语种。不传时默认为英语，枚举值支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "description": "ERP SKC绑定证书池请求",
+    "label": "ErpBindSkcCertificatePoolReq",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "poolSn",
+        "type": "string",
+        "required": true,
+        "description": "资质证书池编号。有两种获取方式：1、通过接口/open-api/goods-certificates/search获取店内所有资质证书的poolSn。2、创建资质证书后响应体中返回的poolSn。",
+        "multiple": 0
+      },
+      {
+        "name": "skcNames",
+        "type": "string",
+        "required": true,
+        "description": "需要绑定的SKC列表，使用平台编码，单次最多200个。",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfVoid",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "string",
+        "description": "响应信息"
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "追踪码"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

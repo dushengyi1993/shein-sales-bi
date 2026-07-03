@@ -1,0 +1,349 @@
+{
+  "docId": "3001890",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询建议零售价审核记录",
+    "userDocName": "查询建议零售价审核记录",
+    "endpoint": "/open-api/goods-recommend-retail-price-audit/search",
+    "method": "POST",
+    "docName": "",
+    "version": 2,
+    "updateTime": "2026-07-02 20:33:41",
+    "changeContent": "文档归属类目更新",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      2,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "建议零售价的审核记录明细。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "x-lt-signature",
+        "type": "int64",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "响应msg的语种。不传时默认为英语，枚举值支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "label": "查询RRP审核历史列表请求（开放平台）",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "audit_state_list",
+        "type": "integer",
+        "required": false,
+        "description": "审核状态列表。1: 待审核 2: 审核成功 3: 审核失败 5: 部分通过 6: 已撤回 5: 部分通过，说明SKC下有部分SKU已审核通过，获得有效期。",
+        "multiple": 1
+      },
+      {
+        "name": "page_num",
+        "type": "integer",
+        "required": true,
+        "description": "页码",
+        "example": "1",
+        "multiple": 0
+      },
+      {
+        "name": "page_size",
+        "type": "integer",
+        "required": true,
+        "description": "每页大小，单页最大100",
+        "example": "20",
+        "multiple": 0
+      },
+      {
+        "name": "skc",
+        "type": "string",
+        "required": false,
+        "description": "SKC平台编码",
+        "example": "skc123456",
+        "multiple": 0
+      },
+      {
+        "name": "spu",
+        "type": "string",
+        "required": false,
+        "description": "SPU平台编码",
+        "example": "spu123456",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfResultOfRrpAuditHistoryData",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "响应信息",
+        "label": "ResultOfRrpAuditHistoryData",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "data",
+            "type": "object",
+            "required": false,
+            "description": "列表信息",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "spu_name",
+                "type": "string",
+                "required": false,
+                "description": "SPU平台编码",
+                "multiple": 0
+              },
+              {
+                "name": "skc_name",
+                "type": "string",
+                "required": false,
+                "description": "SKC平台编码",
+                "multiple": 0
+              },
+              {
+                "name": "submit_time",
+                "type": "datetime",
+                "required": false,
+                "description": "提交时间",
+                "multiple": 0
+              },
+              {
+                "name": "audit_time",
+                "type": "datetime",
+                "required": false,
+                "description": "审核时间",
+                "multiple": 0
+              },
+              {
+                "name": "audit_state",
+                "type": "integer",
+                "required": false,
+                "description": "审核状态 1: 待审核 2: 审核成功 3: 审核失败 5: 部分通过 6: 已撤回",
+                "multiple": 0
+              },
+              {
+                "name": "audit_reason",
+                "type": "string",
+                "required": false,
+                "description": "驳回原因",
+                "multiple": 0
+              },
+              {
+                "name": "change_sn",
+                "type": "string",
+                "required": false,
+                "description": "调价单号",
+                "multiple": 0
+              },
+              {
+                "name": "creator",
+                "type": "string",
+                "required": false,
+                "description": "申请人",
+                "multiple": 0
+              },
+              {
+                "name": "sale_attribute_value",
+                "type": "string",
+                "required": false,
+                "description": "SKC属性值",
+                "multiple": 0
+              },
+              {
+                "name": "sku_rrp_info_list",
+                "type": "object",
+                "required": false,
+                "description": "SKU信息列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "sku_code",
+                    "type": "string",
+                    "required": false,
+                    "description": "SKU平台编码",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "site",
+                    "type": "string",
+                    "required": false,
+                    "description": "站点。站点=其它站点，代表是不按站点提供的SKU建议零售价；站点=某个具体站点，例如shein-fr，代表是站点维度的建议零售价。",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "currency",
+                    "type": "string",
+                    "required": false,
+                    "description": "币种缩写",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "suggested_retail_price",
+                    "type": "double",
+                    "required": false,
+                    "description": "修改后的建议零售价",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "before_suggested_retail_price",
+                    "type": "double",
+                    "required": false,
+                    "description": "修改前的建议零售价",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "type_one_proof",
+                    "type": "object",
+                    "required": false,
+                    "description": "证明材料信息",
+                    "label": "ProofMaterialVO",
+                    "multiple": 0,
+                    "children": [
+                      {
+                        "name": "attachments",
+                        "type": "string",
+                        "required": false,
+                        "description": "证明材料附件列表",
+                        "multiple": 1
+                      },
+                      {
+                        "name": "proof_link",
+                        "type": "string",
+                        "required": false,
+                        "description": "证明链接",
+                        "multiple": 0
+                      }
+                    ]
+                  },
+                  {
+                    "name": "type_two_proof",
+                    "type": "object",
+                    "required": false,
+                    "description": "证明材料信息",
+                    "label": "ProofMaterialVO",
+                    "multiple": 0,
+                    "children": [
+                      {
+                        "name": "attachments",
+                        "type": "string",
+                        "required": false,
+                        "description": "证明材料附件列表",
+                        "multiple": 1
+                      },
+                      {
+                        "name": "proof_link",
+                        "type": "string",
+                        "required": false,
+                        "description": "证明链接",
+                        "multiple": 0
+                      }
+                    ]
+                  },
+                  {
+                    "name": "audit_state",
+                    "type": "integer",
+                    "required": false,
+                    "description": "SKU审核状态 1:待审核;2:审核成功 3:审核失败 6: 已撤回",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "audit_reason",
+                    "type": "string",
+                    "required": false,
+                    "description": "驳回原因",
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "meta",
+            "type": "object",
+            "required": false,
+            "description": "元数据",
+            "label": "Meta",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "count",
+                "type": "integer",
+                "required": false,
+                "description": "数据记录数",
+                "multiple": 0
+              },
+              {
+                "name": "customObj",
+                "type": "object",
+                "required": false,
+                "description": "用户自定义扩展",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "追踪码"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

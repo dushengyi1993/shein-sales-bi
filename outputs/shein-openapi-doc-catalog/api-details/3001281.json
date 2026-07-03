@@ -1,0 +1,208 @@
+{
+  "docId": "3001281",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "退货单-查询退货单列表",
+    "userDocName": "查询退货单列表",
+    "endpoint": "/open-api/return-order/list",
+    "method": "POST",
+    "docName": "post_open-api_return-order_list",
+    "version": 15,
+    "updateTime": "2025-07-21 11:30:38",
+    "changeContent": "更新请求示例",
+    "qpsContent": "100",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "通过该接口获取退货单列表；如何对接退货单请查看客单退货退款服务；",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "queryType",
+        "type": "integer",
+        "required": true,
+        "description": "时间查询的维度类型：1：退货单下发给到商家的时间/ 2：买家申请退货时间/ 3：退货单更新时间",
+        "example": "1",
+        "multiple": 0
+      },
+      {
+        "name": "startTime",
+        "type": "string",
+        "required": true,
+        "description": "yyyy-MM-dd HH:mm:ss 默认查询48小时以内数据",
+        "example": "2023-08-03 13:50:40",
+        "multiple": 0
+      },
+      {
+        "name": "endTime",
+        "type": "string",
+        "required": true,
+        "description": "yyyy-MM-dd HH:mm:ss 默认查询48小时以内数据",
+        "example": "2023-08-03 13:51:40",
+        "multiple": 0
+      },
+      {
+        "name": "page",
+        "type": "integer",
+        "required": true,
+        "description": "请求页码",
+        "example": "1",
+        "multiple": 0
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "required": true,
+        "description": "limit【1，30】",
+        "example": "30",
+        "multiple": 0
+      },
+      {
+        "name": "returnOrderStatus",
+        "type": "integer",
+        "required": false,
+        "description": "1：已关闭/ 2：已申请/ 3：已取消/ 5：已收货/ 6：已妥投/ 7：待交接/ 8：待SHEIN仓中转/ 9：已完成",
+        "example": "1",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": false,
+        "description": "成功：0",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "成功：OK",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "count",
+            "type": "integer",
+            "required": false,
+            "description": "总条数",
+            "example": "1",
+            "multiple": 0
+          },
+          {
+            "name": "returnOrderList",
+            "type": "object",
+            "required": true,
+            "description": "退货单列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "returnOrderNo",
+                "type": "string",
+                "required": false,
+                "description": "退货单号",
+                "example": "N8BFM00MMY",
+                "multiple": 0
+              },
+              {
+                "name": "returnOrderStatus",
+                "type": "integer",
+                "required": false,
+                "description": "退货单状态",
+                "example": "5",
+                "multiple": 0
+              },
+              {
+                "name": "addTime",
+                "type": "string",
+                "required": false,
+                "description": "退货单下发时间，yyyy-MM-dd HH:mm:ss",
+                "example": "2023-07-27 23:49:27",
+                "multiple": 0
+              },
+              {
+                "name": "requestReturnTime",
+                "type": "string",
+                "required": false,
+                "description": "退货单申请时间，yyyy-MM-dd HH:mm:ss",
+                "example": "2023-07-27 23:49:26",
+                "multiple": 0
+              },
+              {
+                "name": "updateTime",
+                "type": "string",
+                "required": false,
+                "description": "退货单更新时间，yyyy-MM-dd HH:mm:ss",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/return-order/list' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570817402' \\ --data-raw '{ \"queryType\": 1, \"startTime\": \"2024-05-23 00:00:00\", \"endTime\": \"2024-05-24 23:59:40\", \"page\": 1, \"pageSize\": 10, \"returnOrderStatus\": 5 }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"count\": 1, \"returnOrderList\": [ { \"returnOrderNo\": \"NGGQM0NLE1\", \"returnOrderStatus\": 5, \"addTime\": \"2024-05-23 10:49:36\", \"requestReturnTime\": \"2024-05-23 10:49:23\", \"updateTime\": \"2024-05-23 10:49:37\" } ] }, \"bbl\": {} }",
+  "errorCode": null
+}

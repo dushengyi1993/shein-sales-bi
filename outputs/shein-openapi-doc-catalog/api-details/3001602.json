@@ -1,0 +1,93 @@
+{
+  "docId": "3001602",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "切换导出地址发货",
+    "userDocName": "切换导出地址发货",
+    "endpoint": "/open-api/gsp/switch-self-shipping",
+    "method": "POST",
+    "docName": "",
+    "version": 5,
+    "updateTime": "2026-03-04 16:29:29",
+    "changeContent": "增加traceid",
+    "qpsContent": "80",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "仅在商家在线下单后可使用该接口；如果商家在SHEIN合作物流下单后，但又希望切换为商家自履约模式（即商家自行联系物流商发货），可调用该接口。需要注意的是：若商家未在线下单或订单状态为已发货，调用该接口将返回错误，该接口目前仅支持美国和欧洲订单",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "orderNo",
+        "type": "string",
+        "required": true,
+        "description": "订单号；（调接口切自发货后，不能再使用平台物流发货）"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": true,
+        "description": "错误描述,成功：OK"
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "required": true,
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/gsp/switch-self-shipping' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-timestamp: 1753760372427' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --data-raw '{ \"orderNo\": \"2507284064100355\" }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { }, \"bbl\": {}, \"traceId\": \"25030823e590f886\" }",
+  "errorCode": null
+}

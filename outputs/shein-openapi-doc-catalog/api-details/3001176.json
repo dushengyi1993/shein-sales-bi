@@ -1,0 +1,125 @@
+{
+  "docId": "3001176",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "上传实拍图图片",
+    "userDocName": "上传实拍图图片",
+    "endpoint": "/open-api/goods-compliance/upload-skc-label-picture",
+    "method": "POST",
+    "docName": "post_open-api_goods-compliance_upload-skc-label-picture",
+    "version": 3,
+    "updateTime": "2025-06-27 15:10:05",
+    "changeContent": "更新示例",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "SKC绑定实拍图时需要使用图片URL，请使用此接口上传本地图片获取URL。实拍图场景整体解决方案，可点击查看文档。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：158339876400"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "查看签名生成规则"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "指定出参语种，默认中文；支持语种:英语:EN 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "file",
+        "type": "blob",
+        "description": "本地图片文件。图片长宽均不能超过8000px、大小不超过10M，支持png/jpeg/jpg格式"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应码。正常为“0”。"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "响应信息。正常为“OK”。"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "description": "响应详细信息",
+        "children": [
+          {
+            "name": "imageUrl",
+            "type": "string",
+            "description": "图片地址，绑定SKC时需要使用。"
+          },
+          {
+            "name": "imageMd5",
+            "type": "string",
+            "description": "图片信息要素，绑定SKC时需要使用。"
+          },
+          {
+            "name": "msg",
+            "type": "string",
+            "description": "上传响应信息"
+          },
+          {
+            "name": "code",
+            "type": "integer",
+            "description": "上传响应编码"
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求追踪码"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/goods-compliance/upload-skc-label-picture' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-timestamp: 1751008118526' \\ --header 'language: zh-cn' \\ --header 'Host: openapi.sheincorp.com' \\ --form 'file=@\"cmMtdXBsb2FkLTE3NTA4MzM4OTk3NzgtMTM=/test pic.jpeg\"'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"imageUrl\": \"https://lt-pqms.oss-cn-shenzhen.aliyuncs.com/gpc2831944489401059568.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=20250504T080405Z&X-Amz-SignedHeaders=host&X-Amz-Expires=432000&X-Amz-Credential=LTAI5tKvGuVMaYLBaMkpkiBr/20250507/oss-cn-shenzhen/s3/aws4_request&X-Amz-Signature=af6c6f0d66e4f2d915d3564d15ba30b49c9a172b23a12a54c6e5b5d719cead00\", \"imageMd5\": \"f39f332f054cf958c9ba4367dce9b1d0\", \"msg\": null, \"code\": 0 }, \"traceId\": \"ed02f5adb2158378\" }",
+  "errorCode": null
+}

@@ -1,0 +1,192 @@
+{
+  "docId": "3001234",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查看Feed任务",
+    "userDocName": "查看Feed任务",
+    "endpoint": "/open-api/sem/feed/getFeed",
+    "method": "GET",
+    "docName": "get_open-api_sem_feed_getFeed",
+    "version": 5,
+    "updateTime": "2025-07-15 22:19:06",
+    "changeContent": "1",
+    "qpsContent": "10",
+    "modes": [
+      1
+    ],
+    "modeNames": [
+      "自运营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object",
+    "children": [
+      {
+        "name": "feedId",
+        "type": "int64",
+        "required": true,
+        "description": "feedId;通过创建Feed任务获得"
+      }
+    ]
+  },
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "响应异常时的bbl相关信息",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1
+              }
+            ]
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "result",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "createdTime",
+                "type": "string",
+                "required": false,
+                "description": "任务创建时间",
+                "multiple": 0
+              },
+              {
+                "name": "feedId",
+                "type": "int64",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "feedType",
+                "type": "string",
+                "required": false,
+                "description": "Feed处理方式",
+                "multiple": 0
+              },
+              {
+                "name": "processingEndTime",
+                "type": "string",
+                "required": false,
+                "description": "文件处理的结束时间",
+                "multiple": 0
+              },
+              {
+                "name": "processingStartTime",
+                "type": "string",
+                "required": false,
+                "description": "文件处理的开始时间",
+                "multiple": 0
+              },
+              {
+                "name": "processingStatus",
+                "type": "string",
+                "required": false,
+                "description": "文件处理的状态；Feed状态的枚举值：1、IN_QUEUE：排队中；文件等待处理中（只有这个状态是可以取消的，其它状态都无法取消）；2、IN_PROGRESS：进行中；文件正在处理中；3、FATAL：致命错误；文件验证失败；4、DONE（Sucess）：完成；6、CANCELLED：已取消",
+                "multiple": 0
+              },
+              {
+                "name": "resultDocumentUrl",
+                "type": "string",
+                "required": false,
+                "description": "返回的文件下载地址；用于查看文件处理结果",
+                "multiple": 0
+              },
+              {
+                "name": "resultFeedDocumentId",
+                "type": "string",
+                "required": false,
+                "description": "返回的文件名称",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request GET 'https://openapi.sheincorp.com/open-api/sem/feed/getFeed' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570849017' \\ --form-data '{ \"KEY\":[\"1865289089032323072\"] }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"result\": { \"feedId\": 1849789420770537472, \"feedType\": \"PRODUCT_LISTING\", \"createdTime\": \"2024-10-25 20:25:40\", \"processingStatus\": \"CANCELLED\", \"processingStartTime\": \"2024-12-07 14:56:01\", \"processingEndTime\": \"2024-12-07 14:56:02\", \"resultFeedDocumentId\": \"MzgxMDk0NDVfMTBfNDI0XzE3MzM1NDQxMzkyMTY=.json\", \"resultDocumentUrl\": \"https://ssmp-openapi.oss-cn-shenzhen.aliyuncs.com/openapi-sem/2024-10-25/21613915_10_359_17298584717301157959690244.json?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=LTAI5tRoCW5YFGVY6MxxWKBM%2F20241102%2Fcn-shenzhen%2Fs3%2Faws4_request&X-Amz-Date=20241102T005904Z&X-Amz-Expires=1800&X-Amz-SignedHeaders=host&X-Amz-Signature=bfbc1fd2d2c042df5e1915cf422a440ec0b64a2916b35a902243cfcdf54ca7df\" } }, \"bbl\": null, \"traceId\": \"4b1404e5bc8ce847\" }",
+  "errorCode": null
+}

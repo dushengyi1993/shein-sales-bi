@@ -1,0 +1,192 @@
+{
+  "docId": "3001305",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "根据SKU查询销量",
+    "userDocName": "根据SKU查询销量",
+    "endpoint": "/open-api/goods/query-sku-sales",
+    "method": "POST",
+    "docName": "post_open-api_goods_query-sku-sales",
+    "version": 10,
+    "updateTime": "2025-07-21 11:33:00",
+    "changeContent": "更新请求示例",
+    "qpsContent": "",
+    "modes": [
+      2,
+      3,
+      5,
+      8
+    ],
+    "modeNames": [
+      "全托管",
+      "SHEIN自营",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "商家可以通过该接口查询7天和30天销量平台限制的QPS为 40/S，某一时间点大批量的调用接口可能会导致限流接口的数据为每天北京时间0点统计更新，建议开发者在北京时间的凌晨2点到7点均匀的拉取数据",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json;charset=UTF-8",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "skuCodeList",
+        "type": "string",
+        "required": true,
+        "description": "skuCode，最多上传100个skuCode",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "响应异常时的bbl相关信息",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1
+              }
+            ]
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "dataList",
+            "type": "object",
+            "required": true,
+            "description": "sku销量集合",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "c30dSaleCnt",
+                "type": "integer",
+                "required": true,
+                "description": "30日销量",
+                "multiple": 0
+              },
+              {
+                "name": "c7dSaleCnt",
+                "type": "integer",
+                "required": true,
+                "description": "7日销量",
+                "multiple": 0
+              },
+              {
+                "name": "cydSaleCnt",
+                "type": "integer",
+                "required": true,
+                "description": "昨日销量"
+              },
+              {
+                "name": "dt",
+                "type": "string",
+                "required": true,
+                "description": "数据统计的截止时间，7天和30天销量根据该时间为起始天数进行7天和30天的销量统计；yyyyMMdd",
+                "multiple": 0
+              },
+              {
+                "name": "skuCode",
+                "type": "string",
+                "required": true,
+                "description": "sku编码",
+                "multiple": 0
+              },
+              {
+                "name": "realTimeSaleCnt",
+                "type": "integer",
+                "required": true,
+                "description": "当日销量"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/goods/query-sku-sales' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570849017' \\ --data-raw '{ \"skuCodeList\":[\"I6il0w9szgmx\"] }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"dataList\": [ { \"skuCode\": \"I46u675r42l4\", \"realTimeSaleCnt\": 0, \"c7dSaleCnt\": 0, \"c30dSaleCnt\": 0, \"dt\": \"\" } ] }, \"bbl\": null, \"traceId\": \"fe801921785899e\" }",
+  "errorCode": null
+}

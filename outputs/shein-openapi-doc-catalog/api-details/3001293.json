@@ -1,0 +1,127 @@
+{
+  "docId": "3001293",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "发货单维度打印面单",
+    "userDocName": "发货单维度打印面单",
+    "endpoint": "/open-api/shipping/delivery/print-package",
+    "method": "POST",
+    "docName": "post_open-api_shipping_delivery_print-package",
+    "version": 9,
+    "updateTime": "2025-07-21 11:31:41",
+    "changeContent": "更新请求示例",
+    "qpsContent": "100",
+    "modes": [
+      1,
+      2,
+      3,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "SHEIN自营",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "通过该接口获取发货单的物流面单信息；",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-language",
+        "type": "string",
+        "description": "指定出参语种，默认中文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "deliveryNo",
+        "type": "string",
+        "required": true,
+        "description": "发货单号",
+        "label": "发货单号"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "label": "返回码"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": true,
+        "description": "错误描述,成功：OK；支持指定语种出参；",
+        "label": "错误信息"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "children": [
+          {
+            "name": "url",
+            "type": "string",
+            "required": true,
+            "description": "pdf链接；支持指定语种出参内容；",
+            "label": "pdf链接"
+          },
+          {
+            "name": "packingType",
+            "type": "integer",
+            "required": true,
+            "description": "备货单类型；"
+          },
+          {
+            "name": "orderNoList",
+            "type": "string",
+            "required": true,
+            "description": "关联的备货单列表；",
+            "multiple": 1
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.cn/open-api/shipping/delivery/print-package' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570817402' \\ --data-raw '{ \"deliveryNo\": \"20231109100004\" }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"packingType\": 2, \"orderNoList\": [\"B231114500244\", \"B231114500299\"], \"url\": \"https://html2pdf.oss-cn-shenzhen.aliyuncs.com/pdf2-test/gmp/2024/3/15/1710468575962-1ef06e76916803df2de67c2cdc6f40f9.oss.pdf?AWSAccessKeyId=LTAI5tLUgHZGZqEUN2t8bPCR&Expires=1710470376&Signature=yTr%2FESgjmuQlBd%2B50HmHNzmfQqU%3D\" } }",
+  "errorCode": null
+}

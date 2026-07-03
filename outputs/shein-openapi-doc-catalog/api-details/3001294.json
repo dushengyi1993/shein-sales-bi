@@ -1,0 +1,229 @@
+{
+  "docId": "3001294",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "备货单审核列表",
+    "userDocName": "备货单审核列表",
+    "endpoint": "/open-api/idms/review-orders",
+    "method": "POST",
+    "docName": "post_open-api_idms_review-orders",
+    "version": 3,
+    "updateTime": "2025-07-21 11:31:46",
+    "changeContent": "更新请求示例",
+    "qpsContent": "50",
+    "modes": [
+      1,
+      2,
+      3,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "SHEIN自营",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "通过该接口查询申请备货的审核信息列表，适用全托管，备货到shein仓（SFS）的自运营、半托管模式的商家；",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "skcList",
+        "type": "string",
+        "description": "shein skc 编码",
+        "multiple": 1
+      },
+      {
+        "name": "supplierCodeList",
+        "type": "string",
+        "description": "供方或号",
+        "multiple": 1
+      },
+      {
+        "name": "orderNoList",
+        "type": "string",
+        "description": "备货单号",
+        "multiple": 1
+      },
+      {
+        "name": "addTimeBegin",
+        "type": "string",
+        "description": "开始的创建时间"
+      },
+      {
+        "name": "addTimeEnd",
+        "type": "string",
+        "description": "结束的创建时间"
+      },
+      {
+        "name": "pageNum",
+        "type": "string",
+        "description": "页码"
+      },
+      {
+        "name": "pageSize",
+        "type": "string",
+        "description": "每页数量"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "成功：0"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "成功：OK"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "children": [
+          {
+            "name": "count",
+            "type": "integer",
+            "description": "总数"
+          },
+          {
+            "name": "list",
+            "type": "object",
+            "description": "备货申请列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "id",
+                "type": "integer"
+              },
+              {
+                "name": "imgPath",
+                "type": "string",
+                "description": "skc图片链接"
+              },
+              {
+                "name": "supplierCode",
+                "type": "string",
+                "description": "供方货号"
+              },
+              {
+                "name": "skc",
+                "type": "string",
+                "description": "shein skc 编码"
+              },
+              {
+                "name": "orderMode",
+                "type": "string",
+                "description": "备货申请单的下单方式"
+              },
+              {
+                "name": "applyStatus",
+                "type": "string",
+                "description": "申请状态"
+              },
+              {
+                "name": "orderAccount",
+                "type": "string",
+                "description": "下单账号"
+              },
+              {
+                "name": "stockType",
+                "type": "string",
+                "description": "备货类型"
+              },
+              {
+                "name": "orderSign",
+                "type": "string",
+                "description": "下单标识"
+              },
+              {
+                "name": "applyNotes",
+                "type": "string",
+                "description": "审核说明"
+              },
+              {
+                "name": "orderNo",
+                "type": "string",
+                "description": "备货单号"
+              },
+              {
+                "name": "skuList",
+                "type": "object",
+                "description": "备货申请sku信息",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "skuCode",
+                    "type": "string",
+                    "description": "shein sku 编码"
+                  },
+                  {
+                    "name": "suffixZh",
+                    "type": "string",
+                    "description": "属性集"
+                  },
+                  {
+                    "name": "orderCount",
+                    "type": "integer",
+                    "description": "实际下单数量"
+                  },
+                  {
+                    "name": "adviceCount",
+                    "type": "integer",
+                    "description": "建议下单数量"
+                  }
+                ]
+              },
+              {
+                "name": "addTime",
+                "type": "string",
+                "description": "下单时间"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.cn/open-api/idms/review-orders' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752201122529' \\ --data-raw '{ }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"count\": 0, \"list\": [] }, \"bbl\": null, \"traceId\": \"666d308310855ef5\" }",
+  "errorCode": null
+}

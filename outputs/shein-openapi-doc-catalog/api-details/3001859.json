@@ -1,0 +1,480 @@
+{
+  "docId": "3001859",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "获取证书要求及证书信息",
+    "userDocName": "查询商品证书要求和审核状态",
+    "endpoint": "/open-api/goods/get-certificate-rule",
+    "method": "POST",
+    "docName": "post_open-api_goods_get-certificate-rule",
+    "version": 12,
+    "updateTime": "2026-06-29 19:52:41",
+    "changeContent": "2026年7月开放平台已推出资质证书新接口，建议对接新接口，详细方案请参考文档：https://open.sheincorp.com/documents/system/05911185-74f1-48d6-a620-fdfb756f6a86",
+    "qpsContent": "40",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "该API支持查询证书要求及证书信息。2026年7月开放平台已推出资质证书新接口，建议对接新接口，详细方案请参考文档。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "language",
+        "type": "string",
+        "required": true,
+        "description": "language"
+      },
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "attributeList",
+        "type": "object",
+        "required": false,
+        "description": "属性数组",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "attributeId",
+            "type": "int64",
+            "required": false,
+            "description": "商品的普通属性id，对接店铺可用属性接口中attribute_type=4的属性",
+            "multiple": 0
+          },
+          {
+            "name": "attributeValueId",
+            "type": "int64",
+            "required": false,
+            "description": "商品的普通属性值id；商品的普通属性id，对接店铺可用属性接口中attribute_type=4的属性值",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "categoryId",
+        "type": "int64",
+        "required": false,
+        "description": "商品的末级分类id",
+        "multiple": 0
+      },
+      {
+        "name": "certificatePoolId",
+        "type": "int64",
+        "required": false,
+        "description": "证书池ID；通过创建证书池获取，可用于查询证书池当前的审核状态",
+        "multiple": 1
+      },
+      {
+        "name": "siteArrList",
+        "type": "string",
+        "required": false,
+        "description": "商品销售的站点信息",
+        "multiple": 1
+      },
+      {
+        "name": "spuName",
+        "type": "string",
+        "required": false,
+        "description": "SHEIN平台生成的SPU，对应商品发布的spu_name；建议用spu查询商品所需证书以及证书的审核状态",
+        "multiple": 0
+      },
+      {
+        "name": "systemId",
+        "type": "string",
+        "required": false,
+        "description": "来源系统:固定传spmp",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "响应异常时的bbl相关信息",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "key",
+                    "type": "string"
+                  },
+                  {
+                    "name": "npid",
+                    "type": "string"
+                  },
+                  {
+                    "name": "tag",
+                    "type": "string"
+                  },
+                  {
+                    "name": "value",
+                    "type": "string"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "data",
+            "type": "object",
+            "required": false,
+            "description": "结果",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "certificateDimension",
+                "type": "integer",
+                "required": false,
+                "description": "判断证书是否需要绑定商品；1、商品维度的证书，该类型的证书需要绑定skc；2、店铺维度的证书，该类型的证书上传后，不需要绑定skc商品",
+                "multiple": 0
+              },
+              {
+                "name": "certificateLabel",
+                "type": "string",
+                "required": false,
+                "description": "字符标识： 0普通类型；1字符类型",
+                "multiple": 0
+              },
+              {
+                "name": "certificateMissStatus",
+                "type": "boolean",
+                "required": false,
+                "description": "证书类型缺失状态 (true: 证书缺失 false：证书不缺)",
+                "example": "0",
+                "multiple": 0
+              },
+              {
+                "name": "certificatePoolList",
+                "type": "object",
+                "required": false,
+                "description": "证书信息集合",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "auditStatus",
+                    "type": "string",
+                    "required": false,
+                    "description": "审核状态 1 待审核、2 审批成功、3 审批失败",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "certificateExpireStatus",
+                    "type": "string",
+                    "required": false,
+                    "description": "证书过期状态：1：正常(未过期)， 2：证书即将过期 3：过期",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "certificatePoolFileList",
+                    "type": "object",
+                    "required": false,
+                    "description": "证书文件集合",
+                    "multiple": 1,
+                    "children": [
+                      {
+                        "name": "certificateUrl",
+                        "type": "string",
+                        "required": false,
+                        "description": "证书url地址",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "certificateUrlName",
+                        "type": "string",
+                        "required": false,
+                        "description": "证书url名称",
+                        "multiple": 0
+                      }
+                    ]
+                  },
+                  {
+                    "name": "certificatePoolId",
+                    "type": "int64",
+                    "required": false,
+                    "description": "证书池id",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "expireTime",
+                    "type": "datetime",
+                    "required": false,
+                    "description": "证书过期时间 (即有效期) 如果是 1970-01-01 00:00:00 则永不过期",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "pqmsCertificateSn",
+                    "type": "string",
+                    "required": false,
+                    "description": "证书编号sn",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "certificateTypeId",
+                "type": "int64",
+                "required": false,
+                "description": "证书类型ID",
+                "multiple": 0
+              },
+              {
+                "name": "certificateTypeValue",
+                "type": "string",
+                "required": false,
+                "description": "证书类型名称",
+                "multiple": 0
+              },
+              {
+                "name": "fileModelUrl",
+                "type": "string",
+                "required": false,
+                "description": "CPC证书下载模板链接",
+                "multiple": 0
+              },
+              {
+                "name": "isRequired",
+                "type": "boolean",
+                "required": false,
+                "description": "是否必须要有证书 true：必有 false：非必有",
+                "example": "0",
+                "multiple": 0
+              },
+              {
+                "name": "mergeSiteInfoList",
+                "type": "object",
+                "required": false,
+                "description": "管控的站点信息集合",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "mergeSiteName",
+                    "type": "string",
+                    "required": false,
+                    "description": "管控的区域名称",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "subSiteList",
+                    "type": "string",
+                    "required": false,
+                    "description": "管控的子站集合信息",
+                    "multiple": 1
+                  }
+                ]
+              },
+              {
+                "name": "otherSourceCertInfoList",
+                "type": "object",
+                "required": false,
+                "description": "其他系统来源证书集合",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "auditStatus",
+                    "type": "string",
+                    "required": false,
+                    "description": "审核状态 1 待审核、2 审批成功、3 审批失败",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "certificateExpireStatus",
+                    "type": "string",
+                    "required": false,
+                    "description": "证书过期状态：0：正常(未过期)， 1：证书即将过期 2：过期",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "certificatePoolFileList",
+                    "type": "object",
+                    "required": false,
+                    "description": "证书文件集合",
+                    "multiple": 1,
+                    "children": [
+                      {
+                        "name": "certificateUrl",
+                        "type": "string",
+                        "required": false,
+                        "description": "证书url地址",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "certificateUrlName",
+                        "type": "string",
+                        "required": false,
+                        "description": "证书url名称",
+                        "multiple": 0
+                      }
+                    ]
+                  },
+                  {
+                    "name": "expireTime",
+                    "type": "datetime",
+                    "required": false,
+                    "description": "证书过期时间 (即有效期) 如果是 1970-01-01 00:00:00 则永不过期",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "pqmsCertificateSn",
+                    "type": "string",
+                    "required": false,
+                    "description": "证书编号sn",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "systemSource",
+                    "type": "string",
+                    "required": false,
+                    "description": "来源系统",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "selfCertificateList",
+                "type": "object",
+                "required": false,
+                "description": "字符声明类型下的普通证书类型信息",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "certificateTypeId",
+                    "type": "int64",
+                    "required": false,
+                    "description": "证书类型id",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "certificateTypeName",
+                    "type": "string",
+                    "required": false,
+                    "description": "证书池类型名称",
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "meta",
+            "type": "object",
+            "required": false,
+            "description": "元数据",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "count",
+                "type": "integer",
+                "required": false,
+                "description": "数据记录数",
+                "multiple": 0
+              },
+              {
+                "name": "customObj",
+                "type": "object",
+                "required": false,
+                "description": "用户自定义扩展",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/goods/get-certificate-rule' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-timestamp: 1751009482524' \\ --header 'language: zh-cn' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi.sheincorp.com' \\ --data-raw '{ \"spuName\": \"a250620506652\" }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"data\": [ { \"certificateTypeId\": 230, \"mergeSiteInfoList\": [ { \"mergeSiteName\": \"欧洲\", \"subSiteList\": [ \"SHEIN西班牙站\" ] } ], \"certificateTypeValue\": \"EN ISO16321检测报告\", \"fileModelUrl\": \"\", \"certificateDimension\": 1, \"certificateLabel\": 0, \"certificateMissStatus\": false, \"isRequired\": true, \"certificatePoolList\": [ { \"certificatePoolId\": 8623835, \"certificateExpireStatus\": 1, \"expireTime\": \"2029-11-12 00:00:00\", \"auditStatus\": 3, \"pqmsCertificateSn\": \"spmp202411150553014\", \"certificatePoolFileList\": [ { \"certificateUrlName\": \"Doc.pdf\", \"certificateUrl\": \"https://lt-pqms.oss-cn-shenzhen.aliyuncs.com/gpc202411150038838.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=20250106T051757Z&X-Amz-SignedHeaders=host&X-Amz-Expires=431999&X-Amz-Credential=LTAI5tKvGuVMaYLBaMkpkiBr/20250106/oss-cn-shenzhen/s3/aws4_request&X-Amz-Signature=d29f718de41f5dd01555dadb89ddf22ad759917f6f31275a80dfa0ee39ebd407\" } ] } ], \"otherSourceCertInfoList\": [], \"selfCertificateList\": [] }, { \"certificateTypeId\": 456, \"mergeSiteInfoList\": [ { \"mergeSiteName\": \"欧洲\", \"subSiteList\": [ \"SHEIN西班牙站\" ] } ], \"certificateTypeValue\": \"GPSR欧盟责任人\", \"fileModelUrl\": \"\", \"certificateDimension\": 1, \"certificateLabel\": 0, \"certificateMissStatus\": false, \"isRequired\": false, \"certificatePoolList\": [], \"otherSourceCertInfoList\": null, \"selfCertificateList\": [] } ], \"meta\": { \"count\": 2, \"customObj\": null } }, \"bbl\": null, \"traceId\": \"d7e2b83cdbd786ec\"",
+  "errorCode": null
+}

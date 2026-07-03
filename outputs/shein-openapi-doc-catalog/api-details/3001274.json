@@ -1,0 +1,220 @@
+{
+  "docId": "3001274",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "批量上传运单号",
+    "userDocName": "批量上传运单号",
+    "endpoint": "/open-api/order/import-batch-multiple-express",
+    "method": "POST",
+    "docName": "post_open-api_order_import-batch-multiple-express",
+    "version": 20,
+    "updateTime": "2025-07-21 11:27:48",
+    "changeContent": "更新请求示例",
+    "qpsContent": "100",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "通过该接口上传自主运营、半托管商家自履约场景的订单物流信息；如何对接订单请查看ERP订单履约方案；注意：上传运单号不代表“已发货”，SHEIN跟各大物流商打通，会根据承运商是否真实揽收作为订单发货状态的标准",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "orderNo",
+        "type": "string",
+        "required": true,
+        "description": "订单号",
+        "multiple": 0
+      },
+      {
+        "name": "infoList",
+        "type": "object",
+        "required": true,
+        "description": "运单号信息，最多传100个",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "expressCode",
+            "type": "string",
+            "required": true,
+            "description": "运单号；如物流商的运单号格式不对，则无法通过校验",
+            "multiple": 0
+          },
+          {
+            "name": "expressIdCode",
+            "type": "string",
+            "required": true,
+            "description": "商家可用物流公司，通过【查询发货渠道】获得",
+            "multiple": 0
+          },
+          {
+            "name": "expressChannelCode",
+            "type": "string",
+            "description": "渠道商产品编码，通过【查询发货渠道】获得"
+          },
+          {
+            "name": "goodsId",
+            "type": "bigint",
+            "required": true,
+            "description": "商品唯一标识；同种商品多件，每件goodsId不同，通过订单详情接口获得",
+            "example": "0"
+          },
+          {
+            "name": "status",
+            "type": "integer",
+            "required": true,
+            "description": "是否删除运单号信息；1、根据goodsId，删除订单运单号信息；2、更新运单号信息"
+          },
+          {
+            "name": "goodExpressRemarkDto",
+            "type": "object",
+            "description": "针对大件商品同sku发多个包裹的场景补充包裹运单信息时使用，注意并非所有商家都有该操作权限；",
+            "children": [
+              {
+                "name": "handleExpressRemark",
+                "type": "integer",
+                "required": true,
+                "description": "本次操作类型；1:添加或更新额外运单物流信息/ 2:删除额外运单物流信息"
+              },
+              {
+                "name": "orderGoodsExpressRemarkList",
+                "type": "object",
+                "description": "额外运单物流信息",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "expressCode",
+                    "type": "string",
+                    "required": true,
+                    "description": "运单号"
+                  },
+                  {
+                    "name": "expressIdCode",
+                    "type": "string",
+                    "required": true,
+                    "description": "商家可用物流公司，通过【查询发货渠道】获得"
+                  },
+                  {
+                    "name": "expressChannelCode",
+                    "type": "string",
+                    "description": "渠道商产品编码，通过【查询发货渠道】获得"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "integer",
+        "description": "响应码",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误信息描述",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "multiple": 1,
+        "children": [
+          {
+            "name": "expressCode",
+            "type": "string",
+            "description": "运单号；如物流商的运单号格式不对，则无法通过校验",
+            "multiple": 0
+          },
+          {
+            "name": "expressIdCode",
+            "type": "string",
+            "description": "物流商名称",
+            "multiple": 0
+          },
+          {
+            "name": "expressChannelCode",
+            "type": "string",
+            "description": "物流商唯一编号"
+          },
+          {
+            "name": "goodsId",
+            "type": "bigint",
+            "description": "商品唯一标识；同种商品多件，每件goodsId不同，通过订单详情接口获得",
+            "example": "0"
+          },
+          {
+            "name": "errorMsg",
+            "type": "string",
+            "description": "错误描述"
+          },
+          {
+            "name": "status",
+            "type": "string",
+            "description": "是否删除运单信息，1：删除订单中good id 的运单号码，2：更新订单中good id 的运单号码"
+          },
+          {
+            "name": "errorOrderGoodsExpressRemark",
+            "type": "string",
+            "description": "运单备注失败原因"
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/order/import-batch-multiple-express' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570849017' \\ --data-raw '{ \"orderNo\": \"GSON8F44T00000M\", \"infoList\": [ { \"expressCode\": \"EPC15B7844A21\", \"expressIdCode\": \"TForce\", \"goodsId\": 3000000000065815, \"status\": 2 } ] }'",
+  "responseExample": "info 数组中返回的是错误明细 接口请求成功无任何失败,则不会返回任何运单信息，info 为空 ** 如果接口请求成功但部分失败，则会在 info 中返回失败的运单，响应代码为 0 { \"code\":0, \"msg\":\"\", \"info\":[ {\"goodsId\":xxx,\"expressCode\":\"xxxx\",\"expressIdCode\":\"DHL ecommerce\",\"errorMsg\":\"xxxxxx\",\"status\":2} ] } ** 如果接口请求成功且没有任何失败，将不会返回运单信息，info 将为空，响应代码为 0。 { \"code\":0, \"msg\":\"\", \"info\":[ ] }",
+  "errorCode": null
+}

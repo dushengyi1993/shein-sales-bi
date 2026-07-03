@@ -158,6 +158,7 @@
   `bash scripts/cloud_openapi_reconciliation.sh YYYY-MM-DD`
   `bash scripts/cloud_openapi_return_reconciliation.sh YYYY-MM-DD`
   `bash scripts/cloud_openapi_product_reconciliation.sh`
+- OpenAPI/自动运营 CLI 当前也提供本机受控工具：`plan-images`、`upload-pic`、`transform-pic`、`audit-status`、`search-product`、`publish-standard`、`shelf-quota`、`order-fulfillment`、`openapi-call`。默认均为 dry-run；真实 execute 仍需店铺身份探针，写接口还需确认文本和 dry-run `payloadHash`。命令示例和边界见 `docs/partner-codex-ops-setup.md` 与 `docs/shein-openapi-dev-handoff-index.md`。
 - 云端手动跑 watchdog（在服务器执行）：
   `node scripts/cloud_ops_watchdog.mjs --dry-run`
 - 云端只读测试飞书问数机器人回答（在服务器 `/opt/shein-bi/app` 执行）：
@@ -256,6 +257,10 @@
 - BI 仓库模型：`docs/bi-warehouse-model.md`
 - SHEIN 后台数据地图：`docs/shein-backend-survey.md`
 - SHEIN 官方 OpenAPI 接入计划：`docs/shein-openapi-integration.md`
+- SHEIN OpenAPI/CLI 当前能力与交接索引：`docs/shein-openapi-dev-handoff-index.md`
+- SHEIN OpenAPI 官方能力台账：`docs/shein-openapi-official-capability-inventory.md`
+- SHEIN OpenAPI API schema 索引：`docs/shein-openapi-api-schema-index.md`
+- SHEIN WebHook 接收器设计：`docs/shein-webhook-receiver-design.md`
 - 营销活动报名价格规则：`docs/marketing-campaign-signup-pricing-rules.md`
 - 营销折扣自动化路线图：`docs/marketing-automation-roadmap.md`
 - scripts 脚本清单与废弃边界：`docs/scripts-inventory.md`

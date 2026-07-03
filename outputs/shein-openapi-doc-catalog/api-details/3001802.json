@@ -1,0 +1,312 @@
+{
+  "docId": "3001802",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询退货申请单列表",
+    "userDocName": "查询退货申请单列表",
+    "endpoint": "/open-api/purchase/return-application-list",
+    "method": "POST",
+    "docName": "",
+    "version": 4,
+    "updateTime": "2026-06-12 10:35:20",
+    "changeContent": "去除描述中的空格",
+    "qpsContent": "50",
+    "modes": [
+      2
+    ],
+    "modeNames": [
+      "全托管"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "分页查询退货申请单列表数据",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "startTime",
+        "type": "string",
+        "description": "开始时间（returnPlanNoList为空时必填），开始时间、结束时间跨度不要超过60天",
+        "example": "2026-05-27T12:09:52.245Z",
+        "multiple": 0
+      },
+      {
+        "name": "endTime",
+        "type": "string",
+        "description": "结束时间（returnPlanNoList为空时必填），开始时间、结束时间跨度不要超过60天",
+        "example": "2026-05-27T12:09:52.245Z",
+        "multiple": 0
+      },
+      {
+        "name": "page",
+        "type": "integer",
+        "description": "页码，不传默认1",
+        "example": "84",
+        "multiple": 0
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "description": "分页大小，1-100，不传默认100",
+        "example": "67",
+        "multiple": 0
+      },
+      {
+        "name": "queryType",
+        "type": "integer",
+        "description": "查询类型：1-发起时间(returnTime)；2-更新时间(updateTime)；当returnPlanNoList为空时必填",
+        "example": "63",
+        "multiple": 0
+      },
+      {
+        "name": "returnPlanNoList",
+        "type": "string",
+        "description": "退货申请单号列表（最多100个），有值时，returnTimeStart/returnTimeEnd/queryType可不传",
+        "example": "random_returnPlanNoList",
+        "multiple": 1
+      },
+      {
+        "name": "returnReasonTypes",
+        "type": "integer",
+        "description": "发起原因：1滞销退、2关店退、3D2商品退、4商品稽查退、5面料&材质稽查退、6出库质检退、7入库问题退、8商家主动退、9CNPJ税务变更退、10运营发起退、11集货中转退；支持批量",
+        "example": "11",
+        "multiple": 1
+      },
+      {
+        "name": "status",
+        "type": "integer",
+        "description": "退货申请单状态；1:待商家确认，2:商家申诉中，3:平台确认中，4:已取消，5:已确认，6:运营审批中",
+        "example": "84",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码，成功：0",
+        "example": "random_code",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述,成功：OK",
+        "example": "random_msg",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "required": true,
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "data",
+            "type": "object",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "initiator",
+                "type": "integer",
+                "description": "发起方1:SHEIN，2:商家",
+                "example": "6",
+                "multiple": 0
+              },
+              {
+                "name": "processing",
+                "type": "object",
+                "description": "处理",
+                "multiple": 0,
+                "children": [
+                  {
+                    "name": "planReturnAddress",
+                    "type": "object",
+                    "description": "当申请退货时，给出退货地址信息",
+                    "multiple": 0,
+                    "children": [
+                      {
+                        "name": "address",
+                        "type": "string",
+                        "description": "退货地址",
+                        "example": "random_address",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "contact",
+                        "type": "string",
+                        "description": "收件人",
+                        "example": "random_contact",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "phone",
+                        "type": "string",
+                        "description": "联系电话",
+                        "example": "random_phone",
+                        "multiple": 0
+                      }
+                    ]
+                  },
+                  {
+                    "name": "returnGenerateQuantity",
+                    "type": "integer",
+                    "description": "实际退货数量",
+                    "example": "0",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "returnQuantity",
+                    "type": "integer",
+                    "description": "发起数量",
+                    "example": "78",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "returnScrappedQuantity",
+                    "type": "integer",
+                    "description": "实际报废数量",
+                    "example": "76",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "relateOrders",
+                "type": "object",
+                "description": "关联的采购单信息",
+                "multiple": 0,
+                "children": [
+                  {
+                    "name": "deliveryCodes",
+                    "type": "string",
+                    "description": "发货单号",
+                    "example": "random_deliveryCodes",
+                    "multiple": 1
+                  },
+                  {
+                    "name": "orders",
+                    "type": "string",
+                    "description": "采购单号",
+                    "example": "random_orders",
+                    "multiple": 1
+                  },
+                  {
+                    "name": "returnOrders",
+                    "type": "string",
+                    "description": "退货单号；报废单号",
+                    "example": "random_returnOrders",
+                    "multiple": 1
+                  }
+                ]
+              },
+              {
+                "name": "returnDealType",
+                "type": "integer",
+                "description": "处理方式；1:退货，2:报废",
+                "example": "27",
+                "multiple": 0
+              },
+              {
+                "name": "returnPlanNo",
+                "type": "string",
+                "description": "退货申请单号",
+                "example": "random_returnPlanNo",
+                "multiple": 0
+              },
+              {
+                "name": "returnReasonType",
+                "type": "integer",
+                "description": "发起原因：1滞销退、2关店退、3D2商品退、4商品稽查退、5面料&材质稽查退、6出库质检退、7入库问题退、8商家主动退、9CNPJ税务变更退、10运营发起退、11集货中转退",
+                "example": "58",
+                "multiple": 0
+              },
+              {
+                "name": "returnTime",
+                "type": "string",
+                "description": "发起时间",
+                "example": "2026-05-27T12:11:47.105Z",
+                "multiple": 0
+              },
+              {
+                "name": "status",
+                "type": "integer",
+                "description": "退货申请单状态；1:待商家确认，2:商家申诉中，3:平台确认中，4:已取消，5:已确认，6:运营审批中",
+                "example": "84",
+                "multiple": 0
+              },
+              {
+                "name": "updateTime",
+                "type": "string",
+                "description": "更新时间",
+                "example": "2026-05-27T12:11:47.105Z",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "meta",
+            "type": "object",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "count",
+                "type": "integer",
+                "example": "56",
+                "multiple": 0
+              },
+              {
+                "name": "customObj",
+                "type": "object",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

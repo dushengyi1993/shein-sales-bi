@@ -241,6 +241,144 @@ function normalizeImageEditPayloadsFromJsonAssets(task, matches, warnings){
   const seen=new Set();
   return embedded.filter(payload=>{ const key=sha256Stable(payload); if(seen.has(key)) return false; seen.add(key); return true; });
 }
+function imageInfoRows(container){ return asArray(container?.image_info_list || container?.imageInfoList); }
+function imageRowType(row){
+  const value = row?.image_type ?? row?.imageType;
+  if(value === null || value === undefined || value === '') return '';
+  const n = Number(value);
+  return Number.isFinite(n) ? String(n) : String(value).trim();
+}
+function imageRowSort(row){
+  const n = Number(row?.image_sort ?? row?.imageSort ?? row?.sort ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+function imageRowUrl(row){ return safeString(row?.image_url || row?.imageUrl || row?.url || '', 1000); }
+function isSuspiciousTinySkuImageUrl(url){
+  const text = String(url || '');
+  return /(?:^|[\\/_-])sku[-_]?80(?:[.\\/_-]|$)|80x80/i.test(text);
+}
+function summarizeImageRows(rows, sourceLabel){
+  const list = asArray(rows).map((row, index) => ({
+    source: sourceLabel,
+    index,
+    image_sort: imageRowSort(row),
+    image_type: imageRowType(row),
+    image_url: imageRowUrl(row),
+  }));
+  const typeCounts = {};
+  for(const row of list){
+    const key = row.image_type || '(missing)';
+    typeCounts[key] = (typeCounts[key] || 0) + 1;
+  }
+  return {rows:list, typeCounts};
+}
+function inspectSingleImageEditPayload(payload, index){
+  const blockers=[];
+  const warnings=[];
+  const prefix=`imageEditPayload[${index}]`;
+  const spuImageInfo = payload?.image_info || payload?.imageInfo || null;
+  const spuSummary = summarizeImageRows(imageInfoRows(spuImageInfo), 'spu.image_info');
+  const skcSummaries=[];
+  const siteDetailRows=[];
+  const skuRows=[];
+  const skcList=asArray(payload?.skc_list || payload?.skcList);
+  if(!payload || typeof payload !== 'object') blockers.push(`${prefix} 不是对象。`);
+  if(payload && !payload.spu_name && !payload.spuName) blockers.push(`${prefix} 缺 spu_name，无法确认 partialEdit 目标 SPU。`);
+  if(spuImageInfo && payload?.is_spu_pic !== true && payload?.isSpuPic !== true) {
+    blockers.push(`${prefix} 提供了 SPU 层 image_info 但缺 is_spu_pic=true，商品轮播/主图可能不会按新版图片方案写入。`);
+  }
+  for(const row of spuSummary.rows){
+    if(row.image_type && !['1','2','5'].includes(row.image_type)) blockers.push(`${prefix} SPU image_info image_type=${row.image_type} 非法，应为 1主图/2细节图/5方形图。`);
+  }
+  skcList.forEach((skc, skcIndex) => {
+    const label=`skc_list[${skcIndex}]`;
+    const imageInfo=skc?.image_info || skc?.imageInfo || null;
+    const summary=summarizeImageRows(imageInfoRows(imageInfo), `${label}.image_info`);
+    const typeCounts=summary.typeCounts;
+    if(summary.rows.length){
+      for(const row of summary.rows){
+        if(!row.image_type) blockers.push(`${prefix} ${label}.image_info_list[${row.index}] 缺 image_type，SKC 图必须标明 1主图/2细节/5方形/6色块。`);
+        else if(!['1','2','5','6'].includes(row.image_type)) blockers.push(`${prefix} ${label}.image_info_list[${row.index}] image_type=${row.image_type} 非法，只允许 1/2/5/6。`);
+      }
+      if((typeCounts['1'] || 0) !== 1) blockers.push(`${prefix} ${label} SKC 图片必须且只能有 1 张主图 image_type=1，当前 ${typeCounts['1'] || 0} 张。`);
+      const main = summary.rows.find(row => row.image_type === '1');
+      if(main && main.image_sort !== 1) warnings.push(`${prefix} ${label} 主图 image_sort=${main.image_sort}，建议主图排序为 1。`);
+      if((typeCounts['2'] || 0) > 11) warnings.push(`${prefix} ${label} SKC 细节图 image_type=2 超过 11 张，当前 ${typeCounts['2']} 张；不同类目图片上限可能不同，提交前请用官方商品图片标准或平台预校验确认。`);
+    }
+    skcSummaries.push({skc_name: skc?.skc_name || skc?.skcName || '', ...summary});
+    for(const group of asArray(skc?.site_detail_image_info_list || skc?.siteDetailImageInfoList)){
+      for(const row of imageInfoRows(group)){
+        siteDetailRows.push({
+          source:`${label}.site_detail_image_info_list`,
+          site_abbr_list: asArray(group?.site_abbr_list || group?.siteAbbrList || group?.site_abbr || group?.siteAbbr).map(x => safeString(x,80)).filter(Boolean),
+          image_sort:imageRowSort(row),
+          image_url:imageRowUrl(row),
+        });
+      }
+    }
+    for(const sku of asArray(skc?.sku_list || skc?.skuList)){
+      for(const row of imageInfoRows(sku?.image_info || sku?.imageInfo)){
+        const skuRow={
+          source:`${label}.sku_list.image_info`,
+          sku_code: safeString(sku?.sku_code || sku?.skuCode || '',120),
+          image_sort:imageRowSort(row),
+          image_type:imageRowType(row),
+          image_url:imageRowUrl(row),
+        };
+        skuRows.push(skuRow);
+        if(skuRow.image_type !== '1') blockers.push(`${prefix} SKU 图只允许主图 image_type=1，当前 ${skuRow.sku_code || '(unknown sku)'} 为 ${skuRow.image_type || '(missing)'}。`);
+        if(isSuspiciousTinySkuImageUrl(skuRow.image_url)) blockers.push(`${prefix} SKU 图疑似引用 80x80/sku-80 裁切图：${skuRow.image_url}`);
+      }
+    }
+  });
+  const skcRows=skcSummaries.flatMap(item => item.rows);
+  const allUrlRows=[...spuSummary.rows, ...skcRows, ...siteDetailRows, ...skuRows].filter(row => row.image_url);
+  const skcDetailCount=skcRows.filter(row => row.image_type === '2').length;
+  const totalDetailImages=skcDetailCount + siteDetailRows.length;
+  if(totalDetailImages > 11) warnings.push(`${prefix} 细节图总数超过 11 张：SKC细节 ${skcDetailCount} + 站点详情 ${siteDetailRows.length} = ${totalDetailImages}；不同类目图片上限可能不同，提交前请用官方商品图片标准或平台预校验确认。`);
+  if(!spuSummary.rows.length) warnings.push(`${prefix} 未提供 SPU 层 image_info；如果任务要求商品轮播/主图，请补 SPU image_info 并设置 is_spu_pic=true。`);
+  if(!skuRows.length) warnings.push(`${prefix} 未提供 SKU 图；如果任务要求 SKU/色块图，请补 skc_list[].sku_list[].image_info。`);
+  return {
+    index,
+    spu_name: payload?.spu_name || payload?.spuName || '',
+    is_spu_pic: Boolean(payload?.is_spu_pic || payload?.isSpuPic),
+    spuImageCount: spuSummary.rows.length,
+    skcCount: skcList.length,
+    skcImageCount: skcRows.length,
+    skcTypeCounts: skcRows.reduce((acc,row)=>{ const k=row.image_type||'(missing)'; acc[k]=(acc[k]||0)+1; return acc; },{}),
+    siteDetailImageCount: siteDetailRows.length,
+    skuImageCount: skuRows.length,
+    detailImageCount: totalDetailImages,
+    urlRefCount: allUrlRows.length,
+    uniqueUrlCount: new Set(allUrlRows.map(row => row.image_url)).size,
+    spuRows: spuSummary.rows,
+    skcRows,
+    siteDetailRows,
+    skuRows,
+    blockers,
+    warnings,
+  };
+}
+function inspectImageEditPayloads(payloads, blockers, warnings){
+  const inspections=asArray(payloads).map((payload,index)=>inspectSingleImageEditPayload(payload,index));
+  for(const item of inspections){
+    blockers.push(...item.blockers);
+    warnings.push(...item.warnings);
+  }
+  return {
+    payloadCount: inspections.length,
+    totalSpuImages: inspections.reduce((sum,item)=>sum+item.spuImageCount,0),
+    totalSkcImages: inspections.reduce((sum,item)=>sum+item.skcImageCount,0),
+    totalSiteDetailImages: inspections.reduce((sum,item)=>sum+item.siteDetailImageCount,0),
+    totalSkuImages: inspections.reduce((sum,item)=>sum+item.skuImageCount,0),
+    totalDetailImages: inspections.reduce((sum,item)=>sum+item.detailImageCount,0),
+    totalUrlRefs: inspections.reduce((sum,item)=>sum+item.urlRefCount,0),
+    uniqueUrlCount: new Set(inspections.flatMap(item => [...item.spuRows, ...item.skcRows, ...item.siteDetailRows, ...item.skuRows].map(row => row.image_url).filter(Boolean))).size,
+    blockers: inspections.flatMap(item => item.blockers),
+    warnings: inspections.flatMap(item => item.warnings),
+    payloads: inspections,
+  };
+}
 async function loadClient(args){ const config=await readJson(args.config); const stores=Array.isArray(config.stores)?config.stores:Object.entries(config.stores||{}).map(([storeKey,v])=>({storeKey,...v})); const store=stores.find(s=>normalizeStoreKey(s?.storeKey||s?.key||s?.store)===normalizeStoreKey(args.store)); if(!store?.openKeyId||!store?.secretKey) throw new Error(`未在 ${rel(args.config)} 找到 ${args.store} 的 openKeyId/secretKey`); return {config, store, client:new SheinOpenApiClient({baseUrl:config.apiBaseUrls?.prodSemiManaged||SHEIN_OPENAPI_BASE_URLS.prodSemiManaged, openKeyId:store.openKeyId, secretKey:store.secretKey})}; }
 function compactCallResult(name,pathText,method,response){ return {name,path:pathText,method,httpStatus:response.status??response.httpStatus??null,code:response.data?.code??response.code??null,msg:safeString(response.data?.msg??response.msg??'',300),traceId:response.data?.traceId??response.traceId??null}; }
 async function callOpenApi(client, {name, path:pathText, method='POST', body, query}){ const response=await client.request(pathText,{method,body,query,headers:{language:'en'}}); return {...compactCallResult(name,pathText,method,response), data:response.data}; }
@@ -361,7 +499,12 @@ async function main(){
   const resolved=resolveTargets({task, store, linkRows:linkLoad.rows||[], productRows:productLoad.rows||[]});
   if(resolved.missing.length) blockers.push(`未定位到目标货号/SKC：${resolved.missing.join('、')}`);
   if(!resolved.matches.length) blockers.push('没有可执行目标链接。');
-  const imageEditPayloads=normalizeImageEditPayloadsFromJsonAssets(taskWithJsonAssets,resolved.matches,warnings);
+  const imageEditPayloads=intents.includes('update_images')
+    ? normalizeImageEditPayloadsFromJsonAssets(taskWithJsonAssets,resolved.matches,warnings)
+    : [];
+  const imagePayloadInspection=intents.includes('update_images')
+    ? inspectImageEditPayloads(imageEditPayloads,blockers,warnings)
+    : inspectImageEditPayloads([],blockers,warnings);
   const certificatePayloads=normalizeCertificatePayloadsFromJsonAssets(taskWithJsonAssets,warnings);
   const payloads=buildPayloads({task:taskWithJsonAssets,intents,matches:resolved.matches,siteInfo,blockers,warnings,imageEditPayloads,certificatePayloads});
   const submitPlan={storeKey:store,intents,payloads:payloads.map(p=>({operation:p.operation,endpoint:p.endpoint,body:p.body,targetSkcs:p.targetLinks.map(x=>x.skc).filter(Boolean)}))};
@@ -380,7 +523,7 @@ async function main(){
   const readbackCalls=[]; let readback={ok:false,status:args.mode==='execute'?'not_run':'planned_not_run',calls:readbackCalls};
   if(actualWriteSubmitted){ readback=await readbackForIntents(client,intents,resolved.matches,readbackCalls); }
   const state=args.mode==='execute' ? (actualWriteSubmitted?'submitted':'blocked') : (blockers.length?'blocked':'ready_for_submit');
-  const output={ok:blockers.length===0, runId, mode:args.mode, adapterKind:'link_maintenance_openapi_executor', state, startedAt, endedAt:new Date().toISOString(), storeKey:store, task:{id:task.id||'',status:task.status||'',intents,productRefs:taskProductRefs(task)}, payload:{found:Boolean(payloadHash), payloadHash, payloadHashAlgorithm:payloadHash?'sha256-stable-json-v1':'', summary:{operations:payloads.map(p=>p.operation), endpoints:payloads.map(p=>p.endpoint), targetCount:resolved.matches.length, skuCount:unique(resolved.matches.flatMap(m=>m.skuCodes)).length}, submitPlan}, adapterEvidence:{realSubmit:actualWriteSubmitted, canSilentWrite:false, matchedLinksCount:resolved.matches.length, matchedLinks:resolved.matches.slice(0,80), linkSnapshotFile:linkLoad.file?rel(linkLoad.file):'', productCacheFile:productLoad.file?rel(productLoad.file):'', siteInfo, calls}, publishResult: actualWriteSubmitted ? {code:'0', msg:'submitted', traceId:submitResults.map(x=>x.traceId).filter(Boolean).join(',')||null, operations:submitResults} : null, readbackFingerprint:{taskId:task.id||'', intents, targetStores:[store], matchedSkcs:resolved.matches.map(m=>m.skc).filter(Boolean), matchedSkuCodes:unique(resolved.matches.flatMap(m=>m.skuCodes)), payloadHash, readbackStatus:readback.status}, readback, blockers, warnings, safety:{canSilentWrite:false, executeRequiresConfirm:SUBMIT_CONFIRM_TEXT, dryRunDoesNotCallBusinessWrite:args.mode!=='execute', note:'维护写真实提交必须由 BI 服务端权限、白名单、payload hash 和确认文本共同放行。'}};
+  const output={ok:blockers.length===0, runId, mode:args.mode, adapterKind:'link_maintenance_openapi_executor', state, startedAt, endedAt:new Date().toISOString(), storeKey:store, task:{id:task.id||'',status:task.status||'',intents,productRefs:taskProductRefs(task)}, payload:{found:Boolean(payloadHash), payloadHash, payloadHashAlgorithm:payloadHash?'sha256-stable-json-v1':'', summary:{operations:payloads.map(p=>p.operation), endpoints:payloads.map(p=>p.endpoint), targetCount:resolved.matches.length, skuCount:unique(resolved.matches.flatMap(m=>m.skuCodes)).length, imagePayloadInspection:{payloadCount:imagePayloadInspection.payloadCount,totalSpuImages:imagePayloadInspection.totalSpuImages,totalSkcImages:imagePayloadInspection.totalSkcImages,totalSiteDetailImages:imagePayloadInspection.totalSiteDetailImages,totalSkuImages:imagePayloadInspection.totalSkuImages,totalDetailImages:imagePayloadInspection.totalDetailImages,totalUrlRefs:imagePayloadInspection.totalUrlRefs,uniqueUrlCount:imagePayloadInspection.uniqueUrlCount}}, submitPlan}, adapterEvidence:{realSubmit:actualWriteSubmitted, canSilentWrite:false, matchedLinksCount:resolved.matches.length, matchedLinks:resolved.matches.slice(0,80), linkSnapshotFile:linkLoad.file?rel(linkLoad.file):'', productCacheFile:productLoad.file?rel(productLoad.file):'', siteInfo, imagePayloadInspection, calls}, publishResult: actualWriteSubmitted ? {code:'0', msg:'submitted', traceId:submitResults.map(x=>x.traceId).filter(Boolean).join(',')||null, operations:submitResults} : null, readbackFingerprint:{taskId:task.id||'', intents, targetStores:[store], matchedSkcs:resolved.matches.map(m=>m.skc).filter(Boolean), matchedSkuCodes:unique(resolved.matches.flatMap(m=>m.skuCodes)), payloadHash, readbackStatus:readback.status}, readback, blockers, warnings, safety:{canSilentWrite:false, executeRequiresConfirm:SUBMIT_CONFIRM_TEXT, dryRunDoesNotCallBusinessWrite:args.mode!=='execute', note:'维护写真实提交必须由 BI 服务端权限、白名单、payload hash 和确认文本共同放行；partialEdit 成功只代表提交版本生成，当前态仍以回读/审核状态为准。'}};
   if(actualWriteSubmitted && !readback.ok){ output.ok=false; output.state='submitted'; output.blockers=[]; output.warnings.push('写接口返回成功但强回读未确认，任务必须锁定等待人工核销。'); }
   const outPath=path.join(args.outDir,`${runId}.local.json`); await writeJson(outPath,output); output.savedTo=rel(outPath); if(!args.quiet) console.log(JSON.stringify(output,null,2));
 }

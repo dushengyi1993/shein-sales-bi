@@ -1,0 +1,588 @@
+{
+  "docId": "3000520",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "MES-FAC-001 订单数据获取接口",
+    "userDocName": "MES-FAC-001 订单数据获取接口",
+    "endpoint": "/open-api/mes/get-order-info",
+    "method": "POST",
+    "docName": "post_open-api_mes_get-order-info",
+    "version": 2,
+    "updateTime": "2024-10-15 11:07:01",
+    "changeContent": "新增traceId",
+    "qpsContent": "",
+    "modes": [
+      3
+    ],
+    "modeNames": [
+      "SHEIN自营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object",
+    "children": [
+      {
+        "name": "acceptOrderEndTime",
+        "type": "string",
+        "required": false,
+        "description": "接单结束时间"
+      },
+      {
+        "name": "acceptOrderStartTime",
+        "type": "string",
+        "required": false,
+        "description": "接单起始时间"
+      },
+      {
+        "name": "factoryIdList",
+        "type": "integer",
+        "required": false,
+        "description": "工厂id集合",
+        "multiple": 1
+      },
+      {
+        "name": "produceOrderIdList",
+        "type": "integer",
+        "required": true,
+        "description": "订单编号",
+        "multiple": 1
+      },
+      {
+        "name": "skc",
+        "type": "string",
+        "required": false,
+        "description": "sku"
+      }
+    ]
+  },
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "integer",
+        "required": false,
+        "description": "状态码",
+        "multiple": 0
+      },
+      {
+        "name": "detailMsg",
+        "type": "string",
+        "required": false,
+        "description": "执行结果详细信息",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "执行结果数据",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "acceptOrderTime",
+            "type": "object",
+            "required": false,
+            "description": "接单时间",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "date",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "day",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "hours",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "minutes",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "month",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "nanos",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "seconds",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "time",
+                "type": "int64",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "timezoneOffset",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "year",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "cutBedInfo",
+            "type": "object",
+            "required": false,
+            "description": "裁床数量信息",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "diffRateValue",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "forecastValue",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "quantity",
+                "type": "integer",
+                "required": false,
+                "description": "数量",
+                "multiple": 0
+              },
+              {
+                "name": "quantityInterval",
+                "type": "string",
+                "required": false,
+                "description": "数量区间",
+                "multiple": 0
+              },
+              {
+                "name": "sizeName",
+                "type": "string",
+                "required": false,
+                "description": "尺码名称",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "cutBedQty",
+            "type": "integer",
+            "required": false,
+            "description": "裁床件数",
+            "multiple": 0
+          },
+          {
+            "name": "cutInfoStr",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          },
+          {
+            "name": "deliveryTime",
+            "type": "object",
+            "required": false,
+            "description": "目标交期",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "date",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "day",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "hours",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "minutes",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "month",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "nanos",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "seconds",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "time",
+                "type": "int64",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "timezoneOffset",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "year",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "designCode",
+            "type": "string",
+            "required": false,
+            "description": "设计款号",
+            "multiple": 0
+          },
+          {
+            "name": "factoryId",
+            "type": "int64",
+            "required": false,
+            "multiple": 0
+          },
+          {
+            "name": "isFirst",
+            "type": "boolean",
+            "required": false,
+            "description": "是否首单",
+            "example": "0",
+            "multiple": 0
+          },
+          {
+            "name": "isUrgent",
+            "type": "boolean",
+            "required": false,
+            "description": "优先级",
+            "example": "0",
+            "multiple": 0
+          },
+          {
+            "name": "orderInfo",
+            "type": "object",
+            "required": false,
+            "description": "下单数量信息",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "diffRateValue",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "forecastValue",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "quantity",
+                "type": "integer",
+                "required": false,
+                "description": "数量",
+                "multiple": 0
+              },
+              {
+                "name": "quantityInterval",
+                "type": "string",
+                "required": false,
+                "description": "数量区间",
+                "multiple": 0
+              },
+              {
+                "name": "sizeName",
+                "type": "string",
+                "required": false,
+                "description": "尺码名称",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "orderInfoStr",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          },
+          {
+            "name": "orderPrice",
+            "type": "double",
+            "required": false,
+            "description": "生产单价",
+            "multiple": 0
+          },
+          {
+            "name": "orderRecordId",
+            "type": "int64",
+            "required": false,
+            "description": "订单id",
+            "multiple": 0
+          },
+          {
+            "name": "orderType",
+            "type": "string",
+            "required": false,
+            "description": "订单类型",
+            "multiple": 0
+          },
+          {
+            "name": "orderTypeInt",
+            "type": "integer",
+            "required": false,
+            "multiple": 0
+          },
+          {
+            "name": "pic",
+            "type": "string",
+            "required": false,
+            "description": "图片",
+            "multiple": 0
+          },
+          {
+            "name": "placeOrderTime",
+            "type": "object",
+            "required": false,
+            "description": "下单时间",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "date",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "day",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "hours",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "minutes",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "month",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "nanos",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "seconds",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "time",
+                "type": "int64",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "timezoneOffset",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              },
+              {
+                "name": "year",
+                "type": "integer",
+                "required": false,
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "produceOrderId",
+            "type": "integer",
+            "required": false,
+            "description": "生产制单号",
+            "multiple": 0
+          },
+          {
+            "name": "producer",
+            "type": "string",
+            "required": false,
+            "description": "生产方",
+            "multiple": 0
+          },
+          {
+            "name": "quantity",
+            "type": "integer",
+            "required": false,
+            "description": "订单件数",
+            "multiple": 0
+          },
+          {
+            "name": "refSku",
+            "type": "string",
+            "required": false,
+            "description": "参考sku",
+            "multiple": 0
+          },
+          {
+            "name": "secondProcess",
+            "type": "object",
+            "required": false,
+            "description": "二次工艺",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "processName",
+                "type": "string",
+                "required": false,
+                "description": "工序名称",
+                "multiple": 0
+              },
+              {
+                "name": "simpleUse",
+                "type": "string",
+                "required": false,
+                "description": "单件用量",
+                "multiple": 0
+              },
+              {
+                "name": "supplierName",
+                "type": "string",
+                "required": false,
+                "description": "供应商名称",
+                "multiple": 0
+              },
+              {
+                "name": "unitPrice",
+                "type": "double",
+                "required": false,
+                "description": "单价",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "sku",
+            "type": "string",
+            "required": false,
+            "description": "大货sku",
+            "multiple": 0
+          },
+          {
+            "name": "status",
+            "type": "string",
+            "required": false,
+            "description": "订单状态",
+            "multiple": 0
+          },
+          {
+            "name": "statusInt",
+            "type": "integer",
+            "required": false,
+            "multiple": 0
+          },
+          {
+            "name": "stockType",
+            "type": "string",
+            "required": false,
+            "description": "备货类型",
+            "multiple": 0
+          },
+          {
+            "name": "stockTypeInt",
+            "type": "integer",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "执行结果提示信息",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "produceOrderIdList\":[9315846,9298549,19367331] }",
+  "responseExample": "code\": 0, \"info\": [ { \"acceptOrderTime\": \"1000-01-01 00:00:00\", \"cutBedInfo\": [ { \"quantityInterval\": \"950\", \"sizeName\": \"XXL\" } ], \"cutBedQty\": 950, \"deliveryTime\": \"2022-01-16\", \"designCode\": \"W1diu2107020007\", \"isFirst\": true, \"isUrgent\": false, \"orderInfo\": [ { \"quantity\": 950, \"sizeName\": \"XXL\" } ], \"orderPrice\": \"567.56\", \"orderRecordId\": \"9111130000000059412\", \"orderType\": \"FOB\", \"pic\": \"https://filetest.ltwebstatic.com/spiderfile/aifd/2021/5/16220821371440386787.jpg\", \"placeOrderTime\": \"2022-01-12 14:36:17\", \"produceOrderId\": 9298549, \"producer\": \"52055分厂1\", \"quantity\": 950, \"refSku\": \"\", \"sku\": \"mM21052766243933\", \"status\": \"已发货\", \"stockType\": \"JIT备货\" }, { \"acceptOrderTime\": \"2022-05-13 16:44:38\", \"cutBedInfo\": [ { \"quantityInterval\": \"39\", \"sizeName\": \"S\" } ], \"cutBedQty\": 39, \"deliveryTime\": \"2022-02-25\", \"designCode\": \"W1diu2107020005\", \"isFirst\": true, \"isUrgent\": false, \"orderInfo\": [ { \"quantity\": 30, \"sizeName\": \"S\" } ], \"orderPrice\": \"12.00\", \"orderRecordId\": \"9111130000000059754\", \"orderType\": \"FOB\", \"pic\": \"https://imgdeal-test01.shein.com/pi_img/2021/06/01/16225347921750591502.jpg\", \"placeOrderTime\": \"2022-02-28 13:50:16\", \"produceOrderId\": 9315846, \"producer\": \"52055分厂1\", \"quantity\": 30, \"refS",
+  "errorCode": null
+}

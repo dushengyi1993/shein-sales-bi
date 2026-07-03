@@ -1,0 +1,210 @@
+{
+  "docId": "3001424",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "重录订单米数和裁片",
+    "userDocName": "给外部供应商调用- 重录订单米数和裁片",
+    "endpoint": "/open-api/mdp/order/goods/reenter-order-info",
+    "method": "POST",
+    "docName": "post_open-api_mdp_order_goods_reenter-order-info",
+    "version": 2,
+    "updateTime": "2025-10-15 15:04:38",
+    "changeContent": "更新MDP文档",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": null,
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "bagInfoList",
+        "type": "object",
+        "description": "烧花，袋信息列表,仅当烧花裁片时必填",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "sizeInfoList",
+            "type": "object",
+            "required": true,
+            "description": "尺码信息",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "quantity",
+                "type": "integer",
+                "required": true,
+                "description": "数量，烧花明细实际数量必须小于等于999",
+                "example": "4852",
+                "multiple": 0
+              },
+              {
+                "name": "size",
+                "type": "string",
+                "required": true,
+                "description": "尺码",
+                "example": "provident impedit recusandae sint eligendi eius nam aut minus ipsum",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "operateTime",
+        "type": "string",
+        "required": true,
+        "description": "operateTime",
+        "example": "2025-04-20 02:53:08",
+        "multiple": 0
+      },
+      {
+        "name": "orderNo",
+        "type": "string",
+        "required": true,
+        "description": "加工单号",
+        "example": "aperiam modi labore et iusto facilis culpa omnis nesciunt necessitatibus provident nam minus pariatur",
+        "multiple": 0
+      },
+      {
+        "name": "reenterType",
+        "type": "integer",
+        "required": true,
+        "description": "重录类型，1、成品布、2、烧花裁片",
+        "example": "51067",
+        "multiple": 0
+      },
+      {
+        "name": "transferPrintList",
+        "type": "object",
+        "description": "转印条数，仅当成品布时必填",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "num",
+            "type": "double",
+            "required": true,
+            "description": "转印米数，数量最多3位整数，2位小数",
+            "example": "486.33",
+            "multiple": 0
+          },
+          {
+            "name": "serialNo",
+            "type": "integer",
+            "required": true,
+            "description": "转印序号",
+            "example": "10865",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "userCode",
+        "type": "string",
+        "description": "操作人的用户Code",
+        "example": "24238",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "bagInfoList",
+            "type": "object",
+            "description": "烧花，袋信息列表,仅当烧花裁片时必填",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "barCode",
+                "type": "string",
+                "description": "捆袋编码",
+                "example": "29477",
+                "multiple": 0
+              },
+              {
+                "name": "sizeInfoList",
+                "type": "object",
+                "required": true,
+                "description": "尺码信息列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "quantity",
+                    "type": "integer",
+                    "description": "数量",
+                    "example": "31184",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "size",
+                    "type": "string",
+                    "description": "尺码",
+                    "example": "rem beatae autem deleniti doloribus amet reprehenderit aut placeat praesentium qui voluptatem autem repudiandae",
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "orderNo",
+            "type": "string",
+            "description": "加工单号",
+            "example": "ut aut nemo quidem nihil quo dolorum cumque quaerat veritatis tenetur dolor eum molestiae rerum beatae facere occaecati",
+            "multiple": 0
+          },
+          {
+            "name": "transferPrintList",
+            "type": "object",
+            "description": "转印条数，仅当成品布时必填",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "clothGuid",
+                "type": "string",
+                "description": "条编码",
+                "example": "49791",
+                "multiple": 0
+              },
+              {
+                "name": "num",
+                "type": "double",
+                "description": "数量",
+                "example": "58275.85",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "example": "前端展示的描述信息",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

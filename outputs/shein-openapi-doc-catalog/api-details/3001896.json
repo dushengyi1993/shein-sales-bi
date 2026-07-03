@@ -1,0 +1,191 @@
+{
+  "docId": "3001896",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "商品撤回",
+    "userDocName": "撤回商品审核",
+    "endpoint": "/open-api/goods/revoke-product",
+    "method": "POST",
+    "docName": "post_open-api_goods_revoke-product",
+    "version": 4,
+    "updateTime": "2026-07-02 21:00:01",
+    "changeContent": "更新文档标题",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      2,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "该接口支持根据spu撤回在审核中的商品，审核通过的商品无法撤回。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "language",
+        "type": "string",
+        "required": true,
+        "description": "支持返回的多语言报错信息，例如：language:en。默认返回中文多语言信息 支持传参： 英语:en 法语: fr 西班牙语:es 德语:de 中文简体:zh-cn 泰语:th 巴西葡语:pt-br"
+      },
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json;charset=UTF-8",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "description": "OpenAPI根据spu撤回公文",
+    "label": "RevokeProductReq",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "spuName",
+        "type": "string",
+        "required": true,
+        "description": "spuName，商品发布成功后返回的spuName",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOf公文撤回响应",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "label": "公文撤回响应",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "failCount",
+            "type": "integer",
+            "required": false,
+            "description": "失败数",
+            "multiple": 0
+          },
+          {
+            "name": "failList",
+            "type": "object",
+            "required": false,
+            "description": "失败结果",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "documentSn",
+                "type": "string",
+                "required": false,
+                "description": "公文号",
+                "multiple": 0
+              },
+              {
+                "name": "msg",
+                "type": "string",
+                "required": false,
+                "description": "错误信息",
+                "multiple": 0
+              },
+              {
+                "name": "skcName",
+                "type": "string",
+                "required": false,
+                "description": "skcName，商品发布成功后返回的skcName",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "successCount",
+            "type": "integer",
+            "required": false,
+            "description": "成功数",
+            "multiple": 0
+          },
+          {
+            "name": "successList",
+            "type": "object",
+            "required": false,
+            "description": "成功结果",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "documentSn",
+                "type": "string",
+                "required": false,
+                "description": "公文号",
+                "multiple": 0
+              },
+              {
+                "name": "skcName",
+                "type": "string",
+                "required": false,
+                "description": "skcName，商品发布成功后返回的skcName",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "total",
+            "type": "integer",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi-test01.sheincorp.cn/open-api/goods/revoke-product' \\ --header 'language: zh-cn' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-timestamp: 1752733538805' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi-test01.sheincorp.cn' \\ --data-raw '{ \"spuName\": \"s2502064450\" }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"successList\": [ { \"documentSn\": \"SPMPA420250211000105\", \"skcName\": \"ss25021193534484\" }, { \"documentSn\": \"SPMPA420250211000104\", \"skcName\": \"ss25021193538318\" } ], \"failList\": [], \"total\": 2, \"successCount\": 2, \"failCount\": 0 }, \"bbl\": null, \"traceId\": \"c5374300f0a2e5f4\" }",
+  "errorCode": null
+}

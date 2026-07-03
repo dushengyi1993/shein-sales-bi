@@ -1,0 +1,364 @@
+{
+  "docId": "3001819",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "库存结余列表查询",
+    "userDocName": "库存结余列表查询",
+    "endpoint": "/open-api/sims/stock-query",
+    "method": "POST",
+    "docName": "",
+    "version": 2,
+    "updateTime": "2026-06-15 15:06:59",
+    "changeContent": "调整请求头参数",
+    "qpsContent": "",
+    "modes": [
+      3
+    ],
+    "modeNames": [
+      "SHEIN自营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识openKeyId，获取方式请查阅：授权手册"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "请求签名，生成规则请查阅：签名规则"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "支持返回的多语言报错信息，默认返回中文多语言信息"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "label": "OpenApiStockQueryRequest",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "skcList",
+        "type": "string",
+        "required": false,
+        "description": "需查询SKC列表",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfOpenApiStockQueryResponse",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "响应异常时的bbl相关信息",
+        "label": "BblMeta",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "key",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "npid",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "tag",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "value",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "请求响应",
+        "label": "OpenApiStockQueryResponse",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "list",
+            "type": "object",
+            "required": false,
+            "description": "数据列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "accurateInventoryExpireTime",
+                "type": "datetime",
+                "required": false,
+                "description": "失效时间",
+                "multiple": 0
+              },
+              {
+                "name": "accurateInventoryLabel",
+                "type": "integer",
+                "required": false,
+                "description": "库存准确",
+                "multiple": 0
+              },
+              {
+                "name": "accurateInventoryLabelName",
+                "type": "string",
+                "required": false,
+                "description": "是否盘点准确",
+                "multiple": 0
+              },
+              {
+                "name": "skc",
+                "type": "string",
+                "required": false,
+                "description": "skc",
+                "multiple": 0
+              },
+              {
+                "name": "skcLocationList",
+                "type": "object",
+                "required": false,
+                "description": "skc库位信息",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "locationId",
+                    "type": "int64",
+                    "required": false,
+                    "description": "库位ID",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "locationName",
+                    "type": "string",
+                    "required": false,
+                    "description": "库位编码/库位名称",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "warehouseId",
+                    "type": "int64",
+                    "required": false,
+                    "description": "仓库id",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "warehouseName",
+                    "type": "string",
+                    "required": false,
+                    "description": "仓库名称",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "skuList",
+                "type": "object",
+                "required": false,
+                "description": "sku列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "isInventory",
+                    "type": "boolean",
+                    "required": false,
+                    "description": "盘点状态",
+                    "example": "false",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "isInventoryName",
+                    "type": "string",
+                    "required": false,
+                    "description": "盘点状态名称",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "sku",
+                    "type": "string",
+                    "required": false,
+                    "description": "sku编码",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "stockList",
+                    "type": "object",
+                    "required": false,
+                    "description": "实际库存-仓库管理模式下返回",
+                    "multiple": 1,
+                    "children": [
+                      {
+                        "name": "locationId",
+                        "type": "string",
+                        "required": false,
+                        "multiple": 0
+                      },
+                      {
+                        "name": "locationName",
+                        "type": "string",
+                        "required": false,
+                        "multiple": 0
+                      },
+                      {
+                        "name": "stockQty",
+                        "type": "integer",
+                        "required": false,
+                        "description": "库存数量",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "type",
+                        "type": "integer",
+                        "required": false,
+                        "description": "库存类型1实际库存/备货库存，2JIT库存",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "warehouseId",
+                        "type": "int64",
+                        "required": false,
+                        "description": "仓库id",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "warehouseName",
+                        "type": "string",
+                        "required": false,
+                        "description": "仓库名称",
+                        "multiple": 0
+                      }
+                    ]
+                  },
+                  {
+                    "name": "stockLocationList",
+                    "type": "object",
+                    "required": false,
+                    "description": "库存库位列表-库位管理模式下返回",
+                    "multiple": 1,
+                    "children": [
+                      {
+                        "name": "locationId",
+                        "type": "int64",
+                        "required": false,
+                        "description": "库位ID",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "locationName",
+                        "type": "string",
+                        "required": false,
+                        "description": "库位编码/库位名称",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "warehouseId",
+                        "type": "int64",
+                        "required": false,
+                        "description": "仓库id",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "warehouseName",
+                        "type": "string",
+                        "required": false,
+                        "description": "仓库名称",
+                        "multiple": 0
+                      }
+                    ]
+                  },
+                  {
+                    "name": "suffixZh",
+                    "type": "string",
+                    "required": false,
+                    "description": "sku属性集-销售属性拼接（中文）",
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

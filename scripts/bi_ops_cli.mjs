@@ -32,6 +32,10 @@ function parseArgs(argv) {
     sourceStores: [],
     writeStores: [],
     products: [],
+    spuList: [],
+    skcList: [],
+    skuCodeList: [],
+    supplierSkuList: [],
     operation: '',
     mode: 'dry-run',
     confirm: '',
@@ -45,6 +49,33 @@ function parseArgs(argv) {
     json: true,
     passwordStdin: false,
     requireRealSubmit: false,
+    imageFile: '',
+    imageUrl: '',
+    imageType: 0,
+    imageDir: '',
+    outputFile: '',
+    openapiConfigFile: '',
+    openapiStoreTruthFile: '',
+    categoryId: '',
+    pageNum: 1,
+    pageSize: 10,
+    languageList: [],
+    version: '',
+    payloadHash: '',
+    orderNo: '',
+    handleType: 1,
+    expressCode: '',
+    expressIdCode: '',
+    expressChannelCode: '',
+    goodsId: '',
+    goodsIds: [],
+    preRequestId: '',
+    packageNo: [],
+    deliveryNo: '',
+    docId: '',
+    endpoint: '',
+    bodyJson: '',
+    bodyFile: '',
   };
   const rest = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -60,6 +91,10 @@ function parseArgs(argv) {
     else if (a === '--source-store' || a === '--source-stores' || a === '--read-store' || a === '--read-stores') args.sourceStores.push(...splitList(argv[++i]));
     else if (a === '--target-store' || a === '--target-stores' || a === '--write-store' || a === '--write-stores') args.writeStores.push(...splitList(argv[++i]));
     else if (a === '--product' || a === '--products' || a === '--ref') args.products.push(...splitList(argv[++i]));
+    else if (a === '--spu' || a === '--spu-name') args.spuList.push(...splitList(argv[++i]));
+    else if (a === '--skc' || a === '--skc-name') args.skcList.push(...splitList(argv[++i]));
+    else if (a === '--sku-code') args.skuCodeList.push(...splitList(argv[++i]));
+    else if (a === '--supplier-sku') args.supplierSkuList.push(...splitList(argv[++i]));
     else if (a === '--operation' || a === '--action' || a === '--intent') args.operation = normalizeOperationName(argv[++i]);
     else if (a === '--mode') args.mode = String(argv[++i] || 'dry-run').trim();
     else if (a === '--confirm') args.confirm = String(argv[++i] || '').trim();
@@ -72,6 +107,33 @@ function parseArgs(argv) {
     else if (a === '--limit') args.limit = Number(argv[++i] || 40);
     else if (a === '--pretty') args.json = false;
     else if (a === '--require-real-submit' || a === '--require-execute') args.requireRealSubmit = true;
+    else if (a === '--file' || a === '--image-file') args.imageFile = path.resolve(String(argv[++i] || ''));
+    else if (a === '--url' || a === '--image-url') args.imageUrl = String(argv[++i] || '').trim();
+    else if (a === '--image-type' || a === '--type') args.imageType = Number(argv[++i] || 0);
+    else if (a === '--image-dir' || a === '--dir') args.imageDir = path.resolve(String(argv[++i] || ''));
+    else if (a === '--out' || a === '--output') args.outputFile = path.resolve(String(argv[++i] || ''));
+    else if (a === '--openapi-config') args.openapiConfigFile = path.resolve(String(argv[++i] || ''));
+    else if (a === '--store-truth' || a === '--openapi-store-truth') args.openapiStoreTruthFile = path.resolve(String(argv[++i] || ''));
+    else if (a === '--category' || a === '--category-id') args.categoryId = String(argv[++i] || '').trim();
+    else if (a === '--page' || a === '--page-num') args.pageNum = Number(argv[++i] || 1);
+    else if (a === '--page-size') args.pageSize = Number(argv[++i] || 10);
+    else if (a === '--language' || a === '--languages') args.languageList.push(...splitList(argv[++i]).map(x => x.toLowerCase()));
+    else if (a === '--version') args.version = String(argv[++i] || '').trim();
+    else if (a === '--payload-hash') args.payloadHash = String(argv[++i] || '').trim();
+    else if (a === '--order-no' || a === '--order') args.orderNo = String(argv[++i] || '').trim();
+    else if (a === '--handle-type') args.handleType = Number(argv[++i] || 1);
+    else if (a === '--express-code') args.expressCode = String(argv[++i] || '').trim();
+    else if (a === '--express-id-code') args.expressIdCode = String(argv[++i] || '').trim();
+    else if (a === '--express-channel-code') args.expressChannelCode = String(argv[++i] || '').trim();
+    else if (a === '--goods-id') args.goodsId = String(argv[++i] || '').trim();
+    else if (a === '--goods-ids') args.goodsIds.push(...splitList(argv[++i]));
+    else if (a === '--pre-request-id') args.preRequestId = String(argv[++i] || '').trim();
+    else if (a === '--package-no' || a === '--package-nos') args.packageNo.push(...splitList(argv[++i]));
+    else if (a === '--delivery-no') args.deliveryNo = String(argv[++i] || '').trim();
+    else if (a === '--doc-id' || a === '--docId') args.docId = String(argv[++i] || '').trim();
+    else if (a === '--endpoint') args.endpoint = String(argv[++i] || '').trim();
+    else if (a === '--body-json') args.bodyJson = String(argv[++i] || '');
+    else if (a === '--body-file') args.bodyFile = path.resolve(String(argv[++i] || ''));
     else if (a === '--help' || a === '-h') {
       args.command = 'help';
     } else if (!args.command) {
@@ -136,6 +198,15 @@ Usage:
   node scripts/bi_ops_cli.mjs capabilities
   node scripts/bi_ops_cli.mjs maintenance-readiness --operation retire_link --expect blocked
   node scripts/bi_ops_cli.mjs maintenance-readiness --operation retire_link --doc-evidence <schema.json> --store-probe <probe.json> --readback-evidence <readback.json> --expect pilot_ready
+  node scripts/bi_ops_cli.mjs plan-images --image-dir <图片文件夹> [--out roles.json]
+  node scripts/bi_ops_cli.mjs upload-pic --store FY --image-type 2 --file <image.jpg> [--mode dry-run|execute]
+  node scripts/bi_ops_cli.mjs transform-pic --store FY --image-type 2 --url <https://...> [--mode dry-run|execute]
+  node scripts/bi_ops_cli.mjs audit-status --store FY --spu <SPU> [--mode dry-run|execute]
+  node scripts/bi_ops_cli.mjs search-product --store FY [--spu <SPU>|--product <货号>] [--mode dry-run|execute]
+  node scripts/bi_ops_cli.mjs publish-standard --store FY [--category <id>] [--mode dry-run|execute]
+  node scripts/bi_ops_cli.mjs shelf-quota --store FY [--mode dry-run|execute]
+  node scripts/bi_ops_cli.mjs order-fulfillment --operation export-address --store FY --order-no <order>
+  node scripts/bi_ops_cli.mjs openapi-call --doc-id <docId> --store FY --body-json '{}'
   node scripts/bi_ops_cli.mjs tasks
   node scripts/bi_ops_cli.mjs create --text "把 520a 在 DL 生成下架预检" --stores DL --products 520a
   node scripts/bi_ops_cli.mjs create --text "复制 CX 的 SM-961 到 HL" --source-stores CX --target-stores HL --products SM-961
@@ -158,11 +229,23 @@ Options:
   --doc-evidence / --store-probe / --readback-evidence
                    maintenance-readiness 用；维护真实写的脱敏证据文件
   --expect         maintenance-readiness 用；blocked / schema_ready / pilot_ready
+  --image-dir      plan-images 用；只扫描本地图包并输出角色规划，不上传、不提交
+  --file / --url   图片工具用；本地文件或外链图片地址
+  --image-type     图片工具用；1主图 / 2细节图 / 5方块图 / 6色块图 / 7详情图
+  --openapi-config 图片工具用；默认 config/shein_openapi.local.json 或 SHEIN_OPENAPI_CONFIG_FILE
+  --store-truth    OpenAPI 工具用；默认 config/store_account_truth.json
+  --category       publish-standard/search-product 用；末级分类 ID
+  --page-size      search-product 用；最大 10
 
 Safety:
   - 密码只用于 login 请求，不写入 session 文件。
   - doctor 只做本机/云端连通性和权限自检，不创建任务、不触发预检、不执行 SHEIN 写。
   - maintenance-readiness 只读检查脱敏证据，不连接 SHEIN，不打开真实写。
+  - plan-images 只做本地图包角色规划，备用目录和“产品封面/AB测试”图不提交。
+  - upload-pic / transform-pic 委托本地 OpenAPI 图片工具；默认 dry-run，execute 会先做店铺身份探针。
+  - audit-status / search-product / publish-standard 是只读 OpenAPI 工具；默认 dry-run，execute 会先做店铺身份探针。
+  - order-fulfillment 是高风险订单履约工具；execute 必须额外提供确认文本和 dry-run payload hash。
+  - openapi-call 是目录驱动 JSON 兜底工具；文件上传/WebHook 会被阻断，写接口 execute 必须确认文本和 payload hash。
   - 所有任务创建/预检/执行/审计都走云端账号权限和审计。
   - execute 仍需服务端确认任务已预检通过，并且确认文本精确匹配。
   - resolve 只用于已提交待回读/需人工处理任务的人工核销；服务端只允许全店管理账号执行。`;
@@ -556,6 +639,106 @@ async function runMaintenanceReadiness(args) {
   process.exitCode = result.code || 0;
 }
 
+async function runImageAssetExecutor(args, action) {
+  const store = [...new Set([...(args.stores || []), ...(args.writeStores || [])])][0] || '';
+  if (!store) throw new Error(`${action} requires --store <店铺>`);
+  if (!args.imageType) throw new Error(`${action} requires --image-type <1|2|5|6|7>`);
+  const commandArgs = [action, '--store', store, '--image-type', String(args.imageType), '--mode', args.mode || 'dry-run'];
+  if (args.openapiConfigFile) commandArgs.push('--config', args.openapiConfigFile);
+  if (args.openapiStoreTruthFile) commandArgs.push('--store-truth', args.openapiStoreTruthFile);
+  if (action === 'upload-pic') {
+    if (!args.imageFile) throw new Error('upload-pic requires --file <image.jpg|png>');
+    commandArgs.push('--file', args.imageFile);
+  } else {
+    if (!args.imageUrl) throw new Error('transform-pic requires --url <https://...>');
+    commandArgs.push('--url', args.imageUrl);
+  }
+  const result = await runLocalNodeScript('scripts/openapi_image_asset_executor.mjs', commandArgs);
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  process.exitCode = result.code || 0;
+}
+
+async function runPlanImages(args) {
+  if (!args.imageDir) throw new Error('plan-images requires --image-dir <图片文件夹>');
+  const commandArgs = ['--dir', args.imageDir];
+  if (args.outputFile) commandArgs.push('--out', args.outputFile);
+  if (!args.json) commandArgs.push('--pretty');
+  const result = await runLocalNodeScript('scripts/link_ops_plan_image_roles.mjs', commandArgs);
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  process.exitCode = result.code || 0;
+}
+
+async function runReadonlyExecutor(args, action) {
+  const store = [...new Set([...(args.stores || []), ...(args.writeStores || [])])][0] || '';
+  if (!store) throw new Error(`${action} requires --store <店铺>`);
+  const commandArgs = [action, '--store', store, '--mode', args.mode || 'dry-run'];
+  if (args.openapiConfigFile) commandArgs.push('--config', args.openapiConfigFile);
+  if (args.openapiStoreTruthFile) commandArgs.push('--store-truth', args.openapiStoreTruthFile);
+  if (args.categoryId) commandArgs.push('--category', args.categoryId);
+  if (args.pageNum) commandArgs.push('--page', String(args.pageNum));
+  if (args.pageSize) commandArgs.push('--page-size', String(args.pageSize));
+  if (args.languageList.length) commandArgs.push('--language', args.languageList.join(','));
+  if (args.version) commandArgs.push('--version', args.version);
+  for (const spu of args.spuList || []) commandArgs.push('--spu', spu);
+  for (const skc of args.skcList || []) commandArgs.push('--skc', skc);
+  for (const skuCode of args.skuCodeList || []) commandArgs.push('--sku-code', skuCode);
+  for (const supplierSku of args.supplierSkuList || []) commandArgs.push('--supplier-sku', supplierSku);
+  for (const product of args.products || []) {
+    if (action === 'search-product') commandArgs.push('--supplier-code', product);
+    else commandArgs.push('--spu', product);
+  }
+  const result = await runLocalNodeScript('scripts/openapi_readonly_executor.mjs', commandArgs);
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  process.exitCode = result.code || 0;
+}
+
+async function runOrderFulfillmentExecutor(args) {
+  const store = [...new Set([...(args.stores || []), ...(args.writeStores || [])])][0] || '';
+  if (!store) throw new Error('order-fulfillment requires --store <店铺>');
+  if (!args.operation) throw new Error('order-fulfillment requires --operation <export-address|import-express|place-express-order|print-express-info>');
+  const commandArgs = [args.operation, '--store', store, '--mode', args.mode || 'dry-run'];
+  if (args.confirm) commandArgs.push('--confirm', args.confirm);
+  if (args.payloadHash) commandArgs.push('--payload-hash', args.payloadHash);
+  if (args.openapiConfigFile) commandArgs.push('--config', args.openapiConfigFile);
+  if (args.openapiStoreTruthFile) commandArgs.push('--store-truth', args.openapiStoreTruthFile);
+  if (args.orderNo) commandArgs.push('--order-no', args.orderNo);
+  if (args.handleType) commandArgs.push('--handle-type', String(args.handleType));
+  if (args.expressCode) commandArgs.push('--express-code', args.expressCode);
+  if (args.expressIdCode) commandArgs.push('--express-id-code', args.expressIdCode);
+  if (args.expressChannelCode) commandArgs.push('--express-channel-code', args.expressChannelCode);
+  if (args.goodsId) commandArgs.push('--goods-id', args.goodsId);
+  if (args.goodsIds.length) commandArgs.push('--goods-ids', args.goodsIds.join(','));
+  if (args.preRequestId) commandArgs.push('--pre-request-id', args.preRequestId);
+  if (args.packageNo.length) commandArgs.push('--package-no', args.packageNo.join(','));
+  if (args.deliveryNo) commandArgs.push('--delivery-no', args.deliveryNo);
+  const result = await runLocalNodeScript('scripts/openapi_order_fulfillment_executor.mjs', commandArgs);
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  process.exitCode = result.code || 0;
+}
+
+async function runCatalogExecutor(args) {
+  const store = [...new Set([...(args.stores || []), ...(args.writeStores || [])])][0] || '';
+  if (!store) throw new Error('openapi-call requires --store <店铺>');
+  if (!args.docId && !args.endpoint) throw new Error('openapi-call requires --doc-id or --endpoint');
+  const commandArgs = ['--store', store, '--mode', args.mode || 'dry-run'];
+  if (args.docId) commandArgs.push('--doc-id', args.docId);
+  if (args.endpoint) commandArgs.push('--endpoint', args.endpoint);
+  if (args.bodyFile) commandArgs.push('--body-file', args.bodyFile);
+  else commandArgs.push('--body-json', args.bodyJson || '{}');
+  if (args.confirm) commandArgs.push('--confirm', args.confirm);
+  if (args.payloadHash) commandArgs.push('--payload-hash', args.payloadHash);
+  if (args.openapiConfigFile) commandArgs.push('--config', args.openapiConfigFile);
+  if (args.openapiStoreTruthFile) commandArgs.push('--store-truth', args.openapiStoreTruthFile);
+  const result = await runLocalNodeScript('scripts/openapi_catalog_executor.mjs', commandArgs);
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  process.exitCode = result.code || 0;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.command === 'help') {
@@ -598,6 +781,42 @@ async function main() {
   }
   if (args.command === 'maintenance-readiness' || args.command === 'maintenance_readiness') {
     await runMaintenanceReadiness(args);
+    return;
+  }
+  if (args.command === 'plan-images' || args.command === 'plan_images') {
+    await runPlanImages(args);
+    return;
+  }
+  if (args.command === 'upload-pic' || args.command === 'upload_pic') {
+    await runImageAssetExecutor(args, 'upload-pic');
+    return;
+  }
+  if (args.command === 'transform-pic' || args.command === 'transform_pic') {
+    await runImageAssetExecutor(args, 'transform-pic');
+    return;
+  }
+  if (args.command === 'audit-status' || args.command === 'audit_status') {
+    await runReadonlyExecutor(args, 'audit-status');
+    return;
+  }
+  if (args.command === 'search-product' || args.command === 'search_product') {
+    await runReadonlyExecutor(args, 'search-product');
+    return;
+  }
+  if (args.command === 'publish-standard' || args.command === 'publish_standard') {
+    await runReadonlyExecutor(args, 'publish-standard');
+    return;
+  }
+  if (args.command === 'shelf-quota' || args.command === 'shelf_quota') {
+    await runReadonlyExecutor(args, 'shelf-quota');
+    return;
+  }
+  if (args.command === 'order-fulfillment' || args.command === 'order_fulfillment') {
+    await runOrderFulfillmentExecutor(args);
+    return;
+  }
+  if (args.command === 'openapi-call' || args.command === 'openapi_call') {
+    await runCatalogExecutor(args);
     return;
   }
   if (args.command === 'me') {

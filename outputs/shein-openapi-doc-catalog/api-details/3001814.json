@@ -1,0 +1,174 @@
+{
+  "docId": "3001814",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "客单物流轨迹查询",
+    "userDocName": "客单物流轨迹查询",
+    "endpoint": "/open-api/gsp/logistics-track",
+    "method": "GET",
+    "docName": "get_open-api_gsp_logistics-track",
+    "version": 8,
+    "updateTime": "2026-06-15 10:23:56",
+    "changeContent": "修改请求参数",
+    "qpsContent": "80",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "通过该接口查下正向客单或逆向退回单的物流轨迹信息；",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-language",
+        "type": "string",
+        "description": "指定出参语种，默认英文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object",
+    "children": [
+      {
+        "name": "orderNo",
+        "type": "string",
+        "description": "正向订单号；正向订单号和退货单号必填一个；当查询正向订单号时，包裹号和运单号必填一个；"
+      },
+      {
+        "name": "packageNo",
+        "type": "string",
+        "description": "包裹号；包裹下有多运单的情况下会返回所有运单信息；"
+      },
+      {
+        "name": "waybillNo",
+        "type": "string",
+        "description": "运单号；按指定运单号返回信息；"
+      },
+      {
+        "name": "returnOrderNo",
+        "type": "string",
+        "description": "退货单号；"
+      }
+    ]
+  },
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": true,
+        "description": "成功：OK"
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "required": true,
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "children": [
+          {
+            "name": "trackInfo",
+            "type": "object",
+            "description": "轨迹信息",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "carrier",
+                "type": "string",
+                "description": "物流商名称；退货场景时，当waybillType=3，统一为“自送”；"
+              },
+              {
+                "name": "carrierCode",
+                "type": "string",
+                "description": "物流商编码；"
+              },
+              {
+                "name": "waybillNo",
+                "type": "string",
+                "description": "运单号"
+              },
+              {
+                "name": "waybillType",
+                "type": "string",
+                "description": "运单对应运输段类型；正向：1-发货头程运单，2-发货尾程运单，6-退货退供运单；逆向：2-发货尾程运单，3-退货用户运单，4-退货平台运单，5-退货卖家履约运单，6-退货退供运单"
+              },
+              {
+                "name": "tracking",
+                "type": "object",
+                "description": "轨迹节点信息",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "description",
+                    "type": "string",
+                    "description": "节点信息具体说明"
+                  },
+                  {
+                    "name": "nodeCode",
+                    "type": "string",
+                    "description": "节点代码"
+                  },
+                  {
+                    "name": "nodeCodeName",
+                    "type": "string",
+                    "description": "节点名称"
+                  },
+                  {
+                    "name": "updateTimeMillis",
+                    "type": "int64",
+                    "description": "该节点的记录时间（单位毫秒，时区UTC+8）；"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "curl --location --request GET 'https://openapi.sheincorp.com/open-api/gsp/logistics-track?orderNo=GSH12110300000M&packageNo=GU25042815276285952' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570729613' \\ --data-raw ''",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"trackInfo\": [ { \"waybillNo\": \"PGC250403545463910620250403\", \"carrier\": \"J&T\", \"carrierCode\": \"\", \"waybillType\": 1, \"tracking\": [ { \"nodeCode\": \"in_transport\", \"nodeCodeName\": \"运输中\", \"description\": \"头程装车扫描\", \"updateTimeMillis\": 1743821802000 }, { \"nodeCode\": \"in_transport\", \"nodeCodeName\": \"运输中\", \"description\": \"头程建包扫描\", \"updateTimeMillis\": 1743799058000 } ] }, { \"waybillNo\": \"SHBG1745798733148268\", \"carrier\": \"USPS\", \"carrierCode\": \"\", \"waybillType\": 2, \"tracking\": [ { \"nodeCode\": \"tail_accept\", \"nodeCodeName\": \"派件异常\", \"description\": \"【InTransit_003】【InTransit_003】ArrivedAtCarrierFacility\", \"updateTimeMillis\": 1742429068000 }, { \"nodeCode\": \"signed\", \"nodeCodeName\": \"运输中\", \"description\": \"1\", \"updateTimeMillis\": 1742245709000 } ] }, { \"waybillNo\": \"QA12344444\", \"carrier\": \"J&T\", \"carrierCode\": \"\", \"waybillType\": 6, \"tracking\": [ { \"nodeCode\": \"sign_for\", \"nodeCodeName\": \"签收\", \"description\": \"送仓扫描\", \"updateTimeMillis\": 1743835065000 }, { \"nodeCode\": \"sign_for\", \"nodeCodeName\": \"签收\", \"description\": \"送仓扫描\", \"updateTimeMillis\": 1743830787000 }, { \"nodeCode\": \"in_transport\", \"nodeCodeName\": \"运输中\", \"description\": \"头程装车扫描\", \"updateTimeMillis\": 1743821802000 }, { \"nodeCode\": \"in_transport\", \"nodeCodeName\": \"运输中\", \"description\": \"头程建包扫描\", \"updateTimeMillis\": 1743799058000 } ] } ] }, \"bbl\": {}, \"traceId\": \"8ea731caf3385b83\" }",
+  "errorCode": null
+}

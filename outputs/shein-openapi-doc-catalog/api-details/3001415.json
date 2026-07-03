@@ -1,0 +1,120 @@
+{
+  "docId": "3001415",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "确认无货接口",
+    "userDocName": "确认无货接口",
+    "endpoint": "/open-api/order/confirm-no-stock",
+    "method": "POST",
+    "docName": "post_open-api_order_confirm-no-stock",
+    "version": 16,
+    "updateTime": "2025-10-11 21:41:39",
+    "changeContent": "变更描述",
+    "qpsContent": "40",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "该API支持商家取消订单中的商品。调用该接口后，开发者再次调用订单详情接口时，可以发现商品的storageTag字段会从1变更为3。随后，系统会在一段时间后将商品的订单状态字段newGoodsStatus修改为6（退款）。⚠️ 注意：商家频繁进行订单取消操作可能会导致店铺受到处罚，请务必谨慎操作",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "skuCode",
+        "type": "string",
+        "description": "SHEIN平台生成的 skuCode；skuCode 和 orderGoodsId 不允许同时为空",
+        "example": "siqwersk74ujdjd"
+      },
+      {
+        "name": "orderNo",
+        "type": "string",
+        "required": true,
+        "description": "订单号",
+        "example": "GSONTJ4490004CY"
+      },
+      {
+        "name": "orderGoodsId",
+        "type": "integer",
+        "required": true,
+        "description": "商品唯一标识；同种商品多件，每件goodsId不同，通过订单详情接口获得",
+        "example": "1212121"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应码",
+        "example": "99002",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "响应信息"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述信息",
+        "example": "The request parameter is abnormal, please refresh and try again",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/order/confirm-no-stock' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570817402' \\ --data-raw '{ \"orderNo\":\"GSON8F44T00000N\", \"orderGoodsId\":3000000000065821, \"skuCode\": \"I95xuum0vjv5\" }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": {} }",
+  "errorCode": null
+}

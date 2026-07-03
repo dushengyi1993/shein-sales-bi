@@ -1,0 +1,157 @@
+{
+  "docId": "3001230",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "创建Feed任务",
+    "userDocName": "创建Feed任务",
+    "endpoint": "/open-api/sem/feed/createFeed",
+    "method": "POST",
+    "docName": "post_open-api_sem_feed_createFeed",
+    "version": 4,
+    "updateTime": "2025-07-15 22:15:43",
+    "changeContent": "1",
+    "qpsContent": "10",
+    "modes": [
+      1
+    ],
+    "modeNames": [
+      "自运营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "feedDocumentId",
+        "type": "string",
+        "required": false,
+        "description": "Feed文件的名称",
+        "multiple": 0
+      },
+      {
+        "name": "feedType",
+        "type": "string",
+        "required": false,
+        "description": "文件的处理方式，目前支持\"PRODUCT_LISTING\"",
+        "multiple": 0
+      },
+      {
+        "name": "version",
+        "type": "string",
+        "required": false,
+        "description": "版本；默认无传",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "响应异常时的bbl相关信息",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1
+              }
+            ]
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "result",
+            "type": "int64",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/sem/feed/createFeed' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570849017' \\ --data-raw '{ \"feedDocumentId\": \"MzgxMDk0NDVfMTBfNDI0XzE3MzM1NDQxMzkyMTY=.json\", \"feedType\": \"PRODUCT_LISTING\", \"version\":\"\" }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"result\": 1865289089032323072 }, \"bbl\": null, \"traceId\": \"5ec8a3225d111eca\" }",
+  "errorCode": null
+}

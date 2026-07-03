@@ -1,0 +1,211 @@
+{
+  "docId": "3001625",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询报账单列表",
+    "userDocName": "查询报账单列表",
+    "endpoint": "/open-api/finance/report-order-list",
+    "method": "POST",
+    "docName": "",
+    "version": 3,
+    "updateTime": "2026-03-26 11:35:05",
+    "changeContent": "新增接口说明",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "自运营和半托管应用可使用该接口查询店铺中已生成的报账单列表。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-language",
+        "type": "string",
+        "description": "指定出参语种，默认英文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "page",
+        "type": "integer",
+        "required": true,
+        "description": "当前页",
+        "example": "1",
+        "multiple": 0
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "required": true,
+        "description": "每页记录数",
+        "example": "20",
+        "multiple": 0
+      },
+      {
+        "name": "reportOrderNo",
+        "type": "string",
+        "description": "报账单编号",
+        "multiple": 0
+      },
+      {
+        "name": "reportStatus",
+        "type": "integer",
+        "description": "报账单状态:1-即将付款，2-已付款，3-付款异常",
+        "example": "2",
+        "multiple": 0
+      },
+      {
+        "name": "completedPayDate",
+        "type": "string",
+        "description": "打款周，格式：yyyy-MM-dd，传入该周任意一天（会覆盖打款完成时间）",
+        "example": "2026-03-23",
+        "multiple": 0
+      },
+      {
+        "name": "completedPayTimeStart",
+        "type": "string",
+        "description": "打款完成结束时间，格式：yyyy-MM-ddHH:mm:ss",
+        "example": "2026-03-23 00:00:00",
+        "multiple": 0
+      },
+      {
+        "name": "completedPayTimeEnd",
+        "type": "string",
+        "description": "打款完成开始时间，格式：yyyy-MM-ddHH:mm:ss",
+        "example": "2026-03-23 23:59:59",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "count",
+            "type": "integer",
+            "example": "100",
+            "multiple": 0
+          },
+          {
+            "name": "list",
+            "type": "object",
+            "required": true,
+            "multiple": 1,
+            "children": [
+              {
+                "name": "reportOrderNo",
+                "type": "string",
+                "required": true,
+                "description": "报账单编号",
+                "example": "RPT20260323001",
+                "multiple": 0
+              },
+              {
+                "name": "reportStatus",
+                "type": "integer",
+                "description": "报账单状态:1-即将付款，2-已付款，3-付款异常",
+                "example": "2",
+                "multiple": 0
+              },
+              {
+                "name": "completedPayTime",
+                "type": "string",
+                "description": "打款日期，yyyy-MM-ddHH:mm:ss",
+                "example": "2026-03-23 10:00:00",
+                "multiple": 0
+              },
+              {
+                "name": "income",
+                "type": "integer",
+                "required": true,
+                "description": "应收金额",
+                "example": "1500",
+                "multiple": 0
+              },
+              {
+                "name": "currencyCode",
+                "type": "string",
+                "required": true,
+                "description": "币种",
+                "example": "USD",
+                "multiple": 0
+              },
+              {
+                "name": "paymentMethod",
+                "type": "integer",
+                "description": "收款方式：1-直接打款，2-钱包充值",
+                "example": "1",
+                "multiple": 0
+              },
+              {
+                "name": "rxAcct",
+                "type": "string",
+                "required": true,
+                "description": "收款账户",
+                "example": "收款账户",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

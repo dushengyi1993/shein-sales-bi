@@ -1,0 +1,538 @@
+{
+  "docId": "3001282",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "退货单-退货单详情查询",
+    "userDocName": "退货单详情查询",
+    "endpoint": "/open-api/return-order/details",
+    "method": "POST",
+    "docName": "post_open-api_return-order_details",
+    "version": 38,
+    "updateTime": "2025-07-21 11:30:42",
+    "changeContent": "更新请求示例",
+    "qpsContent": "40",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "通过该接口获取退货单详情；如何对接退货单请查看客单退货退款服务；",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "returnOrderNoList",
+        "type": "string",
+        "required": true,
+        "description": "最多30条",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": false,
+        "description": "响应码，成功给0",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误信息 无错误时给“OK”",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "description": "响应数据",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "returnOrderNo",
+            "type": "string",
+            "required": false,
+            "description": "退货单号",
+            "example": "N8VTE00002",
+            "multiple": 0
+          },
+          {
+            "name": "returnOrderStatus",
+            "type": "integer",
+            "required": false,
+            "description": "1已关闭 2已申请 3已取消 5已收货 6已妥投 7待交接 8待SHEIN仓中转 9已完成",
+            "example": "5",
+            "multiple": 0
+          },
+          {
+            "name": "noReturnGoodsSign",
+            "type": "integer",
+            "required": false,
+            "description": "0：退货 1：不退货",
+            "example": "0",
+            "multiple": 0
+          },
+          {
+            "name": "returnOrderTagCode",
+            "type": "integer",
+            "required": false,
+            "description": "1:KOL退货单;2:丢件",
+            "multiple": 0
+          },
+          {
+            "name": "orderNo",
+            "type": "string",
+            "required": false,
+            "description": "关联客单单号",
+            "example": "GSON8X44S0000MP",
+            "multiple": 0
+          },
+          {
+            "name": "site",
+            "type": "string",
+            "required": false,
+            "description": "销售站点",
+            "example": "shein-br",
+            "multiple": 0
+          },
+          {
+            "name": "shippingCode",
+            "type": "string",
+            "required": false,
+            "description": "寄件码",
+            "multiple": 0
+          },
+          {
+            "name": "platformExpressNo",
+            "type": "string",
+            "required": false,
+            "description": "SHEIN 平台运单号",
+            "multiple": 0
+          },
+          {
+            "name": "memberExpressNo",
+            "type": "string",
+            "required": false,
+            "description": "买家上传运单号",
+            "multiple": 0
+          },
+          {
+            "name": "expressCompanyName",
+            "type": "string",
+            "required": false,
+            "description": "退货物流商名称",
+            "multiple": 0
+          },
+          {
+            "name": "refundOrderNos",
+            "type": "string",
+            "required": true,
+            "description": "平台退回给卖家的退货单号",
+            "multiple": 1
+          },
+          {
+            "name": "refundWaybill",
+            "type": "json",
+            "required": false,
+            "description": "平台退回给卖家的退货运单号",
+            "multiple": 0
+          },
+          {
+            "name": "refundExpressCompanyName",
+            "type": "string",
+            "required": false,
+            "description": "平台退回给卖家的退货物流商名称",
+            "multiple": 0
+          },
+          {
+            "name": "performanceCost",
+            "type": "integer",
+            "required": false,
+            "description": "退货履约服务费",
+            "example": "0",
+            "multiple": 0
+          },
+          {
+            "name": "invoiceStatus",
+            "type": "integer",
+            "required": false,
+            "description": "巴西退货发票状态；0:不开票/ 1:待开票/ 2:已申请发票/ 3:开票成功",
+            "example": "1",
+            "multiple": 0
+          },
+          {
+            "name": "requestReturnTime",
+            "type": "string",
+            "required": false,
+            "description": "退货申请时间,格式： yyyy-MM-dd HH:mm:ss",
+            "example": "2023-08-03 11:17:26",
+            "multiple": 0
+          },
+          {
+            "name": "allocateTime",
+            "type": "string",
+            "required": false,
+            "description": "退货单下发时间，格式：yyyy-MM-dd HH:mm:ss",
+            "example": "2023-08-03 11:17:28",
+            "multiple": 0
+          },
+          {
+            "name": "lastUpdateTime",
+            "type": "string",
+            "required": false,
+            "description": "更新时间，格式：yyyy-MM-dd HH:mm:ss",
+            "example": "2023-08-03 16:13:39",
+            "multiple": 0
+          },
+          {
+            "name": "sellerSignedTime",
+            "type": "string",
+            "required": false,
+            "description": "退货签收时间，格式：yyyy-MM-dd HH:mm:ss",
+            "example": "2023-08-03 16:13:32",
+            "multiple": 0
+          },
+          {
+            "name": "cancelTime",
+            "type": "string",
+            "required": false,
+            "description": "取消退货申请时间，格式：yyyy-MM-dd HH:mm:ss",
+            "multiple": 0
+          },
+          {
+            "name": "completedTime",
+            "type": "string",
+            "required": false,
+            "description": "退货完成时间，格式：yyyy-MM-dd HH:mm:ss",
+            "multiple": 0
+          },
+          {
+            "name": "checkStatus",
+            "type": "integer",
+            "required": false,
+            "description": "对账状态，1:已对账/ 2: 未对账",
+            "example": "1",
+            "multiple": 0
+          },
+          {
+            "name": "stockMode",
+            "type": "integer",
+            "required": false,
+            "description": "1-SHEIN自主备货, 2-备货到SHEIN仓, 3-不备货到SHEIN仓",
+            "example": "3",
+            "multiple": 0
+          },
+          {
+            "name": "receiveType",
+            "type": "integer",
+            "required": false,
+            "description": "0默认;1卖家收货;2仓库收货",
+            "multiple": 0
+          },
+          {
+            "name": "returnGoodsInfoList",
+            "type": "object",
+            "required": true,
+            "multiple": 1,
+            "children": [
+              {
+                "name": "goodsId",
+                "type": "bigint",
+                "required": false,
+                "description": "关联订单的goodsId；",
+                "example": "4275374634592257",
+                "multiple": 0
+              },
+              {
+                "name": "sku",
+                "type": "string",
+                "required": false,
+                "description": "SHEIN sku ID",
+                "example": "I52pve7u3wf3",
+                "multiple": 0
+              },
+              {
+                "name": "skc",
+                "type": "string",
+                "required": false,
+                "description": "SHEIN skc ID",
+                "example": "sM23011604853289",
+                "multiple": 0
+              },
+              {
+                "name": "goodsSn",
+                "type": "string",
+                "required": false,
+                "description": "seller spu SN",
+                "example": "222222222",
+                "multiple": 0
+              },
+              {
+                "name": "skuSn",
+                "type": "string",
+                "required": false,
+                "description": "seller sku SN",
+                "multiple": 0
+              },
+              {
+                "name": "commodityAttributeList",
+                "type": "object",
+                "required": true,
+                "description": "商品销售属性集",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "attrValueId",
+                    "type": "string",
+                    "required": false,
+                    "description": "属性值ID",
+                    "example": "140,964",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "attrName",
+                    "type": "string",
+                    "required": false,
+                    "description": "属性值名称集合",
+                    "example": "棕色-5",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "language",
+                    "type": "string",
+                    "required": false,
+                    "description": "语种",
+                    "example": "CN",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "goodsTitle",
+                "type": "string",
+                "required": false,
+                "description": "SPU商品名称",
+                "example": "test15",
+                "multiple": 0
+              },
+              {
+                "name": "imageUrl",
+                "type": "string",
+                "required": false,
+                "description": "SPU主图链接",
+                "example": "//imgdeal-test01.shein.com/gspCenter/goodsImage/2023/1/16/7338081779_4399/1732C5C9E09799C3CB328E6DDC568A30_thumbnail_220x293.jpg",
+                "multiple": 0
+              },
+              {
+                "name": "goodsStatus",
+                "type": "integer",
+                "required": false,
+                "description": "商品退货状态；1已关闭 2已申请 3已取消 5已收货 6已妥投 7待交接 8待SHEIN仓中转 9已完成",
+                "example": "5",
+                "multiple": 0
+              },
+              {
+                "name": "returnImageList",
+                "type": "object",
+                "required": true,
+                "description": "退货视频图片",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "type",
+                    "type": "integer",
+                    "required": false,
+                    "description": "1-图片，2-视频",
+                    "example": "1",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "link",
+                    "type": "string",
+                    "required": false,
+                    "description": "url",
+                    "example": "http://filetest.ltwebstatic.com/cspfile/test/return/1691032590167.jpg",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "currency",
+                "type": "string",
+                "description": "币种"
+              },
+              {
+                "name": "saleCurrency",
+                "type": "string",
+                "description": "销售币种"
+              },
+              {
+                "name": "sellerCurrencyPrice",
+                "type": "decimal",
+                "required": false,
+                "description": "商品价格",
+                "example": "666",
+                "multiple": 0
+              },
+              {
+                "name": "costPrice",
+                "type": "decimal",
+                "description": "供货价"
+              },
+              {
+                "name": "settleCurrencyPromotionPrice",
+                "type": "decimal",
+                "description": "活动提报优惠金额"
+              },
+              {
+                "name": "sellerCurrencyStoreCouponPrice",
+                "type": "decimal",
+                "required": false,
+                "description": "店铺优惠金额",
+                "example": "0",
+                "multiple": 0
+              },
+              {
+                "name": "sellerCurrencyPromotionPrice",
+                "type": "decimal",
+                "required": false,
+                "description": "活动优惠金额",
+                "example": "0",
+                "multiple": 0
+              },
+              {
+                "name": "estimateCommission",
+                "type": "decimal",
+                "required": false,
+                "description": "佣金金额",
+                "example": "0",
+                "multiple": 0
+              },
+              {
+                "name": "commissionSaleTax",
+                "type": "decimal",
+                "description": "佣金消费税"
+              },
+              {
+                "name": "performancePrice",
+                "type": "decimal",
+                "description": "退货履约服务费"
+              },
+              {
+                "name": "returnExpense",
+                "type": "decimal",
+                "description": "退货处理费"
+              },
+              {
+                "name": "sellerRealTax",
+                "type": "decimal",
+                "required": false,
+                "description": "欧洲vat税费",
+                "example": "0",
+                "multiple": 0
+              },
+              {
+                "name": "estimateIncomeMoney",
+                "type": "decimal",
+                "required": false,
+                "description": "1、自主运营模式：预计支出=商品价格-优惠券金额-活动优惠金额-佣金+退货处理费+退货单履约服务费。2、半托管模式：预计支出=商品供货价 - 店铺优惠券金额 - 活动提报优惠金额+ 欧洲VAT税费（补贴）+退货处理费+退货单履约服务费",
+                "example": "666",
+                "multiple": 0
+              },
+              {
+                "name": "estimateTaxIncomeMoney",
+                "type": "decimal",
+                "required": false,
+                "description": "1、自主运营模式：预计支出=商品价格-优惠券金额-活动优惠金额-佣金- 欧洲VAT税费（代扣代缴）-佣金消费税+退货处理费+退货单履约服务费。2、半托管模式：预计支出=商品供货价 -活动提报优惠金额+ 欧洲VAT税费（补贴）+退货处理费+退货单履约服务费",
+                "example": "666",
+                "multiple": 0
+              },
+              {
+                "name": "returnReasonList",
+                "type": "object",
+                "required": true,
+                "description": "退货原因",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "language",
+                    "type": "string",
+                    "required": false,
+                    "description": "语种",
+                    "example": "CN",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "reason",
+                    "type": "string",
+                    "required": false,
+                    "description": "原因",
+                    "example": "配饰/件漏发zh-tw",
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/return-order/details' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570817402' \\ --data-raw '{ \"returnOrderNoList\": [ \"NPVYE07KE2\" ] }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": [ { \"returnOrderNo\": \"NPVYE07KE2\", \"returnOrderStatus\": 6, \"noReturnGoodsSign\": 0, \"returnOrderTagCode\": null, \"orderNo\": \"GSONPS56A004WJ8\", \"site\": \"shein-es\", \"shippingCode\": \"\", \"platformExpressNo\": \"PQ7LEW0400154360117460Q\", \"memberExpressNo\": \"\", \"expressCompanyName\": \"Return with Post Office label\", \"refundOrderNos\": [], \"refundWaybill\": \"\", \"refundExpressCompanyName\": \"\", \"performanceCost\": 0, \"invoiceStatus\": 1, \"requestReturnTime\": \"2024-12-10 15:42:01\", \"allocateTime\": \"2024-12-10 15:42:03\", \"lastUpdateTime\": \"2024-12-12 21:52:29\", \"sellerSignedTime\": \"\", \"cancelTime\": \"\", \"completedTime\": \"\", \"checkStatus\": 2, \"stockMode\": 3, \"receiveType\": 0, \"returnGoodsInfoList\": [ { \"goodsId\": 837115739, \"sku\": \"I43cll4jk2za\", \"skc\": \"sl2410020038321928\", \"goodsSn\": \"4008789710079\", \"currency\": \"EUR\", \"saleCurrency\": null, \"skuSn\": \"17009016\", \"commodityAttributeList\": [ { \"attrValueId\": \"447,474\", \"attrName\": \"多色-均码\", \"language\": \"CN\" }, { \"attrValueId\": \"447,474\", \"attrName\": \"Multicolor-one-size\", \"language\": \"US\" }, { \"attrValueId\": \"447,474\", \"attrName\": \"Multicolorido-Tamanho Único\", \"language\": \"PT\" }, { \"attrValueId\": \"447,474\", \"attrName\": \"มัลติคัลเลอร์-ไซส์เดียว\", \"language\": \"TH\" }, { \"attrValueId\": \"447,474\", \"attrName\": \"Multicolor-Unitalla\", \"language\": \"ES\" }, { \"attrValueId\": \"447,474\", \"attrName\": \"Multicolore-Tagli Unica\", \"language\": \"IT\" } ], \"goodsTitle\": \"Playmobil Centro De Cuidados De Animales - Entrega en 24/48h (Península)\", \"imageUrl\": \"https://img.ltwebstatic.com/images3_spmp/2024/10/02/cc/17278484841dfa54bb4f8f1f062973439b4bf39737_square_thumbnail_220x293.jpg\", \"goodsStatus\": 6, \"returnImageList\": [ { \"type\": 1, \"link\": \"\" } ], \"sellerCurrencyPrice\": 115.99, \"costPrice\": null, \"sellerCurrencyStoreCouponPrice\": 0, \"sellerCurrencyPromotionPrice\": 0, \"settleCurrencyPromotionPrice\": null, \"estimateCommission\": 9.28, \"commissionSaleTax\": 0, \"performancePrice\": 0, \"returnExpense\": 0, \"sellerRealTax\": 0, \"estimateIncomeMoney\": 106.71, \"estimateTaxIncomeMoney\": 106.71, \"returnReasonList\": [ { \"language\": \"CN\", \"reason\": \"我不喜歡，不想要了。\" }, { \"language\": \"EN\", \"reason\": \"Don't like so I don't want it\" }, { \"language\": \"PT\", \"reason\": \"Eu não gosto disso, e não quero isso.\" }, { \"language\": \"TH\", \"reason\": \"ฉันไม่ชอบมัน ฉันไม่ต้องการมันแล้ว\" }, { \"language\": \"ES\", \"reason\": \"No me gusta, no lo quiero.\" } ] } ] } ], \"bbl\": {}, \"traceId\": \"87cd406a2d5d4961\" }",
+  "errorCode": null
+}

@@ -1,0 +1,160 @@
+{
+  "docId": "3001300",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "物流公司信息查询（废弃）",
+    "userDocName": "物流公司信息查询（即将废弃）",
+    "endpoint": "/open-api/shipping/express-company-list",
+    "method": "GET",
+    "docName": "get_open-api_shipping_express-company-list",
+    "version": 8,
+    "updateTime": "2025-07-21 11:32:22",
+    "changeContent": "更新请求示例",
+    "qpsContent": "30",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "此接口可以查询到全国性和区域性的物流方式，建议开发者使用此接口获取物流方式信息，提高商家选择物流方式的范围，",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "SiteUID",
+        "type": "string",
+        "required": false,
+        "description": "来源站点"
+      },
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object",
+    "children": [
+      {
+        "name": "addressId",
+        "type": "integer",
+        "required": true,
+        "description": "发货地址ID，给能匹配到到最末级"
+      },
+      {
+        "name": "orderType",
+        "type": "integer",
+        "required": false,
+        "description": "订单类型 1：急采 2：备货 ；建议填写，可能会影响数据的准确性"
+      }
+    ]
+  },
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "响应异常时的bbl相关信息",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1
+              }
+            ]
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 1,
+        "children": [
+          {
+            "name": "companyCode",
+            "type": "string",
+            "required": false,
+            "description": "快递编码",
+            "multiple": 0
+          },
+          {
+            "name": "companyName",
+            "type": "string",
+            "required": false,
+            "description": "快递公司名称",
+            "multiple": 0
+          },
+          {
+            "name": "isSupport",
+            "type": "boolean",
+            "required": false,
+            "description": "是否线上下运单 true:是 false：否",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

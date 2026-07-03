@@ -1,0 +1,154 @@
+{
+  "docId": "3001885",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "获取涨价原因枚举值",
+    "userDocName": "获取成本价涨价原因枚举值",
+    "endpoint": "/open-api/goods/query-change-price-reason",
+    "method": "POST",
+    "docName": "",
+    "version": 3,
+    "updateTime": "2026-07-02 20:27:59",
+    "changeContent": "文档归属类目更新",
+    "qpsContent": "50",
+    "modes": [
+      2,
+      5
+    ],
+    "modeNames": [
+      "全托管",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "此接口获取到的枚举值，可用在更新成本价接口（/open-api/goods/update-cost）的涨价原因change_price_reason_flag",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "指定出参语种，默认中文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "list",
+        "type": "object",
+        "required": true,
+        "description": "要查询的skc列表",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "skc_name",
+            "type": "string",
+            "required": true,
+            "description": "skc平台编码",
+            "example": "sf260119193661977368102",
+            "multiple": 0
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "响应信息。正常为OK",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应code。正常为0",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "description": "响应详情",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "list",
+            "type": "object",
+            "required": true,
+            "description": "skc列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "skcName",
+                "type": "string",
+                "description": "skc编码",
+                "example": "sf260119193661977368102",
+                "multiple": 0
+              },
+              {
+                "name": "changeReasonList",
+                "type": "object",
+                "required": true,
+                "description": "skc可用的涨价原因列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "reasonCode",
+                    "type": "integer",
+                    "description": "涨价原因code",
+                    "example": "1",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "reasonDesc",
+                    "type": "string",
+                    "description": "涨价原因描述，支持多语言返回，语种为header中的language。",
+                    "example": "Decorative techniques and mold price increase",
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "追踪码",
+        "example": "20a9213c89e86b66",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

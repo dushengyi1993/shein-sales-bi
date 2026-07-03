@@ -1,0 +1,123 @@
+{
+  "docId": "3001437",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询商家sku是否已存在",
+    "userDocName": "查询商家sku是否已存在",
+    "endpoint": "/open-api/goods/product/check-supplierSku-repeated",
+    "method": "POST",
+    "docName": "",
+    "version": 1,
+    "updateTime": "2025-10-22 20:45:14",
+    "changeContent": "初版",
+    "qpsContent": "60",
+    "modes": [
+      1,
+      2,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "平台要求商品的商家sku（即发布接口中的supplier_sku）在店铺内全局唯一。建议在发布商品前调用，查询本次输入的商家sku是否在店内已存在（包括已发布商品以及审核中商品），如果已存在引导商家更换信息。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "supplierSkuList",
+        "type": "string",
+        "required": true,
+        "description": "商家sku。单次最多可查询200个。",
+        "example": "34534543",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应编码 成功：0",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "响应信息。成功：OK",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "description": "详细信息",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "supplierSku",
+            "type": "string",
+            "description": "查询时入参的商家sku",
+            "example": "34534543",
+            "multiple": 0
+          },
+          {
+            "name": "repeated",
+            "type": "boolean",
+            "description": "是否已存在。true=已存在；false=不存在",
+            "example": "false",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "追踪码",
+        "example": "ccc40d75be5a760e",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

@@ -1,0 +1,151 @@
+{
+  "docId": "3001520",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "用户授权-根据临时token获取api key和secret key",
+    "userDocName": "获取openKeyId和secretKey",
+    "endpoint": "/open-api/auth/get-by-token",
+    "method": "POST",
+    "docName": "post_open-api_auth_get-by-token",
+    "version": 31,
+    "updateTime": "2025-12-26 14:35:50",
+    "changeContent": "更新请求参数示例。原请求示例中域名是测试环境的，且有host参数。本次调整为生产域名，删除host参数",
+    "qpsContent": "40",
+    "modes": [
+      1,
+      2,
+      3,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "SHEIN自营",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "该API支持用tempToken交换openKeyId和secretKey，对接之前请查阅店铺授权开发者应用手册了解更全面的信息",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "x-lt-appid",
+        "type": "string",
+        "required": true,
+        "description": "开发者appid，可登录查看"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "时间戳（5分钟内有效）"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "可查看签名规则，由于调用getbytoken接口时，开发者还没有openkeyId和secretKey，请使用appId和appSecretKey生成签名；"
+      },
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json;charset=UTF-8"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "支持返回的多语言报错信息，例如：language:en。默认返回中文多语言信息 支持传参： 英语:en 法语: fr 西班牙语:es 德语:de 中文简体:zh-cn 泰语:th 巴西葡语:pt-br 日语:ja"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "tempToken",
+        "type": "string",
+        "required": true,
+        "description": "商家账号登录确认授权返回的tempToken"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应码. 0:处理成功",
+        "label": "响应码"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "响应描述",
+        "label": "响应描述"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "description": "响应内容",
+        "label": "响应内容",
+        "children": [
+          {
+            "name": "secretKey",
+            "type": "string",
+            "required": true,
+            "description": "卖家账号秘钥，需用开发者appSecretKey解密",
+            "label": "加密的秘钥"
+          },
+          {
+            "name": "openKeyId",
+            "type": "string",
+            "required": true,
+            "description": "卖家账号openKeyId"
+          },
+          {
+            "name": "appid",
+            "type": "string",
+            "required": true,
+            "description": "开发者appId"
+          },
+          {
+            "name": "state",
+            "type": "string",
+            "description": "原样返回的标识"
+          },
+          {
+            "name": "supplierId",
+            "type": "integer",
+            "required": true,
+            "description": "SHEIN商户ID",
+            "label": "供应商id"
+          },
+          {
+            "name": "supplierBusinessMode",
+            "type": "string",
+            "description": "商家业务类型。只有特殊的商家此字段才会有值。POP-US:美国POP店；POP-GLOBAL:跨境POP店；SFS:商家既要备货又要管理客单",
+            "label": "供应商业务类型"
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi-test01.sheincorp.cn/open-api/auth/get-by-token' \\ --header 'language: zh-cn' \\ --header 'x-lt-appid: test' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-timestamp: 1752560461085' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi-test01.sheincorp.cn' \\ --data-raw '{ \"tempToken\": \"de723b1c-210b-4ecc-8da4-5f1da6ea0a9b\" }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"secretKey\": \"CQsi1eOAf****************YQqmG\", \"appid\": \"10AF15E7DD802804E7140BE2D326D\", \"openKeyId\": \"5C83782096BA46008D66C424CB39803F\", \"state\": \"OPENAPI\", \"supplierId\": 21840925, \"supplierSource\": 10, \"supplierBusinessMode\":\"POP-US\" }, \"traceId\": \"7b0461d5534f3e1\" }",
+  "errorCode": null
+}

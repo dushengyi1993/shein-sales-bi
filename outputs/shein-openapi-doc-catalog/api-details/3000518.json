@@ -1,0 +1,114 @@
+{
+  "docId": "3000518",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "车缝完工",
+    "userDocName": "车缝完工",
+    "endpoint": "/open-api/mes/sew-end",
+    "method": "POST",
+    "docName": "post_open-api_mes_sew-end",
+    "version": 2,
+    "updateTime": "2024-10-15 11:04:58",
+    "changeContent": "新增traceId",
+    "qpsContent": "",
+    "modes": [
+      3
+    ],
+    "modeNames": [
+      "SHEIN自营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "produceOrderId",
+        "type": "integer",
+        "required": false,
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "dispatchStaffInfos",
+        "type": "object",
+        "required": true,
+        "multiple": 1,
+        "children": [
+          {
+            "name": "operatorName",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          },
+          {
+            "name": "bundleNum",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "integer",
+        "required": false,
+        "example": "18055",
+        "multiple": 0
+      },
+      {
+        "name": "detailMsg",
+        "type": "string",
+        "required": false,
+        "example": "quis qui odit rem deserunt quis cupiditate facere eveniet nihil ut sequi nulla reprehenderit sunt est iste",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "example": "ipsa beatae sequi a repudiandae beatae repellat",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "produceOrderId\":19399708, \"dispatchStaffInfos\":[ { \"operatorName\":\"张三\", \"bundleNum\":\"19399708-P1-B01\" } ] }",
+  "responseExample": "code\": 0, \"msg\": \"success\" }",
+  "errorCode": null
+}

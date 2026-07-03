@@ -1,0 +1,141 @@
+{
+  "docId": "3001796",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询退货可选择的物流",
+    "userDocName": "查询退货可选择的物流",
+    "endpoint": "/open-api/purchase/return-carriers",
+    "method": "POST",
+    "docName": "",
+    "version": 5,
+    "updateTime": "2026-06-09 14:45:36",
+    "changeContent": "修改请求头描述",
+    "qpsContent": "50",
+    "modes": [
+      2
+    ],
+    "modeNames": [
+      "全托管"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "当选择处理方式是退货且使用退货方式是SHEIN合作物流时，可通过此接口获取退货收货地址支持的物流商",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "stateId",
+        "type": "integer",
+        "required": true,
+        "description": "收件地省州ID",
+        "example": "13",
+        "multiple": 0
+      },
+      {
+        "name": "transportAreaCountryCode",
+        "type": "string",
+        "required": true,
+        "description": "运输区域，国家二字码",
+        "example": "random_transportAreaCountryCode",
+        "multiple": 0
+      },
+      {
+        "name": "warehouseIds",
+        "type": "integer",
+        "required": true,
+        "description": "仓库id列表",
+        "example": "74",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码，成功：0",
+        "example": "random_code",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述,成功：OK",
+        "example": "random_msg",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "required": true,
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "list",
+            "type": "object",
+            "description": "物流公司列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "companyCode",
+                "type": "string",
+                "description": "物流公司编码",
+                "example": "random_companyCode",
+                "multiple": 0
+              },
+              {
+                "name": "companyName",
+                "type": "string",
+                "description": "物流公司名称",
+                "example": "random_companyName",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

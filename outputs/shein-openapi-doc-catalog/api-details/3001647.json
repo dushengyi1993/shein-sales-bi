@@ -1,0 +1,260 @@
+{
+  "docId": "3001647",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "货代列表+渠道查询",
+    "userDocName": "​查询货代信息",
+    "endpoint": "/open-api/pfmp/shipping/thirdPartyAndChannelList",
+    "method": "POST",
+    "docName": "",
+    "version": 4,
+    "updateTime": "2026-03-30 17:19:58",
+    "changeContent": "更新接口中文名",
+    "qpsContent": "50",
+    "modes": [
+      2,
+      3,
+      8
+    ],
+    "modeNames": [
+      "全托管",
+      "SHEIN自营",
+      "POP"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "用于查询货代信息，供商家选择使用货代服务",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-language",
+        "type": "string",
+        "description": "指定出参语种，默认中文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "label": "OpenThirdPartyChannelListRequest",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "orderNoList",
+        "type": "string",
+        "required": false,
+        "description": "订单号list",
+        "multiple": 1
+      },
+      {
+        "name": "sellerAddressId",
+        "type": "int64",
+        "required": true,
+        "description": "商家寄件地址id",
+        "multiple": 0
+      },
+      {
+        "name": "shippingRoute",
+        "type": "integer",
+        "required": false,
+        "description": "发货路径，1：直送，2：集货",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfResultOfOpenThirdPartyChannelListResponse",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码，成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "结果",
+        "label": "ResultOfOpenThirdPartyChannelListResponse",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "data",
+            "type": "object",
+            "required": false,
+            "description": "结果",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "forwarderAccountId",
+                "type": "string",
+                "required": false,
+                "description": "货代账号ID，若不存在账号ID，则返回null",
+                "multiple": 0
+              },
+              {
+                "name": "forwarderAccountName",
+                "type": "string",
+                "required": false,
+                "description": "货代账号名称，若不存在，则返回空字符串",
+                "multiple": 0
+              },
+              {
+                "name": "isClmsOrder",
+                "type": "boolean",
+                "required": false,
+                "description": "是否是CLMS订单",
+                "example": "false",
+                "multiple": 0
+              },
+              {
+                "name": "orderConditionList",
+                "type": "integer",
+                "required": false,
+                "description": "下单条件，1：运单号，2：预约取件时间，3：无，4：第三方货代渠道",
+                "multiple": 1
+              },
+              {
+                "name": "productChannelList",
+                "type": "object",
+                "required": false,
+                "description": "第三方货代渠道列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "productChannelId",
+                    "type": "string",
+                    "required": false,
+                    "description": "第三方货代产品渠道id",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "productChannelName",
+                    "type": "string",
+                    "required": false,
+                    "description": "第三方货代产品渠道名称",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "sceneConditionList",
+                "type": "object",
+                "required": false,
+                "description": "不同场景（下单方式）的下单条件",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "orderConditionList",
+                    "type": "integer",
+                    "required": false,
+                    "description": "下单条件，1：运单号，2：预约取件时间，3：无，4：产品渠道",
+                    "multiple": 1
+                  },
+                  {
+                    "name": "scene",
+                    "type": "integer",
+                    "required": false,
+                    "description": "下单条件场景，1-SHEIN代下单（线上下单） 2-自行下单（线下下单）",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "thirdPartyCode",
+                "type": "string",
+                "required": false,
+                "description": "第三方编码",
+                "multiple": 0
+              },
+              {
+                "name": "thirdPartyName",
+                "type": "string",
+                "required": false,
+                "description": "第三方名称",
+                "multiple": 0
+              },
+              {
+                "name": "thirdPartyType",
+                "type": "integer",
+                "required": false,
+                "description": "第三方类型，1-商家车队 2-第三方货代",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "meta",
+            "type": "object",
+            "required": false,
+            "description": "元数据",
+            "label": "Meta",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "count",
+                "type": "integer",
+                "required": false,
+                "description": "数据记录数",
+                "multiple": 0
+              },
+              {
+                "name": "customObj",
+                "type": "object",
+                "required": false,
+                "description": "用户自定义扩展",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

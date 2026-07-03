@@ -1,0 +1,804 @@
+{
+  "docId": "3001869",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "分页查询生产任务",
+    "userDocName": "分页查询生产任务",
+    "endpoint": "/open-api/sims/srp/task-query",
+    "method": "POST",
+    "docName": "",
+    "version": 2,
+    "updateTime": "2026-06-29 20:18:57",
+    "changeContent": "soapi文档更新",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识openKeyId，获取方式请查阅：授权手册"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "请求签名，生成规则请查阅：签名规则"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "支持返回的多语言报错信息，默认返回中文多语言信息"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "label": "分页查询生产任务请求",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "addTimeEnd",
+        "type": "datetime",
+        "required": false,
+        "description": "创建时间止(不传默认近3个月，最大跨度6个月)",
+        "multiple": 0
+      },
+      {
+        "name": "addTimeStart",
+        "type": "datetime",
+        "required": false,
+        "description": "创建时间起(不传默认近3个月，最大跨度6个月)",
+        "multiple": 0
+      },
+      {
+        "name": "deliveryTimeEnd",
+        "type": "datetime",
+        "required": false,
+        "description": "当前进度交期止",
+        "multiple": 0
+      },
+      {
+        "name": "deliveryTimeStart",
+        "type": "datetime",
+        "required": false,
+        "description": "当前进度交期起",
+        "multiple": 0
+      },
+      {
+        "name": "firstMark",
+        "type": "integer",
+        "required": false,
+        "description": "是否首单：1-首单 2-返单 3-首返",
+        "multiple": 0
+      },
+      {
+        "name": "isPriorityProduction",
+        "type": "integer",
+        "required": false,
+        "description": "是否优先生产：1-是 2-否",
+        "multiple": 0
+      },
+      {
+        "name": "mergeCutStatus",
+        "type": "integer",
+        "required": false,
+        "description": "合裁状态：0-不可合裁（未计算） 1-可合裁 2-已合裁",
+        "multiple": 0
+      },
+      {
+        "name": "overdueStatus",
+        "type": "integer",
+        "required": false,
+        "description": "超期状态：1-任务超期 2-任务即将超期 3-进度超期 4-未超期",
+        "multiple": 0
+      },
+      {
+        "name": "page",
+        "type": "integer",
+        "required": false,
+        "description": "页码",
+        "multiple": 0
+      },
+      {
+        "name": "perPage",
+        "type": "integer",
+        "required": false,
+        "description": "每页大小",
+        "multiple": 0
+      },
+      {
+        "name": "planningTimeEnd",
+        "type": "datetime",
+        "required": false,
+        "description": "交货期止",
+        "multiple": 0
+      },
+      {
+        "name": "planningTimeStart",
+        "type": "datetime",
+        "required": false,
+        "description": "交货期起",
+        "multiple": 0
+      },
+      {
+        "name": "productionType",
+        "type": "integer",
+        "required": false,
+        "description": "排单类型：1-订单 2-非订单",
+        "multiple": 0
+      },
+      {
+        "name": "progressCodeList",
+        "type": "string",
+        "required": false,
+        "description": "任务当前进度节点code列表",
+        "multiple": 1
+      },
+      {
+        "name": "remark",
+        "type": "string",
+        "required": false,
+        "description": "备注模糊搜索",
+        "multiple": 0
+      },
+      {
+        "name": "schedulingTimeEnd",
+        "type": "datetime",
+        "required": false,
+        "description": "排单时间止",
+        "multiple": 0
+      },
+      {
+        "name": "schedulingTimeStart",
+        "type": "datetime",
+        "required": false,
+        "description": "排单时间起",
+        "multiple": 0
+      },
+      {
+        "name": "searchKey",
+        "type": "string",
+        "required": false,
+        "description": "任务搜索类型：skc/货号:supplierCode/款号:designCode/排单号:productionNo/任务号:taskNo/订单号:orderNo/胚衣skc:embryoSkc/花型ID:colorPatternId/半成品编码:sfpCode/半成品货号:sfpSupplierCode",
+        "multiple": 0
+      },
+      {
+        "name": "searchKeywordList",
+        "type": "string",
+        "required": false,
+        "description": "任务搜索关键字列表",
+        "multiple": 1
+      },
+      {
+        "name": "taskPriority",
+        "type": "integer",
+        "required": false,
+        "description": "优先级：10-低 20-中 30-高",
+        "multiple": 0
+      },
+      {
+        "name": "taskType",
+        "type": "integer",
+        "required": false,
+        "description": "任务类型：1-成品 2-半成品",
+        "multiple": 0
+      },
+      {
+        "name": "urgentType",
+        "type": "integer",
+        "required": false,
+        "description": "紧急类型：1-普通 2-紧急 3-特急",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfPageListResponseOf分页查询生产任务响应",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "响应异常时的bbl相关信息",
+        "label": "BblMeta",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "key",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "npid",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "tag",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "value",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "分页请求响应",
+        "label": "PageListResponseOf分页查询生产任务响应",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "count",
+            "type": "int64",
+            "required": false,
+            "description": "总数",
+            "multiple": 0
+          },
+          {
+            "name": "list",
+            "type": "object",
+            "required": false,
+            "description": "数据列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "cancelTime",
+                "type": "datetime",
+                "required": false,
+                "description": "取消时间（已取消进度才有值）",
+                "multiple": 0
+              },
+              {
+                "name": "completeNum",
+                "type": "integer",
+                "required": false,
+                "description": "完成数量（各尺码汇总和，已完成进度才有值）",
+                "multiple": 0
+              },
+              {
+                "name": "completeTime",
+                "type": "datetime",
+                "required": false,
+                "description": "完成时间（已完成进度才有值）",
+                "multiple": 0
+              },
+              {
+                "name": "deliveryTime",
+                "type": "datetime",
+                "required": false,
+                "description": "当前进度交期",
+                "multiple": 0
+              },
+              {
+                "name": "designCode",
+                "type": "string",
+                "required": false,
+                "description": "设计款号",
+                "multiple": 0
+              },
+              {
+                "name": "firstMark",
+                "type": "integer",
+                "required": false,
+                "description": "首单标记：1-首单 2-返单",
+                "multiple": 0
+              },
+              {
+                "name": "followerName",
+                "type": "string",
+                "required": false,
+                "description": "跟进人姓名",
+                "multiple": 0
+              },
+              {
+                "name": "followerUid",
+                "type": "int64",
+                "required": false,
+                "description": "跟进人ID",
+                "multiple": 0
+              },
+              {
+                "name": "imgPath",
+                "type": "string",
+                "required": false,
+                "description": "商品主图地址",
+                "multiple": 0
+              },
+              {
+                "name": "imgPathThumb",
+                "type": "string",
+                "required": false,
+                "description": "商品主图缩略图",
+                "multiple": 0
+              },
+              {
+                "name": "isPriorityProduction",
+                "type": "integer",
+                "required": false,
+                "description": "是否优先生产：1-是 2-否",
+                "multiple": 0
+              },
+              {
+                "name": "kitStatus",
+                "type": "integer",
+                "required": false,
+                "description": "是否已齐套：null-无 1-是 2-否",
+                "multiple": 0
+              },
+              {
+                "name": "labels",
+                "type": "object",
+                "required": false,
+                "description": "排产标签列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "labelCode",
+                    "type": "string",
+                    "required": false,
+                    "description": "标签编码",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "labelName",
+                    "type": "string",
+                    "required": false,
+                    "description": "标签名称",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "mergeCutStatus",
+                "type": "integer",
+                "required": false,
+                "description": "合裁状态：0-不可合裁 1-可合裁 2-已合裁",
+                "multiple": 0
+              },
+              {
+                "name": "operatorId",
+                "type": "int64",
+                "required": false,
+                "description": "当前进度工厂组织ID",
+                "multiple": 0
+              },
+              {
+                "name": "operatorName",
+                "type": "string",
+                "required": false,
+                "description": "当前进度工厂组织名称",
+                "multiple": 0
+              },
+              {
+                "name": "orderLabels",
+                "type": "object",
+                "required": false,
+                "description": "订单标签列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "labelCode",
+                    "type": "string",
+                    "required": false,
+                    "description": "标签编码",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "labelName",
+                    "type": "string",
+                    "required": false,
+                    "description": "标签名称",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "orderNo",
+                "type": "string",
+                "required": false,
+                "description": "首个订单号",
+                "multiple": 0
+              },
+              {
+                "name": "overdueStatus",
+                "type": "integer",
+                "required": false,
+                "description": "超期状态：1-任务超期 2-任务即将超期 3-进度超期，null 表示未超期",
+                "multiple": 0
+              },
+              {
+                "name": "planningNum",
+                "type": "integer",
+                "required": false,
+                "description": "排单数（各尺码汇总）",
+                "multiple": 0
+              },
+              {
+                "name": "planningTime",
+                "type": "datetime",
+                "required": false,
+                "description": "交货期",
+                "multiple": 0
+              },
+              {
+                "name": "productionNo",
+                "type": "string",
+                "required": false,
+                "description": "首个排产单号",
+                "multiple": 0
+              },
+              {
+                "name": "productionOrderItems",
+                "type": "object",
+                "required": false,
+                "description": "排单计划与订单关联列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "orderNo",
+                    "type": "string",
+                    "required": false,
+                    "description": "订单号",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "productionNo",
+                    "type": "string",
+                    "required": true,
+                    "description": "排单号",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "productionType",
+                "type": "integer",
+                "required": false,
+                "description": "排单类型：1-订单 2-非订单",
+                "multiple": 0
+              },
+              {
+                "name": "progressCode",
+                "type": "string",
+                "required": false,
+                "description": "当前进度code",
+                "multiple": 0
+              },
+              {
+                "name": "progressName",
+                "type": "string",
+                "required": false,
+                "description": "当前进度名称",
+                "multiple": 0
+              },
+              {
+                "name": "progressNodes",
+                "type": "object",
+                "required": false,
+                "description": "进度节点列表（含交期/工厂组织/层级结构，不含已完成和已取消）",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "deliveryTime",
+                    "type": "datetime",
+                    "required": false,
+                    "description": "进度交期",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "nodeLevel",
+                    "type": "integer",
+                    "required": true,
+                    "description": "节点层级：1-一级 2-二级",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "operationName",
+                    "type": "string",
+                    "required": false,
+                    "description": "作业数量名称（节点未配置时取进度名称）",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "operatorId",
+                    "type": "int64",
+                    "required": false,
+                    "description": "工厂组织ID（操作人员ID）",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "operatorName",
+                    "type": "string",
+                    "required": false,
+                    "description": "操作人员名称",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "progressCode",
+                    "type": "string",
+                    "required": true,
+                    "description": "进度code",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "progressName",
+                    "type": "string",
+                    "required": true,
+                    "description": "进度名称",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "rootProgressCode",
+                    "type": "string",
+                    "required": true,
+                    "description": "一级进度code",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "rootProgressName",
+                    "type": "string",
+                    "required": true,
+                    "description": "一级进度名称",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "serialNum",
+                    "type": "integer",
+                    "required": true,
+                    "description": "排序序号",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "remark",
+                "type": "string",
+                "required": false,
+                "description": "备注",
+                "multiple": 0
+              },
+              {
+                "name": "rootProgressCode",
+                "type": "string",
+                "required": false,
+                "description": "当前一级进度code",
+                "multiple": 0
+              },
+              {
+                "name": "rootProgressName",
+                "type": "string",
+                "required": false,
+                "description": "当前一级进度名称",
+                "multiple": 0
+              },
+              {
+                "name": "scanBundle",
+                "type": "integer",
+                "required": false,
+                "description": "是否扫菲：1-是 2-否",
+                "multiple": 0
+              },
+              {
+                "name": "schedulingTime",
+                "type": "datetime",
+                "required": false,
+                "description": "排单时间",
+                "multiple": 0
+              },
+              {
+                "name": "sfpCode",
+                "type": "string",
+                "required": false,
+                "description": "半成品商品编码",
+                "multiple": 0
+              },
+              {
+                "name": "sfpSupplierCode",
+                "type": "string",
+                "required": false,
+                "description": "半成品供方货号",
+                "multiple": 0
+              },
+              {
+                "name": "sfpType",
+                "type": "integer",
+                "required": false,
+                "description": "半成品类型：1-胚衣 2-花型",
+                "multiple": 0
+              },
+              {
+                "name": "skc",
+                "type": "string",
+                "required": false,
+                "description": "成品/胚衣的SKC",
+                "multiple": 0
+              },
+              {
+                "name": "skuItems",
+                "type": "object",
+                "required": false,
+                "description": "SKU维度明细列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "attributeCode",
+                    "type": "string",
+                    "required": true,
+                    "description": "属性编码(成品为SKU编码,半成品为半成品属性编码)",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "attributeName",
+                    "type": "string",
+                    "required": false,
+                    "description": "属性名称(成品为SKU名称,半成品为半成品属性名称)",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "planningNum",
+                    "type": "integer",
+                    "required": false,
+                    "description": "计划生产数",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "produceNum",
+                    "type": "integer",
+                    "required": false,
+                    "description": "生产中数量",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "tailtrimNum",
+                    "type": "integer",
+                    "required": false,
+                    "description": "尾整作业数（progress_code=tailtrim的work_num）",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "spu",
+                "type": "string",
+                "required": false,
+                "description": "SPU",
+                "multiple": 0
+              },
+              {
+                "name": "supplierCode",
+                "type": "string",
+                "required": false,
+                "description": "货号",
+                "multiple": 0
+              },
+              {
+                "name": "taskId",
+                "type": "int64",
+                "required": false,
+                "description": "任务ID",
+                "multiple": 0
+              },
+              {
+                "name": "taskNo",
+                "type": "string",
+                "required": false,
+                "description": "任务单号",
+                "multiple": 0
+              },
+              {
+                "name": "taskPriority",
+                "type": "integer",
+                "required": false,
+                "description": "优先级：10-低 20-中 30-高",
+                "multiple": 0
+              },
+              {
+                "name": "taskType",
+                "type": "integer",
+                "required": false,
+                "description": "任务类型：1-成品 2-半成品",
+                "multiple": 0
+              },
+              {
+                "name": "urgentType",
+                "type": "integer",
+                "required": false,
+                "description": "紧急类型：1-普通 2-紧急 3-特急",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "page",
+            "type": "integer",
+            "required": false,
+            "description": "页码",
+            "multiple": 0
+          },
+          {
+            "name": "perPage",
+            "type": "integer",
+            "required": false,
+            "description": "每页大小",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

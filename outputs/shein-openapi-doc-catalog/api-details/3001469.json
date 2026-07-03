@@ -1,0 +1,309 @@
+{
+  "docId": "3001469",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "提供外部ERP版料任务查询接口",
+    "userDocName": "提供外部ERP版料任务查询接口",
+    "endpoint": "/open-api/mdp/process/get-process-develop-info-list",
+    "method": "POST",
+    "docName": "",
+    "version": 2,
+    "updateTime": "2025-12-03 17:00:08",
+    "changeContent": "初版\n",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": null,
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "carftNo",
+        "type": "string",
+        "description": "工艺单号",
+        "multiple": 0
+      },
+      {
+        "name": "createdTimeEnd",
+        "type": "string",
+        "required": true,
+        "description": "单据生成结束时间（时间戳）最大查询时间1个月",
+        "example": "1761580800000",
+        "multiple": 0
+      },
+      {
+        "name": "createdTimeStart",
+        "type": "string",
+        "required": true,
+        "description": "单据生成开始时间（时间戳） 最大查询时间1个月",
+        "example": "1764259199000",
+        "multiple": 0
+      },
+      {
+        "name": "developStatusList",
+        "type": "integer",
+        "required": true,
+        "description": "状态 20-调色中 90-小样审批 110-线上批色 30-排版中 120-线上批版 40-打版中 100-送版中 70-版料已签收 80-待排版 50-已完成",
+        "example": "20",
+        "multiple": 1
+      },
+      {
+        "name": "pageNum",
+        "type": "integer",
+        "required": true,
+        "description": "页码",
+        "example": "1",
+        "multiple": 0
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "description": "页大小，不传默认30，最大100",
+        "example": "30",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "detailMsg",
+        "type": "string",
+        "example": "详细信息",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "description": "分页结果对象",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "count",
+            "type": "integer",
+            "description": "总行数",
+            "example": "27",
+            "multiple": 0
+          },
+          {
+            "name": "list",
+            "type": "object",
+            "required": true,
+            "multiple": 1,
+            "children": [
+              {
+                "name": "carftNo",
+                "type": "string",
+                "description": "工艺单号",
+                "multiple": 0
+              },
+              {
+                "name": "createdTime",
+                "type": "bigint",
+                "description": "创建时间(时间戳)",
+                "example": "1761804342000",
+                "multiple": 0
+              },
+              {
+                "name": "cutMethodProcessPartName",
+                "type": "string",
+                "description": "裁剪方式",
+                "multiple": 0
+              },
+              {
+                "name": "cutRemark",
+                "type": "string",
+                "description": "备注(裁剪)",
+                "multiple": 0
+              },
+              {
+                "name": "designImageUrlList",
+                "type": "string",
+                "description": "款式图url",
+                "multiple": 1
+              },
+              {
+                "name": "designNo",
+                "type": "string",
+                "description": "设计款号",
+                "multiple": 0
+              },
+              {
+                "name": "developChannel",
+                "type": "integer",
+                "description": "开发渠道",
+                "multiple": 0
+              },
+              {
+                "name": "developChannelName",
+                "type": "string",
+                "description": "开发渠道描述",
+                "multiple": 0
+              },
+              {
+                "name": "finalMaterialSku",
+                "type": "string",
+                "description": "成品sku/商品编码",
+                "multiple": 0
+              },
+              {
+                "name": "flowerCode",
+                "type": "string",
+                "description": "花型号",
+                "multiple": 0
+              },
+              {
+                "name": "flowerImageUrl",
+                "type": "string",
+                "description": "花型图url",
+                "multiple": 0
+              },
+              {
+                "name": "isBurnFlower",
+                "type": "integer",
+                "description": "是否烧花 1否 2是",
+                "multiple": 0
+              },
+              {
+                "name": "isBurnFlowerName",
+                "type": "string",
+                "description": "是否烧花描述",
+                "multiple": 0
+              },
+              {
+                "name": "isNeedQc",
+                "type": "integer",
+                "description": "是否需检测 0否 1是",
+                "multiple": 0
+              },
+              {
+                "name": "isNeedQcName",
+                "type": "string",
+                "description": "是否需检测描述",
+                "multiple": 0
+              },
+              {
+                "name": "isPosition",
+                "type": "integer",
+                "description": "是否定位 1否 2是",
+                "multiple": 0
+              },
+              {
+                "name": "isPositionName",
+                "type": "string",
+                "description": "是否定位描述",
+                "multiple": 0
+              },
+              {
+                "name": "materialName",
+                "type": "string",
+                "description": "物料名称/商品名称",
+                "multiple": 0
+              },
+              {
+                "name": "materialSku",
+                "type": "string",
+                "description": "底布sku",
+                "multiple": 0
+              },
+              {
+                "name": "needNum",
+                "type": "double",
+                "description": "下单米数(需求数量)",
+                "multiple": 0
+              },
+              {
+                "name": "purchaseNo",
+                "type": "string",
+                "description": "采购单号",
+                "multiple": 0
+              },
+              {
+                "name": "quotedPrice",
+                "type": "double",
+                "description": "单价(报价)",
+                "example": "58.21",
+                "multiple": 0
+              },
+              {
+                "name": "referenceDesignStyle",
+                "type": "string",
+                "description": "复制款号",
+                "multiple": 0
+              },
+              {
+                "name": "sampleCount",
+                "type": "integer",
+                "description": "样衣件数",
+                "example": "54",
+                "multiple": 0
+              },
+              {
+                "name": "systemSource",
+                "type": "integer",
+                "description": "来源",
+                "example": "52",
+                "multiple": 0
+              },
+              {
+                "name": "systemSourceName",
+                "type": "string",
+                "description": "来源描述",
+                "multiple": 0
+              },
+              {
+                "name": "twiceCarft",
+                "type": "string",
+                "description": "工艺类型",
+                "multiple": 0
+              },
+              {
+                "name": "twiceCarftId",
+                "type": "integer",
+                "description": "工艺类型ID",
+                "example": "69",
+                "multiple": 0
+              },
+              {
+                "name": "developStatus",
+                "type": "integer",
+                "description": "状态"
+              },
+              {
+                "name": "developStatusName",
+                "type": "string",
+                "description": "状态描述"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "multiple": 0
+      },
+      {
+        "name": "time",
+        "type": "string",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

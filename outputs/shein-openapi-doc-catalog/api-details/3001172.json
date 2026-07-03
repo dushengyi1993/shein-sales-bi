@@ -1,0 +1,111 @@
+{
+  "docId": "3001172",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "绑定SKC和代理公司",
+    "userDocName": "绑定SKC和代理公司",
+    "endpoint": "/open-api/goods-compliance/save-skc-agency",
+    "method": "POST",
+    "docName": "post_open-api_goods-compliance_save-skc-agency",
+    "version": 3,
+    "updateTime": "2025-06-27 14:51:00",
+    "changeContent": "更新请求示例",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "按要平台合规要求，绑定SKC和代理公司。代理公司的整体解决方案，可点击查看文档。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：158339876400"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "查看签名生成规则"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "指定出参语种，默认中文；支持语种:英语:EN 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "skc",
+        "type": "string",
+        "required": true,
+        "description": "skc",
+        "multiple": 1
+      },
+      {
+        "name": "agencyType",
+        "type": "integer",
+        "required": true,
+        "description": "代理公司的一级类型。0-欧盟责任人；1-英国代理；2-美国代理；3-制造商"
+      },
+      {
+        "name": "agencyId",
+        "type": "string",
+        "description": "代理公司的ID。可通过查询申报公司列表获取agencyId。"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应码。正常为“0”。"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "响应信息。正常为“OK”。"
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求追踪码"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/goods-compliance/save-skc-agency' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>\\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-timestamp: 1751006946539' \\ --header 'language: zh-cn' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi.sheincorp.com' \\ --data-raw '{ \"skc\":[\"dress1481203\"], \"agencyType\":0, \"agencyId\":39141435 }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": null, \"traceId\": \"f19e4bcaa433aba3\" }",
+  "errorCode": null
+}

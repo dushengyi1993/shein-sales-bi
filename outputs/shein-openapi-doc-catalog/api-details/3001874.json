@@ -1,0 +1,311 @@
+{
+  "docId": "3001874",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "更新生产任务接口",
+    "userDocName": "更新生产任务接口",
+    "endpoint": "/open-api/sims/srp/task-update",
+    "method": "POST",
+    "docName": "",
+    "version": 2,
+    "updateTime": "2026-06-29 20:20:42",
+    "changeContent": "soapi文档更新",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识openKeyId，获取方式请查阅：授权手册"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "请求签名，生成规则请查阅：签名规则"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "支持返回的多语言报错信息，默认返回中文多语言信息"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "label": "更新生产任务接口请求",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "baseInfoUpdate",
+        "type": "object",
+        "required": false,
+        "description": "更新生产任务基础信息，传null代表不更新基础信息",
+        "label": "更新生产任务基础信息",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "followerUid",
+            "type": "int64",
+            "required": false,
+            "description": "跟进人ID，null代表不更新，0代表删除跟进人",
+            "multiple": 0
+          },
+          {
+            "name": "planningTime",
+            "type": "datetime",
+            "required": false,
+            "description": "货期时间，yyyy-MM-dd HH:mm:ss，null代表不更新",
+            "multiple": 0
+          },
+          {
+            "name": "remark",
+            "type": "string",
+            "required": false,
+            "description": "备注，null代表不更新，空字符串清空备注",
+            "multiple": 0
+          },
+          {
+            "name": "taskPriority",
+            "type": "integer",
+            "required": false,
+            "description": "任务优先级(低:10,中:20,高:30)，null代表不更新",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "progressNodeUpdates",
+        "type": "object",
+        "required": false,
+        "description": "更新生产任务进度节点信息列表，传null或空列表代表不更新进度节点信息",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "deliveryTime",
+            "type": "datetime",
+            "required": false,
+            "description": "进度交期，yyyy-MM-dd HH:mm:ss，null代表清除",
+            "multiple": 0
+          },
+          {
+            "name": "operatorId",
+            "type": "int64",
+            "required": false,
+            "description": "工厂组织ID，null代表清除",
+            "multiple": 0
+          },
+          {
+            "name": "progressCode",
+            "type": "string",
+            "required": true,
+            "description": "进度code",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "progressUpdate",
+        "type": "object",
+        "required": false,
+        "description": "更新生产任务进度，传null代表不更新进度信息",
+        "label": "更新生产任务进度",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "cancelReason",
+            "type": "integer",
+            "required": false,
+            "description": "取消原因 ID，取消操作时必填，1:次品报废，2:无效单据，3:不生产订单，4:无面料，99:其他",
+            "multiple": 0
+          },
+          {
+            "name": "customReason",
+            "type": "string",
+            "required": false,
+            "description": "自定义原因描述，取消原因选「其他」时填写",
+            "multiple": 0
+          },
+          {
+            "name": "progressCode",
+            "type": "string",
+            "required": false,
+            "description": "要变更的进度节点code",
+            "multiple": 0
+          },
+          {
+            "name": "reverseReason",
+            "type": "integer",
+            "required": false,
+            "description": "逆向操作原因 ID，逆向操作时必填，1:面料有问题，2:需返修，3:误操作，未收到任务",
+            "multiple": 0
+          },
+          {
+            "name": "warehouseId",
+            "type": "int64",
+            "required": false,
+            "description": "入库仓库ID，完成生产任务且开启排产自动入库时必填",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "skuDetails",
+        "type": "object",
+        "required": false,
+        "description": "更新SKU排单数或工序作业数列表，传null或空列表代表不更新SKU信息",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "attributeCode",
+            "type": "string",
+            "required": true,
+            "description": "属性编码(成品为SKU编码,半成品为半成品属性编码)",
+            "multiple": 0
+          },
+          {
+            "name": "planningNum",
+            "type": "integer",
+            "required": false,
+            "description": "排单数[0, 1000000]，null代表不更新",
+            "multiple": 0
+          },
+          {
+            "name": "progressWorks",
+            "type": "object",
+            "required": false,
+            "description": "该SKU的工序作业数列表，null或空列表代表不更新",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "progressCode",
+                "type": "string",
+                "required": true,
+                "description": "进度code",
+                "multiple": 0
+              },
+              {
+                "name": "workNum",
+                "type": "integer",
+                "required": false,
+                "description": "作业数 [0, 1000000]，null表示清除",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "taskNo",
+        "type": "string",
+        "required": true,
+        "description": "生产任务任务单号",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfVoid",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "响应异常时的bbl相关信息",
+        "label": "BblMeta",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "key",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "npid",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "tag",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "value",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "默认值：application/json;charset=UTF-8错误描述,成功：OK",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

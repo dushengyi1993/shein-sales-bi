@@ -1,0 +1,334 @@
+{
+  "docId": "3001817",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "出库订单列表查询",
+    "userDocName": "出库订单列表查询",
+    "endpoint": "/open-api/sims/outbound-order-query",
+    "method": "POST",
+    "docName": "",
+    "version": 2,
+    "updateTime": "2026-06-15 14:52:41",
+    "changeContent": "调整请求头参数",
+    "qpsContent": "",
+    "modes": [
+      3
+    ],
+    "modeNames": [
+      "SHEIN自营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识openKeyId，获取方式请查阅：授权手册"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "请求签名，生成规则请查阅：签名规则"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "支持返回的多语言报错信息，默认返回中文多语言信息"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "label": "OpenApiOutboundOrderQueryRequest",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "addTimeEnd",
+        "type": "datetime",
+        "required": true,
+        "description": "创建时间结束(yyyy-MM-dd HH:mm:ss)，最大区间为3个月",
+        "multiple": 0
+      },
+      {
+        "name": "addTimeStart",
+        "type": "datetime",
+        "required": true,
+        "description": "创建时间结束(yyyy-MM-dd HH:mm:ss)，最大区间为3个月",
+        "multiple": 0
+      },
+      {
+        "name": "lastCursorCode",
+        "type": "string",
+        "required": false,
+        "description": "游标编码，上次请求的结果cursorCode，入参会继续查后面的数据",
+        "multiple": 0
+      },
+      {
+        "name": "status",
+        "type": "integer",
+        "required": false,
+        "description": "出库单状态 1:待办；2:已办，3:已作废",
+        "multiple": 0
+      },
+      {
+        "name": "type",
+        "type": "integer",
+        "required": false,
+        "description": "出库单类型 1、销售出库单、2、调拨出库单、3、其他出库单、4、JIT出库单、5、尾货出库单",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfOpenApiOutboundOrderQueryResponse",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "响应异常时的bbl相关信息",
+        "label": "BblMeta",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "key",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "npid",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "tag",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "value",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "响应数据，200条",
+        "label": "OpenApiOutboundOrderQueryResponse",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "cursorCode",
+            "type": "string",
+            "required": false,
+            "description": "本次新游标",
+            "multiple": 0
+          },
+          {
+            "name": "list",
+            "type": "object",
+            "required": false,
+            "description": "数据列表，单次返回200条，默认返回条件内最新的数据",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "addTime",
+                "type": "datetime",
+                "required": false,
+                "description": "添加时间",
+                "multiple": 0
+              },
+              {
+                "name": "detailList",
+                "type": "object",
+                "required": false,
+                "description": "出库单详情",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "actualOutboundQuantity",
+                    "type": "integer",
+                    "required": false,
+                    "description": "实际出库数，仅状态为“已办”出库单有值",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "size",
+                    "type": "string",
+                    "required": false,
+                    "description": "sku尺码",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "skuCode",
+                    "type": "string",
+                    "required": false,
+                    "description": "sku编码",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "suffixZh",
+                    "type": "string",
+                    "required": false,
+                    "description": "sku属性集-销售属性拼接（中文）",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "waitOutboundQuantity",
+                    "type": "integer",
+                    "required": false,
+                    "description": "待出库数",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "originalOrderNo",
+                "type": "string",
+                "required": false,
+                "description": "关联订单号",
+                "multiple": 0
+              },
+              {
+                "name": "outboundOrderNo",
+                "type": "string",
+                "required": false,
+                "description": "出库单据号",
+                "multiple": 0
+              },
+              {
+                "name": "product",
+                "type": "object",
+                "required": false,
+                "description": "商品信息",
+                "label": "BasicProductInfoResponse",
+                "multiple": 0,
+                "children": [
+                  {
+                    "name": "designCode",
+                    "type": "string",
+                    "required": false,
+                    "description": "设计款号",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "skc",
+                    "type": "string",
+                    "required": false,
+                    "description": "skc",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "supplierCode",
+                    "type": "string",
+                    "required": false,
+                    "description": "供方货号",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "status",
+                "type": "integer",
+                "required": false,
+                "description": "状态",
+                "multiple": 0
+              },
+              {
+                "name": "statusName",
+                "type": "string",
+                "required": false,
+                "description": "状态名称",
+                "multiple": 0
+              },
+              {
+                "name": "type",
+                "type": "integer",
+                "required": false,
+                "description": "出库单类型",
+                "multiple": 0
+              },
+              {
+                "name": "typeName",
+                "type": "string",
+                "required": false,
+                "description": "出库单类型名称",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

@@ -1,0 +1,189 @@
+{
+  "docId": "3001650",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "修改和取消发货单订单信息",
+    "userDocName": "修改和取消发货单订单",
+    "endpoint": "/open-api/shipping/modify-delivery-order-info",
+    "method": "POST",
+    "docName": "post_open-api_shipping_modify-delivery-order-info",
+    "version": 12,
+    "updateTime": "2026-03-30 17:26:42",
+    "changeContent": "更新参数说明",
+    "qpsContent": "100",
+    "modes": [
+      1,
+      2,
+      3,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "SHEIN自营",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "该接口主要用于：1、修改发货单订单包裹数量和商品数量；2、取消发货单订单；注意：箱唛和包裹类型的包裹数量入参不同，如需需求，请根据对应的入参设置。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json;charset=UTF-8",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-language",
+        "type": "string",
+        "description": "指定出参语种，默认中文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "addUid",
+        "type": "string",
+        "required": true,
+        "description": "操作人，默认填写openapi",
+        "multiple": 0
+      },
+      {
+        "name": "deleteOrderNos",
+        "type": "string",
+        "required": false,
+        "description": "取消发货的订单号",
+        "multiple": 1
+      },
+      {
+        "name": "deliveryNo",
+        "type": "string",
+        "required": true,
+        "description": "发货单号",
+        "multiple": 0
+      },
+      {
+        "name": "list",
+        "type": "object",
+        "required": false,
+        "description": "发货订单数据 不删除的订单需传参到这里",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "deliveryQuantity",
+            "type": "integer",
+            "required": false,
+            "description": "订单商品数量",
+            "multiple": 0
+          },
+          {
+            "name": "orderNo",
+            "type": "string",
+            "required": false,
+            "description": "订单编号",
+            "multiple": 0
+          },
+          {
+            "name": "packageNum",
+            "type": "integer",
+            "required": false,
+            "description": "订单的包裹数量，只对类型=箱唛有效，请确认包裹类型",
+            "multiple": 0
+          },
+          {
+            "name": "skuCode",
+            "type": "string",
+            "required": false,
+            "description": "sku编码",
+            "multiple": 0
+          },
+          {
+            "name": "packingInfoList",
+            "type": "object",
+            "description": "装箱明细，仅备货海外仓场景可用",
+            "children": [
+              {
+                "name": "packQuantity",
+                "type": "integer",
+                "description": "装箱数量，仅备货海外仓场景可用"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "packageNumber",
+        "type": "integer",
+        "required": false,
+        "description": "快递单对应包裹总数量",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK；支持指定语种出参；",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.cn/open-api/shipping/modify-delivery-order-info' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570817402' \\ --data-raw '{ \"addUid\": \"2324\", \"deleteOrderNos\": [ ], \"deliveryNo\": \"20240223100005\", \"list\": [ { \"deliveryQuantity\": 1000, \"orderNo\": \"B240222501030\", \"skuCode\": \"I51tgzcvk8hl\" } ], \"packageNumber\": 1 }' 取消发货单订单示例 curl --location --request POST 'https://openapi.sheincorp.cn/open-api/shipping/modify-delivery-order-info' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570817402' \\ --data-raw '{ \"addUid\": \"2324\", \"deleteOrderNos\":[\"B240129500029\",\"B240129\"], \"deliveryNo\":\"20240129100026\", \"list\": [ ], \"packageNumber\": 2 }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": null, \"bbl\": null }",
+  "errorCode": null
+}

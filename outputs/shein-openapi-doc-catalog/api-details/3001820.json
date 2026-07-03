@@ -1,0 +1,167 @@
+{
+  "docId": "3001820",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "自营供应商库存更新",
+    "userDocName": "自营供应商库存更新",
+    "endpoint": "/open-api/sims/stock-update",
+    "method": "POST",
+    "docName": "",
+    "version": 5,
+    "updateTime": "2026-06-15 15:08:45",
+    "changeContent": "调整请求头参数",
+    "qpsContent": "",
+    "modes": [
+      3
+    ],
+    "modeNames": [
+      "SHEIN自营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识openKeyId，获取方式请查阅：授权手册"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "请求签名，生成规则请查阅：签名规则"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "支持返回的多语言报错信息，默认返回中文多语言信息"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "stock",
+        "type": "object",
+        "description": "单次最大10，推荐按一个skc一次",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "skc",
+            "type": "string",
+            "required": true,
+            "description": "SHEIN平台生成的SKC"
+          },
+          {
+            "name": "type",
+            "type": "integer",
+            "required": true,
+            "description": "库存更新类型，1加库存，2减库存，3覆盖库存",
+            "example": "1"
+          },
+          {
+            "name": "accurateInventoryLabel",
+            "type": "integer",
+            "description": "库存是否准确，1库存准确，2库存准确待同步，只有type=3时可入参，其它类型不会使用",
+            "example": "1"
+          },
+          {
+            "name": "skuCode",
+            "type": "string",
+            "required": true,
+            "description": "SHEIN平台生成的SKU"
+          },
+          {
+            "name": "warehouseId",
+            "type": "integer",
+            "required": true,
+            "description": "仓库id"
+          },
+          {
+            "name": "locationId",
+            "type": "integer",
+            "description": "库位id，pda模式必传"
+          },
+          {
+            "name": "changeNum",
+            "type": "integer",
+            "required": true,
+            "description": "更新库存数，type=1或2时，为加减的数量，type=3时，为覆盖库存值，出入库时必须大于0，覆盖时大于等于0"
+          },
+          {
+            "name": "remark",
+            "type": "string",
+            "description": "备注，最大100字符"
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "children": [
+          {
+            "name": "list",
+            "type": "object",
+            "required": true,
+            "description": "如果全成功list为空，不为空说明有报错",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "skc",
+                "type": "string",
+                "description": "SHEIN平台生成的SKC"
+              },
+              {
+                "name": "skuCode",
+                "type": "string",
+                "description": "SHEIN平台生成的SKU"
+              },
+              {
+                "name": "msg",
+                "type": "string",
+                "description": "错误信息"
+              }
+            ]
+          },
+          {
+            "name": "code",
+            "type": "string",
+            "description": "0为成功"
+          },
+          {
+            "name": "msg",
+            "type": "string"
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

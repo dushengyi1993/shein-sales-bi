@@ -1,0 +1,387 @@
+{
+  "docId": "3001621",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询对账单详情",
+    "userDocName": "查询对账单详情",
+    "endpoint": "/open-api/finance/get-check-order-detail",
+    "method": "GET",
+    "docName": "get_open-api_finance_get-check-order-detail",
+    "version": 11,
+    "updateTime": "2026-03-23 15:30:57",
+    "changeContent": "增加showGnreTaxAmount、showPerformanceCost",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "自运营、半托管模式的应用可用。通过对账单单号查询对账单详情，对账单单号可通过查询对账单列表接口获取。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认：application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object",
+    "children": [
+      {
+        "name": "checkOrderNo",
+        "type": "string",
+        "required": true,
+        "description": "对账单号，可通过查询对账单列表接口获取。请注意，此接口为GET请求。"
+      }
+    ]
+  },
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "checkOrderNo",
+        "type": "string",
+        "required": true,
+        "description": "对账单号，可通过查询对账单列表接口获取。"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfOpenApiCheckOrderDetailResponse",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述,成功：OK"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "对账单详情数据",
+        "label": "OpenApiCheckOrderDetailResponse",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "businessCompletedTime",
+            "type": "datetime",
+            "required": true,
+            "description": "业务时间，yyyy-MM-dd HH:mm:ss",
+            "multiple": 0
+          },
+          {
+            "name": "bzOrderNo",
+            "type": "string",
+            "required": true,
+            "description": "业务单号",
+            "multiple": 0
+          },
+          {
+            "name": "checkOrderNo",
+            "type": "string",
+            "required": true,
+            "description": "对账单号",
+            "multiple": 0
+          },
+          {
+            "name": "checkStatus",
+            "type": "integer",
+            "required": true,
+            "description": "对账单状态,1、待生成付款；2、即将付款；3、已付款；4、付款异常",
+            "multiple": 0
+          },
+          {
+            "name": "completedPayTime",
+            "type": "datetime",
+            "required": false,
+            "description": "结算完成时间，yyyy-MM-dd HH:mm:ss",
+            "multiple": 0
+          },
+          {
+            "name": "currencyCode",
+            "type": "string",
+            "required": true,
+            "description": "账单币种",
+            "multiple": 0
+          },
+          {
+            "name": "estimateIncomeMoneyTotal",
+            "type": "double",
+            "required": false,
+            "description": "应付金额汇总",
+            "multiple": 0
+          },
+          {
+            "name": "estimatePayTime",
+            "type": "datetime",
+            "required": false,
+            "description": "预计打款日期，yyyy-MM-dd HH:mm:ss",
+            "multiple": 0
+          },
+          {
+            "name": "incomeExpenditureType",
+            "type": "integer",
+            "required": true,
+            "description": "收支类型，1收入，2支出",
+            "multiple": 0
+          },
+          {
+            "name": "itemList",
+            "type": "object",
+            "required": false,
+            "description": "对账单明细列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "commissionAmount",
+                "type": "double",
+                "required": false,
+                "description": "佣金金额",
+                "multiple": 0
+              },
+              {
+                "name": "commissionRate",
+                "type": "double",
+                "required": false,
+                "description": "佣金比例",
+                "multiple": 0
+              },
+              {
+                "name": "commissionSaleTax",
+                "type": "double",
+                "required": false,
+                "description": "佣金消费税",
+                "multiple": 0
+              },
+              {
+                "name": "costPrice",
+                "type": "double",
+                "required": false,
+                "description": "商品供货价，仅半托管模式此字段有值",
+                "multiple": 0
+              },
+              {
+                "name": "couponAmount",
+                "type": "double",
+                "required": false,
+                "description": "优惠券金额",
+                "multiple": 0
+              },
+              {
+                "name": "incomeAmount",
+                "type": "double",
+                "required": false,
+                "description": "预计收入",
+                "multiple": 0
+              },
+              {
+                "name": "performanceCost",
+                "type": "double",
+                "required": false,
+                "description": "履约服务费",
+                "multiple": 0
+              },
+              {
+                "name": "refundRatio",
+                "type": "string",
+                "required": false,
+                "description": "退款比例，当二级账单类型为订单调整时有值",
+                "multiple": 0
+              },
+              {
+                "name": "returnExpense",
+                "type": "double",
+                "required": false,
+                "description": "退货处理费",
+                "multiple": 0
+              },
+              {
+                "name": "returnFreightSubsidy",
+                "type": "double",
+                "required": false,
+                "description": "退货运费补贴",
+                "multiple": 0
+              },
+              {
+                "name": "sellerCurrencyPrice",
+                "type": "double",
+                "required": false,
+                "description": "商品销售价",
+                "multiple": 0
+              },
+              {
+                "name": "sellerCurrencyPromotionPrice",
+                "type": "double",
+                "required": false,
+                "description": "卖家币种活动优惠金额",
+                "multiple": 0
+              },
+              {
+                "name": "sellerRealTax",
+                "type": "double",
+                "required": false,
+                "description": "欧洲vat税费",
+                "multiple": 0
+              },
+              {
+                "name": "serviceFee",
+                "type": "double",
+                "required": false,
+                "description": "服务费",
+                "multiple": 0
+              },
+              {
+                "name": "settleCurrencyPromotionPrice",
+                "type": "double",
+                "required": false,
+                "description": "结算币种活动提报优惠金额",
+                "multiple": 0
+              },
+              {
+                "name": "skuCode",
+                "type": "string",
+                "required": false,
+                "description": "sku",
+                "multiple": 0
+              },
+              {
+                "name": "stockExpense",
+                "type": "double",
+                "required": false,
+                "description": "备货作业费",
+                "multiple": 0
+              },
+              {
+                "name": "subjectAmountList",
+                "type": "object",
+                "required": false,
+                "description": "税费明细列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "subjectCode",
+                    "type": "string",
+                    "required": false,
+                    "description": "金额栏目，枚举值：WHT_VAT、WHT_IT, CEDULAR_WHT, SUBSIDY_VAT, SUBSIDY_IT, CEDULAR_SUBSIDY",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "subjectPrice",
+                    "type": "double",
+                    "required": false,
+                    "description": "栏目金额",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "subjectType",
+                    "type": "string",
+                    "required": false,
+                    "description": "金额类型。WHT-MX税费代扣代缴；whtTaxSubsidy-MX税费补贴",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "subsidyTotalAmount",
+                "type": "double",
+                "required": false,
+                "description": "Subsidy_total税费补贴汇总金额",
+                "multiple": 0
+              },
+              {
+                "name": "whtTotalAmount",
+                "type": "double",
+                "required": false,
+                "description": "WHT total税费汇总",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "reportOrderNo",
+            "type": "string",
+            "required": true,
+            "description": "报账单号",
+            "multiple": 0
+          },
+          {
+            "name": "secondOrderType",
+            "type": "integer",
+            "required": true,
+            "description": "二级账单类型。具体枚举值点击查看FAQ。",
+            "multiple": 0
+          },
+          {
+            "name": "site",
+            "type": "string",
+            "required": true,
+            "description": "销售站点；例如shein-br",
+            "multiple": 0
+          },
+          {
+            "name": "originalOrderNo",
+            "type": "string",
+            "description": "原始订单号，比如GSO13523Y00MTSQ"
+          },
+          {
+            "name": "showGnreTaxAmount",
+            "type": "double",
+            "description": "展示GNRE税费"
+          },
+          {
+            "name": "showPerformanceCost",
+            "type": "double",
+            "description": "展示履约服务费"
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求追踪码"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request GET 'https://openapi.sheincorp.com/open-api/finance/get-check-order-list?checkOrderNo=B241114524652546' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-timestamp: 1752829588092' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'language: zh-cn' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi.sheincorp.com' \\",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"checkOrderNo\": \"B241114524652546\", \"checkStatus\": 1, \"secondOrderType\": 1, \"incomeExpenditureType\": 1, \"bzOrderNo\": \"GSONP109T00000X1\", \"businessCompletedTime\": \"2024-11-14 17:47:21\", \"completedPayTime\": \"\", \"site\": \"shein-us\", \"currencyCode\": \"USD\", \"estimateIncomeMoneyTotal\": 44.48, \"reportOrderNo\": null, \"estimatePayTime\": \"2025-05-19 10:23:58\", \"itemList\": [ { \"skuCode\": \"I32gzqxvt3ez\", \"sellerCurrencyPrice\": 12.98, \"costPrice\": 0.0, \"couponAmount\": 0.0, \"settleCurrencyPromotionPrice\": 0.0, \"sellerCurrencyPromotionPrice\": 0.0, \"sellerRealTax\": 1.86, \"commissionSaleTax\": 0.0, \"whtTotalAmount\": 0.0, \"subjectAmountList\": [], \"subsidyTotalAmount\": 0.0, \"commissionRate\": 0.0, \"commissionAmount\": 0.0, \"performanceCost\": 0.0, \"stockExpense\": 0.0, \"returnExpense\": 0.0, \"returnFreightSubsidy\": 0.0, \"serviceFee\": 0.0, \"refundRatio\": \"0.00\", \"incomeAmount\": 11.12 }, { \"skuCode\": \"I37n4oz29ihf\", \"sellerCurrencyPrice\": 12.98, \"costPrice\": 0.0, \"couponAmount\": 0.0, \"settleCurrencyPromotionPrice\": 0.0, \"sellerCurrencyPromotionPrice\": 0.0, \"sellerRealTax\": 1.86, \"commissionSaleTax\": 0.0, \"whtTotalAmount\": 0.0, \"subjectAmountList\": [], \"subsidyTotalAmount\": 0.0, \"commissionRate\": 0.0, \"commissionAmount\": 0.0, \"performanceCost\": 0.0, \"stockExpense\": 0.0, \"returnExpense\": 0.0, \"returnFreightSubsidy\": 0.0, \"serviceFee\": 0.0, \"refundRatio\": \"0.00\", \"incomeAmount\": 11.12 }, { \"skuCode\": \"I32gzqxvt3ez\", \"sellerCurrencyPrice\": 12.98, \"costPrice\": 0.0, \"couponAmount\": 0.0, \"settleCurrencyPromotionPrice\": 0.0, \"sellerCurrencyPromotionPrice\": 0.0, \"sellerRealTax\": 1.86, \"commissionSaleTax\": 0.0, \"whtTotalAmount\": 0.0, \"subjectAmountList\": [], \"subsidyTotalAmount\": 0.0, \"commissionRate\": 0.0, \"commissionAmount\": 0.0, \"performanceCost\": 0.0, \"stockExpense\": 0.0, \"returnExpense\": 0.0, \"returnFreightSubsidy\": 0.0, \"serviceFee\": 0.0, \"refundRatio\": \"0.00\", \"incomeAmount\": 11.12 }, { \"skuCode\": \"I37n4oz29ihf\", \"sellerCurrencyPrice\": 12.98, \"costPrice\": 0.0, \"couponAmount\": 0.0, \"settleCurrencyPromotionPrice\": 0.0, \"sellerCurrencyPromotionPrice\": 0.0, \"sellerRealTax\": 1.86, \"commissionSaleTax\": 0.0, \"whtTotalAmount\": 0.0, \"subjectAmountList\": [], \"subsidyTotalAmount\": 0.0, \"commissionRate\": 0.0, \"commissionAmount\": 0.0, \"performanceCost\": 0.0, \"stockExpense\": 0.0, \"returnExpense\": 0.0, \"returnFreightSubsidy\": 0.0, \"serviceFee\": 0.0, \"refundRatio\": \"0.00\", \"incomeAmount\": 11.12 } ] }, \"bbl\": {}, \"traceId\": \"ddd6ff84084802df\" }",
+  "errorCode": null
+}

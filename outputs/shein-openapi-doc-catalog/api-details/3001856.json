@@ -1,0 +1,232 @@
+{
+  "docId": "3001856",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询SKC的警告语绑定状态",
+    "userDocName": "查询SKC的警告语绑定状态",
+    "endpoint": "/open-api/goods-compliance/query-skc-warning-status",
+    "method": "POST",
+    "docName": "",
+    "version": 3,
+    "updateTime": "2026-06-29 19:38:47",
+    "changeContent": "引导使用新接口",
+    "qpsContent": "40",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "查询SKC的警告语证书绑定要求和状态，（此接口已有新接口承接，建议优先对接新接口：/open-api/goods-compliance-requirements/list）。警告语接口完整调用方案，详见文档。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "响应msg的语种。 不传时默认为英语，枚举值支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "certificateTypeCodes",
+        "type": "string",
+        "required": true,
+        "description": "证书类型编码列表，最多20个（目前警告语证书少于20个）。建议先查询/open-api/goods-compliance/query-warning-certificate-rules，获取到全量的警告语证书code，将他们入参至此以确保查出的结果全是警告语的绑定数据。目前平台没有警告语证书标识，只能通过具体的certificateTypeCode来识别哪些是警告语。",
+        "multiple": 1
+      },
+      {
+        "name": "pageNum",
+        "type": "integer",
+        "required": true,
+        "description": "页数",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "required": true,
+        "description": "每页数量，最多200个",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "reviewStates",
+        "type": "integer",
+        "description": "审核状态。0=没有提交过审核;1=待审核;2=审核成功;3=审核驳回",
+        "example": "0",
+        "multiple": 1
+      },
+      {
+        "name": "skcNames",
+        "type": "string",
+        "description": "SKC平台编码，最多200个",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应码",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "响应信息",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "description": "详情",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "data",
+            "type": "object",
+            "description": "详情",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "skcName",
+                "type": "string",
+                "description": "SKC平台编码",
+                "example": "s24102107079376",
+                "multiple": 0
+              },
+              {
+                "name": "items",
+                "type": "object",
+                "description": "SKC需要绑定的警告语证书",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "certificateTypeCode",
+                    "type": "string",
+                    "description": "证书类型Code",
+                    "example": "EuToyWarnings",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "certificateTypeName",
+                    "type": "string",
+                    "description": "证书类型名称",
+                    "example": "EU Toy Safety Directive",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "certificateTypeId",
+                    "type": "integer",
+                    "description": "证书类型ID",
+                    "example": "396",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "complianceGroupCode",
+                    "type": "string",
+                    "description": "证书所属场景，对ERP无业务意义",
+                    "example": "HGXXL",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "reviewState",
+                    "type": "integer",
+                    "description": "审核状态。0=没有提交过审核;1=待审核;2=审核成功;3=审核驳回",
+                    "example": "0",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "isRequired",
+                    "type": "integer",
+                    "description": "是否必传。0-否, 1-是。",
+                    "example": "1",
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "meta",
+            "type": "object",
+            "description": "计数数据",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "count",
+                "type": "integer",
+                "description": "SKC条数",
+                "example": "1",
+                "multiple": 0
+              },
+              {
+                "name": "customObj",
+                "type": "json",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "bbl",
+        "type": "json",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "追踪码",
+        "example": "35a2233c5d654010",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

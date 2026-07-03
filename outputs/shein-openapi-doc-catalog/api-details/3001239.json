@@ -1,0 +1,172 @@
+{
+  "docId": "3001239",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "商品列表接口",
+    "userDocName": "商品列表接口",
+    "endpoint": "/open-api/openapi-business-backend/product/query",
+    "method": "POST",
+    "docName": "post_open-api_openapi-business-backend_product_query",
+    "version": 18,
+    "updateTime": "2025-07-17 11:56:50",
+    "changeContent": "更新curl",
+    "qpsContent": "100",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "该API支持查询已发布成功的商品列表数据，接口一次最多返回50000条数据。如果商家发布的商品数量超过50000条，请增加时间范围进行查询。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "pageNum",
+        "type": "integer",
+        "required": false,
+        "description": "页面数量，默认：1",
+        "defaultValue": "1",
+        "multiple": 0
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "required": false,
+        "description": "页面大小，默认：50",
+        "defaultValue": "50",
+        "multiple": 0
+      },
+      {
+        "name": "insertTimeEnd",
+        "type": "string",
+        "description": "商品上新的结束时间（商品首次审核通过），示例：2024-11-15 19:00:00"
+      },
+      {
+        "name": "insertTimeStart",
+        "type": "string",
+        "description": "商品上新的开始时间（商品首次审核通过）示例：2024-11-15 20:00:00"
+      },
+      {
+        "name": "updateTimeEnd",
+        "type": "string",
+        "description": "商品的更新结束时间（更新范围不仅是商品信息变动，包括系统内部更新时间）.示例：2024-11-15 19:00:00"
+      },
+      {
+        "name": "updateTimeStart",
+        "type": "string",
+        "description": "商品的更新开始时间（更新范围不仅是商品信息变动，包括系统内部更新时间）.示例：2024-11-15 19:00:00"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": false,
+        "description": "编码(0:success)",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "data",
+            "type": "object",
+            "required": false,
+            "multiple": 1,
+            "children": [
+              {
+                "name": "skcName",
+                "type": "string",
+                "required": false,
+                "description": "skcName，skcName是SHEIN生成的系统编码",
+                "multiple": 0
+              },
+              {
+                "name": "skuCodeList",
+                "type": "string",
+                "required": false,
+                "description": "sku维度数据，一个skc下最多40个sku；skuCode，skuCode是SHEIN生成的系统编码",
+                "multiple": 1
+              },
+              {
+                "name": "spuName",
+                "type": "string",
+                "required": false,
+                "description": "spuName，spuName是SHEIN生成的系统编码",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误信息",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi-test01.sheincorp.cn/open-api/openapi-business-backend/product/query' \\ --header 'language: zh-cn' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-timestamp: 1752724525405' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi-test01.sheincorp.cn' \\ --data-raw '{ \"pageNum\": 1, \"pageSize\": 50 }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"data\": [ { \"skcName\": \"sM22040955900525\", \"skuCodeList\": [ \"I065lggbkwpe\", \"I065lggbejle\", \"I065lggb9yr6\", \"I065lggbivg3\", \"I065lggbg9pt\", \"I065lggbclpa\", \"I065lggb4uy5\" ], \"spuName\": \"M2204095590\" }, { \"skcName\": \"sM22120115814401\", \"skuCodeList\": [ \"I9bqt81qmsv0\" ], \"spuName\": \"M2212011581\" } ] } }",
+  "errorCode": null
+}

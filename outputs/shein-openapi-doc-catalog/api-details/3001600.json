@@ -1,0 +1,151 @@
+{
+  "docId": "3001600",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "在线下单",
+    "userDocName": "在线下单",
+    "endpoint": "/open-api/gsp/place-express-order",
+    "method": "POST",
+    "docName": "",
+    "version": 10,
+    "updateTime": "2026-03-04 16:22:22",
+    "changeContent": "增加traceid",
+    "qpsContent": "80",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "在线下单指SHEIN商家指定平台合作物流进行订单履约；目前该功能仅支持美国、欧洲、中东的自运营或半托管商家注意：不是所有店铺可用的物流渠道都支持在线下单，需要调用“商家维度查有可用物流信息”接口确认，如“platformLogisticsChannels”没有数据返回，则代表该店铺无可用的平台合作物流，无法使用在线下单功能",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "expressChannelCode",
+        "type": "string",
+        "required": true,
+        "description": "渠道商产品编码；",
+        "example": "usD2D1250707-Na",
+        "multiple": 0
+      },
+      {
+        "name": "packageInfoList",
+        "type": "object",
+        "required": true,
+        "description": "包裹明细；(目前支持单订单多包裹)",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "orderNo",
+            "type": "string",
+            "required": true,
+            "description": "订单号",
+            "example": "GSO1CL53800M5D4",
+            "multiple": 0
+          },
+          {
+            "name": "goodsIds",
+            "type": "int64",
+            "description": "每件商品的唯一ID。如果一个 SKU 有多件，每一件的goodsId都是唯一的，goodsId可以从订单详情中查询得到。",
+            "multiple": 1
+          }
+        ]
+      },
+      {
+        "name": "preRequestId",
+        "type": "string",
+        "required": true,
+        "description": "渠道预判请求ID；通过调用【查询订单可用物流信息】接口获取",
+        "example": "POJ2507283989769217",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": true,
+        "description": "错误描述,成功：OK",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "required": true,
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "deliveryNo",
+            "type": "string",
+            "description": "运单包裹号",
+            "example": "GU25072532795729922",
+            "multiple": 0
+          },
+          {
+            "name": "placeRequestId",
+            "type": "string",
+            "description": "下单请求id；用于查询【在线下单结果】，注意：平台与实际物流服务商之间采用异步交互，即平台向物流商发起下单申请后，需要等待物流商系统处理并返回最终结果",
+            "example": "2507284064100355",
+            "multiple": 0
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/gsp/place-express-order' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-timestamp: 1753760372427' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --data-raw '{ \"expressChannelCode\": \"usD2D1250707-Na\", \"packageInfoList\":[{ \"orderNo\": \"GSO1CL53800M5D4\" }], \"preRequestId\": \"POJ2507283989769217\" }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"deliveryNo\": \"GU25072532795729922\", \"placeRequestId\": \"2507284064100355\" }, \"bbl\": {}, \"traceId\": \"5d7090d3839f5a67\" }",
+  "errorCode": null
+}

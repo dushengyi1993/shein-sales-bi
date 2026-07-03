@@ -1,0 +1,148 @@
+{
+  "docId": "3000928",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "【新】物流重量回调",
+    "userDocName": "【新】物流重量回调",
+    "endpoint": "/open-api/cargo/weight-callback",
+    "method": "POST",
+    "docName": "post_open-api_cargo_weight-callback",
+    "version": 7,
+    "updateTime": "2025-02-25 11:16:40",
+    "changeContent": "add",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": null,
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "data",
+        "type": "object",
+        "required": true,
+        "description": "data",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "trackingNumber",
+            "type": "string",
+            "required": true,
+            "description": "运单号"
+          },
+          {
+            "name": "actualWeight",
+            "type": "string",
+            "description": "实际重量, 如100.25"
+          },
+          {
+            "name": "volumeWeight",
+            "type": "string",
+            "description": "体积重量（抛重）, 如100.25"
+          },
+          {
+            "name": "chargeWeight",
+            "type": "string",
+            "description": "计费重量, 如100.25"
+          },
+          {
+            "name": "packageQuantity",
+            "type": "string",
+            "description": "包裹数量，如5"
+          },
+          {
+            "name": "volume",
+            "type": "decimal",
+            "description": "运单体积，单位：立方米，最多小数点后6位数(如：0.0063)"
+          },
+          {
+            "name": "volumeDetails",
+            "type": "string",
+            "description": "体积明细，单位：厘米，长*宽*高*数量，不同包裹尺寸的数据，用英文字母\",\"分隔开，最多2000个字符（如：\"30*30*30*2, 20*20*20*1, 10*10*10*2\"）"
+          },
+          {
+            "name": "packageDetails",
+            "type": "object",
+            "description": "包裹详情",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "actualWeight",
+                "type": "double",
+                "description": "实际重量,单位：kg"
+              },
+              {
+                "name": "length",
+                "type": "integer",
+                "description": "长,单位：厘米"
+              },
+              {
+                "name": "width",
+                "type": "integer",
+                "description": "宽,单位：厘米"
+              },
+              {
+                "name": "height",
+                "type": "integer",
+                "description": "高,单位：厘米"
+              },
+              {
+                "name": "quantity",
+                "type": "integer",
+                "description": "数量，若未传子单号，数量必传。若传子单号，数量默认为1"
+              },
+              {
+                "name": "subWaybillNo",
+                "type": "string",
+                "description": "子单号"
+              },
+              {
+                "name": "volume",
+                "type": "double",
+                "description": "体积,单位：立方米，最多6位小数"
+              },
+              {
+                "name": "volumeWeight",
+                "type": "double",
+                "description": "抛重重量,单位：kg"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应编码，0成功，-1失败, 其他失败"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述，成功：OK"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "description": "响应结果"
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "data\": [ { \"trackingNumber\": \"运单号\", \"actualWeight\": null, \"volumeWeight\": null, \"chargeWeight\": null, \"packageQuantity\": null } ] }",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": null }",
+  "errorCode": null
+}

@@ -1,0 +1,285 @@
+{
+  "docId": "3001654",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "发货基本信息查询接口",
+    "userDocName": "发货基本信息查询接口",
+    "endpoint": "/open-api/shipping/basic",
+    "method": "GET",
+    "docName": "get_open-api_shipping_basic",
+    "version": 18,
+    "updateTime": "2026-03-31 21:31:39",
+    "changeContent": "更新参数说明",
+    "qpsContent": "50",
+    "modes": [
+      1,
+      2,
+      3,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "SHEIN自营",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "通过该接口获取商家发货地址，发货仓，支持的发货方式，打包方式，车队，自行委托第三方的物流服务商信息；",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-language",
+        "type": "string",
+        "description": "指定出参语种，默认中文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object",
+    "children": [
+      {
+        "name": "orderType",
+        "type": "integer",
+        "required": true,
+        "description": "订单类型，1：急采，2：备货",
+        "label": "订单类型"
+      },
+      {
+        "name": "addressId",
+        "type": "integer",
+        "description": "不同的发货地址可匹配不同的快递物流，不选择发货地址某些物流公司无法匹配",
+        "label": "发货地址ID"
+      },
+      {
+        "name": "orderNoList",
+        "type": "string",
+        "description": "订单号list",
+        "label": "订单号list"
+      },
+      {
+        "name": "includeSharedAddr",
+        "type": "integer",
+        "description": "是否查询共享发货地址，1：是，2：否，默认为1",
+        "label": "查询共享地址"
+      }
+    ]
+  },
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "addressList",
+            "type": "object",
+            "required": false,
+            "description": "发货地址",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "addressId",
+                "type": "integer",
+                "required": false,
+                "description": "地址ID",
+                "multiple": 0
+              },
+              {
+                "name": "addressName",
+                "type": "string",
+                "required": false,
+                "description": "地址名称",
+                "multiple": 0
+              },
+              {
+                "name": "isSharedAddress",
+                "type": "integer",
+                "description": "是否为共享发货地址"
+              }
+            ]
+          },
+          {
+            "name": "deliveryTypeList",
+            "type": "object",
+            "required": false,
+            "description": "发货方式",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "deliveryTypeName",
+                "type": "string",
+                "required": false,
+                "description": "发货方式名称，支持按指定语种出参",
+                "multiple": 0
+              },
+              {
+                "name": "deliveryTypeValue",
+                "type": "integer",
+                "required": false,
+                "description": "发货方式值",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "expressCompanyList",
+            "type": "object",
+            "required": false,
+            "description": "获取商家自行联系的物流服务商信息；SHEIN集成的物流服务商信息请通过物流产品查询接口获取",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "companyCode",
+                "type": "string",
+                "required": false,
+                "description": "快递编码",
+                "multiple": 0
+              },
+              {
+                "name": "companyName",
+                "type": "string",
+                "required": false,
+                "description": "快递公司名称",
+                "multiple": 0
+              },
+              {
+                "name": "isSupport",
+                "type": "boolean",
+                "required": false,
+                "description": "服务商类型；true:SHEIN集成物流服务商；false：商家自行委托第三方物流服务商；",
+                "multiple": 0
+              },
+              {
+                "name": "isRecommend",
+                "type": "string",
+                "description": "是否推荐物流，1：是，2：否"
+              }
+            ]
+          },
+          {
+            "name": "motorcadeList",
+            "type": "object",
+            "required": false,
+            "description": "车队列表；快递发货商家无需关注",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "isSupport",
+                "type": "boolean",
+                "required": false,
+                "description": "服务商类型；true:SHEIN集成车队；false：商家自行委托第三方车队；",
+                "multiple": 0
+              },
+              {
+                "name": "motorcadeId",
+                "type": "string",
+                "required": false,
+                "description": "车队编码",
+                "multiple": 0
+              },
+              {
+                "name": "motorcadeName",
+                "type": "string",
+                "required": false,
+                "description": "车队名称",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "packageType",
+            "type": "integer",
+            "required": false,
+            "description": "打包类型 1:包裹 2：箱唛",
+            "multiple": 0
+          },
+          {
+            "name": "shippingRouteList",
+            "type": "string",
+            "description": "发货路径，0：直送路径，无需装箱明细。1：直送路径，需要装箱明细。2：集货路径"
+          },
+          {
+            "name": "supplierWarehouseList",
+            "type": "object",
+            "required": false,
+            "description": "商家仓库",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "supplierWarehouseId",
+                "type": "int64",
+                "required": false,
+                "description": "商家仓库id",
+                "multiple": 0
+              },
+              {
+                "name": "warehouseName",
+                "type": "string",
+                "required": false,
+                "description": "仓库名称",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request GET 'https://openapi.sheincorp.cn/open-api/shipping/basic?orderType=1' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570464986' \\ --data-raw ''",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"deliveryTypeList\": [ { \"deliveryTypeName\": \"快递/物流送货\", \"deliveryTypeValue\": 1 }, { \"deliveryTypeName\": \"送货上门\", \"deliveryTypeValue\": 2 }, { \"deliveryTypeName\": \"定点收货\", \"deliveryTypeValue\": 3 }, { \"deliveryTypeName\": \"新增发货方式\", \"deliveryTypeValue\": 4 }, { \"deliveryTypeName\": \"上门查货\", \"deliveryTypeValue\": 21 }, { \"deliveryTypeName\": \"送货上门\", \"deliveryTypeValue\": 10 } ], \"addressList\": [ { \"addressName\": \"河南地址\", \"addressId\": 4722 }, { \"addressName\": \"青羊地址\", \"addressId\": 4721 }, { \"addressName\": \"宝鸡\", \"addressId\": 4720 } ], \"supplierWarehouseList\": [ { \"warehouseName\": \"323432\", \"supplierWarehouseId\": 78377 }, { \"warehouseName\": \"仓库kkiki\", \"supplierWarehouseId\": 78376 }, { \"warehouseName\": \"总仓\", \"supplierWarehouseId\": 78359 } ], \"expressCompanyList\": [ { \"companyName\": \"提前我认为其他完全放弃\", \"companyCode\": \"afasfsag\", \"isSupport\": true }, { \"companyName\": \"车门\", \"companyCode\": \"chemen\", \"isSupport\": true }, { \"companyName\": \"dhl\", \"companyCode\": \"dhl\", \"isSupport\": false }, { \"companyName\": \"fedex\", \"companyCode",
+  "errorCode": null
+}

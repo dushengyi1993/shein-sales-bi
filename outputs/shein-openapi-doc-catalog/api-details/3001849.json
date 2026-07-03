@@ -1,0 +1,261 @@
+{
+  "docId": "3001849",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询SKC的合规信息要求",
+    "userDocName": "查询SKC的合规信息要求",
+    "endpoint": "/open-api/goods-compliance-requirements/list",
+    "method": "POST",
+    "docName": "",
+    "version": 2,
+    "updateTime": "2026-06-29 19:34:41",
+    "changeContent": "新接口上线",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "可查询平台对SKC的合规信息绑定要求（包括资质证书、代理公司、警告语、合规法案、卖点、说明书），出参数据可对应商家后台的商品合规管理列表。合规信息完整解决方案，详见文档。【重要说明】出参中字段complianceGroupCode，可用来区分是哪种类型的合规信息。目前开放平台没有支持所有合规类型信息的创建，不同合规类型的调用接口也不同，请阅读下方枚举说明。ZSZZL：证书资质类，如各类测试报告，可通过API创建。先查询填写规则/open-api/goods-certificate-schemas/detail，再创建/open-api/goods-certificates/save。GSL：公司类，如代理公司，可通过API创建。先查询公司列表/open-api/goods-compliance/agency-list，再和SKC绑定/open-api/goods-compliance/save-skc-agency。HGXXL：合规信息类，如产品标识符、警告语。此类中只有手动绑定的警告语暂可通过API创建，判断方式isManualProductWarning=true，先查询填写规则/open-api/goods-compliance/query-warning-certificate-rules，再编辑SKC的警告语/open-api/goods-compliance/update-skc-warning-certificate。其他信息暂不支持通过API创建。SPTL：卖点证书，暂不支持通过API创建。SPSMS：说明书，暂不支持通过API创建。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "required": false,
+        "description": "响应msg的语种。不传时默认为英语，枚举值支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "description": "查询SKC产品警告语绑定列表请求",
+    "label": "QuerySkcComplianceItemListReq",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "certificateTypeCodes",
+        "type": "string",
+        "required": false,
+        "description": "证书类型编码列表，最多20个",
+        "multiple": 1
+      },
+      {
+        "name": "pageNum",
+        "type": "integer",
+        "required": true,
+        "description": "页码",
+        "multiple": 0
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "required": true,
+        "description": "每页大小，最大200",
+        "multiple": 0
+      },
+      {
+        "name": "reviewStates",
+        "type": "integer",
+        "required": false,
+        "description": "审核状态。0=未审核（即当前为缺失）;1=待审核;2=审核成功;3=审核驳回",
+        "multiple": 1
+      },
+      {
+        "name": "skcNames",
+        "type": "string",
+        "required": false,
+        "description": "SKC编码列表，最多200个",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfResultOfErpSkcComplianceInfoResp",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "响应信息",
+        "label": "ResultOfErpSkcComplianceInfoResp",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "data",
+            "type": "object",
+            "required": false,
+            "description": "列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "items",
+                "type": "object",
+                "required": false,
+                "description": "合规要求列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "certificateTypeCode",
+                    "type": "string",
+                    "required": false,
+                    "description": "证书类型编码",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "certificateTypeId",
+                    "type": "int64",
+                    "required": false,
+                    "description": "证书类型ID",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "certificateTypeName",
+                    "type": "string",
+                    "required": false,
+                    "description": "证书类型名称",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "complianceGroupCode",
+                    "type": "string",
+                    "required": false,
+                    "description": "合规分组编码。【重要】此编码可用来区分合规信息是什么类型，例如资质证书、代理公司、警告语。目前开放平台接口没有支持所有合规信息的上传，请阅读文档顶部的说明。",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "isAutoProductWarning",
+                    "type": "boolean",
+                    "required": false,
+                    "description": "是否为自动绑定的警告语。此类警告语不需要商家手动操作，系统会基于设定自动绑定。",
+                    "example": "false",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "isManualProductWarning",
+                    "type": "boolean",
+                    "required": false,
+                    "description": "是否为手动绑定的警告语。此类警告语需要商家手动操作，可通过API创建绑定，接口调用方式详见文档顶部描述。",
+                    "example": "false",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "isRequired",
+                    "type": "integer",
+                    "required": false,
+                    "description": "是否必传: 0-否, 1-是, 10-未知（通常是一个瞬时过渡状态）",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "reviewState",
+                    "type": "integer",
+                    "required": false,
+                    "description": "审核状态:0=未审核（即当前为缺失）;1=待审核;2=审核成功;3=审核驳回",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "skcName",
+                "type": "string",
+                "required": false,
+                "description": "SKC编码",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "meta",
+            "type": "object",
+            "required": false,
+            "description": "元数据",
+            "label": "Meta",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "count",
+                "type": "integer",
+                "required": false,
+                "description": "数据记录数",
+                "multiple": 0
+              },
+              {
+                "name": "customObj",
+                "type": "object",
+                "required": false,
+                "description": "用户自定义扩展",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "追踪码"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

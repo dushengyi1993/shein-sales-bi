@@ -1,0 +1,179 @@
+{
+  "docId": "3001692",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "修改库存接口",
+    "userDocName": "更新商家库存接口v1",
+    "endpoint": "/open-api/gsp/goods/change-inventory",
+    "method": "POST",
+    "docName": "post_open-api_gsp_goods_change-inventory",
+    "version": 25,
+    "updateTime": "2026-04-27 20:19:47",
+    "changeContent": "更新接口说明",
+    "qpsContent": "50",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "功能介绍：根据 shein sku 编码修改库存，输入 shein sku 编码和修改后的库存数量，返回状态以及修改失败的 shein sku 编码。适用应用：自主运营和半托管模式注意：如果店铺是多仓库的，调用接口需要传warehouseCode,否则会报错注意：此接口已经升级为更新商家库存接口v2",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json;charset=UTF-8",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-language",
+        "type": "string",
+        "description": "指定出参语种，默认中文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "updateSkuInventoryQuantityRequests",
+        "type": "object",
+        "required": true,
+        "description": "1次接口调用最多传100个sku，如需要修改库存的商品数量超过100，开发者需要多次调用接口",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "changeInventoryQuantity",
+            "type": "integer",
+            "description": "商品的总库存；changeInventoryQuantity和saleInventory入参为必填，且只能填写一个；",
+            "example": "673",
+            "multiple": 0
+          },
+          {
+            "name": "skuCode",
+            "type": "string",
+            "required": true,
+            "description": "SHEIN平台生成的SKU，仅限审核通过的SKU可以修改库存；审核失败的SKU不可用",
+            "example": "siqwersk74ujdjd",
+            "multiple": 0
+          },
+          {
+            "name": "warehouseCode",
+            "type": "string",
+            "description": "仓库id，如果店铺有多个仓库则必传。通过商家仓列表查询接口查看"
+          },
+          {
+            "name": "saleInventory",
+            "type": "integer",
+            "description": "更新可售库存；可售库存=可用库存+临时锁库存（下单未付款数）；changeInventoryQuantity和saleInventory入参为必填，且只能填写一个；"
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "response encoding succeeded: 0",
+        "example": "99002",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "error description, success: OK",
+        "example": "The request parameter is abnormal, please refresh and try again",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "children": [
+          {
+            "name": "failedList",
+            "type": "object",
+            "description": "失败列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "code",
+                "type": "string",
+                "description": "失败编码，失败原因，多个原因的情况下只返回一个错误码"
+              },
+              {
+                "name": "reason",
+                "type": "string",
+                "description": "失败原因，多个原因的情况下都会返回"
+              },
+              {
+                "name": "skuCode",
+                "type": "string",
+                "description": "编辑时上传的sku编码"
+              }
+            ]
+          },
+          {
+            "name": "successList",
+            "type": "object",
+            "description": "更新成功的sku列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "skuCode",
+                "type": "string",
+                "description": "编辑时上传的sku编码"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/gsp/goods/change-inventory' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570817402' \\ --data-raw '{ \"updateSkuInventoryQuantityRequests\": [ { \"changeInventoryQuantity\": 66, \"skuCode\": \"I569gfcaeopb\", \"warehouseCode\": \"PS30720142\" }, { \"changeInventoryQuantity\": 66, \"skuCode\": \"I91iicgnj561\", \"warehouseCode\": \"PS56328250\" }, { \"changeInventoryQuantity\": 66, \"skuCode\": \"mike gu test\", \"warehouseCode\": \"PS30720142\" }, { \"changeInventoryQuantity\": 5, \"skuCode\": \"I33sb3sdgytd1\", \"warehouseCode\": \"PS6039317316\" } ] }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"successList\": [ { \"skuCode\": \"I569gfcaeopb\", \"reason\": null, \"code\": null } ], \"failedList\": [ { \"skuCode\": \"I91iicgnj561\", \"reason\": \"商家仓库未匹配到--SKC非当前供应商所属\", \"code\": \"msc-update-stock-001\" }, { \"skuCode\": \"mike gu test\", \"reason\": \"商品SKU不存在--SKC非当前供应商所属\", \"code\": \"msc-update-stock-004\" }, { \"skuCode\": \"I33sb3sdgytd1\", \"reason\": \"商家仓库未匹配到--商品SKU不存在--SKC非当前供应商所属\", \"code\": \"msc-update-stock-001\" } ] }, \"bbl\": null, \"traceId\": \"f1c83bbd7037613e\" }",
+  "errorCode": null
+}

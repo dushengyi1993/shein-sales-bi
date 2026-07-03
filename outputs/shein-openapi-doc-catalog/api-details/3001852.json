@@ -1,0 +1,141 @@
+{
+  "docId": "3001852",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "上传证书文件",
+    "userDocName": "上传资质证书文件",
+    "endpoint": "/open-api/goods-certificate-files/upload",
+    "method": "POST",
+    "docName": "",
+    "version": 2,
+    "updateTime": "2026-06-29 19:35:00",
+    "changeContent": "新接口上线",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "可将本地文件转换为SHEIN的文件链接，用于创建/更新资质证书中的文件内容。完整的资质证书调用方案，详见文档",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "响应msg的语种。不传时默认为中文，枚举值支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "file",
+        "type": "blob",
+        "required": true,
+        "description": "file；单个20M以内、格式为PDF/PNG/JPG/JPEG的文件上传"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfErpUploadImageResp",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "响应体",
+        "label": "ErpUploadImageResp",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "certificateMd5",
+            "type": "string",
+            "required": false,
+            "description": "文件的MD5",
+            "multiple": 0
+          },
+          {
+            "name": "certificateUrl",
+            "type": "string",
+            "required": false,
+            "description": "文件的URL",
+            "multiple": 0
+          },
+          {
+            "name": "code",
+            "type": "integer",
+            "required": false,
+            "description": "响应码。0-成功，1-失败",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "追踪码"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

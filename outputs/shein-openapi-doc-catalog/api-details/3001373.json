@@ -1,0 +1,158 @@
+{
+  "docId": "3001373",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询SKC可用的标签模板",
+    "userDocName": "查询SKC可用的标签模板",
+    "endpoint": "/open-api/goods-compliance/get-label-template",
+    "method": "POST",
+    "docName": "",
+    "version": 2,
+    "updateTime": "2025-08-19 11:08:12",
+    "changeContent": "更新描述",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "平台基于各国家地区的要求，提前预设了多个标签模板，例如GPSR标签模板。系统会为每个skc推荐可用的标签模板，建议商家使用平台的标签模板打印。点击此处查看商家后台的打印流程。此接口可查到每个skc的可用标签模板详细信息（包括预览图），商家可查看预览图后确认要使用的模板后，基于模板进行标签打印：/open-api/goods-compliance/label-print",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "description": "查看签名生成规则"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：158339876400"
+      },
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "description": "application/json"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "指定出参语种，默认中文；支持语种:英语:EN 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "skc",
+        "type": "string",
+        "required": true,
+        "description": "平台生成的skc编码",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应码。正常为“0”",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": true,
+        "description": "响应信息。正常为“OK”",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "description": "详情",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "skc",
+            "type": "string",
+            "required": true,
+            "description": "入参的skc",
+            "example": "sa25080185896920018",
+            "multiple": 0
+          },
+          {
+            "name": "labelList",
+            "type": "object",
+            "description": "可用标签模板列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "labelCode",
+                "type": "string",
+                "description": "标签模板code",
+                "example": "1754474187729",
+                "multiple": 0
+              },
+              {
+                "name": "labelName",
+                "type": "string",
+                "description": "标签模板名称",
+                "example": "开平专用-商品条码",
+                "multiple": 0
+              },
+              {
+                "name": "labelType",
+                "type": "integer",
+                "description": "标签类型",
+                "example": "5",
+                "multiple": 0
+              },
+              {
+                "name": "labelPreview",
+                "type": "string",
+                "description": "模板预览图。包含了标签的样式结构以及标签内涉及的变量信息。",
+                "example": "https://pdf-test01.dotfashion.cn/pdf-proxy/pdf2-test/grc-test01.sheincorp.cn/2025/8/6/1754482137438-7ce67eab97aaf76ab38851e5e60e5e14.oss.png",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "required": true,
+        "description": "请求追踪码。",
+        "example": "e8a87caa89888d32",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'http://https://openapi.sheincorp.com/open-api/goods-compliance/get-label-template' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-timestamp: 1755506960113' \\ --header 'language: zh-cn' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi.sheincorp.com' \\ --header 'Connection: keep-alive' \\ --data-raw '{ \"skc\":\"sa25080185896920018\" }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"skc\": \"sr250811558984fdsf915\", \"labelList\": [ { \"labelCode\": \"1754296911182\", \"labelName\": \"合并打印：条形码/GPSR/环保标\", \"labelType\": 2, \"labelPreview\": \"https://pdf.dotfashion.cn/pdf-proxy/pdf2/grc.biz.sheincorp.cn/2025/8/5/1754365094106-253ceb2da73950744fdcaeaa5d2e3987.oss.png\" }, { \"labelCode\": \"1754295909468\", \"labelName\": \"合并打印：条形码和GPSR标签\", \"labelType\": 2, \"labelPreview\": \"https://pdf.dotfashion.cn/pdf-proxy/pdf2/grc.biz.sheincorp.cn/2025/8/5/1754373567623-105b09531ca6c4a1c18670183a4b4c3b.oss.png\" }, { \"labelCode\": \"Fr-EEE (Big）\", \"labelName\": \"电子电器包装标签模板（贴在包装上）\", \"labelType\": 4, \"labelPreview\": \"https://pdf.dotfashion.cn/pdf-proxy/pdf2/grc.biz.sheincorp.cn/2025/4/14/1744613327119-6c5927897406ee147bb5a170f7d1c30e.oss.png\" }, { \"labelCode\": \"GPSR_Huanbaobiao\", \"labelName\": \"普货_欧盟GPSR+环保标100*100\", \"labelType\": 2, \"labelPreview\": \"https://pdf.dotfashion.cn/pdf-proxy/pdf2/grc.biz.sheincorp.cn/2025/4/15/1744682895438-afa95a6ef6f8a175629bafef9f89e773.oss.png\" }, { \"labelCode\": \"666\", \"labelName\": \"电子电器本体标签模板（贴在本体上）\", \"labelType\": 4, \"labelPreview\": \"https://pdf.dotfashion.cn/pdf-proxy/pdf2/grc.biz.sheincorp.cn/2025/4/14/1744611905915-9146f66800464c6f9b406b4904d14fc6.oss.png\" } ] }, \"bbl\": null, \"traceId\": \"1f30b3e61cf81e07\" }",
+  "errorCode": null
+}

@@ -1,0 +1,408 @@
+{
+  "docId": "3001429",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "获取大货订单信息",
+    "userDocName": "获取大货订单信息",
+    "endpoint": "/open-api/mdp/get-order-info-list",
+    "method": "POST",
+    "docName": "post_open-api_mdp_get-order-info-list",
+    "version": 3,
+    "updateTime": "2025-10-15 15:14:48",
+    "changeContent": "更新MDP接口文档",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": null,
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "pageNum",
+        "type": "integer",
+        "required": true,
+        "label": "页码"
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "required": true,
+        "label": "页大小"
+      },
+      {
+        "name": "orderStatus",
+        "type": "integer",
+        "description": "1排产中；2产前确认中；3打印中；4转印中；5后整中；6烧花中；7待发货；8待收货；9已完成；10全部；",
+        "label": "订单状态"
+      },
+      {
+        "name": "orderTimeStart",
+        "type": "string",
+        "required": true,
+        "description": "时间跨度最大30天",
+        "defaultValue": "2024-08-25 00:00:00",
+        "label": "下单时间开始"
+      },
+      {
+        "name": "orderTimeEnd",
+        "type": "string",
+        "required": true,
+        "description": "时间跨度最大30天",
+        "defaultValue": "2024-08-25 00:00:00",
+        "label": "下单时间结束"
+      },
+      {
+        "name": "prospectTimeStart",
+        "type": "string",
+        "description": "预计交期开始，时间跨度最大30天",
+        "label": "预计交期开始"
+      },
+      {
+        "name": "prospectTimeEnd",
+        "type": "string",
+        "description": "预计交期结束",
+        "label": "预计交期结束"
+      },
+      {
+        "name": "deliveryTimeStart",
+        "type": "string",
+        "description": "发货时间开始",
+        "label": "发货时间开始"
+      },
+      {
+        "name": "deliveryTimeEnd",
+        "type": "string",
+        "description": "发货时间结束",
+        "label": "发货时间结束"
+      },
+      {
+        "name": "garmentConfirmTimeStart",
+        "type": "string",
+        "description": "成衣厂确认时间开始",
+        "label": "成衣厂确认时间开始"
+      },
+      {
+        "name": "garmentConfirmTimeEnd",
+        "type": "string",
+        "description": "成衣厂确认时间结束",
+        "label": "成衣厂确认时间结束"
+      },
+      {
+        "name": "latestSignforTimeStart",
+        "type": "string",
+        "description": "最晚签收日期开始",
+        "label": "最晚签收日期开始"
+      },
+      {
+        "name": "latestSignforTimeEnd",
+        "type": "string",
+        "description": "最晚签收日期结束",
+        "label": "最晚签收日期结束"
+      },
+      {
+        "name": "salesSource",
+        "type": "integer",
+        "description": "1 希音 2自建",
+        "label": "订单销售渠道"
+      },
+      {
+        "name": "orderSystemSource",
+        "type": "integer",
+        "description": "1 FOB 2 MDP 3 GMP",
+        "label": "订单系统来源"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string"
+      },
+      {
+        "name": "msg",
+        "type": "string"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "children": [
+          {
+            "name": "list",
+            "type": "object",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "orderId",
+                "type": "string",
+                "description": "生产制单",
+                "label": "生产制单"
+              },
+              {
+                "name": "designStyle",
+                "type": "string",
+                "description": "设计款号",
+                "label": "设计款号"
+              },
+              {
+                "name": "processNo",
+                "type": "string",
+                "description": "加工单号",
+                "label": "加工单号"
+              },
+              {
+                "name": "hangTagCode",
+                "type": "string",
+                "description": "挂卡编号",
+                "label": "挂卡编号"
+              },
+              {
+                "name": "imageUrl",
+                "type": "string",
+                "description": "款式图片",
+                "label": "款式图片"
+              },
+              {
+                "name": "finalMaterialSku",
+                "type": "string",
+                "description": "成品SKU/商品编码",
+                "label": "成品SKU/商品编码"
+              },
+              {
+                "name": "finalMaterialName",
+                "type": "string",
+                "description": "物料名称/商品名称",
+                "label": "物料名称/商品名称"
+              },
+              {
+                "name": "originalMaterialSku",
+                "type": "string",
+                "description": "底布SKU",
+                "label": "底布SKU"
+              },
+              {
+                "name": "originalMaterialName",
+                "type": "string",
+                "description": "底布名称",
+                "label": "底布名称"
+              },
+              {
+                "name": "flowerCode",
+                "type": "string",
+                "description": "花型号",
+                "label": "花型号"
+              },
+              {
+                "name": "orderNum",
+                "type": "decimal",
+                "description": "下单米数",
+                "label": "下单米数"
+              },
+              {
+                "name": "orderPrice",
+                "type": "decimal",
+                "description": "下单单价",
+                "label": "下单单价"
+              },
+              {
+                "name": "orderSizeNum",
+                "type": "string",
+                "description": "下单尺码数量",
+                "label": "下单尺码数量"
+              },
+              {
+                "name": "isBurnFlower",
+                "type": "integer",
+                "description": "是否烧花 1否2是",
+                "label": "是否烧花 1否2是"
+              },
+              {
+                "name": "isPosition",
+                "type": "integer",
+                "description": "是否定位1否2是",
+                "label": "是否定位1否2是"
+              },
+              {
+                "name": "isFirstOrder",
+                "type": "integer",
+                "description": "是否首单 0-否 1-是",
+                "label": "是否首单 0-否 1-是"
+              },
+              {
+                "name": "firstReturnOrder",
+                "type": "integer",
+                "description": "是否初次返单 1-是 2-否",
+                "label": "是否初次返单 1-是 2-否"
+              },
+              {
+                "name": "isInvoice",
+                "type": "integer",
+                "description": "是否INV:1-开票，0-不开",
+                "label": "是否INV:1-开票，0-不开"
+              },
+              {
+                "name": "flameRetardant",
+                "type": "integer",
+                "description": "是否阻燃款1-是，0-否",
+                "label": "是否阻燃款1-是，0-否"
+              },
+              {
+                "name": "isHighRiskOrder",
+                "type": "integer",
+                "description": "是否高危订单: 0-否；1-是",
+                "label": "是否高危订单: 0-否；1-是"
+              },
+              {
+                "name": "isComplexStyle",
+                "type": "integer",
+                "description": "是否复色款 1-否 2-是",
+                "label": "是否复色款 1-否 2-是"
+              },
+              {
+                "name": "isFirstProcess",
+                "type": "integer",
+                "description": "是否首次加工 0-否 1-是",
+                "label": "是否首次加工 0-否 1-是"
+              },
+              {
+                "name": "isPushAgain",
+                "type": "integer",
+                "description": "是否重新推单 0否 1是",
+                "label": "是否重新推单 0否 1是"
+              },
+              {
+                "name": "isDeliveryExpired",
+                "type": "integer",
+                "description": "是否发货已超期：0-否；1-是",
+                "label": "是否发货已超期：0-否；1-是"
+              },
+              {
+                "name": "isSignSoonExpire",
+                "type": "integer",
+                "description": "是否签收即将超期：0-否；1-是",
+                "label": "是否签收即将超期：0-否；1-是"
+              },
+              {
+                "name": "isSignExpired",
+                "type": "integer",
+                "description": "是否签收已超期：0-否；1-是",
+                "label": "是否签收已超期：0-否；1-是"
+              },
+              {
+                "name": "width",
+                "type": "decimal",
+                "description": "成品/商品sku门幅",
+                "label": "成品/商品sku门幅"
+              },
+              {
+                "name": "weight",
+                "type": "decimal",
+                "description": "成品/商品sku克重",
+                "label": "成品/商品sku克重"
+              },
+              {
+                "name": "originalMaterialColor",
+                "type": "string",
+                "description": "底布sku颜色",
+                "label": "底布sku颜色"
+              },
+              {
+                "name": "recommendLocationCode",
+                "type": "string",
+                "description": "推荐路由",
+                "label": "推荐路由"
+              },
+              {
+                "name": "orderTime",
+                "type": "string",
+                "description": "订单下单时间",
+                "label": "订单下单时间"
+              },
+              {
+                "name": "garmentConfirmTime",
+                "type": "string",
+                "description": "成衣厂确认时间",
+                "label": "成衣厂确认时间"
+              },
+              {
+                "name": "targetDeliveryTime",
+                "type": "string",
+                "description": "目标交期",
+                "label": "目标交期"
+              },
+              {
+                "name": "latestProspectTime",
+                "type": "string",
+                "description": "预计交期",
+                "label": "预计交期"
+              },
+              {
+                "name": "confirmDeliveryTime",
+                "type": "string",
+                "description": "确认发货时间",
+                "label": "确认发货时间"
+              },
+              {
+                "name": "latestSignforTime",
+                "type": "string",
+                "description": "最晚签收时间",
+                "label": "最晚签收时间"
+              },
+              {
+                "name": "garmentFactory",
+                "type": "string",
+                "description": "成衣厂名称",
+                "label": "成衣厂名称"
+              },
+              {
+                "name": "flowerImage",
+                "type": "string",
+                "description": "花型图url",
+                "label": "花型图url"
+              },
+              {
+                "name": "hangCardNo",
+                "type": "string",
+                "description": "挂卡编号",
+                "label": "挂卡编号"
+              },
+              {
+                "name": "cargoLocationCode",
+                "type": "string",
+                "description": "挂卡货位号",
+                "label": "挂卡货位号"
+              },
+              {
+                "name": "printModelList",
+                "type": "string",
+                "description": "打印机型号集合",
+                "label": "打印机型号集合"
+              },
+              {
+                "name": "salesSource",
+                "type": "string",
+                "description": "1 希音 2自建",
+                "label": "订单销售渠道"
+              },
+              {
+                "name": "orderSystemSource",
+                "type": "string",
+                "description": "1 FOB 2 MDP 3 GMP",
+                "label": "订单系统来源"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

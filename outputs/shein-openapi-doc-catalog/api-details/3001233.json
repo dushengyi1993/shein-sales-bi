@@ -1,0 +1,123 @@
+{
+  "docId": "3001233",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "取消Feed任务",
+    "userDocName": "取消Feed任务",
+    "endpoint": "/open-api/sem/feed/cancelFeed",
+    "method": "POST",
+    "docName": "post_open-api_sem_feed_cancelFeed",
+    "version": 4,
+    "updateTime": "2025-07-15 22:18:46",
+    "changeContent": "1",
+    "qpsContent": "10",
+    "modes": [
+      1
+    ],
+    "modeNames": [
+      "自运营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "仅排队中（IN_QUEUE）状态的Feed任务可以取消",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object",
+    "children": [
+      {
+        "name": "feedId",
+        "type": "int64",
+        "required": true,
+        "description": "feedId；form-data"
+      }
+    ]
+  },
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "响应异常时的bbl相关信息",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1
+              }
+            ]
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "curl --location --request GET 'https://openapi.sheincorp.com/open-api/sem/feed/cancelFeed' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570849017' \\ --form-data '{ \"feedId\":[\"1865289089032323072\"] }'",
+  "responseExample": "code\": \"openapi-sem031011\", \"msg\": \"feed in wrong status\", \"info\": null, \"bbl\": null, \"traceId\": \"aef8df7efdbf4231\" }",
+  "errorCode": null
+}

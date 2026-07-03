@@ -1,0 +1,210 @@
+{
+  "docId": "3001466",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "导出地址接口",
+    "userDocName": "导出地址接口",
+    "endpoint": "/open-api/order/export-address",
+    "method": "POST",
+    "docName": "post_open-api_order_export-address",
+    "version": 17,
+    "updateTime": "2025-12-02 22:26:27",
+    "changeContent": "update country",
+    "qpsContent": "300",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "该API支持自主运营，半托管商家导出收件人地址信息以及流转订单状态；对接前请查看解决方案：ERP订单履约方案；",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "orderNo",
+        "type": "string",
+        "required": true,
+        "description": "订单号",
+        "multiple": 0
+      },
+      {
+        "name": "handleType",
+        "type": "integer",
+        "required": true,
+        "description": "操作类型；1：仅导出收件人地址信息/ 2：导出收件人地址并将订单状态流转到待发货，即订单状态值从 \"1\" 更改为 \"2\"",
+        "example": "1",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "integer",
+        "description": "响应码",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误信息描述",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "description": "响应数据",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "receiveMsgList",
+            "type": "object",
+            "required": true,
+            "description": "订单关联的收件人信息",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "orderNo",
+                "type": "string",
+                "description": "订单号",
+                "multiple": 0
+              },
+              {
+                "name": "lastName",
+                "type": "string",
+                "description": "姓氏",
+                "multiple": 0
+              },
+              {
+                "name": "middleName",
+                "type": "string",
+                "description": "中间名",
+                "multiple": 0
+              },
+              {
+                "name": "firstName",
+                "type": "string",
+                "description": "名字",
+                "multiple": 0
+              },
+              {
+                "name": "country",
+                "type": "string",
+                "description": "国家；欧洲的国家枚举值：Germany，Spain，France，Italy，Netherlands，Poland，Portugal，Sweden，United Kingdom",
+                "multiple": 0
+              },
+              {
+                "name": "province",
+                "type": "string",
+                "description": "省份",
+                "multiple": 0
+              },
+              {
+                "name": "city",
+                "type": "string",
+                "description": "城市",
+                "multiple": 0
+              },
+              {
+                "name": "district",
+                "type": "string",
+                "description": "地区",
+                "multiple": 0
+              },
+              {
+                "name": "street",
+                "type": "string",
+                "description": "街道",
+                "multiple": 0
+              },
+              {
+                "name": "address",
+                "type": "string",
+                "description": "详细地址行1",
+                "multiple": 0
+              },
+              {
+                "name": "addressExt",
+                "type": "string",
+                "description": "详细地址行2",
+                "multiple": 0
+              },
+              {
+                "name": "phone",
+                "type": "string",
+                "description": "联系电话",
+                "multiple": 0
+              },
+              {
+                "name": "postCode",
+                "type": "string",
+                "description": "邮编地址",
+                "multiple": 0
+              },
+              {
+                "name": "taxNo",
+                "type": "string",
+                "description": "税号",
+                "multiple": 0
+              },
+              {
+                "name": "email",
+                "type": "string",
+                "description": "用户邮箱"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/order/export-address' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570849017' \\ --data-raw '{ \"orderNo\":\"GSON8H44Y0004CU\", \"handleType\": 2 }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"receiveMsgList\": [ { \"orderNo\": \"GSON8H44Y0004CU\", \"lastName\": \"Price\", \"middleName\": null, \"firstName\": \"Lindsey\", \"country\": \"United States\", \"province\": \"MARYLAND\", \"city\": \"Port Deposit\", \"district\": \"frgds\", \"street\": \"\", \"address\": \"127 Arthur Avenue\", \"addressExt\": \"dadao\", \"phone\": \"55555555\", \"postCode\": \"21904\", \"taxNo\": \"66666\" } ], \"unProcessReason\": [] } }",
+  "errorCode": null
+}

@@ -1,0 +1,172 @@
+{
+  "docId": "3001359",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "本地图片上传",
+    "userDocName": "本地图片上传",
+    "endpoint": "/open-api/goods/upload-pic",
+    "method": "POST",
+    "docName": "post_open-api_goods_upload-pic",
+    "version": 19,
+    "updateTime": "2025-08-12 11:32:25",
+    "changeContent": "更新文档描述",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      2,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "支持将图片文件转换成SHEIN可用的在线图片链接。各类型图片需满足下方要求，否则无法转换，建议开发者将图片在本地处理完成后再调用接口。- 主图（type=1)、细节图（type=2)：像素满足1340px*1785px，或宽高比例1:1，像素范围900px-2200px；格式JPG/JPEG/PNG；大小≤3MB- 方形图（type=5）：宽高比例1:1；像素范围900*900~2200*2200 px；格式JPG/JPEG/PNG；大小≤3MB- 色块图（type=6）：宽高比例1:1；像素80×80 px；格式JPG/JPEG/PNG；大小≤3MB- 详情图（type=7）：宽高比例3:4，像素大于900px； 格式JPG/JPEG/PNG；大小≤3MB每个店铺的各个分类下，需要传什么类型的图、可以传几张图，可通过文档确认：商品图片。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "description": "默认值：multipart/form-data",
+        "defaultValue": "multipart/form-data",
+        "label": "application/form-data"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "required": true,
+        "description": "默认返回中文多语言信息，支持语种：英语:en 法语: fr 西班牙语:es 德语:de 中文简体:zh-cn 泰语:th 巴西葡语:pt-br"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "image_type",
+        "type": "int64",
+        "required": true,
+        "description": "图片类型(1:主图; 2:细节图; 5:方块图; 6:色块图; 7:详情图) 各个类型的图片要求参考文档顶部的描述。"
+      },
+      {
+        "name": "file",
+        "type": "blob",
+        "required": true,
+        "description": "图片文件"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": true,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": true,
+            "multiple": 0
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "example": "17210",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "example": "29045",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "height",
+            "type": "integer",
+            "description": "高",
+            "example": "21158",
+            "multiple": 0
+          },
+          {
+            "name": "image_hex_type",
+            "type": "string",
+            "description": "图片类型",
+            "example": "nesciunt asperiores voluptate velit laudantium quo numquam laudantium dolore et magni nostrum nostrum dolor numquam id enim et asperiores ab ex",
+            "multiple": 0
+          },
+          {
+            "name": "image_url",
+            "type": "string",
+            "description": "图片链接",
+            "example": "molestiae velit earum fugit hic consectetur eligendi corrupti expedita inventore nam laudantium qui ipsum incidunt aut",
+            "multiple": 0
+          },
+          {
+            "name": "size",
+            "type": "integer",
+            "description": "大小",
+            "example": "34153",
+            "multiple": 0
+          },
+          {
+            "name": "width",
+            "type": "integer",
+            "description": "宽",
+            "example": "59832",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "example": "quas corporis sunt laboriosam reprehenderit doloribus iusto harum",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi-test01.sheincorp.cn/open-api/goods/upload-pic' \\ --header 'language: zh-cn' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-timestamp: 1752733538805' \\ --header 'Host: openapi-test01.sheincorp.cn' \\ --form 'image_type=\"2\"' \\ --form 'file=@\"/Users/10124378/Downloads/760eecab5aab4e7a8adec5961c795e50 (1).jpg\"'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"image_url\": \"http://imgdeal-test01.shein.com/images3_pi/2023/11/15/3c/17000397694031071724_square.jpg\", \"width\": 1200, \"height\": 1200, \"size\": 363846, \"image_hex_type\": \"jpg\" }, \"bbl\": null }",
+  "errorCode": null
+}

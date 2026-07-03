@@ -1,0 +1,151 @@
+{
+  "docId": "3001815",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询订单可用发货仓库",
+    "userDocName": "查询订单可用发货仓库",
+    "endpoint": "/open-api/gsp/available-shipping-warehouse",
+    "method": "POST",
+    "docName": "",
+    "version": 7,
+    "updateTime": "2026-06-15 10:34:00",
+    "changeContent": "修正请求参数",
+    "qpsContent": "50",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "提供接口查在线下单业务的订单维度数据的可用发货仓库；请查阅仓库常见不可用原因以及解决方案了解更全面的信息",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "orderNo",
+        "type": "string",
+        "required": true,
+        "description": "订单号"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "required": true,
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "availableWarehouses",
+            "type": "object",
+            "required": true,
+            "description": "订单可用发货仓列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "availableStatus",
+                "type": "integer",
+                "required": true,
+                "description": "发货仓可用状态：1-可用、0-暂不可用",
+                "multiple": 0
+              },
+              {
+                "name": "unavailableReason",
+                "type": "string",
+                "description": "暂不可用原因",
+                "multiple": 0
+              },
+              {
+                "name": "unavailableReasonCode",
+                "type": "string",
+                "description": "暂不可用原因编码",
+                "multiple": 0
+              },
+              {
+                "name": "warehouseAddressCode",
+                "type": "string",
+                "required": true,
+                "description": "仓库地址编码",
+                "multiple": 0
+              },
+              {
+                "name": "warehouseName",
+                "type": "string",
+                "required": true,
+                "description": "仓库名称",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "orderNo",
+            "type": "string",
+            "required": true,
+            "description": "订单号",
+            "multiple": 0
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

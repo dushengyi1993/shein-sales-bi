@@ -1,0 +1,236 @@
+{
+  "docId": "3001857",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询警告语证书的填写规则",
+    "userDocName": "查询警告语证书的填写规则",
+    "endpoint": "/open-api/goods-compliance/query-warning-certificate-rules",
+    "method": "POST",
+    "docName": "",
+    "version": 3,
+    "updateTime": "2026-06-29 19:40:05",
+    "changeContent": "更新解决方案链接",
+    "qpsContent": "40",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "此接口可获取所有需商家手动操作的警告语证书填写规则。详细信息可参考解决方案。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "description": "接口签名"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "响应msg的语种。不传时默认为英语，枚举值支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应码。",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "响应信息。",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "description": "具体信息。规则数据的使用方式，请查看解决方案",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "certificateTypeId",
+            "type": "int64",
+            "description": "证书类型ID",
+            "example": "754",
+            "multiple": 0
+          },
+          {
+            "name": "certificateTypeCode",
+            "type": "string",
+            "description": "证书类型Code，唯一编码。后续查询、更新SKC警告语时均会使用。",
+            "example": "PlaypenWMWAttr",
+            "multiple": 0
+          },
+          {
+            "name": "certificateTypeName",
+            "type": "string",
+            "description": "证书类型名称",
+            "example": "Game Bed Warning",
+            "multiple": 0
+          },
+          {
+            "name": "presetInfo",
+            "type": "object",
+            "description": "证书字段信息",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "isEnabled",
+                "type": "integer",
+                "description": "字段信息是否启用。0-禁用；1-启用",
+                "example": "1",
+                "multiple": 0
+              },
+              {
+                "name": "presetFields",
+                "type": "object",
+                "required": true,
+                "description": "字段详情",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "fieldCode",
+                    "type": "string",
+                    "description": "字段Code，唯一编码。",
+                    "example": "PAWA1",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "fieldName",
+                    "type": "string",
+                    "description": "字段名称，支持返回多语言。",
+                    "example": "商品属性",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "fieldType",
+                    "type": "integer",
+                    "description": "字段值的输入方式。0=多选;1=单选;2=手动输入（实际上还是多选）",
+                    "example": "0",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "fieldSort",
+                    "type": "integer",
+                    "description": "字段排序。重要：排序值最大的字段是警告语字段，其他的均为常规字段。警告语字段、常规字段的处理逻辑不同。",
+                    "example": "0",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "isEnabled",
+                    "type": "integer",
+                    "description": "字段是否启用。0-禁用；1-启用",
+                    "example": "1",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "presetFieldValues",
+                    "type": "object",
+                    "required": true,
+                    "description": "字段值信息",
+                    "multiple": 1,
+                    "children": [
+                      {
+                        "name": "fieldValueId",
+                        "type": "int64",
+                        "description": "字段值ID，唯一编码。",
+                        "example": "2455",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "fieldValue",
+                        "type": "string",
+                        "description": "字段值名称，支持返回多语言。",
+                        "example": "产品是折叠游戏围栏",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "exclusionFieldValueIds",
+                        "type": "int64",
+                        "description": "常规字段专用，互斥的字段值列表。若常规字段值A下有互斥值B、C，则当商家选A时，BC均不能选。",
+                        "multiple": 1
+                      },
+                      {
+                        "name": "mappingPaths",
+                        "type": "object",
+                        "description": "警告语字段专用，警告语组装规则",
+                        "multiple": 1,
+                        "children": [
+                          {
+                            "name": "fieldValueIds",
+                            "type": "int64",
+                            "description": "警告语关联的常规字段值fieldValueId列表。若警告语值a关联了常规字段值A、B，则当商家在常规字段中选了A或B中的任意值时，警告语字段中都需要传入a。",
+                            "multiple": 1
+                          }
+                        ]
+                      },
+                      {
+                        "name": "valueSort",
+                        "type": "integer",
+                        "description": "字段值排序",
+                        "example": "0",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "isEnabled",
+                        "type": "integer",
+                        "description": "字段值是否启用。0-禁用；1-启用",
+                        "example": "1",
+                        "multiple": 0
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "追踪码",
+        "example": "465c0b253ba0211a",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

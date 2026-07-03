@@ -1,0 +1,284 @@
+{
+  "docId": "3001822",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "MES-FAC-002 采购信息接口",
+    "userDocName": "MES-FAC-002 采购信息接口",
+    "endpoint": "/open-api/mes/get-purchase-info",
+    "method": "POST",
+    "docName": "post_open-api_mes_get-purchase-info",
+    "version": 3,
+    "updateTime": "2026-06-15 20:49:27",
+    "changeContent": "接口文档更新",
+    "qpsContent": "",
+    "modes": [
+      3
+    ],
+    "modeNames": [
+      "SHEIN自营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "acceptOrderEndTime",
+        "type": "string",
+        "required": false,
+        "description": "接单结束时间",
+        "example": "2022-06-02 13:57:03",
+        "multiple": 0
+      },
+      {
+        "name": "acceptOrderStartTime",
+        "type": "string",
+        "required": false,
+        "description": "接单起始时间",
+        "example": "2022-06-22 12:40:56",
+        "multiple": 0
+      },
+      {
+        "name": "factoryIdList",
+        "type": "integer",
+        "required": false,
+        "description": "工厂id集合",
+        "multiple": 1
+      },
+      {
+        "name": "produceOrderIdList",
+        "type": "integer",
+        "required": false,
+        "description": "订单编号",
+        "multiple": 1
+      },
+      {
+        "name": "skc",
+        "type": "string",
+        "required": false,
+        "description": "sku",
+        "example": "veniam aperiam molestiae voluptatibus doloribus dolorem facilis eos est necessitatibus blanditiis voluptatibus atque molestiae ducimus iste et",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "integer",
+        "required": false,
+        "description": "状态码",
+        "example": "35713",
+        "multiple": 0
+      },
+      {
+        "name": "detailMsg",
+        "type": "string",
+        "required": false,
+        "description": "执行结果详细信息",
+        "example": "quam veniam quam atque eligendi quam distinctio illo et rem animi et ducimus a ad excepturi quidem fuga",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "description": "执行结果数据",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "produceOrderId",
+            "type": "integer",
+            "required": false,
+            "description": "订单编号",
+            "example": "50033",
+            "multiple": 0
+          },
+          {
+            "name": "purchaseInfo",
+            "type": "object",
+            "required": true,
+            "description": "采购信息列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "materialColor",
+                "type": "string",
+                "required": false,
+                "description": "物料颜色",
+                "example": "ipsum dolor aspernatur voluptatem praesentium eos commodi quisquam consectetur fugiat a sit minima voluptatem sapiente ipsam consequuntur",
+                "multiple": 0
+              },
+              {
+                "name": "materialName",
+                "type": "string",
+                "required": false,
+                "description": "物料名称",
+                "example": "nobis repudiandae sint quia voluptatem quod quia rerum voluptas facere nostrum et eum facilis minima sed provident a perspiciatis",
+                "multiple": 0
+              },
+              {
+                "name": "materialSku",
+                "type": "string",
+                "required": false,
+                "description": "物料SKU",
+                "example": "voluptatem vitae dolorum doloribus totam adipisci tempora libero quod",
+                "multiple": 0
+              },
+              {
+                "name": "materialType",
+                "type": "string",
+                "required": false,
+                "description": "单价",
+                "example": "ab doloribus fuga quam culpa vel accusamus autem qui aut qui",
+                "multiple": 0
+              },
+              {
+                "name": "price",
+                "type": "double",
+                "required": false,
+                "description": "采购单号",
+                "example": "27330.92",
+                "multiple": 0
+              },
+              {
+                "name": "purchaseCode",
+                "type": "string",
+                "required": false,
+                "description": "物料项目",
+                "example": "2538",
+                "multiple": 0
+              },
+              {
+                "name": "purchaseType",
+                "type": "string",
+                "required": false,
+                "description": "物料分类",
+                "example": "quam fugit dicta voluptatem et autem cupiditate consectetur suscipit explicabo quam ipsa et",
+                "multiple": 0
+              },
+              {
+                "name": "simpleUse",
+                "type": "double",
+                "required": false,
+                "description": "单价",
+                "example": "7837.62",
+                "multiple": 0
+              },
+              {
+                "name": "singleAmountKg",
+                "type": "double",
+                "required": false,
+                "description": "单件用量，以公斤为单位",
+                "example": "29473.57",
+                "multiple": 0
+              },
+              {
+                "name": "supplierAddr",
+                "type": "string",
+                "required": false,
+                "description": "供应商地址",
+                "example": "fuga et qui doloremque sapiente dolorem necessitatibus quia dignissimos architecto qui ad eveniet sunt aut nisi voluptatibus consequatur quis",
+                "multiple": 0
+              },
+              {
+                "name": "supplierCode",
+                "type": "string",
+                "required": false,
+                "description": "供应商编号",
+                "example": "23408",
+                "multiple": 0
+              },
+              {
+                "name": "supplierColorNum",
+                "type": "string",
+                "required": false,
+                "description": "供应商色号",
+                "example": "aperiam inventore placeat qui necessitatibus suscipit cupiditate at modi sapiente expedita maiores aut",
+                "multiple": 0
+              },
+              {
+                "name": "supplierLoss",
+                "type": "double",
+                "required": false,
+                "description": "供应商损耗",
+                "example": "51115.95",
+                "multiple": 0
+              },
+              {
+                "name": "supplierName",
+                "type": "string",
+                "required": false,
+                "description": "供应商名称",
+                "example": "consequuntur error in sed omnis dolores aut magnam id repellendus et quidem omnis vitae illo reprehenderit quo beatae nulla",
+                "multiple": 0
+              },
+              {
+                "name": "supplierPhone",
+                "type": "string",
+                "required": false,
+                "description": "供应商电话",
+                "example": "enim tempora earum provident ut qui suscipit magnam qui non et officiis accusantium eum modi cupiditate",
+                "multiple": 0
+              },
+              {
+                "name": "weight",
+                "type": "double",
+                "required": false,
+                "description": "克重",
+                "example": "64365.94",
+                "multiple": 0
+              },
+              {
+                "name": "width",
+                "type": "double",
+                "required": false,
+                "description": "幅宽",
+                "example": "58276.62",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "执行结果提示信息",
+        "example": "sequi est quos ut expedita soluta soluta et id et eos impedit rem fugit corrupti optio fuga et quasi repellendus",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "produceOrderIdList\":[8292325,19383746,9294155], \"acceptOrderStartTime\":\"2023-09-01\", \"acceptOrderEndTime\":\"2023-09-30\" }",
+  "responseExample": "code\": 0, \"info\": [ { \"produceOrderId\": 8292325, \"purchaseInfo\": [ { \"materialColor\": \"红色\", \"materialName\": \"拉链一定要成功！\", \"materialSku\": \"F00002518\", \"materialType\": \"隐形拉链\", \"price\": 356.1626, \"purchaseCode\": \"8292325-P03\", \"purchaseType\": \"辅料A\", \"simpleUse\": 4.00, \"singleAmountKg\": 0.0000, \"supplierAddr\": \"\", \"supplierCode\": \"2252\", \"supplierColorNum\": \"3\", \"supplierLoss\": 0.5000, \"supplierName\": \"拿爪\", \"supplierPhone\": \"\", \"weight\": 190.0000, \"width\": 38.0000 }, { \"materialColor\": \"煤黑色\", \"materialName\": \"dd\", \"materialSku\": \"M00019142\", \"materialType\": \"雪纺\", \"price\": 1.0000, \"purchaseCode\": \"8292325-P02\", \"purchaseType\": \"里料A\", \"simpleUse\": 7.00, \"singleAmountKg\": 0.0000, \"supplierAddr\": \"\", \"supplierCode\": \"dd\", \"supplierColorNum\": \"12#\", \"supplierLoss\": 3.0000, \"supplierName\": \"村长钻饰\", \"supplierPhone\": \"\", \"weight\": 123.0000, \"width\": 123.0000 }, { \"materialColor\": \"gukj\", \"materialName\": \"数码成品底布公斤\", \"materialSku\": \"M00019006\", \"materialType\": \"风衣料\", \"price\": 2.6978, \"purchaseCode\": \"8292325-P01\", \"purchaseType\": \"面料A\", \"simpleUse\": 5.00, \"singleAmo",
+  "errorCode": null
+}

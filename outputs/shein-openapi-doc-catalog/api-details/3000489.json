@@ -1,0 +1,69 @@
+{
+  "docId": "3000489",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "供应商库存-出库同步接口",
+    "userDocName": "供应商库存-出库同步接口",
+    "endpoint": "/open-api/material/out-inventory",
+    "method": "POST",
+    "docName": "post_open-api_material_out-inventory",
+    "version": 3,
+    "updateTime": "2024-10-14 22:22:32",
+    "changeContent": "新增traceId",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "出库同步接口注意： 1.请求参数的中文不能出现unicode编码 如：柯桥变成了 \\u67ef\\u6865 2.请求参数中不能含有特殊的符号如制表符，换行符",
+  "requestHeader": null,
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "numberCode",
+        "type": "string",
+        "required": true,
+        "description": "条编码",
+        "example": "57170",
+        "multiple": 0
+      },
+      {
+        "name": "outNum",
+        "type": "string",
+        "required": true,
+        "description": "本次出库数量",
+        "example": "unde vero expedita",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": true,
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

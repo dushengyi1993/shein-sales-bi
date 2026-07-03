@@ -1,0 +1,297 @@
+{
+  "docId": "3001876",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "批量查询SKC信息",
+    "userDocName": "批量查询SKC信息",
+    "endpoint": "/open-api/spss/skc-info-query",
+    "method": "POST",
+    "docName": "",
+    "version": 8,
+    "updateTime": "2026-06-30 14:25:11",
+    "changeContent": "字段描述更新",
+    "qpsContent": "",
+    "modes": [
+      3
+    ],
+    "modeNames": [
+      "SHEIN自营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识openKeyId，获取方式请查阅：授权手册"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "请求签名，生成规则请查阅：签名规则"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "支持返回的多语言报错信息，默认返回中文多语言信息"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "label": "SKC信息查询入参",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "skcList",
+        "type": "string",
+        "required": true,
+        "description": "SKC列表",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfListOfSKC信息",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "响应异常时的bbl相关信息",
+        "label": "BblMeta",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "key",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "npid",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "tag",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "value",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 1,
+        "children": [
+          {
+            "name": "brandName",
+            "type": "string",
+            "required": false,
+            "description": "品牌名称",
+            "multiple": 0
+          },
+          {
+            "name": "dailySaleList",
+            "type": "object",
+            "required": false,
+            "description": "近30天每日销量，按日期升序排列",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "date",
+                "type": "string",
+                "required": false,
+                "description": "日期，格式 yyyy-MM-dd",
+                "multiple": 0
+              },
+              {
+                "name": "saleCnt",
+                "type": "int64",
+                "required": false,
+                "description": "当日销量",
+                "multiple": 0
+              },
+              {
+                "name": "skuList",
+                "type": "object",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "size",
+                    "type": "string",
+                    "description": "尺码"
+                  },
+                  {
+                    "name": "sku",
+                    "type": "string",
+                    "description": "sku"
+                  },
+                  {
+                    "name": "saleCnt",
+                    "type": "integer",
+                    "description": "销量"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "invtWaySaleDay",
+            "type": "double",
+            "required": false,
+            "description": "SHEIN（仓库+在途）可售天数",
+            "multiple": 0
+          },
+          {
+            "name": "middleEastSalesRatio",
+            "type": "double",
+            "required": false,
+            "description": "中东销量占比（近7天，保留4位小数）",
+            "multiple": 0
+          },
+          {
+            "name": "qualityInspectionLevel",
+            "type": "string",
+            "required": false,
+            "description": "风险等级",
+            "multiple": 0
+          },
+          {
+            "name": "seriesName",
+            "type": "string",
+            "required": false,
+            "description": "系列名称",
+            "multiple": 0
+          },
+          {
+            "name": "shortLabel",
+            "type": "integer",
+            "required": false,
+            "description": "断码标签：1-正常 2-即将断码 3-断码",
+            "multiple": 0
+          },
+          {
+            "name": "shortLabelDesc",
+            "type": "string",
+            "required": false,
+            "description": "断码标签描述",
+            "multiple": 0
+          },
+          {
+            "name": "skc",
+            "type": "string",
+            "required": false,
+            "description": "SKC编码",
+            "multiple": 0
+          },
+          {
+            "name": "trafficData",
+            "type": "object",
+            "description": "流量数据（昨天维度）",
+            "children": [
+              {
+                "name": "uv",
+                "type": "string",
+                "description": "uv"
+              },
+              {
+                "name": "clickRate",
+                "type": "string",
+                "description": "点击率"
+              },
+              {
+                "name": "speedRate",
+                "type": "string",
+                "description": "加车率"
+              },
+              {
+                "name": "converRate",
+                "type": "string",
+                "description": "转化率"
+              },
+              {
+                "name": "bugNumer",
+                "type": "string",
+                "description": "购买人数"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

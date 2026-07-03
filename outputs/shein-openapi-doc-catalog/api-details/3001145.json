@@ -1,0 +1,225 @@
+{
+  "docId": "3001145",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "获取公告详情",
+    "userDocName": "获取公告详情",
+    "endpoint": "/open-api/ssls/announcement/get-anno-detail",
+    "method": "POST",
+    "docName": "post_open-api_ssls_announcement_get-anno-detail",
+    "version": 1,
+    "updateTime": "2025-06-03 22:05:22",
+    "changeContent": "1",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "获取公告详情",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "required": true,
+        "description": "指定出参语种，默认中文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "description": "req",
+    "label": "QueryAnnoDetailReq",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "announcementId",
+        "type": "int64",
+        "required": false,
+        "description": "公告id",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfAnnoDetailInfoPo",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "响应异常时的bbl相关信息",
+        "label": "BblMeta",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1
+              }
+            ]
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "label": "AnnoDetailInfoPo",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "announcementId",
+            "type": "string",
+            "required": false,
+            "description": "公告id",
+            "multiple": 0
+          },
+          {
+            "name": "attachmentList",
+            "type": "object",
+            "required": false,
+            "description": "附件下载",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "name",
+                "type": "string",
+                "required": false,
+                "description": "文件名称",
+                "multiple": 0
+              },
+              {
+                "name": "url",
+                "type": "string",
+                "required": false,
+                "description": "文件url",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "content",
+            "type": "string",
+            "required": false,
+            "description": "公告内容",
+            "multiple": 0
+          },
+          {
+            "name": "importantType",
+            "type": "integer",
+            "required": false,
+            "description": "是否重要 1是 2否",
+            "multiple": 0
+          },
+          {
+            "name": "startTime",
+            "type": "datetime",
+            "required": false,
+            "description": "生效时间",
+            "multiple": 0
+          },
+          {
+            "name": "tagCode",
+            "type": "string",
+            "required": false,
+            "description": "公告标签code",
+            "multiple": 0
+          },
+          {
+            "name": "tagDesc",
+            "type": "string",
+            "required": false,
+            "description": "公告标签文案",
+            "multiple": 0
+          },
+          {
+            "name": "title",
+            "type": "string",
+            "required": false,
+            "description": "公告标题",
+            "multiple": 0
+          },
+          {
+            "name": "typeCode",
+            "type": "string",
+            "required": false,
+            "description": "公告类型code",
+            "multiple": 0
+          },
+          {
+            "name": "typeDesc",
+            "type": "string",
+            "required": false,
+            "description": "公告类型desc",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

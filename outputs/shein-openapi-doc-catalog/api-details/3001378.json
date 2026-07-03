@@ -1,0 +1,135 @@
+{
+  "docId": "3001378",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "发起快速加供任务",
+    "userDocName": "发起快速加供任务",
+    "endpoint": "/open-api/material/mesCreateAddSupp",
+    "method": "POST",
+    "docName": "",
+    "version": 1,
+    "updateTime": "2025-08-21 14:52:14",
+    "changeContent": "新增发起快速加供任务接口",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": null,
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "factoryId",
+        "type": "string",
+        "required": true,
+        "example": "random_factoryId",
+        "label": "成衣厂id",
+        "multiple": 0
+      },
+      {
+        "name": "factory",
+        "type": "string",
+        "required": true,
+        "example": "random_factory",
+        "label": "成衣厂名称",
+        "multiple": 0
+      },
+      {
+        "name": "produceOrderId",
+        "type": "integer",
+        "example": "5",
+        "label": "订单号",
+        "multiple": 0
+      },
+      {
+        "name": "orderNum",
+        "type": "double",
+        "example": "21.7",
+        "label": "订单量",
+        "multiple": 0
+      },
+      {
+        "name": "materialSku",
+        "type": "string",
+        "required": true,
+        "example": "random_materialSku",
+        "label": "物料sku",
+        "multiple": 0
+      },
+      {
+        "name": "supplierCode",
+        "type": "string",
+        "required": true,
+        "example": "random_supplierCode",
+        "label": "供应商编码",
+        "multiple": 0
+      },
+      {
+        "name": "addTime",
+        "type": "string",
+        "required": true,
+        "example": "random_addTime",
+        "label": "添加时间",
+        "multiple": 0
+      },
+      {
+        "name": "addSuppSource",
+        "type": "integer",
+        "example": "28",
+        "multiple": 0
+      },
+      {
+        "name": "hasAudit",
+        "type": "string",
+        "example": "random_hasAudit",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "integer",
+        "required": true,
+        "example": "42",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "example": "random_msg",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "id",
+            "type": "integer",
+            "example": "47",
+            "label": "任务id，加供任务存在时为null",
+            "multiple": 0
+          },
+          {
+            "name": "addSuppStatus",
+            "type": "integer",
+            "example": "29",
+            "label": "加供状态，1加供中2已完成",
+            "multiple": 0
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

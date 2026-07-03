@@ -1,0 +1,483 @@
+{
+  "docId": "3000502",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "物流商推送轨迹数据-trackingmore",
+    "userDocName": "物流商推送轨迹数据-trackingmore",
+    "endpoint": "/open-api/cargo/track-notify-trackingmore",
+    "method": "POST",
+    "docName": "post_open-api_cargo_track-notify-trackingmore",
+    "version": 4,
+    "updateTime": "2024-10-15 10:41:22",
+    "changeContent": "新增traceId",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "trackingmore物流商推送轨迹数据给到Shein [接口文档](https://www.51tracking.com/v3/api-index#webhook)",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "integer",
+        "example": "200",
+        "multiple": 0
+      },
+      {
+        "name": "message",
+        "type": "json",
+        "multiple": 0
+      },
+      {
+        "name": "data",
+        "type": "object",
+        "required": true,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "tracking_number",
+            "type": "string",
+            "example": "UB209300714LV",
+            "label": "物流运单号",
+            "multiple": 0
+          },
+          {
+            "name": "courier_code",
+            "type": "string",
+            "example": "cainiao",
+            "multiple": 0
+          },
+          {
+            "name": "order_number",
+            "type": "string",
+            "example": "#1234",
+            "label": "我司包裹号",
+            "multiple": 0
+          },
+          {
+            "name": "delivery_status",
+            "type": "string",
+            "example": "delivered",
+            "multiple": 0
+          },
+          {
+            "name": "archived",
+            "type": "boolean",
+            "example": "false",
+            "multiple": 0
+          },
+          {
+            "name": "updating",
+            "type": "boolean",
+            "example": "false",
+            "multiple": 0
+          },
+          {
+            "name": "created_at",
+            "type": "string",
+            "example": "2021-06-21T08:13:31+02:00",
+            "multiple": 0
+          },
+          {
+            "name": "update_date",
+            "type": "string",
+            "example": "2021-06-21T11:23:59+02:00",
+            "multiple": 0
+          },
+          {
+            "name": "shipping_date",
+            "type": "json",
+            "multiple": 0
+          },
+          {
+            "name": "customer_name",
+            "type": "json",
+            "multiple": 0
+          },
+          {
+            "name": "customer_email",
+            "type": "string",
+            "example": "example@abc.com",
+            "multiple": 0
+          },
+          {
+            "name": "customer_phone",
+            "type": "string",
+            "example": "+1123456789",
+            "multiple": 0
+          },
+          {
+            "name": "title",
+            "type": "json",
+            "multiple": 0
+          },
+          {
+            "name": "logistics_channel",
+            "type": "string",
+            "example": "4px channel",
+            "multiple": 0
+          },
+          {
+            "name": "note",
+            "type": "json",
+            "multiple": 0
+          },
+          {
+            "name": "destination",
+            "type": "string",
+            "example": "US",
+            "multiple": 0
+          },
+          {
+            "name": "original",
+            "type": "json",
+            "multiple": 0
+          },
+          {
+            "name": "service_code",
+            "type": "json",
+            "multiple": 0
+          },
+          {
+            "name": "weight",
+            "type": "json",
+            "multiple": 0
+          },
+          {
+            "name": "substatus",
+            "type": "string",
+            "example": "delivered001",
+            "multiple": 0
+          },
+          {
+            "name": "status_info",
+            "type": "json",
+            "multiple": 0
+          },
+          {
+            "name": "previously",
+            "type": "json",
+            "multiple": 0
+          },
+          {
+            "name": "destination_track_number",
+            "type": "json",
+            "multiple": 0
+          },
+          {
+            "name": "exchangeNumber",
+            "type": "json",
+            "multiple": 0
+          },
+          {
+            "name": "consignee",
+            "type": "json",
+            "multiple": 0
+          },
+          {
+            "name": "scheduled_delivery_date",
+            "type": "json",
+            "multiple": 0
+          },
+          {
+            "name": "Scheduled_Address",
+            "type": "json",
+            "multiple": 0
+          },
+          {
+            "name": "latest_event",
+            "type": "string",
+            "example": "Delivered,2021-06-20 20:35",
+            "multiple": 0
+          },
+          {
+            "name": "lastest_checkpoint_time",
+            "type": "string",
+            "example": "2021-06-20T20:35:00+02:00",
+            "multiple": 0
+          },
+          {
+            "name": "transit_time",
+            "type": "integer",
+            "example": "2",
+            "multiple": 0
+          },
+          {
+            "name": "stay_time",
+            "type": "integer",
+            "example": "1",
+            "multiple": 0
+          },
+          {
+            "name": "origin_info",
+            "type": "object",
+            "required": true,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "courier_code",
+                "type": "string",
+                "example": "cainiao",
+                "multiple": 0
+              },
+              {
+                "name": "courier_phone",
+                "type": "string",
+                "example": "400-6767-903",
+                "multiple": 0
+              },
+              {
+                "name": "weblink",
+                "type": "string",
+                "example": "http://global.cainiao.com/",
+                "multiple": 0
+              },
+              {
+                "name": "reference_number",
+                "type": "json",
+                "multiple": 0
+              },
+              {
+                "name": "received_date",
+                "type": "string",
+                "example": "2021-06-18 20:35",
+                "multiple": 0
+              },
+              {
+                "name": "dispatched_date",
+                "type": "json",
+                "multiple": 0
+              },
+              {
+                "name": "departed_airport_date",
+                "type": "json",
+                "multiple": 0
+              },
+              {
+                "name": "arrived_abroad_date",
+                "type": "json",
+                "multiple": 0
+              },
+              {
+                "name": "customs_received_date",
+                "type": "json",
+                "multiple": 0
+              },
+              {
+                "name": "arrived_destination_date",
+                "type": "json",
+                "multiple": 0
+              },
+              {
+                "name": "trackinfo",
+                "type": "object",
+                "required": true,
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "checkpoint_date",
+                    "type": "string",
+                    "example": "2021-06-20 20:35",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "tracking_detail",
+                    "type": "string",
+                    "example": "Delivered",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "location",
+                    "type": "json",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "checkpoint_delivery_status",
+                    "type": "string",
+                    "example": "delivered",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "checkpoint_delivery_substatus",
+                    "type": "string",
+                    "example": "delivered001",
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "destination_info",
+            "type": "object",
+            "required": true,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "courier_code",
+                "type": "string",
+                "example": "usps",
+                "multiple": 0
+              },
+              {
+                "name": "courier_phone",
+                "type": "json",
+                "multiple": 0
+              },
+              {
+                "name": "weblink",
+                "type": "string",
+                "example": "http://www.usps.com/",
+                "multiple": 0
+              },
+              {
+                "name": "reference_number",
+                "type": "json",
+                "multiple": 0
+              },
+              {
+                "name": "received_date",
+                "type": "string",
+                "example": "2021-06-18 20:35",
+                "multiple": 0
+              },
+              {
+                "name": "dispatched_date",
+                "type": "json",
+                "multiple": 0
+              },
+              {
+                "name": "departed_airport_date",
+                "type": "json",
+                "multiple": 0
+              },
+              {
+                "name": "arrived_abroad_date",
+                "type": "json",
+                "multiple": 0
+              },
+              {
+                "name": "customs_received_date",
+                "type": "json",
+                "multiple": 0
+              },
+              {
+                "name": "arrived_destination_date",
+                "type": "json",
+                "multiple": 0
+              },
+              {
+                "name": "trackinfo",
+                "type": "object",
+                "required": true,
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "checkpoint_date",
+                    "type": "string",
+                    "example": "2021-06-20 20:35",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "tracking_detail",
+                    "type": "string",
+                    "example": "Delivered",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "location",
+                    "type": "json",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "checkpoint_delivery_status",
+                    "type": "string",
+                    "example": "delivered",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "checkpoint_delivery_substatus",
+                    "type": "string",
+                    "example": "delivered001",
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "verify",
+        "type": "object",
+        "required": true,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "timestamp",
+            "type": "integer",
+            "example": "1625448575",
+            "multiple": 0
+          },
+          {
+            "name": "signature",
+            "type": "string",
+            "example": "cc1ac9b350fa1e5e322c026de6d41f55f902c835ebcbcf495c4ecd18d04a3c54",
+            "multiple": 0
+          },
+          {
+            "name": "usertag",
+            "type": "string",
+            "multiple": 0
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "integer",
+        "required": true,
+        "description": "错误码，0成功，其他失败",
+        "defaultValue": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": true,
+        "description": "错误信息",
+        "defaultValue": "success",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "code\": 0, \"msg\": \"success\" }",
+  "errorCode": null
+}

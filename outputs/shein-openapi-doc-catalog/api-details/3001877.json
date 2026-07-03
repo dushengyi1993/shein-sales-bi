@@ -1,0 +1,399 @@
+{
+  "docId": "3001877",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询资质证书填写规则",
+    "userDocName": "查询资质证书填写规则",
+    "endpoint": "/open-api/goods-certificate-schemas/detail",
+    "method": "POST",
+    "docName": "",
+    "version": 3,
+    "updateTime": "2026-06-30 20:30:58",
+    "changeContent": "补充示例",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "获取资质证书的填写规则，仅支持获取complianceGroupCode=ZSZZL的规则，其他合规信息的填写规则请通过其他接口获取。完整的资质证书接口调用方案，详见文档",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "响应msg的语种。不传时默认为中文，枚举值支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "description": "ERP批量查询证书基础资料配置请求",
+    "label": "ErpGetCertificateBasicInfoReq",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "certificateTypeCodes",
+        "type": "string",
+        "required": false,
+        "description": "证书类型code，单次最多查询10个。",
+        "multiple": 1
+      },
+      {
+        "name": "certificateTypeIdList",
+        "type": "int64",
+        "required": false,
+        "description": "证书类型id,批量查询数量最多:1000",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfErpCertificateBasicInfoWrapResp",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "响应信息",
+        "label": "ErpCertificateBasicInfoWrapResp",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "certificateTypeInfoList",
+            "type": "object",
+            "required": false,
+            "description": "证书类型信息列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "certificateDimension",
+                "type": "integer",
+                "required": false,
+                "description": "证书绑定维度：1:部分商品（需手动和SKC绑定）；2:全部商品",
+                "multiple": 0
+              },
+              {
+                "name": "certificateLabel",
+                "type": "string",
+                "required": false,
+                "description": "证书类型标识：0普通类型；1自符类型；2-溯源证书。目前API仅支持0普通类型的资质证书创建。",
+                "multiple": 0
+              },
+              {
+                "name": "certificateType",
+                "type": "string",
+                "required": false,
+                "description": "证书类型值描述",
+                "multiple": 0
+              },
+              {
+                "name": "certificateTypeId",
+                "type": "int64",
+                "required": false,
+                "description": "证书类型id",
+                "multiple": 0
+              },
+              {
+                "name": "complianceGroupCode",
+                "type": "string",
+                "required": false,
+                "description": "合规信息分组code。枚举值：HGXXL-合规信息类；SPTL-卖点类；GSL-公司类；ZSZZL-证书资质类；SPSMS-说明书【重要】此接口只能获取ZSZZL的填写规则，其他分组的填写规则需要通过其他接口获取。",
+                "multiple": 0
+              },
+              {
+                "name": "fileModelUrl",
+                "type": "string",
+                "required": false,
+                "description": "证书下载模板链接",
+                "multiple": 0
+              },
+              {
+                "name": "isEnabled",
+                "type": "integer",
+                "required": false,
+                "description": "规则状态（0:不启用,1:启用)",
+                "multiple": 0
+              },
+              {
+                "name": "otherPresetInfoList",
+                "type": "object",
+                "required": false,
+                "description": "证书字段（外部关联字段，例如检测机构等。字段的的可选value通常需要srmDetectionAgencyList获取。）",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "inputType",
+                    "type": "integer",
+                    "required": false,
+                    "description": "外部关联字段录入方式(1:单选,2:多选,3:手动录入,4:日期格式,5:警告语,6:欧盟责任人)",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "isRequired",
+                    "type": "integer",
+                    "required": false,
+                    "description": "外部维护时是否必填(0:否,1:是)",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "presetId",
+                    "type": "int64",
+                    "required": false,
+                    "description": "外部关联字段id",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "presetName",
+                    "type": "string",
+                    "required": false,
+                    "description": "外部关联字段名CODE",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "presetRemark",
+                    "type": "string",
+                    "required": false,
+                    "description": "外部关联字段名描述",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "presetValueList",
+                    "type": "object",
+                    "required": false,
+                    "description": "外部关联字段值信息",
+                    "multiple": 1,
+                    "children": [
+                      {
+                        "name": "presetValue",
+                        "type": "string",
+                        "required": false,
+                        "description": "关联字段的值描述",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "presetValueId",
+                        "type": "int64",
+                        "required": false,
+                        "description": "关联字段的值ID",
+                        "multiple": 0
+                      }
+                    ]
+                  },
+                  {
+                    "name": "sourceFrom",
+                    "type": "string",
+                    "required": false,
+                    "description": "外部关联字段来源",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "unit",
+                    "type": "string",
+                    "required": false,
+                    "description": "外部关联字段单位",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "presetInfoList",
+                "type": "object",
+                "required": false,
+                "description": "证书关联字段信息",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "inputType",
+                    "type": "integer",
+                    "required": false,
+                    "description": "关联字段录入方式(1:单选,2:多选,3:手动录入,4:日期格式,5:警告语,6:欧盟责任人)",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "isRequired",
+                    "type": "integer",
+                    "required": false,
+                    "description": "维护时是否必填(0:否,1:是)",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "presetId",
+                    "type": "int64",
+                    "required": false,
+                    "description": "关联字段id",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "presetName",
+                    "type": "string",
+                    "required": false,
+                    "description": "关联字段名CODE",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "presetRemark",
+                    "type": "string",
+                    "required": false,
+                    "description": "关联字段名描述",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "presetValueList",
+                    "type": "object",
+                    "required": false,
+                    "description": "关联字段值信息",
+                    "multiple": 1,
+                    "children": [
+                      {
+                        "name": "presetValue",
+                        "type": "string",
+                        "required": false,
+                        "description": "关联字段的值描述",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "presetValueId",
+                        "type": "int64",
+                        "required": false,
+                        "description": "关联字段的值ID",
+                        "multiple": 0
+                      }
+                    ]
+                  },
+                  {
+                    "name": "unit",
+                    "type": "string",
+                    "required": false,
+                    "description": "关联字段单位",
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "srmDetectionAgencyList",
+            "type": "object",
+            "required": false,
+            "description": "SRM检测机构列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "detectionAgency",
+                "type": "object",
+                "required": false,
+                "label": "DetectionAgency",
+                "multiple": 0,
+                "children": [
+                  {
+                    "name": "detectionAgencyId",
+                    "type": "int64",
+                    "required": false,
+                    "description": "检测机构id",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "detectionAgencyName",
+                    "type": "string",
+                    "required": false,
+                    "description": "检测机构名称",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "laboratoryList",
+                "type": "object",
+                "required": false,
+                "description": "实验室列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "laboratoryId",
+                    "type": "int64",
+                    "required": false,
+                    "description": "实验室id",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "laboratoryName",
+                    "type": "string",
+                    "required": false,
+                    "description": "实验室名称",
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

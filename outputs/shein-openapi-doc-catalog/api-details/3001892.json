@@ -1,0 +1,260 @@
+{
+  "docId": "3001892",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "处理议价单",
+    "userDocName": "处理议价单",
+    "endpoint": "/open-api/goods/discuss/process-discuss",
+    "method": "POST",
+    "docName": "",
+    "version": 5,
+    "updateTime": "2026-07-02 20:35:43",
+    "changeContent": "文档归属类目更新",
+    "qpsContent": "10",
+    "modes": [
+      2,
+      5
+    ],
+    "modeNames": [
+      "全托管",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "只有议价单状态discussStatus=1（待商家确认）的议价单，才可以使用此接口调用处理。议价单的处理操作有3项。1、同意平台建议价：同意后，商品价格会变更为平台建议价格，议价单结束。2、拒绝，放弃上架商品：拒绝后，议价单结束，商家无法再发起报价处理，商品无法上架3、重新报价：商家对平台建议价有疑问，再次进行价格沟通。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "required": true,
+        "description": "指定出参语种，默认中文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "confirmInfos",
+        "type": "object",
+        "description": "议价单操作=【同意平台建议价】或【拒绝，放弃上架】时，请在此字段内入参。注意：每个议价单只能执行一个操作，不要同时在confirmInfos、createCostDiscusses中入参执行多项操作。",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "discussAuditType",
+            "type": "string",
+            "required": true,
+            "description": "操作类型1-同意平台建议价； 2-拒绝，放弃上架",
+            "example": "random_discussAuditType",
+            "multiple": 0
+          },
+          {
+            "name": "discussSn",
+            "type": "string",
+            "required": true,
+            "description": "议价单号只有议价单状态discussStatus=1（待商家确认）的议价单，才可以使用此接口调用处理。",
+            "example": "random_discussSn",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "createCostDiscusses",
+        "type": "object",
+        "description": "议价单操作=【重新报价】时，请在此字段内入参。注意：每个议价单只能执行一个操作，不要同时在confirmInfos、createCostDiscusses中入参执行多项操作。",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "discussSn",
+            "type": "string",
+            "required": true,
+            "description": "议价单号。只有议价单状态discussStatus=1（待商家确认）的议价单，才可以使用此接口调用处理。",
+            "example": "random_discussSn",
+            "multiple": 0
+          },
+          {
+            "name": "discussStep",
+            "type": "integer",
+            "required": true,
+            "description": "议价单轮次数。每个议价单可沟通价格的次数有限，若次数=0则代表无法再次发起新报价。取值逻辑=获取议价单列表接口：/open-api/goods/discuss/query-discuss-list的serialNumber",
+            "example": "77",
+            "multiple": 0
+          },
+          {
+            "name": "fileUploadList",
+            "type": "object",
+            "description": "上传议价材料",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "file_name",
+                "type": "string",
+                "description": "原始文件名（开发者维护）",
+                "example": "random_file_name",
+                "multiple": 0
+              },
+              {
+                "name": "object_key",
+                "type": "string",
+                "description": "文件key，由平台生成，通过接口上传文件后获取/open-api/goods/discuss/upload-discuss-file",
+                "example": "random_object_key",
+                "multiple": 0
+              },
+              {
+                "name": "type",
+                "type": "integer",
+                "description": "文件类型。仅支持1:图片",
+                "example": "23",
+                "multiple": 0
+              },
+              {
+                "name": "url",
+                "type": "string",
+                "description": "文件url，由平台生成，通过接口上传文件后获取/open-api/goods/discuss/upload-discuss-file",
+                "example": "random_url",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "reason",
+            "type": "string",
+            "description": "商家填写发起议价的理由，最多255个字符",
+            "example": "random_reason",
+            "multiple": 0
+          },
+          {
+            "name": "skcName",
+            "type": "string",
+            "required": true,
+            "description": "平台的skc编码",
+            "example": "random_skcName",
+            "multiple": 0
+          },
+          {
+            "name": "skuCostInfoList",
+            "type": "object",
+            "required": true,
+            "description": "发起议价的sku成本价列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "cost",
+                "type": "double",
+                "required": true,
+                "description": "成本价",
+                "example": "31.99",
+                "multiple": 0
+              },
+              {
+                "name": "currency",
+                "type": "string",
+                "required": true,
+                "description": "币种",
+                "example": "random_currency",
+                "multiple": 0
+              },
+              {
+                "name": "lastCost",
+                "type": "double",
+                "required": true,
+                "description": "上次报价的成本价。取值逻辑=获取议价单列表接口：/open-api/goods/discuss/query-discuss-list的响应中\"costPriceHistories\"下\"serialNumber\"数值最大组的costPrice（即议价历史记录中，最新一次议价时的价格。注意：从未发起过议价的sku也有议价历史，会用发布商品时的价格作为第一次议价历史。）",
+                "example": "51.72",
+                "multiple": 0
+              },
+              {
+                "name": "lastCurrency",
+                "type": "string",
+                "required": true,
+                "description": "上次报价的币种。取值逻辑=获取议价单列表接口：/open-api/goods/discuss/query-discuss-list的响应中\"costPriceHistories\"下\"serialNumber\"数值最大组的currency",
+                "example": "random_lastCurrency",
+                "multiple": 0
+              },
+              {
+                "name": "skuCode",
+                "type": "string",
+                "required": true,
+                "description": "平台的sku编码",
+                "example": "random_skuCode",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应码",
+        "example": "11523",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "description": "响应详情",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "failCount",
+            "type": "integer",
+            "description": "提交失败数",
+            "example": "23356",
+            "multiple": 0
+          },
+          {
+            "name": "successCount",
+            "type": "integer",
+            "description": "提交成功数",
+            "example": "13695",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "响应信息",
+        "example": "adipisci quasi odit voluptatem enim dolor porro hic mollitia impedit aut sunt est est",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

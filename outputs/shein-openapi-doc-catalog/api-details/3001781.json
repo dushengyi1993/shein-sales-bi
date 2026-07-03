@@ -1,0 +1,184 @@
+{
+  "docId": "3001781",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "修改退货单的退货方式",
+    "userDocName": "修改退货单的退货方式",
+    "endpoint": "/open-api/purchase/update-pickup-methods",
+    "method": "POST",
+    "docName": "",
+    "version": 2,
+    "updateTime": "2026-06-04 13:50:45",
+    "changeContent": "增加traceid",
+    "qpsContent": "20",
+    "modes": [
+      2
+    ],
+    "modeNames": [
+      "全托管"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "在退货单退货前，通过此接口修改退货单的退货方式、地址及承运商",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识，openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "distributionType",
+        "type": "integer",
+        "required": true,
+        "description": "退货方式，必填；1-SHEIN合作物流；4-自提",
+        "example": "85",
+        "multiple": 0
+      },
+      {
+        "name": "expressInfo",
+        "type": "object",
+        "description": "快递信息；当distributionType=1-SHEIN合作物流时必填",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "addressId",
+            "type": "integer",
+            "description": "退货地址ID，必填",
+            "example": "58",
+            "multiple": 0
+          },
+          {
+            "name": "companyCode",
+            "type": "string",
+            "description": "退货物流公司Code，必填；",
+            "example": "random_companyCode",
+            "multiple": 0
+          },
+          {
+            "name": "snapshotVersion",
+            "type": "string",
+            "description": "地址快照版本，必填",
+            "example": "random_snapshotVersion",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "returnOrderId",
+        "type": "integer",
+        "description": "退货单Id；returnOrderNo与returnOrderId必须传其中之一",
+        "example": "44",
+        "multiple": 0
+      },
+      {
+        "name": "returnOrderNo",
+        "type": "string",
+        "description": "退货单号；returnOrderNo与returnOrderId必须传其中之一",
+        "example": "random_returnOrderNo",
+        "multiple": 0
+      },
+      {
+        "name": "selfPickup",
+        "type": "object",
+        "description": "自提信息",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "driverId",
+            "type": "string",
+            "description": "司机id（非必填）",
+            "example": "random_driverId",
+            "multiple": 0
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码，成功：0",
+        "example": "random_code",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述,成功：OK",
+        "example": "random_msg",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "required": true,
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "data",
+            "type": "object",
+            "multiple": 1
+          },
+          {
+            "name": "meta",
+            "type": "object",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "count",
+                "type": "integer",
+                "example": "80",
+                "multiple": 0
+              },
+              {
+                "name": "customObj",
+                "type": "object",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

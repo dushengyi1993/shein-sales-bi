@@ -1,0 +1,132 @@
+{
+  "docId": "3001432",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "获取打印设备列表 ",
+    "userDocName": "获取打印设备列表 ",
+    "endpoint": "/open-api/mdp/basic-configure/production-equipment/get-print-equipmentList",
+    "method": "POST",
+    "docName": "",
+    "version": 1,
+    "updateTime": "2025-10-15 16:19:42",
+    "changeContent": "新增MDP接口",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object",
+    "children": [
+      {
+        "name": "userCode",
+        "type": "string",
+        "required": true,
+        "description": "userCode"
+      }
+    ]
+  },
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "接口返回基础数据",
+    "label": "ApiResultOfListResultOfGetPrintEquipmentListResp",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": false,
+        "description": "响应码，成功：0",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "detailMsg",
+        "type": "string",
+        "required": false,
+        "description": "详细信息",
+        "example": "详细信息",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "列表结果对象",
+        "label": "ListResultOfGetPrintEquipmentListResp",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "list",
+            "type": "object",
+            "required": false,
+            "description": "数据列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "equipmentCode",
+                "type": "string",
+                "required": false,
+                "description": "设备编号",
+                "multiple": 0
+              },
+              {
+                "name": "equipmentName",
+                "type": "string",
+                "required": false,
+                "description": "设备名称",
+                "multiple": 0
+              },
+              {
+                "name": "id",
+                "type": "int64",
+                "required": false,
+                "description": "设备id",
+                "multiple": 0
+              },
+              {
+                "name": "machineTableCode",
+                "type": "string",
+                "required": false,
+                "description": "机台编号",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "前端展示的描述信息",
+        "example": "前端展示的描述信息",
+        "multiple": 0
+      },
+      {
+        "name": "time",
+        "type": "datetime",
+        "required": false,
+        "description": "响应时间",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

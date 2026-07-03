@@ -1,0 +1,161 @@
+{
+  "docId": "3001880",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询下单结果",
+    "userDocName": "查询下单结果",
+    "endpoint": "/open-api/gsp/check-express-order",
+    "method": "POST",
+    "docName": "",
+    "version": 7,
+    "updateTime": "2026-07-02 10:40:06",
+    "changeContent": "更新参数描述",
+    "qpsContent": "80",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "查询在线下单业务的物流渠道下单结果",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "placeRequestId",
+        "type": "string",
+        "description": "下单请求id；(下单请求id和运单号不能同时为空)；通过调用【在线下单】/open-api/gsp/place-express-order接口获取",
+        "example": "2507284064100355",
+        "multiple": 0
+      },
+      {
+        "name": "deliveryNo",
+        "type": "string",
+        "description": "运单号；(下单请求id和运单号不能同时为空)"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": true,
+        "description": "错误描述,成功：OK",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "required": true,
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "placeRequestId",
+            "type": "string",
+            "description": "下单请求id；",
+            "example": "2507284064100355",
+            "multiple": 0
+          },
+          {
+            "name": "deliveryNo",
+            "type": "string",
+            "description": "运单包裹号",
+            "example": "GU25072532795729922",
+            "multiple": 0
+          },
+          {
+            "name": "handleResult",
+            "type": "integer",
+            "description": "处理结果；1：物流商确认中/ 2：下单成功/ 3：下单失败；仅handleResult=2即下单成功后才可以打印面单",
+            "example": "3",
+            "multiple": 0
+          },
+          {
+            "name": "placeStateFailReasonDesc",
+            "type": "string",
+            "description": "下单失败描述",
+            "example": "Logistics provider exception",
+            "multiple": 0
+          },
+          {
+            "name": "declareSolutionDesc",
+            "type": "string",
+            "description": "解决方案"
+          },
+          {
+            "name": "printStatus",
+            "type": "integer",
+            "description": "面单状态；0：下单中/ 1：待打印面单/ 2：已打印面单/ 3：已取消",
+            "example": "0",
+            "multiple": 0
+          },
+          {
+            "name": "warehouseAddressCode",
+            "type": "string",
+            "description": "仓库地址编码",
+            "example": "WH2511072791432194"
+          },
+          {
+            "name": "expressChannelCode",
+            "type": "string",
+            "description": "下单的渠道商产品编码"
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

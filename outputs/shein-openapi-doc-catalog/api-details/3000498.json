@@ -1,0 +1,86 @@
+{
+  "docId": "3000498",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "顺丰运单未揽收包裹明细回调接口",
+    "userDocName": "顺丰运单未揽收包裹明细回调接口",
+    "endpoint": "/open-api/cargo/qc-outside-cancel-sf-express",
+    "method": "POST",
+    "docName": "post_open-api_cargo_qc-outside-cancel-sf-express",
+    "version": 3,
+    "updateTime": "2024-10-15 10:26:43",
+    "changeContent": "新增traceId",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "顺丰运单未揽收包裹明细回调接口，通知SHEIN未揽收的包裹号明细及运单号",
+  "requestHeader": null,
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "expressNo",
+        "type": "string",
+        "required": true,
+        "description": "运单号",
+        "label": "运单号",
+        "multiple": 0
+      },
+      {
+        "name": "boxNo",
+        "type": "string",
+        "required": true,
+        "description": "包裹号，支持多个",
+        "label": "包裹号，支持多个（未揽收的包裹号）",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "请求返回状态，0-成功",
+        "label": "请求返回状态"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": true,
+        "description": "请求返回描述",
+        "label": "请求返回描述"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "description": "code为0时会返回数据，否则为null",
+        "label": "订单返回参数",
+        "children": [
+          {
+            "name": "box_no",
+            "type": "string",
+            "description": "包裹号，格式示例：[\"B210517000003-1-2\",B\"210517000003-1-2\",\"B210517000003-1-3\"]",
+            "label": "包裹号",
+            "multiple": 1
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "expressNo\": \"SF2121000121\", \"boxNo\": [ \"P20012\" ] }",
+  "responseExample": "code\": \"0\", \"msg\": \"\", \"info\": { \"box_no\": [\"B210517000003-1-2\",\"B210517000003-1-2\",\"B210517000003-1-3\"] } }",
+  "errorCode": null
+}

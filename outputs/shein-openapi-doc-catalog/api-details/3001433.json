@@ -1,0 +1,114 @@
+{
+  "docId": "3001433",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "添加或取消设备异常",
+    "userDocName": "添加或取消设备异常",
+    "endpoint": "/open-api/mdp/basic-configure/production-equipment/add-or-cancel-equipment-exception",
+    "method": "POST",
+    "docName": "",
+    "version": 1,
+    "updateTime": "2025-10-15 16:19:51",
+    "changeContent": "新增MDP接口",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "添加或取消设备异常",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "description": "添加或取消设备异常请求体",
+    "label": "AddOrCancelEquipmentException",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "equipmentCode",
+        "type": "string",
+        "required": true,
+        "description": "设备code",
+        "multiple": 0
+      },
+      {
+        "name": "operationType",
+        "type": "integer",
+        "required": true,
+        "description": "操作类型：1-设备异常 2-设备解除异常",
+        "multiple": 0
+      },
+      {
+        "name": "userCode",
+        "type": "string",
+        "required": true,
+        "description": "userCode",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "接口返回基础数据",
+    "label": "ApiResult",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": false,
+        "description": "响应码，成功：0",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "detailMsg",
+        "type": "string",
+        "required": false,
+        "description": "详细信息",
+        "example": "详细信息",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "响应数据",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "前端展示的描述信息",
+        "example": "前端展示的描述信息",
+        "multiple": 0
+      },
+      {
+        "name": "time",
+        "type": "datetime",
+        "required": false,
+        "description": "响应时间",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

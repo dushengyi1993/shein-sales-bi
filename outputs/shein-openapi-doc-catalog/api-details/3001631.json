@@ -1,0 +1,283 @@
+{
+  "docId": "3001631",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询对账单列表",
+    "userDocName": "查询对账单列表",
+    "endpoint": "/open-api/finance/get-check-order-list",
+    "method": "POST",
+    "docName": "post_open-api_finance_get-check-order-list",
+    "version": 9,
+    "updateTime": "2026-03-26 21:12:18",
+    "changeContent": "更新报账单列表字段",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "自运营和半托管应用可使用该接口查询店铺中已生成的对账单列表。目前，仅对账单列表支持自运营和半托管店铺。对账单接口说明：当订单或其他业务单据进入结算节点后，系统会生成相应的对账单。对账单生成一段时间后，平台进行打款，届时会生成报账单。一个报账单中通常会包含同一批次打款涉及的多个对账单。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认：application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "description": "报账单明细请求Model",
+    "label": "OpenApiCheckOrderListRequest",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bzOrderNos",
+        "type": "string",
+        "required": false,
+        "description": "业务单号，一般指订单号，单次最多支持查询100个",
+        "multiple": 1
+      },
+      {
+        "name": "checkStatus",
+        "type": "integer",
+        "required": false,
+        "description": "对账单状态:1-待结算，2-结算中，3-已结算，4-结算异常",
+        "multiple": 0
+      },
+      {
+        "name": "endAddTime",
+        "type": "datetime",
+        "required": true,
+        "description": "按对账单生成时间查询，查询周期的结束时间，格式：yyyy-MM-dd HH:mm:ss",
+        "multiple": 0
+      },
+      {
+        "name": "endEstimatePayTime",
+        "type": "datetime",
+        "required": false,
+        "description": "预计打款日期结束时间，格式：yyyy-MM-dd HH:mm:ss",
+        "multiple": 0
+      },
+      {
+        "name": "extendOrderNos",
+        "type": "string",
+        "required": false,
+        "description": "其他业务单号，例如退货单、处罚单，单次最多支持查询100个",
+        "multiple": 1
+      },
+      {
+        "name": "page",
+        "type": "integer",
+        "required": true,
+        "description": "当前页",
+        "multiple": 0
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "required": true,
+        "description": "每页记录数，最多30条",
+        "multiple": 0
+      },
+      {
+        "name": "reportOrderNos",
+        "type": "string",
+        "description": "报账单号列表(最多支持100个)"
+      },
+      {
+        "name": "secondOrderTypes",
+        "type": "integer",
+        "required": false,
+        "description": "二级账单类型，具体枚举值点击查看FAQ",
+        "multiple": 1
+      },
+      {
+        "name": "startAddTime",
+        "type": "datetime",
+        "required": true,
+        "description": "按对账单生成时间查询，查询周期的开始时间，格式：yyyy-MM-dd HH:mm:ss",
+        "multiple": 0
+      },
+      {
+        "name": "startEstimatePayTime",
+        "type": "datetime",
+        "required": false,
+        "description": "预计打款日期开始时间，格式：yyyy-MM-dd HH:mm:ss",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfOpenApiCheckOrderListInfoResponse",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "对账单明细汇总信息数据",
+        "label": "OpenApiCheckOrderListInfoResponse",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "count",
+            "type": "int64",
+            "required": false,
+            "description": "对账单总数",
+            "multiple": 0
+          },
+          {
+            "name": "list",
+            "type": "object",
+            "required": false,
+            "description": "对账单列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "businessCompletedTime",
+                "type": "datetime",
+                "required": true,
+                "description": "业务时间，yyyy-MM-dd HH:mm:ss",
+                "multiple": 0
+              },
+              {
+                "name": "bzOrderNo",
+                "type": "string",
+                "required": true,
+                "description": "业务单号",
+                "multiple": 0
+              },
+              {
+                "name": "checkOrderNo",
+                "type": "string",
+                "required": true,
+                "description": "对账单号",
+                "multiple": 0
+              },
+              {
+                "name": "checkStatus",
+                "type": "integer",
+                "required": true,
+                "description": "对账单状态,1、待生成付款；2、即将付款；3、已付款；4、付款异常",
+                "multiple": 0
+              },
+              {
+                "name": "completedPayTime",
+                "type": "datetime",
+                "required": false,
+                "description": "结算完成时间，yyyy-MM-dd HH:mm:ss",
+                "multiple": 0
+              },
+              {
+                "name": "currencyCode",
+                "type": "string",
+                "required": true,
+                "description": "账单币种",
+                "multiple": 0
+              },
+              {
+                "name": "estimateIncomeMoneyTotal",
+                "type": "double",
+                "required": false,
+                "description": "应付金额汇总",
+                "multiple": 0
+              },
+              {
+                "name": "estimatePayTime",
+                "type": "datetime",
+                "required": false,
+                "description": "预计打款日期，yyyy-MM-dd HH:mm:ss",
+                "multiple": 0
+              },
+              {
+                "name": "incomeExpenditureType",
+                "type": "integer",
+                "required": true,
+                "description": "收支类型，1收入，2支出",
+                "multiple": 0
+              },
+              {
+                "name": "reportOrderNo",
+                "type": "string",
+                "required": true,
+                "description": "报账单号",
+                "multiple": 0
+              },
+              {
+                "name": "secondOrderType",
+                "type": "integer",
+                "required": true,
+                "description": "二级账单类型，具体枚举值点击查看FAQ",
+                "multiple": 0
+              },
+              {
+                "name": "site",
+                "type": "string",
+                "required": true,
+                "description": "销售站点；例如shein-br",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求追踪码"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/finance/get-check-order-list' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-timestamp: 1752819433511' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'language: zh-cn' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi.sheincorp.com' \\ --data-raw '{ \"page\":1, \"pageSize\":30, \"startAddTime\":\"2024-11-11 00:00:00\", \"endAddTime\":\"2024-11-15 00:00:00\", \"checkStatus\":1, \"bzOrderNos\":[\"GSONP109T00000X\"], \"secondOrderTypes\":[1,2,3] }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"count\": 1, \"list\": [ { \"checkOrderNo\": \"B241114524652546\", \"checkStatus\": 1, \"secondOrderType\": 1, \"incomeExpenditureType\": 1, \"bzOrderNo\": \"GSONP109T00000X\", \"businessCompletedTime\": \"2024-11-14 17:47:21\", \"completedPayTime\": \"\", \"site\": \"shein-us\", \"currencyCode\": \"USD\", \"estimateIncomeMoneyTotal\": 44.48, \"reportOrderNo\": null, \"estimatePayTime\": \"2025-05-19 10:23:58\" } ] }, \"bbl\": {}, \"traceId\": \"b4ccfaeb2ffbae42\" }",
+  "errorCode": null
+}

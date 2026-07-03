@@ -1,0 +1,72 @@
+{
+  "docId": "3001419",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "提供更新MDP转印任务开始",
+    "userDocName": "提供更新MDP转印任务开始",
+    "endpoint": "/open-api/mdp/product/transfer-print-task/begin",
+    "method": "POST",
+    "docName": "post_open-api_mdp_product_transfer-print-task_begin",
+    "version": 2,
+    "updateTime": "2025-10-15 14:54:17",
+    "changeContent": "更新MDP接口文档",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object"
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "orderNo",
+        "type": "string",
+        "required": true,
+        "description": "加工单号/异常单号/生产异常单号",
+        "label": "加工单号/异常单号/生产异常单号"
+      },
+      {
+        "name": "userCode",
+        "type": "string",
+        "description": "操作人的用户Code",
+        "label": "操作人的用户Code"
+      },
+      {
+        "name": "operateTime",
+        "type": "string",
+        "required": true,
+        "description": "操作时间，2025-01-01 01:00:00",
+        "label": "操作时间"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "状态码。0正常返回，非0错误返回"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "描述信息"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "description": "接口数据data"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

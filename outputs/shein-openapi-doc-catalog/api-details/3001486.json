@@ -1,0 +1,189 @@
+{
+  "docId": "3001486",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "商品接口-全量查询SKC/SKU/设计款号关系列表",
+    "userDocName": "商品接口-全量查询SKC/SKU/设计款号关系列表",
+    "endpoint": "/open-api/goods/number-list",
+    "method": "GET",
+    "docName": "get_open-api_goods_number-list",
+    "version": 11,
+    "updateTime": "2025-12-18 10:32:02",
+    "changeContent": "“供应商”改“商家”",
+    "qpsContent": "120",
+    "modes": [
+      2,
+      3
+    ],
+    "modeNames": [
+      "全托管",
+      "SHEIN自营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "该API支持查询skc/设计款号等编码信息",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object",
+    "children": [
+      {
+        "name": "page",
+        "type": "integer",
+        "required": true,
+        "description": "页码",
+        "defaultValue": "1",
+        "label": "页码"
+      },
+      {
+        "name": "per_page",
+        "type": "integer",
+        "required": true,
+        "description": "每页数据量，最大值为100",
+        "defaultValue": "20",
+        "example": "20",
+        "label": "每页数据量"
+      },
+      {
+        "name": "type",
+        "type": "integer",
+        "required": true,
+        "description": "编号查询类型枚举。1: skc，2: 设计款号design_code,推荐入参1,入参2部分场景可能数据不存在",
+        "example": "1",
+        "label": "编号查询类型"
+      }
+    ]
+  },
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "integer",
+        "description": "code=0成功，code =1失败",
+        "example": "0",
+        "label": "返回码",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "响应信息",
+        "example": "接口请求成功",
+        "label": "信息",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "page",
+            "type": "integer",
+            "description": "当前页码",
+            "example": "1",
+            "label": "当前页码",
+            "multiple": 0
+          },
+          {
+            "name": "per_page",
+            "type": "integer",
+            "description": "当前每页数据量",
+            "example": "50",
+            "label": "当前每页数据量",
+            "multiple": 0
+          },
+          {
+            "name": "count",
+            "type": "integer",
+            "description": "总数据量",
+            "example": "3",
+            "label": "总数据量",
+            "multiple": 0
+          },
+          {
+            "name": "list",
+            "type": "object",
+            "required": true,
+            "multiple": 1,
+            "children": [
+              {
+                "name": "skc",
+                "type": "string",
+                "description": "design_code查询时,skc为空；skc即skc_Name，skc_Name是商品发布SHEIN生成的系统编码",
+                "example": "night171027151",
+                "multiple": 0
+              },
+              {
+                "name": "sku_code",
+                "type": "string",
+                "description": "sku_code，sku_code是商品发布SHEIN生成的系统编码",
+                "example": "XXL",
+                "label": "shein sku",
+                "multiple": 0
+              },
+              {
+                "name": "supplier_sku",
+                "type": "string",
+                "description": "商家sku",
+                "example": "night171027151",
+                "multiple": 0
+              },
+              {
+                "name": "design_code",
+                "type": "string",
+                "description": "设计款号。skc查询时，设计款号为空",
+                "label": "设计款号",
+                "multiple": 0
+              },
+              {
+                "name": "attribute",
+                "type": "string",
+                "description": "属性值",
+                "label": "属性集"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi-test01.sheincorp.cn/open-api/goods/number-list?page=1&per_page=100&type=1' \\ --header 'language: zh-cn' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-timestamp: 1752733538805' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi-test01.sheincorp.cn' \\ --data-raw ''",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"page\": 1, \"per_page\": 100, \"count\": 1960, \"list\": [ { \"skc\": \"ss23111525874412\", \"supplier_sku\": \"\", \"design_code\": \"\", \"sku_code\": \"I3eu5zp1payu\", \"attribute\": \"XL-3\" }, { \"skc\": \"ss23111525874412\", \"supplier_sku\": \"\", \"design_code\": \"\", \"sku_code\": \"I3eu5zp1puhu\", \"attribute\": \"XL-2pc\" }, { \"skc\": \"ss23111525874412\", \"supplier_sku\": \"\", \"design_code\": \"\", \"sku_code\": \"I3eu5zp1qbm2\", \"attribute\": \"XL-4pcs\" }, { \"skc\": \"ss23111525874412\", \"supplier_sku\": \"\", \"design_code\": \"\", \"sku_code\": \"I3eu5zp1qvhh\", \"attribute\": \"XL-ww\" }, { \"skc\": \"ss23111594783030\", \"supplier_sku\": \"\", \"design_code\": \"\", \"sku_code\": \"I14ly1k1jfj7\", \"attribute\": \"XL-qqqqw\" }, { \"skc\": \"ss23111594783030\", \"supplier_sku\": \"\", \"design_code\": \"\", \"sku_code\": \"I3eu4ni3200b\", \"attribute\": \"XL-ww\" }, { \"skc\": \"ss23111594783030\", \"supplier_sku\": \"\", \"design_code\": \"\", \"sku_code\": \"I3eu4ni32ffa\", \"attribute\": \"XL-3\" }, { \"skc\": \"ss23111594783030\", \"supplier_sku\": \"\", \"design_code\": \"\", \"sku_code\": \"I3eu4ni32uep\", \"attribute\": \"XL-2pc\" }, { \"skc\": \"ss23111594783030\", \"supplier_sku\": \"\", \"design",
+  "errorCode": null
+}

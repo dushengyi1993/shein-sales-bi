@@ -1,0 +1,144 @@
+{
+  "docId": "3001417",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "微信小程序登陆",
+    "userDocName": "微信小程序登陆",
+    "endpoint": "/open-api/mdp/wx-mini-program/login",
+    "method": "POST",
+    "docName": "post_open-api_mdp_wx-mini-program_login",
+    "version": 2,
+    "updateTime": "2025-10-15 14:50:57",
+    "changeContent": "更新MDP文档内容",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "微信小程序登陆，目前并没有做真正的登陆，只是简单返回了允许的菜单",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "description": "微信小程序登陆请求",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "openid",
+        "type": "string",
+        "required": true,
+        "description": "openid",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "接口返回基础数据",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": false,
+        "description": "响应码，成功：0",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "detailMsg",
+        "type": "string",
+        "required": false,
+        "description": "详细信息",
+        "example": "详细信息",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "微信小程序登陆返回",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "permissionRespList",
+            "type": "object",
+            "required": false,
+            "description": "权限集合",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "link",
+                "type": "string",
+                "required": false,
+                "description": "前端菜单路由地址",
+                "multiple": 0
+              },
+              {
+                "name": "permissionName",
+                "type": "string",
+                "required": false,
+                "description": "权限名称",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "userCode",
+            "type": "string",
+            "required": false,
+            "description": "用户code",
+            "multiple": 0
+          },
+          {
+            "name": "userId",
+            "type": "int64",
+            "required": false,
+            "description": "用户id",
+            "multiple": 0
+          },
+          {
+            "name": "userName",
+            "type": "string",
+            "required": false,
+            "description": "用户名称/ulp用户名",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "前端展示的描述信息",
+        "example": "前端展示的描述信息",
+        "multiple": 0
+      },
+      {
+        "name": "time",
+        "type": "datetime",
+        "required": false,
+        "description": "响应时间",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

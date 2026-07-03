@@ -1,0 +1,219 @@
+{
+  "docId": "3001884",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "更新供货价",
+    "userDocName": "更新成本价",
+    "endpoint": "/open-api/goods/update-cost",
+    "method": "POST",
+    "docName": "post_open-api_goods_update-cost",
+    "version": 14,
+    "updateTime": "2026-07-02 20:26:09",
+    "changeContent": "文档归属类目更新",
+    "qpsContent": "20",
+    "modes": [
+      2,
+      5
+    ],
+    "modeNames": [
+      "全托管",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "该API支持更新商品成本价（也称供货价）信息。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "language",
+        "type": "string",
+        "required": true,
+        "description": "默认返回中文多语言信息，支持语种：英语:en 法语: fr 西班牙语:es 德语:de 中文简体:zh-cn 泰语:th 巴西葡语:pt-br"
+      },
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "skc_info_list",
+        "type": "object",
+        "required": true,
+        "description": "skc信息。单次最多上传20个skc。",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "skc_name",
+            "type": "string",
+            "required": true,
+            "description": "skc_name，skc_name是商品发布SHEIN生成的系统编码",
+            "multiple": 0
+          },
+          {
+            "name": "change_price_reason_flag",
+            "type": "string",
+            "required": true,
+            "description": "涨价原因code。需填写平台提供的枚举值，不可随意输入。26年7月1日开始字段必填。不同商家可填写的涨价原因不同，需通过接口获取/open-api/goods/query-change-price-reason"
+          },
+          {
+            "name": "change_remark",
+            "type": "string",
+            "description": "涨价原因说明。商家可自定义输入内容，最多1000个字符。"
+          },
+          {
+            "name": "file_upload_list",
+            "type": "object",
+            "description": "涨价原因辅助材料，最多可上传1个材料。",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "object_key",
+                "type": "string",
+                "required": true,
+                "description": "文件唯一编码。需通过接口转换获得：/open-api/goods/discuss/upload-discuss-file"
+              },
+              {
+                "name": "type",
+                "type": "string",
+                "required": true,
+                "description": "文件类型。1:图片（jpg / jpeg / png） 2:pdf 5:csv 6:excel（xls / xlsx）必传，如果不传值可能会导致运营端无法正常查看材料，导致审核异常。"
+              },
+              {
+                "name": "url",
+                "type": "string",
+                "description": "文件地址。需通过接口转换获得：/open-api/goods/discuss/upload-discuss-file"
+              }
+            ]
+          },
+          {
+            "name": "sku_info_list",
+            "type": "object",
+            "required": true,
+            "description": "sku信息。单次最多上传20个sku。",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "cost",
+                "type": "double",
+                "required": true,
+                "description": "更新后的成本价（供货价）。大于0小于100000的数值，最多2位小数点。",
+                "multiple": 0
+              },
+              {
+                "name": "currency",
+                "type": "string",
+                "required": true,
+                "description": "币种。需通过商品发布字段规范（含默认语种）获取，字段\"currency\"",
+                "multiple": 0
+              },
+              {
+                "name": "sku_code",
+                "type": "string",
+                "required": true,
+                "description": "sku_code，sku_code是商品发布SHEIN生成的系统编码",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "spu_name",
+        "type": "string",
+        "required": true,
+        "description": "spu_name，spu_name是商品发布SHEIN生成的系统编码",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "bbl",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1
+              }
+            ]
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "成功: 0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "响应描述",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi-test01.sheincorp.cn/open-api/goods/update-cost' \\ --header 'language: zh-cn' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-timestamp: 1752733538805' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi-test01.sheincorp.cn' \\ --data-raw '{ \"spu_name\": \"xS25121523423\", \"skc_info_list\": [ { \"skc_name\": \"sf24112312321581\", \"sku_info_list\": [ { \"cost\": \"10.55\", \"currency\": \"EUR\", \"sku_code\": \"I1231281em4e\" }, { \"cost\": \"10.55\", \"currency\": \"EUR\", \"sku_code\": \"I12312311ew4e\" }, { \"cost\": \"10.55\", \"currency\": \"EUR\", \"sku_code\": \"I122211281ef4e\" } ] } ] }'",
+  "responseExample": "code\":\"0\", \"msg\":\"OK\", \"info\":null, \"bbl\":null, \"traceId\":\"c2222a9c0223234e\" }",
+  "errorCode": null
+}

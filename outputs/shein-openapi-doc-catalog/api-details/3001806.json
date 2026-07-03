@@ -1,0 +1,214 @@
+{
+  "docId": "3001806",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "创建退货申请单",
+    "userDocName": "创建退货申请单",
+    "endpoint": "/open-api/purchase/create-return-application",
+    "method": "POST",
+    "docName": "",
+    "version": 4,
+    "updateTime": "2026-06-12 10:39:57",
+    "changeContent": "清除字段描述中的空格",
+    "qpsContent": "20",
+    "modes": [
+      2
+    ],
+    "modeNames": [
+      "全托管"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "商家主动发起退货申请，创建退货申请单",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "returnDealType",
+        "type": "integer",
+        "required": true,
+        "description": "发起处理方式:1退货、2报废",
+        "multiple": 0
+      },
+      {
+        "name": "returnModeList",
+        "type": "object",
+        "description": "仓维度的退货方式列表；当returnDealType=1退货时必填，按仓库维度指定每个仓的退货方式；当returnDealType=2报废时，不传",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "returnAddressId",
+            "type": "integer",
+            "description": "计划退货详细地址Id；当distributionType=1-SHEIN合作物流时必填；",
+            "example": "38",
+            "multiple": 0
+          },
+          {
+            "name": "snapshotVersion",
+            "type": "string",
+            "description": "地址快照版本；当distributionType=1-SHEIN合作物流时必填",
+            "example": "random_snapshotVersion",
+            "multiple": 0
+          },
+          {
+            "name": "distributionType",
+            "type": "integer",
+            "required": true,
+            "description": "退货方式，必填；1-SHEIN合作物流；4-自提",
+            "example": "45",
+            "multiple": 0
+          },
+          {
+            "name": "returnExpressCompanyCode",
+            "type": "string",
+            "description": "退货物流公司代码；当distributionType=1-SHEIN合作物流时必填",
+            "example": "random_returnExpressCompanyCode",
+            "multiple": 0
+          },
+          {
+            "name": "returnExpressCompanyName",
+            "type": "string",
+            "description": "退货物流公司名称；当distributionType=1-SHEIN合作物流时必填",
+            "example": "random_returnExpressCompanyName",
+            "multiple": 0
+          },
+          {
+            "name": "warehouseId",
+            "type": "integer",
+            "required": true,
+            "description": "SHEIN仓库id，必填；对应skuInfoList中warehouseInfoList的仓库维度",
+            "example": "60",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "returnReason",
+        "type": "string",
+        "description": "申请退货的原因说明",
+        "example": "random_returnReason",
+        "multiple": 0
+      },
+      {
+        "name": "skuInfoList",
+        "type": "object",
+        "description": "sku信息列表，必填；需要提供平台sku和申请数量",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "platformSku",
+            "type": "string",
+            "required": true,
+            "description": "平台sku",
+            "example": "random_platformSku",
+            "multiple": 0
+          },
+          {
+            "name": "warehouseInfoList",
+            "type": "object",
+            "description": "仓库列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "quantity",
+                "type": "integer",
+                "required": true,
+                "description": "申请退货数量",
+                "example": "60",
+                "multiple": 0
+              },
+              {
+                "name": "warehouseId",
+                "type": "integer",
+                "description": "SHEIN仓库id",
+                "example": "4",
+                "multiple": 0
+              },
+              {
+                "name": "warehouseName",
+                "type": "string",
+                "description": "SHEIN仓库名称",
+                "example": "random_warehouseName",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码，成功：0",
+        "example": "random_code",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述,成功：OK",
+        "example": "random_msg",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "required": true,
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "returnPlanNoList",
+            "type": "string",
+            "description": "创建成功的退货申请单列表",
+            "example": "random_returnPlanNoList",
+            "multiple": 1
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

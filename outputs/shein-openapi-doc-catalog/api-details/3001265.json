@@ -1,0 +1,126 @@
+{
+  "docId": "3001265",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "认证仓调用-接收认证仓服务商仓库渠道变更接口",
+    "userDocName": "认证仓调用-接收认证仓服务商仓库渠道变更接口",
+    "endpoint": "/open-api/lsps-java/auth/entity-change",
+    "method": "POST",
+    "docName": "post_open-api_lsps-java_auth_entity-change",
+    "version": 3,
+    "updateTime": "2025-07-18 14:10:43",
+    "changeContent": "增加请求与返回示例。",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "认证仓同步物理仓库、渠道接口",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "auth_service_code",
+        "type": "string",
+        "description": "认证仓服务商编码"
+      },
+      {
+        "name": "channel_list",
+        "type": "object",
+        "description": "渠道List",
+        "children": [
+          {
+            "name": "change_type",
+            "type": "integer",
+            "description": "渠道变更类型，1.新增 2.停用"
+          },
+          {
+            "name": "channel_code",
+            "type": "string",
+            "description": "渠道编码"
+          },
+          {
+            "name": "channel_name",
+            "type": "string",
+            "description": "渠道名称"
+          },
+          {
+            "name": "channel_ware_code",
+            "type": "string",
+            "description": "渠道可用仓库编码"
+          }
+        ]
+      },
+      {
+        "name": "time",
+        "type": "datetime",
+        "description": "更新时间，年-月-日 时:分:秒 格式:yyyy-MM-dd HH:mm:ss"
+      },
+      {
+        "name": "type",
+        "type": "integer",
+        "description": "类型：1.仓库信息 2.渠道信息 ；枚举值为1，仓库list必填，枚举值为2，渠道list必填"
+      },
+      {
+        "name": "warehouse_list",
+        "type": "object",
+        "description": "仓库List",
+        "children": [
+          {
+            "name": "change_type",
+            "type": "integer",
+            "description": "仓库变更类型，1.新增 2.停用"
+          },
+          {
+            "name": "warehouse_code",
+            "type": "string",
+            "description": "物理仓库编码"
+          },
+          {
+            "name": "warehouse_name",
+            "type": "string",
+            "description": "物理仓库名称"
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码，成功：0"
+      },
+      {
+        "name": "info",
+        "type": "object"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述，成功：OK"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.cn/open-api/lsps-java/auth/entity-change' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570681772' \\ --header 'x-lt-clientCode:TEST' \\ --data-raw '{ \"type\": 1, \"time\": \"2025-07-16 05:57:12\", \"auth_service_code\": \"TEST\", \"warehouse_list\": [ { \"change_type\": 1, \"warehouse_name\": \"美国仓库02\", \"warehouse_code\": \"US01\" }, { \"change_type\": 1, \"warehouse_name\": \"美国仓库02\", \"warehouse_code\": \"US02\" }, { \"change_type\": 1, \"warehouse_name\": \"小货仓库\", \"warehouse_code\": \"MINI\" } ] }' 同步渠道产品： curl --location --request POST 'https://openapi.sheincorp.cn/open-api/lsps-java/auth/entity-change' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570681772' \\ --header 'x-lt-clientCode:TEST' \\ --data-raw '{ \"auth_service_code\": \"TEST\", \"time\": \"2025-07-02 17:58:52\", \"type\": 2, \"channel_list\": [ { \"change_type\": 2, \"channel_code\": \"TEST-C-01\", \"channel_name\": \"TEST-N-01\", \"channel_ware_code\": \"TEST-01\" }, { \"change_type\": 2, \"channel_code\": \"TEST-C-02\", \"channel_name\": \"TEST-N-02\", \"channel_ware_code\": \"TEST-01\" }, { \"change_type\": 2, \"channel_code\": \"TEST-C-03\", \"channel_name\": \"TEST-N-03\", \"channel_ware_code\": \"TEST-03\" } ] }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { } }",
+  "errorCode": null
+}

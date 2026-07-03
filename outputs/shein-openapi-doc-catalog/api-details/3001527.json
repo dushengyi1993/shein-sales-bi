@@ -1,0 +1,327 @@
+{
+  "docId": "3001527",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "回传发票信息",
+    "userDocName": "回传发票信息",
+    "endpoint": "/open-api/order/sync-invoice-info",
+    "method": "POST",
+    "docName": "post_open-api_order_sync-invoice-info",
+    "version": 15,
+    "updateTime": "2025-12-29 11:08:57",
+    "changeContent": "更新接口返回示例",
+    "qpsContent": "100",
+    "modes": [
+      1
+    ],
+    "modeNames": [
+      "自运营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "该接口用于巴西市场商家同步订单发票信息到 SHEIN平台",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "orderInvoiceInfos",
+        "type": "object",
+        "required": true,
+        "description": "上传订单的发票信息，1次接口调用最多50条",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "orderNo",
+            "type": "string",
+            "required": true,
+            "description": "订单号",
+            "example": "B1231231231",
+            "multiple": 0
+          },
+          {
+            "name": "unpackingGroupNo",
+            "type": "string",
+            "description": "拆包组编号；通过订单详情接口获取"
+          },
+          {
+            "name": "ie",
+            "type": "string",
+            "description": "I.E. – 州注册号，允许为空，仅发送 invoiceXmlContent"
+          },
+          {
+            "name": "icms",
+            "type": "integer",
+            "required": true,
+            "description": "1-TAXED 需要交税; 2 NO-TAXED 不需要交税 ; 3-FERR 个人卖家"
+          },
+          {
+            "name": "invoiceNo",
+            "type": "string",
+            "description": "发票编号；最大长度：100 个字符；仅在发送发票的 invoiceXmlContent 时允许为空",
+            "example": "G23123124124",
+            "multiple": 0
+          },
+          {
+            "name": "invoiceKey",
+            "type": "string",
+            "description": "发票密钥；最大长度：100 个字符；仅在发送发票的 invoiceXmlContent 时允许为空",
+            "example": "234dsfsdfw23423esdfsdvsdg",
+            "multiple": 0
+          },
+          {
+            "name": "invoiceSn",
+            "type": "string",
+            "description": "发票系列号；最大长度：100 个字符；仅在发送发票的 invoiceXmlContent 时允许为空",
+            "example": "S1231231231231",
+            "multiple": 0
+          },
+          {
+            "name": "amount",
+            "type": "decimal",
+            "description": "发票总金额；数据类型：BigDecimal(10,2)；仅在发送发票的 invoiceXmlContent 时允许为空",
+            "example": "1231.0",
+            "multiple": 0
+          },
+          {
+            "name": "taxNo",
+            "type": "string",
+            "description": "税号，最大长度 100，允许为空，仅发送 invoiceXmlContent",
+            "example": "T12412412412",
+            "multiple": 0
+          },
+          {
+            "name": "currency",
+            "type": "string",
+            "description": "货币（示例：BRL），允许为空，仅发送 invoiceXmlContent"
+          },
+          {
+            "name": "invoiceType",
+            "type": "string",
+            "description": "发票类型（发票的进出口类型，平台侧发票仅有出货。巴西站，生物信息：Saída），允许为空，仅发送 invoiceXmlContent"
+          },
+          {
+            "name": "authorizationNumber",
+            "type": "string",
+            "description": "发票的授权号码（示例：135220009577779），允许为空，仅发送 invoiceXmlContent"
+          },
+          {
+            "name": "authorizationTime",
+            "type": "string",
+            "description": "发票授权时间（示例：2022-12-04 00:00:00），允许为空，仅发送 invoiceXmlContent"
+          },
+          {
+            "name": "invoiceIssueTime",
+            "type": "string",
+            "description": "发票开具时间（示例：2022-12-04 10:00:00），允许为空，仅发送 invoiceXmlContent"
+          },
+          {
+            "name": "quantity",
+            "type": "string",
+            "description": "发票上面的总数量。BigDecimal(15,4)，允许为空，仅发送 invoiceXmlContent"
+          },
+          {
+            "name": "invoiceXmlContent",
+            "type": "string",
+            "description": "Invoice xml content.The parameter hopefully the entire text can be transferred.If not, need to be URLencode with UTF-8. For Example: Before:"
+          },
+          {
+            "name": "sendMsg",
+            "type": "object",
+            "required": true,
+            "description": "发件人信息",
+            "children": [
+              {
+                "name": "name",
+                "type": "string",
+                "required": true,
+                "description": "名称（上传发件人姓名或公司名称）"
+              },
+              {
+                "name": "taxNo",
+                "type": "string",
+                "required": true,
+                "description": "税号（例如：99867389620，企业的税号 CNPJ 是 14 位数字，个人的税号 CPF 是 11 位数字）"
+              },
+              {
+                "name": "ie",
+                "type": "string",
+                "description": "I.E. – Inscrição Estadual（例如：99867389620；如果主体是公司（免税）或主体是个人，则在此字段中填写 \"ISENTO\"，表示免税）"
+              },
+              {
+                "name": "stateProvinceCode",
+                "type": "string",
+                "required": true,
+                "description": "州和省的两位字符代码（例如：SP）"
+              },
+              {
+                "name": "cityCode",
+                "type": "string",
+                "required": true,
+                "description": "城市代码（例如：3518800）"
+              },
+              {
+                "name": "city",
+                "type": "string",
+                "required": true,
+                "description": "城市（例如：GUARULHOS）"
+              },
+              {
+                "name": "neighborhood",
+                "type": "string",
+                "required": true,
+                "description": "地区（例如：CUMBICA，如果没有，则默认使用 S/N）"
+              },
+              {
+                "name": "street",
+                "type": "string",
+                "required": true,
+                "description": "街道（例如：AVENIDA ORLANDA BERGAMO ESQUINA COM A AVENIDA ABRAAO LINCOLN，如果没有，则默认使用 S/N）"
+              },
+              {
+                "name": "houseNumber",
+                "type": "string",
+                "required": true,
+                "description": "门牌号（例如：1132，如果没有，则默认使用 S/N）"
+              },
+              {
+                "name": "zipCode",
+                "type": "string",
+                "required": true,
+                "description": "邮政编码（例如：13236533）"
+              }
+            ]
+          },
+          {
+            "name": "receiveMsg",
+            "type": "object",
+            "required": true,
+            "description": "收件人信息",
+            "children": [
+              {
+                "name": "name",
+                "type": "string",
+                "required": true,
+                "description": "名称（输入收件人姓名或公司名称）"
+              },
+              {
+                "name": "taxNo",
+                "type": "string",
+                "required": true,
+                "description": "税号（例如：99867389620，企业的税号 CNPJ 是 14 位数字，个人的税号 CPF 是 11 位数字）"
+              },
+              {
+                "name": "ie",
+                "type": "string",
+                "description": "I.E. – Inscrição Estadual（例如：99867389620；如果主体是公司（免税）或主体是个人，则在此字段中填写 \"ISENTO\"，表示免税）"
+              },
+              {
+                "name": "stateProvinceCode",
+                "type": "string",
+                "required": true,
+                "description": "州和省的两位字符代码（例如：SP）"
+              },
+              {
+                "name": "cityCode",
+                "type": "string",
+                "required": true,
+                "description": "城市代码（例如：3518800）"
+              },
+              {
+                "name": "city",
+                "type": "string",
+                "required": true,
+                "description": "城市（例如：GUARULHOS）"
+              },
+              {
+                "name": "neighborhood",
+                "type": "string",
+                "required": true,
+                "description": "地区（例如：CUMBICA，如果没有，则默认使用 S/N）"
+              },
+              {
+                "name": "street",
+                "type": "string",
+                "required": true,
+                "description": "街道（例如：AVENIDA ORLANDA BERGAMO ESQUINA COM A AVENIDA ABRAAO LINCOLN，如果没有，则默认使用 S/N）"
+              },
+              {
+                "name": "houseNumber",
+                "type": "string",
+                "required": true,
+                "description": "门牌号（例如：1132，如果没有，则默认使用 S/N）"
+              },
+              {
+                "name": "zipCode",
+                "type": "string",
+                "required": true,
+                "description": "邮政编码（例如：13236533）"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "integer",
+        "description": "响应码",
+        "example": "0.0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误信息描述",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "json",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/order/sync-invoice-info' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570849017' \\ --data-raw '{ \"orderInvoiceInfos\": [ { \"orderNo\": \"GSONAM44T00NWYG\", \"ie\": \"ISENTO\", \"icms\": \"3\", \"invoiceNo\": \"000000339\", \"invoiceKey\": \"35211119750001055210100000033912606872431111\", \"invoiceSn\": \"001\", \"amount\": 13870.74, \"taxNo\": \"6102\", \"currency\": \"USD\", \"invoiceType\": \"Saída\", \"authorizationNumber\": \"135220009577779\", \"authorizationTime\": \"2023-07-13 00:00:00\", \"invoiceIssueTime\": \"2023-07-13 10:00:00\", \"quantity\": \"910\", \"sendMsg\": { \"name\": \"哈哈23\", \"taxNo\": \"99867389622111\", \"ie\": \"99867389622\", \"stateProvinceCode\": \"SP\", \"cityCode\": \"1456781\", \"city\": \"HHS1\", \"neighborhood\": \"hh1\", \"street\": \"换货1\", \"houseNumber\": \"hh3\", \"zipCode\": \"06330281\" }, \"receiveMsg\": { \"name\": \"哈哈2\", \"taxNo\": \"99867389622\", \"ie\": \"99867389623\", \"stateProvinceCode\": \"SP\", \"cityCode\": \"1456783\", \"city\": \"HHS3\", \"neighborhood\": \"hh3\", \"street\": \"换货3\", \"houseNumber\": \"hh3\", \"zipCode\": \"06330281\" } } ] }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": {} }",
+  "errorCode": null
+}

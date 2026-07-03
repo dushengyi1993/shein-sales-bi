@@ -1,0 +1,345 @@
+{
+  "docId": "3001679",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "国内发货",
+    "userDocName": "创建发货单",
+    "endpoint": "/open-api/shipping/orderToShipping",
+    "method": "POST",
+    "docName": "post_open-api_shipping_orderToShipping",
+    "version": 27,
+    "updateTime": "2026-04-21 17:17:45",
+    "changeContent": "更新参数说明",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      2,
+      3,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "SHEIN自营",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "该接口为采购单生成发货单履约的场景调用。详细履约介绍请查看备货单履约管理文档。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-language",
+        "type": "string",
+        "description": "指定出参语种，默认中文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "adminName",
+        "type": "string",
+        "required": true,
+        "description": "用户名称（ERP系统可自行定义，用于系统记录此次发货的操作人，页面不展示）",
+        "multiple": 0
+      },
+      {
+        "name": "agedProductCode",
+        "type": "string",
+        "description": "时效产品编码，从物流产品查询接口获取"
+      },
+      {
+        "name": "list",
+        "type": "object",
+        "required": false,
+        "multiple": 1,
+        "children": [
+          {
+            "name": "skuCode",
+            "type": "string",
+            "required": true,
+            "description": "sku编码，需要入参采购单中所有的SKU",
+            "multiple": 0
+          },
+          {
+            "name": "orderNo",
+            "type": "string",
+            "required": true,
+            "description": "订单编号",
+            "multiple": 0
+          },
+          {
+            "name": "orderQuantity",
+            "type": "integer",
+            "required": false,
+            "description": "下单数量",
+            "multiple": 0
+          },
+          {
+            "name": "packageNum",
+            "type": "integer",
+            "required": false,
+            "description": "包裹数（箱唛发货时必填，同一订单传相同包裹数）",
+            "multiple": 0
+          },
+          {
+            "name": "tempDeliveryQuantity",
+            "type": "integer",
+            "required": true,
+            "description": "实际发货数量：如果待发货数量大于500，单次发货需要大于150",
+            "multiple": 0
+          },
+          {
+            "name": "packingInfoList",
+            "type": "object",
+            "description": "装箱明细，当shippingRoute为1时需要传入装箱明细",
+            "children": [
+              {
+                "name": "packQuantity",
+                "type": "integer",
+                "required": true,
+                "description": "装箱数量"
+              },
+              {
+                "name": "skuCode",
+                "type": "string",
+                "required": true,
+                "description": "装箱的sku编码"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "orderType",
+        "type": "integer",
+        "required": true,
+        "description": "订单类型，1：急采，2：备货",
+        "multiple": 0
+      },
+      {
+        "name": "deliveryType",
+        "type": "integer",
+        "required": true,
+        "description": "发货方式，商家可用的发货方式枚举值请从发货基本信息查询获取；",
+        "multiple": 0
+      },
+      {
+        "name": "arrivalTime",
+        "type": "datetime",
+        "required": false,
+        "description": "预约SEHIN到仓时间（yyyy-MM-dd HH:mm:ss），当deliveryType=4或21时必填",
+        "multiple": 0
+      },
+      {
+        "name": "shippingRoute",
+        "type": "integer",
+        "description": "发货路径，0：无发货路径，1：直送路径，2：集货路径"
+      },
+      {
+        "name": "expressId",
+        "type": "string",
+        "required": false,
+        "description": "快递编码，SHEIN集成物流场景从物流产品查询接口companyCode字段获取，非SHIEN集成物流场景从发货基本信息查询接口companyCode获取，当deliveryType=1时必填",
+        "multiple": 0
+      },
+      {
+        "name": "coding",
+        "type": "string",
+        "required": false,
+        "description": "车队编码，当deliveryType=2且使用车队自送场景必填",
+        "multiple": 0
+      },
+      {
+        "name": "expressInfo",
+        "type": "object",
+        "required": true,
+        "description": "运单包裹信息",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "addrId",
+            "type": "int64",
+            "required": true,
+            "description": "发货地址id，从发货基本信息查询接口中获取",
+            "multiple": 0
+          },
+          {
+            "name": "expressCode",
+            "type": "string",
+            "required": false,
+            "description": "快递单号，适用非SHIEN集成物流场景",
+            "multiple": 0
+          },
+          {
+            "name": "packageNumber",
+            "type": "integer",
+            "required": true,
+            "description": "总包裹数量（箱唛类型时=所有订单包裹的总计）",
+            "multiple": 0
+          },
+          {
+            "name": "packageWeight",
+            "type": "double",
+            "required": false,
+            "description": "包裹重量（单位:kg）",
+            "multiple": 0
+          },
+          {
+            "name": "reserveParcelTime",
+            "type": "datetime",
+            "required": false,
+            "description": "预约取货时间（yyyy-MM-dd HH:mm:ss），当使用SHEIN集成物流或SHEIN集成车队送货时必填",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "deliveryPackages",
+        "type": "object",
+        "description": "包裹信息列表,包裹列表的长度必须与包裹数量相同",
+        "children": [
+          {
+            "name": "index",
+            "type": "integer",
+            "required": true,
+            "description": "包裹序号，从0开始"
+          },
+          {
+            "name": "packageHeight",
+            "type": "double",
+            "description": "包裹高(cm)"
+          },
+          {
+            "name": "packageLength",
+            "type": "double",
+            "description": "包裹长(cm)"
+          },
+          {
+            "name": "packageWeight",
+            "type": "double",
+            "description": "包裹重量(kg)"
+          },
+          {
+            "name": "packageWidth",
+            "type": "double",
+            "description": "包裹宽(cm)"
+          }
+        ]
+      },
+      {
+        "name": "supplierWarehouseId",
+        "type": "int64",
+        "required": true,
+        "description": "商家仓库id",
+        "multiple": 0
+      },
+      {
+        "name": "subWarehouseId",
+        "type": "integer",
+        "description": "供应商子仓ID"
+      },
+      {
+        "name": "thirdPartyChannel",
+        "type": "int64",
+        "description": "货代渠道"
+      },
+      {
+        "name": "thirdPartyChannelName",
+        "type": "string",
+        "description": "货代渠道名称"
+      },
+      {
+        "name": "thirdPartyOrderMethod",
+        "type": "integer",
+        "description": "货代下单方式：1：SHEIN代下单2：商家自行下单"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "deliveryCode",
+            "type": "string",
+            "required": true,
+            "description": "发货单号",
+            "multiple": 0
+          },
+          {
+            "name": "expressCode",
+            "type": "string",
+            "description": "运单号（系统自动产生运单时，返回运单号）",
+            "label": "运单号"
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述，成功：OK；支持指定语种出参；",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识，用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.cn/open-api/shipping/orderToShipping' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570849017' \\ --data-raw '{ \"agedProductCode\": \"abc\", \"adminName\": \"root test\", \"coding\": \"\", \"deliveryType\": 1, \"expressId\": \"kuayue\", \"expressInfo\": [ { \"addrId\": 688495, \"expressCode\": \"\", \"packageNumber\": 3, \"reserveParcelTime\": \"2025-12-27 23:20:00\" } ], \"list\": [ { \"orderNo\": \"PB2505220000462\", \"orderQuantity\": \"1\", \"packageNum\": 1, \"skuCode\": \"I24lsfii3qse\", \"tempDeliveryQuantity\": 1, \"type\": 0 }, { \"orderNo\": \"PB2505220000433\", \"orderQuantity\": \"1\", \"packageNum\": 1, \"skuCode\": \"I24lsfii3qse\", \"tempDeliveryQuantity\": 1, \"type\": 0 } ], \"orderType\": 2, \"subWarehouseId\": 27, \"supplierWarehouseId\": 89755 }'",
+  "responseExample": "code\": \"0032001\", \"msg\": \"B231107500397订单状态不能发货\", \"info\": null, \"bbl\": null }",
+  "errorCode": null
+}

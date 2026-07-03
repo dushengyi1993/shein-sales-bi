@@ -1,0 +1,199 @@
+{
+  "docId": "3001399",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "绑定SKC和实拍图",
+    "userDocName": "绑定SKC和实拍图",
+    "endpoint": "/open-api/goods-compliance/skc-save-label",
+    "method": "POST",
+    "docName": "post_open-api_goods-compliance_skc-save-label",
+    "version": 4,
+    "updateTime": "2025-09-29 19:19:23",
+    "changeContent": "新增字段",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "绑定SKC和实拍图，若实拍图信息符合要求，则绑定成功。实拍图场景整体解决方案，可点击查看文档。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：158339876400"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "查看签名生成规则"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "指定出参语种，默认中文；支持语种:英语:EN 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "skcList",
+        "type": "string",
+        "required": true,
+        "description": "SKC",
+        "multiple": 1
+      },
+      {
+        "name": "packageLableList",
+        "type": "object",
+        "description": "包装类型标签实拍图",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "imageUrl",
+            "type": "string",
+            "description": "图片的url。需通过接口转换获得/open-api/goods-compliance/label-print"
+          },
+          {
+            "name": "imageMd5",
+            "type": "string",
+            "description": "图片的md5。需通过接口转换获得/open-api/goods-compliance/label-print"
+          }
+        ]
+      },
+      {
+        "name": "bodyLableList",
+        "type": "object",
+        "description": "商品本体类标签实拍图",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "imageUrl",
+            "type": "string",
+            "description": "图片的url。需通过接口转换获得/open-api/goods-compliance/label-print"
+          },
+          {
+            "name": "imageMd5",
+            "type": "string",
+            "description": "图片的md5。需通过接口转换获得/open-api/goods-compliance/label-print"
+          }
+        ]
+      },
+      {
+        "name": "skcLablePicList",
+        "type": "object",
+        "description": "此字段后续将废弃，请勿再对接。",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "imageUrl",
+            "type": "string",
+            "description": "此字段后续将废弃，请勿再对接。"
+          },
+          {
+            "name": "imageMd5",
+            "type": "string",
+            "description": "此字段后续将废弃，请勿再对接。"
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应码。正常为“0”。"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "响应信息。正常为“OK”。"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "description": "响应详细信息",
+        "children": [
+          {
+            "name": "totalCount",
+            "type": "integer",
+            "description": "合计任务数"
+          },
+          {
+            "name": "successCount",
+            "type": "integer",
+            "description": "成功任务数"
+          },
+          {
+            "name": "faildCount",
+            "type": "integer",
+            "description": "失败任务数"
+          },
+          {
+            "name": "faildList",
+            "type": "object",
+            "description": "失败明细",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "skc",
+                "type": "string",
+                "description": "失败的skc"
+              },
+              {
+                "name": "code",
+                "type": "string",
+                "description": "响应码"
+              },
+              {
+                "name": "reason",
+                "type": "string",
+                "description": "失败原因"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求追踪码"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/goods-compliance/skc-save-label' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-timestamp: 1751008346358' \\ --header 'language: zh-cn' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi-test01.sheincorp.cn' \\ --data-raw '{ \"skcList\": [\"s2412135525\"], \"skcLablePicList\": [ { \"imageUrl\": \"https://pqms-1259571579.cos.ap-nanjing.myqcloud.com/gpc2830451623024715776.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=20250506T072103Z&X-Amz-SignedHeaders=host&X-Amz-Expires=432000&X-Amz-Credential=AKIDIPGrBE0VjgOpztXu1sSmqnY5NPBiz1nJ/20250506/ap-nanjing/s3/aws4_request&X-Amz-Signature=5850801420bfd8f81983dbb4ee72f937c56a80114bd85721067a618fd238419f\", \"imageMd5\": \"f39f382f05acf958c9ba4667dce9b1d0\" } ] }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"totalCount\": 1, \"successCount\": 0, \"faildCount\": 1, \"faildList\": [ { \"skc\": \"s2412134534525\", \"code\": \"0108\", \"reason\": \"当前SKC无需上传实拍标签信息，系统已经自动过滤，无需再次操作\" } ] }, \"traceId\": \"e5e3e7147ee7f3ca\" }",
+  "errorCode": null
+}

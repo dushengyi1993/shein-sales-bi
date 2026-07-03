@@ -1,0 +1,72 @@
+{
+  "docId": "3001420",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "提供扫码排产创建波次",
+    "userDocName": "提供扫码排产创建波次",
+    "endpoint": "/open-api/mdp/product/schedule/allocation-confirm",
+    "method": "POST",
+    "docName": "post_open-api_mdp_product_schedule_allocation-confirm",
+    "version": 2,
+    "updateTime": "2025-10-15 14:59:24",
+    "changeContent": "更新MDP接口文档",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": null,
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "orderNoList",
+        "type": "string",
+        "description": "加工单号/异常单号/生产异常单号",
+        "multiple": 0
+      },
+      {
+        "name": "userCode",
+        "type": "string",
+        "description": "操作人的用户Code"
+      },
+      {
+        "name": "operateTime",
+        "type": "datetime",
+        "description": "操作时间"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "状态码。0正常返回，非0错误返回"
+      },
+      {
+        "name": "msg",
+        "type": "string"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "children": [
+          {
+            "name": "productionTaskNoList",
+            "type": "string",
+            "description": "生产波次任务号",
+            "multiple": 0
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

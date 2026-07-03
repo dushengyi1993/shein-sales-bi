@@ -1,0 +1,98 @@
+{
+  "docId": "3001498",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "物流接口-获取快递公司信息",
+    "userDocName": "物流接口-获取快递公司信息",
+    "endpoint": "/open-api/order/express-infos",
+    "method": "GET",
+    "docName": "get_open-api_order_express-infos",
+    "version": 4,
+    "updateTime": "2025-12-18 10:34:46",
+    "changeContent": "“供应商”改“商家”",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "提供给商家查询快递信息",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": false,
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "list",
+            "type": "object",
+            "required": false,
+            "multiple": 1,
+            "children": [
+              {
+                "name": "id",
+                "type": "double",
+                "required": false,
+                "description": "用户id",
+                "multiple": 0
+              },
+              {
+                "name": "expressName",
+                "type": "string",
+                "required": false,
+                "description": "快递公司名称",
+                "multiple": 0
+              },
+              {
+                "name": "expressCode",
+                "type": "string",
+                "required": false,
+                "description": "快递公司编码",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "code\": \"0\", \"msg\": \"\", \"info\": { \"list\": [ { \"expressName\": \"跨越\", \"expressCode\": \"kuayue\", \"id\": \"21\" }, { \"expressName\": \"优速\", \"expressCode\": \"2\", \"id\": \"22\" }, { \"expressName\": \"中通\", \"expressCode\": \"3\", \"id\": \"23\" }, { \"expressName\": \"申通\", \"expressCode\": \"4\", \"id\": \"24\" }, { \"expressName\": \"速尔\", \"expressCode\": \"5\", \"id\": \"25\" }, { \"expressName\": \"顺丰\", \"expressCode\": \"shunfeng\", \"id\": \"26\" }, { \"expressName\": \"快捷\", \"expressCode\": \"7\", \"id\": \"27\" }, { \"expressName\": \"圆通\", \"expressCode\": \"8\", \"id\": \"28\" }, { \"expressName\": \"汇通\", \"expressCode\": \"9\", \"id\": \"29\" }, { \"expressName\": \"韵达\", \"expressCode\": \"yunda\", \"id\": \"30\" }, { \"expressName\": \"其他\", \"expressCode\": \"11\", \"id\": \"31\" }, { \"expressName\": \"京东\", \"expressCode\": \"jingdong\", \"id\": \"1100\" }, { \"expressName\": \"领送\", \"expressCode\": \"lingsong\", \"id\": \"1101\" }, { \"expressName\": \"车门\", \"expressCode\": \"chemen\", \"id\": \"10322\" } ] }, \"error\": null }",
+  "errorCode": null
+}

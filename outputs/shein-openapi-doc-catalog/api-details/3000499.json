@@ -1,0 +1,111 @@
+{
+  "docId": "3000499",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "物流商接口-物流商运单回调",
+    "userDocName": "物流商接口-物流商运单回调",
+    "endpoint": "/open-api/cargo/express-notify",
+    "method": "POST",
+    "docName": "post_open-api_cargo_express-notify",
+    "version": 4,
+    "updateTime": "2024-10-15 10:27:55",
+    "changeContent": "新增traceId",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "物流商运单回调接口，用于物流商在生产运单成功，修改运单，删除运单回调给shein",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "expressNo",
+        "type": "string",
+        "required": true,
+        "description": "物流单号",
+        "multiple": 0
+      },
+      {
+        "name": "customerOrderNumber",
+        "type": "string",
+        "required": true,
+        "description": "shenin 下单单号",
+        "multiple": 0
+      },
+      {
+        "name": "operateType",
+        "type": "integer",
+        "required": true,
+        "description": "操作类型 1 下单通知，2修改运单通知，3取消运单通知",
+        "multiple": 0
+      },
+      {
+        "name": "code",
+        "type": "integer",
+        "required": true,
+        "description": "处理结果 1 成功，-1失败",
+        "multiple": 0
+      },
+      {
+        "name": "errorInfo",
+        "type": "string",
+        "required": false,
+        "description": "错误信息描述",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "错误码，0成功，其他失败",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": true,
+        "description": "错误信息",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "expressNo\": \"物流单号\", \"customerOrderNumber\": \"shenin下单单号\", // 操作类型 1 下单通知，2修改运单通知，3取消运单通知 \"operateType\": 1, //处理结果 1 成功，-1失败 \"code\": 1, \"errorInfo\": null }",
+  "responseExample": "code\": \"0\", \"msg\": \"success\", \"info\": null, \"bbl\": null }",
+  "errorCode": null
+}

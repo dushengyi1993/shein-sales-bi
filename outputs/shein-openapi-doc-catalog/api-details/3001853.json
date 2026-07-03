@@ -1,0 +1,237 @@
+{
+  "docId": "3001853",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "创建/编辑资质证书",
+    "userDocName": "创建/编辑资质证书",
+    "endpoint": "/open-api/goods-certificates/save",
+    "method": "POST",
+    "docName": "",
+    "version": 2,
+    "updateTime": "2026-06-29 19:35:05",
+    "changeContent": "新接口上线",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "可创建和编辑资质证书。操作前请先查询证书的填写规则（/open-api/goods-certificate-schemas/detail），基于规则再操作。完整的资质证书接口调用方案，详见文档。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "required": false,
+        "description": "响应msg的语种。不传时默认为中文，枚举值支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "description": "ERP保存证书池请求",
+    "label": "ErpSaveCertificatePoolReq",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "certificateDimension",
+        "type": "integer",
+        "required": false,
+        "description": "证书适用范围：1-部分商品（即需要手动绑定至商品），2-全部商品（即自动和所有商品绑定）。创建时必填。",
+        "multiple": 0
+      },
+      {
+        "name": "certificateTypeCode",
+        "type": "string",
+        "required": false,
+        "description": "证书类型编码。创建时必填，可通过/open-api/goods-compliance-requirements/list获取。",
+        "multiple": 0
+      },
+      {
+        "name": "fileList",
+        "type": "object",
+        "required": false,
+        "description": "证书文件列表。所有文件必须转换为SHEIN链接后上传，不支持使用外部url。上传接口：/open-api/goods-certificate-files/upload",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "fileMd5",
+            "type": "string",
+            "required": true,
+            "description": "文件MD5。通过上传接口获取：/open-api/goods-certificate-files/upload",
+            "multiple": 0
+          },
+          {
+            "name": "fileName",
+            "type": "string",
+            "required": true,
+            "description": "文件名称。ERP自定义名称。",
+            "multiple": 0
+          },
+          {
+            "name": "fileUrl",
+            "type": "string",
+            "required": true,
+            "description": "文件URL。通过上传接口获取：/open-api/goods-certificate-files/upload",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "poolSn",
+        "type": "string",
+        "required": false,
+        "description": "证书编号。创建时不用填写，编辑时必须填写。",
+        "multiple": 0
+      },
+      {
+        "name": "presetInfoList",
+        "type": "object",
+        "required": false,
+        "description": "证书字段列表",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "presetId",
+            "type": "int64",
+            "required": true,
+            "description": "字段id。通过/open-api/goods-certificate-schemas/detail中获取。otherPresetInfoList和presetInfoList中的presetId都往此字段中传。",
+            "multiple": 0
+          },
+          {
+            "name": "valueList",
+            "type": "object",
+            "required": true,
+            "description": "字段值列表。",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "value",
+                "type": "string",
+                "required": false,
+                "description": "字段值（手动输入版本）。不同字段场景填写方式不同：1、填写规则中presetInfoList下的字段，当inputType=3/4时，可在此入参手动输入的值。2、填写规则中otherPresetInfoList下的字段，区分以下两种情况：2.1 当sourceFrom=SRM，则需输入实验室id（srmDetectionAgencyList - laboratoryList - laboratoryId。注意实验室需要和valueId的机构是同一组数据）2.2 当sourceFrom≠SRM，则需输入字段自己的value值（otherPresetInfoList - presetValueList-presetValue）",
+                "multiple": 0
+              },
+              {
+                "name": "valueId",
+                "type": "int64",
+                "required": false,
+                "description": "字段值（填写id版本）。不同字段场景填写方式不同：1、填写规则中presetInfoList下的字段，当inputType=1/2时，可在此录入id（presetInfoList - presetValueList - presetValueId）2、填写规则中otherPresetInfoList下的字段，区分以下两种情况：2.1 当sourceFrom=SRM，则需输入机构id（srmDetectionAgencyList - detectionAgency - detectionAgencyId。注意机构需要和value的实验室是同一组数据）2.2 当sourceFrom≠SRM，则需输入字段自己的value值（otherPresetInfoList - presetValueList-presetValueId）",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfErpSaveCertificatePoolResp",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "响应",
+        "label": "ErpSaveCertificatePoolResp",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "code",
+            "type": "string",
+            "required": false,
+            "description": "操作结果码：0-成功，非0-失败",
+            "multiple": 0
+          },
+          {
+            "name": "existPoolSnList",
+            "type": "string",
+            "required": false,
+            "description": "已存在的重复证书编号列表（文件内容重复时返回）",
+            "multiple": 1
+          },
+          {
+            "name": "failMsg",
+            "type": "string",
+            "required": false,
+            "description": "失败提示消息",
+            "multiple": 0
+          },
+          {
+            "name": "poolSn",
+            "type": "string",
+            "required": false,
+            "description": "证书编号",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "追踪码"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

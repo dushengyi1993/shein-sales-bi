@@ -10,6 +10,8 @@ outputs/*
 outputs/bi-portal/*
 !outputs/bi-portal/index.html
 !outputs/bi-portal/data.json
+!outputs/shein-openapi-doc-catalog/
+!outputs/shein-openapi-doc-catalog/**
 logs/
 state/
 tmp/

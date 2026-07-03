@@ -1,0 +1,151 @@
+{
+  "docId": "3001855",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询SKC的代理公司绑定要求",
+    "userDocName": "查询SKC的代理公司绑定要求",
+    "endpoint": "/open-api/goods-compliance/skc-agency-detail",
+    "method": "POST",
+    "docName": "post_open-api_goods-compliance_skc-agency-detail",
+    "version": 5,
+    "updateTime": "2026-06-29 19:38:36",
+    "changeContent": "引导使用新接口",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "查询哪些SKC需要绑定哪些类型的代理公司，以及当前的绑定状态（此接口已有新接口承接，建议优先对接新接口：/open-api/goods-compliance-requirements/list）",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：158339876400"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "查看签名生成规则"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "指定出参语种，默认中文；支持语种:英语:EN 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "required": true,
+        "description": "每页条数，最多100"
+      },
+      {
+        "name": "pageNum",
+        "type": "integer",
+        "required": true,
+        "description": "分页页数，建议从1开始查询"
+      },
+      {
+        "name": "skcList",
+        "type": "string",
+        "description": "SKC，支持批量查询",
+        "multiple": 1
+      },
+      {
+        "name": "skcShelfStatusList",
+        "type": "integer",
+        "description": "筛选SKC上下架状态。0-待上架,SKC状态。 1-已上架,2-已下架,3-售罄",
+        "multiple": 1
+      },
+      {
+        "name": "reviewStatusList",
+        "type": "integer",
+        "description": "筛选SKC和代理公司的绑定状态。 1-待绑定；2-待审核（商家后台会显示绑定成功，API层也可理解为绑定成功）；3-绑定失败；4-绑定成功。若需要查询商家当前急需操作的SKC，建议入参1/3",
+        "multiple": 1
+      },
+      {
+        "name": "isRequired",
+        "type": "integer",
+        "description": "筛选SKC是否必须绑定某类型的代理公司。 0-否, 1-是, 10-未知（此为瞬时状态，新SKC生成时的瞬间状态）"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应码。正常为“0”。"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "响应信息。正常为“OK”。"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "description": "响应详情",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "skc",
+            "type": "string",
+            "description": "SKC"
+          },
+          {
+            "name": "reviewState",
+            "type": "integer",
+            "description": "SKC和某类型代理公司的绑定状态。1-待绑定；2-待审核（商家后台会显示绑定成功，API层也可理解为绑定成功）；3-绑定失败；4-绑定成功"
+          },
+          {
+            "name": "agencyType",
+            "type": "integer",
+            "description": "SKC需绑定/已绑定的代理公司一级类型。0-欧代；1-英代；2-美代；3-生产制造商；"
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求追踪码"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/goods-compliance/skc-agency-detail' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-timestamp: 1751006598999' \\ --header 'language: zh-cn' \\ --header 'Host: openapi.sheincorp.com' \\ --data-raw '{ \"pageSize\":10, \"pageNum\":1, \"skcList\":[\"s24124352242434353\"] }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": [ { \"skc\": \"dress14081203\", \"reviewState\": 4, \"agencyType\": 0 }, { \"skc\": \"dress14081203\", \"reviewState\": 2, \"agencyType\": 3 }, { \"skc\": \"dress14081203\", \"reviewState\": 2, \"agencyType\": 2 }, { \"skc\": \"dress14081203\", \"reviewState\": 4, \"agencyType\": 1 } ], \"traceId\": \"c3a742cfc3655f98\" }",
+  "errorCode": null
+}

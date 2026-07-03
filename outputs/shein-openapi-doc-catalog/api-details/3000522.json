@@ -1,0 +1,197 @@
+{
+  "docId": "3000522",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询供应商尾货",
+    "userDocName": "查询供应商尾货",
+    "endpoint": "/open-api/mes/order-inventory-surplus/list",
+    "method": "POST",
+    "docName": "post_open-api_mes_order-inventory-surplus_list",
+    "version": 2,
+    "updateTime": "2024-10-15 11:09:11",
+    "changeContent": "新增traceId",
+    "qpsContent": "",
+    "modes": [
+      3
+    ],
+    "modeNames": [
+      "SHEIN自营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "factoryIds",
+        "type": "integer",
+        "required": false,
+        "description": "工厂权限",
+        "multiple": 1
+      },
+      {
+        "name": "pageNo",
+        "type": "integer",
+        "required": false,
+        "description": "当前页数",
+        "example": "43555",
+        "multiple": 0
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "required": false,
+        "description": "每页数量",
+        "example": "26441",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "integer",
+        "required": false,
+        "description": "状态码",
+        "example": "62904",
+        "multiple": 0
+      },
+      {
+        "name": "detailMsg",
+        "type": "string",
+        "required": false,
+        "description": "执行结果详细信息",
+        "example": "dolores explicabo harum pariatur illum autem qui voluptatem et molestias praesentium magni et ad quis praesentium molestiae",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "description": "执行结果数据",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "pageNo",
+            "type": "integer",
+            "required": false,
+            "description": "当前页码",
+            "example": "43888",
+            "multiple": 0
+          },
+          {
+            "name": "pageSize",
+            "type": "integer",
+            "required": false,
+            "description": "每页大小",
+            "example": "60560",
+            "multiple": 0
+          },
+          {
+            "name": "recoders",
+            "type": "object",
+            "required": true,
+            "description": "返回数据",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "inventoryType",
+                "type": "integer",
+                "required": false,
+                "description": "尾货类型",
+                "example": "23127",
+                "multiple": 0
+              },
+              {
+                "name": "isDismount",
+                "type": "integer",
+                "required": false,
+                "description": "是否下架款（0-否 1-是）",
+                "example": "19722",
+                "multiple": 0
+              },
+              {
+                "name": "sizeInfo",
+                "type": "string",
+                "required": false,
+                "description": "尺码信息",
+                "example": "voluptatem debitis voluptas numquam maiores et commodi architecto aut et",
+                "multiple": 0
+              },
+              {
+                "name": "skc",
+                "type": "string",
+                "required": false,
+                "description": "SKC",
+                "example": "nisi dolorum aliquid blanditiis quam delectus vitae sapiente ut quae aut at saepe earum iusto",
+                "multiple": 0
+              },
+              {
+                "name": "totalSurplus",
+                "type": "integer",
+                "required": false,
+                "description": "总剩余量",
+                "example": "1470",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "totalPage",
+            "type": "integer",
+            "required": false,
+            "description": "总页数",
+            "example": "13628",
+            "multiple": 0
+          },
+          {
+            "name": "totalRecoder",
+            "type": "integer",
+            "required": false,
+            "description": "总记录数",
+            "example": "51459",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "执行结果提示信息",
+        "example": "nesciunt veritatis error nisi atque non enim numquam aut mollitia consequuntur aliquid",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "pageNo\":\"1\", \"pageSize\":\"30\" }",
+  "responseExample": "code\": 0, \"currentPageNo\": 1, \"info\": [ { \"skc\":\"swfXXXXXasf123\", \"totalSurplus\":40, \"sizeInfo\":\"S:30M:10\", \"isDismount\":0, \"inventoryType\":1 } ], \"msg\": \"success\", \"totalPageNo\": 1 }",
+  "errorCode": null
+}

@@ -1,0 +1,167 @@
+{
+  "docId": "3001738",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "更新商家库存接口v2",
+    "userDocName": "更新商家库存接口v2",
+    "endpoint": "/open-api/stock/change-inventory/v2",
+    "method": "POST",
+    "docName": "",
+    "version": 5,
+    "updateTime": "2026-06-01 21:33:50",
+    "changeContent": "变更内容",
+    "qpsContent": "50",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "修改sku库存数量，支持自运营，半托管模式商家注意：1. 如果店铺是多仓库的，warehouseCode必填2. changeInventoryQuantity和saleInventory有且只有其中一个参数必填3. 支持修改商家虚拟库存、商家JIT虚拟库存4. SHEIN仓库存通过采购/退供等供应链业务管理增/减，不对外开放直接修改能力5. 原库存修改接口 /open-api/gsp/goods/change-inventory 将于 2026年12月31日下线。请尽快切换至新接口进行相关操作。过渡期内，新旧接口将同时保留功能支持。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-language",
+        "type": "string",
+        "description": "指定出参语种，默认中文，支持语种，英语：US，法语：FR，西班牙语：ES，德语：DE，中文简体：CN，泰语：TH，巴西葡语：PT，土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "updateSkuInventoryQuantityRequests",
+        "type": "object",
+        "required": true,
+        "description": "上限100个SKU",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "idempotencyKey",
+            "type": "string",
+            "required": true,
+            "description": "业务幂等键。重复请求会被去重掉，避免重复修改库存。"
+          },
+          {
+            "name": "skuCode",
+            "type": "string",
+            "required": true,
+            "description": "SHEIN平台生成的SKU，仅限审核通过的SKU可以修改库存；审核失败的SKU不可用"
+          },
+          {
+            "name": "invType",
+            "type": "string",
+            "required": true,
+            "description": "库存类型 VI：VIRTUAL_INVENTORY/虚拟库存； JI：JIT_INVENTORY/JIT虚拟库存；"
+          },
+          {
+            "name": "warehouseCode",
+            "type": "string",
+            "description": "修改商家虚拟库存：商家自有仓编码（多仓情况下必填）。 修改商家JIT虚拟库存：不需要填。"
+          },
+          {
+            "name": "changeType",
+            "type": "string",
+            "required": true,
+            "description": "总销售库存=可售数量+预占数量+占用数量。预占、占用库存已经被消费者订单占用不能修改。ADD：增加库存；SUB：减少库存；最大可减少数量=可售数量，超出范围报异常。OVERWRITE：覆盖库存；覆盖总销售数量=可售数量+预占数量+占用数量，最小覆盖数量不能低于预占数量+占用数量，否则按预占数量+占用数量覆盖数量来减少库存（即最多仅能把对应的未占用/预占的数量减掉）"
+          },
+          {
+            "name": "changeQuantity",
+            "type": "integer",
+            "required": true,
+            "description": "变更数量（正数）"
+          },
+          {
+            "name": "changeReason",
+            "type": "string",
+            "description": "变更原因"
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码（0：成功；非0：失败） 具体见下方错误码描述"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述信息"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "children": [
+          {
+            "name": "failedList",
+            "type": "object",
+            "description": "失败列表",
+            "children": [
+              {
+                "name": "code",
+                "type": "string",
+                "description": "失败编码，失败原因，多个原因的情况下只返回一个错误码"
+              },
+              {
+                "name": "reason",
+                "type": "string",
+                "description": "失败原因，多个原因的情况下都会返回"
+              },
+              {
+                "name": "skuCode",
+                "type": "string",
+                "description": "编辑时上传的sku编码"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

@@ -1,0 +1,725 @@
+{
+  "docId": "3000515",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询发货单信息",
+    "userDocName": "查询发货单信息",
+    "endpoint": "/open-api/mes/deliver-order/list",
+    "method": "POST",
+    "docName": "post_open-api_mes_deliver-order_list",
+    "version": 2,
+    "updateTime": "2024-10-15 11:02:39",
+    "changeContent": "新增traceId",
+    "qpsContent": "",
+    "modes": [
+      3
+    ],
+    "modeNames": [
+      "SHEIN自营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "acceptOrderEndTime",
+        "type": "string",
+        "required": false,
+        "description": "接单结束时间",
+        "example": "2022-05-04 15:52:59",
+        "multiple": 0
+      },
+      {
+        "name": "acceptOrderStartTime",
+        "type": "string",
+        "required": false,
+        "description": "接单起始时间",
+        "example": "2022-07-08 21:56:05",
+        "multiple": 0
+      },
+      {
+        "name": "factoryIdList",
+        "type": "integer",
+        "required": false,
+        "description": "工厂id集合",
+        "multiple": 1
+      },
+      {
+        "name": "produceOrderIdList",
+        "type": "integer",
+        "required": false,
+        "description": "订单编号",
+        "multiple": 1
+      },
+      {
+        "name": "skc",
+        "type": "string",
+        "required": false,
+        "description": "sku",
+        "example": "earum aut qui accusamus praesentium ea culpa beatae soluta possimus",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "integer",
+        "required": false,
+        "description": "状态码",
+        "example": "10105",
+        "multiple": 0
+      },
+      {
+        "name": "detailMsg",
+        "type": "string",
+        "required": false,
+        "description": "执行结果详细信息",
+        "example": "rerum asperiores iusto voluptatem iure consequatur est quod modi dolorem",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "description": "执行结果数据",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "deliverNumber",
+            "type": "string",
+            "required": false,
+            "description": "发货单号",
+            "example": "34882",
+            "multiple": 0
+          },
+          {
+            "name": "deliverStatus",
+            "type": "integer",
+            "required": false,
+            "example": "7533",
+            "multiple": 0
+          },
+          {
+            "name": "deliverStatusStr",
+            "type": "string",
+            "required": false,
+            "description": "发货状态",
+            "example": "ut incidunt dolores voluptas quam et dolor quo in corrupti est doloremque tenetur veritatis et ut maiores enim qui",
+            "multiple": 0
+          },
+          {
+            "name": "deliveryInfo",
+            "type": "object",
+            "required": true,
+            "description": "发货尺码明细",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "diffRateValue",
+                "type": "integer",
+                "required": false,
+                "example": "53991",
+                "multiple": 0
+              },
+              {
+                "name": "forecastValue",
+                "type": "integer",
+                "required": false,
+                "example": "55339",
+                "multiple": 0
+              },
+              {
+                "name": "quantity",
+                "type": "integer",
+                "required": false,
+                "description": "数量",
+                "example": "32797",
+                "multiple": 0
+              },
+              {
+                "name": "quantityInterval",
+                "type": "string",
+                "required": false,
+                "description": "数量区间",
+                "example": "debitis autem enim alias corporis quam ullam qui deleniti repudiandae reiciendis",
+                "multiple": 0
+              },
+              {
+                "name": "sizeName",
+                "type": "string",
+                "required": false,
+                "description": "尺码名称",
+                "example": "dolor labore velit culpa illum itaque aut blanditiis eius beatae et culpa quia quam voluptas culpa magni",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "deliveryQty",
+            "type": "integer",
+            "required": false,
+            "description": "发货件数",
+            "example": "24745",
+            "multiple": 0
+          },
+          {
+            "name": "deliverySizeDetails",
+            "type": "string",
+            "required": false,
+            "example": "eum deserunt qui dolorem nam veniam autem consequuntur ex sit sed placeat laborum fugit enim velit mollitia ipsum omnis architecto",
+            "multiple": 0
+          },
+          {
+            "name": "inspectionTime",
+            "type": "object",
+            "required": true,
+            "description": "查验（质检）时间",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "date",
+                "type": "integer",
+                "required": false,
+                "example": "59828",
+                "multiple": 0
+              },
+              {
+                "name": "day",
+                "type": "integer",
+                "required": false,
+                "example": "22763",
+                "multiple": 0
+              },
+              {
+                "name": "hours",
+                "type": "integer",
+                "required": false,
+                "example": "9636",
+                "multiple": 0
+              },
+              {
+                "name": "minutes",
+                "type": "integer",
+                "required": false,
+                "example": "59821",
+                "multiple": 0
+              },
+              {
+                "name": "month",
+                "type": "integer",
+                "required": false,
+                "example": "62728",
+                "multiple": 0
+              },
+              {
+                "name": "nanos",
+                "type": "integer",
+                "required": false,
+                "example": "41153",
+                "multiple": 0
+              },
+              {
+                "name": "seconds",
+                "type": "integer",
+                "required": false,
+                "example": "3603",
+                "multiple": 0
+              },
+              {
+                "name": "time",
+                "type": "integer",
+                "required": false,
+                "example": "63967",
+                "multiple": 0
+              },
+              {
+                "name": "timezoneOffset",
+                "type": "integer",
+                "required": false,
+                "example": "53906",
+                "multiple": 0
+              },
+              {
+                "name": "year",
+                "type": "integer",
+                "required": false,
+                "example": "32549",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "produceOrderId",
+            "type": "integer",
+            "required": false,
+            "description": "订单编号",
+            "example": "42161",
+            "multiple": 0
+          },
+          {
+            "name": "qualityInfo",
+            "type": "string",
+            "required": false,
+            "description": "入仓收货正品信息",
+            "example": "voluptas error voluptatum sint fuga ipsa quia quia ex enim nostrum id vero",
+            "multiple": 0
+          },
+          {
+            "name": "reason",
+            "type": "integer",
+            "required": false,
+            "example": "32135",
+            "multiple": 0
+          },
+          {
+            "name": "reasonStr",
+            "type": "string",
+            "required": false,
+            "description": "发货原因",
+            "example": "et quidem fugit exercitationem vero unde ut et quo",
+            "multiple": 0
+          },
+          {
+            "name": "returnInfo",
+            "type": "object",
+            "required": true,
+            "multiple": 1,
+            "children": [
+              {
+                "name": "diffRateValue",
+                "type": "integer",
+                "required": false,
+                "example": "29766",
+                "multiple": 0
+              },
+              {
+                "name": "forecastValue",
+                "type": "integer",
+                "required": false,
+                "example": "18433",
+                "multiple": 0
+              },
+              {
+                "name": "quantity",
+                "type": "integer",
+                "required": false,
+                "description": "数量",
+                "example": "45277",
+                "multiple": 0
+              },
+              {
+                "name": "quantityInterval",
+                "type": "string",
+                "required": false,
+                "description": "数量区间",
+                "example": "ut et voluptas unde eum itaque",
+                "multiple": 0
+              },
+              {
+                "name": "sizeName",
+                "type": "string",
+                "required": false,
+                "description": "尺码名称",
+                "example": "libero vitae velit consequatur nihil hic sint quo in veniam nulla est hic sint est quia eos hic",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "returnInfoStr",
+            "type": "string",
+            "required": false,
+            "description": "退货单尺码明细",
+            "example": "reprehenderit ut laborum voluptas dolor",
+            "multiple": 0
+          },
+          {
+            "name": "returnQty",
+            "type": "integer",
+            "required": false,
+            "description": "退货单件数",
+            "example": "56173",
+            "multiple": 0
+          },
+          {
+            "name": "returnStatus",
+            "type": "integer",
+            "required": false,
+            "example": "2299",
+            "multiple": 0
+          },
+          {
+            "name": "returnStatusStr",
+            "type": "string",
+            "required": false,
+            "description": "退货单状态",
+            "example": "aliquid neque ut consectetur corporis",
+            "multiple": 0
+          },
+          {
+            "name": "returnTime",
+            "type": "object",
+            "required": true,
+            "description": "退货单时间",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "date",
+                "type": "integer",
+                "required": false,
+                "example": "48622",
+                "multiple": 0
+              },
+              {
+                "name": "day",
+                "type": "integer",
+                "required": false,
+                "example": "17316",
+                "multiple": 0
+              },
+              {
+                "name": "hours",
+                "type": "integer",
+                "required": false,
+                "example": "20860",
+                "multiple": 0
+              },
+              {
+                "name": "minutes",
+                "type": "integer",
+                "required": false,
+                "example": "48782",
+                "multiple": 0
+              },
+              {
+                "name": "month",
+                "type": "integer",
+                "required": false,
+                "example": "51904",
+                "multiple": 0
+              },
+              {
+                "name": "nanos",
+                "type": "integer",
+                "required": false,
+                "example": "53388",
+                "multiple": 0
+              },
+              {
+                "name": "seconds",
+                "type": "integer",
+                "required": false,
+                "example": "35333",
+                "multiple": 0
+              },
+              {
+                "name": "time",
+                "type": "integer",
+                "required": false,
+                "example": "14538",
+                "multiple": 0
+              },
+              {
+                "name": "timezoneOffset",
+                "type": "integer",
+                "required": false,
+                "example": "20132",
+                "multiple": 0
+              },
+              {
+                "name": "year",
+                "type": "integer",
+                "required": false,
+                "example": "16153",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "returnType",
+            "type": "integer",
+            "required": false,
+            "example": "15102",
+            "multiple": 0
+          },
+          {
+            "name": "returnTypeStr",
+            "type": "string",
+            "required": false,
+            "description": "退货单类型",
+            "example": "et quis et modi",
+            "multiple": 0
+          },
+          {
+            "name": "sendTime",
+            "type": "object",
+            "required": true,
+            "description": "发货时间",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "date",
+                "type": "integer",
+                "required": false,
+                "example": "61951",
+                "multiple": 0
+              },
+              {
+                "name": "day",
+                "type": "integer",
+                "required": false,
+                "example": "11432",
+                "multiple": 0
+              },
+              {
+                "name": "hours",
+                "type": "integer",
+                "required": false,
+                "example": "27323",
+                "multiple": 0
+              },
+              {
+                "name": "minutes",
+                "type": "integer",
+                "required": false,
+                "example": "27702",
+                "multiple": 0
+              },
+              {
+                "name": "month",
+                "type": "integer",
+                "required": false,
+                "example": "8278",
+                "multiple": 0
+              },
+              {
+                "name": "nanos",
+                "type": "integer",
+                "required": false,
+                "example": "17945",
+                "multiple": 0
+              },
+              {
+                "name": "seconds",
+                "type": "integer",
+                "required": false,
+                "example": "34516",
+                "multiple": 0
+              },
+              {
+                "name": "time",
+                "type": "integer",
+                "required": false,
+                "example": "18636",
+                "multiple": 0
+              },
+              {
+                "name": "timezoneOffset",
+                "type": "integer",
+                "required": false,
+                "example": "12511",
+                "multiple": 0
+              },
+              {
+                "name": "year",
+                "type": "integer",
+                "required": false,
+                "example": "34783",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "storeInfo",
+            "type": "object",
+            "required": true,
+            "description": "入库尺码明细",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "diffRateValue",
+                "type": "integer",
+                "required": false,
+                "example": "58381",
+                "multiple": 0
+              },
+              {
+                "name": "forecastValue",
+                "type": "integer",
+                "required": false,
+                "example": "31523",
+                "multiple": 0
+              },
+              {
+                "name": "quantity",
+                "type": "integer",
+                "required": false,
+                "description": "数量",
+                "example": "34592",
+                "multiple": 0
+              },
+              {
+                "name": "quantityInterval",
+                "type": "string",
+                "required": false,
+                "description": "数量区间",
+                "example": "delectus est magni cupiditate odio commodi",
+                "multiple": 0
+              },
+              {
+                "name": "sizeName",
+                "type": "string",
+                "required": false,
+                "description": "尺码名称",
+                "example": "tenetur eligendi et aut doloribus qui ipsam sed eligendi possimus error vitae amet distinctio",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "storeInfoStr",
+            "type": "string",
+            "required": false,
+            "example": "illo nam est omnis sint adipisci maiores consequatur quo est quo inventore quam tempore quis explicabo ab quia",
+            "multiple": 0
+          },
+          {
+            "name": "storeTime",
+            "type": "object",
+            "required": true,
+            "description": "入库时间",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "date",
+                "type": "integer",
+                "required": false,
+                "example": "57411",
+                "multiple": 0
+              },
+              {
+                "name": "day",
+                "type": "integer",
+                "required": false,
+                "example": "56778",
+                "multiple": 0
+              },
+              {
+                "name": "hours",
+                "type": "integer",
+                "required": false,
+                "example": "21587",
+                "multiple": 0
+              },
+              {
+                "name": "minutes",
+                "type": "integer",
+                "required": false,
+                "example": "43803",
+                "multiple": 0
+              },
+              {
+                "name": "month",
+                "type": "integer",
+                "required": false,
+                "example": "31969",
+                "multiple": 0
+              },
+              {
+                "name": "nanos",
+                "type": "integer",
+                "required": false,
+                "example": "2113",
+                "multiple": 0
+              },
+              {
+                "name": "seconds",
+                "type": "integer",
+                "required": false,
+                "example": "65146",
+                "multiple": 0
+              },
+              {
+                "name": "time",
+                "type": "integer",
+                "required": false,
+                "example": "12348",
+                "multiple": 0
+              },
+              {
+                "name": "timezoneOffset",
+                "type": "integer",
+                "required": false,
+                "example": "65012",
+                "multiple": 0
+              },
+              {
+                "name": "year",
+                "type": "integer",
+                "required": false,
+                "example": "57422",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "storedQty",
+            "type": "integer",
+            "required": false,
+            "description": "入库数",
+            "example": "52021",
+            "multiple": 0
+          },
+          {
+            "name": "subProduceOrderCode",
+            "type": "string",
+            "required": false,
+            "description": "JIT子订单号",
+            "example": "42267",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "执行结果提示信息",
+        "example": "et impedit non autem totam consequatur molestias amet ex nulla corporis",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "acceptOrderEndTime\":\"2023-09-30\", \"acceptOrderStartTime\":\"2023-09-01\", \"produceOrderIdList\":[19486004,19486148,19486155] }",
+  "responseExample": "code\": 0, \"info\": [ { \"deliverNumber\": \"19486148-1-F01\", \"deliverStatusStr\": \"作废\", \"deliveryInfo\": [ { \"quantity\": 30, \"sizeName\": \"28\" } ], \"deliveryQty\": 30, \"produceOrderId\": 19486148, \"reasonStr\": \"首次发货\", \"receiveTime\": null, \"returnInfoStr\": \"\", \"returnStatusStr\": \"返工中\", \"sendTime\": \"2023-09-06 16:04:45\", \"storedQty\": 20, \"subProduceOrderCode\": \"19486148-1\" }, { \"deliverNumber\": \"\", \"deliverStatusStr\": \"待发货\", \"deliveryQty\": 0, \"produceOrderId\": 19486148, \"reasonStr\": \"首次发货\", \"receiveTime\": null, \"returnInfoStr\": \"\", \"returnStatusStr\": \"返工中\", \"storedQty\": 20, \"subProduceOrderCode\": \"19486148-1\" }, { \"deliverNumber\": \"19486148-2-F01\", \"deliverStatusStr\": \"作废\", \"deliveryInfo\": [ { \"quantity\": 30, \"sizeName\": \"28\" } ], \"deliveryQty\": 30, \"produceOrderId\": 19486148, \"reasonStr\": \"首次发货\", \"receiveTime\": null, \"returnInfoStr\": \"\", \"returnStatusStr\": \"返工中\", \"sendTime\": \"2023-09-06 16:04:47\", \"storedQty\": 20, \"subProduceOrderCode\": \"19486148-2\" }, { \"deliverNumber\": \"\", \"deliverStatusStr\": \"待发货\", \"deliveryQty\": 0, \"produceOrderId\": 19486148, \"reasonStr\": \"首次发货\", \"receiveTime\": null, \"returnInfoStr\": \"\", \"returnStatusStr\": \"返工中\", \"storedQty\": 20, \"subProduceOrderCode\": \"19486148-2\" }, { \"deliverNumber\": \"19486148-3-F01\", \"deliverSt",
+  "errorCode": null
+}

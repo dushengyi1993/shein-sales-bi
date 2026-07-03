@@ -1,0 +1,274 @@
+{
+  "docId": "3001254",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查找站点+语种+币种接口",
+    "userDocName": "查询店铺站点和站点币种（旧）",
+    "endpoint": "/open-api/openapi-business-backend/site/query",
+    "method": "POST",
+    "docName": "post_open-api_openapi-business-backend_site_query",
+    "version": 13,
+    "updateTime": "2025-07-17 14:54:50",
+    "changeContent": "更新curl",
+    "qpsContent": "",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "该API支持查询店铺售卖的站点和币种信息，后续不在更新维护，建议对接查询店铺站点和币种信息（新）",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "pageNum",
+        "type": "integer",
+        "required": false,
+        "description": "page num",
+        "defaultValue": "1",
+        "multiple": 0
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "required": false,
+        "description": "page size",
+        "defaultValue": "50",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": false,
+        "description": "return code (0:success)",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 1,
+        "children": [
+          {
+            "name": "mainSite",
+            "type": "string",
+            "required": false,
+            "description": "主站点",
+            "multiple": 0
+          },
+          {
+            "name": "mainSiteName",
+            "type": "string",
+            "required": false,
+            "description": "主站点名称",
+            "multiple": 0
+          },
+          {
+            "name": "subSiteList",
+            "type": "object",
+            "required": false,
+            "description": "子站点",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "currency",
+                "type": "string",
+                "required": false,
+                "description": "币种",
+                "multiple": 0
+              },
+              {
+                "name": "siteAbbr",
+                "type": "string",
+                "required": false,
+                "description": "站点缩写",
+                "multiple": 0
+              },
+              {
+                "name": "siteName",
+                "type": "string",
+                "required": false,
+                "description": "站点名称",
+                "multiple": 0
+              },
+              {
+                "name": "storeType",
+                "type": "string",
+                "required": false,
+                "description": "店铺模式：1-平台类型，2-自营类型",
+                "multiple": 0
+              },
+              {
+                "name": "symbolLeft",
+                "type": "string",
+                "required": false,
+                "description": "货币左侧符号",
+                "multiple": 0
+              },
+              {
+                "name": "symbolRight",
+                "type": "string",
+                "required": false,
+                "description": "货币右侧符号",
+                "multiple": 0
+              },
+              {
+                "name": "rateInfo",
+                "type": "object",
+                "required": false,
+                "description": "汇率",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "currency",
+                    "type": "string",
+                    "required": false,
+                    "description": "币种",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "rate",
+                    "type": "double",
+                    "required": false,
+                    "description": "汇率",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "fixedRate",
+                    "type": "double",
+                    "description": "固定汇率/ fixed rate"
+                  },
+                  {
+                    "name": "rateType",
+                    "type": "integer",
+                    "required": false,
+                    "description": "汇率形式，0实时汇率 1固定汇率",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "symbolLeft",
+                    "type": "string",
+                    "required": false,
+                    "description": "货币左侧符号",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "symbolRight",
+                    "type": "string",
+                    "required": false,
+                    "description": "货币右侧符号",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "siteLanguage_list",
+                "type": "object",
+                "required": false,
+                "description": "站点多语言列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "name",
+                    "type": "string",
+                    "required": false,
+                    "description": "多语言名称",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "isAvailable",
+                    "type": "string",
+                    "required": false,
+                    "description": "是否可用",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "abbr",
+                    "type": "string",
+                    "required": false,
+                    "description": "多语言缩写",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "sort",
+                    "type": "string",
+                    "required": false,
+                    "description": "排序",
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "error message",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi-test01.sheincorp.cn/open-api/openapi-business-backend/site/query' \\ --header 'language: zh-cn' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-timestamp: 1752733538805' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi-test01.sheincorp.cn' \\ --data-raw '{ \"pageNum\": 1, \"pageSize\": 10 }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": [ { \"mainSite\": \"shein\", \"mainSiteName\": \"SHEIN\", \"subSiteList\": [ { \"storeType\": null, \"symbolLeft\": \"$\", \"rateInfo\": [ { \"rateType\": 1, \"rate\": 1.000000, \"fixedRate\": 1.00000000, \"symbolLeft\": \"$\", \"symbolRight\": \"\", \"currency\": \"USD\" } ], \"siteName\": \"SHEIN国际站\", \"symbolRight\": \"\", \"siteLanguageList\": [ { \"isAvailable\": null, \"name\": \"西班牙语\", \"sort\": null, \"abbr\": \"es\" }, { \"isAvailable\": null, \"name\": \"法国法文\", \"sort\": null, \"abbr\": \"fr-fr\" }, { \"isAvailable\": null, \"name\": \"西班牙文\", \"sort\": null, \"abbr\": \"es-es\" }, { \"isAvailable\": null, \"name\": \"英语\", \"sort\": null, \"abbr\": \"en\" } ], \"currency\": \"USD\", \"siteAbbr\": \"shein-www\" }, { \"storeType\": null, \"symbolLeft\": \"\", \"rateInfo\": [ { \"rateType\": 0, \"rate\": 0.946253, \"fixedRate\": 9.00000000, \"symbolLeft\": \"\", \"symbolRight\": \"€\", \"currency\": \"EUR\" } ], \"siteName\": \"SHEIN法国站\", \"symbolRight\": \"€\", \"siteLanguageList\": [ { \"isAvailable\": null, \"name\": \"法国法文\", \"sort\": null, \"abbr\": \"fr-fr\" }, { \"isAvailable\": null, \"name\": \"葡萄牙语\", \"sort\": null, \"abbr\": \"pt-pt-pt\" }, { \"isAvailable\": null, \"name\": \"法语\", \"sort\": null, \"abbr\": \"fr\" }, { \"isAvailable\": null, \"name\": \"意大利语\", \"sort\": null, \"abbr\": \"it\" } ], \"currency\": \"EUR\", \"siteAbbr\": \"shein-fr\" }, { \"storeType\": null, \"symbolLeft\": \"\", \"rateInfo\": [ { \"rateType\": 1, \"rate\": 0.946253, \"fixedRate\": 1.23100000, \"symbolLeft\": \"\", \"symbolRight\": \"€\", \"currency\": \"EUR\" } ], \"siteName\": \"SHEIN西班牙站\", \"symbolRight\": \"€\", \"siteLanguageList\": [ { \"isAvailable\": null, \"name\": \"西班牙文\", \"sort\": null, \"abbr\": \"es-es\" } ], \"currency\": \"EUR\", \"siteAbbr\": \"shein-es\" }, { \"storeType\": null, \"symbolLeft\": \"\", \"rateInfo\": [ { \"rateType\": 1, \"rate\": 0.946253, \"fixedRate\": 1.00000000, \"symbolLeft\": \"\", \"symbolRight\": \"€\", \"currency\": \"EUR\" } ], \"siteName\": \"SHEIN德国站\", \"symbolRight\": \"€\", \"siteLanguageList\": [ { \"isAvailable\": null, \"name\": \"德国德文\", \"sort\": null, \"abbr\": \"de-de\" }, { \"isAvailable\": null, \"name\": \"沙特阿拉伯文\", \"sort\": null, \"abbr\": \"ar-sa\" }, { \"isAvailable\": null, \"name\": \"德语\", \"sort\": null, \"abbr\": \"de\" } ], \"currency\": \"EUR\", \"siteAbbr\": \"shein-de\" }, { \"storeType\": null, \"symbolLeft\": \"\", \"rateInfo\": [ { \"rateType\": 0, \"rate\": 94.339623, \"fixedRate\": 98.30000000, \"symbolLeft\": \"\", \"symbolRight\": \"руб.\", \"currency\": \"RUB\" } ], \"siteName\": \"SHEIN俄罗斯站\", \"symbolRight\": \"руб.\", \"siteLanguageList\": [ { \"isAvailable\": null, \"name\": \"俄罗斯俄文\", \"sort\": null, \"abbr\": \"ru-ru\" }, { \"isAvailable\": null, \"name\": \"俄罗斯语\", \"sort\": null, \"abbr\": \"ru\" } ], \"currency\": \"RUB\", \"siteAbbr\": \"shein-ru\" }, { \"storeType\": null, \"symbolLeft\": \"\", \"rateInfo\": [ { \"rateType\": 0, \"rate\": 0.946253, \"fixedRate\": 0E-8, \"symbolLeft\": \"\", \"symbolRight\": \"€\", \"currency\": \"EUR\" } ], \"siteName\": \"SHEIN意大利站\", \"symbolRight\": \"€\", \"siteLanguageList\": [ { \"isAvailable\": null, \"name\": \"意大利文\", \"sort\": null, \"abbr\": \"it-it\" }, { \"isAvailable\": null, \"name\": \"意大利语\", \"sort\": null, \"abbr\": \"it\" } ], \"currency\": \"EUR\", \"siteAbbr\": \"shein-it\" }, { \"storeType\": null, \"symbolLeft\": \"SR\", \"rateInfo\": [ { \"rateType\": 1, \"rate\": 3.753754, \"fixedRate\": 38.00000000, \"symbolLeft\": \"SR\", \"symbolRight\": \"\", \"currency\": \"SAR\" } ], \"siteName\": \"SHEIN阿拉伯站\", \"symbolRight\": \"\", \"siteLanguageList\": [ { \"isAvailable\": null, \"name\": \"沙特阿拉伯文\", \"sort\": null, \"abbr\": \"ar-sa\" }, { \"isAvailable\": null, \"name\": \"阿拉伯语\", \"sort\": null, \"abbr\": \"ar\" } ], \"currency\": \"SAR\", \"siteAbbr\": \"shein-ar\" }, { \"storeType\": null, \"symbolLeft\": \"NT$\", \"rateInfo\": [ { \"rateType\": 0, \"rate\": 32.467532, \"fixedRate\": 0E-8, \"symbolLeft\": \"NT$\", \"symbolRight\": \"\", \"currency\": \"TWD\" } ], \"siteName\": \"SHEIN台湾站\", \"symbolRight\": \"\", \"siteLanguageList\": [ { \"isAvailable\": null, \"name\": \"台湾\", \"sort\": null, \"abbr\": \"zh-tw1\" } ], \"currency\": \"TWD\", \"siteAbbr\": \"shein-tw\" }, { \"storeType\": null, \"symbolLeft\": \"$\", \"rateInfo\": [ { \"rateType\": 0, \"rate\": 1.000000, \"fixedRate\": 0E-8, \"symbolLeft\": \"$\", \"symbolRight\": \"\", \"currency\": \"USD\" } ], \"siteName\": \"SHEIN美国站\", \"symbolRight\": \"\", \"siteLanguageList\": [ { \"isAvailable\": null, \"name\": \"美式英语\", \"sort\": null, \"abbr\": \"en-us\" }, { \"isAvailable\": null, \"name\": \"西班牙语\", \"sort\": null, \"abbr\": \"es\" }, { \"isAvailable\": null, \"name\": \"西班牙文\", \"sort\": null, \"abbr\": \"es-es\" }, { \"isAvailable\": null, \"name\": \"英语\", \"sort\": null, \"abbr\": \"en\" }, { \"isAvailable\": null, \"name\": \"德国德文\", \"sort\": null, \"abbr\": \"de-de\" } ], \"currency\": \"USD\", \"siteAbbr\": \"shein-us\" }, { \"storeType\": null, \"symbolLeft\": \"GBP£\", \"rateInfo\": [ { \"rateType\": 0, \"rate\": 0.809061, \"fixedRate\": 0E-8, \"symbolLeft\": \"GBP£\", \"symbolRight\": \"\", \"currency\": \"GBP\" } ], \"siteName\": \"SHEIN英国站\", \"symbolRight\": \"\", \"siteLanguageList\": [ { \"isAvailable\": null, \"name\": \"美式英语\", \"sort\": null, \"abbr\": \"en-us\" } ], \"currency\": \"GBP\", \"siteAbbr\": \"shein-uk\" }, { \"storeType\": null, \"symbolLeft\": \"AU$\", \"rateInfo\": [ { \"rateType\": 0, \"rate\": 1.557147, \"fixedRate\": 0E-8, \"symbolLeft\": \"AU$\", \"symbolRight\": \"\", \"currency\": \"AUD\" } ], \"siteName\": \"SHEIN澳大利亚站\", \"symbolRight\": \"\", \"siteLanguageList\": [ { \"isAvailable\": null, \"name\": \"美式英语\", \"sort\": null, \"abbr\": \"en-us\" } ], \"currency\": \"AUD\", \"siteAbbr\": \"shein-au\" }, { \"storeType\": null, \"symbolLeft\": \"₹\", \"rateInfo\": [ { \"rateType\": 0, \"rate\": 83.612040, \"fixedRate\": 0E-8, \"symbolLeft\": \"₹\", \"symbolRight\": \"\", \"currency\": \"INR\" } ], \"siteName\": \"SHEIN印度站\", \"symbolRight\": \"\", \"siteLanguageList\": [ { \"isAvailable\": null, \"name\": \"美式英语\", \"sort\": null, \"abbr\": \"en-us\" } ], \"currency\": \"INR\", \"siteAbbr\": \"shein-in\" }, { \"storeType\": null, \"symbolLeft\": \"$\", \"rateInfo\": [ { \"rateType\": 0, \"rate\": 1.000000, \"fixedRate\": 0E-8, \"symbolLeft\": \"$\", \"symbolRight\": \"\", \"currency\": \"USD\" } ], \"siteName\": \"shein美国清仓站\", \"symbolRight\": \"\", \"siteLanguageList\": [ { \"isAvailable\": null, \"name\": \"美式英语\", \"sort\": null, \"abbr\": \"en-us\" } ], \"currency\": \"USD\", \"siteAbbr\": \"shein-sus\" }, { \"storeType\": null, \"symbolLeft\": \"$MXN\", \"rateInfo\": [ { \"rateType\": 0, \"rate\": 16.806723, \"fixedRate\": 21.00000000, \"symbolLeft\": \"$MXN\", \"symbolRight\": \"\", \"currency\": \"MXN\" } ], \"siteName\": \"SHEIN墨西哥站\", \"symbolRight\": \"\", \"siteLanguageList\": [ { \"isAvailable\": null, \"name\": \"美式英语\", \"sort\": null, \"abbr\": \"en-us\" }, { \"isAvailable\": null, \"name\": \"西班牙文\", \"sort\": null, \"abbr\": \"es-es\" } ], \"currency\": \"MXN\", \"siteAbbr\": \"shein-mx\" }, { \"storeType\": null, \"symbolLeft\": \"SR\", \"rateInfo\": [ { \"rateType\": 0, \"rate\": 3.753754, \"fixedRate\": 0E-8, \"symbolLeft\": \"SR\", \"symbolRight\": \"\", \"currency\": \"SAR\" } ], \"siteName\": \"SHEIN沙特阿拉伯站\", \"symbolRight\": \"\", \"siteLanguageList\": [ { \"isAvailable\": null, \"name\": \"美式英语\", \"sort\": null, \"abbr\": \"en-us\" }, { \"isAvailable\": null, \"name\": \"沙特阿拉伯文\", \"sort\": null, \"abbr\": \"ar-sa\" } ], \"currency\": \"SAR\", \"siteAbbr\": \"shein-sa\" }, { \"storeType\": null, \"symbolLeft\": \"KWD\", \"rateInfo\": [ { \"rateType\": 0, \"rate\": 0.308791, \"fixedRate\": 0E-8, \"symbolLeft\": \"KWD\", \"symbolRight\": \"\", \"currency\": \"KWD\" } ], \"siteName\": \"SHEIN科威特站\", \"symbolRight\": \"\", \"siteLanguageList\": [ { \"isAvailable\": null, \"name\": \"美式英语\", \"sort\": null, \"abbr\": \"en-us\" }, { \"isAvailable\": null, \"name\": \"沙特阿拉伯文\", \"sort\": null, \"abbr\": \"ar-sa\" } ], \"currency\": \"KWD\", \"siteAbbr\": \"shein-kw\" }, { \"storeType\": null, \"symbolLeft\": \"AED\", \"rateInfo\": [ { \"rateType\": 0, \"rate\": 3.672825, \"fixedRate\": 0E-8, \"symbolLeft\": \"AED\", \"symbolRight\": \"\", \"currency\": \"AED\" } ], \"siteName\": \"SHEIN阿联酋站\", \"symbolRight\": \"\", \"siteLanguageList\": [ { \"isAvailable\": null, \"name\": \"美式英语\", \"sort\": null, \"abbr\": \"en-us\" }, { \"isAvailable\": null, \"name\": \"沙特阿拉伯文\", \"sort\": null, \"abbr\": \"ar-sa\" } ], \"currency\": \"AED\", \"siteAbbr\": \"shein-ae\" }, { \"storeType\": null, \"symbolLeft\": \"QR\", \"rateInfo\": [ { \"rateType\": 1, \"rate\": 3.696721, \"fixedRate\": 3.65000000, \"symbolLeft\": \"QR\", \"symbolRight\": \"RQ\", \"currency\": \"QAR\" } ], \"siteName\": \"SHEIN卡塔尔站\", \"symbolRight\": \"RQ\", \"siteLanguageList\": [ { \"isAvailable\": null, \"name\": \"美式英语\", \"sort\": null, \"abbr\": \"en-us\" }, { \"isAvailable\": null, \"name\": \"沙特阿拉伯文\", \"sort\": null, \"abbr\": \"ar-sa\" } ], \"currency\": \"QAR\", \"siteAbbr\": \"shein-qa\" }, { \"storeType\": null, \"symbolLeft\": \"OM\", \"rateInfo\": [ { \"rateType\": 0, \"rate\": 0.385986, \"fixedRate\": 0E-8, \"symbolLeft\": \"OM\", \"symbolRight\": \"\", \"currency\": \"OMR\" } ], \"siteName\": \"SHEIN阿曼站\", \"symbolRight\": \"\", \"siteLanguageList\": [ { \"isAvailable\": null, \"name\": \"美式英语\", \"sort\": null, \"abbr\": \"en-us\" }, { \"isAvailable\": null, \"name\": \"沙特阿拉伯文\", \"sort\": null, \"abbr\": \"ar-sa\" } ], \"currency\": \"OMR\", \"siteAbbr\": \"shein-om\" }, ] } ] }",
+  "errorCode": null
+}

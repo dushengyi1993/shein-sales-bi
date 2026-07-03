@@ -1,0 +1,213 @@
+{
+  "docId": "3001483",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "添加自定义属性值",
+    "userDocName": "添加自定义属性值",
+    "endpoint": "/open-api/goods/add-custom-attribute-value",
+    "method": "POST",
+    "docName": "post_open-api_goods_add-custom-attribute-value",
+    "version": 21,
+    "updateTime": "2025-12-18 10:31:29",
+    "changeContent": "“供应商”改“商家”",
+    "qpsContent": "40",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "2025年12月1日前创建的应用可使用此接口，先确认属性是否支持添加自定义属性值（通过接口确认），则可通过此接口添加自定义属性值。同时也可迁移使用新方案：点击查看2025年12月1日后创建的应用请使用商品发布编辑接口创建自定义属性，详细使用方式查看文档：点击查看",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "language",
+        "type": "string",
+        "required": true,
+        "description": "默认返回中文多语言信息，支持语种：英语:en 法语: fr 西班牙语:es 德语:de 中文简体:zh-cn 泰语:th 巴西葡语:pt-br",
+        "example": "en"
+      },
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "attribute_id",
+        "type": "int64",
+        "required": true,
+        "description": "属性ID。要在哪个属性下添加自定义属性值。"
+      },
+      {
+        "name": "attribute_value",
+        "type": "string",
+        "required": true,
+        "description": "自定义属性值。最多100个字符，特殊符号需使用半角，不支持全角符号。"
+      },
+      {
+        "name": "category_id",
+        "type": "int64",
+        "required": true,
+        "description": "末级分类id"
+      },
+      {
+        "name": "attribute_value_name_multis",
+        "type": "object",
+        "description": "自定义属性值的多语言",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "language",
+            "type": "string",
+            "description": "语种"
+          },
+          {
+            "name": "attribute_value_name_multi",
+            "type": "string",
+            "description": "自定义属性值（多语言）。最多100个字符，特殊符号需使用半角，不支持全角符号。"
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "bbl",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "Result(success: 0)",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "attribute_id",
+            "type": "int64",
+            "required": false,
+            "description": "属性名ID",
+            "multiple": 0
+          },
+          {
+            "name": "attribute_value_id",
+            "type": "int64",
+            "description": "属性值ID"
+          },
+          {
+            "name": "attribute_value_name",
+            "type": "string",
+            "description": "属性值名称"
+          },
+          {
+            "name": "category_id",
+            "type": "int64",
+            "description": "末级分类ID"
+          },
+          {
+            "name": "supplier_id",
+            "type": "int64",
+            "description": "商家ID"
+          },
+          {
+            "name": "supplier_source",
+            "type": "integer",
+            "description": "商家来源"
+          },
+          {
+            "name": "attribute_value_multi_arr",
+            "type": "object",
+            "description": "属性值多语种信息",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "attribute_value_name_multi",
+                "type": "string",
+                "description": "属性值多语种名称"
+              },
+              {
+                "name": "language",
+                "type": "string",
+                "description": "语种"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi-test01.sheincorp.cn/open-api/goods/add-custom-attribute-value' \\ --header 'language: zh-cn' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-timestamp: 1752733538805' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi-test01.sheincorp.cn' \\ --data-raw '{ \"attribute_id\": 27, \"attribute_value\": \"Navy/Bittersweet/Peacoat\", \"category_id\": 4455 }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"supplier_id\": ******, \"supplier_source\": 10, \"category_id\": 4455, \"attribute_id\": 27, \"attribute_value_id\": 5242406, \"attribute_value_name\": \"Navy/Bittersweet/Peacoat\", \"attribute_value_multi_arr\": [ { \"attribute_value_name_multi\": \"البحرية / حلو ومر / Peacoat\", \"language\": \"ar\" }, { \"attribute_value_name_multi\": \"Navy/Bittersweet/Peacoat\", \"language\": \"cs-cz\" }, { \"attribute_value_name_multi\": \"Marineblau/Bittersüß/Peacoat\", \"language\": \"de\" }, { \"attribute_value_name_multi\": \"Ναυτικό/Γλυκόπικρο/Παγώνι\", \"language\": \"el-gr\" }, { \"attribute_value_name_multi\": \"Navy/Bittersweet/Peacoat\", \"language\": \"en\" }, { \"attribute_value_name_multi\": \"Azul marino/Agridulce/Chaquetón\", \"language\": \"es\" }, { \"attribute_value_name_multi\": \"Bleu marine/doux-amer/caban\", \"language\": \"fr\" }, { \"attribute_value_name_multi\": \"חיל הים/מריר/טווס\", \"language\": \"he\" }, { \"attribute_value_name_multi\": \"Angkatan Laut/Pahit Manis/Peacoat\", \"language\": \"id\" }, { \"attribute_value_name_multi\": \"Blu marino/Agrodolce/Peacoat\", \"language\": \"it\" }, { \"attribute_value_name_multi\": \"ネイビー/ビタースイート/ピーコート\", \"language\": \"ja\" }, { \"attribute_value_name_multi\": \"네이비/비터스위트/피코트\", \"language\": \"ko\" }, { \"attribute_value_name_multi\": \"Marineblauw/bitterzoet/peacoat\", \"language\": \"nl\" }, { \"attribute_value_name_multi\": \"Granatowy / Słodko-gorzki / Peacoat\", \"language\": \"pl\" }, { \"attribute_value_name_multi\": \"Marinha/Agridoce/Peacoat\", \"language\": \"pt-br\" }, { \"attribute_value_name_multi\": \"Marinha/Agridoce/Peacoat\", \"language\": \"pt-pt\" }, { \"attribute_value_name_multi\": \"Темно-синий/горько-сладкий/бушлат\", \"language\": \"ru\" }, { \"attribute_value_name_multi\": \"Navy/Bittersweet/Peacoat\", \"language\": \"sv\" }, { \"attribute_value_name_multi\": \"สีกรมท่า/สีหวานอมขมกลืน/สีพีโค้ต\", \"language\": \"th\" }, { \"attribute_value_name_multi\": \"Lacivert/Acı tatlı/Tavuskuşu\", \"language\": \"tr\" }, { \"attribute_value_name_multi\": \"Màu xanh hải quân/ngọt đắng/peacoat\", \"language\": \"vi\" }, { \"attribute_value_name_multi\": \"海军蓝/苦乐参半/豌豆大衣\", \"language\": \"zh-cn\" }, { \"attribute_value_name_multi\": \"海軍藍/苦樂參半/短大衣\", \"language\": \"zh-tw\" } ] }, \"bbl\": null }",
+  "errorCode": null
+}

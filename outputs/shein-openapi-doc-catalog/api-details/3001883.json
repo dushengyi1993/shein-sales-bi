@@ -1,0 +1,192 @@
+{
+  "docId": "3001883",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "更新商品售价",
+    "userDocName": "更新商品售价",
+    "endpoint": "/open-api/openapi-business-backend/product/price/save",
+    "method": "POST",
+    "docName": "post_open-api_openapi-business-backend_product_price_save",
+    "version": 15,
+    "updateTime": "2026-07-02 20:24:33",
+    "changeContent": "文档变更归属类目",
+    "qpsContent": "40",
+    "modes": [
+      1
+    ],
+    "modeNames": [
+      "自运营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "该API支持更新商品的售价信息，调整价格会有价格审核机制，需要重点关注返回参数中的status，只有修改成功之后才能再次发起修改价格，如果返回参数status=2待审核，需通过webhook：商品涨价审批结果通知，拿到结果之后才能再次修改价格。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "productPriceList",
+        "type": "object",
+        "required": false,
+        "description": "商品价格信息列表, 最大长度100",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "productCode",
+            "type": "string",
+            "required": true,
+            "description": "传sku_code，sku_code是商品发布SHEIN生成的系统编码",
+            "multiple": 0
+          },
+          {
+            "name": "currencyCode",
+            "type": "string",
+            "required": true,
+            "description": "币种，商品在SHEIN平台使用的售卖币种，如BRL, THB, USD, MXN. 具体币种可查询店铺站点和币种信息（新）获取",
+            "multiple": 0
+          },
+          {
+            "name": "shopPrice",
+            "type": "double",
+            "required": true,
+            "description": "原价",
+            "multiple": 0
+          },
+          {
+            "name": "specialPrice",
+            "type": "double",
+            "required": false,
+            "description": "特价 ，注：特价不传时，默认特价更新为0！",
+            "multiple": 0
+          },
+          {
+            "name": "site",
+            "type": "string",
+            "required": true,
+            "description": "站点-只能传子站点。例如shein-us",
+            "multiple": 0
+          },
+          {
+            "name": "riseReason",
+            "type": "string",
+            "description": "涨价原因。枚举:1-商品成本上涨,2-物流履约费用上涨,3-活动结束恢复价格,4-其他,5-物流履约费用上涨（物流规则调整）"
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应码 0: 正常",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "响应信息",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "data",
+            "type": "object",
+            "required": false,
+            "multiple": 1,
+            "children": [
+              {
+                "name": "success",
+                "type": "boolean",
+                "required": false,
+                "description": "是否成功 ture:成功 false:失败",
+                "multiple": 0
+              },
+              {
+                "name": "message",
+                "type": "string",
+                "required": false,
+                "description": "message",
+                "multiple": 0
+              },
+              {
+                "name": "productCode",
+                "type": "string",
+                "required": false,
+                "description": "sku_code是商品发布SHEIN生成的系统编码",
+                "multiple": 0
+              },
+              {
+                "name": "site",
+                "type": "string",
+                "required": false,
+                "description": "站点",
+                "multiple": 0
+              },
+              {
+                "name": "status",
+                "type": "integer",
+                "description": "状态码，0 失败，1 成功，2 待审核"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "响应描述",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi-test01.sheincorp.cn/open-api/openapi-business-backend/product/price/save' \\ --header 'language: zh-cn' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-timestamp: 1752734980846' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi-test01.sheincorp.cn' \\ --data-raw '{ \"productPriceList\": [{ \"currencyCode\": \"MXN\", \"productCode\": \"I11mesukkwwr\", \"site\": \"shein-mx\", \"shopPrice\": 1, \"riseReason\":null, \"specialPrice\":null }] }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"data\": [ { \"success\": true, \"message\": \"价格调整成功\", \"productCode\": \"I11mesukkwwr\", \"site\": \"shein-mx\" \"status\":1 } ] } }",
+  "errorCode": null
+}

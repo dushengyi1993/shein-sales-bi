@@ -1,0 +1,162 @@
+{
+  "docId": "3000490",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "供应商订单-发货信息",
+    "userDocName": "供应商订单-发货信息",
+    "endpoint": "/open-api/material/sales-order-deliver-info",
+    "method": "POST",
+    "docName": "post_open-api_material_sales-order-deliver-info",
+    "version": 2,
+    "updateTime": "2024-10-14 22:25:16",
+    "changeContent": "新增traceId",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "salesOrderList",
+        "type": "string",
+        "required": true,
+        "description": "销售单号",
+        "multiple": 1
+      },
+      {
+        "name": "deliverNo",
+        "type": "string",
+        "required": true,
+        "description": "发货单号",
+        "multiple": 0
+      },
+      {
+        "name": "deliverStatus",
+        "type": "integer",
+        "required": true,
+        "description": "发货状态(1已发货2配货完成3取消配货)",
+        "example": "1",
+        "multiple": 0
+      },
+      {
+        "name": "deliverDetail",
+        "type": "object",
+        "required": true,
+        "description": "发货明细",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "clothNo",
+            "type": "string",
+            "required": true,
+            "description": "条编码",
+            "multiple": 0
+          },
+          {
+            "name": "tankNo",
+            "type": "string",
+            "required": true,
+            "description": "缸号",
+            "multiple": 0
+          },
+          {
+            "name": "num",
+            "type": "decimal",
+            "required": true,
+            "description": "数量（不含空差）",
+            "example": "100",
+            "multiple": 0
+          },
+          {
+            "name": "sysDockMaterialCode",
+            "type": "string",
+            "required": true,
+            "description": "系统对接码"
+          },
+          {
+            "name": "fullNum",
+            "type": "decimal",
+            "description": "发货数量（含空差）"
+          },
+          {
+            "name": "unit",
+            "type": "string",
+            "description": "发货单位（不含空差）"
+          },
+          {
+            "name": "fullUnit",
+            "type": "string",
+            "description": "发货单位（含空差）"
+          }
+        ]
+      },
+      {
+        "name": "operateTime",
+        "type": "string",
+        "required": true,
+        "description": "操作时间",
+        "example": "2020-10-10 00：00：00",
+        "multiple": 0
+      },
+      {
+        "name": "operateMan",
+        "type": "string",
+        "required": true,
+        "description": "操作人"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应码 0：成功 其他：失败",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "失败原因",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "children": [
+          {
+            "name": "deliverNo",
+            "type": "string",
+            "description": "送货单号"
+          },
+          {
+            "name": "traceId",
+            "type": "string",
+            "description": "请求的唯一标识；用于异常报错跟踪"
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

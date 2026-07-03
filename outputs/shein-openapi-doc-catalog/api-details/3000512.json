@@ -1,0 +1,253 @@
+{
+  "docId": "3000512",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询物料异常详细接口",
+    "userDocName": "查询物料异常详细接口",
+    "endpoint": "/open-api/mes/material-anomalous/list",
+    "method": "POST",
+    "docName": "post_open-api_mes_material-anomalous_list",
+    "version": 2,
+    "updateTime": "2024-10-15 10:56:34",
+    "changeContent": "新增traceId\n",
+    "qpsContent": "",
+    "modes": [
+      3
+    ],
+    "modeNames": [
+      "SHEIN自营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "factoryIds",
+        "type": "integer",
+        "required": false,
+        "description": "工厂权限",
+        "multiple": 1
+      },
+      {
+        "name": "pageNo",
+        "type": "integer",
+        "required": false,
+        "description": "当前页数",
+        "example": "11300",
+        "multiple": 0
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "required": false,
+        "description": "每页数量",
+        "example": "37327",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "integer",
+        "required": false,
+        "description": "状态码",
+        "example": "25146",
+        "multiple": 0
+      },
+      {
+        "name": "detailMsg",
+        "type": "string",
+        "required": false,
+        "description": "执行结果详细信息",
+        "example": "qui repudiandae ut recusandae quo et eius iusto repudiandae culpa reprehenderit magni perferendis quasi voluptas reiciendis modi repellendus et architecto",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "description": "执行结果数据",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "pageNo",
+            "type": "integer",
+            "required": false,
+            "description": "当前页码",
+            "example": "63928",
+            "multiple": 0
+          },
+          {
+            "name": "pageSize",
+            "type": "integer",
+            "required": false,
+            "description": "每页大小",
+            "example": "61823",
+            "multiple": 0
+          },
+          {
+            "name": "recoders",
+            "type": "object",
+            "required": true,
+            "description": "返回数据",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "anomalousAmount",
+                "type": "double",
+                "required": false,
+                "description": "物料异常数量",
+                "example": "64938.83",
+                "multiple": 0
+              },
+              {
+                "name": "anomalousReason",
+                "type": "integer",
+                "required": false,
+                "description": "异常原因 1：面料质量问题，2：少于送货单，3：订单作废，4：二次采购",
+                "example": "20261",
+                "multiple": 0
+              },
+              {
+                "name": "anomalousStatus",
+                "type": "integer",
+                "required": false,
+                "description": "物料异常FSP审核状态",
+                "example": "8025",
+                "multiple": 0
+              },
+              {
+                "name": "anomalousType",
+                "type": "integer",
+                "required": false,
+                "description": "物料异常类型（1：待确认，2：待配货，3：配货完成，4：待收货，5：已完成，6：已作废）",
+                "example": "1269",
+                "multiple": 0
+              },
+              {
+                "name": "dataSource",
+                "type": "integer",
+                "required": false,
+                "description": "物料异常发起来源（0：采购，1：领料）",
+                "example": "41728",
+                "multiple": 0
+              },
+              {
+                "name": "isInvoice",
+                "type": "integer",
+                "required": false,
+                "description": "是否开票",
+                "example": "57949",
+                "multiple": 0
+              },
+              {
+                "name": "isTrace",
+                "type": "integer",
+                "required": false,
+                "description": "是否溯源(0:否,1:是)",
+                "example": "1487",
+                "multiple": 0
+              },
+              {
+                "name": "materialAnomalousCode",
+                "type": "string",
+                "required": false,
+                "description": "物料异常单号",
+                "example": "46260",
+                "multiple": 0
+              },
+              {
+                "name": "materialDeliveryCode",
+                "type": "string",
+                "required": false,
+                "description": "关联发货单号",
+                "example": "1477",
+                "multiple": 0
+              },
+              {
+                "name": "materialSku",
+                "type": "string",
+                "required": false,
+                "description": "物料SKU",
+                "example": "nihil in inventore laboriosam laudantium beatae dolore ipsam nobis alias at nihil dolore",
+                "multiple": 0
+              },
+              {
+                "name": "requireAmount",
+                "type": "double",
+                "required": false,
+                "description": "需求数量",
+                "example": "41726.86",
+                "multiple": 0
+              },
+              {
+                "name": "taxRate",
+                "type": "double",
+                "required": false,
+                "description": "附加率",
+                "example": "59381.43",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "totalPage",
+            "type": "integer",
+            "required": false,
+            "description": "总页数",
+            "example": "63844",
+            "multiple": 0
+          },
+          {
+            "name": "totalRecoder",
+            "type": "integer",
+            "required": false,
+            "description": "总记录数",
+            "example": "62815",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "执行结果提示信息",
+        "example": "sed architecto nihil molestiae quidem enim nisi harum et iure cumque voluptas expedita mollitia ipsa",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "factoryIds\":[6846992940021109002], \"pageNo\":1, \"pageSize\":30 }",
+  "responseExample": "code\": 0, \"currentPageNo\": 1, \"info\": [ { \"anomalousAmount\": 0.00, \"anomalousReason\": 0, \"anomalousStatus\": 6, \"anomalousType\": 5, \"dataSource\": 0, \"isInvoice\": 2, \"isTrace\": 0, \"materialAnomalousCode\": \"YC520550001\", \"materialDeliveryCode\": \" \", \"materialSku\": \"M00015323\", \"requireAmount\": 15101.10, \"taxRate\": 0.0000 } ], \"msg\": \"success\", \"totalPageNo\": 1 }",
+  "errorCode": null
+}

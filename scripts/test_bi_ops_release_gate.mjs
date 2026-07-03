@@ -15,6 +15,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHECK_FILES = [
   'scripts/serve_bi_portal.mjs',
   'scripts/bi_ops_cli.mjs',
+  'lib/link_ops_image_role_planner.mjs',
+  'scripts/link_ops_plan_image_roles.mjs',
   'scripts/link_ops_hl_openapi_executor.mjs',
   'scripts/link_ops_maintenance_openapi_executor.mjs',
   'scripts/fetch_shein_openapi_products.mjs',
@@ -43,6 +45,17 @@ const CHECK_FILES = [
   'scripts/test_bi_ops_copy_product_success_flow.mjs',
   'scripts/test_bi_ops_copy_product_all_stores_capability.mjs',
   'scripts/test_bi_ops_maintenance_executor_flow.mjs',
+  'scripts/test_link_ops_image_role_planner.mjs',
+  'scripts/openapi_image_asset_executor.mjs',
+  'scripts/test_openapi_image_asset_executor.mjs',
+  'scripts/openapi_readonly_executor.mjs',
+  'scripts/test_openapi_readonly_executor.mjs',
+  'scripts/openapi_order_fulfillment_executor.mjs',
+  'scripts/test_openapi_order_fulfillment_executor.mjs',
+  'scripts/openapi_catalog_executor.mjs',
+  'scripts/test_openapi_catalog_executor.mjs',
+  'scripts/openapi_image_asset_executor.mjs',
+  'scripts/test_openapi_image_asset_executor.mjs',
   'scripts/verify_shein_openapi_doc_detail.mjs',
   'scripts/test_shein_openapi_doc_detail_parser.mjs',
   'scripts/check_bi_ops_maintenance_readiness.mjs',
@@ -51,6 +64,8 @@ const CHECK_FILES = [
 const DIFF_CHECK_FILES = [
   'scripts/serve_bi_portal.mjs',
   'scripts/bi_ops_cli.mjs',
+  'lib/link_ops_image_role_planner.mjs',
+  'scripts/link_ops_plan_image_roles.mjs',
   'scripts/link_ops_hl_openapi_executor.mjs',
   'scripts/link_ops_maintenance_openapi_executor.mjs',
   'scripts/fetch_shein_openapi_products.mjs',
@@ -80,6 +95,15 @@ const DIFF_CHECK_FILES = [
   'scripts/test_bi_ops_copy_product_success_flow.mjs',
   'scripts/test_bi_ops_copy_product_all_stores_capability.mjs',
   'scripts/test_bi_ops_maintenance_executor_flow.mjs',
+  'scripts/test_link_ops_image_role_planner.mjs',
+  'scripts/openapi_image_asset_executor.mjs',
+  'scripts/test_openapi_image_asset_executor.mjs',
+  'scripts/openapi_readonly_executor.mjs',
+  'scripts/test_openapi_readonly_executor.mjs',
+  'scripts/openapi_order_fulfillment_executor.mjs',
+  'scripts/test_openapi_order_fulfillment_executor.mjs',
+  'scripts/openapi_catalog_executor.mjs',
+  'scripts/test_openapi_catalog_executor.mjs',
   'scripts/verify_shein_openapi_doc_detail.mjs',
   'scripts/test_shein_openapi_doc_detail_parser.mjs',
   'scripts/check_bi_ops_maintenance_readiness.mjs',
@@ -178,6 +202,11 @@ async function main() {
   results.push({name: 'copy_product_draft chat locked lifecycle guard smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs', '--chat-natural', '--weak-readback']))});
   results.push({name: 'copy_product_draft all-stores capability smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_all_stores_capability.mjs']))});
   results.push({name: 'maintenance executor fake OpenAPI smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_maintenance_executor_flow.mjs']))});
+  results.push({name: 'local image role planner smoke', ...(await run(process.execPath, ['scripts/test_link_ops_image_role_planner.mjs']))});
+  results.push({name: 'OpenAPI image asset executor smoke', ...(await run(process.execPath, ['scripts/test_openapi_image_asset_executor.mjs']))});
+  results.push({name: 'OpenAPI readonly executor smoke', ...(await run(process.execPath, ['scripts/test_openapi_readonly_executor.mjs']))});
+  results.push({name: 'OpenAPI order fulfillment executor smoke', ...(await run(process.execPath, ['scripts/test_openapi_order_fulfillment_executor.mjs']))});
+  results.push({name: 'OpenAPI catalog executor smoke', ...(await run(process.execPath, ['scripts/test_openapi_catalog_executor.mjs']))});
   results.push({name: 'official doc detail parser smoke', ...(await run(process.execPath, ['scripts/test_shein_openapi_doc_detail_parser.mjs']))});
   results.push({name: 'maintenance readiness smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_maintenance_readiness.mjs']))});
 
@@ -215,6 +244,7 @@ async function main() {
       'copy_product_draft chat locked lifecycle smoke proves submitted/needs-manual-resolve tasks cannot be rechecked or resubmitted from chat',
       'copy_product_draft all-stores capability smoke proves non-HL stores can become confirmable when authorized, probed, gated and whitelisted',
       'maintenance executor smoke uses a local fake OpenAPI server to verify activate/retire/inventory/supply-price/product-price/title/image/certificate payloads and readback',
+      'local image role planner smoke proves 本地图包规划 only scans files and does not upload or submit SHEIN writes',
       'official doc detail parser smoke uses offline fixtures and never prints/saves cookies',
       'maintenance readiness smoke requires schema, per-store permission and strong readback before pilot_ready',
       'production safety smoke asserts production-style configs remain locked unless explicitly configured; write-enabled smokes use temporary fake OpenAPI only',

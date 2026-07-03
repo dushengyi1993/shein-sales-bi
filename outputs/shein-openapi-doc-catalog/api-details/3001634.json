@@ -1,0 +1,545 @@
+{
+  "docId": "3001634",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "商品综合查询",
+    "userDocName": "商品综合查询",
+    "endpoint": "/open-api/goods/searchProduct",
+    "method": "POST",
+    "docName": "",
+    "version": 4,
+    "updateTime": "2026-03-27 15:55:46",
+    "changeContent": "更新名称",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "商品列表接口，支持使用各种条件综合查询，查询结果按SPU维度提供，每个SPU下会提供商品的关键信息。支持的条件：平台编码、商家维护货号、上架状态、类目、发布时间和更新时间；各条件间是且的关系。返回的信息：各层级的编码和货号、标题属性、主图、上架状态、价格、库存",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "required": true,
+        "description": "支持返回的多语言报错信息，例如：language:en。默认返回中文多语言信息 英语:en 法语: fr 西班牙语:es 德语:de 中文简体:zh-cn 泰语:th 巴西葡语:pt-br"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "description": "商品列表V2请求参数",
+    "label": "ProductListV2Request",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "pageNum",
+        "type": "integer",
+        "required": true,
+        "description": "分页页码，从1开始",
+        "example": "1",
+        "multiple": 0
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "required": true,
+        "description": "分页大小，最大10",
+        "example": "20",
+        "multiple": 0
+      },
+      {
+        "name": "categoryIds",
+        "type": "int64",
+        "required": false,
+        "description": "末级分类ID列表，单次最多10个。",
+        "multiple": 1
+      },
+      {
+        "name": "spuNameList",
+        "type": "string",
+        "required": false,
+        "description": "SPU编码列表（平台编码），单次最多10个。",
+        "multiple": 1
+      },
+      {
+        "name": "skcNameList",
+        "type": "string",
+        "required": false,
+        "description": "SKC编码列表（平台编码），单次最多10个。",
+        "multiple": 1
+      },
+      {
+        "name": "skuCodeList",
+        "type": "string",
+        "required": false,
+        "description": "SKU编码列表（平台编码），单次最多10个。",
+        "multiple": 1
+      },
+      {
+        "name": "skcSupplierCodeList",
+        "type": "string",
+        "required": false,
+        "description": "SKC货号列表（商家维护的货号），单次最多10个。",
+        "multiple": 1
+      },
+      {
+        "name": "supplierSkuList",
+        "type": "string",
+        "required": false,
+        "description": "商家SKU列表（商家维护的SKU货号），单次最多10个",
+        "multiple": 1
+      },
+      {
+        "name": "skcShelfStatus",
+        "type": "integer",
+        "required": false,
+        "description": "SKC上架状态，0:下架 1:上架。待上架和已售罄均属于下架状态。",
+        "example": "1",
+        "multiple": 0
+      },
+      {
+        "name": "languageList",
+        "type": "string",
+        "required": false,
+        "description": "语种列表，决定商品信息中名称、属性名称、属性值名称返回的语种内容。单次最多入参5个语种，不传时默认返回英语。支持的语种包括：英语:en、法语:fr、西班牙语:es、德语:de、中文简体:zh-cn、泰语:th、巴西葡语:pt-br、日语:ja、韩语:ko",
+        "multiple": 1
+      },
+      {
+        "name": "createTimeStart",
+        "type": "string",
+        "required": false,
+        "description": "SPU的发布时间段（开始时间），格式 yyyy-MM-dd HH:mm:ss。发布时间定义：SPU首次审核通过时间。",
+        "example": "2024-01-01 00:00:00",
+        "multiple": 0
+      },
+      {
+        "name": "createTimeEnd",
+        "type": "string",
+        "required": false,
+        "description": "SPU的发布时间段（结束时间），格式 yyyy-MM-dd HH:mm:ss。发布时间定义：SPU首次审核通过时间。",
+        "example": "2024-12-31 23:59:59",
+        "multiple": 0
+      },
+      {
+        "name": "updateTimeEnd",
+        "type": "string",
+        "required": false,
+        "description": "SPU的更新时间段（结束时间），格式 yyyy-MM-dd HH:mm:ss。更新时间定义：SPU下任意SKC的标题、品牌、IP、属性变更导致的更新。不包括价格、库存的更新。",
+        "example": "2024-12-31 23:59:59",
+        "multiple": 0
+      },
+      {
+        "name": "updateTimeStart",
+        "type": "string",
+        "required": false,
+        "description": "SPU的更新时间段（开始时间），格式 yyyy-MM-dd HH:mm:ss。更新时间定义：SPU下任意SKC的标题、品牌、IP、属性变更导致的更新。不包括价格、库存的更新。",
+        "example": "2024-01-01 00:00:00",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfProductListV2Response",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "查询结果",
+        "label": "ProductListV2Response",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "meta",
+            "type": "object",
+            "required": false,
+            "description": "分页元信息",
+            "label": "MetaInfo",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "count",
+                "type": "integer",
+                "required": false,
+                "description": "符合查询条件的SPU数量",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "data",
+            "type": "object",
+            "required": false,
+            "description": "SPU列表。默认按SPU发布时间降序排序。",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "spuName",
+                "type": "string",
+                "required": false,
+                "description": "spu编码，平台生成的编码",
+                "multiple": 0
+              },
+              {
+                "name": "spuShelfStatus",
+                "type": "integer",
+                "required": false,
+                "description": "SPU的上架状态，0:下架 1:上架。待上架和已售罄均属于下架状态。",
+                "multiple": 0
+              },
+              {
+                "name": "categoryId",
+                "type": "string",
+                "required": false,
+                "description": "末级类目ID",
+                "multiple": 0
+              },
+              {
+                "name": "skcList",
+                "type": "object",
+                "required": false,
+                "description": "SKC列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "skcName",
+                    "type": "string",
+                    "required": false,
+                    "description": "SKC的平台编码",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "skcShelfStatus",
+                    "type": "integer",
+                    "required": false,
+                    "description": "SKC上架状态，0:下架 1:上架。待上架和已售罄均属于下架状态。",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "supplierCode",
+                    "type": "string",
+                    "required": false,
+                    "description": "SKC的商家货号",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "skcMainPicUrl",
+                    "type": "string",
+                    "required": false,
+                    "description": "SKC主图URL",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "skcTitle",
+                    "type": "object",
+                    "required": false,
+                    "description": "SKC标题列表",
+                    "multiple": 1,
+                    "children": [
+                      {
+                        "name": "language",
+                        "type": "string",
+                        "required": false,
+                        "description": "语种。返回的语种取决于入参中的languageList",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "title",
+                        "type": "string",
+                        "required": false,
+                        "description": "标题内容",
+                        "multiple": 0
+                      }
+                    ]
+                  },
+                  {
+                    "name": "skcSalesAttribute",
+                    "type": "object",
+                    "required": false,
+                    "description": "SKC销售属性列表",
+                    "multiple": 1,
+                    "children": [
+                      {
+                        "name": "language",
+                        "type": "string",
+                        "required": false,
+                        "description": "语种。返回的语种取决于入参中的languageList",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "attributeId",
+                        "type": "string",
+                        "required": false,
+                        "description": "属性ID",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "attributeName",
+                        "type": "string",
+                        "required": false,
+                        "description": "属性名称",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "attributeValueId",
+                        "type": "string",
+                        "required": false,
+                        "description": "属性值ID",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "attributeValueName",
+                        "type": "string",
+                        "required": false,
+                        "description": "属性值名称",
+                        "multiple": 0
+                      }
+                    ]
+                  },
+                  {
+                    "name": "skcSiteShelfStatusList",
+                    "type": "object",
+                    "required": false,
+                    "description": "SKC的站点维度上架状态",
+                    "multiple": 1,
+                    "children": [
+                      {
+                        "name": "status",
+                        "type": "integer",
+                        "required": false,
+                        "description": "上架状态，0:下架 1:上架。",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "subSite",
+                        "type": "string",
+                        "required": false,
+                        "description": "子站点，例如shein-us",
+                        "multiple": 0
+                      }
+                    ]
+                  },
+                  {
+                    "name": "skuList",
+                    "type": "object",
+                    "required": false,
+                    "description": "SKU列表",
+                    "multiple": 1,
+                    "children": [
+                      {
+                        "name": "skuCode",
+                        "type": "string",
+                        "required": false,
+                        "description": "SKU的平台编码",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "supplierSku",
+                        "type": "string",
+                        "required": false,
+                        "description": "商家维护的SKU，即发布接口中的supplier_sku",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "skuSalesAttributeList",
+                        "type": "object",
+                        "required": false,
+                        "description": "SKU销售属性列表。如果列表为空，说明商品没有次规格属性。",
+                        "multiple": 1,
+                        "children": [
+                          {
+                            "name": "language",
+                            "type": "string",
+                            "required": false,
+                            "description": "语种。返回的语种取决于入参中的languageList",
+                            "multiple": 0
+                          },
+                          {
+                            "name": "attributeId",
+                            "type": "string",
+                            "required": false,
+                            "description": "属性ID",
+                            "multiple": 0
+                          },
+                          {
+                            "name": "attributeName",
+                            "type": "string",
+                            "required": false,
+                            "description": "属性名称",
+                            "multiple": 0
+                          },
+                          {
+                            "name": "attributeValueId",
+                            "type": "string",
+                            "required": false,
+                            "description": "属性值ID",
+                            "multiple": 0
+                          },
+                          {
+                            "name": "attributeValueName",
+                            "type": "string",
+                            "required": false,
+                            "description": "属性值名称",
+                            "multiple": 0
+                          }
+                        ]
+                      },
+                      {
+                        "name": "costList",
+                        "type": "object",
+                        "required": false,
+                        "description": "成本价列表。仅半托管/全托管模式商家会返回此数据",
+                        "multiple": 1,
+                        "children": [
+                          {
+                            "name": "cost",
+                            "type": "double",
+                            "required": false,
+                            "description": "金额",
+                            "multiple": 0
+                          },
+                          {
+                            "name": "currency",
+                            "type": "string",
+                            "required": false,
+                            "description": "币种",
+                            "multiple": 0
+                          }
+                        ]
+                      },
+                      {
+                        "name": "priceList",
+                        "type": "object",
+                        "required": false,
+                        "description": "售价列表。仅自运营商家返回此数据",
+                        "multiple": 1,
+                        "children": [
+                          {
+                            "name": "site",
+                            "type": "string",
+                            "required": false,
+                            "description": "站点。例如shein-us",
+                            "multiple": 0
+                          },
+                          {
+                            "name": "currency",
+                            "type": "string",
+                            "required": false,
+                            "description": "币种",
+                            "multiple": 0
+                          },
+                          {
+                            "name": "basePrice",
+                            "type": "double",
+                            "required": false,
+                            "description": "原价",
+                            "multiple": 0
+                          },
+                          {
+                            "name": "specialPrice",
+                            "type": "double",
+                            "required": false,
+                            "description": "特价。特价=0，代表商家发布商品时没有维护特价。特价为0时可视为无特价。",
+                            "multiple": 0
+                          }
+                        ]
+                      },
+                      {
+                        "name": "inventoryList",
+                        "type": "object",
+                        "required": false,
+                        "description": "库存列表。如果为空，则说明商品在任一仓库都没有维护库存数据",
+                        "multiple": 1,
+                        "children": [
+                          {
+                            "name": "warehouseId",
+                            "type": "string",
+                            "required": false,
+                            "description": "仓库ID",
+                            "multiple": 0
+                          },
+                          {
+                            "name": "inventoryNum",
+                            "type": "integer",
+                            "required": false,
+                            "description": "库存数量",
+                            "multiple": 0
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求跟踪码"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

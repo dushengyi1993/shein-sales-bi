@@ -1,0 +1,277 @@
+{
+  "docId": "3001655",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询订单可用物流信息",
+    "userDocName": "查询订单可用物流信息",
+    "endpoint": "/open-api/gsp/order-mapping-channels",
+    "method": "POST",
+    "docName": "",
+    "version": 8,
+    "updateTime": "2026-04-03 17:44:28",
+    "changeContent": "更新prePackageInfo参数必填展示",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "提供接口查在线下单业务的订单维度数据的可用物流渠道；",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "orderNo",
+        "type": "string",
+        "required": true,
+        "description": "订单号",
+        "example": "GSO1CL53800M5D4",
+        "multiple": 0
+      },
+      {
+        "name": "packageSizeInfo",
+        "type": "object",
+        "required": true,
+        "description": "包裹尺寸",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "packageHeight",
+            "type": "string",
+            "required": true,
+            "description": "高度",
+            "example": "10",
+            "multiple": 0
+          },
+          {
+            "name": "packageLength",
+            "type": "string",
+            "required": true,
+            "description": "长度",
+            "example": "10",
+            "multiple": 0
+          },
+          {
+            "name": "packageWidth",
+            "type": "string",
+            "required": true,
+            "description": "宽度",
+            "example": "10",
+            "multiple": 0
+          },
+          {
+            "name": "unit",
+            "type": "string",
+            "required": true,
+            "description": "单位(当前仅支持cm)",
+            "example": "cm",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "packageWeightInfo",
+        "type": "object",
+        "required": true,
+        "description": "包裹重量",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "packageWeight",
+            "type": "string",
+            "required": true,
+            "description": "重量，支持小数",
+            "example": "400",
+            "multiple": 0
+          },
+          {
+            "name": "unit",
+            "type": "string",
+            "required": true,
+            "description": "单位(当前仅支持g)",
+            "example": "g",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "prePackageInfo",
+        "type": "object",
+        "children": [
+          {
+            "name": "goodsIds",
+            "type": "int64",
+            "description": "商品id，cod订单需要传入此参数；非cod订单不要传入此参数",
+            "example": "      6230236437987393394,       6230236437987393395",
+            "multiple": 1
+          }
+        ]
+      },
+      {
+        "name": "warehouseAddressCode",
+        "type": "string",
+        "required": true,
+        "description": "仓库地址编码",
+        "example": "WH2505093344009216",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": true,
+        "description": "错误描述,成功：OK",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "required": true,
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "warehouseAddressCode",
+            "type": "string",
+            "description": "仓库地址编码",
+            "example": "WH2505093344009216",
+            "multiple": 0
+          },
+          {
+            "name": "orderNo",
+            "type": "string",
+            "description": "订单号",
+            "example": "GSO1CL53800M5D4",
+            "multiple": 0
+          },
+          {
+            "name": "preRequestId",
+            "type": "string",
+            "description": "渠道预判请求ID；平台记录的该次请求参数的id，在下一步下单时需要用上；",
+            "example": "POJ2507283989769217",
+            "multiple": 0
+          },
+          {
+            "name": "channelInfoList",
+            "type": "object",
+            "required": true,
+            "description": "可用渠道列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "expressIdCode",
+                "type": "string",
+                "description": "物流公司名称",
+                "example": "123",
+                "multiple": 0
+              },
+              {
+                "name": "expressId",
+                "type": "integer",
+                "description": "物流公司ID",
+                "example": "995",
+                "multiple": 0
+              },
+              {
+                "name": "expressChannelCode",
+                "type": "string",
+                "description": "渠道商产品编码；（下物流单时需要使用该字段）",
+                "example": "usD2D1250707-Na",
+                "multiple": 0
+              },
+              {
+                "name": "expressShortName",
+                "type": "string",
+                "description": "物流公司名称简称",
+                "multiple": 0
+              },
+              {
+                "name": "performanceCost",
+                "type": "double",
+                "description": "履约服务费",
+                "example": "13.02",
+                "multiple": 0
+              },
+              {
+                "name": "currencyCode",
+                "type": "string",
+                "description": "币种",
+                "example": "USD",
+                "multiple": 0
+              },
+              {
+                "name": "estimateMinDay",
+                "type": "json",
+                "description": "预计最快妥投所需天数",
+                "multiple": 0
+              },
+              {
+                "name": "estimateMaxDay",
+                "type": "json",
+                "description": "预计最晚妥投所需天数",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/gsp/order-mapping-channels' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-timestamp: 1753756515388' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --data-raw '{ \"orderNo\": \"GSO1CL53800M5D4\", \"packageSizeInfo\":{ \"packageHeight\": \"10\", \"packageLength\": \"10\", \"packageWidth\": \"10\", \"unit\": \"cm\" }, \"packageWeightInfo\":{ \"packageWeight\": \"400\", \"unit\": \"g\" }, \"warehouseAddressCode\": \"WH2505093344009216\" }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"warehouseAddressCode\": \"WH2505093344009216\", \"orderNo\": \"GSO1CL53800M5D4\", \"preRequestId\": \"POJ2507283989769217\", \"channelInfoList\": [ { \"expressIdCode\": \"123\", \"expressId\": 995, \"expressChannelCode\": \"usD2D1250707-Na\", \"expressShortName\": \"\", \"performanceCost\": 13.02, \"currencyCode\": \"USD\", \"estimateMinDay\": null, \"estimateMaxDay\": null }, { \"expressIdCode\": \"这是第三方派送服务商11\", \"expressId\": 1730, \"expressChannelCode\": \"usD2Dtest02250709-Na\", \"expressShortName\": \"这是资源别称UniTEST02\", \"performanceCost\": 69.15, \"currencyCode\": \"USD\", \"estimateMinDay\": 1, \"estimateMaxDay\": 77 } ] }, \"bbl\": {}, \"traceId\": \"5fcc7a8c8c58b02b\" }",
+  "errorCode": null
+}

@@ -1,0 +1,172 @@
+{
+  "docId": "3001894",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "获取SKU建议零售价规则",
+    "userDocName": "查询建议零售价填写规则",
+    "endpoint": "/open-api/goods/query-recommend-retail-price-rule",
+    "method": "POST",
+    "docName": "",
+    "version": 5,
+    "updateTime": "2026-07-02 20:38:17",
+    "changeContent": "修改为商品",
+    "qpsContent": "",
+    "modes": [
+      1,
+      2,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "商品建议零售价填写规则（SKU维度），使用前请查看说明文档： https://open.sheincorp.com/documents/system/bf5a59ca-d378-4417-a359-f07cc89bf96b",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "响应msg的语种。不传时默认为英语，枚举值支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "brand_code",
+        "type": "string",
+        "description": "品牌code，例如“2xyz2”，可通过接口获取/open-api/goods/query-brand-list。如果商品有传品牌，则必须入参品牌code获取规则。有品牌、无品牌，两种情况下的填写规则差异很大。"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "成功时“0”",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "成功时“OK”",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "description": "信息",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "data",
+            "type": "object",
+            "required": true,
+            "description": "规则详情",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "is_rrp_required",
+                "type": "integer",
+                "description": "SKU维度建议零售价是否必填，0-非必填，1-必填",
+                "example": "1",
+                "multiple": 0
+              },
+              {
+                "name": "site_filling_rule",
+                "type": "integer",
+                "description": "是否允许按分站点维度填写，1-允许，0-不允许",
+                "example": "1",
+                "multiple": 0
+              },
+              {
+                "name": "available_sites",
+                "type": "object",
+                "required": true,
+                "description": "分站点维度规则下，可填写的站点与币种列表。仅在site_filling_rule=1的时候，此字段才会有值。",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "site",
+                    "type": "string",
+                    "description": "站点名，例如shein-fr",
+                    "example": "shein-de",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "currency",
+                    "type": "string",
+                    "description": "站点币种，例如EUR",
+                    "example": "EUR",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "material_requirement",
+                    "type": "integer",
+                    "description": "站点对辅助材料类型的要求，0-不需要填材料，1-类型一材料必填（文件必填，链接选填）、类型二材料选填（文件、链接均选填），2-类型一 或 类型二，至少填写一种（不论选哪一种类型，里面的文件、链接至少给一个）",
+                    "example": "2",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "non_site_filling_rule",
+                "type": "integer",
+                "description": "不分站点填写规则，1-可填，0-不可填",
+                "example": "1",
+                "multiple": 0
+              },
+              {
+                "name": "non_site_currencies",
+                "type": "string",
+                "description": "不分站点的规则下，可填写的币种列表。仅在non_site_filling_rule=1的时候，此字段才会有值。",
+                "example": "USD",
+                "multiple": 1
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "追踪码",
+        "example": "38d84125d30c03e0",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

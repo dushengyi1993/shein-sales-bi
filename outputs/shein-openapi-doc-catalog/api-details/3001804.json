@@ -1,0 +1,170 @@
+{
+  "docId": "3001804",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "确认退货申请单",
+    "userDocName": "确认退货申请单",
+    "endpoint": "/open-api/purchase/confirm-return-application",
+    "method": "POST",
+    "docName": "",
+    "version": 3,
+    "updateTime": "2026-06-12 10:36:55",
+    "changeContent": "清除字段描述中的空格",
+    "qpsContent": "20",
+    "modes": [
+      2
+    ],
+    "modeNames": [
+      "全托管"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "通过该接口对状态为\"待商家确认\"的退货申请单执行确认操作",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "returnDealType",
+        "type": "integer",
+        "required": true,
+        "description": "发起处理方式:1退货、2报废",
+        "example": "90",
+        "multiple": 0
+      },
+      {
+        "name": "returnAddressId",
+        "type": "int64",
+        "description": "计划退货详细地址Id；当returnDealType=1退货时必填",
+        "example": "11",
+        "multiple": 0
+      },
+      {
+        "name": "snapshotVersion",
+        "type": "string",
+        "description": "地址快照版本;当returnDealType=1退货时必填",
+        "example": "random_snapshotVersion",
+        "multiple": 0
+      },
+      {
+        "name": "distributionType",
+        "type": "integer",
+        "required": true,
+        "description": "退货方式；1-SHEIN合作物流，4-自提；当returnDealType=1退货时必填",
+        "example": "39",
+        "multiple": 0
+      },
+      {
+        "name": "returnExpressCompanyCode",
+        "type": "string",
+        "description": "退货物流公司代码；当returnDealType=1退货且distributionType=1-SHEIN合作物流时必填；其他场景不传",
+        "example": "random_returnExpressCompanyCode",
+        "multiple": 0
+      },
+      {
+        "name": "returnExpressCompanyName",
+        "type": "string",
+        "description": "退货物流公司名称；当returnDealType=1退货且distributionType=1-SHEIN合作物流时必填；其他场景不传",
+        "example": "random_returnExpressCompanyName",
+        "multiple": 0
+      },
+      {
+        "name": "returnPlanNo",
+        "type": "string",
+        "required": true,
+        "description": "退货申请单号",
+        "example": "random_returnPlanNo",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码成功：0",
+        "example": "random_code",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述,成功：OK",
+        "example": "random_msg",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "required": true,
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "data",
+            "type": "object",
+            "multiple": 1
+          },
+          {
+            "name": "meta",
+            "type": "object",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "count",
+                "type": "integer",
+                "example": "26",
+                "multiple": 0
+              },
+              {
+                "name": "customObj",
+                "type": "object",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

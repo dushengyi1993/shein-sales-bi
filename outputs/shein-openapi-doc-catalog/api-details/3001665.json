@@ -1,0 +1,151 @@
+{
+  "docId": "3001665",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询加车结构信息",
+    "userDocName": "查询加车结构信息",
+    "endpoint": "/open-api/ccst/v1/custom-info/queryAddCartInfo",
+    "method": "POST",
+    "docName": "post_open-api_ccst_v1_custom-info_queryAddCartInfo",
+    "version": 8,
+    "updateTime": "2026-04-07 20:40:56",
+    "changeContent": "更改接口目录",
+    "qpsContent": "50",
+    "modes": [
+      2,
+      5
+    ],
+    "modeNames": [
+      "全托管",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "",
+  "requestHeader": null,
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "customId",
+        "type": "string",
+        "required": true,
+        "description": "定制搭建ID"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述,成功：OK"
+      },
+      {
+        "name": "data",
+        "type": "object",
+        "children": [
+          {
+            "name": "customInfo",
+            "type": "object",
+            "description": "定制信息的具体内容",
+            "children": [
+              {
+                "name": "preview",
+                "type": "object",
+                "children": [
+                  {
+                    "name": "effects",
+                    "type": "string",
+                    "description": "预览图（产品形态与用户定制信息结合的图）"
+                  },
+                  {
+                    "name": "images",
+                    "type": "string",
+                    "description": "图片类型的定制信息",
+                    "multiple": 1
+                  },
+                  {
+                    "name": "texts",
+                    "type": "string",
+                    "description": "文字类型的定制信息",
+                    "multiple": 1
+                  }
+                ]
+              },
+              {
+                "name": "stores",
+                "type": "object",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "id",
+                    "type": "string",
+                    "description": "存储项的唯一标识符"
+                  },
+                  {
+                    "name": "key",
+                    "type": "string",
+                    "description": "存储项的键"
+                  },
+                  {
+                    "name": "label",
+                    "type": "string",
+                    "description": "组建的label"
+                  },
+                  {
+                    "name": "moduleType",
+                    "type": "string",
+                    "description": "模块类型"
+                  },
+                  {
+                    "name": "propertyName",
+                    "type": "string",
+                    "description": "属性名称"
+                  },
+                  {
+                    "name": "type",
+                    "type": "string",
+                    "description": "数据类型"
+                  },
+                  {
+                    "name": "value",
+                    "type": "object",
+                    "description": "存储项的值"
+                  }
+                ]
+              },
+              {
+                "name": "customizerId",
+                "type": "string",
+                "description": "定制搭建的id"
+              },
+              {
+                "name": "customizerVersion",
+                "type": "int64",
+                "description": "定制搭建的版本"
+              }
+            ]
+          },
+          {
+            "name": "id",
+            "type": "string",
+            "description": "定制数据ID，用户定制数据的唯一标识符"
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

@@ -1,0 +1,131 @@
+{
+  "docId": "3001422",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "提供更新MDP打印任务完成",
+    "userDocName": "提供更新MDP打印任务完成",
+    "endpoint": "/open-api/mdp/product/print-task/finish",
+    "method": "POST",
+    "docName": "post_open-api_mdp_product_print-task_finish",
+    "version": 4,
+    "updateTime": "2025-10-15 15:02:22",
+    "changeContent": "更新MDP接口文档",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "orderNo",
+        "type": "string",
+        "description": "加工单号/异常单号/生产异常单号"
+      },
+      {
+        "name": "designStyle",
+        "type": "string",
+        "required": true,
+        "description": "设计款号"
+      },
+      {
+        "name": "finalMaterialSku",
+        "type": "string",
+        "required": true,
+        "description": "成品sku"
+      },
+      {
+        "name": "actualPrintNum",
+        "type": "decimal",
+        "required": true,
+        "description": "实际打印米数"
+      },
+      {
+        "name": "wasteNum",
+        "type": "decimal",
+        "description": "损耗 ，支持小数点2位"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "orderNo",
+        "type": "string",
+        "description": "加工单号/异常单号/生产异常单号",
+        "example": "est quis quaerat et qui vero esse mollitia repellat aperiam iste",
+        "multiple": 0
+      },
+      {
+        "name": "designStyle",
+        "type": "string",
+        "description": "设计款号,orderNo为空时必填",
+        "example": "sed ea qui minima",
+        "multiple": 0
+      },
+      {
+        "name": "finalMaterialSku",
+        "type": "string",
+        "description": "成品sku,orderNo为空时必填",
+        "example": "ab eveniet magni error nisi",
+        "multiple": 0
+      },
+      {
+        "name": "actualPrintNum",
+        "type": "double",
+        "required": true,
+        "description": "实际打印米数",
+        "example": "12860.7",
+        "multiple": 0
+      },
+      {
+        "name": "wasteNum",
+        "type": "double",
+        "description": "损耗",
+        "example": "1402.17",
+        "multiple": 0
+      },
+      {
+        "name": "userCode",
+        "type": "string",
+        "description": "操作人的用户Code"
+      },
+      {
+        "name": "operateTime",
+        "type": "string",
+        "required": true,
+        "description": "操作时间"
+      },
+      {
+        "name": "equipmentCode",
+        "type": "string",
+        "description": "设备编号"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string"
+      },
+      {
+        "name": "msg",
+        "type": "string"
+      },
+      {
+        "name": "info",
+        "type": "object"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

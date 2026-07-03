@@ -1,0 +1,328 @@
+{
+  "docId": "3001848",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询代理公司列表",
+    "userDocName": "查询代理公司列表",
+    "endpoint": "/open-api/goods-compliance/agency-list",
+    "method": "POST",
+    "docName": "",
+    "version": 8,
+    "updateTime": "2026-06-29 17:39:21",
+    "changeContent": "新增出参字段，支持更多代理公司详细字段。",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "查询商家申报的代理公司信息，包括欧盟责任人、制造商、美国代理、英国代理，此接口的返回信息在SKC绑定代理公司时会使用。代理公司的整体解决方案，可点击查看文档。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：158339876400"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "查看签名生成规则"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "required": false,
+        "description": "指定出参语种，默认中文；支持语种:英语:EN 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "description": "ERP代理公司列表查询请求",
+    "label": "ErpAgencyListReq",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "agencyId",
+        "type": "int64",
+        "required": false,
+        "description": "代理公司ID",
+        "multiple": 0
+      },
+      {
+        "name": "agencyName",
+        "type": "string",
+        "required": false,
+        "description": "代理公司名称（精确匹配，不支持模糊匹配）",
+        "multiple": 0
+      },
+      {
+        "name": "pageNum",
+        "type": "integer",
+        "required": true,
+        "description": "页码，从1开始",
+        "multiple": 0
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "required": true,
+        "description": "每页大小，最多100",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfListOfErpAgencyResp",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "代理公司信息响应",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "agencyAgreementName",
+            "type": "string",
+            "required": false,
+            "description": "代理协议名称",
+            "multiple": 0
+          },
+          {
+            "name": "agencyAgreementUrl",
+            "type": "string",
+            "required": false,
+            "description": "代理协议url",
+            "multiple": 0
+          },
+          {
+            "name": "agencyCityName",
+            "type": "string",
+            "required": false,
+            "description": "城市",
+            "multiple": 0
+          },
+          {
+            "name": "agencyCountryName",
+            "type": "string",
+            "required": false,
+            "description": "国家/地区",
+            "multiple": 0
+          },
+          {
+            "name": "agencyDetailAddress",
+            "type": "string",
+            "required": false,
+            "description": "详细地址",
+            "multiple": 0
+          },
+          {
+            "name": "agencyEndTime",
+            "type": "string",
+            "required": false,
+            "description": "代理期限结束时间",
+            "multiple": 0
+          },
+          {
+            "name": "agencyId",
+            "type": "int64",
+            "required": false,
+            "description": "代理公司ID",
+            "multiple": 0
+          },
+          {
+            "name": "agencyName",
+            "type": "string",
+            "required": false,
+            "description": "代理公司名称",
+            "multiple": 0
+          },
+          {
+            "name": "agencyProvinceName",
+            "type": "string",
+            "required": false,
+            "description": "省/州",
+            "multiple": 0
+          },
+          {
+            "name": "agencyStartTime",
+            "type": "string",
+            "required": false,
+            "description": "代理期限开始时间",
+            "multiple": 0
+          },
+          {
+            "name": "agencyStatus",
+            "type": "integer",
+            "required": false,
+            "description": "代理公司状态，基于代理期限时间生成的状态。0-生效中，1-已过期，2-未生效。agencyStatus=0，且applyStatus=1/2的代理公司才可以和SKC绑定。",
+            "multiple": 0
+          },
+          {
+            "name": "agencySubType",
+            "type": "integer",
+            "required": false,
+            "description": "代理公司的二级类型。只有0-欧盟责任人有二级类型：20-欧洲代理；21-欧盟制造商；22-欧盟进口商；23-欧盟配送服务提供商",
+            "multiple": 0
+          },
+          {
+            "name": "agencyType",
+            "type": "integer",
+            "required": false,
+            "description": "代理公司的一级类型。0-欧盟责任人；1-英国代理；2-美国代理；3-制造商",
+            "multiple": 0
+          },
+          {
+            "name": "applyStatus",
+            "type": "integer",
+            "required": false,
+            "description": "代理申报的审核状态。0-待补充；1-待审核（商家后台页面会展示申报成功，接口层可认为此状态的代理公司可以和SKC绑定）；2-申报成功；3-审核失败；agencyStatus=1，且applyStatus=1/2的代理公司才可以和SKC绑定。",
+            "multiple": 0
+          },
+          {
+            "name": "areaCode",
+            "type": "string",
+            "required": false,
+            "description": "联系电话区号",
+            "multiple": 0
+          },
+          {
+            "name": "brandCodes",
+            "type": "string",
+            "required": false,
+            "description": "品牌编码列表",
+            "multiple": 1
+          },
+          {
+            "name": "contactName",
+            "type": "string",
+            "required": false,
+            "description": "联系人姓名",
+            "multiple": 0
+          },
+          {
+            "name": "coveredProductRange",
+            "type": "integer",
+            "required": false,
+            "description": "代理公司覆盖的商品范围。1-全部商品；2-部分商品；覆盖范围是1-全部商品时，SKC生成后将自动和代理公司完成绑定，不需要手动绑定。",
+            "multiple": 0
+          },
+          {
+            "name": "createTime",
+            "type": "datetime",
+            "required": false,
+            "description": "代理公司的创建时间",
+            "multiple": 0
+          },
+          {
+            "name": "email",
+            "type": "string",
+            "required": false,
+            "description": "电子邮箱",
+            "multiple": 0
+          },
+          {
+            "name": "originType",
+            "type": "integer",
+            "required": false,
+            "description": "来源类型：0-手动创建，1-线上办理",
+            "multiple": 0
+          },
+          {
+            "name": "postalCode",
+            "type": "string",
+            "required": false,
+            "description": "邮政编码",
+            "multiple": 0
+          },
+          {
+            "name": "supplierId",
+            "type": "int64",
+            "required": false,
+            "description": "商家ID",
+            "multiple": 0
+          },
+          {
+            "name": "telephone",
+            "type": "string",
+            "required": false,
+            "description": "联系电话",
+            "multiple": 0
+          },
+          {
+            "name": "title",
+            "type": "string",
+            "required": false,
+            "description": "责任人/公司名称",
+            "multiple": 0
+          },
+          {
+            "name": "updateTime",
+            "type": "datetime",
+            "required": false,
+            "description": "代理公司信息的更新时间",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "追踪码"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

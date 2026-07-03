@@ -1,0 +1,352 @@
+{
+  "docId": "3001891",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "获取议价单列表",
+    "userDocName": "获取议价单列表",
+    "endpoint": "/open-api/goods/discuss/query-discuss-list",
+    "method": "POST",
+    "docName": "",
+    "version": 6,
+    "updateTime": "2026-07-02 20:35:33",
+    "changeContent": "文档归属类目更新",
+    "qpsContent": "10",
+    "modes": [
+      2,
+      5
+    ],
+    "modeNames": [
+      "全托管",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "支持获取商品成本价的议价单列表。目前仅支持3种议价类型：新品议价、老品议价、新品核价复议",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "请求签名"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：158339876400"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "required": true,
+        "description": "语种。默认为中文。支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "discussStatus",
+        "type": "integer",
+        "description": "议价单状态,。1:待商家确认 2:待平台审核 3:接受议价 4:不接受议价 5:议价终止-成功 6:议价终止-失败",
+        "multiple": 0
+      },
+      {
+        "name": "pageNum",
+        "type": "integer",
+        "required": true,
+        "description": "分页数量。建议从1开始查询",
+        "example": "10",
+        "multiple": 0
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "required": true,
+        "description": "分页内条数，单页最多200",
+        "example": "1",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应码",
+        "example": "40908",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "description": "响应详情",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "count",
+            "type": "integer",
+            "description": "查询结果条数",
+            "example": "26842",
+            "multiple": 0
+          },
+          {
+            "name": "data",
+            "type": "object",
+            "required": true,
+            "description": "具体数据。目前仅支持3种议价类型：新品议价、老品议价、新品核价复议",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "allPicUrls",
+                "type": "string",
+                "description": "SKC的所有商品图片",
+                "example": "voluptas delectus nulla aperiam commodi qui labore quidem sapiente ut sint dicta enim corrupti accusantium",
+                "multiple": 1
+              },
+              {
+                "name": "appealCount",
+                "type": "integer",
+                "description": "议价单剩余可议价次数。（平台不允许对同一个SKC进行无限次议价行为，因此会有次数限制，当剩余次数为0时，议价单状态变为6终止-失败）",
+                "example": "49545",
+                "multiple": 0
+              },
+              {
+                "name": "appealReason",
+                "type": "string",
+                "description": "建议改价原因（平台侧写入的内容）",
+                "example": "eveniet consequatur quis repudiandae molestiae",
+                "multiple": 0
+              },
+              {
+                "name": "discussSn",
+                "type": "string",
+                "description": "议价单单号",
+                "example": "at esse ipsam expedita saepe sint quia eum ratione quia commodi sed atque facilis cum est consequuntur quidem ipsa optio ut",
+                "multiple": 0
+              },
+              {
+                "name": "discussStatus",
+                "type": "integer",
+                "description": "议价单状态。1:待商家确认 2:待平台审核 3:接受议价 4:不接受议价 5:议价终止-成功 6:议价终止-失败",
+                "example": "1186",
+                "multiple": 0
+              },
+              {
+                "name": "discussType",
+                "type": "integer",
+                "description": "议价单类型。0:新品议价 1:老品议价 3:新品核价复议",
+                "example": "16593",
+                "multiple": 0
+              },
+              {
+                "name": "fileUploadList",
+                "type": "object",
+                "required": true,
+                "description": "议价上传的辅助材料",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "file_name",
+                    "type": "string",
+                    "description": "原始文件名",
+                    "example": "eligendi facilis autem ipsa est",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "object_key",
+                    "type": "string",
+                    "description": "文件唯一key，需通过接口/open-api/goods/discuss/upload-discuss-file上传文件后获取",
+                    "example": "dicta tempore tempore dolorem iusto nisi nihil incidunt aut quo ipsam harum assumenda non debitis eos aut mollitia ullam facere illo",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "type",
+                    "type": "integer",
+                    "description": "文件类型 1:图片",
+                    "example": "54475",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "url",
+                    "type": "string",
+                    "description": "文件url，需通过接口/open-api/goods/discuss/upload-discuss-file上传文件后获取",
+                    "example": "nisi consectetur illo magni in doloribus voluptate rerum dolores ad ut et sed nisi soluta esse velit qui",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "isSizeSamePrice",
+                "type": "integer",
+                "description": "是否限制所有尺码同价1-是（代表SKC下所有SKU的价格需相同，即议价时也需要相同）；0 否",
+                "example": "15827",
+                "multiple": 0
+              },
+              {
+                "name": "mainPicUrl",
+                "type": "string",
+                "description": "商品主图地址",
+                "example": "qui rerum sit ea veritatis nihil soluta aperiam eum sed eligendi sint reiciendis placeat quae assumenda sunt nihil error",
+                "multiple": 0
+              },
+              {
+                "name": "productTitle",
+                "type": "string",
+                "description": "商品标题",
+                "example": "saepe neque aut dignissimos quibusdam ipsum amet aut corrupti nulla soluta iure sequi et atque itaque facilis",
+                "multiple": 0
+              },
+              {
+                "name": "reason",
+                "type": "string",
+                "description": "议价原因（商家侧输入的内容）",
+                "example": "consectetur est illo nulla expedita quam",
+                "multiple": 0
+              },
+              {
+                "name": "saleAttributeValue",
+                "type": "string",
+                "description": "SKC销售属性值",
+                "example": "et totam velit sapiente quis dicta consequatur vel perferendis tempore omnis consequuntur similique reiciendis accusantium aspernatur eligendi fugiat",
+                "multiple": 0
+              },
+              {
+                "name": "serialNumber",
+                "type": "integer",
+                "description": "当前议价的轮次数",
+                "example": "49585",
+                "multiple": 0
+              },
+              {
+                "name": "skcName",
+                "type": "string",
+                "description": "平台的skc编码",
+                "example": "nihil sint laborum officiis dolor deserunt fugiat eius",
+                "multiple": 0
+              },
+              {
+                "name": "skuCostPrices",
+                "type": "object",
+                "required": true,
+                "description": "sku成本价列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "costPriceHistories",
+                    "type": "object",
+                    "required": true,
+                    "description": "商家的成本价报价记录",
+                    "multiple": 1,
+                    "children": [
+                      {
+                        "name": "costPrice",
+                        "type": "double",
+                        "description": "成本价",
+                        "example": "61390.05",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "currency",
+                        "type": "string",
+                        "description": "币种",
+                        "example": "quia saepe aut temporibus molestiae omnis assumenda",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "serialNumber",
+                        "type": "integer",
+                        "description": "报价轮次数",
+                        "example": "18175",
+                        "multiple": 0
+                      }
+                    ]
+                  },
+                  {
+                    "name": "latestCostPrice",
+                    "type": "double",
+                    "description": "最近一次的商家报价价格。如果serialNumber=1即商家侧还没有发起过报价时，则此字段无数据。",
+                    "example": "2245.66",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "saleAttributeValues",
+                    "type": "string",
+                    "description": "次规格属性值",
+                    "example": "sit atque dolores sint velit atque molestiae omnis repellat dolor magni ullam expedita laborum quo pariatur inventore ut quis",
+                    "multiple": 1
+                  },
+                  {
+                    "name": "skuCode",
+                    "type": "string",
+                    "description": "平台的sku编码",
+                    "example": "346",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "suggestCostCurrency",
+                    "type": "string",
+                    "description": "平台的建议成本价币种",
+                    "example": "magnam corporis eaque hic dolorum dolores veritatis facilis eum nihil vitae qui iusto sint consequatur amet rem rerum enim voluptatem",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "suggestCostPrice",
+                    "type": "double",
+                    "description": "平台的建议成本价",
+                    "example": "56506.04",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "spuName",
+                "type": "string",
+                "description": "平台的spu编码",
+                "example": "id fugit repellat dolorum error ipsa corporis",
+                "multiple": 0
+              },
+              {
+                "name": "supplierCode",
+                "type": "string",
+                "description": "商家的skc货号",
+                "example": "271",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "响应信息",
+        "example": "modi expedita soluta et et ad consequatur tempora commodi consequatur aspernatur illum",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

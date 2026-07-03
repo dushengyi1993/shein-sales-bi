@@ -1,0 +1,105 @@
+{
+  "docId": "3000504",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "揽收超时/取消运单原因回传",
+    "userDocName": "揽收超时/取消运单原因回传",
+    "endpoint": "/open-api/cargo/timeout-cancel-reason-return",
+    "method": "POST",
+    "docName": "post_open-api_cargo_timeout-cancel-reason-return",
+    "version": 2,
+    "updateTime": "2024-10-15 10:44:17",
+    "changeContent": "新增traceId",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object",
+    "children": [
+      {
+        "name": "trackingNumber",
+        "type": "string",
+        "required": true,
+        "description": "运单号"
+      },
+      {
+        "name": "operateType",
+        "type": "integer",
+        "required": true,
+        "description": "操作类型 枚举值：1-揽收超时，2-取消运单"
+      },
+      {
+        "name": "operateSource",
+        "type": "integer",
+        "description": "操作来源 枚举值：1-用户操作、2-物流操作 仅操作类型=取消运单，才回传值，根据操作的角色判断回传（会存在app、小程序等的操作，根据角色判断回传）"
+      },
+      {
+        "name": "reasonType",
+        "type": "integer",
+        "description": "原因类型 枚举值：1-用户原因、2-物流原因"
+      },
+      {
+        "name": "remark",
+        "type": "string",
+        "description": "备注 限制不超过500字符"
+      },
+      {
+        "name": "urlList",
+        "type": "string",
+        "description": "附件 文件URL，支持回传多个附件链接（最多不超个10个，每个附件大小不超过10M）链接对应文件的格式限制：jpg、jpeg、png",
+        "multiple": 1
+      }
+    ]
+  },
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": false,
+        "description": "响应编码，0成功，-1失败, 其他失败",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述，成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "string",
+        "required": false,
+        "description": "null",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

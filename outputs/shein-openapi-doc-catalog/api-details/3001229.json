@@ -1,0 +1,157 @@
+{
+  "docId": "3001229",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "创建Feed文件",
+    "userDocName": "创建Feed文件",
+    "endpoint": "/open-api/sem/feed/createFeedDocument",
+    "method": "POST",
+    "docName": "post_open-api_sem_feed_createFeedDocument",
+    "version": 8,
+    "updateTime": "2025-07-15 22:15:40",
+    "changeContent": "1",
+    "qpsContent": "10",
+    "modes": [
+      1
+    ],
+    "modeNames": [
+      "自运营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "通过调用接口，创建SHEIN平台可访问的文档，接口会返回feedDocumentid值和用于上传feed内容的接口URL。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "contentType",
+        "type": "string",
+        "required": true,
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "响应异常时的bbl相关信息",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1
+              }
+            ]
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "result",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "feedDocumentId",
+                "type": "string",
+                "required": false,
+                "description": "创建的文件名称（目前仅支持JSON）",
+                "multiple": 0
+              },
+              {
+                "name": "url",
+                "type": "string",
+                "required": false,
+                "description": "上传文件的接口地址",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/sem/feed/createFeedDocument' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570849017' \\ --data-raw '{ \"contentType\": \"application/json\" }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"result\": { \"feedDocumentId\": \"MzgxMDk0NDVfMTBfNDI0XzE3MzM1NDQxMzkyMTY=.json\", \"url\": \"http://openapi-test01.sheincorp.cn/open-api/sem/feed/uploadDocumentContent\" } }, \"bbl\": null, \"traceId\": \"192508e1a84df9de\" }",
+  "errorCode": null
+}

@@ -1,0 +1,194 @@
+{
+  "docId": "3001858",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "更新SKC的警告语",
+    "userDocName": "更新SKC的警告语",
+    "endpoint": "/open-api/goods-compliance/update-skc-warning-certificate",
+    "method": "POST",
+    "docName": "",
+    "version": 3,
+    "updateTime": "2026-06-29 19:41:16",
+    "changeContent": "更新解决方案链接",
+    "qpsContent": "40",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "创建/更新某个SKC的警告书证书。详细的入参方式可参考解决方案",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "响应msg的语种。不传时默认为英语，枚举值支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "certificateTypeCode",
+        "type": "string",
+        "required": true,
+        "description": "证书类型编码",
+        "multiple": 0
+      },
+      {
+        "name": "fieldList",
+        "type": "object",
+        "required": true,
+        "description": "证书字段信息",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "fieldCode",
+            "type": "string",
+            "required": true,
+            "description": "证书字段编码。常规字段和警告语字段都需要入参。具体入参方式请参考解决方案。",
+            "multiple": 0
+          },
+          {
+            "name": "fieldValues",
+            "type": "object",
+            "required": true,
+            "description": "字段值列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "fieldValueId",
+                "type": "int64",
+                "required": true,
+                "description": "字段值ID",
+                "example": "0",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "skcNames",
+        "type": "string",
+        "required": true,
+        "description": "SKC平台编码，支持批量操作，单次最多100个。",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应码",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "响应信息",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "description": "详情",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "successList",
+            "type": "object",
+            "required": true,
+            "description": "更新成功列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "skcName",
+                "type": "string",
+                "description": "SKC平台编码",
+                "example": "s24102107079376",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "failedList",
+            "type": "object",
+            "required": true,
+            "description": "更新失败列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "skcName",
+                "type": "string",
+                "description": "SKC平台编码"
+              },
+              {
+                "name": "code",
+                "type": "string",
+                "description": "失败响应码"
+              },
+              {
+                "name": "reason",
+                "type": "string",
+                "description": "具体失败原因"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "追踪码",
+        "example": "9bc89bf253ca66b0",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

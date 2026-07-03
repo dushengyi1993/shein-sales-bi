@@ -1,0 +1,156 @@
+{
+  "docId": "3000491",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "供应商库存-库存同步接口",
+    "userDocName": "供应商库存-库存同步接口",
+    "endpoint": "/open-api/material/sync-inventory",
+    "method": "POST",
+    "docName": "post_open-api_material_sync-inventory",
+    "version": 2,
+    "updateTime": "2024-10-14 22:26:26",
+    "changeContent": "新增traceId",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "库存同步接口注意： 1.请求参数的中文不能出现unicode编码 如：柯桥变成了 \\u67ef\\u6865 2.请求参数中不能含有特殊的符号如制表符，换行符 3.一次同步的数量不能超过100条数据",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 1,
+    "children": [
+      {
+        "name": "supplierMaterialName",
+        "type": "string",
+        "description": "供应商物料名称",
+        "multiple": 0
+      },
+      {
+        "name": "materialCode",
+        "type": "string",
+        "required": true,
+        "description": "系统对接物料编码",
+        "multiple": 0
+      },
+      {
+        "name": "materialColorCode",
+        "type": "string",
+        "description": "供应商物料色号",
+        "multiple": 0
+      },
+      {
+        "name": "materialColorName",
+        "type": "string",
+        "description": "供应商物料颜色",
+        "multiple": 0
+      },
+      {
+        "name": "width",
+        "type": "string",
+        "description": "门幅（cm）",
+        "multiple": 0
+      },
+      {
+        "name": "weight",
+        "type": "string",
+        "description": "克重（g/m2）",
+        "multiple": 0
+      },
+      {
+        "name": "dyelotNumber",
+        "type": "string",
+        "required": true,
+        "description": "缸号",
+        "multiple": 0
+      },
+      {
+        "name": "numberCode",
+        "type": "string",
+        "required": true,
+        "description": "条编号",
+        "multiple": 0
+      },
+      {
+        "name": "repertoryNum",
+        "type": "string",
+        "required": true,
+        "description": "库存数量",
+        "multiple": 0
+      },
+      {
+        "name": "unit",
+        "type": "string",
+        "required": true,
+        "description": "单位",
+        "multiple": 0
+      },
+      {
+        "name": "warehouseName",
+        "type": "string",
+        "required": true,
+        "description": "仓库名称",
+        "multiple": 0
+      },
+      {
+        "name": "warehouseAddr",
+        "type": "string",
+        "required": true,
+        "description": "仓库地址",
+        "multiple": 0
+      },
+      {
+        "name": "rfidCode",
+        "type": "string",
+        "description": "RFID 编码"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": false,
+        "description": "返回编码",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "返回描述",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

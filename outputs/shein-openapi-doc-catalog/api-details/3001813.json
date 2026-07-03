@@ -1,0 +1,141 @@
+{
+  "docId": "3001813",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "JIT母单及子单对应关系查询接口",
+    "userDocName": "JIT母单及子单对应关系查询接口",
+    "endpoint": "/open-api/order/get-mothe-child-orders",
+    "method": "GET",
+    "docName": "get_open-api_order_get-mothe-child-orders",
+    "version": 8,
+    "updateTime": "2026-06-15 10:04:14",
+    "changeContent": "V8",
+    "qpsContent": "40",
+    "modes": [
+      2,
+      3,
+      8
+    ],
+    "modeNames": [
+      "全托管",
+      "SHEIN自营",
+      "POP"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "1.入参orderNos，selectJitMother必填，orderNos最多支持200个订单2.info是个列表，列表实体必返回请求的订单号，motherOrChildOrders=空列表（不为null）的情况：1）订单的商家与请求的商家不一致，2）非JIt订单3）查询的订单与selectJitMother不一致实现逻辑：遍历请求订单编号，校验，如果订单是JIt母单 && 请求查询母单 则motherOrChildOrders为对应的子单信息如果订单是JIt子单 && 请求查询非母单 且 则motherOrChildOrders为对应的母单信息如果订单是JIt合单 && 请求查询非母单 且 则motherOrChildOrders为对应的母单信息code=0返回成功，其他为异常，异常信息取msg",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object",
+    "children": [
+      {
+        "name": "orderNos",
+        "type": "string",
+        "required": true,
+        "description": "采购单号，支持批量，一次最多请求200采购单号。"
+      },
+      {
+        "name": "selectJitMother",
+        "type": "integer",
+        "required": true,
+        "description": "1、是(表示要查询的是母单) ；2、否（表示要查询的是子单，包括合单）"
+      }
+    ]
+  },
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "状态码"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "提示信息"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "description": "响应信息",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "orderNo",
+            "type": "string",
+            "required": true,
+            "description": "查询订单号"
+          },
+          {
+            "name": "motherOrChildOrders",
+            "type": "object",
+            "required": true,
+            "description": "如果是JIt母单，则列表存其关联子单；如果是Jit子单或JIt合单，则表存其关联母单，否则为空列表[]",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "orderNo",
+                "type": "string",
+                "description": "关联的订单号"
+              },
+              {
+                "name": "status",
+                "type": "string",
+                "description": "订单状态：1待下单（暂时不支持），2已下单，3发货中，4已送货，5已收货，6已查验，7已退货，8已完成，9无货下架，10已作废，11待审核，12分单中 13待退货 14全部触发"
+              },
+              {
+                "name": "statusName",
+                "type": "string",
+                "description": "订单状态：1待下单（暂时不支持），2已下单，3发货中，4已送货，5已收货，6已查验，7已退货，8已完成，9无货下架，10已作废，11待审核，12分单中 13待退货 14全部触发"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "error",
+        "type": "string",
+        "description": "错误码"
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request GET 'https://openapi.sheincorp.cn/open-api/order/get-mothe-child-orders?orderNos=J230517600016,J230619600017,J230614600034&selectJitMother=1' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570729613' \\ --header 'language: EN' \\ --data-raw ''",
+  "responseExample": "code\": \"0\", \"msg\": \"\", \"info\": [ { \"orderNo\": \"J230517600016\", \"motherOrChildOrders\": [] }, { \"orderNo\": \"J230619600017\", \"motherOrChildOrders\": [] }, { \"orderNo\": \"J230614600034\", \"motherOrChildOrders\": [] } ], \"error\": null }",
+  "errorCode": null
+}

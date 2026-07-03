@@ -1,0 +1,189 @@
+{
+  "docId": "3001901",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "获取店铺可用IP列表",
+    "userDocName": "查询可用IP列表",
+    "endpoint": "/open-api/goods/query-ip-list",
+    "method": "POST",
+    "docName": "",
+    "version": 2,
+    "updateTime": "2026-07-02 21:01:10",
+    "changeContent": "更新文档标题",
+    "qpsContent": "40",
+    "modes": [
+      1,
+      2,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "获取店铺可用的IP数据。此接口的数据可使用在商品发布接口的入参\"ip_character_list\"。IP指米老鼠这里IP形象，当商品涉及IP（例如联名款）时才会使用到此数据。商家可用的IP需要先提供授权证明等材料才可使用。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "required": true,
+        "description": "每页数量，每页最大数量为200",
+        "example": "200",
+        "multiple": 0
+      },
+      {
+        "name": "idMax",
+        "type": "bigint",
+        "required": true,
+        "description": "上次查询结果中返回的最大的id，idMax。首次查询请输入0。",
+        "example": "0",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应编码。响应成功：0",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "响应信息,成功：OK",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "description": "数据信息",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "count",
+            "type": "integer",
+            "required": true,
+            "description": "查询结果的总数",
+            "example": "3",
+            "multiple": 0
+          },
+          {
+            "name": "idMax",
+            "type": "integer",
+            "required": true,
+            "description": "本次查询结果中的最大id",
+            "example": "112095",
+            "multiple": 0
+          },
+          {
+            "name": "list",
+            "type": "object",
+            "description": "商家可用的IP列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "id",
+                "type": "bigint",
+                "description": "商家和IP关系的数据键值。ERP不用关注业务意义，主要作为查询标的。",
+                "example": "112093",
+                "multiple": 0
+              },
+              {
+                "name": "merchantExternalId",
+                "type": "bigint",
+                "description": "商家ID",
+                "example": "38109363",
+                "multiple": 0
+              },
+              {
+                "name": "ipId",
+                "type": "bigint",
+                "description": "IP的id值。此值会使用在商品发布接口的\"ip_character_list\" - \"ip_id\"。",
+                "example": "39425",
+                "multiple": 0
+              },
+              {
+                "name": "ipName",
+                "type": "string",
+                "description": "IP的英文名称",
+                "example": "ip迪士尼",
+                "multiple": 0
+              },
+              {
+                "name": "ipNameCn",
+                "type": "string",
+                "description": "IP的中文名称",
+                "example": "ipdishini",
+                "multiple": 0
+              },
+              {
+                "name": "ipGroupId",
+                "type": "bigint",
+                "description": "IP归属组的组ID。例如IP米老鼠归属于IP组迪士尼。",
+                "example": "258",
+                "multiple": 0
+              },
+              {
+                "name": "ipGroupName",
+                "type": "string",
+                "description": "IP组名称",
+                "example": "迪士尼ip",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "追踪ID",
+        "example": "70b63a844e39d54c",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

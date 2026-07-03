@@ -1,0 +1,281 @@
+{
+  "docId": "3001893",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询建议零售价列表",
+    "userDocName": "查询商品建议零售价",
+    "endpoint": "/open-api/goods-recommend-retail-price/search",
+    "method": "POST",
+    "docName": "",
+    "version": 3,
+    "updateTime": "2026-07-02 20:37:27",
+    "changeContent": "将SKC改为商品",
+    "qpsContent": "20",
+    "modes": [
+      1,
+      2,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "查询商品当前的建议零售价详情。注意：更新建议零售价前，请一定要查询商品当前建议零售价信息，因为更新是全量覆盖逻辑，提交时必须提供所有想要的信息，原数据会清空，以最新更新信息为准。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "x-lt-signature",
+        "type": "int64",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "响应msg的语种。不传时默认为英语，枚举值支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "description": "查询SKC建议零售价列表请求",
+    "label": "QuerySkcRrpListOpenApiReq",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "skc_name_list",
+        "type": "string",
+        "required": true,
+        "description": "SKC平台编码列表，单次最多支持查询100个SKC。",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfQuerySkcRrpListOpenApiResp",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "响应信息",
+        "label": "QuerySkcRrpListOpenApiResp",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "skc_rrp_list",
+            "type": "object",
+            "required": false,
+            "description": "SKC列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "skc_name",
+                "type": "string",
+                "required": false,
+                "description": "SKC平台编码",
+                "multiple": 0
+              },
+              {
+                "name": "status",
+                "type": "integer",
+                "required": false,
+                "description": "SKC的建议零售价状态。1-审核中 2-包含抽检失败 3-包含审核失败 4-生效中 5-即将过期 6-已过期失效 7-部分过期失效。其中2、3、7指的是SKC下的部分SKU有对应的状态，失败的部分代表没有建议零售价，具体是哪些SKU失败，可以查询审核记录：/open-api/goods-recommend-retail-price-audit/search",
+                "multiple": 0
+              },
+              {
+                "name": "status_desc",
+                "type": "string",
+                "required": false,
+                "description": "当前状态的说明文案。例如status=1，desc=当前skc内有sku的建议零售价正在审核中，不能进行修改",
+                "multiple": 0
+              },
+              {
+                "name": "start_effective_time",
+                "type": "int64",
+                "required": false,
+                "description": "SKC整体建议零售价的有效期开始时间(毫秒时间戳)",
+                "multiple": 0
+              },
+              {
+                "name": "end_effective_time",
+                "type": "int64",
+                "required": false,
+                "description": "SKC整体建议零售价的有效期结束时间(毫秒时间戳)",
+                "multiple": 0
+              },
+              {
+                "name": "last_update_time",
+                "type": "int64",
+                "required": false,
+                "description": "SKC整体建议零售价的最新更新时间(毫秒时间戳)",
+                "multiple": 0
+              },
+              {
+                "name": "sku_rrp_info_list",
+                "type": "object",
+                "required": false,
+                "description": "SKC下详细的SKU建议零售价信息列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "sku_code",
+                    "type": "string",
+                    "required": true,
+                    "description": "SKU平台编码",
+                    "example": "SKU001",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "site_rrp_info_list",
+                    "type": "object",
+                    "required": false,
+                    "description": "站点维度建议零售价列表。一个SKU可能有多组数据。如果A站点是按站点维度提供的，则site有值，例如shein-fr；如果BCD三个站点是不按站点维度提供的，则site无值。",
+                    "multiple": 1,
+                    "children": [
+                      {
+                        "name": "site",
+                        "type": "string",
+                        "required": false,
+                        "description": "站点。若例如shein-fr。如果站点为空，则代表此组数据为不分站点的SKU维度建议零售价。",
+                        "example": "us",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "currency",
+                        "type": "string",
+                        "required": false,
+                        "description": "币种。例如EUR",
+                        "example": "USD",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "suggested_retail_price",
+                        "type": "string",
+                        "required": false,
+                        "description": "建议零售价",
+                        "example": "19.99",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "end_effective_time",
+                        "type": "int64",
+                        "required": false,
+                        "description": "结束生效时间(毫秒时间戳)",
+                        "example": "1741776000000",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "start_effective_time",
+                        "type": "int64",
+                        "required": false,
+                        "description": "开始生效时间(毫秒时间戳)。",
+                        "example": "1739184000000",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "type_one_proof",
+                        "type": "object",
+                        "required": false,
+                        "description": "类型一证明材料信息",
+                        "label": "ProofMaterialVO",
+                        "multiple": 0,
+                        "children": [
+                          {
+                            "name": "attachments",
+                            "type": "string",
+                            "required": false,
+                            "description": "证明材料附件列表",
+                            "multiple": 1
+                          },
+                          {
+                            "name": "proof_link",
+                            "type": "string",
+                            "required": false,
+                            "description": "证明链接",
+                            "multiple": 0
+                          }
+                        ]
+                      },
+                      {
+                        "name": "type_two_proof",
+                        "type": "object",
+                        "required": false,
+                        "description": "类型二证明材料信息",
+                        "label": "ProofMaterialVO",
+                        "multiple": 0,
+                        "children": [
+                          {
+                            "name": "attachments",
+                            "type": "string",
+                            "required": false,
+                            "description": "证明材料附件列表",
+                            "multiple": 1
+                          },
+                          {
+                            "name": "proof_link",
+                            "type": "string",
+                            "required": false,
+                            "description": "证明链接",
+                            "multiple": 0
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "追踪码"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

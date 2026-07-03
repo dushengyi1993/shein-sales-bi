@@ -1,0 +1,184 @@
+{
+  "docId": "3000492",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "供应商质检-验布报告",
+    "userDocName": "供应商质检-验布报告",
+    "endpoint": "/open-api/material/receive-cloth-report",
+    "method": "POST",
+    "docName": "post_open-api_material_receive-cloth-report",
+    "version": 3,
+    "updateTime": "2024-10-14 22:27:33",
+    "changeContent": "新增traceId",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "字段填写说明： 条编码：最多200个字符；条编码不得与该供应商已有验布报告重复； 系统对接码：在Shein存在，且属于该调动接口供应商的系统对接码； 幅宽：要求>0，保留两位小数 克重：单位为米，要求≥0，保留两位小数；单位为公斤时，要求>0，保留两位小数 色差：最多200个字符 单位（只能是公斤或米）：0-公斤，1-米 米数：单位为米时，必填；要求>0，保留两位小数； 公斤数：单位为公斤时，必填；要求>0，保留两位小数； 百平方米扣分：最多200个字符 扣损：最多200个字符 等级：最多200个字符 检测结果：0-合格，1-不合格 文件类型： 0-图片 1-PDF ① 0-图片：可以访问的图片地址，图片格式不限，最多10张 注意： 1.对外接口的图片域名。要以(.文件类型)为最末尾。 例如：http://xxx/api/html/customer105998.jpg http://xxx/api/html/customer105998.png 2.图片的格式要求是：png、jpg、jpeg，其他格式不支持 ② 1-PDF ： 有且仅有一个文件，最大支持30M 验布人员：最多20个字符 验布时间：精确到年月日，时间格式：yyyy-MM-dd 例如：2020-09-01 校验失败返回失败信息具体如下： 条编码：Shein已有该验布报告 系统对接码：系统对接编码不正确； 幅宽：幅宽必须大于0 克重：单位为公斤时，必须大于0 系统对接码：系统对接编码不正确；",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 1,
+    "children": [
+      {
+        "name": "acode",
+        "type": "string",
+        "required": true,
+        "description": "条编码",
+        "example": "T41715915200825000003",
+        "multiple": 0
+      },
+      {
+        "name": "sysDockMaterialCode",
+        "type": "string",
+        "required": true,
+        "description": "系统对接码",
+        "example": "P7199-M00039680 ",
+        "multiple": 0
+      },
+      {
+        "name": "practicalWidth",
+        "type": "decimal",
+        "required": true,
+        "description": "幅宽",
+        "example": "10",
+        "multiple": 0
+      },
+      {
+        "name": "practicalWeight",
+        "type": "decimal",
+        "required": true,
+        "description": "色差",
+        "example": "20",
+        "multiple": 0
+      },
+      {
+        "name": "chromaticAberration",
+        "type": "string",
+        "required": true,
+        "description": "色差",
+        "example": "30",
+        "multiple": 0
+      },
+      {
+        "name": "unit",
+        "type": "integer",
+        "required": true,
+        "description": "单位",
+        "example": "10",
+        "multiple": 0
+      },
+      {
+        "name": "num",
+        "type": "decimal",
+        "description": "数量",
+        "defaultValue": "0",
+        "example": "10",
+        "multiple": 0
+      },
+      {
+        "name": "points",
+        "type": "string",
+        "required": true,
+        "description": "百平方米扣分",
+        "multiple": 0
+      },
+      {
+        "name": "loss",
+        "type": "string",
+        "required": true,
+        "description": "扣损",
+        "example": "2",
+        "multiple": 0
+      },
+      {
+        "name": "level",
+        "type": "string",
+        "required": false,
+        "description": "等级",
+        "example": "三级",
+        "multiple": 0
+      },
+      {
+        "name": "result",
+        "type": "integer",
+        "required": true,
+        "description": "检测结果",
+        "example": "1",
+        "multiple": 0
+      },
+      {
+        "name": "fileUrlList",
+        "type": "string",
+        "required": true,
+        "description": "图片",
+        "multiple": 1
+      },
+      {
+        "name": "fileType",
+        "type": "integer",
+        "required": true,
+        "description": "文件类型 0-图片（单个文件最大支持30M），1-PDF（单个文件最大支持30M）"
+      },
+      {
+        "name": "qcBy",
+        "type": "string",
+        "required": true,
+        "description": "验布人员"
+      },
+      {
+        "name": "qcTime",
+        "type": "string",
+        "required": true,
+        "description": "验布时间，时间格式：yyyy-MM-dd 例如：2020-09-01"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": false,
+        "defaultValue": "0",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "defaultValue": "success",
+        "example": "success",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

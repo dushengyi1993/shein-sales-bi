@@ -1,0 +1,160 @@
+{
+  "docId": "3001369",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询是否支持自定义属性值",
+    "userDocName": "查询是否支持自定义属性值",
+    "endpoint": "/open-api/goods/get-custom-attribute-permission-config",
+    "method": "POST",
+    "docName": "post_open-api_goods_get-custom-attribute-permission-config",
+    "version": 8,
+    "updateTime": "2025-08-15 14:57:20",
+    "changeContent": "更新描述",
+    "qpsContent": "40",
+    "modes": [
+      1,
+      2,
+      3,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "SHEIN自营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "查询某个分类是否可以自定义销售属性的属性值。注意：并非所有商家、所有分类都可以自定义属性值。创建自定义属性值之前一定要先查询此接口确定X商家的Y分类可自定义属性值。",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "language",
+        "type": "string",
+        "required": true,
+        "description": "默认返回中文多语言信息，支持语种：英语:en 法语: fr 西班牙语:es 德语:de 中文简体:zh-cn 泰语:th 巴西葡语:pt-br",
+        "example": "en"
+      },
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "category_id_list",
+        "type": "int64",
+        "required": true,
+        "description": "末级分类ID，最多支持200个",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "bbl",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "Result(success: 0)",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "data",
+            "type": "object",
+            "description": "分类下销售属性信息",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "attribute_id",
+                "type": "int64",
+                "description": "属性id"
+              },
+              {
+                "name": "last_category_id",
+                "type": "int64",
+                "description": "末级分类id"
+              },
+              {
+                "name": "has_permission",
+                "type": "integer",
+                "description": "属性是否支持自定义属性值。1-支持；0-不支持"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi-test01.sheincorp.cn/open-api/goods/get-custom-attribute-permission-config' \\ --header 'language: zh-cn' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-timestamp: 1752733538805' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi-test01.sheincorp.cn' \\ --data-raw '{ \"category_id_list\": [ 2103 ] }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"data\": [ { \"has_permission\": 1, \"last_category_id\": 2103, \"attribute_id\": 27 }, { \"has_permission\": 1, \"last_category_id\": 2103, \"attribute_id\": 87 } ], \"meta\": { \"count\": 2, \"customObj\": null } }, \"bbl\": null }",
+  "errorCode": null
+}

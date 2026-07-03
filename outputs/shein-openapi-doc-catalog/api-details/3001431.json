@@ -1,0 +1,219 @@
+{
+  "docId": "3001431",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "新增或更新挂卡信息",
+    "userDocName": "新增或更新挂卡信息",
+    "endpoint": "/open-api/mdp/hang-card/add-or-update",
+    "method": "POST",
+    "docName": "",
+    "version": 1,
+    "updateTime": "2025-10-15 16:18:49",
+    "changeContent": "MDP新增版本",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "description": "OpenAPI调用新增或更新挂卡请求参数",
+    "label": "OpenApiHangCardAddOrUpdateReq",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "handCardInfoList",
+        "type": "object",
+        "required": false,
+        "description": "挂卡信息",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "designStyle",
+            "type": "string",
+            "required": false,
+            "description": "设计款号",
+            "multiple": 0
+          },
+          {
+            "name": "designer",
+            "type": "string",
+            "required": false,
+            "description": "设计师",
+            "multiple": 0
+          },
+          {
+            "name": "equipmentId",
+            "type": "int64",
+            "required": false,
+            "description": "开发设备id",
+            "multiple": 0
+          },
+          {
+            "name": "finalGoodsSku",
+            "type": "string",
+            "required": false,
+            "description": "成品sku",
+            "multiple": 0
+          },
+          {
+            "name": "flowerCode",
+            "type": "string",
+            "required": false,
+            "description": "花型号",
+            "multiple": 0
+          },
+          {
+            "name": "hangCardNo",
+            "type": "string",
+            "required": false,
+            "description": "挂卡编号",
+            "multiple": 0
+          },
+          {
+            "name": "supplierHangCardNo",
+            "type": "string",
+            "required": false,
+            "description": "供应商挂卡编号",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "userCode",
+        "type": "string",
+        "required": true,
+        "description": "userCode",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "接口返回基础数据",
+    "label": "ApiResultOfOpenApiHangCardAddOrUpdateResp",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": false,
+        "description": "响应码，成功：0",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "detailMsg",
+        "type": "string",
+        "required": false,
+        "description": "详细信息",
+        "example": "详细信息",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "响应数据",
+        "label": "OpenApiHangCardAddOrUpdateResp",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "handCardInfoList",
+            "type": "object",
+            "required": false,
+            "description": "挂卡信息",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "designStyle",
+                "type": "string",
+                "required": false,
+                "description": "设计款号",
+                "multiple": 0
+              },
+              {
+                "name": "designer",
+                "type": "string",
+                "required": false,
+                "description": "设计师",
+                "multiple": 0
+              },
+              {
+                "name": "equipmentId",
+                "type": "int64",
+                "required": false,
+                "description": "开发设备id",
+                "multiple": 0
+              },
+              {
+                "name": "finalGoodsSku",
+                "type": "string",
+                "required": false,
+                "description": "成品sku",
+                "multiple": 0
+              },
+              {
+                "name": "flowerCode",
+                "type": "string",
+                "required": false,
+                "description": "花型号",
+                "multiple": 0
+              },
+              {
+                "name": "hangCardNo",
+                "type": "string",
+                "required": false,
+                "description": "挂卡编号",
+                "multiple": 0
+              },
+              {
+                "name": "supplierHangCardNo",
+                "type": "string",
+                "required": false,
+                "description": "供应商挂卡编号",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "前端展示的描述信息",
+        "example": "前端展示的描述信息",
+        "multiple": 0
+      },
+      {
+        "name": "time",
+        "type": "datetime",
+        "required": false,
+        "description": "响应时间",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

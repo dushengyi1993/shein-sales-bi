@@ -1,0 +1,141 @@
+{
+  "docId": "3000511",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "扎信息查询接口",
+    "userDocName": "扎信息查询接口",
+    "endpoint": "/open-api/mes/bundle-info",
+    "method": "POST",
+    "docName": "post_open-api_mes_bundle-info",
+    "version": 2,
+    "updateTime": "2024-10-15 10:55:47",
+    "changeContent": "新增traceId",
+    "qpsContent": "",
+    "modes": [
+      3
+    ],
+    "modeNames": [
+      "SHEIN自营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bundleNum",
+        "type": "string",
+        "required": false,
+        "description": "扎号",
+        "example": "sit fuga rem enim repellat rem nulla assumenda qui",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "integer",
+        "required": false,
+        "description": "状态码",
+        "example": "23081",
+        "multiple": 0
+      },
+      {
+        "name": "detailMsg",
+        "type": "string",
+        "required": false,
+        "description": "执行结果详细信息",
+        "example": "consequatur amet sint optio dignissimos ut necessitatibus consectetur aut est illo quo omnis illo id quia dolor voluptas necessitatibus est",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "description": "执行结果数据",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "bundleNum",
+            "type": "string",
+            "required": false,
+            "description": "扎号",
+            "example": "et id dicta doloribus praesentium mollitia architecto quis voluptatem ad sunt et sequi numquam voluptates sit voluptatem quia nulla",
+            "multiple": 0
+          },
+          {
+            "name": "bundlePieces",
+            "type": "integer",
+            "required": false,
+            "description": "扎数量",
+            "example": "17785",
+            "multiple": 0
+          },
+          {
+            "name": "designCode",
+            "type": "string",
+            "required": false,
+            "description": "设计款号",
+            "example": "22194",
+            "multiple": 0
+          },
+          {
+            "name": "produceOrderId",
+            "type": "integer",
+            "required": false,
+            "description": "订单编号",
+            "example": "47014",
+            "multiple": 0
+          },
+          {
+            "name": "size",
+            "type": "string",
+            "required": false,
+            "description": "尺码",
+            "example": "voluptatibus consequuntur optio voluptates tempora dolorem assumenda nobis quas ad sint neque eum et et quis consectetur",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "执行结果提示信息",
+        "example": "rerum voluptates ut et",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "bundleNum\":\"19474755-P1-B01\" }",
+  "responseExample": "code\": 0, \"info\": { \"bundleNum\": \"19474755-P1-B01\", \"bundlePieces\": 1000, \"designCode\": \"W1diu2211140040\", \"produceOrderId\": 19474755, \"size\": \"29\" }, \"msg\": \"success\" }",
+  "errorCode": null
+}

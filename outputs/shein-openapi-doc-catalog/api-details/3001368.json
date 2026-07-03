@@ -1,0 +1,235 @@
+{
+  "docId": "3001368",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询商品审核状态",
+    "userDocName": "查询商品审核状态",
+    "endpoint": "/open-api/goods/query-document-state",
+    "method": "POST",
+    "docName": "post_open-api_goods_query-document-state",
+    "version": 18,
+    "updateTime": "2025-08-15 14:49:04",
+    "changeContent": "更新描述",
+    "qpsContent": "70",
+    "modes": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "支持通过spu查询skc的审核状态，支持查询spu指定版本的审核状态；同时，平台也支持webhook消息通知的方式推送商品审核结果，具体可查看商品公文审核通知",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "language",
+        "type": "string",
+        "required": false,
+        "description": "支持返回的多语言报错信息，例如：language:en。默认返回中文多语言信息 英语:en 法语: fr 西班牙语:es 德语:de 中文简体:zh-cn 泰语:th 巴西葡语:pt-br"
+      },
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "spuList",
+        "type": "object",
+        "required": true,
+        "description": "spu列表，1次最多传10个spu",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "spuName",
+            "type": "string",
+            "required": true,
+            "description": "spuName，spuName是SHEIN生成的系统编码",
+            "multiple": 0
+          },
+          {
+            "name": "version",
+            "type": "string",
+            "required": false,
+            "description": "审核版本号。当商品发布或编辑提交后，响应中会包含version。",
+            "multiple": 0
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "data",
+            "type": "object",
+            "required": false,
+            "description": "结果",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "skcList",
+                "type": "object",
+                "required": false,
+                "description": "skc集合",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "documentSn",
+                    "type": "string",
+                    "required": false,
+                    "description": "公文号",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "documentState",
+                    "type": "integer",
+                    "required": false,
+                    "description": "公文状态。-1：接受失败 1：待审核 2：审批成功 3：审批失败 4：已撤回 5：申诉中",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "failedReason",
+                    "type": "object",
+                    "required": false,
+                    "description": "审批失败的原因",
+                    "multiple": 1,
+                    "children": [
+                      {
+                        "name": "content",
+                        "type": "string",
+                        "required": false,
+                        "description": "内容",
+                        "multiple": 0
+                      },
+                      {
+                        "name": "language",
+                        "type": "string",
+                        "required": false,
+                        "description": "语种",
+                        "multiple": 0
+                      }
+                    ]
+                  },
+                  {
+                    "name": "skcName",
+                    "type": "string",
+                    "required": false,
+                    "description": "skcName，skcNname是SHEIN生成的系统编码",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "spuName",
+                "type": "string",
+                "required": false,
+                "description": "spuName，spuName是SHEIN生成的系统编码",
+                "multiple": 0
+              },
+              {
+                "name": "version",
+                "type": "string",
+                "required": false,
+                "description": "审核版本号",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "meta",
+            "type": "object",
+            "required": false,
+            "description": "元数据",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "count",
+                "type": "integer",
+                "required": false,
+                "description": "数据记录数",
+                "multiple": 0
+              },
+              {
+                "name": "customObj",
+                "type": "object",
+                "required": false,
+                "description": "用户自定义扩展",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi-test01.sheincorp.cn/open-api/goods/query-document-state' \\ --header 'language: zh-cn' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-timestamp: 1752724239028' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi-test01.sheincorp.cn' \\ --data-raw '{ \"spuList\": [ { \"spuName\": \"MM2404076986\", \"version\": \"SPMP240407262081729\" } ] }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"data\": [ { \"spuName\": \"MM2404076986\", \"version\": \"SPMP240407262081729\", \"skcList\": [ { \"skcName\": \"sMM24040769866671\", \"documentSn\": \"SPMPA320240407000135\", \"documentState\": 3, \"failedReason\": [ { \"language\": \"zh-cn\", \"content\": \"禁忌:frankie test12;1111111\" }, { \"language\": \"zh-cn\", \"content\": \"上新管控:测试上新管控驳回·1;1111111\" } ] } ] } ], \"meta\": { \"count\": 1, \"customObj\": null } }, \"bbl\": null }",
+  "errorCode": null
+}

@@ -1,0 +1,164 @@
+{
+  "docId": "3001691",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "商家仓库列表查询",
+    "userDocName": "商家仓库列表查询",
+    "endpoint": "/open-api/msc/warehouse/list",
+    "method": "GET",
+    "docName": "get_open-api_msc_warehouse_list",
+    "version": 24,
+    "updateTime": "2026-04-27 20:16:27",
+    "changeContent": "更新接口参数",
+    "qpsContent": "50",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "功能介绍：查询商家仓库列表信息。适用应用：自运营，半托管⚠️注意：商家如果有多个仓库，修改库存时必须传仓库id",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "x-lt-language",
+        "type": "string",
+        "required": false,
+        "description": "指定出参语种，默认中文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      },
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "list",
+            "type": "object",
+            "required": true,
+            "description": "商家仓库列表；商家如果有多个仓库，修改库存时必须传仓库id",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "saleCountryList",
+                "type": "string",
+                "required": true,
+                "description": "销售国列表,枚举：BR、TH、US、MX、US、DE、FR、ES、IT、NL、PL、PT、SE、GB",
+                "multiple": 1
+              },
+              {
+                "name": "warehouseCode",
+                "type": "string",
+                "required": true,
+                "description": "商家仓库编码",
+                "multiple": 0
+              },
+              {
+                "name": "warehouseName",
+                "type": "string",
+                "required": true,
+                "description": "仓库名称,根据入参语种返回,默认EN",
+                "multiple": 0
+              },
+              {
+                "name": "warehouseType",
+                "type": "string",
+                "required": true,
+                "description": "仓库类型；1：商家仓；2：认证仓；只有商家仓的商品可以修改库存"
+              },
+              {
+                "name": "authServiceCode",
+                "type": "string",
+                "description": "认证仓code；仅认证仓显示"
+              },
+              {
+                "name": "authServiceName",
+                "type": "string",
+                "description": "认证仓名称；仅认证仓显示"
+              },
+              {
+                "name": "countrySiteDefaultList",
+                "type": "object",
+                "description": "销售站点及默认仓信息",
+                "children": [
+                  {
+                    "name": "countrySiteCode",
+                    "type": "string",
+                    "description": "子站点编码"
+                  },
+                  {
+                    "name": "defaultFlag",
+                    "type": "integer",
+                    "description": "是否默认仓;0-非默认,1-默认"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request GET 'https://openapi.sheincorp.com/open-api/msc/warehouse/list' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570729613' \\ --data-raw ''",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"list\": [ { \"warehouseCode\": \"PS0426919682\", \"warehouseName\": \"Girona Warehouse\", \"saleCountryList\": [ \"FR\", \"ES\", \"IT\", \"NL\", \"PL\" ], \"createType\": 3, \"warehouseType\": 1, \"authServiceCode\": \"\", \"authServiceName\": \"\" }, { \"warehouseCode\": \"PS1993127180\", \"warehouseName\": \"EU Warehouse\", \"saleCountryList\": [ \"DE\", \"FR\", \"ES\", \"IT\", \"NL\", \"PL\" ], \"createType\": 3, \"warehouseType\": 1, \"authServiceCode\": \"\", \"authServiceName\": \"\" }, { \"warehouseCode\": \"PS8428226538\", \"warehouseName\": \"英国\", \"saleCountryList\": [ \"GB\" ], \"createType\": 1, \"warehouseType\": 1, \"authServiceCode\": \"\", \"authServiceName\": \"\" } ] }, \"bbl\": null, \"traceId\": \"38090e8ea1bc33fa\" }",
+  "errorCode": null
+}

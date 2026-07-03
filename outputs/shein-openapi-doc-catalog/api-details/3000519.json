@@ -1,0 +1,101 @@
+{
+  "docId": "3000519",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "更新供应商尾货",
+    "userDocName": "更新供应商尾货",
+    "endpoint": "/open-api/mes/order-inventory-surplus/update",
+    "method": "POST",
+    "docName": "post_open-api_mes_order-inventory-surplus_update",
+    "version": 2,
+    "updateTime": "2024-10-15 11:06:09",
+    "changeContent": "新增traceId",
+    "qpsContent": "",
+    "modes": [
+      3
+    ],
+    "modeNames": [
+      "SHEIN自营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "produceOrderId",
+        "type": "integer",
+        "required": true,
+        "description": "订单编号",
+        "multiple": 0
+      },
+      {
+        "name": "sizeInfo",
+        "type": "object",
+        "required": true,
+        "multiple": 1,
+        "children": [
+          {
+            "name": "size",
+            "type": "string",
+            "required": true,
+            "description": "尺码",
+            "multiple": 0
+          },
+          {
+            "name": "quantity",
+            "type": "integer",
+            "required": true,
+            "description": "数量",
+            "multiple": 0
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "integer",
+        "required": false,
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "produceOrderId\":9315846, \"sizeInfo\":[ { \"size\":\"S\", \"quantity\":20 }, { \"size\":\"M\", \"quantity\":20 } ] }",
+  "responseExample": "code\": 0, \"msg\": \"success\" }",
+  "errorCode": null
+}

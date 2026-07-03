@@ -1,0 +1,101 @@
+{
+  "docId": "3001279",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "Cancel splitting order packages",
+    "userDocName": "取消超限拆分包裹",
+    "endpoint": "/open-api/order/unpacking-group-remove",
+    "method": "POST",
+    "docName": "post_open-api_order_unpacking-group-remove",
+    "version": 12,
+    "updateTime": "2025-07-21 11:28:24",
+    "changeContent": "更新请求示例",
+    "qpsContent": "40",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "该接口用于当巴西和墨西哥市场的订单超过限制并需要拆包时使用。ERP 需要根据订单详情字段判断订单是否需要拆包（\"isOverLimitOrder\": 1）。请注意：一旦取消拆包，订单会重新生成包裹号，需要调用订单详情接口重新获取；更多信息请查看拆包解决方案；",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json;charset=UTF-8",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "orderNo",
+        "type": "string",
+        "required": true,
+        "description": "订单号",
+        "label": "order number",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应码",
+        "example": "42488",
+        "label": "code,\"0\"-correct, other code-error\t",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": true,
+        "description": "错误信息描述",
+        "example": "error msg",
+        "label": "error message\t",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/order/unpacking-group-remove' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752570817402' \\ --data-raw '{ \"orderNo\": \"GSONYP4490004CA\" }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\" }",
+  "errorCode": null
+}

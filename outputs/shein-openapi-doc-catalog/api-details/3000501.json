@@ -1,0 +1,180 @@
+{
+  "docId": "3000501",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "物流商推送轨迹数据-统一接口",
+    "userDocName": "物流商推送轨迹数据-统一接口",
+    "endpoint": "/open-api/cargo/track-notify",
+    "method": "POST",
+    "docName": "post_open-api_cargo_track-notify",
+    "version": 4,
+    "updateTime": "2024-10-15 10:40:12",
+    "changeContent": "新增traceId",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "物流商推送轨迹数据给到Shein的统一接口",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "logistics_tracks",
+        "type": "object",
+        "required": true,
+        "multiple": 1,
+        "children": [
+          {
+            "name": "logistics_no",
+            "type": "string",
+            "required": true,
+            "example": "运单号",
+            "label": "物流运单号",
+            "multiple": 0
+          },
+          {
+            "name": "order_no",
+            "type": "string",
+            "required": true,
+            "example": "我司包裹号",
+            "label": "我司单号",
+            "multiple": 0
+          },
+          {
+            "name": "current_track",
+            "type": "object",
+            "description": "可以不传，不传则按tracks提取最新一条",
+            "label": "当前轨迹",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "location",
+                "type": "string",
+                "example": "轨迹地点",
+                "multiple": 0
+              },
+              {
+                "name": "content",
+                "type": "string",
+                "example": "轨迹描述",
+                "multiple": 0
+              },
+              {
+                "name": "date",
+                "type": "string",
+                "example": "轨迹时间",
+                "multiple": 0
+              },
+              {
+                "name": "track_code",
+                "type": "string",
+                "example": "轨迹状态码",
+                "multiple": 0
+              },
+              {
+                "name": "extend",
+                "type": "object",
+                "example": "null",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "tracks",
+            "type": "object",
+            "required": true,
+            "multiple": 1,
+            "children": [
+              {
+                "name": "location",
+                "type": "string",
+                "required": true,
+                "example": "轨迹地点",
+                "label": "轨迹地点",
+                "multiple": 0
+              },
+              {
+                "name": "content",
+                "type": "string",
+                "required": true,
+                "example": "轨迹描述",
+                "label": "轨迹内容",
+                "multiple": 0
+              },
+              {
+                "name": "date",
+                "type": "string",
+                "required": true,
+                "description": "国际时间格式：2021-06-20T20:35:00+02:00",
+                "example": "轨迹时间",
+                "label": "轨迹时间",
+                "multiple": 0
+              },
+              {
+                "name": "track_code",
+                "type": "string",
+                "description": "支持的建议传",
+                "example": "轨迹状态码",
+                "label": "轨迹状态码",
+                "multiple": 0
+              },
+              {
+                "name": "extend",
+                "type": "object",
+                "description": "需要附带额外的字段放在这里",
+                "example": "null\n",
+                "label": "拓展字段",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "integer",
+        "required": true,
+        "description": "错误码，0成功，其他失败",
+        "defaultValue": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": true,
+        "description": "错误信息",
+        "defaultValue": "success",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "logistics_tracks\": [ { \"logistics_no\": \"WL009121\", \"order_no\": \"Oddd0013\", //可以不传，不传则按tracks提取最新一条 \"current_track\": { \"location\": null, \"content\": null, \"date\": null, \"track_code\": null, \"extend\": {} }, \"tracks\": [ { \"location\": \"\", \"content\": \"内容\", // 国际时间格式：2021-06-20T20:35:00+02:00 \"date\": \"2023-11-15T20:35:00+02:00\", \"track_code\": null, \"extend\": {} } ] } ] }",
+  "responseExample": "code\": 0, \"msg\": \"success\" }",
+  "errorCode": null
+}

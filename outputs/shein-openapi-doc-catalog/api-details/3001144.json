@@ -1,0 +1,166 @@
+{
+  "docId": "3001144",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询公告列表",
+    "userDocName": "查询公告列表",
+    "endpoint": "/open-api/ssls/announcement/get-anno-list",
+    "method": "POST",
+    "docName": "post_open-api_ssls_announcement_get-anno-list",
+    "version": 1,
+    "updateTime": "2025-06-03 22:05:18",
+    "changeContent": "1",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "获取公告列表",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "required": true,
+        "description": "指定出参语种，默认中文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "description": "req",
+    "label": "QueryAnnoReq",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "pageNumber",
+        "type": "integer",
+        "required": false,
+        "description": "分页的页数",
+        "multiple": 0
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "required": false,
+        "description": "每页返回的条数；请设置1～30的整数",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOfAnnoPageInfoListVo",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "label": "AnnoPageInfoListVo",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "successList",
+            "type": "object",
+            "required": false,
+            "description": "结果",
+            "label": "ResultOfAnnoPageInfoPo1",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "data",
+                "type": "object",
+                "required": false,
+                "description": "结果",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "announcementId",
+                    "type": "string",
+                    "required": false,
+                    "description": "公告id",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "meta",
+                "type": "object",
+                "required": false,
+                "description": "元数据",
+                "label": "Meta",
+                "multiple": 0,
+                "children": [
+                  {
+                    "name": "count",
+                    "type": "integer",
+                    "required": false,
+                    "description": "数据记录数",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "customObj",
+                    "type": "object",
+                    "required": false,
+                    "description": "用户自定义扩展",
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

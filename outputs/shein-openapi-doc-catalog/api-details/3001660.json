@@ -1,0 +1,94 @@
+{
+  "docId": "3001660",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "订单接口-查询SHEIN仓库的收件信息（即将废弃，建议使用",
+    "userDocName": "查询SHEIN仓库的收件信息",
+    "endpoint": "/open-api/order/storage-receiver-info",
+    "method": "GET",
+    "docName": "get_open-api_order_storage-receiver-info",
+    "version": 7,
+    "updateTime": "2026-04-07 20:31:49",
+    "changeContent": "更新接口",
+    "qpsContent": "50",
+    "modes": [
+      2,
+      3,
+      8
+    ],
+    "modeNames": [
+      "全托管",
+      "SHEIN自营",
+      "POP"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "该接口固定查询佛山仓安博1号仓收件人信息，后续不再维护，建议使用/open-api/shipping/warehouse代替 1. code=0成功，code =1失败 2. 失败时失败信息在msg字段， 3. 失败时，info字段为空对象",
+  "requestHeader": null,
+  "queryStrings": {
+    "type": "object",
+    "children": [
+      {
+        "name": "storage_id",
+        "type": "integer",
+        "required": true,
+        "example": "1",
+        "label": "仓库ID"
+      }
+    ]
+  },
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "integer",
+        "description": "0成功，1失败",
+        "example": "0",
+        "label": "返回码",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "example": "ok",
+        "label": "错误信息",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "address",
+            "type": "string",
+            "example": "广东省广州市市天河区博物流中心3号仓",
+            "label": "地址",
+            "multiple": 0
+          },
+          {
+            "name": "person",
+            "type": "string",
+            "example": "王曾",
+            "label": "收件人",
+            "multiple": 0
+          },
+          {
+            "name": "phone",
+            "type": "string",
+            "example": "13922720000",
+            "label": "收件人手机号",
+            "multiple": 0
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "curl {{domain}}/open-api/order/storage-receiver-info?storage_id=120033",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"address\": \"广东省佛山市三水区大塘镇安博物流中心1号仓\", \"person\": \"周*兴\", \"phone\": \"13188888888\" }, \"bbl\": null }",
+  "errorCode": null
+}

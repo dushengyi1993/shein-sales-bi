@@ -1,0 +1,179 @@
+{
+  "docId": "3001430",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "挂卡聚合操作（上架or出库or移位）",
+    "userDocName": "挂卡聚合操作（上架or出库or移位）",
+    "endpoint": "/open-api/mdp/hangcard/operate",
+    "method": "POST",
+    "docName": "",
+    "version": 1,
+    "updateTime": "2025-10-15 16:18:40",
+    "changeContent": "MDP新增接口",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "description": "OpenAPI调用挂卡聚合操作请求参数",
+    "label": "OpenApiHangCardOperateReq",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "groundingOperateParam",
+        "type": "object",
+        "required": false,
+        "description": "上架操作参数",
+        "label": "GroundingOperateParam",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "cargoLocationCode",
+            "type": "string",
+            "required": true,
+            "description": "货位编号",
+            "multiple": 0
+          },
+          {
+            "name": "hangCardNo",
+            "type": "string",
+            "required": true,
+            "description": "挂卡编号",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "operationType",
+        "type": "integer",
+        "required": true,
+        "description": "操作类型 1:挂卡上架 2:挂卡出库 3:挂卡移位",
+        "multiple": 0
+      },
+      {
+        "name": "outboundOperateParam",
+        "type": "object",
+        "required": false,
+        "description": "出库操作参数",
+        "label": "OutboundOperateParam",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "hangCardNos",
+            "type": "string",
+            "required": true,
+            "description": "挂卡编号集合",
+            "multiple": 1
+          },
+          {
+            "name": "outboundType",
+            "type": "integer",
+            "required": true,
+            "description": "出库类型 1-配货出库 2-报废出库",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "shiftOperateParam",
+        "type": "object",
+        "required": false,
+        "description": "移位操作参数",
+        "label": "ShiftOperateParam",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "cargoLocation",
+            "type": "string",
+            "required": true,
+            "description": "货位编号",
+            "multiple": 0
+          },
+          {
+            "name": "hangCardNo",
+            "type": "string",
+            "required": true,
+            "description": "挂卡编号",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "userCode",
+        "type": "string",
+        "required": true,
+        "description": "userCode",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "接口返回基础数据",
+    "label": "ApiResult",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": false,
+        "description": "响应码，成功：0",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "detailMsg",
+        "type": "string",
+        "required": false,
+        "description": "详细信息",
+        "example": "详细信息",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "响应数据",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "前端展示的描述信息",
+        "example": "前端展示的描述信息",
+        "multiple": 0
+      },
+      {
+        "name": "time",
+        "type": "datetime",
+        "required": false,
+        "description": "响应时间",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

@@ -1,0 +1,222 @@
+{
+  "docId": "3001253",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "商品上下架",
+    "userDocName": "商品上下架",
+    "endpoint": "/open-api/goods/modify-skc-shelf",
+    "method": "POST",
+    "docName": "post_open-api_goods_modify-skc-shelf",
+    "version": 13,
+    "updateTime": "2025-07-17 14:53:30",
+    "changeContent": "更新curl",
+    "qpsContent": "40",
+    "modes": [
+      1,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "该API支持根据SKC维度修改商品上下架状态",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "language",
+        "type": "string",
+        "required": true,
+        "description": "默认返回中文多语言信息，支持语种：英语:en 法语: fr 西班牙语:es 德语:de 中文简体:zh-cn 泰语:th 巴西葡语:pt-br",
+        "example": "en"
+      },
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "skc_site_info_list",
+        "type": "object",
+        "required": true,
+        "description": "上下架站点信息，1次调用最多支持100条数据",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "shelf_state",
+            "type": "integer",
+            "required": true,
+            "description": "上下架操作；1.上架,2.下架"
+          },
+          {
+            "name": "site_list",
+            "type": "string",
+            "required": true,
+            "description": "需要修改的商品站点",
+            "multiple": 1
+          },
+          {
+            "name": "skc_name",
+            "type": "string",
+            "required": true,
+            "description": "skc_name，skc_name是商品发布SHEIN生成的系统编码",
+            "multiple": 0
+          }
+        ]
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "bbl",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "成功: 0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "failure_count",
+            "type": "integer",
+            "required": false,
+            "description": "失败数",
+            "multiple": 0
+          },
+          {
+            "name": "failure_results",
+            "type": "object",
+            "required": false,
+            "description": "失败详情",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "code",
+                "type": "string",
+                "required": false,
+                "description": "错误码",
+                "multiple": 0
+              },
+              {
+                "name": "identity",
+                "type": "string",
+                "required": false,
+                "description": "返回失败的skc_name",
+                "multiple": 0
+              },
+              {
+                "name": "line_index",
+                "type": "integer",
+                "required": false,
+                "description": "无需关注",
+                "multiple": 0
+              },
+              {
+                "name": "msg",
+                "type": "string",
+                "required": false,
+                "description": "错误信息",
+                "multiple": 0
+              }
+            ]
+          },
+          {
+            "name": "success_count",
+            "type": "integer",
+            "required": false,
+            "description": "成功数",
+            "multiple": 0
+          },
+          {
+            "name": "total_count",
+            "type": "integer",
+            "required": false,
+            "description": "总数量",
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述, 成功: OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi-test01.sheincorp.cn/open-api/goods/modify-skc-shelf' \\ --header 'language: zh-cn' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-timestamp: 1752733538805' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi-test01.sheincorp.cn' \\ --data-raw '{ \"skc_site_info_list\": [ { \"shelf_state\": 2, \"site_list\": [ \"shein-fr\" ], \"skc_name\":\"sMM23072039123259\" } ] }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"success_count\": 1, \"failure_count\": 0, \"total_count\": 1, \"failure_results\": [] }, \"bbl\": null }",
+  "errorCode": null
+}

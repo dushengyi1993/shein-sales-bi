@@ -1,0 +1,581 @@
+{
+  "docId": "3001443",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询商品备货信息列表",
+    "userDocName": "查询商品备货信息列表",
+    "endpoint": "/open-api/openapi-business-backend/stock-goods-list",
+    "method": "POST",
+    "docName": "post_open-api_openapi-business-backend_stock-goods-list",
+    "version": 4,
+    "updateTime": "2025-11-06 15:20:14",
+    "changeContent": "pageSize的Max由100变为20",
+    "qpsContent": "40",
+    "modes": [
+      1,
+      2,
+      3,
+      5,
+      8
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "SHEIN自营",
+      "半托管",
+      "POP"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "通过该接口获取商品备货相关信息；该接口适用全托管模式，部分自运营、半托管模式商家；",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "pageNum",
+        "type": "integer",
+        "description": "页码；默认1；"
+      },
+      {
+        "name": "pageSize",
+        "type": "integer",
+        "description": "每页数量；默认20；MAX：20；"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "成功：0"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "成功：OK"
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "children": [
+          {
+            "name": "count",
+            "type": "integer",
+            "description": "查询总数"
+          },
+          {
+            "name": "list",
+            "type": "object",
+            "description": "备货建议列表",
+            "children": [
+              {
+                "name": "id",
+                "type": "integer",
+                "description": "skc备货建议批次id"
+              },
+              {
+                "name": "imgPath",
+                "type": "string",
+                "description": "skc图片链接"
+              },
+              {
+                "name": "supplierCode",
+                "type": "string",
+                "description": "供方货号"
+              },
+              {
+                "name": "skc",
+                "type": "string",
+                "description": "shein skc 编码"
+              },
+              {
+                "name": "spuName",
+                "type": "string",
+                "description": "shein spu 编码"
+              },
+              {
+                "name": "categoryName",
+                "type": "string",
+                "description": "商品分类"
+              },
+              {
+                "name": "shelfDays",
+                "type": "integer",
+                "description": "上架天数"
+              },
+              {
+                "name": "operateLabelList",
+                "type": "object",
+                "description": "运营标签",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "type",
+                    "type": "string",
+                    "description": "类型"
+                  },
+                  {
+                    "name": "name",
+                    "type": "string",
+                    "description": "名称"
+                  },
+                  {
+                    "name": "value",
+                    "type": "integer",
+                    "description": "值"
+                  },
+                  {
+                    "name": "note",
+                    "type": "string",
+                    "description": "备注"
+                  },
+                  {
+                    "name": "activityList",
+                    "type": "object",
+                    "description": "活动",
+                    "children": [
+                      {
+                        "name": "name",
+                        "type": "string",
+                        "description": "活动名称"
+                      },
+                      {
+                        "name": "date",
+                        "type": "string",
+                        "description": "活动日期"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "rightsLabelList",
+                "type": "object",
+                "description": "权益标签",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "type",
+                    "type": "string",
+                    "description": "类型"
+                  },
+                  {
+                    "name": "name",
+                    "type": "string",
+                    "description": "名称"
+                  },
+                  {
+                    "name": "value",
+                    "type": "integer",
+                    "description": "值"
+                  },
+                  {
+                    "name": "note",
+                    "type": "string",
+                    "description": "备注"
+                  },
+                  {
+                    "name": "activityList",
+                    "type": "object",
+                    "description": "活动",
+                    "children": [
+                      {
+                        "name": "name",
+                        "type": "string",
+                        "description": "活动名称"
+                      },
+                      {
+                        "name": "date",
+                        "type": "string",
+                        "description": "活动日期"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "goodsLabelList",
+                "type": "object",
+                "description": "商品标签",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "type",
+                    "type": "string",
+                    "description": "类型"
+                  },
+                  {
+                    "name": "name",
+                    "type": "string",
+                    "description": "名称"
+                  },
+                  {
+                    "name": "value",
+                    "type": "integer",
+                    "description": "值"
+                  },
+                  {
+                    "name": "note",
+                    "type": "string",
+                    "description": "备注"
+                  }
+                ]
+              },
+              {
+                "name": "supplyStatus",
+                "type": "object",
+                "description": "供应状态",
+                "children": [
+                  {
+                    "name": "type",
+                    "type": "string",
+                    "description": "类型"
+                  },
+                  {
+                    "name": "name",
+                    "type": "string",
+                    "description": "名称"
+                  },
+                  {
+                    "name": "value",
+                    "type": "integer",
+                    "description": "值"
+                  },
+                  {
+                    "name": "note",
+                    "type": "string",
+                    "description": "备注"
+                  }
+                ]
+              },
+              {
+                "name": "shelfStatus",
+                "type": "object",
+                "description": "上架状态",
+                "children": [
+                  {
+                    "name": "type",
+                    "type": "string",
+                    "description": "类型"
+                  },
+                  {
+                    "name": "name",
+                    "type": "string",
+                    "description": "名称"
+                  },
+                  {
+                    "name": "value",
+                    "type": "integer",
+                    "description": "值"
+                  },
+                  {
+                    "name": "note",
+                    "type": "string",
+                    "description": "备注"
+                  }
+                ]
+              },
+              {
+                "name": "saleModel",
+                "type": "object",
+                "description": "shein销售模式",
+                "children": [
+                  {
+                    "name": "type",
+                    "type": "string",
+                    "description": "类型"
+                  },
+                  {
+                    "name": "name",
+                    "type": "string",
+                    "description": "名称"
+                  },
+                  {
+                    "name": "value",
+                    "type": "integer",
+                    "description": "值"
+                  },
+                  {
+                    "name": "note",
+                    "type": "string",
+                    "description": "备注"
+                  }
+                ]
+              },
+              {
+                "name": "qualityGrade",
+                "type": "object",
+                "description": "质量标签",
+                "children": [
+                  {
+                    "name": "type",
+                    "type": "string",
+                    "description": "类型"
+                  },
+                  {
+                    "name": "name",
+                    "type": "string",
+                    "description": "名称"
+                  },
+                  {
+                    "name": "value",
+                    "type": "integer",
+                    "description": "值"
+                  },
+                  {
+                    "name": "note",
+                    "type": "string",
+                    "description": "备注"
+                  }
+                ]
+              },
+              {
+                "name": "goodsLevel",
+                "type": "object",
+                "description": "商品层次",
+                "children": [
+                  {
+                    "name": "type",
+                    "type": "string",
+                    "description": "类型"
+                  },
+                  {
+                    "name": "goodsLevelName",
+                    "type": "string",
+                    "description": "名称"
+                  },
+                  {
+                    "name": "goodsLevel",
+                    "type": "integer",
+                    "description": "值"
+                  },
+                  {
+                    "name": "note",
+                    "type": "string",
+                    "description": "不知"
+                  }
+                ]
+              },
+              {
+                "name": "stockStandard",
+                "type": "object",
+                "description": "备货标准",
+                "children": [
+                  {
+                    "name": "type",
+                    "type": "string",
+                    "description": "类型"
+                  },
+                  {
+                    "name": "name",
+                    "type": "string",
+                    "description": "名称"
+                  },
+                  {
+                    "name": "value",
+                    "type": "integer",
+                    "description": "值"
+                  },
+                  {
+                    "name": "note",
+                    "type": "string",
+                    "description": "备注"
+                  }
+                ]
+              },
+              {
+                "name": "skuList",
+                "type": "object",
+                "description": "sku备货建议信息",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "id",
+                    "type": "string",
+                    "description": "sku备货建议批次id"
+                  },
+                  {
+                    "name": "skuCode",
+                    "type": "string",
+                    "description": "shein sku 编码"
+                  },
+                  {
+                    "name": "suffixZh",
+                    "type": "string",
+                    "description": "属性集"
+                  },
+                  {
+                    "name": "predictDaySales",
+                    "type": "integer",
+                    "description": "预测日销"
+                  },
+                  {
+                    "name": "orderCnt",
+                    "type": "integer",
+                    "description": "购买单数"
+                  },
+                  {
+                    "name": "totalSaleVolume",
+                    "type": "integer",
+                    "description": "当天销量"
+                  },
+                  {
+                    "name": "c7dSaleCnt",
+                    "type": "integer",
+                    "description": "近7天销量"
+                  },
+                  {
+                    "name": "c30dSaleCnt",
+                    "type": "integer",
+                    "description": "近30天销量"
+                  },
+                  {
+                    "name": "stayDeliver",
+                    "type": "integer",
+                    "description": "待发货量"
+                  },
+                  {
+                    "name": "stayShelf",
+                    "type": "integer",
+                    "description": "待上架量"
+                  },
+                  {
+                    "name": "transit",
+                    "type": "integer",
+                    "description": "在途量"
+                  },
+                  {
+                    "name": "stock",
+                    "type": "integer",
+                    "description": "库存量"
+                  },
+                  {
+                    "name": "transitSale",
+                    "type": "integer",
+                    "description": "负卖"
+                  },
+                  {
+                    "name": "preemptionNum",
+                    "type": "integer",
+                    "description": "销售预占量"
+                  },
+                  {
+                    "name": "stockSaleDays",
+                    "type": "integer",
+                    "description": "库存可售天数"
+                  },
+                  {
+                    "name": "saleDays",
+                    "type": "integer",
+                    "description": "可售天数"
+                  },
+                  {
+                    "name": "goodsDate",
+                    "type": "integer",
+                    "description": "货期"
+                  },
+                  {
+                    "name": "stockDays",
+                    "type": "integer",
+                    "description": "备货天数"
+                  },
+                  {
+                    "name": "jitGoodsTime",
+                    "type": "string",
+                    "description": "Jit货期"
+                  },
+                  {
+                    "name": "jitStockUpDay",
+                    "type": "string",
+                    "description": "Jit备货天数"
+                  },
+                  {
+                    "name": "adviceOrderCount",
+                    "type": "integer",
+                    "description": "建议下单数"
+                  },
+                  {
+                    "name": "orderCount",
+                    "type": "integer",
+                    "description": "已下单数"
+                  },
+                  {
+                    "name": "planUrgentCount",
+                    "type": "integer",
+                    "description": "预计急采数"
+                  },
+                  {
+                    "name": "price",
+                    "type": "string",
+                    "description": "价格"
+                  },
+                  {
+                    "name": "currencySymbol",
+                    "type": "string",
+                    "description": "货币代码"
+                  },
+                  {
+                    "name": "autoOrderStatus",
+                    "type": "integer",
+                    "description": "是否自动下单"
+                  },
+                  {
+                    "name": "allotPassage",
+                    "type": "integer",
+                    "description": "调拨转运在途"
+                  },
+                  {
+                    "name": "mallSaleStatus",
+                    "type": "integer",
+                    "description": "商城销售状态"
+                  },
+                  {
+                    "name": "invoiceStatusName",
+                    "type": "string",
+                    "description": "发票状态"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.cn/open-api/openapi-business-backend/stock-goods-list' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --header 'x-lt-timestamp: 1752154263008' \\ --data-raw '{ }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"count\": 10, \"list\": [ { \"id\": 3058691, \"picUrl\": \"https://imgdeal-test01.shein.com/v4/j/pi/2025/04/20/06/17451210808e6a3b15608fa1192d57fcba7b3fdda6_square.jpg\", \"imgPath\": \"https://imgdeal-test01.shein.com/v4/j/pi/2025/04/20/06/17451210808e6a3b15608fa1192d57fcba7b3fdda6_square.jpg\", \"supplierCode\": \"111\", \"skc\": \"ss25042044640264012\", \"spu\": \"s250420446402\", \"spuName\": \"s250420446402\", \"categoryName\": \"女士短连衣裙\", \"shelfDays\": 0, \"operateLabelList\": [], \"rightsLabelList\": [], \"goodsLabelList\": [], \"supplyStatus\": { \"type\": \"success\", \"name\": \"正常供货\", \"value\": null, \"goodsLevelName\": \"正常供货\", \"goodsLevel\": null, \"note\": null, \"sortValue\": null, \"activityList\": null, \"exitPlatformActivity\": false }, \"shelfStatus\": { \"type\": \"warning\", \"name\": \"待上架\", \"value\": 0, \"goodsLevelName\": \"待上架\", \"goodsLevel\": 0, \"note\": null, \"sortValue\": null, \"activityList\": null, \"exitPlatformActivity\": false }, \"saleModel\": { \"type\": \"success\", \"name\": \"实际库存\", \"value\": null, \"goodsLevelName\": \"实际库存\", \"goodsLevel\": null, \"note\": null, \"sortValue\": null, \"activityList\": null, \"exitPlatformActivity\": false }, \"qualityGrade\": null, \"goodsLevel\": null, \"stockStandard\": null, \"stockWarnStatus\": null, \"skuList\": [ { \"id\": 1515922, \"skuCode\": \"I5cmbaujgtlf\", \"attr\": \"黄色-XXS\", \"suffixZh\": \"黄色-XXS\", \"predictDaySales\": 0, \"orderCnt\": 0, \"totalSaleVolume\": 0, \"c7dSaleCnt\": 0, \"c30dSaleCnt\": 0, \"stayDeliver\": 0, \"stayShelf\": 0, \"transit\": 0, \"stock\": 0, \"transitSale\": 0, \"preemptionNum\": 0, \"allotPassage\": 0, \"planUrgentCount\": 0, \"stockSaleDays\": 0.0, \"saleDays\": 0.0, \"goodsDate\": 0, \"stockDays\": 0, \"jitGoodsTime\": null, \"jitStockUpDay\": null, \"adviceOrderCount\": null, \"orderCount\": 0, \"autoOrderStatus\": null, \"price\": \"999.80\", \"currencySymbol\": \"USD\", \"mallSaleStatus\": null, \"invoiceStatusName\": null }, { \"id\": 1515921, \"skuCode\": \"I5cmbaujha2n\", \"attr\": \"黄色-XS\", \"suffixZh\": \"黄色-XS\", \"predictDaySales\": 0, \"orderCnt\": 0, \"totalSaleVolume\": 0, \"c7dSaleCnt\": 0, \"c30dSaleCnt\": 0, \"stayDeliver\": 0, \"stayShelf\": 0, \"transit\": 0, \"stock\": 0, \"transitSale\": 0, \"preemptionNum\": 0, \"allotPassage\": 0, \"planUrgentCount\": 0, \"stockSaleDays\": 0.0, \"saleDays\": 0.0, \"goodsDate\": 0, \"stockDays\": 0, \"jitGoodsTime\": null, \"jitStockUpDay\": null, \"adviceOrderCount\": null, \"orderCount\": 0, \"autoOrderStatus\": null, \"price\": \"999.80\", \"currencySymbol\": \"USD\", \"mallSaleStatus\": null, \"invoiceStatusName\": null }, { \"id\": null, \"skuCode\": \"合计\", \"attr\": \"合计\", \"suffixZh\": \"合计\", \"predictDaySales\": 0, \"orderCnt\": null, \"totalSaleVolume\": 0, \"c7dSaleCnt\": 0, \"c30dSaleCnt\": 0, \"stayDeliver\": 0, \"stayShelf\": 0, \"transit\": 0, \"stock\": 0, \"transitSale\": 0, \"preemptionNum\": 0, \"allotPassage\": 0, \"planUrgentCount\": 0, \"stockSaleDays\": 0.0, \"saleDays\": 0.0, \"goodsDate\": null, \"stockDays\": null, \"jitGoodsTime\": null, \"jitStockUpDay\": null, \"adviceOrderCount\": null, \"orderCount\": 0, \"autoOrderStatus\": null, \"price\": \"-\", \"currencySymbol\": \"USD\", \"mallSaleStatus\": null, \"invoiceStatusName\": null } ] }, { \"id\": 3058264, \"picUrl\": \"https://imgdeal-test01.shein.com/v4/j/pi/2025/04/20/3b/1745121133b9b00faf092921ef37679a195d1e9eb8.jpg\", \"imgPath\": \"https://imgdeal-test01.shein.com/v4/j/pi/2025/04/20/3b/1745121133b9b00faf092921ef37679a195d1e9eb8.jpg\", \"supplierCode\": \"222\", \"skc\": \"ss25042054684812177\", \"spu\": \"s250420546848\", \"spuName\": \"s250420546848\", \"categoryName\": \"女士短连衣裙\", \"shelfDays\": 0, \"operateLabelList\": [], \"rightsLabelList\": [], \"goodsLabelList\": [], \"supplyStatus\": { \"type\": \"success\", \"name\": \"正常供货\", \"value\": null, \"goodsLevelName\": \"正常供货\", \"goodsLevel\": null, \"note\": null, \"sortValue\": null, \"activityList\": null, \"exitPlatformActivity\": false }, \"shelfStatus\": { \"type\": \"warning\", \"name\": \"待上架\", \"value\": 0, \"goodsLevelName\": \"待上架\", \"goodsLevel\": 0, \"note\": null, \"sortValue\": null, \"activityList\": null, \"exitPlatformActivity\": false }, \"saleModel\": { \"type\": \"success\", \"name\": \"实际库存\", \"value\": null, \"goodsLevelName\": \"实际库存\", \"goodsLevel\": null, \"note\": null, \"sortValue\": null, \"activityList\": null, \"exitPlatformActivity\": false }, \"qualityGrade\": null, \"goodsLevel\": null, \"stockStandard\": null, \"stockWarnStatus\": null, \"skuList\": [ { \"id\": 1515919, \"skuCode\": \"I7bd8r8hgfj8\", \"attr\": \"灰色-XXS\", \"suffixZh\": \"灰色-XXS\", \"predictDaySales\": 0, \"orderCnt\": 0, \"totalSaleVolume\": 0, \"c7dSaleCnt\": 0, \"c30dSaleCnt\": 0, \"stayDeliver\": 0, \"stayShelf\": 0, \"transit\": 0, \"stock\": 0, \"transitSale\": 0, \"preemptionNum\": 0, \"allotPassage\": 0, \"planUrgentCount\": 0, \"stockSaleDays\": 0.0, \"saleDays\": 0.0, \"goodsDate\": 0, \"stockDays\": 0, \"jitGoodsTime\": null, \"jitStockUpDay\": null, \"adviceOrderCount\": null, \"orderCount\": 0, \"autoOrderStatus\": null, \"price\": \"999.80\", \"currencySymbol\": \"USD\", \"mallSaleStatus\": null, \"invoiceStatusName\": null }, { \"id\": 1515920, \"skuCode\": \"I7bd8r8hgys4\", \"attr\": \"灰色-XS\", \"suffixZh\": \"灰色-XS\", \"predictDaySales\": 0, \"orderCnt\": 0, \"totalSaleVolume\": 0, \"c7dSaleCnt\": 0, \"c30dSaleCnt\": 0, \"stayDeliver\": 0, \"stayShelf\": 0, \"transit\": 0, \"stock\": 0, \"transitSale\": 0, \"preemptionNum\": 0, \"allotPassage\": 0, \"planUrgentCount\": 0, \"stockSaleDays\": 0.0, \"saleDays\": 0.0, \"goodsDate\": 0, \"stockDays\": 0, \"jitGoodsTime\": null, \"jitStockUpDay\": null, \"adviceOrderCount\": null, \"orderCount\": 0, \"autoOrderStatus\": null, \"price\": \"999.80\", \"currencySymbol\": \"USD\", \"mallSaleStatus\": null, \"invoiceStatusName\": null }, { \"id\": null, \"skuCode\": \"合计\", \"attr\": \"合计\", \"suffixZh\": \"合计\", \"predictDaySales\": 0, \"orderCnt\": null, \"totalSaleVolume\": 0, \"c7dSaleCnt\": 0, \"c30dSaleCnt\": 0, \"stayDeliver\": 0, \"stayShelf\": 0, \"transit\": 0, \"stock\": 0, \"transitSale\": 0, \"preemptionNum\": 0, \"allotPassage\": 0, \"planUrgentCount\": 0, \"stockSaleDays\": 0.0, \"saleDays\": 0.0, \"goodsDate\": null, \"stockDays\": null, \"jitGoodsTime\": null, \"jitStockUpDay\": null, \"adviceOrderCount\": null, \"orderCount\": 0, \"autoOrderStatus\": null, \"price\": \"-\", \"currencySymbol\": \"USD\", \"mallSaleStatus\": null, \"invoiceStatusName\": null } ] } ], \"message\": null, \"updateTime\": null }, \"bbl\": null, \"traceId\": \"eb7393ff54fcfc40\" }",
+  "errorCode": null
+}

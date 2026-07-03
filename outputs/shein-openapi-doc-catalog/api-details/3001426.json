@@ -1,0 +1,95 @@
+{
+  "docId": "3001426",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "根据印花厂code获取客户信息",
+    "userDocName": "根据印花厂code获取客户信息",
+    "endpoint": "/open-api/mdp/order/customer-requirement/get-factory-customer-list",
+    "method": "POST",
+    "docName": "post_open-api_mdp_order_customer-requirement_get-factory-customer-list",
+    "version": 2,
+    "updateTime": "2025-10-15 15:08:32",
+    "changeContent": "更新MDP接口文档",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": null,
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "factoryUserCode",
+        "type": "string",
+        "required": true,
+        "description": "印花厂管理员code"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "detailMsg",
+        "type": "string",
+        "example": "详细信息",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "list",
+            "type": "object",
+            "required": true,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "customerCode",
+                "type": "string",
+                "description": "客户code",
+                "example": "61100",
+                "multiple": 0
+              },
+              {
+                "name": "customerName",
+                "type": "string",
+                "description": "客户名称",
+                "example": "non voluptas quas sed id aperiam molestias eveniet vitae ut dolorem aut facere et exercitationem laborum facilis qui sed",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "example": "前端展示的描述信息",
+        "multiple": 0
+      },
+      {
+        "name": "time",
+        "type": "string",
+        "example": "2025-02-08 21:55:19",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

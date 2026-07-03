@@ -1,0 +1,253 @@
+{
+  "docId": "3001674",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "报账单销售款收支列表",
+    "userDocName": "报账单销售款收支明细",
+    "endpoint": "/open-api/finance/report-sales-detail",
+    "method": "POST",
+    "docName": "post_open-api_finance_report-sales-detail",
+    "version": 13,
+    "updateTime": "2026-04-09 16:17:34",
+    "changeContent": "去掉字段描述的空格",
+    "qpsContent": "50",
+    "modes": [
+      2,
+      8
+    ],
+    "modeNames": [
+      "全托管",
+      "POP"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "该接口支持全托管和POP模式的商家通过报账单号查询销售款明细数据；报账单号请通过【报账单列表】接口中的reportOrderNo获取；",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      },
+      {
+        "name": "x-lt-language",
+        "type": "string",
+        "description": "指定出参语种，默认英文；支持语种:英语:US 法语:FR 西班牙语:ES 德语:DE 中文简体:CN 泰语:TH 巴西葡语:PT 土耳其语：TR"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "query",
+        "type": "string",
+        "required": false,
+        "description": "下一页数据查询的值",
+        "multiple": 0
+      },
+      {
+        "name": "perPage",
+        "type": "integer",
+        "required": true,
+        "description": "每页大小，最大200",
+        "multiple": 0
+      },
+      {
+        "name": "reportOrderNo",
+        "type": "string",
+        "required": true,
+        "description": "报账单号",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "count",
+            "type": "integer",
+            "required": true,
+            "description": "对账单明细总数",
+            "multiple": 0
+          },
+          {
+            "name": "query",
+            "type": "string",
+            "description": "若该字段有值，代表有下一页数据，用该字段的值去查询下一页数据"
+          },
+          {
+            "name": "reportSalesDetails",
+            "type": "object",
+            "required": false,
+            "description": "对账单明细信息",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "addTime",
+                "type": "datetime",
+                "required": true,
+                "description": "账单生成时间",
+                "multiple": 0
+              },
+              {
+                "name": "amount",
+                "type": "double",
+                "required": true,
+                "description": "金额",
+                "multiple": 0
+              },
+              {
+                "name": "bzOrderNo",
+                "type": "string",
+                "required": true,
+                "description": "业务单号，如客单、客退单等",
+                "multiple": 0
+              },
+              {
+                "name": "companyName",
+                "type": "string",
+                "required": true,
+                "description": "公司主体",
+                "multiple": 0
+              },
+              {
+                "name": "expenseType",
+                "type": "integer",
+                "required": true,
+                "description": "明细费用类型；0:商品/ 1:服务；相同的bzOrderNo和skuCode可能在不同的报账单中以不同的费用明细给出；"
+              },
+              {
+                "name": "goodsCount",
+                "type": "integer",
+                "required": true,
+                "description": "商品数量",
+                "multiple": 0
+              },
+              {
+                "name": "id",
+                "type": "string",
+                "required": true,
+                "description": "对账单明细 id",
+                "multiple": 0
+              },
+              {
+                "name": "inAndOut",
+                "type": "integer",
+                "required": true,
+                "description": "收支类型；1：收入/ 2：支出",
+                "multiple": 0
+              },
+              {
+                "name": "inAndOutName",
+                "type": "string",
+                "required": true,
+                "description": "收支类型名称；支持指定语种出参；",
+                "multiple": 0
+              },
+              {
+                "name": "secondOrderType",
+                "type": "integer",
+                "required": true,
+                "description": "二级账单类型，具体枚举值点击查看FAQ",
+                "multiple": 0
+              },
+              {
+                "name": "secondOrderTypeName",
+                "type": "string",
+                "required": true,
+                "description": "二级账单类型名称；支持指定语种出参；",
+                "multiple": 0
+              },
+              {
+                "name": "settleCurrencyCode",
+                "type": "string",
+                "required": true,
+                "description": "结算币种",
+                "multiple": 0
+              },
+              {
+                "name": "skcName",
+                "type": "string",
+                "required": false,
+                "description": "SKC",
+                "multiple": 0
+              },
+              {
+                "name": "skuCode",
+                "type": "string",
+                "required": false,
+                "description": "平台SKU",
+                "multiple": 0
+              },
+              {
+                "name": "supplierSku",
+                "type": "string",
+                "description": "商家sku；若账单生成后商家修改了商品绑定的商家sku，返回的是修改后的商家sku；"
+              },
+              {
+                "name": "unitPrice",
+                "type": "double",
+                "required": false,
+                "description": "单价",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/finance/report-sales-detail' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-timestamp: 1752818455708' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'language: zh-cn' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi.sheincorp.com' \\ --data-raw '{ \"query\": \"OS2407093385925633\", \"perPage\": \"2\", \"reportOrderNo\":\"B2412210147608576\" }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"reportSalesDetails\": [ { \"secondOrderType\": 11, \"secondOrderTypeName\": \"Guangzhou offline procurement and warehousing\", \"inAndOut\": 1, \"inAndOutName\": \"income\", \"bzOrderNo\": \"666861111112557\", \"id\": \"OS2411205174902784\", \"skcName\": \"s23030915354544\", \"skuCode\": \"I0cknhftflu1\", \"goodsCount\": 4, \"settleCurrencyCode\": \"USD\", \"amount\": 47.28, \"companyName\": \"ROADGET BUSINESS PTE. LTD.\", \"addTime\": \"2024-11-20 21:56:03\", \"unitPrice\": 11.82 }, { \"secondOrderType\": 11, \"secondOrderTypeName\": \"Guangzhou offline procurement and warehousing\", \"inAndOut\": 1, \"inAndOutName\": \"income\", \"bzOrderNo\": \"186243033161908\", \"id\": \"OS2412164097933315\", \"skcName\": \"s23030915354544\", \"skuCode\": \"I0cknhftflu1\", \"goodsCount\": 4, \"settleCurrencyCode\": \"USD\", \"amount\": 47.28, \"companyName\": \"ROADGET BUSINESS PTE. LTD.\", \"addTime\": \"2024-12-16 17:22:10\", \"unitPrice\": 11.82 } ], \"count\": 3, \"query\": null }, \"bbl\": {}, \"traceId\": \"270b714cf9d20130\" }",
+  "errorCode": null
+}

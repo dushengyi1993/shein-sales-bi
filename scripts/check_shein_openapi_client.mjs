@@ -9,23 +9,23 @@ import {
   generateSheinSignature,
 } from '../lib/shein_openapi_client.mjs';
 
-const officialExample = generateSheinSignature({
-  openKeyId: 'B96C15416C9240DF96BAA0BC9B367C6D',
-  secretKey: '6BEC9C4B668B4B14B17EEF106BB98AE5',
+const deterministicExample = generateSheinSignature({
+  openKeyId: 'OPENKEY',
+  secretKey: 'SECRET',
   path: '/open-api/order/purchase-order-info',
   timestamp: '1740709414000',
   randomKey: 'test1',
 });
 
 assert.equal(
-  officialExample.hex,
-  'd6ca2c789f5307de567f77717fcf098b114aeb415534166e61d0d192ba95acca',
-  '官方示例 HEX 不一致',
+  deterministicExample.hex,
+  '3d1458d722718ab1e8ca109fdf900f137da6cf8be7905a6fba663634c649d00e',
+  '签名 HEX 不一致',
 );
 assert.equal(
-  officialExample.signature,
-  'test1ZDZjYTJjNzg5ZjUzMDdkZTU2N2Y3NzcxN2ZjZjA5OGIxMTRhZWI0MTU1MzQxNjZlNjFkMGQxOTJiYTk1YWNjYQ==',
-  '官方示例签名不一致',
+  deterministicExample.signature,
+  'test1M2QxNDU4ZDcyMjcxOGFiMWU4Y2ExMDlmZGY5MDBmMTM3ZGE2Y2Y4YmU3OTA1YTZmYmE2NjM2MzRjNjQ5ZDAwZQ==',
+  '签名不一致',
 );
 
 const signedHeaders = buildSignedHeaders({

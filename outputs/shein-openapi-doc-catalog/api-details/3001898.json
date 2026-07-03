@@ -1,0 +1,278 @@
+{
+  "docId": "3001898",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "商品发布字段规范",
+    "userDocName": "商品发布字段规范",
+    "endpoint": "/open-api/goods/query-publish-fill-in-standard",
+    "method": "POST",
+    "docName": "post_open-api_goods_query-publish-fill-in-standard",
+    "version": 44,
+    "updateTime": "2026-07-02 21:00:12",
+    "changeContent": "更新文档标题",
+    "qpsContent": "40",
+    "modes": [
+      1,
+      2,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "全托管",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "每个店铺在各个分类下有不同的商品发布字段填写规范（要求）。建议在调用商品发布接口前，先调用此接口。本接口可查询的要求范围包括：1、商品标题和商品描述的必填默认语种（default_language）2、商品发布时是否必传竞品链接和库存证明（reference_product_link和proof_of_stock）3、商品发布时是否必传样品信息（sample_info）4、商品发布时是否必传品牌（brand_code）5、商品发布时是否必传skc标题（skc_title）6、半托管和全托管的供货价币种（currency）7、商品是否支持sku和spu维度的图片（picture_config_list）8、商品发布时是否必传最小备货数量（minimum_stock_quantity）9、商品是否支持上传详情图（product_detail_picture）10、商品是否支持在SKU维度传件数（quantity_info)11、商品是否支持传SKC建议零售价（suggest_price）12、商品是否支持填写商家条码（supplier_barcode）13、商品是否支持填写SKU包装类型（package_type）14、商品是否支持上传IP信息（ip_character）",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "language",
+        "type": "string",
+        "required": true,
+        "description": "默认返回中文多语言信息，支持语种：英语:en 法语: fr 西班牙语:es 德语:de 中文简体:zh-cn 泰语:th 巴西葡语:pt-br"
+      },
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "category_id",
+        "type": "long",
+        "description": "末级分类id。查询以下信息的填写规范时需要入参末级分类ID:分类是否支持SPU维度图片、样品信息、SKU包装类型、SKU维度件数、站点详情图、标题默认语种的最大字符数",
+        "label": "分类ID（如需查询审版要求必填）"
+      },
+      {
+        "name": "spu_name",
+        "type": "string",
+        "description": "SHEIN生成的SKC编码。该入参仅用于查询某个SPU当前是否正在使用图片新方案，其它场景不需要传；使用场景较少。"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "bbl",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1
+              }
+            ]
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "result(success: 0)",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "fill_in_standard_list",
+            "type": "object",
+            "required": true,
+            "description": "商品发布接口中字段的填写规范列表。每个field_key值会对应发布接口中的一个入参字段，可确认某个入参能否传值、是否必传。",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "field_key",
+                "type": "string",
+                "required": true,
+                "description": "规范内容。以下是此接口枚举值 - 对应的发布接口入参字段名1、reference_product_link - competing_product_link2、sample_spec - sample_info3、proof_of_stock - proof_of_stock_list4、shelf_require - shelf_require5、brand_code -brand_code6、skc_title - skc_title7、minimum_stock_quantity - minimum_stock_quantity8、product_detail_picture - site_detail_image_info_list9、quantity_info - filled_quantity_to_sku和quantity_info10、suggest_price - suggested_retail_price11、supplier_barcode -supplier_barcode12、package_type -package_type13、ip_character - ip_character_list"
+              },
+              {
+                "name": "module",
+                "type": "string",
+                "required": true,
+                "description": "该模块是对应shein后台发品页面的模块，对应以下模块: 1、基本信息2、供应信息3、参考信息4、样品信息"
+              },
+              {
+                "name": "required",
+                "type": "boolean",
+                "required": true,
+                "description": "field key中内容是否必填。true-必填，false非必填"
+              },
+              {
+                "name": "show",
+                "type": "boolean",
+                "required": true,
+                "description": "field key中内容是否可传。true可传，false不可传（传了反而会报错）。"
+              }
+            ]
+          },
+          {
+            "name": "currency",
+            "type": "string",
+            "required": true,
+            "description": "商品供货价币种。半托管和全托管使用，在发布接口的cost_info -> currency 中使用。"
+          },
+          {
+            "name": "default_language",
+            "type": "string",
+            "required": true,
+            "description": "商家的默认语言。在发布接口的multi_language_desc_list、multi_language_name_list中使用。默认语种的商品名称必填，"
+          },
+          {
+            "name": "default_language_title_max_length",
+            "type": "integer",
+            "description": "商品标题的默认语种的最大字符数。平台从26年6月开始对默认语种字符数进行管控，不同商品分类+语种，默认语种的字符数限制不同。请入参category_id后获取最大字符数。"
+          },
+          {
+            "name": "language_title_max_length_list",
+            "type": "object",
+            "description": "商品标题的所有语种的字符数限制（含默认语种）",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "language",
+                "type": "string",
+                "description": "语种"
+              },
+              {
+                "name": "max_length",
+                "type": "double",
+                "description": "语种的最大字符数（含空格）"
+              }
+            ]
+          },
+          {
+            "name": "picture_config_list",
+            "type": "object",
+            "description": "查询店铺是否支持SPU、SKC、SKU维度上传图片",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "field_key",
+                "type": "string",
+                "description": "字段Code"
+              },
+              {
+                "name": "is_true",
+                "type": "boolean",
+                "description": "枚举：是/否"
+              }
+            ]
+          },
+          {
+            "name": "weight_config",
+            "type": "object",
+            "description": "SKU的重量填写规则。只有在传入 category_id 时返回，否则为 null。",
+            "children": [
+              {
+                "name": "is_required",
+                "type": "boolean",
+                "description": "SKU重量是否必填"
+              },
+              {
+                "name": "available_units",
+                "type": "string",
+                "description": "SKU重量可用单位列表。不同商家和分类可能会有所不同。",
+                "multiple": 1
+              }
+            ]
+          },
+          {
+            "name": "length_width_height_config",
+            "type": "object",
+            "description": "SKU的长宽高填写规则。只有在传入 category_id 时返回，否则为 null。",
+            "children": [
+              {
+                "name": "is_required",
+                "type": "string",
+                "description": "是否必填"
+              },
+              {
+                "name": "available_units",
+                "type": "string",
+                "description": "可用单位标识符列表，枚举值：cm / Inch / Ft",
+                "multiple": 1
+              }
+            ]
+          },
+          {
+            "name": "support_sale_attribute_sort",
+            "type": "boolean",
+            "description": "该字段判断是否支持次销售属性值排序；主销售属性值默认都支持排序"
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述， success: OK",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi-test01.sheincorp.cn/open-api/goods/query-publish-fill-in-standard' \\ --header 'language: zh-cn' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-timestamp: 1752733538805' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi-test01.sheincorp.cn' \\ --data-raw ''",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"fill_in_standard_list\": [ { \"module\": \"reference_info\", \"field_key\": \"reference_product_link\", \"required\": false, \"show\": false }, { \"module\": \"reference_info\", \"field_key\": \"proof_of_stock\", \"required\": false, \"show\": false }, { \"module\": \"basic_info\", \"field_key\": \"skc_title\", \"required\": false, \"show\": true }, { \"module\": \"supplier_info\", \"field_key\": \"minimum_stock_quantity\", \"required\": false, \"show\": false }, { \"module\": \"sales_info\", \"field_key\": \"shelf_require\", \"required\": false, \"show\": false }, { \"module\": \"basic_info\", \"field_key\": \"brand_code\", \"required\": true, \"show\": true } ], \"default_language\": \"en\", \"picture_config_list\": [], \"currency\": \"GBP\", \"support_sale_attribute_sort\": null }, \"bbl\": null, \"traceId\": \"19291dc98a3812a8\" }",
+  "errorCode": null
+}

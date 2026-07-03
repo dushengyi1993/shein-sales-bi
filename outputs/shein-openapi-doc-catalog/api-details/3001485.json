@@ -1,0 +1,138 @@
+{
+  "docId": "3001485",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "商品接口-根据条码批量获取SKC与尺码",
+    "userDocName": "商品接口-根据条码批量获取SKC与尺码",
+    "endpoint": "/open-api/goods/batch-skc-size",
+    "method": "POST",
+    "docName": "post_open-api_goods_batch-skc-size",
+    "version": 11,
+    "updateTime": "2025-12-18 10:31:55",
+    "changeContent": "“供应商”改“商家”",
+    "qpsContent": "60",
+    "modes": [
+      2,
+      3
+    ],
+    "modeNames": [
+      "全托管",
+      "SHEIN自营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "该API支持根据商家的条码批量获取SHEIN的 (skc和尺码)",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json",
+        "defaultValue": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "data",
+        "type": "string",
+        "required": true,
+        "description": "商品条码数组",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "double",
+        "required": false,
+        "description": "响应码",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "响应信息",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "multiple": 0,
+        "children": [
+          {
+            "name": "key",
+            "type": "object",
+            "required": false,
+            "description": "传入的商品条码参数,如参数传入S236711-39A,这里即为S236711-39A",
+            "multiple": 0,
+            "children": [
+              {
+                "name": "skc",
+                "type": "string",
+                "required": false,
+                "description": "skc即skc_name，是商品发布SHEIN生成的系统编码",
+                "multiple": 0
+              },
+              {
+                "name": "size",
+                "type": "string",
+                "required": false,
+                "description": "尺寸",
+                "multiple": 0
+              },
+              {
+                "name": "sku_code",
+                "type": "string",
+                "description": "sku_code，sku_code是商品发布SHEIN生成的系统编码"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi-test01.sheincorp.cn/open-api/goods/batch-skc-size' \\ --header 'language: zh-cn' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-timestamp: 1752733538805' \\ --header 'Content-Type: application/json' \\ --header 'Host: openapi-test01.sheincorp.cn' \\ --data-raw '{ \"data\": [ \"1001251036\", \"1001251037\", \"1001251040\", \"1001251042\", \"S521121-1Y\", \"S420866-86I\" ] }'",
+  "responseExample": "code\": 0, \"msg\": \"接口请求成功\", \"info\": { \"S420866-86I\": { \"skc\": \"dress171226321\", \"size\": \"1XL\", \"sku_code\": \"I2fmtzyqyrlh\" }, \"1001251042\": { \"skc\": \"ss23111007205737\", \"size\": \"43\", \"sku_code\": \"I83q8737u0r6\" }, \"1001251036\": { \"skc\": \"s23111033121496\", \"size\": \"90D\", \"sku_code\": \"I83q7zm3axla\" }, \"1001251037\": { \"skc\": \"s23111033121496\", \"size\": \"75A\", \"sku_code\": \"I83q7zm3c5db\" }, \"S521121-1Y\": { \"skc\": \"tee180628702\", \"size\": \"XS\", \"sku_code\": \"\" }, \"1001251040\": { \"skc\": \"ss23111007205737\", \"size\": \"75A\", \"sku_code\": \"I83q8737spbk\" } } }",
+  "errorCode": null
+}

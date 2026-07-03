@@ -1,0 +1,132 @@
+{
+  "docId": "3001821",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "自营供应商入库单确认",
+    "userDocName": "自营供应商入库单确认",
+    "endpoint": "/open-api/sims/inbound-order-confirm",
+    "method": "POST",
+    "docName": "",
+    "version": 4,
+    "updateTime": "2026-06-15 15:13:19",
+    "changeContent": "调整请求头参数",
+    "qpsContent": "",
+    "modes": [
+      3
+    ],
+    "modeNames": [
+      "SHEIN自营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识openKeyId，获取方式请查阅：授权手册"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "请求签名，生成规则请查阅：签名规则"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "支持返回的多语言报错信息，默认返回中文多语言信息"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "inboundDetailList",
+        "type": "object",
+        "required": true,
+        "description": "入库单明细",
+        "multiple": 1,
+        "children": [
+          {
+            "name": "skuCode",
+            "type": "string",
+            "required": true,
+            "description": "SHEIN平台生成的SKU"
+          },
+          {
+            "name": "warehouseId",
+            "type": "integer",
+            "required": true,
+            "description": "仓库id"
+          },
+          {
+            "name": "locationId",
+            "type": "integer",
+            "description": "库位id，pda模式必传"
+          },
+          {
+            "name": "inboundQty",
+            "type": "integer",
+            "required": true,
+            "description": "入库数量"
+          }
+        ]
+      },
+      {
+        "name": "inboundOrderNo",
+        "type": "string",
+        "required": true
+      },
+      {
+        "name": "isCreateNewOrderOnPartialInbound",
+        "type": "integer",
+        "required": true,
+        "description": "部分入库是否创建新入库单,1是，2否",
+        "example": "1"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "info",
+        "type": "object",
+        "required": true,
+        "children": [
+          {
+            "name": "code",
+            "type": "string",
+            "description": "0为成功"
+          },
+          {
+            "name": "msg",
+            "type": "string"
+          }
+        ]
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

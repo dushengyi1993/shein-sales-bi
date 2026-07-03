@@ -1,0 +1,107 @@
+{
+  "docId": "3000514",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "按时间查询生产制单号",
+    "userDocName": "按时间查询生产制单号",
+    "endpoint": "/open-api/mes/query-produce-order-ids",
+    "method": "POST",
+    "docName": "post_open-api_mes_query-produce-order-ids",
+    "version": 2,
+    "updateTime": "2024-10-15 11:01:34",
+    "changeContent": "新增traceId",
+    "qpsContent": "",
+    "modes": [
+      3
+    ],
+    "modeNames": [
+      "SHEIN自营"
+    ],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "endTime",
+        "type": "string",
+        "required": true,
+        "description": "结束时间",
+        "example": "2022-07-10 12:06:03",
+        "multiple": 0
+      },
+      {
+        "name": "startTime",
+        "type": "string",
+        "required": true,
+        "description": "开始时间",
+        "example": "2022-08-07 05:56:05",
+        "multiple": 0
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "integer",
+        "required": false,
+        "description": "状态码",
+        "example": "39174",
+        "multiple": 0
+      },
+      {
+        "name": "detailMsg",
+        "type": "string",
+        "required": false,
+        "description": "执行结果详细信息",
+        "example": "nobis et esse vel aut eum et placeat quos rerum eum sequi velit velit minus et nobis sint",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "integer",
+        "required": false,
+        "description": "执行结果数据",
+        "multiple": 1
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "执行结果提示信息",
+        "example": "commodi eveniet dolorem quod perferendis eligendi repellat quidem nulla expedita sunt vitae exercitationem aspernatur",
+        "multiple": 0
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "endTime\":\"2023-10-26 23:59:59\", \"startTime\":\"2023-10-26 00:00:00\" }",
+  "responseExample": "code\": 0, \"info\": [ 19501135, 19516725, 19516811, 19516726, 19516727, 19485938, 19516806 ], \"msg\": \"success\" }",
+  "errorCode": null
+}

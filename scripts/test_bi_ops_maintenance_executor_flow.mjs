@@ -157,9 +157,29 @@ try {
     targets: {stores: ['SMK'], productRefs: ['TEST-PRODUCT']},
     partialEditPayload: {
       spu_name: 'spu-smoke',
+      is_spu_pic: true,
+      image_info: {
+        image_group_code: 'G-spu-smoke',
+        image_info_list: [{image_sort: 1, image_type: 1, image_url: 'http://imgdeal-test01.shein.com/images3_pi/smoke-spu-main.jpg'}],
+      },
       skc_list: [{
         skc_name: 'sv-smoke-skc',
-        image_info: {image_group_code: 'G-smoke', image_info_list: [{image_sort: 1, image_type: 1, image_url: 'http://imgdeal-test01.shein.com/images3_pi/smoke-main.jpg'}]},
+        image_info: {
+          image_group_code: 'G-smoke',
+          image_info_list: [
+            {image_sort: 1, image_type: 1, image_url: 'http://imgdeal-test01.shein.com/images3_pi/smoke-main.jpg'},
+            ...Array.from({length: 10}, (_, i) => ({
+              image_sort: i + 2,
+              image_type: 2,
+              image_url: `http://imgdeal-test01.shein.com/images3_pi/smoke-detail-${i + 1}.jpg`,
+            })),
+            {image_sort: 12, image_type: 5, image_url: 'http://imgdeal-test01.shein.com/images3_pi/smoke-square.jpg'},
+          ],
+        },
+        sku_list: [{
+          sku_code: 'sku-smoke-001',
+          image_info: {image_info_list: [{image_sort: 1, image_type: 1, image_url: 'https://img.ltwebstatic.com/v4/j/spmp/2026/07/02/80/high-resolution-sku-main.jpg'}]},
+        }],
       }],
     },
     intents: ['retire_link', 'update_inventory', 'update_supply_price', 'update_product_price', 'update_title', 'update_images'],
@@ -182,7 +202,82 @@ try {
   check('dry-run state ready', dry.json?.state, 'ready_for_submit');
   check('dry-run payload hash present', Boolean(dry.json?.payload?.payloadHash), true);
   check('dry-run has 6 operations', asArray(dry.json?.payload?.summary?.operations).length, 6);
+  check('dry-run records image payload inspection', dry.json?.payload?.summary?.imagePayloadInspection?.payloadCount, 1);
+  check('dry-run records SPU image count', dry.json?.payload?.summary?.imagePayloadInspection?.totalSpuImages, 1);
+  check('dry-run records SKC image count', dry.json?.payload?.summary?.imagePayloadInspection?.totalSkcImages, 12);
+  check('dry-run records SKU image count', dry.json?.payload?.summary?.imagePayloadInspection?.totalSkuImages, 1);
+  check('dry-run records total detail count', dry.json?.payload?.summary?.imagePayloadInspection?.totalDetailImages, 10);
+  check('dry-run records image inspection evidence', dry.json?.adapterEvidence?.imagePayloadInspection?.payloads?.[0]?.skcImageCount, 12);
+  check('dry-run does not misclassify CDN /80/ path as tiny SKU', dry.json?.blockers || [], xs => !asArray(xs).some(x => /high-resolution-sku-main/.test(String(x))));
+  check('dry-run does not misclassify numeric 80 filename as tiny SKU', dry.json?.blockers || [], xs => !asArray(xs).some(x => /\/80\.jpg/.test(String(x))));
   check('dry-run does not call write endpoint', dryPaths.some(p => ['/open-api/goods/modify-skc-shelf','/open-api/stock/change-inventory/v2','/open-api/goods/update-cost','/open-api/openapi-business-backend/product/price/save','/open-api/goods/product/partialEdit'].includes(p)), false);
+
+  const manyDetailTask = {
+    id: 'many-detail-image-smoke',
+    status: 'waiting_review',
+    command: '给 SMK 的 TEST-PRODUCT 换图',
+    targets: {stores: ['SMK'], productRefs: ['TEST-PRODUCT']},
+    partialEditPayload: {
+      spu_name: 'spu-smoke',
+      is_spu_pic: true,
+      image_info: {image_info_list: [{image_sort: 1, image_type: 1, image_url: 'http://imgdeal-test01.shein.com/images3_pi/many-spu-main.jpg'}]},
+      skc_list: [{
+        skc_name: 'sv-smoke-skc',
+        image_info: {
+          image_info_list: [
+            {image_sort: 1, image_type: 1, image_url: 'http://imgdeal-test01.shein.com/images3_pi/many-main.jpg'},
+            ...Array.from({length: 12}, (_, i) => ({
+              image_sort: i + 2,
+              image_type: 2,
+              image_url: `http://imgdeal-test01.shein.com/images3_pi/many-detail-${i + 1}.jpg`,
+            })),
+          ],
+        },
+        sku_list: [{
+          sku_code: 'sku-smoke-001',
+          image_info: {image_info_list: [{image_sort: 1, image_type: 1, image_url: 'https://img.ltwebstatic.com/v4/j/spmp/2026/07/02/80.jpg'}]},
+        }],
+      }],
+    },
+    intents: ['update_images'],
+  };
+  const manyDetailTaskFile = await writeJson('task-many-detail-image.json', {version: 1, tasks: [manyDetailTask]});
+  calls.length = 0;
+  const manyDetailDry = await runNode([...commonArgs, '--task-id', 'many-detail-image-smoke', '--task-json', manyDetailTaskFile, '--dry-run']);
+  check('many-detail image dry-run exits without exception', manyDetailDry.code, 0);
+  check('many-detail image dry-run remains ready', manyDetailDry.json?.ok, true);
+  check('many-detail image dry-run reports warning not blocker', manyDetailDry.json?.warnings || [], xs => asArray(xs).some(x => /细节图.*超过 11 张/.test(String(x))));
+  check('many-detail image dry-run has no numeric 80 sku blocker', manyDetailDry.json?.blockers || [], xs => !asArray(xs).some(x => /80\.jpg/.test(String(x))));
+
+  const badImageTask = {
+    id: 'bad-image-smoke',
+    status: 'waiting_review',
+    command: '给 SMK 的 TEST-PRODUCT 换图',
+    targets: {stores: ['SMK'], productRefs: ['TEST-PRODUCT']},
+    partialEditPayload: {
+      spu_name: 'spu-smoke',
+      skc_list: [{
+        skc_name: 'sv-smoke-skc',
+        image_info: {image_group_code: 'G-smoke', image_info_list: [{image_sort: 1, image_type: 1, image_url: 'http://imgdeal-test01.shein.com/images3_pi/smoke-main.jpg'}]},
+        sku_list: [{
+          sku_code: 'sku-smoke-001',
+          image_info: {image_info_list: [{image_sort: 1, image_type: 6, image_url: 'http://imgdeal-test01.shein.com/images3_pi/sku-80.png'}]},
+        }],
+      }],
+    },
+    intents: ['update_images'],
+  };
+  const badImageTaskFile = await writeJson('task-bad-image.json', {version: 1, tasks: [badImageTask]});
+  calls.length = 0;
+  const badImageDry = await runNode([...commonArgs, '--task-id', 'bad-image-smoke', '--task-json', badImageTaskFile, '--dry-run']);
+  const badImagePaths = calls.map(c => c.path);
+  check('bad image dry-run exits without exception', badImageDry.code, 0);
+  check('bad image dry-run blocks unsafe payload', badImageDry.json?.ok, false);
+  check('bad image dry-run state blocked', badImageDry.json?.state, 'blocked');
+  check('bad image dry-run reports sku type blocker', badImageDry.json?.blockers || [], xs => asArray(xs).some(x => /SKU 图只允许主图 image_type=1/.test(String(x))));
+  check('bad image dry-run reports tiny sku blocker', badImageDry.json?.blockers || [], xs => asArray(xs).some(x => /sku-80|80x80/.test(String(x))));
+  check('bad image dry-run counts sku image', badImageDry.json?.payload?.summary?.imagePayloadInspection?.totalSkuImages, 1);
+  check('bad image dry-run does not call partialEdit', badImagePaths.includes('/open-api/goods/product/partialEdit'), false);
 
   const hash = dry.json?.payload?.payloadHash || '';
   const execTaskFile = await writeJson('task-exec.json', {version: 1, executionContext: {expectedPayloadHash: hash}, tasks: [task]});

@@ -1,0 +1,183 @@
+{
+  "docId": "3001786",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询仓库地址",
+    "userDocName": "查询仓库地址",
+    "endpoint": "/open-api/gsp/warehouse-address",
+    "method": "POST",
+    "docName": "",
+    "version": 3,
+    "updateTime": "2026-06-09 10:05:40",
+    "changeContent": "V3",
+    "qpsContent": "80",
+    "modes": [
+      1,
+      5
+    ],
+    "modeNames": [
+      "自运营",
+      "半托管"
+    ],
+    "isSemiTrust": true
+  },
+  "description": "通过接口获取仓库地址信息用于在线下单业务；",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "application/json"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识 openKeyId"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "接口签名"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": null,
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "成功：0",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "错误描述,成功：OK",
+        "example": "OK",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "openApiAddressInfos",
+            "type": "object",
+            "description": "仓库地址列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "warehouseAddressCode",
+                "type": "string",
+                "description": "仓库地址编码",
+                "example": "WH2505093344009216",
+                "multiple": 0
+              },
+              {
+                "name": "warehouseName",
+                "type": "string",
+                "description": "仓库名称",
+                "example": "美国发货仓",
+                "multiple": 0
+              },
+              {
+                "name": "salesSite",
+                "type": "string",
+                "description": "销售站点",
+                "example": "shein-us",
+                "multiple": 1
+              },
+              {
+                "name": "addressInfo",
+                "type": "object",
+                "description": "仓库地址信息",
+                "multiple": 0,
+                "children": [
+                  {
+                    "name": "country",
+                    "type": "string",
+                    "description": "国家",
+                    "example": "United States",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "province",
+                    "type": "string",
+                    "description": "省份",
+                    "example": "CALIFORNIA",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "city",
+                    "type": "string",
+                    "description": "城市",
+                    "example": "Avenal",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "district",
+                    "type": "string",
+                    "description": "区域",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "postCode",
+                    "type": "string",
+                    "description": "邮编",
+                    "example": "94501",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "address1",
+                    "type": "string",
+                    "description": "地址1",
+                    "example": "test address",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "address2",
+                    "type": "string",
+                    "description": "地址2",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "phone",
+                    "type": "string",
+                    "description": "联系电话",
+                    "example": "2313343434",
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "example": "5180cdc2c1911c29",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "curl --location --request POST 'https://openapi.sheincorp.com/open-api/gsp/warehouse-address' \\ --header 'x-lt-signature: <OFFICIAL_EXAMPLE_SIGNATURE>' \\ --header 'x-lt-openKeyId: <OFFICIAL_EXAMPLE_OPEN_KEY_ID>' \\ --header 'x-lt-timestamp: 1753756515388' \\ --header 'Content-Type: application/json;charset=UTF-8' \\ --data-raw '{ }'",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": { \"openApiAddressInfos\": [ { \"warehouseAddressCode\": \"WH2505093344009216\", \"warehouseName\": \"美国发货仓\", \"salesSite\": [ \"shein-us\" ], \"addressInfo\": { \"country\": \"United States\", \"state\": \"CALIFORNIA\", \"city\": \"Avenal\", \"district\": \"\", \"postCode\": \"94501\", \"address1\": \"test address\", \"address2\": \"\", \"phone\": \"2313343434\" } } ] }, \"bbl\": {}, \"traceId\": \"5180cdc2c1911c29\" }",
+  "errorCode": null
+}

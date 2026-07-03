@@ -1,0 +1,98 @@
+{
+  "docId": "3001045",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "车牌信息回调",
+    "userDocName": "车牌信息回调",
+    "endpoint": "/open-api/cargo/platenum-callback",
+    "method": "POST",
+    "docName": "post_open-api_cargo_platenum-callback",
+    "version": 5,
+    "updateTime": "2025-04-07 13:49:52",
+    "changeContent": "新增描述",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": null,
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "batchCode",
+        "type": "string",
+        "required": true,
+        "description": "批次号",
+        "label": "批次号\t"
+      },
+      {
+        "name": "plateNum",
+        "type": "string",
+        "required": true,
+        "description": "车牌号",
+        "label": "车牌号\t"
+      },
+      {
+        "name": "expressCodeList",
+        "type": "string",
+        "required": true,
+        "description": "运单号集合",
+        "label": "运单号集合\t",
+        "multiple": 1
+      },
+      {
+        "name": "plateNumTwo",
+        "type": "string",
+        "description": "车牌号2",
+        "label": "车牌号2"
+      },
+      {
+        "name": "estimatedArriveStorageTime",
+        "type": "datetime",
+        "description": "预计到仓时间",
+        "label": "预计到仓时间"
+      },
+      {
+        "name": "freightCarType",
+        "type": "string",
+        "description": "车型",
+        "label": "车型"
+      },
+      {
+        "name": "freightCarDepartureTime",
+        "type": "datetime",
+        "description": "车辆发车时间",
+        "label": "车辆发车时间"
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "description": "响应码，\"0\"为成功",
+        "label": "响应码\t"
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "description": "如果是错误，则返回错误信息。如果是成功，则返回“OK”",
+        "label": "响应信息\t"
+      },
+      {
+        "name": "traceId",
+        "type": "string",
+        "description": "请求的唯一标识；用于异常报错跟踪"
+      }
+    ]
+  },
+  "requestExample": "batchCode\": \"批次号\", \"plateNum\": \"车牌号\", \"expressCodeList\": [ \"运单号集合\" ], \"plateNumTwo\": null, \"estimatedArriveStorageTime\": null, \"freightCarType\": null, \"freightCarDepartureTime\": null }",
+  "responseExample": "code\": \"0\", \"msg\": \"OK\", \"info\": null }",
+  "errorCode": null
+}

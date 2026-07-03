@@ -1,0 +1,200 @@
+{
+  "docId": "3001865",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "查询任务节点配置",
+    "userDocName": "查询任务节点配置",
+    "endpoint": "/open-api/sims/srp/progress-node-query",
+    "method": "POST",
+    "docName": "",
+    "version": 2,
+    "updateTime": "2026-06-29 20:17:29",
+    "changeContent": "soapi文档更新",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "description": "默认值：application/json;charset=UTF-8"
+      },
+      {
+        "name": "x-lt-openKeyId",
+        "type": "string",
+        "required": true,
+        "description": "访问用户隐私数据时的唯一权限标识openKeyId，获取方式请查阅：授权手册"
+      },
+      {
+        "name": "x-lt-timestamp",
+        "type": "string",
+        "required": true,
+        "description": "请求时间戳，格式为时间转换为毫秒的值，也就是从1970年1月1日起至今的时间转换为毫秒，如：1583398764000"
+      },
+      {
+        "name": "x-lt-signature",
+        "type": "string",
+        "required": true,
+        "description": "请求签名，生成规则请查阅：签名规则"
+      },
+      {
+        "name": "language",
+        "type": "string",
+        "description": "支持返回的多语言报错信息，默认返回中文多语言信息"
+      }
+    ]
+  },
+  "queryStrings": null,
+  "requestBody": {
+    "type": "object"
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "OK",
+    "label": "ResponseOf开放平台-查询任务节点配置响应",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "bbl",
+        "type": "object",
+        "required": false,
+        "description": "响应异常时的bbl相关信息",
+        "label": "BblMeta",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "info",
+            "type": "object",
+            "required": false,
+            "multiple": 0,
+            "children": [
+              {
+                "name": "*",
+                "type": "object",
+                "required": false,
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "key",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "npid",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "tag",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  },
+                  {
+                    "name": "value",
+                    "type": "string",
+                    "required": false,
+                    "multiple": 0
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "npid",
+            "type": "string",
+            "required": false,
+            "multiple": 0
+          }
+        ]
+      },
+      {
+        "name": "code",
+        "type": "string",
+        "required": true,
+        "description": "响应编码 成功：0",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "label": "开放平台-查询任务节点配置响应",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "nodeList",
+            "type": "object",
+            "required": false,
+            "description": "节点列表（一级节点，含二级children）",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "children",
+                "type": "object",
+                "required": false,
+                "description": "二级节点列表 --- 引用「任务节点项」",
+                "multiple": 1
+              },
+              {
+                "name": "id",
+                "type": "int64",
+                "required": false,
+                "description": "节点ID",
+                "multiple": 0
+              },
+              {
+                "name": "nodeLevel",
+                "type": "integer",
+                "required": false,
+                "description": "节点层级（1=一级，2=二级）",
+                "multiple": 0
+              },
+              {
+                "name": "progressCode",
+                "type": "string",
+                "required": false,
+                "description": "任务节点code",
+                "multiple": 0
+              },
+              {
+                "name": "progressName",
+                "type": "string",
+                "required": false,
+                "description": "任务节点名称",
+                "multiple": 0
+              },
+              {
+                "name": "serialNum",
+                "type": "integer",
+                "required": false,
+                "description": "序号",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "错误描述,成功：OK",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}

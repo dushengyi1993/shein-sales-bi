@@ -1,0 +1,156 @@
+{
+  "docId": "3001470",
+  "ok": true,
+  "status": 200,
+  "meta": {
+    "title": "外部查询操作日志（供小程序调用）",
+    "userDocName": "外部查询操作日志（供小程序调用）",
+    "endpoint": "/open-api/mdp/order/external/get-order-log-list",
+    "method": "POST",
+    "docName": "",
+    "version": 1,
+    "updateTime": "2025-12-03 17:00:57",
+    "changeContent": "初版",
+    "qpsContent": "",
+    "modes": [],
+    "modeNames": [],
+    "isSemiTrust": false
+  },
+  "description": "",
+  "requestHeader": {
+    "type": "object",
+    "children": [
+      {
+        "name": "Content-Type",
+        "type": "string",
+        "required": true,
+        "defaultValue": "application/json"
+      }
+    ]
+  },
+  "queryStrings": {
+    "type": "object"
+  },
+  "requestBody": {
+    "type": "object",
+    "required": false,
+    "description": "外部查询操作日志请求体",
+    "label": "OrderLogExternalReq",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "orderNoList",
+        "type": "string",
+        "required": true,
+        "description": "单据编号列表（加工单号/异常单号/生产异常单号），最多20个",
+        "multiple": 1
+      }
+    ]
+  },
+  "responseBody": {
+    "type": "object",
+    "required": false,
+    "description": "接口返回基础数据",
+    "label": "ApiResultOfListResultOfOrderLogGroupResp",
+    "multiple": 0,
+    "children": [
+      {
+        "name": "code",
+        "type": "string",
+        "required": false,
+        "description": "响应码，成功：0",
+        "example": "0",
+        "multiple": 0
+      },
+      {
+        "name": "detailMsg",
+        "type": "string",
+        "required": false,
+        "description": "详细信息",
+        "example": "详细信息",
+        "multiple": 0
+      },
+      {
+        "name": "info",
+        "type": "object",
+        "required": false,
+        "description": "列表结果对象",
+        "label": "ListResultOfOrderLogGroupResp",
+        "multiple": 0,
+        "children": [
+          {
+            "name": "list",
+            "type": "object",
+            "required": false,
+            "description": "数据列表",
+            "multiple": 1,
+            "children": [
+              {
+                "name": "logs",
+                "type": "object",
+                "required": false,
+                "description": "操作日志列表",
+                "multiple": 1,
+                "children": [
+                  {
+                    "name": "operationDetail",
+                    "type": "string",
+                    "required": false,
+                    "description": "操作详情",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "operationStatus",
+                    "type": "string",
+                    "required": false,
+                    "description": "操作状态",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "operationTime",
+                    "type": "string",
+                    "required": false,
+                    "description": "操作时间",
+                    "multiple": 0
+                  },
+                  {
+                    "name": "operator",
+                    "type": "string",
+                    "required": false,
+                    "description": "操作人",
+                    "multiple": 0
+                  }
+                ]
+              },
+              {
+                "name": "orderNo",
+                "type": "string",
+                "required": false,
+                "description": "单据编号",
+                "multiple": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "msg",
+        "type": "string",
+        "required": false,
+        "description": "前端展示的描述信息",
+        "example": "前端展示的描述信息",
+        "multiple": 0
+      },
+      {
+        "name": "time",
+        "type": "datetime",
+        "required": false,
+        "description": "响应时间",
+        "multiple": 0
+      }
+    ]
+  },
+  "requestExample": "",
+  "responseExample": "",
+  "errorCode": null
+}
