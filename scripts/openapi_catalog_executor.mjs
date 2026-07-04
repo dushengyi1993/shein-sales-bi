@@ -8,6 +8,10 @@
  * - execute validates store identity;
  * - write execute requires confirm text and matching dry-run payload hash;
  * - multipart/file endpoints are blocked here and must use dedicated adapters.
+ *
+ * Daily local CLI usage must not run real execute from this Windows/Codex
+ * machine; real OpenAPI calls belong in shein-bi-tencent/cloud runtime or fake
+ * OpenAPI smoke tests.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
@@ -64,7 +68,10 @@ function help() {
 GET endpoints use --query-json/--query-file. POST endpoints use --body-json/--body-file.
 
 Write execute requires:
-  --mode execute --confirm ${CONFIRM_TEXT} --payload-hash <dry-run hash>`;
+  --mode execute --confirm ${CONFIRM_TEXT} --payload-hash <dry-run hash>
+
+Local boundary:
+  do not run real execute from the local Windows/Codex machine; use the cloud BI executor instead.`;
 }
 
 function rel(file) { return path.relative(ROOT, file).replace(/\\/g, '/'); }
@@ -190,7 +197,7 @@ function classifyPlanEntry(entry, detail) {
   const fileLike = blocksMultipart(entry, detail);
   const write = isWriteEntry(entry);
   let lane = 'catalog_json_call';
-  let nextAction = '可用 openapi-call；dry-run 本地生成 payload/hash，execute 需店铺身份探针。';
+  let nextAction = '可用 openapi-call；本地只做离线计划/payload，真实 execute 需在云端并经过店铺身份探针。';
   if (documentKind === 'webhook' || rw === 'webhook') {
     lane = 'webhook_design_only';
     nextAction = '本轮不开发 receiver；未来先做验签、解密、幂等和落库。';
@@ -205,10 +212,10 @@ function classifyPlanEntry(entry, detail) {
     nextAction = '已有专用/并行层；保持现有受控链路，不用通用兜底替代高频路径。';
   } else if (write) {
     lane = 'catalog_json_guarded_write';
-    nextAction = '低频 JSON 写可用 openapi-call 预检；execute 必须确认文本 + payloadHash + 店铺身份探针。';
+    nextAction = '低频 JSON 写可用 openapi-call 做离线预检；真实 execute 必须在云端满足确认文本 + payloadHash + 店铺身份探针。';
   } else if (method === 'GET') {
     lane = 'catalog_json_get_read';
-    nextAction = '低频 GET 读用 openapi-call --query-json/--query-file。';
+    nextAction = '低频 GET 读可用 openapi-call --query-json/--query-file 组织参数；真实回读在云端执行。';
   }
   return {lane, nextAction, fileLike, write, method};
 }

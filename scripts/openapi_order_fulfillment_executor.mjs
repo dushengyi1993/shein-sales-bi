@@ -7,6 +7,9 @@
  * - --confirm SHEIN_ORDER_FULFILLMENT_SUBMIT
  * - --payload-hash matching dry-run output
  * - store identity probe success
+ *
+ * Daily local Windows/Codex usage must not call real SHEIN OpenAPI; run real
+ * fulfillment only inside shein-bi-tencent/cloud runtime or fake OpenAPI tests.
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -66,7 +69,10 @@ function help() {
   node scripts/openapi_order_fulfillment_executor.mjs place-express-order --store FY --order-no <order> --goods-ids <id,id> --express-channel-code <code> --pre-request-id <id>
   node scripts/openapi_order_fulfillment_executor.mjs print-express-info --store FY --order-no <order> --package-no <pkg>
 
-Execute requires: --mode execute --confirm ${CONFIRM_TEXT} --payload-hash <dry-run hash>`;
+Execute requires: --mode execute --confirm ${CONFIRM_TEXT} --payload-hash <dry-run hash>
+
+Local boundary:
+  do not run real execute from the local Windows/Codex machine; use the cloud BI executor instead.`;
 }
 
 function openApiIdentityToStorageIdentity(value) {

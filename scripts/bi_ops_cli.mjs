@@ -18,6 +18,7 @@ const DEFAULT_BASE_URL = process.env.SHEIN_BI_BASE_URL || 'https://shein-bi.dush
 const DEFAULT_SESSION_FILE = process.env.SHEIN_BI_OPS_SESSION_FILE
   || path.join(os.homedir(), '.shein-bi', 'ops-session.json');
 const SUBMIT_CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
+const LOCAL_OPENAPI_TEST_OVERRIDE = process.env.SHEIN_BI_ALLOW_LOCAL_OPENAPI_EXECUTOR === '1';
 
 function parseArgs(argv) {
   const args = {
@@ -240,8 +241,8 @@ Options:
   --image-dir      plan-images 用；只扫描本地图包并输出角色规划，不上传、不提交
   --file / --url   图片工具用；本地文件或外链图片地址
   --image-type     图片工具用；1主图 / 2细节图 / 5方块图 / 6色块图 / 7详情图
-  --openapi-config 图片工具用；默认 config/shein_openapi.local.json 或 SHEIN_OPENAPI_CONFIG_FILE
-  --store-truth    OpenAPI 工具用；默认 config/store_account_truth.json
+  --openapi-config 底层 OpenAPI executor 测试用；日常 bi_ops_cli 不允许用它从本机直连真实 SHEIN
+  --store-truth    底层 OpenAPI executor 测试用；默认 config/store_account_truth.json
   --category       publish-standard/search-product 用；末级分类 ID
   --page-size      search-product 用；最大 10
 
@@ -250,10 +251,11 @@ Safety:
   - doctor 只做本机/云端连通性和权限自检，不创建任务、不触发预检、不执行 SHEIN 写。
   - maintenance-readiness 只读检查脱敏证据，不连接 SHEIN，不打开真实写。
   - plan-images 只做本地图包角色规划，备用目录和“产品封面/AB测试”图不提交。
-  - upload-pic / transform-pic 委托本地 OpenAPI 图片工具；默认 dry-run，execute 会先做店铺身份探针。
-  - audit-status / search-product / publish-standard 是只读 OpenAPI 工具；默认 dry-run，execute 会先做店铺身份探针。
+  - 本机因白名单/身份边界不能直连真实 SHEIN OpenAPI；bi_ops_cli 的真实 OpenAPI 调用必须走云端 BI 服务。
+  - upload-pic / transform-pic 的 execute 委托云端 /api/openapi-image-asset/*；本地只做文件封装和权限会话传递。
+  - audit-status / search-product / publish-standard / openapi-call 不允许通过 bi_ops_cli 从本机 execute；需要真实回读时到 shein-bi-tencent 云端执行或走云端任务审计。
   - order-fulfillment 是高风险订单履约工具；execute 必须额外提供确认文本和 dry-run payload hash。
-  - openapi-call 是目录驱动 JSON 兜底工具；GET 用 --query-json/--query-file，POST 用 --body-json/--body-file；文件上传/WebHook 会被阻断，写接口 execute 必须确认文本和 payload hash。
+  - openapi-call 是目录驱动 JSON 兜底工具；GET 用 --query-json/--query-file，POST 用 --body-json/--body-file；文件上传/WebHook 会被阻断，真实 execute 只能在云端边界内使用。
   - openapi-catalog-plan 只读取本地官方目录/schema，输出全量接口归位矩阵，不联网、不启用 WebHook receiver。
   - 所有任务创建/预检/执行/审计都走云端账号权限和审计。
   - execute 仍需服务端确认任务已预检通过，并且确认文本精确匹配。
@@ -414,6 +416,26 @@ function print(data, pretty = false) {
     return;
   }
   console.log(JSON.stringify(data, null, 2));
+}
+
+function mimeForImageFile(file) {
+  const ext = path.extname(String(file || '')).toLowerCase();
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  if (ext === '.png') return 'image/png';
+  return 'application/octet-stream';
+}
+
+async function fileToCloudUploadBody(file) {
+  const abs = path.resolve(String(file || ''));
+  const stat = await fs.stat(abs);
+  if (!stat.isFile()) throw new Error(`Not a file: ${file}`);
+  const bytes = await fs.readFile(abs);
+  return {
+    name: path.basename(abs),
+    type: mimeForImageFile(abs),
+    size: bytes.length,
+    dataBase64: bytes.toString('base64'),
+  };
 }
 
 function taskTargets(args) {
@@ -635,6 +657,15 @@ function runLocalNodeScript(scriptRel, scriptArgs = []) {
   });
 }
 
+function assertLocalOpenApiExecutorAllowed(args, action, {allowDryRunForTests = true} = {}) {
+  const mode = args.mode || 'dry-run';
+  if (LOCAL_OPENAPI_TEST_OVERRIDE && (allowDryRunForTests || mode === 'dry-run')) return;
+  if (mode === 'dry-run' && allowDryRunForTests && (args.openapiConfigFile || args.openapiStoreTruthFile)) {
+    throw new Error(`${action} dry-run with --openapi-config is a bottom-level adapter smoke-test path. Set SHEIN_BI_ALLOW_LOCAL_OPENAPI_EXECUTOR=1 only for fake OpenAPI tests; do not use bi_ops_cli to prepare real SHEIN calls locally.`);
+  }
+  throw new Error(`${action} cannot run local SHEIN OpenAPI through bi_ops_cli. This machine is outside the SHEIN OpenAPI whitelist boundary; use the shein-bi-tencent cloud BI executor for real upload/submit/readback.`);
+}
+
 async function runMaintenanceReadiness(args) {
   const commandArgs = ['--operation', args.operation || 'retire_link'];
   if (args.docEvidenceFile) commandArgs.push('--doc-evidence', args.docEvidenceFile);
@@ -652,6 +683,25 @@ async function runImageAssetExecutor(args, action) {
   const store = [...new Set([...(args.stores || []), ...(args.writeStores || [])])][0] || '';
   if (!store) throw new Error(`${action} requires --store <店铺>`);
   if (!args.imageType) throw new Error(`${action} requires --image-type <1|2|5|6|7>`);
+  const mode = args.mode || 'dry-run';
+  const shouldUseCloud = mode === 'execute' && !args.openapiConfigFile && !args.openapiStoreTruthFile;
+  if (shouldUseCloud) {
+    const body = {store, imageType: args.imageType};
+    if (action === 'upload-pic') {
+      if (!args.imageFile) throw new Error('upload-pic requires --file <image.jpg|png>');
+      body.file = await fileToCloudUploadBody(args.imageFile);
+    } else {
+      if (!args.imageUrl) throw new Error('transform-pic requires --url <https://...>');
+      body.url = args.imageUrl;
+    }
+    const {json} = await request(args, `/api/openapi-image-asset/${action}`, {
+      method: 'POST',
+      body,
+    });
+    print(json);
+    return;
+  }
+  assertLocalOpenApiExecutorAllowed(args, action);
   const commandArgs = [action, '--store', store, '--image-type', String(args.imageType), '--mode', args.mode || 'dry-run'];
   if (args.openapiConfigFile) commandArgs.push('--config', args.openapiConfigFile);
   if (args.openapiStoreTruthFile) commandArgs.push('--store-truth', args.openapiStoreTruthFile);
@@ -682,6 +732,7 @@ async function runPlanImages(args) {
 async function runReadonlyExecutor(args, action) {
   const store = [...new Set([...(args.stores || []), ...(args.writeStores || [])])][0] || '';
   if (!store) throw new Error(`${action} requires --store <店铺>`);
+  assertLocalOpenApiExecutorAllowed(args, action);
   const commandArgs = [action, '--store', store, '--mode', args.mode || 'dry-run'];
   if (args.openapiConfigFile) commandArgs.push('--config', args.openapiConfigFile);
   if (args.openapiStoreTruthFile) commandArgs.push('--store-truth', args.openapiStoreTruthFile);
@@ -708,6 +759,7 @@ async function runOrderFulfillmentExecutor(args) {
   const store = [...new Set([...(args.stores || []), ...(args.writeStores || [])])][0] || '';
   if (!store) throw new Error('order-fulfillment requires --store <店铺>');
   if (!args.operation) throw new Error('order-fulfillment requires --operation <export-address|import-express|place-express-order|print-express-info>');
+  assertLocalOpenApiExecutorAllowed(args, 'order-fulfillment', {allowDryRunForTests: false});
   const commandArgs = [args.operation, '--store', store, '--mode', args.mode || 'dry-run'];
   if (args.confirm) commandArgs.push('--confirm', args.confirm);
   if (args.payloadHash) commandArgs.push('--payload-hash', args.payloadHash);
@@ -743,6 +795,7 @@ async function runCatalogExecutor(args) {
   const store = [...new Set([...(args.stores || []), ...(args.writeStores || [])])][0] || '';
   if (!store) throw new Error('openapi-call requires --store <店铺>');
   if (!args.docId && !args.endpoint) throw new Error('openapi-call requires --doc-id or --endpoint');
+  assertLocalOpenApiExecutorAllowed(args, 'openapi-call');
   const commandArgs = ['--store', store, '--mode', args.mode || 'dry-run'];
   if (args.docId) commandArgs.push('--doc-id', args.docId);
   if (args.endpoint) commandArgs.push('--endpoint', args.endpoint);

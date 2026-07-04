@@ -276,7 +276,7 @@ node scripts/bi_ops_cli.mjs tasks --pretty
 
 - 新链接或复制上品需要重新配图时，上传图片后系统应把文件挂到当前会话资料，并尝试判断图片用途。
 - 本地图包可以是 14 张、15 张或少于 14 张；这不是异常。路径任一层包含 `备用` / `backup` / `bak` 的图片不要用；文件名包含 `产品封面` / `AB测试` 的图只作为 AB 测试素材，默认忽略不提交。
-- 前端角色按用户语言理解：`细节图11` 的第 1 张才是主图，放主封面；单独 `轮播图` 不是主图，而是主封面之外最好看的第二封面；方形图使用 1:1 图；其他细节图最多 10 张，排序为先场景、再卖点、最后参数，如果场景图很多可以留一张场景收尾；不足 10 张就有多少放多少，不强行补满。
+- 前端角色按用户语言理解：`细节图11` 的第 1 张才是主图，放主封面；单独 `轮播图` 不是主图，而是主封面之外最好看的第二封面；方形图使用 1:1 图；其他细节图最多 10 张，排序为先卖点、再参数、最后场景；不足 10 张就有多少放多少，不强行补满。
 - SKU 图不是必填兜底位。扣除主封面、方形图和单独轮播/第二封面后，如果其他候选图超过 10 张，才把最低优先级的高清图放到 SKU 图；否则 SKU 图不提交。SKU 图禁止使用 `sku-80` / `80x80` 等裁切小图。
 - AI 可以根据图片内容给出排序建议、重复图/低质图/错品风险提示；用户可以继续说“把第 3 张做主图”“第 5 张不要”“细节图 2 和 6 交换”。图片理解不能替代商品事实：AI 不得根据图片发明不存在的功率、认证、配件或功能；发现图片和链接资料冲突时必须停下来提示。
 - 本地 CLI 可先做离线规划：`node scripts/bi_ops_cli.mjs plan-images --image-dir <图包路径> --out image-role-plan.json`。这个命令只扫描本地文件、排除备用/AB 测试封面并输出前端角色规划，不上传图片、不生成完整 `partialEdit`、不提交 SHEIN。
@@ -348,13 +348,15 @@ node scripts/test_link_ops_image_role_planner.mjs
 - `test_bi_ops_production_safety.mjs` 验证生产安全检查器本身：锁定态通过、复制上品试点通过、维护写试点通过，`*` 通配、角色泛放、未实现动作放行和总闸门大于白名单都会失败。
 - `test_bi_ops_copy_product_success_flow.mjs` 使用本地假 OpenAPI 服务验证 `copy_product_draft` 成功闭环：任务创建、JSON payload 附件、dry-run 锁定 payload hash、显式确认执行、publish 成功、商品查询强指纹回读、任务自动 `done`。它不会调用真实 SHEIN；release gate 还会额外用 `--weak-readback` 跑一次，证明只有平台 SKU / 源 SKC / 货号文本等弱证据时，任务必须进入人工核销，不能自动判成功。
 - `test_bi_ops_maintenance_executor_flow.mjs` 使用本地假 OpenAPI 服务验证维护写执行器：恢复上架、下架、库存、供货价、售价、改标题、换图、证书绑定完整 payload、dry-run hash 锁定、显式确认 execute、库存 + 商品回读；同时覆盖换图 payload 摘要和危险 SKU 小图阻断。它不会调用真实 SHEIN。
-- `test_link_ops_image_role_planner.mjs` 使用临时本地图包验证离线图片角色规划：排除 `备用` 和 `产品封面` AB 测试图，识别主封面、第二封面、1:1 方形图，按场景→卖点→参数排序，容量不足时不硬凑 11 张，容量溢出时才分配高清 SKU 图。它不会上传图片或调用 SHEIN。
+- `test_link_ops_image_role_planner.mjs` 使用临时本地图包验证离线图片角色规划：排除 `备用` 和 `产品封面` AB 测试图，识别主封面、第二封面、1:1 方形图，按卖点→参数→场景排序，容量不足时不硬凑 11 张，容量溢出时才分配高清 SKU 图。它不会上传图片或调用 SHEIN。
 - `test_shein_openapi_doc_detail_parser.mjs` 使用离线 fixture 验证官方文档详情解析器，确保 `modify-skc-shelf` / `shelf_state` 这类维护写接口不会因为解析器变动而误判；它不访问外网、不需要登录态、不保存 Cookie。
 - `test_bi_ops_maintenance_readiness.mjs` 验证维护写 readiness 检查器：缺证据时必须阻断，只有 schema 时只能到 `schema_ready`，只有 schema + 逐店权限 + 强回读三类脱敏证据都齐全时才会到 `pilot_ready`，且含 `secretKey/openKeyId/Cookie/token` 等敏感字段的证据会被拒绝。
 
 ## 2026-07-03 OpenAPI CLI 能力补充
 
-以下命令均走本机受控 CLI，不保存 SHEIN 密钥，不打印 `openKeyId/secretKey`。默认 `dry-run` 不调用 SHEIN；需要真实调用时必须显式 `--mode execute`。
+以下命令均走本机受控 CLI，不保存 SHEIN 密钥，不打印 `openKeyId/secretKey`。默认 `dry-run` 不调用 SHEIN。
+
+> 2026-07-03 边界更新：本机因 SHEIN OpenAPI 白名单/身份边界不能直连真实 OpenAPI。日常 `bi_ops_cli` 的真实上传、提交、回读必须走 `shein-bi-tencent` 云端；本机只做图包规划、payload/dry-run 和假接口 smoke。底层 `scripts/openapi_*_executor.mjs` 保留给云端运行和本地 fake OpenAPI 测试，不作为本机真实业务入口。
 
 ### 图片和图包
 
@@ -365,8 +367,8 @@ node scripts/bi_ops_cli.mjs transform-pic --store FY --image-type 2 --url <https
 ```
 
 - `plan-images` 只做本地图包角色规划，不上传、不提交；备用目录和文件名含“产品封面/AB测试”的图不提交。
-- `upload-pic` 是 multipart 本地图片上传；execute 前会做店铺身份探针。
-- `transform-pic` 是外链图片转换；execute 前会做店铺身份探针。
+- `upload-pic` 是官方“本地图片上传”能力名称；通过 `bi_ops_cli --mode execute` 使用时会转交云端 BI 执行，不从当前 Windows 本机直连 SHEIN。
+- `transform-pic` 是外链图片转换；通过 `bi_ops_cli --mode execute` 使用时同样转交云端 BI 执行。
 
 ### 商品只读/回读能力
 
@@ -377,7 +379,7 @@ node scripts/bi_ops_cli.mjs publish-standard --store FY --category <末级分类
 node scripts/bi_ops_cli.mjs shelf-quota --store FY [--mode execute]
 ```
 
-这些命令走 `scripts/openapi_readonly_executor.mjs`，真实 execute 只读接口前会先校验店铺身份。
+这些命令的真实回读必须在云端执行器里跑；本机 `bi_ops_cli` 不再允许用 `--openapi-config --mode execute` 直连 SHEIN。若要做本地开发验证，只能连 fake OpenAPI。
 
 ### 高风险订单履约
 
@@ -390,7 +392,7 @@ node scripts/bi_ops_cli.mjs order-fulfillment --operation export-address --store
   --mode execute --confirm SHEIN_ORDER_FULFILLMENT_SUBMIT --payload-hash <dry-run输出的payloadHash>
 ```
 
-`order-fulfillment` 覆盖 `export-address`、`import-express`、`place-express-order`、`print-express-info`。这是高风险入口：execute 必须同时满足确认文本、payload hash 和店铺身份探针，缺任意一项都不会联网调用业务接口。
+`order-fulfillment` 覆盖 `export-address`、`import-express`、`place-express-order`、`print-express-info`。这是高风险入口：真实 execute 必须在云端边界内，同时满足确认文本、payload hash 和店铺身份探针；本机不允许直连真实履约接口。
 
 ### 目录驱动兜底调用
 
@@ -398,7 +400,7 @@ node scripts/bi_ops_cli.mjs order-fulfillment --operation export-address --store
 node scripts/bi_ops_cli.mjs openapi-call --doc-id <docId> --store FY --body-json '{}'
 ```
 
-`openapi-call` 读取 `outputs/shein-openapi-doc-catalog/official-capabilities.latest.json`，用于官方 JSON OpenAPI 的兜底 dry-run/受控 execute：
+`openapi-call` 读取 `outputs/shein-openapi-doc-catalog/official-capabilities.latest.json`，用于官方 JSON OpenAPI 的兜底 dry-run/受控 execute。真实 execute 只能在云端边界内使用：
 
 - 只读接口：execute 前校验店铺身份。
 - 写接口：execute 必须 `--confirm SHEIN_OPENAPI_GENERIC_WRITE_SUBMIT` + `--payload-hash <dry-run hash>`。

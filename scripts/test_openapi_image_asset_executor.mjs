@@ -44,9 +44,9 @@ async function freePort() {
     });
   });
 }
-function runNode(args) {
+function runNode(args, {allowLocalOpenApiExecutor = true} = {}) {
   return new Promise(resolve => {
-    const child = spawn(process.execPath, args, {cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe']});
+    const child = spawn(process.execPath, args, {cwd: ROOT, env: {...process.env, ...(allowLocalOpenApiExecutor ? {SHEIN_BI_ALLOW_LOCAL_OPENAPI_EXECUTOR: '1'} : {})}, stdio: ['ignore', 'pipe', 'pipe']});
     let stdout = '', stderr = '';
     child.stdout.on('data', d => { stdout += d.toString(); });
     child.stderr.on('data', d => { stderr += d.toString(); });
@@ -104,6 +104,11 @@ try {
   check('CLI upload-pic dry-run exits 0', cliDryRunUpload.code, 0);
   check('CLI upload-pic dry-run ok', cliDryRunUpload.json?.ok, true);
   check('CLI upload-pic dry-run delegates without network', calls.length, 0);
+
+  const blockedCliUpload = await runNode(['scripts/bi_ops_cli.mjs', 'upload-pic', '--openapi-config', configFile, '--store', 'SMK', '--image-type', '2', '--file', imgFile, '--mode', 'execute'], {allowLocalOpenApiExecutor: false});
+  check('CLI upload-pic local execute blocks without explicit test override', blockedCliUpload.code !== 0, true);
+  check('CLI upload-pic local execute block mentions cloud boundary', blockedCliUpload.stderr + blockedCliUpload.stdout, x => String(x).includes('cannot run local SHEIN OpenAPI through bi_ops_cli'));
+  check('CLI upload-pic local execute block made no network', calls.length, 0);
 
   const dryRunUpload = await runNode(['scripts/openapi_image_asset_executor.mjs', 'upload-pic', '--config', configFile, '--store-truth', truthFile, '--store', 'SMK', '--image-type', '2', '--file', imgFile]);
   check('upload dry-run exits 0', dryRunUpload.code, 0);

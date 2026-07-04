@@ -8,6 +8,9 @@
  * - /open-api/goods/query-publish-fill-in-standard
  *
  * It never submits SHEIN writes. Execute validates store identity before reading.
+ * Daily local CLI usage must not run real execute from this Windows/Codex
+ * machine; real readback belongs in shein-bi-tencent/cloud runtime or fake
+ * OpenAPI smoke tests.
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -69,6 +72,7 @@ function help() {
 Safety:
   - default mode is dry-run;
   - execute validates store identity before reading SHEIN;
+  - do not run real execute from the local Windows/Codex machine; use the cloud BI executor instead;
   - this executor does not submit write endpoints.`;
 }
 

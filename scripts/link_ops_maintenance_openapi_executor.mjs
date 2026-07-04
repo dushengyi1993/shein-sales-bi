@@ -7,6 +7,9 @@
  * update_supply_price, update_product_price, update_title, update_images.
  * It never silently writes: execute requires the server-side task state, a
  * dry-run payload hash, safe write gates and the explicit confirm text.
+ *
+ * Daily local Windows/Codex usage must not call real SHEIN OpenAPI; run real
+ * maintenance writes only inside shein-bi-tencent/cloud runtime or fake tests.
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -86,7 +89,7 @@ function parseArgs(argv) {
     else if (a === '--confirm') args.confirm = String(argv[++i] || '').trim();
     else if (a === '--quiet') args.quiet = true;
     else if (a === '--help' || a === '-h') {
-      console.log(`Usage:\n  node scripts/link_ops_maintenance_openapi_executor.mjs --task-id <id> --store DX --dry-run\n  node scripts/link_ops_maintenance_openapi_executor.mjs --task-json task.json --store DX --execute --confirm ${SUBMIT_CONFIRM_TEXT}`);
+      console.log(`Usage:\n  node scripts/link_ops_maintenance_openapi_executor.mjs --task-id <id> --store DX --dry-run\n  node scripts/link_ops_maintenance_openapi_executor.mjs --task-json task.json --store DX --execute --confirm ${SUBMIT_CONFIRM_TEXT}\n\nLocal boundary:\n  do not run real execute from the local Windows/Codex machine; use the cloud BI executor instead.`);
       process.exit(0);
     } else throw new Error(`Unknown argument: ${a}`);
   }
@@ -184,8 +187,65 @@ function parseNumberForIntent(intent, text){
   for(const re of specs[intent]||[]){ const m=raw.match(re); if(m) return Number(m[1]); }
   return parseNumberFromText(raw);
 }
-function parseTitleFromText(text){ const m=String(text||'').match(/(?:标题|title).{0,16}(?:改成|改为|换成|更新为|改到|=>|：|:)\s*[“"']?(.+?)[”"']?\s*$/i); return m?safeString(m[1],1000):''; }
+function stripTitleInstructionTail(value){
+  let title=String(value||'').replace(/\s+/g,' ').trim();
+  if(!title) return '';
+  const quotePairs={'“':'”','"':'"',"'":"'","‘":"’"};
+  const first = title[0];
+  if(quotePairs[first]){
+    const end = title.indexOf(quotePairs[first], 1);
+    if(end > 0) title = title.slice(1, end).trim();
+  }
+  const instructionBoundary = title.search(/[。；;,，]\s*(?:并\s*)?(?:换图|更换图片|更新图片|图片|图包|素材|细节图|详情图|轮播图|主图|封面|方形图|SKU图|sku图|色块图|参数图|卖点图|场景图|证书|资质|库存|供货价|成本价|售价|价格|上架|下架|上下架|然后|同时|另外|再|其余|其他|如果|用这个|使用本任务|用本任务)/i);
+  if(instructionBoundary >= 0) title = title.slice(0, instructionBoundary).trim();
+  title = title.replace(/[，,；;。]\s*$/g,'').replace(/^[“"']+|[”"']+$/g,'').trim();
+  return title;
+}
+function parseTitleFromText(text){
+  const raw=String(text||'');
+  const marker=/(?:标题|title).{0,16}?(?:改成|改为|换成|更新为|改到|=>|：|:)[：:]?\s*/ig;
+  let match,last=null;
+  while((match=marker.exec(raw))) {
+    const prefix = raw.slice(Math.max(0, match.index - 12), match.index);
+    if (/(?:阿文|阿拉伯文|arabic\s*|ar\s*)$/i.test(prefix)) continue;
+    last=match;
+  }
+  if(!last) return '';
+  return safeString(stripTitleInstructionTail(raw.slice(last.index + last[0].length)),1000);
+}
 function languageForTitle(title){ return /[\u0600-\u06FF]/.test(String(title||'')) ? 'ar' : 'en'; }
+function parseTitleArFromText(text){
+  const raw=String(text||'');
+  const arMarker=/(?:阿文标题|ar标题|arabic title|阿拉伯文标题)[：:]\s*/i;
+  const m=raw.match(arMarker);
+  if(!m) return '';
+  let rest=raw.slice(m.index+m[0].length);
+  const end=rest.search(/[。；;，,\n]/);
+  if(end>0) rest=rest.slice(0,end);
+  return safeString(stripTitleInstructionTail(rest),1000);
+}
+function parseAttributeOverrides(task){
+  const list=asArray(task?.targets?.attributeOverrides||task?.attributeOverrides||task?.targets?.productAttributeList||task?.productAttributeList);
+  return list.filter(x=>x&&typeof x==='object'&&x.attribute_id);
+}
+function ensureSquareImageSortGlobal(payload){
+  for(const skc of asArray(payload?.skc_list||payload?.skcList)){
+    const info=skc?.image_info||skc?.imageInfo;
+    const rows=asArray(info?.image_info_list||info?.imageInfoList);
+    if(!rows.length) continue;
+    const maxSort=Math.max(0,...rows.map(r=>Number(r?.image_sort??r?.imageSort??0)));
+    const sortCounts={};
+    for(const row of rows){ const s=Number(row?.image_sort??row?.imageSort??0); sortCounts[s]=(sortCounts[s]||0)+1; }
+    for(const row of rows){
+      const t=Number(row?.image_type??row?.imageType??0);
+      const s=Number(row?.image_sort??row?.imageSort??0);
+      if(t===5 && sortCounts[s]>1){
+        row.image_sort=maxSort+1;
+        sortCounts[s]--; sortCounts[maxSort+1]=1;
+      }
+    }
+  }
+}
 async function readJson(file){ return JSON.parse(await fs.readFile(file,'utf8')); }
 async function writeJson(file,data){ await fs.mkdir(path.dirname(file),{recursive:true}); await fs.writeFile(file, `${JSON.stringify(data,null,2)}\n`, 'utf8'); }
 function normalizeTaskStore(data){ if(Array.isArray(data?.tasks)) return data; if(data?.id) return {version:1,tasks:[data]}; throw new Error('Task JSON must be a task object or {tasks:[...]}'); }
@@ -380,7 +440,7 @@ function inspectImageEditPayloads(payloads, blockers, warnings){
   };
 }
 async function loadClient(args){ const config=await readJson(args.config); const stores=Array.isArray(config.stores)?config.stores:Object.entries(config.stores||{}).map(([storeKey,v])=>({storeKey,...v})); const store=stores.find(s=>normalizeStoreKey(s?.storeKey||s?.key||s?.store)===normalizeStoreKey(args.store)); if(!store?.openKeyId||!store?.secretKey) throw new Error(`未在 ${rel(args.config)} 找到 ${args.store} 的 openKeyId/secretKey`); return {config, store, client:new SheinOpenApiClient({baseUrl:config.apiBaseUrls?.prodSemiManaged||SHEIN_OPENAPI_BASE_URLS.prodSemiManaged, openKeyId:store.openKeyId, secretKey:store.secretKey})}; }
-function compactCallResult(name,pathText,method,response){ return {name,path:pathText,method,httpStatus:response.status??response.httpStatus??null,code:response.data?.code??response.code??null,msg:safeString(response.data?.msg??response.msg??'',300),traceId:response.data?.traceId??response.traceId??null}; }
+function compactCallResult(name,pathText,method,response){ const info=response.data?.info; return {name,path:pathText,method,httpStatus:response.status??response.httpStatus??null,code:response.data?.code??response.code??null,msg:safeString(response.data?.msg??response.msg??'',300),traceId:response.data?.traceId??response.traceId??null,infoSuccess:info?.success??null,infoVersion:info?.version??null,preValidResult:info?.pre_valid_result??null,skcList:info?.skc_list??null}; }
 async function callOpenApi(client, {name, path:pathText, method='POST', body, query}){ const response=await client.request(pathText,{method,body,query,headers:{language:'en'}}); return {...compactCallResult(name,pathText,method,response), data:response.data}; }
 function summarizeSiteList(data){ const rows=[]; const q=[data]; const seen=new Set(); while(q.length&&rows.length<300){ const cur=q.shift(); if(!cur||typeof cur!=='object'||seen.has(cur)) continue; seen.add(cur); if(Array.isArray(cur)){ q.push(...cur); continue; } const site=safeString(cur.siteAbbr||cur.site_abbr||cur.site||cur.subSite||cur.sub_site||cur.siteCode||cur.site_code,80); const currency=safeString(cur.currency||cur.currencyCode||cur.currency_code,20).toUpperCase(); if(site) rows.push({siteAbbr:site,currency}); q.push(...Object.values(cur)); } return rows; }
 async function getDefaultSite(client,calls,warnings){ try{ const r=await callOpenApi(client,{name:'query-site-list',path:'/open-api/goods/query-site-list',body:{}}); calls.push(compactCallResult(r.name,r.path,r.method,{status:r.httpStatus,data:r.data})); const sites=summarizeSiteList(r.data); const sa=sites.find(x=>String(x.siteAbbr).toLowerCase()==='shein-sa')||sites.find(x=>String(x.currency).toUpperCase()==='SAR')||sites[0]; if(!sa) warnings.push('站点列表为空，默认使用 shein-sa/SAR 但执行前必须人工复核。'); return {site:sa?.siteAbbr||'shein-sa', currency:sa?.currency||'SAR', sites:sites.slice(0,20)}; }catch(e){ warnings.push(`站点列表探针失败：${safeString(e.message||e)}；默认使用 shein-sa/SAR。`); return {site:'shein-sa',currency:'SAR',sites:[]}; } }
@@ -411,8 +471,33 @@ function resolveTargets({task, store, linkRows, productRows}){ const refs=taskPr
   }
   const uniq=[]; const seen=new Set(); for(const m of matches){ const key=`${m.storeKey}|${m.skc}|${m.standardGoodsSn}`; if(seen.has(key)) continue; seen.add(key); uniq.push(m); }
   return {refs, matches:uniq, missing}; }
-function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEditPayloads=[],certificatePayloads=[]}){
+async function fetchSpuInfoForImages(client, matches, calls, warnings){
+  const spuGroups=[...new Map(matches.filter(m=>m.spu).map(m=>[m.spu,m])).values()];
+  const spuInfoMap=new Map();
+  for(const m of spuGroups){
+    try{
+      const response=await client.request('/open-api/goods/spu-info',{method:'POST',body:{spuName:m.spu,languageList:['en','ar']},headers:{language:'en'}});
+      calls.push(compactCallResult('spu-info-image-group','/open-api/goods/spu-info','POST',response));
+      const info=response.data?.info;
+      if(info&&typeof info==='object'){
+        const spuGroupCode=safeString(info.groupCode||info.group_code||info.imageGroupCode||info.image_group_code||'',120);
+        const skcGroups={};
+        for(const skcRow of asArray(info.skcInfoList||info.skc_info_list||info.skcList||info.skc_list)){
+          const skcName=safeString(skcRow.skcName||skcRow.skc_name||skcRow.skc||'',160);
+          const skcGroupCode=safeString(skcRow.groupCode||skcRow.group_code||skcRow.imageGroupCode||skcRow.image_group_code||'',120);
+          if(skcName&&skcGroupCode) skcGroups[skcName]=skcGroupCode;
+        }
+        spuInfoMap.set(m.spu,{spuGroupCode, skcGroups, productTypeId:info.productTypeId||info.product_type_id||null});
+      }
+    }catch(e){
+      warnings.push(`spu-info 查询失败 (${m.spu})：${safeString(e.message||e,200)}；image_group_code 将缺失，图片编辑可能被平台拒绝。`);
+    }
+  }
+  return spuInfoMap;
+}
+function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEditPayloads=[],certificatePayloads=[],spuInfoMap=new Map()}){
   const command=String(task?.command||task?.text||''); const out=[];
+  const firstPartialEditIntent = intents.find(intent => intent === 'update_title' || intent === 'update_images') || '';
   for(const intent of intents){
     const endpoint=ACTIONS[intent].endpoint;
     if(intent==='activate_link'){
@@ -439,16 +524,63 @@ function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEdi
       const productPriceList=matches.flatMap(m=>m.skuCodes.map(sku=>({productCode:sku,currencyCode:siteInfo.currency||'SAR',shopPrice:Number(price.toFixed(2)),specialPrice:Number(price.toFixed(2)),site:siteInfo.site,riseReason:'4'})));
       if(!productPriceList.length) blockers.push('改商品售价任务未解析到 SKU code，无法构建售价 payload。');
       out.push({operation:intent, endpoint, body:{productPriceList}, targetLinks:matches});
-    } else if(intent==='update_title'){
-      const title=parseTitleFromText(command); if(!title) blockers.push('改标题任务缺少新标题，例如“标题改成 XXX”。');
+    } else if(intent==='update_title' || intent==='update_images'){
+      if (intent !== firstPartialEditIntent) continue;
+      const hasTitle=intents.includes('update_title');
+      const hasImages=intents.includes('update_images');
+      const title=hasTitle?parseTitleFromText(command):'';
+      const titleAr=hasTitle?parseTitleArFromText(command):'';
+      const attrOverrides=parseAttributeOverrides(task);
+      if(hasTitle && !title) blockers.push('改标题任务缺少新标题，例如"标题改成 XXX"。');
+      const imagePlans=hasImages?(Array.isArray(imageEditPayloads)?imageEditPayloads:[]):[];
+      if(hasImages && !imagePlans.length) blockers.push('换图任务缺少完整 SHEIN partialEdit 图片 JSON：需提供 spu_name + image_info/skc_list/site_detail_image_info_list，或先通过图片上传/外链转换取得 SHEIN 图片 URL 后再提交。');
       const spuGroups=[...new Map(matches.map(m=>[m.spu,m])).values()].filter(m=>m.spu);
-      if(!spuGroups.length) blockers.push('改标题任务未解析到 SPU，无法构建 partialEdit payload。');
-      for(const m of spuGroups){ out.push({operation:intent, endpoint, body:{spu_name:m.spu, multi_language_name_list:[{language:languageForTitle(title), name:title}]}, targetLinks:[m]}); }
-    } else if(intent==='update_images'){
-      const imagePlans=Array.isArray(imageEditPayloads)?imageEditPayloads:[];
-      if(!imagePlans.length) blockers.push('换图任务缺少完整 SHEIN partialEdit 图片 JSON：需提供 spu_name + image_info/skc_list/site_detail_image_info_list，或先通过图片上传/外链转换取得 SHEIN 图片 URL 后再提交。');
-      for(const body of imagePlans){ out.push({operation:intent, endpoint, body, targetLinks:matches}); }
-      if(!imagePlans.length) out.push({operation:intent, endpoint, body:{}, targetLinks:matches});
+      if(!spuGroups.length) blockers.push('partialEdit 任务未解析到 SPU，无法构建 payload。');
+      for(const m of spuGroups){
+        let body={spu_name:m.spu};
+        if(hasTitle){
+          const lang=languageForTitle(title);
+          const mlList=[{language:lang, name:title}];
+          if(lang==='en' && titleAr) mlList.push({language:'ar', name:titleAr});
+          body.multi_language_name_list=mlList;
+          const skcTitle=titleAr || title;
+          const skcList=matches.filter(x=>x.spu===m.spu).map(x=>({skc_name:x.skc, skc_title:skcTitle}));
+          if(skcList.length) body.skc_list=skcList;
+          if(attrOverrides.length) body.product_attribute_list=attrOverrides.map(a=>({attribute_id:a.attribute_id, attribute_value_id:a.attribute_value_id, attribute_extra_value:a.attribute_extra_value||''}));
+          warnings.push('partialEdit 标题已覆盖 SKC skc_title（平台全量校验用 SKC 标题）；如商品有必填关联属性，已从 attributeOverrides 补齐。');
+        }
+        if(hasImages){
+          const plan=imagePlans.find(p=>p.spu_name===m.spu) || imagePlans[0];
+          if(plan){
+            if(plan.image_info){ body.image_info=plan.image_info; body.is_spu_pic=plan.is_spu_pic!==false; }
+            if(plan.skc_list){
+              if(body.skc_list){
+                for(const oldSkc of body.skc_list){
+                  const newSkc=plan.skc_list.find(s=>s.skc_name===oldSkc.skc_name);
+                  if(newSkc){ oldSkc.image_info=newSkc.image_info; if(newSkc.sku_list) oldSkc.sku_list=newSkc.sku_list; }
+                }
+              } else { body.skc_list=plan.skc_list; body.is_spu_pic=plan.is_spu_pic!==false; }
+            }
+            if(plan.site_detail_image_info_list) body.site_detail_image_info_list=plan.site_detail_image_info_list;
+            ensureSquareImageSortGlobal(body);
+            const spuInfo=spuInfoMap.get(m.spu);
+            if(spuInfo){
+              if(spuInfo.spuGroupCode && body.image_info) body.image_info.image_group_code=spuInfo.spuGroupCode;
+              if(spuInfo.skcGroups && body.skc_list){
+                for(const skc of body.skc_list){
+                  const gc=spuInfo.skcGroups[skc.skc_name];
+                  if(gc && skc.image_info) skc.image_info.image_group_code=gc;
+                }
+              }
+              warnings.push('partialEdit 图片已注入 image_group_code（来自 spu-info 实时查询）。');
+            } else {
+              warnings.push('partialEdit 图片缺少 image_group_code：spu-info 未返回该 SPU 的图片组编码，平台可能拒绝图片编辑。');
+            }
+            warnings.push('partialEdit 图片已合并进同一调用；方形图 image_sort 已确保全局唯一。');
+          }
+        }
+        out.push({operation:hasTitle&&hasImages?'update_title_and_images':intent, endpoint, body, targetLinks:matches.filter(x=>x.spu===m.spu)});
+      }
     } else if(intent==='certificate_review'){
       const certPlans=Array.isArray(certificatePayloads)?certificatePayloads:[];
       if(!certPlans.length) blockers.push('证书/资质任务缺少官方 OpenAPI JSON payload：需提供 certificatePayloads[{endpoint,body}]，endpoint 必须在证书允许列表内。');
@@ -517,8 +649,8 @@ async function main(){
   }
   let submitResults=[]; let actualWriteSubmitted=false;
   if(args.mode==='execute' && blockers.length===0){
-    for(const p of payloads){ const response=await client.request(p.endpoint,{method:'POST',body:p.body,headers:{language:'en'}}); const compact=compactCallResult(p.operation,p.endpoint,'POST',response); calls.push(compact); submitResults.push({...compact, operation:p.operation}); if(String(response.data?.code)!=='0') blockers.push(`${p.operation} 返回失败：${safeString(response.data?.msg||response.data?.code||'未知错误')}`); }
-    actualWriteSubmitted=submitResults.some(r=>String(r.code)==='0');
+    for(const p of payloads){ const response=await client.request(p.endpoint,{method:'POST',body:p.body,headers:{language:'en'}}); const compact=compactCallResult(p.operation,p.endpoint,'POST',response); calls.push(compact); submitResults.push({...compact, operation:p.operation}); if(String(response.data?.code)!=='0') blockers.push(`${p.operation} 返回失败：${safeString(response.data?.msg||response.data?.code||'未知错误')}`); else if(response.data?.info?.success===false){ const errs=(response.data?.info?.pre_valid_result||[]).map(v=>`[${v.form||v.module||''}] ${(v.messages||[]).join('; ')}`).join(' | '); blockers.push(`${p.operation} 校验失败：${errs||'info.success=false 但无详细错误'}`); } }
+    actualWriteSubmitted=submitResults.some(r=>String(r.code)==='0' && r.infoSuccess!==false);
   }
   const readbackCalls=[]; let readback={ok:false,status:args.mode==='execute'?'not_run':'planned_not_run',calls:readbackCalls};
   if(actualWriteSubmitted){ readback=await readbackForIntents(client,intents,resolved.matches,readbackCalls); }

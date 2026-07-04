@@ -30,26 +30,29 @@ outputs/shein-openapi-doc-catalog/api-details/*.json # 半托管接口离线 sch
 | M4 订单履约高风险入口 | 已完成 | `order_fulfillment.mjs`, `openapi_order_fulfillment_executor.mjs` | `test_openapi_order_fulfillment_executor.mjs` |
 | M5 目录驱动 JSON 兜底 | 已完成 | `openapi_catalog_executor.mjs` | `test_openapi_catalog_executor.mjs` |
 | M6 CLI/门禁/文档整合 | 已完成 | `bi_ops_cli.mjs`, `test_bi_ops_release_gate.mjs`, `docs/*` | `test_bi_ops_release_gate.mjs` |
+| M7 partialEdit 修复与正确用法 | 已完成 | `link_ops_maintenance_openapi_executor.mjs`, `docs/shein-openapi-partialEdit-correct-usage.md` | 语法检查 + HL 标题/图片提交成功 |
 
 ## 3. 当前 CLI 命令
 
 ```bash
 node scripts/bi_ops_cli.mjs plan-images --image-dir <图片文件夹> --out roles.json
-node scripts/bi_ops_cli.mjs upload-pic --store FY --image-type 2 --file <image.jpg> [--mode execute]
-node scripts/bi_ops_cli.mjs transform-pic --store FY --image-type 2 --url <https://...> [--mode execute]
-node scripts/bi_ops_cli.mjs audit-status --store FY --spu <SPU> [--mode execute]
-node scripts/bi_ops_cli.mjs search-product --store FY [--spu <SPU>|--product <货号>] [--mode execute]
-node scripts/bi_ops_cli.mjs publish-standard --store FY --category <末级分类ID> [--mode execute]
-node scripts/bi_ops_cli.mjs shelf-quota --store FY [--mode execute]
+node scripts/bi_ops_cli.mjs upload-pic --store FY --image-type 2 --file <image.jpg> --mode execute   # 走云端 BI
+node scripts/bi_ops_cli.mjs transform-pic --store FY --image-type 2 --url <https://...> --mode execute # 走云端 BI
+node scripts/bi_ops_cli.mjs audit-status --store FY --spu <SPU>       # 本机 CLI 不做真实 execute
+node scripts/bi_ops_cli.mjs search-product --store FY --product <货号> # 本机 CLI 不做真实 execute
+node scripts/bi_ops_cli.mjs publish-standard --store FY --category <末级分类ID> # 本机 CLI 不做真实 execute
+node scripts/bi_ops_cli.mjs shelf-quota --store FY                    # 本机 CLI 不做真实 execute
 node scripts/bi_ops_cli.mjs order-fulfillment --operation export-address --store FY --order-no <订单号>
 node scripts/bi_ops_cli.mjs openapi-call --doc-id <docId> --store FY --body-json '{}'
 node scripts/bi_ops_cli.mjs openapi-call --doc-id <GET docId> --store FY --query-json '{"id":"..."}'
 node scripts/bi_ops_cli.mjs openapi-catalog-plan --format summary [--out plan.json]
 ```
 
-默认 `dry-run`。`execute` 规则：
+默认 `dry-run`。本机边界：
 
-- 只读/图片接口：先做店铺身份探针。
+- **本地不能直连真实 SHEIN OpenAPI**：日常 `bi_ops_cli` 不再从本机调用 `openapi_*_executor` 的真实 `execute`。
+- 图片上传/转换：`bi_ops_cli --mode execute` 只委托云端 BI `/api/openapi-image-asset/*`，由 `shein-bi-tencent` 使用云端白名单和密钥执行。
+- 只读回读/目录兜底/订单履约：需要真实 `execute` 时，到 `shein-bi-tencent` 云端执行器或云端任务审计链路跑；本机只保留 `dry-run`/payload/假接口 smoke。
 - 写接口：必须有确认文本和 dry-run `payloadHash`。
 - 订单履约使用独立确认文本 `SHEIN_ORDER_FULFILLMENT_SUBMIT`。
 - 目录驱动写接口使用 `SHEIN_OPENAPI_GENERIC_WRITE_SUBMIT`。
@@ -65,6 +68,33 @@ node scripts/bi_ops_cli.mjs openapi-catalog-plan --format summary [--out plan.js
 - 响应解析：只输出业务需要字段，错误时保留 SHEIN `code/msg`，不打印密钥或完整二进制内容。
 
 JSON 接口使用 `SheinOpenApiClient.request()`；multipart/file 接口使用 `requestMultipart()`，不要手工拼 `Content-Type` 覆盖 boundary。
+
+## 4.1 partialEdit 关键陷阱
+
+详见 docs/shein-openapi-partialEdit-correct-usage.md。摘要：
+
+- **返回值判定**：code=0 不代表成功，必须检查 info.success。执行器已修复 compactCallResult 保留 infoSuccess/infoVersion/preValidResult。
+- **全量校验**：partialEdit 虽是部分编辑，但平台补齐未入参字段后做全量校验。缺必填属性会失败。
+- **标题覆盖**：平台全量校验用 SKC skc_title（默认语种 ar），不是 SPU multi_language_name_list。需在 skc_list 传 skc_title。
+- **必填属性**：如 Power Supply=Wall Plug 导致 Input voltage/current 必填，需在 product_attribute_list 同时传入。新上执行器会在官方属性模板确认后，从 `Plug(Voltage)` / `Voltage` 中推导 `Input voltage`（例如 `UK Plug(220-240V)` → `220-240` + `Vac 50–60Hz`）；无法推导时必须 dry-run 阻断，不允许静默猜。
+- **合并提交**：同一个维护任务同时包含 update_title + update_images 时，必须合并为一个 partialEdit payload（operation=`update_title_and_images`），避免先改标题进入审核后图片无法再提交，或图片/标题被拆成两张审核单。
+- **图片排序**：image_sort 必须全局唯一，不能按 image_type 分组排序。
+- **图片组编码**：编辑场景必须传 image_group_code（从 spu-info 获取）。
+- **审核流程**：提交后进入审核队列，query-document-state 查状态，审核中不能再次提交。
+
+本地开发只能做 payload 构造、语法检查、假 OpenAPI smoke 测试；真实上传图片、partialEdit、publishOrEdit、审核状态回读必须在 `shein-bi-tencent` 云端执行器里跑。本地因白名单/身份边界不能直连 SHEIN OpenAPI，不要把本地直连失败当作业务证据。
+
+## 4.2 图片角色规划规则
+
+lib/link_ops_image_role_planner.mjs 实现的排序规则：
+
+- 细节图顺序：**卖点 → 参数 → 场景**（场景 ≥3 张时最后一张留做收尾）。
+- 主封面 = 细节图第 1 张（主图）。
+- 单独轮播图 = 主封面之外最适合做第二封面的图。
+- 方形图 = 1:1 或文件名含"方形/1:1"的图。
+- SKU 图 = 容量外（>10 张细节候选）最低优先级高清图。
+- 文件名含"产品封面/AB测试"的图忽略不提交。
+- 备用目录的图不使用。
 
 ## 5. 安全边界
 

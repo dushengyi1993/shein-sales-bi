@@ -92,9 +92,11 @@ try {
   ]) await writePng(noSku, name, /^03/.test(name) ? 1000 : 900, /^03/.test(name) ? 1000 : 1200);
   const noSkuPlan = await planLinkOpsImageRoles({dir: noSku});
   check('no sku package ok', noSkuPlan.ok, true);
+  check('generic product cover is ignored', noSkuPlan.roles.ignoredAbTestCovers.map(x => x.name), names => names.includes('02-产品封面.png'));
+  check('generic product cover not submitted', [noSkuPlan.roles.mainCover, noSkuPlan.roles.carouselSecondCover, noSkuPlan.roles.squareImage, noSkuPlan.roles.skuImage, ...noSkuPlan.roles.frontendDetailImages].filter(Boolean).map(x => x.name).includes('02-产品封面.png'), false);
   check('no sku package uses available detail images without forcing 11', noSkuPlan.roles.frontendDetailImages.length, 11);
   check('no sku package does not assign SKU image', noSkuPlan.roles.skuImage, null);
-  check('no sku package keeps closeup near end before parameter', noSkuPlan.roles.frontendDetailImages.map(x => x.name).join(' > '), x => /14-特写卖点.*04-参数规格图/.test(String(x)) && String(x).endsWith('04-参数规格图.png'));
+  check('no sku package orders selling before parameter before scene', noSkuPlan.roles.frontendDetailImages.map(x => x.name).join(' > '), x => { const s = String(x); const paramIdx = s.indexOf('04-参数规格图'); const lastScene = s.endsWith('07-露台场景.png'); const sellingBeforeParam = s.indexOf('08-2000W卖点') < paramIdx; return paramIdx > 0 && lastScene && sellingBeforeParam; });
 
   const outFile = path.join(tmpRoot, 'roles.json');
   const cli = await runCli(['plan-images', '--image-dir', base, '--out', outFile]);

@@ -16,7 +16,7 @@ function check(label, actual, expected) { const pass = typeof expected === 'func
 function sendJson(res, value, status = 200) { res.writeHead(status, {'Content-Type': 'application/json; charset=utf-8'}); res.end(JSON.stringify(value)); }
 function readBody(req) { return new Promise((resolve, reject) => { const chunks = []; req.on('data', c => chunks.push(c)); req.on('end', () => resolve(Buffer.concat(chunks))); req.on('error', reject); }); }
 async function freePort() { return new Promise((resolve, reject) => { const server = net.createServer(); server.on('error', reject); server.listen(0, '127.0.0.1', () => { const port = server.address().port; server.close(() => resolve(port)); }); }); }
-function runNode(args) { return new Promise(resolve => { const child = spawn(process.execPath, args, {cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe']}); let stdout = '', stderr = ''; child.stdout.on('data', d => { stdout += d.toString(); }); child.stderr.on('data', d => { stderr += d.toString(); }); child.on('close', code => { let json = null; try { json = stdout.trim() ? JSON.parse(stdout) : null; } catch {} resolve({code, stdout, stderr, json}); }); }); }
+function runNode(args, {allowLocalOpenApiExecutor = true} = {}) { return new Promise(resolve => { const child = spawn(process.execPath, args, {cwd: ROOT, env: {...process.env, ...(allowLocalOpenApiExecutor ? {SHEIN_BI_ALLOW_LOCAL_OPENAPI_EXECUTOR: '1'} : {})}, stdio: ['ignore', 'pipe', 'pipe']}); let stdout = '', stderr = ''; child.stdout.on('data', d => { stdout += d.toString(); }); child.stderr.on('data', d => { stderr += d.toString(); }); child.on('close', code => { let json = null; try { json = stdout.trim() ? JSON.parse(stdout) : null; } catch {} resolve({code, stdout, stderr, json}); }); }); }
 async function writeJson(relPath, value) { const file = path.join(tmpRoot, relPath); await fs.mkdir(path.dirname(file), {recursive: true}); await fs.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8'); return file; }
 
 const calls = [];
@@ -55,6 +55,11 @@ try {
   check('CLI audit-status dry-run exits 0', cliDryAudit.code, 0);
   check('CLI audit-status dry-run ok', cliDryAudit.json?.ok, true);
   check('CLI audit-status dry-run no network', calls.length, 0);
+
+  const blockedCliExecute = await runNode(['scripts/bi_ops_cli.mjs', 'search-product', '--openapi-config', configFile, '--store-truth', truthFile, '--store', 'SMK', '--product', 'SK-5110', '--mode', 'execute'], {allowLocalOpenApiExecutor: false});
+  check('CLI local OpenAPI execute blocks without explicit test override', blockedCliExecute.code !== 0, true);
+  check('CLI local OpenAPI execute block mentions cloud boundary', blockedCliExecute.stderr + blockedCliExecute.stdout, x => String(x).includes('cannot run local SHEIN OpenAPI through bi_ops_cli'));
+  check('CLI local OpenAPI execute block made no network', calls.length, 0);
 
   const drySearch = await runNode(['scripts/openapi_readonly_executor.mjs', 'search-product', '--config', configFile, '--store-truth', truthFile, '--store', 'SMK', '--supplier-code', 'SK-5110']);
   check('search dry-run exits 0', drySearch.code, 0);

@@ -20,6 +20,10 @@ import {spawn} from 'node:child_process';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import {gzipSync} from 'node:zlib';
+import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
+import {executeUploadPic} from '../lib/openapi_adapters/upload_pic.mjs';
+import {executeTransformPic} from '../lib/openapi_adapters/transform_pic.mjs';
+import {formatStoreIdentityError, validateStoreIdentity} from '../lib/shein_store_identity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
@@ -98,6 +102,9 @@ const types = {
 
 const LINK_OPS_MAX_UPLOAD_FILE_BYTES = 20 * 1024 * 1024;
 const LINK_OPS_MAX_UPLOAD_TOTAL_BYTES = 120 * 1024 * 1024;
+const OPENAPI_IMAGE_ASSET_MAX_FILE_BYTES = 3 * 1024 * 1024;
+const OPENAPI_IMAGE_ASSET_ALLOWED_MIME = new Set(['image/jpeg', 'image/png']);
+const OPENAPI_IMAGE_ASSET_TYPES = new Set([1, 2, 5, 6, 7]);
 const DEFAULT_SHEIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
 const DEFAULT_MANUAL_LOGIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
 const BI_PORTAL_SECTION_KEYS = new Set(['homeProfit', 'homeRankings', 'rankings', 'profit', 'actions', 'linksData', 'productTrafficDaily', 'inventoryTrend', 'comments', 'orders', 'afterSales', 'rtvData', 'waybills']);
@@ -881,6 +888,97 @@ function openApiConfiguredStoresSync() {
     if (key) configured.set(key, entry);
   }
   return {config, configured};
+}
+
+function openApiIdentityToStorageIdentity(value) {
+  const target = {
+    accountNos: new Set(),
+    userNames: new Set(),
+    mainUserNames: new Set(),
+    supplierUserNames: new Set(),
+    supplierIds: new Set(),
+    externalIds: new Set(),
+    rawSources: new Set(),
+  };
+  function add(setName, candidate) {
+    const text = String(candidate ?? '').replace(/\s+/g, ' ').trim();
+    if (text) target[setName].add(text);
+  }
+  function walk(node, source = 'openapi', depth = 0) {
+    if (!node || depth > 8) return;
+    if (Array.isArray(node)) {
+      node.forEach((item, index) => walk(item, `${source}[${index}]`, depth + 1));
+      return;
+    }
+    if (typeof node !== 'object') return;
+    add('rawSources', source);
+    for (const [key, raw] of Object.entries(node)) {
+      const k = String(key || '').toLowerCase();
+      if (raw && typeof raw === 'object') {
+        walk(raw, `${source}.${key}`, depth + 1);
+        continue;
+      }
+      const v = String(raw ?? '').replace(/\s+/g, ' ').trim();
+      if (!v) continue;
+      if (/^GS\d+$/i.test(v) || /(accountno|account_no|account|storeaccount|gsaccount|supplieraccount)/i.test(k)) add('accountNos', v.toUpperCase());
+      if (/(username|user_name|name|shopname|shop_name)/i.test(k)) add('userNames', v);
+      if (/mainusername|main_user_name/i.test(k)) add('mainUserNames', v);
+      if (/supplierusername|supplier_user_name/i.test(k)) add('supplierUserNames', v);
+      if (/(supplierid|supplier_id|merchantid|merchant_id)/i.test(k)) add('supplierIds', v);
+      if (/(externalid|external_id)/i.test(k)) add('externalIds', v);
+    }
+  }
+  walk(value);
+  return Object.fromEntries(Object.entries(target).map(([key, set]) => [key, [...set]]));
+}
+
+function openApiStoreIdentityMatchesMerchant(identityCheck) {
+  const expected = String(identityCheck?.expectedMerchantId || '').trim();
+  const candidates = [
+    ...(identityCheck?.identity?.supplierIds || []),
+    ...(identityCheck?.identity?.externalIds || []),
+    ...(identityCheck?.storageIdentity?.supplierIds || []),
+    ...(identityCheck?.storageIdentity?.externalIds || []),
+  ].map(x => String(x || '').trim()).filter(Boolean);
+  const accountCandidates = [
+    ...(identityCheck?.identity?.accountNos || []),
+    ...(identityCheck?.storageIdentity?.accountNos || []),
+  ].map(x => String(x || '').trim()).filter(Boolean);
+  return Boolean(expected) && candidates.includes(expected) && !accountCandidates.some(x => /^GS\d+$/i.test(x));
+}
+
+function openApiClientForConfiguredStore(storeKey) {
+  const {config, configured} = openApiConfiguredStoresSync();
+  const key = String(storeKey || '').trim().toUpperCase();
+  const store = configured.get(key) || null;
+  if (!store?.enabled || !store?.openKeyId || !store?.secretKey) {
+    throw new Error(`${key || '目标店铺'} 未完成 SHEIN OpenAPI 授权`);
+  }
+  return {
+    config,
+    store,
+    client: new SheinOpenApiClient({
+      baseUrl: config?.apiBaseUrls?.prodSemiManaged || SHEIN_OPENAPI_BASE_URLS.prodSemiManaged,
+      openKeyId: store.openKeyId,
+      secretKey: store.secretKey,
+    }),
+  };
+}
+
+async function verifyOpenApiStoreIdentityForUtility(client, storeKey, configuredStore) {
+  const truthRoot = await readJsonFile(path.join(ROOT, 'config', 'store_account_truth.json'), {stores: {}});
+  const truth = truthRoot?.stores?.[storeKey] || null;
+  if (!truth) return {ok: true, skipped: true, reason: 'no store_account_truth entry'};
+  const response = await client.request('/open-api/openapi-business-backend/query-store-info', {method: 'POST', body: {}, headers: {language: 'en'}});
+  const identity = validateStoreIdentity({
+    store: configuredStore,
+    truth,
+    storageIdentity: openApiIdentityToStorageIdentity(response.data),
+    href: 'openapi:/open-api/openapi-business-backend/query-store-info',
+    context: 'serve_bi_portal_openapi_image_asset',
+  });
+  if (identity.ok || openApiStoreIdentityMatchesMerchant(identity)) return {ok: true, identity, httpStatus: response.status};
+  return {ok: false, identity, httpStatus: response.status, error: formatStoreIdentityError(identity)};
 }
 
 function openApiStoreCapability(storeKey) {
@@ -2290,6 +2388,13 @@ function normalizeLinkOpsAttributeOverrides(value = []) {
   return [...byId.values()].slice(0, 24);
 }
 
+function normalizeStandardGoodsSnDisplayRef(value) {
+  const text = String(value || '').normalize('NFKC').replace(/\s+/g, '').trim();
+  if (!text) return '';
+  if (/\p{Script=Han}/u.test(text)) return text;
+  return '';
+}
+
 function normalizeLinkOpsTargetSet(targets = {}) {
   const stores = Array.isArray(targets?.stores)
     ? targets.stores
@@ -2306,11 +2411,15 @@ function normalizeLinkOpsTargetSet(targets = {}) {
     : typeof (targets?.writeStores || targets?.targetStores) === 'string'
       ? String(targets.writeStores || targets.targetStores).split(/[,\s，、]+/)
       : [];
-  const productRefs = Array.isArray(targets?.productRefs)
+  const rawProductRefs = Array.isArray(targets?.productRefs)
     ? targets.productRefs
     : typeof targets?.productRefs === 'string'
       ? targets.productRefs.split(/[,\s，、]+/)
       : [];
+  const standardGoodsSn = normalizeStandardGoodsSnDisplayRef(targets?.standardGoodsSn || targets?.standard_goods_sn);
+  const productRefs = standardGoodsSn
+    ? [standardGoodsSn, ...rawProductRefs.filter(ref => String(ref || '').normalize('NFKC').replace(/\s+/g, '').trim() !== standardGoodsSn)]
+    : rawProductRefs;
   const attributeOverrides = normalizeLinkOpsAttributeOverrides(
     targets?.attributeOverrides
     || targets?.attribute_overrides
@@ -2330,6 +2439,7 @@ function normalizeLinkOpsTargetSet(targets = {}) {
       ? String(targets.sourceScope || targets.source_scope).trim()
       : '',
     productRefs: clean(productRefs, 48),
+    standardGoodsSn,
     attributeOverrides,
   };
 }
@@ -2342,6 +2452,7 @@ function mergeLinkOpsTargets(...items) {
     writeStores: normalized.flatMap(x => x.writeStores),
     sourceScope: normalized.find(x => x.sourceScope)?.sourceScope || '',
     productRefs: normalized.flatMap(x => x.productRefs),
+    standardGoodsSn: normalized.find(x => x.standardGoodsSn)?.standardGoodsSn || '',
     attributeOverrides: normalized.flatMap(x => x.attributeOverrides),
   });
 }
@@ -3496,6 +3607,142 @@ async function storeLinkOpsUploadedFiles({bucketId, taskId = '', sessionId = '',
     throw err;
   }
   return {assets: added, totalBytes};
+}
+
+function normalizeOpenApiImageAssetType(value) {
+  const type = Number(value);
+  return Number.isInteger(type) ? type : NaN;
+}
+
+async function writeOpenApiImageAssetTempFile({file, buffer, tmpDir}) {
+  const mime = String(file?.type || '').toLowerCase().trim();
+  const ext = uploadExtensionFor(mime, file?.name || '');
+  const stem = safeFileStem(path.basename(String(file?.name || 'image'), path.extname(String(file?.name || ''))), 'image');
+  const storedName = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}-${stem}${ext}`;
+  const filePath = assertInsideDir(tmpDir, path.join(tmpDir, storedName));
+  await fs.mkdir(tmpDir, {recursive: true});
+  await fs.writeFile(filePath, buffer);
+  return filePath;
+}
+
+async function executeOpenApiImageAssetUtility({action, body, args, actor, req}) {
+  const storeKey = String(body.storeKey || body.store || '').trim().toUpperCase();
+  if (!storeKey || !SHEIN_STORE_KEYS.has(storeKey)) throw new Error('Invalid store');
+  const actorGate = requireConcreteOperatorActor(actor);
+  if (actorGate) {
+    await appendAudit(args.auditFile, {at: new Date().toISOString(), type: `openapi-image-asset-${action}-denied`, actor, ...requestMeta(req), denied: actorGate});
+    const error = new Error(actorGate.error || 'actor denied');
+    error.status = 403;
+    error.response = actorGate;
+    throw error;
+  }
+  const denied = requireWriteStores(actor, [storeKey]);
+  if (denied) {
+    await appendAudit(args.auditFile, {at: new Date().toISOString(), type: `openapi-image-asset-${action}-denied`, actor, ...requestMeta(req), storeKey, denied});
+    const error = new Error(denied.error || 'store write denied');
+    error.status = 403;
+    error.response = denied;
+    throw error;
+  }
+  const imageType = normalizeOpenApiImageAssetType(body.imageType ?? body.image_type ?? body.type);
+  if (!OPENAPI_IMAGE_ASSET_TYPES.has(imageType)) throw new Error('imageType must be one of 1/2/5/6/7');
+  const {store, client} = openApiClientForConfiguredStore(storeKey);
+  const identity = await verifyOpenApiStoreIdentityForUtility(client, storeKey, store);
+  if (!identity.ok) {
+    await appendAudit(args.auditFile, {at: new Date().toISOString(), type: `openapi-image-asset-${action}-denied-identity`, actor, ...requestMeta(req), storeKey, identity: {ok: false, httpStatus: identity.httpStatus || null, error: identity.error || ''}});
+    const error = new Error(identity.error || 'store identity validation failed');
+    error.status = 409;
+    throw error;
+  }
+  let adapterResult;
+  let auditFileMeta = null;
+  let tempFile = '';
+  try {
+    if (action === 'upload-pic') {
+      const file = Array.isArray(body.files) ? body.files[0] : (body.file || null);
+      const mime = String(file?.type || file?.mime || '').toLowerCase().trim();
+      if (!OPENAPI_IMAGE_ASSET_ALLOWED_MIME.has(mime)) throw new Error('upload-pic only accepts image/jpeg or image/png');
+      const raw = String(file?.dataBase64 || file?.base64 || '').replace(/^data:[^;]+;base64,/, '');
+      if (!raw) throw new Error('Missing file content');
+      const buffer = Buffer.from(raw, 'base64');
+      if (!buffer.length) throw new Error('Empty file');
+      if (buffer.length > OPENAPI_IMAGE_ASSET_MAX_FILE_BYTES) throw new Error(`image exceeds 3MB OpenAPI limit: ${buffer.length} bytes`);
+      if (!hasUploadMagic(buffer, mime)) throw new Error(`文件内容和类型不匹配：${file?.name || mime}`);
+      auditFileMeta = {
+        name: String(file?.name || 'image').slice(0, 180),
+        mime,
+        bytes: buffer.length,
+        sha256: crypto.createHash('sha256').update(buffer).digest('hex'),
+      };
+      const tmpDir = assertInsideDir(path.resolve(args.linkOpsAssetDir), path.join(path.resolve(args.linkOpsAssetDir), '.openapi-image-tmp'));
+      tempFile = await writeOpenApiImageAssetTempFile({file: {...file, type: mime}, buffer, tmpDir});
+      adapterResult = await executeUploadPic(client, {imageType, filePath: tempFile}, {mode: 'execute'});
+    } else if (action === 'transform-pic') {
+      const originalUrl = String(body.url || body.originalUrl || body.original_url || '').trim();
+      adapterResult = await executeTransformPic(client, {imageType, originalUrl}, {mode: 'execute'});
+    } else {
+      throw new Error(`Unsupported image asset action: ${action}`);
+    }
+  } finally {
+    if (tempFile) await fs.rm(tempFile, {force: true}).catch(() => {});
+  }
+  if (!adapterResult?.ok) {
+    const message = (adapterResult?.blockers || adapterResult?.errors || []).join('; ') || adapterResult?.msg || `${action} failed`;
+    const error = new Error(message);
+    error.status = 502;
+    error.response = {ok: false, error: message, adapterResult: {code: adapterResult?.code || '', msg: adapterResult?.msg || '', traceId: adapterResult?.traceId || ''}};
+    throw error;
+  }
+  const result = action === 'upload-pic'
+    ? {
+      imageUrl: adapterResult.result?.imageUrl || '',
+      width: adapterResult.result?.width || 0,
+      height: adapterResult.result?.height || 0,
+      size: adapterResult.result?.size || 0,
+      imageHexType: adapterResult.result?.imageHexType || '',
+    }
+    : {
+      originalUrl: adapterResult.result?.originalUrl || '',
+      transformedUrl: adapterResult.result?.transformedUrl || '',
+      failureReason: adapterResult.result?.failureReason || '',
+    };
+  await appendAudit(args.auditFile, {
+    at: new Date().toISOString(),
+    type: `openapi-image-asset-${action}`,
+    actor,
+    ...requestMeta(req),
+    storeKey,
+    imageType,
+    file: auditFileMeta,
+    identity: {ok: true, httpStatus: identity.httpStatus || null},
+    result: {...result, traceId: adapterResult.traceId || ''},
+  });
+  return {
+    ok: true,
+    action,
+    mode: 'execute',
+    storeKey,
+    imageType,
+    adapterResult: {
+      ok: true,
+      mode: 'execute',
+      endpoint: action === 'upload-pic' ? '/open-api/goods/upload-pic' : '/open-api/goods/transform-pic',
+      code: adapterResult.code || '0',
+      msg: adapterResult.msg || '',
+      traceId: adapterResult.traceId || '',
+      result,
+    },
+    storeIdentity: {ok: true, httpStatus: identity.httpStatus || null},
+    result,
+    code: adapterResult.code || '0',
+    msg: adapterResult.msg || '',
+    traceId: adapterResult.traceId || '',
+    safety: {
+      cloudCredentialsOnly: true,
+      productWriteSubmitted: false,
+      outputOmitsSecretsAndFileBytes: true,
+    },
+  };
 }
 
 function findLinkOpsTaskOrThrow(store, taskId) {
@@ -7099,6 +7346,25 @@ async function main() {
           });
         }
         return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+      }
+      if (url.pathname === '/api/openapi-image-asset/upload-pic' || url.pathname === '/api/openapi-image-asset/transform-pic') {
+        if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
+        if (req.method !== 'POST') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        const action = url.pathname.endsWith('/transform-pic') ? 'transform-pic' : 'upload-pic';
+        const limitBytes = action === 'upload-pic' ? Math.ceil(OPENAPI_IMAGE_ASSET_MAX_FILE_BYTES * 1.5) + 128 * 1024 : 64 * 1024;
+        let body;
+        try {
+          body = await readBodyJson(req, limitBytes);
+        } catch (err) {
+          return sendJson(res, 400, {ok: false, error: err?.message || String(err || 'Invalid request')});
+        }
+        try {
+          const result = await executeOpenApiImageAssetUtility({action, body, args, actor, req});
+          return sendJson(res, 200, result);
+        } catch (err) {
+          const status = Number(err?.status || 0) || 400;
+          return sendJson(res, status, err?.response || {ok: false, error: err?.message || String(err || `${action} failed`)});
+        }
       }
       if (url.pathname === '/api/link-ops-assets') {
         if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});

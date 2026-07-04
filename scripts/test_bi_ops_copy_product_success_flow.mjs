@@ -105,7 +105,7 @@ const productCase = GENERIC_PRODUCT ? {
   targetSupplierCode: 'HL-GENERIC-COPY-SKC',
   targetSupplierSku: 'HL-GENERIC-COPY-SKU-001',
   command: '复制上品/补链接 SK-9000空气炸锅 到 HL',
-  productRefs: ['SK-9000空气炸锅', 'SK-9000'],
+  productRefs: ['SK-9000空气炸锅'],
   englishName: 'Generic copy smoke product',
   arName: 'منتج اختبار عام',
   zhName: 'SK-9000空气炸锅',
@@ -122,6 +122,7 @@ const productCase = GENERIC_PRODUCT ? {
   productModel: 'TXSM-505A',
   requireInputCurrent: true,
 };
+const taskStandardGoodsSn = productCase.productRefs[0];
 const targetSupplierCode = productCase.targetSupplierCode;
 const targetSupplierSku = productCase.targetSupplierSku;
 const publishTraceId = 'trace-copy-success-smoke';
@@ -145,11 +146,18 @@ const publishPayload = {
     supplier_code: targetSupplierCode,
     skc_name: productCase.targetSupplierCode,
     image_info: {
-      image_info_list: [{
-        image_type: 1,
-        image_sort: 1,
-        image_url: 'https://example.invalid/smoke-main.jpg',
-      }],
+      image_info_list: [
+        {
+          image_type: 1,
+          image_sort: 1,
+          image_url: 'https://example.invalid/smoke-main.jpg',
+        },
+        {
+          image_type: 5,
+          image_sort: 1,
+          image_url: 'https://example.invalid/smoke-square.jpg',
+        },
+      ],
     },
     sale_attribute: {attribute_id: 301, attribute_value_id: 401},
     sku_list: [{
@@ -237,8 +245,12 @@ const fakeOpenApi = http.createServer(async (req, res) => {
     if (imageRows.filter(row => Number(row?.image_type) === 1).length !== 1 || Number(imageRows.find(row => Number(row?.image_type) === 1)?.image_sort) !== 1) {
       return sendJson(res, {code: '400', msg: 'SKC image main type must be exactly one and sort=1', traceId: publishTraceId}, 200);
     }
-    if (strongPayload?.skc_list?.[0]?.supplier_code !== targetSupplierCode) {
-      return sendJson(res, {code: '400', msg: 'unexpected supplier code', traceId: publishTraceId}, 200);
+    const imageSorts = imageRows.map(row => Number(row?.image_sort));
+    if (new Set(imageSorts).size !== imageSorts.length) {
+      return sendJson(res, {code: '400', msg: 'SKC image_sort must be globally unique', traceId: publishTraceId}, 200);
+    }
+    if (strongPayload?.skc_list?.[0]?.supplier_code !== taskStandardGoodsSn) {
+      return sendJson(res, {code: '400', msg: 'unexpected standard goods sn override', traceId: publishTraceId}, 200);
     }
     const attrs = strongPayload?.product_attribute_list || [];
     const inputCurrent = attrs.find(row => Number(row?.attribute_id) === 1002323);
@@ -250,8 +262,8 @@ const fakeOpenApi = http.createServer(async (req, res) => {
     } else if (inputCurrent) {
       return sendJson(res, {code: '400', msg: 'generic product unexpectedly received SM-505 input current', traceId: publishTraceId}, 200);
     }
-    if (productModel?.attribute_extra_value !== productCase.productModel || productModel?.attribute_value_id !== undefined || productModel?.attribute_value !== undefined) {
-      return sendJson(res, {code: '400', msg: 'text product attribute not normalized to attribute_extra_value', traceId: publishTraceId}, 200);
+    if (productModel?.attribute_extra_value !== taskStandardGoodsSn || productModel?.attribute_value_id !== undefined || productModel?.attribute_value !== undefined) {
+      return sendJson(res, {code: '400', msg: 'product model not normalized to standard goods sn', traceId: publishTraceId}, 200);
     }
     if (Number(strongPayload?.shelf_way) !== 2 || !strongPayload?.hope_on_sale_date) {
       return sendJson(res, {code: '400', msg: 'new link must be scheduled ten years later at payload level', traceId: publishTraceId}, 200);
@@ -404,13 +416,13 @@ const fakeOpenApi = http.createServer(async (req, res) => {
       info: {
         data: [{
           spuName: 'Smoke SPU',
-          skcName: WEAK_READBACK_ONLY ? productCase.zhName : productCase.targetSupplierCode,
+          skcName: productCase.targetSupplierCode,
           ...(WEAK_READBACK_ONLY ? {} : {
             supplierCode: targetSupplierCode,
             supplierSku: targetSupplierSku,
           }),
           skuCodeList: ['PLATFORM-SKU-SMOKE'],
-          productName: WEAK_READBACK_ONLY ? productCase.zhName : productCase.englishName,
+          productName: WEAK_READBACK_ONLY ? 'Copy source weak readback candidate' : productCase.englishName,
         }],
       },
     });
@@ -607,6 +619,7 @@ try {
         targets: {
           stores: ['HL'],
           productRefs: productCase.productRefs,
+          standardGoodsSn: taskStandardGoodsSn,
         },
       },
     });
@@ -776,8 +789,14 @@ try {
   }
   const publishCall = fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/product/publishOrEdit').at(-1);
   check('publish sale_attribute is object', Array.isArray(publishCall?.body?.skc_list?.[0]?.sale_attribute), false);
+  check('publish supplier_code uses task standard goods sn', publishCall?.body?.skc_list?.[0]?.supplier_code, taskStandardGoodsSn);
+  check('publish supplier_sku uses task standard goods sn', publishCall?.body?.skc_list?.[0]?.sku_list?.[0]?.supplier_sku, taskStandardGoodsSn);
+  check('publish does not keep source supplier code as new-link goods sn', publishCall?.body?.skc_list?.[0]?.supplier_code === targetSupplierCode, false);
   check('publish skc image_type allowed', publishCall?.body?.skc_list?.[0]?.image_info?.image_info_list?.every(row => [1, 2, 5, 6].includes(Number(row?.image_type))), true);
   check('publish skc main image exactly one', publishCall?.body?.skc_list?.[0]?.image_info?.image_info_list?.filter(row => Number(row?.image_type) === 1).length, 1);
+  const publishedImageSorts = asArray(publishCall?.body?.skc_list?.[0]?.image_info?.image_info_list).map(row => Number(row?.image_sort));
+  check('publish skc image_sort globally unique', new Set(publishedImageSorts).size, publishedImageSorts.length);
+  check('publish square image sort moved away from main sort', publishCall?.body?.skc_list?.[0]?.image_info?.image_info_list?.find(row => Number(row?.image_type) === 5)?.image_sort, value => Number(value) > 1);
   const publishedAttrs = asArray(publishCall?.body?.product_attribute_list);
   const publishedInputCurrent = publishedAttrs.find(row => Number(row?.attribute_id) === 1002323);
   const publishedProductModel = publishedAttrs.find(row => Number(row?.attribute_id) === 1000546);
@@ -789,7 +808,7 @@ try {
   } else {
     check('publish generic product does not receive SM-505 input current', Boolean(publishedInputCurrent), false);
   }
-  check('publish text attribute uses extra value', publishedProductModel?.attribute_extra_value || '', productCase.productModel);
+  check('publish product model uses task standard goods sn', publishedProductModel?.attribute_extra_value || '', taskStandardGoodsSn);
   check('publish text attribute removes zero value id', publishedProductModel?.attribute_value_id, undefined);
   check('publish new link scheduled at payload level', publishCall?.body?.shelf_way, 2);
   check('publish new link schedule date present', Boolean(publishCall?.body?.hope_on_sale_date), true);

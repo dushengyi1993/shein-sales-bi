@@ -6,8 +6,11 @@
  * - /open-api/goods/upload-pic (multipart local image upload)
  * - /open-api/goods/transform-pic (external URL conversion)
  *
- * This script is intentionally separate from bi_ops_cli.mjs. The CLI remains a
- * cloud BI controller and delegates local OpenAPI utility calls here.
+ * This script is intentionally separate from bi_ops_cli.mjs. Daily local CLI
+ * usage must not call real SHEIN OpenAPI from this Windows machine; bi_ops_cli
+ * routes real image asset execution to the cloud BI service. This lower-level
+ * executor is retained for shein-bi-tencent/cloud runtime and fake OpenAPI
+ * smoke tests.
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -64,6 +67,7 @@ function help() {
 Safety:
   - default mode is dry-run;
   - execute validates store identity before calling SHEIN;
+  - do not run real execute from the local Windows/Codex machine; use the cloud BI executor instead;
   - output never includes secretKey/openKeyId or raw file bytes.`;
 }
 

@@ -40,9 +40,9 @@ async function setup() {
       storeKey: STORE,
       skc: SKC,
       spu: SPU,
-      standardGoodsSn: 'SMK-505缝纫机',
+      standardGoodsSn: 'SMK-505',
       productNameCn: 'SMK-505缝纫机',
-      rawGoodsSn: 'SMK-505缝纫机',
+      rawGoodsSn: 'SOURCE-RAW-SMK-505',
     }],
     inventoryRows: [],
     performanceRows: [],
@@ -56,7 +56,7 @@ async function setup() {
         categoryId: 13127,
         productTypeId: 9851,
         brandCode: '2a64l',
-        supplierCode: 'SMK-505缝纫机',
+        supplierCode: 'SOURCE-SPU-SUPPLIER-505',
         productMultiNameList: [
           {language: 'en', productName: 'SMK 505 sewing machine'},
           {language: 'ar', productName: 'ماكينة خياطة اختبار'},
@@ -69,7 +69,7 @@ async function setup() {
         ],
         skcInfoList: [{
           skcName: SKC,
-          supplierCode: 'SMK-505缝纫机',
+          supplierCode: 'SOURCE-SKC-SUPPLIER-505',
           attributeId: 1001466,
           attributeValueId: 2535083,
           skcImageInfoList: [
@@ -125,6 +125,8 @@ try {
   check('product attributes copied dynamically without sales attrs', payload.product_attribute_list?.length, 2);
   check('custom attribute value preserved as attribute_extra_value', payload.product_attribute_list?.[0]?.attribute_extra_value, 'TXSM-505A');
   check('custom attribute zero value id removed', payload.product_attribute_list?.[0]?.attribute_value_id, undefined);
+  check('new-link supplier_code uses standard goods sn', skc.supplier_code, 'SMK-505');
+  check('new-link supplier_code does not copy source OpenAPI supplierCode', skc.supplier_code === 'SOURCE-SKC-SUPPLIER-505', false);
   check('skc images copied from OpenAPI detail', skc.image_info?.image_info_list?.length, 3);
   check('skc image types mapped for publishOrEdit', skc.image_info?.image_info_list?.map(row => row.image_type).join(','), '1,2,5');
   check('main image sort remains first', skc.image_info?.image_info_list?.[0]?.image_sort, 1);

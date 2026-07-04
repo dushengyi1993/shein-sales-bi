@@ -1,4 +1,10 @@
 #!/usr/bin/env node
+/**
+ * SHEIN OpenAPI product publish/copy executor.
+ *
+ * Daily local Windows/Codex usage must not call real SHEIN OpenAPI; run real
+ * publishOrEdit only inside shein-bi-tencent/cloud runtime or fake tests.
+ */
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -13,6 +19,7 @@ import {
   formatStoreIdentityError,
   validateStoreIdentity,
 } from '../lib/shein_store_identity.mjs';
+import {buildProductDisplayName} from '../lib/product_display_name.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CONFIG = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
@@ -30,6 +37,16 @@ const SKC_IMAGE_TYPE_LABELS = new Map([
   [5, '方块图'],
   [6, '色块图'],
 ]);
+const POWER_SUPPLY_ATTRIBUTE_ID = 147;
+const POWER_SUPPLY_WALL_PLUG_VALUE_ID = 1047;
+const PRODUCT_MODEL_ATTRIBUTE_ID = 1000546;
+const INPUT_VOLTAGE_ATTRIBUTE_ID = 1002322;
+const INPUT_CURRENT_ATTRIBUTE_ID = 1002323;
+const PLUG_VOLTAGE_ATTRIBUTE_ID = 1001466;
+const RATED_VOLTAGE_ATTRIBUTE_ID = 1001370;
+const VOLTAGE_ATTRIBUTE_ID = 1000101;
+const VOLTAGE_VALUE_ATTRIBUTE_ID = 164;
+const INPUT_VOLTAGE_AC_UNIT_LABEL = 'Vac 50–60Hz';
 
 function parseArgs(argv) {
   const args = {
@@ -63,7 +80,10 @@ function parseArgs(argv) {
 
 用途：
   SHEIN OpenAPI 商品写执行器。默认只做真实 OpenAPI 权限、站点、品牌、仓库和发布 payload 预检；
-  只有显式 --execute 且带确认文本、payload 完整时，才调用 publishOrEdit。`);
+  只有显式 --execute 且带确认文本、payload 完整时，才调用 publishOrEdit。
+
+Local boundary:
+  不要在本地 Windows/Codex 机器真实执行；真实 publishOrEdit 必须走 shein-bi-tencent 云端执行器。`);
       process.exit(0);
     } else {
       throw new Error(`Unknown argument: ${a}`);
@@ -136,6 +156,13 @@ function jsonClone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
 
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && String(value).trim() !== '') return value;
+  }
+  return '';
+}
+
 function stableJson(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
@@ -155,6 +182,33 @@ function appendUnique(target, values) {
     target.push(text);
     seen.add(text);
   }
+}
+
+function taskStandardGoodsSn(task = null, executionContext = null) {
+  const explicit = safeString(firstNonEmpty(
+    task?.standardGoodsSn,
+    task?.standard_goods_sn,
+    task?.targets?.standardGoodsSn,
+    task?.targets?.standard_goods_sn,
+    task?.metadata?.standardGoodsSn,
+    task?.metadata?.standard_goods_sn,
+    executionContext?.standardGoodsSn,
+    executionContext?.standard_goods_sn,
+    executionContext?.targets?.standardGoodsSn,
+    executionContext?.targets?.standard_goods_sn,
+  ), 240);
+  if (explicit) return buildProductDisplayName(explicit);
+  for (const ref of taskProductRefs(task)) {
+    const text = safeString(ref, 240);
+    if (/\p{Script=Han}/u.test(text)) return buildProductDisplayName(text);
+  }
+  if (isKnownSm505SewingMachineTask(task, executionContext)) return buildProductDisplayName('SM-505A');
+  for (const ref of taskProductRefs(task)) {
+    const text = safeString(ref, 240).toUpperCase();
+    const match = text.match(/\b([A-Z]{1,8}-?\d{2,}[A-Z]?)\b/);
+    if (match) return buildProductDisplayName(match[1]);
+  }
+  return '';
 }
 
 async function readJson(file) {
@@ -1149,7 +1203,7 @@ function normalizeManualAttributeOverride(row) {
     500
   );
   let attributeUnit = rawUnit;
-  if (attributeId === 1002323) {
+  if (attributeId === INPUT_CURRENT_ATTRIBUTE_ID) {
     attributeExtraValue = normalizeInputCurrentExtraValue(attributeExtraValue, row.attribute_unit || row.attributeUnit || '');
     attributeUnit = 'mA';
   }
@@ -1171,9 +1225,9 @@ function collectManualAttributeOverrides(task, executionContext) {
     ...asArray(executionContext?.attributeOverrides || executionContext?.attribute_overrides),
     ...asArray(executionContext?.targets?.attributeOverrides || executionContext?.targets?.attribute_overrides),
   ].map(normalizeManualAttributeOverride).filter(Boolean);
-  if (isKnownSm505SewingMachineTask(task, executionContext) && !rows.some(row => Number(row.attribute_id) === 1002323)) {
+  if (isKnownSm505SewingMachineTask(task, executionContext) && !rows.some(row => Number(row.attribute_id) === INPUT_CURRENT_ATTRIBUTE_ID)) {
     rows.push({
-      attribute_id: 1002323,
+      attribute_id: INPUT_CURRENT_ATTRIBUTE_ID,
       attribute_extra_value: '1200',
       attribute_unit: 'mA',
       label: '输入电流',
@@ -1259,6 +1313,136 @@ function chooseAttributeValueIdForManualUnit(templateRow, row) {
   return null;
 }
 
+function templateAttributeValueLabel(templateRow, valueId) {
+  const id = normalizeAttributeId(valueId);
+  if (!id) return '';
+  const value = asArray(templateRow?.attribute_value_info_list)
+    .find(row => normalizeAttributeId(row?.attribute_value_id) === id);
+  return safeString(value?.attribute_value || '', 160);
+}
+
+function extractVoltageRangeText(value) {
+  const text = safeString(value, 200);
+  if (!text) return '';
+  const range = text.match(/([0-9]{2,3}(?:\.[0-9]+)?)\s*V?\s*[-–—~]\s*([0-9]{2,3}(?:\.[0-9]+)?)\s*V/i);
+  if (range) return `${range[1]}-${range[2]}`;
+  const single = text.match(/([0-9]{2,3}(?:\.[0-9]+)?)\s*V/i);
+  return single ? single[1] : '';
+}
+
+function collectPayloadAttributeRows(payload) {
+  const rows = [];
+  const add = (row, source) => {
+    if (!row || typeof row !== 'object') return;
+    const attributeId = normalizeAttributeId(row.attribute_id ?? row.attributeId);
+    if (!attributeId) return;
+    rows.push({row, source, attributeId});
+  };
+  for (const row of asArray(payload?.product_attribute_list || payload?.productAttributeList)) add(row, 'product_attribute_list');
+  for (const skc of asArray(payload?.skc_list || payload?.skcList)) {
+    if (!skc || typeof skc !== 'object') continue;
+    add(skc.sale_attribute || skc.saleAttribute, 'skc.sale_attribute');
+    for (const row of asArray(skc.sale_attribute_list || skc.saleAttributeList)) add(row, 'skc.sale_attribute_list');
+    for (const sku of asArray(skc.sku_list || skc.skuList)) {
+      if (!sku || typeof sku !== 'object') continue;
+      for (const row of asArray(sku.sale_attribute_list || sku.saleAttributeList)) add(row, 'sku.sale_attribute_list');
+      for (const row of asArray(sku.product_sku_attribute_list || sku.productSkuAttributeList)) add(row, 'sku.product_sku_attribute_list');
+    }
+  }
+  return rows;
+}
+
+function inferInputVoltageFromPayload(payload, templateById) {
+  const rows = collectPayloadAttributeRows(payload);
+  const priority = [
+    PLUG_VOLTAGE_ATTRIBUTE_ID,
+    VOLTAGE_ATTRIBUTE_ID,
+    RATED_VOLTAGE_ATTRIBUTE_ID,
+    VOLTAGE_VALUE_ATTRIBUTE_ID,
+  ];
+  for (const attributeId of priority) {
+    for (const item of rows.filter(row => row.attributeId === attributeId)) {
+      const row = item.row;
+      const template = templateById.get(attributeId);
+      const valueId = normalizeAttributeId(row.attribute_value_id ?? row.attributeValueId);
+      const candidates = [
+        row.attribute_extra_value,
+        row.attributeExtraValue,
+        row.attribute_value,
+        row.attributeValue,
+        row.attribute_value_name,
+        row.attributeValueName,
+        templateAttributeValueLabel(template, valueId),
+      ];
+      for (const candidate of candidates) {
+        const voltage = extractVoltageRangeText(candidate);
+        if (voltage) {
+          return {
+            attribute_extra_value: voltage,
+            source_attribute_id: attributeId,
+            source_value_id: valueId || null,
+            source_value: safeString(candidate, 160),
+            source: item.source,
+          };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function chooseInputVoltageAcUnitValueId(templateRow) {
+  const values = asArray(templateRow?.attribute_value_info_list);
+  const normalizedTarget = INPUT_VOLTAGE_AC_UNIT_LABEL.toLowerCase().replace(/\s+/g, '');
+  const exact = values.find(value => safeString(value.attribute_value, 80).toLowerCase().replace(/\s+/g, '') === normalizedTarget);
+  if (exact?.attribute_value_id) return exact.attribute_value_id;
+  const ac = values.find(value => /vac|v\s*ac/i.test(safeString(value.attribute_value, 80)));
+  if (ac?.attribute_value_id) return ac.attribute_value_id;
+  return values.length === 1 ? normalizeAttributeId(values[0]?.attribute_value_id) : null;
+}
+
+function ensureWallPlugInputVoltage(payload, productAttributeList, templateById) {
+  const applied = [];
+  const blockers = [];
+  const powerSupply = productAttributeList.find(row => normalizeAttributeId(row.attribute_id ?? row.attributeId) === POWER_SUPPLY_ATTRIBUTE_ID);
+  const powerSupplyValueId = normalizeAttributeId(powerSupply?.attribute_value_id ?? powerSupply?.attributeValueId);
+  if (powerSupplyValueId !== POWER_SUPPLY_WALL_PLUG_VALUE_ID) return {applied, blockers};
+  let inputVoltage = productAttributeList.find(row => normalizeAttributeId(row.attribute_id ?? row.attributeId) === INPUT_VOLTAGE_ATTRIBUTE_ID);
+  const existingExtra = safeString(inputVoltage?.attribute_extra_value ?? inputVoltage?.attributeExtraValue ?? '', 120);
+  const existingValueId = normalizeAttributeId(inputVoltage?.attribute_value_id ?? inputVoltage?.attributeValueId);
+  if (inputVoltage && existingExtra && existingValueId) return {applied, blockers};
+
+  const template = templateById.get(INPUT_VOLTAGE_ATTRIBUTE_ID);
+  if (!template) {
+    blockers.push(`Power Supply=Wall Plug 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填，但官方属性模板未返回该属性，不能自动补齐。`);
+    return {applied, blockers};
+  }
+  const inferred = inferInputVoltageFromPayload(payload, templateById);
+  if (!inferred?.attribute_extra_value) {
+    blockers.push(`Power Supply=Wall Plug 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填，但无法从 Plug(Voltage)/Voltage 属性推导电压范围；请补充 Input voltage。`);
+    return {applied, blockers};
+  }
+  const unitValueId = existingValueId || chooseInputVoltageAcUnitValueId(template);
+  if (!unitValueId) {
+    blockers.push(`Power Supply=Wall Plug 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填，已推导 ${inferred.attribute_extra_value}，但无法从官方属性模板匹配 Vac 单位值 ID。`);
+    return {applied, blockers};
+  }
+
+  if (!inputVoltage) {
+    inputVoltage = {attribute_id: INPUT_VOLTAGE_ATTRIBUTE_ID};
+    productAttributeList.push(inputVoltage);
+  }
+  inputVoltage.attribute_id = INPUT_VOLTAGE_ATTRIBUTE_ID;
+  inputVoltage.attribute_value_id = unitValueId;
+  inputVoltage.attribute_extra_value = inferred.attribute_extra_value;
+  delete inputVoltage.attributeValueId;
+  delete inputVoltage.attributeExtraValue;
+  delete inputVoltage.attribute_value;
+  delete inputVoltage.attributeValue;
+  applied.push(`attribute_template:${INPUT_VOLTAGE_ATTRIBUTE_ID}.required_by_wall_plug=${inferred.attribute_extra_value}`);
+  return {applied, blockers};
+}
+
 async function applyAttributeTemplateRules(client, payload) {
   const productTypeId = payloadProductTypeId(payload);
   if (!productTypeId) return {payload, applied: [], warnings: [], blockers: [], evidence: {status: 'skipped_missing_product_type_id'}, call: null};
@@ -1306,6 +1490,9 @@ async function applyAttributeTemplateRules(client, payload) {
   const applied = [];
   const blockers = [];
   const warnings = [];
+  const wallPlugInputVoltage = ensureWallPlugInputVoltage(next, list, byId);
+  applied.push(...wallPlugInputVoltage.applied);
+  blockers.push(...wallPlugInputVoltage.blockers);
   for (const row of list) {
     const attributeId = normalizeAttributeId(row.attribute_id ?? row.attributeId);
     const template = attributeId ? byId.get(attributeId) : null;
@@ -1360,6 +1547,91 @@ function normalizePublishImageType(value) {
   return null;
 }
 
+function ensurePublishImageSortGlobalUnique(payload) {
+  const next = jsonClone(payload || {});
+  const applied = [];
+  for (const [skcIndex, skc] of asArray(next.skc_list || next.skcList).entries()) {
+    const imageInfo = skc?.image_info || skc?.imageInfo;
+    const rows = asArray(imageInfo?.image_info_list || imageInfo?.imageInfoList);
+    if (!rows.length) continue;
+
+    const used = new Set();
+    let maxSort = 0;
+    for (const row of rows) {
+      const sort = Number(row?.image_sort ?? row?.imageSort);
+      if (Number.isFinite(sort) && sort > maxSort) maxSort = sort;
+    }
+
+    for (const [rowIndex, row] of rows.entries()) {
+      const imageType = normalizePublishImageType(row?.image_type ?? row?.imageType);
+      let sort = Number(row?.image_sort ?? row?.imageSort);
+      if (imageType === 1) {
+        if (sort !== 1) {
+          sort = 1;
+          row.image_sort = 1;
+          delete row.imageSort;
+          applied.push(`skc_list[${skcIndex}].image_info.image_info_list[${rowIndex}].main_sort=1`);
+        }
+        used.add(1);
+        if (maxSort < 1) maxSort = 1;
+        continue;
+      }
+      if (!Number.isFinite(sort) || sort <= 0 || used.has(sort)) {
+        do {
+          maxSort += 1;
+        } while (used.has(maxSort));
+        row.image_sort = maxSort;
+        delete row.imageSort;
+        applied.push(`skc_list[${skcIndex}].image_info.image_info_list[${rowIndex}].unique_sort=${maxSort}`);
+        sort = maxSort;
+      }
+      used.add(sort);
+    }
+  }
+  return {payload: next, applied};
+}
+
+function applyTargetStandardGoodsSn(payload, standardGoodsSn) {
+  const goodsSn = safeString(standardGoodsSn, 240);
+  if (!goodsSn) return {payload, applied: []};
+  const next = jsonClone(payload || {});
+  const applied = [];
+  for (const [attrIndex, attr] of asArray(next.product_attribute_list || next.productAttributeList).entries()) {
+    if (!attr || typeof attr !== 'object') continue;
+    const attributeId = normalizeAttributeId(attr.attribute_id ?? attr.attributeId);
+    if (attributeId !== PRODUCT_MODEL_ATTRIBUTE_ID) continue;
+    if ((attr.attribute_extra_value ?? attr.attributeExtraValue) !== goodsSn || attr.attribute_value_id || attr.attributeValueId) {
+      attr.attribute_id = PRODUCT_MODEL_ATTRIBUTE_ID;
+      attr.attribute_extra_value = goodsSn;
+      delete attr.attributeId;
+      delete attr.attribute_value_id;
+      delete attr.attributeValueId;
+      delete attr.attributeExtraValue;
+      delete attr.attribute_value;
+      delete attr.attributeValue;
+      applied.push(`product_attribute_list[${attrIndex}].product_model.standard_goods_sn`);
+    }
+  }
+  if (next.productAttributeList) delete next.productAttributeList;
+  const skcList = asArray(next.skc_list || next.skcList).filter(row => row && typeof row === 'object');
+  for (const [skcIndex, skc] of skcList.entries()) {
+    if ((skc.supplier_code ?? skc.supplierCode) !== goodsSn) {
+      skc.supplier_code = goodsSn;
+      if ('supplierCode' in skc) delete skc.supplierCode;
+      applied.push(`skc_list[${skcIndex}].supplier_code.standard_goods_sn`);
+    }
+    for (const [skuIndex, sku] of asArray(skc.sku_list || skc.skuList).entries()) {
+      if (!sku || typeof sku !== 'object') continue;
+      if ((sku.supplier_sku ?? sku.supplierSku) !== goodsSn) {
+        sku.supplier_sku = goodsSn;
+        if ('supplierSku' in sku) delete sku.supplierSku;
+        applied.push(`skc_list[${skcIndex}].sku_list[${skuIndex}].supplier_sku.standard_goods_sn`);
+      }
+    }
+  }
+  return {payload: next, applied};
+}
+
 function validatePublishPayload(payload) {
   const blockers = [];
   const warnings = [];
@@ -1391,16 +1663,24 @@ function validatePublishPayload(payload) {
     const imageList = asArray(imageInfo?.image_info_list || imageInfo?.imageInfoList);
     if (!imageList.length) blockers.push(`${prefix} 缺 image_info.image_info_list：需要主图/详情图素材或源商品图片映射。`);
     let mainImageCount = 0;
+    const seenImageSorts = new Set();
     for (const [j, image] of imageList.entries()) {
       const imagePrefix = `${prefix}.image_info.image_info_list[${j}]`;
       const imageType = normalizePublishImageType(image?.image_type ?? image?.imageType);
+      const imageSort = Number(image?.image_sort ?? image?.imageSort);
+      if (!Number.isFinite(imageSort) || imageSort <= 0) {
+        blockers.push(`${imagePrefix} 缺合法 image_sort。`);
+      } else if (seenImageSorts.has(imageSort)) {
+        blockers.push(`${imagePrefix} image_sort=${imageSort} 与同一 SKC 其他图片重复；publishOrEdit 图片 sort 必须全局唯一。`);
+      } else {
+        seenImageSorts.add(imageSort);
+      }
       if (imageType === null) {
         blockers.push(`${imagePrefix} 缺 image_type：publishOrEdit 的 SKC 图必须标明 1主图/2细节图/5方块图/6色块图。`);
       } else if (!ALLOWED_SKC_IMAGE_TYPES.has(imageType)) {
         blockers.push(`${imagePrefix} image_type=${imageType} 非法：SKC 图只允许 ${[...SKC_IMAGE_TYPE_LABELS].map(([value, label]) => `${value}${label}`).join('/')}。`);
       } else if (imageType === 1) {
         mainImageCount += 1;
-        const imageSort = Number(image?.image_sort ?? image?.imageSort);
         if (imageSort !== 1) blockers.push(`${imagePrefix} 主图 image_type=1 时 image_sort 必须为 1。`);
       }
       if (!image?.image_url && !image?.imageUrl) blockers.push(`${imagePrefix} 缺 image_url。`);
@@ -2012,13 +2292,17 @@ async function main() {
     if (publishStandardApplied.call) calls.push(publishStandardApplied.call);
     const templateApplied = await applyAttributeTemplateRules(client, publishStandardApplied.payload);
     if (templateApplied.call) calls.push(templateApplied.call);
-    publishPayload = templateApplied.payload;
+    const standardGoodsSnApplied = applyTargetStandardGoodsSn(templateApplied.payload, taskStandardGoodsSn(task, executionContext));
+    const imageSortApplied = ensurePublishImageSortGlobalUnique(standardGoodsSnApplied.payload);
+    publishPayload = imageSortApplied.payload;
     safeDefaults = [
       ...applied.applied,
       ...manualApplied.applied.map(x => `manual_attribute:${x}`),
       ...liveSourceNames.applied,
       ...publishStandardApplied.applied,
       ...templateApplied.applied,
+      ...standardGoodsSnApplied.applied,
+      ...imageSortApplied.applied,
     ];
     manualAttributeOverrides = manualApplied.overrides;
     evidence.sourceLiveSpuInfo = liveSourceNames.evidence;

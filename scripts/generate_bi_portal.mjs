@@ -1960,10 +1960,13 @@ daily_store_product_payment_summary AS (
       store_key,
       standard_goods_sn,
       bool_or(coalesce(is_cod,false)) AS is_cod,
+      max(nullif(goods_title,'')) AS goods_title,
       round(sum(coalesce(sales_sar,0))::numeric, 2) AS sales_sar,
       round(sum(coalesce(gross_sales_sar,0))::numeric, 2) AS gross_sales_sar,
       count(DISTINCT order_no) FILTER (WHERE coalesce(sales_sar,0) > 0) AS orders,
-      count(DISTINCT order_no) FILTER (WHERE coalesce(gross_sales_sar,0) > 0) AS gross_orders
+      count(DISTINCT order_no) FILTER (WHERE coalesce(gross_sales_sar,0) > 0) AS gross_orders,
+      round(sum(coalesce(quantity,0))::numeric, 0) AS quantity,
+      round(sum(coalesce(gross_quantity,0))::numeric, 0) AS gross_quantity
     FROM net_order_item
     WHERE coalesce(order_no,'') <> ''
       AND coalesce(store_key,'') <> ''
@@ -7904,6 +7907,46 @@ function homeSalesForScopeMode(start, end, scopeValue = '', mode = 'net'){
     days:row.daysSet.size
   };
 }
+function isCodPaymentRow(row){
+  const v = row?.is_cod;
+  return v === true || v === 1 || String(v || '').toLowerCase() === 'true';
+}
+function homeCodSalesForScopeMode(start, end, scopeValue = '', mode = 'net'){
+  const hasProduct = Boolean(productScopeQuery());
+  const source = hasProduct ? (DATA.rankings?.dailyStoreProductPaymentSummary || []) : (DATA.rankings?.dailyPaymentSummary || []);
+  const productSource = DATA.rankings?.dailyStoreProductPaymentSummary || [];
+  const salesKey = mode === 'gross' ? 'gross_sales_sar' : 'sales_sar';
+  const orderKey = mode === 'gross' ? 'gross_orders' : 'orders';
+  const qtyKey = mode === 'gross' ? 'gross_quantity' : 'quantity';
+  const row = {sales_sar:0, orders:0, quantity:0, daysSet:new Set(), activeProducts:new Set()};
+  for (const r of source) {
+    const d = String(r.date || '').slice(0, 10);
+    if (!d || d < start || d > end) continue;
+    if (!isCodPaymentRow(r)) continue;
+    if (!storeMatchesScope(r, scopeValue)) continue;
+    if (hasProduct && !productDailyMatch(r)) continue;
+    const qty = Number(r[qtyKey] ?? 0);
+    row.sales_sar += Number(r[salesKey] ?? 0);
+    row.orders += Number(r[orderKey] ?? 0);
+    row.quantity += qty;
+    row.daysSet.add(d);
+  }
+  for (const r of productSource) {
+    const d = String(r.date || '').slice(0, 10);
+    if (!d || d < start || d > end) continue;
+    if (!isCodPaymentRow(r)) continue;
+    if (!storeMatchesScope(r, scopeValue)) continue;
+    if (!productDailyMatch(r)) continue;
+    if (Number(r[qtyKey] ?? 0) > 0 && r.standard_goods_sn) row.activeProducts.add(r.standard_goods_sn);
+  }
+  return {
+    sales_sar:Math.round(row.sales_sar * 100) / 100,
+    orders:row.orders,
+    quantity:row.quantity,
+    activeProducts:row.activeProducts.size,
+    days:row.daysSet.size
+  };
+}
 function homeAfterSalesForScopeMode(start, end, scopeValue = '', mode = state.returnsMode){
   const hasProduct = Boolean(productScopeQuery());
   if (mode === 'order') {
@@ -8291,6 +8334,8 @@ function renderKpisNoGroupsPreview(){
   const scopeValue = (scope.type === 'store' || scope.type === 'owner') ? state.store : '';
   const net = homeSalesForScopeMode(range.start, range.end, scopeValue, 'net');
   const gross = homeSalesForScopeMode(range.start, range.end, scopeValue, 'gross');
+  const codNet = homeCodSalesForScopeMode(range.start, range.end, scopeValue, 'net');
+  const codGross = homeCodSalesForScopeMode(range.start, range.end, scopeValue, 'gross');
   const afterRequest = homeAfterSalesForScopeMode(range.start, range.end, scopeValue, 'request');
   const afterOrder = homeAfterSalesForScopeMode(range.start, range.end, scopeValue, 'order');
   const profit = homeProfitForScope(range.start, range.end, scopeValue);
@@ -8307,11 +8352,15 @@ function renderKpisNoGroupsPreview(){
     '</div>';
   const salesRows = [
     {label:'总成交额', row:gross, tip:'订单创建时的原始成交规模，不扣后续反转'},
-    {label:'净成交额', row:net, tip:'扣除退货、仅退款、派送失败等反转订单后的真实经营口径'}
+    {label:'净成交额', row:net, tip:'扣除退货、仅退款、派送失败等反转订单后的真实经营口径'},
+    {label:'COD总成交额', row:codGross, tip:'仅统计支付方式标记为 COD 的订单，按订单创建时原始成交额'},
+    {label:'COD净成交额', row:codNet, tip:'仅统计支付方式标记为 COD 的订单，扣除后续反转后的净成交额'}
   ];
   const qtyRows = [
     {label:'总订单/销量', row:gross},
-    {label:'净订单/销量', row:net}
+    {label:'净订单/销量', row:net},
+    {label:'COD总订单/销量', row:codGross},
+    {label:'COD净订单/销量', row:codNet}
   ];
   const afterRows = [
     {label:'售后申请时间', row:afterRequest, loading:afterSalesLoading},
@@ -8354,6 +8403,10 @@ function renderKpisNoGroupsPreview(){
   const inventoryIncoming = inventoryRows.reduce((s,r)=>s+Number(r.incoming_quantity || 0),0);
   const inventoryDailySales = inventoryRows.reduce((s,r)=>s+Number(r.weighted_daily_gross_sales || 0),0);
   const inventoryDaysWithIncoming = inventoryDailySales > 0 ? inventoryTotalSupply / inventoryDailySales : null;
+  const inventoryAvailableDays = inventoryDailySales > 0 ? inventoryAvailable / inventoryDailySales : null;
+  const inventoryDaysText = inventoryDailySales > 0
+    ? '总供给 '+fmt.format(inventoryDaysWithIncoming)+' 天 / 可售 '+fmt.format(inventoryAvailableDays)+' 天'
+    : '—';
   const inventorySnapshotDate = latestInventorySnapshotDate(inventoryRows);
   const inventoryScopeNote = (productScopeQuery() ? '当前货号筛选' : '全部货号') + ' · 成本/ET库存不按店铺拆';
   const inventoryCardRows = [
@@ -8362,7 +8415,7 @@ function renderKpisNoGroupsPreview(){
     {label:'成本表在库', value:num(inventoryOnHand)+' 件', note:inventorySnapshotDate},
     {label:'成本表在途', value:num(inventoryIncoming)+' 件', note:'已发未完整到仓/计费'},
     {label:'成本表供给', value:num(inventoryTotalSupply)+' 件', note:'到仓 + 在途 - 已售'},
-    {label:'去化周期', value:inventoryDaysWithIncoming == null ? '—' : fmt.format(inventoryDaysWithIncoming)+' 天', note:inventoryDailySales > 0 ? '按 '+fmt.format(inventoryDailySales)+' 件/天' : '无动销速度'}
+    {label:'去化周期', value:inventoryDaysText, note:inventoryDailySales > 0 ? '按 '+fmt.format(inventoryDailySales)+' 件/天；可售只看 ET 当前可卖库存' : '无动销速度'}
   ];
   const plainRows = rows => rows.map(r => label(r.label)+value(escapeHtml(r.value))+value('<span class="muted">'+escapeHtml(r.note)+'</span>')).join('');
   $('kpis').innerHTML =

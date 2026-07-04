@@ -47,7 +47,9 @@ node scripts/bi_ops_cli.mjs openapi-catalog-plan --format summary [--out plan.js
 
 默认均为 `dry-run`。真实 `execute` 的边界：
 
-- 图片上传/外链转换/只读回读：execute 前校验店铺身份。
+- 本机 Windows/Codex 环境不在 SHEIN OpenAPI 白名单边界内；日常 `bi_ops_cli` 不允许从本机直连真实 OpenAPI。
+- 图片上传/外链转换：`bi_ops_cli --mode execute` 只转交云端 BI 服务执行。
+- 只读回读/目录兜底/订单履约：真实 execute 必须在 `shein-bi-tencent` 云端执行器或云端任务审计链路中跑；本机只保留 dry-run/payload 和 fake OpenAPI smoke。
 - 订单履约：必须 `--confirm SHEIN_ORDER_FULFILLMENT_SUBMIT` + dry-run `payloadHash` + 店铺身份探针。
 - 目录驱动 `openapi-call`：只支持官方 JSON OpenAPI；GET 用 `--query-json/--query-file`，POST 用 `--body-json/--body-file`；写接口必须 `--confirm SHEIN_OPENAPI_GENERIC_WRITE_SUBMIT` + dry-run `payloadHash`；multipart/file/WebHook 被阻断。
 - `openapi-catalog-plan`：只读本地官方目录和详情 schema，输出所有接口的归位矩阵，不联网、不需要店铺密钥、不启用 WebHook receiver。
@@ -57,7 +59,7 @@ node scripts/bi_ops_cli.mjs openapi-catalog-plan --format summary [--out plan.js
 
 | 能力 | 适配器/执行器 | 测试 |
 |------|---------------|------|
-| 本地图片上传 `upload-pic` | `lib/openapi_adapters/upload_pic.mjs`, `scripts/openapi_image_asset_executor.mjs` | `scripts/test_openapi_image_asset_executor.mjs` |
+| 官方本地图片上传 `upload-pic` | `lib/openapi_adapters/upload_pic.mjs`, `scripts/openapi_image_asset_executor.mjs`；日常 CLI 真实执行走云端 | `scripts/test_openapi_image_asset_executor.mjs` |
 | 外链图片转换 `transform-pic` | `lib/openapi_adapters/transform_pic.mjs`, `scripts/openapi_image_asset_executor.mjs` | `scripts/test_openapi_image_asset_executor.mjs` |
 | 图包角色规划 | `lib/link_ops_image_role_planner.mjs` | `scripts/test_link_ops_image_role_planner.mjs` |
 | 审核状态/商品查询/发品规范/上架额度 | `lib/openapi_adapters/query_*.mjs`, `search_product.mjs`, `scripts/openapi_readonly_executor.mjs` | `scripts/test_openapi_readonly_executor.mjs` |
@@ -91,8 +93,8 @@ node scripts/generate_api_schema_index.mjs
 
 - `plan-images` 只扫描本地图包并输出角色建议，不上传、不生成完整 `partialEdit`、不提交 SHEIN。
 - 任一路径包含 `备用` / `backup` / `bak` 的图片不使用；文件名含 `产品封面` / `AB测试` 的图默认忽略。
-- 前端口径：`细节图11` 的第 1 张才是主图；单独 `轮播图` 是第二封面；方形图用 1:1；其他细节按场景 → 卖点 → 参数排序；只有容量外还有第 11 张其他高清图时才放 SKU 图。
-- 真正换图仍要先将图片变成 SHEIN URL，再按官方图片方案映射到 SPU/SKC/SKU 的 `partialEdit` 字段；不同类目图片方案不能硬编码为同一套字段。
+- 前端口径：`细节图11` 的第 1 张才是主图；单独 `轮播图` 是第二封面；方形图用 1:1；其他细节按卖点 → 参数 → 场景排序；只有容量外还有第 11 张其他高清图时才放 SKU 图。
+- 真正换图仍要在云端先将图片变成 SHEIN URL，再按官方图片方案映射到 SPU/SKC/SKU 的 `partialEdit` 字段；不同类目图片方案不能硬编码为同一套字段。
 - `partialEdit` 返回版本号，或后台任务进入流转 / 待审核 / 审核中 / 待终审，即表示平台已接收提交，不应重复提交。
 
 ---

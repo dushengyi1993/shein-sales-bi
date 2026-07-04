@@ -108,10 +108,14 @@ const fake = http.createServer(async (req, res) => {
     return sendJson(res, {code: '0', msg: 'OK', traceId: 'trace-price'});
   }
   if (pathname === '/open-api/goods/product/partialEdit') {
-    const isTitle = body.json?.spu_name === 'spu-smoke' && body.json?.multi_language_name_list?.[0]?.name === 'Smoke Title';
-    const isImage = body.json?.spu_name === 'spu-smoke' && body.json?.skc_list?.[0]?.skc_name === 'sv-smoke-skc' && body.json?.skc_list?.[0]?.image_info?.image_info_list?.[0]?.image_url;
-    if (!isTitle && !isImage) return sendJson(res, {code: '400', msg: 'bad partialEdit payload'}, 200);
-    return sendJson(res, {code: '0', msg: 'OK', traceId: isImage ? 'trace-image' : 'trace-title'});
+    const row = body.json?.skc_list?.[0] || {};
+    const isMergedTitleImage = body.json?.spu_name === 'spu-smoke'
+      && body.json?.multi_language_name_list?.some(x => x.language === 'en' && x.name === 'Smoke Title')
+      && row.skc_name === 'sv-smoke-skc'
+      && row.skc_title === 'Smoke Title'
+      && row.image_info?.image_info_list?.[0]?.image_url;
+    if (!isMergedTitleImage) return sendJson(res, {code: '400', msg: 'bad partialEdit payload'}, 200);
+    return sendJson(res, {code: '0', msg: 'OK', traceId: 'trace-title-image', info: {success: true, version: 'SPMP-SMOKE'}});
   }
   if (pathname === '/open-api/goods/save-certificate-pool-skc-bind') {
     if (body.json?.skc_name !== 'sv-smoke-skc' || body.json?.certificate_pool_id !== 'CERTPOOL-SMOKE') return sendJson(res, {code: '400', msg: 'bad certificate bind payload'}, 200);
@@ -201,7 +205,10 @@ try {
   check('dry-run ok', dry.json?.ok, true);
   check('dry-run state ready', dry.json?.state, 'ready_for_submit');
   check('dry-run payload hash present', Boolean(dry.json?.payload?.payloadHash), true);
-  check('dry-run has 6 operations', asArray(dry.json?.payload?.summary?.operations).length, 6);
+  check('dry-run has 5 operations after merging title+images', asArray(dry.json?.payload?.summary?.operations).length, 5);
+  check('dry-run merges title and images into one partialEdit op', asArray(dry.json?.payload?.summary?.operations), xs => asArray(xs).filter(x => x === 'update_title_and_images').length === 1 && !asArray(xs).includes('update_title') && !asArray(xs).includes('update_images'));
+  check('dry-run merged partialEdit carries skc_title', dry.json?.payload?.submitPlan?.payloads?.find(p => p.operation === 'update_title_and_images')?.body?.skc_list?.[0]?.skc_title, 'Smoke Title');
+  check('dry-run merged partialEdit carries image rows', dry.json?.payload?.submitPlan?.payloads?.find(p => p.operation === 'update_title_and_images')?.body?.skc_list?.[0]?.image_info?.image_info_list?.length, 12);
   check('dry-run records image payload inspection', dry.json?.payload?.summary?.imagePayloadInspection?.payloadCount, 1);
   check('dry-run records SPU image count', dry.json?.payload?.summary?.imagePayloadInspection?.totalSpuImages, 1);
   check('dry-run records SKC image count', dry.json?.payload?.summary?.imagePayloadInspection?.totalSkcImages, 12);
@@ -293,7 +300,8 @@ try {
   for (const endpoint of ['/open-api/goods/modify-skc-shelf','/open-api/stock/change-inventory/v2','/open-api/goods/update-cost','/open-api/openapi-business-backend/product/price/save','/open-api/goods/product/partialEdit','/open-api/stock/stock-query','/open-api/openapi-business-backend/product/query']) {
     check(`execute called ${endpoint}`, execPaths.includes(endpoint), true);
   }
-  check('execute called partialEdit twice for title and image', execPaths.filter(p => p === '/open-api/goods/product/partialEdit').length, 2);
+  check('execute called partialEdit once for merged title and image', execPaths.filter(p => p === '/open-api/goods/product/partialEdit').length, 1);
+  check('execute partialEdit body includes title and image', calls.filter(c => c.path === '/open-api/goods/product/partialEdit')[0]?.body, body => Boolean(body?.multi_language_name_list?.length && body?.skc_list?.[0]?.skc_title && body?.skc_list?.[0]?.image_info?.image_info_list?.length));
   check('execute reused payload hash', exec.json?.payload?.payloadHash || '', hash);
   check('saved output file exists', fssync.existsSync(path.join(ROOT, exec.json?.savedTo || '')), true);
 

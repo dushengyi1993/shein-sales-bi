@@ -19,6 +19,7 @@
 - **源店和目标店必须分离**：`sourceStores` 只表示读来源链接；`writeStores` / `stores` 才表示要写的目标店。跨店复制时若源店混入多写店，执行前必须剔除源店，除非用户明确把源店也列为目标写店。
 - **复制上品里的标题不是改标题动作**：用户说“标题直接复制源链接/沿用源标题”，这是发布 payload 的字段补齐，不是 `update_title` 维护动作，不能把补链任务混进改标题执行器。
 - **新链接默认不自动上架**：所有新上品、复制上品、补链接等从未上过架的新链接，发布 payload 必须默认 `shelf_way=2` 并写入约十年后的 `hope_on_sale_date`；短期内不能自动上架。只有维护已有链接的 `activate_link` / `retire_link` 等上下架动作才按用户指令改变现有链接状态。
+- **新链接默认标准货号**：所有新上品、复制上品、补链接等从未上过架的新链接，发布 payload 的 `skc_list[].supplier_code` 和 `skc_list[].sku_list[].supplier_sku` 必须使用当前任务的标准货号（优先 `task.standardGoodsSn` / `targets.standardGoodsSn` / `metadata.standardGoodsSn` / `executionContext.standardGoodsSn`，再从 `productRefs` 推导），不得继承源链接或店铺特定 raw `supplier_code`。
 - **明确动作优先走 BI 状态机**：补链、复制上品、改价、上下架、补字段、自然语言确认等明确运营动作不得先交给旧问答模型生成建议；必须先创建/更新当前会话任务、检查资料、再用人话返回缺口或结果。
 - **505 只是验收样例，不是特判对象**：`DL 505` 只能用来验证通用链路；自动运营页必须支持所有已接入 OpenAPI 动作走同一条自然语言状态机，包括 `copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。不能给单个货号、单个类目或单个店铺写死流程。
 - **平台缺字段按属性 ID 通用闭环**：`publishOrEdit` 返回“某属性(id)必填”时，后续用户在同一聊天里补“按 800W 算 / 电流 1200mA”等自然语言，系统要从上次平台提示里识别属性 ID、写入当前任务事实并重新资料检查；不能只靠 `SM-505A` 的输入电流特判。
@@ -125,6 +126,7 @@
 - OpenAPI 总账：`/api/openapi-capabilities` 只返回脱敏状态、对账摘要和密钥存在布尔值；不得返回 `APP_SECRET`、`openKeyId`、`secretKey`、`tempToken`、Cookie 或任何可还原密钥的信息。
 - 调度：销售订单、退货退款、商品/链接 OpenAPI 对账均已接入 `scripts/cloud_daily_refresh.sh`；生产 `shein-bi-cloud-daily-refresh.service` 已开启 `SHEIN_BI_DAILY_OPENAPI_RECONCILIATION=1`、`SHEIN_BI_DAILY_OPENAPI_RETURN_RECONCILIATION=1`、`SHEIN_BI_DAILY_OPENAPI_PRODUCT_RECONCILIATION=1`。这些数据对账步骤只写隔离并行对账层，不切生产事实源；自动化运营写操作走独立任务池、权限、白名单、确认和审计链路。
 - 空间：商品原始抓取文件位于忽略目录 `outputs/shein_openapi_products/`，脚本默认每店只保留最近 2 个时间戳快照和 `latest.json`，避免云盘长期膨胀。
+- 空间：凡图包、源图、转换后图片、上传暂存文件或其他大文件同步到 `shein-bi-tencent` 用于 OpenAPI 上传/批量执行，执行结束后必须清理源图和中间大文件；只保留轻量 `summary` / `log` / `manifest` / 审计证据和平台回执日志。清理动作必须记录路径和清理前后大小，禁止删除最终汇总、manifest、审计日志、平台回执日志。
 
 ### B 类：可用 API 辅助，但不能马上完全替换
 
@@ -355,7 +357,7 @@
 - “OpenAPI 可以立刻替换全部现有抓取”——流量、营销、ET、利润输入仍有缺口。
 - “AI 可以绕过确认直接自动上下架”——不允许。用户在聊天里明确确认后，系统才会用内部确认码执行，并记录审计和回读结果。
 - “商品复制/发布一定可一键完成”——payload 完整性、证书、类目属性、图片、站点、品牌和仓库都可能阻断。
-- “AI 看图后可以直接无确认换图/上新”——不允许。AI 可判断图片顺序和质量，但必须先生成可审查的图片结构。当前换图前端角色口径是：`细节图11` 的第 1 张才是主图；单独轮播图是第二封面；文件名含 `产品封面` 的 AB 测试图忽略；方形图用 1:1；其他细节最多 10 张，按场景→卖点→参数排序；只有容量外还有第 11 张其他图时才提交 SKU 高清图。用户可用自然语言调整后才进入提交链路；提交前仍需按官方图片方案映射到 SPU/SKC/SKU 字段。
+- “AI 看图后可以直接无确认换图/上新”——不允许。AI 可判断图片顺序和质量，但必须先生成可审查的图片结构。当前换图前端角色口径是：`细节图11` 的第 1 张才是主图；单独轮播图是第二封面；文件名含 `产品封面` 的 AB 测试图忽略；方形图用 1:1；其他细节最多 10 张，按卖点→参数→场景排序；只有容量外还有第 11 张其他图时才提交 SKU 高清图。用户可用自然语言调整后才进入提交链路；提交前仍需按官方图片方案映射到 SPU/SKC/SKU 字段。
 - “利润页可以完全由 SHEIN OpenAPI 生成”——利润依赖 ET、成本和项目自有口径。
 
 ## 9. 当前上线验收口径
