@@ -552,6 +552,17 @@ function addAction(map, action) {
   const old = map.get(key);
   if (!old || action.score > old.score) map.set(key, {...action, id: key});
 }
+function dateOnly(value) {
+  const text = String(value || '').trim();
+  const m = text.match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : '';
+}
+function firstShelfAgeDays(linkRow, performanceDate) {
+  const firstShelfDate = dateOnly(linkRow?.firstShelfTime);
+  const perfDate = dateOnly(performanceDate);
+  if (!firstShelfDate || !perfDate) return null;
+  return Math.floor((new Date(`${perfDate}T00:00:00Z`).getTime() - new Date(`${firstShelfDate}T00:00:00Z`).getTime()) / 86400000);
+}
 function linkAgeDays(linkRow, inventoryRow) {
   const fromInv = metric(inventoryRow?.shelfDays, NaN);
   if (Number.isFinite(fromInv) && fromInv > 0) return fromInv;
@@ -757,26 +768,32 @@ function buildOperations(linkIdx, salesAgg, selectedStoreKeys, args) {
     });
   }
 
-  // 4) Delist / replacement candidates. Never recommend deleting the only useful coverage blindly.
+  // 4) Delist / replacement candidates. Uses the same conservative read-only
+  // rule as BI action pool: on shelf, c7EpsUv<=300, c7SaleCnt=0, no SHEIN
+  // newGoodsTag, and first shelf time is at least 15 days before performance date.
+  // If legacy local data lacks newGoodsTag or firstShelfTime, it must not enter
+  // executable delist candidates.
   for (const row of linkIdx.performances) {
     const link = linkIdx.linkByStoreSkc.get(uniqueKey(row.storeKey, row.skc)) || {};
     if (link.isHardDead || link.isOutShelf || link.isSoldOut) continue;
-    const inv = linkIdx.invByStoreSkc.get(uniqueKey(row.storeKey, row.skc)) || {};
-    const age = linkAgeDays(link, inv);
+    if (!(link.isOnShelf || link.shelfStatusName === '已上架')) continue;
+    const age = firstShelfAgeDays(link, args.date);
+    if (age === null || age < 15) continue;
+    if (!Object.hasOwn(row, 'newGoodsTag') || String(row.newGoodsTag || '').trim()) continue;
+    const c7Exposure = metric(row.c7EpsUv, NaN);
+    const c7Sale = metric(row.c7SaleCnt, NaN);
+    if (!Number.isFinite(c7Exposure) || !Number.isFinite(c7Sale)) continue;
+    if (c7Exposure > 300 || c7Sale !== 0) continue;
     const standardStoreLinks = linkIdx.standardStoreLinks.get(uniqueKey(row.standardGoodsSn, row.storeKey)) || [];
     const onShelfSameStore = standardStoreLinks.filter(x => x.isOnShelf || x.shelfStatusName === '已上架').length;
     const ss = linkIdx.standardStats.get(row.standardGoodsSn || '') || {};
     const hasReplacement = onShelfSameStore > 1;
-    const zero30 = metric(row.c30SaleCnt) === 0;
-    const enoughAge = age >= 30;
-    const exposedButNoSale = metric(row.c30EpsUv) >= 500 || metric(row.c30GoodsUv) >= 60;
-    if (!zero30 || !enoughAge || !exposedButNoSale) continue;
-    const score = metric(row.c30EpsUv) / 2 + metric(row.c30GoodsUv) * 8 + age + (hasReplacement ? 300 : 0);
+    const score = (300 - c7Exposure) / 2 + age + (hasReplacement ? 300 : 0);
     const totalOnShelfStores = ss.onShelfStores?.size || 0;
     addAction(actions, {
       type: '淘汰候选',
       category: hasReplacement ? '可下架候选' : '先替换再下架',
-      priority: hasReplacement || metric(row.c30EpsUv) >= 2000 ? HIGH : MID,
+      priority: hasReplacement ? HIGH : MID,
       score,
       store: row.storeKey,
       group: row.groupKey,
@@ -784,13 +801,13 @@ function buildOperations(linkIdx, salesAgg, selectedStoreKeys, args) {
       standardGoodsSn: row.standardGoodsSn || '',
       skc: row.skc || '',
       imageUrl: row.imageUrl || link.imageUrl || '',
-      title: `${row.storeKey} 30天0销量淘汰候选：${row.skc}`,
+      title: `${row.storeKey} 低曝光零销量淘汰候选：${row.skc}`,
       reason: hasReplacement
-        ? '同货号同店已有其他上架链接，可把这条长期不转化链接列入下架候选。'
+        ? '同货号同店已有其他上架链接，可把这条低曝光零销量链接列入下架候选。'
         : '该店该货号可能只有这一条上架承接，不建议直接下架；先补新链接或确认该货号不用覆盖。',
-      evidence: `上架约 ${age} 天；30天曝光 ${metric(row.c30EpsUv)}，商详访客 ${metric(row.c30GoodsUv)}，销量 0；同店上架链接 ${onShelfSameStore}；全店覆盖 ${totalOnShelfStores}/${selectedStoreKeys.length}`,
-      nextStep: hasReplacement ? '复核无误后可下架/停用弱链接。' : '先补新链接或确认不卖，再处理旧链接。',
-      metrics: {age, c30Sale: 0, c30Exposure: metric(row.c30EpsUv), onShelfSameStore, allOnShelfStores: totalOnShelfStores},
+      evidence: `首次上架约 ${age} 天；7天曝光 ${c7Exposure}，7天销量 0；SHEIN 新品标签为空；同店上架链接 ${onShelfSameStore}；全店覆盖 ${totalOnShelfStores}/${selectedStoreKeys.length}`,
+      nextStep: hasReplacement ? '先出明细给用户确认；复核无误后才可下架/停用弱链接。' : '先补新链接或确认不卖，再处理旧链接；不能直接执行下架。',
+      metrics: {age, c7Sale: 0, c7Exposure, onShelfSameStore, allOnShelfStores: totalOnShelfStores},
       source: 'delist_rule',
     });
   }
@@ -1159,7 +1176,7 @@ function renderDataNotes(){
     '<b>库存口径：</b>备货信息里的库存已经证实不适合做低库存预警，所以当前网页不生成库存低动作；现在只在销售突然断崖时提示“手动核库存菜单”，不判定缺货。',
     '<b>废且下架：</b>已标废且已下架的链接只作为历史状态，不进今日动作。',
     '<b>全店未上架：</b>如果一个货号15个店都没有已上架链接，按暂不上/库存未到处理，不提醒补链。',
-    '<b>下架候选：</b>30天0销量只进入候选；唯一上架承接会显示“先替换再下架”，并展示同店链接数和全店覆盖数，不会提示直接下架。',
+    '<b>下架候选：</b>统一用近7天曝光≤300且近7天销量0；SHEIN 新品标签非空、首次上架未满15天、缺首次上架时间或旧数据缺新品标签字段，都不能进入可执行下架候选。候选必须先出明细给用户确认。',
     '<b>今日重点：</b>按全局评分和类型预算挑选，不再每店机械凑8条。'
   ].map(x => '<li>'+x+'</li>').join('');
 }

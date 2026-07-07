@@ -47,6 +47,7 @@ const RATED_VOLTAGE_ATTRIBUTE_ID = 1001370;
 const VOLTAGE_ATTRIBUTE_ID = 1000101;
 const VOLTAGE_VALUE_ATTRIBUTE_ID = 164;
 const INPUT_VOLTAGE_AC_UNIT_LABEL = 'Vac 50–60Hz';
+const DEFAULT_AIR_FRYER_INPUT_CURRENT_MA = 6800;
 
 function parseArgs(argv) {
   const args = {
@@ -1189,6 +1190,100 @@ function normalizeInputCurrentExtraValue(value, unit = '') {
   return String(milliamps);
 }
 
+function randomIntInclusive(min, max) {
+  const lo = Math.ceil(Number(min));
+  const hi = Math.floor(Number(max));
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi < lo) return lo;
+  const range = hi - lo + 1;
+  const maxRandom = 0x100000000;
+  const limit = maxRandom - (maxRandom % range);
+  let value;
+  do {
+    value = crypto.randomBytes(4).readUInt32BE(0);
+  } while (value >= limit);
+  return lo + (value % range);
+}
+
+function storePriceBucket({minCents, maxCents, targetStore}) {
+  const storeKey = normalizeStoreKey(targetStore);
+  const storeKeys = STORES.map(row => normalizeStoreKey(row?.storeKey)).filter(Boolean);
+  const storeIndex = storeKeys.indexOf(storeKey);
+  const count = maxCents - minCents + 1;
+  if (storeIndex < 0 || count < storeKeys.length || !storeKeys.length) return {minCents, maxCents};
+  const bucketStart = Math.floor(storeIndex * count / storeKeys.length);
+  const bucketEnd = Math.floor((storeIndex + 1) * count / storeKeys.length) - 1;
+  return {
+    minCents: minCents + bucketStart,
+    maxCents: minCents + Math.max(bucketStart, bucketEnd),
+  };
+}
+
+function randomPriceInRange(range, targetStore = '') {
+  const min = Number(range?.min ?? range?.from ?? range?.low);
+  const max = Number(range?.max ?? range?.to ?? range?.high);
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min < 0 || max < min) return null;
+  const bucket = storePriceBucket({minCents: Math.round(min * 100), maxCents: Math.round(max * 100), targetStore});
+  const cents = randomIntInclusive(bucket.minCents, bucket.maxCents);
+  return (cents / 100).toFixed(2);
+}
+
+function taskSupplyPriceRange(task, executionContext = {}, targetStore = '') {
+  const candidates = [
+    task?.supplyPriceRange,
+    task?.supply_price_range,
+    task?.targets?.supplyPriceRange,
+    task?.targets?.supply_price_range,
+    executionContext?.supplyPriceRange,
+    executionContext?.supply_price_range,
+    executionContext?.targets?.supplyPriceRange,
+    executionContext?.targets?.supply_price_range,
+  ];
+  for (const candidate of candidates) {
+    const price = randomPriceInRange(candidate, targetStore);
+    if (price !== null) {
+      return {
+        min: Number(candidate?.min ?? candidate?.from ?? candidate?.low),
+        max: Number(candidate?.max ?? candidate?.to ?? candidate?.high),
+        __randomCostPrice: price,
+      };
+    }
+  }
+  return null;
+}
+
+function applyRandomSupplyPrice(payload, task, executionContext, targetStore) {
+  const range = taskSupplyPriceRange(task, executionContext, targetStore);
+  if (!range) return {payload, applied: [], evidence: null};
+  const costPrice = range.__randomCostPrice;
+  const next = jsonClone(payload || {});
+  const applied = [];
+  for (const [skcIndex, skc] of asArray(next.skc_list || next.skcList).entries()) {
+    for (const [skuIndex, sku] of asArray(skc?.sku_list || skc?.skuList).entries()) {
+      if (!sku || typeof sku !== 'object') continue;
+      const costInfo = sku.cost_info || sku.costInfo || {};
+      sku.cost_info = {
+        ...costInfo,
+        currency: safeString(costInfo.currency || 'SAR', 20) || 'SAR',
+        cost_price: costPrice,
+      };
+      if ('costInfo' in sku) delete sku.costInfo;
+      applied.push(`skc_list[${skcIndex}].sku_list[${skuIndex}].cost_info.cost_price.randomized`);
+    }
+  }
+  return {
+    payload: next,
+    applied: [...new Set(applied)],
+    evidence: {
+      storeKey: normalizeStoreKey(targetStore),
+      min: range.min,
+      max: range.max,
+      currency: 'SAR',
+      costPrice,
+      perStoreRandomized: true,
+    },
+  };
+}
+
 function normalizeManualAttributeOverride(row) {
   if (!row || typeof row !== 'object') return null;
   const attributeId = normalizeAttributeId(row.attribute_id ?? row.attributeId ?? row.id);
@@ -1217,7 +1312,107 @@ function normalizeManualAttributeOverride(row) {
   };
 }
 
-function collectManualAttributeOverrides(task, executionContext) {
+function textFromPayloadForAttributeInference(payload, task, executionContext) {
+  return [
+    taskTextForKnownRules(task, executionContext),
+    ...asArray(payload?.multi_language_name_list || payload?.multiLanguageNameList)
+      .flatMap(row => [row?.name, row?.product_name, row?.productName, row?.value]),
+    ...asArray(payload?.skc_list || payload?.skcList)
+      .flatMap(skc => [skc?.sale_name, skc?.saleName, skc?.skc_name, skc?.skcName, skc?.supplier_code, skc?.supplierCode]),
+  ].map(v => safeString(v, 300)).filter(Boolean).join(' ');
+}
+
+function isAirFryerTaskOrPayload(payload, task, executionContext) {
+  return /空气炸锅|air\s*fryer/i.test(textFromPayloadForAttributeInference(payload, task, executionContext));
+}
+
+function payloadHasWallPlugPowerSupply(payload) {
+  const rows = asArray(payload?.product_attribute_list || payload?.productAttributeList);
+  const powerSupply = rows.find(row => normalizeAttributeId(row?.attribute_id ?? row?.attributeId) === POWER_SUPPLY_ATTRIBUTE_ID);
+  return normalizeAttributeId(powerSupply?.attribute_value_id ?? powerSupply?.attributeValueId) === POWER_SUPPLY_WALL_PLUG_VALUE_ID;
+}
+
+function payloadHasInputCurrent(payload) {
+  return asArray(payload?.product_attribute_list || payload?.productAttributeList).some(row => {
+    if (normalizeAttributeId(row?.attribute_id ?? row?.attributeId) !== INPUT_CURRENT_ATTRIBUTE_ID) return false;
+    return Boolean(safeString(row?.attribute_extra_value ?? row?.attributeExtraValue ?? row?.attribute_value ?? row?.attributeValue ?? '', 120));
+  });
+}
+
+function parsePowerWatts(value) {
+  const text = safeString(value, 240);
+  if (!text) return null;
+  const watt = text.match(/([0-9]+(?:\.[0-9]+)?)\s*(?:w|瓦|瓦特)\b/i);
+  const raw = watt || text.match(/\b([0-9]{3,4}(?:\.[0-9]+)?)\b/);
+  if (!raw) return null;
+  const n = Number(raw[1]);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function parseVoltageNumber(value) {
+  const text = safeString(value, 120);
+  const range = text.match(/([0-9]{2,3}(?:\.[0-9]+)?)\s*V?\s*[-–—~]\s*([0-9]{2,3}(?:\.[0-9]+)?)\s*V?/i);
+  if (range) return Number(range[1]);
+  const single = text.match(/([0-9]{2,3}(?:\.[0-9]+)?)\s*V/i);
+  return single ? Number(single[1]) : null;
+}
+
+function inferPowerWattsFromPayload(payload) {
+  for (const item of collectPayloadAttributeRows(payload)) {
+    const row = item.row;
+    const name = safeString(row.attribute_name ?? row.attributeName ?? row.name ?? row.label ?? '', 160);
+    const values = [
+      row.attribute_extra_value,
+      row.attributeExtraValue,
+      row.attribute_value,
+      row.attributeValue,
+      row.attribute_value_name,
+      row.attributeValueName,
+    ];
+    if (/power|wattage|rated\s*power|功率|额定功率/i.test(name)) {
+      for (const value of values) {
+        const watts = parsePowerWatts(value);
+        if (watts) return {watts, source: item.source, source_attribute_id: item.attributeId, source_name: name};
+      }
+    }
+    for (const value of values) {
+      const text = safeString(value, 240);
+      if (/w|瓦|瓦特/i.test(text)) {
+        const watts = parsePowerWatts(text);
+        if (watts) return {watts, source: item.source, source_attribute_id: item.attributeId, source_name: name};
+      }
+    }
+  }
+  return null;
+}
+
+function inferInputCurrentOverride(payload, task, executionContext) {
+  if (!payloadHasWallPlugPowerSupply(payload) || payloadHasInputCurrent(payload)) return null;
+  const voltage = inferInputVoltageFromPayload(payload, new Map());
+  const voltageV = parseVoltageNumber(voltage?.attribute_extra_value || voltage?.source_value || '');
+  const power = inferPowerWattsFromPayload(payload);
+  if (power?.watts && voltageV && voltageV > 0) {
+    return {
+      attribute_id: INPUT_CURRENT_ATTRIBUTE_ID,
+      attribute_extra_value: String(Math.round(power.watts * 1000 / voltageV)),
+      attribute_unit: 'mA',
+      label: '输入电流',
+      source: `auto_power_voltage:${power.source_attribute_id || power.source || 'payload'}`,
+    };
+  }
+  if (isAirFryerTaskOrPayload(payload, task, executionContext)) {
+    return {
+      attribute_id: INPUT_CURRENT_ATTRIBUTE_ID,
+      attribute_extra_value: String(DEFAULT_AIR_FRYER_INPUT_CURRENT_MA),
+      attribute_unit: 'mA',
+      label: '输入电流',
+      source: 'auto_air_fryer_default',
+    };
+  }
+  return null;
+}
+
+function collectManualAttributeOverrides(task, executionContext, payload = null) {
   const rows = [
     ...asArray(task?.targets?.attributeOverrides || task?.targets?.attribute_overrides),
     ...asArray(task?.manualAttributeOverrides || task?.manual_attribute_overrides),
@@ -1225,6 +1420,8 @@ function collectManualAttributeOverrides(task, executionContext) {
     ...asArray(executionContext?.attributeOverrides || executionContext?.attribute_overrides),
     ...asArray(executionContext?.targets?.attributeOverrides || executionContext?.targets?.attribute_overrides),
   ].map(normalizeManualAttributeOverride).filter(Boolean);
+  const autoInputCurrent = payload ? normalizeManualAttributeOverride(inferInputCurrentOverride(payload, task, executionContext)) : null;
+  if (autoInputCurrent && !rows.some(row => Number(row.attribute_id) === INPUT_CURRENT_ATTRIBUTE_ID)) rows.push(autoInputCurrent);
   if (isKnownSm505SewingMachineTask(task, executionContext) && !rows.some(row => Number(row.attribute_id) === INPUT_CURRENT_ATTRIBUTE_ID)) {
     rows.push({
       attribute_id: INPUT_CURRENT_ATTRIBUTE_ID,
@@ -1240,7 +1437,7 @@ function collectManualAttributeOverrides(task, executionContext) {
 }
 
 function applyManualAttributeOverrides(payload, task, executionContext) {
-  const overrides = collectManualAttributeOverrides(task, executionContext);
+  const overrides = collectManualAttributeOverrides(task, executionContext, payload);
   if (!overrides.length) return {payload, applied: [], overrides: []};
   const next = jsonClone(payload || {});
   const list = asArray(next.product_attribute_list || next.productAttributeList)
@@ -1361,7 +1558,7 @@ function inferInputVoltageFromPayload(payload, templateById) {
     VOLTAGE_VALUE_ATTRIBUTE_ID,
   ];
   for (const attributeId of priority) {
-    for (const item of rows.filter(row => row.attributeId === attributeId)) {
+    for (const item of rows.filter(row => row.attributeId === attributeId || row.attribute_id === attributeId)) {
       const row = item.row;
       const template = templateById.get(attributeId);
       const valueId = normalizeAttributeId(row.attribute_value_id ?? row.attributeValueId);
@@ -1589,6 +1786,70 @@ function ensurePublishImageSortGlobalUnique(payload) {
     }
   }
   return {payload: next, applied};
+}
+
+function taskShuffleImagesEnabled(task, executionContext = {}) {
+  return Boolean(
+    task?.shuffleImages
+    || task?.shuffle_images
+    || task?.targets?.shuffleImages
+    || task?.targets?.shuffle_images
+    || executionContext?.shuffleImages
+    || executionContext?.shuffle_images
+    || executionContext?.targets?.shuffleImages
+    || executionContext?.targets?.shuffle_images
+  );
+}
+
+function cryptoShuffle(values) {
+  const out = [...values];
+  for (let i = out.length - 1; i > 0; i -= 1) {
+    const j = randomIntInclusive(0, i);
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+function shufflePublishDetailImages(payload, task, executionContext) {
+  if (!taskShuffleImagesEnabled(task, executionContext)) return {payload, applied: []};
+  const next = jsonClone(payload || {});
+  const applied = [];
+  for (const [skcIndex, skc] of asArray(next.skc_list || next.skcList).entries()) {
+    const imageInfo = skc?.image_info || skc?.imageInfo;
+    const rows = asArray(imageInfo?.image_info_list || imageInfo?.imageInfoList);
+    if (!rows.length) continue;
+    const reservedSorts = new Set([1]);
+    const details = [];
+    for (const [rowIndex, row] of rows.entries()) {
+      const imageType = normalizePublishImageType(row?.image_type ?? row?.imageType);
+      if (imageType === 1) {
+        if (Number(row?.image_sort ?? row?.imageSort) !== 1) {
+          row.image_sort = 1;
+          delete row.imageSort;
+          applied.push(`skc_list[${skcIndex}].image_info.image_info_list[${rowIndex}].main_sort=1`);
+        }
+        continue;
+      }
+      if (imageType === 2) {
+        details.push({row, rowIndex});
+        continue;
+      }
+      const sort = Number(row?.image_sort ?? row?.imageSort);
+      if (Number.isFinite(sort) && sort > 1) reservedSorts.add(sort);
+    }
+    if (details.length <= 1) continue;
+    const shuffled = cryptoShuffle(details);
+    let nextSort = 2;
+    for (const item of shuffled) {
+      while (reservedSorts.has(nextSort)) nextSort += 1;
+      item.row.image_sort = nextSort;
+      delete item.row.imageSort;
+      reservedSorts.add(nextSort);
+      applied.push(`skc_list[${skcIndex}].image_info.image_info_list[${item.rowIndex}].detail_shuffle_sort=${nextSort}`);
+      nextSort += 1;
+    }
+  }
+  return {payload: next, applied: [...new Set(applied)]};
 }
 
 function applyTargetStandardGoodsSn(payload, standardGoodsSn) {
@@ -2293,7 +2554,9 @@ async function main() {
     const templateApplied = await applyAttributeTemplateRules(client, publishStandardApplied.payload);
     if (templateApplied.call) calls.push(templateApplied.call);
     const standardGoodsSnApplied = applyTargetStandardGoodsSn(templateApplied.payload, taskStandardGoodsSn(task, executionContext));
-    const imageSortApplied = ensurePublishImageSortGlobalUnique(standardGoodsSnApplied.payload);
+    const randomSupplyPriceApplied = applyRandomSupplyPrice(standardGoodsSnApplied.payload, task, executionContext, targetStore);
+    const imageShuffleApplied = shufflePublishDetailImages(randomSupplyPriceApplied.payload, task, executionContext);
+    const imageSortApplied = ensurePublishImageSortGlobalUnique(imageShuffleApplied.payload);
     publishPayload = imageSortApplied.payload;
     safeDefaults = [
       ...applied.applied,
@@ -2302,12 +2565,15 @@ async function main() {
       ...publishStandardApplied.applied,
       ...templateApplied.applied,
       ...standardGoodsSnApplied.applied,
+      ...randomSupplyPriceApplied.applied,
+      ...imageShuffleApplied.applied,
       ...imageSortApplied.applied,
     ];
     manualAttributeOverrides = manualApplied.overrides;
     evidence.sourceLiveSpuInfo = liveSourceNames.evidence;
     evidence.publishFillInStandard = publishStandardApplied.evidence;
     evidence.attributeTemplate = templateApplied.evidence;
+    evidence.randomSupplyPrice = randomSupplyPriceApplied.evidence;
     appendUnique(warnings, liveSourceNames.warnings);
     appendUnique(warnings, publishStandardApplied.warnings);
     appendUnique(blockers, publishStandardApplied.blockers);
@@ -2338,7 +2604,10 @@ async function main() {
       || '',
       120,
     );
-    if (!expectedHash) {
+    const skipPayloadHashLock = Boolean(task?.skipPayloadHashLock || task?.targets?.skipPayloadHashLock || executionContext?.skipPayloadHashLock || executionContext?.targets?.skipPayloadHashLock);
+    if (skipPayloadHashLock) {
+      warnings.push('skipPayloadHashLock=true: payload hash lock skipped (randomized payload)');
+    } else if (!expectedHash) {
       blockers.push('真实提交缺少 dry-run 锁定的 payload hash，不能提交未经锁定的发布 payload。');
     } else if (!payloadHash || payloadHash !== expectedHash) {
       blockers.push(`真实提交 payload hash 与 dry-run 锁定值不一致：expected=${expectedHash || 'missing'} actual=${payloadHash || 'missing'}`);
@@ -2470,7 +2739,7 @@ async function main() {
   process.exitCode = output.ok ? 0 : 2;
 }
 
-main().catch(err => {
+if (process.env.SHEIN_LINK_OPS_EXECUTOR_SELF_TEST !== '1') main().catch(err => {
   const error = {
     ok: false,
     state: 'error',
@@ -2479,3 +2748,11 @@ main().catch(err => {
   console.error(JSON.stringify(error, null, 2));
   process.exit(1);
 });
+
+export const __testHooks = {
+  applyManualAttributeOverrides,
+  applyRandomSupplyPrice,
+  shufflePublishDetailImages,
+  ensurePublishImageSortGlobalUnique,
+  normalizePublishImageType,
+};

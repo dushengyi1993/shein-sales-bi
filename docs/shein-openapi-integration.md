@@ -24,6 +24,7 @@
 - TZ/JSH/TZZ/XC 等店铺身份校验允许静态 `merchantId` fallback，但只能在配置真相匹配且无 GS 账号冲突时使用；不得运行时自动回填或放宽 `account_mismatch`。
 - 网页端最终提交不再显示固定确认框；用户在同一聊天里说“可以执行 / 提交吧 / 照做”等自然语言，服务端在唯一当前事项、资料检查通过、权限和白名单命中时内部映射为安全码 `SHEIN_OPENAPI_SUBMIT`。CLI 和脚本仍必须显式传安全码。
 - 当前 release gate 覆盖前端确认/反馈、OpenAPI 商品详情 mapper、店铺身份 merchantId fallback、权限矩阵、CLI flow、真实写白名单作用域、生产安全、复制上品成功/弱回读和维护写执行器 smoke。
+- 发版门禁已纳入下架候选策略/CSV 构建/货号修复 payload 三个 smoke 测试。
 
 ## 应用创建建议
 
@@ -201,6 +202,8 @@ node scripts/load_bi_warehouse.mjs --sales-dir outputs/shein_openapi_fetch --sal
 
 - 已接入动作与官方文档：
 - `activate_link` / `retire_link`：`3001253 /open-api/goods/modify-skc-shelf`，恢复/重新上架使用 `shelf_state=1`，下架使用 `shelf_state=2`。
+- 批量低曝光零销量下架候选必须先走只读确认表，不能直接执行。统一规则：当前已上架、近 7 天曝光 `c7EpsUv <= 300`、近 7 天销量 `c7_sale_cnt = 0`、平台新品标签 `newGoodsTag` 为空，并且首次上架已满 15 天；首次上架 15 天内无论是否有新品标签都排除，缺 `first_shelf_time` 进入待确认/不执行。用户确认后，真实下架仍走 `retire_link` 受控任务；货号改成 `（废）标准货号` 是 best-effort，若 `partialEdit` 校验失败，保留下架结果并把未改货号项列入汇总。
+- 下架后货号修复：`scripts/repair_retire_supplier_code_openapi.mjs` 是独立的修复专用执行器，只调 `partialEdit` 改货号为`（废）标准货号`，绝不调 shelf 接口。硬排除 FY SK-5110 和指定 SK-270。本机 Windows 只能 dry-run，真实执行必须在云端。修复失败不阻断已完成的下架结果。
   - `update_inventory`：`3001738 /open-api/stock/change-inventory/v2`，按 SKU 写虚拟库存并用 `/open-api/stock/stock-query` 回读。
   - `update_supply_price`：`3001681 /open-api/goods/update-cost`，按 SKC/SKU 写供货价。
   - `update_product_price`：`3001407 /open-api/openapi-business-backend/product/price/save`，同时写 `shopPrice` 与 `specialPrice`，避免未传 `specialPrice` 被平台解析为 `0`。

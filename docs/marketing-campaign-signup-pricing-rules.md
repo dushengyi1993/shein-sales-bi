@@ -177,6 +177,7 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
 - 新一轮云端 BI / 后台 live scan 只用于补充变化：新增链接、新增可报 SKC、曝光 Top5 变化、平台最低降幅、成本/库存变化、活动窗口变化和旧证据失效。不能因为重新扫描到新数据，就把已经确认过的上期策略回退为默认 `30%` 或旧草稿。
 - 执行方案和 source summary 必须写明本轮继承的 baseline 文件路径；找不到可靠最终版基准时，先报告 blocker，不能直接生成可提交方案。
 - 用户确认并提交完成后，必须把本轮最终全量 `selection-plan + price-overrides` 写成下一轮基准：文件里保留 `baselineForNextOrdinaryActivity=true` 和 `baselineForLimitedDiscountFallback=true`，后续普通活动方案、订单审计和限时折扣兜底都读取这对最终文件，而不是读取演示预填、单店 supplement、旧 `ALL-ready` 或未合并草稿。
+- 订单审计 `audit_order_prices_against_plan.mjs` 支持 `--links-data`（默认 `outputs/bi-portal/sections/linksData.json`）精确目标价 overlay：先从 linksData 按 `storeKey + SKC` 取当前目标价，再按订单时间 + 活动/窗口选择生效计划行。重复计划不再自动报错，只在活跃目标歧义/冲突时报冲突。
 - 普通活动填报价不要批量使用整百/整数固定价。固定价或备注价可以在不越过平台价格上限、目标价底线和利润/成本安全线的前提下做几毛钱级别的小数微调，例如 `160` 可填成 `159.57` 或 `160.28`。
 - 真实预填/提交前必须检查 `price-overrides` 目标行没有整数价；若仍有整数价，先生成带 `jitter` 标记的修正版，并用修正版预填/提交，不能沿用未微调旧文件。
 
@@ -259,6 +260,8 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
   - 如果暂时报不上普通营销活动，或普通活动尚未生效，巡检必须立即生成一周限时折扣兜底，限时折扣价同样按前五力度。
   - 已有旧限时折扣但不是一周窗口或不是前五力度的，若旧活动只包含目标 SKC，可以在 dry-run 安全后取消/结束并重报；若旧活动混有计划外 SKC、人工特殊价或无法确认归属，必须阻断并列人工确认。
   - 该规则的机器配置在 `config/marketing_pricing_policy.json` 的 `newListingWithin7Days`，当前窗口为 `7` 天、限时折扣持续 `7` 天。
+- 平台新品标签延续：`config/marketing_pricing_policy.json` 新增 `newListingWithin7Days.platformNewLabelPatterns = ["新款", "新品", "New Arrivals", "new arrival"]`。平台标签命中时，即使上架超过 7 天，仍按新品/前五力度待遇，除非该链接已有普通营销活动。
+- 目标价证据优先级：先查精确 `storeKey + SKC` 目标价（`exact_store_skc_target_price`），再回退到同标准货号最低批准价。`build_new_listing_limited_discount_plan.mjs --current-marketing-live-scan` 可用 live scan 证明已有限时折扣覆盖，避免重复报名。
 
 ## 三点一、新品保护价规则
 
@@ -362,6 +365,8 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
 - 核心校验永远是目标成交价：先按时间窗口取 `min(当前售价, 普通营销活动价..., 限时折扣价...)` 作为不含券保底基准价；优惠券只用于触券下探风险测算，不能用于证明目标价必然达成。若普通营销活动已报并能命中目标，限时折扣仍必须存在，但只能作为不打穿目标价/底价的兜底层；若普通营销活动缺失、未生效或未覆盖，限时折扣必须直接把不含券保底价兜到当前计划目标价。
 - 当普通营销活动报名漏掉且报名期已结束时，限时折扣必须作为兜底补救：限时折扣价应直接命中原本计划的目标成交价，不得再依赖 `15%` 优惠券实现目标价；结束时间按该普通活动窗口或一个月默认兜底周期设置，并在下期普通活动恢复后重新校验。
 - 如果一个链接已有生效/未来生效限时折扣，先判断它是否干扰本期目标价；会干扰就取消或修改，再按新目标重建。一个链接不能同时依赖多个互相冲突的限时折扣。
+- 执行器硬校验：`apply_hl_limited_discount_rescue.mjs` 和 `split_recreate_mixed_limited_discount.mjs` 在写入前硬校验每行必须有 `finalTargetPrice`，且 `limitedDiscountPrice` 不得低于 `finalTargetPrice - 0.01`；缺失或低于目标价的行直接 fail closed，不会机械按 15% 或过深折扣提交。
+- 限时折扣漂移修复：`build_limited_discount_drift_rescue_plan.mjs` 从每日 guard 的 `limitedDiscountTargetPriceDrift.belowRows` 构建修复计划，以当前 `finalTargetPrice` 作为限时折扣价。
 
 - 新品/新链接只要进入在售运营范围，无论是否已有普通营销活动，都必须检查限时折扣兜底层；没有普通营销活动或普通活动尚未生效时，限时折扣直接把价格降到目标成交价；已有普通营销活动时，限时折扣默认按 `15%` 或缩浅后的安全折扣存在，但不得低于目标价/底价/利润线。
 - 新上架 7 天内且未报普通营销活动的链接，是限时折扣自动处理的高优先级特例：折扣力度按全局曝光前五，活动窗口固定为一周，用于衔接后续普通营销活动；这类链接不等用户再人工确认“是否要兜底”，除非缺成本/目标价/库存、店铺身份异常或平台规则阻断。
@@ -505,10 +510,24 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
 - **P1：guard 脚本拆分** — 计划选择逻辑抽到 lib/marketing_plan_selector.mjs，guard 从 3,545 行降到 ~3,255 行。
 - **P1：计划选择 planMetadata** — 计划 JSON 有 planMetadata.status=current_baseline 时得 8000 分，supersededBy 非空直接拒绝。
 - **P1：共享浏览器/工具模块** — 新建 lib/shein_browser.mjs 和 lib/marketing_utils.mjs，新脚本 import 即可。
-- **P2：优惠券结构化 couponPolicy** — ow.couponPolicy 字段（	raffic/orbidden/price_guarantee）优先于正则。
+- **P2：优惠券结构化 couponPolicy** —
+ow.couponPolicy 字段（	raffic/orbidden/price_guarantee）优先于正则。
 - **P2：订单审计重复键** — 跨活动同 SKC 不同价格不再报为冲突。
 - **P3：内联 Python 抽出** — scripts/cloud_read_order_files.py。
 - **P3：BUSY_SERVICES 配置化** — config/cloud_marketing_busy_services.json。
+- 环境变量 `SHEIN_BI_MARKETING_LIVE_BUSY_SERVICES` 优先于 `config/cloud_marketing_busy_services.json`。
 - **P3：smoke 测试** — scripts/marketing/smoke_marketing_classifiers.mjs，23 个测试。
 
 回滚点：GitHub release 2026.07.02-pre-marketing-refactor-backup。
+### 混合旧限时折扣活动拆分重建（2026-07-06 执行沉淀）
+
+当旧限时折扣活动包含多个目标 SKC 且部分价格已过期/需修正时，使用 scripts/marketing/split_recreate_mixed_limited_discount.mjs 做整场拆分重建：
+
+- **前提条件**：旧活动所有商品都是目标 SKC（xpectedOldSkcs 与 query_activity_goods 完全匹配）；旧活动 state 为 2（待开始）或 3（生效中）。
+- **执行流程**：dry-run 校验 → 结束旧活动（state 3→6 或 2→5）→ 等待旧活动确认结束 → 按分组创建新活动 → 回读验证。
+- **分组策略**：价格需修正的 SKC 放"价格修正组"，价格已正确的放"保持原价组"；两组分别创建独立活动，便于后续审计。
+- **平台阻断处理**：dry-run 发现 hardInvalid（ 004 平台限制、101018 库存=0）的 SKC 从 rows 移除后重跑；被阻断 SKC 不阻断其他 SKC 的拆分重建。
+- **回读验证**：createAllCovered=true、
+oDuplicateCoverage=true、createMissing=[]、旧活动 state=6。
+- **已执行店铺**：QY（75968685→78778295）、NM（78664410→78780660）、FY（75956845→78843370+78843380）。
+- **未执行**：DL（77227890，本地 profile 需人工登录）。

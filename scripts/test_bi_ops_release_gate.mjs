@@ -30,6 +30,13 @@ const CHECK_FILES = [
   'scripts/link_ops_build_product_master_candidate_from_openapi.mjs',
   'scripts/probe_shein_openapi_hl.mjs',
   'lib/link_ops_product_draft_mapper.mjs',
+  'lib/link_retire_candidate_policy.mjs',
+  'lib/retire_supplier_code_repair_payload.mjs',
+  'scripts/test_link_retire_candidate_policy.mjs',
+  'scripts/build_link_retire_candidates_from_csv.mjs',
+  'scripts/test_link_retire_candidates_from_csv.mjs',
+  'scripts/repair_retire_supplier_code_openapi.mjs',
+  'scripts/test_retire_supplier_code_repair_payload.mjs',
   'scripts/generate_bi_portal.mjs',
   'scripts/bi_app/client.js',
   'scripts/test_bi_ops_permissions.mjs',
@@ -85,6 +92,13 @@ const DIFF_CHECK_FILES = [
   'scripts/link_ops_build_product_master_candidate_from_openapi.mjs',
   'scripts/probe_shein_openapi_hl.mjs',
   'lib/link_ops_product_draft_mapper.mjs',
+  'lib/link_retire_candidate_policy.mjs',
+  'lib/retire_supplier_code_repair_payload.mjs',
+  'scripts/test_link_retire_candidate_policy.mjs',
+  'scripts/build_link_retire_candidates_from_csv.mjs',
+  'scripts/test_link_retire_candidates_from_csv.mjs',
+  'scripts/repair_retire_supplier_code_openapi.mjs',
+  'scripts/test_retire_supplier_code_repair_payload.mjs',
   'scripts/test_bi_ops_permissions.mjs',
   'scripts/test_bi_ops_cli_flow.mjs',
   'scripts/test_bi_ops_chat_inference.mjs',
@@ -204,6 +218,9 @@ async function main() {
   results.push({name: 'source candidate policy smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_source_candidate_policy.mjs']))});
   results.push({name: 'OpenAPI product-detail payload mapper smoke', ...(await run(process.execPath, ['scripts/test_link_ops_product_draft_openapi_detail.mjs']))});
   results.push({name: 'OpenAPI live source title enrichment smoke', ...(await run(process.execPath, ['scripts/test_link_ops_executor_live_source_titles.mjs']))});
+  results.push({name: 'link retire candidate 15-day guard smoke', ...(await run(process.execPath, ['scripts/test_link_retire_candidate_policy.mjs']))});
+  results.push({name: 'link retire candidate CSV report smoke', ...(await run(process.execPath, ['scripts/test_link_retire_candidates_from_csv.mjs']))});
+  results.push({name: 'retire supplier-code repair payload smoke', ...(await run(process.execPath, ['scripts/test_retire_supplier_code_repair_payload.mjs']))});
   results.push({name: 'store identity merchant fallback smoke', ...(await run(process.execPath, ['scripts/test_shein_store_identity_merchant_fallback.mjs']))});
   results.push({name: 'real-write whitelist scope smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_write_whitelist_scope.mjs']))});
   results.push({name: 'production real-write safety smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_production_safety.mjs']))});
@@ -249,6 +266,9 @@ async function main() {
       'source candidate policy smoke proves explicit cross-store sources are respected while same-store source links remain valid when no source is explicit',
       'OpenAPI product-detail mapper smoke proves copy_product_draft dynamically maps spu-info attributes, SKU dimensions and cost without inventing supplier_sku',
       'OpenAPI live source title enrichment smoke proves stale source caches missing Arabic titles are repaired from official spu-info before publish validation',
+      'link retire candidate smoke proves low-exposure zero-sales candidates exclude first-shelf links inside the fixed 15-day protection window even when newGoodsTag is empty',
+      'link retire CSV report smoke proves the batch confirmation table uses the same 15-day and newGoodsTag guards and does not submit writes',
+      'retire supplier-code repair smoke proves failed waste-code partialEdit is not counted as done, repair mode never emits shelf payloads, FY/SK-5110 stays hard-excluded, and payloads fill required attributes/titles without local OpenAPI',
       'store identity merchant fallback smoke proves merchant-only OpenAPI identity is accepted only when static truth matches and no GS/merchant conflicts exist',
       'whitelist scope smoke enables safeWriteOperations only inside an isolated temporary portal',
       'production safety smoke checks locked and narrow-pilot configs through temporary files only',

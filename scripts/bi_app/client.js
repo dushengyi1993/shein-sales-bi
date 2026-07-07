@@ -1,7 +1,7 @@
 /* SHEIN BI current production client. Runtime data source: cloud BI section API. */
 (function clientApp(){const CFG=window.__SHEIN_STORE_CONFIG__||{stores:[],ownerGroups:[]};
 const TABS=[['home','总控驾驶舱','home'],['orders','订单中心','order'],['returns','退货退款','return'],['products','商品列表','product'],['inventory','库存管理','stock'],['traffic','流量数据','traffic'],['reviews','商品评价','review'],['marketing','营销中心','mkt'],['ops','自动化运营','ops'],['system','系统健康','sys']];
-const SL={homeRankings:'首页销售/排行',homeProfit:'首页利润',rankings:'完整排行',profit:'利润明细',actions:'动作池',linksData:'链接/覆盖',productTrafficDaily:'货号级每日流量',inventoryTrend:'库存/ET发货',comments:'评价',orders:'订单',afterSales:'售后',rtvData:'RTV追踪',waybills:'物流/ET出库'};
+const SL={homeRankings:'首页销售/排行',homeProfit:'首页利润',rankings:'完整排行',profit:'利润明细',actions:'动作池',linksData:'链接/覆盖',productTrafficDaily:'货号级每日流量',inventoryTrend:'库存/ET发货',comments:'评价',orders:'订单',priceScatter:'订单成交价散点',afterSales:'售后',rtvData:'RTV追踪',waybills:'物流/ET出库'};
 const BASE_NEED={home:['homeRankings','afterSales','homeProfit','productTrafficDaily'],orders:['orders'],returns:['afterSales','homeRankings'],products:['linksData','homeRankings'],inventory:['inventoryTrend','linksData'],traffic:['productTrafficDaily'],reviews:['comments','afterSales','homeRankings'],marketing:['linksData','actions'],ops:['actions','linksData'],system:[]};
 const NEED=BASE_NEED;
 const VALID_TABS=new Set(TABS.map(t=>t[0]));
@@ -83,7 +83,7 @@ function merge(x){if(!x||typeof x!=='object')return;const payload=x.data&&typeof
 
 function genAt(){return D.__sections?.generatedAt||D.generatedAt||D.__latestSectionGeneratedAt||''}
 
-function homeNeeds(){const ns=new Set(BASE_NEED.home);if(S.q||S.trendMetric==='profit')ns.add('profit');if(S.trendMetric==='inventory')ns.add('inventoryTrend');return Array.from(ns)}
+function homeNeeds(){const ns=new Set(BASE_NEED.home);ns.add('priceScatter');if(S.q||S.trendMetric==='profit')ns.add('profit');if(S.trendMetric==='inventory')ns.add('inventoryTrend');return Array.from(ns)}
 function needsFor(tab=S.tab){return tab==='home'?homeNeeds():(BASE_NEED[tab]||[])}
 function surl(n,force=false){const path=(location.protocol==='http:'||location.protocol==='https:')?'/api/bi/section/'+encodeURIComponent(n):'../sections/'+encodeURIComponent(n)+'.json';return force&&path.startsWith('/api/')?path+'?refresh=1&async=1':path}
 async function core(){S.core='loading';render();try{const r=await fetch('../data.json?ts='+Date.now(),{cache:'no-store'});if(!r.ok)throw Error('core HTTP '+r.status);merge(await r.json());S.core='ok';S.err='';dates(true);render();ensure(S.tab,true)}catch(e){S.core='error';S.err=e?.message||String(e);render()}}
@@ -289,6 +289,90 @@ return{series:[],lines:[],note:''}}
 function trendValueText(v,metric=S.trendMetric){const meta=TREND_METRICS[metric]||{};return meta.money?money(v):M(v)}
 function niceCeil(v){const n=Math.abs(N(v));if(n<=10)return 10;const p=Math.pow(10,Math.floor(Math.log10(n)));return Math.ceil(n/p)*p}
 function dataTip(v){return H(v).replace(/\n/g,'&#10;')}
+function priceDistBinSize(minPrice,maxPrice){const spread=Math.max(0,N(maxPrice)-N(minPrice));if(spread<=0)return 5;if(spread<=70)return 10;if(spread<=170)return 20;if(spread<=350)return 50;return Math.ceil(spread/8/10)*10}
+function priceDistData(){
+const q=String(S.q||'').trim();if(!q)return{needsProduct:true,bins:[],rows:[]};
+const rows=(psales().length?psales():sales()).map(r=>{const qty=netQty(r),salesValue=netSales(r),orders=netOrders(r),avg=qty?salesValue/qty:0;return{row:r,avg,qty,sales:salesValue,orders}}).filter(r=>r.avg>0&&r.qty>0);
+if(!rows.length)return{needsProduct:false,bins:[],rows:[]};
+const totalSales=rows.reduce((a,r)=>a+r.sales,0),totalQty=rows.reduce((a,r)=>a+r.qty,0),totalOrders=rows.reduce((a,r)=>a+r.orders,0);
+const minPrice=Math.min(...rows.map(r=>r.avg)),maxPrice=Math.max(...rows.map(r=>r.avg)),binSize=priceDistBinSize(minPrice,maxPrice);
+const start=Math.floor(minPrice/binSize)*binSize,end=Math.max(start+binSize,Math.ceil(maxPrice/binSize)*binSize);
+const bins=[];for(let lo=start;lo<end;lo+=binSize)bins.push({lo,hi:lo+binSize,sales:0,qty:0,orders:0,rows:0});
+for(const r of rows){const idx=Math.min(bins.length-1,Math.max(0,Math.floor((r.avg-start)/binSize)));const b=bins[idx];b.sales+=r.sales;b.qty+=r.qty;b.orders+=r.orders;b.rows+=1}
+const activeBins=bins.filter(b=>b.qty>0),best=activeBins.slice().sort((a,b)=>b.qty-a.qty||b.orders-a.orders)[0]||null;
+return{needsProduct:false,rows,bins:activeBins,totalSales,totalQty,totalOrders,avg:totalQty?totalSales/totalQty:0,minPrice,maxPrice,binSize,best,label:rows[0]?prod(rows[0].row):q};
+}
+
+function priceDistPanel(){
+const data=priceDistData();
+if(data.needsProduct)return`<section class="panel price-dist-panel"><h4>单货号成交价格分布</h4><p class="sub">${H(selectedRangeText())} · 用于报活动前判断真实成交价带</p><div class="empty price-dist-empty">请在搜索框选择或输入货号，查看该货号的成交价格分布</div></section>`;
+if(sourceLoading('homeRankings',data.rows))return`<section class="panel price-dist-panel"><h4>单货号成交价格分布</h4><p class="sub">${H(SL.homeRankings)} 加载中</p><div class="empty">正在加载销售明细，加载完成后自动刷新本图。</div></section>`;
+if(!data.bins.length)return`<section class="panel price-dist-panel"><h4>单货号成交价格分布</h4><p class="sub">${H(homeScopeSubtitle())} · ${H(selectedRangeText())}</p><div class="empty">当前货号没有可计算成交均价的销售明细。</div></section>`;
+const W=760,chartH=330,padL=58,padR=22,padT=24,padB=58,plotW=W-padL-padR,plotH=chartH-padT-padB;
+const maxQty=Math.max(...data.bins.map(b=>b.qty),1),barGap=8,barW=Math.max(12,(plotW-barGap*(data.bins.length-1))/data.bins.length);
+const yFor=v=>padT+plotH-(N(v)/maxQty)*plotH;
+const ticks=[0,maxQty*.25,maxQty*.5,maxQty*.75,maxQty];
+const grid=ticks.map(v=>`<line class="grid-line" x1="${padL}" y1="${yFor(v).toFixed(1)}" x2="${W-padR}" y2="${yFor(v).toFixed(1)}"></line><text class="axis-tick" text-anchor="end" x="${padL-8}" y="${(yFor(v)+4).toFixed(1)}">${H(M(v))}</text>`).join('');
+const bars=data.bins.map((b,i)=>{const x=padL+i*(barW+barGap),y=yFor(b.qty),barHeight=Math.max(2,plotH-(y-padT)),hot=b===data.best,avg=b.qty?b.sales/b.qty:0,pct=data.totalQty?b.qty/data.totalQty:0;const tip=dataTip(`${M2(b.lo)}-${M2(b.hi)} SAR\n销量：${M(b.qty)} 件\n订单：${M(b.orders)} 单\n占总销量：${PCT(pct)}\n段内均价：${M2(avg)} SAR`);return`<g class="price-dist-bar ${hot?'hot':''}"><rect data-tip="${tip}" x="${x.toFixed(1)}" y="${(padT+plotH-barHeight).toFixed(1)}" width="${barW.toFixed(1)}" height="${barHeight.toFixed(1)}" rx="8"></rect><text class="price-dist-value" x="${(x+barW/2).toFixed(1)}" y="${Math.max(14,padT+plotH-barHeight-6).toFixed(1)}" text-anchor="middle">${H(M(b.qty))}</text><text class="axis-tick price-dist-x" x="${(x+barW/2).toFixed(1)}" y="${(chartH-padB+19).toFixed(1)}" text-anchor="middle">${H(M(b.lo))}-${H(M(b.hi))}</text></g>`}).join('');
+const best=data.best,priceRange=`${M2(data.minPrice)}~${M2(data.maxPrice)} SAR`,bestText=best?`${M2(best.lo)}-${M2(best.hi)} SAR`:'—';
+return`<section class="panel price-dist-panel"><h4>单货号成交价格分布</h4><p class="sub">${H(homeScopeSubtitle())} · ${H(selectedRangeText())} · 按每行净成交额/净销量计算均价，自动 ${H(M(data.binSize))} SAR 分桶</p>
+<div class="price-dist-kpis">
+<span><em>整体均价</em><b>${H(M2(data.avg))}</b><small>SAR</small></span>
+<span class="hot"><em>最畅销价格</em><b>${H(bestText)}</b><small>${best?M(best.qty)+'件 / '+M(best.orders)+'单':'—'}</small></span>
+<span><em>价格区间</em><b>${H(priceRange)}</b></span>
+<span><em>总销量</em><b>${H(M(data.totalQty))}</b><small>件</small></span>
+<span><em>总订单</em><b>${H(M(data.totalOrders))}</b><small>单</small></span>
+</div>
+<div class="price-dist-wrap"><svg viewBox="0 0 ${W} ${chartH}" role="img" aria-label="单货号成交价格分布柱状图">
+<defs><linearGradient id="priceDistBar" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#94a3b8"/><stop offset="1" stop-color="#cbd5e1"/></linearGradient><linearGradient id="priceDistHot" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#10b981"/><stop offset="1" stop-color="#34d399"/></linearGradient></defs>
+<rect class="plot-band" x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" rx="14"/>
+${grid}<line class="axis-line" x1="${padL}" y1="${padT}" x2="${padL}" y2="${chartH-padB}"/><line class="axis-line" x1="${padL}" y1="${chartH-padB}" x2="${W-padR}" y2="${chartH-padB}"/>
+${bars}
+<text class="axis-label" x="${(padL+plotW/2).toFixed(1)}" y="${(chartH-10).toFixed(1)}" text-anchor="middle">成交均价价格段 (SAR)</text>
+<text class="axis-label" x="14" y="${(padT+plotH/2).toFixed(1)}" text-anchor="middle" transform="rotate(-90 14 ${(padT+plotH/2).toFixed(1)})">销量 (件)</text>
+</svg></div>
+<div class="chart-legend price-dist-legend"><span><i style="--c:#10b981"></i>最畅销价格段</span><span><i style="--c:#94a3b8"></i>其他成交价格段</span><span class="price-dist-summary">样本 ${H(M(data.rows.length))} 行 · 净成交额 ${H(money(data.totalSales))}</span></div></section>`;
+}
+
+
+function priceScatterRows(){return A(D.priceScatter).filter(r=>{const price=N(r?.unit_price_sar),qty=N(r?.quantity);return price>0&&qty>0&&inSelectedRange(r?.created_date||r?.order_create_time)&&scopeSearchOk(r)})}
+function priceScatterSample(rows,bins,limit=5000){if(rows.length<=limit)return rows;const byBin=new Map();for(const r of rows){const price=N(r.unit_price_sar),idx=Math.min(bins.length-1,Math.max(0,bins.findIndex(b=>price>=b.lo&&price<b.hi)));const key=idx<0?0:idx;if(!byBin.has(key))byBin.set(key,[]);byBin.get(key).push(r)}const perBin=Math.max(1,Math.floor(limit/Math.max(1,byBin.size))),sample=[];for(const xs of byBin.values()){const step=Math.max(1,Math.ceil(xs.length/perBin));for(let i=0;i<xs.length&&sample.length<limit;i+=step)sample.push(xs[i])}return sample}
+function priceScatterPanel(){
+if(!A(D.priceScatter).length&&SS.priceScatter?.status!=='ok')return`<section class="panel price-scatter-panel"><h4>订单成交价散点图</h4><p class="sub">${H(selectedRangeText())} · 每个点是一笔订单商品行</p><div class="empty price-scatter-empty">正在加载订单级散点数据…</div></section>`;
+const rows=priceScatterRows();
+if(!rows.length)return`<section class="panel price-scatter-panel"><h4>订单成交价散点图</h4><p class="sub">${H(homeScopeSubtitle())} · ${H(selectedRangeText())}</p><div class="empty price-scatter-empty">当前筛选条件下没有订单级数据</div></section>`;
+const prices=rows.map(r=>N(r.unit_price_sar)).filter(v=>v>0),minPrice=Math.min(...prices),maxPrice=Math.max(...prices),priceMax=niceCeil(maxPrice),binSize=priceDistBinSize(minPrice,maxPrice);
+const binStart=Math.floor(minPrice/binSize)*binSize,binEnd=Math.max(binStart+binSize,Math.ceil(maxPrice/binSize)*binSize),bins=[];for(let lo=binStart;lo<binEnd;lo+=binSize)bins.push({lo,hi:lo+binSize,qty:0,rows:0});
+let totalSales=0,totalQty=0;for(const r of rows){const price=N(r.unit_price_sar),qty=N(r.quantity);totalSales+=N(r.sales_sar);totalQty+=qty;const idx=Math.min(bins.length-1,Math.max(0,Math.floor((price-binStart)/binSize)));const b=bins[idx];if(b){b.qty+=qty;b.rows+=1}}
+const activeBins=bins.filter(b=>b.qty>0),best=activeBins.slice().sort((a,b)=>b.qty-a.qty||b.rows-a.rows)[0]||null,sampled=priceScatterSample(rows,activeBins.length?activeBins:[{lo:0,hi:priceMax}],5000);
+const w=1280,h=360,padL=72,padR=28,padT=28,padB=54,plotW=w-padL-padR,plotH=h-padT-padB;
+const dateValues=rows.map(r=>ISO(r.created_date||r.order_create_time)).filter(Boolean).sort(),startDate=S.start||dateValues[0]||'',endDate=S.end||dateValues.at(-1)||startDate;
+const startMs=(parseDateOnly(startDate)||parseDateOnly(dateValues[0])||new Date()).getTime(),endMs=(parseDateOnly(endDate)||parseDateOnly(dateValues.at(-1))||new Date()).getTime(),sameDay=!(Number.isFinite(startMs)&&Number.isFinite(endMs))||startMs===endMs;
+const xFor=r=>{if(sameDay)return padL+plotW/2;const d=parseDateOnly(r.created_date||r.order_create_time);const ms=d?d.getTime():startMs;return padL+Math.max(0,Math.min(1,(ms-startMs)/(endMs-startMs)))*plotW};
+const yFor=v=>padT+plotH-(Math.max(0,Math.min(priceMax,N(v)))/priceMax)*plotH;
+const yTicks=[0,priceMax*.25,priceMax*.5,priceMax*.75,priceMax],grid=yTicks.map(v=>`<line class="grid-line" x1="${padL}" y1="${yFor(v).toFixed(1)}" x2="${w-padR}" y2="${yFor(v).toFixed(1)}"></line><text class="axis-tick" text-anchor="end" x="${padL-8}" y="${(yFor(v)+4).toFixed(1)}">${H(M2(v))}</text>`).join('');
+const axisDates=sameDay?[startDate]:[startDate,addDateDays(startDate,Math.round((endMs-startMs)/86400000/2)),endDate].filter(Boolean),dateAxis=axisDates.map(d=>{const ms=(parseDateOnly(d)||new Date(startMs)).getTime(),x=sameDay?padL+plotW/2:padL+Math.max(0,Math.min(1,(ms-startMs)/(endMs-startMs)))*plotW;return`<text class="axis-tick price-scatter-axis" text-anchor="middle" x="${x.toFixed(1)}" y="${h-18}">${H(d)}</text>`}).join('');
+const hasProduct=!!String(S.q||'').trim(),storeColor=r=>hasProduct?'#6366f1':(ownByStore.get(sk(r))?.color||'#6366f1'),radius=sampled.length>3500?2.4:3,opacity=sampled.length>3500?.46:.6;
+const dots=sampled.map(r=>{const date=ISO(r.created_date||r.order_create_time),store=sk(r),product=pkey(r)||prod(r),tip=dataTip(`日期：${date||'—'}\n店铺：${storeDisplayName(store)||'—'}\n货号：${product||'—'}\n单价：${M2(r.unit_price_sar)} SAR\n数量：${M(r.quantity)}\n金额：${M2(r.sales_sar)} SAR`);return`<circle class="price-scatter-dot" data-tip="${tip}" cx="${xFor(r).toFixed(1)}" cy="${yFor(r.unit_price_sar).toFixed(1)}" r="${radius}" fill="${H(storeColor(r))}" opacity="${opacity}"></circle>`}).join('');
+const priceRange=`${M2(minPrice)}~${M2(maxPrice)} SAR`,bestText=best?`${M2(best.lo)}-${M2(best.hi)} SAR`:'—',sampleNote=sampled.length<rows.length?` · 已抽样 ${M(sampled.length)} / ${M(rows.length)} 点`:'';
+const legendStores=hasProduct?[]:uniq(sampled.map(sk)).slice(0,10);
+return`<section class="panel price-scatter-panel"><h4>订单成交价散点图</h4><p class="sub">${H(homeScopeSubtitle())} · ${H(selectedRangeText())} · 点=订单商品行，纵轴为单件成交价 SAR${H(sampleNote)}</p>
+<div class="price-scatter-kpis">
+<span><em>订单行数</em><b>${H(M(rows.length))}</b><small>当前筛选</small></span>
+<span><em>价格区间</em><b>${H(priceRange)}</b></span>
+<span><em>加权均价</em><b>${H(M2(totalQty?totalSales/totalQty:0))}</b><small>SAR</small></span>
+<span class="hot"><em>最畅销价格段</em><b>${H(bestText)}</b><small>${best?M(best.qty)+'件 / '+M(best.rows)+'行':'—'}</small></span>
+</div>
+<div class="price-scatter-wrap"><svg viewBox="0 0 ${w} ${h}" role="img" aria-label="订单成交价散点图">
+<rect class="plot-band" x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" rx="14"></rect>
+${grid}<line class="axis-line" x1="${padL}" y1="${padT}" x2="${padL}" y2="${h-padB}"></line><line class="axis-line" x1="${padL}" y1="${h-padB}" x2="${w-padR}" y2="${h-padB}"></line>
+${dots}${dateAxis}
+<text class="axis-label price-scatter-axis" x="${(padL+plotW/2).toFixed(1)}" y="${h-4}" text-anchor="middle">订单日期</text>
+<text class="axis-label price-scatter-axis" x="14" y="${(padT+plotH/2).toFixed(1)}" text-anchor="middle" transform="rotate(-90 14 ${(padT+plotH/2).toFixed(1)})">单件成交价 (SAR)</text>
+</svg></div>
+<div class="chart-legend price-scatter-legend">${hasProduct?'<span><i style="--c:#6366f1"></i>当前货号</span>':legendStores.map(k=>`<span><i style="--c:${H(ownByStore.get(k)?.color||'#6366f1')}"></i>${H(k)}</span>`).join('')}${legendStores.length>=10?'<span>…</span>':''}</div></section>`;
+}
+
 function lineChart(kind,metric=S.trendMetric){
 const built=buildTrendSeries(kind,metric),series=built.series||[],lines=built.lines||[];
 const meta=TREND_METRICS[metric]||{};
@@ -320,8 +404,11 @@ const hitW=Math.max(10,Math.min(120,groupW*.92));
 const hits=series.map((r,i)=>{const x=Math.max(padL,Math.min(w-padR-hitW,groupX(i)-hitW/2));const detail=overlay?overlayDetail(r):keys.map(k=>labels[k]+'：'+trendValueText(r[k],metric)).join('\n');const tip=dataTip(r.label+'\n'+detail);return`<rect class="chart-hit" data-tip="${tip}" x="${x.toFixed(1)}" y="${padT}" width="${hitW.toFixed(1)}" height="${plotH}"></rect>`}).join('');
 const axisEvery=Math.ceil(series.length/6);
 const axis=series.map((r,i)=>(series.length<=8||i===0||i===series.length-1||i%axisEvery===0)?`<text class="axis" text-anchor="${i===0?'start':i===series.length-1?'end':'middle'}" x="${groupX(i).toFixed(1)}" y="${h-10}">${H(r.label)}</text>`:'').join('');
-const latest=series.at(-1)||{};
-const legend=overlay?`<span class="legend-net"><i style="--c:${colors.net}"></i>${H(labels.net)}：${H(trendValueText(latest.net||0,metric))}</span><span class="legend-total"><i style="--c:${colors.gross}"></i>${H(labels.gross)}：${H(trendValueText(latest.gross||0,metric))}</span><span class="legend-diff"><i style="--c:#9b8b77"></i>反转/扣减：${H(trendValueText(N(latest.gross)-N(latest.net),metric))}</span>`:keys.map(k=>`<span><i style="--c:${colors[k]}"></i>${H(labels[k])}：${H(trendValueText(latest[k]||0,metric))}</span>`).join('');
+const latestRow=series.at(-1)||{};
+const summedRow=series.reduce((a,r)=>{keys.forEach(k=>a[k]=N(a[k])+N(r[k]));return a},{});
+const summaryRow=metric==='inventory'?latestRow:summedRow;
+const summaryValue=k=>H(trendValueText(summaryRow[k]||0,metric));
+const legend=overlay?`<span class="legend-net"><i style="--c:${colors.net}"></i>${H(labels.net)}：${summaryValue('net')}</span><span class="legend-total"><i style="--c:${colors.gross}"></i>${H(labels.gross)}：${summaryValue('gross')}</span><span class="legend-diff"><i style="--c:#9b8b77"></i>反转/扣减：${H(trendValueText(N(summaryRow.gross)-N(summaryRow.net),metric))}</span>`:keys.map(k=>`<span><i style="--c:${colors[k]}"></i>${H(labels[k])}：${summaryValue(k)}</span>`).join('');
 return`<div class="line-chart bar-chart${overlay?' overlay-bar-chart':''}"><svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${H((kind==='month'?'月':'日')+(meta.label||metric)+'柱状趋势')}">${defs}<rect class="plot-band" x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" rx="14"></rect>${grid}<line class="axis-line" x1="${padL}" y1="${padT}" x2="${padL}" y2="${h-padB}"></line><line class="axis-line" x1="${padL}" y1="${h-padB}" x2="${w-padR}" y2="${h-padB}"></line><line class="zero-line" x1="${padL}" y1="${zeroY.toFixed(1)}" x2="${w-padR}" y2="${zeroY.toFixed(1)}"></line>${bars}${valueLabels}${axis}${hits}</svg><div class="chart-legend">${legend}</div><p class="sub">时间段：${H(built.rangeText||`${S.start} 至 ${S.end}`)}；当前显示 ${M(series.length)} 个${kind==='month'?'月份':'日期'}。${H(built.note||'')}</p></div>`}
 function trendPanel(kind){const metric=S.trendMetric;const needed=metric==='profit'?(String(S.q||'').trim()?'profit':'homeProfit'):metric==='traffic'?'productTrafficDaily':metric==='inventory'?'inventoryTrend':'homeRankings';const built=buildTrendSeries(kind,metric);if(sourceLoading(needed,built.series))return`<section class="panel trend-panel"><h4>${kind==='month'?'月趋势':'日趋势'} · ${H(TREND_METRICS[metric]?.label||metric)}</h4><p class="sub">${H(SL[needed]||needed)} 加载中</p><div class="empty">正在加载${H(SL[needed]||needed)}，加载完成后自动刷新本图。</div></section>`;return`<section class="panel trend-panel"><h4>${kind==='month'?'月趋势':'日趋势'} · ${H(TREND_METRICS[metric]?.label||metric)}</h4><p class="sub">${H(metric==='inventory'?inventoryScopeNote():homeScopeSubtitle())}</p>${lineChart(kind,metric)}</section>`}
 
@@ -335,7 +422,7 @@ function accountIdentityHtml(userOrName){const u=(userOrName&&typeof userOrName=
 function accountBoxHtml(){if(AUTH.status==='loading'||AUTH.status==='idle')return`<div class="account-main" title="正在识别登录状态">${accountIdentityHtml('正在识别…')}</div>`;if(AUTH.status==='error')return`<div class="account-main" title="${H(AUTH.error||'会话可能已失效')}">${accountIdentityHtml('未识别')}<button class="logout-btn" data-logout="1">登录</button></div>`;const u=AUTH.user||{};const title=`${u.username||''}${u.displayName&&u.displayName!==u.username?' · '+u.displayName:''} · ${authRoleLabel(u.role)} · ${A(u.readStores).includes('*')?'可读全部':'读权限受限'} · ${authStoreText(u)}`;return`<div class="account-main" title="${H(title)}">${accountIdentityHtml(u)}<button class="logout-btn" data-logout="1">退出</button></div>`}
 function renderAccountBox(){const box=$('accountBox');if(box)box.innerHTML=accountBoxHtml()}
 
-function home(){ensure('home',true);const storeBySales=storeRanks(),storeByQty=storeQtyRanks(),productBySales=productRanks(),productByQty=productQtyRanks();return`${homeKpis()}${head('趋势','按钮只切换当前趋势指标；页面只保留一个日图和一个月图，图上直接显示关键数字。',trendMetricButtons())}<div class="trend-stack">${trendPanel('day')}${trendPanel('month')}</div>${head('排行榜','保留主首页的店铺/产品净成交额与净销量四块信息，并恢复条形比例图。',chips(homeNeeds()))}<section class="rank-grid"><div class="panel rank-panel"><h4>店铺净成交额排行</h4><p class="sub">当前范围 ${M(storeBySales.length)} 店 · ${H(selectedRangeText())} · 天数=净成交日</p>${homeRankList(storeBySales,{limit:storeBySales.length,showOwner:true,color:it=>it.color||'#10b981',attr:it=>`data-home-store="${H(it.key)}"`})}</div><div class="panel rank-panel"><h4>店铺净销量排行</h4><p class="sub">当前范围 ${M(storeByQty.length)} 店 · 按净成交销量件数排序；天数只算净成交日。</p>${homeRankList(storeByQty,{limit:storeByQty.length,showOwner:true,color:it=>it.color||'#60a5fa',attr:it=>`data-home-store="${H(it.key)}"`})}</div><div class="panel rank-panel"><h4>产品净成交额排行</h4><p class="sub">当前范围 ${M(productBySales.length)} 个有销量标准货号；展示均价、销量、订单、覆盖店和净成交天数。</p>${homeRankList(productBySales,{limit:productBySales.length,className:'product-rank',color:()=> '#db2777',attr:it=>`data-home-product="${H(it.key)}"`})}</div><div class="panel rank-panel"><h4>产品净销量排行</h4><p class="sub">当前范围 ${M(productByQty.length)} 个有销量标准货号；按净成交销量件数排序。</p>${homeRankList(productByQty,{limit:productByQty.length,className:'product-rank',color:()=> '#a855f7',attr:it=>`data-home-product="${H(it.key)}"`})}</div></section>`}
+function home(){ensure('home',true);const storeBySales=storeRanks(),storeByQty=storeQtyRanks(),productBySales=productRanks(),productByQty=productQtyRanks();return`${homeKpis()}${head('趋势','按钮只切换当前趋势指标；页面只保留一个日图和一个月图，图上直接显示关键数字。',trendMetricButtons())}<div class="trend-stack home-trend-stack">${trendPanel('day')}${trendPanel('month')}${priceScatterPanel()}</div>${head('排行榜','保留主首页的店铺/产品净成交额与净销量四块信息，并恢复条形比例图。',chips(homeNeeds()))}<section class="rank-grid"><div class="panel rank-panel"><h4>店铺净成交额排行</h4><p class="sub">当前范围 ${M(storeBySales.length)} 店 · ${H(selectedRangeText())} · 天数=净成交日</p>${homeRankList(storeBySales,{limit:storeBySales.length,showOwner:true,color:it=>it.color||'#10b981',attr:it=>`data-home-store="${H(it.key)}"`})}</div><div class="panel rank-panel"><h4>店铺净销量排行</h4><p class="sub">当前范围 ${M(storeByQty.length)} 店 · 按净成交销量件数排序；天数只算净成交日。</p>${homeRankList(storeByQty,{limit:storeByQty.length,showOwner:true,color:it=>it.color||'#60a5fa',attr:it=>`data-home-store="${H(it.key)}"`})}</div><div class="panel rank-panel"><h4>产品净成交额排行</h4><p class="sub">当前范围 ${M(productBySales.length)} 个有销量标准货号；展示均价、销量、订单、覆盖店和净成交天数。</p>${homeRankList(productBySales,{limit:productBySales.length,className:'product-rank',color:()=> '#db2777',attr:it=>`data-home-product="${H(it.key)}"`})}</div><div class="panel rank-panel"><h4>产品净销量排行</h4><p class="sub">当前范围 ${M(productByQty.length)} 个有销量标准货号；按净成交销量件数排序。</p>${homeRankList(productByQty,{limit:productByQty.length,className:'product-rank',color:()=> '#a855f7',attr:it=>`data-home-product="${H(it.key)}"`})}</div></section>`}
 
 const ORDER_STATUS_FILTERS=[
   ['all','全部'],['pending','待处理/待发货'],['shipped','已发货/运输中'],['platform_unclosed','平台未闭环'],['pending_recheck','待复查'],['done','已签收'],['mixed','混合状态'],['cancelled','取消/关闭'],['returning','未妥投退回'],['cod','COD'],['abnormal','异常'],['other','其他/未识别']

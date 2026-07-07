@@ -375,6 +375,8 @@ for (const [sku, group] of bySku.entries()) {
       newListingTopTreatment: Boolean(newListingTopTreatment.applies),
       newListingShelfAgeDays: newListingTopTreatment.shelfAgeDays ?? null,
       newListingShelfAgeSource: newListingTopTreatment.shelfAgeSource || '',
+      platformNewLabel: newListingTopTreatment.platformNewLabel?.applies ? newListingTopTreatment.platformNewLabel.value : '',
+      targetPriceScope: 'store_skc_link_state_window',
       rule: inheritedRuleName || 'cloud_sku_approval_execution_price',
       sourceStatus: status,
       platformAdjusted: targetPrice !== null && uncappedActivityPrice !== null && platformCap !== null && targetPrice < uncappedActivityPrice - 0.001,

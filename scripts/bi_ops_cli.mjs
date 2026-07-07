@@ -80,6 +80,7 @@ function parseArgs(argv) {
     endpoint: '',
     bodyJson: '',
     bodyFile: '',
+    performanceDate: '',
   };
   const rest = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -139,6 +140,7 @@ function parseArgs(argv) {
     else if (a === '--endpoint') args.endpoint = String(argv[++i] || '').trim();
     else if (a === '--body-json') args.bodyJson = String(argv[++i] || '');
     else if (a === '--body-file') args.bodyFile = path.resolve(String(argv[++i] || ''));
+    else if (a === '--performance-date' || a === '--perf-date') args.performanceDate = String(argv[++i] || '').trim();
     else if (a === '--query-json') args.queryJson = String(argv[++i] || '');
     else if (a === '--query-file') args.queryFile = path.resolve(String(argv[++i] || ''));
     else if (a === '--help' || a === '-h') {
@@ -206,6 +208,7 @@ Usage:
   node scripts/bi_ops_cli.mjs maintenance-readiness --operation retire_link --expect blocked
   node scripts/bi_ops_cli.mjs maintenance-readiness --operation retire_link --doc-evidence <schema.json> --store-probe <probe.json> --readback-evidence <readback.json> --expect pilot_ready
   node scripts/bi_ops_cli.mjs plan-images --image-dir <图片文件夹> [--out roles.json]
+  node scripts/bi_ops_cli.mjs retire-candidates --file <v3-times.csv> --performance-date 2026-07-04 [--out <dir>]
   node scripts/bi_ops_cli.mjs upload-pic --store FY --image-type 2 --file <image.jpg> [--mode dry-run|execute]
   node scripts/bi_ops_cli.mjs transform-pic --store FY --image-type 2 --url <https://...> [--mode dry-run|execute]
   node scripts/bi_ops_cli.mjs audit-status --store FY --spu <SPU> [--mode dry-run|execute]
@@ -239,6 +242,7 @@ Options:
                    maintenance-readiness 用；维护真实写的脱敏证据文件
   --expect         maintenance-readiness 用；blocked / schema_ready / pilot_ready
   --image-dir      plan-images 用；只扫描本地图包并输出角色规划，不上传、不提交
+  --performance-date retire-candidates 用；按该表现日期计算首次上架 15 天保护窗
   --file / --url   图片工具用；本地文件或外链图片地址
   --image-type     图片工具用；1主图 / 2细节图 / 5方块图 / 6色块图 / 7详情图
   --openapi-config 底层 OpenAPI executor 测试用；日常 bi_ops_cli 不允许用它从本机直连真实 SHEIN
@@ -251,6 +255,7 @@ Safety:
   - doctor 只做本机/云端连通性和权限自检，不创建任务、不触发预检、不执行 SHEIN 写。
   - maintenance-readiness 只读检查脱敏证据，不连接 SHEIN，不打开真实写。
   - plan-images 只做本地图包角色规划，备用目录和“产品封面/AB测试”图不提交。
+  - retire-candidates 只生成下架候选明细，不执行下架；固定排除有新品标签、首次上架 15 天内或缺首次上架时间的链接，并要求人工确认。
   - 本机因白名单/身份边界不能直连真实 SHEIN OpenAPI；bi_ops_cli 的真实 OpenAPI 调用必须走云端 BI 服务。
   - upload-pic / transform-pic 的 execute 委托云端 /api/openapi-image-asset/*；本地只做文件封装和权限会话传递。
   - audit-status / search-product / publish-standard / openapi-call 不允许通过 bi_ops_cli 从本机 execute；需要真实回读时到 shein-bi-tencent 云端执行或走云端任务审计。
@@ -729,6 +734,17 @@ async function runPlanImages(args) {
   process.exitCode = result.code || 0;
 }
 
+async function runRetireCandidates(args) {
+  if (!args.imageFile) throw new Error('retire-candidates requires --file <enriched candidate csv>');
+  const commandArgs = ['--input', args.imageFile];
+  if (args.outputFile) commandArgs.push('--out-dir', args.outputFile);
+  if (args.performanceDate) commandArgs.push('--performance-date', args.performanceDate);
+  const result = await runLocalNodeScript('scripts/build_link_retire_candidates_from_csv.mjs', commandArgs);
+  process.stdout.write(result.stdout);
+  process.stderr.write(result.stderr);
+  if (result.code !== 0) process.exitCode = result.code;
+}
+
 async function runReadonlyExecutor(args, action) {
   const store = [...new Set([...(args.stores || []), ...(args.writeStores || [])])][0] || '';
   if (!store) throw new Error(`${action} requires --store <店铺>`);
@@ -859,6 +875,10 @@ async function main() {
   }
   if (args.command === 'plan-images' || args.command === 'plan_images') {
     await runPlanImages(args);
+    return;
+  }
+  if (args.command === 'retire-candidates' || args.command === 'retire_candidates') {
+    await runRetireCandidates(args);
     return;
   }
   if (args.command === 'upload-pic' || args.command === 'upload_pic') {

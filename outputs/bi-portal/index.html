@@ -215,18 +215,31 @@ th{position:sticky;top:0;background:#f5f0e8;color:#6d665d;font-size:11px;text-tr
 .trend-panel{padding:16px 18px 14px}
 .line-chart{border:1px solid var(--line);border-radius:18px;background:linear-gradient(180deg,#fffdf8 0%,#fbf7ef 48%,#f3ecdf 100%);padding:10px 10px 12px;overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.72)}
 .line-chart svg{display:block;width:100%;height:auto;min-height:240px}
+.home-trend-stack .line-chart{border-color:#ebe7e0;border-radius:16px;background:#fffdf8;padding:12px 14px 12px;box-shadow:inset 0 1px 0 rgba(255,255,255,.9),0 8px 22px rgba(61,61,61,.045)}
 .plot-band{fill:rgba(255,255,255,.44);stroke:rgba(231,222,209,.62);stroke-width:1}
+.home-trend-stack .plot-band{fill:#fffdf8;stroke:#ebe7e0;stroke-width:1}
 .grid-line{stroke:#e6ded2;stroke-width:1}
+.home-trend-stack .grid-line{stroke:#ebe7e0;stroke-width:1;stroke-dasharray:3 3;opacity:.92}
 .axis-line{stroke:#bfb5a7;stroke-width:1.2}
+.home-trend-stack .axis-line{stroke:#d8d0c7;stroke-width:1}
 .zero-line{stroke:#8a7d6c;stroke-width:1.5;stroke-dasharray:4 5;opacity:.55}
+.home-trend-stack .zero-line{stroke:#b9ad9f;stroke-width:1;stroke-dasharray:3 4;opacity:.50}
 .axis{fill:#8b8175;font-size:12px;font-variant-numeric:tabular-nums}
+.home-trend-stack .axis{fill:#3d3d3d;font-size:11px}
 .series{fill:none;stroke-width:3.2;stroke-linecap:round;stroke-linejoin:round;filter:drop-shadow(0 4px 10px rgba(32,32,29,.08))}
 .dot{stroke:#fffdf8;stroke-width:2}
 .trend-bar{shape-rendering:geometricPrecision;filter:drop-shadow(0 8px 12px rgba(30,25,18,.10));transition:opacity .12s ease,filter .12s ease}
+.home-trend-stack .trend-bar{filter:none;opacity:.96;transition:opacity .14s ease,filter .14s ease}
+.home-trend-stack .trend-bar-total{fill:#f5d0b8}
+.home-trend-stack .trend-bar-net{fill:#d97757}
 .trend-bar:hover{opacity:.9;filter:drop-shadow(0 10px 16px rgba(30,25,18,.16))}
+.home-trend-stack .trend-bar:hover{opacity:1;filter:drop-shadow(0 5px 10px rgba(217,119,87,.14))}
 .overlay-bar-chart .trend-bar-total{opacity:.34;filter:drop-shadow(0 5px 8px rgba(30,25,18,.06))}
 .overlay-bar-chart .trend-bar-net{opacity:.98;filter:drop-shadow(0 9px 14px rgba(30,25,18,.13))}
 .overlay-bar-chart .trend-bar-fallback{opacity:.78}
+.home-trend-stack .overlay-bar-chart .trend-bar-total{opacity:.78;filter:none}
+.home-trend-stack .overlay-bar-chart .trend-bar-net{opacity:1;filter:drop-shadow(0 4px 8px rgba(217,119,87,.12))}
+.home-trend-stack .overlay-bar-chart .trend-bar-fallback{opacity:.88;filter:none}
 .chart-hit{fill:rgba(0,0,0,0);pointer-events:all;cursor:crosshair}
 .chart-tooltip{position:fixed;z-index:9999;max-width:280px;border:1px solid rgba(255,255,255,.14);border-radius:14px;background:rgba(25,22,18,.96);color:#fffaf0;box-shadow:0 18px 44px rgba(20,16,10,.22);padding:9px 11px;font-size:12px;line-height:1.45;font-weight:720;font-variant-numeric:tabular-nums;pointer-events:none;opacity:0;transform:translateY(4px);transition:opacity .08s ease,transform .08s ease;white-space:pre-line}
 .chart-tooltip.visible{opacity:1;transform:translateY(0)}
@@ -239,6 +252,16 @@ th{position:sticky;top:0;background:#f5f0e8;color:#6d665d;font-size:11px;text-tr
 .chart-legend i{width:8px;height:8px;border-radius:50%;background:var(--c)}
 .chart-legend .legend-total{color:#7f7569;background:#fbf7ee}
 .chart-legend .legend-diff{color:#6f655a;background:#f7f1e8}
+.price-band-panel{padding:16px 18px 14px}
+.price-band-list{display:grid;gap:9px;margin-top:12px}
+.price-band-row{display:grid;grid-template-columns:minmax(120px,.22fr) minmax(180px,1fr) minmax(220px,.34fr);gap:12px;align-items:center;border:1px solid var(--line);border-radius:16px;background:#fffdf8;padding:10px 12px}
+.price-band-label,.price-band-value{display:grid;gap:3px;min-width:0}
+.price-band-label b,.price-band-value b{font-size:13px;color:#2f2a24;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.price-band-label span,.price-band-value span{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.price-band-value{text-align:right}
+.price-band-track{height:12px;border-radius:999px;background:#f1eadf;overflow:hidden;box-shadow:inset 0 1px 2px rgba(47,39,28,.07)}
+.price-band-track i{display:block;width:var(--bar-pct,0);height:100%;border-radius:999px;background:linear-gradient(90deg,color-mix(in srgb,var(--bar-color) 62%,#fff),var(--bar-color));box-shadow:0 5px 12px color-mix(in srgb,var(--bar-color) 18%,transparent)}
+.price-band-summary{margin-top:10px}
 .rank-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
 .rank-panel{padding:16px}
 .rank-list{display:grid;gap:8px}
@@ -678,7 +701,8 @@ function sourceLoading(name,rows=[]){const st=SS[name]?.status||'idle';return !r
 
 function salesSummary(){const rows=sales();const prows=psales();const productRows=prows.length?prows:rows;const active=(fn)=>{const xs=uniq(productRows.filter(r=>fn(r)>0).map(pkey));return xs.length||null};const net=sumFirst(rows,['sales_sar','net_revenue_sar','known_net_revenue_sar']);const gross=rows.reduce((a,r)=>a+grossSales(r),0);const qty=rows.reduce((a,r)=>a+netQty(r),0);const gqty=rows.reduce((a,r)=>a+grossQty(r),0);return{rows,productRows,net,gross,ord:rows.reduce((a,r)=>a+netOrders(r),0),gord:rows.reduce((a,r)=>a+grossOrders(r),0),qty,gqty,active:active(netQty),gactive:active(grossQty),avg:qty?net/qty:0}}
 function salesPaymentRows(){const productScoped=Boolean(String(S.q||'').trim());const rows=productScoped&&A(D.rankings?.dailyStoreProductPaymentSummary).length?D.rankings.dailyStoreProductPaymentSummary:D.rankings?.dailyPaymentSummary;return F(rows||[])}
-function salesPaymentSummary(){const rows=salesPaymentRows();const init=()=>({orders:0,grossOrders:0,sales:0,gross:0,qty:0,grossQty:0});const out={all:init(),cod:init(),nonCod:init(),rows};for(const r of rows){const k=isCodLike(r)?'cod':'nonCod';for(const b of [out.all,out[k]]){b.orders+=netOrders(r);b.grossOrders+=grossOrders(r);b.sales+=netSales(r);b.gross+=grossSales(r);b.qty+=netQty(r);b.grossQty+=grossQty(r)}}return out}
+function salesPaymentProductRows(){return F(D.rankings?.dailyStoreProductPaymentSummary||[])}
+function salesPaymentSummary(){const rows=salesPaymentRows(),productRows=salesPaymentProductRows();const init=()=>({orders:0,grossOrders:0,sales:0,gross:0,qty:0,grossQty:0,active:null,grossActive:null});const out={all:init(),cod:init(),nonCod:init(),rows};for(const r of rows){const k=isCodLike(r)?'cod':'nonCod';for(const b of [out.all,out[k]]){b.orders+=netOrders(r);b.grossOrders+=grossOrders(r);b.sales+=netSales(r);b.gross+=grossSales(r);b.qty+=netQty(r);b.grossQty+=grossQty(r)}}const sets={all:{net:new Set(),gross:new Set()},cod:{net:new Set(),gross:new Set()},nonCod:{net:new Set(),gross:new Set()}};for(const r of productRows){const key=pkey(r);if(!key)continue;const k=isCodLike(r)?'cod':'nonCod';if(netQty(r)>0){sets.all.net.add(key);sets[k].net.add(key)}if(grossQty(r)>0){sets.all.gross.add(key);sets[k].gross.add(key)}}for(const k of ['all','cod','nonCod']){out[k].active=sets[k].net.size;out[k].grossActive=sets[k].gross.size}return out}
 
 function returnCaseCount(rows){return uniq(A(rows).map(x=>x.aftersales_order_no||x.return_order_no||x.order_no||JSON.stringify(x))).length||A(rows).length}
 function returnOrderCount(rows){return uniq(A(rows).map(x=>x.order_no||x.aftersales_order_no||x.return_order_no||JSON.stringify(x))).length||A(rows).length}
@@ -710,7 +734,7 @@ function trafficEffectiveRange(latestTrafficDate){let start=S.start,end=S.end,sh
 function trafficRowsInRange(rows,start,end){return A(rows).filter(r=>{const d=dt(r);return(!d||((!start||d>=start)&&(!end||d<=end)))})}
 function trafficSummary(allowLatest=true){const loose=trafficLooseByScope();const latestTrafficDate=uniqueDatesFromRows(loose).at(-1)||'';const range=trafficEffectiveRange(latestTrafficDate);const exactRows=trafficRowsInRange(loose,range.start,range.end);let rows=exactRows;let fallback=false,latestAvailable=range.shifted;const exp=sumFirst(rows,['eps_uv','exposure_uv','exposure_cnt','impressions']);const uv=sumFirst(rows,['goods_uv','uv','visitor_cnt','visitors']);const sale=sumFirst(rows,['sale_cnt','pay_order_cnt','quantity']);const latest=[...rows].sort((a,b)=>String(dt(a)).localeCompare(String(dt(b)))).at(-1)||{};const click=exp?uv/exp:firstNum(latest,['avg_click_rate','click_rate']);const pay=uv?sale/uv:firstNum(latest,['avg_pay_rate','pay_rate']);const dates=uniqueDatesFromRows(rows),sourceDates=uniqueDatesFromRows(loose),nonZeroDays=uniqueDatesFromRows(rows.filter(trafficMetricSum));const prefix=range.shifted?`流量按 ${range.text}`:(dates.length?`${dates[0]}${dates.length>1?'~'+dates.at(-1):''}`:'当前范围暂无');const sourceNote=sourceDates.length?`源 ${sourceDates[0]}~${sourceDates.at(-1)} 共${M(sourceDates.length)}天`:'源暂无';const rangeNote=dates.length?`${prefix} · 明细${M(dates.length)}天 · 有流量${M(nonZeroDays.length)}天 · ${sourceNote}`:(latestTrafficDate?`${prefix} · 最新${latestTrafficDate} · ${sourceNote}`:'当前范围暂无');return{rows,exactRows,exp,uv,sale,click,pay,fallback,latestAvailable,latestDate:dt(latest),latestTrafficDate,rangeNote,rangeText:range.text,effectiveStart:range.start,effectiveEnd:range.end,effectiveShifted:range.shifted,exactDateCount:uniqueDatesFromRows(exactRows).length,sourceDateCount:sourceDates.length,sourceFirstDate:sourceDates[0]||'',sourceLastDate:sourceDates.at(-1)||'',nonZeroDays:nonZeroDays.length}}
 function inventoryScopeNote(){return S.q?'当前货号筛选；库存不按店铺/负责人拆分':'库存不按店铺/负责人拆分，仅货号搜索生效'}
-function inventorySummary(){const rows=invProducts();const totalSupply=sumFirst(rows,['estimated_total_supply_quantity','total_supply_quantity']);const daily=sumFirst(rows,['weighted_daily_gross_sales','daily_sales','gross_sold_30d'])/(rows.some(r=>r.weighted_daily_gross_sales!=null)?1:30);const snap=collectDatesFromRows(rows).at(-1)||D.dates?.inventoryDate||D.dates?.etUpdatedAt||'';return{rows,count:rows.length,available:sumFirst(rows,['et_estimated_available_qty','available_qty']),onhand:sumFirst(rows,['estimated_on_hand_quantity','on_hand_quantity']),incoming:sumFirst(rows,['incoming_quantity']),totalSupply,daily,days:daily>0?totalSupply/daily:null,snapshot:snap}}
+function inventorySummary(){const rows=invProducts();const totalSupply=sumFirst(rows,['estimated_total_supply_quantity','total_supply_quantity']);const available=sumFirst(rows,['et_estimated_available_qty','available_qty']);const daily=sumFirst(rows,['weighted_daily_gross_sales','daily_sales','gross_sold_30d'])/(rows.some(r=>r.weighted_daily_gross_sales!=null)?1:30);const snap=collectDatesFromRows(rows).at(-1)||D.dates?.inventoryDate||D.dates?.etUpdatedAt||'';return{rows,count:rows.length,available,onhand:sumFirst(rows,['estimated_on_hand_quantity','on_hand_quantity']),incoming:sumFirst(rows,['incoming_quantity']),totalSupply,daily,days:daily>0?totalSupply/daily:null,availableDays:daily>0?available/daily:null,snapshot:snap}}
 function collectDatesFromRows(rows){return A(rows).map(dt).filter(Boolean).sort()}
 
 function intro(t,c){return`<section class="intro"><div><span class="eyebrow"><i></i>${H(t)}</span><h2>${H(t)}</h2><p>${H(c)}</p></div><div class="badge">${H(selectedRangeText())} · ${H(scopeName())}${S.q?' · '+H(S.q):''}</div></section>`}
@@ -749,10 +773,14 @@ function returnMetricRow(label,summary,den,loading,opt={}){const rate=opt.showRa
 function homeKpis(){const s=salesSummary(),sp=salesPaymentSummary(),req=retRequestSummary(),orderReq=retOrderCreateSummary(),codReq=retCodOrderCreateSummary(),p=profSum(),tr=trafficSummary(),iv=inventorySummary();const rankingsLoading=sourceLoading('homeRankings',s.rows);const paymentLoading=sourceLoading('homeRankings',sp.rows);const afterLoading=sourceLoading('afterSales',req.rows);const profitLoading=sourceLoading(String(S.q||'').trim()?'profit':'homeProfit',p.rows);const trafficLoading=sourceLoading('productTrafficDaily',tr.rows);const invLoading=sourceLoading('inventoryTrend',iv.rows);const active=v=>v==null?'—':M(v)+' 个';const profitLoss=p.loss,profitRtv=p.rtv,profitStorage=p.storage,profitRtvQty=p.rtvQty,profitRtvCost=p.rtvCost,rtvArrival=rtvArrivalSummary();const rtvArrivalText=rtvArrival.qty>0?` 按 RTV 入仓时间，本期仓库实际收到退件 ${M(rtvArrival.qty)} 件，其中 09 可售 ${M(rtvArrival.qty09)} 件；这些可能来自更早创建的订单。`:' 按 RTV 入仓时间，本期仓库也暂无已匹配入仓退件。';const rtvTipExtra=(profitRtvQty>0?` 当前筛选订单已匹配 RTV 入仓 ${M(profitRtvQty)} 件，回收成本 ${moneyCell(profitRtvCost)} SAR。`:' 当前筛选订单暂未匹配 RTV 入仓成本，因此两条利润线可能相同；这不代表本期仓库没有收到旧订单退件。')+rtvArrivalText;return`<section class="kpi-six">`+
 metricCard('当前时段成交额',selectedRangeText()+' · '+homeScopeSubtitle(),['口径','SAR','RMB'],[
 {label:'总成交额',cells:[htmlValue(moneyCell(s.gross),rankingsLoading),htmlValue(rmbCell(s.gross),rankingsLoading)]},
-{label:'净成交额',cells:[htmlValue(moneyCell(s.net),rankingsLoading),htmlValue(rmbCell(s.net),rankingsLoading)]}], '总成交额是原始成交规模；净成交额扣除退货、仅退款、派送失败等反转订单。')+
+{label:'净成交额',cells:[htmlValue(moneyCell(s.net),rankingsLoading),htmlValue(rmbCell(s.net),rankingsLoading)]},
+{label:'COD总成交额',cells:[htmlValue(moneyCell(sp.cod.gross),paymentLoading),htmlValue(rmbCell(sp.cod.gross),paymentLoading)]},
+{label:'COD净成交额',cells:[htmlValue(moneyCell(sp.cod.sales),paymentLoading),htmlValue(rmbCell(sp.cod.sales),paymentLoading)]}], '总成交额是原始成交规模；净成交额扣除退货、仅退款、派送失败等反转订单；COD 行只统计支付方式标记为 COD 的订单。')+
 metricCard('当前时段订单 / 销量 / 动销',selectedRangeText()+' · '+homeScopeSubtitle(),['口径','订单','销量','动销货号'],[
 {label:'总订单/销量',cells:[htmlValue(M(s.gord)+' 单',rankingsLoading),htmlValue(M(s.gqty)+' 件',rankingsLoading),htmlValue(active(s.gactive),rankingsLoading)]},
-{label:'净订单/销量',cells:[htmlValue(M(s.ord)+' 单',rankingsLoading),htmlValue(M(s.qty)+' 件',rankingsLoading),htmlValue(active(s.active),rankingsLoading)]}], '总订单/销量看原始出单；净订单/销量看最终仍保留成交额的订单。')+
+{label:'净订单/销量',cells:[htmlValue(M(s.ord)+' 单',rankingsLoading),htmlValue(M(s.qty)+' 件',rankingsLoading),htmlValue(active(s.active),rankingsLoading)]},
+{label:'COD总订单/销量',cells:[htmlValue(M(sp.cod.grossOrders)+' 单',paymentLoading),htmlValue(M(sp.cod.grossQty)+' 件',paymentLoading),htmlValue(active(sp.cod.grossActive),paymentLoading)]},
+{label:'COD净订单/销量',cells:[htmlValue(M(sp.cod.orders)+' 单',paymentLoading),htmlValue(M(sp.cod.qty)+' 件',paymentLoading),htmlValue(active(sp.cod.active),paymentLoading)]}], '总订单/销量看原始出单；净订单/销量看最终仍保留成交额的订单；COD 行只统计支付方式标记为 COD 的订单。')+
 metricCard('当前时段退货 / 售后',selectedRangeText()+' · 双时间口径',['口径','订单','SAR','RMB','退货率','金额占比'],[
 returnMetricRow('订单创建时间',orderReq,sp.all,afterLoading||paymentLoading),
 returnMetricRow('售后申请时间',req,sp.all,afterLoading||paymentLoading,{showRate:false,showAmountShare:false}),
@@ -766,7 +794,7 @@ metricCard('当前时段流量',selectedRangeText()+' · 日×店×货号×SKC',
 {label:'成交 / 支付率',cells:[htmlValue(M(tr.sale)+' 件 / '+PCT(tr.pay),trafficLoading),smallValue(tr.rangeNote,trafficLoading)]}], '流量按当前日期、店铺/负责人、货号搜索聚合；点击率/支付率按分子分母重算。历史范围不再静默回退到最新可用日。','traffic-matrix')+
 metricCard('当前库存 / 去化','当前快照 · '+M(iv.count)+' 货号 · 全局库存',['指标','数值','说明'],[
 {label:'供给 / 可售',cells:[htmlValue(M(iv.totalSupply)+' / '+M(iv.available)+' 件',invLoading),smallValue('在库 '+M(iv.onhand)+' · 在途 '+M(iv.incoming),invLoading)]},
-{label:'去化周期',cells:[htmlValue(iv.days==null?'—':M2(iv.days)+' 天',invLoading),smallValue(iv.daily>0?'日销 '+M2(iv.daily)+' 件':'无动销速度',invLoading)]}], '去化周期按总供给/加权日销汇总，不平均各货号天数；ET可售和成本表供给是不同库存口径。','inventory-matrix')+'</section>'}
+{label:'去化周期',cells:[htmlValue(iv.days==null?'—':'总供给 '+M2(iv.days)+' 天 / 可售 '+M2(iv.availableDays)+' 天',invLoading),smallValue(iv.daily>0?'日销 '+M2(iv.daily)+' 件；可售只看 ET 当前可卖库存':'无动销速度',invLoading)]}], '去化周期按总供给/加权日销汇总，不平均各货号天数；可售去化周期只用 ET 当前可卖库存 ÷ 加权日销。','inventory-matrix')+'</section>'}
 
 const TREND_METRICS={sales:{label:'成交额',money:true},quantity:{label:'销量'},returns:{label:'售后'},profit:{label:'利润',money:true},traffic:{label:'流量'},inventory:{label:'库存'}};
 function trendMetricButtons(){return`<div class="trend-toggle">${Object.entries(TREND_METRICS).map(([k,m])=>`<button type="button" class="${S.trendMetric===k?'active':''}" data-trend-metric="${H(k)}">${H(m.label)}</button>`).join('')}</div>`}
@@ -783,6 +811,19 @@ return{series:[],lines:[],note:''}}
 function trendValueText(v,metric=S.trendMetric){const meta=TREND_METRICS[metric]||{};return meta.money?money(v):M(v)}
 function niceCeil(v){const n=Math.abs(N(v));if(n<=10)return 10;const p=Math.pow(10,Math.floor(Math.log10(n)));return Math.ceil(n/p)*p}
 function dataTip(v){return H(v).replace(/\n/g,'&#10;')}
+function priceBandRows(){const buckets=[
+  {label:'<10 SAR',min:0,max:10,color:'#14b8a6'},
+  {label:'10–20 SAR',min:10,max:20,color:'#10b981'},
+  {label:'20–30 SAR',min:20,max:30,color:'#60a5fa'},
+  {label:'30–50 SAR',min:30,max:50,color:'#8b5cf6'},
+  {label:'50–80 SAR',min:50,max:80,color:'#f59e0b'},
+  {label:'80–120 SAR',min:80,max:120,color:'#f97316'},
+  {label:'≥120 SAR',min:120,max:Infinity,color:'#ef4444'}
+].map(x=>({...x,sales:0,qty:0,orders:0,rows:0}));
+const rows=(psales().length?psales():sales()).filter(r=>netSales(r)>0&&netQty(r)>0);
+for(const r of rows){const avg=netSales(r)/netQty(r),b=buckets.find(x=>avg>=x.min&&avg<x.max)||buckets.at(-1);b.sales+=netSales(r);b.qty+=netQty(r);b.orders+=netOrders(r);b.rows+=1}
+return buckets.filter(b=>b.qty>0||b.sales>0||b.orders>0).map(b=>({...b,avg:b.qty?b.sales/b.qty:0}))}
+function priceBandPanel(){const rows=priceBandRows();if(sourceLoading('homeRankings',rows))return`<section class="panel price-band-panel"><h4>成交价格段分布</h4><p class="sub">${H(SL.homeRankings)} 加载中</p><div class="empty">正在加载销售明细，加载完成后自动刷新本图。</div></section>`;if(!rows.length)return`<section class="panel price-band-panel"><h4>成交价格段分布</h4><p class="sub">${H(homeScopeSubtitle())} · ${H(selectedRangeText())}</p><div class="empty">当前筛选没有可计算成交均价的销售明细。</div></section>`;const totalSales=rows.reduce((a,r)=>a+r.sales,0),totalQty=rows.reduce((a,r)=>a+r.qty,0),totalOrders=rows.reduce((a,r)=>a+r.orders,0),max=Math.max(1,...rows.map(r=>r.sales));return`<section class="panel price-band-panel"><h4>成交价格段分布</h4><p class="sub">${H(homeScopeSubtitle())} · ${H(selectedRangeText())} · 按店铺×货号×日期净成交件均价归段</p><div class="price-band-list">${rows.map(r=>{const pct=Math.max(3,r.sales/max*100),share=totalSales?r.sales/totalSales:0,tip=dataTip(`${r.label}\n订单：${M(r.orders)} 单\n销量：${M(r.qty)} 件\n净成交额：${M2(r.sales)} SAR\n均价：${M2(r.avg)} SAR\n成交额占比：${PCT(share)}`);return`<div class="price-band-row" data-tip="${tip}" style="--bar-color:${H(r.color)};--bar-pct:${pct.toFixed(1)}%"><div class="price-band-label"><b>${H(r.label)}</b><span>${PCT(share)} · ${M(r.rows)} 条明细</span></div><div class="price-band-track"><i></i></div><div class="price-band-value"><b>${H(money(r.sales))}</b><span>${M(r.qty)} 件 · ${M(r.orders)} 单 · 均价 ${M2(r.avg)}</span></div></div>`}).join('')}</div><div class="chart-legend price-band-summary"><span><i style="--c:#10b981"></i>净成交额：${H(money(totalSales))}</span><span><i style="--c:#60a5fa"></i>销量：${H(M(totalQty))} 件</span><span><i style="--c:#f59e0b"></i>订单：${H(M(totalOrders))} 单</span><span><i style="--c:#8b5cf6"></i>整体均价：${H(totalQty?M2(totalSales/totalQty):'—')} SAR</span></div></section>`}
 function lineChart(kind,metric=S.trendMetric){
 const built=buildTrendSeries(kind,metric),series=built.series||[],lines=built.lines||[];
 const meta=TREND_METRICS[metric]||{};
@@ -814,8 +855,11 @@ const hitW=Math.max(10,Math.min(120,groupW*.92));
 const hits=series.map((r,i)=>{const x=Math.max(padL,Math.min(w-padR-hitW,groupX(i)-hitW/2));const detail=overlay?overlayDetail(r):keys.map(k=>labels[k]+'：'+trendValueText(r[k],metric)).join('\n');const tip=dataTip(r.label+'\n'+detail);return`<rect class="chart-hit" data-tip="${tip}" x="${x.toFixed(1)}" y="${padT}" width="${hitW.toFixed(1)}" height="${plotH}"></rect>`}).join('');
 const axisEvery=Math.ceil(series.length/6);
 const axis=series.map((r,i)=>(series.length<=8||i===0||i===series.length-1||i%axisEvery===0)?`<text class="axis" text-anchor="${i===0?'start':i===series.length-1?'end':'middle'}" x="${groupX(i).toFixed(1)}" y="${h-10}">${H(r.label)}</text>`:'').join('');
-const latest=series.at(-1)||{};
-const legend=overlay?`<span class="legend-net"><i style="--c:${colors.net}"></i>${H(labels.net)}：${H(trendValueText(latest.net||0,metric))}</span><span class="legend-total"><i style="--c:${colors.gross}"></i>${H(labels.gross)}：${H(trendValueText(latest.gross||0,metric))}</span><span class="legend-diff"><i style="--c:#9b8b77"></i>反转/扣减：${H(trendValueText(N(latest.gross)-N(latest.net),metric))}</span>`:keys.map(k=>`<span><i style="--c:${colors[k]}"></i>${H(labels[k])}：${H(trendValueText(latest[k]||0,metric))}</span>`).join('');
+const latestRow=series.at(-1)||{};
+const summedRow=series.reduce((a,r)=>{keys.forEach(k=>a[k]=N(a[k])+N(r[k]));return a},{});
+const summaryRow=metric==='inventory'?latestRow:summedRow;
+const summaryValue=k=>H(trendValueText(summaryRow[k]||0,metric));
+const legend=overlay?`<span class="legend-net"><i style="--c:${colors.net}"></i>${H(labels.net)}：${summaryValue('net')}</span><span class="legend-total"><i style="--c:${colors.gross}"></i>${H(labels.gross)}：${summaryValue('gross')}</span><span class="legend-diff"><i style="--c:#9b8b77"></i>反转/扣减：${H(trendValueText(N(summaryRow.gross)-N(summaryRow.net),metric))}</span>`:keys.map(k=>`<span><i style="--c:${colors[k]}"></i>${H(labels[k])}：${summaryValue(k)}</span>`).join('');
 return`<div class="line-chart bar-chart${overlay?' overlay-bar-chart':''}"><svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${H((kind==='month'?'月':'日')+(meta.label||metric)+'柱状趋势')}">${defs}<rect class="plot-band" x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" rx="14"></rect>${grid}<line class="axis-line" x1="${padL}" y1="${padT}" x2="${padL}" y2="${h-padB}"></line><line class="axis-line" x1="${padL}" y1="${h-padB}" x2="${w-padR}" y2="${h-padB}"></line><line class="zero-line" x1="${padL}" y1="${zeroY.toFixed(1)}" x2="${w-padR}" y2="${zeroY.toFixed(1)}"></line>${bars}${valueLabels}${axis}${hits}</svg><div class="chart-legend">${legend}</div><p class="sub">时间段：${H(built.rangeText||`${S.start} 至 ${S.end}`)}；当前显示 ${M(series.length)} 个${kind==='month'?'月份':'日期'}。${H(built.note||'')}</p></div>`}
 function trendPanel(kind){const metric=S.trendMetric;const needed=metric==='profit'?(String(S.q||'').trim()?'profit':'homeProfit'):metric==='traffic'?'productTrafficDaily':metric==='inventory'?'inventoryTrend':'homeRankings';const built=buildTrendSeries(kind,metric);if(sourceLoading(needed,built.series))return`<section class="panel trend-panel"><h4>${kind==='month'?'月趋势':'日趋势'} · ${H(TREND_METRICS[metric]?.label||metric)}</h4><p class="sub">${H(SL[needed]||needed)} 加载中</p><div class="empty">正在加载${H(SL[needed]||needed)}，加载完成后自动刷新本图。</div></section>`;return`<section class="panel trend-panel"><h4>${kind==='month'?'月趋势':'日趋势'} · ${H(TREND_METRICS[metric]?.label||metric)}</h4><p class="sub">${H(metric==='inventory'?inventoryScopeNote():homeScopeSubtitle())}</p>${lineChart(kind,metric)}</section>`}
 
@@ -829,7 +873,7 @@ function accountIdentityHtml(userOrName){const u=(userOrName&&typeof userOrName=
 function accountBoxHtml(){if(AUTH.status==='loading'||AUTH.status==='idle')return`<div class="account-main" title="正在识别登录状态">${accountIdentityHtml('正在识别…')}</div>`;if(AUTH.status==='error')return`<div class="account-main" title="${H(AUTH.error||'会话可能已失效')}">${accountIdentityHtml('未识别')}<button class="logout-btn" data-logout="1">登录</button></div>`;const u=AUTH.user||{};const title=`${u.username||''}${u.displayName&&u.displayName!==u.username?' · '+u.displayName:''} · ${authRoleLabel(u.role)} · ${A(u.readStores).includes('*')?'可读全部':'读权限受限'} · ${authStoreText(u)}`;return`<div class="account-main" title="${H(title)}">${accountIdentityHtml(u)}<button class="logout-btn" data-logout="1">退出</button></div>`}
 function renderAccountBox(){const box=$('accountBox');if(box)box.innerHTML=accountBoxHtml()}
 
-function home(){ensure('home',true);const storeBySales=storeRanks(),storeByQty=storeQtyRanks(),productBySales=productRanks(),productByQty=productQtyRanks();return`${homeKpis()}${head('趋势','按钮只切换当前趋势指标；页面只保留一个日图和一个月图，图上直接显示关键数字。',trendMetricButtons())}<div class="trend-stack">${trendPanel('day')}${trendPanel('month')}</div>${head('排行榜','保留主首页的店铺/产品净成交额与净销量四块信息，并恢复条形比例图。',chips(homeNeeds()))}<section class="rank-grid"><div class="panel rank-panel"><h4>店铺净成交额排行</h4><p class="sub">当前范围 ${M(storeBySales.length)} 店 · ${H(selectedRangeText())} · 天数=净成交日</p>${homeRankList(storeBySales,{limit:storeBySales.length,showOwner:true,color:it=>it.color||'#10b981',attr:it=>`data-home-store="${H(it.key)}"`})}</div><div class="panel rank-panel"><h4>店铺净销量排行</h4><p class="sub">当前范围 ${M(storeByQty.length)} 店 · 按净成交销量件数排序；天数只算净成交日。</p>${homeRankList(storeByQty,{limit:storeByQty.length,showOwner:true,color:it=>it.color||'#60a5fa',attr:it=>`data-home-store="${H(it.key)}"`})}</div><div class="panel rank-panel"><h4>产品净成交额排行</h4><p class="sub">当前范围 ${M(productBySales.length)} 个有销量标准货号；展示均价、销量、订单、覆盖店和净成交天数。</p>${homeRankList(productBySales,{limit:productBySales.length,className:'product-rank',color:()=> '#db2777',attr:it=>`data-home-product="${H(it.key)}"`})}</div><div class="panel rank-panel"><h4>产品净销量排行</h4><p class="sub">当前范围 ${M(productByQty.length)} 个有销量标准货号；按净成交销量件数排序。</p>${homeRankList(productByQty,{limit:productByQty.length,className:'product-rank',color:()=> '#a855f7',attr:it=>`data-home-product="${H(it.key)}"`})}</div></section>`}
+function home(){ensure('home',true);const storeBySales=storeRanks(),storeByQty=storeQtyRanks(),productBySales=productRanks(),productByQty=productQtyRanks();return`${homeKpis()}${head('趋势','按钮只切换当前趋势指标；页面只保留一个日图和一个月图，图上直接显示关键数字。',trendMetricButtons())}<div class="trend-stack home-trend-stack">${trendPanel('day')}${trendPanel('month')}${priceBandPanel()}</div>${head('排行榜','保留主首页的店铺/产品净成交额与净销量四块信息，并恢复条形比例图。',chips(homeNeeds()))}<section class="rank-grid"><div class="panel rank-panel"><h4>店铺净成交额排行</h4><p class="sub">当前范围 ${M(storeBySales.length)} 店 · ${H(selectedRangeText())} · 天数=净成交日</p>${homeRankList(storeBySales,{limit:storeBySales.length,showOwner:true,color:it=>it.color||'#10b981',attr:it=>`data-home-store="${H(it.key)}"`})}</div><div class="panel rank-panel"><h4>店铺净销量排行</h4><p class="sub">当前范围 ${M(storeByQty.length)} 店 · 按净成交销量件数排序；天数只算净成交日。</p>${homeRankList(storeByQty,{limit:storeByQty.length,showOwner:true,color:it=>it.color||'#60a5fa',attr:it=>`data-home-store="${H(it.key)}"`})}</div><div class="panel rank-panel"><h4>产品净成交额排行</h4><p class="sub">当前范围 ${M(productBySales.length)} 个有销量标准货号；展示均价、销量、订单、覆盖店和净成交天数。</p>${homeRankList(productBySales,{limit:productBySales.length,className:'product-rank',color:()=> '#db2777',attr:it=>`data-home-product="${H(it.key)}"`})}</div><div class="panel rank-panel"><h4>产品净销量排行</h4><p class="sub">当前范围 ${M(productByQty.length)} 个有销量标准货号；按净成交销量件数排序。</p>${homeRankList(productByQty,{limit:productByQty.length,className:'product-rank',color:()=> '#a855f7',attr:it=>`data-home-product="${H(it.key)}"`})}</div></section>`}
 
 const ORDER_STATUS_FILTERS=[
   ['all','全部'],['pending','待处理/待发货'],['shipped','已发货/运输中'],['platform_unclosed','平台未闭环'],['pending_recheck','待复查'],['done','已签收'],['mixed','混合状态'],['cancelled','取消/关闭'],['returning','未妥投退回'],['cod','COD'],['abnormal','异常'],['other','其他/未识别']

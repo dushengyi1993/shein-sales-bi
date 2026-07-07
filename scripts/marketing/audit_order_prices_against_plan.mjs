@@ -19,6 +19,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const DEFAULT_PLAN = path.join(ROOT, 'tmp', 'marketing-signup', 'price-overrides-2026-06-03-ALL-ready.json');
 const DEFAULT_SALES_DIR = path.join(ROOT, 'outputs', 'shein_fetch');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp', 'marketing-signup', 'order-price-audit');
+const DEFAULT_LINKS_DATA = path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'linksData.json');
 
 function parseArgs(argv) {
   const out = {
@@ -32,6 +33,7 @@ function parseArgs(argv) {
     toleranceSar: 0.01,
     priceGrain: 'auto',
     includeMatches: false,
+    linksData: '',
     planStartTime: '',
     planEndTime: '',
     requirePlanWindow: false,
@@ -52,6 +54,7 @@ function parseArgs(argv) {
     else if (a === '--plan-end-time') out.planEndTime = argv[++i];
     else if (a === '--require-plan-window') out.requirePlanWindow = true;
     else if (a === '--include-matches') out.includeMatches = true;
+    else if (a === '--links-data') out.linksData = path.resolve(argv[++i]);
     else if (a === '--help' || a === '-h') {
       console.log(`Usage:
   node scripts/marketing/audit_order_prices_against_plan.mjs --date 2026-06-05 --stores YJ
@@ -137,6 +140,10 @@ async function writeCsv(file, rows) {
     'deltaSar',
     'deltaPct',
     'planWindowStatus',
+    'activityId',
+    'planStartTime',
+    'planEndTime',
+    'planSelectionReason',
     'canonical',
     'combo',
     'sourceFile',
@@ -176,15 +183,67 @@ function planKey(storeKey, skc) {
   return `${String(storeKey || '').toUpperCase()}|${String(skc || '').trim()}`;
 }
 
-function loadPlanItems(plan) {
+function itemPlanStartTime(item) {
+  return item.planStartTime || item.activityStartTime || item.eventStart || item.startTime || '';
+}
+
+function itemPlanEndTime(item) {
+  return item.planEndTime || item.activityEndTime || item.eventEnd || item.endTime || '';
+}
+
+function unwrapBiLinksData(doc) {
+  if (!doc || typeof doc !== 'object') return {};
+  return doc.data && typeof doc.data === 'object' ? doc.data : doc;
+}
+
+function linkTargetItemsFromLinksData(doc) {
+  const data = unwrapBiLinksData(doc);
+  const rows = [
+    ...(Array.isArray(data.storeLinks) ? data.storeLinks : []),
+    ...(Array.isArray(data.links) ? data.links : []),
+  ];
+  return rows.map(row => ({
+    storeKey: row.store_key || row.storeKey || row.store,
+    skc: row.skc || row.SKC,
+    activityId: row.marketing_activity_id || '',
+    canonical: row.standard_goods_sn || row.standardGoodsSn || row.canonical || row.raw_goods_sn || '',
+    targetPrice: row.marketing_suggested_ordinary_price_sar ?? row.targetPrice ?? row.marketing_final_target_price_sar,
+    finalTargetPrice: row.marketing_final_target_price_sar ?? row.marketing_final_target_price ?? row.finalTargetPrice,
+    couponFactor: row.marketing_coupon_factor ?? row.couponFactor ?? '',
+    combo: row.marketing_ordinary_summary || row.marketing_coupon_summary || '',
+    source: 'linksData_exact_store_skc_current_target',
+    planStartTime: '',
+    planEndTime: '',
+    sourcePriority: 0,
+  })).filter(row => row.storeKey && row.skc && Number.isFinite(Number(row.finalTargetPrice)) && Number(row.finalTargetPrice) > 0);
+}
+
+function loadPlanItems(plan, linkTargetItems = []) {
   const byKey = new Map();
-  const duplicates = new Map();
-  for (const item of plan.items || []) {
+  const byBaseKey = new Map();
+  const duplicateConflicts = new Map();
+  const linkTargetByBaseKey = new Map(linkTargetItems.map(item => [planKey(item.storeKey, item.skc), item]));
+  for (const sourceItem of (plan.items || [])) {
+    const baseKeyForOverlay = planKey(sourceItem.storeKey, sourceItem.skc);
+    const linkTarget = linkTargetByBaseKey.get(baseKeyForOverlay) || null;
+    const item = linkTarget
+      ? {
+          ...sourceItem,
+          ...linkTarget,
+          activityId: sourceItem.activityId ?? linkTarget.activityId ?? '',
+          planStartTime: itemPlanStartTime(sourceItem),
+          planEndTime: itemPlanEndTime(sourceItem),
+          source: 'price_overrides_plan_with_linksData_exact_store_skc_target',
+        }
+      : sourceItem;
     const storeKey = String(item.storeKey || '').toUpperCase();
     const skc = String(item.skc || '').trim();
     const target = Number(item.finalTargetPrice ?? item.targetPrice);
     if (!storeKey || !skc || !Number.isFinite(target) || target <= 0) continue;
-    const key = planKey(storeKey, skc);
+    const baseKey = planKey(storeKey, skc);
+    const planStartTime = itemPlanStartTime(item);
+    const planEndTime = itemPlanEndTime(item);
+    const key = `${baseKey}|${planStartTime}|${planEndTime}|${String(item.activityId ?? '')}`;
     const normalized = {
       storeKey,
       skc,
@@ -195,18 +254,57 @@ function loadPlanItems(plan) {
       couponFactor: item.couponFactor ?? '',
       combo: item.combo || '',
       source: item.source || '',
+      sourcePriority: Number(item.sourcePriority ?? 50),
+      planStartTime,
+      planEndTime,
+      planStartMs: parseTimeMs(planStartTime),
+      planEndMs: parseTimeMs(planEndTime),
     };
     if (byKey.has(key)) {
       const prev = byKey.get(key);
       if (round2(prev.finalTargetPrice) !== round2(normalized.finalTargetPrice)) {
-        if (!duplicates.has(key)) duplicates.set(key, [prev]);
-        duplicates.get(key).push(normalized);
+        if (!duplicateConflicts.has(key)) duplicateConflicts.set(key, [prev]);
+        duplicateConflicts.get(key).push(normalized);
       }
     } else {
       byKey.set(key, normalized);
+      if (!byBaseKey.has(baseKey)) byBaseKey.set(baseKey, []);
+      byBaseKey.get(baseKey).push(normalized);
     }
   }
-  return {byKey, duplicates};
+  for (const item of linkTargetItems) {
+    const baseKey = planKey(item.storeKey, item.skc);
+    if (byBaseKey.has(baseKey)) continue;
+    const storeKey = String(item.storeKey || '').toUpperCase();
+    const skc = String(item.skc || '').trim();
+    const target = Number(item.finalTargetPrice ?? item.targetPrice);
+    if (!storeKey || !skc || !Number.isFinite(target) || target <= 0) continue;
+    const planStartTime = itemPlanStartTime(item);
+    const planEndTime = itemPlanEndTime(item);
+    const key = `${baseKey}|${planStartTime}|${planEndTime}|${String(item.activityId ?? '')}`;
+    const normalized = {
+      storeKey,
+      skc,
+      activityId: item.activityId ?? '',
+      canonical: item.canonical || '',
+      targetPrice: Number(item.targetPrice ?? target),
+      finalTargetPrice: target,
+      couponFactor: item.couponFactor ?? '',
+      combo: item.combo || '',
+      source: item.source || '',
+      sourcePriority: Number(item.sourcePriority ?? 50),
+      planStartTime,
+      planEndTime,
+      planStartMs: parseTimeMs(planStartTime),
+      planEndMs: parseTimeMs(planEndTime),
+    };
+    byKey.set(key, normalized);
+    byBaseKey.set(baseKey, [normalized]);
+  }
+  for (const rows of byBaseKey.values()) {
+    rows.sort((a, b) => Number(a.sourcePriority ?? 50) - Number(b.sourcePriority ?? 50));
+  }
+  return {byKey, byBaseKey, duplicateConflicts};
 }
 
 function inferStoreFromPath(file) {
@@ -239,6 +337,50 @@ function planWindowStatus(orderTime, context) {
   if (startMs !== null && orderMs < startMs) return 'before_plan_window';
   if (endMs !== null && orderMs > endMs) return 'after_plan_window';
   return 'inside_plan_window';
+}
+
+function planItemWindowStatus(orderTime, plan) {
+  if (plan.planStartMs === null && plan.planEndMs === null) return 'not_configured';
+  const orderMs = parseTimeMs(orderTime);
+  if (orderMs === null) return 'order_time_unparseable';
+  if (plan.planStartMs !== null && orderMs < plan.planStartMs) return 'before_plan_window';
+  if (plan.planEndMs !== null && orderMs > plan.planEndMs) return 'after_plan_window';
+  return 'inside_plan_window';
+}
+
+function selectPlanForOrder(candidates, orderTime, context) {
+  if (!candidates?.length) return {status: 'missing_plan', plan: null};
+  const withWindows = candidates.filter(plan => plan.planStartMs !== null || plan.planEndMs !== null);
+  if (!withWindows.length) {
+    const legacyStatus = planWindowStatus(orderTime, context);
+    if (legacyStatus !== 'not_configured' && legacyStatus !== 'inside_plan_window') {
+      return {status: 'outside_plan_window', plan: candidates[0], reason: legacyStatus};
+    }
+    if (candidates.length > 1) {
+      const targets = new Set(candidates.map(plan => round2(plan.finalTargetPrice)));
+      if (targets.size > 1) return {status: 'ambiguous_plan', plan: null, reason: 'multiple windowless plan items have different finalTargetPrice'};
+    }
+    return {status: 'selected', plan: candidates[0], reason: legacyStatus};
+  }
+  const orderMs = parseTimeMs(orderTime);
+  if (orderMs === null) {
+    return {status: 'missing_order_time_for_plan_window', plan: withWindows[0], reason: 'order_time_unparseable'};
+  }
+    const active = withWindows.filter(plan => planItemWindowStatus(orderTime, plan) === 'inside_plan_window');
+    if (!active.length) return {status: 'outside_plan_window', plan: withWindows[0], reason: 'no_plan_item_active_for_order_time'};
+  active.sort((a, b) => {
+    const priorityDiff = Number(a.sourcePriority ?? 50) - Number(b.sourcePriority ?? 50);
+    if (priorityDiff) return priorityDiff;
+    const targetDiff = Number(a.finalTargetPrice) - Number(b.finalTargetPrice);
+    if (targetDiff) return targetDiff;
+    return String(a.activityId || '').localeCompare(String(b.activityId || ''));
+  });
+  return {
+    status: 'selected',
+    plan: active[0],
+    reason: active.length > 1 ? 'multiple_active_plan_items_use_lowest_finalTargetPrice' : 'active_plan_item_window',
+    activeCandidateCount: active.length,
+  };
 }
 
 function classifyRow(row, context) {
@@ -274,19 +416,25 @@ function classifyRow(row, context) {
     return {...base, status: 'missing_skc', reason: 'goods row has no skcName/skc'};
   }
 
-  const key = planKey(context.storeKey, base.skc);
-  if (context.duplicates.has(key)) {
-    return {...base, status: 'ambiguous_plan', reason: 'multiple plan items have different finalTargetPrice'};
-  }
-  const plan = context.planByKey.get(key);
-  if (!plan) {
+  const baseKey = planKey(context.storeKey, base.skc);
+  const candidates = context.planByBaseKey.get(baseKey) || [];
+  if (!candidates.length) {
     return {...base, status: 'missing_plan', reason: 'no plan item for store+skc'};
   }
+  const selected = selectPlanForOrder(candidates, base.orderTime, context);
+  if (selected.status !== 'selected') {
+    return {...base, status: selected.status, reason: selected.reason || selected.status};
+  }
+  const plan = selected.plan;
 
   base.finalTargetPrice = round2(plan.finalTargetPrice);
   base.canonical = plan.canonical;
   base.combo = plan.combo;
-  base.planWindowStatus = planWindowStatus(base.orderTime, context);
+  base.planWindowStatus = planItemWindowStatus(base.orderTime, plan);
+  base.activityId = plan.activityId;
+  base.planStartTime = plan.planStartTime || context.planStartTime || '';
+  base.planEndTime = plan.planEndTime || context.planEndTime || '';
+  base.planSelectionReason = selected.reason || '';
 
   if (!Number.isFinite(quantity) || quantity <= 0) {
     return {...base, status: 'missing_quantity', reason: 'goods row has no positive quantity'};
@@ -309,7 +457,10 @@ function classifyRow(row, context) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const plan = await readJson(args.plan);
-  const {byKey: planByKey, duplicates} = loadPlanItems(plan);
+  const linksDataPath = args.linksData || (fssync.existsSync(DEFAULT_LINKS_DATA) ? DEFAULT_LINKS_DATA : '');
+  const linksData = linksDataPath ? await readJson(linksDataPath).catch(() => null) : null;
+  const linkTargetItems = linkTargetItemsFromLinksData(linksData);
+  const {byKey: planByKey, byBaseKey: planByBaseKey, duplicateConflicts} = loadPlanItems(plan, linkTargetItems);
   const allRows = [];
   const files = [];
   for (const dir of args.salesDirs) {
@@ -335,7 +486,7 @@ async function main() {
       date: date || data.start || data.date || '',
       sourceFile: path.relative(ROOT, file).replace(/\\/g, '/'),
       planByKey,
-      duplicates,
+      planByBaseKey,
       toleranceSar: args.toleranceSar,
       priceGrain: args.priceGrain,
       planStartTime: args.planStartTime,
@@ -360,6 +511,9 @@ async function main() {
     planStartTime: args.planStartTime || null,
     planEndTime: args.planEndTime || null,
     warnings: args.planStartTime || args.planEndTime ? [] : ['plan window is not configured; deviations are raw comparisons, not proof that a plan was active'],
+    duplicatePlanConflictCount: duplicateConflicts.size,
+    linksData: linksDataPath ? path.relative(ROOT, linksDataPath).replace(/\\/g, '/') : null,
+    linkTargetRows: linkTargetItems.length,
     filesScanned: seenFiles.size,
     rowsReturned: allRows.length,
     actionableRows: actionable.length,

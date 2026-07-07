@@ -31,6 +31,10 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (arg === '--execute') args.execute = true;
     else if (arg === '--dry-run') args.execute = false;
+    else if (arg === '--no-close') {
+      // Compatibility with guard-suggested commands. Browser lifecycle is
+      // controlled by the caller via close_store_browsers.ps1.
+    }
     else if (arg === '--port') args.port = Number(argv[++i]);
     else if (arg.startsWith('--port=')) args.port = Number(arg.slice('--port='.length));
     else if (arg === '--rescue') args.rescue = path.resolve(argv[++i]);
@@ -60,10 +64,6 @@ function parseArgs(argv) {
   if (!Number.isFinite(args.port) || args.port <= 0) throw new Error(`Invalid --port: ${args.port}`);
   if (!args.storeKey) throw new Error('Missing --store-key for identity guard');
   if (!args.rescue) throw new Error('Missing --rescue <rescue-json>. Do not rely on a hard-coded one-off batch path.');
-  if (!args.endTime) throw new Error('Missing --end-time "YYYY-MM-DD HH:mm:ss" for the limited-discount rescue window.');
-  if (!String(args.activityNamePrefix || '').trim()) throw new Error('Missing --activity-name-prefix for the limited-discount activity name.');
-  const end = new Date(String(args.endTime).replace(' ', 'T') + '+08:00');
-  if (!Number.isFinite(end.getTime())) throw new Error(`Invalid --end-time: ${args.endTime}`);
   if (!Number.isFinite(args.startDelayMinutes) || args.startDelayMinutes < 1) {
     throw new Error(`Invalid --start-delay-minutes: ${args.startDelayMinutes}`);
   }
@@ -179,21 +179,40 @@ async function recoverLoginIfNeeded(cdp) {
 function normalizeTargetRows(rescue) {
   const rows = (rescue.rows || [])
     .filter(row => row && row.needsLimitedDiscount !== false)
-    .map(row => ({
-      skc: String(row.skc || '').trim(),
-      canonical: row.canonical || '',
-      supplierNo: row.supplierNo || row.currentSupplierNo || '',
-      limitedDiscountPrice: Number(row.limitedDiscountPrice),
-      expectedFinalAfterLimitedAnd15Coupon: row.expectedFinalAfterLimitedAnd15Coupon ?? '',
-      originalPlannedFinalPrice: row.originalPlannedFinalPrice ?? '',
-      originalMarketingPrice: row.originalMarketingPrice ?? '',
-      priceSourceActivityId: row.priceSourceActivityId ?? '',
-      combo: row.combo || '',
-      sourceRule: row.sourceRule || '',
-      note: row.note || '',
-    }));
+    .map(row => {
+      const limitedDiscountPrice = Number(row.limitedDiscountPrice);
+      const finalTargetPrice = Number(
+        row.finalTargetPrice
+        ?? row.targetPrice
+        ?? row.minimumAllowedLimitedDiscountPrice
+        ?? row.originalPlannedFinalPrice
+        ?? NaN,
+      );
+      return {
+        skc: String(row.skc || '').trim(),
+        canonical: row.canonical || '',
+        supplierNo: row.supplierNo || row.currentSupplierNo || '',
+        limitedDiscountPrice,
+        finalTargetPrice: Number.isFinite(finalTargetPrice) ? finalTargetPrice : null,
+        expectedFinalAfterLimitedAnd15Coupon: row.expectedFinalAfterLimitedAnd15Coupon ?? '',
+        originalPlannedFinalPrice: row.originalPlannedFinalPrice ?? '',
+        originalMarketingPrice: row.originalMarketingPrice ?? '',
+        priceSourceActivityId: row.priceSourceActivityId ?? '',
+        combo: row.combo || '',
+        sourceRule: row.sourceRule || '',
+        note: row.note || '',
+      };
+    });
   const missing = rows.filter(row => !row.skc || !Number.isFinite(row.limitedDiscountPrice) || row.limitedDiscountPrice <= 0);
   if (missing.length) throw new Error(`Rescue target rows have missing SKC/price: ${JSON.stringify(missing.slice(0, 5))}`);
+  const missingTarget = rows.filter(row => row.finalTargetPrice === null);
+  if (missingTarget.length) {
+    throw new Error(`Rescue target rows have no finalTargetPrice/targetPrice; refusing unguarded limited-discount write: ${JSON.stringify(missingTarget.slice(0, 5))}`);
+  }
+  const belowTarget = rows.filter(row => row.finalTargetPrice !== null && row.limitedDiscountPrice < row.finalTargetPrice - 0.01);
+  if (belowTarget.length) {
+    throw new Error(`Rescue limited-discount price is below finalTargetPrice; refusing mechanical 15%/too-deep fallback: ${JSON.stringify(belowTarget.slice(0, 5))}`);
+  }
   const seen = new Set();
   const duplicates = [];
   for (const row of rows) {
@@ -212,6 +231,12 @@ function rel(file) {
 const args = parseArgs(process.argv.slice(2));
 await fs.mkdir(args.outDir, {recursive: true});
 const rescue = JSON.parse(await fs.readFile(args.rescue, 'utf8'));
+const effectiveEndTime = rescue.endTime || args.endTime;
+const effectiveActivityNamePrefix = rescue.activityNamePrefix || args.activityNamePrefix;
+if (!effectiveEndTime) throw new Error('Missing --end-time "YYYY-MM-DD HH:mm:ss" for the limited-discount rescue window.');
+if (!String(effectiveActivityNamePrefix || '').trim()) throw new Error('Missing --activity-name-prefix for the limited-discount activity name.');
+const end = new Date(String(effectiveEndTime).replace(' ', 'T') + '+08:00');
+if (!Number.isFinite(end.getTime())) throw new Error(`Invalid --end-time: ${effectiveEndTime}`);
 const targetRows = normalizeTargetRows(rescue);
 const store = STORES.find(s => String(s.storeKey).toUpperCase() === args.storeKey);
 if (!store) throw new Error(`Unknown store for identity guard: ${args.storeKey}`);
@@ -550,6 +575,7 @@ try {
           skuCount: addSkuList.length,
           expectedFinalAfterLimitedAnd15Coupon: target.expectedFinalAfterLimitedAnd15Coupon,
           originalPlannedFinalPrice: target.originalPlannedFinalPrice,
+          finalTargetPrice: target.finalTargetPrice,
           sourceRule: target.sourceRule,
           combo: target.combo,
         });
@@ -971,9 +997,9 @@ try {
       targetRows,
       execute: args.execute,
       targetRefToolId: TARGET_REF_TOOL_ID,
-      targetEndTime: rescue.endTime || args.endTime,
+      targetEndTime: effectiveEndTime,
       startDelayMinutes: args.startDelayMinutes,
-      activityNamePrefix: args.activityNamePrefix,
+      activityNamePrefix: effectiveActivityNamePrefix,
       replaceActivityIds: args.replaceActivityIds,
     },
   );
@@ -987,6 +1013,8 @@ try {
     rescuePath: rel(args.rescue),
     identity,
     loginRecovery,
+    targetEndTime: effectiveEndTime,
+    activityNamePrefix: effectiveActivityNamePrefix,
     ...result,
   }, null, 2), 'utf8');
 

@@ -44,9 +44,14 @@ const activityNamePrefix = args.activityNamePrefix || policy?.newListingWithin7D
 
 const linksDoc = await readJson(linksDataPath);
 const priceDoc = await readJson(priceOverridesPath);
+const liveScanPath = args.currentMarketingLiveScan
+  ? path.resolve(ROOT, args.currentMarketingLiveScan)
+  : '';
+const liveScanDoc = liveScanPath ? await readJson(liveScanPath) : null;
 const linksData = unwrapBiLinksData(linksDoc);
 const storeLinks = Array.isArray(linksData.storeLinks) ? linksData.storeLinks : [];
 const priceIndex = buildPriceIndex(priceDoc);
+const liveLimitedEvidence = collectLiveLimitedDiscountEvidence(liveScanDoc, liveScanPath);
 
 const rows = [];
 const blocked = [];
@@ -62,18 +67,29 @@ for (const link of storeLinks) {
   if (!recent.applies) continue;
 
   const canonical = normalizeCanonicalFromLink(link);
-  const priceEvidence = findPriceEvidence(priceIndex, canonical);
+  const exactPriceEvidence = findPriceEvidence(priceIndex, canonical, storeKey, skc, {allowCanonicalFallback: false});
+  const priceEvidence = exactPriceEvidence || findPriceEvidence(priceIndex, canonical, storeKey, skc);
+  const liveLimitedRows = liveLimitedEvidence.bySkc.get(exactPriceKey(storeKey, skc)) || [];
+  const liveCoveredByName = isLiveNewListingLimitedDiscountCovered(liveLimitedRows);
   const currentLimitedPrice = numberOrNull(
-    link.marketing_limited_discount_price_sar
+    (liveLimitedRows.length ? liveLimitedRows[0].price : null)
+    ?? link.marketing_limited_discount_price_sar
     ?? link.marketing_limited_discount_price
     ?? link.limitedDiscountPrice,
   );
   const hasCurrentLimitedDiscount = (
-    link.marketing_limited_discount_is_current === true
+    liveLimitedRows.length > 0
+    || link.marketing_limited_discount_is_current === true
     || link.marketing_limited_discount_is_current === 1
     || link.marketing_limited_discount_is_current === '1'
     || currentLimitedPrice !== null
   );
+  const resolvedTopTier = resolveTopTierPrice(priceEvidence);
+  const liveCoveredAtTarget = liveCoveredByName
+    && Number.isFinite(resolvedTopTier.price)
+    && currentLimitedPrice !== null
+    && currentLimitedPrice >= resolvedTopTier.price - 0.01;
+  const liveCoveredNoTargetEvidence = liveCoveredByName && (!Number.isFinite(resolvedTopTier.price) || resolvedTopTier.price <= 0);
   const common = {
     storeKey,
     skc,
@@ -82,6 +98,7 @@ for (const link of storeLinks) {
     supplierNo: link.raw_goods_sn || link.rawGoodsSn || canonical,
     shelfAgeDays: recent.shelfAgeDays,
     shelfAgeSource: recent.shelfAgeSource,
+    platformNewLabel: recent.platformNewLabel || null,
     c7EpsUv: numberOrNull(link.c7_eps_uv ?? link.c7EpsUv),
     c30EpsUv: numberOrNull(link.c30_eps_uv ?? link.c30EpsUv),
     currentPrice: numberOrNull(link.current_price_sar ?? link.currentPriceSar ?? link.current_price),
@@ -91,41 +108,57 @@ for (const link of storeLinks) {
     firstShelfTime: link.first_shelf_time || '',
     ordinaryMarketingEvidence: hasOrdinaryMarketingEvidence(link),
   };
+  if (liveCoveredAtTarget || liveCoveredNoTargetEvidence) {
+    ignored.push({
+      ...common,
+      reason: liveCoveredAtTarget
+        ? 'live_new_listing_limited_discount_already_covered_at_target'
+        : 'live_new_listing_limited_discount_already_covered_target_evidence_missing',
+      liveLimitedDiscountSource: liveLimitedEvidence.path || '',
+      liveLimitedDiscountNames: [...new Set(liveLimitedRows.map(row => row.name).filter(Boolean))],
+      plannedLimitedDiscountPrice: resolvedTopTier.price,
+      topTierPriceSource: resolvedTopTier.source,
+    });
+    continue;
+  }
   if (!priceEvidence) {
     blocked.push({
       ...common,
       reason: 'missing_price_evidence_for_canonical',
-      note: '最新最终版 price-overrides 中找不到该标准货号的曝光前五目标价，不能自动写限时折扣。',
+      note: '最新最终版 price-overrides 中找不到该标准货号/店铺+SKC 的曝光前五目标价，不能自动写限时折扣。',
     });
     continue;
   }
-  if (!Number.isFinite(priceEvidence.topTierPrice) || priceEvidence.topTierPrice <= 0) {
+  if (!Number.isFinite(resolvedTopTier.price) || resolvedTopTier.price <= 0) {
     blocked.push({
       ...common,
       reason: 'missing_top_tier_price',
       priceEvidence,
-      note: '该标准货号有普通目标价，但没有可继承的曝光前五目标价，不能自动套“前五力度”。',
+      note: '该标准货号有普通目标价，但没有可继承/推导的曝光前五目标价，不能自动套“前五力度”。',
     });
     continue;
   }
+  const topTierPrice = resolvedTopTier.price;
   const action = hasCurrentLimitedDiscount ? 'replace_existing_limited_discount' : 'create_limited_discount';
   rows.push({
     ...common,
     action,
     needsLimitedDiscount: true,
-    limitedDiscountPrice: priceEvidence.topTierPrice,
-    finalTargetPrice: priceEvidence.topTierPrice,
-    targetPrice: priceEvidence.topTierPrice,
-    expectedFinalNoCoupon: priceEvidence.topTierPrice,
+    limitedDiscountPrice: topTierPrice,
+    finalTargetPrice: topTierPrice,
+    targetPrice: topTierPrice,
+    expectedFinalNoCoupon: topTierPrice,
     expectedFinalAfterLimitedAnd15Coupon: '',
     couponFactor: 1,
-    originalPlannedFinalPrice: priceEvidence.topTierPrice,
+    originalPlannedFinalPrice: topTierPrice,
     sourceRule: 'new_listing_within_7d_same_as_global_exposure_top5',
     combo: '新上架7天限时折扣兜底；不依赖优惠券',
     note: hasCurrentLimitedDiscount
-      ? `新上架${recent.shelfAgeDays}天且未报普通活动，已有旧限时折扣 ${formatPrice(currentLimitedPrice)} SAR；按新规则取消/结束旧活动后重报一周，目标价按曝光前五力度 ${formatPrice(priceEvidence.topTierPrice)} SAR。`
-      : `新上架${recent.shelfAgeDays}天且未报普通活动，缺限时折扣；按曝光前五力度 ${formatPrice(priceEvidence.topTierPrice)} SAR 报一周兜底。`,
+      ? `新上架${recent.shelfAgeDays}天且未报普通活动，已有旧限时折扣 ${formatPrice(currentLimitedPrice)} SAR；按新规则取消/结束旧活动后重报一周，目标价按曝光前五力度 ${formatPrice(topTierPrice)} SAR。`
+      : `新上架${recent.shelfAgeDays}天且未报普通活动，缺限时折扣；按曝光前五力度 ${formatPrice(topTierPrice)} SAR 报一周兜底。`,
     priceEvidence,
+    topTierPriceSource: resolvedTopTier.source,
+    targetPriceEvidenceScope: exactPriceEvidence ? 'exact_store_skc' : 'canonical_top_tier_fallback',
     endTime,
     activityNamePrefix,
   });
@@ -170,6 +203,7 @@ for (const [storeKey, storeRows] of groupBy(rows, row => row.storeKey).entries()
       c7EpsUv: row.c7EpsUv,
       previousLimitedPrice: row.currentLimitedPrice,
       action: row.action,
+      topTierPriceSource: row.topTierPriceSource,
     })),
   };
   await fs.writeFile(rescuePath, `${JSON.stringify(rescue, null, 2)}\n`, 'utf8');
@@ -182,6 +216,7 @@ const summary = {
   sourceLinksData: rel(linksDataPath),
   sourceLinksGeneratedAt: linksDoc.generatedAt || linksData.generatedAt || '',
   sourcePriceOverrides: rel(priceOverridesPath),
+  sourceCurrentMarketingLiveScan: liveScanPath ? rel(liveScanPath) : '',
   pricingPolicy: rel(policyPath),
   rule: {
     windowDays: Number(policy?.newListingWithin7Days?.windowDays || 7),
@@ -197,6 +232,7 @@ const summary = {
     replaceExistingLimitedDiscount: rows.filter(row => row.action === 'replace_existing_limited_discount').length,
     blocked: blocked.length,
     ignored: ignored.length,
+    liveCoveredIgnored: ignored.filter(row => String(row.reason || '').startsWith('live_new_listing_limited_discount_already_covered')).length,
   },
   byStore: countBy(rows, 'storeKey'),
   rescueFiles,
@@ -219,12 +255,16 @@ console.log(JSON.stringify({
 function buildPriceIndex(priceDoc) {
   const items = Array.isArray(priceDoc?.items) ? priceDoc.items : [];
   const byCanonical = new Map();
+  const byExact = new Map();
   for (const item of items) {
     const canonical = normalizeCanonicalFromValue(item.canonical || item.standardGoodsSn || item.standard_goods_sn || item.supplierNo || '');
+    const storeKey = normStore(item.storeKey || item.store || item['店铺']);
+    const skc = String(item.skc || item.SKC || item['SKC'] || '').trim();
     if (!canonical) continue;
     const key = canonicalKey(canonical);
     if (!byCanonical.has(key)) byCanonical.set(key, {canonical, items: []});
     byCanonical.get(key).items.push(item);
+    if (storeKey && skc) byExact.set(exactPriceKey(storeKey, skc), item);
   }
   const evidence = new Map();
   for (const [key, group] of byCanonical.entries()) {
@@ -249,12 +289,86 @@ function buildPriceIndex(priceDoc) {
       })),
     });
   }
-  return evidence;
+  return {byCanonical: evidence, byExact};
 }
 
-function findPriceEvidence(index, canonical) {
-  const key = canonicalKey(canonical);
-  return index.get(key) || null;
+function findPriceEvidence(index, canonical, storeKey = '', skc = '', {allowCanonicalFallback = true} = {}) {
+  const exact = index.byExact?.get(exactPriceKey(storeKey, skc));
+  if (exact) {
+    const finalTargetPrice = numberOrNull(exact.finalTargetPrice ?? exact.targetPrice);
+    if (Number.isFinite(finalTargetPrice) && finalTargetPrice > 0) {
+      return {
+        canonical: normalizeCanonicalFromValue(exact.canonical || exact.standardGoodsSn || exact.standard_goods_sn || canonical),
+        rowCount: 1,
+        topRowCount: exact.isTopExposureLink || exact.newListingTopTreatment ? 1 : 0,
+        topTierPrice: round2(finalTargetPrice),
+        otherTierPrice: null,
+        allPriceMin: round2(finalTargetPrice),
+        sourceScope: 'exact_store_skc',
+        topTierSamples: [{
+          storeKey: exact.storeKey,
+          skc: exact.skc,
+          finalTargetPrice,
+          note: exact.note || '',
+        }],
+      };
+    }
+  }
+  if (!allowCanonicalFallback) return null;
+  return index.byCanonical?.get(canonicalKey(canonical)) || null;
+}
+
+
+function resolveTopTierPrice(priceEvidence) {
+  if (!priceEvidence) return {price: null, source: 'missing_price_evidence'};
+  const explicit = numberOrNull(priceEvidence.topTierPrice);
+  if (Number.isFinite(explicit) && explicit > 0) {
+    return {price: round2(explicit), source: priceEvidence.topRowCount ? 'explicit_top_tier_price' : 'exact_store_skc_target_price'};
+  }
+  const allMin = numberOrNull(priceEvidence.allPriceMin);
+  const other = numberOrNull(priceEvidence.otherTierPrice);
+  if (Number.isFinite(allMin) && allMin > 0 && (!Number.isFinite(other) || allMin <= other + 0.01)) {
+    return {price: round2(allMin), source: 'derived_from_lowest_approved_same_canonical_target_price'};
+  }
+  return {price: null, source: 'missing_top_tier_price'};
+}
+
+function collectLiveLimitedDiscountEvidence(liveDoc, livePath = '') {
+  const rows = Array.isArray(liveDoc?.rows) ? liveDoc.rows : [];
+  const bySkc = new Map();
+  if (!liveDoc || liveDoc.ok === false) return {path: livePath ? rel(livePath) : '', bySkc};
+  for (const row of rows) {
+    const storeKey = normStore(row.store_key || row.storeKey || row.store);
+    const skc = String(row.skc || row.SKC || '').trim();
+    if (!storeKey || !skc) continue;
+    const limitedPrice = numberOrNull(
+      row.marketing_limited_discount_price_sar
+      ?? row.marketing_limited_discount_price
+      ?? row.limitedDiscountPrice
+      ?? row.limited_discount_price_sar
+    );
+    const isLimitedEvidence = (
+      row.marketing_limited_discount_is_current === true
+      || row.marketing_limited_discount_is_current === 1
+      || row.marketing_limited_discount_is_current === '1'
+      || /limited/i.test(String(row.marketing_price_evidence_type || row.evidenceType || ''))
+      || limitedPrice !== null
+    );
+    if (!isLimitedEvidence) continue;
+    const key = exactPriceKey(storeKey, skc);
+    if (!bySkc.has(key)) bySkc.set(key, []);
+    bySkc.get(key).push({
+      price: limitedPrice,
+      name: row.marketing_limited_discount_name || row.limitedDiscountName || row.activityName || '',
+      start: row.marketing_limited_discount_start || row.limitedDiscountStart || '',
+      end: row.marketing_limited_discount_end || row.limitedDiscountEnd || '',
+    });
+  }
+  return {path: livePath ? rel(livePath) : '', bySkc};
+}
+
+function isLiveNewListingLimitedDiscountCovered(rows) {
+  return (rows || []).some(row => /新上架.*限时折扣|高曝光兜底限时折扣|new\s*listing/i.test(String(row.name || '')));
 }
 
 function normalizeCanonicalFromLink(link) {
@@ -363,6 +477,10 @@ function canonicalKey(value) {
     .replace(/\s+/g, '')
     .replace(/[()（）【】\[\]_:：/\\-]/g, '')
     .toUpperCase();
+}
+
+function exactPriceKey(storeKey, skc) {
+  return `${normStore(storeKey)}::${String(skc || '').trim()}`;
 }
 
 function normStore(value) {

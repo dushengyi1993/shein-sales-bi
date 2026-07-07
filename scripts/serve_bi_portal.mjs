@@ -107,7 +107,7 @@ const OPENAPI_IMAGE_ASSET_ALLOWED_MIME = new Set(['image/jpeg', 'image/png']);
 const OPENAPI_IMAGE_ASSET_TYPES = new Set([1, 2, 5, 6, 7]);
 const DEFAULT_SHEIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
 const DEFAULT_MANUAL_LOGIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
-const BI_PORTAL_SECTION_KEYS = new Set(['homeProfit', 'homeRankings', 'rankings', 'profit', 'actions', 'linksData', 'productTrafficDaily', 'inventoryTrend', 'comments', 'orders', 'afterSales', 'rtvData', 'waybills']);
+const BI_PORTAL_SECTION_KEYS = new Set(['homeProfit', 'homeRankings', 'rankings', 'profit', 'actions', 'linksData', 'productTrafficDaily', 'inventoryTrend', 'comments', 'orders', 'priceScatter', 'afterSales', 'rtvData', 'waybills']);
 const BI_PORTAL_SECTION_TIMEOUT_MS = Math.max(60_000, Number(process.env.SHEIN_BI_SECTION_TIMEOUT_MS || 900_000));
 const OPENAPI_READ_PROBE_SUMMARY_FILE = process.env.SHEIN_OPENAPI_READ_PROBE_SUMMARY_FILE
   || path.join(ROOT, 'state', 'openapi-probes', 'read-probes.latest.json');

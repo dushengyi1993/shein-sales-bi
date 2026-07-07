@@ -54,6 +54,7 @@
     "windowDays": 7,
     "onShelfOnly": true,
     "requireNoOrdinaryMarketing": true,
+    "platformNewLabelPatterns": ["新款", "新品", "New Arrivals", "new arrival"],
     "pricingTreatment": "same_as_global_exposure_top5",
     "limitedDiscount": {
       "autoFallbackWhenNoOrdinaryMarketing": true,

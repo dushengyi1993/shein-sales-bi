@@ -11,7 +11,7 @@ const STORE_ACCOUNT_TRUTH = JSON.parse(await fs.readFile(path.join(ROOT, 'config
 const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp/marketing-signup/limited-discount-rescue/mixed-limited-recreate-results');
 
 function parseArgs(argv){
-  const args={plan:'', storeKey:'', port:0, execute:false, outDir:DEFAULT_OUT_DIR, startDelayMinutes:10};
+  const args={plan:'', storeKey:'', port:0, execute:false, outDir:DEFAULT_OUT_DIR, startDelayMinutes:10, allowDropSkcs:false};
   for(let i=0;i<argv.length;i++){
     const a=argv[i];
     if(a==='--plan') args.plan=path.resolve(argv[++i]||'');
@@ -23,6 +23,7 @@ function parseArgs(argv){
     else if(a.startsWith('--port=')) args.port=Number(a.slice(7));
     else if(a==='--execute') args.execute=true;
     else if(a==='--dry-run') args.execute=false;
+    else if(a==='--allow-drop-skcs') args.allowDropSkcs=true;
     else if(a==='--out-dir') args.outDir=path.resolve(argv[++i]||'');
     else if(a.startsWith('--out-dir=')) args.outDir=path.resolve(a.slice(10));
     else if(a==='--start-delay-minutes') args.startDelayMinutes=Number(argv[++i]);
@@ -47,12 +48,25 @@ const args=parseArgs(process.argv.slice(2));
 await fs.mkdir(args.outDir,{recursive:true});
 const plan=JSON.parse(await fs.readFile(args.plan,'utf8'));
 if(String(plan.storeKey||'').toUpperCase()!==args.storeKey) throw new Error(`plan store ${plan.storeKey} != args ${args.storeKey}`);
+for (const group of plan.groups || []) {
+  for (const row of group.rows || []) {
+    const limitedDiscountPrice = Number(row.limitedDiscountPrice);
+    const finalTargetPrice = Number(row.finalTargetPrice ?? row.targetPrice ?? row.minimumAllowedLimitedDiscountPrice ?? row.originalPlannedFinalPrice ?? NaN);
+    if (!Number.isFinite(finalTargetPrice) || finalTargetPrice <= 0) {
+      throw new Error(`limited discount split/recreate row missing finalTargetPrice: ${JSON.stringify({storeKey: args.storeKey, skc: row.skc, limitedDiscountPrice})}`);
+    }
+    if (!Number.isFinite(limitedDiscountPrice) || limitedDiscountPrice < finalTargetPrice - 0.01) {
+      throw new Error(`limited discount split/recreate price below finalTargetPrice; refusing too-deep fallback: ${JSON.stringify({storeKey: args.storeKey, skc: row.skc, limitedDiscountPrice, finalTargetPrice})}`);
+    }
+  }
+}
 const store=STORES.find(s=>String(s.storeKey).toUpperCase()===args.storeKey);
 if(!store) throw new Error(`Unknown store ${args.storeKey}`);
 const old=plan.oldActivity||{};
 if(!old.id) throw new Error('plan missing oldActivity.id');
 const allRows=(plan.groups||[]).flatMap(g=>(g.rows||[]).map(r=>({...r, group:g.group, groupEndTime:g.endTime, activityNamePrefix:g.activityNamePrefix})));
 if(!allRows.length) throw new Error('plan groups empty');
+validateTargetRows(allRows);
 const expectedSet=[...new Set(plan.expectedOldSkcs||allRows.map(r=>r.skc))].sort();
 if(expectedSet.length!==allRows.length) throw new Error('expected SKCs and rows length mismatch or duplicate');
 
@@ -61,7 +75,7 @@ let outPath;
 try{
   const identity=await assertIdentity(cdp, store, 'split_recreate_mixed_limited_discount');
   const result=await cdp.eval(`
-    const {plan, allRows, expectedSet, execute, startDelayMinutes}=__arg;
+    const {plan, allRows, expectedSet, execute, startDelayMinutes, allowDropSkcs}=__arg;
     const headers={'content-type':'application/json;charset=UTF-8'};
     async function post(api, body){
       const res=await fetch('/mrs-api-prefix'+api,{method:'POST',headers,credentials:'include',body:JSON.stringify(body)});
@@ -76,10 +90,13 @@ try{
     const oldSkcs=[...new Set(oldGoods.map(g=>String(g.skc||'')))].sort();
     const expected=[...expectedSet].sort();
     const sameSet=oldSkcs.length===expected.length && oldSkcs.every((s,i)=>s===expected[i]);
+    const expectedIsSubset=expected.every(s=>oldSkcs.includes(s));
+    const droppedSkcs=oldSkcs.filter(s=>!expected.includes(s));
+    const unexpectedPlanSkcs=expected.filter(s=>!oldSkcs.includes(s));
     const oldActivity=oldDetail.info || {};
     const state=Number(oldActivity.state ?? oldActivity.base_info?.state ?? oldActivity.activity_base_info?.state ?? 0);
-    const oldSummary={activity_id:oldId, state, act_name:oldActivity.act_name || oldActivity.base_info?.act_name || plan.oldActivity.name, start_time:oldActivity.start_time || plan.oldActivity.start, end_time:oldActivity.end_time || plan.oldActivity.end, oldSkcs, expected, sameSet, goods: oldGoods.map(g=>({skc:g.skc, supplier:g.sku_supplier_no, price:g.product_act_price, state:g.goods_state, id:g.id}))};
-    if(!sameSet) return {ok:false, execute, reason:'old activity goods set mismatch', oldSummary};
+    const oldSummary={activity_id:oldId, state, act_name:oldActivity.act_name || oldActivity.base_info?.act_name || plan.oldActivity.name, start_time:oldActivity.start_time || plan.oldActivity.start, end_time:oldActivity.end_time || plan.oldActivity.end, oldSkcs, expected, sameSet, allowDropSkcs, expectedIsSubset, droppedSkcs, unexpectedPlanSkcs, goods: oldGoods.map(g=>({skc:g.skc, supplier:g.sku_supplier_no, price:g.product_act_price, state:g.goods_state, id:g.id}))};
+    if(!sameSet && !(allowDropSkcs && expectedIsSubset)) return {ok:false, execute, reason: allowDropSkcs ? 'old activity goods set mismatch; expected SKCs are not subset of live old activity goods' : 'old activity goods set mismatch', oldSummary};
     if(![2,3].includes(state)) return {ok:false, execute, reason:'old activity state not wait/start', oldSummary};
 
     const apolloRaw=localStorage.getItem('front-config') || '{}';
@@ -175,7 +192,7 @@ try{
     result.after={createdSkcs, expected, allExpectedCovered: expected.every(s=>createdSkcs.includes(s))};
     result.ok=!!result.after.allExpectedCovered;
     return result;
-  `,{plan, allRows, expectedSet, execute:args.execute, startDelayMinutes:args.startDelayMinutes});
+  `,{plan, allRows, expectedSet, execute:args.execute, startDelayMinutes:args.startDelayMinutes, allowDropSkcs:args.allowDropSkcs});
   const stamp=new Date().toISOString().replace(/[:.]/g,'-');
   outPath=path.join(args.outDir,`mixed-limited-recreate-${args.execute?'execute':'dry-run'}-${args.storeKey}-${stamp}.json`);
   await fs.writeFile(outPath, JSON.stringify({createdAt:new Date().toISOString(), planPath:rel(args.plan), storeKey:args.storeKey, identity, ...result}, null, 2),'utf8');
@@ -188,3 +205,26 @@ try{
   console.error(JSON.stringify({ok:false, execute:args.execute, out:rel(outPath), error:error.message}, null, 2));
   process.exitCode=1;
 }finally{ cdp.close(); }
+
+function validateTargetRows(rows){
+  const invalidTarget=[];
+  const belowTarget=[];
+  for(const row of rows||[]){
+    const skc=String(row.skc||'').trim();
+    const limitedDiscountPrice=Number(row.limitedDiscountPrice);
+    const finalTargetPrice=Number(row.finalTargetPrice ?? row.targetPrice ?? row.minimumAllowedLimitedDiscountPrice ?? row.originalPlannedFinalPrice ?? NaN);
+    if(!Number.isFinite(limitedDiscountPrice)||limitedDiscountPrice<=0){
+      invalidTarget.push({skc, reason:'missing_limitedDiscountPrice', limitedDiscountPrice: row.limitedDiscountPrice});
+      continue;
+    }
+    if(!Number.isFinite(finalTargetPrice)||finalTargetPrice<=0){
+      invalidTarget.push({skc, reason:'missing_finalTargetPrice', limitedDiscountPrice});
+      continue;
+    }
+    if(limitedDiscountPrice < finalTargetPrice - 0.01){
+      belowTarget.push({skc, limitedDiscountPrice, finalTargetPrice, group: row.group || ''});
+    }
+  }
+  if(invalidTarget.length) throw new Error(`split recreate rows missing guarded target price; refusing limited-discount write: ${JSON.stringify(invalidTarget.slice(0,5))}`);
+  if(belowTarget.length) throw new Error(`split recreate limited-discount price is below finalTargetPrice; refusing mechanical 15%/too-deep fallback: ${JSON.stringify(belowTarget.slice(0,5))}`);
+}

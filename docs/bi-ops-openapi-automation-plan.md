@@ -25,6 +25,8 @@
 - **平台缺字段按属性 ID 通用闭环**：`publishOrEdit` 返回“某属性(id)必填”时，后续用户在同一聊天里补“按 800W 算 / 电流 1200mA”等自然语言，系统要从上次平台提示里识别属性 ID、写入当前任务事实并重新资料检查；不能只靠 `SM-505A` 的输入电流特判。
 - **复制上品成功流必须有非 505 回归**：release gate 必须同时覆盖 `SM-505A/505` 样例和非 505 普通货号，证明通用 `copy_product_draft` 生命周期不是靠缝纫机专用默认值跑通；非 505 场景不得自动带入 `输入电流=1200mA`。
 - **维护动作也必须即时检查**：用户说“改库存/改价/上下架/改标题/换图/补证书”时，聊天应立即定位目标链接、生成对应 OpenAPI 维护 payload 和检查快照，并用人话说明“已定位哪些链接、还差什么、能否一句话确认执行”；不能只给补链动作做即时资料检查。
+- **下架候选必须保护新链接**：低曝光零销量下架候选只能作为只读明细给用户确认，不能自动执行。候选至少要满足当前已上架、近 7 天曝光 `c7EpsUv <= 300`、近 7 天销量 `c7_sale_cnt = 0`、`raw_summary.newGoodsTag` 为空；同时固定安全闸是首次上架 15 天内一律排除，不能仅依赖新品标签。缺 `first_shelf_time` 的链接进入待确认/不执行，不得纳入下架候选执行清单。用户确认执行后，`retire_link` 下架是硬目标；货号改成 `（废）标准货号` 只是 best-effort，若 `partialEdit` 因属性/标题/规格校验失败，记录“已下架但货号未改”即可，不阻断下架。
+- 实现组件：策略库 `lib/link_retire_candidate_policy.mjs`；CSV 报告 `scripts/build_link_retire_candidates_from_csv.mjs`（也可通过 `bi_ops_cli retire-candidates` 调用）；云端执行器 `scripts/execute_retire_candidates_openapi.mjs`；货号修复 `scripts/repair_retire_supplier_code_openapi.mjs` + `lib/retire_supplier_code_repair_payload.mjs`。
 - **上传资料后必须回到同一个聊天闭环**：换图、证书等需要补资料的动作，上传图片/PDF/JSON 后要自动重新检查当前处理，并继续在聊天里说明“资料是否通过 / 还缺什么 / 能否一句话执行”；不能要求员工重复创建任务或理解后台验证器。
 - **图片素材由 AI 辅助排序，但不能黑箱提交**：用户上传新链接或换图素材后，系统可以根据图片内容判断轮播主图、细节图、方形图和 SKU/色块图顺序；但提交前必须在同一聊天里给出可读的排序结果、质量/冲突提示和调整入口。AI 不得凭图片发明不存在的商品参数、认证或功能。
 - **旧任务也要执行前再归一化**：即使运行态文件里保留了历史坏状态，`startControlledLinkOpsExecution` 也必须在 dry-run/execute 前重新合并当前聊天事实并归一化 intent、源店、目标店、人工参数和 payload hash。
@@ -77,6 +79,7 @@
 - 销售订单、退货退款、商品/链接基础资料仍写隔离并行层，不覆盖正式事实表；事实源切换仍要按数据域继续看连续对账趋势和历史 warning。
 - 自动化运营写链路已接入官方 OpenAPI 动作：`copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。
 - `copy_product_draft` 已从单店适配推进到 19 店能力 smoke：源链接参数优先从 OpenAPI 商品列表 + `spu-info` / 商品详情 mapper 还原，不要求用户人工补完整发布 payload；强指纹回读未命中时只能进入人工核销，不能弱匹配自动判成功。
+- 批量复制支持：随机供货价区间 `supplyPriceRange`、细节图洗牌 `shuffleImages`、自动电流推断 `inferInputCurrentOverride`（从功率/电压推算）、随机 payload 跳 hash 锁 `skipPayloadHashLock`。
 - `copy_product_draft` / 新链接发布默认只创建十年后定时上架的新链接，防止补链后短期自动上架；测试必须覆盖 payload 级和 SKC 级 `shelf_way=2` / `hope_on_sale_date`。
 - TZ/JSH/TZZ/XC 等 `query-store-info` 不返回 GS 账号的店铺，只允许在 `config/stores.json` / `config/store_account_truth.json` 的静态 `merchantId` 与实际候选一致、且没有 GS 账号冲突时使用 fallback；不得运行时自动回填或放宽身份校验。
 - 网页端最终确认不再显示固定确认框；用户在同一聊天里说“可以执行 / 提交吧 / 照做”等自然语言，服务端只在唯一当前事项、资料检查通过、权限和白名单命中时，内部映射到安全确认码。CLI/脚本仍必须显式传 `--confirm SHEIN_OPENAPI_SUBMIT`，防止绕过网页会话边界。
@@ -371,6 +374,7 @@
 - 图片上传体验验收：用户不需要理解 `partialEdit` 图片 JSON；页面应能接收图片素材、展示已上传文件和 AI 排序建议，并允许用自然语言调整主图/细节图/方形图/SKU 图分配。执行器只有在生成完整 SHEIN 图片字段、权限和确认均满足后才可提交。`partialEdit` 返回版本号，或后台任务进入流转 / 待审核 / 审核中 / 待终审，都视为平台已接收提交；之后不重复提交，只等待审核生命周期或人工后台确认。
 - 安全边界：资料检查、payload hash、账号权限、店铺权限、真实写白名单、执行审计和回读/人工核销仍在后台强制执行。
 - 发版前必须跑 `node scripts/test_bi_ops_release_gate.mjs`；该 gate 覆盖权限矩阵、CLI flow、白名单作用域、前端聊天-only 静态检查、正式 `outputs/bi-portal/index.html` 与 `scripts/bi_app/client.js` 同步检查、补链/维护执行器、OpenAPI readiness 和自然语言聊天路由。凡是修改 `scripts/bi_app/client.js` 或 `scripts/bi_app/styles.css`，都必须重新生成 `outputs/bi-portal/index.html`，否则不能发布。
+- 发版门禁已纳入下架候选策略/CSV 构建/货号修复 payload smoke 测试。
 
 ### 仍不属于官方 OpenAPI 可写范围
 

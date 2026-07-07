@@ -229,6 +229,18 @@
   - `marketing/end_limited_discounts_for_coupon_plan.mjs`：按风险清单终止会挡券或造成低价叠券的旧限时折扣；真实执行必须显式 `--execute`，默认拒绝结束含非目标 SKC 的混合限时折扣活动，除非逐场确认后加 `--allow-mixed-activity-end`；执行后要用上方扫描器复扫。
 
   - `marketing/apply_hl_limited_discount_rescue.mjs`：HL 漏报普通营销活动后的限时折扣兜底执行器；先终止只包含目标 SKC 的冲突旧限时折扣，再按原普通活动价创建补救限时折扣。必须显式传 `--rescue <json>` 与 `--end-time "YYYY-MM-DD HH:mm:ss"`，默认 dry-run，真实写入必须显式 `--execute`，并会把平台/库存不可创建的 SKC 写入 `skippedUnreportable`。
+  - `marketing/build_limited_discount_drift_rescue_plan.mjs`：从每日 guard 的 `limitedDiscountTargetPriceDrift.belowRows` 构建限时折扣漂移修复计划，按店/分组输出 JSON rescue 文件，以当前 `finalTargetPrice` 作为限时折扣价。
+  - `marketing/remove_skc_from_limited_discount.mjs`：从限时折扣活动中移除指定 SKC 的 CDP 执行器，带登录恢复和店铺身份校验。真实执行需明确授权。
+  - `marketing/batch_fix_limited_discount_drift.mjs`：限时折扣价格漂移批量修复器。接受 `--guard` 自动生成 rescue plan，再逐店串行执行删除漂移 SKC + 新建限时折扣；平台阻断 SKC 自动剔除后对可执行子集新建。输出 JSON 汇总 `storesProcessed/storesOk/storesFailed/targetSkcs/removedSkcs/blockedSkcs/createdSkcs`。
+  - `marketing/guard_limited_discount_drift.mjs`：限时折扣漂移上层入口。判断 `limitedDiscountTargetPriceDrift.belowRows` 非空时调用 `batch_fix_limited_discount_drift.mjs`；无漂移时 no-op。
+  - `marketing/smoke_limited_discount_drift_rescue_plan.mjs`：漂移修复计划 smoke，验证使用当前 finalTargetPrice 且保留历史证据。
+  - `marketing/smoke_limited_discount_target_price_guard.mjs`：rescue 执行路径拒绝低于目标价的限时折扣。
+  - `marketing/smoke_new_listing_limited_discount_plan_exact_price.mjs`：新上架限时折扣计划使用精确 storeKey+SKC 目标价证据。
+  - `marketing/smoke_order_audit_linksdata_exact_target.mjs`：订单审计优先使用 linksData 精确 store/SKC 目标价和活动窗口。
+  - `marketing/smoke_order_target_price_windows.mjs`：订单审计在 linksData 无直接行时使用 store/SKC 时间窗口计划目标。
+  - `marketing/smoke_platform_new_label_policy.mjs`：平台"新款/新品/New Arrivals"标签在超出 7 天窗口后仍保持新品待遇，除非已有普通营销活动。
+  - `marketing/smoke_split_limited_discount_target_price_guard.mjs`：拆分限时折扣计划拒绝低于目标价。
+  - `marketing/smoke_split_recreate_limited_discount_target_guard.mjs`：拆分重建混合限时折扣拒绝低于目标价。
 
   - `marketing/split_recreate_mixed_limited_discount.mjs`：混合旧限时折扣拆分重建工具；只用于用户确认后的 P1 级补救，当旧限时折扣活动同时包含目标 SKC 和计划外 SKC、不能整场盲目结束时，按已确认 plan 先校验旧活动完整 SKC 集合，再结束旧活动并拆分重建目标/保留组。默认 dry-run，真实写入必须显式 `--execute`，且必须通过店铺身份校验、旧活动集合一致性校验、post-end 二次校验和新活动回读覆盖校验。
 
@@ -346,6 +358,11 @@
 - `test_shein_store_identity_merchant_fallback.mjs`：验证店铺身份校验的 `merchantId` fallback 只在静态真相匹配且无 GS 冲突时允许，避免 `account_mismatch` 被误放宽。
 
 - `test_bi_ops_copy_product_all_stores_capability.mjs`：验证 `copy_product_draft` 不再局限 HL；在授权、探针、总闸门、白名单和 payload 能力齐全时，非 HL 店也能进入可确认链路。
+- `test_link_retire_candidate_policy.mjs`：下架候选策略 smoke，覆盖 15 天 cutoff、候选通过、首次上架排除、新品标签排除、曝光/销量/缺字段阻断。
+- `test_link_retire_candidates_from_csv.mjs`：CSV 构建器端到端 smoke，4 行 fixture 验证 1 候选/2 首次上架排除/1 新品标签排除。
+- `test_retire_supplier_code_repair_payload.mjs`：修复 payload 构建器和执行器约束 smoke，验证绝不调 shelf 接口、硬排除项、failed partialEdit 不计成功、本机 Windows OpenAPI 拒绝。
+- `test_retire_execute_best_effort.mjs`：执行器 best-effort 语义测试，货号修复失败不阻断下架硬目标、shelf 回读状态分类。
+- `test_link_ops_executor_copy_batch_features.mjs`：复制批量功能自测，随机供货价区间、图片洗牌/全局 sort 唯一、电流推断。
 
 
 
@@ -399,6 +416,8 @@
 
 
 ## 相关共享库
+- `lib/link_retire_candidate_policy.mjs`：低曝光零销量下架候选策略库。计算首次上架 15 天 cutoff，按上架状态、7 天曝光 <= 300、7 天销量 = 0、新品标签、首次上架日期评估候选。
+- `lib/retire_supplier_code_repair_payload.mjs`：构建/校验下架后货号修复 `partialEdit` payload。规范化属性、补齐 Wall Plug/Input voltage/Input current 必填、标题长度守卫、硬排除项分类。
 
 
 
@@ -457,6 +476,9 @@
 
 
 ## 临时探索 / 排障探针，后续可考虑归档
+- `marketing/probe_remove_skc_from_limited_discount.mjs`：只读 CDP/Fetch 探针，拦截限时折扣编辑页的 remove/delete 请求并 abort，不执行。
+- `marketing/probe2_remove_skc.mjs`：FY 浏览器探针，拦截营销 API 调用以发现 remove-SKC 端点。
+- `marketing/probe_remove_skc_v3.mjs` ~ `v7.mjs`：系列只读探针，尝试多种编辑/详情/管理 URL 和 UI 交互以发现 remove 控件，均不确认删除。非生产脚本，可归档。
 
 
 
@@ -507,6 +529,11 @@
 - 清理候选报告：
 
   - `report_lark_base_cleanup_candidates.mjs`
+
+  - `build_link_retire_candidates_from_csv.mjs`：低曝光零销量下架候选只读报告。输入已带创建时间、首次上架时间、近 7 天曝光/销量和新品标签的 CSV，输出待确认 CSV/Markdown/JSON；不会调用 SHEIN，也不会下架。固定安全规则是：已上架、近 7 天曝光 `c7EpsUv <= 300`、近 7 天销量 `0`、平台新品标签为空，且首次上架已满 15 天。首次上架 15 天内不管是否有新品标签都排除；缺 `first_shelf_time` 的行只能进待确认/不执行。
+
+  - `execute_retire_candidates_openapi.mjs`：云端专用的已确认下架候选执行器。本机只能 dry-run；真实执行必须在 `shein-bi-tencent` 用 `SHEIN_BI_CLOUD_EXECUTION=1`、dry-run `payloadHash` 和确认文本运行。执行顺序是先 `retire_link` 下架，再 best-effort 改 `（废）标准货号`；改货号失败不阻断下架，最终汇总分为“已下架+货号已改/进入审核”“已下架+货号未改”“下架失败”。
+  - `repair_retire_supplier_code_openapi.mjs`：已下架但货号未改成`（废）...`的修复专用执行器。只调 `partialEdit`，绝不调 shelf 接口；本机只能 dry-run，真实执行必须在云端。硬排除 FY SK-5110 和指定 SK-270。
 
 
 

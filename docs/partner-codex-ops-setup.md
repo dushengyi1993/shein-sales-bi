@@ -107,6 +107,7 @@ node scripts/bi_ops_cli.mjs doctor --operation copy_product_draft --target-store
 - 不带 `--require-real-submit` 时，只要求能建任务 / dry-run；适合普通运营确认“我能不能先做预检”。
 - 带 `--require-real-submit` 时，会要求该账号、店铺和动作已经具备真实提交能力；如果仍被总闸门、白名单、账号写权限或动作适配器挡住，命令会退出非 0，并在 `requestedActionReadiness.items[].blockers` 里列出原因。
 - 目前已接入的官方 OpenAPI 写适配器包括：`copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。它们默认只做 dry-run；真实执行必须同时满足账号写权限、`safeWriteOperations`、真实写白名单、人 + 店 + 动作、上一次 dry-run 的 `payloadHash`、`waiting_review` 状态和确认文本 `SHEIN_OPENAPI_SUBMIT`。网页端不会要求用户输入英文安全码或固定确认框，而是在同一聊天里用“可以执行 / 提交吧 / 照做”等自然语言确认；服务端内部映射成安全确认码，CLI/脚本仍使用 `SHEIN_OPENAPI_SUBMIT`。
+- 批量下架弱链接前必须先出只读明细让用户确认。低曝光零销量候选统一按“已上架 + 近 7 天曝光 `<=300` + 近 7 天销量 `0` + 无平台新品标签 + 首次上架已满 15 天”筛选；首次上架 15 天内的链接，不管是否还有新品标签，一律不进入下架执行清单。缺初次上架时间时只能放入待确认/不执行。用户确认后才可用 `retire_link` 下架，并尽力把货号改成 `（废）标准货号`；如果改废货号被平台 `partialEdit` 校验卡住，结果按“已下架但货号未改”汇总，不再为了货号阻断下架。
 - 维护类适配器使用官方文档：商品上下架 `3001253 /open-api/goods/modify-skc-shelf`（`activate_link` 使用 `shelf_state=1`，`retire_link` 使用 `shelf_state=2`），库存 `3001738 /open-api/stock/change-inventory/v2`，供货价 `3001681 /open-api/goods/update-cost`，售价 `3001407 /open-api/openapi-business-backend/product/price/save`，局部编辑 `3001810 /open-api/goods/product/partialEdit`；证书/资质包含 `3001477 /open-api/goods/save-or-update-certificate-pool`、`3001183 /open-api/goods/save-certificate-pool-skc-bind` 等证书接口。网页端 `update_images` 不能要求普通员工手写 `partialEdit` JSON：用户上传图片后，系统应在聊天里展示 AI 排序和资料缺口，再由执行层转换成 SHEIN 需要的图片 URL 与 `partialEdit` 字段；若转换不完整，任务停在资料检查。CLI/脚本仍可传完整结构化 payload 做管理员验收。`certificate_review` 要求提供 `certificatePayloads[{endpoint,body}]`，提交后默认人工核销审核状态。
 - `campaign_signup` / `flash_discount` 当前不走官方 OpenAPI：公开目录未发现营销报名、限时折扣、优惠券报名写接口证据，所以它们继续走本地营销运营流程、价格栈守卫和人工确认，不会在 OpenAPI 总账里伪装成“可真实提交”。
 - 管理员验证维护写前，可先用 `node scripts/verify_shein_openapi_doc_detail.mjs --doc-id 3001253 --endpoint /open-api/goods/modify-skc-shelf --require-verified --pretty` 拉取脱敏 schema 证据，再用 `node scripts/check_bi_ops_maintenance_readiness.mjs --operation retire_link --doc-evidence <schema证据> --store-probe <逐店权限证据> --readback-evidence <回读证据> --expect pilot_ready --pretty` 做总检查。证据文件只放忽略目录；脚本不会打印或保存 Cookie，也不会调用 SHEIN 业务写接口。
@@ -291,6 +292,9 @@ node scripts/bi_ops_cli.mjs tasks --pretty
 
 如果审计里出现 `weak_match_only` 或 `weakMatchedCount > 0`，意思是只找到了平台 SKU、源 SKC 或货号文本这类弱证据；这不能证明新链接已经可靠生成，也需要人工确认后再核销。
 
+**Q: 已下架但货号没改成`（废）...`怎么办？**
+A: 用 `scripts/repair_retire_supplier_code_openapi.mjs` 在云端单独修复，只调 `partialEdit` 改货号，不影响已完成的下架状态。
+
 ### 换电脑或换账号
 
 先退出：
@@ -357,6 +361,21 @@ node scripts/test_link_ops_image_role_planner.mjs
 以下命令均走本机受控 CLI，不保存 SHEIN 密钥，不打印 `openKeyId/secretKey`。默认 `dry-run` 不调用 SHEIN。
 
 > 2026-07-03 边界更新：本机因 SHEIN OpenAPI 白名单/身份边界不能直连真实 OpenAPI。日常 `bi_ops_cli` 的真实上传、提交、回读必须走 `shein-bi-tencent` 云端；本机只做图包规划、payload/dry-run 和假接口 smoke。底层 `scripts/openapi_*_executor.mjs` 保留给云端运行和本地 fake OpenAPI 测试，不作为本机真实业务入口。
+### 下架候选与货号修复
+
+```powershell
+# 生成下架候选明细（只读）
+node scripts/bi_ops_cli.mjs retire-candidates --file <enriched-csv> --performance-date <YYYY-MM-DD>
+
+# 云端执行已确认下架
+node scripts/execute_retire_candidates_openapi.mjs --input <confirmed-candidates.json> --execute --confirm SHEIN_OPENAPI_SUBMIT
+
+# 云端修复已下架但货号未改的链接
+node scripts/repair_retire_supplier_code_openapi.mjs --input <repair-rows.json> --execute --confirm SHEIN_OPENAPI_SUBMIT
+```
+
+货号修复是独立流程，只调 `partialEdit`，不调 shelf 接口；修复失败不阻断已完成的下架。
+
 
 ### 图片和图包
 

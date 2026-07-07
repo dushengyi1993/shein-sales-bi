@@ -84,6 +84,8 @@ BI 系统当前分为三层入口：
    - 云端入口：`https://sa.dushengyi.cc/`，旧 IP `http://43.165.167.135/` 仅作兜底
    - 负责“每天先看什么、先处理什么、如何复制指令、如何标记处理状态”。
    - API section cache 位于 `outputs/bi-portal/sections/`；派生 section 要遵守源缓存生命周期，例如 `homeProfit` 必须从当前 `profit` section 派生。`serve_bi_portal.mjs` 负责 section API、gzip/raw cache 返回，以及 core `generatedAt` 变化后的后台 warmup 兜底。
+   - 首页"单货号成交价格分布"面板：依赖销售明细/homeRankings 行，客户端计算每行均价并分桶，无新写路径，只读决策支持。
+   - 首页"成交价散点图"（priceScatter section）：基于 `fact.order_item` 的 `unit_price_sar = sales_sar / quantity`，按订单日期 × 成交单价绘制散点；不筛选货号时显示全货盘分布，筛选后缩小到单货号。Section API 为 `/api/bi/section/priceScatter`，需同时在 `BI_PORTAL_SECTION_KEYS` 白名单注册。
    - 本地 `127.0.0.1:8787` 和局域网入口已封存，不再作为正式入口。
    - 短期动作状态仍为服务端状态文件，长期应入 PostgreSQL，避免文件状态成为单点。
    - `mart.openapi_sales_reconciliation` 是 19 店 OpenAPI 销售隔离双跑对账表；它不覆盖正式销售事实表，切生产源前必须看连续日期 matched/warning 趋势。
@@ -173,6 +175,8 @@ BI 系统当前分为三层入口：
 
 用途：后续团队协作。
 
+- 下架候选实现组件：策略库 `lib/link_retire_candidate_policy.mjs`、CSV 报告 `scripts/build_link_retire_candidates_from_csv.mjs`、云端执行器 `scripts/execute_retire_candidates_openapi.mjs`、货号修复 `scripts/repair_retire_supplier_code_openapi.mjs` + `lib/retire_supplier_code_repair_payload.mjs`。下架和货号修复是独立阶段，货号修复失败不阻断下架。
+
 ## 当前入仓状态（2026-05-06 截面）
 
 当前 BI 仓库已经按 16 店写入 `2026-05-06` 销售截面，业务域和链接表现为前一完整业务日 `2026-05-05`：
@@ -223,6 +227,8 @@ BI 系统当前分为三层入口：
 - `mart.bi_link_health_current`：链接/SKC 健康分层；
 - `mart.bi_action_queue_current`：当前实操队列。
 
+**SQL schema drift 注意**：`generate_bi_portal.mjs` 的 insights CTE 曾误用 `FROM mart.bi_link_health_current`（该视图暴露 `eps_uv` 而非 `c7_eps_uv`），导致云端刷新失败。修复后改为 `FROM link_health_enriched`（同链 CTE 别名）。后续新增引用 `mart.*` 视图时，必须先用 `\dv mart.*` 和 `\d mart.<view>` 确认字段名，不能假设 CTE 别名与视图字段同名。
+
 - 今日/昨日/本月销售额；
 - 店铺排行；
 - 货号排行；
@@ -258,7 +264,8 @@ BI 系统当前分为三层入口：
 - 补链接；
 - 待上架卡点；
 - 优化候选；
-- 下架候选；
+- 下架候选：必须先生成明细给用户确认，不自动执行；统一安全口径为已上架、近 7 天曝光 `c7EpsUv <= 300`、近 7 天销量 `c7_sale_cnt = 0`、SHEIN 新品标签 `newGoodsTag` 为空、首次上架已满 15 天。缺首次上架时间或缺新品标签字段的旧数据只能放待确认/不执行；
+- 下架后货号修复是独立流程，只调 `partialEdit` 改货号为`（废）标准货号`，不调 shelf 接口；修复失败不阻断已完成的下架。
 - 库存调整；
 - 复核项。
 

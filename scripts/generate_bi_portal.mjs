@@ -128,6 +128,7 @@ const PORTAL_API_SECTION_KEYS = [
   'inventoryTrend',
   'comments',
   'orders',
+  'priceScatter',
   'afterSales',
   'rtvData',
   'waybills',
@@ -221,6 +222,9 @@ const PORTAL_SECTION_SELECTS = {
   orders: `
   'orders', (SELECT data FROM orders)
 `,
+  priceScatter: `
+  'priceScatter', (SELECT data FROM price_scatter)
+`,
   afterSales: `
   'afterSales', (SELECT data FROM after_sales)
 `,
@@ -233,8 +237,43 @@ const PORTAL_SECTION_SELECTS = {
 `,
 };
 
+const STANDALONE_SECTION_SQL = {
+  priceScatter: `
+WITH price_scatter AS (
+  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY t.created_date NULLS LAST, t.unit_price_sar NULLS LAST), '[]'::jsonb) AS data
+  FROM (
+    SELECT
+      oi.order_item_key,
+      oi.created_date,
+      oi.order_create_time,
+      oi.store_key,
+      coalesce(nullif(oi.group_key,''), '') AS group_key,
+      dim.product_canonical_sn(oi.standard_goods_sn) AS standard_goods_sn,
+      oi.skc,
+      oi.quantity,
+      round(coalesce(oi.sales_sar,0)::numeric, 2) AS sales_sar,
+      CASE WHEN coalesce(oi.quantity,0) > 0
+        THEN round((coalesce(oi.sales_sar,0) / oi.quantity)::numeric, 2)
+        ELSE NULL
+      END AS unit_price_sar
+    FROM fact.order_item oi
+    WHERE coalesce(oi.sales_sar,0) > 0
+      AND coalesce(oi.quantity,0) > 0
+      AND coalesce(oi.standard_goods_sn,'') <> ''
+    ORDER BY oi.created_date DESC, oi.order_create_time DESC
+    LIMIT 20000
+  ) t
+)
+SELECT jsonb_build_object(
+  'priceScatter', (SELECT data FROM price_scatter)
+)::text;
+`,
+};
+
 function buildSectionSql(section) {
   const key = String(section || '').trim();
+  const standaloneSql = STANDALONE_SECTION_SQL[key];
+  if (standaloneSql) return standaloneSql;
   const selectBody = PORTAL_SECTION_SELECTS[key];
   if (!selectBody) throw new Error(`Unknown BI portal section: ${key}`);
   const sql = buildSql();
@@ -1607,9 +1646,21 @@ link_health_base AS (
     coalesce(sp.on_shelf_count, 0) AS same_product_on_shelf_count,
     (
       l.is_on_shelf
-      AND coalesce(p.c30_sale_cnt, 0) = 0
+      AND coalesce(p.c7_sale_cnt, 0) = 0
+      AND (
+        p.raw_summary ? 'newGoodsTag'
+        OR p.raw_summary#>'{c30,newGoodsTag}' IS NOT NULL
+        OR p.raw_summary#>'{c7,newGoodsTag}' IS NOT NULL
+      )
+      AND coalesce(
+        nullif(p.raw_summary->>'newGoodsTag',''),
+        nullif(p.raw_summary#>>'{c30,newGoodsTag}',''),
+        nullif(p.raw_summary#>>'{c7,newGoodsTag}','')
+      ) IS NULL
+      AND CASE WHEN coalesce(p.raw_summary->>'c7EpsUv','') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+        THEN (p.raw_summary->>'c7EpsUv')::numeric ELSE NULL END <= 300
       AND l.first_shelf_time IS NOT NULL
-      AND l.first_shelf_time::date <= l.snapshot_date - interval '30 days'
+      AND l.first_shelf_time::date < l.snapshot_date - interval '14 days'
     ) AS retire_candidate,
     (
       l.is_on_shelf
@@ -1628,9 +1679,21 @@ link_health_base AS (
     CASE
       WHEN l.is_wait_shelf AND coalesce(l.wait_shelf_blocked,false) THEN '待上架卡点'
       WHEN l.is_on_shelf
-        AND coalesce(p.c30_sale_cnt, 0) = 0
+        AND coalesce(p.c7_sale_cnt, 0) = 0
+        AND (
+          p.raw_summary ? 'newGoodsTag'
+          OR p.raw_summary#>'{c30,newGoodsTag}' IS NOT NULL
+          OR p.raw_summary#>'{c7,newGoodsTag}' IS NOT NULL
+        )
+        AND coalesce(
+          nullif(p.raw_summary->>'newGoodsTag',''),
+          nullif(p.raw_summary#>>'{c30,newGoodsTag}',''),
+          nullif(p.raw_summary#>>'{c7,newGoodsTag}','')
+        ) IS NULL
+        AND CASE WHEN coalesce(p.raw_summary->>'c7EpsUv','') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+          THEN (p.raw_summary->>'c7EpsUv')::numeric ELSE NULL END <= 300
         AND l.first_shelf_time IS NOT NULL
-        AND l.first_shelf_time::date <= l.snapshot_date - interval '30 days' THEN '下架候选'
+        AND l.first_shelf_time::date < l.snapshot_date - interval '14 days' THEN '下架候选'
       WHEN l.is_on_shelf AND coalesce(p.eps_uv,0) >= 100 AND coalesce(p.click_rate,0) < 0.02 THEN '优化：高曝光低点击'
       WHEN l.is_on_shelf AND coalesce(p.goods_uv,0) >= 30 AND coalesce(p.pay_rate,0) < 0.01 THEN '优化：高访客低支付'
       WHEN l.is_on_shelf THEN '正常在售'
@@ -3884,12 +3947,12 @@ insights AS (
         skc,
         '下架候选链接' AS title,
         '高' AS priority,
-        least(150, (80 + coalesce(eps_uv,0) / 20.0 + coalesce(goods_uv,0) * 2 + coalesce(shelf_age_days,0) / 10.0))::numeric AS score,
-        concat('已上架约 ', coalesce(shelf_age_days,0), ' 天；30天销量 ', coalesce(c30_sale_cnt,0), '；曝光 ', coalesce(eps_uv,0), '；商详访客 ', coalesce(goods_uv,0), '。') AS evidence,
-        '如果同货号同店已有更好链接，可复核后下架；如果是唯一承接，先补新链接再淘汰。' AS next_step
-      FROM mart.bi_link_health_current
+        least(150, (80 + coalesce(shelf_age_days,0) / 5.0 + greatest(0, 300 - coalesce(c7_eps_uv,0)) / 6.0))::numeric AS score,
+        concat('已上架约 ', coalesce(shelf_age_days,0), ' 天；7天销量 ', coalesce(c7_sale_cnt,0), '；7天曝光 ', coalesce(c7_eps_uv,0), '；新品标签为空；首次上架已超过15天。') AS evidence,
+        '先导出明细给人工确认；确认同店承接和库存后，再通过受控任务下架并把货号改为（废）标准货号。' AS next_step
+      FROM link_health_enriched
       WHERE retire_candidate
-      ORDER BY eps_uv DESC NULLS LAST, goods_uv DESC NULLS LAST
+      ORDER BY shelf_age_days DESC NULLS LAST, c7_eps_uv ASC NULLS LAST
       LIMIT 8
     ) l
     UNION ALL
@@ -4255,6 +4318,31 @@ trend_readiness AS (
     'financeSeries', (SELECT data FROM trend_finance_series),
     'storeSalesChange', (SELECT data FROM trend_store_sales_change)
   ) AS data
+),
+price_scatter AS (
+  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY t.created_date NULLS LAST, t.unit_price_sar NULLS LAST), '[]'::jsonb) AS data
+  FROM (
+    SELECT
+      oi.order_item_key,
+      oi.created_date,
+      oi.order_create_time,
+      oi.store_key,
+      coalesce(nullif(oi.group_key,''), '') AS group_key,
+      dim.product_canonical_sn(oi.standard_goods_sn) AS standard_goods_sn,
+      oi.skc,
+      oi.quantity,
+      round(coalesce(oi.sales_sar,0)::numeric, 2) AS sales_sar,
+      CASE WHEN coalesce(oi.quantity,0) > 0
+        THEN round((coalesce(oi.sales_sar,0) / oi.quantity)::numeric, 2)
+        ELSE NULL
+      END AS unit_price_sar
+    FROM fact.order_item oi
+    WHERE coalesce(oi.sales_sar,0) > 0
+      AND coalesce(oi.quantity,0) > 0
+      AND coalesce(oi.standard_goods_sn,'') <> ''
+    ORDER BY oi.created_date DESC, oi.order_create_time DESC
+    LIMIT 20000
+  ) t
 )
 SELECT jsonb_build_object(
   'generatedAt', now(),
@@ -4303,6 +4391,7 @@ SELECT jsonb_build_object(
   'financeGoods', (SELECT data FROM finance_goods),
   'inventoryAlerts', (SELECT data FROM inventory_alerts),
   'orders', (SELECT data FROM orders),
+  'priceScatter', (SELECT data FROM price_scatter),
   'afterSales', (SELECT data FROM after_sales),
   'afterSalesReview', (SELECT data FROM after_sales_review),
   'rtvReview', (SELECT data FROM rtv_review),
@@ -5748,6 +5837,10 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck, 
             </div>
           </div>
           <div class="card" style="margin-top:16px">
+            <div class="card-h"><div><h3>成交价分布 · 点阵图</h3><div class="sub">每个点是一笔订单明细，横轴=下单日期，纵轴=实际成交单价(SAR)。点位密集的价格带就是最好卖的成交价区间。</div></div></div>
+            <div class="card-body"><div id="priceScatterChart"></div></div>
+          </div>
+          <div class="card" style="margin-top:16px">
             <div class="card-h"><div><h3>订单明细</h3><div class="sub">用于从店铺/货号/SKC 反查当日订单。</div></div></div>
             <div class="card-body"><div id="ordersTable"></div></div>
           </div>
@@ -6077,7 +6170,7 @@ function requiredBiSectionsForTab(tab = state.tab || 'overview'){
     links:['linksData','actions'],
     linkops:['linksData','actions'],
     comments:['comments'],
-    business:['orders','afterSales','rtvData','waybills'],
+    business:['orders','priceScatter','afterSales','rtvData','waybills'],
     profit:['profit','rankings','rtvData'],
     inventory:['profit'],
     actions:['actions','linksData','afterSales','waybills','orders'],
@@ -13416,10 +13509,190 @@ function rtvReviewActionText(row){
   if (row?.candidate_cases) return '有 SHEIN 候选：按候选退货单逐个看物流轨迹。';
   return '没有明确候选：先按 ET 物流号、货号和收件时间反查。';
 }
+function renderPriceScatter(rows) {
+  if (!rows || !rows.length) {
+    return '<div class="empty">当前筛选下没有订单明细数据。</div>';
+  }
+
+  const prices = rows.map(r => Number(r.unit_price_sar || 0)).filter(p => p > 0);
+  if (!prices.length) {
+    return '<div class="empty">没有有效的成交单价数据。</div>';
+  }
+  const minPrice = Math.min(...prices);
+  const maxPrice = Math.max(...prices);
+  const priceRange = maxPrice - minPrice || 1;
+  const pricePad = priceRange * 0.1;
+  const yMin = Math.max(0, minPrice - pricePad);
+  const yMax = maxPrice + pricePad;
+
+  const dates = rows.map(r => String(r.created_date || '').slice(0, 10)).filter(Boolean).sort();
+  if (!dates.length) {
+    return '<div class="empty">没有有效的下单日期数据。</div>';
+  }
+  const minDate = dates[0];
+  const maxDate = dates[dates.length - 1];
+  const minTime = new Date(minDate + 'T00:00:00+08:00').getTime();
+  const maxTime = new Date(maxDate + 'T23:59:59+08:00').getTime();
+  const timeRange = maxTime - minTime || 86400000;
+
+  const hasProductFilter = !!state.q;
+  const groupKey = hasProductFilter ? 'store_key' : 'standard_goods_sn';
+  const groups = [...new Set(rows.map(r => r[groupKey] || '未知'))];
+  const colorPalette = ['#3b82f6','#ef4444','#10b981','#f59e0b','#8b5cf6','#ec4899','#06b6d4','#84cc16','#f97316','#6366f1','#14b8a6','#e11d48','#a855f7','#eab308','#64748b'];
+  const groupColors = {};
+  groups.forEach((g, i) => { groupColors[g] = colorPalette[i % colorPalette.length]; });
+
+  const quantities = rows.map(r => Number(r.quantity || 1));
+  const minQty = Math.min(...quantities) || 1;
+  const maxQty = Math.max(...quantities) || 1;
+
+  const canvasId = 'priceScatterCanvas';
+  const tooltipId = 'priceScatterTooltip';
+
+  let html = '<div style="position:relative">';
+  html += '<div style="margin-bottom:8px;display:flex;gap:12px;flex-wrap:wrap;align-items:center">';
+  html += '<span style="font-size:13px;color:#64748b">共 ' + rows.length + ' 个订单明细 · 单价 ' + money(yMin) + ' ~ ' + money(yMax) + ' SAR</span>';
+  if (groups.length <= 8) {
+    groups.forEach(g => {
+      html += '<span style="display:inline-flex;align-items:center;gap:4px;font-size:12px"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:' + groupColors[g] + '"></span>' + escapeHtml(g) + '</span>';
+    });
+  } else {
+    html += '<span style="font-size:12px;color:#64748b">' + groups.length + ' 个' + (hasProductFilter ? '店铺' : '货号') + '</span>';
+  }
+  html += '</div>';
+  html += '<canvas id="' + canvasId + '" style="width:100%;height:420px;display:block;border:1px solid #e5e7eb;border-radius:6px;background:#fafafa"></canvas>';
+  html += '<div id="' + tooltipId + '" style="position:absolute;display:none;pointer-events:none;background:rgba(17,24,39,0.92);color:#fff;padding:8px 10px;border-radius:6px;font-size:12px;line-height:1.5;max-width:280px;z-index:10;box-shadow:0 4px 12px rgba(0,0,0,0.2)"></div>';
+  html += '</div>';
+
+  setTimeout(() => {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+
+    const W = rect.width;
+    const H = rect.height;
+    const padL = 60, padR = 20, padT = 20, padB = 40;
+    const plotW = W - padL - padR;
+    const plotH = H - padT - padB;
+
+    ctx.strokeStyle = '#e5e7eb';
+    ctx.lineWidth = 1;
+    ctx.font = '11px sans-serif';
+    ctx.fillStyle = '#64748b';
+
+    const yTicks = 6;
+    for (let i = 0; i <= yTicks; i++) {
+      const y = padT + (plotH / yTicks) * i;
+      const val = yMax - ((yMax - yMin) / yTicks) * i;
+      ctx.beginPath();
+      ctx.moveTo(padL, y);
+      ctx.lineTo(W - padR, y);
+      ctx.stroke();
+      ctx.textAlign = 'right';
+      ctx.fillText(val.toFixed(1), padL - 6, y + 4);
+    }
+
+    const xTicks = Math.max(1, Math.min(8, dates.length));
+    for (let i = 0; i <= xTicks; i++) {
+      const x = padL + (plotW / xTicks) * i;
+      const t = minTime + (timeRange / xTicks) * i;
+      const d = new Date(t);
+      const label = (d.getMonth() + 1) + '/' + d.getDate();
+      ctx.textAlign = 'center';
+      ctx.fillText(label, x, H - padB + 16);
+      if (i > 0 && i < xTicks) {
+        ctx.beginPath();
+        ctx.moveTo(x, padT);
+        ctx.lineTo(x, H - padB);
+        ctx.strokeStyle = '#f0f0f0';
+        ctx.stroke();
+        ctx.strokeStyle = '#e5e7eb';
+      }
+    }
+
+    ctx.beginPath();
+    ctx.moveTo(padL, padT);
+    ctx.lineTo(padL, H - padB);
+    ctx.lineTo(W - padR, H - padB);
+    ctx.strokeStyle = '#9ca3af';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.fillStyle = '#374151';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('成交单价 (SAR)', padL / 2, H / 2);
+    ctx.fillText('下单日期', W / 2, H - 8);
+
+    const pointData = [];
+    for (const r of rows) {
+      const t = new Date(String(r.created_date || '').slice(0, 10) + 'T00:00:00+08:00').getTime();
+      const price = Number(r.unit_price_sar || 0);
+      if (!t || !price) continue;
+
+      const x = padL + ((t - minTime) / timeRange) * plotW;
+      const y = padT + (1 - (price - yMin) / (yMax - yMin)) * plotH;
+      const qty = Number(r.quantity || 1);
+      const radius = Math.max(2, Math.min(8, 2 + (qty - minQty) / Math.max(1, maxQty - minQty) * 6));
+      const color = groupColors[r[groupKey] || '未知'] || '#3b82f6';
+
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.65;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+
+      pointData.push({x, y, radius, row: r, color});
+    }
+
+    const tooltip = document.getElementById(tooltipId);
+    if (tooltip) {
+      canvas.onmousemove = (e) => {
+        const cRect = canvas.getBoundingClientRect();
+        const mx = e.clientX - cRect.left;
+        const my = e.clientY - cRect.top;
+        let found = null;
+        for (const p of pointData) {
+          const dx = mx - p.x;
+          const dy = my - p.y;
+          if (dx * dx + dy * dy <= (p.radius + 3) * (p.radius + 3)) {
+            found = p;
+            break;
+          }
+        }
+        if (found) {
+          const r = found.row;
+          tooltip.style.display = 'block';
+          tooltip.style.left = (found.x + 12) + 'px';
+          tooltip.style.top = (found.y - 10) + 'px';
+          tooltip.innerHTML =
+            '<div><b>' + escapeHtml(productDisplayName(r)) + '</b></div>' +
+            '<div>店铺: ' + escapeHtml(r.store_key || '-') + '</div>' +
+            '<div>日期: ' + escapeHtml(String(r.created_date || '').slice(0, 10)) + '</div>' +
+            '<div>单价: ' + money(r.unit_price_sar) + ' SAR</div>' +
+            '<div>数量: ' + num(r.quantity) + ' 件</div>' +
+            '<div>金额: ' + money(r.sales_sar) + ' SAR</div>';
+        } else {
+          tooltip.style.display = 'none';
+        }
+      };
+      canvas.onmouseleave = () => { tooltip.style.display = 'none'; };
+    }
+  }, 50);
+
+  return html;
+}
 function renderBusiness(){
   const allBusinessCount = (DATA.finance || []).length + (DATA.orders || []).length + (DATA.afterSales || []).length + (DATA.rtvReview || []).length + (DATA.rtvTrace || []).length + (DATA.waybills || []).length + (DATA.financeOrders || []).length + (DATA.financeGoods || []).length;
   const financeRows = (DATA.finance || []).filter(includes);
   const orderRows = (DATA.orders || []).filter(includes).filter(r => rowInSelectedRangeBy(r, ['created_date', 'order_create_time']));
+  const scatterRows = (DATA.priceScatter || []).filter(includes).filter(r => rowInSelectedRangeBy(r, ['created_date', 'order_create_time']));
   const afterRows = (DATA.afterSales || []).filter(includes).filter(r => rowInSelectedRangeBy(r, ['request_time', 'snapshot_date']));
   const afterReviewRows = (DATA.afterSalesReview || []).filter(includes).filter(r => rowInSelectedRangeBy(r, ['request_time', 'order_created_date', 'snapshot_date']));
   const rtvReviewRows = (DATA.rtvReview || []).filter(includes).filter(r => rowInSelectedRangeBy(r, ['create_time']));
@@ -13538,6 +13811,7 @@ function renderBusiness(){
     ['曝光/加车', r => num(r.goods_uv)+' / '+num(r.cart_uv), 'num'],
     ['销售', r => money(r.sale_amt), 'num']
   ]);
+  $('priceScatterChart').innerHTML = renderPriceScatter(scatterRows);
   $('ordersTable').innerHTML =
     sectionTitleHtml('订单明细', '按订单创建时间口径；用于从店铺、货号、SKC 反查销售。', selectedRangeText())+
     table(orderRows, [
