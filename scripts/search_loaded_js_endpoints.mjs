@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 import fs from 'node:fs/promises';
 const port = Number(process.argv[2] || 9333);
 const out = 'outputs/captures/js-endpoint-search.txt';

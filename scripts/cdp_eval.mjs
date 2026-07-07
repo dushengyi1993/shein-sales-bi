@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 const port = Number(process.argv[2] || 9333);
 const expr = process.argv.slice(3).join(' ') || '({title: document.title, url: location.href, text: document.body?.innerText?.slice(0, 2000)})';
 
