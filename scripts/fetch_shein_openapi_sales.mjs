@@ -8,6 +8,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {isValidSalesGoodsRow, summarizeSalesGoodsRows} from '../lib/shein_sales_validity.mjs';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -72,15 +73,6 @@ function round2(n) {
   return Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
 }
 
-function isPositiveSaleLine(order, item) {
-  const orderStatus = Number(order?.orderStatus);
-  const goodsStatus = Number(item?.newGoodsStatus);
-  const estimatedIncome = Number(item?.estimatedIncome || 0);
-  if (!Number.isFinite(estimatedIncome) || estimatedIncome <= 0) return false;
-  if (orderStatus === 6 || goodsStatus === 6) return false;
-  return true;
-}
-
 async function readJson(file) {
   return JSON.parse(await fs.readFile(file, 'utf8'));
 }
@@ -135,6 +127,21 @@ function attrSuffix(item) {
   return cn?.attrName || us?.attrName || '';
 }
 
+function isCancelledBeforePickup(order, item) {
+  const orderStatus = Number(order?.orderStatus);
+  const goodsStatus = Number(item?.newGoodsStatus);
+  const performanceTag = Number(item?.performanceTag);
+  return orderStatus === 6 && goodsStatus === 6 && performanceTag === 2;
+}
+
+function openApiGoodsPerformanceStatus(order, item) {
+  return isCancelledBeforePickup(order, item) ? 6 : item.performanceTag ?? '';
+}
+
+function openApiGoodsPerformanceStatusDesc(order, item) {
+  return isCancelledBeforePickup(order, item) ? '揽收前已取消' : '';
+}
+
 function toOrderRows(orderDetails) {
   return orderDetails.map((order) => ({
     orderId: String(order.orderNo || ''),
@@ -156,8 +163,9 @@ function toGoodsRows(orderDetails) {
   for (const order of orderDetails) {
     const orderTime = order.orderTime || order.orderAllocateTime || '';
     for (const item of asArray(order.orderGoodsInfoList)) {
-      const positive = isPositiveSaleLine(order, item);
-      const currencyPrice = positive ? round2(item.estimatedIncome || 0) : 0;
+      const currencyPrice = round2(item.estimatedIncome || 0);
+      const goodsPerformanceStatus = openApiGoodsPerformanceStatus(order, item);
+      const goodsPerformanceStatusDesc = openApiGoodsPerformanceStatusDesc(order, item);
       rows.push({
         orderId: String(order.orderNo || ''),
         orderNo: String(order.orderNo || ''),
@@ -186,11 +194,18 @@ function toGoodsRows(orderDetails) {
         currencyCode: item.saleCurrency || item.orderCurrency || '',
         currencyPrice,
         newOrderGoodsStatus: item.newGoodsStatus ?? '',
-        goodsPerformanceStatus: item.performanceTag ?? '',
-        goodsPerformanceStatusDesc: '',
+        goodsPerformanceStatus,
+        goodsPerformanceStatusDesc,
         goodsExchangeTag: item.goodsExchangeTag ?? '',
         performanceTag: item.performanceTag ?? '',
         storageTag: item.storageTag ?? '',
+        isValidSale: isValidSalesGoodsRow({
+          number: 1,
+          currencyPrice,
+          goodsPerformanceStatus,
+          goodsPerformanceStatusDesc,
+        }),
+        salesExclusionReason: isCancelledBeforePickup(order, item) ? 'cancelled_before_pickup' : '',
       });
     }
   }
@@ -198,19 +213,21 @@ function toGoodsRows(orderDetails) {
 }
 
 function summarize(orderList, orderRows, goodsRows) {
-  const positiveGoodsRows = goodsRows.filter((row) => Number(row.currencyPrice || 0) > 0);
-  const positiveOrderNos = new Set(positiveGoodsRows.map((row) => row.orderNo));
-  const salesSar = round2(positiveGoodsRows.reduce((sum, row) => sum + Number(row.currencyPrice || 0), 0));
+  const goodsSales = summarizeSalesGoodsRows(goodsRows);
+  const salesSar = round2(goodsSales.salesSar);
   return {
     orderRefCount: orderList.length,
     apiCount: orderList.length,
     detailedOrderCount: orderRows.length,
-    positiveAmountOrderCount: positiveOrderNos.size,
+    positiveAmountOrderCount: goodsSales.positiveAmountOrderCount,
     goodsLineCount: goodsRows.length,
-    quantityAll: goodsRows.reduce((sum, row) => sum + Number(row.number || 0), 0),
-    quantityPositiveAmount: positiveGoodsRows.reduce((sum, row) => sum + Number(row.number || 0), 0),
+    quantityAll: goodsSales.quantityAll,
+    quantityPositiveAmount: goodsSales.quantityPositiveAmount,
     salesSar,
     salesRmb: round2(salesSar * 1.8),
+    excludedGoodsLineCount: goodsSales.excludedGoodsLineCount,
+    excludedSalesSar: round2(goodsSales.excludedSalesSar),
+    validityPolicy: 'lib/shein_sales_validity.mjs',
     source: 'shein-openapi',
   };
 }

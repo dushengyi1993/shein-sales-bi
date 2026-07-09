@@ -2,13 +2,13 @@
 
 这些 unit 用于 Linux 云端迁移阶段：
 
-- `shein-bi-cloud-today.timer`：当天销售高频刷新为整点两小时一跑，但 `08:00` 由晨间链路接管（`00:00/02:00/04:00/06:00/10:00/.../22:00`），入仓并生成 BI 门户；不开启 systemd 开机补跑，避免服务器重启后和日更/ET 叠加。
+- `shein-bi-cloud-today.timer`：当天销售高频刷新为整点两小时一跑，但 `08:00` 由晨间链路接管（`00:00/02:00/04:00/06:00/10:00/.../22:00`），默认 `SHEIN_SALES_TRANSPORT=webapi`，继续用 WebAPI 入正式销售事实表并生成 BI 门户；OpenAPI 只写并行对账层。不开启 systemd 开机补跑，避免服务器重启后和日更/ET 叠加。
 - `shein-bi-cloud-session-manager.timer`：每天 `02:20`，在 `02:00` 销售刷新结束后顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并检查 profile 体积。
-- `shein-bi-cloud-yesterday.timer`：每天 `03:00` 刷新前一天最终销售，并复核前两天稳定日；不开启开机补跑，漏跑由 watchdog stale 检测暴露后人工补跑。
+- `shein-bi-cloud-yesterday.timer`：每天 `03:00` 用 WebAPI 刷新前一天最终销售，并复核前两天稳定日；OpenAPI 最终日结果在并行对账层核对。不开启开机补跑，漏跑由 watchdog stale 检测暴露后人工补跑。
 - `shein-bi-db-backup.timer`：每天 `02:40` 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto`，默认保留 14 天。
 - `shein-bi-cloud-et-forwarder.timer`：每两小时 `01:20/03:20/.../23:20` 抓取 ET 货代仓/出库单、入仓，并轻量刷新订单/物流/售后相关 section；不开启开机补跑。需要服务器本地 `config/et_forwarder.local.json` 或 `ET_FORWARDER_USERNAME/ET_FORWARDER_PASSWORD`，密钥不进 GitHub。
-- `shein-bi-cloud-morning-chain.timer`：每天 `08:00` 启动晨间串行链路：先刷新当天销售；当前自动飞书日报已关闭（`SHEIN_BI_MORNING_SEND_LARK_REPORT=0`），销售刷新成功后直接启动 `shein-bi-cloud-daily-refresh.service` 做统一日更补采。这样日更不再依赖固定 `08:50/09:10` 窗口，而是跟随销售刷新完成时间。
-- `shein-bi-cloud-daily-refresh.service`：统一执行“日更补采”批次，顺序抓取前一完整日链接/业务域、补采营销活动/限时折扣/优惠券价格线索、RTV 退货轨迹复核，统一入仓、体检并刷新 BI 门户；全店日指标仍全 0 时跳过链接/业务域入仓刷新。该服务由晨间链路触发；启动前如果销售/ET/日报等写入任务仍在跑，会等待一段时间，超时或可用内存不足时写 `skipped_busy` / `skipped_low_memory` 状态并跳过本轮，避免重启后堆叠压垮服务器。需要服务器私有 SHEIN session / browser session，敏感运行态不进 GitHub。旧 HL-only OpenAPI 销售对账已退出生产日更；19 店 OpenAPI 销售、退货退款、商品/链接双跑对账由 `shein-bi-cloud-daily-refresh.service` 通过 `SHEIN_BI_DAILY_OPENAPI_*` 开关开启，只写隔离对账层。
+- `shein-bi-cloud-morning-chain.timer`：每天 `08:00` 启动晨间串行链路：先用 WebAPI 刷新当天销售；当前自动飞书日报已关闭（`SHEIN_BI_MORNING_SEND_LARK_REPORT=0`），销售刷新成功后直接启动 `shein-bi-cloud-daily-refresh.service` 做统一日更补采。这样日更不再依赖固定 `08:50/09:10` 窗口，而是跟随销售刷新完成时间。
+- `shein-bi-cloud-daily-refresh.service`：统一执行“日更补采”批次，顺序抓取前一完整日链接/业务域、补采营销活动/限时折扣/优惠券价格线索、RTV 退货轨迹复核，统一入仓、体检并刷新 BI 门户；全店日指标仍全 0 时跳过链接/业务域入仓刷新。该服务由晨间链路触发；启动前如果销售/ET/日报等写入任务仍在跑，会等待一段时间，超时或可用内存不足时写 `skipped_busy` / `skipped_low_memory` 状态并跳过本轮，避免重启后堆叠压垮服务器。需要服务器私有 SHEIN session / browser session，敏感运行态不进 GitHub。旧 HL-only OpenAPI 销售对账已退出生产日更；19 店 OpenAPI 销售对账仍保留为一周双跑质量监控，退货退款、商品/链接双跑对账由 `SHEIN_BI_DAILY_OPENAPI_*` 开关开启并只写隔离层。
 - `cloud_daily_lark_report.sh` / `shein-bi-cloud-daily-lark-report.service`：日报服务保留为手动诊断入口；正式自动发送当前停用，晨间链路默认 `SHEIN_BI_MORNING_SEND_LARK_REPORT=0`。需要服务器本地 `config/lark_report.json`、`lark-cli` 和飞书授权，密钥/授权不进 GitHub。
 - `shein-bi-cloud-order-closure.timer`：每天 `06:30`（带 `RandomizedDelaySec=5m`）从云端订单底库找未终态订单，重查 SHEIN 当前状态并写入 `ops.order_status_recheck_state`，只更新订单生命周期状态，不重写历史销售事实；成功后刷新 orders section。这个任务排在凌晨销售、登录态、昨日定稿之后；日更补采已移到 `08:50`，避免在 SHEIN 前一日链接/流量指标尚未产出时误抓全 0。
 - `shein-bi-portal.service`：BI Portal 常驻入口，必须以 `sheinops` 运行并保留 `MemoryHigh=1200M` / `MemoryMax=2200M` / `OOMPolicy=stop` / `Restart=always`，防止问数网关或 section 服务异常占满整机内存。

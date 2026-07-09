@@ -312,6 +312,24 @@ async function fetchStoreSales(store, date) {
 async function fetchStoreSalesWithOptions(store, date, options = {}) {
   const fetchArgs = [store.storeKey, '--date', date];
   const transport = options.transport || salesTransportForStore(store);
+  if (transport === 'openapi') {
+    const fetchResult = await runNode('fetch_shein_openapi_sales.mjs', [
+      store.storeKey,
+      '--date',
+      date,
+      '--out',
+      path.join(ROOT, 'outputs', 'shein_fetch'),
+    ]);
+    const fetchJson = fetchResult.ok ? parseJsonFromOutput(fetchResult.stdout) : null;
+    return {
+      ok: fetchResult.ok,
+      stdoutTail: fetchResult.stdout.slice(-1200),
+      stderrTail: fetchResult.stderr.slice(-1200),
+      error: fetchResult.ok ? null : `openapi fetch failed: ${fetchResult.stderr || fetchResult.stdout}`,
+      salesSar: fetchJson?.outputs?.[0]?.summary?.salesSar ?? null,
+      transport: 'openapi',
+    };
+  }
   if (transport && transport !== 'browser') fetchArgs.push('--transport', transport);
   if (options.refreshSession) fetchArgs.push('--refresh-session');
   const fetchResult = await runNode('fetch_shein_sales.mjs', fetchArgs);
@@ -328,7 +346,7 @@ async function fetchStoreSalesWithOptions(store, date, options = {}) {
 
 function salesTransportForStore(store) {
   const value = String(process.env.SHEIN_SALES_TRANSPORT || store.salesTransport || 'browser').trim().toLowerCase();
-  return ['webapi', 'auto', 'browser'].includes(value) ? value : 'browser';
+  return ['webapi', 'auto', 'browser', 'openapi'].includes(value) ? value : 'browser';
 }
 
 async function syncOneStore(store, date, status, options) {
@@ -348,6 +366,23 @@ async function syncOneStore(store, date, status, options) {
 
   const maxAttempts = Math.max(1, Number(options.storeAttempts || 1));
   const salesTransport = salesTransportForStore(store);
+  if (salesTransport === 'openapi') {
+    const fetchResult = await fetchStoreSalesWithOptions(store, date, {transport: 'openapi'});
+    result.fetchStdoutTail = fetchResult.stdoutTail;
+    result.fetchStderrTail = fetchResult.stderrTail;
+    result.fetchTransport = fetchResult.transport;
+    if (!fetchResult.ok) {
+      result.error = fetchResult.error || 'openapi fetch failed';
+      return result;
+    }
+    result.fetchOk = true;
+    result.salesSar = fetchResult.salesSar;
+    result.browser = {opened: false, launched: false, skipped: true, reason: 'openapi_transport_succeeded_without_browser_launch'};
+    result.syncOk = true;
+    result.syncSkipped = true;
+    result.syncSkipReason = 'openapi_transport_no_lark_base_sync';
+    return result;
+  }
   const webApiFirst = salesTransport === 'webapi' || salesTransport === 'auto';
   let fetchResult = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {

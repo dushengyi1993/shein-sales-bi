@@ -76,7 +76,7 @@
 当前状态不再是“只证明 HL 启用”：
 
 - 19 店店铺级 OpenAPI 授权、云端 IP 白名单、只读探针和脱敏能力总账已完成；`/api/openapi-capabilities` 是当前店铺能力总账入口。
-- 销售订单、退货退款、商品/链接基础资料仍写隔离并行层，不覆盖正式事实表；事实源切换仍要按数据域继续看连续对账趋势和历史 warning。
+- 销售订单当前保留 WebAPI 生产事实源；官方 OpenAPI 已完成有效销售口径修正并具备候选切换条件，但按 2026-07-09 决策继续双跑一周，只写隔离并行层和对账层，不覆盖正式销售事实。退货退款、商品/链接基础资料同样仍写隔离并行层，不覆盖正式售后/链接事实。后续事实源切换必须按数据域继续看连续对账趋势和历史 warning。
 - 自动化运营写链路已接入官方 OpenAPI 动作：`copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。
 - `copy_product_draft` 已从单店适配推进到 19 店能力 smoke：源链接参数优先从 OpenAPI 商品列表 + `spu-info` / 商品详情 mapper 还原，不要求用户人工补完整发布 payload；强指纹回读未命中时只能进入人工核销，不能弱匹配自动判成功。
 - 批量复制支持：随机供货价区间 `supplyPriceRange`、细节图洗牌 `shuffleImages`、自动电流推断 `inferInputCurrentOverride`（从功率/电压推算）、随机 payload 跳 hash 锁 `skipPayloadHashLock`。
@@ -96,9 +96,9 @@
 
 1. 销售订单
    - OpenAPI：`order-list` + `order-detail`
-   - 现状：云端 WebAPI 直连优先，浏览器登录态回退。
-   - 策略：每店授权后先写入并行层 `fact.openapi_*`，按店铺 × 日期对账订单数、订单号集合、商品行、销售额、COD/订单状态字段；至少连续 14 天 matched 后再考虑替换。
-   - 注意：历史 HL 日内双跑曾出现 API 抓取时间晚于 Web 源导致的短时差异，因此 OpenAPI 销售不能“一接上就替换生产源”。
+   - 现状：生产销售事实源保留 WebAPI；`shein-bi-cloud-today.service`、`shein-bi-cloud-yesterday.service`、晨间链路和 `cloud_bi_refresh.sh` 默认使用 `SHEIN_SALES_TRANSPORT=webapi`。OpenAPI 每日/按需双跑写 `fact.openapi_*` 与 `mart.openapi_sales_reconciliation`。
+   - 策略：WebAPI 高频销售链路继续写 `fact.store_daily_sales`、`fact.order_header`、`fact.order_item`、`fact.order_payment_flag`；OpenAPI 并行层 `fact.openapi_*` 和 `mart.openapi_sales_reconciliation` 按店铺 × 日期对账订单数、订单号集合、商品行、销售额、取消/无效行、COD/订单状态字段，作为一周双跑切换证据。
+   - 注意：日内对账可能因为 API 抓取时点不同出现短时差异；切换前必须确认已结算日期 WebAPI 与 OpenAPI 的有效销售金额、订单数、商品行、取消/无效行和 SAR 单价口径完全一致。商品四档状态、营销活动、ET 库存、订单闭环复查不随销售订单一起切 OpenAPI。
 
 2. 退货退款
    - OpenAPI：`return-order/list` + `return-order/details`
@@ -123,11 +123,11 @@
 ### 已落地并行层现状（2026-06-26）
 
 - 19 店授权与只读探针：已完成，云端 19/19 `read_probe_ok`。
-- 销售订单：已进入 OpenAPI 并行层，只写 `fact.openapi_*`、`fact.openapi_order_payment_flag`、`mart.openapi_sales_reconciliation`，不覆盖生产销售事实。
+- 销售订单：WebAPI 仍是生产事实源；OpenAPI 写 `fact.openapi_store_daily_sales`、`fact.openapi_order_header`、`fact.openapi_order_item`、`fact.openapi_order_payment_flag`、`mart.openapi_sales_reconciliation` 作一周双跑验证，不覆盖正式 `fact.store_daily_sales` / `fact.order_item`。
 - 退货退款：已进入 OpenAPI 并行层，只写 `fact.openapi_return_order`、`fact.openapi_return_item`、`mart.openapi_return_reconciliation`，不覆盖生产售后事实。
 - 商品/链接基础资料：已进入 OpenAPI 并行层，只写 `fact.openapi_product_link`、`mart.openapi_product_reconciliation`，不覆盖 `fact.link_master_snapshot`、商品页、库存页或任何生产维表。
 - OpenAPI 总账：`/api/openapi-capabilities` 只返回脱敏状态、对账摘要和密钥存在布尔值；不得返回 `APP_SECRET`、`openKeyId`、`secretKey`、`tempToken`、Cookie 或任何可还原密钥的信息。
-- 调度：销售订单、退货退款、商品/链接 OpenAPI 对账均已接入 `scripts/cloud_daily_refresh.sh`；生产 `shein-bi-cloud-daily-refresh.service` 已开启 `SHEIN_BI_DAILY_OPENAPI_RECONCILIATION=1`、`SHEIN_BI_DAILY_OPENAPI_RETURN_RECONCILIATION=1`、`SHEIN_BI_DAILY_OPENAPI_PRODUCT_RECONCILIATION=1`。这些数据对账步骤只写隔离并行对账层，不切生产事实源；自动化运营写操作走独立任务池、权限、白名单、确认和审计链路。
+- 调度：销售订单生产刷新由 `cloud_bi_refresh.sh` 通过 WebAPI 执行；销售订单、退货退款、商品/链接 OpenAPI 对账仍接入 `scripts/cloud_daily_refresh.sh`。生产 `shein-bi-cloud-daily-refresh.service` 保留 `SHEIN_BI_DAILY_OPENAPI_RECONCILIATION=1`、`SHEIN_BI_DAILY_OPENAPI_RETURN_RECONCILIATION=1`、`SHEIN_BI_DAILY_OPENAPI_PRODUCT_RECONCILIATION=1`；销售对账用于一周双跑质量监控，退货/商品仍只写隔离并行对账层。自动化运营写操作走独立任务池、权限、白名单、确认和审计链路。
 - 空间：商品原始抓取文件位于忽略目录 `outputs/shein_openapi_products/`，脚本默认每店只保留最近 2 个时间戳快照和 `latest.json`，避免云盘长期膨胀。
 - 空间：凡图包、源图、转换后图片、上传暂存文件或其他大文件同步到 `shein-bi-tencent` 用于 OpenAPI 上传/批量执行，执行结束后必须清理源图和中间大文件；只保留轻量 `summary` / `log` / `manifest` / 审计证据和平台回执日志。清理动作必须记录路径和清理前后大小，禁止删除最终汇总、manifest、审计日志、平台回执日志。
 
@@ -393,7 +393,7 @@
 
 独立 reviewer 已审阅本方案，结论是“可以继续，但必须保持保守边界”：
 
-- OpenAPI 销售替换要至少 14 天双跑，不能因 HL 早期两天 matched 就直接替换。
+- OpenAPI 销售替换按当前决策至少保持一周全店双跑；不能因局部 matched 就直接替换。若一周内订单数、商品行、金额、取消/无效行、SAR 单价和 BI 价格散点均 100% 无误，再完全切换。
 - 用户已推翻 `2 → 5 → 19` 接入节奏：接入总账、授权和探针按 19 店一次性推进；reviewer 原有保守意见只保留为“生产数据切换和真实写操作必须双跑/确认/回读”的安全边界。
 - 自然语言必须先生成结构化 Intent、资料检查快照和 payload hash；只有同一会话里唯一当前事项满足权限、白名单和确认条件时，才允许由服务端执行真实写接口。
 - 页面应采用“聊天主导 + 当前任务进度侧栏”的模式：后台 dry-run / 预校验 / 审计保留，普通员工界面只展示人话结论、缺口和确认动作。

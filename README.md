@@ -60,7 +60,7 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 ## 工具说明
 
 - 默认用后台、headless、HTTP/CDP、日志、JSON、静态检查和 UI 冒烟脚本验证；只有登录、人机校验、用户明确要求或必须排查交互问题时才打开可见窗口，完成后关闭。
-- SHEIN 销售抓取优先 Node WebAPI 直连；Chrome/CDP 主要用于导出/刷新 Cookie session、登录续期和 WebAPI 失败回退。
+- SHEIN 订单销售生产事实源当前保留 WebAPI；官方 OpenAPI 已具备切换条件但先保持双跑一周。云端 `SHEIN_SALES_TRANSPORT=webapi` 继续写正式销售事实表，OpenAPI 写隔离对账层；一周内确认订单数、商品行、金额、取消/无效行和价格散点 100% 无误后，再完全切到 OpenAPI。
 - 飞书消息/Base 使用 `lark-cli`；`config/lark_report.json` 必须保持合法 UTF-8 JSON。
 - ET 货代仓默认 headless；OCR/验证码连续失败、登录态人工维护或用户明确要求时才临时打开可见窗口。
 - 云端上传的临时文件、OpenAPI 素材、登录维护文件用完必须清理；状态、token、session、密钥和数据库 dump 不写入仓库、文档或聊天。

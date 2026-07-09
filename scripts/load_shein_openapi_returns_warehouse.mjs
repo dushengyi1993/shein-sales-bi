@@ -529,14 +529,59 @@ function setDiff(left, right) {
   return [...left].filter((x) => !right.has(x));
 }
 
-async function queryBrowserAfterSalesSummary(args, date) {
+function buildApiReturnDateValues(apiReturnDateByReturnNo = new Map()) {
+  const rows = [...apiReturnDateByReturnNo.entries()]
+    .map(([returnNo, apiDate]) => [String(returnNo || '').trim(), String(apiDate || '').slice(0, 10)])
+    .filter(([returnNo, apiDate]) => returnNo && /^\d{4}-\d{2}-\d{2}$/.test(apiDate));
+  if (!rows.length) return 'SELECT NULL::text AS return_order_no, NULL::date AS api_date WHERE false';
+  return rows
+    .map(([returnNo, apiDate]) => `SELECT ${sqlLiteral(returnNo)}::text AS return_order_no, ${sqlLiteral(apiDate)}::date AS api_date`)
+    .join('\nUNION ALL\n');
+}
+
+async function queryBrowserAfterSalesSummary(args, date, apiReturnDateByReturnNo = new Map()) {
+  const apiReturnDateValues = buildApiReturnDateValues(apiReturnDateByReturnNo);
   const script = `
-WITH rows AS (
+WITH api_return_dates AS (
+  ${apiReturnDateValues}
+), candidate_rows AS (
+  SELECT ai.*
+  FROM fact.after_sales_item ai
+  WHERE ai.store_key = ${sqlLiteral(args.store)}
+    AND coalesce(ai.order_sub_status_name,'') <> '已取消'
+    AND (
+      ai.request_time::date = ${sqlLiteral(date)}::date
+      OR EXISTS (
+        SELECT 1
+        FROM api_return_dates ard
+        WHERE ard.return_order_no = ai.return_order_no
+          AND ard.api_date = ${sqlLiteral(date)}::date
+      )
+    )
+), latest_rows AS (
   SELECT *
-  FROM fact.after_sales_item
-  WHERE store_key = ${sqlLiteral(args.store)}
-    AND request_time::date = ${sqlLiteral(date)}::date
-    AND coalesce(order_sub_status_name,'') <> '已取消'
+  FROM (
+    SELECT
+      c.*,
+      row_number() OVER (
+        PARTITION BY
+          coalesce(nullif(c.aftersales_order_no,''), nullif(c.order_no,''), nullif(c.return_order_no,''), nullif(c.after_sales_item_key,''), ''),
+          coalesce(nullif(c.entity_id,''), nullif(c.sku_sn,''), nullif(c.standard_goods_sn,''), nullif(c.goods_id,''), nullif(c.after_sales_item_key,''), '')
+        ORDER BY
+          c.snapshot_date DESC NULLS LAST,
+          CASE WHEN coalesce(c.return_order_no,'') <> '' THEN 1 ELSE 0 END DESC,
+          c.updated_at DESC NULLS LAST,
+          c.after_sales_item_key DESC
+      ) AS rn
+    FROM candidate_rows c
+  ) ranked
+  WHERE rn = 1
+), rows AS (
+  SELECT lr.*
+  FROM latest_rows lr
+  LEFT JOIN api_return_dates ard
+    ON ard.return_order_no = lr.return_order_no
+  WHERE coalesce(ard.api_date, lr.request_time::date) = ${sqlLiteral(date)}::date
 ), agg AS (
   SELECT
     count(DISTINCT coalesce(nullif(return_order_no,''), nullif(aftersales_order_no,''), after_sales_item_key))::int AS case_count,
@@ -555,6 +600,7 @@ SELECT jsonb_build_object(
   'quantity', quantity,
   'amountSar', amount_sar,
   'returnNos', return_nos,
+  'aftersalesNos', aftersales_nos,
   'orderNos', order_nos,
   'sourceFiles', source_files
 )::text
@@ -576,17 +622,17 @@ FROM agg;
   };
 }
 
-async function buildReconciliationRow(args, date, apiFile, apiData, factRows) {
+async function buildReconciliationRow(args, date, apiFile, apiData, factRows, apiReturnDateByReturnNo) {
   const api = summarizeApi(apiData, factRows);
-  const browser = args.dryRun ? null : await queryBrowserAfterSalesSummary(args, date);
+  const browser = args.dryRun ? null : await queryBrowserAfterSalesSummary(args, date, apiReturnDateByReturnNo);
   const warnings = [];
   const currencies = new Set(factRows.items.map((r) => r.currency_code).filter(Boolean));
   if (currencies.size > 1) warnings.push(`MULTI_CURRENCY:${[...currencies].join('/')}`);
   const nonSarCurrency = [...currencies].some((c) => c && c !== 'SAR');
   if (nonSarCurrency) warnings.push(`NON_SAR_CURRENCY:${[...currencies].join('/')}`);
   if (api.missingAmountCount) warnings.push(`MISSING_OPENAPI_AMOUNT:${api.missingAmountCount}`);
-  const apiBridgeKeys = new Set([...api.returnNos, ...api.aftersalesNos, ...api.orderNos]);
-  const browserBridgeKeys = browser ? new Set([...browser.returnNos, ...browser.aftersalesNos, ...browser.orderNos]) : new Set();
+  const apiBridgeKeys = new Set([...api.returnNos, ...api.orderNos]);
+  const browserBridgeKeys = browser ? new Set([...browser.returnNos, ...browser.orderNos]) : new Set();
   const deltas = browser ? {
     caseCount: api.caseCount - browser.caseCount,
     itemCount: api.itemCount - browser.itemCount,
@@ -647,6 +693,8 @@ async function collectOpenApiReturns(args) {
   const reconciliations = [];
   const loadedFiles = [];
   const pairs = [];
+  const perDate = [];
+  const apiReturnDateByReturnNo = new Map();
   for (const date of args.dates) {
     const file = path.join(args.returnsDir, args.store, `${date}.json`);
     if (!fssync.existsSync(file)) throw new Error(`Missing OpenAPI returns file: ${rel(file)}`);
@@ -655,9 +703,17 @@ async function collectOpenApiReturns(args) {
     const factRows = buildFactRows(data, file);
     orders.push(...factRows.orders);
     items.push(...factRows.items);
-    reconciliations.push(await buildReconciliationRow(args, date, file, data, factRows));
+    for (const row of factRows.orders) {
+      const returnNo = String(row.return_order_no || '').trim();
+      const retDate = String(row.ret_order_date || '').slice(0, 10);
+      if (returnNo && /^\d{4}-\d{2}-\d{2}$/.test(retDate)) apiReturnDateByReturnNo.set(returnNo, retDate);
+    }
+    perDate.push({date, file, data, factRows});
     loadedFiles.push(rel(file));
     pairs.push({date, store: args.store});
+  }
+  for (const entry of perDate) {
+    reconciliations.push(await buildReconciliationRow(args, entry.date, entry.file, entry.data, entry.factRows, apiReturnDateByReturnNo));
   }
   return {orders, items, reconciliations, loadedFiles, pairs};
 }

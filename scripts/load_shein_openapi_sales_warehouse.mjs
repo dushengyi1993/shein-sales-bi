@@ -16,6 +16,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import {normalizeGoodsSnDetailed} from '../lib/product_sku_normalizer.mjs';
+import {isValidSalesGoodsRow, summarizeSalesGoodsRows} from '../lib/shein_sales_validity.mjs';
 import {
   ORDER_PAYMENT_FLAG_COLUMNS,
   extractPaymentFlagsFromSalesArtifact,
@@ -146,6 +147,27 @@ function ts(v) {
 
 function round2(n) {
   return Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
+}
+
+function recalculateSummaryFromGoodsRows(data, fallbackSummary = {}) {
+  const goodsRows = asArray(data?.goodsRows);
+  const goodsSales = summarizeSalesGoodsRows(goodsRows);
+  const salesSar = round2(goodsSales.salesSar);
+  return {
+    ...fallbackSummary,
+    orderRefCount: Number(fallbackSummary.orderRefCount || fallbackSummary.apiCount || asArray(data?.orderRefs).length || asArray(data?.orderRows).length || 0),
+    apiCount: Number(fallbackSummary.apiCount || fallbackSummary.orderRefCount || asArray(data?.orderRefs).length || 0),
+    detailedOrderCount: Number(fallbackSummary.detailedOrderCount || asArray(data?.orderRows).length || 0),
+    positiveAmountOrderCount: goodsSales.positiveAmountOrderCount,
+    goodsLineCount: goodsRows.length,
+    quantityAll: goodsSales.quantityAll,
+    quantityPositiveAmount: goodsSales.quantityPositiveAmount,
+    salesSar,
+    salesRmb: round2(salesSar * 1.8),
+    excludedGoodsLineCount: goodsSales.excludedGoodsLineCount,
+    excludedSalesSar: round2(goodsSales.excludedSalesSar),
+    validityPolicy: 'lib/shein_sales_validity.mjs',
+  };
 }
 
 function compactJson(value, maxLen = 12000) {
@@ -417,10 +439,10 @@ async function loadOpenApiSalesAtomically(args, sales) {
   return {cleanup, results};
 }
 
-function buildFactRows(data, file) {
+export function buildFactRows(data, file) {
   const date = data.start || data.date || path.basename(file, '.json');
   const source = rel(file);
-  const summary = data.summary || {};
+  const summary = recalculateSummaryFromGoodsRows(data, data.summary || {});
   const daily = [{
     date,
     store_key: data.storeKey,
@@ -473,6 +495,9 @@ function buildFactRows(data, file) {
     const itemKey = `${data.storeKey}__${date}__${orderId}__${row.goodsId || row.entityId || row.skcName || row.skuCode || idx}__${idx}`;
     const qty = num(row.number) ?? 0;
     const price = num(row.currencyPrice) ?? 0;
+    const validSale = isValidSalesGoodsRow(row);
+    const salesQty = validSale ? qty : 0;
+    const salesPrice = validSale ? price : 0;
     items.push({
       order_item_key: itemKey,
       order_key: orderKey,
@@ -493,11 +518,11 @@ function buildFactRows(data, file) {
       sku_sn: row.skuSn || '',
       sku_suffix: row.suffix || '',
       goods_title: row.goodsTitle || '',
-      quantity: qty,
+      quantity: salesQty,
       currency_code: row.currencyCode || '',
       currency_price: price,
-      sales_sar: price,
-      sales_rmb: round2(price * 1.8),
+      sales_sar: salesPrice,
+      sales_rmb: round2(salesPrice * 1.8),
       goods_status: row.newOrderGoodsStatus ?? '',
       goods_performance_status: row.goodsPerformanceStatus ?? '',
       goods_performance_status_desc: row.goodsPerformanceStatusDesc || '',
@@ -509,7 +534,7 @@ function buildFactRows(data, file) {
 }
 
 function summarizeArtifact(data) {
-  const summary = data?.summary || {};
+  const summary = recalculateSummaryFromGoodsRows(data, data?.summary || {});
   return {
     orderCount: Number(summary.orderRefCount || summary.apiCount || 0),
     positiveOrderCount: Number(summary.positiveAmountOrderCount || 0),
@@ -651,7 +676,9 @@ async function main() {
   }, null, 2));
 }
 
-main().catch((error) => {
-  console.error(error?.stack || String(error));
-  process.exit(1);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error?.stack || String(error));
+    process.exit(1);
+  });
+}

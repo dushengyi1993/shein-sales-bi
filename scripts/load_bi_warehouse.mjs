@@ -340,6 +340,7 @@ async function collectSales(args, productMap, skcMap) {
     if (!j || !j.storeKey || !Array.isArray(j.goodsRows)) continue;
     const date = j.start || dateFromFile(file);
     const source = rel(file);
+    const salesSourceKind = j.source === 'shein-openapi' ? 'openapi' : 'browser_webapi';
     const summary = j.summary || {};
     const goodsSales = summarizeSalesGoodsRows(j.goodsRows || []);
     const salesSar = Math.round((goodsSales.salesSar + Number.EPSILON) * 100) / 100;
@@ -369,7 +370,7 @@ async function collectSales(args, productMap, skcMap) {
     paymentFlags.push(...extractPaymentFlagsFromSalesArtifact(j, {
       date,
       sourceFile: source,
-      sourceKind: 'browser_webapi',
+      sourceKind: salesSourceKind,
     }));
     for (const [idx, row] of (j.orderRows || []).entries()) {
       const orderId = String(row.orderId || row.id || row.orderNo || idx);
