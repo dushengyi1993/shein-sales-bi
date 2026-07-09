@@ -56,8 +56,8 @@
 已存在 Codex heartbeat 自动任务 `shein-daily`：
 
 - 名称：`SHEIN 营销价格栈每日巡检`
-- 计划：每日 `09:30` 左右触发；临时窗口任务结束后不得保留一天两次巡检。
-- 边界：先运行只读 `build_marketing_daily_guard_report.mjs`；只读扫描、生成风险报告和候选动作卡；不真实提交、取消、补预算或改限时折扣；继续禁止 `30%/50%` 券真实上线。
+- 计划：每日北京时间 `10:12` 触发，避开 `10:10` browser cleanup，并在本会话继续报告；临时窗口任务结束后不得保留一天两次巡检。
+- 边界：先检查云端核心任务是否正在运行，再运行 `build_marketing_daily_guard_report.mjs` 和后台 live scan/readback；生成风险报告和候选动作卡。普通活动、优惠券、补预算仍不得自动真实提交/取消；限时折扣价格漂移、新链接/新上架 7 天/漏限时折扣兜底是已授权自动写入例外，必须通过身份校验、价格栈校验、库存/平台规则、dry-run 和执行后回读；继续禁止 `30%/50%` 券真实上线。
 - 限时折扣漂移自动修复：guard 报告中 `limitedDiscountTargetPriceDrift.belowRows` 非空时，自动执行 `guard_limited_discount_drift.mjs` → `batch_fix_limited_discount_drift.mjs`，逐店删除漂移 SKC 并新建限时折扣；平台阻断 SKC 自动剔除后对可执行子集新建。
 - 旧 `shein` automation（目标线程 `019dfc8b-7bb1-7ff1-a66d-b10ae67053fa`）和旧 `dl` automation 已停用。
 - 口径：活动标签只做候选信号，真实决策必须先按时间窗口合并普通营销活动价、限时折扣价、当前售价等证据，比较“不含券的保底成交价”与 `finalTargetPrice`；`couponFactor` 只用于触券下探风险，不再用于证明目标成交价必然达成。
@@ -155,10 +155,10 @@
 - BI `outputs/bi-portal/data.json` 过期时，候选只能标为 `stale_observation_only`，不得形成“无新增链接”的 no-action 结论。
 - 云端 BI 读取失败时，日报必须记录 `cloud_bi_fetch_failed`；若本地也缺失或过期，继续阻止 no-action，不能把云端不可达静默解释成无新链接。
 - `price-overrides`、selection plan、`config/stores.json` 缺失或解析失败时 fail closed：日报进入 blocker / unknownSources，不能说没有新链接。
-- 生成新链接候选前必须先验证 guard 选中的目标计划是当前最新已执行全量计划，尤其要优先选择 `2026-06-14` 后不依赖优惠券保底的批次。旧 `all-934`、旧 `ALL-ready` 或历史批次计划会把已在新计划覆盖的 SKC 误报为“新链接缺兜底”；这种情况下只允许修正计划选择并重跑 guard，不得直接开前端创建限时折扣。
+- 生成新链接候选前必须先验证 guard 选中的目标计划是当前最新已执行全量计划，尤其要优先选择 `2026-06-14` 后不依赖优惠券保底的批次。旧 `all-934`、旧 `ALL-ready` 或历史批次计划会把已在新计划覆盖的 SKC 误报为“新链接缺兜底”；这种情况下先修正计划选择并重跑 guard。若修正后仍缺兜底，且可用最新基准、同一标准货号全局曝光 Top5、成本/仓储费/底价推导安全目标价，就必须自动生成限时折扣 rescue 并回读，不能停在“待定价”。
 - 30 天内已上架且缺精确价格计划的 SKC 才进入动作卡；老于 30 天的缺计划链接只计入 `missingExactPlanOnShelf` 背景数，避免日报被历史遗留淹没。
 - 若 `shelf_age_days` 缺失，日报先用 `link_date` 按报告日期兜底推算；仍无法判断年龄的 SKC 进入 `unknown_shelf_age_needs_review`，并阻止 no-action。
-- 已禁报券、`couponFactor=1`、缺 `finalTargetPrice`、已在 `excluded` 的 SKC，只能给“待定价/待确认”动作，不得生成 `15%` 券 dry-run 建议。
+- 已禁报券、`couponFactor=1`、缺 `finalTargetPrice`、已在 `excluded` 的 SKC，不得生成 `15%` 券 dry-run 建议；但“待定价/待确认”只能用于缺成本/仓储费/底价/目标价、身份、库存或平台规则阻断。若系统能按价格规则推导安全兜底价，必须进入限时折扣自动兜底。
 - unknown store / disabled store / 缺店铺或 SKC 的行只进 ignored/source warning，不能作为可执行候选。
 - 审批行导出 `platformNewLabel` 和 `targetPriceScope=store_skc_link_state_window`，明确标注"新品前五待遇"是 scoped 定价处理，不是实际曝光 Top5 证明。
 
@@ -209,7 +209,7 @@
 - `summary.salesSar`
 - 日汇总 / 月汇总预聚合金额
 
-低价成交告警必须先判断订单时间是否落在本期活动窗口内。若订单早于活动开始或晚于活动结束，只能标为“窗口外偏离线索”，不能直接判定本次活动漏报。
+低价成交告警必须先判断订单时间是否落在本期活动窗口内。若订单早于活动开始或晚于活动结束，只能标为“窗口外偏离线索”，不能直接判定本次活动漏报；普通活动报名完成但尚未生效时，日报只验收后台已报/待生效、限时折扣兜底和旧活动叠加，不提前按未来活动目标追责成交价。
 
 根因分类建议：
 
@@ -251,5 +251,5 @@
 2. `audit_order_prices_against_plan.mjs` 已支持 linksData 精确目标价 overlay 和按订单时间/活动窗口选择计划行；剩余工作是接入销售同步后置调度和报告消费，脚本能力本身已就绪。
 3. 把可选流量券预算从“默认每店 1000 SAR”改为按候选规模测算；真实 execute 仍接入人工授权动作池，日报只结构化识别预算低于目标、缺回读证据、写入异常但回读达标。
 4. 把营销活动 `T-3` 提醒接入活动列表扫描和 BI 动作池。
-5. 新链接先进入“待定价/待报兜底限时折扣”队列，真实自动报名等价格栈稳定后再逐步放开。
+5. 新链接动作卡拆成两类：能按最新基准和全局曝光 Top5 推导安全目标价的，直接进入限时折扣自动兜底；只有缺成本/仓储费/底价/目标价或身份、库存、平台阻断的，才进入待定价队列。
 6. `30%/50%` 券只做研究表，不进入执行器默认路径。

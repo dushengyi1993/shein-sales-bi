@@ -883,12 +883,31 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
   const selectedOk = result.selectionMode === 'allowlist'
     ? result.selectedMatchesPlan
     : (!result.totalGoods || result.selectedCount >= result.totalGoods);
+  if (!editReady && selectedOk && result.selectionMode === 'allowlist' && result.clickedNext) {
+    await evalJs(cdp, sessionId, `
+      const visible = el => {
+        if (!el) return false;
+        const s = getComputedStyle(el);
+        const r = el.getBoundingClientRect();
+        return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+      };
+      const nextStep = [...document.querySelectorAll('button')]
+        .filter(visible)
+        .find(b => (b.innerText || b.textContent || '').trim() === '下一步' && !b.disabled && b.getAttribute('aria-disabled') !== 'true');
+      if (nextStep) {
+        nextStep.scrollIntoView({block:'center', inline:'center'});
+        nextStep.click();
+      }
+      return Boolean(nextStep);
+    `).catch(() => false);
+  }
+  const editReadyAfterRetry = editReady || await waitFor(cdp, sessionId, `document.body && document.body.innerText.includes('提报的活动价格')`, 10_000);
   const reason = selectedOk
     ? undefined
     : (result.selectionMode === 'allowlist'
       ? `选择计划不匹配：已选 ${result.selectedCount}/${result.expectedSelectedCount}，未找到 ${result.missingAllowedSkcs?.join(',') || '-'}`
       : `只选中 ${result.selectedCount}/${result.totalGoods} 个商品`);
-  return {...result, pageSize, ok: editReady && selectedOk, mode: editReady ? 'edit' : 'choose', reason};
+  return {...result, pageSize, ok: editReadyAfterRetry && selectedOk, mode: editReadyAfterRetry ? 'edit' : 'choose', reason};
 }
 
 function computeTarget(storeKey, activityId, row) {
