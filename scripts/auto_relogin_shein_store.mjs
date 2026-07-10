@@ -9,6 +9,7 @@ import {spawn, spawnSync} from 'node:child_process';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import fs from 'node:fs/promises';
+import {connectCdp} from '../lib/shein_browser.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
@@ -111,34 +112,6 @@ async function waitForCdpTargets(port, timeoutMs) {
   throw new Error(`CDP port ${port} did not become ready within ${timeoutMs}ms: ${lastError?.message || 'unknown error'}`);
 }
 
-async function connectCdp(port, timeoutMs = 45_000) {
-  const targets = await waitForCdpTargets(port, timeoutMs);
-  const page = targets.find(t => t.type === 'page' && /geiwohuo|shein/i.test(t.url)) || targets.find(t => t.type === 'page');
-  if (!page) throw new Error(`No page target on port ${port}`);
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
-  let seq = 0;
-  const pending = new Map();
-  ws.addEventListener('message', ev => {
-    const msg = JSON.parse(ev.data);
-    if (msg.id && pending.has(msg.id)) {
-      const {resolve, reject} = pending.get(msg.id);
-      pending.delete(msg.id);
-      msg.error ? reject(new Error(JSON.stringify(msg.error))) : resolve(msg.result);
-    }
-  });
-  await new Promise((resolve, reject) => {
-    ws.addEventListener('open', resolve, {once: true});
-    ws.addEventListener('error', reject, {once: true});
-  });
-  const send = (method, params = {}) => {
-    const id = ++seq;
-    ws.send(JSON.stringify({id, method, params}));
-    return new Promise((resolve, reject) => pending.set(id, {resolve, reject}));
-  };
-  await send('Runtime.enable');
-  await send('Page.enable');
-  return {send, ws};
-}
 
 async function evaluate(send, expression) {
   const result = await send('Runtime.evaluate', {expression, awaitPromise: true, returnByValue: true});
@@ -283,7 +256,12 @@ async function clickLogin(send) {
 
 async function restoreOne(store, opts) {
   await launchStore(store.storeKey, opts.visible);
-  const {send, ws} = await connectCdp(store.port, Math.min(opts.timeoutMs, 60_000));
+  const connectionTimeoutMs = Math.min(opts.timeoutMs, 60_000);
+  await waitForCdpTargets(store.port, connectionTimeoutMs);
+  const {send, close} = await connectCdp(store.port, {
+    targetTimeoutMs: Math.min(connectionTimeoutMs, 8000),
+    commandTimeoutMs: connectionTimeoutMs,
+  });
   const started = Date.now();
   const steps = [];
   try {
@@ -334,7 +312,7 @@ async function restoreOne(store, opts) {
     }
     return {storeKey: store.storeKey, ok: false, reason: 'login_not_restored', steps};
   } finally {
-    ws.close();
+    close();
   }
 }
 

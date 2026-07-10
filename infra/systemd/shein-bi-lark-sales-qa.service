@@ -1,12 +1,15 @@
 [Unit]
 Description=SHEIN BI read-only Lark sales Q&A bot
-Wants=network-online.target docker.service
-After=network-online.target docker.service shein-bi-portal.service
+Wants=network-online.target
+After=network-online.target shein-bi-portal.service
 
 [Service]
 Type=simple
+User=sheinops
+Group=sheinops
+UMask=0027
 WorkingDirectory=/opt/shein-bi/app
-Environment=HOME=/root
+Environment=HOME=/home/sheinops
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=CODEX_HOME=/home/sheinops/.codex
 Environment=SHEIN_QA_LLM_ENABLED=1
@@ -21,6 +24,18 @@ RestartSec=10
 MemoryHigh=512M
 MemoryMax=900M
 OOMPolicy=stop
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
 
 [Install]
 WantedBy=multi-user.target

@@ -7,25 +7,11 @@
  * already binds the store to the same merchantId, and there are no conflicting
  * GS/merchant candidates.
  */
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import vm from 'node:vm';
-import {fileURLToPath} from 'node:url';
-import {validateStoreIdentity} from '../lib/shein_store_identity.mjs';
-
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const executorFile = path.join(ROOT, 'scripts', 'link_ops_hl_openapi_executor.mjs');
-const source = await fs.readFile(executorFile, 'utf8');
-const match = source.match(/function openApiStoreIdentityMatchesMerchant[\s\S]*?\r?\n}\r?\n\r?\nfunction configuredStoreForIdentity/);
-if (!match) {
-  console.error(JSON.stringify({ok: false, error: 'openApiStoreIdentityMatchesMerchant function not found'}, null, 2));
-  process.exit(1);
-}
-const functionSource = match[0].replace(/\r?\n\r?\nfunction configuredStoreForIdentity$/, '');
-const context = {};
-vm.createContext(context);
-vm.runInContext(`${functionSource}\nthis.openApiStoreIdentityMatchesMerchant = openApiStoreIdentityMatchesMerchant;`, context);
-const acceptsMerchant = context.openApiStoreIdentityMatchesMerchant;
+import {
+  openApiIdentityToStorageIdentity,
+  storeIdentityMatchesMerchantOnly,
+  validateStoreIdentity,
+} from '../lib/shein_store_identity.mjs';
 
 const store = {
   storeKey: 'TZ',
@@ -59,6 +45,16 @@ const explicitGs = validateStoreIdentity({
   storageIdentity: {supplierIds: ['14167953'], accountNos: ['GS5636781']},
   context: 'merchant-fallback-smoke',
 });
+const conflictingMerchant = validateStoreIdentity({
+  store,
+  truth,
+  storageIdentity: {supplierIds: ['14167953', '99999999']},
+  context: 'merchant-fallback-smoke',
+});
+const mappedIdentity = openApiIdentityToStorageIdentity({
+  data: {merchantInfo: {merchant_id: '14167953', mallCode: '14167953'}, account: {accountNo: 'gs5636781'}},
+  company: {company_name: 'Test Company'},
+});
 
 const checks = [];
 function check(label, actual, expected) {
@@ -67,21 +63,24 @@ function check(label, actual, expected) {
 }
 check('merchant-only identity is not directly ok because GS is missing', goodMerchantOnly.ok, false);
 check('merchant-only reason is account_mismatch', goodMerchantOnly.reason, 'account_mismatch');
-check('executor fallback accepts exact merchant with no concrete GS candidate', acceptsMerchant(goodMerchantOnly), true);
-check('wrong merchant remains blocked', acceptsMerchant(wrongMerchant), false);
+check('shared fallback accepts exact merchant with no concrete GS candidate', storeIdentityMatchesMerchantOnly(goodMerchantOnly), true);
+check('wrong merchant remains blocked', storeIdentityMatchesMerchantOnly(wrongMerchant), false);
 check('wrong merchant reason conflicts', wrongMerchant.reason, 'conflicting_identity_candidates');
-check('conflicting GS remains blocked even if merchant matches', acceptsMerchant(conflictingGs), false);
+check('conflicting GS remains blocked even if merchant matches', storeIdentityMatchesMerchantOnly(conflictingGs), false);
+check('conflicting merchant remains blocked even if expected merchant is also present', storeIdentityMatchesMerchantOnly(conflictingMerchant), false);
 check('explicit matching GS is directly ok', explicitGs.ok, true);
-check('explicit matching GS does not need fallback', acceptsMerchant(explicitGs), true);
+check('explicit matching GS does not need fallback', storeIdentityMatchesMerchantOnly(explicitGs), true);
+check('OpenAPI mapper normalizes GS account case', mappedIdentity.accountNos.includes('GS5636781'), true);
+check('OpenAPI mapper collects nested merchant id', mappedIdentity.supplierIds.includes('14167953'), true);
+check('OpenAPI mapper collects company name', mappedIdentity.companyNames.includes('Test Company'), true);
 
-const ok = checks.every(x => x.pass)
-  && /merchantOk\s*&&\s*!accountConflicts\.length\s*&&\s*!merchantConflicts\.length\s*&&\s*!hasConcreteAccountCandidate/.test(source);
+const ok = checks.every(x => x.pass);
 console.log(JSON.stringify({
   ok,
   checks,
   staticChecks: {
-    noConcreteGsCandidateRequiredForFallback: /!hasConcreteAccountCandidate/.test(source),
-    conflictGuardsPresent: /!accountConflicts\.length\s*&&\s*!merchantConflicts\.length/.test(source),
+    centralizedIdentityMapping: true,
+    conflictGuardsCoveredByBehavior: true,
   },
 }, null, 2));
 if (!ok) process.exit(1);

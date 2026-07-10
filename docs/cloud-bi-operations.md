@@ -309,7 +309,7 @@ GitHub 应保存：
 
 - 云端人工登录入口验证：`/cloud-login-maintenance` 返回 `200`；`/cloud-login/novnc/vnc.html` 返回 `200`；创建会话后 `/cloud-login/session/:id` 返回 `200` 且 WebSocket 升级返回 `101 Switching Protocols`；点“我已完成并关闭”后 export/probe 成功且不残留 Chrome/Xvfb/x11vnc/websockify 进程。
 
-- `shein-bi-lark-sales-qa.service` 应保持 active；可用 `node scripts/lark_sales_qa_bot.mjs --answer "今天销售多少"` 本地只读测试答案。群聊中若无回复，优先检查机器人是否已入群、应用可见范围和 `im.message.receive_v1`/发消息权限。
+- `shein-bi-lark-sales-qa.service` 应保持 active，且 effective `User/Group` 必须为 `sheinops`、`HOME=/home/sheinops`、`NoNewPrivileges=yes`、`PrivateTmp=yes`；可用 `node scripts/lark_sales_qa_bot.mjs --answer "今天销售多少"` 本地只读测试答案。群聊中若无回复，优先检查机器人是否已入群、应用可见范围和 `im.message.receive_v1`/发消息权限。
 
 - GitHub `main` 应包含最新可复用代码和文档；敏感运行态只保留在本地/云端私有目录。
 
@@ -326,6 +326,10 @@ GitHub 应保存：
 - Codex CLI 安装在服务器系统路径，私有配置目录为 `/home/sheinops/.codex`；`auth.json`、`config.toml`、第三方 API 配置和 token 都不进入 GitHub、文档或日志。
 
 - 服务环境必须显式包含：`CODEX_HOME=/home/sheinops/.codex`、`SHEIN_QA_CODEX_GATEWAY_ENABLED=1`、`SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS=600000`、`SHEIN_QA_CODEX_MODEL=gpt-5.5`、`SHEIN_QA_CODEX_REASONING_EFFORT=xhigh`。
+
+- Lark bot 不再使用 root HOME。迁移旧 keychain 时，只能在服务器上把 `/root/.lark-cli/config.json`、`/root/.local/share/lark-cli/master.key` 和对应 `appsecret_*.enc` 备份后，以 `600` 权限安装到 `sheinops` HOME；父目录保持 `700`。不得输出文件内容或把它们放进 app 目录。迁移后先以 `sudo -u sheinops -H lark-cli api GET /open-apis/bot/v3/info --as bot` 做只读凭据探针，再重启服务并检查 websocket `connected` 日志。
+
+- `/opt/shein-bi/app` 不得 world-writable。用 `sudo bash scripts/harden_cloud_runtime_permissions.sh` 只读审计，确认后再加 `--apply`；完成标准是根目录 `sheinops:sheinops 0750`、`worldWritableNonSymlinks=0`。该脚本不跟随 Chrome 的 `Singleton*` symlink，也不递归改属主/组写位。
 
 - 网关只把 `outputs/bi-portal/data.json` 压缩成销售、店铺、货号、链接/覆盖等只读上下文交给模型；不授予写 PostgreSQL、写飞书 Base、改 SHEIN 后台或改服务器文件的权限。
 
@@ -350,6 +354,8 @@ GitHub 应保存：
 ```bash
 
 systemctl show shein-bi-lark-sales-qa.service -p Environment
+
+systemctl show shein-bi-lark-sales-qa.service -p User -p Group -p NoNewPrivileges -p PrivateTmp -p ProtectSystem
 
 CODEX_HOME=/home/sheinops/.codex codex --version
 

@@ -17,7 +17,12 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
-import {formatStoreIdentityError, validateStoreIdentity} from '../lib/shein_store_identity.mjs';
+import {
+  formatStoreIdentityError,
+  openApiIdentityToStorageIdentity,
+  storeIdentityMatchesMerchantOnly,
+  validateStoreIdentity,
+} from '../lib/shein_store_identity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CONFIG = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
@@ -382,47 +387,13 @@ async function loadClient(configFile, storeKey) {
   const baseUrl = config.apiBaseUrls?.prodSemiManaged || SHEIN_OPENAPI_BASE_URLS.prodSemiManaged;
   return {config, store, client: new SheinOpenApiClient({baseUrl, openKeyId: store.openKeyId, secretKey: store.secretKey})};
 }
-function collectOpenApiIdentity(value, target = null, depth = 0) {
-  target = target || {accountNos: new Set(), userNames: new Set(), mainUserNames: new Set(), supplierUserNames: new Set(), supplierIds: new Set(), externalIds: new Set(), emplids: new Set(), companyNames: new Set(), rawSources: new Set()};
-  if (!value || depth > 7) return target;
-  if (Array.isArray(value)) { value.forEach(item => collectOpenApiIdentity(item, target, depth + 1)); return target; }
-  if (typeof value !== 'object') return target;
-  target.rawSources.add(`retire-candidates-openapi-depth-${depth}`);
-  const add = (setName, candidate) => { if (candidate !== null && candidate !== undefined && candidate !== '') target[setName].add(String(candidate).trim()); };
-  add('userNames', value.userName || value.username || value.name || value.enName);
-  add('mainUserNames', value.mainUserName || value.main_user_name);
-  add('supplierUserNames', value.supplierUserName || value.supplier_user_name);
-  add('supplierIds', value.supplierId || value.supplier_id || value.merchantId || value.merchant_id || value.mallCode || value.mall_code);
-  add('externalIds', value.externalId || value.external_id);
-  add('emplids', value.emplid || value.empId);
-  add('companyNames', value.companyName || value.company_name || value.supplierName || value.supplier_name || value.storeTitle || value.store_title || value.shopTitle || value.shop_title);
-  for (const candidate of [value.accountNo, value.account_no, value.shopName, value.shop_name, value.storeTitle, value.store_title, value.userName, value.username, value.name, value.enName, value.mainUserName, value.main_user_name, value.supplierUserName, value.supplier_user_name]) {
-    if (/^GS\d+$/i.test(String(candidate || '').trim())) target.accountNos.add(String(candidate).trim().toUpperCase());
-  }
-  for (const [key, child] of Object.entries(value)) {
-    if (child && typeof child === 'object' && /(user|supplier|merchant|store|shop|seller|account|company|info|data|mall)/i.test(key)) collectOpenApiIdentity(child, target, depth + 1);
-  }
-  return target;
-}
-function toStorageIdentity(value) { return Object.fromEntries(Object.entries(collectOpenApiIdentity(value)).map(([k, set]) => [k, [...set]])); }
-function merchantFallbackOk(identityCheck) {
-  if (!identityCheck || identityCheck.ok) return Boolean(identityCheck?.ok);
-  const expectedMerchantId = String(identityCheck.expectedMerchantId || '').trim();
-  if (!expectedMerchantId) return false;
-  const merchantOk = identityCheck.merchantOk === true || (Array.isArray(identityCheck.merchantCandidates) && identityCheck.merchantCandidates.includes(expectedMerchantId));
-  const accountConflicts = Array.isArray(identityCheck.accountConflicts) ? identityCheck.accountConflicts : [];
-  const merchantConflicts = Array.isArray(identityCheck.merchantConflicts) ? identityCheck.merchantConflicts : [];
-  const accountCandidates = Array.isArray(identityCheck.accountCandidates) ? identityCheck.accountCandidates : [];
-  const hasConcreteAccountCandidate = accountCandidates.some(value => /^GS\d+$/i.test(String(value || '').trim()));
-  return merchantOk && !accountConflicts.length && !merchantConflicts.length && !hasConcreteAccountCandidate;
-}
 async function verifyStoreIdentity(client, storeConfig, truthJson, storeKey, calls) {
   const response = await client.request(STORE_INFO, {method: 'POST', body: {}, headers: {language: 'en'}});
   calls.push(compactCall('store-info', STORE_INFO, response));
   const truth = truthJson?.stores?.[storeKey];
   if (!truth) return {ok: true, warning: 'no_store_truth'};
-  const identity = validateStoreIdentity({store: storeConfig, truth, storageIdentity: toStorageIdentity(response.data), href: `openapi:${STORE_INFO}`, context: 'execute_retire_candidates_openapi'});
-  if (identity.ok || merchantFallbackOk(identity)) return {ok: true, merchantFallback: !identity.ok};
+  const identity = validateStoreIdentity({store: storeConfig, truth, storageIdentity: openApiIdentityToStorageIdentity(response.data), href: `openapi:${STORE_INFO}`, context: 'execute_retire_candidates_openapi'});
+  if (identity.ok || storeIdentityMatchesMerchantOnly(identity)) return {ok: true, merchantFallback: !identity.ok};
   return {ok: false, error: formatStoreIdentityError(identity)};
 }
 function compactCall(name, endpoint, response) {

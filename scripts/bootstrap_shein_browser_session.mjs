@@ -12,6 +12,7 @@ import fssync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import {connectCdp} from '../lib/shein_browser.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
@@ -132,56 +133,6 @@ async function launchStore(store, args) {
   return {launched: true, alreadyOpen: false, error: `CDP port ${store.port} did not open after launch`};
 }
 
-async function connectCdp(port) {
-  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`, {signal: AbortSignal.timeout(4000)})).json();
-  const page = targets.find(t => t.type === 'page' && /geiwohuo|shein/i.test(t.url)) || targets.find(t => t.type === 'page');
-  if (!page) throw new Error(`No Chrome page target on port ${port}`);
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
-  let seq = 0;
-  const pending = new Map();
-  ws.addEventListener('message', ev => {
-    const msg = JSON.parse(ev.data);
-    if (msg.id && pending.has(msg.id)) {
-      const {resolve, reject} = pending.get(msg.id);
-      pending.delete(msg.id);
-      msg.error ? reject(new Error(JSON.stringify(msg.error))) : resolve(msg.result);
-    }
-  });
-  await new Promise((resolve, reject) => {
-    ws.addEventListener('open', resolve, {once: true});
-    ws.addEventListener('error', reject, {once: true});
-  });
-  const send = (method, params = {}) => {
-    const id = ++seq;
-    ws.send(JSON.stringify({id, method, params}));
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        reject(new Error(`CDP command timed out: ${method}`));
-      }, 30_000);
-      pending.set(id, {
-        resolve: value => {
-          clearTimeout(timer);
-          resolve(value);
-        },
-        reject: err => {
-          clearTimeout(timer);
-          reject(err);
-        },
-      });
-    });
-  };
-  await send('Page.enable');
-  await send('Runtime.enable');
-  await send('Network.enable');
-  await send('Emulation.setDeviceMetricsOverride', {
-    width: 1365,
-    height: 900,
-    deviceScaleFactor: 1,
-    mobile: false,
-  }).catch(() => null);
-  return {send, ws};
-}
 
 function parseCookieHeader(cookieHeader) {
   return String(cookieHeader || '')
@@ -282,7 +233,14 @@ async function bootstrapStore(store, args) {
   if (browser.error) {
     return {storeKey: store.storeKey, ok: false, stage: 'browser', browser};
   }
-  const {send, ws} = await connectCdp(store.port);
+  const {send, close} = await connectCdp(store.port, {targetTimeoutMs: 4000, commandTimeoutMs: 30_000});
+  await send('Network.enable');
+  await send('Emulation.setDeviceMetricsOverride', {
+    width: 1365,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  }).catch(() => null);
   try {
     let lastResult = null;
     for (const candidate of candidates) {
@@ -333,7 +291,7 @@ async function bootstrapStore(store, args) {
     }
     return lastResult || {storeKey: store.storeKey, ok: false, stage: 'session', error: 'no usable session candidate'};
   } finally {
-    try { ws.close(); } catch {}
+    close();
   }
 }
 

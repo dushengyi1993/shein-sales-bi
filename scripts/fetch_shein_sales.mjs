@@ -10,6 +10,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {isValidSalesGoodsRow, salesExclusionReason, summarizeSalesGoodsRows} from '../lib/shein_sales_validity.mjs';
+import {connectCdp} from '../lib/shein_browser.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const storesConfig = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
@@ -84,50 +85,6 @@ function getStore(key) {
   return store;
 }
 
-async function connectCdp(port) {
-  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-  const page = targets.find(p => p.type === 'page' && /geiwohuo|shein/i.test(p.url)) || targets.find(p => p.type === 'page');
-  if (!page) throw new Error(`No Chrome page target on port ${port}. 请先启动并登录该店铺浏览器。`);
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
-  let seq = 0;
-  const pending = new Map();
-  ws.addEventListener('message', ev => {
-    const msg = JSON.parse(ev.data);
-    if (msg.id && pending.has(msg.id)) {
-      const {resolve, reject} = pending.get(msg.id);
-      pending.delete(msg.id);
-      if (msg.error) reject(new Error(JSON.stringify(msg.error)));
-      else resolve(msg.result);
-    }
-  });
-  await new Promise((resolve, reject) => {
-    ws.addEventListener('open', resolve, {once: true});
-    ws.addEventListener('error', reject, {once: true});
-  });
-  const send = (method, params = {}) => {
-    const id = ++seq;
-    ws.send(JSON.stringify({id, method, params}));
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        reject(new Error(`CDP command timed out after ${CDP_COMMAND_TIMEOUT_MS}ms: ${method}`));
-      }, CDP_COMMAND_TIMEOUT_MS);
-      pending.set(id, {
-        resolve: value => {
-          clearTimeout(timer);
-          resolve(value);
-        },
-        reject: err => {
-          clearTimeout(timer);
-          reject(err);
-        },
-      });
-    });
-  };
-  await send('Runtime.enable');
-  await send('Page.enable');
-  return {ws, send, page};
-}
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -242,8 +199,8 @@ function formatSecChUa(brands) {
 }
 
 async function exportWebApiSessionFromCdp(store) {
-  const cdp = await connectCdp(store.port);
-  const {ws, send, page} = cdp;
+  const cdp = await connectCdp(store.port, {commandTimeoutMs: CDP_COMMAND_TIMEOUT_MS});
+  const {send, page, close} = cdp;
   try {
     await send('Network.enable');
     const version = await send('Browser.getVersion').catch(() => ({}));
@@ -285,7 +242,7 @@ async function exportWebApiSessionFromCdp(store) {
       },
     };
   } finally {
-    try { ws.close(); } catch {}
+    close();
   }
 }
 
@@ -600,7 +557,7 @@ async function runWithFetcher(args, store, fetchJson, context) {
 }
 
 async function runBrowserTransport(args, store) {
-  const {ws, send, page} = await connectCdp(store.port);
+  const {send, page, close} = await connectCdp(store.port, {commandTimeoutMs: CDP_COMMAND_TIMEOUT_MS});
   try {
     const orderPage = await ensureOrderPage(send);
     const timezone = {
@@ -613,7 +570,7 @@ async function runBrowserTransport(args, store) {
       timezone,
     });
   } finally {
-    ws.close();
+    close();
   }
 }
 

@@ -132,7 +132,7 @@
 
   - `generate_bi_portal_v2.mjs`：历史 V2 平行预览生成器，当前仅作迁移参考；正式入口以后以 `generate_bi_portal.mjs` / `outputs/bi-portal/index.html` 为准。
 
-  - `serve_bi_portal.mjs`：云端 BI Portal 服务，提供静态页、健康检查和 `/api/bi/section/:section`；缓存命中时可直接返回 raw section JSON 或 gzip sidecar；`homeProfit` 是服务层从当前 `profit` section cache 派生的轻量首页利润摘要；`homeRankings` 会裁掉首页不用的重复商品长文本后缓存；服务启动和首页访问会触发 core `generatedAt` watcher 兜底预热 section，健康接口暴露 `biCoreWarmup` 状态。
+  - `serve_bi_portal.mjs`：云端 BI Portal 服务，提供静态页、健康检查和 `/api/bi/section/:section`；缓存读写、generation 校验、raw/gzip sidecar 与 stale 元数据统一由 `lib/bi_section_cache.mjs` 负责；`homeProfit` 是服务层从当前 `profit` section cache 派生的轻量首页利润摘要；`homeRankings` 会裁掉首页不用的重复商品长文本后缓存；服务启动和首页访问会触发 core `generatedAt` watcher 兜底预热 section，健康接口暴露 `biCoreWarmup` 状态。
 
   - `prewarm_bi_portal_sections.sh`：云端 Portal section 预热脚本，由 `cloud_bi_refresh.sh` 在 api data mode 下后台启动；默认先预热首页关键 section，并在 `profit` 成功后补跑 `homeProfit`。前端会拒绝 `staleSource=true` 或 `sourceGeneratedAt` 不匹配的旧利润摘要；若脚本未及时跑完，`serve_bi_portal.mjs` 的 core warmup watcher 会兜底。
 

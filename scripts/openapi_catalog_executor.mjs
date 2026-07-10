@@ -18,7 +18,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
-import {formatStoreIdentityError, validateStoreIdentity} from '../lib/shein_store_identity.mjs';
+import {
+  formatStoreIdentityError,
+  openApiIdentityToStorageIdentity,
+  storeIdentityMatchesMerchantOnly,
+  validateStoreIdentity,
+} from '../lib/shein_store_identity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CONFIG = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
@@ -75,7 +80,6 @@ Local boundary:
 }
 
 function rel(file) { return path.relative(ROOT, file).replace(/\\/g, '/'); }
-function safeString(value, max = 500) { return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max); }
 function normalizeStoreKey(value) { return String(value || '').trim().toUpperCase(); }
 function sha256(value) { return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
 async function readJson(file) { return JSON.parse(await fs.readFile(file, 'utf8')); }
@@ -142,35 +146,6 @@ function blocksMultipart(entry, detail) {
   return false;
 }
 
-function openApiIdentityToStorageIdentity(value) {
-  const target = {accountNos: new Set(), userNames: new Set(), mainUserNames: new Set(), supplierUserNames: new Set(), supplierIds: new Set(), externalIds: new Set(), rawSources: new Set()};
-  function add(setName, candidate) { const value = safeString(candidate, 160); if (value) target[setName].add(value); }
-  function walk(node, source = 'openapi', depth = 0) {
-    if (!node || depth > 8) return;
-    if (Array.isArray(node)) { node.forEach((x, i) => walk(x, `${source}[${i}]`, depth + 1)); return; }
-    if (typeof node !== 'object') return;
-    add('rawSources', source);
-    for (const [key, raw] of Object.entries(node)) {
-      const k = String(key || '').toLowerCase();
-      if (raw && typeof raw === 'object') { walk(raw, `${source}.${key}`, depth + 1); continue; }
-      const v = safeString(raw, 160); if (!v) continue;
-      if (/^GS\d+$/i.test(v) || /(accountno|account_no|account|storeaccount|gsaccount|supplieraccount)/i.test(k)) add('accountNos', v.toUpperCase());
-      if (/(username|user_name|name|shopname|shop_name)/i.test(k)) add('userNames', v);
-      if (/mainusername|main_user_name/i.test(k)) add('mainUserNames', v);
-      if (/supplierusername|supplier_user_name/i.test(k)) add('supplierUserNames', v);
-      if (/(supplierid|supplier_id|merchantid|merchant_id)/i.test(k)) add('supplierIds', v);
-      if (/(externalid|external_id)/i.test(k)) add('externalIds', v);
-    }
-  }
-  walk(value);
-  return Object.fromEntries(Object.entries(target).map(([k, set]) => [k, [...set]]));
-}
-function storeIdentityMatchesMerchantOnly(identityCheck) {
-  const expected = String(identityCheck?.expectedMerchantId || '').trim();
-  const candidates = [...(identityCheck?.identity?.supplierIds || []), ...(identityCheck?.identity?.externalIds || []), ...(identityCheck?.storageIdentity?.supplierIds || []), ...(identityCheck?.storageIdentity?.externalIds || [])].map(x => String(x || '').trim()).filter(Boolean);
-  const accountCandidates = [...(identityCheck?.identity?.accountNos || []), ...(identityCheck?.storageIdentity?.accountNos || [])].map(x => String(x || '').trim()).filter(Boolean);
-  return Boolean(expected) && candidates.includes(expected) && !accountCandidates.some(x => /^GS\d+$/i.test(x));
-}
 async function loadClient(args) {
   const config = await readJson(args.config);
   const stores = Array.isArray(config.stores) ? config.stores : Object.entries(config.stores || {}).map(([storeKey, value]) => ({storeKey, ...value}));

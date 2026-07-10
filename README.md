@@ -75,6 +75,7 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 | BI 系统架构 | `docs/bi-system-architecture.md` |
 | BI 运维说明 | `docs/bi-system-operations.md` |
 | BI 门户 UI 口径 / priceScatter | `docs/bi-portal-ui-current.md` |
+| 2026-07-10 全面审查与优化闭环 | `docs/optimization-review-2026-07-10.md` |
 | BI 仓库模型 | `docs/bi-warehouse-model.md` |
 | SHEIN 后台数据地图 | `docs/shein-backend-survey.md` |
 | SHEIN 官方 OpenAPI 接入 | `docs/shein-openapi-integration.md` |

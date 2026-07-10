@@ -10,6 +10,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import {connectCdp} from '../lib/shein_browser.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
@@ -138,34 +139,6 @@ FROM (
   return JSON.parse(text.slice(start, end + 1));
 }
 
-async function connectCdp(port) {
-  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`, {signal: AbortSignal.timeout(5000)})).json();
-  const page = targets.find(p => p.type === 'page' && /geiwohuo|shein/i.test(p.url)) || targets.find(p => p.type === 'page');
-  if (!page) throw new Error(`No Chrome page target on port ${port}.`);
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
-  let seq = 0;
-  const pending = new Map();
-  ws.addEventListener('message', ev => {
-    const msg = JSON.parse(ev.data);
-    if (!msg.id || !pending.has(msg.id)) return;
-    const {resolve, reject} = pending.get(msg.id);
-    pending.delete(msg.id);
-    if (msg.error) reject(new Error(JSON.stringify(msg.error)));
-    else resolve(msg.result);
-  });
-  await new Promise((resolve, reject) => {
-    ws.addEventListener('open', resolve, {once: true});
-    ws.addEventListener('error', reject, {once: true});
-  });
-  const send = (method, params = {}) => {
-    const id = ++seq;
-    ws.send(JSON.stringify({id, method, params}));
-    return new Promise((resolve, reject) => pending.set(id, {resolve, reject}));
-  };
-  await send('Runtime.enable');
-  await send('Page.enable');
-  return {ws, send};
-}
 
 async function evaluate(send, expression) {
   const result = await send('Runtime.evaluate', {expression, awaitPromise: true, returnByValue: true});
@@ -264,7 +237,7 @@ async function main() {
     const store = stores.get(storeKey);
     const minDate = rows.reduce((a, r) => a < r.comment_date ? a : r.comment_date, rows[0].comment_date);
     const maxDate = rows.reduce((a, r) => a > r.comment_date ? a : r.comment_date, rows[0].comment_date);
-    const {ws, send} = await connectCdp(store.port);
+    const {send, close} = await connectCdp(store.port, {targetTimeoutMs: 5000});
     try {
       await navigate(send, FEEDBACK_URL, args.waitMs);
       const wanted = new Map(rows.map(r => [String(r.comment_id), r]));
@@ -282,7 +255,7 @@ async function main() {
       }
       summary.push({storeKey, selected: rows.length, matched: updates.filter(u => rows.some(r => r.comment_key === u.comment_key)).length, range: `${minDate}..${maxDate}`});
     } finally {
-      try { ws.close(); } catch {}
+      close();
     }
   }
   const result = await updateRows(args, updates);

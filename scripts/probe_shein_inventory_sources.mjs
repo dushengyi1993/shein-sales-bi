@@ -8,6 +8,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {connectCdp} from '../lib/shein_browser.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT_DIR = path.join(ROOT, 'outputs', 'shein_inventory_probe');
@@ -36,46 +37,6 @@ function pad2(n) { return String(n).padStart(2, '0'); }
 function stamp() {
   const d = new Date();
   return `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
-}
-
-async function connectCdp(port) {
-  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`, {signal: AbortSignal.timeout(3000)})).json();
-  const page = targets.find(p => p.type === 'page' && /geiwohuo|shein/i.test(p.url)) || targets.find(p => p.type === 'page');
-  if (!page) throw new Error(`No Chrome page target on port ${port}.`);
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
-  let seq = 0;
-  const pending = new Map();
-  const listeners = new Map();
-  ws.addEventListener('message', ev => {
-    const msg = JSON.parse(ev.data);
-    if (msg.id && pending.has(msg.id)) {
-      const {resolve, reject} = pending.get(msg.id);
-      pending.delete(msg.id);
-      if (msg.error) reject(new Error(JSON.stringify(msg.error)));
-      else resolve(msg.result);
-      return;
-    }
-    if (msg.method && listeners.has(msg.method)) {
-      for (const fn of listeners.get(msg.method)) fn(msg.params || {});
-    }
-  });
-  await new Promise((resolve, reject) => {
-    ws.addEventListener('open', resolve, {once: true});
-    ws.addEventListener('error', reject, {once: true});
-  });
-  const send = (method, params = {}) => {
-    const id = ++seq;
-    ws.send(JSON.stringify({id, method, params}));
-    return new Promise((resolve, reject) => pending.set(id, {resolve, reject}));
-  };
-  const on = (method, fn) => {
-    if (!listeners.has(method)) listeners.set(method, []);
-    listeners.get(method).push(fn);
-  };
-  await send('Runtime.enable');
-  await send('Page.enable');
-  await send('Network.enable');
-  return {ws, send, on, page};
 }
 
 async function evaluate(send, expression) {
@@ -141,6 +102,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   await fs.mkdir(args.outDir, {recursive: true});
   const cdp = await connectCdp(args.port);
+  await cdp.send('Network.enable');
   const requests = new Map();
   const captures = [];
 
@@ -257,7 +219,7 @@ async function main() {
     endpointSummary: endpointSummary.slice(0, 80),
   }, null, 2));
 
-  cdp.ws.close();
+  cdp.close();
 }
 
 main().catch(err => {

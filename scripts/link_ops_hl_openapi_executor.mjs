@@ -17,6 +17,8 @@ import {
 } from '../lib/link_ops_product_draft_mapper.mjs';
 import {
   formatStoreIdentityError,
+  openApiIdentityToStorageIdentity,
+  storeIdentityMatchesMerchantOnly,
   validateStoreIdentity,
 } from '../lib/shein_store_identity.mjs';
 import {buildProductDisplayName} from '../lib/product_display_name.mjs';
@@ -266,80 +268,6 @@ function resultRows(data) {
     getNested(data, 'info.brand_list'),
     getNested(data, 'data'),
   );
-}
-
-function collectOpenApiIdentity(value, out = null, depth = 0) {
-  const target = out || {
-    accountNos: new Set(),
-    userNames: new Set(),
-    mainUserNames: new Set(),
-    supplierUserNames: new Set(),
-    supplierIds: new Set(),
-    externalIds: new Set(),
-    emplids: new Set(),
-    companyNames: new Set(),
-    rawSources: new Set(),
-  };
-  if (!value || depth > 7) return target;
-  if (Array.isArray(value)) {
-    value.forEach(item => collectOpenApiIdentity(item, target, depth + 1));
-    return target;
-  }
-  if (typeof value !== 'object') return target;
-  target.rawSources.add(`openapi-depth-${depth}`);
-  const add = (setName, candidate) => {
-    if (candidate === null || candidate === undefined || candidate === '') return;
-    target[setName].add(String(candidate).trim());
-  };
-  add('userNames', value.userName || value.username || value.name || value.enName);
-  add('mainUserNames', value.mainUserName || value.main_user_name);
-  add('supplierUserNames', value.supplierUserName || value.supplier_user_name);
-  add('supplierIds', value.supplierId || value.supplier_id || value.merchantId || value.merchant_id);
-  add('externalIds', value.externalId || value.external_id);
-  add('emplids', value.emplid || value.empId);
-  add('companyNames', value.companyName || value.company_name || value.supplierName || value.supplier_name);
-  for (const candidate of [
-    value.accountNo,
-    value.account_no,
-    value.shopName,
-    value.shop_name,
-    value.userName,
-    value.username,
-    value.name,
-    value.enName,
-    value.mainUserName,
-    value.main_user_name,
-    value.supplierUserName,
-    value.supplier_user_name,
-  ]) {
-    if (/^GS\d+$/i.test(String(candidate || '').trim())) {
-      target.accountNos.add(String(candidate).trim().toUpperCase());
-    }
-  }
-  for (const [key, child] of Object.entries(value)) {
-    if (child && typeof child === 'object' && /(user|supplier|merchant|store|shop|seller|account|company|info|data)/i.test(key)) {
-      collectOpenApiIdentity(child, target, depth + 1);
-    }
-  }
-  return target;
-}
-
-function openApiIdentityToStorageIdentity(value) {
-  const collected = collectOpenApiIdentity(value);
-  return Object.fromEntries(Object.entries(collected).map(([key, set]) => [key, [...set]]));
-}
-
-function openApiStoreIdentityMatchesMerchant(identityCheck) {
-  if (!identityCheck || identityCheck.ok) return Boolean(identityCheck?.ok);
-  const expectedMerchantId = String(identityCheck.expectedMerchantId || '').trim();
-  if (!expectedMerchantId) return false;
-  const merchantOk = identityCheck.merchantOk === true
-    || (Array.isArray(identityCheck.merchantCandidates) && identityCheck.merchantCandidates.includes(expectedMerchantId));
-  const accountConflicts = Array.isArray(identityCheck.accountConflicts) ? identityCheck.accountConflicts : [];
-  const merchantConflicts = Array.isArray(identityCheck.merchantConflicts) ? identityCheck.merchantConflicts : [];
-  const accountCandidates = Array.isArray(identityCheck.accountCandidates) ? identityCheck.accountCandidates : [];
-  const hasConcreteAccountCandidate = accountCandidates.some(value => /^GS\d+$/i.test(String(value || '').trim()));
-  return merchantOk && !accountConflicts.length && !merchantConflicts.length && !hasConcreteAccountCandidate;
 }
 
 function configuredStoreForIdentity(storeKey) {
@@ -2475,7 +2403,7 @@ async function main() {
     href: 'openapi:/open-api/openapi-business-backend/query-store-info',
     context: 'link_ops_hl_openapi_executor',
   }) : {ok: false, reason: 'missing_configured_store'};
-  const openapiIdentityAcceptedByMerchant = openApiStoreIdentityMatchesMerchant(openapiIdentity);
+  const openapiIdentityAcceptedByMerchant = storeIdentityMatchesMerchantOnly(openapiIdentity);
   evidence.storeIdentity = {
     ...openapiIdentity,
     ok: openapiIdentity.ok || openapiIdentityAcceptedByMerchant,

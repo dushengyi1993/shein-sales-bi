@@ -19,7 +19,6 @@ import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import crypto from 'node:crypto';
 import os from 'node:os';
-import {gzipSync} from 'node:zlib';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
 import {executeUploadPic} from '../lib/openapi_adapters/upload_pic.mjs';
 import {executeTransformPic} from '../lib/openapi_adapters/transform_pic.mjs';
@@ -31,7 +30,20 @@ import {
   mutationOriginAllowed,
   portalResponseHeaders,
 } from '../lib/portal_security.mjs';
-import {formatStoreIdentityError, validateStoreIdentity} from '../lib/shein_store_identity.mjs';
+import {
+  formatStoreIdentityError,
+  openApiIdentityToStorageIdentity,
+  storeIdentityMatchesMerchantOnly,
+  validateStoreIdentity,
+} from '../lib/shein_store_identity.mjs';
+import {
+  acceptsGzip,
+  readBiSectionCache,
+  readBiSectionCacheAnyGeneratedAt,
+  readBiSectionCacheRaw,
+  readBiSectionStaleRaw,
+  writeBiSectionCache,
+} from '../lib/bi_section_cache.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
@@ -541,13 +553,6 @@ async function writeJsonFileCompact(file, value) {
   await fs.rename(tmp, file);
 }
 
-async function writeBufferFileAtomic(file, buffer) {
-  await fs.mkdir(path.dirname(file), {recursive: true});
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(tmp, buffer);
-  await fs.rename(tmp, file);
-}
-
 function loadOpenApiLocalConfigSync() {
   try {
     return JSON.parse(fssync.readFileSync(SHEIN_OPENAPI_LOCAL_CONFIG_FILE, 'utf8'));
@@ -901,63 +906,6 @@ function openApiConfiguredStoresSync() {
   return {config, configured};
 }
 
-function openApiIdentityToStorageIdentity(value) {
-  const target = {
-    accountNos: new Set(),
-    userNames: new Set(),
-    mainUserNames: new Set(),
-    supplierUserNames: new Set(),
-    supplierIds: new Set(),
-    externalIds: new Set(),
-    rawSources: new Set(),
-  };
-  function add(setName, candidate) {
-    const text = String(candidate ?? '').replace(/\s+/g, ' ').trim();
-    if (text) target[setName].add(text);
-  }
-  function walk(node, source = 'openapi', depth = 0) {
-    if (!node || depth > 8) return;
-    if (Array.isArray(node)) {
-      node.forEach((item, index) => walk(item, `${source}[${index}]`, depth + 1));
-      return;
-    }
-    if (typeof node !== 'object') return;
-    add('rawSources', source);
-    for (const [key, raw] of Object.entries(node)) {
-      const k = String(key || '').toLowerCase();
-      if (raw && typeof raw === 'object') {
-        walk(raw, `${source}.${key}`, depth + 1);
-        continue;
-      }
-      const v = String(raw ?? '').replace(/\s+/g, ' ').trim();
-      if (!v) continue;
-      if (/^GS\d+$/i.test(v) || /(accountno|account_no|account|storeaccount|gsaccount|supplieraccount)/i.test(k)) add('accountNos', v.toUpperCase());
-      if (/(username|user_name|name|shopname|shop_name)/i.test(k)) add('userNames', v);
-      if (/mainusername|main_user_name/i.test(k)) add('mainUserNames', v);
-      if (/supplierusername|supplier_user_name/i.test(k)) add('supplierUserNames', v);
-      if (/(supplierid|supplier_id|merchantid|merchant_id)/i.test(k)) add('supplierIds', v);
-      if (/(externalid|external_id)/i.test(k)) add('externalIds', v);
-    }
-  }
-  walk(value);
-  return Object.fromEntries(Object.entries(target).map(([key, set]) => [key, [...set]]));
-}
-
-function openApiStoreIdentityMatchesMerchant(identityCheck) {
-  const expected = String(identityCheck?.expectedMerchantId || '').trim();
-  const candidates = [
-    ...(identityCheck?.identity?.supplierIds || []),
-    ...(identityCheck?.identity?.externalIds || []),
-    ...(identityCheck?.storageIdentity?.supplierIds || []),
-    ...(identityCheck?.storageIdentity?.externalIds || []),
-  ].map(x => String(x || '').trim()).filter(Boolean);
-  const accountCandidates = [
-    ...(identityCheck?.identity?.accountNos || []),
-    ...(identityCheck?.storageIdentity?.accountNos || []),
-  ].map(x => String(x || '').trim()).filter(Boolean);
-  return Boolean(expected) && candidates.includes(expected) && !accountCandidates.some(x => /^GS\d+$/i.test(x));
-}
-
 function openApiClientForConfiguredStore(storeKey) {
   const {config, configured} = openApiConfiguredStoresSync();
   const key = String(storeKey || '').trim().toUpperCase();
@@ -988,7 +936,7 @@ async function verifyOpenApiStoreIdentityForUtility(client, storeKey, configured
     href: 'openapi:/open-api/openapi-business-backend/query-store-info',
     context: 'serve_bi_portal_openapi_image_asset',
   });
-  if (identity.ok || openApiStoreIdentityMatchesMerchant(identity)) return {ok: true, identity, httpStatus: response.status};
+  if (identity.ok || storeIdentityMatchesMerchantOnly(identity)) return {ok: true, identity, httpStatus: response.status};
   return {ok: false, identity, httpStatus: response.status, error: formatStoreIdentityError(identity)};
 }
 
@@ -5649,148 +5597,6 @@ async function readBiPortalCoreMeta(root) {
   };
 }
 
-async function readBiSectionCache(root, section, generatedAt) {
-  const file = path.join(root, 'sections', `${section}.json`);
-  const cached = await readJsonFile(file, null);
-  if (!cached || typeof cached !== 'object') return null;
-  const expectedGeneratedAt = String(generatedAt || '');
-  const cachedGeneratedAt = String(cached.generatedAt || '');
-  if (expectedGeneratedAt && cachedGeneratedAt !== expectedGeneratedAt) return null;
-  if (!cached.data || typeof cached.data !== 'object') return null;
-  return cached;
-}
-
-function appendJsonFieldsToJsonObjectBuffer(buffer, fields = {}) {
-  if (!Buffer.isBuffer(buffer)) return null;
-  const pairs = Object.entries(fields).filter(([, value]) => value !== undefined);
-  if (!pairs.length) return buffer;
-  let end = buffer.length;
-  while (end > 0) {
-    const c = buffer[end - 1];
-    if (c !== 0x20 && c !== 0x09 && c !== 0x0a && c !== 0x0d) break;
-    end--;
-  }
-  if (end < 2 || buffer[end - 1] !== 0x7d) return null;
-  const extra = pairs.map(([key, value]) => {
-    return `,\n  ${JSON.stringify(key)}: ${JSON.stringify(value)}`;
-  }).join('');
-  return Buffer.concat([
-    buffer.subarray(0, end - 1),
-    Buffer.from(`${extra}\n}\n`, 'utf8'),
-  ]);
-}
-
-function appendCacheHitToJsonObjectBuffer(buffer, cacheHit, extraFields = {}) {
-  return appendJsonFieldsToJsonObjectBuffer(buffer, {cacheHit: Boolean(cacheHit), ...extraFields});
-}
-
-function extractJsonStringFieldFromHead(head, field) {
-  const re = new RegExp(`"${field}"\\s*:\\s*"([^"]*)"`);
-  return re.exec(head)?.[1] || '';
-}
-
-function acceptsGzip(value) {
-  return /\bgzip\b/i.test(String(value || ''));
-}
-
-async function writeBiSectionGzipCache(file, rawBuffer) {
-  const gzipFile = `${file}.gz`;
-  const gzipped = gzipSync(rawBuffer, {level: 6});
-  await writeBufferFileAtomic(gzipFile, gzipped);
-  return gzipped;
-}
-
-async function readOrCreateBiSectionGzipCache(file, rawBuffer) {
-  const gzipFile = `${file}.gz`;
-  const [rawStat, gzipStat] = await Promise.all([
-    fs.stat(file).catch(() => null),
-    fs.stat(gzipFile).catch(() => null),
-  ]);
-  if (gzipStat?.size > 0 && (!rawStat || gzipStat.mtimeMs >= rawStat.mtimeMs)) {
-    const existing = await fs.readFile(gzipFile).catch(() => null);
-    if (existing?.length) return existing;
-  }
-  const gzipped = gzipSync(rawBuffer, {level: 6});
-  writeBufferFileAtomic(gzipFile, gzipped).catch(() => {});
-  return gzipped;
-}
-
-async function readBiSectionCacheRaw(root, section, generatedAt, cacheHit = true, options = {}) {
-  const file = path.join(root, 'sections', `${section}.json`);
-  const buffer = await fs.readFile(file).catch(() => null);
-  if (!buffer || !buffer.length) return null;
-
-  // Section cache files put metadata before the heavy `data` object. Validate the
-  // freshness contract from the small head instead of JSON.parse-ing 10MB+ files
-  // on every request.
-  const head = buffer.subarray(0, Math.min(buffer.length, 8192)).toString('utf8');
-  const expectedGeneratedAt = String(generatedAt || '');
-  const cachedGeneratedAt = extractJsonStringFieldFromHead(head, 'generatedAt');
-  if (expectedGeneratedAt && cachedGeneratedAt !== expectedGeneratedAt) return null;
-  if (extractJsonStringFieldFromHead(head, 'section') !== section) return null;
-  if (!/"data"\s*:/.test(head)) return null;
-
-  const extraFields = options.extraFields && typeof options.extraFields === 'object' ? options.extraFields : {};
-  const hasExtraFields = Object.keys(extraFields).length > 0;
-
-  if (options.gzip) {
-    const rawBody = hasExtraFields ? appendCacheHitToJsonObjectBuffer(buffer, cacheHit, extraFields) : null;
-    const body = rawBody
-      ? gzipSync(rawBody, {level: 6})
-      : await readOrCreateBiSectionGzipCache(file, buffer);
-    return {
-      body,
-      headers: {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Content-Encoding': 'gzip',
-        'Content-Length': String(body.length),
-        'Vary': 'Accept-Encoding',
-        'X-BI-Section-Cache-Hit': cacheHit ? 'true' : 'false',
-        'X-BI-Section-Mode': hasExtraFields ? 'raw-cache-gzip-meta' : 'raw-cache-gzip',
-        ...(extraFields.staleSection ? {'X-BI-Section-Stale': 'true'} : {}),
-      },
-    };
-  }
-
-  const body = appendCacheHitToJsonObjectBuffer(buffer, cacheHit, extraFields);
-  if (!body) return null;
-  return {
-    body,
-    headers: {
-      'Content-Type': 'application/json; charset=utf-8',
-      'X-BI-Section-Cache-Hit': cacheHit ? 'true' : 'false',
-      'X-BI-Section-Mode': 'raw-cache',
-      ...(extraFields.staleSection ? {'X-BI-Section-Stale': 'true'} : {}),
-    },
-  };
-}
-
-async function writeBiSectionCache(root, section, generatedAt, data, run) {
-  const dir = path.join(root, 'sections');
-  await fs.mkdir(dir, {recursive: true});
-  const file = path.join(dir, `${section}.json`);
-  const payload = {
-    ok: true,
-    section,
-    generatedAt: generatedAt || '',
-    cachedAt: new Date().toISOString(),
-    data,
-    run: run ? {
-      code: run.code,
-      timedOut: Boolean(run.timedOut),
-      stderrTail: String(run.stderr || '').slice(-4000),
-    } : null,
-  };
-  const raw = Buffer.from(JSON.stringify(payload), 'utf8');
-  await writeBufferFileAtomic(file, raw);
-  try {
-    await writeBiSectionGzipCache(file, raw);
-  } catch (err) {
-    console.warn('BI section gzip cache write failed', section, err?.message || err);
-  }
-  return payload;
-}
-
 function roundNumber(value, digits = 2) {
   const n = Number(value || 0);
   if (!Number.isFinite(n)) return 0;
@@ -5931,36 +5737,6 @@ function buildHomeProfitSummaryFromProfitData(profitData, sourceMeta = {}) {
       source: 'profit_section_cache',
       sourceGeneratedAt: String(sourceMeta.sourceGeneratedAt || ''),
       staleSource: Boolean(sourceMeta.staleSource),
-    },
-  };
-}
-
-async function readBiSectionCacheAnyGeneratedAt(root, section) {
-  const file = path.join(root, 'sections', `${section}.json`);
-  const cached = await readJsonFile(file, null);
-  if (!cached || typeof cached !== 'object') return null;
-  if (String(cached.section || '') !== section) return null;
-  if (!cached.data || typeof cached.data !== 'object') return null;
-  return cached;
-}
-
-async function readBiSectionStaleRaw(root, section, currentGeneratedAt, options = {}) {
-  const stale = await readBiSectionCacheRaw(root, section, '', true, {
-    ...options,
-    extraFields: {
-      staleSection: true,
-      cacheStale: true,
-      refreshScheduled: Boolean(options.refreshScheduled),
-      coreGeneratedAt: String(currentGeneratedAt || ''),
-    },
-  });
-  if (!stale) return null;
-  return {
-    body: stale.body,
-    headers: {
-      ...stale.headers,
-      'X-BI-Section-Stale': 'true',
-      'Cache-Control': 'no-store',
     },
   };
 }

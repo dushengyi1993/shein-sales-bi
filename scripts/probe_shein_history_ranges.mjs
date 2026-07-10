@@ -9,6 +9,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {connectCdp} from '../lib/shein_browser.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
@@ -110,34 +111,6 @@ function clampMonthRange(month, from, to) {
   return {start, end};
 }
 
-async function connectCdp(port) {
-  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-  const page = targets.find(p => p.type === 'page' && /geiwohuo|shein/i.test(p.url)) || targets.find(p => p.type === 'page');
-  if (!page) throw new Error(`No Chrome page target on port ${port}`);
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
-  let seq = 0;
-  const pending = new Map();
-  ws.addEventListener('message', ev => {
-    const msg = JSON.parse(ev.data);
-    if (msg.id && pending.has(msg.id)) {
-      const {resolve, reject} = pending.get(msg.id);
-      pending.delete(msg.id);
-      if (msg.error) reject(new Error(JSON.stringify(msg.error)));
-      else resolve(msg.result);
-    }
-  });
-  await new Promise((resolve, reject) => {
-    ws.addEventListener('open', resolve, {once: true});
-    ws.addEventListener('error', reject, {once: true});
-  });
-  const send = (method, params = {}) => {
-    const id = ++seq;
-    ws.send(JSON.stringify({id, method, params}));
-    return new Promise((resolve, reject) => pending.set(id, {resolve, reject}));
-  };
-  await send('Runtime.enable');
-  return {ws, send, page};
-}
 
 async function pageFetch(send, endpoint, payload) {
   const expression = `(() => {
@@ -212,7 +185,7 @@ async function countOrders(send, store, start, end, perPage, timezone) {
 }
 
 async function probeStore(store, args) {
-  const {ws, send, page} = await connectCdp(store.port);
+  const {send, page, close} = await connectCdp(store.port);
   try {
     const timezone = {
       businessUtcOffsetHours: Number(storesConfig.businessUtcOffsetHours ?? 8),
@@ -256,7 +229,7 @@ async function probeStore(store, args) {
       months,
     };
   } finally {
-    ws.close();
+    close();
   }
 }
 

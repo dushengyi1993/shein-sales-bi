@@ -7,6 +7,7 @@ After=network-online.target
 Type=simple
 User=sheinops
 Group=sheinops
+UMask=0027
 WorkingDirectory=/opt/shein-bi/app
 Environment=NODE_ENV=production
 Environment=CODEX_HOME=/home/sheinops/.codex
@@ -23,6 +24,16 @@ RestartSec=5
 MemoryHigh=1200M
 MemoryMax=2200M
 OOMPolicy=stop
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
 
 [Install]
 WantedBy=multi-user.target

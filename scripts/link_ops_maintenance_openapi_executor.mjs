@@ -16,7 +16,12 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import crypto from 'node:crypto';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
-import {formatStoreIdentityError, validateStoreIdentity} from '../lib/shein_store_identity.mjs';
+import {
+  formatStoreIdentityError,
+  openApiIdentityToStorageIdentity,
+  storeIdentityMatchesMerchantOnly,
+  validateStoreIdentity,
+} from '../lib/shein_store_identity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CONFIG = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
@@ -105,77 +110,6 @@ function sha256Stable(v){ return crypto.createHash('sha256').update(stableJson(v
 function compactRef(v){ return String(v||'').toLowerCase().replace(/[\s_\-（）()【】\[\]，,。.;；:：/\\]+/g,''); }
 function unique(xs){ return [...new Set(xs.filter(Boolean))]; }
 function nowId(){ return new Date().toISOString().replace(/[-:.TZ]/g,'').slice(0,14); }
-function collectOpenApiIdentity(value, target = null, depth = 0){
-  target = target || {
-    accountNos: new Set(),
-    userNames: new Set(),
-    mainUserNames: new Set(),
-    supplierUserNames: new Set(),
-    supplierIds: new Set(),
-    externalIds: new Set(),
-    emplids: new Set(),
-    companyNames: new Set(),
-    rawSources: new Set(),
-  };
-  if(!value || depth > 7) return target;
-  if(Array.isArray(value)){
-    value.forEach(item => collectOpenApiIdentity(item, target, depth + 1));
-    return target;
-  }
-  if(typeof value !== 'object') return target;
-  target.rawSources.add(`openapi-depth-${depth}`);
-  const add = (setName, candidate) => {
-    if(candidate === null || candidate === undefined || candidate === '') return;
-    target[setName].add(String(candidate).trim());
-  };
-  add('userNames', value.userName || value.username || value.name || value.enName);
-  add('mainUserNames', value.mainUserName || value.main_user_name);
-  add('supplierUserNames', value.supplierUserName || value.supplier_user_name);
-  add('supplierIds', value.supplierId || value.supplier_id || value.merchantId || value.merchant_id || value.mallCode || value.mall_code);
-  add('externalIds', value.externalId || value.external_id);
-  add('emplids', value.emplid || value.empId);
-  add('companyNames', value.companyName || value.company_name || value.supplierName || value.supplier_name || value.storeTitle || value.store_title || value.shopTitle || value.shop_title);
-  for(const candidate of [
-    value.accountNo,
-    value.account_no,
-    value.shopName,
-    value.shop_name,
-    value.storeTitle,
-    value.store_title,
-    value.userName,
-    value.username,
-    value.name,
-    value.enName,
-    value.mainUserName,
-    value.main_user_name,
-    value.supplierUserName,
-    value.supplier_user_name,
-  ]){
-    if(/^GS\d+$/i.test(String(candidate || '').trim())) target.accountNos.add(String(candidate).trim().toUpperCase());
-  }
-  for(const [key, child] of Object.entries(value)){
-    if(child && typeof child === 'object' && /(user|supplier|merchant|store|shop|seller|account|company|info|data|mall)/i.test(key)){
-      collectOpenApiIdentity(child, target, depth + 1);
-    }
-  }
-  return target;
-}
-function openApiIdentityToStorageIdentity(value){
-  const collected = collectOpenApiIdentity(value);
-  return Object.fromEntries(Object.entries(collected).map(([key, set]) => [key, [...set]]));
-}
-function openApiStoreIdentityMatchesMerchant(identityCheck){
-  if(!identityCheck || identityCheck.ok) return Boolean(identityCheck?.ok);
-  const expectedMerchantId = String(identityCheck.expectedMerchantId || '').trim();
-  if(!expectedMerchantId) return false;
-  const merchantOk = identityCheck.merchantOk === true
-    || (Array.isArray(identityCheck.merchantCandidates) && identityCheck.merchantCandidates.includes(expectedMerchantId));
-  const accountConflicts = Array.isArray(identityCheck.accountConflicts) ? identityCheck.accountConflicts : [];
-  const merchantConflicts = Array.isArray(identityCheck.merchantConflicts) ? identityCheck.merchantConflicts : [];
-  const accountCandidates = Array.isArray(identityCheck.accountCandidates) ? identityCheck.accountCandidates : [];
-  const hasConcreteAccountCandidate = accountCandidates.some(value => /^GS\d+$/i.test(String(value || '').trim()));
-  return merchantOk && !accountConflicts.length && !merchantConflicts.length && !hasConcreteAccountCandidate;
-}
 function parseNumberFromText(text){ const m=String(text||'').match(/(?:改成|改为|更新为|设置为|设为|到|=|：|:)\s*([0-9]+(?:\.[0-9]{1,2})?)/i) || String(text||'').match(/([0-9]+(?:\.[0-9]{1,2})?)\s*(?:sar|库存|件|个|台|$)/i); return m?Number(m[1]):NaN; }
 function parseNumberForIntent(intent, text){
   const raw=String(text||'');
@@ -619,7 +553,7 @@ async function main(){
       href:'openapi:/open-api/openapi-business-backend/query-store-info',
       context:'link_ops_maintenance_openapi_executor',
     });
-    const acceptedByMerchantOnly=openApiStoreIdentityMatchesMerchant(identity);
+    const acceptedByMerchantOnly=storeIdentityMatchesMerchantOnly(identity);
     if(!identity.ok && !acceptedByMerchantOnly) blockers.push(formatStoreIdentityError(identity));
     else if(acceptedByMerchantOnly) warnings.push(`${store} OpenAPI 店铺信息未返回 GS账号，但 merchantId=${identity.expectedMerchantId} 已匹配；若后续接口返回冲突 GS账号仍会阻断。`);
   }
