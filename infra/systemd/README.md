@@ -2,7 +2,7 @@
 
 这些 unit 用于 Linux 云端迁移阶段：
 
-- `shein-bi-cloud-today.timer`：当天销售高频刷新为整点两小时一跑，但 `08:00` 由晨间链路接管（`00:00/02:00/04:00/06:00/10:00/.../22:00`），默认 `SHEIN_SALES_TRANSPORT=webapi`，继续用 WebAPI 入正式销售事实表并生成 BI 门户；OpenAPI 只写并行对账层。不开启 systemd 开机补跑，避免服务器重启后和日更/ET 叠加。
+- `shein-bi-cloud-today.timer`：当天销售高频刷新为每小时整点一跑，但 `03:00` 由昨日定稿接管、`08:00` 由晨间链路接管（`00:00/01:00/02:00/04:00/05:00/06:00/07:00/09:00/.../23:00`），默认 `SHEIN_SALES_TRANSPORT=webapi`，继续用 WebAPI 入正式销售事实表并生成 BI 门户；OpenAPI 只写并行对账层。不开启 systemd 开机补跑，避免服务器重启后和日更/ET 叠加。
 - `shein-bi-cloud-session-manager.timer`：每天 `02:20`，在 `02:00` 销售刷新结束后顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并检查 profile 体积。
 - `shein-bi-cloud-yesterday.timer`：每天 `03:00` 用 WebAPI 刷新前一天最终销售，并复核前两天稳定日；OpenAPI 最终日结果在并行对账层核对。不开启开机补跑，漏跑由 watchdog stale 检测暴露后人工补跑。
 - `shein-bi-db-backup.timer`：每天 `02:40` 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto`，默认保留 14 天。
@@ -15,7 +15,7 @@
 - `shein-bi-lark-sales-qa.service`：飞书只读问数机器人，必须保留 `MemoryHigh=512M` / `MemoryMax=900M` / `OOMPolicy=stop` / `Restart=always`，避免 Lark 事件消费或 Codex 网关异常挤占销售刷新资源。
 - `shein-bi-cloud-browser-cleanup.timer`：每小时 `:10` / `:40` 清理本项目 `profiles/persistent-*-profile` 下的 headless Chrome 残留，并清理无活动 Chrome 时的 Chrome 临时目录。它只针对本项目 profile + headless 进程，不用于强杀可见人工登录窗口。
 
-注意：`shein-bi-cloud-daily-refresh.service` 和它内部调用的 `cloud_link_business_sync.sh` 必须以 `sheinops` 运行，不能用 root 跑 SHEIN Chrome profile；否则会留下 root-owned profile 文件，导致 `shein-bi-cloud-session-manager.service` 第二天读 profile 报 `EACCES`。这个统一日更批次只收口慢变/日更补采数据，不合并两小时销售刷新、两小时 ET 出库单刷新、数据库备份、订单闭环复查和登录态管家。`cloud_openapi_hl_reconciliation.sh` 仅保留为手动诊断入口；`cloud_rtv_verify.sh` 仍由生产日更调用。迁移时要 mask 旧的 `link-business` / `openapi-hl` / `rtv-verify` timer，避免同一天重复跑。所有重任务 timer 默认 `Persistent=false`，不做开机补跑；如果服务器关机错过窗口，由 watchdog 的数据过期/日更状态告警暴露，再人工按需补跑。ET forwarder 保持 root 执行，因为入仓依赖 Docker/root 环境，且 ET 使用独立 profile，不写 SHEIN 店铺 profile。
+注意：`shein-bi-cloud-daily-refresh.service` 和它内部调用的 `cloud_link_business_sync.sh` 必须以 `sheinops` 运行，不能用 root 跑 SHEIN Chrome profile；否则会留下 root-owned profile 文件，导致 `shein-bi-cloud-session-manager.service` 第二天读 profile 报 `EACCES`。这个统一日更批次只收口慢变/日更补采数据，不合并每小时销售刷新、两小时 ET 出库单刷新、数据库备份、订单闭环复查和登录态管家。`cloud_openapi_hl_reconciliation.sh` 仅保留为手动诊断入口；`cloud_rtv_verify.sh` 仍由生产日更调用。迁移时要 mask 旧的 `link-business` / `openapi-hl` / `rtv-verify` timer，避免同一天重复跑。所有重任务 timer 默认 `Persistent=false`，不做开机补跑；如果服务器关机错过窗口，由 watchdog 的数据过期/日更状态告警暴露，再人工按需补跑。ET forwarder 保持 root 执行，因为入仓依赖 Docker/root 环境，且 ET 使用独立 profile，不写 SHEIN 店铺 profile。
 
 资源护栏：高频销售和 ET 是轻量高优先任务；`daily-refresh` 是低优先慢任务，由晨间链路在销售刷新完成后启动。生产 oneshot 任务必须保留 `MemoryHigh` / `MemoryMax` / `OOMPolicy=stop`，常驻服务必须保留自己的 `MemoryHigh` / `MemoryMax` / `OOMPolicy=stop` / `Restart=always`；`daily-refresh` 必须保留启动前的忙碌写入任务等待和可用内存检查。宁可让慢变补采晚一次，也不要为了补齐链接/营销/RTV 数据把 BI Portal、Metabase 或销售刷新拖死。
 

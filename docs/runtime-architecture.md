@@ -29,7 +29,7 @@
 
 ## 当前云端 systemd 调度（北京时间）
 
-- `shein-bi-cloud-today.timer`：`00:00/02:00/04:00/06:00/10:00/.../22:00` 每两小时整点刷新当天销售、入仓并生成 BI Portal；`08:00` 由晨间链路接管。
+- `shein-bi-cloud-today.timer`：`00:00/01:00/02:00/04:00/.../23:00` 每小时整点刷新当天销售、入仓并生成 BI Portal；`03:00` 由昨日定稿接管，`08:00` 由晨间链路接管。
 - `shein-bi-cloud-morning-chain.timer`：每天 `08:00` 先刷新当天销售，再启动 `shein-bi-cloud-daily-refresh.service`；当前 `SHEIN_BI_MORNING_SEND_LARK_REPORT=0`，飞书日报自动发送停用。
 - `shein-bi-cloud-yesterday.timer`：每天 `03:00` 刷新前一天最终销售，并复核前两天稳定日。
 - `shein-bi-db-backup.timer`：每天 `02:40` 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto`。
@@ -225,7 +225,7 @@
 
 # 2026-05-15 云端调度与本地封存
 
-- 生产调度已切到云端 systemd timer：`shein-bi-cloud-today.timer` 在 `00/02/04/06/10/12/14/16/18/20/22:00` 刷新当天销售、入仓并生成 BI Portal；`08:00` 由 `shein-bi-cloud-morning-chain.timer` 接管，先刷新当天销售，再启动 `shein-bi-cloud-daily-refresh.service` 统一做日更补采（链接/业务域 + 营销活动/限时折扣/优惠券价格线索 + RTV 换单复核）并刷新 BI，且全店日指标仍全 0 时跳过链接/业务域入仓刷新；`shein-bi-cloud-yesterday.timer` 每天 `03:00` 刷新前一天最终销售并复核稳定日；`shein-bi-db-backup.timer` 每天 `02:40` 做数据库备份。
+- 生产调度已切到云端 systemd timer：`shein-bi-cloud-today.timer` 在 `00/01/02/04/05/06/07/09/10/11/12/13/14/15/16/17/18/19/20/21/22/23:00` 刷新当天销售、入仓并生成 BI Portal；`03:00` 由昨日定稿接管，`08:00` 由 `shein-bi-cloud-morning-chain.timer` 接管，先刷新当天销售，再启动 `shein-bi-cloud-daily-refresh.service` 统一做日更补采（链接/业务域 + 营销活动/限时折扣/优惠券价格线索 + RTV 换单复核）并刷新 BI，且全店日指标仍全 0 时跳过链接/业务域入仓刷新；`shein-bi-cloud-yesterday.timer` 每天 `03:00` 刷新前一天最终销售并复核稳定日；`shein-bi-db-backup.timer` 每天 `02:40` 做数据库备份。
 - 覆盖审计由 `scripts/audit_cloud_data_coverage.mjs` 提供：最新日防漏使用 `--expected-start range-start`，历史断档排查使用 `--expected-start first-seen`。后者按每个店首个有效日期之后查中间断档，避免把店铺尚未开通/尚未接入前的日期误判为缺抓。
 - 本地 `SHEIN-*` Windows 计划任务已封存禁用。`scheduled_intraday_dsy.ps1`、`scheduled_yesterday_final_dsy.ps1`、`scheduled_link_management_daily.ps1`、`scheduled_et_forwarder_daily.ps1`、`scheduled_bi_daily_pipeline.ps1` 等只保留为回滚/迁移参考，不再作为生产调度。
 - 云端当前自动覆盖销售 WebAPI、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、晨间销售+统一日更补采、异常通知、登录态巡检、残留浏览器清理和只读问数机器人；飞书日报自动发送已停用；19 店 OpenAPI 销售、退货退款、商品/链接对账已进入隔离双跑层。
@@ -262,3 +262,4 @@
 - 安全边界：外网仍只经过现有 HTTPS 网关和 BI 应用内登录；临时维护会话 token 只短时存在于服务器私有状态文件，完成/关闭后会清空 token 和入口 URL；不保存密码、cookie、localStorage 或请求头值到 GitHub、文档或聊天。
 - 资源边界：一次只允许一个临时登录窗口。若某店 CDP 端口被已完成/已关闭的临时窗口残留占用，脚本会在确认没有生产同步 service 运行时清理孤儿 Chrome/VNC 进程；若生产同步正在运行，则拒绝开启并提示等待。
 - 验证边界：创建会话后应能获得 noVNC `101 Switching Protocols`；点击“我已完成并关闭”后应完成 `export_shein_browser_session.mjs --no-launch` 与 `bootstrap_shein_browser_session.mjs --no-launch`，且不残留 Chrome/Xvfb/x11vnc/websockify 进程。
+

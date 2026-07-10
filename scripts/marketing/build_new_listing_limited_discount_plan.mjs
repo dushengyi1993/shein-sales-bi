@@ -50,7 +50,9 @@ const liveScanPath = args.currentMarketingLiveScan
 const liveScanDoc = liveScanPath ? await readJson(liveScanPath) : null;
 const linksData = unwrapBiLinksData(linksDoc);
 const storeLinks = Array.isArray(linksData.storeLinks) ? linksData.storeLinks : [];
-const priceIndex = buildPriceIndex(priceDoc);
+const primaryPriceIndex = buildPriceIndex(priceDoc, priceOverridesPath, {isSupplemental: false});
+const supplementalPriceIndexes = await loadSupplementalNewListingPriceIndexes(priceOverridesPath);
+const priceIndexes = [primaryPriceIndex, ...supplementalPriceIndexes];
 const liveLimitedEvidence = collectLiveLimitedDiscountEvidence(liveScanDoc, liveScanPath);
 
 const rows = [];
@@ -67,8 +69,8 @@ for (const link of storeLinks) {
   if (!recent.applies) continue;
 
   const canonical = normalizeCanonicalFromLink(link);
-  const exactPriceEvidence = findPriceEvidence(priceIndex, canonical, storeKey, skc, {allowCanonicalFallback: false});
-  const priceEvidence = exactPriceEvidence || findPriceEvidence(priceIndex, canonical, storeKey, skc);
+  const exactPriceEvidence = findPriceEvidenceAcross(priceIndexes, canonical, storeKey, skc, {allowCanonicalFallback: false});
+  const priceEvidence = exactPriceEvidence || findPriceEvidenceAcross(priceIndexes, canonical, storeKey, skc);
   const liveLimitedRows = liveLimitedEvidence.bySkc.get(exactPriceKey(storeKey, skc)) || [];
   const liveCoveredByName = isLiveNewListingLimitedDiscountCovered(liveLimitedRows);
   const currentLimitedPrice = numberOrNull(
@@ -158,6 +160,8 @@ for (const link of storeLinks) {
       : `新上架${recent.shelfAgeDays}天且未报普通活动，缺限时折扣；按曝光前五力度 ${formatPrice(topTierPrice)} SAR 报一周兜底。`,
     priceEvidence,
     topTierPriceSource: resolvedTopTier.source,
+    priceEvidenceSourcePath: priceEvidence?.priceOverridesSource || '',
+    supplementalPriceEvidence: priceEvidence?.supplementalPriceEvidence === true,
     targetPriceEvidenceScope: exactPriceEvidence ? 'exact_store_skc' : 'canonical_top_tier_fallback',
     endTime,
     activityNamePrefix,
@@ -236,6 +240,12 @@ const summary = {
   },
   byStore: countBy(rows, 'storeKey'),
   rescueFiles,
+  supplementalPriceOverrides: supplementalPriceIndexes.map(index => ({
+    path: rel(index.sourcePath),
+    rowCount: index.rowCount,
+    createdAt: index.createdAt || '',
+    baselineForLimitedDiscountFallback: index.baselineForLimitedDiscountFallback === true,
+  })),
   rows,
   blocked,
   ignored: ignored.slice(0, 30),
@@ -252,7 +262,38 @@ console.log(JSON.stringify({
   rescueFiles,
 }, null, 2));
 
-function buildPriceIndex(priceDoc) {
+async function loadSupplementalNewListingPriceIndexes(primaryPath) {
+  const dir = path.join(ROOT, 'tmp', 'marketing-signup');
+  if (!fsSync.existsSync(dir)) return [];
+  const primaryResolved = path.resolve(primaryPath || '');
+  const candidates = [];
+  for (const entry of fsSync.readdirSync(dir, {withFileTypes: true})) {
+    if (!entry.isFile() || !/^price-overrides-.*\.json$/i.test(entry.name)) continue;
+    const full = path.join(dir, entry.name);
+    if (path.resolve(full) === primaryResolved) continue;
+    let doc = null;
+    try {
+      doc = JSON.parse(fsSync.readFileSync(full, 'utf8'));
+    } catch {
+      continue;
+    }
+    const items = Array.isArray(doc?.items) ? doc.items : [];
+    if (items.length < 100) continue;
+    if (doc?.scope?.repairOnly === true) continue;
+    if (doc?.baselineForLimitedDiscountFallback !== true && doc?.baselineForNextOrdinaryActivity !== true) continue;
+    const stat = fsSync.statSync(full);
+    candidates.push({
+      full,
+      doc,
+      score: Math.max(dateToMs(doc?.createdAt), stat.mtimeMs)
+        + (doc?.baselineForLimitedDiscountFallback === true ? 10_000_000 : 0),
+    });
+  }
+  candidates.sort((a, b) => b.score - a.score || String(a.full).localeCompare(String(b.full)));
+  return candidates.slice(0, 6).map(candidate => buildPriceIndex(candidate.doc, candidate.full, {isSupplemental: true}));
+}
+
+function buildPriceIndex(priceDoc, sourcePath = '', {isSupplemental = false} = {}) {
   const items = Array.isArray(priceDoc?.items) ? priceDoc.items : [];
   const byCanonical = new Map();
   const byExact = new Map();
@@ -289,7 +330,28 @@ function buildPriceIndex(priceDoc) {
       })),
     });
   }
-  return {byCanonical: evidence, byExact};
+  return {
+    byCanonical: evidence,
+    byExact,
+    sourcePath: sourcePath || '',
+    rowCount: items.length,
+    createdAt: priceDoc?.createdAt || '',
+    baselineForLimitedDiscountFallback: priceDoc?.baselineForLimitedDiscountFallback === true,
+    isSupplemental,
+  };
+}
+
+function findPriceEvidenceAcross(indexes, canonical, storeKey = '', skc = '', options = {}) {
+  for (const index of indexes || []) {
+    const evidence = findPriceEvidence(index, canonical, storeKey, skc, options);
+    if (!evidence) continue;
+    return {
+      ...evidence,
+      priceOverridesSource: index.sourcePath ? rel(index.sourcePath) : '',
+      supplementalPriceEvidence: index.isSupplemental === true,
+    };
+  }
+  return null;
 }
 
 function findPriceEvidence(index, canonical, storeKey = '', skc = '', {allowCanonicalFallback = true} = {}) {
@@ -512,6 +574,15 @@ function addDays(dateStr, days) {
 function round2(value) {
   const n = Number(value);
   return Number.isFinite(n) ? Math.round((n + Number.EPSILON) * 100) / 100 : null;
+}
+
+function dateToMs(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return 0;
+  const normalized = raw.replace(' ', 'T');
+  const withZone = /(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(normalized) ? normalized : `${normalized}+08:00`;
+  const ms = Date.parse(withZone);
+  return Number.isFinite(ms) ? ms : 0;
 }
 
 function formatPrice(value) {

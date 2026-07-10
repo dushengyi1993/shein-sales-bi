@@ -56,7 +56,8 @@
 已存在 Codex heartbeat 自动任务 `shein-daily`：
 
 - 名称：`SHEIN 营销价格栈每日巡检`
-- 计划：每日北京时间 `10:12` 触发，避开 `10:10` browser cleanup，并在本会话继续报告；临时窗口任务结束后不得保留一天两次巡检。
+- 计划：Codex heartbeat 在本会话继续报告；云端生产 timer 为 `shein-bi-cloud-marketing-live-guard.timer`，每日北京时间 `10:30` 触发。旧 `10:12` 只属于迁移前 heartbeat 口径，不再作为云端生产排班。
+- 防撞车：全量 live scan 不是“看到空闲就硬跑”。开跑前必须检查核心服务 active；同时避开固定资源窗口：browser cleanup 每小时 `:10/:40`、ET forwarder 奇数小时 `:20`、销售刷新偶数整点、晨间链路/日更、登录态管家、备份、订单闭环和 watchdog。若距离下一个固定窗口不足约 `6` 分钟，跳过全量 live scan，报告等待下个空档；临时补跑只允许选择能覆盖完整扫描窗口的空档，不能让全量扫描跨进 ET `:20` 或 cleanup `:10/:40`。
 - 边界：先检查云端核心任务是否正在运行，再运行 `build_marketing_daily_guard_report.mjs` 和后台 live scan/readback；生成风险报告和候选动作卡。普通活动、优惠券、补预算仍不得自动真实提交/取消；限时折扣价格漂移、新链接/新上架 7 天/漏限时折扣兜底是已授权自动写入例外，必须通过身份校验、价格栈校验、库存/平台规则、dry-run 和执行后回读；继续禁止 `30%/50%` 券真实上线。
 - 限时折扣漂移自动修复：guard 报告中 `limitedDiscountTargetPriceDrift.belowRows` 非空时，自动执行 `guard_limited_discount_drift.mjs` → `batch_fix_limited_discount_drift.mjs`，逐店删除漂移 SKC 并新建限时折扣；平台阻断 SKC 自动剔除后对可执行子集新建。
 - 旧 `shein` automation（目标线程 `019dfc8b-7bb1-7ff1-a66d-b10ae67053fa`）和旧 `dl` automation 已停用。

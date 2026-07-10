@@ -46,7 +46,7 @@
 
 | 时间 | systemd timer | 说明 |
 | --- | --- | --- |
-| `00:00/02:00/04:00/06:00/10:00/.../22:00` | `shein-bi-cloud-today.timer` | 每两小时整点刷新当天销售、入仓并生成 BI Portal；`08:00` 由晨间链路接管。 |
+| `00:00/01:00/02:00/04:00/.../23:00` | `shein-bi-cloud-today.timer` | 每小时整点刷新当天销售、入仓并生成 BI Portal；`03:00` 由昨日定稿接管，`08:00` 由晨间链路接管。 |
 | `03:00` | `shein-bi-cloud-yesterday.timer` | 刷新前一天最终销售，并复核前两天稳定日。 |
 | `02:40` | `shein-bi-db-backup.timer` | 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto`，默认保留 14 天。 |
 | `02:20` | `shein-bi-cloud-session-manager.timer` | 顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并检查 profile 体积。 |
@@ -86,8 +86,8 @@
 
 - 当前飞书 Base / 看板写入暂停；飞书日报只保留手动临时发送入口，自动发送已停用。
 - 云端 `shein-bi-cloud-yesterday.timer` 刷新前一天最终版，并回核 D-2 稳定销售。
-- 云端 `shein-bi-cloud-today.timer` 每两小时刷新当天销售。
-- 滚动后置 BI 的验收重点是销售文件入仓和 BI Portal 更新时间；RTV 换单复核耗时不应作为“两小时销售 BI 没更新”的判断依据。RTV 属于统一日更补采子步骤，失败会进入 `daily-refresh` 告警。
+- 云端 `shein-bi-cloud-today.timer` 每小时刷新当天销售，跳过 `03:00` 昨日定稿和 `08:00` 晨间链路。
+- 滚动后置 BI 的验收重点是销售文件入仓和 BI Portal 更新时间；RTV 换单复核耗时不应作为“高频销售 BI 没更新”的判断依据。RTV 属于统一日更补采子步骤，失败会进入 `daily-refresh` 告警。
 - BI Portal API section 会在 `outputs/bi-portal/sections/` 缓存；首页首屏优先加载轻量 `homeRankings`，完整 `rankings` 放到详情/子页需要时再拉。`homeRankings` 只包含首页需要的日店铺、日货号、日店铺×货号粒度，并由服务端裁掉重复长文本后以 gzip sidecar 返回。`inventoryTrend` 是展示库存趋势 section，来自 `fact.visible_inventory_snapshot`，用于“前台展示库存每日快照”趋势；它不同于 ET 货代仓实盘可售，也不同于成本表供给。`cloud_bi_refresh.sh` 会启动 section 预热脚本；`serve_bi_portal.mjs` 还会用 core `generatedAt` watcher 在服务启动和首页访问时兜底预热，避免新 core 后用户首开页面才生成慢 section。首页利润 `homeProfit` 仍从当前 `profit` section cache 派生；若页面首页利润异常偏低，先核对 `homeProfitSummary.sourceGeneratedAt` 与当前 `data.json.__sections.generatedAt` 是否一致，并确认 `staleSource=false`；否则页面应视为利润待预热，不能用旧利润判断业务。
 - 首页库存相关口径必须分开：`展示库存趋势` = SHEIN 前台展示库存快照；`ET可售` = 货代仓实盘可售；`成本表供给` = 到仓 + 在途 - 已售。不要把 `ET可售 + 在途` 当成总供给，也不要把展示库存趋势当成 ET 实盘。
 - 旧 `financeData` section 已下线，线上 `/api/bi/section/financeData` 应返回 `404`；V2 没有财务子页面时，不要恢复旧财务缓存/预热链路。`inventoryTrend` 当前只是展示库存趋势 section，云端 2026-06-20 实测约 `242KB`、gzip 约 `20KB`，不应再按旧的 21MB 假设优化。
@@ -299,3 +299,4 @@
 - 2026-05-03 原 16 店全量评价补抓基线：`fact.product_comment` 共 `1796` 条，最早评价日期 `2025-10-04`、最新评价日期 `2026-05-04`；`1794` 条有 SHEIN 平台译文，剩余 2 条为原文为空，无需翻译。新增店铺的评价随日常业务域同步进入仓库。
 - 全量补抓脚本：`scripts/backfill_shein_comments_full_history.mjs`；日常业务域同步脚本：`scripts/fetch_shein_business_domains.mjs` + `scripts/load_bi_business_domains.mjs`，抓取时同时合并平台译文。
 - SHEIN 评论接口在大时间窗下可能返回 `mgs97906 数据量太多...缩小评论时间`，因此全量补抓必须按日期窗口分段，并在必要时自动拆分。
+

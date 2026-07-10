@@ -228,9 +228,9 @@ async function launchStore(storeKey) {
 
 async function closeStore(storeKey) {
   return await runCommand(
-    'powershell.exe',
-    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/close_store_browsers.ps1', '-Stores', storeKey],
-    {timeoutMs: 60000},
+    process.execPath,
+    ['scripts/cleanup_shein_store_browsers.mjs', '--store', storeKey, '--cleanup-chrome-tmp', '--kill-after-sec', '5'],
+    {timeoutMs: 90000},
   );
 }
 
@@ -430,6 +430,9 @@ async function processStore(storeKey, args) {
 
     const initialDryRun = await applyRescue({storeKey, port: store.port, rescuePath, execute: false});
     record.initialDryRun = summarizeCommand(initialDryRun);
+    if (!initialDryRun.full) {
+      throw new Error(`initial dry-run did not produce a readable result for ${storeKey}: ${initialDryRun.stderr || initialDryRun.stdout || initialDryRun.error || ''}`);
+    }
     record.discoveredOldActivities = conflictActivitiesFromApply(initialDryRun.full);
 
     const existingCovered = alreadyCoveredActivities(initialDryRun.full, rescue);
@@ -453,12 +456,6 @@ async function processStore(storeKey, args) {
     }
 
     let activitiesToRemove = oldActivitiesToRemove(initialDryRun.full, rescue);
-    if (!activitiesToRemove.length && !initialDryRun.full) {
-      const retryDryRun = await applyRescue({storeKey, port: store.port, rescuePath, execute: false});
-      record.initialDryRunRetry = summarizeCommand(retryDryRun);
-      record.discoveredOldActivities = conflictActivitiesFromApply(retryDryRun.full);
-      activitiesToRemove = oldActivitiesToRemove(retryDryRun.full, rescue);
-    }
     if (!activitiesToRemove.length) {
       record.removals.push({
         skipped: true,

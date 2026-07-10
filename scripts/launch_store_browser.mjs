@@ -13,6 +13,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn, spawnSync} from 'node:child_process';
+import http from 'node:http';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHROME_CANDIDATES = [
@@ -157,6 +158,50 @@ function quoteWindowsArg(value) {
   return `"${s.replace(/(\\*)"/g, '$1$1\\"').replace(/\\+$/g, '$&$&')}"`;
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function waitForDebugPort(port, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = '';
+  while (Date.now() < deadline) {
+    try {
+      const pages = await new Promise((resolve, reject) => {
+        const req = http.get({
+          host: '127.0.0.1',
+          port,
+          path: '/json/list',
+          timeout: 1500,
+        }, res => {
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', chunk => { body += chunk; });
+          res.on('end', () => {
+            if (res.statusCode !== 200) {
+              reject(new Error(`HTTP ${res.statusCode}`));
+              return;
+            }
+            try {
+              resolve(JSON.parse(body));
+            } catch (error) {
+              reject(error);
+            }
+          });
+        });
+        req.on('timeout', () => req.destroy(new Error('debug port timeout')));
+        req.on('error', reject);
+      });
+      if (Array.isArray(pages)) return {ok: true, pageCount: pages.length};
+      lastError = 'debug port returned non-array page list';
+    } catch (error) {
+      lastError = error?.message || String(error);
+    }
+    await sleep(500);
+  }
+  return {ok: false, error: lastError || `debug port ${port} not ready within ${timeoutMs}ms`};
+}
+
 if (process.platform === 'win32') {
   const result = spawnSync('powershell.exe', [
       '-NoProfile',
@@ -185,6 +230,11 @@ if (process.platform === 'win32') {
   child.unref();
 }
 
+const debugPort = await waitForDebugPort(store.port);
+if (!debugPort.ok) {
+  throw new Error(`Chrome remote debugging port not ready for ${store.storeKey} port=${store.port}: ${debugPort.error}`);
+}
+
 console.log(JSON.stringify({
   storeKey: store.storeKey,
   shopName: store.shopName,
@@ -195,4 +245,5 @@ console.log(JSON.stringify({
   mode: cliArgs.headless ? 'headless' : (cliArgs.background ? 'background' : 'visible'),
   headless: cliArgs.headless,
   background: cliArgs.background,
+  debugPort,
 }, null, 2));

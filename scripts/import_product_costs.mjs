@@ -234,6 +234,21 @@ import json, sys, os, csv
 file = sys.argv[1]
 ext = os.path.splitext(file)[1].lower()
 out = []
+
+def unique_headers(headers):
+    counts = {}
+    result = []
+    for idx, header in enumerate(headers):
+        base = '' if header is None else str(header).strip()
+        if not base:
+            base = '__blank_%d' % (idx + 1)
+        counts[base] = counts.get(base, 0) + 1
+        if counts[base] == 1:
+            result.append(base)
+        else:
+            result.append('%s__%d' % (base, counts[base]))
+    return result
+
 if ext in ['.xlsx', '.xlsm']:
     import openpyxl
     wb = openpyxl.load_workbook(file, data_only=True, read_only=True)
@@ -249,7 +264,7 @@ if ext in ['.xlsx', '.xlsm']:
                 break
         if header_idx is None:
             continue
-        headers = [str(x).strip() if x is not None else '' for x in rows[header_idx]]
+        headers = unique_headers(rows[header_idx])
         for ridx, row in enumerate(rows[header_idx+1:], start=header_idx+2):
             obj = {}
             for h, v in zip(headers, row):
@@ -261,9 +276,18 @@ if ext in ['.xlsx', '.xlsm']:
             out.append({'sheet': ws.title, 'rowNo': ridx, 'row': obj})
 elif ext == '.csv':
     with open(file, 'r', encoding='utf-8-sig', newline='') as f:
-        reader = csv.DictReader(f)
+        reader = csv.reader(f)
+        try:
+            headers = unique_headers(next(reader))
+        except StopIteration:
+            headers = []
         for i, row in enumerate(reader, start=2):
-            out.append({'sheet': 'CSV', 'rowNo': i, 'row': row})
+            obj = {}
+            for idx, h in enumerate(headers):
+                if not h:
+                    continue
+                obj[h] = row[idx] if idx < len(row) else ''
+            out.append({'sheet': 'CSV', 'rowNo': i, 'row': obj})
 else:
     raise SystemExit('unsupported file type: ' + ext)
 print(json.dumps(out, ensure_ascii=False))

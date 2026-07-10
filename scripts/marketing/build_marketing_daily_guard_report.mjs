@@ -60,7 +60,7 @@ const BI_PORTAL_LINKS_DATA_DEFAULT = path.join(ROOT, 'outputs', 'bi-portal', 'se
 const MARKETING_PRICING_POLICY_DEFAULT = path.join(ROOT, 'config', 'marketing_pricing_policy.json');
 const STORES_CONFIG_DEFAULT = path.join(ROOT, 'config', 'stores.json');
 const COUPON_CANCEL_RESULTS_DIR = path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-cancel-results');
-const DEADLINE_FILL_RESULTS_DIR = path.join(ROOT, 'tmp', 'mbrs', 'deadline-fill-results');
+const DEADLINE_FILL_RESULTS_DIR = resolveDeadlineFillResultsDir();
 const NEW_SKC_SHELF_AGE_DAYS = 30;
 const NEW_LISTING_LIMITED_MAX_ROWS = 60;
 const NEW_SKC_MAX_ROWS = 80;
@@ -129,12 +129,14 @@ function parseArgs(argv) {
   if (!Number.isFinite(args.maxAgeHours) || args.maxAgeHours <= 0) args.maxAgeHours = DEFAULT_MAX_AGE_HOURS;
   if (!Number.isFinite(args.cloudBiSshTimeoutMs) || args.cloudBiSshTimeoutMs <= 0) args.cloudBiSshTimeoutMs = DEFAULT_CLOUD_BI_SSH_TIMEOUT_MS;
   if (!Number.isFinite(args.cloudBiMaxBytes) || args.cloudBiMaxBytes <= 0) args.cloudBiMaxBytes = DEFAULT_CLOUD_BI_MAX_BYTES;
-  if (args.now && !parseAnyDateTime(args.now)) throw new Error(`Invalid --now ${args.now}; expected parseable local/ISO datetime`);
+  const parsedNow = args.now ? parseAnyDateTime(args.now) : null;
+  if (args.now && !parsedNow) throw new Error(`Invalid --now ${args.now}; expected parseable local/ISO datetime`);
   args.planSelection = resolveCurrentMarketingPlanPair({
     targetPlan: args.targetPlan,
     priceOverrides: args.priceOverrides,
     targetPlanExplicit: args.targetPlanExplicit,
     priceOverridesExplicit: args.priceOverridesExplicit,
+    nowMs: parsedNow ? parsedNow.getTime() : Date.now(),
   });
   args.targetPlan = args.planSelection.targetPlan;
   args.priceOverrides = args.planSelection.priceOverrides;
@@ -187,6 +189,15 @@ function parseAnyDateTime(value) {
   return parseLocalDateTime(s);
 }
 
+function dateToMs(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return 0;
+  const normalized = raw.replace(' ', 'T');
+  const withZone = /(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(normalized) ? normalized : `${normalized}+08:00`;
+  const ms = Date.parse(withZone);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
 function ageHours(now, then) {
   if (!now || !then) return null;
   return Math.round(((now.getTime() - then.getTime()) / 36_000)) / 100;
@@ -210,6 +221,16 @@ function latestCurrentMarketingLiveScanFile(dir, regex, storesConfigDoc) {
     ? storesConfigDoc.stores.filter(store => store?.enabled !== false).length
     : 0;
   const inspected = [];
+  const newest = files[0] || '';
+  if (newest) {
+    const doc = readJsonSafe(newest);
+    const stat = fsSync.statSync(newest);
+    const freshHours = (Date.now() - stat.mtimeMs) / 36e5;
+    // Prefer today's/fresh live scan even when one store hit login page. Using
+    // an older all-green scan hides the actual blocker and violates the live
+    // evidence rule.
+    if (doc && doc?.partial !== true && freshHours <= 24) return newest;
+  }
   for (const file of files.slice(0, 20)) {
     const doc = readJsonSafe(file);
     const rows = Array.isArray(doc?.rows) ? doc.rows : [];
@@ -224,6 +245,18 @@ function latestCurrentMarketingLiveScanFile(dir, regex, storesConfigDoc) {
 
 function latestReportFile(regex) {
   return latestFile(DEFAULT_OUT_DIR, regex);
+}
+
+function resolveDeadlineFillResultsDir() {
+  const base = path.join(ROOT, 'tmp', 'mbrs');
+  const defaultDir = path.join(base, 'deadline-fill-results');
+  if (fsSync.existsSync(defaultDir)) return defaultDir;
+  if (!fsSync.existsSync(base)) return defaultDir;
+  const candidates = fsSync.readdirSync(base, {withFileTypes: true})
+    .filter(entry => entry.isDirectory() && /^deadline-fill-results/i.test(entry.name))
+    .map(entry => path.join(base, entry.name))
+    .sort((a, b) => fsSync.statSync(b).mtimeMs - fsSync.statSync(a).mtimeMs);
+  return candidates[0] || defaultDir;
 }
 
 function rowActivityKey(row) {
@@ -966,7 +999,15 @@ function collectPlanEvidence(selectionPlanDoc, priceOverridesDoc) {
   };
 }
 
-function buildNewListingPriceIndex(priceOverridesDoc) {
+function buildNewListingPriceIndex(priceOverridesDoc, priceOverridesSourcePath = '') {
+  const primary = buildSingleNewListingPriceIndex(priceOverridesDoc, priceOverridesSourcePath, {isSupplemental: false});
+  return {
+    ...primary,
+    supplemental: loadSupplementalNewListingPriceIndexesSync(priceOverridesSourcePath),
+  };
+}
+
+function buildSingleNewListingPriceIndex(priceOverridesDoc, sourcePath = '', {isSupplemental = false} = {}) {
   const byExact = new Map();
   const byCanonical = new Map();
   for (const item of priceOverridesDoc?.items || []) {
@@ -990,10 +1031,59 @@ function buildNewListingPriceIndex(priceOverridesDoc) {
     if (!byCanonical.has(key)) byCanonical.set(key, []);
     byCanonical.get(key).push(row);
   }
-  return {byExact, byCanonical};
+  return {
+    byExact,
+    byCanonical,
+    sourcePath,
+    isSupplemental,
+    rowCount: Array.isArray(priceOverridesDoc?.items) ? priceOverridesDoc.items.length : 0,
+    createdAt: priceOverridesDoc?.createdAt || '',
+    baselineForLimitedDiscountFallback: priceOverridesDoc?.baselineForLimitedDiscountFallback === true,
+  };
+}
+
+function loadSupplementalNewListingPriceIndexesSync(primarySourcePath = '') {
+  const dir = path.join(ROOT, 'tmp', 'marketing-signup');
+  if (!fsSync.existsSync(dir)) return [];
+  const primaryResolved = primarySourcePath ? path.resolve(ROOT, primarySourcePath) : '';
+  const candidates = [];
+  for (const entry of fsSync.readdirSync(dir, {withFileTypes: true})) {
+    if (!entry.isFile() || !/^price-overrides-.*\.json$/i.test(entry.name)) continue;
+    const full = path.join(dir, entry.name);
+    if (primaryResolved && path.resolve(full) === primaryResolved) continue;
+    let doc = null;
+    try {
+      doc = JSON.parse(fsSync.readFileSync(full, 'utf8'));
+    } catch {
+      continue;
+    }
+    const items = Array.isArray(doc?.items) ? doc.items : [];
+    if (items.length < 100) continue;
+    if (doc?.scope?.repairOnly === true) continue;
+    if (doc?.baselineForLimitedDiscountFallback !== true && doc?.baselineForNextOrdinaryActivity !== true) continue;
+    const stat = fsSync.statSync(full);
+    candidates.push({
+      full,
+      doc,
+      score: Math.max(dateToMs(doc?.createdAt), stat.mtimeMs)
+        + (doc?.baselineForLimitedDiscountFallback === true ? 10_000_000 : 0),
+    });
+  }
+  candidates.sort((a, b) => b.score - a.score || String(a.full).localeCompare(String(b.full)));
+  return candidates.slice(0, 6).map(candidate => buildSingleNewListingPriceIndex(candidate.doc, rel(candidate.full), {isSupplemental: true}));
 }
 
 function findNewListingPriceEvidence(index, canonical, storeKey = '', skc = '', {allowCanonicalFallback = true} = {}) {
+  const primary = findNewListingPriceEvidenceInSingleIndex(index, canonical, storeKey, skc, {allowCanonicalFallback});
+  if (primary) return annotateNewListingPriceEvidence(primary, index);
+  for (const supplemental of index?.supplemental || []) {
+    const evidence = findNewListingPriceEvidenceInSingleIndex(supplemental, canonical, storeKey, skc, {allowCanonicalFallback});
+    if (evidence) return annotateNewListingPriceEvidence(evidence, supplemental);
+  }
+  return null;
+}
+
+function findNewListingPriceEvidenceInSingleIndex(index, canonical, storeKey = '', skc = '', {allowCanonicalFallback = true} = {}) {
   const exact = index?.byExact?.get(`${normKey(storeKey)}::${normSku(skc)}`);
   if (exact) {
     return {
@@ -1023,6 +1113,15 @@ function findNewListingPriceEvidence(index, canonical, storeKey = '', skc = '', 
     allPriceMin: allPrices.length ? round2(Math.min(...allPrices)) : null,
     sourceScope: 'canonical',
     topTierSamples: topRows.slice(0, 8).map(row => ({storeKey: row.storeKey, skc: row.skc, finalTargetPrice: row.finalTargetPrice, note: row.note || ''})),
+  };
+}
+
+function annotateNewListingPriceEvidence(evidence, index) {
+  if (!evidence) return null;
+  return {
+    ...evidence,
+    priceOverridesSource: index?.sourcePath || '',
+    supplementalPriceEvidence: index?.isSupplemental === true,
   };
 }
 
@@ -1225,7 +1324,34 @@ function isLiveNewListingLimitedDiscountCovered(rows) {
   return (rows || []).some(row => /新上架.*限时折扣|高曝光兜底限时折扣|new\s*listing/i.test(String(row.name || '')));
 }
 
-function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSource, selectionPlanDoc, priceOverridesDoc, storesConfigDoc, pricingPolicy, reportDate, currentMarketingLiveScanSource}) {
+function collectNewListingLimitedDiscountExecutionEvidence(reportDate) {
+  const file = path.join(DEFAULT_OUT_DIR, `new-listing-7d-limited-discount-execution-summary-${reportDate}.json`);
+  const doc = readJsonSafe(file);
+  const bySkc = new Map();
+  if (!doc || !Array.isArray(doc.results)) return {source: exists(file) ? rel(file) : '', bySkc};
+  for (const result of doc.results) {
+    if (result?.status !== 'executed') continue;
+    if (result?.execute?.result?.ok === false) continue;
+    const storeKey = normKey(result.storeKey);
+    if (!storeKey) continue;
+    const targetSkcs = Array.isArray(result.targetSkcs) ? result.targetSkcs : [];
+    const after = result?.execute?.result?.after || {};
+    const uncovered = new Set((Array.isArray(after.uncoveredAfter) ? after.uncoveredAfter : []).map(normSku));
+    const duplicate = new Set((Array.isArray(after.duplicateOverlapSkcs) ? after.duplicateOverlapSkcs : []).map(normSku));
+    for (const rawSkc of targetSkcs) {
+      const skc = normSku(rawSkc);
+      if (!skc || uncovered.has(skc) || duplicate.has(skc)) continue;
+      bySkc.set(`${storeKey}::${skc}`, {
+        source: rel(file),
+        activityId: result.createdActivityId || result?.execute?.result?.createdActivityId || null,
+        targetCount: result.targetCount || result?.execute?.result?.targetCount || null,
+      });
+    }
+  }
+  return {source: rel(file), bySkc};
+}
+
+function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSource, selectionPlanDoc, priceOverridesDoc, priceOverridesSourcePath = '', storesConfigDoc, pricingPolicy, reportDate, currentMarketingLiveScanSource}) {
   const unwrappedLinksData = unwrapBiLinksData(linksDataDoc);
   const unwrappedBiDoc = unwrapBiLinksData(biDoc);
   const links = Array.isArray(unwrappedLinksData.storeLinks) && unwrappedLinksData.storeLinks.length
@@ -1243,7 +1369,7 @@ function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSour
     if (store.enabled !== false) enabledStores.add(storeKey);
   }
   const plan = collectPlanEvidence(selectionPlanDoc, priceOverridesDoc);
-  const newListingPriceIndex = buildNewListingPriceIndex(priceOverridesDoc);
+  const newListingPriceIndex = buildNewListingPriceIndex(priceOverridesDoc, priceOverridesSourcePath);
   const ignored = [];
   const rows = [];
   const byDecision = {};
@@ -1256,6 +1382,7 @@ function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSour
   const newListingLimitedRows = [];
   const newListingPolicy = pricingPolicy || DEFAULT_MARKETING_PRICING_POLICY;
   const liveLimitedEvidence = collectLiveLimitedDiscountEvidence(currentMarketingLiveScanSource);
+  const executionLimitedEvidence = collectNewListingLimitedDiscountExecutionEvidence(reportDate);
 
   for (const link of links) {
     const storeKey = normKey(link.store_key || link.storeKey || link.store);
@@ -1303,7 +1430,9 @@ function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSour
         && limitedPrice !== null
         && limitedPrice >= resolvedTopTier.price - 0.01;
       const liveLimitedCoveredNoTargetEvidence = liveLimitedCoveredByName && (!Number.isFinite(resolvedTopTier.price) || resolvedTopTier.price <= 0);
-      const liveLimitedCovered = liveLimitedCoveredAtTarget || liveLimitedCoveredNoTargetEvidence;
+      const executionLimitedCovered = executionLimitedEvidence.bySkc.has(exactKey);
+      const executionEvidence = executionLimitedEvidence.bySkc.get(exactKey) || null;
+      const liveLimitedCovered = liveLimitedCoveredAtTarget || liveLimitedCoveredNoTargetEvidence || executionLimitedCovered;
       const actionRequired = !liveLimitedCovered;
       newListingLimitedRows.push({
         storeKey,
@@ -1318,6 +1447,8 @@ function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSour
         finalTargetPrice: resolvedTopTier.price,
         targetPriceEvidenceScope: exactPriceEvidence ? 'exact_store_skc' : (priceEvidence ? 'canonical_top_tier_fallback' : ''),
         topTierPriceSource: resolvedTopTier.source,
+        priceEvidenceSourcePath: priceEvidence?.priceOverridesSource || '',
+        supplementalPriceEvidence: priceEvidence?.supplementalPriceEvidence === true,
         priceEvidenceAvailable: Boolean(priceEvidence),
         priceEvidenceBlocked: actionRequired && (!Number.isFinite(resolvedTopTier.price) || resolvedTopTier.price <= 0),
         hasCurrentLimitedDiscount,
@@ -1325,12 +1456,17 @@ function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSour
         liveLimitedDiscountCovered: liveLimitedCovered,
         liveLimitedDiscountCoveredByName: liveLimitedCoveredByName,
         liveLimitedDiscountCoveredAtTarget: liveLimitedCoveredAtTarget,
+        executionLimitedDiscountCovered: executionLimitedCovered,
+        executionLimitedDiscountSource: executionEvidence?.source || '',
+        executionLimitedDiscountActivityId: executionEvidence?.activityId || null,
         liveLimitedDiscountNames: [...new Set(liveLimitedRows.map(row => row.name).filter(Boolean))],
         liveLimitedDiscountSource: liveLimitedEvidence.path || '',
         ordinaryMarketingEvidence: hasOrdinaryMarketingEvidence(link),
         performanceActivityNames: link.performance_activity_names || '',
         actionRequired,
-        action: liveLimitedCovered
+        action: executionLimitedCovered
+          ? '自动执行摘要已证明新上架7天一周兜底限时折扣已创建并回读覆盖，无需重复写入'
+          : liveLimitedCovered
           ? (liveLimitedCoveredAtTarget
             ? 'live scan 已证明新上架7天一周兜底限时折扣已覆盖且不低于当前目标价，无需重复写入'
             : 'live scan 已证明新上架7天一周兜底限时折扣已覆盖；但缺当前目标价证据，暂不重复写入')
@@ -1435,6 +1571,12 @@ function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSour
       actionCount: actionRows.length,
       executableActionCount: executableActionRows.length,
       priceEvidenceBlockedCount: priceEvidenceBlockedRows.length,
+      supplementalPriceOverrides: (newListingPriceIndex.supplemental || []).map(index => ({
+        path: index.sourcePath || '',
+        rowCount: index.rowCount || 0,
+        createdAt: index.createdAt || '',
+        baselineForLimitedDiscountFallback: index.baselineForLimitedDiscountFallback === true,
+      })),
       byStore: countBy(actionRows, 'storeKey'),
       rescueFiles,
       readyDryRunCount: rescueFiles.reduce((sum, file) => sum + Number(file.count || 0), 0),
@@ -3287,6 +3429,7 @@ async function main() {
     linksDataSource: biPortalLinksData.source,
     selectionPlanDoc: targetPlan.data,
     priceOverridesDoc: priceOverrides.data,
+    priceOverridesSourcePath: priceOverrides.source.path,
     storesConfigDoc: storesConfig.data,
     pricingPolicy: marketingPricingPolicy,
     reportDate: args.date,
