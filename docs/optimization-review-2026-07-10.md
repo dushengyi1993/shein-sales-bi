@@ -9,6 +9,9 @@
 - `ada7a9a40ce700448041412ca23f2c8e87209f4e`：优化前完整备份。
 - `947c604c8c1fb36ce648530f0b68f279a284d2af`：业务规则与确定性测试第一阶段。
 - `e7927499cdb6345d31a1eafdebf68c738cbb79eb`：Portal 安全、载荷和运行时第二阶段。
+- `11fc04f`：共享运行时边界、systemd 收紧与 BI 前端收口。
+- `e18dafc`、`ec23a99`、`3f29f94`：权限脚本、跨平台生成器和私有 fixture 门禁修正。
+- `759b7c2`：营销价格扫描 CLI 改为 fail-safe，`--help`、未知参数和错误分组不再误触发全店扫描。
 
 ## 已发现并处理
 
@@ -50,6 +53,21 @@
 - `scripts/test_bi_ops_release_gate.mjs`：运营/OpenAPI 总门禁。
 - 新增 section cache、前端可访问性、systemd 安全契约、共享 CDP、身份冲突等回归。
 - UI 验收覆盖桌面、1200px、390px，以及 home/orders/products/traffic/ops/system 路由、键盘焦点和浏览器 console。
+
+## 生产部署实证（2026-07-10）
+
+- 生产目标文件在变更前已逐一备份到 `/opt/shein-bi/app/backups/codex-full-optimization-20260710-210751`，其中包含文件校验清单、原 systemd unit/drop-in、数据库函数和 Git 状态。
+- 优化源码按文件安装至 `/opt/shein-bi/app`；生产工作树已有业务热修，因此刻意没有执行 `pull`、`reset --hard` 或全目录覆盖。
+- `shein-bi-portal.service` 与 `shein-bi-lark-sales-qa.service` 均以 `sheinops:sheinops` 运行；Portal 健康检查、Lark WebSocket、systemd 安全属性和最近日志均已回读。
+- 正式入口 `https://sa.dushengyi.cc/` 已验证登录跳转、安全响应头、桌面/1200px/390px 布局和六个主路由；浏览器 console 无新增错误。
+- 云端再次执行 `npm test`：28/28 通过；`scripts/test_bi_ops_release_gate.mjs` 通过。两项 SK-5110 私有 handoff fixture 在云端不存在，按门禁设计明确标记为 skipped，而不是伪装为已执行。
+- 云端 app 中普通文件和目录的 world-writable 数量从 45 收口为 0；symlink、属主和既有 group 权限不做破坏性重写。
+
+## 已知外部状态与人工项
+
+- `.github/workflows/ci.yml` 已在本地验证，但 GitHub 拒绝缺少 `workflow` scope 的 OAuth 凭据更新 workflow；该文件保持未提交，待账号完成一次 `gh auth refresh -h github.com -s workflow` 后再推送。
+- 云端 `sheinops` 的 Codex OAuth refresh token 已失效；飞书问数的规则/直接 LLM fallback 已在同一硬化环境中实测可回答，但 Codex 可选路径需要在云端独立重新登录。不能复制本机 `auth.json`，以免制造 refresh-token 竞争。
+- 当前 watchdog 仍保留 2026-07-09 日更中的一条历史 marketing price scan warning；覆盖率、定时器、订单闭环和孤儿浏览器检查正常。本轮没有篡改历史结果，等待下一次日更验证新扫描韧性。
 
 ## 仍需长期治理的边界
 
