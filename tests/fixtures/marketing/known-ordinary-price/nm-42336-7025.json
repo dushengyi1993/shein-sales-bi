@@ -1,0 +1,27 @@
+{
+  "createdAt": "2026-06-06T06:00:00.000Z",
+  "store": "NM",
+  "ok": true,
+  "activity": {
+    "activityId": 42336,
+    "name": "Deterministic ordinary marketing fixture",
+    "eventStart": "2026-06-06 00:00:00",
+    "eventEnd": "2026-06-07 23:59:59"
+  },
+  "fill": {
+    "ok": true,
+    "targets": [
+      {
+        "skc": "sv25082997983132453",
+        "supplierNo": "SK-7025",
+        "canonical": "SK-7025A绞肉机",
+        "targetPrice": 66.9
+      }
+    ],
+    "platformRewrites": []
+  },
+  "submit": {
+    "submitted": true,
+    "ok": true
+  }
+}

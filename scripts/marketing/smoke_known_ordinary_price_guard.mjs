@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 
 import {
   classifyKnownOrdinaryCouponStack,
@@ -8,8 +10,10 @@ import {
 } from '../../lib/marketing_ordinary_price_evidence.mjs';
 
 const skc = 'sv25082997983132453';
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const evidence = await loadKnownOrdinaryPriceEvidence({
-  root: process.cwd(),
+  root,
+  dir: path.join('tests', 'fixtures', 'marketing', 'known-ordinary-price'),
   storeKey: 'NM',
   nowLocal: '2026-06-06 15:00:00',
 });

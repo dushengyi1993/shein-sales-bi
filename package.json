@@ -1,0 +1,16 @@
+{
+  "name": "shein-sales-bi",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "SHEIN sales BI, marketing operations, and controlled automation tooling",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check:generated": "node scripts/generate_product_match_key_schema.mjs --check",
+    "check:source": "node scripts/check_source_integrity.mjs",
+    "test:deterministic": "node scripts/run_deterministic_tests.mjs",
+    "test": "npm run check:generated && npm run check:source && npm run test:deterministic"
+  }
+}

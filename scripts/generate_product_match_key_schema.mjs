@@ -132,17 +132,23 @@ function renderFunctions() {
   };
 }
 
-function writeSchema(rendered) {
+function nextSchema(rendered) {
   const schema = fs.readFileSync(SCHEMA_PATH, 'utf8');
   const functionBlockRe = /CREATE OR REPLACE FUNCTION dim\.product_match_key\(value text\)[\s\S]*?CREATE OR REPLACE FUNCTION dim\.product_canonical_sn\(value text\)[\s\S]*?\$+;/;
   if (!functionBlockRe.test(schema)) {
     throw new Error('failed to locate product_match_key/product_canonical_sn function block in schema.sql');
   }
-  const next = schema.replace(functionBlockRe, () => rendered.sql);
-  fs.writeFileSync(SCHEMA_PATH, next);
+  return {current: schema, next: schema.replace(functionBlockRe, () => rendered.sql)};
+}
+
+function writeSchema(rendered) {
+  const schema = nextSchema(rendered);
+  fs.writeFileSync(SCHEMA_PATH, schema.next);
 }
 
 const rendered = renderFunctions();
+const schemaState = args.has('--check') ? nextSchema(rendered) : null;
+const inSync = schemaState ? schemaState.current === schemaState.next : null;
 if (args.has('--write')) {
   writeSchema(rendered);
 }
@@ -155,7 +161,13 @@ if (!args.has('--quiet')) {
     canonicalCount: rendered.canonicalCount,
     ignoredCount: rendered.ignoredCount,
     wrote: args.has('--write'),
+    inSync,
   }, null, 2));
+}
+
+if (args.has('--check') && !inSync) {
+  console.error('schema.sql product alias functions are stale; run: node scripts/generate_product_match_key_schema.mjs --write');
+  process.exit(1);
 }
 
 export {compact, renderFunctions};

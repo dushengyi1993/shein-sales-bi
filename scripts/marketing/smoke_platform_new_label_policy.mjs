@@ -12,7 +12,7 @@ const policy = {
   },
 };
 
-const platformNew = isRecentNewListingLink({
+const expiredPlatformNew = isRecentNewListingLink({
   skc: 'same-skc',
   is_on_shelf: true,
   shelf_status_name: '已上架',
@@ -20,8 +20,19 @@ const platformNew = isRecentNewListingLink({
   skc_label: '新款',
 }, policy, '2026-07-04');
 
-assert.equal(platformNew.applies, true);
-assert.equal(platformNew.reason, 'platform_new_label_no_ordinary_marketing');
+assert.equal(expiredPlatformNew.applies, false);
+assert.equal(expiredPlatformNew.reason, 'outside_window');
+
+const recentPlatformNew = isRecentNewListingLink({
+  skc: 'same-skc',
+  is_on_shelf: true,
+  shelf_status_name: '已上架',
+  shelf_age_days: 6,
+  skc_label: '新款',
+}, policy, '2026-07-04');
+
+assert.equal(recentPlatformNew.applies, true);
+assert.equal(recentPlatformNew.reason, 'platform_new_label_no_ordinary_marketing');
 
 const oldNormal = isRecentNewListingLink({
   skc: 'same-skc',
@@ -34,4 +45,4 @@ const oldNormal = isRecentNewListingLink({
 assert.equal(oldNormal.applies, false);
 assert.equal(oldNormal.reason, 'outside_window');
 
-console.log(JSON.stringify({ok: true, test: 'platform_new_label_keeps_top_treatment_until_label_removed'}));
+console.log(JSON.stringify({ok: true, test: 'platform_new_label_respects_seven_day_window'}));

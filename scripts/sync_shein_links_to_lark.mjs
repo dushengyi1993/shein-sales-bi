@@ -11,6 +11,7 @@
  * emergency historical migration, but refuse to write unless explicitly
  * enabled with SHEIN_ENABLE_DEPRECATED_LARK_LINK_SYNC=1.
  */
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -410,10 +411,9 @@ function storeConfig() {
   return JSON.parse(fsSyncRead(STORES_PATH));
 }
 function fsSyncRead(file) {
-  // Avoid importing fs sync only for this small config fallback.
   return globalThis.__syncFsRead
     ? globalThis.__syncFsRead(file)
-    : require('node:fs').readFileSync(file, 'utf8');
+    : fsSync.readFileSync(file, 'utf8');
 }
 
 function dateTime(fetchTime) { return String(fetchTime || '').slice(0, 16); }
