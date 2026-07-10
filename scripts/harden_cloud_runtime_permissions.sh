@@ -51,7 +51,7 @@ id "$OWNER" >/dev/null
 getent group "$GROUP" >/dev/null
 
 count_world_writable() {
-  find "$resolved_root" -xdev ! -type l -perm -0002 -printf '.' | wc -c
+  find "$resolved_root" -xdev \( -type f -o -type d \) -perm -0002 -printf '.' | wc -c
 }
 
 before_count="$(count_world_writable)"
@@ -60,13 +60,13 @@ printf 'mode=%s root=%s rootState=%s worldWritableNonSymlinks=%s\n' \
   "$([[ "$APPLY" == 1 ]] && echo apply || echo audit)" "$resolved_root" "$root_state" "$before_count"
 
 if [[ "$APPLY" != 1 ]]; then
-  find "$resolved_root" -xdev ! -type l -perm -0002 -printf '%M %u:%g %p\n' | sed -n '1,50p'
+  find "$resolved_root" -xdev \( -type f -o -type d \) -perm -0002 -printf '%M %u:%g %p\n' | sed -n '1,50p'
   exit 0
 fi
 
 chown "$OWNER:$GROUP" "$resolved_root"
 chmod 0750 "$resolved_root"
-find "$resolved_root" -xdev ! -type l -perm -0002 -exec chmod o-w -- {} +
+find "$resolved_root" -xdev \( -type f -o -type d \) -perm -0002 -exec chmod o-w -- {} +
 
 after_count="$(count_world_writable)"
 if [[ "$after_count" != 0 ]]; then
