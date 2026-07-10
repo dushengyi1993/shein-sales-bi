@@ -2,11 +2,12 @@
 set -Eeuo pipefail
 
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
+source "$ROOT/scripts/lib/shared_lock.sh"
 TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
 LOG_DIR="${SHEIN_BI_MARKETING_LIVE_LOG_DIR:-/srv/shein-bi/logs/cloud-marketing-live-guard}"
 STATE_DIR="${SHEIN_BI_MARKETING_LIVE_STATE_DIR:-$ROOT/state/cloud_marketing_live_guard}"
 ALERT_DIR="$ROOT/state/cloud_ops_alerts"
-LOCK_FILE="${SHEIN_BI_MARKETING_LIVE_LOCK_FILE:-/tmp/shein-bi-cloud-marketing-live-guard.lock}"
+LOCK_FILE="${SHEIN_BI_MARKETING_LIVE_LOCK_FILE:-$ROOT/state/locks/shein-bi-cloud-marketing-live-guard.lock}"
 GROUP="${SHEIN_BI_MARKETING_LIVE_GROUP:-ALL}"
 PAGE_SIZE="${SHEIN_BI_MARKETING_LIVE_PAGE_SIZE:-500}"
 SCAN_TIMEOUT_SEC="${SHEIN_BI_MARKETING_LIVE_SCAN_TIMEOUT_SEC:-2400}"
@@ -210,6 +211,7 @@ LOG_FILE="$LOG_DIR/marketing-live-guard-${DATE}-${STAMP}.log"
 SCAN_OUT="$ROOT/tmp/marketing-signup/current-price-live/current-marketing-price-live-${DATE}-${STAMP}.json"
 GUARD_OUT="$ROOT/outputs/reports/marketing-daily-guard-${DATE}.json"
 
+prepare_shared_lock_file "$LOCK_FILE"
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
   echo "[cloud_marketing_live_guard] another marketing live guard is running; skip"

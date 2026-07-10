@@ -8,6 +8,7 @@ Type=oneshot
 WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/root
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_LARK_REPORT_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-daily-lark-report.lock
 Environment=SHEIN_FEISHU_BASE_PAUSED=1
 Environment=SHEIN_LARK_REPORT_DISABLED=1
 TimeoutStartSec=1800

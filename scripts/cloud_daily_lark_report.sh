@@ -2,10 +2,11 @@
 set -Eeuo pipefail
 
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
+source "$ROOT/scripts/lib/shared_lock.sh"
 TARGET="${1:-today}"
 TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
 LOG_DIR="${SHEIN_LARK_REPORT_LOG_DIR:-/srv/shein-bi/logs/cloud-lark-report}"
-LOCK_FILE="${SHEIN_LARK_REPORT_LOCK_FILE:-/tmp/shein-bi-cloud-daily-lark-report.lock}"
+LOCK_FILE="${SHEIN_LARK_REPORT_LOCK_FILE:-$ROOT/state/locks/shein-bi-cloud-daily-lark-report.lock}"
 SENT_DIR="${SHEIN_LARK_REPORT_SENT_DIR:-$ROOT/state/cloud_daily_report_sent}"
 
 resolve_date() {
@@ -33,6 +34,7 @@ STAMP="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)"
 LOG_FILE="$LOG_DIR/daily-lark-report-${DATE}-${STAMP}.log"
 SENT_FLAG="$SENT_DIR/${DATE}.sent"
 
+prepare_shared_lock_file "$LOCK_FILE"
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
   echo "[cloud_daily_lark_report] another report run is active; skip"

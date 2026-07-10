@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
+source "$ROOT/scripts/lib/shared_lock.sh"
 TARGET="${1:-today}"
 MODE="${2:-intraday}"
 TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
@@ -13,19 +14,6 @@ PORTAL_DATA_PATH="${PORTAL_DATA_PATH:-$ROOT/outputs/bi-portal/data.json}"
 LOCK_FILE="${SHEIN_BI_REFRESH_LOCK_FILE:-$ROOT/state/locks/shein-bi-cloud-sales-refresh.lock}"
 PORTAL_REFRESH_LOCK_FILE="${SHEIN_BI_PORTAL_REFRESH_LOCK_FILE:-$ROOT/state/locks/shein-bi-portal-refresh.lock}"
 PORTAL_REFRESH_LOCK_WAIT_SEC="${SHEIN_BI_PORTAL_REFRESH_LOCK_WAIT_SEC:-1800}"
-
-prepare_shared_lock_file() {
-  local file="$1"
-  local dir
-  dir="$(dirname "$file")"
-  mkdir -p "$dir"
-  chgrp users "$dir" 2>/dev/null || true
-  chmod 2775 "$dir" 2>/dev/null || chmod 0777 "$dir" 2>/dev/null || true
-  if [[ ! -e "$file" ]]; then
-    (umask 000; : >"$file")
-  fi
-  chmod 0666 "$file" 2>/dev/null || true
-}
 
 resolve_date() {
   local target="$1"

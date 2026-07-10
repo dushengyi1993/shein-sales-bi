@@ -127,7 +127,7 @@ ET、统一日更补采、异常通知 watchdog、只读问数机器人（云端
 - `daily-refresh` 启动前会等待销售/昨日销售/ET 写入任务结束，并检查 `MemAvailable`。可用内存低于阈值时写 `skipped_low_memory` 状态后跳过本轮；宁可让慢变数据晚一点，也不能拖慢销售刷新和 BI 页面。
 
 - `daily-refresh`、ET、登录态管家、销售刷新、昨日销售、订单闭环、RTV 校验均有 `MemoryHigh` / `MemoryMax` / `OOMPolicy=stop` 护栏；如果单个任务越界，应失败并告警，不能把整台服务器拖到 OOM。
-- 销售刷新锁由 `SHEIN_BI_REFRESH_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-sales-refresh.lock` 管理，`scripts/cloud_bi_refresh.sh` 会在 `flock` 前调用 `prepare_shared_lock_file "$LOCK_FILE"`。不要使用 `/tmp/shein-bi-cloud-sales-refresh.lock` 作为长期锁文件；历史 `/tmp` 残留曾导致 `shein-bi-cloud-today.service` 启动阶段 `Permission denied`，修复标准是迁回 app `state/locks`、`systemctl daemon-reload`、`systemctl reset-failed`，再跑 `node scripts/cloud_ops_watchdog.mjs --dry-run` 得到 `issues=[]`。
+- 销售、日更、ET、营销巡检、晨间链路、日报、Portal 刷新和预热锁统一放在 `/opt/shein-bi/app/state/locks`，所有脚本在 `flock` 前调用 `scripts/lib/shared_lock.sh` 的 `prepare_shared_lock_file`。目录必须是 `2770`，锁文件必须是 `0660` 且 group 为 `sheinops`；禁止恢复 `chmod 0666`、`umask 000` 或可预测的 `/tmp/*.lock`。历史 `/tmp` 残留曾导致任务权限冲突，修复后应 `systemctl daemon-reload`、`systemctl reset-failed`，并确认 app 内 `worldWritableNonSymlinks=0`。
 - 2026-06-20 已确认旧 `financeData` section 下线：线上 `/api/bi/section/financeData` 应返回 `404`；`/v1/` 应返回 `410`，`/v2/` 只跳转到根路径。不要为 V1/旧财务页面恢复预热、缓存或 timer。
 
 - `inventoryTrend` 不是 ET 实盘库存，而是 SHEIN 前台展示库存趋势。2026-06-20 云端实测 `inventoryTrend.json` 约 `242KB`、gzip 约 `20KB`；若后续怀疑 21MB 大 section，先查线上 `outputs/bi-portal/sections/` 真实体积，不按旧印象处理。
@@ -276,7 +276,7 @@ GitHub 应保存：
 - 服务器本机访问 `/api/health` 或带有效 BI 登录会话访问应返回 `200` 且 `ok=true`；未登录公网访问应返回 `401` 或跳转登录。
 
 - `shein-bi-cloud-today.timer` 应按每小时真实触发，但跳过 `03:00` 昨日定稿和 `08:00` 晨间链路。
-- `shein-bi-cloud-today.service` 的环境变量应包含 `SHEIN_BI_REFRESH_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-sales-refresh.lock`；锁文件应可被 root / sheinops 写入。若 watchdog 只剩 `today.service failed`，先查 `journalctl -u shein-bi-cloud-today.service` 是否为锁文件权限问题。
+- `shein-bi-cloud-today.service` 的环境变量应包含 `SHEIN_BI_REFRESH_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-sales-refresh.lock`；所有 `state/locks/*.lock` 应为 `0660 root|sheinops:sheinops`，同时可被 root / sheinops 写入但不能 world-write。若 watchdog 只剩 `today.service failed`，先查 `journalctl -u shein-bi-cloud-today.service` 是否为锁文件权限问题。
 - `shein-bi-db-backup.timer` 应每日生成 `shein_bi.dump` 与 `metabase.dump`。
 
 - ET 已验证可手动跑 `scripts/cloud_et_forwarder_sync.sh today`，能登录、抓取、入仓并刷新门户；失败时保留上一版 ET 数据，不应阻断销售 BI。

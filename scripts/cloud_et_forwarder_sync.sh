@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
+source "$ROOT/scripts/lib/shared_lock.sh"
 TARGET="${1:-today}"
 MODE="${SHEIN_ET_SYNC_MODE:-daily}"
 TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
@@ -10,7 +11,7 @@ METABASE_URL="${METABASE_URL:-http://127.0.0.1:3000}"
 PORTAL_HEALTH_URL="${PORTAL_HEALTH_URL:-}"
 PORTAL_INDEX_PATH="${PORTAL_INDEX_PATH:-$ROOT/outputs/bi-portal/index.html}"
 PORTAL_DATA_PATH="${PORTAL_DATA_PATH:-$ROOT/outputs/bi-portal/data.json}"
-LOCK_FILE="${SHEIN_ET_LOCK_FILE:-/tmp/shein-bi-cloud-et-forwarder.lock}"
+LOCK_FILE="${SHEIN_ET_LOCK_FILE:-$ROOT/state/locks/shein-bi-cloud-et-forwarder.lock}"
 PORTAL_REFRESH_LOCK_FILE="${SHEIN_BI_PORTAL_REFRESH_LOCK_FILE:-$ROOT/state/locks/shein-bi-portal-refresh.lock}"
 PORTAL_REFRESH_LOCK_WAIT_SEC="${SHEIN_BI_PORTAL_REFRESH_LOCK_WAIT_SEC:-1800}"
 WAIT_SERVICES="${SHEIN_ET_WAIT_SERVICES:-shein-bi-cloud-today.service shein-bi-cloud-yesterday.service shein-bi-cloud-session-manager.service shein-bi-db-backup.service}"
@@ -18,19 +19,6 @@ SKIP_IF_SERVICES="${SHEIN_ET_SKIP_IF_SERVICES:-shein-bi-cloud-daily-refresh.serv
 ET_CHROME_PROFILE_NAME="persistent-et-forwarder-profile"
 ET_CHROME_TMP_DIR="${SHEIN_ET_CHROME_TMP_DIR:-/tmp/shein-bi-et-forwarder-chrome-tmp}"
 ET_CLEANUP_LEGACY_CHROME_TMP="${SHEIN_ET_CLEANUP_LEGACY_CHROME_TMP:-1}"
-
-prepare_shared_lock_file() {
-  local file="$1"
-  local dir
-  dir="$(dirname "$file")"
-  mkdir -p "$dir"
-  chgrp users "$dir" 2>/dev/null || true
-  chmod 2775 "$dir" 2>/dev/null || chmod 0777 "$dir" 2>/dev/null || true
-  if [[ ! -e "$file" ]]; then
-    (umask 000; : >"$file")
-  fi
-  chmod 0666 "$file" 2>/dev/null || true
-}
 
 resolve_date() {
   local target="$1"
@@ -61,6 +49,7 @@ fi
 STAMP="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)"
 LOG_FILE="$LOG_DIR/et-forwarder-${DATE}-${STAMP}.log"
 
+prepare_shared_lock_file "$LOCK_FILE"
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
   echo "[cloud_et_forwarder_sync] another ET sync is running; skip"

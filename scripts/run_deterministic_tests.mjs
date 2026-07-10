@@ -22,6 +22,7 @@ const tests = [
   'scripts/test_bi_client_resilience.mjs',
   'scripts/test_bi_frontend_accessibility.mjs',
   'scripts/test_bi_section_cache.mjs',
+  'scripts/test_shared_lock_security.mjs',
   'scripts/test_systemd_security_contract.mjs',
   'scripts/test_bi_product_section_contract.mjs',
   'scripts/test_openapi_sales_loader_validity.mjs',

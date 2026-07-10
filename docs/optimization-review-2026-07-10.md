@@ -40,6 +40,7 @@
 - CDP 请求具有超时、容量上限和重试边界，避免单个浏览器连接无限挂起。
 - Portal 与飞书问数 systemd unit 固化 umask、内核/控制组保护和资源上限；飞书问数从 root 迁移到 `sheinops`，并启用 `NoNewPrivileges` / `PrivateTmp`。
 - `scripts/harden_cloud_runtime_permissions.sh` 用于移除生产 app 的 world-write；不递归改属主，不破坏 root/`sheinops` 混合调度。
+- 所有生产 `flock` 锁统一迁入 `state/locks`，由 `scripts/lib/shared_lock.sh` 以目录 `2770`、文件 `0660`、组 `sheinops` 创建；删除复制粘贴的 `chmod 0666` 和可预测 `/tmp/*.lock`。
 
 ### 5. 前端与可访问性
 
@@ -60,8 +61,8 @@
 - 优化源码按文件安装至 `/opt/shein-bi/app`；生产工作树已有业务热修，因此刻意没有执行 `pull`、`reset --hard` 或全目录覆盖。
 - `shein-bi-portal.service` 与 `shein-bi-lark-sales-qa.service` 均以 `sheinops:sheinops` 运行；Portal 健康检查、Lark WebSocket、systemd 安全属性和最近日志均已回读。
 - 正式入口 `https://sa.dushengyi.cc/` 已验证登录跳转、安全响应头、桌面/1200px/390px 布局和六个主路由；浏览器 console 无新增错误。
-- 云端再次执行 `npm test`：28/28 通过；`scripts/test_bi_ops_release_gate.mjs` 通过。两项 SK-5110 私有 handoff fixture 在云端不存在，按门禁设计明确标记为 skipped，而不是伪装为已执行。
-- 云端 app 中普通文件和目录的 world-writable 数量从 45 收口为 0；symlink、属主和既有 group 权限不做破坏性重写。
+- 云端再次执行 `npm test`：29/29 通过；`scripts/test_bi_ops_release_gate.mjs` 通过。两项 SK-5110 私有 handoff fixture 在云端不存在，按门禁设计明确标记为 skipped，而不是伪装为已执行。
+- 云端 app 中普通文件和目录的 world-writable 数量从 45 收口为 0；定时任务也不会再把共享锁恢复成 `0666`。symlink、非锁文件属主和既有 group 权限不做破坏性重写。
 
 ## 已知外部状态与人工项
 

@@ -11,6 +11,7 @@ WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/home/sheinops
 Environment=TZ=Asia/Shanghai
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_BI_MARKETING_LIVE_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-marketing-live-guard.lock
 Environment=SHEIN_BI_MARKETING_LIVE_LOG_DIR=/srv/shein-bi/logs/cloud-marketing-live-guard
 Environment=SHEIN_BI_MARKETING_LIVE_SCAN_TIMEOUT_SEC=2400
 Environment=SHEIN_BI_MARKETING_LIVE_SCAN_KILL_AFTER_SEC=60

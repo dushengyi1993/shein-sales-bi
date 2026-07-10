@@ -2,9 +2,10 @@
 set -Eeuo pipefail
 
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
+source "$ROOT/scripts/lib/shared_lock.sh"
 TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
 LOG_DIR="${SHEIN_BI_MORNING_CHAIN_LOG_DIR:-/srv/shein-bi/logs/cloud-morning-chain}"
-LOCK_FILE="${SHEIN_BI_MORNING_CHAIN_LOCK_FILE:-/tmp/shein-bi-cloud-morning-chain.lock}"
+LOCK_FILE="${SHEIN_BI_MORNING_CHAIN_LOCK_FILE:-$ROOT/state/locks/shein-bi-cloud-morning-chain.lock}"
 STATE_DIR="${SHEIN_BI_MORNING_CHAIN_STATE_DIR:-$ROOT/state/cloud_morning_chain}"
 DAILY_REFRESH_UNIT="${SHEIN_BI_MORNING_DAILY_REFRESH_UNIT:-shein-bi-cloud-daily-refresh.service}"
 DAILY_REFRESH_WAIT_SEC="${SHEIN_BI_MORNING_DAILY_REFRESH_WAIT_SEC:-14400}"
@@ -65,6 +66,7 @@ STAMP="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)"
 LOG_FILE="$LOG_DIR/morning-chain-${DATE}-${STAMP}.log"
 DONE_FLAG="$STATE_DIR/${DATE}.done"
 
+prepare_shared_lock_file "$LOCK_FILE"
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
   echo "[cloud_morning_chain] another morning chain is running; skip"

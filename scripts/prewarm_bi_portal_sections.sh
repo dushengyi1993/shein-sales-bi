@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
+source "$ROOT/scripts/lib/shared_lock.sh"
 TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
 PORTAL_URL="${SHEIN_BI_PORTAL_URL:-http://127.0.0.1:8787}"
 # Warm the homepage-critical sections first. profit can be much slower than the
@@ -18,12 +19,12 @@ ASYNC_REFRESH="${SHEIN_BI_PORTAL_PREWARM_ASYNC:-1}"
 LOCK_FILE="${SHEIN_BI_PORTAL_PREWARM_LOCK_FILE:-$ROOT/state/locks/shein-bi-portal-prewarm.lock}"
 
 mkdir -p "$LOG_DIR"
-mkdir -p "$(dirname "$LOCK_FILE")"
 STAMP="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)"
 LOG_FILE="$LOG_DIR/prewarm-${STAMP}.log"
 
 exec >>"$LOG_FILE" 2>&1
 
+prepare_shared_lock_file "$LOCK_FILE"
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
   echo "[prewarm_bi_portal_sections] another prewarm is running; skip"

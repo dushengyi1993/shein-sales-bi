@@ -8,6 +8,7 @@ Type=oneshot
 WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/root
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_ET_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-et-forwarder.lock
 Environment=SHEIN_BI_PORTAL_REFRESH_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-portal-refresh.lock
 Environment=SHEIN_PYTHON=/opt/shein-bi/app/.venv-et/bin/python
 Environment=SHEIN_ET_LOG_DIR=/srv/shein-bi/logs/cloud-et-forwarder

@@ -136,6 +136,8 @@
 
   - `prewarm_bi_portal_sections.sh`：云端 Portal section 预热脚本，由 `cloud_bi_refresh.sh` 在 api data mode 下后台启动；默认先预热首页关键 section，并在 `profit` 成功后补跑 `homeProfit`。前端会拒绝 `staleSource=true` 或 `sourceGeneratedAt` 不匹配的旧利润摘要；若脚本未及时跑完，`serve_bi_portal.mjs` 的 core warmup watcher 会兜底。
 
+  - `scripts/lib/shared_lock.sh`：云端生产 shell 任务的共享 `flock` 权限库；锁只允许位于受控目录，统一使用 `2770` 目录、`0660` 文件和 `sheinops` 组，禁止各脚本自行创建 world-writable `/tmp` 锁。
+
   - `serve_bi_portal.ps1`
 
   - `open_bi_portal.ps1`
