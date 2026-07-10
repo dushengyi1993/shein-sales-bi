@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
@@ -175,4 +177,28 @@ assert.match(
   'ET box item expansion must recompute match_key from standard_goods_sn before using stale stored match_key',
 );
 
-console.log(`product_match_key_schema: ${cases.length} match-key checks, ${canonicalCases.length} canonical checks, ${generatedAliasChecks} generated alias checks, and ET storage match-key precedence checks passed`);
+const eolRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'shein-schema-eol-'));
+try {
+  const crlfSchemaPath = path.join(eolRoot, 'schema.sql');
+  const aliasCopyPath = path.join(eolRoot, 'product_aliases.json');
+  fs.writeFileSync(crlfSchemaPath, schema.replace(/\r?\n/g, '\r\n'));
+  fs.copyFileSync(aliasPath, aliasCopyPath);
+  const env = {
+    ...process.env,
+    SHEIN_PRODUCT_ALIAS_CONFIG_PATH: aliasCopyPath,
+    SHEIN_WAREHOUSE_SCHEMA_PATH: crlfSchemaPath,
+  };
+  const check = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'generate_product_match_key_schema.mjs'), '--check', '--quiet'], {
+    cwd: ROOT,
+    env,
+    encoding: 'utf8',
+  });
+  assert.equal(check.status, 0, `CRLF schema must be considered in sync: ${check.stderr || check.stdout}`);
+  const after = fs.readFileSync(crlfSchemaPath);
+  const lfCount = [...after].filter((byte, index) => byte === 10 && after[index - 1] !== 13).length;
+  assert.equal(lfCount, 0, 'schema generator must preserve CRLF throughout a CRLF file');
+} finally {
+  fs.rmSync(eolRoot, {recursive: true, force: true});
+}
+
+console.log(`product_match_key_schema: ${cases.length} match-key checks, ${canonicalCases.length} canonical checks, ${generatedAliasChecks} generated alias checks, ET storage precedence, and cross-platform EOL checks passed`);

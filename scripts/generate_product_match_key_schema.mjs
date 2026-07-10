@@ -4,8 +4,12 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ALIAS_PATH = path.join(ROOT, 'config', 'product_aliases.json');
-const SCHEMA_PATH = path.join(ROOT, 'infra', 'warehouse', 'schema.sql');
+const ALIAS_PATH = process.env.SHEIN_PRODUCT_ALIAS_CONFIG_PATH
+  ? path.resolve(process.env.SHEIN_PRODUCT_ALIAS_CONFIG_PATH)
+  : path.join(ROOT, 'config', 'product_aliases.json');
+const SCHEMA_PATH = process.env.SHEIN_WAREHOUSE_SCHEMA_PATH
+  ? path.resolve(process.env.SHEIN_WAREHOUSE_SCHEMA_PATH)
+  : path.join(ROOT, 'infra', 'warehouse', 'schema.sql');
 
 const args = new Set(process.argv.slice(2));
 
@@ -138,7 +142,9 @@ function nextSchema(rendered) {
   if (!functionBlockRe.test(schema)) {
     throw new Error('failed to locate product_match_key/product_canonical_sn function block in schema.sql');
   }
-  return {current: schema, next: schema.replace(functionBlockRe, () => rendered.sql)};
+  const newline = schema.includes('\r\n') ? '\r\n' : '\n';
+  const renderedSql = newline === '\n' ? rendered.sql : rendered.sql.replace(/\n/g, newline);
+  return {current: schema, next: schema.replace(functionBlockRe, () => renderedSql)};
 }
 
 function writeSchema(rendered) {
