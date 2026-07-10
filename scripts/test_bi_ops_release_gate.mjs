@@ -139,6 +139,10 @@ const DIFF_CHECK_FILES = [
   'docs/shein-openapi-integration.md',
 ];
 const STALE_CONFIRM_TEXT = 'SHEIN_' + 'HL_OPENAPI_SUBMIT';
+const SK5110_LOCAL_ARTIFACTS = [
+  'tmp/sk5110-batch-prep/sk5110-batch-draft-plan.local-only.json',
+  'tmp/sk5110-batch-prep/sk5110-cloud-execution-handoff.local-only.json',
+];
 
 function run(command, args, {allowFailure = false} = {}) {
   return new Promise((resolve) => {
@@ -235,8 +239,17 @@ async function main() {
   results.push({name: 'copy_product_draft all-stores capability smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_all_stores_capability.mjs']))});
   results.push({name: 'maintenance executor fake OpenAPI smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_maintenance_executor_flow.mjs']))});
   results.push({name: 'local image role planner smoke', ...(await run(process.execPath, ['scripts/test_link_ops_image_role_planner.mjs']))});
-  results.push({name: 'SK-5110 batch draft static guard', ...(await run(process.execPath, ['scripts/test_sk5110_batch_draft_plan.mjs']))});
-  results.push({name: 'SK-5110 cloud handoff static guard', ...(await run(process.execPath, ['scripts/test_sk5110_cloud_handoff_plan.mjs']))});
+  const hasSk5110LocalArtifacts = (await Promise.all(SK5110_LOCAL_ARTIFACTS.map(pathExists))).every(Boolean);
+  if (hasSk5110LocalArtifacts) {
+    results.push({name: 'SK-5110 batch draft static guard', ...(await run(process.execPath, ['scripts/test_sk5110_batch_draft_plan.mjs']))});
+    results.push({name: 'SK-5110 cloud handoff static guard', ...(await run(process.execPath, ['scripts/test_sk5110_cloud_handoff_plan.mjs']))});
+  } else {
+    const missingArtifacts = [];
+    for (const artifact of SK5110_LOCAL_ARTIFACTS) if (!(await pathExists(artifact))) missingArtifacts.push(artifact);
+    const skipped = {code: 0, ok: true, skipped: true, durationMs: 0, reason: `local-only artifacts unavailable: ${missingArtifacts.join(', ')}`};
+    results.push({name: 'SK-5110 batch draft static guard', ...skipped});
+    results.push({name: 'SK-5110 cloud handoff static guard', ...skipped});
+  }
   results.push({name: 'OpenAPI image asset executor smoke', ...(await run(process.execPath, ['scripts/test_openapi_image_asset_executor.mjs']))});
   results.push({name: 'OpenAPI readonly executor smoke', ...(await run(process.execPath, ['scripts/test_openapi_readonly_executor.mjs']))});
   results.push({name: 'OpenAPI order fulfillment executor smoke', ...(await run(process.execPath, ['scripts/test_openapi_order_fulfillment_executor.mjs']))});
@@ -252,7 +265,7 @@ async function main() {
   const ok = results.every(r => r.ok) && staleConfirm.ok;
   const summary = {
     ok,
-    checks: results.map(r => ({name: r.name, code: r.code, ok: r.ok, durationMs: r.durationMs})),
+    checks: results.map(r => ({name: r.name, code: r.code, ok: r.ok, skipped: Boolean(r.skipped), reason: r.reason || '', durationMs: r.durationMs})),
     staleConfirm,
     notes: [
       'permission and CLI flow smokes use isolated temporary auth/task/audit files',
@@ -284,6 +297,7 @@ async function main() {
       'local image role planner smoke proves 本地图包规划 only scans files and does not upload or submit SHEIN writes',
       'SK-5110 batch draft static guard proves local-only 19-store draft keeps NM/HL old-link scope, XC dopamine set, title groups and product-cover exclusion before cloud execution',
       'SK-5110 cloud handoff static guard proves the post-sample batch handoff remains local-only, keeps the HL/DX user-review gate, and requires cloud dry-run/hash before any execute',
+      'SK-5110 local-only artifact guards run only when both private draft files exist; clean CI/cloud worktrees report an explicit skip instead of treating absent private tmp data as a code failure',
       'cloud image asset smoke proves bi_ops_cli image execute uses the BI session/cloud endpoint and fake OpenAPI, not local SHEIN credentials',
       'official doc detail parser smoke uses offline fixtures and never prints/saves cookies',
       'maintenance readiness smoke requires schema, per-store permission and strong readback before pilot_ready',
