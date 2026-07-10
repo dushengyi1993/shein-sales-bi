@@ -67,6 +67,7 @@ function parseArgs(argv) {
     metabaseUrl: '',
     dataMode: process.env.SHEIN_BI_PORTAL_DATA_MODE || 'legacy',
     section: '',
+    sqlOnly: false,
     jsonOnly: false,
     homeVariant: process.env.SHEIN_BI_HOME_VARIANT || 'no-groups',
     previewVariant: '',
@@ -83,6 +84,7 @@ function parseArgs(argv) {
     else if (a === '--metabase-url') args.metabaseUrl = argv[++i];
     else if (a === '--data-mode') args.dataMode = argv[++i];
     else if (a === '--section') args.section = argv[++i];
+    else if (a === '--sql-only') args.sqlOnly = true;
     else if (a === '--json-only') args.jsonOnly = true;
     else if (a === '--home-variant') args.homeVariant = argv[++i];
     else if (a === '--preview-variant') args.previewVariant = argv[++i];
@@ -124,6 +126,8 @@ const PORTAL_API_SECTION_KEYS = [
   'profit',
   'actions',
   'linksData',
+  'productSalesDaily',
+  'homeTrafficDaily',
   'productTrafficDaily',
   'inventoryTrend',
   'comments',
@@ -199,6 +203,12 @@ const PORTAL_SECTION_SELECTS = {
   'storeLinks', (SELECT data FROM store_links),
   'matrix', (SELECT data FROM matrix)
 `,
+  productSalesDaily: `
+  'productSalesDaily', (SELECT data FROM product_sales_daily)
+`,
+  homeTrafficDaily: `
+  'homeTrafficDaily', (SELECT data FROM home_traffic_daily)
+`,
   productTrafficDaily: `
   'productTrafficDaily', (SELECT data FROM product_traffic_daily)
 `,
@@ -238,6 +248,145 @@ const PORTAL_SECTION_SELECTS = {
 };
 
 const STANDALONE_SECTION_SQL = {
+  homeTrafficDaily: `
+WITH raw_home_traffic AS MATERIALIZED (
+  SELECT
+    p.date,
+    p.store_key,
+    p.standard_goods_sn AS raw_goods_sn,
+    round(sum(coalesce(p.sale_cnt, 0))::numeric, 2) AS sale_cnt,
+    round(sum(coalesce(p.pay_order_cnt, 0))::numeric, 2) AS pay_order_cnt,
+    round(sum(coalesce(p.eps_uv, 0))::numeric, 0) AS eps_uv,
+    round(sum(coalesce(p.goods_uv, 0))::numeric, 0) AS goods_uv,
+    round(sum(coalesce(p.cart_uv, 0))::numeric, 0) AS cart_uv
+  FROM fact.link_performance_daily p
+  WHERE coalesce(p.standard_goods_sn, '') <> ''
+    AND coalesce(p.store_key, '') <> ''
+  GROUP BY p.date, p.store_key, p.standard_goods_sn
+),
+home_traffic_product_keys AS MATERIALIZED (
+  SELECT k.raw_goods_sn, dim.product_canonical_sn(k.raw_goods_sn) AS standard_goods_sn
+  FROM (SELECT DISTINCT raw_goods_sn FROM raw_home_traffic) k
+),
+home_traffic_daily AS (
+  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY t.date, t.store_key, t.standard_goods_sn), '[]'::jsonb) AS data
+  FROM (
+    SELECT
+      r.date,
+      r.store_key,
+      k.standard_goods_sn,
+      round(sum(r.sale_cnt)::numeric, 2) AS sale_cnt,
+      round(sum(r.pay_order_cnt)::numeric, 2) AS pay_order_cnt,
+      round(sum(r.eps_uv)::numeric, 0) AS eps_uv,
+      round(sum(r.goods_uv)::numeric, 0) AS goods_uv,
+      round(sum(r.cart_uv)::numeric, 0) AS cart_uv
+    FROM raw_home_traffic r
+    JOIN home_traffic_product_keys k ON k.raw_goods_sn = r.raw_goods_sn
+    WHERE coalesce(k.standard_goods_sn, '') <> ''
+    GROUP BY r.date, r.store_key, k.standard_goods_sn
+  ) t
+)
+SELECT jsonb_build_object(
+  'homeTrafficDaily', (SELECT data FROM home_traffic_daily)
+)::text;
+`,
+  productTrafficDaily: `
+WITH store_latest_link AS (
+  SELECT store_key, max(snapshot_date) AS link_date
+  FROM fact.link_master_snapshot
+  GROUP BY store_key
+),
+latest_link_status AS MATERIALIZED (
+  SELECT
+    l.store_key,
+    l.skc,
+    max(nullif(l.shelf_status, '')) AS shelf_status,
+    max(nullif(l.shelf_status_name, '')) AS shelf_status_name,
+    bool_or(coalesce(l.is_on_shelf, false)) AS is_on_shelf,
+    bool_or(coalesce(l.is_wait_shelf, false)) AS is_wait_shelf,
+    bool_or(coalesce(l.is_sold_out, false)) AS is_sold_out,
+    bool_or(coalesce(l.is_out_shelf, false)) AS is_out_shelf
+  FROM fact.link_master_snapshot l
+  JOIN store_latest_link sll
+    ON sll.store_key = l.store_key
+   AND sll.link_date = l.snapshot_date
+  WHERE coalesce(l.skc, '') <> ''
+    AND coalesce(l.is_hard_dead, false) = false
+  GROUP BY l.store_key, l.skc
+),
+raw_product_traffic AS MATERIALIZED (
+  SELECT
+    p.date,
+    p.store_key,
+    p.standard_goods_sn AS raw_goods_sn,
+    p.skc,
+    round(sum(coalesce(p.sale_cnt, 0))::numeric, 2) AS sale_cnt,
+    round(sum(coalesce(p.pay_order_cnt, 0))::numeric, 2) AS pay_order_cnt,
+    round(sum(coalesce(p.eps_uv, 0))::numeric, 0) AS eps_uv,
+    round(sum(coalesce(p.goods_uv, 0))::numeric, 0) AS goods_uv,
+    round(sum(coalesce(p.cart_uv, 0))::numeric, 0) AS cart_uv
+  FROM fact.link_performance_daily p
+  WHERE coalesce(p.standard_goods_sn, '') <> ''
+    AND coalesce(p.store_key, '') <> ''
+    AND coalesce(p.skc, '') <> ''
+  GROUP BY p.date, p.store_key, p.standard_goods_sn, p.skc
+),
+product_traffic_keys AS MATERIALIZED (
+  SELECT k.raw_goods_sn, dim.product_canonical_sn(k.raw_goods_sn) AS standard_goods_sn
+  FROM (SELECT DISTINCT raw_goods_sn FROM raw_product_traffic) k
+),
+product_traffic_daily AS (
+  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY t.date, t.store_key, t.standard_goods_sn, t.skc), '[]'::jsonb) AS data
+  FROM (
+    SELECT
+      r.date,
+      r.store_key,
+      k.standard_goods_sn,
+      max(nullif(r.raw_goods_sn, '')) AS raw_goods_sn,
+      nullif(r.skc, '') AS skc,
+      max(l.shelf_status) AS shelf_status,
+      max(l.shelf_status_name) AS shelf_status_name,
+      bool_or(coalesce(l.is_on_shelf, false)) AS is_on_shelf,
+      bool_or(coalesce(l.is_wait_shelf, false)) AS is_wait_shelf,
+      bool_or(coalesce(l.is_sold_out, false)) AS is_sold_out,
+      bool_or(coalesce(l.is_out_shelf, false)) AS is_out_shelf,
+      round(sum(r.sale_cnt)::numeric, 2) AS sale_cnt,
+      round(sum(r.pay_order_cnt)::numeric, 2) AS pay_order_cnt,
+      round(sum(r.eps_uv)::numeric, 0) AS eps_uv,
+      round(sum(r.goods_uv)::numeric, 0) AS goods_uv,
+      round(sum(r.cart_uv)::numeric, 0) AS cart_uv
+    FROM raw_product_traffic r
+    JOIN product_traffic_keys k ON k.raw_goods_sn = r.raw_goods_sn
+    LEFT JOIN latest_link_status l ON l.store_key = r.store_key AND l.skc = r.skc
+    WHERE coalesce(k.standard_goods_sn, '') <> ''
+    GROUP BY r.date, r.store_key, k.standard_goods_sn, nullif(r.skc, '')
+  ) t
+)
+SELECT jsonb_build_object(
+  'productTrafficDaily', (SELECT data FROM product_traffic_daily)
+)::text;
+`,
+  productSalesDaily: `
+WITH product_sales_daily AS (
+  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY t.date, t.store_key, t.standard_goods_sn), '[]'::jsonb) AS data
+  FROM (
+    SELECT
+      oi.created_date::date AS date,
+      oi.store_key,
+      dim.product_canonical_sn(oi.standard_goods_sn) AS standard_goods_sn,
+      round(sum(coalesce(oi.net_revenue_sar,0))::numeric, 2) AS sales_sar,
+      round(sum(CASE WHEN coalesce(oi.net_revenue_sar,0) > 0 THEN coalesce(oi.quantity,0) ELSE 0 END)::numeric, 0) AS quantity,
+      count(DISTINCT oi.order_no) FILTER (WHERE coalesce(oi.net_revenue_sar,0) > 0) AS orders
+    FROM ${profitMart('profit_order_item')} oi
+    WHERE coalesce(oi.standard_goods_sn,'') <> ''
+      AND coalesce(oi.store_key,'') <> ''
+    GROUP BY oi.created_date::date, oi.store_key, dim.product_canonical_sn(oi.standard_goods_sn)
+  ) t
+)
+SELECT jsonb_build_object(
+  'productSalesDaily', (SELECT data FROM product_sales_daily)
+)::text;
+`,
   priceScatter: `
 WITH price_scatter AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY t.created_date NULLS LAST, t.unit_price_sar NULLS LAST), '[]'::jsonb) AS data
@@ -16113,7 +16262,13 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.section) {
     markStage(`section:${args.section}:sql`);
-    const raw = await runPsql(args, buildSectionSql(args.section));
+    const sectionSql = buildSectionSql(args.section);
+    if (args.sqlOnly) {
+      clearTimeout(portalGenerateTimer);
+      process.stdout.write(sectionSql);
+      return;
+    }
+    const raw = await runPsql(args, sectionSql);
     markStage(`section:${args.section}:parse`);
     let sectionData = deepSanitize(parsePsqlJson(raw, `BI portal section ${args.section}`));
     if (args.section === 'linksData') sectionData = await enrichPortalDataWithLocalLinkLabels(sectionData);

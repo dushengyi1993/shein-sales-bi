@@ -18,8 +18,15 @@ const tests = [
   'scripts/test_product_match_key_schema.mjs',
   'scripts/test_product_sku_normalizer.mjs',
   'scripts/test_marketing_plan_selector.mjs',
+  'scripts/test_marketing_scan_resilience.mjs',
+  'scripts/test_bi_client_resilience.mjs',
+  'scripts/test_bi_product_section_contract.mjs',
   'scripts/test_openapi_sales_loader_validity.mjs',
+  'scripts/test_portal_security.mjs',
+  'scripts/test_portal_http_security.mjs',
   'scripts/test_shein_store_identity_merchant_fallback.mjs',
+  'scripts/test_shein_browser_cdp.mjs',
+  'scripts/test_bi_ops_portal_shell_sync.mjs',
 ];
 
 const failures = [];

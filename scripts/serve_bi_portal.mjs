@@ -23,6 +23,14 @@ import {gzipSync} from 'node:zlib';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
 import {executeUploadPic} from '../lib/openapi_adapters/upload_pic.mjs';
 import {executeTransformPic} from '../lib/openapi_adapters/transform_pic.mjs';
+import {
+  createLoginRateLimiter,
+  createSerialMutationQueue,
+  isMutationMethod,
+  loginRateKey,
+  mutationOriginAllowed,
+  portalResponseHeaders,
+} from '../lib/portal_security.mjs';
 import {formatStoreIdentityError, validateStoreIdentity} from '../lib/shein_store_identity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -107,7 +115,7 @@ const OPENAPI_IMAGE_ASSET_ALLOWED_MIME = new Set(['image/jpeg', 'image/png']);
 const OPENAPI_IMAGE_ASSET_TYPES = new Set([1, 2, 5, 6, 7]);
 const DEFAULT_SHEIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
 const DEFAULT_MANUAL_LOGIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
-const BI_PORTAL_SECTION_KEYS = new Set(['homeProfit', 'homeRankings', 'rankings', 'profit', 'actions', 'linksData', 'productTrafficDaily', 'inventoryTrend', 'comments', 'orders', 'priceScatter', 'afterSales', 'rtvData', 'waybills']);
+const BI_PORTAL_SECTION_KEYS = new Set(['homeProfit', 'homeRankings', 'rankings', 'profit', 'actions', 'linksData', 'productSalesDaily', 'homeTrafficDaily', 'productTrafficDaily', 'inventoryTrend', 'comments', 'orders', 'priceScatter', 'afterSales', 'rtvData', 'waybills']);
 const BI_PORTAL_SECTION_TIMEOUT_MS = Math.max(60_000, Number(process.env.SHEIN_BI_SECTION_TIMEOUT_MS || 900_000));
 const OPENAPI_READ_PROBE_SUMMARY_FILE = process.env.SHEIN_OPENAPI_READ_PROBE_SUMMARY_FILE
   || path.join(ROOT, 'state', 'openapi-probes', 'read-probes.latest.json');
@@ -498,12 +506,15 @@ function hasUploadMagic(buffer, mime) {
   return false;
 }
 
-function send(res, status, body, headers = {}) {
-  res.writeHead(status, {
+function writeResponseHead(res, status, headers = {}) {
+  res.writeHead(status, portalResponseHeaders({
     'Cache-Control': 'no-store',
-    'X-Content-Type-Options': 'nosniff',
     ...headers,
-  });
+  }));
+}
+
+function send(res, status, body, headers = {}) {
+  writeResponseHead(res, status, headers);
   res.end(body);
 }
 
@@ -6087,7 +6098,7 @@ async function ensureProfitMartCacheFresh(args, generatedAt = '') {
 }
 
 async function generateBiSection(args, root, section, generatedAt) {
-  const profitBackedSections = new Set(['profit', 'homeProfit', 'homeRankings', 'rankings']);
+  const profitBackedSections = new Set(['profit', 'homeProfit', 'homeRankings', 'rankings', 'productSalesDaily']);
   const useProfitMartCache = profitBackedSections.has(section) && process.env.SHEIN_BI_PROFIT_MART_CACHE_DISABLED !== '1';
   const sourceMode = useProfitMartCache ? 'cache' : 'view';
   const refreshRun = sourceMode === 'cache' ? await ensureProfitMartCacheFresh(args, generatedAt) : null;
@@ -6587,8 +6598,8 @@ async function runFirstRunCheck() {
 
 let firstRunCheckInFlight = false;
 
-function sendJson(res, status, value) {
-  send(res, status, JSON.stringify(value, null, 2), {'Content-Type': 'application/json; charset=utf-8'});
+function sendJson(res, status, value, headers = {}) {
+  send(res, status, JSON.stringify(value, null, 2), {'Content-Type': 'application/json; charset=utf-8', ...headers});
 }
 
 function htmlEscape(value) {
@@ -6679,8 +6690,9 @@ async function findManualLoginSession(args, id, token) {
   return {ok: true, session};
 }
 
-async function manualLoginMaintenanceHtml() {
-  const manualStoresJson = JSON.stringify(await manualLoginStoreKeys()).replace(/</g, '\\u003c');
+async function manualLoginMaintenanceHtml(actor) {
+  const writableStores = (await manualLoginStoreKeys()).filter(storeKey => actorCanWriteStores(actor, [storeKey]));
+  const manualStoresJson = JSON.stringify(writableStores).replace(/</g, '\\u003c');
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -6723,8 +6735,16 @@ async function manualLoginMaintenanceHtml() {
   </main>
   <script>
     const STORES = ${manualStoresJson};
+    let SESSION_TOKENS = new Map();
     const $ = id => document.getElementById(id);
-    $('store').innerHTML = STORES.map(s => '<option value="'+s+'">'+s+'</option>').join('');
+    const esc = value => String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    function sameOriginUrl(value){
+      try {
+        const parsed = new URL(String(value || ''), location.origin);
+        return parsed.origin === location.origin && (parsed.protocol === 'http:' || parsed.protocol === 'https:') ? parsed.href : '';
+      } catch { return ''; }
+    }
+    $('store').innerHTML = STORES.map(s => '<option value="'+esc(s)+'">'+esc(s)+'</option>').join('');
     function msg(text){ const el=$('message'); el.hidden=false; el.textContent=text; }
     async function api(url, opts={}){
       const r = await fetch(url, {headers:{'Content-Type':'application/json'}, ...opts});
@@ -6733,17 +6753,22 @@ async function manualLoginMaintenanceHtml() {
       return j;
     }
     function sessionRow(s){
-      const active = s.status === 'active' || s.status === 'starting';
-      const canControl = active || s.status === 'expired' || (s.alive && Object.values(s.alive).some(Boolean));
-      const open = active && s.openUrl ? '<a class="btn" target="_blank" href="'+s.openUrl+'">进入窗口</a>' : '';
-      return '<tr><td><b>'+s.storeKey+'</b><br><span class="hint">'+(s.shopName||'')+'</span></td><td><span class="status '+(active?'active':(s.status==='expired'?'bad':''))+'">'+s.status+'</span><br><span class="hint">过期 '+(s.expiresAt||'-')+'</span></td><td class="mono">'+s.id+'</td><td><div class="row">'+open+(canControl?'<button class="good" data-finish="'+s.id+'" data-token="'+(s.token||'')+'">我已完成并关闭</button><button class="danger" data-close="'+s.id+'" data-token="'+(s.token||'')+'">直接关闭</button>':'')+'</div></td></tr>';
+      const status = String(s.status || 'unknown');
+      const active = status === 'active' || status === 'starting';
+      const canControl = active || status === 'expired' || (s.alive && Object.values(s.alive).some(Boolean));
+      const openUrl = sameOriginUrl(s.openUrl);
+      const open = active && openUrl ? '<a class="btn" target="_blank" rel="noopener noreferrer" href="'+esc(openUrl)+'">进入窗口</a>' : '';
+      const id = esc(s.id);
+      const controls = canControl ? '<button type="button" class="good" data-finish="'+id+'">我已完成并关闭</button><button type="button" class="danger" data-close="'+id+'">直接关闭</button>' : '';
+      return '<tr><td><b>'+esc(s.storeKey)+'</b><br><span class="hint">'+esc(s.shopName||'')+'</span></td><td><span class="status '+(active?'active':(status==='expired'?'bad':''))+'">'+esc(status)+'</span><br><span class="hint">过期 '+esc(s.expiresAt||'-')+'</span></td><td class="mono">'+id+'</td><td><div class="row">'+open+controls+'</div></td></tr>';
     }
     async function refresh(){
       const j = await api('/api/cloud-login/sessions');
       const sessions = j.sessions || [];
+      SESSION_TOKENS = new Map(sessions.map(s => [String(s.id || ''), String(s.token || '')]));
       $('sessions').innerHTML = sessions.length ? '<table><thead><tr><th>店铺</th><th>状态</th><th>会话</th><th>操作</th></tr></thead><tbody>'+sessions.map(sessionRow).join('')+'</tbody></table>' : '<p class="hint">当前没有临时登录窗口。</p>';
-      document.querySelectorAll('[data-finish]').forEach(b=>b.onclick=async()=>{ b.disabled=true; try{ await api('/api/cloud-login/sessions/'+encodeURIComponent(b.dataset.finish)+'/finish',{method:'POST',body:JSON.stringify({token:b.dataset.token})}); msg('已导出登录态并关闭窗口。'); await refresh(); }catch(e){ msg('完成失败：'+e.message); b.disabled=false; }});
-      document.querySelectorAll('[data-close]').forEach(b=>b.onclick=async()=>{ b.disabled=true; try{ await api('/api/cloud-login/sessions/'+encodeURIComponent(b.dataset.close)+'/close',{method:'POST',body:JSON.stringify({token:b.dataset.token})}); msg('已关闭窗口。'); await refresh(); }catch(e){ msg('关闭失败：'+e.message); b.disabled=false; }});
+      document.querySelectorAll('[data-finish]').forEach(b=>b.onclick=async()=>{ b.disabled=true; try{ await api('/api/cloud-login/sessions/'+encodeURIComponent(b.dataset.finish)+'/finish',{method:'POST',body:JSON.stringify({token:SESSION_TOKENS.get(String(b.dataset.finish||''))||''})}); msg('已导出登录态并关闭窗口。'); await refresh(); }catch(e){ msg('完成失败：'+e.message); b.disabled=false; }});
+      document.querySelectorAll('[data-close]').forEach(b=>b.onclick=async()=>{ b.disabled=true; try{ await api('/api/cloud-login/sessions/'+encodeURIComponent(b.dataset.close)+'/close',{method:'POST',body:JSON.stringify({token:SESSION_TOKENS.get(String(b.dataset.close||''))||''})}); msg('已关闭窗口。'); await refresh(); }catch(e){ msg('关闭失败：'+e.message); b.disabled=false; }});
     }
     $('refresh').onclick = refresh;
     $('start').onclick = async () => {
@@ -6752,7 +6777,9 @@ async function manualLoginMaintenanceHtml() {
         const j = await api('/api/cloud-login/sessions', {method:'POST', body:JSON.stringify({storeKey:$('store').value,target:$('target').value,expiresMinutes:Number($('minutes').value)})});
         msg('已开启 '+j.session.storeKey+' 临时登录窗口。新窗口打开后请完成登录，再回本页点“我已完成并关闭”。');
         await refresh();
-        window.open(j.session.openUrl, '_blank', 'noopener,noreferrer');
+        const openUrl = sameOriginUrl(j.session.openUrl);
+        if(!openUrl) throw new Error('服务器返回了不安全的窗口地址');
+        window.open(openUrl, '_blank', 'noopener,noreferrer');
       } catch(e) { msg('开启失败：'+e.message); }
       finally { $('start').disabled = false; }
     };
@@ -6789,7 +6816,7 @@ async function serveNovncAsset(req, res, url) {
   }
 }
 
-async function handleManualLoginWsUpgrade(req, socket, args) {
+async function handleManualLoginWsUpgrade(req, socket, args, {authRequired, authUsers, sessionSecret}) {
   const fail = (status, text) => {
     try {
       socket.write(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\n${text}`);
@@ -6803,6 +6830,10 @@ async function handleManualLoginWsUpgrade(req, socket, args) {
   const token = decodeURIComponent(m[2]);
   const found = await findManualLoginSession(args, id, token);
   if (!found.ok) return fail(found.status || 403, found.error || 'Forbidden');
+  const trustedInternal = authRequired && isTrustedInternalRequest(req);
+  const actor = authRequired ? (authenticateRequest(req, authUsers, sessionSecret) || (trustedInternal ? internalActor() : null)) : null;
+  if (authRequired && !actor) return fail(401, 'Authentication required');
+  if (authRequired && requireWriteStores(actor, [found.session.storeKey])) return fail(403, 'Store write permission required');
   const port = Number(found.session.websockifyPort);
   if (!Number.isInteger(port) || port <= 0) return fail(503, 'Bad websockify port');
   const upstream = net.createConnection({host: '127.0.0.1', port}, () => {
@@ -6833,16 +6864,22 @@ async function main() {
   }
   const sessionSecret = authRequired ? await ensureSessionSecret(args.sessionSecretFile) : '';
   const allowGenerateSections = !(args.readOnly || (args.host === '0.0.0.0' && !authRequired));
+  const loginRateLimiter = createLoginRateLimiter();
+  const enqueueMutationRequest = createSerialMutationQueue();
 
-  const server = http.createServer(async (req, res) => {
+  const handleRequest = async (req, res) => {
     try {
       const url = new URL(req.url || '/', 'http://localhost');
       const trustedInternal = authRequired && isTrustedInternalRequest(req);
       const authenticatedActor = authRequired ? authenticateRequest(req, authUsers, sessionSecret) : null;
       const actor = authRequired ? (authenticatedActor || (trustedInternal ? internalActor() : null)) : null;
+      if (!mutationOriginAllowed(req, {trustedInternal})) {
+        await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'mutation-origin-denied', actor, ...requestMeta(req), path: url.pathname, method: req.method});
+        return sendJson(res, 403, {ok: false, error: 'Cross-origin state-changing request denied'});
+      }
       if (authRequired && !actor && !isPublicPath(url.pathname)) {
         if (isApiPath(url.pathname)) return unauthorized(res, url.pathname);
-        res.writeHead(302, {
+        writeResponseHead(res, 302, {
           'Cache-Control': 'no-store',
           'Location': `/login?next=${encodeURIComponent(req.url || '/')}`,
         });
@@ -6852,7 +6889,7 @@ async function main() {
       if (url.pathname === '/login') {
         if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
         if (actor) {
-          res.writeHead(302, {'Cache-Control': 'no-store', 'Location': url.searchParams.get('next') || '/'});
+          writeResponseHead(res, 302, {'Cache-Control': 'no-store', 'Location': url.searchParams.get('next') || '/'});
           res.end();
           return;
         }
@@ -6876,20 +6913,35 @@ async function main() {
         if (body._error) return sendJson(res, 400, {ok: false, error: body._error});
         const username = String(body.username || '').trim();
         const password = String(body.password || '');
-        const user = authUsers.find(u => u.username.toLowerCase() === username.toLowerCase());
-        if (!verifyPassword(user, password)) {
-          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'auth-login', ok: false, username, ...requestMeta(req)});
-          const next = String(body.next || '/');
-          if (contentType.includes('application/json')) return sendJson(res, 401, {ok: false, error: '账号或密码不正确'});
-          res.writeHead(302, {'Cache-Control': 'no-store', 'Location': `/login?error=${encodeURIComponent('账号或密码不正确')}&user=${encodeURIComponent(username)}&next=${encodeURIComponent(next)}`});
+        const rateKey = loginRateKey(req, username);
+        const rate = loginRateLimiter.inspect(rateKey);
+        if (!rate.allowed) {
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'auth-login', ok: false, rateLimited: true, username, ...requestMeta(req)});
+          const retryHeaders = {'Retry-After': String(rate.retryAfterSec)};
+          if (contentType.includes('application/json')) return sendJson(res, 429, {ok: false, error: '登录尝试过多，请稍后重试'}, retryHeaders);
+          writeResponseHead(res, 302, {...retryHeaders, 'Location': `/login?error=${encodeURIComponent('登录尝试过多，请稍后重试')}&user=${encodeURIComponent(username)}&next=${encodeURIComponent(String(body.next || '/'))}`});
           res.end();
           return;
         }
+        const user = authUsers.find(u => u.username.toLowerCase() === username.toLowerCase());
+        if (!verifyPassword(user, password)) {
+          const failedRate = loginRateLimiter.fail(rateKey);
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'auth-login', ok: false, rateLimited: !failedRate.allowed, username, ...requestMeta(req)});
+          const next = String(body.next || '/');
+          const status = failedRate.allowed ? 401 : 429;
+          const message = failedRate.allowed ? '账号或密码不正确' : '登录尝试过多，请稍后重试';
+          const retryHeaders = failedRate.allowed ? {} : {'Retry-After': String(failedRate.retryAfterSec)};
+          if (contentType.includes('application/json')) return sendJson(res, status, {ok: false, error: message}, retryHeaders);
+          writeResponseHead(res, 302, {...retryHeaders, 'Location': `/login?error=${encodeURIComponent(message)}&user=${encodeURIComponent(username)}&next=${encodeURIComponent(next)}`});
+          res.end();
+          return;
+        }
+        loginRateLimiter.success(rateKey);
         const actorLogin = actorFromUser(user);
         const token = signSessionPayload({username: user.username, iat: Date.now(), exp: Date.now() + 14 * 86400 * 1000}, sessionSecret);
         await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'auth-login', ok: true, actor: actorLogin, ...requestMeta(req)});
         if (contentType.includes('application/json')) {
-          res.writeHead(200, {
+          writeResponseHead(res, 200, {
             'Cache-Control': 'no-store',
             'Content-Type': 'application/json; charset=utf-8',
             'Set-Cookie': sessionCookie(token, req),
@@ -6898,7 +6950,7 @@ async function main() {
           return;
         }
         const next = String(body.next || '/');
-        res.writeHead(302, {
+        writeResponseHead(res, 302, {
           'Cache-Control': 'no-store',
           'Set-Cookie': sessionCookie(token, req),
           'Location': next.startsWith('/') && !next.startsWith('//') ? next : '/',
@@ -6907,14 +6959,14 @@ async function main() {
         return;
       }
       if (url.pathname === '/api/logout') {
-        if (req.method !== 'POST' && req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        if (req.method !== 'POST') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
         await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'auth-logout', ok: true, actor, ...requestMeta(req)});
-        res.writeHead(req.method === 'GET' ? 302 : 200, {
+        writeResponseHead(res, 200, {
           'Cache-Control': 'no-store',
           'Set-Cookie': clearSessionCookie(req),
-          ...(req.method === 'GET' ? {'Location': '/login'} : {'Content-Type': 'application/json; charset=utf-8'}),
+          'Content-Type': 'application/json; charset=utf-8',
         });
-        res.end(req.method === 'GET' ? '' : JSON.stringify({ok: true}));
+        res.end(JSON.stringify({ok: true}));
         return;
       }
       if (url.pathname === '/api/auth/me') {
@@ -6987,18 +7039,20 @@ async function main() {
         return send(res, 410, '旧版 BI 已封存，不再提供线上入口；请访问 / 使用当前 BI 主系统。', {'Content-Type': 'text/plain; charset=utf-8'});
       }
       if (url.pathname === '/v2' || url.pathname.startsWith('/v2/')) {
-        res.writeHead(301, {'Location': '/'});
+        writeResponseHead(res, 301, {'Location': '/'});
         res.end();
         return;
       }
       if (url.pathname === '/cloud-login-maintenance') {
-        return send(res, 200, await manualLoginMaintenanceHtml(), {'Content-Type': 'text/html; charset=utf-8'});
+        return send(res, 200, await manualLoginMaintenanceHtml(authRequired ? actor : internalActor()), {'Content-Type': 'text/html; charset=utf-8'});
       }
       if (url.pathname.startsWith('/cloud-login/session/')) {
         const m = /^\/cloud-login\/session\/([^/]+)$/.exec(url.pathname);
         if (!m) return send(res, 404, 'Not found', {'Content-Type': 'text/plain; charset=utf-8'});
         const found = await findManualLoginSession(args, decodeURIComponent(m[1]), url.searchParams.get('token') || '');
         if (!found.ok) return send(res, found.status || 403, found.error || 'Forbidden', {'Content-Type': 'text/plain; charset=utf-8'});
+        const denied = authRequired ? requireWriteStores(actor, [found.session.storeKey]) : null;
+        if (denied) return send(res, 403, 'Store write permission required', {'Content-Type': 'text/plain; charset=utf-8'});
         return send(res, 200, manualLoginSessionHtml(found.session, url.searchParams.get('token') || ''), {'Content-Type': 'text/html; charset=utf-8'});
       }
       if (url.pathname.startsWith('/cloud-login/novnc/')) {
@@ -7007,7 +7061,9 @@ async function main() {
       if (url.pathname === '/api/cloud-login/sessions') {
         if (req.method === 'GET') {
           const result = await runManualLoginHelper(args, 'list', ['--show-token'], 45_000);
-          return sendJson(res, result.ok === false ? 500 : 200, result);
+          const sessions = (Array.isArray(result.sessions) ? result.sessions : [])
+            .filter(session => !authRequired || actorCanWriteStores(actor, [session.storeKey]));
+          return sendJson(res, result.ok === false ? 500 : 200, {...result, sessions});
         }
         if (req.method === 'POST') {
           if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
@@ -7048,6 +7104,10 @@ async function main() {
           const action = m[2];
           const token = String(body.token || url.searchParams.get('token') || '').trim();
           if (!token) return sendJson(res, 400, {ok: false, error: 'Missing session token'});
+          const found = await findManualLoginSession(args, id, token);
+          if (!found.ok) return sendJson(res, found.status || 403, {ok: false, error: found.error || 'Forbidden'});
+          const denied = authRequired ? requireWriteStores(actor, [found.session.storeKey]) : null;
+          if (denied) return sendJson(res, 403, denied);
           const extra = ['--id', id];
           extra.push('--token', token);
           const result = await runManualLoginHelper(args, action, extra, action === 'finish' ? 180_000 : 60_000);
@@ -8098,10 +8158,19 @@ ${uploadCheckAnswer}` : `
     } catch (err) {
       send(res, 500, `Server error: ${err.message || err}`, {'Content-Type': 'text/plain; charset=utf-8'});
     }
+  };
+
+  const server = http.createServer((req, res) => {
+    const task = () => handleRequest(req, res);
+    if (isMutationMethod(req.method)) {
+      void enqueueMutationRequest(task);
+      return;
+    }
+    void task();
   });
 
   server.on('upgrade', (req, socket) => {
-    handleManualLoginWsUpgrade(req, socket, args).catch(err => {
+    handleManualLoginWsUpgrade(req, socket, args, {authRequired, authUsers, sessionSecret}).catch(err => {
       try {
         socket.write(`HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\n${String(err?.message || err)}`);
       } catch {}

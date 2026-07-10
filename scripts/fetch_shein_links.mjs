@@ -16,6 +16,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {normalizeGoodsSnDetailed, stripLeadingAnnotations, getCatalogConfig} from '../lib/product_sku_normalizer.mjs';
+import {connectCdp} from '../lib/shein_browser.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
@@ -220,35 +221,6 @@ function daysBetween(startYmd, endYmd) {
   const end = new Date(`${String(endYmd).slice(0, 10)}T00:00:00Z`);
   if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
   return Math.floor((end - start) / 86400_000);
-}
-
-async function connectCdp(port) {
-  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`, {signal: AbortSignal.timeout(2500)})).json();
-  const page = targets.find(p => p.type === 'page' && /geiwohuo|shein/i.test(p.url)) || targets.find(p => p.type === 'page');
-  if (!page) throw new Error(`No Chrome page target on port ${port}. 请先启动并登录该店铺浏览器。`);
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
-  let seq = 0;
-  const pending = new Map();
-  ws.addEventListener('message', ev => {
-    const msg = JSON.parse(ev.data);
-    if (!msg.id || !pending.has(msg.id)) return;
-    const {resolve, reject} = pending.get(msg.id);
-    pending.delete(msg.id);
-    if (msg.error) reject(new Error(JSON.stringify(msg.error)));
-    else resolve(msg.result);
-  });
-  await new Promise((resolve, reject) => {
-    ws.addEventListener('open', resolve, {once: true});
-    ws.addEventListener('error', reject, {once: true});
-  });
-  const send = (method, params = {}) => {
-    const id = ++seq;
-    ws.send(JSON.stringify({id, method, params}));
-    return new Promise((resolve, reject) => pending.set(id, {resolve, reject}));
-  };
-  await send('Runtime.enable');
-  await send('Page.enable');
-  return {ws, send, page};
 }
 
 async function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
@@ -1038,7 +1010,7 @@ function buildDashboardRows(store, date, linkRows, performanceRows, inventoryRow
 
 async function fetchStore(store, args) {
   const cdp = await connectCdp(store.port);
-  const {ws, send} = cdp;
+  const {send} = cdp;
   try {
     await ensureGeiwohuoPage(send);
     const sbnHeaders = await captureSbnHeaders(cdp);
@@ -1113,7 +1085,7 @@ async function fetchStore(store, args) {
       raw: args.saveRaw ? {productStatuses, stockup, diagnose, flow} : undefined,
     };
   } finally {
-    try { ws.close(); } catch {}
+    cdp.close();
   }
 }
 
@@ -1157,7 +1129,7 @@ async function main() {
     outDir: args.outDir,
   };
   console.log(JSON.stringify(summary, null, 2));
-  if (!summary.ok) process.exit(1);
+  if (!summary.ok) process.exitCode = 1;
 }
 
 await main();

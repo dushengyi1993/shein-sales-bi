@@ -13,6 +13,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {recoverSheinLoginIfNeeded} from '../../lib/shein_login_recovery.mjs';
+import {connectCdp} from '../../lib/shein_browser.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
@@ -70,9 +71,13 @@ function selectedStores(args) {
   }).sort((a,b)=>String(a.storeKey).localeCompare(String(b.storeKey)));
 }
 function dateMs(value) {
-  const s = String(value || '').trim();
-  if (!s) return NaN;
-  const ms = Date.parse(s.replace(' ', 'T') + (/[zZ]|[+-]\d{2}:?\d{2}$/.test(s) ? '' : '+08:00'));
+  const raw = String(value || '').trim();
+  if (!raw) return NaN;
+  const dateOnly = raw.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+  const normalized = dateOnly
+    ? `${dateOnly[1]}-${String(dateOnly[2]).padStart(2, '0')}-${String(dateOnly[3]).padStart(2, '0')}T00:00:00`
+    : raw.replace(' ', 'T');
+  const ms = Date.parse(/(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(normalized) ? normalized : `${normalized}+08:00`);
   return Number.isFinite(ms) ? ms : NaN;
 }
 function isActiveOrFuture(start, end, state) {
@@ -131,51 +136,18 @@ async function ensureBrowser(store, args) {
   }
   return {launched};
 }
-class Cdp {
-  constructor(wsUrl) { this.wsUrl = wsUrl; this.nextId = 1; this.pending = new Map(); }
-  async connect() {
-    this.ws = new WebSocket(this.wsUrl);
-    await new Promise((resolve, reject) => {
-      this.ws.addEventListener('open', resolve, {once: true});
-      this.ws.addEventListener('error', reject, {once: true});
-    });
-    this.ws.addEventListener('message', ev => {
-      const msg = JSON.parse(ev.data);
-      if (msg.id && this.pending.has(msg.id)) {
-        const {resolve, reject} = this.pending.get(msg.id);
-        this.pending.delete(msg.id);
-        if (msg.error) reject(new Error(JSON.stringify(msg.error)));
-        else resolve(msg.result);
-      }
-    });
-    await this.call('Runtime.enable');
-    await this.call('Page.enable').catch(() => {});
-  }
-  call(method, params = {}) {
-    const id = this.nextId++;
-    this.ws.send(JSON.stringify({id, method, params}));
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`CDP timeout ${method}`)); }, 45_000);
-      this.pending.set(id, {resolve: v => { clearTimeout(timer); resolve(v); }, reject: e => { clearTimeout(timer); reject(e); }});
-    });
-  }
-  async eval(expression, arg = {}) {
-    const res = await this.call('Runtime.evaluate', {expression: `(async () => { const __arg = ${JSON.stringify(arg)}; ${expression} })()`, awaitPromise: true, returnByValue: true});
+async function connectStorePage(store) {
+  const connection = await connectCdp(store.port, {pageUrlPattern: /sso\.geiwohuo\.com/i, commandTimeoutMs: 45_000});
+  const call = (method, params = {}) => connection.send(method, params);
+  const evalPage = async (expression, arg = {}) => {
+    const res = await call('Runtime.evaluate', {expression: `(async () => { const __arg = ${JSON.stringify(arg)}; ${expression} })()`, awaitPromise: true, returnByValue: true});
     if (res.exceptionDetails) {
       const ex = res.exceptionDetails.exception || {};
       throw new Error(ex.description || ex.value || res.exceptionDetails.text || JSON.stringify(res.exceptionDetails));
     }
     return res.result?.value;
-  }
-  close() { try { this.ws?.close(); } catch {} }
-}
-async function connectStorePage(store) {
-  const targets = await httpJson(`http://127.0.0.1:${store.port}/json/list`);
-  const page = targets.find(t => t.type === 'page' && String(t.url || '').includes('sso.geiwohuo.com')) || targets.find(t => t.type === 'page');
-  if (!page) throw new Error(`port ${store.port} no page target`);
-  const cdp = new Cdp(page.webSocketDebuggerUrl);
-  await cdp.connect();
-  return cdp;
+  };
+  return {...connection, call, eval: evalPage};
 }
 async function recoverLoginIfNeeded(cdp) {
   return await recoverSheinLoginIfNeeded({
@@ -356,42 +328,57 @@ function normalizeRows(store, live, levelRuleId, args) {
   }
   return rows;
 }
+function isTransientMarketingScanError(error) {
+  return /fetch failed|failed to fetch|networkerror|load failed|timed?\s*out|timeout|econnreset|socket hang up|cdp websocket|target closed|browser has been closed/i.test(String(error?.message || error || ''));
+}
 async function scanStore(store, args, levelHints) {
-  const result = {store: store.storeKey, shopName: store.shopName, ok: false, rows: [], warnings: []};
-  let cdp = null;
+  const result = {store: store.storeKey, shopName: store.shopName, ok: false, rows: [], warnings: [], attempts: 0};
   let launched = false;
   try {
     const ensured = await ensureBrowser(store, args);
     launched = ensured.launched;
-    cdp = await connectStorePage(store);
-    result.loginRecovery = await gotoMarketingList(cdp);
-    // Only the post-recovery state is authoritative here. The page can start on
-    // the login route, then a saved session / password-manager click can recover
-    // it. Do not fail just because the pre-recovery page was a login page.
-    if (result.loginRecovery.after?.isLogin) {
-      result.reason = 'login page; skipped read-only price scan';
-      return result;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      result.attempts = attempt;
+      let cdp = null;
+      try {
+        cdp = await connectStorePage(store);
+        result.loginRecovery = await gotoMarketingList(cdp);
+        // Only the post-recovery state is authoritative here. The page can start on
+        // the login route, then a saved session / password-manager click can recover
+        // it. Do not fail just because the pre-recovery page was a login page.
+        if (result.loginRecovery.after?.isLogin) {
+          result.reason = 'login page; skipped read-only price scan';
+          return result;
+        }
+        const levelRuleId = levelHints.get(String(store.storeKey).toUpperCase()) || null;
+        result.levelRuleId = levelRuleId;
+        const live = await queryMarketing(cdp, args, levelRuleId);
+        result.page = live.page;
+        result.packets = {
+          activity: live.activityPackets || [],
+          ordinary: live.ordinaryPackets || [],
+          limited: live.limitedPackets || [],
+          coupon: live.couponPackets || [],
+        };
+        result.rows = normalizeRows(store, live, levelRuleId, args);
+        result.ok = true;
+        result.reason = `price scan ok; rows=${result.rows.length}; ordinary=${live.ordinaryRows?.length || 0}; limited=${live.limitedRows?.length || 0}; coupon=${live.couponRows?.length || 0}; attempts=${attempt}`;
+        return result;
+      } catch (err) {
+        result.reason = err.message;
+        result.stack = err.stack;
+        if (attempt < 2 && isTransientMarketingScanError(err)) {
+          result.warnings.push(`transient scan failure on attempt ${attempt}: ${String(err.message || err).slice(0, 500)}`);
+          await sleep(1500);
+          continue;
+        }
+        return result;
+      } finally {
+        cdp?.close();
+      }
     }
-    const levelRuleId = levelHints.get(String(store.storeKey).toUpperCase()) || null;
-    result.levelRuleId = levelRuleId;
-    const live = await queryMarketing(cdp, args, levelRuleId);
-    result.page = live.page;
-    result.packets = {
-      activity: live.activityPackets || [],
-      ordinary: live.ordinaryPackets || [],
-      limited: live.limitedPackets || [],
-      coupon: live.couponPackets || [],
-    };
-    result.rows = normalizeRows(store, live, levelRuleId, args);
-    result.ok = true;
-    result.reason = `price scan ok; rows=${result.rows.length}; ordinary=${live.ordinaryRows?.length || 0}; limited=${live.limitedRows?.length || 0}; coupon=${live.couponRows?.length || 0}`;
-    return result;
-  } catch (err) {
-    result.reason = err.message;
-    result.stack = err.stack;
     return result;
   } finally {
-    cdp?.close();
     if (launched && !args.noClose && !args.visible) {
       closeLaunchedStoreBrowser(store);
       launchedStoreKeys.delete(String(store.storeKey).toUpperCase());
