@@ -8,7 +8,6 @@
  * edits, cancels, or uploads anything.
  */
 import fs from 'node:fs/promises';
-import fsSync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
@@ -27,9 +26,36 @@ const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp', 'marketing-signup', 'current-pric
 const DEFAULT_COUPON_ACTIVITY_ID = 34810;
 const ACTIVE_OR_FUTURE_STATES = new Set(['2', '3']);
 const ACTIVE_COUPON_STATUSES = new Set(['0', '1']);
+const launchedStoreKeys = new Set();
+const USAGE = `
+Usage:
+  node scripts/marketing/scan_current_marketing_prices_for_bi.mjs [options]
+
+Read-only scan of current/future marketing prices. The default group is ALL.
+
+Options:
+  --store <KEY>                 Scan one store
+  --stores <KEY,...>            Scan a comma-separated store list
+  --group <NAME>                Scan a configured store group (default: ALL)
+  --out-dir <PATH>              Snapshot output directory
+  --out <FILE.json>             Snapshot JSON path
+  --coupon-activity-id <ID>     Coupon activity ID (default: 34810)
+  --level-rule-hints <FILE>     Optional level-rule hint JSON
+  --page-size <N>               API page size, 1-1000 (default: 500)
+  --no-launch                   Do not launch missing store browsers
+  --no-close                    Keep browsers launched by this command open
+  --headless                    Launch missing browsers headlessly
+  --visible                     Launch missing browsers visibly
+  -h, --help                    Show this help and exit without scanning
+`;
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 function splitStores(value) { return String(value || '').split(',').map(x => x.trim().toUpperCase()).filter(Boolean); }
+function optionValue(argv, index, option) {
+  const value = argv[index + 1];
+  if (value == null || String(value).startsWith('-')) throw new Error(`Missing value for ${option}`);
+  return value;
+}
 function parseArgs(argv) {
   const args = {
     stores: [],
@@ -46,24 +72,35 @@ function parseArgs(argv) {
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
-    if (a === '--stores') args.stores = splitStores(argv[++i]);
-    else if (a === '--store') args.stores = [String(argv[++i] || '').trim().toUpperCase()].filter(Boolean);
-    else if (a === '--group') args.group = String(argv[++i] || 'ALL').toUpperCase();
-    else if (a === '--out-dir') args.outDir = path.resolve(argv[++i]);
-    else if (a === '--out') args.out = path.resolve(argv[++i]);
-    else if (a === '--coupon-activity-id') args.couponActivityId = Number(argv[++i] || args.couponActivityId);
-    else if (a === '--level-rule-hints') args.levelRuleHints = path.resolve(argv[++i]);
+    const takeValue = () => {
+      const value = optionValue(argv, i, a);
+      i += 1;
+      return value;
+    };
+    if (a === '--stores') args.stores = splitStores(takeValue());
+    else if (a === '--store') args.stores = [String(takeValue()).trim().toUpperCase()].filter(Boolean);
+    else if (a === '--group') args.group = String(takeValue()).toUpperCase();
+    else if (a === '--out-dir') args.outDir = path.resolve(takeValue());
+    else if (a === '--out') args.out = path.resolve(takeValue());
+    else if (a === '--coupon-activity-id') args.couponActivityId = Number(takeValue());
+    else if (a === '--level-rule-hints') args.levelRuleHints = path.resolve(takeValue());
     else if (a === '--no-launch') args.noLaunch = true;
     else if (a === '--no-close') args.noClose = true;
     else if (a === '--headless') args.headless = true;
     else if (a === '--visible') args.visible = true;
-    else if (a === '--page-size') args.pageSize = Number(argv[++i] || args.pageSize);
+    else if (a === '--page-size') args.pageSize = Number(takeValue());
+    else throw new Error(`Unknown option: ${a}`);
   }
+  if (args.headless && args.visible) throw new Error('--headless and --visible cannot be used together');
+  if (!Number.isInteger(args.pageSize) || args.pageSize < 1 || args.pageSize > 1000) throw new Error('--page-size must be an integer from 1 to 1000');
+  if (!Number.isInteger(args.couponActivityId) || args.couponActivityId < 1) throw new Error('--coupon-activity-id must be a positive integer');
   return args;
 }
 function selectedStores(args) {
   const enabled = STORES.filter(s => s.enabled !== false);
-  const keys = args.stores.length ? args.stores : (STORES_CONFIG.groups?.[args.group] || STORES_CONFIG.groups?.ALL || enabled.map(s => s.storeKey));
+  const groupStores = STORES_CONFIG.groups?.[args.group];
+  if (!args.stores.length && !Array.isArray(groupStores)) throw new Error(`Unknown store group: ${args.group}`);
+  const keys = args.stores.length ? args.stores : groupStores;
   return keys.map(key => {
     const store = enabled.find(s => String(s.storeKey).toUpperCase() === String(key).toUpperCase());
     if (!store) throw new Error(`Unknown or disabled store: ${key}`);
@@ -388,72 +425,87 @@ async function scanStore(store, args, levelHints) {
 function csvEscape(value) { const s = String(value ?? ''); return /[",\r\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s; }
 function toCsv(rows, headers) { return [headers.join(','), ...rows.map(row => headers.map(h => csvEscape(row[h])).join(','))].join('\r\n') + '\r\n'; }
 
-const args = parseArgs(process.argv.slice(2));
-const stores = selectedStores(args);
-const levelHints = await loadLevelRuleHints(args.levelRuleHints);
-await fs.mkdir(args.outDir, {recursive: true});
-const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-const jsonPath = args.out || path.join(args.outDir, `current-marketing-price-live-${stamp}.json`);
-const csvPath = jsonPath.replace(/\.json$/i, '.csv');
 const csvHeaders = ['store_key','skc','standard_goods_sn','marketing_suggested_ordinary_price_sar','marketing_ordinary_price_is_current','marketing_limited_discount_price_sar','marketing_limited_discount_is_current','marketing_activity_id','marketing_activity_name','marketing_activity_start','marketing_activity_end','marketing_limited_discount_name','marketing_limited_discount_start','marketing_limited_discount_end','marketing_coupon_summary','marketing_coupon_activity_id','marketing_coupon_level_rule_id','marketing_price_evidence_type','marketing_price_source_rank','marketing_price_source_at'];
-const summary = {
-  ok: false,
-  partial: true,
-  createdAt: new Date().toISOString(),
-  updatedAt: new Date().toISOString(),
-  mode: 'read_only_current_marketing_price_scan',
-  stores: [],
-};
-const launchedStoreKeys = new Set();
 
-function cleanupLaunchedBrowsers() {
-  if (args.noClose || args.visible) return;
-  for (const storeKey of [...launchedStoreKeys]) {
-    const store = STORES.find(s => String(s.storeKey).toUpperCase() === storeKey);
-    if (!store) continue;
-    closeLaunchedStoreBrowser(store);
-    launchedStoreKeys.delete(storeKey);
+async function main(argv) {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    console.log(USAGE.trim());
+    return;
+  }
+  const args = parseArgs(argv);
+  const stores = selectedStores(args);
+  const levelHints = await loadLevelRuleHints(args.levelRuleHints);
+  await fs.mkdir(args.outDir, {recursive: true});
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const jsonPath = args.out || path.join(args.outDir, `current-marketing-price-live-${stamp}.json`);
+  const csvPath = jsonPath.replace(/\.json$/i, '.csv');
+  const summary = {
+    ok: false,
+    partial: true,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    mode: 'read_only_current_marketing_price_scan',
+    stores: [],
+  };
+
+  function cleanupLaunchedBrowsers() {
+    if (args.noClose || args.visible) return;
+    for (const storeKey of [...launchedStoreKeys]) {
+      const store = STORES.find(s => String(s.storeKey).toUpperCase() === storeKey);
+      if (!store) continue;
+      closeLaunchedStoreBrowser(store);
+      launchedStoreKeys.delete(storeKey);
+    }
+  }
+
+  async function writeSnapshot({final = false} = {}) {
+    const rows = summary.stores.flatMap(s => s.rows || []);
+    summary.updatedAt = new Date().toISOString();
+    summary.partial = !final;
+    summary.rowCount = rows.length;
+    summary.currentRows = rows.filter(r => /^current_/.test(String(r.marketing_price_evidence_type))).length;
+    summary.futureRows = rows.filter(r => /^future_/.test(String(r.marketing_price_evidence_type))).length;
+    summary.ok = final && summary.stores.length === stores.length && summary.stores.every(s => s.ok);
+    await fs.writeFile(jsonPath, JSON.stringify({...summary, rows}, null, 2), 'utf8');
+    await fs.writeFile(csvPath, toCsv(rows, csvHeaders), 'utf8');
+  }
+
+  let terminating = false;
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.once(signal, () => {
+      if (terminating) return;
+      terminating = true;
+      summary.terminatedBy = signal;
+      writeSnapshot({final: false})
+        .catch(err => console.error(`failed to write partial marketing price scan snapshot on ${signal}: ${err.message}`))
+        .finally(() => {
+          cleanupLaunchedBrowsers();
+          process.exit(signal === 'SIGTERM' ? 143 : 130);
+        });
+    });
+  }
+
+  try {
+    for (const store of stores) {
+      console.log(`scan ${store.storeKey} ...`);
+      const result = await scanStore(store, args, levelHints);
+      summary.stores.push(result);
+      console.log(`${store.storeKey}: ${result.reason}`);
+      await writeSnapshot({final: false});
+    }
+    await writeSnapshot({final: true});
+    console.log(JSON.stringify({ok: summary.ok, rowCount: summary.rowCount, currentRows: summary.currentRows, futureRows: summary.futureRows, jsonPath, csvPath}, null, 2));
+    if (!summary.ok) {
+      const failedStores = summary.stores.filter(s => !s.ok).map(s => `${s.store}:${s.reason || 'unknown'}`);
+      console.error(`marketing current price scan had failed stores: ${failedStores.join('; ')}`);
+      process.exitCode = 1;
+    }
+  } finally {
+    cleanupLaunchedBrowsers();
   }
 }
 
-async function writeSnapshot({final = false} = {}) {
-  const rows = summary.stores.flatMap(s => s.rows || []);
-  summary.updatedAt = new Date().toISOString();
-  summary.partial = !final;
-  summary.rowCount = rows.length;
-  summary.currentRows = rows.filter(r => /^current_/.test(String(r.marketing_price_evidence_type))).length;
-  summary.futureRows = rows.filter(r => /^future_/.test(String(r.marketing_price_evidence_type))).length;
-  summary.ok = final && summary.stores.length === stores.length && summary.stores.every(s => s.ok);
-  await fs.writeFile(jsonPath, JSON.stringify({...summary, rows}, null, 2), 'utf8');
-  await fs.writeFile(csvPath, toCsv(rows, csvHeaders), 'utf8');
-}
-
-let terminating = false;
-for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.once(signal, () => {
-    if (terminating) return;
-    terminating = true;
-    summary.terminatedBy = signal;
-    writeSnapshot({final: false})
-      .catch(err => console.error(`failed to write partial marketing price scan snapshot on ${signal}: ${err.message}`))
-      .finally(() => {
-        cleanupLaunchedBrowsers();
-        process.exit(signal === 'SIGTERM' ? 143 : 130);
-      });
-  });
-}
-
-for (const store of stores) {
-  console.log(`scan ${store.storeKey} ...`);
-  const result = await scanStore(store, args, levelHints);
-  summary.stores.push(result);
-  console.log(`${store.storeKey}: ${result.reason}`);
-  await writeSnapshot({final: false});
-}
-await writeSnapshot({final: true});
-console.log(JSON.stringify({ok: summary.ok, rowCount: summary.rowCount, currentRows: summary.currentRows, futureRows: summary.futureRows, jsonPath, csvPath}, null, 2));
-if (!summary.ok) {
-  const failedStores = summary.stores.filter(s => !s.ok).map(s => `${s.store}:${s.reason || 'unknown'}`);
-  console.error(`marketing current price scan had failed stores: ${failedStores.join('; ')}`);
+main(process.argv.slice(2)).catch(error => {
+  console.error(`[scan_current_marketing_prices_for_bi] ${error.message}`);
   process.exitCode = 1;
-}
+});
