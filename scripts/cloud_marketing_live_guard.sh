@@ -10,6 +10,7 @@ ALERT_DIR="$ROOT/state/cloud_ops_alerts"
 LOCK_FILE="${SHEIN_BI_MARKETING_LIVE_LOCK_FILE:-$ROOT/state/locks/shein-bi-cloud-marketing-live-guard.lock}"
 GROUP="${SHEIN_BI_MARKETING_LIVE_GROUP:-ALL}"
 PAGE_SIZE="${SHEIN_BI_MARKETING_LIVE_PAGE_SIZE:-500}"
+STORE_ATTEMPTS="${SHEIN_BI_MARKETING_PRICE_STORE_ATTEMPTS:-3}"
 SCAN_TIMEOUT_SEC="${SHEIN_BI_MARKETING_LIVE_SCAN_TIMEOUT_SEC:-2400}"
 SCAN_KILL_AFTER_SEC="${SHEIN_BI_MARKETING_LIVE_SCAN_KILL_AFTER_SEC:-60}"
 GUARD_MAX_AGE_HOURS="${SHEIN_BI_MARKETING_LIVE_GUARD_MAX_AGE_HOURS:-96}"
@@ -68,6 +69,7 @@ run_live_scan() {
     node scripts/marketing/scan_current_marketing_prices_for_bi.mjs \
       --group "$GROUP" \
       --page-size "$PAGE_SIZE" \
+      --store-attempts "$STORE_ATTEMPTS" \
       --headless \
       --out "$out"
 }

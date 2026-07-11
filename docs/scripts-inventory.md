@@ -244,6 +244,8 @@
   - `marketing/smoke_split_limited_discount_target_price_guard.mjs`：拆分限时折扣计划拒绝低于目标价。
   - `marketing/smoke_split_recreate_limited_discount_target_guard.mjs`：拆分重建混合限时折扣拒绝低于目标价。
 
+  - `marketing/scan_current_marketing_prices_for_bi.mjs`：全店当前营销价只读扫描；支持 `--store-attempts 1..5`，默认每店最多 3 次，仅对已分类的瞬时错误重试，最终快照必须给出完整 store payload、聚合 rows、`rowCount`、`ok` 和 `partial`。
+
   - `marketing/split_recreate_mixed_limited_discount.mjs`：混合旧限时折扣拆分重建工具；只用于用户确认后的 P1 级补救，当旧限时折扣活动同时包含目标 SKC 和计划外 SKC、不能整场盲目结束时，按已确认 plan 先校验旧活动完整 SKC 集合，再结束旧活动并拆分重建目标/保留组。默认 dry-run，真实写入必须显式 `--execute`，且必须通过店铺身份校验、旧活动集合一致性校验、post-end 二次校验和新活动回读覆盖校验。
 
   - `marketing/scan_hl_limited_discount_conflicts.mjs`：HL 限时折扣补救后的只读冲突扫描，确认目标 SKC 是否被新限时折扣覆盖、是否还有重复/缺口；必须显式传 `--rescue <json>` 与 `--end-cutoff "YYYY-MM-DD HH:mm:ss"`，不保留一次性批次默认路径。
@@ -326,7 +328,7 @@
 
 - `notify_sync_issue.mjs`
 
-- `cloud_ops_watchdog.mjs`：云端 systemd/watchdog 新鲜度检查；销售/BI 页面按高频阈值，链接/业务域按日更低频阈值，异常时调用 `notify_sync_issue.mjs` 发飞书提醒。
+- `cloud_ops_watchdog.mjs`：云端 systemd/watchdog 新鲜度检查；销售/BI 页面按高频阈值，链接/业务域按日更低频阈值，异常时调用 `notify_sync_issue.mjs` 发飞书提醒。对孤立的历史营销扫描 warning，仅在 `lib/cloud_watchdog_recovery.mjs` 验证后续扫描更新、新鲜、19 店完整且 payload/行数自洽时记录 recovery；不删除历史 warning，也不吞掉其它异常。
 
 - `lark_sales_qa_bot.mjs`：云端只读飞书问数机器人和网页链接管理会话的核心问数逻辑；每轮从 BI Portal JSON 动态压缩销售、店铺、货号、链接/覆盖上下文并回复，不写数据库、飞书 Base 或 SHEIN 后台；产品文本和图表 label 优先使用 `product_display_name` / `productDisplayNames`。
 
@@ -336,7 +338,7 @@
 
 - `cloud_morning_chain.sh`：云端晨间串行链路入口；08:00 先跑当天销售刷新，再启动统一日更。当前 `SHEIN_BI_MORNING_SEND_LARK_REPORT=0`，默认不发送日报。
 
-- `cloud_daily_refresh.sh`：云端统一日更补采入口；集中执行每天一次即可的慢变/复核采集，包括链接/业务域日更、营销活动/限时折扣/优惠券价格线索补采、RTV 换单复核、体检和 BI 刷新。OpenAPI 销售、退货退款、商品/链接双跑在生产日更中已开启；仅写并行对账层，不切生产事实源。自动化运营真实写另走任务池、权限、白名单、确认和审计链路。
+- `cloud_daily_refresh.sh`：云端统一日更补采入口；集中执行每天一次即可的慢变/复核采集，包括链接/业务域日更、营销活动/限时折扣/优惠券价格线索补采、RTV 换单复核、体检和 BI 刷新。营销价格扫描通过 `SHEIN_BI_MARKETING_PRICE_STORE_ATTEMPTS` 注入每店有界重试，生产默认 3 次。OpenAPI 销售、退货退款、商品/链接双跑在生产日更中已开启；仅写并行对账层，不切生产事实源。自动化运营真实写另走任务池、权限、白名单、确认和审计链路。
 
 - `cloud_link_business_sync.sh`：云端链接/业务域低层入口；按店顺序 bootstrap 浏览器会话、抓链接和业务域、入仓。生产调度由 `cloud_daily_refresh.sh` 调用它，避免日更任务分散。
 

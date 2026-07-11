@@ -15,6 +15,7 @@ Environment=SHEIN_BI_MARKETING_LIVE_LOCK_FILE=/opt/shein-bi/app/state/locks/shei
 Environment=SHEIN_BI_MARKETING_LIVE_LOG_DIR=/srv/shein-bi/logs/cloud-marketing-live-guard
 Environment=SHEIN_BI_MARKETING_LIVE_SCAN_TIMEOUT_SEC=2400
 Environment=SHEIN_BI_MARKETING_LIVE_SCAN_KILL_AFTER_SEC=60
+Environment=SHEIN_BI_MARKETING_PRICE_STORE_ATTEMPTS=3
 TimeoutStartSec=3600
 Nice=12
 IOSchedulingClass=best-effort

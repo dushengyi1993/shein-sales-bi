@@ -222,6 +222,7 @@ if [[ "${SHEIN_BI_DAILY_SCAN_MARKETING_PRICES:-1}" == "1" || "${SHEIN_BI_DAILY_S
     node scripts/marketing/scan_current_marketing_prices_for_bi.mjs \
     --group "${SHEIN_BI_MARKETING_PRICE_GROUP:-ALL}" \
     --page-size "${SHEIN_BI_MARKETING_PRICE_PAGE_SIZE:-500}" \
+    --store-attempts "${SHEIN_BI_MARKETING_PRICE_STORE_ATTEMPTS:-3}" \
     "${PRICE_SCAN_MODE_ARGS[@]}"; then
     echo "[cloud_daily_refresh] marketing current price scan done"
   else

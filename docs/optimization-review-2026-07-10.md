@@ -12,6 +12,7 @@
 - `11fc04f`：共享运行时边界、systemd 收紧与 BI 前端收口。
 - `e18dafc`、`ec23a99`、`3f29f94`：权限脚本、跨平台生成器和私有 fixture 门禁修正。
 - `759b7c2`：营销价格扫描 CLI 改为 fail-safe，`--help`、未知参数和错误分组不再误触发全店扫描。
+- `9aab1e1`、`3d9047c`：补齐 GitHub Actions 确定性测试工作流，并升级到 `actions/checkout@v7` / `actions/setup-node@v6`。
 
 ## 已发现并处理
 
@@ -61,21 +62,21 @@
 - 优化源码按文件安装至 `/opt/shein-bi/app`；生产工作树已有业务热修，因此刻意没有执行 `pull`、`reset --hard` 或全目录覆盖。
 - `shein-bi-portal.service` 与 `shein-bi-lark-sales-qa.service` 均以 `sheinops:sheinops` 运行；Portal 健康检查、Lark WebSocket、systemd 安全属性和最近日志均已回读。
 - 正式入口 `https://sa.dushengyi.cc/` 已验证登录跳转、安全响应头、桌面/1200px/390px 布局和六个主路由；浏览器 console 无新增错误。
-- 云端再次执行 `npm test`：29/29 通过；`scripts/test_bi_ops_release_gate.mjs` 通过。两项 SK-5110 私有 handoff fixture 在云端不存在，按门禁设计明确标记为 skipped，而不是伪装为已执行。
+- 云端再次执行 `npm test`：30/30 通过；`scripts/test_bi_ops_release_gate.mjs` 通过。两项 SK-5110 私有 handoff fixture 在云端不存在，按门禁设计明确标记为 skipped，而不是伪装为已执行。
 - 云端 app 中普通文件和目录的 world-writable 数量从 45 收口为 0；定时任务也不会再把共享锁恢复成 `0666`。symlink、非锁文件属主和既有 group 权限不做破坏性重写。
 
-## 已知外部状态与人工项
+## 外部状态与人工项闭环（2026-07-11）
 
-- `.github/workflows/ci.yml` 已在本地验证，但 GitHub 拒绝缺少 `workflow` scope 的 OAuth 凭据更新 workflow；该文件保持未提交，待账号完成一次 `gh auth refresh -h github.com -s workflow` 后再推送。
-- 云端 `sheinops` 的 Codex OAuth refresh token 已失效；飞书问数的规则/直接 LLM fallback 已在同一硬化环境中实测可回答，但 Codex 可选路径需要在云端独立重新登录。不能复制本机 `auth.json`，以免制造 refresh-token 竞争。
-- 当前 watchdog 仍保留 2026-07-09 日更中的一条历史 marketing price scan warning；覆盖率、定时器、订单闭环和孤儿浏览器检查正常。本轮没有篡改历史结果，等待下一次日更验证新扫描韧性。
+- GitHub OAuth 已取得 `workflow` scope；`.github/workflows/ci.yml` 已提交并推送。GitHub Actions [run 29138830979](https://github.com/dushengyi1993/shein-sales-bi/actions/runs/29138830979) 完整通过，且升级 Actions runtime 后不再出现旧 Node runtime 注解。
+- 云端 `sheinops` 已通过设备代码完成独立 Codex 登录，没有复制本机 `auth.json`。同一用户、`gpt-5.5`、`read-only` 边界下的真实 `codex exec` 返回 `AUTH_PROBE_OK`；Lark 问数服务重启后 WebSocket 已连接，未再出现 `refresh_token_reused` / `token_expired` / 401。
+- 日更留下的 `marketing price scan failed` 历史状态没有删除或改写。当天后续 live guard 产出的更新扫描完整覆盖 19/19 店、`ok=true`、`partial=false`、622 行；watchdog 只在验证这份更新且新鲜的完整证据后，将该条“仅扫描失败”告警标记为 recovered，并在报告中保留 `recoveries` 与原 `dailyRefresh`。混合告警、过期扫描、缺店、重复店、失败店或行数不一致仍照常告警。
 
 ## 仍需长期治理的边界
 
 - Portal 仍是高功能密度服务。后续只应按“鉴权与会话 / section API / 登录维护 / 链接运营”逐模块迁移，并保持接口契约测试；禁止无测试的大爆炸重写。
 - Portal 当前需要执行受控 `sudo docker` 子命令并共享浏览器临时目录，因此不能启用 `NoNewPrivileges` / `PrivateTmp`。若未来把这些子任务拆成独立 worker，再收紧该边界。
 - 生产仓库存在业务运行热修和生成物漂移。部署必须逐文件备份/复制，不得 `reset --hard`、`clean` 或 blanket rsync 覆盖云端。
-- GitHub Actions workflow 只有在 GitHub 凭据具备 `workflow` scope 后才能提交；本地 `npm test` 是同一确定性命令，不能因 token 权限问题省略本地门禁。
+- GitHub Actions 与本地 `npm test` 使用同一确定性命令；远端 CI 不能替代本地发布前门禁，反之亦然。
 
 ## 发布完成标准
 

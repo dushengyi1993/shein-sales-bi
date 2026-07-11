@@ -42,6 +42,7 @@ Options:
   --coupon-activity-id <ID>     Coupon activity ID (default: 34810)
   --level-rule-hints <FILE>     Optional level-rule hint JSON
   --page-size <N>               API page size, 1-1000 (default: 500)
+  --store-attempts <N>          Attempts per store, 1-5 (default: 3)
   --no-launch                   Do not launch missing store browsers
   --no-close                    Keep browsers launched by this command open
   --headless                    Launch missing browsers headlessly
@@ -69,6 +70,7 @@ function parseArgs(argv) {
     headless: false,
     visible: false,
     pageSize: 500,
+    storeAttempts: 3,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -89,10 +91,12 @@ function parseArgs(argv) {
     else if (a === '--headless') args.headless = true;
     else if (a === '--visible') args.visible = true;
     else if (a === '--page-size') args.pageSize = Number(takeValue());
+    else if (a === '--store-attempts') args.storeAttempts = Number(takeValue());
     else throw new Error(`Unknown option: ${a}`);
   }
   if (args.headless && args.visible) throw new Error('--headless and --visible cannot be used together');
   if (!Number.isInteger(args.pageSize) || args.pageSize < 1 || args.pageSize > 1000) throw new Error('--page-size must be an integer from 1 to 1000');
+  if (!Number.isInteger(args.storeAttempts) || args.storeAttempts < 1 || args.storeAttempts > 5) throw new Error('--store-attempts must be an integer from 1 to 5');
   if (!Number.isInteger(args.couponActivityId) || args.couponActivityId < 1) throw new Error('--coupon-activity-id must be a positive integer');
   return args;
 }
@@ -374,7 +378,7 @@ async function scanStore(store, args, levelHints) {
   try {
     const ensured = await ensureBrowser(store, args);
     launched = ensured.launched;
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
+    for (let attempt = 1; attempt <= args.storeAttempts; attempt += 1) {
       result.attempts = attempt;
       let cdp = null;
       try {
@@ -404,7 +408,7 @@ async function scanStore(store, args, levelHints) {
       } catch (err) {
         result.reason = err.message;
         result.stack = err.stack;
-        if (attempt < 2 && isTransientMarketingScanError(err)) {
+        if (attempt < args.storeAttempts && isTransientMarketingScanError(err)) {
           result.warnings.push(`transient scan failure on attempt ${attempt}: ${String(err.message || err).slice(0, 500)}`);
           await sleep(1500);
           continue;

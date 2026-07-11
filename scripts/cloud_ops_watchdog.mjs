@@ -4,6 +4,10 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import crypto from 'node:crypto';
+import {
+  assessDailyMarketingScanRecovery,
+  resolveMarketingScanEvidencePath,
+} from '../lib/cloud_watchdog_recovery.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_STATE_DIR = path.join(ROOT, 'state', 'cloud_ops_watchdog');
@@ -310,6 +314,7 @@ async function main() {
   const logFile = path.join(args.logDir, `watchdog-${stamp}.json`);
 
   const issues = [];
+  const recoveries = [];
   const serviceExitAcks = await readServiceExitAcks();
   const units = [];
   for (const unit of UNIT_NAMES) {
@@ -343,10 +348,28 @@ async function main() {
     issues.push(`链接/业务域日更部分店铺失败：date=${partialLinkBusiness.date || '-'} failed=${partialLinkBusiness.failedStores || '-'} log=${partialLinkBusiness.logFile || '-'}`);
   }
   const dailyRefresh = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'daily-refresh-last.json'));
+  let dailyRefreshRecovery = null;
   if (dailyRefresh?.error) {
     issues.push(`日更补采状态不可读：${dailyRefresh.error}`);
   } else if (dailyRefresh?.status && dailyRefresh.status !== 'ok' && !String(dailyRefresh.status).startsWith('skipped')) {
-    issues.push(`日更补采异常：date=${dailyRefresh.date || '-'} status=${dailyRefresh.status} message=${dailyRefresh.message || '-'} log=${dailyRefresh.logFile || '-'}`);
+    const guardState = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'marketing-live-guard-last.json'));
+    const storeConfig = await readJsonIfExists(path.join(ROOT, 'config', 'stores.json'));
+    const scanFile = resolveMarketingScanEvidencePath(ROOT, guardState?.scanFile);
+    const scanSnapshot = scanFile ? await readJsonIfExists(scanFile) : null;
+    const configuredStores = Array.isArray(storeConfig?.stores) ? storeConfig.stores : [];
+    dailyRefreshRecovery = scanFile
+      ? assessDailyMarketingScanRecovery({
+          dailyRefresh,
+          guardState,
+          scanSnapshot,
+          expectedStoreKeys: configuredStores.filter(store => store?.enabled !== false).map(store => store?.storeKey),
+        })
+      : {recovered: false, reason: 'recovery_scan_path_invalid'};
+    if (dailyRefreshRecovery.recovered) {
+      recoveries.push(dailyRefreshRecovery.evidence);
+    } else {
+      issues.push(`日更补采异常：date=${dailyRefresh.date || '-'} status=${dailyRefresh.status} message=${dailyRefresh.message || '-'} log=${dailyRefresh.logFile || '-'}`);
+    }
   }
 
   const portal = await readPortalDates(args.portalData);
@@ -419,6 +442,9 @@ async function main() {
     ok: issues.length === 0,
     generatedAt: new Date().toISOString(),
     issues,
+    recoveries,
+    dailyRefresh,
+    dailyRefreshRecovery,
     portal,
     coverage,
     orphanStoreBrowsers,

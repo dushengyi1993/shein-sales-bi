@@ -122,6 +122,8 @@ ET、统一日更补采、异常通知 watchdog、只读问数机器人（云端
 
 - 慢变补采只放在 `shein-bi-cloud-daily-refresh.service`：由 `shein-bi-cloud-morning-chain.timer` 在 08:00 销售刷新后启动；链接/业务域、商品列表/库存/流量日更、营销活动/限时折扣/优惠券价格线索、RTV 换单复核都集中在这个批次内串行执行，不允许重新拆成多个同日重任务 timer。
 
+- 营销价格扫描按店有界重试，CLI 为 `--store-attempts 1..5`，生产日更和 10:30 live guard 统一由 `SHEIN_BI_MARKETING_PRICE_STORE_ATTEMPTS=3` 固定为最多 3 次；只重试已分类的瞬时错误，业务拒绝或确定性错误不能靠无限重试掩盖。
+
 - 重任务 timer 均不做开机补跑（`Persistent=false`）。服务器重启错过窗口时，由 watchdog 的数据过期/日更状态暴露，再人工选择低峰补跑，避免重启后销售、ET、日更、登录态管家同时恢复执行。
 
 - `daily-refresh` 启动前会等待销售/昨日销售/ET 写入任务结束，并检查 `MemAvailable`。可用内存低于阈值时写 `skipped_low_memory` 状态后跳过本轮；宁可让慢变数据晚一点，也不能拖慢销售刷新和 BI 页面。
@@ -161,7 +163,7 @@ ET、统一日更补采、异常通知 watchdog、只读问数机器人（云端
 
 - 统一日更补采云端入口：`scripts/cloud_daily_refresh.sh yesterday`；生产由晨间链路在销售刷新后启动 `shein-bi-cloud-daily-refresh.service`（若以后重新启用日报，则日报成功后再启动）。它内部调用 `scripts/cloud_link_business_sync.sh` 做链接/业务域日更，集中补采营销活动/限时折扣/优惠券价格线索，并串行执行 `scripts/cloud_rtv_verify.sh`。`scripts/cloud_openapi_hl_reconciliation.sh` 仅保留为显式手动诊断入口。底层脚本仍保留为手动诊断入口，链接/业务域带全店日指标全 0 不入仓守卫。该入口不应在白天手动全量补跑 19 店；若必须补跑，先确认当前没有销售/ET/门户生成任务，并检查可用内存。
 
-- 云端异常通知入口：`scripts/cloud_ops_watchdog.mjs`
+- 云端异常通知入口：`scripts/cloud_ops_watchdog.mjs`。对于内容精确等于 `marketing price scan failed` 的单一日更 warning，watchdog 只有在后续 guard 状态引用一份比 warning 更新、24 小时内、`ok=true` / `partial=false`、与当前 enabled store 集合完全一致且行数自洽的扫描时，才在 `recoveries` 中记录恢复并停止重复告警。原 `daily-refresh-last.json` 和历史日志必须保留；混合 warning、过期/未来时间、路径越界、缺店、重复店、失败店或残缺 payload 一律不能自动变绿。
 
 - 云端覆盖审计入口：`scripts/audit_cloud_data_coverage.mjs`。最新日防漏用 `--expected-start range-start`，历史断档排查用 `--expected-start first-seen`；后者按每个店自己的首个有效日期之后查中间断档，避免把店铺尚未开通/尚未接入前的日期误判为缺抓。
 
@@ -295,7 +297,7 @@ GitHub 应保存：
 
 - `ssh shein-bi-tencent` 应能直接登录服务器并具有免密 `sudo` 运维能力；如果后续 HTTPS 占用 443，先迁移 SSH 端口。
 
-- `shein-bi-cloud-watchdog.timer` 应保持 active；销售/页面过期按 4.5 小时提醒，链接/业务域过期按 48 小时提醒。
+- `shein-bi-cloud-watchdog.timer` 应保持 active；销售/页面过期按 4.5 小时提醒，链接/业务域过期按 48 小时提醒。若报告通过恢复证据收口历史营销扫描 warning，必须同时看到 `issues=[]`、`recoveries[].type=daily_marketing_price_scan_recovery` 和原始 `dailyRefresh.status=warning`，不能只看进程退出码。
 
 - `shein-bi-cloud-morning-chain.timer` 应保持 active；慢变日更由它启动 `shein-bi-cloud-daily-refresh.service`。手动复跑用 `scripts/cloud_daily_refresh.sh yesterday`。若单店卡在 SBN `x-gw-auth`，优先看该店 attempt 重试日志；若 RTV 子步骤失败，先看底层脚本日志；销售订单事实源仍由 high-frequency WebAPI sales 链路写正式表，`shein-bi-cloud-daily-refresh.service` 中的 OpenAPI 销售步骤只作为并行对账质量监控；退货退款、商品/链接双跑对账仍只写隔离层。不要回退到本机补抓冒充云端日更。旧的 `shein-bi-cloud-link-business.timer`、`shein-bi-cloud-openapi-hl.timer`、`shein-bi-cloud-rtv-verify.timer` 应保持 masked，避免日更补采重复跑。
 
