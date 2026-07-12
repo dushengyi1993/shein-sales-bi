@@ -30,6 +30,8 @@
 - 正式入口：`https://sa.dushengyi.cc/`；云端代码目录 `/opt/shein-bi/app`；SSH 别名 `ssh shein-bi-tencent`。详细架构见 `docs/bi-system-architecture.md`，运维见 `docs/bi-system-operations.md`。
 - GitHub release 只代表源码基线；生产以云端 `/opt/shein-bi/app` 和 systemd 实际状态为准。服务器 pull/reset 后必须重跑 BI 刷新。
 - OpenAPI 销售/退货/商品仍以隔离并行层和受控写链为边界；不要回答成“只有 HL 接入”，也不要说已一刀切替代正式事实源。
+- BI 自动运营会话、任务、job 和审计使用 PostgreSQL `ops.link_ops_*`；生产数据库不可用时失败关闭，不能静默回退本地 JSON。
+- 负责人经验只允许 `knowledgePublisher=true` 的本人账号和已登记设备单向发布；同事账号只能消费，不能反向覆盖，也不展示内部规则包版本。
 
 ## ET 货代仓
 
@@ -69,7 +71,7 @@
 
 ## 工具避坑
 
-- PowerShell 5.1 中文管道易编码污染；项目 `.ps1` dot-source `scripts/use_utf8.ps1`，文件保存 UTF-8 with BOM。
+- PowerShell 5.1 中文管道易编码污染；含中文的项目 `.ps1` dot-source `scripts/use_utf8.ps1` 并保存 UTF-8 with BOM，或将可独立运行的安装脚本保持纯 ASCII。
 - 不要用 PowerShell here-string 写大量中文 JS/JSON；优先用 UTF-8 文件、Node 脚本或 `apply_patch`。
 - Node 读取大 stdout 时收集 Buffer 后 `Buffer.concat(...).toString('utf8')`，避免中文多字节被切断。
 - SHEIN `20302 子系统登录重定向` 先自动恢复登录并重抓；恢复失败明确报人工处理，不能用旧数据冒充最新。

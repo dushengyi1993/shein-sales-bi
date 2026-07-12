@@ -9,6 +9,7 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 - **飞书 Base / 原生看板写入暂停**：`state/feishu-base-sync-paused.flag` 存在时不写 Base/看板；飞书日报、异常提醒和只读问数走云端消息链路。
 - **SHEIN OpenAPI 写操作受控**：默认 dry-run；真实提交必须满足账号权限、白名单、人+店+动作、payloadHash/确认码、任务审核和回读审计。
 - **云端部署纪律**：GitHub release 是源码基线，不等于已部署；云端热修必须回填 GitHub，服务器拉取/重置后必须重跑云端 BI 刷新。
+- **负责人经验单向继承**：负责人本机 Codex Desktop/CLI 与负责人 BI 会话的长期经验自动进入网页；其他账号只消费，不能反向覆盖。普通同事界面不展示无业务意义的规则包版本号。
 
 ## 关键入口
 
@@ -50,12 +51,24 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 - 同步 ET 货代仓：`bash scripts/cloud_et_forwarder_sync.sh <scope>`（`<scope>` 按运维文档取值）
 - 跑云端 watchdog：`node scripts/cloud_ops_watchdog.mjs --dry-run`
 - OpenAPI 商品/链接运营 CLI：`node scripts/bi_ops_cli.mjs --help`
+- 团队自动运营：普通成员使用 BI 网页；Owner/合伙人可用 `node scripts/bi_ops_cli.mjs chat --text "..." --wait-seconds 120`，并用 `jobs` / `job` / `wait-job` 查看可恢复后台规划。`--scope-all` 仅全局只读，不扩大写权限。
+- 负责人经验同步：`npm run owner-knowledge:scan`、`npm run owner-knowledge:sync`、`npm run owner-knowledge:status`；运行边界见 `docs/owner-knowledge-sync.md`。
 - 批量复制商品到多店：`node scripts/link_ops_hl_openapi_executor.mjs --help`（支持 `supplyPriceRange`、`shuffleImages`、`inferInputCurrentOverride`、`skipPayloadHashLock`）
 - 批量下架候选生成与执行：`node scripts/build_link_retire_candidates_from_csv.mjs --help`；`node scripts/execute_retire_candidates_openapi.mjs --help`
 - 限时折扣漂移自动修复：`node scripts/marketing/guard_limited_discount_drift.mjs --guard <guard-json>`（先判断漂移，有则自动批量修复）
 - 修复已下架但货号未改：`node scripts/repair_retire_supplier_code_openapi.mjs --help`（云端专用，只调 `partialEdit`）
 
 更多脚本、废弃边界和示例见 `docs/scripts-inventory.md`。
+
+## BI 自动运营 V2（2026-07-12）
+
+- 任务、会话、消息、作业和事件迁入 PostgreSQL 行级 `ops.link_ops_*` 表；revision、idempotency、追加事件和租约作业共同防并发覆盖、重复执行和进程中断。
+- 生产切换按用户确认从空白任务/会话开始；原 31 个任务、4 个会话、15 条消息只留在云端校验备份，不进入新网页。
+- 模型路由默认使用 Luna low 做结构化意图、Terra low/medium 做常规问数和动作规划、Sol high 做复杂/高风险或 Owner 深度诊断；网页禁用 max/ultra，xhigh 只限 Owner 人工显式调用。
+- 跨店复制商品已补齐预演源链接/日期锁、目标店同货号去重、官方属性模板必填校验和强回读；真实写仍必须由当前账号明确确认，不能静默提交。
+- 负责人本机 Codex/CLI 与本人 BI 会话可单向沉淀长期经验；同事只在业务流程中使用相关规则，不能反向写入或覆盖。
+- 飞书问数 service 已主动暂停，生产必须保持 `shein-bi-lark-sales-qa.service` 为 `disabled + inactive`；网页问数和 CLI 继续可用。
+- 发布、迁移、回滚与验收清单见 `docs/bi-ops-v2-release-2026-07-12.md`。
 
 ## 工具说明
 
@@ -76,6 +89,7 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 | BI 运维说明 | `docs/bi-system-operations.md` |
 | BI 门户 UI 口径 / priceScatter | `docs/bi-portal-ui-current.md` |
 | 2026-07-10 全面审查与优化闭环 | `docs/optimization-review-2026-07-10.md` |
+| 2026.07.12 自动运营 V2 发布说明 | `docs/bi-ops-v2-release-2026-07-12.md` |
 | BI 仓库模型 | `docs/bi-warehouse-model.md` |
 | SHEIN 后台数据地图 | `docs/shein-backend-survey.md` |
 | SHEIN 官方 OpenAPI 接入 | `docs/shein-openapi-integration.md` |
@@ -86,6 +100,7 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 | 营销活动报名价格规则 | `docs/marketing-campaign-signup-pricing-rules.md` |
 | 营销折扣自动化路线图 | `docs/marketing-automation-roadmap.md` |
 | scripts 脚本清单与废弃边界 | `docs/scripts-inventory.md` |
+| 负责人经验单向同步 | `docs/owner-knowledge-sync.md` |
 | 数据模型 | `docs/data-model.md` |
 | 实施路线 | `docs/implementation-roadmap.md` |
 | 3 月参考表结构 | `docs/reference-month-table-structure.md` |

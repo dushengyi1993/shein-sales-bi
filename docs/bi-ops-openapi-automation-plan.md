@@ -19,7 +19,7 @@
 - **源店和目标店必须分离**：`sourceStores` 只表示读来源链接；`writeStores` / `stores` 才表示要写的目标店。跨店复制时若源店混入多写店，执行前必须剔除源店，除非用户明确把源店也列为目标写店。
 - **复制上品里的标题不是改标题动作**：用户说“标题直接复制源链接/沿用源标题”，这是发布 payload 的字段补齐，不是 `update_title` 维护动作，不能把补链任务混进改标题执行器。
 - **新链接默认不自动上架**：所有新上品、复制上品、补链接等从未上过架的新链接，发布 payload 必须默认 `shelf_way=2` 并写入约十年后的 `hope_on_sale_date`；短期内不能自动上架。只有维护已有链接的 `activate_link` / `retire_link` 等上下架动作才按用户指令改变现有链接状态。
-- **新链接默认标准货号**：所有新上品、复制上品、补链接等从未上过架的新链接，发布 payload 的 `skc_list[].supplier_code` 和 `skc_list[].sku_list[].supplier_sku` 必须使用当前任务的标准货号（优先 `task.standardGoodsSn` / `targets.standardGoodsSn` / `metadata.standardGoodsSn` / `executionContext.standardGoodsSn`，再从 `productRefs` 推导），不得继承源链接或店铺特定 raw `supplier_code`。
+- **新链接默认标准货号**：所有新上品、复制上品、补链接等从未上过架的新链接，发布 payload 的 `skc_list[].supplier_code` 和 `skc_list[].sku_list[].supplier_sku` 必须原样使用当前任务的标准货号（优先 `task.standardGoodsSn` / `targets.standardGoodsSn` / `metadata.standardGoodsSn` / `executionContext.standardGoodsSn`，再从 `productRefs` 推导），不得继承源链接或店铺特定 raw `supplier_code`；也不得自行添加店铺前缀、颜色、批次或其他后缀。只有用户明确指定时才允许偏离标准货号。
 - **明确动作优先走 BI 状态机**：补链、复制上品、改价、上下架、补字段、自然语言确认等明确运营动作不得先交给旧问答模型生成建议；必须先创建/更新当前会话任务、检查资料、再用人话返回缺口或结果。
 - **505 只是验收样例，不是特判对象**：`DL 505` 只能用来验证通用链路；自动运营页必须支持所有已接入 OpenAPI 动作走同一条自然语言状态机，包括 `copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。不能给单个货号、单个类目或单个店铺写死流程。
 - **平台缺字段按属性 ID 通用闭环**：`publishOrEdit` 返回“某属性(id)必填”时，后续用户在同一聊天里补“按 800W 算 / 电流 1200mA”等自然语言，系统要从上次平台提示里识别属性 ID、写入当前任务事实并重新资料检查；不能只靠 `SM-505A` 的输入电流特判。
@@ -123,6 +123,7 @@
 ### 已落地并行层现状（2026-06-26）
 
 - 19 店授权与只读探针：已完成，云端 19/19 `read_probe_ok`。
+- 2026-07-11 复核：19 店实时只读探针重跑为 `19/19 read_probe_ok`，当日销售、退货、商品 OpenAPI 对账也均为 19 店成功。能力总账已取消 HL 单店硬编码就绪兜底，通用探针或新鲜且存在有效对账行的日常 OpenAPI 对账均可作为读链路证据；网页分开显示“API 已接通 / 可系统检查 / 当前账号可受控提交”，不再把探针时效、全局白名单或他人权限误说成店铺有无 API。
 - 销售订单：WebAPI 仍是生产事实源；OpenAPI 写 `fact.openapi_store_daily_sales`、`fact.openapi_order_header`、`fact.openapi_order_item`、`fact.openapi_order_payment_flag`、`mart.openapi_sales_reconciliation` 作一周双跑验证，不覆盖正式 `fact.store_daily_sales` / `fact.order_item`。
 - 退货退款：已进入 OpenAPI 并行层，只写 `fact.openapi_return_order`、`fact.openapi_return_item`、`mart.openapi_return_reconciliation`，不覆盖生产售后事实。
 - 商品/链接基础资料：已进入 OpenAPI 并行层，只写 `fact.openapi_product_link`、`mart.openapi_product_reconciliation`，不覆盖 `fact.link_master_snapshot`、商品页、库存页或任何生产维表。

@@ -87,11 +87,11 @@
 
 | `shein-bi-cloud-watchdog.timer` | 每小时 | 检查云端服务、timer 和 BI 数据新鲜度，异常时发飞书提醒 |
 
-| `shein-bi-lark-sales-qa.service` | 常驻服务 | 飞书只读问数机器人（云端 Codex CLI 网关），读取 BI Portal JSON 后回复消息，不写数据 |
+| `shein-bi-lark-sales-qa.service` | **主动暂停** | 飞书只读问数机器人代码与 unit 保留，但生产必须保持 `disabled + inactive`；网页问数与 CLI 不依赖它 |
 
 
 
-ET、统一日更补采、异常通知 watchdog、只读问数机器人（云端 Codex CLI 网关）等 Linux systemd 入口已启用并通过手动验证。飞书日报脚本仍保留为手动入口，但自动发送已停用：生产机没有 `shein-bi-cloud-daily-lark-report.timer`，晨间链路 `SHEIN_BI_MORNING_SEND_LARK_REPORT=0`。截至 2026-07-09，19 店订单销售生产事实源保留 WebAPI，高频 `today`、昨日定稿和晨间链路均通过 `SHEIN_SALES_TRANSPORT=webapi` 写正式销售事实表；OpenAPI 已修正取消/无效行口径并保留并行对账层双跑一周。链接/业务域、营销价栈线索、RTV WebAPI 复核、订单闭环复查、SBN 登录态和 ET 实盘库存仍按各自原链路运行，不要把“OpenAPI 可切换候选”误解成全数据域零浏览器/零 WebAPI。不要误以为本地 `SHEIN-*` Windows 任务仍在生产运行。
+ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启用并通过手动验证；飞书只读问数服务已于 2026-07-11 主动暂停，必须保持 `disabled + inactive`。飞书日报脚本仍保留为手动入口，但自动发送已停用：生产机没有 `shein-bi-cloud-daily-lark-report.timer`，晨间链路 `SHEIN_BI_MORNING_SEND_LARK_REPORT=0`。截至 2026-07-09，19 店订单销售生产事实源保留 WebAPI，高频 `today`、昨日定稿和晨间链路均通过 `SHEIN_SALES_TRANSPORT=webapi` 写正式销售事实表；OpenAPI 已修正取消/无效行口径并保留并行对账层双跑一周。链接/业务域、营销价栈线索、RTV WebAPI 复核、订单闭环复查、SBN 登录态和 ET 实盘库存仍按各自原链路运行，不要把“OpenAPI 可切换候选”误解成全数据域零浏览器/零 WebAPI。不要误以为本地 `SHEIN-*` Windows 任务仍在生产运行。
 
 
 
@@ -167,7 +167,7 @@ ET、统一日更补采、异常通知 watchdog、只读问数机器人（云端
 
 - 云端覆盖审计入口：`scripts/audit_cloud_data_coverage.mjs`。最新日防漏用 `--expected-start range-start`，历史断档排查用 `--expected-start first-seen`；后者按每个店自己的首个有效日期之后查中间断档，避免把店铺尚未开通/尚未接入前的日期误判为缺抓。
 
-- 飞书只读问数机器人（云端 Codex CLI 网关）入口：`scripts/cloud_lark_sales_qa_bot.sh` / `scripts/lark_sales_qa_bot.mjs`
+- 飞书只读问数机器人（云端 Codex CLI 网关）保留入口：`scripts/cloud_lark_sales_qa_bot.sh` / `scripts/lark_sales_qa_bot.mjs`；当前只用于离线诊断或未来经明确授权恢复，生产 service 不运行。
 
 - 销售订单生产抓取默认使用 WebAPI；直连成功时不会启动浏览器。OpenAPI 作为并行对账和一周切换候选，本地开发或回滚诊断仍可显式使用 `openapi` / `auto` / `browser` transport。
 
@@ -219,7 +219,7 @@ ET、统一日更补采、异常通知 watchdog、只读问数机器人（云端
 
 - 普通登录弹窗边界：协议签署、公告、通知确认、`知道了` / `确认` / `同意` 等不涉及店铺经营承诺、资质、付费、活动报名或授权范围变更的弹窗，可由运维代理在维护窗口中关闭/确认后再点登录；它们不等同于验证码阻塞。若弹窗内容是新的法律承诺、资质承诺、付费/结算、活动报名、授权范围变化，或出现验证码、滑块、短信、人脸、缺账号密码，则停下让用户处理。
 
-- Nginx 配置必须支持 WebSocket upgrade；仓库模板为 `infra/nginx/shein-bi.conf`，包含 `proxy_set_header Upgrade` 和 `proxy_set_header Connection "upgrade"`。
+- Nginx 配置必须支持 WebSocket upgrade；仓库模板为 `infra/nginx/shein-bi.conf`，包含 `proxy_set_header Upgrade` 和 `proxy_set_header Connection "upgrade"`。Caddy 在公网 TLS 层传入的 `X-Forwarded-Proto: https` 必须由 Nginx 继续传给 Portal，不得用内部 HTTP hop 的 `$scheme` 覆盖；否则真实同源 POST 会被误判为跨域。修改后要用携带 `Host: sa.dushengyi.cc` / `Origin: https://sa.dushengyi.cc` / `X-Forwarded-Proto: https` 的 Nginx 内网探针验证：未登录请求应返回 `401`，不应返回同源拒绝 `403`。
 
 - 日志与状态：状态文件 `/srv/shein-bi/runtime/cloud_manual_login_sessions.json`；日志目录 `/srv/shein-bi/logs/cloud-manual-login`。这些都是服务器私有运行态，不进 GitHub。
 
@@ -311,7 +311,7 @@ GitHub 应保存：
 
 - 云端人工登录入口验证：`/cloud-login-maintenance` 返回 `200`；`/cloud-login/novnc/vnc.html` 返回 `200`；创建会话后 `/cloud-login/session/:id` 返回 `200` 且 WebSocket 升级返回 `101 Switching Protocols`；点“我已完成并关闭”后 export/probe 成功且不残留 Chrome/Xvfb/x11vnc/websockify 进程。
 
-- `shein-bi-lark-sales-qa.service` 应保持 active，且 effective `User/Group` 必须为 `sheinops`、`HOME=/home/sheinops`、`NoNewPrivileges=yes`、`PrivateTmp=yes`；可用 `node scripts/lark_sales_qa_bot.mjs --answer "今天销售多少"` 本地只读测试答案。群聊中若无回复，优先检查机器人是否已入群、应用可见范围和 `im.message.receive_v1`/发消息权限。
+- `shein-bi-lark-sales-qa.service` 应保持 `disabled + inactive`；部署前后执行 `systemctl is-enabled` / `systemctl is-active` 核验，不得为了“全绿”启动它。unit 仍保留 `User/Group=sheinops`、`HOME=/home/sheinops`、`NoNewPrivileges=yes`、`PrivateTmp=yes` 等安全契约，未来恢复需单独授权和发布验证。
 
 - GitHub `main` 应包含最新可复用代码和文档；敏感运行态只保留在本地/云端私有目录。
 
@@ -319,15 +319,15 @@ GitHub 应保存：
 
 
 
-## 飞书问数 / 云端 Codex CLI 网关
+## 飞书问数 / 云端 Codex CLI 网关（当前暂停）
 
 
 
-- 当前生产链路为：飞书消息事件 -> 云端 `lark-cli` / `shein-bi-lark-sales-qa.service` -> `scripts/lark_sales_qa_bot.mjs` -> Codex CLI 只读执行 -> 回复飞书。
+- 历史链路为：飞书消息事件 -> 云端 `lark-cli` / `shein-bi-lark-sales-qa.service` -> `scripts/lark_sales_qa_bot.mjs` -> Codex CLI 只读执行 -> 回复飞书。2026-07-11 起该 service 主动暂停；当前团队入口是网页 BI 自动运营，Owner/合伙人使用 `scripts/bi_ops_cli.mjs`。
 
 - Codex CLI 安装在服务器系统路径，私有配置目录为 `/home/sheinops/.codex`；`auth.json`、`config.toml`、第三方 API 配置和 token 都不进入 GitHub、文档或日志。
 
-- 服务环境必须显式包含：`CODEX_HOME=/home/sheinops/.codex`、`SHEIN_QA_CODEX_GATEWAY_ENABLED=1`、`SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS=600000`、`SHEIN_QA_CODEX_MODEL=gpt-5.5`、`SHEIN_QA_CODEX_REASONING_EFFORT=xhigh`。
+- 若未来经授权恢复飞书服务，默认问数使用 `gpt-5.6-terra` + `low` + 45 秒，图表意图使用 `gpt-5.6-luna` + `low` + 20 秒；不得恢复旧的全局 `gpt-5.5 + xhigh + 600 秒` 配置。
 
 - Lark bot 不再使用 root HOME。迁移旧 keychain 时，只能在服务器上把 `/root/.lark-cli/config.json`、`/root/.local/share/lark-cli/master.key` 和对应 `appsecret_*.enc` 备份后，以 `600` 权限安装到 `sheinops` HOME；父目录保持 `700`。不得输出文件内容或把它们放进 app 目录。迁移后先以 `sudo -u sheinops -H lark-cli api GET /open-apis/bot/v3/info --as bot` 做只读凭据探针，再重启服务并检查 websocket `connected` 日志。
 
@@ -371,7 +371,26 @@ CODEX_HOME=/home/sheinops/.codex SHEIN_QA_CODEX_GATEWAY_ENABLED=1 node scripts/l
 
 
 
-- 飞书问数和链接管理中台的 Codex CLI 网关默认使用 `gpt-5.5` + `model_reasoning_effort=xhigh`；由于超高推理耗时更长，服务超时同步提升到 600 秒。
+- 旧的 `gpt-5.5 + xhigh + 600 秒` 只保留为历史记录，不再是当前配置。当前模型路由见下节。
+
+### BI 自动运营 V2：入口、模型与持久化（2026-07-12）
+
+- 普通团队成员使用网页 BI 自动运营；任务、会话和后台作业按 BI 登录账号隔离，并继续受店铺读写权限约束。
+- Owner/合伙人保留 `scripts/bi_ops_cli.mjs`。`--scope-all` 只是 Owner 的全局只读 jobs 视图，不能替其他账号静默写入；`--profile` 也不改变权限、人工确认或回读要求。
+- 模型按成本和风险分层：结构化意图 `Luna/low/20s`；常规问数 `Terra/low/45s`；动作规划 `Terra/medium/90s`；复杂或高风险分析 `Sol/high/300s`；Owner CLI 深度诊断 `Sol/high/600s`。`xhigh` 只允许 Owner 人工显式请求，网页禁止 `max/ultra`。
+- 自动运营 runtime 使用 PostgreSQL `ops.link_ops_*` 行级表，session/message/task/record/job/event/idempotency/import batch 分开保存。revision 做乐观并发控制，idempotency 防重复，event 追加不可改，job 用租约恢复；数据库不可用时生产失败关闭，不静默回退 JSON。
+- 2026-07-11 切换采用空白任务/会话：旧 31 个任务、4 个会话和 15 条消息只保留在已校验备份，不导入新网页。执行迁移脚本时必须带 `--skip-legacy-conversations`；其他 BI 业务数据、账号与店铺权限不受影响。
+- 迁移顺序：JSON/数据库备份 -> `--dry-run --skip-legacy-conversations` 核对 manifest -> `--execute` -> PG hash/数量回读 -> 导出 PG rollback snapshot -> 创建受限 `shein_link_ops` 角色 -> 安装 unit -> 重启 portal -> 网页/API/CLI 验收。
+- 回滚时先停写，保留 PG 证据，切回 JSON repository 并使用切换前备份或 `scripts/export_link_ops_postgres_snapshot.mjs` 的快照；不要直接删业务库或篡改 event。
+
+### 负责人经验单向同步
+
+- 只有 `config/bi_access_roles.json` 中显式 `knowledgePublisher=true` 的负责人账号和已登记设备可以写入 `owner_knowledge_*` record；普通 owner、operator、admin 和后台任务均不能发布或覆盖。
+- 本机同步只读取当前项目的 Codex memory note、用户消息和最终答复，并在发送前脱敏；reasoning、tool output、其他项目会话和设备 token 不上传。普通同事页面不展示规则版本、fingerprint 或内部任务快照。
+- 服务端使用现有 PostgreSQL Link Ops repository 保存 immutable version、current pointer、active bundle 和 device；candidate 不进入团队业务上下文。规则变化后旧 intent job 结果和旧系统检查均 fail closed。
+- 云端检查：加载 `/srv/shein-bi/secrets/portal-warehouse.env` 后运行 `node scripts/owner_knowledge_admin.mjs status`；本机检查使用 `npm run owner-knowledge:status`。设备轮换使用 `issue-device` 重新签发，同一 device id 的旧 token 随即失效。
+- Windows 常驻任务名为 `SHEIN-Owner-Knowledge-Sync`。任务应保持 `Running`，`%USERPROFILE%\.codex\owner-knowledge\sync-state.json` 应持续更新时间；网络失败不会推进 offset，恢复后自动幂等补传。
+- API 出现 401 时先检查/轮换设备凭证；403 表示当前账号本就没有发布权，不得给同事账号补权限；5xx 先查 `shein-bi-portal` 日志、PostgreSQL 健康和 `npm test`，不能绕过规则层直接改任务 JSON。
 
 - `/home/sheinops/.codex` 已安装 `my-codex` agents/skills/agent-packs/AGENTS 配置；安装前已备份 `.codex` 私有配置到 `/home/sheinops/.codex-backups/`，备份文件不得进入 GitHub。
 

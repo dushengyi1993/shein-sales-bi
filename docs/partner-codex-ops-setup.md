@@ -78,6 +78,32 @@ node scripts/bi_ops_cli.mjs me
 node scripts/bi_ops_cli.mjs logout
 ```
 
+## 网页与 Owner CLI 的当前分工（2026-07-12）
+
+- 普通团队成员直接使用 BI 网页自动运营；服务端按登录账号、owner 和店铺读写范围隔离任务、会话与作业。
+- Owner/合伙人保留 CLI，用于更明确的诊断、批量编排和审计；不能借 CLI 绕过店铺权限、预检、人工确认或 SHEIN 回读。
+- 常用会话/作业命令：
+
+```powershell
+node scripts/bi_ops_cli.mjs chat --text "把 DX 的 PA4-6L 库存改成 30" --wait-seconds 120
+node scripts/bi_ops_cli.mjs jobs --status running
+node scripts/bi_ops_cli.mjs job --job-id <作业ID>
+node scripts/bi_ops_cli.mjs wait-job --job-id <作业ID> --wait-seconds 120
+node scripts/bi_ops_cli.mjs jobs --scope-all  # 仅 Owner 全局只读
+```
+
+- `--profile fast|balanced|deep|owner` 只改变理解深度。默认分层是 Luna low 20 秒、Terra low 45 秒、Terra medium 90 秒、Sol high 300 秒、Owner Sol high 600 秒；`xhigh` 只在 Owner 人工明确要求时使用，网页不启用 max/ultra。
+- 后台 `intent_plan` job 只补全店铺、商品、参数、歧义和风险，不直接授权或提交 SHEIN。终态为 `succeeded`、`failed` 或 `uncertain_write`；后两者先看详情，不要重复创建动作。
+- 飞书问数已主动暂停，生产 `shein-bi-lark-sales-qa.service` 必须保持 `disabled + inactive`；团队网页和 Owner CLI 不依赖它。
+
+### 负责人规则如何传给团队
+
+- 负责人继续在自己的 Codex Desktop/CLI 或本人 BI 账号中工作；可复用经验由本机同步器和 BI 服务自动进入规则层，无需手工复制给每位同事。
+- 同事只需要使用网页。系统会按当前店铺、商品和动作选取相关 active 规则，不会在页面展示“规则包 v…”之类内部版本信息。
+- 同事会话中的补充只影响其当前会话/任务，不能生成、修改或覆盖负责人长期规则；即使账号角色同为 owner，没有 `knowledgePublisher=true` 也无发布权。
+- candidate 只用于负责人后续复核，不参与团队真实业务。规则变化发生在预演之后时，系统会要求重新检查和再次确认，不能沿用旧结果直接写 SHEIN。
+- 负责人本机安装、状态检查和设备轮换见 `docs/owner-knowledge-sync.md`；同事机器不要安装同步任务，也不要复制负责人设备凭证。
+
 ## 安装后自检
 
 先跑一键自检：

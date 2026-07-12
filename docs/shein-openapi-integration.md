@@ -173,7 +173,7 @@ node scripts/load_bi_warehouse.mjs --sales-dir outputs/shein_openapi_fetch --sal
 - 对账稳定后，将该数据域切到 API。
 - 浏览器 profile 仅保留为登录、Cookie/session 刷新、排障和回退工具。
 
-2026-06-26 更新：19 店店铺级 OpenAPI 授权已完成，分批替换阶段从“授权接入”推进到“数据域双跑”。销售、退货退款、商品/链接基础资料均已有隔离并行层；生产源仍未切换。总账当前显示销售双跑 `salesReconciliationReady=19`、商品/链接 `productReconciliationReady=19`，退货退款仍有历史窗口 warning 需继续观察；`writeConfirmable=0` 是真实写操作安全边界，不是接入失败。
+2026-07-11 更新：19 店店铺级 OpenAPI 授权、实时只读探针、销售对账、退货对账和商品/链接对账均已回读为 19 店成功。总账的 `writeConfirmable=19` 表示 19 店均存在至少一类“可进入受控提交链路”的写适配器和店铺总闸门，不表示所有动作都已执行，也不代表可静默写入；每次真实提交仍必须通过当前账号店铺权限、具体动作白名单、资料系统检查、payload hash、用户确认和提交后回读。
 
 商品/链接并行层边界：
 

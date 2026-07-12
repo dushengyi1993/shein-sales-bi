@@ -12,7 +12,7 @@
 - `cloud_daily_lark_report.sh` / `shein-bi-cloud-daily-lark-report.service`：日报服务保留为手动诊断入口；正式自动发送当前停用，晨间链路默认 `SHEIN_BI_MORNING_SEND_LARK_REPORT=0`。需要服务器本地 `config/lark_report.json`、`lark-cli` 和飞书授权，密钥/授权不进 GitHub。
 - `shein-bi-cloud-order-closure.timer`：每天 `06:30`（带 `RandomizedDelaySec=5m`）从云端订单底库找未终态订单，重查 SHEIN 当前状态并写入 `ops.order_status_recheck_state`，只更新订单生命周期状态，不重写历史销售事实；成功后刷新 orders section。这个任务排在凌晨销售、登录态、昨日定稿之后；日更补采已移到 `08:50`，避免在 SHEIN 前一日链接/流量指标尚未产出时误抓全 0。
 - `shein-bi-portal.service`：BI Portal 常驻入口，必须以 `sheinops` 运行并保留 `MemoryHigh=1200M` / `MemoryMax=2200M` / `OOMPolicy=stop` / `Restart=always`，防止问数网关或 section 服务异常占满整机内存。Portal 仍需调用经过白名单约束的 `sudo docker` 子命令并与浏览器维护任务共享临时目录，所以不能照抄 Lark bot 的 `NoNewPrivileges` / `PrivateTmp`；其余内核、systemd、umask 护栏由 unit 固化。
-- `shein-bi-lark-sales-qa.service`：飞书只读问数机器人必须以 `sheinops` 运行，`HOME=/home/sheinops`，并保留 `NoNewPrivileges`、`PrivateTmp`、systemd 内核保护及 `MemoryHigh=512M` / `MemoryMax=900M` / `OOMPolicy=stop` / `Restart=always`。它不依赖 Docker；Lark keychain 只允许迁移到 `/home/sheinops/.lark-cli` 与 `/home/sheinops/.local/share/lark-cli`，目录 `700`、文件 `600`，不得把配置或密钥复制进仓库/日志。
+- `shein-bi-lark-sales-qa.service`：飞书只读问数机器人代码和 unit 保留，但 2026-07-11 起生产主动暂停，必须保持 `disabled + inactive`，部署时不得 `enable`、`start` 或 `enable --now`。若未来经明确授权恢复，仍必须以 `sheinops` 运行，保留 `HOME=/home/sheinops`、`NoNewPrivileges`、`PrivateTmp` 和内存护栏；Lark keychain 不得进入仓库/日志。
 - `shein-bi-cloud-browser-cleanup.timer`：每小时 `:10` / `:40` 清理本项目 `profiles/persistent-*-profile` 下的 headless Chrome 残留，并清理无活动 Chrome 时的 Chrome 临时目录。它只针对本项目 profile + headless 进程，不用于强杀可见人工登录窗口。
 - `shein-bi-cloud-marketing-live-guard.service`：每天 10:30 顺序执行全店只读营销价扫描和价栈守卫；同样固定每店最多 3 次瞬时错误重试。人工补跑必须先避开销售、ET、browser cleanup 和其它重任务窗口。
 - `shein-bi-cloud-watchdog.timer`：每小时只读巡检。它可以用后续完整 19 店扫描证据收口孤立的历史扫描 warning，但必须保留原日更状态并在报告写出 recovery；其它 warning 或不完整证据仍告警。
@@ -36,6 +36,9 @@ systemctl daemon-reload
 # start timer 只启动计时器，不应手动 start 对应 service。
 systemctl enable shein-bi-portal.service shein-bi-cloud-today.timer shein-bi-cloud-morning-chain.timer shein-bi-cloud-yesterday.timer shein-bi-db-backup.timer shein-bi-cloud-order-closure.timer shein-bi-cloud-browser-cleanup.timer
 systemctl start shein-bi-portal.service shein-bi-cloud-today.timer shein-bi-cloud-morning-chain.timer shein-bi-cloud-yesterday.timer shein-bi-db-backup.timer shein-bi-cloud-order-closure.timer shein-bi-cloud-browser-cleanup.timer
+# 飞书问数保持暂停；以下两条必须分别返回 disabled / inactive：
+systemctl is-enabled shein-bi-lark-sales-qa.service || true
+systemctl is-active shein-bi-lark-sales-qa.service || true
 # ET / 登录态在服务器本地 secret 与授权配置完成后再启用；日报/日更由 morning-chain 接管，不再启用独立 timer：
 # systemctl enable shein-bi-cloud-et-forwarder.timer shein-bi-cloud-session-manager.timer
 # systemctl start shein-bi-cloud-et-forwarder.timer shein-bi-cloud-session-manager.timer
