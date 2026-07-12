@@ -106,4 +106,8 @@
 - 线上首次启用后复核了 unchanged `publish --force`：同一 Git commit/fingerprint/hash 现在直接保持 current，并幂等清理同 commit 的旧 pending，不再制造没有新 push/CI run 的幽灵 pending 状态。
 - 首轮线上状态压测发现 PostgreSQL 动态 `listRecords` 对不同 WHERE 形状复用同一个 prepared-statement 名称，会造成连接复用后的随机 500。动态查询现保持 unnamed，并增加回归；修复后 10 次串行 + 10 次并行状态请求全部为 HTTP 200。
 - 营销兜底同时覆盖“历史下架/售罄后重新上架且当前无生效活动”的链接；若最终版计划没有同货号目标价但商品成本存在，则按 Top5 利润率规则推导，不再把仓储费缺失误报成商品成本缺失。
-- 基础版本本地与云端 `npm test` 均为 `57/57`；本次负责人经验同步补丁将本地确定性套件扩展到 `63/63`，BI Ops release gate 全部通过。补丁仍需在本次提交部署后完成云端同版测试、Portal 健康检查、GitHub distribution 激活回读和飞书问数 `disabled + inactive` 复核，线上证据以发布后的追加记录为准。
+- 最终补丁在本机与云端 `/opt/shein-bi/app` 的 `npm test` 均为 `63/63`；本机 BI Ops release gate 为 `151` 项全通过，`staleConfirm=true`、`deploymentBoundary=true`。Portal 重启后 `active + enabled`，本机 HTTP 健康检查为 `200`；`shein-bi-lark-sales-qa.service` 保持 `disabled + inactive`。
+- 负责人本机补传 13 条增量（4 active、9 candidate）后，服务端为 105 个版本、21 条 active、82 条 candidate。GitHub `owner-knowledge` commit `e00ffc62edb3ca501993954f7c0abba53bca0966` 已由 workflow run `29201837075` 校验并激活；最终 `ready=true / current=true / source=github / pending=false`，active 与 distribution fingerprint 一致。
+- Windows 任务已按新参数重装并实测为 `Running / MultipleInstances=IgnoreNew / debounce=15s / reconcile=3600s`；后续 session 文件变化产生 `reason=event` 的同步日志，而不是每 60 秒空转。
+- 合伙人包 `outputs/releases/shein-bi-ops-cli-2026.07.12.1.zip` 已完成临时解压、安装、版本检查、生产 `knowledge-status` 和 `me` 端到端验收；SHA-256 为 `60976f27670c54faac579ec0e7aaa960bc93dc2b7e20d71409bd0403ad40d353`，安装目录与规则缓存扫描未发现 session cookie。
+- 云端精确覆盖前备份为 `/srv/shein-bi/runtime/backups/owner-knowledge-20260712T171059Z-pre-3bae82c6`；unchanged publish 幂等补丁备份为 `/srv/shein-bi/runtime/backups/owner-idempotency-20260712T172004Z-pre-b8840cac`。部署未 reset 或暂存生产主工作树的其他 168 项既有改动。
