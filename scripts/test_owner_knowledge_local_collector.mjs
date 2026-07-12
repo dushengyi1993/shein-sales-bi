@@ -26,11 +26,11 @@ try {
 
   const sessionFile = path.join(sessionsDir, 'rollout-test.jsonl');
   const rows = [
-    {type: 'turn_context', payload: {cwd: projectRoot}},
-    {type: 'event_msg', payload: {type: 'user_message', message: '以后同事的操作不能反向覆盖我的负责人规则。'}},
-    {type: 'event_msg', payload: {type: 'agent_message', phase: 'final_answer', message: '本次失败的根因是字段校验缺失，后续应补测试。'}},
-    {type: 'turn_context', payload: {cwd: path.join(temp, 'OtherProject')}},
-    {type: 'event_msg', payload: {type: 'user_message', message: '以后这个其他项目也默认同步。'}},
+    {type: 'turn_context', timestamp: '2026-07-12T00:00:00.000Z', payload: {cwd: projectRoot}},
+    {type: 'event_msg', timestamp: '2026-07-12T00:01:00.000Z', payload: {type: 'user_message', message: '以后同事的操作不能反向覆盖我的负责人规则。'}},
+    {type: 'event_msg', timestamp: '2026-07-12T00:02:00.000Z', payload: {type: 'agent_message', phase: 'final_answer', message: '本次失败的根因是字段校验缺失，后续应补测试。'}},
+    {type: 'turn_context', timestamp: '2026-07-12T00:03:00.000Z', payload: {cwd: path.join(temp, 'OtherProject')}},
+    {type: 'event_msg', timestamp: '2026-07-12T00:04:00.000Z', payload: {type: 'user_message', message: '以后这个其他项目也默认同步。'}},
   ];
   await fs.writeFile(sessionFile, rows.map(row => JSON.stringify(row)).join('\n') + '\n');
 
@@ -46,13 +46,24 @@ try {
   assert.equal(second.events.length, 0, 'unchanged memory and session offsets are idempotent');
 
   await fs.appendFile(sessionFile, [
-    JSON.stringify({type: 'turn_context', payload: {cwd: projectRoot}}),
-    JSON.stringify({type: 'event_msg', payload: {type: 'user_message', message: '以后商品发布必须保留审计和回读。'}}),
+    JSON.stringify({type: 'turn_context', timestamp: '2026-07-13T00:00:00.000Z', payload: {cwd: projectRoot}}),
+    JSON.stringify({type: 'event_msg', timestamp: '2026-07-13T00:01:00.000Z', payload: {type: 'user_message', message: '以后商品发布必须保留审计和回读。'}}),
   ].join('\n') + '\n');
   const third = await collectOwnerKnowledgeEvents({codexHome, projectRoot, state: second.nextState});
   assert.equal(third.events.length, 1);
   assert.match(third.events[0].text, /审计和回读/);
   assert.equal(third.events[0].activation, 'active');
+  assert.equal(third.events[0].sourceAt, '2026-07-13T00:01:00.000Z');
+
+  await fs.appendFile(sessionFile, [
+    JSON.stringify({type: 'turn_context', timestamp: '2020-01-01T00:00:00.000Z', payload: {cwd: projectRoot}}),
+    JSON.stringify({type: 'event_msg', timestamp: '2020-01-01T00:01:00.000Z', payload: {type: 'user_message', message: '以后商品发布按旧规则只保留审计。'}}),
+  ].join('\n') + '\n');
+  const futureMtime = new Date('2099-01-01T00:00:00.000Z');
+  await fs.utimes(sessionFile, futureMtime, futureMtime);
+  const fourth = await collectOwnerKnowledgeEvents({codexHome, projectRoot, state: third.nextState});
+  assert.equal(fourth.events.length, 1);
+  assert.equal(fourth.events[0].sourceAt, '2020-01-01T00:01:00.000Z', 'session event time is used instead of mutable file mtime');
 
   const redactedAuthorization = redactOwnerKnowledgeSensitiveText('Authorization=Bearer abcdefghijklmnop');
   assert.equal(redactedAuthorization.includes('abcdefghijklmnop'), false);

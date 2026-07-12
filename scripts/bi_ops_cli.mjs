@@ -12,6 +12,11 @@ import path from 'node:path';
 import os from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import {
+  BI_OPS_CLI_VERSION,
+  DEFAULT_PARTNER_KNOWLEDGE_CACHE_DIR,
+  ensurePartnerKnowledgeCurrent,
+} from '../lib/partner_knowledge_cache.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_BASE_URL = process.env.SHEIN_BI_BASE_URL || 'https://sa.dushengyi.cc';
@@ -87,6 +92,7 @@ function parseArgs(argv) {
     bodyJson: '',
     bodyFile: '',
     performanceDate: '',
+    knowledgeCacheDir: process.env.SHEIN_BI_KNOWLEDGE_CACHE_DIR || DEFAULT_PARTNER_KNOWLEDGE_CACHE_DIR,
   };
   const rest = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -153,6 +159,7 @@ function parseArgs(argv) {
     else if (a === '--body-json') args.bodyJson = String(argv[++i] || '');
     else if (a === '--body-file') args.bodyFile = path.resolve(String(argv[++i] || ''));
     else if (a === '--performance-date' || a === '--perf-date') args.performanceDate = String(argv[++i] || '').trim();
+    else if (a === '--knowledge-cache-dir') args.knowledgeCacheDir = path.resolve(String(argv[++i] || ''));
     else if (a === '--query-json') args.queryJson = String(argv[++i] || '');
     else if (a === '--query-file') args.queryFile = path.resolve(String(argv[++i] || ''));
     else if (a === '--help' || a === '-h') {
@@ -212,6 +219,8 @@ function help() {
 Usage:
   node scripts/bi_ops_cli.mjs login --username <账号> --password <密码>
   node scripts/bi_ops_cli.mjs doctor
+  node scripts/bi_ops_cli.mjs knowledge-status
+  node scripts/bi_ops_cli.mjs version
   node scripts/bi_ops_cli.mjs doctor --operation copy_product_draft --target-stores HL
   node scripts/bi_ops_cli.mjs doctor --operation activate_link --stores DL --require-real-submit
   node scripts/bi_ops_cli.mjs doctor --operation retire_link --stores DL --require-real-submit
@@ -254,6 +263,7 @@ Codex App example:
 Options:
   --base-url       默认 ${DEFAULT_BASE_URL}
   --session-file   默认 ${DEFAULT_SESSION_FILE}
+  --knowledge-cache-dir  默认 ${DEFAULT_PARTNER_KNOWLEDGE_CACHE_DIR}
   --source-stores  跨店复制时只读来源店铺
   --target-stores  跨店复制时真实写入目标店铺；不填则沿用 --stores
   --chat-session   chat/tasks 用；继续指定的自动运营会话
@@ -289,6 +299,7 @@ Safety:
   - openapi-catalog-plan 只读取本地官方目录/schema，输出全量接口归位矩阵，不联网、不启用 WebHook receiver。
   - 所有任务创建/预检/执行/审计都走云端账号权限和审计。
   - ask/chat 通过同一 BI 账号、会话归属、模型限流和审计边界；profile 只影响理解深度，不改变写权限。
+  - 每个云端业务命令开始前会用 ETag 检查负责人规则 manifest；有更新才原子下载，普通账号没有反向发布权限。
   - execute 仍需服务端确认任务已预检通过，并且确认文本精确匹配。
   - resolve 只用于已提交待回读/需人工处理任务的人工核销；服务端只允许全店管理账号执行。`;
 }
@@ -386,6 +397,37 @@ async function request(args, pathname, {method = 'GET', body, auth = true} = {})
     throw err;
   }
   return {json, res};
+}
+
+const KNOWLEDGE_CHECK_COMMANDS = new Set([
+  'doctor', 'me', 'capabilities', 'ask', 'chats', 'jobs', 'job', 'wait-job', 'wait_job',
+  'chat', 'tasks', 'create', 'preflight', 'execute', 'resolve', 'audit',
+  'upload-pic', 'upload_pic', 'transform-pic', 'transform_pic',
+]);
+
+async function refreshPartnerKnowledge(args, {strict = false} = {}) {
+  const session = await readSession(args.sessionFile);
+  if (!session.cookie) {
+    if (strict) throw new Error('尚未登录 BI，无法检查负责人规则版本');
+    return {ok: false, skipped: true, warning: '尚未登录 BI'};
+  }
+  const result = await ensurePartnerKnowledgeCurrent({
+    baseUrl: args.baseUrl,
+    cookie: session.cookie,
+    cacheDir: args.knowledgeCacheDir,
+    cliVersion: BI_OPS_CLI_VERSION,
+    strict,
+  });
+  if (result.updated) {
+    process.stderr.write(`负责人规则已更新并校验：${String(result.manifest?.sourceCommit || result.manifest?.fingerprint || '').slice(0, 12)}\n`);
+  }
+  if (result.warning) {
+    process.stderr.write(`负责人规则检查提示：${result.warning}\n`);
+  }
+  if (result.cliUpdateRecommended) {
+    process.stderr.write(`CLI 有推荐更新：当前 ${BI_OPS_CLI_VERSION}，推荐 ${result.recommendedCliVersion}\n`);
+  }
+  return result;
 }
 
 function print(data, pretty = false) {
@@ -876,6 +918,10 @@ async function waitForLinkOpsJob(args, jobId) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.command === 'version') {
+    print({ok: true, version: BI_OPS_CLI_VERSION});
+    return;
+  }
   if (args.command === 'help') {
     console.log(help());
     return;
@@ -899,7 +945,12 @@ async function main() {
       savedAt: new Date().toISOString(),
       note: 'Session cookie only; plaintext password is never stored.',
     });
-    print({ok: true, user: json.user, sessionFile: args.sessionFile});
+    const knowledge = await refreshPartnerKnowledge(args).catch(error => ({ok: false, warning: String(error?.message || error)}));
+    print({ok: true, user: json.user, sessionFile: args.sessionFile, knowledge: {
+      updated: Boolean(knowledge?.updated),
+      current: Boolean(knowledge?.ok && knowledge?.current !== false),
+      sourceCommit: String(knowledge?.manifest?.sourceCommit || ''),
+    }});
     return;
   }
   if (args.command === 'logout') {
@@ -907,6 +958,14 @@ async function main() {
     await fs.rm(args.sessionFile, {force: true}).catch(() => {});
     print({ok: true, sessionFile: args.sessionFile, loggedOut: true});
     return;
+  }
+  if (args.command === 'knowledge-status' || args.command === 'knowledge_status') {
+    const knowledge = await refreshPartnerKnowledge(args, {strict: true});
+    print({ok: true, version: BI_OPS_CLI_VERSION, knowledge});
+    return;
+  }
+  if (KNOWLEDGE_CHECK_COMMANDS.has(args.command)) {
+    await refreshPartnerKnowledge(args, {strict: args.command === 'execute'});
   }
   if (args.command === 'doctor') {
     const report = await runDoctor(args);

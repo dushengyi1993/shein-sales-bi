@@ -13,6 +13,13 @@ EnvironmentFile=/srv/shein-bi/secrets/portal-warehouse.env
 Environment=NODE_ENV=production
 Environment=CODEX_HOME=/home/sheinops/.codex
 Environment=SHEIN_OWNER_KNOWLEDGE_PRINCIPAL=dushengyi
+Environment=SHEIN_OWNER_KNOWLEDGE_GIT_REPO_DIR=/srv/shein-bi/owner-knowledge-repo
+Environment=SHEIN_OWNER_KNOWLEDGE_GIT_BRANCH=owner-knowledge
+Environment=SHEIN_OWNER_KNOWLEDGE_GIT_REMOTE=origin
+Environment=SHEIN_OWNER_KNOWLEDGE_GIT_LOCK_FILE=/srv/shein-bi/runtime/owner-knowledge-git-publish.lock
+Environment=SHEIN_OWNER_KNOWLEDGE_RECONCILE_MS=3600000
+Environment=SHEIN_BI_OPS_CLI_MIN_VERSION=2026.07.12.1
+Environment=SHEIN_BI_OPS_CLI_RECOMMENDED_VERSION=2026.07.12.1
 Environment=SHEIN_LINK_OPS_STORE=postgres
 Environment=SHEIN_WAREHOUSE_PG_HOST=127.0.0.1
 Environment=SHEIN_WAREHOUSE_PG_PORT=54329

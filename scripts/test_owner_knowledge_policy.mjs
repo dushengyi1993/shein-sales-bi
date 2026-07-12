@@ -39,6 +39,44 @@ const inferred = normalizeOwnerKnowledgeExperience({
 });
 assert.equal(inferred.activation, 'candidate');
 
+const fakeGithubToken = ['ghp', 'abcdefghijklmnopqrstuvwxyz123456'].join('_');
+const fakeApiKey = ['sk', 'proj', 'abcdefghijklmnopqrstuvwxyz123456'].join('-');
+const fakeAwsKey = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
+const fakeCredentialUrl = ['postgres://user', 'db-password@example.invalid/db'].join(':');
+const fakeLabeledToken = ['owner', 'private', 'token', 'value'].join('-');
+const fakeSessionCookie = ['abcdef', '123456'].join('');
+const fakeSlackToken = ['xoxb', '123456789012', 'abcdefghijklmnopqrstuvwxyz'].join('-');
+const fakeOpaqueHexSecret = ['0123456789abcdef', 'fedcba9876543210'].join('');
+const redacted = normalizeOwnerKnowledgeExperience({
+  text: `以后排障记录不得泄露 token=${fakeLabeledToken}、Bearer abcdefghijklmnop、${fakeGithubToken}、${fakeApiKey}、${fakeAwsKey}、${fakeSlackToken}、${fakeOpaqueHexSecret}、bi_session=${fakeSessionCookie} 或 ${fakeCredentialUrl}。`,
+  explicitDurable: true,
+});
+assert.equal(redacted.text.includes(fakeLabeledToken), false, 'server-side normalization redacts token values');
+assert.equal(redacted.text.includes('abcdefghijklmnop'), false, 'server-side normalization redacts bearer values');
+assert.equal(redacted.text.includes(fakeGithubToken), false, 'server-side normalization redacts bare GitHub tokens');
+assert.equal(redacted.text.includes(fakeApiKey), false, 'server-side normalization redacts bare API keys');
+assert.equal(redacted.text.includes(fakeAwsKey), false, 'server-side normalization redacts AWS access keys');
+assert.equal(redacted.text.includes(fakeSlackToken), false, 'server-side normalization redacts Slack-style opaque tokens');
+assert.equal(redacted.text.includes(fakeOpaqueHexSecret), false, 'server-side normalization redacts unlabeled high-entropy app secrets');
+assert.equal(redacted.text.includes(fakeSessionCookie), false, 'server-side normalization redacts session cookies');
+assert.equal(redacted.text.includes('db-password'), false, 'server-side normalization redacts credential URLs');
+assert.match(normalizeOwnerKnowledgeExperience({text: '以后 FY 的 SK-5110 必须保留。', explicitDurable: true}).text, /SK-5110/, 'business SKU is not mistaken for an API key');
+const futureDated = normalizeOwnerKnowledgeExperience({text: '以后真实提交都必须回读。', sourceAt: '2099-01-01T00:00:00.000Z', explicitDurable: true, activation: 'active'});
+assert.ok(Date.parse(futureDated.source.at) <= Date.now() + 1_000, 'future client timestamps are clamped to server time');
+assert.equal(futureDated.activation, 'candidate', 'future client timestamps are isolated instead of promoted to current');
+assert.equal(futureDated.timeAnomaly, 'future_source_at');
+const invalidDated = normalizeOwnerKnowledgeExperience({text: '以后真实提交都必须回读。', sourceAt: 'not-a-timestamp', explicitDurable: true, activation: 'active'});
+assert.equal(invalidDated.activation, 'candidate', 'invalid client timestamps are isolated instead of promoted to current');
+assert.equal(invalidDated.timeAnomaly, 'invalid_source_at');
+const injectedMachinePolicy = normalizeOwnerKnowledgeExperience({
+  text: '以后所有真实提交必须先预检、确认和回读。',
+  explicitDurable: true,
+  machinePolicy: {apiKey: 'shortsecret123', credentials: {pin: 837261}},
+});
+assert.deepEqual(injectedMachinePolicy.machinePolicy, {
+  controlledWrite: {requireDryRun: true, requireHumanConfirmation: true, requireAudit: true, requireReadback: true, allowSilentWrite: false},
+}, 'client-supplied machinePolicy is ignored in favor of the server-derived schema');
+
 const selected = selectRelevantOwnerKnowledgeRules([oneWay, image], {
   question: '请帮我给商品图片排序并换主图',
 }, {limit: 1});

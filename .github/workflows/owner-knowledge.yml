@@ -1,0 +1,69 @@
+name: Owner knowledge distribution
+
+on:
+  push:
+    branches: [owner-knowledge]
+    paths:
+      - 'owner-knowledge/**'
+      - 'lib/owner_knowledge_distribution.mjs'
+      - 'lib/owner_knowledge_policy.mjs'
+      - 'scripts/validate_owner_knowledge_distribution.mjs'
+      - '.github/workflows/owner-knowledge.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate-distribution:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - id: validate
+        name: Validate immutable owner knowledge bundle
+        run: node scripts/validate_owner_knowledge_distribution.mjs
+      - name: Activate validated distribution in BI
+        env:
+          ACTIVATION_URL: https://sa.dushengyi.cc/api/owner-knowledge/distribution/activate
+          ACTIVATION_TOKEN: ${{ secrets.OWNER_KNOWLEDGE_ACTIVATION_TOKEN }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          FINGERPRINT: ${{ steps.validate.outputs.fingerprint }}
+          BUNDLE_SHA256: ${{ steps.validate.outputs.bundle_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ACTIVATION_TOKEN"
+          test -n "$SOURCE_COMMIT"
+          test -n "$FINGERPRINT"
+          test -n "$BUNDLE_SHA256"
+          response_file="$(mktemp)"
+          trap 'rm -f "$response_file"' EXIT
+          payload="$(node -e 'process.stdout.write(JSON.stringify({sourceCommit: process.env.SOURCE_COMMIT, fingerprint: process.env.FINGERPRINT, bundleSha256: process.env.BUNDLE_SHA256}))')"
+          for attempt in $(seq 1 12); do
+            status="$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
+              --output "$response_file" --write-out '%{http_code}' \
+              --request POST "$ACTIVATION_URL" \
+              --header "Authorization: Bearer $ACTIVATION_TOKEN" \
+              --header 'Content-Type: application/json' \
+              --data "$payload" || true)"
+            if [ "$status" = '200' ]; then
+              node -e "const fs=require('fs'); const data=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); if (data.ok !== true) process.exit(1)" "$response_file"
+              exit 0
+            fi
+            case "$status" in
+              000|404|5??)
+                sleep 2
+                ;;
+              *)
+                cat "$response_file" >&2
+                echo "Activation failed with HTTP $status" >&2
+                exit 1
+                ;;
+            esac
+          done
+          cat "$response_file" >&2
+          echo 'Activation did not become ready within the retry window' >&2
+          exit 1

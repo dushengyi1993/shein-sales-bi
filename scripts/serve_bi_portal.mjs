@@ -57,6 +57,8 @@ import {createConfiguredLinkOpsStoreGateway} from '../lib/link_ops_store_gateway
 import {createLinkOpsJobWorker} from '../lib/link_ops_job_worker.mjs';
 import {linkOpsPayloadHash} from '../lib/link_ops_repository.mjs';
 import {createOwnerKnowledgeService} from '../lib/owner_knowledge_service.mjs';
+import {createOwnerKnowledgeGitPublisher} from '../lib/owner_knowledge_distribution.mjs';
+import {BI_OPS_CLI_VERSION} from '../lib/partner_knowledge_cache.mjs';
 import {
   actorCanPublishOwnerKnowledge,
   isOwnerKnowledgeCandidateText,
@@ -2309,6 +2311,40 @@ function requestBearerToken(req) {
   return match ? match[1].trim() : '';
 }
 
+function ownerKnowledgeActivationActor(req) {
+  const expected = String(process.env.SHEIN_OWNER_KNOWLEDGE_GITHUB_ACTIVATION_TOKEN || '');
+  const supplied = requestBearerToken(req);
+  if (!expected || !supplied) return null;
+  const left = Buffer.from(expected, 'utf8');
+  const right = Buffer.from(supplied, 'utf8');
+  if (left.length !== right.length || !crypto.timingSafeEqual(left, right)) return null;
+  return {
+    username: 'github-owner-knowledge-ci',
+    displayName: 'GitHub owner knowledge CI',
+    role: 'knowledge_activation',
+    readStores: [],
+    writeStores: [],
+    ownerKey: '',
+    source: 'github-actions',
+  };
+}
+
+function createAsyncExclusiveRunner() {
+  let tail = Promise.resolve();
+  return async work => {
+    let release;
+    const ticket = new Promise(resolve => { release = resolve; });
+    const previous = tail;
+    tail = ticket;
+    await previous.catch(() => {});
+    try {
+      return await work();
+    } finally {
+      release();
+    }
+  };
+}
+
 function ownerKnowledgeContextForTask(task, message = '') {
   const targets = normalizeLinkOpsTargetSet(task?.targets || {});
   return {
@@ -2360,14 +2396,18 @@ async function captureOwnerKnowledgeFromBiMessage({actor, userMessage, session, 
   if (!isOwnerKnowledgeCandidateText(userMessage)) return {captured: false, reason: 'not_reusable_experience'};
   const latestUser = [...asArray(session?.messages)].reverse().find(message => message?.role === 'user');
   const durable = isOwnerKnowledgeDurableText(userMessage);
-  const result = await service.ingest([{
-    text: String(userMessage || '').slice(0, 4_000),
-    sourceKind: 'owner_bi_message',
-    sourceId: `${session?.id || 'session'}:${latestUser?.id || 'message'}`,
-    sourceAt: latestUser?.at || new Date().toISOString(),
-    explicitDurable: durable,
-    activation: durable ? 'active' : 'candidate',
-  }], {actor, actorUser: actorUser(actor, req)});
+  const withConsistencyLock = args?.withOwnerKnowledgeConsistencyLock || (work => work());
+  const result = await withConsistencyLock(() => {
+    args?.bumpOwnerKnowledgeGeneration?.();
+    return service.ingest([{
+        text: String(userMessage || '').slice(0, 4_000),
+        sourceKind: 'owner_bi_message',
+        sourceId: `${session?.id || 'session'}:${latestUser?.id || 'message'}`,
+        sourceAt: latestUser?.at || new Date().toISOString(),
+        explicitDurable: durable,
+        activation: durable ? 'active' : 'candidate',
+      }], {actor, actorUser: actorUser(actor, req)});
+  });
   return {captured: true, durable, result};
 }
 
@@ -5679,6 +5719,21 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
   const now = new Date().toISOString();
   const rawRequestedMode = String(body.mode || body.executionMode || (body.execute === true ? 'execute' : 'dry-run') || 'dry-run').toLowerCase();
   const requestedMode = rawRequestedMode === 'execute' ? 'execute' : 'dry-run';
+  let ownerKnowledgeDistribution = null;
+  let ownerKnowledgeDistributionError = '';
+  const ownerKnowledgeGenerationAtStart = Number(args?.getOwnerKnowledgeGeneration?.() || 0);
+  if (requestedMode === 'execute') {
+    try {
+      ownerKnowledgeDistribution = await args.ownerKnowledgeService?.distributionManifest();
+    } catch (error) {
+      ownerKnowledgeDistributionError = String(error?.message || error);
+    }
+    const testMarkerFile = String(process.env.SHEIN_OWNER_KNOWLEDGE_TEST_PRE_EXECUTE_MARKER_FILE || '').trim();
+    if (testMarkerFile) {
+      await fs.mkdir(path.dirname(testMarkerFile), {recursive: true});
+      await fs.writeFile(testMarkerFile, `${JSON.stringify({at: new Date().toISOString(), fingerprint: ownerKnowledgeDistribution?.fingerprint || ''})}\n`, 'utf8');
+    }
+  }
   const priorKnowledgeFingerprint = String(task?.ownerKnowledgePolicy?.fingerprint || '');
   const knowledgeBinding = await bindOwnerKnowledgeToTask(task, args, task?.command || '');
   if (knowledgeBinding.changed) task = knowledgeBinding.task;
@@ -5731,6 +5786,9 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     preflight.blockers.push('负责人长期规则在上次系统检查后发生更新；必须按新规则重新系统检查，不能沿用旧预演直接提交。');
   }
   if (requestedMode === 'execute') {
+    if (ownerKnowledgeDistributionError || !ownerKnowledgeDistribution?.ready || !ownerKnowledgeDistribution?.current) {
+      preflight.blockers.push('负责人规则尚未完成 GitHub 校验并同步到当前版本；真实提交暂时关闭，请稍后重试。');
+    }
     const unsupportedExecuteIntents = intents
       .filter(intent => intent !== 'copy_product_draft' && intent !== 'manual_review' && !LINK_MAINTENANCE_INTENTS.has(intent));
     if (!hasProductPublishIntent && !hasMaintenanceIntent) {
@@ -5814,26 +5872,94 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     realSubmitWhitelistChecks,
     parentIssuedAt: now,
   };
-  const openApiProductExecutors = await runOpenApiProductExecutors(runnableTask, args, {
-    ...body,
-    actorForWriteGate: actor,
-    mode: executeAllowed && hasProductPublishIntent ? 'execute' : 'dry-run',
-    executionMode: executeAllowed && hasProductPublishIntent ? 'execute' : 'dry-run',
-    execute: executeAllowed && hasProductPublishIntent,
-    confirm: executeAllowed && hasProductPublishIntent ? confirmText : '',
-    confirmText: executeAllowed && hasProductPublishIntent ? confirmText : '',
-    executionContext,
-  });
-  const openApiMaintenanceExecutors = await runOpenApiMaintenanceExecutors(runnableTask, args, {
-    ...body,
-    actorForWriteGate: actor,
-    mode: executeAllowed && hasMaintenanceIntent ? 'execute' : 'dry-run',
-    executionMode: executeAllowed && hasMaintenanceIntent ? 'execute' : 'dry-run',
-    execute: executeAllowed && hasMaintenanceIntent,
-    confirm: executeAllowed && hasMaintenanceIntent ? confirmText : '',
-    confirmText: executeAllowed && hasMaintenanceIntent ? confirmText : '',
-    executionContext,
-  });
+  const runExecutors = async allowExecute => {
+    const product = await runOpenApiProductExecutors(runnableTask, args, {
+      ...body,
+      actorForWriteGate: actor,
+      mode: allowExecute && hasProductPublishIntent ? 'execute' : 'dry-run',
+      executionMode: allowExecute && hasProductPublishIntent ? 'execute' : 'dry-run',
+      execute: allowExecute && hasProductPublishIntent,
+      confirm: allowExecute && hasProductPublishIntent ? confirmText : '',
+      confirmText: allowExecute && hasProductPublishIntent ? confirmText : '',
+      executionContext,
+    });
+    const maintenance = await runOpenApiMaintenanceExecutors(runnableTask, args, {
+      ...body,
+      actorForWriteGate: actor,
+      mode: allowExecute && hasMaintenanceIntent ? 'execute' : 'dry-run',
+      executionMode: allowExecute && hasMaintenanceIntent ? 'execute' : 'dry-run',
+      execute: allowExecute && hasMaintenanceIntent,
+      confirm: allowExecute && hasMaintenanceIntent ? confirmText : '',
+      confirmText: allowExecute && hasMaintenanceIntent ? confirmText : '',
+      executionContext,
+    });
+    return {product, maintenance};
+  };
+  const verifyDistributionUnchanged = async () => {
+    let latest = null;
+    try {
+      latest = await args.ownerKnowledgeService?.distributionManifest();
+    } catch (error) {
+      return {ok: false, error: String(error?.message || error)};
+    }
+    const expected = ownerKnowledgeDistribution;
+    const requiredCurrent = Boolean(expected?.ready && expected?.current && latest?.ready && latest?.current);
+    const sameSnapshot = requiredCurrent
+      && String(latest.fingerprint || '') === String(expected.fingerprint || '')
+      && String(latest.activeFingerprint || '') === String(expected.activeFingerprint || '')
+      && String(latest.sourceCommit || '') === String(expected.sourceCommit || '')
+      && Number(args?.getOwnerKnowledgeGeneration?.() || 0) === ownerKnowledgeGenerationAtStart
+      && (!Number(expected.distributionRevision || 0)
+        || Number(latest.distributionRevision || 0) === Number(expected.distributionRevision || 0));
+    const testMarkerFile = String(process.env.SHEIN_OWNER_KNOWLEDGE_TEST_PRE_EXECUTE_MARKER_FILE || '').trim();
+    if (testMarkerFile) {
+      await fs.writeFile(`${testMarkerFile}.final`, `${JSON.stringify({
+        ok: sameSnapshot,
+        expectedFingerprint: expected?.fingerprint || '',
+        latestFingerprint: latest?.fingerprint || '',
+        expectedSourceCommit: expected?.sourceCommit || '',
+        latestSourceCommit: latest?.sourceCommit || '',
+        expectedGeneration: ownerKnowledgeGenerationAtStart,
+        latestGeneration: Number(args?.getOwnerKnowledgeGeneration?.() || 0),
+      })}\n`, 'utf8');
+    }
+    return sameSnapshot ? {ok: true, manifest: latest} : {ok: false, manifest: latest};
+  };
+  let openApiProductExecutors;
+  let openApiMaintenanceExecutors;
+  if (requestedMode === 'execute') {
+    const testMarkerFile = String(process.env.SHEIN_OWNER_KNOWLEDGE_TEST_PRE_EXECUTE_MARKER_FILE || '').trim();
+    if (testMarkerFile) await fs.writeFile(`${testMarkerFile}.ready`, `${new Date().toISOString()}\n`, 'utf8');
+    const testGenerationBumpMs = Math.max(0, Math.min(4_000, Number(process.env.SHEIN_OWNER_KNOWLEDGE_TEST_BUMP_DURING_EXECUTE_MS || 0)));
+    if (testGenerationBumpMs) {
+      const timer = setTimeout(() => args?.bumpOwnerKnowledgeGeneration?.(), testGenerationBumpMs);
+      timer.unref?.();
+    }
+    const testDelayMs = Math.max(0, Math.min(5_000, Number(process.env.SHEIN_OWNER_KNOWLEDGE_TEST_PRE_EXECUTE_DELAY_MS || 0)));
+    if (testDelayMs) await new Promise(resolve => setTimeout(resolve, testDelayMs));
+    const withConsistencyLock = args?.withOwnerKnowledgeConsistencyLock || (work => work());
+    const guarded = await withConsistencyLock(async () => {
+      const guard = await verifyDistributionUnchanged();
+      if (!guard.ok || !executeAllowed) return {guard, executions: null};
+      return {guard, executions: await runExecutors(true)};
+    });
+    if (!guarded.guard.ok) {
+      preflight.blockers.push('负责人规则在执行准备期间发生变化或尚未完成 GitHub 校验；本次未向 SHEIN 发出真实写请求，请重新系统检查和确认。');
+      executeAllowed = false;
+    }
+    if (guarded.executions) {
+      openApiProductExecutors = guarded.executions.product;
+      openApiMaintenanceExecutors = guarded.executions.maintenance;
+    } else {
+      const dryRun = await runExecutors(false);
+      openApiProductExecutors = dryRun.product;
+      openApiMaintenanceExecutors = dryRun.maintenance;
+    }
+  } else {
+    const dryRun = await runExecutors(false);
+    openApiProductExecutors = dryRun.product;
+    openApiMaintenanceExecutors = dryRun.maintenance;
+  }
   const linkMaintenancePrechecks = openApiMaintenanceExecutors;
   const executorRuns = [...openApiProductExecutors, ...openApiMaintenanceExecutors];
   const executorResults = executorRuns.map(x => x.result).filter(Boolean);
@@ -7321,16 +7447,70 @@ async function main() {
   if (!initialLinkOpsStorageHealth?.ok) {
     throw new Error('Link Ops storage health check failed');
   }
+  const ownerKnowledgeGitRepoDir = String(process.env.SHEIN_OWNER_KNOWLEDGE_GIT_REPO_DIR || '').trim();
+  const ownerKnowledgeDistributionPublisher = ownerKnowledgeGitRepoDir
+    ? createOwnerKnowledgeGitPublisher({
+        repoDir: ownerKnowledgeGitRepoDir,
+        branch: process.env.SHEIN_OWNER_KNOWLEDGE_GIT_BRANCH || 'owner-knowledge',
+        remote: process.env.SHEIN_OWNER_KNOWLEDGE_GIT_REMOTE || 'origin',
+        lockFile: process.env.SHEIN_OWNER_KNOWLEDGE_GIT_LOCK_FILE || '',
+      })
+    : null;
   const ownerKnowledgeService = createOwnerKnowledgeService({
     repository: linkOpsStoreGateway.repository,
     authorityId: process.env.SHEIN_OWNER_KNOWLEDGE_PRINCIPAL || 'dushengyi',
+    distributionPublisher: ownerKnowledgeDistributionPublisher,
   });
+  const withOwnerKnowledgeConsistencyLock = createAsyncExclusiveRunner();
+  let ownerKnowledgeGeneration = 0;
   Object.defineProperty(args, 'ownerKnowledgeService', {
     value: ownerKnowledgeService,
     enumerable: false,
     configurable: false,
     writable: false,
   });
+  Object.defineProperty(args, 'withOwnerKnowledgeConsistencyLock', {
+    value: withOwnerKnowledgeConsistencyLock,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+  Object.defineProperty(args, 'getOwnerKnowledgeGeneration', {
+    value: () => ownerKnowledgeGeneration,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+  Object.defineProperty(args, 'bumpOwnerKnowledgeGeneration', {
+    value: () => { ownerKnowledgeGeneration += 1; return ownerKnowledgeGeneration; },
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+  const initialOwnerKnowledgeDistribution = await ownerKnowledgeService.ensureDistribution({actorUser: 'portal-startup'});
+  Object.defineProperty(args, 'initialOwnerKnowledgeDistribution', {
+    value: initialOwnerKnowledgeDistribution,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+  const ownerKnowledgeReconcileMs = Math.max(
+    5 * 60_000,
+    Number(process.env.SHEIN_OWNER_KNOWLEDGE_RECONCILE_MS || 60 * 60_000)
+  );
+  const ownerKnowledgeReconcileTimer = setInterval(() => {
+    ownerKnowledgeService.ensureDistribution({actorUser: 'portal-reconcile'}).then(result => {
+      if (result?.error || result?.pending) {
+        return appendAudit(args.auditFile, {
+          at: new Date().toISOString(),
+          type: 'owner-knowledge-distribution-pending',
+          result: {source: result.source, fingerprint: result.fingerprint, activeFingerprint: result.activeFingerprint, error: result.error},
+        });
+      }
+      return null;
+    }).catch(error => console.error(`[owner-knowledge-distribution] ${String(error?.message || error)}`));
+  }, ownerKnowledgeReconcileMs);
+  ownerKnowledgeReconcileTimer.unref?.();
   const root = path.resolve(args.dir);
   const indexFile = path.join(root, 'index.html');
   if (!fssync.existsSync(indexFile)) {
@@ -7793,9 +7973,13 @@ async function main() {
       const trustedInternal = authRequired && isTrustedInternalRequest(req);
       const authenticatedActor = authRequired ? authenticateRequest(req, authUsers, sessionSecret) : null;
       const knowledgeBearer = url.pathname.startsWith('/api/owner-knowledge/') ? requestBearerToken(req) : '';
-      const knowledgeDeviceActor = knowledgeBearer ? await ownerKnowledgeService.authenticateBearer(knowledgeBearer) : null;
-      const actor = authRequired ? (authenticatedActor || knowledgeDeviceActor || (trustedInternal ? internalActor() : null)) : null;
-      if (!mutationOriginAllowed(req, {trustedInternal})) {
+      const activationActor = url.pathname === '/api/owner-knowledge/distribution/activate' ? ownerKnowledgeActivationActor(req) : null;
+      const knowledgeDeviceActor = knowledgeBearer && !activationActor ? await ownerKnowledgeService.authenticateBearer(knowledgeBearer) : null;
+      const actor = authRequired ? (authenticatedActor || activationActor || knowledgeDeviceActor || (trustedInternal ? internalActor() : null)) : null;
+      const ownerKnowledgeActivationRequest = url.pathname === '/api/owner-knowledge/distribution/activate';
+      // This endpoint is bearer-only and is called by GitHub Actions, which has no browser Origin header.
+      // Every cookie/session-backed mutation continues through the normal origin guard.
+      if (!ownerKnowledgeActivationRequest && !mutationOriginAllowed(req, {trustedInternal})) {
         await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'mutation-origin-denied', actor, ...requestMeta(req), path: url.pathname, method: req.method});
         return sendJson(res, 403, {ok: false, error: 'Cross-origin state-changing request denied'});
       }
@@ -7894,6 +8078,67 @@ async function main() {
       if (url.pathname === '/api/auth/me') {
         return sendJson(res, actor ? 200 : 401, {ok: Boolean(actor), user: publicActor(actor)});
       }
+      if (url.pathname === '/api/owner-knowledge/distribution/activate') {
+        if (req.method !== 'POST') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        if (actor?.role !== 'knowledge_activation') return sendJson(res, 403, {ok: false, error: 'GitHub distribution activation denied'});
+        const body = await readBodyJson(req, 64 * 1024).catch(error => ({_error: error?.message || String(error)}));
+        if (body._error) return sendJson(res, 400, {ok: false, error: body._error});
+        try {
+          const distribution = await args.withOwnerKnowledgeConsistencyLock(() => ownerKnowledgeService.activatePendingDistribution({
+              sourceCommit: body.sourceCommit,
+              fingerprint: body.fingerprint,
+              bundleSha256: body.bundleSha256,
+              actorUser: 'github-actions',
+            }));
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'owner-knowledge-distribution-activated',
+            actor,
+            ...requestMeta(req),
+            distribution: {sourceCommit: distribution.sourceCommit, fingerprint: distribution.fingerprint, ruleCount: distribution.ruleCount},
+          });
+          return sendJson(res, 200, {ok: true, data: distribution}, {'Cache-Control': 'no-store'});
+        } catch (error) {
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'owner-knowledge-distribution-activation-denied',
+            actor,
+            ...requestMeta(req),
+            error: String(error?.message || error).slice(0, 500),
+            code: String(error?.code || ''),
+          });
+          return sendJson(res, Number(error?.status || 409), {ok: false, error: error?.message || String(error), code: error?.code || 'OWNER_KNOWLEDGE_ACTIVATION_FAILED'});
+        }
+      }
+      if (url.pathname === '/api/owner-knowledge/manifest') {
+        if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        const manifest = await ownerKnowledgeService.distributionManifest();
+        if (!manifest.ready) return sendJson(res, 503, {ok: false, error: '负责人规则包尚未完成发布', data: manifest}, {'Cache-Control': 'no-store'});
+        const data = {
+          schemaVersion: 1,
+          authorityId: ownerKnowledgeService.authorityId,
+          ...manifest,
+          cli: {
+            minimumVersion: process.env.SHEIN_BI_OPS_CLI_MIN_VERSION || BI_OPS_CLI_VERSION,
+            recommendedVersion: process.env.SHEIN_BI_OPS_CLI_RECOMMENDED_VERSION || BI_OPS_CLI_VERSION,
+          },
+        };
+        const etag = `\"okb-${crypto.createHash('sha256').update(`${data.fingerprint}|${data.activeFingerprint}|${data.sourceCommit}|${data.current}`).digest('hex').slice(0, 32)}\"`;
+        if (String(req.headers['if-none-match'] || '') === etag) {
+          writeResponseHead(res, 304, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: etag});
+          res.end();
+          return;
+        }
+        return sendJson(res, 200, {ok: true, data}, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: etag});
+      }
+      if (url.pathname === '/api/owner-knowledge/bundle') {
+        if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        const bundle = await ownerKnowledgeService.distributionBundle();
+        if (!bundle.manifest?.ready) return sendJson(res, 503, {ok: false, error: '负责人规则包尚未完成发布'}, {'Cache-Control': 'no-store'});
+        const data = {...bundle, manifest: {schemaVersion: 1, authorityId: ownerKnowledgeService.authorityId, ...bundle.manifest}};
+        const etag = `\"okb-${crypto.createHash('sha256').update(`${bundle.fingerprint}|${bundle.manifest.sourceCommit}`).digest('hex').slice(0, 32)}\"`;
+        return sendJson(res, 200, {ok: true, data}, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: etag});
+      }
       if (url.pathname === '/api/owner-knowledge/events') {
         if (req.method !== 'POST') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
         if (!actorCanPublishOwnerKnowledge(actor, ownerKnowledgeService.authorityId)) {
@@ -7904,18 +8149,31 @@ async function main() {
         if (body._error) return sendJson(res, 400, {ok: false, error: body._error});
         const experiences = Array.isArray(body.experiences) ? body.experiences : Array.isArray(body.events) ? body.events : [];
         try {
-          const result = await ownerKnowledgeService.ingest(experiences, {
-            actor,
-            actorUser: actorUser(actor, req),
-            sourceKind: knowledgeDeviceActor ? 'owner_local_sync' : 'owner_bi_manual',
-            deviceId: actor?.knowledgeDeviceId || '',
+          const result = await args.withOwnerKnowledgeConsistencyLock(async () => {
+            args.bumpOwnerKnowledgeGeneration();
+            return await ownerKnowledgeService.ingest(experiences, {
+                actor,
+                actorUser: actorUser(actor, req),
+                sourceKind: knowledgeDeviceActor ? 'owner_local_sync' : 'owner_bi_manual',
+                deviceId: actor?.knowledgeDeviceId || '',
+              });
           });
           await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'owner-knowledge-published',
             actor,
             ...requestMeta(req),
-            result: {count: result.results.length, active: result.results.filter(row => row.activation === 'active').length, candidates: result.results.filter(row => row.activation === 'candidate').length, fingerprint: result.bundle.fingerprint},
+            result: {
+              count: result.results.length,
+              active: result.results.filter(row => row.activation === 'active').length,
+              candidates: result.results.filter(row => row.activation === 'candidate').length,
+              fingerprint: result.bundle.fingerprint,
+              distribution: {
+                current: result.distribution?.current,
+                source: result.distribution?.source,
+                sourceCommit: result.distribution?.sourceCommit,
+              },
+            },
           });
           return sendJson(res, 200, result, {'Cache-Control': 'no-store'});
         } catch (error) {
@@ -7967,6 +8225,9 @@ async function main() {
           linkOpsChatFile: args.linkOpsChatFile,
           linkOpsRuntimeFile: args.linkOpsRuntimeFile,
           linkOpsStorage: await linkOpsStoreGateway.health(),
+          ownerKnowledgeDistribution: (value => {
+            return {ready: Boolean(value.ready), current: Boolean(value.current), source: String(value.source || ''), ruleCount: Number(value.ruleCount || 0)};
+          })(await ownerKnowledgeService.distributionManifest()),
           linkOpsJobs: {
             intentPlannerEnabled,
             workerEnabled: Boolean(linkOpsJobWorker),
@@ -8312,6 +8573,8 @@ async function main() {
               await writeLinkOpsChatStore(args, {...chatStore, updatedAt: new Date().toISOString(), sessions});
             }
           }
+          const knowledgeBinding = await bindOwnerKnowledgeToTask(task, args, task.command || '');
+          task = knowledgeBinding.task;
           const current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
           const next = {
             version: 1,
@@ -8331,6 +8594,7 @@ async function main() {
               stores: task.targets?.stores || [],
               productRefs: task.targets?.productRefs || [],
               commandLength: task.command.length,
+              ownerKnowledgeFingerprint: String(task.ownerKnowledgePolicy?.fingerprint || ''),
             },
           });
           return sendJson(res, 200, {
@@ -9513,6 +9777,12 @@ ${uploadCheckAnswer}` : `
     linkOpsChatFile: args.linkOpsChatFile,
     linkOpsRuntimeFile: args.linkOpsRuntimeFile,
     linkOpsStorage: initialLinkOpsStorageHealth,
+    ownerKnowledgeDistribution: {
+      ready: Boolean(initialOwnerKnowledgeDistribution?.ready),
+      current: Boolean(initialOwnerKnowledgeDistribution?.current),
+      source: String(initialOwnerKnowledgeDistribution?.source || ''),
+      ruleCount: Number(initialOwnerKnowledgeDistribution?.ruleCount || 0),
+    },
     manualLoginStateFile: args.manualLoginStateFile,
     lanMode: args.host === '0.0.0.0',
     readOnly: args.readOnly,

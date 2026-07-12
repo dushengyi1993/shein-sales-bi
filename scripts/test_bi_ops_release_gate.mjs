@@ -157,15 +157,25 @@ const BI_OPS_V2_JS_FILES = [
   'lib/bi_ops_model_policy.mjs',
   'lib/bi_ops_agent_governor.mjs',
   'lib/bi_ops_query_context.mjs',
+  'lib/cross_process_ticket_lock.mjs',
   'lib/owner_knowledge_policy.mjs',
   'lib/owner_knowledge_service.mjs',
   'lib/owner_knowledge_local_collector.mjs',
+  'lib/owner_knowledge_distribution.mjs',
+  'lib/partner_knowledge_cache.mjs',
   'scripts/owner_knowledge_sync.mjs',
   'scripts/owner_knowledge_admin.mjs',
+  'scripts/validate_owner_knowledge_distribution.mjs',
   'scripts/test_owner_knowledge_policy.mjs',
   'scripts/test_owner_knowledge_service.mjs',
   'scripts/test_owner_knowledge_local_collector.mjs',
+  'scripts/test_owner_knowledge_event_watch.mjs',
+  'scripts/test_owner_knowledge_distribution.mjs',
+  'scripts/test_partner_knowledge_cache.mjs',
+  'scripts/test_partner_cli_package.mjs',
   'scripts/test_owner_knowledge_portal_flow.mjs',
+  'scripts/test_owner_knowledge_execute_distribution_guard.mjs',
+  'scripts/test_owner_knowledge_execute_toctou_guard.mjs',
   'scripts/bi_ops_intent_planner.mjs',
   'scripts/migrate_link_ops_runtime_to_postgres.mjs',
   'scripts/export_link_ops_postgres_snapshot.mjs',
@@ -196,6 +206,10 @@ const BI_OPS_V2_REQUIRED_ARTIFACTS = [
   'infra/systemd/shein-bi-lark-sales-qa.service',
   'infra/systemd/README.md',
   'scripts/install_owner_knowledge_sync_task.ps1',
+  'scripts/install_partner_bi_ops_cli.ps1',
+  'scripts/build_partner_bi_ops_cli_package.ps1',
+  'config/partner_cli_package.json',
+  '.github/workflows/owner-knowledge.yml',
 ];
 CHECK_FILES.push(...BI_OPS_V2_JS_FILES);
 DIFF_CHECK_FILES.push(...BI_OPS_V2_JS_FILES, ...BI_OPS_V2_REQUIRED_ARTIFACTS);
@@ -258,6 +272,12 @@ async function checkBiOpsV2DeploymentBoundary() {
   const portalUnit = await fs.readFile(path.join(ROOT, 'infra/systemd/shein-bi-portal.service'), 'utf8');
   const systemdReadme = await fs.readFile(path.join(ROOT, 'infra/systemd/README.md'), 'utf8');
   const releaseDoc = await fs.readFile(path.join(ROOT, 'docs/bi-ops-v2-release-2026-07-12.md'), 'utf8');
+  const ownerSync = await fs.readFile(path.join(ROOT, 'scripts/owner_knowledge_sync.mjs'), 'utf8');
+  const ownerInstaller = await fs.readFile(path.join(ROOT, 'scripts/install_owner_knowledge_sync_task.ps1'), 'utf8');
+  const ownerWorkflow = await fs.readFile(path.join(ROOT, '.github/workflows/owner-knowledge.yml'), 'utf8');
+  const portalSource = await fs.readFile(path.join(ROOT, 'scripts/serve_bi_portal.mjs'), 'utf8');
+  const partnerCache = await fs.readFile(path.join(ROOT, 'lib/partner_knowledge_cache.mjs'), 'utf8');
+  const ticketLock = await fs.readFile(path.join(ROOT, 'lib/cross_process_ticket_lock.mjs'), 'utf8');
   const activeLarkCommand = /^[ \t]*(?!#)systemctl\s+(?:enable|start|restart)(?:\s+--now)?[^\r\n]*shein-bi-lark-sales-qa\.service/im;
   const checks = {
     postgresRepository: /SHEIN_LINK_OPS_STORE=postgres/.test(portalUnit),
@@ -267,6 +287,29 @@ async function checkBiOpsV2DeploymentBoundary() {
     tieredModelRouting: /SHEIN_BI_AGENT_MODEL_INTENT=gpt-5\.6-luna/.test(portalUnit)
       && /SHEIN_BI_AGENT_MODEL_BALANCED=gpt-5\.6-terra/.test(portalUnit)
       && /SHEIN_BI_AGENT_MODEL_DEEP=gpt-5\.6-sol/.test(portalUnit),
+    githubKnowledgeDistribution: /SHEIN_OWNER_KNOWLEDGE_GIT_REPO_DIR=\/srv\/shein-bi\/owner-knowledge-repo/.test(portalUnit)
+      && /SHEIN_OWNER_KNOWLEDGE_GIT_BRANCH=owner-knowledge/.test(portalUnit),
+    ciGatedKnowledgeActivation: /validate_owner_knowledge_distribution\.mjs/.test(ownerWorkflow)
+      && /OWNER_KNOWLEDGE_ACTIVATION_TOKEN/.test(ownerWorkflow)
+      && /\/api\/owner-knowledge\/distribution\/activate/.test(ownerWorkflow)
+      && /activatePendingDistribution/.test(portalSource),
+    serverExecuteFailsClosed: /GitHub 校验并同步到当前版本/.test(portalSource)
+      && /startControlledLinkOpsExecution/.test(portalSource)
+      && /withOwnerKnowledgeConsistencyLock/.test(portalSource)
+      && /getOwnerKnowledgeGeneration/.test(portalSource),
+    atomicPartnerKnowledgeCache: /acquireCrossProcessTicketLock/.test(partnerCache)
+      && /generations/.test(partnerCache)
+      && /assertManifestNotOlder/.test(partnerCache)
+      && /latestPointer/.test(partnerCache)
+      && /\.tickets/.test(ticketLock)
+      && /process\.hrtime\.bigint/.test(ticketLock)
+      && /handle\.utimes/.test(ticketLock)
+      && /removeDeadStaleTicket/.test(ticketLock),
+    partnerCliVersionBoundary: /SHEIN_BI_OPS_CLI_MIN_VERSION=2026\.07\.12\.1/.test(portalUnit),
+    eventDrivenOwnerSync: /fsSync\.watch\(/.test(ownerSync)
+      && /debounceSeconds:\s*15/.test(ownerSync)
+      && /reconcileSeconds:\s*60\s*\*\s*60/.test(ownerSync)
+      && /ReconcileMinutes\s*=\s*60/.test(ownerInstaller),
     larkPausedInRunbook: /shein-bi-lark-sales-qa\.service[^\r\n]*disabled\s*\+\s*inactive/i.test(systemdReadme),
     larkPausedInRelease: /shein-bi-lark-sales-qa\.service[^\r\n]*disabled\s*\+\s*inactive/i.test(releaseDoc),
     noActiveLarkStartCommand: !activeLarkCommand.test(systemdReadme) && !activeLarkCommand.test(releaseDoc),
@@ -389,6 +432,7 @@ async function main() {
       'official doc detail parser smoke uses offline fixtures and never prints/saves cookies',
       'maintenance readiness smoke requires schema, per-store permission and strong readback before pilot_ready',
       'deterministic BI Ops V2 suite covers PostgreSQL repositories, migration compatibility, durable jobs, intent planning, model governance, account isolation, CLI and frontend projections',
+      'owner knowledge distribution smokes cover event-driven local capture, GitHub-safe immutable bundles, CI-gated activation, server-side execute blocking, locked generation caches, minimum CLI version and source-metadata redaction',
       'BI Ops V2 deployment boundary requires the restricted PostgreSQL role, durable worker, bounded model routing and an explicitly paused Lark service',
       'production safety smoke asserts production-style configs remain locked unless explicitly configured; write-enabled smokes use temporary fake OpenAPI only',
       'this gate does not submit real SHEIN writes',

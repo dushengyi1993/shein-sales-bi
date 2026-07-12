@@ -80,6 +80,7 @@ const manualLoginStateFile = path.join(tmpRoot, 'manual_login.json');
 const ownerSessionFile = path.join(tmpRoot, 'owner-session.json');
 const operatorSessionFile = path.join(tmpRoot, 'operator-session.json');
 const fakeCodexJs = path.join(tmpRoot, 'fake-codex.mjs');
+const knowledgeCacheDir = path.join(tmpRoot, 'knowledge-cache');
 await fs.writeFile(fakeCodexJs, `
 import fs from 'node:fs/promises';
 const args = process.argv.slice(2);
@@ -159,7 +160,7 @@ async function waitReady() {
 
 function runCli(cliArgs, {input = ''} = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, ['scripts/bi_ops_cli.mjs', '--base-url', baseUrl, ...cliArgs], {
+    const child = spawn(process.execPath, ['scripts/bi_ops_cli.mjs', '--base-url', baseUrl, '--knowledge-cache-dir', knowledgeCacheDir, ...cliArgs], {
       cwd: ROOT,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {...process.env, SHEIN_BI_BASE_URL: baseUrl},
@@ -196,6 +197,7 @@ try {
 
   const operatorLogin = await runCli(['--session-file', operatorSessionFile, 'login', '--username', 'operator_cli_smoke', '--password-stdin'], {input: 'operator-cli-pass\n'});
   expectCliOk('operator login', operatorLogin);
+  check('operator login refreshes owner knowledge', operatorLogin.json?.knowledge?.current, true);
   result.summary.operatorSessionFileExists = fssync.existsSync(operatorSessionFile);
   const operatorSessionText = await fs.readFile(operatorSessionFile, 'utf8');
   check('operator session file exists', result.summary.operatorSessionFileExists, true);
@@ -266,6 +268,7 @@ try {
   const operatorTaskId = operatorCreateDx.json?.task?.id || '';
   result.summary.operatorTaskId = operatorTaskId;
   check('operator task id present', Boolean(operatorTaskId), true);
+  check('operator task projection hides owner knowledge internals', Boolean(operatorCreateDx.json?.task?.ownerKnowledgePolicy), false);
 
   const operatorPreflight = await runCli(['--session-file', operatorSessionFile, 'preflight', '--task-id', operatorTaskId]);
   expectCliOk('operator preflight DX', operatorPreflight);
@@ -352,6 +355,8 @@ try {
   result.summary.taskCount = Array.isArray(tasks.tasks) ? tasks.tasks.length : 0;
   result.summary.auditLines = auditText.trim() ? auditText.trim().split(/\r?\n/).length : 0;
   check('task count from CLI flow', result.summary.taskCount, 4);
+  check('all explicit and chat tasks carry owner knowledge snapshot', tasks.tasks || [], rows => Array.isArray(rows) && rows.every(row => Boolean(row?.ownerKnowledgePolicy?.fingerprint)));
+  check('partner knowledge manifest cached atomically', fssync.existsSync(path.join(knowledgeCacheDir, 'manifest.json')), true);
   check('audit lines from CLI flow >= 12', result.summary.auditLines, n => n >= 12);
 
   result.ok = result.checks.every(x => x.pass);

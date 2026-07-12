@@ -545,12 +545,16 @@
 
 ## BI 自动运营 V2 / PostgreSQL runtime（2026-07-12 release）
 
-- `scripts/owner_knowledge_sync.mjs`：负责人本机 Codex Desktop/CLI 经验增量同步；只上传当前项目的脱敏结构化经验，不上传 reasoning、tool output 或其他项目会话。
-- `scripts/owner_knowledge_admin.mjs`：云端管理员登记负责人同步设备和查看内部状态；返回的设备 token 只允许写入本机私有凭证文件。
-- `scripts/install_owner_knowledge_sync_task.ps1`：安装/卸载负责人本人 Windows 登录后常驻同步任务；普通同事机器不安装。
-- `lib/owner_knowledge_policy.mjs` / `lib/owner_knowledge_service.mjs` / `lib/owner_knowledge_local_collector.mjs`：唯一发布者判定、active/candidate 分层、规则相关性选择、版本/设备存储和本机脱敏采集。详见 `docs/owner-knowledge-sync.md`。
+- `scripts/owner_knowledge_sync.mjs`：负责人本机 Codex Desktop/CLI 经验增量同步；文件事件触发、15 秒去抖、启动对账、60 分钟兜底，只上传当前项目的脱敏结构化经验。
+- `scripts/owner_knowledge_admin.mjs`：云端管理员登记负责人同步设备、查看状态并用 `publish --force` 重试 GitHub distribution；返回的设备 token 只允许写入本机私有凭证文件。
+- `scripts/install_owner_knowledge_sync_task.ps1`：安装/卸载负责人本人 Windows 登录后常驻事件 watcher；普通同事机器不安装。
+- `lib/owner_knowledge_policy.mjs` / `lib/owner_knowledge_service.mjs` / `lib/owner_knowledge_local_collector.mjs`：唯一发布者判定、active/candidate 分层、规则相关性选择、版本/设备/distribution 存储和双层脱敏采集。
+- `lib/owner_knowledge_distribution.mjs` / `scripts/validate_owner_knowledge_distribution.mjs`：生成不含来源/设备/凭证的 immutable GitHub bundle、manifest、hash 校验和专用分支 publisher；Git 调用有界超时，publisher 使用带 nonce/PID/心跳的唯一 ticket 队列。
+- `lib/cross_process_ticket_lock.mjs`：缓存与 Git publisher 共用的跨进程 ticket 锁；每个 contender 使用不可复用文件名，死亡 ticket 独立清理，避免固定 recovery mutex 自身成为永久死锁。
+- `lib/partner_knowledge_cache.mjs`：合伙人 CLI 的 ETag 版本检查、最低 CLI 版本门禁、bundle hash 校验，以及带心跳/进程存活校验、不可变 generation 和写前防回滚的本地原子缓存。
+- `config/partner_cli_package.json` / `scripts/build_partner_bi_ops_cli_package.ps1` / `scripts/install_partner_bi_ops_cli.ps1`：定义、构建和安装不含生产凭证的最小合伙人 CLI 包；安装到用户目录的版本化路径，不在任务中途自改代码。
 - `scripts/serve_bi_portal.mjs`：网页自动运营主服务；生产通过 `SHEIN_LINK_OPS_STORE=postgres` 使用行级 runtime，数据库不可用时失败关闭。
-- `scripts/bi_ops_cli.mjs`：Owner/合伙人 CLI；新增 `chat --wait-seconds`、`jobs`、`job`、`wait-job`、`--profile`、`--scope-all`。这些参数不扩大写权限。
+- `scripts/bi_ops_cli.mjs`：Owner/合伙人 CLI；云端业务命令前自动刷新负责人规则，`knowledge-status` 可做显式诊断；`chat/jobs/job/wait-job/--profile/--scope-all` 均不扩大写权限。
 - `scripts/bi_ops_intent_planner.mjs` / `lib/bi_ops_intent_planner.mjs`：严格 JSON schema 的结构化意图规划；只理解和规划，不执行 SHEIN 写。
 - `lib/bi_ops_query_context.mjs`：按账号和店铺压缩/脱敏 BI 问数与任务上下文，限制长度并避免把跨账号会话或内部执行字段交给模型。
 - `lib/bi_ops_model_policy.mjs`：Luna/Terra/Sol 分层和超时策略；网页禁止 max/ultra。
@@ -563,7 +567,7 @@
 - `scripts/export_link_ops_postgres_snapshot.mjs`：PG -> JSON 回滚快照与 manifest。
 - `scripts/provision_link_ops_postgres_role.sh`：root-only 创建受限角色及私有 EnvironmentFile，不输出密码。
 - `infra/warehouse/migrations/20260711_001_link_ops_runtime.sql`：`ops.link_ops_*` 行级 schema 与 append-only event trigger。
-- 关键回归：`test_bi_ops_agent_governor.mjs`、`test_bi_ops_intent_planner.mjs`、`test_bi_ops_model_policy.mjs`、`test_bi_ops_query_context.mjs`、`test_bi_ops_intent_job_flow.mjs`、`test_bi_ops_multitenant_isolation.mjs`、`test_link_ops_*`、`test_migrate_link_ops_runtime_to_postgres.mjs` 和 `test_owner_knowledge_*`。以上均已纳入 `scripts/run_deterministic_tests.mjs`。
+- 关键回归：`test_bi_ops_agent_governor.mjs`、`test_bi_ops_intent_planner.mjs`、`test_bi_ops_model_policy.mjs`、`test_bi_ops_query_context.mjs`、`test_bi_ops_intent_job_flow.mjs`、`test_bi_ops_multitenant_isolation.mjs`、`test_link_ops_*`、`test_migrate_link_ops_runtime_to_postgres.mjs`、`test_owner_knowledge_*`、`test_partner_knowledge_cache.mjs`。以上均已纳入 `scripts/run_deterministic_tests.mjs`。
 - `scripts/lark_sales_qa_bot.mjs` 和对应 unit 仅保留审计/未来恢复能力；生产 service 当前必须 `disabled + inactive`。
 
 ## 后续整理建议

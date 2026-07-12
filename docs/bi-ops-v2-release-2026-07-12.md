@@ -99,7 +99,10 @@
 - TZ 的 `SM-505A电动缝纫机` 已在负责人明确确认后完成真实 `publishOrEdit`，任务 `lot_20260712071413_1424a130` 进入 `done / submitted_readback_matched`。商品列表强回读匹配到新 SKC `sv260712151443331683679`、SPU `v2607121514433316`；`actualWriteSubmitted=true`、`sheinWriteAttempted=true`，不是弱匹配或仅凭接口弹窗判成功。
 - 负责人经验链路已上线：本机 Codex Desktop/CLI 增量采集、负责人 BI 消息采集、active/candidate 分层、相关规则注入、任务快照和 stale 保护均已接入。首次同步写入 92 个经验版本，其中 19 个 active 信号合并为 18 条当前规则，73 条 candidate 不影响团队任务。
 - 发布权限与普通 owner 角色分离：当前只有 `config/bi_access_roles.json` 中显式 `knowledgePublisher=true` 的负责人可发布；其他 owner/operator 只能消费。普通同事界面不展示规则包版本号、fingerprint 或内部快照。
-- 本机 Windows 登录任务 `SHEIN-Owner-Knowledge-Sync` 每 60 秒增量同步；设备凭证只保存在用户 Codex Home 并限制 ACL，不进入项目或 GitHub。
+- 后续收口已把本机 Windows 登录任务 `SHEIN-Owner-Knowledge-Sync` 从每 60 秒扫描改为文件事件驱动：默认 15 秒去抖、启动立即对账、每 60 分钟低频兜底。设备凭证只保存在用户 Codex Home 并限制 ACL，不进入项目或 GitHub。
+- active 规则经过服务端二次脱敏、禁止字段和 hash 校验后发布到 GitHub `owner-knowledge` 分支；远端 commit 先进入 pending，只有 GitHub Actions 复验 immutable bundle 并以专用令牌激活后才成为 current。合伙人 CLI 每个云端业务命令前用 ETag 检查 manifest，只有版本变化才在跨进程锁内写入不可变 generation 并原子切换指针；普通网页不展示内部版本号。
+- 真实 `execute` 的规则一致性守卫已下沉到 Portal 服务端，网页、自然语言聊天、直接 API 和 CLI 都不能在 distribution 未追平时绕过。激活端点只接受 GitHub Actions 专用 Bearer token，不接受普通 BI Cookie；secret 不进入仓库、unit 或日志。
+- 收口复审又补上执行前后二次 snapshot/generation 校验与互斥、缓存与 Git publisher 的 nonce/PID/心跳唯一 ticket 队列、写前防回滚、Git 调用超时、未知高熵凭证脱敏，以及 session 事件内 timestamp 校验；死亡 ticket 可按其唯一文件安全清理，不再引入可能遗留的固定 recovery mutex。未来或非法时间只进 candidate，客户端 `machinePolicy` 被丢弃并由服务端按 `ruleKey` 推导。旧 generation 不自动删除，避免失效请求清理掉当前规则。
 - 首轮线上状态压测发现 PostgreSQL 动态 `listRecords` 对不同 WHERE 形状复用同一个 prepared-statement 名称，会造成连接复用后的随机 500。动态查询现保持 unnamed，并增加回归；修复后 10 次串行 + 10 次并行状态请求全部为 HTTP 200。
 - 营销兜底同时覆盖“历史下架/售罄后重新上架且当前无生效活动”的链接；若最终版计划没有同货号目标价但商品成本存在，则按 Top5 利润率规则推导，不再把仓储费缺失误报成商品成本缺失。
-- 最终本地与云端 `npm test` 均为 `57/57`；BI Ops release gate、权限隔离、任务投影、受控上新、owner knowledge、营销重新上架兜底和 PostgreSQL 回归均通过。生产 Portal 为 `active`、健康检查 HTTP 200；飞书问数继续保持 `disabled + inactive`。
+- 基础版本本地与云端 `npm test` 均为 `57/57`；本次负责人经验同步补丁将本地确定性套件扩展到 `63/63`，BI Ops release gate 全部通过。补丁仍需在本次提交部署后完成云端同版测试、Portal 健康检查、GitHub distribution 激活回读和飞书问数 `disabled + inactive` 复核，线上证据以发布后的追加记录为准。

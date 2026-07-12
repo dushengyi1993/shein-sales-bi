@@ -386,10 +386,13 @@ CODEX_HOME=/home/sheinops/.codex SHEIN_QA_CODEX_GATEWAY_ENABLED=1 node scripts/l
 ### 负责人经验单向同步
 
 - 只有 `config/bi_access_roles.json` 中显式 `knowledgePublisher=true` 的负责人账号和已登记设备可以写入 `owner_knowledge_*` record；普通 owner、operator、admin 和后台任务均不能发布或覆盖。
-- 本机同步只读取当前项目的 Codex memory note、用户消息和最终答复，并在发送前脱敏；reasoning、tool output、其他项目会话和设备 token 不上传。普通同事页面不展示规则版本、fingerprint 或内部任务快照。
-- 服务端使用现有 PostgreSQL Link Ops repository 保存 immutable version、current pointer、active bundle 和 device；candidate 不进入团队业务上下文。规则变化后旧 intent job 结果和旧系统检查均 fail closed。
-- 云端检查：加载 `/srv/shein-bi/secrets/portal-warehouse.env` 后运行 `node scripts/owner_knowledge_admin.mjs status`；本机检查使用 `npm run owner-knowledge:status`。设备轮换使用 `issue-device` 重新签发，同一 device id 的旧 token 随即失效。
-- Windows 常驻任务名为 `SHEIN-Owner-Knowledge-Sync`。任务应保持 `Running`，`%USERPROFILE%\.codex\owner-knowledge\sync-state.json` 应持续更新时间；网络失败不会推进 offset，恢复后自动幂等补传。
+- 本机同步只读取当前项目的 Codex memory note、用户消息和最终答复，并在本机与服务端各做一次脱敏；reasoning、tool output、其他项目会话、来源路径、设备 token 和无标签高熵疑似凭证不进入 GitHub。session 新旧顺序使用事件内 timestamp，未来或非法 timestamp 只进入 candidate，不能长期占位或覆盖 active。普通同事页面不展示规则版本、fingerprint 或内部任务快照。
+- 服务端使用现有 PostgreSQL Link Ops repository 保存 immutable version、current pointer、active bundle、distribution snapshot 和 device；candidate 不进入团队业务上下文。`machinePolicy` 只按服务端 `ruleKey` 白名单推导，客户端提交的同名对象不会进入存储或分发。规则变化后旧 intent job 结果和旧系统检查均 fail closed。
+- 云端使用独立工作树 `/srv/shein-bi/owner-knowledge-repo` 和独立可写 deploy key，把 active bundle 推送到 GitHub `owner-knowledge` 分支。该分支只有脱敏 bundle、manifest 与校验代码；Portal 主工作树的脏状态不会被 publisher 暂存或提交。push 回读成功后只登记 pending，必须等 GitHub Actions 校验 fingerprint/hash 并调用专用激活端点后才切 current。
+- systemd 必须配置 `SHEIN_OWNER_KNOWLEDGE_GIT_REPO_DIR`、`SHEIN_OWNER_KNOWLEDGE_GIT_BRANCH`、`SHEIN_OWNER_KNOWLEDGE_GIT_LOCK_FILE` 和一小时 reconciliation。禁止把 GitHub 私钥放进项目、environment file 或日志；私钥只放 `/home/sheinops/.ssh/`，权限 `600`。
+- 云端检查：加载 `/srv/shein-bi/secrets/portal-warehouse.env` 后运行 `node scripts/owner_knowledge_admin.mjs status`；强制重试分发使用 `node scripts/owner_knowledge_admin.mjs publish --force`。同时检查 GitHub `Owner knowledge distribution` workflow。只有 workflow 成功且 `distribution.ready=true + current=true + source=github + sourceCommit` 非空才算 GitHub 与云端追平；激活 token 只放 GitHub Actions secret 与云端私有 environment file，不进入 unit、仓库或日志。
+- Windows 常驻任务名为 `SHEIN-Owner-Knowledge-Sync`。任务应保持 `Running`，文件变化 15 秒去抖后同步，启动和每 60 分钟 reconciliation；`sync-state.json` 不再每分钟空转更新。网络失败不会推进 offset，恢复后自动幂等补传。
+- 合伙人 CLI 不持有 GitHub token：每个云端业务命令前读取 Portal manifest，ETag 未变化返回 304；变化时在带心跳/进程存活校验的跨进程锁内写入不可变 `generations/<bundleSha256>/bundle.json`，写前拒绝版本回滚，校验通过后原子切换 manifest pointer。旧 generation 不自动删除。GitHub distribution 未追平或执行准备期间规则 generation 改变时，服务端会对网页、聊天和 CLI 的真实 `execute` 统一失败关闭。
 - API 出现 401 时先检查/轮换设备凭证；403 表示当前账号本就没有发布权，不得给同事账号补权限；5xx 先查 `shein-bi-portal` 日志、PostgreSQL 健康和 `npm test`，不能绕过规则层直接改任务 JSON。
 
 - `/home/sheinops/.codex` 已安装 `my-codex` agents/skills/agent-packs/AGENTS 配置；安装前已备份 `.codex` 私有配置到 `/home/sheinops/.codex-backups/`，备份文件不得进入 GitHub。

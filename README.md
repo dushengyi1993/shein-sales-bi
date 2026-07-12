@@ -52,7 +52,8 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 - 跑云端 watchdog：`node scripts/cloud_ops_watchdog.mjs --dry-run`
 - OpenAPI 商品/链接运营 CLI：`node scripts/bi_ops_cli.mjs --help`
 - 团队自动运营：普通成员使用 BI 网页；Owner/合伙人可用 `node scripts/bi_ops_cli.mjs chat --text "..." --wait-seconds 120`，并用 `jobs` / `job` / `wait-job` 查看可恢复后台规划。`--scope-all` 仅全局只读，不扩大写权限。
-- 负责人经验同步：`npm run owner-knowledge:scan`、`npm run owner-knowledge:sync`、`npm run owner-knowledge:status`；运行边界见 `docs/owner-knowledge-sync.md`。
+- 负责人经验同步：`npm run owner-knowledge:scan`、`npm run owner-knowledge:sync`、`npm run owner-knowledge:status`；本机采用事件驱动 + 60 分钟兜底，active 规则发布到 GitHub `owner-knowledge` 分支。合伙人 CLI 用 `node scripts/bi_ops_cli.mjs knowledge-status` 检查任务前原子缓存；运行边界见 `docs/owner-knowledge-sync.md`。
+- 构建合伙人最小 CLI 包：`npm run partner-cli:package`；ZIP 与 SHA-256 写入忽略目录 `outputs/releases/`，不包含凭证和生产运行态。
 - 批量复制商品到多店：`node scripts/link_ops_hl_openapi_executor.mjs --help`（支持 `supplyPriceRange`、`shuffleImages`、`inferInputCurrentOverride`、`skipPayloadHashLock`）
 - 批量下架候选生成与执行：`node scripts/build_link_retire_candidates_from_csv.mjs --help`；`node scripts/execute_retire_candidates_openapi.mjs --help`
 - 限时折扣漂移自动修复：`node scripts/marketing/guard_limited_discount_drift.mjs --guard <guard-json>`（先判断漂移，有则自动批量修复）

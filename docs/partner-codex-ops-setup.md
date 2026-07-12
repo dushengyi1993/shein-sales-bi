@@ -5,7 +5,7 @@
 ## 一句话流程
 
 1. 安装 `Codex App`。
-2. 安装 `Node.js 20+`。
+2. 安装 `Node.js 22+`。
 3. 拿到项目代码。
 4. 在 Codex App 里打开项目目录。
 5. 用自己的 BI 账号登录一次。
@@ -22,6 +22,16 @@
   - `docs/partner-codex-ops-setup.md`
 - 如果他只会使用、不参与开发，可以给他一个压缩包或 GitHub 下载方式；不要把任何服务器密钥、OpenAPI Secret、AI Router Key 写进文档或发给他。
 
+推荐直接给合伙人最小 CLI 包，而不是整个生产项目。负责人构建：
+
+```powershell
+npm run partner-cli:package
+```
+
+产物位于忽略目录 `outputs/releases/`，同时生成 `.sha256`。压缩包只包含远程 CLI、负责人规则校验模块、安装脚本和本说明，不包含 `.env`、session、店铺 profile、服务器脚本或任何凭证。
+
+最小包保障 `login/doctor/me/capabilities/ask/chat/jobs/tasks/create/preflight/execute/audit/resolve` 以及走云端的图片上传/转换。`plan-images`、本地 CSV 候选生成、开发 smoke 等离线工具仍需要完整项目仓库，不作为合伙人日常必需能力。
+
 ## 电脑安装
 
 ### 1. 安装 Codex App
@@ -30,7 +40,7 @@
 
 ### 2. 安装 Node.js
 
-安装 `Node.js 20` 或更高版本。
+安装 `Node.js 22` 或更高版本。
 
 安装好后，在电脑终端里检查：
 
@@ -38,7 +48,7 @@
 node -v
 ```
 
-如果能看到类似 `v20.x.x`、`v22.x.x` 这样的版本号，就可以继续。
+如果能看到 `v22.x.x` 或更高版本，就可以继续。
 
 ### 3. 放置项目代码
 
@@ -48,6 +58,14 @@ node -v
 - macOS/Linux：`~/Shein销售统计`
 
 然后在 Codex App 里打开这个项目目录。
+
+如果拿到的是最小 CLI 压缩包，解压后在包目录运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+安装器会检查 Node.js 22，把版本化文件装到 `%USERPROFILE%\.shein-bi\cli\versions\`，并生成 `%USERPROFILE%\.shein-bi\cli\shein-bi-ops.cmd`。以后更新 CLI 只需拿到新包后重新运行安装器；旧版本目录保留，便于回滚。
 
 ## 首次登录 BI 自动运营
 
@@ -98,11 +116,14 @@ node scripts/bi_ops_cli.mjs jobs --scope-all  # 仅 Owner 全局只读
 
 ### 负责人规则如何传给团队
 
-- 负责人继续在自己的 Codex Desktop/CLI 或本人 BI 账号中工作；可复用经验由本机同步器和 BI 服务自动进入规则层，无需手工复制给每位同事。
+- 负责人继续在自己的 Codex Desktop/CLI 或本人 BI 账号中工作；本机文件变化采用事件驱动采集，active 规则经脱敏和校验后同时进入云端 PostgreSQL 与 GitHub `owner-knowledge` 分支，无需手工复制给每位同事。
 - 同事只需要使用网页。系统会按当前店铺、商品和动作选取相关 active 规则，不会在页面展示“规则包 v…”之类内部版本信息。
+- 合伙人使用 CLI 时，每个云端业务命令开始前会自动检查规则 manifest；未变化只返回 304，有变化才在带心跳和进程存活校验的本机文件锁内下载到不可变 generation，写前拒绝旧版本、校验后原子切换缓存指针。即使两个 CLI 同时启动或旧网络请求长时间挂起，旧响应也不能覆盖/删除新规则。合伙人不需要 GitHub 账号、deploy key 或负责人设备 token。
 - 同事会话中的补充只影响其当前会话/任务，不能生成、修改或覆盖负责人长期规则；即使账号角色同为 owner，没有 `knowledgePublisher=true` 也无发布权。
 - candidate 只用于负责人后续复核，不参与团队真实业务。规则变化发生在预演之后时，系统会要求重新检查和再次确认，不能沿用旧结果直接写 SHEIN。
 - 负责人本机安装、状态检查和设备轮换见 `docs/owner-knowledge-sync.md`；同事机器不要安装同步任务，也不要复制负责人设备凭证。
+
+规则包与 CLI 程序版本是两件事：规则包每个任务前自动检查；CLI 本体只在启动/管理员要求时升级。云端可以声明最低 CLI 版本，版本过旧时会明确阻断并要求更新，不会在业务处理中途静默替换可执行代码。
 
 ## 安装后自检
 
@@ -112,12 +133,21 @@ node scripts/bi_ops_cli.mjs jobs --scope-all  # 仅 Owner 全局只读
 node scripts/bi_ops_cli.mjs doctor
 ```
 
+确认负责人规则已同步到本机缓存：
+
+```powershell
+node scripts/bi_ops_cli.mjs knowledge-status
+```
+
+缓存位置为 `%USERPROFILE%\.shein-bi\owner-knowledge`。`manifest.json` 指向 `generations/<bundleSha256>/bundle.json`；这里只保存脱敏规则包和 GitHub source commit，不包含负责人原始会话、来源路径或发布凭证。
+
 `doctor` 只做本机和云端只读检查，不创建任务、不预检、不执行 SHEIN 写操作。它会检查：
 
 - 本机 `Node.js` 版本是否满足建议要求；
 - 本机会话文件是否存在，且没有保存明文密码；
 - 当前 BI 登录账号是谁、角色是什么、能写哪些店；
 - 云端 OpenAPI 能力总账能否访问；
+- 负责人规则 manifest/bundle 是否可读取、hash 是否匹配、CLI 是否达到最低版本；
 - 任务池接口是否可访问；
 - 真实写总闸门和真实写试点白名单当前状态。
 
@@ -153,6 +183,8 @@ node scripts/bi_ops_cli.mjs tasks --pretty
 如果能看到账号信息、店铺权限或任务列表，说明他的 Codex App 已经能通过本机连接云端 BI。
 
 ## 日常怎么使用
+
+每次 `chat/create/preflight/execute` 等云端业务命令都会先执行一次轻量规则检查。只有 GitHub source commit 变化时才下载；正常无变化不会重复拉整仓库，也不会产生模型 Token。`execute` 发现云端 active bundle 尚未同步到 GitHub 时会暂时停住，稍后重试即可。
 
 ### 推荐方式：直接让 Codex 调用工具
 

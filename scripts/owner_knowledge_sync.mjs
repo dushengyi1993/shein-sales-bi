@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -15,7 +16,9 @@ function parseArgs(argv) {
     projectRoot: ROOT,
     credentialFile: process.env.SHEIN_OWNER_KNOWLEDGE_CREDENTIAL_FILE || path.join(os.homedir(), '.codex', 'owner-knowledge', 'device.json'),
     stateFile: process.env.SHEIN_OWNER_KNOWLEDGE_STATE_FILE || path.join(os.homedir(), '.codex', 'owner-knowledge', 'sync-state.json'),
-    intervalSeconds: 60,
+    debounceSeconds: 15,
+    reconcileSeconds: 60 * 60,
+    logFile: process.env.SHEIN_OWNER_KNOWLEDGE_LOG_FILE || path.join(os.homedir(), '.codex', 'owner-knowledge', 'sync.log'),
   };
   if (argv[0] && !argv[0].startsWith('--')) args.command = argv.shift();
   for (let index = 0; index < argv.length; index += 1) {
@@ -25,11 +28,21 @@ function parseArgs(argv) {
     else if (arg === '--project-root') args.projectRoot = path.resolve(argv[++index]);
     else if (arg === '--credential-file') args.credentialFile = path.resolve(argv[++index]);
     else if (arg === '--state-file') args.stateFile = path.resolve(argv[++index]);
-    else if (arg === '--interval-seconds') args.intervalSeconds = Math.max(15, Number(argv[++index] || 60));
+    else if (arg === '--debounce-seconds') args.debounceSeconds = positiveSeconds(argv[++index], '--debounce-seconds');
+    else if (arg === '--reconcile-seconds') args.reconcileSeconds = positiveSeconds(argv[++index], '--reconcile-seconds');
+    // Kept for existing task installations. It now controls only the low-frequency reconcile.
+    else if (arg === '--interval-seconds') args.reconcileSeconds = positiveSeconds(argv[++index], '--interval-seconds');
+    else if (arg === '--log-file') args.logFile = path.resolve(argv[++index]);
     else throw new Error(`Unknown argument: ${arg}`);
   }
   args.baseUrl = String(args.baseUrl || '').replace(/\/+$/, '');
   return args;
+}
+
+function positiveSeconds(value, option) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) throw new Error(`${option} must be a positive number`);
+  return seconds;
 }
 
 async function readJson(file, fallback) {
@@ -88,6 +101,94 @@ async function syncOnce(args) {
   return {...collected.summary, published, batches: batches.length, stateFile: args.stateFile};
 }
 
+function redactLogText(value) {
+  return String(value || '')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, 'Bearer [REDACTED]')
+    .replace(/((?:token|api[_-]?key|secret|password|authorization)\s*[:=]\s*)[^\s,;，；]+/gi, '$1[REDACTED]');
+}
+
+function logger(args) {
+  return async (entry, isError = false) => {
+    const line = JSON.stringify(JSON.parse(JSON.stringify(entry, (_key, value) => typeof value === 'string' ? redactLogText(value) : value)));
+    (isError ? console.error : console.log)(line);
+    if (args.logFile) {
+      try {
+        await fs.mkdir(path.dirname(args.logFile), {recursive: true});
+        const stat = await fs.stat(args.logFile).catch(() => null);
+        if (stat && stat.size > 2 * 1024 * 1024) {
+          await fs.rm(`${args.logFile}.1`, {force: true}).catch(() => {});
+          await fs.rename(args.logFile, `${args.logFile}.1`);
+        }
+        await fs.appendFile(args.logFile, `${line}\n`, 'utf8');
+      } catch (error) {
+        console.error(JSON.stringify({ok: false, command: 'watch-log', error: redactLogText(String(error?.message || error))}));
+      }
+    }
+  };
+}
+
+function watchRoots(args) {
+  return [
+    path.join(args.codexHome, 'sessions'),
+    path.join(args.codexHome, 'memories', 'extensions', 'ad_hoc', 'notes'),
+  ];
+}
+
+async function watch(args) {
+  const log = logger(args);
+  let stopped = false;
+  let syncing = false;
+  let eventPending = false;
+  let debounceTimer = null;
+  let reconcileTimer = null;
+  const watchers = [];
+  const runSync = async reason => {
+    if (stopped) return;
+    if (syncing) {
+      if (reason === 'event') eventPending = true;
+      return;
+    }
+    syncing = true;
+    try {
+      const summary = await syncOnce(args);
+      await log({ok: true, command: 'watch-sync', reason, at: new Date().toISOString(), summary});
+    } catch (error) {
+      await log({ok: false, command: 'watch-sync', reason, at: new Date().toISOString(), error: String(error?.message || error)}, true);
+    } finally {
+      syncing = false;
+      if (eventPending && !stopped) {
+        eventPending = false;
+        scheduleEventSync();
+      }
+    }
+  };
+  const scheduleEventSync = () => {
+    if (stopped) return;
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => { debounceTimer = null; void runSync('event'); }, args.debounceSeconds * 1_000);
+  };
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    if (debounceTimer) clearTimeout(debounceTimer);
+    if (reconcileTimer) clearInterval(reconcileTimer);
+    for (const watcher of watchers) watcher.close();
+  };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+
+  for (const root of watchRoots(args)) {
+    try {
+      await fs.mkdir(root, {recursive: true});
+      watchers.push(fsSync.watch(root, {recursive: true}, scheduleEventSync));
+    } catch (error) {
+      await log({ok: false, command: 'watch-init', root, error: String(error?.message || error)}, true);
+    }
+  }
+  reconcileTimer = setInterval(() => { void runSync('reconcile'); }, args.reconcileSeconds * 1_000);
+  await runSync('startup');
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.command === 'scan') {
@@ -105,15 +206,8 @@ async function main() {
     return;
   }
   if (args.command === 'watch') {
-    while (true) {
-      try {
-        const summary = await syncOnce(args);
-        console.log(JSON.stringify({ok: true, command: 'watch-sync', at: new Date().toISOString(), summary}));
-      } catch (error) {
-        console.error(JSON.stringify({ok: false, command: 'watch-sync', at: new Date().toISOString(), error: String(error?.message || error)}));
-      }
-      await new Promise(resolve => setTimeout(resolve, args.intervalSeconds * 1_000));
-    }
+    await watch(args);
+    return;
   }
   throw new Error(`Unknown command: ${args.command}`);
 }

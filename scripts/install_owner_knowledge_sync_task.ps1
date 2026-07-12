@@ -3,7 +3,8 @@ param(
   [string]$CredentialFile = "$HOME\.codex\owner-knowledge\device.json",
   [string]$StateFile = "$HOME\.codex\owner-knowledge\sync-state.json",
   [string]$TaskName = 'SHEIN-Owner-Knowledge-Sync',
-  [int]$IntervalSeconds = 60,
+  [int]$DebounceSeconds = 15,
+  [int]$ReconcileMinutes = 60,
   [switch]$Uninstall
 )
 
@@ -27,12 +28,13 @@ $arguments = @(
   '--credential-file', ('"{0}"' -f $CredentialFile),
   '--state-file', ('"{0}"' -f $StateFile),
   '--project-root', ('"{0}"' -f $root),
-  '--interval-seconds', [string][Math]::Max(15, $IntervalSeconds)
+  '--debounce-seconds', [string][Math]::Max(1, $DebounceSeconds),
+  '--reconcile-seconds', [string]([Math]::Max(1, $ReconcileMinutes) * 60)
 ) -join ' '
 
 $action = New-ScheduledTaskAction -Execute $node -Argument $arguments -WorkingDirectory $root
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description 'One-way owner Codex and CLI knowledge sync to SHEIN BI. Coworker accounts cannot publish back.' -Force | Out-Null
 Start-ScheduledTask -TaskName $TaskName

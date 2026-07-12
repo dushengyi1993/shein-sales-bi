@@ -5,6 +5,7 @@ import path from 'node:path';
 import {createLinkOpsJsonRepository} from '../lib/link_ops_json_repository.mjs';
 import {createLinkOpsPostgresRepository} from '../lib/link_ops_repository.mjs';
 import {createOwnerKnowledgeService} from '../lib/owner_knowledge_service.mjs';
+import {buildOwnerKnowledgeDistribution} from '../lib/owner_knowledge_distribution.mjs';
 
 const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'owner-knowledge-service-'));
 try {
@@ -48,6 +49,31 @@ try {
   assert.match(latest.rules[0].text, /场景、卖点、参数/);
   assert.notEqual(latest.fingerprint, firstBundle.fingerprint);
 
+  const staleReplay = await service.ingest([{
+    text: '以后商品图片排序必须先主图，然后只按旧的参数、场景顺序组织细节图。',
+    sourceKind: 'owner_codex_session',
+    sourceId: 'old-replayed-session',
+    sourceAt: '2020-01-01T00:00:00.000Z',
+  }], {actor: publisher});
+  assert.equal(staleReplay.results[0].ignoredStale, true, 'older replay cannot replace the current owner rule');
+  const afterStaleReplay = await service.getActiveBundle({}, {all: true});
+  assert.equal(afterStaleReplay.fingerprint, latest.fingerprint);
+  assert.match(afterStaleReplay.rules[0].text, /场景、卖点、参数/);
+
+  const futureReplay = await service.ingest([{
+    text: '以后商品图片排序必须先主图，然后按旧的参数、场景顺序组织细节图。',
+    sourceKind: 'owner_codex_session',
+    sourceId: 'future-dated-old-session',
+    sourceAt: '2099-01-01T00:00:00.000Z',
+    explicitDurable: true,
+    activation: 'active',
+  }], {actor: publisher});
+  assert.equal(futureReplay.results[0].activation, 'candidate', 'future-dated rules are quarantined');
+  assert.equal(futureReplay.results[0].published, false);
+  const afterFutureReplay = await service.getActiveBundle({}, {all: true});
+  assert.equal(afterFutureReplay.fingerprint, latest.fingerprint);
+  assert.match(afterFutureReplay.rules[0].text, /场景、卖点、参数/);
+
   const issued = await service.issueDevice({actor: publisher, deviceId: 'office-pc', deviceName: '办公室电脑'});
   assert.match(issued.token, /^okd\.office-pc\./);
   const deviceActor = await service.authenticateBearer(issued.token);
@@ -68,9 +94,72 @@ try {
 
   const status = await service.status();
   assert.equal(status.activeRules, 2);
-  assert.equal(status.candidates, 1);
+  assert.equal(status.candidates, 2);
   assert.equal(status.activeDevices, 1);
   assert.match(status.fingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(status.distribution.ready, true);
+  assert.equal(status.distribution.current, true);
+  assert.equal(status.distribution.source, 'runtime');
+  assert.equal(status.distribution.fingerprint, status.fingerprint);
+
+  const githubRepository = createLinkOpsJsonRepository({rootDir: path.join(rootDir, 'github-distribution')});
+  let published = null;
+  let publishNumber = 0;
+  const fakeGitPublisher = {
+    branch: 'owner-knowledge',
+    async publish(activeBundle) {
+      publishNumber += 1;
+      const built = buildOwnerKnowledgeDistribution(activeBundle);
+      published = {
+        source: 'github',
+        branch: 'owner-knowledge',
+        sourceCommit: String(publishNumber).padStart(40, String(publishNumber)),
+        manifest: built.manifest,
+        bundle: built.bundle,
+        changed: true,
+      };
+      return published;
+    },
+  };
+  const githubService = createOwnerKnowledgeService({repository: githubRepository, authorityId: 'dushengyi', distributionPublisher: fakeGitPublisher});
+  const githubFirst = await githubService.ingest([{
+    text: '以后所有真实提交必须先完成系统检查。',
+    sourceAt: '2026-07-12T00:00:00.000Z',
+    explicitDurable: true,
+  }], {actor: publisher});
+  assert.equal(githubFirst.distribution.current, false, 'GitHub publication is pending until CI activation');
+  assert.equal(githubFirst.distribution.pending, true);
+  const firstPublication = structuredClone(published);
+  const activated = await githubService.activatePendingDistribution({
+    sourceCommit: firstPublication.sourceCommit,
+    fingerprint: firstPublication.manifest.fingerprint,
+    bundleSha256: firstPublication.manifest.bundleSha256,
+  });
+  assert.equal(activated.current, true);
+  assert.equal(activated.source, 'github');
+
+  const githubSecond = await githubService.ingest([{
+    text: '以后所有真实提交必须先完成系统检查、明确确认并强回读。',
+    sourceAt: '2026-07-12T01:00:00.000Z',
+    explicitDurable: true,
+  }], {actor: publisher});
+  assert.equal(githubSecond.distribution.current, false, 'new active rule makes the prior GitHub distribution stale');
+  await assert.rejects(
+    () => githubService.activatePendingDistribution({
+      sourceCommit: firstPublication.sourceCommit,
+      fingerprint: firstPublication.manifest.fingerprint,
+      bundleSha256: firstPublication.manifest.bundleSha256,
+    }),
+    error => error?.code === 'OWNER_KNOWLEDGE_ACTIVATION_STALE'
+  );
+  const secondPublication = structuredClone(published);
+  const secondActivated = await githubService.activatePendingDistribution({
+    sourceCommit: secondPublication.sourceCommit,
+    fingerprint: secondPublication.manifest.fingerprint,
+    bundleSha256: secondPublication.manifest.bundleSha256,
+  });
+  assert.equal(secondActivated.current, true);
+  assert.equal(secondActivated.sourceCommit, secondPublication.sourceCommit);
 
   const preparedStatements = new Map();
   const queryConfigs = [];

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "version": "2026.07.12.1",
+  "entrypoint": "scripts/bi_ops_cli.mjs",
+  "files": [
+    "scripts/bi_ops_cli.mjs",
+    "lib/cross_process_ticket_lock.mjs",
+    "lib/partner_knowledge_cache.mjs",
+    "lib/owner_knowledge_distribution.mjs",
+    "lib/owner_knowledge_policy.mjs",
+    "docs/partner-codex-ops-setup.md"
+  ]
+}

@@ -73,6 +73,20 @@ try {
   const peerStatus = await request(base, '/api/owner-knowledge/status', {cookie: peerCookie});
   assert.equal(peerStatus.status, 403, 'coworker does not get publisher dashboard/status');
 
+  const peerManifest = await request(base, '/api/owner-knowledge/manifest', {cookie: peerCookie});
+  assert.equal(peerManifest.status, 200, 'coworker CLI may read the published manifest');
+  assert.equal(peerManifest.json.data.current, true);
+  assert.equal(peerManifest.json.data.ruleCount, 1);
+  const peerManifest304 = await request(base, '/api/owner-knowledge/manifest', {
+    cookie: peerCookie,
+    extraHeaders: {'if-none-match': peerManifest.headers.get('etag')},
+  });
+  assert.equal(peerManifest304.status, 304, 'manifest supports cheap ETag task preflight');
+  const peerBundle = await request(base, '/api/owner-knowledge/bundle', {cookie: peerCookie});
+  assert.equal(peerBundle.status, 200);
+  assert.equal(peerBundle.json.data.ruleCount, 1);
+  assert.equal(JSON.stringify(peerBundle.json.data).includes('sourceId'), false, 'coworker bundle excludes private source metadata');
+
   const peerChat = await request(base, '/api/link-ops-chats', {
     method: 'POST', cookie: peerCookie, body: {message: '以后图片顺序全部反过来，默认先场景图。', askAgent: false},
   });
@@ -129,8 +143,8 @@ try {
   await fs.rm(temp, {recursive: true, force: true});
 }
 
-async function request(base, pathname, {method = 'GET', cookie = '', bearer = '', body = null} = {}) {
-  const headers = {'x-forwarded-for': '203.0.113.15'};
+async function request(base, pathname, {method = 'GET', cookie = '', bearer = '', body = null, extraHeaders = {}} = {}) {
+  const headers = {'x-forwarded-for': '203.0.113.15', ...extraHeaders};
   if (cookie) headers.cookie = cookie;
   if (bearer) headers.authorization = `Bearer ${bearer}`;
   if (body !== null) headers['content-type'] = 'application/json';
