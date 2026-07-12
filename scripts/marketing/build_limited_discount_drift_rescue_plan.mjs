@@ -2,6 +2,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {createHash} from 'node:crypto';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_GUARD = path.join(ROOT, 'outputs/reports/marketing-daily-guard-2026-07-05.json');
@@ -37,6 +38,33 @@ function rel(file) {
 function ymdFromText(value) {
   const match = String(value || '').match(/20\d{6}/);
   return match ? match[0] : '';
+}
+
+function safeFilePart(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .replace(/[^\p{L}\p{N}]+/gu, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || 'unknown';
+}
+
+function rescueGroupFileName(group, reportDate) {
+  const datePart = String(group.limitedDiscountNameDate || 'unknown');
+  const namePart = safeFilePart(group.limitedDiscountName);
+  const sourceHash = createHash('sha1')
+    .update([group.storeKey, group.limitedDiscountName, group.limitedDiscountEnd].join('::'))
+    .digest('hex')
+    .slice(0, 8);
+  return `limited-drift-rescue-${group.storeKey}-${datePart}-${namePart}-${sourceHash}-${reportDate || 'unknown'}.json`;
+}
+
+async function clearGeneratedRescueFiles(outDir) {
+  const entries = await fs.readdir(outDir, {withFileTypes: true}).catch(() => []);
+  const stale = entries
+    .filter(entry => entry.isFile() && /^limited-drift-rescue-[A-Z0-9]+-.*\.json$/i.test(entry.name))
+    .map(entry => path.join(outDir, entry.name));
+  await Promise.all(stale.map(file => fs.unlink(file)));
+  return stale.length;
 }
 
 function num(value) {
@@ -134,9 +162,9 @@ async function main() {
   const endTime = args.endTime || DEFAULT_END_TIME;
   const plan = buildLimitedDiscountDriftRescuePlan(guard, {guardPath: rel(args.guard), maxRows: args.maxRows});
   await fs.mkdir(args.outDir, {recursive: true});
+  const clearedStaleRescueFiles = await clearGeneratedRescueFiles(args.outDir);
   for (const group of plan.groups) {
-    const safeName = String(group.limitedDiscountNameDate || 'unknown');
-    const file = path.join(args.outDir, `limited-drift-rescue-${group.storeKey}-${safeName}-${plan.reportDate || 'unknown'}.json`);
+    const file = path.join(args.outDir, rescueGroupFileName(group, plan.reportDate));
     const rescue = {
       createdAt: plan.createdAt,
       storeKey: group.storeKey,
@@ -176,7 +204,14 @@ async function main() {
     '执行边界：先 dry-run；单一目标活动安全通过后才 execute；混合/计划外/人工特殊价由 apply 脚本 fail-closed 后再走 split-preserve。',
   ];
   await fs.writeFile(mdPath, `${lines.join('\n')}\n`, 'utf8');
-  console.log(JSON.stringify({ok: true, json: rel(jsonPath), md: rel(mdPath), rescueFiles: plan.rescueFiles.length, rows: plan.totals.selected}, null, 2));
+  console.log(JSON.stringify({
+    ok: true,
+    json: rel(jsonPath),
+    md: rel(mdPath),
+    rescueFiles: plan.rescueFiles.length,
+    rows: plan.totals.selected,
+    clearedStaleRescueFiles,
+  }, null, 2));
 }
 
 if (import.meta.url === `file://${process.argv[1].replaceAll('\\', '/')}` || process.argv[1]?.endsWith('build_limited_discount_drift_rescue_plan.mjs')) {

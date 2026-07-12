@@ -225,14 +225,20 @@ function loadPlanItems(plan, linkTargetItems = []) {
   const linkTargetByBaseKey = new Map(linkTargetItems.map(item => [planKey(item.storeKey, item.skc), item]));
   for (const sourceItem of (plan.items || [])) {
     const baseKeyForOverlay = planKey(sourceItem.storeKey, sourceItem.skc);
-    const linkTarget = linkTargetByBaseKey.get(baseKeyForOverlay) || null;
+    const sourcePlanStartTime = itemPlanStartTime(sourceItem);
+    const sourcePlanEndTime = itemPlanEndTime(sourceItem);
+    const hasApprovedPlanWindow = Number.isFinite(parseTimeMs(sourcePlanStartTime))
+      && Number.isFinite(parseTimeMs(sourcePlanEndTime));
+    const linkTarget = hasApprovedPlanWindow
+      ? null
+      : (linkTargetByBaseKey.get(baseKeyForOverlay) || null);
     const item = linkTarget
       ? {
           ...sourceItem,
           ...linkTarget,
           activityId: sourceItem.activityId ?? linkTarget.activityId ?? '',
-          planStartTime: itemPlanStartTime(sourceItem),
-          planEndTime: itemPlanEndTime(sourceItem),
+          planStartTime: sourcePlanStartTime,
+          planEndTime: sourcePlanEndTime,
           source: 'price_overrides_plan_with_linksData_exact_store_skc_target',
         }
       : sourceItem;

@@ -46,7 +46,7 @@ await fs.writeFile(path.join(salesDir, '2026-07-09.json'), `${JSON.stringify({
     goodsSn: 'SK-SAME',
     skcName: 'same-skc',
     number: 1,
-    currencyPrice: 96,
+    currencyPrice: 110,
   }],
 }, null, 2)}\n`, 'utf8');
 
@@ -66,8 +66,8 @@ const payload = JSON.parse(result.stdout);
 assert.equal(payload.summary.statusCounts.match, 1);
 assert.equal(payload.summary.linkTargetRows, 1);
 const audit = JSON.parse(await fs.readFile(path.resolve(payload.json), 'utf8'));
-assert.equal(audit.rows[0].finalTargetPrice, 96);
+assert.equal(audit.rows[0].finalTargetPrice, 110);
 assert.equal(audit.rows[0].activityId, 1001);
 assert.equal(audit.rows[0].planSelectionReason, 'active_plan_item_window');
 
-console.log(JSON.stringify({ok: true, test: 'order_audit_prefers_linksdata_exact_store_skc_target'}));
+console.log(JSON.stringify({ok: true, test: 'order_audit_locks_approved_target_during_active_plan_window'}));

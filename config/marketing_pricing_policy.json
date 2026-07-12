@@ -1,7 +1,15 @@
 {
   "description": "Machine-readable long-term pricing policy for SHEIN ordinary marketing signup, coupon pairing, and limited-discount fallback. This file contains no credentials.",
-  "updatedAt": "2026-06-28",
+  "updatedAt": "2026-07-11",
   "targetFloorMarginPct": 15,
+  "topTreatmentCostFallback": {
+    "enabled": true,
+    "costMapPath": "tmp/mbrs/marketing-cost-map.json",
+    "defaultBaseMarginPct": 30,
+    "selectionCostBasis": "product_cost_excluding_storage",
+    "missingStorageDoesNotBlock": true,
+    "ruleNote": "新上架/重新上架链接在最新最终版找不到同标准货号目标价时，只要商品成本存在，就按默认30%利润率的曝光Top5待遇（下调5个点且不低于15%底线）自动推导目标价。当前筛选红线按不含仓储的商品成本，仓储费缺失不能把已有成本误报为无成本。"
+  },
   "ordinaryMarketing": {
     "mustSignupDuringSignupWindow": true,
     "signupWindowIsSeparateFromEventWindow": true,
@@ -67,6 +75,22 @@
       "applyTopTreatmentForFirstNewListingSignup": true,
       "activityNamePatterns": ["New Arrivals", "新品", "超级新品"],
       "ruleNote": "新上架7天内链接首次进入新品/超级新品类普通营销活动时，也按全局曝光Top5力度定价，而不是普通链接力度。"
+    }
+  },
+  "relistedWithoutActiveMarketing": {
+    "enabled": true,
+    "historyLookbackDays": 60,
+    "onShelfOnly": true,
+    "requireLatestSourceHasNoActivity": true,
+    "requireNoBiMarketingSignal": true,
+    "requireCompleteLiveMarketingScan": true,
+    "futureMarketingDoesNotSuppressCurrentFallback": true,
+    "pricingTreatment": "same_as_global_exposure_top5",
+    "limitedDiscount": {
+      "autoFallback": true,
+      "durationDays": 7,
+      "activityNamePrefix": "重新上架无活动Top5兜底限时折扣",
+      "ruleNote": "历史快照曾为已下架/已售罄、当前恢复在售，并且最新商品源、BI营销标签及完整营销live scan都没有当前生效活动证据时，按全局曝光Top5/新链接力度自动报一周限时折扣。“即将开始/待生效”不算当前生效，不能用来跳过当前兜底。"
     }
   }
 }

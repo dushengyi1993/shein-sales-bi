@@ -283,7 +283,7 @@ FINAL_GUARD_STATUS=0
 if [[ "$AUTO_REPAIR" == "1" && "$SCAN_STATUS" -eq 0 && "$GUARD_STATUS" -eq 0 ]]; then
   DRIFT_BELOW_COUNT="$(guard_json_value '(j.limitedDiscountTargetPriceDrift?.belowRows || []).length' 0)"
   NEW_LISTING_EXEC_COUNT="$(guard_json_value '(j.newSkcCandidates?.newListingWithin7DaysLimitedDiscount?.executableActionCount || 0)' 0)"
-  echo "[cloud_marketing_live_guard] action check driftBelow=$DRIFT_BELOW_COUNT newListingExecutable=$NEW_LISTING_EXEC_COUNT"
+  echo "[cloud_marketing_live_guard] action check driftBelow=$DRIFT_BELOW_COUNT topTreatmentExecutable=$NEW_LISTING_EXEC_COUNT"
 
   if [[ "$DRIFT_BELOW_COUNT" =~ ^[0-9]+$ && "$DRIFT_BELOW_COUNT" -gt 0 ]]; then
     echo "[cloud_marketing_live_guard] auto fix limited-discount target-price drift count=$DRIFT_BELOW_COUNT"
@@ -297,12 +297,12 @@ if [[ "$AUTO_REPAIR" == "1" && "$SCAN_STATUS" -eq 0 && "$GUARD_STATUS" -eq 0 ]];
   fi
 
   if [[ "$NEW_LISTING_EXEC_COUNT" =~ ^[0-9]+$ && "$NEW_LISTING_EXEC_COUNT" -gt 0 ]]; then
-    echo "[cloud_marketing_live_guard] auto apply new-listing 7d limited-discount fallback executable=$NEW_LISTING_EXEC_COUNT"
+    echo "[cloud_marketing_live_guard] auto apply new-listing/relisted top-treatment limited-discount fallback executable=$NEW_LISTING_EXEC_COUNT"
     if node scripts/marketing/batch_apply_new_listing_limited_discount.mjs --date "$DATE" --guard "$GUARD_OUT"; then
-      echo "[cloud_marketing_live_guard] new-listing limited-discount fallback done"
+      echo "[cloud_marketing_live_guard] new-listing/relisted limited-discount fallback done"
     else
       NEW_LISTING_STATUS=$?
-      echo "[cloud_marketing_live_guard] WARN new-listing limited-discount fallback returned status=$NEW_LISTING_STATUS" >&2
+      echo "[cloud_marketing_live_guard] WARN new-listing/relisted limited-discount fallback returned status=$NEW_LISTING_STATUS" >&2
     fi
     cleanup_store_browsers
   fi

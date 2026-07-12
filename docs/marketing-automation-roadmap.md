@@ -133,6 +133,16 @@
 - 目标价证据：先查精确 `storeKey + SKC`，再回退到同标准货号最低批准价。
 - live scan 已覆盖的新上架/高曝光限时折扣不重复报名；目标价证据缺失但 live scan 按名称已覆盖的也不重复报名，但仍标记为证据缺口。
 
+### 4.1.3 重新上架且无生效营销活动的 Top5 兜底规则
+
+`2026-07-11` 起，旧链接不能再因为原始上架年龄超过 7 天而漏掉限时折扣。系统读取最近 `60` 天 `outputs/shein_links/<STORE>/YYYY-MM-DD.json` 的链接状态历史，并按以下三层证据同时判断：
+
+- 历史状态：同一 `storeKey + SKC` 曾明确为 `SOLD_OUT / 已售罄` 或 `OUT_SHELF / 已下架`，后续快照恢复为 `ON_SHELF / 已上架`。
+- 当前商品源与 BI：最新链接快照 `hasActivity=false`，当前 linksData 没有“营销中/活动中/生效中”信号。单独的“即将开始/待生效”不是当前生效证据。
+- 后台 live：当天完整营销 live scan 没有该 `storeKey + SKC` 的当前生效营销价格行；`future_*` 证据不能阻断当前限时折扣兜底；live scan 缺失/partial 时不得自动写。
+
+同时满足以上条件的链接按“全局标准货号曝光 Top5 / 新链接”力度报一周限时折扣，不沿用原始 `shelf_age_days` 判断。目标价先取精确 `storeKey + SKC`，再取最新最终版中同标准货号的已批准 Top5/最低安全目标价；两者都没有时，只要 `marketing-cost-map` 存在商品成本，就按默认 `30%` 基础利润率的 Top5 待遇（下调 `5` 个点、不低于 `15%` 底线）自动推导目标价。当前该成本兜底按 `product_cost_excluding_storage` 筛选；仓储费缺失必须留痕，但不得把已有商品成本误报为无成本。只有商品成本/底价也缺失，或平台/身份/库存校验阻断时才 fail closed。该候选继续复用 `newSkcCandidates.newListingWithin7DaysLimitedDiscount` 和 `build_new_listing_limited_discount_plan.mjs` 的 dry-run / execute / readback 链路，并在行上标记 `treatmentType=relisted_without_active_marketing`、`lastInactiveDate`、`relistedAt`，避免伪装成真正的新上架 7 天链接。
+
 ### 4.1.1 限时折扣必报巡检规则
 
 `2026-06-21` 起，限时折扣不是“没有营销活动才用”的兜底选项，而是所有在售运营链接都要有的基础价格层：

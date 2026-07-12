@@ -80,17 +80,17 @@ async function pathExists(file) {
   }
 }
 
-async function findRescueFile(planDir, storeKey) {
+async function findRescueFiles(planDir, storeKey) {
   const entries = await fs.readdir(planDir, {withFileTypes: true});
   const matches = entries
     .filter(entry => entry.isFile())
     .map(entry => entry.name)
     .filter(name => new RegExp(`^limited-drift-rescue-${storeKey}-.*\\.json$`, 'i').test(name))
     .sort();
-  if (matches.length !== 1) {
-    throw new Error(`Expected exactly one rescue file for ${storeKey}, found ${matches.length}: ${matches.join(', ')}`);
+  if (!matches.length) {
+    throw new Error(`Expected at least one rescue file for ${storeKey}, found none`);
   }
-  return path.join(planDir, matches[0]);
+  return matches.map(name => path.join(planDir, name));
 }
 
 async function discoverStores(planDir) {
@@ -395,10 +395,9 @@ function verifyExecuteResult(full, expectedSkcs) {
   };
 }
 
-async function processStore(storeKey, args) {
+async function processStore(storeKey, rescuePath, args) {
   const store = storesByKey.get(storeKey);
   if (!store) throw new Error(`Unknown store ${storeKey}`);
-  const rescuePath = await findRescueFile(args.planDir, storeKey);
   const rescue = JSON.parse(await fs.readFile(rescuePath, 'utf8'));
   const targetSkcs = [...new Set((rescue.rows || []).map(row => String(row.skc || '').trim()).filter(Boolean))];
   const record = {
@@ -632,41 +631,46 @@ if (!args.stores.length) {
 const startedAt = new Date().toISOString();
 const results = [];
 for (const storeKey of args.stores) {
-  console.log(`[${new Date().toISOString()}] processing ${storeKey}`);
-  const result = await processStore(storeKey, args);
-  results.push(result);
-  await fs.writeFile(args.out, JSON.stringify({
-    createdAt: startedAt,
-    updatedAt: new Date().toISOString(),
-    guard: rel(args.guard),
-    date: args.date,
-    planDir: rel(args.planDir),
-    outDir: rel(args.outDir),
-    dryRunOnly: args.dryRunOnly,
-    buildPlan,
-    totals: summarizeTotals(results),
-    results,
-  }, null, 2), 'utf8');
-  console.log(JSON.stringify({
-    storeKey,
-    ok: result.ok,
-    status: result.status,
-    oldActivities: result.discoveredOldActivities.map(activity => ({
-      activityId: activity.activityId,
-      targetCount: activity.targetSkcs.length,
-      extraCount: activity.extraCount,
-    })),
-    removed: result.removals.map(item => ({
-      activityId: item.activityId,
-      skcCount: item.skcs?.length || 0,
-      ok: item.skipped ? true : item.result?.ok,
-      skipped: item.skipped || false,
-    })),
-    blockedSkcs: result.blockedSkcs,
-    createdActivityId: result.readback?.createdActivityId || null,
-    subsetRescuePath: result.subsetRescuePath,
-    error: result.error,
-  }, null, 2));
+  const rescuePaths = await findRescueFiles(args.planDir, storeKey);
+  for (const rescuePath of rescuePaths) {
+    console.log(`[${new Date().toISOString()}] processing ${storeKey} rescue=${rel(rescuePath)}`);
+    const result = await processStore(storeKey, rescuePath, args);
+    results.push(result);
+    await fs.writeFile(args.out, JSON.stringify({
+      createdAt: startedAt,
+      updatedAt: new Date().toISOString(),
+      guard: rel(args.guard),
+      date: args.date,
+      planDir: rel(args.planDir),
+      outDir: rel(args.outDir),
+      dryRunOnly: args.dryRunOnly,
+      buildPlan,
+      totals: summarizeTotals(results),
+      results,
+    }, null, 2), 'utf8');
+    console.log(JSON.stringify({
+      storeKey,
+      rescuePath: rel(rescuePath),
+      sourceLimitedDiscountName: result.sourceLimitedDiscountName,
+      ok: result.ok,
+      status: result.status,
+      oldActivities: result.discoveredOldActivities.map(activity => ({
+        activityId: activity.activityId,
+        targetCount: activity.targetSkcs.length,
+        extraCount: activity.extraCount,
+      })),
+      removed: result.removals.map(item => ({
+        activityId: item.activityId,
+        skcCount: item.skcs?.length || 0,
+        ok: item.skipped ? true : item.result?.ok,
+        skipped: item.skipped || false,
+      })),
+      blockedSkcs: result.blockedSkcs,
+      createdActivityId: result.readback?.createdActivityId || null,
+      subsetRescuePath: result.subsetRescuePath,
+      error: result.error,
+    }, null, 2));
+  }
 }
 
 const finalDoc = {
@@ -690,6 +694,8 @@ console.log(JSON.stringify({
 if (!results.every(result => result.ok)) process.exitCode = 2;
 
 function summarizeTotals(results) {
+  const storeKeys = [...new Set(results.map(result => result.storeKey).filter(Boolean))];
+  const failedStoreKeys = new Set(results.filter(result => !result.ok).map(result => result.storeKey).filter(Boolean));
   const targetSkcs = results.reduce((sum, result) => sum + (result.targetSkcs?.length || 0), 0);
   const removedSkcs = results.reduce((sum, result) => (
     sum + (result.removals || [])
@@ -699,9 +705,10 @@ function summarizeTotals(results) {
   const blockedSkcs = results.reduce((sum, result) => sum + (result.blockedSkcs?.length || 0), 0);
   const createdSkcs = results.reduce((sum, result) => sum + (result.readback?.overlapSkcs?.length || 0), 0);
   return {
-    storesProcessed: results.length,
-    storesOk: results.filter(result => result.ok).length,
-    storesFailed: results.filter(result => !result.ok).length,
+    storesProcessed: storeKeys.length,
+    storesOk: storeKeys.length - failedStoreKeys.size,
+    storesFailed: failedStoreKeys.size,
+    groupsProcessed: results.length,
     targetSkcs,
     removedSkcs,
     blockedSkcs,
