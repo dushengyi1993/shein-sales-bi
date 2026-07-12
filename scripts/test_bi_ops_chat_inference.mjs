@@ -188,6 +188,26 @@ try {
   check('numeric product ref inferred', targets.productRefs, xs => asArray(xs).some(x => /^505\b/i.test(String(x))));
   check('assistant message points to auto task', result.summary.autoTaskMessageId, autoTask.id);
 
+  const missingListingCommand = '请处理 TZ · 天舟的 SM-505A电动缝纫机：TZ 缺上架链接：SM-505A电动缝纫机。先说明将影响哪些店铺和链接、当前缺口与下一步。';
+  const missingListingChat = await req(baseUrl, '/api/link-ops-chats', {
+    method: 'POST',
+    cookie,
+    body: {message: missingListingCommand, askAgent: true},
+  });
+  const missingListingTask = missingListingChat.json?.autoTask || {};
+  result.summary.missingListingTask = {
+    id: missingListingTask.id || '',
+    intents: missingListingTask.intents || [],
+    targets: missingListingTask.targets || {},
+  };
+  check('missing-on-shelf-link browser command status', missingListingChat.status, 200);
+  check('missing-on-shelf-link creates controlled task', Boolean(missingListingTask.id), true);
+  check('missing-on-shelf-link infers copy intent', missingListingTask.intents, xs => asArray(xs).includes('copy_product_draft'));
+  check('missing-on-shelf-link target is TZ only', missingListingTask?.targets?.writeStores, xs => asArray(xs).length === 1 && includesStore(xs, 'TZ'));
+  check('missing-on-shelf-link does not use empty TZ as source', missingListingTask?.targets?.sourceStores, xs => asArray(xs).length === 0);
+  check('missing-on-shelf-link searches all stores for source', missingListingTask?.targets?.sourceScope, 'all_stores');
+  check('missing-on-shelf-link keeps SM-505A product ref', missingListingTask?.targets?.productRefs, xs => asArray(xs).some(x => /SM-505A/i.test(String(x))));
+
   const scopedSourceCommand = '帮我给dl的505缝纫机再补一条链接。直接复制所有店铺里流量最高的那条链接。';
   const scopedChat = await req(baseUrl, '/api/link-ops-chats', {
     method: 'POST',
@@ -427,7 +447,7 @@ try {
   check('legacy noAutoTask cannot bypass action handling', Boolean(legacyNoAutoTask.id), true);
 
   tasks = JSON.parse(await fs.readFile(taskFile, 'utf8'));
-  check('task file has four tasks including generic field task', asArray(tasks.tasks).length, 4);
+  check('task file has five tasks including missing-link and generic field tasks', asArray(tasks.tasks).length, 5);
   result.ok = result.checks.every(x => x.pass);
 } finally {
   child.kill('SIGTERM');

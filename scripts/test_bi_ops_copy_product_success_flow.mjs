@@ -139,6 +139,12 @@ const publishPayload = {
   product_attribute_list: [
     {attribute_id: 101, attribute_value_id: 202},
     {attribute_id: 1000546, attribute_value_id: 0, attribute_value: productCase.productModel},
+    ...(productCase.requireInputCurrent ? [
+      {attribute_id: 1000616, attribute_value_id: 1004580},
+      {attribute_id: 1000462, attribute_value_id: 1006206},
+      {attribute_id: 147, attribute_value_id: 1007239},
+      {attribute_id: 1001466, attribute_value_id: 2535083},
+    ] : []),
   ],
   shelf_way: 2,
   hope_on_sale_date: '2036-06-27 10:00:00',
@@ -178,7 +184,7 @@ const fakeOpenApiCalls = [];
 let publishAttemptCount = 0;
 const fakeOpenApi = http.createServer(async (req, res) => {
   const body = await requestBody(req);
-  fakeOpenApiCalls.push({method: req.method, path: req.url.split('?')[0], url: req.url, body: body.json || body.text});
+  fakeOpenApiCalls.push({method: req.method, path: req.url.split('?')[0], url: req.url, body: body.json || body.text, publishAttemptCount});
   const pathname = req.url.split('?')[0];
   if (pathname === '/open-api/openapi-business-backend/query-store-info') {
     return sendJson(res, {
@@ -254,16 +260,24 @@ const fakeOpenApi = http.createServer(async (req, res) => {
     }
     const attrs = strongPayload?.product_attribute_list || [];
     const inputCurrent = attrs.find(row => Number(row?.attribute_id) === 1002323);
+    const inputVoltage = attrs.find(row => Number(row?.attribute_id) === 1002322);
+    const hazardousClassification = attrs.find(row => Number(row?.attribute_id) === 1002328);
     const productModel = attrs.find(row => Number(row?.attribute_id) === 1000546);
     if (productCase.requireInputCurrent) {
       if (inputCurrent?.attribute_extra_value !== '1200' || Number(inputCurrent?.attribute_value_id) !== 304302428) {
         return sendJson(res, {code: '400', msg: 'manual input current override missing or malformed', traceId: publishTraceId}, 200);
       }
+      if (inputVoltage?.attribute_extra_value !== '220-240' || Number(inputVoltage?.attribute_value_id) !== 301114341) {
+        return sendJson(res, {code: '400', msg: 'Power Adapter input voltage missing or malformed', traceId: publishTraceId}, 200);
+      }
+      if (Number(hazardousClassification?.attribute_value_id) !== 316914660) {
+        return sendJson(res, {code: '400', msg: 'hazardous materials classification missing or malformed', traceId: publishTraceId}, 200);
+      }
     } else if (inputCurrent) {
       return sendJson(res, {code: '400', msg: 'generic product unexpectedly received SM-505 input current', traceId: publishTraceId}, 200);
     }
-    if (productModel?.attribute_extra_value !== taskStandardGoodsSn || productModel?.attribute_value_id !== undefined || productModel?.attribute_value !== undefined) {
-      return sendJson(res, {code: '400', msg: 'product model not normalized to standard goods sn', traceId: publishTraceId}, 200);
+    if (productModel?.attribute_extra_value !== productCase.productModel || productModel?.attribute_value_id !== undefined || productModel?.attribute_value !== undefined) {
+      return sendJson(res, {code: '400', msg: 'product model must remain the pure model value', traceId: publishTraceId}, 200);
     }
     if (Number(strongPayload?.shelf_way) !== 2 || !strongPayload?.hope_on_sale_date) {
       return sendJson(res, {code: '400', msg: 'new link must be scheduled ten years later at payload level', traceId: publishTraceId}, 200);
@@ -326,6 +340,66 @@ const fakeOpenApi = http.createServer(async (req, res) => {
           product_type_id: 789,
           attribute_infos: [
             {attribute_id: 1000546, attribute_name: 'Product Model', attribute_mode: 0, attribute_type: 4, attribute_status: 2, attribute_value_info_list: []},
+            ...(productCase.requireInputCurrent ? [
+              {
+                attribute_id: 1002328,
+                attribute_name: 'Hazardous materials classification',
+                attribute_mode: 3,
+                attribute_type: 4,
+                attribute_status: 3,
+                attribute_value_info_list: [
+                  {attribute_value_id: 316913742, attribute_value: 'Class 9 (Miscellaneous Dangerous Goods) - Lithium-ion batteries contained in equipment'},
+                  {attribute_value_id: 316914085, attribute_value: 'Class 9 (Miscellaneous Dangerous Goods) - Lithium-ion batteries packed with equipment'},
+                  {attribute_value_id: 316914660, attribute_value: 'This product is not classified as dangerous goods'},
+                ],
+              },
+              {
+                attribute_id: 1002322,
+                attribute_name: 'Input voltage',
+                attribute_mode: 4,
+                attribute_type: 4,
+                attribute_status: 2,
+                attribute_value_info_list: [
+                  {attribute_value_id: 301114341, attribute_value: 'Vac 50–60Hz'},
+                  {attribute_value_id: 301121023, attribute_value: 'Vdc'},
+                ],
+              },
+              {
+                attribute_id: 1001466,
+                attribute_name: 'Plug(Voltage)',
+                attribute_mode: 1,
+                attribute_type: 4,
+                attribute_status: 2,
+                attribute_value_info_list: [{attribute_value_id: 2535083, attribute_value: 'UK Plug(220-240V)'}],
+              },
+              {
+                attribute_id: 1000462,
+                attribute_name: 'Hazard Category',
+                attribute_mode: 1,
+                attribute_type: 4,
+                attribute_status: 2,
+                attribute_value_info_list: [{attribute_value_id: 1006206, attribute_value: 'Others (Non-Transport Sensitive Items)'}],
+              },
+              {
+                attribute_id: 147,
+                attribute_name: 'Power Supply',
+                attribute_mode: 1,
+                attribute_type: 4,
+                attribute_status: 3,
+                attribute_value_info_list: [
+                  {attribute_value_id: 1047, attribute_value: 'Wall Plug'},
+                  {attribute_value_id: 1007239, attribute_value: 'Power Adapter'},
+                ],
+              },
+              {
+                attribute_id: 1000616,
+                attribute_name: 'Product Features',
+                attribute_mode: 1,
+                attribute_type: 4,
+                attribute_status: 3,
+                attribute_value_info_list: [{attribute_value_id: 1004580, attribute_value: 'None'}],
+              },
+            ] : []),
             {
               attribute_id: 1002323,
               attribute_name: 'Input current',
@@ -372,7 +446,7 @@ const fakeOpenApi = http.createServer(async (req, res) => {
     }, 200);
   }
   if (pathname === '/open-api/goods/searchProduct') {
-    if (SEARCH_PRODUCT_READBACK && !WEAK_READBACK_ONLY) {
+    if (SEARCH_PRODUCT_READBACK && publishAttemptCount > 0 && !WEAK_READBACK_ONLY) {
       const skcNames = asArray(body.json?.skcNameList).map(String);
       const spuNames = asArray(body.json?.spuNameList).map(String);
       const skuCodes = asArray(body.json?.skuCodeList).map(String);
@@ -491,6 +565,11 @@ const whitelistFile = await writeJson('whitelist.json', {
     allowedRoles: ['owner'],
   }],
 });
+const readProbeSummaryFile = await writeJson('read-probes.latest.json', {
+  generatedAt: new Date().toISOString(),
+  counts: {total: 1, readProbeOk: 1, pending: 0, failed: 0},
+  results: [{storeKey: 'HL', ok: true, status: 'read_probe_ok'}],
+});
 const htpasswdFile = path.join(tmpRoot, 'empty.htpasswd');
 await fs.writeFile(htpasswdFile, '', 'utf8');
 const stateFile = path.join(tmpRoot, 'action_state.json');
@@ -521,6 +600,7 @@ const portal = spawn(process.execPath, [
     SHEIN_BI_CORE_WARMUP_DISABLED: '1',
     SHEIN_OPENAPI_CONFIG_FILE: openapiConfigFile,
     SHEIN_BI_OPS_WRITE_WHITELIST_FILE: whitelistFile,
+    SHEIN_OPENAPI_READ_PROBE_SUMMARY_FILE: readProbeSummaryFile,
     SHEIN_LINK_OPS_OPENAPI_EXECUTOR_TIMEOUT_MS: '5000',
     SHEIN_LINK_OPS_READBACK_MAX_PAGES: '1',
   },
@@ -682,6 +762,9 @@ try {
     check('prevalid-retry first confirm status', executed.status, 200);
     check('prevalid-retry first confirm reaches pre-valid failure', firstRetryLifecycle?.status || firstRetryLifecycle?.lifecycleStatus || '', 'publish_pre_valid_failed');
     check('prevalid-retry first confirm does not close task', firstRetryRawTask?.status || '', 'waiting_review');
+    check('prevalid-retry answer does not make operator guess platform fields', firstRetryAnswer, text => !/你也可以.*补|直接在聊天里补/i.test(String(text || '')));
+    check('prevalid-retry answer explains automatic recheck before retry', firstRetryAnswer, text => /自动重新整理并检查|资料检查通过前不会再次提交/.test(String(text || '')));
+    check('prevalid-retry answer de-duplicates platform field messages', (firstRetryAnswer.match(/商品标题不能为空/g) || []).length, 1);
     executed = await req('/api/link-ops-chats', {
       method: 'POST',
       cookie,
@@ -777,7 +860,7 @@ try {
 
   result.summary.fakeOpenApiCallPaths = fakeOpenApiCalls.map(call => call.path);
   check('fake publish endpoint called expected times', fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/product/publishOrEdit').length, PREVALID_RETRY ? 2 : 1);
-  check('fake readback endpoint called', fakeOpenApiCalls.some(call => call.path === '/open-api/openapi-business-backend/product/query' || call.path === '/open-api/goods/spu-info'), PREVALID_FAIL ? false : true);
+  check('fake readback endpoint called', fakeOpenApiCalls.some(call => call.publishAttemptCount > 0 && (call.path === '/open-api/openapi-business-backend/product/query' || call.path === '/open-api/goods/spu-info' || call.path === '/open-api/goods/searchProduct')), PREVALID_FAIL ? false : true);
   if (!PREVALID_FAIL && !WEAK_READBACK_ONLY) {
     check('fake publish-spu readback called first', fakeOpenApiCalls.some(call => call.path === '/open-api/goods/spu-info' && call.body?.spuName === 'v-smoke-copy-product'), true);
     if (SEARCH_PRODUCT_READBACK) {
@@ -799,16 +882,21 @@ try {
   check('publish square image sort moved away from main sort', publishCall?.body?.skc_list?.[0]?.image_info?.image_info_list?.find(row => Number(row?.image_type) === 5)?.image_sort, value => Number(value) > 1);
   const publishedAttrs = asArray(publishCall?.body?.product_attribute_list);
   const publishedInputCurrent = publishedAttrs.find(row => Number(row?.attribute_id) === 1002323);
+  const publishedInputVoltage = publishedAttrs.find(row => Number(row?.attribute_id) === 1002322);
+  const publishedHazardousClassification = publishedAttrs.find(row => Number(row?.attribute_id) === 1002328);
   const publishedProductModel = publishedAttrs.find(row => Number(row?.attribute_id) === 1000546);
   const publishedArName = asArray(publishCall?.body?.multi_language_name_list).find(row => String(row?.language || '').toLowerCase() === 'ar');
   check('publish default ar title copied', publishedArName?.name || '', productCase.arName);
   if (productCase.requireInputCurrent) {
     check('publish SM-505 input current applied', publishedInputCurrent?.attribute_extra_value || '', '1200');
     check('publish SM-505 input current unit value id from official template', Number(publishedInputCurrent?.attribute_value_id), 304302428);
+    check('publish Power Adapter input voltage derived from Plug(Voltage)', publishedInputVoltage?.attribute_extra_value || '', '220-240');
+    check('publish input voltage uses official Vac unit value id', Number(publishedInputVoltage?.attribute_value_id), 301114341);
+    check('publish non-transport hazard category maps to non-dangerous classification', Number(publishedHazardousClassification?.attribute_value_id), 316914660);
   } else {
     check('publish generic product does not receive SM-505 input current', Boolean(publishedInputCurrent), false);
   }
-  check('publish product model uses task standard goods sn', publishedProductModel?.attribute_extra_value || '', taskStandardGoodsSn);
+  check('publish product model remains pure model', publishedProductModel?.attribute_extra_value || '', productCase.productModel);
   check('publish text attribute removes zero value id', publishedProductModel?.attribute_value_id, undefined);
   check('publish new link scheduled at payload level', publishCall?.body?.shelf_way, 2);
   check('publish new link schedule date present', Boolean(publishCall?.body?.hope_on_sale_date), true);
@@ -829,7 +917,7 @@ try {
     result.summary.operatorResolveDeniedStatus = operatorResolveDenied.status;
     result.summary.operatorResolveDeniedError = operatorResolveDenied.json?.error || '';
     check('operator manual resolve denied status', operatorResolveDenied.status, 403);
-    check('operator manual resolve denied reason', operatorResolveDenied.json?.error || '', text => /全店管理账号|人工核销|权限/.test(String(text || '')));
+    check('operator manual resolve denied reason', operatorResolveDenied.json?.error || '', text => /全店管理账号|人工核销|权限|其他 BI 账号/.test(String(text || '')));
 
     const ownerResolve = await req('/api/link-ops-tasks', {
       method: 'PATCH',

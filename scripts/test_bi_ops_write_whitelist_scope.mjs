@@ -181,6 +181,11 @@ const whitelistFile = await writeJson('whitelist.json', {
     },
   ],
 });
+const readProbeSummaryFile = await writeJson('read-probes.latest.json', {
+  generatedAt: new Date().toISOString(),
+  counts: {total: 2, readProbeOk: 2, pending: 0, failed: 0},
+  results: ['HL', 'DX'].map(storeKey => ({storeKey, ok: true, status: 'read_probe_ok'})),
+});
 const htpasswdFile = path.join(tmpRoot, 'empty.htpasswd');
 await fs.writeFile(htpasswdFile, '', 'utf8');
 const stateFile = path.join(tmpRoot, 'action_state.json');
@@ -211,6 +216,7 @@ const child = spawn(process.execPath, [
     SHEIN_BI_CORE_WARMUP_DISABLED: '1',
     SHEIN_OPENAPI_CONFIG_FILE: openapiConfigFile,
     SHEIN_BI_OPS_WRITE_WHITELIST_FILE: whitelistFile,
+    SHEIN_OPENAPI_READ_PROBE_SUMMARY_FILE: readProbeSummaryFile,
     SHEIN_LINK_OPS_OPENAPI_EXECUTOR_TIMEOUT_MS: '750',
   },
   stdio: ['ignore', 'pipe', 'pipe'],
@@ -308,12 +314,17 @@ try {
   const dxRow = findStoreRow(caps.json, 'DX');
   const hlCopy = actionFor(hlRow, 'copy_product_draft');
   const hlTitle = actionFor(hlRow, 'update_title');
+  const operatorCaps = await req('/api/openapi-capabilities', {cookie: operatorCookie});
+  const operatorHlRow = findStoreRow(operatorCaps.json, 'HL');
+  const operatorHlCopy = actionFor(operatorHlRow, 'copy_product_draft');
   result.summary.capabilitiesStatus = caps.status;
   result.summary.capabilitiesRows = countCapabilityRows(caps.json);
   result.summary.safeWriteOperations = caps.json?.safety?.safeWriteOperations || null;
   result.summary.realSubmitWhitelist = caps.json?.safety?.realSubmitWhitelist || null;
   result.summary.hlWriteConfirmable = Boolean(hlRow?.writeConfirmable);
   result.summary.hlCopyRealSubmitSupported = Boolean(hlCopy?.realSubmitSupported);
+  result.summary.ownerHlActorCanSubmit = Boolean(hlCopy?.actorCanSubmit);
+  result.summary.operatorHlActorCanSubmit = Boolean(operatorHlCopy?.actorCanSubmit);
   result.summary.hlTitleRealSubmitSupported = Boolean(hlTitle?.realSubmitSupported);
   result.summary.dxSafeStoreAllowed = Boolean(dxRow?.safeWrite?.storeAllowed);
   check('capabilities status', caps.status, 200);
@@ -323,6 +334,8 @@ try {
   check('isolated safeWrite allowed store is HL only', asArray(caps.json?.safety?.safeWriteOperations?.allowedStores).join(','), 'HL');
   check('isolated whitelist enabled', Boolean(caps.json?.safety?.realSubmitWhitelist?.enabled), true);
   check('HL copy globally confirmable when scoped gates configured', result.summary.hlCopyRealSubmitSupported, true);
+  check('owner HL copy is actor-confirmable', result.summary.ownerHlActorCanSubmit, true);
+  check('operator HL copy is not actor-confirmable without account whitelist', result.summary.operatorHlActorCanSubmit, false);
   check('HL title remains non-confirmable operation', result.summary.hlTitleRealSubmitSupported, false);
   check('DX is outside safeWrite store scope', result.summary.dxSafeStoreAllowed, false);
 

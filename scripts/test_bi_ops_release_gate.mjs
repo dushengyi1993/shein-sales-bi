@@ -14,6 +14,7 @@ import {fileURLToPath} from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHECK_FILES = [
   'scripts/serve_bi_portal.mjs',
+  'scripts/test_portal_security.mjs',
   'scripts/bi_ops_cli.mjs',
   'lib/shein_openapi_client.mjs',
   'scripts/test_shein_openapi_client_windows_guard.mjs',
@@ -49,6 +50,8 @@ const CHECK_FILES = [
   'scripts/test_bi_ops_frontend_confirm_feedback.mjs',
   'scripts/test_bi_ops_portal_shell_sync.mjs',
   'scripts/test_bi_ops_source_candidate_policy.mjs',
+  'scripts/test_link_ops_preflight_product_lock.mjs',
+  'scripts/test_link_ops_product_model_identity_boundary.mjs',
   'scripts/test_link_ops_product_draft_openapi_detail.mjs',
   'scripts/test_link_ops_executor_live_source_titles.mjs',
   'scripts/test_shein_store_identity_merchant_fallback.mjs',
@@ -76,6 +79,9 @@ const CHECK_FILES = [
 ];
 const DIFF_CHECK_FILES = [
   'scripts/serve_bi_portal.mjs',
+  'scripts/test_portal_security.mjs',
+  'infra/nginx/shein-bi.conf',
+  'infra/caddy/Caddyfile.shein-bi',
   'scripts/bi_ops_cli.mjs',
   'lib/shein_openapi_client.mjs',
   'scripts/test_shein_openapi_client_windows_guard.mjs',
@@ -112,6 +118,8 @@ const DIFF_CHECK_FILES = [
   'scripts/bi_app/client.js',
   'scripts/bi_app/styles.css',
   'scripts/test_bi_ops_source_candidate_policy.mjs',
+  'scripts/test_link_ops_preflight_product_lock.mjs',
+  'scripts/test_link_ops_product_model_identity_boundary.mjs',
   'scripts/test_link_ops_product_draft_openapi_detail.mjs',
   'scripts/test_link_ops_executor_live_source_titles.mjs',
   'scripts/test_shein_store_identity_merchant_fallback.mjs',
@@ -138,6 +146,59 @@ const DIFF_CHECK_FILES = [
   'docs/bi-ops-openapi-automation-plan.md',
   'docs/shein-openapi-integration.md',
 ];
+const BI_OPS_V2_JS_FILES = [
+  'lib/warehouse_pg.mjs',
+  'lib/link_ops_repository.mjs',
+  'lib/link_ops_json_repository.mjs',
+  'lib/link_ops_store_gateway.mjs',
+  'lib/link_ops_job_worker.mjs',
+  'lib/link_ops_migration_compat.mjs',
+  'lib/bi_ops_intent_planner.mjs',
+  'lib/bi_ops_model_policy.mjs',
+  'lib/bi_ops_agent_governor.mjs',
+  'lib/bi_ops_query_context.mjs',
+  'lib/owner_knowledge_policy.mjs',
+  'lib/owner_knowledge_service.mjs',
+  'lib/owner_knowledge_local_collector.mjs',
+  'scripts/owner_knowledge_sync.mjs',
+  'scripts/owner_knowledge_admin.mjs',
+  'scripts/test_owner_knowledge_policy.mjs',
+  'scripts/test_owner_knowledge_service.mjs',
+  'scripts/test_owner_knowledge_local_collector.mjs',
+  'scripts/test_owner_knowledge_portal_flow.mjs',
+  'scripts/bi_ops_intent_planner.mjs',
+  'scripts/migrate_link_ops_runtime_to_postgres.mjs',
+  'scripts/export_link_ops_postgres_snapshot.mjs',
+  'scripts/test_bi_ops_intent_job_flow.mjs',
+  'scripts/test_bi_ops_multitenant_isolation.mjs',
+  'scripts/test_migrate_link_ops_runtime_to_postgres.mjs',
+  'scripts/test_link_ops_job_worker.mjs',
+  'scripts/test_link_ops_json_repository.mjs',
+  'scripts/test_link_ops_migration_compat.mjs',
+  'scripts/test_link_ops_schema_sync.mjs',
+  'scripts/test_link_ops_store_gateway.mjs',
+  'scripts/test_bi_ops_intent_planner.mjs',
+  'scripts/test_bi_ops_model_policy.mjs',
+  'scripts/test_bi_ops_agent_governor.mjs',
+  'scripts/test_bi_ops_query_context.mjs',
+];
+const BI_OPS_V2_REQUIRED_ARTIFACTS = [
+  'infra/warehouse/schema.sql',
+  'infra/warehouse/migrations/20260711_001_link_ops_runtime.sql',
+  'scripts/provision_link_ops_postgres_role.sh',
+  'scripts/bi_app/styles.css',
+  'outputs/bi-portal/index.html',
+  'docs/bi-ops-v2-release-2026-07-12.md',
+  'docs/cloud-bi-operations.md',
+  'docs/partner-codex-ops-setup.md',
+  'docs/scripts-inventory.md',
+  'infra/systemd/shein-bi-portal.service',
+  'infra/systemd/shein-bi-lark-sales-qa.service',
+  'infra/systemd/README.md',
+  'scripts/install_owner_knowledge_sync_task.ps1',
+];
+CHECK_FILES.push(...BI_OPS_V2_JS_FILES);
+DIFF_CHECK_FILES.push(...BI_OPS_V2_JS_FILES, ...BI_OPS_V2_REQUIRED_ARTIFACTS);
 const STALE_CONFIRM_TEXT = 'SHEIN_' + 'HL_OPENAPI_SUBMIT';
 const SK5110_LOCAL_ARTIFACTS = [
   'tmp/sk5110-batch-prep/sk5110-batch-draft-plan.local-only.json',
@@ -193,10 +254,30 @@ async function scanStaleConfirmText() {
   return {ok: hits.length === 0, hits};
 }
 
+async function checkBiOpsV2DeploymentBoundary() {
+  const portalUnit = await fs.readFile(path.join(ROOT, 'infra/systemd/shein-bi-portal.service'), 'utf8');
+  const systemdReadme = await fs.readFile(path.join(ROOT, 'infra/systemd/README.md'), 'utf8');
+  const releaseDoc = await fs.readFile(path.join(ROOT, 'docs/bi-ops-v2-release-2026-07-12.md'), 'utf8');
+  const activeLarkCommand = /^[ \t]*(?!#)systemctl\s+(?:enable|start|restart)(?:\s+--now)?[^\r\n]*shein-bi-lark-sales-qa\.service/im;
+  const checks = {
+    postgresRepository: /SHEIN_LINK_OPS_STORE=postgres/.test(portalUnit),
+    restrictedPostgresRole: /SHEIN_WAREHOUSE_PG_USER=shein_link_ops/.test(portalUnit),
+    durableJobWorker: /SHEIN_BI_JOB_WORKER_ENABLED=1/.test(portalUnit),
+    boundedAgentConcurrency: /SHEIN_BI_AGENT_MAX_CONCURRENT=2/.test(portalUnit),
+    tieredModelRouting: /SHEIN_BI_AGENT_MODEL_INTENT=gpt-5\.6-luna/.test(portalUnit)
+      && /SHEIN_BI_AGENT_MODEL_BALANCED=gpt-5\.6-terra/.test(portalUnit)
+      && /SHEIN_BI_AGENT_MODEL_DEEP=gpt-5\.6-sol/.test(portalUnit),
+    larkPausedInRunbook: /shein-bi-lark-sales-qa\.service[^\r\n]*disabled\s*\+\s*inactive/i.test(systemdReadme),
+    larkPausedInRelease: /shein-bi-lark-sales-qa\.service[^\r\n]*disabled\s*\+\s*inactive/i.test(releaseDoc),
+    noActiveLarkStartCommand: !activeLarkCommand.test(systemdReadme) && !activeLarkCommand.test(releaseDoc),
+  };
+  return {ok: Object.values(checks).every(Boolean), checks};
+}
+
 async function main() {
   const results = [];
   const missing = [];
-  for (const rel of CHECK_FILES) {
+  for (const rel of [...CHECK_FILES, ...BI_OPS_V2_REQUIRED_ARTIFACTS]) {
     if (!(await pathExists(rel))) missing.push(rel);
   }
   if (missing.length) {
@@ -208,6 +289,7 @@ async function main() {
     results.push({name: `node --check ${rel}`, ...(await run(process.execPath, ['--check', rel]))});
   }
   results.push({name: 'permission matrix smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_permissions.mjs']))});
+  results.push({name: 'portal security and TLS proxy-chain config smoke', ...(await run(process.execPath, ['scripts/test_portal_security.mjs']))});
   results.push({name: 'CLI flow smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_cli_flow.mjs']))});
   results.push({name: 'shared OpenAPI client Windows guard smoke', ...(await run(process.execPath, ['scripts/test_shein_openapi_client_windows_guard.mjs']))});
   results.push({name: 'local OpenAPI boundary smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_local_openapi_boundary.mjs']))});
@@ -220,6 +302,7 @@ async function main() {
   results.push({name: 'ops frontend confirm feedback smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_frontend_confirm_feedback.mjs']))});
   results.push({name: 'ops portal shell sync smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_portal_shell_sync.mjs']))});
   results.push({name: 'source candidate policy smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_source_candidate_policy.mjs']))});
+  results.push({name: 'preflight product source/date lock smoke', ...(await run(process.execPath, ['scripts/test_link_ops_preflight_product_lock.mjs']))});
   results.push({name: 'OpenAPI product-detail payload mapper smoke', ...(await run(process.execPath, ['scripts/test_link_ops_product_draft_openapi_detail.mjs']))});
   results.push({name: 'OpenAPI live source title enrichment smoke', ...(await run(process.execPath, ['scripts/test_link_ops_executor_live_source_titles.mjs']))});
   results.push({name: 'link retire candidate 15-day guard smoke', ...(await run(process.execPath, ['scripts/test_link_retire_candidate_policy.mjs']))});
@@ -256,17 +339,20 @@ async function main() {
   results.push({name: 'OpenAPI catalog executor smoke', ...(await run(process.execPath, ['scripts/test_openapi_catalog_executor.mjs']))});
   results.push({name: 'official doc detail parser smoke', ...(await run(process.execPath, ['scripts/test_shein_openapi_doc_detail_parser.mjs']))});
   results.push({name: 'maintenance readiness smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_maintenance_readiness.mjs']))});
+  results.push({name: 'deterministic BI Ops V2 suite', ...(await run(process.execPath, ['scripts/run_deterministic_tests.mjs']))});
 
   if (await pathExists('.git')) {
     results.push({name: 'git diff --check automation scope', ...(await run('git', ['diff', '--check', '--', ...DIFF_CHECK_FILES]))});
   }
 
   const staleConfirm = await scanStaleConfirmText();
-  const ok = results.every(r => r.ok) && staleConfirm.ok;
+  const biOpsV2DeploymentBoundary = await checkBiOpsV2DeploymentBoundary();
+  const ok = results.every(r => r.ok) && staleConfirm.ok && biOpsV2DeploymentBoundary.ok;
   const summary = {
     ok,
     checks: results.map(r => ({name: r.name, code: r.code, ok: r.ok, skipped: Boolean(r.skipped), reason: r.reason || '', durationMs: r.durationMs})),
     staleConfirm,
+    biOpsV2DeploymentBoundary,
     notes: [
       'permission and CLI flow smokes use isolated temporary auth/task/audit files',
       'chat inference smoke proves one chat send can create a current-session same-store copy task without calling the LLM or SHEIN',
@@ -277,6 +363,7 @@ async function main() {
       'ops frontend confirm feedback smoke proves the page stays chat-only, slow actions show busy feedback, task evidence is summarized, and Markdown rendering has readable structure',
       'ops portal shell sync smoke proves the generated production HTML carries the current-session task filtering and no stale global task loader',
       'source candidate policy smoke proves explicit cross-store sources are respected while same-store source links remain valid when no source is explicit',
+      'preflight product source/date lock smoke proves execute reuses the source link and scheduled date approved during dry-run, including recovery from a later blocked run',
       'OpenAPI product-detail mapper smoke proves copy_product_draft dynamically maps spu-info attributes, SKU dimensions and cost without inventing supplier_sku',
       'OpenAPI live source title enrichment smoke proves stale source caches missing Arabic titles are repaired from official spu-info before publish validation',
       'link retire candidate smoke proves low-exposure zero-sales candidates exclude first-shelf links inside the fixed 15-day protection window even when newGoodsTag is empty',
@@ -301,6 +388,8 @@ async function main() {
       'cloud image asset smoke proves bi_ops_cli image execute uses the BI session/cloud endpoint and fake OpenAPI, not local SHEIN credentials',
       'official doc detail parser smoke uses offline fixtures and never prints/saves cookies',
       'maintenance readiness smoke requires schema, per-store permission and strong readback before pilot_ready',
+      'deterministic BI Ops V2 suite covers PostgreSQL repositories, migration compatibility, durable jobs, intent planning, model governance, account isolation, CLI and frontend projections',
+      'BI Ops V2 deployment boundary requires the restricted PostgreSQL role, durable worker, bounded model routing and an explicitly paused Lark service',
       'production safety smoke asserts production-style configs remain locked unless explicitly configured; write-enabled smokes use temporary fake OpenAPI only',
       'this gate does not submit real SHEIN writes',
     ],

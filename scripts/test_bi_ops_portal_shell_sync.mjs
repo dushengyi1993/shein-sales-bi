@@ -18,7 +18,7 @@ function ok(cond, msg) {
 }
 
 for (const required of [
-  'sessionId=__none__',
+  'OPS.tasks={version:1,updatedAt:null,tasks:[]}',
   'opsTasksForSession',
   'pendingSession',
   'opsTaskProgressOnly',
@@ -31,12 +31,23 @@ for (const required of [
   'function opsTaskAssetsHtml',
   '当前处理附件',
   'OPS_UPLOAD_LIMIT_TEXT',
+  'function opsJobRows',
+  'function opsJobBanner',
+  'function opsPlanningNote',
+  '/api/link-ops-jobs?limit=80',
+  '后台辅助检查',
+  '不会直接提交 SHEIN',
+  '全局店铺 API 能力',
+  '已接通',
+  '可系统检查',
+  '当前账号可受控提交',
 ]) {
   ok(client.includes(required), `source client missing required ops marker: ${required}`);
   ok(html.includes(required), `generated portal shell missing required ops marker: ${required}`);
 }
 
 for (const stale of [
+  'sessionId=__none__',
   "opsApi('/api/link-ops-tasks?limit=80')",
   "Promise.all([opsApi('/api/openapi-capabilities'),opsApi('/api/link-ops-chats?limit=50'),opsApi('/api/link-ops-tasks?limit=80')])",
   '查看审计',
@@ -51,6 +62,9 @@ for (const stale of [
   'function explainOpsUploadMissing',
   '先在聊天里说清楚要处理什么',
   '先创建处理',
+  '已接通 · <i class="ops-num">${M(read)}</i> 可看',
+  '已验证读',
+  '可真实提交',
 ]) {
   ok(!html.includes(stale), `generated portal shell still contains stale/operator-facing wording: ${stale}`);
 }

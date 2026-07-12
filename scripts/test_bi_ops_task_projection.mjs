@@ -7,6 +7,7 @@
  * wording and verifies /api/link-ops-tasks only returns a safe progress summary.
  */
 import fs from 'node:fs/promises';
+import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
@@ -69,6 +70,7 @@ function assertNoRawTaskLeak(label, json) {
 }
 
 let portal = null;
+let fakeOpenApi = null;
 try {
   const authFile = await writeJson('auth.json', {
     users: [{
@@ -220,11 +222,20 @@ try {
   const auditFile = path.join(tmpRoot, 'audit.jsonl');
   const sessionSecretFile = path.join(tmpRoot, 'session_secret');
   const manualLoginStateFile = path.join(tmpRoot, 'manual_login.json');
+  const fakeOpenApiPort = await freePort();
+  fakeOpenApi = http.createServer((_req, res) => {
+    res.writeHead(200, {'content-type': 'application/json; charset=utf-8'});
+    res.end(JSON.stringify({code: '0', msg: 'projection-test', info: {}, data: {}}));
+  });
+  await new Promise((resolve, reject) => {
+    fakeOpenApi.once('error', reject);
+    fakeOpenApi.listen(fakeOpenApiPort, '127.0.0.1', resolve);
+  });
   const openapiConfigFile = await writeJson('openapi.json', {
     environment: 'projection-test',
     market: 'SA',
     cooperationMode: '半托管',
-    apiBaseUrls: {prodSemiManaged: 'https://example.invalid/openapi'},
+    apiBaseUrls: {prodSemiManaged: `http://127.0.0.1:${fakeOpenApiPort}/openapi`},
     stores: [{
       storeKey: 'DX',
       enabled: true,
@@ -383,6 +394,7 @@ try {
       }],
     },
   });
+  if (uploaded.status !== 200) result.assetUploadError = uploaded.json || uploaded.text;
   check('assets POST status', uploaded.status, 200);
   check('assets POST projected asset count', uploaded.json?.assets?.length || 0, 2);
   check('assets POST accepts xlsx as spreadsheet', uploaded.json?.assets?.some?.(a => a.name === 'projection-plan.xlsx' && a.kind === 'spreadsheet'), true);
@@ -451,6 +463,7 @@ try {
   result.ok = result.checks.every(row => row.pass);
 } finally {
   if (portal) portal.kill('SIGTERM');
+  if (fakeOpenApi) await new Promise(resolve => fakeOpenApi.close(resolve));
   await sleep(200);
 }
 

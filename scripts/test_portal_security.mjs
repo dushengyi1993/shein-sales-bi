@@ -48,10 +48,17 @@ assert.deepEqual(order, ['a:start', 'a:end', 'b:start', 'b:end']);
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const serverSource = fs.readFileSync(path.join(root, 'scripts', 'serve_bi_portal.mjs'), 'utf8');
+const nginxSource = fs.readFileSync(path.join(root, 'infra', 'nginx', 'shein-bi.conf'), 'utf8');
+const caddySource = fs.readFileSync(path.join(root, 'infra', 'caddy', 'Caddyfile.shein-bi'), 'utf8');
 assert.match(serverSource, /const esc = value =>/);
 assert.match(serverSource, /sameOriginUrl\(s\.openUrl\)/);
 assert.doesNotMatch(serverSource, /data-token=/);
 assert.match(serverSource, /filter\(session => !authRequired \|\| actorCanWriteStores/);
 assert.match(serverSource, /handleManualLoginWsUpgrade\(req, socket, args, \{authRequired, authUsers, sessionSecret\}\)/);
+assert.match(nginxSource, /server_name\s+sa\.dushengyi\.cc\b/);
+assert.match(nginxSource, /proxy_set_header\s+X-Forwarded-Proto\s+\$http_x_forwarded_proto\s*;/);
+assert.doesNotMatch(nginxSource, /proxy_set_header\s+X-Forwarded-Proto\s+\$scheme\s*;/);
+assert.match(caddySource, /https:\/\/sa\.dushengyi\.cc:10443/);
+assert.match(caddySource, /header_up\s+X-Forwarded-Proto\s+https/);
 
 console.log('portal_security: headers, origin guard, login limiter, and mutation queue checks passed');

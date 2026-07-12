@@ -14,7 +14,7 @@ import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const DEFAULT_BASE_URL = process.env.SHEIN_BI_BASE_URL || 'https://shein-bi.dushengyi.xyz';
+const DEFAULT_BASE_URL = process.env.SHEIN_BI_BASE_URL || 'https://sa.dushengyi.cc';
 const DEFAULT_SESSION_FILE = process.env.SHEIN_BI_OPS_SESSION_FILE
   || path.join(os.homedir(), '.shein-bi', 'ops-session.json');
 const SUBMIT_CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
@@ -28,7 +28,11 @@ function parseArgs(argv) {
     username: process.env.SHEIN_BI_USERNAME || '',
     password: process.env.SHEIN_BI_PASSWORD || '',
     taskId: '',
+    jobId: '',
+    chatSessionId: '',
     text: '',
+    profile: '',
+    askAgent: true,
     stores: [],
     sourceStores: [],
     writeStores: [],
@@ -41,6 +45,8 @@ function parseArgs(argv) {
     mode: 'dry-run',
     confirm: '',
     status: '',
+    globalView: false,
+    waitSeconds: 0,
     note: '',
     docEvidenceFile: '',
     storeProbeFile: '',
@@ -91,7 +97,11 @@ function parseArgs(argv) {
     else if (a === '--password' || a === '-p') args.password = String(argv[++i] || '');
     else if (a === '--password-stdin') args.passwordStdin = true;
     else if (a === '--task-id' || a === '--id') args.taskId = String(argv[++i] || '').trim();
+    else if (a === '--job-id') args.jobId = String(argv[++i] || '').trim();
+    else if (a === '--chat-session' || a === '--chat-session-id') args.chatSessionId = String(argv[++i] || '').trim();
     else if (a === '--text' || a === '--command') args.text = String(argv[++i] || '').trim();
+    else if (a === '--profile' || a === '--model-profile') args.profile = String(argv[++i] || '').trim().toLowerCase();
+    else if (a === '--no-agent') args.askAgent = false;
     else if (a === '--store' || a === '--stores') args.stores.push(...splitList(argv[++i]));
     else if (a === '--source-store' || a === '--source-stores' || a === '--read-store' || a === '--read-stores') args.sourceStores.push(...splitList(argv[++i]));
     else if (a === '--target-store' || a === '--target-stores' || a === '--write-store' || a === '--write-stores') args.writeStores.push(...splitList(argv[++i]));
@@ -104,6 +114,8 @@ function parseArgs(argv) {
     else if (a === '--mode') args.mode = String(argv[++i] || 'dry-run').trim();
     else if (a === '--confirm') args.confirm = String(argv[++i] || '').trim();
     else if (a === '--status') args.status = String(argv[++i] || '').trim();
+    else if (a === '--all' || a === '--scope-all') args.globalView = true;
+    else if (a === '--wait-seconds') args.waitSeconds = Number(argv[++i] || 0);
     else if (a === '--note') args.note = String(argv[++i] || '').trim();
     else if (a === '--doc-evidence') args.docEvidenceFile = path.resolve(String(argv[++i] || ''));
     else if (a === '--store-probe') args.storeProbeFile = path.resolve(String(argv[++i] || ''));
@@ -219,6 +231,14 @@ Usage:
   node scripts/bi_ops_cli.mjs openapi-call --doc-id <docId> --store FY --body-json '{}'
   node scripts/bi_ops_cli.mjs openapi-call --doc-id <GET docId> --store FY --query-json '{"id":"..."}'
   node scripts/bi_ops_cli.mjs openapi-catalog-plan --format summary [--out plan.json]
+  node scripts/bi_ops_cli.mjs ask --text "今天全部店铺销售额是多少"
+  node scripts/bi_ops_cli.mjs chats
+  node scripts/bi_ops_cli.mjs chat --text "把 DX 的 PA4-6L 库存改成 30"
+  node scripts/bi_ops_cli.mjs chat --chat-session <id> --text "先做系统检查，不要提交"
+  node scripts/bi_ops_cli.mjs chat --text "把 DX 的 PA4-6L 库存改成 30" --wait-seconds 120
+  node scripts/bi_ops_cli.mjs jobs [--status queued|running|succeeded|failed|uncertain_write]
+  node scripts/bi_ops_cli.mjs job --job-id <id>
+  node scripts/bi_ops_cli.mjs wait-job --job-id <id> [--wait-seconds 120]
   node scripts/bi_ops_cli.mjs tasks
   node scripts/bi_ops_cli.mjs create --text "把 520a 在 DL 生成下架预检" --stores DL --products 520a
   node scripts/bi_ops_cli.mjs create --text "复制 CX 的 SM-961 到 HL" --source-stores CX --target-stores HL --products SM-961
@@ -236,6 +256,11 @@ Options:
   --session-file   默认 ${DEFAULT_SESSION_FILE}
   --source-stores  跨店复制时只读来源店铺
   --target-stores  跨店复制时真实写入目标店铺；不填则沿用 --stores
+  --chat-session   chat/tasks 用；继续指定的自动运营会话
+  --profile        Owner 可选 fast / balanced / deep / owner；服务端仍会按风险升级且不会因此绕过权限
+  --no-agent       chat 用；只走确定性意图/任务规则，不调用模型
+  --wait-seconds   chat/wait-job 用；等待后台结构化规划完成的最长秒数
+  --scope-all      Owner 的 jobs 全局只读视图；不会扩大写权限
   --operation      doctor 用；可填 copy_product_draft / activate_link / retire_link / update_title / update_images / update_inventory / update_supply_price / update_product_price / certificate_review
   --require-real-submit  doctor 用；要求所选店铺+动作已可真实提交，否则退出非 0
   --doc-evidence / --store-probe / --readback-evidence
@@ -263,6 +288,7 @@ Safety:
   - openapi-call 是目录驱动 JSON 兜底工具；GET 用 --query-json/--query-file，POST 用 --body-json/--body-file；文件上传/WebHook 会被阻断，真实 execute 只能在云端边界内使用。
   - openapi-catalog-plan 只读取本地官方目录/schema，输出全量接口归位矩阵，不联网、不启用 WebHook receiver。
   - 所有任务创建/预检/执行/审计都走云端账号权限和审计。
+  - ask/chat 通过同一 BI 账号、会话归属、模型限流和审计边界；profile 只影响理解深度，不改变写权限。
   - execute 仍需服务端确认任务已预检通过，并且确认文本精确匹配。
   - resolve 只用于已提交待回读/需人工处理任务的人工核销；服务端只允许全店管理账号执行。`;
 }
@@ -376,7 +402,7 @@ function print(data, pretty = false) {
   if (Array.isArray(data?.rows) && data?.counts) {
     const safe = data?.safety?.safeWriteOperations || {};
     const whitelist = data?.safety?.realSubmitWhitelist || {};
-    console.log(`OpenAPI 总账：${data.counts.authorized || 0}/${data.counts.total || data.rows.length} 已授权，${data.counts.readReady || 0} 只读可用，${data.counts.writeConfirmable || 0} 店有真实提交适配器`);
+    console.log(`OpenAPI 总账：${data.counts.apiConnected ?? data.counts.authorized ?? 0}/${data.counts.total || data.rows.length} API 已接通，${data.counts.writePrecheckReady || 0} 店可系统检查，${data.counts.actorControlledSubmitReady ?? 0} 店当前账号可受控提交`);
     console.log(`真实写总闸门：${safe.enabled ? '开启' : '关闭'}；真实写试点白名单：${whitelist.enabled ? `开启(${whitelist.ruleCount || 0}条)` : '关闭'}；真实提交仍必须命中 人 + 店 + 动作 白名单`);
     for (const row of data.rows) {
       const actions = (Array.isArray(row.actionCapabilities) ? row.actionCapabilities : [])
@@ -401,7 +427,7 @@ function print(data, pretty = false) {
       console.log(`写权限：${Array.isArray(data.user.writeStores) ? data.user.writeStores.join(',') : '-'}`);
     }
     if (data.counts) {
-      console.log(`OpenAPI：${data.counts.authorized || 0}/${data.counts.total || 0} 已授权，${data.counts.readReady || 0} 只读可用，${data.counts.writeConfirmable || 0} 可真实提交`);
+      console.log(`OpenAPI：${data.counts.apiConnected ?? data.counts.authorized ?? 0}/${data.counts.total || 0} API 已接通，${data.counts.writePrecheckReady || 0} 可系统检查，${data.counts.actorControlledSubmitReady ?? 0} 当前账号可受控提交`);
     }
     const safe = data.safety?.safeWriteOperations || {};
     const whitelist = data.safety?.realSubmitWhitelist || {};
@@ -829,6 +855,25 @@ async function runCatalogExecutor(args) {
   process.exitCode = result.code || 0;
 }
 
+async function waitForLinkOpsJob(args, jobId) {
+  const id = String(jobId || '').trim();
+  if (!id) throw new Error('wait-job requires --job-id');
+  const seconds = Number.isFinite(Number(args.waitSeconds)) && Number(args.waitSeconds) > 0
+    ? Math.min(3_600, Number(args.waitSeconds))
+    : 120;
+  const deadline = Date.now() + seconds * 1_000;
+  let last = null;
+  while (Date.now() <= deadline) {
+    const {json} = await request(args, `/api/link-ops-jobs/${encodeURIComponent(id)}`);
+    last = json.data || json;
+    if (['succeeded', 'failed', 'uncertain_write'].includes(String(last.status || ''))) return last;
+    await new Promise(resolve => setTimeout(resolve, 1_000));
+  }
+  const error = new Error(`Timed out waiting ${seconds}s for job ${id}`);
+  error.response = last;
+  throw error;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.command === 'help') {
@@ -927,8 +972,61 @@ async function main() {
     print(json, !args.json);
     return;
   }
+  if (args.command === 'ask') {
+    if (!args.text) throw new Error('ask requires --text');
+    const {json} = await request(args, '/api/ops-agent/ask', {
+      method: 'POST',
+      body: {question: args.text, profile: args.profile || undefined, source: 'codex_desktop_cli'},
+    });
+    print(json);
+    return;
+  }
+  if (args.command === 'chats') {
+    const {json} = await request(args, `/api/link-ops-chats?limit=${encodeURIComponent(args.limit)}`);
+    print(json.data || json, !args.json);
+    return;
+  }
+  if (args.command === 'jobs') {
+    const query = new URLSearchParams({limit: String(args.limit)});
+    if (args.status) query.set('status', args.status);
+    if (args.globalView) query.set('scope', 'all');
+    const {json} = await request(args, `/api/link-ops-jobs?${query}`);
+    print(json, !args.json);
+    return;
+  }
+  if (args.command === 'job') {
+    if (!args.jobId) throw new Error('job requires --job-id');
+    const scope = args.globalView ? '?scope=all' : '';
+    const {json} = await request(args, `/api/link-ops-jobs/${encodeURIComponent(args.jobId)}${scope}`);
+    print(json.data || json, !args.json);
+    return;
+  }
+  if (args.command === 'wait-job' || args.command === 'wait_job') {
+    const job = await waitForLinkOpsJob(args, args.jobId);
+    print({ok: job.status === 'succeeded', job}, !args.json);
+    if (job.status !== 'succeeded') process.exitCode = 1;
+    return;
+  }
+  if (args.command === 'chat') {
+    if (!args.text) throw new Error('chat requires --text');
+    const {json} = await request(args, '/api/link-ops-chats', {
+      method: 'POST',
+      body: {
+        message: args.text,
+        sessionId: args.chatSessionId || undefined,
+        askAgent: args.askAgent,
+        agentProfile: args.profile || undefined,
+        source: 'codex_desktop_cli',
+      },
+    });
+    const job = json.job || null;
+    const completedJob = job && args.waitSeconds > 0 ? await waitForLinkOpsJob(args, job.id) : null;
+    print({ok: true, session: json.session, autoTask: json.autoTask, job, completedJob, data: json.data, taskData: json.taskData});
+    return;
+  }
   if (args.command === 'tasks') {
-    const {json} = await request(args, `/api/link-ops-tasks?limit=${encodeURIComponent(args.limit)}`);
+    const scoped = args.chatSessionId ? `&sessionId=${encodeURIComponent(args.chatSessionId)}` : '';
+    const {json} = await request(args, `/api/link-ops-tasks?limit=${encodeURIComponent(args.limit)}${scoped}`);
     print(json.data || json, !args.json);
     return;
   }

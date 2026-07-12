@@ -4,9 +4,11 @@
  *
  * The service used to keep the real-submit product publish adapter effectively
  * HL-only through a static capability flag. This isolated test proves the
- * current owner model instead: any store that is authorized, read-probe-ready,
- * inside safeWriteOperations and covered by a user+store+operation whitelist is
- * globally confirmable for copy_product_draft. The test never calls SHEIN.
+ * current owner model instead: any store that is authorized, has current read
+ * evidence from either the dedicated probe or daily product reconciliation,
+ * is inside safeWriteOperations and is covered by a user+store+operation
+ * whitelist is globally confirmable for copy_product_draft. The test never
+ * calls SHEIN.
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -101,7 +103,7 @@ const whitelistFile = await writeJson('whitelist.json', {
   }],
 });
 const readProbeFile = await writeJson('read-probes.latest.json', {
-  generatedAt: new Date().toISOString(),
+  generatedAt: new Date(Date.now() - (15 * 24 * 60 * 60 * 1000)).toISOString(),
   counts: {total: STORE_KEYS.length, ok: STORE_KEYS.length},
   results: STORE_KEYS.map(storeKey => ({
     storeKey,
@@ -110,6 +112,36 @@ const readProbeFile = await writeJson('read-probes.latest.json', {
     calls: [],
   })),
 });
+const staleEvidenceGeneratedAt = new Date(Date.now() - (15 * 24 * 60 * 60 * 1000)).toISOString();
+const salesReconciliationFile = await writeJson('sales-reconciliation.latest.json', {
+  generatedAt: staleEvidenceGeneratedAt,
+  results: [],
+});
+const returnReconciliationFile = await writeJson('return-reconciliation.latest.json', {
+  generatedAt: staleEvidenceGeneratedAt,
+  results: [],
+});
+function productReconciliationPayload({generatedAt = new Date().toISOString(), invalidStore = '', invalidMode = ''} = {}) {
+  return {
+    generatedAt,
+    counts: {total: STORE_KEYS.length, succeeded: STORE_KEYS.length, failed: 0},
+    results: STORE_KEYS.map(storeKey => ({
+      storeKey,
+      ok: !(storeKey === invalidStore && invalidMode === 'not-ok'),
+      status: 'warning',
+      load: {
+        reconciliation: storeKey === invalidStore && invalidMode === 'empty-row' ? [] : [{
+          status: 'warning',
+          api_link_count: 10,
+          browser_link_count: 9,
+          matched_skc_count: 9,
+          api_only_skc_count: 1,
+        }],
+      },
+    })),
+  };
+}
+const productReconciliationFile = await writeJson('product-reconciliation.latest.json', productReconciliationPayload());
 const htpasswdFile = path.join(tmpRoot, 'empty.htpasswd');
 await fs.writeFile(htpasswdFile, '', 'utf8');
 const stateFile = path.join(tmpRoot, 'action_state.json');
@@ -141,6 +173,9 @@ const child = spawn(process.execPath, [
     SHEIN_OPENAPI_CONFIG_FILE: openapiConfigFile,
     SHEIN_BI_OPS_WRITE_WHITELIST_FILE: whitelistFile,
     SHEIN_OPENAPI_READ_PROBE_SUMMARY_FILE: readProbeFile,
+    SHEIN_OPENAPI_SALES_RECONCILIATION_SUMMARY_FILE: salesReconciliationFile,
+    SHEIN_OPENAPI_RETURN_RECONCILIATION_SUMMARY_FILE: returnReconciliationFile,
+    SHEIN_OPENAPI_PRODUCT_RECONCILIATION_SUMMARY_FILE: productReconciliationFile,
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -210,8 +245,10 @@ try {
       verifiedRead: Boolean(row?.verifiedRead),
       writePrecheckReady: Boolean(row?.writePrecheckReady),
       writeConfirmable: Boolean(row?.writeConfirmable),
+      actorCanSubmit: Boolean(row?.actorCanSubmit),
       state: action?.state || '',
       realSubmitSupported: Boolean(action?.realSubmitSupported),
+      actorActionCanSubmit: Boolean(action?.actorCanSubmit),
       blockerCount: asArray(action?.realSubmitBlockers).length,
     };
   });
@@ -221,6 +258,8 @@ try {
     || !row.verifiedRead
     || !row.writePrecheckReady
     || !row.realSubmitSupported
+    || !row.actorCanSubmit
+    || !row.actorActionCanSubmit
     || row.state !== 'ready'
     || row.blockerCount !== 0
   );
@@ -236,7 +275,26 @@ try {
   check('safeWrite enabled in isolated config', Boolean(caps.json?.safety?.safeWriteOperations?.enabled), true);
   check('whitelist enabled in isolated config', Boolean(caps.json?.safety?.realSubmitWhitelist?.enabled), true);
   check('canSilentWrite remains false', Boolean(caps.json?.safety?.canSilentWrite), false);
+  check('dedicated read probe is intentionally stale', Boolean(caps.json?.probeSummary?.fresh), false);
+  check('daily product reconciliation is fresh for all stores', Number(caps.json?.counts?.productReconciliationReady || 0), STORE_KEYS.length);
+  check('current owner is allowed into controlled submit flow for all stores', Number(caps.json?.counts?.actorControlledSubmitReady || 0), STORE_KEYS.length);
   check('every store copy_product_draft confirmable', failedStores.length, 0);
+
+  await fs.writeFile(productReconciliationFile, `${JSON.stringify(productReconciliationPayload({invalidStore: 'TZ', invalidMode: 'empty-row'}), null, 2)}\n`, 'utf8');
+  const emptyEvidenceCaps = await req('/api/openapi-capabilities', {cookie});
+  const emptyEvidenceTz = asArray(emptyEvidenceCaps.json?.rows).find(row => row.storeKey === 'TZ') || {};
+  check('empty reconciliation row is not read evidence', Boolean(emptyEvidenceTz.verifiedRead), false);
+  check('empty reconciliation row cannot expose controlled submit', Boolean(emptyEvidenceTz.actorCanSubmit), false);
+
+  await fs.writeFile(productReconciliationFile, `${JSON.stringify(productReconciliationPayload({invalidStore: 'TZ', invalidMode: 'not-ok'}), null, 2)}\n`, 'utf8');
+  const failedEvidenceCaps = await req('/api/openapi-capabilities', {cookie});
+  const failedEvidenceTz = asArray(failedEvidenceCaps.json?.rows).find(row => row.storeKey === 'TZ') || {};
+  check('ok=false reconciliation is not read evidence', Boolean(failedEvidenceTz.verifiedRead), false);
+
+  await fs.writeFile(productReconciliationFile, `${JSON.stringify(productReconciliationPayload({generatedAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()}), null, 2)}\n`, 'utf8');
+  const futureEvidenceCaps = await req('/api/openapi-capabilities', {cookie});
+  check('future-dated reconciliation is not fresh', Boolean(futureEvidenceCaps.json?.productReconciliationSummary?.fresh), false);
+  check('future-dated reconciliation cannot expose controlled submit', Number(futureEvidenceCaps.json?.counts?.actorControlledSubmitReady || 0), 0);
   result.ok = result.checks.every(x => x.pass);
 } finally {
   child.kill();

@@ -76,12 +76,22 @@ try {
   const logoutGet = await fetch(`${base}/api/logout`, {headers: {...publicHeaders, cookie: sessionCookie}});
   assert.equal(logoutGet.status, 405, 'logout is POST-only');
 } finally {
+  const waitForExit = timeoutMs => new Promise(resolve => {
+    if (child.exitCode !== null || child.signalCode !== null) return resolve(true);
+    const timer = setTimeout(() => resolve(false), timeoutMs);
+    child.once('exit', () => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
   child.kill('SIGTERM');
-  await Promise.race([
-    new Promise(resolve => child.once('exit', resolve)),
-    new Promise(resolve => setTimeout(resolve, 2_000)),
-  ]);
-  if (!child.killed) child.kill('SIGKILL');
+  const exitedGracefully = await waitForExit(2_000);
+  if (!exitedGracefully && child.exitCode === null && child.signalCode === null) {
+    child.kill('SIGKILL');
+    await waitForExit(2_000);
+  }
+  child.stdout?.destroy();
+  child.stderr?.destroy();
   await fs.rm(temp, {recursive: true, force: true});
 }
 

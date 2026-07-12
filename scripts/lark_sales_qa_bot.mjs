@@ -7,23 +7,35 @@ import crypto from 'node:crypto';
 import readline from 'node:readline';
 import os from 'node:os';
 import {buildProductDisplayName} from '../lib/product_display_name.mjs';
+import {
+  buildBiOpsQueryContext,
+  buildBiOpsSectionFacts,
+  DEFAULT_BI_OPS_CONTEXT_MAX_BYTES,
+  DEFAULT_BI_OPS_SECTION_MAX_BYTES,
+  loadBiOpsQueryData,
+} from '../lib/bi_ops_query_context.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DATA_PATH = process.env.SHEIN_QA_BI_DATA || path.join(ROOT, 'outputs', 'bi-portal', 'data.json');
+const BI_SECTIONS_DIR = process.env.SHEIN_QA_BI_SECTIONS_DIR || process.env.SHEIN_QA_BI_SECTION_DIR || path.join(path.dirname(DATA_PATH), 'sections');
+const BI_SECTION_MAX_BYTES = Number(process.env.SHEIN_QA_BI_MAX_SECTION_BYTES || DEFAULT_BI_OPS_SECTION_MAX_BYTES);
+const BI_CONTEXT_MAX_BYTES = Number(process.env.SHEIN_QA_CONTEXT_MAX_BYTES || DEFAULT_BI_OPS_CONTEXT_MAX_BYTES);
 const STATE_DIR = process.env.SHEIN_QA_STATE_DIR || path.join(ROOT, 'state', 'lark_sales_qa_bot');
 const CODEX_CONFIG_DIR = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
 const LLM_TIMEOUT_MS = Number(process.env.SHEIN_QA_LLM_TIMEOUT_MS || 45_000);
 const LLM_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_LLM_ENABLED || '1').toLowerCase());
 const CODEX_GATEWAY_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_CODEX_GATEWAY_ENABLED || '1').toLowerCase());
-const CODEX_GATEWAY_TIMEOUT_MS = Number(process.env.SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS || 600_000);
-const CODEX_GATEWAY_MODEL = process.env.SHEIN_QA_CODEX_MODEL || 'gpt-5.5';
-const CODEX_GATEWAY_REASONING_EFFORT = process.env.SHEIN_QA_CODEX_REASONING_EFFORT || 'xhigh';
+const CODEX_GATEWAY_TIMEOUT_MS = Number(process.env.SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS || 45_000);
+const CODEX_GATEWAY_MODEL = process.env.SHEIN_QA_CODEX_MODEL || process.env.SHEIN_BI_AGENT_MODEL_FAST || 'gpt-5.6-terra';
+const CODEX_GATEWAY_REASONING_EFFORT = process.env.SHEIN_QA_CODEX_REASONING_EFFORT || process.env.SHEIN_BI_AGENT_REASONING_FAST || 'low';
+const CODEX_GATEWAY_EPHEMERAL = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_CODEX_EPHEMERAL || '1').toLowerCase());
 const LARK_CLI_BIN = process.env.LARK_CLI_BIN || 'lark-cli';
 const LARK_CLI_PREFIX_ARGS = parseArgList(process.env.LARK_CLI_PREFIX_ARGS || '');
 const CHART_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_CHART_ENABLED || '1').toLowerCase());
 const CHART_INTENT_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_CHART_INTENT_ENABLED || '1').toLowerCase());
-const CHART_INTENT_TIMEOUT_MS = Number(process.env.SHEIN_QA_CHART_INTENT_TIMEOUT_MS || 90_000);
-const CHART_INTENT_MODEL = process.env.SHEIN_QA_CHART_INTENT_MODEL || CODEX_GATEWAY_MODEL;
+const CHART_INTENT_TIMEOUT_MS = Number(process.env.SHEIN_QA_CHART_INTENT_TIMEOUT_MS || process.env.SHEIN_BI_AGENT_TIMEOUT_INTENT_MS || 20_000);
+const CHART_INTENT_MODEL = process.env.SHEIN_QA_CHART_INTENT_MODEL || process.env.SHEIN_BI_AGENT_MODEL_INTENT || 'gpt-5.6-luna';
+const CHART_INTENT_REASONING_EFFORT = process.env.SHEIN_QA_CHART_INTENT_REASONING_EFFORT || process.env.SHEIN_BI_AGENT_REASONING_INTENT || 'low';
 const CHART_PYTHON = process.env.SHEIN_QA_CHART_PYTHON || 'python3';
 const CHART_SCRIPT = process.env.SHEIN_QA_CHART_SCRIPT || path.join(ROOT, 'scripts', 'render_lark_qa_chart.py');
 const CHART_DIR = process.env.SHEIN_QA_CHART_DIR || path.join(STATE_DIR, 'charts');
@@ -32,6 +44,7 @@ const CONVERSATION_TTL_MS = Math.max(0, Number(process.env.SHEIN_QA_CONVERSATION
 const LINK_OPS_TASK_FILE = process.env.SHEIN_QA_LINK_OPS_TASK_FILE || path.join(ROOT, 'state', 'bi_link_ops_tasks.json');
 const LARK_LINK_OPS_TASK_WRITE_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_LINK_OPS_TASK_WRITE_ENABLED || '0').toLowerCase());
 const STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ'];
+const biQueryMetaByData = new WeakMap();
 
 function parseArgList(raw) {
   const text = String(raw || '').trim();
@@ -57,8 +70,15 @@ function parseArgs(argv) {
   return args;
 }
 
-async function readData() {
-  return JSON.parse((await fs.readFile(DATA_PATH, 'utf8')).replace(/^\uFEFF/, ''));
+async function readData(question = '') {
+  const loaded = await loadBiOpsQueryData({
+    question,
+    dataPath: DATA_PATH,
+    sectionsDir: BI_SECTIONS_DIR,
+    maxSectionBytes: BI_SECTION_MAX_BYTES,
+  });
+  biQueryMetaByData.set(loaded.data, loaded.meta);
+  return loaded.data;
 }
 
 function n(value) {
@@ -2176,8 +2196,84 @@ async function inferControlledChartIntent(question, data, conversation = null) {
         },
       ],
       max_output_tokens: 700,
+      text: {
+        format: {
+          type: 'json_schema',
+          name: 'shein_bi_chart_intent',
+          strict: true,
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['shouldChart', 'chartFamily', 'scope', 'metrics', 'sort', 'layout', 'constraints', 'reason', 'confidence'],
+            properties: {
+              shouldChart: {type: 'boolean'},
+              chartFamily: {type: 'string', enum: ['store_sales', 'product_sales', 'inventory', 'category_inventory', 'link', 'none']},
+              scope: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['level', 'allItems', 'stores', 'product'],
+                properties: {
+                  level: {type: 'string'},
+                  allItems: {type: 'boolean'},
+                  stores: {type: 'array', items: {type: 'string'}, maxItems: 19},
+                  product: {type: 'string'},
+                },
+              },
+              metrics: {type: 'array', items: {type: 'string'}, maxItems: 12},
+              sort: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['metric', 'direction'],
+                properties: {metric: {type: 'string'}, direction: {type: 'string', enum: ['asc', 'desc', 'none']}},
+              },
+              layout: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['includeProductName', 'maxRows', 'wide'],
+                properties: {includeProductName: {type: 'boolean'}, maxRows: {type: 'integer', minimum: 0, maximum: 100}, wide: {type: 'boolean'}},
+              },
+              constraints: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['displayRequirements', 'negativeRequirements', 'stockPolicy'],
+                properties: {
+                  displayRequirements: {type: 'array', items: {type: 'string'}, maxItems: 20},
+                  negativeRequirements: {type: 'array', items: {type: 'string'}, maxItems: 20},
+                  stockPolicy: {
+                    type: 'object',
+                    additionalProperties: false,
+                    required: ['mode', 'sellableWarehouses', 'excludedWarehouses', 'exceptionProducts', 'soldOutWithIncomingPlacement', 'soldOutWithoutIncomingPlacement'],
+                    properties: {
+                      mode: {type: 'string', enum: ['default', 'operational_sellable']},
+                      sellableWarehouses: {type: 'array', items: {type: 'string'}, maxItems: 20},
+                      excludedWarehouses: {type: 'array', items: {type: 'string'}, maxItems: 20},
+                      exceptionProducts: {
+                        type: 'array',
+                        maxItems: 30,
+                        items: {
+                          type: 'object',
+                          additionalProperties: false,
+                          required: ['match', 'sellableWarehouses'],
+                          properties: {
+                            match: {type: 'string'},
+                            sellableWarehouses: {type: 'array', items: {type: 'string'}, maxItems: 20},
+                          },
+                        },
+                      },
+                      soldOutWithIncomingPlacement: {type: 'string', enum: ['front', 'last']},
+                      soldOutWithoutIncomingPlacement: {type: 'string', enum: ['front', 'last']},
+                    },
+                  },
+                },
+              },
+              reason: {type: 'string', maxLength: 500},
+              confidence: {type: 'number', minimum: 0, maximum: 1},
+            },
+          },
+        },
+      },
     };
-    if (CODEX_GATEWAY_REASONING_EFFORT) payload.reasoning = {effort: CODEX_GATEWAY_REASONING_EFFORT};
+    if (CHART_INTENT_REASONING_EFFORT) payload.reasoning = {effort: CHART_INTENT_REASONING_EFFORT};
     const res = await fetch(`${baseUrl}/responses`, {
       method: 'POST',
       headers: {
@@ -2364,6 +2460,8 @@ async function callReadonlyCodexGateway(question, context) {
       'resume',
       '--skip-git-repo-check',
       '--ignore-rules',
+      '--config', 'sandbox_mode="read-only"',
+      '--config', 'agents.max_threads=1',
       '--output-last-message', outFile,
       '--model', CODEX_GATEWAY_MODEL,
       '--config', 'approval_policy="never"',
@@ -2377,6 +2475,7 @@ async function callReadonlyCodexGateway(question, context) {
       '--sandbox', 'read-only',
       '--skip-git-repo-check',
       '--ignore-rules',
+      ...(CODEX_GATEWAY_EPHEMERAL ? ['--ephemeral'] : []),
       '--color', 'never',
       '--output-last-message', outFile,
       '--model', CODEX_GATEWAY_MODEL,
@@ -2495,6 +2594,13 @@ function answerQuestion(text, data) {
   ].join('\n');
 }
 
+function shouldAnswerDeterministicallyFirst(text, policy = {}) {
+  if (policy?.isOpsWrite || policy?.needsPublicWeb) return false;
+  const q = normalizeText(text);
+  if (/为什么|原因|诊断|归因|预测|建议|方案|策略|分析|对比|异常|标题|图片|竞品|关键词|活动|折扣|优惠券/i.test(q)) return false;
+  return /销售|销售额|销量|卖了多少|订单|排行|排名|最好|最差|哪个店|哪个品|库存|现货|在途|去化|补货|断货/i.test(q);
+}
+
 function answerPolicyFallback(text, data, policy = {}) {
   const q = normalizeText(text);
   const product = findProductSmart(q, data) || policy.targets?.productRefs?.[0] || '';
@@ -2532,8 +2638,9 @@ function answerPolicyFallback(text, data, policy = {}) {
 }
 
 async function answerQuestionSmart(text, data, policy = {}, linkOpsTask = null, conversation = null) {
-  const context = compactSalesContext(text, data);
-  context.securityPolicy = {
+  if (shouldAnswerDeterministicallyFirst(text, policy)) return answerQuestion(text, data);
+  const contextDraft = compactSalesContext(text, data);
+  contextDraft.securityPolicy = {
     decision: policy.decision || '',
     mode: policy.mode || '',
     reason: policy.reason || '',
@@ -2542,7 +2649,7 @@ async function answerQuestionSmart(text, data, policy = {}, linkOpsTask = null, 
     targets: policy.targets || {},
   };
   if (linkOpsTask) {
-    context.linkOpsTask = {
+    contextDraft.linkOpsTask = {
       id: linkOpsTask.id || '',
       status: linkOpsTask.status || '',
       dryRun: !!linkOpsTask.dryRun,
@@ -2552,7 +2659,15 @@ async function answerQuestionSmart(text, data, policy = {}, linkOpsTask = null, 
     };
   }
   const conversationContext = summarizeConversationForContext(conversation);
-  if (conversationContext) context.conversation = conversationContext;
+  if (conversationContext) contextDraft.conversation = conversationContext;
+  const loadMeta = biQueryMetaByData.get(data) || null;
+  const sectionFacts = buildBiOpsSectionFacts(text, data, loadMeta);
+  const context = buildBiOpsQueryContext(contextDraft, {
+    question: text,
+    loadMeta,
+    sectionFacts,
+    maxBytes: BI_CONTEXT_MAX_BYTES,
+  });
   try {
     const codexAnswer = await callReadonlyCodexGateway(text, context);
     if (codexAnswer) {
@@ -2640,9 +2755,9 @@ async function handleEvent(event, options = {}) {
     });
     return {ok: sent.ok, eventId, blocked: true, safetyMode: policy.mode, answer, sendCode: sent.code ?? null};
   }
-  const data = await readData();
   const effectiveQuestion = buildEffectiveQuestion(event.content || '', conversation);
   const chartQuestion = buildChartQuestion(event.content || '', conversation);
+  const data = await readData(`${effectiveQuestion}\n${chartQuestion}`);
   const previousChartKind = conversation.lastChart?.kind || '';
   const chartRevision = isChartRevisionRequest(event.content || '', conversation);
   const chartPlan = await buildControlledChartSpecSmart(chartQuestion, data, conversation);
@@ -2755,7 +2870,7 @@ async function consume(options = {}) {
 
 const args = parseArgs(process.argv.slice(2));
 if (args.answer) {
-  const data = await readData();
+  const data = await readData(args.answer);
   const policy = classifySafety(args.answer, {chat_type: 'p2p', message_type: 'text', sender_type: 'user'});
   if (policy.blocked) {
     console.log(policy.blockMessage);
@@ -2763,7 +2878,7 @@ if (args.answer) {
     console.log(await answerQuestionSmart(args.answer, data, policy));
   }
 } else if (args.renderChart) {
-  const data = await readData();
+  const data = await readData(args.renderChart);
   const {spec} = await buildControlledChartSpecSmart(args.renderChart, data, null);
   if (!spec) {
     console.error('No controlled chart spec matched this question.');
@@ -2780,7 +2895,7 @@ if (args.answer) {
     unappliedConstraints: result.spec.unappliedConstraints || [],
   }, null, 2));
 } else if (args.planChart) {
-  const data = await readData();
+  const data = await readData(args.planChart);
   const {spec, intent, intentError} = await buildControlledChartSpecSmart(args.planChart, data, null);
   console.log(JSON.stringify({
     ok: Boolean(spec),

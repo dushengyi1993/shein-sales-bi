@@ -41,6 +41,11 @@ const SKC_IMAGE_TYPE_LABELS = new Map([
 ]);
 const POWER_SUPPLY_ATTRIBUTE_ID = 147;
 const POWER_SUPPLY_WALL_PLUG_VALUE_ID = 1047;
+const POWER_SUPPLY_POWER_ADAPTER_VALUE_ID = 1007239;
+const POWER_SUPPLY_INPUT_VOLTAGE_VALUE_IDS = new Set([
+  POWER_SUPPLY_WALL_PLUG_VALUE_ID,
+  POWER_SUPPLY_POWER_ADAPTER_VALUE_ID,
+]);
 const PRODUCT_MODEL_ATTRIBUTE_ID = 1000546;
 const INPUT_VOLTAGE_ATTRIBUTE_ID = 1002322;
 const INPUT_CURRENT_ATTRIBUTE_ID = 1002323;
@@ -48,6 +53,9 @@ const PLUG_VOLTAGE_ATTRIBUTE_ID = 1001466;
 const RATED_VOLTAGE_ATTRIBUTE_ID = 1001370;
 const VOLTAGE_ATTRIBUTE_ID = 1000101;
 const VOLTAGE_VALUE_ATTRIBUTE_ID = 164;
+const HAZARD_CATEGORY_ATTRIBUTE_ID = 1000462;
+const HAZARD_CATEGORY_NON_TRANSPORT_SENSITIVE_VALUE_ID = 1006206;
+const HAZARDOUS_MATERIALS_CLASSIFICATION_ATTRIBUTE_ID = 1002328;
 const INPUT_VOLTAGE_AC_UNIT_LABEL = 'Vac 50–60Hz';
 const DEFAULT_AIR_FRYER_INPUT_CURRENT_MA = 6800;
 
@@ -136,6 +144,16 @@ function stableTaskBaseDate(task = null, executionContext = null) {
 
 function newLinkHopeOnSaleDate(task = null, executionContext = null) {
   return tenYearsLaterBeijing(stableTaskBaseDate(task, executionContext));
+}
+
+function lockedHopeOnSaleDate(executionContext = null) {
+  const value = safeString(
+    executionContext?.productDraftLock?.hopeOnSaleDate
+    || executionContext?.productDraftLock?.hope_on_sale_date
+    || '',
+    80,
+  );
+  return /^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}$/.test(value) ? value : '';
 }
 
 function asArray(value) {
@@ -613,12 +631,12 @@ async function findPublishPayload(task) {
   return null;
 }
 
-async function findOrBuildPublishPayload(task, {targetStore}) {
+async function findOrBuildPublishPayload(task, {targetStore, preferredSource = null}) {
   const existing = await findPublishPayload(task);
   if (existing?.payload) return existing;
   const inferred = inferSourceProductFromTask(task, {targetStore});
   const biCandidates = await inferSourceCandidatesFromBi(task, {targetStore});
-  const candidates = uniqueSourceCandidates([inferred, ...biCandidates]);
+  const candidates = uniqueSourceCandidates([preferredSource, inferred, ...biCandidates]);
   if (!candidates.length) {
     return {
       source: 'missing',
@@ -712,7 +730,8 @@ function applySafeDefaults(payload, {sites, brands, task = null, executionContex
     next.brand_code = brands[0].brandCode;
     applied.push(`brand_code=${brands[0].brandName || brands[0].brandCode}`);
   }
-  const scheduledHopeOnSaleDate = newLinkHopeOnSaleDate(task, executionContext);
+  const lockedSchedule = lockedHopeOnSaleDate(executionContext);
+  const scheduledHopeOnSaleDate = lockedSchedule || newLinkHopeOnSaleDate(task, executionContext);
   const currentShelfWay = next.shelf_way ?? next.shelfWay;
   if (Number(currentShelfWay) !== 2) {
     next.shelf_way = 2;
@@ -728,7 +747,10 @@ function applySafeDefaults(payload, {sites, brands, task = null, executionContex
     delete next.hopeOnSaleDate;
     applied.push('hope_on_sale_date.normalize_snake_case');
   }
-  if (!next.hope_on_sale_date) {
+  if (lockedSchedule && next.hope_on_sale_date !== lockedSchedule) {
+    next.hope_on_sale_date = lockedSchedule;
+    applied.push('hope_on_sale_date=preflight_locked');
+  } else if (!next.hope_on_sale_date) {
     next.hope_on_sale_date = scheduledHopeOnSaleDate;
     applied.push('hope_on_sale_date=ten_years_later_new_link_scheduled');
   }
@@ -746,9 +768,13 @@ function applySafeDefaults(payload, {sites, brands, task = null, executionContex
       delete skc.shelfWay;
       applied.push('skc_list.shelf_way.normalize_snake_case');
     }
-    if (String(skc.shelf_way ?? skc.shelfWay) === '2' && hopeOnSaleDate && !skc.hope_on_sale_date && !skc.hopeOnSaleDate) {
-      skc.hope_on_sale_date = hopeOnSaleDate;
-      applied.push('skc_list.hope_on_sale_date');
+    if (String(skc.shelf_way ?? skc.shelfWay) === '2' && hopeOnSaleDate) {
+      const currentSkcHopeDate = skc.hope_on_sale_date || skc.hopeOnSaleDate || '';
+      if (!currentSkcHopeDate || (lockedSchedule && currentSkcHopeDate !== lockedSchedule)) {
+        skc.hope_on_sale_date = hopeOnSaleDate;
+        if ('hopeOnSaleDate' in skc) delete skc.hopeOnSaleDate;
+        applied.push(lockedSchedule ? 'skc_list.hope_on_sale_date.preflight_locked' : 'skc_list.hope_on_sale_date');
+      }
     }
   }
   const normalizedNames = normalizePublishNames(next);
@@ -969,6 +995,111 @@ function titleMaxLengthMap(info) {
   const defaultMax = Number(info?.default_language_title_max_length ?? info?.defaultLanguageTitleMaxLength);
   if (defaultLanguage && Number.isFinite(defaultMax) && defaultMax > 0 && !out.has(defaultLanguage)) out.set(defaultLanguage, Math.trunc(defaultMax));
   return out;
+}
+
+function isSha256PayloadHash(value) {
+  return /^[a-f0-9]{64}$/i.test(String(value || '').trim());
+}
+
+function preflightProductLockFromRow(row, targetStore = '', fallback = {}) {
+  const result = row?.result && typeof row.result === 'object' ? row.result : row;
+  if (!result || typeof result !== 'object') return null;
+  const storeKey = normalizeStoreKey(result.storeKey || fallback.storeKey || targetStore);
+  if (targetStore && storeKey && storeKey !== normalizeStoreKey(targetStore)) return null;
+  const payload = result.payload && typeof result.payload === 'object' ? result.payload : {};
+  const summary = payload.summary && typeof payload.summary === 'object'
+    ? payload.summary
+    : result.payloadSummary && typeof result.payloadSummary === 'object'
+      ? result.payloadSummary
+      : fallback.payloadSummary && typeof fallback.payloadSummary === 'object'
+        ? fallback.payloadSummary
+        : {};
+  const fingerprint = result.readbackFingerprint && typeof result.readbackFingerprint === 'object'
+    ? result.readbackFingerprint
+    : fallback.readbackFingerprint && typeof fallback.readbackFingerprint === 'object'
+      ? fallback.readbackFingerprint
+      : {};
+  const inferred = payload.inferredSource && typeof payload.inferredSource === 'object'
+    ? payload.inferredSource
+    : payload.inferred && typeof payload.inferred === 'object'
+      ? payload.inferred
+      : {};
+  const generated = payload.generatedDraft && typeof payload.generatedDraft === 'object'
+    ? payload.generatedDraft
+    : {};
+  const sourceStore = normalizeStoreKey(
+    inferred.sourceStore
+    || generated.sourceStore
+    || fingerprint.inferredSourceStore
+    || fallback.sourceStore
+  );
+  const sourceSkc = safeString(
+    inferred.sourceSkc
+    || generated.sourceSkc
+    || fingerprint.inferredSourceSkc
+    || fallback.sourceSkc
+    || '',
+    160,
+  );
+  const payloadHash = safeString(
+    payload.payloadHash
+    || result.payloadHash
+    || fallback.payloadHash
+    || '',
+    120,
+  );
+  if (!sourceStore || !sourceSkc || !isSha256PayloadHash(payloadHash)) return null;
+  return {
+    storeKey: storeKey || normalizeStoreKey(targetStore),
+    sourceStore,
+    sourceSkc,
+    standardGoodsSn: safeString(inferred.standardGoodsSn || fallback.standardGoodsSn || '', 240),
+    hopeOnSaleDate: safeString(summary.hopeOnSaleDate || summary.hope_on_sale_date || fallback.hopeOnSaleDate || '', 80),
+    payloadHash,
+    lockedAt: safeString(fallback.lockedAt || result.endedAt || result.startedAt || '', 80),
+    runId: safeString(result.runId || fallback.runId || '', 120),
+    source: 'preflight_product_lock',
+  };
+}
+
+function resolvePreflightProductLock(task, targetStore = '', {expectedPayloadHash = ''} = {}) {
+  const target = normalizeStoreKey(targetStore);
+  const expected = safeString(expectedPayloadHash, 120);
+  const candidates = [];
+  const currentState = safeString(task?.execution?.state || '', 120);
+  const currentReady = task?.execution?.preflight?.ok === true
+    && /preflight_ready|ready_for_submit/i.test(currentState);
+  if (currentReady) {
+    for (const row of asArray(task?.execution?.openApiProductExecutors)) {
+      const state = safeString(row?.state || row?.result?.state || '', 120);
+      if (!/preflight_ready|ready_for_submit/i.test(state)) continue;
+      const lock = preflightProductLockFromRow(row, target);
+      if (lock) candidates.push(lock);
+    }
+  }
+  for (const event of [...asArray(task?.history)].reverse()) {
+    if (String(event?.event || '') !== 'openapi_product_preflight_ready') continue;
+    const rows = [
+      ...asArray(event?.writeAudit?.executorEvidence),
+      ...asArray(event?.openApiProductExecutors),
+    ];
+    for (const row of rows) {
+      const lock = preflightProductLockFromRow(row, target, {
+        lockedAt: event?.at || '',
+        runId: event?.runId || '',
+      });
+      if (lock) candidates.push(lock);
+    }
+  }
+  const seen = new Set();
+  for (const lock of candidates) {
+    const key = `${lock.storeKey}|${lock.sourceStore}|${lock.sourceSkc}|${lock.payloadHash}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (expected && lock.payloadHash !== expected) continue;
+    return lock;
+  }
+  return null;
 }
 
 async function applyPublishFillInStandardRules(client, payload) {
@@ -1254,10 +1385,11 @@ function isAirFryerTaskOrPayload(payload, task, executionContext) {
   return /空气炸锅|air\s*fryer/i.test(textFromPayloadForAttributeInference(payload, task, executionContext));
 }
 
-function payloadHasWallPlugPowerSupply(payload) {
+function payloadHasInputVoltageRequiringPowerSupply(payload) {
   const rows = asArray(payload?.product_attribute_list || payload?.productAttributeList);
   const powerSupply = rows.find(row => normalizeAttributeId(row?.attribute_id ?? row?.attributeId) === POWER_SUPPLY_ATTRIBUTE_ID);
-  return normalizeAttributeId(powerSupply?.attribute_value_id ?? powerSupply?.attributeValueId) === POWER_SUPPLY_WALL_PLUG_VALUE_ID;
+  const valueId = normalizeAttributeId(powerSupply?.attribute_value_id ?? powerSupply?.attributeValueId);
+  return POWER_SUPPLY_INPUT_VOLTAGE_VALUE_IDS.has(valueId);
 }
 
 function payloadHasInputCurrent(payload) {
@@ -1315,7 +1447,7 @@ function inferPowerWattsFromPayload(payload) {
 }
 
 function inferInputCurrentOverride(payload, task, executionContext) {
-  if (!payloadHasWallPlugPowerSupply(payload) || payloadHasInputCurrent(payload)) return null;
+  if (!payloadHasInputVoltageRequiringPowerSupply(payload) || payloadHasInputCurrent(payload)) return null;
   const voltage = inferInputVoltageFromPayload(payload, new Map());
   const voltageV = parseVoltageNumber(voltage?.attribute_extra_value || voltage?.source_value || '');
   const power = inferPowerWattsFromPayload(payload);
@@ -1526,12 +1658,14 @@ function chooseInputVoltageAcUnitValueId(templateRow) {
   return values.length === 1 ? normalizeAttributeId(values[0]?.attribute_value_id) : null;
 }
 
-function ensureWallPlugInputVoltage(payload, productAttributeList, templateById) {
+function ensurePowerSupplyInputVoltage(payload, productAttributeList, templateById) {
   const applied = [];
   const blockers = [];
   const powerSupply = productAttributeList.find(row => normalizeAttributeId(row.attribute_id ?? row.attributeId) === POWER_SUPPLY_ATTRIBUTE_ID);
   const powerSupplyValueId = normalizeAttributeId(powerSupply?.attribute_value_id ?? powerSupply?.attributeValueId);
-  if (powerSupplyValueId !== POWER_SUPPLY_WALL_PLUG_VALUE_ID) return {applied, blockers};
+  if (!POWER_SUPPLY_INPUT_VOLTAGE_VALUE_IDS.has(powerSupplyValueId)) return {applied, blockers};
+  const powerSupplyTemplate = templateById.get(POWER_SUPPLY_ATTRIBUTE_ID);
+  const powerSupplyLabel = templateAttributeValueLabel(powerSupplyTemplate, powerSupplyValueId) || String(powerSupplyValueId);
   let inputVoltage = productAttributeList.find(row => normalizeAttributeId(row.attribute_id ?? row.attributeId) === INPUT_VOLTAGE_ATTRIBUTE_ID);
   const existingExtra = safeString(inputVoltage?.attribute_extra_value ?? inputVoltage?.attributeExtraValue ?? '', 120);
   const existingValueId = normalizeAttributeId(inputVoltage?.attribute_value_id ?? inputVoltage?.attributeValueId);
@@ -1539,17 +1673,17 @@ function ensureWallPlugInputVoltage(payload, productAttributeList, templateById)
 
   const template = templateById.get(INPUT_VOLTAGE_ATTRIBUTE_ID);
   if (!template) {
-    blockers.push(`Power Supply=Wall Plug 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填，但官方属性模板未返回该属性，不能自动补齐。`);
+    blockers.push(`Power Supply=${powerSupplyLabel} 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填，但官方属性模板未返回该属性，不能自动补齐。`);
     return {applied, blockers};
   }
   const inferred = inferInputVoltageFromPayload(payload, templateById);
   if (!inferred?.attribute_extra_value) {
-    blockers.push(`Power Supply=Wall Plug 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填，但无法从 Plug(Voltage)/Voltage 属性推导电压范围；请补充 Input voltage。`);
+    blockers.push(`Power Supply=${powerSupplyLabel} 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填，但无法从 Plug(Voltage)/Voltage 属性推导电压范围；请补充 Input voltage。`);
     return {applied, blockers};
   }
   const unitValueId = existingValueId || chooseInputVoltageAcUnitValueId(template);
   if (!unitValueId) {
-    blockers.push(`Power Supply=Wall Plug 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填，已推导 ${inferred.attribute_extra_value}，但无法从官方属性模板匹配 Vac 单位值 ID。`);
+    blockers.push(`Power Supply=${powerSupplyLabel} 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填，已推导 ${inferred.attribute_extra_value}，但无法从官方属性模板匹配 Vac 单位值 ID。`);
     return {applied, blockers};
   }
 
@@ -1564,8 +1698,94 @@ function ensureWallPlugInputVoltage(payload, productAttributeList, templateById)
   delete inputVoltage.attributeExtraValue;
   delete inputVoltage.attribute_value;
   delete inputVoltage.attributeValue;
-  applied.push(`attribute_template:${INPUT_VOLTAGE_ATTRIBUTE_ID}.required_by_wall_plug=${inferred.attribute_extra_value}`);
+  applied.push(`attribute_template:${INPUT_VOLTAGE_ATTRIBUTE_ID}.required_by_power_supply_${powerSupplyValueId}=${inferred.attribute_extra_value}`);
   return {applied, blockers};
+}
+
+function payloadAttributeHasValue(row) {
+  if (!row || typeof row !== 'object') return false;
+  const valueId = normalizeAttributeId(row.attribute_value_id ?? row.attributeValueId);
+  const extraValue = safeString(
+    row.attribute_extra_value
+    ?? row.attributeExtraValue
+    ?? row.attribute_value
+    ?? row.attributeValue
+    ?? '',
+    500,
+  );
+  return Boolean(valueId || extraValue);
+}
+
+function chooseNonDangerousGoodsValueId(templateRow) {
+  const values = asArray(templateRow?.attribute_value_info_list);
+  const exact = values.find(value => /this product is not classified as dangerous goods/i.test(safeString(value?.attribute_value, 240)));
+  if (exact?.attribute_value_id) return normalizeAttributeId(exact.attribute_value_id);
+  const fallback = values.find(value => /not (?:classified as )?dangerous goods|non[-\s]?dangerous/i.test(safeString(value?.attribute_value, 240)));
+  return normalizeAttributeId(fallback?.attribute_value_id);
+}
+
+function payloadIndicatesNonDangerousGoods(productAttributeList, templateById) {
+  const hazardCategory = productAttributeList.find(row => normalizeAttributeId(row.attribute_id ?? row.attributeId) === HAZARD_CATEGORY_ATTRIBUTE_ID);
+  const hazardCategoryValueId = normalizeAttributeId(hazardCategory?.attribute_value_id ?? hazardCategory?.attributeValueId);
+  if (hazardCategoryValueId === HAZARD_CATEGORY_NON_TRANSPORT_SENSITIVE_VALUE_ID) return true;
+  const hazardCategoryLabel = templateAttributeValueLabel(templateById.get(HAZARD_CATEGORY_ATTRIBUTE_ID), hazardCategoryValueId);
+  return /non[-\s]?transport sensitive|not (?:classified as )?dangerous goods|non[-\s]?dangerous/i.test(hazardCategoryLabel);
+}
+
+function ensureHazardousMaterialsClassification(productAttributeList, templateById) {
+  const applied = [];
+  const blockers = [];
+  const template = templateById.get(HAZARDOUS_MATERIALS_CLASSIFICATION_ATTRIBUTE_ID);
+  if (!template) return {applied, blockers};
+  let classification = productAttributeList.find(row => normalizeAttributeId(row.attribute_id ?? row.attributeId) === HAZARDOUS_MATERIALS_CLASSIFICATION_ATTRIBUTE_ID);
+  if (payloadAttributeHasValue(classification)) return {applied, blockers};
+  if (!payloadIndicatesNonDangerousGoods(productAttributeList, templateById)) return {applied, blockers};
+  const valueId = chooseNonDangerousGoodsValueId(template);
+  if (!valueId) {
+    blockers.push(`Hazardous materials classification(${HAZARDOUS_MATERIALS_CLASSIFICATION_ATTRIBUTE_ID}) 为官方模板必填项，源商品已标记为非运输敏感物品，但模板中找不到“非危险品”选项。`);
+    return {applied, blockers};
+  }
+  if (!classification) {
+    classification = {attribute_id: HAZARDOUS_MATERIALS_CLASSIFICATION_ATTRIBUTE_ID};
+    productAttributeList.push(classification);
+  }
+  classification.attribute_id = HAZARDOUS_MATERIALS_CLASSIFICATION_ATTRIBUTE_ID;
+  classification.attribute_value_id = valueId;
+  delete classification.attributeValueId;
+  delete classification.attribute_extra_value;
+  delete classification.attributeExtraValue;
+  delete classification.attribute_value;
+  delete classification.attributeValue;
+  applied.push(`attribute_template:${HAZARDOUS_MATERIALS_CLASSIFICATION_ATTRIBUTE_ID}.non_dangerous_from_hazard_category=${valueId}`);
+  return {applied, blockers};
+}
+
+function requiredTemplateAttributeBlockers(productAttributeList, templates) {
+  const blockers = [];
+  for (const template of templates) {
+    if (Number(template?.attribute_status) !== 3) continue;
+    const attributeId = normalizeAttributeId(template?.attribute_id);
+    if (!attributeId) continue;
+    const row = productAttributeList.find(item => normalizeAttributeId(item?.attribute_id ?? item?.attributeId) === attributeId);
+    if (payloadAttributeHasValue(row)) continue;
+    blockers.push(`${template.attribute_name || `商品属性 ${attributeId}`}(${attributeId}) 是 SHEIN 官方商品类型模板的必填属性，当前发布资料未填写。`);
+  }
+  return blockers;
+}
+
+function summarizeProductAttributes(productAttributeList, templateById) {
+  return productAttributeList.map(row => {
+    const attributeId = normalizeAttributeId(row?.attribute_id ?? row?.attributeId);
+    const valueId = normalizeAttributeId(row?.attribute_value_id ?? row?.attributeValueId);
+    const template = attributeId ? templateById.get(attributeId) : null;
+    return {
+      attributeId,
+      attributeName: safeString(template?.attribute_name || row?.attribute_name || row?.attributeName || '', 160),
+      attributeValueId: valueId,
+      attributeValue: valueId ? templateAttributeValueLabel(template, valueId) : '',
+      attributeExtraValue: safeString(row?.attribute_extra_value ?? row?.attributeExtraValue ?? '', 160),
+    };
+  }).filter(row => row.attributeId);
 }
 
 async function applyAttributeTemplateRules(client, payload) {
@@ -1615,9 +1835,12 @@ async function applyAttributeTemplateRules(client, payload) {
   const applied = [];
   const blockers = [];
   const warnings = [];
-  const wallPlugInputVoltage = ensureWallPlugInputVoltage(next, list, byId);
-  applied.push(...wallPlugInputVoltage.applied);
-  blockers.push(...wallPlugInputVoltage.blockers);
+  const powerSupplyInputVoltage = ensurePowerSupplyInputVoltage(next, list, byId);
+  applied.push(...powerSupplyInputVoltage.applied);
+  blockers.push(...powerSupplyInputVoltage.blockers);
+  const hazardousMaterialsClassification = ensureHazardousMaterialsClassification(list, byId);
+  applied.push(...hazardousMaterialsClassification.applied);
+  blockers.push(...hazardousMaterialsClassification.blockers);
   for (const row of list) {
     const attributeId = normalizeAttributeId(row.attribute_id ?? row.attributeId);
     const template = attributeId ? byId.get(attributeId) : null;
@@ -1644,6 +1867,7 @@ async function applyAttributeTemplateRules(client, payload) {
       applied.push(`attribute_template:${attributeId}.manual_input_no_value_id`);
     }
   }
+  blockers.push(...requiredTemplateAttributeBlockers(list, templates));
   next.product_attribute_list = list;
   if (next.productAttributeList) delete next.productAttributeList;
   return {
@@ -1654,7 +1878,9 @@ async function applyAttributeTemplateRules(client, payload) {
     evidence: {
       ...evidence,
       attributeCount: templates.length,
+      requiredAttributeIds: templates.filter(row => Number(row?.attribute_status) === 3).map(row => row.attribute_id),
       enrichedAttributeIds: applied.map(item => item.split(':')[1]?.split('.')[0]).filter(Boolean),
+      finalProductAttributes: summarizeProductAttributes(list, byId),
     },
     call,
   };
@@ -1785,22 +2011,9 @@ function applyTargetStandardGoodsSn(payload, standardGoodsSn) {
   if (!goodsSn) return {payload, applied: []};
   const next = jsonClone(payload || {});
   const applied = [];
-  for (const [attrIndex, attr] of asArray(next.product_attribute_list || next.productAttributeList).entries()) {
-    if (!attr || typeof attr !== 'object') continue;
-    const attributeId = normalizeAttributeId(attr.attribute_id ?? attr.attributeId);
-    if (attributeId !== PRODUCT_MODEL_ATTRIBUTE_ID) continue;
-    if ((attr.attribute_extra_value ?? attr.attributeExtraValue) !== goodsSn || attr.attribute_value_id || attr.attributeValueId) {
-      attr.attribute_id = PRODUCT_MODEL_ATTRIBUTE_ID;
-      attr.attribute_extra_value = goodsSn;
-      delete attr.attributeId;
-      delete attr.attribute_value_id;
-      delete attr.attributeValueId;
-      delete attr.attributeExtraValue;
-      delete attr.attribute_value;
-      delete attr.attributeValue;
-      applied.push(`product_attribute_list[${attrIndex}].product_model.standard_goods_sn`);
-    }
-  }
+  // standardGoodsSn is a supplier/product identity, not the Product Model.
+  // Keep attribute 1000546 exactly as provided by the product payload; Chinese
+  // product names may be valid supplier codes but must never leak into model.
   if (next.productAttributeList) delete next.productAttributeList;
   const skcList = asArray(next.skc_list || next.skcList).filter(row => row && typeof row === 'object');
   for (const [skcIndex, skc] of skcList.entries()) {
@@ -1959,6 +2172,125 @@ function openApiSearchProductRows(data) {
     data?.info?.rows ||
     data?.data,
   );
+}
+
+function publishTargetSupplierCodes(payload) {
+  return [...new Set(asArray(payload?.skc_list || payload?.skcList)
+    .map(row => safeString(row?.supplier_code ?? row?.supplierCode ?? '', 160))
+    .filter(Boolean))];
+}
+
+function existingTargetSkcRows(data, supplierCodes) {
+  const wanted = new Set(supplierCodes.map(compactRef).filter(Boolean));
+  const rows = [];
+  for (const product of openApiSearchProductRows(data)) {
+    const spuName = safeString(product?.spuName || product?.spu_name || '', 120);
+    for (const skc of asArray(product?.skcList || product?.skc_list || product?.skcInfoList || product?.skc_info_list)) {
+      const supplierCode = safeString(skc?.supplierCode || skc?.supplier_code || '', 160);
+      if (!supplierCode || !wanted.has(compactRef(supplierCode))) continue;
+      const siteShelf = asArray(skc?.skcSiteShelfStatusList || skc?.skc_site_shelf_status_list || skc?.shelfStatusInfoList || skc?.shelf_status_info_list)
+        .find(row => /shein-sa/i.test(String(row?.subSite || row?.siteAbbr || row?.site_abbr || '')));
+      rows.push({
+        spuName,
+        skcName: safeString(skc?.skcName || skc?.skc_name || '', 120),
+        supplierCode,
+        shelfStatus: Number(siteShelf?.status ?? siteShelf?.shelfStatus ?? siteShelf?.shelf_status ?? skc?.skcShelfStatus ?? skc?.skc_shelf_status ?? product?.spuShelfStatus ?? product?.spu_shelf_status),
+        recycleStatus: null,
+      });
+    }
+  }
+  return rows;
+}
+
+function enrichExistingTargetSkcsFromSpuInfo(matches, info) {
+  const next = matches.map(row => ({...row}));
+  const skcs = asArray(info?.skcInfoList || info?.skc_info_list || info?.skcList || info?.skc_list);
+  for (const row of next) {
+    const detail = skcs.find(item => safeString(item?.skcName || item?.skc_name || '', 120) === row.skcName);
+    if (!detail) continue;
+    const siteShelf = asArray(detail?.shelfStatusInfoList || detail?.shelf_status_info_list)
+      .find(item => /shein-sa/i.test(String(item?.siteAbbr || item?.site_abbr || item?.subSite || '')));
+    const recycle = asArray(detail?.recycleInfoList || detail?.recycle_info_list)
+      .find(item => /shein-sa/i.test(String(item?.subSite || item?.siteAbbr || item?.site_abbr || '')));
+    const shelfStatus = Number(siteShelf?.shelfStatus ?? siteShelf?.shelf_status);
+    const recycleStatus = Number(recycle?.recycleStatus ?? recycle?.recycle_status);
+    if (Number.isFinite(shelfStatus)) row.shelfStatus = shelfStatus;
+    if (Number.isFinite(recycleStatus)) row.recycleStatus = recycleStatus;
+    row.lastShelfTime = safeString(siteShelf?.lastShelfTime || siteShelf?.last_shelf_time || '', 80);
+    row.lastUpdateTime = safeString(siteShelf?.lastUpdateTime || siteShelf?.last_update_time || '', 80);
+  }
+  return next;
+}
+
+async function inspectTargetDuplicateProducts(client, payload, targetStore = '') {
+  const supplierCodes = publishTargetSupplierCodes(payload);
+  const calls = [];
+  const blockers = [];
+  const warnings = [];
+  if (!supplierCodes.length) {
+    return {calls, blockers, warnings, evidence: {status: 'skipped_missing_supplier_code', supplierCodes: [], matches: []}};
+  }
+  let response = null;
+  try {
+    response = await client.request('/open-api/goods/searchProduct', {
+      method: 'POST',
+      body: {pageNum: 1, pageSize: 10, skcSupplierCodeList: supplierCodes.slice(0, 20), languageList: ['en', 'ar']},
+      headers: {language: 'en'},
+    });
+  } catch (err) {
+    blockers.push(`${targetStore || '目标店'} 同货号去重检查失败：${safeString(err?.message || err, 300)}；在确认目标店没有现有同货号链接前禁止创建新链接。`);
+    return {calls, blockers, warnings, evidence: {status: 'query_failed', supplierCodes, matches: [], error: safeString(err?.message || err, 300)}};
+  }
+  calls.push(compactCallResult('search-existing-target-by-supplier-code', '/open-api/goods/searchProduct', 'POST', response));
+  if (!response.ok || String(response.data?.code) !== '0') {
+    blockers.push(`${targetStore || '目标店'} 同货号去重检查失败：code=${safeString(response.data?.code || '', 80)} msg=${safeString(response.data?.msg || response.statusText || '', 300)}；在确认目标店没有现有同货号链接前禁止创建新链接。`);
+    return {calls, blockers, warnings, evidence: {status: 'query_not_ok', supplierCodes, matches: [], httpStatus: response.status, code: response.data?.code ?? null, msg: response.data?.msg ?? null}};
+  }
+  let matches = existingTargetSkcRows(response.data, supplierCodes);
+  const bySpu = [...new Set(matches.map(row => row.spuName).filter(Boolean))].slice(0, 20);
+  for (const spuName of bySpu) {
+    try {
+      const detailResponse = await client.request('/open-api/goods/spu-info', {
+        method: 'POST',
+        body: {spuName, languageList: ['en', 'ar']},
+        headers: {language: 'en'},
+      });
+      calls.push(compactCallResult(`spu-info-existing-target-${spuName}`, '/open-api/goods/spu-info', 'POST', detailResponse));
+      if (!detailResponse.ok || String(detailResponse.data?.code) !== '0' || !detailResponse.data?.info) continue;
+      const group = matches.filter(row => row.spuName === spuName);
+      const enriched = enrichExistingTargetSkcsFromSpuInfo(group, detailResponse.data.info);
+      const enrichedBySkc = new Map(enriched.map(row => [row.skcName, row]));
+      matches = matches.map(row => row.spuName === spuName ? (enrichedBySkc.get(row.skcName) || row) : row);
+    } catch (err) {
+      calls.push({name: `spu-info-existing-target-${spuName}`, path: '/open-api/goods/spu-info', method: 'POST', httpStatus: null, code: null, msg: safeString(err?.message || err, 300), traceId: null});
+    }
+  }
+  const recycled = matches.filter(row => Number(row.recycleStatus) === 1);
+  const active = matches.filter(row => Number(row.recycleStatus) !== 1 && Number(row.shelfStatus) === 1);
+  const inactive = matches.filter(row => Number(row.recycleStatus) !== 1 && Number(row.shelfStatus) !== 1);
+  if (active.length) {
+    blockers.push(`${targetStore || '目标店'} 已存在同货号在售链接 ${active.map(row => row.skcName).filter(Boolean).join('、')}，禁止重复创建新链接。`);
+  }
+  if (inactive.length) {
+    blockers.push(`${targetStore || '目标店'} 已存在同货号下架但未回收链接 ${inactive.map(row => row.skcName).filter(Boolean).join('、')}；应优先恢复该链接，或先明确说明为何必须另建，当前禁止直接创建重复链接。`);
+  }
+  if (recycled.length) {
+    warnings.push(`${targetStore || '目标店'} 已存在同货号历史回收链接 ${recycled.map(row => row.skcName).filter(Boolean).join('、')}（已回收、当前非在售）。本次计划仍是创建新链接，不会恢复旧链接；确认后新链接会与历史回收记录并存。`);
+  }
+  return {
+    calls,
+    blockers,
+    warnings,
+    evidence: {
+      status: 'ok',
+      supplierCodes,
+      matchCount: matches.length,
+      activeCount: active.length,
+      inactiveCount: inactive.length,
+      recycledCount: recycled.length,
+      matches: matches.slice(0, 40),
+    },
+  };
 }
 
 function rowTextForReadback(row) {
@@ -2464,7 +2796,28 @@ async function main() {
     warnings.push(`仓库列表探针失败：${safeString(err?.message || err)}`);
   }
 
-  const payloadFound = await findOrBuildPublishPayload(task, {targetStore});
+  const expectedPayloadHash = args.mode === 'execute'
+    ? safeString(
+      executionContext?.expectedPayloadHash
+      || executionContext?.request?.expectedPayloadHash
+      || executionContext?.request?.payloadHash
+      || '',
+      120,
+    )
+    : '';
+  const reusePreflightLock = args.mode === 'execute'
+    || executionContext?.reusePreflightLock === true
+    || executionContext?.request?.reusePreflightLock === true;
+  const productDraftLock = reusePreflightLock
+    ? resolvePreflightProductLock(task, targetStore, {expectedPayloadHash})
+    : null;
+  const effectiveExecutionContext = productDraftLock
+    ? {...(executionContext || {}), productDraftLock}
+    : executionContext;
+  const payloadFound = await findOrBuildPublishPayload(task, {
+    targetStore,
+    preferredSource: productDraftLock,
+  });
   let payloadSummary = null;
   let safeDefaults = [];
   let manualAttributeOverrides = [];
@@ -2473,19 +2826,21 @@ async function main() {
   let payloadHash = '';
   if (payloadFound?.payload) {
     appendUnique(warnings, payloadFound.mappingWarnings);
-    const applied = applySafeDefaults(payloadFound.payload, {sites, brands, task, executionContext});
-    const manualApplied = applyManualAttributeOverrides(applied.payload, task, executionContext);
+    const applied = applySafeDefaults(payloadFound.payload, {sites, brands, task, executionContext: effectiveExecutionContext});
+    const manualApplied = applyManualAttributeOverrides(applied.payload, task, effectiveExecutionContext);
     const liveSourceNames = await enrichPayloadNamesFromLiveSourceOpenApi(config, manualApplied.payload, payloadFound);
     if (liveSourceNames.call) calls.push(liveSourceNames.call);
     const publishStandardApplied = await applyPublishFillInStandardRules(client, liveSourceNames.payload);
     if (publishStandardApplied.call) calls.push(publishStandardApplied.call);
     const templateApplied = await applyAttributeTemplateRules(client, publishStandardApplied.payload);
     if (templateApplied.call) calls.push(templateApplied.call);
-    const standardGoodsSnApplied = applyTargetStandardGoodsSn(templateApplied.payload, taskStandardGoodsSn(task, executionContext));
-    const randomSupplyPriceApplied = applyRandomSupplyPrice(standardGoodsSnApplied.payload, task, executionContext, targetStore);
-    const imageShuffleApplied = shufflePublishDetailImages(randomSupplyPriceApplied.payload, task, executionContext);
+    const standardGoodsSnApplied = applyTargetStandardGoodsSn(templateApplied.payload, taskStandardGoodsSn(task, effectiveExecutionContext));
+    const randomSupplyPriceApplied = applyRandomSupplyPrice(standardGoodsSnApplied.payload, task, effectiveExecutionContext, targetStore);
+    const imageShuffleApplied = shufflePublishDetailImages(randomSupplyPriceApplied.payload, task, effectiveExecutionContext);
     const imageSortApplied = ensurePublishImageSortGlobalUnique(imageShuffleApplied.payload);
     publishPayload = imageSortApplied.payload;
+    const targetDuplicateCheck = await inspectTargetDuplicateProducts(client, publishPayload, targetStore);
+    calls.push(...targetDuplicateCheck.calls);
     safeDefaults = [
       ...applied.applied,
       ...manualApplied.applied.map(x => `manual_attribute:${x}`),
@@ -2502,11 +2857,14 @@ async function main() {
     evidence.publishFillInStandard = publishStandardApplied.evidence;
     evidence.attributeTemplate = templateApplied.evidence;
     evidence.randomSupplyPrice = randomSupplyPriceApplied.evidence;
+    evidence.targetDuplicateCheck = targetDuplicateCheck.evidence;
     appendUnique(warnings, liveSourceNames.warnings);
     appendUnique(warnings, publishStandardApplied.warnings);
     appendUnique(blockers, publishStandardApplied.blockers);
     appendUnique(warnings, templateApplied.warnings);
     appendUnique(blockers, templateApplied.blockers);
+    appendUnique(warnings, targetDuplicateCheck.warnings);
+    appendUnique(blockers, targetDuplicateCheck.blockers);
     payloadValidation = validatePublishPayload(publishPayload);
     payloadSummary = extractPayloadSummary(publishPayload);
     payloadHash = sha256Stable(publishPayload);
@@ -2525,13 +2883,7 @@ async function main() {
     if (args.confirm !== SUBMIT_CONFIRM_TEXT) {
       blockers.push(`真实提交必须显式传入 --confirm ${SUBMIT_CONFIRM_TEXT}`);
     }
-    const expectedHash = safeString(
-      executionContext?.expectedPayloadHash
-      || executionContext?.request?.expectedPayloadHash
-      || executionContext?.request?.payloadHash
-      || '',
-      120,
-    );
+    const expectedHash = expectedPayloadHash;
     const skipPayloadHashLock = Boolean(task?.skipPayloadHashLock || task?.targets?.skipPayloadHashLock || executionContext?.skipPayloadHashLock || executionContext?.targets?.skipPayloadHashLock);
     if (skipPayloadHashLock) {
       warnings.push('skipPayloadHashLock=true: payload hash lock skipped (randomized payload)');
@@ -2619,6 +2971,13 @@ async function main() {
       targetStore: executionContext.targetStore || targetStore,
       parentIssuedAt: executionContext.parentIssuedAt || '',
       issuedAt: executionContext.issuedAt || '',
+      productDraftLock: productDraftLock ? {
+        sourceStore: productDraftLock.sourceStore,
+        sourceSkc: productDraftLock.sourceSkc,
+        hopeOnSaleDate: productDraftLock.hopeOnSaleDate,
+        payloadHash: productDraftLock.payloadHash,
+        runId: productDraftLock.runId,
+      } : null,
     } : null,
     openapi: {
       baseUrl: client.baseUrl,
@@ -2646,6 +3005,14 @@ async function main() {
       generatedDraft: payloadFound?.generatedDraft || null,
       generationError: payloadFound?.generationError || null,
       inferredSource: payloadFound?.inferred || null,
+      preflightLock: productDraftLock ? {
+        reused: true,
+        sourceStore: productDraftLock.sourceStore,
+        sourceSkc: productDraftLock.sourceSkc,
+        hopeOnSaleDate: productDraftLock.hopeOnSaleDate,
+        payloadHash: productDraftLock.payloadHash,
+        runId: productDraftLock.runId,
+      } : null,
     },
     readbackFingerprint,
     readback,
@@ -2678,8 +3045,13 @@ if (process.env.SHEIN_LINK_OPS_EXECUTOR_SELF_TEST !== '1') main().catch(err => {
 });
 
 export const __testHooks = {
+  applySafeDefaults,
   applyManualAttributeOverrides,
+  applyAttributeTemplateRules,
+  inspectTargetDuplicateProducts,
   applyRandomSupplyPrice,
+  applyTargetStandardGoodsSn,
+  resolvePreflightProductLock,
   shufflePublishDetailImages,
   ensurePublishImageSortGlobalUnique,
   normalizePublishImageType,

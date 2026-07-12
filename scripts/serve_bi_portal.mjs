@@ -44,6 +44,29 @@ import {
   readBiSectionStaleRaw,
   writeBiSectionCache,
 } from '../lib/bi_section_cache.mjs';
+import {
+  BiOpsAgentGovernorError,
+  createBiOpsAgentGovernor,
+} from '../lib/bi_ops_agent_governor.mjs';
+import {
+  biOpsModelProfiles,
+  modelProfilePublicSummary,
+  selectBiOpsModelProfile,
+} from '../lib/bi_ops_model_policy.mjs';
+import {createConfiguredLinkOpsStoreGateway} from '../lib/link_ops_store_gateway.mjs';
+import {createLinkOpsJobWorker} from '../lib/link_ops_job_worker.mjs';
+import {linkOpsPayloadHash} from '../lib/link_ops_repository.mjs';
+import {createOwnerKnowledgeService} from '../lib/owner_knowledge_service.mjs';
+import {
+  actorCanPublishOwnerKnowledge,
+  isOwnerKnowledgeCandidateText,
+  isOwnerKnowledgeDurableText,
+} from '../lib/owner_knowledge_policy.mjs';
+import {
+  BI_OPS_ACTION_INTENTS,
+  biOpsIntentPlanToTaskInput,
+  runBiOpsIntentPlanner,
+} from '../lib/bi_ops_intent_planner.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
@@ -58,6 +81,7 @@ function parseArgs(argv) {
     stateFile: path.join(ROOT, 'state', 'bi_action_state.json'),
     linkOpsTaskFile: path.join(ROOT, 'state', 'bi_link_ops_tasks.json'),
     linkOpsChatFile: path.join(ROOT, 'state', 'bi_link_ops_chats.json'),
+    linkOpsRuntimeFile: process.env.SHEIN_LINK_OPS_RUNTIME_FILE || path.join(ROOT, 'state', 'bi_link_ops_runtime.json'),
     linkOpsAssetDir: '',
     manualLoginStateFile: process.env.SHEIN_MANUAL_LOGIN_STATE_FILE || '/srv/shein-bi/runtime/cloud_manual_login_sessions.json',
     authFile: path.join(ROOT, 'config', 'bi_users.local.json'),
@@ -80,6 +104,7 @@ function parseArgs(argv) {
     else if (a === '--state-file') args.stateFile = path.resolve(argv[++i]);
     else if (a === '--link-ops-task-file') args.linkOpsTaskFile = path.resolve(argv[++i]);
     else if (a === '--link-ops-chat-file') args.linkOpsChatFile = path.resolve(argv[++i]);
+    else if (a === '--link-ops-runtime-file') args.linkOpsRuntimeFile = path.resolve(argv[++i]);
     else if (a === '--link-ops-asset-dir') args.linkOpsAssetDir = path.resolve(argv[++i]);
     else if (a === '--manual-login-state-file') args.manualLoginStateFile = path.resolve(argv[++i]);
     else if (a === '--auth-file') args.authFile = path.resolve(argv[++i]);
@@ -131,9 +156,12 @@ const BI_PORTAL_SECTION_KEYS = new Set(['homeProfit', 'homeRankings', 'rankings'
 const BI_PORTAL_SECTION_TIMEOUT_MS = Math.max(60_000, Number(process.env.SHEIN_BI_SECTION_TIMEOUT_MS || 900_000));
 const OPENAPI_READ_PROBE_SUMMARY_FILE = process.env.SHEIN_OPENAPI_READ_PROBE_SUMMARY_FILE
   || path.join(ROOT, 'state', 'openapi-probes', 'read-probes.latest.json');
-const OPENAPI_SALES_RECONCILIATION_SUMMARY_FILE = path.join(ROOT, 'state', 'openapi-probes', 'sales-reconciliation.latest.json');
-const OPENAPI_RETURN_RECONCILIATION_SUMMARY_FILE = path.join(ROOT, 'state', 'openapi-probes', 'return-reconciliation.latest.json');
-const OPENAPI_PRODUCT_RECONCILIATION_SUMMARY_FILE = path.join(ROOT, 'state', 'openapi-probes', 'product-reconciliation.latest.json');
+const OPENAPI_SALES_RECONCILIATION_SUMMARY_FILE = process.env.SHEIN_OPENAPI_SALES_RECONCILIATION_SUMMARY_FILE
+  || path.join(ROOT, 'state', 'openapi-probes', 'sales-reconciliation.latest.json');
+const OPENAPI_RETURN_RECONCILIATION_SUMMARY_FILE = process.env.SHEIN_OPENAPI_RETURN_RECONCILIATION_SUMMARY_FILE
+  || path.join(ROOT, 'state', 'openapi-probes', 'return-reconciliation.latest.json');
+const OPENAPI_PRODUCT_RECONCILIATION_SUMMARY_FILE = process.env.SHEIN_OPENAPI_PRODUCT_RECONCILIATION_SUMMARY_FILE
+  || path.join(ROOT, 'state', 'openapi-probes', 'product-reconciliation.latest.json');
 const OPENAPI_READ_PROBE_FRESH_MS = Math.max(60_000, Number(process.env.SHEIN_OPENAPI_READ_PROBE_FRESH_MS || 14 * 24 * 60 * 60 * 1000));
 const OPENAPI_SALES_RECONCILIATION_FRESH_MS = Math.max(60_000, Number(process.env.SHEIN_OPENAPI_SALES_RECONCILIATION_FRESH_MS || 14 * 24 * 60 * 60 * 1000));
 const OPENAPI_RETURN_RECONCILIATION_FRESH_MS = Math.max(60_000, Number(process.env.SHEIN_OPENAPI_RETURN_RECONCILIATION_FRESH_MS || 14 * 24 * 60 * 60 * 1000));
@@ -152,18 +180,12 @@ const biPortalCoreWarmupState = {
   lastError: '',
 };
 const linkOpsExecutionLocks = new Set();
-const LINK_OPS_STORE_CAPABILITIES = {
-  HL: {
-    openapiAuthorized: true,
-    verifiedRead: true,
-    salesReconciliation: true,
-    productPublishAdapter: true,
-    readDomains: ['store_info', 'site_currency', 'warehouse', 'product', 'stock', 'order', 'return', 'finance'],
-    writeDomains: ['product_publish_precheck'],
-    note: 'HL 已完成 SHEIN OpenAPI 真实授权，并已验证商品/订单/库存等只读接口和销售对账；商品发布/编辑执行器已接入受控系统检查，真实提交仍要求 payload 完整和显式确认。',
-  },
-};
+// Store capability must come from the same dynamic evidence for every store.
+// Do not add one-store readiness fallbacks here: they make an expired shared
+// probe look like an HL-only API deployment even when all stores are healthy.
+const LINK_OPS_STORE_CAPABILITIES = {};
 const LINK_OPS_OPENAPI_SUBMIT_CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
+const BI_OPS_ACTION_INTENT_SET = new Set(BI_OPS_ACTION_INTENTS);
 const LINK_OPS_PROTECTED_TASK_PATCH_FIELDS = new Set([
   'execution',
   'executionHistory',
@@ -175,6 +197,9 @@ const LINK_OPS_PROTECTED_TASK_PATCH_FIELDS = new Set([
   'createdAt',
   'assets',
   'writeAudit',
+  'actorKey',
+  'ownerKey',
+  'ownership',
 ]);
 const DEFAULT_OPENAPI_READ_DOMAINS = ['store_info', 'product', 'stock', 'order', 'return', 'finance'];
 const DEFAULT_OPENAPI_WRITE_PRECHECK_DOMAINS = ['product_publish_precheck'];
@@ -525,6 +550,27 @@ function writeResponseHead(res, status, headers = {}) {
   }));
 }
 
+function linkOpsRepositoryHttpDetails(error) {
+  const code = String(error?.code || '');
+  if (!code) return null;
+  if (code === 'LINK_OPS_VALIDATION') {
+    return {status: 400, body: {ok: false, error: error.message, code}};
+  }
+  if (code === 'LINK_OPS_NOT_FOUND') {
+    return {status: 404, body: {ok: false, error: error.message, code}};
+  }
+  if (['LINK_OPS_REVISION_CONFLICT', 'LINK_OPS_IDEMPOTENCY_CONFLICT', 'LINK_OPS_IMPORT_CONFLICT', 'LINK_OPS_ALREADY_EXISTS', 'LINK_OPS_GATEWAY_CONFLICT'].includes(code)) {
+    return {status: 409, body: {ok: false, error: error.message, code, retryable: code === 'LINK_OPS_REVISION_CONFLICT'}};
+  }
+  if (['WAREHOUSE_PG_UNAVAILABLE', 'WAREHOUSE_PG_CONFIGURATION', 'LINK_OPS_JSON_LOCK_TIMEOUT'].includes(code)) {
+    return {status: 503, body: {ok: false, error: '自动运营存储暂不可用，请稍后重试。', code, retryable: true}};
+  }
+  if (code.startsWith('LINK_OPS_')) {
+    return {status: 500, body: {ok: false, error: '自动运营状态保存失败，操作未被静默降级。', code}};
+  }
+  return null;
+}
+
 function send(res, status, body, headers = {}) {
   writeResponseHead(res, status, headers);
   res.end(body);
@@ -760,7 +806,7 @@ function loadOpenApiReadProbeSummarySync() {
   try {
     const summary = JSON.parse(fssync.readFileSync(OPENAPI_READ_PROBE_SUMMARY_FILE, 'utf8'));
     const generatedAtMs = Date.parse(summary?.generatedAt || '');
-    const fresh = Number.isFinite(generatedAtMs) && Date.now() - generatedAtMs <= OPENAPI_READ_PROBE_FRESH_MS;
+    const fresh = openApiEvidenceTimestampFresh(generatedAtMs, OPENAPI_READ_PROBE_FRESH_MS);
     const byStore = new Map();
     for (const result of Array.isArray(summary?.results) ? summary.results : []) {
       const key = String(result?.storeKey || '').trim().toUpperCase();
@@ -777,19 +823,40 @@ function openApiProbeResultIsReadReady(result) {
   return Boolean(result?.ok) && String(result?.status || '') === 'read_probe_ok';
 }
 
+function openApiEvidenceTimestampFresh(generatedAtMs, maxAgeMs, nowMs = Date.now()) {
+  if (!Number.isFinite(generatedAtMs)) return false;
+  const ageMs = nowMs - generatedAtMs;
+  return ageMs >= -(5 * 60_000) && ageMs <= maxAgeMs;
+}
+
+function openApiReconciliationReadEvidenceOk(kind, result, row) {
+  if (!result?.ok || !row || typeof row !== 'object') return false;
+  const fields = kind === 'sales'
+    ? ['apiSalesSar', 'api_sales_sar', 'apiOnlyOrderCount', 'api_only_order_count', 'browserOnlyOrderCount', 'browser_only_order_count']
+    : kind === 'return'
+      ? ['apiAmountSar', 'api_amount_sar', 'apiOnlyReturnCount', 'api_only_return_count', 'checkedDays', 'checked_days']
+      : ['apiLinkCount', 'api_link_count', 'matchedSkcCount', 'matched_skc_count', 'apiOnlySkcCount', 'api_only_skc_count'];
+  // A warning may describe reconciliation differences while still proving that
+  // the API read and warehouse load completed. Require a real domain metric so
+  // an empty/malformed outer result cannot unlock the controlled workflow.
+  return fields.some(field => row[field] !== null && row[field] !== undefined && Number.isFinite(Number(row[field])));
+}
+
 function loadOpenApiSalesReconciliationSummarySync() {
   try {
     const summary = JSON.parse(fssync.readFileSync(OPENAPI_SALES_RECONCILIATION_SUMMARY_FILE, 'utf8'));
     const generatedAtMs = Date.parse(summary?.generatedAt || '');
-    const fresh = Number.isFinite(generatedAtMs) && Date.now() - generatedAtMs <= OPENAPI_SALES_RECONCILIATION_FRESH_MS;
+    const fresh = openApiEvidenceTimestampFresh(generatedAtMs, OPENAPI_SALES_RECONCILIATION_FRESH_MS);
     const byStore = new Map();
     for (const result of Array.isArray(summary?.results) ? summary.results : []) {
       const key = String(result?.storeKey || '').trim().toUpperCase();
       if (!key) continue;
       const row = Array.isArray(result?.load?.reconciliation) ? result.load.reconciliation[0] : null;
+      const readEvidenceOk = openApiReconciliationReadEvidenceOk('sales', result, row);
       byStore.set(key, {
         status: result?.status || row?.status || '',
-        ok: Boolean(result?.ok),
+        ok: readEvidenceOk,
+        readEvidenceOk,
         date: summary?.date || row?.date || '',
         generatedAt: summary?.generatedAt || '',
         browserSalesSar: row?.browserSalesSar ?? null,
@@ -834,15 +901,17 @@ function loadOpenApiReturnReconciliationSummarySync() {
   try {
     const summary = JSON.parse(fssync.readFileSync(OPENAPI_RETURN_RECONCILIATION_SUMMARY_FILE, 'utf8'));
     const generatedAtMs = Date.parse(summary?.generatedAt || '');
-    const fresh = Number.isFinite(generatedAtMs) && Date.now() - generatedAtMs <= OPENAPI_RETURN_RECONCILIATION_FRESH_MS;
+    const fresh = openApiEvidenceTimestampFresh(generatedAtMs, OPENAPI_RETURN_RECONCILIATION_FRESH_MS);
     const byStore = new Map();
     for (const result of Array.isArray(summary?.results) ? summary.results : []) {
       const key = String(result?.storeKey || '').trim().toUpperCase();
       if (!key) continue;
       const row = summarizeOpenApiReturnRows(result?.load?.reconciliation) || result?.reconciliation || null;
+      const readEvidenceOk = openApiReconciliationReadEvidenceOk('return', result, row);
       byStore.set(key, {
         status: result?.status || row?.status || '',
-        ok: Boolean(result?.ok) && (!row || row.status === 'matched'),
+        ok: Boolean(readEvidenceOk && row.status === 'matched'),
+        readEvidenceOk,
         date: summary?.date || row?.date || '',
         generatedAt: summary?.generatedAt || '',
         browserAmountSar: row?.browserAmountSar ?? null,
@@ -865,15 +934,17 @@ function loadOpenApiProductReconciliationSummarySync() {
   try {
     const summary = JSON.parse(fssync.readFileSync(OPENAPI_PRODUCT_RECONCILIATION_SUMMARY_FILE, 'utf8'));
     const generatedAtMs = Date.parse(summary?.generatedAt || '');
-    const fresh = Number.isFinite(generatedAtMs) && Date.now() - generatedAtMs <= OPENAPI_PRODUCT_RECONCILIATION_FRESH_MS;
+    const fresh = openApiEvidenceTimestampFresh(generatedAtMs, OPENAPI_PRODUCT_RECONCILIATION_FRESH_MS);
     const byStore = new Map();
     for (const result of Array.isArray(summary?.results) ? summary.results : []) {
       const key = String(result?.storeKey || '').trim().toUpperCase();
       if (!key) continue;
       const row = Array.isArray(result?.load?.reconciliation) ? result.load.reconciliation[0] : result?.reconciliation || null;
+      const readEvidenceOk = openApiReconciliationReadEvidenceOk('product', result, row);
       byStore.set(key, {
         status: result?.status || row?.status || '',
-        ok: Boolean(result?.ok),
+        ok: readEvidenceOk,
+        readEvidenceOk,
         generatedAt: summary?.generatedAt || row?.generated_at || row?.generatedAt || '',
         apiLinkCount: row?.api_link_count ?? row?.apiLinkCount ?? null,
         apiOnShelfCount: row?.api_on_shelf_count ?? row?.apiOnShelfCount ?? null,
@@ -940,9 +1011,12 @@ async function verifyOpenApiStoreIdentityForUtility(client, storeKey, configured
   return {ok: false, identity, httpStatus: response.status, error: formatStoreIdentityError(identity)};
 }
 
-function openApiStoreCapability(storeKey) {
+function openApiStoreCapability(storeKey, evidence = {}) {
   const {config, configured} = openApiConfiguredStoresSync();
-  const probeSummary = loadOpenApiReadProbeSummarySync();
+  const probeSummary = evidence.probeSummary || loadOpenApiReadProbeSummarySync();
+  const salesReconciliationSummary = evidence.salesReconciliationSummary || loadOpenApiSalesReconciliationSummarySync();
+  const returnReconciliationSummary = evidence.returnReconciliationSummary || loadOpenApiReturnReconciliationSummarySync();
+  const productReconciliationSummary = evidence.productReconciliationSummary || loadOpenApiProductReconciliationSummarySync();
   const key = String(storeKey || '').trim().toUpperCase();
   const local = configured.get(key) || null;
   const staticCap = LINK_OPS_STORE_CAPABILITIES[key] || {};
@@ -952,7 +1026,15 @@ function openApiStoreCapability(storeKey) {
   const authorized = enabled && hasOpenKey && hasSecret;
   const probeResult = probeSummary.byStore.get(key) || null;
   const probeReadReady = authorized && probeSummary.fresh && openApiProbeResultIsReadReady(probeResult);
-  const verifiedRead = authorized && (Boolean(staticCap.verifiedRead) || probeReadReady);
+  const salesReconciliation = salesReconciliationSummary.byStore.get(key) || null;
+  const returnReconciliation = returnReconciliationSummary.byStore.get(key) || null;
+  const productReconciliation = productReconciliationSummary.byStore.get(key) || null;
+  const reconciliationReadReady = authorized && Boolean(
+    (salesReconciliationSummary.fresh && salesReconciliation?.readEvidenceOk)
+    || (returnReconciliationSummary.fresh && returnReconciliation?.readEvidenceOk)
+    || (productReconciliationSummary.fresh && productReconciliation?.readEvidenceOk)
+  );
+  const verifiedRead = authorized && (probeReadReady || reconciliationReadReady);
   const productPublishPrecheckAdapter = authorized && verifiedRead;
   const safeWrite = safeWriteOperationAllowed(config, {operation: 'copy_product_draft', storeKey: key});
   const whitelistConfigured = biOpsWriteWhitelistConfigured({operation: 'copy_product_draft', storeKey: key});
@@ -966,6 +1048,7 @@ function openApiStoreCapability(storeKey) {
     authorized,
     verifiedRead,
     probeReadReady,
+    reconciliationReadReady,
     productPublishAdapter: productPublishPrecheckAdapter,
     productPublishPrecheckAdapter,
     productPublishExecuteAdapter,
@@ -1099,14 +1182,19 @@ function openApiCapabilityLedger() {
     .filter(key => DEFAULT_MANUAL_LOGIN_STORE_KEYS.includes(key) || configured.has(key))
     .sort((a, b) => a.localeCompare(b));
   const rows = stores.map(storeKey => {
-    const cap = openApiStoreCapability(storeKey);
+    const cap = openApiStoreCapability(storeKey, {
+      probeSummary,
+      salesReconciliationSummary,
+      returnReconciliationSummary,
+      productReconciliationSummary,
+    });
     const {local, staticCap, enabled, authorized} = cap;
     const probeResult = probeSummary.byStore.get(storeKey) || null;
     const salesReconciliation = salesReconciliationSummary.byStore.get(storeKey) || null;
     const returnReconciliation = returnReconciliationSummary.byStore.get(storeKey) || null;
     const productReconciliation = productReconciliationSummary.byStore.get(storeKey) || null;
-    const probeReadReady = authorized && probeSummary.fresh && openApiProbeResultIsReadReady(probeResult);
-    const verifiedRead = authorized && (Boolean(staticCap.verifiedRead) || probeReadReady);
+    const probeReadReady = cap.probeReadReady;
+    const verifiedRead = cap.verifiedRead;
     const salesReconciliationReady = Boolean(salesReconciliationSummary.fresh && salesReconciliation && salesReconciliation.ok);
     const returnReconciliationReady = Boolean(returnReconciliationSummary.fresh && returnReconciliation && returnReconciliation.ok);
     const productReconciliationReady = Boolean(productReconciliationSummary.fresh && productReconciliation && productReconciliation.ok);
@@ -1134,6 +1222,7 @@ function openApiCapabilityLedger() {
       configured: configured.has(storeKey),
       enabled,
       authorized,
+      apiConnected: authorized,
       verifiedRead,
       salesReconciliation: salesReconciliationReady || Boolean(staticCap.salesReconciliation),
       salesReconciliationLatest: salesReconciliation,
@@ -1163,8 +1252,8 @@ function openApiCapabilityLedger() {
         apiCredential: maskCredentialPresence(authorized),
         encryptedCredential: maskCredentialPresence(local?.encryptedSecretKey),
       },
-      note: staticCap.note || (probeReadReady
-        ? `云端只读探针已通过（${probeSummary.summary?.generatedAt || 'unknown'}），销售双跑${salesReconciliation ? ` ${salesReconciliation.date || ''}=${salesReconciliation.status || 'unknown'}` : '待调度'}，退货双跑${returnReconciliation ? ` ${returnReconciliation.date || ''}=${returnReconciliation.status || 'unknown'}` : '待调度'}，商品基础资料双跑${productReconciliation ? `=${productReconciliation.status || 'unknown'}` : '待调度'}；商品发布/编辑可进入 OpenAPI 系统检查 权限与 payload 系统检查，真实写操作仍需单独适配、人工确认和回读。`
+      note: staticCap.note || (verifiedRead
+        ? `云端 API 读链路已有新鲜成功证据（${probeReadReady ? `通用探针 ${probeSummary.summary?.generatedAt || 'unknown'}` : '日常 OpenAPI 对账'}），销售双跑${salesReconciliation ? ` ${salesReconciliation.date || ''}=${salesReconciliation.status || 'unknown'}` : '待调度'}，退货双跑${returnReconciliation ? ` ${returnReconciliation.date || ''}=${returnReconciliation.status || 'unknown'}` : '待调度'}，商品基础资料双跑${productReconciliation ? `=${productReconciliation.status || 'unknown'}` : '待调度'}；真实写操作仍需资料检查、账号权限、你明确确认和提交后回读。`
         : authorized
           ? (probeResult && !openApiProbeResultIsReadReady(probeResult)
             ? `已授权，但最近云端只读探针未通过：${probeResult.status || 'unknown'}。`
@@ -1174,15 +1263,21 @@ function openApiCapabilityLedger() {
   });
   const counts = rows.reduce((acc, r) => {
     acc.total += 1;
-    if (r.authorized) acc.authorized += 1;
+    if (r.authorized) {
+      acc.authorized += 1;
+      acc.apiConnected += 1;
+    }
     if (r.verifiedRead) acc.readReady += 1;
     if (r.salesReconciliation) acc.salesReconciliationReady += 1;
     if (r.returnReconciliation) acc.returnReconciliationReady += 1;
     if (r.productReconciliation) acc.productReconciliationReady += 1;
     if (r.writePrecheckReady) acc.writePrecheckReady += 1;
-    if (r.writeConfirmable) acc.writeConfirmable += 1;
+    if (r.writeConfirmable) {
+      acc.writeConfirmable += 1;
+      acc.controlledSubmitReady += 1;
+    }
     return acc;
-  }, {total: 0, authorized: 0, readReady: 0, salesReconciliationReady: 0, returnReconciliationReady: 0, productReconciliationReady: 0, writePrecheckReady: 0, writeConfirmable: 0});
+  }, {total: 0, authorized: 0, apiConnected: 0, readReady: 0, salesReconciliationReady: 0, returnReconciliationReady: 0, productReconciliationReady: 0, writePrecheckReady: 0, writeConfirmable: 0, controlledSubmitReady: 0});
   return {
     ok: true,
     generatedAt: new Date().toISOString(),
@@ -1329,18 +1424,28 @@ function projectOpenApiCapabilityDefinitionsForClient(defs) {
   })).filter(row => row.key);
 }
 
-function projectOpenApiCapabilityRowForClient(row) {
+function projectOpenApiCapabilityRowForClient(row, actor = null) {
   if (!row || typeof row !== 'object') return null;
+  const storeKey = String(row.storeKey || '').trim().toUpperCase();
+  const actorWriteAllowed = actorCanWriteStores(actor, [storeKey]);
   const actionCapabilities = asArray(row.actionCapabilities)
-    .map(projectOpenApiActionCapabilityForClient)
+    .map(action => {
+      const projected = projectOpenApiActionCapabilityForClient(action);
+      const actorWhitelist = biOpsWriteWhitelistAllowedForActor(actor, {operation: action?.intent, storeKey});
+      return {
+        ...projected,
+        actorCanSubmit: Boolean(projected.realSubmitSupported && actorWriteAllowed && actorWhitelist.allowed),
+      };
+    })
     .filter(action => action.key);
   return {
-    storeKey: String(row.storeKey || '').trim().toUpperCase(),
+    storeKey,
     storeName: sanitizeLinkOpsClientText(row.storeName || '', 80),
     status: String(row.status || '').trim(),
     configured: Boolean(row.configured),
     enabled: Boolean(row.enabled),
     authorized: Boolean(row.authorized),
+    apiConnected: Boolean(row.apiConnected ?? row.authorized),
     verifiedRead: Boolean(row.verifiedRead),
     salesReconciliation: Boolean(row.salesReconciliation),
     salesReconciliationLatest: row.salesReconciliationLatest || null,
@@ -1350,6 +1455,7 @@ function projectOpenApiCapabilityRowForClient(row) {
     productReconciliationLatest: row.productReconciliationLatest || null,
     writePrecheckReady: Boolean(row.writePrecheckReady),
     writeConfirmable: Boolean(row.writeConfirmable),
+    actorCanSubmit: actionCapabilities.some(action => action.actorCanSubmit),
     canSilentWrite: false,
     actionCapabilities,
     safeWriteEnabled: Boolean(row.safeWriteEnabled),
@@ -1383,9 +1489,9 @@ function projectOpenApiCapabilityRowForClient(row) {
   };
 }
 
-function projectOpenApiCapabilityLedgerForClient(ledger) {
+function projectOpenApiCapabilityLedgerForClient(ledger, actor = null) {
   const rows = asArray(ledger?.rows)
-    .map(projectOpenApiCapabilityRowForClient)
+    .map(row => projectOpenApiCapabilityRowForClient(row, actor))
     .filter(Boolean);
   return {
     ok: ledger?.ok !== false,
@@ -1399,12 +1505,15 @@ function projectOpenApiCapabilityLedgerForClient(ledger) {
     cooperationMode: ledger?.cooperationMode || '半托管',
     apiBase: ledger?.apiBase || '',
     allStoreKeys: asArray(ledger?.allStoreKeys).map(x => String(x || '').trim().toUpperCase()).filter(Boolean),
-    counts: ledger?.counts || {
-      total: rows.length,
-      authorized: rows.filter(r => r.authorized).length,
-      readReady: rows.filter(r => r.verifiedRead).length,
-      writePrecheckReady: rows.filter(r => r.writePrecheckReady).length,
-      writeConfirmable: rows.filter(r => r.writeConfirmable).length,
+    counts: {
+      ...(ledger?.counts || {
+        total: rows.length,
+        authorized: rows.filter(r => r.authorized).length,
+        readReady: rows.filter(r => r.verifiedRead).length,
+        writePrecheckReady: rows.filter(r => r.writePrecheckReady).length,
+        writeConfirmable: rows.filter(r => r.writeConfirmable).length,
+      }),
+      actorControlledSubmitReady: rows.filter(r => r.actorCanSubmit).length,
     },
     readDomainLabels: ledger?.readDomainLabels || OPENAPI_READ_DOMAIN_LABELS,
     writeDomainLabels: ledger?.writeDomainLabels || OPENAPI_WRITE_DOMAIN_LABELS,
@@ -1563,6 +1672,7 @@ function userPublicFields(user) {
     readStores: normalizeStoreList(hasOwnField(user, 'readStores') ? user.readStores : ['*']),
     writeStores,
     ownerKey: String(user.ownerKey || '').trim(),
+    knowledgePublisher: user.knowledgePublisher === true,
     source: user.source,
   };
 }
@@ -1703,6 +1813,7 @@ function actorFromUser(user) {
     readStores: normalizeStoreList(user.readStores || ['*']),
     writeStores: normalizeStoreList(user.writeStores || []),
     ownerKey: user.ownerKey || '',
+    knowledgePublisher: user.knowledgePublisher === true,
     source: user.source,
   };
 }
@@ -1828,6 +1939,7 @@ function internalActor() {
     readStores: ['*'],
     writeStores: ['*'],
     ownerKey: 'SYSTEM',
+    knowledgePublisher: false,
     source: 'trusted-localhost',
   };
 }
@@ -1849,15 +1961,102 @@ function canWriteAllStores(actor) {
   return role === 'admin' || role === 'owner' || normalizeStoreList(actor?.writeStores || []).includes('*');
 }
 
+function inferredLinkOpsStoreActor(value) {
+  const candidates = [
+    ...(Array.isArray(value?.tasks) ? value.tasks : []),
+    ...(Array.isArray(value?.sessions) ? value.sessions : []),
+    ...(value?.actions && typeof value.actions === 'object' ? Object.values(value.actions) : []),
+  ];
+  for (const record of candidates) {
+    const actor = String(
+      record?.updatedByUser
+      || record?.actorUser
+      || record?.requestedByUser
+      || record?.createdByUser
+      || record?.ownerUser
+      || record?.ownership?.ownerUser
+      || record?.ownership?.actorKey
+      || record?.ownership?.username
+      || ''
+    ).trim();
+    if (actor) return actor;
+  }
+  return '';
+}
+
+async function readLinkOpsTaskStore(args) {
+  if (args.linkOpsStoreGateway) return args.linkOpsStoreGateway.readTaskStore();
+  return readLinkOpsTaskStore(args);
+}
+
+async function writeLinkOpsTaskStore(args, value) {
+  if (args.linkOpsStoreGateway) {
+    return args.linkOpsStoreGateway.replaceTaskStore(value, {actorUser: inferredLinkOpsStoreActor(value)});
+  }
+  await writeLinkOpsTaskStore(args, value);
+  return value;
+}
+
+async function readLinkOpsChatStore(args) {
+  if (args.linkOpsStoreGateway) return args.linkOpsStoreGateway.readChatStore();
+  return readLinkOpsChatStore(args);
+}
+
+async function writeLinkOpsChatStore(args, value) {
+  if (args.linkOpsStoreGateway) {
+    return args.linkOpsStoreGateway.replaceChatStore(value, {actorUser: inferredLinkOpsStoreActor(value)});
+  }
+  await writeLinkOpsChatStore(args, value);
+  return value;
+}
+
+async function readLinkOpsActionState(args) {
+  if (args.linkOpsStoreGateway) return args.linkOpsStoreGateway.readActionState();
+  return readLinkOpsActionState(args);
+}
+
+async function writeLinkOpsActionState(args, value) {
+  if (args.linkOpsStoreGateway) {
+    return args.linkOpsStoreGateway.replaceActionState(value, {actorUser: inferredLinkOpsStoreActor(value)});
+  }
+  await writeLinkOpsActionState(args, value);
+  return value;
+}
+
+function actorHasGlobalOpsView(actor) {
+  const role = String(actor?.role || '').trim().toLowerCase();
+  return role === 'admin' || role === 'owner';
+}
+
 function isInternalSystemActor(actor) {
   return String(actor?.username || '') === 'local-system' || String(actor?.role || '').toLowerCase() === 'system';
 }
 
 function requireConcreteOperatorActor(actor) {
-  if (!isInternalSystemActor(actor)) return null;
+  const role = String(actor?.role || '').trim().toLowerCase();
+  if (actor && !isInternalSystemActor(actor) && ['admin', 'owner', 'operator'].includes(role)) return null;
   return {
     ok: false,
-    error: '自动运营写操作必须使用具体 BI 登录账号，不能使用服务器内部任务身份',
+    error: '自动运营写操作必须使用具体 BI operator/owner 登录账号，不能使用匿名、只读或服务器内部任务身份',
+  };
+}
+
+function actorCanReadStores(actor, stores) {
+  const targets = normalizeStoreList(stores);
+  if (!targets.length) return true;
+  const allowed = new Set(normalizeStoreList(actor?.readStores || []));
+  if (allowed.has('*')) return true;
+  return targets.every(store => allowed.has(store));
+}
+
+function requireReadStores(actor, stores) {
+  const targets = normalizeStoreList(stores);
+  if (actorCanReadStores(actor, targets)) return null;
+  return {
+    ok: false,
+    error: '当前账号没有这些店铺的自动运营查看权限',
+    stores: targets,
+    allowedStores: normalizeStoreList(actor?.readStores || []),
   };
 }
 
@@ -1884,6 +2083,188 @@ function requireWriteTargets(actor, targets) {
   const normalized = normalizeLinkOpsTargetSet(targets);
   const stores = normalizeConcreteStoreKeys(normalized.writeStores.length ? normalized.writeStores : normalized.stores);
   return stores.length ? requireWriteStores(actor, stores) : null;
+}
+
+function normalizeOpsActorKey(value) {
+  return String(value || '').normalize('NFKC').trim().toLowerCase();
+}
+
+function actorOpsKey(actor) {
+  return normalizeOpsActorKey(actor?.username || '');
+}
+
+function isConcreteLegacyOpsActor(value) {
+  const raw = String(value || '').normalize('NFKC').trim();
+  const key = normalizeOpsActorKey(raw);
+  if (!key || ['local-system', 'system', 'anonymous', 'unknown', 'localhost'].includes(key)) return false;
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(key)) return false;
+  if (key.includes(':') && /^[0-9a-f:.]+$/i.test(key)) return false;
+  return true;
+}
+
+function linkOpsOwnershipForRecord(record) {
+  const existing = record?.ownership && typeof record.ownership === 'object' ? record.ownership : {};
+  const explicitActor = normalizeOpsActorKey(existing.actorKey || record?.actorKey || record?.ownerActorKey || '');
+  const requestedByUser = String(record?.requestedByUser || '').normalize('NFKC').trim();
+  const legacyActor = !explicitActor && isConcreteLegacyOpsActor(requestedByUser)
+    ? normalizeOpsActorKey(requestedByUser)
+    : '';
+  const actorKey = explicitActor || legacyActor;
+  const source = String(existing.source || '').trim()
+    || (explicitActor ? 'stored' : legacyActor ? 'legacy_requested_by_user' : 'legacy_unowned');
+  return {
+    version: 1,
+    state: actorKey ? 'owned' : 'legacy_unowned',
+    actorKey,
+    username: String(existing.username || (actorKey ? requestedByUser || actorKey : '')).trim(),
+    ownerKey: String(existing.ownerKey || record?.ownerKey || '').trim(),
+    assignedAt: String(existing.assignedAt || (actorKey ? record?.createdAt || record?.updatedAt || '' : '')).trim(),
+    source,
+  };
+}
+
+function normalizeLinkOpsRecordOwnership(record) {
+  if (!record || typeof record !== 'object') return record;
+  const ownership = linkOpsOwnershipForRecord(record);
+  return {
+    ...record,
+    actorKey: ownership.actorKey,
+    ownerKey: ownership.ownerKey,
+    ownership,
+  };
+}
+
+function bindLinkOpsRecordToActor(record, actor, source = 'created') {
+  const now = new Date().toISOString();
+  const actorKey = actorOpsKey(actor);
+  if (!actorKey) throw new Error('Missing concrete BI actor identity');
+  const ownership = {
+    version: 1,
+    state: 'owned',
+    actorKey,
+    username: String(actor?.username || '').trim(),
+    ownerKey: String(actor?.ownerKey || '').trim(),
+    assignedAt: now,
+    source: String(source || 'created'),
+  };
+  return {
+    ...record,
+    actorKey,
+    ownerKey: ownership.ownerKey,
+    ownership,
+  };
+}
+
+function linkOpsSessionStores(session) {
+  const targets = normalizeLinkOpsTargetSet(session?.targets || {});
+  return normalizeStoreList([
+    ...targets.stores,
+    ...targets.writeStores,
+    ...targets.sourceStores,
+  ]);
+}
+
+function linkOpsAccessDenied(kind, reason, stores = []) {
+  return {
+    ok: false,
+    error: reason,
+    resource: kind,
+    stores: normalizeStoreList(stores),
+  };
+}
+
+function authorizeLinkOpsRecord(actor, record, {
+  kind = 'task',
+  mode = 'read',
+  globalView = false,
+  claimLegacy = false,
+} = {}) {
+  const normalized = normalizeLinkOpsRecordOwnership(record);
+  const ownership = normalized?.ownership || linkOpsOwnershipForRecord(normalized);
+  const actorKey = actorOpsKey(actor);
+  const stores = kind === 'session' ? linkOpsSessionStores(normalized) : taskWriteStores(normalized);
+  const sourceStores = kind === 'task' ? taskSourceStores(normalized) : [];
+  const globalReadAllowed = mode === 'read' && globalView && actorHasGlobalOpsView(actor);
+  if (!actorKey || isInternalSystemActor(actor)) {
+    return {ok: false, record: normalized, denied: linkOpsAccessDenied(kind, '必须使用具体 BI 登录账号访问自动运营数据', stores)};
+  }
+  if (globalView && mode === 'read' && !globalReadAllowed) {
+    return {ok: false, record: normalized, denied: linkOpsAccessDenied(kind, '只有 owner/admin 可以使用全局自动运营查看范围', stores)};
+  }
+  let nextRecord = normalized;
+  let claimedLegacy = false;
+  let ownershipMigrated = false;
+  if (!globalReadAllowed) {
+    if (ownership.actorKey && ownership.actorKey !== actorKey) {
+      return {ok: false, record: normalized, denied: linkOpsAccessDenied(kind, '该自动运营记录属于其他 BI 账号', stores)};
+    }
+    if (ownership.actorKey === actorKey && mode !== 'read' && (!ownership.ownerKey || !ownership.username)) {
+      const migratedOwnership = {
+        ...ownership,
+        username: String(actor?.username || ownership.username || '').trim(),
+        ownerKey: String(actor?.ownerKey || ownership.ownerKey || '').trim(),
+        assignedAt: ownership.assignedAt || new Date().toISOString(),
+      };
+      nextRecord = {
+        ...normalized,
+        actorKey,
+        ownerKey: migratedOwnership.ownerKey,
+        ownership: migratedOwnership,
+      };
+      ownershipMigrated = true;
+    }
+    if (!ownership.actorKey) {
+      if (mode === 'read' && actorHasGlobalOpsView(actor)) {
+        // Owners may inspect quarantined single-user legacy rows before deciding
+        // whether to claim them; operators never inherit anonymous legacy data.
+      } else if (mode !== 'read' && claimLegacy && actorHasGlobalOpsView(actor)) {
+        nextRecord = bindLinkOpsRecordToActor(normalized, actor, 'legacy_owner_claim');
+        claimedLegacy = true;
+      } else {
+        return {ok: false, record: normalized, denied: linkOpsAccessDenied(kind, '旧版自动运营记录尚未安全归属；仅 owner/admin 可查看并在首次修改时认领', stores)};
+      }
+    }
+  }
+  const storeDenied = kind === 'session' || globalReadAllowed
+    ? requireReadStores(actor, stores)
+    : requireWriteStores(actor, stores);
+  if (storeDenied) return {ok: false, record: nextRecord, denied: storeDenied};
+  const sourceStoreDenied = kind === 'task' ? requireReadStores(actor, sourceStores) : null;
+  if (sourceStoreDenied) return {ok: false, record: nextRecord, denied: sourceStoreDenied};
+  return {ok: true, record: nextRecord, claimedLegacy, ownershipMigrated, globalView: globalReadAllowed};
+}
+
+function linkOpsTasksForActor(tasks, actor, {globalView = false, mode = 'read'} = {}) {
+  return asArray(tasks)
+    .map(task => authorizeLinkOpsRecord(actor, task, {kind: 'task', mode, globalView, claimLegacy: false}))
+    .filter(access => access.ok)
+    .map(access => access.record);
+}
+
+function linkOpsSessionsForActor(sessions, actor, {globalView = false, mode = 'read'} = {}) {
+  return asArray(sessions)
+    .map(session => authorizeLinkOpsRecord(actor, session, {kind: 'session', mode, globalView, claimLegacy: false}))
+    .filter(access => access.ok)
+    .map(access => access.record);
+}
+
+function requestedGlobalOpsView(url) {
+  const scope = String(url?.searchParams?.get('scope') || '').trim().toLowerCase();
+  return ['all', 'global', 'audit'].includes(scope)
+    || ['1', 'true', 'yes'].includes(String(url?.searchParams?.get('global') || '').trim().toLowerCase());
+}
+
+function actionStatePatchStore(patch) {
+  const key = String(patch?.key || '').trim();
+  const keyStore = String(key.split('|')[1] || '').trim().toUpperCase();
+  const explicitStore = String(patch?.storeKey || patch?.store_key || patch?.store || '').trim().toUpperCase();
+  if (!keyStore || !SHEIN_STORE_KEYS.has(keyStore)) {
+    return {ok: false, error: 'Action-state key must contain a valid SHEIN store', key, keyStore};
+  }
+  if (explicitStore && keyStore && explicitStore !== keyStore) {
+    return {ok: false, error: 'Action-state store does not match key', key, keyStore, explicitStore};
+  }
+  return {ok: true, key, storeKey: keyStore};
 }
 
 function loginPageHtml({error = '', next = '/', user = ''} = {}) {
@@ -1921,6 +2302,73 @@ function actorLabel(actor, req) {
 
 function actorUser(actor, req) {
   return actor?.username || normalizeRemoteAddress(req);
+}
+
+function requestBearerToken(req) {
+  const match = /^Bearer\s+(.+)$/i.exec(String(req?.headers?.authorization || '').trim());
+  return match ? match[1].trim() : '';
+}
+
+function ownerKnowledgeContextForTask(task, message = '') {
+  const targets = normalizeLinkOpsTargetSet(task?.targets || {});
+  return {
+    question: String(message || task?.command || ''),
+    command: String(task?.command || ''),
+    intents: asArray(task?.intents).map(String),
+    stores: normalizeConcreteStoreKeys(targets.stores),
+    productRefs: targets.productRefs,
+    targets,
+  };
+}
+
+function ownerKnowledgeTaskSnapshot(bundle) {
+  return {
+    version: 1,
+    fingerprint: String(bundle?.fingerprint || ''),
+    capturedAt: new Date().toISOString(),
+    rules: asArray(bundle?.rules).slice(0, 20).map(rule => ({
+      ruleKey: String(rule?.ruleKey || ''),
+      versionId: String(rule?.versionId || ''),
+      text: String(rule?.text || '').slice(0, 1_200),
+      risk: String(rule?.risk || ''),
+      tags: asArray(rule?.tags).map(String).slice(0, 20),
+      machinePolicy: rule?.machinePolicy && typeof rule.machinePolicy === 'object' ? rule.machinePolicy : null,
+    })),
+  };
+}
+
+async function bindOwnerKnowledgeToTask(task, args, message = '') {
+  const service = args?.ownerKnowledgeService;
+  if (!task || !service) return {task, changed: false, bundle: null};
+  const bundle = await service.getActiveBundle(ownerKnowledgeContextForTask(task, message), {limit: 20});
+  const previous = String(task?.ownerKnowledgePolicy?.fingerprint || '');
+  if (previous && previous === bundle.fingerprint) return {task, changed: false, bundle};
+  return {
+    task: {
+      ...task,
+      ownerKnowledgePolicy: ownerKnowledgeTaskSnapshot(bundle),
+      updatedAt: new Date().toISOString(),
+    },
+    changed: true,
+    bundle,
+  };
+}
+
+async function captureOwnerKnowledgeFromBiMessage({actor, userMessage, session, args, req}) {
+  const service = args?.ownerKnowledgeService;
+  if (!service || !actorCanPublishOwnerKnowledge(actor, service.authorityId)) return {captured: false, reason: 'not_publisher'};
+  if (!isOwnerKnowledgeCandidateText(userMessage)) return {captured: false, reason: 'not_reusable_experience'};
+  const latestUser = [...asArray(session?.messages)].reverse().find(message => message?.role === 'user');
+  const durable = isOwnerKnowledgeDurableText(userMessage);
+  const result = await service.ingest([{
+    text: String(userMessage || '').slice(0, 4_000),
+    sourceKind: 'owner_bi_message',
+    sourceId: `${session?.id || 'session'}:${latestUser?.id || 'message'}`,
+    sourceAt: latestUser?.at || new Date().toISOString(),
+    explicitDurable: durable,
+    activation: durable ? 'active' : 'candidate',
+  }], {actor, actorUser: actorUser(actor, req)});
+  return {captured: true, durable, result};
 }
 
 async function appendAudit(file, entry) {
@@ -2060,7 +2508,7 @@ function inferLinkOpsIntent(command) {
   const intents = [];
   const activateLinkIntent = /恢复上架|重新上架|再次上架|改为上架|设为上架|设置上架|恢复在售|改回在售|上架回来/.test(text)
     || /\b(activate_link|on_shelf|onshelf|relist|restore_listing)\b/.test(lower);
-  const copyProductIntent = /补(?:一|1)?(?:个|条|款)?(?:新)?(?:链接|链|商品|上品)|补链|缺链接|缺链|复制|拷贝|参考|上品|草稿|覆盖|创建草稿|创建链接|上链接|发链接|发布商品|刊登|提交审核/.test(text)
+  const copyProductIntent = /补(?:一|1)?(?:个|条|款)?(?:新)?(?:链接|链|商品|上品)|补链|缺(?:少)?(?:上架|在售|可售|新)?(?:的)?(?:链接|链)|复制|拷贝|参考|上品|草稿|覆盖|创建草稿|创建链接|上链接|发链接|发布商品|刊登|提交审核/.test(text)
     || /\b(copy|draft|create|publish|coverage)\b/.test(lower);
   if (activateLinkIntent) intents.push('activate_link');
   if (copyProductIntent) intents.push('copy_product_draft');
@@ -2123,7 +2571,8 @@ function inferLinkOpsTargets(command, options = {}) {
     .map(x => x.toUpperCase())
     .filter(x => SHEIN_STORE_KEYS.has(x)))].slice(0, 24);
   const copyToMatch = /(?:从|复制|拷贝|参考)?\s*\b([A-Z]{2,3})\b[\s\S]{0,48}?(?:到|至|给|复制到|拷贝到|上到|铺到)\s*\b([A-Z]{2,3})\b/i.exec(text);
-  const copyLike = /复制|拷贝|参考|补.*链接|补链|上链接|创建链接|发布商品|刊登/.test(text) || /\b(copy|draft|create|publish)\b/i.test(text);
+  const missingLinkLike = /缺(?:少)?(?:上架|在售|可售|新)?(?:的)?(?:链接|链)/.test(text);
+  const copyLike = /复制|拷贝|参考|补.*链接|补链|缺(?:少)?(?:上架|在售|可售|新)?(?:的)?(?:链接|链)|上链接|创建链接|发布商品|刊登/.test(text) || /\b(copy|draft|create|publish)\b/i.test(text);
   const sourceStores = [];
   const writeStores = [];
   if (copyToMatch) {
@@ -2133,7 +2582,7 @@ function inferLinkOpsTargets(command, options = {}) {
     if (SHEIN_STORE_KEYS.has(target)) writeStores.push(target);
   }
   if (copyLike && storeMatches.length === 1 && !sourceStores.length && !writeStores.length) {
-    if (!allStoresAsSourceScope) sourceStores.push(storeMatches[0]);
+    if (!allStoresAsSourceScope && !missingLinkLike) sourceStores.push(storeMatches[0]);
     writeStores.push(storeMatches[0]);
   }
   const namedProductMatches = text.match(/\b[A-Z]{1,6}-?\d{1,8}[A-Z]?(?:-[A-Z0-9]+)?[\u4e00-\u9fa5]{1,24}?(?=(?:补|复制|改|换|上架|下架|，|,|。|；|;|\s|$))/giu) || [];
@@ -2149,7 +2598,7 @@ function inferLinkOpsTargets(command, options = {}) {
     stores: storeMatches,
     sourceStores,
     writeStores,
-    sourceScope: allStoresAsSourceScope ? 'all_stores' : '',
+    sourceScope: allStoresAsSourceScope || missingLinkLike ? 'all_stores' : '',
     productRefs: skuMatches,
     attributeOverrides: includeAttributeOverrides ? inferLinkOpsAttributeOverrides(text, {task: options.attributeContextTask || null}) : [],
   };
@@ -2465,7 +2914,7 @@ async function inferTargetsFromTaskChatSession(args, task) {
   const sessionId = String(task?.chatSessionId || task?.chat?.sessionId || '').trim();
   if (!sessionId || !args?.linkOpsChatFile) return {};
   try {
-    const data = normalizeLinkOpsChatStore(await readJsonFile(args.linkOpsChatFile, {version: 1, updatedAt: null, sessions: []}));
+    const data = normalizeLinkOpsChatStore(await readLinkOpsChatStore(args));
     const session = data.sessions.find(row => String(row?.id || '') === sessionId);
     if (!session) return {};
     return inferTargetsFromChatSession(session);
@@ -2564,7 +3013,7 @@ function isLinkOpsActionCommand(command) {
   const lower = text.toLowerCase();
   const intents = inferLinkOpsIntent(text).filter(x => x !== 'manual_review');
   if (!intents.length) return false;
-  const actionVerb = /恢复上架|重新上架|再次上架|改为上架|设为上架|设置上架|恢复在售|下架|归档|停掉|移除|删除链接|换图|换主图|换图片|换套图|更换图片|更换主图|替换图片|上传图片|改标题|换标题|标题改|改库存|设置库存|库存改|改供货价|改成本价|改售价|改商品价|改价格|设置价格|调价|补(?:一|1)?(?:个|条|款)?(?:新)?(?:链接|链|商品|上品)|补链接|补链|复制|复制上品|创建草稿|创建链接|上品|上链接|发链接|发布商品|刊登|提交审核|报活动|报名|限时折扣|设置折扣|补证书|补资质|上传证书/.test(text)
+  const actionVerb = /恢复上架|重新上架|再次上架|改为上架|设为上架|设置上架|恢复在售|下架|归档|停掉|移除|删除链接|换图|换主图|换图片|换套图|更换图片|更换主图|替换图片|上传图片|改标题|换标题|标题改|改库存|设置库存|库存改|改供货价|改成本价|改售价|改商品价|改价格|设置价格|调价|补(?:一|1)?(?:个|条|款)?(?:新)?(?:链接|链|商品|上品)|补链接|补链|缺(?:少)?(?:上架|在售|可售|新)?(?:的)?(?:链接|链)|复制|复制上品|创建草稿|创建链接|上品|上链接|发链接|发布商品|刊登|提交审核|报活动|报名|限时折扣|设置折扣|补证书|补资质|上传证书/.test(text)
     || /(?:标题|title)\s*(?:改成|改为|更新为|设置为|设为|换成|到|=|：|:)/i.test(text)
     || /(?:改成|改为|更新为|设置为|设为|换成)\s*[^，。；\n]{0,80}(?:标题|title)/i.test(text)
     || /(?:库存|虚拟库存|供货价|成本价|售价|原价|销售价|商品价|价格)\s*(?:改成|改为|更新为|设置为|设为|到|=|：|:)/.test(text)
@@ -2611,7 +3060,7 @@ function hasActionableLinkOpsContext(session) {
     .join('\n');
   const intents = inferLinkOpsIntent(text).filter(x => x !== 'manual_review');
   if (!intents.length) return false;
-  return /恢复上架|重新上架|再次上架|改为上架|设为上架|设置上架|恢复在售|下架|归档|停掉|移除|删除链接|换图|更换图片|改标题|换标题|补链接|补链|复制|上品|上链接|发链接|发布商品|刊登|提交审核|报活动|报名|限时折扣|设置折扣|补证书|补资质|上传证书|任务|动作/.test(text);
+  return /恢复上架|重新上架|再次上架|改为上架|设为上架|设置上架|恢复在售|下架|归档|停掉|移除|删除链接|换图|更换图片|改标题|换标题|补链接|补链|缺(?:少)?(?:上架|在售|可售|新)?(?:的)?(?:链接|链)|复制|上品|上链接|发链接|发布商品|刊登|提交审核|报活动|报名|限时折扣|设置折扣|补证书|补资质|上传证书|任务|动作/.test(text);
 }
 
 function compactChatLine(value, max = 420) {
@@ -2786,7 +3235,7 @@ function buildLinkOpsTaskFromCommand(body, actor, req) {
     inferLinkOpsTargets(command)
   ));
   const id = `lot_${now.replace(/[-:.TZ]/g, '').slice(0, 14)}_${crypto.randomBytes(4).toString('hex')}`;
-  return {
+  return bindLinkOpsRecordToActor({
     id,
     version: 1,
     status: 'draft',
@@ -2829,7 +3278,7 @@ function buildLinkOpsTaskFromCommand(body, actor, req) {
       status: 'draft',
       progress: 10,
     }],
-  };
+  }, actor, 'created');
 }
 
 function normalizeLinkOpsTaskStore(value) {
@@ -2837,7 +3286,10 @@ function normalizeLinkOpsTaskStore(value) {
   return {
     version: 1,
     updatedAt: value?.updatedAt || null,
-    tasks: tasks.filter(x => x && typeof x === 'object').slice(0, 1000),
+    tasks: tasks
+      .filter(x => x && typeof x === 'object')
+      .map(normalizeLinkOpsRecordOwnership)
+      .slice(0, 1000),
   };
 }
 
@@ -2890,6 +3342,8 @@ function sanitizeLinkOpsClientText(value, max = 600) {
     .replace(/HL\s*仓库列表/g, '目标店仓库列表')
     .replace(/OpenAPI/g, '接口')
     .replace(/dry[- ]?run|Dry[- ]?run|预检/g, '资料检查')
+    .replace(/真实提交\s*payload hash\s*与\s*dry-run\s*锁定值不一致\s*[:：]?\s*expected=[a-f0-9]{64}\s+actual=[a-f0-9]{64}/ig, '提交前检测到发布资料与确认时的版本发生变化，已安全停止提交；需要重新检查后再确认')
+    .replace(/\b[a-f0-9]{64}\b/ig, '[内部校验值已隐藏]')
     .replace(/payload hash/ig, '本次检查快照');
   if (linkOpsClientTextHasInternalLeak(text)) {
     const stripped = stripLinkOpsInternalLeakLines(text);
@@ -2907,6 +3361,8 @@ function sanitizeLinkOpsClientMarkdown(value, max = 16000) {
     .replace(/HL\s*仓库列表/g, '目标店仓库列表')
     .replace(/OpenAPI/g, '接口')
     .replace(/dry[- ]?run|Dry[- ]?run|预检/g, '资料检查')
+    .replace(/真实提交\s*payload hash\s*与\s*dry-run\s*锁定值不一致\s*[:：]?\s*expected=[a-f0-9]{64}\s+actual=[a-f0-9]{64}/ig, '提交前检测到发布资料与确认时的版本发生变化，已安全停止提交；需要重新检查后再确认')
+    .replace(/\b[a-f0-9]{64}\b/ig, '[内部校验值已隐藏]')
     .replace(/payload hash/ig, '本次检查快照')
     .slice(0, max);
   if (linkOpsClientTextHasInternalLeak(text)) {
@@ -3067,6 +3523,101 @@ function projectLinkOpsTargetsForClient(targets, intents = []) {
   };
 }
 
+function projectLinkOpsOwnershipForClient(record) {
+  const ownership = linkOpsOwnershipForRecord(record);
+  return {
+    state: ownership.state,
+    actorKey: ownership.actorKey,
+    ownerKey: ownership.ownerKey,
+    source: ownership.source,
+  };
+}
+
+function projectLinkOpsPlanningForClient(planning) {
+  if (!planning || typeof planning !== 'object' || Array.isArray(planning)) return null;
+  const parameters = planning.parameters && typeof planning.parameters === 'object' && !Array.isArray(planning.parameters)
+    ? planning.parameters
+    : {};
+  const ambiguity = planning.ambiguity && typeof planning.ambiguity === 'object' && !Array.isArray(planning.ambiguity)
+    ? planning.ambiguity
+    : {};
+  const risk = planning.risk && typeof planning.risk === 'object' && !Array.isArray(planning.risk)
+    ? planning.risk
+    : {};
+  const modelProfile = planning.modelProfile && typeof planning.modelProfile === 'object' && !Array.isArray(planning.modelProfile)
+    ? planning.modelProfile
+    : {};
+  const finiteOrNull = value => value === null || value === undefined || value === ''
+    ? null
+    : Number.isFinite(Number(value)) ? Number(value) : null;
+  const textList = (value, max = 20, chars = 160) => asArray(value)
+    .map(entry => sanitizeLinkOpsClientText(entry, chars))
+    .filter(Boolean)
+    .slice(0, max);
+  return {
+    version: Math.max(0, Number(planning.version || 0)),
+    jobId: sanitizeLinkOpsClientText(planning.jobId || '', 180),
+    requestType: sanitizeLinkOpsClientText(planning.requestType || '', 40),
+    parameters: {
+      timeRange: sanitizeLinkOpsClientText(parameters.timeRange || '', 80),
+      dateFrom: sanitizeLinkOpsClientText(parameters.dateFrom || '', 40),
+      dateTo: sanitizeLinkOpsClientText(parameters.dateTo || '', 40),
+      metrics: textList(parameters.metrics, 20, 80),
+      groupBy: sanitizeLinkOpsClientText(parameters.groupBy || '', 80),
+      comparison: sanitizeLinkOpsClientText(parameters.comparison || '', 80),
+      rankDirection: sanitizeLinkOpsClientText(parameters.rankDirection || '', 40),
+      limit: finiteOrNull(parameters.limit),
+      title: sanitizeLinkOpsClientText(parameters.title || '', 500),
+      inventory: finiteOrNull(parameters.inventory),
+      supplyPrice: finiteOrNull(parameters.supplyPrice),
+      productPrice: finiteOrNull(parameters.productPrice),
+      currency: sanitizeLinkOpsClientText(parameters.currency || '', 12),
+      discountRate: finiteOrNull(parameters.discountRate),
+      discountPrice: finiteOrNull(parameters.discountPrice),
+      quantity: finiteOrNull(parameters.quantity),
+      activityId: sanitizeLinkOpsClientText(parameters.activityId || '', 120),
+      startAt: sanitizeLinkOpsClientText(parameters.startAt || '', 80),
+      endAt: sanitizeLinkOpsClientText(parameters.endAt || '', 80),
+      sourceScope: sanitizeLinkOpsClientText(parameters.sourceScope || '', 160),
+      standardGoodsSn: sanitizeLinkOpsClientText(parameters.standardGoodsSn || '', 160),
+      imageInstruction: sanitizeLinkOpsClientText(parameters.imageInstruction || '', 500),
+      actionNote: sanitizeLinkOpsClientText(parameters.actionNote || '', 500),
+      attributeOverrides: asArray(parameters.attributeOverrides).map(item => ({
+        attributeId: sanitizeLinkOpsClientText(item?.attributeId || item?.attribute_id || '', 120),
+        label: sanitizeLinkOpsClientText(item?.label || '', 160),
+        value: sanitizeLinkOpsClientText(item?.value || item?.attribute_extra_value || '', 300),
+        unit: sanitizeLinkOpsClientText(item?.unit || item?.attribute_unit || '', 40),
+      })).filter(item => item.attributeId || item.label || item.value).slice(0, 30),
+    },
+    ambiguity: {
+      hasAmbiguity: Boolean(ambiguity.hasAmbiguity),
+      reasons: textList(ambiguity.reasons, 20, 300),
+      clarifyingQuestions: textList(ambiguity.clarifyingQuestions, 20, 300),
+    },
+    risk: {
+      level: sanitizeLinkOpsClientText(risk.level || '', 40),
+      writeRequested: Boolean(risk.writeRequested),
+      requiresHumanConfirmation: Boolean(risk.requiresHumanConfirmation),
+      reasons: textList(risk.reasons, 20, 300),
+    },
+    confidence: Math.max(0, Math.min(1, Number(planning.confidence || 0))),
+    summary: sanitizeLinkOpsClientText(planning.summary || '', 1_000),
+    ignored: Boolean(planning.ignored),
+    ignoredReason: sanitizeLinkOpsClientText(planning.ignoredReason || '', 160),
+    ignoredRequestType: sanitizeLinkOpsClientText(planning.ignoredRequestType || '', 40),
+    advisory: Boolean(planning.advisory),
+    factsApplied: Boolean(planning.factsApplied),
+    modelProfile: {
+      tier: sanitizeLinkOpsClientText(modelProfile.tier || '', 40),
+      model: sanitizeLinkOpsClientText(modelProfile.model || '', 120),
+      reasoning: sanitizeLinkOpsClientText(modelProfile.reasoning || '', 40),
+      timeoutMs: Math.max(0, Number(modelProfile.timeoutMs || 0)),
+      reason: sanitizeLinkOpsClientText(modelProfile.reason || '', 120),
+    },
+    completedAt: sanitizeLinkOpsClientText(planning.completedAt || '', 80),
+  };
+}
+
 function projectLinkOpsTaskForClient(task) {
   const execution = projectLinkOpsExecutionForClient(task?.execution);
   const preflight = projectLinkOpsPreflightForClient(task?.preflight) || execution?.preflight || null;
@@ -3079,12 +3630,14 @@ function projectLinkOpsTaskForClient(task) {
     intents,
     targets: projectLinkOpsTargetsForClient(task?.targets || {}, intents),
     chatSessionId: String(task?.chatSessionId || task?.chat?.sessionId || ''),
+    ownership: projectLinkOpsOwnershipForClient(task),
     createdAt: task?.createdAt || '',
     updatedAt: task?.updatedAt || '',
     lifecycle: task?.lifecycle && typeof task.lifecycle === 'object' ? {
       lifecycleStatus: String(task.lifecycle.lifecycleStatus || task.lifecycle.status || ''),
       status: String(task.lifecycle.status || task.lifecycle.lifecycleStatus || ''),
     } : null,
+    planning: projectLinkOpsPlanningForClient(task?.planning),
     preflight,
     execution,
     assets: asArray(task?.assets).map(projectLinkOpsAssetForClient).slice(0, 30),
@@ -3099,6 +3652,14 @@ function projectLinkOpsTaskStoreForClient(value, {limit = 120} = {}) {
     updatedAt: store.updatedAt,
     tasks: store.tasks.slice(0, max).map(projectLinkOpsTaskForClient),
   };
+}
+
+function projectLinkOpsTaskStoreForActor(value, actor, {limit = 120, globalView = false} = {}) {
+  const store = normalizeLinkOpsTaskStore(value);
+  return projectLinkOpsTaskStoreForClient({
+    ...store,
+    tasks: linkOpsTasksForActor(store.tasks, actor, {globalView, mode: 'read'}),
+  }, {limit});
 }
 
 function projectLinkOpsAssetForClient(asset) {
@@ -3119,6 +3680,7 @@ function projectLinkOpsChatMessageForClient(message) {
   const meta = message.meta && typeof message.meta === 'object' ? {
     mode: sanitizeLinkOpsClientText(message.meta.mode || '', 60),
     autoTaskId: String(message.meta.autoTaskId || ''),
+    intentPlanJobId: sanitizeLinkOpsClientText(message.meta.intentPlanJobId || '', 180),
   } : null;
   return {
     id: String(message.id || ''),
@@ -3127,7 +3689,7 @@ function projectLinkOpsChatMessageForClient(message) {
       ? sanitizeLinkOpsClientMarkdown(message.content || '', 16000)
       : String(message.content || '').slice(0, 4000),
     at: message.at || message.createdAt || '',
-    ...(meta && (meta.mode || meta.autoTaskId) ? {meta} : {}),
+    ...(meta && (meta.mode || meta.autoTaskId || meta.intentPlanJobId) ? {meta} : {}),
   };
 }
 
@@ -3140,6 +3702,7 @@ function projectLinkOpsChatSessionForClient(session) {
     title: sanitizeLinkOpsClientText(session.title || '', 120),
     autoTitle: session.autoTitle !== false,
     targets: projectLinkOpsTargetsForClient(session.targets || {}),
+    ownership: projectLinkOpsOwnershipForClient(session),
     memoryPolicy: CLOUD_AI_MEMORY_POLICY,
     createdAt: session.createdAt || '',
     updatedAt: session.updatedAt || '',
@@ -3157,6 +3720,14 @@ function projectLinkOpsChatStoreForClient(value, {limit = 80} = {}) {
     memoryPolicy: CLOUD_AI_MEMORY_POLICY,
     sessions: store.sessions.slice(0, max).map(projectLinkOpsChatSessionForClient).filter(Boolean),
   };
+}
+
+function projectLinkOpsChatStoreForActor(value, actor, {limit = 80, globalView = false} = {}) {
+  const store = normalizeLinkOpsChatStore(value);
+  return projectLinkOpsChatStoreForClient({
+    ...store,
+    sessions: linkOpsSessionsForActor(store.sessions, actor, {globalView, mode: 'read'}),
+  }, {limit});
 }
 
 function taskTargetStores(task) {
@@ -3182,7 +3753,7 @@ function normalizeLinkOpsChatStore(value) {
     memoryPolicy: CLOUD_AI_MEMORY_POLICY,
     sessions: sessions
       .filter(x => x && typeof x === 'object')
-      .map(session => ({
+      .map(session => normalizeLinkOpsRecordOwnership({
         ...session,
         memoryPolicy: CLOUD_AI_MEMORY_POLICY,
         codexSessionId: safeCodexSessionId(session.codexSessionId || ''),
@@ -3202,7 +3773,7 @@ function buildChatSessionFromMessage(body, actor, req) {
     inferLinkOpsTargets(message),
     body.targets && typeof body.targets === 'object' ? body.targets : {}
   ));
-  return {
+  return bindLinkOpsRecordToActor({
     id,
     version: 1,
     status: 'chatting',
@@ -3222,13 +3793,13 @@ function buildChatSessionFromMessage(body, actor, req) {
       content: message,
       at: now,
     }],
-  };
+  }, actor, 'created');
 }
 
 function buildUploadChatSession(actor, req) {
   const now = new Date().toISOString();
   const id = `los_${now.replace(/[-:.TZ]/g, '').slice(0, 14)}_${crypto.randomBytes(4).toString('hex')}`;
-  return {
+  return bindLinkOpsRecordToActor({
     id,
     version: 1,
     status: 'chatting',
@@ -3244,7 +3815,7 @@ function buildUploadChatSession(actor, req) {
     createdAt: now,
     updatedAt: now,
     messages: [],
-  };
+  }, actor, 'created');
 }
 
 function appendChatMessage(session, body, actor, req) {
@@ -3396,7 +3967,7 @@ function appendExecutionHistory(task, entry = {}) {
 }
 
 function isOwnerActor(actor) {
-  return canWriteAllStores(actor);
+  return actorHasGlobalOpsView(actor);
 }
 
 function taskRequiresOwnerLifecycleResolve(task) {
@@ -3740,13 +4311,13 @@ async function appendLinkOpsChatAssistantMessageForTask(args, task, answer, meta
   const sessionId = String(task?.chatSessionId || task?.sessionId || task?.targets?.chatSessionId || '').trim();
   const content = String(answer || '').trim();
   if (!sessionId || !content) return {ok: false, reason: 'missing_session_or_answer'};
-  const current = normalizeLinkOpsChatStore(await readJsonFile(args.linkOpsChatFile, {version: 1, updatedAt: null, sessions: []}));
+  const current = normalizeLinkOpsChatStore(await readLinkOpsChatStore(args));
   const idx = current.sessions.findIndex(s => String(s.id || '') === sessionId);
   if (idx < 0) return {ok: false, reason: 'session_not_found'};
   const sessions = current.sessions.slice();
   sessions[idx] = appendAssistantChatMessage(sessions[idx], content, meta);
   const next = {version: 1, updatedAt: new Date().toISOString(), memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions};
-  await writeJsonFile(args.linkOpsChatFile, next);
+  await writeLinkOpsChatStore(args, next);
   return {ok: true, session: sessions[idx], store: next};
 }
 
@@ -3851,6 +4422,15 @@ function humanSourceMetricLine(source = {}) {
 
 function cleanHumanBlockerMessage(value) {
   return String(value || '')
+    .replace(/Because\s+Power Supply\(147\)\s+selected\s+Power Adapter\(1007239\),?\s+Input voltage\(1002322\)\s+is required/ig, '供电方式选择了电源适配器，因此输入电压是必填项')
+    .replace(/Hazardous materials classification\s*:\s*The template attribute under type is required/ig, '危险品分类：这是当前商品类型的必填属性')
+    .replace(/Hazardous materials classification/ig, '危险品分类')
+    .replace(/Input voltage\(1002322\)/ig, '输入电压')
+    .replace(/Power Supply\(147\)/ig, '供电方式')
+    .replace(/Power Adapter\(1007239\)/ig, '电源适配器')
+    .replace(/The template attribute under type is required/ig, '这是当前商品类型的必填属性')
+    .replace(/真实提交\s*payload hash\s*与\s*dry-run\s*锁定值不一致\s*[:：]?\s*expected=[a-f0-9]{64}\s+actual=[a-f0-9]{64}/ig, '提交前检测到发布资料与确认时的版本发生变化，已安全停止提交；系统需要重新检查，确认更新后的源链接和发布资料后再继续。')
+    .replace(/\b[a-f0-9]{64}\b/ig, '[内部校验值已隐藏]')
     .replace(/dry-run|Dry-run|预检/g, '资料检查')
     .replace(/系统检查/g, '资料检查')
     .replace(/payload hash/g, '本次检查快照')
@@ -3871,10 +4451,11 @@ function cleanHumanBlockerMessage(value) {
 }
 
 function cleanHumanBlockerList(values) {
-  return uniqueMessages(asArray(values))
+  const cleaned = uniqueMessages(asArray(values))
     .map(cleanHumanBlockerMessage)
     .map(x => String(x || '').replace(/[。；;,\s]+$/g, '').trim())
     .filter(Boolean);
+  return uniqueMessages(cleaned);
 }
 
 function linkOpsHumanStatus(task) {
@@ -3883,7 +4464,7 @@ function linkOpsHumanStatus(task) {
   if (status === 'done') return '完成';
   if (status === 'submitted_but_readback_pending' || state === 'submitted') return '已提交，正在确认结果';
   if (status === 'needs_manual_resolve' || /readback_failed|suspicious/.test(state)) return '已提交，但需要人工确认结果';
-  if (state === 'publish_pre_valid_failed') return 'SHEIN 没通过，需要补充';
+  if (state === 'publish_pre_valid_failed') return 'SHEIN 预校验未通过，正在重新检查资料';
   if (state === 'openapi_product_preflight_ready' || state === 'link_maintenance_preflight_ready') return '资料已通过，等你一句话确认执行';
   if (state === 'blocked') return '卡住了，需要补充';
   if (status === 'waiting_review') return '等你确认执行';
@@ -3960,12 +4541,16 @@ function buildChatExecutionAnswer(task, {userMessage = ''} = {}) {
   const readbackMatched = lifecycleStatus === 'submitted_readback_matched'
     || (lifecycleReadbacks.length > 0 && lifecycleReadbacks.every(row => row?.ok && /matched/i.test(String(row?.status || '')) && Number(row?.matchedCount || 0) > 0));
   const pre = task?.execution?.preflight || {};
-  const blockers = cleanHumanBlockerList([
+  const preValidMessages = execs.flatMap(executionPreValidMessagesFromRun);
+  const executorBlockers = execs.flatMap(x => asArray(x?.blockers));
+  const rawBlockers = [
     ...asArray(pre.blockers),
     ...execs.flatMap(x => asArray(x?.payload?.validation?.blockers)),
-    ...execs.flatMap(x => asArray(x?.blockers)),
-    ...execs.flatMap(executionPreValidMessagesFromRun),
-  ]);
+    ...executorBlockers,
+    ...preValidMessages,
+  ].filter(value => !(preValidMessages.length && /publishOrEdit\s*平台预校验失败/i.test(String(value || ''))));
+  const payloadDriftBlocked = rawBlockers.some(value => /payload hash\s*与\s*dry-run\s*锁定值不一致/i.test(String(value || '')));
+  const blockers = cleanHumanBlockerList(rawBlockers);
   const submitted = Boolean(task?.execution?.actualWriteSubmitted || task?.execution?.writeAudit?.actualWriteSubmitted);
   const writeAttempted = Boolean(task?.execution?.sheinWriteAttempted || task?.execution?.writeAudit?.sheinWriteAttempted);
   const state = String(task?.execution?.state || task?.lifecycle?.lifecycleStatus || '');
@@ -3996,7 +4581,7 @@ function buildChatExecutionAnswer(task, {userMessage = ''} = {}) {
   if (publishPreValidFailed) {
     const missing = blockers.length ? blockers.slice(0, 5).join('；') : '平台没有给出具体字段，我会继续按商品资料重新检查。';
     lines.push(`SHEIN 这次没有创建新链接，平台还要求补充：${missing}。`);
-    lines.push('我会按这些字段重新整理发布资料；你也可以直接在聊天里补一句字段值，我收到后会重新检查。');
+    lines.push('我会根据源链接资料和 SHEIN 官方模板自动重新整理并检查；在资料检查通过前不会再次提交。只有现有资料确实无法判断时，我才会明确告诉你缺哪一个业务值。');
   } else if (submitted) {
     if (readbackMatched) {
       lines.push(hasProductPublishIntent
@@ -4025,6 +4610,9 @@ function buildChatExecutionAnswer(task, {userMessage = ''} = {}) {
     }
   } else if (writeAttempted) {
     lines.push('这次没有确认创建成功。我会先复查平台返回和商品列表；确认前不会重复提交，避免重复铺货。');
+  } else if (payloadDriftBlocked) {
+    lines.push('提交前检测到发布资料与确认时的版本发生变化，系统已安全停止；这次没有向 SHEIN 发出创建请求。');
+    lines.push('你不需要猜字段或粘贴内部校验值。我会重新检查并把更新后的源链接和发布资料说清楚，确认后再继续。');
   } else if (blockers.length) {
     lines.push(`还差：${blockers.slice(0, 5).join('；')}。`);
     lines.push('你不用点别的按钮，直接在聊天里补缺的字段或说明怎么处理，我会接着往下做。');
@@ -4072,7 +4660,7 @@ async function executeChatNaturalLanguageTask({task, taskData, session, userMess
     if (idx >= 0) tasks[idx] = updated;
     else tasks.unshift(updated);
     const nextData = {version: 1, updatedAt: new Date().toISOString(), tasks: tasks.slice(0, 1000)};
-    await writeJsonFile(args.linkOpsTaskFile, nextData);
+    await writeLinkOpsTaskStore(args, nextData);
     await appendAudit(args.auditFile, {
       at: new Date().toISOString(),
       type: 'link-ops-chat-natural-execute',
@@ -4099,8 +4687,9 @@ async function executeChatNaturalLanguageTask({task, taskData, session, userMess
 
 async function runChatNaturalLanguageExecutionIfPossible({session, userMessage, taskData, actor, req, args}) {
   const current = normalizeLinkOpsTaskStore(taskData || {version: 1, updatedAt: null, tasks: []});
-  const activeTasks = activeChatTasks(current.tasks, session?.id);
-  const eligibleTasks = eligibleChatNaturalExecutionTasks(current.tasks, session?.id);
+  const actorTasks = linkOpsTasksForActor(current.tasks, actor, {mode: 'mutate'});
+  const activeTasks = activeChatTasks(actorTasks, session?.id);
+  const eligibleTasks = eligibleChatNaturalExecutionTasks(actorTasks, session?.id);
   if (!activeTasks.length) {
     return {
       handled: true,
@@ -4140,7 +4729,28 @@ async function runChatNaturalLanguageExecutionIfPossible({session, userMessage, 
     await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-chat-natural-execute-no-eligible', actor, ...requestMeta(req), session: {id: session?.id || ''}, taskCount: activeTasks.length, tasks: activeTasks.slice(0, 10).map(t => ({id: t.id, name: chatTaskDisplayName(t), status: t.status, state: t.execution?.state || '', reasons: chatNaturalExecutionEligibility(t).reasons}))});
     return {handled: true, task: activeTasks[0], taskData: current, answer: `我先不提交：这个会话里有 ${activeTasks.length} 件未完成事项，但没有唯一一件处于“资料已查完、等你一句话执行”的状态。你可以直接说要继续哪一个，例如：${names || '指定店铺和货号'}。`};
   }
-  const task = eligibleTasks[0];
+  let task = eligibleTasks[0];
+  const previousKnowledgeFingerprint = String(task?.ownerKnowledgePolicy?.fingerprint || '');
+  const knowledgeBinding = await bindOwnerKnowledgeToTask(task, args, userMessage);
+  if (knowledgeBinding.changed) {
+    task = knowledgeBinding.task;
+    const reboundStore = replaceLinkOpsTaskInStore(current, task);
+    await writeLinkOpsTaskStore(args, reboundStore);
+    const checked = await runImmediateChatSystemCheckIfPossible({task, taskData: reboundStore, actor, req, args, updated: true});
+    if (previousKnowledgeFingerprint && previousKnowledgeFingerprint !== knowledgeBinding.bundle?.fingerprint) {
+      return {
+        handled: true,
+        task: checked.task,
+        taskData: checked.taskData,
+        answer: `${checked.answer || '我已按负责人最新规则重新检查。'}\n\n负责人长期规则刚刚有更新；为避免沿用旧预演直接提交，请你再说一次“可以执行”。`,
+      };
+    }
+    task = checked.task || task;
+    if (!chatNaturalExecutionEligibility(task).ok) {
+      return {handled: true, task, taskData: checked.taskData, answer: checked.answer || '我已按负责人规则重新检查，目前还不能提交。'};
+    }
+    return await executeChatNaturalLanguageTask({task, taskData: checked.taskData, session, userMessage, actor, req, args});
+  }
   return await executeChatNaturalLanguageTask({task, taskData: current, session, userMessage, actor, req, args});
 }
 
@@ -4203,9 +4813,10 @@ function buildChatSystemCheckAnswer(task, {updated = false} = {}) {
   }
   if (blockers.length) {
     lines.push(`还差：${blockers.slice(0, 5).join('；')}。`);
-    lines.push('你直接在聊天里补一句缺失字段或说明处理方式。我收到后会自动重新检查。');
+    lines.push('能从源链接和 SHEIN 官方模板确定的字段我会自动补齐；只有确实需要业务判断的值，你再直接在聊天里说明，我收到后会自动重新检查。');
   } else if (ready) {
     lines.push('目前资料已经够了，资料检查通过。');
+    if (warnings.length) lines.push(`提交前需要你注意：${warnings.slice(0, 4).join('；')}。`);
     lines.push(hasCopyProduct
       ? '如果要创建这条新链接，你直接在聊天里说“可以执行”“提交吧”或“照做”，我会提交到 SHEIN，并把结果回读给你。'
       : '如果要执行这次维护，你直接在聊天里说“可以执行”“提交吧”或“照做”，我会提交到 SHEIN，并把结果回读给你。');
@@ -4251,7 +4862,7 @@ async function runImmediateChatSystemCheckIfPossible({task, taskData, actor, req
     if (idx >= 0) tasks[idx] = checked;
     else tasks.unshift(checked);
     const nextData = {version: 1, updatedAt: new Date().toISOString(), tasks: tasks.slice(0, 1000)};
-    await writeJsonFile(args.linkOpsTaskFile, nextData);
+    await writeLinkOpsTaskStore(args, nextData);
     await appendAudit(args.auditFile, {
       at: new Date().toISOString(),
       type: 'link-ops-chat-immediate-system-check',
@@ -5066,6 +5677,11 @@ async function runOpenApiMaintenanceExecutors(task, args, body = {}) {
 async function startControlledLinkOpsExecution(task, actor, req, args, body = {}) {
   const originalStatus = String(task?.status || 'draft');
   const now = new Date().toISOString();
+  const rawRequestedMode = String(body.mode || body.executionMode || (body.execute === true ? 'execute' : 'dry-run') || 'dry-run').toLowerCase();
+  const requestedMode = rawRequestedMode === 'execute' ? 'execute' : 'dry-run';
+  const priorKnowledgeFingerprint = String(task?.ownerKnowledgePolicy?.fingerprint || '');
+  const knowledgeBinding = await bindOwnerKnowledgeToTask(task, args, task?.command || '');
+  if (knowledgeBinding.changed) task = knowledgeBinding.task;
   const intents = normalizeIntentsForCommand(Array.isArray(task?.intents) ? task.intents : [], task?.command || '');
   const chatTargets = await inferTargetsFromTaskChatSession(args, task);
   const mergedTargets = normalizeTargetsForIntents(intents, mergeLinkOpsTargets(task?.targets || {}, chatTargets));
@@ -5081,8 +5697,6 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       },
     };
   }
-  const rawRequestedMode = String(body.mode || body.executionMode || (body.execute === true ? 'execute' : 'dry-run') || 'dry-run').toLowerCase();
-  const requestedMode = rawRequestedMode === 'execute' ? 'execute' : 'dry-run';
   const confirmText = String(body.confirm || body.confirmText || '').trim();
   const confirmTextPresent = confirmText === LINK_OPS_OPENAPI_SUBMIT_CONFIRM_TEXT;
   let executeAllowed = false;
@@ -5113,6 +5727,9 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     }
     : task;
   const preflight = runPreflightForLinkOpsTask(runnableTask);
+  if (requestedMode === 'execute' && priorKnowledgeFingerprint && knowledgeBinding.changed) {
+    preflight.blockers.push('负责人长期规则在上次系统检查后发生更新；必须按新规则重新系统检查，不能沿用旧预演直接提交。');
+  }
   if (requestedMode === 'execute') {
     const unsupportedExecuteIntents = intents
       .filter(intent => intent !== 'copy_product_draft' && intent !== 'manual_review' && !LINK_MAINTENANCE_INTENTS.has(intent));
@@ -6251,9 +6868,12 @@ function startBiPortalCoreWarmupWatcher(args, root, options = {}) {
 async function askReadonlyOpsAgent(question, options = {}) {
   const text = String(question || '').trim();
   if (!text) throw new Error('Missing question');
-  const maxQuestionChars = Math.max(12000, Number(process.env.SHEIN_BI_OPS_AGENT_MAX_QUESTION_CHARS || 480000));
+  const maxQuestionChars = Math.max(2_000, Math.min(50_000, Number(process.env.SHEIN_BI_OPS_AGENT_MAX_QUESTION_CHARS || 12_000)));
   if (text.length > maxQuestionChars) throw new Error('Question too long');
   const codexSessionId = safeCodexSessionId(options.codexSessionId || '');
+  const profile = options.profile && typeof options.profile === 'object'
+    ? options.profile
+    : selectBiOpsModelProfile({mode: options.mode || 'query', question: options.routingText || text});
   const codexMetaFile = path.join(os.tmpdir(), `shein-linkops-codex-session-${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.json`);
   const result = await runChildProcess(process.execPath, [
     path.join(ROOT, 'scripts', 'lark_sales_qa_bot.mjs'),
@@ -6261,14 +6881,15 @@ async function askReadonlyOpsAgent(question, options = {}) {
     text,
   ], {
     cwd: ROOT,
-    timeoutMs: Number(process.env.SHEIN_BI_OPS_AGENT_TIMEOUT_MS || 190_000),
+    timeoutMs: Math.max(20_000, Number(profile.timeoutMs || 45_000) + 10_000),
     env: {
       CODEX_HOME: process.env.CODEX_HOME || '/home/sheinops/.codex',
       SHEIN_QA_CODEX_GATEWAY_ENABLED: process.env.SHEIN_QA_CODEX_GATEWAY_ENABLED || '1',
-      SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS: process.env.SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS || '600000',
-      SHEIN_QA_CODEX_MODEL: process.env.SHEIN_QA_CODEX_MODEL || 'gpt-5.5',
-      SHEIN_QA_CODEX_REASONING_EFFORT: process.env.SHEIN_QA_CODEX_REASONING_EFFORT || 'xhigh',
-      SHEIN_QA_LLM_ENABLED: process.env.SHEIN_QA_LLM_ENABLED || '1',
+      SHEIN_QA_CODEX_GATEWAY_TIMEOUT_MS: String(profile.timeoutMs || 45_000),
+      SHEIN_QA_CODEX_MODEL: profile.model,
+      SHEIN_QA_CODEX_REASONING_EFFORT: profile.reasoning,
+      SHEIN_QA_CODEX_EPHEMERAL: codexSessionId ? '0' : '1',
+      SHEIN_QA_LLM_ENABLED: process.env.SHEIN_BI_AGENT_ALLOW_DIRECT_LLM_FALLBACK || '0',
       SHEIN_QA_LLM_TIMEOUT_MS: process.env.SHEIN_QA_LLM_TIMEOUT_MS || '45000',
       SHEIN_QA_CODEX_SESSION_ID: codexSessionId,
       SHEIN_QA_CODEX_SESSION_META_FILE: codexMetaFile,
@@ -6277,13 +6898,17 @@ async function askReadonlyOpsAgent(question, options = {}) {
   const codexMeta = await readJsonFile(codexMetaFile, null);
   await fs.rm(codexMetaFile, {force: true}).catch(() => {});
   if (!result.ok) {
-    throw new Error(`Ops agent failed code=${result.code} timeout=${result.timedOut} stderr=${String(result.stderr || '').slice(-500)}`);
+    const error = new Error(`Ops agent failed code=${result.code} timeout=${result.timedOut} stderr=${String(result.stderr || '').slice(-500)}`);
+    error.status = 503;
+    error.code = result.timedOut ? 'AGENT_TIMEOUT' : 'AGENT_UPSTREAM_FAILED';
+    throw error;
   }
   return {
     answer: String(result.stdout || '').trim(),
     stderrTail: String(result.stderr || '').slice(-1000),
     codexSessionId: codexMeta?.sessionId || codexSessionId || '',
     codexResumed: Boolean(codexMeta?.resumed),
+    profile: modelProfilePublicSummary(profile),
   };
 }
 
@@ -6376,6 +7001,56 @@ let firstRunCheckInFlight = false;
 
 function sendJson(res, status, value, headers = {}) {
   send(res, status, JSON.stringify(value, null, 2), {'Content-Type': 'application/json; charset=utf-8', ...headers});
+}
+
+function agentErrorHttpDetails(error) {
+  const status = Number(error?.status || 0);
+  const safeStatus = status >= 400 && status <= 599 ? status : 503;
+  const retryAfterSec = Math.max(0, Number(error?.retryAfterSec || 0));
+  return {
+    status: safeStatus,
+    headers: retryAfterSec ? {'Retry-After': String(Math.ceil(retryAfterSec))} : {},
+    body: {
+      ok: false,
+      error: safeStatus === 429
+        ? String(error?.message || '智能运营请求过于频繁，请稍后再试')
+        : '智能运营服务暂时不可用，请稍后重试',
+      code: String(error?.code || 'AGENT_UNAVAILABLE'),
+      retryAfterSec,
+    },
+  };
+}
+
+function requestedAgentProfile(actor, requestedValue, options = {}) {
+  const requested = String(requestedValue || '').trim().toLowerCase();
+  const profiles = biOpsModelProfiles();
+  if (requested && !profiles[requested]) {
+    const error = new Error('不支持的智能运营模型档位');
+    error.status = 400;
+    error.code = 'AGENT_PROFILE_INVALID';
+    throw error;
+  }
+  if (requested === 'owner' && !actorHasGlobalOpsView(actor)) {
+    const error = new Error('只有 owner/admin 可以显式使用 owner 模型档位');
+    error.status = 403;
+    error.code = 'AGENT_PROFILE_FORBIDDEN';
+    throw error;
+  }
+  if (requested === 'deep' && !actorHasGlobalOpsView(actor)) {
+    const error = new Error('只有 owner/admin 可以手动指定 deep；系统仍会按任务风险自动升级');
+    error.status = 403;
+    error.code = 'AGENT_PROFILE_FORBIDDEN';
+    throw error;
+  }
+  return selectBiOpsModelProfile({
+    profile: requested,
+    mode: options.mode || 'query',
+    question: options.question || '',
+    intents: options.intents || [],
+    stores: options.stores || [],
+    actorRole: actor?.role || '',
+    ownerEscalation: requested === 'owner',
+  });
 }
 
 function htmlEscape(value) {
@@ -6628,6 +7303,34 @@ async function handleManualLoginWsUpgrade(req, socket, args, {authRequired, auth
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  const linkOpsStoreGateway = createConfiguredLinkOpsStoreGateway({
+    env: process.env,
+    rootDir: ROOT,
+    taskFile: args.linkOpsTaskFile,
+    sessionFile: args.linkOpsChatFile,
+    actionFile: args.stateFile,
+    runtimeFile: args.linkOpsRuntimeFile,
+  });
+  Object.defineProperty(args, 'linkOpsStoreGateway', {
+    value: linkOpsStoreGateway,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+  const initialLinkOpsStorageHealth = await linkOpsStoreGateway.health();
+  if (!initialLinkOpsStorageHealth?.ok) {
+    throw new Error('Link Ops storage health check failed');
+  }
+  const ownerKnowledgeService = createOwnerKnowledgeService({
+    repository: linkOpsStoreGateway.repository,
+    authorityId: process.env.SHEIN_OWNER_KNOWLEDGE_PRINCIPAL || 'dushengyi',
+  });
+  Object.defineProperty(args, 'ownerKnowledgeService', {
+    value: ownerKnowledgeService,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
   const root = path.resolve(args.dir);
   const indexFile = path.join(root, 'index.html');
   if (!fssync.existsSync(indexFile)) {
@@ -6642,13 +7345,456 @@ async function main() {
   const allowGenerateSections = !(args.readOnly || (args.host === '0.0.0.0' && !authRequired));
   const loginRateLimiter = createLoginRateLimiter();
   const enqueueMutationRequest = createSerialMutationQueue();
+  const opsAgentGovernor = createBiOpsAgentGovernor({
+    maxConcurrent: Number(process.env.SHEIN_BI_AGENT_MAX_CONCURRENT || 2),
+    maxConcurrentPerActor: Number(process.env.SHEIN_BI_AGENT_MAX_CONCURRENT_PER_ACTOR || 1),
+    maxQueue: Number(process.env.SHEIN_BI_AGENT_MAX_QUEUE || 12),
+    maxQueuedPerActor: Number(process.env.SHEIN_BI_AGENT_MAX_QUEUED_PER_ACTOR || 3),
+    rateLimit: Number(process.env.SHEIN_BI_AGENT_RATE_LIMIT || 12),
+    rateWindowMs: Number(process.env.SHEIN_BI_AGENT_RATE_WINDOW_MS || 10 * 60_000),
+    queueTimeoutMs: Number(process.env.SHEIN_BI_AGENT_QUEUE_TIMEOUT_MS || 30_000),
+    failureThreshold: Number(process.env.SHEIN_BI_AGENT_FAILURE_THRESHOLD || 4),
+    failureWindowMs: Number(process.env.SHEIN_BI_AGENT_FAILURE_WINDOW_MS || 5 * 60_000),
+    circuitCooldownMs: Number(process.env.SHEIN_BI_AGENT_CIRCUIT_COOLDOWN_MS || 2 * 60_000),
+  });
+
+  const intentPlannerEnabled = String(
+    process.env.SHEIN_BI_INTENT_PLANNER_ENABLED
+    ?? (linkOpsStoreGateway.mode === 'postgres' ? '1' : '0')
+  ).trim() === '1';
+  const jobWorkerEnabled = String(
+    process.env.SHEIN_BI_JOB_WORKER_ENABLED
+    ?? (linkOpsStoreGateway.mode === 'postgres' ? '1' : '0')
+  ).trim() === '1';
+  const intentPlannerCodexArgsPrefix = (() => {
+    const raw = String(process.env.SHEIN_BI_CODEX_ARGS_PREFIX_JSON || '').trim();
+    if (!raw) return [];
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error('SHEIN_BI_CODEX_ARGS_PREFIX_JSON must be valid JSON');
+    }
+    if (!Array.isArray(parsed) || parsed.length > 16 || parsed.some(entry => typeof entry !== 'string' || !entry || entry.length > 1_000 || entry.includes('\0'))) {
+      throw new Error('SHEIN_BI_CODEX_ARGS_PREFIX_JSON must be an array of 1-16 safe strings');
+    }
+    return parsed;
+  })();
+
+  function intentPlannerActorSnapshot(actor) {
+    return {
+      username: String(actor?.username || '').trim(),
+      displayName: String(actor?.displayName || '').trim(),
+      role: String(actor?.role || '').trim(),
+      ownerKey: String(actor?.ownerKey || '').trim(),
+      readStores: normalizeStoreList(actor?.readStores || []),
+      writeStores: normalizeStoreList(actor?.writeStores || []),
+    };
+  }
+
+  function intentPlannerContext(task, session) {
+    return {
+      task: task ? {
+        id: String(task.id || ''),
+        status: String(task.status || ''),
+        command: String(task.command || '').slice(0, 2_000),
+        intents: asArray(task.intents).slice(0, 20),
+        targets: normalizeLinkOpsTargetSet(task.targets || {}),
+      } : null,
+      session: session ? {
+        id: String(session.id || ''),
+        targets: normalizeLinkOpsTargetSet(session.targets || {}),
+        messages: recentCloudAiMessages(session.messages)
+          .filter(message => message?.role === 'user')
+          .slice(-6)
+          .map(message => ({role: 'user', content: String(message.content || '').slice(0, 1_000)})),
+      } : null,
+      ownerKnowledge: task?.ownerKnowledgePolicy && typeof task.ownerKnowledgePolicy === 'object'
+        ? task.ownerKnowledgePolicy
+        : null,
+    };
+  }
+
+  function intentPlannerTaskSnapshot(task) {
+    const repositoryRevision = Number(task?.repositoryRevision);
+    const businessState = {
+      command: String(task?.command || ''),
+      status: String(task?.status || ''),
+      progress: normalizeProgress(task?.progress, 0),
+      intents: asArray(task?.intents).map(String),
+      targets: normalizeLinkOpsTargetSet(task?.targets || {}),
+      lifecycle: task?.lifecycle && typeof task.lifecycle === 'object' ? task.lifecycle : null,
+      preflight: task?.preflight && typeof task.preflight === 'object' ? task.preflight : null,
+      execution: task?.execution && typeof task.execution === 'object' ? task.execution : null,
+      assets: asArray(task?.assets),
+      ownerKnowledgePolicy: task?.ownerKnowledgePolicy && typeof task.ownerKnowledgePolicy === 'object'
+        ? task.ownerKnowledgePolicy
+        : null,
+    };
+    return {
+      repositoryRevision: Number.isSafeInteger(repositoryRevision) && repositoryRevision > 0 ? repositoryRevision : null,
+      updatedAt: String(task?.updatedAt || ''),
+      fingerprint: linkOpsPayloadHash(businessState),
+    };
+  }
+
+  function intentPlannerTaskSnapshotIsStale(queuedSnapshot, task) {
+    // Jobs created before snapshot binding (or with malformed payloads) are
+    // fail-closed. They may finish as stale, but can never alter a newer task.
+    if (!queuedSnapshot || typeof queuedSnapshot !== 'object') return true;
+    const queuedFingerprint = String(queuedSnapshot.fingerprint || '');
+    if (!/^[a-f0-9]{64}$/i.test(queuedFingerprint)) return true;
+    const current = intentPlannerTaskSnapshot(task);
+    const queuedRevision = Number(queuedSnapshot.repositoryRevision);
+    const revisionChanged = Number.isSafeInteger(queuedRevision) && queuedRevision > 0
+      && Number.isSafeInteger(current.repositoryRevision) && current.repositoryRevision > 0
+      && queuedRevision !== current.repositoryRevision;
+    const fingerprintChanged = queuedFingerprint !== current.fingerprint;
+    return revisionChanged || fingerprintChanged;
+  }
+
+  async function enqueueIntentPlanJob({task, session, message, actor, req}) {
+    if (!intentPlannerEnabled || !task?.id || !session?.id) return null;
+    let taskForJob = task;
+    try {
+      const freshTaskStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+      const freshTask = freshTaskStore.tasks.find(row => String(row?.id || '') === String(task.id || ''));
+      if (freshTask) taskForJob = freshTask;
+    } catch {}
+    const ownerUser = actorUser(actor, req);
+    const latestMessage = asArray(session.messages).at(-1);
+    const idempotencySeed = {
+      kind: 'intent_plan',
+      taskId: taskForJob.id,
+      sessionId: session.id,
+      messageId: latestMessage?.id || '',
+      message: String(message || '').slice(0, 4_000),
+      ownerKnowledgeFingerprint: String(taskForJob?.ownerKnowledgePolicy?.fingerprint || ''),
+    };
+    const digest = linkOpsPayloadHash(idempotencySeed);
+    const jobId = `job_intent_${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}_${digest.slice(0, 12)}`;
+    const idempotencyKey = `intent-plan:${digest}`;
+    const job = await linkOpsStoreGateway.enqueueJob({
+      id: jobId,
+      kind: 'intent_plan',
+      taskId: String(taskForJob.id),
+      chatSessionId: String(session.id),
+      ownerUser,
+      actorUser: ownerUser,
+      writeBoundary: 'none',
+      payload: {
+        kind: 'intent_plan',
+        message: String(message || '').slice(0, 4_000),
+        actor: intentPlannerActorSnapshot(actor),
+        context: intentPlannerContext(taskForJob, session),
+        ownerKnowledgeFingerprint: String(taskForJob?.ownerKnowledgePolicy?.fingerprint || ''),
+        taskSnapshot: intentPlannerTaskSnapshot(taskForJob),
+      },
+      queuedAt: new Date().toISOString(),
+    }, {idempotencyKey, ownerUser, actorUser: ownerUser});
+    linkOpsJobWorker?.wake();
+    return job;
+  }
+
+  function publicLinkOpsJob(job) {
+    if (!job) return null;
+    return {
+      id: String(job.jobId || job.id || ''),
+      kind: String(job.kind || job.type || job.payload?.kind || ''),
+      taskId: String(job.taskId || ''),
+      chatSessionId: String(job.chatSessionId || ''),
+      status: String(job.status || ''),
+      writeBoundary: String(job.writeBoundary || 'none'),
+      attempt: Number(job.attempt || 0),
+      queuedAt: job.queuedAt || null,
+      startedAt: job.startedAt || null,
+      finishedAt: job.finishedAt || null,
+      result: job.result && typeof job.result === 'object' ? {
+        summary: String(job.result.summary || '').slice(0, 500),
+        requestType: String(job.result.requestType || ''),
+        taskId: String(job.result.taskId || job.taskId || ''),
+        applied: Boolean(job.result.applied),
+        plannerDowngradeIgnored: Boolean(job.result.plannerDowngradeIgnored),
+        plannerFactsIgnored: Boolean(job.result.plannerFactsIgnored),
+        advisoryOnly: Boolean(job.result.advisoryOnly),
+        staleIgnored: Boolean(job.result.staleIgnored),
+        chatFeedbackSuppressed: Boolean(job.result.chatFeedbackSuppressed),
+      } : {},
+      error: job.error && typeof job.error === 'object' ? {
+        code: String(job.error.code || '').slice(0, 120),
+        message: String(job.error.message || '').slice(0, 500),
+        retryable: Boolean(job.error.retryable),
+      } : {},
+    };
+  }
+
+  function actorCanReadLinkOpsJob(actor, job, {globalView = false} = {}) {
+    if (globalView && actorHasGlobalOpsView(actor)) return true;
+    return actorOpsKey(actor) === normalizeOpsActorKey(job?.ownerUser || job?.actorUser || '');
+  }
+
+  async function applyIntentPlanJob(job) {
+    const payload = job.payload && typeof job.payload === 'object' ? job.payload : {};
+    const actor = payload.actor && typeof payload.actor === 'object' ? payload.actor : {};
+    const message = String(payload.message || '').trim();
+    if (!message) throw Object.assign(new Error('Intent-plan job is missing its message'), {code: 'MISSING_MESSAGE'});
+    const queuedKnowledgeFingerprint = String(payload.ownerKnowledgeFingerprint || payload.context?.ownerKnowledge?.fingerprint || '');
+    if (queuedKnowledgeFingerprint) {
+      const currentKnowledge = await ownerKnowledgeService.getActiveBundle({
+        question: message,
+        command: payload.context?.task?.command || '',
+        intents: payload.context?.task?.intents || [],
+        stores: payload.context?.task?.targets?.stores || [],
+        productRefs: payload.context?.task?.targets?.productRefs || [],
+        targets: payload.context?.task?.targets || {},
+      }, {limit: 20});
+      if (currentKnowledge.fingerprint !== queuedKnowledgeFingerprint) {
+        return {
+          applied: false,
+          taskId: job.taskId,
+          requestType: 'advisory',
+          summary: '负责人长期规则已更新；过期的后台理解结果已忽略。',
+          confidence: 0,
+          factsChanged: false,
+          plannerDowngradeIgnored: false,
+          plannerFactsIgnored: false,
+          advisoryOnly: true,
+          staleIgnored: true,
+          chatFeedbackSuppressed: true,
+        };
+      }
+    }
+    const profile = selectBiOpsModelProfile({profile: 'balanced'}, process.env);
+    const allowedStores = [...SHEIN_STORE_KEYS];
+    const plan = await opsAgentGovernor.run(actorOpsKey(actor), () => runBiOpsIntentPlanner({
+      message,
+      context: payload.context || {},
+    }, {
+      allowedStores,
+      model: profile.model,
+      reasoning: profile.reasoning,
+      timeoutMs: profile.timeoutMs,
+      codexBin: process.env.SHEIN_BI_CODEX_BIN || 'codex',
+      codexArgsPrefix: intentPlannerCodexArgsPrefix,
+      env: {
+        ...process.env,
+        CODEX_HOME: process.env.CODEX_HOME || '/home/sheinops/.codex',
+      },
+    }), {tier: profile.name, kind: 'intent-plan', sessionId: job.chatSessionId});
+
+    return enqueueMutationRequest(async () => {
+      const taskStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+      const taskIndex = taskStore.tasks.findIndex(task => String(task?.id || '') === String(job.taskId || ''));
+      if (taskIndex < 0) throw Object.assign(new Error('Intent-plan task no longer exists'), {code: 'TASK_NOT_FOUND'});
+      const access = authorizeLinkOpsRecord(actor, taskStore.tasks[taskIndex], {kind: 'task', mode: 'mutate'});
+      if (!access.ok) throw Object.assign(new Error(access.denied?.error || 'Intent-plan task ownership changed'), {code: 'TASK_ACCESS_DENIED'});
+      const task = access.record;
+      if (intentPlannerTaskSnapshotIsStale(payload.taskSnapshot, task)) {
+        return {
+          applied: false,
+          taskId: task.id,
+          requestType: plan.requestType,
+          summary: '结构化理解完成时任务已被后续指令更新；过期结果已忽略。',
+          confidence: plan.confidence,
+          factsChanged: false,
+          plannerDowngradeIgnored: false,
+          plannerFactsIgnored: false,
+          advisoryOnly: true,
+          staleIgnored: true,
+          chatFeedbackSuppressed: true,
+        };
+      }
+      const previousTargets = normalizeLinkOpsTargetSet(task.targets || {});
+      const previousIntents = asArray(task.intents).map(String);
+      const existingActionIntents = previousIntents.filter(intent => BI_OPS_ACTION_INTENT_SET.has(intent));
+      const existingActionTask = existingActionIntents.length > 0;
+      const plannerIsActionPlan = ['action', 'mixed'].includes(plan.requestType);
+      // The deterministic state machine has already created an action task from
+      // the user's explicit command. A slower model pass is advisory only: it
+      // cannot downgrade or expand intents, stores, products or parameters.
+      const plannerDowngradeIgnored = existingActionTask && !plannerIsActionPlan;
+      let candidateAdapted = null;
+      if (plannerIsActionPlan) {
+        candidateAdapted = biOpsIntentPlanToTaskInput(plan, {allowedStores, command: task.command || message});
+        if (!existingActionTask) {
+          const writeDenied = requireWriteStores(actor, candidateAdapted.targets.writeStores);
+          const readDenied = requireReadStores(actor, candidateAdapted.targets.sourceStores);
+          if (writeDenied || readDenied) {
+            throw Object.assign(new Error((writeDenied || readDenied).error), {code: 'INTENT_PLAN_PERMISSION_DENIED'});
+          }
+        }
+      }
+      const candidateTargets = candidateAdapted
+        ? normalizeTargetsForIntents(
+            [...previousIntents, ...candidateAdapted.intents],
+            mergeLinkOpsTargets(previousTargets, candidateAdapted.targets)
+          )
+        : previousTargets;
+      const candidateIntents = candidateAdapted
+        ? normalizeIntentsForCommand([...previousIntents, ...candidateAdapted.intents], task.command || message)
+        : previousIntents;
+      const plannerFactsIgnored = existingActionTask && Boolean(candidateAdapted) && (
+        JSON.stringify(previousTargets) !== JSON.stringify(candidateTargets)
+        || JSON.stringify(previousIntents) !== JSON.stringify(candidateIntents)
+      );
+      const adapted = existingActionTask ? null : candidateAdapted;
+      const nextTargets = adapted
+        ? candidateTargets
+        : previousTargets;
+      const nextIntents = adapted
+        ? candidateIntents
+        : previousIntents;
+      const factsChanged = JSON.stringify(previousTargets) !== JSON.stringify(nextTargets)
+        || JSON.stringify(previousIntents) !== JSON.stringify(nextIntents);
+      const completedAt = new Date().toISOString();
+      const plannerResultIgnored = plannerDowngradeIgnored || plannerFactsIgnored;
+      const advisoryPlanning = existingActionTask ? {
+        ...(task.planning && typeof task.planning === 'object' ? task.planning : {}),
+        version: Number(plan.version || 1),
+        requestType: 'action',
+        parameters: task.planning?.parameters && typeof task.planning.parameters === 'object'
+          ? task.planning.parameters
+          : {},
+        ambiguity: {hasAmbiguity: false, reasons: [], clarifyingQuestions: []},
+        risk: {
+          level: String(task.planning?.risk?.level || 'medium'),
+          writeRequested: true,
+          requiresHumanConfirmation: true,
+          reasons: uniqueMessages([
+            ...asArray(task.planning?.risk?.reasons),
+            '后台模型只做辅助理解，不能修改已经锁定的动作、店铺、商品或预演事实。',
+          ]),
+        },
+        confidence: Number(task.planning?.confidence || 0),
+        summary: plannerResultIgnored
+          ? '后台结构化结果与当前受控动作事实冲突，已忽略；任务事实和系统检查结果保持不变。'
+          : '后台结构化检查仅作辅助理解；已锁定的任务事实和系统检查结果保持不变。',
+        advisory: true,
+        factsApplied: false,
+        ignored: plannerResultIgnored,
+        ignoredReason: plannerDowngradeIgnored
+          ? 'existing_action_cannot_be_downgraded_to_query'
+          : plannerFactsIgnored
+            ? 'existing_action_facts_are_authoritative'
+            : '',
+        ignoredRequestType: String(plan.requestType || ''),
+      } : null;
+      const updatedTask = {
+        ...task,
+        intents: nextIntents,
+        targets: nextTargets,
+        planning: {
+          ...(advisoryPlanning || adapted?.planning || {}),
+          ...(!existingActionTask && adapted ? {factsApplied: factsChanged, advisory: false} : {}),
+          jobId: job.jobId,
+          modelProfile: modelProfilePublicSummary(profile),
+          completedAt,
+        },
+        preview: existingActionTask
+          ? (task.preview && typeof task.preview === 'object' ? task.preview : {})
+          : {
+              ...(task.preview && typeof task.preview === 'object' ? task.preview : {}),
+              summary: plan.summary,
+              riskNotes: [...plan.risk.reasons],
+              structuredIntent: {
+                requestType: plan.requestType,
+                confidence: plan.confidence,
+                ambiguity: plan.ambiguity,
+              },
+            },
+        updatedAt: completedAt,
+      };
+      if (factsChanged) {
+        updatedTask.execution = {
+          ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
+          state: 'needs_repreflight',
+          preflight: {
+            ...(task.execution?.preflight && typeof task.execution.preflight === 'object' ? task.execution.preflight : {}),
+            ok: false,
+            blockers: uniqueMessages([
+              ...asArray(task.execution?.preflight?.blockers),
+              '结构化意图规划更新了目标事实，必须重新做系统检查后才能提交。',
+            ]),
+          },
+        };
+      }
+      updatedTask.history = appendTaskHistory(updatedTask, 'structured_intent_planned', actor, {headers: {}, socket: {}}, {
+        jobId: job.jobId,
+        requestType: plan.requestType,
+        confidence: plan.confidence,
+        factsChanged,
+        plannerDowngradeIgnored,
+        plannerFactsIgnored,
+        advisoryOnly: existingActionTask,
+      });
+      const tasks = taskStore.tasks.slice();
+      tasks[taskIndex] = updatedTask;
+      await writeLinkOpsTaskStore(args, {...taskStore, updatedAt: completedAt, tasks});
+
+      const chatStore = normalizeLinkOpsChatStore(await readLinkOpsChatStore(args));
+      const sessionIndex = chatStore.sessions.findIndex(session => String(session?.id || '') === String(job.chatSessionId || ''));
+      const chatFeedbackSuppressed = existingActionTask || (
+        !factsChanged
+        && String(task.status || '') === 'waiting_review'
+        && task.execution?.preflight?.ok === true
+      );
+      if (sessionIndex >= 0) {
+        const sessionAccess = authorizeLinkOpsRecord(actor, chatStore.sessions[sessionIndex], {kind: 'session', mode: 'mutate'});
+        if (sessionAccess.ok) {
+          const alreadyReported = asArray(sessionAccess.record.messages)
+            .some(messageRow => String(messageRow?.meta?.intentPlanJobId || '') === String(job.jobId));
+          if (!alreadyReported && !chatFeedbackSuppressed) {
+            const questions = asArray(plan.ambiguity?.clarifyingQuestions).filter(Boolean);
+            const answer = questions.length
+              ? `结构化检查完成：${plan.summary}\n\n还需要你确认：\n${questions.map(question => `- ${question}`).join('\n')}`
+              : `结构化检查完成：${plan.summary}\n\n我已把识别出的店铺、商品、动作参数和风险写入当前任务；任何真实写操作仍会先重新检查并等你确认。`;
+            const sessions = chatStore.sessions.slice();
+            sessions[sessionIndex] = appendAssistantChatMessage(sessionAccess.record, answer, {
+              mode: 'structured-intent-plan',
+              intentPlanJobId: job.jobId,
+              autoTaskId: updatedTask.id,
+              agentProfile: modelProfilePublicSummary(profile),
+            });
+            await writeLinkOpsChatStore(args, {...chatStore, updatedAt: completedAt, sessions});
+          }
+        }
+      }
+
+      return {
+        applied: true,
+        taskId: updatedTask.id,
+        requestType: plan.requestType,
+        summary: plan.summary,
+        confidence: plan.confidence,
+        factsChanged,
+        plannerDowngradeIgnored,
+        plannerFactsIgnored,
+        advisoryOnly: existingActionTask,
+        staleIgnored: false,
+        chatFeedbackSuppressed,
+      };
+    });
+  }
+
+  let linkOpsJobWorker = null;
+  if (jobWorkerEnabled) {
+    linkOpsJobWorker = createLinkOpsJobWorker({
+      store: linkOpsStoreGateway,
+      handlers: {intent_plan: applyIntentPlanJob},
+      pollMs: Number(process.env.SHEIN_BI_JOB_POLL_MS || 1_500),
+      leaseMs: Number(process.env.SHEIN_BI_JOB_LEASE_MS || 10 * 60_000),
+      onEvent: event => appendAudit(args.auditFile, {type: `link-ops-job-${event.event}`, ...event}),
+    });
+  }
 
   const handleRequest = async (req, res) => {
     try {
       const url = new URL(req.url || '/', 'http://localhost');
       const trustedInternal = authRequired && isTrustedInternalRequest(req);
       const authenticatedActor = authRequired ? authenticateRequest(req, authUsers, sessionSecret) : null;
-      const actor = authRequired ? (authenticatedActor || (trustedInternal ? internalActor() : null)) : null;
+      const knowledgeBearer = url.pathname.startsWith('/api/owner-knowledge/') ? requestBearerToken(req) : '';
+      const knowledgeDeviceActor = knowledgeBearer ? await ownerKnowledgeService.authenticateBearer(knowledgeBearer) : null;
+      const actor = authRequired ? (authenticatedActor || knowledgeDeviceActor || (trustedInternal ? internalActor() : null)) : null;
       if (!mutationOriginAllowed(req, {trustedInternal})) {
         await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'mutation-origin-denied', actor, ...requestMeta(req), path: url.pathname, method: req.method});
         return sendJson(res, 403, {ok: false, error: 'Cross-origin state-changing request denied'});
@@ -6748,6 +7894,63 @@ async function main() {
       if (url.pathname === '/api/auth/me') {
         return sendJson(res, actor ? 200 : 401, {ok: Boolean(actor), user: publicActor(actor)});
       }
+      if (url.pathname === '/api/owner-knowledge/events') {
+        if (req.method !== 'POST') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        if (!actorCanPublishOwnerKnowledge(actor, ownerKnowledgeService.authorityId)) {
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'owner-knowledge-publish-denied', actor, ...requestMeta(req)});
+          return sendJson(res, 403, {ok: false, error: '当前账号只能使用负责人规则，不能修改或覆盖'});
+        }
+        const body = await readBodyJson(req, 2 * 1024 * 1024).catch(error => ({_error: error?.message || String(error)}));
+        if (body._error) return sendJson(res, 400, {ok: false, error: body._error});
+        const experiences = Array.isArray(body.experiences) ? body.experiences : Array.isArray(body.events) ? body.events : [];
+        try {
+          const result = await ownerKnowledgeService.ingest(experiences, {
+            actor,
+            actorUser: actorUser(actor, req),
+            sourceKind: knowledgeDeviceActor ? 'owner_local_sync' : 'owner_bi_manual',
+            deviceId: actor?.knowledgeDeviceId || '',
+          });
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'owner-knowledge-published',
+            actor,
+            ...requestMeta(req),
+            result: {count: result.results.length, active: result.results.filter(row => row.activation === 'active').length, candidates: result.results.filter(row => row.activation === 'candidate').length, fingerprint: result.bundle.fingerprint},
+          });
+          return sendJson(res, 200, result, {'Cache-Control': 'no-store'});
+        } catch (error) {
+          return sendJson(res, Number(error?.status || 400), {ok: false, error: error?.message || String(error), code: error?.code || 'OWNER_KNOWLEDGE_PUBLISH_FAILED'});
+        }
+      }
+      if (url.pathname === '/api/owner-knowledge/status') {
+        if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        if (!actorCanPublishOwnerKnowledge(actor, ownerKnowledgeService.authorityId)) return sendJson(res, 403, {ok: false, error: '负责人权限 required'});
+        return sendJson(res, 200, {ok: true, data: await ownerKnowledgeService.status()}, {'Cache-Control': 'no-store'});
+      }
+      if (url.pathname === '/api/owner-knowledge/active') {
+        if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        if (!actorCanPublishOwnerKnowledge(actor, ownerKnowledgeService.authorityId)) return sendJson(res, 403, {ok: false, error: '当前账号只能在业务流程中使用负责人规则'});
+        const query = String(url.searchParams.get('q') || '').slice(0, 2_000);
+        const bundle = await ownerKnowledgeService.getActiveBundle({question: query}, {limit: Math.max(1, Math.min(50, Number(url.searchParams.get('limit') || 20)))});
+        return sendJson(res, 200, {ok: true, data: bundle}, {'Cache-Control': 'no-store'});
+      }
+      if (url.pathname === '/api/owner-knowledge/devices') {
+        if (req.method !== 'POST') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        const body = await readBodyJson(req, 64 * 1024).catch(error => ({_error: error?.message || String(error)}));
+        if (body._error) return sendJson(res, 400, {ok: false, error: body._error});
+        try {
+          const issued = await ownerKnowledgeService.issueDevice({
+            actor,
+            actorUser: actorUser(actor, req),
+            deviceId: String(body.deviceId || ''),
+            deviceName: String(body.deviceName || ''),
+          });
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'owner-knowledge-device-enrolled', actor, ...requestMeta(req), device: {deviceId: issued.deviceId, deviceName: issued.deviceName, enrolledAt: issued.enrolledAt}});
+          return sendJson(res, 201, {ok: true, data: issued}, {'Cache-Control': 'no-store'});
+        } catch (error) {
+          return sendJson(res, Number(error?.status || 400), {ok: false, error: error?.message || String(error), code: error?.code || 'OWNER_KNOWLEDGE_DEVICE_ENROLL_FAILED'});
+        }
+      }
       if (url.pathname === '/api/health') {
         const urlHost = args.host === '0.0.0.0' ? '127.0.0.1' : args.host;
         return sendJson(res, 200, {
@@ -6762,6 +7965,13 @@ async function main() {
           stateFile: args.stateFile,
           linkOpsTaskFile: args.linkOpsTaskFile,
           linkOpsChatFile: args.linkOpsChatFile,
+          linkOpsRuntimeFile: args.linkOpsRuntimeFile,
+          linkOpsStorage: await linkOpsStoreGateway.health(),
+          linkOpsJobs: {
+            intentPlannerEnabled,
+            workerEnabled: Boolean(linkOpsJobWorker),
+            workerRunning: Boolean(linkOpsJobWorker?.isRunning()),
+          },
           linkOpsAssetDir: args.linkOpsAssetDir,
           manualLoginStateFile: args.manualLoginStateFile,
           writableActionState: !args.readOnly,
@@ -6932,11 +8142,18 @@ async function main() {
       }
       if (url.pathname === '/api/openapi-capabilities') {
         if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
-        return sendJson(res, 200, projectOpenApiCapabilityLedgerForClient(openApiCapabilityLedger()));
+        return sendJson(res, 200, {
+          ...projectOpenApiCapabilityLedgerForClient(openApiCapabilityLedger(), actor),
+          agentRuntime: {
+            governor: opsAgentGovernor.snapshot(),
+            profiles: Object.fromEntries(Object.entries(biOpsModelProfiles()).map(([key, value]) => [key, modelProfilePublicSummary(value)])),
+            policy: 'code_first_then_tiered_model',
+          },
+        });
       }
       if (url.pathname === '/api/action-state') {
         if (req.method === 'GET') {
-          const data = await readJsonFile(args.stateFile, {version: 1, updatedAt: null, actions: {}});
+          const data = await readLinkOpsActionState(args);
           return sendJson(res, 200, {ok: true, data});
         }
         if (req.method === 'POST') {
@@ -6944,10 +8161,33 @@ async function main() {
             return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
           }
           const body = await readBodyJson(req);
-          const current = await readJsonFile(args.stateFile, {version: 1, updatedAt: null, actions: {}});
-          const actions = current.actions && typeof current.actions === 'object' ? current.actions : {};
           const patches = Array.isArray(body.actions) ? body.actions : [body];
           if (patches.length > 300) return sendJson(res, 400, {ok: false, error: 'Too many actions'});
+          const actorGate = requireConcreteOperatorActor(actor);
+          if (actorGate) {
+            await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'action-state-denied', actor, ...requestMeta(req), denied: actorGate});
+            return sendJson(res, 403, actorGate);
+          }
+          const patchScopes = patches.map(actionStatePatchStore);
+          const invalidScope = patchScopes.find(scope => !scope.ok);
+          if (invalidScope) {
+            await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'action-state-denied', actor, ...requestMeta(req), denied: invalidScope});
+            return sendJson(res, 400, {ok: false, error: invalidScope.error});
+          }
+          const denied = requireWriteStores(actor, patchScopes.map(scope => scope.storeKey));
+          if (denied) {
+            await appendAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'action-state-denied',
+              actor,
+              ...requestMeta(req),
+              stores: patchScopes.map(scope => scope.storeKey),
+              denied,
+            });
+            return sendJson(res, 403, denied);
+          }
+          const current = await readLinkOpsActionState(args);
+          const actions = current.actions && typeof current.actions === 'object' ? current.actions : {};
           for (const patch of patches) {
             const key = String(patch.key || '');
             const status = String(patch.status || 'open');
@@ -6970,7 +8210,7 @@ async function main() {
             else actions[key] = nextItem;
           }
           const next = {version: 1, updatedAt: new Date().toISOString(), actions};
-          await writeJsonFile(args.stateFile, next);
+          await writeLinkOpsActionState(args, next);
           await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'action-state',
@@ -6989,26 +8229,41 @@ async function main() {
       }
       if (url.pathname === '/api/link-ops-tasks') {
         if (req.method === 'GET') {
-          const current = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
+          const current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
           const limit = Math.max(1, Math.min(500, Number(url.searchParams.get('limit') || 120)));
-          const sessionId = String(url.searchParams.get('sessionId') || url.searchParams.get('chatSessionId') || '').trim();
+          const globalView = requestedGlobalOpsView(url);
+          if (globalView && !actorHasGlobalOpsView(actor)) {
+            return sendJson(res, 403, {ok: false, error: '只有 owner/admin 可以使用 scope=all 查看全局自动运营任务'});
+          }
+          let sessionId = String(url.searchParams.get('sessionId') || url.searchParams.get('chatSessionId') || '').trim();
           if (sessionId) {
+            try { sessionId = safeLinkOpsChatSessionId(sessionId); } catch (err) {
+              return sendJson(res, 400, {ok: false, error: err?.message || 'Invalid chat session id'});
+            }
             const messageTaskIds = new Set();
-            try {
-              const chatStore = normalizeLinkOpsChatStore(await readJsonFile(args.linkOpsChatFile, {version: 1, updatedAt: null, sessions: []}));
-              const session = chatStore.sessions.find(row => String(row?.id || '') === sessionId);
-              for (const message of asArray(session?.messages)) {
+            const chatStore = normalizeLinkOpsChatStore(await readLinkOpsChatStore(args));
+            const session = chatStore.sessions.find(row => String(row?.id || '') === sessionId);
+            if (session) {
+              const sessionAccess = authorizeLinkOpsRecord(actor, session, {kind: 'session', mode: 'read', globalView});
+              if (!sessionAccess.ok) return sendJson(res, 403, sessionAccess.denied);
+              for (const message of asArray(sessionAccess.record?.messages)) {
                 const id = String(message?.meta?.autoTaskId || '').trim();
                 if (id) messageTaskIds.add(id);
               }
-            } catch {}
+            } else {
+              const orphanTasks = current.tasks.filter(task => String(task?.chatSessionId || task?.chat?.sessionId || '') === sessionId);
+              if (!orphanTasks.length) return sendJson(res, 404, {ok: false, error: 'Chat session not found'});
+              if (!linkOpsTasksForActor(orphanTasks, actor, {globalView, mode: 'read'}).length) {
+                return sendJson(res, 403, {ok: false, error: '该 legacy 会话任务属于其他 BI 账号或超出店铺范围'});
+              }
+            }
             const scoped = {
               ...current,
               tasks: current.tasks.filter(task => String(task?.chatSessionId || task?.chat?.sessionId || '') === sessionId || messageTaskIds.has(String(task?.id || ''))),
             };
-            return sendJson(res, 200, {ok: true, data: projectLinkOpsTaskStoreForClient(scoped, {limit})});
+            return sendJson(res, 200, {ok: true, data: projectLinkOpsTaskStoreForActor(scoped, actor, {limit, globalView})});
           }
-          return sendJson(res, 200, {ok: true, data: projectLinkOpsTaskStoreForClient(current, {limit})});
+          return sendJson(res, 200, {ok: true, data: projectLinkOpsTaskStoreForActor(current, actor, {limit, globalView})});
         }
         if (req.method === 'POST') {
           if (args.readOnly) {
@@ -7020,8 +8275,9 @@ async function main() {
             return sendJson(res, 403, actorGate);
           }
           let task;
+          let body;
           try {
-            const body = await readBodyJson(req);
+            body = await readBodyJson(req);
             task = buildLinkOpsTaskFromCommand(body, actor, req);
           } catch (err) {
             return sendJson(res, 400, {ok: false, error: err?.message || String(err || 'Invalid request')});
@@ -7031,13 +8287,38 @@ async function main() {
             await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-task-denied', actor, ...requestMeta(req), task: {stores: taskTargetStores(task), writeStores: taskWriteStores(task), sourceStores: taskSourceStores(task), commandLength: String(task.command || '').length}, denied});
             return sendJson(res, 403, denied);
           }
-          const current = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
+          const sourceDenied = requireReadStores(actor, taskSourceStores(task));
+          if (sourceDenied) {
+            await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-task-denied', actor, ...requestMeta(req), task: {stores: taskTargetStores(task), writeStores: taskWriteStores(task), sourceStores: taskSourceStores(task), commandLength: String(task.command || '').length}, denied: sourceDenied});
+            return sendJson(res, 403, sourceDenied);
+          }
+          if (task.chatSessionId) {
+            let sessionId;
+            try { sessionId = safeLinkOpsChatSessionId(task.chatSessionId); } catch (err) {
+              return sendJson(res, 400, {ok: false, error: err?.message || 'Invalid chat session id'});
+            }
+            const chatStore = normalizeLinkOpsChatStore(await readLinkOpsChatStore(args));
+            const sessionIdx = chatStore.sessions.findIndex(session => String(session?.id || '') === sessionId);
+            if (sessionIdx < 0) return sendJson(res, 404, {ok: false, error: 'Chat session not found'});
+            const sessionAccess = authorizeLinkOpsRecord(actor, chatStore.sessions[sessionIdx], {kind: 'session', mode: 'mutate', claimLegacy: true});
+            if (!sessionAccess.ok) {
+              await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-task-denied-session', actor, ...requestMeta(req), session: {id: sessionId}, denied: sessionAccess.denied});
+              return sendJson(res, 403, sessionAccess.denied);
+            }
+            task.chatSessionId = sessionId;
+            if (sessionAccess.claimedLegacy || sessionAccess.ownershipMigrated) {
+              const sessions = chatStore.sessions.slice();
+              sessions[sessionIdx] = sessionAccess.record;
+              await writeLinkOpsChatStore(args, {...chatStore, updatedAt: new Date().toISOString(), sessions});
+            }
+          }
+          const current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
           const next = {
             version: 1,
             updatedAt: new Date().toISOString(),
             tasks: [task, ...current.tasks].slice(0, 1000),
           };
-          await writeJsonFile(args.linkOpsTaskFile, next);
+          await writeLinkOpsTaskStore(args, next);
           await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'link-ops-task',
@@ -7054,7 +8335,7 @@ async function main() {
           });
           return sendJson(res, 200, {
             ok: true,
-            data: projectLinkOpsTaskStoreForClient(next, {limit: 500}),
+            data: projectLinkOpsTaskStoreForActor(next, actor, {limit: 500}),
             task: projectLinkOpsTaskForClient(task),
           });
         }
@@ -7073,19 +8354,23 @@ async function main() {
           } catch (err) {
             return sendJson(res, 400, {ok: false, error: err?.message || String(err || 'Invalid request')});
           }
-          const id = String(body.id || '').trim();
+          let id = String(body.id || '').trim();
           if (!id) return sendJson(res, 400, {ok: false, error: 'Missing task id'});
-          const current = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
+          try { id = safeTaskId(id); } catch (err) {
+            return sendJson(res, 400, {ok: false, error: err?.message || 'Invalid task id'});
+          }
+          const current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
           const idx = current.tasks.findIndex(t => String(t.id || '') === id);
           if (idx < 0) return sendJson(res, 404, {ok: false, error: 'Task not found'});
-          const denied = requireWriteStores(actor, taskWriteStores(current.tasks[idx]));
-          if (denied) {
-            await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-task-update-denied', actor, ...requestMeta(req), task: {id, stores: taskTargetStores(current.tasks[idx]), writeStores: taskWriteStores(current.tasks[idx]), sourceStores: taskSourceStores(current.tasks[idx])}, denied});
-            return sendJson(res, 403, denied);
+          const access = authorizeLinkOpsRecord(actor, current.tasks[idx], {kind: 'task', mode: 'mutate', claimLegacy: true});
+          if (!access.ok) {
+            await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-task-update-denied', actor, ...requestMeta(req), task: {id, stores: taskTargetStores(current.tasks[idx]), writeStores: taskWriteStores(current.tasks[idx]), sourceStores: taskSourceStores(current.tasks[idx])}, denied: access.denied});
+            return sendJson(res, 403, access.denied);
           }
+          current.tasks[idx] = access.record;
           let updated;
           try {
-            updated = patchLinkOpsTask(current.tasks[idx], body, actor, req);
+            updated = patchLinkOpsTask(access.record, body, actor, req);
           } catch (err) {
             const error = err?.message || String(err || 'Invalid patch');
             await appendAudit(args.auditFile, {
@@ -7108,7 +8393,7 @@ async function main() {
           const tasks = current.tasks.slice();
           tasks[idx] = updated;
           const next = {version: 1, updatedAt: new Date().toISOString(), tasks};
-          await writeJsonFile(args.linkOpsTaskFile, next);
+          await writeLinkOpsTaskStore(args, next);
           await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'link-ops-task-update',
@@ -7119,11 +8404,13 @@ async function main() {
               event: String(body.event || body.action || 'update').slice(0, 80),
               status: updated.status,
               progress: normalizeProgress(updated.progress, 0),
+              claimedLegacy: access.claimedLegacy,
+              ownershipMigrated: access.ownershipMigrated,
             },
           });
           return sendJson(res, 200, {
             ok: true,
-            data: projectLinkOpsTaskStoreForClient(next, {limit: 500}),
+            data: projectLinkOpsTaskStoreForActor(next, actor, {limit: 500}),
             task: projectLinkOpsTaskForClient(updated),
           });
         }
@@ -7136,11 +8423,21 @@ async function main() {
             await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-task-delete-denied', actor, ...requestMeta(req), denied: actorGate});
             return sendJson(res, 403, actorGate);
           }
-          const id = String(url.searchParams.get('id') || '').trim();
+          let id = String(url.searchParams.get('id') || '').trim();
           if (!id) return sendJson(res, 400, {ok: false, error: 'Missing task id'});
-          const current = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
-          const task = current.tasks.find(t => String(t.id || '') === id);
-          if (!task) return sendJson(res, 404, {ok: false, error: 'Task not found'});
+          try { id = safeTaskId(id); } catch (err) {
+            return sendJson(res, 400, {ok: false, error: err?.message || 'Invalid task id'});
+          }
+          const current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+          const taskIdx = current.tasks.findIndex(t => String(t.id || '') === id);
+          if (taskIdx < 0) return sendJson(res, 404, {ok: false, error: 'Task not found'});
+          const access = authorizeLinkOpsRecord(actor, current.tasks[taskIdx], {kind: 'task', mode: 'mutate', claimLegacy: true});
+          if (!access.ok) {
+            await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-task-delete-denied', actor, ...requestMeta(req), task: {id, stores: taskTargetStores(current.tasks[taskIdx]), writeStores: taskWriteStores(current.tasks[taskIdx]), sourceStores: taskSourceStores(current.tasks[taskIdx])}, denied: access.denied});
+            return sendJson(res, 403, access.denied);
+          }
+          const task = access.record;
+          current.tasks[taskIdx] = task;
           if (taskRequiresOwnerLifecycleResolve(task) && !isOwnerActor(actor)) {
             const deniedLifecycle = {
               ok: false,
@@ -7152,17 +8449,12 @@ async function main() {
             await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-task-delete-denied', actor, ...requestMeta(req), task: {id, stores: taskTargetStores(task), writeStores: taskWriteStores(task), sourceStores: taskSourceStores(task)}, denied: deniedLifecycle});
             return sendJson(res, 403, deniedLifecycle);
           }
-          const denied = requireWriteStores(actor, taskWriteStores(task));
-          if (denied) {
-            await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-task-delete-denied', actor, ...requestMeta(req), task: {id, stores: taskTargetStores(task), writeStores: taskWriteStores(task), sourceStores: taskSourceStores(task)}, denied});
-            return sendJson(res, 403, denied);
-          }
           const next = {
             version: 1,
             updatedAt: new Date().toISOString(),
             tasks: current.tasks.filter(t => String(t.id || '') !== id),
           };
-          await writeJsonFile(args.linkOpsTaskFile, next);
+          await writeLinkOpsTaskStore(args, next);
           let assetsDeleted = false;
           try {
             await removeLinkOpsTaskAssetDir(id, args);
@@ -7173,11 +8465,11 @@ async function main() {
             type: 'link-ops-task-delete',
             actor,
             ...requestMeta(req),
-            task: {id, status: task.status, commandLength: String(task.command || '').length, assetsDeleted},
+            task: {id, status: task.status, commandLength: String(task.command || '').length, assetsDeleted, claimedLegacy: access.claimedLegacy},
           });
           return sendJson(res, 200, {
             ok: true,
-            data: projectLinkOpsTaskStoreForClient(next, {limit: 500}),
+            data: projectLinkOpsTaskStoreForActor(next, actor, {limit: 500}),
             deleted: {id},
           });
         }
@@ -7216,24 +8508,27 @@ async function main() {
           } catch (err) {
             return sendJson(res, 400, {ok: false, error: err?.message || String(err || 'Invalid upload')});
           }
-          const current = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
+          const current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
           const taskRef = String(body.taskId || body.id || '').trim();
           let targetTask = null;
           if (taskRef) {
+            let foundTask;
             try {
-              targetTask = findLinkOpsTaskOrThrow(current, taskRef).task;
+              foundTask = findLinkOpsTaskOrThrow(current, taskRef);
             } catch (err) {
               const message = err?.message || String(err || 'Task not found');
               return sendJson(res, message === 'Invalid task id' ? 400 : 404, {ok: false, error: message});
             }
-            const denied = requireWriteStores(actor, taskWriteStores(targetTask));
-            if (denied) {
-              await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-assets-upload-denied', actor, ...requestMeta(req), task: {id: targetTask.id, stores: taskTargetStores(targetTask), writeStores: taskWriteStores(targetTask), sourceStores: taskSourceStores(targetTask)}, denied});
-              return sendJson(res, 403, denied);
+            const access = authorizeLinkOpsRecord(actor, foundTask.task, {kind: 'task', mode: 'mutate', claimLegacy: true});
+            if (!access.ok) {
+              await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-assets-upload-denied', actor, ...requestMeta(req), task: {id: foundTask.task.id, stores: taskTargetStores(foundTask.task), writeStores: taskWriteStores(foundTask.task), sourceStores: taskSourceStores(foundTask.task)}, denied: access.denied});
+              return sendJson(res, 403, access.denied);
             }
+            targetTask = access.record;
+            current.tasks[foundTask.idx] = targetTask;
           }
 
-          const chatCurrent = normalizeLinkOpsChatStore(await readJsonFile(args.linkOpsChatFile, {version: 1, updatedAt: null, sessions: []}));
+          const chatCurrent = normalizeLinkOpsChatStore(await readLinkOpsChatStore(args));
           let sessionId = String(body.sessionId || body.chatSessionId || targetTask?.chatSessionId || targetTask?.chat?.sessionId || targetTask?.targets?.chatSessionId || '').trim();
           let chatSession = null;
           let chatCreated = false;
@@ -7241,8 +8536,15 @@ async function main() {
             try { sessionId = safeLinkOpsChatSessionId(sessionId); } catch (err) {
               return sendJson(res, 400, {ok: false, error: err?.message || 'Invalid chat session id'});
             }
-            chatSession = chatCurrent.sessions.find(s => String(s.id || '') === sessionId) || null;
-            if (!chatSession) return sendJson(res, 404, {ok: false, error: 'Chat session not found'});
+            const sessionIdx = chatCurrent.sessions.findIndex(s => String(s.id || '') === sessionId);
+            if (sessionIdx < 0) return sendJson(res, 404, {ok: false, error: 'Chat session not found'});
+            const sessionAccess = authorizeLinkOpsRecord(actor, chatCurrent.sessions[sessionIdx], {kind: 'session', mode: 'mutate', claimLegacy: true});
+            if (!sessionAccess.ok) {
+              await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-assets-upload-denied', actor, ...requestMeta(req), session: {id: sessionId}, denied: sessionAccess.denied});
+              return sendJson(res, 403, sessionAccess.denied);
+            }
+            chatSession = sessionAccess.record;
+            chatCurrent.sessions[sessionIdx] = chatSession;
           } else {
             chatSession = buildUploadChatSession(actor, req);
             sessionId = chatSession.id;
@@ -7281,7 +8583,7 @@ async function main() {
               } catch (err) {
                 uploadCheckAnswer = `我已收到你上传的资料，但重新检查时没有跑完：${String(err?.message || err || 'unknown error')}。你可以继续在聊天里补充或让我重试。`;
               }
-              await writeJsonFile(args.linkOpsTaskFile, responseStore);
+              await writeLinkOpsTaskStore(args, responseStore);
             } else {
               const stored = await storeLinkOpsUploadedFiles({
                 bucketId: `session-${sessionId}`,
@@ -7315,7 +8617,7 @@ ${uploadCheckAnswer}` : `
             ? [chatSession, ...chatCurrent.sessions].slice(0, 300)
             : chatCurrent.sessions.map(s => String(s.id || '') === chatSession.id ? chatSession : s);
           const nextChatStore = {version: 1, updatedAt: new Date().toISOString(), memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions};
-          await writeJsonFile(args.linkOpsChatFile, nextChatStore);
+          await writeLinkOpsChatStore(args, nextChatStore);
           const projectedChatSession = projectLinkOpsChatSessionForClient(chatSession);
           await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
@@ -7332,7 +8634,7 @@ ${uploadCheckAnswer}` : `
           });
           return sendJson(res, 200, {
             ok: true,
-            data: projectLinkOpsTaskStoreForClient(responseStore, {limit: 500}),
+            data: projectLinkOpsTaskStoreForActor(responseStore, actor, {limit: 500}),
             task: responseTask ? projectLinkOpsTaskForClient(responseTask) : null,
             assets: result.assets.map(projectLinkOpsAssetForClient).filter(Boolean),
             session: projectedChatSession,
@@ -7350,26 +8652,30 @@ ${uploadCheckAnswer}` : `
           }
           const body = await readBodyJson(req, 256 * 1024).catch(err => ({_error: err?.message || String(err)}));
           if (body._error) return sendJson(res, 400, {ok: false, error: body._error});
-          const id = String(body.id || body.taskId || '').trim();
+          let id = String(body.id || body.taskId || '').trim();
           if (!id) return sendJson(res, 400, {ok: false, error: 'Missing task id'});
-          const current = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
+          try { id = safeTaskId(id); } catch (err) {
+            return sendJson(res, 400, {ok: false, error: err?.message || 'Invalid task id'});
+          }
+          const current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
           const idx = current.tasks.findIndex(t => String(t.id || '') === id);
           if (idx < 0) return sendJson(res, 404, {ok: false, error: 'Task not found'});
-          if (taskRequiresOwnerLifecycleResolve(current.tasks[idx])) {
+          const access = authorizeLinkOpsRecord(actor, current.tasks[idx], {kind: 'task', mode: 'mutate', claimLegacy: true});
+          if (!access.ok) {
+            await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-execute-denied', actor, ...requestMeta(req), task: {id, stores: taskTargetStores(current.tasks[idx]), writeStores: taskWriteStores(current.tasks[idx]), sourceStores: taskSourceStores(current.tasks[idx])}, denied: access.denied});
+            return sendJson(res, 403, access.denied);
+          }
+          current.tasks[idx] = access.record;
+          if (taskRequiresOwnerLifecycleResolve(access.record)) {
             const deniedLifecycle = {
               ok: false,
               error: '该任务已进入提交后待回读/需人工处理状态，禁止重新系统检查或执行；请由全店管理账号人工核销为完成或归档。',
               taskId: id,
-              status: current.tasks[idx].status || '',
-              lifecycleStatus: current.tasks[idx].lifecycle?.lifecycleStatus || current.tasks[idx].lifecycle?.status || '',
+              status: access.record.status || '',
+              lifecycleStatus: access.record.lifecycle?.lifecycleStatus || access.record.lifecycle?.status || '',
             };
-            await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-execute-denied', actor, ...requestMeta(req), task: {id, stores: taskTargetStores(current.tasks[idx]), writeStores: taskWriteStores(current.tasks[idx]), sourceStores: taskSourceStores(current.tasks[idx])}, denied: deniedLifecycle});
+            await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-execute-denied', actor, ...requestMeta(req), task: {id, stores: taskTargetStores(access.record), writeStores: taskWriteStores(access.record), sourceStores: taskSourceStores(access.record)}, denied: deniedLifecycle});
             return sendJson(res, 409, deniedLifecycle);
-          }
-          const denied = requireWriteStores(actor, taskWriteStores(current.tasks[idx]));
-          if (denied) {
-            await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-execute-denied', actor, ...requestMeta(req), task: {id, stores: taskTargetStores(current.tasks[idx]), writeStores: taskWriteStores(current.tasks[idx]), sourceStores: taskSourceStores(current.tasks[idx])}, denied});
-            return sendJson(res, 403, denied);
           }
           if (linkOpsExecutionLocks.has(id)) {
             const deniedLock = {ok: false, error: '该自动运营任务正在执行/系统检查中，请等待当前请求结束后再重试', taskId: id};
@@ -7378,11 +8684,11 @@ ${uploadCheckAnswer}` : `
           }
           linkOpsExecutionLocks.add(id);
           try {
-            const updated = await startControlledLinkOpsExecution(current.tasks[idx], actor, req, args, body);
+            const updated = await startControlledLinkOpsExecution(access.record, actor, req, args, body);
             const tasks = current.tasks.slice();
             tasks[idx] = updated;
             const next = {version: 1, updatedAt: new Date().toISOString(), tasks};
-            await writeJsonFile(args.linkOpsTaskFile, next);
+            await writeLinkOpsTaskStore(args, next);
             await appendAudit(args.auditFile, {
               at: new Date().toISOString(),
               type: 'link-ops-execute',
@@ -7406,7 +8712,7 @@ ${uploadCheckAnswer}` : `
             });
             return sendJson(res, 200, {
               ok: true,
-              data: projectLinkOpsTaskStoreForClient(next, {limit: 500}),
+              data: projectLinkOpsTaskStoreForActor(next, actor, {limit: 500}),
               task: projectLinkOpsTaskForClient(updated),
               execution: projectLinkOpsExecutionForClient(updated.execution),
             });
@@ -7418,25 +8724,72 @@ ${uploadCheckAnswer}` : `
       }
       if (url.pathname === '/api/link-ops-audit') {
         if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
-        const taskId = String(url.searchParams.get('taskId') || url.searchParams.get('id') || '').trim();
+        let taskId = String(url.searchParams.get('taskId') || url.searchParams.get('id') || '').trim();
         const limit = Math.max(1, Math.min(100, Number(url.searchParams.get('limit') || 40)));
         if (taskId) {
-          const current = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
+          try { taskId = safeTaskId(taskId); } catch (err) {
+            return sendJson(res, 400, {ok: false, error: err?.message || 'Invalid task id'});
+          }
+          const current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
           const task = current.tasks.find(t => String(t.id || '') === taskId);
           if (!task) return sendJson(res, 404, {ok: false, error: 'Task not found'});
-          const denied = requireWriteStores(actor, taskWriteStores(task));
-          if (denied) return sendJson(res, 403, denied);
-        } else if (!canWriteAllStores(actor)) {
+          const access = authorizeLinkOpsRecord(actor, task, {kind: 'task', mode: 'read', globalView: actorHasGlobalOpsView(actor)});
+          if (!access.ok) return sendJson(res, 403, access.denied);
+        } else if (!actorHasGlobalOpsView(actor)) {
           return sendJson(res, 403, {ok: false, error: '只有全店管理账号可以查看全局自动运营记录'});
         }
         const entries = await readLinkOpsAuditEntries(args.auditFile, {taskId, limit});
         return sendJson(res, 200, {ok: true, taskId, entries});
       }
+      if (url.pathname === '/api/link-ops-jobs') {
+        if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        const globalView = requestedGlobalOpsView(url);
+        if (globalView && !actorHasGlobalOpsView(actor)) {
+          return sendJson(res, 403, {ok: false, error: '只有 owner/admin 可以使用 scope=all 查看全局后台作业'});
+        }
+        const status = String(url.searchParams.get('status') || '').trim();
+        if (status && !['queued', 'running', 'succeeded', 'failed', 'uncertain_write'].includes(status)) {
+          return sendJson(res, 400, {ok: false, error: 'Invalid job status'});
+        }
+        const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit') || 80)));
+        const jobs = await linkOpsStoreGateway.listJobs({
+          status,
+          ownerUser: globalView ? '' : actorUser(actor, req),
+          limit,
+        });
+        return sendJson(res, 200, {
+          ok: true,
+          data: jobs.filter(job => actorCanReadLinkOpsJob(actor, job, {globalView})).map(publicLinkOpsJob),
+          worker: {
+            enabled: Boolean(linkOpsJobWorker),
+            running: Boolean(linkOpsJobWorker?.isRunning()),
+          },
+        });
+      }
+      {
+        const match = /^\/api\/link-ops-jobs\/([^/]+)$/.exec(url.pathname);
+        if (match) {
+          if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+          const jobId = decodeURIComponent(match[1]);
+          if (!/^[A-Za-z0-9._:-]{1,180}$/.test(jobId)) return sendJson(res, 400, {ok: false, error: 'Invalid job id'});
+          const job = await linkOpsStoreGateway.getJob(jobId);
+          if (!job) return sendJson(res, 404, {ok: false, error: 'Job not found'});
+          const globalView = requestedGlobalOpsView(url);
+          if (!actorCanReadLinkOpsJob(actor, job, {globalView})) {
+            return sendJson(res, 403, {ok: false, error: '该后台作业属于其他 BI 账号'});
+          }
+          return sendJson(res, 200, {ok: true, data: publicLinkOpsJob(job)});
+        }
+      }
       if (url.pathname === '/api/link-ops-chats') {
         if (req.method === 'GET') {
-          const current = normalizeLinkOpsChatStore(await readJsonFile(args.linkOpsChatFile, {version: 1, updatedAt: null, sessions: []}));
+          const current = normalizeLinkOpsChatStore(await readLinkOpsChatStore(args));
           const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit') || 80)));
-          return sendJson(res, 200, {ok: true, data: projectLinkOpsChatStoreForClient(current, {limit})});
+          const globalView = requestedGlobalOpsView(url);
+          if (globalView && !actorHasGlobalOpsView(actor)) {
+            return sendJson(res, 403, {ok: false, error: '只有 owner/admin 可以使用 scope=all 查看全局自动运营会话'});
+          }
+          return sendJson(res, 200, {ok: true, data: projectLinkOpsChatStoreForActor(current, actor, {limit, globalView})});
         }
         if (req.method === 'POST') {
           if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
@@ -7451,30 +8804,73 @@ ${uploadCheckAnswer}` : `
           } catch (err) {
             return sendJson(res, 400, {ok: false, error: err?.message || String(err || 'Invalid request')});
           }
-          const current = normalizeLinkOpsChatStore(await readJsonFile(args.linkOpsChatFile, {version: 1, updatedAt: null, sessions: []}));
+          const current = normalizeLinkOpsChatStore(await readLinkOpsChatStore(args));
           const sessionId = String(body.sessionId || body.id || '').trim();
           let session;
           let created = false;
           let autoTask = null;
           let taskData = null;
+          let intentPlanJob = null;
+          let shouldEnqueueIntentPlan = false;
+          let userMessage = '';
+          let ownerKnowledgeCapture = null;
           try {
-            const userMessage = String(body.message || body.command || body.text || '').trim();
+            userMessage = String(body.message || body.command || body.text || '').trim();
             if (sessionId) {
-              const existing = current.sessions.find(s => String(s.id || '') === sessionId);
-              if (!existing) return sendJson(res, 404, {ok: false, error: 'Chat session not found'});
-              session = appendChatMessage(existing, body, actor, req);
+              let safeSessionId;
+              try { safeSessionId = safeLinkOpsChatSessionId(sessionId); } catch (err) {
+                return sendJson(res, 400, {ok: false, error: err?.message || 'Invalid chat session id'});
+              }
+              const existingIdx = current.sessions.findIndex(s => String(s.id || '') === safeSessionId);
+              if (existingIdx < 0) return sendJson(res, 404, {ok: false, error: 'Chat session not found'});
+              const sessionAccess = authorizeLinkOpsRecord(actor, current.sessions[existingIdx], {kind: 'session', mode: 'mutate', claimLegacy: true});
+              if (!sessionAccess.ok) {
+                await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-chat-denied', actor, ...requestMeta(req), session: {id: safeSessionId}, denied: sessionAccess.denied});
+                return sendJson(res, 403, sessionAccess.denied);
+              }
+              current.sessions[existingIdx] = sessionAccess.record;
+              session = appendChatMessage(sessionAccess.record, body, actor, req);
             } else {
               session = buildChatSessionFromMessage(body, actor, req);
               created = true;
             }
+            const sessionStoreDenied = requireReadStores(actor, linkOpsSessionStores(session));
+            if (sessionStoreDenied) {
+              await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-chat-denied', actor, ...requestMeta(req), session: {id: session.id, created}, denied: sessionStoreDenied});
+              return sendJson(res, 403, sessionStoreDenied);
+            }
+            // PostgreSQL enforces task.chat_session_id -> session.id. Persist a
+            // brand-new chat before any auto-task is written, then update the
+            // same session with assistant/preflight messages at the end.
+            if (created && linkOpsStoreGateway.mode === 'postgres') {
+              const bootstrapSessions = [session, ...current.sessions].slice(0, 300);
+              await writeLinkOpsChatStore(args, {
+                version: 1,
+                updatedAt: new Date().toISOString(),
+                memoryPolicy: CLOUD_AI_MEMORY_POLICY,
+                sessions: bootstrapSessions,
+              });
+              await appendAudit(args.auditFile, {
+                at: new Date().toISOString(),
+                type: 'link-ops-chat-session-bootstrap',
+                actor,
+                ...requestMeta(req),
+                session: {id: session.id, created: true},
+              });
+            }
             let attributeContextTask = null;
             try {
-              const contextTaskData = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
-              attributeContextTask = findReusableChatTask(contextTaskData.tasks, session.id);
+              const contextTaskData = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+              attributeContextTask = findReusableChatTask(linkOpsTasksForActor(contextTaskData.tasks, actor, {mode: 'mutate'}), session.id);
             } catch {}
             const conversationTargets = inferTargetsFromChatSession(session);
             const userMessageTargets = inferLinkOpsTargets(userMessage, {attributeContextTask});
             const userAttributeOverrides = normalizeLinkOpsTargetSet(userMessageTargets).attributeOverrides;
+            try {
+              ownerKnowledgeCapture = await captureOwnerKnowledgeFromBiMessage({actor, userMessage, session, args, req});
+            } catch (error) {
+              ownerKnowledgeCapture = {captured: false, error};
+            }
             const explicitActionCommand = isLinkOpsActionCommand(userMessage);
             const confirmExecuteCommand = isConfirmExecuteChatCommand(userMessage);
             const shouldAutoTask = explicitActionCommand || (confirmExecuteCommand && hasActionableLinkOpsContext(session));
@@ -7495,7 +8891,7 @@ ${uploadCheckAnswer}` : `
             let codexResumed = false;
             let naturalExecutionHandled = false;
             if (confirmExecuteCommand && !explicitActionCommand) {
-              taskData = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
+              taskData = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
               const executionResult = await runChatNaturalLanguageExecutionIfPossible({
                 session,
                 userMessage,
@@ -7513,6 +8909,12 @@ ${uploadCheckAnswer}` : `
             if (!naturalExecutionHandled && shouldAskOpsAgent) {
               const rememberedMessages = recentCloudAiMessages(session.messages);
               const conversation = rememberedMessages.map(m => `${m.role === 'assistant' ? '智能体' : '用户'}：${m.content}`).join('\n');
+              const ownerKnowledgePrompt = await ownerKnowledgeService.promptContext({
+                question: userMessage,
+                stores: conversationTargets.stores,
+                productRefs: conversationTargets.productRefs,
+                targets: conversationTargets,
+              }, {limit: 12});
               const extraRules = shouldAutoTask
                 ? [
                     confirmExecuteCommand
@@ -7531,6 +8933,7 @@ ${uploadCheckAnswer}` : `
                 '明确的 SHEIN 链接/商品运营写动作（改标题、换图、补链接、上架/下架、报活动等）只能在同一会话里受控处理和资料检查，不允许绕过中台静默写后台。',
                 '如果信息还不够，先问需要补充什么；如果已经可以形成任务，请给出清晰的下一步和风险边界。',
                 '遇到“这个链接/这个品/2,223 这个”等指代时，必须结合上文已出现的店铺、货号、SKC、曝光/访客/销量数字重新定位；不能因为最新一句没写全就否定上轮数据。',
+                '负责人已发布的长期规则只读生效；其他账号和当前模型都不得把自己的习惯反向写成长期规则。与本轮相关的负责人规则：\n' + ownerKnowledgePrompt.text,
                 '会话已识别目标：' + summarizeLinkOpsTargets(conversationTargets),
                 '会话已上传资料：' + summarizeLinkOpsSessionAssets(session),
                 '会话目标执行能力：\n' + buildLinkOpsCapabilitySummary(conversationTargets),
@@ -7538,16 +8941,40 @@ ${uploadCheckAnswer}` : `
                 rememberedMessages.length ? conversation : '当前没有可继承的短期上下文，请按最新用户消息独立处理。',
               ].join('\n\n');
               const startedAt = Date.now();
-              const result = await askReadonlyOpsAgent(question, {codexSessionId: session.codexSessionId || ''});
+              let profile;
+              try {
+                profile = requestedAgentProfile(actor, body.agentProfile || body.profile || '', {
+                  mode: 'query',
+                  question: userMessage,
+                  stores: conversationTargets.stores,
+                });
+              } catch (err) {
+                const failure = agentErrorHttpDetails(err);
+                return sendJson(res, failure.status, failure.body, failure.headers);
+              }
+              let result;
+              try {
+                result = await opsAgentGovernor.run(actorOpsKey(actor), () => askReadonlyOpsAgent(question, {
+                  codexSessionId: session.codexSessionId || '',
+                  profile,
+                  routingText: userMessage,
+                }), {tier: profile.name, sessionId: session.id, kind: 'chat'});
+              } catch (err) {
+                const failure = agentErrorHttpDetails(err);
+                await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'ops-agent-chat-failed', actor, ...requestMeta(req), session: {id: session.id}, profile: modelProfilePublicSummary(profile), errorCode: failure.body.code});
+                return sendJson(res, failure.status, failure.body, failure.headers);
+              }
               agentDurationMs = Date.now() - startedAt;
               agentAnswer = result.answer;
               codexResumed = Boolean(result.codexResumed);
               if (result.codexSessionId) session.codexSessionId = result.codexSessionId;
+              session.agentProfile = result.profile;
             }
             if (!naturalExecutionHandled && shouldAutoTask) {
-              const taskStore = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
-              const duplicate = findDuplicateAutoTask(taskStore.tasks, session.id, effectiveTaskCommand);
-              const reusable = duplicate || findReusableChatTask(taskStore.tasks, session.id);
+              const taskStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+              const actorTasks = linkOpsTasksForActor(taskStore.tasks, actor, {mode: 'mutate'});
+              const duplicate = findDuplicateAutoTask(actorTasks, session.id, effectiveTaskCommand);
+              const reusable = duplicate || findReusableChatTask(actorTasks, session.id);
               if (duplicate) {
                 autoTask = duplicate;
                 const denied = requireWriteStores(actor, taskWriteStores(autoTask));
@@ -7576,7 +9003,7 @@ ${uploadCheckAnswer}` : `
                 const tasks = taskStore.tasks.slice();
                 if (idx >= 0) tasks[idx] = autoTask;
                 taskData = {version: 1, updatedAt: new Date().toISOString(), tasks};
-                await writeJsonFile(args.linkOpsTaskFile, taskData);
+                await writeLinkOpsTaskStore(args, taskData);
                 await appendAudit(args.auditFile, {
                   at: new Date().toISOString(),
                   type: 'link-ops-chat-update-task',
@@ -7630,7 +9057,7 @@ ${uploadCheckAnswer}` : `
                   updatedAt: new Date().toISOString(),
                   tasks: [autoTask, ...taskStore.tasks].slice(0, 1000),
                 };
-                await writeJsonFile(args.linkOpsTaskFile, taskData);
+                await writeLinkOpsTaskStore(args, taskData);
                 await appendAudit(args.auditFile, {
                   at: new Date().toISOString(),
                   type: 'link-ops-chat-auto-task',
@@ -7651,7 +9078,13 @@ ${uploadCheckAnswer}` : `
               if (taskWithSessionAssets !== autoTask) {
                 autoTask = taskWithSessionAssets;
                 taskData = replaceLinkOpsTaskInStore(taskData, autoTask);
-                await writeJsonFile(args.linkOpsTaskFile, taskData);
+                await writeLinkOpsTaskStore(args, taskData);
+              }
+              const knowledgeBinding = await bindOwnerKnowledgeToTask(autoTask, args, userMessage);
+              if (knowledgeBinding.changed) {
+                autoTask = knowledgeBinding.task;
+                taskData = replaceLinkOpsTaskInStore(taskData, autoTask);
+                await writeLinkOpsTaskStore(args, taskData);
               }
               const checkResult = await runImmediateChatSystemCheckIfPossible({
                 task: autoTask,
@@ -7668,10 +9101,14 @@ ${uploadCheckAnswer}` : `
                 : '收到，我已开始处理这件事。系统会在这个会话里说明选中的对象、资料缺口和下一步。';
               const humanCheckAnswer = checkResult.answer || autoTaskNote;
               agentAnswer = agentAnswer ? `${agentAnswer}\n\n${humanCheckAnswer}` : humanCheckAnswer;
+              shouldEnqueueIntentPlan = Boolean(intentPlannerEnabled && autoTask?.id && explicitActionCommand);
+              if (shouldEnqueueIntentPlan) {
+                agentAnswer += '\n\n我已把结构化意图检查放到后台作业中；它只做辅助理解和风险提示，不会改动已经锁定的店铺、商品、参数或预演事实，更不会替你授权或直接提交 SHEIN。';
+              }
             }
             if (!naturalExecutionHandled && !shouldAutoTask && userAttributeOverrides.length) {
-              const taskStore = normalizeLinkOpsTaskStore(await readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []}));
-              const reusable = findReusableChatTask(taskStore.tasks, session.id);
+              const taskStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+              const reusable = findReusableChatTask(linkOpsTasksForActor(taskStore.tasks, actor, {mode: 'mutate'}), session.id);
               if (reusable) {
                 const denied = requireWriteStores(actor, taskWriteStores(reusable));
                 if (denied) {
@@ -7716,7 +9153,7 @@ ${uploadCheckAnswer}` : `
                   const tasks = taskStore.tasks.slice();
                   if (idx >= 0) tasks[idx] = updatedTask;
                   taskData = {version: 1, updatedAt: nowForOverride, tasks};
-                  await writeJsonFile(args.linkOpsTaskFile, taskData);
+                  await writeLinkOpsTaskStore(args, taskData);
                   autoTask = updatedTask;
                   await appendAudit(args.auditFile, {
                     at: nowForOverride,
@@ -7751,6 +9188,7 @@ ${uploadCheckAnswer}` : `
                 durationMs: agentDurationMs,
                 codexSessionId: session.codexSessionId || '',
                 codexResumed,
+                agentProfile: session.agentProfile || null,
                 autoTaskId: autoTask?.id || '',
               });
             }
@@ -7761,7 +9199,51 @@ ${uploadCheckAnswer}` : `
             ? [session, ...current.sessions].slice(0, 300)
             : current.sessions.map(s => String(s.id || '') === session.id ? session : s);
           const next = {version: 1, updatedAt: new Date().toISOString(), memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions};
-          await writeJsonFile(args.linkOpsChatFile, next);
+          await writeLinkOpsChatStore(args, next);
+          if (ownerKnowledgeCapture?.captured) {
+            await appendAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'owner-knowledge-bi-message-captured',
+              actor,
+              ...requestMeta(req),
+              session: {id: session.id},
+              durable: ownerKnowledgeCapture.durable,
+              result: {count: ownerKnowledgeCapture.result.results.length, active: ownerKnowledgeCapture.result.results.filter(row => row.activation === 'active').length},
+            });
+          } else if (ownerKnowledgeCapture?.error) {
+            await appendAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'owner-knowledge-bi-message-capture-failed',
+              actor,
+              ...requestMeta(req),
+              session: {id: session.id},
+              error: String(ownerKnowledgeCapture.error?.message || ownerKnowledgeCapture.error).slice(0, 500),
+            });
+          }
+          if (shouldEnqueueIntentPlan && autoTask) {
+            try {
+              intentPlanJob = await enqueueIntentPlanJob({task: autoTask, session, message: userMessage, actor, req});
+              await appendAudit(args.auditFile, {
+                at: new Date().toISOString(),
+                type: 'link-ops-intent-plan-queued',
+                actor,
+                ...requestMeta(req),
+                session: {id: session.id},
+                task: {id: autoTask.id},
+                job: publicLinkOpsJob(intentPlanJob),
+              });
+            } catch (error) {
+              await appendAudit(args.auditFile, {
+                at: new Date().toISOString(),
+                type: 'link-ops-intent-plan-queue-failed',
+                actor,
+                ...requestMeta(req),
+                session: {id: session.id},
+                task: {id: autoTask.id},
+                error: String(error?.message || error).slice(0, 500),
+              });
+            }
+          }
           await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'link-ops-chat',
@@ -7771,10 +9253,11 @@ ${uploadCheckAnswer}` : `
           });
           return sendJson(res, 200, {
             ok: true,
-            data: projectLinkOpsChatStoreForClient(next, {limit: 300}),
+            data: projectLinkOpsChatStoreForActor(next, actor, {limit: 300}),
             session: projectLinkOpsChatSessionForClient(session),
             autoTask: autoTask ? projectLinkOpsTaskForClient(autoTask) : null,
-            taskData: taskData ? projectLinkOpsTaskStoreForClient(taskData, {limit: 500}) : null,
+            job: publicLinkOpsJob(intentPlanJob),
+            taskData: taskData ? projectLinkOpsTaskStoreForActor(taskData, actor, {limit: 500}) : null,
           });
         }
         if (req.method === 'PATCH') {
@@ -7786,35 +9269,65 @@ ${uploadCheckAnswer}` : `
           }
           const body = await readBodyJson(req, 256 * 1024).catch(err => ({_error: err?.message || String(err)}));
           if (body._error) return sendJson(res, 400, {ok: false, error: body._error});
-          const id = String(body.id || body.sessionId || '').trim();
+          let id = String(body.id || body.sessionId || '').trim();
           if (!id) return sendJson(res, 400, {ok: false, error: 'Missing session id'});
-          const current = normalizeLinkOpsChatStore(await readJsonFile(args.linkOpsChatFile, {version: 1, updatedAt: null, sessions: []}));
+          try { id = safeLinkOpsChatSessionId(id); } catch (err) {
+            return sendJson(res, 400, {ok: false, error: err?.message || 'Invalid chat session id'});
+          }
+          const current = normalizeLinkOpsChatStore(await readLinkOpsChatStore(args));
           const idx = current.sessions.findIndex(s => String(s.id || '') === id);
           if (idx < 0) return sendJson(res, 404, {ok: false, error: 'Chat session not found'});
+          const access = authorizeLinkOpsRecord(actor, current.sessions[idx], {kind: 'session', mode: 'mutate', claimLegacy: true});
+          if (!access.ok) {
+            await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-chat-update-denied', actor, ...requestMeta(req), session: {id}, denied: access.denied});
+            return sendJson(res, 403, access.denied);
+          }
           const session = {
-            ...current.sessions[idx],
-            title: typeof body.title === 'string' ? body.title.trim().slice(0, 100) : current.sessions[idx].title,
-            autoTitle: typeof body.title === 'string' ? false : current.sessions[idx].autoTitle,
-            status: typeof body.status === 'string' ? body.status.trim().slice(0, 40) : current.sessions[idx].status,
+            ...access.record,
+            title: typeof body.title === 'string' ? body.title.trim().slice(0, 100) : access.record.title,
+            autoTitle: typeof body.title === 'string' ? false : access.record.autoTitle,
+            status: typeof body.status === 'string' ? body.status.trim().slice(0, 40) : access.record.status,
             memoryPolicy: CLOUD_AI_MEMORY_POLICY,
             updatedAt: new Date().toISOString(),
           };
           const sessions = current.sessions.slice();
           sessions[idx] = session;
           const next = {version: 1, updatedAt: new Date().toISOString(), memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions};
-          await writeJsonFile(args.linkOpsChatFile, next);
+          await writeLinkOpsChatStore(args, next);
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'link-ops-chat-update',
+            actor,
+            ...requestMeta(req),
+            session: {id, claimedLegacy: access.claimedLegacy, ownershipMigrated: access.ownershipMigrated, status: session.status || ''},
+          });
           return sendJson(res, 200, {
             ok: true,
-            data: projectLinkOpsChatStoreForClient(next, {limit: 300}),
+            data: projectLinkOpsChatStoreForActor(next, actor, {limit: 300}),
             session: projectLinkOpsChatSessionForClient(session),
           });
         }
         if (req.method === 'DELETE') {
           if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
-          const id = String(url.searchParams.get('id') || '').trim();
+          const actorGate = requireConcreteOperatorActor(actor);
+          if (actorGate) {
+            await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-chat-delete-denied', actor, ...requestMeta(req), denied: actorGate});
+            return sendJson(res, 403, actorGate);
+          }
+          let id = String(url.searchParams.get('id') || '').trim();
           if (!id) return sendJson(res, 400, {ok: false, error: 'Missing session id'});
-          const current = normalizeLinkOpsChatStore(await readJsonFile(args.linkOpsChatFile, {version: 1, updatedAt: null, sessions: []}));
-          const deletedSession = current.sessions.find(s => String(s.id || '') === id) || null;
+          try { id = safeLinkOpsChatSessionId(id); } catch (err) {
+            return sendJson(res, 400, {ok: false, error: err?.message || 'Invalid chat session id'});
+          }
+          const current = normalizeLinkOpsChatStore(await readLinkOpsChatStore(args));
+          const sessionIdx = current.sessions.findIndex(s => String(s.id || '') === id);
+          if (sessionIdx < 0) return sendJson(res, 404, {ok: false, error: 'Chat session not found'});
+          const access = authorizeLinkOpsRecord(actor, current.sessions[sessionIdx], {kind: 'session', mode: 'mutate', claimLegacy: true});
+          if (!access.ok) {
+            await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-chat-delete-denied', actor, ...requestMeta(req), session: {id}, denied: access.denied});
+            return sendJson(res, 403, access.denied);
+          }
+          const deletedSession = access.record;
           let codexSessionDelete = {ok: true, skipped: true, reason: 'no_codex_session_id', deletedFiles: []};
           if (deletedSession?.codexSessionId) {
             try {
@@ -7829,7 +9342,7 @@ ${uploadCheckAnswer}` : `
             }
           }
           const next = {version: 1, updatedAt: new Date().toISOString(), memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions: current.sessions.filter(s => String(s.id || '') !== id)};
-          await writeJsonFile(args.linkOpsChatFile, next);
+          await writeLinkOpsChatStore(args, next);
           await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'link-ops-chat-delete',
@@ -7845,7 +9358,7 @@ ${uploadCheckAnswer}` : `
           });
           return sendJson(res, 200, {
             ok: true,
-            data: projectLinkOpsChatStoreForClient(next, {limit: 300}),
+            data: projectLinkOpsChatStoreForActor(next, actor, {limit: 300}),
             deleted: {
               id,
               existed: Boolean(deletedSession),
@@ -7873,7 +9386,11 @@ ${uploadCheckAnswer}` : `
           const question = String(body.question || body.command || body.text || '').trim();
           const startedAt = Date.now();
           try {
-            const result = await askReadonlyOpsAgent(question);
+            const profile = requestedAgentProfile(actor, body.profile || body.agentProfile || '', {mode: 'query', question});
+            const result = await opsAgentGovernor.run(actorOpsKey(actor), () => askReadonlyOpsAgent(question, {
+              profile,
+              routingText: question,
+            }), {tier: profile.name, kind: 'ask'});
             await appendAudit(args.auditFile, {
               at: new Date().toISOString(),
               type: 'ops-agent-ask',
@@ -7882,6 +9399,7 @@ ${uploadCheckAnswer}` : `
               questionPreview: question.slice(0, 240),
               answerLength: result.answer.length,
               durationMs: Date.now() - startedAt,
+              profile: result.profile,
               ok: true,
             });
             return sendJson(res, 200, {
@@ -7889,6 +9407,7 @@ ${uploadCheckAnswer}` : `
               mode: 'bi-ops-chat',
               answer: result.answer,
               durationMs: Date.now() - startedAt,
+              profile: result.profile,
             });
           } catch (err) {
             await appendAudit(args.auditFile, {
@@ -7901,7 +9420,8 @@ ${uploadCheckAnswer}` : `
               ok: false,
               error: String(err?.message || err).slice(0, 500),
             });
-            return sendJson(res, 500, {ok: false, error: err?.message || String(err || 'Ops agent failed')});
+            const failure = agentErrorHttpDetails(err);
+            return sendJson(res, failure.status, failure.body, failure.headers);
           }
         }
         return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
@@ -7932,7 +9452,14 @@ ${uploadCheckAnswer}` : `
       const data = await fs.readFile(file);
       send(res, 200, data, {'Content-Type': types[ext] || 'application/octet-stream'});
     } catch (err) {
-      send(res, 500, `Server error: ${err.message || err}`, {'Content-Type': 'text/plain; charset=utf-8'});
+      const storageFailure = linkOpsRepositoryHttpDetails(err);
+      if (storageFailure) {
+        return sendJson(res, storageFailure.status, storageFailure.body);
+      }
+      if (String(req.url || '').startsWith('/api/')) {
+        return sendJson(res, 500, {ok: false, error: 'Server error'});
+      }
+      send(res, 500, 'Server error', {'Content-Type': 'text/plain; charset=utf-8'});
     }
   };
 
@@ -7960,6 +9487,19 @@ ${uploadCheckAnswer}` : `
   });
 
   startBiPortalCoreWarmupWatcher(args, root, {allowGenerate: allowGenerateSections});
+  linkOpsJobWorker?.start();
+
+  let shuttingDown = false;
+  const shutdown = async signal => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(JSON.stringify({ok: true, event: 'shutdown', signal, time: new Date().toISOString()}));
+    await linkOpsJobWorker?.stop();
+    await new Promise(resolve => server.close(resolve));
+    await linkOpsStoreGateway.close();
+  };
+  process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
+  process.once('SIGINT', () => { void shutdown('SIGINT'); });
 
   const urlHost = args.host === '0.0.0.0' ? '127.0.0.1' : args.host;
   console.log(JSON.stringify({
@@ -7969,6 +9509,10 @@ ${uploadCheckAnswer}` : `
     port: args.port,
     root,
     stateFile: args.stateFile,
+    linkOpsTaskFile: args.linkOpsTaskFile,
+    linkOpsChatFile: args.linkOpsChatFile,
+    linkOpsRuntimeFile: args.linkOpsRuntimeFile,
+    linkOpsStorage: initialLinkOpsStorageHealth,
     manualLoginStateFile: args.manualLoginStateFile,
     lanMode: args.host === '0.0.0.0',
     readOnly: args.readOnly,

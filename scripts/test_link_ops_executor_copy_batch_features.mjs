@@ -4,6 +4,8 @@
  * - per-store random cost_info.cost_price from supplyPriceRange
  * - detail-only image sort shuffle with main/square sort invariants
  * - air-fryer input current auto-override from power/voltage
+ * - official product template enrichment for Power Adapter input voltage and
+ *   non-dangerous-goods classification
  */
 process.env.SHEIN_LINK_OPS_EXECUTOR_SELF_TEST = '1';
 
@@ -87,6 +89,174 @@ fallbackPayload.product_attribute_list = fallbackPayload.product_attribute_list.
 const fallbackApplied = __testHooks.applyManualAttributeOverrides(fallbackPayload, {targets: {productRefs: ['BY-506空气炸锅']}}, {});
 const fallbackCurrent = asArray(fallbackApplied.payload.product_attribute_list).find(row => Number(row.attribute_id) === 1002323);
 check('air fryer input current default applied without power', fallbackCurrent?.attribute_extra_value, '6800');
+
+const officialTemplateResponse = {
+  code: '0',
+  msg: 'OK',
+  info: {
+    data: [{
+      product_type_id: 9851,
+      attribute_infos: [
+        {
+          attribute_id: 1002328,
+          attribute_name: 'Hazardous materials classification',
+          attribute_mode: 3,
+          attribute_type: 4,
+          attribute_status: 3,
+          attribute_value_info_list: [
+            {attribute_value_id: 316913742, attribute_value: 'Class 9 (Miscellaneous Dangerous Goods) - Lithium-ion batteries contained in equipment'},
+            {attribute_value_id: 316914085, attribute_value: 'Class 9 (Miscellaneous Dangerous Goods) - Lithium-ion batteries packed with equipment'},
+            {attribute_value_id: 316914660, attribute_value: 'This product is not classified as dangerous goods'},
+          ],
+        },
+        {
+          attribute_id: 1002322,
+          attribute_name: 'Input voltage',
+          attribute_mode: 4,
+          attribute_type: 4,
+          attribute_status: 2,
+          attribute_value_info_list: [
+            {attribute_value_id: 301114341, attribute_value: 'Vac 50–60Hz'},
+            {attribute_value_id: 301121023, attribute_value: 'Vdc'},
+          ],
+        },
+        {
+          attribute_id: 1001466,
+          attribute_name: 'Plug(Voltage)',
+          attribute_mode: 1,
+          attribute_type: 4,
+          attribute_status: 2,
+          attribute_value_info_list: [
+            {attribute_value_id: 2535083, attribute_value: 'UK Plug(220-240V)'},
+          ],
+        },
+        {
+          attribute_id: 1000462,
+          attribute_name: 'Hazard Category',
+          attribute_mode: 1,
+          attribute_type: 4,
+          attribute_status: 2,
+          attribute_value_info_list: [
+            {attribute_value_id: 1006206, attribute_value: 'Others (Non-Transport Sensitive Items)'},
+          ],
+        },
+        {
+          attribute_id: 147,
+          attribute_name: 'Power Supply',
+          attribute_mode: 1,
+          attribute_type: 4,
+          attribute_status: 3,
+          attribute_value_info_list: [
+            {attribute_value_id: 1047, attribute_value: 'Wall Plug'},
+            {attribute_value_id: 1007239, attribute_value: 'Power Adapter'},
+          ],
+        },
+        {
+          attribute_id: 1000616,
+          attribute_name: 'Product Features',
+          attribute_mode: 1,
+          attribute_type: 4,
+          attribute_status: 3,
+          attribute_value_info_list: [{attribute_value_id: 1004580, attribute_value: 'None'}],
+        },
+        {
+          attribute_id: 1000546,
+          attribute_name: 'Product Model',
+          attribute_mode: 0,
+          attribute_type: 4,
+          attribute_status: 3,
+          attribute_value_info_list: [],
+        },
+      ],
+    }],
+  },
+};
+const templateClient = {
+  async request(pathname) {
+    if (pathname !== '/open-api/goods/query-attribute-template') throw new Error(`unexpected template path ${pathname}`);
+    return {ok: true, status: 200, data: officialTemplateResponse};
+  },
+};
+const sm505PowerAdapterPayload = {
+  product_type_id: 9851,
+  product_attribute_list: [
+    {attribute_id: 1000546, attribute_extra_value: 'TXSM-505A'},
+    {attribute_id: 1000616, attribute_value_id: 1004580},
+    {attribute_id: 1000462, attribute_value_id: 1006206},
+    {attribute_id: 147, attribute_value_id: 1007239},
+    {attribute_id: 1001466, attribute_value_id: 2535083},
+  ],
+};
+const templateApplied = await __testHooks.applyAttributeTemplateRules(templateClient, sm505PowerAdapterPayload);
+const templateRows = asArray(templateApplied.payload.product_attribute_list);
+const templateInputVoltage = templateRows.find(row => Number(row.attribute_id) === 1002322);
+const templateHazardousClassification = templateRows.find(row => Number(row.attribute_id) === 1002328);
+check('Power Adapter triggers required input voltage enrichment', templateInputVoltage?.attribute_extra_value, '220-240');
+check('input voltage uses official Vac unit value id', templateInputVoltage?.attribute_value_id, 301114341);
+check('non-transport-sensitive source maps to non-dangerous classification', templateHazardousClassification?.attribute_value_id, 316914660);
+check('all official required template attributes are present', templateApplied.blockers.length, 0);
+check('template evidence retains final input voltage', templateApplied.evidence.finalProductAttributes.find(row => row.attributeId === 1002322)?.attributeExtraValue, '220-240');
+check('template evidence retains final hazardous classification', templateApplied.evidence.finalProductAttributes.find(row => row.attributeId === 1002328)?.attributeValueId, 316914660);
+
+function duplicateGuardClient({shelfStatus = 0, recycleStatus = 1} = {}) {
+  return {
+    async request(pathname) {
+      if (pathname === '/open-api/goods/searchProduct') {
+        return {
+          ok: true,
+          status: 200,
+          data: {
+            code: '0',
+            msg: 'OK',
+            info: {
+              data: [{
+                spuName: 'v-existing-sm505',
+                spuShelfStatus: shelfStatus,
+                skcList: [{
+                  skcName: 'sv-existing-sm505',
+                  supplierCode: 'SM-505A电动缝纫机',
+                  skcShelfStatus: shelfStatus,
+                  skcSiteShelfStatusList: [{subSite: 'shein-sa', status: shelfStatus}],
+                }],
+              }],
+              meta: {count: 1},
+            },
+          },
+        };
+      }
+      if (pathname === '/open-api/goods/spu-info') {
+        return {
+          ok: true,
+          status: 200,
+          data: {
+            code: '0',
+            msg: 'OK',
+            info: {
+              spuName: 'v-existing-sm505',
+              skcInfoList: [{
+                skcName: 'sv-existing-sm505',
+                supplierCode: 'SM-505A电动缝纫机',
+                shelfStatusInfoList: [{siteAbbr: 'shein-sa', shelfStatus, lastUpdateTime: '2026-06-09 15:38:00'}],
+                recycleInfoList: [{subSite: 'shein-sa', recycleStatus}],
+              }],
+            },
+          },
+        };
+      }
+      throw new Error(`unexpected duplicate-guard path ${pathname}`);
+    },
+  };
+}
+
+const duplicateGuardPayload = {skc_list: [{supplier_code: 'SM-505A电动缝纫机'}]};
+const recycledDuplicate = await __testHooks.inspectTargetDuplicateProducts(duplicateGuardClient({shelfStatus: 0, recycleStatus: 1}), duplicateGuardPayload, 'TZ');
+check('historical recycled same-goods link does not silently block a confirmed new link', recycledDuplicate.blockers.length, 0);
+check('historical recycled same-goods link is surfaced before confirmation', recycledDuplicate.warnings.some(text => /历史回收链接.*sv-existing-sm505/.test(text)), true);
+check('historical recycled same-goods link evidence is classified', recycledDuplicate.evidence.recycledCount, 1);
+
+const activeDuplicate = await __testHooks.inspectTargetDuplicateProducts(duplicateGuardClient({shelfStatus: 1, recycleStatus: 0}), duplicateGuardPayload, 'TZ');
+check('active same-goods target link blocks duplicate publish', activeDuplicate.blockers.some(text => /已存在同货号在售链接.*sv-existing-sm505/.test(text)), true);
+check('active same-goods target link evidence is classified', activeDuplicate.evidence.activeCount, 1);
 
 const ok = checks.every(row => row.pass);
 console.log(JSON.stringify({ok, checks}, null, 2));

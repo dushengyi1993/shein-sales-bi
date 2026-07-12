@@ -10,7 +10,13 @@
   "scripts": {
     "check:generated": "node scripts/generate_product_match_key_schema.mjs --check",
     "check:source": "node scripts/check_source_integrity.mjs",
+    "owner-knowledge:scan": "node scripts/owner_knowledge_sync.mjs scan",
+    "owner-knowledge:sync": "node scripts/owner_knowledge_sync.mjs sync",
+    "owner-knowledge:status": "node scripts/owner_knowledge_sync.mjs status",
     "test:deterministic": "node scripts/run_deterministic_tests.mjs",
     "test": "npm run check:generated && npm run check:source && npm run test:deterministic"
+  },
+  "dependencies": {
+    "pg": "8.16.3"
   }
 }

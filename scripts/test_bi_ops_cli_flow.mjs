@@ -6,6 +6,13 @@ import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const cliSource = await fs.readFile(path.join(ROOT, 'scripts', 'bi_ops_cli.mjs'), 'utf8');
+if (!cliSource.includes("process.env.SHEIN_BI_BASE_URL || 'https://sa.dushengyi.cc'")) {
+  throw new Error('bi_ops_cli default URL must use the current production BI entry');
+}
+if (cliSource.includes('shein-bi.dushengyi.xyz')) {
+  throw new Error('bi_ops_cli still references the retired BI hostname');
+}
 const KEEP_TEMP = process.argv.includes('--keep-temp');
 const tmpBase = path.join(ROOT, 'tmp');
 await fs.mkdir(tmpBase, {recursive: true});
@@ -66,11 +73,38 @@ await fs.writeFile(htpasswdFile, '', 'utf8');
 const stateFile = path.join(tmpRoot, 'action_state.json');
 const taskFile = path.join(tmpRoot, 'tasks.json');
 const chatFile = path.join(tmpRoot, 'chats.json');
+const runtimeFile = path.join(tmpRoot, 'runtime.json');
 const auditFile = path.join(tmpRoot, 'audit.jsonl');
 const sessionSecretFile = path.join(tmpRoot, 'session_secret');
 const manualLoginStateFile = path.join(tmpRoot, 'manual_login.json');
 const ownerSessionFile = path.join(tmpRoot, 'owner-session.json');
 const operatorSessionFile = path.join(tmpRoot, 'operator-session.json');
+const fakeCodexJs = path.join(tmpRoot, 'fake-codex.mjs');
+await fs.writeFile(fakeCodexJs, `
+import fs from 'node:fs/promises';
+const args = process.argv.slice(2);
+const output = args[args.indexOf('--output-last-message') + 1];
+for await (const _chunk of process.stdin) {}
+const plan = ${JSON.stringify({
+  version: 1,
+  requestType: 'action',
+  intents: ['update_inventory'],
+  stores: ['DX'],
+  sourceStores: [],
+  productRefs: ['PA4-6L'],
+  parameters: {
+    timeRange: '', dateFrom: '', dateTo: '', metrics: [], groupBy: '', comparison: '', rankDirection: '',
+    limit: null, title: '', inventory: 30, supplyPrice: null, productPrice: null, currency: '',
+    discountRate: null, discountPrice: null, quantity: null, activityId: '', startAt: '', endAt: '',
+    sourceScope: '', standardGoodsSn: 'PA4-6L', attributeOverrides: [], imageInstruction: '', actionNote: '',
+  },
+  ambiguity: {hasAmbiguity: false, reasons: [], clarifyingQuestions: []},
+  risk: {level: 'medium', writeRequested: true, requiresHumanConfirmation: true, reasons: ['库存修改需人工确认。']},
+  confidence: 0.96,
+  summary: '把 DX 的 PA4-6L 库存改为 30；只完成结构化规划，不直接提交。',
+})};
+await fs.writeFile(output, JSON.stringify(plan), 'utf8');
+`, 'utf8');
 
 const port = await getFreePort();
 const baseUrl = `http://127.0.0.1:${port}`;
@@ -85,6 +119,7 @@ const server = spawn(process.execPath, [
   '--state-file', stateFile,
   '--link-ops-task-file', taskFile,
   '--link-ops-chat-file', chatFile,
+  '--link-ops-runtime-file', runtimeFile,
   '--manual-login-state-file', manualLoginStateFile,
   '--audit-file', auditFile,
 ], {
@@ -92,6 +127,13 @@ const server = spawn(process.execPath, [
   env: {
     ...process.env,
     SHEIN_BI_CORE_WARMUP_DISABLED: '1',
+    SHEIN_LINK_OPS_STORE: 'json',
+    SHEIN_BI_INTENT_PLANNER_ENABLED: '1',
+    SHEIN_BI_JOB_WORKER_ENABLED: '1',
+    SHEIN_BI_JOB_POLL_MS: '100',
+    SHEIN_BI_JOB_LEASE_MS: '60000',
+    SHEIN_BI_CODEX_BIN: process.execPath,
+    SHEIN_BI_CODEX_ARGS_PREFIX_JSON: JSON.stringify([fakeCodexJs]),
     SHEIN_OPENAPI_CONFIG_FILE: openapiConfigFile,
     SHEIN_BI_OPS_WRITE_WHITELIST_FILE: whitelistFile,
   },
@@ -260,6 +302,33 @@ try {
   result.summary.operatorCopyTaskId = operatorCopyAllowed.json?.task?.id || '';
   check('operator copy task id present', Boolean(result.summary.operatorCopyTaskId), true);
 
+  const operatorChat = await runCli([
+    '--session-file', operatorSessionFile,
+    'chat',
+    '--text', '把 DX 的 PA4-6L 库存改成 30',
+    '--no-agent',
+    '--wait-seconds', '10',
+  ]);
+  expectCliOk('operator chat with durable plan', operatorChat);
+  const operatorJobId = operatorChat.json?.job?.id || '';
+  result.summary.operatorJobId = operatorJobId;
+  result.summary.operatorCompletedJobStatus = operatorChat.json?.completedJob?.status || '';
+  check('operator chat job id present', Boolean(operatorJobId), true);
+  check('operator chat waits for durable plan', result.summary.operatorCompletedJobStatus, 'succeeded');
+
+  const operatorJobs = await runCli(['--session-file', operatorSessionFile, 'jobs', '--status', 'succeeded']);
+  expectCliOk('operator jobs', operatorJobs);
+  check('operator jobs includes own durable plan', operatorJobs.json?.data || [], rows => Array.isArray(rows) && rows.some(row => row.id === operatorJobId));
+
+  const operatorJob = await runCli(['--session-file', operatorSessionFile, 'job', '--job-id', operatorJobId]);
+  check('operator job exit', operatorJob.code, 0);
+  check('operator job detail status', operatorJob.json?.status, 'succeeded');
+  check('operator job detail remains read-only', operatorJob.json?.writeBoundary, 'read_only');
+
+  const operatorWaitJob = await runCli(['--session-file', operatorSessionFile, 'wait-job', '--job-id', operatorJobId, '--wait-seconds', '5']);
+  expectCliOk('operator wait-job', operatorWaitJob);
+  check('operator wait-job status', operatorWaitJob.json?.job?.status, 'succeeded');
+
   const ownerLogin = await runCli(['--session-file', ownerSessionFile, 'login', '--username', 'owner_cli_smoke', '--password-stdin'], {input: 'owner-cli-pass\n'});
   expectCliOk('owner login', ownerLogin);
   const ownerCreateHl = await runCli([
@@ -282,8 +351,8 @@ try {
   const auditText = fssync.existsSync(auditFile) ? await fs.readFile(auditFile, 'utf8') : '';
   result.summary.taskCount = Array.isArray(tasks.tasks) ? tasks.tasks.length : 0;
   result.summary.auditLines = auditText.trim() ? auditText.trim().split(/\r?\n/).length : 0;
-  check('task count from CLI flow', result.summary.taskCount, 3);
-  check('audit lines from CLI flow >= 8', result.summary.auditLines, n => n >= 8);
+  check('task count from CLI flow', result.summary.taskCount, 4);
+  check('audit lines from CLI flow >= 12', result.summary.auditLines, n => n >= 12);
 
   result.ok = result.checks.every(x => x.pass);
 } finally {

@@ -17,6 +17,7 @@
     "杜圣宜": {
       "displayName": "杜圣宜",
       "role": "owner",
+      "knowledgePublisher": true,
       "readStores": ["*"],
       "writeStores": ["*"]
     },

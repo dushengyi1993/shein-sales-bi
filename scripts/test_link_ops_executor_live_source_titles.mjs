@@ -172,6 +172,9 @@ const fakeOpenApi = http.createServer(async (req, res) => {
       },
     });
   }
+  if (pathname === '/open-api/goods/searchProduct') {
+    return sendJson(res, {code: '0', msg: 'OK', info: {data: [], meta: {count: 0}}});
+  }
   if (pathname === '/open-api/goods/product/publishOrEdit') {
     return sendJson(res, {code: '500', msg: 'dry-run test must not publish'}, 500);
   }
@@ -258,6 +261,7 @@ try {
   check('publish standard default language is ar', output?.evidence?.publishFillInStandard?.defaultLanguage || '', 'ar');
   check('official call ledger includes source-spu-info-live', output?.openapi?.calls || [], value => asArray(value).some(call => call?.name === 'source-spu-info-live'));
   check('official call ledger includes attribute template', output?.openapi?.calls || [], value => asArray(value).some(call => call?.name === 'query-attribute-template'));
+  check('official call ledger includes target duplicate guard', output?.openapi?.calls || [], value => asArray(value).some(call => call?.name === 'search-existing-target-by-supplier-code'));
 
   result.stdout = run.stdout.slice(0, 1000);
   result.stderr = run.stderr.slice(0, 1000);

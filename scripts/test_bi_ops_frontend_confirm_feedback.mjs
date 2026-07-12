@@ -30,9 +30,10 @@ for (const msg of ['正在处理当前对话…', '收到，我正在处理。�
 }
 ok(client.includes('pendingSession') && client.includes('pending_user_') && client.includes('pending_assistant_'), 'chat send has no optimistic pending session, messages can disappear until refresh');
 ok(client.includes('opsHumanCheckRows') && client.includes('opsHumanProblemText'), 'human-readable task check helpers missing');
+ok(client.includes('problem=state.blocked?opsHumanProblemText') && client.includes('<b>当前状态</b>'), 'non-blocking warnings are still mislabeled as the current blocker after preflight passes');
 ok(client.includes('opsExecPublishPreValidFailed') && client.includes('opsExecStateLabel'), 'publish pre-valid failure helpers missing');
 ok(client.includes('平台没通过，需要补充') && client.includes('未创建新链接'), 'publish pre-valid failure is not explained clearly');
-ok(client.includes('店铺能力') && client.includes('可操作') && client.includes('opsTaskProgressOnly'), 'operator-facing capability/progress wording is not simplified');
+ok(client.includes('全局店铺 API 能力') && client.includes('当前账号可受控提交') && client.includes('opsTaskProgressOnly'), 'operator-facing capability/progress wording is not simplified');
 ok(client.includes('如果要执行，就直接说“可以执行”“提交吧”“照做”'), 'chat-only natural confirmation hint missing');
 ok(client.includes('把 DX 某条 SKC 库存改成 100') && client.includes('下架缺货链接'), 'chat prompt still looks copy-only instead of generic ops');
 ok(client.includes('data-ops-upload="1"') && client.includes('function chooseOpsFiles') && client.includes('input.showPicker') && client.includes('input.click()'), 'upload button does not synchronously open a real file input from a user gesture');
@@ -42,7 +43,7 @@ ok(!client.includes('data-ops-upload-missing="1"') && !client.includes('function
 ok(client.includes('function opsSessionAssetsHtml') && client.includes('会话资料') && client.includes('可以先上传图片、表格或文档'), 'uploaded files are not rendered as session-level context');
 ok(client.includes('function opsTaskAssetsHtml') && client.includes('当前处理附件'), 'task assets are not rendered when a task exists');
 ok(client.includes('OPS_UPLOAD_LIMIT_TEXT') && client.includes('XLSX') && client.includes('20MB') && client.includes('120MB'), 'upload limits/formats are not visible in frontend');
-for (const phrase of ['飞书', 'V1', '任务池', '确认成任务', '可预检 ', '完成 dry-run', '只能问数、生成任务或 dry-run', '查看审计', '正在读取这条任务的审计记录', '系统会先建任务并预检', '最后确认', '确认提交', 'data-ops-final-execute', 'data-ops-execute', 'data-ops-audit', 'data-ops-resolve', 'executeOpsTask', 'loadOpsAudit', 'resolveOpsTask', '任务 ', '当前任务', '生成任务草稿', 'askOnly', 'noAutoTask', 'opsDryrun', '只问数', '只回答']) {
+for (const phrase of ['飞书', 'V1', '任务池', '确认成任务', '可预检 ', '完成 dry-run', '只能问数、生成任务或 dry-run', '查看审计', '正在读取这条任务的审计记录', '系统会先建任务并预检', '最后确认', '确认提交', 'data-ops-final-execute', 'data-ops-execute', 'data-ops-audit', 'data-ops-resolve', 'executeOpsTask', 'loadOpsAudit', 'resolveOpsTask', '任务 ', '生成任务草稿', 'askOnly', 'noAutoTask', 'opsDryrun', '只问数', '只回答']) {
   ok(!client.includes(phrase), `operator-facing technical wording leaked: ${phrase}`);
 }
 for (const phrase of ['飞书', '回到 BI 自动化运营页', '当前飞书通道', 'ops_write_readonly_advice', 'body.noAutoTask', 'readonly-codex-gateway', '形成强确认', '系统已锁住任务', '我已经调用过 SHEIN 写接口', '系统已经把内部检查结果收口到聊天里', '请按聊天里的缺口继续']) {
@@ -58,6 +59,26 @@ ok(!portalHtml.includes('replace(/\\n?/g'), 'embedded portal Markdown parser ins
 for (const cls of ['.ops-busy-banner', '.ops-evidence-item', '.ops-upload-label:disabled', '.ops-upload-file-input', '.ops-assets', '.ops-asset-pill', '.ops-md-table-wrap', '.ops-task-control.conversational', '.ops-task-card.progress-only', '.ops-session.pending']) {
   ok(css.includes(cls), `missing CSS selector ${cls}`);
 }
+for (const fn of ['opsJobRows', 'opsJobBanner', 'opsPlanningNote']) {
+  ok(client.includes(`function ${fn}`), `missing durable-job UI helper ${fn}`);
+}
+ok(client.includes('/api/link-ops-jobs?limit=80'), 'ops runtime does not load durable background jobs');
+ok((client.includes('不会直接提交 SHEIN') || client.includes('也不会提交 SHEIN')) && client.includes('后台辅助检查'), 'durable planning safety/status wording is missing');
+ok(client.includes('结果与已通过的任务事实冲突或已经过期') && client.includes('仅辅助理解和提示风险'), 'frontend does not explain ignored/advisory planner results');
+ok(client.includes('不会修改已锁定的店铺、商品、参数或预演事实') && client.includes('后台结果与当前任务冲突或已过期，系统已忽略'), 'job banner can still expose stale or contradictory model conclusions');
+const permissionPanelSource = client.slice(client.indexOf('function opsPermissionRiskPanel'), client.indexOf('function opsResourcesPanel'));
+ok(!permissionPanelSource.includes('opsCompactCapabilityLedger'), 'global store capability ledger is still nested in the task-specific right rail');
+ok(client.includes('${opsSummaryKpis(as,tasks,activeTask)}${opsCompactCapabilityLedger()}'), 'global store capability ledger is not rendered at workspace level');
+ok(portalServer.includes('intentPlannerTaskSnapshotIsStale') && portalServer.includes('existingActionTask ? null : candidateAdapted'), 'server lacks stale-job or advisory-only action fact guards');
+ok(portalServer.includes("if (!/^[a-f0-9]{64}$/i.test(queuedFingerprint)) return true"), 'legacy or malformed planner jobs are not failed closed as stale');
+const sessionBootstrapAt = portalServer.indexOf("type: 'link-ops-chat-session-bootstrap'");
+const autoTaskAfterBootstrapAt = portalServer.indexOf('if (shouldAutoTask)', sessionBootstrapAt);
+ok(sessionBootstrapAt >= 0 && autoTaskAfterBootstrapAt > sessionBootstrapAt, 'new PostgreSQL chat session is not persisted before its FK-bound auto-task');
+for (const cls of ['.ops-job-banner', '.ops-planning-note']) {
+  ok(css.includes(cls), `missing durable-job CSS selector ${cls}`);
+}
+ok(css.includes('.ops-job-state') && css.includes('grid-template-columns:auto minmax(0,1fr)'), 'completed job banner/planning note can still collapse into the icon column');
+ok(css.includes('.ops-execution-checklist li b{font-size:13px') && css.includes('.ops-execution-checklist li small{font-size:11.5px'), 'execution control typography is still too small');
 ok(/\.ops-task-evidence\{[^}]*grid-template-columns:repeat\(auto-fit,minmax/.test(css), 'task evidence is not grid-based');
 ok(/\.ops-task-card \.ops-task-evidence span[^}]*max-width:100%!important/.test(css), 'generic task-card span clamp still applies to evidence chips');
 ok(css.includes('overflow-x:hidden!important'), 'right rail horizontal overflow guard missing');
