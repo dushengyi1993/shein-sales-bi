@@ -108,8 +108,11 @@ try {
   const fakeGitPublisher = {
     branch: 'owner-knowledge',
     async publish(activeBundle) {
-      publishNumber += 1;
       const built = buildOwnerKnowledgeDistribution(activeBundle);
+      if (published?.manifest?.fingerprint === built.manifest.fingerprint) {
+        return {...published, manifest: built.manifest, bundle: built.bundle, changed: false};
+      }
+      publishNumber += 1;
       published = {
         source: 'github',
         branch: 'owner-knowledge',
@@ -137,6 +140,12 @@ try {
   });
   assert.equal(activated.current, true);
   assert.equal(activated.source, 'github');
+  const forcedSame = await githubService.ensureDistribution({actorUser: 'owner-knowledge-test', force: true});
+  assert.equal(forcedSame.current, true, 'force publishing unchanged GitHub content remains current');
+  assert.equal(forcedSame.pending, undefined, 'force publishing unchanged GitHub content does not create a ghost pending record');
+  assert.equal(forcedSame.sourceCommit, firstPublication.sourceCommit);
+  const afterForcedSame = await githubService.distributionManifest();
+  assert.equal(afterForcedSame.pending, false);
 
   const githubSecond = await githubService.ingest([{
     text: '以后所有真实提交必须先完成系统检查、明确确认并强回读。',
