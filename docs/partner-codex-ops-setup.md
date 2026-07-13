@@ -30,7 +30,7 @@ npm run partner-cli:package
 
 产物位于忽略目录 `outputs/releases/`，同时生成 `.sha256`。压缩包只包含远程 CLI、负责人规则校验模块、安装脚本和本说明，不包含 `.env`、session、店铺 profile、服务器脚本或任何凭证。
 
-最小包保障 `login/doctor/me/capabilities/ask/chat/jobs/tasks/create/preflight/execute/audit/resolve` 以及走云端的图片上传/转换。`plan-images`、本地 CSV 候选生成、开发 smoke 等离线工具仍需要完整项目仓库，不作为合伙人日常必需能力。
+最小包保障 `login/doctor/me/capabilities/ask/chat/jobs/tasks/create/preflight/execute/audit/resolve`、本地 `plan-images`、同任务 `prepare-publish` 以及走云端的图片上传/转换。营销 CSV 候选生成、开发 smoke 等工具仍需要完整项目仓库，不作为合伙人日常必需能力。
 
 ## 电脑安装
 
@@ -65,7 +65,13 @@ node -v
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-安装器会检查 Node.js 22，把版本化文件装到 `%USERPROFILE%\.shein-bi\cli\versions\`，并生成 `%USERPROFILE%\.shein-bi\cli\shein-bi-ops.cmd`。以后更新 CLI 只需拿到新包后重新运行安装器；旧版本目录保留，便于回滚。
+安装器会检查 Node.js 22，把版本化文件装到 `%USERPROFILE%\.shein-bi\cli\versions\`，生成稳定启动器 `%USERPROFILE%\.shein-bi\cli\shein-bi-ops.cmd`，并安装专用 Codex Skill 到 `%USERPROFILE%\.codex\skills\shein-bi-ops\SKILL.md`。`2026.07.13.1` 是自动更新引导版：从更早版本升级到它仍需最后运行一次新安装包；安装后每个业务命令会先检查云端 release，逐文件与 bundle SHA256 校验通过后原子切换版本并重启同一命令，旧版本目录保留用于回滚。
+
+安装后统一让 Codex 调用稳定启动器，不要继续运行解压目录里的旧副本：
+
+```powershell
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" version
+```
 
 ## 首次登录 BI 自动运营
 
@@ -123,7 +129,7 @@ node scripts/bi_ops_cli.mjs jobs --scope-all  # 仅 Owner 全局只读
 - candidate 只用于负责人后续复核，不参与团队真实业务。规则变化发生在预演之后时，系统会要求重新检查和再次确认，不能沿用旧结果直接写 SHEIN。
 - 负责人本机安装、状态检查和设备轮换见 `docs/owner-knowledge-sync.md`；同事机器不要安装同步任务，也不要复制负责人设备凭证。
 
-规则包与 CLI 程序版本是两件事：规则包每个任务前自动检查；CLI 本体只在启动/管理员要求时升级。云端可以声明最低 CLI 版本，版本过旧时会明确阻断并要求更新，不会在业务处理中途静默替换可执行代码。
+规则包与 CLI 程序版本是两件事：规则包每个任务前自动检查；受管 CLI 在业务命令开始前检查程序 release。发现新版本时先完成哈希校验、不可变版本目录安装和原子指针切换，再用新版本重启原命令；不会 60 秒轮询，也不会在 SHEIN 写入过程中替换代码。云端仍可声明最低版本，更新失败时会在业务动作前停住。
 
 ## 安装后自检
 
@@ -184,7 +190,7 @@ node scripts/bi_ops_cli.mjs tasks --pretty
 
 ## 日常怎么使用
 
-每次 `chat/create/preflight/execute` 等云端业务命令都会先执行一次轻量规则检查。只有 GitHub source commit 变化时才下载；正常无变化不会重复拉整仓库，也不会产生模型 Token。`execute` 发现云端 active bundle 尚未同步到 GitHub 时会暂时停住，稍后重试即可。
+每次 `chat/create/preflight/execute/prepare-publish` 等业务命令会先检查 CLI release，再执行轻量规则检查。release 和规则都支持 ETag；无变化只返回 304，不拉整仓库，也不产生模型 Token。`execute` 发现云端 active bundle 尚未同步到 GitHub 时会暂时停住，稍后重试即可。
 
 ### 推荐方式：直接让 Codex 调用工具
 
@@ -339,6 +345,14 @@ node scripts/bi_ops_cli.mjs tasks --pretty
 - SKU 图不是必填兜底位。扣除主封面、方形图和单独轮播/第二封面后，如果其他候选图超过 10 张，才把最低优先级的高清图放到 SKU 图；否则 SKU 图不提交。SKU 图禁止使用 `sku-80` / `80x80` 等裁切小图。
 - AI 可以根据图片内容给出排序建议、重复图/低质图/错品风险提示；用户可以继续说“把第 3 张做主图”“第 5 张不要”“细节图 2 和 6 交换”。图片理解不能替代商品事实：AI 不得根据图片发明不存在的功率、认证、配件或功能；发现图片和链接资料冲突时必须停下来提示。
 - 本地 CLI 可先做离线规划：`node scripts/bi_ops_cli.mjs plan-images --image-dir <图包路径> --out image-role-plan.json`。这个命令只扫描本地文件、排除备用/AB 测试封面并输出前端角色规划，不上传图片、不生成完整 `partialEdit`、不提交 SHEIN。
+- 用户当轮明确指令和目录名含“已审可用”的人工审核结果高于 AI 语义推断。“某参数不进入最终标题/核心卖点”不等于“含该参数的已审图片禁用”；AI 可以提示，但不得擅自排除。只有文件损坏、格式/大小不支持、明确错品、平台角色/容量冲突或 SHEIN 真实校验失败可以阻断。
+- 有本地图包的新发品不要逐张 `upload-pic` 后再新建缩写任务。应在原任务上运行：
+
+```powershell
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" prepare-publish --task-id <任务ID> --store JSH --image-dir '<已审可用目录>' --approved-assets --standard-goods-sn '(全)SK-999食品料理机' --supply-price 210 --inventory 100
+```
+
+该命令读取实际尺寸、按角色上传、把返回 URL 与货号/供货价/库存等显式事实绑定到同一任务，然后基于新 payload 重新预演。返回结果必须看到 `payloadSource=task`、图片数量/名称、方形图尺寸和新的 payload hash；它本身不真实发布。
 - 真正提交 SHEIN 前，后台仍要把图片转成 SHEIN 可接受的图片 URL，先查官方图片方案，再把前端角色映射到 `partialEdit` / 发布 payload 的 SPU/SKC/SKU 层级。不同类目图片方案可能不同，不能把“轮播图/细节图/SKU 图”的前端叫法直接等同于固定 OpenAPI 字段。
 - CLI / 执行器会在 `update_images` 的 dry-run 阶段检查图片 payload：SPU 层 `image_info` 必须搭配 `is_spu_pic=true`，SKC 图类型只能是 `1/2/5/6` 且主图唯一，细节图总数最多 11 张，SKU 图只能用 `image_type=1` 的高清主图；疑似 `sku-80` / `80x80` 裁切图会被阻断。`partialEdit` 返回成功并生成版本号，或后台任务已进入流转 / 待审核 / 审核中 / 待终审，即代表 SHEIN 已接收提交；后续是平台审核生命周期，不要当作“没提交”反复执行。最终当前态仍以审核完成后的回读或后台可见态为准。
 

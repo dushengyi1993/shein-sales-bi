@@ -1,13 +1,22 @@
 {
-  "schemaVersion": 1,
-  "version": "2026.07.12.1",
+  "schemaVersion": 2,
+  "version": "2026.07.13.1",
   "entrypoint": "scripts/bi_ops_cli.mjs",
+  "bootstrap": "scripts/partner_cli_bootstrap.mjs",
+  "codexSkill": "codex/skills/shein-bi-ops/SKILL.md",
   "files": [
+    "AGENTS.md",
     "scripts/bi_ops_cli.mjs",
+    "scripts/partner_cli_bootstrap.mjs",
+    "scripts/link_ops_plan_image_roles.mjs",
     "lib/cross_process_ticket_lock.mjs",
     "lib/partner_knowledge_cache.mjs",
+    "lib/partner_cli_release.mjs",
+    "lib/partner_cli_updater.mjs",
+    "lib/link_ops_image_role_planner.mjs",
     "lib/owner_knowledge_distribution.mjs",
     "lib/owner_knowledge_policy.mjs",
+    "codex/skills/shein-bi-ops/SKILL.md",
     "docs/partner-codex-ops-setup.md"
   ]
 }

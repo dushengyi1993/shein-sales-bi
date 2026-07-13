@@ -59,6 +59,12 @@ import {linkOpsPayloadHash} from '../lib/link_ops_repository.mjs';
 import {createOwnerKnowledgeService} from '../lib/owner_knowledge_service.mjs';
 import {createOwnerKnowledgeGitPublisher} from '../lib/owner_knowledge_distribution.mjs';
 import {BI_OPS_CLI_VERSION} from '../lib/partner_knowledge_cache.mjs';
+import {buildPartnerCliRelease} from '../lib/partner_cli_release.mjs';
+import {
+  applyApprovedImageBindingsToPublishPayload,
+  applyExplicitPublishPreparationOverrides,
+  normalizePublishPreparationOverrides,
+} from '../lib/link_ops_publish_asset_binding.mjs';
 import {
   actorCanPublishOwnerKnowledge,
   isOwnerKnowledgeCandidateText,
@@ -74,6 +80,17 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
 const SHEIN_OPENAPI_LOCAL_CONFIG_FILE = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
 const BI_OPS_WRITE_WHITELIST_FILE = process.env.SHEIN_BI_OPS_WRITE_WHITELIST_FILE || path.join(ROOT, 'config', 'bi_ops_write_whitelist.local.json');
+let partnerCliReleasePromise = null;
+
+async function currentPartnerCliRelease() {
+  if (!partnerCliReleasePromise) {
+    partnerCliReleasePromise = buildPartnerCliRelease({sourceRoot: ROOT}).catch(error => {
+      partnerCliReleasePromise = null;
+      throw error;
+    });
+  }
+  return await partnerCliReleasePromise;
+}
 
 function parseArgs(argv) {
   const args = {
@@ -2548,7 +2565,9 @@ function inferLinkOpsIntent(command) {
   const intents = [];
   const activateLinkIntent = /恢复上架|重新上架|再次上架|改为上架|设为上架|设置上架|恢复在售|改回在售|上架回来/.test(text)
     || /\b(activate_link|on_shelf|onshelf|relist|restore_listing)\b/.test(lower);
-  const copyProductIntent = /补(?:一|1)?(?:个|条|款)?(?:新)?(?:链接|链|商品|上品)|补链|缺(?:少)?(?:上架|在售|可售|新)?(?:的)?(?:链接|链)|复制|拷贝|参考|上品|草稿|覆盖|创建草稿|创建链接|上链接|发链接|发布商品|刊登|提交审核/.test(text)
+  const naturalPublishIntent = /(?:给|在)\s*[A-Z]{2,3}\s*店铺?\s*上(?:一|1)(?:个|款)\s*[A-Z0-9-]+/i.test(text);
+  const copyProductIntent = naturalPublishIntent
+    || /补(?:一|1)?(?:个|条|款)?(?:新)?(?:链接|链|商品|上品)|补链|缺(?:少)?(?:上架|在售|可售|新)?(?:的)?(?:链接|链)|复制|拷贝|参考|上品|草稿|覆盖|创建草稿|创建链接|上链接|发链接|发布商品|刊登|提交审核/.test(text)
     || /\b(copy|draft|create|publish|coverage)\b/.test(lower);
   if (activateLinkIntent) intents.push('activate_link');
   if (copyProductIntent) intents.push('copy_product_draft');
@@ -2602,6 +2621,9 @@ function linkOpsStatusLabel(status) {
 function inferLinkOpsTargets(command, options = {}) {
   const includeAttributeOverrides = options.includeAttributeOverrides !== false;
   const text = String(command || '');
+  const productInferenceText = text
+    .replace(/["“][^"”\r\n]*[\\/][^"”\r\n]*["”]/gu, ' ')
+    .replace(/(?:[A-Za-z]:)?(?:[\\/][^\\/\s，。；;"“”]+){2,}/gu, ' ');
   const allStoreMentioned = /全店|所有店|所有店铺|全部店|全部店铺|19\s*店|十九\s*店|各店|每个店/.test(text);
   const allStoresAsSourceScope = /(?:全店|所有店|所有店铺|全部店|全部店铺|19\s*店|十九\s*店|各店|每个店)(?:里|中|内|范围|里面)?[\s\S]{0,36}?(?:流量|曝光|销量|最高|最好|现有|已有|源链接|挑|选|找)/.test(text);
   const allStoresRequested = allStoreMentioned && !allStoresAsSourceScope;
@@ -2612,7 +2634,10 @@ function inferLinkOpsTargets(command, options = {}) {
     .filter(x => SHEIN_STORE_KEYS.has(x)))].slice(0, 24);
   const copyToMatch = /(?:从|复制|拷贝|参考)?\s*\b([A-Z]{2,3})\b[\s\S]{0,48}?(?:到|至|给|复制到|拷贝到|上到|铺到)\s*\b([A-Z]{2,3})\b/i.exec(text);
   const missingLinkLike = /缺(?:少)?(?:上架|在售|可售|新)?(?:的)?(?:链接|链)/.test(text);
-  const copyLike = /复制|拷贝|参考|补.*链接|补链|缺(?:少)?(?:上架|在售|可售|新)?(?:的)?(?:链接|链)|上链接|创建链接|发布商品|刊登/.test(text) || /\b(copy|draft|create|publish)\b/i.test(text);
+  const naturalPublishLike = /(?:给|在)\s*[A-Z]{2,3}\s*店铺?\s*上(?:一|1)(?:个|款)\s*[A-Z0-9-]+/i.test(text);
+  const copyLike = naturalPublishLike
+    || /复制|拷贝|参考|补.*链接|补链|缺(?:少)?(?:上架|在售|可售|新)?(?:的)?(?:链接|链)|上链接|创建链接|发布商品|刊登/.test(text)
+    || /\b(copy|draft|create|publish)\b/i.test(text);
   const sourceStores = [];
   const writeStores = [];
   if (copyToMatch) {
@@ -2625,9 +2650,9 @@ function inferLinkOpsTargets(command, options = {}) {
     if (!allStoresAsSourceScope && !missingLinkLike) sourceStores.push(storeMatches[0]);
     writeStores.push(storeMatches[0]);
   }
-  const namedProductMatches = text.match(/\b[A-Z]{1,6}-?\d{1,8}[A-Z]?(?:-[A-Z0-9]+)?[\u4e00-\u9fa5]{1,24}?(?=(?:补|复制|改|换|上架|下架|，|,|。|；|;|\s|$))/giu) || [];
-  const alnumMatches = text.match(/\b(?:[A-Z]{1,6}-?\d{1,8}[A-Z]?(?:-[A-Z0-9]+)?(?:[\u4e00-\u9fa5A-Za-z0-9-]*)?|(?:sv|sb)\d{8,})\b/giu) || [];
-  const numericProductMatches = (text.match(/(?<!\d)(\d{3,6}[A-Z]?)(?=\s*(?:缝纫机|咖啡机|空气炸锅|热风梳|厨师机|脱毛仪|榨汁机|绞肉机|吸尘器|电磁炉|按摩器|链接|货号|产品|品))/giu) || [])
+  const namedProductMatches = productInferenceText.match(/\b[A-Z]{1,6}-?\d{1,8}[A-Z]?(?:-[A-Z0-9]+)?[\u4e00-\u9fa5]{1,24}?(?=(?:补|复制|改|换|上架|下架|，|,|。|；|;|\s|$))/giu) || [];
+  const alnumMatches = productInferenceText.match(/\b(?:[A-Z]{1,6}-?\d{1,8}[A-Z]?(?:-[A-Z0-9]+)?(?:[\u4e00-\u9fa5A-Za-z0-9-]*)?|(?:sv|sb)\d{8,})\b/giu) || [];
+  const numericProductMatches = (productInferenceText.match(/(?<!\d)(\d{3,6}[A-Z]?)(?=\s*(?:缝纫机|咖啡机|空气炸锅|热风梳|厨师机|脱毛仪|榨汁机|绞肉机|吸尘器|电磁炉|按摩器|链接|货号|产品|品))/giu) || [])
     .map(x => x.match(/\d{3,6}[A-Z]?/i)?.[0] || '');
   const skuMatches = [...new Set([...namedProductMatches, ...alnumMatches, ...numericProductMatches]
     .map(x => x
@@ -3054,6 +3079,7 @@ function isLinkOpsActionCommand(command) {
   const intents = inferLinkOpsIntent(text).filter(x => x !== 'manual_review');
   if (!intents.length) return false;
   const actionVerb = /恢复上架|重新上架|再次上架|改为上架|设为上架|设置上架|恢复在售|下架|归档|停掉|移除|删除链接|换图|换主图|换图片|换套图|更换图片|更换主图|替换图片|上传图片|改标题|换标题|标题改|改库存|设置库存|库存改|改供货价|改成本价|改售价|改商品价|改价格|设置价格|调价|补(?:一|1)?(?:个|条|款)?(?:新)?(?:链接|链|商品|上品)|补链接|补链|缺(?:少)?(?:上架|在售|可售|新)?(?:的)?(?:链接|链)|复制|复制上品|创建草稿|创建链接|上品|上链接|发链接|发布商品|刊登|提交审核|报活动|报名|限时折扣|设置折扣|补证书|补资质|上传证书/.test(text)
+    || /(?:给|在)\s*[A-Z]{2,3}\s*店铺?\s*上(?:一|1)(?:个|款)\s*[A-Z0-9-]+/i.test(text)
     || /(?:标题|title)\s*(?:改成|改为|更新为|设置为|设为|换成|到|=|：|:)/i.test(text)
     || /(?:改成|改为|更新为|设置为|设为|换成)\s*[^，。；\n]{0,80}(?:标题|title)/i.test(text)
     || /(?:库存|虚拟库存|供货价|成本价|售价|原价|销售价|商品价|价格)\s*(?:改成|改为|更新为|设置为|设为|到|=|：|:)/.test(text)
@@ -5256,6 +5282,7 @@ function buildLinkOpsExecutionWriteAudit({task, actor, req, runId, at, requested
         payloadHash: result.payload?.payloadHash || '',
         payloadHashAlgorithm: result.payload?.payloadHashAlgorithm || '',
         payloadSummary: result.payload?.summary || null,
+        approvedImageOrderLocked: Boolean(result.evidence?.approvedImageOrderLocked),
         adapterEvidence: result.adapterEvidence || null,
         readbackFingerprint: result.readbackFingerprint || null,
         suspiciousWriteAttempted: Boolean(result.suspiciousWriteAttempted) || String(result.state || '') === 'suspicious_write_attempted',
@@ -5511,8 +5538,12 @@ async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey
   const expectedPayloadHash = mode === 'execute'
     ? payloadHashForStoreFromTaskExecution(task, targetStore)
     : '';
+  const capturePublishPayload = executionContext?.capturePublishPayload === true && mode === 'dry-run';
   const taskSnapshotDir = path.join(ROOT, 'tmp', 'link-ops-executor-task-json');
   const taskSnapshotFile = path.join(taskSnapshotDir, `${safeTaskId(task.id)}-${crypto.randomBytes(4).toString('hex')}.json`);
+  const payloadCaptureFile = capturePublishPayload
+    ? path.join(taskSnapshotDir, `${safeTaskId(task.id)}-${crypto.randomBytes(4).toString('hex')}.payload.json`)
+    : '';
   await fs.mkdir(taskSnapshotDir, {recursive: true});
   await fs.writeFile(taskSnapshotFile, `${JSON.stringify({
     version: 1,
@@ -5539,14 +5570,18 @@ async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey
   if (mode === 'execute') {
     childArgs.push('--confirm', String(body.confirm || body.confirmText || ''));
   }
+  if (payloadCaptureFile) childArgs.push('--payload-out', payloadCaptureFile);
   let result;
+  let capturedPublishPayload = null;
   try {
     result = await runChildProcess(process.execPath, childArgs, {
       cwd: ROOT,
       timeoutMs: Number(process.env.SHEIN_LINK_OPS_OPENAPI_EXECUTOR_TIMEOUT_MS || 180_000),
     });
+    if (payloadCaptureFile) capturedPublishPayload = await readJsonFile(payloadCaptureFile, null);
   } finally {
     await fs.rm(taskSnapshotFile, {force: true}).catch(() => {});
+    if (payloadCaptureFile) await fs.rm(payloadCaptureFile, {force: true}).catch(() => {});
   }
   const parsed = parseChildJsonOutput(result.stdout);
   if (parsed) {
@@ -5557,6 +5592,7 @@ async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey
       code: result.code,
       timedOut: result.timedOut,
       result: parsed,
+      capturedPublishPayload,
       stderrTail: String(result.stderr || '').slice(-1200),
     };
   }
@@ -5566,6 +5602,7 @@ async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey
     storeKey: targetStore,
     code: result.code,
     timedOut: result.timedOut,
+    capturedPublishPayload,
       result: {
         ok: false,
         state: mode === 'execute' ? 'suspicious_write_attempted' : (result.timedOut ? 'timeout' : 'error'),
@@ -5581,6 +5618,135 @@ async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey
         rawStderrTail: String(result.stderr || '').slice(-1200),
     },
     stderrTail: String(result.stderr || '').slice(-1200),
+  };
+}
+
+async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req) {
+  if (!task || typeof task !== 'object') throw new Error('Task not found');
+  if (taskRequiresOwnerLifecycleResolve(task)) {
+    const error = new Error('该任务已进入提交后待回读/人工处理状态，不能替换发布素材');
+    error.status = 409;
+    throw error;
+  }
+  const targetStore = String(body.store || body.storeKey || '').trim().toUpperCase();
+  if (!targetStore) throw new Error('Missing target store for publish asset binding');
+  const writeStores = taskWriteStores(task);
+  if (!writeStores.includes(targetStore)) throw new Error(`目标店铺 ${targetStore} 不在该任务写入范围 ${writeStores.join('/') || '(empty)'}`);
+  const denied = requireWriteStores(actor, [targetStore]);
+  if (denied) {
+    const error = new Error(denied.error || '当前账号没有目标店铺写权限');
+    error.status = 403;
+    error.response = denied;
+    throw error;
+  }
+  if (body.sourceApproved !== true) throw new Error('必须明确 sourceApproved=true 才能绑定人工审核素材');
+  const bindings = asArray(body.bindings);
+  if (!bindings.length || bindings.length > 14) throw new Error('Approved publish asset binding requires 1-14 uploaded images');
+  const publishPreparation = normalizePublishPreparationOverrides(body.publishPreparation || body);
+  const taskForCapture = {
+    ...task,
+    status: String(task.status || '') === 'draft' ? 'confirmed' : task.status,
+    targets: {
+      ...(task.targets && typeof task.targets === 'object' ? task.targets : {}),
+      standardGoodsSn: publishPreparation.standardGoodsSn || task?.targets?.standardGoodsSn || '',
+      supplyPrice: publishPreparation.supplyPrice,
+      inventory: publishPreparation.inventory,
+      categoryId: publishPreparation.categoryId,
+      titleAr: publishPreparation.titles.ar || '',
+      titleEn: publishPreparation.titles.en || '',
+      publishPreparation,
+    },
+    publishPreparation,
+  };
+  const captureTask = {
+    ...taskForCapture,
+    // The reviewed bindings below replace every publish image. Raw image assets
+    // attached to the task must not make the base-payload capture fall back to
+    // source images or block this explicit same-task preparation step.
+    assets: asArray(taskForCapture.assets).filter(asset => !String(asset?.mime || asset?.type || '').toLowerCase().startsWith('image/')),
+  };
+  const captured = await runOpenApiProductExecutorForStore(
+    captureTask,
+    args,
+    {mode: 'dry-run', source: 'approved_publish_asset_prepare', actorForWriteGate: actor},
+    targetStore,
+    {capturePublishPayload: true, publishPreparation},
+  );
+  if (!captured.capturedPublishPayload) {
+    const error = new Error('无法从当前任务生成可绑定图片的发布 payload；没有创建新任务，也没有回退到源链接图片');
+    error.status = 409;
+    error.response = {
+      ok: false,
+      error: error.message,
+      blockers: captured.result?.blockers || [],
+      warnings: captured.result?.warnings || [],
+      payloadSource: captured.result?.payload?.source || null,
+    };
+    throw error;
+  }
+  const explicit = applyExplicitPublishPreparationOverrides(captured.capturedPublishPayload, publishPreparation);
+  const bound = applyApprovedImageBindingsToPublishPayload(explicit.payload, bindings, {sourceApproved: true});
+  const now = new Date().toISOString();
+  const bindingFingerprint = crypto.createHash('sha256').update(JSON.stringify({
+    targetStore,
+    bindings: bound.bindings.map(row => ({name: row.name, role: row.role, imageType: row.imageType, imageUrl: row.imageUrl, sha256: row.sha256})),
+    publishPreparation,
+  })).digest('hex');
+  const nextTask = {
+    ...taskForCapture,
+    openapiPublishPayload: bound.payload,
+    publishAssetBinding: {
+      schemaVersion: 1,
+      sourceApproved: true,
+      authority: 'human_reviewed_source',
+      targetStore,
+      boundAt: now,
+      boundByUser: actorUser(actor, req),
+      bindingFingerprint,
+      imageCount: bound.bindings.length,
+      images: bound.bindings.map(row => ({
+        name: row.name,
+        relativePath: row.relativePath,
+        role: row.role,
+        imageType: row.imageType,
+        imageUrl: row.imageUrl,
+        width: row.width,
+        height: row.height,
+        sha256: row.sha256,
+      })),
+      evidence: bound.evidence,
+      publishPreparation: explicit.evidence,
+    },
+    execution: {
+      ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
+      state: 'needs_repreflight',
+      openApiProductExecutors: [],
+      preflight: {
+        ok: false,
+        blockers: ['人工审核图片和显式发布字段已绑定到同一任务，需要基于新 payload 重新预演。'],
+        warnings: [],
+      },
+    },
+    note: '人工审核图片已上传并绑定到同一任务；旧预演锁已作废，必须重新预演后才能提交。',
+    updatedAt: now,
+  };
+  nextTask.history = appendTaskHistory(nextTask, 'approved_publish_assets_bound', actor, req, {
+    targetStore,
+    bindingFingerprint,
+    imageCount: bound.bindings.length,
+    boundNames: bound.evidence.boundNames,
+    publishPreparation: explicit.evidence,
+  });
+  return {
+    task: nextTask,
+    binding: {
+      targetStore,
+      bindingFingerprint,
+      payloadSource: 'task',
+      ...bound.evidence,
+      publishPreparation: explicit.evidence,
+      preflightInvalidated: true,
+    },
   };
 }
 
@@ -8078,6 +8244,31 @@ async function main() {
       if (url.pathname === '/api/auth/me') {
         return sendJson(res, actor ? 200 : 401, {ok: Boolean(actor), user: publicActor(actor)});
       }
+      if (url.pathname === '/api/partner-cli/manifest' || url.pathname === '/api/partner-cli/bundle') {
+        if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        try {
+          const release = await currentPartnerCliRelease();
+          const etag = `"pcli-${release.manifest.bundleSha256}"`;
+          if (String(req.headers['if-none-match'] || '') === etag) {
+            writeResponseHead(res, 304, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: etag});
+            res.end();
+            return;
+          }
+          const data = url.pathname.endsWith('/bundle') ? release.bundle : release.manifest;
+          if (url.pathname.endsWith('/bundle')) {
+            await appendAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'partner-cli-bundle-download',
+              actor,
+              ...requestMeta(req),
+              release: {version: release.manifest.version, bundleSha256: release.manifest.bundleSha256},
+            });
+          }
+          return sendJson(res, 200, {ok: true, data}, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: etag});
+        } catch (error) {
+          return sendJson(res, 503, {ok: false, error: `CLI 发布包尚未就绪：${error?.message || String(error)}`}, {'Cache-Control': 'no-store'});
+        }
+      }
       if (url.pathname === '/api/owner-knowledge/distribution/activate') {
         if (req.method !== 'POST') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
         if (actor?.role !== 'knowledge_activation') return sendJson(res, 403, {ok: false, error: 'GitHub distribution activation denied'});
@@ -8756,6 +8947,77 @@ async function main() {
         } catch (err) {
           const status = Number(err?.status || 0) || 400;
           return sendJson(res, status, err?.response || {ok: false, error: err?.message || String(err || `${action} failed`)});
+        }
+      }
+      if (url.pathname === '/api/link-ops-publish-assets') {
+        if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
+        if (req.method !== 'POST') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        const actorGate = requireConcreteOperatorActor(actor);
+        if (actorGate) {
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-publish-assets-denied', actor, ...requestMeta(req), denied: actorGate});
+          return sendJson(res, 403, actorGate);
+        }
+        let body;
+        try {
+          body = await readBodyJson(req, 1024 * 1024);
+        } catch (error) {
+          return sendJson(res, 400, {ok: false, error: error?.message || String(error)});
+        }
+        const taskRef = String(body.taskId || body.id || '').trim();
+        if (!taskRef) return sendJson(res, 400, {ok: false, error: 'Missing task id'});
+        let current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+        let found;
+        try {
+          found = findLinkOpsTaskOrThrow(current, taskRef);
+        } catch (error) {
+          const message = error?.message || String(error);
+          return sendJson(res, message === 'Invalid task id' ? 400 : 404, {ok: false, error: message});
+        }
+        const access = authorizeLinkOpsRecord(actor, found.task, {kind: 'task', mode: 'mutate', claimLegacy: true});
+        if (!access.ok) {
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-publish-assets-denied', actor, ...requestMeta(req), task: {id: found.task.id}, denied: access.denied});
+          return sendJson(res, 403, access.denied);
+        }
+        const lockId = String(access.record.id || taskRef);
+        if (linkOpsExecutionLocks.has(lockId)) return sendJson(res, 409, {ok: false, error: '该任务正在执行其他检查，请等待当前操作结束'});
+        linkOpsExecutionLocks.add(lockId);
+        try {
+          const prepared = await prepareApprovedPublishAssetsForTask(access.record, args, body, actor, req);
+          const tasks = current.tasks.slice();
+          tasks[found.idx] = prepared.task;
+          current = {version: 1, updatedAt: new Date().toISOString(), tasks};
+          await writeLinkOpsTaskStore(args, current);
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'link-ops-publish-assets-bound',
+            actor,
+            ...requestMeta(req),
+            task: {id: prepared.task.id, stores: taskTargetStores(prepared.task), writeStores: taskWriteStores(prepared.task)},
+            binding: {
+              targetStore: prepared.binding.targetStore,
+              bindingFingerprint: prepared.binding.bindingFingerprint,
+              imageCount: prepared.binding.boundImageCount,
+              boundNames: prepared.binding.boundNames,
+              publishPreparation: prepared.binding.publishPreparation,
+            },
+          });
+          return sendJson(res, 200, {
+            ok: true,
+            task: projectLinkOpsTaskForClient(prepared.task),
+            binding: prepared.binding,
+          });
+        } catch (error) {
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'link-ops-publish-assets-failed',
+            actor,
+            ...requestMeta(req),
+            task: {id: taskRef},
+            error: String(error?.message || error).slice(0, 500),
+          });
+          return sendJson(res, Number(error?.status || 400), error?.response || {ok: false, error: error?.message || String(error)});
+        } finally {
+          linkOpsExecutionLocks.delete(lockId);
         }
       }
       if (url.pathname === '/api/link-ops-assets') {

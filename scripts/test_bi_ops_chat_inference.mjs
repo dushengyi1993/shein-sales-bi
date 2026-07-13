@@ -208,6 +208,18 @@ try {
   check('missing-on-shelf-link searches all stores for source', missingListingTask?.targets?.sourceScope, 'all_stores');
   check('missing-on-shelf-link keeps SM-505A product ref', missingListingTask?.targets?.productRefs, xs => asArray(xs).some(x => /SM-505A/i.test(String(x))));
 
+  const localPathCommand = String.raw`给JSH店铺上一个SK-999食品料理机。图片见：\Desktop-bsa9rsp\共享文件夹\产品梳理汇总-2026\料理机SK-999\SK-999新图（杨欢）-已审可用\FY-JSH-11-SK-999-撒哈拉暖沙风宣传套图。标题见："Y:\产品资料包20251211\SOKONY\SK-999破壁机\最新资料.html"。`;
+  const localPathChat = await req(baseUrl, '/api/link-ops-chats', {
+    method: 'POST',
+    cookie,
+    body: {message: localPathCommand, askAgent: false},
+  });
+  const localPathTask = localPathChat.json?.autoTask || {};
+  const localPathRefs = asArray(localPathTask?.targets?.productRefs);
+  check('local-path publish command status', localPathChat.status, 200);
+  check('local-path publish keeps explicit SK-999', localPathRefs, xs => xs.some(ref => /SK-999/i.test(String(ref))));
+  check('local-path fragments are not product refs', localPathRefs, xs => !xs.some(ref => /BSA9RSP|JSH-11-SK-999|HTML|20251211/i.test(String(ref))));
+
   const scopedSourceCommand = '帮我给dl的505缝纫机再补一条链接。直接复制所有店铺里流量最高的那条链接。';
   const scopedChat = await req(baseUrl, '/api/link-ops-chats', {
     method: 'POST',
@@ -447,7 +459,7 @@ try {
   check('legacy noAutoTask cannot bypass action handling', Boolean(legacyNoAutoTask.id), true);
 
   tasks = JSON.parse(await fs.readFile(taskFile, 'utf8'));
-  check('task file has five tasks including missing-link and generic field tasks', asArray(tasks.tasks).length, 5);
+  check('task file has six tasks including local-path publish, missing-link and generic field tasks', asArray(tasks.tasks).length, 6);
   result.ok = result.checks.every(x => x.pass);
 } finally {
   child.kill('SIGTERM');

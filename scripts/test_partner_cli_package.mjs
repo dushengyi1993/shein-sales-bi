@@ -4,11 +4,14 @@ import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {BI_OPS_CLI_VERSION} from '../lib/partner_knowledge_cache.mjs';
+import {buildPartnerCliRelease, validatePartnerCliRelease} from '../lib/partner_cli_release.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const manifest = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'partner_cli_package.json'), 'utf8'));
 if (manifest.version !== BI_OPS_CLI_VERSION) throw new Error('partner package version and CLI version differ');
 if (manifest.entrypoint !== 'scripts/bi_ops_cli.mjs') throw new Error('partner package entrypoint is unexpected');
+if (manifest.bootstrap !== 'scripts/partner_cli_bootstrap.mjs') throw new Error('partner package bootstrap is unexpected');
+if (manifest.codexSkill !== 'codex/skills/shein-bi-ops/SKILL.md') throw new Error('partner package Codex skill is unexpected');
 const forbidden = /(?:\.env|secret|token|credential|cookie|session|\.jsonl)$/i;
 for (const relative of manifest.files || []) {
   if (path.isAbsolute(relative) || String(relative).split(/[\\/]+/).includes('..')) throw new Error(`partner package path escapes root: ${relative}`);
@@ -19,6 +22,10 @@ for (const relative of manifest.files || []) {
 for (const script of ['scripts/install_partner_bi_ops_cli.ps1', 'scripts/build_partner_bi_ops_cli_package.ps1']) {
   const bytes = await fs.readFile(path.join(ROOT, script));
   if ([...bytes].some(byte => byte > 127)) throw new Error(`${script} must remain ASCII for Windows PowerShell 5`);
+}
+const installerText = await fs.readFile(path.join(ROOT, 'scripts/install_partner_bi_ops_cli.ps1'), 'utf8');
+if (!installerText.includes('%~dp0bootstrap.mjs')) {
+  throw new Error('partner launcher must resolve bootstrap relative to itself so Unicode install paths remain valid');
 }
 
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'partner-cli-package-'));
@@ -39,7 +46,34 @@ try {
   });
   const output = JSON.parse(result.stdout);
   if (result.code !== 0 || output.version !== manifest.version) throw new Error(`packaged CLI did not start: ${result.stderr || result.stdout}`);
-  console.log(JSON.stringify({ok: true, version: manifest.version, fileCount: manifest.files.length}));
+  const release = await buildPartnerCliRelease({sourceRoot: ROOT});
+  const validated = validatePartnerCliRelease(release);
+  if (validated.version !== manifest.version) throw new Error('validated release version differs from package');
+  if (!validated.files.some(file => file.path === manifest.codexSkill)) throw new Error('validated release omitted Codex skill');
+
+  const installRoot = path.join(temp, 'managed');
+  const versionRoot = path.join(installRoot, 'versions', manifest.version);
+  for (const relative of manifest.files) {
+    const target = path.join(versionRoot, relative);
+    await fs.mkdir(path.dirname(target), {recursive: true});
+    await fs.copyFile(path.join(ROOT, relative), target);
+  }
+  const entrypoint = path.join(versionRoot, manifest.entrypoint);
+  await fs.mkdir(installRoot, {recursive: true});
+  await fs.copyFile(path.join(versionRoot, manifest.bootstrap), path.join(installRoot, 'bootstrap.mjs'));
+  await fs.writeFile(path.join(installRoot, 'current.json'), `${JSON.stringify({version: manifest.version, entrypoint})}\n`, 'utf8');
+  const boot = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.join(installRoot, 'bootstrap.mjs'), 'version'], {cwd: installRoot, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']});
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', chunk => { stdout += chunk.toString(); });
+    child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+    child.on('error', reject);
+    child.on('close', code => resolve({code, stdout, stderr}));
+  });
+  const bootOutput = JSON.parse(boot.stdout);
+  if (boot.code !== 0 || bootOutput.version !== manifest.version || bootOutput.managed !== true) throw new Error(`managed bootstrap did not start current CLI: ${boot.stderr || boot.stdout}`);
+  console.log(JSON.stringify({ok: true, version: manifest.version, fileCount: manifest.files.length, bundleSha256: validated.bundleSha256, managedBootstrap: true}));
 } finally {
   await fs.rm(temp, {recursive: true, force: true});
 }

@@ -163,6 +163,9 @@ const BI_OPS_V2_JS_FILES = [
   'lib/owner_knowledge_local_collector.mjs',
   'lib/owner_knowledge_distribution.mjs',
   'lib/partner_knowledge_cache.mjs',
+  'lib/partner_cli_release.mjs',
+  'lib/partner_cli_updater.mjs',
+  'lib/link_ops_publish_asset_binding.mjs',
   'scripts/owner_knowledge_sync.mjs',
   'scripts/owner_knowledge_admin.mjs',
   'scripts/validate_owner_knowledge_distribution.mjs',
@@ -173,6 +176,10 @@ const BI_OPS_V2_JS_FILES = [
   'scripts/test_owner_knowledge_distribution.mjs',
   'scripts/test_partner_knowledge_cache.mjs',
   'scripts/test_partner_cli_package.mjs',
+  'scripts/test_partner_cli_updater.mjs',
+  'scripts/test_partner_cli_portal_release.mjs',
+  'scripts/partner_cli_bootstrap.mjs',
+  'scripts/test_link_ops_publish_asset_binding.mjs',
   'scripts/test_owner_knowledge_portal_flow.mjs',
   'scripts/test_owner_knowledge_execute_distribution_guard.mjs',
   'scripts/test_owner_knowledge_execute_toctou_guard.mjs',
@@ -209,6 +216,9 @@ const BI_OPS_V2_REQUIRED_ARTIFACTS = [
   'scripts/install_partner_bi_ops_cli.ps1',
   'scripts/build_partner_bi_ops_cli_package.ps1',
   'config/partner_cli_package.json',
+  'AGENTS.md',
+  'codex/skills/shein-bi-ops/SKILL.md',
+  'docs/partner-cli-release-2026-07-13.md',
   '.github/workflows/owner-knowledge.yml',
 ];
 CHECK_FILES.push(...BI_OPS_V2_JS_FILES);
@@ -355,6 +365,7 @@ async function main() {
   results.push({name: 'real-write whitelist scope smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_write_whitelist_scope.mjs']))});
   results.push({name: 'production real-write safety smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_production_safety.mjs']))});
   results.push({name: 'copy_product_draft success lifecycle smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs']))});
+  results.push({name: 'copy_product_draft approved asset binding smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs', '--asset-binding']))});
   results.push({name: 'copy_product_draft searchProduct readback smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs', '--search-product-readback']))});
   results.push({name: 'copy_product_draft generic product lifecycle smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs', '--generic-product']))});
   results.push({name: 'copy_product_draft chat natural generic lifecycle smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs', '--generic-product', '--chat-natural']))});

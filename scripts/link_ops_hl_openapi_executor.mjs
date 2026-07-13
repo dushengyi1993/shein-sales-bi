@@ -22,6 +22,10 @@ import {
   validateStoreIdentity,
 } from '../lib/shein_store_identity.mjs';
 import {buildProductDisplayName} from '../lib/product_display_name.mjs';
+import {
+  applyExplicitPublishPreparationOverrides,
+  taskHasUnboundImageAssets,
+} from '../lib/link_ops_publish_asset_binding.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CONFIG = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
@@ -70,6 +74,7 @@ function parseArgs(argv) {
     store: TARGET_STORE,
     confirm: '',
     quiet: false,
+    payloadOut: '',
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -83,6 +88,7 @@ function parseArgs(argv) {
     else if (a === '--dry-run') args.mode = 'dry-run';
     else if (a === '--execute') args.mode = 'execute';
     else if (a === '--confirm') args.confirm = String(argv[++i] || '').trim();
+    else if (a === '--payload-out') args.payloadOut = path.resolve(argv[++i]);
     else if (a === '--quiet') args.quiet = true;
     else if (a === '--help' || a === '-h') {
       console.log(`Usage:
@@ -634,6 +640,14 @@ async function findPublishPayload(task) {
 async function findOrBuildPublishPayload(task, {targetStore, preferredSource = null}) {
   const existing = await findPublishPayload(task);
   if (existing?.payload) return existing;
+  if (taskHasUnboundImageAssets(task)) {
+    return {
+      source: 'unbound_image_assets',
+      payload: null,
+      inferred: inferSourceProductFromTask(task, {targetStore}),
+      generationError: '任务已经上传本地图片，但这些图片尚未转换并绑定到发布 payload；已拒绝静默回退到源链接图片。请先使用同一任务的图片准备/绑定流程。',
+    };
+  }
   const inferred = inferSourceProductFromTask(task, {targetStore});
   const biCandidates = await inferSourceCandidatesFromBi(task, {targetStore});
   const candidates = uniqueSourceCandidates([preferredSource, inferred, ...biCandidates]);
@@ -688,6 +702,51 @@ async function findOrBuildPublishPayload(task, {targetStore, preferredSource = n
       metrics: x.metrics || null,
     })),
     generationError: errors.slice(0, 8).join('；') || '未能从候选源链接生成发布 payload。',
+  };
+}
+
+function taskPublishPreparationOverrides(task = {}, executionContext = {}) {
+  return {
+    ...(task?.publishPreparation && typeof task.publishPreparation === 'object' ? task.publishPreparation : {}),
+    ...(task?.metadata?.publishPreparation && typeof task.metadata.publishPreparation === 'object' ? task.metadata.publishPreparation : {}),
+    ...(task?.targets?.publishPreparation && typeof task.targets.publishPreparation === 'object' ? task.targets.publishPreparation : {}),
+    ...(executionContext?.publishPreparation && typeof executionContext.publishPreparation === 'object' ? executionContext.publishPreparation : {}),
+    standardGoodsSn: firstNonEmpty(
+      executionContext?.publishPreparation?.standardGoodsSn,
+      task?.publishPreparation?.standardGoodsSn,
+      task?.targets?.standardGoodsSn,
+      task?.standardGoodsSn,
+    ),
+    supplyPrice: firstNonEmpty(
+      executionContext?.publishPreparation?.supplyPrice,
+      task?.publishPreparation?.supplyPrice,
+      task?.targets?.supplyPrice,
+      task?.supplyPrice,
+    ),
+    inventory: firstNonEmpty(
+      executionContext?.publishPreparation?.inventory,
+      task?.publishPreparation?.inventory,
+      task?.targets?.inventory,
+      task?.inventory,
+    ),
+    categoryId: firstNonEmpty(
+      executionContext?.publishPreparation?.categoryId,
+      task?.publishPreparation?.categoryId,
+      task?.targets?.categoryId,
+      task?.categoryId,
+    ),
+    titleAr: firstNonEmpty(
+      executionContext?.publishPreparation?.titleAr,
+      task?.publishPreparation?.titleAr,
+      task?.targets?.titleAr,
+      task?.titleAr,
+    ),
+    titleEn: firstNonEmpty(
+      executionContext?.publishPreparation?.titleEn,
+      task?.publishPreparation?.titleEn,
+      task?.targets?.titleEn,
+      task?.titleEn,
+    ),
   };
 }
 
@@ -1955,6 +2014,16 @@ function taskShuffleImagesEnabled(task, executionContext = {}) {
   );
 }
 
+function taskApprovedImageOrderLocked(task) {
+  const binding = task?.publishAssetBinding || task?.metadata?.publishAssetBinding || null;
+  return Boolean(
+    binding?.sourceApproved === true
+    && binding?.authority === 'human_reviewed_source'
+    && binding?.boundAt
+    && binding?.bindingFingerprint
+  );
+}
+
 function cryptoShuffle(values) {
   const out = [...values];
   for (let i = out.length - 1; i > 0; i -= 1) {
@@ -2836,7 +2905,18 @@ async function main() {
     if (templateApplied.call) calls.push(templateApplied.call);
     const standardGoodsSnApplied = applyTargetStandardGoodsSn(templateApplied.payload, taskStandardGoodsSn(task, effectiveExecutionContext));
     const randomSupplyPriceApplied = applyRandomSupplyPrice(standardGoodsSnApplied.payload, task, effectiveExecutionContext, targetStore);
-    const imageShuffleApplied = shufflePublishDetailImages(randomSupplyPriceApplied.payload, task, effectiveExecutionContext);
+    const explicitPreparationApplied = applyExplicitPublishPreparationOverrides(
+      randomSupplyPriceApplied.payload,
+      taskPublishPreparationOverrides(task, effectiveExecutionContext),
+    );
+    // A reviewed image package is an operator-owned fact, not an AI suggestion.
+    // Preserve its explicit order even when an older task/template still carries
+    // shuffleImages=true; otherwise a later preflight can silently rewrite the
+    // sequence that the operator just approved and locked to this task.
+    const approvedImageOrderLocked = taskApprovedImageOrderLocked(task);
+    const imageShuffleApplied = approvedImageOrderLocked
+      ? {payload: explicitPreparationApplied.payload, applied: ['publish_asset_binding.approved_order_locked']}
+      : shufflePublishDetailImages(explicitPreparationApplied.payload, task, effectiveExecutionContext);
     const imageSortApplied = ensurePublishImageSortGlobalUnique(imageShuffleApplied.payload);
     publishPayload = imageSortApplied.payload;
     const targetDuplicateCheck = await inspectTargetDuplicateProducts(client, publishPayload, targetStore);
@@ -2849,6 +2929,7 @@ async function main() {
       ...templateApplied.applied,
       ...standardGoodsSnApplied.applied,
       ...randomSupplyPriceApplied.applied,
+      ...explicitPreparationApplied.applied,
       ...imageShuffleApplied.applied,
       ...imageSortApplied.applied,
     ];
@@ -2857,6 +2938,8 @@ async function main() {
     evidence.publishFillInStandard = publishStandardApplied.evidence;
     evidence.attributeTemplate = templateApplied.evidence;
     evidence.randomSupplyPrice = randomSupplyPriceApplied.evidence;
+    evidence.explicitPublishPreparation = explicitPreparationApplied.evidence;
+    evidence.approvedImageOrderLocked = approvedImageOrderLocked;
     evidence.targetDuplicateCheck = targetDuplicateCheck.evidence;
     appendUnique(warnings, liveSourceNames.warnings);
     appendUnique(warnings, publishStandardApplied.warnings);
@@ -3029,6 +3112,7 @@ async function main() {
 
   const outPath = path.join(args.outDir, `${runId}.local.json`);
   await writeJson(outPath, output);
+  if (args.payloadOut && publishPayload) await writeJson(args.payloadOut, publishPayload);
   output.savedTo = rel(outPath);
   if (!args.quiet) console.log(JSON.stringify(output, null, 2));
   process.exitCode = output.ok ? 0 : 2;
@@ -3050,8 +3134,10 @@ export const __testHooks = {
   applyAttributeTemplateRules,
   inspectTargetDuplicateProducts,
   applyRandomSupplyPrice,
+  applyExplicitPublishPreparationOverrides,
   applyTargetStandardGoodsSn,
   resolvePreflightProductLock,
+  taskApprovedImageOrderLocked,
   shufflePublishDetailImages,
   ensurePublishImageSortGlobalUnique,
   normalizePublishImageType,

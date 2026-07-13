@@ -29,6 +29,7 @@ const PREVALID_RETRY = process.argv.includes('--prevalid-retry');
 const GENERIC_PRODUCT = process.argv.includes('--generic-product');
 const CHAT_NATURAL = process.argv.includes('--chat-natural');
 const SEARCH_PRODUCT_READBACK = process.argv.includes('--search-product-readback');
+const ASSET_BINDING = process.argv.includes('--asset-binding');
 const CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
 const tmpBase = path.join(ROOT, 'tmp');
 await fs.mkdir(tmpBase, {recursive: true});
@@ -67,6 +68,16 @@ function extractTaskId(json) {
 async function rawTaskById(id) {
   const data = JSON.parse(await fs.readFile(taskFile, 'utf8').catch(() => '{"tasks":[]}'));
   return asArray(data?.tasks).find(task => String(task?.id || '') === String(id || '')) || null;
+}
+
+async function updateRawTaskById(id, update) {
+  const data = JSON.parse(await fs.readFile(taskFile, 'utf8').catch(() => '{"tasks":[]}'));
+  const tasks = asArray(data?.tasks);
+  const index = tasks.findIndex(task => String(task?.id || '') === String(id || ''));
+  if (index < 0) throw new Error(`Task not found for test update: ${id}`);
+  tasks[index] = update(tasks[index]);
+  await fs.writeFile(taskFile, JSON.stringify({...data, tasks}, null, 2), 'utf8');
+  return tasks[index];
 }
 
 function writeAuditFromExecute(json) {
@@ -717,11 +728,56 @@ try {
         name: 'publish-payload.json',
         type: 'application/json',
         dataBase64: b64Json({publishPayload}),
-      }],
+      }, ...(ASSET_BINDING ? [{
+        name: 'approved-local-main.png',
+        type: 'image/png',
+        dataBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/ax2Z7kAAAAASUVORK5CYII=',
+      }] : [])],
     },
   });
   check('upload payload status', uploaded.status, 200);
-  check('uploaded one payload asset', asArray(uploaded.json?.assets).length, 1);
+  check(ASSET_BINDING ? 'uploaded payload and raw image assets before same-task binding' : 'uploaded one payload asset', asArray(uploaded.json?.assets).length, ASSET_BINDING ? 2 : 1);
+
+  if (ASSET_BINDING) {
+    // Simulate an older task/template preference. The subsequently approved
+    // package must override this AI/randomization preference and retain the
+    // exact human-reviewed order through preflight and real execution.
+    await updateRawTaskById(taskId, task => ({...task, shuffleImages: true}));
+    const binding = await req('/api/link-ops-publish-assets', {
+      method: 'POST',
+      cookie,
+      body: {
+        taskId,
+        store: 'HL',
+        sourceApproved: true,
+        publishPreparation: {
+          standardGoodsSn: taskStandardGoodsSn,
+          supplyPrice: 210,
+          inventory: 100,
+          titleAr: productCase.arName,
+          titleEn: productCase.englishName,
+        },
+        bindings: [
+          {name: '02-approved-main.png', role: 'mainCover', imageType: 1, imageUrl: 'https://img.shein.com/approved/main.png', width: 900, height: 1200, order: 1},
+          {name: '05-approved-carousel.png', role: 'carouselSecondCover', imageType: 1, imageUrl: 'https://img.shein.com/approved/carousel.png', width: 900, height: 1200, order: 2},
+          {name: '11-approved-15-speed.png', role: 'detail', imageType: 2, imageUrl: 'https://img.shein.com/approved/15-speed.png', width: 900, height: 1200, order: 3},
+          {name: '12-approved-45db.png', role: 'detail', imageType: 2, imageUrl: 'https://img.shein.com/approved/45db.png', width: 900, height: 1200, order: 4},
+          {name: '03-approved-square.png', role: 'squareImage', imageType: 5, imageUrl: 'https://img.shein.com/approved/square.png', width: 1254, height: 1254, order: 5},
+        ],
+      },
+    });
+    const boundRawTask = await rawTaskById(taskId);
+    check('approved publish asset binding status', binding.status, 200);
+    check('approved publish asset binding stays on task', binding.json?.task?.id, taskId);
+    check('approved publish asset binding payload source', binding.json?.binding?.payloadSource, 'task');
+    check('approved publish asset binding keeps all images', binding.json?.binding?.boundImageCount, 5);
+    check('approved publish asset binding measures square', binding.json?.binding?.squareDimensions, '1254x1254');
+    check('bound payload no longer uses source image', JSON.stringify(boundRawTask?.openapiPublishPayload || {}), text => !text.includes('example.invalid'));
+    check('bound payload retains 15 speed image', JSON.stringify(boundRawTask?.openapiPublishPayload || {}), text => text.includes('15-speed.png'));
+    check('bound payload retains 45dB image', JSON.stringify(boundRawTask?.openapiPublishPayload || {}), text => text.includes('45db.png'));
+    check('bound payload locks supply price', boundRawTask?.openapiPublishPayload?.skc_list?.[0]?.sku_list?.[0]?.cost_info?.cost_price, '210.00');
+    check('bound payload locks exact supplier code', boundRawTask?.openapiPublishPayload?.skc_list?.[0]?.supplier_code, taskStandardGoodsSn);
+  }
 
   let dryRun = null;
   let dryRunTask = uploaded.json?.task || {};
@@ -776,6 +832,8 @@ try {
   const lifecycle = executedRawTask?.lifecycle || executedRawTask?.execution?.lifecycle || taskLifecycle(executed.json);
   const execEvidence = executorEvidenceFromAudit(writeAudit, 'HL');
   const executedTask = executedRawTask || executed.json?.task || {};
+  const executedProductRun = asArray(executedTask?.execution?.openApiProductExecutors)
+    .find(row => String(row?.storeKey || '').trim().toUpperCase() === 'HL') || null;
   const chatAnswer = CHAT_NATURAL ? asArray(executed.json?.session?.messages).at(-1)?.content || '' : '';
   result.summary.executedStatus = executed.status;
   result.summary.chatAnswer = chatAnswer;
@@ -880,6 +938,25 @@ try {
   const publishedImageSorts = asArray(publishCall?.body?.skc_list?.[0]?.image_info?.image_info_list).map(row => Number(row?.image_sort));
   check('publish skc image_sort globally unique', new Set(publishedImageSorts).size, publishedImageSorts.length);
   check('publish square image sort moved away from main sort', publishCall?.body?.skc_list?.[0]?.image_info?.image_info_list?.find(row => Number(row?.image_type) === 5)?.image_sort, value => Number(value) > 1);
+  if (ASSET_BINDING) {
+    const publishedApprovedImages = asArray(publishCall?.body?.skc_list?.[0]?.image_info?.image_info_list)
+      .slice()
+      .sort((a, b) => Number(a?.image_sort) - Number(b?.image_sort));
+    const expectedApprovedImageOrder = [
+      'https://img.shein.com/approved/main.png',
+      'https://img.shein.com/approved/15-speed.png',
+      'https://img.shein.com/approved/45db.png',
+      'https://img.shein.com/approved/square.png',
+    ];
+    check(
+      'approved image order remains locked despite legacy shuffle flag',
+      publishedApprovedImages.map(row => row?.image_url),
+      value => JSON.stringify(value) === JSON.stringify(expectedApprovedImageOrder),
+    );
+    check('executor records approved order lock', asArray(executedProductRun?.payload?.safeDefaults).includes('publish_asset_binding.approved_order_locked'), true);
+    check('executor does not apply detail shuffle to approved package', asArray(executedProductRun?.payload?.safeDefaults).some(row => String(row).includes('detail_shuffle_sort')), false);
+    check('executor audit marks approved image order locked', Boolean(execEvidence?.approvedImageOrderLocked), true);
+  }
   const publishedAttrs = asArray(publishCall?.body?.product_attribute_list);
   const publishedInputCurrent = publishedAttrs.find(row => Number(row?.attribute_id) === 1002323);
   const publishedInputVoltage = publishedAttrs.find(row => Number(row?.attribute_id) === 1002322);

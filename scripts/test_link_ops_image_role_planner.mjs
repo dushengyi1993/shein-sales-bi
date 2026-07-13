@@ -98,6 +98,23 @@ try {
   check('no sku package does not assign SKU image', noSkuPlan.roles.skuImage, null);
   check('no sku package orders selling before parameter before scene', noSkuPlan.roles.frontendDetailImages.map(x => x.name).join(' > '), x => { const s = String(x); const paramIdx = s.indexOf('04-参数规格图'); const lastScene = s.endsWith('07-露台场景.png'); const sellingBeforeParam = s.indexOf('08-2000W卖点') < paramIdx; return paramIdx > 0 && lastScene && sellingBeforeParam; });
 
+  const approved = path.join(tmpRoot, 'SK-999新图-已审可用', 'FY-JSH-11-SK-999');
+  for (const [name, width, height] of [
+    ['01-6000W 撒哈拉暖沙生活海报-v1.png', 900, 1200],
+    ['02-6000W 纯产品暖沙旗舰封面-v1.png', 900, 1200],
+    ['03-1-1 暖沙多功能方形封面-v1.png', 1254, 1254],
+    ['05-三大暖沙购买理由轮播图-v1.png', 900, 1200],
+    ['11-15档调速与简单操作卖点图-v1.png', 900, 1200],
+    ['12-45dB静音与一键清洗卖点图-v1.png', 900, 1200],
+    ['14-8叶刀头与陶瓷防粘底盘特写-v2.png', 900, 1200],
+  ]) await writePng(approved, name, width, height);
+  const approvedPlan = await planLinkOpsImageRoles({dir: approved});
+  check('approved source auto detected', approvedPlan.approval?.sourceApproved, true);
+  check('pure product flagship cover is eligible main', approvedPlan.roles.mainCover?.name, '02-6000W 纯产品暖沙旗舰封面-v1.png');
+  check('approved square uses measured dimensions', `${approvedPlan.roles.squareImage?.width}x${approvedPlan.roles.squareImage?.height}`, '1254x1254');
+  check('approved 15 speed image not silently excluded', approvedPlan.roles.ignoredAbTestCovers.map(x => x.name).includes('11-15档调速与简单操作卖点图-v1.png'), false);
+  check('approved 45dB image remains assignable', JSON.stringify(approvedPlan.roles), text => text.includes('12-45dB静音与一键清洗卖点图-v1.png'));
+
   const outFile = path.join(tmpRoot, 'roles.json');
   const cli = await runCli(['plan-images', '--image-dir', base, '--out', outFile]);
   check('bi_ops_cli plan-images exit', cli.code, 0);

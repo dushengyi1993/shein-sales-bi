@@ -12,11 +12,18 @@ import path from 'node:path';
 import os from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import crypto from 'node:crypto';
 import {
   BI_OPS_CLI_VERSION,
   DEFAULT_PARTNER_KNOWLEDGE_CACHE_DIR,
   ensurePartnerKnowledgeCurrent,
 } from '../lib/partner_knowledge_cache.mjs';
+import {
+  checkAndInstallPartnerCliUpdate,
+  findManagedPartnerCliInstallRoot,
+  relaunchPartnerCli,
+} from '../lib/partner_cli_updater.mjs';
+import {planLinkOpsImageRoles} from '../lib/link_ops_image_role_planner.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_BASE_URL = process.env.SHEIN_BI_BASE_URL || 'https://sa.dushengyi.cc';
@@ -65,6 +72,13 @@ function parseArgs(argv) {
     imageUrl: '',
     imageType: 0,
     imageDir: '',
+    assetFiles: [],
+    approvedAssets: false,
+    standardGoodsSn: '',
+    supplyPrice: null,
+    inventory: null,
+    titleAr: '',
+    titleEn: '',
     outputFile: '',
     openapiConfigFile: '',
     openapiStoreTruthFile: '',
@@ -130,10 +144,19 @@ function parseArgs(argv) {
     else if (a === '--limit') args.limit = Number(argv[++i] || 40);
     else if (a === '--pretty') args.json = false;
     else if (a === '--require-real-submit' || a === '--require-execute') args.requireRealSubmit = true;
-    else if (a === '--file' || a === '--image-file') args.imageFile = path.resolve(String(argv[++i] || ''));
+    else if (a === '--file' || a === '--image-file') {
+      args.imageFile = path.resolve(String(argv[++i] || ''));
+      args.assetFiles.push(args.imageFile);
+    }
     else if (a === '--url' || a === '--image-url') args.imageUrl = String(argv[++i] || '').trim();
     else if (a === '--image-type' || a === '--type') args.imageType = Number(argv[++i] || 0);
     else if (a === '--image-dir' || a === '--dir') args.imageDir = path.resolve(String(argv[++i] || ''));
+    else if (a === '--approved-assets' || a === '--source-approved') args.approvedAssets = true;
+    else if (a === '--standard-goods-sn' || a === '--supplier-code') args.standardGoodsSn = String(argv[++i] || '').trim();
+    else if (a === '--supply-price') args.supplyPrice = Number(argv[++i]);
+    else if (a === '--inventory' || a === '--stock-qty') args.inventory = Number(argv[++i]);
+    else if (a === '--title-ar') args.titleAr = String(argv[++i] || '').trim();
+    else if (a === '--title-en') args.titleEn = String(argv[++i] || '').trim();
     else if (a === '--out' || a === '--output') args.outputFile = path.resolve(String(argv[++i] || ''));
     else if (a === '--format') args.format = String(argv[++i] || '').trim();
     else if (a === '--openapi-config') args.openapiConfigFile = path.resolve(String(argv[++i] || ''));
@@ -221,6 +244,9 @@ Usage:
   node scripts/bi_ops_cli.mjs doctor
   node scripts/bi_ops_cli.mjs knowledge-status
   node scripts/bi_ops_cli.mjs version
+  node scripts/bi_ops_cli.mjs update
+  node scripts/bi_ops_cli.mjs update-status
+  node scripts/bi_ops_cli.mjs guide
   node scripts/bi_ops_cli.mjs doctor --operation copy_product_draft --target-stores HL
   node scripts/bi_ops_cli.mjs doctor --operation activate_link --stores DL --require-real-submit
   node scripts/bi_ops_cli.mjs doctor --operation retire_link --stores DL --require-real-submit
@@ -229,6 +255,7 @@ Usage:
   node scripts/bi_ops_cli.mjs maintenance-readiness --operation retire_link --expect blocked
   node scripts/bi_ops_cli.mjs maintenance-readiness --operation retire_link --doc-evidence <schema.json> --store-probe <probe.json> --readback-evidence <readback.json> --expect pilot_ready
   node scripts/bi_ops_cli.mjs plan-images --image-dir <图片文件夹> [--out roles.json]
+  node scripts/bi_ops_cli.mjs prepare-publish --task-id <id> --store JSH --image-dir <已审可用图片目录> --approved-assets --standard-goods-sn "(全)SK-999食品料理机" --supply-price 210 --inventory 100
   node scripts/bi_ops_cli.mjs retire-candidates --file <v3-times.csv> --performance-date 2026-07-04 [--out <dir>]
   node scripts/bi_ops_cli.mjs upload-pic --store FY --image-type 2 --file <image.jpg> [--mode dry-run|execute]
   node scripts/bi_ops_cli.mjs transform-pic --store FY --image-type 2 --url <https://...> [--mode dry-run|execute]
@@ -277,6 +304,11 @@ Options:
                    maintenance-readiness 用；维护真实写的脱敏证据文件
   --expect         maintenance-readiness 用；blocked / schema_ready / pilot_ready
   --image-dir      plan-images 用；只扫描本地图包并输出角色规划，不上传、不提交
+  --approved-assets  prepare-publish 用；确认图片目录已经过人工审核，AI 不得按语义擅自剔图
+  --standard-goods-sn / --supply-price / --inventory
+                   prepare-publish 用；把货号、供货价和库存锁到同一任务
+  --title-ar / --title-en / --category-id
+                   prepare-publish 用；可选的精确标题与末级分类覆盖
   --performance-date retire-candidates 用；按该表现日期计算首次上架 15 天保护窗
   --file / --url   图片工具用；本地文件或外链图片地址
   --image-type     图片工具用；1主图 / 2细节图 / 5方块图 / 6色块图 / 7详情图
@@ -289,7 +321,9 @@ Safety:
   - 密码只用于 login 请求，不写入 session 文件。
   - doctor 只做本机/云端连通性和权限自检，不创建任务、不触发预检、不执行 SHEIN 写。
   - maintenance-readiness 只读检查脱敏证据，不连接 SHEIN，不打开真实写。
-  - plan-images 只做本地图包角色规划，备用目录和“产品封面/AB测试”图不提交。
+  - 用户当轮明确指令和“已审可用”素材高于 AI 语义推断；标题未采用某参数不等于图片禁用。
+  - plan-images 只做本地图包角色规划，备用目录和明确“产品封面/AB测试”图不提交；会读取真实尺寸再判断方形图。
+  - prepare-publish 上传后把图片 URL 和显式字段绑定回同一 task，再重新预演；不会新建替代任务，也不会静默复制源图。
   - retire-candidates 只生成下架候选明细，不执行下架；固定排除有新品标签、首次上架 15 天内或缺首次上架时间的链接，并要求人工确认。
   - 本机因白名单/身份边界不能直连真实 SHEIN OpenAPI；bi_ops_cli 的真实 OpenAPI 调用必须走云端 BI 服务。
   - upload-pic / transform-pic 的 execute 委托云端 /api/openapi-image-asset/*；本地只做文件封装和权限会话传递。
@@ -300,6 +334,7 @@ Safety:
   - 所有任务创建/预检/执行/审计都走云端账号权限和审计。
   - ask/chat 通过同一 BI 账号、会话归属、模型限流和审计边界；profile 只影响理解深度，不改变写权限。
   - 每个云端业务命令开始前会用 ETag 检查负责人规则 manifest；有更新才原子下载，普通账号没有反向发布权限。
+  - 受管安装还会在业务命令前检查 CLI release；有新版本时校验逐文件和 bundle SHA256，原子安装后重启同一命令。
   - execute 仍需服务端确认任务已预检通过，并且确认文本精确匹配。
   - resolve 只用于已提交待回读/需人工处理任务的人工核销；服务端只允许全店管理账号执行。`;
 }
@@ -372,7 +407,7 @@ function cookieFromSetCookie(headers) {
 }
 
 async function request(args, pathname, {method = 'GET', body, auth = true} = {}) {
-  const headers = {'accept': 'application/json', 'user-agent': 'shein-bi-ops-cli/1.0'};
+  const headers = {'accept': 'application/json', 'user-agent': `shein-bi-ops-cli/${BI_OPS_CLI_VERSION}`};
   if (body !== undefined) headers['content-type'] = 'application/json';
   if (auth) {
     const session = await readSession(args.sessionFile);
@@ -403,7 +438,39 @@ const KNOWLEDGE_CHECK_COMMANDS = new Set([
   'doctor', 'me', 'capabilities', 'ask', 'chats', 'jobs', 'job', 'wait-job', 'wait_job',
   'chat', 'tasks', 'create', 'preflight', 'execute', 'resolve', 'audit',
   'upload-pic', 'upload_pic', 'transform-pic', 'transform_pic',
+  'prepare-publish', 'prepare_publish',
 ]);
+
+const AUTO_UPDATE_COMMANDS = new Set([
+  ...KNOWLEDGE_CHECK_COMMANDS,
+  'plan-images', 'plan_images',
+]);
+
+async function refreshPartnerCli(args, {force = false, checkOnly = false} = {}) {
+  const installRoot = await findManagedPartnerCliInstallRoot({entryRoot: ROOT});
+  if (!installRoot) return {ok: true, managed: false, updated: false, currentVersion: BI_OPS_CLI_VERSION};
+  const session = await readSession(args.sessionFile);
+  if (!session.cookie) throw new Error('尚未登录 BI，无法检查 CLI 更新');
+  const result = await checkAndInstallPartnerCliUpdate({
+    baseUrl: args.baseUrl,
+    cookie: session.cookie,
+    currentVersion: BI_OPS_CLI_VERSION,
+    entryRoot: ROOT,
+    installRoot,
+    force,
+    checkOnly,
+  });
+  if (result.updated && !args.json) process.stderr.write(`CLI 已安全更新：${result.currentVersion} -> ${result.latestVersion}\n`);
+  return result;
+}
+
+async function refreshPartnerCliAndRelaunchIfNeeded(args, {force = false} = {}) {
+  const result = await refreshPartnerCli(args, {force});
+  if (!result.updated) return {relaunched: false, result};
+  const relaunched = await relaunchPartnerCli({entrypoint: result.entrypoint, argv: process.argv.slice(2)});
+  process.exitCode = relaunched.code;
+  return {relaunched: true, result, relaunched};
+}
 
 async function refreshPartnerKnowledge(args, {strict = false} = {}) {
   const session = await readSession(args.sessionFile);
@@ -418,13 +485,13 @@ async function refreshPartnerKnowledge(args, {strict = false} = {}) {
     cliVersion: BI_OPS_CLI_VERSION,
     strict,
   });
-  if (result.updated) {
+  if (result.updated && !args.json) {
     process.stderr.write(`负责人规则已更新并校验：${String(result.manifest?.sourceCommit || result.manifest?.fingerprint || '').slice(0, 12)}\n`);
   }
-  if (result.warning) {
+  if (result.warning && !args.json) {
     process.stderr.write(`负责人规则检查提示：${result.warning}\n`);
   }
-  if (result.cliUpdateRecommended) {
+  if (result.cliUpdateRecommended && !args.json) {
     process.stderr.write(`CLI 有推荐更新：当前 ${BI_OPS_CLI_VERSION}，推荐 ${result.recommendedCliVersion}\n`);
   }
   return result;
@@ -794,12 +861,155 @@ async function runImageAssetExecutor(args, action) {
 async function runPlanImages(args) {
   if (!args.imageDir) throw new Error('plan-images requires --image-dir <图片文件夹>');
   const commandArgs = ['--dir', args.imageDir];
+  if (args.approvedAssets) commandArgs.push('--approved');
   if (args.outputFile) commandArgs.push('--out', args.outputFile);
   if (!args.json) commandArgs.push('--pretty');
   const result = await runLocalNodeScript('scripts/link_ops_plan_image_roles.mjs', commandArgs);
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.stderr) process.stderr.write(result.stderr);
   process.exitCode = result.code || 0;
+}
+
+function publishPreparationFromArgs(args) {
+  if (args.supplyPrice !== null && !Number.isFinite(args.supplyPrice)) throw new Error('--supply-price must be a number');
+  if (args.inventory !== null && (!Number.isFinite(args.inventory) || args.inventory < 0 || !Number.isInteger(args.inventory))) {
+    throw new Error('--inventory must be a non-negative integer');
+  }
+  const categoryId = String(args.categoryId || '').trim();
+  if (categoryId && (!/^\d+$/.test(categoryId) || Number(categoryId) <= 0)) throw new Error('--category-id must be a positive integer');
+  return {
+    standardGoodsSn: args.standardGoodsSn || '',
+    supplyPrice: args.supplyPrice,
+    inventory: args.inventory,
+    categoryId: categoryId ? Number(categoryId) : null,
+    titleAr: args.titleAr || '',
+    titleEn: args.titleEn || '',
+  };
+}
+
+function preparedImageAssignments(plan) {
+  const roles = plan?.roles || {};
+  const rows = [];
+  const add = (item, role, imageType, order) => {
+    if (!item?.path) return;
+    rows.push({
+      name: item.name || path.basename(item.path),
+      path: item.path,
+      relativePath: item.relativePath || item.name || '',
+      role,
+      imageType,
+      order,
+      width: Number(item.width || 0),
+      height: Number(item.height || 0),
+    });
+  };
+  add(roles.mainCover, 'mainCover', 1, 0);
+  add(roles.carouselSecondCover, 'carouselSecondCover', 1, 10);
+  for (const [index, item] of (roles.otherDetailImages || []).entries()) add(item, 'detail', 2, 20 + index);
+  add(roles.squareImage, 'squareImage', 5, 100);
+  add(roles.skuImage, 'skuImage', 1, 110);
+  const seen = new Set();
+  return rows.filter(row => {
+    const key = path.resolve(row.path).toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).sort((a, b) => a.order - b.order);
+}
+
+async function runPreparePublish(args) {
+  if (!args.taskId) throw new Error('prepare-publish requires --task-id <id>');
+  if (!args.imageDir) throw new Error('prepare-publish requires --image-dir <reviewed image folder>');
+  const store = [...new Set([...(args.writeStores || []), ...(args.stores || [])])][0] || '';
+  if (!store) throw new Error('prepare-publish requires --store <target store>');
+  const plan = await planLinkOpsImageRoles({dir: args.imageDir, sourceApproved: args.approvedAssets ? true : null});
+  const sourceApproved = args.approvedAssets || plan.approval?.sourceApproved === true;
+  if (!sourceApproved) throw new Error('图片目录未标记为“已审可用”；请确认人工审核后加 --approved-assets');
+  if (!plan.ok) throw new Error(`图片角色规划未通过：${(plan.blockers || []).join('；')}`);
+  if (!plan.roles?.squareImage) throw new Error('读取真实图片尺寸后仍未找到 1:1 方形图，已在上传前停止');
+  const assignments = preparedImageAssignments(plan);
+  if (!assignments.length) throw new Error('没有可上传并绑定的审核图片');
+  const uploaded = [];
+  try {
+    for (const [index, assignment] of assignments.entries()) {
+      const file = await fileToCloudUploadBody(assignment.path);
+      if (!['image/jpeg', 'image/png'].includes(file.type)) throw new Error(`SHEIN upload-pic 不支持该格式：${assignment.name}`);
+      if (!args.json) process.stderr.write(`上传审核图片 ${index + 1}/${assignments.length}：${assignment.name}\n`);
+      const {json} = await request(args, '/api/openapi-image-asset/upload-pic', {
+        method: 'POST',
+        body: {store, imageType: assignment.imageType, file},
+      });
+      const imageUrl = String(json?.result?.imageUrl || json?.adapterResult?.result?.imageUrl || '').trim();
+      if (!imageUrl) throw new Error(`云端上传没有返回 imageUrl：${assignment.name}`);
+      const bytes = await fs.readFile(assignment.path);
+      uploaded.push({
+        ...assignment,
+        path: undefined,
+        imageUrl,
+        sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+      });
+    }
+  } catch (error) {
+    error.response = {ok: false, uploadedBeforeFailure: uploaded.map(row => ({name: row.name, role: row.role, imageUrl: row.imageUrl}))};
+    throw error;
+  }
+  const publishPreparation = publishPreparationFromArgs(args);
+  const {json: bindingJson} = await request(args, '/api/link-ops-publish-assets', {
+    method: 'POST',
+    body: {
+      taskId: args.taskId,
+      store,
+      sourceApproved: true,
+      sourceDirLabel: path.basename(args.imageDir),
+      bindings: uploaded,
+      publishPreparation,
+    },
+  });
+  if (bindingJson?.binding?.payloadSource !== 'task') throw new Error('云端没有确认 payloadSource=task，已停止重新预演');
+  const {json: preflightJson} = await request(args, '/api/link-ops-execute', {
+    method: 'POST',
+    body: {id: args.taskId, mode: 'dry-run', source: 'codex_desktop_cli_prepare_publish'},
+  });
+  print({
+    ok: true,
+    taskId: args.taskId,
+    store,
+    sourceApproved: true,
+    plan: {
+      sourceDir: plan.sourceDir,
+      scannedImages: plan.counts?.scannedImages || 0,
+      eligibleImages: plan.counts?.eligibleImages || 0,
+      ignoredAbTestCovers: plan.roles?.ignoredAbTestCovers?.map(row => row.name) || [],
+      warnings: plan.warnings || [],
+    },
+    uploaded: uploaded.map(row => ({name: row.name, role: row.role, imageType: row.imageType, width: row.width, height: row.height, sha256: row.sha256})),
+    binding: bindingJson.binding,
+    task: preflightJson.task,
+    execution: preflightJson.execution,
+    safety: {
+      sameTask: true,
+      payloadSource: bindingJson.binding.payloadSource,
+      realPublishOccurred: false,
+      nextStep: '核对新预演的 payloadHash 和字段；只有用户明确确认后才调用 execute。',
+    },
+  });
+}
+
+function operatorGuide() {
+  return {
+    ok: true,
+    version: BI_OPS_CLI_VERSION,
+    authority: [
+      '用户当前明确指令',
+      '已审可用/人工审核素材',
+      '负责人规则与正式资料',
+      'AI 建议',
+    ],
+    imageBoundary: '标题或核心卖点未采用某参数，不等于已审图片禁用；AI 只能提示，不能静默剔除。',
+    objectiveBlockersOnly: ['文件损坏', '平台不支持的格式/大小', '明确错品', '图片角色/容量冲突', '真实 SHEIN 校验失败'],
+    requiredFlow: '同一任务 create -> prepare-publish -> post-binding preflight -> 用户确认 -> execute -> readback',
+    managedLauncher: path.join(os.homedir(), '.shein-bi', 'cli', 'shein-bi-ops.cmd'),
+  };
 }
 
 async function runRetireCandidates(args) {
@@ -919,7 +1129,12 @@ async function waitForLinkOpsJob(args, jobId) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.command === 'version') {
-    print({ok: true, version: BI_OPS_CLI_VERSION});
+    const installRoot = await findManagedPartnerCliInstallRoot({entryRoot: ROOT});
+    print({ok: true, version: BI_OPS_CLI_VERSION, managed: Boolean(installRoot), installRoot: installRoot || null});
+    return;
+  }
+  if (args.command === 'guide') {
+    print(operatorGuide());
     return;
   }
   if (args.command === 'help') {
@@ -945,11 +1160,18 @@ async function main() {
       savedAt: new Date().toISOString(),
       note: 'Session cookie only; plaintext password is never stored.',
     });
+    const cliUpdate = await refreshPartnerCli(args, {force: true}).catch(error => ({ok: false, warning: String(error?.message || error)}));
     const knowledge = await refreshPartnerKnowledge(args).catch(error => ({ok: false, warning: String(error?.message || error)}));
     print({ok: true, user: json.user, sessionFile: args.sessionFile, knowledge: {
       updated: Boolean(knowledge?.updated),
       current: Boolean(knowledge?.ok && knowledge?.current !== false),
       sourceCommit: String(knowledge?.manifest?.sourceCommit || ''),
+    }, cliUpdate: {
+      managed: Boolean(cliUpdate?.managed),
+      updated: Boolean(cliUpdate?.updated),
+      currentVersion: BI_OPS_CLI_VERSION,
+      installedVersion: cliUpdate?.latestVersion || BI_OPS_CLI_VERSION,
+      warning: cliUpdate?.warning || '',
     }});
     return;
   }
@@ -963,6 +1185,21 @@ async function main() {
     const knowledge = await refreshPartnerKnowledge(args, {strict: true});
     print({ok: true, version: BI_OPS_CLI_VERSION, knowledge});
     return;
+  }
+  if (args.command === 'update-status' || args.command === 'update_status') {
+    const update = await refreshPartnerCli(args, {force: true, checkOnly: true});
+    print({ok: true, version: BI_OPS_CLI_VERSION, update});
+    return;
+  }
+  if (args.command === 'update') {
+    const update = await refreshPartnerCliAndRelaunchIfNeeded(args, {force: true});
+    if (update.relaunched) return;
+    print({ok: true, version: BI_OPS_CLI_VERSION, update: update.result});
+    return;
+  }
+  if (AUTO_UPDATE_COMMANDS.has(args.command)) {
+    const update = await refreshPartnerCliAndRelaunchIfNeeded(args);
+    if (update.relaunched) return;
   }
   if (KNOWLEDGE_CHECK_COMMANDS.has(args.command)) {
     await refreshPartnerKnowledge(args, {strict: args.command === 'execute'});
@@ -979,6 +1216,10 @@ async function main() {
   }
   if (args.command === 'plan-images' || args.command === 'plan_images') {
     await runPlanImages(args);
+    return;
+  }
+  if (args.command === 'prepare-publish' || args.command === 'prepare_publish') {
+    await runPreparePublish(args);
     return;
   }
   if (args.command === 'retire-candidates' || args.command === 'retire_candidates') {
