@@ -115,7 +115,16 @@ jobs:
           (cd artifacts && sha256sum -c "$checksum_name")
           rm -rf artifact-extracted
           mkdir artifact-extracted
+          # Windows PowerShell Compress-Archive writes backslash separators. Info-ZIP
+          # extracts them correctly on Linux but returns 1 for that compatibility warning.
+          set +e
           unzip -q "artifacts/$zip_name" -d artifact-extracted
+          unzip_status="$?"
+          set -e
+          if [ "$unzip_status" -gt 1 ]; then
+            echo "Partner CLI ZIP extraction failed with status $unzip_status" >&2
+            exit "$unzip_status"
+          fi
           node automation/scripts/verify_partner_cli_package_artifact.mjs \
             --source-root release-source --extracted-root artifact-extracted
           source_commit="$(git -C release-source rev-parse HEAD)"
