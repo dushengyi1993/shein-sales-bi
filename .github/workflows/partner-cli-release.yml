@@ -125,6 +125,9 @@ jobs:
             echo "Partner CLI ZIP extraction failed with status $unzip_status" >&2
             exit "$unzip_status"
           fi
+          # The same Windows archive may carry zeroed Unix directory modes.
+          # Restore owner read/traverse access before the byte-for-byte verifier.
+          chmod -R u+rwX artifact-extracted
           node automation/scripts/verify_partner_cli_package_artifact.mjs \
             --source-root release-source --extracted-root artifact-extracted
           source_commit="$(git -C release-source rev-parse HEAD)"
