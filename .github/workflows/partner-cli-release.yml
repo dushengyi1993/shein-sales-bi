@@ -1,0 +1,203 @@
+name: Partner CLI release to BI
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published partner-cli-v* release tag to deploy
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: partner-cli-production-release
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'partner-cli-v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DEPLOY_TOKEN: ${{ secrets.PARTNER_CLI_DEPLOY_TOKEN }}
+      DEPLOY_URL: https://sa.dushengyi.cc/api/partner-cli/release/deploy
+      STATUS_URL: https://sa.dushengyi.cc/api/partner-cli/release/status
+    steps:
+      - id: release
+        name: Resolve published release
+        shell: bash
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          tag="${DISPATCH_TAG:-$EVENT_TAG}"
+          case "$tag" in
+            partner-cli-v*) ;;
+            *) echo "Refusing non-partner release tag: $tag" >&2; exit 1 ;;
+          esac
+          release_json="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft,isPrerelease,publishedAt)"
+          test "$(jq -r '.tagName' <<<"$release_json")" = "$tag"
+          test "$(jq -r '.isDraft' <<<"$release_json")" = 'false'
+          test "$(jq -r '.isPrerelease' <<<"$release_json")" = 'false'
+          published_at="$(jq -r '.publishedAt' <<<"$release_json")"
+          test -n "$published_at"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "published_at=$published_at" >> "$GITHUB_OUTPUT"
+
+      - name: Check deployment credential
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_TOKEN"
+
+      - name: Checkout deployment automation
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: automation
+          persist-credentials: false
+
+      - name: Checkout immutable release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+          path: release-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: release-source/package-lock.json
+
+      - name: Validate release source
+        working-directory: release-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts
+          npm test
+
+      - id: assets
+        name: Resolve or build immutable release assets
+        shell: bash
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          version="${TAG#partner-cli-v}"
+          zip_name="shein-bi-ops-cli-${version}.zip"
+          checksum_name="${zip_name}.sha256"
+          mkdir -p artifacts
+          asset_names="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          zip_count="$(grep -Fxc "$zip_name" <<<"$asset_names" || true)"
+          checksum_count="$(grep -Fxc "$checksum_name" <<<"$asset_names" || true)"
+          if [ "$zip_count" = '1' ] && [ "$checksum_count" = '1' ]; then
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir artifacts --pattern "$zip_name" --pattern "$checksum_name" --clobber
+            origin='existing-release-assets'
+          elif [ "$zip_count" = '0' ] && [ "$checksum_count" = '0' ]; then
+            pwsh -NoProfile -File release-source/scripts/build_partner_bi_ops_cli_package.ps1 \
+              -SourceRoot "$PWD/release-source" -OutputDir "$PWD/artifacts"
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" \
+              "artifacts/$zip_name" "artifacts/$checksum_name"
+            origin='built-and-uploaded'
+          else
+            echo 'Release has a partial or duplicate Partner CLI asset set; refusing mutation.' >&2
+            exit 1
+          fi
+          (cd artifacts && sha256sum -c "$checksum_name")
+          rm -rf artifact-extracted
+          mkdir artifact-extracted
+          unzip -q "artifacts/$zip_name" -d artifact-extracted
+          node automation/scripts/verify_partner_cli_package_artifact.mjs \
+            --source-root release-source --extracted-root artifact-extracted
+          source_commit="$(git -C release-source rev-parse HEAD)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "zip_name=$zip_name" >> "$GITHUB_OUTPUT"
+          echo "checksum_name=$checksum_name" >> "$GITHUB_OUTPUT"
+          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
+          echo "origin=$origin" >> "$GITHUB_OUTPUT"
+
+      - name: Build validated deployment envelope
+        shell: bash
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          PUBLISHED_AT: ${{ steps.release.outputs.published_at }}
+          SOURCE_COMMIT: ${{ steps.assets.outputs.source_commit }}
+          ZIP_NAME: ${{ steps.assets.outputs.zip_name }}
+          CHECKSUM_NAME: ${{ steps.assets.outputs.checksum_name }}
+        run: |
+          set -euo pipefail
+          node automation/scripts/build_partner_cli_deploy_payload.mjs \
+            --source-root release-source \
+            --package-file "artifacts/$ZIP_NAME" \
+            --checksum-file "artifacts/$CHECKSUM_NAME" \
+            --tag "$TAG" \
+            --source-commit "$SOURCE_COMMIT" \
+            --published-at "$PUBLISHED_AT" \
+            --output deployment-payload.json
+
+      - name: Deploy atomically to BI
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ steps.assets.outputs.version }}
+          EXPECTED_SOURCE_COMMIT: ${{ steps.assets.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          response_file="$(mktemp)"
+          status_file="$(mktemp)"
+          trap 'rm -f "$response_file" "$status_file" deployment-payload.json' EXIT
+          http_status="$(curl --silent --show-error --connect-timeout 10 --max-time 120 \
+            --retry 2 --retry-all-errors \
+            --output "$response_file" --write-out '%{http_code}' \
+            --request POST "$DEPLOY_URL" \
+            --header "Authorization: Bearer $DEPLOY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data-binary @deployment-payload.json)"
+          if [ "$http_status" != '200' ]; then
+            cat "$response_file" >&2
+            echo "Partner CLI deployment failed with HTTP $http_status" >&2
+            exit 1
+          fi
+          node - "$response_file" "$EXPECTED_VERSION" "$EXPECTED_SOURCE_COMMIT" <<'NODE'
+          const fs = require('fs');
+          const [file, version, sourceCommit] = process.argv.slice(2);
+          const body = JSON.parse(fs.readFileSync(file, 'utf8'));
+          if (body.ok !== true || body.data?.active?.version !== version || body.data?.active?.sourceCommit !== sourceCommit) process.exit(1);
+          NODE
+          status_code="$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
+            --output "$status_file" --write-out '%{http_code}' \
+            --request GET "$STATUS_URL" \
+            --header "Authorization: Bearer $DEPLOY_TOKEN")"
+          test "$status_code" = '200'
+          node - "$status_file" "$EXPECTED_VERSION" "$EXPECTED_SOURCE_COMMIT" <<'NODE'
+          const fs = require('fs');
+          const [file, version, sourceCommit] = process.argv.slice(2);
+          const body = JSON.parse(fs.readFileSync(file, 'utf8'));
+          if (body.ok !== true || body.data?.active?.source !== 'managed' || body.data?.active?.version !== version || body.data?.active?.sourceCommit !== sourceCommit) process.exit(1);
+          NODE
+
+      - name: Publish deployment summary
+        shell: bash
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.assets.outputs.version }}
+          SOURCE_COMMIT: ${{ steps.assets.outputs.source_commit }}
+          ASSET_ORIGIN: ${{ steps.assets.outputs.origin }}
+        run: |
+          {
+            echo '## Partner CLI production deployment'
+            echo
+            echo "- Tag: \`$TAG\`"
+            echo "- Version: \`$VERSION\`"
+            echo "- Source commit: \`$SOURCE_COMMIT\`"
+            echo "- Assets: \`$ASSET_ORIGIN\`"
+            echo '- BI activation: verified by authenticated readback'
+          } >> "$GITHUB_STEP_SUMMARY"

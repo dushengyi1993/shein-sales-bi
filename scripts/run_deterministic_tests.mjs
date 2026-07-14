@@ -39,6 +39,7 @@ const tests = [
   'scripts/test_partner_cli_package.mjs',
   'scripts/test_partner_cli_updater.mjs',
   'scripts/test_partner_cli_portal_release.mjs',
+  'scripts/test_partner_cli_release_pipeline.mjs',
   'scripts/test_link_ops_publish_asset_binding.mjs',
   'scripts/test_link_ops_json_repository.mjs',
   'scripts/test_link_ops_store_gateway.mjs',

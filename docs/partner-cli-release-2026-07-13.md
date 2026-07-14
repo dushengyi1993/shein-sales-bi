@@ -8,6 +8,7 @@
 
 - 旧版 `2026.07.12.1` 本身没有更新器，因此必须最后手动安装一次本版本。
 - 从本版本开始，稳定启动器会在业务命令前检查云端 release；发现新版本后校验 manifest、bundle SHA256 和逐文件 SHA256，安装到不可变版本目录，原子切换 `current.json`，再重启同一命令。
+- GitHub `partner-cli-v*` Release 发布后，由 `Partner CLI release to BI` 工作流自动验证 Tag 源码和 Release 资产、调用 BI 专用部署端点、原子切换云端当前版本并回读；不再需要人工把新包复制到 BI。完整发布说明见 `docs/partner-cli-automatic-deployment.md`。
 - 不使用定时轮询，不在 SHEIN 写操作中途热替换代码。
 - 安装器同步安装 `shein-bi-ops` Codex Skill。用户当轮指令和“已审可用”素材高于 AI 建议；标题未采用某参数不能被推导成图片禁用。
 - 新增 `prepare-publish`：本地图片读取真实尺寸并上传后，URL、货号、供货价、库存、可选标题/分类会写回同一任务的完整发布 payload，再重新预演。旧预演 hash 自动失效，禁止上传后另建短任务或静默回退源链接图片。

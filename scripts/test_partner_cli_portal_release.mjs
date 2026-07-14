@@ -7,7 +7,8 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {validatePartnerCliRelease} from '../lib/partner_cli_release.mjs';
+import {buildPartnerCliRelease, validatePartnerCliRelease} from '../lib/partner_cli_release.mjs';
+import {PARTNER_CLI_DEPLOYMENT_SCHEMA_VERSION} from '../lib/partner_cli_release_store.mjs';
 import {BI_OPS_CLI_VERSION} from '../lib/partner_knowledge_cache.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -17,6 +18,8 @@ const authFile = path.join(temp, 'auth.json');
 const packageFile = path.join(temp, `shein-bi-ops-cli-${BI_OPS_CLI_VERSION}.zip`);
 const packageBytes = Buffer.from('504b030414000000000000000000000000000000000000000000', 'hex');
 const packageSha256 = crypto.createHash('sha256').update(packageBytes).digest('hex');
+const deployToken = 'partner-cli-deploy-test-token';
+const releaseDir = path.join(temp, 'partner-cli-releases');
 await fs.writeFile(packageFile, packageBytes);
 await fs.writeFile(`${packageFile}.sha256`, `${packageSha256}  ${path.basename(packageFile)}\n`, 'ascii');
 await fs.writeFile(authFile, `${JSON.stringify({
@@ -29,6 +32,21 @@ await fs.writeFile(authFile, `${JSON.stringify({
     writeStores: ['*'],
   }],
 }, null, 2)}\n`, 'utf8');
+const sourceRelease = await buildPartnerCliRelease({sourceRoot: ROOT});
+const deploymentPayload = {
+  schemaVersion: PARTNER_CLI_DEPLOYMENT_SCHEMA_VERSION,
+  tagName: `partner-cli-v${BI_OPS_CLI_VERSION}`,
+  sourceCommit: 'd'.repeat(40),
+  publishedAt: '2026-07-13T17:03:08.000Z',
+  manifest: sourceRelease.manifest,
+  bundle: sourceRelease.bundle,
+  package: {
+    fileName: path.basename(packageFile),
+    size: packageBytes.length,
+    sha256: packageSha256,
+    dataBase64: packageBytes.toString('base64'),
+  },
+};
 
 const port = await freePort();
 const child = spawn(process.execPath, [
@@ -48,7 +66,12 @@ const child = spawn(process.execPath, [
   cwd: ROOT,
   windowsHide: true,
   stdio: ['ignore', 'pipe', 'pipe'],
-  env: {...process.env, SHEIN_PARTNER_CLI_PACKAGE_FILE: packageFile},
+  env: {
+    ...process.env,
+    SHEIN_PARTNER_CLI_PACKAGE_FILE: packageFile,
+    SHEIN_PARTNER_CLI_RELEASE_DIR: releaseDir,
+    SHEIN_PARTNER_CLI_GITHUB_DEPLOY_TOKEN: deployToken,
+  },
 });
 
 let stderr = '';
@@ -62,6 +85,14 @@ try {
   assert.equal(unauthenticated.status, 401);
   const unauthenticatedPackage = await fetch(`${baseUrl}/api/partner-cli/package`, {headers: externalHeaders});
   assert.equal(unauthenticatedPackage.status, 401);
+  const unauthenticatedReleaseStatus = await fetch(`${baseUrl}/api/partner-cli/release/status`, {headers: externalHeaders});
+  assert.equal(unauthenticatedReleaseStatus.status, 401);
+  const unauthenticatedDeploy = await fetch(`${baseUrl}/api/partner-cli/release/deploy`, {
+    method: 'POST',
+    headers: {...externalHeaders, 'content-type': 'application/json'},
+    body: JSON.stringify(deploymentPayload),
+  });
+  assert.equal(unauthenticatedDeploy.status, 401);
 
   const login = await fetch(`${baseUrl}/api/login`, {
     method: 'POST',
@@ -71,6 +102,29 @@ try {
   assert.equal(login.status, 200);
   const cookie = String(login.headers.get('set-cookie') || '').split(';')[0];
   assert.match(cookie, /^bi_session=/);
+
+  const cookieDeploy = await fetch(`${baseUrl}/api/partner-cli/release/deploy`, {
+    method: 'POST',
+    headers: {...externalHeaders, cookie, 'content-type': 'application/json'},
+    body: JSON.stringify(deploymentPayload),
+  });
+  assert.equal(cookieDeploy.status, 403);
+  const deploymentResponse = await fetch(`${baseUrl}/api/partner-cli/release/deploy`, {
+    method: 'POST',
+    headers: {...externalHeaders, authorization: `Bearer ${deployToken}`, 'content-type': 'application/json'},
+    body: JSON.stringify(deploymentPayload),
+  });
+  assert.equal(deploymentResponse.status, 200);
+  const deploymentBody = await deploymentResponse.json();
+  assert.equal(deploymentBody.ok, true);
+  assert.equal(deploymentBody.data?.active?.source, 'managed');
+  assert.equal(deploymentBody.data?.active?.version, BI_OPS_CLI_VERSION);
+  const releaseStatusResponse = await fetch(`${baseUrl}/api/partner-cli/release/status`, {
+    headers: {...externalHeaders, authorization: `Bearer ${deployToken}`},
+  });
+  assert.equal(releaseStatusResponse.status, 200);
+  const releaseStatusBody = await releaseStatusResponse.json();
+  assert.equal(releaseStatusBody.data?.active?.sourceCommit, 'd'.repeat(40));
 
   const manifestResponse = await fetch(`${baseUrl}/api/partner-cli/manifest`, {headers: {...externalHeaders, cookie}});
   assert.equal(manifestResponse.status, 200);
@@ -116,7 +170,8 @@ try {
   const audit = await fs.readFile(auditFile, 'utf8');
   assert.match(audit, /partner-cli-bundle-download/);
   assert.match(audit, /partner-cli-package-download/);
-  assert.doesNotMatch(audit, /dataBase64|release-test-password|bi_session=/);
+  assert.match(audit, /partner-cli-release-deployed/);
+  assert.doesNotMatch(audit, /dataBase64|release-test-password|partner-cli-deploy-test-token|bi_session=/);
   console.log(JSON.stringify({
     ok: true,
     version: validated.version,
@@ -125,6 +180,7 @@ try {
     authRequired: true,
     bundleValidated: true,
     packageDownloadValidated: true,
+    automatedDeploymentValidated: true,
     packageSha256,
   }));
 } finally {

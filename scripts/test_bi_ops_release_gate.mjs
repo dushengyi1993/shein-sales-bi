@@ -164,6 +164,7 @@ const BI_OPS_V2_JS_FILES = [
   'lib/owner_knowledge_distribution.mjs',
   'lib/partner_knowledge_cache.mjs',
   'lib/partner_cli_release.mjs',
+  'lib/partner_cli_release_store.mjs',
   'lib/partner_cli_updater.mjs',
   'lib/link_ops_publish_asset_binding.mjs',
   'scripts/owner_knowledge_sync.mjs',
@@ -178,6 +179,9 @@ const BI_OPS_V2_JS_FILES = [
   'scripts/test_partner_cli_package.mjs',
   'scripts/test_partner_cli_updater.mjs',
   'scripts/test_partner_cli_portal_release.mjs',
+  'scripts/test_partner_cli_release_pipeline.mjs',
+  'scripts/build_partner_cli_deploy_payload.mjs',
+  'scripts/verify_partner_cli_package_artifact.mjs',
   'scripts/partner_cli_bootstrap.mjs',
   'scripts/test_link_ops_publish_asset_binding.mjs',
   'scripts/test_owner_knowledge_portal_flow.mjs',
@@ -219,7 +223,9 @@ const BI_OPS_V2_REQUIRED_ARTIFACTS = [
   'AGENTS.md',
   'codex/skills/shein-bi-ops/SKILL.md',
   'docs/partner-cli-release-2026-07-13.md',
+  'docs/partner-cli-automatic-deployment.md',
   '.github/workflows/owner-knowledge.yml',
+  '.github/workflows/partner-cli-release.yml',
 ];
 CHECK_FILES.push(...BI_OPS_V2_JS_FILES);
 DIFF_CHECK_FILES.push(...BI_OPS_V2_JS_FILES, ...BI_OPS_V2_REQUIRED_ARTIFACTS);

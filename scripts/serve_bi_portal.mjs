@@ -59,7 +59,7 @@ import {linkOpsPayloadHash} from '../lib/link_ops_repository.mjs';
 import {createOwnerKnowledgeService} from '../lib/owner_knowledge_service.mjs';
 import {createOwnerKnowledgeGitPublisher} from '../lib/owner_knowledge_distribution.mjs';
 import {BI_OPS_CLI_VERSION} from '../lib/partner_knowledge_cache.mjs';
-import {buildPartnerCliRelease} from '../lib/partner_cli_release.mjs';
+import {createPartnerCliReleaseStore} from '../lib/partner_cli_release_store.mjs';
 import {
   applyApprovedImageBindingsToPublishPayload,
   applyExplicitPublishPreparationOverrides,
@@ -80,51 +80,12 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
 const SHEIN_OPENAPI_LOCAL_CONFIG_FILE = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
 const BI_OPS_WRITE_WHITELIST_FILE = process.env.SHEIN_BI_OPS_WRITE_WHITELIST_FILE || path.join(ROOT, 'config', 'bi_ops_write_whitelist.local.json');
-let partnerCliReleasePromise = null;
-let partnerCliPackagePromise = null;
-
-async function currentPartnerCliRelease() {
-  if (!partnerCliReleasePromise) {
-    partnerCliReleasePromise = buildPartnerCliRelease({sourceRoot: ROOT}).catch(error => {
-      partnerCliReleasePromise = null;
-      throw error;
-    });
-  }
-  return await partnerCliReleasePromise;
-}
-
-async function currentPartnerCliPackage() {
-  if (!partnerCliPackagePromise) {
-    partnerCliPackagePromise = (async () => {
-      const packageFile = path.resolve(process.env.SHEIN_PARTNER_CLI_PACKAGE_FILE
-        || path.join(ROOT, 'outputs', 'releases', `shein-bi-ops-cli-${BI_OPS_CLI_VERSION}.zip`));
-      const checksumFile = path.resolve(process.env.SHEIN_PARTNER_CLI_PACKAGE_SHA256_FILE || `${packageFile}.sha256`);
-      const stat = await fs.stat(packageFile);
-      if (!stat.isFile() || stat.size < 4 || stat.size > 128 * 1024 * 1024) throw new Error('CLI 安装包文件无效或大小异常');
-      const [bytes, checksumText] = await Promise.all([
-        fs.readFile(packageFile),
-        fs.readFile(checksumFile, 'utf8'),
-      ]);
-      if (bytes[0] !== 0x50 || bytes[1] !== 0x4b) throw new Error('CLI 安装包不是有效的 ZIP 文件');
-      const expectedSha256 = String(checksumText || '').trim().split(/\s+/)[0].toLowerCase();
-      const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
-      if (!/^[a-f0-9]{64}$/.test(expectedSha256) || sha256 !== expectedSha256) {
-        throw new Error('CLI 安装包 SHA256 校验失败');
-      }
-      return {
-        bytes,
-        sha256,
-        fileName: `shein-bi-ops-cli-${BI_OPS_CLI_VERSION}.zip`,
-        size: bytes.length,
-        etag: `"pcli-zip-${sha256}"`,
-      };
-    })().catch(error => {
-      partnerCliPackagePromise = null;
-      throw error;
-    });
-  }
-  return await partnerCliPackagePromise;
-}
+const partnerCliReleaseStore = createPartnerCliReleaseStore({
+  releaseRoot: process.env.SHEIN_PARTNER_CLI_RELEASE_DIR || '',
+  fallbackSourceRoot: ROOT,
+  fallbackPackageFile: process.env.SHEIN_PARTNER_CLI_PACKAGE_FILE || '',
+  fallbackChecksumFile: process.env.SHEIN_PARTNER_CLI_PACKAGE_SHA256_FILE || '',
+});
 
 function parseArgs(argv) {
   const args = {
@@ -2373,6 +2334,24 @@ function ownerKnowledgeActivationActor(req) {
     username: 'github-owner-knowledge-ci',
     displayName: 'GitHub owner knowledge CI',
     role: 'knowledge_activation',
+    readStores: [],
+    writeStores: [],
+    ownerKey: '',
+    source: 'github-actions',
+  };
+}
+
+function partnerCliDeployActor(req) {
+  const expected = String(process.env.SHEIN_PARTNER_CLI_GITHUB_DEPLOY_TOKEN || '');
+  const supplied = requestBearerToken(req);
+  if (!expected || !supplied) return null;
+  const left = Buffer.from(expected, 'utf8');
+  const right = Buffer.from(supplied, 'utf8');
+  if (left.length !== right.length || !crypto.timingSafeEqual(left, right)) return null;
+  return {
+    username: 'github-partner-cli-ci',
+    displayName: 'GitHub partner CLI CI',
+    role: 'partner_cli_deploy',
     readStores: [],
     writeStores: [],
     ownerKey: '',
@@ -8174,12 +8153,18 @@ async function main() {
       const authenticatedActor = authRequired ? authenticateRequest(req, authUsers, sessionSecret) : null;
       const knowledgeBearer = url.pathname.startsWith('/api/owner-knowledge/') ? requestBearerToken(req) : '';
       const activationActor = url.pathname === '/api/owner-knowledge/distribution/activate' ? ownerKnowledgeActivationActor(req) : null;
+      const partnerCliAutomationRequest = url.pathname === '/api/partner-cli/release/deploy'
+        || url.pathname === '/api/partner-cli/release/status';
+      const partnerCliAutomationActor = partnerCliAutomationRequest ? partnerCliDeployActor(req) : null;
       const knowledgeDeviceActor = knowledgeBearer && !activationActor ? await ownerKnowledgeService.authenticateBearer(knowledgeBearer) : null;
-      const actor = authRequired ? (authenticatedActor || activationActor || knowledgeDeviceActor || (trustedInternal ? internalActor() : null)) : null;
+      const actor = authRequired
+        ? (partnerCliAutomationActor || authenticatedActor || activationActor || knowledgeDeviceActor || (trustedInternal ? internalActor() : null))
+        : null;
       const ownerKnowledgeActivationRequest = url.pathname === '/api/owner-knowledge/distribution/activate';
-      // This endpoint is bearer-only and is called by GitHub Actions, which has no browser Origin header.
+      const bearerAutomationMutation = ownerKnowledgeActivationRequest || url.pathname === '/api/partner-cli/release/deploy';
+      // These endpoints are bearer-only and are called by GitHub Actions, which has no browser Origin header.
       // Every cookie/session-backed mutation continues through the normal origin guard.
-      if (!ownerKnowledgeActivationRequest && !mutationOriginAllowed(req, {trustedInternal})) {
+      if (!bearerAutomationMutation && !mutationOriginAllowed(req, {trustedInternal})) {
         await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'mutation-origin-denied', actor, ...requestMeta(req), path: url.pathname, method: req.method});
         return sendJson(res, 403, {ok: false, error: 'Cross-origin state-changing request denied'});
       }
@@ -8278,10 +8263,61 @@ async function main() {
       if (url.pathname === '/api/auth/me') {
         return sendJson(res, actor ? 200 : 401, {ok: Boolean(actor), user: publicActor(actor)});
       }
+      if (url.pathname === '/api/partner-cli/release/status') {
+        if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        if (actor?.role !== 'partner_cli_deploy') return sendJson(res, 403, {ok: false, error: 'GitHub partner CLI release status denied'});
+        try {
+          const active = await partnerCliReleaseStore.status();
+          return sendJson(res, 200, {ok: true, data: {active}}, {'Cache-Control': 'no-store'});
+        } catch (error) {
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'partner-cli-release-status-failed',
+            actor,
+            ...requestMeta(req),
+            error: error?.message || String(error),
+          });
+          return sendJson(res, 503, {ok: false, error: 'Partner CLI release status is unavailable'}, {'Cache-Control': 'no-store'});
+        }
+      }
+      if (url.pathname === '/api/partner-cli/release/deploy') {
+        if (req.method !== 'POST') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        if (actor?.role !== 'partner_cli_deploy') return sendJson(res, 403, {ok: false, error: 'GitHub partner CLI release deployment denied'});
+        const body = await readBodyJson(req, 32 * 1024 * 1024).catch(error => ({_error: error?.message || String(error)}));
+        if (body._error) return sendJson(res, 400, {ok: false, error: body._error}, {'Cache-Control': 'no-store'});
+        try {
+          const result = await partnerCliReleaseStore.deploy(body);
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'partner-cli-release-deployed',
+            actor,
+            ...requestMeta(req),
+            changed: result.changed,
+            release: result.active,
+          });
+          return sendJson(res, 200, {ok: true, data: result}, {'Cache-Control': 'no-store'});
+        } catch (error) {
+          const conflict = error?.code === 'STALE_VERSION' || error?.code === 'VERSION_CONFLICT';
+          const invalid = error?.code === 'INVALID_DEPLOYMENT' || error?.code === 'RELEASE_STORE_DISABLED';
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'partner-cli-release-deploy-failed',
+            actor,
+            ...requestMeta(req),
+            errorCode: error?.code || 'DEPLOYMENT_FAILED',
+            error: error?.message || String(error),
+          });
+          return sendJson(res, conflict ? 409 : invalid ? 400 : 500, {
+            ok: false,
+            error: error?.message || 'Partner CLI release deployment failed',
+          }, {'Cache-Control': 'no-store'});
+        }
+      }
       if (url.pathname === '/api/partner-cli/package') {
         if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
         try {
-          const packageFile = await currentPartnerCliPackage();
+          const currentRelease = await partnerCliReleaseStore.getCurrentRelease();
+          const packageFile = currentRelease.package;
           if (String(req.headers['if-none-match'] || '') === packageFile.etag) {
             writeResponseHead(res, 304, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: packageFile.etag});
             res.end();
@@ -8292,7 +8328,7 @@ async function main() {
             type: 'partner-cli-package-download',
             actor,
             ...requestMeta(req),
-            release: {version: BI_OPS_CLI_VERSION, sha256: packageFile.sha256, size: packageFile.size},
+            release: {version: currentRelease.manifest.version, sha256: packageFile.sha256, size: packageFile.size},
           });
           writeResponseHead(res, 200, {
             'Cache-Control': 'private, no-cache, must-revalidate',
@@ -8311,7 +8347,7 @@ async function main() {
       if (url.pathname === '/api/partner-cli/manifest' || url.pathname === '/api/partner-cli/bundle') {
         if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
         try {
-          const release = await currentPartnerCliRelease();
+          const release = await partnerCliReleaseStore.getCurrentRelease();
           const etag = `"pcli-${release.manifest.bundleSha256}"`;
           if (String(req.headers['if-none-match'] || '') === etag) {
             writeResponseHead(res, 304, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: etag});
