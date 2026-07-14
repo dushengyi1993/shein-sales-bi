@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
@@ -13,6 +14,11 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'partner-cli-portal-release-'));
 const auditFile = path.join(temp, 'audit.jsonl');
 const authFile = path.join(temp, 'auth.json');
+const packageFile = path.join(temp, `shein-bi-ops-cli-${BI_OPS_CLI_VERSION}.zip`);
+const packageBytes = Buffer.from('504b030414000000000000000000000000000000000000000000', 'hex');
+const packageSha256 = crypto.createHash('sha256').update(packageBytes).digest('hex');
+await fs.writeFile(packageFile, packageBytes);
+await fs.writeFile(`${packageFile}.sha256`, `${packageSha256}  ${path.basename(packageFile)}\n`, 'ascii');
 await fs.writeFile(authFile, `${JSON.stringify({
   users: [{
     username: 'partner_release_owner',
@@ -38,7 +44,12 @@ const child = spawn(process.execPath, [
   '--link-ops-chat-file', path.join(temp, 'chats.json'),
   '--manual-login-state-file', path.join(temp, 'manual-login.json'),
   '--audit-file', auditFile,
-], {cwd: ROOT, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']});
+], {
+  cwd: ROOT,
+  windowsHide: true,
+  stdio: ['ignore', 'pipe', 'pipe'],
+  env: {...process.env, SHEIN_PARTNER_CLI_PACKAGE_FILE: packageFile},
+});
 
 let stderr = '';
 child.stderr.on('data', chunk => { stderr += chunk.toString(); });
@@ -49,6 +60,8 @@ try {
   const externalHeaders = {'x-forwarded-for': '203.0.113.20'};
   const unauthenticated = await fetch(`${baseUrl}/api/partner-cli/manifest`, {headers: externalHeaders});
   assert.equal(unauthenticated.status, 401);
+  const unauthenticatedPackage = await fetch(`${baseUrl}/api/partner-cli/package`, {headers: externalHeaders});
+  assert.equal(unauthenticatedPackage.status, 401);
 
   const login = await fetch(`${baseUrl}/api/login`, {
     method: 'POST',
@@ -80,11 +93,29 @@ try {
   assert.equal(validated.ok, true);
   assert.equal(validated.version, BI_OPS_CLI_VERSION);
 
+  const packageResponse = await fetch(`${baseUrl}/api/partner-cli/package`, {headers: {...externalHeaders, cookie}});
+  assert.equal(packageResponse.status, 200);
+  assert.equal(packageResponse.headers.get('content-type'), 'application/zip');
+  assert.match(packageResponse.headers.get('content-disposition') || '', new RegExp(`shein-bi-ops-cli-${BI_OPS_CLI_VERSION.replaceAll('.', '\\.')}`));
+  assert.equal(packageResponse.headers.get('x-checksum-sha256'), packageSha256);
+  const packageEtag = packageResponse.headers.get('etag') || '';
+  assert.equal(packageEtag, `"pcli-zip-${packageSha256}"`);
+  assert.deepEqual(Buffer.from(await packageResponse.arrayBuffer()), packageBytes);
+
+  const packageNotModified = await fetch(`${baseUrl}/api/partner-cli/package`, {
+    headers: {...externalHeaders, cookie, 'if-none-match': packageEtag},
+  });
+  assert.equal(packageNotModified.status, 304);
+
+  const packageMethodDenied = await fetch(`${baseUrl}/api/partner-cli/package`, {method: 'POST', headers: {...externalHeaders, cookie}});
+  assert.equal(packageMethodDenied.status, 405);
+
   const methodDenied = await fetch(`${baseUrl}/api/partner-cli/bundle`, {method: 'POST', headers: {...externalHeaders, cookie}});
   assert.equal(methodDenied.status, 405);
 
   const audit = await fs.readFile(auditFile, 'utf8');
   assert.match(audit, /partner-cli-bundle-download/);
+  assert.match(audit, /partner-cli-package-download/);
   assert.doesNotMatch(audit, /dataBase64|release-test-password|bi_session=/);
   console.log(JSON.stringify({
     ok: true,
@@ -93,6 +124,8 @@ try {
     etag,
     authRequired: true,
     bundleValidated: true,
+    packageDownloadValidated: true,
+    packageSha256,
   }));
 } finally {
   child.kill('SIGTERM');

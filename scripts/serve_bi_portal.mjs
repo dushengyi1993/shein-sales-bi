@@ -81,6 +81,7 @@ const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
 const SHEIN_OPENAPI_LOCAL_CONFIG_FILE = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
 const BI_OPS_WRITE_WHITELIST_FILE = process.env.SHEIN_BI_OPS_WRITE_WHITELIST_FILE || path.join(ROOT, 'config', 'bi_ops_write_whitelist.local.json');
 let partnerCliReleasePromise = null;
+let partnerCliPackagePromise = null;
 
 async function currentPartnerCliRelease() {
   if (!partnerCliReleasePromise) {
@@ -90,6 +91,39 @@ async function currentPartnerCliRelease() {
     });
   }
   return await partnerCliReleasePromise;
+}
+
+async function currentPartnerCliPackage() {
+  if (!partnerCliPackagePromise) {
+    partnerCliPackagePromise = (async () => {
+      const packageFile = path.resolve(process.env.SHEIN_PARTNER_CLI_PACKAGE_FILE
+        || path.join(ROOT, 'outputs', 'releases', `shein-bi-ops-cli-${BI_OPS_CLI_VERSION}.zip`));
+      const checksumFile = path.resolve(process.env.SHEIN_PARTNER_CLI_PACKAGE_SHA256_FILE || `${packageFile}.sha256`);
+      const stat = await fs.stat(packageFile);
+      if (!stat.isFile() || stat.size < 4 || stat.size > 128 * 1024 * 1024) throw new Error('CLI 安装包文件无效或大小异常');
+      const [bytes, checksumText] = await Promise.all([
+        fs.readFile(packageFile),
+        fs.readFile(checksumFile, 'utf8'),
+      ]);
+      if (bytes[0] !== 0x50 || bytes[1] !== 0x4b) throw new Error('CLI 安装包不是有效的 ZIP 文件');
+      const expectedSha256 = String(checksumText || '').trim().split(/\s+/)[0].toLowerCase();
+      const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+      if (!/^[a-f0-9]{64}$/.test(expectedSha256) || sha256 !== expectedSha256) {
+        throw new Error('CLI 安装包 SHA256 校验失败');
+      }
+      return {
+        bytes,
+        sha256,
+        fileName: `shein-bi-ops-cli-${BI_OPS_CLI_VERSION}.zip`,
+        size: bytes.length,
+        etag: `"pcli-zip-${sha256}"`,
+      };
+    })().catch(error => {
+      partnerCliPackagePromise = null;
+      throw error;
+    });
+  }
+  return await partnerCliPackagePromise;
 }
 
 function parseArgs(argv) {
@@ -8243,6 +8277,36 @@ async function main() {
       }
       if (url.pathname === '/api/auth/me') {
         return sendJson(res, actor ? 200 : 401, {ok: Boolean(actor), user: publicActor(actor)});
+      }
+      if (url.pathname === '/api/partner-cli/package') {
+        if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        try {
+          const packageFile = await currentPartnerCliPackage();
+          if (String(req.headers['if-none-match'] || '') === packageFile.etag) {
+            writeResponseHead(res, 304, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: packageFile.etag});
+            res.end();
+            return;
+          }
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'partner-cli-package-download',
+            actor,
+            ...requestMeta(req),
+            release: {version: BI_OPS_CLI_VERSION, sha256: packageFile.sha256, size: packageFile.size},
+          });
+          writeResponseHead(res, 200, {
+            'Cache-Control': 'private, no-cache, must-revalidate',
+            'Content-Type': 'application/zip',
+            'Content-Disposition': `attachment; filename="${packageFile.fileName}"`,
+            'Content-Length': String(packageFile.size),
+            'X-Checksum-SHA256': packageFile.sha256,
+            ETag: packageFile.etag,
+          });
+          res.end(packageFile.bytes);
+          return;
+        } catch (error) {
+          return sendJson(res, 503, {ok: false, error: `CLI 安装包尚未就绪：${error?.message || String(error)}`}, {'Cache-Control': 'no-store'});
+        }
       }
       if (url.pathname === '/api/partner-cli/manifest' || url.pathname === '/api/partner-cli/bundle') {
         if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
