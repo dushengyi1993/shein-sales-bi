@@ -111,12 +111,22 @@ try {
   await fs.mkdir(path.join(extractedPackageRoot, 'config'), {recursive: true});
   await fs.copyFile(path.join(sourceRoot, 'config', 'partner_cli_package.json'), path.join(extractedPackageRoot, 'config', 'partner_cli_package.json'));
   await fs.copyFile(path.join(sourceRoot, 'scripts', 'install_partner_bi_ops_cli.ps1'), path.join(extractedPackageRoot, 'install.ps1'));
+  const agentsArtifact = path.join(extractedPackageRoot, 'AGENTS.md');
+  const agentsText = await fs.readFile(agentsArtifact, 'utf8');
+  await fs.writeFile(agentsArtifact, agentsText.includes('\r\n') ? agentsText.replace(/\r\n/g, '\n') : agentsText.replace(/\n/g, '\r\n'), 'utf8');
   const artifactVerify = spawnSync(process.execPath, [
     path.join(ROOT, 'scripts', 'verify_partner_cli_package_artifact.mjs'),
     '--source-root', sourceRoot,
     '--extracted-root', extractedRoot,
   ], {cwd: ROOT, encoding: 'utf8'});
   assert.equal(artifactVerify.status, 0, artifactVerify.stderr || artifactVerify.stdout);
+  await fs.appendFile(agentsArtifact, '\nunauthorized-content-change\n', 'utf8');
+  const changedArtifactVerify = spawnSync(process.execPath, [
+    path.join(ROOT, 'scripts', 'verify_partner_cli_package_artifact.mjs'),
+    '--source-root', sourceRoot,
+    '--extracted-root', extractedRoot,
+  ], {cwd: ROOT, encoding: 'utf8'});
+  assert.notEqual(changedArtifactVerify.status, 0, 'artifact verifier accepted a real content change');
 
   console.log(JSON.stringify({
     ok: true,
@@ -126,6 +136,8 @@ try {
     managedActivation: true,
     immutableConflictRejected: true,
     artifactSourceMatchVerified: true,
+    platformLineEndingsAccepted: true,
+    realArtifactChangeRejected: true,
   }));
 } finally {
   await fs.rm(temp, {recursive: true, force: true});

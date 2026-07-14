@@ -3,6 +3,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 
+const TEXT_EXTENSIONS = new Set(['.cjs', '.cmd', '.js', '.json', '.md', '.mjs', '.ps1', '.sh', '.ts', '.txt', '.yaml', '.yml']);
+
 function parseArgs(argv) {
   const args = {};
   for (let index = 0; index < argv.length; index += 1) {
@@ -29,7 +31,18 @@ async function collectFiles(root, current = root, output = []) {
 
 async function assertSameFile(left, right, label) {
   const [leftBytes, rightBytes] = await Promise.all([fs.readFile(left), fs.readFile(right)]);
-  if (!leftBytes.equals(rightBytes)) throw new Error(`Package content differs from release source: ${label}`);
+  if (leftBytes.equals(rightBytes)) return;
+  if (TEXT_EXTENSIONS.has(path.extname(label).toLowerCase())) {
+    const decoder = new TextDecoder('utf-8', {fatal: true});
+    let leftText;
+    let rightText;
+    try {
+      leftText = decoder.decode(leftBytes);
+      rightText = decoder.decode(rightBytes);
+    } catch {}
+    if (leftText !== undefined && leftText.replace(/\r\n/g, '\n') === rightText.replace(/\r\n/g, '\n')) return;
+  }
+  throw new Error(`Package content differs from release source: ${label}`);
 }
 
 const args = parseArgs(process.argv.slice(2));

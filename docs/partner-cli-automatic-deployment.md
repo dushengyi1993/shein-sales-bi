@@ -13,7 +13,7 @@
 1. 拒绝草稿、预发布和非 `partner-cli-v*` Tag。
 2. 从 Tag 对应的不可变源码运行 `npm ci --ignore-scripts` 和 `npm test`。
 3. Release 已有 ZIP 与 checksum 时直接下载，不重新生成或覆盖；两项都不存在时才构建并上传；只缺一项或出现重名时失败。
-4. 解压 ZIP，逐文件确认它与 Tag 源码及包清单完全一致，拒绝额外文件、缺失文件和符号链接。
+4. 解压 ZIP，逐文件确认它与 Tag 源码及包清单一致；二进制必须逐字节相同，UTF-8 文本只允许 Windows/Linux 换行符差异，额外文件、缺失文件、符号链接和其他内容变化都会被拒绝。
 5. 生成包含源码 Commit、Release 时间、manifest、bundle、ZIP 和全部哈希的部署信封。
 6. 使用 GitHub Actions 专用 Bearer 凭证调用 BI 部署端点。
 7. BI 再次验证 Tag/版本绑定、Commit 格式、bundle 哈希、逐文件哈希、ZIP 大小和 ZIP SHA256。
