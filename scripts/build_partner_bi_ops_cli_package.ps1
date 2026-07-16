@@ -13,6 +13,20 @@ $manifest = Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json
 $name = "shein-bi-ops-cli-$($manifest.version)"
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ($name + '-' + [Guid]::NewGuid().ToString('N'))
 $stage = Join-Path $tempRoot $name
+
+function Get-Sha256Hex([string]$Path) {
+  $stream = $null
+  $sha = $null
+  try {
+    $stream = [IO.File]::OpenRead($Path)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    return ([BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLowerInvariant()
+  } finally {
+    if ($sha) { $sha.Dispose() }
+    if ($stream) { $stream.Dispose() }
+  }
+}
+
 try {
   New-Item -ItemType Directory -Path $stage -Force | Out-Null
   foreach ($relative in @($manifest.files)) {
@@ -31,7 +45,7 @@ try {
   $zip = Join-Path $OutputDir ($name + '.zip')
   Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
   Compress-Archive -LiteralPath $stage -DestinationPath $zip -CompressionLevel Optimal
-  $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+  $hash = Get-Sha256Hex $zip
   [IO.File]::WriteAllText($zip + '.sha256', "$hash  $([IO.Path]::GetFileName($zip))`n", [Text.Encoding]::ASCII)
   Write-Output $zip
   Write-Output "SHA256=$hash"

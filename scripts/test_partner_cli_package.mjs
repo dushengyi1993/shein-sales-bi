@@ -12,6 +12,21 @@ if (manifest.version !== BI_OPS_CLI_VERSION) throw new Error('partner package ve
 if (manifest.entrypoint !== 'scripts/bi_ops_cli.mjs') throw new Error('partner package entrypoint is unexpected');
 if (manifest.bootstrap !== 'scripts/partner_cli_bootstrap.mjs') throw new Error('partner package bootstrap is unexpected');
 if (manifest.codexSkill !== 'codex/skills/shein-bi-ops/SKILL.md') throw new Error('partner package Codex skill is unexpected');
+if (!manifest.files.includes('config/store_style_profiles.json')) throw new Error('partner package must include store image-style evidence');
+const storeProfiles = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'store_style_profiles.json'), 'utf8'));
+const expectedTitleGroups = {
+  title1: ['JSH', 'DL', 'TZZ', 'CX', 'HL', 'TS', 'TZ'],
+  title2: ['DX', 'LQ', 'XC', 'MZ', 'NM', 'YJ'],
+  title3: ['JY', 'QY', 'XL', 'FY', 'QH', 'ZL'],
+};
+const configuredTitleGroups = storeProfiles.defaultTitleGroups || {};
+const configuredStores = Object.keys(configuredTitleGroups);
+if (configuredStores.length !== 19 || new Set(configuredStores).size !== 19) throw new Error('default title groups must cover 19 unique stores');
+for (const [titleGroup, stores] of Object.entries(expectedTitleGroups)) {
+  for (const store of stores) {
+    if (configuredTitleGroups[store] !== titleGroup) throw new Error(`${store} default title group must be ${titleGroup}`);
+  }
+}
 const forbidden = /(?:\.env|secret|token|credential|cookie|session|\.jsonl)$/i;
 for (const relative of manifest.files || []) {
   if (path.isAbsolute(relative) || String(relative).split(/[\\/]+/).includes('..')) throw new Error(`partner package path escapes root: ${relative}`);
@@ -22,6 +37,10 @@ for (const relative of manifest.files || []) {
 for (const script of ['scripts/install_partner_bi_ops_cli.ps1', 'scripts/build_partner_bi_ops_cli_package.ps1']) {
   const bytes = await fs.readFile(path.join(ROOT, script));
   if ([...bytes].some(byte => byte > 127)) throw new Error(`${script} must remain ASCII for Windows PowerShell 5`);
+}
+const packageBuilderText = await fs.readFile(path.join(ROOT, 'scripts/build_partner_bi_ops_cli_package.ps1'), 'utf8');
+if (!packageBuilderText.includes('[Security.Cryptography.SHA256]::Create()') || /\bGet-FileHash\b/.test(packageBuilderText)) {
+  throw new Error('partner package builder must compute SHA256 without depending on Get-FileHash module autoload');
 }
 const installerText = await fs.readFile(path.join(ROOT, 'scripts/install_partner_bi_ops_cli.ps1'), 'utf8');
 if (!installerText.includes('%~dp0bootstrap.mjs')) {

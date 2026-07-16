@@ -1,11 +1,12 @@
 {
   "schemaVersion": 2,
-  "version": "2026.07.13.1",
+  "version": "2026.07.16.1",
   "entrypoint": "scripts/bi_ops_cli.mjs",
   "bootstrap": "scripts/partner_cli_bootstrap.mjs",
   "codexSkill": "codex/skills/shein-bi-ops/SKILL.md",
   "files": [
     "AGENTS.md",
+    "config/store_style_profiles.json",
     "scripts/bi_ops_cli.mjs",
     "scripts/partner_cli_bootstrap.mjs",
     "scripts/link_ops_plan_image_roles.mjs",
