@@ -51,6 +51,15 @@ Git tag：`partner-cli-v2026.07.16.1`
 - supplier-code normalization 的历史失败 unit/审计记录继续保留；本版只收紧后续入口，不篡改旧结果。
 - 飞书问数服务继续保持 `disabled + inactive`，本版没有恢复。
 
+## 发布后验收
+
+- Release 源 commit 为 `4c27ce29521f445d3c672005e3a001fc8298a790`；[main CI](https://github.com/dushengyi1993/shein-sales-bi/actions/runs/29490660400) 与 [Partner CLI 发布部署](https://github.com/dushengyi1993/shein-sales-bi/actions/runs/29490758157) 均通过。
+- GitHub Release 已生成 ZIP 与 SHA256；线上托管版本为 `2026.07.16.1`，元数据回读的 `sourceCommit` 与 Release 源 commit 一致，包 SHA256 为 `0e05d8bbbd95532043e6a6178adb6e8f927981627cbfc3b1620f5a349509e102`。
+- 50 个非 CLI 运行文件已按清单逐文件备份、校验和安装；回滚备份位于 `/srv/shein-bi/backups/releases/2026.07.16.1-20260716-184104`。没有覆盖实时 Portal 数据，也没有执行全目录 `reset`、`clean` 或同步。
+- Portal 已重启并完成缓存预热；`/login` 返回 `200`、根入口返回 `302`，未登录访问 `/api/health` 按鉴权设计返回 `401`，重启后没有 error 级日志。
+- 营销 timer 保持 `active + waiting`，下一次计划为 2026-07-17 10:30（Asia/Shanghai）；unit 已加载长期授权 ID、`cloud_timer` 上下文和自动修复开关。本次发版没有手动触发营销 service。
+- 营销 oneshot 继续保留 2026-07-16 10:30 巡检的 `Result=exit-code` 与 warning 状态，没有执行 `reset-failed` 掩盖历史结果；飞书问数仍为 `disabled + inactive`。
+
 ## 回滚
 
 - 源码回滚：回到本 tag 的前一稳定 commit，并按逐文件生产部署流程恢复备份。
