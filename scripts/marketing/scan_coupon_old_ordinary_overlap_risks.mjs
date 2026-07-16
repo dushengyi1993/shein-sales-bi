@@ -18,7 +18,7 @@ const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
 const COUPON_GOODS_URL = (activityId, levelRuleId) => `https://sso.geiwohuo.com/#/mbrs/marketing/coupon/rule/goods/${activityId}/${levelRuleId}`;
 const ACTIVITY_ID_DEFAULT = 34810;
 const PLAN_PATH_DEFAULT = path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-submit-results', 'coupon-extra-vs-ordinary-plan-2026-06-03.json');
-const LEVEL_RULE_HINT_DEFAULT = path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-cancel-results', 'final-coupon-active-plan-counts-2026-06-03.json');
+const LEVEL_RULE_HINT_DEFAULT = path.join(ROOT, 'config', 'marketing_coupon_level_rules.json');
 const OUT_DIR = path.join(ROOT, 'tmp', 'marketing-signup', 'old-ordinary-overlap-risk');
 const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
 const STORES = STORES_CONFIG.stores || [];
@@ -230,6 +230,11 @@ async function loadLevelRuleHints(file) {
   if (file && fsSync.existsSync(path.resolve(ROOT, file))) {
     const doc = await readJson(file);
     for (const row of doc.checks || []) if (row.store && row.levelRuleId) hints.set(String(row.store).toUpperCase(), Number(row.levelRuleId));
+    const configuredStores = doc?.activities?.[String(ACTIVITY_ID_DEFAULT)]?.stores || {};
+    for (const [storeKey, row] of Object.entries(configuredStores)) {
+      const levelRuleId = Number(row?.levelRuleId);
+      if (Number.isFinite(levelRuleId) && levelRuleId > 0) hints.set(String(storeKey).toUpperCase(), levelRuleId);
+    }
   }
   const resultDir = path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-submit-results');
   if (fsSync.existsSync(resultDir)) {

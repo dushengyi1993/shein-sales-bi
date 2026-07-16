@@ -79,6 +79,8 @@ function parseArgs(argv) {
     includeCoupon: false,
     dryRun: false,
     noClose: false,
+    headless: false,
+    selectionDebugOnly: false,
     submit: false,
     minDiscountFallback: [],
     priceOverrides: '',
@@ -96,6 +98,8 @@ function parseArgs(argv) {
     else if (a === '--include-coupon') out.includeCoupon = true;
     else if (a === '--dry-run') out.dryRun = true;
     else if (a === '--no-close') out.noClose = true;
+    else if (a === '--headless') out.headless = true;
+    else if (a === '--selection-debug-only') out.selectionDebugOnly = true;
     else if (a === '--submit') out.submit = true;
     else if (a === '--min-discount-fallback') out.minDiscountFallback = String(argv[++i] || '').split(',').map(s => s.trim()).filter(Boolean);
     else if (a === '--price-overrides') out.priceOverrides = path.resolve(argv[++i] || '');
@@ -280,7 +284,7 @@ function launchVisible(store) {
   const r = spawnSync(process.execPath, [
     path.join(ROOT, 'scripts', 'launch_store_browser.mjs'),
     store.storeKey,
-    '--visible',
+    args.headless ? '--headless' : '--visible',
     '--url',
     LIST_URL,
   ], {cwd: ROOT, encoding: 'utf8', timeout: 20_000});
@@ -369,12 +373,13 @@ class Cdp {
     this.ws.send(JSON.stringify(payload));
     return new Promise((resolve, reject) => {
       this.pending.set(id, {resolve, reject});
+      const timeoutMs = method === 'Runtime.evaluate' ? 120_000 : 30_000;
       setTimeout(() => {
         if (this.pending.has(id)) {
           this.pending.delete(id);
           reject(new Error(`CDP timeout: ${method}`));
         }
-      }, 30_000);
+      }, timeoutMs);
     });
   }
   close() {
@@ -517,7 +522,20 @@ async function setPageSize500(cdp, sessionId) {
   `);
   if (!before?.rect) return {ok: false, skipped: true, reason: '未找到每页条数控件', ...before};
   if (/500\s*条\/页/.test(before.currentText || '')) return {ok: true, changed: false, ...before};
-  await realClick(cdp, sessionId, before.rect);
+  const centeredRect = await evalJs(cdp, sessionId, `
+    const textOf = el => String(el?.innerText || el?.textContent || '').replace(/\\s+/g, ' ').trim();
+    const current = [...document.querySelectorAll('.soui-pagination-size-list, .soui-select-wrapper, div, span')]
+      .filter(el => /\\d+\\s*条\\/页/.test(textOf(el)))
+      .sort((a,b) => {
+        const score = el => String(el.className || '').includes('soui-pagination-size-list') ? 0 : (String(el.className || '').includes('soui-select-wrapper') ? 1 : 2);
+        return (score(a) - score(b)) || (b.getBoundingClientRect().y - a.getBoundingClientRect().y);
+      })[0];
+    if (!current) return false;
+    current.scrollIntoView({block:'center', inline:'center'});
+    const r = current.getBoundingClientRect();
+    return {x: r.left, y: r.top, w: r.width, h: r.height};
+  `);
+  await realClick(cdp, sessionId, centeredRect || before.rect);
   await sleep(500);
   const option = await evalJs(cdp, sessionId, `
     const textOf = el => String(el?.innerText || el?.textContent || '').replace(/\\s+/g, ' ').trim();
@@ -671,13 +689,100 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
   if (mode === 'edit') return {ok: true, mode: 'edit'};
   if (mode !== 'choose') return {ok: false, mode, reason: '未知页面'};
 
-  const pageSize = await setPageSize500(cdp, sessionId);
+  let pageSize = null;
+  const pageSizeAttempts = [];
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    await cdp.call('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27}, sessionId).catch(() => {});
+    await cdp.call('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27}, sessionId).catch(() => {});
+    pageSize = await setPageSize500(cdp, sessionId);
+    pageSizeAttempts.push({attempt, ...pageSize});
+    if (pageSize?.ok) break;
+    await sleep(800);
+  }
+  pageSize = {...pageSize, attempts: pageSizeAttempts};
   await sleep(500);
+
+  if (args.selectionDebugOnly) {
+    const diagnostic = await evalJs(cdp, sessionId, `
+      const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+      const rowInfo = tr => {
+        const text = tr?.innerText || '';
+        return {
+          skc: String((text.match(/SKC:\\s*([a-z]{2}\\d+)/i) || [])[1] || '').toLowerCase(),
+          text: text.slice(0, 260),
+        };
+      };
+      const tbody = document.querySelector('tbody');
+      const activityId = Number((location.href.match(/\\/config\\/(\\d+)/) || [])[1] || 0);
+      let apiSnapshot = null;
+      try {
+        const response = await fetch('/mrs-api-prefix/mbrs/activity/query_supplier_goods_list_v2?page_num=1&page_size=500', {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'content-type': 'application/json;charset=UTF-8',
+            'Origin-Url': location.href,
+            'x-bbl-route': location.hash.replace(/^#/, '') || '/mbrs/marketing/list',
+            'x-req-zone-id': 'Asia/Shanghai',
+            'x-lt-language': 'CN',
+            'LAN': 'CN',
+          },
+          body: JSON.stringify({
+            activity_id: activityId,
+            is_partake: 0,
+            main_site: 'shein',
+            pricing_currency_code: 'SAR',
+            skc_query: {grade_tree_list: []},
+          }),
+        });
+        const packet = await response.json();
+        const list = packet?.info?.partake_goods_list || [];
+        apiSnapshot = {
+          httpStatus: response.status,
+          code: packet?.code ?? null,
+          msg: packet?.msg || '',
+          total: Number(packet?.info?.total ?? list.length),
+          rows: list.map((row, index) => ({
+            idx: index + 1,
+            skc: String(row?.skc || '').toLowerCase(),
+            supplierNo: row?.supplier_no || '',
+            currentPrice: Number(row?.current_cost || row?.current_cost_display?.value || row?.shop_price || row?.special_price || row?.current_shop_price || 0),
+          })),
+        };
+      } catch (error) {
+        apiSnapshot = {error: String(error?.message || error)};
+      }
+      const ancestors = [];
+      for (let el = tbody; el; el = el.parentElement) {
+        const style = getComputedStyle(el);
+        ancestors.push({
+          tag: el.tagName,
+          className: String(el.className || '').slice(0, 260),
+          overflowY: style.overflowY,
+          clientHeight: el.clientHeight,
+          scrollHeight: el.scrollHeight,
+          scrollTop: el.scrollTop,
+          rowCount: el.querySelectorAll('tbody tr').length,
+        });
+      }
+      return {
+        href: location.href,
+        visibleRows: [...document.querySelectorAll('tbody tr')].filter(visible).map(rowInfo).filter(x => x.skc),
+        allRows: [...document.querySelectorAll('tbody tr')].map(rowInfo).filter(x => x.skc),
+        checkboxHtml: [...document.querySelectorAll('input[type=checkbox]')].map(x => x.closest('.soui-checkbox-wrapper,.merchant-ui-checkbox')?.outerHTML || x.outerHTML),
+        apiSnapshot,
+        ancestors,
+        bodyTail: (document.body?.innerText || '').slice(-900),
+      };
+    `);
+    return {ok: false, mode: 'choose', reason: 'selection_debug_only', pageSize, diagnostic};
+  }
 
   const result = await evalJs(cdp, sessionId, `
     const allowSkcs = Array.isArray(__arg?.allowSkcs) ? __arg.allowSkcs.map(x => String(x || '').trim().toLowerCase()).filter(Boolean) : null;
     const allowSet = allowSkcs ? new Set(allowSkcs) : null;
     const seenAllowed = new Set();
+    let fullAllowlistHeaderConfirmed = false;
     const sleep = ms => new Promise(r => setTimeout(r, ms));
     const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
     const isDisabled = el => !el || el.disabled || el.getAttribute('aria-disabled') === 'true' ||
@@ -754,6 +859,52 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
       return row;
     };
     const skcOfRow = tr => recordRow(tr).skc;
+    const visibleGoodsRows = () => [...document.querySelectorAll('tbody tr')]
+      .filter(visible)
+      .filter(tr => rowSnapshot(tr).skc);
+    const recordVisibleGoodsRows = () => {
+      const rows = visibleGoodsRows();
+      for (const tr of rows) {
+        const row = recordRow(tr);
+        if (allowSet?.has(row.skc)) seenAllowed.add(row.skc);
+      }
+      return rows;
+    };
+    const waitForSelectedCount = async expected => {
+      for (let i = 0; i < 30; i++) {
+        const count = parseSelected().selectedCount;
+        if (count === expected) return true;
+        await sleep(200);
+      }
+      return parseSelected().selectedCount === expected;
+    };
+    const selectExactFullAllowlistViaHeader = async totalGoods => {
+      if (!allowSet || !totalGoods || allowSet.size !== totalGoods) return {used: false, clicks: 0};
+      const rows = recordVisibleGoodsRows();
+      const visibleSkcs = new Set(rows.map(row => rowSnapshot(row).skc).filter(Boolean));
+      const seenSkcs = new Set(seenRowsBySkc.keys());
+      const exactKnownSet = (rows.length === totalGoods && visibleSkcs.size === allowSet.size &&
+        [...visibleSkcs].every(skc => allowSet.has(skc))) ||
+        (seenSkcs.size === allowSet.size && [...seenSkcs].every(skc => allowSet.has(skc)));
+      if (!exactKnownSet) return {used: false, clicks: 0};
+      if (parseSelected().selectedCount === totalGoods) {
+        fullAllowlistHeaderConfirmed = true;
+        return {used: true, clicks: 0};
+      }
+      const cb = headerCheckbox();
+      if (!cb) return {used: false, clicks: 0};
+      const beforeCount = parseSelected().selectedCount;
+      fire(cb);
+      let selectedAll = await waitForSelectedCount(totalGoods);
+      let clicks = 1;
+      if (!selectedAll && beforeCount > 0 && parseSelected().selectedCount === 0) {
+        fire(cb);
+        clicks++;
+        selectedAll = await waitForSelectedCount(totalGoods);
+      }
+      if (selectedAll) fullAllowlistHeaderConfirmed = true;
+      return {used: selectedAll, clicks};
+    };
     const selectUncheckedVisibleRows = async () => {
       let clicks = 0;
       const rowChecks = [...document.querySelectorAll('tr input[type=checkbox]')]
@@ -795,22 +946,30 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
       return {clicks, visibleRows, visibleAllowed};
     };
     const tableScroller = () => [...document.querySelectorAll('div,main,section')]
-      .filter(el => el.querySelectorAll('tr input[type=checkbox]').length >= 2 && el.scrollHeight > el.clientHeight + 40)
+      .filter(visible)
+      .filter(el => ['auto', 'scroll'].includes(getComputedStyle(el).overflowY))
+      .filter(el => el.querySelectorAll('tbody tr').length >= 2 && el.scrollHeight > el.clientHeight + 40)
       .sort((a,b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight))[0];
     const sweepVirtualRows = async totalGoods => {
       const scroller = tableScroller();
       if (!scroller) return 0;
       let clicks = 0;
-      const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-      for (let top = 0, guard = 0; guard < 80 && top <= max + 30; guard++, top += 360) {
+      const step = Math.max(60, Math.floor(scroller.clientHeight * 0.25));
+      for (let top = 0, guard = 0; guard < 160; guard++, top += step) {
+        const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
         scroller.scrollTop = Math.min(top, max);
         scroller.dispatchEvent(new Event('scroll', {bubbles:true}));
-        await sleep(260);
-        if (allowSet) clicks += (await alignVisibleRowsToAllowlist()).clicks;
-        else clicks += await selectUncheckedVisibleRows();
+        await sleep(450);
+        recordVisibleGoodsRows();
+        if (allowSet) {
+          clicks += (await alignVisibleRowsToAllowlist()).clicks;
+        } else {
+          clicks += await selectUncheckedVisibleRows();
+        }
         const selectedNow = parseSelected().selectedCount;
         if (allowSet && seenAllowed.size >= allowSet.size) break;
         if (!allowSet && totalGoods && selectedNow >= totalGoods) break;
+        if (top >= max) break;
       }
       return clicks;
     };
@@ -822,7 +981,10 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
       await gotoPage(page);
       await sleep(500);
       if (allowSet) {
-        selectedClicks += (await alignVisibleRowsToAllowlist()).clicks;
+        recordVisibleGoodsRows();
+        const exactHeader = await selectExactFullAllowlistViaHeader(total.totalGoods);
+        selectedClicks += exactHeader.clicks;
+        if (!exactHeader.used) selectedClicks += (await alignVisibleRowsToAllowlist()).clicks;
       } else {
         const cb = headerCheckbox();
         if (cb && !cb.checked) {
@@ -834,6 +996,9 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
       }
       if ((allowSet && seenAllowed.size < allowSet.size) || (!allowSet && total.totalGoods && parseSelected().selectedCount < total.totalGoods)) {
         selectedClicks += await sweepVirtualRows(total.totalGoods);
+      }
+      if (allowSet && parseSelected().selectedCount !== allowSet.size) {
+        selectedClicks += (await selectExactFullAllowlistViaHeader(total.totalGoods)).clicks;
       }
       pages++;
     }
@@ -847,17 +1012,38 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
           await sleep(500);
           selectedClicks += (await alignVisibleRowsToAllowlist()).clicks;
           selectedClicks += await sweepVirtualRows(total.totalGoods);
+          selectedClicks += (await selectExactFullAllowlistViaHeader(total.totalGoods)).clicks;
         }
       }
     }
     const selected = parseSelected();
     const availableRows = [...seenRowsBySkc.values()].sort((a,b) => a.idx - b.idx);
     const outOfPlanRows = allowSet ? availableRows.filter(row => row.skc && !allowSet.has(row.skc)) : [];
-    const missingAllowedSkcs = allowSet ? [...allowSet].filter(skc => !seenAllowed.has(skc)).sort() : [];
+    const missingAllowedSkcs = allowSet && !fullAllowlistHeaderConfirmed ? [...allowSet].filter(skc => !seenAllowed.has(skc)).sort() : [];
     const expectedSelectedCount = allowSet ? allowSet.size : total.totalGoods;
     const selectedMatchesPlan = allowSet
-      ? missingAllowedSkcs.length === 0 && selected.selectedCount === expectedSelectedCount
+      ? missingAllowedSkcs.length === 0 && selected.selectedCount === expectedSelectedCount && outOfPlanRows.length === 0
       : true;
+    const debug = {
+      trCount: document.querySelectorAll('tr').length,
+      checkboxInputCount: document.querySelectorAll('input[type=checkbox]').length,
+      customCheckboxCount: document.querySelectorAll('[role=checkbox],.soui-checkbox,.merchant-ui-checkbox,.ant-checkbox').length,
+      tableCount: document.querySelectorAll('table').length,
+      scrollCandidates: [...document.querySelectorAll('div,main,section')]
+        .filter(visible)
+        .filter(el => ['auto', 'scroll'].includes(getComputedStyle(el).overflowY))
+        .filter(el => el.querySelectorAll('tbody tr').length >= 2 && el.scrollHeight > el.clientHeight + 40)
+        .map(el => ({tag: el.tagName, className: String(el.className || '').slice(0, 240), clientHeight: el.clientHeight, scrollHeight: el.scrollHeight, rowCount: el.querySelectorAll('tbody tr').length})),
+      rowTextSamples: [...document.querySelectorAll('tr')].slice(0, 5).map(tr => (tr.innerText || tr.textContent || '').trim().slice(0, 500)),
+      customCheckboxSamples: [...document.querySelectorAll('[role=checkbox],.soui-checkbox,.merchant-ui-checkbox,.ant-checkbox')].slice(0, 8).map(el => ({
+        tag: el.tagName,
+        className: String(el.className || '').slice(0, 300),
+        role: el.getAttribute('role') || '',
+        ariaChecked: el.getAttribute('aria-checked') || '',
+        html: el.outerHTML.slice(0, 800),
+      })),
+      bodyHead: (document.body?.innerText || '').slice(0, 1500),
+    };
     const nextStep = [...document.querySelectorAll('button')].filter(visible).find(b => b.innerText.trim() === '下一步');
     const canNext = nextStep && !nextStep.disabled && selectedMatchesPlan;
     if (canNext) fire(nextStep);
@@ -867,13 +1053,15 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
       selectedClicks,
       clickedNext: Boolean(canNext),
       selectionMode: allowSet ? 'allowlist' : 'all',
+      selectionEvidenceMode: fullAllowlistHeaderConfirmed ? 'plan_count_visible_membership_header_count' : 'row_membership',
       expectedSelectedCount,
-      matchedAllowedCount: allowSet ? seenAllowed.size : null,
+      matchedAllowedCount: allowSet ? (fullAllowlistHeaderConfirmed ? allowSet.size : seenAllowed.size) : null,
       missingAllowedSkcs,
       selectedMatchesPlan,
       availableRows,
       outOfPlanRows,
       outOfPlanCount: outOfPlanRows.length,
+      debug,
       ...total,
       ...selected,
     };
@@ -1572,7 +1760,7 @@ const summary = {
 };
 
 for (const store of selectedStores) {
-  console.log(`\n[${store.storeKey}] 打开可见前端浏览器并检查活动...`);
+  console.log(`\n[${store.storeKey}] 打开${args.headless ? '云端无头' : '可见前端'}浏览器并检查活动...`);
   if (!args.noClose) {
     closeExistingStoreChrome(store);
     await sleep(2500);

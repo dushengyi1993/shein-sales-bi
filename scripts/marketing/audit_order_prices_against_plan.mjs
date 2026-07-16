@@ -14,6 +14,10 @@ import fssync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {isValidSalesGoodsRow, salesExclusionReason} from '../../lib/shein_sales_validity.mjs';
+import {
+  findActiveManualLimitedDiscount,
+  loadManualLimitedDiscountRegistry,
+} from '../../lib/marketing_manual_limited_discount_overrides.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_PLAN = path.join(ROOT, 'tmp', 'marketing-signup', 'price-overrides-2026-06-03-ALL-ready.json');
@@ -424,22 +428,34 @@ function classifyRow(row, context) {
 
   const baseKey = planKey(context.storeKey, base.skc);
   const candidates = context.planByBaseKey.get(baseKey) || [];
-  if (!candidates.length) {
+  const manualSpecial = findActiveManualLimitedDiscount(
+    context.manualLimitedDiscountRegistry,
+    context.storeKey,
+    base.skc,
+    base.orderTime,
+  );
+  if (!candidates.length && !manualSpecial) {
     return {...base, status: 'missing_plan', reason: 'no plan item for store+skc'};
   }
-  const selected = selectPlanForOrder(candidates, base.orderTime, context);
+  const selected = manualSpecial
+    ? {status: 'selected', plan: candidates[0] || null, reason: 'manual_special_limited_discount_window'}
+    : selectPlanForOrder(candidates, base.orderTime, context);
   if (selected.status !== 'selected') {
     return {...base, status: selected.status, reason: selected.reason || selected.status};
   }
   const plan = selected.plan;
 
-  base.finalTargetPrice = round2(plan.finalTargetPrice);
-  base.canonical = plan.canonical;
-  base.combo = plan.combo;
-  base.planWindowStatus = planItemWindowStatus(base.orderTime, plan);
-  base.activityId = plan.activityId;
-  base.planStartTime = plan.planStartTime || context.planStartTime || '';
-  base.planEndTime = plan.planEndTime || context.planEndTime || '';
+  base.finalTargetPrice = round2(manualSpecial?.specialPrice ?? plan.finalTargetPrice);
+  base.ordinaryPlanFinalTargetPrice = plan ? round2(plan.finalTargetPrice) : null;
+  base.expectedPriceSource = manualSpecial ? 'manual_special_limited_discount_override' : 'ordinary_marketing_plan';
+  base.manualSpecialValidFrom = manualSpecial?.validFrom || '';
+  base.manualSpecialValidTo = manualSpecial?.validTo || '';
+  base.canonical = plan?.canonical || manualSpecial?.canonical || '';
+  base.combo = plan?.combo || '';
+  base.planWindowStatus = manualSpecial ? 'manual_special_limited_discount_window' : planItemWindowStatus(base.orderTime, plan);
+  base.activityId = plan?.activityId || manualSpecial?.currentActivityId || '';
+  base.planStartTime = manualSpecial?.validFrom || plan?.planStartTime || context.planStartTime || '';
+  base.planEndTime = manualSpecial?.validTo || plan?.planEndTime || context.planEndTime || '';
   base.planSelectionReason = selected.reason || '';
 
   if (!Number.isFinite(quantity) || quantity <= 0) {
@@ -450,9 +466,10 @@ function classifyRow(row, context) {
   }
   const actualUnitPrice = context.priceGrain === 'line' ? currencyPrice / quantity : currencyPrice;
   base.actualUnitPrice = round2(actualUnitPrice);
-  base.deltaSar = round2(actualUnitPrice - plan.finalTargetPrice);
-  base.deltaPct = plan.finalTargetPrice ? round4(base.deltaSar / plan.finalTargetPrice) : null;
-  if (base.planWindowStatus !== 'not_configured' && base.planWindowStatus !== 'inside_plan_window') {
+  base.deltaSar = round2(actualUnitPrice - base.finalTargetPrice);
+  base.deltaPct = base.finalTargetPrice ? round4(base.deltaSar / base.finalTargetPrice) : null;
+  const acceptedWindowStatuses = new Set(['not_configured', 'inside_plan_window', 'manual_special_limited_discount_window']);
+  if (!acceptedWindowStatuses.has(base.planWindowStatus)) {
     return {...base, status: 'outside_plan_window', reason: base.planWindowStatus};
   }
   if (base.deltaSar < -context.toleranceSar) return {...base, status: 'below_target'};
@@ -462,6 +479,7 @@ function classifyRow(row, context) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  const manualLimitedDiscountRegistry = await loadManualLimitedDiscountRegistry();
   const plan = await readJson(args.plan);
   const linksDataPath = args.linksData || (fssync.existsSync(DEFAULT_LINKS_DATA) ? DEFAULT_LINKS_DATA : '');
   const linksData = linksDataPath ? await readJson(linksDataPath).catch(() => null) : null;
@@ -497,6 +515,7 @@ async function main() {
       priceGrain: args.priceGrain,
       planStartTime: args.planStartTime,
       planEndTime: args.planEndTime,
+      manualLimitedDiscountRegistry,
     };
     for (const row of data.goodsRows) {
       const audit = classifyRow(row, context);

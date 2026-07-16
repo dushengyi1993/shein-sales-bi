@@ -3,15 +3,17 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
+import {
+  buildManualLimitedDiscountIndex,
+  loadManualLimitedDiscountRegistry,
+  partitionRowsByManualLimitedDiscount,
+} from '../../lib/marketing_manual_limited_discount_overrides.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const DEFAULT_GUARD = path.join(ROOT, 'outputs/reports/marketing-daily-guard-2026-07-05.json');
-const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp/marketing-signup/limited-discount-fallback/target-price-drift-2026-07-05');
-const DEFAULT_END_TIME = '2026-07-21 23:59:59';
 const DEFAULT_ACTIVITY_NAME_PREFIX = '限时折扣目标价漂移修复';
 
 function parseArgs(argv) {
-  const args = {guard: DEFAULT_GUARD, outDir: DEFAULT_OUT_DIR, endTime: '', activityNamePrefix: DEFAULT_ACTIVITY_NAME_PREFIX, maxRows: 0};
+  const args = {guard: '', outDir: '', endTime: '', activityNamePrefix: DEFAULT_ACTIVITY_NAME_PREFIX, maxRows: 0};
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--guard') args.guard = path.resolve(argv[++i] || '');
@@ -27,8 +29,18 @@ function parseArgs(argv) {
     else throw new Error(`Unknown argument: ${a}`);
   }
   if (!args.guard) throw new Error('Missing --guard');
-  if (!args.outDir) throw new Error('Missing --out-dir');
+  const reportDate = String(args.guard).match(/20\d{2}-\d{2}-\d{2}/)?.[0] || '';
+  if (!reportDate) throw new Error('Could not infer report date from --guard; use a marketing-daily-guard-YYYY-MM-DD.json path.');
+  if (!args.outDir) args.outDir = path.join(ROOT, 'tmp', 'marketing-signup', 'limited-discount-fallback', `target-price-drift-${reportDate}`);
+  if (!args.endTime) args.endTime = `${addDays(reportDate, 7)} 23:59:59`;
   return args;
+}
+
+function addDays(dateText, days) {
+  const [year, month, day] = String(dateText).split('-').map(Number);
+  const value = new Date(Date.UTC(year, month - 1, day));
+  value.setUTCDate(value.getUTCDate() + Number(days || 0));
+  return value.toISOString().slice(0, 10);
 }
 
 function rel(file) {
@@ -111,11 +123,14 @@ async function writeJson(file, obj) {
 }
 
 export function buildLimitedDiscountDriftRescuePlan(guard, options = {}) {
-  const rows = (guard.limitedDiscountTargetPriceDrift?.belowRows || [])
+  const candidateRows = (guard.limitedDiscountTargetPriceDrift?.belowRows || [])
     .filter(row => row && row.storeKey && row.skc)
     .filter(row => num(row.finalTargetPrice) !== null)
     .filter(row => num(row.limitedDiscountPrice) !== null)
     .filter(row => num(row.limitedDiscountPrice) < num(row.finalTargetPrice) - 0.01);
+  const manualIndex = options.manualIndex || buildManualLimitedDiscountIndex(options.manualRegistry || {entries: []}, options.now || new Date());
+  const partitioned = partitionRowsByManualLimitedDiscount(candidateRows, manualIndex, options.now || new Date());
+  const rows = partitioned.ordinaryRows;
   const selectedRows = Number(options.maxRows || 0) > 0 ? rows.slice(0, Number(options.maxRows)) : rows;
   const groups = new Map();
   for (const row of selectedRows) {
@@ -145,12 +160,23 @@ export function buildLimitedDiscountDriftRescuePlan(guard, options = {}) {
     sourcePriceOverrides: guard.limitedDiscountTargetPriceDrift?.planSourcePath || '',
     rule: '修正 live 限时折扣价低于当前窗口 finalTargetPrice 的行；单一目标活动可用 apply_hl_limited_discount_rescue dry-run/execute，混合活动由脚本 fail-closed 后再 split-preserve。',
     totals: {
-      belowTarget: rows.length,
+      belowTarget: candidateRows.length,
+      ordinaryBelowTarget: rows.length,
+      protectedManualSpecial: partitioned.protectedRows.length,
       selected: selectedRows.length,
       groups: groups.size,
       stores: Object.keys(byStore).length,
     },
     byStore,
+    protectedManualSpecialRows: partitioned.protectedRows.map(({row, entry}) => ({
+      storeKey: entry.storeKey,
+      skc: entry.skc,
+      staleLimitedDiscountPrice: num(row.limitedDiscountPrice),
+      staleFinalTargetPrice: num(row.finalTargetPrice),
+      protectedSpecialPrice: entry.specialPrice,
+      validTo: entry.validTo,
+      reason: 'active manual-special registry entry defensively removed from ordinary drift rescue plan',
+    })),
     groups: [...groups.values()].sort((a, b) => a.storeKey.localeCompare(b.storeKey) || String(a.limitedDiscountName).localeCompare(String(b.limitedDiscountName))),
     rescueFiles,
   };
@@ -159,8 +185,9 @@ export function buildLimitedDiscountDriftRescuePlan(guard, options = {}) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const guard = JSON.parse(await fs.readFile(args.guard, 'utf8'));
-  const endTime = args.endTime || DEFAULT_END_TIME;
-  const plan = buildLimitedDiscountDriftRescuePlan(guard, {guardPath: rel(args.guard), maxRows: args.maxRows});
+  const manualRegistry = await loadManualLimitedDiscountRegistry();
+  const endTime = args.endTime;
+  const plan = buildLimitedDiscountDriftRescuePlan(guard, {guardPath: rel(args.guard), maxRows: args.maxRows, manualRegistry});
   await fs.mkdir(args.outDir, {recursive: true});
   const clearedStaleRescueFiles = await clearGeneratedRescueFiles(args.outDir);
   for (const group of plan.groups) {

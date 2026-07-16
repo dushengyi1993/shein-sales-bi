@@ -1,7 +1,37 @@
 {
   "description": "Machine-readable long-term pricing policy for SHEIN ordinary marketing signup, coupon pairing, and limited-discount fallback. This file contains no credentials.",
-  "updatedAt": "2026-07-11",
+  "updatedAt": "2026-07-16",
   "targetFloorMarginPct": 15,
+  "automationExecution": {
+    "enabled": true,
+    "authorizationId": "owner-standing-cloud-marketing-v1",
+    "authorizedAt": "2026-07-16",
+    "authorizationType": "standing_owner_policy",
+    "perRunPayloadHashRequired": false,
+    "allowedContexts": [
+      "cloud_timer",
+      "owner_codex_cli"
+    ],
+    "storeScope": "all_enabled_stores",
+    "allowedActions": [
+      "restore_manual_special_limited_discount",
+      "repair_limited_discount_target_price_drift",
+      "apply_new_listing_limited_discount_fallback",
+      "create_or_replace_limited_discount_activity",
+      "top_up_limited_discount_virtual_inventory"
+    ],
+    "requiredGuards": [
+      "fresh_complete_ordinary_marketing_scan",
+      "fresh_complete_limited_discount_scan",
+      "current_owner_pricing_policy",
+      "store_identity_check",
+      "preflight",
+      "target_price_floor",
+      "post_write_readback",
+      "audit_artifact"
+    ],
+    "note": "云端营销 timer 按负责人长期策略授权自动执行，不要求逐次人工 payload hash。超出本动作、店铺或价格策略范围的任务仍须阻断并单独复核。"
+  },
   "topTreatmentCostFallback": {
     "enabled": true,
     "costMapPath": "tmp/mbrs/marketing-cost-map.json",
@@ -37,12 +67,14 @@
   "limitedDiscount": {
     "mustExistForPlannedLinks": true,
     "role": "fallback_price_tool",
+    "defaultActivityStock": 10,
+    "defaultDurationDays": 7,
     "defaultDiscountRatePct": 15,
     "defaultPriceFactor": 0.85,
     "oldLimitedDiscountCanBeCancelledAndRecreated": true,
     "mustNotInterfereTargetPrice": true,
     "adjustWhenInterferes": true,
-    "priorityNote": "Limited discount is the guaranteed fallback price layer when ordinary marketing is not enough. Coupons are not guaranteed to trigger, so do not rely on ordinary marketing + 15% coupon as the primary guaranteed price stack; cancel/recreate or adjust limited discounts when the guaranteed base price would be lower or higher than the intended target."
+    "priorityNote": "Limited discount is the guaranteed fallback price layer when ordinary marketing is not enough. Coupons are not guaranteed to trigger, so do not rely on ordinary marketing + 15% coupon as the primary guaranteed price stack; cancel/recreate or adjust limited discounts when the guaranteed base price would be lower or higher than the intended target. Unless the user explicitly requests otherwise, fallback limited-discount activity stock is exactly 10 and the activity window is 7 days."
   },
   "exposureTopLinks": {
     "enabled": true,

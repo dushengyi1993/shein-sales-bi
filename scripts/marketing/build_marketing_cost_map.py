@@ -21,6 +21,7 @@ COST_INPUT_CANDIDATES = [
 ]
 OUTPUT = ROOT / "tmp" / "mbrs" / "marketing-cost-map.json"
 BI_PATH = ROOT / "outputs" / "bi-portal" / "data.json"
+BI_PROFIT_SECTION_PATH = ROOT / "outputs" / "bi-portal" / "sections" / "profit.json"
 CNY_TO_SAR = 1 / 1.8
 
 
@@ -185,6 +186,15 @@ def build_true_cost_map(cost_map: dict[str, float]) -> dict[str, dict]:
         bi = json.loads(BI_PATH.read_text(encoding="utf-8"))
     except Exception:
         return {}
+    if not (bi.get("profit") or {}).get("productStorageDaily") and BI_PROFIT_SECTION_PATH.exists():
+        try:
+            section_doc = json.loads(BI_PROFIT_SECTION_PATH.read_text(encoding="utf-8"))
+            section_data = section_doc.get("data") if isinstance(section_doc.get("data"), dict) else section_doc
+            section_profit = section_data.get("profit") if isinstance(section_data, dict) else None
+            if isinstance(section_profit, dict):
+                bi["profit"] = section_profit
+        except Exception:
+            pass
     products = (bi.get("profit") or {}).get("products") or []
     profit_by_key: dict[str, dict] = {}
     for p in products:
@@ -329,6 +339,7 @@ def main() -> None:
     OUTPUT.write_text(json.dumps({
         "source": str(input_path),
         "biSource": str(BI_PATH) if BI_PATH.exists() else None,
+        "biProfitSectionSource": str(BI_PROFIT_SECTION_PATH) if BI_PROFIT_SECTION_PATH.exists() else None,
         "count": len(cost_map),
         "trueCostCount": len(true_cost_map),
         "costMap": cost_map,

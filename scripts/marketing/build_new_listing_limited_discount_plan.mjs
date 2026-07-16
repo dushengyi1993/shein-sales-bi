@@ -11,6 +11,7 @@ import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
 import {
+  buildLinkRowIndexFromBi,
   deriveTopTreatmentTargetFromCost,
   hasOrdinaryMarketingEvidence,
   isRecentNewListingLink,
@@ -21,11 +22,22 @@ import {
   collectRelistedLinkHistoryEvidence,
   marketingLinkKey,
 } from '../../lib/marketing_relisted_link_history.mjs';
+import {
+  assessLatestRawMarketingLinkCoverage,
+  collectLatestRawMarketingLinkRows,
+  mergeMarketingLinkRows,
+} from '../../lib/marketing_latest_raw_link_overlay.mjs';
 import {normalizeGoodsSnDetailed} from '../../lib/product_sku_normalizer.mjs';
+import {
+  buildManualLimitedDiscountIndex,
+  classifyManualLimitedDiscountLiveState,
+  loadManualLimitedDiscountRegistry,
+} from '../../lib/marketing_manual_limited_discount_overrides.mjs';
 
 const ROOT = process.cwd();
 const DEFAULT_LINKS_DATA = path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'linksData.json');
 const DEFAULT_POLICY = path.join(ROOT, 'config', 'marketing_pricing_policy.json');
+const DEFAULT_STORES_CONFIG = path.join(ROOT, 'config', 'stores.json');
 const DEFAULT_COST_MAP = path.join(ROOT, 'tmp', 'mbrs', 'marketing-cost-map.json');
 const DEFAULT_PRICE_OVERRIDES = path.join(
   ROOT,
@@ -45,14 +57,27 @@ const reportJsonPath = path.resolve(ROOT, args.reportJson || path.join('outputs'
 const reportMdPath = path.resolve(ROOT, args.reportMd || path.join('outputs', 'reports', `new-listing-7d-limited-discount-plan-${reportDate}.md`));
 
 const policy = await loadMarketingPricingPolicy(policyPath);
+const effectiveNow = args.now ? new Date(String(args.now).replace(' ', 'T') + (/[zZ]|[+-]\d{2}:?\d{2}$/.test(String(args.now)) ? '' : '+08:00')) : new Date();
+if (!Number.isFinite(effectiveNow.getTime())) throw new Error(`Invalid --now: ${args.now}`);
+const manualLimitedDiscountRegistry = await loadManualLimitedDiscountRegistry();
+const manualLimitedDiscountIndex = buildManualLimitedDiscountIndex(
+  manualLimitedDiscountRegistry,
+  effectiveNow,
+);
 const costMapPath = path.resolve(ROOT, args.costMap || policy?.topTreatmentCostFallback?.costMapPath || DEFAULT_COST_MAP);
-const durationDays = positiveInt(policy?.newListingWithin7Days?.limitedDiscount?.durationDays, 7);
+const durationDays = positiveInt(
+  policy?.newListingWithin7Days?.limitedDiscount?.durationDays ?? policy?.limitedDiscount?.defaultDurationDays,
+  7,
+);
+const activityStock = positiveInt(policy?.limitedDiscount?.defaultActivityStock, 10);
 const endTime = args.endTime || `${addDays(reportDate, durationDays)} 23:59:59`;
 const activityNamePrefix = args.activityNamePrefix || policy?.newListingWithin7Days?.limitedDiscount?.activityNamePrefix || '新上架7天高曝光兜底限时折扣';
 const relistedPolicy = policy?.relistedWithoutActiveMarketing || {};
 const relistedActivityNamePrefix = relistedPolicy?.limitedDiscount?.activityNamePrefix || '重新上架无活动Top5兜底限时折扣';
 
 const linksDoc = await readJson(linksDataPath);
+const storesConfigPath = path.resolve(ROOT, args.storesConfig || DEFAULT_STORES_CONFIG);
+const storesConfig = await readJson(storesConfigPath);
 const priceDoc = await readJson(priceOverridesPath);
 const costDoc = fsSync.existsSync(costMapPath) ? await readJson(costMapPath) : {};
 const liveScanPath = args.currentMarketingLiveScan
@@ -60,11 +85,40 @@ const liveScanPath = args.currentMarketingLiveScan
   : '';
 const liveScanDoc = liveScanPath ? await readJson(liveScanPath) : null;
 const linksData = unwrapBiLinksData(linksDoc);
-const storeLinks = Array.isArray(linksData.storeLinks) ? linksData.storeLinks : [];
+const linkRowIndex = buildLinkRowIndexFromBi(linksDoc);
+const expectedRawStoreKeys = [...new Set((storesConfig.stores || [])
+  .filter(store => store?.enabled !== false)
+  .map(store => normStore(store?.storeKey || store?.key || store?.store))
+  .filter(Boolean))].sort();
+if (!expectedRawStoreKeys.length) throw new Error(`No enabled stores found in stores config: ${storesConfigPath}`);
+const latestRawLinks = collectLatestRawMarketingLinkRows({
+  historyDir: linkHistoryDir,
+  reportDate,
+  storeKeys: expectedRawStoreKeys,
+});
+const latestRawLinkCoverage = assessLatestRawMarketingLinkCoverage({
+  sourceFiles: latestRawLinks.sourceFiles,
+  errors: latestRawLinks.errors,
+  storeKeys: expectedRawStoreKeys,
+});
+if (!latestRawLinkCoverage.complete) {
+  throw new Error(
+    `Latest raw link overlay incomplete: expectedStores=${latestRawLinkCoverage.expectedStoreCount} `
+    + `sourceFiles=${latestRawLinkCoverage.sourceFileCount} missing=${latestRawLinkCoverage.missingStoreKeys.join(',') || '(none)'} `
+    + `parseErrors=${latestRawLinkCoverage.parseErrorCount}; refuse to generate a false no-action plan.`,
+  );
+}
+const mergedLinks = mergeMarketingLinkRows([...linkRowIndex.byLinkKey.values()], latestRawLinks.rows);
+const storeLinks = mergedLinks.rows;
+if (storeLinks.length === 0) {
+  throw new Error('No normalized store+SKC rows found in links data; refuse to report a false no-action result.');
+}
 const primaryPriceIndex = buildPriceIndex(priceDoc, priceOverridesPath, {isSupplemental: false});
-const supplementalPriceIndexes = await loadSupplementalNewListingPriceIndexes(priceOverridesPath);
+const supplementalPriceIndexes = args.noSupplementalPriceOverrides === 'true'
+  ? []
+  : await loadSupplementalNewListingPriceIndexes(priceOverridesPath, args.supplementalPriceOverridesDir);
 const priceIndexes = [primaryPriceIndex, ...supplementalPriceIndexes];
-const liveLimitedEvidence = collectLiveLimitedDiscountEvidence(liveScanDoc, liveScanPath);
+const liveLimitedEvidence = collectLiveLimitedDiscountEvidence(liveScanDoc, liveScanPath, {now: effectiveNow, requiredEndTime: endTime});
 const currentLinkKeys = new Set(storeLinks.map(link => marketingLinkKey(
   link.store_key || link.storeKey || link.store,
   link.skc || link.SKC,
@@ -89,6 +143,7 @@ for (const link of storeLinks) {
   }
   const recent = isRecentNewListingLink(link, policy, reportDate);
   const exactKey = exactPriceKey(storeKey, skc);
+  const manualSpecialEntry = manualLimitedDiscountIndex.activeByKey.get(exactKey) || null;
   const relistedEvidence = relistedHistory.bySkc.get(exactKey) || null;
   const liveMarketingRows = liveLimitedEvidence.anyBySkc.get(exactKey) || [];
   const relistedApplies = relistedPolicy.enabled !== false
@@ -105,27 +160,40 @@ for (const link of storeLinks) {
   const exactPriceEvidence = findPriceEvidenceAcross(priceIndexes, canonical, storeKey, skc, {allowCanonicalFallback: false});
   const priceEvidence = exactPriceEvidence || findPriceEvidenceAcross(priceIndexes, canonical, storeKey, skc);
   const liveLimitedRows = liveLimitedEvidence.bySkc.get(exactKey) || [];
+  const manualSpecialLiveState = manualSpecialEntry
+    ? classifyManualLimitedDiscountLiveState(manualSpecialEntry, liveLimitedRows)
+    : null;
   const liveCoveredByName = isLiveNewListingLimitedDiscountCovered(liveLimitedRows);
+  const biLimitedExplicitlyInactive = (
+    link.marketing_limited_discount_is_current === false
+    || link.marketing_limited_discount_is_current === 0
+    || link.marketing_limited_discount_is_current === '0'
+  );
   const currentLimitedPrice = numberOrNull(
     (liveLimitedRows.length ? liveLimitedRows[0].price : null)
-    ?? link.marketing_limited_discount_price_sar
-    ?? link.marketing_limited_discount_price
-    ?? link.limitedDiscountPrice,
+    ?? (biLimitedExplicitlyInactive
+      ? null
+      : link.marketing_limited_discount_price_sar
+        ?? link.marketing_limited_discount_price
+        ?? link.limitedDiscountPrice),
   );
   const hasCurrentLimitedDiscount = (
     liveLimitedRows.length > 0
     || link.marketing_limited_discount_is_current === true
     || link.marketing_limited_discount_is_current === 1
     || link.marketing_limited_discount_is_current === '1'
-    || currentLimitedPrice !== null
+    || (!biLimitedExplicitlyInactive && currentLimitedPrice !== null)
   );
   const planTopTier = resolveTopTierPrice(priceEvidence);
   const costTopTier = deriveTopTreatmentTargetFromCost({canonical, costDoc, policy});
-  const resolvedTopTier = Number.isFinite(planTopTier.price) && planTopTier.price > 0 ? planTopTier : costTopTier;
-  const liveCoveredAtTarget = liveCoveredByName
+  const ordinaryTopTier = Number.isFinite(planTopTier.price) && planTopTier.price > 0 ? planTopTier : costTopTier;
+  const resolvedTopTier = manualSpecialEntry
+    ? {price: manualSpecialEntry.specialPrice, source: 'manual_special_limited_discount_override'}
+    : ordinaryTopTier;
+  const liveCoveredAtTarget = (manualSpecialEntry ? manualSpecialLiveState?.status === 'covered_exact' : liveCoveredByName)
     && Number.isFinite(resolvedTopTier.price)
     && currentLimitedPrice !== null
-    && currentLimitedPrice >= resolvedTopTier.price - 0.01;
+    && Math.abs(round2(currentLimitedPrice) - round2(resolvedTopTier.price)) <= 0.01;
   const liveCoveredNoTargetEvidence = liveCoveredByName && (!Number.isFinite(resolvedTopTier.price) || resolvedTopTier.price <= 0);
   const common = {
     storeKey,
@@ -150,6 +218,11 @@ for (const link of storeLinks) {
     performanceActivityNames: link.performance_activity_names || '',
     firstShelfTime: link.first_shelf_time || '',
     ordinaryMarketingEvidence: hasOrdinaryMarketingEvidence(link),
+    manualSpecialLimitedDiscount: Boolean(manualSpecialEntry),
+    manualSpecialLiveStatus: manualSpecialLiveState?.status || '',
+    manualSpecialValidFrom: manualSpecialEntry?.validFrom || '',
+    manualSpecialValidTo: manualSpecialEntry?.validTo || '',
+    manualSpecialCurrentActivityId: manualSpecialEntry?.currentActivityId || null,
   };
   if (liveCoveredAtTarget || liveCoveredNoTargetEvidence) {
     ignored.push({
@@ -164,7 +237,7 @@ for (const link of storeLinks) {
     });
     continue;
   }
-  if (!priceEvidence && !costTopTier.available) {
+  if (!manualSpecialEntry && !priceEvidence && !costTopTier.available) {
     blocked.push({
       ...common,
       reason: 'missing_price_and_product_cost_evidence_for_canonical',
@@ -183,7 +256,9 @@ for (const link of storeLinks) {
     continue;
   }
   const topTierPrice = resolvedTopTier.price;
-  const action = hasCurrentLimitedDiscount ? 'replace_existing_limited_discount' : 'create_limited_discount';
+  const action = manualSpecialEntry
+    ? (manualSpecialLiveState?.status === 'covered_exact' ? 'keep_manual_special_limited_discount' : 'restore_manual_special_limited_discount')
+    : hasCurrentLimitedDiscount ? 'replace_existing_limited_discount' : 'create_limited_discount';
   rows.push({
     ...common,
     action,
@@ -195,13 +270,17 @@ for (const link of storeLinks) {
     expectedFinalAfterLimitedAnd15Coupon: '',
     couponFactor: 1,
     originalPlannedFinalPrice: topTierPrice,
-    sourceRule: treatmentType === 'relisted_without_active_marketing'
+    sourceRule: manualSpecialEntry
+      ? 'manual_special_limited_discount_override'
+      : treatmentType === 'relisted_without_active_marketing'
       ? 'relisted_without_active_marketing_same_as_global_exposure_top5'
       : 'new_listing_within_7d_same_as_global_exposure_top5',
     combo: treatmentType === 'relisted_without_active_marketing'
       ? '重新上架无生效营销活动限时折扣兜底；不依赖优惠券'
       : '新上架7天限时折扣兜底；不依赖优惠券',
-    note: treatmentType === 'relisted_without_active_marketing'
+    note: manualSpecialEntry
+      ? `用户批准人工特殊限时折扣保护：精确恢复 ${formatPrice(manualSpecialEntry.specialPrice)} SAR、活动库存 ${manualSpecialEntry.activityStock}，有效至 ${manualSpecialEntry.validTo}；不得用普通 Top5/基准价覆盖。`
+      : treatmentType === 'relisted_without_active_marketing'
       ? `历史快照 ${relistedEvidence.lastInactiveDate} 为${relistedEvidence.lastInactiveStatus || '下架/售罄'}，${relistedEvidence.relistedAt} 恢复在售，当前商品源、BI和完整营销live scan均无生效活动；按曝光前五/新链接力度 ${formatPrice(topTierPrice)} SAR 报一周兜底。`
       : hasCurrentLimitedDiscount
         ? `新上架${recent.shelfAgeDays}天且未报普通活动，已有旧限时折扣 ${formatPrice(currentLimitedPrice)} SAR；按新规则取消/结束旧活动后重报一周，目标价按曝光前五力度 ${formatPrice(topTierPrice)} SAR。`
@@ -219,8 +298,11 @@ for (const link of storeLinks) {
       : priceEvidence
         ? 'canonical_top_tier_fallback'
         : 'product_cost_top_treatment_fallback',
-    endTime,
-    activityNamePrefix: treatmentType === 'relisted_without_active_marketing' ? relistedActivityNamePrefix : activityNamePrefix,
+    endTime: manualSpecialEntry?.validTo || endTime,
+    activityStock: manualSpecialEntry?.activityStock || activityStock,
+    activityNamePrefix: manualSpecialEntry
+      ? `${storeKey}人工特殊限时折扣保护恢复`
+      : treatmentType === 'relisted_without_active_marketing' ? relistedActivityNamePrefix : activityNamePrefix,
   });
 }
 
@@ -231,8 +313,10 @@ await fs.mkdir(outDir, {recursive: true});
 await fs.mkdir(path.dirname(reportJsonPath), {recursive: true});
 
 const rescueFiles = [];
-for (const [storeKey, storeRows] of groupBy(rows, row => row.storeKey).entries()) {
-  const rescuePath = path.join(outDir, `new-listing-7d-limited-${storeKey}-${reportDate}.json`);
+for (const [, storeRows] of groupBy(rows, row => `${row.storeKey}::${row.endTime}::${row.activityStock}::${row.activityNamePrefix}`).entries()) {
+  const storeKey = storeRows[0].storeKey;
+  const windowSuffix = String(storeRows[0].endTime || endTime).slice(0, 10).replaceAll('-', '');
+  const rescuePath = path.join(outDir, `new-listing-7d-limited-${storeKey}-${reportDate}-${windowSuffix}-s${storeRows[0].activityStock}.json`);
   const storePrefixes = [...new Set(storeRows.map(row => row.activityNamePrefix).filter(Boolean))];
   const storeActivityNamePrefix = storePrefixes.length === 1
     ? storePrefixes[0]
@@ -244,7 +328,8 @@ for (const [storeKey, storeRows] of groupBy(rows, row => row.storeKey).entries()
     sourceLinksData: rel(linksDataPath),
     sourcePriceOverrides: rel(priceOverridesPath),
     pricingPolicy: rel(policyPath),
-    endTime,
+    endTime: storeRows[0].endTime,
+    activityStock: storeRows[0].activityStock,
     activityNamePrefix: storeActivityNamePrefix,
     rows: storeRows.map(row => ({
       storeKey: row.storeKey,
@@ -275,6 +360,11 @@ for (const [storeKey, storeRows] of groupBy(rows, row => row.storeKey).entries()
       productUnitCostSar: row.productUnitCostSar,
       storageUnitCostSar: row.storageUnitCostSar,
       selectionCostBasis: row.selectionCostBasis,
+      manualSpecialLimitedDiscount: row.manualSpecialLimitedDiscount,
+      manualSpecialValidFrom: row.manualSpecialValidFrom,
+      manualSpecialValidTo: row.manualSpecialValidTo,
+      manualSpecialCurrentActivityId: row.manualSpecialCurrentActivityId,
+      activityStock: row.activityStock,
     })),
   };
   await fs.writeFile(rescuePath, `${JSON.stringify(rescue, null, 2)}\n`, 'utf8');
@@ -297,11 +387,29 @@ const summary = {
   sourceCostMap: rel(costMapPath),
   sourceCurrentMarketingLiveScan: liveScanPath ? rel(liveScanPath) : '',
   sourceRelistedLinkHistory: rel(linkHistoryDir),
+  latestRawLinkOverlay: {
+    ...latestRawLinkCoverage,
+    sourceFileCount: latestRawLinks.sourceFiles.length,
+    sourceFiles: latestRawLinks.sourceFiles.map(file => ({...file, path: rel(file.path)})),
+    parseErrorCount: latestRawLinks.errors.length,
+    errors: latestRawLinks.errors.slice(0, 20),
+    rawRowCount: mergedLinks.rawRowCount,
+    addedRowCount: mergedLinks.addedRowCount,
+    addedRows: mergedLinks.addedRows.slice(0, 60).map(row => ({
+      storeKey: row.store_key,
+      skc: row.skc,
+      canonical: row.standard_goods_sn,
+      linkDate: row.link_date,
+      firstShelfTime: row.first_shelf_time,
+      source: rel(row.raw_link_snapshot_source),
+    })),
+  },
   pricingPolicy: rel(policyPath),
   rule: {
     windowDays: Number(policy?.newListingWithin7Days?.windowDays || 7),
     pricingTreatment: policy?.newListingWithin7Days?.pricingTreatment || 'same_as_global_exposure_top5',
     durationDays,
+    activityStock,
     endTime,
     activityNamePrefix,
     relistedActivityNamePrefix,
@@ -345,8 +453,10 @@ console.log(JSON.stringify({
   rescueFiles,
 }, null, 2));
 
-async function loadSupplementalNewListingPriceIndexes(primaryPath) {
-  const dir = path.join(ROOT, 'tmp', 'marketing-signup');
+async function loadSupplementalNewListingPriceIndexes(primaryPath, requestedDir = '') {
+  const dir = requestedDir
+    ? path.resolve(ROOT, requestedDir)
+    : path.join(ROOT, 'tmp', 'marketing-signup');
   if (!fsSync.existsSync(dir)) return [];
   const primaryResolved = path.resolve(primaryPath || '');
   const candidates = [];
@@ -478,7 +588,7 @@ function resolveTopTierPrice(priceEvidence) {
   return {price: null, source: 'missing_top_tier_price'};
 }
 
-function collectLiveLimitedDiscountEvidence(liveDoc, livePath = '') {
+function collectLiveLimitedDiscountEvidence(liveDoc, livePath = '', {now = new Date(), requiredEndTime = ''} = {}) {
   const rows = Array.isArray(liveDoc?.rows) ? liveDoc.rows : [];
   const bySkc = new Map();
   const anyBySkc = new Map();
@@ -489,9 +599,6 @@ function collectLiveLimitedDiscountEvidence(liveDoc, livePath = '') {
     const skc = String(row.skc || row.SKC || '').trim();
     if (!storeKey || !skc) continue;
     const key = exactPriceKey(storeKey, skc);
-    if (!isCurrentMarketingEvidenceRow(row)) continue;
-    if (!anyBySkc.has(key)) anyBySkc.set(key, []);
-    anyBySkc.get(key).push(row);
     const limitedPrice = numberOrNull(
       row.marketing_limited_discount_price_sar
       ?? row.marketing_limited_discount_price
@@ -505,13 +612,35 @@ function collectLiveLimitedDiscountEvidence(liveDoc, livePath = '') {
       || /limited/i.test(String(row.marketing_price_evidence_type || row.evidenceType || ''))
       || limitedPrice !== null
     );
+    const isCurrentEvidence = isCurrentMarketingEvidenceRow(row);
+    const liveLimitedName = row.marketing_limited_discount_name || row.limitedDiscountName || row.activityName || '';
+    const startText = row.marketing_limited_discount_start || row.limitedDiscountStart || '';
+    const endText = row.marketing_limited_discount_end || row.limitedDiscountEnd || '';
+    const startMs = dateToMs(startText);
+    const endMs = dateToMs(endText);
+    const requiredEndMs = dateToMs(requiredEndTime);
+    const futureWindowIsValid = startMs > 0
+      && endMs > 0
+      && startMs >= now.getTime() - 5 * 60 * 1000
+      && startMs <= now.getTime() + 24 * 60 * 60 * 1000
+      && (!requiredEndMs || endMs >= requiredEndMs);
+    const isFutureFallbackCovered = !isCurrentEvidence
+      && isLimitedEvidence
+      && futureWindowIsValid
+      && isLiveNewListingLimitedDiscountCovered([{name: liveLimitedName}]);
+    // A future ordinary campaign must not suppress the current fallback, but a
+    // future limited discount is the fallback we just scheduled and must stop
+    // the next guard run from creating a duplicate during its start delay.
+    if (!isCurrentEvidence && !isFutureFallbackCovered) continue;
+    if (!anyBySkc.has(key)) anyBySkc.set(key, []);
+    anyBySkc.get(key).push(row);
     if (!isLimitedEvidence) continue;
     if (!bySkc.has(key)) bySkc.set(key, []);
     bySkc.get(key).push({
       price: limitedPrice,
-      name: row.marketing_limited_discount_name || row.limitedDiscountName || row.activityName || '',
-      start: row.marketing_limited_discount_start || row.limitedDiscountStart || '',
-      end: row.marketing_limited_discount_end || row.limitedDiscountEnd || '',
+      name: liveLimitedName,
+      start: startText,
+      end: endText,
     });
   }
   return {path: livePath ? rel(livePath) : '', bySkc, anyBySkc, complete};
@@ -537,8 +666,12 @@ function hasBiActiveMarketingSignal(link) {
     link?.marketing_limited_discount_is_current === true
     || link?.marketing_limited_discount_is_current === 1
     || link?.marketing_limited_discount_is_current === '1'
-    || numberOrNull(link?.marketing_limited_discount_price_sar ?? link?.marketing_limited_discount_price ?? link?.limitedDiscountPrice) !== null
-    || numberOrNull(link?.marketing_coupon_factor ?? link?.couponFactor) !== null
+    || (
+      link?.marketing_limited_discount_is_current !== false
+      && link?.marketing_limited_discount_is_current !== 0
+      && link?.marketing_limited_discount_is_current !== '0'
+      && numberOrNull(link?.marketing_limited_discount_price_sar ?? link?.marketing_limited_discount_price ?? link?.limitedDiscountPrice) !== null
+    )
   ) return true;
   const text = [
     link?.activity_label,

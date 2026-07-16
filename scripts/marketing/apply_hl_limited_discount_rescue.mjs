@@ -6,11 +6,22 @@ import {
   storeIdentityEvalBody,
 } from '../../lib/shein_store_identity.mjs';
 import {recoverSheinLoginIfNeeded} from '../../lib/shein_login_recovery.mjs';
+import {
+  applyManualLimitedDiscountOverride,
+  buildManualLimitedDiscountIndex,
+  findActiveManualLimitedDiscount,
+  loadManualLimitedDiscountRegistry,
+} from '../../lib/marketing_manual_limited_discount_overrides.mjs';
+import {
+  assertMarketingAutomationAuthorization,
+  MARKETING_AUTOMATION_ACTIONS,
+} from '../../lib/marketing_automation_authorization.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp/marketing-signup/limited-discount-rescue');
 const DEFAULT_PORT = 9360;
 const TARGET_REF_TOOL_ID = 175;
+const CDP_CALL_TIMEOUT_MS = Number(process.env.SHEIN_MARKETING_CDP_CALL_TIMEOUT_MS || 600000);
 const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
 const STORES = STORES_CONFIG.stores || [];
 const STORE_ACCOUNT_TRUTH = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'store_account_truth.json'), 'utf8'));
@@ -24,6 +35,7 @@ function parseArgs(argv) {
     storeKey: 'HL',
     startDelayMinutes: 20,
     endTime: '',
+    activityStock: 10,
     activityNamePrefix: 'HL漏报补救限时折扣',
     replaceActivityIds: [],
   };
@@ -48,6 +60,8 @@ function parseArgs(argv) {
     else if (arg.startsWith('--start-delay-minutes=')) args.startDelayMinutes = Number(arg.slice('--start-delay-minutes='.length));
     else if (arg === '--end-time') args.endTime = argv[++i] || '';
     else if (arg.startsWith('--end-time=')) args.endTime = arg.slice('--end-time='.length);
+    else if (arg === '--activity-stock') args.activityStock = Number(argv[++i]);
+    else if (arg.startsWith('--activity-stock=')) args.activityStock = Number(arg.slice('--activity-stock='.length));
     else if (arg === '--activity-name-prefix') args.activityNamePrefix = argv[++i] || '';
     else if (arg.startsWith('--activity-name-prefix=')) args.activityNamePrefix = arg.slice('--activity-name-prefix='.length);
     else if (arg === '--replace-activity-id' || arg === '--replace-activity-ids') {
@@ -66,6 +80,9 @@ function parseArgs(argv) {
   if (!args.rescue) throw new Error('Missing --rescue <rescue-json>. Do not rely on a hard-coded one-off batch path.');
   if (!Number.isFinite(args.startDelayMinutes) || args.startDelayMinutes < 1) {
     throw new Error(`Invalid --start-delay-minutes: ${args.startDelayMinutes}`);
+  }
+  if (!Number.isInteger(args.activityStock) || args.activityStock <= 0) {
+    throw new Error(`Invalid --activity-stock: ${args.activityStock}`);
   }
   args.replaceActivityIds = [...new Set(args.replaceActivityIds.map(Number).filter(Number.isFinite))];
   return args;
@@ -112,7 +129,7 @@ class Cdp {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`CDP timeout ${method}`));
-      }, 180000);
+      }, CDP_CALL_TIMEOUT_MS);
       this.pending.set(id, {
         resolve: value => {
           clearTimeout(timer);
@@ -176,7 +193,7 @@ async function recoverLoginIfNeeded(cdp) {
   });
 }
 
-function normalizeTargetRows(rescue) {
+function normalizeTargetRows(rescue, manualIndex, execute) {
   const rows = (rescue.rows || [])
     .filter(row => row && row.needsLimitedDiscount !== false)
     .map(row => {
@@ -188,7 +205,8 @@ function normalizeTargetRows(rescue) {
         ?? row.originalPlannedFinalPrice
         ?? NaN,
       );
-      return {
+      const base = {
+        storeKey: String(row.storeKey || rescue.storeKey || '').trim().toUpperCase(),
         skc: String(row.skc || '').trim(),
         canonical: row.canonical || '',
         supplierNo: row.supplierNo || row.currentSupplierNo || '',
@@ -202,6 +220,13 @@ function normalizeTargetRows(rescue) {
         sourceRule: row.sourceRule || '',
         note: row.note || '',
       };
+      const manualEntry = findActiveManualLimitedDiscount(manualIndex, base.storeKey, base.skc);
+      const declaresManualSpecial = /manual_special|user_(?:requested|approved).*special|high_click_special/i.test(String(base.sourceRule || ''))
+        || row.manualSpecialLimitedDiscount === true;
+      if (execute && declaresManualSpecial && !manualEntry) {
+        throw new Error(`Manual special limited-discount execute requires an active registry entry before submit: ${base.storeKey}::${base.skc}`);
+      }
+      return manualEntry ? applyManualLimitedDiscountOverride(base, manualEntry) : base;
     });
   const missing = rows.filter(row => !row.skc || !Number.isFinite(row.limitedDiscountPrice) || row.limitedDiscountPrice <= 0);
   if (missing.length) throw new Error(`Rescue target rows have missing SKC/price: ${JSON.stringify(missing.slice(0, 5))}`);
@@ -229,15 +254,34 @@ function rel(file) {
 }
 
 const args = parseArgs(process.argv.slice(2));
+const automationAuthorization = args.execute ? await assertMarketingAutomationAuthorization({
+  action: MARKETING_AUTOMATION_ACTIONS.CREATE_OR_REPLACE_ACTIVITY,
+  storeKey: args.storeKey,
+}) : null;
 await fs.mkdir(args.outDir, {recursive: true});
 const rescue = JSON.parse(await fs.readFile(args.rescue, 'utf8'));
-const effectiveEndTime = rescue.endTime || args.endTime;
-const effectiveActivityNamePrefix = rescue.activityNamePrefix || args.activityNamePrefix;
+const manualRegistry = await loadManualLimitedDiscountRegistry();
+const manualIndex = buildManualLimitedDiscountIndex(manualRegistry, new Date());
+const targetRows = normalizeTargetRows(rescue, manualIndex, args.execute);
+const manualRows = targetRows.filter(row => row.manualSpecialLimitedDiscount === true);
+if (manualRows.length && manualRows.length !== targetRows.length) {
+  throw new Error('A rescue file cannot mix active manual-special and ordinary limited-discount rows; split by protection window before execute.');
+}
+const manualEndTimes = [...new Set(manualRows.map(row => row.manualSpecialValidTo).filter(Boolean))];
+const manualActivityStocks = [...new Set(manualRows.map(row => Number(row.activityStock)).filter(Number.isInteger))];
+if (manualEndTimes.length > 1 || manualActivityStocks.length > 1) {
+  throw new Error('Manual-special rescue rows have different validTo/activityStock values; split them before execute.');
+}
+const effectiveEndTime = manualEndTimes[0] || rescue.endTime || args.endTime;
+const effectiveActivityStock = Number(manualActivityStocks[0] ?? rescue.activityStock ?? args.activityStock);
+const effectiveActivityNamePrefix = manualRows.length
+  ? `${args.storeKey}人工特殊限时折扣保护恢复`
+  : (rescue.activityNamePrefix || args.activityNamePrefix);
 if (!effectiveEndTime) throw new Error('Missing --end-time "YYYY-MM-DD HH:mm:ss" for the limited-discount rescue window.');
 if (!String(effectiveActivityNamePrefix || '').trim()) throw new Error('Missing --activity-name-prefix for the limited-discount activity name.');
+if (!Number.isInteger(effectiveActivityStock) || effectiveActivityStock <= 0) throw new Error(`Invalid activity stock: ${effectiveActivityStock}`);
 const end = new Date(String(effectiveEndTime).replace(' ', 'T') + '+08:00');
 if (!Number.isFinite(end.getTime())) throw new Error(`Invalid --end-time: ${effectiveEndTime}`);
-const targetRows = normalizeTargetRows(rescue);
 const store = STORES.find(s => String(s.storeKey).toUpperCase() === args.storeKey);
 if (!store) throw new Error(`Unknown store for identity guard: ${args.storeKey}`);
 
@@ -259,6 +303,7 @@ try {
       targetRefToolId,
       targetEndTime,
       startDelayMinutes,
+      activityStock,
       activityNamePrefix,
       replaceActivityIds,
     } = __arg;
@@ -408,6 +453,46 @@ try {
       return {listPacket, activities, detailed, overlaps, activeOrFuture, conflictActivities};
     }
 
+    function verifyExactCreatedCoverage(after, expectedRows, expectedActivityId) {
+      const rowsBySkc = new Map();
+      for (const row of after.overlaps || []) {
+        if (!rowsBySkc.has(row.skc)) rowsBySkc.set(row.skc, []);
+        rowsBySkc.get(row.skc).push(row);
+      }
+      return expectedRows.map(target => {
+        const candidates = rowsBySkc.get(target.skc) || [];
+        const expectedPrice = Number(target.limitedDiscountPrice);
+        const candidateChecks = candidates.map(row => {
+          const end = parseChinaDate(row.end_time);
+          const checks = {
+            activityId: Number(row.activity_id) === Number(expectedActivityId),
+            state: [2, 3].includes(Number(row.state)),
+            price: Math.abs(Number(row.product_act_price) - expectedPrice) <= 0.01,
+            stock: Number(row.attend_num_sum || 0) >= Number(activityStock),
+            endTime: Boolean(end && end >= windowEnd),
+          };
+          return {
+            activityId: row.activity_id,
+            state: row.state,
+            productActPrice: row.product_act_price,
+            attendNumSum: row.attend_num_sum,
+            endTime: row.end_time,
+            checks,
+            ok: Object.values(checks).every(Boolean),
+          };
+        });
+        return {
+          skc: target.skc,
+          expectedActivityId: expectedActivityId || null,
+          expectedPrice,
+          expectedActivityStock: Number(activityStock),
+          expectedEndTime: targetEndTime,
+          candidates: candidateChecks,
+          ok: candidateChecks.some(row => row.ok),
+        };
+      });
+    }
+
     function summarizeConflicts(conflictActivities) {
       return conflictActivities.map(entry => ({
         activity_id: entry.activity.activity_id,
@@ -420,6 +505,12 @@ try {
         extraCount: entry.extraGoods.length,
         targetSkcs: [...new Set(entry.targetGoods.map(g => g.skc))].sort(),
         extraSkcs: [...new Set(entry.extraGoods.map(g => g.skc))].sort(),
+        targetGoods: entry.targetGoods.map(g => ({
+          skc: g.skc,
+          product_act_price: g.product_act_price,
+          attend_num_sum: g.attend_num_sum,
+          stock_num: g.stock_num,
+        })),
       }));
     }
 
@@ -488,7 +579,7 @@ try {
         const inventory = Number(good.inventory_num ?? good.ivt_num ?? 0);
         const minStock = Number(good.check_stock?.min_stock ?? defaultMinStock);
         const maxStock = Number(good.check_stock?.max_stock ?? defaultMaxStock);
-        const attendNum = Math.max(minStock, Math.min(maxStock, inventory));
+        const attendNum = activityStock;
 
         if (good.error_code) invalid.push({skc: target.skc, reason: 'query_goods error_code', error_code: good.error_code});
         if (!Number.isFinite(price) || price <= 0) invalid.push({skc: target.skc, reason: 'invalid target price', price});
@@ -500,6 +591,12 @@ try {
         }
         if (!Number.isFinite(inventory) || inventory < minStock) {
           invalid.push({skc: target.skc, reason: 'inventory below min_stock', inventory, minStock});
+        }
+        if (attendNum < minStock || attendNum > maxStock) {
+          invalid.push({skc: target.skc, reason: 'configured activity stock outside platform bounds', attendNum, minStock, maxStock});
+        }
+        if (!Number.isFinite(inventory) || inventory < attendNum) {
+          invalid.push({skc: target.skc, reason: 'inventory below configured activity stock', inventory, attendNum});
         }
 
         const isSaleAttribute = Number(good.is_sale_attribute) === 1;
@@ -781,6 +878,29 @@ try {
       after: null,
       ok: false,
     };
+    const manualSpecialAlreadyCovered = targetRows.every(target => {
+      if (!target.manualSpecialLimitedDiscount) return false;
+      return before.overlaps.some(overlap => (
+        overlap.skc === target.skc
+        && Math.abs(Number(overlap.product_act_price) - Number(target.limitedDiscountPrice)) <= 0.01
+        && Number(overlap.attend_num_sum || 0) >= Number(activityStock)
+        && (!overlap.end_time || parseChinaDate(overlap.end_time) >= windowEnd)
+      ));
+    });
+    result.manualSpecialProtection = {
+      registrySource: 'config/marketing_manual_limited_discount_overrides.json',
+      protectedTargetCount: targetRows.filter(row => row.manualSpecialLimitedDiscount).length,
+      alreadyCoveredExact: manualSpecialAlreadyCovered,
+    };
+    if (manualSpecialAlreadyCovered) {
+      const activityIds = [...new Set(before.overlaps.map(row => Number(row.activity_id)).filter(Number.isFinite))];
+      result.ok = true;
+      result.alreadyCovered = true;
+      result.dryRunOnly = !execute;
+      result.createdActivityId = activityIds.length === 1 ? activityIds[0] : null;
+      result.reason = 'active manual-special limited discount already matches registry price, stock and validTo; no write performed';
+      return result;
+    }
     result.skuPricePayloadGuard = checkSkuPricePayload(goodsBuild.addRows);
     if (!result.skuPricePayloadGuard.ok) {
       result.validationFailed = true;
@@ -817,7 +937,9 @@ try {
 
     if (validationFailed && !validationOnlyCurrentLimitedConflict) {
       result.validationFailed = true;
-      if (!execute) return result;
+      result.ok = false;
+      result.reason = 'platform pre-validation failed; aborting before every write';
+      return result;
     }
 
     if (!execute) {
@@ -960,7 +1082,16 @@ try {
       result.createdActivity = await queryCreatedActivity(createdActivityId);
     }
 
-    const after = await queryCurrentLimitedDiscounts();
+    let after = null;
+    let exactReadbackRows = [];
+    let readbackAttempts = 0;
+    for (let attempt = 1; attempt <= 6; attempt += 1) {
+      readbackAttempts = attempt;
+      after = await queryCurrentLimitedDiscounts();
+      exactReadbackRows = verifyExactCreatedCoverage(after, executableTargetRows, createdActivityId);
+      if (createdActivityId && exactReadbackRows.length === executableTargetRows.length && exactReadbackRows.every(row => row.ok)) break;
+      if (attempt < 6) await new Promise(resolve => setTimeout(resolve, 1500));
+    }
     const overlapBySkc = new Map();
     for (const row of after.overlaps) {
       if (!overlapBySkc.has(row.skc)) overlapBySkc.set(row.skc, []);
@@ -986,11 +1117,16 @@ try {
       duplicateOverlapSkcs,
       uncoveredAfter,
       unexpectedUncoveredAfter,
+      exactReadbackRows,
+      readbackAttempts,
     };
     result.ok =
+      Boolean(result.createdActivityId) &&
       result.after.overlapSkcCount === result.targetCountForCreate &&
       result.after.unexpectedUncoveredAfter.length === 0 &&
-      result.after.duplicateOverlapSkcs.length === 0;
+      result.after.duplicateOverlapSkcs.length === 0 &&
+      result.after.exactReadbackRows.length === result.targetCountForCreate &&
+      result.after.exactReadbackRows.every(row => row.ok);
     return result;
     `,
     {
@@ -998,6 +1134,7 @@ try {
       execute: args.execute,
       targetRefToolId: TARGET_REF_TOOL_ID,
       targetEndTime: effectiveEndTime,
+      activityStock: effectiveActivityStock,
       startDelayMinutes: args.startDelayMinutes,
       activityNamePrefix: effectiveActivityNamePrefix,
       replaceActivityIds: args.replaceActivityIds,
@@ -1013,6 +1150,7 @@ try {
     rescuePath: rel(args.rescue),
     identity,
     loginRecovery,
+    automationAuthorization,
     targetEndTime: effectiveEndTime,
     activityNamePrefix: effectiveActivityNamePrefix,
     ...result,
@@ -1043,6 +1181,9 @@ try {
       overlapSkcCount: result.after.overlapSkcCount,
       duplicateOverlapSkcs: result.after.duplicateOverlapSkcs.length,
       uncoveredAfter: result.after.uncoveredAfter.length,
+      exactReadbackOk: result.after.exactReadbackRows.filter(row => row.ok).length,
+      exactReadbackExpected: result.after.exactReadbackRows.length,
+      readbackAttempts: result.after.readbackAttempts,
       activeOrFuture: result.after.activeOrFuture,
     } : null,
   }, null, 2));
@@ -1057,6 +1198,7 @@ try {
     port: args.port,
     rescuePath: rel(args.rescue),
     execute: args.execute,
+    automationAuthorization,
     ok: false,
     error: {
       message: error.message,

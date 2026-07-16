@@ -4,11 +4,19 @@ import fssync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import {
+  buildManualLimitedDiscountIndex,
+  loadManualLimitedDiscountRegistry,
+  partitionRowsByManualLimitedDiscount,
+} from '../../lib/marketing_manual_limited_discount_overrides.mjs';
+import {
+  assertMarketingAutomationAuthorization,
+  MARKETING_AUTOMATION_ACTIONS,
+} from '../../lib/marketing_automation_authorization.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp/marketing-signup/limited-discount-rescue');
 const DEFAULT_ACTIVITY_NAME_PREFIX = '限时折扣目标价漂移修复';
-const DEFAULT_END_TIME = '2026-07-21 23:59:59';
 
 const storesConfig = JSON.parse(await fs.readFile(path.join(ROOT, 'config/stores.json'), 'utf8'));
 const storesByKey = new Map((storesConfig.stores || []).map(store => [String(store.storeKey).toUpperCase(), store]));
@@ -21,7 +29,7 @@ function parseArgs(argv) {
     outDir: DEFAULT_OUT_DIR,
     out: '',
     stores: [],
-    dryRunOnly: false,
+    dryRunOnly: true,
     skipBuildPlan: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -39,6 +47,7 @@ function parseArgs(argv) {
     else if (arg === '--stores') args.stores = splitCsv(argv[++i]).map(s => s.toUpperCase());
     else if (arg.startsWith('--stores=')) args.stores = splitCsv(arg.slice('--stores='.length)).map(s => s.toUpperCase());
     else if (arg === '--dry-run-only') args.dryRunOnly = true;
+    else if (arg === '--execute') args.dryRunOnly = false;
     else if (arg === '--skip-build-plan') args.skipBuildPlan = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -61,6 +70,13 @@ function splitCsv(value) {
 function inferDateFromPath(value) {
   const match = String(value || '').match(/20\d{2}-\d{2}-\d{2}/);
   return match ? match[0] : '';
+}
+
+function addDays(dateText, days) {
+  const [year, month, day] = String(dateText).split('-').map(Number);
+  const value = new Date(Date.UTC(year, month - 1, day));
+  value.setUTCDate(value.getUTCDate() + Number(days || 0));
+  return value.toISOString().slice(0, 10);
 }
 
 function rel(file) {
@@ -122,7 +138,7 @@ async function buildRescuePlanIfNeeded(args) {
     '--out-dir',
     args.planDir,
     '--end-time',
-    DEFAULT_END_TIME,
+    `${addDays(args.date, 7)} 23:59:59`,
     '--activity-name-prefix',
     DEFAULT_ACTIVITY_NAME_PREFIX,
   ], {timeoutMs: 300000});
@@ -245,6 +261,23 @@ async function applyRescue({storeKey, port, rescuePath, execute}) {
     rescuePath,
     execute ? '--execute' : '--dry-run',
   ], {timeoutMs: 900000});
+  const loaded = await loadToolOutputFromStdout(result);
+  return {...result, parsed: loaded.summary, full: loaded.full, outPath: loaded.outPath};
+}
+
+async function topUpAuthorizedFallbackInventory({storeKey, skc, rescuePath, execute}) {
+  const commandArgs = [
+    'scripts/marketing/manage_manual_limited_discount_inventory.mjs',
+    '--store',
+    storeKey,
+    '--skc',
+    skc,
+    '--rescue',
+    rescuePath,
+    execute ? '--execute' : '--dry-run',
+  ];
+  if (execute) commandArgs.push('--confirm', 'AUTHORIZED_LIMITED_DISCOUNT_FALLBACK_STOCK_TOP_UP');
+  const result = await runCommand(process.execPath, commandArgs, {timeoutMs: 300000});
   const loaded = await loadToolOutputFromStdout(result);
   return {...result, parsed: loaded.summary, full: loaded.full, outPath: loaded.outPath};
 }
@@ -395,24 +428,51 @@ function verifyExecuteResult(full, expectedSkcs) {
   };
 }
 
-async function processStore(storeKey, rescuePath, args) {
+export function filterDriftRescueRowsDefensively(rescue, manualIndex) {
+  const partitioned = partitionRowsByManualLimitedDiscount(rescue?.rows || [], manualIndex);
+  return {
+    rescue: {...rescue, rows: partitioned.ordinaryRows},
+    protectedManualSpecialRows: partitioned.protectedRows.map(({row, entry}) => ({
+      storeKey: entry.storeKey,
+      skc: entry.skc,
+      staleTargetPrice: row.finalTargetPrice ?? row.targetPrice ?? null,
+      protectedSpecialPrice: entry.specialPrice,
+      validTo: entry.validTo,
+    })),
+  };
+}
+
+async function processStore(storeKey, rescuePath, args, manualIndex) {
   const store = storesByKey.get(storeKey);
   if (!store) throw new Error(`Unknown store ${storeKey}`);
-  const rescue = JSON.parse(await fs.readFile(rescuePath, 'utf8'));
+  let rescue = JSON.parse(await fs.readFile(rescuePath, 'utf8'));
+  let activeRescuePath = rescuePath;
+  const defensive = filterDriftRescueRowsDefensively(rescue, manualIndex);
+  const protectedManualSpecialRows = defensive.protectedManualSpecialRows;
+  const ordinaryRows = defensive.rescue.rows;
+  if (protectedManualSpecialRows.length && ordinaryRows.length) {
+    rescue = {...defensive.rescue, protectedManualSpecialRows};
+    activeRescuePath = path.join(args.outDir, `defensive-filtered-${path.basename(rescuePath)}`);
+    await fs.writeFile(activeRescuePath, `${JSON.stringify(rescue, null, 2)}\n`, 'utf8');
+  }
   const targetSkcs = [...new Set((rescue.rows || []).map(row => String(row.skc || '').trim()).filter(Boolean))];
   const record = {
     storeKey,
     port: store.port,
-    rescuePath: rel(rescuePath),
+    rescuePath: rel(activeRescuePath),
+    sourceRescuePath: rel(rescuePath),
     sourceLimitedDiscountName: rescue.sourceLimitedDiscountName,
     endTime: rescue.endTime,
     activityNamePrefix: rescue.activityNamePrefix,
     targetSkcs,
+    protectedManualSpecialRows,
     launched: null,
     initialDryRun: null,
     discoveredOldActivities: [],
     removals: [],
     postDeleteDryRun: null,
+    inventoryTopUps: [],
+    postInventoryTopUpDryRun: null,
     blockedSkcs: [],
     subsetRescuePath: '',
     executeApply: null,
@@ -425,9 +485,15 @@ async function processStore(storeKey, rescuePath, args) {
   };
 
   try {
+    if (!ordinaryRows.length) {
+      record.ok = true;
+      record.status = 'protected_manual_special_skipped';
+      record.skippedCreate = true;
+      return record;
+    }
     record.launched = summarizeRaw(await launchStore(storeKey));
 
-    const initialDryRun = await applyRescue({storeKey, port: store.port, rescuePath, execute: false});
+    const initialDryRun = await applyRescue({storeKey, port: store.port, rescuePath: activeRescuePath, execute: false});
     record.initialDryRun = summarizeCommand(initialDryRun);
     if (!initialDryRun.full) {
       throw new Error(`initial dry-run did not produce a readable result for ${storeKey}: ${initialDryRun.stderr || initialDryRun.stdout || initialDryRun.error || ''}`);
@@ -489,7 +555,7 @@ async function processStore(storeKey, rescuePath, args) {
       }
     }
 
-    let postDeleteDryRun = await applyRescue({storeKey, port: store.port, rescuePath, execute: false});
+    let postDeleteDryRun = await applyRescue({storeKey, port: store.port, rescuePath: activeRescuePath, execute: false});
     record.postDeleteDryRun = summarizeCommand(postDeleteDryRun);
 
     const remainingOld = oldActivitiesToRemove(postDeleteDryRun.full, rescue);
@@ -520,7 +586,7 @@ async function processStore(storeKey, rescuePath, args) {
           throw new Error(`retry remove_skc failed for ${storeKey} activity ${activity.activityId}`);
         }
       }
-      postDeleteDryRun = await applyRescue({storeKey, port: store.port, rescuePath, execute: false});
+      postDeleteDryRun = await applyRescue({storeKey, port: store.port, rescuePath: activeRescuePath, execute: false});
       record.postRetryRemoveDryRun = summarizeCommand(postDeleteDryRun);
     }
 
@@ -541,6 +607,38 @@ async function processStore(storeKey, rescuePath, args) {
         record.ok = true;
         record.status = 'already_created';
         return record;
+      }
+    }
+
+    const inventoryBlocked = (postDeleteDryRun.full?.validation?.invalid || [])
+      .filter(row => row.reason === 'inventory below configured activity stock')
+      .map(row => String(row.skc || '').trim())
+      .filter(Boolean);
+    if (inventoryBlocked.length && !args.dryRunOnly) {
+      for (const skc of [...new Set(inventoryBlocked)]) {
+        const inventoryDryRun = await topUpAuthorizedFallbackInventory({
+          storeKey,
+          skc,
+          rescuePath: activeRescuePath,
+          execute: false,
+        });
+        const inventoryExecute = inventoryDryRun.full?.ok
+          ? await topUpAuthorizedFallbackInventory({
+            storeKey,
+            skc,
+            rescuePath: activeRescuePath,
+            execute: true,
+          })
+          : null;
+        record.inventoryTopUps.push({
+          skc,
+          dryRun: inventoryDryRun.full || inventoryDryRun.parsed || summarizeRaw(inventoryDryRun),
+          execute: inventoryExecute ? (inventoryExecute.full || inventoryExecute.parsed || summarizeRaw(inventoryExecute)) : null,
+        });
+      }
+      if (record.inventoryTopUps.some(item => item.execute?.ok)) {
+        postDeleteDryRun = await applyRescue({storeKey, port: store.port, rescuePath: activeRescuePath, execute: false});
+        record.postInventoryTopUpDryRun = summarizeCommand(postDeleteDryRun);
       }
     }
 
@@ -602,6 +700,11 @@ function summarizeRaw(result) {
 }
 
 const args = parseArgs(process.argv.slice(2));
+const automationAuthorization = args.dryRunOnly ? null : await assertMarketingAutomationAuthorization({
+  action: MARKETING_AUTOMATION_ACTIONS.REPAIR_TARGET_PRICE_DRIFT,
+});
+const manualRegistry = await loadManualLimitedDiscountRegistry();
+const manualIndex = buildManualLimitedDiscountIndex(manualRegistry, new Date());
 await fs.mkdir(args.outDir, {recursive: true});
 if (!fssync.existsSync(args.guard)) throw new Error(`Guard report does not exist: ${args.guard}`);
 const buildPlan = await buildRescuePlanIfNeeded(args);
@@ -619,6 +722,7 @@ if (!args.stores.length) {
     planDir: rel(args.planDir),
     outDir: rel(args.outDir),
     dryRunOnly: args.dryRunOnly,
+    automationAuthorization,
     buildPlan,
     totals: summarizeTotals([]),
     results: [],
@@ -634,7 +738,7 @@ for (const storeKey of args.stores) {
   const rescuePaths = await findRescueFiles(args.planDir, storeKey);
   for (const rescuePath of rescuePaths) {
     console.log(`[${new Date().toISOString()}] processing ${storeKey} rescue=${rel(rescuePath)}`);
-    const result = await processStore(storeKey, rescuePath, args);
+    const result = await processStore(storeKey, rescuePath, args, manualIndex);
     results.push(result);
     await fs.writeFile(args.out, JSON.stringify({
       createdAt: startedAt,
@@ -644,6 +748,7 @@ for (const storeKey of args.stores) {
       planDir: rel(args.planDir),
       outDir: rel(args.outDir),
       dryRunOnly: args.dryRunOnly,
+      automationAuthorization,
       buildPlan,
       totals: summarizeTotals(results),
       results,
@@ -681,6 +786,7 @@ const finalDoc = {
   planDir: rel(args.planDir),
   outDir: rel(args.outDir),
   dryRunOnly: args.dryRunOnly,
+  automationAuthorization,
   buildPlan,
   totals: summarizeTotals(results),
   results,

@@ -44,6 +44,18 @@ import {
   collectRelistedLinkHistoryEvidence,
   marketingLinkKey,
 } from '../../lib/marketing_relisted_link_history.mjs';
+import {
+  assessLatestRawMarketingLinkCoverage,
+  collectLatestRawMarketingLinkRows,
+  mergeMarketingLinkRows,
+} from '../../lib/marketing_latest_raw_link_overlay.mjs';
+import {
+  buildManualLimitedDiscountIndex,
+  classifyManualLimitedDiscountLiveState,
+  findActiveManualLimitedDiscount,
+  loadManualLimitedDiscountRegistry,
+  manualLimitedDiscountKey,
+} from '../../lib/marketing_manual_limited_discount_overrides.mjs';
 
 import {resolveCurrentMarketingPlanPair} from '../../lib/marketing_plan_selector.mjs';
 function readJsonSafe(file) {
@@ -1204,19 +1216,19 @@ function collectLiveLimitedDiscountEvidence(liveScanSource) {
   const doc = liveScanSource?.data || {};
   const rows = Array.isArray(doc.rows) ? doc.rows : [];
   const bySkc = new Map();
+  const manualBySkc = new Map();
   const anyBySkc = new Map();
+  const newListingBySkc = new Map();
+  const newListingAnyBySkc = new Map();
   const sourceStatus = source.status || 'missing';
   if (sourceStatus !== 'ok' || doc.ok === false) {
-    return {status: sourceStatus, path: source.path || '', bySkc, anyBySkc, complete: false};
+    return {status: sourceStatus, path: source.path || '', bySkc, manualBySkc, anyBySkc, newListingBySkc, newListingAnyBySkc, complete: false};
   }
   for (const row of rows) {
     const storeKey = normKey(row.store_key || row.storeKey || row.store);
     const skc = normSku(row.skc || row.SKC);
     if (!storeKey || !skc) continue;
     const key = `${storeKey}::${skc}`;
-    if (!isCurrentMarketingEvidenceRow(row)) continue;
-    if (!anyBySkc.has(key)) anyBySkc.set(key, []);
-    anyBySkc.get(key).push(row);
     const limitedPrice = numberOrNull(
       row.marketing_limited_discount_price_sar
       ?? row.marketing_limited_discount_price
@@ -1231,23 +1243,43 @@ function collectLiveLimitedDiscountEvidence(liveScanSource) {
       || limitedPrice !== null
     );
     if (!isLimitedEvidence) continue;
-    if (!bySkc.has(key)) bySkc.set(key, []);
-    bySkc.get(key).push({
+    const evidence = {
       price: limitedPrice,
       name: row.marketing_limited_discount_name || row.limitedDiscountName || row.activityName || '',
+      activityId: row.marketing_limited_discount_activity_id || row.limitedDiscountActivityId || row.activityId || '',
       start: row.marketing_limited_discount_start || row.limitedDiscountStart || '',
       end: row.marketing_limited_discount_end || row.limitedDiscountEnd || '',
+      activityStock: numberOrNull(row.marketing_limited_discount_attend_num_sum ?? row.activityStock ?? row.attendNumSum),
+      stock: numberOrNull(row.marketing_limited_discount_stock_num ?? row.stockNum),
       evidenceType: row.marketing_price_evidence_type || row.evidenceType || '',
       sourceAt: row.marketing_price_source_at || row.sourceAt || doc.createdAt || doc.generatedAt || '',
-    });
+    };
+    if (!manualBySkc.has(key)) manualBySkc.set(key, []);
+    manualBySkc.get(key).push(evidence);
+    const isCurrentEvidence = isCurrentMarketingEvidenceRow(row);
+    const isFutureNewListingFallback = !isCurrentEvidence
+      && isLiveNewListingLimitedDiscountCovered([{name: evidence.name}]);
+    if (isCurrentEvidence || isFutureNewListingFallback) {
+      if (!newListingAnyBySkc.has(key)) newListingAnyBySkc.set(key, []);
+      newListingAnyBySkc.get(key).push(row);
+      if (!newListingBySkc.has(key)) newListingBySkc.set(key, []);
+      newListingBySkc.get(key).push(evidence);
+    }
+    if (!isCurrentEvidence) continue;
+    if (!anyBySkc.has(key)) anyBySkc.set(key, []);
+    anyBySkc.get(key).push(row);
+    if (!bySkc.has(key)) bySkc.set(key, []);
+    bySkc.get(key).push(evidence);
   }
-  return {status: sourceStatus, path: source.path || '', bySkc, anyBySkc, complete: doc.partial !== true};
+  return {status: sourceStatus, path: source.path || '', bySkc, manualBySkc, anyBySkc, newListingBySkc, newListingAnyBySkc, complete: doc.partial !== true};
 }
 
-function summarizeLimitedDiscountTargetPriceDrift({liveScanSource, priceOverridesDoc, priceOverridesSourcePath, activityWindowEvidence, now, linksDataDoc = null, linksDataSourcePath = ''}) {
+function summarizeLimitedDiscountTargetPriceDrift({liveScanSource, priceOverridesDoc, priceOverridesSourcePath, activityWindowEvidence, now, manualLimitedDiscountRegistry, linksDataDoc = null, linksDataSourcePath = ''}) {
   const live = collectLiveLimitedDiscountEvidence(liveScanSource);
+  const manualIndex = buildManualLimitedDiscountIndex(manualLimitedDiscountRegistry, now);
   const plan = buildOrderTargetPlanIndex(priceOverridesDoc, priceOverridesSourcePath, activityWindowEvidence, linksDataDoc, linksDataSourcePath);
   const rows = [];
+  const manualRows = [];
   const missingPlanRows = [];
   const dataQualityRows = [];
   if (live.status !== 'ok') {
@@ -1262,12 +1294,56 @@ function summarizeLimitedDiscountTargetPriceDrift({liveScanSource, priceOverride
       dataQualityRows: [],
       byStore: {},
       samples: [],
+      manualSpecialLimitedDiscount: {
+        registrySource: manualLimitedDiscountRegistry?.sourcePath || '',
+        activeCount: manualIndex.activeByKey.size,
+        rows: [],
+        missingRows: [],
+        priceMismatchRows: [],
+        coverageMismatchRows: [],
+        coveredRows: [],
+      },
     };
   }
   const nowText = formatLocalDateTime(now);
+  for (const entry of manualIndex.activeByKey.values()) {
+    const key = manualLimitedDiscountKey(entry.storeKey, entry.skc);
+    // Manual-special protection must be proven by a currently active row.
+    // `manualBySkc` also contains future/expired evidence and can otherwise
+    // falsely mark a missing activity as covered.
+    const liveRows = live.bySkc.get(key) || [];
+    const liveState = classifyManualLimitedDiscountLiveState(entry, liveRows);
+    const candidates = plan.rowsBySkc.get(key) || [];
+    manualRows.push({
+      storeKey: entry.storeKey,
+      skc: entry.skc,
+      canonical: entry.canonical || '',
+      status: liveState.status,
+      specialPrice: entry.specialPrice,
+      ordinaryFinalTargetPrice: candidates.length ? selectOrderPlanRow(candidates, nowText).planRow?.finalTargetPrice ?? null : null,
+      livePrices: liveState.livePrices,
+      liveCoverage: liveState.liveCoverage || [],
+      activityIds: [...new Set(liveRows.map(row => row.activityId).filter(Boolean))],
+      activityNames: [...new Set(liveRows.map(row => row.name).filter(Boolean))],
+      validFrom: entry.validFrom,
+      validTo: entry.validTo,
+      activityStock: entry.activityStock,
+      currentActivityId: entry.currentActivityId,
+      sourceThreadId: entry.sourceThreadId,
+      sourceArtifact: entry.sourceArtifact,
+      actionRequired: liveState.status !== 'covered_exact',
+      action: liveState.status === 'covered_exact'
+        ? '用户批准的特殊限时折扣价格精确命中，保持并禁止普通漂移修复覆盖'
+        : liveState.status === 'missing'
+          ? '人工特殊限时折扣缺失：恢复登记中的精确特殊价；库存不足时先核 ET 实盘'
+          : '恢复登记中的精确人工特殊价；库存不足时仅在 ET 实盘足够后补平台虚拟库存',
+    });
+  }
   for (const [key, liveRows] of live.bySkc.entries()) {
     const [storeKey, skc] = key.split('::');
+    const manualEntry = manualIndex.activeByKey.get(key) || null;
     const candidates = plan.rowsBySkc.get(key) || [];
+    if (manualEntry) continue;
     if (!candidates.length) {
       missingPlanRows.push({storeKey, skc, reason: 'no price-overrides row for live limited-discount skc'});
       continue;
@@ -1316,6 +1392,10 @@ function summarizeLimitedDiscountTargetPriceDrift({liveScanSource, priceOverride
     }
   }
   const belowRows = rows.filter(row => row.status === 'limited_discount_below_current_target');
+  const manualMissingRows = manualRows.filter(row => row.status === 'missing');
+  const manualPriceMismatchRows = manualRows.filter(row => row.status === 'price_mismatch');
+  const manualCoverageMismatchRows = manualRows.filter(row => row.status === 'coverage_mismatch');
+  const manualCoveredRows = manualRows.filter(row => row.status === 'covered_exact');
   return {
     status: 'ok',
     source: live.path || '',
@@ -1328,6 +1408,18 @@ function summarizeLimitedDiscountTargetPriceDrift({liveScanSource, priceOverride
     dataQualityRows: dataQualityRows.slice(0, 80),
     byStore: countBy(belowRows, 'storeKey'),
     samples: belowRows.slice(0, 20),
+    manualSpecialLimitedDiscount: {
+      registrySource: manualLimitedDiscountRegistry?.sourcePath || '',
+      activeCount: manualIndex.activeByKey.size,
+      checked: manualRows.length,
+      actionCount: manualMissingRows.length + manualPriceMismatchRows.length + manualCoverageMismatchRows.length,
+      byStatus: countBy(manualRows, 'status'),
+      rows: manualRows,
+      missingRows: manualMissingRows,
+      priceMismatchRows: manualPriceMismatchRows,
+      coverageMismatchRows: manualCoverageMismatchRows,
+      coveredRows: manualCoveredRows,
+    },
   };
 }
 
@@ -1392,12 +1484,19 @@ function collectNewListingLimitedDiscountExecutionEvidence(reportDate) {
   return {source: rel(file), bySkc};
 }
 
-function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSource, selectionPlanDoc, priceOverridesDoc, priceOverridesSourcePath = '', storesConfigDoc, pricingPolicy, reportDate, currentMarketingLiveScanSource}) {
+function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSource, selectionPlanDoc, priceOverridesDoc, priceOverridesSourcePath = '', storesConfigDoc, pricingPolicy, reportDate, currentMarketingLiveScanSource, manualLimitedDiscountRegistry, now}) {
   const unwrappedLinksData = unwrapBiLinksData(linksDataDoc);
   const unwrappedBiDoc = unwrapBiLinksData(biDoc);
-  const links = Array.isArray(unwrappedLinksData.storeLinks) && unwrappedLinksData.storeLinks.length
+  const baseLinks = Array.isArray(unwrappedLinksData.storeLinks) && unwrappedLinksData.storeLinks.length
     ? unwrappedLinksData.storeLinks
     : (Array.isArray(unwrappedBiDoc.storeLinks) ? unwrappedBiDoc.storeLinks : []);
+  const latestRawLinks = collectLatestRawMarketingLinkRows({
+    historyDir: SHEIN_LINK_HISTORY_DIR,
+    reportDate,
+    storeKeys: (storesConfigDoc?.stores || []).filter(store => store?.enabled !== false).map(store => store.storeKey),
+  });
+  const mergedLinks = mergeMarketingLinkRows(baseLinks, latestRawLinks.rows);
+  const links = mergedLinks.rows;
   const effectiveBiSource = (Array.isArray(unwrappedLinksData.storeLinks) && unwrappedLinksData.storeLinks.length)
     ? linksDataSource
     : biSource;
@@ -1409,6 +1508,11 @@ function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSour
     knownStores.add(storeKey);
     if (store.enabled !== false) enabledStores.add(storeKey);
   }
+  const latestRawLinkCoverage = assessLatestRawMarketingLinkCoverage({
+    sourceFiles: latestRawLinks.sourceFiles,
+    errors: latestRawLinks.errors,
+    storeKeys: [...enabledStores],
+  });
   const plan = collectPlanEvidence(selectionPlanDoc, priceOverridesDoc);
   const newListingPriceIndex = buildNewListingPriceIndex(priceOverridesDoc, priceOverridesSourcePath);
   const ignored = [];
@@ -1425,6 +1529,7 @@ function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSour
   const relistedPolicy = newListingPolicy?.relistedWithoutActiveMarketing || {};
   const costMapDoc = readJsonSafe(MARKETING_COST_MAP_DEFAULT) || {};
   const liveLimitedEvidence = collectLiveLimitedDiscountEvidence(currentMarketingLiveScanSource);
+  const manualIndex = buildManualLimitedDiscountIndex(manualLimitedDiscountRegistry, now);
   const executionLimitedEvidence = collectNewListingLimitedDiscountExecutionEvidence(reportDate);
   const currentLinkKeys = new Set(links.map(link => marketingLinkKey(
     link.store_key || link.storeKey || link.store,
@@ -1460,7 +1565,7 @@ function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSour
     const exactKey = `${storeKey}::${skc}`;
     const recentNewListing = isRecentNewListingLink(link, newListingPolicy, reportDate);
     const relistedEvidence = relistedHistory.bySkc.get(exactKey) || null;
-    const liveMarketingRows = liveLimitedEvidence.anyBySkc.get(exactKey) || [];
+    const liveMarketingRows = liveLimitedEvidence.newListingAnyBySkc.get(exactKey) || [];
     const relistedApplies = relistedPolicy.enabled !== false
       && relistedHistory.status === 'ok'
       && relistedEvidence
@@ -1470,7 +1575,9 @@ function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSour
       && liveMarketingRows.length === 0;
     if (recentNewListing.applies || relistedApplies) {
       const treatmentType = recentNewListing.applies ? 'new_listing_within_7d' : 'relisted_without_active_marketing';
-      const liveLimitedRows = liveLimitedEvidence.bySkc.get(exactKey) || [];
+      const liveLimitedRows = liveLimitedEvidence.newListingBySkc.get(exactKey) || [];
+      const manualEntry = manualIndex.activeByKey.get(exactKey) || null;
+      const manualLiveState = manualEntry ? classifyManualLimitedDiscountLiveState(manualEntry, liveLimitedRows) : null;
       const liveLimitedCoveredByName = isLiveNewListingLimitedDiscountCovered(liveLimitedRows);
       const liveLimitedPrice = liveLimitedRows.length ? numberOrNull(liveLimitedRows[0].price) : null;
       const limitedPrice = numberOrNull(
@@ -1490,11 +1597,14 @@ function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSour
       const priceEvidence = exactPriceEvidence || findNewListingPriceEvidence(newListingPriceIndex, canonical, storeKey, skc);
       const planTopTier = resolveNewListingTopTierPrice(priceEvidence);
       const costTopTier = deriveTopTreatmentTargetFromCost({canonical, costDoc: costMapDoc, policy: newListingPolicy});
-      const resolvedTopTier = Number.isFinite(planTopTier.price) && planTopTier.price > 0 ? planTopTier : costTopTier;
-      const liveLimitedCoveredAtTarget = liveLimitedCoveredByName
+      const ordinaryTopTier = Number.isFinite(planTopTier.price) && planTopTier.price > 0 ? planTopTier : costTopTier;
+      const resolvedTopTier = manualEntry
+        ? {price: manualEntry.specialPrice, source: 'manual_special_limited_discount_override'}
+        : ordinaryTopTier;
+      const liveLimitedCoveredAtTarget = (manualEntry ? manualLiveState?.status === 'covered_exact' : liveLimitedCoveredByName)
         && Number.isFinite(resolvedTopTier.price)
         && limitedPrice !== null
-        && limitedPrice >= resolvedTopTier.price - 0.01;
+        && round2(limitedPrice) + 0.010001 >= round2(resolvedTopTier.price);
       const liveLimitedCoveredNoTargetEvidence = liveLimitedCoveredByName && (!Number.isFinite(resolvedTopTier.price) || resolvedTopTier.price <= 0);
       const executionLimitedCovered = executionLimitedEvidence.bySkc.has(exactKey);
       const executionEvidence = executionLimitedEvidence.bySkc.get(exactKey) || null;
@@ -1517,6 +1627,11 @@ function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSour
         limitedDiscountPrice: limitedPrice,
         plannedLimitedDiscountPrice: resolvedTopTier.price,
         finalTargetPrice: resolvedTopTier.price,
+        ordinaryTopTierPrice: ordinaryTopTier.price,
+        manualSpecialLimitedDiscount: Boolean(manualEntry),
+        manualSpecialValidTo: manualEntry?.validTo || '',
+        manualSpecialActivityStock: manualEntry?.activityStock || null,
+        manualSpecialLiveStatus: manualLiveState?.status || '',
         targetPriceEvidenceScope: exactPriceEvidence
           ? 'exact_store_skc'
           : priceEvidence
@@ -1545,7 +1660,9 @@ function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSour
         ordinaryMarketingEvidence: hasOrdinaryMarketingEvidence(link),
         performanceActivityNames: link.performance_activity_names || '',
         actionRequired,
-        action: executionLimitedCovered
+        action: manualEntry && manualLiveState?.status !== 'covered_exact'
+          ? `人工特殊限时折扣${manualLiveState?.status === 'missing' ? '缺失' : '错价'}：恢复精确特殊价 ${manualEntry.specialPrice} SAR，有效至 ${manualEntry.validTo}`
+          : executionLimitedCovered
           ? '自动执行摘要已证明Top5待遇一周兜底限时折扣已创建并回读覆盖，无需重复写入'
           : liveLimitedCovered
           ? (liveLimitedCoveredAtTarget
@@ -1678,6 +1795,25 @@ function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSour
       coveredRows: coveredNoActionRows.slice(0, NEW_LISTING_LIMITED_MAX_ROWS),
     },
     storeLinksRows: links.length,
+    baseStoreLinksRows: mergedLinks.baseRowCount,
+    latestRawLinkOverlay: {
+      source: rel(SHEIN_LINK_HISTORY_DIR),
+      ...latestRawLinkCoverage,
+      sourceFileCount: latestRawLinks.sourceFiles.length,
+      sourceFiles: latestRawLinks.sourceFiles.map(file => ({...file, path: rel(file.path)})),
+      parseErrorCount: latestRawLinks.errors.length,
+      errors: latestRawLinks.errors.slice(0, 20),
+      rawRowCount: mergedLinks.rawRowCount,
+      addedRowCount: mergedLinks.addedRowCount,
+      addedRows: mergedLinks.addedRows.slice(0, 60).map(row => ({
+        storeKey: row.store_key,
+        skc: row.skc,
+        canonical: row.standard_goods_sn,
+        linkDate: row.link_date,
+        firstShelfTime: row.first_shelf_time,
+        source: rel(row.raw_link_snapshot_source),
+      })),
+    },
     onShelfRows,
     exactPlannedRows,
     missingExactPlanOnShelf,
@@ -1887,9 +2023,15 @@ function collectRequiredActivityKeys(...docs) {
   const keys = new Set();
   const activities = new Set();
   for (const doc of docs) {
-    for (const row of doc?.items || []) {
-      const storeKey = normKey(row?.storeKey || row?.store || row?.['店铺']);
-      const activityId = String(row?.activityId || row?.['活动ID'] || '').trim();
+    const data = unwrapBiLinksData(doc);
+    const rows = [
+      ...(Array.isArray(doc?.items) ? doc.items : []),
+      ...(Array.isArray(data?.storeLinks) ? data.storeLinks : []),
+      ...(Array.isArray(data?.links) ? data.links : []),
+    ];
+    for (const row of rows) {
+      const storeKey = normKey(row?.storeKey || row?.store_key || row?.store || row?.['店铺']);
+      const activityId = String(row?.activityId || row?.marketing_activity_id || row?.['活动ID'] || '').trim();
       if (!activityId) continue;
       activities.add(activityId);
       const key = planActivityKey(storeKey, activityId);
@@ -2054,7 +2196,7 @@ function selectOrderPlanRow(candidateRows, orderTime) {
   return {status: 'missing_plan', planRow: candidates[0] || null, candidateCount: candidates.length};
 }
 
-function linkTargetRowsFromLinksData(linksDataDoc, linksDataSourcePath = '') {
+function linkTargetRowsFromLinksData(linksDataDoc, linksDataSourcePath = '', activityWindowEvidence = null) {
   const data = unwrapBiLinksData(linksDataDoc);
   const linkRows = [
     ...(Array.isArray(data.storeLinks) ? data.storeLinks : []),
@@ -2066,7 +2208,7 @@ function linkTargetRowsFromLinksData(linksDataDoc, linksDataSourcePath = '') {
     const skc = normSku(row?.skc || row?.SKC);
     const finalTargetPrice = numberOrNull(row?.marketing_final_target_price_sar ?? row?.marketing_final_target_price ?? row?.finalTargetPrice);
     if (!storeKey || !skc || finalTargetPrice === null) continue;
-    rows.push({
+    const item = {
       key: `${storeKey}::${skc}`,
       storeKey,
       skc,
@@ -2091,6 +2233,12 @@ function linkTargetRowsFromLinksData(linksDataDoc, linksDataSourcePath = '') {
       linkStatus: row?.shelf_status_name || row?.visible_shelf_statuses || '',
       newListingTopTreatment: row?.newListingTopTreatment === true || /新上架|新品|New\s*Arrivals/i.test(String(row?.marketing_price_note || row?.performance_activity_names || '')),
       priceEvidenceType: row?.marketing_price_evidence_type || '',
+    };
+    const window = resolvePlanWindow(item, activityWindowEvidence);
+    rows.push({
+      ...item,
+      ...window,
+      activityWindowSource: window.activityWindowSource || item.activityWindowSource,
     });
   }
   return rows;
@@ -2102,7 +2250,7 @@ function buildOrderTargetPlanIndex(priceOverridesDoc, priceOverridesSourcePath =
   const duplicateKeys = [];
   const duplicateConflicts = [];
   const missingTargetRows = [];
-  const linkTargetRows = linkTargetRowsFromLinksData(linksDataDoc, linksDataSourcePath);
+  const linkTargetRows = linkTargetRowsFromLinksData(linksDataDoc, linksDataSourcePath, activityWindowEvidence);
   const linkTargetBySkc = new Map(linkTargetRows.map(row => [row.key, row]));
   const addItem = item => {
     const key = item.key;
@@ -2345,7 +2493,7 @@ function loadOrderPriceMitigationEvidence(reportDate) {
   };
 }
 
-function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOverridesSourcePath, activityWindowEvidence, orderMitigationEvidence, now, maxAgeHours, linksDataDoc = null, linksDataSourcePath = ''}) {
+function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOverridesSourcePath, activityWindowEvidence, orderMitigationEvidence, manualLimitedDiscountRegistry, now, maxAgeHours, linksDataDoc = null, linksDataSourcePath = ''}) {
   const plan = buildOrderTargetPlanIndex(priceOverridesDoc, priceOverridesSourcePath, activityWindowEvidence, linksDataDoc, linksDataSourcePath);
   const statusCounts = {};
   const byStore = {};
@@ -2487,6 +2635,7 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
       let selectedPlan = {planRow: null, status: '', duplicateResolution: ''};
       let planWindowStatus = '';
       const orderTime = orderLineTime(raw);
+      let manualSpecialEntry = null;
       if (!storeKey || !skc) {
         status = 'missing_store_or_skc';
         reason = '订单商品行缺店铺或 SKC，不能匹配目标价';
@@ -2496,10 +2645,37 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
       } else {
         const planKey = `${storeKey}::${skc}`;
         const planCandidates = plan.rowsBySkc.get(planKey) || [];
+        manualSpecialEntry = findActiveManualLimitedDiscount(manualLimitedDiscountRegistry, storeKey, skc, orderTime || now);
         selectedPlan = selectOrderPlanRow(planCandidates, orderTime);
         planRow = selectedPlan.planRow || plan.bySkc.get(planKey) || null;
         planWindowStatus = selectedPlan.status || '';
-        if (!planCandidates.length) {
+        if (manualSpecialEntry) {
+          if (price === null) {
+            status = 'missing_currency_price';
+            reason = '命中人工特殊限时折扣窗口，但订单商品行缺 currencyPrice';
+          } else if (currencyCode !== 'SAR') {
+            status = 'unsupported_currency';
+            reason = `命中人工特殊限时折扣窗口，但币种为 ${currencyCode}，暂不能按 SAR 特殊价比较`;
+          } else if (quantity !== null && quantity !== 1) {
+            status = 'grain_unknown';
+            reason = `命中人工特殊限时折扣窗口，但 number=${quantity}，不能确认 currencyPrice 是否单件成交价`;
+          } else {
+            matchedPlanRows += 1;
+            finalTargetPrice = manualSpecialEntry.specialPrice;
+            deltaSar = Math.round((price - finalTargetPrice) * 100) / 100;
+            planWindowStatus = 'manual_special_limited_discount_window';
+            if (deltaSar < -ORDER_PRICE_TOLERANCE_SAR) {
+              status = 'below_target';
+              reason = '订单商品行成交价低于用户批准的人工特殊限时折扣价';
+            } else if (deltaSar > ORDER_PRICE_TOLERANCE_SAR) {
+              status = 'above_target';
+              reason = '订单商品行成交价高于用户批准的人工特殊限时折扣价';
+            } else {
+              status = 'matches_target';
+              reason = '订单商品行成交价命中用户批准的人工特殊限时折扣价';
+            }
+          }
+        } else if (!planCandidates.length) {
           status = 'unmatched_plan';
           reason = '不在 price-overrides 精确目标价计划内；仅做背景计数，不参与低价/高价结论';
         } else if (selectedPlan.status === 'outside_plan_window') {
@@ -2563,6 +2739,11 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
         actualUnitPriceUsed: quantity === null || quantity === 1 ? price : null,
         currencyCode,
         finalTargetPrice,
+        ordinaryPlanFinalTargetPrice: planRow?.finalTargetPrice ?? null,
+        expectedPriceSource: manualSpecialEntry ? 'manual_special_limited_discount_override' : 'ordinary_marketing_plan',
+        manualSpecialPrice: manualSpecialEntry?.specialPrice ?? null,
+        manualSpecialValidFrom: manualSpecialEntry?.validFrom || '',
+        manualSpecialValidTo: manualSpecialEntry?.validTo || '',
         targetPrice: planRow?.targetPrice ?? null,
         couponFactor: planRow?.couponFactor ?? null,
         deltaSar,
@@ -2852,7 +3033,7 @@ function buildDryRunCommands({targetPlan, priceOverrides, optionalTrafficCouponR
   if (Number(limitedDiscountTargetPriceDrift?.belowTarget || 0) > 0) {
     commands.push({
       label: 'limited-discount-target-drift-build-rescue-plan',
-      command: `node scripts/marketing/build_limited_discount_drift_rescue_plan.mjs --guard outputs/reports/marketing-daily-guard-${reportDate || new Date().toISOString().slice(0, 10)}.json --end-time "2026-07-21 23:59:59" --activity-name-prefix "限时折扣目标价漂移修复"`,
+      command: `node scripts/marketing/build_limited_discount_drift_rescue_plan.mjs --guard outputs/reports/marketing-daily-guard-${reportDate || new Date().toISOString().slice(0, 10)}.json --activity-name-prefix "限时折扣目标价漂移修复"`,
       nextAfterPass: '生成 rescue 文件后，按店铺/旧活动先运行 apply_hl_limited_discount_rescue.mjs --dry-run；单一目标活动安全通过后才允许 execute，混合活动必须 fail-closed 后走 split-preserve。',
     });
   }
@@ -3340,6 +3521,8 @@ function buildMarkdown(report) {
   lines.push(`- 旧普通活动叠券：未处理低价 ${humanCount(report.knownOrdinaryActivityGuard.belowTargetCount, '个')}；待系统只读查价 ${humanCount(report.knownOrdinaryActivityGuard.evidenceIncompleteCount, '个')}；已取消止损 ${humanCount(report.knownOrdinaryActivityGuard.mitigatedBelowTargetCount || 0, '个')}`);
   lines.push(`- 限时折扣叠券：低价 ${humanCount(report.lowPriceOverlap.belowTarget, '个')}；待系统补价证据 ${humanCount(report.lowPriceOverlap.missingEvidence, '个')}；取消候选 ${humanCount(report.lowPriceOverlap.cancelRows, '个')}`);
   lines.push(`- 订单商品行成交价：云端读取 ${humanCount(report.orderPriceAudit.cloud?.rows || 0, '行')}；活动窗口内命中目标并比价 ${humanCount(report.orderPriceAudit.cloud?.matchedPlanRows || 0, '行')}；窗口外历史线索 ${humanCount(report.orderPriceAudit.outsideWindow, '条')}；未命中计划背景数 ${humanCount(report.orderPriceAudit.cloud?.unmatchedRows || 0, '行')}；低于目标 ${humanCount(report.orderPriceAudit.below, '条')}；高于目标 ${humanCount(report.orderPriceAudit.above, '条')}；缺窗口/价格/粒度证据 ${humanCount(report.orderPriceAudit.dataQualityRows, '条')}`);
+  const manualSpecial = report.manualSpecialLimitedDiscount || report.limitedDiscountTargetPriceDrift?.manualSpecialLimitedDiscount || {};
+  lines.push(`- 人工特殊限时折扣保护：有效登记 ${humanCount(manualSpecial.activeCount || 0, '条')}；精确覆盖 ${humanCount((manualSpecial.coveredRows || []).length, '条')}；缺失/错价待恢复 ${humanCount(manualSpecial.actionCount || 0, '条')}。`);
   const couponTrafficIntent = report.couponTrafficIntent || {};
   const budgetPrefix = couponTrafficIntent.enabled ? '可选流量券预算' : '优惠券预算观察';
   lines.push(`- ${budgetPrefix}：明确流量券目标 ${humanCount(couponTrafficIntent.allowed15TrafficCount || 0, '个')}；低于预算目标的店铺 ${humanCount(report.couponBudget.belowTargetCount, '个')}；缺回读证据 ${humanCount(report.couponBudget.missingEvidenceCount, '个')}`);
@@ -3402,6 +3585,7 @@ async function main() {
   sources.push(biPortal.source);
   const biPortalLinksData = await read('biPortalLinksData', BI_PORTAL_LINKS_DATA_DEFAULT);
   const marketingPricingPolicy = await loadMarketingPricingPolicy(MARKETING_PRICING_POLICY_DEFAULT);
+  const manualLimitedDiscountRegistry = await loadManualLimitedDiscountRegistry();
   const targetPlan = await read('targetSelectionPlan', args.targetPlan);
   const priceOverrides = await read('priceOverridesPlan', args.priceOverrides);
   const storesConfig = await read('storesConfig', args.storesConfig);
@@ -3507,7 +3691,7 @@ async function main() {
   }
   const knownOrdinaryCancelMitigation = await loadKnownOrdinaryCancelMitigation(args.date);
   const orderPriceMitigationEvidence = loadOrderPriceMitigationEvidence(args.date);
-  const activityWindowEvidence = loadActivityWindowEvidence(targetPlan.data, priceOverrides.data);
+  const activityWindowEvidence = loadActivityWindowEvidence(targetPlan.data, priceOverrides.data, biPortalLinksData.data);
 
   const cloudOrderRows = await readCloudSheinFetchOrderRows({
     cloudBiSsh: args.cloudBiSsh,
@@ -3536,6 +3720,7 @@ async function main() {
     priceOverridesSourcePath: priceOverrides.source.path,
     activityWindowEvidence,
     orderMitigationEvidence: orderPriceMitigationEvidence,
+    manualLimitedDiscountRegistry,
     now,
     maxAgeHours: args.maxAgeHours,
     linksDataDoc: biPortalLinksData.source.status === 'ok' ? biPortalLinksData.data : null,
@@ -3547,6 +3732,7 @@ async function main() {
     priceOverridesSourcePath: priceOverrides.source.path,
     activityWindowEvidence,
     now,
+    manualLimitedDiscountRegistry,
     linksDataDoc: biPortalLinksData.source.status === 'ok' ? biPortalLinksData.data : null,
     linksDataSourcePath: biPortalLinksData.source.status === 'ok' ? biPortalLinksData.source.path : '',
   });
@@ -3582,6 +3768,8 @@ async function main() {
     pricingPolicy: marketingPricingPolicy,
     reportDate: args.date,
     currentMarketingLiveScanSource,
+    manualLimitedDiscountRegistry,
+    now,
   });
   const couponTrafficIntent = summarizeCouponTrafficIntent(couponEligibilityPlan);
   const optionalTrafficCouponReview = optionalTrafficCouponReviewStatus({couponEligibilityPlan});
@@ -3772,6 +3960,18 @@ async function main() {
     );
   }
   const newListingLimitedForBlocker = newSkcCandidates.newListingWithin7DaysLimitedDiscount || {};
+  const latestRawLinkOverlayForBlocker = newSkcCandidates.latestRawLinkOverlay || {};
+  if (latestRawLinkOverlayForBlocker.complete !== true) {
+    addBlocker(
+      blockers,
+      'latest_raw_link_overlay_incomplete',
+      `新链接原始快照覆盖不完整：应有 ${latestRawLinkOverlayForBlocker.expectedStoreCount || 0} 店，实际 ${latestRawLinkOverlayForBlocker.sourceFileCount || 0} 店，解析失败 ${latestRawLinkOverlayForBlocker.parseErrorCount || 0}；禁止据此输出无缺口`,
+      {
+        missingStoreKeys: latestRawLinkOverlayForBlocker.missingStoreKeys || [],
+        errors: (latestRawLinkOverlayForBlocker.errors || []).slice(0, 20),
+      },
+    );
+  }
   if (Number(newListingLimitedForBlocker.actionCount || 0) > 0 && Number(newListingLimitedForBlocker.readyDryRunCount || 0) <= 0) {
     addBlocker(
       blockers,
@@ -3792,6 +3992,20 @@ async function main() {
       {
         samples: limitedDiscountTargetPriceDrift.belowRows.slice(0, 20),
         planSourcePath: limitedDiscountTargetPriceDrift.planSourcePath,
+      },
+    );
+  }
+  const manualSpecialLimitedDiscount = limitedDiscountTargetPriceDrift.manualSpecialLimitedDiscount || {};
+  if (Number(manualSpecialLimitedDiscount.actionCount || 0) > 0) {
+    addBlocker(
+      blockers,
+      'manual_special_limited_discount_restore_required',
+      `用户批准的人工特殊限时折扣缺失/错价/库存或时间窗不符=${manualSpecialLimitedDiscount.actionCount}`,
+      {
+        registrySource: manualSpecialLimitedDiscount.registrySource || '',
+        missingRows: (manualSpecialLimitedDiscount.missingRows || []).slice(0, 20),
+        priceMismatchRows: (manualSpecialLimitedDiscount.priceMismatchRows || []).slice(0, 20),
+        coverageMismatchRows: (manualSpecialLimitedDiscount.coverageMismatchRows || []).slice(0, 20),
       },
     );
   }
@@ -3972,6 +4186,7 @@ async function main() {
     newSkcCandidates,
     orderPriceAudit,
     limitedDiscountTargetPriceDrift,
+    manualSpecialLimitedDiscount,
     biPortalFreshness,
     biPortalSourceSelection: {
       selectedPath: biPortal.source?.path || '',
@@ -4045,6 +4260,7 @@ async function main() {
     && !report.orderPriceAudit.below
     && !report.orderPriceAudit.above
     && !report.orderPriceAudit.dataQualityRows
+    && !report.manualSpecialLimitedDiscount.actionCount
     && report.orderPriceAudit.cloud?.status === 'ok'
     && !report.orderPriceAudit.cloud?.missingFileCount
     && !report.orderPriceAudit.cloud?.parseErrorFileCount

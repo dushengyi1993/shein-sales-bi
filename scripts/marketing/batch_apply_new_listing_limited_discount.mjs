@@ -13,6 +13,15 @@ import fsSync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import {
+  applyManualLimitedDiscountOverride,
+  buildManualLimitedDiscountIndex,
+  loadManualLimitedDiscountRegistry,
+} from '../../lib/marketing_manual_limited_discount_overrides.mjs';
+import {
+  assertMarketingAutomationAuthorization,
+  MARKETING_AUTOMATION_ACTIONS,
+} from '../../lib/marketing_automation_authorization.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp/marketing-signup/limited-discount-rescue');
@@ -25,7 +34,7 @@ function parseArgs(argv) {
     currentMarketingLiveScan: '',
     outDir: DEFAULT_OUT_DIR,
     stores: [],
-    dryRunOnly: false,
+    dryRunOnly: true,
     skipBuild: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -43,6 +52,7 @@ function parseArgs(argv) {
     else if (arg === '--stores') args.stores = splitCsv(argv[++i]).map(s => s.toUpperCase());
     else if (arg.startsWith('--stores=')) args.stores = splitCsv(arg.slice('--stores='.length)).map(s => s.toUpperCase());
     else if (arg === '--dry-run-only') args.dryRunOnly = true;
+    else if (arg === '--execute') args.dryRunOnly = false;
     else if (arg === '--skip-build') args.skipBuild = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -178,6 +188,21 @@ async function applyRescue({storeKey, port, rescuePath, execute}) {
   return await loadToolOutput(result);
 }
 
+async function topUpAuthorizedFallbackInventory({storeKey, skc, rescuePath, execute}) {
+  const commandArgs = [
+    'scripts/marketing/manage_manual_limited_discount_inventory.mjs',
+    '--store',
+    storeKey,
+    '--skc',
+    skc,
+    '--rescue',
+    rescuePath,
+    execute ? '--execute' : '--dry-run',
+  ];
+  if (execute) commandArgs.push('--confirm', 'AUTHORIZED_LIMITED_DISCOUNT_FALLBACK_STOCK_TOP_UP');
+  return await loadToolOutput(await runCommand(process.execPath, commandArgs, {timeoutMs: 300000}));
+}
+
 async function buildPlan(args, guard) {
   const priceOverrides = args.priceOverrides || path.resolve(ROOT, guard?.targetPlanSelection?.priceOverrides || '');
   const liveScan = args.currentMarketingLiveScan
@@ -212,10 +237,10 @@ function classifyBlockedDryRun(full) {
   return {type: 'dry_run_not_ok', reason};
 }
 
-async function processStore({file, storeMap, args}) {
+async function processStore({file, storeMap, args, manualIndex}) {
   const storeKey = String(file.storeKey || '').toUpperCase();
   const store = storeMap.get(storeKey);
-  const rescuePath = path.resolve(ROOT, file.path || '');
+  let rescuePath = path.resolve(ROOT, file.path || '');
   const record = {
     storeKey,
     rescuePath: rel(rescuePath),
@@ -223,17 +248,40 @@ async function processStore({file, storeMap, args}) {
     launched: null,
     dryRun: null,
     execute: null,
+    inventoryTopUp: null,
     close: null,
     ok: false,
     status: 'pending',
     createdActivityId: null,
     targetSkcs: [],
     blocked: null,
+    protectedManualSpecialRows: [],
     error: '',
   };
   try {
     if (!store) throw new Error(`Unknown or disabled store: ${storeKey}`);
-    const rescue = await readJson(rescuePath);
+    let rescue = await readJson(rescuePath);
+    const transformedRows = (rescue.rows || []).map(row => {
+      const entry = manualIndex.activeByKey.get(`${storeKey}::${String(row.skc || '').trim()}`) || null;
+      if (!entry) return row;
+      record.protectedManualSpecialRows.push({skc: entry.skc, specialPrice: entry.specialPrice, validTo: entry.validTo, activityStock: entry.activityStock});
+      return applyManualLimitedDiscountOverride({...row, storeKey}, entry);
+    });
+    if (record.protectedManualSpecialRows.length) {
+      rescue = {...rescue, rows: transformedRows};
+      const allManual = transformedRows.every(row => row.manualSpecialLimitedDiscount === true);
+      if (allManual) {
+        const endTimes = [...new Set(transformedRows.map(row => row.manualSpecialValidTo))];
+        const stocks = [...new Set(transformedRows.map(row => Number(row.activityStock)))];
+        if (endTimes.length === 1) rescue.endTime = endTimes[0];
+        if (stocks.length === 1) rescue.activityStock = stocks[0];
+        rescue.activityNamePrefix = `${storeKey}人工特殊限时折扣保护恢复`;
+      }
+      const preparedPath = path.join(args.outDir, `manual-protected-${path.basename(rescuePath)}`);
+      await fs.writeFile(preparedPath, `${JSON.stringify(rescue, null, 2)}\n`, 'utf8');
+      rescuePath = preparedPath;
+      record.rescuePath = rel(rescuePath);
+    }
     record.targetSkcs = (rescue.rows || []).map(row => String(row.skc || '').trim()).filter(Boolean);
     record.launched = summarizeRaw(await launchStore(storeKey));
     if (!record.launched.ok) throw new Error(`launch_store_browser failed for ${storeKey}: ${record.launched.stderr || record.launched.stdout || record.launched.error}`);
@@ -254,8 +302,53 @@ async function processStore({file, storeMap, args}) {
       throw new Error(`dry-run did not produce a readable result for ${storeKey}: ${dryRun.stderr || dryRun.stdout || dryRun.error || ''}`);
     }
     if (!dryRun.full?.ok) {
+      const invalid = Array.isArray(dryRun.full?.validation?.invalid) ? dryRun.full.validation.invalid : [];
+      const inventoryOnly = invalid.length === 1
+        && record.targetSkcs.length === 1
+        && invalid.every(row => row.reason === 'inventory below configured activity stock')
+        && record.protectedManualSpecialRows.length === 0;
+      if (inventoryOnly && !args.dryRunOnly) {
+        const inventoryDryRun = await topUpAuthorizedFallbackInventory({
+          storeKey,
+          skc: record.targetSkcs[0],
+          rescuePath,
+          execute: false,
+        });
+        const inventoryExecute = inventoryDryRun.full?.ok
+          ? await topUpAuthorizedFallbackInventory({
+            storeKey,
+            skc: record.targetSkcs[0],
+            rescuePath,
+            execute: true,
+          })
+          : null;
+        record.inventoryTopUp = {
+          dryRun: inventoryDryRun.full || inventoryDryRun.parsed || summarizeRaw(inventoryDryRun),
+          execute: inventoryExecute ? (inventoryExecute.full || inventoryExecute.parsed || summarizeRaw(inventoryExecute)) : null,
+        };
+        if (inventoryExecute?.full?.ok) {
+          const retry = await applyRescue({storeKey, port: store.port, rescuePath, execute: false});
+          record.dryRunAfterInventoryTopUp = {
+            ...summarizeRaw(retry),
+            out: retry.outPath ? rel(retry.outPath) : '',
+            parsed: retry.parsed || null,
+            result: retry.full || null,
+          };
+          if (retry.full?.ok) {
+            dryRun.full = retry.full;
+          }
+        }
+      }
+    }
+    if (!dryRun.full?.ok) {
       record.blocked = classifyBlockedDryRun(dryRun.full || dryRun.parsed || {});
       record.status = record.blocked.type;
+      record.ok = true;
+      return record;
+    }
+    if (dryRun.full?.alreadyCovered) {
+      record.createdActivityId = dryRun.full.createdActivityId || null;
+      record.status = 'manual_special_already_covered';
       record.ok = true;
       return record;
     }
@@ -364,6 +457,11 @@ function buildMarkdown(doc) {
 }
 
 const args = parseArgs(process.argv.slice(2));
+const automationAuthorization = args.dryRunOnly ? null : await assertMarketingAutomationAuthorization({
+  action: MARKETING_AUTOMATION_ACTIONS.APPLY_NEW_LISTING_FALLBACK,
+});
+const manualRegistry = await loadManualLimitedDiscountRegistry();
+const manualIndex = buildManualLimitedDiscountIndex(manualRegistry, new Date());
 await fs.mkdir(args.outDir, {recursive: true});
 await fs.mkdir(path.join(ROOT, 'outputs', 'reports'), {recursive: true});
 if (!fsSync.existsSync(args.guard)) throw new Error(`Guard report does not exist: ${args.guard}`);
@@ -380,7 +478,7 @@ const rescueFiles = (plan.rescueFiles || [])
 const storeMap = storeConfigByKey();
 const results = [];
 for (const file of rescueFiles) {
-  results.push(await processStore({file, storeMap, args}));
+  results.push(await processStore({file, storeMap, args, manualIndex}));
 }
 const outputJson = path.join(ROOT, 'outputs', 'reports', `new-listing-7d-limited-discount-execution-summary-${args.date}.json`);
 const outputMd = path.join(ROOT, 'outputs', 'reports', `new-listing-7d-limited-discount-execution-summary-${args.date}.md`);
@@ -389,6 +487,7 @@ const doc = {
   finishedAt: new Date().toISOString(),
   date: args.date,
   dryRunOnly: args.dryRunOnly,
+  automationAuthorization,
   guard: rel(args.guard),
   build,
   planPath: rel(planPath),
@@ -402,10 +501,12 @@ const doc = {
 doc.totals = summarizeTotals(results, plan);
 await fs.writeFile(outputJson, JSON.stringify(doc, null, 2), 'utf8');
 await fs.writeFile(outputMd, buildMarkdown(doc), 'utf8');
+const fullyClear = doc.totals.storesFailed === 0 && doc.totals.storesBlocked === 0;
 console.log(JSON.stringify({
-  ok: doc.totals.storesFailed === 0,
+  ok: fullyClear,
   out: rel(outputJson),
   md: rel(outputMd),
   totals: doc.totals,
 }, null, 2));
+if (!fullyClear) process.exitCode = 2;
 if (doc.totals.storesFailed > 0) process.exitCode = 2;

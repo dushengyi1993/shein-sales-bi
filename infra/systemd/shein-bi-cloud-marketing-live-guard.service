@@ -16,6 +16,11 @@ Environment=SHEIN_BI_MARKETING_LIVE_LOG_DIR=/srv/shein-bi/logs/cloud-marketing-l
 Environment=SHEIN_BI_MARKETING_LIVE_SCAN_TIMEOUT_SEC=2400
 Environment=SHEIN_BI_MARKETING_LIVE_SCAN_KILL_AFTER_SEC=60
 Environment=SHEIN_BI_MARKETING_PRICE_STORE_ATTEMPTS=3
+# Owner-approved standing policy permits timer writes within the checked action,
+# store and pricing scope; out-of-policy work still fails closed.
+Environment=SHEIN_BI_MARKETING_LIVE_AUTO_REPAIR=1
+Environment=SHEIN_BI_MARKETING_AUTOMATION_CONTEXT=cloud_timer
+Environment=SHEIN_BI_MARKETING_AUTOMATION_AUTHORIZATION=owner-standing-cloud-marketing-v1
 TimeoutStartSec=3600
 Nice=12
 IOSchedulingClass=best-effort

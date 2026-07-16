@@ -341,9 +341,12 @@ function normalizeRows(store, live, levelRuleId, args) {
       standard_goods_sn: good.sku_supplier_no || '',
       marketing_limited_discount_price_sar: numberOrNull(good.product_act_price),
       marketing_limited_discount_is_current: current ? true : '',
+      marketing_limited_discount_activity_id: a.activityId || good.activity_id || '',
       marketing_limited_discount_name: a.name || '',
       marketing_limited_discount_start: a.start || '',
       marketing_limited_discount_end: a.end || '',
+      marketing_limited_discount_attend_num_sum: numberOrNull(good.attend_num_sum),
+      marketing_limited_discount_stock_num: numberOrNull(good.stock_num),
       marketing_coupon_factor: couponActive.has(skc) ? 0.85 : null,
       marketing_coupon_summary: couponActive.has(skc) ? '15%券' : '',
       marketing_price_evidence_type: current ? 'current_limited_discount_live_scan' : 'future_limited_discount_live_scan',
@@ -429,7 +432,7 @@ async function scanStore(store, args, levelHints) {
 function csvEscape(value) { const s = String(value ?? ''); return /[",\r\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s; }
 function toCsv(rows, headers) { return [headers.join(','), ...rows.map(row => headers.map(h => csvEscape(row[h])).join(','))].join('\r\n') + '\r\n'; }
 
-const csvHeaders = ['store_key','skc','standard_goods_sn','marketing_suggested_ordinary_price_sar','marketing_ordinary_price_is_current','marketing_limited_discount_price_sar','marketing_limited_discount_is_current','marketing_activity_id','marketing_activity_name','marketing_activity_start','marketing_activity_end','marketing_limited_discount_name','marketing_limited_discount_start','marketing_limited_discount_end','marketing_coupon_summary','marketing_coupon_activity_id','marketing_coupon_level_rule_id','marketing_price_evidence_type','marketing_price_source_rank','marketing_price_source_at'];
+const csvHeaders = ['store_key','skc','standard_goods_sn','marketing_suggested_ordinary_price_sar','marketing_ordinary_price_is_current','marketing_limited_discount_price_sar','marketing_limited_discount_is_current','marketing_activity_id','marketing_activity_name','marketing_activity_start','marketing_activity_end','marketing_limited_discount_activity_id','marketing_limited_discount_name','marketing_limited_discount_start','marketing_limited_discount_end','marketing_limited_discount_attend_num_sum','marketing_limited_discount_stock_num','marketing_coupon_summary','marketing_coupon_activity_id','marketing_coupon_level_rule_id','marketing_price_evidence_type','marketing_price_source_rank','marketing_price_source_at'];
 
 async function main(argv) {
   if (argv.includes('--help') || argv.includes('-h')) {

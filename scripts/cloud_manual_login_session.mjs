@@ -27,6 +27,7 @@ const DEFAULT_HEIGHT = 900;
 const SBN_URL = 'https://sso.geiwohuo.com/#/sbn/merchandise/details';
 const ORDER_URL = 'https://sso.geiwohuo.com/#/gsp/order-management/list';
 const HOME_URL = 'https://sso.geiwohuo.com/#/gsp/home';
+const MBRS_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
 const CHROME_CANDIDATES = [
   '/usr/bin/google-chrome',
   '/usr/bin/google-chrome-stable',
@@ -93,6 +94,7 @@ function bjDate(offsetDays = 0) {
 }
 
 function targetUrl(target) {
+  if (target === 'mbrs' || target === 'marketing') return MBRS_URL;
   if (target === 'order' || target === 'gsp') return ORDER_URL;
   if (target === 'home') return HOME_URL;
   return SBN_URL;

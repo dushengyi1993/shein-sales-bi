@@ -13,11 +13,13 @@ PAGE_SIZE="${SHEIN_BI_MARKETING_LIVE_PAGE_SIZE:-500}"
 STORE_ATTEMPTS="${SHEIN_BI_MARKETING_PRICE_STORE_ATTEMPTS:-3}"
 SCAN_TIMEOUT_SEC="${SHEIN_BI_MARKETING_LIVE_SCAN_TIMEOUT_SEC:-2400}"
 SCAN_KILL_AFTER_SEC="${SHEIN_BI_MARKETING_LIVE_SCAN_KILL_AFTER_SEC:-60}"
+STACK_REVIEW_TIMEOUT_SEC="${SHEIN_BI_MARKETING_STACK_REVIEW_TIMEOUT_SEC:-600}"
+STACK_REVIEW_KILL_AFTER_SEC="${SHEIN_BI_MARKETING_STACK_REVIEW_KILL_AFTER_SEC:-30}"
 GUARD_MAX_AGE_HOURS="${SHEIN_BI_MARKETING_LIVE_GUARD_MAX_AGE_HOURS:-96}"
 GUARD_CLOUD_BI_SSH="${SHEIN_BI_MARKETING_LIVE_CLOUD_BI_SSH:-local}"
 GUARD_CLOUD_BI_ROOT="${SHEIN_BI_MARKETING_LIVE_CLOUD_BI_ROOT:-$ROOT}"
 MIN_AVAILABLE_MEM_MIB="${SHEIN_BI_MARKETING_LIVE_MIN_AVAILABLE_MEM_MIB:-2200}"
-AUTO_REPAIR="${SHEIN_BI_MARKETING_LIVE_AUTO_REPAIR:-1}"
+AUTO_REPAIR="${SHEIN_BI_MARKETING_LIVE_AUTO_REPAIR:-0}"
 RESERVED_WINDOW_MINUTES="${SHEIN_BI_MARKETING_LIVE_RESERVED_WINDOW_MINUTES:-6}"
 IGNORE_RESERVED_WINDOW="${SHEIN_BI_MARKETING_LIVE_IGNORE_RESERVED_WINDOW:-0}"
 # P3-#9: load busy services from config file, fallback to env var or hardcoded default
@@ -72,6 +74,16 @@ run_live_scan() {
       --store-attempts "$STORE_ATTEMPTS" \
       --headless \
       --out "$out"
+}
+
+run_marketing_stack_review() {
+  timeout -k "$STACK_REVIEW_KILL_AFTER_SEC" "$STACK_REVIEW_TIMEOUT_SEC" \
+    node scripts/marketing/export_marketing_stack_review.mjs \
+      --batch-size 3 \
+      --headless \
+      --session-http \
+      --cloud-bi-ssh "$GUARD_CLOUD_BI_SSH" \
+      --cloud-bi-root "$GUARD_CLOUD_BI_ROOT"
 }
 
 run_guard_report() {
@@ -257,6 +269,19 @@ fi
 echo "[cloud_marketing_live_guard] cleanup before live scan"
 cleanup_store_browsers
 
+# Ordinary marketing is the highest-priority layer. Refresh its full-store live
+# evidence every day before evaluating limited-discount drift or fallback work.
+# Session HTTP reuses the session-manager evidence and does not open browsers;
+# the guard report below verifies 19/19 explicit store coverage and freshness.
+STACK_REVIEW_STATUS=0
+echo "[cloud_marketing_live_guard] refresh ordinary marketing stack review via session HTTP"
+if run_marketing_stack_review; then
+  echo "[cloud_marketing_live_guard] ordinary marketing stack review refreshed"
+else
+  STACK_REVIEW_STATUS=$?
+  echo "[cloud_marketing_live_guard] WARN ordinary marketing stack review returned status=$STACK_REVIEW_STATUS" >&2
+fi
+
 SCAN_STATUS=0
 if run_live_scan "$SCAN_OUT"; then
   echo "[cloud_marketing_live_guard] live scan done scan=$SCAN_OUT"
@@ -278,36 +303,61 @@ fi
 
 DRIFT_REPAIR_STATUS=0
 NEW_LISTING_STATUS=0
+MANUAL_SPECIAL_RESTORE_STATUS=0
+WRITE_PHASE_FAILED=0
 FINAL_SCAN_STATUS=0
 FINAL_GUARD_STATUS=0
-if [[ "$AUTO_REPAIR" == "1" && "$SCAN_STATUS" -eq 0 && "$GUARD_STATUS" -eq 0 ]]; then
+ORDINARY_LIVE_READY="$(guard_json_value '(j.marketingStackReviewCoverage?.coverageComplete === true && Number(j.marketingStackReviewFreshness?.activityAgeHours ?? 999999) <= Number(j.marketingStackReviewFreshness?.activityFreshnessThresholdHours ?? 48)) ? 1 : 0' 0)"
+echo "[cloud_marketing_live_guard] ordinary live evidence ready=$ORDINARY_LIVE_READY stackReviewStatus=$STACK_REVIEW_STATUS"
+if [[ "$AUTO_REPAIR" == "1" && "$STACK_REVIEW_STATUS" -eq 0 && "$ORDINARY_LIVE_READY" -eq 1 && "$SCAN_STATUS" -eq 0 && "$GUARD_STATUS" -eq 0 ]]; then
   DRIFT_BELOW_COUNT="$(guard_json_value '(j.limitedDiscountTargetPriceDrift?.belowRows || []).length' 0)"
   NEW_LISTING_EXEC_COUNT="$(guard_json_value '(j.newSkcCandidates?.newListingWithin7DaysLimitedDiscount?.executableActionCount || 0)' 0)"
-  echo "[cloud_marketing_live_guard] action check driftBelow=$DRIFT_BELOW_COUNT topTreatmentExecutable=$NEW_LISTING_EXEC_COUNT"
+  MANUAL_SPECIAL_RESTORE_COUNT="$(guard_json_value 'Number(j.manualSpecialLimitedDiscount?.actionCount || 0)' 0)"
+  echo "[cloud_marketing_live_guard] action check manualSpecialRestore=$MANUAL_SPECIAL_RESTORE_COUNT driftBelow=$DRIFT_BELOW_COUNT topTreatmentExecutable=$NEW_LISTING_EXEC_COUNT"
 
-  if [[ "$DRIFT_BELOW_COUNT" =~ ^[0-9]+$ && "$DRIFT_BELOW_COUNT" -gt 0 ]]; then
+  if [[ "$MANUAL_SPECIAL_RESTORE_COUNT" =~ ^[0-9]+$ && "$MANUAL_SPECIAL_RESTORE_COUNT" -gt 0 ]]; then
+    echo "[cloud_marketing_live_guard] restore active user-approved manual special limited discounts count=$MANUAL_SPECIAL_RESTORE_COUNT"
+    if node scripts/marketing/batch_restore_manual_limited_discounts.mjs --guard "$GUARD_OUT" --execute; then
+      echo "[cloud_marketing_live_guard] manual-special limited-discount restore done"
+    else
+      MANUAL_SPECIAL_RESTORE_STATUS=$?
+      WRITE_PHASE_FAILED=1
+      echo "[cloud_marketing_live_guard] WARN manual-special limited-discount restore returned status=$MANUAL_SPECIAL_RESTORE_STATUS" >&2
+    fi
+    cleanup_store_browsers
+  fi
+
+  if [[ "$WRITE_PHASE_FAILED" -eq 0 && "$DRIFT_BELOW_COUNT" =~ ^[0-9]+$ && "$DRIFT_BELOW_COUNT" -gt 0 ]]; then
     echo "[cloud_marketing_live_guard] auto fix limited-discount target-price drift count=$DRIFT_BELOW_COUNT"
-    if node scripts/marketing/batch_fix_limited_discount_drift.mjs --guard "$GUARD_OUT"; then
+    if node scripts/marketing/batch_fix_limited_discount_drift.mjs --guard "$GUARD_OUT" --execute; then
       echo "[cloud_marketing_live_guard] limited-discount drift fix done"
     else
       DRIFT_REPAIR_STATUS=$?
+      WRITE_PHASE_FAILED=1
       echo "[cloud_marketing_live_guard] WARN limited-discount drift fix returned status=$DRIFT_REPAIR_STATUS" >&2
     fi
     cleanup_store_browsers
+  elif [[ "$WRITE_PHASE_FAILED" -ne 0 && "$DRIFT_BELOW_COUNT" =~ ^[0-9]+$ && "$DRIFT_BELOW_COUNT" -gt 0 ]]; then
+    DRIFT_REPAIR_STATUS=90
+    echo "[cloud_marketing_live_guard] SKIP drift repair because an earlier write phase failed; final live scan will capture the partial state" >&2
   fi
 
-  if [[ "$NEW_LISTING_EXEC_COUNT" =~ ^[0-9]+$ && "$NEW_LISTING_EXEC_COUNT" -gt 0 ]]; then
+  if [[ "$WRITE_PHASE_FAILED" -eq 0 && "$NEW_LISTING_EXEC_COUNT" =~ ^[0-9]+$ && "$NEW_LISTING_EXEC_COUNT" -gt 0 ]]; then
     echo "[cloud_marketing_live_guard] auto apply new-listing/relisted top-treatment limited-discount fallback executable=$NEW_LISTING_EXEC_COUNT"
-    if node scripts/marketing/batch_apply_new_listing_limited_discount.mjs --date "$DATE" --guard "$GUARD_OUT"; then
+    if node scripts/marketing/batch_apply_new_listing_limited_discount.mjs --date "$DATE" --guard "$GUARD_OUT" --execute; then
       echo "[cloud_marketing_live_guard] new-listing/relisted limited-discount fallback done"
     else
       NEW_LISTING_STATUS=$?
+      WRITE_PHASE_FAILED=1
       echo "[cloud_marketing_live_guard] WARN new-listing/relisted limited-discount fallback returned status=$NEW_LISTING_STATUS" >&2
     fi
     cleanup_store_browsers
+  elif [[ "$WRITE_PHASE_FAILED" -ne 0 && "$NEW_LISTING_EXEC_COUNT" =~ ^[0-9]+$ && "$NEW_LISTING_EXEC_COUNT" -gt 0 ]]; then
+    NEW_LISTING_STATUS=90
+    echo "[cloud_marketing_live_guard] SKIP new-listing fallback because an earlier write phase failed; final live scan will capture the partial state" >&2
   fi
 
-  if [[ "$DRIFT_BELOW_COUNT" -gt 0 || "$NEW_LISTING_EXEC_COUNT" -gt 0 ]]; then
+  if [[ "$MANUAL_SPECIAL_RESTORE_COUNT" -gt 0 || "$DRIFT_BELOW_COUNT" -gt 0 || "$NEW_LISTING_EXEC_COUNT" -gt 0 ]]; then
     FINAL_STAMP="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)-final"
     SCAN_OUT="$ROOT/tmp/marketing-signup/current-price-live/current-marketing-price-live-${DATE}-${FINAL_STAMP}.json"
     echo "[cloud_marketing_live_guard] final live scan after auto actions"
@@ -329,14 +379,15 @@ else
   if [[ "$AUTO_REPAIR" != "1" ]]; then
     echo "[cloud_marketing_live_guard] auto repair disabled"
   else
-    echo "[cloud_marketing_live_guard] skip auto repair because scanStatus=$SCAN_STATUS guardStatus=$GUARD_STATUS"
+    echo "[cloud_marketing_live_guard] skip auto repair because stackReviewStatus=$STACK_REVIEW_STATUS ordinaryLiveReady=$ORDINARY_LIVE_READY scanStatus=$SCAN_STATUS guardStatus=$GUARD_STATUS"
   fi
 fi
 
-if [[ "$SCAN_STATUS" -eq 0 && "$GUARD_STATUS" -eq 0 && "$DRIFT_REPAIR_STATUS" -eq 0 && "$NEW_LISTING_STATUS" -eq 0 && "$FINAL_SCAN_STATUS" -eq 0 && "$FINAL_GUARD_STATUS" -eq 0 ]]; then
-  write_state "ok" "marketing live guard completed; autoRepair drift=$DRIFT_REPAIR_STATUS newListing=$NEW_LISTING_STATUS" 1
+if [[ "$STACK_REVIEW_STATUS" -eq 0 && "$ORDINARY_LIVE_READY" -eq 1 && "$SCAN_STATUS" -eq 0 && "$GUARD_STATUS" -eq 0 && "$MANUAL_SPECIAL_RESTORE_STATUS" -eq 0 && "$DRIFT_REPAIR_STATUS" -eq 0 && "$NEW_LISTING_STATUS" -eq 0 && "$FINAL_SCAN_STATUS" -eq 0 && "$FINAL_GUARD_STATUS" -eq 0 ]]; then
+  write_state "ok" "marketing live guard completed; ordinaryLiveReady=$ORDINARY_LIVE_READY autoRepair manualSpecial=$MANUAL_SPECIAL_RESTORE_STATUS drift=$DRIFT_REPAIR_STATUS newListing=$NEW_LISTING_STATUS" 1
   echo "[cloud_marketing_live_guard] done ok date=$DATE log=$LOG_FILE"
 else
-  write_state "warning" "live scan status=$SCAN_STATUS guard status=$GUARD_STATUS driftRepair=$DRIFT_REPAIR_STATUS newListing=$NEW_LISTING_STATUS finalScan=$FINAL_SCAN_STATUS finalGuard=$FINAL_GUARD_STATUS" 0
-  echo "[cloud_marketing_live_guard] done warning scanStatus=$SCAN_STATUS guardStatus=$GUARD_STATUS driftRepair=$DRIFT_REPAIR_STATUS newListing=$NEW_LISTING_STATUS finalScan=$FINAL_SCAN_STATUS finalGuard=$FINAL_GUARD_STATUS log=$LOG_FILE" >&2
+  write_state "warning" "stackReview=$STACK_REVIEW_STATUS ordinaryLiveReady=$ORDINARY_LIVE_READY live scan status=$SCAN_STATUS guard status=$GUARD_STATUS manualSpecialRestore=$MANUAL_SPECIAL_RESTORE_STATUS driftRepair=$DRIFT_REPAIR_STATUS newListing=$NEW_LISTING_STATUS finalScan=$FINAL_SCAN_STATUS finalGuard=$FINAL_GUARD_STATUS" 0
+  echo "[cloud_marketing_live_guard] done warning stackReviewStatus=$STACK_REVIEW_STATUS ordinaryLiveReady=$ORDINARY_LIVE_READY scanStatus=$SCAN_STATUS guardStatus=$GUARD_STATUS manualSpecialRestore=$MANUAL_SPECIAL_RESTORE_STATUS driftRepair=$DRIFT_REPAIR_STATUS newListing=$NEW_LISTING_STATUS finalScan=$FINAL_SCAN_STATUS finalGuard=$FINAL_GUARD_STATUS log=$LOG_FILE" >&2
+  exit 1
 fi
