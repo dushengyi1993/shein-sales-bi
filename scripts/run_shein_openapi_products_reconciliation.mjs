@@ -130,7 +130,7 @@ async function runOneStore(storeKey, args) {
   if (args.skipStock) fetchArgs.push('--skip-stock');
   const fetchStep = await runNodeStep('fetch', 'fetch_shein_openapi_products.mjs', fetchArgs, {timeoutMs: args.fetchTimeoutMs});
   if (!fetchStep.ok) return {storeKey, status: 'fetch_failed', ok: false, fetchStep, loadStep: null};
-  const loadStep = await runNodeStep('load', 'load_shein_openapi_products_warehouse.mjs', ['--store', storeKey], {timeoutMs: args.loadTimeoutMs});
+  const loadStep = await runNodeStep('load', 'load_shein_openapi_products_warehouse.mjs', ['--store', storeKey, '--skip-ensure'], {timeoutMs: args.loadTimeoutMs});
   if (!loadStep.ok) return {storeKey, status: 'load_failed', ok: false, fetchStep, loadStep};
   const row = Array.isArray(loadStep.parsed?.reconciliation) ? loadStep.parsed.reconciliation[0] : null;
   return {
@@ -228,7 +228,13 @@ const skipped = requested
 if (!authorized.length) throw new Error(`No authorized stores found for requested set: ${requested.join(',')}`);
 
 const startedAt = new Date().toISOString();
-const results = await runQueue(authorized, args);
+const ensureStep = await runNodeStep(
+  'ensure',
+  'load_shein_openapi_products_warehouse.mjs',
+  ['--ensure-only'],
+  {timeoutMs: args.loadTimeoutMs},
+);
+const results = ensureStep.ok ? await runQueue(authorized, args) : [];
 const publicResults = results.map(publicResult);
 const counts = publicResults.reduce((acc, r) => {
   acc.total += 1;
@@ -242,7 +248,7 @@ const counts = publicResults.reduce((acc, r) => {
 
 const output = {
   schemaVersion: 'shein-openapi-product-reconciliation-run/v1',
-  ok: counts.failed === 0,
+  ok: ensureStep.ok && counts.failed === 0,
   generatedAt: new Date().toISOString(),
   startedAt,
   endedAt: new Date().toISOString(),
@@ -250,6 +256,15 @@ const output = {
   maxDetails: args.maxDetails,
   requestedStores: requested,
   authorizedStores: authorized,
+  ensure: {
+    ok: ensureStep.ok,
+    code: ensureStep.code,
+    timedOut: ensureStep.timedOut,
+    startedAt: ensureStep.startedAt,
+    endedAt: ensureStep.endedAt,
+    stderrTail: ensureStep.stderrTail,
+    stdoutTail: ensureStep.parsed ? '' : ensureStep.stdoutTail,
+  },
   counts,
   skipped,
   results: publicResults,

@@ -65,6 +65,8 @@ const tests = [
   'scripts/test_systemd_security_contract.mjs',
   'scripts/test_bi_product_section_contract.mjs',
   'scripts/test_openapi_sales_loader_validity.mjs',
+  'scripts/test_openapi_sales_mapping_contract.mjs',
+  'scripts/test_cloud_bi_refresh_lock_handoff.mjs',
   'scripts/test_portal_security.mjs',
   'scripts/test_portal_http_security.mjs',
   'scripts/test_owner_knowledge_portal_flow.mjs',

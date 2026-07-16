@@ -122,7 +122,7 @@ prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
     fi
 
     if [[ "$SHEIN_BI_PORTAL_DATA_MODE" == "api" && "${SHEIN_BI_PORTAL_PREWARM_DISABLED:-0}" != "1" ]]; then
-      nohup bash scripts/prewarm_bi_portal_sections.sh >/dev/null 2>&1 &
+      nohup bash scripts/prewarm_bi_portal_sections.sh 8>&- 9>&- >/dev/null 2>&1 &
       echo "[cloud_bi_refresh] portal section prewarm started pid=$!"
     fi
   fi

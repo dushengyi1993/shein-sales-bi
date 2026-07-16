@@ -8,15 +8,21 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {isValidSalesGoodsRow, summarizeSalesGoodsRows} from '../lib/shein_sales_validity.mjs';
+import {summarizeSalesGoodsRows} from '../lib/shein_sales_validity.mjs';
+import {
+  mapOpenApiOrderDetails,
+  resolveOpenApiStoreMetadata,
+} from '../lib/shein_openapi_sales_mapper.mjs';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CONFIG = path.join(ROOT, 'config', 'shein_openapi.local.json');
+const DEFAULT_STORES_CONFIG = path.join(ROOT, 'config', 'stores.json');
 
 function parseArgs(argv) {
   const args = {
     config: DEFAULT_CONFIG,
+    storesConfig: DEFAULT_STORES_CONFIG,
     store: '',
     outDir: path.join(ROOT, 'outputs', 'shein_openapi_fetch'),
   };
@@ -24,6 +30,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--config') args.config = path.resolve(argv[++i]);
+    else if (a === '--stores-config') args.storesConfig = path.resolve(argv[++i]);
     else if (a === '--date') args.date = argv[++i];
     else if (a === '--start') args.start = argv[++i];
     else if (a === '--end') args.end = argv[++i];
@@ -120,98 +127,6 @@ async function fetchOrderDetails(client, orderNos) {
   return out;
 }
 
-function attrSuffix(item) {
-  const attrs = asArray(item.skuAttribute);
-  const cn = attrs.find((a) => a.language === 'CN' && a.attrName && a.attrName !== '-');
-  const us = attrs.find((a) => a.language === 'US' && a.attrName && a.attrName !== '-');
-  return cn?.attrName || us?.attrName || '';
-}
-
-function isCancelledBeforePickup(order, item) {
-  const orderStatus = Number(order?.orderStatus);
-  const goodsStatus = Number(item?.newGoodsStatus);
-  const performanceTag = Number(item?.performanceTag);
-  return orderStatus === 6 && goodsStatus === 6 && performanceTag === 2;
-}
-
-function openApiGoodsPerformanceStatus(order, item) {
-  return isCancelledBeforePickup(order, item) ? 6 : item.performanceTag ?? '';
-}
-
-function openApiGoodsPerformanceStatusDesc(order, item) {
-  return isCancelledBeforePickup(order, item) ? '揽收前已取消' : '';
-}
-
-function toOrderRows(orderDetails) {
-  return orderDetails.map((order) => ({
-    orderId: String(order.orderNo || ''),
-    orderNo: String(order.orderNo || ''),
-    billno: String(order.orderNo || ''),
-    orderStatus: order.orderStatus ?? '',
-    orderStatusDesc: '',
-    performStatus: order.orderStatus ?? '',
-    performStatusDesc: '',
-    allocateTime: String(order.orderTime || order.orderAllocateTime || '').slice(0, 16),
-    allocateTimeFull: order.orderTime || order.orderAllocateTime || '',
-    site: order.salesSite || '',
-    orderType: order.orderType ?? '',
-  }));
-}
-
-function toGoodsRows(orderDetails) {
-  const rows = [];
-  for (const order of orderDetails) {
-    const orderTime = order.orderTime || order.orderAllocateTime || '';
-    for (const item of asArray(order.orderGoodsInfoList)) {
-      const currencyPrice = round2(item.estimatedIncome || 0);
-      const goodsPerformanceStatus = openApiGoodsPerformanceStatus(order, item);
-      const goodsPerformanceStatusDesc = openApiGoodsPerformanceStatusDesc(order, item);
-      rows.push({
-        orderId: String(order.orderNo || ''),
-        orderNo: String(order.orderNo || ''),
-        billno: String(order.orderNo || ''),
-        orderStatus: order.orderStatus ?? '',
-        orderStatusDesc: '',
-        performStatus: order.orderStatus ?? '',
-        performStatusDesc: '',
-        allocateTime: String(orderTime).slice(0, 16),
-        allocateTimeFull: orderTime,
-        site: order.salesSite || '',
-        orderType: order.orderType ?? '',
-        pageStatus: '',
-        pageStatusDesc: '',
-        orderCustomerTime: order.paymentTime || order.orderTime || '',
-        orderCreateTime: orderTime,
-        goodsId: String(item.goodsId || ''),
-        entityId: String(item.goodsId || ''),
-        goodsSn: item.goodsSn || '',
-        skuSn: item.sellerSku || '',
-        skuCode: item.skuCode || '',
-        skcName: item.skc || '',
-        suffix: attrSuffix(item),
-        goodsTitle: item.goodsTitle || '',
-        number: 1,
-        currencyCode: item.saleCurrency || item.orderCurrency || '',
-        currencyPrice,
-        newOrderGoodsStatus: item.newGoodsStatus ?? '',
-        goodsPerformanceStatus,
-        goodsPerformanceStatusDesc,
-        goodsExchangeTag: item.goodsExchangeTag ?? '',
-        performanceTag: item.performanceTag ?? '',
-        storageTag: item.storageTag ?? '',
-        isValidSale: isValidSalesGoodsRow({
-          number: 1,
-          currencyPrice,
-          goodsPerformanceStatus,
-          goodsPerformanceStatusDesc,
-        }),
-        salesExclusionReason: isCancelledBeforePickup(order, item) ? 'cancelled_before_pickup' : '',
-      });
-    }
-  }
-  return rows;
-}
-
 function summarize(orderList, orderRows, goodsRows) {
   const goodsSales = summarizeSalesGoodsRows(goodsRows);
   const salesSar = round2(goodsSales.salesSar);
@@ -236,6 +151,8 @@ const args = parseArgs(process.argv.slice(2));
 const config = await readJson(args.config);
 const store = asArray(config.stores).find((s) => String(s.storeKey).toUpperCase() === args.store);
 if (!store?.openKeyId || !store?.secretKey) throw new Error(`${args.store} 未完成 SHEIN OpenAPI 授权`);
+const publicStoreConfig = await readJson(args.storesConfig);
+const storeMetadata = resolveOpenApiStoreMetadata(args.store, store, publicStoreConfig);
 
 const client = new SheinOpenApiClient({
   baseUrl: config.apiBaseUrls?.prodSemiManaged || SHEIN_OPENAPI_BASE_URLS.prodSemiManaged,
@@ -248,12 +165,11 @@ for (const date of eachDate(args.start, args.end)) {
   const orderList = await fetchOrderListForDate(client, date);
   const orderNos = orderList.map((row) => String(row.orderNo)).filter(Boolean);
   const orderDetails = await fetchOrderDetails(client, orderNos);
-  const orderRows = toOrderRows(orderDetails);
-  const goodsRows = toGoodsRows(orderDetails);
+  const {orderRows, goodsRows} = mapOpenApiOrderDetails(orderDetails);
   const payload = {
     storeKey: args.store,
-    shopName: store.shopName || args.store,
-    groupKey: store.groupKey || '',
+    shopName: storeMetadata.shopName,
+    groupKey: storeMetadata.groupKey,
     start: date,
     end: date,
     fetchTime: new Date().toISOString(),

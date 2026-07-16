@@ -122,7 +122,7 @@ async function runOneStore(storeKey, args) {
   if (!fetchStep.ok) {
     return {storeKey, status: 'fetch_failed', ok: false, fetchStep, loadStep: null};
   }
-  const loadStep = await runNodeStep('load', 'load_shein_openapi_sales_warehouse.mjs', ['--store', storeKey, '--date', args.date], {timeoutMs: args.loadTimeoutMs});
+  const loadStep = await runNodeStep('load', 'load_shein_openapi_sales_warehouse.mjs', ['--store', storeKey, '--date', args.date, '--skip-ensure'], {timeoutMs: args.loadTimeoutMs});
   if (!loadStep.ok) {
     return {storeKey, status: 'load_failed', ok: false, fetchStep, loadStep};
   }
@@ -215,7 +215,13 @@ const skipped = requested.filter(storeKey => !isAuthorized(configured.get(storeK
 if (!authorized.length) throw new Error(`No authorized stores found for requested set: ${requested.join(',')}`);
 
 const startedAt = new Date().toISOString();
-const results = await runQueue(authorized, args);
+const ensureStep = await runNodeStep(
+  'ensure',
+  'load_shein_openapi_sales_warehouse.mjs',
+  ['--ensure-only'],
+  {timeoutMs: args.loadTimeoutMs},
+);
+const results = ensureStep.ok ? await runQueue(authorized, args) : [];
 const publicResults = results.map(publicResult);
 const counts = publicResults.reduce((acc, r) => {
   acc.total += 1;
@@ -229,7 +235,7 @@ const counts = publicResults.reduce((acc, r) => {
 
 const output = {
   schemaVersion: 'shein-openapi-sales-reconciliation-run/v1',
-  ok: counts.failed === 0,
+  ok: ensureStep.ok && counts.failed === 0,
   date: args.date,
   generatedAt: new Date().toISOString(),
   startedAt,
@@ -237,6 +243,15 @@ const output = {
   concurrency: args.concurrency,
   requestedStores: requested,
   authorizedStores: authorized,
+  ensure: {
+    ok: ensureStep.ok,
+    code: ensureStep.code,
+    timedOut: ensureStep.timedOut,
+    startedAt: ensureStep.startedAt,
+    endedAt: ensureStep.endedAt,
+    stderrTail: ensureStep.stderrTail,
+    stdoutTail: ensureStep.parsed ? '' : ensureStep.stdoutTail,
+  },
   counts,
   skipped,
   results: publicResults,

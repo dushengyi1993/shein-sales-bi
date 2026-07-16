@@ -16,7 +16,11 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import {normalizeGoodsSnDetailed} from '../lib/product_sku_normalizer.mjs';
-import {isValidSalesGoodsRow, summarizeSalesGoodsRows} from '../lib/shein_sales_validity.mjs';
+import {
+  isValidSalesGoodsRow,
+  salesExclusionReason,
+  summarizeSalesGoodsRows,
+} from '../lib/shein_sales_validity.mjs';
 import {
   ORDER_PAYMENT_FLAG_COLUMNS,
   extractPaymentFlagsFromSalesArtifact,
@@ -63,6 +67,8 @@ function parseArgs(argv) {
     salesDir: path.join(ROOT, 'outputs', 'shein_openapi_fetch'),
     browserDir: path.join(ROOT, 'outputs', 'shein_fetch'),
     dryRun: false,
+    ensureOnly: false,
+    skipEnsure: false,
     dates: [],
   };
   const rest = [];
@@ -79,18 +85,25 @@ function parseArgs(argv) {
     else if (a === '--start') args.start = argv[++i];
     else if (a === '--end') args.end = argv[++i];
     else if (a === '--dry-run') args.dryRun = true;
+    else if (a === '--ensure-only') args.ensureOnly = true;
+    else if (a === '--skip-ensure') args.skipEnsure = true;
     else if (a === '--help' || a === '-h') {
       console.log(`Usage:
   node scripts/load_shein_openapi_sales_warehouse.mjs --store HL --date 2026-05-05
   node scripts/load_shein_openapi_sales_warehouse.mjs HL --start 2026-05-05 --end 2026-05-06
 
 Loads outputs/shein_openapi_fetch/<STORE>/<DATE>.json into parallel OpenAPI fact tables
-and writes API-vs-browser reconciliation rows.`);
+and writes API-vs-browser reconciliation rows.
+
+Schema orchestration:
+  --ensure-only   create/migrate parallel tables, then exit
+  --skip-ensure   load data without DDL (only after a successful ensure step)`);
       process.exit(0);
     } else {
       rest.push(a);
     }
   }
+  if (args.ensureOnly) return args;
   if (!args.store && rest[0]) args.store = String(rest[0]).toUpperCase();
   if (args.start) {
     if (!args.end) args.end = args.start;
@@ -292,11 +305,38 @@ CREATE TABLE IF NOT EXISTS mart.openapi_sales_reconciliation (
   api_only_order_count integer,
   browser_only_goods_count integer,
   api_only_goods_count integer,
+  browser_invalid_goods_line_count integer,
+  api_invalid_goods_line_count integer,
+  browser_invalid_sales_sar numeric,
+  api_invalid_sales_sar numeric,
+  invalid_goods_line_count_delta integer,
+  invalid_sales_sar_delta numeric,
+  business_line_diff_count integer,
+  scatter_point_diff_count integer,
+  order_time_diff_count integer,
+  cod_diff_count integer,
+  metadata_diff_count integer,
+  status_diff_count integer,
+  identity_overlay_required boolean,
   status text NOT NULL,
   generated_at timestamptz NOT NULL DEFAULT now(),
   raw_summary jsonb NOT NULL DEFAULT '{}'::jsonb,
   PRIMARY KEY (date, store_key)
 );
+ALTER TABLE mart.openapi_sales_reconciliation
+  ADD COLUMN IF NOT EXISTS browser_invalid_goods_line_count integer,
+  ADD COLUMN IF NOT EXISTS api_invalid_goods_line_count integer,
+  ADD COLUMN IF NOT EXISTS browser_invalid_sales_sar numeric,
+  ADD COLUMN IF NOT EXISTS api_invalid_sales_sar numeric,
+  ADD COLUMN IF NOT EXISTS invalid_goods_line_count_delta integer,
+  ADD COLUMN IF NOT EXISTS invalid_sales_sar_delta numeric,
+  ADD COLUMN IF NOT EXISTS business_line_diff_count integer,
+  ADD COLUMN IF NOT EXISTS scatter_point_diff_count integer,
+  ADD COLUMN IF NOT EXISTS order_time_diff_count integer,
+  ADD COLUMN IF NOT EXISTS cod_diff_count integer,
+  ADD COLUMN IF NOT EXISTS metadata_diff_count integer,
+  ADD COLUMN IF NOT EXISTS status_diff_count integer,
+  ADD COLUMN IF NOT EXISTS identity_overlay_required boolean;
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -416,7 +456,7 @@ function openApiSalesLoadSpecs(sales) {
     },
     {
       table: 'mart.openapi_sales_reconciliation',
-      columns: ['date','store_key','browser_source_file','api_source_file','browser_order_count','api_order_count','browser_positive_order_count','api_positive_order_count','browser_goods_line_count','api_goods_line_count','browser_quantity_positive_amount','api_quantity_positive_amount','browser_sales_sar','api_sales_sar','order_count_delta','positive_order_count_delta','goods_line_count_delta','quantity_positive_delta','sales_sar_delta','browser_only_order_count','api_only_order_count','browser_only_goods_count','api_only_goods_count','status','generated_at','raw_summary'],
+      columns: ['date','store_key','browser_source_file','api_source_file','browser_order_count','api_order_count','browser_positive_order_count','api_positive_order_count','browser_goods_line_count','api_goods_line_count','browser_quantity_positive_amount','api_quantity_positive_amount','browser_sales_sar','api_sales_sar','order_count_delta','positive_order_count_delta','goods_line_count_delta','quantity_positive_delta','sales_sar_delta','browser_only_order_count','api_only_order_count','browser_only_goods_count','api_only_goods_count','browser_invalid_goods_line_count','api_invalid_goods_line_count','browser_invalid_sales_sar','api_invalid_sales_sar','invalid_goods_line_count_delta','invalid_sales_sar_delta','business_line_diff_count','scatter_point_diff_count','order_time_diff_count','cod_diff_count','metadata_diff_count','status_diff_count','identity_overlay_required','status','generated_at','raw_summary'],
       conflictColumns: ['date','store_key'],
       rows: sales.reconciliations,
     },
@@ -535,14 +575,23 @@ export function buildFactRows(data, file) {
 
 function summarizeArtifact(data) {
   const summary = recalculateSummaryFromGoodsRows(data, data?.summary || {});
+  const goodsRows = asArray(data?.goodsRows);
+  const invalidRows = goodsRows.filter((row) => !isValidSalesGoodsRow(row));
   return {
     orderCount: Number(summary.orderRefCount || summary.apiCount || 0),
     positiveOrderCount: Number(summary.positiveAmountOrderCount || 0),
     goodsLineCount: Number(summary.goodsLineCount || 0),
     quantityPositiveAmount: Number(summary.quantityPositiveAmount || 0),
     salesSar: round2(summary.salesSar || 0),
-    orderNos: asArray(data?.orderRows).map((r) => String(r.orderNo || r.orderId || '')).filter(Boolean).sort(),
-    goodsIds: asArray(data?.goodsRows).map((r) => String(r.goodsId || '')).filter(Boolean).sort(),
+    invalidGoodsLineCount: invalidRows.length,
+    invalidSalesSar: round2(invalidRows.reduce((sum, row) => sum + Number(row?.currencyPrice || 0), 0)),
+    orderNos: [
+      ...asArray(data?.orderRows).map((r) => r?.orderNo || r?.billno || r?.billNo),
+      ...goodsRows.map((r) => r?.orderNo || r?.billno || r?.billNo),
+      ...asArray(data?.orders).map((r) => r?.orderNo || r?.billno || r?.billNo),
+      ...asArray(data?.orderRefs).map((r) => r?.orderNo || r?.billno || r?.billNo),
+    ].map((value) => String(value || '')).filter(Boolean).sort(),
+    goodsIds: goodsRows.map((r) => String(r?.goodsId || '')).filter(Boolean).sort(),
     fetchTime: data?.fetchTime || null,
   };
 }
@@ -551,17 +600,195 @@ function setDiff(left, right) {
   return [...left].filter((x) => !right.has(x));
 }
 
-async function buildReconciliationRow(args, date, apiFile, apiData) {
-  const browserFile = path.join(args.browserDir, args.store, `${date}.json`);
-  const api = summarizeArtifact(apiData);
-  const browserExists = fssync.existsSync(browserFile);
-  const browserData = browserExists ? await readJson(browserFile) : null;
-  const browser = browserData ? summarizeArtifact(browserData) : null;
-  const browserOrderSet = new Set(browser?.orderNos || []);
-  const apiOrderSet = new Set(api.orderNos || []);
-  const browserGoodsSet = new Set(browser?.goodsIds || []);
-  const apiGoodsSet = new Set(api.goodsIds || []);
-  const deltas = browser ? {
+function cleanText(value) {
+  return String(value ?? '').trim();
+}
+
+function canonicalNumber(value, digits = 6) {
+  const number = num(value) ?? 0;
+  const scale = 10 ** digits;
+  return Math.round((number + Number.EPSILON) * scale) / scale;
+}
+
+function canonicalGoodsSn(row) {
+  const raw = cleanText(row?.goodsSn || row?.standardGoodsSn || row?.standard_goods_sn);
+  const details = normalizeGoodsSnDetailed(raw, {
+    goodsTitle: row?.goodsTitle || row?.goodsName || row?.goods_title || '',
+  });
+  return cleanText(details.canonical || raw);
+}
+
+function canonicalExclusion(row) {
+  if (isValidSalesGoodsRow(row)) return '';
+  const reason = cleanText(salesExclusionReason(row)).toLowerCase();
+  if (reason.includes('cancel')) return 'cancelled';
+  const statusText = [
+    row?.pageStatus,
+    row?.pageStatusDesc,
+    row?.goodsPerformanceStatusDesc,
+    row?.orderStatusDesc,
+    row?.performStatusDesc,
+  ].map(cleanText).join(' ');
+  if (/cancel|取消/i.test(statusText)) return 'cancelled';
+  if (canonicalNumber(row?.number ?? row?.quantity) <= 0) return 'non_positive_quantity';
+  if (canonicalNumber(row?.currencyPrice) <= 0) return 'non_positive_amount';
+  if (row?.isValidSale === false || cleanText(row?.isValidSale).toLowerCase() === 'false') return 'explicit_invalid';
+  return reason || 'invalid';
+}
+
+function orderNoOf(row) {
+  return cleanText(row?.orderNo || row?.billno || row?.billNo || row?.orderId || row?.id);
+}
+
+function normalizeBusinessTime(value) {
+  const text = cleanText(value);
+  if (!text) return '';
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (!match) return text;
+  return `${match[1]}-${match[2]}-${match[3]} ${match[4]}:${match[5]}:${match[6] || '00'}`;
+}
+
+function goodsRowBusinessTime(row) {
+  return normalizeBusinessTime(row?.orderCreateTime || row?.allocateTimeFull || row?.allocateTime);
+}
+
+function businessLineKey(row) {
+  const valid = isValidSalesGoodsRow(row);
+  return JSON.stringify([
+    orderNoOf(row),
+    cleanText(row?.goodsId),
+    canonicalGoodsSn(row),
+    cleanText(row?.skcName || row?.skc),
+    cleanText(row?.skuCode || row?.sku_code),
+    canonicalNumber(row?.number ?? row?.quantity),
+    cleanText(row?.currencyCode || row?.currency_code).toUpperCase(),
+    valid ? round2(row?.currencyPrice) : 0,
+    valid,
+    canonicalExclusion(row),
+  ]);
+}
+
+function scatterPointKey(row) {
+  const quantity = canonicalNumber(row?.number ?? row?.quantity);
+  const amount = round2(row?.currencyPrice);
+  return JSON.stringify([
+    orderNoOf(row),
+    cleanText(row?.goodsId),
+    canonicalGoodsSn(row),
+    cleanText(row?.skcName || row?.skc),
+    goodsRowBusinessTime(row),
+    quantity,
+    amount,
+    quantity > 0 ? canonicalNumber(amount / quantity) : 0,
+  ]);
+}
+
+function statusLineKey(row) {
+  return JSON.stringify([
+    orderNoOf(row),
+    cleanText(row?.goodsId),
+    canonicalGoodsSn(row),
+    cleanText(row?.skcName || row?.skc),
+    cleanText(row?.skuCode || row?.sku_code),
+    cleanText(row?.orderStatus),
+    cleanText(row?.orderStatusDesc),
+    cleanText(row?.performStatus),
+    cleanText(row?.performStatusDesc),
+    cleanText(row?.newOrderGoodsStatus),
+    cleanText(row?.goodsPerformanceStatus),
+    cleanText(row?.goodsPerformanceStatusDesc),
+  ]);
+}
+
+function multiset(values) {
+  const counts = new Map();
+  for (const value of values) counts.set(value, (counts.get(value) || 0) + 1);
+  return counts;
+}
+
+function compareMultisets(browserValues, apiValues, exampleLimit = 6) {
+  const browser = multiset(browserValues);
+  const api = multiset(apiValues);
+  const keys = [...new Set([...browser.keys(), ...api.keys()])].sort();
+  let diffCount = 0;
+  const examples = [];
+  for (const key of keys) {
+    const browserCount = browser.get(key) || 0;
+    const apiCount = api.get(key) || 0;
+    if (browserCount === apiCount) continue;
+    diffCount += Math.abs(browserCount - apiCount);
+    if (examples.length < exampleLimit) examples.push({key, browserCount, apiCount});
+  }
+  return {diffCount, examples};
+}
+
+function orderTimeKeys(data) {
+  const byOrder = new Map();
+  const add = (row) => {
+    const orderNo = orderNoOf(row);
+    const time = goodsRowBusinessTime(row);
+    if (!orderNo || !time) return;
+    if (!byOrder.has(orderNo)) byOrder.set(orderNo, new Set());
+    byOrder.get(orderNo).add(time);
+  };
+  for (const row of asArray(data?.goodsRows)) add(row);
+  for (const row of asArray(data?.orderRows)) add(row);
+  return [...byOrder.entries()]
+    .flatMap(([orderNo, times]) => [...times].map((time) => JSON.stringify([orderNo, time])))
+    .sort();
+}
+
+function codKeys(data, sourceKind) {
+  return extractPaymentFlagsFromSalesArtifact(data, {
+    date: data?.start || data?.date || '',
+    sourceKind,
+  }).map((row) => JSON.stringify([
+    cleanText(row?.order_no),
+    row?.is_cod === true ? true : row?.is_cod === false ? false : null,
+  ])).sort();
+}
+
+function metadataValues(data) {
+  return [
+    cleanText(data?.storeKey || data?.store_key).toUpperCase(),
+    cleanText(data?.groupKey || data?.group_key),
+    cleanText(data?.shopName || data?.shop_name),
+  ];
+}
+
+function identityOverlayRequired(browserData, apiData) {
+  const browserOrders = asArray(browserData?.orderRows);
+  const apiOrders = asArray(apiData?.orderRows);
+  const browserGoods = asArray(browserData?.goodsRows);
+  const apiGoods = asArray(apiData?.goodsRows);
+  const hasInternalOrderId = (rows) => rows.some((row) => {
+    const id = cleanText(row?.orderId || row?.id);
+    return id && id !== orderNoOf(row);
+  });
+  return (hasInternalOrderId(browserOrders) && !hasInternalOrderId(apiOrders))
+    || (browserGoods.some((row) => cleanText(row?.entityId)) && !apiGoods.some((row) => cleanText(row?.entityId)))
+    || (browserGoods.some((row) => cleanText(row?.suffix)) && !apiGoods.some((row) => cleanText(row?.suffix)));
+}
+
+function compactArtifactSummary(summary) {
+  if (!summary) return null;
+  const {orderNos, goodsIds, ...rest} = summary;
+  return {
+    ...rest,
+    distinctOrderNoCount: new Set(orderNos).size,
+    distinctGoodsIdCount: new Set(goodsIds).size,
+  };
+}
+
+export function compareSalesArtifacts(browserData, apiData) {
+  const api = summarizeArtifact(apiData || {});
+  if (!browserData) return {matched: false, browser: null, api, deltas: null, quality: null};
+  const browser = summarizeArtifact(browserData);
+  const browserOrderSet = new Set(browser.orderNos);
+  const apiOrderSet = new Set(api.orderNos);
+  const browserGoodsSet = new Set(browser.goodsIds);
+  const apiGoodsSet = new Set(api.goodsIds);
+  const deltas = {
     orderCount: api.orderCount - browser.orderCount,
     positiveOrderCount: api.positiveOrderCount - browser.positiveOrderCount,
     goodsLineCount: api.goodsLineCount - browser.goodsLineCount,
@@ -571,17 +798,58 @@ async function buildReconciliationRow(args, date, apiFile, apiData) {
     apiOnlyOrderCount: setDiff(apiOrderSet, browserOrderSet).length,
     browserOnlyGoodsCount: setDiff(browserGoodsSet, apiGoodsSet).length,
     apiOnlyGoodsCount: setDiff(apiGoodsSet, browserGoodsSet).length,
-  } : null;
-  const matched = Boolean(deltas
-    && deltas.orderCount === 0
-    && deltas.positiveOrderCount === 0
-    && deltas.goodsLineCount === 0
-    && deltas.quantityPositiveAmount === 0
-    && deltas.salesSar === 0
-    && deltas.browserOnlyOrderCount === 0
-    && deltas.apiOnlyOrderCount === 0
-    && deltas.browserOnlyGoodsCount === 0
-    && deltas.apiOnlyGoodsCount === 0);
+    invalidGoodsLineCount: api.invalidGoodsLineCount - browser.invalidGoodsLineCount,
+    invalidSalesSar: round2(api.invalidSalesSar - browser.invalidSalesSar),
+  };
+  const browserGoodsRows = asArray(browserData?.goodsRows);
+  const apiGoodsRows = asArray(apiData?.goodsRows);
+  const businessLines = compareMultisets(
+    browserGoodsRows.map(businessLineKey),
+    apiGoodsRows.map(businessLineKey),
+  );
+  const scatterPoints = compareMultisets(
+    browserGoodsRows.filter(isValidSalesGoodsRow).map(scatterPointKey),
+    apiGoodsRows.filter(isValidSalesGoodsRow).map(scatterPointKey),
+  );
+  const orderTimes = compareMultisets(orderTimeKeys(browserData), orderTimeKeys(apiData));
+  const codFlags = compareMultisets(codKeys(browserData, 'browser_webapi'), codKeys(apiData, 'openapi'));
+  const metadataDiffCount = metadataValues(browserData)
+    .filter((value, index) => value !== metadataValues(apiData)[index]).length;
+  const statuses = compareMultisets(
+    browserGoodsRows.map(statusLineKey),
+    apiGoodsRows.map(statusLineKey),
+  );
+  const quality = {
+    businessLineDiffCount: businessLines.diffCount,
+    scatterPointDiffCount: scatterPoints.diffCount,
+    orderTimeDiffCount: orderTimes.diffCount,
+    codDiffCount: codFlags.diffCount,
+    metadataDiffCount,
+    statusDiffCount: statuses.diffCount,
+    identityOverlayRequired: identityOverlayRequired(browserData, apiData),
+    examples: {
+      businessLines: businessLines.examples,
+      scatterPoints: scatterPoints.examples,
+      orderTimes: orderTimes.examples,
+      codFlags: codFlags.examples,
+      statuses: statuses.examples,
+    },
+  };
+  const matched = Object.values(deltas).every((value) => value === 0)
+    && quality.businessLineDiffCount === 0
+    && quality.scatterPointDiffCount === 0
+    && quality.orderTimeDiffCount === 0
+    && quality.codDiffCount === 0
+    && quality.metadataDiffCount === 0;
+  return {matched, browser, api, deltas, quality};
+}
+
+async function buildReconciliationRow(args, date, apiFile, apiData) {
+  const browserFile = path.join(args.browserDir, args.store, `${date}.json`);
+  const browserExists = fssync.existsSync(browserFile);
+  const browserData = browserExists ? await readJson(browserFile) : null;
+  const comparison = compareSalesArtifacts(browserData, apiData);
+  const {browser, api, deltas, quality, matched} = comparison;
   const status = !browser ? 'missing_browser' : matched ? 'matched' : 'warning';
   return {
     date,
@@ -607,9 +875,29 @@ async function buildReconciliationRow(args, date, apiFile, apiData) {
     api_only_order_count: deltas?.apiOnlyOrderCount ?? null,
     browser_only_goods_count: deltas?.browserOnlyGoodsCount ?? null,
     api_only_goods_count: deltas?.apiOnlyGoodsCount ?? null,
+    browser_invalid_goods_line_count: browser?.invalidGoodsLineCount ?? null,
+    api_invalid_goods_line_count: api.invalidGoodsLineCount,
+    browser_invalid_sales_sar: browser?.invalidSalesSar ?? null,
+    api_invalid_sales_sar: api.invalidSalesSar,
+    invalid_goods_line_count_delta: deltas?.invalidGoodsLineCount ?? null,
+    invalid_sales_sar_delta: deltas?.invalidSalesSar ?? null,
+    business_line_diff_count: quality?.businessLineDiffCount ?? null,
+    scatter_point_diff_count: quality?.scatterPointDiffCount ?? null,
+    order_time_diff_count: quality?.orderTimeDiffCount ?? null,
+    cod_diff_count: quality?.codDiffCount ?? null,
+    metadata_diff_count: quality?.metadataDiffCount ?? null,
+    status_diff_count: quality?.statusDiffCount ?? null,
+    identity_overlay_required: quality?.identityOverlayRequired ?? null,
     status,
     generated_at: new Date().toISOString(),
-    raw_summary: compactJson({browser, api, deltas, browserFetchTime: browser?.fetchTime || null, apiFetchTime: api.fetchTime || null}),
+    raw_summary: compactJson({
+      browser: compactArtifactSummary(browser),
+      api: compactArtifactSummary(api),
+      deltas,
+      quality,
+      browserFetchTime: browser?.fetchTime || null,
+      apiFetchTime: api.fetchTime || null,
+    }),
   };
 }
 
@@ -644,8 +932,15 @@ async function collectOpenApiSales(args) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.ensureOnly) {
+    const ensure = await ensureOpenApiTables(args);
+    console.log(JSON.stringify({ok: true, ensureOnly: true, ensure}, null, 2));
+    return;
+  }
   const sales = await collectOpenApiSales(args);
-  const ensure = await ensureOpenApiTables(args);
+  const ensure = args.skipEnsure
+    ? {skipped: true, reason: 'orchestrator_completed_schema_ensure'}
+    : await ensureOpenApiTables(args);
   const {cleanup, results} = await loadOpenApiSalesAtomically(args, sales);
 
   console.log(JSON.stringify({
@@ -671,6 +966,15 @@ async function main() {
       salesSarDelta: r.sales_sar_delta,
       browserOnlyOrderCount: r.browser_only_order_count,
       apiOnlyOrderCount: r.api_only_order_count,
+      invalidGoodsLineCountDelta: r.invalid_goods_line_count_delta,
+      invalidSalesSarDelta: r.invalid_sales_sar_delta,
+      businessLineDiffCount: r.business_line_diff_count,
+      scatterPointDiffCount: r.scatter_point_diff_count,
+      orderTimeDiffCount: r.order_time_diff_count,
+      codDiffCount: r.cod_diff_count,
+      metadataDiffCount: r.metadata_diff_count,
+      statusDiffCount: r.status_diff_count,
+      identityOverlayRequired: r.identity_overlay_required,
     })),
     results,
   }, null, 2));

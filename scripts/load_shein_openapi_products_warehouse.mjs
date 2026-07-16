@@ -25,6 +25,8 @@ function parseArgs(argv) {
     store: '',
     productDir: path.join(ROOT, 'outputs', 'shein_openapi_products'),
     dryRun: false,
+    ensureOnly: false,
+    skipEnsure: false,
   };
   const rest = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -36,17 +38,24 @@ function parseArgs(argv) {
     else if (a === '--store') args.store = String(argv[++i] || '').trim().toUpperCase();
     else if (a === '--product-dir') args.productDir = path.resolve(argv[++i]);
     else if (a === '--dry-run') args.dryRun = true;
+    else if (a === '--ensure-only') args.ensureOnly = true;
+    else if (a === '--skip-ensure') args.skipEnsure = true;
     else if (a === '--help' || a === '-h') {
       console.log(`Usage:
   node scripts/load_shein_openapi_products_warehouse.mjs --store HL
 
 Loads outputs/shein_openapi_products/<STORE>/latest.json into isolated OpenAPI
-product tables and writes an API-vs-current-link-snapshot reconciliation row.`);
+product tables and writes an API-vs-current-link-snapshot reconciliation row.
+
+Schema orchestration:
+  --ensure-only   create/migrate parallel tables, then exit
+  --skip-ensure   load data without DDL (only after a successful ensure step)`);
       process.exit(0);
     } else {
       rest.push(a);
     }
   }
+  if (args.ensureOnly) return args;
   if (!args.store && rest[0]) args.store = String(rest[0] || '').trim().toUpperCase();
   if (!args.store) throw new Error('Missing store key. Use --store HL or positional HL.');
   return args;
@@ -487,11 +496,18 @@ FROM (
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.ensureOnly) {
+    const ensure = await ensureOpenApiProductTables(args);
+    console.log(JSON.stringify({ok: true, ensureOnly: true, ensure}, null, 2));
+    return;
+  }
   const file = path.join(args.productDir, args.store, 'latest.json');
   if (!fssync.existsSync(file)) throw new Error(`Missing OpenAPI product file: ${rel(file)}`);
   const data = await readJson(file);
   const productRows = buildProductRows(data, file);
-  const ensure = await ensureOpenApiProductTables(args);
+  const ensure = args.skipEnsure
+    ? {skipped: true, reason: 'orchestrator_completed_schema_ensure'}
+    : await ensureOpenApiProductTables(args);
   const {cleanup, results} = await loadProductsAtomically(args, productRows, rel(file));
   const reconciliation = await queryReconciliation(args);
   console.log(JSON.stringify({
