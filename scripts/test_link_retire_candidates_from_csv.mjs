@@ -37,6 +37,8 @@ const columns = [
   'current_status',
   'link_created_time',
   'first_shelf_time',
+  'inventory_recovery_date',
+  'recovery_evidence_complete',
   'suggested_waste_goods_sn',
   'perf_date',
 ];
@@ -51,6 +53,7 @@ const rows = [
     current_status: '已上架',
     link_created_time: '2026-01-08 22:47:06',
     first_shelf_time: '2026-01-11 13:22:45',
+    inventory_recovery_date: '2026-05-01',
     suggested_waste_goods_sn: '（废）SK-5110电磁炉',
     perf_date: '2026-07-04',
   },
@@ -64,6 +67,7 @@ const rows = [
     current_status: '已上架',
     link_created_time: '2026-06-28 14:57:56',
     first_shelf_time: '2026-07-04 20:31:21',
+    inventory_recovery_date: '',
     suggested_waste_goods_sn: '（废）SK-YM-7032绞肉机',
     perf_date: '2026-07-04',
   },
@@ -77,6 +81,7 @@ const rows = [
     current_status: '已上架',
     link_created_time: '2026-06-20 17:09:08',
     first_shelf_time: '2026-07-04 13:47:07',
+    inventory_recovery_date: '',
     suggested_waste_goods_sn: '（废）KF-JN-02便携咖啡机',
     perf_date: '2026-07-04',
   },
@@ -90,7 +95,37 @@ const rows = [
     current_status: '已上架',
     link_created_time: '2026-06-20 17:09:08',
     first_shelf_time: '2026-05-01 13:47:07',
+    inventory_recovery_date: '',
     suggested_waste_goods_sn: '（废）SK-15013卷发钳和卷发棒',
+    perf_date: '2026-07-04',
+  },
+  {
+    store: 'DX',
+    standard_goods_sn: 'SK-3378杆式吸尘器',
+    skc: 'sv-replenished-yesterday',
+    c7_exposure: 5,
+    c7_sale_cnt: 0,
+    new_tag_value: '',
+    current_status: '已上架',
+    link_created_time: '2025-08-28 12:00:00',
+    first_shelf_time: '2025-12-03 22:37:56',
+    inventory_recovery_date: '2026-07-03',
+    suggested_waste_goods_sn: '（废）SK-3378杆式吸尘器',
+    perf_date: '2026-07-04',
+  },
+  {
+    store: 'QY',
+    standard_goods_sn: 'OLD-UNKNOWN',
+    skc: 'sv-missing-recovery-evidence',
+    c7_exposure: 0,
+    c7_sale_cnt: 0,
+    new_tag_value: '',
+    current_status: '已上架',
+    link_created_time: '2025-01-01 00:00:00',
+    first_shelf_time: '2025-01-02 00:00:00',
+    inventory_recovery_date: '',
+    recovery_evidence_complete: '',
+    suggested_waste_goods_sn: '（废）OLD-UNKNOWN',
     perf_date: '2026-07-04',
   },
 ];
@@ -103,10 +138,12 @@ const result = await run(['scripts/build_link_retire_candidates_from_csv.mjs', '
 assert.equal(result.code, 0, result.stderr);
 const parsed = JSON.parse(result.stdout);
 assert.equal(parsed.ok, true);
-assert.equal(parsed.counts.inputRows, 4);
+assert.equal(parsed.counts.inputRows, 6);
 assert.equal(parsed.counts.candidateRows, 1);
 assert.equal(parsed.counts.excludedByFirstShelf15d, 2);
 assert.equal(parsed.counts.excludedByNewGoodsTag, 1);
+assert.equal(parsed.counts.excludedByRecentRecovery15d, 1);
+assert.equal(parsed.counts.cannotJudgeRows, 1);
 for (const check of parsed.targetSkcCheck) {
   assert.equal(check.presentInCandidates, false, check.skc);
   assert.equal(check.bucket, 'excludedByFirstShelf15d', check.skc);

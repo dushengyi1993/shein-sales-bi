@@ -4,15 +4,16 @@ import path from 'node:path';
 import {planLinkOpsImageRoles} from '../lib/link_ops_image_role_planner.mjs';
 
 function parseArgs(argv) {
-  const args = {dir: '', out: '', pretty: false, approved: null};
+  const args = {dir: '', out: '', pretty: false, approved: null, store: ''};
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--dir' || a === '--image-dir') args.dir = String(argv[++i] || '').trim();
     else if (a === '--out' || a === '--output') args.out = path.resolve(String(argv[++i] || ''));
     else if (a === '--pretty') args.pretty = true;
     else if (a === '--approved' || a === '--approved-assets') args.approved = true;
+    else if (a === '--store' || a === '--target-store') args.store = String(argv[++i] || '').trim().toUpperCase();
     else if (a === '--help' || a === '-h') {
-      console.log('Usage:\n  node scripts/link_ops_plan_image_roles.mjs --dir <图片文件夹> [--approved] [--out roles.json] [--pretty]');
+      console.log('Usage:\n  node scripts/link_ops_plan_image_roles.mjs --dir <图片文件夹> [--store JSH] [--approved] [--out roles.json] [--pretty]');
       process.exit(0);
     } else if (!args.dir) args.dir = a;
     else throw new Error(`Unknown argument: ${a}`);
@@ -37,7 +38,7 @@ function printPretty(plan) {
 }
 
 const args = parseArgs(process.argv.slice(2));
-const plan = await planLinkOpsImageRoles({dir: args.dir, sourceApproved: args.approved});
+const plan = await planLinkOpsImageRoles({dir: args.dir, sourceApproved: args.approved, storeKey: args.store});
 if (args.out) {
   await fs.mkdir(path.dirname(args.out), {recursive: true});
   await fs.writeFile(args.out, `${JSON.stringify(plan, null, 2)}\n`, 'utf8');

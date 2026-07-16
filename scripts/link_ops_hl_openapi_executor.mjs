@@ -2291,7 +2291,65 @@ function enrichExistingTargetSkcsFromSpuInfo(matches, info) {
   return next;
 }
 
-async function inspectTargetDuplicateProducts(client, payload, targetStore = '') {
+async function rejectedReplacementDuplicateOverride(client, task, targetStore, matches, calls) {
+  const replacement = task?.notes?.replacesRejectedTarget;
+  const enabled = task?.allowDuplicateNewPublish === true
+    && task?.notes?.repairMode === 'republish_rejected'
+    && replacement
+    && typeof replacement === 'object'
+    && Number(replacement.state) === 3
+    && normalizeStoreKey(replacement.store) === normalizeStoreKey(targetStore)
+    && /^sv\d+$/i.test(safeString(replacement.skc, 120))
+    && /^(?:sr|v)\d+$/i.test(safeString(replacement.spu, 120));
+  if (!enabled) return {allowed: false, replacement: null, liveValidation: {status: 'not_requested'}};
+
+  const rejectedSkc = safeString(replacement.skc, 120);
+  // Never bypass the guard when the allegedly rejected SKC itself appears in
+  // the product list.  The narrow exception is only for a *different* draft
+  // replacing a terminal state=3 document while older same-code links coexist.
+  if (matches.some(row => safeString(row?.skcName, 120) === rejectedSkc)) {
+    return {allowed: false, replacement: {store: targetStore, spu: replacement.spu, skc: rejectedSkc, state: 3}, liveValidation: {status: 'replacement_present_in_product_search'}};
+  }
+  const rejectedSpu = safeString(replacement.spu, 120);
+  try {
+    const response = await client.request('/open-api/goods/query-document-state', {
+      method: 'POST',
+      body: {spuList: [{spuName: rejectedSpu}]},
+      headers: {language: 'zh-cn'},
+    });
+    calls.push(compactCallResult(`query-document-state-rejected-replacement-${rejectedSpu}`, '/open-api/goods/query-document-state', 'POST', response));
+    if (!response.ok || String(response.data?.code) !== '0') {
+      return {
+        allowed: false,
+        replacement: {store: targetStore, spu: rejectedSpu, skc: rejectedSkc, state: 3},
+        liveValidation: {status: 'query_not_ok', code: response.data?.code ?? null, msg: response.data?.msg ?? null},
+      };
+    }
+    const liveSkc = asArray(response.data?.info?.data)
+      .filter(row => safeString(row?.spuName || row?.spu_name, 120) === rejectedSpu)
+      .flatMap(row => asArray(row?.skcList || row?.skc_list))
+      .find(row => safeString(row?.skcName || row?.skc_name, 120) === rejectedSkc);
+    const documentState = Number(liveSkc?.documentState ?? liveSkc?.document_state);
+    const allowed = Number.isFinite(documentState) && documentState === 3;
+    return {
+      allowed,
+      replacement: {store: targetStore, spu: rejectedSpu, skc: rejectedSkc, state: 3},
+      liveValidation: {
+        status: allowed ? 'verified_terminal_rejected' : 'not_terminal_rejected',
+        documentState: Number.isFinite(documentState) ? documentState : null,
+      },
+    };
+  } catch (error) {
+    calls.push({name: `query-document-state-rejected-replacement-${rejectedSpu}`, path: '/open-api/goods/query-document-state', method: 'POST', httpStatus: null, code: null, msg: safeString(error?.message || error, 300), traceId: null});
+    return {
+      allowed: false,
+      replacement: {store: targetStore, spu: rejectedSpu, skc: rejectedSkc, state: 3},
+      liveValidation: {status: 'query_failed', error: safeString(error?.message || error, 300)},
+    };
+  }
+}
+
+async function inspectTargetDuplicateProducts(client, payload, targetStore = '', task = null) {
   const supplierCodes = publishTargetSupplierCodes(payload);
   const calls = [];
   const blockers = [];
@@ -2337,11 +2395,18 @@ async function inspectTargetDuplicateProducts(client, payload, targetStore = '')
   const recycled = matches.filter(row => Number(row.recycleStatus) === 1);
   const active = matches.filter(row => Number(row.recycleStatus) !== 1 && Number(row.shelfStatus) === 1);
   const inactive = matches.filter(row => Number(row.recycleStatus) !== 1 && Number(row.shelfStatus) !== 1);
-  if (active.length) {
+  const hasBlockingDuplicate = active.length > 0 || inactive.length > 0;
+  const rejectedReplacement = hasBlockingDuplicate
+    ? await rejectedReplacementDuplicateOverride(client, task, targetStore, matches, calls)
+    : {allowed: false, replacement: null, liveValidation: {status: 'not_needed_no_blocking_duplicate'}};
+  if (active.length && !rejectedReplacement.allowed) {
     blockers.push(`${targetStore || '目标店'} 已存在同货号在售链接 ${active.map(row => row.skcName).filter(Boolean).join('、')}，禁止重复创建新链接。`);
   }
-  if (inactive.length) {
+  if (inactive.length && !rejectedReplacement.allowed) {
     blockers.push(`${targetStore || '目标店'} 已存在同货号下架但未回收链接 ${inactive.map(row => row.skcName).filter(Boolean).join('、')}；应优先恢复该链接，或先明确说明为何必须另建，当前禁止直接创建重复链接。`);
+  }
+  if (rejectedReplacement.allowed && (active.length || inactive.length)) {
+    warnings.push(`${targetStore || '目标店'} 正在替换终态 state=3 的议价拒绝链接 ${rejectedReplacement.replacement.skc}；已对其他同货号链接应用单次重发豁免，不改变全局去重规则。`);
   }
   if (recycled.length) {
     warnings.push(`${targetStore || '目标店'} 已存在同货号历史回收链接 ${recycled.map(row => row.skcName).filter(Boolean).join('、')}（已回收、当前非在售）。本次计划仍是创建新链接，不会恢复旧链接；确认后新链接会与历史回收记录并存。`);
@@ -2357,6 +2422,7 @@ async function inspectTargetDuplicateProducts(client, payload, targetStore = '')
       activeCount: active.length,
       inactiveCount: inactive.length,
       recycledCount: recycled.length,
+      rejectedReplacementOverride: rejectedReplacement,
       matches: matches.slice(0, 40),
     },
   };
@@ -2919,7 +2985,7 @@ async function main() {
       : shufflePublishDetailImages(explicitPreparationApplied.payload, task, effectiveExecutionContext);
     const imageSortApplied = ensurePublishImageSortGlobalUnique(imageShuffleApplied.payload);
     publishPayload = imageSortApplied.payload;
-    const targetDuplicateCheck = await inspectTargetDuplicateProducts(client, publishPayload, targetStore);
+    const targetDuplicateCheck = await inspectTargetDuplicateProducts(client, publishPayload, targetStore, task);
     calls.push(...targetDuplicateCheck.calls);
     safeDefaults = [
       ...applied.applied,

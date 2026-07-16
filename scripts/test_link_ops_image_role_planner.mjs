@@ -68,6 +68,8 @@ try {
   await writePng(base, '18-最后收尾厨房场景-v1.png');
   await writePng(base, '19-额外沙特生活场景-v1.png');
   await writePng(path.join(base, '备用'), '99-备用不要用.png');
+  await writePng(path.join(base, '备选'), '98-备选不要用.png');
+  await writePng(path.join(base, '废'), '97-废图不要用.png');
 
   const plan = await planLinkOpsImageRoles({dir: base});
   check('plan ok', plan.ok, true);
@@ -82,21 +84,33 @@ try {
   check('main cover mapping remains front-role not fixed full payload', plan.roles.mainCover.openApiMapping.targetLevel.join(','), 'skc');
   check('second cover mapping calls out SPU scheme dependency', plan.roles.carouselSecondCover.openApiMapping.targetLevel.join(','), 'spu');
   check('backup image is absent', JSON.stringify(plan), x => !x.includes('99-备用不要用'));
+  check('alternate image is absent', JSON.stringify(plan), x => !x.includes('98-备选不要用'));
+  check('discarded image is absent', JSON.stringify(plan), x => !x.includes('97-废图不要用'));
   check('product cover is not submitted roles', [plan.roles.mainCover, plan.roles.carouselSecondCover, plan.roles.squareImage, plan.roles.skuImage, ...plan.roles.frontendDetailImages].filter(Boolean).map(x => x.name).includes('02-沙特奢华质感产品封面-v1.png'), false);
 
   const noSku = path.join(tmpRoot, 'no-sku');
   for (const name of [
-    '01-主封面.png', '02-产品封面.png', '03-方形图.png', '04-参数规格图.png', '05-核心优势轮播图.png',
+    '01-主封面.png', '02-纯产品质感封面.png', '03-方形图.png', '04-参数规格图.png', '05-核心优势轮播图.png',
     '06-家庭场景.png', '07-露台场景.png', '08-2000W卖点.png', '09-控温卖点.png',
-    '10-兼容卖点.png', '11-便携卖点.png', '12-指示灯卖点.png', '14-特写卖点.png', '17-效率对比图.png',
+    '10-大小双规格冰块卖点.png', '11-便携卖点.png', '12-指示灯卖点.png', '14-特写卖点.png', '17-效率对比图.png',
   ]) await writePng(noSku, name, /^03/.test(name) ? 1000 : 900, /^03/.test(name) ? 1000 : 1200);
   const noSkuPlan = await planLinkOpsImageRoles({dir: noSku});
   check('no sku package ok', noSkuPlan.ok, true);
-  check('generic product cover is ignored', noSkuPlan.roles.ignoredAbTestCovers.map(x => x.name), names => names.includes('02-产品封面.png'));
-  check('generic product cover not submitted', [noSkuPlan.roles.mainCover, noSkuPlan.roles.carouselSecondCover, noSkuPlan.roles.squareImage, noSkuPlan.roles.skuImage, ...noSkuPlan.roles.frontendDetailImages].filter(Boolean).map(x => x.name).includes('02-产品封面.png'), false);
+  check('numbered no-person product cover is ignored', noSkuPlan.roles.ignoredAbTestCovers.map(x => x.name), names => names.includes('02-纯产品质感封面.png'));
+  check('numbered no-person product cover not submitted', [noSkuPlan.roles.mainCover, noSkuPlan.roles.carouselSecondCover, noSkuPlan.roles.squareImage, noSkuPlan.roles.skuImage, ...noSkuPlan.roles.frontendDetailImages].filter(Boolean).map(x => x.name).includes('02-纯产品质感封面.png'), false);
   check('no sku package uses available detail images without forcing 11', noSkuPlan.roles.frontendDetailImages.length, 11);
   check('no sku package does not assign SKU image', noSkuPlan.roles.skuImage, null);
   check('no sku package orders selling before parameter before scene', noSkuPlan.roles.frontendDetailImages.map(x => x.name).join(' > '), x => { const s = String(x); const paramIdx = s.indexOf('04-参数规格图'); const lastScene = s.endsWith('07-露台场景.png'); const sellingBeforeParam = s.indexOf('08-2000W卖点') < paramIdx; return paramIdx > 0 && lastScene && sellingBeforeParam; });
+  check('explicit selling point outranks embedded specification word', noSkuPlan.roles.frontendDetailImages.map(x => x.name).join(' > '), x => String(x).indexOf('10-大小双规格冰块卖点') < String(x).indexOf('04-参数规格图'));
+
+  const singleShot = path.join(tmpRoot, 'single-shot-cover');
+  for (const name of [
+    '01-主封面.png', '02-产品单镜封面图-v1.png', '03-1-1 方形封面.png', '04-参数规格图.png',
+    '05-核心轮播图.png', '08-动力卖点图.png', '09-配件卖点图.png', '06-家庭场景图.png',
+  ]) await writePng(singleShot, name, /^03/.test(name) ? 1000 : 900, /^03/.test(name) ? 1000 : 1200);
+  const singleShotPlan = await planLinkOpsImageRoles({dir: singleShot});
+  check('numbered product single-shot cover is ignored', singleShotPlan.roles.ignoredAbTestCovers.map(x => x.name), names => names.includes('02-产品单镜封面图-v1.png'));
+  check('product single-shot cover is absent from submit roles', [singleShotPlan.roles.mainCover, singleShotPlan.roles.carouselSecondCover, singleShotPlan.roles.squareImage, singleShotPlan.roles.skuImage, ...singleShotPlan.roles.frontendDetailImages].filter(Boolean).map(x => x.name).includes('02-产品单镜封面图-v1.png'), false);
 
   const approved = path.join(tmpRoot, 'SK-999新图-已审可用', 'FY-JSH-11-SK-999');
   for (const [name, width, height] of [
@@ -108,12 +122,17 @@ try {
     ['12-45dB静音与一键清洗卖点图-v1.png', 900, 1200],
     ['14-8叶刀头与陶瓷防粘底盘特写-v2.png', 900, 1200],
   ]) await writePng(approved, name, width, height);
-  const approvedPlan = await planLinkOpsImageRoles({dir: approved});
+  const approvedPlan = await planLinkOpsImageRoles({dir: approved, storeKey: 'JSH'});
   check('approved source auto detected', approvedPlan.approval?.sourceApproved, true);
-  check('pure product flagship cover is eligible main', approvedPlan.roles.mainCover?.name, '02-6000W 纯产品暖沙旗舰封面-v1.png');
+  check('reviewed numbered no-person flagship cover is not ignored', approvedPlan.roles.ignoredAbTestCovers.map(x => x.name).includes('02-6000W 纯产品暖沙旗舰封面-v1.png'), false);
+  check('reviewed numbered no-person flagship cover remains assignable', JSON.stringify(approvedPlan.roles), text => text.includes('02-6000W 纯产品暖沙旗舰封面-v1.png'));
+  check('reviewed lifestyle cover remains main', approvedPlan.roles.mainCover?.name, '01-6000W 撒哈拉暖沙生活海报-v1.png');
   check('approved square uses measured dimensions', `${approvedPlan.roles.squareImage?.width}x${approvedPlan.roles.squareImage?.height}`, '1254x1254');
   check('approved 15 speed image not silently excluded', approvedPlan.roles.ignoredAbTestCovers.map(x => x.name).includes('11-15档调速与简单操作卖点图-v1.png'), false);
   check('approved 45dB image remains assignable', JSON.stringify(approvedPlan.roles), text => text.includes('12-45dB静音与一键清洗卖点图-v1.png'));
+  check('store style profile is surfaced as advisory evidence', approvedPlan.storeStyle?.preferredStyles?.join(','), '沙漠风,岩土风,沙特传统');
+  check('store default title group is surfaced', approvedPlan.storeStyle?.defaultTitleGroup, 'title1');
+  check('store style never auto-approves full goods number', approvedPlan.storeStyle?.automaticFullGoodsNumber, false);
 
   const outFile = path.join(tmpRoot, 'roles.json');
   const cli = await runCli(['plan-images', '--image-dir', base, '--out', outFile]);

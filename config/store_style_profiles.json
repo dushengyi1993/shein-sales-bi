@@ -1,0 +1,56 @@
+{
+  "version": 2,
+  "updatedAt": "2026-07-16",
+  "purpose": "跨店铺新发品时按店铺默认标题组并优先选择与店铺定位相近的套图；没有匹配套图时允许借用，但不得将货号标记为（全）。",
+  "rules": {
+    "preferMatchingStyle": true,
+    "defaultTitleGroupPolicy": "新上链接默认按 defaultTitleGroups 选择标题；仅当用户当轮另行指定时覆盖。",
+    "fullGoodsNumberRequires": [
+      "标题与卖点资料齐全",
+      "套图与目标店铺风格匹配"
+    ],
+    "fullGoodsNumberPrefix": "（全）"
+  },
+  "defaultTitleGroups": {
+    "JSH": "title1",
+    "DL": "title1",
+    "TZZ": "title1",
+    "CX": "title1",
+    "HL": "title1",
+    "TS": "title1",
+    "TZ": "title1",
+    "DX": "title2",
+    "LQ": "title2",
+    "XC": "title2",
+    "MZ": "title2",
+    "NM": "title2",
+    "YJ": "title2",
+    "JY": "title3",
+    "QY": "title3",
+    "XL": "title3",
+    "FY": "title3",
+    "QH": "title3",
+    "ZL": "title3"
+  },
+  "profiles": {
+    "DL": ["简约", "现代", "都市", "白灰"],
+    "QY": ["简约", "现代", "都市", "白灰"],
+    "YJ": ["意式"],
+    "JY": ["意式"],
+    "DX": ["浅色奢华", "金色"],
+    "LQ": ["浅色奢华", "金色"],
+    "HL": ["奶油ins风"],
+    "XL": ["奶油ins风"],
+    "TZ": ["家居性感风"],
+    "TZZ": ["家居性感风"],
+    "ZL": ["法式", "法式复古"],
+    "CX": ["法式", "法式复古"],
+    "TS": ["海洋系", "度假风", "蓝色系"],
+    "QH": ["海洋系", "度假风", "蓝色系"],
+    "MZ": ["森系", "自然系"],
+    "XC": ["森系", "自然系"],
+    "FY": ["沙漠风", "岩土风", "沙特传统"],
+    "JSH": ["沙漠风", "岩土风", "沙特传统"],
+    "NM": ["深色奢华系", "黑金"]
+  }
+}

@@ -215,6 +215,7 @@ try {
   check('dry-run records SKU image count', dry.json?.payload?.summary?.imagePayloadInspection?.totalSkuImages, 1);
   check('dry-run records total detail count', dry.json?.payload?.summary?.imagePayloadInspection?.totalDetailImages, 10);
   check('dry-run records image inspection evidence', dry.json?.adapterEvidence?.imagePayloadInspection?.payloads?.[0]?.skcImageCount, 12);
+  check('existing image group codes are reported as retained, not injected', dry.json?.warnings || [], xs => asArray(xs).some(x => /保留 payload 中已有的 2 个 image_group_code/.test(String(x))) && !asArray(xs).some(x => /已注入.*image_group_code/.test(String(x))));
   check('dry-run does not misclassify CDN /80/ path as tiny SKU', dry.json?.blockers || [], xs => !asArray(xs).some(x => /high-resolution-sku-main/.test(String(x))));
   check('dry-run does not misclassify numeric 80 filename as tiny SKU', dry.json?.blockers || [], xs => !asArray(xs).some(x => /\/80\.jpg/.test(String(x))));
   check('dry-run does not call write endpoint', dryPaths.some(p => ['/open-api/goods/modify-skc-shelf','/open-api/stock/change-inventory/v2','/open-api/goods/update-cost','/open-api/openapi-business-backend/product/price/save','/open-api/goods/product/partialEdit'].includes(p)), false);
@@ -254,6 +255,7 @@ try {
   check('many-detail image dry-run exits without exception', manyDetailDry.code, 0);
   check('many-detail image dry-run remains ready', manyDetailDry.json?.ok, true);
   check('many-detail image dry-run reports warning not blocker', manyDetailDry.json?.warnings || [], xs => asArray(xs).some(x => /细节图.*超过 11 张/.test(String(x))));
+  check('spu-info without group codes reports honest missing warning', manyDetailDry.json?.warnings || [], xs => asArray(xs).some(x => /缺少 image_group_code/.test(String(x))) && !asArray(xs).some(x => /已注入.*image_group_code/.test(String(x))));
   check('many-detail image dry-run has no numeric 80 sku blocker', manyDetailDry.json?.blockers || [], xs => !asArray(xs).some(x => /80\.jpg/.test(String(x))));
 
   const badImageTask = {

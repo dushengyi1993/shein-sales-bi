@@ -368,34 +368,14 @@ function sqlLiteral(value) {
   return `'${String(value ?? '').replace(/'/g, "''")}'`;
 }
 
-async function deleteImportedRowsForSources(args, files) {
-  const sourceFiles = [...new Set(files.map(file => rel(file)).filter(Boolean))];
-  const result = {
-    operation: 'replace-source-files',
-    sourceFiles: sourceFiles.length,
-    dryRun: args.dryRun,
-  };
-  if (!sourceFiles.length || args.dryRun) return result;
-  const inList = sourceFiles.map(sqlLiteral).join(', ');
-  const script = `
-BEGIN;
-DELETE FROM fact.product_cost_batch WHERE source_file IN (${inList});
-DELETE FROM fact.monthly_storage_fee WHERE source_file IN (${inList});
-COMMIT;
-`;
-  await runPsqlScript(args, script);
-  return result;
-}
-
-async function upsertRows(args, table, columns, conflictColumns, rows) {
-  if (!rows.length) return {table, rows: 0};
-  const stage = `stage_${table.replace(/\W/g, '_')}_${Date.now()}`;
+function appendStageUpsert(script, table, columns, conflictColumns, rows, stageSuffix) {
+  if (!rows.length) return script;
+  const stage = `stage_${table.replace(/\W/g, '_')}_${stageSuffix}`;
   const sqlColumns = columns.map(qIdent).join(', ');
   const updateSet = columns
     .filter(c => !conflictColumns.includes(c))
     .map(c => `${qIdent(c)} = EXCLUDED.${qIdent(c)}`)
     .join(',\n    ');
-  let script = 'BEGIN;\n';
   script += `CREATE TEMP TABLE "${stage}" (LIKE ${qIdent(table)} INCLUDING DEFAULTS) ON COMMIT DROP;\n`;
   script += `COPY "${stage}" (${sqlColumns}) FROM STDIN WITH (FORMAT csv, NULL '');\n`;
   for (const row of rows) script += csvLine(columns.map(c => row[c]));
@@ -403,10 +383,38 @@ async function upsertRows(args, table, columns, conflictColumns, rows) {
   script += `INSERT INTO ${qIdent(table)} (${sqlColumns})\n`;
   script += `SELECT ${sqlColumns} FROM "${stage}"\n`;
   script += `ON CONFLICT (${conflictColumns.map(qIdent).join(', ')}) DO UPDATE SET\n    ${updateSet};\n`;
+  return script;
+}
+
+async function replaceImportedRowsAtomically(args, files, costRows, storageRows) {
+  const sourceFiles = [...new Set(files.map(file => rel(file)).filter(Boolean))];
+  const results = [
+    {operation: 'replace-source-files', sourceFiles: sourceFiles.length, dryRun: args.dryRun},
+    {table: 'fact.product_cost_batch', rows: costRows.length, ...(args.dryRun ? {dryRun: true} : {})},
+    {table: 'fact.monthly_storage_fee', rows: storageRows.length, ...(args.dryRun && storageRows.length ? {dryRun: true} : {})},
+  ];
+  if (args.dryRun || !sourceFiles.length) return results;
+
+  const costColumns = [
+    'batch_key','standard_goods_sn','raw_goods_sn','batch_no','shipped_date','arrived_date','shipped_quantity',
+    'goods_cost_amount','first_leg_freight_amount','other_cost_amount','total_cost_amount',
+    'currency_code','cost_sar','unit_cost_sar','complete_batch','ignored_reason',
+    'purchase_unit_price','length_cm','width_cm','height_cm','volume_l','weight_kg',
+    'source_file','source_sheet','source_row_no','raw_summary'
+  ];
+  const storageColumns = [
+    'month_start','total_fee_amount','currency_code','total_fee_sar','note','source_file','raw_summary'
+  ];
+  const inList = sourceFiles.map(sqlLiteral).join(', ');
+  const stageSuffix = `${Date.now()}_${process.pid}`;
+  let script = 'BEGIN;\n';
+  script += `DELETE FROM fact.product_cost_batch WHERE source_file IN (${inList});\n`;
+  script += `DELETE FROM fact.monthly_storage_fee WHERE source_file IN (${inList});\n`;
+  script = appendStageUpsert(script, 'fact.product_cost_batch', costColumns, ['batch_key'], costRows, `${stageSuffix}_cost`);
+  script = appendStageUpsert(script, 'fact.monthly_storage_fee', storageColumns, ['month_start'], storageRows, `${stageSuffix}_storage`);
   script += 'COMMIT;\n';
-  if (args.dryRun) return {table, rows: rows.length, dryRun: true};
   await runPsqlScript(args, script);
-  return {table, rows: rows.length};
+  return results;
 }
 
 async function ensureSchema(args) {
@@ -462,18 +470,7 @@ async function main() {
     perFile.push({file: rel(file), costRows: result.costRows.length, storageRows: result.storageRows.length});
   }
   await ensureSchema(args);
-  const results = [];
-  results.push(await deleteImportedRowsForSources(args, files));
-  results.push(await upsertRows(args, 'fact.product_cost_batch', [
-    'batch_key','standard_goods_sn','raw_goods_sn','batch_no','shipped_date','arrived_date','shipped_quantity',
-    'goods_cost_amount','first_leg_freight_amount','other_cost_amount','total_cost_amount',
-    'currency_code','cost_sar','unit_cost_sar','complete_batch','ignored_reason',
-    'purchase_unit_price','length_cm','width_cm','height_cm','volume_l','weight_kg',
-    'source_file','source_sheet','source_row_no','raw_summary'
-  ], ['batch_key'], allCost));
-  results.push(await upsertRows(args, 'fact.monthly_storage_fee', [
-    'month_start','total_fee_amount','currency_code','total_fee_sar','note','source_file','raw_summary'
-  ], ['month_start'], allStorage));
+  const results = await replaceImportedRowsAtomically(args, files, allCost, allStorage);
   const complete = allCost.filter(r => r.complete_batch).length;
   const ignored = allCost.length - complete;
   const missingFreight = allCost.filter(r => /头程/.test(r.ignored_reason || '')).length;

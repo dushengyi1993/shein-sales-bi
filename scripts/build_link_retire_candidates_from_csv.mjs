@@ -124,6 +124,9 @@ function withVerdict(row, performanceDate) {
     retire_candidate_bucket: verdict.bucket,
     retire_candidate_reason: verdict.reason,
     first_shelf_15d_cutoff_date: verdict.cutoffDate || '',
+    recovery_or_relist_date: verdict.recoveryDate || '',
+    recovery_age_days_at_perf_date: verdict.recoveryAgeDays ?? '',
+    recovery_evidence_source: verdict.recoveryEvidenceSource || '',
   };
 }
 
@@ -136,6 +139,7 @@ async function main() {
   const candidates = evaluated.filter(row => row.retire_candidate_bucket === 'candidate');
   const excludedByFirstShelf15d = evaluated.filter(row => row.retire_candidate_bucket === 'excludedByFirstShelf15d');
   const excludedByNewGoodsTag = evaluated.filter(row => row.retire_candidate_bucket === 'excludedByNewGoodsTag');
+  const excludedByRecentRecovery15d = evaluated.filter(row => row.retire_candidate_bucket === 'excludedByRecentRecovery15d');
   const cannotJudge = evaluated.filter(row => row.retire_candidate_bucket === 'cannotJudge');
   const targetSkcs = ['sv260628145147517093202', 'sv260620170564657240918'];
   const targetSkcCheck = targetSkcs.map(skc => {
@@ -153,7 +157,7 @@ async function main() {
   });
   const summary = {
     generatedAt: new Date(Date.now() + 8 * 3600_000).toISOString().replace('Z', '+08:00'),
-    reportVersion: 'v5-first-shelf-15d',
+    reportVersion: 'v6-first-shelf-and-recovery-15d',
     input: args.input,
     performanceDate,
     criteria: {
@@ -162,6 +166,7 @@ async function main() {
       c7Sales: 'c7_sale_cnt = 0',
       newTagExclusion: 'exclude non-empty raw_summary.newGoodsTag / newGoodsTag',
       firstShelf15dSafety: 'exclude first_shelf_time within 15 days regardless of newGoodsTag; missing first_shelf_time is cannotJudge',
+      recovery15dSafety: 'exclude inventory_recovery_date / relisted_at within 15 days; last_shelf_time is fallback only',
       executionBoundary: 'read-only report; user confirmation is required before retire_link and （废）standard goods sn changes',
     },
     counts: {
@@ -169,6 +174,7 @@ async function main() {
       candidateRows: candidates.length,
       excludedByFirstShelf15d: excludedByFirstShelf15d.length,
       excludedByNewGoodsTag: excludedByNewGoodsTag.length,
+      excludedByRecentRecovery15d: excludedByRecentRecovery15d.length,
       cannotJudgeRows: cannotJudge.length,
     },
     byStore: groupCount(candidates, 'store'),
@@ -183,11 +189,17 @@ async function main() {
       'retire_candidate_bucket',
       'retire_candidate_reason',
       'first_shelf_15d_cutoff_date',
+      'recovery_or_relist_date',
+      'recovery_age_days_at_perf_date',
+      'recovery_evidence_source',
     ].includes(c)),
     'shelf_age_days_at_perf_date',
     'retire_candidate_bucket',
     'retire_candidate_reason',
     'first_shelf_15d_cutoff_date',
+    'recovery_or_relist_date',
+    'recovery_age_days_at_perf_date',
+    'recovery_evidence_source',
   ];
   await fs.mkdir(args.outDir, {recursive: true});
   const base = path.join(args.outDir, `${args.prefix}.${stamp()}`);
@@ -199,12 +211,12 @@ async function main() {
   await fs.writeFile(outJson, JSON.stringify({summary, rows: candidates}, null, 2), 'utf8');
   await fs.writeFile(outSummary, JSON.stringify(summary, null, 2), 'utf8');
   const md = [
-    '# 待下架链接候选明细 v5-first-shelf-15d（只读）',
+    '# 待下架链接候选明细 v6-first-shelf-and-recovery-15d（只读）',
     '',
-    '**固定安全线：首次上架 15 天内，不管有没有新品标签，都不执行下架。未执行下架/改货号。**',
+    '**固定安全线：首次上架或库存恢复/重新在售 15 天内，不管有没有新品标签或营销活动，都不执行下架。未执行下架/改货号。**',
     '',
     `- 表现数据日：${performanceDate}`,
-    `- 输入行：${rows.length}；候选：${candidates.length}；15天保护排除：${excludedByFirstShelf15d.length}；新品标签排除：${excludedByNewGoodsTag.length}；待确认/不执行：${cannotJudge.length}。`,
+    `- 输入行：${rows.length}；候选：${candidates.length}；首次上架15天保护：${excludedByFirstShelf15d.length}；库存恢复/重新在售15天保护：${excludedByRecentRecovery15d.length}；新品标签排除：${excludedByNewGoodsTag.length}；待确认/不执行：${cannotJudge.length}。`,
     '',
     '## 按店铺汇总',
     '',

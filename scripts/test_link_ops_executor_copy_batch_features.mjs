@@ -198,7 +198,7 @@ check('all official required template attributes are present', templateApplied.b
 check('template evidence retains final input voltage', templateApplied.evidence.finalProductAttributes.find(row => row.attributeId === 1002322)?.attributeExtraValue, '220-240');
 check('template evidence retains final hazardous classification', templateApplied.evidence.finalProductAttributes.find(row => row.attributeId === 1002328)?.attributeValueId, 316914660);
 
-function duplicateGuardClient({shelfStatus = 0, recycleStatus = 1} = {}) {
+function duplicateGuardClient({shelfStatus = 0, recycleStatus = 1, documentState = 3} = {}) {
   return {
     async request(pathname) {
       if (pathname === '/open-api/goods/searchProduct') {
@@ -243,6 +243,17 @@ function duplicateGuardClient({shelfStatus = 0, recycleStatus = 1} = {}) {
           },
         };
       }
+      if (pathname === '/open-api/goods/query-document-state') {
+        return {
+          ok: true,
+          status: 200,
+          data: {
+            code: '0',
+            msg: 'OK',
+            info: {data: [{spuName: 'v9000001', skcList: [{skcName: 'sv9000001', documentState}]}]},
+          },
+        };
+      }
       throw new Error(`unexpected duplicate-guard path ${pathname}`);
     },
   };
@@ -257,6 +268,30 @@ check('historical recycled same-goods link evidence is classified', recycledDupl
 const activeDuplicate = await __testHooks.inspectTargetDuplicateProducts(duplicateGuardClient({shelfStatus: 1, recycleStatus: 0}), duplicateGuardPayload, 'TZ');
 check('active same-goods target link blocks duplicate publish', activeDuplicate.blockers.some(text => /已存在同货号在售链接.*sv-existing-sm505/.test(text)), true);
 check('active same-goods target link evidence is classified', activeDuplicate.evidence.activeCount, 1);
+
+const rejectedReplacementTask = {
+  allowDuplicateNewPublish: true,
+  notes: {
+    repairMode: 'republish_rejected',
+    replacesRejectedTarget: {store: 'TZ', spu: 'v9000001', skc: 'sv9000001', state: 3},
+  },
+};
+const forgedRejected = await __testHooks.inspectTargetDuplicateProducts(
+  duplicateGuardClient({shelfStatus: 1, recycleStatus: 0, documentState: 2}),
+  duplicateGuardPayload,
+  'TZ',
+  rejectedReplacementTask,
+);
+check('task-declared rejection cannot bypass live state 2', forgedRejected.blockers.some(text => /已存在同货号在售链接/.test(text)), true);
+check('live state 2 rejection override is denied', forgedRejected.evidence.rejectedReplacementOverride.liveValidation.documentState, 2);
+const verifiedRejected = await __testHooks.inspectTargetDuplicateProducts(
+  duplicateGuardClient({shelfStatus: 1, recycleStatus: 0, documentState: 3}),
+  duplicateGuardPayload,
+  'TZ',
+  rejectedReplacementTask,
+);
+check('live state 3 rejection override allows one replacement', verifiedRejected.blockers.length, 0);
+check('live state 3 rejection override is audited', verifiedRejected.evidence.rejectedReplacementOverride.liveValidation.status, 'verified_terminal_rejected');
 
 const ok = checks.every(row => row.pass);
 console.log(JSON.stringify({ok, checks}, null, 2));

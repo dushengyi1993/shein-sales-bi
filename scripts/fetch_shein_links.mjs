@@ -49,6 +49,7 @@ function parseArgs(argv) {
     rawDir: RAW_DIR,
     saveRaw: true,
     fetchFlowDiagnose: true,
+    masterOnly: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -61,6 +62,7 @@ function parseArgs(argv) {
     else if (a === '--raw-dir') args.rawDir = path.resolve(argv[++i]);
     else if (a === '--no-raw') args.saveRaw = false;
     else if (a === '--no-flow-diagnose') args.fetchFlowDiagnose = false;
+    else if (a === '--master-only') args.masterOnly = true;
   }
   return args;
 }
@@ -1013,7 +1015,7 @@ async function fetchStore(store, args) {
   const {send} = cdp;
   try {
     await ensureGeiwohuoPage(send);
-    const sbnHeaders = await captureSbnHeaders(cdp);
+    const sbnHeaders = args.masterOnly ? null : await captureSbnHeaders(cdp);
     const fetchTime = nowBjString();
     // 商品列表接口当前会返回全量链接，筛选条件由前端侧处理；
     // 因此这里抓全量后按返回的 shelf_status 本地分组，避免重复计数。
@@ -1022,6 +1024,41 @@ async function fetchStore(store, args) {
       const rows = productAll.rows.filter(x => x.shelf_status === status);
       return {status, count: rows.length, total: rows.length, rows};
     });
+    if (args.masterOnly) {
+      const date = args.date;
+      const releasedPriceBySpu = new Map();
+      const linkRows = flattenProductRows(store, date, productStatuses, releasedPriceBySpu);
+      return {
+        ok: true,
+        date,
+        fetchTime,
+        store: {storeKey: store.storeKey, groupKey: store.groupKey, shopName: store.shopName || '', port: store.port},
+        counts: {
+          productsByStatus: Object.fromEntries(productStatuses.map(x => [x.status, x.count])),
+          stockup: 0,
+          diagnoseDay: 0,
+          diagnoseC7: 0,
+          diagnosePrev7: 0,
+          diagnoseC30: 0,
+          flowDiagnose: 0,
+          releasedPrices: 0,
+          linkRows: linkRows.length,
+          inventoryRows: 0,
+          performanceRows: 0,
+          coverageRows: 0,
+          suggestionRows: 0,
+        },
+        updateTimes: {flowDiagnoseLastUpdateTime: ''},
+        linkRows,
+        performanceRows: [],
+        inventoryRows: [],
+        releasedPriceRows: [],
+        coverageRows: [],
+        suggestionRows: [],
+        dashboardRows: [],
+        raw: args.saveRaw ? {productStatuses} : undefined,
+      };
+    }
     const releasedPriceBySpu = await fetchReleasedPagePrices(send, productAll.rows);
     const stockup = await fetchStockup(send, args.pageSize);
     const date = args.date;

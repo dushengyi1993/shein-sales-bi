@@ -14,6 +14,7 @@ const base = {
   c7_sale_cnt: 0,
   new_goods_tag: '',
   first_shelf_time: '2026-06-19 23:59:59',
+  inventory_recovery_date: '2026-05-01',
 };
 
 assert.equal(evaluateLowExposureZeroSalesRetireCandidate(base, {performanceDate}).candidate, true);
@@ -31,5 +32,18 @@ const missingNewTag = {...base};
 delete missingNewTag.new_goods_tag;
 assert.equal(evaluateLowExposureZeroSalesRetireCandidate(missingNewTag, {performanceDate}).reason, 'missing_new_goods_tag');
 assert.equal(evaluateLowExposureZeroSalesRetireCandidate({...base, first_shelf_time: ''}, {performanceDate}).bucket, 'cannotJudge');
+const missingRecoveryEvidence = {...base, inventory_recovery_date: ''};
+assert.equal(evaluateLowExposureZeroSalesRetireCandidate(missingRecoveryEvidence, {performanceDate}).reason, 'missing_recovery_evidence');
+assert.equal(evaluateLowExposureZeroSalesRetireCandidate({...missingRecoveryEvidence, recovery_history_checked: true}, {performanceDate}).candidate, true);
+for (const patch of [
+  {inventory_recovery_date: '2026-07-03'},
+  {inventory_recovery_date: '', relisted_at: '2026-07-02'},
+  {inventory_recovery_date: '', relisted_at: '', last_shelf_time: '2026-07-01'},
+]) {
+  const got = evaluateLowExposureZeroSalesRetireCandidate({...base, ...patch}, {performanceDate});
+  assert.equal(got.candidate, false);
+  assert.equal(got.bucket, 'excludedByRecentRecovery15d');
+  assert.equal(got.reason, 'inventory_recovery_or_relist_within_15d');
+}
 
 console.log(JSON.stringify({ok: true, performanceDate, cutoffDate: firstShelf15dCutoffDate(performanceDate)}, null, 2));

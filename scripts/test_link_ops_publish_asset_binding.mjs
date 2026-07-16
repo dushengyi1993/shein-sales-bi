@@ -56,6 +56,10 @@ check('locks inventory while preserving warehouse', overridden.payload.skc_list[
 check('preserves warehouse id', overridden.payload.skc_list[0].sku_list[0].stock_info_list[0].warehouse_id, 'WH-1');
 check('locks category', overridden.payload.category_id, 12345);
 check('locks Arabic title', overridden.payload.multi_language_name_list.find(row => row.language === 'ar')?.name, 'Arabic locked title');
+const noNumericOverrides = applyExplicitPublishPreparationOverrides(payload, {standardGoodsSn: 'SK-999食品料理机'});
+check('missing supply price does not become zero', noNumericOverrides.payload.skc_list[0].sku_list[0].cost_info.cost_price, '99.00');
+check('missing inventory does not become zero', noNumericOverrides.payload.skc_list[0].sku_list[0].stock_info_list[0].stock, 8);
+check('missing numeric overrides remain null in evidence', JSON.stringify({supplyPrice:noNumericOverrides.evidence.supplyPrice,inventory:noNumericOverrides.evidence.inventory,categoryId:noNumericOverrides.evidence.categoryId}), '{"supplyPrice":null,"inventory":null,"categoryId":null}');
 check('image assets without binding are detected', taskHasUnboundImageAssets({assets: [{mime: 'image/png'}]}), true);
 check('bound image assets are not detected as unbound', taskHasUnboundImageAssets({assets: [{mime: 'image/png'}], publishAssetBinding: {boundAt: new Date().toISOString()}}), false);
 

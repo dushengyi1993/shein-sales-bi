@@ -11,4 +11,12 @@ For partner/operator image work:
 - Upload and bind images to the same task. Do not create a replacement task after upload, and do not report success when the task payload still comes from a source-link snapshot.
 - Preserve explicit store, category, title source, supplier code, price, and inventory values as structured task facts. Do not replace them with a shorter free-text task.
 
+For every new SHEIN listing, use the default store title group from `config/store_style_profiles.json` unless the user explicitly overrides it for the current batch:
+
+- Title 1: JSH, DL, TZZ, CX, HL, TS, TZ.
+- Title 2: DX, LQ, XC, MZ, NM, YJ.
+- Title 3: JY, QY, XL, FY, QH, ZL.
+
+Preserve the selected title group as a structured per-store task fact and verify it before dry-run.
+
 Real SHEIN writes still require cloud permissions, dry-run/preflight, an exact payload hash, explicit user confirmation, audit, and readback.

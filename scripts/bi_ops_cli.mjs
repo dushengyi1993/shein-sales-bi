@@ -254,7 +254,7 @@ Usage:
   node scripts/bi_ops_cli.mjs capabilities
   node scripts/bi_ops_cli.mjs maintenance-readiness --operation retire_link --expect blocked
   node scripts/bi_ops_cli.mjs maintenance-readiness --operation retire_link --doc-evidence <schema.json> --store-probe <probe.json> --readback-evidence <readback.json> --expect pilot_ready
-  node scripts/bi_ops_cli.mjs plan-images --image-dir <图片文件夹> [--out roles.json]
+  node scripts/bi_ops_cli.mjs plan-images --image-dir <图片文件夹> [--store JSH] [--out roles.json]
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <id> --store JSH --image-dir <已审可用图片目录> --approved-assets --standard-goods-sn "(全)SK-999食品料理机" --supply-price 210 --inventory 100
   node scripts/bi_ops_cli.mjs retire-candidates --file <v3-times.csv> --performance-date 2026-07-04 [--out <dir>]
   node scripts/bi_ops_cli.mjs upload-pic --store FY --image-type 2 --file <image.jpg> [--mode dry-run|execute]
@@ -861,6 +861,8 @@ async function runImageAssetExecutor(args, action) {
 async function runPlanImages(args) {
   if (!args.imageDir) throw new Error('plan-images requires --image-dir <图片文件夹>');
   const commandArgs = ['--dir', args.imageDir];
+  const store = [...new Set([...(args.writeStores || []), ...(args.stores || [])])][0] || '';
+  if (store) commandArgs.push('--store', store);
   if (args.approvedAssets) commandArgs.push('--approved');
   if (args.outputFile) commandArgs.push('--out', args.outputFile);
   if (!args.json) commandArgs.push('--pretty');
@@ -922,7 +924,7 @@ async function runPreparePublish(args) {
   if (!args.imageDir) throw new Error('prepare-publish requires --image-dir <reviewed image folder>');
   const store = [...new Set([...(args.writeStores || []), ...(args.stores || [])])][0] || '';
   if (!store) throw new Error('prepare-publish requires --store <target store>');
-  const plan = await planLinkOpsImageRoles({dir: args.imageDir, sourceApproved: args.approvedAssets ? true : null});
+  const plan = await planLinkOpsImageRoles({dir: args.imageDir, sourceApproved: args.approvedAssets ? true : null, storeKey: store});
   const sourceApproved = args.approvedAssets || plan.approval?.sourceApproved === true;
   if (!sourceApproved) throw new Error('图片目录未标记为“已审可用”；请确认人工审核后加 --approved-assets');
   if (!plan.ok) throw new Error(`图片角色规划未通过：${(plan.blockers || []).join('；')}`);
@@ -980,6 +982,7 @@ async function runPreparePublish(args) {
       scannedImages: plan.counts?.scannedImages || 0,
       eligibleImages: plan.counts?.eligibleImages || 0,
       ignoredAbTestCovers: plan.roles?.ignoredAbTestCovers?.map(row => row.name) || [],
+      storeStyle: plan.storeStyle || null,
       warnings: plan.warnings || [],
     },
     uploaded: uploaded.map(row => ({name: row.name, role: row.role, imageType: row.imageType, width: row.width, height: row.height, sha256: row.sha256})),

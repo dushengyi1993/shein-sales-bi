@@ -414,14 +414,26 @@ async function fetchSpuInfoForImages(client, matches, calls, warnings){
       calls.push(compactCallResult('spu-info-image-group','/open-api/goods/spu-info','POST',response));
       const info=response.data?.info;
       if(info&&typeof info==='object'){
-        const spuGroupCode=safeString(info.groupCode||info.group_code||info.imageGroupCode||info.image_group_code||'',120);
+        const spuImageRows=asArray(info.spuImageInfoList||info.spu_image_info_list||info.imageInfoList||info.image_info_list);
+        const spuGroupCode=safeString(
+          info.groupCode||info.group_code||info.imageGroupCode||info.image_group_code
+          ||spuImageRows.find(row=>row?.groupCode||row?.group_code)?.groupCode
+          ||spuImageRows.find(row=>row?.groupCode||row?.group_code)?.group_code
+          ||'',120);
         const skcGroups={};
         for(const skcRow of asArray(info.skcInfoList||info.skc_info_list||info.skcList||info.skc_list)){
           const skcName=safeString(skcRow.skcName||skcRow.skc_name||skcRow.skc||'',160);
-          const skcGroupCode=safeString(skcRow.groupCode||skcRow.group_code||skcRow.imageGroupCode||skcRow.image_group_code||'',120);
+          const skcImageRows=asArray(skcRow.skcImageInfoList||skcRow.skc_image_info_list||skcRow.imageInfoList||skcRow.image_info_list);
+          const skcGroupCode=safeString(
+            skcRow.groupCode||skcRow.group_code||skcRow.imageGroupCode||skcRow.image_group_code
+            ||skcImageRows.find(row=>row?.groupCode||row?.group_code)?.groupCode
+            ||skcImageRows.find(row=>row?.groupCode||row?.group_code)?.group_code
+            ||'',120);
           if(skcName&&skcGroupCode) skcGroups[skcName]=skcGroupCode;
         }
-        spuInfoMap.set(m.spu,{spuGroupCode, skcGroups, productTypeId:info.productTypeId||info.product_type_id||null});
+        if(spuGroupCode||Object.keys(skcGroups).length){
+          spuInfoMap.set(m.spu,{spuGroupCode, skcGroups, productTypeId:info.productTypeId||info.product_type_id||null});
+        }
       }
     }catch(e){
       warnings.push(`spu-info 查询失败 (${m.spu})：${safeString(e.message||e,200)}；image_group_code 将缺失，图片编辑可能被平台拒绝。`);
@@ -498,15 +510,22 @@ function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEdi
             if(plan.site_detail_image_info_list) body.site_detail_image_info_list=plan.site_detail_image_info_list;
             ensureSquareImageSortGlobal(body);
             const spuInfo=spuInfoMap.get(m.spu);
+            let injectedGroupCodeCount=0;
+            let retainedGroupCodeCount=body.image_info?.image_group_code?1:0;
+            for(const skc of asArray(body.skc_list)) if(skc?.image_info?.image_group_code) retainedGroupCodeCount+=1;
             if(spuInfo){
-              if(spuInfo.spuGroupCode && body.image_info) body.image_info.image_group_code=spuInfo.spuGroupCode;
+              if(spuInfo.spuGroupCode && body.image_info && !body.image_info.image_group_code){ body.image_info.image_group_code=spuInfo.spuGroupCode; injectedGroupCodeCount+=1; }
               if(spuInfo.skcGroups && body.skc_list){
                 for(const skc of body.skc_list){
                   const gc=spuInfo.skcGroups[skc.skc_name];
-                  if(gc && skc.image_info) skc.image_info.image_group_code=gc;
+                  if(gc && skc.image_info && !skc.image_info.image_group_code){ skc.image_info.image_group_code=gc; injectedGroupCodeCount+=1; }
                 }
               }
-              warnings.push('partialEdit 图片已注入 image_group_code（来自 spu-info 实时查询）。');
+            }
+            if(injectedGroupCodeCount>0){
+              warnings.push(`partialEdit 图片已注入 ${injectedGroupCodeCount} 个 image_group_code（来自 spu-info 实时查询）。`);
+            } else if(retainedGroupCodeCount>0){
+              warnings.push(`partialEdit 图片保留 payload 中已有的 ${retainedGroupCodeCount} 个 image_group_code；spu-info 未新增组码。`);
             } else {
               warnings.push('partialEdit 图片缺少 image_group_code：spu-info 未返回该 SPU 的图片组编码，平台可能拒绝图片编辑。');
             }
@@ -572,7 +591,10 @@ async function main(){
     ? inspectImageEditPayloads(imageEditPayloads,blockers,warnings)
     : inspectImageEditPayloads([],blockers,warnings);
   const certificatePayloads=normalizeCertificatePayloadsFromJsonAssets(taskWithJsonAssets,warnings);
-  const payloads=buildPayloads({task:taskWithJsonAssets,intents,matches:resolved.matches,siteInfo,blockers,warnings,imageEditPayloads,certificatePayloads});
+  const spuInfoMap=intents.includes('update_images')
+    ? await fetchSpuInfoForImages(client,resolved.matches,calls,warnings)
+    : new Map();
+  const payloads=buildPayloads({task:taskWithJsonAssets,intents,matches:resolved.matches,siteInfo,blockers,warnings,imageEditPayloads,certificatePayloads,spuInfoMap});
   const submitPlan={storeKey:store,intents,payloads:payloads.map(p=>({operation:p.operation,endpoint:p.endpoint,body:p.body,targetSkcs:p.targetLinks.map(x=>x.skc).filter(Boolean)}))};
   const payloadHash=payloads.some(p=>Object.keys(p.body||{}).length)?sha256Stable(submitPlan):'';
   if(args.mode==='execute'){

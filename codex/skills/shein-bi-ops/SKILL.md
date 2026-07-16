@@ -25,6 +25,7 @@ Apply this precedence without improvising:
 AI is advisory at level 4. It must not override levels 1-3.
 
 - “Not used in the final title/core selling points” does not mean “prohibited in approved images.”
+- For new listings, read `config/store_style_profiles.json` and use its per-store `defaultTitleGroups` value unless the user explicitly overrides the title group for the current batch. Keep the chosen title group as a structured task fact through preflight and dry-run.
 - Do not silently exclude approved images because of claims such as speed, noise, motor material or coating. Mention a concise warning only when useful; keep the image unless the user or SHEIN rejects it.
 - Only objective corruption, unsupported format/size, demonstrably wrong product, platform role/capacity conflict, or an actual SHEIN validation response may block.
 - Read real dimensions before saying a 1:1 image is absent.

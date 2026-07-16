@@ -11,6 +11,9 @@ import {
   supplierCodeRepairFinalStatus,
   INPUT_CURRENT_ATTRIBUTE_ID,
   INPUT_VOLTAGE_ATTRIBUTE_ID,
+  HAZARD_CATEGORY_ATTRIBUTE_ID,
+  HAZARD_CATEGORY_NON_TRANSPORT_SENSITIVE_VALUE_ID,
+  HAZARDOUS_MATERIALS_CLASSIFICATION_ATTRIBUTE_ID,
 } from '../lib/retire_supplier_code_repair_payload.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -85,6 +88,88 @@ const blocked = buildSupplierCodeRepairPayload({
 });
 assert.ok(blocked.blockers.some(x => /Input current/.test(x)), 'missing current must block instead of guessing');
 
+const currentOnlyLinkedRule = buildSupplierCodeRepairPayload({
+  row: failedRow,
+  spuInfo,
+  attributeTemplateRows: templateRows.filter(row => Number(row.attribute_id) !== INPUT_VOLTAGE_ATTRIBUTE_ID),
+  fillStandardInfo: {default_language: 'ar', default_language_title_max_length: 325},
+  inputCurrentHint: {attribute_extra_value: '3.6', attribute_value_id: 304301999, source: 'same_standard_goods_sn'},
+  requiredLinkedAttributeIds: [INPUT_CURRENT_ATTRIBUTE_ID],
+});
+assert.deepEqual(currentOnlyLinkedRule.blockers, []);
+assert.equal(currentOnlyLinkedRule.evidence.hasInputVoltage, false);
+assert.equal(currentOnlyLinkedRule.evidence.hasInputCurrent, true);
+assert.deepEqual(currentOnlyLinkedRule.evidence.requiredLinkedAttributeIds, [INPUT_CURRENT_ATTRIBUTE_ID]);
+
+const hazardInfo = {
+  ...spuInfo,
+  productAttributeInfoList: [
+    ...spuInfo.productAttributeInfoList,
+    {attributeId: HAZARD_CATEGORY_ATTRIBUTE_ID, attributeValueId: HAZARD_CATEGORY_NON_TRANSPORT_SENSITIVE_VALUE_ID, attributeValue: null},
+  ],
+};
+const hazardTemplateRows = [
+  ...templateRows,
+  {
+    attribute_id: HAZARD_CATEGORY_ATTRIBUTE_ID,
+    attribute_name: 'Hazard Category',
+    attribute_mode: 1,
+    attribute_status: 2,
+    attribute_value_info_list: [{attribute_value_id: HAZARD_CATEGORY_NON_TRANSPORT_SENSITIVE_VALUE_ID, attribute_value: 'Others (Non-Transport Sensitive Items)'}],
+  },
+  {
+    attribute_id: HAZARDOUS_MATERIALS_CLASSIFICATION_ATTRIBUTE_ID,
+    attribute_name: 'Hazardous materials classification',
+    attribute_mode: 3,
+    attribute_status: 3,
+    attribute_value_info_list: [
+      {attribute_value_id: 316914027, attribute_value: 'Class 9 - Lithium-ion batteries'},
+      {attribute_value_id: 316913742, attribute_value: 'Class 9 - Lithium-ion batteries contained in equipment'},
+      {attribute_value_id: 316914660, attribute_value: '该商品不属于危险品'},
+    ],
+  },
+];
+const hazardCategoryOnly = buildSupplierCodeRepairPayload({
+  row: failedRow,
+  spuInfo: hazardInfo,
+  attributeTemplateRows: hazardTemplateRows,
+  fillStandardInfo: {default_language: 'ar', default_language_title_max_length: 325},
+  inputCurrentHint: {attribute_extra_value: '3.6', attribute_value_id: 304301999, source: 'same_standard_goods_sn'},
+});
+assert.ok(hazardCategoryOnly.blockers.some(text => /provide an approved product-specific or unanimous sibling hint/.test(text)));
+assert.equal(hazardCategoryOnly.body, null);
+
+const hazardHinted = buildSupplierCodeRepairPayload({
+  row: failedRow,
+  spuInfo,
+  attributeTemplateRows: hazardTemplateRows,
+  fillStandardInfo: {default_language: 'ar', default_language_title_max_length: 325},
+  inputCurrentHint: {attribute_extra_value: '3.6', attribute_value_id: 304301999, source: 'same_standard_goods_sn'},
+  hazardousClassificationHint: {attribute_value_id: 316913742, source: 'user_approved_lithium_battery_contained_in_equipment'},
+});
+assert.deepEqual(hazardHinted.blockers, []);
+assert.ok(hazardHinted.body.product_attribute_list.some(row => Number(row.attribute_id) === HAZARDOUS_MATERIALS_CLASSIFICATION_ATTRIBUTE_ID && Number(row.attribute_value_id) === 316913742));
+assert.equal(hazardHinted.evidence.hazardousClassificationHint.attributeValueId, 316913742);
+
+const featureRequiredTemplateRows = templateRows.map(row => Number(row.attribute_id) === 1000616 ? {...row, attribute_status: 3} : row);
+const featureMissingInfo = {
+  ...spuInfo,
+  productAttributeInfoList: spuInfo.productAttributeInfoList.filter(row => Number(row.attributeId) !== 1000616),
+};
+const featureHinted = buildSupplierCodeRepairPayload({
+  row: failedRow,
+  spuInfo: featureMissingInfo,
+  attributeTemplateRows: featureRequiredTemplateRows,
+  fillStandardInfo: {default_language: 'ar', default_language_title_max_length: 325},
+  inputCurrentHint: {attribute_extra_value: '3.6', attribute_value_id: 304301999, source: 'same_standard_goods_sn'},
+  requiredAttributeHints: {
+    1000616: {attribute_value_id: 1004580, source: 'same_canonical_cross_store_unanimous_required_attribute'},
+  },
+});
+assert.deepEqual(featureHinted.blockers, []);
+assert.ok(featureHinted.body.product_attribute_list.some(row => Number(row.attribute_id) === 1000616 && Number(row.attribute_value_id) === 1004580));
+assert.deepEqual(featureHinted.evidence.requiredAttributeHintIds, [1000616]);
+
 if (process.platform === 'win32') {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'retire-supplier-code-repair-'));
   const previous = path.join(tmp, 'previous-final-summary.json');
@@ -101,4 +186,4 @@ if (process.platform === 'win32') {
   assert.match(stderr, /Refusing SHEIN OpenAPI access on Windows\/local Codex/);
 }
 
-console.log(JSON.stringify({ok: true, checks: ['status_guard', 'no_shelf_endpoint', 'fy_sk5110_hard_exclude', 'payload_attributes_title_guard']}, null, 2));
+console.log(JSON.stringify({ok: true, checks: ['status_guard', 'no_shelf_endpoint', 'fy_sk5110_hard_exclude', 'payload_attributes_title_guard', 'official_linked_rule_scope', 'required_hazard_classification', 'approved_hazard_classification_hint', 'required_attribute_sibling_hint']}, null, 2));
