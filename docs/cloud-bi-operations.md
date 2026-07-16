@@ -91,7 +91,7 @@
 
 
 
-ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启用并通过手动验证；飞书只读问数服务已于 2026-07-11 主动暂停，必须保持 `disabled + inactive`。飞书日报脚本仍保留为手动入口，但自动发送已停用：生产机没有 `shein-bi-cloud-daily-lark-report.timer`，晨间链路 `SHEIN_BI_MORNING_SEND_LARK_REPORT=0`。截至 2026-07-09，19 店订单销售生产事实源保留 WebAPI，高频 `today`、昨日定稿和晨间链路均通过 `SHEIN_SALES_TRANSPORT=webapi` 写正式销售事实表；OpenAPI 已修正取消/无效行口径并保留并行对账层双跑一周。链接/业务域、营销价栈线索、RTV WebAPI 复核、订单闭环复查、SBN 登录态和 ET 实盘库存仍按各自原链路运行，不要把“OpenAPI 可切换候选”误解成全数据域零浏览器/零 WebAPI。不要误以为本地 `SHEIN-*` Windows 任务仍在生产运行。
+ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启用并通过手动验证；飞书只读问数服务已于 2026-07-11 主动暂停，必须保持 `disabled + inactive`。飞书日报脚本仍保留为手动入口，但自动发送已停用：生产机没有 `shein-bi-cloud-daily-lark-report.timer`，晨间链路 `SHEIN_BI_MORNING_SEND_LARK_REPORT=0`。自 `2026-07-09` 起，19 店订单销售生产事实源仍为 WebAPI，高频 `today`、昨日定稿和晨间链路均通过 `SHEIN_SALES_TRANSPORT=webapi` 写正式销售事实表；OpenAPI 已修正取消/无效行口径，只在隔离对账层双跑。**截至 `2026-07-16`，仍待负责人根据对账 artifact 决定是否切换；不得把双跑或授权表述为已切生产事实源。** 链接/业务域、营销价栈线索、RTV WebAPI 复核、订单闭环复查、SBN 登录态和 ET 实盘库存仍按各自原链路运行，不要把“OpenAPI 可切换候选”误解成全数据域零浏览器/零 WebAPI。不要误以为本地 `SHEIN-*` Windows 任务仍在生产运行。
 
 
 
@@ -99,19 +99,19 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 
 
 
-### 当前排班总览（2026-07-09）
+### 当前排班总览（2026-07-16 核对）
 
 | 时间 / 频率 | 任务 | 形式 | 生产事实影响 | 备注 |
 |---|---|---|---|---|
-| `00:00/01:00/02:00/04:00/05:00/06:00/07:00/09:00/.../23:00` | 当天销售高频刷新 `shein-bi-cloud-today.service` | WebAPI，`SHEIN_SALES_TRANSPORT=webapi` | 写正式销售事实表和 BI Portal | 每小时一跑，跳过 `03:00` 昨日定稿和 `08:00` 晨间链路；不启动浏览器；OpenAPI 只做并行对账，不覆盖正式表。若一周双跑 100% 通过，再把该项切为 OpenAPI。 |
+| 每小时整点，排除 `03:00` / `08:00` | 当天销售高频刷新 `shein-bi-cloud-today.service` | WebAPI，`SHEIN_SALES_TRANSPORT=webapi` | 写正式销售事实表和 BI Portal | 以 `infra/systemd/shein-bi-cloud-today.timer` 的 `OnCalendar` 为准；不启动浏览器；OpenAPI 只做并行对账，不覆盖正式表。自 `2026-07-09` 起的双跑截至 `2026-07-16` 仍待负责人根据对账 artifact 决定，不能自行切换。 |
 | `03:00` | 昨日最终销售与前两天稳定日复核 `shein-bi-cloud-yesterday.service` | WebAPI，`SHEIN_SALES_TRANSPORT=webapi` | 写正式销售事实表 | OpenAPI 最终日结果在并行层核对。 |
 | `08:00` | 晨间串行链路 `shein-bi-cloud-morning-chain.service` | WebAPI 销售刷新 -> 日更补采 | 先写当天正式销售，再触发慢变日更 | 飞书日报自动发送关闭；日更跟随销售刷新完成时间。 |
 | 晨间链路之后，每日一次 | 统一日更补采 `shein-bi-cloud-daily-refresh.service` / `cloud_daily_refresh.sh yesterday` | 混合：WebAPI/headless + OpenAPI 并行层 | 写链接/业务域、营销线索、RTV 复核等慢变数据；OpenAPI 销售只写隔离对账层 | 商品四档状态、营销活动、SBN 经营/流量等仍需 WebAPI/headless；不得拆回多个高频 timer。 |
-| 晨间日更内每日一次，跑 D-1 | 销售/退货/商品 OpenAPI reconciliation | OpenAPI | 只写 `fact.openapi_*` 和 `mart.openapi_*_reconciliation` | 2026-07-09 起销售双跑观察一周；切换条件是订单数、商品行、金额、取消/无效行、SAR 单价、价格散点全部无误。退货/商品继续隔离，不切正式事实。 |
+| 晨间日更内每日一次，跑 D-1 | 销售/退货/商品 OpenAPI reconciliation | OpenAPI | 只写 `fact.openapi_*` 和 `mart.openapi_*_reconciliation` | 自 `2026-07-09` 起隔离双跑；截至 `2026-07-16`，订单数、商品行、金额、取消/无效行、SAR 单价、价格散点等对账 artifact 仍待负责人决策。退货/商品继续隔离，不切正式事实。 |
 | `01:20/03:20/.../23:20` | ET 货代仓/出库单 `shein-bi-cloud-et-forwarder.service` | ET headless/API | 写 ET 仓库、出库单，并轻量刷新订单/物流/售后 section | 不是 SHEIN OpenAPI；异常不应中断已成功店铺数据。 |
 | `02:20` | 登录态管家 `shein-bi-cloud-session-manager.service` | 短生命周期 headless browser + WebAPI/SBN 探针 | 不写销售事实 | 恢复 WebAPI + SBN 登录态，结束后关闭它启动的浏览器。 |
 | `06:30` | 订单闭环复查 `shein-bi-cloud-order-closure.service` | WebAPI | 只更新订单生命周期状态，不重写历史销售事实 | 用于未终态订单复查；不随销售 OpenAPI 候选切换。 |
-| `10:30` | 每日营销 live guard `shein-bi-cloud-marketing-live-guard.service` | 后台 live scan/readback，必要时浏览器 | 只在已授权例外中写限时折扣；普通活动/优惠券仍需用户确认 | 每日一次集中跑；包含营销活动、限时折扣、优惠券价格巡检。旧 `10:12` 是 Codex heartbeat 迁移期口径，不再是云端生产排班。 |
+| `10:30` | 每日营销 live guard `shein-bi-cloud-marketing-live-guard.service` | 后台 live scan/readback，必要时浏览器 | 按负责人长期策略授权自动写限时折扣；普通活动/优惠券仍需对应业务授权 | 每日一次集中跑；不逐次索要 payload hash，但强制授权上下文、实时证据、预校验、审计和写后回读。旧 `10:12` 是 Codex heartbeat 迁移期口径，不再是云端生产排班。 |
 | 每小时 `:10/:40` | 浏览器残留清理 `shein-bi-cloud-browser-cleanup.service` | 本机进程清理 | 不写业务数据 | 保留轻量清理，防止异常浏览器堆积；不是重任务；不用于强杀可见人工登录窗口。 |
 | 每小时 `:50` | watchdog `shein-bi-cloud-watchdog.service` | 只读巡检 | 不写业务数据 | 检查服务、timer、BI 新鲜度、销售/页面过期、浏览器残留并发提醒。 |
 | `02:40` | 数据库备份 `shein-bi-db-backup.service` | PostgreSQL dump/备份 | 备份 | 默认保留 14 天。 |
@@ -171,7 +171,7 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 
 - 销售订单生产抓取默认使用 WebAPI；直连成功时不会启动浏览器。OpenAPI 作为并行对账和一周切换候选，本地开发或回滚诊断仍可显式使用 `openapi` / `auto` / `browser` transport。
 
-- 官方 OpenAPI 销售订单当前不覆盖生产事实表；`fact.openapi_*` 与 `mart.openapi_sales_reconciliation` 保留为一周双跑质量监控和切换证据。退货退款、商品/链接基础资料仍是 OpenAPI 并行层；商品四档状态、营销活动报名、ET 实盘库存和利润输入不能直接由 OpenAPI 替代。
+- 官方 OpenAPI 销售订单当前不覆盖生产事实表；自 `2026-07-09` 起，`fact.openapi_*` 与 `mart.openapi_sales_reconciliation` 作为隔离双跑质量监控和切换证据。截至 `2026-07-16`，是否切换仍待负责人根据对账 artifact 决定。退货退款、商品/链接基础资料仍是 OpenAPI 并行层；商品四档状态、营销活动报名、ET 实盘库存和利润输入不能直接由 OpenAPI 替代。
 
 - ET 已改为 Linux headless Chrome + 账号密码/OCR 自动登录模式；Windows Chrome 保存密码不能直接迁到 Linux，服务器必须单独保存 `config/et_forwarder.local.json` 或等价环境变量。
 

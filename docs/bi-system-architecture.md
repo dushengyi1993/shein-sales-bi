@@ -97,7 +97,7 @@ BI 系统当前分为三层入口：
 
 当前自动任务状态：
 
-- 云端 `shein-bi-cloud-today.timer`：北京时间 `00/02/04/06/10/12/14/16/18/20/22:00`，刷新当天销售、入仓并生成 BI Portal；`08:00` 由晨间链路接管。
+- 生产调度不在本架构文档复述；以 `infra/systemd/shein-bi-cloud-today.timer` 为调度事实源，操作与验收见 [cloud-bi-operations.md](cloud-bi-operations.md)。
 - 云端 `shein-bi-cloud-morning-chain.timer`：每天 `08:00`，先刷新当天销售，再启动 `shein-bi-cloud-daily-refresh.service` 做统一日更补采；当前飞书日报自动发送已停用。
 - 云端 `shein-bi-cloud-yesterday.timer`：每天 `03:00`，刷新前一天最终销售并复核前两天稳定日。
 - 云端 `shein-bi-db-backup.timer`：每天 `02:40`，备份业务库和 Metabase 元数据库。

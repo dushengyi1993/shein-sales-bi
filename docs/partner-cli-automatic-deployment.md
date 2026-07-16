@@ -47,7 +47,7 @@ partner-cli-vYYYY.MM.DD.N
 工作流会自动完成构建/资产复用、验证、BI 激活和回读。需要重新验收现有已发布版本时，可手动触发：
 
 ```powershell
-gh workflow run "Partner CLI release to BI" --repo dushengyi1993/shein-sales-bi -f tag=partner-cli-v2026.07.13.1
+gh workflow run "Partner CLI release to BI" --repo dushengyi1993/shein-sales-bi -f tag=partner-cli-v2026.07.16.1
 ```
 
 手动触发仍会执行全部验证，并且同一内容重复部署是幂等的。

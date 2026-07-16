@@ -20,6 +20,7 @@
 - **复制上品里的标题不是改标题动作**：用户说“标题直接复制源链接/沿用源标题”，这是发布 payload 的字段补齐，不是 `update_title` 维护动作，不能把补链任务混进改标题执行器。
 - **新链接默认不自动上架**：所有新上品、复制上品、补链接等从未上过架的新链接，发布 payload 必须默认 `shelf_way=2` 并写入约十年后的 `hope_on_sale_date`；短期内不能自动上架。只有维护已有链接的 `activate_link` / `retire_link` 等上下架动作才按用户指令改变现有链接状态。
 - **新链接默认标准货号**：所有新上品、复制上品、补链接等从未上过架的新链接，发布 payload 的 `skc_list[].supplier_code` 和 `skc_list[].sku_list[].supplier_sku` 必须原样使用当前任务的标准货号（优先 `task.standardGoodsSn` / `targets.standardGoodsSn` / `metadata.standardGoodsSn` / `executionContext.standardGoodsSn`，再从 `productRefs` 推导），不得继承源链接或店铺特定 raw `supplier_code`；也不得自行添加店铺前缀、颜色、批次或其他后缀。只有用户明确指定时才允许偏离标准货号。
+- **型号与标准货号必须分层**：`product_model` 只填纯型号；`supplier_code`、`supplier_sku`、任务中的 `standard_goods_sn` 必须填“型号 + 中文品名”的标准货号。不得因为后台原始货号或候选导出只有纯型号，就把纯型号当成标准货号。SK-5110 的标准货号固定为 `SK-5110电磁炉`。
 - **明确动作优先走 BI 状态机**：补链、复制上品、改价、上下架、补字段、自然语言确认等明确运营动作不得先交给旧问答模型生成建议；必须先创建/更新当前会话任务、检查资料、再用人话返回缺口或结果。
 - **505 只是验收样例，不是特判对象**：`DL 505` 只能用来验证通用链路；自动运营页必须支持所有已接入 OpenAPI 动作走同一条自然语言状态机，包括 `copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。不能给单个货号、单个类目或单个店铺写死流程。
 - **平台缺字段按属性 ID 通用闭环**：`publishOrEdit` 返回“某属性(id)必填”时，后续用户在同一聊天里补“按 800W 算 / 电流 1200mA”等自然语言，系统要从上次平台提示里识别属性 ID、写入当前任务事实并重新资料检查；不能只靠 `SM-505A` 的输入电流特判。

@@ -27,15 +27,10 @@
 - Windows Chrome：保留 SHEIN 登录态、Cookie/session 刷新和页面自动化回退；销售主链路已 WebAPI 直连优先。Chrome profile 仍使用工作区内的 `profiles/` 作为 `--user-data-dir`，避免占用默认 C 盘 Chrome 用户目录；只有登录、验证码、人机校验或排障时才打开可见 Chrome。
 - 飞书写入：当前 `lark-cli` 在 Windows 侧可用；但飞书 Base / 看板写入受 `state/feishu-base-sync-paused.flag` 控制，暂停期间只保留飞书 IM 日报和异常提醒。
 
-## 当前云端 systemd 调度（北京时间）
+## 云端 systemd 调度
 
-- `shein-bi-cloud-today.timer`：`00:00/01:00/02:00/04:00/.../23:00` 每小时整点刷新当天销售、入仓并生成 BI Portal；`03:00` 由昨日定稿接管，`08:00` 由晨间链路接管。
-- `shein-bi-cloud-morning-chain.timer`：每天 `08:00` 先刷新当天销售，再启动 `shein-bi-cloud-daily-refresh.service`；当前 `SHEIN_BI_MORNING_SEND_LARK_REPORT=0`，飞书日报自动发送停用。
-- `shein-bi-cloud-yesterday.timer`：每天 `03:00` 刷新前一天最终销售，并复核前两天稳定日。
-- `shein-bi-db-backup.timer`：每天 `02:40` 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto`。
-- `shein-bi-cloud-et-forwarder.timer`：奇数小时 `:20` 高频同步 ET 货代仓/出库单，只轻量刷新订单/物流/售后相关 section。
-- `shein-bi-cloud-session-manager.timer`：每天 `02:20` 顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态。
-- `shein-bi-cloud-browser-cleanup.timer`：每 30 分钟清理超时残留店铺浏览器。
+调度事实在 `infra/systemd/*.timer` 的 `OnCalendar`；生产操作与验证只维护在 [cloud-bi-operations.md](cloud-bi-operations.md)。本运行环境文档不重复时间表。
+
 - 会写当前 19 店 SHEIN Chrome profile 的云端任务必须以 `sheinops` 运行；`shein-bi-cloud-daily-refresh.service` 不能用 root，否则会留下 root-owned profile 文件，导致登录态管家次日 `EACCES`。登录态恢复入口为 `restore_shein_store_session.mjs`，先回灌 browser/WebAPI session，再验证 GSP + SBN。
 - 本地 `SHEIN-*` Windows 计划任务已全部禁用，只保留为回滚和 Linux 迁移参考。
 
@@ -225,7 +220,7 @@
 
 # 2026-05-15 云端调度与本地封存
 
-- 生产调度已切到云端 systemd timer：`shein-bi-cloud-today.timer` 在 `00/01/02/04/05/06/07/09/10/11/12/13/14/15/16/17/18/19/20/21/22/23:00` 刷新当天销售、入仓并生成 BI Portal；`03:00` 由昨日定稿接管，`08:00` 由 `shein-bi-cloud-morning-chain.timer` 接管，先刷新当天销售，再启动 `shein-bi-cloud-daily-refresh.service` 统一做日更补采（链接/业务域 + 营销活动/限时折扣/优惠券价格线索 + RTV 换单复核）并刷新 BI，且全店日指标仍全 0 时跳过链接/业务域入仓刷新；`shein-bi-cloud-yesterday.timer` 每天 `03:00` 刷新前一天最终销售并复核稳定日；`shein-bi-db-backup.timer` 每天 `02:40` 做数据库备份。
+- 生产调度已切到云端 systemd；历史记录不维护时间表。以 `infra/systemd/*.timer` 的 `OnCalendar` 为准，操作与验收见 [cloud-bi-operations.md](cloud-bi-operations.md)。
 - 覆盖审计由 `scripts/audit_cloud_data_coverage.mjs` 提供：最新日防漏使用 `--expected-start range-start`，历史断档排查使用 `--expected-start first-seen`。后者按每个店首个有效日期之后查中间断档，避免把店铺尚未开通/尚未接入前的日期误判为缺抓。
 - 本地 `SHEIN-*` Windows 计划任务已封存禁用。`scheduled_intraday_dsy.ps1`、`scheduled_yesterday_final_dsy.ps1`、`scheduled_link_management_daily.ps1`、`scheduled_et_forwarder_daily.ps1`、`scheduled_bi_daily_pipeline.ps1` 等只保留为回滚/迁移参考，不再作为生产调度。
 - 云端当前自动覆盖销售 WebAPI、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、晨间销售+统一日更补采、异常通知、登录态巡检、残留浏览器清理和只读问数机器人；飞书日报自动发送已停用；19 店 OpenAPI 销售、退货退款、商品/链接对账已进入隔离双跑层。

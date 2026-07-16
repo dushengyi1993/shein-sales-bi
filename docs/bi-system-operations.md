@@ -44,16 +44,7 @@
 
 ### 4.1 当前云端生产调度
 
-| 时间 | systemd timer | 说明 |
-| --- | --- | --- |
-| `00:00/01:00/02:00/04:00/.../23:00` | `shein-bi-cloud-today.timer` | 每小时整点刷新当天销售、入仓并生成 BI Portal；`03:00` 由昨日定稿接管，`08:00` 由晨间链路接管。 |
-| `03:00` | `shein-bi-cloud-yesterday.timer` | 刷新前一天最终销售，并复核前两天稳定日。 |
-| `02:40` | `shein-bi-db-backup.timer` | 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto`，默认保留 14 天。 |
-| `02:20` | `shein-bi-cloud-session-manager.timer` | 顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并检查 profile 体积。 |
-| `01:20/03:20/.../23:20` | `shein-bi-cloud-et-forwarder.timer` | 高频同步 ET 货代仓/出库单、入仓后只轻量刷新订单/物流/售后相关 section。 |
-| `08:00` | `shein-bi-cloud-morning-chain.timer` | 晨间串行链路：先刷新当天销售，再启动统一日更补采；当前飞书日报自动发送已停用。 |
-| 每 30 分钟 | `shein-bi-cloud-browser-cleanup.timer` | 清理超时残留店铺浏览器，避免 headless Chrome 堆积。 |
-| 每小时 | `shein-bi-cloud-watchdog.timer` | 检查云端服务、timer 和数据新鲜度，异常时提醒。 |
+本文件不维护时间表。生产调度以 `infra/systemd/*.timer` 的 `OnCalendar` 为准；生产操作、冲突窗口和验证步骤见 [cloud-bi-operations.md](cloud-bi-operations.md)。
 
 云端当前自动覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、晨间销售+日更链路、异常通知、登录态巡检和只读问数机器人；飞书日报自动发送当前已停用。OpenAPI 销售对账已升级为 19 店并行双跑层，仍不替换生产销售源。覆盖审计使用 `scripts/audit_cloud_data_coverage.mjs`：查最新日防漏时用 `--expected-start range-start`，查历史断档时用 `--expected-start first-seen`。历史口径只检查每个店首个有效日期之后是否中间断档，不把店铺尚未开通/尚未接入前的日期算作缺抓。
 
@@ -85,8 +76,7 @@
 ## 5. 飞书日报与 BI 刷新规则
 
 - 当前飞书 Base / 看板写入暂停；飞书日报只保留手动临时发送入口，自动发送已停用。
-- 云端 `shein-bi-cloud-yesterday.timer` 刷新前一天最终版，并回核 D-2 稳定销售。
-- 云端 `shein-bi-cloud-today.timer` 每小时刷新当天销售，跳过 `03:00` 昨日定稿和 `08:00` 晨间链路。
+- 云端刷新由 systemd unit 触发；不要从本文推导时间表，按 [cloud-bi-operations.md](cloud-bi-operations.md) 的 runbook 核验实际 timer。
 - 滚动后置 BI 的验收重点是销售文件入仓和 BI Portal 更新时间；RTV 换单复核耗时不应作为“高频销售 BI 没更新”的判断依据。RTV 属于统一日更补采子步骤，失败会进入 `daily-refresh` 告警。
 - BI Portal API section 会在 `outputs/bi-portal/sections/` 缓存；首页首屏优先加载轻量 `homeRankings`，完整 `rankings` 放到详情/子页需要时再拉。`homeRankings` 只包含首页需要的日店铺、日货号、日店铺×货号粒度，并由服务端裁掉重复长文本后以 gzip sidecar 返回。`inventoryTrend` 是展示库存趋势 section，来自 `fact.visible_inventory_snapshot`，用于“前台展示库存每日快照”趋势；它不同于 ET 货代仓实盘可售，也不同于成本表供给。`cloud_bi_refresh.sh` 会启动 section 预热脚本；`serve_bi_portal.mjs` 还会用 core `generatedAt` watcher 在服务启动和首页访问时兜底预热，避免新 core 后用户首开页面才生成慢 section。首页利润 `homeProfit` 仍从当前 `profit` section cache 派生；若页面首页利润异常偏低，先核对 `homeProfitSummary.sourceGeneratedAt` 与当前 `data.json.__sections.generatedAt` 是否一致，并确认 `staleSource=false`；否则页面应视为利润待预热，不能用旧利润判断业务。
 - 首页库存相关口径必须分开：`展示库存趋势` = SHEIN 前台展示库存快照；`ET可售` = 货代仓实盘可售；`成本表供给` = 到仓 + 在途 - 已售。不要把 `ET可售 + 在途` 当成总供给，也不要把展示库存趋势当成 ET 实盘。

@@ -7,7 +7,7 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 - **BI 判断只认云端运行时**：云端 PostgreSQL、线上 BI 门户、`/api/bi/section/*`、云端日志和 systemd 状态；仓库 `outputs/bi-portal/*` 只是灾备/兼容快照。
 - **本地 BI 已封存**：本地 `8787`、`SHEIN-*` Windows 计划任务和本地抓数任务只作回滚参考，除非明确回滚不得恢复。
 - **飞书 Base / 原生看板写入暂停**：`state/feishu-base-sync-paused.flag` 存在时不写 Base/看板；飞书日报、异常提醒和只读问数走云端消息链路。
-- **SHEIN OpenAPI 写操作受控**：默认 dry-run；真实提交必须满足账号权限、白名单、人+店+动作、payloadHash/确认码、任务审核和回读审计。
+- **SHEIN 写操作受控**：普通任务默认 dry-run，真实提交须满足账号权限、人+店+动作、确认与回读审计；云端营销 timer 是负责人长期策略授权的有限例外，不要求逐次 payload hash，但只能执行策略白名单内的限时折扣动作，并强制实时证据、预校验和写后回读。
 - **云端部署纪律**：GitHub release 是源码基线，不等于已部署；云端热修必须回填 GitHub，服务器拉取/重置后必须重跑云端 BI 刷新。
 - **负责人经验单向继承**：负责人本机 Codex Desktop/CLI 与负责人 BI 会话的长期经验自动进入网页；其他账号只消费，不能反向覆盖。普通同事界面不展示无业务意义的规则包版本号。
 
@@ -91,6 +91,7 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 | BI 门户 UI 口径 / priceScatter | `docs/bi-portal-ui-current.md` |
 | 2026-07-10 全面审查与优化闭环 | `docs/optimization-review-2026-07-10.md` |
 | 2026.07.12 自动运营 V2 发布说明 | `docs/bi-ops-v2-release-2026-07-12.md` |
+| 2026.07.16.1 自动运营与 Partner CLI 发布说明 | `docs/bi-ops-release-2026-07-16.md` |
 | BI 仓库模型 | `docs/bi-warehouse-model.md` |
 | SHEIN 后台数据地图 | `docs/shein-backend-survey.md` |
 | SHEIN 官方 OpenAPI 接入 | `docs/shein-openapi-integration.md` |
@@ -100,6 +101,7 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 | SHEIN WebHook 接收器设计 | `docs/shein-webhook-receiver-design.md` |
 | 营销活动报名价格规则 | `docs/marketing-campaign-signup-pricing-rules.md` |
 | 营销折扣自动化路线图 | `docs/marketing-automation-roadmap.md` |
+| 每日营销巡检交接与执行规则 | `docs/marketing-daily-inspection-handoff.md` |
 | scripts 脚本清单与废弃边界 | `docs/scripts-inventory.md` |
 | 负责人经验单向同步 | `docs/owner-knowledge-sync.md` |
 | 数据模型 | `docs/data-model.md` |

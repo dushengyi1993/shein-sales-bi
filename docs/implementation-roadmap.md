@@ -1,6 +1,6 @@
-# 实施路线与当前阶段
+# 实施路线（历史路线图）
 
-> 2026-05-29 更新：本地局域网试用和 GitHub 托管已完成；本地 BI 已封存，云端 BI `https://sa.dushengyi.cc/` 是正式入口，旧 IP `http://43.165.167.135/` 仅作兜底。销售、ET、飞书日报手动入口、异常通知、RTV 完整复核、链接/业务域日更、登录态巡检和只读问数机器人均已有云端 systemd 入口；19 店 OpenAPI 已完成授权并进入销售/退货/商品隔离双跑；下面早期阶段保留为路线回顾。
+> 本文保留实施阶段与决策背景，不是当前生产排班的权威来源。当前 unit 参数以 `infra/systemd/` 为准，生产 runbook 见 [cloud-bi-operations.md](cloud-bi-operations.md)。本地局域网试用和 GitHub 托管已完成；本地 BI 已封存，云端 BI `https://sa.dushengyi.cc/` 是正式入口，旧 IP `http://43.165.167.135/` 仅作兜底。
 
 ## 已完成主线
 
@@ -21,7 +21,7 @@
 - 月表由 `店铺日报事实` 重算生成。
 - 只保留当月和上个月的独立月表，更早月份进入年度汇总。
 - 当前云端 systemd 调度：
-  - `shein-bi-cloud-today.timer` 在 `00/02/04/06/10/12/14/16/18/20/22:00` 刷新当天销售、入仓并生成 BI Portal；
+  - 当前生产调度已迁交 systemd；具体触发时间不在历史路线图维护，见 [cloud-bi-operations.md](cloud-bi-operations.md)。
   - `shein-bi-cloud-morning-chain.timer` 每天 `08:00` 先刷新销售，再启动慢变日更；当前飞书日报自动发送已停用；
   - `shein-bi-cloud-yesterday.timer` 每天 `03:00` 刷新前一天最终销售并复核稳定日；
   - `shein-bi-db-backup.timer` 每天 `02:40` 备份数据库；
