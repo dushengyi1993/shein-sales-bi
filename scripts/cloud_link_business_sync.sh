@@ -62,6 +62,40 @@ NODE
   done
 }
 
+write_link_business_success() {
+  local portal_refreshed="$1"
+  mkdir -p "$ROOT/state/cloud_ops_alerts"
+  DATE="$DATE" \
+  LOG_FILE="$LOG_FILE" \
+  PORTAL_REFRESHED="$portal_refreshed" \
+  SUCCESS_STORES="${SUCCESS_STORES[*]}" \
+  node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+
+const root = process.cwd();
+const successfulStores = String(process.env.SUCCESS_STORES || '')
+  .split(/\s+/)
+  .map(value => value.trim().toUpperCase())
+  .filter(Boolean);
+const payload = {
+  ok: true,
+  date: process.env.DATE,
+  generatedAt: new Date().toISOString(),
+  successfulStores,
+  failedStores: [],
+  metricReady: true,
+  warehouseLoaded: true,
+  portalRefreshed: ['1', 'true'].includes(String(process.env.PORTAL_REFRESHED || '').toLowerCase()),
+  logFile: process.env.LOG_FILE,
+};
+const file = path.join(root, 'state', 'cloud_ops_alerts', 'link-business-last-success.json');
+const tmp = `${file}.${process.pid}.tmp`;
+fs.writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+fs.renameSync(tmp, file);
+NODE
+}
+
 store_profile_dir() {
   local key="$1"
   STORE_KEY="$key" node -e "const fs=require('fs'); const path=require('path'); const cfg=JSON.parse(fs.readFileSync('config/stores.json','utf8')); const s=(cfg.stores||[]).find(x=>String(x.storeKey).toUpperCase()===process.env.STORE_KEY.toUpperCase()); if(!s) process.exit(2); console.log(path.join(process.cwd(),'profiles',\`persistent-\${s.profileKey}-profile\`));"
@@ -254,6 +288,7 @@ if [[ "${SHEIN_LINK_BUSINESS_REFRESH_PORTAL:-1}" != "1" && "${SHEIN_LINK_BUSINES
   echo "[cloud_link_business_sync] warehouse load done; skip portal refresh because SHEIN_LINK_BUSINESS_REFRESH_PORTAL=${SHEIN_LINK_BUSINESS_REFRESH_PORTAL:-}"
   if [[ "${#FAILED_STORES[@]}" -eq 0 ]]; then
     rm -f "$ROOT/state/cloud_ops_alerts/link-business-last-partial.json" 2>/dev/null || true
+    write_link_business_success false
   fi
   echo "[cloud_link_business_sync] done date=$DATE log=$LOG_FILE"
   exit 0
@@ -281,5 +316,6 @@ if [[ "${#FAILED_STORES[@]}" -gt 0 ]]; then
   echo "[cloud_link_business_sync] done with partial failures date=$DATE failed=${FAILED_STORES[*]} log=$LOG_FILE"
 else
   rm -f "$ROOT/state/cloud_ops_alerts/link-business-last-partial.json" 2>/dev/null || true
+  write_link_business_success true
   echo "[cloud_link_business_sync] done date=$DATE log=$LOG_FILE"
 fi

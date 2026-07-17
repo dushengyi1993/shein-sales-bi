@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {
+  assessDailyLinkBusinessRecovery,
   assessDailyMarketingScanRecovery,
   resolveMarketingScanEvidencePath,
 } from '../lib/cloud_watchdog_recovery.mjs';
@@ -102,9 +103,74 @@ assert.equal(resolveMarketingScanEvidencePath(fakeRoot, path.join(fakeRoot, 'con
 assert.equal(resolveMarketingScanEvidencePath(fakeRoot, path.join(fakeRoot, 'tmp', 'marketing-signup', 'current-price-live', '..', '..', '..', 'config.json')), null);
 assert.equal(resolveMarketingScanEvidencePath(fakeRoot, 'relative-scan.json'), null);
 
+const dailyLinkRefresh = {
+  date: '2026-07-16',
+  generatedAt: '2026-07-17T02:50:00.000Z',
+  status: 'warning',
+  message: 'link-business partial',
+};
+const linkSuccess = {
+  ok: true,
+  date: '2026-07-16',
+  generatedAt: '2026-07-17T08:30:00.000Z',
+  successfulStores: stores,
+  failedStores: [],
+  metricReady: true,
+  warehouseLoaded: true,
+  portalRefreshed: true,
+  logFile: '/srv/shein-bi/logs/cloud-link-business/repair.log',
+};
+const recoveredLink = assessDailyLinkBusinessRecovery({
+  dailyRefresh: dailyLinkRefresh,
+  linkSuccess,
+  expectedStoreKeys: stores,
+  nowMs: Date.parse('2026-07-17T17:00:00+08:00'),
+});
+assert.equal(recoveredLink.recovered, true);
+assert.equal(recoveredLink.evidence.successfulStores, 3);
+assert.equal(recoveredLink.evidence.portalRefreshed, true);
+
+assert.equal(assessDailyLinkBusinessRecovery({
+  dailyRefresh: {...dailyLinkRefresh, message: 'link-business partial RTV failed'},
+  linkSuccess,
+  expectedStoreKeys: stores,
+}).reason, 'daily_warning_not_link_business_only');
+
+assert.equal(assessDailyLinkBusinessRecovery({
+  dailyRefresh: dailyLinkRefresh,
+  linkSuccess: {...linkSuccess, generatedAt: '2026-07-17T02:40:00.000Z'},
+  expectedStoreKeys: stores,
+}).reason, 'link_business_recovery_not_newer_than_daily_warning');
+
+assert.equal(assessDailyLinkBusinessRecovery({
+  dailyRefresh: dailyLinkRefresh,
+  linkSuccess: {...linkSuccess, portalRefreshed: false},
+  expectedStoreKeys: stores,
+  nowMs: Date.parse('2026-07-17T17:00:00+08:00'),
+}).reason, 'link_business_recovery_not_complete');
+
+assert.equal(assessDailyLinkBusinessRecovery({
+  dailyRefresh: dailyLinkRefresh,
+  linkSuccess: {...linkSuccess, date: '2026-07-15'},
+  expectedStoreKeys: stores,
+  nowMs: Date.parse('2026-07-17T17:00:00+08:00'),
+}).reason, 'link_business_recovery_date_mismatch');
+
+assert.equal(assessDailyLinkBusinessRecovery({
+  dailyRefresh: dailyLinkRefresh,
+  linkSuccess: {...linkSuccess, successfulStores: stores.slice(0, 2)},
+  expectedStoreKeys: stores,
+  nowMs: Date.parse('2026-07-17T17:00:00+08:00'),
+}).reason, 'link_business_recovery_store_coverage_incomplete');
+
 const watchdogSource = fs.readFileSync(path.join(root, 'scripts', 'cloud_ops_watchdog.mjs'), 'utf8');
 assert.match(watchdogSource, /assessDailyMarketingScanRecovery/);
+assert.match(watchdogSource, /assessDailyLinkBusinessRecovery/);
 assert.match(watchdogSource, /resolveMarketingScanEvidencePath/);
 assert.match(watchdogSource, /recoveries,/);
 
-console.log('cloud_watchdog_recovery: only newer complete all-store scan evidence resolves the isolated daily scan warning');
+const linkSyncSource = fs.readFileSync(path.join(root, 'scripts', 'cloud_link_business_sync.sh'), 'utf8');
+assert.match(linkSyncSource, /link-business-last-success\.json/);
+assert.match(linkSyncSource, /write_link_business_success true/);
+
+console.log('cloud_watchdog_recovery: only newer complete all-store evidence resolves isolated marketing or link/business warnings');

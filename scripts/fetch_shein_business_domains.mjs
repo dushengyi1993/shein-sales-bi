@@ -10,6 +10,7 @@
  * It only uses the already logged-in Chrome profile for a store. No credentials
  * or request headers are persisted.
  */
+import fssync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';

@@ -40,4 +40,13 @@ assert.match(productTrafficSql, /raw_product_traffic AS MATERIALIZED/);
 assert.match(productTrafficSql, /product_traffic_keys AS MATERIALIZED/);
 assert.match(productTrafficSql, /latest_link_status AS MATERIALIZED/);
 
-console.log('bi_product_section_contract: slim sales/traffic sections and bounded matrix rendering checks passed');
+const inventorySql = generator.slice(
+  generator.indexOf('inventory_cost_product AS ('),
+  generator.indexOf('inventory_depletion_batches AS ('),
+);
+assert.match(inventorySql, /LEFT JOIN mart\.product_unit_cost_by_match_key cost_rate ON cost_rate\.match_key = k\.match_key/);
+assert.match(inventorySql, /round\(unit_cost_sar::numeric, 2\) AS unit_cost_sar/);
+assert.match(inventorySql, /round\(cost_arrived_cost_sar::numeric, 2\) AS arrived_cost_sar/);
+assert.doesNotMatch(inventorySql, /NULL::numeric AS unit_cost_sar/, 'ET-backed inventory rows must retain known cost evidence');
+
+console.log('bi_product_section_contract: slim sales/traffic sections, inventory cost continuity, and bounded matrix rendering checks passed');

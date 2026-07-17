@@ -27,6 +27,7 @@ const tests = [
   'scripts/test_product_display_name.mjs',
   'scripts/test_product_match_key_schema.mjs',
   'scripts/test_product_sku_normalizer.mjs',
+  'scripts/test_business_domain_fetch_contract.mjs',
   'scripts/test_marketing_plan_selector.mjs',
   'scripts/test_marketing_scan_resilience.mjs',
   'scripts/test_cloud_watchdog_recovery.mjs',

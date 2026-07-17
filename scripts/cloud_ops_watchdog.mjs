@@ -5,6 +5,7 @@ import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import crypto from 'node:crypto';
 import {
+  assessDailyLinkBusinessRecovery,
   assessDailyMarketingScanRecovery,
   resolveMarketingScanEvidencePath,
 } from '../lib/cloud_watchdog_recovery.mjs';
@@ -348,23 +349,44 @@ async function main() {
     issues.push(`链接/业务域日更部分店铺失败：date=${partialLinkBusiness.date || '-'} failed=${partialLinkBusiness.failedStores || '-'} log=${partialLinkBusiness.logFile || '-'}`);
   }
   const dailyRefresh = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'daily-refresh-last.json'));
+  const linkBusinessSuccess = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'link-business-last-success.json'));
   let dailyRefreshRecovery = null;
   if (dailyRefresh?.error) {
     issues.push(`日更补采状态不可读：${dailyRefresh.error}`);
   } else if (dailyRefresh?.status && dailyRefresh.status !== 'ok' && !String(dailyRefresh.status).startsWith('skipped')) {
     const guardState = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'marketing-live-guard-last.json'));
     const storeConfig = await readJsonIfExists(path.join(ROOT, 'config', 'stores.json'));
+    const configuredStores = Array.isArray(storeConfig?.stores) ? storeConfig.stores : [];
+    const expectedStoreKeys = configuredStores
+      .filter(store => store?.enabled !== false)
+      .map(store => store?.storeKey);
+    const linkRecovery = assessDailyLinkBusinessRecovery({
+      dailyRefresh,
+      linkSuccess: linkBusinessSuccess,
+      expectedStoreKeys,
+    });
     const scanFile = resolveMarketingScanEvidencePath(ROOT, guardState?.scanFile);
     const scanSnapshot = scanFile ? await readJsonIfExists(scanFile) : null;
-    const configuredStores = Array.isArray(storeConfig?.stores) ? storeConfig.stores : [];
-    dailyRefreshRecovery = scanFile
+    const marketingRecovery = scanFile
       ? assessDailyMarketingScanRecovery({
           dailyRefresh,
           guardState,
           scanSnapshot,
-          expectedStoreKeys: configuredStores.filter(store => store?.enabled !== false).map(store => store?.storeKey),
+          expectedStoreKeys,
         })
       : {recovered: false, reason: 'recovery_scan_path_invalid'};
+    dailyRefreshRecovery = linkRecovery.recovered
+      ? linkRecovery
+      : marketingRecovery.recovered
+        ? marketingRecovery
+        : {
+            recovered: false,
+            reason: 'no_verified_daily_recovery',
+            attempts: {
+              linkBusiness: linkRecovery.reason,
+              marketingScan: marketingRecovery.reason,
+            },
+          };
     if (dailyRefreshRecovery.recovered) {
       recoveries.push(dailyRefreshRecovery.evidence);
     } else {
@@ -444,6 +466,7 @@ async function main() {
     issues,
     recoveries,
     dailyRefresh,
+    linkBusinessSuccess,
     dailyRefreshRecovery,
     portal,
     coverage,

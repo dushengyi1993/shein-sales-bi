@@ -2812,9 +2812,13 @@ inventory_cost_product AS (
     dim.product_match_key(standard_goods_sn) AS match_key,
     string_agg(DISTINCT standard_goods_sn, ' / ' ORDER BY standard_goods_sn) AS cost_standard_goods_sn_list,
     count(*) AS cost_batch_count,
+    count(*) FILTER (WHERE arrived_date IS NOT NULL) AS cost_arrived_batch_count,
+    count(*) FILTER (WHERE shipped_date IS NOT NULL AND arrived_date IS NULL) AS cost_incoming_batch_count,
+    count(*) FILTER (WHERE shipped_date IS NULL) AS cost_not_shipped_batch_count,
     sum(coalesce(shipped_quantity,0)) AS cost_shipped_quantity,
     sum(coalesce(shipped_quantity,0)) FILTER (WHERE arrived_date IS NOT NULL) AS cost_arrived_quantity,
     sum(coalesce(shipped_quantity,0)) FILTER (WHERE shipped_date IS NOT NULL AND arrived_date IS NULL) AS cost_incoming_quantity,
+    sum(coalesce(cost_sar,0)) FILTER (WHERE complete_batch AND arrived_date IS NOT NULL) AS cost_arrived_cost_sar,
     min(shipped_date) AS cost_first_shipped_date,
     max(shipped_date) AS cost_latest_shipped_date,
     max(arrived_date) AS cost_latest_arrived_date,
@@ -2875,14 +2879,23 @@ inventory_depletion_products AS (
         ship.latest_event_date AS et_ship_latest_event_date,
         ship.status_summary AS et_ship_status_summary,
         coalesce(cost.cost_batch_count,0) AS cost_batch_count,
+        coalesce(cost.cost_arrived_batch_count,0) AS cost_arrived_batch_count,
+        coalesce(cost.cost_incoming_batch_count,0) AS cost_incoming_batch_count,
+        coalesce(cost.cost_not_shipped_batch_count,0) AS cost_not_shipped_batch_count,
         coalesce(cost.cost_shipped_quantity,0) AS cost_shipped_quantity,
         coalesce(cost.cost_arrived_quantity,0) AS cost_arrived_quantity,
         coalesce(cost.cost_incoming_quantity,0) AS cost_incoming_quantity,
+        coalesce(cost.cost_arrived_cost_sar,0) AS cost_arrived_cost_sar,
         cost.cost_first_shipped_date,
         cost.cost_latest_shipped_date,
         cost.cost_latest_arrived_date,
         cost.cost_batch_nos,
         cost.cost_standard_goods_sn_list,
+        cost_rate.unit_cost_sar,
+        cost_rate.avg_purchase_unit_price,
+        cost_rate.avg_volume_l,
+        cost_rate.avg_weight_kg,
+        cost_rate.ignored_reasons,
         coalesce(storage.storage_fee_30d_sar,0) AS et_storage_fee_30d_sar,
         storage.latest_fee_date AS et_storage_fee_latest_date
       FROM keys k
@@ -2890,6 +2903,7 @@ inventory_depletion_products AS (
       LEFT JOIN inventory_et_ship_product ship ON ship.match_key = k.match_key
       LEFT JOIN inventory_sales_product s ON s.match_key = k.match_key
       LEFT JOIN inventory_cost_product cost ON cost.match_key = k.match_key
+      LEFT JOIN mart.product_unit_cost_by_match_key cost_rate ON cost_rate.match_key = k.match_key
       LEFT JOIN inventory_storage_product storage ON storage.match_key = k.match_key
     ), calc AS (
       SELECT *,
@@ -2904,10 +2918,10 @@ inventory_depletion_products AS (
       coalesce(standard_goods_sn_list, standard_goods_sn) AS standard_goods_sn_list,
       NULL::text AS raw_goods_sn_list,
       goods_title,
-      0::bigint AS batch_count,
-      0::bigint AS arrived_batch_count,
-      0::bigint AS incoming_batch_count,
-      0::bigint AS not_shipped_batch_count,
+      cost_batch_count::bigint AS batch_count,
+      cost_arrived_batch_count::bigint AS arrived_batch_count,
+      cost_incoming_batch_count::bigint AS incoming_batch_count,
+      cost_not_shipped_batch_count::bigint AS not_shipped_batch_count,
       round(et_estimated_available_qty::numeric, 0) AS arrived_quantity,
       round(et_ship_in_transit_quantity::numeric, 0) AS incoming_quantity,
       0::numeric AS not_shipped_quantity,
@@ -2935,12 +2949,12 @@ inventory_depletion_products AS (
       coalesce(cost_latest_shipped_date, et_ship_latest_in_transit_date, et_ship_latest_application_date) AS latest_shipped_date,
       coalesce(cost_latest_arrived_date, et_ship_latest_event_date) AS first_arrived_date,
       coalesce(cost_latest_arrived_date, et_ship_latest_event_date) AS latest_arrived_date,
-      0::numeric AS arrived_cost_sar,
-      NULL::numeric AS unit_cost_sar,
-      NULL::numeric AS avg_purchase_unit_price,
-      NULL::numeric AS avg_volume_l,
-      NULL::numeric AS avg_weight_kg,
-      NULL::text AS ignored_reasons,
+      round(cost_arrived_cost_sar::numeric, 2) AS arrived_cost_sar,
+      round(unit_cost_sar::numeric, 2) AS unit_cost_sar,
+      round(avg_purchase_unit_price::numeric, 2) AS avg_purchase_unit_price,
+      round(avg_volume_l::numeric, 2) AS avg_volume_l,
+      round(avg_weight_kg::numeric, 3) AS avg_weight_kg,
+      ignored_reasons,
       CASE
         WHEN coalesce(et_estimated_available_qty,0) <= 0 AND coalesce(et_ship_in_transit_quantity,0) <= 0 AND coalesce(et_historical_supply_quantity,0) > 0 THEN '已断货'
         WHEN coalesce(et_estimated_available_qty,0) <= 0 AND coalesce(et_ship_in_transit_quantity,0) > 0 THEN '有在途'
