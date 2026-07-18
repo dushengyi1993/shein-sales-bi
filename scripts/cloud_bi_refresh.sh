@@ -91,6 +91,17 @@ node scripts/load_bi_warehouse.mjs \
   --skip-links \
   --skip-dashboard
 
+COST_LEDGER_STATUS=0
+if [[ "${SHEIN_BI_INVENTORY_COST_REFRESH:-1}" == "1" || "${SHEIN_BI_INVENTORY_COST_REFRESH:-1}" == "true" ]]; then
+  set +e
+  bash scripts/refresh_inventory_cost_ledger.sh
+  COST_LEDGER_STATUS=$?
+  set -e
+  if [[ "$COST_LEDGER_STATUS" -ne 0 ]]; then
+    echo "[cloud_bi_refresh] WARN inventory cost ledger refresh failed status=$COST_LEDGER_STATUS; sales facts remain available and profit keeps the previous valued snapshot" >&2
+  fi
+fi
+
 # 高频销售刷新只使用已经补采好的慢变数据快照；不要在两小时销售
 # 任务里顺手打开 SHEIN 后台扫描活动价，否则会拖慢当天经营数据刷新。
 # 慢变补采统一由 cloud_daily_refresh.sh 调度。
@@ -101,6 +112,15 @@ prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
   if ! flock -w "$PORTAL_REFRESH_LOCK_WAIT_SEC" 8; then
     echo "[cloud_bi_refresh] portal refresh lock busy after ${PORTAL_REFRESH_LOCK_WAIT_SEC}s; skip portal generation/prewarm this run"
   else
+    if [[ "$COST_LEDGER_STATUS" -eq 0 && "${SHEIN_BI_PROFIT_MART_REFRESH_DISABLED:-0}" != "1" ]]; then
+      set +e
+      bash scripts/refresh_profit_marts.sh
+      PROFIT_MART_STATUS=$?
+      set -e
+      if [[ "$PROFIT_MART_STATUS" -ne 0 ]]; then
+        echo "[cloud_bi_refresh] WARN profit mart refresh failed status=$PROFIT_MART_STATUS; portal will retain the last complete cache" >&2
+      fi
+    fi
     set +e
     node scripts/audit_bi_warehouse.mjs
     AUDIT_STATUS=$?

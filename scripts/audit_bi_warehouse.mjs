@@ -167,6 +167,63 @@ function evaluate(summary, metabase) {
   if ((counts.guided_actions || 0) > 500) warnings.push(`指导动作池过大：${counts.guided_actions} 条。`);
   if ((counts.guided_actions || 0) < 20) warnings.push(`指导动作池可能过小：${counts.guided_actions} 条。`);
 
+  const accounting = s.accountingHealth || {};
+  const profitCache = accounting.profit_cache || {};
+  if (!profitCache.status) {
+    errors.push('利润缓存尚未发布；拒绝让体检或 BI 页面回退到昂贵的实时利润视图。');
+  } else if (profitCache.status !== 'ok') {
+    errors.push(`利润缓存状态异常：${profitCache.status}。`);
+  } else {
+    const factOrderMax = String(profitCache.fact_order_max_date || '').slice(0, 10);
+    const cacheOrderMax = String(profitCache.source_max_order_date || '').slice(0, 10);
+    const factStorageMax = String(profitCache.fact_storage_fee_max_date || '').slice(0, 10);
+    const cacheStorageMax = String(profitCache.source_max_storage_fee_date || '').slice(0, 10);
+    if (factOrderMax && cacheOrderMax < factOrderMax) {
+      errors.push(`利润缓存落后于订单事实：cache=${cacheOrderMax || '-'} fact=${factOrderMax}。`);
+    }
+    if (factStorageMax && cacheStorageMax < factStorageMax) {
+      errors.push(`利润缓存落后于仓储费事实：cache=${cacheStorageMax || '-'} fact=${factStorageMax}。`);
+    }
+  }
+  const latestCostRun = accounting.latest_cost_run || {};
+  if (!latestCostRun.run_id) {
+    warnings.push('尚无已完成的移动平均成本台账运行；利润中的商品成本不能视为已锁定历史成本。');
+  } else {
+    if (latestCostRun.status !== 'completed') errors.push(`最近成本台账运行未完成：run=${latestCostRun.run_id} status=${latestCostRun.status || '-'}`);
+    if (Number(latestCostRun.frozen_rows_touched || 0) !== 0) {
+      errors.push(`最近成本台账运行触碰了冻结会计期：run=${latestCostRun.run_id} rows=${latestCostRun.frozen_rows_touched}`);
+    }
+    if (Number(latestCostRun.unvalued_sale_count || 0) > 0) {
+      warnings.push(`最近成本台账仍有 ${latestCostRun.unvalued_sale_count} 条销售缺少可用历史成本；这些行不会硬算利润。`);
+    }
+  }
+
+  const storage = accounting.storage_reconciliation || {};
+  const maxStorageDelta = Math.max(
+    Math.abs(Number(storage.max_store_delta_sar || 0)),
+    Math.abs(Number(storage.max_product_delta_sar || 0)),
+    Math.abs(Number(storage.max_product_store_delta_sar || 0)),
+  );
+  if (maxStorageDelta > 0.01) {
+    errors.push(`仓储费分摊未守恒：最大差额 ${maxStorageDelta.toFixed(4)} SAR（允许误差 0.01 SAR）。`);
+  }
+  if (Number(storage.central_pool_fee_sar || 0) > 0) {
+    warnings.push(`仍有 ${Number(storage.central_pool_fee_sar).toFixed(2)} SAR 仓储费缺少可证明的店铺归属，已进入 CENTRAL_POOL，未静默丢失。`);
+  }
+
+  const finance = accounting.finance_return_cost || {};
+  if (!finance.latest_fetched_at) {
+    warnings.push('尚未采集 OpenAPI 财务核对单或退货单实际费用；退货费只能使用按包裹估算值。');
+  } else if (Number(finance.actual_cost_lines || 0) === 0) {
+    warnings.push('OpenAPI 数据已采集，但财务核对单与退货单 performance_price 均没有非零实际退货费用；利润继续保留按包裹估算并明确标注。');
+  }
+  if (Math.abs(Number(finance.max_reconciliation_delta_sar || 0)) > 0.01) {
+    errors.push(`实际退货费分摊未守恒：最大差额 ${Number(finance.max_reconciliation_delta_sar).toFixed(4)} SAR。`);
+  }
+  if (Number(finance.unmapped_lines || 0) > 0) {
+    warnings.push(`有 ${finance.unmapped_lines} 条实际退货费尚未映射到订单行，金额 ${Number(finance.unmapped_actual_cost_sar || 0).toFixed(2)} SAR；该金额已单列风险，未静默计入或丢弃。`);
+  }
+
   return {ok: errors.length === 0, errors, warnings};
 }
 
@@ -220,6 +277,157 @@ summary AS (
       'comments_90d', (SELECT count(*) FROM fact.product_comment WHERE comment_date >= (SELECT business_date FROM latest) - interval '90 days'),
       'guided_actions', (SELECT count(*) FROM mart.bi_guided_action_current)
     ),
+    'accountingHealth', jsonb_build_object(
+      'profit_cache', coalesce((
+        SELECT jsonb_build_object(
+          'status', m.status,
+          'refreshed_at', m.refreshed_at,
+          'source_max_order_date', m.source_max_order_date,
+          'source_max_storage_fee_date', m.source_max_storage_fee_date,
+          'fact_order_max_date', (SELECT max(created_date)::date FROM fact.order_item),
+          'fact_storage_fee_max_date', (SELECT max(fee_date)::date FROM mart.et_storage_fee_daily),
+          'row_counts', m.row_counts
+        )
+        FROM mart.profit_mart_cache_meta m
+        WHERE m.cache_key = 'profit_marts'
+      ), '{}'::jsonb),
+      'latest_cost_run', coalesce((
+        SELECT jsonb_build_object(
+          'run_id', r.run_id,
+          'status', r.status,
+          'completed_at', r.completed_at,
+          'rebuild_from', r.rebuild_from,
+          'event_count', r.event_count,
+          'sale_count', r.sale_count,
+          'unvalued_sale_count', r.unvalued_sale_count,
+          'frozen_rows_touched', (
+            SELECT count(*)
+            FROM fact.inventory_cost_ledger l
+            JOIN ops.accounting_period_close c
+              ON c.month_start = date_trunc('month', l.effective_at)::date
+             AND c.status = 'frozen'
+            WHERE l.ledger_version = r.ledger_version
+          )
+        )
+        FROM ops.inventory_cost_run r
+        ORDER BY r.completed_at DESC NULLS LAST, r.started_at DESC
+        LIMIT 1
+      ), '{}'::jsonb),
+      'storage_reconciliation', coalesce((
+        WITH fee AS (
+          SELECT fee_date, sum(actual_fee_sar) AS actual_fee_sar
+          FROM mart.et_storage_fee_daily
+          GROUP BY fee_date
+        ),
+        store_alloc AS (
+          SELECT date AS fee_date, sum(allocated_storage_fee_sar) AS allocated_fee_sar
+          FROM mart.storage_fee_store_daily_cache
+          GROUP BY date
+        ),
+        product_alloc AS (
+          SELECT date AS fee_date, sum(actual_allocated_fee_sar) AS allocated_fee_sar
+          FROM mart.storage_fee_product_daily_cache
+          GROUP BY date
+        ),
+        product_store_alloc AS (
+          SELECT
+            date AS fee_date,
+            sum(storage_fee_sar) AS allocated_fee_sar,
+            sum(storage_fee_sar) FILTER (WHERE store_key = 'CENTRAL_POOL') AS central_pool_fee_sar
+          FROM mart.storage_fee_product_store_daily_cache
+          GROUP BY date
+        ),
+        reconciliation AS (
+          SELECT
+            f.fee_date,
+            f.actual_fee_sar - coalesce(s.allocated_fee_sar,0) AS store_allocation_delta_sar,
+            f.actual_fee_sar - coalesce(p.allocated_fee_sar,0) AS product_allocation_delta_sar,
+            f.actual_fee_sar - coalesce(ps.allocated_fee_sar,0) AS product_store_allocation_delta_sar,
+            coalesce(ps.central_pool_fee_sar,0) AS central_pool_fee_sar
+          FROM fee f
+          LEFT JOIN store_alloc s USING (fee_date)
+          LEFT JOIN product_alloc p USING (fee_date)
+          LEFT JOIN product_store_alloc ps USING (fee_date)
+        )
+        SELECT jsonb_build_object(
+          'days', count(*),
+          'max_store_delta_sar', coalesce(max(abs(store_allocation_delta_sar)),0),
+          'max_product_delta_sar', coalesce(max(abs(product_allocation_delta_sar)),0),
+          'max_product_store_delta_sar', coalesce(max(abs(product_store_allocation_delta_sar)),0),
+          'central_pool_fee_sar', coalesce(sum(central_pool_fee_sar),0)
+        )
+        FROM reconciliation
+      ), '{}'::jsonb),
+      'finance_return_cost', jsonb_build_object(
+        'latest_fetched_at', greatest(
+          (SELECT max(fetched_at) FROM fact.openapi_finance_check_order),
+          (SELECT max(updated_at) FROM fact.openapi_return_item)
+        ),
+        'covered_stores', (
+          SELECT count(DISTINCT store_key)
+          FROM (
+            SELECT store_key FROM fact.openapi_finance_check_order
+            UNION ALL
+            SELECT store_key FROM fact.openapi_return_item
+          ) covered
+        ),
+        'check_orders', (SELECT count(*) FROM fact.openapi_finance_check_order),
+        'settled_check_orders', (SELECT count(*) FROM fact.openapi_finance_check_order WHERE check_status = 3),
+        'finance_actual_cost_lines', (
+          SELECT count(*) FROM fact.openapi_finance_check_order_item
+          WHERE check_status = 3
+            AND (coalesce(return_expense_sar,0) <> 0 OR coalesce(return_freight_subsidy_sar,0) <> 0)
+        ),
+        'return_order_actual_cost_lines', (
+          SELECT count(*) FROM fact.openapi_return_item WHERE coalesce(performance_price,0) > 0
+        ),
+        'actual_cost_lines', (SELECT count(*) FROM mart.return_cost_actual),
+        'actual_cost_sar', (SELECT coalesce(sum(actual_return_cost_sar),0) FROM mart.return_cost_actual),
+        'actual_fee_sources', coalesce((
+          SELECT jsonb_object_agg(fee_source, source_count)
+          FROM (
+            SELECT fee_source, count(*) AS source_count
+            FROM mart.return_cost_actual
+            GROUP BY fee_source
+          ) source_counts
+        ), '{}'::jsonb),
+        'mapped_lines', (
+          SELECT count(*) FROM (
+            SELECT mapped FROM mart.finance_return_cost_reconciliation
+            UNION ALL
+            SELECT mapped FROM mart.return_order_performance_cost_reconciliation
+          ) r WHERE mapped
+        ),
+        'unmapped_lines', (
+          SELECT count(*) FROM (
+            SELECT mapped FROM mart.finance_return_cost_reconciliation
+            UNION ALL
+            SELECT mapped FROM mart.return_order_performance_cost_reconciliation
+          ) r WHERE NOT mapped
+        ),
+        'mapped_actual_cost_sar', (
+          SELECT coalesce(sum(mapped_cost_sar),0) FROM (
+            SELECT mapped_net_return_cost_sar AS mapped_cost_sar FROM mart.finance_return_cost_reconciliation
+            UNION ALL
+            SELECT mapped_return_performance_cost_sar AS mapped_cost_sar FROM mart.return_order_performance_cost_reconciliation
+          ) r
+        ),
+        'unmapped_actual_cost_sar', (
+          SELECT coalesce(sum(unmapped_cost_sar),0) FROM (
+            SELECT unmapped_net_return_cost_sar AS unmapped_cost_sar FROM mart.finance_return_cost_reconciliation
+            UNION ALL
+            SELECT unmapped_return_performance_cost_sar AS unmapped_cost_sar FROM mart.return_order_performance_cost_reconciliation
+          ) r
+        ),
+        'max_reconciliation_delta_sar', (
+          SELECT coalesce(max(abs(reconciliation_delta_sar)),0) FROM (
+            SELECT reconciliation_delta_sar FROM mart.finance_return_cost_reconciliation
+            UNION ALL
+            SELECT reconciliation_delta_sar FROM mart.return_order_performance_cost_reconciliation
+          ) r
+        )
+      )
+    ),
     'guidedActionByDomain', (SELECT coalesce(jsonb_object_agg(action_domain, n), '{}'::jsonb) FROM (SELECT action_domain, count(*) AS n FROM mart.bi_guided_action_current GROUP BY action_domain) t),
     'topRiskStores', (SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) FROM (
       SELECT store_key, sales_sar, after_sales_case_count, low_display_stock_count, low_star_comment_count, risk_score
@@ -250,6 +458,7 @@ SELECT payload::text FROM summary;
     file: path.relative(ROOT, file).replace(/\\/g, '/'),
     latestDates: summary.latestDates,
     latestCounts: summary.latestCounts,
+    accountingHealth: summary.accountingHealth,
     guidedActionByDomain: summary.guidedActionByDomain,
     warnings: evaluation.warnings,
     errors: evaluation.errors,

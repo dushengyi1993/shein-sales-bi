@@ -15,7 +15,13 @@ import {getAliasConfig} from '../lib/product_sku_normalizer.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORTAL_GENERATE_TIMEOUT_MS = Number(process.env.SHEIN_BI_PORTAL_TIMEOUT_MS || 900_000);
-const PROFIT_MART_SOURCE = String(process.env.SHEIN_BI_PROFIT_MART_SOURCE || 'view').trim().toLowerCase();
+// Canonical profit views are the calculation source for the cache refresh, not a
+// serving surface.  Falling back to them here silently recomputes the full
+// order/after-sales/storage dependency tree and turned a small portal refresh
+// into a multi-minute (sometimes multi-hour) pipeline.  Operators may still
+// request `view` explicitly for diagnostics, but production serving is
+// cache-first and fails closed if publication has not completed.
+const PROFIT_MART_SOURCE = String(process.env.SHEIN_BI_PROFIT_MART_SOURCE || 'cache').trim().toLowerCase();
 if (!['view', 'cache'].includes(PROFIT_MART_SOURCE)) {
   throw new Error(`Invalid SHEIN_BI_PROFIT_MART_SOURCE: ${PROFIT_MART_SOURCE}`);
 }
@@ -151,7 +157,7 @@ const PORTAL_SECTION_SELECTS = {
     'shipments', (SELECT data FROM inventory_et_shipments),
     'batches', '[]'::jsonb,
     'method', jsonb_build_object(
-      'stockBasis', 'ET 实际库存为准：09散件仓 + 01整箱仓为可售；SHEIN 店铺库存只作为已上架链接虚拟库存参考',
+      'stockBasis', 'ET 运营可售默认只计 09 散件仓；SK-03038 按已批准例外计 09+01。其他 01/03/04/06 仓位只作物理库存展示；SHEIN 店铺库存仅作为已上架链接虚拟库存参考',
       'shipmentBasis', '在途来自 ET 发货申请单；ET 状态 12 视为已到仓/已完成，其他状态视为在途或未入仓',
       'salesDeduction', '去化按历史毛销量和最近销量计算，不用 SHEIN 虚拟库存推算真实库存',
       'velocityRule', '加权日销 = 近7天毛销量/7 × 70% + 近30天毛销量/30 × 30%'
@@ -218,7 +224,7 @@ const PORTAL_SECTION_SELECTS = {
     'shipments', (SELECT data FROM inventory_et_shipments),
     'batches', '[]'::jsonb,
     'method', jsonb_build_object(
-      'stockBasis', 'ET 实际库存为准：09散件仓 + 01整箱仓为可售；SHEIN 店铺库存只作为已上架链接虚拟库存参考',
+      'stockBasis', 'ET 运营可售默认只计 09 散件仓；SK-03038 按已批准例外计 09+01。其他 01/03/04/06 仓位只作物理库存展示；SHEIN 店铺库存仅作为已上架链接虚拟库存参考',
       'shipmentBasis', '在途来自 ET 发货申请单；ET 状态 12 视为已到仓/已完成，其他状态视为在途或未入仓',
       'salesDeduction', '去化按历史毛销量和最近销量计算，不用 SHEIN 虚拟库存推算真实库存',
       'velocityRule', '加权日销 = 近7天毛销量/7 × 70% + 近30天毛销量/30 × 30%'
@@ -2415,6 +2421,15 @@ profit_daily_store_product AS (
       round(sum(coalesce(missing_cost_quantity,0))::numeric, 0) AS missing_cost_quantity,
       sum(coalesce(missing_cost_lines,0)) AS missing_cost_lines,
       sum(coalesce(reversal_lines,0)) AS reversal_lines,
+      round(sum(coalesce(risk_adjusted_net_revenue_sar,0))::numeric, 2) AS risk_adjusted_net_revenue_sar,
+      round(sum(coalesce(pending_revenue_risk_sar,0))::numeric, 2) AS pending_revenue_risk_sar,
+      round(sum(coalesce(risk_adjusted_profit_before_storage_sar,0))::numeric, 2) AS risk_adjusted_profit_before_storage_sar,
+      round(sum(coalesce(risk_adjusted_profit_after_storage_sar,0))::numeric, 2) AS risk_adjusted_profit_after_storage_sar,
+      sum(coalesce(pending_revenue_risk_lines,0)) AS pending_revenue_risk_lines,
+      round(sum(coalesce(pending_impact_quantity,0))::numeric, 0) AS pending_impact_quantity,
+      round(sum(coalesce(pending_impact_amount_sar,0))::numeric, 2) AS pending_impact_amount_sar,
+      round(sum(coalesce(actual_return_cost_sar,0))::numeric, 2) AS actual_return_cost_sar,
+      round(sum(coalesce(estimated_return_delivery_fee_sar,0))::numeric, 2) AS estimated_return_delivery_fee_sar,
       CASE WHEN sum(coalesce(net_revenue_sar,0)) FILTER (WHERE missing_cost_lines = 0) > 0
         THEN round((sum(coalesce(profit_before_storage_sar,0)) / nullif(sum(coalesce(known_net_revenue_sar,0)),0))::numeric, 4)
         ELSE NULL END AS profit_margin_before_storage,
@@ -2424,7 +2439,8 @@ profit_daily_store_product AS (
       CASE WHEN sum(coalesce(net_revenue_sar,0)) > 0
         THEN round((sum(coalesce(known_net_revenue_sar,0)) / nullif(sum(coalesce(net_revenue_sar,0)),0))::numeric, 4)
         ELSE NULL END AS cost_coverage_revenue_rate,
-      string_agg(DISTINCT storage_fee_method, ' / ') FILTER (WHERE coalesce(storage_fee_method,'') <> '') AS storage_fee_method
+      string_agg(DISTINCT storage_fee_method, ' / ') FILTER (WHERE coalesce(storage_fee_method,'') <> '') AS storage_fee_method,
+      string_agg(DISTINCT storage_allocation_stage, ' / ') FILTER (WHERE coalesce(storage_allocation_stage,'') <> '') AS storage_allocation_stage
     FROM ${profitDailyStoreProduct}
     WHERE coalesce(standard_goods_sn,'') <> ''
     GROUP BY date, store_key, group_key, standard_goods_sn
@@ -2457,7 +2473,16 @@ profit_month_group AS (
       round(cost_coverage_revenue_rate::numeric, 4) AS cost_coverage_revenue_rate,
       round(missing_cost_revenue_sar::numeric, 2) AS missing_cost_revenue_sar,
       missing_cost_lines,
-      reversal_lines
+      reversal_lines,
+      round(risk_adjusted_net_revenue_sar::numeric, 2) AS risk_adjusted_net_revenue_sar,
+      round(pending_revenue_risk_sar::numeric, 2) AS pending_revenue_risk_sar,
+      round(risk_adjusted_profit_before_storage_sar::numeric, 2) AS risk_adjusted_profit_before_storage_sar,
+      round(risk_adjusted_profit_after_storage_sar::numeric, 2) AS risk_adjusted_profit_after_storage_sar,
+      round(risk_adjusted_profit_margin_after_storage::numeric, 4) AS risk_adjusted_profit_margin_after_storage,
+      pending_revenue_risk_lines,
+      round(actual_return_cost_sar::numeric, 2) AS actual_return_cost_sar,
+      round(estimated_return_delivery_fee_sar::numeric, 2) AS estimated_return_delivery_fee_sar,
+      storage_fee_method
     FROM ${profitMonthGroup}
     ORDER BY month_start, group_key
   ) t
@@ -2493,6 +2518,17 @@ profit_product_summary AS (
       round(missing_cost_quantity::numeric, 0) AS missing_cost_quantity,
       missing_cost_lines,
       reversal_lines,
+      round(risk_adjusted_net_revenue_sar::numeric, 2) AS risk_adjusted_net_revenue_sar,
+      round(pending_revenue_risk_sar::numeric, 2) AS pending_revenue_risk_sar,
+      round(risk_adjusted_profit_before_storage_sar::numeric, 2) AS risk_adjusted_profit_before_storage_sar,
+      round(risk_adjusted_profit_after_storage_sar::numeric, 2) AS risk_adjusted_profit_after_storage_sar,
+      round(risk_adjusted_profit_margin_after_storage::numeric, 4) AS risk_adjusted_profit_margin_after_storage,
+      pending_revenue_risk_lines,
+      round(pending_impact_quantity::numeric, 0) AS pending_impact_quantity,
+      round(pending_impact_amount_sar::numeric, 2) AS pending_impact_amount_sar,
+      round(actual_return_cost_sar::numeric, 2) AS actual_return_cost_sar,
+      round(estimated_return_delivery_fee_sar::numeric, 2) AS estimated_return_delivery_fee_sar,
+      storage_allocation_stage,
       round(unit_cost_sar::numeric, 2) AS unit_cost_sar,
       complete_batch_count,
       ignored_batch_count,
@@ -2730,7 +2766,12 @@ inventory_et_ship_product AS (
   SELECT
     coalesce(nullif(dim.product_match_key(i.standard_goods_sn),''), nullif(dim.product_match_key(i.match_key),''), nullif(i.match_key,'')) AS match_key,
     dim.product_canonical_sn(coalesce(nullif(dim.product_match_key(max(i.standard_goods_sn)),''), nullif(dim.product_match_key(max(i.match_key)),''), max(i.standard_goods_sn), max(i.match_key))) AS standard_goods_sn,
-    sum(coalesce(i.quantity,0)) AS historical_supply_quantity,
+    sum(coalesce(i.quantity,0)) AS application_quantity,
+    sum(coalesce(i.quantity,0)) FILTER (
+      WHERE o.has_arrival_evidence
+         OR o.has_effective_in_transit_evidence
+         OR o.has_physical_ship_evidence
+    ) AS historical_supply_quantity,
     sum(coalesce(i.quantity,0)) FILTER (
       WHERE coalesce(o.status,'') <> '12'
         AND NOT o.has_arrival_evidence
@@ -2748,6 +2789,11 @@ inventory_et_ship_product AS (
         AND NOT o.has_arrival_evidence
         AND NOT o.has_effective_in_transit_evidence
     ) AS pending_review_order_count,
+    min(coalesce(o.shipment_departure_basis_time, o.create_time)) FILTER (
+      WHERE o.has_arrival_evidence
+         OR o.has_effective_in_transit_evidence
+         OR o.has_physical_ship_evidence
+    )::date AS first_shipped_date,
     max(o.create_time)::date AS latest_application_date,
     max(coalesce(o.shipment_departure_basis_time, o.create_time)) FILTER (
       WHERE coalesce(o.status,'') <> '12'
@@ -2759,6 +2805,8 @@ inventory_et_ship_product AS (
         AND NOT o.has_arrival_evidence
         AND NOT o.has_effective_in_transit_evidence
     )::date AS latest_pending_review_date,
+    min(coalesce(o.shipment_arrival_basis_time,o.shipment_departure_basis_time,o.into_time,o.end_time,o.ship_time,o.check_time,o.create_time)) FILTER (WHERE coalesce(o.status,'') = '12' OR o.has_arrival_evidence)::date AS first_arrived_date,
+    max(coalesce(o.shipment_arrival_basis_time,o.shipment_departure_basis_time,o.into_time,o.end_time,o.ship_time,o.check_time,o.create_time)) FILTER (WHERE coalesce(o.status,'') = '12' OR o.has_arrival_evidence)::date AS latest_arrived_date,
     max(coalesce(o.shipment_arrival_basis_time,o.shipment_departure_basis_time,o.into_time,o.end_time,o.ship_time,o.check_time,o.create_time))::date AS latest_event_date,
     string_agg(DISTINCT concat('状态', coalesce(nullif(o.status,''),'未知')), ' / ' ORDER BY concat('状态', coalesce(nullif(o.status,''),'未知'))) AS status_summary
   FROM fact.et_ship_order_item i
@@ -2801,6 +2849,7 @@ inventory_sales_product AS (
     sum(gross_quantity) AS gross_sold_quantity,
     sum(net_quantity) AS net_sold_quantity,
     sum(gross_quantity) FILTER (WHERE created_date >= (SELECT max_date FROM anchor) - interval '6 days') AS gross_sold_7d,
+    sum(gross_quantity) FILTER (WHERE created_date >= (SELECT max_date FROM anchor) - interval '13 days') AS gross_sold_14d,
     sum(gross_quantity) FILTER (WHERE created_date >= (SELECT max_date FROM anchor) - interval '29 days') AS gross_sold_30d,
     max(created_date) FILTER (WHERE gross_quantity > 0) AS last_sale_date,
     min(created_date) FILTER (WHERE gross_quantity > 0) AS first_sale_date
@@ -2821,6 +2870,7 @@ inventory_cost_product AS (
     sum(coalesce(cost_sar,0)) FILTER (WHERE complete_batch AND arrived_date IS NOT NULL) AS cost_arrived_cost_sar,
     min(shipped_date) AS cost_first_shipped_date,
     max(shipped_date) AS cost_latest_shipped_date,
+    min(arrived_date) AS cost_first_arrived_date,
     max(arrived_date) AS cost_latest_arrived_date,
     string_agg(DISTINCT nullif(batch_no,''), ', ' ORDER BY nullif(batch_no,'')) FILTER (WHERE coalesce(batch_no,'') <> '') AS cost_batch_nos
   FROM fact.product_cost_batch
@@ -2852,31 +2902,49 @@ inventory_depletion_products AS (
         coalesce(s.gross_sold_quantity,0) AS gross_sold_quantity,
         coalesce(s.net_sold_quantity,0) AS net_sold_quantity,
         coalesce(s.gross_sold_7d,0) AS gross_sold_7d,
+        coalesce(s.gross_sold_14d,0) AS gross_sold_14d,
         coalesce(s.gross_sold_30d,0) AS gross_sold_30d,
         s.last_sale_date,
         s.first_sale_date,
-        coalesce(et.loose_sellable_qty,0) AS et_loose_sellable_qty,
-        coalesce(et.full_carton_qty,0) AS et_full_carton_qty,
-        coalesce(et.rtv_qty,0) AS et_rtv_qty,
-        coalesce(et.damaged_qty,0) AS et_damaged_qty,
-        coalesce(et.scrap_qty,0) AS et_scrap_qty,
-        coalesce(et.estimated_available_qty,0) AS et_estimated_available_qty,
-        coalesce(et.pending_process_qty,0) AS et_pending_process_qty,
-        coalesce(et.box_count,0) AS et_box_count,
+        et.loose_sellable_qty AS et_loose_sellable_qty,
+        et.full_carton_qty AS et_full_carton_qty,
+        et.rtv_qty AS et_rtv_qty,
+        et.damaged_qty AS et_damaged_qty,
+        et.scrap_qty AS et_scrap_qty,
+        -- Operational sellable stock is policy-controlled in the ET mart.
+        -- Keep all-warehouse physical stock separate; never blend it into the
+        -- quantity used for stockout, replenishment, or marketing decisions.
+        et.operational_sellable_qty AS et_estimated_available_qty,
+        et.estimated_available_qty AS et_all_warehouse_inventory_qty,
+        et.operational_stock_policy AS et_operational_stock_policy,
+        et.pending_process_qty AS et_pending_process_qty,
+        et.box_count AS et_box_count,
         et.loose_warehouses AS et_loose_warehouses,
         et.box_warehouses AS et_box_warehouses,
         et.store_snapshot_date AS et_store_snapshot_date,
         et.box_snapshot_date AS et_box_snapshot_date,
-        coalesce(ship.historical_supply_quantity,0) AS et_historical_supply_quantity,
-        coalesce(ship.in_transit_quantity,0) AS et_ship_in_transit_quantity,
-        coalesce(ship.pending_review_quantity,0) AS et_ship_pending_review_quantity,
-        coalesce(ship.arrived_quantity,0) AS et_ship_arrived_quantity,
+        CASE
+          WHEN et.match_key IS NULL THEN 'not_matched'
+          WHEN k.match_key = 'SK03038' AND et.box_snapshot_date IS NULL THEN 'not_matched'
+          WHEN k.match_key <> 'SK03038' AND et.store_snapshot_date IS NULL THEN 'not_matched'
+          WHEN k.match_key = 'SK03038' AND et.box_snapshot_date < current_date - 3 THEN 'stale'
+          WHEN k.match_key <> 'SK03038' AND et.store_snapshot_date < current_date - 3 THEN 'stale'
+          ELSE 'matched'
+        END AS inventory_match_status,
+        ship.historical_supply_quantity AS et_historical_supply_quantity,
+        ship.application_quantity AS et_ship_application_quantity,
+        ship.in_transit_quantity AS et_ship_in_transit_quantity,
+        ship.pending_review_quantity AS et_ship_pending_review_quantity,
+        ship.arrived_quantity AS et_ship_arrived_quantity,
         ship.ship_order_count AS et_ship_order_count,
         ship.pending_review_order_count AS et_ship_pending_review_order_count,
         ship.latest_application_date AS et_ship_latest_application_date,
+        ship.first_shipped_date AS et_ship_first_shipped_date,
         ship.latest_in_transit_date AS et_ship_latest_in_transit_date,
         ship.latest_pending_review_date AS et_ship_latest_pending_review_date,
         ship.latest_event_date AS et_ship_latest_event_date,
+        ship.first_arrived_date AS et_ship_first_arrived_date,
+        ship.latest_arrived_date AS et_ship_latest_arrived_date,
         ship.status_summary AS et_ship_status_summary,
         coalesce(cost.cost_batch_count,0) AS cost_batch_count,
         coalesce(cost.cost_arrived_batch_count,0) AS cost_arrived_batch_count,
@@ -2888,6 +2956,7 @@ inventory_depletion_products AS (
         coalesce(cost.cost_arrived_cost_sar,0) AS cost_arrived_cost_sar,
         cost.cost_first_shipped_date,
         cost.cost_latest_shipped_date,
+        cost.cost_first_arrived_date,
         cost.cost_latest_arrived_date,
         cost.cost_batch_nos,
         cost.cost_standard_goods_sn_list,
@@ -2908,7 +2977,11 @@ inventory_depletion_products AS (
     ), calc AS (
       SELECT *,
         ((coalesce(gross_sold_7d,0) / 7.0 * 0.7) + (coalesce(gross_sold_30d,0) / 30.0 * 0.3)) AS weighted_daily_gross_sales,
-        (coalesce(et_estimated_available_qty,0) + coalesce(et_ship_in_transit_quantity,0)) AS et_current_total_supply_quantity,
+        CASE
+          WHEN inventory_match_status = 'matched'
+          THEN coalesce(et_estimated_available_qty,0) + coalesce(et_ship_in_transit_quantity,0)
+          ELSE NULL
+        END AS et_current_total_supply_quantity,
         greatest(coalesce(et_historical_supply_quantity,0), coalesce(cost_shipped_quantity,0)) AS supply_evidence_quantity
       FROM joined
     )
@@ -2922,14 +2995,14 @@ inventory_depletion_products AS (
       cost_arrived_batch_count::bigint AS arrived_batch_count,
       cost_incoming_batch_count::bigint AS incoming_batch_count,
       cost_not_shipped_batch_count::bigint AS not_shipped_batch_count,
-      round(et_estimated_available_qty::numeric, 0) AS arrived_quantity,
+      round(et_ship_arrived_quantity::numeric, 0) AS arrived_quantity,
       round(et_ship_in_transit_quantity::numeric, 0) AS incoming_quantity,
       0::numeric AS not_shipped_quantity,
       round(gross_sold_quantity::numeric, 0) AS gross_sold_quantity,
       round(net_sold_quantity::numeric, 0) AS net_sold_quantity,
       0::numeric AS reversal_quantity,
       0::bigint AS reversal_lines,
-      round(et_estimated_available_qty::numeric, 0) AS estimated_on_hand_quantity,
+      CASE WHEN inventory_match_status = 'matched' THEN round(et_estimated_available_qty::numeric, 0) ELSE NULL::numeric END AS estimated_on_hand_quantity,
       round(et_current_total_supply_quantity::numeric, 0) AS estimated_total_supply_quantity,
       0::numeric AS oversold_or_missing_batch_quantity,
       CASE
@@ -2939,16 +3012,16 @@ inventory_depletion_products AS (
       END AS depletion_rate,
       round(gross_sold_7d::numeric, 0) AS gross_sold_7d,
       round(gross_sold_30d::numeric, 0) AS gross_sold_30d,
-      round(gross_sold_30d::numeric, 0) AS gross_sold_14d,
+      round(gross_sold_14d::numeric, 0) AS gross_sold_14d,
       round(weighted_daily_gross_sales::numeric, 2) AS weighted_daily_gross_sales,
-      round(CASE WHEN weighted_daily_gross_sales > 0 THEN et_estimated_available_qty / NULLIF(weighted_daily_gross_sales,0) ELSE NULL END::numeric, 1) AS days_of_supply_on_hand,
-      round(CASE WHEN weighted_daily_gross_sales > 0 THEN et_current_total_supply_quantity / NULLIF(weighted_daily_gross_sales,0) ELSE NULL END::numeric, 1) AS days_of_supply_with_incoming,
+      round(CASE WHEN inventory_match_status = 'matched' AND weighted_daily_gross_sales > 0 THEN et_estimated_available_qty / NULLIF(weighted_daily_gross_sales,0) ELSE NULL END::numeric, 1) AS days_of_supply_on_hand,
+      round(CASE WHEN inventory_match_status = 'matched' AND weighted_daily_gross_sales > 0 THEN et_current_total_supply_quantity / NULLIF(weighted_daily_gross_sales,0) ELSE NULL END::numeric, 1) AS days_of_supply_with_incoming,
       last_sale_date,
       first_sale_date,
-      coalesce(cost_first_shipped_date, et_ship_latest_application_date) AS first_shipped_date,
-      coalesce(cost_latest_shipped_date, et_ship_latest_in_transit_date, et_ship_latest_application_date) AS latest_shipped_date,
-      coalesce(cost_latest_arrived_date, et_ship_latest_event_date) AS first_arrived_date,
-      coalesce(cost_latest_arrived_date, et_ship_latest_event_date) AS latest_arrived_date,
+      least(et_ship_first_shipped_date, cost_first_shipped_date) AS first_shipped_date,
+      greatest(et_ship_latest_in_transit_date, et_ship_latest_application_date, cost_latest_shipped_date) AS latest_shipped_date,
+      least(et_ship_first_arrived_date, cost_first_arrived_date) AS first_arrived_date,
+      greatest(et_ship_latest_arrived_date, cost_latest_arrived_date) AS latest_arrived_date,
       round(cost_arrived_cost_sar::numeric, 2) AS arrived_cost_sar,
       round(unit_cost_sar::numeric, 2) AS unit_cost_sar,
       round(avg_purchase_unit_price::numeric, 2) AS avg_purchase_unit_price,
@@ -2956,26 +3029,33 @@ inventory_depletion_products AS (
       round(avg_weight_kg::numeric, 3) AS avg_weight_kg,
       ignored_reasons,
       CASE
-        WHEN coalesce(et_estimated_available_qty,0) <= 0 AND coalesce(et_ship_in_transit_quantity,0) <= 0 AND coalesce(et_historical_supply_quantity,0) > 0 THEN '已断货'
+        WHEN inventory_match_status = 'matched' AND coalesce(et_estimated_available_qty,0) <= 0 AND coalesce(et_ship_in_transit_quantity,0) <= 0 AND coalesce(et_historical_supply_quantity,0) > 0 THEN '已断货'
+        WHEN coalesce(et_ship_in_transit_quantity,0) > 0 AND inventory_match_status <> 'matched' THEN '有在途（在库未知）'
+        WHEN inventory_match_status = 'not_matched' THEN '未匹配ET'
+        WHEN inventory_match_status = 'stale' THEN 'ET快照过期'
         WHEN coalesce(et_estimated_available_qty,0) <= 0 AND coalesce(et_ship_in_transit_quantity,0) > 0 THEN '有在途'
-        WHEN coalesce(et_estimated_available_qty,0) > 0 AND weighted_daily_gross_sales > 0 AND et_estimated_available_qty / NULLIF(weighted_daily_gross_sales,0) <= 30 THEN '即将断货'
+        WHEN inventory_match_status = 'matched' AND coalesce(et_estimated_available_qty,0) > 0 AND weighted_daily_gross_sales > 0 AND et_estimated_available_qty / NULLIF(weighted_daily_gross_sales,0) <= 30 THEN '即将断货'
         WHEN coalesce(et_ship_in_transit_quantity,0) > 0 THEN '有在途'
-        WHEN coalesce(et_estimated_available_qty,0) > 0 AND coalesce(gross_sold_30d,0) <= 0 THEN '完全卖不动'
+        WHEN inventory_match_status = 'matched' AND coalesce(et_estimated_available_qty,0) > 0 AND coalesce(gross_sold_30d,0) <= 0 THEN '完全卖不动'
         ELSE '正常'
       END AS stock_status,
       CASE
-        WHEN coalesce(et_estimated_available_qty,0) <= 0 AND coalesce(et_historical_supply_quantity,0) > 0 THEN 'high'
-        WHEN coalesce(et_estimated_available_qty,0) > 0 AND weighted_daily_gross_sales > 0 AND et_estimated_available_qty / NULLIF(weighted_daily_gross_sales,0) <= 30 THEN 'high'
-        WHEN coalesce(et_ship_in_transit_quantity,0) > 0 OR (coalesce(et_estimated_available_qty,0) > 0 AND coalesce(gross_sold_30d,0) <= 0) THEN 'mid'
+        WHEN inventory_match_status = 'matched' AND coalesce(et_estimated_available_qty,0) <= 0 AND coalesce(et_historical_supply_quantity,0) > 0 THEN 'high'
+        WHEN inventory_match_status = 'matched' AND coalesce(et_estimated_available_qty,0) > 0 AND weighted_daily_gross_sales > 0 AND et_estimated_available_qty / NULLIF(weighted_daily_gross_sales,0) <= 30 THEN 'high'
+        WHEN inventory_match_status <> 'matched' OR coalesce(et_ship_in_transit_quantity,0) > 0 OR (coalesce(et_estimated_available_qty,0) > 0 AND coalesce(gross_sold_30d,0) <= 0) THEN 'mid'
         ELSE 'low'
       END AS risk_level,
-      (et_estimated_available_qty IS NOT NULL) AS has_et_inventory,
+      (inventory_match_status <> 'not_matched') AS has_et_inventory,
+      inventory_match_status,
+      CASE WHEN inventory_match_status = 'matched' THEN round(et_estimated_available_qty::numeric, 0) ELSE NULL::numeric END AS current_sellable_quantity,
       round(et_loose_sellable_qty::numeric, 0) AS et_loose_sellable_qty,
       round(et_full_carton_qty::numeric, 0) AS et_full_carton_qty,
       round(et_rtv_qty::numeric, 0) AS et_rtv_qty,
       round(et_damaged_qty::numeric, 0) AS et_damaged_qty,
       round(et_scrap_qty::numeric, 0) AS et_scrap_qty,
       round(et_estimated_available_qty::numeric, 0) AS et_estimated_available_qty,
+      round(et_all_warehouse_inventory_qty::numeric, 0) AS et_all_warehouse_inventory_qty,
+      et_operational_stock_policy,
       round(et_pending_process_qty::numeric, 0) AS et_pending_process_qty,
       round(et_box_count::numeric, 0) AS et_box_count,
       et_loose_warehouses,
@@ -2984,6 +3064,7 @@ inventory_depletion_products AS (
       et_box_snapshot_date,
       round(et_historical_supply_quantity::numeric, 0) AS et_declared_shipped_quantity,
       round(et_historical_supply_quantity::numeric, 0) AS et_historical_supply_quantity,
+      round(et_ship_application_quantity::numeric, 0) AS et_ship_application_quantity,
       round(cost_shipped_quantity::numeric, 0) AS cost_table_shipped_quantity,
       round(cost_arrived_quantity::numeric, 0) AS cost_table_arrived_quantity,
       round(cost_incoming_quantity::numeric, 0) AS cost_table_incoming_quantity,
@@ -2994,8 +3075,8 @@ inventory_depletion_products AS (
       cost_batch_nos,
       cost_standard_goods_sn_list,
       round(supply_evidence_quantity::numeric, 0) AS supply_evidence_quantity,
-      round(greatest(coalesce(et_estimated_available_qty,0) + coalesce(et_ship_in_transit_quantity,0) + coalesce(gross_sold_quantity,0) - coalesce(et_historical_supply_quantity,0), 0)::numeric, 0) AS et_ship_capture_gap_quantity,
-      round(greatest(coalesce(et_estimated_available_qty,0) + coalesce(et_ship_in_transit_quantity,0) + coalesce(gross_sold_quantity,0) - coalesce(supply_evidence_quantity,0), 0)::numeric, 0) AS supply_reconcile_gap_quantity,
+      CASE WHEN inventory_match_status = 'matched' THEN round(greatest(coalesce(et_estimated_available_qty,0) + coalesce(et_ship_in_transit_quantity,0) + coalesce(gross_sold_quantity,0) - coalesce(et_historical_supply_quantity,0), 0)::numeric, 0) ELSE NULL::numeric END AS et_ship_capture_gap_quantity,
+      CASE WHEN inventory_match_status = 'matched' THEN round(greatest(coalesce(et_estimated_available_qty,0) + coalesce(et_ship_in_transit_quantity,0) + coalesce(gross_sold_quantity,0) - coalesce(supply_evidence_quantity,0), 0)::numeric, 0) ELSE NULL::numeric END AS supply_reconcile_gap_quantity,
       round(et_ship_in_transit_quantity::numeric, 0) AS et_ship_in_transit_quantity,
       round(et_ship_pending_review_quantity::numeric, 0) AS et_ship_pending_review_quantity,
       round(et_ship_arrived_quantity::numeric, 0) AS et_ship_arrived_quantity,
@@ -8653,11 +8734,13 @@ function renderKpisNoGroupsPreview(){
     {label:'最近点击/支付率', value:trafficRows.length ? ((trafficLatest.avg_click_rate == null ? '—' : pct(trafficLatest.avg_click_rate))+' / '+(trafficLatest.avg_pay_rate == null ? '—' : pct(trafficLatest.avg_pay_rate))) : '—', note:trafficRows.length ? (trafficLatest.date || '-') : trafficRangeNote}
   ];
   const inventoryRows = previewInventoryProductRows();
-  const inventoryTotalSupply = inventoryRows.reduce((s,r)=>s+Number(r.estimated_total_supply_quantity || 0),0);
-  const inventoryAvailable = inventoryRows.reduce((s,r)=>s+Number(r.et_estimated_available_qty || 0),0);
-  const inventoryOnHand = inventoryRows.reduce((s,r)=>s+Number(r.estimated_on_hand_quantity || 0),0);
+  const inventoryKnownRows = inventoryRows.filter(r => String(r.inventory_match_status || '').toLowerCase() === 'matched');
+  const inventoryUnknownCount = inventoryRows.length - inventoryKnownRows.length;
+  const inventoryTotalSupply = inventoryKnownRows.reduce((s,r)=>s+Number(r.estimated_total_supply_quantity || 0),0);
+  const inventoryAvailable = inventoryKnownRows.reduce((s,r)=>s+Number(r.current_sellable_quantity ?? r.et_estimated_available_qty ?? 0),0);
+  const inventoryAllWarehouse = inventoryKnownRows.reduce((s,r)=>s+Number(r.et_all_warehouse_inventory_qty || 0),0);
   const inventoryIncoming = inventoryRows.reduce((s,r)=>s+Number(r.incoming_quantity || 0),0);
-  const inventoryDailySales = inventoryRows.reduce((s,r)=>s+Number(r.weighted_daily_gross_sales || 0),0);
+  const inventoryDailySales = inventoryKnownRows.reduce((s,r)=>s+Number(r.weighted_daily_gross_sales || 0),0);
   const inventoryDaysWithIncoming = inventoryDailySales > 0 ? inventoryTotalSupply / inventoryDailySales : null;
   const inventoryAvailableDays = inventoryDailySales > 0 ? inventoryAvailable / inventoryDailySales : null;
   const inventoryDaysText = inventoryDailySales > 0
@@ -8666,9 +8749,9 @@ function renderKpisNoGroupsPreview(){
   const inventorySnapshotDate = latestInventorySnapshotDate(inventoryRows);
   const inventoryScopeNote = (productScopeQuery() ? '当前货号筛选' : '全部货号') + ' · 成本/ET库存不按店铺拆';
   const inventoryCardRows = [
-    {label:'货号数', value:num(inventoryRows.length)+' 个', note:inventoryScopeNote},
-    {label:'ET可售', value:num(inventoryAvailable)+' 件', note:'ET实盘；不与在途相加'},
-    {label:'成本表在库', value:num(inventoryOnHand)+' 件', note:inventorySnapshotDate},
+    {label:'货号数', value:num(inventoryRows.length)+' 个', note:inventoryScopeNote+'；库存未知 '+num(inventoryUnknownCount)},
+    {label:'ET运营可售', value:num(inventoryAvailable)+' 件', note:'仅汇总快照新鲜且已匹配货号'},
+    {label:'ET全仓物理量', value:num(inventoryAllWarehouse)+' 件', note:inventorySnapshotDate+'；不直接用于补货/断货'},
     {label:'成本表在途', value:num(inventoryIncoming)+' 件', note:'已发未完整到仓/计费'},
     {label:'成本表供给', value:num(inventoryTotalSupply)+' 件', note:'到仓 + 在途 - 已售'},
     {label:'去化周期', value:inventoryDaysText, note:inventoryDailySales > 0 ? '按 '+fmt.format(inventoryDailySales)+' 件/天；可售只看 ET 当前可卖库存' : '无动销速度'}
@@ -9286,9 +9369,11 @@ function renderPreviewInventoryPanel(){
   const rows = previewInventoryProductRows();
   const alerts = previewInventoryAlertRows();
   if (!rows.length) return panel('库存 / 去化指标表', '云端 core 暂无匹配货号的库存去化数据。', '<div class="empty">当前筛选下暂无库存/去化数据。</div>');
-  const totalSupply = rows.reduce((s,r)=>s+Number(r.estimated_total_supply_quantity || 0),0);
-  const available = rows.reduce((s,r)=>s+Number(r.et_estimated_available_qty || 0),0);
-  const onHand = rows.reduce((s,r)=>s+Number(r.estimated_on_hand_quantity || 0),0);
+  const knownRows = rows.filter(r => String(r.inventory_match_status || '').toLowerCase() === 'matched');
+  const unknownCount = rows.length - knownRows.length;
+  const totalSupply = knownRows.reduce((s,r)=>s+Number(r.estimated_total_supply_quantity || 0),0);
+  const available = knownRows.reduce((s,r)=>s+Number(r.current_sellable_quantity ?? r.et_estimated_available_qty ?? 0),0);
+  const allWarehouse = knownRows.reduce((s,r)=>s+Number(r.et_all_warehouse_inventory_qty || 0),0);
   const highRisk = rows.filter(r => String(r.risk_level || '').toLowerCase() === 'high').length;
   const sorted = [...rows].sort((a,b) => {
     const ar = String(a.risk_level || '').toLowerCase() === 'high' ? 0 : 1;
@@ -9299,9 +9384,10 @@ function renderPreviewInventoryPanel(){
   const summary = '<div class="home-bars" style="margin-bottom:12px">'+
     [
       {label:'货号数', value:num(rows.length)+' 个'},
-      {label:'ET估算可售', value:num(available)+' 件'},
-      {label:'在库估算', value:num(onHand)+' 件'},
+      {label:'ET运营可售', value:num(available)+' 件'},
+      {label:'ET全仓物理量', value:num(allWarehouse)+' 件'},
       {label:'总供给（含在途）', value:num(totalSupply)+' 件'},
+      {label:'库存未知', value:num(unknownCount)+' 个'},
       {label:'高风险去化', value:num(highRisk)+' 个'},
       {label:'低展示库存预警', value:num(alerts.length)+' 条'}
     ].map(x => '<div class="home-bar" style="grid-template-columns:minmax(130px,180px) 1fr auto"><b>'+escapeHtml(x.label)+'</b><i style="width:100%;--bar-color:#14b8a6"></i><span>'+escapeHtml(x.value)+'</span></div>').join('')+
@@ -9312,11 +9398,11 @@ function renderPreviewInventoryPanel(){
     '<div class="table-note"><b>库存 / 去化指标表</b>：按货号展示 ET 可售、总供给、销量速度和去化天数。</div>'+
     table(sorted, [
       ['货号', r => '<b>'+escapeHtml(productDisplayName(r))+'</b><div class="muted">'+escapeHtml(r.standard_goods_sn || r.match_key || '-')+'</div>'],
-      ['ET可售', r => num(r.et_estimated_available_qty || 0), 'num'],
-      ['总供给', r => num(r.estimated_total_supply_quantity || 0), 'num'],
+      ['ET运营可售', r => String(r.inventory_match_status || '').toLowerCase() === 'matched' ? num(r.current_sellable_quantity ?? r.et_estimated_available_qty ?? 0) : '<span class="muted">未知</span>', 'num'],
+      ['总供给', r => String(r.inventory_match_status || '').toLowerCase() === 'matched' ? num(r.estimated_total_supply_quantity || 0) : '<span class="muted">未知</span>', 'num'],
       ['30日销量', r => num(r.gross_sold_30d || 0), 'num'],
       ['日均销量', r => fmt.format(Number(r.weighted_daily_gross_sales || 0)), 'num'],
-      ['去化天数', r => '在库 '+num(r.days_of_supply_on_hand || 0)+' / 含在途 '+num(r.days_of_supply_with_incoming || 0), 'num'],
+      ['去化天数', r => String(r.inventory_match_status || '').toLowerCase() === 'matched' ? ('在库 '+inventoryDaysText(r.days_of_supply_on_hand)+' / 含在途 '+inventoryDaysText(r.days_of_supply_with_incoming)) : '<span class="muted">未知</span>', 'num'],
       ['状态', r => '<span class="tag '+(String(r.risk_level || '').toLowerCase() === 'high' ? 'high' : 'mid')+'">'+escapeHtml(r.stock_status || r.risk_level || '-')+'</span>']
     ], {limit:8})+
     '</div>'
@@ -9785,25 +9871,26 @@ function buildPreviewInventorySeries(kind){
     };
   }
   const rows = previewInventoryProductRows();
-  if (!rows.length) return {series:[], lines:[], note:'当前筛选下暂无库存快照。'};
-  const snapshotDate = latestInventorySnapshotDate(rows);
+  const knownRows = rows.filter(r => String(r.inventory_match_status || '').toLowerCase() === 'matched');
+  if (!knownRows.length) return {series:[], lines:[], note:rows.length ? '当前货号 ET 库存未匹配或快照已过期，库存保持未知。' : '当前筛选下暂无库存快照。'};
+  const snapshotDate = latestInventorySnapshotDate(knownRows);
   const id = kind === 'month' ? (monthId(snapshotDate) || snapshotDate) : snapshotDate;
   const labelText = kind === 'month' ? (monthId(snapshotDate) || snapshotDate) : snapshotDate;
   const point = {
     id,
     label:labelText,
-    available:rows.reduce((s,r)=>s+Number(r.et_estimated_available_qty || 0),0),
-    on_hand:rows.reduce((s,r)=>s+Number(r.estimated_on_hand_quantity || 0),0),
-    total_supply:rows.reduce((s,r)=>s+Number(r.estimated_total_supply_quantity || 0),0)
+    available:knownRows.reduce((s,r)=>s+Number(r.current_sellable_quantity ?? r.et_estimated_available_qty ?? 0),0),
+    on_hand:knownRows.reduce((s,r)=>s+Number(r.et_all_warehouse_inventory_qty || 0),0),
+    total_supply:knownRows.reduce((s,r)=>s+Number(r.estimated_total_supply_quantity || 0),0)
   };
   return {
     series:[point],
     lines:[
       {key:'available', label:'ET可售', color:'#14b8a6'},
-      {key:'on_hand', label:'在库估算', color:'#60a5fa'},
+      {key:'on_hand', label:'ET全仓物理量', color:'#60a5fa'},
       {key:'total_supply', label:'总供给', color:'#f59e0b'}
     ],
-    note:'库存目前来自当前快照，不是历史库存趋势；有库存历史后可扩展为真实趋势。'
+    note:'只汇总 ET 已匹配且快照未过期的货号；未知库存不按 0 参与。当前点不是历史库存趋势。'
   };
 }
 function buildPreviewMetricSeries(kind, metric){
@@ -10052,9 +10139,7 @@ function renderProfitLineChart(){
     return '<rect class="chart-hit" x="'+prev.toFixed(1)+'" y="'+padT+'" width="'+Math.max(8, next-prev).toFixed(1)+'" height="'+(h-padT-padB)+'" data-tip="'+escapeHtml(tip)+'"></rect>';
   }).join('');
   const latest = series.at(-1) || {};
-  const note = NO_GROUPS_PREVIEW
-    ? '当前筛选展示含仓储利润；全盘只保留全部店铺口径，货号层优先使用 ET 仓储费下载明细，缺明细日期才使用体积库存天数兜底。'
-    : '当前筛选展示含仓储利润；店铺/分组按净销售额分摊，货号层优先使用 ET 仓储费下载明细，缺明细日期才使用体积库存天数兜底。';
+  const note = '当前筛选展示含仓储利润；仓储费先按 ET 货号证据归集，再按货号×店铺销量分摊，无销量余额进入 CENTRAL_POOL，并逐层对账到每日总账。';
   const sliceNote = monthSliceNote(range);
   return '<div class="line-chart">'+
     '<svg viewBox="0 0 '+w+' '+h+'" role="img" aria-label="月利润趋势">'+gridTicks+
@@ -14458,7 +14543,7 @@ function renderProfitPage(){
   $('profitOverview').innerHTML =
     '<div class="page-anchor-row"><button type="button" onclick="document.getElementById(\\'profitTrendCard\\')?.scrollIntoView({behavior:\\'smooth\\',block:\\'start\\'})">看月利润趋势</button><button type="button" onclick="document.getElementById(\\'profitRankGrid\\')?.scrollIntoView({behavior:\\'smooth\\',block:\\'start\\'})">看加码/处理货号</button><button type="button" onclick="document.getElementById(\\'profitSelectionCard\\')?.scrollIntoView({behavior:\\'smooth\\',block:\\'start\\'})">看选品标尺</button><button type="button" onclick="document.getElementById(\\'profitCostGapCard\\')?.scrollIntoView({behavior:\\'smooth\\',block:\\'start\\'})">看成本缺口</button></div>'+
     '<div class="mission-grid">'+
-      '<div class="mission-card '+escapeHtml(profitLevel)+'"><span>真实商品利润</span><strong>'+escapeHtml(hasCost ? money(summary.profitSar) : '待成本')+'</strong><p>主口径：退货营收归 0，真实退货退款扣退货运费；不把 RTV 回收直接冲回主利润。</p></div>'+
+      '<div class="mission-card '+escapeHtml(profitLevel)+'"><span>已落定商品利润</span><strong>'+escapeHtml(hasCost ? money(summary.profitSar) : '待成本')+'</strong><p>主口径只冲减已落定退款/履约异常；待决售后单列风险。退货费优先用财务实际值，缺失时按包裹估算。</p></div>'+
       '<div class="mission-card '+(Number(summary.rtvRecoverableCostSar||0) ? 'good' : 'info')+'"><span>RTV 已收可二售</span><strong>'+escapeHtml(hasCost ? money(summary.profitReceivedResellableSar) : '-')+'</strong><p>测算口径：如果 ET 已收退件未来可卖，理论上比保守口径多 '+escapeHtml(money(summary.rtvRecoverableCostSar))+'。</p></div>'+
       '<div class="mission-card '+(Number(summary.costCoverageRate||0) >= .9 ? 'good' : 'warn')+'"><span>成本覆盖率</span><strong>'+escapeHtml(pct(summary.costCoverageRate))+'</strong><p>缺成本净成交 '+escapeHtml(money(summary.missingCostRevenueSar))+'；成本不足时不要硬看利润率。</p></div>'+
       '<div class="mission-card '+(Number(summary.returnFeeSar||0) ? 'warn' : 'good')+'"><span>售后侵蚀</span><strong>'+escapeHtml(money(summary.returnFeeSar))+'</strong><p>反转 '+escapeHtml(num(summary.reversalLines))+' 行；先定位低利润且退货多的货号。</p></div>'+
@@ -14480,14 +14565,14 @@ function renderProfitPage(){
       profitKpiCard('当前真实利润', hasCost ? money(summary.profitSar) : '待成本表', hasCost ? ('RMB '+fmt.format(Number(summary.profitSar||0)*RMB_RATE)+' · 已扣仓储 '+money(summary.storageFeeSar)) : '导入成本表后自动替换首页粗估', hasCost ? (Number(summary.profitSar||0) >= 0 ? 'good' : 'bad') : 'warn')+
       profitKpiCard('利润率', hasCost ? pct(summary.margin) : '-', '当前筛选口径；已扣仓储费', hasCost ? (Number(summary.margin||0) >= .25 ? 'good' : Number(summary.margin||0) >= .1 ? 'warn' : 'bad') : 'warn')+
       profitKpiCard('成本覆盖', pct(summary.costCoverageRate), '缺成本净成交 '+money(summary.missingCostRevenueSar), Number(summary.costCoverageRate||0) >= .9 ? 'good' : 'warn')+
-      profitKpiCard('退货保守扣减', money(summary.returnFeeSar), '反转 '+num(summary.reversalLines)+' 行；仅真实退货退款扣 13.88 SAR', Number(summary.returnFeeSar||0) ? 'bad' : 'good')+
+      profitKpiCard('退货费用', money(summary.returnFeeSar), '反转 '+num(summary.reversalLines)+' 行；财务实际优先，缺失才按退货包裹 13.88 SAR 估算', Number(summary.returnFeeSar||0) ? 'bad' : 'good')+
       profitKpiCard('RTV 已收二售测算', hasCost ? money(summary.profitReceivedResellableSar) : '-', '比保守口径多 '+money(summary.rtvRecoverableCostSar)+'；已收 '+num(summary.rtvReceivedQuantity)+' 件', Number(summary.rtvRecoverableCostSar||0) ? 'good' : 'warn')+
     '</div>'+
     '<div class="store-flow">'+
-      '<div class="store-verdict"><h3>口径说明</h3><p>'+escapeHtml(NO_GROUPS_PREVIEW ? '仓储费已进入真实利润。全盘只保留全部店铺口径；货号层优先使用 ET 当日仓储费下载明细，缺明细日期才按体积库存天数估算兜底。' : '仓储费已进入真实利润。店铺/DSY/LGM 按净销售额分摊；货号层优先使用 ET 当日仓储费下载明细，缺明细日期才按体积库存天数估算兜底。')+'</p>'+
+      '<div class="store-verdict"><h3>口径说明</h3><p>'+escapeHtml('仓储费已进入真实利润：先按 ET 货号明细归集，再按货号×店铺销量分摊；无销量余额进入 CENTRAL_POOL。各层分摊都与账单总额对账，不会因没有销量而消失。')+'</p>'+
         '<div class="store-action-steps">'+
-          '<div class="store-step"><b>成本批次</b><p>同货号完整批次总成本 / 发货总数；缺头程运输费的批次不计入均摊。</p></div>'+
-          '<div class="store-step"><b>退货反转</b><p>退货/仅退款/派件失败营收按 0；仅真实退货退款额外扣 13.88 SAR。</p></div>'+
+          '<div class="store-step"><b>成本批次</b><p>按货号移动加权平均；期初只取生效日前一日结存，冻结期间不被后续批次穿越改写。</p></div>'+
+          '<div class="store-step"><b>售后与退货费</b><p>已落定退款才冲减真实营收；未落定售后只进风险。退货费实际账单优先，缺失才按包裹估算。</p></div>'+
           '<div class="store-step"><b>仓储费</b><p>ET 显示金额按 RMB，实际减半后折 SAR；货号明细优先，兜底口径必须标注。</p></div>'+
         '</div></div>'+
       '<div class="store-kpi-grid">'+
@@ -14506,7 +14591,7 @@ function renderProfitPage(){
       return isScopedProfit || storeMatchesScope({store_key:'', group_key:r.group_key || ''});
     });
   if (NO_GROUPS_PREVIEW && !isScopedProfit) profitMonthDetailRows = aggregateNoGroupsProfitMonthRows(profitMonthDetailRows);
-  $('profitTrendPanel').innerHTML = renderProfitLineChart() + sectionTitleHtml('月度利润明细', NO_GROUPS_PREVIEW ? (isScopedProfit ? '当前店铺/货号筛选下的含仓储真实利润。' : '全盘月利润；只保留全部店铺口径。') : (isScopedProfit ? '当前店铺/分组/货号筛选下的含仓储真实利润。' : '总计和分组月利润；仓储费按 DSY/LGM 净成交额比例分摊。')) + table(profitMonthDetailRows, [
+  $('profitTrendPanel').innerHTML = renderProfitLineChart() + sectionTitleHtml('月度利润明细', isScopedProfit ? '当前筛选下的已落定利润；待决售后另列风险，仓储费按分层证据对账分摊。' : '全盘月利润；仓储费按货号证据、店铺销量和 CENTRAL_POOL 逐层对账。') + table(profitMonthDetailRows, [
       [NO_GROUPS_PREVIEW ? '月份/范围' : '月份/组', r => '<b>'+escapeHtml(String(r.month_start || '').slice(0,7))+'</b><br><span class="tag info">'+escapeHtml(r.group_key || '-')+'</span>'],
       ['净营收', r => money(r.net_revenue_sar), 'num'],
       ['商品成本', r => money(r.product_cost_sar), 'num'],
@@ -14642,17 +14727,20 @@ function inventoryRowsWithScope(){
     });
 }
 function inventoryHasEt(row){
-  return Boolean(row.has_et_inventory) || Number(row.et_estimated_available_qty||0) > 0 || Number(row.et_pending_process_qty||0) > 0 || Number(row.et_full_carton_qty||0) > 0;
+  return String(row.inventory_match_status || '').toLowerCase() === 'matched';
 }
 function inventoryOnHandQty(row){
-  return inventoryHasEt(row) ? Number(row.et_estimated_available_qty || 0) : Number(row.estimated_on_hand_quantity || 0);
+  return inventoryHasEt(row) ? Number(row.current_sellable_quantity ?? row.et_estimated_available_qty ?? 0) : null;
 }
-function inventoryLooseQty(row){ return inventoryHasEt(row) ? Number(row.et_loose_sellable_qty || 0) : Number(row.estimated_on_hand_quantity || 0); }
-function inventoryFullCartonQty(row){ return Number(row.et_full_carton_qty || 0); }
-function inventoryPendingQty(row){ return inventoryHasEt(row) ? Number(row.et_pending_process_qty || 0) : 0; }
-function inventorySourceText(row){ return inventoryHasEt(row) ? 'ET仓实盘' : '成本表估算'; }
+function inventoryLooseQty(row){ return inventoryHasEt(row) ? Number(row.et_loose_sellable_qty || 0) : null; }
+function inventoryFullCartonQty(row){ return inventoryHasEt(row) ? Number(row.et_full_carton_qty || 0) : null; }
+function inventoryPendingQty(row){ return inventoryHasEt(row) ? Number(row.et_pending_process_qty || 0) : null; }
+function inventorySourceText(row){
+  const status = String(row.inventory_match_status || '').toLowerCase();
+  return status === 'matched' ? 'ET仓运营库存' : status === 'stale' ? 'ET快照过期（库存未知）' : '未匹配ET（库存未知）';
+}
 function inventoryWarehouseText(row){
-  if (!inventoryHasEt(row)) return '成本表批次';
+  if (!inventoryHasEt(row)) return '不使用成本表推算当前库存';
   return [row.et_loose_warehouses, row.et_box_warehouses].filter(Boolean).join(' / ') || 'ET仓';
 }
 function inventoryRiskClass(row){
@@ -14660,6 +14748,7 @@ function inventoryRiskClass(row){
   const days = row.scoped_days_of_supply_on_hand == null ? Number(row.days_of_supply_on_hand ?? Infinity) : Number(row.scoped_days_of_supply_on_hand);
   const sold30 = Number(row.scoped_sold_30d ?? row.gross_sold_30d ?? 0);
   const onHand = inventoryOnHandQty(row);
+  if (!inventoryHasEt(row)) return 'mid';
   if (inventoryHasEt(row)) {
     if (onHand <= 0 && sold30 > 0) return 'high';
     if (Number.isFinite(days) && days <= 14) return 'high';
@@ -14668,9 +14757,7 @@ function inventoryRiskClass(row){
     if (inventoryLooseQty(row) <= 0 && inventoryFullCartonQty(row) > 0) return 'mid';
     return 'good';
   }
-  if (/疑似缺货|已售罄|14天/.test(status) || days <= 14) return 'high';
-  if (/在途|低动销|30天|库存偏慢/.test(status) || days <= 30) return 'mid';
-  return 'good';
+  return 'mid';
 }
 function inventoryAdvice(row){
   const onHand = inventoryOnHandQty(row);
@@ -14678,8 +14765,11 @@ function inventoryAdvice(row){
   const sold30 = Number(row.scoped_sold_30d ?? row.gross_sold_30d ?? 0);
   const days = row.scoped_days_of_supply_on_hand;
   const status = String(row.stock_status || '');
+  if (!inventoryHasEt(row)) return String(row.inventory_match_status || '').toLowerCase() === 'stale'
+    ? 'ET 快照已经过期，当前库存未知；先刷新 ET，再判断补货、断货或清货。'
+    : '当前货号未匹配到 ET，库存未知；先修复货号映射，不用成本表倒推当前库存。';
   if (inventoryHasEt(row)) {
-    if (inventoryLooseQty(row) <= 0 && inventoryFullCartonQty(row) > 0) return '09散件仓缺货但01整箱仓有货，优先确认是否要拆箱上架或直接按箱发。';
+    if (inventoryLooseQty(row) <= 0 && inventoryFullCartonQty(row) > 0) return '09散件仓缺货但01整箱仓有货；默认01不计运营可售，需按已批准货号规则拆箱/转仓。';
     if (onHand <= 0 && incoming > 0) return 'ET当前无可售，成本表显示仍有在途；先盯到仓和展示库存，避免继续推流。';
     if (onHand <= 0) return 'ET实盘无可售库存；先核对是否在03/04/06或箱仓，再决定补货/下架。';
     if (inventoryPendingQty(row) > 0) return '有RTV/破损/待处理库存，先处理可恢复销售的货，再判断是否补货。';
@@ -14689,15 +14779,7 @@ function inventoryAdvice(row){
     if (days != null && days > 120) return 'ET实盘库存去化偏慢，考虑活动清货或暂停补货。';
     return 'ET库存节奏正常，结合利润和链接表现决定是否加码。';
   }
-  if (/成本表缺到仓批次/.test(status)) return '已有销售但成本表没有可扣减的到仓批次，先核实是否漏填到仓日期、头程费或历史批次。';
-  if (status.includes('未发/待确认')) return '成本表有数量但缺发货/到仓信息，暂不计入库存；等发货或到仓后再纳入去化。';
-  if (onHand <= 0 && incoming > 0) return '到仓前关注链接库存；到仓后优先补展示库存。';
-  if (onHand <= 0) return '疑似已无到仓库存；先核实成本表是否漏批次，再判断是否补货。';
-  if (sold30 <= 0) return '30天无销量：先看链接覆盖、价格和活动；不建议继续补货。';
-  if (days != null && days <= 14) return '按当前速度 14 天内可能卖完，优先准备补货或提高到仓批次跟进。';
-  if (days != null && days <= 30) return '30 天内可能卖完，关注采购与头程节奏。';
-  if (days != null && days > 120) return '库存去化偏慢，考虑活动清货或暂停补货。';
-  return '库存节奏正常，按链接表现和利润决定是否加码。';
+  return '当前库存未知，先刷新或修复 ET 匹配后再给运营建议。';
 }
 function inventoryStatusTag(row){
   const cls = inventoryRiskClass(row);
@@ -14712,37 +14794,39 @@ function inventoryDaysText(v){
 function renderInventoryPage(){
   const rows = inventoryRowsWithScope();
   const anchor = dataAnchorDate();
-  const totalOnHand = rows.reduce((s,r)=>s+inventoryOnHandQty(r),0);
+  const knownRows = rows.filter(inventoryHasEt);
+  const unknownCount = rows.length - knownRows.length;
+  const totalOnHand = knownRows.reduce((s,r)=>s+Number(inventoryOnHandQty(r) || 0),0);
   const totalIncoming = rows.reduce((s,r)=>s+Number(r.incoming_quantity||0),0);
   const totalNotShipped = rows.reduce((s,r)=>s+Number(r.not_shipped_quantity||0),0);
   const totalArrived = rows.reduce((s,r)=>s+Number(r.arrived_quantity||0),0);
   const totalEtLoose = rows.reduce((s,r)=>s+Number(r.et_loose_sellable_qty||0),0);
   const totalEtBox = rows.reduce((s,r)=>s+Number(r.et_full_carton_qty||0),0);
-  const totalEtPending = rows.reduce((s,r)=>s+inventoryPendingQty(r),0);
+  const totalEtPending = knownRows.reduce((s,r)=>s+Number(inventoryPendingQty(r) || 0),0);
   const etProductCount = rows.filter(inventoryHasEt).length;
   const sold30 = rows.reduce((s,r)=>s+Number(r.scoped_sold_30d||0),0);
   const daily = rows.reduce((s,r)=>s+Number(r.scoped_daily_sales||0),0);
   const urgent = rows.filter(r => inventoryRiskClass(r) === 'high').length;
-  const slow = rows.filter(r => Number(r.estimated_on_hand_quantity||0) > 0 && Number(r.scoped_sold_30d||0) <= 0).length;
+  const slow = knownRows.filter(r => Number(inventoryOnHandQty(r)||0) > 0 && Number(r.scoped_sold_30d||0) <= 0).length;
   const scopeText = storeScopeLabel() + (productScopeQuery() || state.q ? ' · 已按货号/关键词筛选' : '');
   $('inventoryTag').textContent = scopeText + ' · 截至 ' + anchor;
   $('inventoryOverview').innerHTML =
     '<div class="page-anchor-row"><button type="button" onclick="document.getElementById(\\'inventoryRiskCard\\')?.scrollIntoView({behavior:\\'smooth\\',block:\\'start\\'})">看补货/断货</button><button type="button" onclick="document.getElementById(\\'inventorySlowCard\\')?.scrollIntoView({behavior:\\'smooth\\',block:\\'start\\'})">看清货候选</button><button type="button" onclick="document.getElementById(\\'inventoryProductCard\\')?.scrollIntoView({behavior:\\'smooth\\',block:\\'start\\'})">看货号明细</button><button type="button" onclick="document.getElementById(\\'inventoryBatchFold\\')?.scrollIntoView({behavior:\\'smooth\\',block:\\'start\\'})">看批次/在途</button></div>'+
     '<div class="mission-grid">'+
-      '<div class="mission-card good"><span>可承接库存</span><strong>'+escapeHtml(num(totalOnHand))+'</strong><p>ET 09散件 + 01整箱；这是今天最接近实盘的可售/可承接口径。</p></div>'+
+      '<div class="mission-card good"><span>运营可售库存</span><strong>'+escapeHtml(num(totalOnHand))+'</strong><p>默认只计 ET 09 散件；仅已批准货号可把 01 整箱纳入。未知货号不按 0。</p></div>'+
       '<div class="mission-card warn"><span>待处理库存</span><strong>'+escapeHtml(num(totalEtPending))+'</strong><p>03 RTV / 04破损 / 06报废，不直接当可卖；先处理可回流部分。</p></div>'+
       '<div class="mission-card info"><span>在途 / 未发</span><strong>'+escapeHtml(num(totalIncoming))+'</strong><p>成本表有发货但缺到仓或头程费；未发 '+escapeHtml(num(totalNotShipped))+'。</p></div>'+
       '<div class="mission-card bad"><span>高风险货号</span><strong>'+escapeHtml(num(urgent))+'</strong><p>断货、14天内断货或实盘缺货；优先看补货/断货预警。</p></div>'+
     '</div>'+
     '<div class="store-flow">'+
-      '<div class="store-verdict"><h3>先看结论</h3><p>有 ET 数据时，本页优先使用货代仓实盘库存：09散件仓和01整箱仓计入可售，03/04/06作为待处理/不可售提示；成本表继续用于在途、批次和成本解释。</p>'+
+      '<div class="store-verdict"><h3>先看结论</h3><p>当前库存只认新鲜且已匹配的 ET 快照：默认 09 散件为运营可售，01 整箱只按已批准货号例外纳入，03/04/06仅作待处理提示；成本表不再倒推当前库存。</p>'+
         '<div class="store-action-steps">'+
           '<div class="store-step"><b>09散件</b><p>买家订单主要从这里出库，是最核心可售库存。</p></div>'+
-          '<div class="store-step"><b>01整箱</b><p>海运到仓后的整箱库存，可拆到09或个别按箱发。</p></div>'+
+          '<div class="store-step"><b>01整箱</b><p>属于全仓物理量；默认不算运营可售，只有已批准货号例外纳入。</p></div>'+
           '<div class="store-step"><b>03/04/06</b><p>RTV、破损、报废等待处理库存，不直接当作可卖库存。</p></div>'+
         '</div></div>'+
       '<div class="store-kpi-grid">'+
-        '<div class="store-kpi"><span>ET可售库存</span><strong>'+num(totalOnHand)+'</strong><small>覆盖 '+num(etProductCount)+' 个货号；09 '+num(totalEtLoose)+' · 01 '+num(totalEtBox)+'</small></div>'+
+        '<div class="store-kpi"><span>ET运营可售</span><strong>'+num(totalOnHand)+'</strong><small>已匹配 '+num(etProductCount)+'；未知 '+num(unknownCount)+'；09 '+num(totalEtLoose)+' · 01物理量 '+num(totalEtBox)+'</small></div>'+
         '<div class="store-kpi"><span>待处理仓</span><strong>'+num(totalEtPending)+'</strong><small>03 RTV / 04破损 / 06报废，不计入可售</small></div>'+
         '<div class="store-kpi"><span>成本表在途</span><strong>'+num(totalIncoming)+'</strong><small>有发货但缺到仓或头程费；未发 '+num(totalNotShipped)+'</small></div>'+
         '<div class="store-kpi"><span>近30天毛销量</span><strong>'+num(sold30)+'</strong><small>'+escapeHtml(scopeText)+' · 店铺筛选只影响销售速度</small></div>'+
@@ -14762,7 +14846,7 @@ function renderInventoryPage(){
   const compactCols = [
     ['货号', r => '<button class="link-like" data-inventory-product="'+escapeHtml(r.standard_goods_sn || '')+'"><b>'+escapeHtml(productDisplayName(r))+'</b></button><div class="muted">'+escapeHtml(r.standard_goods_sn || '').slice(0,60)+'</div>'],
     ['状态', r => inventoryStatusTag(r)+'<div class="muted">'+escapeHtml(inventoryAdvice(r)).slice(0,70)+'</div>'],
-    ['可售/在途', r => num(inventoryOnHandQty(r))+' / '+num(r.incoming_quantity)+'<div class="muted">'+escapeHtml(inventorySourceText(r))+'</div>', 'num'],
+    ['可售/在途', r => (inventoryHasEt(r) ? num(inventoryOnHandQty(r)) : '未知')+' / '+num(r.incoming_quantity)+'<div class="muted">'+escapeHtml(inventorySourceText(r))+'</div>', 'num'],
     ['近7/30销量', r => num(r.scoped_sold_7d)+' / '+num(r.scoped_sold_30d), 'num'],
     ['预计可卖', r => inventoryDaysText(r.scoped_days_of_supply_on_hand), 'num']
   ];
@@ -14771,9 +14855,9 @@ function renderInventoryPage(){
   $('inventoryProductTable').innerHTML = table(rows, [
     ['货号', r => '<button class="link-like" data-inventory-product="'+escapeHtml(r.standard_goods_sn || '')+'"><b>'+escapeHtml(productDisplayName(r))+'</b></button><div class="muted">'+escapeHtml(r.standard_goods_sn || '').slice(0,80)+'</div>'],
     ['库存状态', r => inventoryStatusTag(r)+'<div class="muted">'+escapeHtml(inventorySourceText(r))+' · '+escapeHtml(inventoryWarehouseText(r)).slice(0,70)+'</div>'],
-    ['ET实盘可售', r => inventoryHasEt(r) ? (num(r.et_estimated_available_qty)+'<div class="muted">09 '+num(r.et_loose_sellable_qty)+' / 01 '+num(r.et_full_carton_qty)+'</div>') : '<span class="muted">暂无ET</span>', 'num'],
+    ['ET运营可售', r => inventoryHasEt(r) ? (num(r.current_sellable_quantity ?? r.et_estimated_available_qty ?? 0)+'<div class="muted">09 '+num(r.et_loose_sellable_qty)+' / 01物理量 '+num(r.et_full_carton_qty)+'</div>') : '<span class="muted">未知</span>', 'num'],
     ['待处理仓', r => inventoryHasEt(r) ? (num(r.et_pending_process_qty)+'<div class="muted">03 '+num(r.et_rtv_qty)+' / 04 '+num(r.et_damaged_qty)+' / 06 '+num(r.et_scrap_qty)+'</div>') : '<span class="muted">-</span>', 'num'],
-    ['成本表到仓/估算', r => num(r.arrived_quantity)+' / '+num(r.estimated_on_hand_quantity)+'<div class="muted">去化 '+pct(r.depletion_rate)+'</div>', 'num'],
+    ['成本表到仓 / ET物理全仓', r => num(r.arrived_quantity)+' / '+(inventoryHasEt(r) ? num(r.et_all_warehouse_inventory_qty) : '未知')+'<div class="muted">物理全仓不等于运营可售</div>', 'num'],
     ['在途 / 未发', r => num(r.incoming_quantity)+' / '+num(r.not_shipped_quantity), 'num'],
     ['累计毛销 / 净销', r => num(r.gross_sold_quantity)+' / '+num(r.net_sold_quantity)+'<div class="muted">退货反转 '+num(r.reversal_quantity)+'</div>', 'num'],
     ['近7/30毛销量', r => num(r.scoped_sold_7d)+' / '+num(r.scoped_sold_30d)+'<div class="muted">当前范围 '+num(r.scoped_store_count)+' 店</div>', 'num'],
@@ -15468,7 +15552,7 @@ const PAGE_GUIDES = {
     purpose: NO_GROUPS_PREVIEW ? '回答一个问题：真实利润到底从哪里来？先补成本覆盖，再看月度总利润、店铺利润和货号利润，仓储费已进入真实利润。' : '回答一个问题：真实利润到底从哪里来？先补成本覆盖，再看月度总利润、分组利润和货号利润，仓储费已进入真实利润。',
     steps: [
       ['先看覆盖', '成本表缺口会直接影响真实利润可信度；缺头程运费的批次会被保留但不计入单位成本。'],
-      ['再看月利润', '月度利润会扣商品成本、退货派送费和按净成交额分摊的 ET 仓储费。'],
+      ['再看月利润', '月度利润会扣移动平均商品成本、实际/包裹估算退货费和逐层对账分摊的 ET 仓储费；待决售后另看风险线。'],
       ['最后做选品', '用单位成本、体积、售价和退货率模拟利润率，指导后续选品。']
     ],
     actions: [
@@ -15684,17 +15768,18 @@ function renderPageDecisionSummaries(){
   }
   if (state.tab === 'inventory') {
     const invRows = inventoryRowsWithScope();
+    const knownRows = invRows.filter(inventoryHasEt);
     const high = invRows.filter(r => inventoryRiskClass(r) === 'high').length;
-    const onHand = invRows.reduce((s,r)=>s+Number(r.estimated_on_hand_quantity||0),0);
+    const onHand = knownRows.reduce((s,r)=>s+Number(inventoryOnHandQty(r)||0),0);
     const incoming = invRows.reduce((s,r)=>s+Number(r.incoming_quantity||0),0);
     const daily = invRows.reduce((s,r)=>s+Number(r.scoped_daily_sales||0),0);
-    const slow = invRows.filter(r => Number(r.estimated_on_hand_quantity||0) > 0 && Number(r.scoped_sold_30d||0) <= 0).length;
+    const slow = knownRows.filter(r => Number(inventoryOnHandQty(r)||0) > 0 && Number(r.scoped_sold_30d||0) <= 0).length;
     sectionDecisionBlock('inventory', {
       title:'实际库存 / 去化决策摘要',
       subtitle:'当前范围：' + storeScopeLabel() + '；库存优先来自 ET 货代仓实盘，销售速度按当前筛选范围计算。',
       tag:'ET实盘优先',
       cards:[
-        {label:'ET可售库存', value:num(onHand)+' 件', hint:'09散件仓 + 01整箱仓；无ET数据时回退成本表估算。', level:onHand ? 'info' : 'mid'},
+        {label:'ET运营可售', value:num(onHand)+' 件', hint:'默认只计09散件；仅已批准货号可纳入01整箱。未匹配或过期快照显示未知，不用成本表反推。', level:onHand ? 'info' : 'mid'},
         {label:'成本表在途', value:num(incoming)+' 件', hint:'有发货但缺到仓或缺头程费，暂不计入ET可售。', level:incoming ? 'mid' : 'good'},
         {label:'加权日销', value:fmt.format(daily)+' 件/天', hint:'近7天70% + 近30天30%，用于估算去化周期。', level:daily ? 'good' : 'mid'},
         {label:'高风险货号', value:num(high)+' 个', hint:'疑似缺货、14天内断货或批次缺口。低动销 '+num(slow)+' 个。', level:high ? 'high' : 'good'}
@@ -15716,7 +15801,7 @@ function renderPageDecisionSummaries(){
       {label:'当前真实利润', value:pr.hasAnyCost ? money(pr.profitSar) : '待成本表', hint:'净营收 - 商品成本 - 退货派送费 - 仓储费。', level:pr.hasAnyCost ? (Number(pr.profitSar||0) >= 0 ? 'good' : 'high') : 'mid'},
       {label:'成本覆盖', value:pct(pr.costCoverageRate), hint:'只有有成本的净成交额才计入真实利润；缺成本不能硬算。', level:Number(pr.costCoverageRate||0) >= .9 ? 'good' : 'mid'},
       {label:'成本货号', value:num(costProducts) + ' 个', hint:'缺成本货号 '+num(missingProducts)+' 个；导入成本表后自动更新。', level:costProducts ? 'good' : 'mid'},
-      {label:'退货费用', value:money(pr.returnFeeSar), hint:'退货或派送失败每单加 13.88 SAR，按保守毁损处理。', level:Number(pr.returnFeeSar||0) ? 'high' : 'good'}
+      {label:'退货费用', value:money(pr.returnFeeSar), hint:'优先使用财务核对单实际金额；无法识别时才按退货包裹 13.88 SAR 估算。', level:Number(pr.returnFeeSar||0) ? 'high' : 'good'}
     ],
     next:'先补齐成本覆盖，再看月利润趋势；选品前用右侧计算器模拟售价、体积、头程和退货率。',
     target:'profitOverview'

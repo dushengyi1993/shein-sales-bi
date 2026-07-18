@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import readline from 'node:readline';
 import os from 'node:os';
 import {buildProductDisplayName} from '../lib/product_display_name.mjs';
+import {inventoryMatchStatusLabel, normalizeInventoryProjection} from '../lib/inventory_projection_contract.mjs';
 import {
   buildBiOpsQueryContext,
   buildBiOpsSectionFacts,
@@ -335,7 +336,7 @@ function inventoryRelevanceScore(row, {product, numberHints, latestNumberHints, 
   ];
   if ((latestNumberHints || []).some(h => numericFields.some(v => valueMatchesNumberHint(v, [h])))) score += 50000;
   if ((numberHints || []).some(h => numericFields.some(v => valueMatchesNumberHint(v, [h])))) score += 20000;
-  if (row?.has_et_inventory) score += 3000;
+  if (normalizeInventoryProjection(row).fresh_matched) score += 3000;
   if (String(row?.risk_level || '').toLowerCase() === 'high') score += 1200;
   if (/售罄|缺货|断货|补货|在途/i.test(String(row?.stock_status || ''))) score += 900;
   if (n(row?.days_of_supply_on_hand) <= 7 && n(row?.weighted_daily_gross_sales) > 0) score += 700;
@@ -380,13 +381,19 @@ function compactInventoryContext({question, data, product, numberHints, latestNu
       costFileUpdatedAt: data.dates?.manualCostFileUpdatedAt || '',
     },
     method: inventory.method || null,
-    products: products.map(r => ({
+    products: products.map(raw => {
+      const r = normalizeInventoryProjection(raw);
+      return ({
       standard_goods_sn: r.standard_goods_sn,
       product_display_name: productDisplayName(r, data),
       goods_title: r.goods_title,
       stock_status: r.stock_status,
       risk_level: r.risk_level,
       has_et_inventory: r.has_et_inventory,
+      inventory_match_status: r.inventory_match_status,
+      fresh_matched: r.fresh_matched,
+      current_sellable_quantity: r.current_sellable_quantity,
+      arrived_quantity: r.arrived_quantity,
       et_loose_sellable_qty: r.et_loose_sellable_qty,
       et_full_carton_qty: r.et_full_carton_qty,
       et_estimated_available_qty: r.et_estimated_available_qty,
@@ -408,7 +415,8 @@ function compactInventoryContext({question, data, product, numberHints, latestNu
       et_box_warehouses: r.et_box_warehouses,
       et_store_snapshot_date: r.et_store_snapshot_date,
       et_box_snapshot_date: r.et_box_snapshot_date,
-    })),
+      });
+    }),
     batches: batches.map(r => ({
       batch_no: r.batch_no,
       standard_goods_sn: r.standard_goods_sn,
@@ -498,19 +506,22 @@ function answerInventoryQuestion(text, data) {
       const opOnHand = operationalWarehouseOnHand(r);
       const opDays = daysForStock(opOnHand, speed);
       const opDaysWithIncoming = daysForStock(opOnHand + n(r.incoming_quantity), speed);
+      const hasFreshEt = r.fresh_matched === true;
+      const incomingText = r.incoming_quantity == null ? '未知' : `${intNum(r.incoming_quantity)} 件`;
       return [
         `${i + 1}. ${productDisplayName(r, data)}`,
         `状态 ${r.stock_status || '-'}`,
-        operationalPolicy ? `09仓可售 ${intNum(opOnHand)} 件${isIceMaker03038(r) ? '（03038取01仓）' : ''}` : `ET可用 ${intNum(r.et_estimated_available_qty)} 件`,
-        operationalPolicy ? `排除03/04/06 ${intNum(n(r.et_rtv_qty) + n(r.et_damaged_qty) + n(r.et_scrap_qty))} 件` : `估算在库 ${intNum(r.estimated_on_hand_quantity)} 件`,
-        `在途 ${intNum(r.incoming_quantity)} 件`,
+        `ET匹配 ${inventoryMatchStatusLabel(r)}`,
+        operationalPolicy ? `09仓可售 ${r.fresh_matched ? `${intNum(opOnHand)} 件${isIceMaker03038(r) ? '（03038取01仓）' : ''}` : '未知（非最新匹配快照）'}` : `ET可用 ${r.current_sellable_quantity == null ? '未知' : `${intNum(r.current_sellable_quantity)} 件`}`,
+        operationalPolicy ? `排除03/04/06 ${r.fresh_matched ? `${intNum(n(r.et_rtv_qty) + n(r.et_damaged_qty) + n(r.et_scrap_qty))} 件` : '未知'}` : `累计到仓 ${r.arrived_quantity == null ? '未知' : `${intNum(r.arrived_quantity)} 件`}`,
+        `在途 ${incomingText}`,
         `近30天销量 ${intNum(r.gross_sold_30d)} 件`,
-        operationalPolicy ? `实际现货可卖 ${formatDays(opDays, speed > 0)}` : `在库可卖 ${r.days_of_supply_on_hand ?? '-'} 天`,
-        operationalPolicy ? `含在途可卖 ${formatDays(opDaysWithIncoming, speed > 0)}` : `含在途可卖 ${r.days_of_supply_with_incoming ?? '-'} 天`,
+        operationalPolicy ? `实际现货可卖 ${hasFreshEt ? formatDays(opDays, speed > 0) : '未知'}` : `在库可卖 ${hasFreshEt ? (r.days_of_supply_on_hand ?? '-') : '未知'}${hasFreshEt ? ' 天' : ''}`,
+        operationalPolicy ? `含在途可卖 ${hasFreshEt && r.incoming_quantity != null ? formatDays(opDaysWithIncoming, speed > 0) : '未知'}` : `含在途可卖 ${hasFreshEt && r.incoming_quantity != null ? (r.days_of_supply_with_incoming ?? '-') : '未知'}${hasFreshEt && r.incoming_quantity != null ? ' 天' : ''}`,
       ].join('；');
     }),
     alerts.length ? `平台低展示库存样本：${alerts.slice(0, 6).map(a => `${a.store_key}/${productDisplayName(a, data)} ${intNum(a.usable_inventory ?? a.inventory_quantity)}件`).join('；')}` : '',
-    `口径：${operationalPolicy ? '默认只计 ETRUH09散件仓；SK-03038 制冰机例外计 ETRUH01整箱仓；ETRUH03_RTV/04Damaged/06报废不计可售现货。' : 'ET/成本表实物库存与去化，不等同于 SHEIN 平台展示库存。'}${latestNote}`,
+    `口径：${operationalPolicy ? '默认只计 ETRUH09散件仓；SK-03038 制冰机例外计 ETRUH01整箱仓；ETRUH03_RTV/04Damaged/06报废不计可售现货。' : '只用新鲜且已匹配的 ET 可售库存；未匹配/过期显示未知，不用成本表倒推当前库存，也不等同于 SHEIN 平台展示库存。'}${latestNote}`,
   ].filter(Boolean).join('\n');
 }
 
@@ -710,8 +721,10 @@ function productMatchesPolicyException(row, exception) {
 }
 
 function operationalWarehouseOnHand(row, policy = defaultOperationalStockPolicy()) {
+  const projection = normalizeInventoryProjection(row);
+  if (!projection.fresh_matched) return null;
   if (!stockPolicyUsesOperational(policy)) {
-    return n(row?.estimated_on_hand_quantity ?? row?.et_estimated_available_qty ?? row?.available_quantity);
+    return projection.current_sellable_quantity;
   }
   const counted = new Set();
   let total = 0;
@@ -755,6 +768,7 @@ function auditStockPolicy(policy) {
 }
 
 function daysForStock(stock, speed) {
+  if (stock === null || stock === undefined || stock === '') return null;
   const s = n(speed);
   if (s <= 0) return null;
   return n(stock) / s;
@@ -762,6 +776,7 @@ function daysForStock(stock, speed) {
 
 function operationalInventorySortTuple(row, onHand, speed, daysOnHand) {
   const incoming = n(row?.incoming_quantity);
+  if (onHand === null || onHand === undefined) return [8, 999999, -n(row?.gross_sold_30d), productKeyText(row)];
   if (onHand <= 0 && incoming <= 0) return [9, 999999, -n(row?.gross_sold_30d), productKeyText(row)];
   if (onHand <= 0 && incoming > 0) return [0, 0, -incoming, productKeyText(row)];
   if (speed <= 0) return [6, 999998, -onHand, productKeyText(row)];
@@ -892,8 +907,11 @@ function buildInventoryChartSpec(text, data, intent = null) {
 
   const metricValue = row => {
     if (operationalStockPolicy && metric === 'estimated_on_hand_quantity') return operationalWarehouseOnHand(row, stockPolicy);
-    if (metric === 'estimated_on_hand_quantity') return n(row.estimated_on_hand_quantity ?? row.et_estimated_available_qty ?? row.available_quantity);
-    return n(row[metric]);
+    const projection = normalizeInventoryProjection(row);
+    if (metric === 'estimated_on_hand_quantity') return projection.fresh_matched ? projection.current_sellable_quantity : null;
+    if (metric === 'days_of_supply_on_hand' && !projection.fresh_matched) return null;
+    const value = row[metric];
+    return value === null || value === undefined || value === '' ? null : n(value);
   };
   const sourceRows = allProductsMode
     ? asArray(data.inventoryDepletion?.products)
@@ -914,6 +932,9 @@ function buildInventoryChartSpec(text, data, intent = null) {
         et_loose_warehouses: row.et_loose_warehouses,
         et_box_warehouses: row.et_box_warehouses,
         et_estimated_available_qty: row.et_estimated_available_qty,
+        current_sellable_quantity: row.current_sellable_quantity,
+        inventory_match_status: row.inventory_match_status,
+        has_et_inventory: row.has_et_inventory,
         estimated_on_hand_quantity: row.estimated_on_hand_quantity,
         incoming_quantity: row.incoming_quantity,
         gross_sold_30d: row.gross_sold_30d,
@@ -935,31 +956,40 @@ function buildInventoryChartSpec(text, data, intent = null) {
         );
       }
       if (wantsMultiInventoryView && (latestAsksCycleSort || wantsCycleFields)) {
-        const dayA = n(a.days_of_supply_on_hand) > 0 && n(a.weighted_daily_gross_sales) > 0 ? n(a.days_of_supply_on_hand) : 999999;
-        const dayB = n(b.days_of_supply_on_hand) > 0 && n(b.weighted_daily_gross_sales) > 0 ? n(b.days_of_supply_on_hand) : 999999;
-        return dayA - dayB || n(b.estimated_on_hand_quantity ?? b.et_estimated_available_qty) - n(a.estimated_on_hand_quantity ?? a.et_estimated_available_qty);
+        const pa = normalizeInventoryProjection(a);
+        const pb = normalizeInventoryProjection(b);
+        const dayA = pa.fresh_matched && n(a.days_of_supply_on_hand) >= 0 && n(a.weighted_daily_gross_sales) > 0 ? n(a.days_of_supply_on_hand) : 999999;
+        const dayB = pb.fresh_matched && n(b.days_of_supply_on_hand) >= 0 && n(b.weighted_daily_gross_sales) > 0 ? n(b.days_of_supply_on_hand) : 999999;
+        return dayA - dayB || n(pb.current_sellable_quantity) - n(pa.current_sellable_quantity);
       }
       if (metric === 'days_of_supply_on_hand') {
         const dayA = metricValue(a) > 0 && n(a.weighted_daily_gross_sales) > 0 ? metricValue(a) : 999999;
         const dayB = metricValue(b) > 0 && n(b.weighted_daily_gross_sales) > 0 ? metricValue(b) : 999999;
         return dayA - dayB || n(b.gross_sold_30d) - n(a.gross_sold_30d);
       }
-      return metricValue(b) - metricValue(a) || n(b.gross_sold_30d) - n(a.gross_sold_30d);
+      const av = metricValue(a);
+      const bv = metricValue(b);
+      if (av == null || bv == null) return av == null && bv == null ? n(b.gross_sold_30d) - n(a.gross_sold_30d) : (av == null ? 1 : -1);
+      return bv - av || n(b.gross_sold_30d) - n(a.gross_sold_30d);
     })
     .slice(0, allProductsMode ? 120 : 12)
     .map(r => {
       const speed = n(r.weighted_daily_gross_sales);
-      const onHand = operationalStockPolicy
-        ? operationalWarehouseOnHand(r, stockPolicy)
-        : n(r.estimated_on_hand_quantity ?? r.et_estimated_available_qty ?? r.available_quantity);
-      const daysOnHandRaw = operationalStockPolicy ? daysForStock(onHand, speed) : n(r.days_of_supply_on_hand);
-      const daysWithIncomingRaw = operationalStockPolicy ? daysForStock(onHand + n(r.incoming_quantity), speed) : n(r.days_of_supply_with_incoming);
-      const daysOnHand = Number.isFinite(daysOnHandRaw) ? daysOnHandRaw : 0;
-      const daysWithIncoming = Number.isFinite(daysWithIncomingRaw) ? daysWithIncomingRaw : 0;
+      const projection = normalizeInventoryProjection(r);
+      const onHand = operationalStockPolicy ? operationalWarehouseOnHand(r, stockPolicy) : projection.current_sellable_quantity;
+      const daysOnHandRaw = operationalStockPolicy ? daysForStock(onHand, speed) : (projection.fresh_matched ? Number(r.days_of_supply_on_hand) : null);
+      const daysWithIncomingRaw = operationalStockPolicy
+        ? daysForStock(onHand == null ? null : onHand + n(r.incoming_quantity), speed)
+        : (projection.fresh_matched && r.incoming_quantity != null ? Number(r.days_of_supply_with_incoming) : null);
+      const daysOnHand = Number.isFinite(daysOnHandRaw) ? daysOnHandRaw : null;
+      const daysWithIncoming = Number.isFinite(daysWithIncomingRaw) ? daysWithIncomingRaw : null;
       const status = String(r.stock_status || '-');
-      const activeSoldOut = operationalStockPolicy && onHand <= 0 && n(r.incoming_quantity) > 0;
-      const inactiveSoldOut = operationalStockPolicy && onHand <= 0 && n(r.incoming_quantity) <= 0;
-      const riskColor = speed > 0 && onHand <= 0
+      const stockKnown = projection.fresh_matched && onHand != null;
+      const activeSoldOut = operationalStockPolicy && stockKnown && onHand <= 0 && n(r.incoming_quantity) > 0;
+      const inactiveSoldOut = operationalStockPolicy && stockKnown && onHand <= 0 && n(r.incoming_quantity) <= 0;
+      const riskColor = !stockKnown
+        ? '#6B7280'
+        : speed > 0 && onHand <= 0
         ? '#DC2626'
         : (speed > 0 && daysOnHand > 0 && daysOnHand <= 14
           ? '#DC2626'
@@ -973,16 +1003,16 @@ function buildInventoryChartSpec(text, data, intent = null) {
           : '';
         return {
           label: compactProductInventoryLabel(r, allProductsMode ? 52 : 38),
-          value: onHand,
-          valueLabel: `${policyPrefix}${intNum(onHand)}｜日销${Number(speed.toFixed(1))}｜${formatDays(daysOnHand, speed > 0)}`,
-          note: `${policyNote ? `${policyNote}｜` : ''}在途 ${intNum(r.incoming_quantity)}｜含在途 ${formatDays(daysWithIncoming, speed > 0)}｜${status}`,
+          value: stockKnown ? onHand : 0,
+          valueLabel: stockKnown ? `${policyPrefix}${intNum(onHand)}｜日销${Number(speed.toFixed(1))}｜${formatDays(daysOnHand, speed > 0)}` : `${policyPrefix}未知｜${inventoryMatchStatusLabel(r)}`,
+          note: `${policyNote ? `${policyNote}｜` : ''}在途 ${r.incoming_quantity == null ? '未知' : intNum(r.incoming_quantity)}｜含在途 ${stockKnown ? formatDays(daysWithIncoming, speed > 0) : '未知'}｜${status}`,
           color: riskColor,
         };
       }
       return {
         label: compactProductInventoryLabel(r, allProductsMode ? 46 : 34),
-        value: metricValue(r),
-        valueLabel: `${metric === 'days_of_supply_on_hand' || metric === 'weighted_daily_gross_sales' ? Number(metricValue(r).toFixed(1)) : intNum(metricValue(r))}${unit}`,
+        value: metricValue(r) == null ? 0 : metricValue(r),
+        valueLabel: metricValue(r) == null ? `未知｜${inventoryMatchStatusLabel(r)}` : `${metric === 'days_of_supply_on_hand' || metric === 'weighted_daily_gross_sales' ? Number(metricValue(r).toFixed(1)) : intNum(metricValue(r))}${unit}`,
         note: `状态 ${status}｜在途 ${intNum(r.incoming_quantity)}｜近30销量 ${intNum(r.gross_sold_30d)}`,
         color: riskColor,
       };
@@ -998,8 +1028,8 @@ function buildInventoryChartSpec(text, data, intent = null) {
         ? '每个货号一行：货号+中文品名｜09仓可售现货｜在途｜日销｜实际现货/含在途去化周期；已售罄有在途靠前，已售罄无在途放最后'
         : '每个货号一行：货号+中文品名｜现货库存｜在途｜日销｜现货/含在途去化周期；红=断货风险，橙=30天内补货，灰=慢动销')
       : (allProductsMode
-        ? `逐货号展示，按${metricLabel.replace(/（.*?）/g, '')}${metric === 'days_of_supply_on_hand' ? '升序' : '降序'}排列；基于 ET/成本表实物库存与销售去化`
-        : '基于 ET/成本表实物库存与销售去化，不等同于 SHEIN 平台展示库存'),
+        ? `逐货号展示，按${metricLabel.replace(/（.*?）/g, '')}${metric === 'days_of_supply_on_hand' ? '升序' : '降序'}排列；只用新鲜已匹配 ET 库存，未知不按 0 计算`
+        : '只用新鲜已匹配 ET 库存与销售去化；未知不按 0 计算，也不等同于 SHEIN 平台展示库存'),
     metricLabel: wantsMultiInventoryView ? (operationalStockPolicy ? '09仓可售现货（件）；右侧标日销/实际去化周期' : '现货库存（件）；右侧标日销/去化周期') : metricLabel,
     unit,
     footnote: `${operationalStockPolicy ? `${summarizeStockPolicy(stockPolicy)}。` : ''}${unappliedFootnote}ET更新时间：${inventory.freshness?.etUpdatedAt || '-'}；BI生成：${data.generatedAt || '-'}`,
@@ -1090,6 +1120,7 @@ function formatDays(value, hasSpeed = true) {
 
 function categoryInventoryStatus(row) {
   if (!row.productCount && row.onHand <= 0 && row.pending <= 0 && row.speed <= 0) return {label: '待补数据', priority: 90};
+  if (!row.matchedProducts) return {label: '库存未知', priority: 80};
   if (row.speed > 0 && row.onHand <= 0) return {label: '断货', priority: 0};
   if (row.speed > 0 && row.daysOnHand <= 14) return {label: '14天内', priority: 1};
   if (row.speed > 0 && row.daysOnHand <= 30) return {label: '30天内', priority: 2};
@@ -1107,6 +1138,8 @@ function buildCategoryInventoryChartSpec(text, data) {
       rowsByCategory.set(key, {
         category: key,
         products: new Set(),
+        matchedProducts: 0,
+        unknownProducts: 0,
         onHand: 0,
         pending: 0,
         sold7d: 0,
@@ -1124,11 +1157,17 @@ function buildCategoryInventoryChartSpec(text, data) {
     const category = pickCategoryForProduct(row, categoryByProduct);
     const agg = ensure(category);
     if (product) agg.products.add(product);
-    agg.onHand += n(row?.estimated_on_hand_quantity ?? row?.et_estimated_available_qty ?? row?.available_quantity);
-    agg.pending += n(row?.incoming_quantity) + n(row?.not_shipped_quantity);
-    agg.sold7d += n(row?.gross_sold_7d);
-    agg.sold30d += n(row?.gross_sold_30d);
-    agg.speed += n(row?.weighted_daily_gross_sales ?? row?.weighted_daily_sales ?? row?.daily_sales);
+    const projection = normalizeInventoryProjection(row);
+    if (projection.fresh_matched && projection.current_sellable_quantity != null) {
+      agg.matchedProducts += 1;
+      agg.onHand += projection.current_sellable_quantity;
+      agg.pending += n(row?.incoming_quantity) + n(row?.not_shipped_quantity);
+      agg.sold7d += n(row?.gross_sold_7d);
+      agg.sold30d += n(row?.gross_sold_30d);
+      agg.speed += n(row?.weighted_daily_gross_sales ?? row?.weighted_daily_sales ?? row?.daily_sales);
+    } else {
+      agg.unknownProducts += 1;
+    }
   }
 
   const categories = [...rowsByCategory.values()].map(row => {
@@ -1158,7 +1197,7 @@ function buildCategoryInventoryChartSpec(text, data) {
       label: compactLabel(row.category, 24),
       value: row.onHand,
       valueLabel: `${intNum(row.onHand)}件`,
-      note: `${row.status}｜货号${intNum(row.productCount)}｜日销${Number(row.speed.toFixed(1)).toLocaleString('en-US')}｜现货${formatDays(row.daysOnHand, row.speed > 0)}｜待到/待发${intNum(row.pending)}`,
+      note: `${row.status}｜货号${intNum(row.productCount)}｜ET覆盖${intNum(row.matchedProducts)}/${intNum(row.productCount)}｜日销${Number(row.speed.toFixed(1)).toLocaleString('en-US')}｜现货${row.matchedProducts ? formatDays(row.daysOnHand, row.speed > 0) : '未知'}｜待到/待发${row.matchedProducts ? intNum(row.pending) : '未知'}`,
     }));
 
   if (!chartRows.length) return null;
@@ -1166,13 +1205,15 @@ function buildCategoryInventoryChartSpec(text, data) {
   const totalPending = categories.reduce((sum, row) => sum + row.pending, 0);
   const totalSpeed = categories.reduce((sum, row) => sum + row.speed, 0);
   const overallDays = totalSpeed > 0 ? totalOnHand / totalSpeed : null;
+  const matchedProducts = categories.reduce((sum, row) => sum + row.matchedProducts, 0);
+  const unknownProducts = categories.reduce((sum, row) => sum + row.unknownProducts, 0);
   return {
     kind: 'category_inventory',
     title: '全品类库存去化信息图',
-    subtitle: `现货 ${intNum(totalOnHand)} 件｜待到/待发 ${intNum(totalPending)} 件｜加权日销 ${Number(totalSpeed.toFixed(1)).toLocaleString('en-US')}｜整体现货周期 ${formatDays(overallDays, totalSpeed > 0)}`,
+    subtitle: `已匹配现货 ${intNum(totalOnHand)} 件｜待到/待发 ${intNum(totalPending)} 件｜ET覆盖 ${intNum(matchedProducts)} 个货号｜未知 ${intNum(unknownProducts)} 个｜加权日销 ${Number(totalSpeed.toFixed(1)).toLocaleString('en-US')}｜整体现货周期 ${formatDays(overallDays, totalSpeed > 0 && matchedProducts > 0)}`,
     metricLabel: '现货库存（件）',
     unit: ' 件',
-    footnote: `口径：库存=estimated_on_hand_quantity；日销=weighted_daily_gross_sales；现货周期=库存/日销；ET更新时间：${data.dates?.etUpdatedAt || data.inventoryDepletion?.freshness?.etUpdatedAt || '-'}；BI生成：${data.generatedAt || '-'}`,
+    footnote: `口径：只汇总新鲜且已匹配的 ET current_sellable_quantity；未匹配/过期货号标为未知，不按 0 或断货计算；日销=weighted_daily_gross_sales；ET更新时间：${data.dates?.etUpdatedAt || data.inventoryDepletion?.freshness?.etUpdatedAt || '-'}；BI生成：${data.generatedAt || '-'}`,
     rows: chartRows,
     maxRows: Math.min(80, chartRows.length),
     rowHeight: 56,

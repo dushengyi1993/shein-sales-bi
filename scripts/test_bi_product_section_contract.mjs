@@ -48,5 +48,13 @@ assert.match(inventorySql, /LEFT JOIN mart\.product_unit_cost_by_match_key cost_
 assert.match(inventorySql, /round\(unit_cost_sar::numeric, 2\) AS unit_cost_sar/);
 assert.match(inventorySql, /round\(cost_arrived_cost_sar::numeric, 2\) AS arrived_cost_sar/);
 assert.doesNotMatch(inventorySql, /NULL::numeric AS unit_cost_sar/, 'ET-backed inventory rows must retain known cost evidence');
+assert.match(inventorySql, /gross_sold_14d/, 'inventory projection must expose a real 14-day sales window');
+assert.match(generator, /sum\(gross_quantity\) FILTER \(WHERE created_date >= \(SELECT max_date FROM anchor\) - interval '13 days'\) AS gross_sold_14d/, '14-day window is anchored inclusively at 13 days before the latest sales date');
+assert.match(inventorySql, /inventory_match_status/, 'inventory projection must publish ET match freshness state');
+assert.match(inventorySql, /WHEN et\.match_key IS NULL THEN 'not_matched'/, 'unmatched keys must not masquerade as ET inventory');
+assert.match(inventorySql, /round\(et_ship_arrived_quantity::numeric, 0\) AS arrived_quantity/, 'arrived quantity must not reuse current sellable quantity');
+assert.match(inventorySql, /least\(et_ship_first_arrived_date, cost_first_arrived_date\) AS first_arrived_date/, 'first arrival must be the earliest known arrival');
+assert.match(inventorySql, /greatest\(et_ship_latest_arrived_date, cost_latest_arrived_date\) AS latest_arrived_date/, 'latest arrival must be the latest known arrival');
+assert.match(inventorySql, /inventory_match_status = 'matched' AND coalesce\(et_estimated_available_qty,0\) <= 0/, 'only fresh ET matches can be labelled out of stock');
 
 console.log('bi_product_section_contract: slim sales/traffic sections, inventory cost continuity, and bounded matrix rendering checks passed');

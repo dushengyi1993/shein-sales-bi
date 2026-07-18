@@ -6561,6 +6561,14 @@ function emptyHomeProfitScopeRow(date, scopeValue) {
     missing_cost_quantity: 0,
     missing_cost_lines: 0,
     reversal_lines: 0,
+    risk_adjusted_net_revenue_sar: 0,
+    pending_revenue_risk_sar: 0,
+    risk_adjusted_profit_before_storage_sar: 0,
+    pending_revenue_risk_lines: 0,
+    pending_impact_quantity: 0,
+    pending_impact_amount_sar: 0,
+    actual_return_cost_sar: 0,
+    estimated_return_delivery_fee_sar: 0,
   };
 }
 
@@ -6599,6 +6607,14 @@ function buildHomeProfitSummaryFromProfitData(profitData, sourceMeta = {}) {
     row.missing_cost_quantity += Number(r.missing_cost_quantity || 0);
     row.missing_cost_lines += Number(r.missing_cost_lines || 0);
     row.reversal_lines += Number(r.reversal_lines || 0);
+    row.risk_adjusted_net_revenue_sar += Number(r.risk_adjusted_net_revenue_sar ?? r.net_revenue_sar ?? 0);
+    row.pending_revenue_risk_sar += Number(r.pending_revenue_risk_sar || 0);
+    row.risk_adjusted_profit_before_storage_sar += Number(r.risk_adjusted_profit_before_storage_sar ?? r.profit_before_storage_sar ?? 0);
+    row.pending_revenue_risk_lines += Number(r.pending_revenue_risk_lines || 0);
+    row.pending_impact_quantity += Number(r.pending_impact_quantity || 0);
+    row.pending_impact_amount_sar += Number(r.pending_impact_amount_sar || 0);
+    row.actual_return_cost_sar += Number(r.actual_return_cost_sar || 0);
+    row.estimated_return_delivery_fee_sar += Number(r.estimated_return_delivery_fee_sar || 0);
   };
   const addStorageRow = (scopeValue, r) => {
     const date = String(r?.date || '').slice(0, 10);
@@ -6638,18 +6654,26 @@ function buildHomeProfitSummaryFromProfitData(profitData, sourceMeta = {}) {
     'known_net_revenue_sar',
     'known_gross_revenue_sar',
     'missing_cost_revenue_sar',
+    'risk_adjusted_net_revenue_sar',
+    'pending_revenue_risk_sar',
+    'risk_adjusted_profit_before_storage_sar',
+    'pending_impact_amount_sar',
+    'actual_return_cost_sar',
+    'estimated_return_delivery_fee_sar',
   ];
-  const countFields = ['quantity', 'order_lines', 'orders', 'rtv_received_quantity', 'rtv_received_to_09_quantity', 'missing_cost_quantity', 'missing_cost_lines', 'reversal_lines', 'storage_matched'];
+  const countFields = ['quantity', 'order_lines', 'orders', 'rtv_received_quantity', 'rtv_received_to_09_quantity', 'missing_cost_quantity', 'missing_cost_lines', 'reversal_lines', 'pending_revenue_risk_lines', 'pending_impact_quantity', 'storage_matched'];
   const dailyScopes = Array.from(map.values()).map(row => {
     const effectiveStorage = Number(row.storage_matched || 0) > 0 ? Number(row.storage_fee_sar || 0) : Number(row.fallback_storage_fee_sar || 0);
     const out = {...row};
     out.profit_after_storage_sar = Number(out.profit_before_storage_sar || 0) - effectiveStorage;
+    out.risk_adjusted_profit_after_storage_sar = Number(out.risk_adjusted_profit_before_storage_sar || 0) - effectiveStorage;
     out.profit_if_rtv_received_resellable_after_storage_sar = Number(out.profit_if_rtv_received_resellable_sar || 0) - effectiveStorage;
     out.profit_if_rtv_09_resellable_after_storage_sar = Number(out.profit_if_rtv_09_resellable_sar || 0) - effectiveStorage;
     out.cost_coverage_revenue_rate = Number(out.net_revenue_sar || 0) > 0 ? roundNumber(Number(out.known_net_revenue_sar || 0) / Number(out.net_revenue_sar || 0), 4) : null;
     out.profit_margin_after_storage = Number(out.known_net_revenue_sar || 0) > 0 ? roundNumber(out.profit_after_storage_sar / Number(out.known_net_revenue_sar || 0), 4) : null;
+    out.risk_adjusted_profit_margin_after_storage = Number(out.risk_adjusted_net_revenue_sar || 0) > 0 ? roundNumber(out.risk_adjusted_profit_after_storage_sar / Number(out.risk_adjusted_net_revenue_sar || 0), 4) : null;
     for (const field of moneyFields) out[field] = roundNumber(out[field], 2);
-    for (const field of ['profit_after_storage_sar', 'profit_if_rtv_received_resellable_after_storage_sar', 'profit_if_rtv_09_resellable_after_storage_sar']) out[field] = roundNumber(out[field], 2);
+    for (const field of ['profit_after_storage_sar', 'risk_adjusted_profit_after_storage_sar', 'profit_if_rtv_received_resellable_after_storage_sar', 'profit_if_rtv_09_resellable_after_storage_sar']) out[field] = roundNumber(out[field], 2);
     for (const field of countFields) out[field] = roundNumber(out[field], 0);
     return out;
   }).sort((a, b) => String(a.date).localeCompare(String(b.date)) || Number(a.scope_order || 0) - Number(b.scope_order || 0) || String(a.scope_value || '').localeCompare(String(b.scope_value || '')));
