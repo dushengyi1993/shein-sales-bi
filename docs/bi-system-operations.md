@@ -1,17 +1,17 @@
 # SHEIN BI 系统运行说明
 
-> 当前权威状态：2026-06-20。V2 是唯一正式 BI 入口；本地 BI 已封存，V1 仅保留 GitHub archive 恢复点；云端专用运维清单见 `docs/cloud-bi-operations.md`。本文保留业务口径、本地回滚和历史 Windows 运维参考。
+> 当前权威状态：2026-07-18。V2 是唯一正式 BI 入口；本地 BI 已封存，V1 仅保留 GitHub archive 恢复点；云端专用运维清单见 `docs/cloud-bi-operations.md`。本文保留业务口径、本地回滚和历史 Windows 运维参考。
 
 ## 1. 当前系统定位
 
-- 飞书多维表格 / 原生看板写入已临时暂停；飞书日报脚本、异常通知 watchdog 和只读问数机器人已迁到云端独立链路并验证，其中飞书日报自动发送当前停用。
+- 飞书多维表格 / 原生看板写入已临时暂停；异常通知 watchdog 保留云端运行。飞书日报自动发送和飞书只读问数 service 当前均停用，后者必须保持 `disabled + inactive`；网页问数与 CLI 不依赖它。
 - BI 系统当前以云端为正式入口，负责 PostgreSQL 数据仓库、Metabase 和 BI 经营门户。
 - 当前不能直接停用或删除 Metabase：PostgreSQL 是数据底座，Metabase 是正式深度分析/自由钻取层，BI Portal 是日常经营入口；只有等自研门户完全覆盖深钻能力后，才能重新评估是否降级 Metabase。
 - 不从飞书反抓数据做 BI 源头；BI 源头来自 SHEIN 后台抓取后的私有源文件 / PostgreSQL。
 - 销售源文件已改为 WebAPI 直连优先生成；Chrome profile 只作为 Cookie/session 刷新、登录续期和回退来源。
 - BI 后置刷新失败不应反向影响 SHEIN 抓数、异常通知或后续手动日报入口。
 - 暂停开关：`state/feishu-base-sync-paused.flag`。存在该文件时，跳过飞书事实表、产品表、月表、宽表和看板写入；删除该文件后可恢复写表链路。
-- 营销折扣自动化仍按“建议 / dry-run / 复核 / 授权执行 / live 回读”分层推进；长期路线图见 `docs/marketing-automation-roadmap.md`。BI 可以生成动作卡和同事分店任务，但真实提交、取消、改价、补预算必须先有价格栈证据和店铺身份校验。
+- 营销折扣自动化仍按“只读巡检 / 精确队列 / 受控修复 / live 回读”分层；长期路线图见 `docs/marketing-automation-roadmap.md`。guard 使用 session HTTP，一次读取 19 店普通活动、15% 券 active 集合与当前/未来活动价，不启动浏览器、不持有租约或写授权。`2026-07-18` 生产实测完整巡检 `157s`、1516 行、19/19 店成功、Chrome `0 -> 0`。repair worker 于 `10:50/12:50/14:50/16:50/18:50` 每轮最多处理 8 个活动组，强制精确 hash、旧保护快照、事务 journal、失败补偿和最终全店 readback。
 
 ## 2. 日常入口
 
@@ -46,7 +46,7 @@
 
 本文件不维护时间表。生产调度以 `infra/systemd/*.timer` 的 `OnCalendar` 为准；生产操作、冲突窗口和验证步骤见 [cloud-bi-operations.md](cloud-bi-operations.md)。
 
-云端当前自动覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、晨间销售+日更链路、异常通知、登录态巡检和只读问数机器人；飞书日报自动发送当前已停用。OpenAPI 销售对账已升级为 19 店并行双跑层，仍不替换生产销售源。覆盖审计使用 `scripts/audit_cloud_data_coverage.mjs`：查最新日防漏时用 `--expected-start range-start`，查历史断档时用 `--expected-start first-seen`。历史口径只检查每个店首个有效日期之后是否中间断档，不把店铺尚未开通/尚未接入前的日期算作缺抓。
+云端当前自动覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、晨间销售+日更链路、异常通知和登录态巡检；网页/CLI 问数继续可用，飞书日报自动发送与飞书只读问数 service 当前均停用。OpenAPI 销售对账已升级为 19 店并行双跑层，仍不替换生产销售源。覆盖审计使用 `scripts/audit_cloud_data_coverage.mjs`：查最新日防漏时用 `--expected-start range-start`，查历史断档时用 `--expected-start first-seen`。历史口径只检查每个店首个有效日期之后是否中间断档，不把店铺尚未开通/尚未接入前的日期算作缺抓。
 
 ### 4.2 本地历史任务 / 回滚参考
 
@@ -81,6 +81,7 @@
 - BI Portal API section 会在 `outputs/bi-portal/sections/` 缓存；首页首屏优先加载轻量 `homeRankings`，完整 `rankings` 放到详情/子页需要时再拉。`homeRankings` 只包含首页需要的日店铺、日货号、日店铺×货号粒度，并由服务端裁掉重复长文本后以 gzip sidecar 返回。`inventoryTrend` 是展示库存趋势 section，来自 `fact.visible_inventory_snapshot`，用于“前台展示库存每日快照”趋势；它不同于 ET 货代仓实盘可售，也不同于成本表供给。`cloud_bi_refresh.sh` 会启动 section 预热脚本；`serve_bi_portal.mjs` 还会用 core `generatedAt` watcher 在服务启动和首页访问时兜底预热，避免新 core 后用户首开页面才生成慢 section。首页利润 `homeProfit` 仍从当前 `profit` section cache 派生；若页面首页利润异常偏低，先核对 `homeProfitSummary.sourceGeneratedAt` 与当前 `data.json.__sections.generatedAt` 是否一致，并确认 `staleSource=false`；否则页面应视为利润待预热，不能用旧利润判断业务。
 - 首页库存相关口径必须分开：`展示库存趋势` = SHEIN 前台展示库存快照；`ET可售` = 货代仓实盘可售；`成本表供给` = 到仓 + 在途 - 已售。不要把 `ET可售 + 在途` 当成总供给，也不要把展示库存趋势当成 ET 实盘。
 - 旧 `financeData` section 已下线，线上 `/api/bi/section/financeData` 应返回 `404`；V2 没有财务子页面时，不要恢复旧财务缓存/预热链路。`inventoryTrend` 当前只是展示库存趋势 section，云端 2026-06-20 实测约 `242KB`、gzip 约 `20KB`，不应再按旧的 21MB 假设优化。
+- `refresh_profit_marts.sql` 必须按依赖顺序复用本轮 `_cache_new`：昂贵的 `mart.profit_order_item` 只物化一次，随后仓储与利润聚合从已物化输入构建。禁止恢复逐个 `SELECT * FROM mart.<canonical_view>` 的叠层刷新；该写法会反复展开同一视图树，把生产规模刷新从约 3 分钟拖到约 18 分钟。
 - 如果某个店失败，但目标日期当前启用店铺销售源文件已经齐，BI 仍应刷新；云端 watchdog / 异常通知负责提醒失败店铺和服务异常。
 - 业务域单店失败不应阻断销售入仓和门户刷新，应在 BI 体检/提醒里标注。
 - `send_daily_lark_report.mjs` / `scripts/cloud_daily_lark_report.sh` 仍保留为手动临时发送入口；生产日报自动发送当前已停用，不存在 `shein-bi-cloud-daily-lark-report.timer`。不要默认本地日报或旧 timer 仍在生产运行。
@@ -173,8 +174,8 @@
 ### 9.2 成本表字段和计算
 
 - 一行成本批次代表同一个货号的一批货。
-- 同货号单位成本 = 完整批次总成本 / 完整批次发货总数。
-- 如果表里已有 `单台总成本（SAR）`，它代表这一批的单件完整成本；入库时会还原成“这一批总成本 = 单台总成本 × 数量”，最终仍按同货号所有完整批次加权平均。
+- 单批单位成本 = 该批完整总成本 / 该批发货数量；这是入库事件的成本，不是永久覆盖历史销量的“当前平均价”。
+- 如果表里已有 `单台总成本（SAR）`，它代表这一批的单件完整成本；入库时会还原成“这一批总成本 = 单台总成本 × 数量”。正式销售 COGS 再由期初结存与各到货批次按事件时间做移动加权平均，避免未来批次成本穿越到过去订单。
 - 完整批次至少要有：货号、发货数量、货款金额、头程运输费金额。
 - 缺头程运输费金额的批次会写入 `fact.product_cost_batch`，但 `complete_batch=false`，不参与单位成本均摊。
 - 成本默认人民币转 SAR，汇率沿用 `1 SAR = 1.8 RMB`；如成本文件本身为 SAR，脚本会按 SAR 写入。
@@ -184,14 +185,15 @@
 
 ### 9.3 利润计算
 
-- 商品/店铺/货号层利润：`净营收 - 商品成本 - 退货派送费`。
-- 未取消售后申请、退货、仅退款、派送失败等保守处理订单：营收视为 `0`，仍扣商品成本；只有真实退货退款链路额外扣 `13.88 SAR` 退货派送费，`仅退款`、`派件失败`、`派件异常` 不重复扣退货派送费。
+- 页面和报表分开给出已落定利润与未落定售后风险。已落定利润不能因未结售后而被提前冲成最终结果；风险调整值只作保守经营参考，必须带未落定标签。
+- 退货费依次取 `fact.openapi_finance_check_order*` 已结算净退货成本、`fact.openapi_return_item.performance_price` 退货单实际履约费；仅在两类实际值都缺失、且售后确为退货包裹时才估 `13.88 SAR`。`仅退款`、派件失败/异常和零金额取消单不得重复套估算退货费。
+- 商品成本从首个可信 ET 实盘切点起来自移动加权台账：期初种子只能取生效日前一日 ET 结存，后续按入库、销售、已证实的 RTV 09 回流等事件推进；切点前因缺少批次消耗证据，只保留明确标注的 `legacy_pre_cutover_estimate`，不能声称批次精确。切点后缺台账不得退回静态均价；`ops.accounting_period_close` 冻结的会计期间拒绝重建。
 - 但 `sales_sar <= 0` 的 0 金额订单行（常见为“揽收前已取消”）不视为真实售出，不扣商品成本，也不加 `13.88 SAR` 退货派送费；否则会把取消单误当卖出后毁损，严重压低利润。
 - 利润率：`利润 / 净营收`。净营收为 0 时利润率为空，不硬算。
 - 成本/利润页高利润 / 低利润货号分界线固定为 `20%` 利润率：`>= 20%` 为高利润 / 可加码，`< 20%` 为低利润 / 需要处理。
 - 成本缺失的订单行不参与真实利润额计算，并在页面显示成本覆盖率和缺成本销售额。
 - 仓储费正式来源是 ET 物流仓服账单 `仓储费`：显示金额按 RMB 读取，实际扣费按显示金额 × 0.5 后折 SAR；`fact.monthly_storage_fee` 仅保留为旧手工/历史兜底表。
-- 仓储费已纳入真实利润。店铺和 DSY/LGM 按净销售额分摊；货号层优先使用 ET 仓储费导出明细，若历史明细合计与总账不一致则按每日总账缩放并标记 `download_detail_scaled_to_bill`，只有完全缺明细日期才使用 ET 体积 × 库存天数估算并校准到每日实际仓储费总额，页面必须标注兜底口径。
+- 仓储费已纳入利润，但按“货号证据 → 货号 × 店铺销量 → `CENTRAL_POOL`”逐层分摊；明细与总账有差异时按日对账并保留方法。没有货号/店铺归属证据的余额必须留在 `CENTRAL_POOL`，不得静默丢失或以净销售额直接覆盖。
 - ET 仓储费导出码与 BI 展示货号分层处理：`storage_code` / `sku_code` 保留 ET 原始码，`match_key` 只做内部归并；BI/利润展示使用 `mart.product_display_by_match_key` 选出的销售或商品主档标准货号，不能把规范化中间短码当作新货号展示。
 - 月利润复核不能只看当前订单创建月结果；还要看售后申请月对历史订单月的回冲。2026 年 3/4/5 月审计见 `docs/bi-profit-audit-2026-03-05.md`：当前主利润公式未发现少扣退货，5 月利润暂高主要来自售后反转率尚低、成本率较低和退货快递费较少；5 月仍处售后成熟期，不能当最终稳定利润。
 
@@ -242,7 +244,7 @@
 - 检查本地是否仍封存：`http://127.0.0.1:8787/api/health` 应无法连接；若能连上，说明本地 BI 被重新启动，需要确认是否为回滚。
 - 修改 BI 门户 UI 时，默认先后台验证：`node --check scripts/generate_bi_portal.mjs`、`$env:SHEIN_BI_PORTAL_TIMEOUT_MS='900000'; node scripts/generate_bi_portal.mjs`、静态检查 `outputs/bi-portal/index.html` / `data.json`。除非用户要求或必须排查浏览器交互问题，不主动打开前端。
 - 云端是最终审核面。涉及 V2 弹窗/筛选/页面交互时，发布前必须在云端页面或云端服务输出复核；时间筛选月份切换的关键证据是弹窗保持 `hidden=false`、`aria-expanded=true`，月份标题正确更新且无 console error/warn。
-- OpenAPI 销售对账当前为 19 店并行双跑层；`fetch_shein_openapi_sales.mjs` / `load_shein_openapi_sales_warehouse.mjs` / `run_shein_openapi_sales_reconciliation.mjs` 只写 `fact.openapi_*` 与 `mart.openapi_sales_reconciliation`，不作为正式销售源。调度器必须先用 `--ensure-only` 单独完成一次 schema 迁移，再让并行店铺 loader 使用 `--skip-ensure` 入仓；禁止多店 loader 并发 DDL，否则可与另一店的 upsert 形成 PostgreSQL deadlock。`matched` 不再只看汇总数：还必须确认 `business_line_diff_count`、`scatter_point_diff_count`、`order_time_diff_count`、`cod_diff_count`、`metadata_diff_count` 全为 0，且取消/无效行计数与归零后 SAR 金额一致。`status_diff_count` 和 `identity_overlay_required` 用于明确 WebAPI 状态/内部标识补充层，不得通过伪造 OpenAPI 字段消除差异。修复后双跑窗口是 `2026-07-17..2026-07-23`，`2026-07-24` 再根据云端运行态出切换结论。
+- OpenAPI 抓数故障收口：2026-07-16 的业务域抓取因遗漏同步 `fssync` 依赖而在错误分支触发异常，已补齐依赖并保留既有文件的零行保护；2026-07-17 的并行 loader 曾让每店同时做 DDL，造成 PostgreSQL deadlock。调度现先单进程 `--ensure-only`，worker 一律 `--skip-ensure`，并行只负责数据加载。销售/商品/退货 OpenAPI 双跑仍只写 `fact.openapi_*` 与对账层，不切换正式事实源。
 - 检查 WebAPI 销售直连：`node scripts/fetch_shein_sales.mjs HL --date YYYY-MM-DD --transport webapi --json`，再和 `outputs/shein_fetch/HL/YYYY-MM-DD.json` 或数据库切片对账。
 - 检查取消单口径：先 dry-run `node scripts/repair_shein_sales_summaries.mjs --start YYYY-MM-DD --end YYYY-MM-DD`；确认后再加 `--write`。写回后运行 `node scripts/audit_shein_sales_logic.mjs --month YYYY-MM --date YYYY-MM-DD --offline`。
 - 检查成本文件解析但不入库：`node .\scripts\import_product_costs.mjs --dry-run`。

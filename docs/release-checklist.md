@@ -15,7 +15,7 @@
 - [ ] 固定目标 commit SHA，并记录发布分支、Git tag 和 GitHub release（或明确说明为何不创建）。
 - [ ] 确认发布资产与目标 SHA 一致，release note 写清变更范围、回滚点和已知限制。
 - [ ] CI 已针对目标 SHA 完成；失败、未配置或未运行的检查必须如实列出。
-- [ ] 云端部署仅在得到对应权限后执行；普通生产写入遵守 preflight、精确 payload hash、明确确认、审计与 readback。负责人已登记的长期自动化策略可免逐次 hash，但必须校验授权 ID/上下文、动作与店铺范围、实时证据、预校验、审计和 readback。
+- [ ] 云端部署仅在得到对应权限后执行；普通生产写入遵守 preflight、精确 payload hash、明确确认、审计与 readback。负责人已登记的长期自动化策略可免逐次人工确认，但不得免除 hash：系统必须自动计算、锁定并校验精确 payload/work hash，同时校验授权 ID/上下文、动作与店铺范围、实时证据、预校验、审计和 readback。
 
 ## 发布后
 

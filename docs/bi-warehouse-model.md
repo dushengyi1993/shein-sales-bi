@@ -275,12 +275,20 @@ ET 物流仓服账单里的 `仓储费` 是仓储成本正式来源，旧 `fact.
 - `dim.storage_fee_policy`：配置 ET 显示金额到 BI 利润口径的换算，当前为显示金额 × `0.5` 后按 `1 SAR = 1.8 RMB` 折 SAR。
 - `fact.et_storage_fee_product_detail`：网页端 `ExportStoreFee` 下载的 SKU/箱号日仓储费明细；CSV 原表不入仓库、不提交，只保存规范化字段和来源审计字段。
 - `mart.et_storage_fee_daily`：按日汇总 ET 仓储费总账与实际扣费。
-- `mart.storage_fee_store_daily`：店铺/DSY/LGM 按净销售额分摊仓储费；当日无销售时回退月净销售额分摊。
-- `mart.storage_fee_product_daily`：货号层主路径优先使用 `ExportStoreFee` 明细；若历史明细合计与 ET 每日总账不一致，则保留明细的货号/箱号分布并按总账缩放，标记 `download_detail_scaled_to_bill`；只有完全缺明细日期才用 `mart.storage_fee_product_daily_estimated` 体积 × 库存天数估算，并校准到 ET 每日实际仓储费总额。
+- `mart.storage_fee_product_daily`：先用 `ExportStoreFee` 的货号/箱号证据分配；证据与 ET 日总账不一致时按日缩放并记录方法。没有可证明货号归属的余额不猜测体积成本，进入 `CENTRAL_POOL`。
+- `mart.storage_fee_product_store_daily` / `mart.storage_fee_store_daily`：在已归属货号内按货号 × 店铺销量分配；无法归店的残余以 `CENTRAL_POOL` 保留。`mart.storage_fee_daily_reconciliation` 必须使货号、店铺和总账三层可核对。
 - `mart.product_display_by_match_key`：仓储费、利润等展示层按内部 `match_key` 选择销售行或 `dim.product` 中已有的标准货号作为显示货号。ET 原始仓储码仍留在 `fact.et_storage_fee_product_detail.storage_code` / `sku_code`；`match_key` 只用于归并，不应把 ET 解析中间码作为新的对外商品货号。
 - `mart.storage_fee_daily_reconciliation`：独立对比总账、店铺分摊和货号分摊，避免 join 后把每日总账按明细行数放大。
 
-利润视图保留 `profit_before_storage_sar` 作诊断，并新增 `storage_fee_sar`、`profit_after_storage_sar`、`profit_margin_after_storage`、`storage_fee_method`。店铺/分组利润使用净销售额分摊视角；货号利润使用明细优先视角，两者都应能回到同一 ET 每日总额，但不能在同一粒度里无说明混用。
+利润视图保留 `profit_before_storage_sar` 作诊断，并提供 `storage_fee_sar`、`profit_after_storage_sar`、`profit_margin_after_storage`、`storage_fee_method`。不得再把店铺/分组按净销售额直接分摊作为主口径。
+
+### 成本台账、售后结算与期间冻结
+
+- `fact.inventory_cost_opening`：经批准的期初；`effective_date` 只取生效日前一日 ET 结存，禁止用同日快照避免重复计算当日流转。
+- `fact.inventory_cost_event` / `fact.inventory_cost_ledger`：从首个可信 ET 实盘切点起，按期初、盘点、入库、销售、RTV 最终进入 09 等事件，用移动加权平均维护数量、价值和销售 COGS。切点前无法知道真实批次消耗，利润保留 `legacy_pre_cutover_estimate` 并明确披露；切点后未估值或缺期初保持明确状态，不能再用未来成本表臆算补零。
+- `ops.accounting_period_close`：会计期间冻结边界；台账重建拒绝改写冻结期间，只允许从首个未冻结期间开始。
+- `fact.openapi_finance_check_order*`、`fact.openapi_return_item.performance_price` / `mart.return_cost_actual`：退货费优先用已结算财务净成本，其次用退货单商品行真实履约费；实际值都缺失时，只有退货包裹可保留 `13.88` 估算。来源区分 `finance_check_order_actual`、`return_order_performance_price_actual` 与 `package_estimate`。
+- 利润 mart 同时保留已落定利润、估算退货费和未落定售后风险字段；未结售后风险不能覆盖或改写已落定利润。
 
 ### `fact.product_quality_daily`
 
