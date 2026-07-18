@@ -864,6 +864,7 @@ async function verifyStore(store, planRows) {
     if (err.identityCheck) result.identity = err.identityCheck;
   } finally {
     cdp?.close();
+    if (!args.noClose) closeExistingStoreChrome(store);
   }
   return result;
 }

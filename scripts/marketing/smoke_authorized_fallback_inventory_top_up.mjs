@@ -20,6 +20,13 @@ try {
       limitedDiscountPrice: 61.34,
       activityStock: 10,
       manualSpecialLimitedDiscount: false,
+    }, {
+      storeKey: 'LQ',
+      skc: 'another-low-stock-skc',
+      canonical: 'SK-11004蒸汽熨烫机',
+      limitedDiscountPrice: 56.53,
+      activityStock: 10,
+      manualSpecialLimitedDiscount: false,
     }],
   }), 'utf8');
 
@@ -53,6 +60,7 @@ try {
   const firstIdempotencyKey = buildInventoryIdempotencyKey(idempotencyInput);
   assert.equal(firstIdempotencyKey, buildInventoryIdempotencyKey(idempotencyInput));
   assert.notEqual(firstIdempotencyKey, buildInventoryIdempotencyKey({...idempotencyInput, activityStock: 11}));
+  assert.notEqual(firstIdempotencyKey, buildInventoryIdempotencyKey({...idempotencyInput, retryAttempt: 2}));
   assert.match(firstIdempotencyKey, /^bi-marketing-inventory-[a-f0-9]{64}$/);
 
   const protectedPath = path.join(tmp, 'protected.json');
@@ -73,9 +81,18 @@ try {
   );
 
   const driftBatchSource = await fs.readFile(path.join(process.cwd(), 'scripts/marketing/batch_fix_limited_discount_drift.mjs'), 'utf8');
-  assert.match(driftBatchSource, /topUpAuthorizedFallbackInventory/);
-  assert.match(driftBatchSource, /AUTHORIZED_LIMITED_DISCOUNT_FALLBACK_STOCK_TOP_UP/);
-  assert.match(driftBatchSource, /postInventoryTopUpDryRun/);
+  assert.match(driftBatchSource, /replace_limited_discount_transactionally\.mjs/);
+  assert.doesNotMatch(driftBatchSource, /remove_skc_from_limited_discount\.mjs/);
+
+  const fallbackBatchSource = await fs.readFile(path.join(process.cwd(), 'scripts/marketing/batch_apply_new_listing_limited_discount.mjs'), 'utf8');
+  assert.match(fallbackBatchSource, /for \(const skc of inventorySkcs\)/);
+  assert.match(fallbackBatchSource, /writeInventoryExecutableSubset/);
+  assert.match(fallbackBatchSource, /remainingInventorySkcs/);
+  assert.match(fallbackBatchSource, /executed_subset_with_platform_or_inventory_blockers/);
+
+  const inventoryManagerSource = await fs.readFile(path.join(process.cwd(), 'scripts/marketing/manage_manual_limited_discount_inventory.mjs'), 'utf8');
+  assert.match(inventoryManagerSource, /writeAttempt <= 2/);
+  assert.match(inventoryManagerSource, /writeReadbackFailure/);
 
   console.log(JSON.stringify({
     ok: true,
@@ -84,7 +101,9 @@ try {
     insufficientEt: 'et_stock_below_activity_stock',
     exactTopUpTo: 10,
     deterministicIdempotencyKey: true,
-    driftBatchIntegrated: true,
+    driftBatchUsesSafeTransaction: true,
+    multiSkcFallbackBatchIntegrated: true,
+    boundedInventoryWriteRetry: true,
   }));
 } finally {
   await fs.rm(tmp, {recursive: true, force: true});

@@ -13,23 +13,22 @@ Environment=TZ=Asia/Shanghai
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=SHEIN_BI_MARKETING_LIVE_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-marketing-live-guard.lock
 Environment=SHEIN_BI_MARKETING_LIVE_LOG_DIR=/srv/shein-bi/logs/cloud-marketing-live-guard
-Environment=SHEIN_BI_MARKETING_LIVE_SCAN_TIMEOUT_SEC=2400
+Environment=SHEIN_BI_MARKETING_LIVE_SCAN_TIMEOUT_SEC=900
 Environment=SHEIN_BI_MARKETING_LIVE_SCAN_KILL_AFTER_SEC=60
 Environment=SHEIN_BI_MARKETING_PRICE_STORE_ATTEMPTS=3
-# Owner-approved standing policy permits timer writes within the checked action,
-# store and pricing scope; out-of-policy work still fails closed.
-Environment=SHEIN_BI_MARKETING_LIVE_AUTO_REPAIR=1
-Environment=SHEIN_BI_MARKETING_AUTOMATION_CONTEXT=cloud_timer
-Environment=SHEIN_BI_MARKETING_AUTOMATION_AUTHORIZATION=owner-standing-cloud-marketing-v1
-TimeoutStartSec=3600
+Environment=SHEIN_BI_MARKETING_PRICE_SESSION_CONCURRENCY=3
+# This service is inspection/queue-build only. Owner-authorized writes are
+# isolated in the bounded repair worker and never extend the scan critical path.
+Environment=SHEIN_BI_MARKETING_LIVE_BUILD_REPAIR_QUEUE=1
+TimeoutStartSec=1800
+TimeoutStopSec=90
+KillSignal=SIGTERM
 Nice=12
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
 CPUWeight=40
-MemoryHigh=1800M
-MemoryMax=2400M
+MemoryHigh=1000M
+MemoryMax=1400M
 OOMPolicy=stop
 KillMode=control-group
-ExecStartPre=-/usr/bin/env node /opt/shein-bi/app/scripts/cleanup_shein_store_browsers.mjs --all --cleanup-chrome-tmp --kill-after-sec 5
 ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_marketing_live_guard.sh
-ExecStartPost=-/usr/bin/env node /opt/shein-bi/app/scripts/cleanup_shein_store_browsers.mjs --all --cleanup-chrome-tmp --kill-after-sec 5

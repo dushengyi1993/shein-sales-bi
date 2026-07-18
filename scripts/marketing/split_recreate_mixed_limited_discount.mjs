@@ -60,6 +60,9 @@ for (const group of plan.groups || []) {
     }
   }
 }
+if (args.execute) {
+  throw new Error('Legacy split/recreate execute is disabled because it ends the old activity before replacement. Use replace_limited_discount_transactionally.mjs so every removed SKC has a durable snapshot and automatic compensation.');
+}
 const store=STORES.find(s=>String(s.storeKey).toUpperCase()===args.storeKey);
 if(!store) throw new Error(`Unknown store ${args.storeKey}`);
 const old=plan.oldActivity||{};

@@ -17,6 +17,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {normalizeGoodsSnDetailed} from '../../lib/product_sku_normalizer.mjs';
+import {normalizeInventoryProjection} from '../../lib/inventory_projection_contract.mjs';
 import {
   addBiPortalSourceArgs,
   normalizeBiPortalSourceArgs,
@@ -24,6 +25,7 @@ import {
   summarizeBiPortalSourceForReport,
 } from '../../lib/bi_portal_source.mjs';
 import {summarizeStoreAuditCoverage} from '../../lib/marketing_stack_review_coverage.mjs';
+import {loadSheinBrowserSession, sheinSessionPostJson} from '../../lib/shein_session_http.mjs';
 import {
   couponPlanStoreView,
   findCouponPlanRow,
@@ -179,29 +181,39 @@ const COUPON_HEADERS = [
 const LIMIT_HEADERS = ['店铺','SKC','标准货号','限时折扣名称','限时折扣价SAR','来源','数据日期','风险提示','修改意见/备注'];
 
 for (const [batchIndex, batch] of batches.entries()) {
-  const batchAudit = {batchIndex: batchIndex + 1, stores: batch.map(s => s.storeKey), startedAt: new Date().toISOString(), finishedAt: '', closeAfterBatch: !args.noClose};
+  const batchAudit = {
+    batchIndex: batchIndex + 1,
+    stores: batch.map(s => s.storeKey),
+    startedAt: new Date().toISOString(),
+    finishedAt: '',
+    mode: args.sessionHttp ? 'session_http' : 'browser',
+    closeAfterBatch: false,
+  };
   audit.batches.push(batchAudit);
   console.log(`\n[BATCH ${batchIndex + 1}/${batches.length}] ${batch.map(s => s.storeKey).join(', ')}`);
-  for (const store of batch) {
-    const storeResult = await scanStore(store).catch(err => ({
-      store: store.storeKey,
-      ok: false,
-      error: err.message,
-      stack: err.stack,
-      activities: [],
-      couponSummaries: [],
-      rows: [],
-    }));
+  const scanStoreSafely = store => scanStore(store).catch(err => ({
+    store: store.storeKey,
+    ok: false,
+    error: err.message,
+    stack: err.stack,
+    activities: [],
+    couponSummaries: [],
+    rows: [],
+  }));
+  const storeResults = args.sessionHttp
+    ? await Promise.all(batch.map(scanStoreSafely))
+    : await scanStoresSequentially(batch, scanStoreSafely);
+  for (const [storeIndex, store] of batch.entries()) {
+    const storeResult = storeResults[storeIndex];
     audit.stores.push(stripRowsForAudit(storeResult));
     detailRows.push(...(storeResult.rows || []));
     couponRows.push(...(storeResult.couponSummaries || []));
     await fs.writeFile(path.join(runDir, `store-${store.storeKey}.json`), JSON.stringify(storeResult, null, 2), 'utf8');
   }
-  if (!args.noClose) {
-    for (const store of batch) closeExistingStoreChrome(store);
-  }
   batchAudit.finishedAt = new Date().toISOString();
-  console.log(`[BATCH ${batchIndex + 1}] 已保存审计并关闭本批 profile。`);
+  console.log(args.sessionHttp
+    ? `[BATCH ${batchIndex + 1}] session HTTP 并发扫描完成，未启动或关闭浏览器。`
+    : `[BATCH ${batchIndex + 1}] 浏览器扫描完成；每个 profile 已在对应店铺扫描结束时独立收尾。`);
 }
 
 const limitRows = buildLimitDiscountRows(linkIndex);
@@ -476,8 +488,9 @@ async function scanStoreViaSession(store) {
     rows: [],
   };
   try {
-    const activities = await fetchActivitiesHttp(session);
-    result.activityFetchDiagnostics = fetchActivitiesHttp.lastDiagnostics || [];
+    const activityResult = await fetchActivitiesHttp(session);
+    const activities = activityResult.activities;
+    result.activityFetchDiagnostics = activityResult.diagnostics;
     const scoped = activities.filter(withinScope);
     const ordinary = scoped.filter(a => !isCouponActivity(a));
     const coupons = scoped.filter(isCouponActivity);
@@ -522,37 +535,11 @@ async function scanStoreViaSession(store) {
 }
 
 async function loadBrowserSession(storeKey) {
-  const file = path.join(ROOT, 'state', 'shein_browser_sessions', `${storeKey}.local.json`);
-  const doc = JSON.parse(await fs.readFile(file, 'utf8'));
-  const cookie = (doc.cookies || []).map(c => `${c.name}=${c.value}`).join('; ');
-  if (!cookie) throw new Error(`No cookies in ${path.relative(ROOT, file)}`);
-  return {...doc, cookie};
+  return loadSheinBrowserSession(ROOT, storeKey);
 }
 
 async function sessionFetchJson(session, url, body, extraHeaders = {}) {
-  const res = await fetch(`https://sso.geiwohuo.com${url}`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'cookie': session.cookie,
-      'user-agent': session.userAgent || 'Mozilla/5.0',
-      'origin': 'https://sso.geiwohuo.com',
-      'referer': 'https://sso.geiwohuo.com/',
-      ...extraHeaders,
-    },
-    body: JSON.stringify(body || {}),
-  });
-  const text = await res.text();
-  let json = null;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    throw new Error(`${url} HTTP ${res.status}: ${text.slice(0, 200)}`);
-  }
-  if (!res.ok) {
-    throw new Error(`${url} HTTP ${res.status}: ${String(json?.msg || text).slice(0, 200)}`);
-  }
-  return json;
+  return sheinSessionPostJson(session, url, body, {headers: extraHeaders});
 }
 
 async function fetchActivitiesHttp(session) {
@@ -566,7 +553,7 @@ async function fetchActivitiesHttp(session) {
     pages.push({page, code: json?.code, msg: json?.msg, list});
     if (list.length < 100) break;
   }
-  fetchActivitiesHttp.lastDiagnostics = (pages || []).map(p => ({
+  const diagnostics = (pages || []).map(p => ({
     page: p.page,
     code: p.code,
     msg: p.msg,
@@ -584,7 +571,13 @@ async function fetchActivitiesHttp(session) {
       list.push(normalizeActivity(a));
     }
   }
-  return list;
+  return {activities: list, diagnostics};
+}
+
+async function scanStoresSequentially(stores, scanStoreSafely) {
+  const results = [];
+  for (const store of stores) results.push(await scanStoreSafely(store));
+  return results;
 }
 
 function normalizeActivity(a) {
@@ -609,12 +602,120 @@ async function fetchActivityDetailHttp(session, activityId) {
 }
 
 async function fetchCouponSummaryHttp(session, store, activity) {
-  const [detailJson, usageJson, sellerJson] = await Promise.all([
+  const [detailJson, usageJson, sellerJson, coupon15Rule] = await Promise.all([
     sessionFetchJson(session, '/mrs-api-prefix/mbrs/activity/get_activity_detail', {activity_id: activity.activityId}),
     sessionFetchJson(session, '/mrs-api-prefix/mbrs/coupon/query_coupon_activity_usage_List?page_num=1&page_size=20', {activity_ids: [activity.activityId], query_status: 0}),
     sessionFetchJson(session, '/mrs-api-prefix/mbrs/activity/fetch_seller_act_info', {partake_act_id: activity.activityId}),
+    fetchCoupon15PctRuleStatsHttp(session, store, activity.activityId).catch(err => ({
+      ok: false,
+      levelRuleId: configuredCouponLevelRuleId(store.storeKey, activity.activityId),
+      levelRuleIdSource: 'config',
+      error: err.message,
+    })),
   ]);
-  return couponSummaryFromApi(store, activity, detailJson?.info || {}, usageJson?.info?.coupon_activity_usage_detail_list?.[0] || {}, sellerJson?.info || {}, null);
+  return couponSummaryFromApi(
+    store,
+    activity,
+    detailJson?.info || {},
+    usageJson?.info?.coupon_activity_usage_detail_list?.[0] || {},
+    sellerJson?.info || {},
+    coupon15Rule,
+  );
+}
+
+async function fetchCoupon15PctRuleStatsHttp(session, store, activityId) {
+  const levelRuleId = configuredCouponLevelRuleId(store.storeKey, activityId);
+  if (!levelRuleId) {
+    return {
+      ok: false,
+      levelRuleId: 0,
+      levelRuleIdSource: 'config',
+      reason: `configured 15% coupon levelRuleId missing for ${store.storeKey}/${activityId}`,
+    };
+  }
+  const route = `/mbrs/marketing/coupon/rule/signup/${activityId}/${levelRuleId}`;
+  const headers = {
+    'origin-url': `https://sso.geiwohuo.com/#${route}`,
+    'x-bbl-route': route,
+    'x-req-zone-id': 'Asia/Shanghai',
+    'x-lt-language': 'CN',
+    LAN: 'CN',
+  };
+  const queryAll = async pageModule => {
+    const all = [];
+    let declaredTotal = 0;
+    let lastMessage = '';
+    for (let pageNum = 1; pageNum <= 100; pageNum += 1) {
+      const json = await sessionFetchJson(
+        session,
+        `/mrs-api-prefix/mbrs/activity/multi-level/goods/query?page_num=${pageNum}&page_size=200`,
+        {
+          activity_id: Number(activityId),
+          level_rule_id: levelRuleId,
+          page: 'COUPON',
+          page_module: pageModule,
+          product_code_list: [],
+          supplier_no_list: [],
+        },
+        headers,
+      );
+      const code = String(json?.code ?? '');
+      lastMessage = String(json?.msg || '');
+      const list = Array.isArray(json?.info?.partake_goods_list) ? json.info.partake_goods_list : [];
+      if (code !== '0') {
+        return {ok: false, code, msg: lastMessage, total: declaredTotal, list: all};
+      }
+      declaredTotal = Number(json?.info?.total ?? list.length ?? 0);
+      all.push(...list.map(item => ({
+        skc: String(item?.skc || '').trim(),
+        supplierNo: item?.supplier_no || '',
+        status: String(item?.status ?? ''),
+        enrollTime: item?.enroll_time || null,
+      })));
+      if (!list.length || all.length >= declaredTotal) break;
+    }
+    const bySkc = new Map();
+    for (const item of all) {
+      if (item.skc && !bySkc.has(item.skc)) bySkc.set(item.skc, item);
+    }
+    return {ok: true, code: '0', msg: lastMessage, total: declaredTotal, list: [...bySkc.values()]};
+  };
+  const [available, enrolled] = await Promise.all([
+    queryAll('MULTI_LEVEL_RULE_GOODS'),
+    queryAll('MULTI_LEVEL_RULE_ENROLLED_GOODS'),
+  ]);
+  if (!available.ok || !enrolled.ok) {
+    return {
+      ok: false,
+      levelRuleId,
+      levelRuleIdSource: 'config',
+      availableCode: available.code,
+      availableMsg: available.msg,
+      enrolledCode: enrolled.code,
+      enrolledMsg: enrolled.msg,
+    };
+  }
+  const enrolledSet = new Set(enrolled.list.map(item => item.skc));
+  const remaining = available.list.map(item => item.skc).filter(skc => skc && !enrolledSet.has(skc));
+  const activeEnrolled = enrolled.list.filter(item => ['0', '1'].includes(String(item.status ?? '')));
+  const statusCounts = {};
+  for (const item of enrolled.list) statusCounts[item.status] = (statusCounts[item.status] || 0) + 1;
+  return {
+    ok: true,
+    levelRuleId,
+    levelRuleIdSource: 'config',
+    availableTotal: available.total,
+    availableCount: available.list.length,
+    enrolledTotal: enrolled.total,
+    enrolledCount: enrolled.list.length,
+    remainingCount: remaining.length,
+    remainingSample: remaining.slice(0, 20),
+    availableSkcs: available.list.map(item => item.skc).filter(Boolean),
+    enrolledSkcs: enrolled.list.map(item => item.skc).filter(Boolean),
+    enrolledActiveSkcs: activeEnrolled.map(item => item.skc).filter(Boolean),
+    enrolledActiveRows: activeEnrolled,
+    statusSummary: Object.keys(statusCounts).sort().map(key => `${key}:${statusCounts[key]}`).join(';'),
+  };
 }
 
 function couponSummaryFromApi(store, activity, detail = {}, usage = {}, seller = {}, coupon15Rule = null) {
@@ -1411,11 +1512,13 @@ function buildDepletionIndex(bi) {
   for (const p of bi.inventoryDepletion?.products || []) {
     const standard = p.standard_goods_sn || p.standardGoodsSn;
     if (!standard) continue;
+    const projection = normalizeInventoryProjection(p);
     byStandard.set(compact(standard), {
-      onHand: Number(p.estimated_on_hand_quantity || 0),
-      daysOnHand: Number(p.days_of_supply_on_hand || 0),
+      onHand: projection.fresh_matched ? projection.current_sellable_quantity : null,
+      daysOnHand: projection.fresh_matched ? numValue(p.days_of_supply_on_hand) : null,
       weightedDailySales: Number(p.weighted_daily_gross_sales || 0),
       unitCostSar: numValue(p.unit_cost_sar),
+      inventoryMatchStatus: projection.inventory_match_status,
     });
   }
   return byStandard;

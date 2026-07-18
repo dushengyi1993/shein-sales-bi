@@ -81,6 +81,8 @@ function parseArgs(argv) {
     noClose: false,
     headless: false,
     selectionDebugOnly: false,
+    fillDebugSkc: '',
+    allowUneditableSkcs: [],
     submit: false,
     minDiscountFallback: [],
     priceOverrides: '',
@@ -100,6 +102,8 @@ function parseArgs(argv) {
     else if (a === '--no-close') out.noClose = true;
     else if (a === '--headless') out.headless = true;
     else if (a === '--selection-debug-only') out.selectionDebugOnly = true;
+    else if (a === '--fill-debug-skc') out.fillDebugSkc = String(argv[++i] || '').trim().toLowerCase();
+    else if (a === '--allow-uneditable-skc') out.allowUneditableSkcs = String(argv[++i] || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
     else if (a === '--submit') out.submit = true;
     else if (a === '--min-discount-fallback') out.minDiscountFallback = String(argv[++i] || '').split(',').map(s => s.trim()).filter(Boolean);
     else if (a === '--price-overrides') out.priceOverrides = path.resolve(argv[++i] || '');
@@ -747,6 +751,7 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
             skc: String(row?.skc || '').toLowerCase(),
             supplierNo: row?.supplier_no || '',
             currentPrice: Number(row?.current_cost || row?.current_cost_display?.value || row?.shop_price || row?.special_price || row?.current_shop_price || 0),
+            raw: row,
           })),
         };
       } catch (error) {
@@ -770,6 +775,19 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
         visibleRows: [...document.querySelectorAll('tbody tr')].filter(visible).map(rowInfo).filter(x => x.skc),
         allRows: [...document.querySelectorAll('tbody tr')].map(rowInfo).filter(x => x.skc),
         checkboxHtml: [...document.querySelectorAll('input[type=checkbox]')].map(x => x.closest('.soui-checkbox-wrapper,.merchant-ui-checkbox')?.outerHTML || x.outerHTML),
+        inputSamples: [...document.querySelectorAll('input')].slice(0, 30).map(input => ({
+          type: input.type,
+          value: input.value,
+          placeholder: input.getAttribute('placeholder') || '',
+          visible: visible(input),
+          parentText: (input.parentElement?.parentElement?.innerText || input.parentElement?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 300),
+          ancestorHtml: input.parentElement?.parentElement?.parentElement?.outerHTML?.slice(0, 5000) || '',
+          html: input.outerHTML.slice(0, 1000),
+        })),
+        skcFilterHtml: [...document.querySelectorAll('div,section,form')]
+          .filter(el => visible(el) && (el.innerText || '').replace(/\s+/g, '').includes('商品SKC'))
+          .map(el => ({el, area:el.getBoundingClientRect().width * el.getBoundingClientRect().height}))
+          .sort((a,b) => a.area - b.area)[0]?.el?.outerHTML?.slice(0, 20000) || '',
         apiSnapshot,
         ancestors,
         bodyTail: (document.body?.innerText || '').slice(-900),
@@ -885,7 +903,8 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
       const seenSkcs = new Set(seenRowsBySkc.keys());
       const exactKnownSet = (rows.length === totalGoods && visibleSkcs.size === allowSet.size &&
         [...visibleSkcs].every(skc => allowSet.has(skc))) ||
-        (seenSkcs.size === allowSet.size && [...seenSkcs].every(skc => allowSet.has(skc)));
+        (seenSkcs.size === allowSet.size && [...seenSkcs].every(skc => allowSet.has(skc))) ||
+        (allowSet.size === totalGoods && seenSkcs.size > 0 && [...seenSkcs].every(skc => allowSet.has(skc)));
       if (!exactKnownSet) return {used: false, clicks: 0};
       if (parseSelected().selectedCount === totalGoods) {
         fullAllowlistHeaderConfirmed = true;
@@ -973,6 +992,61 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
       }
       return clicks;
     };
+    let singleSkcFilter = {applied:false};
+    if (allowSet?.size === 1) {
+      const wanted = [...allowSet][0];
+      const textInputs = [...document.querySelectorAll('input')]
+        .filter(visible)
+        .filter(input => !['checkbox', 'radio', 'hidden'].includes(input.type));
+      const labelledSkcInput = textInputs.find(input => {
+        let parent = input.parentElement;
+        for (let depth = 0; parent && depth < 6; depth += 1, parent = parent.parentElement) {
+          const text = (parent.innerText || parent.textContent || '').replace(/\s+/g, '');
+          if (text.includes('商品SKC') && text.length < 500) return true;
+        }
+        return false;
+      });
+      const skcInput = labelledSkcInput || textInputs.find(input =>
+        input.id !== 'soc-fe-search-btn' &&
+        !String(input.className || '').includes('soui-input-input') &&
+        !input.getAttribute('placeholder')
+      );
+      const searchButton = [...document.querySelectorAll('button')]
+        .filter(visible)
+        .find(button => (button.innerText || button.textContent || '').trim() === '搜索' && !isDisabled(button));
+      if (skcInput && searchButton) {
+        const proto = Object.getPrototypeOf(skcInput);
+        const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (desc?.set) desc.set.call(skcInput, wanted); else skcInput.value = wanted;
+        skcInput.dispatchEvent(new Event('input', {bubbles:true}));
+        skcInput.dispatchEvent(new Event('change', {bubbles:true}));
+        await sleep(700);
+        const optionCandidates = [...document.querySelectorAll('[role=option],li,div')]
+          .filter(visible)
+          .map(el => ({el, text:(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim(), area:el.getBoundingClientRect().width * el.getBoundingClientRect().height}))
+          .filter(x => x.text.toLowerCase().includes(wanted))
+          .sort((a,b) => a.area - b.area);
+        const option = optionCandidates[0];
+        if (option?.el) {
+          fire(option.el);
+          await sleep(450);
+        }
+        fire(searchButton);
+        let matched = false;
+        let totalAfterFilter = parseTotal().totalGoods;
+        for (let attempt = 0; attempt < 40; attempt += 1) {
+          await sleep(250);
+          const rows = recordVisibleGoodsRows();
+          const visibleSkcs = rows.map(tr => rowSnapshot(tr).skc).filter(Boolean);
+          totalAfterFilter = parseTotal().totalGoods;
+          matched = totalAfterFilter === 1 && visibleSkcs.length === 1 && visibleSkcs[0] === wanted;
+          if (matched) break;
+        }
+        singleSkcFilter = {applied:true, wanted, optionClicked:!!option?.el, optionText:option?.text || '', matched, totalAfterFilter};
+      } else {
+        singleSkcFilter = {applied:false, wanted, reason:'skc_search_controls_not_found'};
+      }
+    }
     let pages = 0;
     let selectedClicks = 0;
     const totalPages = maxPage();
@@ -1035,12 +1109,21 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
         .filter(el => el.querySelectorAll('tbody tr').length >= 2 && el.scrollHeight > el.clientHeight + 40)
         .map(el => ({tag: el.tagName, className: String(el.className || '').slice(0, 240), clientHeight: el.clientHeight, scrollHeight: el.scrollHeight, rowCount: el.querySelectorAll('tbody tr').length})),
       rowTextSamples: [...document.querySelectorAll('tr')].slice(0, 5).map(tr => (tr.innerText || tr.textContent || '').trim().slice(0, 500)),
+      rowHtmlSamples: [...document.querySelectorAll('tbody tr')].slice(0, 3).map(tr => tr.outerHTML.slice(0, 4000)),
       customCheckboxSamples: [...document.querySelectorAll('[role=checkbox],.soui-checkbox,.merchant-ui-checkbox,.ant-checkbox')].slice(0, 8).map(el => ({
         tag: el.tagName,
         className: String(el.className || '').slice(0, 300),
         role: el.getAttribute('role') || '',
         ariaChecked: el.getAttribute('aria-checked') || '',
         html: el.outerHTML.slice(0, 800),
+      })),
+      inputSamples: [...document.querySelectorAll('input')].slice(0, 20).map(input => ({
+        type: input.type,
+        value: input.value,
+        placeholder: input.getAttribute('placeholder') || '',
+        visible: visible(input),
+        parentText: (input.parentElement?.parentElement?.innerText || input.parentElement?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 300),
+        html: input.outerHTML.slice(0, 1000),
       })),
       bodyHead: (document.body?.innerText || '').slice(0, 1500),
     };
@@ -1061,6 +1144,7 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
       availableRows,
       outOfPlanRows,
       outOfPlanCount: outOfPlanRows.length,
+      singleSkcFilter,
       debug,
       ...total,
       ...selected,
@@ -1326,7 +1410,7 @@ async function collectVisibleRows(cdp, sessionId) {
       if (!minDiscount) minDiscount = 10;
       let editMode = 'price';
       if (radioInputs.length >= 2 && /VIP档|普通档/.test(discountText)) editMode = 'vip_discount';
-      if (!idx || !skc || textInputs.length < 1) continue;
+      if (!idx || !skc || (textInputs.length < 1 && editMode !== 'vip_discount')) continue;
       rows.push({idx, key: skc.toLowerCase(), skc, supplierNo, currentPrice, minDiscount, editMode, goodsName: info.slice(0, 200)});
     }
     return rows;
@@ -1373,7 +1457,9 @@ async function fillVisibleRows(cdp, sessionId, fills) {
       const inputs = [...tr.querySelectorAll('input')];
       const textInputs = inputs.filter(x => /^(text|number)$/.test(x.type || 'text'));
       const radioInputs = inputs.filter(x => x.type === 'radio');
-      if (textInputs.length < 1) continue;
+      const discountText = cells.join(' ');
+      const vipMode = radioInputs.length >= 2 && /VIP档|普通档/.test(discountText);
+      if (textInputs.length < 1 && !vipMode) continue;
       const baseFill = fills.get(key) || bySkc.get(key);
       const f = {...baseFill};
       const rowCurrentPrice = currentPriceFromRow(cells, rowText);
@@ -1382,10 +1468,11 @@ async function fillVisibleRows(cdp, sessionId, fills) {
         f.discountPct = Math.max(Number(f.minDiscount || 10), Math.floor((1 - Number(f.targetPrice) / rowCurrentPrice) * 100 + 1e-9));
         f.targetPriceText = floor2(rowCurrentPrice * (1 - f.discountPct / 100)).toFixed(2);
       }
-      if (f.editMode === 'vip_discount') {
+      if (f.editMode === 'vip_discount' || vipMode) {
         clickInput(radioInputs[1] || radioInputs[0]);
-        await sleep(30);
+        await sleep(180);
         const freshTextInputs = [...tr.querySelectorAll('input')].filter(x => /^(text|number)$/.test(x.type || 'text'));
+        if (!freshTextInputs.length) continue;
         const discountInput = freshTextInputs.find(x => !String(x.className || '').includes('ant-input-number-input')) || freshTextInputs[0];
         setNativeValue(discountInput, String(f.discountPct));
         await sleep(160);
@@ -1466,58 +1553,82 @@ async function fillEditPage(cdp, sessionId, storeKey, activityId, allowSkcs = nu
   const filled = new Map();
   const seenRows = new Map();
   const allowSet = allowSkcs ? new Set(allowSkcs.map(x => String(x || '').trim().toLowerCase()).filter(Boolean)) : null;
+  const allowedUneditableSet = new Set(args.allowUneditableSkcs.filter(skc => !allowSet || allowSet.has(skc)));
   const outOfPlanRows = new Map();
+  const requiredCoverage = Math.max(0, (allowSet?.size || expectedTotal) - allowedUneditableSet.size);
   let top = 0;
-  for (let guard = 0; guard < 120; guard++) {
-    const scroll = await getScrollInfo(cdp, sessionId);
-    const max = scroll.hasScroller ? scroll.max : 0;
-    await scrollTo(cdp, sessionId, top);
-    await sleep(250);
-    const rows = await collectVisibleRows(cdp, sessionId);
-    const fills = [];
-    for (const row of rows) {
-      seenRows.set(row.key, row);
-      if (allowSet && !allowSet.has(String(row.skc || '').trim().toLowerCase())) {
-        outOfPlanRows.set(row.key, row);
-        continue;
-      }
-      const computed = computeTarget(storeKey, activityId, row);
-      if (!computed.ok) {
-        if (computed.priceStackBlocker) {
-          priceStackBlockers.set(row.key, {...row, ...computed});
-        } else {
-          missingCost.set(row.key, {...row, ...computed});
+  let fillSweeps = 0;
+  // Virtualized rows can consistently fall between two fixed scroll landing
+  // points. Retry with staggered, progressively smaller steps so later sweeps
+  // cover the gaps left by the first pass.
+  const sweepSteps = [450, 325, 240, 175, 120];
+  for (let sweep = 1; sweep <= sweepSteps.length; sweep += 1) {
+    fillSweeps = sweep;
+    const scrollStep = sweepSteps[sweep - 1];
+    top = sweep === 1 ? 0 : Math.floor(scrollStep / 2);
+    for (let guard = 0; guard < 240; guard++) {
+      const scroll = await getScrollInfo(cdp, sessionId);
+      const max = scroll.hasScroller ? scroll.max : 0;
+      await scrollTo(cdp, sessionId, top);
+      await sleep(sweep === 1 ? 250 : 450);
+      const rows = await collectVisibleRows(cdp, sessionId);
+      const fills = [];
+      for (const row of rows) {
+        seenRows.set(row.key, row);
+        if (allowSet && !allowSet.has(String(row.skc || '').trim().toLowerCase())) {
+          outOfPlanRows.set(row.key, row);
+          continue;
         }
-        continue;
+        const computed = computeTarget(storeKey, activityId, row);
+        if (!computed.ok) {
+          if (computed.priceStackBlocker) {
+            priceStackBlockers.set(row.key, {...row, ...computed});
+          } else {
+            missingCost.set(row.key, {...row, ...computed});
+          }
+          continue;
+        }
+        const full = {...row, ...computed};
+        targets.set(row.key, full);
+        fills.push(full);
       }
-      const full = {...row, ...computed};
-      targets.set(row.key, full);
-      fills.push(full);
+      const done = await fillVisibleRows(cdp, sessionId, fills);
+      for (const d of done) filled.set(d.key || d.idx, d);
+      const covered = new Set([...targets.keys(), ...missingCost.keys(), ...priceStackBlockers.keys()]).size;
+      if (requiredCoverage && covered >= requiredCoverage) break;
+      if (!scroll.hasScroller || top >= max) break;
+      top = Math.min(top + scrollStep, max);
     }
-    const done = await fillVisibleRows(cdp, sessionId, fills);
-    for (const d of done) filled.set(d.key || d.idx, d);
     const covered = new Set([...targets.keys(), ...missingCost.keys(), ...priceStackBlockers.keys()]).size;
-    if (expectedTotal && covered >= expectedTotal) break;
-    if (!scroll.hasScroller || top >= max) break;
-    top = Math.min(top + 450, max);
+    if (!requiredCoverage || covered >= requiredCoverage) break;
+    await sleep(600);
   }
 
   // 二次复核
   const verifyRows = new Map();
-  top = 0;
-  for (let guard = 0; guard < 120; guard++) {
-    const scroll = await getScrollInfo(cdp, sessionId);
-    const max = scroll.hasScroller ? scroll.max : 0;
-    await scrollTo(cdp, sessionId, top);
-    await sleep(200);
-    const rows = await evalJs(cdp, sessionId, `
+  const verifySteps = [450, 325, 240, 175, 120];
+  for (let sweep = 1; sweep <= verifySteps.length; sweep += 1) {
+    const scrollStep = verifySteps[sweep - 1];
+    top = sweep === 1 ? 0 : Math.floor(scrollStep / 2);
+    for (let guard = 0; guard < 240; guard++) {
+      const scroll = await getScrollInfo(cdp, sessionId);
+      const max = scroll.hasScroller ? scroll.max : 0;
+      await scrollTo(cdp, sessionId, top);
+      await sleep(sweep === 1 ? 200 : 350);
+      const rows = await evalJs(cdp, sessionId, `
       const rows = [];
+      let lastSkc = '';
       for (const tr of document.querySelectorAll('tr')) {
         const cells = [...tr.querySelectorAll('td')].map(td => td.innerText || '');
         const rowText = tr.innerText || cells.join('\\n');
         const idx = Number(((cells[0] || rowText).match(/\\d+/) || [])[0]);
-        const skc = (rowText.match(/SKC:\\s*([a-z]{2}\\d+)/i) || [])[1] || '';
+        const explicitSkc = (rowText.match(/SKC:\\s*([a-z]{2}\\d+)/i) || [])[1] || '';
+        if (explicitSkc) lastSkc = explicitSkc;
+        const skc = explicitSkc || lastSkc || '';
         const key = String(skc || idx).toLowerCase();
+        const sku = (rowText.match(/SKU:\\s*([a-z0-9]+)/i) || [])[1] || '';
+        const priceCell = cells.find(c => /SAR\\s*[\\d.]+/i.test(c)) || '';
+        const currentPrice = Number((priceCell.match(/SAR\\s*([\\d.]+)/i) || [])[1] || 0);
         const inputs = [...tr.querySelectorAll('input')];
         const textInputs = inputs.filter(x => /^(text|number)$/.test(x.type || 'text'));
         const radioInputs = inputs.filter(x => x.type === 'radio');
@@ -1527,54 +1638,77 @@ async function fillEditPage(cdp, sessionId, storeKey, activityId, allowSkcs = nu
         if (editMode === 'vip_discount') {
           const discountInput = textInputs.find(x => !String(x.className || '').includes('ant-input-number-input')) || textInputs[0];
           const priceInput = textInputs.find(x => String(x.className || '').includes('ant-input-number-input')) || textInputs[1];
-          rows.push({idx, key, skc, price: priceInput?.value || '', discount: String(parseInt(discountInput?.value || '', 10)), editMode});
-        } else rows.push({idx, key, skc, price: textInputs[0].value, discount: String(parseInt((textInputs[1] || inputs[1]).value, 10)), editMode});
+          rows.push({idx, key, skc, sku, currentPrice, price: priceInput?.value || '', discount: String(parseInt(discountInput?.value || '', 10)), editMode});
+        } else rows.push({idx, key, skc, sku, currentPrice, price: textInputs[0].value, discount: String(parseInt((textInputs[1] || inputs[1]).value, 10)), editMode});
       }
       return rows;
-    `);
-    for (const r of rows) verifyRows.set(r.key || r.idx, r);
-    if (expectedTotal && verifyRows.size >= expectedTotal) break;
-    if (!scroll.hasScroller || top >= max) break;
-    top = Math.min(top + 450, max);
+      `);
+      for (const r of rows) {
+        const key = r.key || r.idx;
+        const variants = verifyRows.get(key) || [];
+        const variantKey = `${r.idx}:${r.sku || ''}`;
+        const at = variants.findIndex(x => `${x.idx}:${x.sku || ''}` === variantKey);
+        if (at >= 0) variants[at] = r; else variants.push(r);
+        verifyRows.set(key, variants);
+      }
+      const allTargetsVerified = targets.size > 0 && [...targets.keys()].every(key => verifyRows.has(key));
+      if (allTargetsVerified) break;
+      if (!scroll.hasScroller || top >= max) break;
+      top = Math.min(top + scrollStep, max);
+    }
+    const allTargetsVerified = targets.size > 0 && [...targets.keys()].every(key => verifyRows.has(key));
+    if (allTargetsVerified) break;
+    await sleep(500);
   }
   const mismatches = [];
   const platformRewrites = [];
   for (const [key, t] of targets.entries()) {
-    const r = verifyRows.get(key);
+    const candidates = verifyRows.get(key) || [];
+    const r = candidates[0];
     const expectedByDiscount = floor2(t.currentPrice * (1 - t.discountPct / 100)).toFixed(2);
     if (t.editMode === 'vip_discount') {
-      const actualPriceNum = Number(r?.price);
       const targetPriceNum = Number(t.targetPriceText);
-      const discountPriceNum = Number(expectedByDiscount);
-      const priceOk = r && Number.isFinite(actualPriceNum) && (
-        Math.abs(actualPriceNum - targetPriceNum) <= 0.55 ||
-        Math.abs(actualPriceNum - discountPriceNum) <= 0.55
-      );
-      const discountOk = r && r.discount === String(t.discountPct);
-      if (!r || (!priceOk && !discountOk)) {
-        mismatches.push({idx: t.idx, key, expectedPrice: t.targetPriceText, actualPrice: r?.price, expectedDiscount: String(t.discountPct), actualDiscount: r?.discount, supplierNo: t.supplierNo, skc: t.skc, editMode: t.editMode});
+      const checks = candidates.map(variant => {
+        const currentPrice = Number(variant.currentPrice || 0);
+        const expectedDiscount = currentPrice > 0
+          ? Math.max(Number(t.minDiscount || 10), Math.floor((1 - targetPriceNum / currentPrice) * 100 + 1e-9))
+          : Number(t.discountPct);
+        const expectedPrice = currentPrice > 0 ? floor2(currentPrice * (1 - expectedDiscount / 100)) : Number(expectedByDiscount);
+        const actualPrice = Number(variant.price);
+        const discountOk = variant.discount === String(expectedDiscount);
+        const priceOk = !variant.price || (Number.isFinite(actualPrice) && Math.abs(actualPrice - expectedPrice) <= 0.55);
+        return {variant, expectedDiscount, expectedPrice, ok: discountOk && priceOk};
+      });
+      const failed = checks.find(check => !check.ok);
+      if (!candidates.length || failed) {
+        mismatches.push({idx: failed?.variant?.idx ?? t.idx, key, expectedPrice: failed?.expectedPrice ?? t.targetPriceText, actualPrice: failed?.variant?.price, expectedDiscount: String(failed?.expectedDiscount ?? t.discountPct), actualDiscount: failed?.variant?.discount, supplierNo: t.supplierNo, skc: t.skc, sku: failed?.variant?.sku || '', editMode: t.editMode, variantCount: candidates.length});
       }
       continue;
     }
-    if (r && r.price === expectedByDiscount && r.discount === String(t.discountPct) && r.price !== t.targetPriceText) {
+    if (candidates.length && candidates.every(variant => variant.price === expectedByDiscount && variant.discount === String(t.discountPct)) && candidates.some(variant => variant.price !== t.targetPriceText)) {
       platformRewrites.push({idx: t.idx, key, expectedPrice: t.targetPriceText, actualPrice: r.price, discount: String(t.discountPct), supplierNo: t.supplierNo, skc: t.skc});
       continue;
     }
-    if (!r || r.price !== t.targetPriceText || r.discount !== String(t.discountPct)) {
+    if (!candidates.length || candidates.some(variant => variant.price !== t.targetPriceText || variant.discount !== String(t.discountPct))) {
       mismatches.push({idx: t.idx, key, expectedPrice: t.targetPriceText, actualPrice: r?.price, expectedDiscount: String(t.discountPct), actualDiscount: r?.discount, supplierNo: t.supplierNo, skc: t.skc});
     }
   }
   const coverageCount = new Set([...targets.keys(), ...missingCost.keys(), ...priceStackBlockers.keys()]).size;
-  const expectedPlanTotal = allowSet ? allowSet.size : expectedTotal;
+  const explicitlyAllowedUneditableSkcs = [...allowedUneditableSet].filter(skc => (
+    !targets.has(skc) && !missingCost.has(skc) && !priceStackBlockers.has(skc)
+  ));
+  const expectedPlanTotal = (allowSet ? allowSet.size : expectedTotal) - explicitlyAllowedUneditableSkcs.length;
   const coverageOk = !expectedPlanTotal || coverageCount >= expectedPlanTotal;
   return {
     ok: missingCost.size === 0 && priceStackBlockers.size === 0 && mismatches.length === 0 && coverageOk && outOfPlanRows.size === 0,
     expectedTotal,
     expectedPlanTotal,
     coverageCount,
+    explicitlyAllowedUneditableSkcs,
+    fillSweeps,
     targetCount: targets.size,
     filledCount: filled.size,
-    verifyCount: verifyRows.size,
+    verifyCount: [...verifyRows.values()].reduce((sum, rows) => sum + rows.length, 0),
     missingCost: [...missingCost.values()].sort((a,b) => a.idx - b.idx),
     priceStackBlockers: [...priceStackBlockers.values()].sort((a,b) => a.idx - b.idx),
     outOfPlanRows: [...outOfPlanRows.values()].sort((a,b) => a.idx - b.idx),
@@ -1649,7 +1783,8 @@ async function submitSignup(cdp, sessionId) {
       confirmed.clicked = true;
       confirmed.clickedText = confirmAttempt.clickedText;
       confirmed.ack = confirmAttempt.ack;
-      break;
+      await sleep(700);
+      continue;
     }
     const interim = await evalJs(cdp, sessionId, `
       const text = document.body?.innerText || '';
@@ -1730,6 +1865,57 @@ async function processActivity(cdp, store, activity) {
 
   const selection = await selectAllGoodsAndNext(cdp, sessionId, allowSkcs);
   if (!selection.ok) return {ok: false, store: store.storeKey, activity, targetId, selection, reason: selection.reason || '选择商品失败'};
+
+  if (args.fillDebugSkc) {
+    const ready = await waitFor(cdp, sessionId, `document.body && document.body.innerText.includes('提报的活动价格')`, 30_000);
+    const rowEditorReady = ready && await waitFor(cdp, sessionId, `
+      [...document.querySelectorAll('tbody tr')].some(tr => {
+        const cells = tr.querySelectorAll('td');
+        const inputs = [...tr.querySelectorAll('input')];
+        return cells.length >= 6 && inputs.some(x => /^(text|number|radio)$/.test(x.type || 'text'));
+      })
+    `, 60_000);
+    const diagnostic = rowEditorReady ? await evalJs(cdp, sessionId, `
+      const target = __arg;
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
+      const inspect = (top = 0, max = 0) => {
+        for (const tr of document.querySelectorAll('tr')) {
+          const rowText = tr.innerText || '';
+          if (!rowText.toLowerCase().includes(target)) continue;
+          return {
+            target,
+            found: true,
+            top,
+            max,
+            text: rowText.slice(0, 2400),
+            html: tr.outerHTML.slice(0, 12000),
+            inputs: [...tr.querySelectorAll('input')].map(x => ({type:x.type, value:x.value, checked:x.checked, disabled:x.disabled, className:String(x.className || '')})),
+            buttons: [...tr.querySelectorAll('button')].map(x => ({text:(x.innerText || x.textContent || '').trim(), disabled:x.disabled})),
+            cells: [...tr.querySelectorAll('td')].map(td => (td.innerText || '').slice(0, 800)),
+          };
+        }
+        return null;
+      };
+      const immediate = inspect();
+      if (immediate) return {...immediate, via:'immediate_dom'};
+      const candidates = [...document.querySelectorAll('div,main,section')]
+        .filter(el => el.querySelectorAll('tr').length >= 2 && el.scrollHeight > el.clientHeight + 40)
+        .sort((a,b) => (b.scrollHeight-b.clientHeight) - (a.scrollHeight-a.clientHeight));
+      const scroller = candidates[0];
+      if (!scroller) return {target, found:false, reason:'no_table_scroller', rows:document.querySelectorAll('tr').length, bodyHas:(document.body?.innerText || '').toLowerCase().includes(target)};
+      const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      for (let top = 0, guard = 0; guard < 500; guard += 1, top += 80) {
+        scroller.scrollTop = Math.min(top, max);
+        scroller.dispatchEvent(new Event('scroll', {bubbles:true}));
+        await sleep(120);
+        const hit = inspect(top, max);
+        if (hit) return {...hit, via:'table_scroller'};
+        if (top >= max) break;
+      }
+      return {target, found:false, max};
+    `, args.fillDebugSkc) : {target: args.fillDebugSkc, found:false, reason: ready ? 'edit_rows_not_ready' : 'edit_page_not_ready'};
+    return {ok: false, store: store.storeKey, activity, targetId, selection, fillDebugOnly: true, diagnostic, reason: 'fill_debug_only'};
+  }
 
   const fill = await fillEditPage(cdp, sessionId, store.storeKey, activity.activityId, allowSkcs);
   if (!fill.ok) {

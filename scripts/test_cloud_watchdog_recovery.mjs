@@ -6,13 +6,105 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {
   assessDailyLinkBusinessRecovery,
+  assessDailyMarketingGuardHealth,
+  assessDailyMarketingRepairHealth,
   assessDailyMarketingScanRecovery,
+  assessDailyOpenapiProductRecovery,
   resolveMarketingScanEvidencePath,
 } from '../lib/cloud_watchdog_recovery.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const nowMs = Date.parse('2026-07-11T12:30:00+08:00');
 const stores = ['DL', 'DX', 'QY'];
+
+const guardRetryPending = assessDailyMarketingGuardHealth({
+  guardState: {date: '2026-07-18', generatedAt: '2026-07-18T02:31:00.000Z', status: 'warning'},
+  lastOkState: null,
+  nowMs: Date.parse('2026-07-18T13:50:00+08:00'),
+});
+assert.equal(guardRetryPending.healthy, true);
+assert.equal(guardRetryPending.pending, true);
+assert.equal(guardRetryPending.reason, 'retry_window_open');
+
+const guardFinalFailure = assessDailyMarketingGuardHealth({
+  guardState: {date: '2026-07-18', generatedAt: '2026-07-18T08:45:00.000Z', status: 'warning'},
+  lastOkState: {date: '2026-07-17', generatedAt: '2026-07-17T08:45:00.000Z', status: 'ok'},
+  nowMs: Date.parse('2026-07-18T17:50:00+08:00'),
+});
+assert.equal(guardFinalFailure.healthy, false);
+assert.equal(guardFinalFailure.reason, 'today_success_missing');
+
+const guardFinalStillRunning = assessDailyMarketingGuardHealth({
+  guardState: {date: '2026-07-18', generatedAt: '2026-07-18T08:31:00.000Z', status: 'warning'},
+  lastOkState: {date: '2026-07-17', generatedAt: '2026-07-17T08:45:00.000Z', status: 'ok'},
+  guardRunning: true,
+  guardStartedAt: '2026-07-18T17:30:00+08:00',
+  nowMs: Date.parse('2026-07-18T17:50:00+08:00'),
+});
+assert.equal(guardFinalStillRunning.healthy, true);
+assert.equal(guardFinalStillRunning.pending, true);
+assert.equal(guardFinalStillRunning.reason, 'final_run_active');
+const guardOverdue = assessDailyMarketingGuardHealth({
+  guardState: {date: '2026-07-18', status: 'warning'},
+  guardRunning: true,
+  guardStartedAt: '2026-07-18T16:00:00+08:00',
+  nowMs: Date.parse('2026-07-18T17:50:00+08:00'),
+});
+assert.equal(guardOverdue.healthy, false);
+assert.equal(guardOverdue.reason, 'final_run_overdue');
+
+const guardFinalSuccess = assessDailyMarketingGuardHealth({
+  guardState: {date: '2026-07-18', generatedAt: '2026-07-18T08:40:00.000Z', status: 'ok'},
+  lastOkState: {date: '2026-07-18', generatedAt: '2026-07-18T08:40:00.000Z', status: 'ok'},
+  nowMs: Date.parse('2026-07-18T17:50:00+08:00'),
+});
+assert.equal(guardFinalSuccess.healthy, true);
+assert.equal(guardFinalSuccess.pending, false);
+assert.equal(guardFinalSuccess.reason, 'today_success_verified');
+
+const guardFailedAfterSuccess = assessDailyMarketingGuardHealth({
+  guardState: {date: '2026-07-18', generatedAt: '2026-07-18T09:00:00.000Z', status: 'failed'},
+  lastOkState: {date: '2026-07-18', generatedAt: '2026-07-18T08:40:00.000Z', status: 'ok'},
+  nowMs: Date.parse('2026-07-18T17:50:00+08:00'),
+});
+assert.equal(guardFailedAfterSuccess.healthy, false);
+assert.equal(guardFailedAfterSuccess.reason, 'newer_failure_after_success');
+
+const repairPending = assessDailyMarketingRepairHealth({
+  queueState: {date: '2026-07-18', status: 'pending', counts: {totalRows: 61, totalGroups: 32}},
+  nowMs: Date.parse('2026-07-18T18:30:00+08:00'),
+});
+assert.equal(repairPending.healthy, true);
+assert.equal(repairPending.pending, true);
+assert.equal(repairPending.reason, 'repair_windows_open');
+const repairRunningAfterDeadline = assessDailyMarketingRepairHealth({
+  queueState: {date: '2026-07-18', status: 'pending'},
+  repairRunning: true,
+  repairStartedAt: '2026-07-18T20:00:00+08:00',
+  nowMs: Date.parse('2026-07-18T20:30:00+08:00'),
+});
+assert.equal(repairRunningAfterDeadline.reason, 'repair_worker_active');
+const repairOverdueAfterDeadline = assessDailyMarketingRepairHealth({
+  queueState: {date: '2026-07-18', status: 'pending'},
+  repairRunning: true,
+  repairStartedAt: '2026-07-18T19:00:00+08:00',
+  nowMs: Date.parse('2026-07-18T20:30:00+08:00'),
+});
+assert.equal(repairOverdueAfterDeadline.healthy, false);
+assert.equal(repairOverdueAfterDeadline.reason, 'repair_worker_overdue');
+const repairFailedAfterDeadline = assessDailyMarketingRepairHealth({
+  queueState: {date: '2026-07-18', status: 'failed'},
+  repairState: {status: 'failed'},
+  nowMs: Date.parse('2026-07-18T20:30:00+08:00'),
+});
+assert.equal(repairFailedAfterDeadline.healthy, false);
+assert.equal(repairFailedAfterDeadline.reason, 'repair_queue_failed');
+const repairCompleted = assessDailyMarketingRepairHealth({
+  queueState: {date: '2026-07-18', status: 'completed', counts: {totalRows: 0, totalGroups: 0}},
+  nowMs: Date.parse('2026-07-18T20:30:00+08:00'),
+});
+assert.equal(repairCompleted.healthy, true);
+assert.equal(repairCompleted.reason, 'today_repair_queue_completed');
 const dailyRefresh = {
   date: '2026-07-10',
   generatedAt: '2026-07-11T09:17:54+08:00',
@@ -163,9 +255,45 @@ assert.equal(assessDailyLinkBusinessRecovery({
   nowMs: Date.parse('2026-07-17T17:00:00+08:00'),
 }).reason, 'link_business_recovery_store_coverage_incomplete');
 
+const dailyProductRefresh = {
+  date: '2026-07-15',
+  generatedAt: '2026-07-16T01:00:00.000Z',
+  status: 'warning',
+  message: 'openapi product reconciliation failed',
+};
+const productReport = {
+  ok: true,
+  generatedAt: '2026-07-17T01:00:00.000Z',
+  ensure: {ok: true},
+  counts: {failed: 0, matched: 2, warning: 1},
+  results: stores.map(storeKey => ({storeKey, ok: true, status: 'matched'})),
+};
+const recoveredProduct = assessDailyOpenapiProductRecovery({
+  dailyRefresh: dailyProductRefresh,
+  productReport,
+  expectedStoreKeys: stores,
+  nowMs: Date.parse('2026-07-17T12:00:00.000Z'),
+});
+assert.equal(recoveredProduct.recovered, true);
+assert.equal(recoveredProduct.evidence.successfulStores, 3);
+assert.equal(assessDailyOpenapiProductRecovery({
+  dailyRefresh: {...dailyProductRefresh, message: 'openapi product reconciliation failed RTV failed'},
+  productReport,
+  expectedStoreKeys: stores,
+}).reason, 'daily_warning_not_openapi_product_only');
+assert.equal(assessDailyOpenapiProductRecovery({
+  dailyRefresh: dailyProductRefresh,
+  productReport: {...productReport, results: productReport.results.slice(0, 2)},
+  expectedStoreKeys: stores,
+  nowMs: Date.parse('2026-07-17T12:00:00.000Z'),
+}).reason, 'openapi_product_recovery_store_coverage_incomplete');
+
 const watchdogSource = fs.readFileSync(path.join(root, 'scripts', 'cloud_ops_watchdog.mjs'), 'utf8');
 assert.match(watchdogSource, /assessDailyMarketingScanRecovery/);
+assert.match(watchdogSource, /assessDailyMarketingGuardHealth/);
+assert.match(watchdogSource, /assessDailyMarketingRepairHealth/);
 assert.match(watchdogSource, /assessDailyLinkBusinessRecovery/);
+assert.match(watchdogSource, /assessDailyOpenapiProductRecovery/);
 assert.match(watchdogSource, /resolveMarketingScanEvidencePath/);
 assert.match(watchdogSource, /recoveries,/);
 
@@ -173,4 +301,4 @@ const linkSyncSource = fs.readFileSync(path.join(root, 'scripts', 'cloud_link_bu
 assert.match(linkSyncSource, /link-business-last-success\.json/);
 assert.match(linkSyncSource, /write_link_business_success true/);
 
-console.log('cloud_watchdog_recovery: only newer complete all-store evidence resolves isolated marketing or link/business warnings');
+console.log('cloud_watchdog_recovery: only newer complete all-store evidence resolves isolated marketing, link/business, or OpenAPI product warnings');

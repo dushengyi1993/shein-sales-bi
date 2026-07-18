@@ -19,8 +19,10 @@ import {
   selectBiPortalSource as selectSharedBiPortalSource,
 } from '../../lib/bi_portal_source.mjs';
 import {
+  classifyLimitedDiscountCouponStack,
   classifyCouponEligibilityRow,
   couponPlanStoreView,
+  findCouponPlanRow,
   loadCouponTargetEligibilityPlan,
 } from '../../lib/marketing_coupon_policy.mjs';
 import {summarizeCouponBudgetStatus} from '../../lib/marketing_coupon_budget_guard.mjs';
@@ -78,6 +80,7 @@ const MARKETING_PRICING_POLICY_DEFAULT = path.join(ROOT, 'config', 'marketing_pr
 const MARKETING_COST_MAP_DEFAULT = path.join(ROOT, 'tmp', 'mbrs', 'marketing-cost-map.json');
 const SHEIN_LINK_HISTORY_DIR = path.join(ROOT, 'outputs', 'shein_links');
 const STORES_CONFIG_DEFAULT = path.join(ROOT, 'config', 'stores.json');
+const ALLOWED_LIMITED_COUPON_OVERLAPS_DEFAULT = path.join(ROOT, 'config', 'marketing_allowed_limited_coupon_overlaps.json');
 const COUPON_CANCEL_RESULTS_DIR = path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-cancel-results');
 const DEADLINE_FILL_RESULTS_DIR = resolveDeadlineFillResultsDir();
 const NEW_SKC_SHELF_AGE_DAYS = 30;
@@ -105,6 +108,18 @@ const STALE_BLOCKER_SOURCE_LABELS = new Set([
   'lowPriceOverlapLive',
   'lowPriceOverlapCancelList',
   'marketingStackReview',
+]);
+const LEGACY_COUPON_EVIDENCE_SOURCE_LABELS = new Set([
+  'couponSubmitLatestSummary',
+  'lowPriceOverlapLive',
+  'lowPriceOverlapCancelList',
+  'oldOrdinaryOverlapLive',
+  'oldOrdinaryOverlapCancelList',
+]);
+const NON_EXPIRING_VERSIONED_SOURCE_LABELS = new Set([
+  'storesConfig',
+  'targetSelectionPlan',
+  'priceOverridesPlan',
 ]);
 
 function parseArgs(argv) {
@@ -1016,6 +1031,288 @@ function collectPlanEvidence(selectionPlanDoc, priceOverridesDoc) {
     excludedBySkc,
     plannedStandardsByStore,
   };
+}
+
+function parseActiveLimitedCouponOverlapAllowlist(now) {
+  const doc = readJsonSafe(ALLOWED_LIMITED_COUPON_OVERLAPS_DEFAULT) || {};
+  return (Array.isArray(doc.entries) ? doc.entries : []).filter(entry => {
+    const validUntil = parseAnyDateTime(entry?.validUntil || '');
+    return !validUntil || validUntil.getTime() >= now.getTime();
+  });
+}
+
+function findApprovedBelowTargetOverlap(entries, row) {
+  const activityId = Number(row.limitedDiscountActivityId || 0);
+  const couponActivityId = Number(row.couponActivityId || 0);
+  const levelRuleId = Number(row.levelRuleId || 0);
+  const storeKey = normKey(row.storeKey);
+  const skc = normSku(row.skc);
+  for (const entry of entries || []) {
+    if (entry?.allowBelowTarget !== true) continue;
+    const approvedStore = normKey(entry.storeKey || '*');
+    if (approvedStore !== '*' && approvedStore !== storeKey) continue;
+    if (normSku(entry.skc) !== skc) continue;
+    if (Number(entry.limitedDiscountActivityId || 0) !== activityId) continue;
+    if (Number(entry.couponActivityId || 0) !== couponActivityId) continue;
+    if (Number(entry.levelRuleId || 0) !== levelRuleId) continue;
+    const approvedFinal = numberOrNull(entry.approvedFinalWithCoupon);
+    const maxApprovedLoss = numberOrNull(entry.maxApprovedLossSar);
+    const finalWithCoupon = numberOrNull(row.finalWithCoupon);
+    const targetFinalPrice = numberOrNull(row.targetFinalPrice);
+    if (approvedFinal === null || maxApprovedLoss === null || finalWithCoupon === null || targetFinalPrice === null) continue;
+    const liveLoss = round2(targetFinalPrice - finalWithCoupon);
+    if (finalWithCoupon < approvedFinal - 0.01 || liveLoss > maxApprovedLoss + 0.01) continue;
+    return {...entry, liveLoss};
+  }
+  return null;
+}
+
+function summarizeFreshLiveLowPriceOverlap({
+  stackDoc,
+  stackSource,
+  stackCoverage,
+  liveScanSource,
+  couponPlan,
+  storesConfigDoc,
+  now,
+}) {
+  const enabledStores = enabledStoreKeysFromConfig(storesConfigDoc);
+  const enabledSet = new Set(enabledStores);
+  const stackCouponRows = Array.isArray(stackDoc?.couponRows) ? stackDoc.couponRows : [];
+  const storeStatuses = Array.isArray(stackDoc?.storeStatuses) ? stackDoc.storeStatuses : [];
+  const expectedCouponRows = storeStatuses
+    .filter(status => enabledSet.has(normKey(status?.storeKey || status?.store)))
+    .reduce((sum, status) => sum + Number(status?.couponCount || 0), 0);
+  const couponRuleFailures = stackCouponRows.filter(row => row?._raw?.coupon15Rule?.ok !== true);
+  const couponRowsByEnabledStore = stackCouponRows.filter(row => enabledSet.has(normKey(row?.['店铺'] || row?.storeKey || row?.store)));
+
+  const liveDoc = liveScanSource?.data || {};
+  const liveStores = Array.isArray(liveDoc.stores) ? liveDoc.stores : [];
+  const liveStoreByKey = new Map(liveStores.map(store => [normKey(store?.storeKey || store?.store || store), store]));
+  const liveMissingStores = enabledStores.filter(storeKey => {
+    const status = liveStoreByKey.get(storeKey);
+    return !status || status?.ok !== true;
+  });
+  const stackEvidenceAt = parseAnyDateTime(stackDoc?.activityScanFinishedAt || stackDoc?.activityScanCreatedAt || stackDoc?.createdAt || '');
+  const liveEvidenceAt = parseAnyDateTime(liveDoc?.updatedAt || liveDoc?.createdAt || liveDoc?.generatedAt || '');
+  const stackEvidenceAgeHours = stackEvidenceAt ? ageHours(now, stackEvidenceAt) : null;
+  const liveEvidenceAgeHours = liveEvidenceAt ? ageHours(now, liveEvidenceAt) : null;
+  const evidenceSkewMinutes = stackEvidenceAt && liveEvidenceAt
+    ? Math.round(Math.abs(stackEvidenceAt.getTime() - liveEvidenceAt.getTime()) / 6000) / 10
+    : null;
+  const reasons = [];
+  if (stackSource?.status !== 'ok') reasons.push(`marketing_stack_source_${stackSource?.status || 'missing'}`);
+  if (!stackCoverage?.coverageComplete) reasons.push('marketing_stack_store_coverage_incomplete');
+  if (couponRowsByEnabledStore.length !== expectedCouponRows) reasons.push('coupon_summary_count_mismatch');
+  if (couponRuleFailures.length) reasons.push('coupon_rule_query_failed');
+  if (liveScanSource?.source?.status !== 'ok') reasons.push(`current_marketing_live_scan_${liveScanSource?.source?.status || 'missing'}`);
+  if (liveDoc.ok !== true || liveDoc.partial === true) reasons.push('current_marketing_live_scan_not_complete');
+  if (liveMissingStores.length) reasons.push('current_marketing_live_scan_store_coverage_incomplete');
+  if (stackEvidenceAgeHours === null || stackEvidenceAgeHours > 2) reasons.push('marketing_stack_not_same_run_fresh');
+  if (liveEvidenceAgeHours === null || liveEvidenceAgeHours > 2) reasons.push('current_marketing_live_scan_not_same_run_fresh');
+  if (evidenceSkewMinutes === null || evidenceSkewMinutes > 30) reasons.push('live_coupon_and_limited_scan_not_same_run');
+  if (!couponPlan) reasons.push('coupon_target_plan_unavailable');
+
+  const base = {
+    meaning: 'live 15% coupon enrolled set intersected with the same-run current/future ordinary and limited-discount price layers; final price uses the lowest known promotion price × coupon factor',
+    source: 'fresh_marketing_stack_plus_current_price_live_scan',
+    trusted: reasons.length === 0,
+    reasons,
+    belowTarget: 0,
+    missingEvidence: 0,
+    matchesTarget: 0,
+    limitedFallbackAboveTarget: 0,
+    aboveTarget: 0,
+    cancelRows: 0,
+    allStoresOk: reasons.length === 0,
+    storeCount: enabledStores.length,
+    expectedCouponRows,
+    couponSummaryRows: couponRowsByEnabledStore.length,
+    couponRuleFailureCount: couponRuleFailures.length,
+    couponRuleFailureSamples: couponRuleFailures.slice(0, 10).map(row => ({
+      storeKey: normKey(row?.['店铺'] || row?.storeKey || row?.store),
+      activityId: row?.['优惠券活动ID'] || row?._raw?.activity?.activityId || '',
+      levelRuleId: row?._raw?.coupon15Rule?.levelRuleId || '',
+      error: row?._raw?.coupon15Rule?.error || row?._raw?.coupon15Rule?.reason || row?._raw?.coupon15Rule?.enrolledMsg || '',
+    })),
+    liveMissingStores,
+    stackEvidenceAt: stackEvidenceAt?.toISOString() || '',
+    liveEvidenceAt: liveEvidenceAt?.toISOString() || '',
+    stackEvidenceAgeHours,
+    liveEvidenceAgeHours,
+    evidenceSkewMinutes,
+    activeCouponCount: 0,
+    activeCouponOutsideAllowedPlan: 0,
+    activeCouponOutsideAllowedPlanRows: [],
+    activeCouponOutsideAllowedPlanOverlap: 0,
+    activeCouponOutsideAllowedPlanOverlapRows: [],
+    activePromotionOverlapCount: 0,
+    activeOrdinaryOverlapCount: 0,
+    activeLimitedOverlapCount: 0,
+    approvedBelowTargetCount: 0,
+    rows: [],
+  };
+  if (!base.trusted) return base;
+
+  const activeCouponByKey = new Map();
+  for (const couponRow of couponRowsByEnabledStore) {
+    const storeKey = normKey(couponRow?.['店铺'] || couponRow?.storeKey || couponRow?.store);
+    const rule = couponRow?._raw?.coupon15Rule || {};
+    const activityId = Number(couponRow?.['优惠券活动ID'] || couponRow?._raw?.activity?.activityId || 0);
+    const activeRows = Array.isArray(rule.enrolledActiveRows)
+      ? rule.enrolledActiveRows
+      : (Array.isArray(rule.enrolledActiveSkcs) ? rule.enrolledActiveSkcs.map(skc => ({skc})) : []);
+    for (const active of activeRows) {
+      const skc = normSku(active?.skc);
+      if (!storeKey || !skc) continue;
+      activeCouponByKey.set(`${storeKey}::${skc}`, {
+        storeKey,
+        skc,
+        supplierNo: active?.supplierNo || '',
+        couponActivityId: activityId,
+        levelRuleId: Number(rule.levelRuleId || 0),
+        couponStatus: String(active?.status ?? ''),
+      });
+    }
+  }
+  base.activeCouponCount = activeCouponByKey.size;
+
+  const promotionByKey = new Map();
+  for (const row of Array.isArray(liveDoc.rows) ? liveDoc.rows : []) {
+    const storeKey = normKey(row?.store_key || row?.storeKey || row?.store);
+    const skc = normSku(row?.skc || row?.SKC);
+    if (!enabledSet.has(storeKey) || !skc) continue;
+    const key = `${storeKey}::${skc}`;
+    const evidenceType = String(row?.marketing_price_evidence_type || row?.evidenceType || '');
+    const candidates = [];
+    const ordinaryPrice = numberOrNull(
+      row?.marketing_suggested_ordinary_price_sar
+      ?? row?.marketing_ordinary_price_sar
+      ?? row?.ordinaryMarketingPrice
+      ?? row?.ordinaryActivityPrice
+    );
+    if (/ordinary/i.test(evidenceType) || row?.marketing_activity_id) {
+      candidates.push({
+        promotionType: 'ordinary_marketing',
+        promotionPrice: ordinaryPrice,
+        promotionActivityId: Number(row?.marketing_activity_id || row?.ordinaryActivityId || row?.activityId || 0),
+        promotionName: row?.marketing_activity_name || row?.ordinaryActivityName || row?.activityName || '',
+        promotionStart: row?.marketing_activity_start || row?.ordinaryActivityStart || '',
+        promotionEnd: row?.marketing_activity_end || row?.ordinaryActivityEnd || '',
+      });
+    }
+    const limitedDiscountPrice = numberOrNull(
+      row?.marketing_limited_discount_price_sar
+      ?? row?.marketing_limited_discount_price
+      ?? row?.limitedDiscountPrice
+      ?? row?.limited_discount_price_sar
+    );
+    if (/limited/i.test(evidenceType) || row?.marketing_limited_discount_activity_id || limitedDiscountPrice !== null) {
+      candidates.push({
+        promotionType: 'limited_discount',
+        promotionPrice: limitedDiscountPrice,
+        promotionActivityId: Number(row?.marketing_limited_discount_activity_id || row?.limitedDiscountActivityId || row?.activityId || 0),
+        promotionName: row?.marketing_limited_discount_name || row?.limitedDiscountName || row?.activityName || '',
+        promotionStart: row?.marketing_limited_discount_start || row?.limitedDiscountStart || '',
+        promotionEnd: row?.marketing_limited_discount_end || row?.limitedDiscountEnd || '',
+      });
+    }
+    if (!candidates.length) continue;
+    if (!promotionByKey.has(key)) promotionByKey.set(key, []);
+    promotionByKey.get(key).push(...candidates.map(candidate => ({
+      ...candidate,
+      storeKey,
+      skc,
+      supplierNo: row?.standard_goods_sn || row?.supplier_no || row?.supplierNo || '',
+      evidenceType,
+    })));
+  }
+
+  const approvals = parseActiveLimitedCouponOverlapAllowlist(now);
+  const decisionCounts = {};
+  for (const [key, coupon] of activeCouponByKey) {
+    const planRow = findCouponPlanRow(couponPlan, coupon.storeKey, coupon.skc);
+    const outsideAllowedPlan = !planRow || planRow.allowed15 !== true;
+    if (outsideAllowedPlan) {
+      base.activeCouponOutsideAllowedPlan += 1;
+      base.activeCouponOutsideAllowedPlanRows.push({
+        ...coupon,
+        category: planRow?.category || 'not_in_allowed_plan',
+        reason: planRow?.reason || 'active_coupon_not_in_allowed15_plan',
+      });
+    }
+    const promotions = promotionByKey.get(key) || [];
+    if (!promotions.length) continue;
+    base.activePromotionOverlapCount += 1;
+    if (outsideAllowedPlan) {
+      base.activeCouponOutsideAllowedPlanOverlap += 1;
+      base.activeCouponOutsideAllowedPlanOverlapRows.push({...coupon, promotionCandidates: promotions});
+    }
+    if (promotions.some(item => item.promotionType === 'ordinary_marketing')) base.activeOrdinaryOverlapCount += 1;
+    if (promotions.some(item => item.promotionType === 'limited_discount')) base.activeLimitedOverlapCount += 1;
+    const missingPricePromotion = promotions.find(item => item.promotionPrice === null);
+    const effectivePromotion = promotions
+      .filter(item => item.promotionPrice !== null)
+      .sort((a, b) => a.promotionPrice - b.promotionPrice)[0] || missingPricePromotion;
+    if (missingPricePromotion) {
+      const result = {
+        ...coupon,
+        ...missingPricePromotion,
+        priceDecision: `missing_${missingPricePromotion.promotionType}_price`,
+        shouldCancelCoupon: false,
+        promotionCandidates: promotions,
+      };
+      decisionCounts[result.priceDecision] = (decisionCounts[result.priceDecision] || 0) + 1;
+      base.missingEvidence += 1;
+      base.rows.push(result);
+      continue;
+    }
+    const priceGuardInput = {
+      skc: coupon.skc,
+      supplierNo: effectivePromotion?.supplierNo || coupon.supplierNo,
+      limitedDiscountPrice: effectivePromotion?.promotionPrice,
+    };
+    const priceGuard = classifyLimitedDiscountCouponStack(priceGuardInput, planRow, {fallbackDiscountPct: 15});
+    const result = {
+      ...coupon,
+      ...effectivePromotion,
+      promotionCandidates: promotions,
+      limitedDiscountPrice: effectivePromotion?.promotionPrice,
+      limitedDiscountActivityId: effectivePromotion?.promotionType === 'limited_discount' ? effectivePromotion.promotionActivityId : 0,
+      couponFactor: priceGuard.couponFactor,
+      finalWithCoupon: priceGuard.finalWithCoupon,
+      targetFinalPrice: priceGuard.finalTargetPrice,
+      safetyFloor: priceGuard.safetyFloor,
+      diff: priceGuard.diff,
+      priceDecision: priceGuard.decision,
+      shouldCancelCoupon: priceGuard.shouldCancelCoupon,
+      belowTargetApproved: false,
+      approvalReason: '',
+    };
+    const approval = priceGuard.shouldCancelCoupon && effectivePromotion?.promotionType === 'limited_discount'
+      ? findApprovedBelowTargetOverlap(approvals, result)
+      : null;
+    if (approval) {
+      result.shouldCancelCoupon = false;
+      result.belowTargetApproved = true;
+      result.approvalReason = approval.reason || '';
+      base.approvedBelowTargetCount += 1;
+    }
+    const decision = String(result.priceDecision || 'unknown');
+    decisionCounts[decision] = (decisionCounts[decision] || 0) + 1;
+    if (decision.startsWith('missing_')) base.missingEvidence += 1;
+    if (result.shouldCancelCoupon) base.belowTarget += 1;
+    if (/matches_(?:target|safety_floor)$/.test(decision)) base.matchesTarget += 1;
+    if (/above_(?:target|safety_floor)$/.test(decision)) base.limitedFallbackAboveTarget += 1;
+    base.rows.push(result);
+  }
+  base.aboveTarget = base.limitedFallbackAboveTarget;
+  base.cancelRows = base.belowTarget;
+  base.priceDecisionCounts = decisionCounts;
+  base.activeCouponOutsideAllowedPlanRows = base.activeCouponOutsideAllowedPlanRows.slice(0, 30);
+  base.activeCouponOutsideAllowedPlanOverlapRows = base.activeCouponOutsideAllowedPlanOverlapRows.slice(0, 30);
+  base.rows = base.rows.slice(0, 100);
+  return base;
 }
 
 function buildNewListingPriceIndex(priceOverridesDoc, priceOverridesSourcePath = '') {
@@ -3705,8 +4002,39 @@ async function main() {
   const couponSubmitDryRun = summarizeCouponSubmit(couponSubmit.data);
   couponSubmitDryRun.summaryPath = rel(couponSubmitPath);
 
-  const lowPriceOverlap = summarizeLowPriceOverlap(lowLive.data, lowCancel.data);
-  const oldOrdinaryOverlap = summarizeOldOrdinaryOverlap(oldLive.data, oldCancel.data);
+  const marketingStackReviewCoverage = summarizeStackReviewCoverage(stackReview.data, storesConfig.data);
+  const legacyLowPriceOverlap = summarizeLowPriceOverlap(lowLive.data, lowCancel.data);
+  const freshLiveLowPriceOverlap = summarizeFreshLiveLowPriceOverlap({
+    stackDoc: stackReview.data,
+    stackSource: stackReview.source,
+    stackCoverage: marketingStackReviewCoverage,
+    liveScanSource: currentMarketingLiveScanSource,
+    couponPlan: couponEligibilityPlan,
+    storesConfigDoc: storesConfig.data,
+    now,
+  });
+  const lowPriceOverlap = freshLiveLowPriceOverlap.trusted
+    ? freshLiveLowPriceOverlap
+    : {
+      ...legacyLowPriceOverlap,
+      source: 'legacy_coupon_overlap_artifacts',
+      trusted: false,
+      freshEvidence: freshLiveLowPriceOverlap,
+    };
+  const legacyOldOrdinaryOverlap = summarizeOldOrdinaryOverlap(oldLive.data, oldCancel.data);
+  const oldOrdinaryOverlap = freshLiveLowPriceOverlap.trusted
+    ? {
+      source: freshLiveLowPriceOverlap.source,
+      supersededLegacyArtifacts: true,
+      riskCancel: false,
+      cancelRows: 0,
+      observationRows: freshLiveLowPriceOverlap.activeOrdinaryOverlapCount,
+      riskRows: freshLiveLowPriceOverlap.rows.filter(row => row.promotionType === 'ordinary_marketing'
+        && (row.shouldCancelCoupon || String(row.priceDecision || '').startsWith('missing_'))).length,
+      storeCount: freshLiveLowPriceOverlap.storeCount,
+      allStoresOk: true,
+    }
+    : legacyOldOrdinaryOverlap;
   const knownOrdinaryActivityGuard = summarizeKnownOrdinaryActivityGuard({
     couponPlan: couponEligibilityPlan,
     ordinaryEvidenceByStore,
@@ -3745,7 +4073,6 @@ async function main() {
     handledRows: Number(t3MarketingCandidates.handledRows || 0),
     handledKeyCount: deadlineHandledKeys.size,
   };
-  const marketingStackReviewCoverage = summarizeStackReviewCoverage(stackReview.data, storesConfig.data);
   const couponBudget = summarizeCouponBudgetStatus({
     executeDoc: budgetExecute.data,
     executeSource: budgetExecute.source,
@@ -3794,6 +4121,39 @@ async function main() {
   const sourceWarnings = [];
   const contextWarnings = [];
   const unknownSources = [];
+  const freshCouponEvidenceSupersedesLegacy = freshLiveLowPriceOverlap.trusted === true;
+  if (freshCouponEvidenceSupersedesLegacy) {
+    contextWarnings.push({
+      code: 'legacy_coupon_evidence_superseded',
+      label: 'liveCouponLimitedOverlap',
+      message: '本轮已直接读取 19 店实时 15% 券 active 集合并与当次限时折扣 live scan 交叉校验；旧 coupon submit/low-price 中间文件仅留历史审计，不再作为当前阻断。',
+      evidence: {
+        source: freshLiveLowPriceOverlap.source,
+        storeCount: freshLiveLowPriceOverlap.storeCount,
+        activeCouponCount: freshLiveLowPriceOverlap.activeCouponCount,
+        activePromotionOverlapCount: freshLiveLowPriceOverlap.activePromotionOverlapCount,
+        activeOrdinaryOverlapCount: freshLiveLowPriceOverlap.activeOrdinaryOverlapCount,
+        activeLimitedOverlapCount: freshLiveLowPriceOverlap.activeLimitedOverlapCount,
+      },
+    });
+    if (freshLiveLowPriceOverlap.activeCouponOutsideAllowedPlan > 0
+      && freshLiveLowPriceOverlap.activeCouponOutsideAllowedPlanOverlap === 0) {
+      contextWarnings.push({
+        code: 'standalone_active_coupon_outside_current_plan',
+        label: 'liveCouponPriceStack',
+        message: `实时发现 ${freshLiveLowPriceOverlap.activeCouponOutsideAllowedPlan} 个历史 active 券商品不在当前可选流量券计划，但本轮未与任何当前/未来普通活动或限时折扣重叠；仅留观察，不误判为价格栈风险。`,
+        evidence: {samples: freshLiveLowPriceOverlap.activeCouponOutsideAllowedPlanRows.slice(0, 20)},
+      });
+    }
+  }
+  const completedHistoricalSourceLabels = new Set();
+  if (ordinaryEnrollmentOpenIssues.issueCount === 0 && ordinaryEnrollmentOpenIssues.missingFillEvidence === 0) {
+    completedHistoricalSourceLabels.add('ordinaryEnrollmentOpenIssues');
+  }
+  if (ordinaryEnrollmentSupplementOpenIssues.pricePendingRows === 0
+    && ordinaryEnrollmentSupplementOpenIssues.extraAvailableRows === 0) {
+    completedHistoricalSourceLabels.add('ordinaryEnrollmentSupplementOpenIssues');
+  }
 
   const safety = {
     readOnly: true,
@@ -3854,6 +4214,13 @@ async function main() {
   }
 
   for (const src of sources) {
+    if (freshCouponEvidenceSupersedesLegacy && LEGACY_COUPON_EVIDENCE_SOURCE_LABELS.has(src.label)) {
+      continue;
+    }
+    if (src.status === 'stale' && (NON_EXPIRING_VERSIONED_SOURCE_LABELS.has(src.label)
+      || completedHistoricalSourceLabels.has(src.label))) {
+      continue;
+    }
     const optionalBudgetSourceCovered = (
       (couponBudget.selectedSource === 'execute' && ['couponBudgetDryRun', 'couponBudgetReadback'].includes(src.label))
       || (couponBudget.selectedSource === 'readback_current' && ['couponBudgetExecute', 'couponBudgetDryRun'].includes(src.label))
@@ -3892,7 +4259,7 @@ async function main() {
       });
     }
   }
-  if (couponSubmitDryRun.status === 'untrusted') addBlocker(blockers, 'coupon_submit_not_dry_run', '最新优惠券提交 summary 不是 dry-run，不能作为自动任务安全证据', {path: couponSubmitDryRun.summaryPath});
+  if (couponSubmitDryRun.status === 'untrusted' && !freshCouponEvidenceSupersedesLegacy) addBlocker(blockers, 'coupon_submit_not_dry_run', '最新优惠券提交 summary 不是 dry-run，不能作为自动任务安全证据', {path: couponSubmitDryRun.summaryPath});
   if (couponEligibilityPlanError) addBlocker(blockers, 'coupon_target_plan_classifier_failed', '优惠券 allowed15 目标计划解析失败，不能判断旧普通活动叠券风险', {error: couponEligibilityPlanError});
   if (knownOrdinaryEvidenceSource.status === 'missing') addBlocker(blockers, 'known_ordinary_evidence_missing', '旧普通营销活动填报价证据目录缺失，不能形成价格栈 no-action 结论', {path: knownOrdinaryEvidenceSource.path});
   if (!biPortal.data) addBlocker(blockers, 'bi_portal_source_unavailable', '没有可解析的 BI Portal data.json，不能判断新链接、BI 标签或新鲜度', {path: biPortal.source?.path || ''});
@@ -4032,7 +4399,17 @@ async function main() {
       evidence: {duplicateKeys: orderPriceAudit.cloud.duplicatePlanKeys.slice(0, 20), planSourcePath: orderPriceAudit.cloud.planSourcePath},
     });
   }
-  for (const f of couponSubmitDryRun.identityFailures || []) addBlocker(blockers, 'store_identity_failure', `${f.store} 身份校验失败`, f);
+  if (!freshCouponEvidenceSupersedesLegacy) {
+    for (const f of couponSubmitDryRun.identityFailures || []) addBlocker(blockers, 'store_identity_failure', `${f.store} 身份校验失败`, f);
+  }
+  if (lowPriceOverlap.activeCouponOutsideAllowedPlanOverlap > 0) {
+    addBlocker(
+      blockers,
+      'active_coupon_outside_allowed_plan',
+      `实时 15% 券 active 集合中有 ${lowPriceOverlap.activeCouponOutsideAllowedPlanOverlap} 个商品既不在允许配套计划，又与普通活动/限时折扣价格层重叠`,
+      {samples: (lowPriceOverlap.activeCouponOutsideAllowedPlanOverlapRows || []).slice(0, 20)},
+    );
+  }
   if (lowPriceOverlap.belowTarget > 0) addBlocker(blockers, 'coupon_final_below_target', `低价叠券 below target=${lowPriceOverlap.belowTarget}`);
   if (lowPriceOverlap.missingEvidence > 0) addBlocker(blockers, 'coupon_missing_price_evidence', `低价叠券缺价格证据=${lowPriceOverlap.missingEvidence}`);
   if (lowPriceOverlap.cancelRows > 0) addBlocker(blockers, 'low_price_cancel_rows_nonzero', `低价叠券取消候选 rows=${lowPriceOverlap.cancelRows}`);

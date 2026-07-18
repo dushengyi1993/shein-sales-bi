@@ -13,6 +13,7 @@ import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {recoverSheinLoginIfNeeded} from '../../lib/shein_login_recovery.mjs';
 import {connectCdp} from '../../lib/shein_browser.mjs';
+import {loadSheinBrowserSession, sheinSessionPostJson} from '../../lib/shein_session_http.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
@@ -43,6 +44,8 @@ Options:
   --level-rule-hints <FILE>     Optional level-rule hint JSON
   --page-size <N>               API page size, 1-1000 (default: 500)
   --store-attempts <N>          Attempts per store, 1-5 (default: 3)
+  --session-http                Use session-manager cookies without launching Chrome
+  --session-concurrency <N>     Concurrent session HTTP stores, 1-6 (default: 3)
   --no-launch                   Do not launch missing store browsers
   --no-close                    Keep browsers launched by this command open
   --headless                    Launch missing browsers headlessly
@@ -71,6 +74,8 @@ function parseArgs(argv) {
     visible: false,
     pageSize: 500,
     storeAttempts: 3,
+    sessionHttp: false,
+    sessionConcurrency: 3,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -92,11 +97,14 @@ function parseArgs(argv) {
     else if (a === '--visible') args.visible = true;
     else if (a === '--page-size') args.pageSize = Number(takeValue());
     else if (a === '--store-attempts') args.storeAttempts = Number(takeValue());
+    else if (a === '--session-http') args.sessionHttp = true;
+    else if (a === '--session-concurrency') args.sessionConcurrency = Number(takeValue());
     else throw new Error(`Unknown option: ${a}`);
   }
   if (args.headless && args.visible) throw new Error('--headless and --visible cannot be used together');
   if (!Number.isInteger(args.pageSize) || args.pageSize < 1 || args.pageSize > 1000) throw new Error('--page-size must be an integer from 1 to 1000');
   if (!Number.isInteger(args.storeAttempts) || args.storeAttempts < 1 || args.storeAttempts > 5) throw new Error('--store-attempts must be an integer from 1 to 5');
+  if (!Number.isInteger(args.sessionConcurrency) || args.sessionConcurrency < 1 || args.sessionConcurrency > 6) throw new Error('--session-concurrency must be an integer from 1 to 6');
   if (!Number.isInteger(args.couponActivityId) || args.couponActivityId < 1) throw new Error('--coupon-activity-id must be a positive integer');
   return args;
 }
@@ -221,6 +229,188 @@ async function loadLevelRuleHints(file) {
   } catch {}
   return hints;
 }
+
+function arrayFrom(value) {
+  if (Array.isArray(value)) return value;
+  if (Array.isArray(value?.data)) return value.data;
+  if (Array.isArray(value?.list)) return value.list;
+  if (Array.isArray(value?.records)) return value.records;
+  if (Array.isArray(value?.partake_goods_list)) return value.partake_goods_list;
+  if (Array.isArray(value?.activity_detail_list)) return value.activity_detail_list;
+  return [];
+}
+
+function marketingPacketOk(packet) {
+  return packet && (packet.code === '0' || packet.code === 0);
+}
+
+function assertCompleteMarketingPackets(live) {
+  const failures = [];
+  for (const [domain, packets] of Object.entries({
+    activity: live.activityPackets || [],
+    ordinary: live.ordinaryPackets || [],
+    limited: live.limitedPackets || [],
+    coupon: live.couponPackets || [],
+  })) {
+    for (const packet of packets) {
+      if (!marketingPacketOk(packet)) {
+        failures.push(`${domain}:${packet.activityId || packet.pageNum || '-'}:http=${packet.http || '-'}:code=${packet.code ?? '-'}:${String(packet.msg || '').slice(0, 120)}`);
+      }
+    }
+  }
+  if (!(live.activityPackets || []).length) failures.push('activity:no-packet');
+  if (!(live.limitedPackets || []).length) failures.push('limited:no-packet');
+  if (failures.length) {
+    throw new Error(`marketing price evidence incomplete: ${failures.slice(0, 8).join('; ')}`);
+  }
+}
+
+async function queryMarketingViaSessionHttp(store, args, levelRuleId) {
+  const session = await loadSheinBrowserSession(ROOT, store.storeKey);
+  const headers = route => ({
+    'Origin-Url': LIST_URL,
+    'x-req-zone-id': 'Asia/Shanghai',
+    'x-lt-language': 'CN',
+    LAN: 'CN',
+    'x-bbl-route': route,
+  });
+  const post = async (apiPath, body, route = '/mbrs/marketing/list') => {
+    const json = await sheinSessionPostJson(session, `/mrs-api-prefix${apiPath}`, body, {
+      timeoutMs: 20_000,
+      headers: headers(route),
+    });
+    return {
+      http: 200,
+      code: json?.code,
+      msg: json?.msg || '',
+      info: json?.info ?? json,
+    };
+  };
+
+  const activities = [];
+  const activityPackets = [];
+  for (let pageNum = 1; pageNum <= 20; pageNum += 1) {
+    const packet = await post(`/mbrs/activity/get_activity_list?page_num=${pageNum}&page_size=100`, {});
+    const list = arrayFrom(packet.info?.activity_detail_list ?? packet.info);
+    activityPackets.push({pageNum, http: packet.http, code: packet.code, msg: packet.msg, count: list.length});
+    if (!marketingPacketOk(packet)) break;
+    activities.push(...list);
+    if (list.length < 100) break;
+  }
+
+  const ordinaryRows = [];
+  const ordinaryPackets = [];
+  for (const activity of activities) {
+    const activityId = Number(activity.activity_id);
+    const name = activity.activity_name || '';
+    const label = activity.text_tag_content || '';
+    const isCoupon = activityId === args.couponActivityId
+      || /coupon|优惠券/i.test([name, label, activity.backend_cate, activity.multi_level_coupon_activity ? 'coupon' : ''].join(' '));
+    const state = String(activity.state ?? activity.activity_state ?? '');
+    const endTime = activity.end_zone_time || '';
+    const endMs = dateMs(endTime);
+    if (isCoupon || (state && !ACTIVE_OR_FUTURE_STATES.has(state)) || (Number.isFinite(endMs) && endMs < Date.now())) continue;
+    let collected = 0;
+    for (let pageNum = 1; pageNum <= 50; pageNum += 1) {
+      const packet = await post(
+        `/mbrs/activity/get_partake_activity_goods_list?page_num=${pageNum}&page_size=${args.pageSize}`,
+        {activity_id_list: [activityId], query_coupon: false, skc_list: [], audit_status: [0, 1]},
+        `/mbrs/marketing/sign-up/config/${activityId}`,
+      );
+      const list = arrayFrom(packet.info?.data ?? packet.info);
+      const total = Number(packet.info?.meta?.total ?? packet.info?.total ?? list.length ?? 0);
+      ordinaryPackets.push({activityId, pageNum, http: packet.http, code: packet.code, msg: packet.msg, total, count: list.length});
+      if (!marketingPacketOk(packet)) break;
+      for (const item of list) {
+        ordinaryRows.push({...item, __activity: {
+          activityId,
+          name,
+          start: activity.start_zone_time || '',
+          end: activity.end_zone_time || '',
+          signEnd: activity.activity_end_zone_time || '',
+          state,
+        }});
+      }
+      collected += list.length;
+      if (!list.length || collected >= total || list.length < args.pageSize) break;
+    }
+  }
+
+  const limitedRows = [];
+  const limitedPackets = [];
+  for (let pageNum = 1; pageNum <= 20; pageNum += 1) {
+    const listPacket = await post('/promotion/obm/query_obm_activity_list', {
+      page_num: pageNum,
+      page_size: 200,
+      system: 'mrs',
+      ref_tools_id: 175,
+    });
+    const list = arrayFrom(listPacket.info);
+    limitedPackets.push({pageNum, http: listPacket.http, code: listPacket.code, msg: listPacket.msg, count: list.length});
+    if (!marketingPacketOk(listPacket)) break;
+    for (const activity of list) {
+      const state = String(activity.state ?? '');
+      const endMs = dateMs(activity.end_time);
+      if (state && !ACTIVE_OR_FUTURE_STATES.has(state)) continue;
+      if (Number.isFinite(endMs) && endMs < Date.now()) continue;
+      const goodsPacket = await post('/promotion/simple_platform/query_activity_goods', {
+        activity_id: activity.activity_id,
+        page_num: 1,
+        page_size: 1000,
+      });
+      const goods = arrayFrom(goodsPacket.info);
+      limitedPackets.push({activityId: activity.activity_id, http: goodsPacket.http, code: goodsPacket.code, msg: goodsPacket.msg, count: goods.length});
+      if (!marketingPacketOk(goodsPacket)) continue;
+      for (const good of goods) {
+        limitedRows.push({...good, __activity: {
+          activityId: activity.activity_id,
+          name: activity.act_name || '',
+          start: activity.start_time || '',
+          end: activity.end_time || '',
+          state,
+        }});
+      }
+    }
+    if (list.length < 200) break;
+  }
+
+  const couponRows = [];
+  const couponPackets = [];
+  if (levelRuleId) {
+    for (let pageNum = 1; pageNum <= 50; pageNum += 1) {
+      const packet = await post(
+        `/mbrs/activity/multi-level/goods/query?page_num=${pageNum}&page_size=${args.pageSize}`,
+        {
+          activity_id: args.couponActivityId,
+          level_rule_id: levelRuleId,
+          page: 'COUPON',
+          page_module: 'MULTI_LEVEL_RULE_ENROLLED_GOODS',
+          product_code_list: [],
+          supplier_no_list: [],
+        },
+        `/mbrs/marketing/coupon/rule/goods/${args.couponActivityId}/${levelRuleId}`,
+      );
+      const list = arrayFrom(packet.info?.partake_goods_list ?? packet.info);
+      const total = Number(packet.info?.total ?? list.length ?? 0);
+      couponPackets.push({pageNum, http: packet.http, code: packet.code, msg: packet.msg, total, count: list.length});
+      if (!marketingPacketOk(packet)) break;
+      couponRows.push(...list);
+      if (!list.length || couponRows.length >= total || list.length < args.pageSize) break;
+    }
+  }
+
+  return {
+    page: {href: LIST_URL, title: 'session-http', source: path.relative(ROOT, session.sessionFile)},
+    activityPackets,
+    ordinaryPackets,
+    ordinaryRows,
+    limitedPackets,
+    limitedRows,
+    couponPackets,
+    couponRows,
+  };
+}
+
 async function queryMarketing(cdp, args, levelRuleId) {
   return await cdp.eval(`
     const headers = {'content-type':'application/json;charset=UTF-8','Origin-Url':location.href,'x-req-zone-id':'Asia/Shanghai','x-lt-language':'CN','LAN':'CN'};
@@ -375,7 +565,41 @@ function normalizeRows(store, live, levelRuleId, args) {
 function isTransientMarketingScanError(error) {
   return /fetch failed|failed to fetch|networkerror|load failed|timed?\s*out|timeout|econnreset|socket hang up|cdp websocket|target closed|browser has been closed/i.test(String(error?.message || error || ''));
 }
+async function scanStoreViaSessionHttp(store, args, levelHints) {
+  const result = {store: store.storeKey, shopName: store.shopName, ok: false, rows: [], warnings: [], attempts: 0, transport: 'session_http'};
+  for (let attempt = 1; attempt <= args.storeAttempts; attempt += 1) {
+    result.attempts = attempt;
+    try {
+      const levelRuleId = levelHints.get(String(store.storeKey).toUpperCase()) || null;
+      result.levelRuleId = levelRuleId;
+      const live = await queryMarketingViaSessionHttp(store, args, levelRuleId);
+      assertCompleteMarketingPackets(live);
+      result.page = live.page;
+      result.packets = {
+        activity: live.activityPackets || [],
+        ordinary: live.ordinaryPackets || [],
+        limited: live.limitedPackets || [],
+        coupon: live.couponPackets || [],
+      };
+      result.rows = normalizeRows(store, live, levelRuleId, args);
+      result.ok = true;
+      result.reason = `session price scan ok; rows=${result.rows.length}; ordinary=${live.ordinaryRows?.length || 0}; limited=${live.limitedRows?.length || 0}; coupon=${live.couponRows?.length || 0}; attempts=${attempt}`;
+      return result;
+    } catch (err) {
+      result.reason = err.message;
+      result.stack = err.stack;
+      if (attempt < args.storeAttempts && isTransientMarketingScanError(err)) {
+        result.warnings.push(`transient session scan failure on attempt ${attempt}: ${String(err.message || err).slice(0, 500)}`);
+        await sleep(1500);
+        continue;
+      }
+      return result;
+    }
+  }
+  return result;
+}
 async function scanStore(store, args, levelHints) {
+  if (args.sessionHttp) return scanStoreViaSessionHttp(store, args, levelHints);
   const result = {store: store.storeKey, shopName: store.shopName, ok: false, rows: [], warnings: [], attempts: 0};
   let launched = false;
   try {
@@ -397,6 +621,7 @@ async function scanStore(store, args, levelHints) {
         const levelRuleId = levelHints.get(String(store.storeKey).toUpperCase()) || null;
         result.levelRuleId = levelRuleId;
         const live = await queryMarketing(cdp, args, levelRuleId);
+        assertCompleteMarketingPackets(live);
         result.page = live.page;
         result.packets = {
           activity: live.activityPackets || [],
@@ -451,7 +676,9 @@ async function main(argv) {
     partial: true,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    mode: 'read_only_current_marketing_price_scan',
+    mode: args.sessionHttp
+      ? 'read_only_current_marketing_price_scan_session_http'
+      : 'read_only_current_marketing_price_scan_browser',
     stores: [],
   };
 
@@ -493,12 +720,25 @@ async function main(argv) {
   }
 
   try {
-    for (const store of stores) {
-      console.log(`scan ${store.storeKey} ...`);
-      const result = await scanStore(store, args, levelHints);
-      summary.stores.push(result);
-      console.log(`${store.storeKey}: ${result.reason}`);
-      await writeSnapshot({final: false});
+    if (args.sessionHttp) {
+      for (let offset = 0; offset < stores.length; offset += args.sessionConcurrency) {
+        const batch = stores.slice(offset, offset + args.sessionConcurrency);
+        console.log(`scan session batch ${Math.floor(offset / args.sessionConcurrency) + 1}: ${batch.map(store => store.storeKey).join(',')} ...`);
+        const results = await Promise.all(batch.map(store => scanStore(store, args, levelHints)));
+        for (const result of results) {
+          summary.stores.push(result);
+          console.log(`${result.store}: ${result.reason}`);
+        }
+        await writeSnapshot({final: false});
+      }
+    } else {
+      for (const store of stores) {
+        console.log(`scan ${store.storeKey} ...`);
+        const result = await scanStore(store, args, levelHints);
+        summary.stores.push(result);
+        console.log(`${store.storeKey}: ${result.reason}`);
+        await writeSnapshot({final: false});
+      }
     }
     await writeSnapshot({final: true});
     console.log(JSON.stringify({ok: summary.ok, rowCount: summary.rowCount, currentRows: summary.currentRows, futureRows: summary.futureRows, jsonPath, csvPath}, null, 2));

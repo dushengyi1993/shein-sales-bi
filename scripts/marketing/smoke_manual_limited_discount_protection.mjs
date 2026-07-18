@@ -113,11 +113,13 @@ const [restoreBatchSource, applySource, guardSource, registryManagerSource] = aw
   fs.readFile('scripts/marketing/manage_manual_limited_discount_override.mjs', 'utf8'),
 ]);
 assert.match(restoreBatchSource, /assessRecoverableDryRun/);
-assert.match(restoreBatchSource, /final dry-run did not reach ok=true/);
+assert.match(restoreBatchSource, /replace_limited_discount_transactionally\.mjs/);
+assert.doesNotMatch(restoreBatchSource, /remove_skc_from_limited_discount\.mjs/);
 assert.match(applySource, /exactReadbackRows/);
 assert.match(applySource, /expectedActivityStock/);
-assert.match(guardSource, /WRITE_PHASE_FAILED/);
-assert.match(guardSource, /SKIP new-listing fallback because an earlier write phase failed/);
+assert.doesNotMatch(applySource, /undo_or_end_obm_activity/);
+assert.match(guardSource, /inspection phase complete; no SHEIN mutation is executed/);
+assert.doesNotMatch(guardSource, /--execute/);
 assert.match(registryManagerSource, /acquireCrossProcessTicketLock/);
 
 console.log(JSON.stringify({

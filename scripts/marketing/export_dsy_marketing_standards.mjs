@@ -4,6 +4,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {normalizeGoodsSnDetailed} from '../../lib/product_sku_normalizer.mjs';
+import {normalizeInventoryProjection} from '../../lib/inventory_projection_contract.mjs';
 import {
   buildExposureTopLinkIndex,
   loadMarketingPricingPolicy,
@@ -543,6 +544,7 @@ function classifyAndPrice(storeKey, activityId, row) {
   const keysCompact = keysRaw.map(compact).filter(Boolean);
   const fixed = keysCompact.map(k => fixedPriceRules.get(k)).find(v => v !== undefined);
   const depletion = depletionByStandard.get(compact(canonical)) || depletionByStandard.get(compact(row.supplierNo));
+  const inventoryProjection = normalizeInventoryProjection(depletion || {});
   const trueCostInfo = lookupTrueCost(keysRaw);
   const baseCost = lookupCost(keysRaw) ?? numValue(depletion?.unit_cost_sar);
   const cost = numValue(trueCostInfo?.trueUnitCostSar)
@@ -552,8 +554,8 @@ function classifyAndPrice(storeKey, activityId, row) {
   const storageUnitCostSar = numValue(trueCostInfo?.storageUnitCostSar)
     ?? numValue(trueCostInfo?.storageUnitCostSar30d);
   const storageMethod = trueCostInfo?.storageMethod || '';
-  const onHand = Number(depletion?.estimated_on_hand_quantity ?? 0);
-  const daysOnHand = Number(depletion?.days_of_supply_on_hand ?? 0);
+  const onHand = inventoryProjection.fresh_matched ? inventoryProjection.current_sellable_quantity : null;
+  const daysOnHand = inventoryProjection.fresh_matched ? numValue(depletion?.days_of_supply_on_hand) : null;
   const weightedDailySales = Number(depletion?.weighted_daily_gross_sales ?? 0);
   const seed = `${storeKey}:${activityId}:${row.skc}:${canonical}`;
 
@@ -625,6 +627,7 @@ function classifyAndPrice(storeKey, activityId, row) {
     depletion,
     onHand,
     daysOnHand,
+    inventoryMatchStatus: inventoryProjection.inventory_match_status,
     weightedDailySales,
     rule,
     targetMargin,
@@ -769,6 +772,7 @@ for (const store of selectedStores) {
           '仓储成本SAR/件': num(priced.storageUnitCostSar),
           '含仓储成本SAR': num(priced.cost),
           '仓储口径': priced.storageMethod || (priced.storageUnitCostSar === null ? '估算缺失' : ''),
+          'ET库存匹配状态': priced.inventoryMatchStatus,
           '在仓剩余库存': num(priced.onHand),
           '加权日均销量': num(priced.weightedDailySales),
           '去化周期天': num(priced.daysOnHand),

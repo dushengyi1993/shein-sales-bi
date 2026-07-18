@@ -25,6 +25,8 @@ import {acquireCrossProcessTicketLock} from '../../lib/cross_process_ticket_lock
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_CONFIG = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'outputs', 'reports', 'manual-limited-discount-inventory');
+const DEFAULT_PRICING_POLICY = path.join(ROOT, 'config', 'marketing_pricing_policy.json');
+const FALLBACK_ACTIVITY_STOCK = 10;
 const MANUAL_CONFIRM_TEXT = 'MANUAL_SPECIAL_LIMITED_DISCOUNT_STOCK_TOP_UP';
 const AUTO_FALLBACK_CONFIRM_TEXT = 'AUTHORIZED_LIMITED_DISCOUNT_FALLBACK_STOCK_TOP_UP';
 const STORE_ACCOUNT_TRUTH = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'store_account_truth.json'), 'utf8'));
@@ -68,9 +70,20 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-export function buildInventoryIdempotencyKey({authorizationId, mode, store, skc, skuCode, activityStock, validTo, sourceArtifact}) {
-  const source = JSON.stringify({authorizationId, mode, store, skc, skuCode, activityStock, validTo, sourceArtifact});
+export function buildInventoryIdempotencyKey({authorizationId, mode, store, skc, skuCode, activityStock, overwriteQuantity, validTo, sourceArtifact, retryAttempt = 1}) {
+  const source = JSON.stringify({authorizationId, mode, store, skc, skuCode, activityStock, overwriteQuantity, validTo, sourceArtifact, retryAttempt});
   return `bi-marketing-inventory-${createHash('sha256').update(source).digest('hex')}`.slice(0, 120);
+}
+
+export function computePlatformOverwriteQuantity(activityStock, stockSnapshot) {
+  const requiredUsable = Number(activityStock);
+  const row = asArray(stockSnapshot?.rows)[0] || {};
+  const locked = Math.max(0, Number(row.totalLockedQuantity || 0));
+  const currentTotal = Math.max(0, Number(row.totalInventoryQuantity || 0));
+  if (!Number.isInteger(requiredUsable) || requiredUsable <= 0) {
+    throw new Error(`Invalid required usable inventory: ${activityStock}`);
+  }
+  return Math.max(currentTotal, requiredUsable + locked);
 }
 
 function inventoryWriteLockPath(store, skc) {
@@ -116,10 +129,7 @@ function shanghaiToday() {
 }
 
 function requireCurrentEtSnapshot(row, canonical, source) {
-  const snapshotDates = [row?.storeSnapshotDate, row?.boxSnapshotDate]
-    .filter(Boolean)
-    .map(value => String(value).slice(0, 10));
-  const latestSnapshotDate = snapshotDates.sort().at(-1) || '';
+  const latestSnapshotDate = String(row?.operationalSnapshotDate || '').slice(0, 10);
   const today = shanghaiToday();
   if (!latestSnapshotDate || latestSnapshotDate !== today) {
     throw new Error(`${source} ET inventory snapshot is not current-day: ${canonical} latest=${latestSnapshotDate || 'missing'} today=${today}`);
@@ -141,20 +151,33 @@ async function queryEtInventoryFromBi(canonical, biPortalData, maxAgeHours) {
     || String(item.match_key || '').trim().toUpperCase() === targetMatchKey
   ));
   if (!row?.has_et_inventory) throw new Error(`Fresh BI projection has no ET inventory evidence for ${canonical}`);
-  const snapshotDates = [row.et_store_snapshot_date, row.et_box_snapshot_date].filter(Boolean).map(value => String(value).slice(0, 10));
-  const latestSnapshotDate = snapshotDates.sort().at(-1) || '';
+  if (row.inventory_match_status && row.inventory_match_status !== 'matched') {
+    throw new Error(`BI ET inventory is not a fresh matched fact for ${canonical}: status=${row.inventory_match_status}`);
+  }
+  const operationalPolicy = String(row.et_operational_stock_policy || '09_loose_only');
+  const latestSnapshotDate = String(
+    operationalPolicy.includes('01_full_carton_exception')
+      ? row.et_box_snapshot_date
+      : row.et_store_snapshot_date,
+  ).slice(0, 10);
   const today = shanghaiToday();
   if (!latestSnapshotDate || latestSnapshotDate < today) {
     throw new Error(`BI ET inventory snapshot is not current-day: ${canonical} latest=${latestSnapshotDate || 'missing'} today=${today}`);
   }
+  const currentSellable = row.current_sellable_quantity ?? row.et_estimated_available_qty;
+  if (currentSellable === null || currentSellable === undefined || !Number.isFinite(Number(currentSellable))) {
+    throw new Error(`BI ET inventory has no usable current sellable quantity for ${canonical}`);
+  }
   return {
     standardGoodsSn: row.standard_goods_sn,
     matchKey: row.match_key,
-    estimatedAvailableQty: Number(row.et_estimated_available_qty),
+    estimatedAvailableQty: Number(currentSellable),
     looseSellableQty: Number(row.et_loose_sellable_qty),
     fullCartonQty: Number(row.et_full_carton_qty),
     storeSnapshotDate: row.et_store_snapshot_date,
     boxSnapshotDate: row.et_box_snapshot_date,
+    operationalSnapshotDate: latestSnapshotDate,
+    operationalStockPolicy: operationalPolicy,
     evidenceSource: 'bi_portal_et_projection',
     evidencePath: path.relative(ROOT, biPortalData).replaceAll(path.sep, '/'),
     evidenceGeneratedAt: doc.generatedAt || doc.createdAt || '',
@@ -169,11 +192,16 @@ async function queryEtInventory(canonical, biPortalData, maxBiAgeHours) {
       SELECT
         standard_goods_sn,
         match_key,
-        estimated_available_qty,
+        operational_sellable_qty,
+        operational_stock_policy,
         loose_sellable_qty,
         full_carton_qty,
         store_snapshot_date,
-        box_snapshot_date
+        box_snapshot_date,
+        CASE
+          WHEN operational_stock_policy = '09_loose_plus_01_full_carton_exception' THEN box_snapshot_date
+          ELSE store_snapshot_date
+        END AS operational_snapshot_date
       FROM mart.et_product_inventory_current
       WHERE match_key = dim.product_match_key($1)
          OR dim.product_canonical_sn(standard_goods_sn) = dim.product_canonical_sn($1)
@@ -184,11 +212,13 @@ async function queryEtInventory(canonical, biPortalData, maxBiAgeHours) {
     const normalized = row ? {
       standardGoodsSn: row.standard_goods_sn,
       matchKey: row.match_key,
-      estimatedAvailableQty: Number(row.estimated_available_qty),
+      estimatedAvailableQty: Number(row.operational_sellable_qty),
       looseSellableQty: Number(row.loose_sellable_qty),
       fullCartonQty: Number(row.full_carton_qty),
       storeSnapshotDate: row.store_snapshot_date,
       boxSnapshotDate: row.box_snapshot_date,
+      operationalSnapshotDate: row.operational_snapshot_date,
+      operationalStockPolicy: row.operational_stock_policy,
       evidenceSource: 'mart.et_product_inventory_current',
     } : null;
     return normalized ? requireCurrentEtSnapshot(normalized, canonical, normalized.evidenceSource) : null;
@@ -249,7 +279,15 @@ export async function resolveInventoryTarget(args) {
   if (row.manualSpecialLimitedDiscount === true) {
     throw new Error('Manual-special rows must use registry mode, not authorized fallback rescue mode');
   }
-  const activityStock = Number(row.activityStock ?? rescue.activityStock);
+  const pricingPolicy = JSON.parse(await fs.readFile(DEFAULT_PRICING_POLICY, 'utf8'));
+  const configuredActivityStock = Number(pricingPolicy?.limitedDiscount?.defaultActivityStock);
+  const activityStock = Number(
+    row.activityStock
+    ?? rescue.activityStock
+    ?? (Number.isInteger(configuredActivityStock) && configuredActivityStock > 0
+      ? configuredActivityStock
+      : FALLBACK_ACTIVITY_STOCK),
+  );
   if (!Number.isInteger(activityStock) || activityStock <= 0) throw new Error(`Invalid rescue activityStock: ${activityStock}`);
   const canonical = String(row.canonical || '').trim();
   if (!canonical) throw new Error('Authorized fallback rescue row is missing canonical');
@@ -289,11 +327,19 @@ async function readPlatformStock(client, skuCodes) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  const target = await resolveInventoryTarget(args);
+  const payloadHash = createHash('sha256').update(JSON.stringify({
+    action: 'top_up_limited_discount_virtual_inventory',
+    storeKey: args.store,
+    skc: args.skc,
+    activityStock: target.activityStock,
+    target,
+  })).digest('hex');
   const automationAuthorization = args.execute ? await assertMarketingAutomationAuthorization({
     action: MARKETING_AUTOMATION_ACTIONS.TOP_UP_VIRTUAL_INVENTORY,
     storeKey: args.store,
+    payloadHash,
   }) : null;
-  const target = await resolveInventoryTarget(args);
   if (args.execute && args.confirm !== target.confirmText) throw new Error(`Execute requires --confirm ${target.confirmText}`);
   const et = await resolveEtInventory(target.canonical, args.biPortalData, args.maxBiAgeHours);
   const {client, store} = await loadClient(args);
@@ -311,9 +357,12 @@ async function main() {
   let decision = initialDecision;
   let preWrite = null;
   let writeResponse = null;
+  const writeResponses = [];
   let after = before;
   let readbackAttempts = 0;
   let idempotencyKey = '';
+  const idempotencyKeys = [];
+  let writeReadbackFailure = '';
   let releaseWriteLock = null;
   if (args.execute && decision.action === 'top_up_platform_virtual_stock') {
     releaseWriteLock = await acquireCrossProcessTicketLock(inventoryWriteLockPath(args.store, args.skc), {
@@ -333,44 +382,53 @@ async function main() {
       });
       after = preWrite;
       if (decision.action === 'top_up_platform_virtual_stock') {
-        idempotencyKey = buildInventoryIdempotencyKey({
-          authorizationId: automationAuthorization?.authorizationId || '',
-          mode: target.mode,
-          store: args.store,
-          skc: args.skc,
-          skuCode: skuCodes[0],
-          activityStock: target.activityStock,
-          validTo: target.validTo,
-          sourceArtifact: target.sourceArtifact,
-        });
-        const response = await client.request('/open-api/stock/change-inventory/v2', {
-          method: 'POST',
-          body: {
-            updateSkuInventoryQuantityRequests: [{
-              idempotencyKey,
-              skuCode: skuCodes[0],
-              invType: 'VI',
-              changeType: 'OVERWRITE',
-              changeQuantity: target.activityStock,
-              changeReason: target.mode === 'manual_special'
-                ? 'Restore user-approved manual special limited discount after verified ET stock guard'
-                : 'Create user-authorized automatic limited discount fallback after verified ET stock guard',
-            }],
-          },
-          headers: {language: 'en'},
-        });
-        writeResponse = {code: response.data?.code, msg: response.data?.msg || '', traceId: response.data?.traceId || '', info: response.data?.info || null};
-        if (String(response.data?.code) !== '0' || response.data?.info?.success === false) {
-          throw new Error(`change-inventory failed: ${response.data?.code} ${response.data?.msg || ''}`);
-        }
-        for (let attempt = 1; attempt <= 10; attempt += 1) {
-          readbackAttempts = attempt;
-          after = await readPlatformStock(client, skuCodes);
+        for (let writeAttempt = 1; writeAttempt <= 2; writeAttempt += 1) {
+          const overwriteQuantity = computePlatformOverwriteQuantity(target.activityStock, after);
+          idempotencyKey = buildInventoryIdempotencyKey({
+            authorizationId: automationAuthorization?.authorizationId || '',
+            mode: target.mode,
+            store: args.store,
+            skc: args.skc,
+            skuCode: skuCodes[0],
+            activityStock: target.activityStock,
+            overwriteQuantity,
+            validTo: target.validTo,
+            sourceArtifact: target.sourceArtifact,
+            retryAttempt: writeAttempt,
+          });
+          idempotencyKeys.push(idempotencyKey);
+          const response = await client.request('/open-api/stock/change-inventory/v2', {
+            method: 'POST',
+            body: {
+              updateSkuInventoryQuantityRequests: [{
+                idempotencyKey,
+                skuCode: skuCodes[0],
+                invType: 'VI',
+                changeType: 'OVERWRITE',
+                changeQuantity: overwriteQuantity,
+                changeReason: target.mode === 'manual_special'
+                  ? 'Restore user-approved manual special limited discount after verified ET stock guard'
+                  : 'Create user-authorized automatic limited discount fallback after verified ET stock guard',
+              }],
+            },
+            headers: {language: 'en'},
+          });
+          writeResponse = {writeAttempt, code: response.data?.code, msg: response.data?.msg || '', traceId: response.data?.traceId || '', info: response.data?.info || null};
+          writeResponses.push(writeResponse);
+          if (String(response.data?.code) !== '0' || response.data?.info?.success === false) {
+            throw new Error(`change-inventory failed: ${response.data?.code} ${response.data?.msg || ''}`);
+          }
+          for (let attempt = 1; attempt <= 10; attempt += 1) {
+            readbackAttempts += 1;
+            after = await readPlatformStock(client, skuCodes);
+            if (after.totalUsableInventory >= target.activityStock) break;
+            if (attempt < 10) await sleep(3000);
+          }
           if (after.totalUsableInventory >= target.activityStock) break;
-          if (attempt < 10) await sleep(3000);
+          if (writeAttempt < 2) await sleep(3000);
         }
         if (after.totalUsableInventory < target.activityStock) {
-          throw new Error(`Inventory write returned success but readback usable inventory ${after.totalUsableInventory} < ${target.activityStock}`);
+          writeReadbackFailure = `Inventory writes returned success but readback usable inventory ${after.totalUsableInventory} < ${target.activityStock}`;
         }
       }
     } finally {
@@ -402,7 +460,10 @@ async function main() {
     initialDecision,
     decision,
     idempotencyKey: idempotencyKey || null,
+    idempotencyKeys,
     writeResponse,
+    writeResponses,
+    writeReadbackFailure,
     after,
     readbackAttempts,
     writeAttempted: Boolean(args.execute && decision.action === 'top_up_platform_virtual_stock'),

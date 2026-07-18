@@ -34,7 +34,7 @@ await fs.writeFile(costMap, JSON.stringify({
     storageMethod: 'missing',
   }},
 }));
-await fs.writeFile(liveScan, JSON.stringify({ok: true, partial: false, rows: []}));
+await fs.writeFile(liveScan, JSON.stringify({ok: true, partial: false, stores: [{storeKey: 'NM', ok: true}], rows: []}));
 const snapshot = (status, hasActivity = false) => ({linkRows: [{
   storeKey: 'NM', skc, standardGoodsSn: canonical,
   shelfStatus: status,

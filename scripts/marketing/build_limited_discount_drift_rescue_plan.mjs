@@ -11,6 +11,7 @@ import {
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_ACTIVITY_NAME_PREFIX = '限时折扣目标价漂移修复';
+const DEFAULT_ACTIVITY_STOCK = 10;
 
 function parseArgs(argv) {
   const args = {guard: '', outDir: '', endTime: '', activityNamePrefix: DEFAULT_ACTIVITY_NAME_PREFIX, maxRows: 0};
@@ -92,7 +93,7 @@ function groupKey(row) {
   ].join('::');
 }
 
-function normalizeRow(row) {
+function normalizeRow(row, activityStock) {
   const finalTargetPrice = num(row.finalTargetPrice);
   const limitedDiscountPrice = finalTargetPrice;
   return {
@@ -104,6 +105,7 @@ function normalizeRow(row) {
     finalTargetPrice,
     targetPrice: finalTargetPrice,
     needsLimitedDiscount: true,
+    activityStock,
     limitedDiscountPrice,
     previousLimitedPrice: num(row.limitedDiscountPrice),
     previousDeltaSar: num(row.deltaSar),
@@ -123,6 +125,9 @@ async function writeJson(file, obj) {
 }
 
 export function buildLimitedDiscountDriftRescuePlan(guard, options = {}) {
+  const activityStock = Number.isInteger(Number(options.activityStock)) && Number(options.activityStock) > 0
+    ? Number(options.activityStock)
+    : DEFAULT_ACTIVITY_STOCK;
   const candidateRows = (guard.limitedDiscountTargetPriceDrift?.belowRows || [])
     .filter(row => row && row.storeKey && row.skc)
     .filter(row => num(row.finalTargetPrice) !== null)
@@ -145,7 +150,7 @@ export function buildLimitedDiscountDriftRescuePlan(guard, options = {}) {
         rows: [],
       });
     }
-    groups.get(key).rows.push(normalizeRow(row));
+    groups.get(key).rows.push(normalizeRow(row, activityStock));
   }
   const byStore = {};
   const rescueFiles = [];
@@ -187,7 +192,17 @@ async function main() {
   const guard = JSON.parse(await fs.readFile(args.guard, 'utf8'));
   const manualRegistry = await loadManualLimitedDiscountRegistry();
   const endTime = args.endTime;
-  const plan = buildLimitedDiscountDriftRescuePlan(guard, {guardPath: rel(args.guard), maxRows: args.maxRows, manualRegistry});
+  const pricingPolicy = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'marketing_pricing_policy.json'), 'utf8'));
+  const activityStock = Number.isInteger(Number(pricingPolicy?.limitedDiscount?.defaultActivityStock))
+    && Number(pricingPolicy.limitedDiscount.defaultActivityStock) > 0
+    ? Number(pricingPolicy.limitedDiscount.defaultActivityStock)
+    : DEFAULT_ACTIVITY_STOCK;
+  const plan = buildLimitedDiscountDriftRescuePlan(guard, {
+    guardPath: rel(args.guard),
+    maxRows: args.maxRows,
+    manualRegistry,
+    activityStock,
+  });
   await fs.mkdir(args.outDir, {recursive: true});
   const clearedStaleRescueFiles = await clearGeneratedRescueFiles(args.outDir);
   for (const group of plan.groups) {
@@ -202,6 +217,7 @@ async function main() {
       sourceLimitedDiscountName: group.limitedDiscountName,
       sourceLimitedDiscountEnd: group.limitedDiscountEnd,
       endTime,
+      activityStock: group.rows[0]?.activityStock || activityStock,
       activityNamePrefix: args.activityNamePrefix,
       rows: group.rows,
     };

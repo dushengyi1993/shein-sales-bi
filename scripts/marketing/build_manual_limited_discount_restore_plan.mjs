@@ -65,6 +65,7 @@ export function buildManualLimitedDiscountRestorePlan(guard, registry, now = new
   }
   return {
     createdAt: new Date().toISOString(),
+    reportDate: String(guard.reportDate || '').trim() || now.toISOString().slice(0, 10),
     sourceGuard: guard.sourcePath || '',
     registrySource: registry.sourcePath || '',
     activeRegistryCount: index.activeByKey.size,

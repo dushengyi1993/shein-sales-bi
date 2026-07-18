@@ -3,7 +3,7 @@ Description=Run SHEIN BI cloud morning chain after the 08:00 sales slot
 
 [Timer]
 OnCalendar=*-*-* 08:00:00
-Persistent=false
+Persistent=true
 Unit=shein-bi-cloud-morning-chain.service
 
 [Install]

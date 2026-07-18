@@ -9,6 +9,10 @@ METABASE_URL="${METABASE_URL:-http://127.0.0.1:3000}"
 PORTAL_HEALTH_URL="${PORTAL_HEALTH_URL:-}"
 PORTAL_INDEX_PATH="${PORTAL_INDEX_PATH:-$ROOT/outputs/bi-portal/index.html}"
 PORTAL_DATA_PATH="${PORTAL_DATA_PATH:-$ROOT/outputs/bi-portal/data.json}"
+LEASE_TASK="${SHEIN_LINK_BUSINESS_LEASE_TASK:-cloud-link-business}"
+LEASE_RUN_ID="${SHEIN_LINK_BUSINESS_RUN_ID:-$(node -e 'console.log(require("node:crypto").randomUUID())')}"
+LEASE_TTL_SEC="${SHEIN_LINK_BUSINESS_LEASE_TTL_SEC:-5400}"
+LEASE_ACTIVE=0
 
 resolve_date() {
   local target="$1"
@@ -47,19 +51,25 @@ check_portal_health() {
 
 close_store_browsers() {
   cd "$ROOT"
-  node - <<'NODE' | while IFS= read -r profile_dir; do
-const fs = require('fs');
-const path = require('path');
-const root = process.cwd();
-const cfg = JSON.parse(fs.readFileSync(path.join(root, 'config', 'stores.json'), 'utf8'));
-for (const store of cfg.stores || []) {
-  if (store.enabled === false) continue;
-  console.log(path.join(root, 'profiles', `persistent-${store.profileKey}-profile`));
+  local owned_args=()
+  if [[ "$LEASE_ACTIVE" == "1" ]]; then
+    owned_args+=(--owned-lease-task "$LEASE_TASK" --owned-lease-run-id "$LEASE_RUN_ID")
+  fi
+  node scripts/cleanup_shein_store_browsers.mjs --all --cleanup-chrome-tmp --kill-after-sec 5 "${owned_args[@]}" || true
 }
-NODE
-    [[ -n "$profile_dir" ]] || continue
-    pkill -f -- "--user-data-dir=$profile_dir" 2>/dev/null || true
-  done
+
+lease_action() {
+  node scripts/manage_browser_task_leases.mjs "$1" --root "$ROOT" --task "$LEASE_TASK" \
+    --run-id "$LEASE_RUN_ID" --owner-pid "$$" --ttl-sec "$LEASE_TTL_SEC" --group ALL
+}
+
+on_exit() {
+  set +e
+  if [[ "$LEASE_ACTIVE" == "1" ]]; then
+    close_store_browsers
+    lease_action release >/dev/null 2>&1 || true
+    LEASE_ACTIVE=0
+  fi
 }
 
 write_link_business_success() {
@@ -103,10 +113,11 @@ store_profile_dir() {
 
 close_one_store_browser() {
   local key="$1"
-  local profile_dir
-  profile_dir="$(store_profile_dir "$key")"
-  [[ -n "$profile_dir" ]] || return 0
-  pkill -f -- "--user-data-dir=$profile_dir" 2>/dev/null || true
+  local owned_args=()
+  if [[ "$LEASE_ACTIVE" == "1" ]]; then
+    owned_args+=(--owned-lease-task "$LEASE_TASK" --owned-lease-run-id "$LEASE_RUN_ID")
+  fi
+  node scripts/cleanup_shein_store_browsers.mjs --store "$key" --cleanup-chrome-tmp --kill-after-sec 5 "${owned_args[@]}" || true
 }
 
 store_keys() {
@@ -130,7 +141,10 @@ cd "$ROOT"
 export SHEIN_BI_PORTAL_TIMEOUT_MS="${SHEIN_BI_PORTAL_TIMEOUT_MS:-1800000}"
 export SHEIN_BI_PORTAL_DATA_MODE="${SHEIN_BI_PORTAL_DATA_MODE:-api}"
 
-trap close_store_browsers EXIT
+trap on_exit EXIT
+lease_action acquire
+LEASE_ACTIVE=1
+close_store_browsers
 
 STORES="$(store_keys)"
 FAILED_STORES=()
@@ -140,6 +154,7 @@ for STORE in $STORES; do
   STORE_OK=0
   MAX_ATTEMPTS="${SHEIN_LINK_BUSINESS_STORE_ATTEMPTS:-3}"
   for ATTEMPT in $(seq 1 "$MAX_ATTEMPTS"); do
+    lease_action heartbeat >/dev/null
     echo "[cloud_link_business_sync] store=$STORE attempt=$ATTEMPT/$MAX_ATTEMPTS bootstrap/fetch start"
     close_one_store_browser "$STORE"
     if node scripts/restore_shein_store_session.mjs \

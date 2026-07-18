@@ -50,11 +50,52 @@ await fs.writeFile(linksDataPath, `${JSON.stringify({
       shelf_age_days: 2,
       c7_eps_uv: 8,
     },
+    {
+      store_key: 'JY',
+      skc: 'covered-higher-skc',
+      standard_goods_sn: 'COVERED-HIGHER',
+      raw_goods_sn: 'COVERED-HIGHER',
+      is_on_shelf: true,
+      shelf_status_name: '已上架',
+      shelf_age_days: 2,
+      c7_eps_uv: 7,
+    },
+    {
+      store_key: 'JY',
+      skc: 'covered-lower-skc',
+      standard_goods_sn: 'COVERED-LOWER',
+      raw_goods_sn: 'COVERED-LOWER',
+      is_on_shelf: true,
+      shelf_status_name: '已上架',
+      shelf_age_days: 2,
+      c7_eps_uv: 6,
+    },
+    ...[100, 90, 80, 70, 60].map((c7, index) => ({
+      store_key: 'JY',
+      skc: `old-peer-${index + 1}`,
+      standard_goods_sn: 'OLD-CANONICAL',
+      raw_goods_sn: 'OLD-CANONICAL',
+      is_on_shelf: true,
+      shelf_status_name: '已上架',
+      shelf_age_days: 180,
+      c7_eps_uv: c7,
+    })),
+    {
+      store_key: 'JY',
+      skc: 'old-missing-limited',
+      standard_goods_sn: 'OLD-CANONICAL',
+      raw_goods_sn: 'OLD-CANONICAL',
+      is_on_shelf: true,
+      shelf_status_name: '已上架',
+      shelf_age_days: 180,
+      c7_eps_uv: 10,
+    },
   ],
 }, null, 2)}\n`, 'utf8');
 
 await fs.writeFile(liveScanPath, `${JSON.stringify({
   ok: true,
+  stores: [{storeKey: 'JY', ok: true}],
   rows: [
     {
       storeKey: 'JY',
@@ -63,6 +104,27 @@ await fs.writeFile(liveScanPath, `${JSON.stringify({
       marketing_limited_discount_name: '新上架7天高曝光兜底限时折扣20260704',
       marketing_limited_discount_is_current: true,
     },
+    {
+      storeKey: 'JY',
+      skc: 'covered-higher-skc',
+      marketing_limited_discount_price_sar: 90,
+      marketing_limited_discount_name: '新上架7天高曝光兜底限时折扣20260704',
+      marketing_limited_discount_is_current: true,
+    },
+    {
+      storeKey: 'JY',
+      skc: 'covered-lower-skc',
+      marketing_limited_discount_price_sar: 80,
+      marketing_limited_discount_name: '新上架7天高曝光兜底限时折扣20260704',
+      marketing_limited_discount_is_current: true,
+    },
+    ...[1, 2, 3, 4, 5].map(index => ({
+      storeKey: 'JY',
+      skc: `old-peer-${index}`,
+      marketing_limited_discount_price_sar: 94.68,
+      marketing_limited_discount_name: '在售老链接漏限时折扣兜底20260704',
+      marketing_limited_discount_is_current: true,
+    })),
   ],
 }, null, 2)}\n`, 'utf8');
 
@@ -115,6 +177,24 @@ await fs.writeFile(priceOverridesPath, `${JSON.stringify({
       combo: '已覆盖',
     },
     {
+      storeKey: 'JY',
+      activityId: 47064,
+      skc: 'covered-higher-skc',
+      canonical: 'COVERED-HIGHER',
+      finalTargetPrice: 88,
+      targetPrice: 88,
+      combo: '现有兜底价高于目标，不自动降价',
+    },
+    {
+      storeKey: 'JY',
+      activityId: 47064,
+      skc: 'covered-lower-skc',
+      canonical: 'COVERED-LOWER',
+      finalTargetPrice: 88,
+      targetPrice: 88,
+      combo: '现有兜底价低于目标，仍需修复',
+    },
+    {
       storeKey: 'DL',
       activityId: 47064,
       skc: 'raw-only-reference',
@@ -123,6 +203,26 @@ await fs.writeFile(priceOverridesPath, `${JSON.stringify({
       targetPrice: 77.77,
       isTopExposureLink: true,
       combo: '原始链接覆盖层同货号前五价',
+    },
+    ...[1, 2, 3, 4, 5].map(index => ({
+      storeKey: 'JY',
+      activityId: 47064,
+      skc: `old-peer-${index}`,
+      canonical: 'OLD-CANONICAL',
+      finalTargetPrice: 94.68,
+      targetPrice: 94.68,
+      isTopExposureLink: true,
+      combo: '当前全局曝光前五',
+    })),
+    {
+      storeKey: 'DL',
+      activityId: 47064,
+      skc: 'old-other-reference',
+      canonical: 'OLD-CANONICAL',
+      finalTargetPrice: 99.87,
+      targetPrice: 99.87,
+      isTopExposureLink: false,
+      combo: '非曝光前五基准',
     },
   ],
 }, null, 2)}\n`, 'utf8');
@@ -160,10 +260,10 @@ const result = spawnSync(process.execPath, [
 
 assert.equal(result.status, 0, result.stderr || result.stdout);
 const payload = JSON.parse(result.stdout);
-assert.equal(payload.actionable, 3);
+assert.equal(payload.actionable, 5);
 
 const report = JSON.parse(await fs.readFile(reportJson, 'utf8'));
-assert.equal(report.rows.length, 3);
+assert.equal(report.rows.length, 5);
 assert.equal(report.rows[0].storeKey, 'JY');
 assert.equal(report.rows[0].skc, 'new-skc');
 assert.equal(report.rows[0].limitedDiscountPrice, 96.17);
@@ -180,11 +280,52 @@ assert.equal(rawOnlyRow.limitedDiscountPrice, 77.77);
 assert.equal(rawOnlyRow.topTierPriceSource, 'explicit_top_tier_price');
 assert.equal(report.latestRawLinkOverlay.addedRowCount, 1);
 assert.equal(report.latestRawLinkOverlay.addedRows[0].skc, 'raw-only-skc');
-assert.equal(report.totals.liveCoveredIgnored, 1);
+assert.equal(report.totals.liveCoveredIgnored, 2);
+const oldMissingRow = report.rows.find(row => row.skc === 'old-missing-limited');
+assert.equal(oldMissingRow.treatmentType, 'existing_on_shelf_missing_limited_discount');
+assert.equal(oldMissingRow.currentExposureIsTop5, false);
+assert.equal(oldMissingRow.limitedDiscountPrice, 99.87);
+assert.equal(oldMissingRow.topTierPriceSource, 'canonical_current_non_top5_tier_price');
+assert.equal(oldMissingRow.endTime, '2026-08-03 23:59:59', 'persistent on-shelf fallback uses a 30-day window');
+assert.equal(exactRow.endTime, '2026-07-11 23:59:59', 'new-listing top treatment remains a 7-day window');
+assert.equal(report.rule.mandatoryOnShelfDurationDays, 30);
+assert.equal(report.totals.existingOnShelfMissingLimitedDiscount, 1);
+assert.equal(report.rule.liveLimitedEvidenceComplete, true);
 assert.equal(report.ignored.some(row => row.skc === 'covered-skc' && row.reason === 'live_new_listing_limited_discount_already_covered_at_target'), true);
-const rescue = JSON.parse(await fs.readFile(path.resolve(report.rescueFiles[0].path), 'utf8'));
-assert.equal(rescue.rows.some(row => row.limitedDiscountPrice === 96.17), true);
-assert.equal(rescue.rows.some(row => row.limitedDiscountPrice === 51.73), true);
-assert.equal(rescue.rows.some(row => row.skc === 'raw-only-skc' && row.limitedDiscountPrice === 77.77), true);
+assert.equal(report.ignored.some(row => row.skc === 'covered-higher-skc' && row.reason === 'live_new_listing_limited_discount_already_covered_at_target'), true);
+const coveredLowerRow = report.rows.find(row => row.skc === 'covered-lower-skc');
+assert.equal(coveredLowerRow.action, 'replace_existing_limited_discount');
+assert.equal(coveredLowerRow.currentLimitedPrice, 80);
+assert.equal(coveredLowerRow.limitedDiscountPrice, 88);
+const rescueRows = (await Promise.all(report.rescueFiles.map(async file => {
+  const rescue = JSON.parse(await fs.readFile(path.resolve(file.path), 'utf8'));
+  return rescue.rows || [];
+}))).flat();
+assert.equal(rescueRows.some(row => row.limitedDiscountPrice === 96.17), true);
+assert.equal(rescueRows.some(row => row.limitedDiscountPrice === 51.73), true);
+assert.equal(rescueRows.some(row => row.skc === 'raw-only-skc' && row.limitedDiscountPrice === 77.77), true);
+assert.equal(rescueRows.some(row => row.skc === 'old-missing-limited' && row.limitedDiscountPrice === 99.87), true);
+
+const incompleteLiveScanPath = path.join(tmp, 'live-incomplete.json');
+const incompleteReportJson = path.join(tmp, 'report-incomplete.json');
+const liveDoc = JSON.parse(await fs.readFile(liveScanPath, 'utf8'));
+await fs.writeFile(incompleteLiveScanPath, `${JSON.stringify({...liveDoc, stores: []}, null, 2)}\n`, 'utf8');
+const incompleteResult = spawnSync(process.execPath, [
+  'scripts/marketing/build_new_listing_limited_discount_plan.mjs',
+  '--date', '2026-07-04',
+  '--links-data', linksDataPath,
+  '--price-overrides', priceOverridesPath,
+  '--out-dir', path.join(tmp, 'out-incomplete'),
+  '--report-json', incompleteReportJson,
+  '--report-md', path.join(tmp, 'report-incomplete.md'),
+  '--current-marketing-live-scan', incompleteLiveScanPath,
+  '--link-history-dir', linkHistoryDir,
+  '--stores-config', storesConfigPath,
+  '--no-supplemental-price-overrides',
+], {encoding: 'utf8'});
+assert.equal(incompleteResult.status, 0, incompleteResult.stderr || incompleteResult.stdout);
+const incompleteReport = JSON.parse(await fs.readFile(incompleteReportJson, 'utf8'));
+assert.equal(incompleteReport.rule.liveLimitedEvidenceComplete, false);
+assert.equal(incompleteReport.rows.some(row => row.skc === 'old-missing-limited'), false);
 
 console.log(JSON.stringify({ok: true, test: 'new_listing_limited_discount_exact_derived_live_covered_and_raw_overlay'}));

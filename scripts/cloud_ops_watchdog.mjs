@@ -6,7 +6,10 @@ import {spawn} from 'node:child_process';
 import crypto from 'node:crypto';
 import {
   assessDailyLinkBusinessRecovery,
+  assessDailyMarketingGuardHealth,
+  assessDailyMarketingRepairHealth,
   assessDailyMarketingScanRecovery,
+  assessDailyOpenapiProductRecovery,
   resolveMarketingScanEvidencePath,
 } from '../lib/cloud_watchdog_recovery.mjs';
 
@@ -31,6 +34,9 @@ const TIMER_NAMES = [
   'shein-bi-cloud-morning-chain.timer',
   'shein-bi-cloud-session-manager.timer',
   'shein-bi-cloud-order-closure.timer',
+  'shein-bi-cloud-marketing-live-guard.timer',
+  'shein-bi-cloud-marketing-repair.timer',
+  'shein-bi-cloud-browser-cleanup.timer',
   'shein-bi-cloud-watchdog.timer',
 ];
 
@@ -85,7 +91,7 @@ function run(command, args, options = {}) {
 }
 
 async function systemctlShow(name) {
-  const res = await run('systemctl', ['show', name, '--no-pager', '--property=LoadState,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,StateChangeTimestamp,ExecMainStartTimestamp,ExecMainExitTimestamp']);
+  const res = await run('systemctl', ['show', name, '--no-pager', '--property=LoadState,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,StateChangeTimestamp,ActiveEnterTimestamp,ExecMainStartTimestamp,ExecMainExitTimestamp']);
   const data = {};
   for (const line of String(res.stdout || '').split(/\r?\n/)) {
     const idx = line.indexOf('=');
@@ -342,6 +348,31 @@ async function main() {
     }
   }
 
+  const marketingGuardState = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'marketing-live-guard-last.json'));
+  const marketingGuardLastOkState = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'marketing-live-guard-last-ok.json'));
+  const marketingGuardService = await systemctlShow('shein-bi-cloud-marketing-live-guard.service');
+  const marketingGuardHealth = assessDailyMarketingGuardHealth({
+    guardState: marketingGuardState,
+    lastOkState: marketingGuardLastOkState,
+    guardRunning: ['active', 'activating', 'reloading'].includes(marketingGuardService.ActiveState),
+    guardStartedAt: marketingGuardService.ExecMainStartTimestamp || marketingGuardService.ActiveEnterTimestamp,
+  });
+  if (!marketingGuardHealth.healthy) {
+    issues.push(`营销无人值守守卫未完成：date=${marketingGuardHealth.today} reason=${marketingGuardHealth.reason} lastStatus=${marketingGuardState?.status || '-'} lastDate=${marketingGuardState?.date || '-'} message=${marketingGuardState?.message || '-'}`);
+  }
+  const marketingRepairQueue = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_marketing_live_guard', 'repair-queues', `marketing-repair-${marketingGuardHealth.today}.json`));
+  const marketingRepairState = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'marketing-repair-last.json'));
+  const marketingRepairService = await systemctlShow('shein-bi-cloud-marketing-repair.service');
+  const marketingRepairHealth = assessDailyMarketingRepairHealth({
+    queueState: marketingRepairQueue,
+    repairState: marketingRepairState,
+    repairRunning: ['active', 'activating', 'reloading'].includes(marketingRepairService.ActiveState),
+    repairStartedAt: marketingRepairService.ExecMainStartTimestamp || marketingRepairService.ActiveEnterTimestamp,
+  });
+  if (!marketingRepairHealth.healthy) {
+    issues.push(`营销修复队列未闭环：date=${marketingRepairHealth.today} reason=${marketingRepairHealth.reason} queueStatus=${marketingRepairQueue?.status || '-'} rows=${marketingRepairQueue?.counts?.totalRows ?? '-'} groups=${marketingRepairQueue?.counts?.totalGroups ?? '-'} workerStatus=${marketingRepairState?.status || '-'}`);
+  }
+
   const partialLinkBusiness = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'link-business-last-partial.json'));
   if (partialLinkBusiness?.error) {
     issues.push(`链接/业务域部分失败状态不可读：${partialLinkBusiness.error}`);
@@ -354,7 +385,6 @@ async function main() {
   if (dailyRefresh?.error) {
     issues.push(`日更补采状态不可读：${dailyRefresh.error}`);
   } else if (dailyRefresh?.status && dailyRefresh.status !== 'ok' && !String(dailyRefresh.status).startsWith('skipped')) {
-    const guardState = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'marketing-live-guard-last.json'));
     const storeConfig = await readJsonIfExists(path.join(ROOT, 'config', 'stores.json'));
     const configuredStores = Array.isArray(storeConfig?.stores) ? storeConfig.stores : [];
     const expectedStoreKeys = configuredStores
@@ -365,28 +395,37 @@ async function main() {
       linkSuccess: linkBusinessSuccess,
       expectedStoreKeys,
     });
-    const scanFile = resolveMarketingScanEvidencePath(ROOT, guardState?.scanFile);
+    const scanFile = resolveMarketingScanEvidencePath(ROOT, marketingGuardState?.scanFile);
     const scanSnapshot = scanFile ? await readJsonIfExists(scanFile) : null;
     const marketingRecovery = scanFile
       ? assessDailyMarketingScanRecovery({
           dailyRefresh,
-          guardState,
+          guardState: marketingGuardState,
           scanSnapshot,
           expectedStoreKeys,
         })
       : {recovered: false, reason: 'recovery_scan_path_invalid'};
+    const productReport = await readJsonIfExists(path.join(ROOT, 'state', 'openapi-probes', 'product-reconciliation.latest.json'));
+    const productRecovery = assessDailyOpenapiProductRecovery({
+      dailyRefresh,
+      productReport,
+      expectedStoreKeys,
+    });
     dailyRefreshRecovery = linkRecovery.recovered
       ? linkRecovery
       : marketingRecovery.recovered
         ? marketingRecovery
-        : {
-            recovered: false,
-            reason: 'no_verified_daily_recovery',
-            attempts: {
-              linkBusiness: linkRecovery.reason,
-              marketingScan: marketingRecovery.reason,
-            },
-          };
+        : productRecovery.recovered
+          ? productRecovery
+          : {
+              recovered: false,
+              reason: 'no_verified_daily_recovery',
+              attempts: {
+                linkBusiness: linkRecovery.reason,
+                marketingScan: marketingRecovery.reason,
+                openapiProduct: productRecovery.reason,
+              },
+            };
     if (dailyRefreshRecovery.recovered) {
       recoveries.push(dailyRefreshRecovery.evidence);
     } else {
@@ -468,6 +507,14 @@ async function main() {
     dailyRefresh,
     linkBusinessSuccess,
     dailyRefreshRecovery,
+    marketingGuardState,
+    marketingGuardLastOkState,
+    marketingGuardService,
+    marketingGuardHealth,
+    marketingRepairQueue,
+    marketingRepairState,
+    marketingRepairService,
+    marketingRepairHealth,
     portal,
     coverage,
     orphanStoreBrowsers,

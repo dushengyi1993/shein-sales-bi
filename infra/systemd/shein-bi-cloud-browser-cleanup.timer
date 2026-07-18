@@ -2,8 +2,8 @@
 Description=Run SHEIN BI stale headless store Chrome cleanup
 
 [Timer]
-OnCalendar=*-*-* *:10,40:00
-Persistent=false
+OnCalendar=*-*-* *:15:00
+Persistent=true
 Unit=shein-bi-cloud-browser-cleanup.service
 
 [Install]

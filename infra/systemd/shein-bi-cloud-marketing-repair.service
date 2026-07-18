@@ -1,0 +1,33 @@
+[Unit]
+Description=SHEIN BI bounded marketing repair worker
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=sheinops
+Group=sheinops
+WorkingDirectory=/opt/shein-bi/app
+Environment=HOME=/home/sheinops
+Environment=TZ=Asia/Shanghai
+Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_BI_MARKETING_REPAIR_LOG_DIR=/srv/shein-bi/logs/cloud-marketing-repair
+Environment=SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS=8
+Environment=SHEIN_BI_MARKETING_REPAIR_LEASE_TTL_SEC=3000
+Environment=SHEIN_BI_MARKETING_LIVE_SCAN_TIMEOUT_SEC=900
+Environment=SHEIN_BI_MARKETING_LIVE_SCAN_KILL_AFTER_SEC=60
+Environment=SHEIN_BI_MARKETING_PRICE_SESSION_CONCURRENCY=3
+Environment=SHEIN_BI_MARKETING_AUTOMATION_CONTEXT=cloud_timer
+Environment=SHEIN_BI_MARKETING_AUTOMATION_AUTHORIZATION=owner-standing-cloud-marketing-v1
+TimeoutStartSec=2400
+TimeoutStopSec=90
+KillSignal=SIGTERM
+Nice=12
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUWeight=40
+MemoryHigh=2200M
+MemoryMax=3000M
+OOMPolicy=stop
+KillMode=control-group
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_marketing_repair_worker.sh

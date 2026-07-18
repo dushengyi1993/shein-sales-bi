@@ -13,7 +13,7 @@ assert.match(builder, /activityStock,/);
 assert.match(executor, /const\s+effectiveActivityStock\s*=\s*Number\(manualActivityStocks\[0\]\s*\?\?\s*rescue\.activityStock\s*\?\?\s*args\.activityStock\)/);
 assert.match(executor, /manualActivityStocks\s*=\s*\[\.\.\.new Set\(manualRows\.map\(row\s*=>\s*Number\(row\.activityStock\)\)/);
 assert.match(executor, /const\s+\{[\s\S]*?activityStock,[\s\S]*?\}\s*=\s*__arg/);
-assert.match(executor, /const\s+attendNum\s*=\s*activityStock/);
+assert.match(executor, /const\s+attendNum\s*=\s*Number\.isInteger\(Number\(target\.activityStock\)\)[\s\S]*?:\s*activityStock;/);
 assert.match(executor, /activityStock:\s*effectiveActivityStock/);
 
 console.log(JSON.stringify({ok: true, test: 'limited_discount_default_activity_stock_10_duration_7d'}));

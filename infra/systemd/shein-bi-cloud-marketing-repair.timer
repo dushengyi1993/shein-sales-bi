@@ -1,0 +1,10 @@
+[Unit]
+Description=Resume bounded SHEIN marketing repairs after fast inspections
+
+[Timer]
+OnCalendar=*-*-* 10,12,14,16,18:50:00
+Persistent=true
+Unit=shein-bi-cloud-marketing-repair.service
+
+[Install]
+WantedBy=timers.target

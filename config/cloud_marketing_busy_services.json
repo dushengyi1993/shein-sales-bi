@@ -8,6 +8,7 @@
     "shein-bi-cloud-session-manager.service",
     "shein-bi-cloud-morning-chain.service",
     "shein-bi-cloud-order-closure.service",
-    "shein-bi-db-backup.service"
+    "shein-bi-db-backup.service",
+    "shein-bi-cloud-marketing-repair.service"
   ]
 }

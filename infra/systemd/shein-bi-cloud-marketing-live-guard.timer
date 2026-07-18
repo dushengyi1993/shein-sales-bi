@@ -3,7 +3,9 @@ Description=Run SHEIN BI cloud marketing live guard daily
 
 [Timer]
 OnCalendar=*-*-* 10:30:00
-Persistent=false
+OnCalendar=*-*-* 13:30:00
+OnCalendar=*-*-* 16:30:00
+Persistent=true
 Unit=shein-bi-cloud-marketing-live-guard.service
 
 [Install]

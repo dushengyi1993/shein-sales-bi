@@ -3,7 +3,7 @@ Description=Run SHEIN BI cloud yesterday final refresh
 
 [Timer]
 OnCalendar=*-*-* 03:00:00
-Persistent=false
+Persistent=true
 Unit=shein-bi-cloud-yesterday.service
 
 [Install]

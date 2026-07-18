@@ -16,7 +16,8 @@ try {
       enabled: true,
       authorizationId: 'owner-standing-v1',
       authorizedAt: '2026-07-16',
-      perRunPayloadHashRequired: false,
+      perRunPayloadHashRequired: true,
+      perRunUserConfirmationRequired: false,
       allowedContexts: ['cloud_timer'],
       storeScope: 'all_enabled_stores',
       allowedActions: [MARKETING_AUTOMATION_ACTIONS.APPLY_NEW_LISTING_FALLBACK],
@@ -29,32 +30,45 @@ try {
     policyPath,
     context: 'cloud_timer',
     authorizationId: 'owner-standing-v1',
+    payloadHash: 'a'.repeat(64),
   });
   assert.equal(authorization.storeKey, 'TZ');
-  assert.equal(authorization.perRunPayloadHashRequired, false);
+  assert.equal(authorization.perRunPayloadHashRequired, true);
+  assert.equal(authorization.perRunUserConfirmationRequired, false);
+  assert.equal(authorization.payloadHash, 'a'.repeat(64));
+
+  await assert.rejects(() => assertMarketingAutomationAuthorization({
+    action: MARKETING_AUTOMATION_ACTIONS.APPLY_NEW_LISTING_FALLBACK,
+    policyPath,
+    context: 'cloud_timer',
+    authorizationId: 'owner-standing-v1',
+  }), /payload\/plan hash is required/);
 
   await assert.rejects(() => assertMarketingAutomationAuthorization({
     action: MARKETING_AUTOMATION_ACTIONS.REPAIR_TARGET_PRICE_DRIFT,
     policyPath,
     context: 'cloud_timer',
     authorizationId: 'owner-standing-v1',
+    payloadHash: 'b'.repeat(64),
   }), /outside standing authorization/);
   await assert.rejects(() => assertMarketingAutomationAuthorization({
     action: MARKETING_AUTOMATION_ACTIONS.APPLY_NEW_LISTING_FALLBACK,
     policyPath,
     context: 'owner_codex_cli',
     authorizationId: 'owner-standing-v1',
+    payloadHash: 'b'.repeat(64),
   }), /context is not authorized/);
   await assert.rejects(() => assertMarketingAutomationAuthorization({
     action: MARKETING_AUTOMATION_ACTIONS.APPLY_NEW_LISTING_FALLBACK,
     policyPath,
     context: 'cloud_timer',
     authorizationId: 'wrong-id',
+    payloadHash: 'b'.repeat(64),
   }), /id is missing or does not match/);
 
   console.log(JSON.stringify({
     ok: true,
-    test: 'standing_marketing_automation_authorization_is_scoped_and_hashless',
+    test: 'standing_marketing_automation_authorization_is_scoped_hashed_and_confirmationless',
   }));
 } finally {
   await fs.rm(tmp, {recursive: true, force: true});

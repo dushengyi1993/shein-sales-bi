@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {
@@ -38,6 +39,7 @@ function parseArgs(argv) {
     activityStock: 10,
     activityNamePrefix: 'HL漏报补救限时折扣',
     replaceActivityIds: [],
+    expectedRescueHash: '',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -73,6 +75,8 @@ function parseArgs(argv) {
     else if (arg.startsWith('--replace-activity-ids=')) {
       args.replaceActivityIds.push(...String(arg.slice('--replace-activity-ids='.length) || '').split(',').map(value => Number(value.trim())).filter(Number.isFinite));
     }
+    else if (arg === '--expected-rescue-hash') args.expectedRescueHash = String(argv[++i] || '').trim().toLowerCase();
+    else if (arg.startsWith('--expected-rescue-hash=')) args.expectedRescueHash = String(arg.slice('--expected-rescue-hash='.length) || '').trim().toLowerCase();
     else throw new Error(`Unknown argument: ${arg}`);
   }
   if (!Number.isFinite(args.port) || args.port <= 0) throw new Error(`Invalid --port: ${args.port}`);
@@ -85,6 +89,9 @@ function parseArgs(argv) {
     throw new Error(`Invalid --activity-stock: ${args.activityStock}`);
   }
   args.replaceActivityIds = [...new Set(args.replaceActivityIds.map(Number).filter(Number.isFinite))];
+  if (args.expectedRescueHash && !/^[a-f0-9]{64}$/.test(args.expectedRescueHash)) {
+    throw new Error(`Invalid --expected-rescue-hash: ${args.expectedRescueHash}`);
+  }
   return args;
 }
 
@@ -219,6 +226,9 @@ function normalizeTargetRows(rescue, manualIndex, execute) {
         combo: row.combo || '',
         sourceRule: row.sourceRule || '',
         note: row.note || '',
+        activityStock: Number.isInteger(Number(row.activityStock)) && Number(row.activityStock) > 0
+          ? Number(row.activityStock)
+          : null,
       };
       const manualEntry = findActiveManualLimitedDiscount(manualIndex, base.storeKey, base.skc);
       const declaresManualSpecial = /manual_special|user_(?:requested|approved).*special|high_click_special/i.test(String(base.sourceRule || ''))
@@ -254,12 +264,19 @@ function rel(file) {
 }
 
 const args = parseArgs(process.argv.slice(2));
-const automationAuthorization = args.execute ? await assertMarketingAutomationAuthorization({
+let automationAuthorization = null;
+await fs.mkdir(args.outDir, {recursive: true});
+const rescueText = await fs.readFile(args.rescue, 'utf8');
+const rescueHash = crypto.createHash('sha256').update(rescueText).digest('hex');
+if (args.expectedRescueHash && rescueHash !== args.expectedRescueHash) {
+  throw new Error(`Rescue payload hash mismatch: expected=${args.expectedRescueHash} actual=${rescueHash}`);
+}
+automationAuthorization = args.execute ? await assertMarketingAutomationAuthorization({
   action: MARKETING_AUTOMATION_ACTIONS.CREATE_OR_REPLACE_ACTIVITY,
   storeKey: args.storeKey,
+  payloadHash: process.env.SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH || rescueHash,
 }) : null;
-await fs.mkdir(args.outDir, {recursive: true});
-const rescue = JSON.parse(await fs.readFile(args.rescue, 'utf8'));
+const rescue = JSON.parse(rescueText);
 const manualRegistry = await loadManualLimitedDiscountRegistry();
 const manualIndex = buildManualLimitedDiscountIndex(manualRegistry, new Date());
 const targetRows = normalizeTargetRows(rescue, manualIndex, args.execute);
@@ -468,7 +485,7 @@ try {
             activityId: Number(row.activity_id) === Number(expectedActivityId),
             state: [2, 3].includes(Number(row.state)),
             price: Math.abs(Number(row.product_act_price) - expectedPrice) <= 0.01,
-            stock: Number(row.attend_num_sum || 0) >= Number(activityStock),
+            stock: Number(row.attend_num_sum || 0) >= Number(target.activityStock || activityStock),
             endTime: Boolean(end && end >= windowEnd),
           };
           return {
@@ -485,7 +502,7 @@ try {
           skc: target.skc,
           expectedActivityId: expectedActivityId || null,
           expectedPrice,
-          expectedActivityStock: Number(activityStock),
+          expectedActivityStock: Number(target.activityStock || activityStock),
           expectedEndTime: targetEndTime,
           candidates: candidateChecks,
           ok: candidateChecks.some(row => row.ok),
@@ -579,7 +596,9 @@ try {
         const inventory = Number(good.inventory_num ?? good.ivt_num ?? 0);
         const minStock = Number(good.check_stock?.min_stock ?? defaultMinStock);
         const maxStock = Number(good.check_stock?.max_stock ?? defaultMaxStock);
-        const attendNum = activityStock;
+        const attendNum = Number.isInteger(Number(target.activityStock)) && Number(target.activityStock) > 0
+          ? Number(target.activityStock)
+          : activityStock;
 
         if (good.error_code) invalid.push({skc: target.skc, reason: 'query_goods error_code', error_code: good.error_code});
         if (!Number.isFinite(price) || price <= 0) invalid.push({skc: target.skc, reason: 'invalid target price', price});
@@ -712,57 +731,6 @@ try {
         goodsRowsChecked: (addRows || []).length,
         skuRowsChecked,
         mismatches,
-      };
-    }
-
-    function groupInvalidBySkc(invalidRows) {
-      const grouped = new Map();
-      for (const invalid of invalidRows || []) {
-        if (!grouped.has(invalid.skc)) grouped.set(invalid.skc, []);
-        grouped.get(invalid.skc).push(invalid);
-      }
-      return grouped;
-    }
-
-    function classifyPostEndInvalid(invalidRows) {
-      const grouped = groupInvalidBySkc(invalidRows);
-      const hardReasons = new Set([
-        'invalid target price',
-        'price exceeds max_supply_price',
-        'price hits rate_intercept floor',
-      ]);
-      const hardInvalid = [];
-      const blockedSkcs = [];
-      for (const [skc, rows] of grouped.entries()) {
-        if (rows.some(row => hardReasons.has(row.reason))) {
-          hardInvalid.push(...rows);
-        } else {
-          blockedSkcs.push(skc);
-        }
-      }
-      return {hardInvalid, blockedSkcs};
-    }
-
-    async function waitForEnded(activityIds) {
-      for (let attempt = 1; attempt <= 8; attempt += 1) {
-        await new Promise(resolve => setTimeout(resolve, attempt === 1 ? 1200 : 2500));
-        const current = await queryCurrentLimitedDiscounts();
-        const stillActive = current.conflictActivities
-          .filter(entry => activityIds.includes(Number(entry.activity.activity_id)))
-          .map(entry => ({
-            activity_id: entry.activity.activity_id,
-            state: entry.activity.state,
-            targetCount: entry.targetGoods.length,
-            extraCount: entry.extraGoods.length,
-          }));
-        if (!stillActive.length) return {ok: true, attempts: attempt, current};
-      }
-      const current = await queryCurrentLimitedDiscounts();
-      return {
-        ok: false,
-        attempts: 8,
-        current,
-        stillActive: summarizeConflicts(current.conflictActivities.filter(entry => activityIds.includes(Number(entry.activity.activity_id)))),
       };
     }
 
@@ -946,125 +914,48 @@ try {
       result.ok = true;
       result.dryRunOnly = true;
       if (validationOnlyCurrentLimitedConflict) {
-        result.reason = 'dry-run replacement candidate: only current limited-discount conflict 0006 remains; execute will end safe target-only old activity then revalidate before create';
+        result.reason = 'dry-run replacement candidate: only current limited-discount conflict 0006 remains; execute must use the durable transactional replacement wrapper';
       }
       return result;
     }
 
-    const conflictActivityIds = before.conflictActivities
-      .map(entry => Number(entry.activity.activity_id))
-      .filter(activityId => !replaceActivityIdSet.size || replaceActivityIdSet.has(activityId));
-    const nonReplaceConflictActivityIds = before.conflictActivities
-      .map(entry => Number(entry.activity.activity_id))
-      .filter(activityId => replaceActivityIdSet.size && !replaceActivityIdSet.has(activityId));
-    if (nonReplaceConflictActivityIds.length) {
-      const err = new Error('Target SKCs overlap non-replacement limited-discount activities; aborting create');
-      err.nonReplaceConflictActivityIds = nonReplaceConflictActivityIds;
-      throw err;
+    // This primitive is intentionally create-only. Replacement is a multi-step
+    // transaction owned by replace_limited_discount_transactionally.mjs, which
+    // persists the old activity snapshot before deletion and compensates every
+    // uncovered SKC if validation/create/readback fails. Ending an old activity
+    // here would recreate the historic delete-before-create data-loss window.
+    if (before.conflictActivities.length) {
+      result.validationFailed = true;
+      result.requiresTransactionalReplacement = true;
+      result.ok = false;
+      result.reason = 'existing limited-discount conflict requires the durable transactional replacement wrapper; no write performed';
+      return result;
     }
-    const missingReplacementIds = [...replaceActivityIdSet].filter(activityId => !conflictActivityIds.includes(activityId));
-    if (replaceActivityIdSet.size && missingReplacementIds.length) {
-      const err = new Error('Requested replacement activity is not active/future conflict for target SKCs; aborting create');
-      err.missingReplacementIds = missingReplacementIds;
-      throw err;
-    }
-    for (const entry of before.conflictActivities.filter(item => conflictActivityIds.includes(Number(item.activity.activity_id)))) {
-      const state = Number(entry.activity.state);
-      const actionState = state === 3 ? 6 : 5;
-      const packet = await post('/promotion/obm/undo_or_end_obm_activity', {
-        activity_id: Number(entry.activity.activity_id),
-        promotion_action_state: actionState,
-      });
-      result.endedActivities.push({
-        activity_id: Number(entry.activity.activity_id),
-        previous_state: state,
-        promotion_action_state: actionState,
-        response: {code: packet.code, msg: packet.msg, info: packet.info},
-      });
+    if (replaceActivityIdSet.size) {
+      result.validationFailed = true;
+      result.ok = false;
+      result.reason = 'replace activity ids are only accepted by the durable transactional replacement wrapper; no write performed';
+      return result;
     }
 
-    const endedCheck = await waitForEnded(conflictActivityIds);
-    result.endedCheck = {
-      ok: endedCheck.ok,
-      attempts: endedCheck.attempts,
-      stillActive: endedCheck.stillActive || [],
-    };
-    if (!endedCheck.ok) {
-      const err = new Error('Existing limited-discount activities did not end after undo/end calls; aborting create');
-      err.endedCheck = result.endedCheck;
-      throw err;
-    }
-
-    const postEndCheckPacket = await post('/promotion/simple_platform/check_activity', activityBase);
-    const postEndEffectiveCenterList = postEndCheckPacket.info?.effective_center_list || [];
-    const postEndQueryGoodsPacket = await post('/promotion/simple_platform/query_goods', {
-      page_size: 500,
-      page_num: 1,
-      activity_base_info_request: {...activityBase, sub_type_id: 2},
-      effective_center_list: postEndEffectiveCenterList,
-      skc_list: targetSkcs,
-      is_shelf: 1,
-    });
-    const postEndQueryGoodsRows = postEndQueryGoodsPacket.info?.data || postEndQueryGoodsPacket.info || [];
-    const postEndGoodsBuild = buildAddCostRows(postEndQueryGoodsRows, postEndCheckPacket.info);
-    const postEndInvalid = classifyPostEndInvalid(postEndGoodsBuild.invalid);
-    result.postEndValidation = {
-      missing: postEndGoodsBuild.missing,
-      invalid: postEndGoodsBuild.invalid,
-      addRows: postEndGoodsBuild.addRows.length,
-      targetRows: targetRows.length,
-      hardInvalid: postEndInvalid.hardInvalid,
-      blockedSkcs: postEndInvalid.blockedSkcs,
-    };
-    if (postEndGoodsBuild.missing.length || postEndInvalid.hardInvalid.length) {
-      const err = new Error('Post-end validation failed; aborting create');
-      err.validation = result.postEndValidation;
-      throw err;
-    }
-
-    const blockedSet = new Set(postEndInvalid.blockedSkcs);
-    const executableTargetRows = targetRows.filter(row => !blockedSet.has(row.skc));
-    const executableGoodsBuild = buildAddCostRows(postEndQueryGoodsRows, postEndCheckPacket.info, executableTargetRows);
-    if (executableGoodsBuild.missing.length || executableGoodsBuild.invalid.length || executableGoodsBuild.addRows.length !== executableTargetRows.length) {
-      const err = new Error('Executable subset validation failed; aborting create');
-      err.validation = {
-        missing: executableGoodsBuild.missing,
-        invalid: executableGoodsBuild.invalid,
-        addRows: executableGoodsBuild.addRows.length,
-        executableTargetRows: executableTargetRows.length,
-      };
-      throw err;
-    }
+    const executableTargetRows = targetRows;
     result.targetCountForCreate = executableTargetRows.length;
-    result.skippedUnreportable = targetRows
-      .filter(row => blockedSet.has(row.skc))
-      .map(row => ({
-        skc: row.skc,
-        canonical: row.canonical,
-        supplierNo: row.supplierNo,
-        reasons: (groupInvalidBySkc(postEndGoodsBuild.invalid).get(row.skc) || []).map(item => ({
-          reason: item.reason,
-          error_code: item.error_code,
-          inventory: item.inventory,
-          minStock: item.minStock,
-        })),
-      }));
-    result.plannedGoods = executableGoodsBuild.detailRows;
-    createPayload = {
-      ...createPayload,
-      add_cost_and_stock_info_list: executableGoodsBuild.addRows,
+    result.postEndValidation = {
+      skipped: true,
+      reason: 'no old activity was ended; initial preflight remains authoritative',
+      missing: goodsBuild.missing,
+      invalid: goodsBuild.invalid,
+      addRows: goodsBuild.addRows.length,
+      targetRows: targetRows.length,
+      hardInvalid: [],
+      blockedSkcs: [],
     };
+    result.plannedGoods = goodsBuild.detailRows;
     result.createPayload = createPayload;
-    result.finalSkuPricePayloadGuard = checkSkuPricePayload(executableGoodsBuild.addRows, executableTargetRows);
+    result.finalSkuPricePayloadGuard = checkSkuPricePayload(goodsBuild.addRows, executableTargetRows);
     if (!result.finalSkuPricePayloadGuard.ok) {
       const err = new Error('Final sku-level limited-discount price payload guard failed; aborting create');
       err.finalSkuPricePayloadGuard = result.finalSkuPricePayloadGuard;
-      throw err;
-    }
-
-    if (result.targetCountForCreate <= 0) {
-      const err = new Error('No executable limited-discount target rows remain after post-end validation');
-      err.validation = result.postEndValidation;
       throw err;
     }
 

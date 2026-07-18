@@ -11,8 +11,10 @@ import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
 import {
+  buildExposureTopLinkIndex,
   buildLinkRowIndexFromBi,
   deriveTopTreatmentTargetFromCost,
+  exposureRankInfo,
   hasOrdinaryMarketingEvidence,
   isRecentNewListingLink,
   loadMarketingPricingPolicy,
@@ -55,6 +57,7 @@ const linkHistoryDir = path.resolve(ROOT, args.linkHistoryDir || path.join('outp
 const outDir = path.resolve(ROOT, args.outDir || path.join('tmp', 'marketing-signup', 'limited-discount-fallback', `new-listing-7d-${reportDate}`));
 const reportJsonPath = path.resolve(ROOT, args.reportJson || path.join('outputs', 'reports', `new-listing-7d-limited-discount-plan-${reportDate}.json`));
 const reportMdPath = path.resolve(ROOT, args.reportMd || path.join('outputs', 'reports', `new-listing-7d-limited-discount-plan-${reportDate}.md`));
+const sourceGuardPath = args.sourceGuard ? path.resolve(ROOT, args.sourceGuard) : '';
 
 const policy = await loadMarketingPricingPolicy(policyPath);
 const effectiveNow = args.now ? new Date(String(args.now).replace(' ', 'T') + (/[zZ]|[+-]\d{2}:?\d{2}$/.test(String(args.now)) ? '' : '+08:00')) : new Date();
@@ -74,6 +77,10 @@ const endTime = args.endTime || `${addDays(reportDate, durationDays)} 23:59:59`;
 const activityNamePrefix = args.activityNamePrefix || policy?.newListingWithin7Days?.limitedDiscount?.activityNamePrefix || '新上架7天高曝光兜底限时折扣';
 const relistedPolicy = policy?.relistedWithoutActiveMarketing || {};
 const relistedActivityNamePrefix = relistedPolicy?.limitedDiscount?.activityNamePrefix || '重新上架无活动Top5兜底限时折扣';
+const mandatoryOnShelfPolicy = policy?.mandatoryOnShelfLimitedDiscount || {};
+const mandatoryOnShelfActivityNamePrefix = mandatoryOnShelfPolicy?.activityNamePrefix || '在售老链接漏限时折扣兜底';
+const mandatoryOnShelfDurationDays = positiveInt(mandatoryOnShelfPolicy?.durationDays, 30);
+const mandatoryOnShelfEndTime = args.mandatoryOnShelfEndTime || `${addDays(reportDate, mandatoryOnShelfDurationDays)} 23:59:59`;
 
 const linksDoc = await readJson(linksDataPath);
 const storesConfigPath = path.resolve(ROOT, args.storesConfig || DEFAULT_STORES_CONFIG);
@@ -84,6 +91,7 @@ const liveScanPath = args.currentMarketingLiveScan
   ? path.resolve(ROOT, args.currentMarketingLiveScan)
   : '';
 const liveScanDoc = liveScanPath ? await readJson(liveScanPath) : null;
+const sourceGuardDoc = sourceGuardPath ? await readJson(sourceGuardPath) : null;
 const linksData = unwrapBiLinksData(linksDoc);
 const linkRowIndex = buildLinkRowIndexFromBi(linksDoc);
 const expectedRawStoreKeys = [...new Set((storesConfig.stores || [])
@@ -118,7 +126,12 @@ const supplementalPriceIndexes = args.noSupplementalPriceOverrides === 'true'
   ? []
   : await loadSupplementalNewListingPriceIndexes(priceOverridesPath, args.supplementalPriceOverridesDir);
 const priceIndexes = [primaryPriceIndex, ...supplementalPriceIndexes];
-const liveLimitedEvidence = collectLiveLimitedDiscountEvidence(liveScanDoc, liveScanPath, {now: effectiveNow, requiredEndTime: endTime});
+const exposureIndex = buildExposureTopLinkIndex({storeLinks}, policy);
+const liveLimitedEvidence = collectLiveLimitedDiscountEvidence(liveScanDoc, liveScanPath, {
+  now: effectiveNow,
+  requiredEndTime: endTime,
+  expectedStoreKeys: expectedRawStoreKeys,
+});
 const currentLinkKeys = new Set(storeLinks.map(link => marketingLinkKey(
   link.store_key || link.storeKey || link.store,
   link.skc || link.SKC,
@@ -130,6 +143,9 @@ const relistedHistory = collectRelistedLinkHistoryEvidence({
   currentKeys: currentLinkKeys,
   storeKeys: new Set(storeLinks.map(link => normStore(link.store_key || link.storeKey || link.store)).filter(Boolean)),
 });
+const targetPriceDriftStageKeys = new Set((sourceGuardDoc?.limitedDiscountTargetPriceDrift?.belowRows || [])
+  .map(row => exactPriceKey(normStore(row?.storeKey || row?.store_key), String(row?.skc || '').trim()))
+  .filter(key => !key.endsWith('::')));
 
 const rows = [];
 const blocked = [];
@@ -146,6 +162,7 @@ for (const link of storeLinks) {
   const manualSpecialEntry = manualLimitedDiscountIndex.activeByKey.get(exactKey) || null;
   const relistedEvidence = relistedHistory.bySkc.get(exactKey) || null;
   const liveMarketingRows = liveLimitedEvidence.anyBySkc.get(exactKey) || [];
+  const liveLimitedRows = liveLimitedEvidence.bySkc.get(exactKey) || [];
   const relistedApplies = relistedPolicy.enabled !== false
     && relistedEvidence
     && isOnShelfMarketingLink(link)
@@ -153,13 +170,40 @@ for (const link of storeLinks) {
     && (relistedPolicy.requireNoBiMarketingSignal === false || !hasBiActiveMarketingSignal(link))
     && (relistedPolicy.requireCompleteLiveMarketingScan === false || liveLimitedEvidence.complete)
     && liveMarketingRows.length === 0;
-  if (!recent.applies && !relistedApplies) continue;
-  const treatmentType = recent.applies ? 'new_listing_within_7d' : 'relisted_without_active_marketing';
+  const mandatoryOnShelfApplies = mandatoryOnShelfPolicy.enabled !== false
+    && isOnShelfMarketingLink(link)
+    && (mandatoryOnShelfPolicy.requireCompleteLiveMarketingScan === false || liveLimitedEvidence.complete)
+    && liveLimitedRows.length === 0;
+  if (!recent.applies && !relistedApplies && !mandatoryOnShelfApplies) continue;
+  if (targetPriceDriftStageKeys.has(exactKey)) {
+    ignored.push({
+      storeKey,
+      skc,
+      canonical: normalizeCanonicalFromLink(link),
+      reason: 'handled_by_exact_target_price_drift_stage',
+    });
+    continue;
+  }
+  if (manualSpecialEntry && String(args.excludeManualSpecial || 'false') === 'true') {
+    ignored.push({
+      storeKey,
+      skc,
+      canonical: normalizeCanonicalFromLink(link),
+      reason: 'manual_special_managed_by_dedicated_restore_stage',
+      specialPrice: manualSpecialEntry.specialPrice,
+      validTo: manualSpecialEntry.validTo,
+    });
+    continue;
+  }
+  const treatmentType = recent.applies
+    ? 'new_listing_within_7d'
+    : relistedApplies
+      ? 'relisted_without_active_marketing'
+      : 'existing_on_shelf_missing_limited_discount';
 
   const canonical = normalizeCanonicalFromLink(link);
   const exactPriceEvidence = findPriceEvidenceAcross(priceIndexes, canonical, storeKey, skc, {allowCanonicalFallback: false});
   const priceEvidence = exactPriceEvidence || findPriceEvidenceAcross(priceIndexes, canonical, storeKey, skc);
-  const liveLimitedRows = liveLimitedEvidence.bySkc.get(exactKey) || [];
   const manualSpecialLiveState = manualSpecialEntry
     ? classifyManualLimitedDiscountLiveState(manualSpecialEntry, liveLimitedRows)
     : null;
@@ -187,14 +231,27 @@ for (const link of storeLinks) {
   const planTopTier = resolveTopTierPrice(priceEvidence);
   const costTopTier = deriveTopTreatmentTargetFromCost({canonical, costDoc, policy});
   const ordinaryTopTier = Number.isFinite(planTopTier.price) && planTopTier.price > 0 ? planTopTier : costTopTier;
+  const currentExposureRank = exposureRankInfo(exposureIndex, canonical, skc, storeKey);
+  const mandatoryTier = resolveMandatoryOnShelfTarget({
+    priceEvidence,
+    costTopTier,
+    isTopExposureLink: currentExposureRank.isTopExposureLink,
+  });
   const resolvedTopTier = manualSpecialEntry
     ? {price: manualSpecialEntry.specialPrice, source: 'manual_special_limited_discount_override'}
-    : ordinaryTopTier;
-  const liveCoveredAtTarget = (manualSpecialEntry ? manualSpecialLiveState?.status === 'covered_exact' : liveCoveredByName)
+    : treatmentType === 'existing_on_shelf_missing_limited_discount'
+      ? mandatoryTier
+      : ordinaryTopTier;
+  const eligibleLiveCoverage = treatmentType === 'existing_on_shelf_missing_limited_discount'
+    ? hasCurrentLimitedDiscount
+    : liveCoveredByName;
+  const liveCoveredAtTarget = (manualSpecialEntry ? manualSpecialLiveState?.status === 'covered_exact' : eligibleLiveCoverage)
     && Number.isFinite(resolvedTopTier.price)
     && currentLimitedPrice !== null
-    && Math.abs(round2(currentLimitedPrice) - round2(resolvedTopTier.price)) <= 0.01;
-  const liveCoveredNoTargetEvidence = liveCoveredByName && (!Number.isFinite(resolvedTopTier.price) || resolvedTopTier.price <= 0);
+    && (manualSpecialEntry
+      ? Math.abs(round2(currentLimitedPrice) - round2(resolvedTopTier.price)) <= 0.01
+      : round2(currentLimitedPrice) >= round2(resolvedTopTier.price) - 0.01);
+  const liveCoveredNoTargetEvidence = eligibleLiveCoverage && (!Number.isFinite(resolvedTopTier.price) || resolvedTopTier.price <= 0);
   const common = {
     storeKey,
     skc,
@@ -218,6 +275,8 @@ for (const link of storeLinks) {
     performanceActivityNames: link.performance_activity_names || '',
     firstShelfTime: link.first_shelf_time || '',
     ordinaryMarketingEvidence: hasOrdinaryMarketingEvidence(link),
+    currentExposureRank: currentExposureRank.rank ?? null,
+    currentExposureIsTop5: currentExposureRank.isTopExposureLink === true,
     manualSpecialLimitedDiscount: Boolean(manualSpecialEntry),
     manualSpecialLiveStatus: manualSpecialLiveState?.status || '',
     manualSpecialValidFrom: manualSpecialEntry?.validFrom || '',
@@ -274,14 +333,20 @@ for (const link of storeLinks) {
       ? 'manual_special_limited_discount_override'
       : treatmentType === 'relisted_without_active_marketing'
       ? 'relisted_without_active_marketing_same_as_global_exposure_top5'
+      : treatmentType === 'existing_on_shelf_missing_limited_discount'
+      ? 'existing_on_shelf_missing_limited_discount_current_exposure_tier'
       : 'new_listing_within_7d_same_as_global_exposure_top5',
     combo: treatmentType === 'relisted_without_active_marketing'
       ? '重新上架无生效营销活动限时折扣兜底；不依赖优惠券'
+      : treatmentType === 'existing_on_shelf_missing_limited_discount'
+      ? '在售老链接漏限时折扣兜底；不依赖优惠券'
       : '新上架7天限时折扣兜底；不依赖优惠券',
     note: manualSpecialEntry
       ? `用户批准人工特殊限时折扣保护：精确恢复 ${formatPrice(manualSpecialEntry.specialPrice)} SAR、活动库存 ${manualSpecialEntry.activityStock}，有效至 ${manualSpecialEntry.validTo}；不得用普通 Top5/基准价覆盖。`
       : treatmentType === 'relisted_without_active_marketing'
       ? `历史快照 ${relistedEvidence.lastInactiveDate} 为${relistedEvidence.lastInactiveStatus || '下架/售罄'}，${relistedEvidence.relistedAt} 恢复在售，当前商品源、BI和完整营销live scan均无生效活动；按曝光前五/新链接力度 ${formatPrice(topTierPrice)} SAR 报一周兜底。`
+      : treatmentType === 'existing_on_shelf_missing_limited_discount'
+      ? `完整营销live scan确认该在售老链接没有当前/未来限时折扣；按当前全局曝光${currentExposureRank.isTopExposureLink ? 'Top5' : '非Top5'}档位 ${formatPrice(topTierPrice)} SAR 报一周兜底。`
       : hasCurrentLimitedDiscount
         ? `新上架${recent.shelfAgeDays}天且未报普通活动，已有旧限时折扣 ${formatPrice(currentLimitedPrice)} SAR；按新规则取消/结束旧活动后重报一周，目标价按曝光前五力度 ${formatPrice(topTierPrice)} SAR。`
         : `新上架${recent.shelfAgeDays}天且未报普通活动，缺限时折扣；按曝光前五力度 ${formatPrice(topTierPrice)} SAR 报一周兜底。`,
@@ -298,11 +363,16 @@ for (const link of storeLinks) {
       : priceEvidence
         ? 'canonical_top_tier_fallback'
         : 'product_cost_top_treatment_fallback',
-    endTime: manualSpecialEntry?.validTo || endTime,
+    endTime: manualSpecialEntry?.validTo
+      || (treatmentType === 'existing_on_shelf_missing_limited_discount' ? mandatoryOnShelfEndTime : endTime),
     activityStock: manualSpecialEntry?.activityStock || activityStock,
     activityNamePrefix: manualSpecialEntry
       ? `${storeKey}人工特殊限时折扣保护恢复`
-      : treatmentType === 'relisted_without_active_marketing' ? relistedActivityNamePrefix : activityNamePrefix,
+      : treatmentType === 'relisted_without_active_marketing'
+        ? relistedActivityNamePrefix
+        : treatmentType === 'existing_on_shelf_missing_limited_discount'
+          ? mandatoryOnShelfActivityNamePrefix
+          : activityNamePrefix,
   });
 }
 
@@ -316,7 +386,11 @@ const rescueFiles = [];
 for (const [, storeRows] of groupBy(rows, row => `${row.storeKey}::${row.endTime}::${row.activityStock}::${row.activityNamePrefix}`).entries()) {
   const storeKey = storeRows[0].storeKey;
   const windowSuffix = String(storeRows[0].endTime || endTime).slice(0, 10).replaceAll('-', '');
-  const rescuePath = path.join(outDir, `new-listing-7d-limited-${storeKey}-${reportDate}-${windowSuffix}-s${storeRows[0].activityStock}.json`);
+  const treatmentTypes = [...new Set(storeRows.map(row => row.treatmentType).filter(Boolean))];
+  const treatmentSuffix = treatmentTypes.length === 1
+    ? treatmentTypes[0].replaceAll('_', '-')
+    : 'mixed-treatments';
+  const rescuePath = path.join(outDir, `limited-${storeKey}-${treatmentSuffix}-${reportDate}-${windowSuffix}-s${storeRows[0].activityStock}.json`);
   const storePrefixes = [...new Set(storeRows.map(row => row.activityNamePrefix).filter(Boolean))];
   const storeActivityNamePrefix = storePrefixes.length === 1
     ? storePrefixes[0]
@@ -327,6 +401,7 @@ for (const [, storeRows] of groupBy(rows, row => `${row.storeKey}::${row.endTime
     purpose: `new_listing_or_relisted_top_treatment_limited_discount_fallback_${reportDate}`,
     sourceLinksData: rel(linksDataPath),
     sourcePriceOverrides: rel(priceOverridesPath),
+    sourceGuard: sourceGuardPath ? rel(sourceGuardPath) : '',
     pricingPolicy: rel(policyPath),
     endTime: storeRows[0].endTime,
     activityStock: storeRows[0].activityStock,
@@ -381,6 +456,7 @@ for (const [, storeRows] of groupBy(rows, row => `${row.storeKey}::${row.endTime
 const summary = {
   createdAt: new Date().toISOString(),
   reportDate,
+  sourceGuard: sourceGuardPath ? rel(sourceGuardPath) : '',
   sourceLinksData: rel(linksDataPath),
   sourceLinksGeneratedAt: linksDoc.generatedAt || linksData.generatedAt || '',
   sourcePriceOverrides: rel(priceOverridesPath),
@@ -413,6 +489,11 @@ const summary = {
     endTime,
     activityNamePrefix,
     relistedActivityNamePrefix,
+    mandatoryOnShelfActivityNamePrefix,
+    mandatoryOnShelfDurationDays,
+    mandatoryOnShelfEndTime,
+    mandatoryOnShelfRequireCompleteLiveScan: mandatoryOnShelfPolicy.requireCompleteLiveMarketingScan !== false,
+    liveLimitedEvidenceComplete: liveLimitedEvidence.complete,
     relistedHistoryLookbackDays: Number(relistedPolicy.historyLookbackDays || 60),
     relistedHistoryStatus: relistedHistory.status,
     relistedHistorySourceFileCount: relistedHistory.sourceFileCount,
@@ -423,6 +504,7 @@ const summary = {
     actionable: rows.length,
     newListingWithin7Days: rows.filter(row => row.treatmentType === 'new_listing_within_7d').length,
     relistedWithoutActiveMarketing: rows.filter(row => row.treatmentType === 'relisted_without_active_marketing').length,
+    existingOnShelfMissingLimitedDiscount: rows.filter(row => row.treatmentType === 'existing_on_shelf_missing_limited_discount').length,
     createLimitedDiscount: rows.filter(row => row.action === 'create_limited_discount').length,
     replaceExistingLimitedDiscount: rows.filter(row => row.action === 'replace_existing_limited_discount').length,
     blocked: blocked.length,
@@ -588,11 +670,51 @@ function resolveTopTierPrice(priceEvidence) {
   return {price: null, source: 'missing_top_tier_price'};
 }
 
-function collectLiveLimitedDiscountEvidence(liveDoc, livePath = '', {now = new Date(), requiredEndTime = ''} = {}) {
+function resolveMandatoryOnShelfTarget({priceEvidence, costTopTier, isTopExposureLink = false} = {}) {
+  if (priceEvidence?.sourceScope === 'exact_store_skc') {
+    const exact = numberOrNull(priceEvidence.topTierPrice ?? priceEvidence.allPriceMin);
+    if (Number.isFinite(exact) && exact > 0) return {price: round2(exact), source: 'exact_store_skc_target_price'};
+  }
+  const tierPrice = numberOrNull(
+    isTopExposureLink
+      ? (priceEvidence?.topTierPrice ?? priceEvidence?.allPriceMin ?? priceEvidence?.otherTierPrice)
+      : (priceEvidence?.otherTierPrice ?? priceEvidence?.topTierPrice ?? priceEvidence?.allPriceMin),
+  );
+  if (Number.isFinite(tierPrice) && tierPrice > 0) {
+    return {
+      price: round2(tierPrice),
+      source: isTopExposureLink ? 'canonical_current_top5_tier_price' : 'canonical_current_non_top5_tier_price',
+    };
+  }
+  if (costTopTier?.available) {
+    if (isTopExposureLink) return {price: costTopTier.price, source: costTopTier.source};
+    const cost = numberOrNull(costTopTier.productUnitCostSar);
+    const baseMargin = numberOrNull(costTopTier.baseMargin);
+    if (Number.isFinite(cost) && cost > 0 && Number.isFinite(baseMargin) && baseMargin > 0 && baseMargin < 1) {
+      return {price: ceil2(cost / (1 - baseMargin)), source: 'derived_from_product_cost_non_top5_base_margin'};
+    }
+  }
+  return {price: null, source: 'missing_current_exposure_tier_price'};
+}
+
+function collectLiveLimitedDiscountEvidence(liveDoc, livePath = '', {
+  now = new Date(),
+  requiredEndTime = '',
+  expectedStoreKeys = [],
+} = {}) {
   const rows = Array.isArray(liveDoc?.rows) ? liveDoc.rows : [];
   const bySkc = new Map();
   const anyBySkc = new Map();
-  const complete = Boolean(liveDoc && liveDoc.ok !== false && liveDoc.partial !== true);
+  const observedStoreKeys = new Set([...(liveDoc?.stores || []), ...(liveDoc?.storeStatus || []), ...(liveDoc?.storeStatuses || [])]
+    .map(store => normStore(store?.storeKey || store?.store_key || store?.store || store))
+    .filter(Boolean));
+  const expected = [...new Set((expectedStoreKeys || []).map(normStore).filter(Boolean))];
+  const complete = Boolean(
+    liveDoc
+    && liveDoc.ok !== false
+    && liveDoc.partial !== true
+    && (!expected.length || expected.every(storeKey => observedStoreKeys.has(storeKey))),
+  );
   if (!liveDoc || liveDoc.ok === false) return {path: livePath ? rel(livePath) : '', bySkc, anyBySkc, complete};
   for (const row of rows) {
     const storeKey = normStore(row.store_key || row.storeKey || row.store);
@@ -647,7 +769,7 @@ function collectLiveLimitedDiscountEvidence(liveDoc, livePath = '', {now = new D
 }
 
 function isLiveNewListingLimitedDiscountCovered(rows) {
-  return (rows || []).some(row => /新上架.*限时折扣|重新上架.*限时折扣|高曝光兜底限时折扣|Top5兜底限时折扣|new\s*listing|relisted/i.test(String(row.name || '')));
+  return (rows || []).some(row => /新上架.*限时折扣|重新上架.*限时折扣|高曝光兜底限时折扣|Top5兜底限时折扣|漏限时折扣兜底|历史销冠.*兜底|new\s*listing|relisted/i.test(String(row.name || '')));
 }
 
 function isOnShelfMarketingLink(link) {
@@ -713,11 +835,11 @@ function representativePrice(values) {
 
 function buildMarkdown(summary) {
   const lines = [];
-  lines.push(`# 新上架/重新上架 Top5 限时折扣兜底计划 ${summary.reportDate}`);
+  lines.push(`# 在售链接限时折扣兜底计划 ${summary.reportDate}`);
   lines.push('');
   lines.push('## 结论');
   lines.push('');
-  lines.push(`- 需要处理：${summary.totals.actionable} 个链接；新上架7天 ${summary.totals.newListingWithin7Days} 个，重新上架且无生效营销活动 ${summary.totals.relistedWithoutActiveMarketing} 个；其中新建限时折扣 ${summary.totals.createLimitedDiscount} 个，已有旧限时折扣需取消/结束后重报 ${summary.totals.replaceExistingLimitedDiscount} 个。`);
+  lines.push(`- 需要处理：${summary.totals.actionable} 个链接；新上架7天 ${summary.totals.newListingWithin7Days} 个，重新上架且无生效营销活动 ${summary.totals.relistedWithoutActiveMarketing} 个，其他在售老链接漏限时折扣 ${summary.totals.existingOnShelfMissingLimitedDiscount || 0} 个；其中新建限时折扣 ${summary.totals.createLimitedDiscount} 个，已有旧限时折扣需取消/结束后重报 ${summary.totals.replaceExistingLimitedDiscount} 个。`);
   lines.push(`- 阻断：${summary.totals.blocked} 个；主要是缺最新最终版曝光前五目标价或货号归并证据。`);
   lines.push(`- 限时折扣窗口：到 \`${summary.rule.endTime}\`；新链接活动名前缀：\`${summary.rule.activityNamePrefix}\`；重新上架活动名前缀：\`${summary.rule.relistedActivityNamePrefix}\`。`);
   lines.push('');
@@ -732,6 +854,8 @@ function buildMarkdown(summary) {
   for (const row of summary.rows.slice(0, 80)) {
     const treatment = row.treatmentType === 'relisted_without_active_marketing'
       ? `重新上架（${row.lastInactiveDate} ${row.lastInactiveStatus || '下架/售罄'} → ${row.relistedAt} 在售）`
+      : row.treatmentType === 'existing_on_shelf_missing_limited_discount'
+        ? `在售老链接（当前曝光${row.currentExposureIsTop5 ? 'Top5' : '非Top5'}档）`
       : `新上架 ${row.shelfAgeDays} 天`;
     lines.push(`- ${row.storeKey} / \`${row.skc}\` / ${row.canonical}: ${row.action === 'create_limited_discount' ? '新建' : '取消旧折扣后重报'}，${treatment}，目标 ${formatPrice(row.limitedDiscountPrice)} SAR，7天曝光 ${row.c7EpsUv ?? 0}。`);
   }
@@ -835,6 +959,11 @@ function addDays(dateStr, days) {
 function round2(value) {
   const n = Number(value);
   return Number.isFinite(n) ? Math.round((n + Number.EPSILON) * 100) / 100 : null;
+}
+
+function ceil2(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.ceil((n - Number.EPSILON) * 100) / 100 : null;
 }
 
 function dateToMs(value) {

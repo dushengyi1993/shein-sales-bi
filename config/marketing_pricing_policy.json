@@ -7,7 +7,8 @@
     "authorizationId": "owner-standing-cloud-marketing-v1",
     "authorizedAt": "2026-07-16",
     "authorizationType": "standing_owner_policy",
-    "perRunPayloadHashRequired": false,
+    "perRunPayloadHashRequired": true,
+    "perRunUserConfirmationRequired": false,
     "allowedContexts": [
       "cloud_timer",
       "owner_codex_cli"
@@ -30,7 +31,7 @@
       "post_write_readback",
       "audit_artifact"
     ],
-    "note": "云端营销 timer 按负责人长期策略授权自动执行，不要求逐次人工 payload hash。超出本动作、店铺或价格策略范围的任务仍须阻断并单独复核。"
+    "note": "云端营销 timer 按负责人长期策略授权自动执行，不要求逐次人工确认；每次运行仍必须自动生成并校验精确计划/载荷 hash。超出本动作、店铺或价格策略范围的任务仍须阻断并单独复核。"
   },
   "topTreatmentCostFallback": {
     "enabled": true,
@@ -66,6 +67,7 @@
   },
   "limitedDiscount": {
     "mustExistForPlannedLinks": true,
+    "mustExistForAllOnShelfLinks": true,
     "role": "fallback_price_tool",
     "defaultActivityStock": 10,
     "defaultDurationDays": 7,
@@ -75,6 +77,16 @@
     "mustNotInterfereTargetPrice": true,
     "adjustWhenInterferes": true,
     "priorityNote": "Limited discount is the guaranteed fallback price layer when ordinary marketing is not enough. Coupons are not guaranteed to trigger, so do not rely on ordinary marketing + 15% coupon as the primary guaranteed price stack; cancel/recreate or adjust limited discounts when the guaranteed base price would be lower or higher than the intended target. Unless the user explicitly requests otherwise, fallback limited-discount activity stock is exactly 10 and the activity window is 7 days."
+  },
+  "mandatoryOnShelfLimitedDiscount": {
+    "enabled": true,
+    "onShelfOnly": true,
+    "requireCompleteLiveMarketingScan": true,
+    "futureOrdinaryMarketingDoesNotSuppressCurrentFallback": true,
+    "pricingTreatment": "current_global_exposure_tier",
+    "durationDays": 30,
+    "activityNamePrefix": "在售老链接漏限时折扣兜底",
+    "ruleNote": "完整live scan后，对所有当前在售链接与当前/未来限时折扣做店铺+SKC精确差集。老链接不得因为没进入旧price-overrides、不属于新上架或重新上架而漏报。精确链接价优先；否则按当前全局7天曝光Top5/非Top5档位从同货号已批准基准推导。老链接兜底采用30天窗口，避免把长期覆盖错误实现成每7天全量重建；新上架/重新上架的Top处理仍保持7天。"
   },
   "exposureTopLinks": {
     "enabled": true,

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
 import fssync from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
@@ -13,6 +14,7 @@ import {
   assertMarketingAutomationAuthorization,
   MARKETING_AUTOMATION_ACTIONS,
 } from '../../lib/marketing_automation_authorization.mjs';
+import {loadExactDriftRepairManifest} from '../../lib/marketing_repair_manifest.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp/marketing-signup/limited-discount-rescue');
@@ -31,6 +33,9 @@ function parseArgs(argv) {
     stores: [],
     dryRunOnly: true,
     skipBuildPlan: false,
+    maxGroups: 0,
+    resume: true,
+    expectedWorkFingerprint: '',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -49,6 +54,11 @@ function parseArgs(argv) {
     else if (arg === '--dry-run-only') args.dryRunOnly = true;
     else if (arg === '--execute') args.dryRunOnly = false;
     else if (arg === '--skip-build-plan') args.skipBuildPlan = true;
+    else if (arg === '--max-groups') args.maxGroups = Number(argv[++i] || 0);
+    else if (arg.startsWith('--max-groups=')) args.maxGroups = Number(arg.slice('--max-groups='.length));
+    else if (arg === '--no-resume') args.resume = false;
+    else if (arg === '--expected-work-fingerprint') args.expectedWorkFingerprint = String(argv[++i] || '').trim().toLowerCase();
+    else if (arg.startsWith('--expected-work-fingerprint=')) args.expectedWorkFingerprint = String(arg.slice('--expected-work-fingerprint='.length)).trim().toLowerCase();
     else throw new Error(`Unknown argument: ${arg}`);
   }
   if (!args.guard) throw new Error('Missing required --guard <marketing-daily-guard-YYYY-MM-DD.json>');
@@ -60,6 +70,10 @@ function parseArgs(argv) {
   }
   if (!args.outDir) throw new Error('Missing --out-dir');
   if (!args.out) args.out = path.join(args.outDir, `batch-drift-fix-result-${args.date}.json`);
+  if (!Number.isInteger(args.maxGroups) || args.maxGroups < 0) throw new Error(`Invalid --max-groups: ${args.maxGroups}`);
+  if (args.expectedWorkFingerprint && !/^[a-f0-9]{64}$/.test(args.expectedWorkFingerprint)) {
+    throw new Error(`Invalid --expected-work-fingerprint: ${args.expectedWorkFingerprint}`);
+  }
   return args;
 }
 
@@ -94,36 +108,6 @@ async function pathExists(file) {
   } catch {
     return false;
   }
-}
-
-async function findRescueFiles(planDir, storeKey) {
-  const entries = await fs.readdir(planDir, {withFileTypes: true});
-  const matches = entries
-    .filter(entry => entry.isFile())
-    .map(entry => entry.name)
-    .filter(name => new RegExp(`^limited-drift-rescue-${storeKey}-.*\\.json$`, 'i').test(name))
-    .sort();
-  if (!matches.length) {
-    throw new Error(`Expected at least one rescue file for ${storeKey}, found none`);
-  }
-  return matches.map(name => path.join(planDir, name));
-}
-
-async function discoverStores(planDir) {
-  const entries = await fs.readdir(planDir, {withFileTypes: true});
-  const stores = [];
-  const seen = new Set();
-  for (const entry of entries) {
-    if (!entry.isFile()) continue;
-    const match = entry.name.match(/^limited-drift-rescue-([A-Z0-9]+)-.*\.json$/i);
-    if (!match) continue;
-    const storeKey = match[1].toUpperCase();
-    if (seen.has(storeKey)) continue;
-    seen.add(storeKey);
-    stores.push(storeKey);
-  }
-  stores.sort((a, b) => a.localeCompare(b));
-  return stores;
 }
 
 async function buildRescuePlanIfNeeded(args) {
@@ -243,56 +227,27 @@ async function launchStore(storeKey) {
 }
 
 async function closeStore(storeKey) {
+  const cleanupArgs = ['scripts/cleanup_shein_store_browsers.mjs', '--store', storeKey, '--cleanup-chrome-tmp', '--kill-after-sec', '5'];
+  const leaseTask = String(process.env.SHEIN_BI_BROWSER_LEASE_TASK || '').trim();
+  const leaseRunId = String(process.env.SHEIN_BI_BROWSER_LEASE_RUN_ID || '').trim();
+  if (leaseTask && leaseRunId) cleanupArgs.push('--owned-lease-task', leaseTask, '--owned-lease-run-id', leaseRunId);
   return await runCommand(
     process.execPath,
-    ['scripts/cleanup_shein_store_browsers.mjs', '--store', storeKey, '--cleanup-chrome-tmp', '--kill-after-sec', '5'],
+    cleanupArgs,
     {timeoutMs: 90000},
   );
 }
 
-async function applyRescue({storeKey, port, rescuePath, execute}) {
+async function replaceTransactionally({storeKey, port, rescuePath, execute}) {
+  const rescueHash = crypto.createHash('sha256').update(await fs.readFile(rescuePath)).digest('hex');
   const result = await runCommand(process.execPath, [
-    'scripts/marketing/apply_hl_limited_discount_rescue.mjs',
-    '--store',
-    storeKey,
-    '--port',
-    String(port),
-    '--rescue',
-    rescuePath,
+    'scripts/marketing/replace_limited_discount_transactionally.mjs',
+    '--store', storeKey,
+    '--port', String(port),
+    '--rescue', rescuePath,
+    '--expected-rescue-hash', rescueHash,
     execute ? '--execute' : '--dry-run',
-  ], {timeoutMs: 900000});
-  const loaded = await loadToolOutputFromStdout(result);
-  return {...result, parsed: loaded.summary, full: loaded.full, outPath: loaded.outPath};
-}
-
-async function topUpAuthorizedFallbackInventory({storeKey, skc, rescuePath, execute}) {
-  const commandArgs = [
-    'scripts/marketing/manage_manual_limited_discount_inventory.mjs',
-    '--store',
-    storeKey,
-    '--skc',
-    skc,
-    '--rescue',
-    rescuePath,
-    execute ? '--execute' : '--dry-run',
-  ];
-  if (execute) commandArgs.push('--confirm', 'AUTHORIZED_LIMITED_DISCOUNT_FALLBACK_STOCK_TOP_UP');
-  const result = await runCommand(process.execPath, commandArgs, {timeoutMs: 300000});
-  const loaded = await loadToolOutputFromStdout(result);
-  return {...result, parsed: loaded.summary, full: loaded.full, outPath: loaded.outPath};
-}
-
-async function removeSkcs({storeKey, activityId, skcs, execute}) {
-  const result = await runCommand(process.execPath, [
-    'scripts/marketing/remove_skc_from_limited_discount.mjs',
-    '--stores',
-    storeKey,
-    '--activity-id',
-    String(activityId),
-    '--skcs',
-    skcs.join(','),
-    execute ? '--execute' : '--dry-run',
-  ], {timeoutMs: 600000});
+  ], {timeoutMs: 1800000});
   const loaded = await loadToolOutputFromStdout(result);
   return {...result, parsed: loaded.summary, full: loaded.full, outPath: loaded.outPath};
 }
@@ -305,126 +260,6 @@ function summarizeCommand(result) {
     out: result.parsed?.out || (result.outPath ? rel(result.outPath) : ''),
     stdoutSummary: result.parsed || null,
     stderrTail: result.stderr ? result.stderr.slice(-2000) : '',
-  };
-}
-
-function conflictActivitiesFromApply(full) {
-  const activities = full?.before?.conflictActivities || [];
-  return activities.map(activity => ({
-    activityId: Number(activity.activity_id),
-    actName: activity.act_name,
-    state: activity.state,
-    startTime: activity.start_time,
-    endTime: activity.end_time,
-    goodsCount: Number(activity.goodsCount || 0),
-    targetCount: Number(activity.targetCount || 0),
-    extraCount: Number(activity.extraCount || 0),
-    targetSkcs: [...new Set((activity.targetSkcs || []).map(String).filter(Boolean))],
-    extraSkcs: [...new Set((activity.extraSkcs || []).map(String).filter(Boolean))],
-  })).filter(activity => Number.isFinite(activity.activityId) && activity.activityId > 0);
-}
-
-function oldActivitiesToRemove(full, rescue) {
-  const sourceName = String(rescue.sourceLimitedDiscountName || '').trim();
-  const targetSet = new Set((rescue.rows || []).map(row => String(row.skc || '').trim()).filter(Boolean));
-  return conflictActivitiesFromApply(full)
-    .filter(activity => {
-      const nameMatches = sourceName && String(activity.actName || '').trim() === sourceName;
-      const hasTargetSkc = activity.targetSkcs.some(skc => targetSet.has(skc));
-      return nameMatches && hasTargetSkc;
-    })
-    .map(activity => ({
-      ...activity,
-      targetSkcs: activity.targetSkcs.filter(skc => targetSet.has(skc)),
-    }))
-    .filter(activity => activity.targetSkcs.length);
-}
-
-function alreadyCoveredActivities(full, rescue) {
-  const sourceName = String(rescue.sourceLimitedDiscountName || '').trim();
-  const targetSet = new Set((rescue.rows || []).map(row => String(row.skc || '').trim()).filter(Boolean));
-  return conflictActivitiesFromApply(full)
-    .filter(activity => String(activity.actName || '').trim() !== sourceName)
-    .filter(activity => activity.extraCount === 0)
-    .filter(activity => activity.targetSkcs.some(skc => targetSet.has(skc)));
-}
-
-function platformBlockedSkcs(full) {
-  const invalid = full?.validation?.invalid || [];
-  const blocked = [];
-  for (const row of invalid) {
-    const skc = String(row.skc || '').trim();
-    if (!skc) continue;
-    const isOnlyOldLimitedConflict =
-      row.reason === 'query_goods error_code' &&
-      row.error_code === 'mrs-simple_platform_limit_discounts-0006';
-    if (!isOnlyOldLimitedConflict) {
-      blocked.push({
-        skc,
-        reason: row.reason || '',
-        error_code: row.error_code || '',
-        inventory: row.inventory,
-        minStock: row.minStock,
-        price: row.price,
-        maxSupplyPrice: row.maxSupplyPrice,
-        interceptSupplyPrice: row.interceptSupplyPrice,
-      });
-    }
-  }
-  const bySkc = new Map();
-  for (const row of blocked) if (!bySkc.has(row.skc)) bySkc.set(row.skc, row);
-  return [...bySkc.values()];
-}
-
-async function writeSubsetRescue({storeKey, originalRescue, originalPath, blockedRows, outDir}) {
-  const blockedSet = new Set(blockedRows.map(row => row.skc));
-  const keptRows = (originalRescue.rows || []).filter(row => !blockedSet.has(String(row.skc)));
-  const subset = {
-    ...originalRescue,
-    createdAt: new Date().toISOString(),
-    parentRescue: rel(originalPath),
-    purpose: `${originalRescue.purpose || 'limited_discount_target_price_drift_rescue'}_platform_blocked_subset`,
-    excludedPlatformBlockedSkcs: blockedRows,
-    originalRowCount: (originalRescue.rows || []).length,
-    executableRowCount: keptRows.length,
-    rows: keptRows,
-  };
-  const date = inferDateFromPath(originalRescue.purpose) || inferDateFromPath(originalRescue.sourceGuard) || inferDateFromPath(originalPath) || 'unknown';
-  const file = path.join(outDir, `limited-drift-rescue-${storeKey}-platform-blocked-subset-${date}.json`);
-  await fs.writeFile(file, JSON.stringify(subset, null, 2), 'utf8');
-  return {path: file, rescue: subset};
-}
-
-function verifyExecuteResult(full, expectedSkcs) {
-  const expected = [...new Set(expectedSkcs.map(String).filter(Boolean))].sort();
-  const conflictActivities = full?.after?.conflictActivities || [];
-  const overlapSkcs = [...new Set(conflictActivities
-    .flatMap(activity => activity.targetSkcs || [])
-    .map(row => String(row || '').trim())
-    .filter(Boolean))].sort();
-  const createdActivityId = full?.createdActivityId || null;
-  const uncovered = expected.filter(skc => !overlapSkcs.includes(skc));
-  const duplicateOverlapSkcs = full?.after?.duplicateOverlapSkcs || [];
-  return {
-    ok: !!full?.ok && uncovered.length === 0 && duplicateOverlapSkcs.length === 0,
-    createdActivityId,
-    expectedSkcs: expected,
-    overlapSkcs,
-    uncovered,
-    duplicateOverlapSkcs,
-    afterSummary: full?.after ? {
-      overlapSkcCount: full.after.overlapSkcCount,
-      unexpectedUncoveredAfter: full.after.unexpectedUncoveredAfter,
-      activeOrFuture: full.after.activeOrFuture,
-      conflictActivities: conflictActivities.map(activity => ({
-        activityId: activity.activity_id,
-        actName: activity.act_name,
-        state: activity.state,
-        targetCount: activity.targetCount,
-        extraCount: activity.extraCount,
-        targetSkcs: activity.targetSkcs,
-      })),
-    } : null,
   };
 }
 
@@ -442,7 +277,7 @@ export function filterDriftRescueRowsDefensively(rescue, manualIndex) {
   };
 }
 
-async function processStore(storeKey, rescuePath, args, manualIndex) {
+async function processStore(storeKey, rescuePath, args, manualIndex, browserSession = {}) {
   const store = storesByKey.get(storeKey);
   if (!store) throw new Error(`Unknown store ${storeKey}`);
   let rescue = JSON.parse(await fs.readFile(rescuePath, 'utf8'));
@@ -491,191 +326,64 @@ async function processStore(storeKey, rescuePath, args, manualIndex) {
       record.skippedCreate = true;
       return record;
     }
-    record.launched = summarizeRaw(await launchStore(storeKey));
-
-    const initialDryRun = await applyRescue({storeKey, port: store.port, rescuePath: activeRescuePath, execute: false});
-    record.initialDryRun = summarizeCommand(initialDryRun);
-    if (!initialDryRun.full) {
-      throw new Error(`initial dry-run did not produce a readable result for ${storeKey}: ${initialDryRun.stderr || initialDryRun.stdout || initialDryRun.error || ''}`);
-    }
-    record.discoveredOldActivities = conflictActivitiesFromApply(initialDryRun.full);
-
-    const existingCovered = alreadyCoveredActivities(initialDryRun.full, rescue);
-    if (existingCovered.length && !oldActivitiesToRemove(initialDryRun.full, rescue).length) {
-      const coveredSkcs = [...new Set(existingCovered.flatMap(activity => activity.targetSkcs))].sort();
-      const missing = targetSkcs.filter(skc => !coveredSkcs.includes(skc));
-      if (!missing.length) {
-        record.readback = {
-          ok: true,
-          createdActivityId: existingCovered[0].activityId,
-          expectedSkcs: targetSkcs.slice().sort(),
-          overlapSkcs: coveredSkcs,
-          uncovered: [],
-          duplicateOverlapSkcs: [],
-          afterSummary: {conflictActivities: existingCovered},
-        };
-        record.ok = true;
-        record.status = 'already_created';
-        return record;
-      }
+    if (browserSession.ready) {
+      record.launched = browserSession.launchSummary || {ok: true, reused: true};
+    } else {
+      record.launched = summarizeRaw(await launchStore(storeKey));
     }
 
-    let activitiesToRemove = oldActivitiesToRemove(initialDryRun.full, rescue);
-    if (!activitiesToRemove.length) {
-      record.removals.push({
-        skipped: true,
-        reason: 'no matching old limited-discount activity currently contains target SKCs; treating as already removed',
-        skcs: targetSkcs,
-      });
-    }
-    for (const activity of activitiesToRemove) {
-      const skcs = activity.targetSkcs.length ? activity.targetSkcs : targetSkcs;
-      const removeResult = await removeSkcs({
-        storeKey,
-        activityId: activity.activityId,
-        skcs,
-        execute: true,
-      });
-      record.removals.push({
-        activityId: activity.activityId,
-        actName: activity.actName,
-        skcs,
-        command: summarizeCommand(removeResult),
-        result: removeResult.full?.results?.[0] ? {
-          ok: removeResult.full.results[0].ok,
-          beforeTotalSkcs: removeResult.full.results[0].before?.totalSkcs,
-          afterTotalSkcs: removeResult.full.results[0].after?.totalSkcs,
-          stillPresent: removeResult.full.results[0].after?.stillPresent,
-          missingPreserved: removeResult.full.results[0].after?.missingPreserved,
-          reason: removeResult.full.results[0].reason || removeResult.full.results[0].error?.message || '',
-        } : null,
-      });
-      if (!removeResult.full?.ok) {
-        throw new Error(`remove_skc failed for ${storeKey} activity ${activity.activityId}`);
-      }
-    }
-
-    let postDeleteDryRun = await applyRescue({storeKey, port: store.port, rescuePath: activeRescuePath, execute: false});
-    record.postDeleteDryRun = summarizeCommand(postDeleteDryRun);
-
-    const remainingOld = oldActivitiesToRemove(postDeleteDryRun.full, rescue);
-    if (remainingOld.length) {
-      for (const activity of remainingOld) {
-        const removeResult = await removeSkcs({
-          storeKey,
-          activityId: activity.activityId,
-          skcs: activity.targetSkcs,
-          execute: true,
-        });
-        record.removals.push({
-          activityId: activity.activityId,
-          actName: activity.actName,
-          skcs: activity.targetSkcs,
-          retryAfterPostDeleteDryRun: true,
-          command: summarizeCommand(removeResult),
-          result: removeResult.full?.results?.[0] ? {
-            ok: removeResult.full.results[0].ok,
-            beforeTotalSkcs: removeResult.full.results[0].before?.totalSkcs,
-            afterTotalSkcs: removeResult.full.results[0].after?.totalSkcs,
-            stillPresent: removeResult.full.results[0].after?.stillPresent,
-            missingPreserved: removeResult.full.results[0].after?.missingPreserved,
-            reason: removeResult.full.results[0].reason || removeResult.full.results[0].error?.message || '',
-          } : null,
-        });
-        if (!removeResult.full?.ok) {
-          throw new Error(`retry remove_skc failed for ${storeKey} activity ${activity.activityId}`);
-        }
-      }
-      postDeleteDryRun = await applyRescue({storeKey, port: store.port, rescuePath: activeRescuePath, execute: false});
-      record.postRetryRemoveDryRun = summarizeCommand(postDeleteDryRun);
-    }
-
-    const coveredAfterRemoval = alreadyCoveredActivities(postDeleteDryRun.full, rescue);
-    if (coveredAfterRemoval.length) {
-      const coveredSkcs = [...new Set(coveredAfterRemoval.flatMap(activity => activity.targetSkcs))].sort();
-      const missing = targetSkcs.filter(skc => !coveredSkcs.includes(skc));
-      if (!missing.length) {
-        record.readback = {
-          ok: true,
-          createdActivityId: coveredAfterRemoval[0].activityId,
-          expectedSkcs: targetSkcs.slice().sort(),
-          overlapSkcs: coveredSkcs,
-          uncovered: [],
-          duplicateOverlapSkcs: [],
-          afterSummary: {conflictActivities: coveredAfterRemoval},
-        };
-        record.ok = true;
-        record.status = 'already_created';
-        return record;
-      }
-    }
-
-    const inventoryBlocked = (postDeleteDryRun.full?.validation?.invalid || [])
-      .filter(row => row.reason === 'inventory below configured activity stock')
-      .map(row => String(row.skc || '').trim())
-      .filter(Boolean);
-    if (inventoryBlocked.length && !args.dryRunOnly) {
-      for (const skc of [...new Set(inventoryBlocked)]) {
-        const inventoryDryRun = await topUpAuthorizedFallbackInventory({
-          storeKey,
-          skc,
-          rescuePath: activeRescuePath,
-          execute: false,
-        });
-        const inventoryExecute = inventoryDryRun.full?.ok
-          ? await topUpAuthorizedFallbackInventory({
-            storeKey,
-            skc,
-            rescuePath: activeRescuePath,
-            execute: true,
-          })
-          : null;
-        record.inventoryTopUps.push({
-          skc,
-          dryRun: inventoryDryRun.full || inventoryDryRun.parsed || summarizeRaw(inventoryDryRun),
-          execute: inventoryExecute ? (inventoryExecute.full || inventoryExecute.parsed || summarizeRaw(inventoryExecute)) : null,
-        });
-      }
-      if (record.inventoryTopUps.some(item => item.execute?.ok)) {
-        postDeleteDryRun = await applyRescue({storeKey, port: store.port, rescuePath: activeRescuePath, execute: false});
-        record.postInventoryTopUpDryRun = summarizeCommand(postDeleteDryRun);
-      }
-    }
-
-    record.blockedSkcs = platformBlockedSkcs(postDeleteDryRun.full);
-
-    const subset = await writeSubsetRescue({
+    const transaction = await replaceTransactionally({
       storeKey,
-      originalRescue: rescue,
-      originalPath: rescuePath,
-      blockedRows: record.blockedSkcs,
-      outDir: args.outDir,
+      port: store.port,
+      rescuePath: activeRescuePath,
+      execute: !args.dryRunOnly,
     });
-    record.subsetRescuePath = rel(subset.path);
-
-    const executableSkcs = subset.rescue.rows.map(row => String(row.skc));
-    if (!executableSkcs.length) {
-      record.skippedCreate = true;
-      record.status = 'all_platform_blocked';
-      record.ok = true;
-      return record;
+    record.transaction = summarizeCommand(transaction);
+    if (!transaction.full) {
+      throw new Error(`transactional replacement did not produce a readable result for ${storeKey}: ${transaction.stderr || transaction.stdout || transaction.error || ''}`);
     }
-
-    if (args.dryRunOnly) {
-      record.skippedCreate = true;
-      record.status = 'dry_run_only';
-      record.ok = false;
-      return record;
-    }
-
-    const executeApply = await applyRescue({storeKey, port: store.port, rescuePath: subset.path, execute: true});
-    record.executeApply = summarizeCommand(executeApply);
-    record.readback = verifyExecuteResult(executeApply.full, executableSkcs);
-    if (!record.readback.ok) {
-      throw new Error(`execute/readback failed for ${storeKey}`);
-    }
-    record.ok = true;
-    record.status = record.blockedSkcs.length ? 'created_subset_with_platform_blockers' : 'created_all';
+    const tx = transaction.full;
+    record.initialDryRun = tx.initialDryRun || null;
+    record.discoveredOldActivities = (tx.snapshots || []).map(snapshot => ({
+      activityId: snapshot.activityId,
+      actName: snapshot.actName,
+      state: snapshot.state,
+      startTime: snapshot.startTime,
+      endTime: snapshot.endTime,
+      goodsCount: snapshot.beforeGoods?.length || 0,
+      targetCount: snapshot.plannedSkcs?.length || 0,
+      extraCount: Math.max(0, (snapshot.beforeGoods?.length || 0) - (snapshot.plannedSkcs?.length || 0)),
+      targetSkcs: snapshot.plannedSkcs || [],
+      extraSkcs: [],
+    }));
+    record.removals = (tx.removals || []).map(removal => ({
+      activityId: removal.activityId,
+      skcs: removal.skcs || [],
+      result: {ok: removal.ok === true, reason: removal.command?.reason || ''},
+      command: removal.command || null,
+    }));
+    record.postDeleteDryRun = tx.postDeleteDryRun || null;
+    record.blockedSkcs = [...new Set([
+      ...(tx.initiallyBlockedSkcs || []),
+      ...(tx.postDeleteBlockedSkcs || []),
+    ])].map(skc => ({skc}));
+    record.executeApply = tx.desiredCreate || null;
+    record.compensation = tx.compensation || null;
+    record.readback = {
+      ok: tx.ok === true,
+      createdActivityId: tx.desiredCreate?.createdActivityId || null,
+      expectedSkcs: targetSkcs.slice().sort(),
+      overlapSkcs: (tx.desiredCoveredSkcs || []).slice().sort(),
+      uncovered: tx.uncoveredSkcs || [],
+      duplicateOverlapSkcs: [],
+      safe: tx.safe === true,
+      restoredCoveredSkcs: tx.compensation?.restoredCoveredSkcs || [],
+    };
+    record.ok = tx.ok === true;
+    record.status = String(tx.status || (record.ok ? 'replaced_all' : 'failed'));
+    record.error = record.ok ? '' : (tx.safe === true
+      ? 'replacement was not completed; previous protection was restored and the queue remains blocked for review'
+      : 'replacement failed and one or more SKCs remain uncovered');
     return record;
   } catch (error) {
     record.ok = false;
@@ -683,8 +391,10 @@ async function processStore(storeKey, rescuePath, args, manualIndex) {
     record.error = error.message;
     return record;
   } finally {
-    const closeResult = await closeStore(storeKey);
-    record.close = summarizeRaw(closeResult);
+    if (!browserSession.keepOpen) {
+      const closeResult = await closeStore(storeKey);
+      record.close = summarizeRaw(closeResult);
+    }
   }
 }
 
@@ -699,10 +409,44 @@ function summarizeRaw(result) {
   };
 }
 
+function isCompletedRepairResult(result) {
+  if (!result?.ok) return false;
+  if (result.readback?.ok === true) return true;
+  return ['already_exactly_covered', 'dry_run_transaction_locked', 'dry_run_create_only', 'protected_manual_special_skipped'].includes(String(result.status || ''));
+}
+
+async function loadResumableResults(args, workFingerprint) {
+  if (!args.resume || !(await pathExists(args.out))) return [];
+  try {
+    const previous = JSON.parse(await fs.readFile(args.out, 'utf8'));
+    if (previous.workFingerprint !== workFingerprint || previous.dryRunOnly !== args.dryRunOnly) return [];
+    return (previous.results || []).filter(isCompletedRepairResult);
+  } catch {
+    return [];
+  }
+}
+
+function resultKey(result) {
+  return String(result?.sourceRescuePath || result?.rescuePath || '').replaceAll('\\', '/').toLowerCase();
+}
+
+async function writeProgress(args, common, results, deferredEntries = []) {
+  const doc = {
+    ...common,
+    updatedAt: new Date().toISOString(),
+    finishedAt: deferredEntries.length ? null : new Date().toISOString(),
+    complete: deferredEntries.length === 0,
+    deferredGroups: deferredEntries.length,
+    deferredRescueFiles: deferredEntries.map(entry => entry.relativePath),
+    totals: summarizeTotals(results),
+    results,
+  };
+  await fs.writeFile(args.out, `${JSON.stringify(doc, null, 2)}\n`, 'utf8');
+  return doc;
+}
+
 const args = parseArgs(process.argv.slice(2));
-const automationAuthorization = args.dryRunOnly ? null : await assertMarketingAutomationAuthorization({
-  action: MARKETING_AUTOMATION_ACTIONS.REPAIR_TARGET_PRICE_DRIFT,
-});
+let automationAuthorization = null;
 const manualRegistry = await loadManualLimitedDiscountRegistry();
 const manualIndex = buildManualLimitedDiscountIndex(manualRegistry, new Date());
 await fs.mkdir(args.outDir, {recursive: true});
@@ -712,8 +456,24 @@ if (!buildPlan.skipped && !buildPlan.ok) {
   throw new Error(`build_limited_discount_drift_rescue_plan failed: ${buildPlan.stderr || buildPlan.stdout || buildPlan.error || ''}`);
 }
 if (!fssync.existsSync(args.planDir)) throw new Error(`Plan dir does not exist after build step: ${args.planDir}`);
-if (!args.stores.length) args.stores = await discoverStores(args.planDir);
-if (!args.stores.length) {
+const exactManifest = await loadExactDriftRepairManifest({
+  root: ROOT,
+  planDir: args.planDir,
+  guardPath: args.guard,
+  date: args.date,
+});
+if (args.expectedWorkFingerprint && exactManifest.workFingerprint !== args.expectedWorkFingerprint) {
+  throw new Error(`Exact drift work fingerprint mismatch: expected=${args.expectedWorkFingerprint} actual=${exactManifest.workFingerprint}`);
+}
+automationAuthorization = args.dryRunOnly ? null : await assertMarketingAutomationAuthorization({
+  action: MARKETING_AUTOMATION_ACTIONS.REPAIR_TARGET_PRICE_DRIFT,
+  payloadHash: exactManifest.workFingerprint,
+});
+const storesFilter = new Set(args.stores);
+const exactEntries = exactManifest.entries
+  .filter(entry => !storesFilter.size || storesFilter.has(entry.storeKey))
+  .sort((a, b) => a.storeKey.localeCompare(b.storeKey) || a.relativePath.localeCompare(b.relativePath));
+if (!exactEntries.length) {
   const emptyDoc = {
     createdAt: new Date().toISOString(),
     finishedAt: new Date().toISOString(),
@@ -724,63 +484,28 @@ if (!args.stores.length) {
     dryRunOnly: args.dryRunOnly,
     automationAuthorization,
     buildPlan,
+    manifestPath: exactManifest.manifestRelativePath,
+    manifestHash: exactManifest.manifestHash,
+    workFingerprint: exactManifest.workFingerprint,
+    complete: true,
+    deferredGroups: 0,
     totals: summarizeTotals([]),
     results: [],
   };
-  await fs.writeFile(args.out, JSON.stringify(emptyDoc, null, 2), 'utf8');
-  console.log(JSON.stringify({ok: true, out: rel(args.out), reason: 'no rescue files discovered', totals: emptyDoc.totals}, null, 2));
+  await fs.writeFile(args.out, `${JSON.stringify(emptyDoc, null, 2)}\n`, 'utf8');
+  console.log(JSON.stringify({ok: true, out: rel(args.out), reason: 'no exact rescue files selected', totals: emptyDoc.totals}, null, 2));
   process.exit(0);
 }
 
 const startedAt = new Date().toISOString();
-const results = [];
-for (const storeKey of args.stores) {
-  const rescuePaths = await findRescueFiles(args.planDir, storeKey);
-  for (const rescuePath of rescuePaths) {
-    console.log(`[${new Date().toISOString()}] processing ${storeKey} rescue=${rel(rescuePath)}`);
-    const result = await processStore(storeKey, rescuePath, args, manualIndex);
-    results.push(result);
-    await fs.writeFile(args.out, JSON.stringify({
-      createdAt: startedAt,
-      updatedAt: new Date().toISOString(),
-      guard: rel(args.guard),
-      date: args.date,
-      planDir: rel(args.planDir),
-      outDir: rel(args.outDir),
-      dryRunOnly: args.dryRunOnly,
-      automationAuthorization,
-      buildPlan,
-      totals: summarizeTotals(results),
-      results,
-    }, null, 2), 'utf8');
-    console.log(JSON.stringify({
-      storeKey,
-      rescuePath: rel(rescuePath),
-      sourceLimitedDiscountName: result.sourceLimitedDiscountName,
-      ok: result.ok,
-      status: result.status,
-      oldActivities: result.discoveredOldActivities.map(activity => ({
-        activityId: activity.activityId,
-        targetCount: activity.targetSkcs.length,
-        extraCount: activity.extraCount,
-      })),
-      removed: result.removals.map(item => ({
-        activityId: item.activityId,
-        skcCount: item.skcs?.length || 0,
-        ok: item.skipped ? true : item.result?.ok,
-        skipped: item.skipped || false,
-      })),
-      blockedSkcs: result.blockedSkcs,
-      createdActivityId: result.readback?.createdActivityId || null,
-      subsetRescuePath: result.subsetRescuePath,
-      error: result.error,
-    }, null, 2));
-  }
-}
-
-const finalDoc = {
+const resumedResults = await loadResumableResults(args, exactManifest.workFingerprint);
+const completedKeys = new Set(resumedResults.map(resultKey));
+const pendingEntries = exactEntries.filter(entry => !completedKeys.has(entry.relativePath.toLowerCase()));
+const selectedEntries = args.maxGroups > 0 ? pendingEntries.slice(0, args.maxGroups) : pendingEntries;
+const deferredEntries = args.maxGroups > 0 ? pendingEntries.slice(args.maxGroups) : [];
+const results = [...resumedResults];
+const common = {
   createdAt: startedAt,
-  finishedAt: new Date().toISOString(),
   guard: rel(args.guard),
   date: args.date,
   planDir: rel(args.planDir),
@@ -788,16 +513,92 @@ const finalDoc = {
   dryRunOnly: args.dryRunOnly,
   automationAuthorization,
   buildPlan,
-  totals: summarizeTotals(results),
-  results,
+  manifestPath: exactManifest.manifestRelativePath,
+  manifestHash: exactManifest.manifestHash,
+  workFingerprint: exactManifest.workFingerprint,
+  exactGroupCount: exactEntries.length,
+  resumedGroups: resumedResults.length,
 };
-await fs.writeFile(args.out, JSON.stringify(finalDoc, null, 2), 'utf8');
+
+const entriesByStore = new Map();
+for (const entry of selectedEntries) {
+  if (!entriesByStore.has(entry.storeKey)) entriesByStore.set(entry.storeKey, []);
+  entriesByStore.get(entry.storeKey).push(entry);
+}
+
+for (const [storeKey, storeEntries] of entriesByStore.entries()) {
+  let launchSummary = null;
+  try {
+    launchSummary = summarizeRaw(await launchStore(storeKey));
+    for (const entry of storeEntries) {
+      console.log(`[${new Date().toISOString()}] processing ${storeKey} rescue=${entry.relativePath}`);
+      const result = await processStore(storeKey, entry.path, args, manualIndex, {
+        ready: true,
+        keepOpen: true,
+        launchSummary: {...launchSummary, reusedForStoreBatch: true},
+      });
+      results.push(result);
+      await writeProgress(args, common, results, deferredEntries);
+      console.log(JSON.stringify({
+        storeKey,
+        rescuePath: entry.relativePath,
+        sourceLimitedDiscountName: result.sourceLimitedDiscountName,
+        ok: result.ok,
+        status: result.status,
+        oldActivities: result.discoveredOldActivities.map(activity => ({
+          activityId: activity.activityId,
+          targetCount: activity.targetSkcs.length,
+          extraCount: activity.extraCount,
+        })),
+        removed: result.removals.map(item => ({
+          activityId: item.activityId,
+          skcCount: item.skcs?.length || 0,
+          ok: item.plannedOnly || item.skipped ? true : item.result?.ok,
+          plannedOnly: item.plannedOnly || false,
+          skipped: item.skipped || false,
+        })),
+        blockedSkcs: result.blockedSkcs,
+        createdActivityId: result.readback?.createdActivityId || null,
+        subsetRescuePath: result.subsetRescuePath,
+        error: result.error,
+      }, null, 2));
+    }
+  } catch (error) {
+    for (const entry of storeEntries) {
+      if (results.some(result => resultKey(result) === entry.relativePath.toLowerCase())) continue;
+      results.push({
+        storeKey,
+        rescuePath: entry.relativePath,
+        sourceRescuePath: entry.relativePath,
+        targetSkcs: entry.rescue.rows.map(row => String(row.skc || '')).filter(Boolean),
+        launched: launchSummary,
+        ok: false,
+        status: 'browser_launch_failed',
+        error: error.message,
+        removals: [],
+        blockedSkcs: [],
+        readback: null,
+      });
+    }
+    await writeProgress(args, common, results, deferredEntries);
+  } finally {
+    const closeResult = summarizeRaw(await closeStore(storeKey));
+    common.storeBrowserSessions = common.storeBrowserSessions || [];
+    common.storeBrowserSessions.push({storeKey, launch: launchSummary, close: closeResult, groupCount: storeEntries.length});
+  }
+}
+
+const finalDoc = await writeProgress(args, common, results, deferredEntries);
 console.log(JSON.stringify({
-  ok: results.every(result => result.ok),
+  ok: results.every(result => result.ok) && deferredEntries.length === 0,
+  complete: deferredEntries.length === 0,
   out: rel(args.out),
   totals: finalDoc.totals,
+  resumedGroups: resumedResults.length,
+  deferredGroups: deferredEntries.length,
 }, null, 2));
 if (!results.every(result => result.ok)) process.exitCode = 2;
+else if (deferredEntries.length) process.exitCode = 3;
 
 function summarizeTotals(results) {
   const storeKeys = [...new Set(results.map(result => result.storeKey).filter(Boolean))];

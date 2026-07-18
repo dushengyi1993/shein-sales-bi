@@ -52,11 +52,6 @@ check_portal_health() {
   fi
 }
 
-close_store_browsers() {
-  cd "$ROOT"
-  node scripts/cleanup_shein_store_browsers.mjs --all --cleanup-chrome-tmp --kill-after-sec 5 || true
-}
-
 write_daily_alert() {
   local status="$1"
   local message="$2"
@@ -86,7 +81,6 @@ on_signal() {
   set +e
   write_daily_alert "interrupted" "daily refresh interrupted by signal=$signal; run did not complete"
   echo "[cloud_daily_refresh] INTERRUPTED signal=$signal log=$LOG_FILE" >&2
-  close_store_browsers
   trap - EXIT ERR INT TERM HUP
   exit "$status"
 }
@@ -174,7 +168,6 @@ fi
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 trap 'on_error "$LINENO" "$?"' ERR
-trap close_store_browsers EXIT
 trap 'on_signal INT' INT
 trap 'on_signal TERM' TERM
 trap 'on_signal HUP' HUP
@@ -191,10 +184,6 @@ wait_for_busy_writers
 wait_for_lark_report_lock
 ensure_capacity_for_slow_refresh
 
-echo "[cloud_daily_refresh] cleanup stale store browsers after lock acquisition"
-close_store_browsers
-
-
 echo "[cloud_daily_refresh] step=link-business date=$DATE"
 if ! SHEIN_LINK_BUSINESS_REFRESH_PORTAL=0 bash scripts/cloud_link_business_sync.sh "$DATE"; then
   DAILY_WARNINGS+=("link-business failed")
@@ -209,30 +198,7 @@ if [[ -s "$ROOT/state/cloud_ops_alerts/link-business-last-metric-not-ready.json"
   echo "[cloud_daily_refresh] WARN link/business metrics were not ready; keep previous complete link/business data visible" >&2
 fi
 
-if [[ "${SHEIN_BI_DAILY_SCAN_MARKETING_PRICES:-1}" == "1" || "${SHEIN_BI_DAILY_SCAN_MARKETING_PRICES:-1}" == "true" ]]; then
-  echo "[cloud_daily_refresh] step=marketing-current-price-scan"
-  close_store_browsers
-  PRICE_SCAN_MODE_ARGS=()
-  if [[ "${SHEIN_BI_MARKETING_PRICE_VISIBLE:-0}" == "1" || "${SHEIN_BI_MARKETING_PRICE_VISIBLE:-0}" == "true" ]]; then
-    PRICE_SCAN_MODE_ARGS+=(--visible)
-  elif [[ "${SHEIN_BI_MARKETING_PRICE_HEADLESS:-1}" == "1" || "${SHEIN_BI_MARKETING_PRICE_HEADLESS:-1}" == "true" ]]; then
-    PRICE_SCAN_MODE_ARGS+=(--headless)
-  fi
-  if timeout -k "${SHEIN_BI_MARKETING_PRICE_SCAN_KILL_AFTER_SEC:-120}" "${SHEIN_BI_MARKETING_PRICE_SCAN_TIMEOUT_SEC:-2700}" \
-    node scripts/marketing/scan_current_marketing_prices_for_bi.mjs \
-    --group "${SHEIN_BI_MARKETING_PRICE_GROUP:-ALL}" \
-    --page-size "${SHEIN_BI_MARKETING_PRICE_PAGE_SIZE:-500}" \
-    --store-attempts "${SHEIN_BI_MARKETING_PRICE_STORE_ATTEMPTS:-3}" \
-    "${PRICE_SCAN_MODE_ARGS[@]}"; then
-    echo "[cloud_daily_refresh] marketing current price scan done"
-  else
-    DAILY_WARNINGS+=("marketing price scan failed")
-    echo "[cloud_daily_refresh] WARN marketing current price scan failed; BI will keep previous price snapshot and mark missing prices as待补采" >&2
-  fi
-  close_store_browsers
-else
-  echo "[cloud_daily_refresh] marketing current price scan disabled by SHEIN_BI_DAILY_SCAN_MARKETING_PRICES"
-fi
+echo "[cloud_daily_refresh] marketing current-price evidence is owned by cloud_marketing_live_guard; skip duplicate all-store scan"
 
 node scripts/marketing/export_marketing_price_leads_for_bi.mjs || {
   DAILY_WARNINGS+=("marketing price export failed")
@@ -263,6 +229,18 @@ else
   echo "[cloud_daily_refresh] openapi return reconciliation disabled by SHEIN_BI_DAILY_OPENAPI_RETURN_RECONCILIATION"
 fi
 
+if [[ "${SHEIN_BI_DAILY_OPENAPI_FINANCE_SYNC:-0}" == "1" || "${SHEIN_BI_DAILY_OPENAPI_FINANCE_SYNC:-0}" == "true" ]]; then
+  echo "[cloud_daily_refresh] step=openapi-finance-sync date=$DATE"
+  if SHEIN_BI_PORTAL_PREWARM_DISABLED=1 bash scripts/cloud_openapi_finance_sync.sh "$DATE"; then
+    echo "[cloud_daily_refresh] openapi finance sync done"
+  else
+    DAILY_WARNINGS+=("openapi finance sync execution_failed")
+    echo "[cloud_daily_refresh] WARN openapi finance sync execution failed; keep prior settled return-cost facts" >&2
+  fi
+else
+  echo "[cloud_daily_refresh] openapi finance sync disabled by SHEIN_BI_DAILY_OPENAPI_FINANCE_SYNC"
+fi
+
 if [[ "${SHEIN_BI_DAILY_OPENAPI_PRODUCT_RECONCILIATION:-0}" == "1" || "${SHEIN_BI_DAILY_OPENAPI_PRODUCT_RECONCILIATION:-0}" == "true" ]]; then
   echo "[cloud_daily_refresh] step=openapi-product-reconciliation"
   if SHEIN_BI_PORTAL_PREWARM_DISABLED=1 bash scripts/cloud_openapi_product_reconciliation.sh; then
@@ -287,12 +265,35 @@ else
   echo "[cloud_daily_refresh] RTV verify disabled by SHEIN_BI_DAILY_RTV_VERIFY"
 fi
 
+COST_LEDGER_STATUS=0
+if [[ "${SHEIN_BI_DAILY_INVENTORY_COST_REFRESH:-1}" == "1" || "${SHEIN_BI_DAILY_INVENTORY_COST_REFRESH:-1}" == "true" ]]; then
+  echo "[cloud_daily_refresh] step=inventory-cost-ledger"
+  set +e
+  bash scripts/refresh_inventory_cost_ledger.sh
+  COST_LEDGER_STATUS=$?
+  set -e
+  if [[ "$COST_LEDGER_STATUS" -ne 0 ]]; then
+    DAILY_WARNINGS+=("inventory cost ledger refresh failed status=$COST_LEDGER_STATUS")
+    echo "[cloud_daily_refresh] WARN inventory cost ledger refresh failed; retain the previous complete profit cache" >&2
+  fi
+fi
+
 prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
 {
   if ! flock -w "$PORTAL_REFRESH_LOCK_WAIT_SEC" 8; then
     DAILY_WARNINGS+=("portal refresh lock busy")
     echo "[cloud_daily_refresh] WARN portal refresh lock busy after ${PORTAL_REFRESH_LOCK_WAIT_SEC}s; skip portal generation/prewarm this run" >&2
   else
+    if [[ "$COST_LEDGER_STATUS" -eq 0 && "${SHEIN_BI_PROFIT_MART_REFRESH_DISABLED:-0}" != "1" ]]; then
+      set +e
+      bash scripts/refresh_profit_marts.sh
+      PROFIT_MART_STATUS=$?
+      set -e
+      if [[ "$PROFIT_MART_STATUS" -ne 0 ]]; then
+        DAILY_WARNINGS+=("profit mart refresh failed status=$PROFIT_MART_STATUS")
+        echo "[cloud_daily_refresh] WARN profit mart refresh failed; portal will retain the last complete cache" >&2
+      fi
+    fi
     set +e
     node scripts/audit_bi_warehouse.mjs
     AUDIT_STATUS=$?

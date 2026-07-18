@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {
@@ -7,6 +8,10 @@ import {
   storeIdentityEvalBody,
 } from '../../lib/shein_store_identity.mjs';
 import {recoverSheinLoginIfNeeded} from '../../lib/shein_login_recovery.mjs';
+import {
+  assertMarketingAutomationAuthorization,
+  MARKETING_AUTOMATION_ACTIONS,
+} from '../../lib/marketing_automation_authorization.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp/marketing-signup/limited-discount-rescue');
@@ -156,6 +161,17 @@ async function assertCurrentStoreIdentity(cdp, store, context) {
 }
 
 async function removeForStore(store, args) {
+  const payloadHash = crypto.createHash('sha256').update(JSON.stringify({
+    action: 'remove_skc_from_limited_discount',
+    storeKey: store.storeKey,
+    activityId: args.activityId,
+    skcs: args.skcs.slice().sort(),
+  })).digest('hex');
+  const automationAuthorization = args.execute ? await assertMarketingAutomationAuthorization({
+    action: MARKETING_AUTOMATION_ACTIONS.CREATE_OR_REPLACE_ACTIVITY,
+    storeKey: store.storeKey,
+    payloadHash,
+  }) : null;
   const cdp = await connect(store.port);
   try {
     const loginRecovery = await recoverLoginIfNeeded(cdp);
@@ -298,7 +314,7 @@ async function removeForStore(store, args) {
       skcsToRemove: args.skcs,
       execute: args.execute,
     });
-    return {storeKey: store.storeKey, port: store.port, identity, loginRecovery, ...result};
+    return {storeKey: store.storeKey, port: store.port, identity, loginRecovery, automationAuthorization, payloadHash, ...result};
   } catch (error) {
     return {
       storeKey: store.storeKey,
