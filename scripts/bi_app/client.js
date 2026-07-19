@@ -176,6 +176,7 @@ function isCodLike(r){if(r?.is_cod===true||r?.is_cod===1||String(r?.is_cod).toLo
 function compact(v){const n=N(v),a=Math.abs(n);if(a>=100000000)return (n/100000000).toFixed(1)+'亿';if(a>=10000)return (n/10000).toFixed(1)+'万';return M(n)}
 function htmlValue(v,loading=false){return loading?'<span class="pending">加载中</span>':H(v)}
 function smallValue(v,loading=false){return loading?'<span class="pending">加载中</span>':`<span class="metric-note">${H(v)}</span>`}
+function metricValueWithNote(value,note='',loading=false,tone=''){if(loading)return'<span class="pending">加载中</span>';const noteTone=tone==='risk'?' is-risk':tone==='cost'?' is-cost':'';return`<span class="metric-main-value">${H(value)}</span>${note?`<span class="metric-subvalue${noteTone}">${H(note)}</span>`:''}`}
 function homeScopeSubtitle(){return `${scopeName()}${S.q?' · '+S.q:''}`}
 function sourceLoading(name,rows=[]){const st=SS[name]?.status||'idle';return !rows.length&&(st==='loading'||st==='idle')}
 
@@ -268,12 +269,10 @@ metricCard('当前时段退货 / 售后',selectedRangeText()+' · 双时间口�
 returnMetricRow('订单创建时间',orderReq,sp.all,afterLoading||paymentLoading),
 returnMetricRow('售后申请时间',req,sp.all,afterLoading||paymentLoading,{showRate:false,showAmountShare:false}),
 returnMetricRow('COD订单创建',codReq,sp.cod,afterLoading||paymentLoading)], '订单创建时间=本期创建订单中已发生售后的去重订单数÷本期总订单数，用于复盘 cohort；售后申请时间=本期新申请售后的压力，只展示申请单数和金额，不计算退货率，避免把旧订单的售后除以本期新订单造成误导；COD行也按订单创建时间，退货率=本期创建的COD订单中发生售后的订单数÷本期COD总订单数。金额占比=订单创建口径售后金额÷对应订单总成交额。')+
-metricCard('当前时段利润与风险',selectedRangeText()+' · 已落定 / 待决分开',['口径','SAR','RMB','利润率/占比'],[
-{label:'已落定利润',cells:[htmlValue(moneyCell(profitLoss),profitLoading),htmlValue(rmbCell(profitLoss),profitLoading),htmlValue(PCT(p.revenue?profitLoss/p.revenue:null),profitLoading)]},
-{label:'待决售后风险',cells:[htmlValue(moneyCell(-profitRisk),profitLoading),htmlValue(rmbCell(-profitRisk),profitLoading),htmlValue(PCT(p.revenue?profitRisk/p.revenue:null),profitLoading)]},
-{label:'风险调整后利润',cells:[htmlValue(moneyCell(profitRiskAdjusted),profitLoading),htmlValue(rmbCell(profitRiskAdjusted),profitLoading),htmlValue(PCT(p.riskRevenue?profitRiskAdjusted/p.riskRevenue:null),profitLoading)]},
-{label:'RTV入仓测算',cells:[htmlValue(moneyCell(profitRtv),profitLoading),htmlValue(rmbCell(profitRtv),profitLoading),htmlValue(PCT(p.revenue?profitRtv/p.revenue:null),profitLoading)]},
-{label:'已扣仓储费',cells:[htmlValue(moneyCell(profitStorage),profitLoading),htmlValue(rmbCell(profitStorage),profitLoading),htmlValue(PCT(p.revenue?profitStorage/p.revenue:null),profitLoading)]}], '已落定利润只冲减已经同意退款，或已明确派件失败/异常的订单；待买家退货、待交接、待选择方案等未落定售后仅列为风险，不提前改写真实收入。风险调整后利润用于压力测试，并不等于已发生退款。RTV入仓测算按当前筛选订单创建口径，只回加这些订单已匹配入仓退件的商品成本。'+rtvTipExtra+returnFeeTip+' 仓储费来自 ET 物流仓服账单/明细，并按货号和店铺的分层证据分摊；无销量时不会再消失。','profit-matrix')+
+metricCard('当前时段利润与风险',selectedRangeText()+' · 3 个结果 / 2 个影响项',['口径','SAR','RMB','利润率/占比'],[
+{label:'已落定利润',cells:[metricValueWithNote(moneyCell(profitLoss),`其中仓储费 ${moneyCell(-profitStorage)}`,profitLoading,'cost'),metricValueWithNote(rmbCell(profitLoss),`其中仓储费 ${rmbCell(-profitStorage)}`,profitLoading,'cost'),metricValueWithNote(PCT(p.revenue?profitLoss/p.revenue:null),`仓储占比 ${PCT(p.revenue?profitStorage/p.revenue:null)}`,profitLoading,'cost')]},
+{label:'风险调整后利润',cells:[metricValueWithNote(moneyCell(profitRiskAdjusted),`待决售后风险 ${moneyCell(-profitRisk)}`,profitLoading,'risk'),metricValueWithNote(rmbCell(profitRiskAdjusted),`待决售后风险 ${rmbCell(-profitRisk)}`,profitLoading,'risk'),metricValueWithNote(PCT(p.riskRevenue?profitRiskAdjusted/p.riskRevenue:null),`风险占比 ${PCT(p.revenue?profitRisk/p.revenue:null)}`,profitLoading,'risk')]},
+{label:'RTV入仓测算',cells:[metricValueWithNote(moneyCell(profitRtv),'',profitLoading),metricValueWithNote(rmbCell(profitRtv),'',profitLoading),metricValueWithNote(PCT(p.revenue?profitRtv/p.revenue:null),'已入仓退件可二售假设',profitLoading)]}], '已落定利润只冲减已经同意退款，或已明确派件失败/异常的订单；待买家退货、待交接、待选择方案等未落定售后仅列为风险，不提前改写真实收入。风险调整后利润用于压力测试，并不等于已发生退款。RTV入仓测算按当前筛选订单创建口径，只回加这些订单已匹配入仓退件的商品成本。'+rtvTipExtra+returnFeeTip+' 仓储费来自 ET 物流仓服账单/明细，并按货号和店铺的分层证据分摊；无销量时不会再消失。','profit-matrix profit-summary-matrix')+
 metricCard('当前时段流量',selectedRangeText()+' · 日×店×货号×SKC',['指标','数值','说明'],[
 {label:'曝光 / 访客',cells:[htmlValue(M(tr.exp)+' / '+M(tr.uv),trafficLoading),smallValue('点击率 '+PCT(tr.click),trafficLoading)]},
 {label:'成交 / 支付率',cells:[htmlValue(M(tr.sale)+' 件 / '+PCT(tr.pay),trafficLoading),smallValue(tr.rangeNote,trafficLoading)]}], '流量按当前日期、店铺/负责人、货号搜索聚合；点击率/支付率按分子分母重算。历史范围不再静默回退到最新可用日。','traffic-matrix')+
