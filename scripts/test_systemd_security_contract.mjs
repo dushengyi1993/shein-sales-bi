@@ -39,6 +39,7 @@ assert.doesNotMatch(portal, /^NoNewPrivileges=true$/m, 'portal uses audited sudo
 assert.doesNotMatch(portal, /^PrivateTmp=true$/m, 'portal browser maintenance must share the host temporary namespace');
 
 const webhook = readUnit('shein-bi-webhook.service');
+const webhookProvision = fs.readFileSync(new URL('./provision_shein_webhook_postgres_role.sh', import.meta.url), 'utf8');
 assert.equal(property(webhook, 'User'), 'sheinops');
 assert.equal(property(webhook, 'Group'), 'sheinops');
 assert.equal(property(webhook, 'OOMPolicy'), 'stop');
@@ -54,6 +55,9 @@ assert.equal(property(webhook, 'NoNewPrivileges'), 'true');
 assertCommonHardening(webhook, 'webhook', {protectSystem: 'strict'});
 assert.equal(property(webhook, 'PrivateTmp'), 'true');
 assert.doesNotMatch(webhook, /sudo|docker exec/, 'webhook worker uses restricted direct PostgreSQL, never sudo/docker');
+assert.match(webhookProvision, /install -d -m 0750 -o root -g "\$\{ENV_DIR_GROUP\}"/, 'webhook provisioning must preserve Portal access to the shared secrets directory');
+assert.match(webhookProvision, /chmod 0600 "\$\{temporary\}"/, 'the webhook database credential itself must remain root-only');
+assert.doesNotMatch(webhookProvision, /install -d -m 0700[^\n]*dirname/, 'webhook provisioning must not make the shared secrets directory root-only');
 
 const lark = readUnit('shein-bi-lark-sales-qa.service');
 assert.equal(property(lark, 'User'), 'sheinops');
