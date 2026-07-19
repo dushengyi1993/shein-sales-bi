@@ -268,7 +268,7 @@ metricCard('当前时段订单 / 销量 / 动销',selectedRangeText()+' · '+hom
 metricCard('当前时段退货 / 售后',selectedRangeText()+' · 双时间口径',['口径','订单','SAR','RMB','退货率','金额占比'],[
 returnMetricRow('订单创建时间',orderReq,sp.all,afterLoading||paymentLoading),
 returnMetricRow('售后申请时间',req,sp.all,afterLoading||paymentLoading,{showRate:false,showAmountShare:false}),
-returnMetricRow('COD订单创建',codReq,sp.cod,afterLoading||paymentLoading)], '订单创建时间=本期创建订单中已发生售后的去重订单数÷本期总订单数，用于复盘 cohort；售后申请时间=本期新申请售后的压力，只展示申请单数和金额，不计算退货率，避免把旧订单的售后除以本期新订单造成误导；COD行也按订单创建时间，退货率=本期创建的COD订单中发生售后的订单数÷本期COD总订单数。金额占比=订单创建口径售后金额÷对应订单总成交额。')+
+returnMetricRow('COD订单创建',codReq,sp.cod,afterLoading||paymentLoading)], '订单创建时间=本期创建订单中已发生售后的去重订单数÷本期总订单数，用于复盘 cohort；售后申请时间=本期新申请售后的压力，只展示申请单数和金额，不计算退货率，避免把旧订单的售后除以本期新订单造成误导；COD行也按订单创建时间，退货率=本期创建的COD订单中发生售后的订单数÷本期COD总订单数。金额占比=订单创建口径售后金额÷对应订单总成交额。','return-summary-matrix')+
 metricCard('当前时段利润与风险',selectedRangeText()+' · 3 个结果 / 2 个影响项',['口径','SAR','RMB','利润率/占比'],[
 {label:'已落定利润',cells:[metricValueWithNote(moneyCell(profitLoss),`其中仓储费 ${moneyCell(-profitStorage)}`,profitLoading,'cost'),metricValueWithNote(rmbCell(profitLoss),`其中仓储费 ${rmbCell(-profitStorage)}`,profitLoading,'cost'),metricValueWithNote(PCT(p.revenue?profitLoss/p.revenue:null),`仓储占比 ${PCT(p.revenue?profitStorage/p.revenue:null)}`,profitLoading,'cost')]},
 {label:'风险调整后利润',cells:[metricValueWithNote(moneyCell(profitRiskAdjusted),`待决售后风险 ${moneyCell(-profitRisk)}`,profitLoading,'risk'),metricValueWithNote(rmbCell(profitRiskAdjusted),`待决售后风险 ${rmbCell(-profitRisk)}`,profitLoading,'risk'),metricValueWithNote(PCT(p.riskRevenue?profitRiskAdjusted/p.riskRevenue:null),`风险占比 ${PCT(p.revenue?profitRisk/p.revenue:null)}`,profitLoading,'risk')]},

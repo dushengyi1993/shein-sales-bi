@@ -21,5 +21,6 @@ assert.match(source, /仅在 ET 快照最新且已匹配、当前可售为 0、�
 assert.match(source, /label:'已落定利润'.*`\u5176中仓储费 /, 'settled profit keeps storage fee as an inline supporting figure');
 assert.match(source, /label:'风险调整后利润'.*`\u5f85决售后风险 /, 'risk-adjusted profit keeps pending risk as an inline supporting figure');
 assert.doesNotMatch(source, /\{label:'(?:待决售后风险|已扣仓储费)',cells:/, 'profit summary must stay at three primary rows');
+assert.match(source, /'return-summary-matrix'\)\+/, 'returns and profit summary tables expose paired height-alignment classes');
 
 console.log('bi_client_resilience: refresh, version fallback, and history contracts passed');
