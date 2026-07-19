@@ -231,7 +231,8 @@ async function buildCatalogPlan(args) {
     counts,
     safety: {
       localOnlyNoSheinNetwork: true,
-      webhookReceiverEnabled: false,
+      dedicatedWebhookReceiverImplemented: true,
+      webhookEntriesBlockedFromGenericJsonCall: true,
       fileEndpointsBlockedFromGenericJsonCall: true,
       writeExecuteStillRequiresConfirmHashAndIdentityProbe: true,
     },
@@ -244,7 +245,7 @@ function printPlanSummary(plan) {
   console.log(`- generic JSON GET reads: ${plan.counts.getJsonCallable}`);
   console.log(`- generic JSON POST/read-write candidates: ${plan.counts.postJsonCallable}`);
   console.log(`- dedicated/file adapters required: ${plan.counts.fileDedicatedRequired}`);
-  console.log(`- WebHook design-only: ${plan.counts.webhookDesignOnly}`);
+  console.log(`- WebHook entries (dedicated receiver only): ${plan.counts.webhookDesignOnly}`);
   console.log(`- lanes: ${Object.entries(plan.counts.byLane).map(([k,v]) => `${k}=${v}`).join(', ')}`);
 }
 

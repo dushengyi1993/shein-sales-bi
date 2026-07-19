@@ -96,6 +96,7 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 | 2026.07.16.1 自动运营与 Partner CLI 发布说明 | `docs/bi-ops-release-2026-07-16.md` |
 | 2026.07.18.1 业务逻辑与营销巡检加固发布说明 | `docs/bi-ops-release-2026-07-18.md` |
 | 2026.07.19.1 ET 仓储费历史重述与自动同步发布说明 | `docs/bi-ops-release-2026-07-19.md` |
+| 2026.07.19.2 Webhook 与平台动态发布说明 | `docs/bi-webhook-release-2026-07-19.md` |
 | 2026-07-19 仓储费历史重述口径与验收 | `docs/storage-fee-history-restatement-2026-07-19.md` |
 | 2026-07-18 BI 业务逻辑加固口径 | `docs/bi-business-logic-hardening-2026-07-18.md` |
 | BI 仓库模型 | `docs/bi-warehouse-model.md` |
@@ -104,7 +105,7 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 | OpenAPI/CLI 能力交接索引 | `docs/shein-openapi-dev-handoff-index.md` |
 | OpenAPI 官方能力台账 | `docs/shein-openapi-official-capability-inventory.md` |
 | OpenAPI API schema 索引 | `docs/shein-openapi-api-schema-index.md` |
-| SHEIN WebHook 接收器设计 | `docs/shein-webhook-receiver-design.md` |
+| SHEIN Webhook 接收、平台动态与运行说明 | `docs/shein-webhook-receiver-design.md` |
 | 营销活动报名价格规则 | `docs/marketing-campaign-signup-pricing-rules.md` |
 | 营销折扣自动化路线图 | `docs/marketing-automation-roadmap.md` |
 | 每日营销巡检交接与执行规则 | `docs/marketing-daily-inspection-handoff.md` |

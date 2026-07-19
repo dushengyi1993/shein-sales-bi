@@ -7,7 +7,7 @@
 import fs from 'node:fs/promises';
 import fssync from 'node:fs';
 import path from 'node:path';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 import {spawn} from 'node:child_process';
 import crypto from 'node:crypto';
 import {normalizeGoodsSnDetailed} from '../lib/product_sku_normalizer.mjs';
@@ -330,6 +330,37 @@ function buildUpsertRowsSql(table, columns, conflictColumns, rows) {
   return {script, result};
 }
 
+/** Plain SQL upsert for the direct node-postgres webhook path (no psql COPY meta-protocol). */
+function buildDirectUpsertRowsSql(table, columns, conflictColumns, rows) {
+  const originalRowCount = rows.length;
+  if (rows.length && conflictColumns.length) {
+    const byConflictKey = new Map();
+    for (const row of rows) {
+      const key = conflictColumns.map((column) => String(row[column] ?? '')).join('\u001F');
+      byConflictKey.set(key, row);
+    }
+    rows = [...byConflictKey.values()];
+  }
+  const result = {table, rows: rows.length, inputRows: originalRowCount, dedupedRows: originalRowCount - rows.length};
+  if (!rows.length) return {script: '', result: {...result, skipped: true}};
+  const valueLiteral = (value) => {
+    if (value === null || value === undefined || value === '') return 'NULL';
+    const encoded = typeof value === 'object' ? JSON.stringify(value) : String(value);
+    return `'${encoded.replace(/'/g, "''")}'`;
+  };
+  const nonConflict = columns.filter((column) => !conflictColumns.includes(column) && column !== 'updated_at');
+  const updateSet = [
+    ...nonConflict.map((column) => `${qIdent(column)} = EXCLUDED.${qIdent(column)}`),
+    columns.includes('updated_at') ? 'updated_at = now()' : '',
+  ].filter(Boolean).join(',\n    ');
+  const sqlColumns = columns.map(qIdent).join(', ');
+  const values = rows.map((row) => `(${columns.map((column) => valueLiteral(row[column])).join(', ')})`).join(',\n');
+  return {
+    script: `INSERT INTO ${qIdent(table)} (${sqlColumns})\nVALUES\n${values}\nON CONFLICT (${conflictColumns.map(qIdent).join(', ')}) DO UPDATE SET\n    ${updateSet};\n`,
+    result,
+  };
+}
+
 function returnLoadSpecs(data) {
   return [
     {
@@ -367,6 +398,66 @@ async function loadOpenApiReturnsAtomically(args, data) {
   if (args.dryRun) return {cleanup, results};
   await runPsqlScript(args, script);
   return {cleanup, results};
+}
+
+function assertTargetedReturnRows(rows, storeKey, returnOrderNo) {
+  const normalizedStore = String(storeKey || '').trim().toUpperCase();
+  const normalizedReturnOrderNo = String(returnOrderNo || '').trim();
+  if (!normalizedStore || !normalizedReturnOrderNo) throw new Error('targeted return upsert requires storeKey and returnOrderNo');
+  for (const row of rows) {
+    if (String(row.store_key || '').toUpperCase() !== normalizedStore || String(row.return_order_no || '') !== normalizedReturnOrderNo) {
+      throw new Error(`targeted return row escaped requested scope ${normalizedStore}/${normalizedReturnOrderNo}`);
+    }
+  }
+  return {storeKey: normalizedStore, returnOrderNo: normalizedReturnOrderNo};
+}
+
+/** A return-order-only transaction: no date cleanup and no reconciliation. */
+export function buildTargetedOpenApiReturnsUpsertSql({artifact, file = 'webhook://return-order-details', storeKey, returnOrderNo}) {
+  const scope = assertTargetedReturnRows([], storeKey, returnOrderNo);
+  if (String(artifact?.storeKey || '').trim().toUpperCase() !== scope.storeKey) throw new Error(`Store mismatch: expected ${scope.storeKey}, got ${artifact?.storeKey || '-'}`);
+  const rows = buildFactRows(artifact, file);
+  const orders = rows.orders.filter((row) => String(row.return_order_no || '') === scope.returnOrderNo);
+  const items = rows.items.filter((row) => String(row.return_order_no || '') === scope.returnOrderNo);
+  assertTargetedReturnRows(orders, scope.storeKey, scope.returnOrderNo);
+  assertTargetedReturnRows(items, scope.storeKey, scope.returnOrderNo);
+  if (orders.length !== 1) throw new Error(`Expected exactly one return header for ${scope.storeKey}/${scope.returnOrderNo}, got ${orders.length}`);
+  const results = [];
+  let script = 'BEGIN;\n';
+  script += `DELETE FROM ${OPENAPI_RETURN_ITEM_TABLE} WHERE store_key = ${sqlLiteral(scope.storeKey)} AND return_order_no = ${sqlLiteral(scope.returnOrderNo)};\n`;
+  for (const spec of returnLoadSpecs({orders, items, reconciliations: []}).slice(0, 2)) {
+    const built = buildDirectUpsertRowsSql(spec.table, spec.columns, spec.conflictColumns, spec.rows);
+    script += built.script;
+    results.push(built.result);
+  }
+  script += 'COMMIT;\n';
+  return {scope, script, results, rowCounts: {headers: orders.length, items: items.length}};
+}
+
+export async function upsertTargetedOpenApiReturns(args, input, {executor = runPsqlScript} = {}) {
+  const built = buildTargetedOpenApiReturnsUpsertSql(input);
+  if (args?.dryRun) return {...built, dryRun: true};
+  await executor(args, built.script);
+  return built;
+}
+
+export function buildTargetedOpenApiReturnsReadbackSql({storeKey, returnOrderNo}) {
+  const scope = assertTargetedReturnRows([], storeKey, returnOrderNo);
+  return `SELECT json_build_object('storeKey', ${sqlLiteral(scope.storeKey)}, 'returnOrderNo', ${sqlLiteral(scope.returnOrderNo)}, 'headers', (SELECT count(*) FROM ${OPENAPI_RETURN_ORDER_TABLE} WHERE store_key = ${sqlLiteral(scope.storeKey)} AND return_order_no = ${sqlLiteral(scope.returnOrderNo)}), 'items', (SELECT count(*) FROM ${OPENAPI_RETURN_ITEM_TABLE} WHERE store_key = ${sqlLiteral(scope.storeKey)} AND return_order_no = ${sqlLiteral(scope.returnOrderNo)}))::text;\n`;
+}
+
+export async function readbackTargetedOpenApiReturns(args, scope, expectedRowCounts, {executor = runPsqlScript} = {}) {
+  const out = await executor(args, buildTargetedOpenApiReturnsReadbackSql(scope));
+  const line = String(out.stdout || '').split(/\r?\n/).map((value) => value.trim()).find((value) => value.startsWith('{'));
+  if (!line) throw new Error(`Missing targeted return readback for ${scope.storeKey}/${scope.returnOrderNo}`);
+  const result = JSON.parse(line);
+  const expected = expectedRowCounts || {};
+  for (const key of ['headers', 'items']) {
+    if (Number(result[key]) !== Number(expected[key])) {
+      throw new Error(`Targeted return readback failed for ${scope.storeKey}/${scope.returnOrderNo}: ${key}=${result[key]}, expected=${expected[key]}`);
+    }
+  }
+  return result;
 }
 
 function reasonByLanguage(item, lang) {
@@ -408,7 +499,7 @@ function itemKeyPart(item, idx) {
   return `h${shortHash(`${item.sku || ''}|${item.skc || ''}|${item.goodsTitle || ''}|${idx}`)}`;
 }
 
-function buildFactRows(data, file) {
+export function buildFactRows(data, file) {
   const source = rel(file);
   const orders = [];
   const items = [];
@@ -755,7 +846,6 @@ async function main() {
   }, null, 2));
 }
 
-main().catch((error) => {
-  console.error(error?.stack || String(error));
-  process.exit(1);
-});
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => { console.error(error?.stack || String(error)); process.exit(1); });
+}

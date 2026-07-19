@@ -1,0 +1,18 @@
+{
+  "spu_name": "s23121872106",
+  "version": "SPMP231218173254739",
+  "received_success": true,
+  "document_details": [
+    {
+      "document_sn": "SPMPA320231218041879",
+      "skc_name": "ss2312187210636233",
+      "sku_list": [
+        {
+          "sku_code": "I41y8oidji5y",
+          "seller_sku": "ieu8o1231123y"
+        }
+      ]
+    }
+  ],
+  "failed_reason": null
+}

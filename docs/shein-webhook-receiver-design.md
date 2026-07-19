@@ -1,168 +1,148 @@
-# SHEIN WebHook 接收器设计
+# SHEIN Webhook 接收与“平台动态”运行说明
 
-> 状态：设计稿。当前 M3 只确定接入模型和后续开发边界，不启用真实 WebHook 回调。
+> 状态：2026-07-19 已完成代码、数据库迁移、BI 子页面、P0 飞书出口和云端服务定义。真实回调是否生效，以开放平台各 App 的订阅与线上回调验收为准。
 
-## 1. 目标和边界
+## 1. 业务目标
 
-SHEIN WebHook 的价值不是替代 OpenAPI 查询接口，而是把平台侧状态变化实时推到我们的云端系统。它最适合作为这些场景的第一触发源：商品审核结果、商品上下架、商品额度变化、订单/退货/采购单状态、库存预警和建议零售价审核/有效期变化。
+Webhook 是平台状态变化的实时触发源，不替代 OpenAPI 详情接口，也不直接触发任何 SHEIN 写操作。
 
-本项目的 owner 应是云端 BI/API 服务，不应直接把 SHEIN 回调打到飞书机器人或本机 Codex：
+- 商品接收、审核、上下架和删除审核：进入“平台动态”，并在身份唯一时回填现有运营任务。
+- 订单、退货：收到单号后调用详情接口，只增量 upsert 这一单，再按店铺+单号回读。
+- 授权、商品额度、合规：产生高优先级风险；授权异常和额度为 0 会关闭对应店铺的真实写闸门。
+- 飞书只发 P0；正常订单、正常退货和普通状态变化只在 BI 查看。
+- 飞书问数/QA bot 不参与此链路，也无需恢复。
 
-- SHEIN 回调要求 1.5 秒内响应，聊天机器人链路不可控。
-- 验签、AES 解密、幂等去重和事件落库必须在服务端完成。
-- 飞书适合作为通知和人工协同层，不适合作为事件事实源。
-- 收到事件后可以再触发 BI 门户提示、飞书群消息、或受控 CLI/执行器任务。
-
-推荐架构：
+## 2. 生产架构
 
 ```mermaid
 flowchart LR
-  A["SHEIN WebHook"] --> B["云端 /api/shein/webhook/:eventCode"]
-  B --> C["快速验签 + 保存 raw_event"]
-  C --> D["立即返回 2xx"]
-  C --> E["异步解密/规范化/幂等去重"]
-  E --> F["事件表 shein_openapi_webhook_events"]
-  F --> G["BI 门户消息/任务状态更新"]
-  F --> H["飞书群机器人通知"]
-  F --> I["必要时触发只读回读或受控执行器"]
+  A["19 个 SHEIN OpenAPI App"] -->|"HTTPS 8443"| B["Cloudflare"]
+  B --> C["Caddy 8443\n仅信任 Cloudflare 边缘来源"]
+  C --> D["Nginx\nSHEIN 官方推送 IP allowlist"]
+  D --> E["shein-bi-webhook :8792"]
+  E --> F["验签 + AES 解密 + 最小校验"]
+  F --> G["PostgreSQL 密文 receipt/queue"]
+  G -->|"持久化成功后"| H["1.5 秒内返回 200"]
+  G --> I["异步 worker 租约内解密"]
+  I --> J["商品任务回填"]
+  I --> K["订单/退货定向详情与 upsert"]
+  I --> L["授权/额度安全闸门"]
+  I --> M["仅 P0 飞书告警"]
+  G --> N["BI 平台动态只读 API/子页面"]
 ```
 
-## 2. 官方回调契约
-
-证据来源：`docs/shein-openapi-doc-center-research-and-plan.md` 与 `docs/shein-openapi-official-capability-inventory.md`。
-
-- 回调方法：`POST`。
-- 内容类型：官方描述为 `multipart/form-data`。
-- 关键请求头：`x-lt-openKeyId`、`x-lt-eventCode`、`x-lt-appid`、`x-lt-timestamp`、`x-lt-signature`。
-- 请求体：`eventData`，为 AES 加密内容。
-- 验签使用应用级 `app_id` 与 `app_secretKey`，不是店铺授权得到的 `openKeyId/secretKey`。
-- 解密使用 AES/CBC/PKCS5Padding，IV 为 `space-station-default-iv`，密钥为 `app_secretKey`（按现有 `lib/shein_openapi_client.mjs` 授权解密模型，取前 16 字节）。
-- SHEIN 以 2xx 响应判断推送成功，因此入口必须先完成最低限度校验和落库，再异步处理。
-
-## 3. 22 个 WebHook 事件清单
-
-| docId | 事件 | path | 建议优先级 | 用途 |
-|---:|---|---|---|---|
-| 3001450 | 商品审核通知 | `/product_document_audit_status_notice` | P0 | 替代/减少审核状态轮询，驱动商品任务进入待复核/成功/失败。 |
-| 3000910 | 商品接收通知 | `/product_document_receive_status_notice` | P0 | 确认平台已接收商品发布/编辑公文。 |
-| 3001449 | 商品发布公文审核通知（全渠道） | `/product_document_audit_status_notice_all_channels` | P0 | 覆盖全渠道审核结果，和普通审核通知统一归一。 |
-| 3000848 | 商品上下架通知 | `/product_shelves_notice` | P0 | 上下架状态变更实时同步，减少手动回查。 |
-| 3001061 | 商品额度变动通知 | `/product_quota_change_notice` | P1 | 和 `shelf-quota` 配合，提示可上架额度不足或恢复。 |
-| 3000804 | 商品价格异常通知 | `/product_prices_abnormal_notice` | P1 | 价格异常进入 BI/飞书提醒，避免链接长期异常。 |
-| 3000912 | 商品涨价审批结果通知 | `/product_price_audit_status_notice` | P1 | 价格/建议零售价相关审批回读。 |
-| 3001792 | 建议零售价审核状态更新 | `/product_rrp_review_status_changed` | P1 | 建议零售价状态变化提醒。 |
-| 3001793 | 建议零售价有效期变更 | `/product_rrp_validity_changed` | P1 | 有效期临近/变化提醒。 |
-| 3001104 | 商品合规信息失效通知 | `/product_compliance_change_notice` | P1 | 合规失效要进入任务池，避免链接被动下架。 |
-| 3001068 | SKU库存预警通知 | `/inventory_warning_notice` | P1 | 库存预警，后续可联动补库存/限时折扣保护。 |
-| 3001048 | 推送缺货需求库存数（新） | `/out_of_stock_notice` | P1 | 缺货需求提示。 |
-| 3001442 | 订单同步通知 | `/order_push_notice` | P2 | 订单变化事件，可辅助订单/履约增量同步。 |
-| 3000914 | 退货单同步通知 | `/return_order_push_notice` | P2 | 退货事件进入售后/利润提醒。 |
-| 3001082 | cte开票通知 | `/invoice_status_notice` | P2 | 开票状态提醒。 |
-| 3001461 | SHEIN合作物流单下单通知 | `/logistics_order_result_notice` | P2 | 在线下单结果回调。 |
-| 3001435 | 采购单通知 | `/purchase_order_notice` | P2 | 采购单状态进入后续采购单模块。 |
-| 3001441 | 发货单变更通知 | `/delivery_modify_notice` | P2 | 发货单变化提醒。 |
-| 3001744 | 采购退货申请单状态通知 | `/purchase_order_return_application_notice` | P2 | 采购退货申请状态提醒。 |
-| 3001765 | 采购单合作物流通知 | `/logistics_forecast_result_notice` | P2 | 采购物流结果提醒。 |
-| 3001801 | 采购退货单状态通知 | `/purchase_order_return_notice` | P2 | 采购退货单状态提醒。 |
-| 3001503 | 店铺授权关系变更通知 | `/authorization_change_notice` | P0 | openKeyId/secretKey 可能失效或授权被撤销，必须告警并暂停该店写操作。 |
-
-## 4. 服务端处理流程
-
-### 4.1 同步入口
-
-1. 接收 `POST /api/shein/webhook/:eventCode`。
-2. 校验请求来源基本形态：方法、`eventCode`、必要 header、`eventData` 存在。
-3. 记录 `raw_event`：header、事件路径、收到时间、请求 IP、原始加密体 hash；不要把明文凭证写日志。
-4. 验签。失败仍要记录为 `signature_failed`，响应 401/403。
-5. 成功后把事件写入队列或数据库 `pending` 状态，并尽快返回 200。
-
-### 4.2 异步处理
-
-1. AES 解密 `eventData`。
-2. JSON 解析并规范化成统一结构。
-3. 计算幂等键。
-4. 如果重复事件，记录 `duplicate`，不重复通知、不重复触发执行器。
-5. 根据事件类型执行轻量动作：
-   - 商品审核/接收：更新链接任务状态，必要时调用 `audit-status` 或 `search-product` 回读确认。
-   - 授权变更：把店铺 OpenAPI 能力标记为需要复核，禁止真实写。
-   - 商品额度变化：调用 `shelf-quota` 回读并通知。
-   - 库存/价格/合规/订单/退货：先落事件并发通知，不自动写 SHEIN。
-6. 通知层只消费已落库事件。
-
-## 5. 幂等、重放和安全
-
-建议幂等键：
+固定回调：
 
 ```text
-sha256(app_id + openKeyId + eventCode + decrypted business id + platform timestamp + eventData hash)
+POST https://sa.dushengyi.cc:8443/api/shein/webhook/v1/events
 ```
 
-如果某类事件没有明确业务单号，则退化为：
+回调 URL 不带 query。19 个 App 可以配置同一 URL；服务依据 `x-lt-appid + x-lt-openKeyId` 映射到唯一店铺。映射不唯一、缺店、重复店铺或 App/openKey 不一致时启动/请求失败，不猜店铺。
+
+`8443` 是 Cloudflare 支持的 HTTPS 代理端口。生产链路没有让应用直接信任客户端自报的 `CF-Connecting-IP`：UFW 只允许 Cloudflare 官方网段访问 8443，Caddy 再校验直接对端属于同一网段，随后才把 Cloudflare 覆盖写入的原始客户端 IP 传给 Nginx；Nginx 最后按 SHEIN 官方推送 IP 放行。签名仍是主校验，来源 IP 只是独立第二层。
+
+## 3. 官方协议实现
+
+请求头：
+
+- `x-lt-openKeyId`
+- `x-lt-eventCode`
+- `x-lt-appid`
+- `x-lt-timestamp`
+- `x-lt-signature`
+
+请求体主要为 `multipart/form-data` 的 `eventData` 字段；考虑官方文档表述差异，接收器还兼容 JSON 和 urlencoded，但同样执行严格大小、重复字段和格式校验。
+
+签名：
 
 ```text
-sha256(app_id + openKeyId + eventCode + x-lt-timestamp + eventData hash)
+apiKey = x-lt-appid（缺失时回退 x-lt-openKeyId）
+randomKey = x-lt-signature 前 5 字符
+signString = apiKey + "&" + timestamp + "&" + callbackPath
+secret = appSecretKey + randomKey
+hashHex = lowercase_hex(HMAC-SHA256(signString, secret))
+expected = randomKey + Base64(UTF8(hashHex))
 ```
 
-安全要求：
+签名使用常量时间比较，并校验 5 分钟时间窗。解密采用 AES-128-CBC/PKCS5Padding：key 为 `appSecretKey` UTF-8 前 16 字节（不足补零），IV 为 `space-station-default-iv` 前 16 字节。
 
-- `x-lt-timestamp` 必须有时间窗校验，建议 5 分钟；超窗进入 `replay_rejected`。
-- 签名比较必须用 constant-time compare。
-- `eventData` 原文只保存加密体和 hash；解密明文只保存在受控事件表，不打印到普通日志。
-- 不允许 WebHook 直接触发真实写。它只能更新任务状态、发通知、触发只读回读或创建待人工确认任务。
-- 授权变更事件优先级最高：一旦授权异常，相关店铺写白名单应暂停，直到人工/探针恢复。
+接收器只有在 receipt 与队列状态已在同一数据库事务中持久化后才返回 200。应用入口总预算为 1.2 秒，receipt 事务 statement timeout 为 0.8 秒，Nginx read timeout 为 1.4 秒；不能可靠落库时在平台 1.5 秒超时前返回 503，让 SHEIN 重推。平台重推命中 `idempotency_key` 时只增加重复计数，不重复通知。
 
-## 6. 建议数据库表
+## 4. 第一阶段事件
 
-```sql
-create table shein_openapi_webhook_events (
-  id bigserial primary key,
-  received_at timestamptz not null default now(),
-  processed_at timestamptz,
-  app_id text not null,
-  open_key_id text,
-  store_key text,
-  event_code text not null,
-  event_path text not null,
-  platform_timestamp text,
-  signature_ok boolean not null default false,
-  replay_rejected boolean not null default false,
-  idempotency_key text not null,
-  encrypted_event_hash text not null,
-  encrypted_event_data text,
-  decrypted_payload jsonb,
-  normalized_payload jsonb,
-  status text not null default 'pending',
-  error text,
-  notify_status text,
-  source_ip text,
-  unique (idempotency_key)
-);
+| 批次 | eventCode | 事件 | 处理 |
+|---|---:|---|---|
+| 商品生命周期 | 3000910 | 商品接收 | 平台动态；唯一强身份时回填任务 |
+| 商品生命周期 | 3001450 | 商品审核 | 失败为 P0；任务回填 |
+| 商品生命周期 | 3001449 | 全渠道商品审核 | 和普通审核统一归一并幂等 |
+| 商品生命周期 | 3000848 | 商品上下架 | 非预期下架为 P0 |
+| 商品生命周期 | 3001903 | 商品删除审核 | 删除获批或审核失败均为 P0 |
+| 订单/退货 | 3001442 | 订单同步 | 按订单号详情、targeted upsert、回读 |
+| 订单/退货 | 3000914 | 退货单同步 | 按退货单号详情、targeted upsert、回读 |
+| 风险 | 3001503 | 授权关系变更 | P0；关闭该店授权闸门 |
+| 风险 | 3001061 | 商品额度变更 | 额度 0 为 P0/关闭闸门；恢复为正数自动开闸 |
+| 风险 | 3001104 | 合规信息失效 | 必需合规为 P0；按业务对象处理，不错误地封整店 |
 
-create index shein_openapi_webhook_events_event_time_idx
-  on shein_openapi_webhook_events (event_code, received_at desc);
-```
+官方目录当前为 23 个 Webhook（新增 `3001903`）。其余事件已能安全解析和入库，但第一阶段不主动订阅；价格异常、库存预警等 P1 也不发飞书。
 
-## 7. 飞书接入方式
+## 5. 数据与并发
 
-最方便的方式是复用现有云端机器人能力，但让飞书只作为事件通知出口：
+迁移：`infra/warehouse/migrations/20260719_001_shein_webhook_runtime.sql`
 
-1. WebHook receiver 落库并规范化事件。
-2. 事件分发器生成一段人话摘要，例如“FY 商品 SKC123 审核失败，原因：标题不符合规范，已进入待人工处理”。
-3. 调用现有云端飞书机器人发送到指定群。
-4. 群消息带 BI 门户任务链接；人工点击进入 BI 处理，而不是在飞书里直接执行 SHEIN 写。
+- `ops.shein_webhook_receipt`：AES 密文 `event_data`、密文 hash、最小规范化投影、幂等键、状态、lease、重试、告警与处理结果；不保存解密后的原始 payload。
+- `ops.shein_webhook_store_gate`：店铺级授权/额度闸门。
+- worker 使用 `FOR UPDATE SKIP LOCKED` 领取任务；过期 lease 可恢复。
+- worker 只在持有 lease 时按当前 App secret 解密；lease 续约失败会中止后续处理。
+- 最多重试 8 次，指数退避后进入 `dead_letter`。
+- BI API 永不返回 app id、openKey、密文、原始 payload 或凭据。
 
-后续如果要允许飞书群内命令处理事件，也应走 BI 任务接口：飞书消息 -> 云端机器人 -> 创建/更新 BI 任务 -> 预检 -> 人工确认 -> 受控执行器。
+订单/退货 targeted 模式与原来的日期全量 loader 完全隔离：同一事务只按 `店铺 + 订单号/退货单号` 精确删除该单既有子项（订单 item/payment flag 或退货 item），再 upsert 当前 header/子项；不执行日期切片删除、不改写整日 reconciliation，最后按同一业务键核对 header/子项数量。
 
-## 8. 开发里程碑建议
+worker 直接使用独立受限 PostgreSQL 角色 `shein_webhook_ops` 执行这些 SQL，不调用 `sudo`/Docker。它只获得 webhook receipt/gate 与上述精准订单/退货表所需权限，不拥有日汇总或 reconciliation 写权限。Portal 继续使用 `shein_link_ops`：数据库只允许它读取 receipt 的安全投影列并维护 gate，不能读取 `event_data/app_id/open_key_id/cipher_hash`，也不能删除订单/退货事实。
 
-- W1：实现 receiver 骨架、验签/AES 解密单元测试、事件落库、2xx 快速响应。
-- W2：接入商品审核/接收/授权变更/额度变动 4 类 P0/P1 事件，触发只读回读。
-- W3：接飞书群通知；每类事件先只发摘要和 BI 链接。
-- W4：把事件和链接任务状态联动，补 dashboard 最近事件列表。
+## 6. 写安全边界
 
-## 9. 当前不做的事
+- Webhook 永不直接调用 SHEIN 写接口。
+- 商品任务只在“店铺 + 至少两个平台强身份字段”全部精确匹配且结果唯一时附加 readback；0 个或多个候选只标记 unmatched/ambiguous。
+- 授权闸门可由事件之后更新、更成功的店铺只读探针自动解除。
+- 商品额度必须收到正数恢复事件才开闸。
+- 授权无业务时间的重复真实事件以签名时间区分；额度/授权 gate 按 receipt ID 单调更新，旧事件不能覆盖新事件。
+- 真实提交在预检查和 executor 获得 `execute=true` 前各查一次 gate；仓库缺失、查询失败或期间新封闸均失败关闭。
+- 合规失效通常是商品/证书级，禁止用店铺级闸门误伤其他商品。
+- 原有 dry-run、payload hash、账号权限、明确确认、审计和写后回读全部保留。
 
-- 不把 WebHook 直接映射为真实写动作。
-- 不把飞书当事件事实源。
-- 不在本地 Windows 常驻监听公网回调。
-- 不把 `app_secretKey`、`eventData` 明文或店铺 `secretKey` 打进日志。
+## 7. BI 与飞书
+
+BI：导航新增独立“平台动态”页，提供 24 小时事件、待处理、失败、P0 摘要，以及店铺/级别/类型/状态筛选。接口沿用 `bi_session` 和账号 `readStores` 权限；SQL 层再次限制店铺范围。
+
+飞书：复用 `lark-cli im +messages-send` 的现有通知身份，但仅发送 P0，幂等键来自 webhook receipt，不恢复已暂停的问数服务。详情与普通事件留在 BI，避免刷屏。
+
+## 8. 部署与验收
+
+1. 先备份生产应用、当前生效的 Nginx 站点（现网为 `/etc/nginx/sites-available/shein-bi`）、`/etc/caddy/Caddyfile` 和现有 unit；生产应用工作树有运行态改动时只上传本版本精确文件，禁止 `git pull/reset/clean`。
+2. 以 root 运行 `scripts/provision_shein_webhook_postgres_role.sh` 创建/收紧 `shein_webhook_ops`（LOGIN、NOSUPERUSER、NOCREATEDB、NOCREATEROLE、NOINHERIT、NOREPLICATION）；随机密码仅写 `/srv/shein-bi/secrets/webhook-warehouse.env` 的 `SHEIN_WAREHOUSE_PG_PASSWORD`，文件 `root:root 0600`，不得复用 `portal-warehouse.env` 或 `shein_link_ops` 密码。随后以数据库 owner 执行 `infra/warehouse/migrations/20260719_001_shein_webhook_runtime.sql`。
+3. 权限验收必须同时证明：`shein_webhook_ops` 可写 receipt/精准事实表；`shein_link_ops` 只能 SELECT receipt 安全列并读写 gate，读取 `event_data` 与删除订单/退货事实均被 PostgreSQL 拒绝。
+4. 安装 `infra/systemd/shein-bi-webhook.service` 与 Nginx 配置。**只把** `infra/caddy/Caddyfile.shein-bi` 中 8443 callback 站点合并到生产完整 Caddyfile，禁止用仓库子集覆盖生产其他域名。
+5. UFW 仅允许 Cloudflare 官方 IPv4/IPv6 网段访问 `8443/tcp`，不对全网开放；依次执行 `caddy validate`、`nginx -t`、`systemd-analyze verify` 后才 reload/start。
+6. 验证 `http://127.0.0.1:8792/healthz`、数据库队列、BI 页面与来源 IP 拒绝路径；确认 `shein-bi-lark-sales-qa.service` 仍为 `disabled + inactive`。
+
+开放平台侧要在每个 App 中配置 `https://sa.dushengyi.cc:8443/api/shein/webhook/v1/events`、订阅上述 10 个事件，并用官方调试工具产生真实加密推送。验收标准：回调 2xx、receipt 唯一、worker 成功、BI 可见；再分别验证订单定向入仓、授权闸门和一条受控 P0 飞书消息。开放平台尚未审核/启用订阅时，只能称“接收端已就绪”，不能称“真实回调已上线”。
+
+官方文档提供了事件 payload 样例，但没有发布可独立核对的签名/密文 golden vector；本地密码学测试因此是协议公式与 round-trip 门禁，不能冒充官方向量。上线验收还必须用真实 App secret 发送一次不打印明文/密钥的有效合成请求，并清理测试 receipt，再用平台官方调试推送完成最终证明。
+
+## 9. 回滚顺序
+
+1. `systemctl disable --now shein-bi-webhook.service`，先停止接收与 worker；不要删除既有 receipt，它们是审计证据。
+2. 恢复本次部署前备份的 `/etc/nginx/sites-available/shein-bi`，从完整 `/etc/caddy/Caddyfile` 移除/恢复本次 8443 block；分别 `nginx -t`、`caddy validate` 后 reload。
+3. 按部署记录逐条删除本次 UFW Cloudflare `8443/tcp` 规则，确认公网 8443 不再监听/放行。
+4. 恢复备份的 Portal unit 与精确应用文件，`systemctl daemon-reload` 后重启 Portal；再次确认飞书问数仍为 `disabled + inactive`。
+5. `ALTER ROLE shein_webhook_ops NOLOGIN` 并撤销它对 webhook/fact 表的权限；专用 secret 文件先归档到仅 root 可读备份，确认无需重放后再销毁。
+6. 数据表默认保留。只有 receipt/gate 已为空、审计已导出且负责人明确批准，才允许单独迁移删除；不得为了“回滚干净”直接 DROP 生产证据。
+7. 验证 BI 原页面、受控写 dry-run、Nginx/Caddy 配置和现有 timers；记录备份目录、恢复文件 hash 与回滚时间。
+
+## 10. 安全要求
+
+- `appSecretKey`、店铺 secretKey、解密后的 `eventData` 和买家信息不得进入 Git、前端、数据库原始字段或普通日志。
+- 私有凭据继续只放 `config/shein_openapi.local.json`/云端 secrets。
+- Cloudflare/UFW/Caddy 来源链与 Nginx SHEIN 官方推送 IP allowlist 是第二层；签名始终是主校验。
+- Cloudflare 或 SHEIN 官方 IP 变更时须同步更新 allowlist，并通过“最后收到时间”监控发现静默断流。

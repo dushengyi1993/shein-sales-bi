@@ -7,11 +7,11 @@
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const DEFAULT_CONFIG = path.join(ROOT, 'config', 'shein_openapi.local.json');
+const DEFAULT_CONFIG = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
 
 function parseArgs(argv) {
   const args = {
@@ -151,7 +151,7 @@ async function fetchReturnOrderListForDate(client, date, pageSize) {
   return {rows: all, total: total ?? all.length};
 }
 
-async function fetchReturnOrderDetails(client, returnOrderNos) {
+export async function fetchReturnOrderDetails(client, returnOrderNos) {
   const out = [];
   for (const part of chunk(returnOrderNos, 30)) {
     if (!part.length) continue;
@@ -162,6 +162,40 @@ async function fetchReturnOrderDetails(client, returnOrderNos) {
     out.push(...detailsFromResponse(response.data));
   }
   return out;
+}
+
+function requestedSet(values, label) {
+  const ids = [...new Set(asArray(values).map((value) => String(value || '').trim()).filter(Boolean))];
+  if (!ids.length) throw new Error(`Missing ${label}`);
+  return new Set(ids);
+}
+
+/** Fetch exactly the requested return details for a webhook worker. */
+export async function fetchOpenApiReturnOrderDetailsForStore({storeKey, returnOrderNos, client, config, fetchTime = new Date().toISOString()} = {}) {
+  const normalizedStore = String(storeKey || '').trim().toUpperCase();
+  if (!normalizedStore) throw new Error('Missing storeKey');
+  const requested = requestedSet(returnOrderNos, 'returnOrderNos');
+  let effectiveConfig = config;
+  let store;
+  let effectiveClient = client;
+  if (!effectiveClient) {
+    effectiveConfig = effectiveConfig || await readJson(DEFAULT_CONFIG);
+    store = asArray(effectiveConfig.stores).find((entry) => String(entry.storeKey).toUpperCase() === normalizedStore);
+    if (!store?.openKeyId || !store?.secretKey) throw new Error(`${normalizedStore} 未完成 SHEIN OpenAPI 授权`);
+    effectiveClient = new SheinOpenApiClient({baseUrl: effectiveConfig.apiBaseUrls?.prodSemiManaged || SHEIN_OPENAPI_BASE_URLS.prodSemiManaged, openKeyId: store.openKeyId, secretKey: store.secretKey});
+  }
+  if (!store && effectiveConfig) store = asArray(effectiveConfig.stores).find((entry) => String(entry.storeKey).toUpperCase() === normalizedStore);
+  const returnOrders = await fetchReturnOrderDetails(effectiveClient, [...requested]);
+  const returned = new Set(returnOrders.map((row) => String(row?.returnOrderNo || '').trim()).filter(Boolean));
+  const unexpected = [...returned].filter((returnOrderNo) => !requested.has(returnOrderNo));
+  const missing = [...requested].filter((returnOrderNo) => !returned.has(returnOrderNo));
+  if (unexpected.length || missing.length) throw new Error(`return-order/details target mismatch for ${normalizedStore}: missing=${missing.join(',') || '-'} unexpected=${unexpected.join(',') || '-'}`);
+  return {
+    storeKey: normalizedStore, shopName: store?.shopName || normalizedStore, groupKey: store?.groupKey || '', fetchTime,
+    source: 'shein-openapi-webhook', requestedReturnOrderNos: [...requested],
+    returnOrderRefs: returnOrders.map((row) => ({returnOrderNo: row.returnOrderNo, orderNo: row.orderNo, requestReturnTime: row.requestReturnTime, addTime: row.addTime})),
+    returnOrders, summary: summarize(returnOrders, returnOrders),
+  };
 }
 
 function cnReason(reasons) {
@@ -199,6 +233,7 @@ function summarize(returnList, returnDetails) {
   };
 }
 
+async function main() {
 const args = parseArgs(process.argv.slice(2));
 const config = await readJson(args.config);
 const store = asArray(config.stores).find((s) => String(s.storeKey).toUpperCase() === args.store);
@@ -241,3 +276,8 @@ for (const date of eachDate(args.start, args.end)) {
 }
 
 console.log(JSON.stringify({ok: true, storeKey: args.store, outputs}, null, 2));
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => { console.error(error?.stack || String(error)); process.exit(1); });
+}

@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const REPORT_CONFIG_PATH = path.join(ROOT, 'config', 'lark_report.json');
-const OUT_DIR = path.join(ROOT, 'outputs', 'sync_issue_alerts');
+const OUT_DIR = process.env.SHEIN_SYNC_ISSUE_OUT_DIR || path.join(ROOT, 'outputs', 'sync_issue_alerts');
 
 function parseArgs(argv) {
   const args = {
@@ -18,6 +18,8 @@ function parseArgs(argv) {
     loginRequiredStores: '',
     message: '',
     logFile: '',
+    title: '',
+    idempotencyKey: '',
     dryRun: false,
     force: false,
   };
@@ -30,6 +32,8 @@ function parseArgs(argv) {
     else if (a === '--login-required-stores') args.loginRequiredStores = argv[++i] || '';
     else if (a === '--message') args.message = argv[++i] || '';
     else if (a === '--log-file') args.logFile = argv[++i] || '';
+    else if (a === '--title') args.title = argv[++i] || '';
+    else if (a === '--idempotency-key') args.idempotencyKey = argv[++i] || '';
     else if (a === '--dry-run') args.dryRun = true;
     else if (a === '--force') args.force = true;
   }
@@ -85,16 +89,21 @@ async function main() {
   const identity = cfg.defaultIdentity || 'bot';
   const date = args.date || new Date().toISOString().slice(0, 10);
   const modeLabel = args.mode || 'sync';
-  const title = `SHEIN 同步异常提醒：${date} ${modeLabel}`;
+  const isWebhook = String(args.kind || '').toLowerCase() === 'webhook';
+  const title = args.title || (isWebhook
+    ? `SHEIN 平台高优先级动态：${modeLabel}`
+    : `SHEIN 同步异常提醒：${date} ${modeLabel}`);
   const text = [
-    `⚠️ ${title}`,
+    `${isWebhook ? '🚨' : '⚠️'} ${title}`,
     '',
     failed.length ? `失败店铺：${failed.join('、')}` : '',
     loginRequired.length ? `疑似登录态/验证问题：${loginRequired.join('、')}` : '',
     args.message ? `原因：${args.message}` : '',
     args.logFile ? `日志：${args.logFile}` : '',
     '',
-    '处理原则：已成功店铺的数据继续同步；BI 会尽量刷新可用数据，不因单店失败整条中断。',
+    isWebhook
+      ? '处理原则：该消息仅用于平台高优先级异常；详情与普通动态请到 BI「平台动态」查看。'
+      : '处理原则：已成功店铺的数据继续同步；BI 会尽量刷新可用数据，不因单店失败整条中断。',
     `提醒时间：${bjDateTime()}`,
   ].filter(Boolean).join('\n');
 
@@ -119,10 +128,13 @@ async function main() {
     '--user-id', recipient,
     '--text', text,
   ];
-  const key = idempotencyKey([date, modeLabel, failed.join(','), loginRequired.join(','), args.message, stamp]);
+  const key = args.idempotencyKey || idempotencyKey([date, modeLabel, failed.join(','), loginRequired.join(','), args.message, stamp]);
   let res = await runLark([...baseLarkArgs, '--idempotency-key', key]);
   let fallbackTried = false;
-  if (!res.ok && /field validation failed/i.test(`${res.stdout}\n${res.stderr}`)) {
+  // Webhook P0 alerts are retried by the durable receipt worker. Never retry
+  // those without an idempotency key: a process crash between send and local
+  // acknowledgement would otherwise produce duplicate emergency messages.
+  if (!isWebhook && !res.ok && /field validation failed/i.test(`${res.stdout}\n${res.stderr}`)) {
     fallbackTried = true;
     res = await runLark(baseLarkArgs);
   }

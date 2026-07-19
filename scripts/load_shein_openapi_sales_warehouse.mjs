@@ -596,6 +596,106 @@ function summarizeArtifact(data) {
   };
 }
 
+/** Plain SQL upsert for the direct node-postgres webhook path (no psql COPY meta-protocol). */
+function buildDirectUpsertRowsSql(table, columns, conflictColumns, rows) {
+  const originalRowCount = rows.length;
+  if (rows.length && conflictColumns.length) {
+    const byConflictKey = new Map();
+    for (const row of rows) {
+      const key = conflictColumns.map((column) => String(row[column] ?? '')).join('\u001F');
+      byConflictKey.set(key, row);
+    }
+    rows = [...byConflictKey.values()];
+  }
+  const result = {table, rows: rows.length, inputRows: originalRowCount, dedupedRows: originalRowCount - rows.length};
+  if (!rows.length) return {script: '', result: {...result, skipped: true}};
+  const valueLiteral = (value) => {
+    if (value === null || value === undefined || value === '') return 'NULL';
+    const encoded = typeof value === 'object' ? JSON.stringify(value) : String(value);
+    return `'${encoded.replace(/'/g, "''")}'`;
+  };
+  const nonConflict = columns.filter((column) => !conflictColumns.includes(column) && column !== 'updated_at');
+  const updateSet = [
+    ...nonConflict.map((column) => `${qIdent(column)} = EXCLUDED.${qIdent(column)}`),
+    columns.includes('updated_at') ? 'updated_at = now()' : '',
+  ].filter(Boolean).join(',\n    ');
+  const sqlColumns = columns.map(qIdent).join(', ');
+  const values = rows.map((row) => `(${columns.map((column) => valueLiteral(row[column])).join(', ')})`).join(',\n');
+  return {
+    script: `INSERT INTO ${qIdent(table)} (${sqlColumns})\nVALUES\n${values}\nON CONFLICT (${conflictColumns.map(qIdent).join(', ')}) DO UPDATE SET\n    ${updateSet};\n`,
+    result,
+  };
+}
+
+function assertTargetedSalesRows(rows, storeKey, orderNo) {
+  const normalizedStore = String(storeKey || '').trim().toUpperCase();
+  const normalizedOrderNo = String(orderNo || '').trim();
+  if (!normalizedStore || !normalizedOrderNo) throw new Error('targeted sales upsert requires storeKey and orderNo');
+  for (const row of rows) {
+    if (String(row.store_key || '').toUpperCase() !== normalizedStore || String(row.order_no || '') !== normalizedOrderNo) {
+      throw new Error(`targeted sales row escaped requested scope ${normalizedStore}/${normalizedOrderNo}`);
+    }
+  }
+  return {storeKey: normalizedStore, orderNo: normalizedOrderNo};
+}
+
+/**
+ * Build a single-order transaction.  It deliberately excludes daily summaries,
+ * reconciliation.  It removes only this order's replaceable detail rows
+ * before upserting, never a same-day slice.
+ */
+export function buildTargetedOpenApiSalesUpsertSql({artifact, file = 'webhook://order-detail', storeKey, orderNo}) {
+  const scope = assertTargetedSalesRows([], storeKey, orderNo);
+  if (String(artifact?.storeKey || '').trim().toUpperCase() !== scope.storeKey) throw new Error(`Store mismatch: expected ${scope.storeKey}, got ${artifact?.storeKey || '-'}`);
+  const rows = buildFactRows(artifact, file);
+  const orders = rows.orders.filter((row) => String(row.order_no || '') === scope.orderNo);
+  const items = rows.items.filter((row) => String(row.order_no || '') === scope.orderNo);
+  const paymentFlags = rows.paymentFlags.filter((row) => String(row.order_no || '') === scope.orderNo);
+  assertTargetedSalesRows(orders, scope.storeKey, scope.orderNo);
+  assertTargetedSalesRows(items, scope.storeKey, scope.orderNo);
+  assertTargetedSalesRows(paymentFlags, scope.storeKey, scope.orderNo);
+  if (orders.length !== 1) throw new Error(`Expected exactly one order header for ${scope.storeKey}/${scope.orderNo}, got ${orders.length}`);
+  const targeted = {orders, items, paymentFlags};
+  const specs = openApiSalesLoadSpecs({daily: [], ...targeted, reconciliations: []}).filter((spec) => spec.rows.length || ['fact.openapi_order_header'].includes(spec.table));
+  const results = [];
+  let script = 'BEGIN;\n';
+  script += `DELETE FROM fact.openapi_order_item WHERE store_key = ${sqlLiteral(scope.storeKey)} AND order_no = ${sqlLiteral(scope.orderNo)};\n`;
+  script += `DELETE FROM ${OPENAPI_ORDER_PAYMENT_FLAG_TABLE} WHERE store_key = ${sqlLiteral(scope.storeKey)} AND order_no = ${sqlLiteral(scope.orderNo)};\n`;
+  for (const spec of specs) {
+    const built = buildDirectUpsertRowsSql(spec.table, spec.columns, spec.conflictColumns, spec.rows);
+    script += built.script;
+    results.push(built.result);
+  }
+  script += 'COMMIT;\n';
+  return {scope, script, results, rowCounts: {headers: orders.length, items: items.length, paymentFlags: paymentFlags.length}};
+}
+
+export async function upsertTargetedOpenApiSales(args, input, {executor = runPsqlScript} = {}) {
+  const built = buildTargetedOpenApiSalesUpsertSql(input);
+  if (args?.dryRun) return {...built, dryRun: true};
+  await executor(args, built.script);
+  return built;
+}
+
+export function buildTargetedOpenApiSalesReadbackSql({storeKey, orderNo}) {
+  const scope = assertTargetedSalesRows([], storeKey, orderNo);
+  return `SELECT json_build_object('storeKey', ${sqlLiteral(scope.storeKey)}, 'orderNo', ${sqlLiteral(scope.orderNo)}, 'headers', (SELECT count(*) FROM fact.openapi_order_header WHERE store_key = ${sqlLiteral(scope.storeKey)} AND order_no = ${sqlLiteral(scope.orderNo)}), 'items', (SELECT count(*) FROM fact.openapi_order_item WHERE store_key = ${sqlLiteral(scope.storeKey)} AND order_no = ${sqlLiteral(scope.orderNo)}), 'paymentFlags', (SELECT count(*) FROM ${OPENAPI_ORDER_PAYMENT_FLAG_TABLE} WHERE store_key = ${sqlLiteral(scope.storeKey)} AND order_no = ${sqlLiteral(scope.orderNo)}))::text;\n`;
+}
+
+export async function readbackTargetedOpenApiSales(args, scope, expectedRowCounts, {executor = runPsqlScript} = {}) {
+  const out = await executor(args, buildTargetedOpenApiSalesReadbackSql(scope));
+  const line = String(out.stdout || '').split(/\r?\n/).map((value) => value.trim()).find((value) => value.startsWith('{'));
+  if (!line) throw new Error(`Missing targeted order readback for ${scope.storeKey}/${scope.orderNo}`);
+  const result = JSON.parse(line);
+  const expected = expectedRowCounts || {};
+  for (const key of ['headers', 'items', 'paymentFlags']) {
+    if (Number(result[key]) !== Number(expected[key])) {
+      throw new Error(`Targeted order readback failed for ${scope.storeKey}/${scope.orderNo}: ${key}=${result[key]}, expected=${expected[key]}`);
+    }
+  }
+  return result;
+}
+
 function setDiff(left, right) {
   return [...left].filter((x) => !right.has(x));
 }

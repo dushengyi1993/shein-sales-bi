@@ -499,4 +499,4 @@ node scripts/bi_ops_cli.mjs openapi-call --doc-id <docId> --store FY --body-json
 
 ### WebHook
 
-设计文档见 `docs/shein-webhook-receiver-design.md`。当前只完成设计，不启用真实 WebHook 服务。后续建议路径是：SHEIN 回调先进入云端 receiver 落库、验签、AES 解密和幂等去重，再由云端机器人发飞书群通知；飞书不是事件事实源。
+运行说明见 `docs/shein-webhook-receiver-design.md`。接收端、密文队列、异步 worker 和 BI“平台动态”子页面已实现；真实事件是否开始进入，以各 SHEIN App 的回调订阅/审核状态为准。普通动态只在 BI 展示，飞书仅接收 P0 摘要；飞书不是事件事实源，已暂停的问数服务也不因此恢复。

@@ -36,7 +36,7 @@ try{
  await fs.writeFile(path.join(detailDir,'3001359.json'),JSON.stringify({docId:'3001359',requestBody:{children:[{name:'file',type:'blob'}]}}));
  await fs.writeFile(path.join(detailDir,'3001852.json'),JSON.stringify({docId:'3001852',requestBody:{children:[{name:'file',type:'blob',description:'PDF/PNG/JPG/JPEG 文件上传'}]}}));
  const plan=await run(['scripts/openapi_catalog_executor.mjs','plan','--catalog',catalog,'--detail-dir',detailDir]);
- check('plan ok',plan.json?.ok,true); check('plan total',plan.json?.counts?.total,6); check('plan webhook design-only',plan.json?.counts?.webhookDesignOnly,1); check('plan file dedicated',plan.json?.counts?.fileDedicatedRequired,2); check('plan GET callable',plan.json?.counts?.getJsonCallable,1);
+ check('plan ok',plan.json?.ok,true); check('plan total',plan.json?.counts?.total,6); check('plan webhook dedicated-only',plan.json?.counts?.webhookDesignOnly,1); check('dedicated receiver implemented',plan.json?.safety?.dedicatedWebhookReceiverImplemented,true); check('webhook generic blocked',plan.json?.safety?.webhookEntriesBlockedFromGenericJsonCall,true); check('plan file dedicated',plan.json?.counts?.fileDedicatedRequired,2); check('plan GET callable',plan.json?.counts?.getJsonCallable,1);
  const dryRead=await run(['scripts/openapi_catalog_executor.mjs','--doc-id','3001544','--catalog',catalog,'--config',config,'--store-truth',truth,'--store','SMK','--body-json','{}','--detail-dir',detailDir]);
  check('read dry ok',dryRead.code,0); check('read dry no network',calls.length,0);
  const execRead=await run(['scripts/openapi_catalog_executor.mjs','--doc-id','3001544','--catalog',catalog,'--config',config,'--store-truth',truth,'--store','SMK','--body-json','{}','--mode','execute','--detail-dir',detailDir]);

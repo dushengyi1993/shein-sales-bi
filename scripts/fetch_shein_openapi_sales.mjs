@@ -7,7 +7,7 @@
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 import {summarizeSalesGoodsRows} from '../lib/shein_sales_validity.mjs';
 import {
   mapOpenApiOrderDetails,
@@ -16,7 +16,7 @@ import {
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const DEFAULT_CONFIG = path.join(ROOT, 'config', 'shein_openapi.local.json');
+const DEFAULT_CONFIG = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
 const DEFAULT_STORES_CONFIG = path.join(ROOT, 'config', 'stores.json');
 
 function parseArgs(argv) {
@@ -114,7 +114,7 @@ async function fetchOrderListForDate(client, date) {
   return all;
 }
 
-async function fetchOrderDetails(client, orderNos) {
+export async function fetchOrderDetails(client, orderNos) {
   const out = [];
   for (const part of chunk(orderNos, 30)) {
     if (!part.length) continue;
@@ -125,6 +125,67 @@ async function fetchOrderDetails(client, orderNos) {
     out.push(...asArray(response.data?.info));
   }
   return out;
+}
+
+function requestedSet(values, label) {
+  const ids = [...new Set(asArray(values).map((value) => String(value || '').trim()).filter(Boolean))];
+  if (!ids.length) throw new Error(`Missing ${label}`);
+  return new Set(ids);
+}
+
+/**
+ * Fetch exactly the requested order details for a webhook worker.  The
+ * returned payload intentionally has the same shape as the daily fetch
+ * artifact, so it can share the established mapper and warehouse rows.
+ */
+export async function fetchOpenApiOrderDetailsForStore({
+  storeKey,
+  orderNos,
+  client,
+  config,
+  storesConfig,
+  fetchTime = new Date().toISOString(),
+} = {}) {
+  const normalizedStore = String(storeKey || '').trim().toUpperCase();
+  if (!normalizedStore) throw new Error('Missing storeKey');
+  const requested = requestedSet(orderNos, 'orderNos');
+  let effectiveConfig = config;
+  let effectiveStoresConfig = storesConfig;
+  let effectiveClient = client;
+  let store;
+  if (!effectiveClient) {
+    effectiveConfig = effectiveConfig || await readJson(DEFAULT_CONFIG);
+    store = asArray(effectiveConfig.stores).find((entry) => String(entry.storeKey).toUpperCase() === normalizedStore);
+    if (!store?.openKeyId || !store?.secretKey) throw new Error(`${normalizedStore} 未完成 SHEIN OpenAPI 授权`);
+    effectiveClient = new SheinOpenApiClient({
+      baseUrl: effectiveConfig.apiBaseUrls?.prodSemiManaged || SHEIN_OPENAPI_BASE_URLS.prodSemiManaged,
+      openKeyId: store.openKeyId,
+      secretKey: store.secretKey,
+    });
+  }
+  if (!store && effectiveConfig) store = asArray(effectiveConfig.stores).find((entry) => String(entry.storeKey).toUpperCase() === normalizedStore);
+  if (!effectiveStoresConfig) effectiveStoresConfig = await readJson(DEFAULT_STORES_CONFIG);
+  const storeMetadata = resolveOpenApiStoreMetadata(normalizedStore, store || {storeKey: normalizedStore}, effectiveStoresConfig);
+  const orderDetails = await fetchOrderDetails(effectiveClient, [...requested]);
+  const returned = new Set(orderDetails.map((row) => String(row?.orderNo || '').trim()).filter(Boolean));
+  const unexpected = [...returned].filter((orderNo) => !requested.has(orderNo));
+  const missing = [...requested].filter((orderNo) => !returned.has(orderNo));
+  if (unexpected.length || missing.length) {
+    throw new Error(`order-detail target mismatch for ${normalizedStore}: missing=${missing.join(',') || '-'} unexpected=${unexpected.join(',') || '-'}`);
+  }
+  const {orderRows, goodsRows} = mapOpenApiOrderDetails(orderDetails);
+  return {
+    storeKey: normalizedStore,
+    shopName: storeMetadata.shopName,
+    groupKey: storeMetadata.groupKey,
+    fetchTime,
+    source: 'shein-openapi-webhook',
+    requestedOrderNos: [...requested],
+    orders: orderDetails,
+    orderRows,
+    goodsRows,
+    summary: summarize(orderDetails, orderRows, goodsRows),
+  };
 }
 
 function summarize(orderList, orderRows, goodsRows) {
@@ -147,49 +208,38 @@ function summarize(orderList, orderRows, goodsRows) {
   };
 }
 
-const args = parseArgs(process.argv.slice(2));
-const config = await readJson(args.config);
-const store = asArray(config.stores).find((s) => String(s.storeKey).toUpperCase() === args.store);
-if (!store?.openKeyId || !store?.secretKey) throw new Error(`${args.store} 未完成 SHEIN OpenAPI 授权`);
-const publicStoreConfig = await readJson(args.storesConfig);
-const storeMetadata = resolveOpenApiStoreMetadata(args.store, store, publicStoreConfig);
-
-const client = new SheinOpenApiClient({
-  baseUrl: config.apiBaseUrls?.prodSemiManaged || SHEIN_OPENAPI_BASE_URLS.prodSemiManaged,
-  openKeyId: store.openKeyId,
-  secretKey: store.secretKey,
-});
-
-const outputs = [];
-for (const date of eachDate(args.start, args.end)) {
-  const orderList = await fetchOrderListForDate(client, date);
-  const orderNos = orderList.map((row) => String(row.orderNo)).filter(Boolean);
-  const orderDetails = await fetchOrderDetails(client, orderNos);
-  const {orderRows, goodsRows} = mapOpenApiOrderDetails(orderDetails);
-  const payload = {
-    storeKey: args.store,
-    shopName: storeMetadata.shopName,
-    groupKey: storeMetadata.groupKey,
-    start: date,
-    end: date,
-    fetchTime: new Date().toISOString(),
-    source: 'shein-openapi',
-    request: {
-      apiBaseUrl: client.baseUrl,
-      queryType: 1,
-      startTime: `${date} 00:00:00`,
-      endTime: `${date} 23:59:59`,
-    },
-    timezone: {name: 'Asia/Shanghai', utcOffsetHours: 8},
-    summary: summarize(orderList, orderRows, goodsRows),
-    orderRefs: orderList,
-    orders: orderDetails,
-    orderRows,
-    goodsRows,
-  };
-  const outFile = path.join(args.outDir, args.store, `${date}.json`);
-  await writeJson(outFile, payload);
-  outputs.push({date, savedTo: path.relative(ROOT, outFile).replace(/\\/g, '/'), summary: payload.summary});
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const config = await readJson(args.config);
+  const store = asArray(config.stores).find((s) => String(s.storeKey).toUpperCase() === args.store);
+  if (!store?.openKeyId || !store?.secretKey) throw new Error(`${args.store} 未完成 SHEIN OpenAPI 授权`);
+  const publicStoreConfig = await readJson(args.storesConfig);
+  const storeMetadata = resolveOpenApiStoreMetadata(args.store, store, publicStoreConfig);
+  const client = new SheinOpenApiClient({
+    baseUrl: config.apiBaseUrls?.prodSemiManaged || SHEIN_OPENAPI_BASE_URLS.prodSemiManaged,
+    openKeyId: store.openKeyId,
+    secretKey: store.secretKey,
+  });
+  const outputs = [];
+  for (const date of eachDate(args.start, args.end)) {
+    const orderList = await fetchOrderListForDate(client, date);
+    const orderNos = orderList.map((row) => String(row.orderNo)).filter(Boolean);
+    const orderDetails = await fetchOrderDetails(client, orderNos);
+    const {orderRows, goodsRows} = mapOpenApiOrderDetails(orderDetails);
+    const payload = {
+      storeKey: args.store, shopName: storeMetadata.shopName, groupKey: storeMetadata.groupKey, start: date, end: date,
+      fetchTime: new Date().toISOString(), source: 'shein-openapi',
+      request: {apiBaseUrl: client.baseUrl, queryType: 1, startTime: `${date} 00:00:00`, endTime: `${date} 23:59:59`},
+      timezone: {name: 'Asia/Shanghai', utcOffsetHours: 8}, summary: summarize(orderList, orderRows, goodsRows),
+      orderRefs: orderList, orders: orderDetails, orderRows, goodsRows,
+    };
+    const outFile = path.join(args.outDir, args.store, `${date}.json`);
+    await writeJson(outFile, payload);
+    outputs.push({date, savedTo: path.relative(ROOT, outFile).replace(/\\/g, '/'), summary: payload.summary});
+  }
+  console.log(JSON.stringify({ok: true, storeKey: args.store, outputs}, null, 2));
 }
 
-console.log(JSON.stringify({ok: true, storeKey: args.store, outputs}, null, 2));
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => { console.error(error?.stack || String(error)); process.exit(1); });
+}

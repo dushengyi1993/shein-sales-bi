@@ -26,7 +26,7 @@ outputs/shein-openapi-doc-catalog/api-details/*.json # 半托管接口离线 sch
 |--------|------|----------|------|
 | M1 图片上传/转换 | 已完成 | `upload_pic.mjs`, `transform_pic.mjs`, `openapi_image_asset_executor.mjs` | `test_openapi_image_asset_executor.mjs` |
 | M2 审核状态/商品查询/发品规范 | 已完成 | `query_document_state.mjs`, `search_product.mjs`, `query_publish_fill_in_standard.mjs`, `openapi_readonly_executor.mjs` | `test_openapi_readonly_executor.mjs` |
-| M3 上架额度 + WebHook 设计 | 已完成 | `query_shelf_quota.mjs`, `docs/shein-webhook-receiver-design.md` | `test_openapi_readonly_executor.mjs` + 文档审查 |
+| M3 上架额度 + WebHook 第一阶段 | 已完成 | `query_shelf_quota.mjs`, `scripts/serve_shein_webhook.mjs`, `docs/shein-webhook-receiver-design.md` | Webhook receiver/config/repository/handler/service/Portal 契约测试 |
 | M4 订单履约高风险入口 | 已完成 | `order_fulfillment.mjs`, `openapi_order_fulfillment_executor.mjs` | `test_openapi_order_fulfillment_executor.mjs` |
 | M5 目录驱动 JSON 兜底 | 已完成 | `openapi_catalog_executor.mjs` | `test_openapi_catalog_executor.mjs` |
 | M6 CLI/门禁/文档整合 | 已完成 | `bi_ops_cli.mjs`, `test_bi_ops_release_gate.mjs`, `docs/*` | `test_bi_ops_release_gate.mjs` |
@@ -57,7 +57,7 @@ node scripts/bi_ops_cli.mjs openapi-catalog-plan --format summary [--out plan.js
 - 订单履约使用独立确认文本 `SHEIN_ORDER_FULFILLMENT_SUBMIT`。
 - 目录驱动写接口使用 `SHEIN_OPENAPI_GENERIC_WRITE_SUBMIT`。
 - 自动运营页受控写仍使用 `SHEIN_OPENAPI_SUBMIT` 和任务审计链路。
-- `openapi-catalog-plan` 只读本地官方目录和 schema，不联网、不需要店铺密钥，用于把所有官方接口归入：已专用/并行、JSON GET、JSON POST/写、文件专用、WebHook 设计态、当前范围外。
+- `openapi-catalog-plan` 只读本地官方目录和 schema，不联网、不需要店铺密钥，用于把所有官方接口归入：已专用/并行、JSON GET、JSON POST/写、文件专用、WebHook 专用 receiver、当前范围外。通用 JSON executor 仍拒绝 Webhook 条目。
 
 ## 4. 适配器模式
 
@@ -124,7 +124,7 @@ node scripts/generate_api_schema_index.mjs
 
 - 高频换图/上新/回读继续走专用 adapter，并接入 `test_bi_ops_release_gate.mjs`。
 - 合规、RRP、采购单等低频 JSON 接口可先用 `openapi-call` 验证，再沉淀专用 adapter；执行前先用 `openapi-catalog-plan` 看该 docId 所属 lane。
-- 文件上传、批量导入、WebHook 不走 `openapi-call`；必须单独实现并测试边界。当前本地 catalog 口径：239 个官方条目中，15 个低频 GET JSON、90 个低频 POST/写 JSON 可由目录兜底预检，5 个文件接口要求专用 adapter，22 个 WebHook 保持设计态，75 个当前范围外。
+- 文件上传、批量导入、Webhook 不走 `openapi-call`；必须单独实现并测试边界。2026-07-19 官方目录为 243 条（OpenAPI 220、Webhook 23）；Webhook 已有独立验签/AES/幂等队列服务，首批商品生命周期、订单/退货和授权/额度/合规事件已接入，不能再按“22 个 Webhook 全部设计态”的旧口径判断。
 - 对任何真实写新增能力，先补 fake OpenAPI 测试，再考虑真实 execute。
 
 ## 8. 发版检查

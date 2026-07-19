@@ -56,6 +56,8 @@ import {
 import {createConfiguredLinkOpsStoreGateway} from '../lib/link_ops_store_gateway.mjs';
 import {createLinkOpsJobWorker} from '../lib/link_ops_job_worker.mjs';
 import {linkOpsPayloadHash} from '../lib/link_ops_repository.mjs';
+import {createSheinWebhookRepository} from '../lib/shein_webhook_repository.mjs';
+import {evaluateSheinWebhookWriteGates} from '../lib/shein_webhook_write_gate.mjs';
 import {createOwnerKnowledgeService} from '../lib/owner_knowledge_service.mjs';
 import {createOwnerKnowledgeGitPublisher} from '../lib/owner_knowledge_distribution.mjs';
 import {BI_OPS_CLI_VERSION} from '../lib/partner_knowledge_cache.mjs';
@@ -5961,10 +5963,18 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     }
     : task;
   const preflight = runPreflightForLinkOpsTask(runnableTask);
+  const evaluateWebhookWriteGates = () => evaluateSheinWebhookWriteGates({
+    repository: args.sheinWebhookRepository,
+    writeStores,
+    loadProbeSummary: loadOpenApiReadProbeSummarySync,
+    probeIsReadReady: openApiProbeResultIsReadReady,
+  });
   if (requestedMode === 'execute' && priorKnowledgeFingerprint && knowledgeBinding.changed) {
     preflight.blockers.push('负责人长期规则在上次系统检查后发生更新；必须按新规则重新系统检查，不能沿用旧预演直接提交。');
   }
   if (requestedMode === 'execute') {
+    const initialWebhookGate = await evaluateWebhookWriteGates();
+    preflight.blockers.push(...initialWebhookGate.blockers);
     if (ownerKnowledgeDistributionError || !ownerKnowledgeDistribution?.ready || !ownerKnowledgeDistribution?.current) {
       preflight.blockers.push('负责人规则尚未完成 GitHub 校验并同步到当前版本；真实提交暂时关闭，请稍后重试。');
     }
@@ -6119,11 +6129,19 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     const withConsistencyLock = args?.withOwnerKnowledgeConsistencyLock || (work => work());
     const guarded = await withConsistencyLock(async () => {
       const guard = await verifyDistributionUnchanged();
-      if (!guard.ok || !executeAllowed) return {guard, executions: null};
-      return {guard, executions: await runExecutors(true)};
+      if (!guard.ok || !executeAllowed) return {guard, webhookGate: null, executions: null};
+      // Re-evaluate immediately before the executor receives execute=true. A
+      // webhook may have closed a store gate during preparation.
+      const webhookGate = await evaluateWebhookWriteGates();
+      if (!webhookGate.ok) return {guard, webhookGate, executions: null};
+      return {guard, webhookGate, executions: await runExecutors(true)};
     });
     if (!guarded.guard.ok) {
       preflight.blockers.push('负责人规则在执行准备期间发生变化或尚未完成 GitHub 校验；本次未向 SHEIN 发出真实写请求，请重新系统检查和确认。');
+      executeAllowed = false;
+    }
+    if (guarded.webhookGate && !guarded.webhookGate.ok) {
+      preflight.blockers.push(...guarded.webhookGate.blockers);
       executeAllowed = false;
     }
     if (guarded.executions) {
@@ -7653,6 +7671,26 @@ async function main() {
   if (!initialLinkOpsStorageHealth?.ok) {
     throw new Error('Link Ops storage health check failed');
   }
+  const webhookRepositoryEnabled = ['1', 'true', 'yes', 'on'].includes(String(
+    process.env.SHEIN_WEBHOOK_REPOSITORY_ENABLED
+    || (linkOpsStoreGateway.mode === 'postgres' ? '1' : '0')
+  ).trim().toLowerCase());
+  const sheinWebhookRepository = webhookRepositoryEnabled
+    ? createSheinWebhookRepository({env: process.env})
+    : null;
+  let initialWebhookStorageHealth = {ok: false, enabled: false};
+  if (sheinWebhookRepository) {
+    initialWebhookStorageHealth = {...await sheinWebhookRepository.health(), enabled: true};
+    // Health alone only checks PostgreSQL connectivity. Touch the read model so
+    // a missing migration fails fast instead of producing a blank UI later.
+    await sheinWebhookRepository.summary({allowedStores: []});
+  }
+  Object.defineProperty(args, 'sheinWebhookRepository', {
+    value: sheinWebhookRepository,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
   const ownerKnowledgeGitRepoDir = String(process.env.SHEIN_OWNER_KNOWLEDGE_GIT_REPO_DIR || '').trim();
   const ownerKnowledgeDistributionPublisher = ownerKnowledgeGitRepoDir
     ? createOwnerKnowledgeGitPublisher({
@@ -8527,6 +8565,37 @@ async function main() {
           return sendJson(res, Number(error?.status || 400), {ok: false, error: error?.message || String(error), code: error?.code || 'OWNER_KNOWLEDGE_DEVICE_ENROLL_FAILED'});
         }
       }
+      if (url.pathname === '/api/shein/webhook/summary' || url.pathname === '/api/shein/webhook/events') {
+        if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        if (!args.sheinWebhookRepository) {
+          return sendJson(res, 503, {ok: false, error: '平台动态服务尚未启用'}, {'Cache-Control': 'no-store'});
+        }
+        const actorStores = authRequired ? normalizeStoreList(actor?.readStores || []) : ['*'];
+        const allowedStores = actorStores.includes('*') ? '*' : actorStores;
+        try {
+          if (url.pathname.endsWith('/summary')) {
+            const data = await args.sheinWebhookRepository.summary({allowedStores});
+            return sendJson(res, 200, {ok: true, data}, {'Cache-Control': 'private, no-store'});
+          }
+          const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit') || 100) || 100));
+          const data = await args.sheinWebhookRepository.listEvents({
+            allowedStores,
+            limit,
+            cursor: String(url.searchParams.get('cursor') || ''),
+            filters: {
+              storeKey: String(url.searchParams.get('store') || '').trim().toUpperCase(),
+              severity: String(url.searchParams.get('severity') || '').trim().toUpperCase(),
+              eventType: String(url.searchParams.get('eventType') || '').trim(),
+              eventCode: String(url.searchParams.get('eventCode') || '').trim(),
+              status: String(url.searchParams.get('status') || '').trim(),
+            },
+          });
+          return sendJson(res, 200, {ok: true, data}, {'Cache-Control': 'private, no-store'});
+        } catch (error) {
+          const validation = String(error?.code || '') === 'SHEIN_WEBHOOK_VALIDATION';
+          return sendJson(res, validation ? 400 : 503, {ok: false, error: validation ? String(error.message || '查询参数无效') : '平台动态暂时不可用'}, {'Cache-Control': 'no-store'});
+        }
+      }
       if (url.pathname === '/api/health') {
         const urlHost = args.host === '0.0.0.0' ? '127.0.0.1' : args.host;
         return sendJson(res, 200, {
@@ -8543,6 +8612,7 @@ async function main() {
           linkOpsChatFile: args.linkOpsChatFile,
           linkOpsRuntimeFile: args.linkOpsRuntimeFile,
           linkOpsStorage: await linkOpsStoreGateway.health(),
+          sheinWebhookStorage: initialWebhookStorageHealth,
           ownerKnowledgeDistribution: (value => {
             return {ready: Boolean(value.ready), current: Boolean(value.current), source: String(value.source || ''), ruleCount: Number(value.ruleCount || 0)};
           })(await ownerKnowledgeService.distributionManifest()),
@@ -10149,7 +10219,10 @@ ${uploadCheckAnswer}` : `
     console.log(JSON.stringify({ok: true, event: 'shutdown', signal, time: new Date().toISOString()}));
     await linkOpsJobWorker?.stop();
     await new Promise(resolve => server.close(resolve));
-    await linkOpsStoreGateway.close();
+    await Promise.allSettled([
+      linkOpsStoreGateway.close(),
+      args.sheinWebhookRepository?.close?.(),
+    ]);
   };
   process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
   process.once('SIGINT', () => { void shutdown('SIGINT'); });

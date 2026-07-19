@@ -248,6 +248,7 @@
 - 正式域名入口为 `https://sa.dushengyi.cc/`；当前公网解析可经过 Cloudflare，再回源到腾讯云服务器 `43.165.167.135`。
 - 服务器 443 端口同时承担 SSH 运维入口和 HTTPS 入口：`HAProxy` 在 443 做协议分流，SSH 流量转到本机 sshd `127.0.0.1:22`，HTTPS 流量转到 Caddy `127.0.0.1:10443`。
 - HAProxy 承接公网 `443` 并转到 Caddy `10443`；Caddy 负责 `sa.dushengyi.cc` 的自动 TLS 证书和 HTTP -> HTTPS 跳转；nginx 退到本机 `127.0.0.1:8080` 并反代到 BI Portal `127.0.0.1:8787`，身份认证由 BI Portal 应用内登录承担。旧 `shein-bi.faceair.me` 和 `shein-bi.dushengyi.xyz` 不再作为正式入口。
+- SHEIN Webhook 使用独立回调 `https://sa.dushengyi.cc:8443/api/shein/webhook/v1/events`，不经过 443 的 SSH/HTTPS 分流。UFW 仅允许 Cloudflare 官方网段访问 8443；Caddy 校验直接对端后传递 Cloudflare 写入的真实客户端 IP，Nginx 再按 SHEIN 官方推送 IP 放行，最终反代到 `127.0.0.1:8792`。不要把 8443 对全网开放，也不要让 Node 服务直接暴露公网。
 - 对应配置模板：`infra/haproxy/haproxy-ssh-https.cfg`、`infra/caddy/Caddyfile.shein-bi`。不要直接让 Node 服务暴露公网。
 
 ## 2026-05-18 云端临时人工登录入口

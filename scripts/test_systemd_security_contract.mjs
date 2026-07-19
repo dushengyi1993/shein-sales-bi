@@ -12,7 +12,7 @@ function property(unit, key) {
   return matches[0][1].trim();
 }
 
-function assertCommonHardening(unit, name) {
+function assertCommonHardening(unit, name, {allowAuditedSudo = false} = {}) {
   assert.equal(property(unit, 'UMask'), '0027', `${name} must not create world-readable runtime secrets`);
   assert.equal(property(unit, 'ProtectSystem'), 'full');
   assert.equal(property(unit, 'ProtectKernelTunables'), 'true');
@@ -23,7 +23,11 @@ function assertCommonHardening(unit, name) {
   assert.equal(property(unit, 'ProtectHostname'), 'true');
   assert.equal(property(unit, 'LockPersonality'), 'true');
   assert.equal(property(unit, 'RestrictRealtime'), 'true');
-  assert.equal(property(unit, 'RestrictSUIDSGID'), 'true');
+  if (allowAuditedSudo) {
+    assert.doesNotMatch(unit, /^RestrictSUIDSGID=true$/m, `${name} uses audited sudo docker helpers`);
+  } else {
+    assert.equal(property(unit, 'RestrictSUIDSGID'), 'true');
+  }
 }
 
 const portal = readUnit('shein-bi-portal.service');
@@ -33,6 +37,22 @@ assert.equal(property(portal, 'OOMPolicy'), 'stop');
 assertCommonHardening(portal, 'portal');
 assert.doesNotMatch(portal, /^NoNewPrivileges=true$/m, 'portal uses audited sudo child commands and cannot enable this yet');
 assert.doesNotMatch(portal, /^PrivateTmp=true$/m, 'portal browser maintenance must share the host temporary namespace');
+
+const webhook = readUnit('shein-bi-webhook.service');
+assert.equal(property(webhook, 'User'), 'sheinops');
+assert.equal(property(webhook, 'Group'), 'sheinops');
+assert.equal(property(webhook, 'OOMPolicy'), 'stop');
+assert.equal(property(webhook, 'Restart'), 'always');
+assert.match(webhook, /^Environment=HOME=\/home\/sheinops$/m);
+assert.match(webhook, /^Environment=SHEIN_WEBHOOK_HOST=127\.0\.0\.1$/m);
+assert.match(webhook, /^Environment=SHEIN_WEBHOOK_PORT=8792$/m);
+assert.match(webhook, /^Environment=SHEIN_WEBHOOK_WORKER_ENABLED=1$/m);
+assert.match(webhook, /^EnvironmentFile=\/srv\/shein-bi\/secrets\/webhook-warehouse\.env$/m);
+assert.match(webhook, /^Environment=SHEIN_WAREHOUSE_PG_USER=shein_webhook_ops$/m);
+assert.doesNotMatch(webhook, /portal-warehouse\.env|SHEIN_WAREHOUSE_PG_USER=shein_link_ops/, 'webhook must not inherit the portal database role');
+assert.equal(property(webhook, 'NoNewPrivileges'), 'true');
+assertCommonHardening(webhook, 'webhook');
+assert.doesNotMatch(webhook, /sudo|docker exec/, 'webhook worker uses restricted direct PostgreSQL, never sudo/docker');
 
 const lark = readUnit('shein-bi-lark-sales-qa.service');
 assert.equal(property(lark, 'User'), 'sheinops');
@@ -126,6 +146,7 @@ console.log(JSON.stringify({
   ok: true,
   checked: [
     'shein-bi-portal.service',
+    'shein-bi-webhook.service',
     'shein-bi-lark-sales-qa.service',
     'hourly lease-aware browser cleanup',
     'three retry-capable marketing guard windows',
