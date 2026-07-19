@@ -22,7 +22,6 @@ import {
 import {createSheinWebhookRepository} from '../lib/shein_webhook_repository.mjs';
 import {createSheinWebhookEventProcessor} from '../lib/shein_webhook_handlers.mjs';
 import {syncWebhookOrder, syncWebhookReturn} from '../lib/shein_webhook_order_return_sync.mjs';
-import {createConfiguredLinkOpsStoreGateway} from '../lib/link_ops_store_gateway.mjs';
 import {createWarehousePgPool, withPgClient} from '../lib/warehouse_pg.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -47,6 +46,21 @@ function safeError(error) {
 export function webhookSeverityCode(receipt = {}) {
   const value = receipt?.severity;
   return String(value && typeof value === 'object' ? value.severity : value || '').trim().toUpperCase();
+}
+
+export function webhookAlertIdempotencyKey(receipt = {}) {
+  const family = String(receipt?.normalized?.eventFamily || '').trim();
+  if (family === 'authorization') {
+    // The official authorization payload has no event id/time and the docs do
+    // not promise that retries reuse the signature timestamp. Debounce new
+    // signatures in a short time bucket while still recording every receipt and
+    // re-closing the gate; a later genuine transition can alert again.
+    const at = Date.parse(receipt.receivedAt || '');
+    const bucket = Number.isFinite(at) ? Math.floor(at / (10 * 60_000)) : 0;
+    const material = [receipt.storeKey, receipt.eventCode, receipt.normalized?.status, receipt.normalized?.businessId, bucket].join('|');
+    return `sync-issue-${crypto.createHash('sha256').update(material).digest('hex').slice(0, 24)}`;
+  }
+  return `sync-issue-${String(receipt.idempotencyKey || '').slice(0, 24)}`;
 }
 
 function writeJson(res, status, payload) {
@@ -155,7 +169,7 @@ export function createWebhookFeishuNotifier({root = ROOT} = {}) {
       // Match the established notifier key shape and keep it stable across
       // worker retries. The notifier deliberately refuses an unkeyed fallback
       // for webhook alerts, so a crash cannot turn a retry into a duplicate DM.
-      const key = `sync-issue-${String(receipt.idempotencyKey).slice(0, 24)}`;
+      const key = webhookAlertIdempotencyKey(receipt);
       const result = await runChild(process.execPath, [
         path.join(root, 'scripts', 'notify_sync_issue.mjs'),
         '--kind', 'webhook',
@@ -329,8 +343,21 @@ export function createSheinWebhookService({
         signal: abortController.signal,
       };
 
-      // P0 notification is independent of enrichment/warehouse work. A failed
-      // downstream sync must never suppress an urgent platform warning.
+      // Apply business safety state first.  In particular, authorization and
+      // quota gates must be closed before a potentially slow Feishu process is
+      // allowed to run; otherwise an executor could write during the alert.
+      assertLease();
+      let outcome;
+      let processingError = null;
+      try {
+        outcome = await eventProcessor.process(workItem);
+      } catch (error) {
+        processingError = error;
+      }
+      assertLease();
+
+      // P0 notification remains independent of enrichment/warehouse success:
+      // a failed downstream sync must never suppress the urgent warning.
       let alertError = null;
       if (severity.severity === 'P0' && !receipt.alertedAt && notifier?.notify) {
         assertLease();
@@ -352,15 +379,6 @@ export function createSheinWebhookService({
           alertError = error;
         }
       }
-      assertLease();
-      let outcome;
-      let processingError = null;
-      try {
-        outcome = await eventProcessor.process(workItem);
-      } catch (error) {
-        processingError = error;
-      }
-      assertLease();
       if (processingError && alertError) {
         throw new AggregateError([alertError, processingError], 'Webhook P0 notification and business processing both failed');
       }
@@ -435,13 +453,14 @@ async function main() {
   const warehousePool = createWarehousePgPool({env: process.env});
   const repository = createSheinWebhookRepository({pool: warehousePool});
   const health = await repository.health();
-  const linkOpsGateway = createConfiguredLinkOpsStoreGateway({env: {...process.env, SHEIN_LINK_OPS_STORE: 'postgres'}, rootDir: ROOT});
-  await linkOpsGateway.health();
   const pgExecutor = createWebhookPgScriptExecutor({pool: warehousePool});
   const warehouseArgs = {dryRun: false};
   const eventProcessor = createSheinWebhookEventProcessor({
     webhookRepository: repository,
-    linkOpsRepository: linkOpsGateway.repository,
+    // The public receiver role deliberately has no access to ops.link_ops_*.
+    // Product lifecycle events remain visible in Platform Activity; attaching
+    // them to mutable tasks is deferred to a separately privileged reconciler.
+    linkOpsRepository: null,
     orderReturnSync: {
       syncOrder: input => syncWebhookOrder({...input, warehouseArgs, executor: pgExecutor}),
       syncReturn: input => syncWebhookReturn({...input, warehouseArgs, executor: pgExecutor}),
@@ -471,7 +490,7 @@ async function main() {
     shutdown = true;
     console.log(JSON.stringify({event: 'webhook-shutdown', signal}));
     await service.stop();
-    await Promise.allSettled([repository.close(), linkOpsGateway.close()]);
+    await Promise.allSettled([repository.close()]);
   };
   process.once('SIGTERM', () => { void stop('SIGTERM'); });
   process.once('SIGINT', () => { void stop('SIGINT'); });

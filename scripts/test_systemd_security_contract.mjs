@@ -12,9 +12,9 @@ function property(unit, key) {
   return matches[0][1].trim();
 }
 
-function assertCommonHardening(unit, name, {allowAuditedSudo = false} = {}) {
+function assertCommonHardening(unit, name, {allowAuditedSudo = false, protectSystem = 'full'} = {}) {
   assert.equal(property(unit, 'UMask'), '0027', `${name} must not create world-readable runtime secrets`);
-  assert.equal(property(unit, 'ProtectSystem'), 'full');
+  assert.equal(property(unit, 'ProtectSystem'), protectSystem);
   assert.equal(property(unit, 'ProtectKernelTunables'), 'true');
   assert.equal(property(unit, 'ProtectKernelModules'), 'true');
   assert.equal(property(unit, 'ProtectKernelLogs'), 'true');
@@ -51,7 +51,8 @@ assert.match(webhook, /^EnvironmentFile=\/srv\/shein-bi\/secrets\/webhook-wareho
 assert.match(webhook, /^Environment=SHEIN_WAREHOUSE_PG_USER=shein_webhook_ops$/m);
 assert.doesNotMatch(webhook, /portal-warehouse\.env|SHEIN_WAREHOUSE_PG_USER=shein_link_ops/, 'webhook must not inherit the portal database role');
 assert.equal(property(webhook, 'NoNewPrivileges'), 'true');
-assertCommonHardening(webhook, 'webhook');
+assertCommonHardening(webhook, 'webhook', {protectSystem: 'strict'});
+assert.equal(property(webhook, 'PrivateTmp'), 'true');
 assert.doesNotMatch(webhook, /sudo|docker exec/, 'webhook worker uses restricted direct PostgreSQL, never sudo/docker');
 
 const lark = readUnit('shein-bi-lark-sales-qa.service');

@@ -6,7 +6,7 @@
 
 Webhook 是平台状态变化的实时触发源，不替代 OpenAPI 详情接口，也不直接触发任何 SHEIN 写操作。
 
-- 商品接收、审核、上下架和删除审核：进入“平台动态”，并在身份唯一时回填现有运营任务。
+- 商品接收、审核、上下架和删除审核：进入“平台动态”。公网接收进程不读取可变运营任务表；任务自动挂接留给后续独立授权的 reconciler。
 - 订单、退货：收到单号后调用详情接口，只增量 upsert 这一单，再按店铺+单号回读。
 - 授权、商品额度、合规：产生高优先级风险；授权异常和额度为 0 会关闭对应店铺的真实写闸门。
 - 飞书只发 P0；正常订单、正常退货和普通状态变化只在 BI 查看。
@@ -24,7 +24,7 @@ flowchart LR
   F --> G["PostgreSQL 密文 receipt/queue"]
   G -->|"持久化成功后"| H["1.5 秒内返回 200"]
   G --> I["异步 worker 租约内解密"]
-  I --> J["商品任务回填"]
+  I --> J["商品生命周期记录"]
   I --> K["订单/退货定向详情与 upsert"]
   I --> L["授权/额度安全闸门"]
   I --> M["仅 P0 飞书告警"]
@@ -72,8 +72,8 @@ expected = randomKey + Base64(UTF8(hashHex))
 
 | 批次 | eventCode | 事件 | 处理 |
 |---|---:|---|---|
-| 商品生命周期 | 3000910 | 商品接收 | 平台动态；唯一强身份时回填任务 |
-| 商品生命周期 | 3001450 | 商品审核 | 失败为 P0；任务回填 |
+| 商品生命周期 | 3000910 | 商品接收 | 平台动态；保留强身份供后续 reconciler 使用 |
+| 商品生命周期 | 3001450 | 商品审核 | 失败为 P0；不让公网进程改运营任务 |
 | 商品生命周期 | 3001449 | 全渠道商品审核 | 和普通审核统一归一并幂等 |
 | 商品生命周期 | 3000848 | 商品上下架 | 非预期下架为 P0 |
 | 商品生命周期 | 3001903 | 商品删除审核 | 删除获批或审核失败均为 P0 |
@@ -90,24 +90,26 @@ expected = randomKey + Base64(UTF8(hashHex))
 迁移：`infra/warehouse/migrations/20260719_001_shein_webhook_runtime.sql`
 
 - `ops.shein_webhook_receipt`：AES 密文 `event_data`、密文 hash、最小规范化投影、幂等键、状态、lease、重试、告警与处理结果；不保存解密后的原始 payload。
-- `ops.shein_webhook_store_gate`：店铺级授权/额度闸门。
+- `ops.shein_webhook_store_gate`：店铺级授权/额度闸门，同时保存平台事件顺序值；额度乱序按平台 `sendTimeStamp` 而不是本地收件 ID 判新旧。
 - worker 使用 `FOR UPDATE SKIP LOCKED` 领取任务；过期 lease 可恢复。
 - worker 只在持有 lease 时按当前 App secret 解密；lease 续约失败会中止后续处理。
 - 最多重试 8 次，指数退避后进入 `dead_letter`。
 - BI API 永不返回 app id、openKey、密文、原始 payload 或凭据。
 
-订单/退货 targeted 模式与原来的日期全量 loader 完全隔离：同一事务只按 `店铺 + 订单号/退货单号` 精确删除该单既有子项（订单 item/payment flag 或退货 item），再 upsert 当前 header/子项；不执行日期切片删除、不改写整日 reconciliation，最后按同一业务键核对 header/子项数量。
+订单/退货 targeted 模式与原来的日期全量 loader 完全隔离：详情没有至少一条 item 时拒绝写入；每条事实都携带 `source_snapshot_at`。通过后在同一事务调用数据库按单 `SECURITY DEFINER` apply 函数；函数验证全部行都属于同一店铺/单号、主子键不跨作用域，并按抓取版本比较现有 header。只有当前快照不旧于库内版本时，才原子替换该单 header/子项/付款标记。它不执行日期切片删除、不改写整日 reconciliation，最后回读 source snapshot 与行数；若已被更新快照取代，明确记为 `superseded` 而不是重写新事实。
 
-worker 直接使用独立受限 PostgreSQL 角色 `shein_webhook_ops` 执行这些 SQL，不调用 `sudo`/Docker。它只获得 webhook receipt/gate 与上述精准订单/退货表所需权限，不拥有日汇总或 reconciliation 写权限。Portal 继续使用 `shein_link_ops`：数据库只允许它读取 receipt 的安全投影列并维护 gate，不能读取 `event_data/app_id/open_key_id/cipher_hash`，也不能删除订单/退货事实。
+targeted 与日期 loader 对同一店铺使用同一 PostgreSQL advisory lock；两者都在首次 API 请求前记录版本，日期 loader 的清理、header conflict update 和 child insert 还会再次比较 `source_snapshot_at`。因此锁负责串行，版本负责判新旧：即使日期 loader 先开始抓旧快照、在较新 Webhook 写入后才完成，旧 header、item 和 payment flag 也会被整体拒绝。
+
+worker 直接使用独立受限 PostgreSQL 角色 `shein_webhook_ops`，不调用 `sudo`/Docker。它只获得 webhook receipt/gate 运行权限、五张事实表只读回读和两个按单 apply 函数的执行权；没有事实表原始 `INSERT/UPDATE/DELETE`、日汇总或 reconciliation 写权限，也没有 `ops.link_ops_*` 权限。Portal 继续使用 `shein_link_ops`：数据库只允许它读取 receipt/gate 安全投影，并通过受控函数解除“同一来源 receipt”的授权闸门；不能读取 `event_data/app_id/open_key_id/cipher_hash`、任意改 gate 或修改订单/退货事实。
 
 ## 6. 写安全边界
 
 - Webhook 永不直接调用 SHEIN 写接口。
-- 商品任务只在“店铺 + 至少两个平台强身份字段”全部精确匹配且结果唯一时附加 readback；0 个或多个候选只标记 unmatched/ambiguous。
+- 商品事件保留“店铺 + 平台强身份字段”，但公网 receiver 不连接 `ops.link_ops_*`；任务 readback 必须由后续独立最小权限 reconciler 完成。
 - 授权闸门可由事件之后更新、更成功的店铺只读探针自动解除。
 - 商品额度必须收到正数恢复事件才开闸。
-- 授权无业务时间的重复真实事件以签名时间区分；额度/授权 gate 按 receipt ID 单调更新，旧事件不能覆盖新事件。
-- 真实提交在预检查和 executor 获得 `execute=true` 前各查一次 gate；仓库缺失、查询失败或期间新封闸均失败关闭。
+- 授权无业务时间的重复真实事件以签名时间区分，重签重试按“店铺+状态+10 分钟时间桶”抑制重复飞书，但 receipt 与封闸仍全部执行；授权/额度先封闸后通知。额度 gate 以平台 `sendTimeStamp` 单调更新，延迟到达的旧恢复事件不能覆盖新归零；无法验证顺序的归零仍立即封闸，且不会被不确定事件自动开闸。
+- 真实提交在预检查、整批 executor 前、每个店铺子执行器获得 `execute=true` 前，以及子执行器每一次业务写 `client.request` 的紧前一刻复核 gate；维护任务的多个 payload 逐个复核，前一写后新封闸会阻止下一写。仓库缺失、目标店缺失、查询失败或期间新封闸均失败关闭。
 - 合规失效通常是商品/证书级，禁止用店铺级闸门误伤其他商品。
 - 原有 dry-run、payload hash、账号权限、明确确认、审计和写后回读全部保留。
 
@@ -115,13 +117,13 @@ worker 直接使用独立受限 PostgreSQL 角色 `shein_webhook_ops` 执行这�
 
 BI：导航新增独立“平台动态”页，提供 24 小时事件、待处理、失败、P0 摘要，以及店铺/级别/类型/状态筛选。接口沿用 `bi_session` 和账号 `readStores` 权限；SQL 层再次限制店铺范围。
 
-飞书：复用 `lark-cli im +messages-send` 的现有通知身份，但仅发送 P0，幂等键来自 webhook receipt，不恢复已暂停的问数服务。详情与普通事件留在 BI，避免刷屏。
+飞书：复用 `lark-cli im +messages-send` 的现有通知身份，但仅发送 P0；普通事件按 receipt 幂等，官方无事件 ID 的授权重签按 10 分钟时间桶去重，不恢复已暂停的问数服务。详情与普通事件留在 BI，避免刷屏。
 
 ## 8. 部署与验收
 
-1. 先备份生产应用、当前生效的 Nginx 站点（现网为 `/etc/nginx/sites-available/shein-bi`）、`/etc/caddy/Caddyfile` 和现有 unit；生产应用工作树有运行态改动时只上传本版本精确文件，禁止 `git pull/reset/clean`。
+1. 先备份生产应用、当前生效的 Nginx 站点（现网为 `/etc/nginx/sites-available/shein-bi`）、`/etc/caddy/Caddyfile`、现有 unit 和相关数据库 ACL 快照；生产应用工作树有运行态改动时只上传本版本精确文件，禁止 `git pull/reset/clean`。
 2. 以 root 运行 `scripts/provision_shein_webhook_postgres_role.sh` 创建/收紧 `shein_webhook_ops`（LOGIN、NOSUPERUSER、NOCREATEDB、NOCREATEROLE、NOINHERIT、NOREPLICATION）；随机密码仅写 `/srv/shein-bi/secrets/webhook-warehouse.env` 的 `SHEIN_WAREHOUSE_PG_PASSWORD`，文件 `root:root 0600`，不得复用 `portal-warehouse.env` 或 `shein_link_ops` 密码。随后以数据库 owner 执行 `infra/warehouse/migrations/20260719_001_shein_webhook_runtime.sql`。
-3. 权限验收必须同时证明：`shein_webhook_ops` 可写 receipt/精准事实表；`shein_link_ops` 只能 SELECT receipt 安全列并读写 gate，读取 `event_data` 与删除订单/退货事实均被 PostgreSQL 拒绝。
+3. 权限验收必须同时证明：`shein_webhook_ops` 可写 receipt/gate、只读回读五张事实表并调用两个 scoped/versioned apply 函数，但事实表原始 INSERT/UPDATE/DELETE、底层 prepare 函数与 `ops.link_ops_*` 查询被拒绝；`shein_link_ops` 只能 SELECT receipt/gate 安全列并调用授权恢复函数，读取 `event_data`、任意 UPDATE gate 与修改订单/退货事实均被 PostgreSQL 拒绝。
 4. 安装 `infra/systemd/shein-bi-webhook.service` 与 Nginx 配置。**只把** `infra/caddy/Caddyfile.shein-bi` 中 8443 callback 站点合并到生产完整 Caddyfile，禁止用仓库子集覆盖生产其他域名。
 5. UFW 仅允许 Cloudflare 官方 IPv4/IPv6 网段访问 `8443/tcp`，不对全网开放；依次执行 `caddy validate`、`nginx -t`、`systemd-analyze verify` 后才 reload/start。
 6. 验证 `http://127.0.0.1:8792/healthz`、数据库队列、BI 页面与来源 IP 拒绝路径；确认 `shein-bi-lark-sales-qa.service` 仍为 `disabled + inactive`。
@@ -136,7 +138,7 @@ BI：导航新增独立“平台动态”页，提供 24 小时事件、待处�
 2. 恢复本次部署前备份的 `/etc/nginx/sites-available/shein-bi`，从完整 `/etc/caddy/Caddyfile` 移除/恢复本次 8443 block；分别 `nginx -t`、`caddy validate` 后 reload。
 3. 按部署记录逐条删除本次 UFW Cloudflare `8443/tcp` 规则，确认公网 8443 不再监听/放行。
 4. 恢复备份的 Portal unit 与精确应用文件，`systemctl daemon-reload` 后重启 Portal；再次确认飞书问数仍为 `disabled + inactive`。
-5. `ALTER ROLE shein_webhook_ops NOLOGIN` 并撤销它对 webhook/fact 表的权限；专用 secret 文件先归档到仅 root 可读备份，确认无需重放后再销毁。
+5. `ALTER ROLE shein_webhook_ops NOLOGIN` 并撤销它对 webhook/fact 表与受控函数的权限；专用 secret 文件先归档到仅 root 可读备份，确认无需重放后再销毁。若上线前 ACL 快照显示 migration 之外还发生过权限变化，按快照逐项恢复，禁止猜测式 `GRANT ALL`。
 6. 数据表默认保留。只有 receipt/gate 已为空、审计已导出且负责人明确批准，才允许单独迁移删除；不得为了“回滚干净”直接 DROP 生产证据。
 7. 验证 BI 原页面、受控写 dry-run、Nginx/Caddy 配置和现有 timers；记录备份目录、恢复文件 hash 与回滚时间。
 

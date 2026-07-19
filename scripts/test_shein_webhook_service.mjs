@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import {createSheinWebhookService, createWebhookPgScriptExecutor, webhookSeverityCode} from './serve_shein_webhook.mjs';
+import {createSheinWebhookService, createWebhookPgScriptExecutor, webhookAlertIdempotencyKey, webhookSeverityCode} from './serve_shein_webhook.mjs';
 
 assert.equal(webhookSeverityCode({severity: 'P0'}), 'P0');
 assert.equal(webhookSeverityCode({severity: {severity: 'P0', notifyFeishu: true}}), 'P0');
 assert.equal(webhookSeverityCode({severity: {severity: 'P3'}}), 'P3');
+const authorizationAlert = {eventCode: '3001503', storeKey: 'AA', receivedAt: '2026-07-19T00:01:00.000Z', normalized: {eventFamily: 'authorization', status: '1', businessId: 'supplier-1'}};
+assert.equal(webhookAlertIdempotencyKey(authorizationAlert), webhookAlertIdempotencyKey({...authorizationAlert, idempotencyKey: 'different', receivedAt: '2026-07-19T00:09:59.000Z'}), 're-signed authorization retries in one time bucket must not spam Feishu');
+assert.notEqual(webhookAlertIdempotencyKey(authorizationAlert), webhookAlertIdempotencyKey({...authorizationAlert, receivedAt: '2026-07-19T00:11:00.000Z'}), 'a later authorization occurrence may alert again');
 
 const secret = 'app-secret-key';
 const callbackPath = '/api/shein/webhook/v1/events';
@@ -105,7 +108,7 @@ const workerRepository = {
 const worker = createSheinWebhookService({
   repository: workerRepository,
   credentialRegistry: registry,
-  eventProcessor: {process: async receipt => ({title: 'AA 授权异常', summary: '请处理', businessKey: receipt.normalized.businessId || '', actionState: 'authorization_gate_blocked'})},
+  eventProcessor: {process: async receipt => (workerCalls.push(['gate-processed', receipt.id]), {title: 'AA 授权异常', summary: '请处理', businessKey: receipt.normalized.businessId || '', actionState: 'authorization_gate_blocked'})},
   notifier: {notify: async input => workerCalls.push(['notify', input.receipt.id])},
   workerEnabled: false,
   workerId: 'worker-test',
@@ -115,6 +118,7 @@ await worker.processOne();
 assert.equal(workerCalls.find(row => row[0] === 'notify')?.[1], '9');
 assert.equal(workerCalls.find(row => row[0] === 'alerted')?.[2]?.workerId, 'worker-test');
 assert.equal(workerCalls.find(row => row[0] === 'processed')?.[2]?.workerId, 'worker-test');
+assert.ok(workerCalls.findIndex(row => row[0] === 'gate-processed') < workerCalls.findIndex(row => row[0] === 'notify'), 'risk gate must close before Feishu notification starts');
 
 claim = {...claim, id: '10', severity: 'P3', attempt: 2};
 const failingWorker = createSheinWebhookService({

@@ -247,6 +247,9 @@ const client = new SheinOpenApiClient({
 
 const outputs = [];
 for (const date of eachDate(args.start, args.end)) {
+  // Version the slice at query start, not after all pages/details finish.
+  // Otherwise a slow stale fetch could look newer than an intervening webhook.
+  const fetchTime = new Date().toISOString();
   const list = await fetchReturnOrderListForDate(client, date, args.pageSize);
   const returnOrderNos = [...new Set(list.rows.map((row) => String(row.returnOrderNo || '').trim()).filter(Boolean))];
   const details = await fetchReturnOrderDetails(client, returnOrderNos);
@@ -256,7 +259,7 @@ for (const date of eachDate(args.start, args.end)) {
     groupKey: store.groupKey || '',
     start: date,
     end: date,
-    fetchTime: new Date().toISOString(),
+    fetchTime,
     source: 'shein-openapi',
     request: {
       apiBaseUrl: client.baseUrl,

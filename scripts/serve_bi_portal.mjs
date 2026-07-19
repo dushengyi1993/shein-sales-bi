@@ -5495,6 +5495,24 @@ function parseChildJsonOutput(stdout = '') {
   return null;
 }
 
+function blockedStoreExecutorResult(storeKey, blockers = []) {
+  return {
+    ok: false,
+    mode: 'dry-run',
+    storeKey,
+    code: null,
+    timedOut: false,
+    result: {
+      ok: false,
+      state: 'blocked',
+      blockers: uniqueMessages(blockers),
+      warnings: [],
+      issuedExecuteToExecutor: false,
+    },
+    stderrTail: '',
+  };
+}
+
 function payloadHashForStoreFromTaskExecution(task, storeKey = '') {
   const target = String(storeKey || '').trim().toUpperCase();
   const runs = Array.isArray(task?.execution?.openApiProductExecutors)
@@ -5549,7 +5567,7 @@ async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey
   const mode = requestedExecute && cap.productPublishExecuteAdapter
     ? 'execute'
     : 'dry-run';
-  const {actorForWriteGate: _actorForWriteGate, ...safeBodyForSnapshot} = body && typeof body === 'object' ? body : {};
+  const {actorForWriteGate: _actorForWriteGate, beforeStoreWrite: _beforeStoreWrite, ...safeBodyForSnapshot} = body && typeof body === 'object' ? body : {};
   const expectedPayloadHash = mode === 'execute'
     ? payloadHashForStoreFromTaskExecution(task, targetStore)
     : '';
@@ -5589,6 +5607,10 @@ async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey
   let result;
   let capturedPublishPayload = null;
   try {
+    if (mode === 'execute' && typeof body.beforeStoreWrite === 'function') {
+      const gate = await body.beforeStoreWrite(targetStore);
+      if (!gate?.ok) return blockedStoreExecutorResult(targetStore, gate?.blockers || ['平台动态安全闸门最终复核失败。']);
+    }
     result = await runChildProcess(process.execPath, childArgs, {
       cwd: ROOT,
       timeoutMs: Number(process.env.SHEIN_LINK_OPS_OPENAPI_EXECUTOR_TIMEOUT_MS || 180_000),
@@ -5810,7 +5832,7 @@ async function runOpenApiMaintenanceExecutorForStore(task, args, body = {}, stor
     return cap.authorized && cap.verifiedRead && control.enabled;
   });
   const mode = requestedExecute && allActionsEnabled ? 'execute' : 'dry-run';
-  const {actorForWriteGate: _actorForWriteGate, ...safeBodyForSnapshot} = body && typeof body === 'object' ? body : {};
+  const {actorForWriteGate: _actorForWriteGate, beforeStoreWrite: _beforeStoreWrite, ...safeBodyForSnapshot} = body && typeof body === 'object' ? body : {};
   const expectedPayloadHash = mode === 'execute'
     ? (intents.map(intent => payloadHashForMaintenanceFromTaskExecution(task, targetStore, intent)).find(Boolean) || '')
     : '';
@@ -5843,6 +5865,10 @@ async function runOpenApiMaintenanceExecutorForStore(task, args, body = {}, stor
   if (mode === 'execute') childArgs.push('--confirm', String(body.confirm || body.confirmText || ''));
   let result;
   try {
+    if (mode === 'execute' && typeof body.beforeStoreWrite === 'function') {
+      const gate = await body.beforeStoreWrite(targetStore);
+      if (!gate?.ok) return blockedStoreExecutorResult(targetStore, gate?.blockers || ['平台动态安全闸门最终复核失败。']);
+    }
     result = await runChildProcess(process.execPath, childArgs, {
       cwd: ROOT,
       timeoutMs: Number(process.env.SHEIN_LINK_OPS_OPENAPI_EXECUTOR_TIMEOUT_MS || 180_000),
@@ -5963,9 +5989,9 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     }
     : task;
   const preflight = runPreflightForLinkOpsTask(runnableTask);
-  const evaluateWebhookWriteGates = () => evaluateSheinWebhookWriteGates({
+  const evaluateWebhookWriteGates = (stores = writeStores) => evaluateSheinWebhookWriteGates({
     repository: args.sheinWebhookRepository,
-    writeStores,
+    writeStores: stores,
     loadProbeSummary: loadOpenApiReadProbeSummarySync,
     probeIsReadReady: openApiProbeResultIsReadReady,
   });
@@ -6070,6 +6096,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       execute: allowExecute && hasProductPublishIntent,
       confirm: allowExecute && hasProductPublishIntent ? confirmText : '',
       confirmText: allowExecute && hasProductPublishIntent ? confirmText : '',
+      beforeStoreWrite: store => evaluateWebhookWriteGates([store]),
       executionContext,
     });
     const maintenance = await runOpenApiMaintenanceExecutors(runnableTask, args, {
@@ -6080,6 +6107,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       execute: allowExecute && hasMaintenanceIntent,
       confirm: allowExecute && hasMaintenanceIntent ? confirmText : '',
       confirmText: allowExecute && hasMaintenanceIntent ? confirmText : '',
+      beforeStoreWrite: store => evaluateWebhookWriteGates([store]),
       executionContext,
     });
     return {product, maintenance};

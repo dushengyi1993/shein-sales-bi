@@ -272,8 +272,8 @@ node scripts/bi_ops_cli.mjs official-capabilities --write-default-markdown --pre
 | MES | 3001876 | 批量查询SKC信息 | POST | /open-api/spss/skc-info-query | read | official_available_out_of_current_scope | low | 当前 BI/运营主路径暂不接；若业务进入该域，再按独立 owner、权限和回读模型设计。 |
 | MES | 3001882 | 根据订单号查询订单信息 | POST | /open-api/mes/query-produce-order-info-by-id | read | official_available_out_of_current_scope | medium | 当前 BI/运营主路径暂不接；若业务进入该域，再按独立 owner、权限和回读模型设计。 |
 | Webhook | 3000804 | 商品价格异常通知 | POST | /product_prices_abnormal_notice | webhook | webhook_candidate | low | 如业务需要实时通知，先设计签名校验、幂等、重放防护和事件落库，再接收回调。 |
-| Webhook | 3000848 | 商品上下架通知 | POST | /product_shelves_notice | webhook | webhook_first_phase_integrated | high | 已进入第一阶段可靠接收、非预期下架 P0 告警、任务回填和 BI 平台动态。 |
-| Webhook | 3000910 | 商品接收通知 | POST | /product_document_receive_status_notice | webhook | webhook_first_phase_integrated | high | 已进入第一阶段可靠接收、任务唯一强身份回填和 BI 平台动态。 |
+| Webhook | 3000848 | 商品上下架通知 | POST | /product_shelves_notice | webhook | webhook_first_phase_integrated | high | 已进入第一阶段可靠接收、非预期下架 P0 告警和 BI 平台动态；保留店铺/平台强身份，公网 receiver 不修改运营任务。 |
+| Webhook | 3000910 | 商品接收通知 | POST | /product_document_receive_status_notice | webhook | webhook_first_phase_integrated | high | 已进入第一阶段可靠接收和 BI 平台动态；保留任务关联所需的平台强身份，后续由独立最小权限 reconciler 关联。 |
 | Webhook | 3000912 | 商品涨价审批结果通知 | POST | /product_price_audit_status_notice | webhook | webhook_candidate | low | 如业务需要实时通知，先设计签名校验、幂等、重放防护和事件落库，再接收回调。 |
 | Webhook | 3000914 | 退货单同步通知 | POST | /return_order_push_notice | webhook | webhook_first_phase_integrated | high | 已进入第一阶段可靠接收、按退货单号定向详情/upsert/readback 和 BI 平台动态。 |
 | Webhook | 3001048 | 推送缺货需求库存数（新） | POST | /out_of_stock_notice | webhook | webhook_candidate | low | 如业务需要实时通知，先设计签名校验、幂等、重放防护和事件落库，再接收回调。 |
@@ -284,8 +284,8 @@ node scripts/bi_ops_cli.mjs official-capabilities --write-default-markdown --pre
 | Webhook | 3001435 | 采购单通知 | POST | /purchase_order_notice | webhook | webhook_candidate | low | 如业务需要实时通知，先设计签名校验、幂等、重放防护和事件落库，再接收回调。 |
 | Webhook | 3001441 | 发货单变更通知 | POST | /delivery_modify_notice | webhook | webhook_candidate | low | 如业务需要实时通知，先设计签名校验、幂等、重放防护和事件落库，再接收回调。 |
 | Webhook | 3001442 | 订单同步通知 | POST | /order_push_notice | webhook | webhook_first_phase_integrated | high | 已进入第一阶段可靠接收、按订单号定向详情/upsert/readback 和 BI 平台动态。 |
-| Webhook | 3001449 | 商品发布公文审核通知（全渠道） | POST | /product_document_audit_status_notice_all_channels | webhook | webhook_first_phase_integrated | high | 已进入第一阶段可靠接收、审核失败 P0、任务回填和 BI 平台动态。 |
-| Webhook | 3001450 | 商品审核通知 | POST | /product_document_audit_status_notice | webhook | webhook_first_phase_integrated | high | 已进入第一阶段可靠接收、审核失败 P0、任务回填和 BI 平台动态。 |
+| Webhook | 3001449 | 商品发布公文审核通知（全渠道） | POST | /product_document_audit_status_notice_all_channels | webhook | webhook_first_phase_integrated | high | 已进入第一阶段可靠接收、审核失败 P0 和 BI 平台动态；公网 receiver 不读取或修改运营任务。 |
+| Webhook | 3001450 | 商品审核通知 | POST | /product_document_audit_status_notice | webhook | webhook_first_phase_integrated | high | 已进入第一阶段可靠接收、审核失败 P0 和 BI 平台动态；公网 receiver 不读取或修改运营任务。 |
 | Webhook | 3001461 | SHEIN合作物流单下单通知 | POST | /logistics_order_result_notice | webhook | webhook_candidate | low | 如业务需要实时通知，先设计签名校验、幂等、重放防护和事件落库，再接收回调。 |
 | Webhook | 3001503 | 店铺授权关系变更通知 | POST | /authorization_change_notice | webhook | webhook_first_phase_integrated | high | 已进入第一阶段可靠接收、店铺授权写闸门和 P0 告警。 |
 | Webhook | 3001744 | 采购退货申请单状态通知 | POST | /purchase_order_return_application_notice | webhook | webhook_candidate | low | 如业务需要实时通知，先设计签名校验、幂等、重放防护和事件落库，再接收回调。 |

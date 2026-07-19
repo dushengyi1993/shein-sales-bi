@@ -2,9 +2,12 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 
-const [portal, writeGate, nginx, caddy, service, notifier, migration, schema] = await Promise.all([
+const [portal, webhookServer, writeGate, productExecutor, maintenanceExecutor, nginx, caddy, service, notifier, migration, schema] = await Promise.all([
   fs.readFile(new URL('./serve_bi_portal.mjs', import.meta.url), 'utf8'),
+  fs.readFile(new URL('./serve_shein_webhook.mjs', import.meta.url), 'utf8'),
   fs.readFile(new URL('../lib/shein_webhook_write_gate.mjs', import.meta.url), 'utf8'),
+  fs.readFile(new URL('./link_ops_hl_openapi_executor.mjs', import.meta.url), 'utf8'),
+  fs.readFile(new URL('./link_ops_maintenance_openapi_executor.mjs', import.meta.url), 'utf8'),
   fs.readFile(new URL('../infra/nginx/shein-bi.conf', import.meta.url), 'utf8'),
   fs.readFile(new URL('../infra/caddy/Caddyfile.shein-bi', import.meta.url), 'utf8'),
   fs.readFile(new URL('../infra/systemd/shein-bi-webhook.service', import.meta.url), 'utf8'),
@@ -20,8 +23,15 @@ assert.match(portal, /listEvents\(\{\s*allowedStores,/);
 assert.match(writeGate, /listStoreGates\(\{storeKeys: writeStores, blockingOnly: true\}\)/);
 assert.match(writeGate, /平台动态安全闸门当前不可用，真实提交已按失败关闭处理/);
 assert.ok((portal.match(/await evaluateWebhookWriteGates\(\)/g) || []).length >= 2, 'execute must check platform gates at preflight and immediately before write');
+assert.ok((portal.match(/beforeStoreWrite: store => evaluateWebhookWriteGates\(\[store\]\)/g) || []).length >= 2, 'every store executor must recheck its own gate');
 assert.match(writeGate, /probeSummary\.generatedAtMs\) > gateAt/);
 assert.match(writeGate, /probeSummary\?\.fresh === true/);
+for (const executor of [productExecutor, maintenanceExecutor]) {
+  assert.match(executor, /import \{runSheinWebhookExternalWriteGuarded\} from '\.\.\/lib\/shein_webhook_external_write_guard\.mjs';/);
+  assert.match(executor, /runSheinWebhookExternalWriteGuarded\(\{[\s\S]*?writeStores:\s*\[[^\]]+\][\s\S]*?write:\s*\(\)\s*=>\s*client\.request\(/);
+}
+assert.match(productExecutor, /runSheinWebhookExternalWriteGuarded\(\{[\s\S]*?publishOrEdit/);
+assert.match(maintenanceExecutor, /for\s*\(const p of payloads\)[\s\S]*?runSheinWebhookExternalWriteGuarded\(/, 'maintenance must recheck immediately before every payload write');
 
 assert.match(nginx, /location = \/api\/shein\/webhook\/v1\/events/);
 assert.match(nginx, /proxy_pass http:\/\/127\.0\.0\.1:8792/);
@@ -43,19 +53,34 @@ assert.match(service, /^Environment=SHEIN_OPENAPI_REQUEST_TIMEOUT_MS=30000$/m);
 assert.match(service, /^EnvironmentFile=\/srv\/shein-bi\/secrets\/webhook-warehouse\.env$/m);
 assert.match(service, /^Environment=SHEIN_WAREHOUSE_PG_USER=shein_webhook_ops$/m);
 assert.match(service, /^NoNewPrivileges=true$/m);
+assert.match(service, /^ProtectSystem=strict$/m);
+assert.match(service, /^PrivateTmp=true$/m);
 assert.doesNotMatch(service, /lark_sales_qa_bot|shein-bi-lark-sales-qa/);
+assert.doesNotMatch(webhookServer, /createConfiguredLinkOpsStoreGateway|linkOpsGateway/, 'webhook DB role must not touch mutable link-ops tables');
 assert.match(notifier, /isWebhook/);
 assert.match(notifier, /详情与普通动态请到 BI「平台动态」查看/);
 assert.match(notifier, /if \(!isWebhook && !res\.ok/);
 
 for (const sql of [migration, schema]) {
   assert.match(sql, /event_data text NOT NULL/);
+  assert.match(sql, /source_event_order numeric\(30,0\)/);
+  assert.match(sql, /JOIN ops\.shein_webhook_receipt AS receipt ON receipt\.id=gate\.source_receipt_id/);
   assert.doesNotMatch(sql, /decrypted_payload/i);
   assert.match(sql, /GRANT SELECT \(id, received_at, processed_at, store_key, event_code, normalized, severity, status, title, summary, business_key, action_state, duplicate_count\) ON TABLE ops\.shein_webhook_receipt TO shein_link_ops/);
   assert.doesNotMatch(sql, /GRANT SELECT, INSERT, UPDATE ON TABLE ops\.shein_webhook_receipt TO shein_link_ops/);
+  assert.match(sql, /GRANT SELECT ON TABLE ops\.shein_webhook_store_gate TO shein_link_ops/);
+  assert.doesNotMatch(sql, /GRANT SELECT, INSERT, UPDATE ON TABLE ops\.shein_webhook_store_gate TO shein_link_ops/);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION ops\.reopen_shein_webhook_authorization_gate\(text,bigint,text\) TO shein_link_ops/);
   assert.match(sql, /GRANT SELECT, INSERT, UPDATE ON TABLE ops\.shein_webhook_receipt TO shein_webhook_ops/);
-  assert.match(sql, /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE fact\.openapi_order_item TO shein_webhook_ops/);
-  assert.match(sql, /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE fact\.openapi_return_item TO shein_webhook_ops/);
+  assert.match(sql, /GRANT SELECT ON TABLE fact\.openapi_order_item TO shein_webhook_ops/);
+  assert.match(sql, /GRANT SELECT ON TABLE fact\.openapi_return_item TO shein_webhook_ops/);
+  assert.match(sql, /REVOKE ALL PRIVILEGES ON TABLE fact\.openapi_order_item FROM shein_webhook_ops/);
+  assert.match(sql, /REVOKE ALL PRIVILEGES ON TABLE fact\.openapi_return_item FROM shein_webhook_ops/);
+  assert.doesNotMatch(sql, /GRANT [^;\n]*(?:INSERT|UPDATE|DELETE)[^;\n]*fact\.openapi_[^;\n]* TO shein_webhook_ops/);
+  assert.match(sql, /source_snapshot_at timestamptz/);
+  assert.doesNotMatch(sql, /GRANT EXECUTE ON FUNCTION ops\.prepare_shein_webhook_(?:order|return)_replace[^;]* TO shein_webhook_ops/);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION ops\.apply_shein_webhook_order_snapshot\(text,text,timestamptz,jsonb,jsonb,jsonb\) TO shein_webhook_ops/);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION ops\.apply_shein_webhook_return_snapshot\(text,text,timestamptz,jsonb,jsonb\) TO shein_webhook_ops/);
   assert.doesNotMatch(sql, /GRANT .*fact\.openapi_(?:order|return).* TO shein_link_ops/);
   assert.doesNotMatch(sql, /GRANT .*fact\.openapi_daily|GRANT .*reconciliation/i);
 }

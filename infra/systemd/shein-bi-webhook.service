@@ -41,7 +41,7 @@ TimeoutStopSec=30
 MemoryHigh=600M
 MemoryMax=1000M
 OOMPolicy=stop
-ProtectSystem=full
+ProtectSystem=strict
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true
@@ -52,7 +52,8 @@ LockPersonality=true
 RestrictRealtime=true
 NoNewPrivileges=true
 RestrictSUIDSGID=true
-ReadWritePaths=-/srv/shein-bi/logs/webhook-alerts
+PrivateTmp=true
+ReadWritePaths=-/srv/shein-bi/logs/webhook-alerts -/home/sheinops/.lark-cli -/home/sheinops/.local/share/lark-cli
 
 [Install]
 WantedBy=multi-user.target

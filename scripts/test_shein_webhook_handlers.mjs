@@ -8,7 +8,14 @@ const updates = [];
 const webhookRepository = {upsertStoreGate: async gate => {
   const key = `${gate.storeKey}:${gate.gateType}`;
   const current = currentGates.get(key);
-  const applied = current?.sourceReceiptId === undefined || gate.sourceReceiptId === null || Number(gate.sourceReceiptId) >= Number(current.sourceReceiptId);
+  const incomingOrdered = gate.sourceEventOrder !== null && gate.sourceEventOrder !== undefined;
+  const currentOrdered = current?.sourceEventOrder !== null && current?.sourceEventOrder !== undefined;
+  const applied = !current
+    || (!incomingOrdered && gate.state === 'blocked')
+    || (incomingOrdered && !currentOrdered && (gate.gateType !== 'quota' || gate.state === 'blocked' || current.state !== 'blocked'))
+    || (incomingOrdered && currentOrdered && (BigInt(gate.sourceEventOrder) > BigInt(current.sourceEventOrder)
+      || (BigInt(gate.sourceEventOrder) === BigInt(current.sourceEventOrder) && Number(gate.sourceReceiptId) >= Number(current.sourceReceiptId))))
+    || (!incomingOrdered && !currentOrdered && gate.gateType !== 'quota' && Number(gate.sourceReceiptId) >= Number(current.sourceReceiptId));
   const result = applied ? {...gate, applied} : {...current, applied: false};
   if (applied) currentGates.set(key, {...gate});
   gates.push({...gate, applied});
@@ -51,15 +58,20 @@ assert.equal(replayedProduct.replayed, true);
 assert.equal(updates.length, 1, 'receipt replay must not produce a second task revision');
 
 await processor.process({...base, id: 2, normalized: {eventFamily: 'authorization', eventCode: '3001503', eventLabel: '授权', storeKey: 'AA'}, payload: {type: 6}});
-await processor.process({...base, id: 3, normalized: {eventFamily: 'quota', eventCode: '3001061', eventLabel: '额度', storeKey: 'AA', quota: 0}, payload: {quota: 0}});
-await processor.process({...base, id: 4, normalized: {eventFamily: 'quota', eventCode: '3001061', eventLabel: '额度', storeKey: 'AA', quota: 12}, payload: {quota: 12}});
+await processor.process({...base, id: 3, normalized: {eventFamily: 'quota', eventCode: '3001061', eventLabel: '额度', storeKey: 'AA', quota: 0, eventTime: '1700000000000'}, payload: {quota: 0}});
+await processor.process({...base, id: 4, normalized: {eventFamily: 'quota', eventCode: '3001061', eventLabel: '额度', storeKey: 'AA', quota: 12, eventTime: '1700000001000'}, payload: {quota: 12}});
 await processor.process({...base, id: 5, normalized: {eventFamily: 'compliance', eventCode: '3001104', eventLabel: '合规', storeKey: 'AA'}, payload: {required: false}});
 assert.deepEqual(gates.map(g => [g.gateType, g.state]), [['authorization', 'blocked'], ['quota', 'blocked'], ['quota', 'open']]);
 
-const newestZero = await processor.process({...base, id: 10, normalized: {eventFamily: 'quota', eventCode: '3001061', eventLabel: '额度', storeKey: 'AA', quota: 0}, payload: {quota: 0}});
-const stalePositive = await processor.process({...base, id: 9, normalized: {eventFamily: 'quota', eventCode: '3001061', eventLabel: '额度', storeKey: 'AA', quota: 12}, payload: {quota: 12}});
+const newestZero = await processor.process({...base, id: 10, normalized: {eventFamily: 'quota', eventCode: '3001061', eventLabel: '额度', storeKey: 'AA', quota: 0, eventTime: '1700000003000'}, payload: {quota: 0}});
+const stalePositive = await processor.process({...base, id: 11, normalized: {eventFamily: 'quota', eventCode: '3001061', eventLabel: '额度', storeKey: 'AA', quota: 12, eventTime: '1700000002000'}, payload: {quota: 12}});
 assert.equal(newestZero.actionState, 'quota_gate_blocked');
 assert.equal(stalePositive.actionState, 'quota_gate_stale_ignored');
-assert.equal(currentGates.get('AA:quota').state, 'blocked', 'an older positive quota event must not reopen a newer zero gate');
+assert.equal(currentGates.get('AA:quota').state, 'blocked', 'a later-delivered but older positive quota event must not reopen a newer zero gate');
+const unorderedZero = await processor.process({...base, id: 12, normalized: {eventFamily: 'quota', eventCode: '3001061', eventLabel: '额度', storeKey: 'AA', quota: 0, eventTime: ''}, payload: {quota: 0}});
+const uncertainPositive = await processor.process({...base, id: 13, normalized: {eventFamily: 'quota', eventCode: '3001061', eventLabel: '额度', storeKey: 'AA', quota: 12, eventTime: '1700000004000'}, payload: {quota: 12}});
+assert.equal(unorderedZero.actionState, 'quota_gate_blocked', 'missing event order must still close a zero-quota gate');
+assert.equal(uncertainPositive.actionState, 'quota_gate_stale_ignored', 'an ordered positive event cannot automatically clear an unordered zero-quota risk');
+assert.equal(currentGates.get('AA:quota').state, 'blocked');
 
 console.log('shein_webhook_handlers: product, order/return and risk gates passed');

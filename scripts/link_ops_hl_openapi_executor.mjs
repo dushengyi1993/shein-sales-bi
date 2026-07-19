@@ -26,6 +26,7 @@ import {
   applyExplicitPublishPreparationOverrides,
   taskHasUnboundImageAssets,
 } from '../lib/link_ops_publish_asset_binding.mjs';
+import {runSheinWebhookExternalWriteGuarded} from '../lib/shein_webhook_external_write_guard.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CONFIG = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
@@ -3046,32 +3047,40 @@ async function main() {
   const readyForSubmit = blockers.length === 0 && Boolean(publishPayload);
   let publishResult = null;
   if (args.mode === 'execute' && readyForSubmit) {
-    const response = await client.request('/open-api/goods/product/publishOrEdit', {
-      method: 'POST',
-      body: publishPayload,
-      headers: {language: 'en'},
+    const guardedWrite = await runSheinWebhookExternalWriteGuarded({
+      writeStores: [targetStore],
+      write: () => client.request('/open-api/goods/product/publishOrEdit', {
+        method: 'POST',
+        body: publishPayload,
+        headers: {language: 'en'},
+      }),
     });
-    publishResult = {
-      httpStatus: response.status,
-      code: response.data?.code ?? null,
-      msg: response.data?.msg ?? null,
-      traceId: response.data?.traceId ?? null,
-      info: response.data?.info ?? null,
-    };
-    calls.push({
-      name: 'publishOrEdit',
-      path: '/open-api/goods/product/publishOrEdit',
-      method: 'POST',
-      httpStatus: publishResult.httpStatus,
-      code: publishResult.code,
-      msg: publishResult.msg,
-      traceId: publishResult.traceId,
-    });
-    if (publishResult.code !== '0') {
-      blockers.push(`publishOrEdit 返回失败：${safeString(publishResult.msg || publishResult.code || '未知错误')}`);
-    } else if (!publishResultSucceeded(publishResult)) {
-      const preValidMessages = publishPreValidMessages(publishResult.info);
-      blockers.push(`publishOrEdit 平台预校验失败，未创建新链接：${preValidMessages.join('；') || safeString(publishResult.msg || '未知原因')}`);
+    if (!guardedWrite.ok) {
+      appendUnique(blockers, guardedWrite.gate?.blockers || ['平台动态安全闸门阻止真实提交。']);
+    } else {
+      const response = guardedWrite.value;
+      publishResult = {
+        httpStatus: response.status,
+        code: response.data?.code ?? null,
+        msg: response.data?.msg ?? null,
+        traceId: response.data?.traceId ?? null,
+        info: response.data?.info ?? null,
+      };
+      calls.push({
+        name: 'publishOrEdit',
+        path: '/open-api/goods/product/publishOrEdit',
+        method: 'POST',
+        httpStatus: publishResult.httpStatus,
+        code: publishResult.code,
+        msg: publishResult.msg,
+        traceId: publishResult.traceId,
+      });
+      if (publishResult.code !== '0') {
+        blockers.push(`publishOrEdit 返回失败：${safeString(publishResult.msg || publishResult.code || '未知错误')}`);
+      } else if (!publishResultSucceeded(publishResult)) {
+        const preValidMessages = publishPreValidMessages(publishResult.info);
+        blockers.push(`publishOrEdit 平台预校验失败，未创建新链接：${preValidMessages.join('；') || safeString(publishResult.msg || '未知原因')}`);
+      }
     }
   }
   const publishSucceeded = publishResultSucceeded(publishResult);

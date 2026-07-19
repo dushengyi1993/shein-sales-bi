@@ -35,8 +35,9 @@ class FakePool {
         {...baseRow, id: 40, store_key: 'DL', received_at: '2026-07-19T00:00:00.000Z', event_type: 'quota', duplicate: true},
       ]};
     }
-    if (key === 'shein-webhook-list-store-gates') return {rows: [{store_key: 'JSH', gate_type: 'authorization', state: 'blocked', reason: 'expired', source_receipt_id: 41, updated_at: '2026-07-19T01:00:00.000Z'}]};
-    if (key === 'shein-webhook-upsert-store-gate') return {rows: [{store_key: values[0], gate_type: values[1], state: values[2], reason: values[3], source_receipt_id: values[4], updated_at: '2026-07-19T01:01:00.000Z', applied: true}]};
+    if (key === 'shein-webhook-list-store-gates') return {rows: [{store_key: 'JSH', gate_type: 'authorization', state: 'blocked', reason: 'expired', source_receipt_id: 41, source_event_order: null, updated_at: '2026-07-19T01:00:00.000Z'}]};
+    if (key === 'shein-webhook-upsert-store-gate') return {rows: [{store_key: values[0], gate_type: values[1], state: values[2], reason: values[3], source_receipt_id: values[4], source_event_order: values[5], updated_at: '2026-07-19T01:01:00.000Z', applied: true}]};
+    if (key === 'shein-webhook-reopen-authorization-gate') return {rows: [{store_key: values[0], gate_type: 'authorization', state: 'open', reason: values[2], source_receipt_id: values[1], source_event_order: null, updated_at: '2026-07-19T01:02:00.000Z', applied: true}]};
     if (key === 'shein-webhook-summary-totals') return {rows: [{last_24h: '2', pending: '1', failed: '0', p0: '1', last_received_at: baseRow.received_at}]};
     if (key === 'shein-webhook-summary-by-type') return {rows: [{event_type: 'authorization', total: '2'}]};
     if (key === 'shein-webhook-summary-by-store') return {rows: [{store_key: 'JSH', total: '2'}]};
@@ -93,7 +94,7 @@ await repo.listEvents({allowedStores: [], limit: 1});
 assert.match(latest(pool, 'shein-webhook-list-events').text, /WHERE FALSE/, 'empty event scope must not become all stores');
 
 const gates = await repo.listStoreGates({storeKeys: ['JSH']});
-assert.deepEqual(gates[0], {storeKey: 'JSH', gateType: 'authorization', state: 'blocked', reason: 'expired', sourceReceiptId: '41', updatedAt: '2026-07-19T01:00:00.000Z'});
+assert.deepEqual(gates[0], {storeKey: 'JSH', gateType: 'authorization', state: 'blocked', reason: 'expired', sourceReceiptId: '41', sourceEventOrder: null, updatedAt: '2026-07-19T01:00:00.000Z'});
 const gateList = latest(pool, 'shein-webhook-list-store-gates');
 assert.match(gateList.text, /store_key = ANY\(\$1::text\[\]\)/);
 assert.match(gateList.text, /state='blocked'/);
@@ -101,11 +102,17 @@ await repo.listStoreGates({storeKeys: []});
 assert.match(latest(pool, 'shein-webhook-list-store-gates').text, /WHERE FALSE/, 'empty gate scope must not become all stores');
 await repo.listStoreGates({storeKeys: '*', blockingOnly: false});
 assert.doesNotMatch(latest(pool, 'shein-webhook-list-store-gates').text, /ANY\(/, "only literal '*' may request all stores");
-const updatedGate = await repo.upsertStoreGate({storeKey: 'JSH', gateType: 'quota', state: 'blocked', reason: 'zero', sourceReceiptId: 44});
+const updatedGate = await repo.upsertStoreGate({storeKey: 'JSH', gateType: 'quota', state: 'blocked', reason: 'zero', sourceReceiptId: 44, sourceEventOrder: '1700000000000000'});
 assert.equal(updatedGate.applied, true);
 const gateUpsert = latest(pool, 'shein-webhook-upsert-store-gate');
-assert.match(gateUpsert.text, /EXCLUDED\.source_receipt_id >= ops\.shein_webhook_store_gate\.source_receipt_id/, 'older receipts must not overwrite a newer gate');
+assert.match(gateUpsert.text, /EXCLUDED\.source_event_order > ops\.shein_webhook_store_gate\.source_event_order/, 'platform event order must win over receipt arrival order');
+assert.match(gateUpsert.text, /EXCLUDED\.gate_type <> 'quota'[\s\S]*EXCLUDED\.state='blocked'/, 'an unversioned blocked quota gate must fail closed instead of accepting an unverifiable reopen');
+assert.match(gateUpsert.text, /EXCLUDED\.state='blocked' AND EXCLUDED\.source_event_order IS NULL/, 'an unversioned risk-closing event must always fail closed even after an ordered open gate');
+assert.equal(gateUpsert.values[5], '1700000000000000');
 assert.match(gateUpsert.text, /false AS applied/, 'a stale transition must return the current gate as not applied');
+const reopened = await repo.reopenAuthorizationGate({storeKey: 'JSH', sourceReceiptId: 41, reason: 'probe recovered'});
+assert.equal(reopened.state, 'open');
+assert.match(latest(pool, 'shein-webhook-reopen-authorization-gate').text, /ops\.reopen_shein_webhook_authorization_gate/);
 
 const totals = await repo.summary({allowedStores: ['JSH'], now: '2026-07-19T02:00:00Z'});
 assert.deepEqual(totals.totals, {last24h: 2, pending: 1, failed: 0, p0: 1});

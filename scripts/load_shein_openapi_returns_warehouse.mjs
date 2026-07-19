@@ -109,6 +109,15 @@ function ts(v) {
   return s;
 }
 
+function sourceSnapshotAt(data, label = 'OpenAPI return artifact') {
+  const raw = ts(data?.fetchTime);
+  const parsed = raw ? new Date(raw) : null;
+  if (!parsed || Number.isNaN(parsed.getTime())) {
+    throw new Error(`${label} is missing a valid fetchTime; refusing an unversioned warehouse write`);
+  }
+  return parsed.toISOString();
+}
+
 function datePart(v) {
   const t = ts(v);
   return t ? t.slice(0, 10) : null;
@@ -210,6 +219,7 @@ CREATE TABLE IF NOT EXISTS fact.openapi_return_order (
   receive_type text,
   source_file text,
   raw_summary jsonb NOT NULL DEFAULT '{}'::jsonb,
+  source_snapshot_at timestamptz,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS openapi_return_order_store_date_idx ON fact.openapi_return_order (store_key, ret_order_date);
@@ -255,11 +265,14 @@ CREATE TABLE IF NOT EXISTS fact.openapi_return_item (
   return_reason_en text,
   source_file text,
   raw_summary jsonb NOT NULL DEFAULT '{}'::jsonb,
+  source_snapshot_at timestamptz,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS openapi_return_item_store_date_idx ON fact.openapi_return_item (store_key, ret_order_date);
 CREATE INDEX IF NOT EXISTS openapi_return_item_goods_idx ON fact.openapi_return_item (standard_goods_sn, store_key);
 CREATE INDEX IF NOT EXISTS openapi_return_item_order_no_idx ON fact.openapi_return_item (store_key, order_no);
+ALTER TABLE fact.openapi_return_order ADD COLUMN IF NOT EXISTS source_snapshot_at timestamptz;
+ALTER TABLE fact.openapi_return_item ADD COLUMN IF NOT EXISTS source_snapshot_at timestamptz;
 
 CREATE TABLE IF NOT EXISTS mart.openapi_return_reconciliation (
   date date NOT NULL,
@@ -296,11 +309,30 @@ COMMIT;
 }
 
 function buildCleanupSql(pairs) {
-  const tupleList = pairs.map((p) => `(${sqlLiteral(p.date)}::date, ${sqlLiteral(p.store)})`).join(', ');
-  return `DELETE FROM ${OPENAPI_RETURN_ITEM_TABLE} WHERE (ret_order_date, store_key) IN (${tupleList});\nDELETE FROM ${OPENAPI_RETURN_ORDER_TABLE} WHERE (ret_order_date, store_key) IN (${tupleList});\nDELETE FROM ${OPENAPI_RETURN_RECONCILIATION_TABLE} WHERE (date, store_key) IN (${tupleList});\n`;
+  const tupleList = pairs.map((p) => `(${sqlLiteral(p.date)}::date, ${sqlLiteral(p.store)}, ${sqlLiteral(p.sourceSnapshotAt)}::timestamptz)`).join(', ');
+  return `CREATE TEMP TABLE incoming_openapi_return_slice(date date, store_key text, source_snapshot_at timestamptz) ON COMMIT DROP;
+INSERT INTO incoming_openapi_return_slice(date, store_key, source_snapshot_at) VALUES ${tupleList};
+DELETE FROM ${OPENAPI_RETURN_ITEM_TABLE} AS item USING incoming_openapi_return_slice AS slice
+WHERE item.ret_order_date=slice.date AND item.store_key=slice.store_key
+  AND NOT EXISTS (
+    SELECT 1 FROM ${OPENAPI_RETURN_ORDER_TABLE} AS header
+    WHERE header.store_key=item.store_key AND header.return_order_no=item.return_order_no
+      AND header.source_snapshot_at > slice.source_snapshot_at
+  );
+DELETE FROM ${OPENAPI_RETURN_ORDER_TABLE} AS header USING incoming_openapi_return_slice AS slice
+WHERE header.ret_order_date=slice.date AND header.store_key=slice.store_key
+  AND (header.source_snapshot_at IS NULL OR header.source_snapshot_at <= slice.source_snapshot_at);
+DELETE FROM ${OPENAPI_RETURN_RECONCILIATION_TABLE} AS reconciliation USING incoming_openapi_return_slice AS slice
+WHERE reconciliation.date=slice.date AND reconciliation.store_key=slice.store_key;
+`;
 }
 
-function buildUpsertRowsSql(table, columns, conflictColumns, rows) {
+function buildStoreLoadLocksSql(pairs) {
+  const stores = [...new Set((pairs || []).map(pair => String(pair?.store || '').trim().toUpperCase()).filter(Boolean))].sort();
+  return stores.map(store => `SELECT pg_advisory_xact_lock(hashtextextended('shein-openapi-return:' || ${sqlLiteral(store)}, 0));`).join('\n');
+}
+
+function buildUpsertRowsSql(table, columns, conflictColumns, rows, {freshnessColumn = '', freshnessParent = null} = {}) {
   const originalRowCount = rows.length;
   if (rows.length && conflictColumns.length) {
     const byConflictKey = new Map();
@@ -319,61 +351,54 @@ function buildUpsertRowsSql(table, columns, conflictColumns, rows) {
     columns.includes('updated_at') ? 'updated_at = now()' : '',
   ].filter(Boolean).join(',\n    ');
   const sqlColumns = columns.map(qIdent).join(', ');
+  const stageRef = `"${stage}"`;
+  const sourceGuard = freshnessParent
+    ? `WHERE NOT EXISTS (SELECT 1 FROM ${qIdent(freshnessParent.table)} AS freshness_parent
+      WHERE freshness_parent.${qIdent('store_key')}=${stageRef}.${qIdent('store_key')}
+        AND freshness_parent.${qIdent(freshnessParent.keyColumn)}=${stageRef}.${qIdent(freshnessParent.keyColumn)}
+        AND freshness_parent.${qIdent(freshnessColumn)} > ${stageRef}.${qIdent(freshnessColumn)})`
+    : '';
+  const conflictGuard = freshnessColumn
+    ? `\nWHERE freshness_target.${qIdent(freshnessColumn)} IS NULL OR EXCLUDED.${qIdent(freshnessColumn)} >= freshness_target.${qIdent(freshnessColumn)}`
+    : '';
   let script = '';
-  script += `CREATE TEMP TABLE "${stage}" (LIKE ${qIdent(table)} INCLUDING DEFAULTS) ON COMMIT DROP;\n`;
-  script += `COPY "${stage}" (${sqlColumns}) FROM STDIN WITH (FORMAT csv, NULL '');\n`;
+  script += `CREATE TEMP TABLE ${stageRef} (LIKE ${qIdent(table)} INCLUDING DEFAULTS) ON COMMIT DROP;\n`;
+  script += `COPY ${stageRef} (${sqlColumns}) FROM STDIN WITH (FORMAT csv, NULL '');\n`;
   for (const row of rows) script += csvLine(columns.map((c) => row[c]));
   script += '\\.\n';
-  script += `INSERT INTO ${qIdent(table)} (${sqlColumns})\n`;
-  script += `SELECT ${sqlColumns} FROM "${stage}"\n`;
-  script += `ON CONFLICT (${conflictColumns.map(qIdent).join(', ')}) DO UPDATE SET\n    ${updateSet};\n`;
+  script += `INSERT INTO ${qIdent(table)} AS freshness_target (${sqlColumns})\n`;
+  script += `SELECT ${sqlColumns} FROM ${stageRef}\n${sourceGuard}\n`;
+  script += `ON CONFLICT (${conflictColumns.map(qIdent).join(', ')}) DO UPDATE SET\n    ${updateSet}${conflictGuard};\n`;
   return {script, result};
 }
 
-/** Plain SQL upsert for the direct node-postgres webhook path (no psql COPY meta-protocol). */
-function buildDirectUpsertRowsSql(table, columns, conflictColumns, rows) {
-  const originalRowCount = rows.length;
-  if (rows.length && conflictColumns.length) {
-    const byConflictKey = new Map();
-    for (const row of rows) {
-      const key = conflictColumns.map((column) => String(row[column] ?? '')).join('\u001F');
-      byConflictKey.set(key, row);
+function jsonRowsLiteral(rows) {
+  const normalized = rows.map((row) => {
+    const copy = {...row};
+    if (typeof copy.raw_summary === 'string') {
+      try { copy.raw_summary = JSON.parse(copy.raw_summary); } catch { /* A jsonb scalar remains valid. */ }
     }
-    rows = [...byConflictKey.values()];
-  }
-  const result = {table, rows: rows.length, inputRows: originalRowCount, dedupedRows: originalRowCount - rows.length};
-  if (!rows.length) return {script: '', result: {...result, skipped: true}};
-  const valueLiteral = (value) => {
-    if (value === null || value === undefined || value === '') return 'NULL';
-    const encoded = typeof value === 'object' ? JSON.stringify(value) : String(value);
-    return `'${encoded.replace(/'/g, "''")}'`;
-  };
-  const nonConflict = columns.filter((column) => !conflictColumns.includes(column) && column !== 'updated_at');
-  const updateSet = [
-    ...nonConflict.map((column) => `${qIdent(column)} = EXCLUDED.${qIdent(column)}`),
-    columns.includes('updated_at') ? 'updated_at = now()' : '',
-  ].filter(Boolean).join(',\n    ');
-  const sqlColumns = columns.map(qIdent).join(', ');
-  const values = rows.map((row) => `(${columns.map((column) => valueLiteral(row[column])).join(', ')})`).join(',\n');
-  return {
-    script: `INSERT INTO ${qIdent(table)} (${sqlColumns})\nVALUES\n${values}\nON CONFLICT (${conflictColumns.map(qIdent).join(', ')}) DO UPDATE SET\n    ${updateSet};\n`,
-    result,
-  };
+    return copy;
+  });
+  return `${sqlLiteral(JSON.stringify(normalized))}::jsonb`;
 }
 
 function returnLoadSpecs(data) {
   return [
     {
       table: OPENAPI_RETURN_ORDER_TABLE,
-      columns: ['return_order_key','ret_order_date','store_key','group_key','shop_name','return_order_no','aftersales_order_no','order_no','site','return_order_status','return_order_status_name','no_return_goods_sign','return_order_tag_code','shipping_code','platform_express_no','member_express_no','express_company_name','refund_order_nos','refund_waybill','refund_express_company_name','performance_cost','invoice_status','request_return_time','add_time','allocate_time','last_update_time','seller_signed_time','cancel_time','completed_time','check_status','stock_mode','receive_type','source_file','raw_summary'],
+      columns: ['return_order_key','ret_order_date','store_key','group_key','shop_name','return_order_no','aftersales_order_no','order_no','site','return_order_status','return_order_status_name','no_return_goods_sign','return_order_tag_code','shipping_code','platform_express_no','member_express_no','express_company_name','refund_order_nos','refund_waybill','refund_express_company_name','performance_cost','invoice_status','request_return_time','add_time','allocate_time','last_update_time','seller_signed_time','cancel_time','completed_time','check_status','stock_mode','receive_type','source_file','raw_summary','source_snapshot_at'],
       conflictColumns: ['return_order_key'],
       rows: data.orders,
+      freshnessColumn: 'source_snapshot_at',
     },
     {
       table: OPENAPI_RETURN_ITEM_TABLE,
-      columns: ['return_item_key','return_order_key','ret_order_date','store_key','group_key','shop_name','return_order_no','order_no','site','standard_goods_sn','raw_goods_sn','goods_id','entity_id','skc','sku','sku_sn','sku_suffix','goods_title','goods_status','quantity','currency_code','sale_currency','seller_currency_price','cost_price','seller_currency_store_coupon_price','seller_currency_promotion_price','settle_currency_promotion_price','performance_price','return_expense','return_freight_subsidy','seller_real_tax','estimate_income_money','estimate_tax_income_money','amount_sar','return_reason_cn','return_reason_en','source_file','raw_summary'],
+      columns: ['return_item_key','return_order_key','ret_order_date','store_key','group_key','shop_name','return_order_no','order_no','site','standard_goods_sn','raw_goods_sn','goods_id','entity_id','skc','sku','sku_sn','sku_suffix','goods_title','goods_status','quantity','currency_code','sale_currency','seller_currency_price','cost_price','seller_currency_store_coupon_price','seller_currency_promotion_price','settle_currency_promotion_price','performance_price','return_expense','return_freight_subsidy','seller_real_tax','estimate_income_money','estimate_tax_income_money','amount_sar','return_reason_cn','return_reason_en','source_file','raw_summary','source_snapshot_at'],
       conflictColumns: ['return_item_key'],
       rows: data.items,
+      freshnessColumn: 'source_snapshot_at',
+      freshnessParent: {table: OPENAPI_RETURN_ORDER_TABLE, keyColumn: 'return_order_no'},
     },
     {
       table: OPENAPI_RETURN_RECONCILIATION_TABLE,
@@ -384,19 +409,26 @@ function returnLoadSpecs(data) {
   ];
 }
 
-async function loadOpenApiReturnsAtomically(args, data) {
-  const cleanup = args.dryRun ? {pairs: data.pairs.length, dryRun: true} : {pairs: data.pairs.length};
+export function buildOpenApiReturnsAtomicSql(data) {
   let script = 'BEGIN;\n';
+  script += `${buildStoreLoadLocksSql(data.pairs)}\n`;
   script += buildCleanupSql(data.pairs);
   const results = [];
   for (const spec of returnLoadSpecs(data)) {
-    const built = buildUpsertRowsSql(spec.table, spec.columns, spec.conflictColumns, spec.rows);
+    const built = buildUpsertRowsSql(spec.table, spec.columns, spec.conflictColumns, spec.rows, spec);
     script += built.script;
-    results.push(args.dryRun ? {...built.result, dryRun: true} : built.result);
+    results.push(built.result);
   }
   script += 'COMMIT;\n';
+  return {script, results};
+}
+
+async function loadOpenApiReturnsAtomically(args, data) {
+  const cleanup = args.dryRun ? {pairs: data.pairs.length, dryRun: true} : {pairs: data.pairs.length};
+  const built = buildOpenApiReturnsAtomicSql(data);
+  const results = args.dryRun ? built.results.map(result => ({...result, dryRun: true})) : built.results;
   if (args.dryRun) return {cleanup, results};
-  await runPsqlScript(args, script);
+  await runPsqlScript(args, built.script);
   return {cleanup, results};
 }
 
@@ -422,16 +454,20 @@ export function buildTargetedOpenApiReturnsUpsertSql({artifact, file = 'webhook:
   assertTargetedReturnRows(orders, scope.storeKey, scope.returnOrderNo);
   assertTargetedReturnRows(items, scope.storeKey, scope.returnOrderNo);
   if (orders.length !== 1) throw new Error(`Expected exactly one return header for ${scope.storeKey}/${scope.returnOrderNo}, got ${orders.length}`);
-  const results = [];
-  let script = 'BEGIN;\n';
-  script += `DELETE FROM ${OPENAPI_RETURN_ITEM_TABLE} WHERE store_key = ${sqlLiteral(scope.storeKey)} AND return_order_no = ${sqlLiteral(scope.returnOrderNo)};\n`;
-  for (const spec of returnLoadSpecs({orders, items, reconciliations: []}).slice(0, 2)) {
-    const built = buildDirectUpsertRowsSql(spec.table, spec.columns, spec.conflictColumns, spec.rows);
-    script += built.script;
-    results.push(built.result);
-  }
-  script += 'COMMIT;\n';
-  return {scope, script, results, rowCounts: {headers: orders.length, items: items.length}};
+  if (items.length < 1) throw new Error(`Refusing targeted return replacement for ${scope.storeKey}/${scope.returnOrderNo}: item detail is empty`);
+  const specs = returnLoadSpecs({orders, items, reconciliations: []}).slice(0, 2);
+  const results = specs.map((spec) => ({table: spec.table, inputRows: spec.rows.length, rows: spec.rows.length}));
+  const script = `BEGIN;
+SELECT * FROM ops.apply_shein_webhook_return_snapshot(
+  ${sqlLiteral(scope.storeKey)},
+  ${sqlLiteral(scope.returnOrderNo)},
+  ${sqlLiteral(rows.sourceSnapshotAt)}::timestamptz,
+  ${jsonRowsLiteral(orders)},
+  ${jsonRowsLiteral(items)}
+);
+COMMIT;
+`;
+  return {scope, script, results, rowCounts: {headers: orders.length, items: items.length, sourceSnapshotAt: rows.sourceSnapshotAt}};
 }
 
 export async function upsertTargetedOpenApiReturns(args, input, {executor = runPsqlScript} = {}) {
@@ -443,7 +479,7 @@ export async function upsertTargetedOpenApiReturns(args, input, {executor = runP
 
 export function buildTargetedOpenApiReturnsReadbackSql({storeKey, returnOrderNo}) {
   const scope = assertTargetedReturnRows([], storeKey, returnOrderNo);
-  return `SELECT json_build_object('storeKey', ${sqlLiteral(scope.storeKey)}, 'returnOrderNo', ${sqlLiteral(scope.returnOrderNo)}, 'headers', (SELECT count(*) FROM ${OPENAPI_RETURN_ORDER_TABLE} WHERE store_key = ${sqlLiteral(scope.storeKey)} AND return_order_no = ${sqlLiteral(scope.returnOrderNo)}), 'items', (SELECT count(*) FROM ${OPENAPI_RETURN_ITEM_TABLE} WHERE store_key = ${sqlLiteral(scope.storeKey)} AND return_order_no = ${sqlLiteral(scope.returnOrderNo)}))::text;\n`;
+  return `SELECT json_build_object('storeKey', ${sqlLiteral(scope.storeKey)}, 'returnOrderNo', ${sqlLiteral(scope.returnOrderNo)}, 'sourceSnapshotAt', (SELECT max(source_snapshot_at) FROM ${OPENAPI_RETURN_ORDER_TABLE} WHERE store_key = ${sqlLiteral(scope.storeKey)} AND return_order_no = ${sqlLiteral(scope.returnOrderNo)}), 'headers', (SELECT count(*) FROM ${OPENAPI_RETURN_ORDER_TABLE} WHERE store_key = ${sqlLiteral(scope.storeKey)} AND return_order_no = ${sqlLiteral(scope.returnOrderNo)}), 'items', (SELECT count(*) FROM ${OPENAPI_RETURN_ITEM_TABLE} WHERE store_key = ${sqlLiteral(scope.storeKey)} AND return_order_no = ${sqlLiteral(scope.returnOrderNo)}))::text;\n`;
 }
 
 export async function readbackTargetedOpenApiReturns(args, scope, expectedRowCounts, {executor = runPsqlScript} = {}) {
@@ -452,6 +488,15 @@ export async function readbackTargetedOpenApiReturns(args, scope, expectedRowCou
   if (!line) throw new Error(`Missing targeted return readback for ${scope.storeKey}/${scope.returnOrderNo}`);
   const result = JSON.parse(line);
   const expected = expectedRowCounts || {};
+  const actualSnapshotMs = Date.parse(result.sourceSnapshotAt || '');
+  const expectedSnapshotMs = Date.parse(expected.sourceSnapshotAt || '');
+  if (!Number.isFinite(actualSnapshotMs) || !Number.isFinite(expectedSnapshotMs)) {
+    throw new Error(`Targeted return readback has no valid source snapshot for ${scope.storeKey}/${scope.returnOrderNo}`);
+  }
+  if (actualSnapshotMs > expectedSnapshotMs) return {...result, superseded: true};
+  if (actualSnapshotMs !== expectedSnapshotMs) {
+    throw new Error(`Targeted return readback snapshot mismatch for ${scope.storeKey}/${scope.returnOrderNo}: actual=${result.sourceSnapshotAt}, expected=${expected.sourceSnapshotAt}`);
+  }
   for (const key of ['headers', 'items']) {
     if (Number(result[key]) !== Number(expected[key])) {
       throw new Error(`Targeted return readback failed for ${scope.storeKey}/${scope.returnOrderNo}: ${key}=${result[key]}, expected=${expected[key]}`);
@@ -501,6 +546,7 @@ function itemKeyPart(item, idx) {
 
 export function buildFactRows(data, file) {
   const source = rel(file);
+  const snapshotAt = sourceSnapshotAt(data, `${data?.storeKey || 'unknown store'} OpenAPI return artifact`);
   const orders = [];
   const items = [];
   const refsByReturnNo = new Map(asArray(data.returnOrderRefs)
@@ -548,6 +594,7 @@ export function buildFactRows(data, file) {
       receive_type: detail.receiveType ?? '',
       source_file: source,
       raw_summary: compactJson(detail),
+      source_snapshot_at: snapshotAt,
     });
     for (const [gidx, item] of asArray(detail.returnGoodsInfoList).entries()) {
       const rawGoods = item.goodsSn || '';
@@ -593,10 +640,11 @@ export function buildFactRows(data, file) {
         return_reason_en: reasonByLanguage(item, 'EN'),
         source_file: source,
         raw_summary: compactJson({returnOrder: detail, goods: item}),
+        source_snapshot_at: snapshotAt,
       });
     }
   }
-  return {orders, items};
+  return {sourceSnapshotAt: snapshotAt, orders, items};
 }
 
 function summarizeApi(data, rows) {
@@ -801,7 +849,7 @@ async function collectOpenApiReturns(args) {
     }
     perDate.push({date, file, data, factRows});
     loadedFiles.push(rel(file));
-    pairs.push({date, store: args.store});
+    pairs.push({date, store: args.store, sourceSnapshotAt: factRows.sourceSnapshotAt});
   }
   for (const entry of perDate) {
     reconciliations.push(await buildReconciliationRow(args, entry.date, entry.file, entry.data, entry.factRows, apiReturnDateByReturnNo));

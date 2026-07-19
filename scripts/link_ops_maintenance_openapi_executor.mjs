@@ -16,6 +16,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import crypto from 'node:crypto';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
+import {runSheinWebhookExternalWriteGuarded} from '../lib/shein_webhook_external_write_guard.mjs';
 import {
   formatStoreIdentityError,
   openApiIdentityToStorageIdentity,
@@ -605,7 +606,26 @@ async function main(){
   }
   let submitResults=[]; let actualWriteSubmitted=false;
   if(args.mode==='execute' && blockers.length===0){
-    for(const p of payloads){ const response=await client.request(p.endpoint,{method:'POST',body:p.body,headers:{language:'en'}}); const compact=compactCallResult(p.operation,p.endpoint,'POST',response); calls.push(compact); submitResults.push({...compact, operation:p.operation}); if(String(response.data?.code)!=='0') blockers.push(`${p.operation} 返回失败：${safeString(response.data?.msg||response.data?.code||'未知错误')}`); else if(response.data?.info?.success===false){ const errs=(response.data?.info?.pre_valid_result||[]).map(v=>`[${v.form||v.module||''}] ${(v.messages||[]).join('; ')}`).join(' | '); blockers.push(`${p.operation} 校验失败：${errs||'info.success=false 但无详细错误'}`); } }
+    for(const p of payloads){
+      const guardedWrite=await runSheinWebhookExternalWriteGuarded({
+        writeStores:[store],
+        write:()=>client.request(p.endpoint,{method:'POST',body:p.body,headers:{language:'en'}}),
+      });
+      if(!guardedWrite.ok){
+        blockers.push(...(guardedWrite.gate?.blockers||['平台动态安全闸门阻止真实提交。']));
+        break;
+      }
+      const response=guardedWrite.value;
+      const compact=compactCallResult(p.operation,p.endpoint,'POST',response);
+      calls.push(compact);
+      submitResults.push({...compact, operation:p.operation});
+      if(String(response.data?.code)!=='0'){
+        blockers.push(`${p.operation} 返回失败：${safeString(response.data?.msg||response.data?.code||'未知错误')}`);
+      }else if(response.data?.info?.success===false){
+        const errs=(response.data?.info?.pre_valid_result||[]).map(v=>`[${v.form||v.module||''}] ${(v.messages||[]).join('; ')}`).join(' | ');
+        blockers.push(`${p.operation} 校验失败：${errs||'info.success=false 但无详细错误'}`);
+      }
+    }
     actualWriteSubmitted=submitResults.some(r=>String(r.code)==='0' && r.infoSuccess!==false);
   }
   const readbackCalls=[]; let readback={ok:false,status:args.mode==='execute'?'not_run':'planned_not_run',calls:readbackCalls};

@@ -222,13 +222,17 @@ async function main() {
   });
   const outputs = [];
   for (const date of eachDate(args.start, args.end)) {
+    // This is the source-version boundary for the whole slice.  Taking it
+    // before the first request prevents a slow, older daily fetch from being
+    // stamped later than a webhook detail fetch that completed in between.
+    const fetchTime = new Date().toISOString();
     const orderList = await fetchOrderListForDate(client, date);
     const orderNos = orderList.map((row) => String(row.orderNo)).filter(Boolean);
     const orderDetails = await fetchOrderDetails(client, orderNos);
     const {orderRows, goodsRows} = mapOpenApiOrderDetails(orderDetails);
     const payload = {
       storeKey: args.store, shopName: storeMetadata.shopName, groupKey: storeMetadata.groupKey, start: date, end: date,
-      fetchTime: new Date().toISOString(), source: 'shein-openapi',
+      fetchTime, source: 'shein-openapi',
       request: {apiBaseUrl: client.baseUrl, queryType: 1, startTime: `${date} 00:00:00`, endTime: `${date} 23:59:59`},
       timezone: {name: 'Asia/Shanghai', utcOffsetHours: 8}, summary: summarize(orderList, orderRows, goodsRows),
       orderRefs: orderList, orders: orderDetails, orderRows, goodsRows,

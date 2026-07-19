@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS fact.openapi_order_payment_flag (
   source_kind text NOT NULL,
   source_file text,
   raw_evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
+  source_snapshot_at timestamptz,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS openapi_order_payment_flag_store_date_idx
@@ -156,6 +157,15 @@ function ts(v) {
   const s = String(v).trim();
   if (!s || s === '-') return null;
   return s;
+}
+
+function sourceSnapshotAt(data, label = 'OpenAPI artifact') {
+  const raw = ts(data?.fetchTime);
+  const parsed = raw ? new Date(raw) : null;
+  if (!parsed || Number.isNaN(parsed.getTime())) {
+    throw new Error(`${label} is missing a valid fetchTime; refusing an unversioned warehouse write`);
+  }
+  return parsed.toISOString();
 }
 
 function round2(n) {
@@ -281,6 +291,9 @@ ${OPENAPI_ORDER_PAYMENT_FLAG_CREATE_SQL}
 CREATE TABLE IF NOT EXISTS fact.openapi_store_daily_sales (LIKE fact.store_daily_sales INCLUDING DEFAULTS);
 CREATE TABLE IF NOT EXISTS fact.openapi_order_header (LIKE fact.order_header INCLUDING DEFAULTS);
 CREATE TABLE IF NOT EXISTS fact.openapi_order_item (LIKE fact.order_item INCLUDING DEFAULTS);
+ALTER TABLE fact.openapi_order_header ADD COLUMN IF NOT EXISTS source_snapshot_at timestamptz;
+ALTER TABLE fact.openapi_order_item ADD COLUMN IF NOT EXISTS source_snapshot_at timestamptz;
+ALTER TABLE fact.openapi_order_payment_flag ADD COLUMN IF NOT EXISTS source_snapshot_at timestamptz;
 CREATE TABLE IF NOT EXISTS mart.openapi_sales_reconciliation (
   date date NOT NULL,
   store_key text NOT NULL,
@@ -371,6 +384,7 @@ COMMIT;
 async function cleanupLoadedSlices(args, pairs) {
   if (!pairs.length) return {pairs: 0, skipped: true};
   const script = `BEGIN;
+${buildStoreLoadLocksSql(pairs)}
 ${buildCleanupSql(pairs)}
 COMMIT;
 `;
@@ -379,17 +393,40 @@ COMMIT;
   return {pairs: pairs.length};
 }
 
+function buildStoreLoadLocksSql(pairs) {
+  const stores = [...new Set((pairs || []).map(pair => String(pair?.store || '').trim().toUpperCase()).filter(Boolean))].sort();
+  return stores.map(store => `SELECT pg_advisory_xact_lock(hashtextextended('shein-openapi-order:' || ${sqlLiteral(store)}, 0));`).join('\n');
+}
+
 function buildCleanupSql(pairs) {
-  const tupleList = pairs.map((p) => `(${sqlLiteral(p.date)}::date, ${sqlLiteral(p.store)})`).join(', ');
-  return `DELETE FROM fact.openapi_order_item WHERE (created_date, store_key) IN (${tupleList});
-DELETE FROM fact.openapi_order_header WHERE (created_date, store_key) IN (${tupleList});
-DELETE FROM fact.openapi_store_daily_sales WHERE (date, store_key) IN (${tupleList});
-DELETE FROM mart.openapi_sales_reconciliation WHERE (date, store_key) IN (${tupleList});
-DELETE FROM fact.openapi_order_payment_flag WHERE (created_date, store_key) IN (${tupleList});
+  const tupleList = pairs.map((p) => `(${sqlLiteral(p.date)}::date, ${sqlLiteral(p.store)}, ${sqlLiteral(p.sourceSnapshotAt)}::timestamptz)`).join(', ');
+  return `CREATE TEMP TABLE incoming_openapi_sales_slice(date date, store_key text, source_snapshot_at timestamptz) ON COMMIT DROP;
+INSERT INTO incoming_openapi_sales_slice(date, store_key, source_snapshot_at) VALUES ${tupleList};
+DELETE FROM fact.openapi_order_item AS item USING incoming_openapi_sales_slice AS slice
+WHERE item.created_date=slice.date AND item.store_key=slice.store_key
+  AND NOT EXISTS (
+    SELECT 1 FROM fact.openapi_order_header AS header
+    WHERE header.store_key=item.store_key AND header.order_no=item.order_no
+      AND header.source_snapshot_at > slice.source_snapshot_at
+  );
+DELETE FROM fact.openapi_order_payment_flag AS payment USING incoming_openapi_sales_slice AS slice
+WHERE payment.created_date=slice.date AND payment.store_key=slice.store_key
+  AND NOT EXISTS (
+    SELECT 1 FROM fact.openapi_order_header AS header
+    WHERE header.store_key=payment.store_key AND header.order_no=payment.order_no
+      AND header.source_snapshot_at > slice.source_snapshot_at
+  );
+DELETE FROM fact.openapi_order_header AS header USING incoming_openapi_sales_slice AS slice
+WHERE header.created_date=slice.date AND header.store_key=slice.store_key
+  AND (header.source_snapshot_at IS NULL OR header.source_snapshot_at <= slice.source_snapshot_at);
+DELETE FROM fact.openapi_store_daily_sales AS daily USING incoming_openapi_sales_slice AS slice
+WHERE daily.date=slice.date AND daily.store_key=slice.store_key;
+DELETE FROM mart.openapi_sales_reconciliation AS reconciliation USING incoming_openapi_sales_slice AS slice
+WHERE reconciliation.date=slice.date AND reconciliation.store_key=slice.store_key;
 `;
 }
 
-function buildUpsertRowsSql(table, columns, conflictColumns, rows) {
+function buildUpsertRowsSql(table, columns, conflictColumns, rows, {freshnessColumn = '', freshnessParent = null} = {}) {
   const originalRowCount = rows.length;
   if (rows.length && conflictColumns.length) {
     const byConflictKey = new Map();
@@ -408,14 +445,24 @@ function buildUpsertRowsSql(table, columns, conflictColumns, rows) {
     columns.includes('updated_at') ? 'updated_at = now()' : '',
   ].filter(Boolean).join(',\n    ');
   const sqlColumns = columns.map(qIdent).join(', ');
+  const stageRef = `"${stage}"`;
+  const sourceGuard = freshnessParent
+    ? `WHERE NOT EXISTS (SELECT 1 FROM ${qIdent(freshnessParent.table)} AS freshness_parent
+      WHERE freshness_parent.${qIdent('store_key')}=${stageRef}.${qIdent('store_key')}
+        AND freshness_parent.${qIdent(freshnessParent.keyColumn)}=${stageRef}.${qIdent(freshnessParent.keyColumn)}
+        AND freshness_parent.${qIdent(freshnessColumn)} > ${stageRef}.${qIdent(freshnessColumn)})`
+    : '';
+  const conflictGuard = freshnessColumn
+    ? `\nWHERE freshness_target.${qIdent(freshnessColumn)} IS NULL OR EXCLUDED.${qIdent(freshnessColumn)} >= freshness_target.${qIdent(freshnessColumn)}`
+    : '';
   let script = '';
-  script += `CREATE TEMP TABLE "${stage}" (LIKE ${qIdent(table)} INCLUDING DEFAULTS) ON COMMIT DROP;\n`;
-  script += `COPY "${stage}" (${sqlColumns}) FROM STDIN WITH (FORMAT csv, NULL '');\n`;
+  script += `CREATE TEMP TABLE ${stageRef} (LIKE ${qIdent(table)} INCLUDING DEFAULTS) ON COMMIT DROP;\n`;
+  script += `COPY ${stageRef} (${sqlColumns}) FROM STDIN WITH (FORMAT csv, NULL '');\n`;
   for (const row of rows) script += csvLine(columns.map((c) => row[c]));
   script += '\\.\n';
-  script += `INSERT INTO ${qIdent(table)} (${sqlColumns})\n`;
-  script += `SELECT ${sqlColumns} FROM "${stage}"\n`;
-  script += `ON CONFLICT (${conflictColumns.map(qIdent).join(', ')}) DO UPDATE SET\n    ${updateSet};\n`;
+  script += `INSERT INTO ${qIdent(table)} AS freshness_target (${sqlColumns})\n`;
+  script += `SELECT ${sqlColumns} FROM ${stageRef}\n${sourceGuard}\n`;
+  script += `ON CONFLICT (${conflictColumns.map(qIdent).join(', ')}) DO UPDATE SET\n    ${updateSet}${conflictGuard};\n`;
   return {script, result};
 }
 
@@ -438,21 +485,26 @@ function openApiSalesLoadSpecs(sales) {
     },
     {
       table: 'fact.openapi_order_header',
-      columns: ['order_key','store_key','group_key','order_id','order_no','bill_no','created_date','order_create_time','allocate_time','site','order_status','order_status_desc','perform_status','perform_status_desc','source_file','raw_summary'],
+      columns: ['order_key','store_key','group_key','order_id','order_no','bill_no','created_date','order_create_time','allocate_time','site','order_status','order_status_desc','perform_status','perform_status_desc','source_file','raw_summary','source_snapshot_at'],
       conflictColumns: ['order_key'],
       rows: sales.orders,
+      freshnessColumn: 'source_snapshot_at',
     },
     {
       table: 'fact.openapi_order_item',
-      columns: ['order_item_key','order_key','store_key','group_key','order_id','order_no','bill_no','created_date','order_create_time','site','standard_goods_sn','raw_goods_sn','goods_id','entity_id','skc','sku_code','sku_sn','sku_suffix','goods_title','quantity','currency_code','currency_price','sales_sar','sales_rmb','goods_status','goods_performance_status','goods_performance_status_desc','source_file','raw_summary'],
+      columns: ['order_item_key','order_key','store_key','group_key','order_id','order_no','bill_no','created_date','order_create_time','site','standard_goods_sn','raw_goods_sn','goods_id','entity_id','skc','sku_code','sku_sn','sku_suffix','goods_title','quantity','currency_code','currency_price','sales_sar','sales_rmb','goods_status','goods_performance_status','goods_performance_status_desc','source_file','raw_summary','source_snapshot_at'],
       conflictColumns: ['order_item_key'],
       rows: sales.items,
+      freshnessColumn: 'source_snapshot_at',
+      freshnessParent: {table: 'fact.openapi_order_header', keyColumn: 'order_no'},
     },
     {
       table: OPENAPI_ORDER_PAYMENT_FLAG_TABLE,
-      columns: ORDER_PAYMENT_FLAG_COLUMNS,
+      columns: [...ORDER_PAYMENT_FLAG_COLUMNS, 'source_snapshot_at'],
       conflictColumns: ['order_key'],
       rows: sales.paymentFlags,
+      freshnessColumn: 'source_snapshot_at',
+      freshnessParent: {table: 'fact.openapi_order_header', keyColumn: 'order_no'},
     },
     {
       table: 'mart.openapi_sales_reconciliation',
@@ -463,25 +515,33 @@ function openApiSalesLoadSpecs(sales) {
   ];
 }
 
-async function loadOpenApiSalesAtomically(args, sales) {
-  const cleanup = args.dryRun ? {pairs: sales.pairs.length, dryRun: true} : {pairs: sales.pairs.length};
+export function buildOpenApiSalesAtomicSql(sales) {
   let script = 'BEGIN;\n';
+  script += `${buildStoreLoadLocksSql(sales.pairs)}\n`;
   script += buildCleanupSql(sales.pairs);
   const results = [];
   for (const spec of openApiSalesLoadSpecs(sales)) {
-    const built = buildUpsertRowsSql(spec.table, spec.columns, spec.conflictColumns, spec.rows);
+    const built = buildUpsertRowsSql(spec.table, spec.columns, spec.conflictColumns, spec.rows, spec);
     script += built.script;
-    results.push(args.dryRun ? {...built.result, dryRun: true} : built.result);
+    results.push(built.result);
   }
   script += 'COMMIT;\n';
+  return {script, results};
+}
+
+async function loadOpenApiSalesAtomically(args, sales) {
+  const cleanup = args.dryRun ? {pairs: sales.pairs.length, dryRun: true} : {pairs: sales.pairs.length};
+  const built = buildOpenApiSalesAtomicSql(sales);
+  const results = args.dryRun ? built.results.map(result => ({...result, dryRun: true})) : built.results;
   if (args.dryRun) return {cleanup, results};
-  await runPsqlScript(args, script);
+  await runPsqlScript(args, built.script);
   return {cleanup, results};
 }
 
 export function buildFactRows(data, file) {
   const date = data.start || data.date || path.basename(file, '.json');
   const source = rel(file);
+  const snapshotAt = sourceSnapshotAt(data, `${data?.storeKey || 'unknown store'} OpenAPI sales artifact`);
   const summary = recalculateSummaryFromGoodsRows(data, data.summary || {});
   const daily = [{
     date,
@@ -494,7 +554,7 @@ export function buildFactRows(data, file) {
     quantity_positive_amount: num(summary.quantityPositiveAmount),
     sales_sar: num(summary.salesSar),
     sales_rmb: num(summary.salesRmb),
-    fetch_time: ts(data.fetchTime),
+    fetch_time: snapshotAt,
     source_file: source,
     raw_summary: compactJson(summary),
   }];
@@ -504,7 +564,7 @@ export function buildFactRows(data, file) {
     date,
     sourceFile: source,
     sourceKind: 'openapi',
-  });
+  }).map(row => ({...row, source_snapshot_at: snapshotAt}));
   for (const [idx, row] of asArray(data.orderRows).entries()) {
     const orderId = String(row.orderId || row.id || row.orderNo || idx);
     const orderKey = `${data.storeKey}__${orderId}`;
@@ -525,6 +585,7 @@ export function buildFactRows(data, file) {
       perform_status_desc: row.performStatusDesc || '',
       source_file: source,
       raw_summary: compactJson(row),
+      source_snapshot_at: snapshotAt,
     });
   }
   for (const [idx, row] of asArray(data.goodsRows).entries()) {
@@ -568,9 +629,10 @@ export function buildFactRows(data, file) {
       goods_performance_status_desc: row.goodsPerformanceStatusDesc || '',
       source_file: source,
       raw_summary: compactJson(row),
+      source_snapshot_at: snapshotAt,
     });
   }
-  return {date, daily, orders, items, paymentFlags};
+  return {date, sourceSnapshotAt: snapshotAt, daily, orders, items, paymentFlags};
 }
 
 function summarizeArtifact(data) {
@@ -596,35 +658,16 @@ function summarizeArtifact(data) {
   };
 }
 
-/** Plain SQL upsert for the direct node-postgres webhook path (no psql COPY meta-protocol). */
-function buildDirectUpsertRowsSql(table, columns, conflictColumns, rows) {
-  const originalRowCount = rows.length;
-  if (rows.length && conflictColumns.length) {
-    const byConflictKey = new Map();
-    for (const row of rows) {
-      const key = conflictColumns.map((column) => String(row[column] ?? '')).join('\u001F');
-      byConflictKey.set(key, row);
+function jsonRowsLiteral(rows) {
+  const normalized = rows.map((row) => {
+    const copy = {...row};
+    for (const key of ['raw_summary', 'raw_evidence']) {
+      if (typeof copy[key] !== 'string') continue;
+      try { copy[key] = JSON.parse(copy[key]); } catch { /* A jsonb scalar remains valid. */ }
     }
-    rows = [...byConflictKey.values()];
-  }
-  const result = {table, rows: rows.length, inputRows: originalRowCount, dedupedRows: originalRowCount - rows.length};
-  if (!rows.length) return {script: '', result: {...result, skipped: true}};
-  const valueLiteral = (value) => {
-    if (value === null || value === undefined || value === '') return 'NULL';
-    const encoded = typeof value === 'object' ? JSON.stringify(value) : String(value);
-    return `'${encoded.replace(/'/g, "''")}'`;
-  };
-  const nonConflict = columns.filter((column) => !conflictColumns.includes(column) && column !== 'updated_at');
-  const updateSet = [
-    ...nonConflict.map((column) => `${qIdent(column)} = EXCLUDED.${qIdent(column)}`),
-    columns.includes('updated_at') ? 'updated_at = now()' : '',
-  ].filter(Boolean).join(',\n    ');
-  const sqlColumns = columns.map(qIdent).join(', ');
-  const values = rows.map((row) => `(${columns.map((column) => valueLiteral(row[column])).join(', ')})`).join(',\n');
-  return {
-    script: `INSERT INTO ${qIdent(table)} (${sqlColumns})\nVALUES\n${values}\nON CONFLICT (${conflictColumns.map(qIdent).join(', ')}) DO UPDATE SET\n    ${updateSet};\n`,
-    result,
-  };
+    return copy;
+  });
+  return `${sqlLiteral(JSON.stringify(normalized))}::jsonb`;
 }
 
 function assertTargetedSalesRows(rows, storeKey, orderNo) {
@@ -655,19 +698,22 @@ export function buildTargetedOpenApiSalesUpsertSql({artifact, file = 'webhook://
   assertTargetedSalesRows(items, scope.storeKey, scope.orderNo);
   assertTargetedSalesRows(paymentFlags, scope.storeKey, scope.orderNo);
   if (orders.length !== 1) throw new Error(`Expected exactly one order header for ${scope.storeKey}/${scope.orderNo}, got ${orders.length}`);
+  if (items.length < 1) throw new Error(`Refusing targeted order replacement for ${scope.storeKey}/${scope.orderNo}: item detail is empty`);
   const targeted = {orders, items, paymentFlags};
   const specs = openApiSalesLoadSpecs({daily: [], ...targeted, reconciliations: []}).filter((spec) => spec.rows.length || ['fact.openapi_order_header'].includes(spec.table));
-  const results = [];
-  let script = 'BEGIN;\n';
-  script += `DELETE FROM fact.openapi_order_item WHERE store_key = ${sqlLiteral(scope.storeKey)} AND order_no = ${sqlLiteral(scope.orderNo)};\n`;
-  script += `DELETE FROM ${OPENAPI_ORDER_PAYMENT_FLAG_TABLE} WHERE store_key = ${sqlLiteral(scope.storeKey)} AND order_no = ${sqlLiteral(scope.orderNo)};\n`;
-  for (const spec of specs) {
-    const built = buildDirectUpsertRowsSql(spec.table, spec.columns, spec.conflictColumns, spec.rows);
-    script += built.script;
-    results.push(built.result);
-  }
-  script += 'COMMIT;\n';
-  return {scope, script, results, rowCounts: {headers: orders.length, items: items.length, paymentFlags: paymentFlags.length}};
+  const results = specs.map((spec) => ({table: spec.table, inputRows: spec.rows.length, rows: spec.rows.length}));
+  const script = `BEGIN;
+SELECT * FROM ops.apply_shein_webhook_order_snapshot(
+  ${sqlLiteral(scope.storeKey)},
+  ${sqlLiteral(scope.orderNo)},
+  ${sqlLiteral(rows.sourceSnapshotAt)}::timestamptz,
+  ${jsonRowsLiteral(orders)},
+  ${jsonRowsLiteral(items)},
+  ${jsonRowsLiteral(paymentFlags)}
+);
+COMMIT;
+`;
+  return {scope, script, results, rowCounts: {headers: orders.length, items: items.length, paymentFlags: paymentFlags.length, sourceSnapshotAt: rows.sourceSnapshotAt}};
 }
 
 export async function upsertTargetedOpenApiSales(args, input, {executor = runPsqlScript} = {}) {
@@ -679,7 +725,7 @@ export async function upsertTargetedOpenApiSales(args, input, {executor = runPsq
 
 export function buildTargetedOpenApiSalesReadbackSql({storeKey, orderNo}) {
   const scope = assertTargetedSalesRows([], storeKey, orderNo);
-  return `SELECT json_build_object('storeKey', ${sqlLiteral(scope.storeKey)}, 'orderNo', ${sqlLiteral(scope.orderNo)}, 'headers', (SELECT count(*) FROM fact.openapi_order_header WHERE store_key = ${sqlLiteral(scope.storeKey)} AND order_no = ${sqlLiteral(scope.orderNo)}), 'items', (SELECT count(*) FROM fact.openapi_order_item WHERE store_key = ${sqlLiteral(scope.storeKey)} AND order_no = ${sqlLiteral(scope.orderNo)}), 'paymentFlags', (SELECT count(*) FROM ${OPENAPI_ORDER_PAYMENT_FLAG_TABLE} WHERE store_key = ${sqlLiteral(scope.storeKey)} AND order_no = ${sqlLiteral(scope.orderNo)}))::text;\n`;
+  return `SELECT json_build_object('storeKey', ${sqlLiteral(scope.storeKey)}, 'orderNo', ${sqlLiteral(scope.orderNo)}, 'sourceSnapshotAt', (SELECT max(source_snapshot_at) FROM fact.openapi_order_header WHERE store_key = ${sqlLiteral(scope.storeKey)} AND order_no = ${sqlLiteral(scope.orderNo)}), 'headers', (SELECT count(*) FROM fact.openapi_order_header WHERE store_key = ${sqlLiteral(scope.storeKey)} AND order_no = ${sqlLiteral(scope.orderNo)}), 'items', (SELECT count(*) FROM fact.openapi_order_item WHERE store_key = ${sqlLiteral(scope.storeKey)} AND order_no = ${sqlLiteral(scope.orderNo)}), 'paymentFlags', (SELECT count(*) FROM ${OPENAPI_ORDER_PAYMENT_FLAG_TABLE} WHERE store_key = ${sqlLiteral(scope.storeKey)} AND order_no = ${sqlLiteral(scope.orderNo)}))::text;\n`;
 }
 
 export async function readbackTargetedOpenApiSales(args, scope, expectedRowCounts, {executor = runPsqlScript} = {}) {
@@ -688,6 +734,15 @@ export async function readbackTargetedOpenApiSales(args, scope, expectedRowCount
   if (!line) throw new Error(`Missing targeted order readback for ${scope.storeKey}/${scope.orderNo}`);
   const result = JSON.parse(line);
   const expected = expectedRowCounts || {};
+  const actualSnapshotMs = Date.parse(result.sourceSnapshotAt || '');
+  const expectedSnapshotMs = Date.parse(expected.sourceSnapshotAt || '');
+  if (!Number.isFinite(actualSnapshotMs) || !Number.isFinite(expectedSnapshotMs)) {
+    throw new Error(`Targeted order readback has no valid source snapshot for ${scope.storeKey}/${scope.orderNo}`);
+  }
+  if (actualSnapshotMs > expectedSnapshotMs) return {...result, superseded: true};
+  if (actualSnapshotMs !== expectedSnapshotMs) {
+    throw new Error(`Targeted order readback snapshot mismatch for ${scope.storeKey}/${scope.orderNo}: actual=${result.sourceSnapshotAt}, expected=${expected.sourceSnapshotAt}`);
+  }
   for (const key of ['headers', 'items', 'paymentFlags']) {
     if (Number(result[key]) !== Number(expected[key])) {
       throw new Error(`Targeted order readback failed for ${scope.storeKey}/${scope.orderNo}: ${key}=${result[key]}, expected=${expected[key]}`);
@@ -1025,7 +1080,7 @@ async function collectOpenApiSales(args) {
     paymentFlags.push(...factRows.paymentFlags);
     reconciliations.push(await buildReconciliationRow(args, factRows.date, file, data));
     loadedFiles.push(rel(file));
-    pairs.push({date: factRows.date, store: args.store});
+    pairs.push({date: factRows.date, store: args.store, sourceSnapshotAt: factRows.sourceSnapshotAt});
   }
   return {daily, orders, items, paymentFlags, reconciliations, loadedFiles, pairs};
 }

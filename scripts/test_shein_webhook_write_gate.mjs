@@ -9,11 +9,11 @@ assert.match(missing.blockers[0], /失败关闭/);
 let gates = [];
 const repository = {
   listStoreGates: async ({storeKeys}) => gates.filter(gate => storeKeys.includes(gate.storeKey) && gate.state === 'blocked'),
-  upsertStoreGate: async input => {
-    const current = gates.find(gate => gate.storeKey === input.storeKey && gate.gateType === input.gateType);
+  reopenAuthorizationGate: async input => {
+    const current = gates.find(gate => gate.storeKey === input.storeKey && gate.gateType === 'authorization');
     if (current && Number(input.sourceReceiptId) < Number(current.sourceReceiptId)) return {...current, applied: false};
-    const next = {...current, ...input, updatedAt: new Date().toISOString(), applied: true};
-    gates = gates.filter(gate => !(gate.storeKey === input.storeKey && gate.gateType === input.gateType));
+    const next = {...current, ...input, gateType: 'authorization', state: 'open', updatedAt: new Date().toISOString(), applied: true};
+    gates = gates.filter(gate => !(gate.storeKey === input.storeKey && gate.gateType === 'authorization'));
     gates.push(next);
     return next;
   },
@@ -38,7 +38,7 @@ assert.equal(recovered.clearedGates[0].state, 'open');
 
 const staleRepository = {
   listStoreGates: async () => [{storeKey: 'FY', gateType: 'authorization', state: 'blocked', sourceReceiptId: '40', updatedAt: '2026-07-19T10:00:00.000Z'}],
-  upsertStoreGate: async () => ({storeKey: 'FY', gateType: 'authorization', state: 'blocked', sourceReceiptId: '41', applied: false}),
+  reopenAuthorizationGate: async () => ({storeKey: 'FY', gateType: 'authorization', state: 'blocked', sourceReceiptId: '41', applied: false}),
 };
 const staleRecovery = await evaluateSheinWebhookWriteGates({
   repository: staleRepository,

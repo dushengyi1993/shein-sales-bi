@@ -14,14 +14,14 @@ BI 新增独立“平台动态”子页面，普通状态变化不再塞入首�
 ### 商品生命周期
 
 - 商品接收、普通/全渠道审核、上下架、删除审核进入平台动态。
-- 只有“店铺 + 至少两个平台强身份字段”唯一命中现有运营任务时，才追加任务 readback；不唯一时只记录事件。
+- 保留店铺和平台强身份供后续关联，但公网 receiver 不读取/修改 `ops.link_ops_*`；任务自动挂接留给独立最小权限 reconciler。
 - 审核失败、非预期下架、删除获批或删除审核失败为 P0。
 
 ### 订单与退货
 
 - 收到订单号或退货单号后调用对应 OpenAPI 详情接口。
-- 同一事务只精准替换该 `店铺 + 单号` 的子项，再 upsert header；不删除日期切片、不重写整日 reconciliation。
-- 写后按同一业务键核对 header、item 和 payment flag 数量。
+- 空 item 详情直接拒绝写；同一事务通过受控数据库函数按 `店铺 + 单号 + source_snapshot_at` 领取替换权，只有不旧于现有版本时才精准替换子项并 upsert header；不删除日期切片、不重写整日 reconciliation。
+- targeted 与日快照都在各自首次 API 请求前锁定抓取版本并共用店铺 advisory lock；即使旧日快照先抓、后落库，也不能因“完成得更晚”伪装成新版本覆盖 Webhook 事实。写后同时核对 source snapshot 与 header、item、payment flag 数量；已被更新快照取代时明确返回 superseded。
 
 ### 授权、额度与合规
 
@@ -35,10 +35,10 @@ BI 新增独立“平台动态”子页面，普通状态变化不再塞入首�
 - UFW/Caddy 只接受 Cloudflare 边缘来源，Nginx 再按 SHEIN 官方推送 IP 放行；官方 HMAC 签名始终是主校验。
 - 应用入口预算 1.2 秒、receipt SQL statement timeout 0.8 秒、Nginx read timeout 1.4 秒；仅在密文 receipt 与队列可靠落库后返回 200。
 - PostgreSQL 只保存 AES 密文与最小规范化投影，不保存解密后的原始 payload；BI API 不返回 App/openKey、密文或买家原始信息。
-- worker 使用租约、`FOR UPDATE SKIP LOCKED`、续租失败中止、指数重试与 dead-letter。
-- worker 以独立 `shein_webhook_ops` PostgreSQL 角色直接执行精准 SQL，不调用 sudo/Docker；没有日汇总和 reconciliation 写权限。Portal 的 `shein_link_ops` 只能读取 receipt 安全投影，不能读密文或删除订单/退货事实。
-- 授权无业务时间的重复真实事件不会被永久去重；gate 按 receipt ID 单调更新，旧额度恢复不能覆盖更新的额度归零。
-- 真实 SHEIN 提交在预检查与 executor 前各核验一次平台 gate，repository 缺失或查询异常均失败关闭。
+- worker 使用租约、`FOR UPDATE SKIP LOCKED`、续租失败中止、指数重试与 dead-letter；授权/额度事件先完成数据库封闸，再启动可能较慢的飞书通知。
+- worker 以独立 `shein_webhook_ops` PostgreSQL 角色调用两个按单 `SECURITY DEFINER` apply 函数，不调用 sudo/Docker；事实表只有只读回读权限，没有原始 INSERT/UPDATE/DELETE、`ops.link_ops_*`、日汇总或 reconciliation 写权限。Portal 的 `shein_link_ops` 只能读取 receipt/gate 安全投影并调用受控授权恢复函数，不能读密文、任意改 gate 或修改订单/退货事实。
+- 授权无业务时间的重复真实事件不会被永久去重，重签重试以 10 分钟时间桶抑制重复飞书；额度 gate 按平台 `sendTimeStamp` 单调更新，延迟到达的旧恢复不能覆盖更新的额度归零。缺失/非法事件顺序的额度归零仍会立即失败关闭，并禁止不确定的自动恢复。
+- 真实 SHEIN 提交在预检查、整批 executor、每个店铺子执行器启动前，以及子执行器每一次真实 `client.request` 写调用的紧前一刻核验平台 gate；repository 缺失、目标店缺失或查询异常均失败关闭。
 - P0 通知有稳定幂等键；普通事件和 P1 只留在 BI。
 
 ## 界面
