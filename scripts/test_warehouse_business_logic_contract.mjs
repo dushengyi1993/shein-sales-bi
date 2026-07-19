@@ -12,6 +12,7 @@ const refresh = read('scripts/refresh_profit_marts.sql');
 const smokeSql = read('scripts/smoke_warehouse_business_logic.sql');
 const audit = read('scripts/audit_bi_warehouse.mjs');
 const portalGenerator = read('scripts/generate_bi_portal.mjs');
+const portalServer = read('scripts/serve_bi_portal.mjs');
 const portalClient = read('scripts/bi_app/client.js');
 const costRebuild = read('scripts/rebuild_inventory_cost_ledger.mjs');
 const periodManager = read('scripts/manage_accounting_period.mjs');
@@ -62,6 +63,8 @@ assert.match(audit, /mart\.return_order_performance_cost_reconciliation/);
 assert.match(portalGenerator, /SHEIN_BI_PROFIT_MART_SOURCE \|\| 'cache'/,
   'portal core must serve the published profit cache by default');
 assert.match(portalGenerator, /Operators may still\s*\n\/\/ request `view` explicitly/);
+assert.match(portalServer, /profitBackedSections = new Set\(\['profit', 'homeProfit', 'homeRankings', 'rankings', 'productSalesDaily', 'inventoryTrend'\]\)/,
+  'inventory trend must use the published profit cache instead of expanding the live canonical view');
 assert.match(portalGenerator, /运营可售默认只计 09 散件仓/);
 assert.doesNotMatch(portalGenerator, /09散件仓 \+ 01整箱仓为可售/);
 assert.match(portalClient, /运营可售默认只计 09 散件仓/);

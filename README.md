@@ -49,6 +49,8 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 - 刷新历史最终版：`bash scripts/cloud_bi_refresh.sh <scope> final`（`<scope>` 按运维文档取值）
 - 备份数据库：`bash scripts/cloud_db_backup.sh`
 - 同步 ET 货代仓：`bash scripts/cloud_et_forwarder_sync.sh <scope>`（`<scope>` 按运维文档取值）
+- 同步/回灌 ET 仓储费：`bash scripts/cloud_et_storage_fee_sync.sh daily [YYYY-MM-DD]` / `bash scripts/cloud_et_storage_fee_sync.sh backfill YYYY-MM-DD`
+- 仓储费利润对账：`node scripts/check_storage_fee_profit.mjs --mode local --start YYYY-MM-DD --end YYYY-MM-DD`
 - 跑云端 watchdog：`node scripts/cloud_ops_watchdog.mjs --dry-run`
 - OpenAPI 商品/链接运营 CLI：`node scripts/bi_ops_cli.mjs --help`
 - 团队自动运营：普通成员使用 BI 网页；Owner/合伙人可用 `node scripts/bi_ops_cli.mjs chat --text "..." --wait-seconds 120`，并用 `jobs` / `job` / `wait-job` 查看可恢复后台规划。`--scope-all` 仅全局只读，不扩大写权限。
@@ -93,6 +95,8 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 | 2026.07.12 自动运营 V2 发布说明 | `docs/bi-ops-v2-release-2026-07-12.md` |
 | 2026.07.16.1 自动运营与 Partner CLI 发布说明 | `docs/bi-ops-release-2026-07-16.md` |
 | 2026.07.18.1 业务逻辑与营销巡检加固发布说明 | `docs/bi-ops-release-2026-07-18.md` |
+| 2026.07.19.1 ET 仓储费历史重述与自动同步发布说明 | `docs/bi-ops-release-2026-07-19.md` |
+| 2026-07-19 仓储费历史重述口径与验收 | `docs/storage-fee-history-restatement-2026-07-19.md` |
 | 2026-07-18 BI 业务逻辑加固口径 | `docs/bi-business-logic-hardening-2026-07-18.md` |
 | BI 仓库模型 | `docs/bi-warehouse-model.md` |
 | SHEIN 后台数据地图 | `docs/shein-backend-survey.md` |

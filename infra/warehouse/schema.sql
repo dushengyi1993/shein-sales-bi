@@ -3843,22 +3843,153 @@ ORDER BY
   amount_weight DESC NULLS LAST,
   display_standard_goods_sn;
 
+-- Canonical ET storage-fee ledger.  A same-day/same-business-key amount is
+-- never deduplicated merely because it looks alike: only a complete
+-- pending-to-paid replacement chain with exactly one paid bill collapses.  In
+-- particular, two paid bills remain two economic events.  The ET business key
+-- includes fee/billing dates, other_income, stable client identity, remark,
+-- country, and oversea scope so unrelated customers cannot cross-collapse.
+CREATE OR REPLACE VIEW mart.et_storage_fee_bill_canonical AS
+WITH base AS (
+  SELECT
+    coalesce(ship_time::date, create_time::date, push_time::date) AS fee_date,
+    income_bill_id,
+    batch_id,
+    client_from_id,
+    oversea_id,
+    source_type,
+    sort,
+    sort_name,
+    remark,
+    status AS bill_status,
+    status_name AS bill_status_name,
+    coalesce(other_income,0) AS shown_fee_rmb,
+    out_money AS diagnostic_out_money_rmb,
+    billing_period_date::date AS billing_period_date,
+    create_time,
+    updated_at,
+    raw_summary,
+    CASE
+      WHEN lower(concat_ws(' ', status, status_name)) ~ '(已支付|支付成功|已完成|已结算|paid|done|completed|settled)' THEN 'paid'
+      WHEN lower(concat_ws(' ', status, status_name)) ~ '(等待支付|待支付|待付款|未支付|pending|awaiting.?payment|unpaid)' THEN 'pending'
+      ELSE 'other'
+    END AS payment_state,
+    concat_ws('|',
+      coalesce(ship_time::date, create_time::date, push_time::date)::text,
+      coalesce(billing_period_date::date, coalesce(ship_time::date, create_time::date, push_time::date))::text,
+      to_char(coalesce(other_income,0), 'FM999999999999990.000000'),
+      coalesce(nullif(client_from_id,''), nullif(raw_summary->>'ClientId',''), nullif(raw_summary->>'OwnerClientId',''), ''),
+      coalesce(nullif(remark,''), nullif(raw_summary->>'Remark',''), nullif(raw_summary->>'remark',''), ''),
+      coalesce(nullif(raw_summary->>'CountryId',''), nullif(raw_summary->>'countryId',''), nullif(raw_summary->>'CountryCode',''), nullif(raw_summary->>'countryCode',''), ''),
+      coalesce(nullif(oversea_id,''), nullif(raw_summary->>'OverseaId',''), nullif(raw_summary->>'overseaId',''), '')
+    ) AS canonical_business_key
+  FROM fact.et_income_bill
+  WHERE sort = '2' OR sort_name = '仓储费'
+),
+replacement_groups AS (
+  SELECT
+    canonical_business_key,
+    count(*)::integer AS group_source_count,
+    count(*) FILTER (WHERE payment_state = 'paid')::integer AS paid_count,
+    count(*) FILTER (WHERE payment_state = 'pending')::integer AS pending_count,
+    count(*) FILTER (WHERE payment_state = 'other')::integer AS other_count,
+    array_agg(income_bill_id ORDER BY updated_at DESC NULLS LAST, create_time DESC NULLS LAST, income_bill_id) AS group_income_bill_ids
+  FROM base
+  WHERE fee_date IS NOT NULL
+  GROUP BY canonical_business_key
+),
+classified AS (
+  SELECT
+    b.*,
+    g.group_source_count,
+    g.paid_count,
+    g.pending_count,
+    g.other_count,
+    g.group_income_bill_ids,
+    (g.paid_count = 1 AND g.pending_count >= 1 AND g.other_count = 0) AS is_status_replacement
+  FROM base b
+  JOIN replacement_groups g USING (canonical_business_key)
+  WHERE b.fee_date IS NOT NULL
+)
+SELECT
+  fee_date,
+  income_bill_id,
+  canonical_business_key,
+  bill_status,
+  bill_status_name,
+  payment_state,
+  shown_fee_rmb,
+  diagnostic_out_money_rmb,
+  billing_period_date,
+  CASE WHEN is_status_replacement THEN group_source_count ELSE 1 END AS source_count,
+  CASE WHEN is_status_replacement THEN group_income_bill_ids ELSE ARRAY[income_bill_id]::text[] END AS source_income_bill_ids,
+  CASE
+    WHEN is_status_replacement THEN array_remove(group_income_bill_ids, income_bill_id)
+    ELSE ARRAY[]::text[]
+  END AS superseded_income_bill_ids,
+  CASE
+    WHEN is_status_replacement THEN 'status_replacement_paid_supersedes_pending'
+    ELSE 'independent_bill_no_status_replacement'
+  END AS canonical_reason,
+  paid_count AS replacement_paid_count,
+  pending_count AS replacement_pending_count,
+  raw_summary
+FROM classified
+WHERE NOT is_status_replacement OR payment_state = 'paid';
+
+-- A replacement chain can provide at most one SKU-detail source for each
+-- canonical bill. Prefer the paid canonical bill's own ExportStoreFee rows;
+-- only when those are absent, inherit the first usable superseded source.
+-- This preserves evidence without ever double-counting two bill exports.
+CREATE OR REPLACE VIEW mart.et_storage_fee_canonical_detail_source AS
+SELECT
+  c.fee_date,
+  c.income_bill_id AS canonical_income_bill_id,
+  pick.income_bill_id AS detail_source_income_bill_id,
+  CASE
+    WHEN pick.income_bill_id IS NULL THEN 'no_usable_detail_source'
+    WHEN pick.income_bill_id = c.income_bill_id THEN 'canonical_bill_detail'
+    ELSE 'superseded_bill_detail_fallback'
+  END AS detail_source_reason,
+  c.canonical_reason,
+  c.source_count,
+  c.source_income_bill_ids,
+  c.superseded_income_bill_ids
+FROM mart.et_storage_fee_bill_canonical c
+LEFT JOIN LATERAL (
+  SELECT source.income_bill_id
+  FROM unnest(c.source_income_bill_ids) WITH ORDINALITY AS source(income_bill_id, ordinality)
+  JOIN fact.et_storage_fee_product_detail d
+    ON d.fee_date = c.fee_date
+   AND d.income_bill_id = source.income_bill_id
+  GROUP BY source.income_bill_id, source.ordinality
+  HAVING sum(coalesce(d.shown_fee_rmb,0)) <> 0
+  ORDER BY
+    CASE WHEN source.income_bill_id = c.income_bill_id THEN 0 ELSE 1 END,
+    source.ordinality
+  LIMIT 1
+) pick ON true;
+
 CREATE OR REPLACE VIEW mart.et_storage_fee_daily AS
 WITH policy AS (
   SELECT * FROM dim.storage_fee_policy WHERE policy_key = 'et_default'
 ),
 base AS (
   SELECT
-    coalesce(ship_time::date, create_time::date, push_time::date) AS fee_date,
+    fee_date,
     income_bill_id,
-    status AS bill_status,
-    status_name AS bill_status_name,
-    coalesce(other_income,0) AS shown_fee_rmb,
-    out_money AS diagnostic_out_money_rmb,
-    billing_period_date::date AS billing_period_date,
+    bill_status,
+    bill_status_name,
+    shown_fee_rmb,
+    diagnostic_out_money_rmb,
+    billing_period_date,
+    source_count,
+    source_income_bill_ids,
+    superseded_income_bill_ids,
+    canonical_reason,
+    canonical_business_key,
     raw_summary
-  FROM fact.et_income_bill
-  WHERE sort_name = '仓储费'
+  FROM mart.et_storage_fee_bill_canonical
 )
 SELECT
   b.fee_date,
@@ -3873,8 +4004,13 @@ SELECT
   round((b.shown_fee_rmb * p.billing_discount / nullif(p.sar_to_rmb,0))::numeric, 6) AS actual_fee_sar,
   p.currency_code,
   p.sar_to_rmb,
-  'et_income_bill'::text AS source,
-  b.raw_summary
+  'et_income_bill_canonical'::text AS source,
+  b.raw_summary,
+  b.source_count,
+  b.source_income_bill_ids,
+  b.superseded_income_bill_ids,
+  b.canonical_reason,
+  b.canonical_business_key
 FROM base b
 CROSS JOIN policy p
 WHERE b.fee_date IS NOT NULL;
@@ -4016,6 +4152,13 @@ fee_daily AS (
   FROM mart.et_storage_fee_daily
   GROUP BY fee_date
 ),
+detail_bill AS (
+  -- Each canonical bill contributes exactly one selected evidence export:
+  -- itself when available, otherwise one superseded fallback.
+  SELECT DISTINCT fee_date, detail_source_income_bill_id AS income_bill_id
+  FROM mart.et_storage_fee_canonical_detail_source
+  WHERE detail_source_income_bill_id IS NOT NULL
+),
 detail_day AS (
   SELECT
     d.fee_date AS date,
@@ -4025,6 +4168,9 @@ detail_day AS (
     abs(sum(coalesce(d.shown_fee_rmb,0)) - max(f.shown_fee_rmb)) <= 0.05 AS detail_complete,
     max(f.shown_fee_rmb) / nullif(sum(coalesce(d.shown_fee_rmb,0)),0) AS detail_bill_scale
   FROM fact.et_storage_fee_product_detail d
+  JOIN detail_bill cb
+    ON cb.fee_date = d.fee_date
+   AND cb.income_bill_id = d.income_bill_id
   JOIN fee_daily f ON f.date = d.fee_date
   GROUP BY d.fee_date
 ),
@@ -4076,6 +4222,9 @@ detail_expanded AS (
       ELSE d.shown_fee_rmb * coalesce(dd.detail_bill_scale,1)
     END AS shown_fee_rmb
   FROM fact.et_storage_fee_product_detail d
+  JOIN detail_bill cb
+    ON cb.fee_date = d.fee_date
+   AND cb.income_bill_id = d.income_bill_id
   JOIN detail_day dd
     ON dd.date = d.fee_date
    AND coalesce(dd.detail_rows,0) > 0

@@ -29,10 +29,20 @@ WITH fee_daily AS (
   FROM mart.et_storage_fee_daily
   GROUP BY fee_date
 ),
+detail_bill AS (
+  -- Each canonical bill chooses one detail export: paid bill first, then one
+  -- superseded fallback only when the paid bill has no usable detail.
+  SELECT DISTINCT fee_date, detail_source_income_bill_id AS income_bill_id
+  FROM mart.et_storage_fee_canonical_detail_source
+  WHERE detail_source_income_bill_id IS NOT NULL
+),
 detail_day AS (
   SELECT d.fee_date AS date, count(*) AS detail_rows,
     sum(coalesce(d.shown_fee_rmb,0)) AS detail_shown_fee_rmb
   FROM fact.et_storage_fee_product_detail d
+  JOIN detail_bill cb
+    ON cb.fee_date = d.fee_date
+   AND cb.income_bill_id = d.income_bill_id
   JOIN fee_daily f ON f.date=d.fee_date
   GROUP BY d.fee_date
 )
@@ -102,6 +112,13 @@ fee_daily AS (
   FROM mart.et_storage_fee_daily
   GROUP BY fee_date
 ),
+detail_bill AS (
+  -- Canonical bill first; exactly one superseded detail source only as an
+  -- evidence fallback, so replacement exports cannot be double-counted.
+  SELECT DISTINCT fee_date, detail_source_income_bill_id AS income_bill_id
+  FROM mart.et_storage_fee_canonical_detail_source
+  WHERE detail_source_income_bill_id IS NOT NULL
+),
 detail_day AS (
   SELECT
     d.fee_date AS date,
@@ -111,6 +128,9 @@ detail_day AS (
     abs(sum(coalesce(d.shown_fee_rmb,0)) - max(f.shown_fee_rmb)) <= 0.05 AS detail_complete,
     max(f.shown_fee_rmb) / nullif(sum(coalesce(d.shown_fee_rmb,0)),0) AS detail_bill_scale
   FROM fact.et_storage_fee_product_detail d
+  JOIN detail_bill cb
+    ON cb.fee_date = d.fee_date
+   AND cb.income_bill_id = d.income_bill_id
   JOIN fee_daily f ON f.date = d.fee_date
   GROUP BY d.fee_date
 ),
@@ -162,6 +182,9 @@ detail_expanded AS (
       ELSE d.shown_fee_rmb * coalesce(dd.detail_bill_scale,1)
     END AS shown_fee_rmb
   FROM fact.et_storage_fee_product_detail d
+  JOIN detail_bill cb
+    ON cb.fee_date = d.fee_date
+   AND cb.income_bill_id = d.income_bill_id
   JOIN detail_day dd
     ON dd.date = d.fee_date
    AND coalesce(dd.detail_rows,0) > 0
@@ -859,7 +882,16 @@ SELECT 'profit_marts','ok',now(),
     'profit_month_group',(SELECT count(*) FROM mart.profit_month_group_cache),
     'profit_product_summary',(SELECT count(*) FROM mart.profit_product_summary_cache),
     'fee_days',(SELECT fee_days FROM tmp_profit_mart_refresh_mode),
-    'missing_fee_days',(SELECT missing_fee_days FROM tmp_profit_mart_refresh_mode)
+    'missing_fee_days',(SELECT missing_fee_days FROM tmp_profit_mart_refresh_mode),
+    'canonical_storage_bills',(SELECT count(*) FROM mart.et_storage_fee_bill_canonical),
+    'storage_status_replacement_chains',(
+      SELECT count(*) FROM mart.et_storage_fee_bill_canonical
+      WHERE canonical_reason = 'status_replacement_paid_supersedes_pending'
+    ),
+    'storage_detail_scaled_days',(
+      SELECT count(DISTINCT date) FROM mart.storage_fee_product_daily_cache
+      WHERE storage_allocation_method = 'download_detail_scaled_to_bill'
+    )
   ),
   'dependency-ordered cache refresh; canonical conserving storage allocation computed once'
 ON CONFLICT(cache_key) DO UPDATE SET

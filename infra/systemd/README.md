@@ -7,6 +7,7 @@
 - `shein-bi-cloud-yesterday.timer`：每天 `03:00` 用 WebAPI 刷新前一天最终销售，并复核前两天稳定日；OpenAPI 最终日结果在并行对账层核对。该每日唯一性任务使用 `Persistent=true`，service 自身仍通过锁和日期状态防重复。
 - `shein-bi-db-backup.timer`：每天 `02:40` 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto`，默认保留 14 天。
 - `shein-bi-cloud-et-forwarder.timer`：每两小时 `01:20/03:20/.../23:20` 抓取 ET 货代仓/出库单、入仓，并轻量刷新订单/物流/售后相关 section；不开启开机补跑。需要服务器本地 `config/et_forwarder.local.json` 或 `ET_FORWARDER_USERNAME/ET_FORWARDER_PASSWORD`，密钥不进 GitHub。
+- `shein-bi-cloud-et-storage-fee.timer`：每天 `14:10` 只读抓取 ET 仓储费最终账单与 SKU 明细，执行 canonical 去重、利润 cache 发布、四层对账与 `profit/homeProfit` 预热。它与通用 ET 共用 profile/锁，但使用独立状态、输出和日志；`Persistent=true`，失败必须告警，不能静默跳过。
 - `shein-bi-cloud-morning-chain.timer`：每天 `08:00` 启动晨间串行链路：先用 WebAPI 刷新当天销售；当前自动飞书日报已关闭（`SHEIN_BI_MORNING_SEND_LARK_REPORT=0`），销售刷新成功后直接启动 `shein-bi-cloud-daily-refresh.service` 做统一日更补采。这样日更不再依赖固定 `08:50/09:10` 窗口，而是跟随销售刷新完成时间。
 - `shein-bi-cloud-daily-refresh.service`：统一执行前一完整日链接/业务域、SBN 营销概览、RTV 退货轨迹复核、入仓、体检与 BI 刷新；不再重复调用 MBRs 全店营销价格栈扫描，实时普通活动/券/限时折扣只由独立 guard 读取。全店日指标仍全 0 时跳过链接/业务域入仓刷新。该服务由晨间链路触发；启动前等待销售/ET 等写入任务并检查内存，忙碌或低内存时记录状态后跳过。19 店 OpenAPI 销售/退货/商品隔离双跑只写隔离层；runner 先单进程 schema ensure，再让 worker `--skip-ensure` 并行入仓。`2026-07-17..23` 为修复后的新验证窗口，`2026-07-24` 结论前继续保留 WebAPI 生产事实源。
 - `cloud_daily_lark_report.sh` / `shein-bi-cloud-daily-lark-report.service`：日报服务保留为手动诊断入口；正式自动发送当前停用，晨间链路默认 `SHEIN_BI_MORNING_SEND_LARK_REPORT=0`。需要服务器本地 `config/lark_report.json`、`lark-cli` 和飞书授权，密钥/授权不进 GitHub。
@@ -29,7 +30,7 @@
 
 ```bash
 cp infra/systemd/*.service infra/systemd/*.timer /etc/systemd/system/
-chmod +x scripts/cloud_bi_refresh.sh scripts/cloud_db_backup.sh scripts/cloud_et_forwarder_sync.sh scripts/cloud_link_business_sync.sh scripts/cloud_daily_refresh.sh scripts/cloud_daily_lark_report.sh scripts/cloud_marketing_live_guard.sh scripts/cloud_marketing_repair_worker.sh
+chmod +x scripts/cloud_bi_refresh.sh scripts/cloud_db_backup.sh scripts/cloud_et_forwarder_sync.sh scripts/cloud_et_storage_fee_sync.sh scripts/cloud_link_business_sync.sh scripts/cloud_daily_refresh.sh scripts/cloud_daily_lark_report.sh scripts/cloud_marketing_live_guard.sh scripts/cloud_marketing_repair_worker.sh
 systemd-analyze verify /etc/systemd/system/shein-bi-portal.service /etc/systemd/system/shein-bi-lark-sales-qa.service
 systemctl daemon-reload
 # 启用 timer 时不要对一组重任务使用 `enable --now` 批量拉起。
@@ -42,8 +43,8 @@ systemctl start shein-bi-portal.service shein-bi-cloud-today.timer shein-bi-clou
 systemctl is-enabled shein-bi-lark-sales-qa.service || true
 systemctl is-active shein-bi-lark-sales-qa.service || true
 # ET / 登录态在服务器本地 secret 与授权配置完成后再启用；日报/日更由 morning-chain 接管，不再启用独立 timer：
-# systemctl enable shein-bi-cloud-et-forwarder.timer shein-bi-cloud-session-manager.timer
-# systemctl start shein-bi-cloud-et-forwarder.timer shein-bi-cloud-session-manager.timer
+# systemctl enable shein-bi-cloud-et-forwarder.timer shein-bi-cloud-et-storage-fee.timer shein-bi-cloud-session-manager.timer
+# systemctl start shein-bi-cloud-et-forwarder.timer shein-bi-cloud-et-storage-fee.timer shein-bi-cloud-session-manager.timer
 # 旧的 link-business / openapi-hl / rtv-verify 分散 timer 已由 daily-refresh 接管；若服务器曾启用过，迁移时执行：
 # systemctl disable --now shein-bi-cloud-link-business.timer shein-bi-cloud-openapi-hl.timer shein-bi-cloud-rtv-verify.timer
 # systemctl mask --force shein-bi-cloud-link-business.timer shein-bi-cloud-openapi-hl.timer shein-bi-cloud-rtv-verify.timer

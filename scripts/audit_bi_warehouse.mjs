@@ -207,6 +207,26 @@ function evaluate(summary, metabase) {
   if (maxStorageDelta > 0.01) {
     errors.push(`仓储费分摊未守恒：最大差额 ${maxStorageDelta.toFixed(4)} SAR（允许误差 0.01 SAR）。`);
   }
+  if (Number(storage.unresolved_replacement_chain_count || 0) > 0) {
+    errors.push(`仓储费存在 ${storage.unresolved_replacement_chain_count} 条“待支付→已支付”替换链未收敛到唯一 canonical 账单。`);
+  }
+  if (Number(storage.canonical_duplicate_count || 0) > 0) {
+    errors.push(`仓储费 canonical 替换链出现 ${storage.canonical_duplicate_count} 组重复保留账单，拒绝继续使用可能双算的利润缓存。`);
+  }
+  const rawStorageDate = String(storage.latest_raw_fee_date || '').slice(0, 10);
+  const canonicalStorageDate = String(storage.latest_canonical_fee_date || '').slice(0, 10);
+  if (rawStorageDate && (!canonicalStorageDate || canonicalStorageDate < rawStorageDate)) {
+    errors.push(`仓储费 canonical 总账日期陈旧：canonical=${canonicalStorageDate || '-'} raw=${rawStorageDate}。`);
+  }
+  if (Number(storage.detail_missing_days || 0) > 0) {
+    warnings.push(`有 ${storage.detail_missing_days} 个 canonical 仓储费日期缺少可用货号明细，金额已进入 CENTRAL_POOL 或库存证据回退，未把缺失明细当作 0。`);
+  }
+  if (Number(storage.detail_scaled_days || 0) > 0) {
+    warnings.push(`有 ${storage.detail_scaled_days} 个 canonical 仓储费日期的货号明细与总账不等，已按日缩放至 canonical 总账。`);
+  }
+  if (Number(storage.detail_inherited_bill_count || 0) > 0) {
+    warnings.push(`有 ${storage.detail_inherited_bill_count} 个 canonical 仓储费账单缺少自身明细，已继承单一 superseded 明细源；未合并多份替换链导出。`);
+  }
   if (Number(storage.central_pool_fee_sar || 0) > 0) {
     warnings.push(`仍有 ${Number(storage.central_pool_fee_sar).toFixed(2)} SAR 仓储费缺少可证明的店铺归属，已进入 CENTRAL_POOL，未静默丢失。`);
   }
@@ -314,7 +334,77 @@ summary AS (
         LIMIT 1
       ), '{}'::jsonb),
       'storage_reconciliation', coalesce((
-        WITH fee AS (
+        WITH canonical AS (
+          SELECT * FROM mart.et_storage_fee_bill_canonical
+        ),
+        raw_storage AS (
+          SELECT
+            coalesce(ship_time::date, create_time::date, push_time::date) AS fee_date,
+            income_bill_id,
+            CASE
+              WHEN lower(concat_ws(' ', status, status_name)) ~ '(已支付|支付成功|已完成|已结算|paid|done|completed|settled)' THEN 'paid'
+              WHEN lower(concat_ws(' ', status, status_name)) ~ '(等待支付|待支付|待付款|未支付|pending|awaiting.?payment|unpaid)' THEN 'pending'
+              ELSE 'other'
+            END AS payment_state,
+            concat_ws('|',
+              coalesce(ship_time::date, create_time::date, push_time::date)::text,
+              coalesce(billing_period_date::date, coalesce(ship_time::date, create_time::date, push_time::date))::text,
+              to_char(coalesce(other_income,0), 'FM999999999999990.000000'),
+              coalesce(nullif(client_from_id,''), nullif(raw_summary->>'ClientId',''), nullif(raw_summary->>'OwnerClientId',''), ''),
+              coalesce(nullif(remark,''), nullif(raw_summary->>'Remark',''), nullif(raw_summary->>'remark',''), ''),
+              coalesce(nullif(raw_summary->>'CountryId',''), nullif(raw_summary->>'countryId',''), nullif(raw_summary->>'CountryCode',''), nullif(raw_summary->>'countryCode',''), ''),
+              coalesce(nullif(oversea_id,''), nullif(raw_summary->>'OverseaId',''), nullif(raw_summary->>'overseaId',''), '')
+            ) AS canonical_business_key
+          FROM fact.et_income_bill
+          WHERE (sort = '2' OR sort_name = '仓储费')
+            AND coalesce(ship_time::date, create_time::date, push_time::date) IS NOT NULL
+        ),
+        replacement_candidate AS (
+          SELECT
+            canonical_business_key,
+            count(*) FILTER (WHERE payment_state = 'paid') AS paid_count,
+            count(*) FILTER (WHERE payment_state = 'pending') AS pending_count,
+            count(*) FILTER (WHERE payment_state = 'other') AS other_count
+          FROM raw_storage
+          GROUP BY canonical_business_key
+        ),
+        replacement_audit AS (
+          SELECT
+            r.canonical_business_key,
+            count(c.income_bill_id) AS canonical_count,
+            max(c.canonical_reason) AS canonical_reason
+          FROM replacement_candidate r
+          LEFT JOIN canonical c USING (canonical_business_key)
+          WHERE r.paid_count = 1 AND r.pending_count >= 1 AND r.other_count = 0
+          GROUP BY r.canonical_business_key
+        ),
+        canonical_detail_source AS (
+          SELECT * FROM mart.et_storage_fee_canonical_detail_source
+        ),
+        detail_by_bill AS (
+          SELECT s.fee_date, s.canonical_income_bill_id, s.detail_source_reason, count(*) AS detail_rows,
+            sum(coalesce(d.shown_fee_rmb,0)) AS detail_shown_fee_rmb
+          FROM canonical_detail_source s
+          JOIN fact.et_storage_fee_product_detail d
+            ON d.fee_date = s.fee_date
+           AND d.income_bill_id = s.detail_source_income_bill_id
+          WHERE s.detail_source_income_bill_id IS NOT NULL
+          GROUP BY s.fee_date, s.canonical_income_bill_id, s.detail_source_reason
+        ),
+        detail_coverage AS (
+          SELECT
+            c.fee_date,
+            count(*) AS canonical_bill_count,
+            count(db.canonical_income_bill_id) FILTER (WHERE coalesce(db.detail_shown_fee_rmb,0) <> 0) AS covered_bill_count,
+            sum(c.shown_fee_rmb) AS canonical_shown_fee_rmb,
+            sum(coalesce(db.detail_shown_fee_rmb,0)) AS detail_shown_fee_rmb
+          FROM canonical c
+          LEFT JOIN detail_by_bill db
+            ON db.fee_date = c.fee_date
+           AND db.canonical_income_bill_id = c.income_bill_id
+          GROUP BY c.fee_date
+        ),
+        fee AS (
           SELECT fee_date, sum(actual_fee_sar) AS actual_fee_sar
           FROM mart.et_storage_fee_daily
           GROUP BY fee_date
@@ -354,7 +444,38 @@ summary AS (
           'max_store_delta_sar', coalesce(max(abs(store_allocation_delta_sar)),0),
           'max_product_delta_sar', coalesce(max(abs(product_allocation_delta_sar)),0),
           'max_product_store_delta_sar', coalesce(max(abs(product_store_allocation_delta_sar)),0),
-          'central_pool_fee_sar', coalesce(sum(central_pool_fee_sar),0)
+          'central_pool_fee_sar', coalesce(sum(central_pool_fee_sar),0),
+          'unresolved_replacement_chain_count', (
+            SELECT count(*) FROM replacement_audit
+            WHERE canonical_count <> 1
+               OR canonical_reason <> 'status_replacement_paid_supersedes_pending'
+          ),
+          'canonical_duplicate_count', (
+            SELECT count(*) FROM replacement_audit WHERE canonical_count > 1
+          ),
+          'detail_covered_days', (
+            SELECT count(*) FROM detail_coverage
+            WHERE covered_bill_count = canonical_bill_count
+          ),
+          'detail_missing_days', (
+            SELECT count(*) FROM detail_coverage
+            WHERE covered_bill_count < canonical_bill_count
+          ),
+          'detail_scaled_days', (
+            SELECT count(*) FROM detail_coverage
+            WHERE covered_bill_count = canonical_bill_count
+              AND abs(canonical_shown_fee_rmb - detail_shown_fee_rmb) > 0.05
+          ),
+          'detail_inherited_bill_count', (
+            SELECT count(*) FROM canonical_detail_source
+            WHERE detail_source_reason = 'superseded_bill_detail_fallback'
+          ),
+          'detail_inherited_days', (
+            SELECT count(DISTINCT fee_date) FROM canonical_detail_source
+            WHERE detail_source_reason = 'superseded_bill_detail_fallback'
+          ),
+          'latest_raw_fee_date', (SELECT max(fee_date) FROM raw_storage),
+          'latest_canonical_fee_date', (SELECT max(fee_date) FROM canonical)
         )
         FROM reconciliation
       ), '{}'::jsonb),

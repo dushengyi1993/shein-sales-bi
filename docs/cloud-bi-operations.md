@@ -79,6 +79,8 @@
 
 | `shein-bi-cloud-et-forwarder.timer` | 北京时间 `01:20/03:20/.../23:20` | 高频抓取 ET 货代仓/出库单、入仓，只轻量刷新订单/物流/售后相关 section；需要服务器本地 ET 登录配置 |
 
+| `shein-bi-cloud-et-storage-fee.timer` | 北京时间 `14:10` | 只读同步 ET 仓储费最终账单与 SKU 明细，重建利润 cache、对账并只预热 `profit/homeProfit` |
+
 | `shein-bi-cloud-morning-chain.timer` | 北京时间 `08:00` | 晨间串行链路：先刷新当天销售，再启动统一日更补采；当前 `SHEIN_BI_MORNING_SEND_LARK_REPORT=0`，飞书日报自动发送已停用 |
 
 | `shein-bi-cloud-session-manager.timer` | 北京时间 `02:20` | 云端登录态管家：顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，检查 profile 体积，生成报告 |
@@ -109,6 +111,7 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 | 晨间链路之后，每日一次 | 统一日更补采 `shein-bi-cloud-daily-refresh.service` / `cloud_daily_refresh.sh yesterday` | 混合：WebAPI/headless + OpenAPI 并行层 | 写链接/业务域、SBN 营销概览线索、RTV 复核等慢变数据；OpenAPI 销售只写隔离对账层 | 不再重复执行 MBRs 全店营销价格栈扫描；该实时扫描只属于独立 guard。商品四档状态、SBN 经营/流量等仍需 WebAPI/headless。 |
 | 晨间日更内每日一次，跑 D-1 | 销售/退货/商品 OpenAPI reconciliation | OpenAPI | 只写 `fact.openapi_*` 和 `mart.openapi_*_reconciliation` | 首轮 `2026-07-09..15` 已回灌核对；修复映射与深度门禁后，以 `2026-07-17..23` 作为新验证窗口，`2026-07-24` 出结论。退货/商品继续隔离，不切正式事实。 |
 | `01:20/03:20/.../23:20` | ET 货代仓/出库单 `shein-bi-cloud-et-forwarder.service` | ET headless/API | 写 ET 仓库、出库单，并轻量刷新订单/物流/售后 section | 不是 SHEIN OpenAPI；异常不应中断已成功店铺数据。 |
+| `14:10` | ET 仓储费 `shein-bi-cloud-et-storage-fee.service` | ET headless/API，只读 `IncomeBill(sort=2)` + `ExportStoreFee` | 写仓储费事实、canonical 账单与利润 cache | 与通用 ET 共用 profile 锁但隔离输出；只预热利润，不刷新无关库存趋势。 |
 | `02:20` | 登录态管家 `shein-bi-cloud-session-manager.service` | 短生命周期 headless browser + WebAPI/SBN 探针 | 不写销售事实 | 恢复 WebAPI + SBN 登录态，结束后关闭它启动的浏览器。 |
 | `06:30` | 订单闭环复查 `shein-bi-cloud-order-closure.service` | WebAPI | 只更新订单生命周期状态，不重写历史销售事实 | 用于未终态订单复查；不随销售 OpenAPI 候选切换。 |
 | `10:30/13:30/16:30` | 每日营销 live guard `shein-bi-cloud-marketing-live-guard.service` | session HTTP 只读直连 | 一次读取 19 店普通活动、15% 券 active 集合与当前/未来活动价，生成精确计划和 repair queue；不持有写授权 | 不启动浏览器、不申请浏览器租约、不执行清理；当天首次成功后后续窗口只作失败重试。 |
@@ -117,7 +120,8 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 | 每小时 `:50` | watchdog `shein-bi-cloud-watchdog.service` | 只读巡检 | 不写业务数据 | 检查服务、timer、BI 新鲜度、销售/页面过期、浏览器残留并发提醒。 |
 | `02:40` | 数据库备份 `shein-bi-db-backup.service` | PostgreSQL dump/备份 | 备份 | 默认保留 14 天。 |
 
-- 高频销售刷新和 ET 出库单刷新保持独立：销售每小时整点跑（跳过 `03:00` / `08:00`），ET 每奇数小时 `20` 分跑；ET 默认只刷新相关 section，不再随销售高频全量生成 BI Portal。
+- 高频销售刷新、通用 ET 和仓储费保持独立：销售每小时整点跑（跳过 `03:00` / `08:00`），通用 ET 每奇数小时 `20` 分跑，仓储费每日 `14:10` 跑；仓储费先取得共用 ET 锁，不能与通用 ET 争用 profile。
+- 仓储费回灌/补跑使用 `bash scripts/cloud_et_storage_fee_sync.sh backfill YYYY-MM-DD`。完成标准不是“抓到文件”，而是 `check_storage_fee_profit.mjs` 四层守恒、`audit_bi_warehouse.mjs` 无 errors、timer/service success 和 profile Chrome 为 0。
 
 - 营销 live guard 临时补跑必须避开 ET `:20`、销售刷新整点、晨间/日更、登录态管家、备份和订单闭环。`2026-07-18 21:06` 的 19 店生产实测为 `157s`、Chrome `0 -> 0`；调度仍保留约 6 分钟安全空档，距离下一重任务不足该阈值时跳过。若正常巡检再次升到十几分钟或数小时，应视为重复抓取、浏览器回退或扫描夹带写入的故障。
 
@@ -125,7 +129,7 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 
 - 营销价格扫描按店有界重试，CLI 为 `--store-attempts 1..5`，生产 guard 由 `SHEIN_BI_MARKETING_PRICE_STORE_ATTEMPTS=3` 固定为最多 3 次；只重试已分类的瞬时错误，业务拒绝或确定性错误不能靠无限重试掩盖。
 
-- 高频销售、ET 和 watchdog 保持 `Persistent=false`，避免开机并发补跑；每日唯一性任务（昨日定稿、晨间链路、备份、订单闭环、登录态、营销 guard/repair）使用 `Persistent=true`，但各 service 仍先检查当天成功状态、忙碌任务和资源窗口，防止重启后重复写入或堆叠执行。事实以对应 `.timer` 文件为准。
+- 高频销售、通用 ET 和 watchdog 保持 `Persistent=false`，避免开机并发补跑；每日仓储费及其它每日唯一性任务（昨日定稿、晨间链路、备份、订单闭环、登录态、营销 guard/repair）使用 `Persistent=true`，但各 service 仍先检查锁、当天状态和资源窗口，防止重启后堆叠执行。事实以对应 `.timer` 文件为准。
 
 - `daily-refresh` 启动前会等待销售/昨日销售/ET 写入任务结束，并检查 `MemAvailable`。可用内存低于阈值时写 `skipped_low_memory` 状态后跳过本轮；宁可让慢变数据晚一点，也不能拖慢销售刷新和 BI 页面。
 

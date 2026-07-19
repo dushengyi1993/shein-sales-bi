@@ -6820,7 +6820,10 @@ async function ensureProfitMartCacheFresh(args, generatedAt = '') {
 }
 
 async function generateBiSection(args, root, section, generatedAt) {
-  const profitBackedSections = new Set(['profit', 'homeProfit', 'homeRankings', 'rankings', 'productSalesDaily']);
+  // inventoryTrend consumes historical sales/profit rows too. Using the
+  // published cache avoids expanding mart.profit_order_item on every trend
+  // request, which previously turned one portal warmup into a 10+ minute SQL.
+  const profitBackedSections = new Set(['profit', 'homeProfit', 'homeRankings', 'rankings', 'productSalesDaily', 'inventoryTrend']);
   const useProfitMartCache = profitBackedSections.has(section) && process.env.SHEIN_BI_PROFIT_MART_CACHE_DISABLED !== '1';
   const sourceMode = useProfitMartCache ? 'cache' : 'view';
   const refreshRun = sourceMode === 'cache' ? await ensureProfitMartCacheFresh(args, generatedAt) : null;

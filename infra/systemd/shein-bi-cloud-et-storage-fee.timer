@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the ET storage-fee sync once after daily bill generation
+
+[Timer]
+OnCalendar=*-*-* 14:10:00 Asia/Shanghai
+Persistent=true
+Unit=shein-bi-cloud-et-storage-fee.service
+
+[Install]
+WantedBy=timers.target

@@ -116,9 +116,11 @@ function bjDate(offsetDays) {
   return d.toISOString().slice(0, 10);
 }
 
-function addDays(date, offset) {
-  const d = new Date(`${date}T00:00:00+08:00`);
-  d.setDate(d.getDate() + offset);
+export function addDays(date, offset) {
+  // Calendar arithmetic must not round-trip a Beijing midnight through UTC:
+  // 2026-07-19T00:00:00+08:00 serializes as 2026-07-18 in ISO UTC.
+  const [year, month, day] = String(date).split('-').map(Number);
+  const d = new Date(Date.UTC(year, month - 1, day + Number(offset)));
   return d.toISOString().slice(0, 10);
 }
 
@@ -126,10 +128,11 @@ function firstDayOfMonth(date) {
   return `${date.slice(0, 7)}-01`;
 }
 
-function firstDayOfPrevMonth(date) {
-  const d = new Date(`${date}T00:00:00+08:00`);
-  d.setMonth(d.getMonth() - 1, 1);
-  return d.toISOString().slice(0, 10);
+export function firstDayOfPrevMonth(date) {
+  const [year, month] = String(date).split('-').map(Number);
+  const previousYear = month === 1 ? year - 1 : year;
+  const previousMonth = month === 1 ? 12 : month - 1;
+  return `${previousYear}-${String(previousMonth).padStart(2, '0')}-01`;
 }
 
 function safeName(value) {
@@ -609,7 +612,10 @@ const ENDPOINTS = {
   income_bill: {
     kind: 'finance',
     idFields: ['IncomeBillId'],
-    list: ctx => withParams('/Finance/IncomeBill/GetGridJson', {page: ctx.page, limit: ctx.limit, sort: '', status: '', cityId: '', overseaId: '', incomeBillId: '', start: ctx.financeStart, end: ctx.date, paySort: '', payStartTime: '', payEndTime: '', payId: '', sourceType: ''}),
+    // sort=2 is ET's storage-fee bill filter. Keep the generic finance fetch
+    // unchanged, but make --storage-fee-only a server-side filter rather than
+    // downloading every income-bill category and filtering it locally.
+    list: ctx => withParams('/Finance/IncomeBill/GetGridJson', {page: ctx.page, limit: ctx.limit, sort: ctx.storageFeeOnly ? 2 : '', status: '', cityId: '', overseaId: '', incomeBillId: '', start: ctx.financeStart, end: ctx.date, paySort: '', payStartTime: '', payEndTime: '', payId: '', sourceType: ''}),
     details: [
       {name: 'income_bill_item', idField: 'IncomeBillId', url: (id, ctx) => withParams('/Finance/IncomeBill/GetDetailGridJson', {page: 1, limit: ctx.detailLimit, id})},
     ],
@@ -985,7 +991,7 @@ async function fetchDetails(cdp, args, def, listRows, ctx) {
   return detailResults;
 }
 
-function buildContext(args) {
+export function buildContext(args) {
   const backfillStart = args.startDate || '2020-01-01';
   const shipStart = args.mode === 'backfill' ? backfillStart : addDays(args.date, -args.shipLookbackDays);
   return {
@@ -996,6 +1002,7 @@ function buildContext(args) {
     currentMonthStart: firstDayOfMonth(args.date),
     limit: args.limit,
     detailLimit: Math.max(500, args.limit),
+    storageFeeOnly: args.storageFeeOnly,
   };
 }
 
@@ -1211,7 +1218,9 @@ async function main() {
   }, null, 2));
 }
 
-main().catch(err => {
-  console.error(err?.stack || String(err));
-  process.exit(1);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(err => {
+    console.error(err?.stack || String(err));
+    process.exit(1);
+  });
+}

@@ -96,18 +96,36 @@ INSERT INTO fact.openapi_finance_check_order_item(
   ('FCI_UNMAPPED','FC_UNMAPPED','S1','G1','FC_UNMAPPED','R_UNKNOWN',3,'2026-01-15 12:01','SAR',now(),0,'UNKNOWN',15,3,12,'validation-hash');
 
 INSERT INTO fact.et_income_bill(
-  income_bill_id,sort_name,status,status_name,other_income,ship_time,create_time,billing_period_date
+  income_bill_id,client_from_id,sort_name,status,status_name,other_income,ship_time,create_time,billing_period_date
 ) VALUES
-  ('BILL_POOL','仓储费','done','done',100,'2026-01-05 08:00','2026-01-05 08:00','2026-01-05'),
-  ('BILL_LINK','仓储费','done','done',100,'2026-01-06 08:00','2026-01-06 08:00','2026-01-06');
+  ('BILL_POOL',NULL,'仓储费','done','done',100,'2026-01-05 08:00','2026-01-05 08:00','2026-01-05'),
+  ('BILL_LINK',NULL,'仓储费','done','done',100,'2026-01-06 08:00','2026-01-06 08:00','2026-01-06'),
+  ('BILL_REPL_PENDING',NULL,'仓储费','waiting','等待支付',515.51,'2026-04-04 08:00','2026-04-04 08:00','2026-04-04'),
+  ('BILL_REPL_PAID',NULL,'仓储费','paid','已支付',515.51,'2026-04-04 09:00','2026-04-04 09:00','2026-04-04'),
+  ('BILL_PAID_A',NULL,'仓储费','paid','已支付',100,'2026-04-05 08:00','2026-04-05 08:00','2026-04-05'),
+  ('BILL_PAID_B',NULL,'仓储费','paid','已支付',100,'2026-04-05 09:00','2026-04-05 09:00','2026-04-05'),
+  ('BILL_CLIENT_A_PAID','CLIENT_A','仓储费','paid','已支付',100,'2026-04-06 08:00','2026-04-06 08:00','2026-04-06'),
+  ('BILL_CLIENT_B_PENDING','CLIENT_B','仓储费','waiting','等待支付',100,'2026-04-06 09:00','2026-04-06 09:00','2026-04-06'),
+  ('BILL_INHERIT_PENDING',NULL,'仓储费','waiting','等待支付',200,'2026-04-07 08:00','2026-04-07 08:00','2026-04-07'),
+  ('BILL_INHERIT_PAID',NULL,'仓储费','paid','已支付',200,'2026-04-07 09:00','2026-04-07 09:00','2026-04-07');
 INSERT INTO fact.et_storage_fee_product_detail(
   unique_key,income_bill_id,fee_date,warehouse_name,storage_type,storage_code,
   standard_goods_sn,match_key,quantity,shown_fee_rmb,actual_fee_rmb,actual_fee_sar
-) VALUES ('SFD_LINK','BILL_LINK','2026-01-06','ETRUH09散件仓','散件','P1','P1',dim.product_match_key('P1'),10,100,75,75/1.88);
+) VALUES
+  ('SFD_LINK','BILL_LINK','2026-01-06','ETRUH09散件仓','散件','P1','P1',dim.product_match_key('P1'),10,100,50,50/1.8),
+  -- This pending detail must be ignored after BILL_REPL_PAID supersedes it.
+  ('SFD_REPL_PENDING','BILL_REPL_PENDING','2026-04-04','ETRUH09散件仓','散件','P2','P2',dim.product_match_key('P2'),10,100,50,50/1.8),
+  ('SFD_REPL_PAID','BILL_REPL_PAID','2026-04-04','ETRUH09散件仓','散件','P1','P1',dim.product_match_key('P1'),10,100,50,50/1.8),
+  ('SFD_PAID_A','BILL_PAID_A','2026-04-05','ETRUH09散件仓','散件','P1','P1',dim.product_match_key('P1'),10,50,25,25/1.8),
+  ('SFD_PAID_B','BILL_PAID_B','2026-04-05','ETRUH09散件仓','散件','P2','P2',dim.product_match_key('P2'),10,50,25,25/1.8),
+  -- Paid replacement has no detail; its one pending predecessor is inherited.
+  ('SFD_INHERIT_PENDING','BILL_INHERIT_PENDING','2026-04-07','ETRUH09散件仓','散件','P2','P2',dim.product_match_key('P2'),10,100,50,50/1.8);
 INSERT INTO fact.link_master_snapshot(
   unique_key,snapshot_date,store_key,group_key,standard_goods_sn,skc,is_on_shelf,is_wait_shelf,
   is_sold_out,is_out_shelf,is_hard_dead
-) VALUES ('LINK_P1','2026-01-04','S1','G1','P1','SKCA',true,false,false,false,false);
+) VALUES
+  ('LINK_P1','2026-01-04','S1','G1','P1','SKCA',true,false,false,false,false),
+  ('LINK_P2','2026-01-04','S1','G1','P2','SKCB',true,false,false,false,false);
 
 DO $$
 DECLARE
@@ -183,6 +201,11 @@ DECLARE
   v_alloc numeric;
   v_store text;
   v_delta numeric;
+  v_count bigint;
+  v_superseded text[];
+  v_p1_fee numeric;
+  v_detail_source text;
+  v_detail_reason text;
 BEGIN
   SELECT actual_fee_sar INTO v_fee FROM mart.et_storage_fee_daily WHERE fee_date='2026-01-05';
   SELECT sum(storage_fee_sar),max(store_key) INTO v_alloc,v_store
@@ -202,6 +225,80 @@ BEGIN
   IF coalesce(v_delta,999) > 0.01 THEN
     RAISE EXCEPTION 'storage reconciliation delta too large: %',v_delta;
   END IF;
+
+  SELECT count(*)
+    INTO v_count
+  FROM mart.et_storage_fee_bill_canonical
+  WHERE fee_date='2026-04-04';
+  SELECT superseded_income_bill_ids INTO v_superseded
+  FROM mart.et_storage_fee_bill_canonical
+  WHERE fee_date='2026-04-04'
+  LIMIT 1;
+  IF v_count <> 1 OR v_superseded <> ARRAY['BILL_REPL_PENDING']::text[] THEN
+    RAISE EXCEPTION 'pending-to-paid replacement must retain only paid canonical bill: rows %, superseded %',v_count,v_superseded;
+  END IF;
+
+  SELECT sum(shown_fee_rmb),sum(actual_fee_rmb),sum(actual_fee_sar)
+    INTO v_fee,v_alloc,v_delta
+  FROM mart.et_storage_fee_daily
+  WHERE fee_date='2026-04-04';
+  IF abs(v_fee-515.51) > 0.005
+     OR abs(v_alloc-(515.51*0.5)) > 0.005
+     OR abs(v_delta-(515.51*0.5/1.8)) > 0.005 THEN
+    RAISE EXCEPTION 'canonical storage fee must use other_income * 0.5 / 1.8: shown %, rmb %, sar %',v_fee,v_alloc,v_delta;
+  END IF;
+
+  SELECT count(*),sum(shown_fee_rmb) INTO v_count,v_fee
+  FROM mart.et_storage_fee_bill_canonical
+  WHERE fee_date='2026-04-05';
+  IF v_count <> 2 OR abs(v_fee-200) > 0.005 THEN
+    RAISE EXCEPTION 'two independently paid bills must remain distinct: rows %, shown %',v_count,v_fee;
+  END IF;
+
+  SELECT count(*) INTO v_count
+  FROM mart.et_storage_fee_bill_canonical
+  WHERE fee_date='2026-04-06';
+  IF v_count <> 2 THEN
+    RAISE EXCEPTION 'same-date paid/pending bills from different clients must not be cross-collapsed: rows %',v_count;
+  END IF;
+
+  SELECT detail_source_income_bill_id,detail_source_reason
+    INTO v_detail_source,v_detail_reason
+  FROM mart.et_storage_fee_canonical_detail_source
+  WHERE fee_date='2026-04-07' AND canonical_income_bill_id='BILL_INHERIT_PAID';
+  IF v_detail_source <> 'BILL_INHERIT_PENDING' OR v_detail_reason <> 'superseded_bill_detail_fallback' THEN
+    RAISE EXCEPTION 'paid bill without detail must inherit exactly one pending detail source: source %, reason %',v_detail_source,v_detail_reason;
+  END IF;
+
+  SELECT sum(actual_allocated_fee_sar) INTO v_p1_fee
+  FROM mart.storage_fee_product_daily
+  WHERE date='2026-04-07' AND match_key=dim.product_match_key('P2');
+  IF abs(v_p1_fee-(200*0.5/1.8)) > 0.005
+     OR EXISTS (
+       SELECT 1 FROM mart.storage_fee_product_daily
+       WHERE date='2026-04-07' AND match_key=dim.product_match_key('P1')
+     ) THEN
+    RAISE EXCEPTION 'inherited pending detail must allocate once to its canonical paid bill: P2 %',v_p1_fee;
+  END IF;
+
+  SELECT sum(actual_allocated_fee_sar) INTO v_p1_fee
+  FROM mart.storage_fee_product_daily
+  WHERE date='2026-04-04' AND match_key=dim.product_match_key('P1');
+  IF abs(v_p1_fee-(515.51*0.5/1.8)) > 0.005
+     OR EXISTS (
+       SELECT 1 FROM mart.storage_fee_product_daily
+       WHERE date='2026-04-04' AND match_key=dim.product_match_key('P2')
+     ) THEN
+    RAISE EXCEPTION 'only canonical paid-bill detail may define product distribution: P1 %',v_p1_fee;
+  END IF;
+
+  SELECT max(greatest(abs(store_allocation_delta_sar),abs(product_allocation_delta_sar),abs(product_store_allocation_delta_sar)))
+    INTO v_delta
+  FROM mart.storage_fee_daily_reconciliation
+  WHERE fee_date IN ('2026-04-04','2026-04-05','2026-04-07');
+  IF coalesce(v_delta,999) > 0.01 THEN
+    RAISE EXCEPTION 'scaled canonical detail must conserve across ledger, product, and store layers: %',v_delta;
+  END IF;
 END $$;
 
 SELECT jsonb_build_object(
@@ -215,7 +312,12 @@ SELECT jsonb_build_object(
     'return_order_performance_price_actual_replaces_estimate',
     'finance_unmapped_actual_is_visible_and_reconciles',
     'storage_active_link_or_central_pool',
-    'storage_reconciles'
+    'storage_reconciles',
+    'storage_pending_paid_replacement_is_canonicalized',
+    'storage_two_paid_bills_are_not_merged',
+    'storage_different_clients_are_not_cross_collapsed',
+    'storage_superseded_detail_is_inherited_once_when_paid_detail_missing',
+    'storage_detail_scales_to_canonical_bill_and_conserves'
   )
 ) AS warehouse_business_logic_smoke;
 

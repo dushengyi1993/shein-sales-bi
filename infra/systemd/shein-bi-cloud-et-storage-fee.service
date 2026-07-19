@@ -1,0 +1,44 @@
+[Unit]
+Description=SHEIN BI cloud ET storage-fee read-only sync
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+User=sheinops
+Group=sheinops
+UMask=0027
+WorkingDirectory=/opt/shein-bi/app
+Environment=HOME=/home/sheinops
+Environment=TZ=Asia/Shanghai
+Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+# Must remain the generic ET lock: it serializes the shared ET profile.
+Environment=SHEIN_ET_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-et-forwarder.lock
+Environment=SHEIN_ET_PROFILE_DIR=/opt/shein-bi/app/profiles/persistent-et-forwarder-profile
+Environment=SHEIN_ET_STORAGE_FEE_STATE_PATH=/opt/shein-bi/app/state/et_storage_fee_sync_state.json
+Environment=SHEIN_ET_STORAGE_FEE_OUTPUT_DIR=/opt/shein-bi/app/outputs/et-storage-fee
+Environment=SHEIN_BI_PORTAL_REFRESH_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-portal-refresh.lock
+Environment=SHEIN_ET_STORAGE_FEE_LOG_DIR=/srv/shein-bi/logs/cloud-et-storage-fee
+Environment=SHEIN_ET_STORAGE_FEE_BACKFILL_START_DATE=2025-11-17
+Environment=SHEIN_DOCKER_USE_SUDO=1
+Environment=SHEIN_BI_PORTAL_REFRESH_LOCK_WAIT_SEC=120
+TimeoutStartSec=7200
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+MemoryHigh=800M
+MemoryMax=1200M
+OOMPolicy=stop
+KillMode=control-group
+# Do not use NoNewPrivileges or RestrictSUIDSGID: this job deliberately uses
+# documented sheinops NOPASSWD sudo for Docker-backed refresh helpers.
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictRealtime=true
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_et_storage_fee_sync.sh daily

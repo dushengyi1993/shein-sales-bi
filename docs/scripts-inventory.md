@@ -134,7 +134,7 @@
 
   - `generate_bi_portal_v2.mjs`：历史 V2 平行预览生成器，当前仅作迁移参考；正式入口以后以 `generate_bi_portal.mjs` / `outputs/bi-portal/index.html` 为准。
 
-  - `serve_bi_portal.mjs`：云端 BI Portal 服务，提供静态页、健康检查和 `/api/bi/section/:section`；缓存读写、generation 校验、raw/gzip sidecar 与 stale 元数据统一由 `lib/bi_section_cache.mjs` 负责；`homeProfit` 是服务层从当前 `profit` section cache 派生的轻量首页利润摘要；`homeRankings` 会裁掉首页不用的重复商品长文本后缓存；服务启动和首页访问会触发 core `generatedAt` watcher 兜底预热 section，健康接口暴露 `biCoreWarmup` 状态。
+  - `serve_bi_portal.mjs`：云端 BI Portal 服务，提供静态页、健康检查和 `/api/bi/section/:section`；缓存读写、generation 校验、raw/gzip sidecar 与 stale 元数据统一由 `lib/bi_section_cache.mjs` 负责；`homeProfit` 是服务层从当前 `profit` section cache 派生的轻量首页利润摘要；`homeRankings` 会裁掉首页不用的重复商品长文本后缓存；`inventoryTrend` 也必须读取已发布利润 cache，禁止每次展开实时 `mart.profit_order_item`；服务启动和首页访问会触发 core `generatedAt` watcher 兜底预热 section，健康接口暴露 `biCoreWarmup` 状态。
 
   - `prewarm_bi_portal_sections.sh`：云端 Portal section 预热脚本，由 `cloud_bi_refresh.sh` 在 api data mode 下后台启动；默认先预热首页关键 section，并在 `profit` 成功后补跑 `homeProfit`。前端会拒绝 `staleSource=true` 或 `sourceGeneratedAt` 不匹配的旧利润摘要；若脚本未及时跑完，`serve_bi_portal.mjs` 的 core warmup watcher 会兜底。
 
@@ -156,11 +156,15 @@
 
   - `cloud_et_forwarder_sync.sh`：Linux 云端 ET 同步入口；抓取、入仓并刷新 BI Portal。依赖服务器本地 `config/et_forwarder.local.json` 或 `ET_FORWARDER_USERNAME/ET_FORWARDER_PASSWORD`，密钥不进 GitHub。
 
+  - `cloud_et_storage_fee_sync.sh`：Linux 云端仓储费专用只读入口；支持 `daily|backfill`，与通用 ET 共用 profile 锁但使用独立状态/输出/日志，完整性校验通过后才入仓、发布利润 cache、对账并预热 `profit/homeProfit`。
+
+  - `check_storage_fee_profit.mjs`：生产仓储费四层守恒检查；核对 canonical 总账、货号、店铺、店铺×货号、缩放日、缺明细日和利润 cache。
+
   - `cloud_rtv_verify.sh`：Linux 云端完整 RTV 换单复核入口；生产由 `cloud_daily_refresh.sh` 统一日更补采批次调用，默认使用 WebAPI transport，不阻塞两小时销售刷新。
 
   - `fetch_et_forwarder.mjs`
 
-    - Windows 下复用本地 ET Chrome profile；Linux 下使用 headless Chrome/Chromium、`--no-sandbox`、`--disable-dev-shm-usage`，通过 ET 本地凭据和 OCR 自动登录。
+    - Windows 下复用本地 ET Chrome profile；Linux 下使用 headless Chrome/Chromium、`--no-sandbox`、`--disable-dev-shm-usage`，通过 ET 本地凭据和 OCR 自动登录。`--storage-fee-only` 只请求 `IncomeBill sort=2`，并可用 `--out-dir` 隔离产物。
 
   - `load_et_forwarder_warehouse.mjs`
 

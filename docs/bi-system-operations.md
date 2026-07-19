@@ -98,9 +98,11 @@
 ## 6A. ET 货代仓与 RTV 换单复核
 
 - ET 专属 profile：`profiles/persistent-et-forwarder-profile`。
-- ET 本地每日同步任务 `SHEIN-Sales-ETForwarder-0420` 已封存禁用；抓取器 `scripts/fetch_et_forwarder.mjs` 和入仓器 `scripts/load_et_forwarder_warehouse.mjs` 仍保留，后续需迁成云端任务后再恢复自动同步。
+- ET 本地任务 `SHEIN-Sales-ETForwarder-0420` 已封存禁用；生产已迁到云端 `shein-bi-cloud-et-forwarder.timer`。仓储费由独立 `shein-bi-cloud-et-storage-fee.timer` 每日 `14:10` 同步总账和 SKU 明细，并在成功入仓后重建利润 cache、对账和预热 `profit/homeProfit`。
+- 两个 ET 任务共用 `profiles/persistent-et-forwarder-profile` 与同一互斥锁，禁止并发操作登录态；仓储费任务使用独立状态、`outputs/et-storage-fee/`、日志和 Chrome 临时目录，不复用通用 root 任务的输出目录。
 - ET 登录态过期时，抓取器会调用 `scripts/et_login_helper.py`，读取 ET profile 中 Chrome 已保存的凭据并用本地 OCR 识别验证码；日志和文档不得输出密码。
 - ET 货代仓也适用“非必要不打开前端窗口”：`scripts/fetch_et_forwarder.mjs` 默认 `visible=false` 并用 `WindowStyle Hidden` 启动 Chrome；自动登录优先走 `scripts/et_login_helper.py` + OCR。只有 OCR/验证码连续失败、登录态必须人工处理、用户明确要求，或必须排查浏览器交互问题时，才允许临时加 `--visible` 打开 ET 前台窗口，处理完必须关闭。
+- ET 仓储费口径以最终账单为总额、明细为分摊权重；明细与账单不一致不能把明细合计直接当成本。历史重述与回滚见 `docs/storage-fee-history-restatement-2026-07-19.md`。
 - RTV 主利润口径继续保守：反转订单营收按 0，仍扣商品成本；ET 已收件只进入“RTV 已收可二次销售测算”，不自动改主利润。
 - SHEIN 售后列表中的退货物流号可能不是 ET RTV 最终入仓号；`scripts/verify_shein_rtv_tracking.mjs` 会读取 SHEIN 售后详情和退货物流详情，识别 `new waybill number [...]` 等换单证据，并写入 `ops.rtv_tracking_verification`。
 - SHEIN 物流详情可能返回中文轨迹，例如 `新的运单号[6031326736754]`、`运单已...更换`；解析器必须同时识别中英文换单提示。示例：`ZL / 16FBC044CV / 6031126719507` 已匹配 ET RTV `TH26040146319 / 6031326736754`。

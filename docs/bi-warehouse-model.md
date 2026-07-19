@@ -274,11 +274,15 @@ ET 物流仓服账单里的 `仓储费` 是仓储成本正式来源，旧 `fact.
 - `fact.et_income_bill`：每日仓储费总账，`sort_name='仓储费'`，显示金额按 `other_income` 读取为 RMB；费用自然日优先 `ship_time::date`，`billing_period_date` 仅作结算账期诊断。
 - `dim.storage_fee_policy`：配置 ET 显示金额到 BI 利润口径的换算，当前为显示金额 × `0.5` 后按 `1 SAR = 1.8 RMB` 折 SAR。
 - `fact.et_storage_fee_product_detail`：网页端 `ExportStoreFee` 下载的 SKU/箱号日仓储费明细；CSV 原表不入仓库、不提交，只保存规范化字段和来源审计字段。
-- `mart.et_storage_fee_daily`：按日汇总 ET 仓储费总账与实际扣费。
-- `mart.storage_fee_product_daily`：先用 `ExportStoreFee` 的货号/箱号证据分配；证据与 ET 日总账不一致时按日缩放并记录方法。没有可证明货号归属的余额不猜测体积成本，进入 `CENTRAL_POOL`。
+- `mart.et_storage_fee_bill_canonical`：以金额、客户、账期、备注等稳定业务键识别状态替换；同一业务账单仅在“一条已支付 + 至少一条等待支付”时由已支付替换等待支付，两条独立已支付账单不会误合并。
+- `mart.et_storage_fee_daily`：从 canonical 账单按日汇总 ET 最终账单与实际扣费；正式应付额始终为最终账单 × `0.5` ÷ `1.8`。
+- `mart.et_storage_fee_canonical_detail_source`：每条 canonical 账单只选一份明细。优先已支付账单自身明细；自身缺失时才继承同替换链的一份历史导出，禁止把重复导出相加。
+- `mart.storage_fee_product_daily`：`ExportStoreFee` 只提供货号/箱号分摊权重；明细与最终账单明显不一致时按日缩放到 canonical 总账并记录 `download_detail_scaled_to_bill`。没有可证明货号归属的余额不猜测体积成本，进入 `CENTRAL_POOL`。
 - `mart.storage_fee_product_store_daily` / `mart.storage_fee_store_daily`：在已归属货号内按货号 × 店铺销量分配；无法归店的残余以 `CENTRAL_POOL` 保留。`mart.storage_fee_daily_reconciliation` 必须使货号、店铺和总账三层可核对。
 - `mart.product_display_by_match_key`：仓储费、利润等展示层按内部 `match_key` 选择销售行或 `dim.product` 中已有的标准货号作为显示货号。ET 原始仓储码仍留在 `fact.et_storage_fee_product_detail.storage_code` / `sku_code`；`match_key` 只用于归并，不应把 ET 解析中间码作为新的对外商品货号。
 - `mart.storage_fee_daily_reconciliation`：独立对比总账、店铺分摊和货号分摊，避免 join 后把每日总账按明细行数放大。
+
+`2026-07-19` 历史重述覆盖 `2025-11-17..2026-07-19`：246 条原始仓储费行形成 245 条 canonical 账单，20,822 条 SKU 明细覆盖 245/245 天；46 天明细与账单明显不同，均已按最终账单缩放。完整说明见 `docs/storage-fee-history-restatement-2026-07-19.md`。
 
 利润视图保留 `profit_before_storage_sar` 作诊断，并提供 `storage_fee_sar`、`profit_after_storage_sar`、`profit_margin_after_storage`、`storage_fee_method`。不得再把店铺/分组按净销售额直接分摊作为主口径。
 

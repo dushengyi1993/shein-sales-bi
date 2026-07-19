@@ -81,6 +81,37 @@ assert.match(marketingRepairScript, /--max-groups "\$REMAINING_GROUPS"/);
 assert.match(marketingRepairScript, /new_groups_in_result/);
 assert.equal(property(marketingRepair, 'TimeoutStartSec'), '2400');
 
+const storageFeeTimer = readUnit('shein-bi-cloud-et-storage-fee.timer');
+assert.equal(property(storageFeeTimer, 'OnCalendar'), '*-*-* 14:10:00 Asia/Shanghai');
+assert.equal(property(storageFeeTimer, 'Persistent'), 'true');
+
+const storageFeeSync = readUnit('shein-bi-cloud-et-storage-fee.service');
+assert.equal(property(storageFeeSync, 'User'), 'sheinops');
+assert.equal(property(storageFeeSync, 'Group'), 'sheinops');
+assert.equal(property(storageFeeSync, 'UMask'), '0027');
+assert.equal(property(storageFeeSync, 'ProtectSystem'), 'full');
+assert.equal(property(storageFeeSync, 'ProtectKernelTunables'), 'true');
+assert.equal(property(storageFeeSync, 'ProtectKernelModules'), 'true');
+assert.equal(property(storageFeeSync, 'ProtectKernelLogs'), 'true');
+assert.equal(property(storageFeeSync, 'ProtectControlGroups'), 'true');
+assert.equal(property(storageFeeSync, 'ProtectClock'), 'true');
+assert.equal(property(storageFeeSync, 'ProtectHostname'), 'true');
+assert.equal(property(storageFeeSync, 'LockPersonality'), 'true');
+assert.equal(property(storageFeeSync, 'RestrictRealtime'), 'true');
+assert.equal(property(storageFeeSync, 'OOMPolicy'), 'stop');
+assert.equal(property(storageFeeSync, 'TimeoutStartSec'), '7200');
+assert.match(storageFeeSync, /^Environment=HOME=\/home\/sheinops$/m);
+assert.match(storageFeeSync, /shein-bi-cloud-et-forwarder\.lock/,
+  'storage-fee sync must serialize the shared ET browser profile');
+assert.match(storageFeeSync, /SHEIN_ET_STORAGE_FEE_OUTPUT_DIR=\/opt\/shein-bi\/app\/outputs\/et-storage-fee/,
+  'storage-fee sync must not share the generic root-owned output tree');
+assert.match(storageFeeSync, /^Environment=SHEIN_DOCKER_USE_SUDO=1$/m,
+  'storage-fee sync must use the audited NOPASSWD Docker path');
+assert.doesNotMatch(storageFeeSync, /^NoNewPrivileges=true$/m,
+  'storage-fee sync uses the audited sheinops NOPASSWD Docker helpers');
+assert.doesNotMatch(storageFeeSync, /^RestrictSUIDSGID=true$/m,
+  'storage-fee sync must not block its audited sudo elevation');
+
 for (const timerName of [
   'shein-bi-cloud-morning-chain.timer',
   'shein-bi-cloud-order-closure.timer',
@@ -99,6 +130,7 @@ console.log(JSON.stringify({
     'hourly lease-aware browser cleanup',
     'three retry-capable marketing guard windows',
     'bounded resumable marketing repair worker',
+    'daily canonical ET storage-fee sync',
     'persistent critical daily timers',
   ],
 }, null, 2));
