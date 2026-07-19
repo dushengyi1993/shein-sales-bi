@@ -1190,18 +1190,26 @@ return{series:[],lines:[],note:''}}
 function trendValueText(v,metric=S.trendMetric){const meta=TREND_METRICS[metric]||{};return meta.money?money(v):M(v)}
 function niceCeil(v){const n=Math.abs(N(v));if(n<=10)return 10;const p=Math.pow(10,Math.floor(Math.log10(n)));return Math.ceil(n/p)*p}
 function dataTip(v){return H(v).replace(/\n/g,'&#10;')}
-function priceDistBinSize(minPrice,maxPrice){const spread=Math.max(0,N(maxPrice)-N(minPrice));if(spread<=0)return 5;if(spread<=70)return 10;if(spread<=170)return 20;if(spread<=350)return 50;return Math.ceil(spread/8/10)*10}
+function adaptivePriceScale(values,maxBins=8){
+const prices=A(values).map(N).filter(v=>v>0),minPrice=prices.length?Math.min(...prices):0,maxPrice=prices.length?Math.max(...prices):0,uniquePriceCount=new Set(prices.map(v=>v.toFixed(6))).size;
+if(!prices.length)return{prices:[],minPrice:0,maxPrice:0,span:0,binCount:0,binWidth:0,edges:[],bins:[]};
+if(maxPrice===minPrice||uniquePriceCount===1)return{prices,minPrice,maxPrice,span:0,binCount:1,binWidth:0,edges:[minPrice],bins:[{index:0,lo:minPrice,hi:maxPrice}]};
+const binCount=Math.max(2,Math.min(maxBins,uniquePriceCount,Math.ceil(Math.sqrt(prices.length)))),span=maxPrice-minPrice,binWidth=span/binCount;
+const edges=Array.from({length:binCount+1},(_,i)=>i===binCount?maxPrice:minPrice+binWidth*i);
+const bins=Array.from({length:binCount},(_,i)=>({index:i,lo:edges[i],hi:edges[i+1]}));
+return{prices,minPrice,maxPrice,span,binCount,binWidth,edges,bins};
+}
+function adaptivePriceBinIndex(value,scale){if(!scale?.binCount)return-1;if(scale.binCount===1||scale.binWidth<=0)return 0;return Math.min(scale.binCount-1,Math.max(0,Math.floor((N(value)-scale.minPrice)/scale.binWidth)))}
+function priceBandText(bin,unit=true){if(!bin)return'—';const range=Math.abs(N(bin.hi)-N(bin.lo))<.005?M2(bin.lo):`${M2(bin.lo)}-${M2(bin.hi)}`;return unit?range+' SAR':range}
 function priceDistData(){
 const q=String(S.q||'').trim();if(!q)return{needsProduct:true,bins:[],rows:[]};
 const rows=(psales().length?psales():sales()).map(r=>{const qty=netQty(r),salesValue=netSales(r),orders=netOrders(r),avg=qty?salesValue/qty:0;return{row:r,avg,qty,sales:salesValue,orders}}).filter(r=>r.avg>0&&r.qty>0);
 if(!rows.length)return{needsProduct:false,bins:[],rows:[]};
 const totalSales=rows.reduce((a,r)=>a+r.sales,0),totalQty=rows.reduce((a,r)=>a+r.qty,0),totalOrders=rows.reduce((a,r)=>a+r.orders,0);
-const minPrice=Math.min(...rows.map(r=>r.avg)),maxPrice=Math.max(...rows.map(r=>r.avg)),binSize=priceDistBinSize(minPrice,maxPrice);
-const start=Math.floor(minPrice/binSize)*binSize,end=Math.max(start+binSize,Math.ceil(maxPrice/binSize)*binSize);
-const bins=[];for(let lo=start;lo<end;lo+=binSize)bins.push({lo,hi:lo+binSize,sales:0,qty:0,orders:0,rows:0});
-for(const r of rows){const idx=Math.min(bins.length-1,Math.max(0,Math.floor((r.avg-start)/binSize)));const b=bins[idx];b.sales+=r.sales;b.qty+=r.qty;b.orders+=r.orders;b.rows+=1}
+const scale=adaptivePriceScale(rows.map(r=>r.avg)),bins=scale.bins.map(b=>({...b,sales:0,qty:0,orders:0,rows:0}));
+for(const r of rows){const b=bins[adaptivePriceBinIndex(r.avg,scale)];if(!b)continue;b.sales+=r.sales;b.qty+=r.qty;b.orders+=r.orders;b.rows+=1}
 const activeBins=bins.filter(b=>b.qty>0),best=activeBins.slice().sort((a,b)=>b.qty-a.qty||b.orders-a.orders)[0]||null;
-return{needsProduct:false,rows,bins:activeBins,totalSales,totalQty,totalOrders,avg:totalQty?totalSales/totalQty:0,minPrice,maxPrice,binSize,best,label:rows[0]?prod(rows[0].row):q};
+return{needsProduct:false,rows,bins:activeBins,totalSales,totalQty,totalOrders,avg:totalQty?totalSales/totalQty:0,minPrice:scale.minPrice,maxPrice:scale.maxPrice,binCount:scale.binCount,binWidth:scale.binWidth,best,label:rows[0]?prod(rows[0].row):q};
 }
 
 function priceDistPanel(){
@@ -1214,9 +1222,9 @@ const maxQty=Math.max(...data.bins.map(b=>b.qty),1),barGap=8,barW=Math.max(12,(p
 const yFor=v=>padT+plotH-(N(v)/maxQty)*plotH;
 const ticks=[0,maxQty*.25,maxQty*.5,maxQty*.75,maxQty];
 const grid=ticks.map(v=>`<line class="grid-line" x1="${padL}" y1="${yFor(v).toFixed(1)}" x2="${W-padR}" y2="${yFor(v).toFixed(1)}"></line><text class="axis-tick" text-anchor="end" x="${padL-8}" y="${(yFor(v)+4).toFixed(1)}">${H(M(v))}</text>`).join('');
-const bars=data.bins.map((b,i)=>{const x=padL+i*(barW+barGap),y=yFor(b.qty),barHeight=Math.max(2,plotH-(y-padT)),hot=b===data.best,avg=b.qty?b.sales/b.qty:0,pct=data.totalQty?b.qty/data.totalQty:0;const tip=dataTip(`${M2(b.lo)}-${M2(b.hi)} SAR\n销量：${M(b.qty)} 件\n订单：${M(b.orders)} 单\n占总销量：${PCT(pct)}\n段内均价：${M2(avg)} SAR`);return`<g class="price-dist-bar ${hot?'hot':''}"><rect data-tip="${tip}" x="${x.toFixed(1)}" y="${(padT+plotH-barHeight).toFixed(1)}" width="${barW.toFixed(1)}" height="${barHeight.toFixed(1)}" rx="8"></rect><text class="price-dist-value" x="${(x+barW/2).toFixed(1)}" y="${Math.max(14,padT+plotH-barHeight-6).toFixed(1)}" text-anchor="middle">${H(M(b.qty))}</text><text class="axis-tick price-dist-x" x="${(x+barW/2).toFixed(1)}" y="${(chartH-padB+19).toFixed(1)}" text-anchor="middle">${H(M(b.lo))}-${H(M(b.hi))}</text></g>`}).join('');
-const best=data.best,priceRange=`${M2(data.minPrice)}~${M2(data.maxPrice)} SAR`,bestText=best?`${M2(best.lo)}-${M2(best.hi)} SAR`:'—';
-return`<section class="panel price-dist-panel"><h4>单货号成交价格分布</h4><p class="sub">${H(homeScopeSubtitle())} · ${H(selectedRangeText())} · 按每行净成交额/净销量计算均价，自动 ${H(M(data.binSize))} SAR 分桶</p>
+const bars=data.bins.map((b,i)=>{const x=padL+i*(barW+barGap),y=yFor(b.qty),barHeight=Math.max(2,plotH-(y-padT)),hot=b===data.best,avg=b.qty?b.sales/b.qty:0,pct=data.totalQty?b.qty/data.totalQty:0,band=priceBandText(b);const tip=dataTip(`${band}\n销量：${M(b.qty)} 件\n订单：${M(b.orders)} 单\n占总销量：${PCT(pct)}\n段内均价：${M2(avg)} SAR`);return`<g class="price-dist-bar ${hot?'hot':''}"><rect data-tip="${tip}" x="${x.toFixed(1)}" y="${(padT+plotH-barHeight).toFixed(1)}" width="${barW.toFixed(1)}" height="${barHeight.toFixed(1)}" rx="8"></rect><text class="price-dist-value" x="${(x+barW/2).toFixed(1)}" y="${Math.max(14,padT+plotH-barHeight-6).toFixed(1)}" text-anchor="middle">${H(M(b.qty))}</text><text class="axis-tick price-dist-x" x="${(x+barW/2).toFixed(1)}" y="${(chartH-padB+19).toFixed(1)}" text-anchor="middle">${H(priceBandText(b,false))}</text></g>`}).join('');
+const best=data.best,priceRange=`${M2(data.minPrice)}~${M2(data.maxPrice)} SAR`,bestText=priceBandText(best);
+return`<section class="panel price-dist-panel"><h4>单货号成交价格分布</h4><p class="sub">${H(homeScopeSubtitle())} · ${H(selectedRangeText())} · 按每行净成交额/净销量计算均价，按真实最低/最高价自适应 ${H(M(data.binCount))} 段</p>
 <div class="price-dist-kpis">
 <span><em>整体均价</em><b>${H(M2(data.avg))}</b><small>SAR</small></span>
 <span class="hot"><em>最畅销价格</em><b>${H(bestText)}</b><small>${best?M(best.qty)+'件 / '+M(best.orders)+'单':'—'}</small></span>
@@ -1237,30 +1245,29 @@ ${bars}
 
 
 function priceScatterRows(){return A(D.priceScatter).filter(r=>{const price=N(r?.unit_price_sar),qty=N(r?.quantity);return price>0&&qty>0&&inSelectedRange(r?.created_date||r?.order_create_time)&&scopeSearchOk(r)})}
-function priceScatterSample(rows,bins,limit=5000){if(rows.length<=limit)return rows;const byBin=new Map();for(const r of rows){const price=N(r.unit_price_sar),idx=Math.min(bins.length-1,Math.max(0,bins.findIndex(b=>price>=b.lo&&price<b.hi)));const key=idx<0?0:idx;if(!byBin.has(key))byBin.set(key,[]);byBin.get(key).push(r)}const perBin=Math.max(1,Math.floor(limit/Math.max(1,byBin.size))),sample=[];for(const xs of byBin.values()){const step=Math.max(1,Math.ceil(xs.length/perBin));for(let i=0;i<xs.length&&sample.length<limit;i+=step)sample.push(xs[i])}return sample}
+function priceScatterSample(rows,scale,limit=5000){if(rows.length<=limit)return rows;const byBin=new Map();for(const r of rows){const key=adaptivePriceBinIndex(r.unit_price_sar,scale);if(key<0)continue;if(!byBin.has(key))byBin.set(key,[]);byBin.get(key).push(r)}const perBin=Math.max(1,Math.floor(limit/Math.max(1,byBin.size))),sample=[];for(const xs of byBin.values()){const step=Math.max(1,Math.ceil(xs.length/perBin));for(let i=0;i<xs.length&&sample.length<limit;i+=step)sample.push(xs[i])}return sample}
 function priceScatterPanel(){
 if(!A(D.priceScatter).length&&SS.priceScatter?.status!=='ok')return`<section class="panel price-scatter-panel"><h4>订单成交价散点图</h4><p class="sub">${H(selectedRangeText())} · 每个点是一笔订单商品行</p><div class="empty price-scatter-empty">正在加载订单级散点数据…</div></section>`;
 const rows=priceScatterRows();
 if(!rows.length)return`<section class="panel price-scatter-panel"><h4>订单成交价散点图</h4><p class="sub">${H(homeScopeSubtitle())} · ${H(selectedRangeText())}</p><div class="empty price-scatter-empty">当前筛选条件下没有订单级数据</div></section>`;
-const prices=rows.map(r=>N(r.unit_price_sar)).filter(v=>v>0),minPrice=Math.min(...prices),maxPrice=Math.max(...prices),priceMax=niceCeil(maxPrice),binSize=priceDistBinSize(minPrice,maxPrice);
-const binStart=Math.floor(minPrice/binSize)*binSize,binEnd=Math.max(binStart+binSize,Math.ceil(maxPrice/binSize)*binSize),bins=[];for(let lo=binStart;lo<binEnd;lo+=binSize)bins.push({lo,hi:lo+binSize,qty:0,rows:0});
-let totalSales=0,totalQty=0;for(const r of rows){const price=N(r.unit_price_sar),qty=N(r.quantity);totalSales+=N(r.sales_sar);totalQty+=qty;const idx=Math.min(bins.length-1,Math.max(0,Math.floor((price-binStart)/binSize)));const b=bins[idx];if(b){b.qty+=qty;b.rows+=1}}
-const activeBins=bins.filter(b=>b.qty>0),best=activeBins.slice().sort((a,b)=>b.qty-a.qty||b.rows-a.rows)[0]||null,sampled=priceScatterSample(rows,activeBins.length?activeBins:[{lo:0,hi:priceMax}],5000);
+const scale=adaptivePriceScale(rows.map(r=>r.unit_price_sar)),minPrice=scale.minPrice,maxPrice=scale.maxPrice,bins=scale.bins.map(b=>({...b,qty:0,rows:0}));
+let totalSales=0,totalQty=0;for(const r of rows){const qty=N(r.quantity);totalSales+=N(r.sales_sar);totalQty+=qty;const b=bins[adaptivePriceBinIndex(r.unit_price_sar,scale)];if(b){b.qty+=qty;b.rows+=1}}
+const activeBins=bins.filter(b=>b.qty>0),best=activeBins.slice().sort((a,b)=>b.qty-a.qty||b.rows-a.rows)[0]||null,sampled=priceScatterSample(rows,scale,5000);
 const w=1280,h=360,padL=72,padR=28,padT=28,padB=54,plotW=w-padL-padR,plotH=h-padT-padB;
 const dateValues=rows.map(r=>ISO(r.created_date||r.order_create_time)).filter(Boolean).sort(),startDate=S.start||dateValues[0]||'',endDate=S.end||dateValues.at(-1)||startDate;
 const startMs=(parseDateOnly(startDate)||parseDateOnly(dateValues[0])||new Date()).getTime(),endMs=(parseDateOnly(endDate)||parseDateOnly(dateValues.at(-1))||new Date()).getTime(),sameDay=!(Number.isFinite(startMs)&&Number.isFinite(endMs))||startMs===endMs;
 const xFor=r=>{if(sameDay)return padL+plotW/2;const d=parseDateOnly(r.created_date||r.order_create_time);const ms=d?d.getTime():startMs;return padL+Math.max(0,Math.min(1,(ms-startMs)/(endMs-startMs)))*plotW};
-const yFor=v=>padT+plotH-(Math.max(0,Math.min(priceMax,N(v)))/priceMax)*plotH;
-const yTicks=[0,priceMax*.25,priceMax*.5,priceMax*.75,priceMax],grid=yTicks.map(v=>`<line class="grid-line" x1="${padL}" y1="${yFor(v).toFixed(1)}" x2="${w-padR}" y2="${yFor(v).toFixed(1)}"></line><text class="axis-tick" text-anchor="end" x="${padL-8}" y="${(yFor(v)+4).toFixed(1)}">${H(M2(v))}</text>`).join('');
+const yFor=v=>scale.span>0?padT+plotH-(Math.max(0,Math.min(1,(N(v)-minPrice)/scale.span)))*plotH:padT+plotH/2;
+const yTicks=scale.edges.length?scale.edges:[minPrice],grid=yTicks.map(v=>`<line class="grid-line" x1="${padL}" y1="${yFor(v).toFixed(1)}" x2="${w-padR}" y2="${yFor(v).toFixed(1)}"></line><text class="axis-tick" text-anchor="end" x="${padL-8}" y="${(yFor(v)+4).toFixed(1)}">${H(M2(v))}</text>`).join('');
 const axisDates=sameDay?[startDate]:[startDate,addDateDays(startDate,Math.round((endMs-startMs)/86400000/2)),endDate].filter(Boolean),dateAxis=axisDates.map(d=>{const ms=(parseDateOnly(d)||new Date(startMs)).getTime(),x=sameDay?padL+plotW/2:padL+Math.max(0,Math.min(1,(ms-startMs)/(endMs-startMs)))*plotW;return`<text class="axis-tick price-scatter-axis" text-anchor="middle" x="${x.toFixed(1)}" y="${h-18}">${H(d)}</text>`}).join('');
 const hasProduct=!!String(S.q||'').trim(),storeColor=r=>hasProduct?'#6366f1':(ownByStore.get(sk(r))?.color||'#6366f1'),radius=sampled.length>3500?2.4:3,opacity=sampled.length>3500?.46:.6;
 const dots=sampled.map(r=>{const date=ISO(r.created_date||r.order_create_time),store=sk(r),product=pkey(r)||prod(r),tip=dataTip(`日期：${date||'—'}\n店铺：${storeDisplayName(store)||'—'}\n货号：${product||'—'}\n单价：${M2(r.unit_price_sar)} SAR\n数量：${M(r.quantity)}\n金额：${M2(r.sales_sar)} SAR`);return`<circle class="price-scatter-dot" data-tip="${tip}" cx="${xFor(r).toFixed(1)}" cy="${yFor(r.unit_price_sar).toFixed(1)}" r="${radius}" fill="${H(storeColor(r))}" opacity="${opacity}"></circle>`}).join('');
-const priceRange=`${M2(minPrice)}~${M2(maxPrice)} SAR`,bestText=best?`${M2(best.lo)}-${M2(best.hi)} SAR`:'—',sampleNote=sampled.length<rows.length?` · 已抽样 ${M(sampled.length)} / ${M(rows.length)} 点`:'';
+const priceRange=`${M2(minPrice)}~${M2(maxPrice)}`,bestText=priceBandText(best),sampleNote=sampled.length<rows.length?` · 已抽样 ${M(sampled.length)} / ${M(rows.length)} 点`:'';
 const legendStores=hasProduct?[]:uniq(sampled.map(sk)).slice(0,10);
-return`<section class="panel price-scatter-panel"><h4>订单成交价散点图</h4><p class="sub">${H(homeScopeSubtitle())} · ${H(selectedRangeText())} · 点=订单商品行，纵轴为单件成交价 SAR${H(sampleNote)}</p>
+return`<section class="panel price-scatter-panel"><h4>订单成交价散点图</h4><p class="sub">${H(homeScopeSubtitle())} · ${H(selectedRangeText())} · 点=订单商品行，纵轴从真实最低价到最高价，并自适应分为 ${H(M(scale.binCount))} 段${H(sampleNote)}</p>
 <div class="price-scatter-kpis">
 <span><em>订单行数</em><b>${H(M(rows.length))}</b><small>当前筛选</small></span>
-<span><em>价格区间</em><b>${H(priceRange)}</b></span>
+<span><em>价格区间</em><b>${H(priceRange)}</b><small>SAR</small></span>
 <span><em>加权均价</em><b>${H(M2(totalQty?totalSales/totalQty:0))}</b><small>SAR</small></span>
 <span class="hot"><em>最畅销价格段</em><b>${H(bestText)}</b><small>${best?M(best.qty)+'件 / '+M(best.rows)+'行':'—'}</small></span>
 </div>
