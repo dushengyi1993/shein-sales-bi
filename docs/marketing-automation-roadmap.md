@@ -68,6 +68,7 @@
 
 - 本地 Codex heartbeat 只负责汇报、观察报告、dry-run 清单和阻塞原因；云端 guard timer 只负责完整 live scan、精确计划和建队列，不持有写授权。负责人长期策略授权内的限时折扣动作只由独立 repair worker 执行。
 - 复核频率按风险分层。云端 timer 每日做一次 19 店完整基线；动作后只复扫受影响店并与成功基线合并（shell 尚未接入定点合并前，保留最终全量复扫）。本地临时补扫按候选店铺最小集合和 3–5 店小批次执行，跑完关闭。
+- repair worker 的最终闭环必须按固定顺序执行：19 店普通活动/优惠券 session HTTP stack review 刷新 → 19 店价格栈 final scan → guard 重建。价格栈放在最后，避免待生效活动在 stack review 期间跨过开始时间，又被旧价格快照重新判为缺口。大批修复可能超过 `30` 分钟的同轮证据时差；如果不刷新 stack review，guard 会把已被当日 live 证据取代的历史 coupon/overlap 中间文件重新判成 stale blocker。最终 stack review 是 browserless session HTTP 刷新，不得回退为逐店前端扫描。
 - `source stale` 只表示证据需要刷新，不等于可以自动全店 live scan；如果没有低价止损、补券窗口或用户授权，日报只能报告“需补证据/等待窗口”，不得用全量前端扫描替代判断。
 - 若调用 `scripts/marketing/submit_coupon_activity_goods.mjs`，必须带 `--dry-run` 或 `--no-submit`。
 - 默认禁止本地 heartbeat 向写入型脚本传 `--execute`。云端 worker 的长期授权例外包括限时折扣价格漂移修复、登记中的人工特殊折扣恢复，以及新链接/新上架 7 天/重新上架无活动/漏限时折扣兜底；它们不逐次索要人工确认，但每轮必须自动计算并校验精确 payload/work hash，同时通过授权 ID/上下文、身份、价格栈、库存/平台校验、dry-run 和执行后 live 回读。优惠券取消、补预算、普通活动报名和无证据写入仍不得自动执行。

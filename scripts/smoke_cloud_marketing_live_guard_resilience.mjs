@@ -56,6 +56,8 @@ assert.match(repairWorker, /--skip-build-plan --execute/);
 assert.match(repairWorker, /--expected-work-fingerprint/);
 assert.match(repairWorker, /SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH/);
 assert.match(repairWorker, /awaiting_final_readback/);
+assert.match(repairWorker, /run_final_readback\(\)[\s\S]*export_marketing_stack_review\.mjs[\s\S]*scan_current_marketing_prices_for_bi\.mjs[\s\S]*build_marketing_daily_guard_report\.mjs/,
+  'repair final readback must refresh ordinary/coupon session HTTP evidence before the latest price scan and final guard rebuild');
 assert.match(repairWorker, /export SHEIN_BI_BROWSER_LEASE_TASK="\$LEASE_TASK"/);
 assert.match(repairWorker, /export SHEIN_BI_BROWSER_LEASE_RUN_ID="\$RUN_ID"/);
 assert.doesNotMatch(dailyRefresh, /manage_browser_task_leases\.mjs/);

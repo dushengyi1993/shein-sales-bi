@@ -16,6 +16,8 @@ LEASE_ACQUIRED=0
 MAX_GROUPS="${SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS:-8}"
 SCAN_TIMEOUT_SEC="${SHEIN_BI_MARKETING_LIVE_SCAN_TIMEOUT_SEC:-2400}"
 SCAN_KILL_AFTER_SEC="${SHEIN_BI_MARKETING_LIVE_SCAN_KILL_AFTER_SEC:-60}"
+STACK_REVIEW_TIMEOUT_SEC="${SHEIN_BI_MARKETING_STACK_REVIEW_TIMEOUT_SEC:-900}"
+STACK_REVIEW_KILL_AFTER_SEC="${SHEIN_BI_MARKETING_STACK_REVIEW_KILL_AFTER_SEC:-60}"
 GUARD_MAX_AGE_HOURS="${SHEIN_BI_MARKETING_LIVE_GUARD_MAX_AGE_HOURS:-96}"
 GUARD_CLOUD_BI_SSH="${SHEIN_BI_MARKETING_LIVE_CLOUD_BI_SSH:-local}"
 GUARD_CLOUD_BI_ROOT="${SHEIN_BI_MARKETING_LIVE_CLOUD_BI_ROOT:-$ROOT}"
@@ -125,6 +127,16 @@ run_final_readback() {
   stamp="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)-repair-final"
   scan_out="$ROOT/tmp/marketing-signup/current-price-live/current-marketing-price-live-${DATE}-${stamp}.json"
   guard_out="$ROOT/outputs/reports/marketing-daily-guard-${DATE}.json"
+  # Repair may run longer than the guard's same-run evidence skew. Refresh the
+  # browserless ordinary/coupon snapshot first, then take the latest price scan
+  # so scheduled activities cannot cross their start time after price readback.
+  lease_action heartbeat
+  timeout -k "$STACK_REVIEW_KILL_AFTER_SEC" "$STACK_REVIEW_TIMEOUT_SEC" \
+    node scripts/marketing/export_marketing_stack_review.mjs \
+      --batch-size 3 \
+      --session-http \
+      --cloud-bi-ssh "$GUARD_CLOUD_BI_SSH" \
+      --cloud-bi-root "$GUARD_CLOUD_BI_ROOT"
   lease_action heartbeat
   timeout -k "$SCAN_KILL_AFTER_SEC" "$SCAN_TIMEOUT_SEC" \
     node scripts/marketing/scan_current_marketing_prices_for_bi.mjs \
