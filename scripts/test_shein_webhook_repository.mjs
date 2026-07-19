@@ -19,9 +19,13 @@ class FakePool {
   async query(request, suppliedValues) {
     const text = typeof request === 'string' ? request : request.text;
     const values = typeof request === 'string' ? (suppliedValues || []) : (request.values || []);
-    this.queries.push({text, values, name: typeof request === 'object' ? request.name : ''});
+    const preparedName = typeof request === 'object' ? (request.name || '') : '';
+    const marker = text.match(/shein_webhook:([a-z_]+)/)?.[1] || '';
+    const key = preparedName || (marker ? `shein-webhook-${marker.replaceAll('_', '-')}` : '');
+    this.queries.push({text, values, name: key, preparedName});
+    const maxParameter = Math.max(0, ...[...text.matchAll(/\$(\d+)/g)].map(match => Number(match[1])));
+    assert.equal(values.length, maxParameter, `bound value count must match SQL parameters for ${key || text.slice(0, 80)}`);
     if (text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK' || text.startsWith('SET TRANSACTION')) return {rows: []};
-    const key = typeof request === 'object' ? request.name : '';
     this.calls[key] = (this.calls[key] || 0) + 1;
     if (key === 'shein-webhook-store-receipt') {
       return {rows: [{...baseRow, duplicate_count: this.calls[key] - 1, duplicate: this.calls[key] > 1}]};
@@ -85,6 +89,7 @@ assert.equal(events.rows.length, 1);
 assert.ok(events.nextCursor, 'limit + 1 response must yield a cursor');
 assert.deepEqual(Object.keys(events.rows[0]).sort(), ['actionState', 'businessKey', 'duplicate', 'eventCode', 'eventType', 'id', 'processedAt', 'receivedAt', 'severity', 'status', 'storeKey', 'summary', 'title'].sort());
 const list = latest(pool, 'shein-webhook-list-events');
+assert.equal(list.preparedName, '', 'dynamic event-list SQL must not reuse a fixed prepared-statement name');
 assert.match(list.text, /store_key = ANY\(\$1::text\[\]\)/, 'allowed stores must be SQL constrained');
 assert.equal(list.values[0][0], 'JSH');
 assert.doesNotMatch(list.text, /decrypted_payload|cipher_hash|app_id|open_key_id/, 'frontend projection must exclude secrets and payload');
@@ -96,6 +101,7 @@ assert.match(latest(pool, 'shein-webhook-list-events').text, /WHERE FALSE/, 'emp
 const gates = await repo.listStoreGates({storeKeys: ['JSH']});
 assert.deepEqual(gates[0], {storeKey: 'JSH', gateType: 'authorization', state: 'blocked', reason: 'expired', sourceReceiptId: '41', sourceEventOrder: null, updatedAt: '2026-07-19T01:00:00.000Z'});
 const gateList = latest(pool, 'shein-webhook-list-store-gates');
+assert.equal(gateList.preparedName, '', 'dynamic gate-list SQL must not reuse a fixed prepared-statement name');
 assert.match(gateList.text, /store_key = ANY\(\$1::text\[\]\)/);
 assert.match(gateList.text, /state='blocked'/);
 await repo.listStoreGates({storeKeys: []});
@@ -118,5 +124,10 @@ const totals = await repo.summary({allowedStores: ['JSH'], now: '2026-07-19T02:0
 assert.deepEqual(totals.totals, {last24h: 2, pending: 1, failed: 0, p0: 1});
 assert.equal(totals.byStore[0].storeKey, 'JSH');
 assert.match(latest(pool, 'shein-webhook-summary-by-store').text, /store_key = ANY/, 'summary scope must also be SQL constrained');
+assert.equal(latest(pool, 'shein-webhook-summary-by-store').preparedName, '', 'dynamic summary SQL must be unnamed');
+await repo.summary({allowedStores: '*', now: '2026-07-19T02:00:00Z'});
+assert.match(latest(pool, 'shein-webhook-summary-by-type').text, /\$1::timestamptz IS NOT NULL AND TRUE/, 'all-store summary must still bind its time parameter');
+await repo.summary({allowedStores: [], now: '2026-07-19T02:00:00Z'});
+assert.match(latest(pool, 'shein-webhook-summary-by-store').text, /\$1::timestamptz IS NOT NULL AND FALSE/, 'empty-store summary must bind safely and remain fail-closed');
 
 console.log('shein webhook repository tests: ok');
