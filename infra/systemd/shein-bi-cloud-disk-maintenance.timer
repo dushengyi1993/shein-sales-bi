@@ -1,0 +1,11 @@
+[Unit]
+Description=Run SHEIN BI guarded disk maintenance weekly
+
+[Timer]
+OnCalendar=Sun *-*-* 01:35:00 Asia/Shanghai
+RandomizedDelaySec=10m
+Persistent=true
+Unit=shein-bi-cloud-disk-maintenance.service
+
+[Install]
+WantedBy=timers.target

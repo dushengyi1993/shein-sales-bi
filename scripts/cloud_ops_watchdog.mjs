@@ -25,6 +25,7 @@ const UNIT_NAMES = [
   'shein-bi-cloud-session-manager.service',
   'shein-bi-cloud-morning-chain.service',
   'shein-bi-cloud-order-closure.service',
+  'shein-bi-cloud-disk-maintenance.service',
 ];
 const TIMER_NAMES = [
   'shein-bi-cloud-today.timer',
@@ -37,6 +38,7 @@ const TIMER_NAMES = [
   'shein-bi-cloud-marketing-live-guard.timer',
   'shein-bi-cloud-marketing-repair.timer',
   'shein-bi-cloud-browser-cleanup.timer',
+  'shein-bi-cloud-disk-maintenance.timer',
   'shein-bi-cloud-watchdog.timer',
 ];
 
@@ -234,6 +236,37 @@ async function auditOrphanStoreBrowsers() {
     orphanCount: processes.length,
     processes,
   };
+}
+
+async function auditRootDisk() {
+  const res = await run('df', ['-Pk', '/'], {timeoutMs: 5_000});
+  if (!res.ok) return {ok: false, error: `disk audit failed code=${res.code}`};
+  const line = String(res.stdout || '').trim().split(/\r?\n/).at(-1) || '';
+  const parts = line.trim().split(/\s+/);
+  if (parts.length < 6) return {ok: false, error: 'disk audit returned an unreadable result'};
+  const totalKiB = Number(parts[1]);
+  const usedKiB = Number(parts[2]);
+  const availableKiB = Number(parts[3]);
+  const usedPercent = Number(String(parts[4]).replace('%', ''));
+  if (![totalKiB, usedKiB, availableKiB, usedPercent].every(Number.isFinite)) {
+    return {ok: false, error: 'disk audit returned invalid numbers'};
+  }
+  return {
+    ok: true,
+    mount: parts[5],
+    totalBytes: totalKiB * 1024,
+    usedBytes: usedKiB * 1024,
+    availableBytes: availableKiB * 1024,
+    usedPercent,
+  };
+}
+
+function rootDiskIssue(disk) {
+  if (!disk?.ok) return `服务器硬盘检查失败：${disk?.error || '未知原因'}`;
+  if (disk.usedPercent >= 93) return '服务器硬盘即将写满：根盘使用率已超过 93%，需要立即处理。';
+  if (disk.usedPercent >= 88) return '服务器硬盘快满了：根盘使用率已超过 88%，请检查自动维护结果。';
+  if (disk.usedPercent >= 80) return '服务器硬盘空间偏紧：根盘使用率已超过 80%，自动维护会在安全窗口清缓存并归档旧抓数。';
+  return '';
 }
 
 async function psqlJson(sql, timeoutMs = Number(process.env.SHEIN_CLOUD_WATCHDOG_DB_TIMEOUT_MS || 30_000)) {
@@ -472,6 +505,10 @@ async function main() {
     issues.push(`SHEIN 店铺浏览器残留：count=${orphanStoreBrowsers.orphanCount} threshold=${orphanStoreBrowsers.maxAgeMin}min ${sample}`);
   }
 
+  const rootDisk = await auditRootDisk();
+  const diskIssue = rootDiskIssue(rootDisk);
+  if (diskIssue) issues.push(diskIssue);
+
   const orderClosure = await auditOrderClosure(args);
   if (orderClosure.state?.error) {
     issues.push(`订单状态复查状态不可读：${orderClosure.state.error}`);
@@ -518,6 +555,7 @@ async function main() {
     portal,
     coverage,
     orphanStoreBrowsers,
+    rootDisk,
     orderClosure,
     units,
     timers,

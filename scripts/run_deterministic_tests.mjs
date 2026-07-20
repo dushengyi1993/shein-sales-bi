@@ -78,6 +78,7 @@ const tests = [
   'scripts/test_link_ops_migration_compat.mjs',
   'scripts/test_migrate_link_ops_runtime_to_postgres.mjs',
   'scripts/test_shared_lock_security.mjs',
+  'scripts/test_cloud_disk_maintenance_contract.mjs',
   'scripts/test_systemd_security_contract.mjs',
   'scripts/test_bi_product_section_contract.mjs',
   'scripts/test_inventory_projection_contract.mjs',

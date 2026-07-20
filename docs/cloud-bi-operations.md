@@ -86,6 +86,7 @@
 | `shein-bi-cloud-session-manager.timer` | 北京时间 `02:20` | 云端登录态管家：顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，检查 profile 体积，生成报告 |
 
 | `shein-bi-cloud-browser-cleanup.timer` | 每小时 `:15` | 租约感知地回收过期/死亡租约和无有效租约的孤儿浏览器；不打断有效任务 |
+| `shein-bi-cloud-disk-maintenance.timer` | 每周日 `01:35`，随机延迟不超过 10 分钟 | 旧抓数校验归档到 COS、清理 7 天前临时文件；根盘达到 80% 且无浏览器任务时才清 profile 可再生缓存 |
 
 | `shein-bi-cloud-watchdog.timer` | 每小时 | 检查云端服务、timer 和 BI 数据新鲜度，异常时发飞书提醒 |
 
@@ -147,7 +148,7 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 
 
 
-备份默认保留 `14` 天。后续正式长期运行还应补对象存储或异地下载备份，避免云盘单点故障。
+数据库备份默认保留 `14` 天。抓数原始产物本地保留 `30` 天，之后由 `cloud_disk_maintenance.sh` 打包到 `/lhcos-data/shein-bi-archive/YYYY-MM-DD/`；只有压缩包可完整读取、成员清单一致且 SHA256 已落盘时，才删除未发生变化的本地源文件。COS 不可写或校验失败时必须保留本地文件。浏览器缓存清理与每小时孤儿进程清理分开：前者只在根盘达到 `80%`、浏览器租约为零且没有 Chrome 进程时执行，并明确排除 Cookie、Local Storage 和 IndexedDB。journald 上限为 `1GB`，同时至少给根盘保留 `5GB`。
 
 
 

@@ -74,6 +74,21 @@ const browserCleanupTimer = readUnit('shein-bi-cloud-browser-cleanup.timer');
 assert.equal(property(browserCleanupTimer, 'OnCalendar'), '*-*-* *:15:00', 'browser cleanup runs hourly, not every 30 minutes');
 assert.equal(property(browserCleanupTimer, 'Persistent'), 'true');
 
+const diskMaintenance = readUnit('shein-bi-cloud-disk-maintenance.service');
+assert.equal(property(diskMaintenance, 'User'), 'root');
+assert.equal(property(diskMaintenance, 'Group'), 'sheinops');
+assert.equal(property(diskMaintenance, 'OOMPolicy'), 'stop');
+assert.equal(property(diskMaintenance, 'NoNewPrivileges'), 'true');
+assert.equal(property(diskMaintenance, 'PrivateTmp'), 'true');
+assertCommonHardening(diskMaintenance, 'disk maintenance');
+assert.match(diskMaintenance, /SHEIN_BI_PROFILE_CACHE_THRESHOLD_PERCENT=80/);
+assert.match(diskMaintenance, /SHEIN_BI_OUTPUT_RETENTION_DAYS=30/);
+assert.doesNotMatch(diskMaintenance, /restore_shein_store_session|bootstrap_shein_browser_session/,
+  'root-run disk maintenance must never launch a SHEIN browser');
+const diskMaintenanceTimer = readUnit('shein-bi-cloud-disk-maintenance.timer');
+assert.equal(property(diskMaintenanceTimer, 'OnCalendar'), 'Sun *-*-* 01:35:00 Asia/Shanghai');
+assert.equal(property(diskMaintenanceTimer, 'Persistent'), 'true');
+
 const marketingGuardTimer = readUnit('shein-bi-cloud-marketing-live-guard.timer');
 const marketingWindows = [...marketingGuardTimer.matchAll(/^OnCalendar=(.*)$/gm)].map(match => match[1].trim());
 assert.deepEqual(marketingWindows, ['*-*-* 10:30:00', '*-*-* 13:30:00', '*-*-* 16:30:00']);
