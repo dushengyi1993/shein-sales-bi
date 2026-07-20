@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import {createSheinWebhookEventProcessor} from '../lib/shein_webhook_handlers.mjs';
+import {createSheinWebhookEventProcessor, humanizeSheinWebhookEvent} from '../lib/shein_webhook_handlers.mjs';
 
 const gates = [];
 const currentGates = new Map();
@@ -45,12 +45,25 @@ const appScoped = await processor.process({...base, normalized: {appScopedOnly: 
 assert.equal(appScoped.actionState, 'app_scoped_event_recorded');
 assert.equal(gates.length, 0, 'an app-only validation delivery must not change store gates');
 assert.equal(syncCalls.length, 0, 'an app-only validation delivery must not sync orders or returns');
-assert.equal((await processor.process({...base, normalized: {eventFamily: 'order', eventCode: '3001442', eventLabel: '订单', storeKey: 'AA', orderId: 'O-1', businessId: 'O-1'}, payload: {orderNo: 'O-1'}})).actionState, 'order_warehouse_synced');
+const orderOutcome = await processor.process({...base, normalized: {eventFamily: 'order', eventCode: '3001442', eventLabel: '订单', storeKey: 'AA', orderId: 'O-1', businessId: 'O-1', status: '4'}, payload: {orderNo: 'O-1'}});
+assert.equal(orderOutcome.actionState, 'order_warehouse_synced');
+assert.equal(orderOutcome.title, 'AA 店：订单已同步');
+assert.equal(orderOutcome.summary, '订单 O-1 已同步到 BI，无需人工处理。');
+assert.doesNotMatch(`${orderOutcome.title}\n${orderOutcome.summary}`, /P3|3001442|状态 4|normal_or_non_alerting_event|order_warehouse_synced/);
 assert.equal((await processor.process({...base, normalized: {eventFamily: 'return', eventCode: '3000914', eventLabel: '退货', storeKey: 'AA', returnId: 'R-1', businessId: 'R-1'}, payload: {returnOrderNo: 'R-1'}})).actionState, 'return_warehouse_synced');
 assert.deepEqual(syncCalls, [
   ['order', {storeKey: 'AA', orderNo: 'O-1'}],
   ['return', {storeKey: 'AA', returnOrderNo: 'R-1'}],
 ]);
+
+const authorizationCopy = humanizeSheinWebhookEvent(
+  {eventFamily: 'authorization', storeKey: 'AA', businessId: 'internal-1', status: '6'},
+  {severity: 'P0', reason: 'authorization_exception'},
+);
+assert.equal(authorizationCopy.title, 'AA 店：店铺授权需要处理');
+assert.match(authorizationCopy.summary, /系统已暂停该店的自动操作/);
+assert.match(authorizationCopy.summary, /请重新检查并恢复授权/);
+assert.doesNotMatch(`${authorizationCopy.title}\n${authorizationCopy.summary}`, /P0|status|状态 6|authorization_exception|OpenAPI/);
 
 const productResult = await processor.process({...base, normalized: {eventFamily: 'product_audit', eventCode: '3001450', eventLabel: '审核', storeKey: 'AA', productId: 'SPU-1', skc: 'SKC-1', businessId: 'DOC-1'}, payload: {spuName: 'SPU-1', skcName: 'SKC-1', documentSn: 'DOC-1', version: '7'}});
 assert.equal(productResult.actionState, 'task_readback_attached');

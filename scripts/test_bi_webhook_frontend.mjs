@@ -18,8 +18,10 @@ for (const source of [client, html]) {
   assert.match(source, /webhookStore/);
   assert.match(source, /webhookType/);
   assert.match(source, /webhookStatus/);
-  assert.match(source, /24h 事件/);
-  assert.match(source, /待处理/);
+  assert.match(source, /近24小时通知/);
+  assert.match(source, /近24小时需处理/);
+  assert.match(source, /这里只告诉你发生了什么、系统做了什么，以及是否需要你处理/);
+  assert.match(source, /系统处理结果/);
   assert.match(source, /平台动态加载失败/);
 }
 
@@ -27,7 +29,16 @@ assert.match(client, /return\{id:webhookText\(r\?\.id\),receivedAt:webhookText\(
 assert.match(client, /function platformPage\(\)\{loadWebhook\(\)/);
 assert.match(client, /WEBHOOK\.promise=\(async\(\)=>[\s\S]*?if\(S\.tab==='platform'\)render\(\);return WEBHOOK\.promise/);
 assert.doesNotMatch(client, /WEBHOOK\.error='';if\(S\.tab==='platform'\)render\(\);WEBHOOK\.promise=/, 'loading render must happen only after promise assignment to avoid recursive render');
+assert.match(client, /const WEBHOOK_EVENT_LABELS=Object\.freeze/);
+assert.match(client, /P0:'需要立即处理',P1:'建议关注',P3:'普通通知'/);
+assert.match(client, /succeeded:'已处理'/);
+const eventCard = client.match(/function webhookEventCard\(r\)\{([\s\S]*?)\}\nfunction platformPage/)?.[1] || '';
+assert.ok(eventCard, 'webhookEventCard must exist');
+assert.doesNotMatch(eventCard, /eventCode|actionState|r\.title|r\.summary|webhookBadge\(r\.severity|webhookBadge\(r\.status/, 'operator timeline must not render audit-only codes or stored technical copy');
+assert.match(eventCard, /webhookTitle\(r\)/);
+assert.match(eventCard, /webhookSummary\(r\)/);
+assert.doesNotMatch(client, /P0（24h）|集中查看平台 webhook|事件时间线|刷新事件/);
 assert.match(css, /\.webhook-event\{display:grid/);
 assert.match(css, /@media\(max-width:720px\)\{\.webhook-kpis/);
 
-console.log('bi_webhook_frontend: navigation, API, normalized event projection, states, and mobile timeline contracts passed');
+console.log('bi_webhook_frontend: business-language timeline, hidden audit metadata, filters, states, and mobile contracts passed');

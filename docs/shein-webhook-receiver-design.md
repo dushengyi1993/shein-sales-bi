@@ -118,9 +118,11 @@ worker 直接使用独立受限 PostgreSQL 角色 `shein_webhook_ops`，不调�
 
 ## 7. BI 与飞书
 
-BI：导航新增独立“平台动态”页，提供 24 小时事件、待处理、失败、P0 摘要，以及店铺/级别/类型/状态筛选。接口沿用 `bi_session` 和账号 `readStores` 权限；SQL 层再次限制店铺范围。
+BI：导航新增独立“平台动态”页，提供近 24 小时通知、系统处理中、处理失败、近 24 小时需处理摘要，以及店铺/重要程度/业务内容/系统处理结果筛选。接口沿用 `bi_session` 和账号 `readStores` 权限；SQL 层再次限制店铺范围。
 
-飞书：复用 `lark-cli im +messages-send` 的现有通知身份，但仅发送 P0；普通事件按 receipt 幂等，官方无事件 ID 的授权重签按 10 分钟时间桶去重，不恢复已暂停的问数服务。详情与普通事件留在 BI，避免刷屏。
+面向运营人员的展示必须遵守同一个“人话”契约：只说发生了什么、系统做了什么、是否需要人工处理。`P0/P1/P3`、`succeeded/retry/dead_letter`、event code、action state、数字平台状态和英文分类原因只保留在数据库、API 内部字段与日志中，不得直接渲染到页面或飞书；历史 receipt 也由 BI 展示层即时翻译，不要求改写审计数据。
+
+飞书：复用 `lark-cli im +messages-send` 的现有通知身份，但仅发送需要立即处理的事项；普通事件按 receipt 幂等，官方无事件 ID 的授权重签按 10 分钟时间桶去重，不恢复已暂停的问数服务。消息正文直接给出业务影响和下一步，不使用“原因：英文代码”“处理原则”之类机器话。详情与普通事件留在 BI，避免刷屏。
 
 开放平台在保存订阅或执行“消息测试”时，可能发送 App 签名有效但 openKey 不属于任何正式店铺的技术样例。只有 App 本身能唯一映射到一个店铺时才接收这类投递，并标记 `appScopedOnly + deliveryScope=app_only + P3`。该标记必须从 ingress 持久化到 worker：技术样例只保留审计 receipt，不运行商品/订单/退货 handler、不产生 gate、不修改运营任务、不发飞书。正常 BI summary/timeline 默认过滤它们；只有显式 `includeTechnical=true` 的审计调用可读取。
 

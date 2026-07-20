@@ -66,6 +66,7 @@ const tests = [
   'scripts/test_shein_webhook_handlers.mjs',
   'scripts/test_shein_webhook_order_return_sync.mjs',
   'scripts/test_shein_webhook_service.mjs',
+  'scripts/test_notify_sync_issue.mjs',
   'scripts/test_shein_webhook_portal_contract.mjs',
   'scripts/test_bi_webhook_frontend.mjs',
   'scripts/test_link_ops_json_repository.mjs',

@@ -1,7 +1,7 @@
-# SHEIN BI / Ops 2026.07.20.1 发布说明
+# SHEIN BI / Ops 2026.07.20.2 发布说明
 
 发布日期：2026-07-20
-范围：SHEIN OpenAPI Webhook 第一阶段、BI“平台动态”、订单/退货按单增量、授权/额度安全闸门、P0 飞书摘要
+范围：SHEIN OpenAPI Webhook 第一阶段、BI“平台动态”、订单/退货按单增量、授权/额度安全闸门、飞书重要提醒、人话展示修正
 
 ## 发布结论
 
@@ -46,9 +46,10 @@ BI 新增独立“平台动态”子页面，普通状态变化不再塞入首�
 ## 界面
 
 - 顶部导航新增“平台动态”独立入口。
-- 展示最近 24 小时、待处理、失败、P0 和最后接收时间。
-- 支持店铺、级别、事件类型和处理状态筛选。
-- 页面只使用规范化业务字段，并沿用 `bi_session + readStores` 权限；SQL 再做一次店铺范围限制。
+- 展示近 24 小时通知、系统处理中、处理失败、近 24 小时需处理和最后接收时间。
+- 支持店铺、重要程度、业务内容和系统处理结果筛选；筛选值也使用运营能理解的中文。
+- 时间线只展示“发生了什么、系统做了什么、是否需要处理”。`P0/P1/P3`、`succeeded`、事件编号、内部 action state、数字平台状态和英文分类原因不再直接展示；历史 receipt 无需改库，也会在页面即时翻译。
+- 页面沿用 `bi_session + readStores` 权限；SQL 再做一次店铺范围限制。
 - 正常“平台动态”摘要与时间线默认排除 `appScopedOnly` 技术验证记录；技术记录仍保留在数据库并可由明确的审计调用读取，避免把订阅调试样例展示成业务动态。
 
 ## 发布与验收
@@ -66,12 +67,14 @@ BI 新增独立“平台动态”子页面，普通状态变化不再塞入首�
 - 正式回调已切到标准 443。HAProxy 对 `sa.dushengyi.cc` 的 TLS 分支增加 Cloudflare 直接来源约束并继续保留 SSH-over-443；Caddy 10443 只在该受控上游后使用 Cloudflare 原始来源头，Nginx 仍执行 SHEIN 官方推送 IP allowlist。受限 8443 回退入口继续保留，但不再写入开放平台回调配置。
 - 使用生产 App 凭据在服务器本机生成 AES 密文与官方 HMAC 签名，向事件 `3000910` 发送唯一 P3 合成回调：入口返回 200、异步 receipt 进入 `succeeded`、worker `failed=0`；测试 receipt 随后按唯一业务键删除，剩余 0。该事件不触发飞书、不调用 SHEIN 写接口。
 - 实测数据库隔离：`shein_webhook_ops` 原始修改订单事实表、读取 `ops.link_ops_*` 均被拒绝；`shein_link_ops` 读取 receipt 密文、直接修改 gate 均被拒绝；worker 仅保留两个受控 apply 函数执行权。
-- 本轮完整 `npm test` 为 104/104；4 个变更运行文件与本地候选 SHA-256 一致，生产 HAProxy 配置与仓库模板一致。漏装的 catalog executor 闸门版本和修复后的角色配置脚本已单独热补，并把旧文件保存到此前备份的 `app-final-hotfix` 子目录。
-- 飞书问数服务已复核为 `disabled + inactive`；普通/P1/P3 事件不会发飞书，只有 P0 使用稳定幂等键发送摘要。
+- 本轮完整 `npm test` 为 105/105；本次人话修正的 6 个生产文件与本地候选 SHA-256 一致，生产 HAProxy 配置与仓库模板一致。漏装的 catalog executor 闸门版本和修复后的角色配置脚本已单独热补，并把旧文件保存到此前备份的 `app-final-hotfix` 子目录。
+- 飞书问数服务已复核为 `disabled + inactive`；普通平台动态不会发飞书，只有需要立即处理的事项使用稳定幂等键发送。消息只给业务影响和下一步，不再暴露优先级代码、数字状态或英文原因。
 - 部署中发现系统 `/usr/lib` 原有元数据为 `sheinops:sheinops 0750`。纠正所有者后曾短暂形成 `root:root 0750`，导致普通 SSH shell 无法执行；已通过腾讯云执行命令恢复为 `root:root 0755`，随后验证 SSH、sudo、Caddy reload 及全部核心服务正常，全程未重启主机。共享 secrets 目录保持 `root:sheinops 0750`，Webhook 独立环境文件为 `root:root 0600`。
 - 2026-07-20 已完成 19/19 个半托管 App 的正式/测试回调审核，目标均为标准 443 URL，最新记录均为审核通过；每店允许的 10 类事件均逐项订阅并回读为 10/10。CX 的官方“消息测试”已成功发送并由 receiver/worker 正常接收。
 - 全店订阅验证共形成 190 条技术 receipt，最终全部为 `succeeded + P3 + appScopedOnly`，队列、失败、dead-letter、P0、业务 gate、合成订单/退货行和飞书发送均为 0。验证期间发现 worker 曾在重新解密时丢失隔离标记，导致样例短暂误触发 28 个 gate、14 个退货 header/14 个 item，并实际发送 74 条飞书高优先级测试消息；根因修复后已精确回滚数据库副作用、撤回全部 74 条消息并发送一次更正说明，不删除 190 条审计 receipt。
-- 隔离上线后又真实收到 NM、MZ 两条订单事件，均完成按单入仓并在 BI“平台动态”展示；页面当前为 2 条业务事件、待处理 0、失败 0、P0 0，且不显示 190 条技术验证记录。
+- 隔离上线后最先真实收到 NM、MZ 两条订单事件，均完成按单入仓并在 BI“平台动态”展示；上线初验时为 2 条业务事件、待处理 0、失败 0、P0 0，且不显示 190 条技术验证记录。
+- 2026-07-20 19:02 完成人话修正热部署。生产 BI 已用现有 QH 订单 `GSH18B08T00NTCR` 回读为“QH 店：订单已同步 / 已处理 / 已同步到 BI，无需人工处理”，页面中不再出现 `P3`、`succeeded`、`3001442`、英文分类原因或内部 action state；14 条真实订单动态均正常显示，页面错误数为 0。Webhook 与 Portal 服务均为 `active`，worker 健康且失败数为 0；未发送测试飞书消息，飞书模板由确定性测试验证。
 - 本轮关键备份：`/srv/shein-bi/backups/webhook-trusted-proxy-20260720-165027`、`/srv/shein-bi/backups/webhook-worker-quarantine-20260720-173224`、`/srv/shein-bi/backups/webhook-subscription-fixture-remediation-20260720-173325`、`/srv/shein-bi/backups/webhook-final-rollout-20260720-175338`。生产 `shein-bi-webhook.service` 保持 `active + enabled`、worker 正常轮询；飞书问数服务与 Codex `shein-webhook` 续跑任务继续保持暂停。
+- 本次人话修正回滚备份：`/srv/shein-bi/backups/webhook-human-copy-20260720-190110`。
 
 详细运行与回滚边界见 [SHEIN Webhook 接收与平台动态](shein-webhook-receiver-design.md)。

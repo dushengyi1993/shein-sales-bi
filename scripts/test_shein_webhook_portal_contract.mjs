@@ -66,7 +66,8 @@ assert.match(service, /^PrivateTmp=true$/m);
 assert.doesNotMatch(service, /lark_sales_qa_bot|shein-bi-lark-sales-qa/);
 assert.doesNotMatch(webhookServer, /createConfiguredLinkOpsStoreGateway|linkOpsGateway/, 'webhook DB role must not touch mutable link-ops tables');
 assert.match(notifier, /isWebhook/);
-assert.match(notifier, /详情与普通动态请到 BI「平台动态」查看/);
+assert.match(notifier, /SHEIN 平台发来一项需要人工处理的变化/);
+assert.doesNotMatch(notifier, /详情与普通动态请到 BI「平台动态」查看|该消息仅用于平台高优先级异常/);
 assert.match(notifier, /if \(!isWebhook && !res\.ok/);
 
 for (const sql of [migration, schema]) {

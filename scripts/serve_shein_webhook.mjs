@@ -20,7 +20,7 @@ import {
   loadSheinWebhookCredentialRegistry,
 } from '../lib/shein_webhook_config.mjs';
 import {createSheinWebhookRepository} from '../lib/shein_webhook_repository.mjs';
-import {createSheinWebhookEventProcessor} from '../lib/shein_webhook_handlers.mjs';
+import {createSheinWebhookEventProcessor, humanizeSheinWebhookEvent} from '../lib/shein_webhook_handlers.mjs';
 import {syncWebhookOrder, syncWebhookReturn} from '../lib/shein_webhook_order_return_sync.mjs';
 import {createWarehousePgPool, withPgClient} from '../lib/warehouse_pg.mjs';
 
@@ -400,9 +400,10 @@ export function createSheinWebhookService({
       let alertError = null;
       if (severity.severity === 'P0' && !receipt.alertedAt && notifier?.notify) {
         assertLease();
+        const alertCopy = humanizeSheinWebhookEvent(normalized, severity);
         const alertOutcome = {
-          title: `${receipt.storeKey} ${normalized.eventLabel || 'SHEIN 平台高优先级动态'}`,
-          summary: [normalized.businessId ? `业务单号 ${normalized.businessId}` : '', normalized.status ? `状态 ${normalized.status}` : '', severity.reason ? `原因 ${severity.reason}` : ''].filter(Boolean).join('；') || '平台推送了需要立即关注的异常。',
+          title: alertCopy.title,
+          summary: alertCopy.summary,
           actionState: 'p0_alert',
         };
         try {

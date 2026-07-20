@@ -40,8 +40,7 @@ function parseArgs(argv) {
   return args;
 }
 
-function bjDateTime() {
-  const now = new Date();
+function bjDateTime(now = new Date()) {
   const bj = new Date(now.getTime() + 8 * 3600_000);
   return bj.toISOString().replace('T', ' ').slice(0, 19);
 }
@@ -74,6 +73,29 @@ function idempotencyKey(parts) {
   return `sync-issue-${hash}`;
 }
 
+export function buildSyncIssueMessage({isWebhook = false, title, failed = [], loginRequired = [], message = '', logFile = '', now = new Date()} = {}) {
+  if (isWebhook) {
+    return [
+      `🚨 ${title}`,
+      '',
+      message || 'SHEIN 平台发来一项需要人工处理的变化。',
+      '',
+      `时间：${bjDateTime(now)}`,
+    ].join('\n');
+  }
+  return [
+    `⚠️ ${title}`,
+    '',
+    failed.length ? `失败店铺：${failed.join('、')}` : '',
+    loginRequired.length ? `疑似登录态/验证问题：${loginRequired.join('、')}` : '',
+    message ? `原因：${message}` : '',
+    logFile ? `日志：${logFile}` : '',
+    '',
+    '处理原则：已成功店铺的数据继续同步；BI 会尽量刷新可用数据，不因单店失败整条中断。',
+    `提醒时间：${bjDateTime(now)}`,
+  ].filter(Boolean).join('\n');
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const failed = splitStores(args.failedStores);
@@ -93,19 +115,7 @@ async function main() {
   const title = args.title || (isWebhook
     ? `SHEIN 平台高优先级动态：${modeLabel}`
     : `SHEIN 同步异常提醒：${date} ${modeLabel}`);
-  const text = [
-    `${isWebhook ? '🚨' : '⚠️'} ${title}`,
-    '',
-    failed.length ? `失败店铺：${failed.join('、')}` : '',
-    loginRequired.length ? `疑似登录态/验证问题：${loginRequired.join('、')}` : '',
-    args.message ? `原因：${args.message}` : '',
-    args.logFile ? `日志：${args.logFile}` : '',
-    '',
-    isWebhook
-      ? '处理原则：该消息仅用于平台高优先级异常；详情与普通动态请到 BI「平台动态」查看。'
-      : '处理原则：已成功店铺的数据继续同步；BI 会尽量刷新可用数据，不因单店失败整条中断。',
-    `提醒时间：${bjDateTime()}`,
-  ].filter(Boolean).join('\n');
+  const text = buildSyncIssueMessage({isWebhook, title, failed, loginRequired, message: args.message, logFile: args.logFile});
 
   await fs.mkdir(OUT_DIR, {recursive: true});
   const stamp = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
@@ -150,7 +160,9 @@ async function main() {
   if (!res.ok) process.exitCode = 1;
 }
 
-main().catch(err => {
-  console.error(err?.stack || String(err));
-  process.exitCode = 1;
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(err => {
+    console.error(err?.stack || String(err));
+    process.exitCode = 1;
+  });
+}

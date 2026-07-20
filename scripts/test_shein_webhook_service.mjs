@@ -114,13 +114,16 @@ const worker = createSheinWebhookService({
   repository: workerRepository,
   credentialRegistry: registry,
   eventProcessor: {process: async receipt => (workerCalls.push(['gate-processed', receipt.id]), {title: 'AA 授权异常', summary: '请处理', businessKey: receipt.normalized.businessId || '', actionState: 'authorization_gate_blocked'})},
-  notifier: {notify: async input => workerCalls.push(['notify', input.receipt.id])},
+  notifier: {notify: async input => workerCalls.push(['notify', input.receipt.id, input.outcome])},
   workerEnabled: false,
   workerId: 'worker-test',
   logger: {warn() {}, error() {}},
 });
 await worker.processOne();
 assert.equal(workerCalls.find(row => row[0] === 'notify')?.[1], '9');
+assert.equal(workerCalls.find(row => row[0] === 'notify')?.[2]?.title, 'AA 店：店铺授权需要处理');
+assert.match(workerCalls.find(row => row[0] === 'notify')?.[2]?.summary || '', /系统已暂停该店的自动操作/);
+assert.doesNotMatch(JSON.stringify(workerCalls.find(row => row[0] === 'notify')?.[2] || {}), /P0|3001503|authorization_exception|状态/);
 assert.equal(workerCalls.find(row => row[0] === 'alerted')?.[2]?.workerId, 'worker-test');
 assert.equal(workerCalls.find(row => row[0] === 'processed')?.[2]?.workerId, 'worker-test');
 assert.ok(workerCalls.findIndex(row => row[0] === 'gate-processed') < workerCalls.findIndex(row => row[0] === 'notify'), 'risk gate must close before Feishu notification starts');
