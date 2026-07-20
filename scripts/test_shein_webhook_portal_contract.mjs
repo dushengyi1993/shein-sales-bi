@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 
-const [portal, webhookServer, writeGate, productExecutor, maintenanceExecutor, nginx, caddy, service, notifier, migration, schema] = await Promise.all([
+const [portal, webhookServer, writeGate, productExecutor, maintenanceExecutor, nginx, caddy, haproxy, service, notifier, migration, schema] = await Promise.all([
   fs.readFile(new URL('./serve_bi_portal.mjs', import.meta.url), 'utf8'),
   fs.readFile(new URL('./serve_shein_webhook.mjs', import.meta.url), 'utf8'),
   fs.readFile(new URL('../lib/shein_webhook_write_gate.mjs', import.meta.url), 'utf8'),
@@ -10,6 +10,7 @@ const [portal, webhookServer, writeGate, productExecutor, maintenanceExecutor, n
   fs.readFile(new URL('./link_ops_maintenance_openapi_executor.mjs', import.meta.url), 'utf8'),
   fs.readFile(new URL('../infra/nginx/shein-bi.conf', import.meta.url), 'utf8'),
   fs.readFile(new URL('../infra/caddy/Caddyfile.shein-bi', import.meta.url), 'utf8'),
+  fs.readFile(new URL('../infra/haproxy/haproxy-ssh-https.cfg', import.meta.url), 'utf8'),
   fs.readFile(new URL('../infra/systemd/shein-bi-webhook.service', import.meta.url), 'utf8'),
   fs.readFile(new URL('./notify_sync_issue.mjs', import.meta.url), 'utf8'),
   fs.readFile(new URL('../infra/warehouse/migrations/20260719_001_shein_webhook_runtime.sql', import.meta.url), 'utf8'),
@@ -41,9 +42,16 @@ assert.match(nginx, /proxy_connect_timeout 250ms;/);
 assert.match(nginx, /proxy_read_timeout 1400ms;/);
 
 assert.match(caddy, /https:\/\/sa\.dushengyi\.cc:8443/);
+assert.match(caddy, /https:\/\/sa\.dushengyi\.cc:10443/);
 assert.match(caddy, /path \/api\/shein\/webhook\/v1\/events/);
 assert.match(caddy, /remote_ip 173\.245\.48\.0\/20/);
 assert.match(caddy, /header_up X-Real-IP \{http\.request\.header\.CF-Connecting-IP\}/);
+assert.match(haproxy, /acl is_shein_bi_sni req\.ssl_sni -i sa\.dushengyi\.cc/);
+assert.match(haproxy, /acl is_cloudflare src 173\.245\.48\.0\/20/);
+const proxyReject = haproxy.indexOf('tcp-request content reject if is_tls is_shein_bi_sni !is_cloudflare');
+const proxyTlsAccept = haproxy.indexOf('tcp-request content accept if is_tls');
+assert.ok(proxyReject >= 0 && proxyTlsAccept > proxyReject, 'Cloudflare/SNI reject must run before TLS acceptance');
+assert.doesNotMatch(haproxy, /tcp-request content accept if \{ req\.len gt 0 \}/, 'partial first bytes must not bypass TLS SNI inspection');
 
 assert.match(service, /^User=sheinops$/m);
 assert.match(service, /^Environment=SHEIN_WEBHOOK_HOST=127\.0\.0\.1$/m);

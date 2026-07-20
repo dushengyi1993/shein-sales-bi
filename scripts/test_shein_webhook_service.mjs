@@ -1,11 +1,15 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import {createSheinWebhookService, createWebhookPgScriptExecutor, webhookAlertIdempotencyKey, webhookSeverityCode} from './serve_shein_webhook.mjs';
+import {createSheinWebhookService, createWebhookPgScriptExecutor, resolveIncomingWebhookEventCode, webhookAlertIdempotencyKey, webhookSeverityCode} from './serve_shein_webhook.mjs';
 
 assert.equal(webhookSeverityCode({severity: 'P0'}), 'P0');
 assert.equal(webhookSeverityCode({severity: {severity: 'P0', notifyFeishu: true}}), 'P0');
 assert.equal(webhookSeverityCode({severity: {severity: 'P3'}}), 'P3');
+assert.equal(resolveIncomingWebhookEventCode('product_document_receive_status_notice'), '3000910');
+assert.equal(resolveIncomingWebhookEventCode('/product_document_receive_status_notice'), '3000910');
+assert.equal(resolveIncomingWebhookEventCode('3000910'), '3000910');
+assert.equal(resolveIncomingWebhookEventCode('unknown_event'), '');
 const authorizationAlert = {eventCode: '3001503', storeKey: 'AA', receivedAt: '2026-07-19T00:01:00.000Z', normalized: {eventFamily: 'authorization', status: '1', businessId: 'supplier-1'}};
 assert.equal(webhookAlertIdempotencyKey(authorizationAlert), webhookAlertIdempotencyKey({...authorizationAlert, idempotencyKey: 'different', receivedAt: '2026-07-19T00:09:59.000Z'}), 're-signed authorization retries in one time bucket must not spam Feishu');
 assert.notEqual(webhookAlertIdempotencyKey(authorizationAlert), webhookAlertIdempotencyKey({...authorizationAlert, receivedAt: '2026-07-19T00:11:00.000Z'}), 'a later authorization occurrence may alert again');
@@ -33,13 +37,14 @@ const service = createSheinWebhookService({repository, credentialRegistry: regis
 const address = await service.start({host: '127.0.0.1', port: 0});
 const timestamp = '1700000000000';
 const eventData = encrypt({orderNo: 'O-1', changeTime: '2026-07-19 12:00:00'});
-const headers = {'content-type': 'application/json', 'x-lt-appid': 'app-1', 'x-lt-openkeyid': 'open-1', 'x-lt-eventcode': '3001442', 'x-lt-timestamp': timestamp, 'x-lt-signature': signature(timestamp)};
+const headers = {'content-type': 'application/json', 'x-lt-appid': 'app-1', 'x-lt-openkeyid': 'open-1', 'x-lt-eventcode': 'order_push_notice', 'x-lt-timestamp': timestamp, 'x-lt-signature': signature(timestamp)};
 const url = `http://127.0.0.1:${address.port}${callbackPath}`;
 const ok = await fetch(url, {method: 'POST', headers, body: JSON.stringify({eventData})});
 assert.equal(ok.status, 200);
 assert.equal((await ok.json()).ok, true);
 assert.equal(stored.length, 1);
 assert.equal(stored[0].storeKey, 'AA');
+assert.equal(stored[0].eventCode, '3001442');
 assert.equal(stored[0].normalized.orderId, 'O-1');
 assert.equal(stored[0].severity, 'P3');
 assert.equal('appSecretKey' in stored[0], false);
@@ -119,6 +124,38 @@ assert.equal(workerCalls.find(row => row[0] === 'notify')?.[1], '9');
 assert.equal(workerCalls.find(row => row[0] === 'alerted')?.[2]?.workerId, 'worker-test');
 assert.equal(workerCalls.find(row => row[0] === 'processed')?.[2]?.workerId, 'worker-test');
 assert.ok(workerCalls.findIndex(row => row[0] === 'gate-processed') < workerCalls.findIndex(row => row[0] === 'notify'), 'risk gate must close before Feishu notification starts');
+
+const appScopedCalls = [];
+const appScopedWorker = createSheinWebhookService({
+  repository: {
+    ...workerRepository,
+    claimNext: async () => ({
+      ...claim,
+      id: '90',
+      attempt: 1,
+      severity: 'P3',
+      alertedAt: null,
+      normalized: {appScopedOnly: true, deliveryScope: 'subscription_validation'},
+    }),
+    markProcessed: async (id, input) => appScopedCalls.push(['processed', id, input]),
+  },
+  credentialRegistry: registry,
+  eventProcessor: {process: async receipt => {
+    appScopedCalls.push(['process', receipt]);
+    return {title: 'AA Webhook 应用级验证', summary: 'no-op', businessKey: '', actionState: 'app_scoped_event_recorded'};
+  }},
+  notifier: {notify: async () => appScopedCalls.push(['notify'])},
+  workerEnabled: false,
+  workerId: 'worker-test',
+  logger: {warn() {}, error() {}},
+});
+await appScopedWorker.processOne();
+const scopedWorkItem = appScopedCalls.find(row => row[0] === 'process')?.[1];
+assert.equal(scopedWorkItem?.normalized?.appScopedOnly, true, 'worker must preserve the persisted app-only quarantine marker');
+assert.equal(scopedWorkItem?.normalized?.deliveryScope, 'subscription_validation');
+assert.equal(scopedWorkItem?.severity?.severity, 'P3');
+assert.equal(appScopedCalls.some(row => row[0] === 'notify'), false, 'quarantined validation deliveries must never alert');
+assert.equal(appScopedCalls.find(row => row[0] === 'processed')?.[2]?.normalized?.appScopedOnly, true);
 
 claim = {...claim, id: '10', severity: 'P3', attempt: 2};
 const failingWorker = createSheinWebhookService({

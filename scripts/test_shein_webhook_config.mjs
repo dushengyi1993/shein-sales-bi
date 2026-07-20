@@ -14,9 +14,14 @@ const registry = await loadSheinWebhookCredentialRegistry({config: {
 
 assert.deepEqual(registry.summary, {appCount: 2, storeCount: 3, configFile: ''});
 assert.equal(registry.resolve({'x-lt-appid': 'app-bb'}).storeKey, 'BB');
+assert.equal(registry.resolve({'x-lt-appid': 'app-bb'}).identityScope, 'app_only');
+assert.equal(registry.resolve({'x-lt-appid': 'app-bb', 'x-lt-openkeyid': 'synthetic-test-open-key'}).storeKey, 'BB');
+assert.equal(registry.resolve({'x-lt-appid': 'app-bb', 'x-lt-openkeyid': 'synthetic-test-open-key'}).identityScope, 'app_only');
 assert.equal(registry.resolve({'x-lt-appid': 'app-shared', 'x-lt-openkeyid': 'open-aa'}).storeKey, 'AA');
+assert.equal(registry.resolve({'x-lt-appid': 'app-shared', 'x-lt-openkeyid': 'open-aa'}).identityScope, 'store');
 assert.equal(registry.resolve({'x-lt-openkeyid': 'open-cc'}).appId, 'app-shared');
 assert.throws(() => registry.resolve({'x-lt-appid': 'app-shared'}), /multiple stores/);
+assert.throws(() => registry.resolve({'x-lt-appid': 'app-shared', 'x-lt-openkeyid': 'synthetic-test-open-key'}), /multiple stores/);
 assert.throws(() => registry.resolve({'x-lt-appid': 'app-bb', 'x-lt-openkeyid': 'open-aa'}), /mismatch/);
 assert.throws(() => registry.resolve({'x-lt-appid': 'unknown'}), /Unknown/);
 assert.equal(JSON.stringify(registry.summary).includes('secret'), false);

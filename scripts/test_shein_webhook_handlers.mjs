@@ -41,6 +41,10 @@ const processor = createSheinWebhookEventProcessor({
 });
 
 const base = {id: 1, idempotencyKey: 'a'.repeat(64), severity: {severity: 'P3', notifyFeishu: false}};
+const appScoped = await processor.process({...base, normalized: {appScopedOnly: true, eventFamily: 'authorization', eventCode: '3001503', eventLabel: '授权', storeKey: 'AA'}, payload: {type: 6}});
+assert.equal(appScoped.actionState, 'app_scoped_event_recorded');
+assert.equal(gates.length, 0, 'an app-only validation delivery must not change store gates');
+assert.equal(syncCalls.length, 0, 'an app-only validation delivery must not sync orders or returns');
 assert.equal((await processor.process({...base, normalized: {eventFamily: 'order', eventCode: '3001442', eventLabel: '订单', storeKey: 'AA', orderId: 'O-1', businessId: 'O-1'}, payload: {orderNo: 'O-1'}})).actionState, 'order_warehouse_synced');
 assert.equal((await processor.process({...base, normalized: {eventFamily: 'return', eventCode: '3000914', eventLabel: '退货', storeKey: 'AA', returnId: 'R-1', businessId: 'R-1'}, payload: {returnOrderNo: 'R-1'}})).actionState, 'return_warehouse_synced');
 assert.deepEqual(syncCalls, [

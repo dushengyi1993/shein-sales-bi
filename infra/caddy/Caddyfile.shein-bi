@@ -18,8 +18,10 @@ https://sa.dushengyi.cc:10443 {
 		protocols tls1.2 tls1.3
 	}
 	reverse_proxy 127.0.0.1:8080 {
-		header_up X-Real-IP {remote_host}
-		header_up X-Forwarded-For {remote_host}
+		# HAProxy rejects non-Cloudflare TLS peers for this SNI, so these
+		# Cloudflare-owned headers are trusted for the original client IP.
+		header_up X-Real-IP {http.request.header.CF-Connecting-IP}
+		header_up X-Forwarded-For {http.request.header.CF-Connecting-IP}
 		header_up X-Forwarded-Proto https
 		header_up Host {host}
 	}

@@ -1,6 +1,6 @@
 # SHEIN Webhook 接收与“平台动态”运行说明
 
-> 状态：2026-07-19 已完成代码、数据库迁移、BI 子页面、P0 飞书出口和云端服务定义。真实回调是否生效，以开放平台各 App 的订阅与线上回调验收为准。
+> 状态：2026-07-20 已完成代码、数据库迁移、BI 子页面、P0 飞书出口、云端服务，以及 19/19 App 正式/测试回调和每店 10/10 事件订阅验收。
 
 ## 1. 业务目标
 
@@ -16,30 +16,31 @@ Webhook 是平台状态变化的实时触发源，不替代 OpenAPI 详情接口
 
 ```mermaid
 flowchart LR
-  A["19 个 SHEIN OpenAPI App"] -->|"HTTPS 8443"| B["Cloudflare"]
-  B --> C["Caddy 8443\n仅信任 Cloudflare 边缘来源"]
-  C --> D["Nginx\nSHEIN 官方推送 IP allowlist"]
-  D --> E["shein-bi-webhook :8792"]
-  E --> F["验签 + AES 解密 + 最小校验"]
-  F --> G["PostgreSQL 密文 receipt/queue"]
-  G -->|"持久化成功后"| H["1.5 秒内返回 200"]
-  G --> I["异步 worker 租约内解密"]
-  I --> J["商品生命周期记录"]
-  I --> K["订单/退货定向详情与 upsert"]
-  I --> L["授权/额度安全闸门"]
-  I --> M["仅 P0 飞书告警"]
-  G --> N["BI 平台动态只读 API/子页面"]
+  A["19 个 SHEIN OpenAPI App"] -->|"HTTPS 443"| B["Cloudflare"]
+  B --> C["HAProxy 443\nSNI + Cloudflare 直接来源门禁"]
+  C --> D["Caddy 10443\n受控恢复真实来源 IP"]
+  D --> E["Nginx\nSHEIN 官方推送 IP allowlist"]
+  E --> F["shein-bi-webhook :8792"]
+  F --> G["验签 + AES 解密 + 最小校验"]
+  G --> H["PostgreSQL 密文 receipt/queue"]
+  H -->|"持久化成功后"| I["1.5 秒内返回 200"]
+  H --> J["异步 worker 租约内解密"]
+  J --> K["商品生命周期记录"]
+  J --> L["订单/退货定向详情与 upsert"]
+  J --> M["授权/额度安全闸门"]
+  J --> N["仅 P0 飞书告警"]
+  H --> O["BI 平台动态只读 API/子页面"]
 ```
 
 固定回调：
 
 ```text
-POST https://sa.dushengyi.cc:8443/api/shein/webhook/v1/events
+POST https://sa.dushengyi.cc/api/shein/webhook/v1/events
 ```
 
-回调 URL 不带 query。19 个 App 可以配置同一 URL；服务依据 `x-lt-appid + x-lt-openKeyId` 映射到唯一店铺。映射不唯一、缺店、重复店铺或 App/openKey 不一致时启动/请求失败，不猜店铺。
+回调 URL 不带 query。19 个 App 可以配置同一 URL；正式业务事件依据 `x-lt-appid + x-lt-openKeyId` 映射到唯一店铺，已知跨店不一致、映射不唯一、缺店或重复店铺时失败关闭，不猜店铺。只有开放平台自身的技术探针可在 App 唯一映射时进入下述 `appScopedOnly` 隔离路径。
 
-`8443` 是 Cloudflare 支持的 HTTPS 代理端口。生产链路没有让应用直接信任客户端自报的 `CF-Connecting-IP`：UFW 只允许 Cloudflare 官方网段访问 8443，Caddy 再校验直接对端属于同一网段，随后才把 Cloudflare 覆盖写入的原始客户端 IP 传给 Nginx；Nginx 最后按 SHEIN 官方推送 IP 放行。签名仍是主校验，来源 IP 只是独立第二层。
+正式链路复用标准 443，但没有让应用直接信任客户端自报的 `CF-Connecting-IP`：HAProxy 先确认 `sa.dushengyi.cc` SNI 的直接来源属于 Cloudflare，再把 TLS 流量转到 Caddy `10443`；Caddy 只在这条受控上游后恢复 Cloudflare 写入的原始客户端 IP，Nginx 最后按 SHEIN 官方推送 IP 放行。签名仍是主校验，来源 IP 只是独立第二层。`8443` 继续作为受限故障回退，但不得写入平台正式/测试回调。
 
 ## 3. 官方协议实现
 
@@ -50,6 +51,8 @@ POST https://sa.dushengyi.cc:8443/api/shein/webhook/v1/events
 - `x-lt-appid`
 - `x-lt-timestamp`
 - `x-lt-signature`
+
+开放平台实际推送的 `x-lt-eventCode` 可能是订阅路由名（例如 `product_document_receive_status_notice`），并不总是文档目录中的数字编号。接收器将 10 个允许路由名映射到内部固定数字事件定义，同时保留数字编号兼容；未知路由仍失败关闭。
 
 请求体主要为 `multipart/form-data` 的 `eventData` 字段；考虑官方文档表述差异，接收器还兼容 JSON 和 urlencoded，但同样执行严格大小、重复字段和格式校验。
 
@@ -119,24 +122,28 @@ BI：导航新增独立“平台动态”页，提供 24 小时事件、待处�
 
 飞书：复用 `lark-cli im +messages-send` 的现有通知身份，但仅发送 P0；普通事件按 receipt 幂等，官方无事件 ID 的授权重签按 10 分钟时间桶去重，不恢复已暂停的问数服务。详情与普通事件留在 BI，避免刷屏。
 
+开放平台在保存订阅或执行“消息测试”时，可能发送 App 签名有效但 openKey 不属于任何正式店铺的技术样例。只有 App 本身能唯一映射到一个店铺时才接收这类投递，并标记 `appScopedOnly + deliveryScope=app_only + P3`。该标记必须从 ingress 持久化到 worker：技术样例只保留审计 receipt，不运行商品/订单/退货 handler、不产生 gate、不修改运营任务、不发飞书。正常 BI summary/timeline 默认过滤它们；只有显式 `includeTechnical=true` 的审计调用可读取。
+
 ## 8. 部署与验收
 
 1. 先备份生产应用、当前生效的 Nginx 站点（现网为 `/etc/nginx/sites-available/shein-bi`）、`/etc/caddy/Caddyfile`、现有 unit 和相关数据库 ACL 快照；生产应用工作树有运行态改动时只上传本版本精确文件，禁止 `git pull/reset/clean`。
 2. 以 root 运行 `scripts/provision_shein_webhook_postgres_role.sh` 创建/收紧 `shein_webhook_ops`（LOGIN、NOSUPERUSER、NOCREATEDB、NOCREATEROLE、NOINHERIT、NOREPLICATION）；随机密码仅写 `/srv/shein-bi/secrets/webhook-warehouse.env` 的 `SHEIN_WAREHOUSE_PG_PASSWORD`，文件 `root:root 0600`，不得复用 `portal-warehouse.env` 或 `shein_link_ops` 密码。随后以数据库 owner 执行 `infra/warehouse/migrations/20260719_001_shein_webhook_runtime.sql`。
 3. 权限验收必须同时证明：`shein_webhook_ops` 可写 receipt/gate、只读回读五张事实表并调用两个 scoped/versioned apply 函数，但事实表原始 INSERT/UPDATE/DELETE、底层 prepare 函数与 `ops.link_ops_*` 查询被拒绝；`shein_link_ops` 只能 SELECT receipt/gate 安全列并调用授权恢复函数，读取 `event_data`、任意 UPDATE gate 与修改订单/退货事实均被 PostgreSQL 拒绝。
-4. 安装 `infra/systemd/shein-bi-webhook.service` 与 Nginx 配置。**只把** `infra/caddy/Caddyfile.shein-bi` 中 8443 callback 站点合并到生产完整 Caddyfile，禁止用仓库子集覆盖生产其他域名。
-5. UFW 仅允许 Cloudflare 官方 IPv4/IPv6 网段访问 `8443/tcp`，不对全网开放；依次执行 `caddy validate`、`nginx -t`、`systemd-analyze verify` 后才 reload/start。
+4. 安装 `infra/systemd/shein-bi-webhook.service` 与 Nginx 配置。标准 443 回调要同时核对 `infra/haproxy/haproxy-ssh-https.cfg` 和 `infra/caddy/Caddyfile.shein-bi`：HAProxy 必须保留 SSH-over-443 并只允许 Cloudflare 直接来源进入目标 SNI 的 HTTPS backend；禁止用仓库配置子集覆盖生产其他域名或 SSH 分流。
+5. 依次执行 `haproxy -c`、`caddy validate`、`nginx -t`、`systemd-analyze verify` 后才 reload/start；从 Cloudflare、HAProxy、Caddy、Nginx 到 receiver 逐跳验证真实来源 IP 和拒绝路径。受限 `8443` 回退继续沿用 Cloudflare 网段防火墙规则，不对全网开放。
 6. 验证 `http://127.0.0.1:8792/healthz`、数据库队列、BI 页面与来源 IP 拒绝路径；确认 `shein-bi-lark-sales-qa.service` 仍为 `disabled + inactive`。
 
-开放平台侧要在每个 App 中配置 `https://sa.dushengyi.cc:8443/api/shein/webhook/v1/events`、订阅上述 10 个事件，并用官方调试工具产生真实加密推送。验收标准：回调 2xx、receipt 唯一、worker 成功、BI 可见；再分别验证订单定向入仓、授权闸门和一条受控 P0 飞书消息。开放平台尚未审核/启用订阅时，只能称“接收端已就绪”，不能称“真实回调已上线”。
+开放平台侧要在每个 App 中配置 `https://sa.dushengyi.cc/api/shein/webhook/v1/events`，正式/测试回调都回读到审核通过，再逐项订阅上述 10 个事件。平台订阅/调试样例的验收标准是回调 2xx、receipt 唯一、worker 成功且保持 `appScopedOnly + P3`，不得以技术样例验证真实业务 handler。订单定向入仓、授权/额度闸门和 P0 飞书仍要用受控的业务级测试或真实事件单独验收。
+
+2026-07-20 生产回读：19/19 App 的正式/测试回调均审核通过，事件订阅均为 10/10；CX 官方消息测试成功。全店 190 条订阅验证 receipt 全部 `succeeded + P3 + appScopedOnly`，业务 gate、合成订单/退货行、飞书告警均为 0。上线过程中曾发现 worker 重建规范化对象时丢失隔离标记，造成测试样例短暂副作用；修复后已精确回滚 28 个 gate、14 个退货 header/14 个 item，撤回实际发送的 74 条飞书测试消息，并保留 190 条 receipt 作为审计证据。
 
 官方文档提供了事件 payload 样例，但没有发布可独立核对的签名/密文 golden vector；本地密码学测试因此是协议公式与 round-trip 门禁，不能冒充官方向量。上线验收还必须用真实 App secret 发送一次不打印明文/密钥的有效合成请求，并清理测试 receipt，再用平台官方调试推送完成最终证明。
 
 ## 9. 回滚顺序
 
 1. `systemctl disable --now shein-bi-webhook.service`，先停止接收与 worker；不要删除既有 receipt，它们是审计证据。
-2. 恢复本次部署前备份的 `/etc/nginx/sites-available/shein-bi`，从完整 `/etc/caddy/Caddyfile` 移除/恢复本次 8443 block；分别 `nginx -t`、`caddy validate` 后 reload。
-3. 按部署记录逐条删除本次 UFW Cloudflare `8443/tcp` 规则，确认公网 8443 不再监听/放行。
+2. 恢复本次部署前备份的 `/etc/haproxy/haproxy.cfg`、`/etc/caddy/Caddyfile` 与 `/etc/nginx/sites-available/shein-bi`；分别执行 `haproxy -c`、`caddy validate`、`nginx -t` 后 reload，确认 SSH-over-443 未受影响。
+3. 若同时回滚受限 `8443` 故障入口，再按部署记录逐条删除对应 Cloudflare 防火墙规则并确认不再监听/放行；不要把 8443 误当正式平台回调继续保留。
 4. 恢复备份的 Portal unit 与精确应用文件，`systemctl daemon-reload` 后重启 Portal；再次确认飞书问数仍为 `disabled + inactive`。
 5. `ALTER ROLE shein_webhook_ops NOLOGIN` 并撤销它对 webhook/fact 表与受控函数的权限；专用 secret 文件先归档到仅 root 可读备份，确认无需重放后再销毁。若上线前 ACL 快照显示 migration 之外还发生过权限变化，按快照逐项恢复，禁止猜测式 `GRANT ALL`。
 6. 数据表默认保留。只有 receipt/gate 已为空、审计已导出且负责人明确批准，才允许单独迁移删除；不得为了“回滚干净”直接 DROP 生产证据。

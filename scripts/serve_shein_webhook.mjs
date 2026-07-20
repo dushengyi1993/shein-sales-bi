@@ -26,7 +26,21 @@ import {createWarehousePgPool, withPgClient} from '../lib/warehouse_pg.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CALLBACK_PATH = '/api/shein/webhook/v1/events';
-const EVENT_CODES = new Set(SUPPORTED_WEBHOOK_EVENTS.map(row => row.eventCode));
+const EVENT_CODE_BY_HEADER = new Map(SUPPORTED_WEBHOOK_EVENTS.flatMap(row => [
+  [String(row.eventCode), String(row.eventCode)],
+  [String(row.eventPath).replace(/^\/+/, '').toLowerCase(), String(row.eventCode)],
+]));
+
+/**
+ * SHEIN sends the route-style event name in `x-lt-eventCode` (for example
+ * `product_document_receive_status_notice`).  Internally we keep the stable
+ * numeric document id used by the catalog, handlers, and warehouse rows.
+ * Numeric values remain accepted for existing deterministic probes.
+ */
+export function resolveIncomingWebhookEventCode(value) {
+  const normalized = String(value || '').trim().replace(/^\/+/, '').toLowerCase();
+  return EVENT_CODE_BY_HEADER.get(normalized) || '';
+}
 
 function positiveInt(value, fallback, {min = 1, max = Number.MAX_SAFE_INTEGER} = {}) {
   const parsed = Number(value);
@@ -235,11 +249,21 @@ export function createSheinWebhookService({
       if (!payload || (typeof payload !== 'object' && typeof payload !== 'string') || Array.isArray(payload)) {
         throw Object.assign(new Error('Webhook payload must be a JSON object or an official JSON-string wrapper'), {statusCode: 400});
       }
-      const eventCode = String(headers['x-lt-eventcode'] || '').trim();
-      if (!EVENT_CODES.has(eventCode)) throw Object.assign(new Error('Unsupported SHEIN webhook event code'), {statusCode: 400, code: 'WEBHOOK_EVENT_UNSUPPORTED'});
+      const eventCode = resolveIncomingWebhookEventCode(headers['x-lt-eventcode']);
+      if (!eventCode) throw Object.assign(new Error('Unsupported SHEIN webhook event code'), {statusCode: 400, code: 'WEBHOOK_EVENT_UNSUPPORTED'});
       const receivedAt = new Date(now()).toISOString();
-      const normalizedBase = normalizeWebhookBusinessEvent({eventCode, payload, storeKey: identity.storeKey, receivedAt});
-      const severity = classifyWebhookSeverity({normalizedEvent: normalizedBase});
+      const appScopedOnly = identity.identityScope === 'app_only';
+      const normalizedBase = {
+        ...normalizeWebhookBusinessEvent({eventCode, payload, storeKey: identity.storeKey, receivedAt}),
+        ...(appScopedOnly ? {appScopedOnly: true, deliveryScope: 'app_only'} : {}),
+      };
+      // Subscription validation and the official debug tool use an app-signed
+      // synthetic openKeyId.  Record those deliveries for end-to-end audit,
+      // but never let an app-only identity close a store gate, sync an order,
+      // mutate an Ops task, or send a P0 alert.
+      const severity = appScopedOnly
+        ? {severity: 'P3', reason: 'app_scoped_delivery', notifyFeishu: false}
+        : classifyWebhookSeverity({normalizedEvent: normalizedBase});
       const normalized = {...normalizedBase, severityReason: severity.reason, notifyFeishu: severity.notifyFeishu};
       const idempotencyKey = computeWebhookIdempotencyKey({headers, eventCode, payload, eventData, businessId: normalized.businessId, platformTimestamp: headers['x-lt-timestamp']});
       const cipherHash = crypto.createHash('sha256').update(eventData, 'utf8').digest('hex');
@@ -260,8 +284,10 @@ export function createSheinWebhookService({
           eventData,
           normalized,
           severity: severity.severity,
-          title: `${identity.storeKey} ${normalized.eventLabel}`,
-          summary: normalized.businessId ? `业务单号 ${normalized.businessId}` : '平台事件已可靠接收，等待异步处理。',
+          title: appScopedOnly ? `${identity.storeKey} Webhook 应用级验证` : `${identity.storeKey} ${normalized.eventLabel}`,
+          summary: appScopedOnly
+            ? '签名与接收链路验证通过；未携带已授权店铺 OpenKey，不执行任何业务动作。'
+            : normalized.businessId ? `业务单号 ${normalized.businessId}` : '平台事件已可靠接收，等待异步处理。',
           businessKey: normalized.businessId,
           actionState: 'queued',
           statementTimeoutMs: Math.min(
@@ -327,13 +353,26 @@ export function createSheinWebhookService({
       const actualCipherHash = crypto.createHash('sha256').update(String(receipt.eventData || ''), 'utf8').digest('hex');
       if (actualCipherHash !== receipt.cipherHash) throw Object.assign(new Error('Stored webhook ciphertext hash mismatch'), {code: 'WEBHOOK_CIPHERTEXT_CORRUPT'});
       const payload = decryptWebhookEventData(receipt.eventData, identity.appSecretKey);
-      const normalizedBase = normalizeWebhookBusinessEvent({
-        eventCode: receipt.eventCode,
-        payload,
-        storeKey: receipt.storeKey,
-        receivedAt: receipt.receivedAt,
-      });
-      const severity = classifyWebhookSeverity({normalizedEvent: normalizedBase});
+      const persistedAppScope = receipt.normalized?.appScopedOnly === true;
+      const normalizedBase = {
+        ...normalizeWebhookBusinessEvent({
+          eventCode: receipt.eventCode,
+          payload,
+          storeKey: receipt.storeKey,
+          receivedAt: receipt.receivedAt,
+        }),
+        ...(persistedAppScope ? {
+          appScopedOnly: true,
+          deliveryScope: String(receipt.normalized?.deliveryScope || 'app_only'),
+        } : {}),
+      };
+      // Ingress/maintenance classification is an operational security label,
+      // not a derived payload field. Preserve it across worker-side decrypt and
+      // normalization so validation fixtures can never become store writes or
+      // P0 alerts merely because the worker rebuilt the normalized projection.
+      const severity = persistedAppScope
+        ? {severity: 'P3', reason: 'app_scoped_delivery', notifyFeishu: false}
+        : classifyWebhookSeverity({normalizedEvent: normalizedBase});
       const normalized = {...normalizedBase, severityReason: severity.reason, notifyFeishu: severity.notifyFeishu};
       const workItem = {
         ...receipt,
