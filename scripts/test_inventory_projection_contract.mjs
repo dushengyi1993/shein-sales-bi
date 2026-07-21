@@ -35,6 +35,16 @@ assert.match(generator, /et\.operational_sellable_qty AS et_estimated_available_
 assert.match(generator, /et\.estimated_available_qty AS et_all_warehouse_inventory_qty/, 'all-warehouse physical stock remains separate evidence');
 const schema = fs.readFileSync(path.join(root, 'infra', 'warehouse', 'schema.sql'), 'utf8');
 assert.match(schema, /WHEN coalesce\(s\.match_key,b\.match_key\) = 'SK03038'/, 'only the approved SK-03038 exception counts 01 full-carton stock as operational sellable');
+assert.match(schema, /0\.3 \* \(coalesce\(s\.gross_sold_7d,0\) \/ 7\.0\) \+ 0\.7 \* \(coalesce\(s\.gross_sold_30d,0\) \/ 30\.0\)/, 'warehouse velocity uses 30% recent and 70% 30-day baseline');
+assert.match(generator, /gross_sold_7d,0\) \/ 7\.0 \* 0\.3.*gross_sold_30d,0\) \/ 30\.0 \* 0\.7/, 'portal SQL uses the same velocity weights');
+assert.match(generator, /round\(weighted_daily_gross_sales::numeric, 4\)/, 'portal keeps enough daily-rate precision for slow sellers');
+assert.match(client, /gross_sold_7d'\]\)\/7\*\.3\+firstNum\(r,\['gross_sold_30d'\]\)\/30\*\.7/, 'browser fallback uses the same velocity weights');
+assert.match(client, /预计月销/);
+assert.match(client, /低样本/);
+assert.doesNotMatch(generator, /近7天(?:毛销量\/7 × |)70%|7天70% \+ 30天30%/, 'old aggressive velocity copy is removed');
+const sk272Daily = 1 / 7 * 0.3 + 1 / 30 * 0.7;
+assert.equal(Number((sk272Daily * 30).toFixed(2)), 1.99, 'SK-272 example projects about 1.99 units/month');
+assert.equal(Number((35 / sk272Daily / 30).toFixed(1)), 17.6, 'SK-272 example depletes 35 units in about 17.6 months');
 assert.match(standards, /inventoryProjection\.fresh_matched \? inventoryProjection\.current_sellable_quantity : null/, 'marketing standards do not turn unknown ET stock into zero');
 assert.match(stackReview, /projection\.fresh_matched \? projection\.current_sellable_quantity : null/, 'marketing stack review preserves unknown ET stock');
 assert.match(inventoryWriter, /operational_sellable_qty/);

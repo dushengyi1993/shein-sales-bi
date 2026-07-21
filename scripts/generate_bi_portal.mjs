@@ -161,7 +161,7 @@ const PORTAL_SECTION_SELECTS = {
       'stockBasis', 'ET 运营可售默认只计 09 散件仓；SK-03038 按已批准例外计 09+01。其他 01/03/04/06 仓位只作物理库存展示；SHEIN 店铺库存仅作为已上架链接虚拟库存参考',
       'shipmentBasis', '在途来自 ET 发货申请单；ET 状态 12 视为已到仓/已完成，其他状态视为在途或未入仓',
       'salesDeduction', '去化按历史毛销量和最近销量计算，不用 SHEIN 虚拟库存推算真实库存',
-      'velocityRule', '加权日销 = 近7天毛销量/7 × 70% + 近30天毛销量/30 × 30%'
+      'velocityRule', '趋势日销 = 近7天毛销量/7 × 30% + 近30天毛销量/30 × 70%'
     )
   ),
   'campaigns', (SELECT data FROM campaigns),
@@ -228,7 +228,7 @@ const PORTAL_SECTION_SELECTS = {
       'stockBasis', 'ET 运营可售默认只计 09 散件仓；SK-03038 按已批准例外计 09+01。其他 01/03/04/06 仓位只作物理库存展示；SHEIN 店铺库存仅作为已上架链接虚拟库存参考',
       'shipmentBasis', '在途来自 ET 发货申请单；ET 状态 12 视为已到仓/已完成，其他状态视为在途或未入仓',
       'salesDeduction', '去化按历史毛销量和最近销量计算，不用 SHEIN 虚拟库存推算真实库存',
-      'velocityRule', '加权日销 = 近7天毛销量/7 × 70% + 近30天毛销量/30 × 30%'
+      'velocityRule', '趋势日销 = 近7天毛销量/7 × 30% + 近30天毛销量/30 × 70%'
     )
   )
 `,
@@ -2944,7 +2944,7 @@ inventory_depletion_products AS (
       LEFT JOIN inventory_storage_product storage ON storage.match_key = k.match_key
     ), calc AS (
       SELECT *,
-        ((coalesce(gross_sold_7d,0) / 7.0 * 0.7) + (coalesce(gross_sold_30d,0) / 30.0 * 0.3)) AS weighted_daily_gross_sales,
+        ((coalesce(gross_sold_7d,0) / 7.0 * 0.3) + (coalesce(gross_sold_30d,0) / 30.0 * 0.7)) AS weighted_daily_gross_sales,
         CASE
           WHEN inventory_match_status = 'matched'
           THEN coalesce(et_estimated_available_qty,0) + coalesce(et_ship_in_transit_quantity,0)
@@ -2981,7 +2981,7 @@ inventory_depletion_products AS (
       round(gross_sold_7d::numeric, 0) AS gross_sold_7d,
       round(gross_sold_30d::numeric, 0) AS gross_sold_30d,
       round(gross_sold_14d::numeric, 0) AS gross_sold_14d,
-      round(weighted_daily_gross_sales::numeric, 2) AS weighted_daily_gross_sales,
+      round(weighted_daily_gross_sales::numeric, 4) AS weighted_daily_gross_sales,
       round(CASE WHEN inventory_match_status = 'matched' AND weighted_daily_gross_sales > 0 THEN et_estimated_available_qty / NULLIF(weighted_daily_gross_sales,0) ELSE NULL END::numeric, 1) AS days_of_supply_on_hand,
       round(CASE WHEN inventory_match_status = 'matched' AND weighted_daily_gross_sales > 0 THEN et_current_total_supply_quantity / NULLIF(weighted_daily_gross_sales,0) ELSE NULL END::numeric, 1) AS days_of_supply_with_incoming,
       last_sale_date,
@@ -4588,7 +4588,7 @@ SELECT jsonb_build_object(
       'stockBasis', '成本表批次 + 毛销量 FIFO 扣减',
       'arrivalRule', '到仓/派送日期和头程运输费均存在才计入到仓库存；缺任一项计入在途或待确认',
       'salesDeduction', '库存消耗按毛销量扣减，退货暂不加回，避免高估可售库存',
-      'velocityRule', '日均销量 = 近7天毛销量/7 × 70% + 近30天毛销量/30 × 30%'
+      'velocityRule', '趋势日销 = 近7天毛销量/7 × 30% + 近30天毛销量/30 × 70%'
     )
   ),
   'actions', (SELECT data FROM actions),
@@ -14798,7 +14798,7 @@ function renderInventoryPage(){
         '<div class="store-kpi"><span>待处理仓</span><strong>'+num(totalEtPending)+'</strong><small>03 RTV / 04破损 / 06报废，不计入可售</small></div>'+
         '<div class="store-kpi"><span>成本表在途</span><strong>'+num(totalIncoming)+'</strong><small>有发货但缺到仓或头程费；未发 '+num(totalNotShipped)+'</small></div>'+
         '<div class="store-kpi"><span>近30天毛销量</span><strong>'+num(sold30)+'</strong><small>'+escapeHtml(scopeText)+' · 店铺筛选只影响销售速度</small></div>'+
-        '<div class="store-kpi"><span>加权日销</span><strong>'+fmt.format(daily)+'</strong><small>7天70% + 30天30%</small></div>'+
+        '<div class="store-kpi"><span>趋势日销</span><strong>'+fmt.format(daily)+'</strong><small>7天30% + 30天70%</small></div>'+
         '<div class="store-kpi"><span>高风险货号</span><strong>'+num(urgent)+'</strong><small>断货/14天内断货/实盘缺货</small></div>'+
       '</div>'+
     '</div>'+
@@ -15749,7 +15749,7 @@ function renderPageDecisionSummaries(){
       cards:[
         {label:'ET运营可售', value:num(onHand)+' 件', hint:'默认只计09散件；仅已批准货号可纳入01整箱。未匹配或过期快照显示未知，不用成本表反推。', level:onHand ? 'info' : 'mid'},
         {label:'成本表在途', value:num(incoming)+' 件', hint:'有发货但缺到仓或缺头程费，暂不计入ET可售。', level:incoming ? 'mid' : 'good'},
-        {label:'加权日销', value:fmt.format(daily)+' 件/天', hint:'近7天70% + 近30天30%，用于估算去化周期。', level:daily ? 'good' : 'mid'},
+        {label:'趋势日销', value:fmt.format(daily)+' 件/天', hint:'近7天30% + 近30天70%，用于估算去化周期。', level:daily ? 'good' : 'mid'},
         {label:'高风险货号', value:num(high)+' 个', hint:'疑似缺货、14天内断货或批次缺口。低动销 '+num(slow)+' 个。', level:high ? 'high' : 'good'}
       ],
       next:'先处理高风险补货，再看低动销库存是否需要活动清货；对异常货号先核对成本表是否漏批次。',

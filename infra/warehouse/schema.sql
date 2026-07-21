@@ -5040,7 +5040,7 @@ SELECT
   coalesce(s.gross_sold_7d,0) AS gross_sold_7d,
   coalesce(s.gross_sold_14d,0) AS gross_sold_14d,
   coalesce(s.gross_sold_30d,0) AS gross_sold_30d,
-    (0.7 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.3 * (coalesce(s.gross_sold_30d,0) / 30.0)) AS weighted_daily_gross_sales,
+    (0.3 * (coalesce(s.gross_sold_7d,0) / 7.0) + 0.7 * (coalesce(s.gross_sold_30d,0) / 30.0)) AS weighted_daily_gross_sales,
   NULL::numeric AS days_of_supply_on_hand,
   NULL::numeric AS days_of_supply_with_incoming,
   s.last_sale_date,
