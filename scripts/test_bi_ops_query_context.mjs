@@ -176,7 +176,9 @@ try {
       ],
       dates: {linkDate: '2026-07-10'},
       productDisplayNames: {'VAC-01': '一号吸尘器', 'TOAST-02': '二号早餐机', 'FAIL-03': '未命中商品'},
-    });
+    }, '2026-07-10T08:00:00.000+08:00');
+    const loaded = await loadBiOpsQueryData({question: '近7天链接曝光点击率销量筛选', dataPath: fixture.dataPath, sectionsDir: fixture.sectionsDir});
+    assert.deepEqual(loaded.meta.crossGenerationSections, ['linksData'], 'daily link data should survive a newer hourly sales core only when link business dates match');
     const env = {
       ...process.env,
       SHEIN_QA_BI_DATA: fixture.dataPath,
