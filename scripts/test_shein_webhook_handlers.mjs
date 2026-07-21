@@ -95,11 +95,18 @@ assert.match(shelfOutcome.summary, /上架时间：2026-04-27 15:07（已上架 
 assert.match(shelfOutcome.summary, /近7天 1 件 \/ 57\.46 SAR/);
 assert.match(shelfOutcome.summary, /近30天 13 件 \/ 746\.53 SAR/);
 assert.match(shelfOutcome.summary, /累计 20 件 \/ 1,153\.91 SAR/);
-assert.match(shelfOutcome.summary, /下架人：平台推送未提供/);
-assert.match(shelfOutcome.summary, /下架原因：平台推送未提供/);
+assert.doesNotMatch(shelfOutcome.summary, /下架人：/);
+assert.doesNotMatch(shelfOutcome.summary, /下架原因：/);
 assert.match(shelfOutcome.summary, /商品已进入回收站/);
 assert.equal(shelfOutcome.normalized.productContextStatus, 'resolved');
 assert.ok(productContextCalls.some(call => call.skc === 'SKC-DOWN'));
+
+const shelfCopyWithPlatformDetails = humanizeSheinWebhookEvent({
+  eventFamily: 'product_shelves', storeKey: 'AA', skc: 'SKC-DOWN', action: 'off_shelf',
+  eventTime: '1784605591827', shelfOperator: '运营甲', shelfReason: '重复商品',
+}, {severity: 'P0'});
+assert.match(shelfCopyWithPlatformDetails.summary, /下架人：运营甲/);
+assert.match(shelfCopyWithPlatformDetails.summary, /下架原因：重复商品/);
 
 const productResult = await processor.process({...base, normalized: {eventFamily: 'product_audit', eventCode: '3001450', eventLabel: '审核', storeKey: 'AA', productId: 'SPU-1', skc: 'SKC-1', businessId: 'DOC-1'}, payload: {spuName: 'SPU-1', skcName: 'SKC-1', documentSn: 'DOC-1', version: '7'}});
 assert.equal(productResult.actionState, 'task_readback_attached');

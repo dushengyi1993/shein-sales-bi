@@ -96,7 +96,7 @@ expected = randomKey + Base64(UTF8(hashHex))
 - `ops.shein_webhook_store_gate`：店铺级授权/额度闸门，同时保存平台事件顺序值；额度乱序按平台 `sendTimeStamp` 而不是本地收件 ID 判新旧。
 - `ops.get_shein_webhook_product_context(store, skc, event_at)`：`SECURITY DEFINER` 只读函数，只返回单个 SKC 的货号、商品/款式、上架时间和聚合销售；调用角色没有底层链接/利润明细表的直接 `SELECT`。查询严格截止事件日期，避免把未来快照写进历史通知。
 
-商品上下架平台会按子站拆成瞬时回调。receipt 逐条留存，业务时间线和摘要按店铺、SKC、动作与分钟合并，飞书按两分钟业务窗口幂等；审计完整性与运营去重分开处理。官方 `3000848` 字段只有 SKC、更新时间、站点、上下架状态、首次/最近上架时间与回收站状态，`spu-info` 也不返回下架人或原因，因此这两项缺失时必须显示“平台推送未提供”，不得推断。
+商品上下架平台会按子站拆成瞬时回调。receipt 逐条留存，业务时间线和摘要按店铺、SKC、动作与分钟合并，飞书按两分钟业务窗口幂等；审计完整性与运营去重分开处理。官方 `3000848` 字段只有 SKC、更新时间、站点、上下架状态、首次/最近上架时间与回收站状态，`spu-info` 也不返回下架人或原因，因此这两项只在平台明示时展示，缺失时直接省略且不得推断。
 - worker 使用 `FOR UPDATE SKIP LOCKED` 领取任务；过期 lease 可恢复。
 - worker 只在持有 lease 时按当前 App secret 解密；lease 续约失败会中止后续处理。
 - 最多重试 8 次，指数退避后进入 `dead_letter`。
