@@ -155,12 +155,32 @@ test('normalizes order, return, authorization, quota, and compliance classificat
   assert.equal(classifyWebhookSeverity({normalizedEvent: normalizeWebhookBusinessEvent({eventCode: '3001104', payload: {isRequired: 0, isMiss: 1}})}).severity, 'P3');
   assert.equal(classifyWebhookSeverity({normalizedEvent: normalizeWebhookBusinessEvent({eventCode: '3001903', payload: {skc_name: 'SKC-DELETE', status: 2}})}).reason, 'unexpected_product_removal');
 });
+test('keeps routine platform flow quiet while surfacing business-impacting changes', () => {
+  assert.equal(classifyWebhookSeverity({normalizedEvent: normalizeWebhookBusinessEvent({eventCode: '3000910', payload: {receivedSuccess: true}})}).severity, 'P3');
+  assert.equal(classifyWebhookSeverity({normalizedEvent: normalizeWebhookBusinessEvent({eventCode: '3000910', payload: {receivedSuccess: false}})}).severity, 'P1');
+  assert.equal(classifyWebhookSeverity({normalizedEvent: normalizeWebhookBusinessEvent({eventCode: '3000912', payload: {status: 'APPROVED'}})}).severity, 'P3');
+  assert.equal(classifyWebhookSeverity({normalizedEvent: normalizeWebhookBusinessEvent({eventCode: '3000912', payload: {status: 'REJECTED'}})}).severity, 'P1');
+  assert.equal(classifyWebhookSeverity({normalizedEvent: normalizeWebhookBusinessEvent({eventCode: '3001792', payload: {status: 'APPROVED'}})}).severity, 'P3');
+  assert.equal(classifyWebhookSeverity({normalizedEvent: normalizeWebhookBusinessEvent({eventCode: '3001792', payload: {status: 'REJECTED'}})}).severity, 'P1');
+  assert.equal(classifyWebhookSeverity({normalizedEvent: normalizeWebhookBusinessEvent({eventCode: '3001793', payload: {status: 'ACTIVE'}})}).severity, 'P3');
+  assert.equal(classifyWebhookSeverity({normalizedEvent: normalizeWebhookBusinessEvent({eventCode: '3001793', payload: {status: 'EXPIRED'}})}).severity, 'P1');
+  for (const eventCode of ['3001435', '3001441', '3001744', '3001801']) {
+    assert.equal(classifyWebhookSeverity({normalizedEvent: normalizeWebhookBusinessEvent({eventCode, payload: {status: 'UPDATED'}})}).severity, 'P1', eventCode);
+  }
+});
 test('every supported official event can be normalized and classified', () => {
   assert.equal(SUPPORTED_WEBHOOK_EVENTS.length, 23);
+  const successfulSeverity = {
+    product_audit: 'P3', product_receive: 'P3', product_audit_all_channels: 'P3', product_shelves: 'P3', quota: 'P3',
+    price_abnormal: 'P1', price_audit: 'P3', rrp_review: 'P3', rrp_validity: 'P3', compliance: 'P3',
+    inventory_warning: 'P1', out_of_stock: 'P1', order: 'P3', return: 'P3', invoice: 'P3', logistics_order: 'P3',
+    purchase_order: 'P1', delivery: 'P1', purchase_return_application: 'P1', logistics_forecast: 'P3', purchase_return: 'P1',
+    authorization: 'P0', product_delete_audit: 'P3',
+  };
   for (const event of SUPPORTED_WEBHOOK_EVENTS) {
     const normalized = normalizeWebhookBusinessEvent({eventCode: event.eventCode, eventPath: event.eventPath, payload: {status: 'SUCCESS'}});
     assert.equal(normalized.eventFamily, event.family, event.eventCode);
-    assert.match(classifyWebhookSeverity({normalizedEvent: normalized}).severity, /^P[013]$/, event.eventCode);
+    assert.equal(classifyWebhookSeverity({normalizedEvent: normalized}).severity, successfulSeverity[event.family], event.eventCode);
   }
 });
 test('normalizes official snake_case payload fields and keeps P1 out of Feishu', () => {

@@ -94,7 +94,7 @@ expected = randomKey + Base64(UTF8(hashHex))
 
 - `ops.shein_webhook_receipt`：AES 密文 `event_data`、密文 hash、最小规范化投影、幂等键、状态、lease、重试、告警与处理结果；不保存解密后的原始 payload。
 - `ops.shein_webhook_store_gate`：店铺级授权/额度闸门，同时保存平台事件顺序值；额度乱序按平台 `sendTimeStamp` 而不是本地收件 ID 判新旧。
-- `ops.get_shein_webhook_product_context(store, skc, event_at)`：`SECURITY DEFINER` 只读函数，只返回单个 SKC 的货号、商品/款式、上架时间和聚合销售；调用角色没有底层链接/利润明细表的直接 `SELECT`。查询严格截止事件日期，避免把未来快照写进历史通知。
+- `ops.get_shein_webhook_product_context(store, skc, event_at)`：`SECURITY DEFINER` 只读函数，只返回单个 SKC 的货号、商品/款式、上架时间和聚合销售；调用角色没有底层链接/利润明细表的直接 `SELECT`。查询严格截止事件日期，避免把未来快照写进历史通知。运营通知按“一货号一款式”展示，不单列款式字段。
 
 商品上下架平台会按子站拆成瞬时回调。receipt 逐条留存，业务时间线和摘要只对同店铺、同 SKC、同动作的回调静默合并，飞书按包含 SKC 的两分钟业务窗口幂等；不同 SKC 永不合并。审计完整性与运营去重分开处理，用户文案不展示底层回调条数。官方 `3000848` 字段只有 SKC、更新时间、站点、上下架状态、首次/最近上架时间与回收站状态，`spu-info` 也不返回下架人或原因，因此这两项只在平台明示时展示，缺失时直接省略且不得推断。
 - worker 使用 `FOR UPDATE SKIP LOCKED` 领取任务；过期 lease 可恢复。
@@ -128,6 +128,8 @@ BI：导航新增独立“平台动态”页，提供近 24 小时通知、系�
 飞书：复用 `lark-cli im +messages-send` 的现有通知身份，但仅发送需要立即处理的事项；普通事件按 receipt 幂等，官方无事件 ID 的授权重签按 10 分钟时间桶去重，不恢复已暂停的问数服务。消息正文直接给出业务影响和下一步，不使用“原因：英文代码”“处理原则”之类机器话。详情与普通事件留在 BI，避免刷屏。
 
 开放平台在保存订阅或执行“消息测试”时，可能发送 App 签名有效但 openKey 不属于任何正式店铺的技术样例。只有 App 本身能唯一映射到一个店铺时才接收这类投递，并标记 `appScopedOnly + deliveryScope=app_only + P3`。该标记必须从 ingress 持久化到 worker：技术样例只保留审计 receipt，不运行商品/订单/退货 handler、不产生 gate、不修改运营任务、不发飞书。正常 BI summary/timeline 默认过滤它们；只有显式 `includeTechnical=true` 的审计调用可读取。
+
+默认运营时间线不是 webhook 流水账，只显示 `P0/P1/P2` 经营事项，或处理状态为 `failed/retry/dead_letter` 的同步异常。`P3` 正常订单/退货同步、商品接收、审核通过、正常上架等仍照常处理并保留 receipt，但不进入运营页面和摘要；显式 `includeTechnical=true` 的审计调用可读取全部记录。
 
 ## 8. 部署与验收
 

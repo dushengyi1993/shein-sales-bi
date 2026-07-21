@@ -18,9 +18,11 @@ for (const source of [client, html]) {
   assert.match(source, /webhookStore/);
   assert.match(source, /webhookType/);
   assert.match(source, /webhookStatus/);
-  assert.match(source, /近24小时通知/);
+  assert.match(source, /近24小时重点动态/);
   assert.match(source, /近24小时需处理/);
-  assert.match(source, /这里只告诉你发生了什么、系统做了什么，以及是否需要你处理/);
+  assert.match(source, /普通订单和退货同步、审核通过、正常上架等只留后台审计/);
+  assert.match(source, /当前没有需要关注的平台动态/);
+  assert.match(source, /普通成功回执不会出现/);
   assert.match(source, /系统处理结果/);
   assert.match(source, /平台动态加载失败/);
 }

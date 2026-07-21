@@ -95,6 +95,7 @@ assert.match(shelfOutcome.summary, /上架时间：2026-04-27 15:07（已上架 
 assert.match(shelfOutcome.summary, /近7天 1 件 \/ 57\.46 SAR/);
 assert.match(shelfOutcome.summary, /近30天 13 件 \/ 746\.53 SAR/);
 assert.match(shelfOutcome.summary, /累计 20 件 \/ 1,153\.91 SAR/);
+assert.doesNotMatch(shelfOutcome.summary, /款式：|英规插/);
 assert.doesNotMatch(shelfOutcome.summary, /下架人：/);
 assert.doesNotMatch(shelfOutcome.summary, /下架原因：/);
 assert.doesNotMatch(shelfOutcome.summary, /合并说明|\d+ 条站点变化/);
