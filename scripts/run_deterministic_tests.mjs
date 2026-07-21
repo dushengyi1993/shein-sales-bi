@@ -59,6 +59,7 @@ const tests = [
   'scripts/test_retire_supplier_code_repair_payload.mjs',
   'scripts/test_shein_openapi_client_timeout.mjs',
   'scripts/test_shein_webhook_receiver.mjs',
+  'scripts/test_shein_webhook_audit_context.mjs',
   'scripts/test_shein_webhook_config.mjs',
   'scripts/test_shein_webhook_repository.mjs',
   'scripts/test_shein_webhook_write_gate.mjs',

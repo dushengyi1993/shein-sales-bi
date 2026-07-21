@@ -460,7 +460,7 @@
 - `lib/shein_webhook_receiver.mjs` / `lib/shein_webhook_config.mjs`：官方签名/AES、三种 body 格式、23 个事件规范化，以及 19 App 到店铺的严格私有配置映射。
 - `lib/shein_webhook_repository.mjs` / `infra/warehouse/migrations/20260719_001_shein_webhook_runtime.sql` / `infra/warehouse/migrations/20260721_001_shein_webhook_product_context.sql`：只存密文的幂等 receipt/queue、安全前端投影、下架站点事件合并、受限商品/销售上下文函数、租约重试、事实表只读 + 按单 apply 函数，以及授权/额度店铺闸门。
 - `scripts/provision_shein_webhook_postgres_role.sh`：root-only 创建独立 `shein_webhook_ops` 与 `0600` 专用 EnvironmentFile，不输出密码；迁移随后只授予精准表权限。
-- `lib/shein_webhook_handlers.mjs` / `lib/shein_webhook_order_return_sync.mjs`：商品生命周期安全记录与人话补全、订单/退货按单号无损增量入仓、授权/额度风险处理；下架人/原因仅使用平台明示字段，公网 worker 不读取运营任务表，合规事件不错误地封整店。
+- `lib/shein_webhook_handlers.mjs` / `lib/shein_webhook_audit_context.mjs` / `lib/shein_webhook_order_return_sync.mjs`：商品生命周期安全记录与人话补全、审核失败的回调原因及只读议价信息补全、订单/退货按单号无损增量入仓、授权/额度风险处理；下架人/原因仅使用平台明示字段，审核补全失败不阻塞 P0，公网 worker 不读取运营任务表，合规事件不错误地封整店。
 - `scripts/test_shein_webhook_*.mjs` / `scripts/test_bi_webhook_frontend.mjs`：协议、配置、仓库、处理器、targeted upsert、HTTP receiver 和“平台动态”前端回归；均纳入 deterministic tests。
 
 - `lib/link_ops_image_role_planner.mjs` / `config/store_style_profiles.json`：上新图片角色与 19 店默认风格/标题组规划。明确标记 `已审可用` 的素材只允许因客观平台失败阻断；规划结果携带逐店 `defaultTitleGroup`，用户当轮指定可覆盖。

@@ -200,5 +200,22 @@ test('frontend projection does not expose raw payload or sensitive fields', () =
   assert.equal(serialized.includes('secret'), false); assert.equal(serialized.includes('phone'), false); assert.equal(serialized.includes('hidden'), false);
   assert.equal(view.orderId, 'O-1');
 });
+test('prefers the Chinese product audit failure reason and exposes only the safe text', () => {
+  const normalized = normalizeWebhookBusinessEvent({
+    eventCode: '3001450',
+    payload: {
+      skc_name: 'SKC-AUDIT-1',
+      audit_state: 3,
+      failed_reason: [
+        {language: 'US', content: 'Negotiation failed'},
+        {language: 'CN', content: '议价失败:商家操作-不接受议价;拒绝议价'},
+      ],
+    },
+  });
+  assert.equal(normalized.auditFailureReason, '议价失败:商家操作-不接受议价;拒绝议价');
+  const view = projectWebhookEventForFrontend(normalized);
+  assert.equal(view.auditFailureReason, normalized.auditFailureReason);
+  assert.doesNotMatch(JSON.stringify(view), /Negotiation failed/);
+});
 
 if (!process.exitCode) console.log(`\n${passed} tests passed`);

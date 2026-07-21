@@ -110,6 +110,62 @@ const shelfCopyWithPlatformDetails = humanizeSheinWebhookEvent({
 assert.match(shelfCopyWithPlatformDetails.summary, /下架人：运营甲/);
 assert.match(shelfCopyWithPlatformDetails.summary, /下架原因：重复商品/);
 
+const auditLookupCalls = [];
+const auditProcessor = createSheinWebhookEventProcessor({
+  webhookRepository,
+  productAuditContextProvider: {
+    getAuditContext: async input => {
+      auditLookupCalls.push(input);
+      return {
+        skc: input.skc,
+        supplierCode: '(全)KJ-102三明治机和早餐机',
+        failureReason: input.auditFailureReason,
+        appealCount: 4,
+        merchantOffer: {min: 106, max: 106, currency: 'SAR'},
+        platformSuggested: {min: 70.79, max: 70.79, currency: 'SAR'},
+      };
+    },
+  },
+});
+const auditOutcome = await auditProcessor.process({
+  ...base,
+  id: 21,
+  severity: {severity: 'P0', notifyFeishu: true},
+  normalized: {
+    eventFamily: 'product_audit', eventCode: '3001450', eventLabel: '审核',
+    storeKey: 'TZ', skc: 'sv260714225651130014631', businessId: 'SPMPA4202607143661962',
+    auditFailureReason: '议价失败:商家操作-不接受议价;拒绝议价',
+  },
+  payload: {},
+});
+assert.equal(auditOutcome.title, 'TZ 店：(全)KJ-102三明治机和早餐机审核未通过');
+assert.match(auditOutcome.summary, /货号：\(全\)KJ-102三明治机和早餐机/);
+assert.match(auditOutcome.summary, /链接：sv260714225651130014631/);
+assert.match(auditOutcome.summary, /失败原因：议价失败：商家操作-不接受议价；拒绝议价/);
+assert.match(auditOutcome.summary, /我方申报价：106\.00 SAR/);
+assert.match(auditOutcome.summary, /平台建议价：70\.79 SAR/);
+assert.match(auditOutcome.summary, /剩余议价次数：4/);
+assert.doesNotMatch(auditOutcome.summary, /款式：|平台未提供/);
+assert.equal(auditOutcome.normalized.auditContextStatus, 'resolved');
+assert.equal(auditLookupCalls.length, 1);
+
+const unavailableAuditProcessor = createSheinWebhookEventProcessor({
+  webhookRepository,
+  productAuditContextProvider: {getAuditContext: async () => { throw new Error('temporary read failure'); }},
+});
+const unavailableAudit = await unavailableAuditProcessor.process({
+  ...base,
+  id: 22,
+  severity: {severity: 'P0', notifyFeishu: true},
+  normalized: {
+    eventFamily: 'product_audit', storeKey: 'TZ', skc: 'SKC-FAIL',
+    auditFailureReason: '资料审核失败：缺少电压',
+  },
+  payload: {},
+});
+assert.match(unavailableAudit.summary, /失败原因：资料审核失败：缺少电压/);
+assert.equal(unavailableAudit.normalized.auditContextStatus, 'unavailable');
+
 const productResult = await processor.process({...base, normalized: {eventFamily: 'product_audit', eventCode: '3001450', eventLabel: '审核', storeKey: 'AA', productId: 'SPU-1', skc: 'SKC-1', businessId: 'DOC-1'}, payload: {spuName: 'SPU-1', skcName: 'SKC-1', documentSn: 'DOC-1', version: '7'}});
 assert.equal(productResult.actionState, 'task_readback_attached');
 assert.equal(updates.length, 1);

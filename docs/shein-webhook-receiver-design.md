@@ -121,7 +121,7 @@ worker 直接使用独立受限 PostgreSQL 角色 `shein_webhook_ops`，不调�
 
 ## 7. BI 与飞书
 
-BI：导航新增独立“平台动态”页，提供近 24 小时通知、系统处理中、处理失败、近 24 小时需处理摘要，以及店铺/重要程度/业务内容/系统处理结果筛选。商品下架卡片使用多行人话详情展示货号、链接、上架时间、销售、下架时间、操作人、原因和下一步；同一批子站回调只占一条。接口沿用 `bi_session` 和账号 `readStores` 权限；SQL 层再次限制店铺范围。
+BI：导航新增独立“平台动态”页，提供近 24 小时通知、系统处理中、处理失败、近 24 小时需处理摘要，以及店铺/重要程度/业务内容/系统处理结果筛选。商品下架卡片使用多行人话详情展示货号、链接、上架时间、销售、下架时间、平台明确给出的操作人/原因和下一步；同一 SKC 的子站回调合并成一件事，但不同 SKC 必须逐条保留。商品审核失败卡片优先展示货号、回调中文失败原因；议价失败再通过同店只读议价单查询补齐我方最新申报价、平台建议价和剩余议价次数。没有可靠值的字段直接省略，不显示“平台未提供”，也不单列款式。接口沿用 `bi_session` 和账号 `readStores` 权限；SQL 层再次限制店铺范围。
 
 面向运营人员的展示必须遵守同一个“人话”契约：只说发生了什么、系统做了什么、是否需要人工处理。`P0/P1/P3`、`succeeded/retry/dead_letter`、event code、action state、数字平台状态和英文分类原因只保留在数据库、API 内部字段与日志中，不得直接渲染到页面或飞书；历史 receipt 也由 BI 展示层即时翻译，不要求改写审计数据。
 
@@ -130,6 +130,8 @@ BI：导航新增独立“平台动态”页，提供近 24 小时通知、系�
 开放平台在保存订阅或执行“消息测试”时，可能发送 App 签名有效但 openKey 不属于任何正式店铺的技术样例。只有 App 本身能唯一映射到一个店铺时才接收这类投递，并标记 `appScopedOnly + deliveryScope=app_only + P3`。该标记必须从 ingress 持久化到 worker：技术样例只保留审计 receipt，不运行商品/订单/退货 handler、不产生 gate、不修改运营任务、不发飞书。正常 BI summary/timeline 默认过滤它们；只有显式 `includeTechnical=true` 的审计调用可读取。
 
 默认运营时间线不是 webhook 流水账，只显示 `P0/P1/P2` 经营事项，或处理状态为 `failed/retry/dead_letter` 的同步异常。`P3` 正常订单/退货同步、商品接收、审核通过、正常上架等仍照常处理并保留 receipt，但不进入运营页面和摘要；显式 `includeTechnical=true` 的审计调用可读取全部记录。
+
+审核补全是只读便利链路，不是接收成功的前置条件：`lib/shein_webhook_receiver.mjs` 从多语言 `failed_reason` 中优先选择中文；`lib/shein_webhook_audit_context.mjs` 只在原因明确涉及议价、报价或价格时查询 `/open-api/goods/discuss/query-discuss-list`，按 `skcName` 精确匹配，并取 `costPriceHistories` 中最大 `serialNumber` 作为我方最新申报价。接口超时、无匹配或返回异常时，worker 继续使用 webhook 自带原因完成 P0 告警，避免补全服务故障压住真正的经营风险。
 
 ## 8. 部署与验收
 

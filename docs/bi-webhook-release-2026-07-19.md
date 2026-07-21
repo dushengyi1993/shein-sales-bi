@@ -75,6 +75,7 @@ BI 新增独立“平台动态”子页面，普通状态变化不再塞入首�
 - 隔离上线后最先真实收到 NM、MZ 两条订单事件，均完成按单入仓并在 BI“平台动态”展示；上线初验时为 2 条业务事件、待处理 0、失败 0、P0 0，且不显示 190 条技术验证记录。
 - “平台动态”收口为经营风险视图：默认只展示 `P0/P1/P2` 事项，或 webhook 处理失败、重试、dead-letter；所有 `P3` 正常回执只留审计层。订单/退货同步成功、商品接收成功、审核通过、正常上架、普通开票与物流成功状态均不再占用运营注意力。
 - 必须保留的经营事项包括：商品下架、审核拒绝、授权变化、额度归零、必需合规失效、价格异常、库存预警、补货需求，以及采购单、发货变更、采购退货等需要跟进的供应链变化。价格/RRP/开票/合作物流只在失败、拒绝、失效时进入经营视图。飞书仍只发送 `P0`，`P1/P2` 留在 BI 页面。
+- 商品审核失败优先读取回调中的中文 `failed_reason`。若失败属于议价/报价，再以同店同 SKC 调用只读议价单列表补齐货号、我方最新申报价、平台建议价和剩余议价次数；只保存这些安全字段，不保存议价接口原文。补全查询失败时仍按回调原因发送 P0，不阻塞 receipt，也不把旧议价数据用于非价格类审核失败。
 - 本轮关键备份：`/srv/shein-bi/backups/webhook-trusted-proxy-20260720-165027`、`/srv/shein-bi/backups/webhook-worker-quarantine-20260720-173224`、`/srv/shein-bi/backups/webhook-subscription-fixture-remediation-20260720-173325`、`/srv/shein-bi/backups/webhook-final-rollout-20260720-175338`。生产 `shein-bi-webhook.service` 保持 `active + enabled`、worker 正常轮询；飞书问数服务与 Codex `shein-webhook` 续跑任务继续保持暂停。
 - 本次人话修正回滚备份：`/srv/shein-bi/backups/webhook-human-copy-20260720-190110`。
 

@@ -21,6 +21,7 @@ import {
 } from '../lib/shein_webhook_config.mjs';
 import {createSheinWebhookRepository} from '../lib/shein_webhook_repository.mjs';
 import {createSheinWebhookEventProcessor, humanizeSheinWebhookEvent} from '../lib/shein_webhook_handlers.mjs';
+import {createSheinWebhookAuditContextProvider} from '../lib/shein_webhook_audit_context.mjs';
 import {syncWebhookOrder, syncWebhookReturn} from '../lib/shein_webhook_order_return_sync.mjs';
 import {createWarehousePgPool, withPgClient} from '../lib/warehouse_pg.mjs';
 
@@ -519,12 +520,14 @@ async function main() {
   const health = await repository.health();
   const pgExecutor = createWebhookPgScriptExecutor({pool: warehousePool});
   const warehouseArgs = {dryRun: false};
+  const productAuditContextProvider = await createSheinWebhookAuditContextProvider({configFile});
   const eventProcessor = createSheinWebhookEventProcessor({
     webhookRepository: repository,
     // The public receiver role deliberately has no access to ops.link_ops_*.
     // Product lifecycle events remain visible in Platform Activity; attaching
     // them to mutable tasks is deferred to a separately privileged reconciler.
     linkOpsRepository: null,
+    productAuditContextProvider,
     orderReturnSync: {
       syncOrder: input => syncWebhookOrder({...input, warehouseArgs, executor: pgExecutor}),
       syncReturn: input => syncWebhookReturn({...input, warehouseArgs, executor: pgExecutor}),
