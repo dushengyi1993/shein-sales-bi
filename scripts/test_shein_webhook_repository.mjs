@@ -96,6 +96,7 @@ assert.equal(list.values[0][0], 'JSH');
 assert.doesNotMatch(list.text, /decrypted_payload|cipher_hash|app_id|open_key_id/, 'frontend projection must exclude secrets and payload');
 assert.match(list.text, /appScopedOnly/, 'business timeline must hide technical validation deliveries by default');
 assert.match(list.text, /row_number\(\) OVER \(PARTITION BY[\s\S]*product_shelves/, 'per-site shelf callbacks must collapse to one business incident');
+assert.match(list.text, /concat_ws\('\|'[\s\S]*COALESCE\(business_key,''\)/, 'incident grouping must include the SKC/business key so distinct links can never collapse together');
 assert.match(list.text, /ops\.get_shein_webhook_product_context/, 'historical shelf incidents must receive safe business context at read time');
 assert.doesNotMatch(list.text, /SELECT \*/, 'safe-projection CTE must not request ciphertext or identity columns through SELECT *');
 await repo.listEvents({allowedStores: ['JSH'], limit: 1, includeTechnical: true});

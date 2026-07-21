@@ -97,6 +97,7 @@ assert.match(shelfOutcome.summary, /近30天 13 件 \/ 746\.53 SAR/);
 assert.match(shelfOutcome.summary, /累计 20 件 \/ 1,153\.91 SAR/);
 assert.doesNotMatch(shelfOutcome.summary, /下架人：/);
 assert.doesNotMatch(shelfOutcome.summary, /下架原因：/);
+assert.doesNotMatch(shelfOutcome.summary, /合并说明|\d+ 条站点变化/);
 assert.match(shelfOutcome.summary, /商品已进入回收站/);
 assert.equal(shelfOutcome.normalized.productContextStatus, 'resolved');
 assert.ok(productContextCalls.some(call => call.skc === 'SKC-DOWN'));
