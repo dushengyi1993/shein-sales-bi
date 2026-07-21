@@ -109,9 +109,11 @@ function intNum(value) {
 }
 
 function addDays(ymd, delta) {
-  const d = new Date(`${ymd}T00:00:00+08:00`);
-  d.setDate(d.getDate() + delta);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const [year, month, day] = String(ymd).slice(0, 10).split('-').map(Number);
+  if (![year, month, day].every(Number.isFinite)) return '';
+  const d = new Date(Date.UTC(year, month - 1, day));
+  d.setUTCDate(d.getUTCDate() + delta);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
 }
 
 function pickDate(text, data) {
