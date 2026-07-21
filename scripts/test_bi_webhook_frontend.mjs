@@ -30,6 +30,8 @@ assert.match(client, /function platformPage\(\)\{loadWebhook\(\)/);
 assert.match(client, /WEBHOOK\.promise=\(async\(\)=>[\s\S]*?if\(S\.tab==='platform'\)render\(\);return WEBHOOK\.promise/);
 assert.doesNotMatch(client, /WEBHOOK\.error='';if\(S\.tab==='platform'\)render\(\);WEBHOOK\.promise=/, 'loading render must happen only after promise assignment to avoid recursive render');
 assert.match(client, /const WEBHOOK_EVENT_LABELS=Object\.freeze/);
+assert.match(client, /function webhookCopyText\(v,max=4000\)/);
+assert.match(client, /phase==='done'&&stored/);
 assert.match(client, /P0:'需要立即处理',P1:'建议关注',P3:'普通通知'/);
 assert.match(client, /succeeded:'已处理'/);
 const eventCard = client.match(/function webhookEventCard\(r\)\{([\s\S]*?)\}\nfunction platformPage/)?.[1] || '';
@@ -39,6 +41,7 @@ assert.match(eventCard, /webhookTitle\(r\)/);
 assert.match(eventCard, /webhookSummary\(r\)/);
 assert.doesNotMatch(client, /P0（24h）|集中查看平台 webhook|事件时间线|刷新事件/);
 assert.match(css, /\.webhook-event\{display:grid/);
+assert.match(css, /\.webhook-event-body p\{[^}]*white-space:pre-line/);
 assert.match(css, /@media\(max-width:720px\)\{\.webhook-kpis/);
 
 console.log('bi_webhook_frontend: business-language timeline, hidden audit metadata, filters, states, and mobile contracts passed');

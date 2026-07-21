@@ -13,6 +13,17 @@ assert.equal(resolveIncomingWebhookEventCode('unknown_event'), '');
 const authorizationAlert = {eventCode: '3001503', storeKey: 'AA', receivedAt: '2026-07-19T00:01:00.000Z', normalized: {eventFamily: 'authorization', status: '1', businessId: 'supplier-1'}};
 assert.equal(webhookAlertIdempotencyKey(authorizationAlert), webhookAlertIdempotencyKey({...authorizationAlert, idempotencyKey: 'different', receivedAt: '2026-07-19T00:09:59.000Z'}), 're-signed authorization retries in one time bucket must not spam Feishu');
 assert.notEqual(webhookAlertIdempotencyKey(authorizationAlert), webhookAlertIdempotencyKey({...authorizationAlert, receivedAt: '2026-07-19T00:11:00.000Z'}), 'a later authorization occurrence may alert again');
+const shelfAlert = {eventCode: '3000848', storeKey: 'TZ', receivedAt: '2026-07-21T03:46:32.000Z', normalized: {eventFamily: 'product_shelves', action: 'off_shelf', businessId: 'SKC-1', eventTime: '1784605591040'}};
+assert.equal(
+  webhookAlertIdempotencyKey(shelfAlert),
+  webhookAlertIdempotencyKey({...shelfAlert, idempotencyKey: 'another-site', normalized: {...shelfAlert.normalized, eventTime: '1784605591827'}}),
+  'one per-site shelf callback burst must produce one Feishu incident alert',
+);
+assert.notEqual(
+  webhookAlertIdempotencyKey(shelfAlert),
+  webhookAlertIdempotencyKey({...shelfAlert, normalized: {...shelfAlert.normalized, businessId: 'SKC-2'}}),
+  'different SKCs must remain separate shelf alerts',
+);
 
 const secret = 'app-secret-key';
 const callbackPath = '/api/shein/webhook/v1/events';

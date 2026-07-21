@@ -77,4 +77,14 @@ BI 新增独立“平台动态”子页面，普通状态变化不再塞入首�
 - 本轮关键备份：`/srv/shein-bi/backups/webhook-trusted-proxy-20260720-165027`、`/srv/shein-bi/backups/webhook-worker-quarantine-20260720-173224`、`/srv/shein-bi/backups/webhook-subscription-fixture-remediation-20260720-173325`、`/srv/shein-bi/backups/webhook-final-rollout-20260720-175338`。生产 `shein-bi-webhook.service` 保持 `active + enabled`、worker 正常轮询；飞书问数服务与 Codex `shein-webhook` 续跑任务继续保持暂停。
 - 本次人话修正回滚备份：`/srv/shein-bi/backups/webhook-human-copy-20260720-190110`。
 
+## 2026-07-21 下架通知补全
+
+- 商品下架通知不再只显示 SKC。Webhook worker 与 BI 只读接口会通过受限数据库函数补齐货号、商品/款式、首次上架时间、近 7 天/30 天/累计成交件数与成交额、最近成交日期，并把同一批按站点推送的回调合并成一件业务事件。
+- 飞书与 BI 共用同一套人话文案。下架时间、是否进入回收站来自平台推送；货号、上架时间和销售来自事件时点之前的仓库事实，不使用未来快照。
+- 官方 `3000848` 推送和 `spu-info` 详情接口均不提供下架操作人或下架原因。系统对此明确显示“平台推送未提供”，并指向 SHEIN 后台商品操作记录；禁止根据回收站状态或其他间接字段猜测下架人/原因。
+- 平台一次下架可能在一秒内按多个子站推送多条事件。receipt 继续逐条保留作审计，但 BI 时间线、摘要 KPI 和飞书告警按“店铺 + SKC + 动作 + 分钟”合并；飞书另以两分钟业务事件窗口做稳定幂等，避免一件商品连续刷屏。
+- 新增迁移 `infra/warehouse/migrations/20260721_001_shein_webhook_product_context.sql`。`shein_webhook_ops` 与 `shein_link_ops` 仅获得安全函数执行权，不获得链接或利润明细表的直接查询权。
+- 生产已用 TZ / `sv260423204163159209262` 回读：显示货号 `S1810电热水壶`、首次上架 `2026-04-27 15:07`、近 7 天 `1 件 / 57.46 SAR`、近 30 天 `13 件 / 746.53 SAR`、累计 `20 件 / 1,153.91 SAR`，11 条子站回调合并为 1 条，TZ 近 24 小时 P0 从 11 个回调口径收口为 1 件事。安全函数实测约 27ms；`shein_webhook_ops` 可执行该函数但直接查询利润明细仍被 PostgreSQL 拒绝。
+- 生产备份：`/srv/shein-bi/backups/webhook-product-context-20260721-124921`；安全列热修备份：`/srv/shein-bi/backups/webhook-product-context-hotfix-20260721-125145`。Webhook 与 Portal 均回读为 `active`，健康接口正常。
+
 详细运行与回滚边界见 [SHEIN Webhook 接收与平台动态](shein-webhook-receiver-design.md)。

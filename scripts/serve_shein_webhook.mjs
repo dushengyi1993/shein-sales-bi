@@ -64,6 +64,28 @@ export function webhookSeverityCode(receipt = {}) {
 
 export function webhookAlertIdempotencyKey(receipt = {}) {
   const family = String(receipt?.normalized?.eventFamily || '').trim();
+  if (family === 'product_shelves') {
+    // One merchant action is emitted as a burst of per-site callbacks. Keep
+    // every receipt for audit, but send one operator alert for the business
+    // incident rather than one message per sub-site. A short bucket still lets
+    // a later genuine removal alert again.
+    const intrinsic = String(receipt?.normalized?.eventTime || '').trim();
+    const intrinsicNumber = /^\d{10,16}$/.test(intrinsic) ? Number(intrinsic) : NaN;
+    const intrinsicMs = Number.isFinite(intrinsicNumber)
+      ? (intrinsic.length <= 10 ? intrinsicNumber * 1000 : intrinsic.length <= 13 ? intrinsicNumber : intrinsicNumber / (10 ** (intrinsic.length - 13)))
+      : NaN;
+    const receivedMs = Date.parse(receipt.receivedAt || '');
+    const occurrenceMs = Number.isFinite(intrinsicMs) ? intrinsicMs : (Number.isFinite(receivedMs) ? receivedMs : 0);
+    const bucket = Math.floor(occurrenceMs / (2 * 60_000));
+    const material = [
+      receipt.storeKey || receipt.normalized?.storeKey,
+      family,
+      receipt.normalized?.businessId || receipt.normalized?.skc,
+      receipt.normalized?.action,
+      bucket,
+    ].join('|');
+    return `sync-issue-${crypto.createHash('sha256').update(material).digest('hex').slice(0, 24)}`;
+  }
   if (family === 'authorization') {
     // The official authorization payload has no event id/time and the docs do
     // not promise that retries reuse the signature timestamp. Debounce new
@@ -396,18 +418,20 @@ export function createSheinWebhookService({
       assertLease();
 
       // P0 notification remains independent of enrichment/warehouse success:
-      // a failed downstream sync must never suppress the urgent warning.
+      // a failed downstream sync must never suppress the urgent warning. When
+      // the handler did resolve product facts, reuse that richer copy.
       let alertError = null;
       if (severity.severity === 'P0' && !receipt.alertedAt && notifier?.notify) {
         assertLease();
-        const alertCopy = humanizeSheinWebhookEvent(normalized, severity);
+        const alertNormalized = outcome?.normalized || normalized;
+        const alertCopy = humanizeSheinWebhookEvent(alertNormalized, severity);
         const alertOutcome = {
           title: alertCopy.title,
           summary: alertCopy.summary,
           actionState: 'p0_alert',
         };
         try {
-          await notifier.notify({receipt: workItem, outcome: alertOutcome});
+          await notifier.notify({receipt: {...workItem, normalized: alertNormalized}, outcome: alertOutcome});
           assertLease();
           await repository.markAlerted(receipt.id, {workerId, actionState: 'p0_feishu_alerted'});
         } catch (error) {
@@ -428,7 +452,7 @@ export function createSheinWebhookService({
       await repository.markProcessed(receipt.id, {
         status: 'succeeded',
         workerId,
-        normalized,
+        normalized: outcome?.normalized || normalized,
         severity: severity.severity,
         title: outcome.title,
         summary: outcome.summary,

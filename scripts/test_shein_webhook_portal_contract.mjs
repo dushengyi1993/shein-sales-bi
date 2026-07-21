@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 
-const [portal, webhookServer, writeGate, productExecutor, maintenanceExecutor, nginx, caddy, haproxy, service, notifier, migration, schema] = await Promise.all([
+const [portal, webhookServer, writeGate, productExecutor, maintenanceExecutor, nginx, caddy, haproxy, service, notifier, migration, contextMigration, schema] = await Promise.all([
   fs.readFile(new URL('./serve_bi_portal.mjs', import.meta.url), 'utf8'),
   fs.readFile(new URL('./serve_shein_webhook.mjs', import.meta.url), 'utf8'),
   fs.readFile(new URL('../lib/shein_webhook_write_gate.mjs', import.meta.url), 'utf8'),
@@ -14,6 +14,7 @@ const [portal, webhookServer, writeGate, productExecutor, maintenanceExecutor, n
   fs.readFile(new URL('../infra/systemd/shein-bi-webhook.service', import.meta.url), 'utf8'),
   fs.readFile(new URL('./notify_sync_issue.mjs', import.meta.url), 'utf8'),
   fs.readFile(new URL('../infra/warehouse/migrations/20260719_001_shein_webhook_runtime.sql', import.meta.url), 'utf8'),
+  fs.readFile(new URL('../infra/warehouse/migrations/20260721_001_shein_webhook_product_context.sql', import.meta.url), 'utf8'),
   fs.readFile(new URL('../infra/warehouse/schema.sql', import.meta.url), 'utf8'),
 ]);
 
@@ -92,6 +93,15 @@ for (const sql of [migration, schema]) {
   assert.match(sql, /GRANT EXECUTE ON FUNCTION ops\.apply_shein_webhook_return_snapshot\(text,text,timestamptz,jsonb,jsonb\) TO shein_webhook_ops/);
   assert.doesNotMatch(sql, /GRANT .*fact\.openapi_(?:order|return).* TO shein_link_ops/);
   assert.doesNotMatch(sql, /GRANT .*fact\.openapi_daily|GRANT .*reconciliation/i);
+}
+
+for (const sql of [contextMigration, schema]) {
+  assert.match(sql, /CREATE OR REPLACE FUNCTION ops\.get_shein_webhook_product_context/);
+  assert.match(sql, /SECURITY DEFINER/);
+  assert.match(sql, /REVOKE ALL ON FUNCTION ops\.get_shein_webhook_product_context\(text,text,timestamptz\) FROM PUBLIC/);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION ops\.get_shein_webhook_product_context\(text,text,timestamptz\) TO shein_webhook_ops/);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION ops\.get_shein_webhook_product_context\(text,text,timestamptz\) TO shein_link_ops/);
+  assert.doesNotMatch(contextMigration, /GRANT SELECT ON (?:TABLE )?(?:fact|mart)\./, 'context roles must not receive raw mart SELECT');
 }
 
 console.log('shein_webhook_portal_contract: auth-scoped read model, write gate, ciphertext schema, ingress and P0 notifier passed');

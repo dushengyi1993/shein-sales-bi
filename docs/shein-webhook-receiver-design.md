@@ -90,10 +90,13 @@ expected = randomKey + Base64(UTF8(hashHex))
 
 ## 5. 数据与并发
 
-迁移：`infra/warehouse/migrations/20260719_001_shein_webhook_runtime.sql`
+迁移：`infra/warehouse/migrations/20260719_001_shein_webhook_runtime.sql`；商品通知安全补全：`infra/warehouse/migrations/20260721_001_shein_webhook_product_context.sql`。
 
 - `ops.shein_webhook_receipt`：AES 密文 `event_data`、密文 hash、最小规范化投影、幂等键、状态、lease、重试、告警与处理结果；不保存解密后的原始 payload。
 - `ops.shein_webhook_store_gate`：店铺级授权/额度闸门，同时保存平台事件顺序值；额度乱序按平台 `sendTimeStamp` 而不是本地收件 ID 判新旧。
+- `ops.get_shein_webhook_product_context(store, skc, event_at)`：`SECURITY DEFINER` 只读函数，只返回单个 SKC 的货号、商品/款式、上架时间和聚合销售；调用角色没有底层链接/利润明细表的直接 `SELECT`。查询严格截止事件日期，避免把未来快照写进历史通知。
+
+商品上下架平台会按子站拆成瞬时回调。receipt 逐条留存，业务时间线和摘要按店铺、SKC、动作与分钟合并，飞书按两分钟业务窗口幂等；审计完整性与运营去重分开处理。官方 `3000848` 字段只有 SKC、更新时间、站点、上下架状态、首次/最近上架时间与回收站状态，`spu-info` 也不返回下架人或原因，因此这两项缺失时必须显示“平台推送未提供”，不得推断。
 - worker 使用 `FOR UPDATE SKIP LOCKED` 领取任务；过期 lease 可恢复。
 - worker 只在持有 lease 时按当前 App secret 解密；lease 续约失败会中止后续处理。
 - 最多重试 8 次，指数退避后进入 `dead_letter`。
@@ -103,7 +106,7 @@ expected = randomKey + Base64(UTF8(hashHex))
 
 targeted 与日期 loader 对同一店铺使用同一 PostgreSQL advisory lock；两者都在首次 API 请求前记录版本，日期 loader 的清理、header conflict update 和 child insert 还会再次比较 `source_snapshot_at`。因此锁负责串行，版本负责判新旧：即使日期 loader 先开始抓旧快照、在较新 Webhook 写入后才完成，旧 header、item 和 payment flag 也会被整体拒绝。
 
-worker 直接使用独立受限 PostgreSQL 角色 `shein_webhook_ops`，不调用 `sudo`/Docker。它只获得 webhook receipt/gate 运行权限、五张事实表只读回读和两个按单 apply 函数的执行权；没有事实表原始 `INSERT/UPDATE/DELETE`、日汇总或 reconciliation 写权限，也没有 `ops.link_ops_*` 权限。Portal 继续使用 `shein_link_ops`：数据库只允许它读取 receipt/gate 安全投影，并通过受控函数解除“同一来源 receipt”的授权闸门；不能读取 `event_data/app_id/open_key_id/cipher_hash`、任意改 gate 或修改订单/退货事实。
+worker 直接使用独立受限 PostgreSQL 角色 `shein_webhook_ops`，不调用 `sudo`/Docker。它只获得 webhook receipt/gate 运行权限、五张事实表只读回读、两个按单 apply 函数和商品通知安全聚合函数的执行权；没有链接/利润明细表直接查询权、事实表原始 `INSERT/UPDATE/DELETE`、日汇总或 reconciliation 写权限，也没有 `ops.link_ops_*` 权限。Portal 继续使用 `shein_link_ops`：数据库只允许它读取 receipt/gate 安全投影、调用商品通知安全聚合函数，并通过受控函数解除“同一来源 receipt”的授权闸门；不能读取 `event_data/app_id/open_key_id/cipher_hash`、任意改 gate 或修改订单/退货事实。
 
 ## 6. 写安全边界
 
@@ -118,7 +121,7 @@ worker 直接使用独立受限 PostgreSQL 角色 `shein_webhook_ops`，不调�
 
 ## 7. BI 与飞书
 
-BI：导航新增独立“平台动态”页，提供近 24 小时通知、系统处理中、处理失败、近 24 小时需处理摘要，以及店铺/重要程度/业务内容/系统处理结果筛选。接口沿用 `bi_session` 和账号 `readStores` 权限；SQL 层再次限制店铺范围。
+BI：导航新增独立“平台动态”页，提供近 24 小时通知、系统处理中、处理失败、近 24 小时需处理摘要，以及店铺/重要程度/业务内容/系统处理结果筛选。商品下架卡片使用多行人话详情展示货号、链接、上架时间、销售、下架时间、操作人、原因和下一步；同一批子站回调只占一条。接口沿用 `bi_session` 和账号 `readStores` 权限；SQL 层再次限制店铺范围。
 
 面向运营人员的展示必须遵守同一个“人话”契约：只说发生了什么、系统做了什么、是否需要人工处理。`P0/P1/P3`、`succeeded/retry/dead_letter`、event code、action state、数字平台状态和英文分类原因只保留在数据库、API 内部字段与日志中，不得直接渲染到页面或飞书；历史 receipt 也由 BI 展示层即时翻译，不要求改写审计数据。
 

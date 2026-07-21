@@ -5,6 +5,7 @@ import {createSheinWebhookEventProcessor, humanizeSheinWebhookEvent} from '../li
 const gates = [];
 const currentGates = new Map();
 const updates = [];
+const productContextCalls = [];
 const webhookRepository = {upsertStoreGate: async gate => {
   const key = `${gate.storeKey}:${gate.gateType}`;
   const current = currentGates.get(key);
@@ -20,6 +21,17 @@ const webhookRepository = {upsertStoreGate: async gate => {
   if (applied) currentGates.set(key, {...gate});
   gates.push({...gate, applied});
   return result;
+}, getProductBusinessContext: async input => {
+  productContextCalls.push(input);
+  return {
+    storeKey: input.storeKey,
+    skc: input.skc,
+    supplierCode: input.skc === 'SKC-DOWN' ? 'S1810电热水壶' : '测试货号',
+    productName: input.skc === 'SKC-DOWN' ? 'S1810电热水壶' : '测试商品',
+    variantName: input.skc === 'SKC-DOWN' ? '英规插(220-240V)' : '',
+    firstShelfTime: '2026-04-27 15:07:18',
+    sales: {units7d: 1, grossSales7dSar: 57.46, units30d: 13, grossSales30dSar: 746.53, unitsLifetime: 20, grossSalesLifetimeSar: 1153.91, lastSaleDate: '2026-07-16'},
+  };
 }};
 const task = {
   id: 'task-1', repositoryRevision: 3, ownerUser: 'owner',
@@ -64,6 +76,30 @@ assert.equal(authorizationCopy.title, 'AA 店：店铺授权需要处理');
 assert.match(authorizationCopy.summary, /系统已暂停该店的自动操作/);
 assert.match(authorizationCopy.summary, /请重新检查并恢复授权/);
 assert.doesNotMatch(`${authorizationCopy.title}\n${authorizationCopy.summary}`, /P0|status|状态 6|authorization_exception|OpenAPI/);
+
+const shelfOutcome = await processor.process({
+  ...base,
+  id: 20,
+  severity: {severity: 'P0', notifyFeishu: true},
+  normalized: {
+    eventFamily: 'product_shelves', eventCode: '3000848', eventLabel: '商品上下架通知',
+    storeKey: 'AA', skc: 'SKC-DOWN', businessId: 'SKC-DOWN', action: 'off_shelf',
+    eventTime: '1784605591827', receivedAt: '2026-07-21T03:46:32.789Z',
+    shelfChanges: [{site: 'shein-sa', shelfState: '0', firstShelfTime: '2026-04-27 15:07:18', recycleState: '1'}],
+  },
+  payload: {skcName: 'SKC-DOWN'},
+});
+assert.equal(shelfOutcome.title, 'AA 店：S1810电热水壶被下架');
+assert.match(shelfOutcome.summary, /货号：S1810电热水壶/);
+assert.match(shelfOutcome.summary, /上架时间：2026-04-27 15:07（已上架 85 天）/);
+assert.match(shelfOutcome.summary, /近7天 1 件 \/ 57\.46 SAR/);
+assert.match(shelfOutcome.summary, /近30天 13 件 \/ 746\.53 SAR/);
+assert.match(shelfOutcome.summary, /累计 20 件 \/ 1,153\.91 SAR/);
+assert.match(shelfOutcome.summary, /下架人：平台推送未提供/);
+assert.match(shelfOutcome.summary, /下架原因：平台推送未提供/);
+assert.match(shelfOutcome.summary, /商品已进入回收站/);
+assert.equal(shelfOutcome.normalized.productContextStatus, 'resolved');
+assert.ok(productContextCalls.some(call => call.skc === 'SKC-DOWN'));
 
 const productResult = await processor.process({...base, normalized: {eventFamily: 'product_audit', eventCode: '3001450', eventLabel: '审核', storeKey: 'AA', productId: 'SPU-1', skc: 'SKC-1', businessId: 'DOC-1'}, payload: {spuName: 'SPU-1', skcName: 'SKC-1', documentSn: 'DOC-1', version: '7'}});
 assert.equal(productResult.actionState, 'task_readback_attached');

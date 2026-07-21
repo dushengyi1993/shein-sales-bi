@@ -39,6 +39,7 @@ class FakePool {
         {...baseRow, id: 40, store_key: 'DL', received_at: '2026-07-19T00:00:00.000Z', event_type: 'quota', duplicate: true},
       ]};
     }
+    if (key === 'shein-webhook-get-product-business-context') return {rows: [{context: {storeKey: values[0], skc: values[1], supplierCode: 'S1810电热水壶'}}]};
     if (key === 'shein-webhook-list-store-gates') return {rows: [{store_key: 'JSH', gate_type: 'authorization', state: 'blocked', reason: 'expired', source_receipt_id: 41, source_event_order: null, updated_at: '2026-07-19T01:00:00.000Z'}]};
     if (key === 'shein-webhook-upsert-store-gate') return {rows: [{store_key: values[0], gate_type: values[1], state: values[2], reason: values[3], source_receipt_id: values[4], source_event_order: values[5], updated_at: '2026-07-19T01:01:00.000Z', applied: true}]};
     if (key === 'shein-webhook-reopen-authorization-gate') return {rows: [{store_key: values[0], gate_type: 'authorization', state: 'open', reason: values[2], source_receipt_id: values[1], source_event_order: null, updated_at: '2026-07-19T01:02:00.000Z', applied: true}]};
@@ -94,12 +95,19 @@ assert.match(list.text, /store_key = ANY\(\$1::text\[\]\)/, 'allowed stores must
 assert.equal(list.values[0][0], 'JSH');
 assert.doesNotMatch(list.text, /decrypted_payload|cipher_hash|app_id|open_key_id/, 'frontend projection must exclude secrets and payload');
 assert.match(list.text, /appScopedOnly/, 'business timeline must hide technical validation deliveries by default');
+assert.match(list.text, /row_number\(\) OVER \(PARTITION BY[\s\S]*product_shelves/, 'per-site shelf callbacks must collapse to one business incident');
+assert.match(list.text, /ops\.get_shein_webhook_product_context/, 'historical shelf incidents must receive safe business context at read time');
+assert.doesNotMatch(list.text, /SELECT \*/, 'safe-projection CTE must not request ciphertext or identity columns through SELECT *');
 await repo.listEvents({allowedStores: ['JSH'], limit: 1, includeTechnical: true});
 assert.doesNotMatch(latest(pool, 'shein-webhook-list-events').text, /appScopedOnly/, 'technical audit callers may explicitly include validation deliveries');
 await repo.listEvents({allowedStores: ['JSH'], limit: 1, cursor: events.nextCursor});
 assert.match(latest(pool, 'shein-webhook-list-events').text, /\(received_at, id\) < \(/, 'cursor must be a stable SQL keyset predicate');
 await repo.listEvents({allowedStores: [], limit: 1});
 assert.match(latest(pool, 'shein-webhook-list-events').text, /WHERE FALSE/, 'empty event scope must not become all stores');
+
+const productContext = await repo.getProductBusinessContext({storeKey: 'tz', skc: 'SKC-1', eventAt: '2026-07-21T03:46:32.000Z'});
+assert.equal(productContext.supplierCode, 'S1810电热水壶');
+assert.deepEqual(latest(pool, 'shein-webhook-get-product-business-context').values, ['TZ', 'SKC-1', '2026-07-21T03:46:32.000Z']);
 
 const gates = await repo.listStoreGates({storeKeys: ['JSH']});
 assert.deepEqual(gates[0], {storeKey: 'JSH', gateType: 'authorization', state: 'blocked', reason: 'expired', sourceReceiptId: '41', sourceEventOrder: null, updatedAt: '2026-07-19T01:00:00.000Z'});
@@ -129,6 +137,8 @@ assert.equal(totals.byStore[0].storeKey, 'JSH');
 assert.match(latest(pool, 'shein-webhook-summary-by-store').text, /store_key = ANY/, 'summary scope must also be SQL constrained');
 assert.equal(latest(pool, 'shein-webhook-summary-by-store').preparedName, '', 'dynamic summary SQL must be unnamed');
 assert.match(latest(pool, 'shein-webhook-summary-totals').text, /appScopedOnly/, 'business summary must hide technical validation deliveries by default');
+assert.match(latest(pool, 'shein-webhook-summary-totals').text, /incident_rank=1/, 'summary KPIs must count merged business incidents instead of per-site shelf callbacks');
+assert.doesNotMatch(latest(pool, 'shein-webhook-summary-totals').text, /SELECT \*/, 'summary CTE must stay within the portal safe-column grant');
 await repo.summary({allowedStores: ['JSH'], now: '2026-07-19T02:00:00Z', includeTechnical: true});
 assert.doesNotMatch(latest(pool, 'shein-webhook-summary-totals').text, /appScopedOnly/, 'technical audit callers may explicitly include validation deliveries');
 await repo.summary({allowedStores: '*', now: '2026-07-19T02:00:00Z'});

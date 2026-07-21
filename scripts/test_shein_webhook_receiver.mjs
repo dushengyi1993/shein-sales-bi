@@ -110,7 +110,7 @@ const officialFixtures = Object.freeze({
   '3000910': {severity: 'P3', fields: {productId: 's23121872106', documentId: 'SPMPA320231218041879', skc: 'ss2312187210636233', sku: 'I41y8oidji5y', receivedSuccess: 'true', version: 'SPMP231218173254739'}},
   '3001450': {severity: 'P3', fields: {documentId: 'SPMPA420231215003106', auditState: '2', version: 'SPMP231215009184753', eventTime: '2023-12-18 11:46:43'}},
   '3001449': {severity: 'P3', fields: {documentId: 'SPMPA420231215003106', auditState: '2', version: 'SPMP231215009184753', eventTime: '2023-12-18 11:46:43'}},
-  '3000848': {severity: 'P0', fields: {skc: 'swdress23210526603', status: '0', action: 'off_shelf', eventTime: '1735564506057', shelfStates: ['0']}},
+  '3000848': {severity: 'P0', fields: {skc: 'swdress23210526603', status: '0', action: 'off_shelf', eventTime: '1735564506057', shelfStates: ['0'], shelfChanges: [{site: 'shein-il', shelfState: '0', firstShelfTime: '1970-01-01 08:00:01', lastShelfTime: '2018-08-28 00:00:00', recycleState: '1'}]}},
   '3001903': {severity: 'P0', fields: {skc: 'sd260625185879185501303', status: '3', eventTime: '2026-06-30 14:20:53'}},
   '3001442': {severity: 'P3', fields: {orderId: 'GSHND026A000YW2', status: '1', eventTime: '1706769529786'}},
   '3000914': {severity: 'P3', fields: {returnId: 'ND67E08VAR', eventTime: '1706771656710'}},
@@ -136,6 +136,13 @@ test('normalizes first-batch product receipt/audits/shelves/delete audit and P0 
   assert.equal(allChannels.eventFamily, 'product_audit_all_channels');
   const shelves = normalizeWebhookBusinessEvent({eventCode: '3000848', payload: {spuName: 'SPU-1', operationType: 'OFF_SHELF'}});
   assert.equal(classifyWebhookSeverity({normalizedEvent: shelves}).reason, 'unexpected_product_removal');
+  const detailedShelf = normalizeWebhookBusinessEvent({eventCode: '3000848', payload: {
+    skcName: 'SKC-1', updateTime: 1784605591827, offShelfReason: '重复商品', operatorName: '运营甲',
+    shelfChangeInfos: [{siteChangeInfos: [{site: 'shein-sa', shelfState: 0, firstShelfTime: '2026-04-27 15:07:18', lastShelfTime: '2026-04-27 15:07:18', recycleState: 1}]}],
+  }});
+  assert.equal(detailedShelf.shelfReason, '重复商品');
+  assert.equal(detailedShelf.shelfOperator, '运营甲');
+  assert.deepEqual(detailedShelf.shelfChanges, [{site: 'shein-sa', shelfState: '0', firstShelfTime: '2026-04-27 15:07:18', lastShelfTime: '2026-04-27 15:07:18', recycleState: '1'}]);
   const deleteAudit = normalizeWebhookBusinessEvent({eventCode: '3001450', payload: {documentType: 'DELETE', auditStatus: 'REJECTED'}});
   assert.equal(deleteAudit.action, 'delete_audit');
 });
