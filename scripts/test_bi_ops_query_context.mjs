@@ -201,6 +201,20 @@ try {
     assert.match(bot.stdout, /点击率 4\.00%/);
     assert.doesNotMatch(bot.stdout, /店铺销售排行|敏感信息|未命中商品/);
 
+    const wrappedQuery = [
+      '这是 SHEIN 链接管理中台的一段运营会话。',
+      '敏感登录材料和底层维护类请求只能拒绝说明，也不得输出 token/cookie/密码/密钥。',
+      '负责人规则：在使用登录态时不得读取或输出 token/cookie，任何人不能展示密码。',
+      `用户：${query}`,
+    ].join('\n\n');
+    const wrapped = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'lark_sales_qa_bot.mjs'), '--answer', wrappedQuery], {
+      cwd: ROOT, encoding: 'utf8', timeout: 15_000, maxBuffer: 4 * 1024 * 1024,
+      env: {...env, SHEIN_QA_SAFETY_TEXT: query, SHEIN_QA_QUERY_TEXT: query},
+    });
+    assert.equal(wrapped.status, 0, wrapped.stderr || wrapped.stdout);
+    assert.match(wrapped.stdout, /命中 2 条/);
+    assert.doesNotMatch(wrapped.stdout, /敏感信息/);
+
     const specific = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'lark_sales_qa_bot.mjs'), '--answer', 'TZZ近7天零销量链接：曝光量3000以上，点击率4%以上，只读查询。'], {
       cwd: ROOT, encoding: 'utf8', timeout: 15_000, maxBuffer: 4 * 1024 * 1024, env,
     });

@@ -7271,6 +7271,12 @@ async function askReadonlyOpsAgent(question, options = {}) {
       SHEIN_QA_LLM_TIMEOUT_MS: process.env.SHEIN_QA_LLM_TIMEOUT_MS || '45000',
       SHEIN_QA_CODEX_SESSION_ID: codexSessionId,
       SHEIN_QA_CODEX_SESSION_META_FILE: codexMetaFile,
+      // Safety classification must inspect the operator's latest message, not
+      // the portal-authored wrapper (which itself contains phrases such as
+      // "must not output token/cookie"). The full wrapper remains the answer
+      // prompt so conversation and owner-rule context are preserved.
+      SHEIN_QA_SAFETY_TEXT: String(options.routingText || text),
+      SHEIN_QA_QUERY_TEXT: String(options.routingText || text),
     },
   });
   const codexMeta = await readJsonFile(codexMetaFile, null);

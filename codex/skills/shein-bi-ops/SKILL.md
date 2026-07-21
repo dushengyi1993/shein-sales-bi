@@ -13,6 +13,19 @@ Use the managed launcher, not a copied old `scripts/bi_ops_cli.mjs`:
 
 The launcher checks for an authenticated, hash-verified CLI update before business commands and restarts the same command on the new version when needed.
 
+## Read-only BI questions
+
+For sales, traffic, inventory, profit, returns, link-performance filters, rankings, or other read-only business-data questions, call `ask` first and return its result directly:
+
+```powershell
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" ask --text '<the user question>'
+```
+
+- Use `chat` only for a continuing BI operations conversation or a controlled listing/link action that may create or update a task.
+- Cloud BI is the source of truth. Do not claim that a local V3/export file is required for an ordinary BI query.
+- Never replace a failed BI query with browser scraping, `web-access`, SHEIN login automation, Chrome remote debugging, or a request that the user enable CDP. Those are not valid fallbacks for BI经营数据.
+- If `ask` returns an error, report the exact CLI error and stop. Do not reinterpret a routing error as missing business data and do not invent results.
+
 ## Authority and evidence
 
 Apply this precedence without improvising:

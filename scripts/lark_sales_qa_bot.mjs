@@ -1735,7 +1735,7 @@ function asksForSecretMaterial(text) {
     if (!value || !SECRET_RE.test(value) || !SECRET_ACTION_RE.test(value)) return false;
     // “不要读取认证信息”是安全约束，不是反向索取凭据。只豁免明确
     // 的否定祈使句；“能不能告诉我密码”仍会被拦截。
-    if (/^(?:请)?(?:不要|无需|无须|不得|禁止|避免|不可|不)\s*(?:读取|返回|展示|显示|输出|导出|打印|泄露|访问|使用|涉及|索取)[^，。；\n]{0,24}(?:token|cookie|密码|密钥|secret|凭据|认证信息|验证码|登录态|session)/i.test(value)) return false;
+    if (/^(?:请)?(?:也)?(?:不要|无需|无须|不得|禁止|避免|不可|不能|不应|不可以|不)\s*(?:读取|返回|展示|显示|输出|导出|打印|泄露|访问|使用|涉及|索取)[^，。；\n]{0,24}(?:token|cookie|密码|密钥|secret|凭据|认证信息|验证码|登录态|session)/i.test(value)) return false;
     return true;
   });
 }
@@ -2792,11 +2792,12 @@ function answerPolicyFallback(text, data, policy = {}) {
   return '';
 }
 
-async function answerQuestionSmart(text, data, policy = {}, linkOpsTask = null, conversation = null) {
-  const linkFilterAnswer = answerLinkPerformanceFilter(text, data);
+async function answerQuestionSmart(text, data, policy = {}, linkOpsTask = null, conversation = null, queryText = text) {
+  const routingText = String(queryText || text);
+  const linkFilterAnswer = answerLinkPerformanceFilter(routingText, data);
   if (linkFilterAnswer) return linkFilterAnswer;
-  if (shouldAnswerDeterministicallyFirst(text, policy)) return answerQuestion(text, data);
-  const contextDraft = compactSalesContext(text, data);
+  if (shouldAnswerDeterministicallyFirst(routingText, policy)) return answerQuestion(routingText, data);
+  const contextDraft = compactSalesContext(routingText, data);
   contextDraft.securityPolicy = {
     decision: policy.decision || '',
     mode: policy.mode || '',
@@ -2818,9 +2819,9 @@ async function answerQuestionSmart(text, data, policy = {}, linkOpsTask = null, 
   const conversationContext = summarizeConversationForContext(conversation);
   if (conversationContext) contextDraft.conversation = conversationContext;
   const loadMeta = biQueryMetaByData.get(data) || null;
-  const sectionFacts = buildBiOpsSectionFacts(text, data, loadMeta);
+  const sectionFacts = buildBiOpsSectionFacts(routingText, data, loadMeta);
   const context = buildBiOpsQueryContext(contextDraft, {
-    question: text,
+    question: routingText,
     loadMeta,
     sectionFacts,
     maxBytes: BI_CONTEXT_MAX_BYTES,
@@ -2843,9 +2844,9 @@ async function answerQuestionSmart(text, data, policy = {}, linkOpsTask = null, 
   } catch (err) {
     console.error(JSON.stringify({ok: false, stage: 'llm_answer_failed', error: String(err?.message || err).slice(0, 800)}));
   }
-  const policyFallback = answerPolicyFallback(text, data, policy);
+  const policyFallback = answerPolicyFallback(routingText, data, policy);
   if (policyFallback) return policyFallback;
-  return answerQuestion(text, data);
+  return answerQuestion(routingText, data);
 }
 
 function shouldAnswerEvent(event) {
@@ -3027,12 +3028,13 @@ async function consume(options = {}) {
 
 const args = parseArgs(process.argv.slice(2));
 if (args.answer) {
-  const data = await readData(args.answer);
-  const policy = classifySafety(args.answer, {chat_type: 'p2p', message_type: 'text', sender_type: 'user'});
+  const queryText = String(process.env.SHEIN_QA_QUERY_TEXT || process.env.SHEIN_QA_SAFETY_TEXT || args.answer);
+  const data = await readData(queryText);
+  const policy = classifySafety(queryText, {chat_type: 'p2p', message_type: 'text', sender_type: 'user'});
   if (policy.blocked) {
     console.log(policy.blockMessage);
   } else {
-    console.log(await answerQuestionSmart(args.answer, data, policy));
+    console.log(await answerQuestionSmart(args.answer, data, policy, null, null, queryText));
   }
 } else if (args.renderChart) {
   const data = await readData(args.renderChart);
