@@ -361,7 +361,7 @@
 - `cloud_ops_watchdog.mjs`：云端 systemd/watchdog 新鲜度检查；销售/BI 页面按高频阈值，链接/业务域按日更低频阈值，并按 80% / 88% / 93% 三档监测根盘容量，异常时调用 `notify_sync_issue.mjs` 发飞书提醒。对孤立的历史营销扫描 warning，仅在 `lib/cloud_watchdog_recovery.mjs` 验证后续扫描更新、新鲜、19 店完整且 payload/行数自洽时记录 recovery；不删除历史 warning，也不吞掉其它异常。
 - `cloud_disk_maintenance.sh`：每周低优先级磁盘维护；抓数产物本地保留 30 天，COS 归档必须通过 gzip、成员清单和 SHA256 校验后才删除未变化的本地文件。profile 缓存仅在根盘达到 80%、没有有效浏览器租约且没有 Chrome 进程时清理，Cookie 与持久登录状态不在目标清单中。
 
-- `lark_sales_qa_bot.mjs`：云端只读问数核心，供网页和 Owner CLI 复用（独立飞书监听 service 仍暂停）；每轮从 BI Portal JSON 动态压缩销售、店铺、货号、链接/覆盖上下文并回复，不写数据库、飞书 Base 或 SHEIN 后台。近 7 天曝光/点击率/销量组合筛选直接读取 `storeLinks`，点击率按近 7 天商详访客除以曝光重算，不交给模型猜路由；安全约束中的否定式凭据词不算索取。产品文本和图表 label 优先使用 `product_display_name` / `productDisplayNames`。
+- `lark_sales_qa_bot.mjs`：云端只读问数核心，供网页和 Owner CLI 复用（独立飞书监听 service 仍暂停）；每轮从 BI Portal JSON 动态压缩销售、店铺、货号、链接/覆盖上下文并回复，不写数据库、飞书 Base 或 SHEIN 后台。近 7 天曝光/点击率/销量组合筛选直接读取 `storeLinks`，点击率按近 7 天商详访客除以曝光重算，不交给模型猜路由；“全店最低折后价”同样走确定性查询，只采用当前有效的后台折后价、普通活动价或限时折扣价，并返回并列最低链接、覆盖数与快照时间。安全约束中的否定式凭据词不算索取。产品文本和图表 label 优先使用 `product_display_name` / `productDisplayNames`。
 
 - `cloud_shein_session_manager.mjs` / `cloud_shein_session_manager.sh`：云端登录态管家；顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并输出 profile 体积报告。
 
@@ -602,6 +602,7 @@
 - `scripts/bi_ops_cli.mjs`：Owner/合伙人 CLI；云端业务命令前自动刷新负责人规则，`knowledge-status` 可做显式诊断；`chat/jobs/job/wait-job/--profile/--scope-all` 均不扩大写权限。
 - `scripts/bi_ops_intent_planner.mjs` / `lib/bi_ops_intent_planner.mjs`：严格 JSON schema 的结构化意图规划；只理解和规划，不执行 SHEIN 写。
 - `lib/bi_ops_query_context.mjs`：按账号和店铺压缩/脱敏 BI 问数与任务上下文，限制长度并避免把跨账号会话或内部执行字段交给模型。
+- `lib/marketing_price_lead_merge.mjs`：按证据等级和时间合并营销价格线索；高等级实时扫描保护当前价格、有效状态与来源，低等级历史计划仅补空字段，避免把已生效价格降级成计划价。
 - `lib/bi_ops_model_policy.mjs`：Luna/Terra/Sol 分层和超时策略；网页禁止 max/ultra。
 - `lib/bi_ops_agent_governor.mjs`：并发、每账号队列、速率和熔断护栏。
 - `lib/link_ops_repository.mjs` / `lib/link_ops_store_gateway.mjs` / `lib/link_ops_json_repository.mjs`：PostgreSQL 行级仓库、旧 snapshot 兼容网关和本地 JSON 测试仓库。

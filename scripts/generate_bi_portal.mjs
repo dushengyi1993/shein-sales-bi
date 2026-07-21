@@ -12,6 +12,7 @@ import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import {enrichProductDisplayNames} from '../lib/product_display_name.mjs';
 import {getAliasConfig} from '../lib/product_sku_normalizer.mjs';
+import {mergeRankedMarketingPriceLead} from '../lib/marketing_price_lead_merge.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORTAL_GENERATE_TIMEOUT_MS = Number(process.env.SHEIN_BI_PORTAL_TIMEOUT_MS || 900_000);
@@ -1096,40 +1097,7 @@ function mergeMarketingPriceLead(map, lead) {
   if (!key) return;
   const previous = map.get(key);
   const next = Object.fromEntries(nonEmptyObjectEntries(normalizeMarketingPriceLead(lead)));
-  const source = {
-    type: next.marketing_price_evidence_type || '',
-    file: next.marketing_price_source_file || '',
-    at: next.marketing_price_source_at || '',
-  };
-  if (!previous) {
-    map.set(key, {
-      ...next,
-      marketing_price_evidence_count: 1,
-      marketing_price_sources: source.file ? [source] : [],
-    });
-    return;
-  }
-  const merged = {...previous};
-  for (const [field, value] of nonEmptyObjectEntries(next)) {
-    if (field === 'marketing_price_note' && merged[field]) {
-      if (!String(merged[field]).includes(String(value))) merged[field] = `${merged[field]}；${value}`;
-      continue;
-    }
-    if (field === 'marketing_price_source_file' || field === 'marketing_price_source_at' || field === 'marketing_price_evidence_type') {
-      const currentAt = String(merged.marketing_price_source_at || '');
-      const incomingAt = String(next.marketing_price_source_at || '');
-      const currentRank = Number(merged.marketing_price_source_rank || 0);
-      const incomingRank = Number(next.marketing_price_source_rank || 0);
-      if (incomingRank > currentRank || (incomingRank === currentRank && incomingAt > currentAt)) merged[field] = value;
-      continue;
-    }
-    merged[field] = value;
-  }
-  merged.marketing_price_evidence_count = Number(previous.marketing_price_evidence_count || 1) + 1;
-  const sources = Array.isArray(previous.marketing_price_sources) ? previous.marketing_price_sources.slice() : [];
-  if (source.file && !sources.some(x => x.file === source.file && x.type === source.type)) sources.push(source);
-  merged.marketing_price_sources = sources.slice(-8);
-  map.set(key, merged);
+  map.set(key, mergeRankedMarketingPriceLead(previous, next));
 }
 
 async function readPackagedMarketingPriceLeads(root, map, summary) {

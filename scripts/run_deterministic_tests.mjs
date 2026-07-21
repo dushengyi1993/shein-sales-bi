@@ -34,6 +34,7 @@ const tests = [
   'scripts/test_business_domain_fetch_contract.mjs',
   'scripts/test_marketing_plan_selector.mjs',
   'scripts/test_marketing_scan_resilience.mjs',
+  'scripts/test_marketing_price_lead_merge.mjs',
   'scripts/test_cloud_watchdog_recovery.mjs',
   'scripts/test_bi_client_resilience.mjs',
   'scripts/test_bi_frontend_accessibility.mjs',

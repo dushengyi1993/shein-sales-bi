@@ -2749,6 +2749,126 @@ function answerLinkPerformanceFilter(text, data) {
   ].join('\n');
 }
 
+function positivePriceNumbers(value) {
+  return (String(value ?? '').match(/-?\d+(?:\.\d+)?/g) || [])
+    .map(Number)
+    .filter(number => Number.isFinite(number) && number > 0);
+}
+
+function currentPriceFlag(value) {
+  return value === true || value === 1 || String(value || '').toLowerCase() === 'true' || String(value || '') === '1';
+}
+
+function activeDiscountCandidates(row) {
+  const candidates = [];
+  const add = (label, value, sourceAt) => {
+    const values = positivePriceNumbers(value);
+    if (!values.length) return;
+    candidates.push({label, value: Math.min(...values), sourceAt: String(sourceAt || '').trim()});
+  };
+  const platformPrices = positivePriceNumbers(row?.current_price_range_sar);
+  const comparisonPrices = positivePriceNumbers(row?.original_supply_price_range_sar || row?.purchase_price_range_sar || row?.list_price_range_sar);
+  if (platformPrices.length) {
+    const sameAsComparison = comparisonPrices.length === platformPrices.length
+      && platformPrices.every((value, index) => Math.abs(value - comparisonPrices[index]) < 0.005);
+    if (!sameAsComparison) add('后台折后价', row.current_price_range_sar, row.current_price_source_at);
+  }
+  const evidenceType = String(row?.marketing_price_evidence_type || '');
+  const ordinaryCurrent = currentPriceFlag(row?.marketing_ordinary_price_is_current)
+    || /current_ordinary_marketing_live_scan|active_ordinary/i.test(evidenceType);
+  const limitedCurrent = currentPriceFlag(row?.marketing_limited_discount_is_current)
+    || /current_limited_discount_live_scan|active_limited_discount_live_scan|active_limited/i.test(evidenceType);
+  if (ordinaryCurrent) add('普通活动价', row?.marketing_suggested_ordinary_price_sar, row?.marketing_price_source_at);
+  if (limitedCurrent) add('限时折扣价', row?.marketing_limited_discount_price_sar, row?.marketing_price_source_at);
+  return candidates.sort((left, right) => left.value - right.value || left.label.localeCompare(right.label, 'zh-Hans-CN'));
+}
+
+function requestedProductModels(text) {
+  return [...new Set((String(text || '').toUpperCase().match(/\b[A-Z]{1,8}-\d[A-Z0-9-]{1,24}\b/g) || [])
+    .filter(value => !/^SV\d/i.test(value)))];
+}
+
+function rowMatchesProductModel(row, model) {
+  const escaped = String(model || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (!escaped) return false;
+  const pattern = new RegExp(`(^|[^A-Z0-9])${escaped}(?=$|[^A-Z0-9])`, 'i');
+  return pattern.test([
+    row?.standard_goods_sn,
+    row?.raw_goods_sn,
+    row?.product_display_name,
+    row?.product_name_cn,
+  ].filter(Boolean).join('|'));
+}
+
+function isOnShelfLink(row) {
+  return row?.is_on_shelf === true || /(?:已上架|正常在售)/u.test(String(row?.shelf_status_name || ''));
+}
+
+function chinaTimestamp(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(text) && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(text)
+    ? `${text.replace(' ', 'T')}+08:00`
+    : text;
+  const date = new Date(normalized);
+  if (!Number.isFinite(date.getTime())) return text;
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(date).filter(part => part.type !== 'literal').map(part => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+}
+
+function answerLowestCurrentDiscountPrices(text, data) {
+  const q = normalizeText(text);
+  if (!/(?:折后价|活动价|促销价)/u.test(q) || !/(?:最低|最便宜|低价)/u.test(q)) return '';
+  const models = requestedProductModels(q);
+  if (!models.length) return '';
+  const sourceRows = asArray(data.storeLinks).length ? asArray(data.storeLinks) : asArray(data.links);
+  if (!sourceRows.length) return '';
+  const output = ['全部店铺当前在售链接最低折后价（SAR，不含额外优惠券）'];
+  let latestPriceAt = '';
+  let latestLinkDate = '';
+  for (const model of models) {
+    const unique = new Map();
+    for (const row of sourceRows) {
+      if (!rowMatchesProductModel(row, model)) continue;
+      const store = String(row?.store_key || '').toUpperCase();
+      const skc = String(row?.skc || '').trim();
+      if (!store || !skc) continue;
+      const key = `${store}\u0000${skc}`;
+      const previous = unique.get(key);
+      if (!previous || String(row.link_date || '') >= String(previous.link_date || '')) unique.set(key, row);
+    }
+    const allLinks = [...unique.values()];
+    const onShelf = allLinks.filter(isOnShelfLink);
+    const priced = [];
+    const missing = [];
+    for (const row of onShelf) {
+      const candidate = activeDiscountCandidates(row)[0];
+      latestLinkDate = [latestLinkDate, String(row?.link_date || '').slice(0, 10)].sort().at(-1) || latestLinkDate;
+      if (!candidate) {
+        missing.push(`${row.store_key}/${row.skc}`);
+        continue;
+      }
+      latestPriceAt = [latestPriceAt, candidate.sourceAt].sort().at(-1) || latestPriceAt;
+      priced.push({...candidate, store: String(row.store_key), skc: String(row.skc)});
+    }
+    priced.sort((left, right) => left.value - right.value || left.store.localeCompare(right.store) || left.skc.localeCompare(right.skc));
+    if (!priced.length) {
+      output.push(`${model}：在售 ${onShelf.length} 条 / 总链接 ${allLinks.length} 条，当前折后价取价 0 条。${missing.length ? ` 未取价：${missing.join('、')}` : ''}`);
+      continue;
+    }
+    const minimum = priced[0].value;
+    const ties = priced.filter(item => Math.abs(item.value - minimum) < 0.005);
+    output.push(`${model}：${minimum.toFixed(2)} SAR｜${ties.map(item => `${item.store}/${item.skc}`).join('、')}｜${ties[0].label}｜在售 ${onShelf.length} 条，取价 ${priced.length} 条，未取价 ${missing.length} 条${missing.length ? `（${missing.join('、')}）` : ''}`);
+  }
+  const priceAt = chinaTimestamp(latestPriceAt);
+  if (priceAt || latestLinkDate) output.push(`价格快照：${priceAt || '-'}；链接数据：${latestLinkDate || data.dates?.linkDate || '-'}`);
+  output.push('只使用当前已生效的后台折后价/活动价；未把原价、供货价、计划价或历史成交价当成当前折后价。');
+  return output.join('\n');
+}
+
 function shouldAnswerDeterministicallyFirst(text, policy = {}) {
   if (policy?.isOpsWrite || policy?.needsPublicWeb) return false;
   const q = normalizeText(text);
@@ -2794,6 +2914,8 @@ function answerPolicyFallback(text, data, policy = {}) {
 
 async function answerQuestionSmart(text, data, policy = {}, linkOpsTask = null, conversation = null, queryText = text) {
   const routingText = String(queryText || text);
+  const discountPriceAnswer = answerLowestCurrentDiscountPrices(routingText, data);
+  if (discountPriceAnswer) return discountPriceAnswer;
   const linkFilterAnswer = answerLinkPerformanceFilter(routingText, data);
   if (linkFilterAnswer) return linkFilterAnswer;
   if (shouldAnswerDeterministicallyFirst(routingText, policy)) return answerQuestion(routingText, data);

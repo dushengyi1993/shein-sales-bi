@@ -169,8 +169,8 @@ try {
       links: [],
       matrix: [],
       storeLinks: [
-        {store_key: 'TZZ', standard_goods_sn: 'VAC-01', skc: 'sv10000000000000001', c7_eps_uv: 4000, c7_goods_uv: 200, c7_sale_cnt: 0, shelf_status_name: '已上架', link_date: '2026-07-10'},
-        {store_key: 'JSH', standard_goods_sn: 'TOAST-02', skc: 'sv10000000000000002', c7_eps_uv: 3000, c7_goods_uv: 120, c7_sale_cnt: 0, shelf_status_name: '已上架', link_date: '2026-07-10'},
+        {store_key: 'TZZ', standard_goods_sn: 'VAC-01', skc: 'sv10000000000000001', c7_eps_uv: 4000, c7_goods_uv: 200, c7_sale_cnt: 0, shelf_status_name: '已上架', link_date: '2026-07-10', marketing_limited_discount_price_sar: 90, marketing_limited_discount_is_current: true, marketing_price_evidence_type: 'current_limited_discount_live_scan', marketing_price_source_at: '2026-07-10T03:00:00.000Z'},
+        {store_key: 'JSH', standard_goods_sn: 'TOAST-02', skc: 'sv10000000000000002', c7_eps_uv: 3000, c7_goods_uv: 120, c7_sale_cnt: 0, shelf_status_name: '已上架', link_date: '2026-07-10', marketing_limited_discount_price_sar: 50, marketing_limited_discount_is_current: true, marketing_price_evidence_type: 'current_limited_discount_live_scan', marketing_price_source_at: '2026-07-10T03:00:00.000Z'},
         {store_key: 'XC', standard_goods_sn: 'FAIL-03', skc: 'sv10000000000000003', c7_eps_uv: 5000, c7_goods_uv: 199, c7_sale_cnt: 0, shelf_status_name: '已上架', link_date: '2026-07-10'},
         {store_key: 'HL', standard_goods_sn: 'FAIL-03', skc: 'sv10000000000000004', c7_eps_uv: 7000, c7_goods_uv: 350, c7_sale_cnt: 1, shelf_status_name: '已上架', link_date: '2026-07-10'},
       ],
@@ -214,6 +214,15 @@ try {
     assert.equal(wrapped.status, 0, wrapped.stderr || wrapped.stdout);
     assert.match(wrapped.stdout, /命中 2 条/);
     assert.doesNotMatch(wrapped.stdout, /敏感信息/);
+
+    const prices = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'lark_sales_qa_bot.mjs'), '--answer', '找出 VAC-01、TOAST-02 在所有店铺链接最低的当前折后价'], {
+      cwd: ROOT, encoding: 'utf8', timeout: 15_000, maxBuffer: 4 * 1024 * 1024, env,
+    });
+    assert.equal(prices.status, 0, prices.stderr || prices.stdout);
+    assert.match(prices.stdout, /VAC-01：90\.00 SAR｜TZZ\/sv10000000000000001/);
+    assert.match(prices.stdout, /TOAST-02：50\.00 SAR｜JSH\/sv10000000000000002/);
+    assert.match(prices.stdout, /在售 1 条，取价 1 条，未取价 0 条/);
+    assert.doesNotMatch(prices.stdout, /priceScatter|供货价代替|无法可靠/);
 
     const specific = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'lark_sales_qa_bot.mjs'), '--answer', 'TZZ近7天零销量链接：曝光量3000以上，点击率4%以上，只读查询。'], {
       cwd: ROOT, encoding: 'utf8', timeout: 15_000, maxBuffer: 4 * 1024 * 1024, env,
