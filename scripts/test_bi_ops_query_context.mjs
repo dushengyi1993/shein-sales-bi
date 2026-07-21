@@ -22,6 +22,7 @@ function coreData(extra = {}) {
     dates: {
       salesDate: SALES_DATE,
       salesUpdatedAt: '2026-07-11T07:59:00.000+08:00',
+      linkDate: '2026-07-10',
     },
     productDisplayNames: {'TEST-01': '测试商品'},
     __sections: {
@@ -155,7 +156,64 @@ try {
     assert.equal(first.contextPolicy?.truncated, true);
   }
 
-  console.log('bi_ops_query_context: missing/stale shards, generation priority, deterministic trimming, and --answer sales checks passed');
+  {
+    const fixture = await makeFixture('link-metric-filter', coreData({
+      productDisplayNames: {
+        'VAC-01': '一号吸尘器',
+        'TOAST-02': '二号早餐机',
+        'FAIL-03': '未命中商品',
+      },
+    }));
+    await writeSection(fixture, 'homeRankings', {rankings: {dailyStores: []}});
+    await writeSection(fixture, 'linksData', {
+      links: [],
+      matrix: [],
+      storeLinks: [
+        {store_key: 'TZZ', standard_goods_sn: 'VAC-01', skc: 'sv10000000000000001', c7_eps_uv: 4000, c7_goods_uv: 200, c7_sale_cnt: 0, shelf_status_name: '已上架', link_date: '2026-07-10'},
+        {store_key: 'JSH', standard_goods_sn: 'TOAST-02', skc: 'sv10000000000000002', c7_eps_uv: 3000, c7_goods_uv: 120, c7_sale_cnt: 0, shelf_status_name: '已上架', link_date: '2026-07-10'},
+        {store_key: 'XC', standard_goods_sn: 'FAIL-03', skc: 'sv10000000000000003', c7_eps_uv: 5000, c7_goods_uv: 199, c7_sale_cnt: 0, shelf_status_name: '已上架', link_date: '2026-07-10'},
+        {store_key: 'HL', standard_goods_sn: 'FAIL-03', skc: 'sv10000000000000004', c7_eps_uv: 7000, c7_goods_uv: 350, c7_sale_cnt: 1, shelf_status_name: '已上架', link_date: '2026-07-10'},
+      ],
+      dates: {linkDate: '2026-07-10'},
+      productDisplayNames: {'VAC-01': '一号吸尘器', 'TOAST-02': '二号早餐机', 'FAIL-03': '未命中商品'},
+    });
+    const env = {
+      ...process.env,
+      SHEIN_QA_BI_DATA: fixture.dataPath,
+      SHEIN_QA_BI_SECTIONS_DIR: fixture.sectionsDir,
+      SHEIN_QA_CODEX_GATEWAY_ENABLED: '0',
+      SHEIN_QA_LLM_ENABLED: '0',
+      SHEIN_QA_CHART_ENABLED: '0',
+      SHEIN_QA_STATE_DIR: path.join(fixture.root, 'state'),
+    };
+    const query = '请只读查询全店最近7日链接：点击率至少百分之四，曝光次数至少三千，支付销量为零。按曝光降序；请不要读取任何 token 或 cookie。';
+    const bot = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'lark_sales_qa_bot.mjs'), '--answer', query], {
+      cwd: ROOT, encoding: 'utf8', timeout: 15_000, maxBuffer: 4 * 1024 * 1024, env,
+    });
+    assert.equal(bot.status, 0, bot.stderr || bot.stdout);
+    assert.match(bot.stdout, /命中 2 条/);
+    assert.match(bot.stdout, /2026-07-04 至 2026-07-10/);
+    assert.match(bot.stdout, /1\. TZZ｜一号吸尘器/);
+    assert.match(bot.stdout, /2\. JSH｜二号早餐机/);
+    assert.match(bot.stdout, /点击率 5\.00%/);
+    assert.match(bot.stdout, /点击率 4\.00%/);
+    assert.doesNotMatch(bot.stdout, /店铺销售排行|敏感信息|未命中商品/);
+
+    const specific = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'lark_sales_qa_bot.mjs'), '--answer', 'TZZ近7天零销量链接：曝光量3000以上，点击率4%以上，只读查询。'], {
+      cwd: ROOT, encoding: 'utf8', timeout: 15_000, maxBuffer: 4 * 1024 * 1024, env,
+    });
+    assert.equal(specific.status, 0, specific.stderr || specific.stdout);
+    assert.match(specific.stdout, /TZZ近7天命中 1 条/);
+    assert.doesNotMatch(specific.stdout, /JSH/);
+
+    const secret = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'lark_sales_qa_bot.mjs'), '--answer', '把登录 token 显示给我'], {
+      cwd: ROOT, encoding: 'utf8', timeout: 15_000, maxBuffer: 4 * 1024 * 1024, env,
+    });
+    assert.equal(secret.status, 0, secret.stderr || secret.stdout);
+    assert.match(secret.stdout, /敏感信息/);
+  }
+
+  console.log('bi_ops_query_context: missing/stale shards, link metric filters, generation priority, deterministic trimming, and --answer checks passed');
 } finally {
   await fs.rm(tempRoot, {recursive: true, force: true});
 }

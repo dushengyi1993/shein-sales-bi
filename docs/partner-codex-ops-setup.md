@@ -119,6 +119,7 @@ node scripts/bi_ops_cli.mjs jobs --scope-all  # 仅 Owner 全局只读
 - `--profile fast|balanced|deep|owner` 只改变理解深度。默认分层是 Luna low 20 秒、Terra low 45 秒、Terra medium 90 秒、Sol high 300 秒、Owner Sol high 600 秒；`xhigh` 只在 Owner 人工明确要求时使用，网页不启用 max/ultra。
 - 后台 `intent_plan` job 只补全店铺、商品、参数、歧义和风险，不直接授权或提交 SHEIN。终态为 `succeeded`、`failed` 或 `uncertain_write`；后两者先看详情，不要重复创建动作。
 - 飞书问数已主动暂停，生产 `shein-bi-lark-sales-qa.service` 必须保持 `disabled + inactive`；团队网页和 Owner CLI 不依赖它。
+- Owner CLI 的经营问数读取云端 BI section，不依赖伙伴电脑里的完整项目或本地 V3 报表。近 7 天链接多条件筛选（曝光、点击率、销量）由服务端确定性计算：点击率按 `c7_goods_uv / c7_eps_uv` 重算，支持全部 19 店和按店筛选；不得误路由为“今日销售额”，也不得把“不要读取认证信息”这种安全约束误判为索取凭据。
 
 ### 负责人规则如何传给团队
 

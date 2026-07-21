@@ -44,7 +44,7 @@ const CONVERSATION_DIR = process.env.SHEIN_QA_CONVERSATION_DIR || path.join(STAT
 const CONVERSATION_TTL_MS = Math.max(0, Number(process.env.SHEIN_QA_CONVERSATION_TTL_MS || 0));
 const LINK_OPS_TASK_FILE = process.env.SHEIN_QA_LINK_OPS_TASK_FILE || path.join(ROOT, 'state', 'bi_link_ops_tasks.json');
 const LARK_LINK_OPS_TASK_WRITE_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_LINK_OPS_TASK_WRITE_ENABLED || '0').toLowerCase());
-const STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ'];
+const STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
 const biQueryMetaByData = new WeakMap();
 
 function parseArgList(raw) {
@@ -1662,7 +1662,8 @@ function appendConversationTurn(conversation, event, {policy, answer, chartSpec,
 }
 
 const INFRA_ACTION_RE = /重启|部署|发布版本|发版|改代码|修改代码|提交代码|提交git|git\s+push|push|pull|reset|删库|清库|迁移数据库|执行SQL|跑SQL|改表|drop\s+table|truncate|systemctl|sudo|ssh|shell|命令行|定时器|timer|service|docker|nginx|caddy|metabase|postgres|数据库|服务器|BI系统|BI门户|源码|仓库|github|配置文件|auth\.json|config\.toml/i;
-const SECRET_RE = /token|cookie|密码|密钥|secret|app[_ -]?secret|auth\.json|config\.toml|凭据|验证码|session/i;
+const SECRET_RE = /token|cookie|密码|密钥|secret|app[_ -]?secret|auth\.json|config\.toml|凭据|认证信息|验证码|登录态|session/i;
+const SECRET_ACTION_RE = /发|给|看|显示|展示|输出|导出|返回|读取|打印|告诉|是什么|复制|下载|泄露/;
 const ECOM_DOMAIN_RE = /SHEIN|shein|希音|沙特|半托|电商|运营|店铺|货号|SKU|sku|SKC|skc|商品|产品|链接|上架|下架|标题|主图|图片|套图|卖点|五点|描述|关键词|竞品|竞对|搜索词|流量|曝光|访客|点击|支付|转化|销售|销量|订单|利润|成本|退货|退款|售后|库存|ET|et|货代|去化|补货|活动|报名|折扣|促销|定价|价格|BI|bi|图表|画图|信息图|日报|看板|动作池|任务池/;
 const OPS_WRITE_RE = /改标题|换标题|优化标题并(替换|执行|提交)|换图|更换图片|改主图|上传图片|补链接|补链|创建链接|复制上品|上品|上链接|发布商品|刊登|提交审核|恢复上架|重新上架|再次上架|改为上架|设为上架|设置上架|恢复在售|下架|归档|删除链接|停掉链接|报活动|活动报名|报名活动|设置折扣|限时折扣|改价|调价|改价格|改库存|补证书|补资质|执行|开始处理|加入任务池|加入动作池/;
 const DRAFT_OR_RESEARCH_RE = /优化标题|标题优化|写标题|生成标题|改写标题|卖点|五点|描述|文案|关键词|竞品|竞对|参考|调研|搜索|查一下|找一下|分析.*标题|图片方案|套图方案/;
@@ -1726,12 +1727,23 @@ function isClearLinkOpsActionCommand(text) {
   return true;
 }
 
+function asksForSecretMaterial(text) {
+  return normalizeText(text).split(/[，。；\n]+/).some(clause => {
+    const value = clause.trim();
+    if (!value || !SECRET_RE.test(value) || !SECRET_ACTION_RE.test(value)) return false;
+    // “不要读取认证信息”是安全约束，不是反向索取凭据。只豁免明确
+    // 的否定祈使句；“能不能告诉我密码”仍会被拦截。
+    if (/^(?:请)?(?:不要|无需|无须|不得|禁止|避免|不可|不)\s*(?:读取|返回|展示|显示|输出|导出|打印|泄露|访问|使用|涉及|索取)[^，。；\n]{0,24}(?:token|cookie|密码|密钥|secret|凭据|认证信息|验证码|登录态|session)/i.test(value)) return false;
+    return true;
+  });
+}
+
 function classifySafety(text, event = {}, conversation = null) {
   const q = normalizeText(text);
   const isEcom = ECOM_DOMAIN_RE.test(q);
   const inheritedEcom = !isEcom && isFollowupText(q) && conversationHasEcommerceContext(conversation);
   const effectiveIsEcom = isEcom || inheritedEcom;
-  const asksSecret = SECRET_RE.test(q) && /发|给|看|显示|导出|读取|打印|告诉|是什么|复制|下载|泄露/.test(q);
+  const asksSecret = asksForSecretMaterial(q);
   const isOpsWrite = effectiveIsEcom && isClearLinkOpsActionCommand(q);
   const isDraftOrResearch = DRAFT_OR_RESEARCH_RE.test(q) && effectiveIsEcom;
   const isInfra = INFRA_ACTION_RE.test(q) && !isOpsWrite;
@@ -2373,6 +2385,7 @@ async function callReadonlyLlm(question, context) {
                 '标题优化、卖点、关键词、竞品参考等需求允许使用公开网页资料做只读调研；不得登录、绕过权限、抓取内部/敏感信息，也不得输出 token/cookie/密码/密钥。',
                 '每次回答都必须基于本轮 JSON 重新查数；最新用户消息换了店铺、货号、SKC 或指标时，以最新消息为准，指代不完整时再结合上文。',
                 '不要编造未提供的数据；缺数据就明确说缺哪类数据。',
+                '只读经营指标筛选属于允许范围；用户说“不要读取认证信息/不要返回 token”是在声明安全约束，不是索取凭据，不得据此拒绝经营数据查询。',
                 '上下文里的 inventory.products 是 ET/成本表实物库存与去化口径，platformStockAlerts 是 SHEIN 平台展示库存；不要把二者混为一谈。只要 inventory 里有数据，就不能说“看不到 ET 库存”。',
                 '不要给出修改 BI 系统、服务器、代码、密钥、账号、非 SHEIN 业务的建议。',
                 '涉及上品、改标题、换图、下架、活动报名、限时折扣等运营写操作时，必须强调飞书只读，实际建任务/预检/确认要回到 BI 自动化运营页。',
@@ -2478,6 +2491,7 @@ async function callReadonlyCodexGateway(question, context) {
     '如果 securityPolicy.mode=ops_write_readonly_advice，说明飞书当前只读：你可以给出建议和下一步，但不能说已建任务；请提示用户到 BI 自动化运营页创建任务并预检确认。',
     '标题优化、卖点、关键词、竞品参考等需求允许使用公开网页资料做只读调研；不得登录、绕过权限、抓取内部/敏感信息，也不得输出 token/cookie/密码/密钥。',
     '每次回答都必须基于本轮提供的最新 BI JSON 上下文重新查数；如果最新用户消息换了店铺、货号、SKC 或指标，以最新消息为准，指代不完整时再结合上文。',
+    '只读经营指标筛选属于允许范围；用户说“不要读取认证信息/不要返回 token”是在声明安全约束，不是索取凭据，不得据此拒绝经营数据查询。',
     '你可以根据下面提供的 BI JSON 上下文回答；只有标题/关键词/竞品/公开资料调研类问题才允许读取公开网页，除此之外不要调用外部网站；不允许修改文件，不允许绕过上层执行器直接执行 SHEIN 写操作。',
     '上下文里的 inventory.products 是 ET/成本表实物库存与去化口径，platformStockAlerts 是 SHEIN 平台展示库存；不要把二者混为一谈。只要 inventory 里有数据，就不能说“看不到 ET 库存”。',
     '如果用户问上品、改标题、换图、下架、活动、限时折扣，不能说已经静默执行，也不能说已在飞书建任务；应说明飞书只读，并建议回到 BI 自动化运营页生成任务、预检和确认。',
@@ -2635,6 +2649,104 @@ function answerQuestion(text, data) {
   ].join('\n');
 }
 
+function parseChineseMetricNumber(value) {
+  const raw = String(value || '').replace(/,/g, '').trim();
+  if (!raw) return null;
+  if (/^\d+(?:\.\d+)?$/.test(raw)) return Number(raw);
+  const digits = new Map(Object.entries({零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9}));
+  const units = new Map(Object.entries({十: 10, 百: 100, 千: 1000}));
+  let total = 0;
+  let section = 0;
+  let current = 0;
+  for (const char of raw) {
+    if (digits.has(char)) {
+      current = digits.get(char);
+      continue;
+    }
+    if (units.has(char)) {
+      section += (current || 1) * units.get(char);
+      current = 0;
+      continue;
+    }
+    if (char === '万') {
+      total += (section + current || 1) * 10_000;
+      section = 0;
+      current = 0;
+      continue;
+    }
+    return null;
+  }
+  return total + section + current;
+}
+
+function metricThreshold(text, labelPattern) {
+  const match = normalizeText(text).match(new RegExp(`${labelPattern}([^，。；\\n]{0,32})`, 'iu'));
+  if (!match) return null;
+  const percentIndex = match[1].indexOf('百分之');
+  const metricText = percentIndex >= 0 ? match[1].slice(percentIndex + 3) : match[1];
+  const literals = metricText.match(/\d+(?:,\d{3})*(?:\.\d+)?|[零〇一二两三四五六七八九十百千万]+/gu) || [];
+  for (const literal of literals) {
+    const parsed = parseChineseMetricNumber(literal);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function answerLinkPerformanceFilter(text, data) {
+  const q = normalizeText(text);
+  if (!/(?:近|最近)\s*7\s*(?:天|日)/u.test(q)) return '';
+  if (!/点击率/u.test(q) || !/曝光/u.test(q) || !/(?:销量|成交件数)/u.test(q)) return '';
+  if (!/(?:零销量|销量[^，。；\n]{0,12}(?:等于|为|=|不高于|至多)?\s*(?:0|零)|(?:支付)?销量为零)/u.test(q)) return '';
+
+  const clickLiteral = metricThreshold(q, '点击率');
+  const exposureThreshold = metricThreshold(q, '曝光(?:量|次数|人数)?');
+  if (!Number.isFinite(clickLiteral) || !Number.isFinite(exposureThreshold)) return '';
+  const clickThreshold = /百分之|%/u.test(q) || clickLiteral > 1 ? clickLiteral / 100 : clickLiteral;
+  const stores = pickStoresSmart(q);
+  const sourceRows = asArray(data.storeLinks).length ? asArray(data.storeLinks) : asArray(data.links);
+  const uniqueRows = new Map();
+  for (const row of sourceRows) {
+    const storeKey = String(row?.store_key || '').toUpperCase();
+    const skc = String(row?.skc || '').trim();
+    if (!storeKey || !skc || !rowMatchesStores(row, stores)) continue;
+    const key = `${storeKey}\u0000${skc}`;
+    const prior = uniqueRows.get(key);
+    if (!prior || String(row.link_date || '') > String(prior.link_date || '')) uniqueRows.set(key, row);
+  }
+  const matches = [...uniqueRows.values()].map(row => {
+    const exposure = n(row.c7_eps_uv);
+    const visitors = n(row.c7_goods_uv);
+    const clickRate = exposure > 0 ? visitors / exposure : 0;
+    return {row, exposure, visitors, clickRate, sales: n(row.c7_sale_cnt)};
+  }).filter(item => item.exposure >= exposureThreshold && item.clickRate >= clickThreshold && item.sales === 0)
+    .sort((left, right) => right.exposure - left.exposure
+      || right.clickRate - left.clickRate
+      || String(left.row.store_key || '').localeCompare(String(right.row.store_key || ''))
+      || String(left.row.skc || '').localeCompare(String(right.row.skc || '')));
+
+  const latestDate = String(data.dates?.linkDate || matches[0]?.row?.link_date || '').slice(0, 10);
+  const startDate = latestDate ? addDays(latestDate, -6) : '';
+  const scope = stores.length ? stores.join('、') : '全部店铺';
+  const thresholdLabel = `${(clickThreshold * 100).toFixed(2).replace(/\.00$/, '')}%`;
+  const header = `${scope}近7天命中 ${matches.length} 条：点击率 ≥ ${thresholdLabel}、曝光量 ≥ ${intNum(exposureThreshold)}、销量 = 0`;
+  if (!matches.length) {
+    return [header, latestDate ? `统计区间：${startDate} 至 ${latestDate}` : '', '本次没有符合条件的链接。'].filter(Boolean).join('\n');
+  }
+  const lines = matches.map((item, index) => {
+    const row = item.row;
+    const product = productDisplayName(row, data) || String(row.standard_goods_sn || row.raw_goods_sn || '未命名商品');
+    const supplierCode = String(row.standard_goods_sn || row.raw_goods_sn || '').trim();
+    const status = String(row.shelf_status_name || '').trim();
+    return `${index + 1}. ${row.store_key}｜${product}${supplierCode && supplierCode !== product ? `｜货号 ${supplierCode}` : ''}｜${row.skc}｜曝光 ${intNum(item.exposure)}｜点击率 ${(item.clickRate * 100).toFixed(2)}%｜销量 0${status ? `｜${status}` : ''}`;
+  });
+  return [
+    header,
+    latestDate ? `统计区间：${startDate} 至 ${latestDate}；点击率按近7天商详访客 ÷ 近7天曝光量重算。` : '点击率按近7天商详访客 ÷ 近7天曝光量重算。',
+    ...lines,
+    'BI 当前没有单独下发可点击的商品网址；以上 SKC 是链接唯一定位编号。',
+  ].join('\n');
+}
+
 function shouldAnswerDeterministicallyFirst(text, policy = {}) {
   if (policy?.isOpsWrite || policy?.needsPublicWeb) return false;
   const q = normalizeText(text);
@@ -2679,6 +2791,8 @@ function answerPolicyFallback(text, data, policy = {}) {
 }
 
 async function answerQuestionSmart(text, data, policy = {}, linkOpsTask = null, conversation = null) {
+  const linkFilterAnswer = answerLinkPerformanceFilter(text, data);
+  if (linkFilterAnswer) return linkFilterAnswer;
   if (shouldAnswerDeterministicallyFirst(text, policy)) return answerQuestion(text, data);
   const contextDraft = compactSalesContext(text, data);
   contextDraft.securityPolicy = {
