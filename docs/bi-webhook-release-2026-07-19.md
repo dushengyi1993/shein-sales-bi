@@ -88,5 +88,6 @@ BI 新增独立“平台动态”子页面，普通状态变化不再塞入首�
 - 新增迁移 `infra/warehouse/migrations/20260721_001_shein_webhook_product_context.sql`。`shein_webhook_ops` 与 `shein_link_ops` 仅获得安全函数执行权，不获得链接或利润明细表的直接查询权。
 - 生产已用 TZ / `sv260423204163159209262` 回读：显示货号 `S1810电热水壶`、首次上架 `2026-04-27 15:07`、近 7 天 `1 件 / 57.46 SAR`、近 30 天 `13 件 / 746.53 SAR`、累计 `20 件 / 1,153.91 SAR`；同一 SKC 的子站重复回调静默收口为一件事。安全函数实测约 27ms；`shein_webhook_ops` 可执行该函数但直接查询利润明细仍被 PostgreSQL 拒绝。
 - 生产备份：`/srv/shein-bi/backups/webhook-product-context-20260721-124921`；安全列热修备份：`/srv/shein-bi/backups/webhook-product-context-hotfix-20260721-125145`。Webhook 与 Portal 均回读为 `active`，健康接口正常。
+- 2026-07-21 审核失败补全已部署，回滚备份为 `/srv/shein-bi/backups/webhook-audit-enrichment-20260721-141508`。TZ receipt `407` 已用平台原回调原因和同店只读议价单回填：货号 `(全)KJ-102三明治机和早餐机`、我方申报价 `106.00 SAR`、平台建议价 `70.79 SAR`、剩余议价次数 `4`；BI 安全事件接口已回读为新的人话卡片，Webhook/Portal 均为 `active`。历史飞书消息不追改，后续真实审核失败自动使用新模板。
 
 详细运行与回滚边界见 [SHEIN Webhook 接收与平台动态](shein-webhook-receiver-design.md)。
