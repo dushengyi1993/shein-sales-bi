@@ -148,6 +148,8 @@ assert.match(auditOutcome.summary, /剩余议价次数：4/);
 assert.doesNotMatch(auditOutcome.summary, /款式：|平台未提供/);
 assert.equal(auditOutcome.normalized.auditContextStatus, 'resolved');
 assert.equal(auditLookupCalls.length, 1);
+assert.equal(auditLookupCalls[0].productId, '');
+assert.equal(auditLookupCalls[0].version, '');
 
 const unavailableAuditProcessor = createSheinWebhookEventProcessor({
   webhookRepository,
