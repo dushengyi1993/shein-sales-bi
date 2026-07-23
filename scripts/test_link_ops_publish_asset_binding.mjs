@@ -39,7 +39,16 @@ check('retains approved 45dB image', JSON.stringify(bound.payload), text => text
 check('uses measured square image', bound.evidence.squareDimensions, '1254x1254');
 check('replaces source SKC images', JSON.stringify(bound.payload), text => !text.includes('source.jpg'));
 check('binds separate SPU carousel', bound.payload.image_info?.image_info_list?.[0]?.image_url, 'https://img.shein.com/upload/carousel.png');
-check('binds SKU image to uploaded main', bound.payload.skc_list[0].sku_list[0].image_info.image_info_list[0].image_url, 'https://img.shein.com/upload/main.png');
+check('does not invent SKU image when no skuImage role was planned', 'image_info' in bound.payload.skc_list[0].sku_list[0], false);
+check('reports no SKU image when no skuImage role was planned', bound.evidence.skuImage, '');
+
+const explicitSkuBindings = [
+  ...bindings,
+  {name: '13-sku.png', role: 'skuImage', imageType: 1, imageUrl: 'https://img.shein.com/upload/sku.png', width: 900, height: 1200, order: 6},
+];
+const explicitlyBoundSku = applyApprovedImageBindingsToPublishPayload(payload, explicitSkuBindings, {sourceApproved: true});
+check('binds SKU image only when explicitly planned', explicitlyBoundSku.payload.skc_list[0].sku_list[0].image_info.image_info_list[0].image_url, 'https://img.shein.com/upload/sku.png');
+check('reports explicitly planned SKU image', explicitlyBoundSku.evidence.skuImage, '13-sku.png');
 
 const overridden = applyExplicitPublishPreparationOverrides(bound.payload, {
   standardGoodsSn: '(全)SK-999食品料理机',

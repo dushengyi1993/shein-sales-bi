@@ -2584,8 +2584,18 @@ function isExplicitUpdateTitleIntent(text) {
 
 function normalizeIntentsForCommand(intents = [], command = '') {
   const out = [...new Set(asArray(intents).map(x => String(x || '').trim()).filter(Boolean))];
-  if (out.includes('copy_product_draft') && out.includes('update_title') && isCopySourceTitleHint(command, true) && !isExplicitUpdateTitleIntent(command)) {
-    return out.filter(x => x !== 'update_title');
+  if (out.includes('copy_product_draft')) {
+    const publishPreparationIntents = new Set([
+      'update_images',
+      'update_inventory',
+      'update_supply_price',
+      'certificate_review',
+    ]);
+    return out.filter(intent => {
+      if (publishPreparationIntents.has(intent)) return false;
+      if (intent !== 'update_title') return true;
+      return isExplicitUpdateTitleIntent(command) && !isCopySourceTitleHint(command, true);
+    });
   }
   return out.length ? out : ['manual_review'];
 }
