@@ -10,6 +10,11 @@ const source = fs.readFileSync(path.join(root, 'scripts', 'bi_app', 'client.js')
 assert.match(source, /window\.addEventListener\('hashchange',syncTabFromLocation\)/, 'hash navigation stays synchronized');
 assert.match(source, /window\.addEventListener\('popstate',syncTabFromLocation\)/, 'browser back and forward are handled');
 assert.match(source, /document\.addEventListener\('visibilitychange'/, 'long-open tabs refresh after becoming visible');
+assert.match(source, /setInterval\(\(\)=>\{revalidateCore\(\)\.catch\(\(\)=>\{\}\)\},CORE_VISIBLE_POLL_MS\)/, 'visible long-open tabs periodically revalidate core');
+assert.match(source, /function scheduleSectionRecheck\(n\)/, 'stale sections schedule an automatic recheck');
+assert.match(source, /load\(n,true,false,true\)/, 'section rechecks bypass browser state without forcing duplicate generation');
+assert.match(source, /if\(needsRecheck\)scheduleSectionRecheck\(n\)/, 'stale or background-refresh responses are polled until current');
+assert.match(source, /完成后页面会自动更新/, 'operator copy promises only the implemented automatic update');
 assert.match(source, /await core\(\{silent:true,ensureAfter:false\}\)/, 'section version mismatches revalidate core first');
 assert.match(source, /versionWarning=.*数据版本与 core 暂未同步/, 'persistent mismatches degrade to an explicit stale warning');
 assert.doesNotMatch(source, /throw Error\(n\+' generatedAt 不匹配/, 'version mismatches must not hard-fail a usable cached page');

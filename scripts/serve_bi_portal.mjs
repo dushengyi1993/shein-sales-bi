@@ -45,6 +45,10 @@ import {
   writeBiSectionCache,
 } from '../lib/bi_section_cache.mjs';
 import {
+  evaluateProfitMartCacheFreshness,
+  PROFIT_MART_CORE_SKEW_MS,
+} from '../lib/bi_profit_mart_freshness.mjs';
+import {
   BiOpsAgentGovernorError,
   createBiOpsAgentGovernor,
 } from '../lib/bi_ops_agent_governor.mjs';
@@ -6894,17 +6898,18 @@ async function ensureProfitMartCacheFresh(args, generatedAt = '') {
         stderr: `${refreshed.stderr || ''}\n[ensureProfitMartCacheFresh] freshness check failed; refreshed cache instead: ${err?.message || err}`,
       };
     }
-    const factOrderMax = String(freshness.factOrderMax || '').slice(0, 10);
-    const profitCacheMax = String(freshness.profitCacheMax || '').slice(0, 10);
-    const profitCacheRows = Number(freshness.profitCacheRows || 0);
-    const metaRefreshedAtMs = Date.parse(String(freshness.metaRefreshedAt || ''));
-    const generatedAtMs = Date.parse(String(generatedAt || ''));
-    const generatedFresh = !generatedAtMs || (Number.isFinite(metaRefreshedAtMs) && metaRefreshedAtMs >= generatedAtMs);
-    if (profitCacheRows > 0 && factOrderMax && profitCacheMax >= factOrderMax && generatedFresh) {
+    const decision = evaluateProfitMartCacheFreshness(freshness, {
+      coreGeneratedAt: generatedAt,
+      allowedCoreSkewMs: Math.max(
+        0,
+        Number(process.env.SHEIN_BI_PROFIT_MART_CORE_SKEW_MS || PROFIT_MART_CORE_SKEW_MS),
+      ),
+    });
+    if (decision.fresh) {
       return {
         code: 0,
         timedOut: false,
-        stdout: `[ensureProfitMartCacheFresh] cache fresh factOrderMax=${factOrderMax} profitCacheMax=${profitCacheMax} rows=${profitCacheRows} metaRefreshedAt=${freshness.metaRefreshedAt || ''} coreGeneratedAt=${generatedAt || ''}`,
+        stdout: `[ensureProfitMartCacheFresh] cache fresh factOrderMax=${decision.factOrderMax} profitCacheMax=${decision.profitCacheMax} rows=${decision.profitCacheRows} metaRefreshedAt=${freshness.metaRefreshedAt || ''} coreGeneratedAt=${generatedAt || ''} allowedCoreSkewMs=${decision.allowedCoreSkewMs}`,
         stderr: '',
       };
     }

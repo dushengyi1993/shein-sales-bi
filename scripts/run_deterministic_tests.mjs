@@ -39,6 +39,7 @@ const tests = [
   'scripts/test_bi_client_resilience.mjs',
   'scripts/test_bi_frontend_accessibility.mjs',
   'scripts/test_bi_section_cache.mjs',
+  'scripts/test_bi_profit_mart_freshness.mjs',
   'scripts/test_bi_ops_agent_governor.mjs',
   'scripts/test_bi_ops_model_policy.mjs',
   'scripts/test_bi_ops_intent_planner.mjs',
