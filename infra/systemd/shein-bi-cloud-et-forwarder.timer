@@ -1,8 +1,8 @@
 [Unit]
-Description=Run SHEIN BI cloud ET forwarder sync every two hours
+Description=Run SHEIN BI cloud ET forwarder sync at business checkpoints
 
 [Timer]
-OnCalendar=*-*-* 01,03,05,07,09,11,13,15,17,19,21,23:20:00
+OnCalendar=*-*-* 01,04,07,10,13,17,20,23:20:00
 Persistent=false
 Unit=shein-bi-cloud-et-forwarder.service
 

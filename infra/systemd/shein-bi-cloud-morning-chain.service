@@ -11,6 +11,7 @@ Environment=TZ=Asia/Shanghai
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=SHEIN_BI_MORNING_CHAIN_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-morning-chain.lock
 Environment=SHEIN_BI_MORNING_SEND_LARK_REPORT=0
+Environment=SHEIN_BI_MORNING_SALES_REFRESH=0
 TimeoutStartSec=21600
 Nice=10
 IOSchedulingClass=best-effort

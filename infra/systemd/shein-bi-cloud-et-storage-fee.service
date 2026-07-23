@@ -41,4 +41,5 @@ ProtectClock=true
 ProtectHostname=true
 LockPersonality=true
 RestrictRealtime=true
+ExecStartPre=+/usr/bin/install -d -o sheinops -g sheinops -m 0750 /opt/shein-bi/app/tmp/et-captcha
 ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_et_storage_fee_sync.sh daily

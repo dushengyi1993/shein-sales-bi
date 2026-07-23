@@ -17,7 +17,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_STATE_DIR = path.join(ROOT, 'state', 'cloud_ops_watchdog');
 const DEFAULT_LOG_DIR = process.env.SHEIN_CLOUD_WATCHDOG_LOG_DIR || '/srv/shein-bi/logs/cloud-watchdog';
 const UNIT_NAMES = [
-  'shein-bi-cloud-today.service',
+  'shein-bi-portal.service',
+  'shein-bi-webhook.service',
   'shein-bi-cloud-yesterday.service',
   'shein-bi-db-backup.service',
   'shein-bi-cloud-et-forwarder.service',
@@ -27,8 +28,8 @@ const UNIT_NAMES = [
   'shein-bi-cloud-order-closure.service',
   'shein-bi-cloud-disk-maintenance.service',
 ];
+const ALWAYS_RUNNING_UNITS = new Set(['shein-bi-portal.service', 'shein-bi-webhook.service']);
 const TIMER_NAMES = [
-  'shein-bi-cloud-today.timer',
   'shein-bi-cloud-yesterday.timer',
   'shein-bi-db-backup.timer',
   'shein-bi-cloud-et-forwarder.timer',
@@ -118,6 +119,26 @@ function hoursSince(value) {
 function fmtHours(n) {
   if (n === null || n === undefined || !Number.isFinite(n)) return '-';
   return `${Math.round(n * 10) / 10}h`;
+}
+
+function newerTimestamp(a, b) {
+  const left = parseDate(a);
+  const right = parseDate(b);
+  if (left && right) return left >= right ? a : b;
+  return left ? a : (right ? b : (a || b || ''));
+}
+
+async function readPortalRuntimeHealth() {
+  try {
+    const response = await fetch('http://127.0.0.1:8787/api/health', {
+      signal: AbortSignal.timeout(5_000),
+      headers: {'Accept': 'application/json'},
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
 }
 
 
@@ -367,7 +388,9 @@ async function main() {
     const abnormalState = status.ActiveState === 'failed' || !resultOk;
     const acknowledgedExit = abnormalExit && !abnormalState && serviceExitAcks.has(serviceExitAckKey(status));
     status.serviceExitAcknowledged = acknowledgedExit;
-    if (abnormalState || (abnormalExit && !acknowledgedExit)) {
+    if (ALWAYS_RUNNING_UNITS.has(unit) && status.ActiveState !== 'active') {
+      issues.push(`常驻服务未运行：${unit} state=${status.ActiveState || '-'} result=${status.Result || '-'}`);
+    } else if (abnormalState || (abnormalExit && !acknowledgedExit)) {
       issues.push(`服务异常：${unit} state=${status.ActiveState || '-'} result=${status.Result || '-'} exit=${status.ExecMainStatus || '-'} code=${status.ExecMainCode || '-'}`);
     }
   }
@@ -467,16 +490,27 @@ async function main() {
   }
 
   const portal = await readPortalDates(args.portalData);
+  const portalRuntime = await readPortalRuntimeHealth();
   if (portal.error) {
     issues.push(`BI 数据文件不可读：${portal.error}`);
   } else {
     const generatedAge = hoursSince(portal.generatedAt);
-    const salesAge = hoursSince(portal.dates?.salesUpdatedAt);
+    const salesTimestamp = newerTimestamp(
+      portal.dates?.salesUpdatedAt,
+      portalRuntime?.liveUpdates?.lastOrderAt,
+    );
+    const salesAge = hoursSince(salesTimestamp);
     const businessAge = hoursSince(portal.dates?.businessUpdatedAt);
     const linkAge = hoursSince(portal.dates?.linkUpdatedAt);
     const etAge = hoursSince(portal.dates?.etUpdatedAt);
-    if (generatedAge === null || generatedAge > 4.5) issues.push(`BI 页面生成过期：${portal.generatedAt || '-'} age=${fmtHours(generatedAge)}，阈值=4.5h`);
-    if (salesAge === null || salesAge > 4.5) issues.push(`SHEIN 销售源过期：${portal.dates?.salesUpdatedAt || '-'} age=${fmtHours(salesAge)}，阈值=4.5h`);
+    if (generatedAge === null || generatedAge > 30) issues.push(`BI 页面底稿过期：${portal.generatedAt || '-'} age=${fmtHours(generatedAge)}，阈值=30h`);
+    if (salesAge === null || salesAge > 30) issues.push(`SHEIN 销售数据过期：${salesTimestamp || '-'} age=${fmtHours(salesAge)}，阈值=30h`);
+    if (!portalRuntime) {
+      issues.push('BI 实时运行状态不可读：Portal /api/health 无响应');
+    }
+    if (portalRuntime?.liveUpdates?.enabled === true && portalRuntime.liveUpdates.connected !== true) {
+      issues.push(`BI 实时更新通道未连接：channel=${portalRuntime.liveUpdates.channel || '-'} error=${portalRuntime.liveUpdates.lastError || '-'}`);
+    }
     // 业务域/链接表现是低频日更，不按销售高频阈值判断。
     if (businessAge === null || businessAge > 48) issues.push(`SHEIN 业务域日更过期：${portal.dates?.businessUpdatedAt || '-'} age=${fmtHours(businessAge)}，阈值=48h`);
     if (linkAge === null || linkAge > 48) issues.push(`SHEIN 链接表现日更过期：${portal.dates?.linkUpdatedAt || '-'} age=${fmtHours(linkAge)}，阈值=48h`);

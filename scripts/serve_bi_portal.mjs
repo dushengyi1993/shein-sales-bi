@@ -19,6 +19,7 @@ import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import crypto from 'node:crypto';
 import os from 'node:os';
+import pg from 'pg';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
 import {executeUploadPic} from '../lib/openapi_adapters/upload_pic.mjs';
 import {executeTransformPic} from '../lib/openapi_adapters/transform_pic.mjs';
@@ -85,8 +86,10 @@ import {
   biOpsIntentPlanToTaskInput,
   runBiOpsIntentPlanner,
 } from '../lib/bi_ops_intent_planner.mjs';
+import {warehousePgConfigFromEnv} from '../lib/warehouse_pg.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const {Client: PgClient} = pg;
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
 const SHEIN_OPENAPI_LOCAL_CONFIG_FILE = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
 const BI_OPS_WRITE_WHITELIST_FILE = process.env.SHEIN_BI_OPS_WRITE_WHITELIST_FILE || path.join(ROOT, 'config', 'bi_ops_write_whitelist.local.json');
@@ -183,8 +186,11 @@ const OPENAPI_IMAGE_ASSET_ALLOWED_MIME = new Set(['image/jpeg', 'image/png']);
 const OPENAPI_IMAGE_ASSET_TYPES = new Set([1, 2, 5, 6, 7]);
 const DEFAULT_SHEIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
 const DEFAULT_MANUAL_LOGIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
-const BI_PORTAL_SECTION_KEYS = new Set(['homeProfit', 'homeRankings', 'rankings', 'profit', 'actions', 'linksData', 'productSalesDaily', 'homeTrafficDaily', 'productTrafficDaily', 'inventoryTrend', 'comments', 'orders', 'priceScatter', 'afterSales', 'rtvData', 'waybills']);
+const BI_PORTAL_SECTION_KEYS = new Set(['homeProfit', 'homeRankings', 'rankings', 'profit', 'actions', 'linksData', 'productSalesDaily', 'homeTrafficDaily', 'productTrafficDaily', 'inventoryTrend', 'comments', 'orders', 'liveSalesToday', 'priceScatter', 'afterSales', 'rtvData', 'waybills']);
 const BI_PORTAL_SECTION_TIMEOUT_MS = Math.max(60_000, Number(process.env.SHEIN_BI_SECTION_TIMEOUT_MS || 900_000));
+const BI_LIVE_UPDATE_CHANNEL = 'shein_bi_live_update';
+const BI_LIVE_UPDATE_RECONNECT_MS = Math.max(1_000, Number(process.env.SHEIN_BI_LIVE_UPDATE_RECONNECT_MS || 5_000));
+const BI_LIVE_UPDATE_HEARTBEAT_MS = Math.max(10_000, Number(process.env.SHEIN_BI_LIVE_UPDATE_HEARTBEAT_MS || 25_000));
 const OPENAPI_READ_PROBE_SUMMARY_FILE = process.env.SHEIN_OPENAPI_READ_PROBE_SUMMARY_FILE
   || path.join(ROOT, 'state', 'openapi-probes', 'read-probes.latest.json');
 const OPENAPI_SALES_RECONCILIATION_SUMMARY_FILE = process.env.SHEIN_OPENAPI_SALES_RECONCILIATION_SUMMARY_FILE
@@ -198,6 +204,7 @@ const OPENAPI_SALES_RECONCILIATION_FRESH_MS = Math.max(60_000, Number(process.en
 const OPENAPI_RETURN_RECONCILIATION_FRESH_MS = Math.max(60_000, Number(process.env.SHEIN_OPENAPI_RETURN_RECONCILIATION_FRESH_MS || 14 * 24 * 60 * 60 * 1000));
 const OPENAPI_PRODUCT_RECONCILIATION_FRESH_MS = Math.max(60_000, Number(process.env.SHEIN_OPENAPI_PRODUCT_RECONCILIATION_FRESH_MS || 14 * 24 * 60 * 60 * 1000));
 const biSectionInFlight = new Map();
+const biSectionForceRerun = new Set();
 let biSectionBackgroundQueue = Promise.resolve();
 let biProfitMartFreshnessPromise = null;
 const DEFAULT_BI_PORTAL_CORE_WARMUP_SECTIONS = ['homeRankings', 'profit', 'homeProfit', 'afterSales', 'orders', 'waybills'];
@@ -6798,8 +6805,18 @@ function buildHomeProfitSummaryFromProfitData(profitData, sourceMeta = {}) {
 }
 
 function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt, options = {}) {
-  const key = `${root}|${section}|${generatedAt || ''}`;
-  if (biSectionInFlight.has(key)) return true;
+  const force = options.force === true;
+  const key = `${root}|${section}|${generatedAt || ''}${force ? '|force' : ''}`;
+  if (biSectionInFlight.has(key)) {
+    if (force && !biSectionForceRerun.has(key)) {
+      biSectionForceRerun.add(key);
+      biSectionInFlight.get(key).finally(() => {
+        biSectionForceRerun.delete(key);
+        scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt, {force: true});
+      }).catch(() => {});
+    }
+    return true;
+  }
   const previousQueue = biSectionBackgroundQueue.catch(() => {});
   const run = previousQueue.then(async () => {
     const startedAt = Date.now();
@@ -6810,10 +6827,12 @@ function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt,
       logBiPortalCoreWarmup('section-background-skip', {section, reason: 'core-changed', generatedAt, latestGeneratedAt});
       return null;
     }
-    const currentCache = await readBiSectionCache(root, section, generatedAt).catch(() => null);
-    if (currentCache) {
-      logBiPortalCoreWarmup('section-background-skip', {section, reason: 'already-cached', generatedAt});
-      return currentCache;
+    if (!force) {
+      const currentCache = await readBiSectionCache(root, section, generatedAt).catch(() => null);
+      if (currentCache) {
+        logBiPortalCoreWarmup('section-background-skip', {section, reason: 'already-cached', generatedAt});
+        return currentCache;
+      }
     }
     const payload = await generateBiSection(args, root, section, generatedAt);
     logBiPortalCoreWarmup('section-background-done', {section, generatedAt, durationMs: Date.now() - startedAt});
@@ -6876,6 +6895,7 @@ async function readProfitMartCacheFreshness(args) {
   const sql = `
 SELECT jsonb_build_object(
   'factOrderMax', (SELECT max(created_date) FROM fact.order_item),
+  'factUpdatedAt', (SELECT max(updated_at) FROM fact.order_item),
   'profitCacheMax', (SELECT max(created_date) FROM mart.profit_order_item_cache),
   'profitCacheRows', (SELECT count(*) FROM mart.profit_order_item_cache),
   'metaRefreshedAt', (SELECT max(refreshed_at) FROM mart.profit_mart_cache_meta WHERE cache_key='profit_marts' AND status='ok')
@@ -6919,7 +6939,7 @@ async function ensureProfitMartCacheFresh(args, generatedAt = '') {
       return {
         code: 0,
         timedOut: false,
-        stdout: `[ensureProfitMartCacheFresh] cache fresh factOrderMax=${decision.factOrderMax} profitCacheMax=${decision.profitCacheMax} rows=${decision.profitCacheRows} metaRefreshedAt=${freshness.metaRefreshedAt || ''} coreGeneratedAt=${generatedAt || ''} allowedCoreSkewMs=${decision.allowedCoreSkewMs}`,
+        stdout: `[ensureProfitMartCacheFresh] cache fresh factOrderMax=${decision.factOrderMax} factUpdatedAt=${freshness.factUpdatedAt || ''} profitCacheMax=${decision.profitCacheMax} rows=${decision.profitCacheRows} metaRefreshedAt=${freshness.metaRefreshedAt || ''} coreGeneratedAt=${generatedAt || ''} allowedCoreSkewMs=${decision.allowedCoreSkewMs}`,
         stderr: '',
       };
     }
@@ -7019,7 +7039,7 @@ async function loadBiSection(args, root, section, options = {}) {
     if (!allowGenerate) {
       return {status: 403, payload: {ok: false, section, error: 'Section refresh is disabled in read-only or unauthenticated LAN mode'}};
     }
-    const refreshScheduled = scheduleBiSectionBackgroundGeneration(args, root, section, meta.generatedAt);
+    const refreshScheduled = scheduleBiSectionBackgroundGeneration(args, root, section, meta.generatedAt, {force: true});
     const currentRaw = await readBiSectionCacheRaw(root, section, meta.generatedAt, true, {
       ...options,
       extraFields: {refreshScheduled, coreGeneratedAt: meta.generatedAt},
@@ -7151,6 +7171,218 @@ function logBiPortalCoreWarmup(message, extra = {}) {
     .filter(([, value]) => value !== undefined && value !== null && value !== '')
     .map(([key, value]) => `${key}=${String(value)}`);
   console.error(`[bi-core-warmup] ${message}${parts.length ? ` ${parts.join(' ')}` : ''}`);
+}
+
+function liveUpdatesEnabled(env = process.env) {
+  return !['0', 'false', 'no', 'off'].includes(String(env.SHEIN_BI_LIVE_UPDATES_ENABLED || '1').trim().toLowerCase());
+}
+
+function boundedLiveText(value, limit = 160) {
+  return String(value ?? '').trim().replace(/[\r\n]+/g, ' ').slice(0, limit);
+}
+
+/**
+ * Convert a database NOTIFY payload into the small, non-sensitive message that
+ * may be sent to every logged-in browser. The warehouse remains the source of
+ * truth: this only identifies which read-only portal sections need refreshing.
+ */
+export function normalizeBiLiveUpdatePayload(payload, now = new Date()) {
+  const raw = String(payload ?? '').trim();
+  if (!raw || raw.length > 16_384) return null;
+  let source = raw;
+  try {
+    source = JSON.parse(raw);
+  } catch {
+    // Plain `order`, `return`, and `product` are useful for manually operated
+    // SQL notifiers too. Never forward an arbitrary raw payload to browsers.
+  }
+  const record = source && typeof source === 'object' && !Array.isArray(source) ? source : {};
+  const kindText = boundedLiveText(
+    record.kind || record.eventFamily || record.family || record.type || record.event || source,
+    80
+  ).toLowerCase();
+  let kind = '';
+  if (/return|refund|after.?sale/.test(kindText)) kind = 'return';
+  else if (/product|shelf|audit|sku|price/.test(kindText)) kind = 'product';
+  else if (/order|sales?/.test(kindText)) kind = 'order';
+  else if (/authorization|quota|compliance|inventory|out.?of.?stock|invoice|logistics|purchase|delivery|rrp/.test(kindText)) kind = 'platform';
+  if (!kind) return null;
+  return {
+    kind,
+    storeKey: boundedLiveText(record.storeKey || record.store_key || record.store || '', 32).toUpperCase(),
+    entityId: boundedLiveText(
+      record.orderId || record.order_no || record.orderNo || record.returnId || record.return_no || record.returnNo
+      || record.productId || record.product_id || record.productCode || record.skc || record.id || '',
+      160
+    ),
+    occurredAt: boundedLiveText(record.occurredAt || record.updatedAt || record.updated_at || record.processedAt || record.createdAt || '', 64)
+      || now.toISOString(),
+  };
+}
+
+export function liveSectionsForBiUpdate(kind) {
+  const base = ['liveSalesToday', 'orders', 'priceScatter'];
+  if (kind === 'return') return [...base, 'afterSales'];
+  if (kind === 'product') return ['linksData', 'actions'];
+  if (kind === 'order') return base;
+  return [];
+}
+
+function livePgClientConfig(env = process.env) {
+  const {max, ...config} = warehousePgConfigFromEnv(env);
+  return {
+    ...config,
+    application_name: `${String(config.application_name || 'shein-bi-portal').slice(0, 48)}-live-events`,
+    keepAlive: true,
+  };
+}
+
+/**
+ * Dedicated LISTEN connection. It deliberately does not share the portal's
+ * query pool: a dropped notification socket must never block normal requests.
+ */
+export function createBiLiveUpdateBridge(options = {}) {
+  const env = options.env || process.env;
+  const ClientClass = options.ClientClass || PgClient;
+  const channel = options.channel || BI_LIVE_UPDATE_CHANNEL;
+  const reconnectMs = Number(options.reconnectMs || BI_LIVE_UPDATE_RECONNECT_MS);
+  const heartbeatMs = Number(options.heartbeatMs || BI_LIVE_UPDATE_HEARTBEAT_MS);
+  const now = options.now || (() => new Date());
+  const onUpdate = typeof options.onUpdate === 'function' ? options.onUpdate : null;
+  const clients = new Set();
+  let client = null;
+  let stopped = false;
+  let connecting = null;
+  let reconnectTimer = null;
+  let heartbeatTimer = null;
+  let lastError = '';
+  let lastEventAt = '';
+  let lastOrderAt = '';
+
+  const status = () => ({
+    enabled: liveUpdatesEnabled(env),
+    connected: Boolean(client),
+    clients: clients.size,
+    channel,
+    lastError,
+    lastEventAt,
+    lastOrderAt,
+  });
+  const scheduleReconnect = () => {
+    if (stopped || !liveUpdatesEnabled(env) || reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      void connect();
+    }, reconnectMs);
+    reconnectTimer.unref?.();
+  };
+  const dropClient = async target => {
+    if (target && client !== target) return;
+    if (target && client === target) client = null;
+    try { await target?.end?.(); } catch {}
+    if (!stopped) scheduleReconnect();
+  };
+  const publish = event => {
+    if (!event) return;
+    const wire = JSON.stringify({
+      ...event,
+      sections: liveSectionsForBiUpdate(event.kind),
+      receivedAt: now().toISOString(),
+    });
+    for (const response of [...clients]) {
+      try {
+        response.write(`event: live-update\ndata: ${wire}\n\n`);
+      } catch {
+        clients.delete(response);
+      }
+    }
+  };
+  const handleNotification = notification => {
+    if (notification?.channel !== channel) return;
+    const event = normalizeBiLiveUpdatePayload(notification.payload, now());
+    if (!event) return;
+    lastEventAt = now().toISOString();
+    if (event.kind === 'order') lastOrderAt = lastEventAt;
+    Promise.resolve(onUpdate ? onUpdate(event) : event)
+      .then(result => publish(result === false ? null : (result && typeof result === 'object' ? {...event, ...result} : event)))
+      .catch(error => {
+        lastError = boundedLiveText(error?.message || error, 300);
+        console.error(`[bi-live-events] update handling failed: ${lastError}`);
+      });
+  };
+  const connect = async () => {
+    if (stopped || !liveUpdatesEnabled(env) || connecting || client) return connecting;
+    connecting = (async () => {
+      let next;
+      try {
+        next = new ClientClass(livePgClientConfig(env));
+        next.on?.('notification', handleNotification);
+        next.on?.('error', error => {
+          lastError = boundedLiveText(error?.message || error, 300);
+          void dropClient(next);
+        });
+        next.on?.('end', () => { void dropClient(next); });
+        await next.connect();
+        await next.query(`LISTEN ${channel}`);
+        const latest = await next.query(`
+          SELECT
+            max(processed_at) FILTER (WHERE status='succeeded') AS last_event_at,
+            max(processed_at) FILTER (
+              WHERE status='succeeded' AND COALESCE(normalized->>'eventFamily','')='order'
+            ) AS last_order_at
+          FROM ops.shein_webhook_receipt
+        `);
+        lastEventAt = latest?.rows?.[0]?.last_event_at ? new Date(latest.rows[0].last_event_at).toISOString() : lastEventAt;
+        lastOrderAt = latest?.rows?.[0]?.last_order_at ? new Date(latest.rows[0].last_order_at).toISOString() : lastOrderAt;
+        if (stopped) {
+          await next.end?.();
+          return;
+        }
+        client = next;
+        lastError = '';
+        console.error(`[bi-live-events] listening channel=${channel}`);
+      } catch (error) {
+        lastError = boundedLiveText(error?.message || error, 300);
+        try { await next?.end?.(); } catch {}
+        scheduleReconnect();
+      } finally {
+        connecting = null;
+      }
+    })();
+    return connecting;
+  };
+  const addSseClient = response => {
+    clients.add(response);
+    response.write(`retry: ${Math.max(1_000, reconnectMs)}\nevent: ready\ndata: ${JSON.stringify({ok: true, live: status()})}\n\n`);
+    return () => clients.delete(response);
+  };
+  const start = async () => {
+    if (heartbeatMs > 0 && !heartbeatTimer) {
+      heartbeatTimer = setInterval(() => {
+        for (const response of [...clients]) {
+          try { response.write(`: keepalive ${now().toISOString()}\n\n`); } catch { clients.delete(response); }
+        }
+      }, heartbeatMs);
+      heartbeatTimer.unref?.();
+    }
+    await connect();
+    return status();
+  };
+  const stop = async () => {
+    stopped = true;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+    for (const response of clients) {
+      try { response.end(); } catch {}
+    }
+    clients.clear();
+    const current = client;
+    client = null;
+    await Promise.allSettled([connecting, current?.end?.()]);
+  };
+  return {start, stop, addSseClient, publish, status};
 }
 
 async function scheduleBiPortalCoreWarmup(args, root, options = {}) {
@@ -7868,6 +8100,7 @@ async function main() {
   const allowGenerateSections = !(args.readOnly || (args.host === '0.0.0.0' && !authRequired));
   const loginRateLimiter = createLoginRateLimiter();
   const enqueueMutationRequest = createSerialMutationQueue();
+  const biLiveUpdateBridge = createBiLiveUpdateBridge();
   const opsAgentGovernor = createBiOpsAgentGovernor({
     maxConcurrent: Number(process.env.SHEIN_BI_AGENT_MAX_CONCURRENT || 2),
     maxConcurrentPerActor: Number(process.env.SHEIN_BI_AGENT_MAX_CONCURRENT_PER_ACTOR || 1),
@@ -8428,6 +8661,20 @@ async function main() {
       if (url.pathname === '/api/auth/me') {
         return sendJson(res, actor ? 200 : 401, {ok: Boolean(actor), user: publicActor(actor)});
       }
+      if (url.pathname === '/api/bi/live-events') {
+        if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        writeResponseHead(res, 200, {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Connection': 'keep-alive',
+          'X-Accel-Buffering': 'no',
+        });
+        res.flushHeaders?.();
+        const remove = biLiveUpdateBridge.addSseClient(res);
+        const close = () => remove();
+        req.once('close', close);
+        res.once('close', close);
+        return;
+      }
       if (url.pathname === '/api/partner-cli/release/status') {
         if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
         if (actor?.role !== 'partner_cli_deploy') return sendJson(res, 403, {ok: false, error: 'GitHub partner CLI release status denied'});
@@ -8729,6 +8976,7 @@ async function main() {
           readOnly: args.readOnly,
           authRequired,
           allowGenerateSections,
+          liveUpdates: biLiveUpdateBridge.status(),
           biCoreWarmup: {
             generatedAt: biPortalCoreWarmupState.generatedAt,
             status: biPortalCoreWarmupState.status,
@@ -10309,6 +10557,7 @@ ${uploadCheckAnswer}` : `
     server.listen(args.port, args.host, resolve);
   });
 
+  await biLiveUpdateBridge.start();
   startBiPortalCoreWarmupWatcher(args, root, {allowGenerate: allowGenerateSections});
   linkOpsJobWorker?.start();
 
@@ -10318,6 +10567,7 @@ ${uploadCheckAnswer}` : `
     shuttingDown = true;
     console.log(JSON.stringify({ok: true, event: 'shutdown', signal, time: new Date().toISOString()}));
     await linkOpsJobWorker?.stop();
+    await biLiveUpdateBridge.stop();
     await new Promise(resolve => server.close(resolve));
     await Promise.allSettled([
       linkOpsStoreGateway.close(),
@@ -10350,12 +10600,16 @@ ${uploadCheckAnswer}` : `
     readOnly: args.readOnly,
     authRequired,
     allowGenerateSections,
+    liveUpdates: biLiveUpdateBridge.status(),
     biCoreWarmupSections: configuredBiPortalCoreWarmupSections(),
     authUsers: authUsers.map(u => ({username: u.username, displayName: u.displayName, role: u.role, source: u.source})),
   }, null, 2));
 }
 
-main().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+const IS_DIRECT_RUN = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (IS_DIRECT_RUN) {
+  main().catch(err => {
+    console.error(err);
+    process.exit(1);
+  });
+}

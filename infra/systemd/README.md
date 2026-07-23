@@ -2,13 +2,13 @@
 
 本文件只维护 unit/timer 的部署参数与安全护栏；生产排班、人工补跑和验收见 [../../docs/cloud-bi-operations.md](../../docs/cloud-bi-operations.md)。调度事实以各 `.timer` 的 `OnCalendar` 为准。
 
-- `shein-bi-cloud-today.timer`：当天销售高频刷新为每小时整点一跑，但 `03:00` 由昨日定稿接管、`08:00` 由晨间链路接管（`00:00/01:00/02:00/04:00/05:00/06:00/07:00/09:00/.../23:00`），默认 `SHEIN_SALES_TRANSPORT=webapi`，继续用 WebAPI 入正式销售事实表并生成 BI 门户；OpenAPI 只写并行对账层。不开启 systemd 开机补跑，避免服务器重启后和日更/ET 叠加。
+- 当天销售不再使用 `shein-bi-cloud-today.timer` 每小时抓取。半托订单 Webhook 收到后按单查询 OpenAPI 并增量更新正式销售事实，Portal 通过 PostgreSQL `NOTIFY` + 登录态 SSE 刷新当前页面；`shein-bi-cloud-today.service` 只保留为人工灾备入口，不安装/启用对应 timer。
 - `shein-bi-cloud-session-manager.timer`：每天 `02:20`，在 `02:00` 销售刷新结束后顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并检查 profile 体积。
 - `shein-bi-cloud-yesterday.timer`：每天 `03:00` 用 WebAPI 刷新前一天最终销售，并复核前两天稳定日；OpenAPI 最终日结果在并行对账层核对。该每日唯一性任务使用 `Persistent=true`，service 自身仍通过锁和日期状态防重复。
 - `shein-bi-db-backup.timer`：每天 `02:40` 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto`，默认保留 14 天。
-- `shein-bi-cloud-et-forwarder.timer`：每两小时 `01:20/03:20/.../23:20` 抓取 ET 货代仓/出库单、入仓，并轻量刷新订单/物流/售后相关 section；不开启开机补跑。需要服务器本地 `config/et_forwarder.local.json` 或 `ET_FORWARDER_USERNAME/ET_FORWARDER_PASSWORD`，密钥不进 GitHub。
+- `shein-bi-cloud-et-forwarder.timer`：每天 `01:20/04:20/07:20/10:20/13:20/17:20/20:20/23:20` 抓取 ET 货代仓/出库单、入仓，并轻量刷新订单/物流/售后相关 section；不开启开机补跑。需要服务器本地 `config/et_forwarder.local.json` 或 `ET_FORWARDER_USERNAME/ET_FORWARDER_PASSWORD`，密钥不进 GitHub。
 - `shein-bi-cloud-et-storage-fee.timer`：每天 `14:10` 只读抓取 ET 仓储费最终账单与 SKU 明细，执行 canonical 去重、利润 cache 发布、四层对账与 `profit/homeProfit` 预热。它与通用 ET 共用 profile/锁，但使用独立状态、输出和日志；`Persistent=true`，失败必须告警，不能静默跳过。
-- `shein-bi-cloud-morning-chain.timer`：每天 `08:00` 启动晨间串行链路：先用 WebAPI 刷新当天销售；当前自动飞书日报已关闭（`SHEIN_BI_MORNING_SEND_LARK_REPORT=0`），销售刷新成功后直接启动 `shein-bi-cloud-daily-refresh.service` 做统一日更补采。这样日更不再依赖固定 `08:50/09:10` 窗口，而是跟随销售刷新完成时间。
+- `shein-bi-cloud-morning-chain.timer`：每天 `08:00` 启动晨间串行链路；默认 `SHEIN_BI_MORNING_SALES_REFRESH=0`，不再重复抓当天销售，直接启动 `shein-bi-cloud-daily-refresh.service` 做前一完整日的统一日更补采。自动飞书日报继续关闭（`SHEIN_BI_MORNING_SEND_LARK_REPORT=0`）。
 - `shein-bi-cloud-daily-refresh.service`：统一执行前一完整日链接/业务域、SBN 营销概览、RTV 退货轨迹复核、入仓、体检与 BI 刷新；不再重复调用 MBRs 全店营销价格栈扫描，实时普通活动/券/限时折扣只由独立 guard 读取。全店日指标仍全 0 时跳过链接/业务域入仓刷新。该服务由晨间链路触发；启动前等待销售/ET 等写入任务并检查内存，忙碌或低内存时记录状态后跳过。19 店 OpenAPI 销售/退货/商品隔离双跑只写隔离层；runner 先单进程 schema ensure，再让 worker `--skip-ensure` 并行入仓。`2026-07-17..23` 为修复后的新验证窗口，`2026-07-24` 结论前继续保留 WebAPI 生产事实源。
 - `cloud_daily_lark_report.sh` / `shein-bi-cloud-daily-lark-report.service`：日报服务保留为手动诊断入口；正式自动发送当前停用，晨间链路默认 `SHEIN_BI_MORNING_SEND_LARK_REPORT=0`。需要服务器本地 `config/lark_report.json`、`lark-cli` 和飞书授权，密钥/授权不进 GitHub。
 - `shein-bi-cloud-order-closure.timer`：每天 `06:30`（带 `RandomizedDelaySec=5m`）从云端订单底库找未终态订单，重查 SHEIN 当前状态并写入 `ops.order_status_recheck_state`，只更新订单生命周期状态，不重写历史销售事实；成功后刷新 orders section。日更补采由 `08:00` 晨间销售完成后触发，避免过早抓取前一日仍未产出的链接/流量指标。
@@ -16,13 +16,13 @@
 - `shein-bi-webhook.service`：SHEIN OpenAPI Webhook 独立常驻入口与数据库队列 worker，只监听 `127.0.0.1:8792`；正式公网回调走标准 443 的 Cloudflare -> HAProxy SNI/来源门禁 -> Caddy 10443 -> Nginx SHEIN 官方推送 IP allowlist，`8443` 只保留受限回退。入口预算 1.2 秒、receipt SQL 预算 0.8 秒，只在 AES 密文可靠落库后回 200。worker 使用专属 `shein_webhook_ops` 与 `/srv/shein-bi/secrets/webhook-warehouse.env`，不得复用 Portal 的 `shein_link_ops`/secret；它没有运营任务表或事实表原始 DML，只能只读回读并调用按单 apply 函数，也没有日汇总/reconciliation 权限；风险事件先封闸后发送 P0 飞书摘要。开放平台订阅/调试使用的 App 级技术投递必须强制为 `appScopedOnly + P3`，只留审计 receipt，不得封闸、同步订单/退货、改运营任务或发飞书；BI 默认不展示此类技术记录。服务不调用 sudo/Docker，也绝不直接写 SHEIN；飞书问数服务继续保持暂停。
 - `shein-bi-portal.service` 的负责人规则分发使用独立 `/srv/shein-bi/owner-knowledge-repo` 工作树、`owner-knowledge` 分支和 `/srv/shein-bi/runtime/owner-knowledge-git-publish.lock`。独立 deploy key 只放 `~sheinops/.ssh` 且权限 `600`；Portal 主工作树即使有生产运行态改动也不能被规则 publisher 暂存。远端 commit 先登记 pending，GitHub Actions 校验并调用专用激活端点后才切 current；分发失败由一小时 reconciliation 重试，所有入口的 `execute` 在 distribution 未追平时失败关闭。激活 token 只放 GitHub secret 与 `/srv/shein-bi/secrets/portal-warehouse.env`。
 - `shein-bi-lark-sales-qa.service`：飞书只读问数机器人代码和 unit 保留，但 2026-07-11 起生产主动暂停，必须保持 `disabled + inactive`，部署时不得 `enable`、`start` 或 `enable --now`。若未来经明确授权恢复，仍必须以 `sheinops` 运行，保留 `HOME=/home/sheinops`、`NoNewPrivileges`、`PrivateTmp` 和内存护栏；Lark keychain 不得进入仓库/日志。
-- `shein-bi-cloud-browser-cleanup.timer`：每小时 `:15` 回收过期/死亡 owner 租约，再清理无有效任务租约保护的 headless Chrome 和临时目录。它不强杀可见人工登录窗口，也不打断仍持有有效租约的抓取/营销任务。
+- `shein-bi-cloud-browser-cleanup.timer`：每天仅在 `03:45/09:50/21:00` 三个非营销/日更窗口回收过期或死亡 owner 租约，再清理无有效任务租约保护的 headless Chrome 和临时目录。它不强杀可见人工登录窗口，也不打断仍持有有效租约的抓取/营销任务。
 - `shein-bi-cloud-disk-maintenance.timer`：每周日 `01:35`（随机延迟最多 10 分钟）执行低优先级磁盘维护。抓数原始产物本地保留 30 天，旧文件只有在 COS 归档、成员清单和 SHA256 校验完成后才删除；临时文件保留 7 天。由于 ET 与抓数产物存在经过审计的 root/sheinops 混合属主，该 service 以 root 读取和删除明确白名单路径，但不启动浏览器、不加载登录页，也不写业务数据。浏览器 profile 只有根盘达到 80% 且没有有效浏览器租约或 Chrome 进程时才清可再生缓存，永不删除 Cookie、Local Storage、IndexedDB 等登录/持久状态。journald 由 `90-shein-bi-journald-disk-cap.conf` 限制为最多 1GB，并至少给根盘保留 5GB。
 - `shein-bi-cloud-marketing-live-guard.service`：`10:30/13:30/16:30` 提供每日巡检及失败重试窗口；当天首次成功后后续窗口退出。该服务以 session HTTP 一次读取 19 店普通活动、15% 券 active 集合与当前/未来活动价，生成精确 manifest/hash 与 repair queue；不启动浏览器、不申请浏览器租约、不执行清理、不持有写授权。`2026-07-18` 生产实测 `157s`、19/19 店、1516 行、Chrome `0 -> 0`。
-- `shein-bi-cloud-marketing-repair.timer`：`10:50/12:50/14:50/16:50/18:50` 消费 guard 的精确队列，每轮总预算最多 8 个活动组。父 worker 取得浏览器租约后把 task/runId 传给子批次，只关闭本任务拥有的店铺；每组 preflight、精确 work hash、旧活动快照、事务 journal、失败补偿和最终全店 readback 缺一不可。
+- `shein-bi-cloud-marketing-repair.timer`：`10:50/12:50/14:50/16:50/18:50` 消费 guard 的精确队列，`19:30` 做当天最后一次续跑与回读；每轮总预算最多 8 个活动组。父 worker 取得浏览器租约后把 task/runId 传给子批次，只关闭本任务拥有的店铺；每组 preflight、精确 work hash、旧活动快照、事务 journal、失败补偿和最终全店 readback 缺一不可。
 - `shein-bi-cloud-watchdog.timer`：每小时只读巡检。它可以用后续完整 19 店扫描证据收口孤立的历史扫描 warning，但必须保留原日更状态并在报告写出 recovery；其它 warning 或不完整证据仍告警。
 
-注意：`shein-bi-cloud-daily-refresh.service` 和它内部调用的 `cloud_link_business_sync.sh` 必须以 `sheinops` 运行，不能用 root 跑 SHEIN Chrome profile；否则会留下 root-owned profile 文件，导致登录态管家读 profile 报 `EACCES`。统一日更只收口慢变/日更补采，不合并每小时销售、两小时 ET、备份、订单闭环和登录态管家。迁移时 mask 旧 `link-business/openapi-hl/rtv-verify` 分散 timer。高频 today/ET/watchdog 使用 `Persistent=false`；每日唯一性任务使用 `Persistent=true` 并依赖锁、当天成功状态、忙碌/资源门禁防重复，事实以各 `.timer` 为准。ET forwarder 保持 root 执行，因为入仓依赖 Docker/root 环境，且 ET 使用独立 profile。
+注意：`shein-bi-cloud-daily-refresh.service` 和它内部调用的 `cloud_link_business_sync.sh` 必须以 `sheinops` 运行，不能用 root 跑 SHEIN Chrome profile；否则会留下 root-owned profile 文件，导致登录态管家读 profile 报 `EACCES`。统一日更只收口前一完整日的慢变/补采，不重复承担当天销售；当天销售由半托 Webhook + OpenAPI 按单更新。迁移时停用并删除旧 `today` timer，mask 旧 `link-business/openapi-hl/rtv-verify` 分散 timer。ET/watchdog 使用 `Persistent=false`；每日唯一性任务使用 `Persistent=true` 并依赖锁、当天成功状态、忙碌/资源门禁防重复，事实以各 `.timer` 为准。ET forwarder 保持 root 执行，因为入仓依赖 Docker/root 环境，且 ET 使用独立 profile。
 
 资源护栏：高频销售和 ET 是轻量高优先任务；`daily-refresh` 是低优先慢任务，由晨间链路在销售刷新完成后启动。生产 oneshot 任务必须保留 `MemoryHigh` / `MemoryMax` / `OOMPolicy=stop`，常驻服务必须保留自己的 `MemoryHigh` / `MemoryMax` / `OOMPolicy=stop` / `Restart=always`；`daily-refresh` 必须保留启动前的忙碌写入任务等待和可用内存检查。宁可让慢变补采晚一次，也不要为了补齐链接/营销/RTV 数据把 BI Portal、Metabase 或销售刷新拖死。
 
@@ -40,8 +40,8 @@ systemctl daemon-reload
 # 在某些 systemd 状态下这会立即触发 timer 关联服务，造成部署时销售、
 # ET、日更、登录态管家等任务并发。推荐先 enable，再逐个 start timer；
 # start timer 只启动计时器，不应手动 start 对应 service。
-systemctl enable shein-bi-portal.service shein-bi-webhook.service shein-bi-cloud-today.timer shein-bi-cloud-morning-chain.timer shein-bi-cloud-yesterday.timer shein-bi-db-backup.timer shein-bi-cloud-order-closure.timer shein-bi-cloud-browser-cleanup.timer shein-bi-cloud-disk-maintenance.timer shein-bi-cloud-marketing-live-guard.timer shein-bi-cloud-marketing-repair.timer
-systemctl start shein-bi-portal.service shein-bi-webhook.service shein-bi-cloud-today.timer shein-bi-cloud-morning-chain.timer shein-bi-cloud-yesterday.timer shein-bi-db-backup.timer shein-bi-cloud-order-closure.timer shein-bi-cloud-browser-cleanup.timer shein-bi-cloud-disk-maintenance.timer shein-bi-cloud-marketing-live-guard.timer shein-bi-cloud-marketing-repair.timer
+systemctl enable shein-bi-portal.service shein-bi-webhook.service shein-bi-cloud-morning-chain.timer shein-bi-cloud-yesterday.timer shein-bi-db-backup.timer shein-bi-cloud-order-closure.timer shein-bi-cloud-browser-cleanup.timer shein-bi-cloud-disk-maintenance.timer shein-bi-cloud-marketing-live-guard.timer shein-bi-cloud-marketing-repair.timer
+systemctl start shein-bi-portal.service shein-bi-webhook.service shein-bi-cloud-morning-chain.timer shein-bi-cloud-yesterday.timer shein-bi-db-backup.timer shein-bi-cloud-order-closure.timer shein-bi-cloud-browser-cleanup.timer shein-bi-cloud-disk-maintenance.timer shein-bi-cloud-marketing-live-guard.timer shein-bi-cloud-marketing-repair.timer
 # 飞书问数保持暂停；以下两条必须分别返回 disabled / inactive：
 systemctl is-enabled shein-bi-lark-sales-qa.service || true
 systemctl is-active shein-bi-lark-sales-qa.service || true
@@ -51,4 +51,7 @@ systemctl is-active shein-bi-lark-sales-qa.service || true
 # 旧的 link-business / openapi-hl / rtv-verify 分散 timer 已由 daily-refresh 接管；若服务器曾启用过，迁移时执行：
 # systemctl disable --now shein-bi-cloud-link-business.timer shein-bi-cloud-openapi-hl.timer shein-bi-cloud-rtv-verify.timer
 # systemctl mask --force shein-bi-cloud-link-business.timer shein-bi-cloud-openapi-hl.timer shein-bi-cloud-rtv-verify.timer
+# 旧的每小时当天销售 timer 已由 Webhook 替代：
+# systemctl disable --now shein-bi-cloud-today.timer
+# rm -f /etc/systemd/system/shein-bi-cloud-today.timer
 ```

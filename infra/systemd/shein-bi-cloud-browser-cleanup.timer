@@ -1,8 +1,10 @@
 [Unit]
-Description=Run SHEIN BI stale headless store Chrome cleanup
+Description=Run SHEIN BI orphan Chrome cleanup outside data and marketing windows
 
 [Timer]
-OnCalendar=*-*-* *:15:00
+OnCalendar=*-*-* 03:45:00
+OnCalendar=*-*-* 09:50:00
+OnCalendar=*-*-* 21:00:00
 Persistent=true
 Unit=shein-bi-cloud-browser-cleanup.service
 

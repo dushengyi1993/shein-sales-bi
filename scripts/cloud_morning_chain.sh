@@ -10,6 +10,7 @@ STATE_DIR="${SHEIN_BI_MORNING_CHAIN_STATE_DIR:-$ROOT/state/cloud_morning_chain}"
 DAILY_REFRESH_UNIT="${SHEIN_BI_MORNING_DAILY_REFRESH_UNIT:-shein-bi-cloud-daily-refresh.service}"
 DAILY_REFRESH_WAIT_SEC="${SHEIN_BI_MORNING_DAILY_REFRESH_WAIT_SEC:-14400}"
 SEND_LARK_REPORT="${SHEIN_BI_MORNING_SEND_LARK_REPORT:-0}"
+RUN_SALES_REFRESH="${SHEIN_BI_MORNING_SALES_REFRESH:-0}"
 ALLOW_REPEAT="${SHEIN_BI_MORNING_CHAIN_FORCE:-0}"
 DRY_RUN="${SHEIN_BI_MORNING_CHAIN_DRY_RUN:-0}"
 
@@ -95,10 +96,15 @@ if [[ -f "$DONE_FLAG" && "$ALLOW_REPEAT" != "1" && "$ALLOW_REPEAT" != "true" ]];
   exit 0
 fi
 
-write_state "running" "sales refresh started"
-SHEIN_BI_REFRESH_BUSY_EXIT_CODE=75 bash scripts/cloud_bi_refresh.sh today morning-chain
+if [[ "$RUN_SALES_REFRESH" == "1" || "$RUN_SALES_REFRESH" == "true" ]]; then
+  write_state "running" "sales fallback refresh started"
+  SHEIN_BI_REFRESH_BUSY_EXIT_CODE=75 bash scripts/cloud_bi_refresh.sh today morning-chain
+  echo "[cloud_morning_chain] sales fallback refresh done"
+else
+  echo "[cloud_morning_chain] webhook is the intraday sales source; skip duplicate morning sales pull"
+fi
 
-echo "[cloud_morning_chain] sales refresh done; start Lark daily report"
+echo "[cloud_morning_chain] start Lark daily report stage"
 if [[ "$SEND_LARK_REPORT" == "1" || "$SEND_LARK_REPORT" == "true" ]]; then
   write_state "running" "daily report started"
   SHEIN_LARK_REPORT_SYNC_TODAY=0 bash scripts/cloud_daily_lark_report.sh today

@@ -139,6 +139,7 @@ const PORTAL_API_SECTION_KEYS = [
   'inventoryTrend',
   'comments',
   'orders',
+  'liveSalesToday',
   'priceScatter',
   'afterSales',
   'rtvData',
@@ -255,6 +256,44 @@ const PORTAL_SECTION_SELECTS = {
 };
 
 const STANDALONE_SECTION_SQL = {
+  liveSalesToday: `
+WITH live_items AS (
+  SELECT
+    oi.created_date::date AS date,
+    oi.store_key,
+    oi.group_key,
+    oi.order_no,
+    dim.product_canonical_sn(oi.standard_goods_sn) AS standard_goods_sn,
+    oi.skc,
+    oi.goods_title,
+    coalesce(oi.quantity,0) AS source_quantity,
+    CASE WHEN coalesce(oi.net_revenue_sar,0) > 0 THEN coalesce(oi.quantity,0) ELSE 0 END AS quantity,
+    CASE WHEN coalesce(oi.gross_revenue_sar,0) > 0 THEN coalesce(oi.quantity,0) ELSE 0 END AS gross_quantity,
+    round(coalesce(oi.net_revenue_sar,0)::numeric,2) AS sales_sar,
+    round(coalesce(oi.gross_revenue_sar,0)::numeric,2) AS gross_sales_sar,
+    coalesce(p.is_cod,false) AS is_cod
+  FROM mart.profit_order_item oi
+  LEFT JOIN (
+    SELECT store_key, order_no, bool_or(coalesce(is_cod,false)) AS is_cod
+    FROM fact.order_payment_flag
+    WHERE coalesce(order_no,'') <> ''
+    GROUP BY store_key, order_no
+  ) p ON p.store_key=oi.store_key AND p.order_no=oi.order_no
+  WHERE oi.created_date=current_date
+    AND coalesce(oi.store_key,'') <> ''
+    AND coalesce(oi.standard_goods_sn,'') <> ''
+)
+SELECT jsonb_build_object(
+  'liveSalesToday', jsonb_build_object(
+    'date', current_date,
+    'generatedAt', now(),
+    'items', coalesce((
+      SELECT jsonb_agg(to_jsonb(t) ORDER BY t.store_key,t.order_no,t.standard_goods_sn,t.skc)
+      FROM live_items t
+    ),'[]'::jsonb)
+  )
+)::text;
+`,
   homeTrafficDaily: `
 WITH raw_home_traffic AS MATERIALIZED (
   SELECT
@@ -6202,6 +6241,12 @@ const TOTAL_STORE_COUNT = STORE_CODES_ARRAY.length || Number(DATA.counts?.stores
 let portalDataLastReadAt = new Date();
 let portalRefreshInFlight = false;
 let portalAutoRefreshTimer = null;
+let portalLiveEventSource = null;
+let portalLiveRefreshTimer = null;
+let portalLiveRefreshInFlight = false;
+const portalLivePendingSections = new Set();
+const BI_LIVE_EVENTS_API = '/api/bi/live-events';
+const BI_LIVE_FALLBACK_REFRESH_MS = 5 * 60 * 1000;
 const fmt = new Intl.NumberFormat('zh-CN', {maximumFractionDigits: 2});
 const fmt0 = new Intl.NumberFormat('zh-CN', {maximumFractionDigits: 0});
 const money = n => 'SAR ' + fmt.format(Number(n || 0));
@@ -6464,6 +6509,114 @@ async function loadBiSection(section){
 }
 async function loadBiSections(sections){
   for (const section of sections) await loadBiSection(section);
+}
+function liveEventSections(event){
+  const supplied = Array.isArray(event?.sections) ? event.sections : [];
+  const allowed = new Set(['homeRankings','rankings','orders','priceScatter','afterSales','linksData','actions']);
+  return [...new Set(supplied.map(x => String(x || '')).filter(x => allowed.has(x)))];
+}
+function biLiveRefreshUrl(section){
+  const base = biSectionUrl(section);
+  return base + (base.includes('?') ? '&' : '?') + 'refresh=1&live=1';
+}
+function biLiveGeneratedAtMismatch(section, expected, actual){
+  const error = new Error(section + ' generatedAt 不匹配：section=' + actual + ' core=' + expected);
+  error.code = 'BI_LIVE_GENERATED_AT_MISMATCH';
+  return error;
+}
+async function fetchBiSectionForLiveRefresh(section, expectedGeneratedAt){
+  const res = await fetch(biLiveRefreshUrl(section), {cache:'no-store'});
+  if (!res.ok) throw new Error(section + ' HTTP ' + res.status);
+  const payload = await res.json();
+  const payloadGeneratedAt = payload && typeof payload === 'object' ? String(payload.generatedAt || '') : '';
+  if (!payloadGeneratedAt) throw new Error(section + ' 缺少 generatedAt，已阻止合并以避免串用旧 section 数据');
+  if (expectedGeneratedAt && payloadGeneratedAt !== expectedGeneratedAt) {
+    throw biLiveGeneratedAtMismatch(section, expectedGeneratedAt, payloadGeneratedAt);
+  }
+  return {section, data: payload?.data && typeof payload.data === 'object' ? payload.data : payload};
+}
+async function readLatestPortalCore(){
+  const res = await fetch('data.json?ts=' + Date.now(), {cache:'no-store'});
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const next = await res.json();
+  DATA = next;
+  resetBiSectionRuntimeFromData();
+  STORE_CODES = new Set((DATA.stores || []).map(s => s.store_key));
+  STORE_CODES_ARRAY = orderedStoreCodes();
+  portalDataLastReadAt = new Date();
+  return next;
+}
+function renderPortalCoreRefresh(){
+  renderKpis();
+  renderFilters();
+  applyStateToControls();
+  renderAll();
+  const stamp = $('portalDataLastReadAt');
+  if (stamp) stamp.textContent = localTimeText(portalDataLastReadAt);
+}
+async function flushPortalLiveRefresh(){
+  portalLiveRefreshTimer = null;
+  if (portalLiveRefreshInFlight || !portalLivePendingSections.size || actionStateStore.mode !== 'service') return;
+  portalLiveRefreshInFlight = true;
+  const sections = [...portalLivePendingSections];
+  portalLivePendingSections.clear();
+  try {
+    let completed = false;
+    for (let attempt = 0; attempt < 2 && !completed; attempt += 1) {
+      await readLatestPortalCore();
+      const expectedGeneratedAt = currentBiSectionGeneratedAt();
+      if (!biPortalUsesApiSections() || !expectedGeneratedAt) {
+        completed = true;
+        break;
+      }
+      try {
+        const refreshed = await Promise.all(sections
+          .filter(section => BI_SECTION_KEYS.has(section))
+          .map(section => fetchBiSectionForLiveRefresh(section, expectedGeneratedAt)));
+        refreshed.forEach(({section, data}) => {
+          mergeBiSectionData(data || {});
+          BI_SECTION_LOADED.add(section);
+          biSectionState[section] = {status:'loaded', loadedAt:new Date().toISOString(), live:true};
+        });
+        completed = true;
+      } catch (error) {
+        if (error?.code !== 'BI_LIVE_GENERATED_AT_MISMATCH' || attempt > 0) throw error;
+        // A scheduled full refresh won the race. Read its matching core once,
+        // then retry all affected sections; never merge a mixed generation.
+      }
+    }
+    renderPortalCoreRefresh();
+  } catch (error) {
+    console.warn('live BI section refresh failed', error);
+  } finally {
+    portalLiveRefreshInFlight = false;
+    if (portalLivePendingSections.size && !portalLiveRefreshTimer) {
+      portalLiveRefreshTimer = window.setTimeout(flushPortalLiveRefresh, 500);
+    }
+  }
+}
+function queuePortalLiveRefresh(event){
+  if (actionStateStore.mode !== 'service') return;
+  liveEventSections(event).forEach(section => portalLivePendingSections.add(section));
+  if (!portalLivePendingSections.size || portalLiveRefreshTimer || portalLiveRefreshInFlight) return;
+  portalLiveRefreshTimer = window.setTimeout(flushPortalLiveRefresh, 350);
+}
+function startPortalLiveUpdates(){
+  if (portalLiveEventSource || actionStateStore.mode !== 'service' || typeof EventSource !== 'function') return;
+  try {
+    const source = new EventSource(BI_LIVE_EVENTS_API);
+    source.addEventListener('live-update', message => {
+      try { queuePortalLiveRefresh(JSON.parse(message.data || '{}')); } catch { /* Ignore malformed server events. */ }
+    });
+    source.onerror = () => {
+      // EventSource reconnects by itself. The five-minute fallback below still
+      // protects users when an intermediary does not support streaming.
+    };
+    portalLiveEventSource = source;
+    window.addEventListener('pagehide', () => source.close(), {once:true});
+  } catch (error) {
+    console.warn('live BI event stream unavailable', error);
+  }
 }
 let biBackgroundLoadActive = false;
 let biSectionRenderTimer = null;
@@ -16156,20 +16309,8 @@ async function refreshPortalData(options = {}){
     btn.textContent = silent ? '自动读取中...' : '读取中...';
   }
   try {
-    const res = await fetch('data.json?ts=' + Date.now(), {cache: 'no-store'});
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const next = await res.json();
-    DATA = next;
-    resetBiSectionRuntimeFromData();
-    STORE_CODES = new Set((DATA.stores || []).map(s => s.store_key));
-    STORE_CODES_ARRAY = orderedStoreCodes();
-    portalDataLastReadAt = new Date();
-    renderKpis();
-    renderFilters();
-    applyStateToControls();
-    renderAll();
-    const stamp = $('portalDataLastReadAt');
-    if (stamp) stamp.textContent = localTimeText(portalDataLastReadAt);
+    await readLatestPortalCore();
+    renderPortalCoreRefresh();
     if (!silent) showToast('已读取最新状态');
   } catch (err) {
     console.warn('refresh portal data failed', err);
@@ -16221,9 +16362,12 @@ function startPortalAutoRefresh(){
   if (portalAutoRefreshTimer || actionStateStore.mode !== 'service') return;
   portalAutoRefreshTimer = window.setInterval(() => {
     if (document.hidden) return;
-    if (state.tab !== 'system') return;
     refreshPortalData({silent:true});
-  }, 60000);
+  }, BI_LIVE_FALLBACK_REFRESH_MS);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) refreshPortalData({silent:true});
+  });
+  window.addEventListener('focus', () => refreshPortalData({silent:true}));
 }
 function applyTheme(theme){
   const next = theme === 'light' ? 'light' : 'dark';
@@ -16318,6 +16462,7 @@ initServiceHealth();
 initActionState();
 refreshLinkOpsTasks();
 refreshLinkOpsChats();
+startPortalLiveUpdates();
 startPortalAutoRefresh();
 </script>
 </body>

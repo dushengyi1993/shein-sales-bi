@@ -36,7 +36,7 @@
 - 域名：`https://sa.dushengyi.cc/`
 - 典型服务：
   - `shein-bi-portal.service`
-  - `shein-bi-cloud-today.timer`
+  - `shein-bi-webhook.service`（半托当天销售事件入口；旧 `shein-bi-cloud-today.timer` 已停用）
   - `shein-bi-cloud-daily-refresh.service`
   - `shein-bi-cloud-et-forwarder.timer`
 

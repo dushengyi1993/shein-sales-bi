@@ -1,8 +1,9 @@
 [Unit]
-Description=Resume bounded SHEIN marketing repairs after fast inspections
+Description=Resume bounded SHEIN marketing repairs and run final readback
 
 [Timer]
 OnCalendar=*-*-* 10,12,14,16,18:50:00
+OnCalendar=*-*-* 19:30:00
 Persistent=true
 Unit=shein-bi-cloud-marketing-repair.service
 

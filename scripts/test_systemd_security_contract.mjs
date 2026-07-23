@@ -71,7 +71,8 @@ assert.doesNotMatch(lark, /(?:Wants|After)=.*docker\.service/m, 'read-only Lark 
 assert.doesNotMatch(lark, /HOME=\/root|^User=root$|^Group=root$/m, 'Lark bot must never run from root HOME');
 
 const browserCleanupTimer = readUnit('shein-bi-cloud-browser-cleanup.timer');
-assert.equal(property(browserCleanupTimer, 'OnCalendar'), '*-*-* *:15:00', 'browser cleanup runs hourly, not every 30 minutes');
+const browserCleanupWindows = [...browserCleanupTimer.matchAll(/^OnCalendar=(.*)$/gm)].map(match => match[1].trim());
+assert.deepEqual(browserCleanupWindows, ['*-*-* 03:45:00', '*-*-* 09:50:00', '*-*-* 21:00:00']);
 assert.equal(property(browserCleanupTimer, 'Persistent'), 'true');
 
 const diskMaintenance = readUnit('shein-bi-cloud-disk-maintenance.service');
@@ -109,7 +110,8 @@ assert.doesNotMatch(marketingGuardScript, /batch_restore_manual_limited_discount
 assert.equal(property(marketingGuard, 'TimeoutStartSec'), '1800');
 
 const marketingRepairTimer = readUnit('shein-bi-cloud-marketing-repair.timer');
-assert.equal(property(marketingRepairTimer, 'OnCalendar'), '*-*-* 10,12,14,16,18:50:00');
+const marketingRepairWindows = [...marketingRepairTimer.matchAll(/^OnCalendar=(.*)$/gm)].map(match => match[1].trim());
+assert.deepEqual(marketingRepairWindows, ['*-*-* 10,12,14,16,18:50:00', '*-*-* 19:30:00']);
 assert.equal(property(marketingRepairTimer, 'Persistent'), 'true');
 const marketingRepair = readUnit('shein-bi-cloud-marketing-repair.service');
 const marketingRepairScript = fs.readFileSync(new URL('./cloud_marketing_repair_worker.sh', import.meta.url), 'utf8');
@@ -168,7 +170,7 @@ console.log(JSON.stringify({
     'shein-bi-portal.service',
     'shein-bi-webhook.service',
     'shein-bi-lark-sales-qa.service',
-    'hourly lease-aware browser cleanup',
+    'three off-window lease-aware browser cleanup windows',
     'three retry-capable marketing guard windows',
     'bounded resumable marketing repair worker',
     'daily canonical ET storage-fee sync',
