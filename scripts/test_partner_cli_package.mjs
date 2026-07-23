@@ -63,6 +63,9 @@ try {
     child.on('error', reject);
     child.on('close', code => resolve({code, stdout, stderr}));
   });
+  if (result.code !== 0 || !result.stdout.trim()) {
+    throw new Error(`packaged CLI did not start: ${result.stderr || result.stdout || `exit=${result.code}`}`);
+  }
   const output = JSON.parse(result.stdout);
   if (result.code !== 0 || output.version !== manifest.version) throw new Error(`packaged CLI did not start: ${result.stderr || result.stdout}`);
   const release = await buildPartnerCliRelease({sourceRoot: ROOT});

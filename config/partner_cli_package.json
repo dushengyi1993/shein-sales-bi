@@ -15,6 +15,7 @@
     "lib/partner_cli_release.mjs",
     "lib/partner_cli_updater.mjs",
     "lib/link_ops_image_role_planner.mjs",
+    "lib/link_ops_duplicate_publish_override.mjs",
     "lib/owner_knowledge_distribution.mjs",
     "lib/owner_knowledge_policy.mjs",
     "codex/skills/shein-bi-ops/SKILL.md",
