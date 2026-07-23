@@ -78,6 +78,7 @@ function parseArgs(argv) {
     standardGoodsSn: '',
     supplyPrice: null,
     inventory: null,
+    inputCurrentMa: null,
     titleAr: '',
     titleEn: '',
     outputFile: '',
@@ -156,6 +157,7 @@ function parseArgs(argv) {
     else if (a === '--standard-goods-sn' || a === '--supplier-code') args.standardGoodsSn = String(argv[++i] || '').trim();
     else if (a === '--supply-price') args.supplyPrice = Number(argv[++i]);
     else if (a === '--inventory' || a === '--stock-qty') args.inventory = Number(argv[++i]);
+    else if (a === '--input-current-ma') args.inputCurrentMa = Number(argv[++i]);
     else if (a === '--title-ar') args.titleAr = String(argv[++i] || '').trim();
     else if (a === '--title-en') args.titleEn = String(argv[++i] || '').trim();
     else if (a === '--out' || a === '--output') args.outputFile = path.resolve(String(argv[++i] || ''));
@@ -309,6 +311,8 @@ Options:
   --approved-assets  prepare-publish 用；确认图片目录已经过人工审核，AI 不得按语义擅自剔图
   --standard-goods-sn / --supply-price / --inventory
                    prepare-publish 用；把货号、供货价和库存锁到同一任务
+  --supplier-sku / --input-current-ma
+                   prepare-publish 用；同店重复链接时锁定唯一 Seller SKU，并补输入电流属性
   --title-ar / --title-en / --category-id
                    prepare-publish 用；可选的精确标题与末级分类覆盖
   --performance-date retire-candidates 用；按该表现日期计算首次上架 15 天保护窗
@@ -879,15 +883,26 @@ function publishPreparationFromArgs(args) {
   if (args.inventory !== null && (!Number.isFinite(args.inventory) || args.inventory < 0 || !Number.isInteger(args.inventory))) {
     throw new Error('--inventory must be a non-negative integer');
   }
+  if (args.inputCurrentMa !== null && (!Number.isFinite(args.inputCurrentMa) || args.inputCurrentMa <= 0)) {
+    throw new Error('--input-current-ma must be a positive number');
+  }
   const categoryId = String(args.categoryId || '').trim();
   if (categoryId && (!/^\d+$/.test(categoryId) || Number(categoryId) <= 0)) throw new Error('--category-id must be a positive integer');
   return {
     standardGoodsSn: args.standardGoodsSn || '',
+    supplierSku: args.supplierSkuList[0] || '',
     supplyPrice: args.supplyPrice,
     inventory: args.inventory,
     categoryId: categoryId ? Number(categoryId) : null,
     titleAr: args.titleAr || '',
     titleEn: args.titleEn || '',
+    attributeOverrides: args.inputCurrentMa === null ? [] : [{
+      attribute_id: 1002323,
+      attribute_extra_value: String(Math.round(args.inputCurrentMa)),
+      attribute_unit: 'mA',
+      label: '输入电流',
+      source: 'explicit_prepare_publish',
+    }],
   };
 }
 

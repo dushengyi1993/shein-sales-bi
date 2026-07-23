@@ -1538,8 +1538,10 @@ function collectManualAttributeOverrides(task, executionContext, payload = null)
     ...asArray(task?.targets?.attributeOverrides || task?.targets?.attribute_overrides),
     ...asArray(task?.manualAttributeOverrides || task?.manual_attribute_overrides),
     ...asArray(task?.attributeOverrides || task?.attribute_overrides),
+    ...asArray(task?.publishPreparation?.attributeOverrides || task?.publishPreparation?.attribute_overrides),
     ...asArray(executionContext?.attributeOverrides || executionContext?.attribute_overrides),
     ...asArray(executionContext?.targets?.attributeOverrides || executionContext?.targets?.attribute_overrides),
+    ...asArray(executionContext?.publishPreparation?.attributeOverrides || executionContext?.publishPreparation?.attribute_overrides),
   ].map(normalizeManualAttributeOverride).filter(Boolean);
   const autoInputCurrent = payload ? normalizeManualAttributeOverride(inferInputCurrentOverride(payload, task, executionContext)) : null;
   if (autoInputCurrent && !rows.some(row => Number(row.attribute_id) === INPUT_CURRENT_ATTRIBUTE_ID)) rows.push(autoInputCurrent);

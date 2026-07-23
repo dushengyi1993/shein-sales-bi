@@ -48,14 +48,17 @@ const overridden = applyExplicitPublishPreparationOverrides(bound.payload, {
   categoryId: 12345,
   titleAr: 'Arabic locked title',
   titleEn: 'English locked title',
+  supplierSku: '(全)SK-999食品料理机-2',
+  attributeOverrides: [{attribute_id: 1002323, attribute_extra_value: '3409', attribute_unit: 'mA'}],
 });
 check('locks exact supplier code', overridden.payload.skc_list[0].supplier_code, '(全)SK-999食品料理机');
-check('locks exact supplier sku', overridden.payload.skc_list[0].sku_list[0].supplier_sku, '(全)SK-999食品料理机');
+check('locks unique supplier sku separately', overridden.payload.skc_list[0].sku_list[0].supplier_sku, '(全)SK-999食品料理机-2');
 check('locks exact supply price', overridden.payload.skc_list[0].sku_list[0].cost_info.cost_price, '210.00');
 check('locks inventory while preserving warehouse', overridden.payload.skc_list[0].sku_list[0].stock_info_list[0].stock, 100);
 check('preserves warehouse id', overridden.payload.skc_list[0].sku_list[0].stock_info_list[0].warehouse_id, 'WH-1');
 check('locks category', overridden.payload.category_id, 12345);
 check('locks Arabic title', overridden.payload.multi_language_name_list.find(row => row.language === 'ar')?.name, 'Arabic locked title');
+check('records explicit input current attribute', overridden.evidence.attributeOverrideIds.join(','), '1002323');
 const renormalized = applyExplicitPublishPreparationOverrides(bound.payload, {
   standardGoodsSn: '(全)SK-999食品料理机',
   supplyPrice: 210,
