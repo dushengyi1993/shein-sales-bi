@@ -21,6 +21,7 @@ const child = spawn(process.execPath, [
   '--auth-file', authFile,
   '--htpasswd-file', path.join(temp, 'missing.htpasswd'),
   '--session-secret-file', path.join(temp, 'session-secret'),
+  '--session-ttl-days', '90',
   '--state-file', path.join(temp, 'state.json'),
   '--link-ops-task-file', path.join(temp, 'tasks.json'),
   '--link-ops-chat-file', path.join(temp, 'chats.json'),
@@ -58,6 +59,7 @@ try {
   assert.match(secureLogin.headers.get('set-cookie') || '', /HttpOnly/);
   assert.match(secureLogin.headers.get('set-cookie') || '', /SameSite=Lax/);
   assert.match(secureLogin.headers.get('set-cookie') || '', /Secure/);
+  assert.match(secureLogin.headers.get('set-cookie') || '', /Max-Age=7776000/);
   const sessionCookie = String(secureLogin.headers.get('set-cookie') || '').split(';')[0];
 
   const sameOriginHeaders = {...publicHeaders, 'content-type': 'application/json', origin: base};

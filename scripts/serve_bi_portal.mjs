@@ -82,6 +82,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
 const SHEIN_OPENAPI_LOCAL_CONFIG_FILE = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
 const BI_OPS_WRITE_WHITELIST_FILE = process.env.SHEIN_BI_OPS_WRITE_WHITELIST_FILE || path.join(ROOT, 'config', 'bi_ops_write_whitelist.local.json');
+const DEFAULT_BI_SESSION_TTL_DAYS = 90;
 const partnerCliReleaseStore = createPartnerCliReleaseStore({
   releaseRoot: process.env.SHEIN_PARTNER_CLI_RELEASE_DIR || '',
   fallbackSourceRoot: ROOT,
@@ -104,6 +105,7 @@ function parseArgs(argv) {
     accessRolesFile: path.join(ROOT, 'config', 'bi_access_roles.json'),
     htpasswdFile: process.env.SHEIN_BI_HTPASSWD_FILE || '/srv/shein-bi/secrets/bi_basic_auth.htpasswd',
     sessionSecretFile: process.env.SHEIN_BI_SESSION_SECRET_FILE || path.join(ROOT, 'state', 'bi_portal_session_secret.local'),
+    sessionTtlDays: Number(process.env.SHEIN_BI_SESSION_TTL_DAYS || DEFAULT_BI_SESSION_TTL_DAYS),
     auditFile: path.join(ROOT, 'logs', 'bi_portal_action_audit.jsonl'),
     distro: 'Ubuntu-24.04',
     container: 'shein-warehouse-db',
@@ -127,6 +129,7 @@ function parseArgs(argv) {
     else if (a === '--access-roles-file') args.accessRolesFile = path.resolve(argv[++i]);
     else if (a === '--htpasswd-file') args.htpasswdFile = path.resolve(argv[++i]);
     else if (a === '--session-secret-file') args.sessionSecretFile = path.resolve(argv[++i]);
+    else if (a === '--session-ttl-days') args.sessionTtlDays = Number(argv[++i]);
     else if (a === '--audit-file') args.auditFile = path.resolve(argv[++i]);
     else if (a === '--distro') args.distro = argv[++i];
     else if (a === '--container') args.container = argv[++i];
@@ -138,6 +141,10 @@ function parseArgs(argv) {
   if (!Number.isInteger(args.port) || args.port < 1 || args.port > 65535) {
     throw new Error(`Invalid --port: ${args.port}`);
   }
+  if (!Number.isFinite(args.sessionTtlDays) || args.sessionTtlDays < 1 || args.sessionTtlDays > 365) {
+    throw new Error(`Invalid --session-ttl-days: ${args.sessionTtlDays}; expected 1-365`);
+  }
+  args.sessionTtlDays = Math.round(args.sessionTtlDays);
   if (!args.linkOpsAssetDir) {
     args.linkOpsAssetDir = path.join(path.dirname(args.linkOpsTaskFile), 'bi_link_ops_assets');
   }
@@ -1886,7 +1893,7 @@ function verifySessionToken(token, secret) {
   }
 }
 
-function sessionCookie(token, req, maxAgeSec = 86400 * 14) {
+function sessionCookie(token, req, maxAgeSec) {
   const secure = String(req.headers['x-forwarded-proto'] || '').toLowerCase() === 'https';
   return `bi_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSec}${secure ? '; Secure' : ''}`;
 }
@@ -8328,13 +8335,14 @@ async function main() {
         }
         loginRateLimiter.success(rateKey);
         const actorLogin = actorFromUser(user);
-        const token = signSessionPayload({username: user.username, iat: Date.now(), exp: Date.now() + 14 * 86400 * 1000}, sessionSecret);
+        const sessionTtlMs = args.sessionTtlDays * 86400 * 1000;
+        const token = signSessionPayload({username: user.username, iat: Date.now(), exp: Date.now() + sessionTtlMs}, sessionSecret);
         await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'auth-login', ok: true, actor: actorLogin, ...requestMeta(req)});
         if (contentType.includes('application/json')) {
           writeResponseHead(res, 200, {
             'Cache-Control': 'no-store',
             'Content-Type': 'application/json; charset=utf-8',
-            'Set-Cookie': sessionCookie(token, req),
+            'Set-Cookie': sessionCookie(token, req, args.sessionTtlDays * 86400),
           });
           res.end(JSON.stringify({ok: true, user: publicActor(actorLogin)}));
           return;
@@ -8342,7 +8350,7 @@ async function main() {
         const next = String(body.next || '/');
         writeResponseHead(res, 302, {
           'Cache-Control': 'no-store',
-          'Set-Cookie': sessionCookie(token, req),
+          'Set-Cookie': sessionCookie(token, req, args.sessionTtlDays * 86400),
           'Location': next.startsWith('/') && !next.startsWith('//') ? next : '/',
         });
         res.end();
