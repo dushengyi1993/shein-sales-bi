@@ -92,11 +92,17 @@ assert.match(productionClient, /CORE_VISIBLE_POLL_MS=5\*60\*1000/, 'the formal p
 assert.match(productionClient, /LIVE_LAST_ORDER_AT=newestStamp/, 'the data-status timestamp must advance from real order events');
 assert.match(productionClient, /function applyLiveOrderRankingOverlay\(\)/, 'live orders must update today rankings without rebuilding the full profit mart');
 assert.match(productionClient, /const LIVE_ORDER_SECTIONS=\['liveSalesToday','orders','priceScatter'\]/, 'live orders must always refresh the lightweight today-sales section');
+assert.match(productionClient, /home:\['homeRankings','afterSales','homeProfit','homeTrafficDaily','liveSalesToday'\]/, 'the homepage must load the current-day profit overlay even before a new SSE event');
 assert.match(productionClient, /n==='liveSalesToday'\?'\?refresh=1'/, 'the lightweight today-sales section must refresh synchronously');
 assert.match(productionClient, /queueLiveRefresh\(\{kind:'order',receivedAt:at,sections:LIVE_ORDER_SECTIONS\}\)/, 'a newly opened page must catch up from the persisted last order receipt');
+assert.match(productionClient, /profitStoreRows/, 'the current-day store profit rows must replace the stale cached day');
+assert.match(productionClient, /if\(useLive&&d===liveDate\)return false/, 'cached current-day profit must be removed before the live rows are appended');
 assert.match(productionClient, /loadWebhook\(true\)/, 'platform activity must refresh when a live event arrives');
 assert.match(productionClient, /load\(n,true,true\)/, 'only relevant section APIs should be force-refreshed');
-assert.match(generator, /liveSalesToday:[\s\S]*FROM mart\.profit_order_item oi[\s\S]*WHERE oi\.created_date=current_date/, 'the live ranking overlay must use the exact current-day net/gross profit facts');
+assert.match(generator, /liveSalesToday:[\s\S]*FROM fact\.order_item oi[\s\S]*WHERE oi\.created_date=current_date/, 'the live overlay must read the exact current-day order facts without rebuilding the full profit view');
+assert.match(generator, /FROM fact\.inventory_cost_ledger l[\s\S]*l\.effective_at <= coalesce\(oi\.order_create_time, oi\.created_date::timestamp\)/, 'the live cost fallback must be bounded at the sale time so future receipts cannot leak backwards');
+assert.match(generator, /'profitStoreRows'[\s\S]*FROM profit_store_rows_final/, 'the lightweight section must publish current-day profit by store');
+assert.doesNotMatch(generator.match(/liveSalesToday:[\s\S]*?`,\n  homeTrafficDaily:/)?.[0] || '', /FROM mart\.profit_order_item oi/, 'the live endpoint must not expand the multi-minute full profit view');
 assert.doesNotMatch(portalServer, /createBiLiveCoreRefreshScheduler|live core refresh failed/, 'one webhook must not launch a full 40+ second portal rebuild');
 assert.match(portalServer, /liveUpdates:\s*biLiveUpdateBridge\.status\(\)/, 'portal health must expose LISTEN connection status');
 assert.match(portalServer, /scheduleBiSectionBackgroundGeneration\(args, root, section, meta\.generatedAt, \{force: true\}\)/, 'an SSE force refresh must not skip an existing section cache');

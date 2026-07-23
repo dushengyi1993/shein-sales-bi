@@ -15,7 +15,7 @@ for (const source of [generator, server, client, prewarm]) {
   assert.match(source, /homeTrafficDaily/, 'homeTrafficDaily must exist across generator, server, client, and prewarm');
 }
 assert.match(client, /products:\['linksData','productSalesDaily'\]/, 'product page must not load the oversized homeRankings section');
-assert.match(client, /home:\['homeRankings','afterSales','homeProfit','homeTrafficDaily'\]/, 'home must load the slim traffic section');
+assert.match(client, /home:\['homeRankings','afterSales','homeProfit','homeTrafficDaily','liveSalesToday'\]/, 'home must load slim traffic plus the current-day profit overlay');
 assert.doesNotMatch(client.match(/const BASE_NEED=\{[^;]+/)?.[0] || '', /home:\[[^\]]*productTrafficDaily/, 'home must not load SKC-level traffic details');
 assert.match(client, /source=A\(D\.productSalesDaily\)\.length\?A\(D\.productSalesDaily\):A\(rankingProductRows\(\)\)/, 'product sales keeps a backward-compatible fallback');
 const standaloneSections = generator.slice(generator.indexOf('const STANDALONE_SECTION_SQL'));
