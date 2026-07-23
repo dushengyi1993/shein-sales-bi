@@ -27,6 +27,12 @@ const exact = evaluateAdditionalDuplicatePublishOverride(task, 'NM', [{skcName: 
 assert.equal(exact.allowed, true);
 assert.equal(exact.status, 'authorized_exact_live_duplicate_set');
 
+const stringOwner = evaluateAdditionalDuplicatePublishOverride({
+  ...task,
+  duplicatePublishOverride: {...task.duplicatePublishOverride, approvedBy: 'owner'},
+}, 'NM', [{skcName: 'sv260714225544971215796'}]);
+assert.equal(stringOwner.allowed, true);
+
 const newUnexpectedDuplicate = evaluateAdditionalDuplicatePublishOverride(task, 'NM', [
   {skcName: 'sv260714225544971215796'},
   {skcName: 'sv260723000000000000001'},
