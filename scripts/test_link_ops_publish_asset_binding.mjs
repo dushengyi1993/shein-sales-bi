@@ -56,6 +56,16 @@ check('locks inventory while preserving warehouse', overridden.payload.skc_list[
 check('preserves warehouse id', overridden.payload.skc_list[0].sku_list[0].stock_info_list[0].warehouse_id, 'WH-1');
 check('locks category', overridden.payload.category_id, 12345);
 check('locks Arabic title', overridden.payload.multi_language_name_list.find(row => row.language === 'ar')?.name, 'Arabic locked title');
+const renormalized = applyExplicitPublishPreparationOverrides(bound.payload, {
+  standardGoodsSn: '(全)SK-999食品料理机',
+  supplyPrice: 210,
+  inventory: 100,
+  categoryId: 12345,
+  titles: {ar: 'Nested Arabic locked title', en: 'Nested English locked title'},
+});
+check('keeps nested Arabic title after re-normalization', renormalized.payload.multi_language_name_list.find(row => row.language === 'ar')?.name, 'Nested Arabic locked title');
+check('keeps nested English title after re-normalization', renormalized.payload.multi_language_name_list.find(row => row.language === 'en')?.name, 'Nested English locked title');
+check('reports nested title languages after re-normalization', renormalized.evidence.titleLanguages.join(','), 'ar,en');
 const noNumericOverrides = applyExplicitPublishPreparationOverrides(payload, {standardGoodsSn: 'SK-999食品料理机'});
 check('missing supply price does not become zero', noNumericOverrides.payload.skc_list[0].sku_list[0].cost_info.cost_price, '99.00');
 check('missing inventory does not become zero', noNumericOverrides.payload.skc_list[0].sku_list[0].stock_info_list[0].stock, 8);
