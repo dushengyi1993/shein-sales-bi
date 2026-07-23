@@ -62,6 +62,7 @@ import {createConfiguredLinkOpsStoreGateway} from '../lib/link_ops_store_gateway
 import {createLinkOpsJobWorker} from '../lib/link_ops_job_worker.mjs';
 import {linkOpsPayloadHash} from '../lib/link_ops_repository.mjs';
 import {createSheinWebhookRepository} from '../lib/shein_webhook_repository.mjs';
+import {createSheinWebhookTaskReconciler} from '../lib/shein_webhook_task_reconciler.mjs';
 import {evaluateSheinWebhookWriteGates} from '../lib/shein_webhook_write_gate.mjs';
 import {createOwnerKnowledgeService} from '../lib/owner_knowledge_service.mjs';
 import {createOwnerKnowledgeGitPublisher} from '../lib/owner_knowledge_distribution.mjs';
@@ -7209,6 +7210,7 @@ export function normalizeBiLiveUpdatePayload(payload, now = new Date()) {
   if (!kind) return null;
   return {
     kind,
+    receiptId: boundedLiveText(record.receiptId || record.receipt_id || '', 32),
     storeKey: boundedLiveText(record.storeKey || record.store_key || record.store || '', 32).toUpperCase(),
     entityId: boundedLiveText(
       record.orderId || record.order_no || record.orderNo || record.returnId || record.return_no || record.returnNo
@@ -8100,7 +8102,25 @@ async function main() {
   const allowGenerateSections = !(args.readOnly || (args.host === '0.0.0.0' && !authRequired));
   const loginRateLimiter = createLoginRateLimiter();
   const enqueueMutationRequest = createSerialMutationQueue();
-  const biLiveUpdateBridge = createBiLiveUpdateBridge();
+  const webhookTaskReconciler = sheinWebhookRepository && linkOpsStoreGateway.mode === 'postgres'
+    ? createSheinWebhookTaskReconciler({
+        webhookRepository: sheinWebhookRepository,
+        linkOpsRepository: linkOpsStoreGateway.repository,
+        pollMs: Number(process.env.SHEIN_WEBHOOK_TASK_RECONCILE_MS || 5_000),
+        batchSize: Number(process.env.SHEIN_WEBHOOK_TASK_RECONCILE_BATCH || 50),
+        onEvent: event => appendAudit(args.auditFile, {at: new Date().toISOString(), type: `webhook-task-${event.event}`, ...event}),
+      })
+    : null;
+  const biLiveUpdateBridge = createBiLiveUpdateBridge({
+    onUpdate: event => {
+      if (event.kind === 'product' && event.receiptId) {
+        void webhookTaskReconciler?.reconcileReceipt(event.receiptId).catch(error => {
+          console.error(`[webhook-task-reconcile] ${String(error?.message || error)}`);
+        });
+      }
+      return event;
+    },
+  });
   const opsAgentGovernor = createBiOpsAgentGovernor({
     maxConcurrent: Number(process.env.SHEIN_BI_AGENT_MAX_CONCURRENT || 2),
     maxConcurrentPerActor: Number(process.env.SHEIN_BI_AGENT_MAX_CONCURRENT_PER_ACTOR || 1),
@@ -10558,6 +10578,7 @@ ${uploadCheckAnswer}` : `
   });
 
   await biLiveUpdateBridge.start();
+  await webhookTaskReconciler?.start();
   startBiPortalCoreWarmupWatcher(args, root, {allowGenerate: allowGenerateSections});
   linkOpsJobWorker?.start();
 
@@ -10567,6 +10588,7 @@ ${uploadCheckAnswer}` : `
     shuttingDown = true;
     console.log(JSON.stringify({ok: true, event: 'shutdown', signal, time: new Date().toISOString()}));
     await linkOpsJobWorker?.stop();
+    await webhookTaskReconciler?.stop();
     await biLiveUpdateBridge.stop();
     await new Promise(resolve => server.close(resolve));
     await Promise.allSettled([

@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 
-const [portal, webhookServer, writeGate, productExecutor, maintenanceExecutor, nginx, caddy, haproxy, service, notifier, migration, contextMigration, schema] = await Promise.all([
+const [portal, webhookServer, writeGate, productExecutor, maintenanceExecutor, nginx, caddy, haproxy, service, notifier, migration, contextMigration, reconciliationMigration, schema] = await Promise.all([
   fs.readFile(new URL('./serve_bi_portal.mjs', import.meta.url), 'utf8'),
   fs.readFile(new URL('./serve_shein_webhook.mjs', import.meta.url), 'utf8'),
   fs.readFile(new URL('../lib/shein_webhook_write_gate.mjs', import.meta.url), 'utf8'),
@@ -15,6 +15,7 @@ const [portal, webhookServer, writeGate, productExecutor, maintenanceExecutor, n
   fs.readFile(new URL('./notify_sync_issue.mjs', import.meta.url), 'utf8'),
   fs.readFile(new URL('../infra/warehouse/migrations/20260719_001_shein_webhook_runtime.sql', import.meta.url), 'utf8'),
   fs.readFile(new URL('../infra/warehouse/migrations/20260721_001_shein_webhook_product_context.sql', import.meta.url), 'utf8'),
+  fs.readFile(new URL('../infra/warehouse/migrations/20260724_001_shein_webhook_task_reconciliation.sql', import.meta.url), 'utf8'),
   fs.readFile(new URL('../infra/warehouse/schema.sql', import.meta.url), 'utf8'),
 ]);
 
@@ -22,6 +23,8 @@ assert.match(portal, /\/api\/shein\/webhook\/summary/);
 assert.match(portal, /\/api\/shein\/webhook\/events/);
 assert.match(portal, /actorStores\.includes\('\*'\) \? '\*' : actorStores/);
 assert.match(portal, /listEvents\(\{\s*allowedStores,/);
+assert.match(portal, /createSheinWebhookTaskReconciler/);
+assert.match(portal, /webhookTaskReconciler\?\.reconcileReceipt\(event\.receiptId\)/);
 assert.match(writeGate, /listStoreGates\(\{storeKeys: writeStores, blockingOnly: true\}\)/);
 assert.match(writeGate, /平台动态安全闸门当前不可用，真实提交已按失败关闭处理/);
 assert.ok((portal.match(/await evaluateWebhookWriteGates\(\)/g) || []).length >= 2, 'execute must check platform gates at preflight and immediately before write');
@@ -92,7 +95,7 @@ for (const sql of [migration, schema]) {
   assert.match(sql, /GRANT EXECUTE ON FUNCTION ops\.apply_shein_webhook_order_snapshot\(text,text,timestamptz,jsonb,jsonb,jsonb\) TO shein_webhook_ops/);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION ops\.apply_shein_webhook_return_snapshot\(text,text,timestamptz,jsonb,jsonb\) TO shein_webhook_ops/);
   assert.doesNotMatch(sql, /GRANT .*fact\.openapi_(?:order|return).* TO shein_link_ops/);
-  assert.doesNotMatch(sql, /GRANT .*fact\.openapi_daily|GRANT .*reconciliation/i);
+  assert.doesNotMatch(sql, /GRANT [^;\n]*fact\.(?:openapi_daily|reconciliation)/i);
 }
 
 for (const sql of [contextMigration, schema]) {
@@ -102,6 +105,15 @@ for (const sql of [contextMigration, schema]) {
   assert.match(sql, /GRANT EXECUTE ON FUNCTION ops\.get_shein_webhook_product_context\(text,text,timestamptz\) TO shein_webhook_ops/);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION ops\.get_shein_webhook_product_context\(text,text,timestamptz\) TO shein_link_ops/);
   assert.doesNotMatch(contextMigration, /GRANT SELECT ON (?:TABLE )?(?:fact|mart)\./, 'context roles must not receive raw mart SELECT');
+}
+
+for (const sql of [reconciliationMigration, schema]) {
+  assert.match(sql, /CREATE OR REPLACE FUNCTION ops\.record_shein_webhook_task_reconciliation/);
+  assert.match(sql, /SECURITY DEFINER/);
+  assert.match(sql, /action_state='event_recorded_no_task_repository'/);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION ops\.record_shein_webhook_task_reconciliation\(bigint,text,text\) TO shein_link_ops/);
+  assert.match(sql, /REVOKE ALL ON FUNCTION ops\.record_shein_webhook_task_reconciliation\(bigint,text,text\) FROM PUBLIC/);
+  assert.doesNotMatch(sql, /GRANT SELECT, INSERT, UPDATE ON TABLE ops\.shein_webhook_receipt TO shein_link_ops/);
 }
 
 console.log('shein_webhook_portal_contract: auth-scoped read model, write gate, ciphertext schema, ingress and P0 notifier passed');

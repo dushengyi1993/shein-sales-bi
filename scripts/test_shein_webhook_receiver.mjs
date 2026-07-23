@@ -117,11 +117,14 @@ const officialFixtures = Object.freeze({
   '3001503': {severity: 'P0', fields: {status: '1', authType: '1', supplierId: '22043644'}},
   '3001061': {severity: 'P0', fields: {availableLimit: 0, supplierId: '5511473', eventTime: '2593111773260075'}},
   '3001104': {severity: 'P0', fields: {skc: 'sr25050899111321041', complianceRequired: '1', complianceMissing: '1', eventTime: '2025-05-08 11:23:08'}},
+  '3001461': {severity: 'P3', fields: {deliveryNo: 'GU2509025285251076', placeRequestId: '2509033332639749', businessId: '2509033332639749', eventTime: '1756879655633'}},
+  '3001792': {severity: 'P3', fields: {skc: 'sc260414201529947197009', auditState: '2', status: '2', eventTime: '2026-06-02 21:46:25'}},
+  '3001793': {severity: 'P3', fields: {skc: 'sc260414201529947197009', rrpEndEffectiveDate: '9999-12-31 23:59:59', status: 'ACTIVE'}},
 });
-test('normalizes all ten official first-phase fixtures with P0/P1/P3 policy', () => {
+test('normalizes all thirteen subscribed official fixtures with P0/P1/P3 policy', () => {
   for (const [eventCode, expected] of Object.entries(officialFixtures)) {
     const fixture = JSON.parse(readFileSync(new URL(`./fixtures/shein_webhook_official/${eventCode}.json`, import.meta.url), 'utf8'));
-    const normalized = normalizeWebhookBusinessEvent({eventCode, payload: fixture});
+    const normalized = normalizeWebhookBusinessEvent({eventCode, payload: fixture, receivedAt: '2026-07-24T00:00:00.000Z'});
     assert.equal(classifyWebhookSeverity({normalizedEvent: normalized}).severity, expected.severity, eventCode);
     for (const [field, value] of Object.entries(expected.fields)) assert.deepEqual(normalized[field], value, `${eventCode}.${field}`);
   }
@@ -164,6 +167,16 @@ test('keeps routine platform flow quiet while surfacing business-impacting chang
   assert.equal(classifyWebhookSeverity({normalizedEvent: normalizeWebhookBusinessEvent({eventCode: '3001792', payload: {status: 'REJECTED'}})}).severity, 'P1');
   assert.equal(classifyWebhookSeverity({normalizedEvent: normalizeWebhookBusinessEvent({eventCode: '3001793', payload: {status: 'ACTIVE'}})}).severity, 'P3');
   assert.equal(classifyWebhookSeverity({normalizedEvent: normalizeWebhookBusinessEvent({eventCode: '3001793', payload: {status: 'EXPIRED'}})}).severity, 'P1');
+  assert.equal(classifyWebhookSeverity({normalizedEvent: normalizeWebhookBusinessEvent({
+    eventCode: '3001793',
+    payload: {skc_name: 'SKC-RRP', end_effective_date: '2026-07-27 23:59:59'},
+    receivedAt: '2026-07-24T00:00:00.000Z',
+  })}).severity, 'P1');
+  assert.equal(normalizeWebhookBusinessEvent({
+    eventCode: '3001793',
+    payload: {skc_name: 'SKC-RRP', end_effective_date: '2026-07-23 23:59:59'},
+    receivedAt: '2026-07-24T00:00:00.000Z',
+  }).status, 'EXPIRED');
   for (const eventCode of ['3001435', '3001441', '3001744', '3001801']) {
     assert.equal(classifyWebhookSeverity({normalizedEvent: normalizeWebhookBusinessEvent({eventCode, payload: {status: 'UPDATED'}})}).severity, 'P1', eventCode);
   }
@@ -199,6 +212,12 @@ test('frontend projection does not expose raw payload or sensitive fields', () =
   const serialized = JSON.stringify(view).toLowerCase();
   assert.equal(serialized.includes('secret'), false); assert.equal(serialized.includes('phone'), false); assert.equal(serialized.includes('hidden'), false);
   assert.equal(view.orderId, 'O-1');
+  const logisticsView = projectWebhookEventForFrontend(normalizeWebhookBusinessEvent({
+    eventCode: '3001461',
+    payload: {deliveryNo: 'D-1', placeRequestId: 'P-1', changeTime: 1756879655633},
+  }));
+  assert.equal(logisticsView.deliveryNo, 'D-1');
+  assert.equal(logisticsView.placeRequestId, 'P-1');
 });
 test('prefers the Chinese product audit failure reason and exposes only the safe text', () => {
   const normalized = normalizeWebhookBusinessEvent({

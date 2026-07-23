@@ -98,6 +98,7 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 | 2026.07.19.1 ET 仓储费历史重述与自动同步发布说明 | `docs/bi-ops-release-2026-07-19.md` |
 | 2026.07.19.2 Webhook 与平台动态发布说明 | `docs/bi-webhook-release-2026-07-19.md` |
 | 2026.07.23 半托 Webhook 实时销售切换与新排班 | `docs/bi-webhook-live-cutover-2026-07-23.md` |
+| 2026.07.24 半托 13 类 Webhook 业务闭环 | `docs/bi-webhook-live-cutover-2026-07-23.md`、`docs/shein-webhook-receiver-design.md` |
 | 2026-07-19 仓储费历史重述口径与验收 | `docs/storage-fee-history-restatement-2026-07-19.md` |
 | 2026-07-18 BI 业务逻辑加固口径 | `docs/bi-business-logic-hardening-2026-07-18.md` |
 | BI 仓库模型 | `docs/bi-warehouse-model.md` |

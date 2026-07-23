@@ -40,6 +40,9 @@ class FakePool {
       ]};
     }
     if (key === 'shein-webhook-get-product-business-context') return {rows: [{context: {storeKey: values[0], skc: values[1], supplierCode: 'S1810电热水壶'}}]};
+    if (key === 'shein-webhook-list-task-reconciliation-receipts') return {rows: [{...baseRow, status: 'succeeded', action_state: 'event_recorded_no_task_repository', normalized: {eventFamily: 'product_audit', productId: 'SPU-1', skc: 'SKC-1'}}]};
+    if (key === 'shein-webhook-get-task-reconciliation-receipt') return {rows: [{...baseRow, status: 'succeeded', action_state: 'event_recorded_no_task_repository', normalized: {eventFamily: 'product_audit', productId: 'SPU-1', skc: 'SKC-1'}}]};
+    if (key === 'shein-webhook-mark-task-reconciliation') return {rows: [{applied: true}]};
     if (key === 'shein-webhook-list-store-gates') return {rows: [{store_key: 'JSH', gate_type: 'authorization', state: 'blocked', reason: 'expired', source_receipt_id: 41, source_event_order: null, updated_at: '2026-07-19T01:00:00.000Z'}]};
     if (key === 'shein-webhook-upsert-store-gate') return {rows: [{store_key: values[0], gate_type: values[1], state: values[2], reason: values[3], source_receipt_id: values[4], source_event_order: values[5], updated_at: '2026-07-19T01:01:00.000Z', applied: true}]};
     if (key === 'shein-webhook-reopen-authorization-gate') return {rows: [{store_key: values[0], gate_type: 'authorization', state: 'open', reason: values[2], source_receipt_id: values[1], source_event_order: null, updated_at: '2026-07-19T01:02:00.000Z', applied: true}]};
@@ -113,6 +116,13 @@ assert.match(latest(pool, 'shein-webhook-list-events').text, /WHERE FALSE/, 'emp
 const productContext = await repo.getProductBusinessContext({storeKey: 'tz', skc: 'SKC-1', eventAt: '2026-07-21T03:46:32.000Z'});
 assert.equal(productContext.supplierCode, 'S1810电热水壶');
 assert.deepEqual(latest(pool, 'shein-webhook-get-product-business-context').values, ['TZ', 'SKC-1', '2026-07-21T03:46:32.000Z']);
+const reconciliationReceipts = await repo.listTaskReconciliationReceipts({limit: 20});
+assert.equal(reconciliationReceipts[0].idempotencyKey, '41');
+assert.match(latest(pool, 'shein-webhook-list-task-reconciliation-receipts').text, /event_recorded_no_task_repository/);
+assert.equal((await repo.getTaskReconciliationReceipt(41)).normalized.skc, 'SKC-1');
+assert.equal(await repo.markTaskReconciliation(41, {actionState: 'task_readback_attached', taskId: 'task-1'}), true);
+assert.deepEqual(latest(pool, 'shein-webhook-mark-task-reconciliation').values, [41, 'task_readback_attached', 'task-1']);
+await assert.rejects(() => repo.markTaskReconciliation(41, {actionState: 'arbitrary'}), /Unsupported task reconciliation state/);
 
 const gates = await repo.listStoreGates({storeKeys: ['JSH']});
 assert.deepEqual(gates[0], {storeKey: 'JSH', gateType: 'authorization', state: 'blocked', reason: 'expired', sourceReceiptId: '41', sourceEventOrder: null, updatedAt: '2026-07-19T01:00:00.000Z'});

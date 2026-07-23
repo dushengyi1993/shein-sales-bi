@@ -168,6 +168,44 @@ const unavailableAudit = await unavailableAuditProcessor.process({
 assert.match(unavailableAudit.summary, /失败原因：资料审核失败：缺少电压/);
 assert.equal(unavailableAudit.normalized.auditContextStatus, 'unavailable');
 
+const logisticsCopy = humanizeSheinWebhookEvent({
+  eventFamily: 'logistics_order',
+  storeKey: 'TZ',
+  placeRequestId: '2509033332639749',
+  deliveryNo: 'GU2509025285251076',
+  eventTime: '1756879655633',
+}, {severity: 'P3'});
+assert.equal(logisticsCopy.title, 'TZ 店：SHEIN 物流单已创建');
+assert.match(logisticsCopy.summary, /下单编号：2509033332639749/);
+assert.match(logisticsCopy.summary, /运单包裹号：GU2509025285251076/);
+assert.doesNotMatch(logisticsCopy.summary, /状态已更新|3001461|P3/);
+
+const rrpRejected = humanizeSheinWebhookEvent({
+  eventFamily: 'rrp_review',
+  storeKey: 'TZ',
+  skc: 'sc260414201529947197009',
+  auditState: '3',
+  status: '3',
+  eventTime: '2026-06-02 21:46:25',
+  productContext: {supplierCode: 'SK-999食品料理机', productName: 'SK-999食品料理机'},
+}, {severity: 'P1'});
+assert.equal(rrpRejected.title, 'TZ 店：SK-999食品料理机建议零售价审核未通过');
+assert.match(rrpRejected.summary, /货号：SK-999食品料理机/);
+assert.match(rrpRejected.summary, /审核结果：审核未通过/);
+assert.match(rrpRejected.summary, /修正建议零售价资料后重新提交/);
+
+const rrpExpiring = humanizeSheinWebhookEvent({
+  eventFamily: 'rrp_validity',
+  storeKey: 'TZ',
+  skc: 'sc260414201529947197009',
+  status: 'EXPIRING_SOON',
+  rrpEndEffectiveDate: '2026-07-27 23:59:59',
+  productContext: {supplierCode: 'SK-999食品料理机'},
+}, {severity: 'P1'});
+assert.equal(rrpExpiring.title, 'TZ 店：SK-999食品料理机建议零售价即将到期');
+assert.match(rrpExpiring.summary, /有效期至：2026-07-27 23:59/);
+assert.match(rrpExpiring.summary, /7 天内到期/);
+
 const productResult = await processor.process({...base, normalized: {eventFamily: 'product_audit', eventCode: '3001450', eventLabel: '审核', storeKey: 'AA', productId: 'SPU-1', skc: 'SKC-1', businessId: 'DOC-1'}, payload: {spuName: 'SPU-1', skcName: 'SKC-1', documentSn: 'DOC-1', version: '7'}});
 assert.equal(productResult.actionState, 'task_readback_attached');
 assert.equal(updates.length, 1);
@@ -176,6 +214,23 @@ task.lifecycle = {webhookReadbacks: [{receiptId: 1}]};
 const replayedProduct = await processor.process({...base, normalized: {eventFamily: 'product_audit', eventCode: '3001450', eventLabel: '审核', storeKey: 'AA', productId: 'SPU-1', skc: 'SKC-1', businessId: 'DOC-1'}, payload: {spuName: 'SPU-1', skcName: 'SKC-1', documentSn: 'DOC-1', version: '7'}});
 assert.equal(replayedProduct.replayed, true);
 assert.equal(updates.length, 1, 'receipt replay must not produce a second task revision');
+const singleSkcDelete = await processor.process({
+  ...base,
+  id: 99,
+  idempotencyKey: 'b'.repeat(64),
+  severity: {severity: 'P0', notifyFeishu: true},
+  normalized: {
+    eventFamily: 'product_delete_audit',
+    eventCode: '3001903',
+    storeKey: 'AA',
+    skc: 'SKC-1',
+    businessId: 'SKC-1',
+    status: '2',
+  },
+  payload: {},
+});
+assert.equal(singleSkcDelete.actionState, 'task_readback_attached', 'store + exact SKC may attach when the task match is unique');
+assert.equal(updates.length, 2);
 
 await processor.process({...base, id: 2, normalized: {eventFamily: 'authorization', eventCode: '3001503', eventLabel: '授权', storeKey: 'AA'}, payload: {type: 6}});
 await processor.process({...base, id: 3, normalized: {eventFamily: 'quota', eventCode: '3001061', eventLabel: '额度', storeKey: 'AA', quota: 0, eventTime: '1700000000000'}, payload: {quota: 0}});

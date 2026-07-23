@@ -34,7 +34,7 @@ const order = normalizeBiLiveUpdatePayload(JSON.stringify({
   eventFamily: 'order', storeKey: 'tz', orderId: 'GSH18A51T000BED', updatedAt: '2026-07-23T11:59:59.000Z',
 }), fixedNow);
 assert.deepEqual(order, {
-  kind: 'order', storeKey: 'TZ', entityId: 'GSH18A51T000BED', occurredAt: '2026-07-23T11:59:59.000Z',
+  kind: 'order', receiptId: '', storeKey: 'TZ', entityId: 'GSH18A51T000BED', occurredAt: '2026-07-23T11:59:59.000Z',
 });
 assert.deepEqual(liveSectionsForBiUpdate('return'), ['liveSalesToday', 'orders', 'priceScatter', 'afterSales']);
 assert.deepEqual(liveSectionsForBiUpdate('product'), ['linksData', 'actions']);
