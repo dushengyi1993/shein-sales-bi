@@ -68,6 +68,10 @@ import {
   normalizePublishPreparationOverrides,
 } from '../lib/link_ops_publish_asset_binding.mjs';
 import {
+  ADDITIONAL_DUPLICATE_PUBLISH_CONFIRM_TEXT,
+  normalizeAdditionalDuplicatePublishOverrideInput,
+} from '../lib/link_ops_duplicate_publish_override.mjs';
+import {
   actorCanPublishOwnerKnowledge,
   isOwnerKnowledgeCandidateText,
   isOwnerKnowledgeDurableText,
@@ -223,6 +227,7 @@ const LINK_OPS_PROTECTED_TASK_PATCH_FIELDS = new Set([
   'actorKey',
   'ownerKey',
   'ownership',
+  'allowDuplicateNewPublish',
 ]);
 const DEFAULT_OPENAPI_READ_DOMAINS = ['store_info', 'product', 'stock', 'order', 'return', 'finance'];
 const DEFAULT_OPENAPI_WRITE_PRECHECK_DOMAINS = ['product_publish_precheck'];
@@ -4121,6 +4126,44 @@ function patchLinkOpsTask(task, body, actor, req) {
   }
   if (typeof body.command === 'string') {
     next.command = body.command.trim().slice(0, 2000) || next.command;
+  }
+  if (body.duplicatePublishOverride !== undefined) {
+    if (!isOwnerActor(actor)) {
+      throw new Error('只有全店管理账号可以授权保留同货号旧链接并额外新建。');
+    }
+    if (!asArray(task?.intents).includes('copy_product_draft')) {
+      throw new Error('同货号额外新建授权只适用于复制上品任务。');
+    }
+    const override = normalizeAdditionalDuplicatePublishOverrideInput(body.duplicatePublishOverride);
+    if (override.confirmation !== ADDITIONAL_DUPLICATE_PUBLISH_CONFIRM_TEXT) {
+      throw new Error(`同货号额外新建授权需要确认文本 ${ADDITIONAL_DUPLICATE_PUBLISH_CONFIRM_TEXT}`);
+    }
+    if (!taskWriteStores(task).includes(override.store)) {
+      throw new Error(`授权店铺 ${override.store || '(empty)'} 不在任务写入范围内。`);
+    }
+    if (!override.existingSkcs.length) {
+      throw new Error('同货号额外新建授权必须锁定至少一个现有 SKC。');
+    }
+    if (override.reason.length < 8) {
+      throw new Error('同货号额外新建授权必须说明保留旧链接并新增的业务原因。');
+    }
+    next.allowDuplicateNewPublish = true;
+    next.duplicatePublishOverride = {
+      ...override,
+      approvedAt: new Date().toISOString(),
+      approvedBy: actorUser(actor, req),
+    };
+    next.preflight = {
+      ok: false,
+      blockers: ['负责人已授权本任务额外创建同货号链接，需要重新预检并锁定当前精确重复链接集合。'],
+      warnings: [],
+    };
+    next.execution = {
+      ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
+      state: 'needs_repreflight',
+      preflight: next.preflight,
+      openApiProductExecutors: [],
+    };
   }
   if (body.preview && typeof body.preview === 'object') {
     next.preview = {

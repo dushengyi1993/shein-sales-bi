@@ -24,6 +24,7 @@ import {
   relaunchPartnerCli,
 } from '../lib/partner_cli_updater.mjs';
 import {planLinkOpsImageRoles} from '../lib/link_ops_image_role_planner.mjs';
+import {ADDITIONAL_DUPLICATE_PUBLISH_CONFIRM_TEXT} from '../lib/link_ops_duplicate_publish_override.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_BASE_URL = process.env.SHEIN_BI_BASE_URL || 'https://sa.dushengyi.cc';
@@ -278,6 +279,7 @@ Usage:
   node scripts/bi_ops_cli.mjs tasks
   node scripts/bi_ops_cli.mjs create --text "把 520a 在 DL 生成下架预检" --stores DL --products 520a
   node scripts/bi_ops_cli.mjs create --text "复制 CX 的 SM-961 到 HL" --source-stores CX --target-stores HL --products SM-961
+  node scripts/bi_ops_cli.mjs authorize-duplicate-publish --task-id <id> --store NM --skc sv123 --note "保留旧链接并额外新增" --confirm ${ADDITIONAL_DUPLICATE_PUBLISH_CONFIRM_TEXT}
   node scripts/bi_ops_cli.mjs preflight --task-id <id>
   node scripts/bi_ops_cli.mjs execute --task-id <id> --confirm ${SUBMIT_CONFIRM_TEXT}
   node scripts/bi_ops_cli.mjs resolve --task-id <id> --status done --note "人工确认已闭环"
@@ -1338,6 +1340,31 @@ async function main() {
     const {json} = await request(args, '/api/link-ops-tasks', {
       method: 'POST',
       body: {command: args.text, source: 'codex_desktop_cli', targets: taskTargets(args)},
+    });
+    print({ok: true, task: json.task, data: json.data});
+    return;
+  }
+  if (args.command === 'authorize-duplicate-publish') {
+    if (!args.taskId) throw new Error('authorize-duplicate-publish requires --task-id');
+    const store = [...new Set([...(args.writeStores || []), ...(args.stores || [])])][0] || '';
+    if (!store) throw new Error('authorize-duplicate-publish requires --store <target store>');
+    if (!args.skcList.length) throw new Error('authorize-duplicate-publish requires --skc <existing SKC>');
+    if (!args.note) throw new Error('authorize-duplicate-publish requires --note <business reason>');
+    if (args.confirm !== ADDITIONAL_DUPLICATE_PUBLISH_CONFIRM_TEXT) {
+      throw new Error(`authorize-duplicate-publish requires --confirm ${ADDITIONAL_DUPLICATE_PUBLISH_CONFIRM_TEXT}`);
+    }
+    const {json} = await request(args, '/api/link-ops-tasks', {
+      method: 'PATCH',
+      body: {
+        id: args.taskId,
+        event: 'authorize_additional_same_code_link_cli',
+        duplicatePublishOverride: {
+          store,
+          existingSkcs: args.skcList,
+          reason: args.note,
+          confirmation: args.confirm,
+        },
+      },
     });
     print({ok: true, task: json.task, data: json.data});
     return;

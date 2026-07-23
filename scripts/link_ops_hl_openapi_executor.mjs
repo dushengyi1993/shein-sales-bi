@@ -26,6 +26,7 @@ import {
   applyExplicitPublishPreparationOverrides,
   taskHasUnboundImageAssets,
 } from '../lib/link_ops_publish_asset_binding.mjs';
+import {evaluateAdditionalDuplicatePublishOverride} from '../lib/link_ops_duplicate_publish_override.mjs';
 import {runSheinWebhookExternalWriteGuarded} from '../lib/shein_webhook_external_write_guard.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -2400,14 +2401,19 @@ async function inspectTargetDuplicateProducts(client, payload, targetStore = '',
   const rejectedReplacement = hasBlockingDuplicate
     ? await rejectedReplacementDuplicateOverride(client, task, targetStore, matches, calls)
     : {allowed: false, replacement: null, liveValidation: {status: 'not_needed_no_blocking_duplicate'}};
-  if (active.length && !rejectedReplacement.allowed) {
+  const additionalDuplicateOverride = evaluateAdditionalDuplicatePublishOverride(task, targetStore, [...active, ...inactive]);
+  const duplicateOverrideAllowed = rejectedReplacement.allowed || additionalDuplicateOverride.allowed;
+  if (active.length && !duplicateOverrideAllowed) {
     blockers.push(`${targetStore || '目标店'} 已存在同货号在售链接 ${active.map(row => row.skcName).filter(Boolean).join('、')}，禁止重复创建新链接。`);
   }
-  if (inactive.length && !rejectedReplacement.allowed) {
+  if (inactive.length && !duplicateOverrideAllowed) {
     blockers.push(`${targetStore || '目标店'} 已存在同货号下架但未回收链接 ${inactive.map(row => row.skcName).filter(Boolean).join('、')}；应优先恢复该链接，或先明确说明为何必须另建，当前禁止直接创建重复链接。`);
   }
   if (rejectedReplacement.allowed && (active.length || inactive.length)) {
     warnings.push(`${targetStore || '目标店'} 正在替换终态 state=3 的议价拒绝链接 ${rejectedReplacement.replacement.skc}；已对其他同货号链接应用单次重发豁免，不改变全局去重规则。`);
+  }
+  if (additionalDuplicateOverride.allowed) {
+    warnings.push(`${targetStore || '目标店'} 已由负责人明确授权保留现有同货号链接 ${additionalDuplicateOverride.existingSkcs.join('、')} 并额外新建一条；该豁免仅对本任务和当前精确链接集合生效。`);
   }
   if (recycled.length) {
     warnings.push(`${targetStore || '目标店'} 已存在同货号历史回收链接 ${recycled.map(row => row.skcName).filter(Boolean).join('、')}（已回收、当前非在售）。本次计划仍是创建新链接，不会恢复旧链接；确认后新链接会与历史回收记录并存。`);
@@ -2424,6 +2430,7 @@ async function inspectTargetDuplicateProducts(client, payload, targetStore = '',
       inactiveCount: inactive.length,
       recycledCount: recycled.length,
       rejectedReplacementOverride: rejectedReplacement,
+      additionalDuplicateOverride,
       matches: matches.slice(0, 40),
     },
   };
