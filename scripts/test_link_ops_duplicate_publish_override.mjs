@@ -8,7 +8,7 @@ import {
 
 const input = normalizeAdditionalDuplicatePublishOverrideInput({
   store: 'nm',
-  existingSkcs: ['sv260714225544971215796', 'invalid', 'sv260714225544971215796'],
+  existingSkcs: ['SV260714225544971215796', 'invalid', 'sv260714225544971215796'],
   reason: '旧链接议价成功并保留，本任务明确额外新增一条。',
   confirmation: ADDITIONAL_DUPLICATE_PUBLISH_CONFIRM_TEXT,
 });
