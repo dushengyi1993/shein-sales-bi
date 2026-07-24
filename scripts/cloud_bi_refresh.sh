@@ -91,6 +91,50 @@ node scripts/load_bi_warehouse.mjs \
   --skip-links \
   --skip-dashboard
 
+# After the Webhook/OpenAPI cutover, the 03:00 WebAPI fetch remains an
+# independent final-day comparison source. It must never become a second copy
+# in the formal facts. The warehouse loader above therefore skips formal sales
+# rows on/after the configured cutover. Refresh the complete OpenAPI day,
+# require all 19 stores to match the WebAPI artifacts, then atomically promote
+# that canonical slice into the formal facts.
+PRIMARY_SALES_ACTIVE="$(
+  docker exec shein-warehouse-db psql -X -qAt -U shein -d shein_bi \
+    -c "SELECT CASE WHEN ops.shein_webhook_primary_sales_enabled(DATE '$DATE') THEN 'true' ELSE 'false' END"
+)"
+if [[ "$PRIMARY_SALES_ACTIVE" == "true" && "${SHEIN_BI_PRIMARY_SALES_FINALIZE:-1}" != "0" ]]; then
+  OPENAPI_RECON_DIR="${SHEIN_BI_OPENAPI_RECON_DIR:-/srv/shein-bi/logs/openapi-sales-reconciliation}"
+  OPENAPI_RECON_FILE="$OPENAPI_RECON_DIR/openapi-sales-$DATE-$STAMP.json"
+  mkdir -p "$OPENAPI_RECON_DIR"
+  node scripts/run_shein_openapi_sales_reconciliation.mjs \
+    --date "$DATE" \
+    --concurrency "${SHEIN_OPENAPI_RECONCILE_CONCURRENCY:-3}" \
+    --out "$OPENAPI_RECON_FILE"
+  node - "$OPENAPI_RECON_FILE" <<'NODE'
+const fs = require('fs');
+const file = process.argv[2];
+const report = JSON.parse(fs.readFileSync(file, 'utf8'));
+const counts = report.counts || {};
+const expected = 19;
+const ok = report.ok === true
+  && Number(counts.total) === expected
+  && Number(counts.succeeded) === expected
+  && Number(counts.matched) === expected
+  && Number(counts.failed || 0) === 0
+  && Number(counts.warning || 0) === 0
+  && Number(counts.missingBrowser || 0) === 0
+  && Number(counts.skipped || 0) === 0;
+if (!ok) {
+  throw new Error(`OpenAPI final-day gate failed: ${JSON.stringify(counts)}`);
+}
+console.log(`[cloud_bi_refresh] OpenAPI final-day gate passed: ${JSON.stringify(counts)}`);
+NODE
+  PROMOTION_RESULT="$(
+    docker exec shein-warehouse-db psql -X -qAt -F '|' -v ON_ERROR_STOP=1 -U shein -d shein_bi \
+      -c "SELECT headers_written,items_written,payment_flags_written,daily_rows_refreshed FROM ops.promote_openapi_sales_slice(DATE '$DATE',DATE '$DATE')"
+  )"
+  echo "[cloud_bi_refresh] canonical OpenAPI sales promoted date=$DATE result=$PROMOTION_RESULT reconciliation=$OPENAPI_RECON_FILE"
+fi
+
 COST_LEDGER_STATUS=0
 if [[ "${SHEIN_BI_INVENTORY_COST_REFRESH:-1}" == "1" || "${SHEIN_BI_INVENTORY_COST_REFRESH:-1}" == "true" ]]; then
   set +e

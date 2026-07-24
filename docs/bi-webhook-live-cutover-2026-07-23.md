@@ -73,6 +73,8 @@
 - `shein-bi-portal.service`、`shein-bi-webhook.service` 均为 `active`。
 - Portal `/api/health` 显示 `liveUpdates.enabled=true`、`connected=true`。
 - 修复成本键切换后，`liveSalesToday` 返回店铺级当天利润覆盖；2026-07-23 23:38 验收净成交额 `3282.11 SAR`、商品成本 `2321.57 SAR`、已落定利润 `960.54 SAR`、缺成本行 `0`，查询耗时 `0.54s`。
+- 2026-07-24 发现 03:00 WebAPI 最终日任务仍会把同一批订单写入正式事实，因 WebAPI 与 OpenAPI 商品行键不同而把 2026-07-23 金额/件数放大为两倍。已清除 WebAPI 副本并重建成本、利润与页面缓存；最终回读为 `31` 个有效订单、`34` 件、`3282.11 SAR`，19 店 OpenAPI 与 WebAPI 全部 `matched`。
+- 切源保护现已固化：切换日及以后，通用 WebAPI 入仓器只保留文件和独立核对证据，不清理或写入正式销售事实；03:00 任务必须先完成 19/19 店 OpenAPI 深度匹配，随后通过 `ops.promote_openapi_sales_slice` 原子晋升正式日切片。任何失败、warning、缺店或差异都禁止晋升。
 - `shein-bi-cloud-today.timer` 为 `not-found/inactive`；全托 `shein-fm-sales-sync.timer` 为 `disabled/inactive`。
 - 19 个半托 App 正式/测试回调均为审核通过的标准 443 地址；新增可用订阅逐店回读为 `3/3`，当前总计 `13/13`。本轮 57 条平台验证回调全部安全隔离并处理成功，飞书、经营闸门和业务写入副作用均为 0。
 

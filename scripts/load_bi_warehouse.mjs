@@ -18,6 +18,7 @@ import {
   ORDER_PAYMENT_FLAG_TABLE,
   extractPaymentFlagsFromSalesArtifact,
 } from '../lib/order_payment_flags.mjs';
+import {guardFormalSalesFacts} from '../lib/primary_sales_cutover_guard.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -169,8 +170,8 @@ function psqlSpawnCommand(args, extraFlags = '') {
   };
 }
 
-async function runPsqlScript(args, script) {
-  const psql = psqlSpawnCommand(args);
+async function runPsqlScript(args, script, extraFlags = '') {
+  const psql = psqlSpawnCommand(args, extraFlags);
   const child = spawn(psql.command, psql.args, {
     cwd: ROOT,
     windowsHide: true,
@@ -187,6 +188,27 @@ async function runPsqlScript(args, script) {
     throw new Error(`psql failed (${code})\nSTDOUT:\n${stdout.slice(-4000)}\nSTDERR:\n${stderr.slice(-4000)}`);
   }
   return {stdout, stderr};
+}
+
+async function readPrimarySalesGuard(args) {
+  if (args.dryRun) {
+    return {enabled: false, cutoverDate: '', source: 'dry-run'};
+  }
+  const result = await runPsqlScript(args, `
+SELECT
+  CASE WHEN ops.shein_webhook_primary_sales_enabled(current_date) THEN 'true' ELSE 'false' END,
+  COALESCE((
+    SELECT setting_value
+    FROM ops.shein_webhook_runtime_setting
+    WHERE setting_key='primary_sales_cutover_date'
+  ), '');
+`, ' -qAt -F "|"');
+  const [enabledRaw = '', cutoverDate = ''] = String(result.stdout || '').trim().split('|');
+  const enabled = enabledRaw === 'true';
+  if (enabled && !/^\d{4}-\d{2}-\d{2}$/.test(cutoverDate)) {
+    throw new Error(`Primary sales is enabled but cutover date is invalid: ${cutoverDate || '(empty)'}`);
+  }
+  return {enabled, cutoverDate, source: 'ops.shein_webhook_runtime_setting'};
 }
 
 async function ensureOrderPaymentFlagTable(args) {
@@ -666,6 +688,9 @@ async function main() {
 
   const stores = await collectStores();
   const sales = await collectSales(args, productMap, skcMap);
+  const primarySalesGuard = await readPrimarySalesGuard(args);
+  const guardedSales = guardFormalSalesFacts(sales, primarySalesGuard);
+  const formalSales = guardedSales.sales;
   const links = await collectLinks(args, productMap, skcMap);
   const dashboard = await collectDashboard(args);
   const products = [...productMap.values()];
@@ -673,17 +698,17 @@ async function main() {
   const catalog = [...sales.catalog, ...links.catalog];
 
   const paymentFlagTable = await ensureOrderPaymentFlagTable(args);
-  const cleanup = await cleanupLoadedSlices(args, sales.daily, links.master, dashboard);
+  const cleanup = await cleanupLoadedSlices(args, formalSales.daily, links.master, dashboard);
 
   const batches = [
     ['dim.store', ['store_key','group_key','shop_name','profile_key','cdp_port','profile_name','enabled','product_stats_enabled'], ['store_key'], stores],
     ['dim.product', ['standard_goods_sn','sample_raw_goods_sn','needs_review','review_reason','first_seen_date','last_seen_date'], ['standard_goods_sn'], products],
     ['dim.skc', ['skc','spu','standard_goods_sn','raw_goods_sn','sku_code','title','image_url','category_l1','category_l2','category_l3','category_l4','first_seen_date','last_seen_date'], ['skc'], skcs],
     ['raw.local_file_catalog', ['file_path','file_kind','store_key','target_date','record_count','raw_meta'], ['file_path'], catalog],
-    ['fact.store_daily_sales', ['date','store_key','group_key','shop_name','valid_order_count','goods_line_count','quantity_all','quantity_positive_amount','sales_sar','sales_rmb','fetch_time','source_file','raw_summary'], ['date','store_key'], sales.daily],
-    ['fact.order_header', ['order_key','store_key','group_key','order_id','order_no','bill_no','created_date','order_create_time','allocate_time','site','order_status','order_status_desc','perform_status','perform_status_desc','source_file','raw_summary'], ['order_key'], sales.orders],
-    ['fact.order_item', ['order_item_key','order_key','store_key','group_key','order_id','order_no','bill_no','created_date','order_create_time','site','standard_goods_sn','raw_goods_sn','goods_id','entity_id','skc','sku_code','sku_sn','sku_suffix','goods_title','quantity','currency_code','currency_price','sales_sar','sales_rmb','goods_status','goods_performance_status','goods_performance_status_desc','source_file','raw_summary'], ['order_item_key'], sales.items],
-    [ORDER_PAYMENT_FLAG_TABLE, ORDER_PAYMENT_FLAG_COLUMNS, ['order_key'], sales.paymentFlags],
+    ['fact.store_daily_sales', ['date','store_key','group_key','shop_name','valid_order_count','goods_line_count','quantity_all','quantity_positive_amount','sales_sar','sales_rmb','fetch_time','source_file','raw_summary'], ['date','store_key'], formalSales.daily],
+    ['fact.order_header', ['order_key','store_key','group_key','order_id','order_no','bill_no','created_date','order_create_time','allocate_time','site','order_status','order_status_desc','perform_status','perform_status_desc','source_file','raw_summary'], ['order_key'], formalSales.orders],
+    ['fact.order_item', ['order_item_key','order_key','store_key','group_key','order_id','order_no','bill_no','created_date','order_create_time','site','standard_goods_sn','raw_goods_sn','goods_id','entity_id','skc','sku_code','sku_sn','sku_suffix','goods_title','quantity','currency_code','currency_price','sales_sar','sales_rmb','goods_status','goods_performance_status','goods_performance_status_desc','source_file','raw_summary'], ['order_item_key'], formalSales.items],
+    [ORDER_PAYMENT_FLAG_TABLE, ORDER_PAYMENT_FLAG_COLUMNS, ['order_key'], formalSales.paymentFlags],
     ['fact.link_master_snapshot', ['unique_key','snapshot_date','store_key','group_key','shop_name','standard_goods_sn','raw_goods_sn','spu','skc','sku_codes','sale_name','image_url','product_name_cn','product_name_en','brand_name','shelf_status','shelf_status_name','is_on_shelf','is_wait_shelf','is_sold_out','is_out_shelf','is_hard_dead','wait_shelf_blocked','wait_shelf_block_reason','created_time','shelf_time','first_shelf_time','expect_shelf_time','source_file','raw_summary'], ['unique_key'], links.master],
     ['fact.link_performance_daily', ['unique_key','date','store_key','group_key','shop_name','standard_goods_sn','raw_goods_sn','spu','skc','goods_name','image_url','sale_cnt','pay_order_cnt','eps_uv','goods_uv','click_rate','cart_uv','cart_pv','cart_rate','pay_uv','pay_rate','c7_sale_cnt','prev7_sale_cnt','c30_sale_cnt','quality_grade','comment_count','bad_comment_rate','return_order_count','return_item_count','activity_tag','activity_names','flow_diagnose_tabs','source_file','raw_summary'], ['unique_key'], links.perf],
     ['fact.product_store_coverage', ['unique_key','date','store_key','group_key','shop_name','standard_goods_sn','coverage_status','has_on_shelf_link','need_supplement_link','link_count','on_shelf_count','wait_shelf_count','sold_out_count','out_shelf_count','hard_dead_count','duplicate_on_shelf','best_skc','best_link_c30_sale','skc_list','recommendation','source_file','raw_summary'], ['unique_key'], links.coverage],
@@ -704,6 +729,11 @@ async function main() {
     linkFiles: links.fileCount,
     dashboardFile: fssync.existsSync(args.dashboardJson) ? rel(args.dashboardJson) : null,
     paymentFlagTable,
+    primarySalesGuard: {
+      ...primarySalesGuard,
+      skipped: guardedSales.skipped,
+      skippedTotal: guardedSales.skippedTotal,
+    },
     cleanup,
     results,
   }, null, 2));

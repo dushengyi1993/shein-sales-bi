@@ -94,7 +94,7 @@
 
 
 
-ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启用并通过手动验证；飞书只读问数服务自 2026-07-11 起保持 `disabled + inactive`。2026-07-23 起，19 店半托当天销售由订单 Webhook 触发按单 OpenAPI 查询并写正式事实表，在线 BI 通过 SSE 实时刷新；旧每小时 `today` timer 已删除。每日 `03:00` WebAPI 仍作为前一天最终定稿和独立核对，晨间日更继续补齐链接/业务域、RTV、SBN 和商品流量等非订单数据。Webhook 替代的是半托当天销售轮询，不等于所有数据域都已无浏览器或无 WebAPI。
+ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启用并通过手动验证；飞书只读问数服务自 2026-07-11 起保持 `disabled + inactive`。2026-07-23 起，19 店半托当天销售由订单 Webhook 触发按单 OpenAPI 查询并写正式事实表，在线 BI 通过 SSE 实时刷新；旧每小时 `today` timer 已删除。每日 `03:00` WebAPI 仍抓前一天作为独立核对证据，但切换日以后不得直接清理或写入正式销售事实；只有 19 店 OpenAPI 与 WebAPI 全部深度匹配后，才原子晋升 OpenAPI 最终日切片。晨间日更继续补齐链接/业务域、RTV、SBN 和商品流量等非订单数据。Webhook 替代的是半托当天销售轮询，不等于所有数据域都已无浏览器或无 WebAPI。
 
 
 
@@ -107,7 +107,7 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 | 时间 / 频率 | 任务 | 形式 | 生产事实影响 | 备注 |
 |---|---|---|---|---|
 | 实时事件 | 半托订单 Webhook + 按单 OpenAPI 同步 | Webhook 触发，只查发生变化的订单 | 更新当天正式销售事实、日汇总并通知在线 BI | 旧每小时 `today` timer 已删除；失败进入 Webhook 重试/dead-letter 与 watchdog。 |
-| `03:00` | 昨日最终销售与前两天稳定日复核 `shein-bi-cloud-yesterday.service` | WebAPI，`SHEIN_SALES_TRANSPORT=webapi` | 写正式销售事实表 | OpenAPI 最终日结果在并行层核对。 |
+| `03:00` | 昨日最终销售与前两天稳定日复核 `shein-bi-cloud-yesterday.service` | WebAPI 独立抓取 + 19 店 OpenAPI 深度对账 | WebAPI 不写正式事实；19/19 全匹配后原子晋升 OpenAPI 日切片 | 任一失败、warning、缺店或差异都禁止晋升，避免双写或用不完整日覆盖正式事实。 |
 | `08:00` | 晨间串行链路 `shein-bi-cloud-morning-chain.service` | 直接启动日更补采 | 不重复抓当天销售，只触发慢变日更 | 飞书日报自动发送关闭。 |
 | 晨间链路之后，每日一次 | 统一日更补采 `shein-bi-cloud-daily-refresh.service` / `cloud_daily_refresh.sh yesterday` | 混合：WebAPI/headless + OpenAPI 并行层 | 写链接/业务域、SBN 营销概览线索、RTV 复核等慢变数据；OpenAPI 销售只写隔离对账层 | 不再重复执行 MBRs 全店营销价格栈扫描；该实时扫描只属于独立 guard。商品四档状态、SBN 经营/流量等仍需 WebAPI/headless。 |
 | 晨间日更内每日一次，跑 D-1 | 销售/退货/商品 OpenAPI reconciliation | OpenAPI | 只写 `fact.openapi_*` 和 `mart.openapi_*_reconciliation` | 首轮 `2026-07-09..15` 已回灌核对；修复映射与深度门禁后，以 `2026-07-17..23` 作为新验证窗口，`2026-07-24` 出结论。退货/商品继续隔离，不切正式事实。 |
