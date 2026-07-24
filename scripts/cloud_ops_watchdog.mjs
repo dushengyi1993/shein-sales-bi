@@ -191,7 +191,9 @@ async function readPortalDates(file) {
 async function auditRecentCoverage() {
   const res = await run(process.execPath, [
     'scripts/audit_cloud_data_coverage.mjs',
-    '--recent-days', '1',
+    // Include yesterday as the finalized completeness target. Today's
+    // webhook-driven sales rows are intentionally sparse for zero-sale stores.
+    '--recent-days', '2',
     '--tables', 'sales,linkPerformance,productStoreCoverage',
     '--expected-start', 'first-seen',
     '--json',

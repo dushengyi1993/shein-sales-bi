@@ -24,6 +24,10 @@ const TABLE_RULES = [
     storeColumn: 'store_key',
     severity: 'error',
     storeWhere: DEFAULT_STORE_WHERE,
+    // Webhook-primary sales only materializes today's row after a store has an
+    // order event. A missing row today can therefore mean a legitimate zero,
+    // while the next-day finalized snapshot must still cover every store.
+    allowSparseCurrentDay: true,
   },
   {
     key: 'linkPerformance',
@@ -173,7 +177,27 @@ WHERE ${rule.storeWhere || DEFAULT_STORE_WHERE};
   };
 }
 
-async function auditRule(args, rule) {
+async function databaseCurrentDate(args) {
+  return (await runPsql(args, 'SELECT current_date::text;')).trim();
+}
+
+export function classifyMissingCoverageRows({
+  rows,
+  allowSparseCurrentDay = false,
+  currentDate = '',
+  explicitRange = false,
+}) {
+  const missingRows = rows.filter(row => row.missingStoreCount > 0);
+  if (!allowSparseCurrentDay || explicitRange || !currentDate) {
+    return {blockingRows: missingRows, nonBlockingCurrentDayRows: []};
+  }
+  return {
+    blockingRows: missingRows.filter(row => row.date !== currentDate),
+    nonBlockingCurrentDayRows: missingRows.filter(row => row.date === currentDate),
+  };
+}
+
+async function auditRule(args, rule, currentDate) {
   const expected = await expectedStores(args, rule);
   const latest = await latestDate(args, rule);
   if (!latest) {
@@ -279,7 +303,15 @@ ORDER BY c.d;
     };
   });
 
-  const missingRows = rows.filter(r => r.missingStoreCount > 0);
+  const {
+    blockingRows: missingRows,
+    nonBlockingCurrentDayRows,
+  } = classifyMissingCoverageRows({
+    rows,
+    allowSparseCurrentDay: Boolean(rule.allowSparseCurrentDay),
+    currentDate,
+    explicitRange: Boolean(args.start || args.end),
+  });
   const zeroMetricDates = rule.zeroMetricExpression
     ? rows.filter(r => r.rowCount > 0 && r.storeCount >= expected.count && Number(r.metricSum || 0) === 0).map(r => r.date)
     : [];
@@ -306,6 +338,8 @@ ORDER BY c.d;
     ok: issues.length === 0,
     missingDateCount: missingRows.length,
     missingStoreDateCells: missingRows.reduce((sum, r) => sum + r.missingStoreCount, 0),
+    nonBlockingCurrentDayGapCount: nonBlockingCurrentDayRows.reduce((sum, r) => sum + r.missingStoreCount, 0),
+    nonBlockingCurrentDayRows: nonBlockingCurrentDayRows.slice(0, args.maxRows),
     zeroMetricDates,
     rows: rows.filter(r => r.missingStoreCount > 0 || zeroMetricDates.includes(r.date)).slice(0, args.maxRows),
     issues,
@@ -331,8 +365,9 @@ async function main() {
   const selected = TABLE_RULES.filter(r => args.tables.includes(r.key));
   const unknown = args.tables.filter(key => !TABLE_RULES.some(r => r.key === key));
   if (unknown.length) throw new Error(`Unknown --tables key(s): ${unknown.join(', ')}`);
+  const currentDate = await databaseCurrentDate(args);
   const checks = [];
-  for (const rule of selected) checks.push(await auditRule(args, rule));
+  for (const rule of selected) checks.push(await auditRule(args, rule, currentDate));
   const issueCount = checks.reduce((sum, c) => sum + c.issues.length, 0);
   const report = {
     ok: issueCount === 0,
@@ -344,6 +379,7 @@ async function main() {
       tables: args.tables,
       expectedStart: args.expectedStart,
       statementTimeoutMs: args.statementTimeoutMs,
+      currentDate,
     },
     issueCount,
     checks,
@@ -354,7 +390,9 @@ async function main() {
   if (args.strict && !report.ok) process.exitCode = 1;
 }
 
-main().catch(err => {
-  console.error(err?.stack || String(err));
-  process.exitCode = 1;
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(err => {
+    console.error(err?.stack || String(err));
+    process.exitCode = 1;
+  });
+}
