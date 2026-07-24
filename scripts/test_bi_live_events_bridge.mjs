@@ -91,6 +91,8 @@ assert.match(productionClient, /new EventSource\('\/api\/bi\/live-events'\)/, 't
 assert.match(productionClient, /CORE_VISIBLE_POLL_MS=5\*60\*1000/, 'the formal production shell must use a five-minute fallback');
 assert.match(productionClient, /LIVE_LAST_ORDER_AT=newestStamp/, 'the data-status timestamp must advance from real order events');
 assert.match(productionClient, /function applyLiveOrderRankingOverlay\(\)/, 'live orders must update today rankings without rebuilding the full profit mart');
+assert.match(productionClient, /if\(!date\|\|!D\.rankings\)return;/, 'a verified zero-order live day must clear stale cached rankings instead of preserving old sales');
+assert.match(productionClient, /if\(n==='liveSalesToday'\|\|n==='homeRankings'\|\|n==='rankings'\)applyLiveOrderRankingOverlay\(\)/, 'initial section loading must reconcile cached rankings with live sales regardless of response order');
 assert.match(productionClient, /const LIVE_ORDER_SECTIONS=\['liveSalesToday','orders','priceScatter'\]/, 'live orders must always refresh the lightweight today-sales section');
 assert.match(productionClient, /home:\['homeRankings','afterSales','homeProfit','homeTrafficDaily','liveSalesToday'\]/, 'the homepage must load the current-day profit overlay even before a new SSE event');
 assert.match(productionClient, /n==='liveSalesToday'\?'\?refresh=1'/, 'the lightweight today-sales section must refresh synchronously');
