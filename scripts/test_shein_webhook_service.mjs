@@ -139,6 +139,63 @@ assert.equal(workerCalls.find(row => row[0] === 'alerted')?.[2]?.workerId, 'work
 assert.equal(workerCalls.find(row => row[0] === 'processed')?.[2]?.workerId, 'worker-test');
 assert.ok(workerCalls.findIndex(row => row[0] === 'gate-processed') < workerCalls.findIndex(row => row[0] === 'notify'), 'risk gate must close before Feishu notification starts');
 
+const shelfWorkerCalls = [];
+const pendingShelfCipher = encrypt({
+  skcName: 'SKC-DOWN',
+  updateTime: 1784887354445,
+  shelfChangeInfos: [{siteChangeInfos: [{
+    site: 'shein-sa',
+    shelfState: 0,
+    firstShelfTime: '1970-01-01 08:00:01',
+    lastShelfTime: '2018-08-28 00:00:00',
+    recycleState: 0,
+  }]}],
+});
+const shelfWorker = createSheinWebhookService({
+  repository: {
+    ...workerRepository,
+    claimNext: async () => ({
+      id: '91', idempotencyKey: 'd'.repeat(64), eventCode: '3000848', storeKey: 'AA', attempt: 1,
+      appId: 'app-1', openKeyId: 'open-1', eventData: pendingShelfCipher,
+      cipherHash: crypto.createHash('sha256').update(pendingShelfCipher, 'utf8').digest('hex'),
+      severity: 'P3', alertedAt: null, receivedAt: '2026-07-24T10:02:35.755Z',
+      normalized: {eventCode: '3000848', eventFamily: 'product_shelves', storeKey: 'AA'},
+    }),
+    markAlerted: async (id, input) => shelfWorkerCalls.push(['alerted', id, input]),
+    markProcessed: async (id, input) => shelfWorkerCalls.push(['processed', id, input]),
+  },
+  credentialRegistry: registry,
+  eventProcessor: {
+    enrich: async receipt => ({
+      ...receipt.normalized,
+      productContext: {
+        supplierCode: 'SK-03038制冰机',
+        firstShelfTime: '2026-06-11 13:35:00',
+        lastKnownShelfStatus: '已上架',
+        sales: {unitsLifetime: 2},
+      },
+      productContextStatus: 'resolved',
+    }),
+    process: async receipt => ({
+      title: 'processed',
+      summary: 'processed',
+      businessKey: receipt.normalized.skc,
+      actionState: 'event_recorded',
+      normalized: receipt.normalized,
+    }),
+  },
+  notifier: {notify: async input => shelfWorkerCalls.push(['notify', input])},
+  workerEnabled: false,
+  workerId: 'worker-test',
+  logger: {warn() {}, error() {}},
+});
+await shelfWorker.processOne();
+const enrichedShelfAlert = shelfWorkerCalls.find(row => row[0] === 'notify')?.[1];
+assert.equal(enrichedShelfAlert?.receipt?.severity?.severity, 'P0', 'known prior shelf evidence must elevate a generic state=0 callback after enrichment');
+assert.equal(enrichedShelfAlert?.outcome?.title, 'AA 店：SK-03038制冰机被下架');
+assert.match(enrichedShelfAlert?.outcome?.summary || '', /上架时间：2026-06-11 13:35/);
+assert.doesNotMatch(enrichedShelfAlert?.outcome?.summary || '', /1970|2018|回收站/);
+
 const appScopedCalls = [];
 const appScopedWorker = createSheinWebhookService({
   repository: {

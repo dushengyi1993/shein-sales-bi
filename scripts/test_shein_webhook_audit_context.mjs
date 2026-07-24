@@ -70,6 +70,16 @@ assert.equal(ignored.supplierCode, '(全)KJ-102三明治机和早餐机');
 assert.equal(calls.length, 2, 'non-negotiation audit failures may resolve the product but must not query stale negotiation prices');
 assert.match(calls[1].url, /searchProduct$/);
 
+const productIdentity = await provider.getProductIdentity({storeKey: 'tz', skc: 'SKC-1'});
+assert.deepEqual(productIdentity, {
+  source: 'shein_product_search',
+  skc: 'SKC-1',
+  supplierCode: '(全)KJ-102三明治机和早餐机',
+  currentShelfStatus: '',
+});
+assert.equal(calls.length, 3);
+assert.match(calls[2].url, /searchProduct$/);
+
 const missingReasonCalls = [];
 const missingReasonProvider = await createSheinWebhookAuditContextProvider({
   config: {

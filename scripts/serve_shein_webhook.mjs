@@ -377,7 +377,7 @@ export function createSheinWebhookService({
       if (actualCipherHash !== receipt.cipherHash) throw Object.assign(new Error('Stored webhook ciphertext hash mismatch'), {code: 'WEBHOOK_CIPHERTEXT_CORRUPT'});
       const payload = decryptWebhookEventData(receipt.eventData, identity.appSecretKey);
       const persistedAppScope = receipt.normalized?.appScopedOnly === true;
-      const normalizedBase = {
+      let normalizedBase = {
         ...normalizeWebhookBusinessEvent({
           eventCode: receipt.eventCode,
           payload,
@@ -389,6 +389,15 @@ export function createSheinWebhookService({
           deliveryScope: String(receipt.normalized?.deliveryScope || 'app_only'),
         } : {}),
       };
+      if (!persistedAppScope && eventProcessor?.enrich) {
+        assertLease();
+        normalizedBase = await eventProcessor.enrich({
+          ...receipt,
+          normalized: normalizedBase,
+          signal: abortController.signal,
+        });
+        assertLease();
+      }
       // Ingress/maintenance classification is an operational security label,
       // not a derived payload field. Preserve it across worker-side decrypt and
       // normalization so validation fixtures can never become store writes or

@@ -99,9 +99,40 @@ assert.doesNotMatch(shelfOutcome.summary, /款式：|英规插/);
 assert.doesNotMatch(shelfOutcome.summary, /下架人：/);
 assert.doesNotMatch(shelfOutcome.summary, /下架原因：/);
 assert.doesNotMatch(shelfOutcome.summary, /合并说明|\d+ 条站点变化/);
-assert.match(shelfOutcome.summary, /商品已进入回收站/);
+assert.doesNotMatch(shelfOutcome.summary, /回收站/);
 assert.equal(shelfOutcome.normalized.productContextStatus, 'resolved');
 assert.ok(productContextCalls.some(call => call.skc === 'SKC-DOWN'));
+
+const identityCalls = [];
+const pendingProcessor = createSheinWebhookEventProcessor({
+  webhookRepository: {
+    ...webhookRepository,
+    getProductBusinessContext: async () => null,
+  },
+  productAuditContextProvider: {
+    getProductIdentity: async input => {
+      identityCalls.push(input);
+      return {source: 'shein_product_search', skc: input.skc, supplierCode: 'SK-04031胶囊咖啡机', currentShelfStatus: '0'};
+    },
+  },
+});
+const pendingOutcome = await pendingProcessor.process({
+  ...base,
+  id: 201,
+  severity: {severity: 'P3', notifyFeishu: false},
+  normalized: {
+    eventFamily: 'product_shelves', eventCode: '3000848', eventLabel: '商品上下架通知',
+    storeKey: 'ZL', skc: 'sv260723145349087891523', businessId: 'sv260723145349087891523',
+    action: 'not_on_shelf', eventTime: '1784887354445', receivedAt: '2026-07-24T10:02:35.755Z',
+    shelfChanges: [{site: 'shein-sa', shelfState: '0', firstShelfTime: '', lastShelfTime: '', recycleState: '1'}],
+  },
+  payload: {},
+});
+assert.equal(pendingOutcome.title, 'ZL 店：SK-04031胶囊咖啡机上下架状态已更新');
+assert.match(pendingOutcome.summary, /没有发现实际下架证据，无需告警/);
+assert.doesNotMatch(pendingOutcome.summary, /1970|2018|回收站|被下架/);
+assert.equal(pendingOutcome.normalized.productContextStatus, 'resolved');
+assert.deepEqual(identityCalls, [{storeKey: 'ZL', skc: 'sv260723145349087891523'}]);
 
 const shelfCopyWithPlatformDetails = humanizeSheinWebhookEvent({
   eventFamily: 'product_shelves', storeKey: 'AA', skc: 'SKC-DOWN', action: 'off_shelf',
