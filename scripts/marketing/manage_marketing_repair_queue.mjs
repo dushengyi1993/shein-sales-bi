@@ -52,6 +52,16 @@ function preserveStage(existing, next) {
   return {...next, ...existing, inputFingerprint: next.inputFingerprint};
 }
 
+function queueStatusFromStages(stages, {empty = false, afterUpdate = false} = {}) {
+  if (empty) return 'completed';
+  const statuses = Object.values(stages).map(stage => String(stage?.status || 'pending'));
+  if (statuses.some(status => status === 'failed')) return 'failed';
+  const terminal = statuses.every(status => ['not_required', 'completed', 'blocked'].includes(status));
+  if (!terminal) return 'pending';
+  if (statuses.some(status => status === 'blocked')) return 'blocked';
+  return afterUpdate ? 'awaiting_final_readback' : 'completed';
+}
+
 async function buildQueue(args) {
   const date = String(args.date || '').trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`Invalid --date: ${date || 'missing'}`);
@@ -136,13 +146,12 @@ async function buildQueue(args) {
   ]));
   const totalRows = manualRows + driftRows + fallbackRows;
   const totalGroups = stageDefinitions.manualSpecialRestore.groups + stageDefinitions.driftRepair.groups + stageDefinitions.fallbackRepair.groups;
-  const allDone = Object.values(stages).every(stage => ['not_required', 'completed'].includes(stage.status));
   const queue = {
     schemaVersion: 1,
     date,
     createdAt: existing?.createdAt || now,
     updatedAt: now,
-    status: totalRows === 0 || allDone ? 'completed' : 'pending',
+    status: queueStatusFromStages(stages, {empty: totalRows === 0}),
     sourceGuard: rel(guardPath),
     sourceGuardHash: guardHash,
     queueFingerprint: hashJson({
@@ -173,12 +182,7 @@ async function updateStage(args) {
     resultPath: String(args.resultPath || ''),
     updatedAt: new Date().toISOString(),
   };
-  const stageStatuses = Object.values(queue.stages).map(stage => stage.status);
-  queue.status = stageStatuses.every(value => ['not_required', 'completed'].includes(value))
-    ? 'awaiting_final_readback'
-    : stageStatuses.some(value => value === 'failed')
-      ? 'failed'
-      : 'pending';
+  queue.status = queueStatusFromStages(queue.stages, {afterUpdate: true});
   queue.updatedAt = new Date().toISOString();
   await writeJsonAtomic(queuePath, queue);
   console.log(JSON.stringify({ok: true, queue: rel(queuePath), stage: stageName, status, queueStatus: queue.status}, null, 2));

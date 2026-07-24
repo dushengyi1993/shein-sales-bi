@@ -82,6 +82,19 @@ try {
 NODE
 }
 
+result_total() {
+  local result_path="$1" field="$2"
+  JSON_FILE="$ROOT/$result_path" JSON_FIELD="$field" node <<'NODE'
+const fs = require('node:fs');
+try {
+  const value = JSON.parse(fs.readFileSync(process.env.JSON_FILE, 'utf8'));
+  console.log(Math.max(0, Number(value?.totals?.[process.env.JSON_FIELD] || 0)));
+} catch {
+  console.log(0);
+}
+NODE
+}
+
 consume_group_budget() {
   local count="${1:-0}"
   [[ "$count" =~ ^[0-9]+$ ]] || count=0
@@ -206,9 +219,13 @@ if [[ ! -f "$QUEUE_FILE" ]]; then
   exit 0
 fi
 QUEUE_STATUS="$(queue_value 'j.status' missing)"
-if [[ "$QUEUE_STATUS" == "completed" ]]; then
-  write_state ok "repair queue already completed"
-  echo "[cloud_marketing_repair] queue already completed"
+if [[ "$QUEUE_STATUS" == "completed" || "$QUEUE_STATUS" == "blocked" ]]; then
+  if [[ "$QUEUE_STATUS" == "blocked" ]]; then
+    write_state blocked "repair queue reached a terminal business blocker; no unsafe write was attempted"
+  else
+    write_state ok "repair queue already completed"
+  fi
+  echo "[cloud_marketing_repair] queue already terminal status=$QUEUE_STATUS"
   exit 0
 fi
 ACTIVE_BUSY="$(active_busy_services)"
@@ -296,6 +313,17 @@ if [[ "$FALLBACK_STATUS" != "not_required" && "$FALLBACK_STATUS" != "completed" 
   if node scripts/marketing/batch_apply_new_listing_limited_discount.mjs \
       --date "$DATE" --guard "$GUARD_PATH" --skip-build --execute --max-groups "$REMAINING_GROUPS" \
       --expected-work-fingerprint "$WORK_FINGERPRINT"; then
+    BLOCKED_TARGETS="$(result_total "$RESULT_PATH" blockedTargetCount)"
+    FAILED_TARGETS="$(result_total "$RESULT_PATH" failedTargetCount)"
+    if (( BLOCKED_TARGETS > 0 && FAILED_TARGETS == 0 )); then
+      update_stage fallbackRepair blocked false "preflight reached terminal inventory/platform blockers; no unsafe write attempted" "$RESULT_PATH"
+      write_state blocked "fallback repair safely blocked by current inventory/platform conditions"
+      node scripts/marketing/notify_marketing_repair_blockers.mjs \
+        --date "$DATE" --result "$RESULT_PATH" --log-file "$LOG_FILE" \
+        || echo "[cloud_marketing_repair] WARN blocker notification failed"
+      echo "[cloud_marketing_repair] terminal business blockers reported date=$DATE rows=$BLOCKED_TARGETS"
+      exit 0
+    fi
     update_stage fallbackRepair completed true "bounded execute and per-group readback succeeded" "$RESULT_PATH"
     consume_group_budget "$(new_groups_in_result "$RESULT_PATH")"
   else

@@ -73,7 +73,7 @@ function idempotencyKey(parts) {
   return `sync-issue-${hash}`;
 }
 
-export function buildSyncIssueMessage({isWebhook = false, title, failed = [], loginRequired = [], message = '', logFile = '', now = new Date()} = {}) {
+export function buildSyncIssueMessage({isWebhook = false, isMarketing = false, title, failed = [], loginRequired = [], message = '', logFile = '', now = new Date()} = {}) {
   if (isWebhook) {
     return [
       `🚨 ${title}`,
@@ -81,6 +81,15 @@ export function buildSyncIssueMessage({isWebhook = false, title, failed = [], lo
       message || 'SHEIN 平台发来一项需要人工处理的变化。',
       '',
       `时间：${bjDateTime(now)}`,
+    ].join('\n');
+  }
+  if (isMarketing) {
+    return [
+      `⚠️ ${title}`,
+      '',
+      message || '有营销兜底任务因业务条件不足而未执行。',
+      '',
+      `提醒时间：${bjDateTime(now)}`,
     ].join('\n');
   }
   return [
@@ -111,11 +120,15 @@ async function main() {
   const identity = cfg.defaultIdentity || 'bot';
   const date = args.date || new Date().toISOString().slice(0, 10);
   const modeLabel = args.mode || 'sync';
-  const isWebhook = String(args.kind || '').toLowerCase() === 'webhook';
+  const kind = String(args.kind || '').toLowerCase();
+  const isWebhook = kind === 'webhook';
+  const isMarketing = kind === 'marketing';
   const title = args.title || (isWebhook
     ? `SHEIN 平台高优先级动态：${modeLabel}`
-    : `SHEIN 同步异常提醒：${date} ${modeLabel}`);
-  const text = buildSyncIssueMessage({isWebhook, title, failed, loginRequired, message: args.message, logFile: args.logFile});
+    : isMarketing
+      ? `SHEIN 营销任务提醒：${date}`
+      : `SHEIN 同步异常提醒：${date} ${modeLabel}`);
+  const text = buildSyncIssueMessage({isWebhook, isMarketing, title, failed, loginRequired, message: args.message, logFile: args.logFile});
 
   await fs.mkdir(OUT_DIR, {recursive: true});
   const stamp = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);

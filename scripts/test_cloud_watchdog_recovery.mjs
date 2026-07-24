@@ -105,6 +105,14 @@ const repairCompleted = assessDailyMarketingRepairHealth({
 });
 assert.equal(repairCompleted.healthy, true);
 assert.equal(repairCompleted.reason, 'today_repair_queue_completed');
+const repairBlocked = assessDailyMarketingRepairHealth({
+  queueState: {date: '2026-07-18', status: 'blocked', counts: {totalRows: 7, totalGroups: 6}},
+  repairState: {status: 'blocked'},
+  nowMs: Date.parse('2026-07-18T20:30:00+08:00'),
+});
+assert.equal(repairBlocked.healthy, true);
+assert.equal(repairBlocked.pending, false);
+assert.equal(repairBlocked.reason, 'today_repair_queue_blocked_and_reported');
 const dailyRefresh = {
   date: '2026-07-10',
   generatedAt: '2026-07-11T09:17:54+08:00',

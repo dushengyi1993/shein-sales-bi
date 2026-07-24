@@ -94,6 +94,12 @@ try {
   queue = JSON.parse(await fs.readFile(queuePath, 'utf8'));
   assert.equal(queue.stages.driftRepair.status, 'completed', 'same exact work fingerprint must preserve completed progress');
 
+  run('update-stage', '--queue', queuePath, '--stage', 'fallbackRepair', '--status', 'blocked', '--readback-ok', 'false');
+  run(...buildArgs);
+  queue = JSON.parse(await fs.readFile(queuePath, 'utf8'));
+  assert.equal(queue.stages.fallbackRepair.status, 'blocked', 'same exact work fingerprint must preserve terminal business blockers');
+  assert.equal(queue.status, 'blocked', 'a fully processed queue with business blockers must not remain pending');
+
   await fs.writeFile(guardPath, `${JSON.stringify({...guard, createdAt: 'changed'})}\n`);
   run(...buildArgs);
   queue = JSON.parse(await fs.readFile(queuePath, 'utf8'));

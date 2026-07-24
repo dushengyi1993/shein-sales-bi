@@ -28,4 +28,14 @@ const syncText = buildSyncIssueMessage({
 assert.match(syncText, /失败店铺：QH/);
 assert.match(syncText, /原因：订单抓取失败/);
 
-console.log('notify_sync_issue: webhook alerts use business-language copy while sync alerts retain diagnostics');
+const marketingText = buildSyncIssueMessage({
+  isMarketing: true,
+  title: '营销兜底未完成：2 条链接库存不足',
+  message: '系统没有虚增库存，也没有提交活动。',
+  now,
+});
+assert.match(marketingText, /^⚠️ 营销兜底未完成/m);
+assert.match(marketingText, /系统没有虚增库存/);
+assert.doesNotMatch(marketingText, /SHEIN 同步异常|处理原则：已成功店铺|原因：/);
+
+console.log('notify_sync_issue: webhook and marketing alerts use business-language copy while sync alerts retain diagnostics');
