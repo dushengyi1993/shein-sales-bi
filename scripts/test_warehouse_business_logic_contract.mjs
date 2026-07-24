@@ -59,6 +59,15 @@ assert.doesNotMatch(audit, /FROM mart\.storage_fee_daily_reconciliation/,
   'post-refresh audit must reconcile published caches instead of recomputing canonical storage views');
 assert.match(audit, /FROM mart\.return_cost_actual/);
 assert.match(audit, /mart\.return_order_performance_cost_reconciliation/);
+assert.match(audit, /SELECT store_key FROM fact\.openapi_store_daily_sales WHERE date = \(SELECT sales_date FROM latest\)/,
+  'sales coverage must count a successful zero-sale OpenAPI probe instead of treating no order row as a missing store');
+assert.match(audit, /sales_probe_store_count/);
+assert.doesNotMatch(audit, /return arr\.length \? `\?\?\?/,
+  'missing-store warnings must remain readable Chinese instead of mojibake');
+assert.match(audit, /notes\.push\(`有 \$\{storage\.detail_scaled_days\}/,
+  'conserving storage-detail scaling is an accounting note, not a recurring health warning');
+assert.match(audit, /notes\.push\(`有 \$\{Number\(storage\.central_pool_fee_sar\)/,
+  'a conserved CENTRAL_POOL balance is an accounting note, not an actionable health warning');
 
 assert.match(portalGenerator, /SHEIN_BI_PROFIT_MART_SOURCE \|\| 'cache'/,
   'portal core must serve the published profit cache by default');

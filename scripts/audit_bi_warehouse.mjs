@@ -117,6 +117,7 @@ async function checkMetabase(args) {
 function evaluate(summary, metabase) {
   const warnings = [];
   const errors = [];
+  const notes = [];
 
   if (metabase && metabase.skipped) {
     // Metabase is an archived/manual dashboard surface now. Do not warn unless
@@ -151,7 +152,7 @@ function evaluate(summary, metabase) {
   const expectedStoreCount = Number(s.storeCount || 0) || 0;
   const miss = key => {
     const arr = Array.isArray(storeCoverage[key]) ? storeCoverage[key].filter(Boolean) : [];
-    return arr.length ? `???${arr.join('?')}` : '';
+    return arr.length ? `：缺少 ${arr.join('、')}` : '';
   };
   if (expectedStoreCount && (storeCoverage.sales_store_count || 0) < expectedStoreCount) warnings.push(`销售最新日覆盖 ${storeCoverage.sales_store_count || 0}/${expectedStoreCount} 店${miss('sales_missing_stores')}`);
   if (expectedStoreCount && (storeCoverage.business_store_count || 0) < expectedStoreCount) warnings.push(`业务域最新日覆盖 ${storeCoverage.business_store_count || 0}/${expectedStoreCount} 店${miss('business_missing_stores')}`);
@@ -222,13 +223,13 @@ function evaluate(summary, metabase) {
     warnings.push(`有 ${storage.detail_missing_days} 个 canonical 仓储费日期缺少可用货号明细，金额已进入 CENTRAL_POOL 或库存证据回退，未把缺失明细当作 0。`);
   }
   if (Number(storage.detail_scaled_days || 0) > 0) {
-    warnings.push(`有 ${storage.detail_scaled_days} 个 canonical 仓储费日期的货号明细与总账不等，已按日缩放至 canonical 总账。`);
+    notes.push(`有 ${storage.detail_scaled_days} 个 canonical 仓储费日期的货号明细已按日缩放至 canonical 总账；这是保持明细与实际账单守恒的正常处理。`);
   }
   if (Number(storage.detail_inherited_bill_count || 0) > 0) {
     warnings.push(`有 ${storage.detail_inherited_bill_count} 个 canonical 仓储费账单缺少自身明细，已继承单一 superseded 明细源；未合并多份替换链导出。`);
   }
   if (Number(storage.central_pool_fee_sar || 0) > 0) {
-    warnings.push(`仍有 ${Number(storage.central_pool_fee_sar).toFixed(2)} SAR 仓储费缺少可证明的店铺归属，已进入 CENTRAL_POOL，未静默丢失。`);
+    notes.push(`有 ${Number(storage.central_pool_fee_sar).toFixed(2)} SAR 仓储费无法证明具体店铺归属，已保守留在 CENTRAL_POOL；金额仍计入总利润且未丢失。`);
   }
 
   const finance = accounting.finance_return_cost || {};
@@ -244,7 +245,7 @@ function evaluate(summary, metabase) {
     warnings.push(`有 ${finance.unmapped_lines} 条实际退货费尚未映射到订单行，金额 ${Number(finance.unmapped_actual_cost_sar || 0).toFixed(2)} SAR；该金额已单列风险，未静默计入或丢弃。`);
   }
 
-  return {ok: errors.length === 0, errors, warnings};
+  return {ok: errors.length === 0, errors, warnings, notes};
 }
 
 async function main() {
@@ -272,12 +273,33 @@ summary AS (
       'finance_detail_date', (SELECT finance_detail_date FROM latest)
     ),
     'storeCoverage', jsonb_build_object(
-      'sales_store_count', (SELECT count(DISTINCT store_key) FROM fact.store_daily_sales WHERE date = (SELECT sales_date FROM latest)),
+      'sales_store_count', (
+        SELECT count(DISTINCT store_key)
+        FROM (
+          SELECT store_key FROM fact.store_daily_sales WHERE date = (SELECT sales_date FROM latest)
+          UNION
+          SELECT store_key FROM fact.openapi_store_daily_sales WHERE date = (SELECT sales_date FROM latest)
+        ) covered_sales_store
+      ),
+      'sales_fact_store_count', (SELECT count(DISTINCT store_key) FROM fact.store_daily_sales WHERE date = (SELECT sales_date FROM latest)),
+      'sales_probe_store_count', (SELECT count(DISTINCT store_key) FROM fact.openapi_store_daily_sales WHERE date = (SELECT sales_date FROM latest)),
       'business_store_count', (SELECT count(DISTINCT store_key) FROM fact.home_finance_snapshot WHERE snapshot_date = (SELECT business_date FROM latest)),
       'inventory_store_count', (SELECT count(DISTINCT store_key) FROM fact.visible_inventory_snapshot WHERE snapshot_date = (SELECT inventory_date FROM latest)),
       'quality_store_count', (SELECT count(DISTINCT store_key) FROM fact.quality_skc_snapshot WHERE snapshot_date = (SELECT quality_date FROM latest)),
       'finance_detail_store_count', (SELECT count(DISTINCT store_key) FROM fact.finance_module_stat_snapshot WHERE snapshot_date = (SELECT finance_detail_date FROM latest)),
-      'sales_missing_stores', (SELECT to_jsonb(array_agg(store_key ORDER BY store_key)) FROM dim.store s WHERE NOT EXISTS (SELECT 1 FROM fact.store_daily_sales f WHERE f.date = (SELECT sales_date FROM latest) AND f.store_key = s.store_key)),
+      'sales_missing_stores', (
+        SELECT to_jsonb(array_agg(store_key ORDER BY store_key))
+        FROM dim.store s
+        WHERE s.enabled IS DISTINCT FROM false
+          AND NOT EXISTS (
+            SELECT 1 FROM fact.store_daily_sales f
+            WHERE f.date = (SELECT sales_date FROM latest) AND f.store_key = s.store_key
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM fact.openapi_store_daily_sales f
+            WHERE f.date = (SELECT sales_date FROM latest) AND f.store_key = s.store_key
+          )
+      ),
       'business_missing_stores', (SELECT to_jsonb(array_agg(store_key ORDER BY store_key)) FROM dim.store s WHERE NOT EXISTS (SELECT 1 FROM fact.home_finance_snapshot f WHERE f.snapshot_date = (SELECT business_date FROM latest) AND f.store_key = s.store_key)),
       'inventory_missing_stores', (SELECT to_jsonb(array_agg(store_key ORDER BY store_key)) FROM dim.store s WHERE NOT EXISTS (SELECT 1 FROM fact.visible_inventory_snapshot f WHERE f.snapshot_date = (SELECT inventory_date FROM latest) AND f.store_key = s.store_key)),
       'quality_missing_stores', (SELECT to_jsonb(array_agg(store_key ORDER BY store_key)) FROM dim.store s WHERE NOT EXISTS (SELECT 1 FROM fact.quality_skc_snapshot f WHERE f.snapshot_date = (SELECT quality_date FROM latest) AND f.store_key = s.store_key)),
