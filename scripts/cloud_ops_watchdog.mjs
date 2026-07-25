@@ -9,6 +9,7 @@ import {
   assessDailyMarketingGuardHealth,
   assessDailyMarketingRepairHealth,
   assessDailyMarketingScanRecovery,
+  assessDailyOpenapiSalesRecovery,
   assessDailyOpenapiProductRecovery,
   resolveMarketingScanEvidencePath,
 } from '../lib/cloud_watchdog_recovery.mjs';
@@ -189,11 +190,24 @@ async function readPortalDates(file) {
 }
 
 async function auditRecentCoverage() {
+  const shanghaiParts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date()).map(part => [part.type, part.value]));
+  const shanghaiMinuteOfDay = Number(shanghaiParts.hour || 0) * 60 + Number(shanghaiParts.minute || 0);
+  const finalizedSalesSlaMinute = Number(process.env.SHEIN_CLOUD_WATCHDOG_FINALIZED_SALES_SLA_MINUTE || 220);
+  // The canonical previous-day slice is finalized by the 03:00 job. Before
+  // its 03:40 SLA, auditing two days would incorrectly flag legitimate
+  // zero-sale stores that have not yet received their materialized zero row.
+  const recentDays = shanghaiMinuteOfDay < finalizedSalesSlaMinute ? 1 : 2;
   const res = await run(process.execPath, [
     'scripts/audit_cloud_data_coverage.mjs',
-    // Include yesterday as the finalized completeness target. Today's
-    // webhook-driven sales rows are intentionally sparse for zero-sale stores.
-    '--recent-days', '2',
+    // Include yesterday only after the canonical 03:00 finalizer's SLA.
+    // Today's webhook-driven sales rows are intentionally sparse for
+    // zero-sale stores.
+    '--recent-days', String(recentDays),
     '--tables', 'sales,linkPerformance,productStoreCoverage',
     '--expected-start', 'first-seen',
     '--json',
@@ -453,6 +467,49 @@ async function main() {
       linkSuccess: linkBusinessSuccess,
       expectedStoreKeys,
     });
+    const openapiSalesReport = await readJsonIfExists(path.join(ROOT, 'state', 'openapi-probes', 'sales-reconciliation.latest.json'));
+    const openapiSalesRecovery = assessDailyOpenapiSalesRecovery({
+      dailyRefresh,
+      salesReport: openapiSalesReport,
+      expectedStoreKeys,
+    });
+    const combinedLinkOpenapiMatch = /^(link-business (?:failed|partial|metrics not ready)(?: link-business (?:failed|partial|metrics not ready))*) openapi reconciliation failed$/
+      .exec(String(dailyRefresh.message || '').trim());
+    let combinedLinkOpenapiRecovery = {recovered: false, reason: 'daily_warning_not_combined_link_openapi_sales'};
+    if (combinedLinkOpenapiMatch) {
+      const linkPartRecovery = assessDailyLinkBusinessRecovery({
+        dailyRefresh: {...dailyRefresh, message: combinedLinkOpenapiMatch[1]},
+        linkSuccess: linkBusinessSuccess,
+        expectedStoreKeys,
+      });
+      const salesPartRecovery = assessDailyOpenapiSalesRecovery({
+        dailyRefresh: {...dailyRefresh, message: 'openapi reconciliation failed'},
+        salesReport: openapiSalesReport,
+        expectedStoreKeys,
+      });
+      if (linkPartRecovery.recovered && salesPartRecovery.recovered) {
+        combinedLinkOpenapiRecovery = {
+          recovered: true,
+          reason: 'newer_complete_link_and_openapi_sales_recovery',
+          evidence: {
+            type: 'daily_link_openapi_sales_recovery',
+            dailyDate: dailyRefresh.date || null,
+            dailyGeneratedAt: dailyRefresh.generatedAt,
+            linkBusiness: linkPartRecovery.evidence,
+            openapiSales: salesPartRecovery.evidence,
+          },
+        };
+      } else {
+        combinedLinkOpenapiRecovery = {
+          recovered: false,
+          reason: 'combined_link_openapi_sales_recovery_incomplete',
+          attempts: {
+            linkBusiness: linkPartRecovery.reason,
+            openapiSales: salesPartRecovery.reason,
+          },
+        };
+      }
+    }
     const scanFile = resolveMarketingScanEvidencePath(ROOT, marketingGuardState?.scanFile);
     const scanSnapshot = scanFile ? await readJsonIfExists(scanFile) : null;
     const marketingRecovery = scanFile
@@ -471,6 +528,10 @@ async function main() {
     });
     dailyRefreshRecovery = linkRecovery.recovered
       ? linkRecovery
+      : openapiSalesRecovery.recovered
+        ? openapiSalesRecovery
+        : combinedLinkOpenapiRecovery.recovered
+          ? combinedLinkOpenapiRecovery
       : marketingRecovery.recovered
         ? marketingRecovery
         : productRecovery.recovered
@@ -480,6 +541,8 @@ async function main() {
               reason: 'no_verified_daily_recovery',
               attempts: {
                 linkBusiness: linkRecovery.reason,
+                openapiSales: openapiSalesRecovery.reason,
+                combinedLinkOpenapiSales: combinedLinkOpenapiRecovery.reason,
                 marketingScan: marketingRecovery.reason,
                 openapiProduct: productRecovery.reason,
               },

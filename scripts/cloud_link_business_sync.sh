@@ -209,6 +209,42 @@ JSON
   fi
 fi
 
+# A targeted retry should be able to close an earlier all-store partial run
+# without re-opening the other 18 browser profiles. Merge only when the prior
+# partial is for the same date, every formerly failed store succeeded now, and
+# the combined set exactly covers every enabled store. The downstream metric,
+# warehouse and portal checks still run over the merged all-store evidence.
+if [[ "${#FAILED_STORES[@]}" -eq 0 && -s "$ROOT/state/cloud_ops_alerts/link-business-last-partial.json" ]]; then
+  MERGED_RECOVERY_STORES="$(
+    DATE="$DATE" CURRENT_SUCCESS_STORES="${SUCCESS_STORES[*]}" node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const root = process.cwd();
+const stateFile = path.join(root, 'state', 'cloud_ops_alerts', 'link-business-last-partial.json');
+const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+if (String(state.date || '') !== String(process.env.DATE || '')) process.exit(0);
+const split = value => (Array.isArray(value) ? value : String(value || '').split(/[\s,]+/))
+  .map(item => String(item || '').trim().toUpperCase())
+  .filter(Boolean);
+const current = new Set(split(process.env.CURRENT_SUCCESS_STORES));
+const failed = split(state.failedStores);
+if (!failed.length || failed.some(store => !current.has(store))) process.exit(0);
+const config = JSON.parse(fs.readFileSync(path.join(root, 'config', 'stores.json'), 'utf8'));
+const expected = (config.stores || [])
+  .filter(store => store.enabled !== false)
+  .map(store => String(store.storeKey || '').trim().toUpperCase())
+  .filter(Boolean);
+const merged = new Set([...split(state.successStores), ...current]);
+if (expected.some(store => !merged.has(store)) || [...merged].some(store => !expected.includes(store))) process.exit(0);
+process.stdout.write(expected.join(' '));
+NODE
+  )"
+  if [[ -n "$MERGED_RECOVERY_STORES" ]]; then
+    SUCCESS_STORES=($MERGED_RECOVERY_STORES)
+    echo "[cloud_link_business_sync] targeted recovery completed prior partial; merged all-store evidence: ${SUCCESS_STORES[*]}"
+  fi
+fi
+
 set +e
 METRIC_READY_JSON="$(
   DATE="$DATE" SUCCESS_STORES="${SUCCESS_STORES[*]}" node - <<'NODE'

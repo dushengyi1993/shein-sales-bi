@@ -70,6 +70,19 @@ assertCommonHardening(lark, 'lark bot');
 assert.doesNotMatch(lark, /(?:Wants|After)=.*docker\.service/m, 'read-only Lark bot has no Docker dependency');
 assert.doesNotMatch(lark, /HOME=\/root|^User=root$|^Group=root$/m, 'Lark bot must never run from root HOME');
 
+for (const unitName of [
+  'shein-bi-cloud-today.service',
+  'shein-bi-cloud-yesterday.service',
+]) {
+  const salesRefresh = readUnit(unitName);
+  assert.equal(property(salesRefresh, 'User'), 'sheinops', `${unitName} must not create root-owned shared artifacts`);
+  assert.equal(property(salesRefresh, 'Group'), 'sheinops');
+  assert.match(salesRefresh, /^Environment=HOME=\/home\/sheinops$/m);
+  assert.match(salesRefresh, /^Environment=SHEIN_DOCKER_USE_SUDO=1$/m);
+  assert.match(salesRefresh, /^Environment=SHEIN_BI_OPENAPI_RECON_DIR=\/opt\/shein-bi\/app\/outputs\/reports\/openapi-sales-reconciliation$/m);
+  assert.doesNotMatch(salesRefresh, /HOME=\/root|^User=root$|^Group=root$/m);
+}
+
 const browserCleanupTimer = readUnit('shein-bi-cloud-browser-cleanup.timer');
 const browserCleanupWindows = [...browserCleanupTimer.matchAll(/^OnCalendar=(.*)$/gm)].map(match => match[1].trim());
 assert.deepEqual(browserCleanupWindows, ['*-*-* 03:45:00', '*-*-* 09:50:00', '*-*-* 21:00:00']);

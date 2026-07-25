@@ -14,6 +14,11 @@ PORTAL_DATA_PATH="${PORTAL_DATA_PATH:-$ROOT/outputs/bi-portal/data.json}"
 LOCK_FILE="${SHEIN_BI_REFRESH_LOCK_FILE:-$ROOT/state/locks/shein-bi-cloud-sales-refresh.lock}"
 PORTAL_REFRESH_LOCK_FILE="${SHEIN_BI_PORTAL_REFRESH_LOCK_FILE:-$ROOT/state/locks/shein-bi-portal-refresh.lock}"
 PORTAL_REFRESH_LOCK_WAIT_SEC="${SHEIN_BI_PORTAL_REFRESH_LOCK_WAIT_SEC:-1800}"
+if [[ "${SHEIN_DOCKER_USE_SUDO:-0}" == "1" ]]; then
+  DOCKER=(sudo docker)
+else
+  DOCKER=(docker)
+fi
 
 resolve_date() {
   local target="$1"
@@ -98,7 +103,7 @@ node scripts/load_bi_warehouse.mjs \
 # require all 19 stores to match the WebAPI artifacts, then atomically promote
 # that canonical slice into the formal facts.
 PRIMARY_SALES_ACTIVE="$(
-  docker exec shein-warehouse-db psql -X -qAt -U shein -d shein_bi \
+  "${DOCKER[@]}" exec shein-warehouse-db psql -X -qAt -U shein -d shein_bi \
     -c "SELECT CASE WHEN ops.shein_webhook_primary_sales_enabled(DATE '$DATE') THEN 'true' ELSE 'false' END"
 )"
 if [[ "$PRIMARY_SALES_ACTIVE" == "true" && "${SHEIN_BI_PRIMARY_SALES_FINALIZE:-1}" != "0" ]]; then
@@ -129,7 +134,7 @@ if (!ok) {
 console.log(`[cloud_bi_refresh] OpenAPI final-day gate passed: ${JSON.stringify(counts)}`);
 NODE
   PROMOTION_RESULT="$(
-    docker exec shein-warehouse-db psql -X -qAt -F '|' -v ON_ERROR_STOP=1 -U shein -d shein_bi \
+    "${DOCKER[@]}" exec shein-warehouse-db psql -X -qAt -F '|' -v ON_ERROR_STOP=1 -U shein -d shein_bi \
       -c "SELECT headers_written,items_written,payment_flags_written,daily_rows_refreshed FROM ops.promote_openapi_sales_slice(DATE '$DATE',DATE '$DATE')"
   )"
   echo "[cloud_bi_refresh] canonical OpenAPI sales promoted date=$DATE result=$PROMOTION_RESULT reconciliation=$OPENAPI_RECON_FILE"

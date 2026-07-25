@@ -9,6 +9,7 @@ import {
   assessDailyMarketingGuardHealth,
   assessDailyMarketingRepairHealth,
   assessDailyMarketingScanRecovery,
+  assessDailyOpenapiSalesRecovery,
   assessDailyOpenapiProductRecovery,
   resolveMarketingScanEvidencePath,
 } from '../lib/cloud_watchdog_recovery.mjs';
@@ -16,6 +17,32 @@ import {
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const nowMs = Date.parse('2026-07-11T12:30:00+08:00');
 const stores = ['DL', 'DX', 'QY'];
+
+const openapiSalesDaily = {
+  date: '2026-07-24',
+  generatedAt: '2026-07-25T01:14:41.000Z',
+  status: 'warning',
+  message: 'openapi reconciliation failed',
+};
+const openapiSalesReport = {
+  ok: true,
+  date: '2026-07-24',
+  generatedAt: '2026-07-25T03:44:17.000Z',
+  requestedStores: stores,
+  counts: {total: 3, succeeded: 3, failed: 0, matched: 3, warning: 0, missingBrowser: 0, skipped: 0},
+  results: stores.map(storeKey => ({storeKey, ok: true, status: 'matched'})),
+};
+assert.equal(assessDailyOpenapiSalesRecovery({
+  dailyRefresh: openapiSalesDaily,
+  salesReport: openapiSalesReport,
+  expectedStoreKeys: stores,
+  nowMs: Date.parse('2026-07-25T12:00:00+08:00'),
+}).recovered, true);
+assert.equal(assessDailyOpenapiSalesRecovery({
+  dailyRefresh: openapiSalesDaily,
+  salesReport: {...openapiSalesReport, counts: {...openapiSalesReport.counts, matched: 2}},
+  expectedStoreKeys: stores,
+}).reason, 'openapi_sales_recovery_store_coverage_incomplete');
 
 const guardRetryPending = assessDailyMarketingGuardHealth({
   guardState: {date: '2026-07-18', generatedAt: '2026-07-18T02:31:00.000Z', status: 'warning'},
@@ -302,11 +329,16 @@ assert.match(watchdogSource, /assessDailyMarketingGuardHealth/);
 assert.match(watchdogSource, /assessDailyMarketingRepairHealth/);
 assert.match(watchdogSource, /assessDailyLinkBusinessRecovery/);
 assert.match(watchdogSource, /assessDailyOpenapiProductRecovery/);
+assert.match(watchdogSource, /assessDailyOpenapiSalesRecovery/);
+assert.match(watchdogSource, /daily_link_openapi_sales_recovery/);
 assert.match(watchdogSource, /resolveMarketingScanEvidencePath/);
 assert.match(watchdogSource, /recoveries,/);
 
 const linkSyncSource = fs.readFileSync(path.join(root, 'scripts', 'cloud_link_business_sync.sh'), 'utf8');
 assert.match(linkSyncSource, /link-business-last-success\.json/);
 assert.match(linkSyncSource, /write_link_business_success true/);
+assert.match(linkSyncSource, /targeted recovery completed prior partial/);
+assert.match(linkSyncSource, /failed\.some\(store => !current\.has\(store\)\)/);
+assert.match(linkSyncSource, /expected\.some\(store => !merged\.has\(store\)\)/);
 
 console.log('cloud_watchdog_recovery: only newer complete all-store evidence resolves isolated marketing, link/business, or OpenAPI product warnings');

@@ -127,6 +127,7 @@ async function navigate(send, url, waitMs = 3500) {
 async function pageInfo(send) {
   return await evaluate(send, `(() => {
     const text = document.body?.innerText || '';
+    const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
     return {
       href: location.href,
       title: document.title,
@@ -137,8 +138,16 @@ async function pageInfo(send) {
         type: el.type || '',
         placeholder: el.placeholder || '',
         hasValue: !!el.value,
-        visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
-      }))
+        visible: visible(el)
+      })),
+      buttons: [...document.querySelectorAll('button,[role=button],a')]
+        .filter(visible)
+        .map(el => ({
+          text: (el.innerText || el.textContent || '').trim(),
+          disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true'
+        }))
+        .filter(item => item.text)
+        .slice(0, 20)
     };
   })()`);
 }
@@ -201,11 +210,22 @@ async function trySavedPassword(send) {
       userInput.focus();
       userInput.dispatchEvent(new Event('focus', {bubbles: true}));
     }
+    // Chrome can paint autofilled values without notifying a controlled
+    // Vue/React form. Re-dispatch value-change events without reading or
+    // serializing the values so the login button/form state is updated.
+    let syncedInputs = 0;
+    for (const input of visibleInputs) {
+      if (!input.value) continue;
+      input.dispatchEvent(new Event('input', {bubbles: true}));
+      input.dispatchEvent(new Event('change', {bubbles: true}));
+      syncedInputs += 1;
+    }
     return {
       focused: !!userInput,
       hasTextValue: visibleInputs.some(el => (el.type || '').toLowerCase() !== 'password' && !!el.value),
       hasPasswordValue: visibleInputs.some(el => (el.type || '').toLowerCase() === 'password' && !!el.value),
-      inputCount: visibleInputs.length
+      inputCount: visibleInputs.length,
+      syncedInputs
     };
   })()`);
 }
@@ -233,25 +253,40 @@ async function key(send, keyName) {
 }
 
 async function clickLogin(send) {
-  return await evaluate(send, `(async () => {
+  const target = await evaluate(send, `(() => {
     const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-    const candidates = [...document.querySelectorAll('button,[role=button],a,div,span')]
+    const candidates = [...document.querySelectorAll('button,[role=button],a')]
       .filter(visible)
       .map(el => {
         const r = el.getBoundingClientRect();
-        return {el, text: (el.innerText || el.textContent || '').trim(), tag: el.tagName, area: r.width * r.height};
+        return {
+          el,
+          text: (el.innerText || el.textContent || '').trim(),
+          tag: el.tagName,
+          area: r.width * r.height,
+          disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true',
+          x: r.left + r.width / 2,
+          y: r.top + r.height / 2
+        };
       })
-      .filter(x => x.text && (x.text.includes('\\u767b\\u5f55') || /login/i.test(x.text)))
+      .filter(x => !x.disabled && x.text && (x.text.includes('\\u767b\\u5f55') || /login/i.test(x.text)))
       .slice(0, 10);
-    const target = candidates.find(x => x.tag === 'BUTTON' && x.text === '\\u767b\\u5f55')
+    const target = candidates.find(x => x.text.includes('\\u7ee7\\u7eed\\u767b\\u5f55') && x.text.length <= 20)
+      || candidates.find(x => x.tag === 'BUTTON' && x.text === '\\u767b\\u5f55')
       || candidates.find(x => x.tag === 'BUTTON' && x.text.length <= 20 && x.area > 1000)
       || candidates.find(x => x.text === '\\u767b\\u5f55')
       || candidates.find(x => x.text.length <= 20 && x.area > 1000)
       || candidates[0];
     if (!target) return {clicked: false, candidates: candidates.map(x => x.text)};
-    target.el.click();
-    return {clicked: true, text: target.text};
+    target.el.scrollIntoView({block: 'center', inline: 'center'});
+    const r = target.el.getBoundingClientRect();
+    return {clicked: true, text: target.text, x: r.left + r.width / 2, y: r.top + r.height / 2};
   })()`);
+  if (!target?.clicked) return target;
+  await send('Input.dispatchMouseEvent', {type: 'mouseMoved', x: target.x, y: target.y, button: 'none'});
+  await send('Input.dispatchMouseEvent', {type: 'mousePressed', x: target.x, y: target.y, button: 'left', clickCount: 1});
+  await send('Input.dispatchMouseEvent', {type: 'mouseReleased', x: target.x, y: target.y, button: 'left', clickCount: 1});
+  return {clicked: true, text: target.text};
 }
 
 async function restoreOne(store, opts) {
@@ -298,7 +333,37 @@ async function restoreOne(store, opts) {
         }
         const click = await clickLogin(send);
         steps.push({step: 'click-login', click});
-        await sleep(6500);
+        await sleep(2500);
+        let postLogin = await pageInfo(send);
+        steps.push({
+          step: 'post-login-page',
+          page: {
+            href: postLogin.href,
+            title: postLogin.title,
+            textPreview: postLogin.textPreview,
+            inputs: postLogin.inputs,
+            buttons: postLogin.buttons,
+          },
+        });
+        const continueLogin = postLogin.buttons?.some(button =>
+          !button.disabled && String(button.text || '').includes('\u7ee7\u7eed\u767b\u5f55'));
+        if (continueLogin) {
+          const continueClick = await clickLogin(send);
+          steps.push({step: 'click-continue-login', click: continueClick});
+          await sleep(2500);
+          postLogin = await pageInfo(send);
+          steps.push({
+            step: 'post-continue-login-page',
+            page: {
+              href: postLogin.href,
+              title: postLogin.title,
+              textPreview: postLogin.textPreview,
+              inputs: postLogin.inputs,
+              buttons: postLogin.buttons,
+            },
+          });
+        }
+        await sleep(1500);
       }
 
       await navigate(send, ORDER_URL, 3500);
