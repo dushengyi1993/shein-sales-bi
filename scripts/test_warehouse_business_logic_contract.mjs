@@ -62,6 +62,9 @@ assert.match(audit, /mart\.return_order_performance_cost_reconciliation/);
 assert.match(audit, /SELECT store_key FROM fact\.openapi_store_daily_sales WHERE date = \(SELECT sales_date FROM latest\)/,
   'sales coverage must count a successful zero-sale OpenAPI probe instead of treating no order row as a missing store');
 assert.match(audit, /sales_probe_store_count/);
+assert.match(audit, /sales_coverage_is_event_driven_today/);
+assert.match(audit, /ops\.shein_webhook_primary_sales_enabled\(current_date\)/);
+assert.match(audit, /按 0 销量处理，不判为数据缺失/);
 assert.doesNotMatch(audit, /return arr\.length \? `\?\?\?/,
   'missing-store warnings must remain readable Chinese instead of mojibake');
 assert.match(audit, /notes\.push\(`有 \$\{storage\.detail_scaled_days\}/,
@@ -79,6 +82,9 @@ assert.doesNotMatch(portalGenerator, /09散件仓 \+ 01整箱仓为可售/);
 assert.match(portalClient, /运营可售默认只计 09 散件仓/);
 assert.match(portalClient, /SK-03038 按已批准例外计 09\+01/);
 assert.doesNotMatch(portalClient, /09散件仓 \+ 01整箱仓是可售实盘/);
+assert.match(portalClient, /function auditMessages\(\)/);
+assert.match(portalClient, /class="audit-reasons"/);
+assert.match(portalGenerator, /id="auditReasons"/);
 
 assert.match(refresh, /^BEGIN ISOLATION LEVEL REPEATABLE READ;/m);
 assert.match(refresh, /mart\.profit_daily_store_product/);

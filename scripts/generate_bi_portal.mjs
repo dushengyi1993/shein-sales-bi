@@ -5957,6 +5957,7 @@ function buildHtml(data, metabaseUrl, audit, pipeline, briefing, firstRunCheck, 
       <div><strong>成本表文件</strong><br><span id="manualCostDate"></span></div>
       <div><strong>ET 货代仓</strong><br><span id="etDate"></span></div>
       <div style="margin-top:8px">数据体检：<span id="auditState"></span></div>
+      <div id="auditReasons" hidden style="margin-top:6px;border-left:2px solid #d97706;padding-left:8px;color:#f5d58d;font-size:11px;line-height:1.5"></div>
     </div>
   </aside>
   <main>
@@ -10723,6 +10724,14 @@ function renderFilters(){
   else if (a.ok && !a.warnings && !a.errors) $('auditState').innerHTML = '<span class="audit-ok">通过</span>';
   else if (a.errors) $('auditState').innerHTML = '<span class="audit-bad">'+a.errors+' 个错误</span>';
   else $('auditState').innerHTML = '<span class="audit-warn">'+a.warnings+' 个提醒</span>';
+  const auditMessages = [...(a?.errorMessages || []), ...(a?.warningMessages || [])].filter(Boolean);
+  const auditReasons = $('auditReasons');
+  if (auditReasons) {
+    auditReasons.hidden = auditMessages.length === 0;
+    auditReasons.innerHTML = auditMessages.length
+      ? '<strong>原因：</strong><br>' + auditMessages.slice(0, 4).map(x => escapeHtml(String(x))).join('<br>')
+      : '';
+  }
 }
 
 function bindChartTooltips(){

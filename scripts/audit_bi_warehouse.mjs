@@ -154,7 +154,16 @@ function evaluate(summary, metabase) {
     const arr = Array.isArray(storeCoverage[key]) ? storeCoverage[key].filter(Boolean) : [];
     return arr.length ? `：缺少 ${arr.join('、')}` : '';
   };
-  if (expectedStoreCount && (storeCoverage.sales_store_count || 0) < expectedStoreCount) warnings.push(`销售最新日覆盖 ${storeCoverage.sales_store_count || 0}/${expectedStoreCount} 店${miss('sales_missing_stores')}`);
+  if (expectedStoreCount && (storeCoverage.sales_store_count || 0) < expectedStoreCount) {
+    if (storeCoverage.sales_coverage_is_event_driven_today === true) {
+      const missingStores = Array.isArray(storeCoverage.sales_missing_stores)
+        ? storeCoverage.sales_missing_stores.filter(Boolean)
+        : [];
+      notes.push(`今日销售采用 Webhook 订单事件增量；${missingStores.length ? missingStores.join('、') : '尚无订单的店铺'}暂未产生订单事实，按 0 销量处理，不判为数据缺失。`);
+    } else {
+      warnings.push(`销售最新日覆盖 ${storeCoverage.sales_store_count || 0}/${expectedStoreCount} 店${miss('sales_missing_stores')}`);
+    }
+  }
   if (expectedStoreCount && (storeCoverage.business_store_count || 0) < expectedStoreCount) warnings.push(`业务域最新日覆盖 ${storeCoverage.business_store_count || 0}/${expectedStoreCount} 店${miss('business_missing_stores')}`);
   if (expectedStoreCount && (storeCoverage.inventory_store_count || 0) < expectedStoreCount) warnings.push(`库存最新日覆盖 ${storeCoverage.inventory_store_count || 0}/${expectedStoreCount} 店${miss('inventory_missing_stores')}`);
   if (expectedStoreCount && (storeCoverage.quality_store_count || 0) < expectedStoreCount) warnings.push(`质量最新日覆盖 ${storeCoverage.quality_store_count || 0}/${expectedStoreCount} 店${miss('quality_missing_stores')}`);
@@ -283,6 +292,10 @@ summary AS (
       ),
       'sales_fact_store_count', (SELECT count(DISTINCT store_key) FROM fact.store_daily_sales WHERE date = (SELECT sales_date FROM latest)),
       'sales_probe_store_count', (SELECT count(DISTINCT store_key) FROM fact.openapi_store_daily_sales WHERE date = (SELECT sales_date FROM latest)),
+      'sales_coverage_is_event_driven_today', (
+        (SELECT sales_date FROM latest) = current_date
+        AND ops.shein_webhook_primary_sales_enabled(current_date)
+      ),
       'business_store_count', (SELECT count(DISTINCT store_key) FROM fact.home_finance_snapshot WHERE snapshot_date = (SELECT business_date FROM latest)),
       'inventory_store_count', (SELECT count(DISTINCT store_key) FROM fact.visible_inventory_snapshot WHERE snapshot_date = (SELECT inventory_date FROM latest)),
       'quality_store_count', (SELECT count(DISTINCT store_key) FROM fact.quality_skc_snapshot WHERE snapshot_date = (SELECT quality_date FROM latest)),
