@@ -25,7 +25,8 @@ INSERT INTO fact.order_item(
   ('OI_RTV_B','OK_RTV','S1','G1','O_RTV','2026-01-10','2026-01-10 10:06','P1','SKCRTV','SKURTV','P1 RTV split B',1,'SAR',50),
   ('OI_RETURN_MIX_A','OK_RETURN_MIX','S1','G1','O_RETURN_MIX','2026-01-10','2026-01-10 10:07','P1','SKCRM_A','SKURM_A','P1 package actual A',1,'SAR',60),
   ('OI_RETURN_MIX_B','OK_RETURN_MIX','S1','G1','O_RETURN_MIX','2026-01-10','2026-01-10 10:07','P2','SKCRM_B','SKURM_B','P2 package actual B',1,'SAR',40),
-  ('OI_MULTI','OK_MULTI','S1','G1','O_MULTI','2026-01-10','2026-01-10 10:08','P1','SKC_MULTI','SKU_MULTI','P1 realized plus pending',1,'SAR',100);
+  ('OI_MULTI','OK_MULTI','S1','G1','O_MULTI','2026-01-10','2026-01-10 10:08','P1','SKC_MULTI','SKU_MULTI','P1 realized plus pending',1,'SAR',100),
+  ('OI_RTV_ZERO','OK_RTV_ZERO','S1','G1','O_RTV_ZERO','2026-01-10','2026-01-10 10:09','P1','SKC_RTV_ZERO','SKU_RTV_ZERO','cancelled zero-quantity line',0,'SAR',0);
 
 INSERT INTO fact.inventory_cost_event(
   event_key,match_key,effective_at,event_type,quantity,cost_amount_sar,source_table,
@@ -93,21 +94,28 @@ INSERT INTO fact.after_sales_item(
   ('AF_MULTI_REAL','2026-01-11','S1','G1','2026-01-11 09:08','AF_MULTI_REAL','R_MULTI_REAL','O_MULTI',
    '退货退款','同意退款','已签收',50,'SAR','P1','SKC_MULTI',0.5,50),
   ('AF_MULTI_PENDING','2026-01-11','S1','G1','2026-01-11 09:09','AF_MULTI_PENDING','R_MULTI_PENDING','O_MULTI',
-   '退货退款','待买家退货','待寄回',30,'SAR','P1',NULL,0.3,30);
+   '退货退款','待买家退货','待寄回',30,'SAR','P1',NULL,0.3,30),
+  ('AF_RTV_ZERO','2026-01-11','S1','G1','2026-01-11 09:10','AF_RTV_ZERO','R_RTV_ZERO','O_RTV_ZERO',
+   '退货退款','同意退款','已签收',0,'SAR','P1','SKC_RTV_ZERO',1,0);
 
 INSERT INTO fact.et_return_order(
   return_order_id,store_name_in,shipment_number,status,status_name,in_quantity,create_time
-) VALUES ('ET_RTV','ETRUH09散件仓','EXP_RTV','done','已到货',1,'2026-01-12 10:00');
+) VALUES
+  ('ET_RTV','ETRUH09散件仓','EXP_RTV','done','已到货',1,'2026-01-12 10:00'),
+  ('ET_RTV_ZERO','ETRUH09散件仓','EXP_RTV_ZERO','done','已到货',1,'2026-01-12 10:01');
 INSERT INTO fact.et_return_order_item(
   unique_key,return_order_id,standard_goods_sn,match_key,quantity,instock,create_time
-) VALUES ('ET_RTV_ITEM','ET_RTV','P1',dim.product_match_key('P1'),1,1,'2026-01-12 10:00');
+) VALUES
+  ('ET_RTV_ITEM','ET_RTV','P1',dim.product_match_key('P1'),1,1,'2026-01-12 10:00'),
+  ('ET_RTV_ZERO_ITEM','ET_RTV_ZERO','P1',dim.product_match_key('P1'),1,1,'2026-01-12 10:01');
 INSERT INTO ops.rtv_tracking_verification(
   verification_id,store_key,et_return_order_id,et_shipment_number,standard_goods_sn,
   shein_aftersales_order_no,shein_order_no,shein_return_order_no,match_status,match_source
-) VALUES (
-  'RTV_SPLIT_VALIDATION','S1','ET_RTV','EXP_RTV','P1',
-  'AF_RTV','O_RTV','R_RTV','matched','validation'
-);
+) VALUES
+  ('RTV_SPLIT_VALIDATION','S1','ET_RTV','EXP_RTV','P1',
+   'AF_RTV','O_RTV','R_RTV','matched','validation'),
+  ('RTV_ZERO_VALIDATION','S1','ET_RTV_ZERO','EXP_RTV_ZERO','P1',
+   'AF_RTV_ZERO','O_RTV_ZERO','R_RTV_ZERO','matched','validation');
 
 INSERT INTO fact.openapi_return_order(
   return_order_key,ret_order_date,store_key,group_key,return_order_no,order_no,return_order_status,check_status
@@ -199,6 +207,8 @@ DECLARE
   v_rtv_received numeric;
   v_rtv_09_received numeric;
   v_rtv_recoverable numeric;
+  v_rtv_zero_received numeric;
+  v_rtv_zero_recoverable numeric;
   v_multi_net numeric;
   v_multi_pending numeric;
   v_multi_risk_adjusted numeric;
@@ -247,6 +257,16 @@ BEGIN
      OR abs(v_rtv_recoverable-10) > 0.005 THEN
     RAISE EXCEPTION 'split_order_item_rtv_is_allocated_once contract failed: received %, received09 %, recoverable %',
       v_rtv_received,v_rtv_09_received,v_rtv_recoverable;
+  END IF;
+
+  SELECT sum(rtv_received_quantity),sum(rtv_recoverable_cost_sar)
+    INTO v_rtv_zero_received,v_rtv_zero_recoverable
+  FROM mart.profit_order_item
+  WHERE order_no='O_RTV_ZERO';
+  IF abs(coalesce(v_rtv_zero_received,0)) > 0.005
+     OR abs(coalesce(v_rtv_zero_recoverable,0)) > 0.005 THEN
+    RAISE EXCEPTION 'zero_quantity_order_must_not_receive_rtv_recovery contract failed: received %, recoverable %',
+      v_rtv_zero_received,v_rtv_zero_recoverable;
   END IF;
 
   SELECT sum(return_delivery_fee_sar),sum(actual_return_cost_sar),count(*) FILTER (WHERE actual_return_cost_sar IS NOT NULL)
@@ -440,6 +460,7 @@ SELECT jsonb_build_object(
     'partial_refund_and_split_package_fee',
     'pending_partial_refund',
     'split_order_item_rtv_is_allocated_once',
+    'zero_quantity_order_must_not_receive_rtv_recovery',
     'finance_actual_replaces_estimate',
     'return_order_performance_price_actual_replaces_estimate',
     'mixed_package_actual_replaces_all_estimate',

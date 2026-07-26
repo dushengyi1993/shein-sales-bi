@@ -4044,30 +4044,27 @@ rtv_allocated AS (
   SELECT
     m.order_item_key,
     CASE
-      WHEN coalesce(total_rtv_received_quantity,0) <= 0 THEN 0
+      WHEN line_quantity <= 0 OR coalesce(total_rtv_received_quantity,0) <= 0 THEN 0
       WHEN matched_quantity > 0 THEN least(
         line_quantity,
         total_rtv_received_quantity * line_quantity / matched_quantity
       )
-      WHEN matched_row_number = 1 THEN total_rtv_received_quantity
       ELSE 0
     END AS rtv_received_quantity,
     CASE
-      WHEN coalesce(total_rtv_received_to_09_quantity,0) <= 0 THEN 0
+      WHEN line_quantity <= 0 OR coalesce(total_rtv_received_to_09_quantity,0) <= 0 THEN 0
       WHEN matched_quantity > 0 THEN least(
         line_quantity,
         total_rtv_received_to_09_quantity * line_quantity / matched_quantity
       )
-      WHEN matched_row_number = 1 THEN total_rtv_received_to_09_quantity
       ELSE 0
     END AS rtv_received_to_09_quantity,
     CASE
-      WHEN coalesce(total_rtv_received_to_rtv_quantity,0) <= 0 THEN 0
+      WHEN line_quantity <= 0 OR coalesce(total_rtv_received_to_rtv_quantity,0) <= 0 THEN 0
       WHEN matched_quantity > 0 THEN least(
         line_quantity,
         total_rtv_received_to_rtv_quantity * line_quantity / matched_quantity
       )
-      WHEN matched_row_number = 1 THEN total_rtv_received_to_rtv_quantity
       ELSE 0
     END AS rtv_received_to_rtv_quantity,
     rtv_recovery_status,

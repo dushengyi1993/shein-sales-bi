@@ -66,6 +66,12 @@ assert.doesNotMatch(
 );
 assert.match(schema, /rtv_allocated AS/);
 assert.match(schema, /total_rtv_received_quantity \* line_quantity \/ matched_quantity/);
+assert.match(schema, /WHEN line_quantity <= 0 OR coalesce\(total_rtv_received_quantity,0\) <= 0 THEN 0/);
+assert.doesNotMatch(
+  schema,
+  /WHEN matched_row_number = 1 THEN total_rtv_received_quantity/,
+  'a zero-quantity order line must never receive an RTV recovery fallback',
+);
 assert.match(schema, /greatest\(\s*sum\([\s\S]*?max\(coalesce\(rdest\.final_09_quantity,0\)\)\s*\) AS et_received_to_09_qty/);
 assert.doesNotMatch(schema, /\)\s*\+ max\(coalesce\(rdest(?:_any)?\.final_09_quantity,0\)\) AS et_received_to_09_qty/);
 
@@ -135,6 +141,7 @@ for (const contract of [
   'partial_refund_and_split_package_fee',
   'pending_partial_refund',
   'split_order_item_rtv_is_allocated_once',
+  'zero_quantity_order_must_not_receive_rtv_recovery',
   'finance_actual_replaces_estimate',
   'return_order_performance_price_actual_replaces_estimate',
   'mixed_package_actual_replaces_all_estimate',
@@ -158,6 +165,7 @@ console.log(JSON.stringify({
     'pending after-sales separated from realized refunds',
     'partial realized and pending refunds are capped and prorated across split order items',
     'RTV received quantity is conserved across split order items',
+    'zero-quantity order lines never receive RTV recovery value',
     'finance or return-order actual cost replaces one estimate per package',
     'product-store storage allocation is conserved with CENTRAL_POOL residual',
     'repeatable-read mart publication and production regressions guarded',
