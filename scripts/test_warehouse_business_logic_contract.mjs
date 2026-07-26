@@ -96,6 +96,10 @@ assert.match(audit, /sales_probe_store_count/);
 assert.match(audit, /sales_coverage_is_event_driven_today/);
 assert.match(audit, /ops\.shein_webhook_primary_sales_enabled\(current_date\)/);
 assert.match(audit, /按 0 销量处理，不判为数据缺失/);
+assert.doesNotMatch(audit, /linkLagDaysFromSales/,
+  'real-time Webhook sales must not make the slower daily link snapshot look stale');
+assert.match(audit, /linkLagDaysFromBusiness/);
+assert.match(audit, /请确认每日慢变数据同步是否成功完成/);
 assert.match(audit, /cross_store_after_sales_orders/);
 assert.match(audit, /unique_skc_store_mismatch_rows/);
 assert.match(audit, /primary_openapi_store_mismatch_orders/);

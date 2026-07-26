@@ -197,20 +197,14 @@ function evaluate(summary, metabase, productReconciliation = null) {
   if (!latest.link_date) warnings.push('没有在 fact.link_master_snapshot 中找到链接数据。');
   if (!latest.business_date) warnings.push('没有在 fact.home_finance_snapshot 中找到业务域快照。');
   if (!latest.finance_detail_date) warnings.push('没有在 fact.finance_module_stat_snapshot 中找到 gsfs 财务模块快照。');
-  const linkLagDaysFromSales = latest.link_date && latest.sales_date
-    ? Math.floor((Date.parse(`${latest.sales_date}T00:00:00Z`) - Date.parse(`${latest.link_date}T00:00:00Z`)) / 86400000)
-    : 0;
   const linkLagDaysFromBusiness = latest.link_date && latest.business_date
     ? Math.floor((Date.parse(`${latest.business_date}T00:00:00Z`) - Date.parse(`${latest.link_date}T00:00:00Z`)) / 86400000)
     : 0;
-  // Link performance is intentionally refreshed once per day at 05:30 for the
-  // previous complete day.  When today's sales/business domains are refreshed
-  // intraday, link_date = sales_date - 1 is normal and should not alarm.
-  if (linkLagDaysFromSales > 1) {
-    warnings.push(`链接数据超过 1 天未更新：link_date=${latest.link_date}，sales_date=${latest.sales_date}。请确认 05:30 链接同步是否成功完成。`);
-  }
+  // Link and business-domain snapshots are slow daily data and should be
+  // compared with each other. Today's sales can advance immediately through
+  // Webhook and must not make a healthy previous-day link snapshot look stale.
   if (linkLagDaysFromBusiness > 1) {
-    warnings.push(`链接数据超过 1 天未更新：link_date=${latest.link_date}，business_date=${latest.business_date}。请确认 05:30 链接同步是否成功完成。`);
+    warnings.push(`链接数据超过 1 天未更新：link_date=${latest.link_date}，business_date=${latest.business_date}。请确认每日慢变数据同步是否成功完成。`);
   }
 
   const storeCoverage = s.storeCoverage || {};
