@@ -2295,59 +2295,72 @@ function enrichExistingTargetSkcsFromSpuInfo(matches, info) {
   return next;
 }
 
-async function rejectedReplacementDuplicateOverride(client, task, targetStore, matches, calls) {
-  const replacement = task?.notes?.replacesRejectedTarget;
+async function terminalReplacementDuplicateOverride(client, task, targetStore, matches, calls) {
+  const repairMode = safeString(task?.notes?.repairMode, 80);
+  const expectedState = repairMode === 'republish_rejected'
+    ? 3
+    : repairMode === 'republish_withdrawn'
+      ? 4
+      : null;
+  const replacement = expectedState === 3
+    ? task?.notes?.replacesRejectedTarget
+    : expectedState === 4
+      ? task?.notes?.replacesWithdrawnTarget
+      : null;
   const enabled = task?.allowDuplicateNewPublish === true
-    && task?.notes?.repairMode === 'republish_rejected'
+    && expectedState !== null
     && replacement
     && typeof replacement === 'object'
-    && Number(replacement.state) === 3
+    && Number(replacement.state) === expectedState
     && normalizeStoreKey(replacement.store) === normalizeStoreKey(targetStore)
     && /^sv\d+$/i.test(safeString(replacement.skc, 120))
     && /^(?:sr|v)\d+$/i.test(safeString(replacement.spu, 120));
   if (!enabled) return {allowed: false, replacement: null, liveValidation: {status: 'not_requested'}};
 
-  const rejectedSkc = safeString(replacement.skc, 120);
+  const replacedSkc = safeString(replacement.skc, 120);
   // Never bypass the guard when the allegedly rejected SKC itself appears in
   // the product list.  The narrow exception is only for a *different* draft
-  // replacing a terminal state=3 document while older same-code links coexist.
-  if (matches.some(row => safeString(row?.skcName, 120) === rejectedSkc)) {
-    return {allowed: false, replacement: {store: targetStore, spu: replacement.spu, skc: rejectedSkc, state: 3}, liveValidation: {status: 'replacement_present_in_product_search'}};
+  // replacing an exact terminal rejected/withdrawn document while older
+  // same-code links coexist.
+  if (matches.some(row => safeString(row?.skcName, 120) === replacedSkc)) {
+    return {allowed: false, replacement: {store: targetStore, spu: replacement.spu, skc: replacedSkc, state: expectedState}, liveValidation: {status: 'replacement_present_in_product_search'}};
   }
-  const rejectedSpu = safeString(replacement.spu, 120);
+  const replacedSpu = safeString(replacement.spu, 120);
   try {
     const response = await client.request('/open-api/goods/query-document-state', {
       method: 'POST',
-      body: {spuList: [{spuName: rejectedSpu}]},
+      body: {spuList: [{spuName: replacedSpu}]},
       headers: {language: 'zh-cn'},
     });
-    calls.push(compactCallResult(`query-document-state-rejected-replacement-${rejectedSpu}`, '/open-api/goods/query-document-state', 'POST', response));
+    calls.push(compactCallResult(`query-document-state-terminal-replacement-${replacedSpu}`, '/open-api/goods/query-document-state', 'POST', response));
     if (!response.ok || String(response.data?.code) !== '0') {
       return {
         allowed: false,
-        replacement: {store: targetStore, spu: rejectedSpu, skc: rejectedSkc, state: 3},
+        replacement: {store: targetStore, spu: replacedSpu, skc: replacedSkc, state: expectedState},
         liveValidation: {status: 'query_not_ok', code: response.data?.code ?? null, msg: response.data?.msg ?? null},
       };
     }
     const liveSkc = asArray(response.data?.info?.data)
-      .filter(row => safeString(row?.spuName || row?.spu_name, 120) === rejectedSpu)
+      .filter(row => safeString(row?.spuName || row?.spu_name, 120) === replacedSpu)
       .flatMap(row => asArray(row?.skcList || row?.skc_list))
-      .find(row => safeString(row?.skcName || row?.skc_name, 120) === rejectedSkc);
+      .find(row => safeString(row?.skcName || row?.skc_name, 120) === replacedSkc);
     const documentState = Number(liveSkc?.documentState ?? liveSkc?.document_state);
-    const allowed = Number.isFinite(documentState) && documentState === 3;
+    const allowed = Number.isFinite(documentState) && documentState === expectedState;
     return {
       allowed,
-      replacement: {store: targetStore, spu: rejectedSpu, skc: rejectedSkc, state: 3},
+      replacement: {store: targetStore, spu: replacedSpu, skc: replacedSkc, state: expectedState},
       liveValidation: {
-        status: allowed ? 'verified_terminal_rejected' : 'not_terminal_rejected',
+        status: allowed
+          ? expectedState === 3 ? 'verified_terminal_rejected' : 'verified_terminal_withdrawn'
+          : 'not_expected_terminal_state',
         documentState: Number.isFinite(documentState) ? documentState : null,
       },
     };
   } catch (error) {
-    calls.push({name: `query-document-state-rejected-replacement-${rejectedSpu}`, path: '/open-api/goods/query-document-state', method: 'POST', httpStatus: null, code: null, msg: safeString(error?.message || error, 300), traceId: null});
+    calls.push({name: `query-document-state-terminal-replacement-${replacedSpu}`, path: '/open-api/goods/query-document-state', method: 'POST', httpStatus: null, code: null, msg: safeString(error?.message || error, 300), traceId: null});
     return {
       allowed: false,
-      replacement: {store: targetStore, spu: rejectedSpu, skc: rejectedSkc, state: 3},
+      replacement: {store: targetStore, spu: replacedSpu, skc: replacedSkc, state: expectedState},
       liveValidation: {status: 'query_failed', error: safeString(error?.message || error, 300)},
     };
   }
@@ -2400,19 +2413,20 @@ async function inspectTargetDuplicateProducts(client, payload, targetStore = '',
   const active = matches.filter(row => Number(row.recycleStatus) !== 1 && Number(row.shelfStatus) === 1);
   const inactive = matches.filter(row => Number(row.recycleStatus) !== 1 && Number(row.shelfStatus) !== 1);
   const hasBlockingDuplicate = active.length > 0 || inactive.length > 0;
-  const rejectedReplacement = hasBlockingDuplicate
-    ? await rejectedReplacementDuplicateOverride(client, task, targetStore, matches, calls)
+  const terminalReplacement = hasBlockingDuplicate
+    ? await terminalReplacementDuplicateOverride(client, task, targetStore, matches, calls)
     : {allowed: false, replacement: null, liveValidation: {status: 'not_needed_no_blocking_duplicate'}};
   const additionalDuplicateOverride = evaluateAdditionalDuplicatePublishOverride(task, targetStore, [...active, ...inactive]);
-  const duplicateOverrideAllowed = rejectedReplacement.allowed || additionalDuplicateOverride.allowed;
+  const duplicateOverrideAllowed = terminalReplacement.allowed || additionalDuplicateOverride.allowed;
   if (active.length && !duplicateOverrideAllowed) {
     blockers.push(`${targetStore || '目标店'} 已存在同货号在售链接 ${active.map(row => row.skcName).filter(Boolean).join('、')}，禁止重复创建新链接。`);
   }
   if (inactive.length && !duplicateOverrideAllowed) {
     blockers.push(`${targetStore || '目标店'} 已存在同货号下架但未回收链接 ${inactive.map(row => row.skcName).filter(Boolean).join('、')}；应优先恢复该链接，或先明确说明为何必须另建，当前禁止直接创建重复链接。`);
   }
-  if (rejectedReplacement.allowed && (active.length || inactive.length)) {
-    warnings.push(`${targetStore || '目标店'} 正在替换终态 state=3 的议价拒绝链接 ${rejectedReplacement.replacement.skc}；已对其他同货号链接应用单次重发豁免，不改变全局去重规则。`);
+  if (terminalReplacement.allowed && (active.length || inactive.length)) {
+    const terminalLabel = Number(terminalReplacement.replacement?.state) === 3 ? '议价拒绝' : '已撤回';
+    warnings.push(`${targetStore || '目标店'} 正在替换终态 state=${terminalReplacement.replacement.state} 的${terminalLabel}链接 ${terminalReplacement.replacement.skc}；已对其他同货号链接应用单次重发豁免，不改变全局去重规则。`);
   }
   if (additionalDuplicateOverride.allowed) {
     warnings.push(`${targetStore || '目标店'} 已由负责人明确授权保留现有同货号链接 ${additionalDuplicateOverride.existingSkcs.join('、')} 并额外新建一条；该豁免仅对本任务和当前精确链接集合生效。`);
@@ -2431,7 +2445,7 @@ async function inspectTargetDuplicateProducts(client, payload, targetStore = '',
       activeCount: active.length,
       inactiveCount: inactive.length,
       recycledCount: recycled.length,
-      rejectedReplacementOverride: rejectedReplacement,
+      rejectedReplacementOverride: terminalReplacement,
       additionalDuplicateOverride,
       matches: matches.slice(0, 40),
     },

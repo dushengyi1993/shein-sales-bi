@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {
+  loadExactHighClickSpecialPlan,
   loadExactManualRepairPlan,
   loadExactDriftRepairManifest,
   loadExactFallbackRepairPlan,
@@ -67,6 +68,7 @@ async function buildQueue(args) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`Invalid --date: ${date || 'missing'}`);
   const guardPath = path.resolve(ROOT, args.guard || `outputs/reports/marketing-daily-guard-${date}.json`);
   const manualPlanPath = path.resolve(ROOT, args.manualPlan || `tmp/marketing-signup/manual-limited-discount-restore/${date}/manual-limited-discount-restore-plan.json`);
+  const highClickPlanPath = path.resolve(ROOT, args.highClickPlan || `outputs/reports/high-click-low-conversion-special-plan-${date}.json`);
   const driftPlanDir = path.resolve(ROOT, args.driftPlanDir || `tmp/marketing-signup/limited-discount-fallback/target-price-drift-${date}`);
   const fallbackPlanPath = path.resolve(ROOT, args.fallbackPlan || `outputs/reports/new-listing-7d-limited-discount-plan-${date}.json`);
   const queuePath = path.resolve(ROOT, args.queue || `state/cloud_marketing_live_guard/repair-queues/marketing-repair-${date}.json`);
@@ -74,8 +76,18 @@ async function buildQueue(args) {
   if (String(guard.reportDate || '') !== date) throw new Error(`Guard reportDate mismatch: expected=${date} actual=${guard.reportDate || 'missing'}`);
 
   const manualRows = Number(guard?.manualSpecialLimitedDiscount?.actionCount || 0);
+  const highClickRows = Number(guard?.highClickLowConversionSpecial?.actionCount || 0);
   const driftRows = Number((guard?.limitedDiscountTargetPriceDrift?.belowRows || []).length);
   const guardHash = await sha256File(guardPath);
+  const highClick = await loadExactHighClickSpecialPlan({
+    root: ROOT,
+    planPath: highClickPlanPath,
+    guardPath,
+    date,
+  });
+  if (highClick.entries.length !== highClickRows) {
+    throw new Error(`High-click queue row mismatch: guard=${highClickRows} plan=${highClick.entries.length}`);
+  }
 
   let manual = null;
   if (manualRows > 0) {
@@ -99,7 +111,8 @@ async function buildQueue(args) {
   const fallbackKeys = new Set(fallback.entries.flatMap(entry => entry.rescue.rows || [])
     .map(row => `${String(row?.storeKey || '').trim().toUpperCase()}::${String(row?.skc || '').trim()}`));
   const manualKeys = new Set((manual?.entries || []).map(entry => `${entry.storeKey}::${entry.skc}`));
-  const allKeys = [...manualKeys, ...driftKeys, ...fallbackKeys];
+  const highClickKeys = new Set(highClick.entries.map(entry => entry.key));
+  const allKeys = [...highClickKeys, ...manualKeys, ...driftKeys, ...fallbackKeys];
   const countsByKey = allKeys.reduce((acc, key) => acc.set(key, (acc.get(key) || 0) + 1), new Map());
   const overlappingWorkKeys = [...countsByKey.entries()].filter(([, count]) => count > 1).map(([key]) => key).sort();
   if (overlappingWorkKeys.length) {
@@ -108,6 +121,15 @@ async function buildQueue(args) {
   const existing = await readJson(queuePath).catch(() => null);
   const now = new Date().toISOString();
   const stageDefinitions = {
+    highClickSpecial: {
+      status: highClickRows > 0 ? 'pending' : 'not_required',
+      rows: highClickRows,
+      groups: highClick.entries.length,
+      planPath: highClick.planRelativePath,
+      inputFingerprint: hashJson({guardHash, workFingerprint: highClick.workFingerprint}),
+      workFingerprint: highClick.workFingerprint,
+      updatedAt: now,
+    },
     manualSpecialRestore: {
       status: manualRows > 0 ? 'pending' : 'not_required',
       rows: manualRows,
@@ -144,8 +166,8 @@ async function buildQueue(args) {
     name,
     preserveStage(existing?.stages?.[name], stage),
   ]));
-  const totalRows = manualRows + driftRows + fallbackRows;
-  const totalGroups = stageDefinitions.manualSpecialRestore.groups + stageDefinitions.driftRepair.groups + stageDefinitions.fallbackRepair.groups;
+  const totalRows = highClickRows + manualRows + driftRows + fallbackRows;
+  const totalGroups = stageDefinitions.highClickSpecial.groups + stageDefinitions.manualSpecialRestore.groups + stageDefinitions.driftRepair.groups + stageDefinitions.fallbackRepair.groups;
   const queue = {
     schemaVersion: 1,
     date,
@@ -158,7 +180,18 @@ async function buildQueue(args) {
       guardHash,
       stages: Object.fromEntries(Object.entries(stageDefinitions).map(([name, stage]) => [name, stage.inputFingerprint])),
     }),
-    counts: {totalRows, totalGroups, manualRows, manualGroups: stageDefinitions.manualSpecialRestore.groups, driftRows, driftGroups: stageDefinitions.driftRepair.groups, fallbackRows, fallbackGroups: stageDefinitions.fallbackRepair.groups},
+    counts: {
+      totalRows,
+      totalGroups,
+      highClickRows,
+      highClickGroups: stageDefinitions.highClickSpecial.groups,
+      manualRows,
+      manualGroups: stageDefinitions.manualSpecialRestore.groups,
+      driftRows,
+      driftGroups: stageDefinitions.driftRepair.groups,
+      fallbackRows,
+      fallbackGroups: stageDefinitions.fallbackRepair.groups,
+    },
     deduplication: {key: 'storeKey+skc', overlappingWorkKeys: 0},
     stages,
   };

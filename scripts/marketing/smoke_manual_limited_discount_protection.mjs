@@ -6,21 +6,38 @@ import {
   buildManualLimitedDiscountIndex,
   classifyManualLimitedDiscountLiveState,
   findActiveManualLimitedDiscount,
-  loadManualLimitedDiscountRegistry,
   partitionRowsByManualLimitedDiscount,
   resolveManualLimitedDiscountInventoryAction,
+  selectManualLimitedDiscountCoverageRows,
 } from '../../lib/marketing_manual_limited_discount_overrides.mjs';
 import {buildLimitedDiscountDriftRescuePlan} from './build_limited_discount_drift_rescue_plan.mjs';
 import {buildManualLimitedDiscountRestorePlan} from './build_manual_limited_discount_restore_plan.mjs';
 
 const activeAt = new Date('2026-07-13T12:00:00+08:00');
 const expiredAt = new Date('2026-07-21T12:00:00+08:00');
-const registry = await loadManualLimitedDiscountRegistry();
 const protectedRows = [
   {storeKey: 'DX', skc: 'sv260128171583714957215', limitedDiscountPrice: 283, finalTargetPrice: 293.34, limitedDiscountName: 'wrong ordinary repair'},
   {storeKey: 'HL', skc: 'sv260204035473792493137', limitedDiscountPrice: 127.29, finalTargetPrice: 135.62, limitedDiscountName: '80123125 wrong ordinary repair'},
   {storeKey: 'YJ', skc: 'sv260202233956355340972', limitedDiscountPrice: 163.75, finalTargetPrice: 176.2, limitedDiscountName: 'stale deleted row'},
 ];
+// Keep the regression fixture independent from the mutable production registry.
+// A later user-approved renewal may legitimately replace the same store+SKC key.
+const registry = {
+  entries: protectedRows.map((row, index) => ({
+    storeKey: row.storeKey,
+    skc: row.skc,
+    canonical: ['SK-13065吸尘器', 'SK-777碎冰机和刨冰机', 'SK-13015杆式吸尘器'][index],
+    specialPrice: row.limitedDiscountPrice,
+    validFrom: index === 2 ? '2026-07-13 00:00:00' : '2026-07-12 21:00:00',
+    validTo: index === 2 ? '2026-07-20 23:59:59' : '2026-07-19 23:59:59',
+    activityStock: 10,
+    reason: 'smoke_fixture_user_approved_special_price',
+    sourceThreadId: 'smoke-fixture',
+    sourceArtifact: 'smoke-fixture.json',
+    currentActivityId: 80100000 + index,
+    status: 'active',
+  })),
+};
 const ordinaryDrift = {storeKey: 'FY', skc: 'sv-real-drift', limitedDiscountPrice: 90, finalTargetPrice: 100, limitedDiscountName: 'ordinary real drift'};
 const staleGuard = {
   reportDate: '2026-07-13',
@@ -97,6 +114,36 @@ assert.equal(shortStockLive.status, 'coverage_mismatch');
 const missingCoverageEvidence = classifyManualLimitedDiscountLiveState(dxInside, [{price: 283}]);
 assert.equal(missingCoverageEvidence.status, 'coverage_mismatch');
 
+// A just-created exact activity may be scheduled a few minutes ahead by
+// SHEIN. Its registered activity id is accepted during that short lead time,
+// while a different, expired, or far-future activity is not.
+const scheduledExactRow = {
+  activityId: dxInside.currentActivityId,
+  price: 283,
+  activityStock: 10,
+  start: '2026-07-13 12:30:00',
+  end: dxInside.validTo,
+  evidenceType: 'future_limited_discount_live_scan',
+};
+const scheduledCoverage = selectManualLimitedDiscountCoverageRows(dxInside, {
+  currentRows: [],
+  allRows: [
+    scheduledExactRow,
+    {...scheduledExactRow, activityId: 99999999},
+    {...scheduledExactRow, start: '2026-07-13 18:00:00'},
+    {...scheduledExactRow, evidenceType: 'expired_limited_discount_live_scan'},
+  ],
+  at: activeAt,
+});
+assert.equal(scheduledCoverage.scheduledRows.length, 1);
+assert.equal(classifyManualLimitedDiscountLiveState(dxInside, scheduledCoverage.rows).status, 'covered_exact');
+const farFutureCoverage = selectManualLimitedDiscountCoverageRows(dxInside, {
+  currentRows: [],
+  allRows: [{...scheduledExactRow, start: '2026-07-13 18:00:00'}],
+  at: activeAt,
+});
+assert.equal(classifyManualLimitedDiscountLiveState(dxInside, farFutureCoverage.rows).status, 'missing');
+
 // ET evidence is the only authority that permits a virtual-stock top-up.
 assert.deepEqual(
   resolveManualLimitedDiscountInventoryAction({platformStock: 9, etStock: 18, activityStock: 10}).action,
@@ -133,5 +180,11 @@ console.log(JSON.stringify({
   orderInsideExpectedPrice: dxInside.specialPrice,
   orderOutsideFallsBackToOrdinaryTarget: 293.34,
   inventoryBranches: {enough: 'top_up_platform_virtual_stock', insufficient: etBlocked.reason},
-  liveCoverageChecks: {exact: exactLive.status, shortStock: shortStockLive.status, missingEvidence: missingCoverageEvidence.status},
+  liveCoverageChecks: {
+    exact: exactLive.status,
+    scheduledExact: classifyManualLimitedDiscountLiveState(dxInside, scheduledCoverage.rows).status,
+    farFuture: classifyManualLimitedDiscountLiveState(dxInside, farFutureCoverage.rows).status,
+    shortStock: shortStockLive.status,
+    missingEvidence: missingCoverageEvidence.status,
+  },
 }, null, 2));

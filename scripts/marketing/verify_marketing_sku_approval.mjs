@@ -142,7 +142,7 @@ for (const row of rows) {
 
   if (!/缺云端成本|货号待归并/.test(status)) {
     if (!(storage > 0)) {
-      addFailure('full-table', '可处理 SKU 的仓储费/件不是正数', {sku, status, storage: row['仓储费SAR/件']});
+      addWarning('full-table', '仓储费展示缺失或不是正数；不按0填充，也不阻断不含仓储商品成本边界', {sku, status, storage: row['仓储费SAR/件']});
     }
     if (isAmbiguousCouponText(combo)) {
       addFailure('full-table', '建议活动组合存在 15% 券歧义', {sku, combo});
@@ -287,13 +287,18 @@ function isAmbiguousCouponText(value) {
 }
 
 function parseArgs(argv) {
+  const allowedKeys = new Set(['cost', 'csv', 'date', 'issues', 'out', 'version']);
   const out = {};
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg.startsWith('--')) {
-      out[arg.slice(2)] = argv[i + 1];
-      i++;
-    }
+    if (!arg.startsWith('--')) throw new Error(`Unexpected positional argument: ${arg}`);
+    const [key, inlineValue] = arg.slice(2).split('=', 2);
+    if (!allowedKeys.has(key)) throw new Error(`Unknown argument: --${key}`);
+    const value = inlineValue !== undefined
+      ? inlineValue
+      : (argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[++i] : '');
+    if (value === '') throw new Error(`Missing value for --${key}`);
+    out[key] = value;
   }
   return out;
 }

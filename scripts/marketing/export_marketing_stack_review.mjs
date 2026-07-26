@@ -18,6 +18,7 @@ import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {normalizeGoodsSnDetailed} from '../../lib/product_sku_normalizer.mjs';
 import {normalizeInventoryProjection} from '../../lib/inventory_projection_contract.mjs';
+import {buildSharedStorageCostIndex, findSharedStorageCost} from '../../lib/marketing_shared_storage_cost.mjs';
 import {
   addBiPortalSourceArgs,
   normalizeBiPortalSourceArgs,
@@ -126,6 +127,7 @@ if (!selectedStores.length) {
 
 const linkIndex = buildLinkActivityIndex(BI);
 const depletionIndex = buildDepletionIndex(BI);
+const sharedStorageCostIndex = buildSharedStorageCostIndex(BI);
 const batches = chunk(selectedStores, args.batchSize);
 const audit = {
   createdAt: now.toISOString(),
@@ -338,6 +340,7 @@ function parseArgs(argv) {
     else if (a === '--coupon-target-plan') out.couponTargetPlan = argv[++i];
     else if (a === '--coupon-price-overrides' || a === '--price-overrides') out.couponPriceOverrides.push(...String(argv[++i] || '').split(',').map(s => s.trim()).filter(Boolean));
     else if (a === '--session-http') out.sessionHttp = true;
+    else throw new Error(`Unknown argument: ${a}`);
   }
   if (!Number.isFinite(out.batchSize) || out.batchSize < 1) out.batchSize = 1;
   out.batchSize = Math.min(3, Math.floor(out.batchSize));
@@ -1544,20 +1547,23 @@ function lookupDepletion(storeKey, canonical, supplierNo) {
 function lookupCostInfo(keys) {
   const trueCost = lookupTrueCost(keys);
   const fallbackCost = lookupCost(keys);
+  const sharedStorageCost = findSharedStorageCost(sharedStorageCostIndex, keys);
   const productCostSar = numValue(trueCost?.unitCostSar)
     ?? numValue(trueCost?.productUnitCostSar)
     ?? fallbackCost;
   const storageUnitCostSar = numValue(trueCost?.storageUnitCostSar)
-    ?? numValue(trueCost?.storageUnitCostSar30d);
+    ?? numValue(trueCost?.storageUnitCostSar30d)
+    ?? numValue(sharedStorageCost?.storageUnitCostSar);
   const explicitFullCostSar = numValue(trueCost?.trueUnitCostSar);
   const fullCostSar = explicitFullCostSar !== null ? explicitFullCostSar
     : (productCostSar !== null && storageUnitCostSar !== null ? round2(productCostSar + storageUnitCostSar) : productCostSar);
+  const mappedStorageMethod = /^(?:missing|unknown)$/i.test(String(trueCost?.storageMethod || '').trim()) ? '' : trueCost?.storageMethod;
   return {
     productCostSar,
     storageUnitCostSar,
     fullCostSar,
-    storageMethod: trueCost?.storageMethod || '',
-    raw: trueCost || null,
+    storageMethod: mappedStorageMethod || sharedStorageCost?.storageMethod || '',
+    raw: trueCost ? {...trueCost, sharedStorageCostFallback: sharedStorageCost || null} : sharedStorageCost,
   };
 }
 

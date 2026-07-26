@@ -51,6 +51,7 @@ function parseArgs(argv) {
     pollMs: 5_000,
     pageSize: 500,
     priceTolerance: 0.06,
+    portOverrides: new Map(),
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -65,7 +66,17 @@ function parseArgs(argv) {
     else if (a === '--poll-ms') out.pollMs = Number(argv[++i] || out.pollMs);
     else if (a === '--page-size') out.pageSize = Number(argv[++i] || out.pageSize);
     else if (a === '--price-tolerance') out.priceTolerance = Number(argv[++i] || out.priceTolerance);
+    else if (a === '--port-overrides') {
+      for (const entry of splitList(argv[++i])) {
+        const [storeKey, rawPort] = entry.split(':');
+        const port = Number(rawPort);
+        if (storeKey && Number.isInteger(port) && port > 0) {
+          out.portOverrides.set(storeKey.trim().toUpperCase(), port);
+        }
+      }
+    }
     else if (!a.startsWith('--')) out.stores.push(...splitList(a).map(x => x.toUpperCase()));
+    else throw new Error(`Unknown argument: ${a}`);
   }
   out.stores = [...new Set(out.stores)];
   out.activityIds = [...new Set(out.activityIds)];
@@ -141,6 +152,7 @@ function evaluateFillEvidenceDoc(doc, sourceFile, storeKey, activityId) {
   const extraAvailableCount = Math.max(selectionOutOfPlanRows.length, extraAvailableCountFromTotals);
   const targets = Array.isArray(fill.targets) ? fill.targets : [];
   const targetBySkc = new Map();
+  const platformRewriteBySkc = new Map();
   for (const row of targets) {
     const skc = String(row?.skc || '').trim();
     if (!skc) continue;
@@ -151,6 +163,11 @@ function evaluateFillEvidenceDoc(doc, sourceFile, storeKey, activityId) {
       targetPrice: Number(row.targetPrice ?? NaN),
       targetPriceText: row.targetPriceText || '',
     });
+  }
+  for (const row of Array.isArray(fill.platformRewrites) ? fill.platformRewrites : []) {
+    const skc = String(row?.skc || '').trim();
+    const actualPrice = Number(row?.actualPrice ?? NaN);
+    if (skc && Number.isFinite(actualPrice)) platformRewriteBySkc.set(skc, actualPrice);
   }
   const selectedMatchesPlan = selection.selectionMode === 'allowlist'
     ? selection.selectedMatchesPlan === true
@@ -193,6 +210,7 @@ function evaluateFillEvidenceDoc(doc, sourceFile, storeKey, activityId) {
     extraAvailableCount,
     extraAvailableRows: selectionOutOfPlanRows.slice(0, 20),
     targetBySkc,
+    platformRewriteBySkc,
   };
 }
 
@@ -227,12 +245,25 @@ async function loadFillEvidenceFor(storeKey, activityId) {
   const file = path.join(args.fillResultsDir, `${String(storeKey).toUpperCase()}-${Number(activityId)}.json`);
   const candidates = [];
   if (fsSync.existsSync(file)) candidates.push(file);
-  try {
-    const names = await fs.readdir(args.fillResultsDir);
-    for (const name of names) {
-      if (/^summary-.*\.json$/i.test(name)) candidates.push(path.join(args.fillResultsDir, name));
+  const directName = path.basename(file).toLowerCase();
+  const pendingDirs = [args.fillResultsDir];
+  while (pendingDirs.length) {
+    const dir = pendingDirs.pop();
+    let entries = [];
+    try {
+      entries = await fs.readdir(dir, {withFileTypes: true});
+    } catch {
+      continue;
     }
-  } catch {}
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        pendingDirs.push(fullPath);
+      } else if (entry.isFile() && entry.name.toLowerCase() === directName) {
+        candidates.push(fullPath);
+      }
+    }
+  }
   const uniqueCandidates = [...new Set(candidates)].sort((a, b) => {
     const aDirect = a === file ? 0 : 1;
     const bDirect = b === file ? 0 : 1;
@@ -248,6 +279,7 @@ async function loadFillEvidenceFor(storeKey, activityId) {
       ok: false,
       reason: 'fill_result_missing',
       targetBySkc: new Map(),
+      platformRewriteBySkc: new Map(),
     };
   }
   const cleanEvidenceList = [];
@@ -274,6 +306,7 @@ async function loadFillEvidenceFor(storeKey, activityId) {
       reason: '',
       priceEvidenceOk: true,
       targetBySkc: new Map(),
+      platformRewriteBySkc: new Map(),
       selection: {
         ...cleanEvidenceList[0].selection,
         selectedCount: 0,
@@ -298,6 +331,9 @@ async function loadFillEvidenceFor(storeKey, activityId) {
       for (const [skc, row] of evidence.targetBySkc.entries()) {
         if (!merged.targetBySkc.has(skc)) merged.targetBySkc.set(skc, row);
       }
+      for (const [skc, actualPrice] of evidence.platformRewriteBySkc.entries()) {
+        merged.platformRewriteBySkc.set(skc, actualPrice);
+      }
       merged.selection.selectedCount += Number(evidence.selection?.selectedCount || 0);
       merged.selection.expectedSelectedCount += Number(evidence.selection?.expectedSelectedCount || 0);
       merged.selection.totalGoods += Number(evidence.selection?.totalGoods || 0);
@@ -320,6 +356,7 @@ async function loadFillEvidenceFor(storeKey, activityId) {
       ok: false,
       reason: `fill_result_read_failed: ${firstError.err.message}`,
       targetBySkc: new Map(),
+      platformRewriteBySkc: new Map(),
     };
   }
   try {
@@ -332,6 +369,7 @@ async function loadFillEvidenceFor(storeKey, activityId) {
       ok: false,
       reason: fsSync.existsSync(file) ? `fill_result_read_failed: ${err.message}` : 'fill_result_missing',
       targetBySkc: new Map(),
+      platformRewriteBySkc: new Map(),
     };
   }
 }
@@ -359,13 +397,15 @@ function closeExistingStoreChrome(store) {
 }
 
 function launchVisible(store, url = LIST_URL) {
-  const r = spawnSync(process.execPath, [
+  const launchArgs = [
     path.join(ROOT, 'scripts', 'launch_store_browser.mjs'),
     store.storeKey,
     '--visible',
     '--url',
     url,
-  ], {cwd: ROOT, encoding: 'utf8', timeout: 20_000});
+  ];
+  if (store.port) launchArgs.push('--port', String(store.port));
+  const r = spawnSync(process.execPath, launchArgs, {cwd: ROOT, encoding: 'utf8', timeout: 20_000});
   if (r.status !== 0) throw new Error(`launch visible failed for ${store.storeKey}: ${r.stderr || r.stdout}`);
 }
 
@@ -672,6 +712,24 @@ function compareWithFillEvidence({actual, expected, fillEvidence, skc}) {
     };
   }
   if (direct.reason !== 'missing_actual_price') {
+    const rewritePrice = fillEvidence?.platformRewriteBySkc?.get(String(skc || '').trim());
+    if (
+      Number.isFinite(actual)
+      && Number.isFinite(expected)
+      && actual + args.priceTolerance >= expected
+      && Number.isFinite(rewritePrice)
+      && Math.abs(actual - rewritePrice) <= args.priceTolerance
+    ) {
+      return {
+        ok: true,
+        reason: '',
+        diff: direct.diff,
+        source: 'enrolled_goods_platform_integer_discount_rewrite',
+        usedFillFallback: true,
+        unavailableButFillVerified: false,
+        fillTargetPrice: expected,
+      };
+    }
     return {
       ...direct,
       source: 'enrolled_goods_activity_price',
@@ -902,7 +960,14 @@ if (!plan.rows.length) {
 
 const selectedStores = STORES
   .filter(store => args.stores.includes(String(store.storeKey || '').toUpperCase()))
-  .map(store => ({...store, storeKey: String(store.storeKey || '').toUpperCase()}));
+  .map(store => {
+    const storeKey = String(store.storeKey || '').toUpperCase();
+    return {
+      ...store,
+      storeKey,
+      port: args.portOverrides.get(storeKey) || store.port,
+    };
+  });
 const missingStores = args.stores.filter(storeKey => !selectedStores.some(store => store.storeKey === storeKey));
 if (missingStores.length) throw new Error(`Unknown stores: ${missingStores.join(',')}`);
 
@@ -1008,7 +1073,7 @@ const md = [
     ? `- 注意：${summary.priceUnavailableButFillVerifiedRows} 行已报接口未回传活动价，价格证据来自提交前填价复核文件；这不视为失败。`
     : '- 已报接口回传了可直接比对的活动价。',
     summary.priceUnavailableNoFillEvidenceRows
-    ? `- 注意：${summary.priceUnavailableNoFillEvidenceRows} 行已报接口未回传活动价，且无填价复核文件可用；结构覆盖已确认，但价格证据不完整，不视为价格错误。` 
+    ? `- 注意：${summary.priceUnavailableNoFillEvidenceRows} 行已报接口未回传活动价，且无填价复核文件可用；结构覆盖已确认，但价格证据不完整，不视为价格错误。`
     : '',
   `- 店铺：${args.stores.join(', ')}`,
   `- 活动：${args.activityIds.join(', ')}`,

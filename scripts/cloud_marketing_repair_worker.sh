@@ -160,6 +160,9 @@ run_final_readback() {
   node scripts/marketing/build_marketing_daily_guard_report.mjs \
     --date "$DATE" --max-age-hours "$GUARD_MAX_AGE_HOURS" \
     --cloud-bi-ssh "$GUARD_CLOUD_BI_SSH" --cloud-bi-root "$GUARD_CLOUD_BI_ROOT"
+  node scripts/marketing/build_high_click_special_discount_plan.mjs \
+    --date "$DATE" --guard "$guard_out" \
+    --out "$ROOT/outputs/reports/high-click-low-conversion-special-plan-${DATE}.json"
   price_overrides="$(GUARD_FILE="$guard_out" node -e "const j=require(process.env.GUARD_FILE);process.stdout.write(String(j.targetPlanSelection?.priceOverrides||''))")"
   [[ -n "$price_overrides" ]] || return 2
   if [[ "$price_overrides" == /* ]]; then price_path="$price_overrides"; else price_path="$ROOT/$price_overrides"; fi
@@ -182,6 +185,7 @@ run_final_readback() {
   fi
   node scripts/marketing/manage_marketing_repair_queue.mjs build \
     --date "$DATE" --guard "$guard_out" \
+    --high-click-plan "$ROOT/outputs/reports/high-click-low-conversion-special-plan-${DATE}.json" \
     --manual-plan "$manual_plan" \
     --drift-plan-dir "$ROOT/tmp/marketing-signup/limited-discount-fallback/target-price-drift-${DATE}" \
     --fallback-plan "$ROOT/outputs/reports/new-listing-7d-limited-discount-plan-${DATE}.json" \
@@ -241,6 +245,44 @@ export SHEIN_BI_BROWSER_LEASE_TASK="$LEASE_TASK"
 export SHEIN_BI_BROWSER_LEASE_RUN_ID="$RUN_ID"
 cleanup_store_browsers
 REMAINING_GROUPS="$MAX_GROUPS"
+
+HIGH_CLICK_STATUS="$(queue_value 'j.stages?.highClickSpecial?.status' not_required)"
+if [[ "$HIGH_CLICK_STATUS" != "not_required" && "$HIGH_CLICK_STATUS" != "completed" ]]; then
+  WORK_FINGERPRINT="$(queue_value 'j.stages?.highClickSpecial?.workFingerprint' '')"
+  export SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH="$WORK_FINGERPRINT"
+  GUARD_PATH="$ROOT/$(queue_value 'j.sourceGuard' '')"
+  HIGH_CLICK_PLAN_PATH="$ROOT/$(queue_value 'j.stages?.highClickSpecial?.planPath' '')"
+  RESULT_PATH="outputs/reports/high-click-low-conversion-special-execution-${DATE}.json"
+  if node scripts/marketing/batch_apply_high_click_special_discounts.mjs \
+      --date "$DATE" --guard "$GUARD_PATH" --plan "$HIGH_CLICK_PLAN_PATH" \
+      --execute --max-items "$REMAINING_GROUPS" --result "$ROOT/$RESULT_PATH" \
+      --expected-work-fingerprint "$WORK_FINGERPRINT"; then
+    update_stage highClickSpecial completed true "protected registration, execute and per-item live readback succeeded" "$RESULT_PATH"
+    consume_group_budget "$(processed_items_this_run "$RESULT_PATH")"
+  else
+    status=$?
+    if [[ "$status" -eq 3 ]]; then
+      update_stage highClickSpecial pending false "bounded chunk completed; more exact-plan items remain" "$RESULT_PATH"
+      write_state pending "high-click special chunk completed; queue will resume without replaying successful items"
+      exit 0
+    fi
+    BLOCKED_TARGETS="$(result_total "$RESULT_PATH" blocked)"
+    FAILED_TARGETS="$(result_total "$RESULT_PATH" failed)"
+    if (( BLOCKED_TARGETS > 0 && FAILED_TARGETS == 0 )); then
+      update_stage highClickSpecial blocked false "ET/platform preflight safely blocked one or more protected specials" "$RESULT_PATH"
+      write_state blocked "high-click special repair safely blocked by current ET inventory/platform conditions"
+      exit 0
+    fi
+    update_stage highClickSpecial failed false "execute/readback failed status=$status" "$RESULT_PATH"
+    write_state failed "high-click special execute failed status=$status"
+    exit "$status"
+  fi
+fi
+
+if (( REMAINING_GROUPS <= 0 )); then
+  write_state pending "bounded group budget consumed; remaining stages continue on the next worker run"
+  exit 0
+fi
 
 MANUAL_STATUS="$(queue_value 'j.stages?.manualSpecialRestore?.status' not_required)"
 if [[ "$MANUAL_STATUS" != "not_required" && "$MANUAL_STATUS" != "completed" ]]; then

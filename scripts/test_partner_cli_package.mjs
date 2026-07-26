@@ -27,6 +27,34 @@ for (const [titleGroup, stores] of Object.entries(expectedTitleGroups)) {
     if (configuredTitleGroups[store] !== titleGroup) throw new Error(`${store} default title group must be ${titleGroup}`);
   }
 }
+const expectedStyleProfiles = {
+  DL: ['简约', '现代', '都市', '白灰'],
+  QY: ['简约', '现代', '都市', '白灰'],
+  YJ: ['意式'],
+  JY: ['意式'],
+  DX: ['浅色奢华', '金色'],
+  XL: ['浅色奢华', '金色'],
+  HL: ['奶油ins风'],
+  LQ: ['奶油ins风'],
+  TZZ: ['家居性感风'],
+  ZL: ['法式', '法式复古'],
+  CX: ['法式', '法式复古'],
+  TS: ['海洋系', '度假风', '蓝色系'],
+  QH: ['海洋系', '度假风', '蓝色系'],
+  MZ: ['森系', '自然系'],
+  XC: ['森系', '自然系'],
+  FY: ['沙漠风', '岩土风', '沙特传统'],
+  JSH: ['沙漠风', '岩土风', '沙特传统'],
+  NM: ['深色奢华系', '黑金'],
+  TZ: ['深色奢华系', '黑金'],
+};
+const configuredProfiles = storeProfiles.profiles || {};
+if (Object.keys(configuredProfiles).length !== 19) throw new Error('store style profiles must cover 19 stores');
+for (const [store, styles] of Object.entries(expectedStyleProfiles)) {
+  if (JSON.stringify(configuredProfiles[store]) !== JSON.stringify(styles)) {
+    throw new Error(`${store} style profile must be ${styles.join(',')}`);
+  }
+}
 const forbidden = /(?:\.env|secret|token|credential|cookie|session|\.jsonl)$/i;
 for (const relative of manifest.files || []) {
   if (path.isAbsolute(relative) || String(relative).split(/[\\/]+/).includes('..')) throw new Error(`partner package path escapes root: ${relative}`);

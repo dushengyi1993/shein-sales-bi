@@ -79,10 +79,13 @@ function parseArgs(argv) {
     url: ORDER_URL,
     background: false,
     headless: false,
+    allowLocalNetworkAssets: false,
+    port: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--url') args.url = argv[++i] || ORDER_URL;
+    else if (a === '--port') args.port = Number(argv[++i] || 0);
     else if (a === '--headless') {
       args.headless = true;
       args.background = false;
@@ -91,12 +94,16 @@ function parseArgs(argv) {
       args.background = true;
       args.headless = false;
     }
+    else if (a === '--allow-local-network-assets') {
+      args.allowLocalNetworkAssets = true;
+    }
     else if (a === '--visible') {
       args.background = false;
       args.headless = false;
     }
+    else if (a.startsWith('--')) throw new Error(`Unknown argument: ${a}`);
     else if (!args.storeKey) args.storeKey = a;
-    else if (!a.startsWith('--')) args.url = a;
+    else args.url = a;
   }
   return args;
 }
@@ -108,6 +115,12 @@ if (!storeKey) throw new Error('Missing store key, e.g. DL');
 if (CHROME !== 'chrome.exe' && !fs.existsSync(CHROME)) throw new Error(`Chrome not found: ${CHROME}`);
 
 const store = getStore(storeKey);
+if (cliArgs.port !== null) {
+  if (!Number.isInteger(cliArgs.port) || cliArgs.port < 1024 || cliArgs.port > 65535) {
+    throw new Error(`Invalid --port: ${cliArgs.port}`);
+  }
+  store.port = cliArgs.port;
+}
 const profileDir = path.join(ROOT, 'profiles', `persistent-${store.profileKey}-profile`);
 const cacheDir = path.join(profileDir, 'cache');
 const logDir = path.join(ROOT, 'logs');
@@ -127,6 +140,11 @@ const args = [
   '--disable-background-timer-throttling',
   '--disable-renderer-backgrounding',
   '--disable-backgrounding-occluded-windows',
+  ...(cliArgs.allowLocalNetworkAssets ? [
+    // Some SHEIN CDN hostnames resolve through the local proxy address space.
+    // Current Chrome otherwise blocks those official scripts under LNA checks.
+    '--disable-features=LocalNetworkAccessChecks',
+  ] : []),
   ...(!cliArgs.background && !cliArgs.headless ? [
     '--start-maximized',
   ] : []),

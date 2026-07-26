@@ -21,6 +21,10 @@ import {
   storeIdentityEvalBody,
 } from '../../lib/shein_store_identity.mjs';
 import {recoverSheinLoginIfNeeded} from '../../lib/shein_login_recovery.mjs';
+import {
+  assertOrdinaryCampaignApprovedSubset,
+  loadOrdinaryCampaignApproval,
+} from '../../lib/marketing_ordinary_campaign_approval.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
@@ -30,6 +34,7 @@ const COST_DOC = JSON.parse(await fs.readFile(path.join(ROOT, 'tmp', 'mbrs', 'ma
 const COSTS = COST_DOC.costMap || {};
 const TRUE_COSTS = COST_DOC.trueCostMap || {};
 const args = parseArgs(process.argv.slice(2));
+const EXECUTION_APPROVAL = await loadExecutionApproval();
 const OUT_DIR = args.outDir ? path.resolve(args.outDir) : path.join(ROOT, 'tmp', 'mbrs', 'deadline-fill-results');
 await fs.mkdir(OUT_DIR, {recursive: true});
 const now = new Date();
@@ -80,6 +85,7 @@ function parseArgs(argv) {
     dryRun: false,
     noClose: false,
     headless: false,
+    runtimePort: null,
     selectionDebugOnly: false,
     fillDebugSkc: '',
     allowUneditableSkcs: [],
@@ -90,6 +96,8 @@ function parseArgs(argv) {
     pricingPolicy: path.join(ROOT, 'config', 'marketing_pricing_policy.json'),
     bi: path.join(ROOT, 'outputs', 'bi-portal', 'data.json'),
     outDir: '',
+    executionWorkFingerprint: '',
+    approvalManifest: '',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -101,6 +109,7 @@ function parseArgs(argv) {
     else if (a === '--dry-run') out.dryRun = true;
     else if (a === '--no-close') out.noClose = true;
     else if (a === '--headless') out.headless = true;
+    else if (a === '--runtime-port') out.runtimePort = Number(argv[++i] || 0);
     else if (a === '--selection-debug-only') out.selectionDebugOnly = true;
     else if (a === '--fill-debug-skc') out.fillDebugSkc = String(argv[++i] || '').trim().toLowerCase();
     else if (a === '--allow-uneditable-skc') out.allowUneditableSkcs = String(argv[++i] || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
@@ -111,8 +120,38 @@ function parseArgs(argv) {
     else if (a === '--pricing-policy') out.pricingPolicy = path.resolve(argv[++i] || '');
     else if (a === '--bi') out.bi = path.resolve(argv[++i] || '');
     else if (a === '--out-dir') out.outDir = path.resolve(argv[++i] || '');
+    else if (a === '--execution-work-fingerprint') out.executionWorkFingerprint = String(argv[++i] || '').trim().toLowerCase();
+    else if (a === '--approval-manifest') out.approvalManifest = path.resolve(argv[++i] || '');
+    else throw new Error(`Unknown argument: ${a}`);
+  }
+  if (out.executionWorkFingerprint && !/^[a-f0-9]{64}$/.test(out.executionWorkFingerprint)) {
+    throw new Error('Invalid --execution-work-fingerprint');
   }
   return out;
+}
+
+async function loadExecutionApproval() {
+  if (args.submit && !args.approvalManifest) {
+    throw new Error('--submit requires --approval-manifest; a filename containing approved is not authorization');
+  }
+  if (!args.approvalManifest) return null;
+  if (!args.selectionPlan || !args.priceOverrides) {
+    throw new Error('--approval-manifest requires --selection-plan and --price-overrides');
+  }
+  const approval = await loadOrdinaryCampaignApproval({
+    root: ROOT,
+    manifestPath: args.approvalManifest,
+  });
+  const [selection, prices] = await Promise.all([
+    fs.readFile(args.selectionPlan, 'utf8').then(JSON.parse),
+    fs.readFile(args.priceOverrides, 'utf8').then(JSON.parse),
+  ]);
+  assertOrdinaryCampaignApprovedSubset(approval, selection, prices);
+  if (args.executionWorkFingerprint && args.executionWorkFingerprint !== approval.workFingerprint) {
+    throw new Error(`--execution-work-fingerprint does not match approval manifest: expected=${approval.workFingerprint} actual=${args.executionWorkFingerprint}`);
+  }
+  args.executionWorkFingerprint = approval.workFingerprint;
+  return approval;
 }
 
 function compact(s) {
@@ -289,6 +328,8 @@ function launchVisible(store) {
     path.join(ROOT, 'scripts', 'launch_store_browser.mjs'),
     store.storeKey,
     args.headless ? '--headless' : '--visible',
+    '--port',
+    String(store.port),
     '--url',
     LIST_URL,
   ], {cwd: ROOT, encoding: 'utf8', timeout: 20_000});
@@ -363,8 +404,9 @@ class Cdp {
     this.ws.addEventListener('message', ev => {
       const msg = JSON.parse(ev.data);
       if (msg.id && this.pending.has(msg.id)) {
-        const {resolve, reject} = this.pending.get(msg.id);
+        const {resolve, reject, timer} = this.pending.get(msg.id);
         this.pending.delete(msg.id);
+        clearTimeout(timer);
         if (msg.error) reject(new Error(JSON.stringify(msg.error)));
         else resolve(msg.result);
       }
@@ -376,14 +418,14 @@ class Cdp {
     if (sessionId) payload.sessionId = sessionId;
     this.ws.send(JSON.stringify(payload));
     return new Promise((resolve, reject) => {
-      this.pending.set(id, {resolve, reject});
-      const timeoutMs = method === 'Runtime.evaluate' ? 120_000 : 30_000;
-      setTimeout(() => {
+      const timeoutMs = method === 'Runtime.evaluate' ? 300_000 : 30_000;
+      const timer = setTimeout(() => {
         if (this.pending.has(id)) {
           this.pending.delete(id);
           reject(new Error(`CDP timeout: ${method}`));
         }
       }, timeoutMs);
+      this.pending.set(id, {resolve, reject, timer});
     });
   }
   close() {
@@ -422,7 +464,12 @@ async function evalJs(cdp, sessionId, body, arg = undefined) {
     userGesture: true,
   }, sessionId);
   if (res.exceptionDetails) {
-    throw new Error(res.exceptionDetails.text || JSON.stringify(res.exceptionDetails));
+    throw new Error(
+      res.exceptionDetails.exception?.description
+      || res.exceptionDetails.exception?.value
+      || res.exceptionDetails.text
+      || JSON.stringify(res.exceptionDetails)
+    );
   }
   return res.result?.value;
 }
@@ -464,9 +511,12 @@ async function waitForActivityOrLogin(cdp, sessionId, timeoutMs = 35_000) {
         || text.includes('请输入账号')
         || text.includes('请输入密码')
         || (text.includes('账号登录') && text.includes('密码') && text.includes('登录'));
-      return {activityReady, loginReady, href: location.href, title: document.title || '', tail: text.slice(-800)};
+      const renderError = text.includes('渲染异常，请刷新页面后重试')
+        || text.includes("application '/mbrs' died in status LOADING_SOURCE_CODE")
+        || text.includes('Failed to load script for "/mbrs"');
+      return {activityReady, loginReady, renderError, href: location.href, title: document.title || '', tail: text.slice(-800)};
     `).catch(err => ({activityReady: false, loginReady: false, error: err.message, href: '', tail: ''}));
-    if (state.activityReady || state.loginReady) return state;
+    if (state.activityReady || state.loginReady || state.renderError) return state;
     await sleep(500);
   }
   return {activityReady: false, loginReady: false, timeout: true};
@@ -678,6 +728,121 @@ function dueActivities(activities) {
   return args.activityIds.length ? specifiedActivities(activities) : activities.filter(withinDeadline);
 }
 
+async function preselectSingleSkcViaCdp(cdp, sessionId, wantedSkc) {
+  const wanted = String(wantedSkc || '').trim().toLowerCase();
+  if (!wanted) return {attempted: false, selected: false};
+  for (let attempt = 0; attempt < 90; attempt += 1) {
+    const state = await evalJs(cdp, sessionId, `
+      const wanted = __arg.wanted;
+      const attempt = __arg.attempt;
+      const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+      const selectedText = [...document.querySelectorAll('*')]
+        .filter(visible)
+        .map(el => el.innerText || '')
+        .find(text => /已选商品\d+个/.test(text)) || '';
+      const selectedCount = Number((selectedText.match(/已选商品(\d+)个/) || [])[1] || 0);
+      const row = [...document.querySelectorAll('tbody tr')].find(tr => {
+        const skc = String(((tr.innerText || '').match(/SKC:\s*([a-z]{2}\d+)/i) || [])[1] || '').toLowerCase();
+        return skc === wanted;
+      });
+      if (row) {
+        row.scrollIntoView({block:'center', inline:'nearest'});
+        const cell = row.querySelector('td:first-child');
+        const hoverTarget = cell?.querySelector('div') || cell || row;
+        for (const type of ['mouseenter','mouseover','mousemove']) {
+          hoverTarget.dispatchEvent(new MouseEvent(type, {bubbles:true, cancelable:true, view:window}));
+        }
+        const rect = (row.querySelector('input[type=checkbox]')?.closest('.soui-checkbox-wrapper,.merchant-ui-checkbox') || cell || row).getBoundingClientRect();
+        return {selectedCount, found:true, rect:{x:rect.left,y:rect.top,w:rect.width,h:rect.height}};
+      }
+      const roots = [document.scrollingElement, ...document.querySelectorAll('div,main,section')]
+        .filter(Boolean)
+        .filter((root, index, all) => all.indexOf(root) === index)
+        .filter(root => root.scrollHeight > root.clientHeight + 20)
+        .sort((a,b) => (b.scrollHeight-b.clientHeight) - (a.scrollHeight-a.clientHeight))
+        .slice(0, 12);
+      for (const root of roots) {
+        const max = Math.max(0, root.scrollHeight - root.clientHeight);
+        const top = Math.min(max, attempt * Math.max(80, Math.floor(Math.max(300, root.clientHeight) * 0.25)));
+        if (root === document.scrollingElement) window.scrollTo(0, top);
+        else {
+          root.scrollTop = top;
+          root.dispatchEvent(new Event('scroll', {bubbles:true}));
+        }
+      }
+      return {selectedCount, found:false, rootCount:roots.length};
+    `, {wanted, attempt});
+    if (state.selectedCount === 1) return {attempted: true, selected: true, attempt, via: 'existing_selection'};
+    if (state.found && state.rect) {
+      await sleep(250);
+      await realClick(cdp, sessionId, state.rect);
+      await sleep(500);
+      const selectedCount = await evalJs(cdp, sessionId, `
+        const text = [...document.querySelectorAll('*')].map(el => el.innerText || '').find(value => /已选商品\d+个/.test(value)) || '';
+        return Number((text.match(/已选商品(\d+)个/) || [])[1] || 0);
+      `).catch(() => 0);
+      if (selectedCount === 1) return {attempted: true, selected: true, attempt, via: 'cdp_row_cell_click'};
+    }
+    await sleep(300);
+  }
+  return {attempted: true, selected: false, reason: 'target_row_not_selectable_after_scroll'};
+}
+
+async function applyAllowlistBatchFilterViaCdp(cdp, sessionId, allowSkcs) {
+  const skcs = [...new Set((allowSkcs || []).map(value => String(value || '').trim().toLowerCase()).filter(Boolean))];
+  if (!skcs.length) return {attempted: false, matched: false};
+  const prepared = await evalJs(cdp, sessionId, `
+    const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    const textarea = [...document.querySelectorAll('textarea')]
+      .filter(visible)
+      .find(el => String(el.getAttribute('placeholder') || '').includes('回车分割'));
+    if (!textarea) return {ok:false, reason:'batch_skc_textarea_not_found'};
+    let scope = textarea.parentElement;
+    for (let depth = 0; scope && depth < 12; depth += 1, scope = scope.parentElement) {
+      const hasSearch = [...scope.querySelectorAll('button')]
+        .some(button => visible(button) && (button.innerText || button.textContent || '').trim() === '搜索' && !button.disabled);
+      if (hasSearch && (scope.innerText || '').includes('商品SKC')) break;
+    }
+    const button = [...(scope || document).querySelectorAll('button')]
+      .filter(visible)
+      .find(el => (el.innerText || el.textContent || '').trim() === '搜索' && !el.disabled);
+    if (!button) return {ok:false, reason:'batch_skc_search_button_not_found'};
+    textarea.focus();
+    const desc = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
+    if (desc?.set) desc.set.call(textarea, __arg.value); else textarea.value = __arg.value;
+    textarea.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:__arg.value}));
+    textarea.dispatchEvent(new Event('change', {bubbles:true}));
+    textarea.dispatchEvent(new FocusEvent('blur', {bubbles:true}));
+    button.scrollIntoView({block:'center', inline:'center'});
+    const rect = button.getBoundingClientRect();
+    return {ok:true, textareaValue:textarea.value, rect:{x:rect.left,y:rect.top,w:rect.width,h:rect.height}};
+  `, {value: `${skcs.join('\n')}\n`});
+  if (!prepared?.ok || !prepared.rect) return {attempted: true, matched: false, ...prepared};
+  await realClick(cdp, sessionId, prepared.rect);
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    await sleep(250);
+    const state = await evalJs(cdp, sessionId, `
+      const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+      const totals = [...document.querySelectorAll('*')]
+        .filter(visible)
+        .map(el => el.innerText || '')
+        .map(text => Number((text.match(/总计\s*(\d+)\s*个/) || [])[1] || 0))
+        .filter(Boolean);
+      const totalGoods = totals.length ? Math.max(...totals) : 0;
+      const visibleSkcs = [...document.querySelectorAll('tbody tr')]
+        .filter(visible)
+        .map(tr => String(((tr.innerText || '').match(/SKC:\s*([a-z]{2}\d+)/i) || [])[1] || '').toLowerCase())
+        .filter(Boolean);
+      return {totalGoods, visibleSkcs};
+    `);
+    const matched = state.totalGoods === skcs.length
+      && state.visibleSkcs.length > 0
+      && state.visibleSkcs.every(skc => skcs.includes(skc));
+    if (matched) return {attempted: true, matched: true, requested: skcs.length, ...state, prepared};
+  }
+  return {attempted: true, matched: false, requested: skcs.length, prepared};
+}
+
 async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
   const ready = await waitFor(cdp, sessionId, `
     document.body && (document.body.innerText.includes('可报名商品') || document.body.innerText.includes('提报的活动价格'))
@@ -705,6 +870,11 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
   }
   pageSize = {...pageSize, attempts: pageSizeAttempts};
   await sleep(500);
+
+  const preselectedSingle = {attempted: false, selected: false, reason: 'batch_skc_textarea_filter_preferred'};
+  const prefilteredAllowlist = allowSkcs?.length
+    ? await applyAllowlistBatchFilterViaCdp(cdp, sessionId, allowSkcs)
+    : {attempted: false, matched: false};
 
   if (args.selectionDebugOnly) {
     const diagnostic = await evalJs(cdp, sessionId, `
@@ -800,6 +970,7 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
     const allowSkcs = Array.isArray(__arg?.allowSkcs) ? __arg.allowSkcs.map(x => String(x || '').trim().toLowerCase()).filter(Boolean) : null;
     const allowSet = allowSkcs ? new Set(allowSkcs) : null;
     const seenAllowed = new Set();
+    if (allowSet?.size === 1 && __arg?.preselectedSingle?.selected) seenAllowed.add([...allowSet][0]);
     let fullAllowlistHeaderConfirmed = false;
     const sleep = ms => new Promise(r => setTimeout(r, ms));
     const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
@@ -992,8 +1163,63 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
       }
       return clicks;
     };
+    let allowlistBatchFilter = __arg?.prefilteredAllowlist?.matched
+      ? {applied:true, source:'cdp_real_click', ...__arg.prefilteredAllowlist}
+      : {applied:false, prefilter:__arg?.prefilteredAllowlist || null};
+    if (allowSet?.size && !allowlistBatchFilter.matched) {
+      const textarea = [...document.querySelectorAll('textarea')]
+        .filter(visible)
+        .find(el => String(el.getAttribute('placeholder') || '').includes('回车分割'));
+      let searchScope = textarea?.parentElement || null;
+      for (let depth = 0; searchScope && depth < 12; depth += 1, searchScope = searchScope.parentElement) {
+        const hasSearch = [...searchScope.querySelectorAll('button')]
+          .some(button => visible(button) && (button.innerText || button.textContent || '').trim() === '搜索' && !isDisabled(button));
+        if (hasSearch && (searchScope.innerText || '').includes('商品SKC')) break;
+      }
+      const searchButton = [...(searchScope || document).querySelectorAll('button')]
+        .filter(visible)
+        .find(button => (button.innerText || button.textContent || '').trim() === '搜索' && !isDisabled(button));
+      if (textarea && searchButton) {
+        const value = [...allowSet].join('\\n') + '\\n';
+        textarea.focus();
+        textarea.select();
+        const desc = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
+        if (desc?.set) desc.set.call(textarea, value); else textarea.value = value;
+        textarea.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:value}));
+        textarea.dispatchEvent(new Event('change', {bubbles:true}));
+        textarea.dispatchEvent(new FocusEvent('blur', {bubbles:true}));
+        await sleep(500);
+        const textareaValueBeforeSearch = textarea.value;
+        fire(searchButton);
+        let matched = false;
+        let totalAfterFilter = parseTotal().totalGoods;
+        let visibleSkcs = [];
+        for (let attempt = 0; attempt < 60; attempt += 1) {
+          await sleep(250);
+          const rows = recordVisibleGoodsRows();
+          visibleSkcs = rows.map(tr => rowSnapshot(tr).skc).filter(Boolean);
+          totalAfterFilter = parseTotal().totalGoods;
+          matched = totalAfterFilter === allowSet.size
+            && visibleSkcs.length > 0
+            && visibleSkcs.every(skc => allowSet.has(skc));
+          if (matched) break;
+        }
+        allowlistBatchFilter = {
+          applied:true,
+          matched,
+          requested:allowSet.size,
+          totalAfterFilter,
+          visibleSkcs,
+          textareaValueBeforeSearch,
+          textareaValueAfterSearch:textarea.value,
+          searchButtonText:(searchButton.innerText || searchButton.textContent || '').trim(),
+        };
+      } else {
+        allowlistBatchFilter = {applied:false, matched:false, reason:'batch_skc_textarea_or_search_not_found'};
+      }
+    }
     let singleSkcFilter = {applied:false};
-    if (allowSet?.size === 1) {
+    if (allowSet?.size === 1 && !allowlistBatchFilter.applied && !__arg?.preselectedSingle?.selected) {
       const wanted = [...allowSet][0];
       const textInputs = [...document.querySelectorAll('input')]
         .filter(visible)
@@ -1047,6 +1273,56 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
         singleSkcFilter = {applied:false, wanted, reason:'skc_search_controls_not_found'};
       }
     }
+    const selectSingletonVisibleRow = async wanted => {
+      for (const tr of [...document.querySelectorAll('tbody tr')]) {
+        const row = recordRow(tr);
+        if (row.skc !== wanted) continue;
+        const checkbox = tr.querySelector('input[type=checkbox]');
+        const firstCell = tr.querySelector('td:first-child');
+        const clickTarget = checkbox || firstCell?.querySelector('.index__checkboxCenter--t0W3ObGk') || firstCell;
+        if (!clickTarget) return {found:true, clicked:false, reason:'missing_row_select_target'};
+        if (checkbox?.checked || parseSelected().selectedCount === 1) {
+          seenAllowed.add(wanted);
+          return {found:true, clicked:false, selected:true};
+        }
+        fire(clickTarget);
+        const selected = await waitForSelectedCount(1);
+        if (selected) seenAllowed.add(wanted);
+        return {found:true, clicked:true, selected};
+      }
+      return {found:false, clicked:false, selected:false};
+    };
+    const sweepSingletonIntoView = async wanted => {
+      let direct = await selectSingletonVisibleRow(wanted);
+      if (direct.selected) return direct;
+      const roots = [document.scrollingElement, ...document.querySelectorAll('div,main,section')]
+        .filter(Boolean)
+        .filter((root, index, all) => all.indexOf(root) === index)
+        .filter(root => root.scrollHeight > root.clientHeight + 20)
+        .sort((a,b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight));
+      for (const root of roots) {
+        const max = Math.max(0, root.scrollHeight - root.clientHeight);
+        const step = Math.max(80, Math.floor(Math.max(300, root.clientHeight) * 0.3));
+        for (let top = 0, guard = 0; guard < 180; guard += 1, top += step) {
+          if (root === document.scrollingElement) window.scrollTo(0, Math.min(top, max));
+          else {
+            root.scrollTop = Math.min(top, max);
+            root.dispatchEvent(new Event('scroll', {bubbles:true}));
+          }
+          await sleep(300);
+          recordVisibleGoodsRows();
+          direct = await selectSingletonVisibleRow(wanted);
+          if (direct.selected) return {...direct, root: root.tagName, top: Math.min(top, max), max};
+          if (top >= max) break;
+        }
+      }
+      return direct;
+    };
+    if (allowSet?.size === 1 && !allowlistBatchFilter.applied && parseSelected().selectedCount !== 1) {
+      const wanted = [...allowSet][0];
+      const directSelection = await sweepSingletonIntoView(wanted);
+      singleSkcFilter = {...singleSkcFilter, directSelection};
+    }
     let pages = 0;
     let selectedClicks = 0;
     const totalPages = maxPage();
@@ -1095,8 +1371,13 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
     const outOfPlanRows = allowSet ? availableRows.filter(row => row.skc && !allowSet.has(row.skc)) : [];
     const missingAllowedSkcs = allowSet && !fullAllowlistHeaderConfirmed ? [...allowSet].filter(skc => !seenAllowed.has(skc)).sort() : [];
     const expectedSelectedCount = allowSet ? allowSet.size : total.totalGoods;
+    const directSingletonSelected = allowSet?.size === 1
+      && selected.selectedCount === 1
+      && seenAllowed.has([...allowSet][0]);
     const selectedMatchesPlan = allowSet
-      ? missingAllowedSkcs.length === 0 && selected.selectedCount === expectedSelectedCount && outOfPlanRows.length === 0
+      ? missingAllowedSkcs.length === 0
+        && selected.selectedCount === expectedSelectedCount
+        && (outOfPlanRows.length === 0 || directSingletonSelected)
       : true;
     const debug = {
       trCount: document.querySelectorAll('tr').length,
@@ -1144,12 +1425,14 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
       availableRows,
       outOfPlanRows,
       outOfPlanCount: outOfPlanRows.length,
+      allowlistBatchFilter,
       singleSkcFilter,
+      preselectedSingle: __arg?.preselectedSingle || null,
       debug,
       ...total,
       ...selected,
     };
-  `, {allowSkcs});
+  `, {allowSkcs, preselectedSingle, prefilteredAllowlist});
 
   const editReady = await waitFor(cdp, sessionId, `document.body && document.body.innerText.includes('提报的活动价格')`, 30_000);
   const selectedOk = result.selectionMode === 'allowlist'
@@ -1476,7 +1759,18 @@ async function fillVisibleRows(cdp, sessionId, fills) {
         const discountInput = freshTextInputs.find(x => !String(x.className || '').includes('ant-input-number-input')) || freshTextInputs[0];
         setNativeValue(discountInput, String(f.discountPct));
         await sleep(160);
-        done.push({idx, key, skc, price: f.targetPriceText, discount: String(f.discountPct), editMode: f.editMode, inheritedSkc: !explicitSkc});
+        const priceInput = freshTextInputs.find(x => String(x.className || '').includes('ant-input-number-input')) || freshTextInputs[1];
+        done.push({
+          idx,
+          key,
+          skc,
+          price: f.targetPriceText,
+          discount: String(f.discountPct),
+          actualPrice: priceInput?.value || '',
+          actualDiscount: String(parseInt(discountInput?.value || '', 10)),
+          editMode: f.editMode,
+          inheritedSkc: !explicitSkc,
+        });
       } else {
         const pairs = [];
         for (let i = 0; i < textInputs.length; i += 2) {
@@ -1495,7 +1789,18 @@ async function fillVisibleRows(cdp, sessionId, fills) {
             await sleep(60);
           }
         }
-        done.push({idx, key, skc, price: f.targetPriceText, discount: String(f.discountPct), editMode: f.editMode || 'price', filledInputPairs: pairs.length, inheritedSkc: !explicitSkc});
+        done.push({
+          idx,
+          key,
+          skc,
+          price: f.targetPriceText,
+          discount: String(f.discountPct),
+          actualPrice: pairs[0]?.priceInput?.value || '',
+          actualDiscount: String(parseInt(pairs[0]?.discountInput?.value || '', 10)),
+          editMode: f.editMode || 'price',
+          filledInputPairs: pairs.length,
+          inheritedSkc: !explicitSkc,
+        });
       }
     }
     return done;
@@ -1665,6 +1970,7 @@ async function fillEditPage(cdp, sessionId, storeKey, activityId, allowSkcs = nu
   for (const [key, t] of targets.entries()) {
     const candidates = verifyRows.get(key) || [];
     const r = candidates[0];
+    const fillEvidence = filled.get(key);
     const expectedByDiscount = floor2(t.currentPrice * (1 - t.discountPct / 100)).toFixed(2);
     if (t.editMode === 'vip_discount') {
       const targetPriceNum = Number(t.targetPriceText);
@@ -1680,17 +1986,64 @@ async function fillEditPage(cdp, sessionId, storeKey, activityId, allowSkcs = nu
         return {variant, expectedDiscount, expectedPrice, ok: discountOk && priceOk};
       });
       const failed = checks.find(check => !check.ok);
-      if (!candidates.length || failed) {
+      const fillDiscountOk = fillEvidence?.actualDiscount === String(t.discountPct);
+      const fillPrice = Number(fillEvidence?.actualPrice);
+      const fillPriceOk = !fillEvidence?.actualPrice || (Number.isFinite(fillPrice) && Math.abs(fillPrice - Number(expectedByDiscount)) <= 0.55);
+      if ((!candidates.length && !(fillDiscountOk && fillPriceOk)) || failed) {
         mismatches.push({idx: failed?.variant?.idx ?? t.idx, key, expectedPrice: failed?.expectedPrice ?? t.targetPriceText, actualPrice: failed?.variant?.price, expectedDiscount: String(failed?.expectedDiscount ?? t.discountPct), actualDiscount: failed?.variant?.discount, supplierNo: t.supplierNo, skc: t.skc, sku: failed?.variant?.sku || '', editMode: t.editMode, variantCount: candidates.length});
       }
       continue;
     }
-    if (candidates.length && candidates.every(variant => variant.price === expectedByDiscount && variant.discount === String(t.discountPct)) && candidates.some(variant => variant.price !== t.targetPriceText)) {
+    const variantPriceChecks = candidates.map(variant => {
+      const actual = Number(variant.price);
+      const variantCurrentPrice = Number(variant.currentPrice || t.currentPrice || 0);
+      const expectedVariantDiscount = variantCurrentPrice > 0
+        ? Math.max(Number(t.minDiscount || 10), Math.floor((1 - Number(t.targetPriceText) / variantCurrentPrice) * 100 + 1e-9))
+        : Number(t.discountPct);
+      const variantExpectedByDiscount = floor2(variantCurrentPrice * (1 - expectedVariantDiscount / 100));
+      const discountOk = variant.discount === String(expectedVariantDiscount);
+      const exactTarget = discountOk && variant.price === t.targetPriceText;
+      const platformRewrite = discountOk
+        && Number.isFinite(actual)
+        && actual + 0.001 >= Number(t.targetPriceText)
+        && Math.abs(actual - variantExpectedByDiscount) <= 0.06;
+      return {variant, actual, expectedVariantDiscount, variantExpectedByDiscount, exactTarget, platformRewrite, ok: exactTarget || platformRewrite};
+    });
+    const acceptableVariantPrices = variantPriceChecks.length && variantPriceChecks.every(check => check.ok);
+    if (acceptableVariantPrices && variantPriceChecks.some(check => check.platformRewrite && !check.exactTarget)) {
       platformRewrites.push({idx: t.idx, key, expectedPrice: t.targetPriceText, actualPrice: r.price, discount: String(t.discountPct), supplierNo: t.supplierNo, skc: t.skc});
       continue;
     }
+    if (acceptableVariantPrices) continue;
+    if (!candidates.length && fillEvidence) {
+      const actualPrice = String(fillEvidence.actualPrice || '');
+      const actualDiscount = String(fillEvidence.actualDiscount || '');
+      if (actualPrice === expectedByDiscount && actualDiscount === String(t.discountPct) && actualPrice !== t.targetPriceText) {
+        platformRewrites.push({idx: t.idx, key, expectedPrice: t.targetPriceText, actualPrice, discount: String(t.discountPct), supplierNo: t.supplierNo, skc: t.skc, source: 'immediate_fill_readback'});
+        continue;
+      }
+      if (actualPrice === t.targetPriceText && actualDiscount === String(t.discountPct)) continue;
+    }
     if (!candidates.length || candidates.some(variant => variant.price !== t.targetPriceText || variant.discount !== String(t.discountPct))) {
-      mismatches.push({idx: t.idx, key, expectedPrice: t.targetPriceText, actualPrice: r?.price, expectedDiscount: String(t.discountPct), actualDiscount: r?.discount, supplierNo: t.supplierNo, skc: t.skc});
+      mismatches.push({
+        idx: t.idx,
+        key,
+        expectedPrice: t.targetPriceText,
+        actualPrice: r?.price,
+        expectedDiscount: String(t.discountPct),
+        actualDiscount: r?.discount,
+        supplierNo: t.supplierNo,
+        skc: t.skc,
+        variantPriceChecks: variantPriceChecks.map(check => ({
+          currentPrice: check.variant.currentPrice,
+          actualPrice: check.variant.price,
+          actualDiscount: check.variant.discount,
+          expectedVariantDiscount: check.expectedVariantDiscount,
+          variantExpectedByDiscount: check.variantExpectedByDiscount,
+          exactTarget: check.exactTarget,
+          platformRewrite: check.platformRewrite,
+        })),
+      });
     }
   }
   const coverageCount = new Set([...targets.keys(), ...missingCost.keys(), ...priceStackBlockers.keys()]).size;
@@ -1848,7 +2201,18 @@ async function processActivity(cdp, store, activity) {
   }
   const url = `${LIST_URL.replace('/list', `/sign-up/config/${activity.activityId}`)}`;
   const {targetId, sessionId} = await newPage(cdp, url);
-  const firstState = await waitForActivityOrLogin(cdp, sessionId, 35_000);
+  let firstState = await waitForActivityOrLogin(cdp, sessionId, 35_000);
+  const renderRecovery = {needed: Boolean(firstState.renderError), ok: !firstState.renderError, attempts: []};
+  for (let attempt = 1; firstState.renderError && attempt <= 3; attempt += 1) {
+    await cdp.call('Page.reload', {ignoreCache: attempt > 1}, sessionId).catch(() => {});
+    await sleep(2500 * attempt);
+    firstState = await waitForActivityOrLogin(cdp, sessionId, 35_000);
+    renderRecovery.attempts.push({attempt, state: firstState});
+    if (firstState.activityReady || firstState.loginReady) {
+      renderRecovery.ok = true;
+      break;
+    }
+  }
   const loginRecovery = firstState.loginReady ? await recoverLoginIfNeeded(cdp, sessionId) : {needed: false, ok: true, before: firstState, attempts: []};
   if (loginRecovery.needed && !loginRecovery.ok) {
     return {ok: false, store: store.storeKey, activity, targetId, loginRecovery, reason: '活动页登录恢复失败'};
@@ -1860,7 +2224,7 @@ async function processActivity(cdp, store, activity) {
       const text = document.body?.innerText || '';
       return {href: location.href, title: document.title || '', head: text.slice(0, 800), tail: text.slice(-800)};
     `).catch(err => ({error: err.message}));
-    return {ok: false, store: store.storeKey, activity, targetId, firstState, loginRecovery, loadedState, pageState, reason: '活动页面未加载'};
+    return {ok: false, store: store.storeKey, activity, targetId, firstState, renderRecovery, loginRecovery, loadedState, pageState, reason: '活动页面未加载'};
   }
 
   const selection = await selectAllGoodsAndNext(cdp, sessionId, allowSkcs);
@@ -1927,12 +2291,20 @@ async function processActivity(cdp, store, activity) {
   return {ok: fill.ok && submit.ok, store: store.storeKey, activity, targetId, selection, fill, submit, url: currentUrl, reason: submit.ok ? undefined : submit.reason};
 }
 
-const selectedStores = STORES.filter(s => s.enabled)
+let selectedStores = STORES.filter(s => s.enabled)
   .filter(s => {
     if (args.stores.length) return args.stores.includes(s.storeKey);
     if (s.groupKey !== 'DSY') return false;
     return s.storeKey !== 'MZ';
   });
+
+if (args.runtimePort !== null) {
+  if (selectedStores.length !== 1) throw new Error('--runtime-port 只允许与单店 --stores 一起使用');
+  if (!Number.isInteger(args.runtimePort) || args.runtimePort < 1024 || args.runtimePort > 65535) {
+    throw new Error(`Invalid --runtime-port: ${args.runtimePort}`);
+  }
+  selectedStores = selectedStores.map(store => ({...store, port: args.runtimePort}));
+}
 
 const summary = {
   createdAt: new Date().toISOString(),
@@ -1942,6 +2314,9 @@ const summary = {
   includeCoupon: args.includeCoupon,
   submit: args.submit,
   selectionPlan: args.selectionPlan || '',
+  executionWorkFingerprint: args.executionWorkFingerprint || '',
+  approvalManifest: EXECUTION_APPROVAL ? path.relative(ROOT, EXECUTION_APPROVAL.manifestPath) : '',
+  approvalManifestHash: EXECUTION_APPROVAL?.manifestHash || '',
   stores: [],
 };
 
@@ -1992,6 +2367,7 @@ for (const store of selectedStores) {
     for (const activity of plannedActivities) {
       console.log(`[${store.storeKey}] 处理 ${activity.activityId} ${activity.name}`);
       const result = await processActivity(cdp, store, activity).catch(err => ({ok: false, store: store.storeKey, activity, reason: err.message, stack: err.stack}));
+      result.executionWorkFingerprint = args.executionWorkFingerprint || '';
       storeResult.results.push(result);
       if (result.targetId && (result.ok || args.noClose)) keepTargetIds.push(result.targetId);
       const file = path.join(OUT_DIR, `${store.storeKey}-${activity.activityId}.json`);
@@ -2004,6 +2380,10 @@ for (const store of selectedStores) {
     console.log(`[${store.storeKey}] 异常：${err.message}`);
   } finally {
     cdp.close();
+    if (!args.noClose) {
+      await sleep(500);
+      closeExistingStoreChrome(store);
+    }
   }
 }
 

@@ -1,0 +1,139 @@
+#!/usr/bin/env node
+
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import {spawn} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
+import {loadOrdinaryCampaignApproval} from '../../lib/marketing_ordinary_campaign_approval.mjs';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+
+function split(value) {
+  return String(value || '').split(',').map(item => item.trim()).filter(Boolean);
+}
+
+function parseArgs(argv) {
+  const args = {stores: [], activities: [], selection: '', prices: '', approvalManifest: '', outDir: '', concurrency: 3};
+  for (let i = 0; i < argv.length; i += 1) {
+    const key = argv[i];
+    if (key === '--stores') args.stores = split(argv[++i]).map(item => item.toUpperCase());
+    else if (key === '--activities') args.activities = split(argv[++i]).map(Number).filter(Boolean);
+    else if (key === '--selection') args.selection = path.resolve(argv[++i] || '');
+    else if (key === '--prices') args.prices = path.resolve(argv[++i] || '');
+    else if (key === '--approval-manifest') args.approvalManifest = path.resolve(argv[++i] || '');
+    else if (key === '--out-dir') args.outDir = path.resolve(argv[++i] || '');
+    else if (key === '--concurrency') args.concurrency = Number(argv[++i] || 3);
+    else throw new Error(`Unknown argument: ${key}`);
+  }
+  if (!args.stores.length || !args.activities.length || !args.selection || !args.prices || !args.approvalManifest || !args.outDir) {
+    throw new Error('Required: --stores --activities --selection --prices --approval-manifest --out-dir');
+  }
+  if (!Number.isInteger(args.concurrency) || args.concurrency < 1 || args.concurrency > 5) throw new Error('Invalid concurrency');
+  return args;
+}
+
+function runNode(commandArgs, label) {
+  return new Promise(resolve => {
+    const child = spawn(process.execPath, commandArgs, {cwd: ROOT, windowsHide: true});
+    child.stdout.on('data', chunk => process.stdout.write(`[${label}] ${chunk}`));
+    child.stderr.on('data', chunk => process.stderr.write(`[${label}] ${chunk}`));
+    child.on('exit', (code, signal) => resolve({code, signal}));
+  });
+}
+
+async function newestSummary(dir) {
+  try {
+    const names = (await fs.readdir(dir)).filter(name => /^summary-.*\.json$/i.test(name)).sort();
+    if (!names.length) return {error: 'summary_not_found'};
+    const file = path.join(dir, names.at(-1));
+    return {file: path.relative(ROOT, file), doc: JSON.parse(await fs.readFile(file, 'utf8'))};
+  } catch (error) {
+    return {error: String(error?.message || error)};
+  }
+}
+
+function activityResults(summary) {
+  return (summary?.stores || []).flatMap(store => store.results || []).filter(result => !result.skipped);
+}
+
+const args = parseArgs(process.argv.slice(2));
+const approval = await loadOrdinaryCampaignApproval({
+  root: ROOT,
+  manifestPath: args.approvalManifest,
+  selectionPath: args.selection,
+  pricesPath: args.prices,
+});
+for (const storeKey of args.stores) {
+  if (!approval.selectionRows.some(row => String(row.storeKey || '').toUpperCase() === storeKey)) {
+    throw new Error(`Approved plan has no rows for requested store: ${storeKey}`);
+  }
+}
+for (const activityId of args.activities) {
+  if (!approval.selectionRows.some(row => Number(row.activityId || 0) === activityId)) {
+    throw new Error(`Approved plan has no rows for requested activity: ${activityId}`);
+  }
+}
+await fs.mkdir(args.outDir, {recursive: true});
+const results = [];
+let cursor = 0;
+
+async function worker() {
+  while (cursor < args.stores.length) {
+    const storeKey = args.stores[cursor++];
+    const base = [
+      path.join(ROOT, 'scripts', 'marketing', 'dsy_marketing_deadline_fill.mjs'),
+      '--stores', storeKey,
+      '--activity', args.activities.join(','),
+      '--selection-plan', args.selection,
+      '--price-overrides', args.prices,
+      '--approval-manifest', approval.manifestPath,
+      '--execution-work-fingerprint', approval.workFingerprint,
+      '--headless',
+      ...(storeKey === 'FY' ? ['--runtime-port', '9455'] : []),
+    ];
+    const dryDir = path.join(args.outDir, storeKey, 'dry-run');
+    const executeDir = path.join(args.outDir, storeKey, 'execute');
+    console.log(`\n[STORE-BATCH] DRY-RUN ${storeKey}`);
+    const dryProcess = await runNode([...base, '--out-dir', dryDir], `${storeKey}:dry`);
+    const dry = await newestSummary(dryDir);
+    const dryResults = activityResults(dry.doc);
+    const row = {storeKey, dryProcess, dryFile: dry.file || '', dryError: dry.error || '', dryResults};
+    if (dryProcess.code !== 0 || !dryResults.length || dryResults.some(result => !result.ok)) {
+      row.status = 'dry_run_failed';
+      results.push(row);
+      console.log(`[STORE-BATCH] BLOCKED ${storeKey}: ${dryResults.filter(result => !result.ok).map(result => `${result.activity?.activityId}:${result.reason || 'failed'}`).join(',') || dry.error}`);
+      continue;
+    }
+    console.log(`[STORE-BATCH] EXECUTE ${storeKey}`);
+    const executeProcess = await runNode([...base, '--submit', '--out-dir', executeDir], `${storeKey}:execute`);
+    const execute = await newestSummary(executeDir);
+    const executeResults = activityResults(execute.doc);
+    row.executeProcess = executeProcess;
+    row.executeFile = execute.file || '';
+    row.executeError = execute.error || '';
+    row.executeResults = executeResults;
+    row.status = executeProcess.code === 0 && executeResults.length
+      && executeResults.every(result => result.ok && result.submit?.submitted === true)
+      ? 'submitted'
+      : 'execute_failed';
+    results.push(row);
+    console.log(`[STORE-BATCH] ${row.status.toUpperCase()} ${storeKey}`);
+  }
+}
+
+await Promise.all(Array.from({length: Math.min(args.concurrency, args.stores.length)}, () => worker()));
+const summary = {
+  createdAt: new Date().toISOString(),
+  approvalManifest: path.relative(ROOT, approval.manifestPath),
+  approvalManifestHash: approval.manifestHash,
+  workFingerprint: approval.workFingerprint,
+  stores: args.stores,
+  submittedStores: results.filter(row => row.status === 'submitted').map(row => row.storeKey),
+  dryRunFailedStores: results.filter(row => row.status === 'dry_run_failed').map(row => row.storeKey),
+  executeFailedStores: results.filter(row => row.status === 'execute_failed').map(row => row.storeKey),
+  results,
+};
+const file = path.join(args.outDir, 'store-submission-summary.json');
+await fs.writeFile(file, `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
+console.log(`\n[STORE-BATCH] SUMMARY ${path.relative(ROOT, file)} submitted=${summary.submittedStores.length}/${args.stores.length}`);
+process.exitCode = summary.submittedStores.length === args.stores.length ? 0 : 2;

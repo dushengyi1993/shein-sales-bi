@@ -1,8 +1,9 @@
-﻿import fs from 'node:fs/promises';
+import fs from 'node:fs/promises';
 import fssync from 'node:fs';
 import path from 'node:path';
 import { SpreadsheetFile, Workbook } from '@oai/artifact-tool';
 import { normalizeGoodsSnDetailed } from '../../lib/product_sku_normalizer.mjs';
+import {buildSharedStorageCostIndex, findSharedStorageCost} from '../../lib/marketing_shared_storage_cost.mjs';
 import {
   buildLinkRowIndexFromBi,
   buildExposureTopLinkIndex,
@@ -22,11 +23,12 @@ const OUTPUT_VERSION = cli.version || 'v7';
 const reportJson = path.resolve(ROOT, cli.report || path.join('outputs', 'reports', `marketing-stack-review-${DATE_TAG}.json`));
 const cloudBiPath = path.resolve(ROOT, cli.bi || path.join('tmp', 'sku-approval-builder', `cloud-bi-portal-data-${DATE_TAG}.json`));
 const cloudCostPath = path.resolve(ROOT, cli.cost || path.join('tmp', 'sku-approval-builder', `cloud-marketing-cost-map-${DATE_TAG}.json`));
-const outDir = path.join(ROOT, 'outputs', 'reports');
+const outDir = path.resolve(ROOT, cli.outputDir || path.join('outputs', 'reports'));
 
 const activityDoc = JSON.parse(await fs.readFile(reportJson, 'utf8'));
 const cloudBi = JSON.parse(await fs.readFile(cloudBiPath, 'utf8'));
 const cloudCostDoc = JSON.parse(await fs.readFile(cloudCostPath, 'utf8'));
+const sharedStorageCostIndex = buildSharedStorageCostIndex(cloudBi);
 const pricingPolicyPath = path.resolve(ROOT, cli.pricingPolicy || path.join('config', 'marketing_pricing_policy.json'));
 const pricingPolicy = await loadMarketingPricingPolicy(pricingPolicyPath);
 const cloudBiStat = fssync.statSync(cloudBiPath);
@@ -75,6 +77,9 @@ const fixedRules = buildRuleMap(fixedPriceBase);
 const marginRules = buildRuleMap(specialMarginBase);
 
 const rawRows = rawActivityRows;
+if (!rawRows.length) {
+  throw new Error(`Marketing activity review has no detail rows: ${reportJson}`);
+}
 const rows = rawRows.map(normalizeReviewRow);
 
 const bySku = new Map();
@@ -526,10 +531,12 @@ const sourceSummary = {
     host: 'shein-bi-tencent',
     appPath: '/opt/shein-bi/app',
     biPath: '/opt/shein-bi/app/outputs/bi-portal/data.json',
+    biInputPath: path.relative(ROOT, cloudBiPath),
     biGeneratedAt: cloudBi.generatedAt || '',
     pulledBiBytes: cloudBiStat.size,
     pulledBiMtime: cloudBiStat.mtime.toISOString(),
     costPath: '/opt/shein-bi/app/tmp/mbrs/marketing-cost-map.json',
+    costInputPath: path.relative(ROOT, cloudCostPath),
     costSource: cloudCostDoc.source || '',
     costBiSource: cloudCostDoc.biSource || '',
     trueCostCount: cloudCostDoc.trueCostCount || Object.keys(TRUE_COSTS).length,
@@ -607,7 +614,7 @@ for (let c = 0; c < activitySummaryHeaders.length; c++) {
   activitySummarySheet.getRangeByIndexes(0, c, activitySummaryRows.length + 1, 1).format.columnWidthPx = width;
 }
 activitySummarySheet.tables.add(`A1:${colName(activitySummaryHeaders.length)}${activitySummaryRows.length + 1}`, true, `ActivitySummary${safeTableSuffix(OUTPUT_VERSION)}`).style = 'TableStyleMedium2';
-const sheet = workbook.worksheets.add('给你确认');
+const sheet = workbook.worksheets.add('按货号汇总');
 sheet.showGridLines = false;
 sheet.getRangeByIndexes(0, 0, confirmRows.length + 1, confirmHeaders.length).values = [confirmHeaders, ...confirmRows.map(r => confirmHeaders.map(h => r[h] ?? ''))];
 sheet.freezePanes.freezeRows(1);
@@ -636,6 +643,126 @@ statusRange.conditionalFormats.add('containsText', {text: '利润低于', format
 statusRange.conditionalFormats.add('containsText', {text: '部分店', format: {fill: '#FFF2CC', font: {bold: true, color: '#7F6000'}}});
 statusRange.conditionalFormats.add('containsText', {text: '限时折扣', format: {fill: '#E2F0D9', font: {bold: true, color: '#375623'}}});
 
+const sourceRowByKey = new Map(rows.map(r => [
+  `${String(r['店铺'] || '').trim().toUpperCase()}::${Number(r['活动ID'] || 0)}::${String(r['SKC'] || '').trim()}`,
+  r,
+]));
+const signupHeaders = [
+  '活动ID','活动名称','报名截止','店铺','标准货号','中文品名','SKC','供方货号','当前售价SAR','平台最低降幅%',
+  '平台可报上限SAR','建议报名价SAR','普通目标成交价SAR','商品成本SAR（不含仓储）','仓储费SAR/件','含仓储成本SAR',
+  '不含仓储利润率','含仓储利润率','曝光待遇','新上架7天待遇','方案状态','风险/处理说明','备注/修改意见',
+];
+const signupRows = executionRows.map(r => {
+  const sourceRow = sourceRowByKey.get(`${r.storeKey}::${r.activityId}::${r.skc}`) || {};
+  const exposureTreatment = r.isTopExposureLink ? '最新7日全店曝光Top5力度' : '普通力度';
+  const storageText = r.storageUnitCostSar === null || r.storageUnitCostSar === undefined ? '仓储展示缺失' : '';
+  return [
+    r.activityId, sourceRow['活动名称'] || '', sourceRow['报名截止'] || '', r.storeKey, r.canonical,
+    String(r.canonical || '').replace(/^[A-Z0-9-]+/i, '') || r.canonical, r.skc, r.supplierNo, r.currentPrice,
+    r.platformMinDiscountPct, r.platformAllowedMaxBasePrice, r.targetPrice, r.finalTargetPrice, r.cost,
+    r.storageUnitCostSar, r.fullCost, r.marginBeforeStorage, r.marginAfterStorage, exposureTreatment,
+    r.newListingTopTreatment ? `是（上架${r.newListingShelfAgeDays ?? ''}天，按Top5力度）` : '否',
+    r.selected ? '待用户确认，未提交' : '剔除/阻塞',
+    [r.excludeReason, storageText, r.note].filter(Boolean).join('；'), '',
+  ];
+});
+const signupSheet = workbook.worksheets.add('报名明细');
+signupSheet.showGridLines = false;
+signupSheet.getRangeByIndexes(0, 0, signupRows.length + 1, signupHeaders.length).values = [signupHeaders, ...signupRows];
+signupSheet.freezePanes.freezeRows(1);
+signupSheet.freezePanes.freezeColumns(4);
+signupSheet.getRangeByIndexes(0, 0, 1, signupHeaders.length).format = {fill: '#1F4E78', font: {bold: true, color: '#FFFFFF'}, wrapText: true};
+signupSheet.getRangeByIndexes(1, 0, signupRows.length, signupHeaders.length).format = {wrapText: true};
+for (let c = 0; c < signupHeaders.length; c++) {
+  const h = signupHeaders[c];
+  let width = 120;
+  if (['活动名称','风险/处理说明'].includes(h)) width = 300;
+  if (['标准货号','中文品名','SKC','供方货号'].includes(h)) width = 190;
+  if (['曝光待遇','新上架7天待遇','方案状态','备注/修改意见'].includes(h)) width = 190;
+  signupSheet.getRangeByIndexes(0, c, signupRows.length + 1, 1).format.columnWidthPx = width;
+}
+for (const h of ['当前售价SAR','平台可报上限SAR','建议报名价SAR','普通目标成交价SAR','商品成本SAR（不含仓储）','仓储费SAR/件','含仓储成本SAR']) {
+  const c = signupHeaders.indexOf(h);
+  signupSheet.getRangeByIndexes(1, c, signupRows.length, 1).format.numberFormat = '0.00';
+}
+for (const h of ['不含仓储利润率','含仓储利润率']) {
+  const c = signupHeaders.indexOf(h);
+  signupSheet.getRangeByIndexes(1, c, signupRows.length, 1).format.numberFormat = '0.0%';
+}
+signupSheet.tables.add(`A1:${colName(signupHeaders.length)}${signupRows.length + 1}`, true, `SignupDetail${safeTableSuffix(OUTPUT_VERSION)}`).style = 'TableStyleMedium2';
+
+const differenceHeaders = ['标准货号','店铺','活动ID','SKC','当前售价SAR','建议报名价SAR','普通目标成交价SAR','曝光待遇','差异原因','备注/修改意见'];
+const priceSetsByCanonical = new Map();
+for (const r of executionRows) {
+  if (!priceSetsByCanonical.has(r.canonical)) priceSetsByCanonical.set(r.canonical, new Set());
+  priceSetsByCanonical.get(r.canonical).add(String(r.targetPrice ?? ''));
+}
+const differenceRows = executionRows.map(r => [
+  r.canonical, r.storeKey, r.activityId, r.skc, r.currentPrice, r.targetPrice, r.finalTargetPrice,
+  r.isTopExposureLink ? 'Top5力度' : '普通力度',
+  r.platformAdjusted
+    ? `平台最低降幅将策略价压到 ${fmt(r.platformAllowedMaxBasePrice)} SAR`
+    : (priceSetsByCanonical.get(r.canonical)?.size > 1 ? '同货号因Top5身份/店铺平台上限产生差异' : '同货号各店同价'),
+  '',
+]);
+const differenceSheet = workbook.worksheets.add('店铺差异明细');
+differenceSheet.showGridLines = false;
+differenceSheet.getRangeByIndexes(0, 0, differenceRows.length + 1, differenceHeaders.length).values = [differenceHeaders, ...differenceRows];
+differenceSheet.freezePanes.freezeRows(1);
+differenceSheet.freezePanes.freezeColumns(2);
+differenceSheet.getRangeByIndexes(0, 0, 1, differenceHeaders.length).format = {fill: '#4F6D7A', font: {bold: true, color: '#FFFFFF'}, wrapText: true};
+differenceSheet.getRangeByIndexes(1, 0, differenceRows.length, differenceHeaders.length).format = {wrapText: true};
+for (let c = 0; c < differenceHeaders.length; c++) differenceSheet.getRangeByIndexes(0, c, differenceRows.length + 1, 1).format.columnWidthPx = ['标准货号','差异原因','备注/修改意见'].includes(differenceHeaders[c]) ? 250 : 135;
+differenceSheet.tables.add(`A1:${colName(differenceHeaders.length)}${differenceRows.length + 1}`, true, `StoreDifference${safeTableSuffix(OUTPUT_VERSION)}`).style = 'TableStyleMedium4';
+
+const blockedHeaders = ['店铺','活动ID','标准货号','SKC','建议报名价SAR','商品成本SAR','仓储费SAR/件','阻塞原因','处理建议','备注/修改意见'];
+const excludedRowsForSheet = executionRows.filter(r => !r.selected);
+const blockedRows = excludedRowsForSheet.length ? excludedRowsForSheet.map(r => [
+  r.storeKey, r.activityId, r.canonical, r.skc, r.targetPrice, r.cost, r.storageUnitCostSar, r.excludeReason,
+  '先补齐对应证据或调整价格，再单独补报；不影响其他安全行。', '',
+]) : [['','','','','','','','无阻塞项',`本轮 ${executionRows.filter(r => r.selected).length} 行均进入待确认方案。`,'']];
+const blockedSheet = workbook.worksheets.add('剔除项与阻塞项');
+blockedSheet.showGridLines = false;
+blockedSheet.getRangeByIndexes(0, 0, blockedRows.length + 1, blockedHeaders.length).values = [blockedHeaders, ...blockedRows];
+blockedSheet.freezePanes.freezeRows(1);
+blockedSheet.getRangeByIndexes(0, 0, 1, blockedHeaders.length).format = {fill: '#9C0006', font: {bold: true, color: '#FFFFFF'}, wrapText: true};
+blockedSheet.getRangeByIndexes(1, 0, blockedRows.length, blockedHeaders.length).format = {wrapText: true};
+for (let c = 0; c < blockedHeaders.length; c++) blockedSheet.getRangeByIndexes(0, c, blockedRows.length + 1, 1).format.columnWidthPx = /原因|建议|备注/.test(blockedHeaders[c]) ? 300 : 150;
+blockedSheet.tables.add(`A1:${colName(blockedHeaders.length)}${blockedRows.length + 1}`, true, `BlockedItems${safeTableSuffix(OUTPUT_VERSION)}`).style = 'TableStyleMedium3';
+
+const riskHeaders = ['店铺','活动ID','标准货号','SKC','风险类型','建议报名价SAR','不含仓储利润率','含仓储利润率','处理结论','备注/修改意见'];
+const riskSourceRows = executionRows.filter(r => r.platformAdjusted || r.storageUnitCostSar === null || r.storageUnitCostSar === undefined || (isNum(r.marginAfterStorage) && r.marginAfterStorage < targetFloorMargin));
+const riskRows = riskSourceRows.length ? riskSourceRows.map(r => [
+  r.storeKey, r.activityId, r.canonical, r.skc,
+  [r.platformAdjusted ? '平台最低降幅压价' : '', r.storageUnitCostSar === null || r.storageUnitCostSar === undefined ? '仓储展示缺失' : '', isNum(r.marginAfterStorage) && r.marginAfterStorage < targetFloorMargin ? '含仓储利润率低于15%' : ''].filter(Boolean).join('；'),
+  r.targetPrice, r.marginBeforeStorage, r.marginAfterStorage,
+  r.selected ? '商品成本边界通过，可进入普通活动待确认；仓储风险单列展示。' : '已阻塞，不进入报名。', '',
+]) : [['','','','','无风险项','','','','','']];
+const riskSheet = workbook.worksheets.add('低价补救与风险项');
+riskSheet.showGridLines = false;
+riskSheet.getRangeByIndexes(0, 0, riskRows.length + 1, riskHeaders.length).values = [riskHeaders, ...riskRows];
+riskSheet.freezePanes.freezeRows(1);
+riskSheet.getRangeByIndexes(0, 0, 1, riskHeaders.length).format = {fill: '#BF9000', font: {bold: true, color: '#FFFFFF'}, wrapText: true};
+riskSheet.getRangeByIndexes(1, 0, riskRows.length, riskHeaders.length).format = {wrapText: true};
+for (const h of ['不含仓储利润率','含仓储利润率']) {
+  const c = riskHeaders.indexOf(h);
+  riskSheet.getRangeByIndexes(1, c, riskRows.length, 1).format.numberFormat = '0.0%';
+}
+for (let c = 0; c < riskHeaders.length; c++) riskSheet.getRangeByIndexes(0, c, riskRows.length + 1, 1).format.columnWidthPx = /风险|结论|备注/.test(riskHeaders[c]) ? 290 : 150;
+riskSheet.tables.add(`A1:${colName(riskHeaders.length)}${riskRows.length + 1}`, true, `RiskItems${safeTableSuffix(OUTPUT_VERSION)}`).style = 'TableStyleMedium5';
+
+const couponSheet = workbook.worksheets.add('15%券流量试验计划');
+couponSheet.showGridLines = false;
+const couponPlanRows = [
+  ['状态','适用活动','本轮动作','定价边界','说明','备注/修改意见'],
+  ['无已批准目标','48732 / 48733 / 49565','不提交优惠券，也不把券当保底层','普通活动目标价不依赖优惠券触发','后续若单独批准15%小流量试验，再按指定店铺/SKC另建计划；30%/50%券禁止。',''],
+];
+couponSheet.getRangeByIndexes(0, 0, couponPlanRows.length, couponPlanRows[0].length).values = couponPlanRows;
+couponSheet.getRange('A1:F1').format = {fill: '#595959', font: {bold: true, color: '#FFFFFF'}, wrapText: true};
+couponSheet.getRange('A2:F2').format = {wrapText: true};
+couponSheet.getRange('A:F').format.columnWidthPx = 220;
+couponSheet.tables.add('A1:F2', true, `CouponPlan${safeTableSuffix(OUTPUT_VERSION)}`).style = 'TableStyleMedium9';
+
 const detailSheet = workbook.worksheets.add('系统依据');
 detailSheet.showGridLines = false;
 detailSheet.getRangeByIndexes(0, 0, approvalRows.length + 1, detailHeaders.length).values = [detailHeaders, ...approvalRows.map(r => detailHeaders.map(h => r[h] ?? ''))];
@@ -660,34 +787,37 @@ detailTable.showFilterButton = true;
 const sourceSheet = workbook.worksheets.add('云端来源');
 sourceSheet.showGridLines = false;
 const sourceRows = [
-  ['项目', '值'],
-  ['云端主机', sourceSummary.cloudProductionSource.host],
-  ['云端应用目录', sourceSummary.cloudProductionSource.appPath],
-  ['云端 BI 快照', sourceSummary.cloudProductionSource.biPath],
-  ['BI generatedAt', 'cloud generatedAt: ' + sourceSummary.cloudProductionSource.biGeneratedAt],
-  ['云端成本映射', sourceSummary.cloudProductionSource.costPath],
-  ['成本源文件', sourceSummary.cloudProductionSource.costSource],
-  ['成本映射所用 BI', sourceSummary.cloudProductionSource.costBiSource],
-  ['营销定价策略', sourceSummary.pricingPolicy.path],
-  ['曝光数据源', sourceSummary.pricingPolicy.exposureDataPath],
-  ['曝光数据 mtime', 'cloud mtime: ' + sourceSummary.pricingPolicy.exposureDataMtime],
-  ['曝光字段', (sourceSummary.pricingPolicy.exposureMetricFields || []).join(', ')],
-  ['曝光排名层级分布', Object.entries(sourceSummary.pricingPolicy.exposureMetricTierCounts || {}).map(([k, v]) => `${k}=${v}`).join('；')],
-  ['曝光货号回填', `用本次活动明细的 店铺+SKC 回填云端链接快照空货号：${sourceSummary.pricingPolicy.exposureCanonicalBackfill?.filledRows || 0} 行；未回填空货号：${sourceSummary.pricingPolicy.exposureCanonicalBackfill?.remainingBlankRows || 0} 行`],
-  ['曝光前五规则', sourceSummary.pricingPolicy.rule],
-  ['自动剔除利润率口径', sourceSummary.pricingPolicy.selectionMarginRule],
-  ['云端 trueCostCount', sourceSummary.cloudProductionSource.trueCostCount],
-  ['活动扫描明细行数', rawRows.length],
-  ['活动扫描店铺数', activityDoc.selectedStores?.length || 0],
-  ['说明', `${OUTPUT_VERSION} 成本、仓储费/件、含仓储成本、利润率均用云端生产 BI/成本映射重算；仓储费/件继续展示为当前仍在仓库存的移动平均累计仓储成本，但本轮自动剔除红线使用 ${marginBasisText(selectionMarginBasis)}，不是含仓储利润率。`],
+  ['项目', '值', '备注/修改意见'],
+  ['云端主机', sourceSummary.cloudProductionSource.host, ''],
+  ['云端应用目录', sourceSummary.cloudProductionSource.appPath, ''],
+  ['云端 BI 原始路径', sourceSummary.cloudProductionSource.biPath, ''],
+  ['本轮 BI 输入副本', sourceSummary.cloudProductionSource.biInputPath, ''],
+  ['BI generatedAt', 'cloud generatedAt: ' + sourceSummary.cloudProductionSource.biGeneratedAt, ''],
+  ['云端成本映射原始路径', sourceSummary.cloudProductionSource.costPath, ''],
+  ['本轮成本输入副本', sourceSummary.cloudProductionSource.costInputPath, ''],
+  ['成本源文件', sourceSummary.cloudProductionSource.costSource, ''],
+  ['成本映射所用 BI', sourceSummary.cloudProductionSource.costBiSource, ''],
+  ['营销定价策略', sourceSummary.pricingPolicy.path, ''],
+  ['曝光数据源', sourceSummary.pricingPolicy.exposureDataPath, ''],
+  ['曝光数据 mtime', 'cloud mtime: ' + sourceSummary.pricingPolicy.exposureDataMtime, ''],
+  ['曝光字段', (sourceSummary.pricingPolicy.exposureMetricFields || []).join(', '), ''],
+  ['曝光排名层级分布', Object.entries(sourceSummary.pricingPolicy.exposureMetricTierCounts || {}).map(([k, v]) => `${k}=${v}`).join('；'), ''],
+  ['曝光货号回填', `用本次活动明细的 店铺+SKC 回填云端链接快照空货号：${sourceSummary.pricingPolicy.exposureCanonicalBackfill?.filledRows || 0} 行；未回填空货号：${sourceSummary.pricingPolicy.exposureCanonicalBackfill?.remainingBlankRows || 0} 行`, ''],
+  ['曝光前五规则', sourceSummary.pricingPolicy.rule, ''],
+  ['自动剔除利润率口径', sourceSummary.pricingPolicy.selectionMarginRule, ''],
+  ['云端 trueCostCount', sourceSummary.cloudProductionSource.trueCostCount, ''],
+  ['活动扫描明细行数', rawRows.length, ''],
+  ['活动扫描店铺数', activityDoc.selectedStores?.length || 0, ''],
+  ['说明', `${OUTPUT_VERSION} 成本、仓储费/件、含仓储成本、利润率均用云端生产 BI/成本映射重算；仓储费/件继续展示为当前仍在仓库存的移动平均累计仓储成本，但本轮自动剔除红线使用 ${marginBasisText(selectionMarginBasis)}，不是含仓储利润率。`, ''],
 ];
 sourceSheet.getRange('B:B').format.numberFormat = '@';
-sourceSheet.getRangeByIndexes(0, 0, sourceRows.length, 2).values = sourceRows;
+sourceSheet.getRangeByIndexes(0, 0, sourceRows.length, 3).values = sourceRows;
 sourceSheet.getRange('B:B').format.numberFormat = '@';
-sourceSheet.getRange('A1:B1').format = {fill: '#1F4E78', font: {bold: true, color: '#FFFFFF'}};
+sourceSheet.getRange('A1:C1').format = {fill: '#1F4E78', font: {bold: true, color: '#FFFFFF'}};
 sourceSheet.getRange('A:A').format.columnWidthPx = 180;
 sourceSheet.getRange('B:B').format.columnWidthPx = 760;
-sourceSheet.getRangeByIndexes(1, 0, sourceRows.length - 1, 2).format = {wrapText: true};
+sourceSheet.getRange('C:C').format.columnWidthPx = 220;
+sourceSheet.getRangeByIndexes(1, 0, sourceRows.length - 1, 3).format = {wrapText: true};
 
 const notes = workbook.worksheets.add('说明');
 notes.showGridLines = false;
@@ -695,7 +825,7 @@ notes.getRange('A1:D1').values = [['这张表怎么用', '', '', '']];
 notes.mergeCells('A1:D1');
 notes.getRange('A1:D1').format = {fill: '#1F4E78', font: {bold: true, color: '#FFFFFF'}};
 notes.getRange('A3:D9').values = [
-  ['1', '先看', '给你确认', '每个标准货号一行，已补商品成本、仓储费/件、含仓储成本。'],
+  ['1', '先看', '按货号汇总', '每个标准货号一行，已补商品成本、仓储费/件、含仓储成本。'],
   ['2', '利润率口径', '不含仓储 / 含仓储', `不含仓储利润率只扣商品成本；含仓储利润率扣商品成本+云端仓储费/件。本轮自动剔除红线按 ${marginBasisText(selectionMarginBasis)} >= ${round2(targetFloorMargin * 100)}%。`],
   ['3', '云端来源', '云端来源', '成本和仓储来自 shein-bi-tencent 的生产 BI 快照和云端成本映射。'],
   ['4', '你确认什么', '建议最终成交价SAR', '接受就写同意；要改就填“你的确认最终价SAR”或“你的确认利润率%”。'],
@@ -713,10 +843,10 @@ notes.getRange('B:B').format.columnWidthPx = 130;
 notes.getRange('C:C').format.columnWidthPx = 180;
 notes.getRange('D:D').format.columnWidthPx = 520;
 
-const preview = await workbook.render({sheetName: '给你确认', range: 'A1:P24', scale: 1, format: 'png'});
+const preview = await workbook.render({sheetName: '按货号汇总', range: 'A1:P24', scale: 1, format: 'png'});
 const previewPath = path.join(outDir, `marketing-sku-approval-${DATE_TAG}-${OUTPUT_VERSION}-preview.png`);
 await fs.writeFile(previewPath, new Uint8Array(await preview.arrayBuffer()));
-const inspect = await workbook.inspect({kind: 'table', range: '给你确认!A1:P12', include: 'values', tableMaxRows: 12, tableMaxCols: 16});
+const inspect = await workbook.inspect({kind: 'table', range: '按货号汇总!A1:P12', include: 'values', tableMaxRows: 12, tableMaxCols: 16});
 console.log(inspect.ndjson);
 const errors = await workbook.inspect({kind: 'match', searchTerm: '#REF!|#DIV/0!|#VALUE!|#NAME\\?|#N/A', options: {useRegex: true, maxResults: 50}, summary: 'formula errors'});
 console.log(errors.ndjson);
@@ -732,6 +862,8 @@ const executionArtifacts = await writeExecutionArtifacts(executionRows, {
   cloudBiPath,
   cloudCostPath,
   exposureDataPath,
+  executionOutputDir: cli.executionOutputDir,
+  reportsOutputDir: cli.outputDir,
 });
 sourceSummary.output.xlsxPath = path.relative(ROOT, xlsxPath);
 sourceSummary.output.previewPath = path.relative(ROOT, previewPath);
@@ -746,9 +878,13 @@ function normalizeReviewRow(row) {
   const normalized = normalizeGoodsSnDetailed(rawSupplier, {goodsTitle});
   const canonical = normalized.canonical || row['标准货号'] || rawSupplier;
   const cloudCostFromMap = lookupCloudCostInfo([canonical, rawSupplier, row['供方货号'], row['标准货号'], modelCode(canonical), modelCode(rawSupplier)]);
+  const activityRowCost = costInfoFromActivityRow(row);
+  // Inventory is shared across stores, so product and storage cost both belong to
+  // the canonical SKU. A link-level activity response may omit storage fields and
+  // must not turn the same shared stock into different per-store costs.
   const cloudCost = cloudCostFromMap?.productUnitCostSar !== null && cloudCostFromMap?.productUnitCostSar !== undefined
     ? cloudCostFromMap
-    : (costInfoFromActivityRow(row) || cloudCostFromMap);
+    : activityRowCost;
   return {
     ...row,
     '供方货号': rawSupplier || row['供方货号'] || '',
@@ -793,19 +929,24 @@ function lookupCloudCostInfo(keys) {
     ?? costMapValue;
   const storageFeeSar = numValue(trueCost?.storageFeeSar) ?? numValue(profitRow?.storage_fee_sar);
   const quantityBasis = numValue(trueCost?.quantityBasis) ?? null;
+  const sharedStorageCost = findSharedStorageCost(sharedStorageCostIndex, keys);
   let storageUnitCostSar = numValue(trueCost?.storageUnitCostSar);
   if (storageUnitCostSar === null) storageUnitCostSar = numValue(trueCost?.storageUnitCostSar30d);
+  if (storageUnitCostSar === null) storageUnitCostSar = numValue(sharedStorageCost?.storageUnitCostSar);
   const fullUnitCostSar = positiveOrNull(trueCost?.trueUnitCostSar)
     ?? (productUnitCostSar !== null && storageUnitCostSar !== null ? Number(productUnitCostSar) + Number(storageUnitCostSar) : null);
-  const storageMethodRaw = String(trueCost?.storageMethod || profitRow?.storage_fee_method || '').trim() || (storageUnitCostSar === 0 ? 'cloud_zero_storage_fee' : 'missing');
+  const mappedStorageMethod = /^(?:missing|unknown)$/i.test(String(trueCost?.storageMethod || '').trim()) ? '' : trueCost?.storageMethod;
+  const storageMethodRaw = String(mappedStorageMethod || profitRow?.storage_fee_method || sharedStorageCost?.storageMethod || '').trim() || (storageUnitCostSar === 0 ? 'cloud_zero_storage_fee' : 'missing');
   const storageMethod = trueCost?.storageUnitBasis ? `${storageMethodRaw} / ${trueCost.storageUnitBasis}` : storageMethodRaw;
-  const source = trueCost?.source || (profitRow ? 'outputs/bi-portal/data.json' : (costMapValue !== null ? 'cloud costMap' : ''));
+  const source = sharedStorageCost && !mappedStorageMethod
+    ? sharedStorageCost.source
+    : (trueCost?.source || (profitRow ? 'outputs/bi-portal/data.json' : (costMapValue !== null ? 'cloud costMap' : '')));
   return {
     productUnitCostSar: roundOrNull(productUnitCostSar, 4),
     storageUnitCostSar: roundOrNull(storageUnitCostSar, 4),
     fullUnitCostSar: roundOrNull(fullUnitCostSar, 4),
-    storageFeeSar: roundOrNull(storageFeeSar, 4),
-    quantityBasis: roundOrNull(quantityBasis, 4),
+    storageFeeSar: roundOrNull(storageFeeSar ?? sharedStorageCost?.storageFeeSar, 4),
+    quantityBasis: roundOrNull(quantityBasis ?? sharedStorageCost?.storageCurrentQuantity, 4),
     storageRecent30FeeSar: roundOrNull(trueCost?.storageRecent30FeeSar, 4),
     storageRecent30Days: roundOrNull(trueCost?.storageRecent30Days, 4),
     storageUnitBasis: trueCost?.storageUnitBasis || '',
@@ -1216,9 +1357,10 @@ function executionTagFromVersion(version) {
   return v || 'plan';
 }
 async function writeExecutionArtifacts(rows, opts) {
-  const signupDir = path.join(ROOT, 'tmp', 'marketing-signup');
+  const signupDir = path.resolve(ROOT, opts.executionOutputDir || path.join('tmp', 'marketing-signup'));
   await fs.mkdir(signupDir, {recursive: true});
-  const reportsDir = path.join(ROOT, 'outputs', 'reports');
+  const reportsDir = path.resolve(ROOT, opts.reportsOutputDir || path.join('outputs', 'reports'));
+  await fs.mkdir(reportsDir, {recursive: true});
   const selected = rows.filter(r => r.selected);
   const excluded = rows.filter(r => !r.selected);
   const byReason = {};
@@ -1447,13 +1589,33 @@ function excludedExecutionRow(row) {
   };
 }
 function parseArgs(argv) {
+  const allowedKeys = new Set([
+    'baselinePriceOverrides',
+    'baselineUserRemarks',
+    'bi',
+    'cost',
+    'date',
+    'executionOutputDir',
+    'executionTag',
+    'exposureData',
+    'outputDir',
+    'pricingPolicy',
+    'report',
+    'selectionMarginBasis',
+    'targetFloorMarginPct',
+    'version',
+  ]);
   const out = {};
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (!arg.startsWith('--')) continue;
+    if (!arg.startsWith('--')) throw new Error(`Unexpected positional argument: ${arg}`);
     const [rawKey, inlineValue] = arg.slice(2).split('=', 2);
     const key = rawKey.replace(/-([a-z])/g, (_, ch) => ch.toUpperCase());
-    const value = inlineValue !== undefined ? inlineValue : (argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[++i] : 'true');
+    if (!allowedKeys.has(key)) throw new Error(`Unknown argument: --${rawKey}`);
+    const value = inlineValue !== undefined
+      ? inlineValue
+      : (argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[++i] : '');
+    if (value === '') throw new Error(`Missing value for --${rawKey}`);
     out[key] = value;
   }
   return out;

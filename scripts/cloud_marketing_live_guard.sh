@@ -123,10 +123,18 @@ run_manual_special_restore_plan() {
     --out-dir "$ROOT/tmp/marketing-signup/manual-limited-discount-restore/${DATE}"
 }
 
+run_high_click_special_plan() {
+  node scripts/marketing/build_high_click_special_discount_plan.mjs \
+    --date "$DATE" \
+    --guard "$GUARD_OUT" \
+    --out "$ROOT/outputs/reports/high-click-low-conversion-special-plan-${DATE}.json"
+}
+
 build_repair_queue() {
   node scripts/marketing/manage_marketing_repair_queue.mjs build \
     --date "$DATE" \
     --guard "$GUARD_OUT" \
+    --high-click-plan "$ROOT/outputs/reports/high-click-low-conversion-special-plan-${DATE}.json" \
     --manual-plan "$ROOT/tmp/marketing-signup/manual-limited-discount-restore/${DATE}/manual-limited-discount-restore-plan.json" \
     --drift-plan-dir "$ROOT/tmp/marketing-signup/limited-discount-fallback/target-price-drift-${DATE}" \
     --fallback-plan "$ROOT/outputs/reports/new-listing-7d-limited-discount-plan-${DATE}.json" \
@@ -414,6 +422,7 @@ else
 fi
 
 ON_SHELF_PLAN_STATUS=0
+HIGH_CLICK_PLAN_STATUS=0
 MANUAL_PLAN_STATUS=0
 DRIFT_PLAN_STATUS=0
 REPAIR_QUEUE_BUILD_STATUS=0
@@ -421,6 +430,15 @@ REPAIR_DEFERRED=0
 ORDINARY_LIVE_READY="$(guard_json_value '(j.marketingStackReviewCoverage?.coverageComplete === true && Number(j.marketingStackReviewFreshness?.activityAgeHours ?? 999999) <= Number(j.marketingStackReviewFreshness?.activityFreshnessThresholdHours ?? 48)) ? 1 : 0' 0)"
 echo "[cloud_marketing_live_guard] ordinary live evidence ready=$ORDINARY_LIVE_READY stackReviewStatus=$STACK_REVIEW_STATUS"
 if [[ "$BUILD_REPAIR_QUEUE" == "1" && "$STACK_REVIEW_STATUS" -eq 0 && "$ORDINARY_LIVE_READY" -eq 1 && "$SCAN_STATUS" -eq 0 && "$GUARD_STATUS" -eq 0 ]]; then
+  HIGH_CLICK_ACTION_COUNT="$(guard_json_value 'Number(j.highClickLowConversionSpecial?.actionCount || 0)' 0)"
+  echo "[cloud_marketing_live_guard] build high-click low-conversion protected special-discount plan"
+  if run_high_click_special_plan; then
+    echo "[cloud_marketing_live_guard] high-click special plan ready actions=$HIGH_CLICK_ACTION_COUNT"
+  else
+    HIGH_CLICK_PLAN_STATUS=$?
+    REPAIR_QUEUE_BUILD_STATUS=90
+    echo "[cloud_marketing_live_guard] WARN high-click special plan returned status=$HIGH_CLICK_PLAN_STATUS" >&2
+  fi
   DRIFT_BELOW_COUNT="$(guard_json_value '(j.limitedDiscountTargetPriceDrift?.belowRows || []).length' 0)"
   GUARD_NEW_LISTING_EXEC_COUNT="$(guard_json_value '(j.newSkcCandidates?.newListingWithin7DaysLimitedDiscount?.executableActionCount || 0)' 0)"
   NEW_LISTING_EXEC_COUNT="$GUARD_NEW_LISTING_EXEC_COUNT"
@@ -456,7 +474,7 @@ if [[ "$BUILD_REPAIR_QUEUE" == "1" && "$STACK_REVIEW_STATUS" -eq 0 && "$ORDINARY
       echo "[cloud_marketing_live_guard] WARN drift repair plan returned status=$DRIFT_PLAN_STATUS" >&2
     fi
   fi
-  if [[ "$ON_SHELF_PLAN_STATUS" -eq 0 && "$MANUAL_PLAN_STATUS" -eq 0 && "$DRIFT_PLAN_STATUS" -eq 0 ]]; then
+  if [[ "$HIGH_CLICK_PLAN_STATUS" -eq 0 && "$ON_SHELF_PLAN_STATUS" -eq 0 && "$MANUAL_PLAN_STATUS" -eq 0 && "$DRIFT_PLAN_STATUS" -eq 0 ]]; then
     if build_repair_queue; then
       REPAIR_TOTAL_ROWS="$(queue_json_value 'Number(j.counts?.totalRows || 0)' 0)"
       REPAIR_TOTAL_GROUPS="$(queue_json_value 'Number(j.counts?.totalGroups || 0)' 0)"
@@ -469,7 +487,7 @@ if [[ "$BUILD_REPAIR_QUEUE" == "1" && "$STACK_REVIEW_STATUS" -eq 0 && "$ORDINARY
       echo "[cloud_marketing_live_guard] WARN repair queue build returned status=$REPAIR_QUEUE_BUILD_STATUS" >&2
     fi
   fi
-  echo "[cloud_marketing_live_guard] action check manualSpecialRestore=$MANUAL_SPECIAL_RESTORE_COUNT driftBelow=$DRIFT_BELOW_COUNT limitedFallbackExecutable=$NEW_LISTING_EXEC_COUNT deferred=$REPAIR_DEFERRED"
+  echo "[cloud_marketing_live_guard] action check highClickSpecial=$HIGH_CLICK_ACTION_COUNT manualSpecialRestore=$MANUAL_SPECIAL_RESTORE_COUNT driftBelow=$DRIFT_BELOW_COUNT limitedFallbackExecutable=$NEW_LISTING_EXEC_COUNT deferred=$REPAIR_DEFERRED"
   echo "[cloud_marketing_live_guard] inspection phase complete; no SHEIN mutation is executed in this service. The exact hashed queue is consumed only by shein-bi-cloud-marketing-repair.service."
 else
   if [[ "$BUILD_REPAIR_QUEUE" != "1" ]]; then
@@ -479,11 +497,11 @@ else
   fi
 fi
 
-if [[ "$STACK_REVIEW_STATUS" -eq 0 && "$ORDINARY_LIVE_READY" -eq 1 && "$SCAN_STATUS" -eq 0 && "$GUARD_STATUS" -eq 0 && "$ON_SHELF_PLAN_STATUS" -eq 0 && "$MANUAL_PLAN_STATUS" -eq 0 && "$DRIFT_PLAN_STATUS" -eq 0 && "$REPAIR_QUEUE_BUILD_STATUS" -eq 0 ]]; then
+if [[ "$STACK_REVIEW_STATUS" -eq 0 && "$ORDINARY_LIVE_READY" -eq 1 && "$SCAN_STATUS" -eq 0 && "$GUARD_STATUS" -eq 0 && "$HIGH_CLICK_PLAN_STATUS" -eq 0 && "$ON_SHELF_PLAN_STATUS" -eq 0 && "$MANUAL_PLAN_STATUS" -eq 0 && "$DRIFT_PLAN_STATUS" -eq 0 && "$REPAIR_QUEUE_BUILD_STATUS" -eq 0 ]]; then
   write_state "ok" "marketing inspection completed; repairDeferred=$REPAIR_DEFERRED" 1
   echo "[cloud_marketing_live_guard] done ok date=$DATE log=$LOG_FILE"
 else
-  write_state "warning" "stackReview=$STACK_REVIEW_STATUS ordinaryLiveReady=$ORDINARY_LIVE_READY liveScan=$SCAN_STATUS guard=$GUARD_STATUS onShelfPlan=$ON_SHELF_PLAN_STATUS manualPlan=$MANUAL_PLAN_STATUS driftPlan=$DRIFT_PLAN_STATUS repairQueue=$REPAIR_QUEUE_BUILD_STATUS" 0
-  echo "[cloud_marketing_live_guard] done warning stackReviewStatus=$STACK_REVIEW_STATUS ordinaryLiveReady=$ORDINARY_LIVE_READY scanStatus=$SCAN_STATUS guardStatus=$GUARD_STATUS onShelfPlanStatus=$ON_SHELF_PLAN_STATUS manualPlanStatus=$MANUAL_PLAN_STATUS driftPlanStatus=$DRIFT_PLAN_STATUS repairQueueStatus=$REPAIR_QUEUE_BUILD_STATUS log=$LOG_FILE" >&2
+  write_state "warning" "stackReview=$STACK_REVIEW_STATUS ordinaryLiveReady=$ORDINARY_LIVE_READY liveScan=$SCAN_STATUS guard=$GUARD_STATUS highClickPlan=$HIGH_CLICK_PLAN_STATUS onShelfPlan=$ON_SHELF_PLAN_STATUS manualPlan=$MANUAL_PLAN_STATUS driftPlan=$DRIFT_PLAN_STATUS repairQueue=$REPAIR_QUEUE_BUILD_STATUS" 0
+  echo "[cloud_marketing_live_guard] done warning stackReviewStatus=$STACK_REVIEW_STATUS ordinaryLiveReady=$ORDINARY_LIVE_READY scanStatus=$SCAN_STATUS guardStatus=$GUARD_STATUS highClickPlanStatus=$HIGH_CLICK_PLAN_STATUS onShelfPlanStatus=$ON_SHELF_PLAN_STATUS manualPlanStatus=$MANUAL_PLAN_STATUS driftPlanStatus=$DRIFT_PLAN_STATUS repairQueueStatus=$REPAIR_QUEUE_BUILD_STATUS log=$LOG_FILE" >&2
   exit 1
 fi

@@ -23,6 +23,11 @@ import {
   assertMarketingAutomationAuthorization,
   MARKETING_AUTOMATION_ACTIONS,
 } from '../../lib/marketing_automation_authorization.mjs';
+import {
+  countBlockedFallbackTargets,
+  fallbackBatchExitCode,
+  isResumableFallbackResult,
+} from '../../lib/marketing_bounded_batch_resume.mjs';
 import {loadExactFallbackRepairPlan} from '../../lib/marketing_repair_manifest.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -522,8 +527,7 @@ function summarizeTotals(results, plan) {
     storesBlocked: blocked.length,
     storesFailed: failed.length,
     executedTargetCount: executed.reduce((sum, row) => sum + Number(row.execute?.result?.targetCountForCreate ?? row.execute?.result?.targetCount ?? row.targetCount ?? 0), 0),
-    blockedTargetCount: blocked.reduce((sum, row) => sum + Number(row.targetCount || 0), 0)
-      + executed.reduce((sum, row) => sum + Number(row.inventoryBlockedSkcs?.length || 0), 0),
+    blockedTargetCount: countBlockedFallbackTargets(results),
     failedTargetCount: failed.reduce((sum, row) => sum + Number(row.targetCount || 0), 0),
     createdActivities: executed.map(row => ({storeKey: row.storeKey, activityId: row.createdActivityId, targetCount: row.execute?.result?.targetCountForCreate ?? row.targetCount})),
     blockedByType: blocked.reduce((acc, row) => {
@@ -557,7 +561,7 @@ function buildMarkdown(doc) {
       lines.push(`- ${row.storeKey}: ${row.targetCount} 个，${row.blocked.type}，${row.blocked.reason || ''}`);
     }
   }
-  const failed = doc.results.filter(row => !row.ok);
+  const failed = doc.results.filter(row => !row.ok && !row.blocked);
   if (failed.length) {
     lines.push('');
     lines.push('## 异常失败');
@@ -580,18 +584,21 @@ async function loadResumableResults(outputJson, {workFingerprint, dryRunOnly}) {
   try {
     const previous = await readJson(outputJson);
     if (previous.workFingerprint !== workFingerprint || previous.dryRunOnly !== dryRunOnly) return [];
-    return (previous.results || []).filter(result => result?.ok === true && !result?.blocked);
+    // A group may create the safe subset and retain per-SKC blockers. Replaying
+    // that whole group would duplicate the activity already created for safe rows.
+    return (previous.results || []).filter(isResumableFallbackResult);
   } catch {
     return [];
   }
 }
 
-async function writeExecutionProgress({outputJson, outputMd, common, results, plan, deferredEntries}) {
+async function writeExecutionProgress({outputJson, outputMd, common, results, plan, deferredEntries, processingComplete = false}) {
+  const complete = processingComplete && deferredEntries.length === 0;
   const doc = {
     ...common,
     updatedAt: new Date().toISOString(),
-    finishedAt: deferredEntries.length ? null : new Date().toISOString(),
-    complete: deferredEntries.length === 0,
+    finishedAt: complete ? new Date().toISOString() : null,
+    complete,
     deferredGroups: deferredEntries.length,
     deferredRescueFiles: deferredEntries.map(entry => entry.relativePath),
     results,
@@ -698,7 +705,15 @@ for (const [storeKey, storeEntries] of entriesByStore.entries()) {
     common.storeBrowserSessions.push({storeKey, launch: launchSummary, close: summarizeRaw(await closeStore(storeKey)), groupCount: storeEntries.length});
   }
 }
-const doc = await writeExecutionProgress({outputJson, outputMd, common, results, plan, deferredEntries});
+const doc = await writeExecutionProgress({
+  outputJson,
+  outputMd,
+  common,
+  results,
+  plan,
+  deferredEntries,
+  processingComplete: true,
+});
 const fullyClear = doc.totals.storesFailed === 0 && doc.totals.storesBlocked === 0 && deferredEntries.length === 0;
 console.log(JSON.stringify({
   ok: fullyClear,
@@ -709,5 +724,7 @@ console.log(JSON.stringify({
   resumedGroups: resumedResults.length,
   deferredGroups: deferredEntries.length,
 }, null, 2));
-if (doc.totals.storesFailed > 0 || doc.totals.storesBlocked > 0) process.exitCode = 2;
-else if (deferredEntries.length) process.exitCode = 3;
+process.exitCode = fallbackBatchExitCode({
+  failedCount: doc.totals.storesFailed,
+  deferredCount: deferredEntries.length,
+});

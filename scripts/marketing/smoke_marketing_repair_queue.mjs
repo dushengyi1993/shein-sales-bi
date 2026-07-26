@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -36,13 +37,18 @@ try {
   const driftDir = path.join(fixtureRoot, `target-price-drift-${date}`);
   const fallbackDir = path.join(fixtureRoot, `fallback-${date}`);
   const fallbackPlanPath = path.join(fixtureRoot, `new-listing-7d-limited-discount-plan-${date}.json`);
+  const highClickPlanPath = path.join(fixtureRoot, `high-click-low-conversion-special-plan-${date}.json`);
   const queuePath = path.join(fixtureRoot, `marketing-repair-${date}.json`);
   await fs.mkdir(driftDir, {recursive: true});
   await fs.mkdir(fallbackDir, {recursive: true});
   const liveScan = rel(path.join(fixtureRoot, `live-${date}.json`));
   const priceOverrides = rel(path.join(fixtureRoot, 'price-overrides.json'));
-  const guard = {
+  let guard = {
     reportDate: date,
+    highClickLowConversionSpecial: {
+      actionCount: 1,
+      rows: [{storeKey: 'HL', skc: 'sv3'}],
+    },
     limitedDiscountTargetPriceDrift: {
       source: liveScan,
       belowRows: [{storeKey: 'DL', skc: 'sv1'}],
@@ -50,7 +56,26 @@ try {
     manualSpecialLimitedDiscount: {actionCount: 0},
     targetPlanSelection: {priceOverrides},
   };
-  await fs.writeFile(guardPath, `${JSON.stringify(guard)}\n`);
+  const writeGuardAndHighClickPlan = async () => {
+    const guardText = `${JSON.stringify(guard)}\n`;
+    await fs.writeFile(guardPath, guardText);
+    await fs.writeFile(highClickPlanPath, `${JSON.stringify({
+      reportDate: date,
+      sourceGuard: rel(guardPath),
+      sourceGuardHash: crypto.createHash('sha256').update(guardText).digest('hex'),
+      actionCount: 1,
+      rows: [{
+        storeKey: 'HL',
+        skc: 'sv3',
+        canonical: 'SK-3',
+        specialPrice: 88.88,
+        activityStock: 10,
+        validFrom: `${date} 12:00:00`,
+        validTo: '2026-07-25 23:59:59',
+      }],
+    })}\n`);
+  };
+  await writeGuardAndHighClickPlan();
   const sourceGuard = rel(guardPath);
 
   const driftName = `limited-drift-rescue-DL-current-a1b2c3d4-${date}.json`;
@@ -83,12 +108,13 @@ try {
     rescueFiles: [{storeKey: 'DL', path: rel(fallbackPath), count: 1}],
   })}\n`);
 
-  const buildArgs = ['build', '--date', date, '--guard', guardPath, '--drift-plan-dir', driftDir, '--fallback-plan', fallbackPlanPath, '--queue', queuePath];
+  const buildArgs = ['build', '--date', date, '--guard', guardPath, '--high-click-plan', highClickPlanPath, '--drift-plan-dir', driftDir, '--fallback-plan', fallbackPlanPath, '--queue', queuePath];
   run(...buildArgs);
   let queue = JSON.parse(await fs.readFile(queuePath, 'utf8'));
-  assert.deepEqual(queue.counts, {totalRows: 2, totalGroups: 2, manualRows: 0, manualGroups: 0, driftRows: 1, driftGroups: 1, fallbackRows: 1, fallbackGroups: 1});
+  assert.deepEqual(queue.counts, {totalRows: 3, totalGroups: 3, highClickRows: 1, highClickGroups: 1, manualRows: 0, manualGroups: 0, driftRows: 1, driftGroups: 1, fallbackRows: 1, fallbackGroups: 1});
   assert.equal(queue.status, 'pending');
 
+  run('update-stage', '--queue', queuePath, '--stage', 'highClickSpecial', '--status', 'completed', '--readback-ok', 'true');
   run('update-stage', '--queue', queuePath, '--stage', 'driftRepair', '--status', 'completed', '--readback-ok', 'true');
   run(...buildArgs);
   queue = JSON.parse(await fs.readFile(queuePath, 'utf8'));
@@ -100,7 +126,8 @@ try {
   assert.equal(queue.stages.fallbackRepair.status, 'blocked', 'same exact work fingerprint must preserve terminal business blockers');
   assert.equal(queue.status, 'blocked', 'a fully processed queue with business blockers must not remain pending');
 
-  await fs.writeFile(guardPath, `${JSON.stringify({...guard, createdAt: 'changed'})}\n`);
+  guard = {...guard, createdAt: 'changed'};
+  await writeGuardAndHighClickPlan();
   run(...buildArgs);
   queue = JSON.parse(await fs.readFile(queuePath, 'utf8'));
   assert.equal(queue.stages.driftRepair.status, 'pending', 'changed guard hash must invalidate old completion');

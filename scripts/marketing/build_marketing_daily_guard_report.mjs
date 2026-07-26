@@ -57,7 +57,13 @@ import {
   findActiveManualLimitedDiscount,
   loadManualLimitedDiscountRegistry,
   manualLimitedDiscountKey,
+  selectManualLimitedDiscountCoverageRows,
 } from '../../lib/marketing_manual_limited_discount_overrides.mjs';
+import {
+  buildHighClickLowConversionSpecialAudit,
+  buildHighClickSpecialEffectAudit,
+  getHighClickSpecialPolicy,
+} from '../../lib/marketing_high_click_special_policy.mjs';
 
 import {resolveCurrentMarketingPlanPair} from '../../lib/marketing_plan_selector.mjs';
 function readJsonSafe(file) {
@@ -78,6 +84,7 @@ const BI_PORTAL_DATA_DEFAULT = path.join(ROOT, 'outputs', 'bi-portal', 'data.jso
 const BI_PORTAL_LINKS_DATA_DEFAULT = path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'linksData.json');
 const MARKETING_PRICING_POLICY_DEFAULT = path.join(ROOT, 'config', 'marketing_pricing_policy.json');
 const MARKETING_COST_MAP_DEFAULT = path.join(ROOT, 'tmp', 'mbrs', 'marketing-cost-map.json');
+const HIGH_CLICK_EFFECT_LEDGER_DEFAULT = path.join(ROOT, 'state', 'marketing_high_click_special_effects.json');
 const SHEIN_LINK_HISTORY_DIR = path.join(ROOT, 'outputs', 'shein_links');
 const STORES_CONFIG_DEFAULT = path.join(ROOT, 'config', 'stores.json');
 const ALLOWED_LIMITED_COUPON_OVERLAPS_DEFAULT = path.join(ROOT, 'config', 'marketing_allowed_limited_coupon_overlaps.json');
@@ -128,6 +135,7 @@ function parseArgs(argv) {
     outDir: DEFAULT_OUT_DIR,
     maxAgeHours: DEFAULT_MAX_AGE_HOURS,
     biPortalData: BI_PORTAL_DATA_DEFAULT,
+    biPortalLinksData: BI_PORTAL_LINKS_DATA_DEFAULT,
     targetPlan: '',
     priceOverrides: '',
     targetPlanExplicit: false,
@@ -145,6 +153,7 @@ function parseArgs(argv) {
     else if (a === '--out-dir') args.outDir = path.resolve(argv[++i]);
     else if (a === '--max-age-hours') args.maxAgeHours = Number(argv[++i]);
     else if (a === '--bi-portal-data') args.biPortalData = path.resolve(argv[++i]);
+    else if (a === '--bi-portal-links-data') args.biPortalLinksData = path.resolve(argv[++i]);
     else if (a === '--target-plan') {
       args.targetPlan = path.resolve(argv[++i]);
       args.targetPlanExplicit = true;
@@ -158,6 +167,7 @@ function parseArgs(argv) {
     else if (a === '--cloud-bi-ssh-timeout-ms') args.cloudBiSshTimeoutMs = Number(argv[++i]);
     else if (a === '--cloud-bi-max-bytes') args.cloudBiMaxBytes = Number(argv[++i]);
     else if (a === '--now') args.now = String(argv[++i] || '').trim();
+    else throw new Error(`Unknown argument: ${a}`);
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(args.date)) throw new Error(`Invalid --date ${args.date}; expected YYYY-MM-DD`);
   if (!Number.isFinite(args.maxAgeHours) || args.maxAgeHours <= 0) args.maxAgeHours = DEFAULT_MAX_AGE_HOURS;
@@ -1605,11 +1615,16 @@ function summarizeLimitedDiscountTargetPriceDrift({liveScanSource, priceOverride
   const nowText = formatLocalDateTime(now);
   for (const entry of manualIndex.activeByKey.values()) {
     const key = manualLimitedDiscountKey(entry.storeKey, entry.skc);
-    // Manual-special protection must be proven by a currently active row.
-    // `manualBySkc` also contains future/expired evidence and can otherwise
-    // falsely mark a missing activity as covered.
-    const liveRows = live.bySkc.get(key) || [];
+    const selectedCoverage = selectManualLimitedDiscountCoverageRows(entry, {
+      currentRows: live.bySkc.get(key) || [],
+      allRows: live.manualBySkc.get(key) || [],
+      at: now,
+    });
+    const liveRows = selectedCoverage.rows;
     const liveState = classifyManualLimitedDiscountLiveState(entry, liveRows);
+    const scheduledExact = liveState.status === 'covered_exact'
+      && selectedCoverage.scheduledRows.length > 0
+      && classifyManualLimitedDiscountLiveState(entry, selectedCoverage.currentRows).status !== 'covered_exact';
     const candidates = plan.rowsBySkc.get(key) || [];
     manualRows.push({
       storeKey: entry.storeKey,
@@ -1620,6 +1635,10 @@ function summarizeLimitedDiscountTargetPriceDrift({liveScanSource, priceOverride
       ordinaryFinalTargetPrice: candidates.length ? selectOrderPlanRow(candidates, nowText).planRow?.finalTargetPrice ?? null : null,
       livePrices: liveState.livePrices,
       liveCoverage: liveState.liveCoverage || [],
+      coverageMode: scheduledExact ? 'scheduled_future_exact' : 'current_exact',
+      scheduledStartTimes: scheduledExact
+        ? [...new Set(selectedCoverage.scheduledRows.map(row => row.start).filter(Boolean))]
+        : [],
       activityIds: [...new Set(liveRows.map(row => row.activityId).filter(Boolean))],
       activityNames: [...new Set(liveRows.map(row => row.name).filter(Boolean))],
       validFrom: entry.validFrom,
@@ -1630,7 +1649,9 @@ function summarizeLimitedDiscountTargetPriceDrift({liveScanSource, priceOverride
       sourceArtifact: entry.sourceArtifact,
       actionRequired: liveState.status !== 'covered_exact',
       action: liveState.status === 'covered_exact'
-        ? '用户批准的特殊限时折扣价格精确命中，保持并禁止普通漂移修复覆盖'
+        ? scheduledExact
+          ? '用户批准的特殊限时折扣已精确排期，等待生效并禁止普通漂移修复重复覆盖'
+          : '用户批准的特殊限时折扣价格精确命中，保持并禁止普通漂移修复覆盖'
         : liveState.status === 'missing'
           ? '人工特殊限时折扣缺失：恢复登记中的精确特殊价；库存不足时先核 ET 实盘'
           : '恢复登记中的精确人工特殊价；库存不足时仅在 ET 实盘足够后补平台虚拟库存',
@@ -2358,6 +2379,40 @@ function normalizeActivityWindowFromDoc(doc, sourcePath) {
   };
 }
 
+function normalizeActivityWindowFromStackReviewRow(row, sourcePath) {
+  const rawActivity = row?._raw?.activity || {};
+  const raw = rawActivity.raw || {};
+  const activityId = String(
+    row?.['活动ID']
+    || rawActivity.activityId
+    || rawActivity.activity_id
+    || raw.activity_id
+    || '',
+  ).trim();
+  const eventStart = row?.['普通活动开始']
+    || rawActivity.eventStart
+    || rawActivity.event_start
+    || raw.start_zone_time
+    || '';
+  const eventEnd = row?.['普通活动结束']
+    || rawActivity.eventEnd
+    || rawActivity.event_end
+    || raw.end_zone_time
+    || '';
+  const startDate = parseAnyDateTime(eventStart);
+  const endDate = parseAnyDateTime(eventEnd);
+  if (!activityId || !eventStart || !eventEnd || !startDate || !endDate) return null;
+  return {
+    activityId,
+    activityName: row?.['活动名称'] || rawActivity.name || raw.activity_name || '',
+    eventStart,
+    eventEnd,
+    startMs: startDate.getTime(),
+    endMs: endDate.getTime(),
+    sourcePath,
+  };
+}
+
 function loadActivityWindowEvidence(...docs) {
   const required = collectRequiredActivityKeys(...docs);
   const byStoreActivity = new Map();
@@ -2408,6 +2463,60 @@ function loadActivityWindowEvidence(...docs) {
       if (!byActivity.has(activityId)) byActivity.set(activityId, item);
     } catch (err) {
       inspected.push({path: rel(file), storeKey, activityId, ok: false, error: err.message});
+    }
+  }
+  const unresolvedActivities = new Set(
+    [...required.activities].filter(activityId => !byActivity.has(activityId)),
+  );
+  const unresolvedStoreActivityKeys = new Set(
+    [...required.keys].filter(key => !byStoreActivity.has(key)),
+  );
+  if (unresolvedActivities.size || unresolvedStoreActivityKeys.size) {
+    for (const file of listFiles(DEFAULT_OUT_DIR, /^marketing-stack-review-\d{4}-\d{2}-\d{2}\.json$/i).slice(0, 30)) {
+      try {
+        const doc = JSON.parse(fsSync.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+        const rows = Array.isArray(doc?.detailRows) ? doc.detailRows : [];
+        let matchedRows = 0;
+        for (const row of rows) {
+          const storeKey = normKey(row?.['店铺'] || row?.storeKey || row?.store);
+          const activityId = String(row?.['活动ID'] || row?.activityId || '').trim();
+          const storeActivityKey = planActivityKey(storeKey, activityId);
+          if (
+            !unresolvedActivities.has(activityId)
+            && !unresolvedStoreActivityKeys.has(storeActivityKey)
+          ) {
+            continue;
+          }
+          const window = normalizeActivityWindowFromStackReviewRow(row, rel(file));
+          if (!window) continue;
+          const item = {...window, storeKey};
+          if (storeActivityKey && !byStoreActivity.has(storeActivityKey)) {
+            byStoreActivity.set(storeActivityKey, item);
+            unresolvedStoreActivityKeys.delete(storeActivityKey);
+          }
+          if (!byActivity.has(activityId)) {
+            byActivity.set(activityId, item);
+            unresolvedActivities.delete(activityId);
+          }
+          matchedRows += 1;
+        }
+        if (matchedRows) {
+          inspected.push({
+            path: rel(file),
+            sourceType: 'marketing_stack_review',
+            ok: true,
+            matchedRows,
+          });
+        }
+        if (!unresolvedActivities.size && !unresolvedStoreActivityKeys.size) break;
+      } catch (err) {
+        inspected.push({
+          path: rel(file),
+          sourceType: 'marketing_stack_review',
+          ok: false,
+          error: err.message,
+        });
+      }
     }
   }
   const missingStoreActivityKeys = [...required.keys]
@@ -3405,6 +3514,31 @@ function humanCount(value, unit = '个') {
   return `${n} ${unit}`;
 }
 
+function humanPercent(value) {
+  if (value === null || value === undefined || value === '') return '缺证据';
+  const n = Number(value);
+  return Number.isFinite(n) ? `${(n * 100).toFixed(2)}%` : '缺证据';
+}
+
+function humanEffectStatus(value) {
+  return ({
+    converted: '已出单',
+    observing_no_sale_yet: '活动中，暂未出单',
+    ended_without_sale: '已到期，仍未出单',
+    missing_current_metrics: '缺当前7日指标',
+    pending: '待开始',
+  })[String(value || '')] || String(value || '未知');
+}
+
+function humanWindowStatus(value) {
+  return ({
+    active: '进行中',
+    ended: '已到期',
+    pending: '待开始',
+    invalid_window: '时间窗异常',
+  })[String(value || '')] || String(value || '未知');
+}
+
 function humanSourceWarningText(warning) {
   const labelMap = {
     marketingStackReview: '营销审核表',
@@ -3661,6 +3795,8 @@ function buildHumanSummary(report) {
   const mandatoryLimited = report.mandatoryLimitedDiscountStatus || {};
   const ordinaryIssues = report.ordinaryEnrollmentOpenIssues || {};
   const ordinarySupplementIssues = report.ordinaryEnrollmentSupplementOpenIssues || {};
+  const highClickSpecial = report.highClickLowConversionSpecial || {};
+  const highClickEffect = report.highClickSpecialEffect || {};
 
   for (const blocker of report.blockers || []) {
     actions.push({level: '必须处理', text: humanBlockerText(blocker)});
@@ -3696,6 +3832,14 @@ function buildHumanSummary(report) {
     });
   } else if (newListingLimited.enabled !== false) {
     ok.push('新上架 7 天/重新上架无活动限时折扣：没有需要 Top5 待遇兜底/重报的链接。');
+  }
+  if (Number(highClickSpecial.actionCount || 0) > 0) {
+    watches.push(`高点击低转化专属折扣：${humanCount(highClickSpecial.actionCount, '条')}符合“7日曝光>3000、7日点击率>4%、7日销量=0”，已进入先登记保护、再 dry-run/执行/live 回读的自动队列；价格按同货号全局曝光Top5利润率再降2个百分点，库存10、周期7天。`);
+  } else if (highClickSpecial.enabled !== false) {
+    ok.push(`高点击低转化专属折扣：本轮符合条件 ${humanCount(highClickSpecial.qualifyingCount || 0, '条')}，其中已有有效人工特殊价保护 ${humanCount(highClickSpecial.protectedCount || 0, '条')}，无新增自动写入。`);
+  }
+  if (Number(highClickEffect.total || 0) > 0) {
+    watches.push(`特殊折扣效果：跟踪 ${humanCount(highClickEffect.total, '条')}，最新7日口径已出单 ${humanCount(highClickEffect.convertedCount || 0, '条')}、仍在观察且0单 ${humanCount(highClickEffect.observingNoSaleCount || 0, '条')}、到期仍0单 ${humanCount(highClickEffect.endedWithoutSaleCount || 0, '条')}、当前指标缺失 ${humanCount(highClickEffect.missingCurrentMetricsCount || 0, '条')}；这是滚动7日方向性对比，不把同期变化误写成折扣因果。`);
   }
   if (Number(fallbackGaps.total || 0) > 0) {
     const storeText = storeCountText(fallbackGaps.byStore || {}, 6);
@@ -3812,6 +3956,35 @@ function buildMarkdown(report) {
   lines.push(`- 剩余缺口：${mandatoryHuman.remainingText || '未生成限时折扣缺口摘要。'}`);
   lines.push(`- 后续动作：${mandatoryHuman.actionText || '继续按必报兜底规则巡检。'}`);
   lines.push('');
+  lines.push('## 高点击低转化专属折扣');
+  lines.push('');
+  const highClickSpecial = report.highClickLowConversionSpecial || {};
+  const highClickEffect = report.highClickSpecialEffect || {};
+  lines.push('- 触发条件：当前在售，近7天曝光人数严格大于3000、近7天点击率严格大于4%，且近7天销量明确为0；缺失销量不按0处理。');
+  lines.push(`- 本轮候选：符合 ${humanCount(highClickSpecial.qualifyingCount || 0, '条')}；新增待自动登记/执行 ${humanCount(highClickSpecial.actionCount || 0, '条')}；已有人工特殊价保护 ${humanCount(highClickSpecial.protectedCount || 0, '条')}；价格证据阻断 ${humanCount(highClickSpecial.blockedCount || 0, '条')}。`);
+  lines.push('- 执行口径：同货号全局曝光Top5利润率再降低2个百分点，库存10、周期7天；先登记人工特殊价保护，再 dry-run、执行和 live 回读。');
+  if ((highClickSpecial.rows || []).length) {
+    lines.push('');
+    lines.push('| 店铺 | 品名/货号 | SKC | 7日曝光 | 7日点击率 | 7日销量 | 专属价 SAR |');
+    lines.push('|---|---|---|---:|---:|---:|---:|');
+    for (const row of highClickSpecial.rows.slice(0, 20)) {
+      lines.push(`| ${row.storeKey} | ${String(row.productName || row.canonical || '').replaceAll('|', '/')} | ${row.skc} | ${row.metrics?.c7Exposure ?? ''} | ${humanPercent(row.metrics?.c7ClickRate)} | ${row.metrics?.c7SaleCount ?? ''} | ${num(row.specialPrice)} |`);
+    }
+  }
+  lines.push('');
+  lines.push(`- 效果跟踪：共 ${humanCount(highClickEffect.total || 0, '条')}；最新7日已出单 ${humanCount(highClickEffect.convertedCount || 0, '条')}；活动中仍0单 ${humanCount(highClickEffect.observingNoSaleCount || 0, '条')}；到期仍0单 ${humanCount(highClickEffect.endedWithoutSaleCount || 0, '条')}；缺当前指标 ${humanCount(highClickEffect.missingCurrentMetricsCount || 0, '条')}；缺基线 ${humanCount(highClickEffect.missingBaselineCount || 0, '条')}。`);
+  lines.push('- 效果解释：按报名时基线与当前滚动7日曝光、点击率、销量做方向性对比；报告不会把同期流量变化直接当成折扣造成。');
+  if ((highClickEffect.rows || []).length) {
+    lines.push('');
+    lines.push('| 店铺 | 品名/货号 | SKC | 特殊价 | 状态 | 基线曝光/点击率/销量 | 当前曝光/点击率/销量 | 判断 |');
+    lines.push('|---|---|---|---:|---|---|---|---|');
+    for (const row of highClickEffect.rows.slice(0, 30)) {
+      const baseline = row.baseline || {};
+      const current = row.current || {};
+      lines.push(`| ${row.storeKey} | ${String(row.canonical || '').replaceAll('|', '/')} | ${row.skc} | ${num(row.specialPrice)} | ${humanWindowStatus(row.windowStatus)} | ${baseline.c7Exposure ?? '缺'}/${humanPercent(baseline.c7ClickRate)}/${baseline.c7SaleCount ?? '缺'} | ${current.c7Exposure ?? '缺'}/${humanPercent(current.c7ClickRate)}/${current.c7SaleCount ?? '缺'} | ${humanEffectStatus(row.effectStatus)} |`);
+    }
+  }
+  lines.push('');
   lines.push('## 今日关键状态');
   lines.push('');
   lines.push(`- 价格止损阻塞：${report.blockers.length ? `${humanCount(report.blockers.length, '个')}，不能自动执行` : '无'}`);
@@ -3820,6 +3993,7 @@ function buildMarkdown(report) {
   lines.push(`- 订单商品行成交价：云端读取 ${humanCount(report.orderPriceAudit.cloud?.rows || 0, '行')}；活动窗口内命中目标并比价 ${humanCount(report.orderPriceAudit.cloud?.matchedPlanRows || 0, '行')}；窗口外历史线索 ${humanCount(report.orderPriceAudit.outsideWindow, '条')}；未命中计划背景数 ${humanCount(report.orderPriceAudit.cloud?.unmatchedRows || 0, '行')}；低于目标 ${humanCount(report.orderPriceAudit.below, '条')}；高于目标 ${humanCount(report.orderPriceAudit.above, '条')}；缺窗口/价格/粒度证据 ${humanCount(report.orderPriceAudit.dataQualityRows, '条')}`);
   const manualSpecial = report.manualSpecialLimitedDiscount || report.limitedDiscountTargetPriceDrift?.manualSpecialLimitedDiscount || {};
   lines.push(`- 人工特殊限时折扣保护：有效登记 ${humanCount(manualSpecial.activeCount || 0, '条')}；精确覆盖 ${humanCount((manualSpecial.coveredRows || []).length, '条')}；缺失/错价待恢复 ${humanCount(manualSpecial.actionCount || 0, '条')}。`);
+  lines.push(`- 高点击低转化专属折扣：符合 ${humanCount(highClickSpecial.qualifyingCount || 0, '条')}；新增自动队列 ${humanCount(highClickSpecial.actionCount || 0, '条')}；已保护 ${humanCount(highClickSpecial.protectedCount || 0, '条')}；效果已出单 ${humanCount(highClickEffect.convertedCount || 0, '条')}。`);
   const couponTrafficIntent = report.couponTrafficIntent || {};
   const budgetPrefix = couponTrafficIntent.enabled ? '可选流量券预算' : '优惠券预算观察';
   lines.push(`- ${budgetPrefix}：明确流量券目标 ${humanCount(couponTrafficIntent.allowed15TrafficCount || 0, '个')}；低于预算目标的店铺 ${humanCount(report.couponBudget.belowTargetCount, '个')}；缺回读证据 ${humanCount(report.couponBudget.missingEvidenceCount, '个')}`);
@@ -3880,7 +4054,7 @@ async function main() {
   });
   const biPortal = biPortalSelection.selected;
   sources.push(biPortal.source);
-  const biPortalLinksData = await read('biPortalLinksData', BI_PORTAL_LINKS_DATA_DEFAULT);
+  const biPortalLinksData = await read('biPortalLinksData', args.biPortalLinksData);
   const marketingPricingPolicy = await loadMarketingPricingPolicy(MARKETING_PRICING_POLICY_DEFAULT);
   const manualLimitedDiscountRegistry = await loadManualLimitedDiscountRegistry();
   const targetPlan = await read('targetSelectionPlan', args.targetPlan);
@@ -4097,6 +4271,28 @@ async function main() {
     currentMarketingLiveScanSource,
     manualLimitedDiscountRegistry,
     now,
+  });
+  const highClickSpecialPolicy = getHighClickSpecialPolicy(marketingPricingPolicy);
+  const highClickLowConversionSpecial = buildHighClickLowConversionSpecialAudit({
+    linksDataDoc: biPortalLinksData.data,
+    priceOverridesDoc: priceOverrides.data,
+    costDoc: readJsonSafe(MARKETING_COST_MAP_DEFAULT) || {},
+    manualRegistry: manualLimitedDiscountRegistry,
+    marketingPolicy: marketingPricingPolicy,
+    reportDate: args.date,
+    now,
+    sourceLinksData: biPortalLinksData.source.path || rel(args.biPortalLinksData),
+    sourceLinksDataStatus: biPortalLinksData.source.status || 'missing',
+    sourcePriceOverrides: priceOverrides.source.path || rel(args.priceOverrides),
+    sourceCostMap: rel(MARKETING_COST_MAP_DEFAULT),
+  });
+  const highClickSpecialEffect = buildHighClickSpecialEffectAudit({
+    linksDataDoc: biPortalLinksData.data,
+    manualRegistry: manualLimitedDiscountRegistry,
+    experimentLedger: readJsonSafe(HIGH_CLICK_EFFECT_LEDGER_DEFAULT),
+    root: ROOT,
+    now,
+    policy: highClickSpecialPolicy,
   });
   const couponTrafficIntent = summarizeCouponTrafficIntent(couponEligibilityPlan);
   const optionalTrafficCouponReview = optionalTrafficCouponReviewStatus({couponEligibilityPlan});
@@ -4376,6 +4572,14 @@ async function main() {
       },
     );
   }
+  if (Number(highClickLowConversionSpecial.blockedCount || 0) > 0) {
+    sourceWarnings.push({
+      code: 'high_click_special_pricing_blocked',
+      label: 'highClickLowConversionSpecial',
+      message: `高点击低转化专属折扣有 ${highClickLowConversionSpecial.blockedCount} 条因成本/Top5价格/利润率底线证据不足而未进入自动写入队列`,
+      evidence: {samples: (highClickLowConversionSpecial.blockedRows || []).slice(0, 20)},
+    });
+  }
   if (orderPriceAudit.cloud.dataQualityRows > 0) {
     sourceWarnings.push({
       code: 'cloud_order_price_data_quality',
@@ -4561,6 +4765,8 @@ async function main() {
     knownOrdinaryActivityGuard,
     aboveTargetActions,
     newSkcCandidates,
+    highClickLowConversionSpecial,
+    highClickSpecialEffect,
     orderPriceAudit,
     limitedDiscountTargetPriceDrift,
     manualSpecialLimitedDiscount,
@@ -4623,6 +4829,8 @@ async function main() {
     && !report.newSkcCandidates.needsConfirmation
     && !report.newSkcCandidates.needsAgeReview
     && !report.newSkcCandidates.needsCouponReview
+    && !report.highClickLowConversionSpecial.actionCount
+    && !report.highClickLowConversionSpecial.blockedCount
     && !report.couponNonGuaranteedFallbackGaps.total
     && !report.ordinaryEnrollmentOpenIssues.issueCount
     && !report.ordinaryEnrollmentOpenIssues.missingFillEvidence

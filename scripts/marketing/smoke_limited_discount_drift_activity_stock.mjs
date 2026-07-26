@@ -36,6 +36,14 @@ assert.equal(plan.groups[0].rows[0].activityStock, 10);
 const lockedSnapshot = {rows: [{totalInventoryQuantity: 10, totalUsableInventory: 9, totalLockedQuantity: 1}]};
 assert.equal(computePlatformOverwriteQuantity(10, lockedSnapshot), 11);
 assert.equal(computePlatformOverwriteQuantity(8, lockedSnapshot), 10, 'inventory recovery must not reduce current total inventory');
+const hiddenUnavailableSnapshot = {rows: [{totalInventoryQuantity: 10, totalUsableInventory: 9, totalLockedQuantity: 0}]};
+assert.equal(
+  computePlatformOverwriteQuantity(10, hiddenUnavailableSnapshot),
+  11,
+  'observed unavailable inventory must be compensated even when the platform reports zero explicit locks',
+);
+const noGapSnapshot = {rows: [{totalInventoryQuantity: 10, totalUsableInventory: 10, totalLockedQuantity: 0}]};
+assert.equal(computePlatformOverwriteQuantity(10, noGapSnapshot), 10);
 assert.notEqual(
   buildInventoryIdempotencyKey({store: 'LQ', skc: 'sv-test', activityStock: 10, overwriteQuantity: 10}),
   buildInventoryIdempotencyKey({store: 'LQ', skc: 'sv-test', activityStock: 10, overwriteQuantity: 11}),

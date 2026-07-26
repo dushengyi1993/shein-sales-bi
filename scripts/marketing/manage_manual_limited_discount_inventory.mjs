@@ -80,10 +80,12 @@ export function computePlatformOverwriteQuantity(activityStock, stockSnapshot) {
   const row = asArray(stockSnapshot?.rows)[0] || {};
   const locked = Math.max(0, Number(row.totalLockedQuantity || 0));
   const currentTotal = Math.max(0, Number(row.totalInventoryQuantity || 0));
+  const currentUsable = Math.max(0, Number(row.totalUsableInventory || 0));
+  const observedUnavailable = Math.max(locked, currentTotal - currentUsable);
   if (!Number.isInteger(requiredUsable) || requiredUsable <= 0) {
     throw new Error(`Invalid required usable inventory: ${activityStock}`);
   }
-  return Math.max(currentTotal, requiredUsable + locked);
+  return Math.max(currentTotal, requiredUsable + observedUnavailable);
 }
 
 function inventoryWriteLockPath(store, skc) {

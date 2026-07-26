@@ -293,6 +293,22 @@ const verifiedRejected = await __testHooks.inspectTargetDuplicateProducts(
 check('live state 3 rejection override allows one replacement', verifiedRejected.blockers.length, 0);
 check('live state 3 rejection override is audited', verifiedRejected.evidence.rejectedReplacementOverride.liveValidation.status, 'verified_terminal_rejected');
 
+const withdrawnReplacementTask = {
+  allowDuplicateNewPublish: true,
+  notes: {
+    repairMode: 'republish_withdrawn',
+    replacesWithdrawnTarget: {store: 'TZ', spu: 'v9000001', skc: 'sv9000001', state: 4},
+  },
+};
+const verifiedWithdrawn = await __testHooks.inspectTargetDuplicateProducts(
+  duplicateGuardClient({shelfStatus: 1, recycleStatus: 0, documentState: 4}),
+  duplicateGuardPayload,
+  'TZ',
+  withdrawnReplacementTask,
+);
+check('live state 4 withdrawn override allows one replacement', verifiedWithdrawn.blockers.length, 0);
+check('live state 4 withdrawn override is audited', verifiedWithdrawn.evidence.rejectedReplacementOverride.liveValidation.status, 'verified_terminal_withdrawn');
+
 const ok = checks.every(row => row.pass);
 console.log(JSON.stringify({ok, checks}, null, 2));
 if (!ok) process.exit(1);

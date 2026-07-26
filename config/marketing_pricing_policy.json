@@ -18,6 +18,7 @@
       "restore_manual_special_limited_discount",
       "repair_limited_discount_target_price_drift",
       "apply_new_listing_limited_discount_fallback",
+      "apply_high_click_low_conversion_special_discount",
       "create_or_replace_limited_discount_activity",
       "top_up_limited_discount_virtual_inventory"
     ],
@@ -100,6 +101,31 @@
     "whenBaseAboveFloor": "lower_top_links_by_delta",
     "fixedPricePolicy": "do_not_override_fixed_price_or_row_override",
     "sourceNote": "Top links are ranked globally per standard_goods_sn across all stores and all links. Ranking uses positive 7-day exposure first; only when a whole standard_goods_sn has no positive 7-day exposure does it fall back to 30-day/total exposure. Rows with no positive metric in the selected fallback tier are not used for top-link ranking; if exposure data is unavailable, scripts keep the base margin and mark the exposure rule as not applied."
+  },
+  "highClickLowConversionSpecial": {
+    "enabled": true,
+    "criteria": {
+      "c7ExposureMinExclusive": 3000,
+      "c7ClickRateMinExclusive": 0.04,
+      "c7SaleCountEquals": 0,
+      "onShelfOnly": true
+    },
+    "pricing": {
+      "top5MarginDeltaPct": 2,
+      "floorMarginPct": 15,
+      "rounding": "ceil2"
+    },
+    "limitedDiscount": {
+      "activityStock": 10,
+      "durationDays": 7,
+      "activityNamePrefix": "高点击低转化专属限时折扣"
+    },
+    "effectReview": {
+      "enabled": true,
+      "lookbackDays": 30,
+      "method": "rolling_7d_directional_comparison_not_causal_attribution"
+    },
+    "ruleNote": "当前在售链接只有在近7天曝光人数严格大于3000、近7天点击率严格大于4%且近7天销量明确为0时才进入自动专属折扣。点击率使用c7_goods_uv/c7_eps_uv计算；缺失销量不能当0。价格按最新已批准普通活动同标准货号全局曝光Top5商品成本利润率再降低2个百分点，并遵守15%利润率底线；活动库存10、有效期7天。提交前必须先写人工特殊折扣保护登记，后续漂移/兜底不得覆盖。"
   },
   "newListingWithin7Days": {
     "enabled": true,
