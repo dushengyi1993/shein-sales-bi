@@ -2,6 +2,8 @@
 
 > 基础台账生成时间：`2026-07-03T04:38:53.590Z`；2026-07-19 复核官方目录为 243 条（OpenAPI 220、Webhook 23），新增 Webhook `3001903 商品删除审核通知`。来源：SHEIN 开放平台公开文档中心目录接口；本文件不包含任何密钥、Cookie 或店铺授权值。
 
+> 状态说明：下方 `integrated_read_parallel` 等标签是基础快照的接入分类，不是 2026-07-26 的生产路由总账。当前半托销售切源和 DL 单一 App + 19 店授权拓扑分别以 [Webhook 实时切换记录](bi-webhook-live-cutover-2026-07-23.md) 与 [单应用生产切换记录](openapi-single-app-production-cutover-2026-07-26.md) 为准。
+
 ## 刷新方式
 
 ```powershell

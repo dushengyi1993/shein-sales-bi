@@ -2,7 +2,7 @@
 
 > 当前项目正在从“登录浏览器抓取 SHEIN 后台数据”逐步切换到 SHEIN 官方开放平台 API。本文记录当前已确认的官方规则、应用创建口径、本地配置边界和分阶段接入计划。
 
-> 2026-06-28 补充：当前项目同时存在两条“API 化”链路。`SHEIN 官方 OpenAPI` 需要开放平台应用、授权和签名，19 店已完成授权/探针/隔离对账与受控写预检；`SHEIN 后台 WebAPI 直连` 复用已登录 Cookie/session 调后台接口，仍用于当前销售生产抓取的无浏览器直连优先。两者不要混为一谈，密钥和 Cookie session 都不得进入 GitHub。
+> 2026-06-28 历史边界：项目同时存在官方 OpenAPI 与复用登录态的后台 WebAPI。2026-07-23 起销售事实已切为 Webhook/按单 OpenAPI + 最终日全店门禁；WebAPI 仍用于独立核对和未完全 API 化的数据域。两者不要混为一谈，密钥和 Cookie session 都不得进入 GitHub。
 
 > 2026-07-26 更新：半托生产数据面已统一为 **DL 单一 App + 19 店各自唯一 OpenKey**。通用读取、受控写、BI/CLI、日更对账、营销库存兜底和 Webhook 均使用同一份私有配置；原独立 App 只保留为回滚资产。详见 [单应用生产切换记录](openapi-single-app-production-cutover-2026-07-26.md)。
 
@@ -172,7 +172,7 @@ node scripts/load_bi_warehouse.mjs --sales-dir outputs/shein_openapi_fetch --sal
 ### P3：当前启用店铺分批替换
 
 - 每批授权若干店铺。
-- 同一数据域先双跑：官方 OpenAPI 与当前生产销售源（WebAPI 直连优先，必要时浏览器回退）并行一段时间。
+- 同一数据域切源前先双跑对账。半托销售已在 2026-07-23 完成 Webhook/按单 OpenAPI 切换，并保留最终日 WebAPI 独立核对；退货、商品、链接和编辑级资料继续按各自证据与门禁逐项切换。
 - 对账稳定后，将该数据域切到 API。
 - 浏览器 profile 仅保留为登录、Cookie/session 刷新、排障和回退工具。
 

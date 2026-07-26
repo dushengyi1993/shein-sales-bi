@@ -1,6 +1,6 @@
 # SHEIN 营销折扣自动化路线图
 
-> 当前状态：2026-06-28。本文只沉淀系统规则、动作边界和后续实现顺序；不写 SHEIN session、BI 登录密码、OpenAPI 密钥或 `.local` 运行态。
+> 当前状态：2026-07-26。本文只沉淀系统规则、动作边界和后续实现顺序；生产排班以 `infra/systemd/*.timer` 为准，不写 SHEIN session、BI 登录密码、OpenAPI 密钥或 `.local` 运行态。
 
 ## 1. 核心不变量
 
@@ -57,10 +57,11 @@
 已存在 Codex heartbeat 自动任务 `shein-daily`：
 
 - 名称：`SHEIN 营销价格栈每日巡检`
-- 计划：Codex heartbeat 在本会话继续报告；完整巡检保持独立分钟级运行。大批修复改由队列 worker 在北京时间 `10:50/12:50/14:50/16:50/18:50` 取任务，单轮最多 `8` 个活动组、最长 `40` 分钟，不再由巡检同步等待。
-- 防撞车：全量 live scan 不是“看到空闲就硬跑”。开跑前必须检查核心服务 active；同时避开 ET forwarder 奇数小时 `:20`、整点销售刷新、晨间链路/日更、登录态管家、备份、订单闭环和 watchdog。browser cleanup 已改为每小时 `:15` 且租约感知，只回收孤儿，不再作为迫使有效任务中断的资源窗口。当天第一次完整巡检成功后，后续 timer 只作失败重试，不能因 repair queue 尚未完成就重新全扫并重建工作 hash。
-- 边界：先检查云端核心任务是否正在运行，再运行 `build_marketing_daily_guard_report.mjs` 和后台 live scan/readback；生成风险报告、精确 manifest/hash 和候选活动组并入队。巡检最长 `30` 分钟，不能等待写入。普通活动、优惠券、补预算仍不得自动真实提交/取消；限时折扣价格漂移、新链接/新上架 7 天/重新上架及在售老链接 `30` 天兜底是已授权自动写入例外，worker 必须通过身份校验、价格栈校验、dry-run、执行后全店 live readback；继续禁止 `30%/50%` 券真实上线。
+- 计划：Codex heartbeat 在本会话继续报告；完整巡检保持独立分钟级运行。大批修复改由队列 worker 在北京时间 `10:50/12:50/14:50/16:50/18:50/19:30` 取任务，单轮最多 `8` 个活动组、最长 `40` 分钟，不再由巡检同步等待。
+- 防撞车：全量 live scan 不是“看到空闲就硬跑”。开跑前必须检查核心服务 active；同时避开 ET forwarder 的固定 `:20` 窗口、晨间链路/日更、登录态管家、备份、订单闭环和 watchdog。当天销售已由 Webhook 实时触发，不再假设存在整点销售 timer。browser cleanup 只在 `03:45/09:50/21:00` 运行且租约感知，只回收孤儿，不再作为迫使有效任务中断的资源窗口。当天第一次完整巡检成功后，后续 guard timer 只作失败重试，不能因 repair queue 尚未完成就重新全扫并重建工作 hash。
+- 边界：先检查云端核心任务是否正在运行，再运行 `build_marketing_daily_guard_report.mjs` 和后台 live scan/readback；生成风险报告、精确 manifest/hash 和候选活动组并入队。巡检最长 `30` 分钟，不能等待写入。普通活动、优惠券、补预算仍不得自动真实提交/取消；限时折扣价格漂移、新链接/新上架 7 天/重新上架及在售老链接兜底、高点击低转化专属折扣是已授权自动写入例外，worker 必须通过身份校验、价格栈校验、dry-run、执行后全店 live readback；继续禁止 `30%/50%` 券真实上线。
 - 限时折扣漂移自动修复：guard 报告中 `limitedDiscountTargetPriceDrift.belowRows` 非空时，生成精确 manifest/hash 后入队；worker 同店复用浏览器并按活动组 resume。价格漂移与兜底计划在 `storeKey + SKC` 上必须互斥。替换统一走“旧保护快照 → 删除 → 目标创建/readback → 失败自动补偿恢复”，平台阻断仍保留为待处理，不能把“旧保护已恢复”冒充修复成功。
+- 批次部分成功也属于可恢复状态：执行结果已有 `createdActivityId` 和 `desiredCoveredSkcs` 时，resume 只跳过这些精确成功键，不得因为组级 `ok=false` 重放整个活动组。延后组优先返回“仍有工作”状态；只有阻断项且本批已消费完成时允许进入最终 live readback，由最新差集重建更小的 blocker 队列。
 - 旧 `shein` automation（目标线程 `019dfc8b-7bb1-7ff1-a66d-b10ae67053fa`）和旧 `dl` automation 已停用。
 - 口径：活动标签只做候选信号，真实决策必须先按时间窗口合并普通营销活动价、限时折扣价、当前售价等证据，比较“不含券的保底成交价”与 `finalTargetPrice`；`couponFactor` 只用于触券下探风险，不再用于证明目标成交价必然达成。
 
@@ -71,7 +72,7 @@
 - repair worker 的最终闭环必须按固定顺序执行：19 店普通活动/优惠券 session HTTP stack review 刷新 → 19 店价格栈 final scan → guard 重建。价格栈放在最后，避免待生效活动在 stack review 期间跨过开始时间，又被旧价格快照重新判为缺口。大批修复可能超过 `30` 分钟的同轮证据时差；如果不刷新 stack review，guard 会把已被当日 live 证据取代的历史 coupon/overlap 中间文件重新判成 stale blocker。最终 stack review 是 browserless session HTTP 刷新，不得回退为逐店前端扫描。
 - `source stale` 只表示证据需要刷新，不等于可以自动全店 live scan；如果没有低价止损、补券窗口或用户授权，日报只能报告“需补证据/等待窗口”，不得用全量前端扫描替代判断。
 - 若调用 `scripts/marketing/submit_coupon_activity_goods.mjs`，必须带 `--dry-run` 或 `--no-submit`。
-- 默认禁止本地 heartbeat 向写入型脚本传 `--execute`。云端 worker 的长期授权例外包括限时折扣价格漂移修复、登记中的人工特殊折扣恢复，以及新链接/新上架 7 天/重新上架无活动/漏限时折扣兜底；它们不逐次索要人工确认，但每轮必须自动计算并校验精确 payload/work hash，同时通过授权 ID/上下文、身份、价格栈、库存/平台校验、dry-run 和执行后 live 回读。优惠券取消、补预算、普通活动报名和无证据写入仍不得自动执行。
+- 默认禁止本地 heartbeat 向写入型脚本传 `--execute`。云端 worker 的长期授权例外包括限时折扣价格漂移修复、登记中的人工特殊折扣恢复、新链接/新上架 7 天/重新上架无活动/漏限时折扣兜底，以及满足严格 7 日指标的高点击低转化专属折扣；它们不逐次索要人工确认，但每轮必须自动计算并校验精确 payload/work hash，同时通过授权 ID/上下文、身份、价格栈、库存/平台校验、dry-run 和执行后 live 回读。优惠券取消、补预算、普通活动报名和无证据写入仍不得自动执行。
 - 真实提交、回读、限时折扣补报或用户手动接管后，都必须把本批店铺浏览器关掉；全店批量任务结束后做一次全店 close 和 debug port 检查，确认没有店铺 profile 残留，不能把浏览器清理完全寄托给定时 cleanup。
 - 浏览器清理的完成条件包含店铺 profile 的 `SingletonLock/Cookie/Socket` 清理；仅在该 profile 已无 Chrome 进程时删除。进程和端口为 0 但 Singleton 锁仍在，不能视为可供下一批复用。
 - 标签仍存在时不能机械阻塞：不含券保底价低于目标价或缺价格证据才阻塞；保底价命中目标才算价格保障正确。优惠券只能作为流量试验候选，不能用于把偏高保底价“算成达标”。
@@ -111,13 +112,14 @@
 | 可报活动提前三天提醒 | 活动报名截止时间进入 `T-3` | 营销活动列表全量分页、店铺身份 | 生成待报活动清单、缺成本/缺覆盖价/缺仓储费阻塞 | 不自动报名；用户确认备注和覆盖价后再执行 | 活动 ID、报名截止、可报商品数、阻塞原因 |
 | `30%/50%` 券研究 | 用户要求研究且普通活动可报 | 普通活动计划、券档、成本、目标价、平台最低折扣、旧普通活动/限时折扣价 | 运行 `build_high_coupon_research_candidates.mjs` 只输出测算：哪些 SKC 理论可用更高券 | 禁止真实上线；不得生成提交命令；必须保证平台折扣满足、最终价不低于底价且无更低旧活动打穿 | 研究表、利润红线、平台最低降幅、旧活动证据 |
 | 三层价格栈日常巡检 | 每日销售/链接/业务域刷新后 | BI 数据、live 活动集合、订单审计 | 风险日报：低于目标、偏高、待系统取证、预算不足、登录阻塞 | 默认只读；长期授权内的限时折扣修复可自动 dry-run/execute/rescan，其余写入单独授权 | 风险计数、店铺/SKC/货号、补救状态 |
+| 高点击低转化专属折扣 | 当前在售，7 日曝光 `>3000`、点击率 `>4%`、销量明确为 `0` | 最新 linksData、批准价、成本、特殊价保护登记 | Top5 利润率再降 2 个百分点，库存 10、周期 7 天 | 属于长期授权限时折扣动作；登记保护后才可 dry-run/execute/readback，执行前重读指标 | 精确计划/work hash、保护登记、活动 ID、逐条 live 回读、滚动 7 日方向性效果 |
 | 云端运营系统协同 | BI 自动运营驾驶舱上线后 | PostgreSQL、BI Portal API、任务状态表 | 给同事分配店铺、展示动作卡、记录处理状态 | 同事只能处理被分配店铺；真实提交前需要权限和二次确认 | 操作审计、负责人、状态、执行日志 |
 
 ### 4.1 巡检频率和前端资源边界
 
 日常巡检的目标是发现必须处理的风险，不是每天把所有前端 profile 重跑一遍。标准分层如下：
 
-1. **每日 live 观察层**：先运行 `build_marketing_daily_guard_report.mjs --cloud-bi-ssh shein-bi-tencent --cloud-bi-root /opt/shein-bi/app` 读取经营线索，但不能以 BI 作为已报/未报最终证据；每日必须有当天或足够新鲜的 SHEIN 后台 live scan/readback，直接读取普通活动、限时折扣、优惠券集合。优先用云端可用浏览器；没有云端浏览器时，用本地店铺 profile 小批次扫描并立即关闭。
+1. **每日 live 观察层**：先运行 `build_marketing_daily_guard_report.mjs --cloud-bi-ssh shein-bi-tencent --cloud-bi-root /opt/shein-bi/app` 读取经营线索，但不能以 BI 作为已报/未报最终证据；每日必须有当天或足够新鲜的 SHEIN 后台 live scan/readback，直接读取普通活动、限时折扣、优惠券集合。普通活动和价格栈优先走云端 session HTTP，不启动浏览器；只有写入、登录恢复或平台无 HTTP 能力的步骤才按店铺最小集合取得浏览器租约，完成后立即关闭。
 2. **定点补证层**：guard 或 live scan 出现具体店铺/SKC 的低价止损、普通活动漏报、身份异常、限时折扣兜底缺口或可选流量券候选时，只扫这些店铺/活动，不扫无关店铺。
 3. **一次性验收层**：大批量真实提交完成后允许做一次全量回读，作为该批次最终验收；之后同一批次不重复全量，除非有新异常或用户要求。
 4. **人工窗口处理层**：到约定处理窗口后，先用 guard / 风险计划缩小候选范围，再分批 dry-run 和执行取消券、限时折扣或普通活动补报；补完后只对影响店铺做必要回读，不把“全量前端复核”做成日常动作。
@@ -162,13 +164,18 @@
 - 限时折扣目标价漂移检测：guard 将当前 live 限时折扣行与活跃目标价窗口对比，低于当前目标价的行标记为 blocker/risk。
 - 限时折扣漂移自动修复链路：`guard_limited_discount_drift.mjs` 判断 `limitedDiscountTargetPriceDrift.belowRows` 非空后生成精确 manifest，`batch_fix_limited_discount_drift.mjs` 按组交给事务执行器。事务顺序固定为“锁旧保护快照与 hash → 删除目标 SKC → 创建并精确回读目标活动 → 任一失败按快照恢复旧保护”；平台阻断或安全恢复仍保持待处理，不能记作成功。
 - 用户批准的人工特殊限时折扣以 `config/marketing_manual_limited_discount_overrides.json` 为事实源。有效窗口内 guard 单列 `manualSpecialLimitedDiscount`，不进入普通漂移队列；漂移计划器、漂移执行器、新链接/重新上架计划器和底层 rescue 执行器都要独立重读登记表，旧 guard/旧 rescue 也不能绕过。特殊活动缺失或错价时恢复登记中的精确价格、库存和 `validTo`，到期后自动恢复普通规则。
+- 高点击低转化自动实验的候选口径为当前在售、`c7_eps_uv > 3000`、`c7_goods_uv / c7_eps_uv > 4%`、`c7_sale_cnt = 0`。guard 生成 `highClickLowConversionSpecial` 审计区及精确计划，worker 在登记前重读最新链接指标，防止 stale guard 给已经出单/跌出阈值的链接继续降价。
+- 高点击专属价按同标准货号最新已批准全局曝光 Top5 商品成本利润率再降 2 个百分点，最低利润率 15%，活动库存 10、周期 7 天。执行顺序固定为“写保护登记 -> 复用人工特殊恢复器 dry-run/ET 门控库存/事务替换/live readback -> 回写 activityId”；不可覆盖的 plan 副本保留报名基线，供后续效果日报读取。
+- 人工特殊活动提交后可能被 SHEIN 排到数十分钟后生效。guard 仅在 future 行的活动 ID 等于保护登记 `currentActivityId`、价格/库存/截止精确命中且开始时间不超过当前两小时时，视为 `scheduled_future_exact`，否则仍 fail-closed；这样既避免刚创建后重复救援，也不让任意未来/过期活动冒充当前保护。
+- `highClickSpecialEffect` 每日按报名基线与当前滚动 7 日曝光、点击率、销量做方向性对比，分别报告已出单、活动中仍 0 单、到期仍 0 单和缺指标；不得把滚动窗口变化表述成单因素因果。
 - 已登记特殊活动删除后若平台库存低于 `activityStock`，恢复器必须先查询 ET 实盘。ET 足够才可把平台虚拟库存补到登记数量；ET 不足直接阻断。
 - 2026-07-16 用户进一步授权自动限时折扣兜底库存补齐：目标价漂移、新链接/新上架 7 天、重新上架无活动、漏限时折扣的 rescue 若平台可报库存低于计划 `activityStock`，可先查 ET 当日实盘；ET 足够时只补平台虚拟库存到本次计划数量并回读，再重跑 dry-run/execute。ET 不足、当天证据缺失或回读不一致时阻断。授权不覆盖普通营销活动报名库存、优惠券或任意扩大库存。
-- 库存补齐以平台 `totalUsableInventory` 达到 `activityStock` 为准。`OVERWRITE` 写入的是总库存，若有锁定库存，覆盖量应为 `activityStock + totalLockedQuantity`（且不得下调现有总库存），实际覆盖量必须参与幂等键。漂移 rescue 必须显式写入 `activityStock`；兼容旧 rescue 时按配置默认 10，禁止 `NaN` 让整条 ET 门控静默失效。
+- 库存补齐以平台 `totalUsableInventory` 达到 `activityStock` 为准。`OVERWRITE` 写入的是总库存，不可用量取 `max(totalLockedQuantity, totalInventoryQuantity - totalUsableInventory)`；覆盖量至少为“要求可用库存 + 不可用量”，且不得下调现有总量。实际覆盖量必须参与幂等键。漂移 rescue 必须显式写入 `activityStock`；兼容旧 rescue 时按配置默认 10，禁止 `NaN` 让整条 ET 门控静默失效。
 - `platform_saleable_stock=0` 在 guard 报告中只是 BI 信号，不是最终库存判定；live/dry-run 才是最终库存证据。
 - guard 建议命令在 live scan 可用时自动传 `--current-marketing-live-scan`。
 - 少量自动补报完成后，使用 `merge_current_marketing_price_scans.mjs --base <完整19店快照> --overlay <受影响店复扫> --out <合并快照>`，再基于合并快照生成 final guard；不得为 1–3 店补报无条件重扫 19 店。合并器不调用 SHEIN，只接受成功且非 partial 的完整基线和成功店铺 overlay。
 - 自动任务新建或恢复限时折扣后的日报必须逐条列出店铺、标准货号/中文品名、SKC、活动 ID、价格、活动库存、开始/截止时间和 live readback 结果，不得只列活动号和价格。
+- 批量日报的逐条明细可以另存 JSON/CSV/Markdown，但汇报正文至少要给出总数、按店/活动汇总、新链接逐条结果和每一条未解决 blocker，并提供最终 live scan 对应的明细文件；执行器中途摘要不能替代最终 19 店回读。
 
 ### 4.2 新链接动作卡落地边界
 

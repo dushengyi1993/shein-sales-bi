@@ -27,6 +27,8 @@
 
 ## 历史、发布与归档
 
-- [当前发布说明（2026.07.19.2 Webhook/平台动态）](bi-webhook-release-2026-07-19.md)、[2026.07.19.1 仓储费发布说明](bi-ops-release-2026-07-19.md)、[仓储费历史重述（2026-07-19）](storage-fee-history-restatement-2026-07-19.md)、[上一版发布说明（2026.07.18.1）](bi-ops-release-2026-07-18.md)、[业务逻辑加固口径（2026-07-18）](bi-business-logic-hardening-2026-07-18.md)、[BI V2 发布说明（2026-07-12）](bi-ops-v2-release-2026-07-12.md)、[优化复盘（2026-07-10）](optimization-review-2026-07-10.md)、[实施路线（历史）](implementation-roadmap.md)
+- [当前发布说明（2026.07.26.1）](bi-ops-release-2026-07-26.md)、[单应用生产切换（2026-07-26）](openapi-single-app-production-cutover-2026-07-26.md)、[半托 Webhook 实时销售切换（2026-07-23）](bi-webhook-live-cutover-2026-07-23.md)
+- [Webhook/平台动态发布说明（2026.07.20.2）](bi-webhook-release-2026-07-19.md)、[仓储费发布说明（2026.07.19.1）](bi-ops-release-2026-07-19.md)、[仓储费历史重述（2026-07-19）](storage-fee-history-restatement-2026-07-19.md)、[业务逻辑与营销加固（2026.07.18.1）](bi-ops-release-2026-07-18.md)、[BI V2 发布说明（2026-07-12）](bi-ops-v2-release-2026-07-12.md)
+- [优化复盘（2026-07-10）](optimization-review-2026-07-10.md)、[实施路线（历史）](implementation-roadmap.md)、[OpenAPI 自动运营原始方案（历史）](bi-ops-openapi-automation-plan.md)
 - [利润审计（2026-03-05）](bi-profit-audit-2026-03-05.md)、[负责人知识同步](owner-knowledge-sync.md)、[合作方 CLI 发布（2026-07-13）](partner-cli-release-2026-07-13.md)
 - [营销运行归档：2026-07-13 至 2026-07-16](archive/marketing-runs/2026-07-13-to-2026-07-16.md)、[存储费利润集成历史计划](superpowers/plans/2026-05-30-storage-fee-profit-integration.md)

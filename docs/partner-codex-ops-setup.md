@@ -6,10 +6,12 @@
 
 1. 安装 `Codex App`。
 2. 安装 `Node.js 22+`。
-3. 拿到项目代码。
-4. 在 Codex App 里打开项目目录。
+3. 从负责人或已登录 BI 的 `/api/partner-cli/package` 取得当前受管 CLI 安装包并运行 `install.ps1`。
+4. 安装完成后新开一个 Codex 任务，让新安装的 `shein-bi-ops` Skill 完整加载。
 5. 用自己的 BI 账号登录一次。
-6. 之后直接让 Codex 帮他创建、预检和执行自动运营任务。
+6. 以后让 Codex 调用稳定启动器；每个业务命令前自动检查 CLI 与负责人规则更新。
+
+> 普通合伙人不需要克隆完整 GitHub 项目。本文出现的 `node scripts/bi_ops_cli.mjs ...` 是维护者在完整仓库中的等价命令；受管安装用户统一改用 `& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" ...`。
 
 ## 你需要提前给他的东西
 
@@ -17,10 +19,8 @@
 - 一个 BI 账号和密码。
   - 合伙人/管理员账号：可读全部店铺，可写全部店铺。
   - 普通运营账号：可读全部店铺，只能写自己负责的店铺。
-- 项目代码，至少要包含这些文件：
-  - `scripts/bi_ops_cli.mjs`
-  - `docs/partner-codex-ops-setup.md`
-- 如果他只会使用、不参与开发，可以给他一个压缩包或 GitHub 下载方式；不要把任何服务器密钥、OpenAPI Secret、AI Router Key 写进文档或发给他。
+- 当前受管 Partner CLI 安装包；普通合伙人不需要 GitHub 仓库权限。
+- 只有参与开发的人才需要完整项目代码。不要把任何服务器密钥、OpenAPI Secret、AI Router Key 写进安装包、文档或聊天。
 
 推荐直接给合伙人最小 CLI 包，而不是整个生产项目。负责人构建：
 
@@ -50,16 +50,9 @@ node -v
 
 如果能看到 `v22.x.x` 或更高版本，就可以继续。
 
-### 3. 放置项目代码
+### 3. 安装受管 CLI
 
-建议放在一个固定目录，例如：
-
-- Windows：`D:\Shein销售统计`
-- macOS/Linux：`~/Shein销售统计`
-
-然后在 Codex App 里打开这个项目目录。
-
-如果拿到的是最小 CLI 压缩包，解压后在包目录运行：
+解压当前安装包后，在包目录运行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
@@ -73,12 +66,14 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 & "$HOME\.shein-bi\cli\shein-bi-ops.cmd" version
 ```
 
+安装或升级 Skill 后必须新开一个 Codex 任务；旧任务不会完整重载新 Skill。只有维护/开发项目本身时才把完整仓库放到固定目录并在 Codex 中打开。
+
 ## 首次登录 BI 自动运营
 
-在项目目录运行：
+受管安装用户运行：
 
 ```powershell
-node scripts/bi_ops_cli.mjs login --username 他的BI账号
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" login --username 他的BI账号
 ```
 
 然后按提示输入密码。
@@ -93,13 +88,13 @@ node scripts/bi_ops_cli.mjs login --username 他的BI账号
 如果需要确认当前登录的是谁：
 
 ```powershell
-node scripts/bi_ops_cli.mjs me
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" me
 ```
 
 如果需要退出登录：
 
 ```powershell
-node scripts/bi_ops_cli.mjs logout
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" logout
 ```
 
 ## 网页与 Owner CLI 的当前分工（2026-07-12）
@@ -137,13 +132,13 @@ node scripts/bi_ops_cli.mjs jobs --scope-all  # 仅 Owner 全局只读
 先跑一键自检：
 
 ```powershell
-node scripts/bi_ops_cli.mjs doctor
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" doctor
 ```
 
 确认负责人规则已同步到本机缓存：
 
 ```powershell
-node scripts/bi_ops_cli.mjs knowledge-status
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" knowledge-status
 ```
 
 缓存位置为 `%USERPROFILE%\.shein-bi\owner-knowledge`。`manifest.json` 指向 `generations/<bundleSha256>/bundle.json`；这里只保存脱敏规则包和 GitHub source commit，不包含负责人原始会话、来源路径或发布凭证。

@@ -1,12 +1,12 @@
 # 运行环境架构
 
-## 2026-06-20 当前运行环境摘要
+## 2026-07-26 当前运行环境摘要
 
 - SHEIN 销售抓数、BI 后置刷新和数据库备份已切到云端 systemd；本地 BI 和 `SHEIN-*` Windows 计划任务已封存禁用。
-- 飞书多维表格 / 原生看板写入已临时暂停；异常通知 watchdog 和只读问数机器人已云端化并验证。飞书日报脚本保留为手动入口，自动发送当前已停用。
-- 销售抓取主入口已改为 Node WebAPI 直连优先；当前 19 店 `salesTransport=auto`，成功时不启动浏览器，浏览器只保留为 Cookie/session 刷新、登录续期和回退工具。
+- 飞书多维表格 / 原生看板写入已临时暂停；异常通知 watchdog 保留。飞书日报脚本只作手动入口，自动发送停用；飞书只读问数 service 必须保持 `disabled + inactive`，团队问数走 BI 网页或 CLI。
+- 半托当天销售主入口为 Webhook + 按单 OpenAPI；前一天最终日由 WebAPI 独立文件与 19 店 OpenAPI 深度匹配后原子晋升。`salesTransport=auto` 与浏览器继续服务最终日核对、登录续期和其它未完全 API 化的数据域。
 - 暂停开关为 `state/feishu-base-sync-paused.flag`；存在该文件时跳过飞书事实表、产品表、月表、宽表和看板写入，删除后可恢复。
-- 云端当前自动覆盖销售 WebAPI、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、晨间销售+统一日更补采、19 店 OpenAPI 隔离双跑、异常通知、登录态巡检、残留浏览器清理和网页/CLI 问数；飞书只读问数 service 当前保持 `disabled + inactive`。
+- 云端当前自动覆盖 Webhook/OpenAPI 当天销售、最终日核对与晋升、BI Portal、数据库备份、ET 货代仓、晨间慢变日更、异常通知、登录态巡检、残留浏览器清理和网页/CLI 问数；半托生产 OpenAPI 数据面为 DL 单一 App + 19 店唯一 OpenKey。
 - 当前正式门户为 V2；V1 已从线上 `/v1/` 下线，只保留 GitHub final/archive release `2026.06.18-v1-final-archive` 作为恢复点，不再进入正式 release 或日常刷新。
 - SHEIN 临时人工登录维护入口已云端化：BI `/cloud-login-maintenance` 通过 noVNC 打开指定店铺独立 profile 的短时 Chrome 窗口，完成后导出/探测 session 并关闭临时进程。
 - BI Portal 生成端会用 `lib/product_display_name.mjs` 给 `data.json` 补齐 `product_display_name` / `productDisplayNames`；前端页面和云端飞书问数机器人共用该显示名，后台归因 key 仍保持 `standard_goods_sn`。
@@ -40,7 +40,7 @@
 
 回滚时 Windows 计划任务 Action 不直接调用 `powershell.exe -File ...`，而是调用 `wscript.exe` 执行 `scripts/run_scheduled_hidden.vbs`，再隐藏启动对应 `.ps1`。这样即使同步任务运行十几分钟，也不会在前台留下黑色命令行窗口。任务最长运行时间为 90 分钟，避免后台卡死影响下一次同步。
 
-## SHEIN 销售 WebAPI 直连边界（2026-05-11）
+## SHEIN WebAPI 核对与回滚边界（初始验证 2026-05-11）
 
 - `fetch_shein_sales.mjs` 支持 `--transport browser|webapi|auto`；默认从 `config/stores.json` 的 `salesTransport` 或环境变量 `SHEIN_SALES_TRANSPORT` 读取。
 - `state/shein_webapi_sessions/<店铺>.local.json` 保存导出的 Cookie header、User-Agent 和 client hints，是敏感本地运行态；该目录在 `state/` 下，不进入 GitHub。
@@ -49,20 +49,20 @@
 - SHEIN Cookie 通常会随活跃访问续期，因此每天跑一次 WebAPI 有助于保持 session；ET 货代仓不是这个规律，仍按 ET 专属自动登录 + OCR 处理。
 - `2026-05-08` 已完成 16 店 WebAPI 与现有数据库对账，订单数、商品行数、正销量和销售额一致；全店直连资源证据见 `outputs/cloud-migration/webapi-allstores-resource-20260511-201715.json`。
 
-## 为什么不全用 WSL
+## 历史本地边界：为什么当时不全用 WSL
 
 - SHEIN 登录态和 Chrome UI 自动化天然在 Windows Chrome 上更稳。
 - 当前 `lark-cli` 已在 Windows 侧配置好授权，WSL 里没有直接安装。
 - WSL 调 Windows GUI/Chrome 可行但链路更绕，长期定时任务出错点更多。
 
-## BI 系统的 WSL 边界
+## 历史本地边界：BI 系统的 WSL 设计
 
 2026-05-01 开始，新的专业 BI 系统采用“新系统 WSL 化、旧生产链路暂不动”的策略：
 
 - Metabase、Metabase 配置库、SHEIN 数据仓库通过 Docker 跑在 WSL。
 - WSL 发行版已迁移到 `D:\WSL\Ubuntu-24.04`。
 - Docker 数据根已迁移到 `D:\SheinBI\docker-data\docker-data.ext4`，实际挂载到 WSL 内 `/mnt/wsl/shein-docker-data/docker`。
-- 本地旧销售抓取、飞书日报和 Windows 计划任务已封存；其中销售抓取逻辑已迁到云端 WebAPI 直连优先，Chrome 仅保留为回退/登录续期工具。飞书 Base / 看板写入已通过暂停开关临时停用，直到用户确认恢复并完成云端化。
+- 本地旧销售抓取、飞书日报和 Windows 计划任务已封存；该段记录 2026-05 的迁移过程。当前销售事实链以本文件顶部的 Webhook/OpenAPI 口径为准，Chrome/WebAPI 只在各自数据域和灾备边界内保留。飞书 Base / 看板写入继续由暂停开关禁用。
 - 后续新写的 BI 数据入仓、规则引擎、Metabase 配置脚本，优先按“可迁移到 Linux 服务器”的方式设计，减少 PowerShell 业务逻辑。
 
 也就是说：**BI 底座可以先 WSL/服务器化，但不要为了统一环境去冒险迁移已稳定的飞书生产链路。**
@@ -223,7 +223,7 @@
 - 生产调度已切到云端 systemd；历史记录不维护时间表。以 `infra/systemd/*.timer` 的 `OnCalendar` 为准，操作与验收见 [cloud-bi-operations.md](cloud-bi-operations.md)。
 - 覆盖审计由 `scripts/audit_cloud_data_coverage.mjs` 提供：最新日防漏使用 `--expected-start range-start`，历史断档排查使用 `--expected-start first-seen`。后者按每个店首个有效日期之后查中间断档，避免把店铺尚未开通/尚未接入前的日期误判为缺抓。
 - 本地 `SHEIN-*` Windows 计划任务已封存禁用。`scheduled_intraday_dsy.ps1`、`scheduled_yesterday_final_dsy.ps1`、`scheduled_link_management_daily.ps1`、`scheduled_et_forwarder_daily.ps1`、`scheduled_bi_daily_pipeline.ps1` 等只保留为回滚/迁移参考，不再作为生产调度。
-- 云端当前自动覆盖销售 WebAPI、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、晨间销售+统一日更补采、异常通知、登录态巡检、残留浏览器清理和网页/CLI 问数；飞书日报自动发送与飞书只读问数 service 均停用；19 店 OpenAPI 销售、退货退款、商品/链接对账已进入隔离双跑层。
+- 云端当前自动覆盖 Webhook/OpenAPI 当天销售、最终日核对与晋升、BI Portal、数据库备份、ET 货代仓、晨间慢变日更、异常通知、登录态巡检、残留浏览器清理和网页/CLI 问数；飞书日报自动发送与飞书只读问数 service 均停用。退货退款、商品/链接等其它 OpenAPI 数据域仍按各自对账与日更边界逐项收口。
 - 旧独立链接管理计划任务 `SHEIN-Sales-15Stores-LinkManagement-0340` / `SHEIN-Sales-15Stores-LinkManagement-0510` 已删除；`SHEIN-Sales-15Stores-LinkManagement-0530` 是本地历史任务，已封存。
 - HL 旧子账号 profile `profiles/persistent-hl-profile` 已删除；正式 HL profile 为 `profiles/persistent-shein-main-profile`，CDP 端口 `9360`。
 - 飞书定时任务和写表链路都通过 `config/stores.json` 获取 HL profile；当前生产脚本中没有旧 HL profile、旧端口 `9338` 或 `profileKey=hl` 引用。

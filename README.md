@@ -1,12 +1,12 @@
 # SHEIN 销售统计与 BI 经营系统
 
-SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / 自动运营工作区。生产以云端 BI、PostgreSQL warehouse、Metabase 与受控 OpenAPI 执行链为准。
+SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / 自动运营工作区。生产以云端 BI、PostgreSQL warehouse、Metabase、DL 单一半托 OpenAPI App 下的 19 店授权与受控执行链为准。
 
 ## 核心规则
 
 - **BI 判断只认云端运行时**：云端 PostgreSQL、线上 BI 门户、`/api/bi/section/*`、云端日志和 systemd 状态；仓库 `outputs/bi-portal/*` 只是灾备/兼容快照。
 - **本地 BI 已封存**：本地 `8787`、`SHEIN-*` Windows 计划任务和本地抓数任务只作回滚参考，除非明确回滚不得恢复。
-- **飞书 Base / 原生看板写入暂停**：`state/feishu-base-sync-paused.flag` 存在时不写 Base/看板；飞书日报、异常提醒和只读问数走云端消息链路。
+- **飞书 Base / 原生看板写入暂停**：`state/feishu-base-sync-paused.flag` 存在时不写 Base/看板；异常提醒保留，日报只保留手动入口，问数走 BI 网页或 CLI。飞书只读问数 service 必须保持暂停。
 - **SHEIN 写操作受控**：普通任务默认 dry-run，真实提交须满足账号权限、人+店+动作、确认与回读审计；云端营销 timer 是负责人长期策略授权的有限例外，不逐次索要人工确认或人工提供 hash，但系统仍必须为每轮自动计算、锁定并校验精确 payload/work hash，且只能执行策略白名单内的限时折扣动作，并强制实时证据、预校验和写后回读。
 - **云端部署纪律**：GitHub release 是源码基线，不等于已部署；云端热修必须回填 GitHub，服务器拉取/重置后必须重跑云端 BI 刷新。
 - **负责人经验单向继承**：负责人本机 Codex Desktop/CLI 与负责人 BI 会话的长期经验自动进入网页；其他账号只消费，不能反向覆盖。普通同事界面不展示无业务意义的规则包版本号。
@@ -45,8 +45,8 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 
 > 生产命令默认在云端 `/opt/shein-bi/app` 执行；本地命令主要用于开发、dry-run、审计或受控执行。
 
-- 刷新销售 + BI Portal：`bash scripts/cloud_bi_refresh.sh <scope> intraday`（`<scope>` 按运维文档取值）
-- 刷新历史最终版：`bash scripts/cloud_bi_refresh.sh <scope> final`（`<scope>` 按运维文档取值）
+- 人工灾备刷新当天销售 + BI Portal：`bash scripts/cloud_bi_refresh.sh today intraday`（日常当天销售由 Webhook 实时触发，不运行每小时全店轮询）
+- 收口前一天最终版：`bash scripts/cloud_bi_refresh.sh yesterday final`（WebAPI 仅作独立核对；19/19 OpenAPI 深度匹配后才原子晋升正式日切片）
 - 备份数据库：`bash scripts/cloud_db_backup.sh`
 - 同步 ET 货代仓：`bash scripts/cloud_et_forwarder_sync.sh <scope>`（`<scope>` 按运维文档取值）
 - 同步/回灌 ET 仓储费：`bash scripts/cloud_et_storage_fee_sync.sh daily [YYYY-MM-DD]` / `bash scripts/cloud_et_storage_fee_sync.sh backfill YYYY-MM-DD`
@@ -56,7 +56,7 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 - 团队自动运营：普通成员使用 BI 网页；Owner/合伙人可用 `node scripts/bi_ops_cli.mjs chat --text "..." --wait-seconds 120`，并用 `jobs` / `job` / `wait-job` 查看可恢复后台规划。`--scope-all` 仅全局只读，不扩大写权限。
 - 负责人经验同步：`npm run owner-knowledge:scan`、`npm run owner-knowledge:sync`、`npm run owner-knowledge:status`；本机采用事件驱动 + 60 分钟兜底，active 规则发布到 GitHub `owner-knowledge` 分支。合伙人 CLI 用 `node scripts/bi_ops_cli.mjs knowledge-status` 检查任务前原子缓存；运行边界见 `docs/owner-knowledge-sync.md`。
 - 构建合伙人最小 CLI 包：`npm run partner-cli:package`；ZIP 与 SHA-256 写入忽略目录 `outputs/releases/`，不包含凭证和生产运行态。
-- 批量复制商品到多店：`node scripts/link_ops_hl_openapi_executor.mjs --help`（支持 `supplyPriceRange`、`shuffleImages`、`inferInputCurrentOverride`、`skipPayloadHashLock`）
+- 批量复制商品到多店：`node scripts/link_ops_hl_openapi_executor.mjs --help`（支持 `supplyPriceRange`、`shuffleImages`、`inferInputCurrentOverride`；真实写仍遵守预演、确认和回读）
 - 批量下架候选生成与执行：`node scripts/build_link_retire_candidates_from_csv.mjs --help`；`node scripts/execute_retire_candidates_openapi.mjs --help`
 - 限时折扣漂移自动修复：`node scripts/marketing/guard_limited_discount_drift.mjs --guard <guard-json>`（先判断漂移，有则自动批量修复）
 - 修复已下架但货号未改：`node scripts/repair_retire_supplier_code_openapi.mjs --help`（云端专用，只调 `partialEdit`）
@@ -76,7 +76,7 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 ## 工具说明
 
 - 默认用后台、headless、HTTP/CDP、日志、JSON、静态检查和 UI 冒烟脚本验证；只有登录、人机校验、用户明确要求或必须排查交互问题时才打开可见窗口，完成后关闭。
-- SHEIN 订单销售生产事实源当前保留 WebAPI；官方 OpenAPI 已具备切换条件但先保持双跑一周。云端 `SHEIN_SALES_TRANSPORT=webapi` 继续写正式销售事实表，OpenAPI 写隔离对账层；一周内确认订单数、商品行、金额、取消/无效行和价格散点 100% 无误后，再完全切到 OpenAPI。
+- 2026-07-23 起，半托当天销售由订单 Webhook 触发按单 OpenAPI 查询并写正式事实；在线 BI 通过 PostgreSQL `NOTIFY` + SSE 增量刷新。每日 `03:00` WebAPI 只保留独立核对文件，19/19 店深度匹配后才由 OpenAPI 原子晋升前一日正式切片。商品流量、四档状态、营销和部分编辑级详情仍按各自日更或 WebAPI/headless 边界运行，不能把“销售已切 OpenAPI”误写成“所有数据域都不再使用浏览器/WebAPI”。
 - 飞书消息/Base 使用 `lark-cli`；`config/lark_report.json` 必须保持合法 UTF-8 JSON。
 - ET 货代仓默认 headless；OCR/验证码连续失败、登录态人工维护或用户明确要求时才临时打开可见窗口。
 - 云端上传的临时文件、OpenAPI 素材、登录维护文件用完必须清理；状态、token、session、密钥和数据库 dump 不写入仓库、文档或聊天。
@@ -99,6 +99,8 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 | 2026.07.19.2 Webhook 与平台动态发布说明 | `docs/bi-webhook-release-2026-07-19.md` |
 | 2026.07.23 半托 Webhook 实时销售切换与新排班 | `docs/bi-webhook-live-cutover-2026-07-23.md` |
 | 2026.07.24 半托 13 类 Webhook 业务闭环 | `docs/bi-webhook-live-cutover-2026-07-23.md`、`docs/shein-webhook-receiver-design.md` |
+| 2026.07.26 半托 OpenAPI 单应用生产切换 | `docs/openapi-single-app-production-cutover-2026-07-26.md` |
+| 2026.07.26.1 当前源码发布说明 | `docs/bi-ops-release-2026-07-26.md` |
 | 2026-07-19 仓储费历史重述口径与验收 | `docs/storage-fee-history-restatement-2026-07-19.md` |
 | 2026-07-18 BI 业务逻辑加固口径 | `docs/bi-business-logic-hardening-2026-07-18.md` |
 | BI 仓库模型 | `docs/bi-warehouse-model.md` |

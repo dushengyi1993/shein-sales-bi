@@ -48,6 +48,9 @@ description: SHEIN 营销活动报名、优惠券、限时折扣和价格栈守�
 - 已有生效限时折扣但价格不符合上述规则时，先判断是否为单一目标活动。只包含目标 SKC 的旧限时折扣可以在 dry-run 安全后修改、取消后重建；若同一限时折扣活动里还有计划外 SKC、价格看起来是人工特殊处理、或无法确认活动归属，必须 fail closed 生成阻断/人工确认清单，不能自动覆盖。
 - 自动补限时折扣前必须做折扣比例缩放：若 `当前售价 × 0.85 >= finalTargetPrice`，可用默认 `15%`；若低于目标价，只能选择平台允许的更浅折扣或直接用目标价兜底。若平台最低折扣要求导致无法既满足折扣规则又不低于目标价，禁止自动写入，报告阻断。
 - 不能因为 BI 标签看起来正常就 no-action；也不能因为 live 发现一个旧限时折扣就假定它安全。
+- 高点击低转化专属折扣按已批准实验口径自动处理：当前在售、`c7_eps_uv > 3000`、`c7_goods_uv / c7_eps_uv > 4%` 且 `c7_sale_cnt = 0` 才入队；缺失销量不得当 0。价格按同标准货号最新已批准全局曝光 Top5 商品成本利润率再降 2 个百分点，最低利润率 15%，库存 10、周期 7 天。
+- 高点击专属折扣真实写入前先登记到人工特殊折扣保护表，再 dry-run/ET 门控库存/事务替换/live readback。worker 写登记前重读最新 7 日指标，已经出单、跌出阈值或下架的 stale 候选直接跳过。
+- 人工特殊活动刚创建后的 future 行，只有活动 ID 等于保护登记 `currentActivityId`、价格/库存/截止精确且两小时内开始，才算已排期精确覆盖；不得因此重复救援，其他未来/过期活动继续 fail-closed。
 
 真实止损判断分两层：
 
@@ -147,23 +150,30 @@ node scripts/marketing/check_store_profile_identity.mjs --stores <stores> --no-c
 ```powershell
 node --check scripts/marketing/dsy_marketing_deadline_fill.mjs
 node --check scripts/marketing/submit_coupon_activity_goods.mjs
-node scripts/marketing/verify_marketing_sku_approval.mjs --workbook <xlsx>
+node scripts/marketing/verify_marketing_sku_approval.mjs --date YYYY-MM-DD --version vN
 ```
 
 - 确认 `selection-plan` 与 `price-overrides` key 对齐，无空价、无 0 价、无重复冲突。
+- 候选 subset 只用于展示，不得自行标记为已授权。用户明确批准整批后，先锁定不可变执行清单：
+
+```powershell
+node scripts/marketing/lock_ordinary_campaign_execution_plan.mjs --selection <candidate-selection.json> --prices <candidate-prices.json> --output-dir <approved-dir> --label <batch> --approval-text "<用户原话>" --approval-source "<任务ID/消息时间>"
+```
+
+- 后续批量 runner 必须同时使用输出的 `*-user-approved.json` 和 `approval-manifest-*.json`。文件 SHA-256、payload hash、work fingerprint 或批准来源任一不一致都停止；不得只因文件名含 `approved` 就提交。
 
 ### 3. 首店确认
 
-首店必须先预填普通活动但不提交，让用户看页面。
+首店必须先用已锁定的批准文件预填普通活动但不提交，让用户看页面。
 
 ```powershell
-node scripts/marketing/dsy_marketing_deadline_fill.mjs --stores <pilotStore> --activity <ids> --selection-plan <pilot-selection.json> --price-overrides <pilot-price.json> --no-close
+node scripts/marketing/dsy_marketing_deadline_fill.mjs --stores <pilotStore> --activity <ids> --selection-plan <approved-selection.json> --price-overrides <approved-price.json> --approval-manifest <approval-manifest.json> --no-close
 ```
 
 只有用户确认后，才能提交首店：
 
 ```powershell
-node scripts/marketing/dsy_marketing_deadline_fill.mjs --stores <pilotStore> --activity <ids> --selection-plan <pilot-selection.json> --price-overrides <pilot-price.json> --submit --no-close
+node scripts/marketing/dsy_marketing_deadline_fill.mjs --stores <pilotStore> --activity <ids> --selection-plan <approved-selection.json> --price-overrides <approved-price.json> --approval-manifest <approval-manifest.json> --submit --no-close
 ```
 
 提交后必须回读普通活动已报/审核中集合：
@@ -191,6 +201,7 @@ node scripts/marketing/submit_coupon_activity_goods.mjs --stores <pilotStore> --
 首店普通活动确认无误后，其他店可以分批自动完成；可选流量券只有在用户明确批准对应清单后才进入同批 dry-run/提交流程。
 
 - 每批先提交普通活动。
+- 店级/分块/单行恢复 runner 都必须带同一 `--approval-manifest`；`--resume-from` 只承认相同 work fingerprint 的精确成功键。
 - 每批立刻回读普通活动。
 - 每批不再默认配套 15% 券；如本期有用户批准的可选流量券清单，只对该清单 dry-run。
 - 只对安全店铺/安全 SKC、且明确是流量用途的目标提交券。
@@ -242,6 +253,7 @@ node scripts/marketing/submit_coupon_activity_goods.mjs --stores <allStores> --a
 - 新链接候选必须把 BI `linksData` 与截至报告日各店最新原始 `outputs/shein_links` 快照按 `store+SKC` 合并；原始快照只追加 BI 缺失键，不覆盖 BI 已有字段。live 活动扫描只枚举活动商品，不能单独证明“所有在售链接均有活动”，所以不得在原始链接源比 BI sidecar 更新时输出无缺口。原始快照覆盖少于当前启用店铺数或有解析错误时，guard 和计划器都必须 fail closed，不得生成“无缺口”结论。
 - 2026-07-16 用户已授权自动限时折扣兜底库存补齐：目标价漂移、新链接/新上架 7 天、重新上架无活动、漏限时折扣若仅因平台可报库存低于计划 `activityStock` 阻断，先查 ET 当日实盘；ET 足够时精确补平台虚拟库存到计划数量并回读，再重跑 dry-run/execute。ET 不足、证据过期或回读不一致时阻断。不得扩展到普通营销活动库存、优惠券或任意增库存。
 - 新建或恢复限时折扣后的用户报告必须逐条写明店铺、标准货号与中文品名、SKC、活动 ID、价格、活动库存、开始/截止时间和 live readback 结果；不能只报活动号和价格。
+- 每日 guard 对高点击专属折扣必须反馈效果：报名基线与当前滚动 7 日曝光、点击率、销量，以及已出单、活动中仍 0 单、到期仍 0 单、缺指标状态。只能写方向性观察，不能声称折扣单独造成销量变化。
 - 订单审计必须按活动生效窗口判断；窗口外订单只能作为历史线索，不能当成当前活动低价/高价 blocker。
 - 订单成交价只认商品行 `currencyPrice`。如果 `currencyPrice` 低于或高于当前活动窗口目标价，必须按 `店铺 + SKC + 标准货号` 归因到普通活动、限时折扣、优惠券、旧活动、平台最低降幅或缺证据。
 - 如果用户本期批准了低利润率、清货价或剔除项可报，这些目标就是新预期价；巡检不能再按旧默认利润率重复报警。

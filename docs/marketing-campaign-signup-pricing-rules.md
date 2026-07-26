@@ -108,6 +108,8 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
 
 审核文档应同时提供“明细行”与“按标准货号汇总”两种视图：明细行用于逐 SKC 防漏，汇总视图用于用户快速看价格区间和风险。用户在 `修改意见/备注` 中确认后，才能转换成本期覆盖文件；覆盖文件必须保留用户备注来源。
 
+用户确认后不能只靠文件名里的 `approved` 继续执行。必须用 `scripts/marketing/lock_ordinary_campaign_execution_plan.mjs` 把用户批准原话、批准来源、selection/price payload hash、输出文件 SHA-256 和 work fingerprint 固化到 `approval-manifest-*.json`。候选 subset 不携带执行授权；store/chunk/singleton 批量提交器只接受与 manifest 完全一致的已批准文件，授权后任一改动或跨 fingerprint resume 都失败关闭。
+
 ### 用户确认方案的固定输出格式
 
 给用户看的方案必须是 Excel 工作簿（`.xlsx`）为主，Markdown 只做摘要入口，JSON/CSV 只给脚本和复核使用。不能只给用户一张几百行明细表，也不能只给 CSV/JSON。
@@ -289,12 +291,14 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
   - BI 导入脚本：`scripts/import_product_costs.mjs`
 - 若货号缺完整成本，自动化不得擅自猜价，必须保留给用户确认。
 - 营销活动用的仓储费/件必须来自 BI `profit.productStorageDaily`：
+  - 仓储费是标准货号共享货盘成本，不是店铺/SKC 链接级成本；同一标准货号所有店铺链接必须使用同一个仓储费/件。
   - 使用当前仍在仓库存的移动平均累计仓储成本。
   - 每日仓储费加入该货号“库存仓储成本余额”。
   - 如果当日仓储数量比上一日减少，减少的数量视为已出库/已不再产生仓储费，并按上一日平均仓储成本从余额中剔除。
   - 新增库存只从入仓后开始承担仓储费，不分摊入仓前的历史仓储费。
   - 禁止用 `profit.products.storage_fee_sar / profit.products.quantity`，因为这里的 `quantity` 是历史销量，会把慢销品仓储费/件夸大几十倍。
   - 若 ET 明细有仓储而确认表显示 `0` 或空，视为系统错误；不得按 0 仓储通过。
+  - 对已入仓但零销量、因此缺少 `profit.products` 商品行的货号，必须用 `inventoryDepletion` 的当前可售量 + 破损量作为数量基数，将该货号 ET 仓储费余额折算为共享仓储费/件；不能因为所有店都没卖而宣称“没有仓储记录”。
 - 对于缺“头程运输费金额”的批次：
   - BI 会保留批次记录
   - 但不参与完整单位成本均摊
@@ -326,10 +330,11 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
 - 进入“选择商品”页后，必须先把右下角每页条数改为 `500 条/页`，再点击全选；不能在默认 `20 条/页` 下直接全选，否则会漏选第 21 个及之后的商品。
 - 即使已切到 `500 条/页`，SHEIN 商品表格仍可能使用前端虚拟滚动，DOM 里只挂载可见行；标准导出必须优先使用 `query_supplier_goods_list_v2?page_size=500` 接口全量取商品，并核对接口返回 `total` 与行数一致。
 - 全选后必须用页面上的 `总计 N 个` 与 `已选商品 N 个` 做一致性检查；不一致时不得进入下一步。
+- 大批量活动页即使接口返回完整，虚拟表也可能随机漏挂载少量目标行。整店批量填报出现缺行时，必须改用 `run_ordinary_chunk_submission_batch.mjs` 小块续跑；runner 必须带同一 `--approval-manifest`，`--resume-from` 只能跳过已有干净 execute 证据且 work fingerprint 完全一致的精确 `store + activity + SKC`，不能按店铺或活动整组猜测成功。
 - 当前自动化执行入口为 `scripts/marketing/dsy_marketing_deadline_fill.mjs`；该脚本属于营销活动半自动操作入口，不是 Windows 计划任务。
-- 脚本默认只完成勾选商品、填写活动价/降幅和复核；只有在用户明确授权“可以提交/自己提交/全自动报完”后，才允许传 `--submit` 点击最终 `提交报名`。首店仍必须先预填不提交，让用户确认页面无误。
+- 脚本默认只完成勾选商品、填写活动价/降幅和复核；只有在用户明确授权“可以提交/自己提交/全自动报完”后，才允许传 `--submit` 点击最终 `提交报名`。首店仍必须先预填不提交，让用户确认页面无误；批量 runner 还必须验证不可变 approval manifest。
 - 下一次报新活动前，审核导出入口必须升级或补充为“叠加安全审核”版本：除了现有普通营销活动字段，还必须读取/合并当前和未来可能重叠的普通营销活动、优惠券和限时折扣。若脚本暂时只能导出普通活动，不得把它当作最终可报名审核表。
-- 按货号汇总的确认表由 `scripts/marketing/build_marketing_sku_approval.mjs --date YYYY-MM-DD --version vN` 生成；交付前必须跑 `scripts/marketing/verify_marketing_sku_approval.mjs --date YYYY-MM-DD --version vN`。校验至少覆盖：用户标注回归、全表仓储费/件正数、含仓储利润率不高于不含仓储利润率、利润率与建议最终成交价同口径、券策略明确“仅 15%”或“15/30/50 都禁止”、旧别名不独立出现。
+- 按货号汇总的确认表由 `scripts/marketing/build_marketing_sku_approval.mjs --date YYYY-MM-DD --version vN` 生成；交付前必须跑 `scripts/marketing/verify_marketing_sku_approval.mjs --date YYYY-MM-DD --version vN`。校验至少覆盖：用户标注回归、仓储费缺失不伪装成 0、含仓储利润率不高于不含仓储利润率、利润率与建议最终成交价同口径、券策略明确“仅 15%”或“15/30/50 都禁止”、旧别名不独立出现。仓储证据缺失会告警并要求补证，但不再把不含仓储商品成本口径误判为整份表不可用。
 - 重扫漏报或用户质疑漏报时，不要只处理上一次报错活动；必须逐店重新扫描 DSY 店铺（含 `MZ`，除非用户明确排除）在时间窗内仍可报名的活动，发现新增抓入商品就补填。
 - 报名方案生成时，BI/链接抓取可能尚未覆盖全部可报名 SKC；执行页才出现的新 SKC 必须补进系统，不得当作“计划外所以跳过”：
   - 若活动页 `totalGoods > expectedSelectedCount`、`selection.outOfPlanRows` 非空，或后台活动列表 `已报数量 < 可报总数`（即 `applyGoodsNum < allowGoodsNum`）存在不在当前最终计划里的差额，必须生成 supplement `selection-plan` / `price-overrides`；不能因为计划内 `missingRows=0` 就宣布没漏。
@@ -344,6 +349,7 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
   - 用户指出漏报、脚本发现 `extraAvailableRows`、或只补少量店铺时，默认只回读受影响店铺/活动；其它店铺沿用最近一次已通过的全量回读证据。
   - 最终验收必须显式绑定当前最终版 `selection-plan + price-overrides`，逐店证明计划行已报/审核中、缺失 0、计划外可报 0、已报/可报差额 0、硬性错价 0；如果某个单店提交结果文件被演示预填或不提交流程覆盖，不能用它反推“未提交”，必须回到 live 回读或可继承成功回读证据。
   - `verify_ordinary_activity_enrollment.mjs` 遇到已报接口不回传活动价时，可用同一 `store + activity + skc` 的提交前填价复核文件作为价格证据，并在汇总中标出 `priceUnavailableButFillVerified`。平台最低降幅/整数折扣把页面价小幅压到计划价以下且差额低于 `1 SAR` 时，记录为平台压价来源，不当作硬性错价；超过容差或没有填价证据才进入 blocker。
+  - 同一 SKC 有多个规格且原价不同，平台可能把每个规格分别改写为整数折扣价。校验必须按各规格自己的当前价反推折扣和活动价，并逐规格证明改写价不低于用户批准目标；不能拿一个规格的折扣率套整行，也不能因安全改写误判整条失败。
   - 日常巡检默认只读云端 BI、订单商品行和既有 scan/dry-run/readback 报告；不得仅因为某个报告过期就全店开前端。必须开前端时按 3-5 店小批次执行，跑完立即关闭。
   - 普通活动真实提交或回读结束后，不管成功、失败还是用户中途接管提交，都必须调用 `scripts/close_store_browsers.ps1 -Stores <stores>` 关闭本批店铺浏览器；大批量任务结束后再做一次全店关闭和远程调试端口检查，确认没有店铺 profile 残留，避免卡顿、串号和下次误判。
 - 建议填写顺序：
@@ -512,6 +518,14 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
 - 混合活动只移除目标 SKC，禁止整场误伤。平台库存低于登记库存时先查 ET 实盘，ET 足够才允许补平台虚拟库存，ET 不足必须阻断。
 - 登记、活动 ID 回写、停用和校验统一使用 `scripts/marketing/manage_manual_limited_discount_override.mjs`；恢复使用 `scripts/marketing/batch_restore_manual_limited_discounts.mjs`，并保留 dry-run、execute、live readback 和浏览器清理证据。
 
+### 高点击低转化专属折扣自动化（2026-07-26）
+
+- 候选必须同时满足：当前在售、近 7 天曝光人数 `> 3000`、近 7 天点击率 `> 4%`、近 7 天销量 `= 0`。点击率统一用 `c7_goods_uv / c7_eps_uv` 计算，阈值是严格大于；缺销量、缺曝光或缺点击人数均不得进入自动写入。
+- 专属价沿用用户已批准的高点击实验口径：读取最新已批准普通活动基准，取同标准货号全局曝光 Top5 的商品成本利润率，再降低 2 个百分点，按 `ceil2(productCost / (1 - specialMargin))` 计算。特殊利润率低于 15% 底线、缺商品成本或缺可靠 Top5 目标价时阻断。
+- 活动库存固定 10，周期 7 天。执行器在提交 SHEIN 前先写 `config/marketing_manual_limited_discount_overrides.json`，再复用人工特殊折扣恢复链路完成 ET 门控库存补齐、混合活动精确拆分、dry-run、execute、live readback 和活动 ID 回写。
+- guard 生成计划时判断一次，repair worker 写登记前必须再用最新 `linksData` 判断一次；旧计划中的链接若已经出单、跌出曝光/点击率阈值或下架，则以 `no_longer_qualifies` 安全跳过。
+- 每日效果反馈记录报名时的 7 日曝光/点击率/销量基线，并与当前滚动 7 日指标对比，输出已出单、活动中仍 0 单、到期仍 0 单和数据缺失。该结果是方向性观察，不作单因素因果归因。
+
 ### 代码审查与修复
 
 2026-07-02 对营销系统做了完整代码审查（第一性原理 + 对抗式审查），发现并修复了 12 个问题：
@@ -521,8 +535,7 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
 - **P1：guard 脚本拆分** — 计划选择逻辑抽到 lib/marketing_plan_selector.mjs，guard 从 3,545 行降到 ~3,255 行。
 - **P1：计划选择 planMetadata** — 计划 JSON 有 planMetadata.status=current_baseline 时得 8000 分，supersededBy 非空直接拒绝。
 - **P1：共享浏览器/工具模块** — 新建 lib/shein_browser.mjs 和 lib/marketing_utils.mjs，新脚本 import 即可。
-- **P2：优惠券结构化 couponPolicy** —
-ow.couponPolicy 字段（	raffic/orbidden/price_guarantee）优先于正则。
+- **P2：优惠券结构化 couponPolicy** — `row.couponPolicy` 字段（`traffic/forbidden/price_guarantee`）优先于正则。
 - **P2：订单审计重复键** — 跨活动同 SKC 不同价格不再报为冲突。
 - **P3：内联 Python 抽出** — scripts/cloud_read_order_files.py。
 - **P3：BUSY_SERVICES 配置化** — config/cloud_marketing_busy_services.json。
@@ -532,13 +545,12 @@ ow.couponPolicy 字段（	raffic/orbidden/price_guarantee）优先于正则。
 回滚点：GitHub release 2026.07.02-pre-marketing-refactor-backup。
 ### 混合旧限时折扣活动拆分重建（2026-07-06 执行沉淀）
 
-当旧限时折扣活动包含多个目标 SKC 且部分价格已过期/需修正时，使用 scripts/marketing/split_recreate_mixed_limited_discount.mjs 做整场拆分重建：
+本节只保留 2026-07-06 的历史执行证据。当前 `split_recreate_mixed_limited_discount.mjs --execute` 已禁用；真实替换必须走 `replace_limited_discount_transactionally.mjs`，不能照抄旧的整场先删后建流程。
 
-- **前提条件**：旧活动所有商品都是目标 SKC（xpectedOldSkcs 与 query_activity_goods 完全匹配）；旧活动 state 为 2（待开始）或 3（生效中）。
+- **当时前提条件**：旧活动所有商品都是目标 SKC（`expectedOldSkcs` 与 `query_activity_goods` 完全匹配）；旧活动 state 为 2（待开始）或 3（生效中）。
 - **执行流程**：dry-run 校验 → 结束旧活动（state 3→6 或 2→5）→ 等待旧活动确认结束 → 按分组创建新活动 → 回读验证。
 - **分组策略**：价格需修正的 SKC 放"价格修正组"，价格已正确的放"保持原价组"；两组分别创建独立活动，便于后续审计。
 - **平台阻断处理**：dry-run 发现 hardInvalid（004 平台限制、101018 库存=0）的 SKC 从 rows 移除后重跑；被阻断 SKC 不阻断其他 SKC 的拆分重建。
-- **回读验证**：createAllCovered=true、
-oDuplicateCoverage=true、createMissing=[]、旧活动 state=6。
+- **当时回读验证**：`createAllCovered=true`、`noDuplicateCoverage=true`、`createMissing=[]`、旧活动 `state=6`。
 - **已执行店铺**：QY（75968685→78778295）、NM（78664410→78780660）、FY（75956845→78843370+78843380）。
 - **未执行**：DL（77227890，本地 profile 需人工登录）。

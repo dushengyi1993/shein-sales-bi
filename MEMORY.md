@@ -5,7 +5,7 @@
 ## 红线
 
 - BI 数据判断、开发验收和故障排查只认云端运行时：云端 PostgreSQL、线上 BI、`/api/bi/section/*`、云端日志和 systemd；不得用仓库 `outputs/bi-portal/*` 判断生产现状。
-- 不要在本地直连或真实写 SHEIN OpenAPI；写操作走云端/受控脚本。普通任务先 dry-run、再人工确认、再回读审计；营销 timer 仅在负责人长期策略白名单内免逐次确认与 payload hash，仍须完整预检、回读和审计。
+- 不要在本地直连或真实写 SHEIN OpenAPI；写操作走云端/受控脚本。普通任务先 dry-run、再人工确认、再回读审计；营销 timer 仅在负责人长期策略白名单内免逐次人工确认和人工提供 hash，但系统每轮仍必须自动计算、锁定并校验精确 payload/work hash，并保留完整预检、回读和审计。
 - 本地 BI、`8787`、`SHEIN-*` Windows 计划任务已封存；除非用户明确回滚，不得恢复本地生产调度。
 - 飞书 Base / 原生看板写入暂停；不要把日报、问数或异常提醒误判成 Base 写入恢复。
 - 密钥、session、OpenAPI secret、noVNC token、数据库 dump、店铺密码不写仓库、文档、日志或聊天。
@@ -29,7 +29,7 @@
 - 架构和调度细节只查 `docs/bi-system-architecture.md` / `docs/bi-system-operations.md`，MEMORY 只保留“云端运行态为准”的红线。
 - 正式入口：`https://sa.dushengyi.cc/`；云端代码目录 `/opt/shein-bi/app`；SSH 别名 `ssh shein-bi-tencent`。详细架构见 `docs/bi-system-architecture.md`，运维见 `docs/bi-system-operations.md`。
 - GitHub release 只代表源码基线；生产以云端 `/opt/shein-bi/app` 和 systemd 实际状态为准。服务器 pull/reset 后必须重跑 BI 刷新。
-- OpenAPI 销售/退货/商品仍以隔离并行层和受控写链为边界；不要回答成“只有 HL 接入”，也不要说已一刀切替代正式事实源。
+- 2026-07-26 起半托生产 OpenAPI 数据面为 **DL 单一 App + 19 店唯一 OpenKey**；旧 18 App 只留作回滚，不进入生产读写或 Webhook 业务处理。2026-07-23 起当天销售由订单 Webhook 触发按单 OpenAPI 写正式事实；`03:00` WebAPI 仅作独立核对，19/19 深度匹配后才原子晋升 OpenAPI 最终日切片。退货、商品/链接和编辑级资料仍按各自 OpenAPI、WebAPI/headless 与日更边界处理，不能把销售切源扩大成全域切源。
 - BI 自动运营会话、任务、job 和审计使用 PostgreSQL `ops.link_ops_*`；生产数据库不可用时失败关闭，不能静默回退本地 JSON。
 - 负责人经验只允许 `knowledgePublisher=true` 的本人账号和已登记设备单向发布；同事账号只能消费，不能反向覆盖，也不展示内部规则包版本。
 
@@ -42,7 +42,7 @@
 
 ## 营销活动
 
-- 普通营销活动真实报名/取消、优惠券提交/取消、补预算仍需要当前线程明确授权；每日巡检用 `owner-standing-cloud-marketing-v1` 长期授权自动处理限时折扣价格漂移、登记中的人工特殊折扣恢复、新链接/新上架 7 天及重新上架/漏限时折扣兜底，不要求逐次 payload hash。每次仍须通过授权上下文、身份、价格栈、库存/平台规则、dry-run、执行后精确回读与审计；任一写阶段失败后跳过后续写阶段，只做最终 live scan。
+- 普通营销活动真实报名/取消、优惠券提交/取消、补预算仍需要当前任务明确授权；每日巡检用 `owner-standing-cloud-marketing-v1` 长期授权自动处理限时折扣价格漂移、登记中的人工特殊折扣恢复、新链接/新上架 7 天、重新上架/漏限时折扣兜底，以及严格命中“7 日曝光 >3000、点击率 >4%、销量明确为 0”的高点击低转化专属折扣。用户不必逐次提供 hash，但系统每轮仍须自动生成并校验精确 work hash，通过授权上下文、身份、价格栈、库存/平台规则、dry-run、执行后精确回读与审计；任一写阶段失败后跳过后续写阶段，只做最终 live scan。
 - 营销定价以 `docs/marketing-campaign-signup-pricing-rules.md`、`config/marketing_pricing_policy.json`、`lib/marketing_pricing_policy.mjs` 为准；整数目标价提交前做安全 jitter 并复查。
 - 普通活动、优惠券、限时折扣、旧活动价、成本、仓储费和利润率必须做叠加安全审核；活动扫描过期或证据缺失时 fail closed。
 - 新链接/新 SKC 不得简单标“待定价”：若能从最新已执行全量计划、同标准货号全局曝光 Top5 规则、成本/仓储费/底价推导出安全目标价，必须自动生成限时折扣兜底并回读；只有缺成本/目标价/仓储费、身份、库存或平台规则阻断时才 fail closed。

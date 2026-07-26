@@ -1,6 +1,6 @@
-# BI 自动化运营页 × SHEIN OpenAPI 接入方案（当前口径）
+# BI 自动化运营页 × SHEIN OpenAPI 接入方案（历史设计）
 
-> 状态：2026-06-28 已进入 V2 可试用收口阶段。V2 自动运营工作台只属于 BI 门户和云端 Codex CLI 自然语言会话，不再和飞书入口、V1 页面或旧“任务池/验证器”产品心智绑定。19 店 OpenAPI 授权、云端白名单、只读探针和写操作资料检查链路已完成；`copy_product_draft` 不再是单店适配，而是按店铺能力、payload mapper、自然语言确认映射、真实写白名单和回读/审计受控执行。本文仍坚持密钥隔离、资料检查、人工自然语言确认、审计回读和生产数据双跑对账边界，不保存任何 SHEIN 账号、密码、APP_SECRET、openKeyId、secretKey、tempToken 或 Cookie。
+> 状态：本文保留 2026-06-28 至 2026-07-18 的原始设计、迁移理由和当时双跑边界，不是当前生产事实源说明。当前半托销售/Webhook 见 [实时切换记录](bi-webhook-live-cutover-2026-07-23.md)，当前 19 店授权拓扑见 [单应用生产切换](openapi-single-app-production-cutover-2026-07-26.md)，生产 runbook 见 [cloud-bi-operations.md](cloud-bi-operations.md)。本文不保存任何 SHEIN 账号、密码、APP_SECRET、openKeyId、secretKey、tempToken 或 Cookie。
 
 ## 1. 目标
 

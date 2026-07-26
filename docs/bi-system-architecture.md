@@ -1,6 +1,6 @@
-# SHEIN BI 系统架构初版
+# SHEIN BI 系统架构
 
-更新时间：2026-05-29
+更新时间：2026-07-26
 
 ## 结论
 
@@ -8,12 +8,12 @@
 
 ```mermaid
 flowchart LR
-  A["SHEIN 后台 WebAPI / 官方 OpenAPI"] --> B["抓取与标准化脚本"]
+  A["SHEIN Webhook / 官方 OpenAPI / 后台 WebAPI"] --> B["增量同步、日更与标准化"]
   B --> C["PostgreSQL 数据仓库"]
   C --> D["Metabase BI"]
   C --> E["自定义实操台"]
-  B --> F["飞书 Base 过渡层"]
-  F --> G["现有日报/协同表"]
+  B --> F["飞书 P0 异常摘要"]
+  F --> G["人工处置"]
 ```
 
 ## 设计原则
@@ -35,8 +35,9 @@ flowchart LR
    - 本机 WSL + Docker + D 盘数据盘只保留为开发、排障和短期回滚参考。
 
 5. **生产链路逐步 API 化，不冒险硬迁移**
-   - 云端 systemd 已覆盖销售 WebAPI、入仓、BI Portal 生成、数据库备份、ET、飞书日报手动入口、统一日更补采、异常通知和登录态巡检；网页/CLI 问数继续可用，飞书日报自动发送与飞书只读问数 service 均停用。19 店 OpenAPI 销售/退货/商品对账已进入隔离双跑层，后续替换链路仍必须逐项验证后切换。
-   - SHEIN 销售抓取已改为 WebAPI 直连优先，Chrome 登录态保留为 Cookie/session 刷新和失败回退；官方 OpenAPI 继续并行试点，不直接覆盖生产事实表。
+   - 云端 systemd 已覆盖 Webhook/OpenAPI 当天销售、最终日核对与晋升、BI Portal、数据库备份、ET、飞书日报手动入口、统一慢变日更、异常通知和登录态巡检；网页/CLI 问数继续可用，飞书日报自动发送与飞书只读问数 service 均停用。
+   - 2026-07-23 起半托当天销售由 Webhook 触发按单 OpenAPI 写正式事实；前一天 WebAPI 只作独立核对，19/19 店深度匹配后才原子晋升 OpenAPI 日切片。商品流量、四档状态、营销与编辑级资料仍按各自 OpenAPI/WebAPI/headless 边界逐项演进。
+   - 2026-07-26 起半托生产 OpenAPI 数据面为 DL 单一 App + 19 店唯一 OpenKey；原独立 App 只作回滚，不进入生产业务处理。
 
 ## 当前服务
 
@@ -64,7 +65,7 @@ flowchart LR
 - Metabase 运行在云端 Docker 内部，不在文档中写公网裸地址；本地旧 WSL 地址只作历史排障参考。
 - Metabase dashboard 编号仍可作为内部迁移参考，但不要使用旧本地 WSL IP 作为正式入口。
 
-## 当前运行态（2026-06-03）
+## 当前运行态（2026-07-26）
 
 BI 系统当前分为三层入口：
 
@@ -72,7 +73,7 @@ BI 系统当前分为三层入口：
    - Base 表格 / Dashboard 写入由 `state/feishu-base-sync-paused.flag` 暂停。
    - 飞书日报脚本、异常通知 watchdog 和只读问数机器人已云端化并验证；日报自动发送当前停用，本地历史监听/提醒任务只作回滚参考。
    - SHEIN 抓数和 BI 刷新不得因飞书 Base 暂停而中断。
-   - 销售源文件当前由 WebAPI 直连优先生成；直连失败时才回退 Chrome。
+   - 当天销售事实由 Webhook/OpenAPI 增量更新；WebAPI 文件用于最终日独立核对和其它尚未 API 化的数据域，不因 Base 暂停而中断。
 
 2. **Metabase 分析层**
    - 连接 PostgreSQL 数据仓库。
@@ -87,19 +88,19 @@ BI 系统当前分为三层入口：
    - 首页"单货号成交价格分布"面板：依赖销售明细/homeRankings 行，客户端计算每行均价并分桶，无新写路径，只读决策支持。
    - 首页"成交价散点图"（priceScatter section）：基于 `fact.order_item` 的 `unit_price_sar = sales_sar / quantity`，按订单日期 × 成交单价绘制散点；不筛选货号时显示全货盘分布，筛选后缩小到单货号。Section API 为 `/api/bi/section/priceScatter`，需同时在 `BI_PORTAL_SECTION_KEYS` 白名单注册。
    - 本地 `127.0.0.1:8787` 和局域网入口已封存，不再作为正式入口。
-   - 短期动作状态仍为服务端状态文件，长期应入 PostgreSQL，避免文件状态成为单点。
-   - `mart.openapi_sales_reconciliation` 是 19 店 OpenAPI 销售隔离双跑对账表；它不覆盖正式销售事实表，切生产源前必须看连续日期 matched/warning 趋势。
+   - 自动运营会话、任务、job、事件和审计已进入 PostgreSQL `ops.link_ops_*`，revision、idempotency 和租约共同防并发覆盖。
+   - `fact.openapi_*` 与 `mart.openapi_sales_reconciliation` 是 OpenAPI 可追溯来源和最终日门禁证据；切换日以后当天事实由 Webhook 定向写入，最终日仍需全店匹配后原子晋升。
 
 当前团队访问状态：
 
-- 已具备：云端域名/HTTPS 入口、BI 应用内登录、服务端动作状态文件、深链接、动作清单复制、CSV 导出、系统巡检页。
-- 未完成：多人编辑冲突控制、动作状态入库、异地备份和权限分级。
+- 已具备：云端域名/HTTPS、应用内登录、账号/店铺权限、PostgreSQL 任务状态、可恢复 job、深链接、CSV 导出、系统巡检和审计。
+- 持续维护：异地备份恢复演练、数据域逐项 API 化和前端可读性；不能把这些长期维护项写成生产入口尚未完成。
 
 当前自动任务状态：
 
 - 生产调度以 `infra/systemd/*.timer` 和 [cloud-bi-operations.md](cloud-bi-operations.md) 为事实源；半托当天销售由 Webhook 事件触发，不再存在每小时 `today` timer。
 - 云端 `shein-bi-cloud-morning-chain.timer`：每天 `08:00`，跳过重复的当天销售抓取，直接启动 `shein-bi-cloud-daily-refresh.service` 做前一完整日统一补采；当前飞书日报自动发送已停用。
-- 云端 `shein-bi-cloud-yesterday.timer`：每天 `03:00`，刷新前一天最终销售并复核前两天稳定日。
+- 云端 `shein-bi-cloud-yesterday.timer`：每天 `03:00`，生成前一天 WebAPI 核对文件、复核稳定日，并在 19/19 OpenAPI 深度匹配后原子晋升最终日切片。
 - 云端 `shein-bi-db-backup.timer`：每天 `02:40`，备份业务库和 Metabase 元数据库。
 - 云端 `shein-bi-cloud-session-manager.timer`、`shein-bi-cloud-et-forwarder.timer`、`shein-bi-cloud-browser-cleanup.timer` 和 `shein-bi-cloud-watchdog.timer` 分别承担登录态巡检、ET 出库/货代、非业务窗口残留浏览器清理和异常通知。飞书问数服务保持暂停；旧 `today/daily-lark-report/link-business/rtv-verify/openapi-hl` 分散 timer 不再是生产调度。
 - 本地 `SHEIN-BI-Daily-Pipeline-0700`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-Sales-ETForwarder-0420` 等 Windows 任务已封存禁用，仅保留为回滚/迁移参考。
@@ -132,7 +133,7 @@ BI 系统当前分为三层入口：
 - `fact_after_sales`
 - `fact_fulfillment_daily`
 - `fact_marketing_campaign_daily`
-   - OpenAPI 并行试点表：`fact.openapi_store_daily_sales`、`fact.openapi_order_header`、`fact.openapi_order_item`。这些表只用于官方 OpenAPI / 当前生产销售源双跑验证，正式切换前不作为首页和日报的生产销售源。
+   - OpenAPI 来源表：`fact.openapi_store_daily_sales`、`fact.openapi_order_header`、`fact.openapi_order_item`。切换日以后它们承接 Webhook 定向同步和最终日全量来源，同时继续作为 reconciliation 与回滚证据；正式事实仍通过受限 apply/promote 函数写入，不允许业务脚本任意双写。
 
 用途：Metabase 的主要数据源。
 

@@ -1,6 +1,6 @@
 # SHEIN BI 系统运行说明
 
-> 当前权威状态：2026-07-18。V2 是唯一正式 BI 入口；本地 BI 已封存，V1 仅保留 GitHub archive 恢复点；云端专用运维清单见 `docs/cloud-bi-operations.md`。本文保留业务口径、本地回滚和历史 Windows 运维参考。
+> 当前权威状态：2026-07-26。V2 是唯一正式 BI 入口；本地 BI 已封存，V1 仅保留 GitHub archive 恢复点；云端专用运维清单见 `docs/cloud-bi-operations.md`。本文保留业务口径、本地回滚和历史 Windows 运维参考。
 
 ## 1. 当前系统定位
 
@@ -8,10 +8,10 @@
 - BI 系统当前以云端为正式入口，负责 PostgreSQL 数据仓库、Metabase 和 BI 经营门户。
 - 当前不能直接停用或删除 Metabase：PostgreSQL 是数据底座，Metabase 是正式深度分析/自由钻取层，BI Portal 是日常经营入口；只有等自研门户完全覆盖深钻能力后，才能重新评估是否降级 Metabase。
 - 不从飞书反抓数据做 BI 源头；BI 源头来自 SHEIN 后台抓取后的私有源文件 / PostgreSQL。
-- 销售源文件已改为 WebAPI 直连优先生成；Chrome profile 只作为 Cookie/session 刷新、登录续期和回退来源。
+- 半托当天销售由订单 Webhook 触发按单 OpenAPI 写正式事实；前一天最终收口用 WebAPI 独立文件做全店深度核对，匹配后原子晋升 OpenAPI 日切片。Chrome profile 仍用于商品/流量/营销/订单生命周期等未完全 API 化的数据域和登录续期，不是当天销售轮询主路径。
 - BI 后置刷新失败不应反向影响 SHEIN 抓数、异常通知或后续手动日报入口。
 - 暂停开关：`state/feishu-base-sync-paused.flag`。存在该文件时，跳过飞书事实表、产品表、月表、宽表和看板写入；删除该文件后可恢复写表链路。
-- 营销折扣自动化仍按“只读巡检 / 精确队列 / 受控修复 / live 回读”分层；长期路线图见 `docs/marketing-automation-roadmap.md`。guard 使用 session HTTP，一次读取 19 店普通活动、15% 券 active 集合与当前/未来活动价，不启动浏览器、不持有租约或写授权。`2026-07-18` 生产实测完整巡检 `157s`、1516 行、19/19 店成功、Chrome `0 -> 0`。repair worker 于 `10:50/12:50/14:50/16:50/18:50` 每轮最多处理 8 个活动组，强制精确 hash、旧保护快照、事务 journal、失败补偿和最终全店 readback。
+- 营销折扣自动化仍按“只读巡检 / 精确队列 / 受控修复 / live 回读”分层；长期路线图见 `docs/marketing-automation-roadmap.md`。guard 使用 session HTTP，一次读取 19 店普通活动、15% 券 active 集合与当前/未来活动价，不启动浏览器、不持有租约或写授权。`2026-07-18` 生产实测完整巡检 `157s`、1516 行、19/19 店成功、Chrome `0 -> 0`。repair worker 于 `10:50/12:50/14:50/16:50/18:50/19:30` 每轮最多处理 8 个活动组，强制精确 hash、旧保护快照、事务 journal、失败补偿和最终全店 readback。
 
 ## 2. 日常入口
 
@@ -33,7 +33,7 @@
 
 - 当前 BI 截面日期和经营数据只以云端门户系统状态页、线上 `/api/bi/section/*`、云端 PostgreSQL warehouse、云端日志和 systemd 状态为准，不在本文写死；仓库快照不用于当前数据判断，运维文档只记录口径和入口。
 - 当前 BI 门户侧栏更新时间口径：销售取销售源数据抓取时间；售后/库存/财务取业务域源文件最大 `fetchTime`；链接表现取链接源文件最大 `fetchTime`；ET 货代仓取 ET 源文件/入仓批次时间。BI 入仓或页面重跑时间只作内部排障，不作为侧栏主要更新时间。
-- 销售抓取入口：当前 19 店 `salesTransport=auto`，先 WebAPI 直连，失败才回退浏览器；本地 session 在 `state/shein_webapi_sessions/*.local.json`，不进 GitHub。
+- 销售事实入口：切换日以后当天走 Webhook + 按单 OpenAPI；前一天 WebAPI 只作为独立核对文件。`salesTransport=auto` 与 `state/shein_webapi_sessions/*.local.json` 仍保留给最终日核对、灾备和其它 WebAPI 数据域，不进 GitHub。
 - 销售有效性口径：所有抓取、日报、产品统计、BI 入仓和飞书表格脚本必须共用 `lib/shein_sales_validity.mjs`。源头总销售只剔除真正取消、揽收前取消等未形成销售的商品行，例如 `pageStatus=CANCEL`、`goodsPerformanceStatus=6` 或订单/履约状态文本含取消；`用户已退款`、退货、派件失败等仍保留在总销售里，再由净销售额、售后/利润层反转。历史 summary 重算入口为 `scripts/repair_shein_sales_summaries.mjs`。
 - 店铺范围：`CX DL DX FY HL JSH JY LQ MZ NM QH QY TS TZ TZZ XC XL YJ ZL`
 - 分组：DSY = `DL DX FY LQ NM HL JY ZL TS MZ`；LGM = `CX YJ XL QY QH TZ JSH TZZ XC`。
@@ -46,7 +46,7 @@
 
 本文件不维护时间表。生产调度以 `infra/systemd/*.timer` 的 `OnCalendar` 为准；生产操作、冲突窗口和验证步骤见 [cloud-bi-operations.md](cloud-bi-operations.md)。
 
-云端当前自动覆盖销售 WebAPI 直连、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、晨间销售+日更链路、异常通知和登录态巡检；网页/CLI 问数继续可用，飞书日报自动发送与飞书只读问数 service 当前均停用。OpenAPI 销售对账已升级为 19 店并行双跑层，仍不替换生产销售源。覆盖审计使用 `scripts/audit_cloud_data_coverage.mjs`：查最新日防漏时用 `--expected-start range-start`，查历史断档时用 `--expected-start first-seen`。历史口径只检查每个店首个有效日期之后是否中间断档，不把店铺尚未开通/尚未接入前的日期算作缺抓。
+云端当前自动覆盖 Webhook/OpenAPI 当天销售、最终日核对与晋升、BI Portal、数据库备份、ET 货代仓、晨间慢变日更、异常通知和登录态巡检；网页/CLI 问数继续可用，飞书日报自动发送与飞书只读问数 service 当前均停用。覆盖审计使用 `scripts/audit_cloud_data_coverage.mjs`：查最新日防漏时用 `--expected-start range-start`，查历史断档时用 `--expected-start first-seen`。历史口径只检查每个店首个有效日期之后是否中间断档，不把店铺尚未开通/尚未接入前的日期算作缺抓；事件驱动当天无订单可以是合法零值，不因没有销售事件单独报警。
 
 ### 4.2 本地历史任务 / 回滚参考
 
@@ -63,7 +63,7 @@
 
 如果将来回滚本地，Windows 任务仍应通过 `wscript.exe` + `scripts/run_scheduled_hidden.vbs` 隐藏启动 PowerShell，不要直接注册前台 PowerShell 窗口。
 
-## 4A. SHEIN 销售 WebAPI 直连运行规则
+## 4A. SHEIN WebAPI 核对与灾备规则
 
 - 单店销售抓取：`node scripts/fetch_shein_sales.mjs HL --date YYYY-MM-DD --transport webapi`。
 - 强制浏览器回退：`node scripts/fetch_shein_sales.mjs HL --date YYYY-MM-DD --transport browser`。
@@ -246,7 +246,7 @@
 - 检查本地是否仍封存：`http://127.0.0.1:8787/api/health` 应无法连接；若能连上，说明本地 BI 被重新启动，需要确认是否为回滚。
 - 修改 BI 门户 UI 时，默认先后台验证：`node --check scripts/generate_bi_portal.mjs`、`$env:SHEIN_BI_PORTAL_TIMEOUT_MS='900000'; node scripts/generate_bi_portal.mjs`、静态检查 `outputs/bi-portal/index.html` / `data.json`。除非用户要求或必须排查浏览器交互问题，不主动打开前端。
 - 云端是最终审核面。涉及 V2 弹窗/筛选/页面交互时，发布前必须在云端页面或云端服务输出复核；时间筛选月份切换的关键证据是弹窗保持 `hidden=false`、`aria-expanded=true`，月份标题正确更新且无 console error/warn。
-- OpenAPI 抓数故障收口：2026-07-16 的业务域抓取因遗漏同步 `fssync` 依赖而在错误分支触发异常，已补齐依赖并保留既有文件的零行保护；2026-07-17 的并行 loader 曾让每店同时做 DDL，造成 PostgreSQL deadlock。调度现先单进程 `--ensure-only`，worker 一律 `--skip-ensure`，并行只负责数据加载。销售/商品/退货 OpenAPI 双跑仍只写 `fact.openapi_*` 与对账层，不切换正式事实源。
+- OpenAPI 抓数故障收口：2026-07-16 的业务域抓取因遗漏同步 `fssync` 依赖而在错误分支触发异常，已补齐依赖并保留既有文件的零行保护；2026-07-17 的并行 loader 曾让每店同时做 DDL，造成 PostgreSQL deadlock。调度现先单进程 `--ensure-only`，worker 一律 `--skip-ensure`，并行只负责数据加载。销售在切换日以后按 Webhook/OpenAPI 正式事实与 03:00 全店门禁运行；商品、退货等数据域仍按各自隔离对账与日更验收，不从销售结论类推。
 - 检查 WebAPI 销售直连：`node scripts/fetch_shein_sales.mjs HL --date YYYY-MM-DD --transport webapi --json`，再和 `outputs/shein_fetch/HL/YYYY-MM-DD.json` 或数据库切片对账。
 - 检查取消单口径：先 dry-run `node scripts/repair_shein_sales_summaries.mjs --start YYYY-MM-DD --end YYYY-MM-DD`；确认后再加 `--write`。写回后运行 `node scripts/audit_shein_sales_logic.mjs --month YYYY-MM --date YYYY-MM-DD --offline`。
 - 检查成本文件解析但不入库：`node .\scripts\import_product_costs.mjs --dry-run`。
@@ -289,8 +289,7 @@
 ## 16. 2026-05-03 评价全量与平台翻译口径（当前权威）
 
 - 评价/口碑底库按每店开店以来全量补抓；日常新增评价同步默认只抓最近 `14` 天作为防漏增量窗口，既覆盖小范围延迟/补跑，也避免 90 天过长窗口浪费资源。
-- 评论中文翻译使用 SHEIN 评论列表接口的 `translate: 1` 平台译文，写入 `fact.product_comment.goods_comment_content_zh`，`translation_provider='shein-platform'`；旧的本地启发式翻译和 `scripts/translate_product_comments.mjs` 不再作为生产口径。
+- 评论中文翻译使用 SHEIN 评论列表接口的 `translate: 1` 平台译文，写入 `fact.product_comment.goods_comment_content_zh`，`translation_provider='shein-platform'`；旧的本地启发式翻译脚本已移除，不再作为生产口径。
 - 2026-05-03 原 16 店全量评价补抓基线：`fact.product_comment` 共 `1796` 条，最早评价日期 `2025-10-04`、最新评价日期 `2026-05-04`；`1794` 条有 SHEIN 平台译文，剩余 2 条为原文为空，无需翻译。新增店铺的评价随日常业务域同步进入仓库。
 - 全量补抓脚本：`scripts/backfill_shein_comments_full_history.mjs`；日常业务域同步脚本：`scripts/fetch_shein_business_domains.mjs` + `scripts/load_bi_business_domains.mjs`，抓取时同时合并平台译文。
 - SHEIN 评论接口在大时间窗下可能返回 `mgs97906 数据量太多...缩小评论时间`，因此全量补抓必须按日期窗口分段，并在必要时自动拆分。
-

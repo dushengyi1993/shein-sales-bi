@@ -79,7 +79,7 @@
 
   - `fetch_shein_sales.mjs`
 
-    - `fetch_shein_sales.mjs` 支持 `--transport browser|webapi|auto`、`--session-dir`、`--refresh-session`，当前生产配置为 WebAPI 直连优先。
+    - `fetch_shein_sales.mjs` 支持 `--transport browser|webapi|auto`、`--session-dir`、`--refresh-session`；当前用于最终日 WebAPI 独立核对、尚未 API 化的数据域和人工灾备，不再承担半托当天销售的定时全店轮询。
 
     - `run_sales_sync_job.mjs` 读取 `config/stores.json.salesTransport` / `SHEIN_SALES_TRANSPORT`；`auto` 成功时不启动浏览器，失败才刷新 session 或回退 Chrome。
 
@@ -133,7 +133,7 @@
 
   - `generate_bi_portal.mjs`：当前 V2 正式 BI 门户生成器；默认超时 `900` 秒，输出 `outputs/bi-portal/index.html` 与 `outputs/bi-portal/data.json`；生成前会通过 `lib/product_display_name.mjs` 补齐 `product_display_name` 和顶层 `productDisplayNames`。
 
-  - `generate_bi_portal_v2.mjs`：历史 V2 平行预览生成器，当前仅作迁移参考；正式入口以后以 `generate_bi_portal.mjs` / `outputs/bi-portal/index.html` 为准。
+  - 历史 V2 平行预览生成器已移除；正式入口只使用 `generate_bi_portal.mjs` / `outputs/bi-portal/index.html`。
 
   - `serve_bi_portal.mjs`：云端 BI Portal 服务，提供静态页、健康检查和 `/api/bi/section/:section`；缓存读写、generation 校验、raw/gzip sidecar 与 stale 元数据统一由 `lib/bi_section_cache.mjs` 负责；`homeProfit` 是服务层从当前 `profit` section cache 派生的轻量首页利润摘要；`homeRankings` 会裁掉首页不用的重复商品长文本后缓存；`inventoryTrend` 也必须读取已发布利润 cache，禁止每次展开实时 `mart.profit_order_item`；服务启动和首页访问会触发 core `generatedAt` watcher 兜底预热 section，健康接口暴露 `biCoreWarmup` 状态。
 
@@ -211,7 +211,7 @@
 
   - `marketing/build_marketing_sku_approval.mjs` / `marketing/verify_marketing_sku_approval.mjs`：按云端 BI / 成本映射生成并校验货号级确认表；确认表必须是用户可审的 Excel 人话版，而不是只给 CSV/JSON 或几百行明细。标准工作簿至少包含 `说明`、`按货号汇总`、`店铺差异明细`、`报名明细`、`剔除项/阻塞项`、`低价补救/风险项`、`15%券流量试验计划`（如适用）等 sheet；除说明页外必须有 `备注/修改意见` 列。确认表必须展示预期利润率、预期最终价、普通活动填报价、是否使用可选 15% 流量券、触券下探价、成本、仓储费/件、优惠券/限时折扣风险和带店铺前缀的全局曝光前五链接目标利润率差异，不能按每个店铺各算一组 Top5。
 
-  - `marketing/dsy_marketing_deadline_fill.mjs`：DSY 营销活动报名半自动补填；默认只勾选商品、填活动价/降幅和复核，用户明确授权后才可传 `--submit` 真实提交。支持 `--out-dir` 隔离探测/补报证据；选择页会记录 `availableRows/outOfPlanRows/outOfPlanCount`，当活动页出现计划外可报名 SKC 时必须生成 supplement `selection-plan` / `price-overrides` 并补进 repaired 全量计划，不能把新增可报行忽略掉。本期价格覆盖表用 `--price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD-approved.json`，缺成本例外仅用 `--min-discount-fallback SK-13034`；未命中逐行覆盖价时同样读取 `config/marketing_pricing_policy.json` 和 BI 曝光数据执行同一标准货号全局曝光前五利润率规则。
+  - `marketing/dsy_marketing_deadline_fill.mjs`：DSY 营销活动报名半自动补填；默认只勾选商品、填活动价/降幅和复核。真实 `--submit` 除用户明确授权外，还强制要求 `--approval-manifest`，并验证当前 selection/price 是批准计划的精确子集；文件变化或 work fingerprint 不符立即停止。支持 `--out-dir` 隔离探测/补报证据；选择页会记录 `availableRows/outOfPlanRows/outOfPlanCount`，当活动页出现计划外可报名 SKC 时必须生成 supplement `selection-plan` / `price-overrides` 并补进 repaired 全量计划，不能把新增可报行忽略掉。本期价格覆盖表用锁定后的 `*-user-approved.json`，缺成本例外仅用 `--min-discount-fallback SK-13034`；未命中逐行覆盖价时同样读取 `config/marketing_pricing_policy.json` 和 BI 曝光数据执行同一标准货号全局曝光前五利润率规则。
 
   - `marketing/verify_ordinary_activity_enrollment.mjs`：普通营销活动提交后的已报/审核中集合回读器，按 `selection-plan + price-overrides` 校验 `missingRows/priceMismatchRows/badPacketActivities/extraAvailableRows/activityListGapRows`。`extraAvailableRows` 来自执行页 `outOfPlanRows`、`totalGoods > expectedSelectedCount` 或后台活动列表 `applyGoodsNum < allowGoodsNum` 的差额，用于发现“计划内都报了但页面还有漏抓商品”的系统级漏报；补报后必须回读到 `extraAvailableRows=0` 且 `activityListGapRows=0`。只补少量店铺时优先传 `--stores` 和 `--fill-results-dir` 做最小范围复核，不要求每天全店开前端。
 
@@ -251,7 +251,7 @@
   - `marketing/build_limited_discount_drift_rescue_plan.mjs`：从每日 guard 的 `limitedDiscountTargetPriceDrift.belowRows` 构建限时折扣漂移修复计划，按店/分组输出 JSON rescue 文件，以当前 `finalTargetPrice` 作为限时折扣价，并把策略默认 `activityStock=10` 写入 rescue 根和明细行。
   - `marketing/manage_manual_limited_discount_override.mjs`：人工特殊限时折扣持久登记 CLI，支持 `validate/list/register/update-activity/disable`；真实特殊价提交前必须先登记，live 回读后写回活动 ID。所有变更在跨进程 ticket lock 内重新读取后原子更新，防止 timer 与 CLI 并发丢失登记。
   - `marketing/build_manual_limited_discount_restore_plan.mjs` / `marketing/batch_restore_manual_limited_discounts.mjs`：从 guard 的 `manualSpecialLimitedDiscount` 审计区构建精确特殊价恢复计划，完成 dry-run、ET 门控库存处理后，把替换交给统一事务执行器；只有目标活动精确回读成功才更新登记。混合旧活动不再由批处理直接先删后建。
-  - `marketing/manage_manual_limited_discount_inventory.mjs`：ET 门控的限时折扣库存守卫。默认只为有效人工特殊登记项服务；`--rescue <json>` 模式用于 2026-07-16 已授权的目标价漂移、新链接/新上架 7 天、重新上架无活动、漏限时折扣 rescue。优先查询 `mart.et_product_inventory_current`，生产只读角色无权访问时只接受新鲜且带当天 ET snapshot 的云端 BI ET 投影。写前在逐链接跨进程锁内二次回读平台库存，已被其它进程补足时不覆盖；旧 rescue 缺库存字段时读取策略默认 10。平台 `OVERWRITE` 按“要求可用库存 + 当前锁定库存”计算且不下调现有总量，实际覆盖量进入幂等键，最终以 `totalUsableInventory >= activityStock` 回读为准。ET 不足/过期/回读不一致时返回非零；不得用于普通营销活动库存或任意增库存。
+  - `marketing/manage_manual_limited_discount_inventory.mjs`：ET 门控的限时折扣库存守卫。默认只为有效人工特殊登记项服务；`--rescue <json>` 模式用于 2026-07-16 已授权的目标价漂移、新链接/新上架 7 天、重新上架无活动、漏限时折扣 rescue。优先查询 `mart.et_product_inventory_current`，生产只读角色无权访问时只接受新鲜且带当天 ET snapshot 的云端 BI ET 投影。写前在逐链接跨进程锁内二次回读平台库存，已被其它进程补足时不覆盖；旧 rescue 缺库存字段时读取策略默认 10。平台 `OVERWRITE` 的不可用量取 `max(totalLockedQuantity, totalInventoryQuantity - totalUsableInventory)`，覆盖量至少为“要求可用库存 + 不可用量”且不下调现有总量；实际覆盖量进入幂等键，最终以 `totalUsableInventory >= activityStock` 回读为准。ET 不足/过期/回读不一致时返回非零；不得用于普通营销活动库存或任意增库存。
   - `marketing/batch_apply_new_listing_limited_discount.mjs`：批量执行新链接/新上架/重新上架/在售老链接漏兜底。多 SKC rescue 中每个库存目标独立调用 ET 门控库存守卫；可执行子集可继续，但被排除的 SKC 会让该组保持 blocker 并在后续轮次重试，不能因部分成功把整组标成完成。替换写统一走事务执行器。
   - `marketing/smoke_authorized_fallback_inventory_top_up.mjs`：验证 ET 足够时精确补到 10、ET 不足阻断、平台库存已足够不写、确定性 idempotency key，以及普通 rescue 不能冒充人工特殊登记项。
   - `marketing/remove_skc_from_limited_discount.mjs`：从限时折扣活动中移除指定 SKC 的 CDP 执行器，带登录恢复和店铺身份校验。真实执行需明确授权；营销修复的 dry-run 已修为预演完成后立即返回，绝不得误调用本执行器。
@@ -261,6 +261,14 @@
   - `marketing/smoke_limited_discount_drift_activity_stock.mjs`：验证漂移 rescue 显式库存、旧 rescue 默认库存、锁定库存补偿、不得下调平台总库存，以及覆盖量变化必须生成新幂等键。
   - `marketing/smoke_limited_discount_target_price_guard.mjs`：rescue 执行路径拒绝低于目标价的限时折扣。
   - `marketing/smoke_manual_limited_discount_protection.mjs`：验证无保护时旧逻辑会排队、有效保护剔除三条、到期恢复普通规则、stale rescue 防御、普通漂移不受影响、特殊价精确恢复，以及价格/活动库存/`validTo` 三项 live 覆盖、写阶段 fail closed 和 ET 足够/不足分支。
+  - `marketing/build_high_click_special_discount_plan.mjs` / `marketing/batch_apply_high_click_special_discounts.mjs`：高点击低转化专属限时折扣的精确计划与有界执行。只接受当前在售、7 日曝光 `>3000`、点击率 `>4%`、销量明确为 `0` 的链接；执行前重读指标、先登记特殊价保护，再复用 ET 门控/事务替换/live 回读。
+  - `marketing/smoke_high_click_special_policy.mjs`：覆盖严格阈值、缺失销量不当零、Top5 利润率下调、保护优先、过期恢复、stale 计划重判和滚动 7 日效果分类。
+  - `marketing/smoke_bounded_fallback_resume.mjs`：验证组级部分失败时只续跑未覆盖的精确键，不重放已有 `createdActivityId + desiredCoveredSkcs` 的成功项。
+  - `marketing/smoke_shared_storage_cost.mjs`：验证零销量在库货号仍按 ET 货号仓储费与当前可售+破损数量形成共享仓储费/件。
+  - `marketing/build_ordinary_campaign_plan_subset.mjs` / `marketing/lock_ordinary_campaign_execution_plan.mjs`：从候选计划生成待批准 subset，并把用户批准原话、来源、文件 SHA-256、payload hash 和 work fingerprint 锁入不可变 manifest；subset 本身不携带提交授权。
+  - `marketing/run_ordinary_store_submission_batch.mjs` / `marketing/run_ordinary_chunk_submission_batch.mjs` / `marketing/run_ordinary_singleton_recovery_batch.mjs`：普通活动批准后的店级、分块和单行恢复执行器。三者都要求同一 approval manifest；chunk resume 只承认同一 fingerprint 的精确成功证据。
+  - `marketing/merge_ordinary_activity_enrollment_reports.mjs` / `marketing/promote_ordinary_campaign_baseline.mjs`：合并只读补充回读；只有全量回读无缺失、错价、计划外可报、活动列表缺口或坏包时，才把批准计划晋升为下一活动窗口基线。
+  - `marketing/smoke_ordinary_campaign_approval.mjs`：验证批准文件不可变、selection/price 键严格对齐和 work fingerprint 一致。
   - `marketing/smoke_new_listing_limited_discount_plan_exact_price.mjs`：新上架限时折扣计划使用精确 storeKey+SKC 目标价证据。
   - `marketing/smoke_order_audit_linksdata_exact_target.mjs`：订单审计优先使用 linksData 精确 store/SKC 目标价和活动窗口。
   - `marketing/smoke_order_target_price_windows.mjs`：订单审计在 linksData 无直接行时使用 store/SKC 时间窗口计划目标。
@@ -272,9 +280,9 @@
 
   - `cleanup_shein_store_browsers.mjs`：按配置店铺 profile 精确关闭 Chrome/Chromium，清理 Chrome 临时目录；确认目标店铺进程归零后同时删除该 profile 的 `SingletonLock/Cookie/Socket`，避免进程已关但旧锁阻断下一批启动。不得删除仍有目标进程的 profile 锁，也不处理 ET forwarder 等非营销 profile。
 
-  - `lib/browser_task_lease.mjs` / `smoke_browser_task_lease.mjs`：实际启动浏览器的任务按“任务 × 店铺”获取、心跳和释放租约；过期或 owner PID 已死亡才回收。每小时 `shein-bi-cloud-browser-cleanup.timer` 先回收过期租约，再清理未受有效租约保护的孤儿浏览器。纯 session HTTP guard 不申请租约。
+  - `lib/browser_task_lease.mjs` / `smoke_browser_task_lease.mjs`：实际启动浏览器的任务按“任务 × 店铺”获取、心跳和释放租约；过期或 owner PID 已死亡才回收。`shein-bi-cloud-browser-cleanup.timer` 只在 `03:45/09:50/21:00` 回收过期租约并清理未受有效租约保护的孤儿浏览器。纯 session HTTP guard 不申请租约。
 
-  - `cloud_marketing_live_guard.sh` 与营销修复 queue/worker：完整巡检与大批写入解耦。guard 只做一次 stack review、一次价格层 scan、一次报告/建队列；不启动浏览器、不清理浏览器、不持有写授权。`2026-07-18` 生产基线为 19 店 `157s`、1516 行、Chrome `0 -> 0`。当次实时券/活动价证据完整时，旧 coupon/low-price/old-ordinary 中间扫描只作历史审计；实时证据不完整则 fail closed。worker 于 `10:50/12:50/14:50/16:50/18:50` 每轮最多 8 组，强制精确 work hash、事务补偿和最终全店 readback。
+  - `cloud_marketing_live_guard.sh` 与营销修复 queue/worker：完整巡检与大批写入解耦。guard 只做一次 stack review、一次价格层 scan、一次报告/建队列；不启动浏览器、不清理浏览器、不持有写授权。`2026-07-18` 生产基线为 19 店 `157s`、1516 行、Chrome `0 -> 0`。当次实时券/活动价证据完整时，旧 coupon/low-price/old-ordinary 中间扫描只作历史审计；实时证据不完整则 fail closed。worker 于 `10:50/12:50/14:50/16:50/18:50/19:30` 每轮最多 8 组，强制精确 work hash、事务补偿和最终全店 readback。
 
   - `marketing/split_recreate_mixed_limited_discount.mjs`：仅保留历史 dry-run/计划核对；旧“先结束整场再拆分重建”的 `--execute` 已禁用。真实替换必须改走 `replace_limited_discount_transactionally.mjs`，不能恢复旧入口。
 
@@ -367,9 +375,9 @@
 
 - `cloud_manual_login_session.mjs`：云端临时人工登录窗口管理器；按店启动 Xvfb + Chrome + x11vnc + websockify/noVNC，完成后导出/探测登录态并关闭临时进程。状态、短期 token 和日志都属于服务器私有运行态，不提交 GitHub。
 
-- `cloud_morning_chain.sh`：云端晨间串行链路入口；08:00 先跑当天销售刷新，再启动统一日更。当前 `SHEIN_BI_MORNING_SEND_LARK_REPORT=0`，默认不发送日报。
+- `cloud_morning_chain.sh`：云端晨间串行链路入口；08:00 默认跳过当天销售全店刷新，直接启动前一完整日统一慢变日更。当前 `SHEIN_BI_MORNING_SALES_REFRESH=0`、`SHEIN_BI_MORNING_SEND_LARK_REPORT=0`；当天销售由 Webhook/OpenAPI 增量更新，日报默认不发送。
 
-- `cloud_daily_refresh.sh`：云端统一日更补采入口；集中执行每天一次的链接/业务域、SBN 营销概览、RTV 换单复核、体检和 BI 刷新。它不再调用全店 `scan_current_marketing_prices_for_bi.mjs`，避免与独立 guard 重复抓同一 MBRs 价格栈。OpenAPI 销售、退货退款、商品/链接双跑只写隔离对账层，不切生产事实源。
+- `cloud_daily_refresh.sh`：云端统一日更补采入口；集中执行每天一次的链接/业务域、SBN 营销概览、RTV 换单复核、体检和 BI 刷新。它不再调用全店 `scan_current_marketing_prices_for_bi.mjs`，避免与独立 guard 重复抓同一 MBRs 价格栈。该入口中的 OpenAPI 销售步骤只产出来源/对账证据；正式最终日晋升属于 `03:00` 的全店深度匹配门禁。退货、商品/链接仍按各自隔离对账和切源边界处理。
 
 - `cloud_link_business_sync.sh`：云端链接/业务域低层入口；按店顺序 bootstrap 浏览器会话、抓链接和业务域、入仓。生产调度由 `cloud_daily_refresh.sh` 调用它，避免日更任务分散。
 
@@ -473,9 +481,17 @@
 
 - `lib/marketing_pricing_policy.mjs`：营销活动机器可读定价策略加载与曝光前五链接识别；负责把 `config/marketing_pricing_policy.json` 里的“限时折扣兜底 / 同一标准货号全局曝光前五利润率差异 / 15%底价”规则提供给审核表和填报脚本。
 
-- `lib/marketing_automation_authorization.mjs`：读取 `config/marketing_pricing_policy.json` 中的负责人长期营销授权，校验授权 ID、运行上下文、动作白名单和全启用店范围。云端 timer 不逐次要求 payload hash；普通活动、优惠券、预算和策略外动作不在授权内。
+- `lib/marketing_automation_authorization.mjs`：读取 `config/marketing_pricing_policy.json` 中的负责人长期营销授权，校验授权 ID、运行上下文、动作白名单、全启用店范围和系统本轮自动锁定的 payload/work hash。用户不必逐次提供 hash；普通活动、优惠券、预算和策略外动作不在授权内。
 
 - `lib/marketing_manual_limited_discount_overrides.mjs`：人工特殊限时折扣登记、有效窗口、精确价格/活动库存/截止时间覆盖判定，以及 ET 门控库存动作的共享实现。
+
+- `lib/marketing_bounded_batch_resume.mjs`：把限时折扣批次结果拆成已完成、终态阻断、可重试和待续跑精确键，避免组级失败导致成功项重放。
+
+- `lib/marketing_high_click_special_policy.mjs`：高点击低转化候选、Top5 利润率下调、保护登记冲突、执行前重判和效果跟踪的共享规则。
+
+- `lib/marketing_shared_storage_cost.mjs`：为零销量但仍有 ET 实盘和仓储费的标准货号计算共享仓储费/件，供营销审核与 stack review 共同使用。
+
+- `lib/marketing_ordinary_campaign_approval.mjs`：普通活动批准文件的不可变校验、键对齐、payload hash、work fingerprint 和 manifest 装载；批量提交器不得自行复制一套弱校验。
 
 - `lib/marketing_ordinary_price_evidence.mjs`：读取 `tmp/mbrs/deadline-fill-results` 中仍在活动生效窗口内的普通营销活动填报价，按 `storeKey + skc` 归组，并计算不含券保底价与 `finalTargetPrice` 的差异，同时保留触券下探风险；供优惠券提交器、每日 guard 和高券研究共用，避免旧普通活动低价或触券打穿风险只在某一个脚本里被发现。
 
@@ -532,7 +548,7 @@
 
 
 
-这些不是生产主链路。为了避免误删，目前先保留；后续可移动到 `scripts/archive/` 或 `tools/probes/`。
+这些不是生产主链路。为了避免误删，目前先保留；确需归档时再创建明确的归档目录或迁入 `tools/probes/`，并同步更新本清单。
 
 
 

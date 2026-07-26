@@ -25,11 +25,11 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 当月主看板：`SHEIN经营看板 v3-主看板`，ID `blkFn3qHrwdsrJyX`，数据源 `看板数据-MAIN-*`
 - 上月看板：`SHEIN经营看板 v3-上月`，ID `blkWeyZhphgRZYim`，数据源 `看板数据-PREV-*`
 - 店铺：DSY=`DL DX FY LQ NM HL JY ZL TS MZ`；LGM=`CX YJ XL QY QH TZ JSH TZZ XC`。
-- 云端 BI 正式入口：`https://shein-bi.dushengyi.xyz/`，旧 IP `http://43.165.167.135/` 仅作兜底，Nginx Basic Auth 保护；本地 `8787` 服务和 `SHEIN-*` Windows 任务已封存禁用，除非明确回滚不要重启。
+- 云端 BI 正式入口：`https://sa.dushengyi.cc/`，旧 IP `http://43.165.167.135/` 仅作兜底；正式入口使用应用内登录和 `bi_session`。本地 `8787` 服务和 `SHEIN-*` Windows 任务已封存禁用，除非明确回滚不要重启。
 - V2 是当前正式 BI Portal；V1 已封存到 `/v1/` 和 GitHub final/archive release，不再进入正式 release，也不纳入日常自动刷新。
-- 云端生产调度：`shein-bi-cloud-today.timer` 每两小时整点刷新当天销售、入仓并生成 BI Portal；`shein-bi-cloud-yesterday.timer` 每天 `03:00` 刷新前一天最终版并复核稳定日；`shein-bi-db-backup.timer` 每天 `02:40` 备份数据库；`shein-bi-cloud-session-manager.timer` 每天巡检/恢复 19 店登录态；`shein-bi-cloud-et-forwarder.timer` 每奇数小时 `:20` 跑 ET；`shein-bi-cloud-morning-chain.timer` 每天 `08:00` 先跑销售再启动 `shein-bi-cloud-daily-refresh.service`；飞书日报自动发送已停用，无 `daily-lark-report.timer`；`shein-bi-cloud-watchdog.timer` 每小时巡检；`shein-bi-lark-sales-qa.service` 常驻只读问数。
-- 19 店 SHEIN 官方 OpenAPI 已完成店铺级授权、云端白名单和只读探针；销售订单、退货退款、商品/链接基础资料均进入隔离并行双跑层，并由 `shein-bi-cloud-daily-refresh.service` 的 `SHEIN_BI_DAILY_OPENAPI_*` 开关自动更新。OpenAPI 只写 `fact.openapi_*` / `mart.openapi_*_reconciliation`，不切生产源，不执行 SHEIN 写操作。
-- 当前 19 店销售生产抓取已改为 WebAPI 直连优先：`config/stores.json.salesTransport=auto`，session 文件在 `state/shein_webapi_sessions/*.local.json`，直连成功不启动浏览器；浏览器只作刷新 session、登录续期和回退。
+- 云端生产调度：半托当天销售由订单 Webhook 触发按单 OpenAPI 增量更新，不启用 `shein-bi-cloud-today.timer`；`shein-bi-cloud-yesterday.timer` 每天 `03:00` 生成 WebAPI 独立核对并在 19/19 深度匹配后原子晋升 OpenAPI 最终日切片；`shein-bi-cloud-morning-chain.timer` 每天 `08:00` 启动前一完整日慢变补采；数据库备份、ET、登录态、营销 guard/repair、孤儿浏览器清理和 watchdog 各由独立 timer 负责。飞书日报仅保留手动入口，飞书只读问数 service 保持暂停。
+- 2026-07-26 起，19 店半托 OpenAPI 生产数据面统一为 DL 单一 App + 每店唯一 OpenKey；原 18 个独立 App 只作回滚，不进入生产读写或 Webhook 业务处理。当天销售已切正式事实；退货退款、商品/链接、营销和编辑级资料继续按各自 OpenAPI、WebAPI/headless 与日更边界逐项收口。
+- WebAPI/session 与店铺 Chrome profile 仍用于最终日独立核对、尚未 API 化的数据域、登录续期和人工灾备；不能因为销售已切 Webhook/OpenAPI 就删除这些能力，也不能把它们说成当天销售主链路。
 - ET 货代仓已接入仓库和 BI；云端 ET 同步已启用并验证成功。RTV 复核耗时长是正常现象，滚动销售刷新不应等待完整 RTV。
 - LGM profile 映射：`CX=profile cx/GS9489101`，`YJ=profile yj/GS8146729`，`XL=profile xl/GS9307061`，`QY=profile qy/GS7451160`，`QH=profile qh/GS8715910`，`TZ=profile tz/GS5636781`，`JSH=profile jsh/GS3308359`，`TZZ=profile tzz/GS7146778`，`XC=profile xc/GS2944318`。`YJ/XL/QY` 已在 2026-06-05 纠正为店铺代码与 profileKey 对齐；错位核验必须同时比对 `config/stores.json`、`config/store_account_truth.json`、浏览器保存账号、实际登录后的店铺名/账号和 live 抓数归属。
 
@@ -50,9 +50,9 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 不做猜测性单店时区偏移；HL 的错误 `accountUtcOffsetHours=3` 已删除并回补。
 
 ## 定时任务
-- 当前生产调度在云端 systemd：`shein-bi-cloud-today.timer`、`shein-bi-cloud-morning-chain.timer`、`shein-bi-cloud-yesterday.timer`、`shein-bi-db-backup.timer`、`shein-bi-cloud-session-manager.timer`、`shein-bi-cloud-et-forwarder.timer`、`shein-bi-cloud-browser-cleanup.timer`、`shein-bi-cloud-watchdog.timer`、`shein-bi-lark-sales-qa.service`。云端当前自动覆盖销售 WebAPI、销售入仓、BI Portal 生成、数据库备份、ET 货代仓同步、统一日更补采、19 店 OpenAPI 隔离双跑、登录态巡检、异常通知和只读问数机器人；飞书日报只保留手动入口。
+- 当前生产调度在云端 systemd：`shein-bi-webhook.service` 常驻承接半托实时事件；`shein-bi-cloud-yesterday.timer`、`shein-bi-cloud-morning-chain.timer`、`shein-bi-db-backup.timer`、`shein-bi-cloud-session-manager.timer`、ET、营销 guard/repair、浏览器清理和 watchdog timers 分别处理最终日门禁、慢变日更、备份、登录态、货代仓、限时折扣、孤儿进程和异常提醒。`shein-bi-cloud-today.timer` 应不存在或保持停用；`shein-bi-lark-sales-qa.service` 应保持 `disabled + inactive`。
 - 本地 `SHEIN-*` Windows 任务已于 `2026-05-15` 封存禁用，保留为回滚/迁移参考；除非明确回滚，不要重新启用 `SHEIN-Sales-15Stores-Intraday-Daytime`、`SHEIN-BI-Daily-Pipeline-0700`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-Sales-ETForwarder-0420` 或 HL OpenAPI 本地任务。
-- 不要默认本地日报、watchdog、ET、链接/业务域或 OpenAPI Windows 任务仍在生产运行；云端飞书日报和只读问数使用独立机器人/应用，换机器人时需重新映射收件人 `open_id`。
+- 不要默认本地日报、watchdog、ET、链接/业务域或 OpenAPI Windows 任务仍在生产运行；飞书日报自动发送和飞书只读问数均已暂停，只有高优先级 watchdog/Webhook 摘要保留消息出口。
 - 历史规则仍保留：V1 门户生成放在流水线末尾单次执行，默认 `SHEIN_BI_PORTAL_TIMEOUT_MS=900000`，不要恢复多个状态点重复生成页面；RTV 复核耗时长不是滚动 BI 失败。
 
 ## 数据层
@@ -86,15 +86,15 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 销售当天同步（本地回滚参考）：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_intraday_dsy.ps1`
 - BI 每日流水线（本地回滚参考）：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_bi_daily_pipeline.ps1`
 - 生成 BI 门户：`$env:SHEIN_BI_PORTAL_TIMEOUT_MS='900000'; node scripts/generate_bi_portal.mjs`
-- 当前 V2 正式门户生成/刷新优先走云端 `scripts/cloud_bi_refresh.sh` 和 section warmup；历史 `scripts/generate_bi_portal_v2.mjs` 仅作迁移参考。运行态验收必须看云端页面和线上 `/api/bi/section/*`，仓库 `outputs/bi-portal/data.json` 只作灾备兼容。
+- 当前 V2 正式门户生成/刷新优先走云端 `scripts/cloud_bi_refresh.sh` 和 section warmup；历史平行预览生成器已移除。运行态验收必须看云端页面和线上 `/api/bi/section/*`，仓库 `outputs/bi-portal/data.json` 只作灾备兼容。
 - 云端 ET 每日同步：服务器执行 `bash scripts/cloud_et_forwarder_sync.sh today`；本地回滚参考才用 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_et_forwarder_daily.ps1`
 - 云端链接/业务域日更：服务器执行 `bash scripts/cloud_link_business_sync.sh yesterday`；不要回退到本机补抓冒充云端日更。
 - 云端登录态管家：服务器执行 `bash scripts/cloud_shein_session_manager.sh`；会顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态。
-- 云端异常通知：服务器执行 `node scripts/cloud_ops_watchdog.mjs --dry-run` 先看巡检结果；销售/页面按 4.5 小时阈值，链接/业务域按 48 小时日更阈值。
-- 飞书只读问数机器人：服务器 systemd 常驻 `shein-bi-lark-sales-qa.service`，入口 `bash scripts/cloud_lark_sales_qa_bot.sh` / `node scripts/lark_sales_qa_bot.mjs --answer "今天销售多少"`；只能只读回答，不写数据库、飞书 Base 或 SHEIN 后台。
+- 云端异常通知：服务器执行 `node scripts/cloud_ops_watchdog.mjs --dry-run` 先看巡检结果；当前日事件驱动合法零销量不得误报，提醒必须给出具体原因、影响与下一步。
+- 飞书只读问数机器人代码只作恢复参考；`shein-bi-lark-sales-qa.service` 必须保持 `disabled + inactive`，不得在发版或巡检时为了“全绿”启动。
 - RTV 换单复核：`node scripts/verify_shein_rtv_tracking.mjs --priority high,medium,low --include-no-cases --limit 120 --case-limit 60 --max-runtime-ms 3600000`
 - 营销活动报名（legacy 提醒）：旧 DSY-only `export_dsy_marketing_standards.mjs` / `dsy_marketing_deadline_fill.mjs --all-open` 命令只能作历史线索或单步脚本参考，不能作为当前报活动流程入口。凡涉及普通营销活动、优惠券、限时折扣、价格栈、批量提交或低价/高价补救，一律先使用 `shein-marketing-ops`：以当前 `selection-plan + price-overrides`、云端/live 证据、首店确认、普通活动回读、可选 15% 流量券 dry-run/安全提交和全局复核为准；不得因这里的旧说明排除 `34810` 配套券，也不得用旧命令阻止用户已授权后的真实提交。
-- OpenAPI 19 店双跑手动诊断：`node scripts/run_shein_openapi_sales_reconciliation.mjs --date YYYY-MM-DD`、`node scripts/run_shein_openapi_returns_reconciliation.mjs --date YYYY-MM-DD`、`node scripts/run_shein_openapi_products_reconciliation.mjs`；只写隔离并行层，不切生产事实源。
+- OpenAPI 对账手动诊断：`node scripts/run_shein_openapi_sales_reconciliation.mjs --date YYYY-MM-DD`、`node scripts/run_shein_openapi_returns_reconciliation.mjs --date YYYY-MM-DD`、`node scripts/run_shein_openapi_products_reconciliation.mjs`。销售来源表与 reconciliation 是最终日晋升证据；退货/商品仍遵守各自隔离对账和切源门禁，不能把诊断脚本当成任意写正式事实的入口。
 - 月表：`node scripts/generate_monthly_sales_table.mjs --month YYYY-MM --include-lgm`
 - 年度/宽表：`node scripts/generate_compact_display_tables.mjs --group ALL --current-month YYYY-MM --recent-months 2`
 - 当月看板：`node scripts/setup_lark_dashboard_main_v3.mjs --month YYYY-MM`
@@ -119,7 +119,7 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 顶部 statistics 卡底板/字体颜色不在公开 `data_config` 中；用 `scripts/apply_dashboard_kpi_card_styles_ui.mjs` 或同类 Playwright 脚本通过飞书内部 `chart/user_change` 保存。
 
 ## 登录与抓取硬规则
-- 销售抓取先 WebAPI 直连；`fetchTransport=webapi` 且 `browser.reason=webapi_transport_succeeded_without_browser_launch` 表示没有启动店铺浏览器。
+- 运行 `fetch_shein_sales.mjs` 做最终日核对或灾备时优先 WebAPI 直连；`fetchTransport=webapi` 且 `browser.reason=webapi_transport_succeeded_without_browser_launch` 表示没有启动店铺浏览器。半托当天销售的正常主链路是 Webhook + 按单 OpenAPI，不应先跑该全店抓取器。
 - WebAPI session 文件含 Cookie，不得提交 GitHub、写入日志、文档或聊天；迁移时只走加密渠道或在新环境重新登录导出。
 - 页面显示“我的订单/首页”不代表接口可用；接口 `20302 子系统登录重定向` 才是登录态失效硬信号。
 - 遇到 `20302`，`run_sales_sync_job.mjs` 必须先刷新 WebAPI session / 调用 `auto_relogin_shein_store.mjs` 恢复登录并重新抓取；失败时提示人工登录，不得用旧数据。
@@ -128,7 +128,7 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - SHEIN 登录 URL redirect 必须 base64 编码。
 
 ## 工具
-- 生产销售抓取链路：自写 Node WebAPI 直连优先；Chrome DevTools Protocol/WebSocket + 工作区 Chrome profile 用于导出/刷新 Cookie session、登录续期和回退。
+- 生产当天销售链路：Webhook + 按单 OpenAPI；最终日 WebAPI 独立核对和其它未 API 化数据域继续使用自写 Node WebAPI。Chrome DevTools Protocol/WebSocket + 工作区 Chrome profile 仅用于导出/刷新 Cookie session、登录续期和必要回退。
 - Chrome 路径：`launch_store_browser.mjs` 优先 C 盘正式安装路径，D 盘只兜底；店铺 profile 仍必须留在工作区。headless 启动失败时同步脚本会 fallback 到后台窗口模式。Windows 后台启动通过 `PowerShell Start-Process`，不要改回 `cmd start`。
 - 飞书 Base/IM：`lark-cli`。
 - 飞书看板富文本和样式：Playwright + `profiles/persistent-feishu-profile`。

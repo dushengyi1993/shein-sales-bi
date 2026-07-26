@@ -3,7 +3,7 @@
 > 适用工作区：`E:\Codex WorkSpace\Shein销售统计`
 > 生产目录：`/opt/shein-bi/app`
 > 时间口径：`Asia/Shanghai`
-> 当前自动化：分钟级完整巡检与大批修复已解耦。巡检独立完成当天 live 证据；修复 worker 在 `10:50/12:50/14:50/16:50/18:50` 取队列，不得拖住巡检。
+> 当前自动化：分钟级完整巡检与大批修复已解耦。巡检独立完成当天 live 证据；修复 worker 在 `10:50/12:50/14:50/16:50/18:50/19:30` 取队列，不得拖住巡检。
 
 本文是日常运维入口和可复用流程；[pricing-rules](marketing-campaign-signup-pricing-rules.md) 是业务政策，`skills/shein-marketing-ops/SKILL.md` 是执行指令。运行批次记录已迁至 [2026-07-13-to-2026-07-16.md](archive/marketing-runs/2026-07-13-to-2026-07-16.md)。三者必须一起阅读，但不得互相替代。
 
@@ -58,7 +58,7 @@ node scripts/marketing/export_marketing_stack_review.mjs \
 
 开跑前读取实际 `systemctl cat/list-timers` 和核心 service 状态，不按旧记忆猜排班；禁止顺手修改销售刷新或用户现有 timer。
 
-价格栈与普通活动审核默认均走 session HTTP，不启动浏览器；临时补跑仍避开奇数小时 ET `:20`、整点销售刷新、watchdog `:50` 及晨间/备份/订单闭环。browser cleanup 已降为每小时 `:15`，且只清理无有效任务租约的孤儿浏览器，不再要求巡检为了 cleanup 中断或反复重开。
+价格栈与普通活动审核默认均走 session HTTP，不启动浏览器；临时补跑仍避开 ET 固定 `:20`、watchdog `:50` 及晨间/备份/订单闭环。当天销售由 Webhook 实时触发，不再假设存在整点销售 timer。browser cleanup 只在 `03:45/09:50/21:00` 运行，且只清理无有效任务租约的孤儿浏览器，不再要求巡检为了 cleanup 中断或反复重开。
 
 guard 尚未结束时，heartbeat 每 60–90 秒轮询，最长 30 分钟；结束后只读取并汇报巡检证据。获准的大批修复另入队列，由 worker 完成，不能再与巡检同步串行。
 
@@ -67,7 +67,7 @@ guard 尚未结束时，heartbeat 每 60–90 秒轮询，最长 30 分钟；结
 云端证据：`2026-07-17` 的全在售兜底差集产生 `74` 条；`2026-07-18` 基准切换产生 `61` 条、`32` 个活动组。旧流程把完整巡检与大批写入同步串行，曾在约一小时后被系统杀掉，不能再作为生产路径。
 
 - 完整巡检保持分钟级完成，最长 `30` 分钟；它生成精确 manifest/hash、活动组和可恢复队列，但不等待大批修复。
-- 修复 worker 在 `10:50/12:50/14:50/16:50/18:50` 运行，单轮按总预算最多处理 `8` 个活动组、最长 `40` 分钟；一个阶段提前完成时会用剩余预算继续下一阶段，不再空耗整个时间窗。同店复用浏览器，成功组可 resume，失败/阻断组不会被误记为完成。
+- 修复 worker 在 `10:50/12:50/14:50/16:50/18:50/19:30` 运行，单轮按总预算最多处理 `8` 个活动组、最长 `40` 分钟；一个阶段提前完成时会用剩余预算继续下一阶段，不再空耗整个时间窗。同店复用浏览器，成功组可 resume，失败/阻断组不会被误记为完成。
 - 每个替换组仍先 preflight/dry-run，再锁定旧活动完整快照和精确 hash。真实删除、目标活动创建、回读与补偿由事务执行器统一管理；目标创建失败时自动恢复旧保护。dry-run 不得进入删除或任何真实写路径。
 - 修复队列全部组完成后，最终闭环顺序固定为：先用 session HTTP 刷新 19 店普通活动/优惠券 stack review，再做 19 店价格栈 final live readback，最后重建 guard。价格栈必须最后扫，避免刚创建的待生效活动在 stack review 期间跨过开始时间后，又被旧价格快照误判为缺失。修复耗时超过同轮证据时差时，不得沿用巡检开始时的旧 stack review，让已被 live 证据替代的优惠券中间文件重新变成 stale blocker。巡检 watchdog 与修复 watchdog 分别验收，后者必须在 `20:00` 前确认修复闭环或明确剩余 blocker。
 - 候选范围同时包括持续在售老链接的 `30` 天兜底，以及新品/重新上架的 `7` 天兜底；两者都以精确 `storeKey + SKC` manifest 为准。价格漂移阶段与兜底阶段必须键级互斥，发现重叠直接拒绝建队列，不能重复修同一链接。
@@ -90,6 +90,9 @@ guard 尚未结束时，heartbeat 每 60–90 秒轮询，最长 30 分钟；结
 - 没有普通活动时，限时折扣直接命中 `finalTargetPrice`。
 - 有普通活动时仍需限时折扣；默认当前售价 15% 折扣，若低于目标价或安全线则缩浅，不能打穿目标价。
 - 新链接、新上架 7 天、重新上架且无当前生效营销活动的链接，按全局 Top5 力度自动报一周限时折扣。
+- 高点击低转化链接自动报专属折扣：必须是当前在售、`c7_eps_uv > 3000`、`c7_goods_uv / c7_eps_uv > 4%` 且 `c7_sale_cnt = 0`。三个条件都按最新 7 日数据严格判断；销量字段缺失不得当成 0。价格按最新已批准普通活动中同标准货号全局曝光 Top5 的商品成本利润率再降低 2 个百分点，且不得低于 15% 利润率底线；活动库存 10、周期 7 天。
+- 高点击专属折扣真实提交前必须先写入人工特殊限时折扣保护登记。有效窗口内漂移、新链接、重新上架和普通漏兜底均不得覆盖；当日修复 worker 写入前再次读取最新 7 日指标，已经出单或跌出阈值时跳过旧计划。
+- SHEIN 刚创建的人工特殊活动若尚在平台生效延迟中，只有活动 ID 与登记的 `currentActivityId` 一致、价格/库存/截止精确命中且两小时内开始，才记为“已排期精确覆盖”；不得在这段时间重复救援。其他未来、过期或活动 ID 不一致的行仍按缺失/错价处理。
 - 持续在售的老链接也必须参与完整差集：每日 19 店 live scan 后，以全部当前在售 `storeKey + SKC` 减去当前/已排期待生效限时折扣集合。不得因为链接不在旧 `price-overrides`、不是新上架、也没有“售罄 -> 在售”历史而跳过。
 - “即将开始/待生效”活动不等于当前生效活动，不能据此跳过当前兜底。
 - 重新上架识别读取最近 60 天 `outputs/shein_links/<STORE>/YYYY-MM-DD.json`，保留 `lastInactiveDate/relistedAt/treatmentType`。
@@ -118,10 +121,11 @@ guard 尚未结束时，heartbeat 每 60–90 秒轮询，最长 30 分钟；结
 
 - 限时折扣价格漂移修复；
 - 新链接/新上架 7 天/重新上架无活动/漏限时折扣兜底。
+- 高点击低转化专属限时折扣的保护登记、精确创建/替换及 ET 门控库存补齐。
 
 这些动作使用 `config/marketing_pricing_policy.json` 中 `owner-standing-cloud-marketing-v1` 的负责人长期授权，worker 不逐次索要人工确认，但必须自动计算、锁定并校验本轮精确 payload/work hash。每个写入仍必须满足授权上下文/动作范围、身份校验、价格栈校验、库存/平台规则、dry-run、execute、审计和 readback。普通活动、优惠券和预算不在长期授权内，只生成方案，得到对应业务授权后才提交。
 
-guard 只生成并锁定队列，不执行任何写入。独立 repair worker 按“人工特殊折扣恢复 -> 目标价漂移修复 -> 全部在售链接限时折扣差集兜底（含新链接、重新上架和持续在售老链接）”串行消费队列；`scripts/cloud_marketing_live_guard.sh` 在完整 live scan 后无条件生成该差集计划，不能再由“新链接候选数”决定是否调用计划器。任一阶段失败后，后续写阶段跳过，避免基于旧证据继续写；队列完成后由 worker 做一次最终全店 live readback，完整记录部分成功、失败和跳过项。
+guard 只生成并锁定队列，不执行任何写入。独立 repair worker 按“高点击低转化专属折扣先登记保护并精确创建 -> 既有人工特殊折扣恢复 -> 目标价漂移修复 -> 全部在售链接限时折扣差集兜底（含新链接、重新上架和持续在售老链接）”串行消费队列；`scripts/cloud_marketing_live_guard.sh` 在完整 live scan 后无条件生成该差集计划，不能再由“新链接候选数”决定是否调用计划器。任一阶段失败后，后续写阶段跳过，避免基于旧证据继续写；队列完成后由 worker 做一次最终全店 live readback，完整记录部分成功、失败和跳过项。
 
 2026-07-16 起，以上已授权限时折扣链路若平台可报库存低于计划 `activityStock`，允许先查询 ET 当日实盘：ET 可售库存足够时，只把平台虚拟库存精确补到本次 `activityStock`（默认 10），回读一致后重新 dry-run 并完成兜底；ET 不足、证据非当天或回读不一致时必须阻断。该授权覆盖目标价漂移、新链接/新上架 7 天、重新上架无活动和漏限时折扣，不扩展到普通营销活动报名库存、优惠券或任意扩大平台库存。
 
@@ -153,6 +157,7 @@ guard 的 `runId` 写入不可覆盖的 `state/cloud_marketing_live_guard/report
 6. 订单低于/高于目标价及处理结果。
 7. 优惠券实验状态。
 8. 需要重新登录的店铺。
+9. 高点击低转化专属折扣：符合条件、已保护、新增执行、阻断数量；并逐条反馈报名时基线与当前滚动 7 日曝光、点击率、销量，标明“已出单/活动中仍 0 单/到期仍 0 单/缺指标”。效果仅作方向性对比，不把同期变化直接归因为折扣。
 
 凡本轮新建或恢复限时折扣，日报必须逐条给出：店铺、标准货号与中文品名、SKC、活动 ID、价格、活动库存、开始时间、截止时间、动作结果和 live readback。不得只写“某店新建活动号/价格”。
 
@@ -165,17 +170,20 @@ guard 的 `runId` 写入不可覆盖的 `state/cloud_marketing_live_guard/report
 ### 8.1 普通活动方案
 
 - 先读后台 live 活动页和当前最终版基准，不凭 BI 或旧 Excel 猜活动、可报数量和已报状态。
-- 当前基准读取 `tmp/marketing-signup/selection-plan-2026-07-15-v48217-48215-48925-final-executed-all-1063.json` 及同名 paired `price-overrides`；下一期方案一旦经用户确认并真实执行，应生成新的最终全量基准并替换它。
+- 当前活动窗口继续读取 `tmp/marketing-signup/selection-plan-2026-07-15-v48217-48215-48925-final-executed-all-1063.json` 及同名 paired `price-overrides`。`2026-07-21` 已执行的 `v48732-48733-49565-final-executed-all-991` 及 paired `price-overrides` 是下一活动窗口基准；选择器只能在对应活动窗口启用它，不能因文件更新就提前覆盖仍生效的上一期目标。
 - 基准只继承用户备注、固定价、特殊利润率、货号归并和已批准例外；新一期价格仍按最新 7 天链接曝光重新分层，不能简单继承同店同 SKC 上一期执行价。
 - 新活动方案必须是人话版 Excel，至少包括 `说明`、`按货号汇总`、`店铺差异明细`、`报名明细`、`剔除项/阻塞项`、`低价补救/风险项`；除说明页外保留 `备注/修改意见` 列。
 - `本期曝光前五/新链接前五行数` 表示命中两种待遇规则的报名明细行数，不代表有那么多个不同链接；展示时同时给出唯一链接数，避免把行数误读成链接数。
 - 对新链接、新 SKC、重新上架链接，能按同标准货号全局 Top5、当前成本和最新最终基准推导的，必须直接定价，不能写“待定价”。
 - 用户已经修改方案并明确说“可以开始报名”后，按已批准方案直接分批执行、回读并汇报；不要每批再次要求人工确认。
+- 批量执行前必须用 `lock_ordinary_campaign_execution_plan.mjs` 把用户批准原话、消息/任务来源、selection/price payload hash、文件 SHA-256 和 work fingerprint 写入不可变 approval manifest。store/chunk/singleton runner 必须读取同一 manifest；授权后文件变化、目标超出批准范围或 resume 证据 fingerprint 不同都要失败关闭。用户已批准整批后无需每个小批次再次确认，但不能省掉这份机器可验证的授权锁。
 - 新方案的目标价只在对应普通活动生效窗口内用于订单审计。活动开始前的订单不能用未来目标价判低价/高价；活动结束后也不能继续套用过期窗口。
 
 ### 8.2 成本与仓储展示
 
 - 给用户审核的普通活动方案必须分别展示商品成本、仓储费/件、含仓储完整成本、商品成本利润率和含仓储利润率；仓储费真实存在时两套结果不能做成一样。
+- 商品成本和仓储费都按标准货号共享货盘取值，同一标准货号不得因店铺或 SKC 活动行缺字段而出现不同成本。链接级 live 响应缺仓储字段时，先回填 canonical 共享成本；不能把链接缺字段误报成仓库无记录。
+- 已入仓但尚未开单的货号可能不出现在销售利润商品行；此时必须回查 `inventoryDepletion` 与 `mart.storage_fee_product_daily_cache`。库存为零销量时，按累计仓储费余额 / 当前物理库存计算共享仓储费/件。
 - 仓储费缺失时要明确标记证据缺口，不能按 0 冒充“含仓储成本”；应优先回查成本源和货号归并。
 - 自动限时折扣兜底当前获准按 `product_cost_excluding_storage` 做安全红线；因此“仓储费缺失不阻断自动兜底”和“普通活动审核表必须展示真实仓储费”是两个不同边界，不能混为一谈。
 
@@ -189,7 +197,9 @@ guard 的 `runId` 写入不可覆盖的 `state/cloud_marketing_live_guard/report
 
 - 写入前核对活动 ID、店铺身份、SKC、价格覆盖、平台最低降幅和活动窗口。
 - 用户已批准方案后，先小批执行并在同一任务内继续完成其余安全店铺；遇到单店登录/接口异常时记录并继续其他店，不让一个店拖死整批。
+- 候选 subset 只是待批准方案，不能自行标记 `submit=true`。只有显式 lock 后生成的 `*-user-approved.json + approval-manifest-*.json` 才能交给批量提交器；批量结果必须携带同一 work fingerprint。
 - 每个写入组只回读受影响店铺/活动；整条 repair queue 结束后再做一次全店 live readback。不得在每个组后都重复全扫 19 店，也不得省掉最终全店闭环。
+- 限时折扣组部分成功时，以 `createdActivityId + desiredCoveredSkcs` 作为精确续跑证据；已创建成功的 SKC 不得整组重放，只把未覆盖或明确阻断的 `storeKey + SKC` 留给下一批。`blockedTargetCount` 按唯一阻断键计数，progress 只能在本批所有选中组结束后写 `complete=true`。
 - 无论成功、失败或阻断，本批浏览器立即关闭；最终确认调试端口和 Chrome 临时目录为 0。
 
 ## 9. 当前效率基线与防回退
@@ -204,6 +214,8 @@ guard 的 `runId` 写入不可覆盖的 `state/cloud_marketing_live_guard/report
 `2026-07-13`、`2026-07-15` 和 `2026-07-16` 的运行日志、活动 ID、回读和 warning 已移至 [2026-07-13-to-2026-07-16.md](archive/marketing-runs/2026-07-13-to-2026-07-16.md)。日常操作从本 runbook 的证据链和写入边界开始，历史结果不能替代当天 live evidence。
 
 2026-07-17 对“67 条在售老链接漏兜底”做了完整收口：当天最新链接状态扩展后实际需处理 74 条，通过分批补报、逐 SKC ET 门控库存补齐和 TZZ 超时后独立 live 回读/重试，最终 19 店快照重建计划为 `actionable=0 / blocked=0`。根因修复集中在 `batch_apply_new_listing_limited_discount.mjs`、`manage_manual_limited_discount_inventory.mjs` 和 `build_new_listing_limited_discount_plan.mjs`；该日结果不得代替后续每日 live 差集。
+
+2026-07-22 完整 live 差集最初生成 `401` 条动作；精确续跑后共为 `391` 条链接新建限时折扣，最终只剩 `6` 条因 ET 当日实盘不足 10 阻断，平台 `0004` 阻断已归零。普通活动 session HTTP 与价格栈最终回读均为 19/19，漂移 `belowTarget=0`，guard blocker 归零；逐条活动证据见 `outputs/reports/limited-discount-created-detail-2026-07-22.{json,csv,md}`。同日已把 `2026-07-21 v48732-48733-49565-final-executed-all-991` 最终基准同步到云端，并验证选择器仍按活动窗口使用上一期有效基准。
 
 ## 11. 关键文件
 
@@ -221,3 +233,6 @@ guard 的 `runId` 写入不可覆盖的 `state/cloud_marketing_live_guard/report
 - `lib/marketing_manual_limited_discount_overrides.mjs`
 - `scripts/marketing/manage_manual_limited_discount_override.mjs`
 - `scripts/marketing/batch_restore_manual_limited_discounts.mjs`
+- `lib/marketing_high_click_special_policy.mjs`
+- `scripts/marketing/build_high_click_special_discount_plan.mjs`
+- `scripts/marketing/batch_apply_high_click_special_discounts.mjs`
