@@ -5,7 +5,7 @@
 - SHEIN 销售抓数、BI 后置刷新和数据库备份已切到云端 systemd；本地 BI 和 `SHEIN-*` Windows 计划任务已封存禁用。
 - 飞书多维表格 / 原生看板写入已临时暂停；异常通知 watchdog 保留。飞书日报脚本只作手动入口，自动发送停用；飞书只读问数 service 必须保持 `disabled + inactive`，团队问数走 BI 网页或 CLI。
 - 半托当天销售主入口为 Webhook + 按单 OpenAPI；前一天最终日由 WebAPI 独立文件与 19 店 OpenAPI 深度匹配后原子晋升。`salesTransport=auto` 与浏览器继续服务最终日核对、登录续期和其它未完全 API 化的数据域。
-- 当天订单入仓后，Portal 通过 PostgreSQL `NOTIFY` + SSE 立即更新销售，不再每 60 秒轮询；订单/退货事件按 45 秒合并，自动重建移动加权成本与利润 cache，完成后再次推送。补账期间只显示“利润正自动补成本”，不以旧成本或假零值替代；服务重启会追赶、失败 5 分钟后重试。
+- 当天订单入仓后，Portal 通过 PostgreSQL `NOTIFY` + SSE 立即更新销售，不再每 60 秒轮询；新订单或已有订单金额/数量变化都先显示正式事实值并标记利润待补账，相同内容重放不误报。订单/退货事件按 45 秒合并，自动重建移动加权成本与利润 cache，完成后再次推送。补账期间只显示“利润正自动补成本”，不以旧成本或假零值替代；服务重启会追赶、失败 5 分钟后重试。
 - 暂停开关为 `state/feishu-base-sync-paused.flag`；存在该文件时跳过飞书事实表、产品表、月表、宽表和看板写入，删除后可恢复。
 - 云端当前自动覆盖 Webhook/OpenAPI 当天销售、最终日核对与晋升、BI Portal、数据库备份、ET 货代仓、晨间慢变日更、异常通知、登录态巡检、残留浏览器清理和网页/CLI 问数；半托生产 OpenAPI 数据面为 DL 单一 App + 19 店唯一 OpenKey。
 - 当前正式门户为 V2；V1 已从线上 `/v1/` 下线，只保留 GitHub final/archive release `2026.06.18-v1-final-archive` 作为恢复点，不再进入正式 release 或日常刷新。

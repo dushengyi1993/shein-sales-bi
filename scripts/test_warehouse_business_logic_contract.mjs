@@ -107,6 +107,11 @@ assert.match(portalGenerator, /FROM mart\.profit_order_item_cache\s+WHERE create
   'today live profit must use the atomically published canonical accounting cache');
 assert.doesNotMatch(portalGenerator, /live_unit_cost_sar/,
   'today live profit must not value a partially assigned line using a whole-line fallback unit cost');
+assert.match(portalGenerator, /freshness\.cache_matches_source/,
+  'today live sales must detect an existing order row whose amount or quantity changed after accounting publication');
+assert.match(portalGenerator, /abs\(coalesce\(pc\.gross_revenue_sar,0\)-oi\.gross_revenue_sar\) <= 0\.005/);
+assert.match(portalGenerator, /NOT freshness\.cache_matches_source[\s\S]*?AS accounting_pending/,
+  'changed existing rows, not only brand-new rows, must be labelled as awaiting accounting');
 assert.match(portalGenerator, /FROM mart\.storage_fee_store_daily_cache\s+WHERE date=current_date/,
   'today storage allocation must use the same atomically published per-store accounting snapshot');
 assert.match(portalServer, /profitBackedSections = new Set\(\['profit', 'homeProfit', 'homeRankings', 'rankings', 'productSalesDaily', 'inventoryTrend'\]\)/,

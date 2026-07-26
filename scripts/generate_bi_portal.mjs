@@ -298,14 +298,37 @@ live_items AS (
     oi.skc,
     oi.goods_title,
     oi.quantity AS source_quantity,
-    CASE WHEN coalesce(pc.net_revenue_sar,oi.gross_revenue_sar)>0 THEN oi.quantity ELSE 0 END AS quantity,
+    CASE
+      WHEN (
+        CASE WHEN freshness.cache_matches_source
+          THEN pc.net_revenue_sar
+          ELSE oi.gross_revenue_sar
+        END
+      ) > 0 THEN oi.quantity
+      ELSE 0
+    END AS quantity,
     CASE WHEN oi.gross_revenue_sar>0 THEN oi.quantity ELSE 0 END AS gross_quantity,
-    round(coalesce(pc.net_revenue_sar,oi.gross_revenue_sar)::numeric,2) AS sales_sar,
+    round((
+      CASE WHEN freshness.cache_matches_source
+        THEN pc.net_revenue_sar
+        ELSE oi.gross_revenue_sar
+      END
+    )::numeric,2) AS sales_sar,
     round(oi.gross_revenue_sar::numeric,2) AS gross_sales_sar,
     coalesce(p.is_cod,false) AS is_cod,
-    (pc.order_item_key IS NULL AND oi.gross_revenue_sar>0) AS accounting_pending
+    (
+      NOT freshness.cache_matches_source
+      AND (oi.gross_revenue_sar <> 0 OR coalesce(pc.gross_revenue_sar,0) <> 0)
+    ) AS accounting_pending
   FROM current_order_items oi
   LEFT JOIN cached_profit_items pc ON pc.order_item_key=oi.order_item_key
+  CROSS JOIN LATERAL (
+    SELECT (
+      pc.order_item_key IS NOT NULL
+      AND abs(coalesce(pc.gross_revenue_sar,0)-oi.gross_revenue_sar) <= 0.005
+      AND abs(coalesce(pc.quantity,0)-oi.quantity) <= 0.0001
+    ) AS cache_matches_source
+  ) freshness
   LEFT JOIN (
     SELECT store_key,order_no,bool_or(coalesce(is_cod,false)) AS is_cod
     FROM fact.order_payment_flag
