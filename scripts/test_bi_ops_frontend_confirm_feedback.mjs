@@ -36,8 +36,8 @@ ok(client.includes('平台没通过，需要补充') && client.includes('未创�
 ok(client.includes('全局店铺 API 能力') && client.includes('当前账号可受控提交') && client.includes('opsTaskProgressOnly'), 'operator-facing capability/progress wording is not simplified');
 ok(client.includes('如果要执行，就直接说“可以执行”“提交吧”“照做”'), 'chat-only natural confirmation hint missing');
 ok(client.includes('把 DX 某条 SKC 库存改成 100') && client.includes('下架缺货链接'), 'chat prompt still looks copy-only instead of generic ops');
-ok(client.includes('data-ops-upload="1"') && client.includes('function chooseOpsFiles') && client.includes('input.showPicker') && client.includes('input.click()'), 'upload button does not synchronously open a real file input from a user gesture');
-ok(client.includes("if(b?.dataset?.opsUpload){chooseOpsFiles();return}if(!e.target.closest('#rangeDock')"), 'upload click is not handled before render-prone global click branches');
+ok(/<label class="ops-upload-label.*for="opsUploadFiles"/.test(client), 'upload control is not a native label tied directly to the file input');
+ok(!client.includes('function chooseOpsFiles') && !client.includes('data-ops-upload="1"'), 'obsolete script-driven upload picker remains alongside the native label');
 ok(client.includes('ops-upload-file-input') && client.includes('type="file"') && client.includes('accept="${H(OPS_UPLOAD_ACCEPT)}"'), 'upload control is not backed by a real file input picker');
 ok(!client.includes('data-ops-upload-missing="1"') && !client.includes('function explainOpsUploadMissing') && !client.includes('先在聊天里说清楚要处理什么'), 'upload still incorrectly requires an existing task');
 ok(client.includes('function opsSessionAssetsHtml') && client.includes('会话资料') && client.includes('可以先上传图片、表格或文档'), 'uploaded files are not rendered as session-level context');
@@ -56,7 +56,7 @@ ok(client.includes('blockquote') && client.includes('opsMarkdownTable'), 'Markdo
 ok(client.includes("replaceAll(String.fromCharCode(13),'').split(String.fromCharCode(10))"), 'Markdown newline normalization must not use a regex that can become /\\n?/g in embedded HTML');
 ok(!portalHtml.includes('replace(/\\n?/g'), 'embedded portal Markdown parser inserts a newline at every character');
 
-for (const cls of ['.ops-busy-banner', '.ops-evidence-item', '.ops-upload-label:disabled', '.ops-upload-file-input', '.ops-assets', '.ops-asset-pill', '.ops-md-table-wrap', '.ops-task-control.conversational', '.ops-task-card.progress-only', '.ops-session.pending']) {
+for (const cls of ['.ops-busy-banner', '.ops-evidence-item', '.ops-upload-label.disabled', '.ops-upload-file-input', '.ops-assets', '.ops-asset-pill', '.ops-md-table-wrap', '.ops-task-control.conversational', '.ops-task-card.progress-only', '.ops-session.pending']) {
   ok(css.includes(cls), `missing CSS selector ${cls}`);
 }
 for (const fn of ['opsJobRows', 'opsJobBanner', 'opsPlanningNote']) {

@@ -10,8 +10,10 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {writeJsonFileAtomic} from '../../lib/atomic_file_publish.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+let activeSourceReadErrors = null;
 
 function parseArgs(argv) {
   const args = {
@@ -19,6 +21,7 @@ function parseArgs(argv) {
     out: path.join(ROOT, 'outputs', 'bi-portal', 'marketing-price-leads.json'),
     maxOverrideFiles: 80,
     keepExistingOnEmpty: true,
+    injectFailureBeforeWrite: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -26,8 +29,38 @@ function parseArgs(argv) {
     else if (a === '--out') args.out = path.resolve(argv[++i]);
     else if (a === '--max-override-files') args.maxOverrideFiles = Number(argv[++i] || args.maxOverrideFiles);
     else if (a === '--allow-empty-overwrite') args.keepExistingOnEmpty = false;
+    else if (a === '--inject-failure-before-write') args.injectFailureBeforeWrite = true;
   }
   return args;
+}
+
+function previousSnapshotRows(existing) {
+  return Array.isArray(existing?.rows) ? existing.rows : [];
+}
+
+function snapshotFreshness(status, reason, previous = {}) {
+  return {
+    status,
+    checkedAt: new Date().toISOString(),
+    snapshotGeneratedAt: String(previous?.generatedAt || previous?.freshness?.snapshotGeneratedAt || ''),
+    reason: sanitizeText(reason),
+  };
+}
+
+async function writeDegradedSnapshot(args, existing, {status, reason}) {
+  const preserved = existing && typeof existing === 'object' ? existing : {};
+  const payload = {
+    ...preserved,
+    generatedAt: String(preserved.generatedAt || ''),
+    sourceRoot: path.basename(args.sourceRoot),
+    caveat: preserved.caveat || '来自最近一次活动扫描/报名价格栈产物；用于 BI 商品列表辅助判断，不等同于实时链接售价或最终成交价。',
+    sources: Array.isArray(preserved.sources) ? preserved.sources : [],
+    rowCount: previousSnapshotRows(preserved).length,
+    rows: previousSnapshotRows(preserved),
+    freshness: snapshotFreshness(status, reason, preserved),
+  };
+  await writeJsonFileAtomic(args.out, payload);
+  return payload;
 }
 
 function sanitizeText(value) {
@@ -54,7 +87,10 @@ async function statOrNull(file) {
 async function readJsonOrNull(file) {
   try {
     return JSON.parse(await fs.readFile(file, 'utf8'));
-  } catch {
+  } catch (error) {
+    if (activeSourceReadErrors && error?.code !== 'ENOENT') {
+      activeSourceReadErrors.push(`${rel(ROOT, file)}: ${sanitizeText(error?.message || error).slice(0, 300)}`);
+    }
     return null;
   }
 }
@@ -441,31 +477,63 @@ async function collectPriceOverrides(root, map, sources, maxFiles) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const map = new Map();
-  const sources = [];
-  await collectStackReview(args.sourceRoot, map, sources);
-  await collectLiveCouponLimitedScans(args.sourceRoot, map, sources);
-  await collectCurrentLivePriceEvidence(args.sourceRoot, map, sources);
-  await collectPriceOverrides(args.sourceRoot, map, sources, args.maxOverrideFiles);
-  const rows = [...map.values()].sort((a, b) => String(a.store_key).localeCompare(String(b.store_key)) || String(a.skc).localeCompare(String(b.skc)));
-  if (!rows.length && args.keepExistingOnEmpty) {
-    const existing = await statOrNull(args.out);
-    if (existing?.size > 0) {
-      console.log(JSON.stringify({ok: true, skipped: true, reason: 'no marketing price evidence sources found; kept existing snapshot', out: args.out, existingBytes: existing.size}, null, 2));
+  const existing = await readJsonOrNull(args.out);
+  try {
+    activeSourceReadErrors = [];
+    const map = new Map();
+    const sources = [];
+    await collectStackReview(args.sourceRoot, map, sources);
+    await collectLiveCouponLimitedScans(args.sourceRoot, map, sources);
+    await collectCurrentLivePriceEvidence(args.sourceRoot, map, sources);
+    await collectPriceOverrides(args.sourceRoot, map, sources, args.maxOverrideFiles);
+    const rows = [...map.values()].sort((a, b) => String(a.store_key).localeCompare(String(b.store_key)) || String(a.skc).localeCompare(String(b.skc)));
+    if (activeSourceReadErrors.length) {
+      const payload = await writeDegradedSnapshot(args, existing, {
+        status: 'error',
+        reason: `本轮有 ${activeSourceReadErrors.length} 个营销价格证据文件无法读取：${activeSourceReadErrors.slice(0, 3).join('；')}`,
+      });
+      console.log(JSON.stringify({ok: true, degraded: true, freshness: payload.freshness, out: args.out, rowCount: payload.rowCount}, null, 2));
       return;
     }
+    if (!rows.length && args.keepExistingOnEmpty) {
+      const payload = await writeDegradedSnapshot(args, existing, {
+        status: 'stale',
+        reason: sources.length
+          ? '本轮读到营销价格证据文件，但没有形成任何有效价格行；为避免空结果覆盖，保留上一份完整快照。'
+          : '本轮未找到任何营销价格证据源，保留上一份完整快照。',
+      });
+      console.log(JSON.stringify({ok: true, degraded: true, freshness: payload.freshness, out: args.out, rowCount: payload.rowCount}, null, 2));
+      return;
+    }
+    if (args.injectFailureBeforeWrite) throw new Error('injected marketing price export failure before publish');
+    const generatedAt = new Date().toISOString();
+    const payload = {
+      generatedAt,
+      sourceRoot: path.basename(args.sourceRoot),
+      caveat: '来自最近一次活动扫描/报名价格栈产物；用于 BI 商品列表辅助判断，不等同于实时链接售价或最终成交价。',
+      sources,
+      rowCount: rows.length,
+      rows,
+      freshness: {
+        status: 'fresh',
+        checkedAt: generatedAt,
+        snapshotGeneratedAt: generatedAt,
+        reason: '本轮已从营销价格证据源重新导出。',
+      },
+    };
+    await writeJsonFileAtomic(args.out, payload);
+    console.log(JSON.stringify({ok: true, freshness: payload.freshness, out: args.out, rowCount: rows.length, sources}, null, 2));
+  } catch (error) {
+    await writeDegradedSnapshot(args, existing, {
+      status: 'error',
+      reason: `本轮导出失败：${error?.message || error}`,
+    }).catch(writeError => {
+      console.error(`failed to publish marketing price error metadata: ${writeError?.message || writeError}`);
+    });
+    throw error;
+  } finally {
+    activeSourceReadErrors = null;
   }
-  const payload = {
-    generatedAt: new Date().toISOString(),
-    sourceRoot: path.basename(args.sourceRoot),
-    caveat: '来自最近一次活动扫描/报名价格栈产物；用于 BI 商品列表辅助判断，不等同于实时链接售价或最终成交价。',
-    sources,
-    rowCount: rows.length,
-    rows,
-  };
-  await fs.mkdir(path.dirname(args.out), {recursive: true});
-  await fs.writeFile(args.out, JSON.stringify(payload, null, 2), 'utf8');
-  console.log(JSON.stringify({ok: true, out: args.out, rowCount: rows.length, sources}, null, 2));
 }
 
 main().catch(err => {

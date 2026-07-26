@@ -160,6 +160,8 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 - 前一天最终版入口：`scripts/cloud_bi_refresh.sh yesterday final`。WebAPI 生成独立核对文件但在切换日以后不写正式事实；19/19 店 OpenAPI 深度匹配后才调用 `ops.promote_openapi_sales_slice` 原子晋升。
 
 - Portal section 预热有两层：`cloud_bi_refresh.sh` 生成 core 后会后台启动 `scripts/prewarm_bi_portal_sections.sh`；`serve_bi_portal.mjs` 还会在服务启动和首页访问时检测 `data.json.generatedAt`，通过 core warmup watcher 兜底预热 section，防止用户打开页面时才现场生成。`homeRankings` 是首页销售/排行轻量 section，服务端会裁掉首页不用的重复 `goods_title` / `skc_list` 文本并写 `.json.gz` sidecar；完整 `rankings` 仍保留给详情/子页。`homeProfit` 只从当前 `profit` section cache 派生；如果当前 `profit` 缺失或过旧，前端会把 `staleSource=true` / `sourceGeneratedAt` 不匹配的摘要视为不可用，不能拿旧利润当业务真相。
+- Portal 实时链路不做 60 秒轮询：订单 Webhook 入仓后先通过 PostgreSQL `NOTIFY` + SSE 推送销售；可见页面仅每 5 分钟做一次兜底检查。Portal 将订单/退货事件按默认 `45s` 合并后执行成本台账和利润 cache 刷新，成功后再推送 `accountingRefreshed=true`；失败默认 `5min` 后自动重试，服务启动时也会补做离线期间的事件。可用 `SHEIN_BI_LIVE_ACCOUNTING_DEBOUNCE_MS` / `SHEIN_BI_LIVE_ACCOUNTING_RETRY_MS` 调整，但不得把它改回高频全量销售抓数。
+- 实时销售直接查询当天 `fact.order_item`，利润只读取同一次原子发布的 `mart.profit_order_item_cache` 与仓储费 cache。若销售已到但利润 cache 尚未覆盖，API 返回 `accountingPending=true`，页面显示利润正在补成本；禁止用静态单位成本、旧利润或零值掩盖这个时间差。
 - `productTrafficDaily` section 当前是日期 × 店铺 × 标准货号 × SKC 粒度，并从最新链接主快照带出 `shelf_status_name`、`is_on_shelf`、`is_sold_out`、`is_out_shelf` 等字段。流量页前端按顶部时间范围聚合成店铺 × 标准货号 × SKC 明细，默认只看已上架链接；若要追溯历史某日当时的上架状态，需要另做日期对齐的历史状态层，不能把当前快照解释成历史状态事实。
 - 数据库备份入口：`scripts/cloud_db_backup.sh`
 
@@ -293,7 +295,7 @@ GitHub 应保存：
 
 - 若 BI 侧栏显示的“页面生成 / 销售源”时间明显旧于当前事件，先检查 `shein-bi-webhook.service`、receipt 队列、`fact.openapi_order_* -> fact.order_*` 触发器和 Portal 的 `/api/bi/live-events`；不要先恢复每小时全量抓数掩盖根因。人工灾备才运行 `shein-bi-cloud-today.service`。
 
-- 若首页长期“加载中”或利润明显异常偏低，先用服务器本机或有效 BI 登录会话访问 `/api/health` 确认 `biCoreWarmup.status`，再访问 `/api/bi/section/homeProfit` 或在服务器读 `outputs/bi-portal/sections/homeProfit.json`，确认 `homeProfitSummary.sourceGeneratedAt` 等于当前 `data.json.__sections.generatedAt` 且 `staleSource=false`。若任一 section 旧于 core，可请求对应 `/api/bi/section/<section>?refresh=1` 或等待 portal 服务 warmup；不要用旧 section 数字判断业务。
+- 若首页长期“加载中”或利润明显异常偏低，先用服务器本机或有效 BI 登录会话访问 `/api/health` 确认 `biCoreWarmup.status`，再访问 `/api/bi/section/homeProfit` 或在服务器读 `outputs/bi-portal/sections/homeProfit.json`，确认 `homeProfitSummary.sourceGeneratedAt` 等于当前 `data.json.__sections.generatedAt` 且 `staleSource=false`。当天新订单另查实时 section 的 `accountingPending`、`latestSaleUpdatedAt` 与 `accountingRefreshedAt`：`accountingPending=true` 表示销售已到、利润正在补成本，不是零利润；若超过一次 `5min` 重试仍未收口，再查 Portal 日志中的 live accounting refresh 错误。若任一普通 section 旧于 core，可请求对应 `/api/bi/section/<section>?refresh=1` 或等待 portal service warmup；不要用旧 section 数字判断业务。
 
 - BI Portal 生成后，`outputs/bi-portal/data.json` 应包含顶层 `productDisplayNames`，且主要含 `standard_goods_sn` 的对象应有 `product_display_name`。如果页面或飞书问数机器人又裸显示 `SM-505A`、`SK-10075` 这类短码，先在服务器跑 `node scripts/test_product_display_name.mjs`，再重跑 `node scripts/generate_bi_portal.mjs` 或对应云端刷新 service。
 
@@ -432,3 +434,9 @@ CODEX_HOME=/home/sheinops/.codex SHEIN_QA_CODEX_GATEWAY_ENABLED=1 node scripts/l
 - 兜底：`scripts/cloud_link_business_sync.sh` 支持部分店铺失败继续执行并记录 `state/cloud_ops_alerts/link-business-last-partial.json`；默认不把部分成功结果入仓刷新 BI，避免把不完整链接/业务域日期展示成全量成功。
 
 - 恢复手段：若云端 SBN 子系统态整体失效，可在本机用 `scripts/auto_relogin_shein_store.mjs` 恢复对应店铺、再用 `scripts/export_shein_browser_session.mjs` 导出 `state/shein_browser_sessions/*.local.json` 并同步到云端私有同名目录；这些 session 文件是敏感运行态，不进 GitHub。若失败页面其实是协议签署 / 公告 / 通知确认挡住登录按钮，应先在可见/noVNC 窗口中关闭或确认普通弹窗并再次点击登录，然后导出/回灌 session；不要只看 `login_not_restored` 就认定必须用户扫码。
+# 2026-07-26 运行语义补充
+
+- 商品对账以 **当前 OpenAPI 快照 + 前一版 OpenAPI 快照 + 商品上下架 Webhook** 为准。OpenAPI 独有链接、API 合法的待上架/下架状态，以及浏览器四态快照差异都只保留为诊断信息；不会再让 19 店长期 warning。只有 OpenAPI 详情缺失、库存缺失，或“已上架 → 非已上架”但没有对应 Webhook 证据，才是需要处理的 warning。
+- `scripts/audit_bi_warehouse.mjs`、watchdog 和 `state/openapi-probes/product-reconciliation.latest.json` 使用同一语义。先看具体店铺和具体缺口，不把“browser mismatch”当成可操作事故。
+- 凌晨登录态、备份、昨日最终核对共享同一把锁。正常运行时后启动任务等待；宕机后 Persistent timer 同时补跑时，软 `Before/After` 只做 `session-manager → db-backup → yesterday` 排序，不触发额外任务，`flock` 仍是最终互斥。验收时检查三个 service 的 journal 是否按顺序出现锁等待及最终完成记录。
+- 云端 Linux 的运行状态只看 systemd、watchdog、Portal `/api/health` 与数仓审计；旧 Windows 计划任务不参与生产健康判断。

@@ -91,8 +91,18 @@ const inheritedDetailBills = [
   {income_bill_id: 'INHERIT_PENDING', fee_date: '2026-04-07', billing_period_date: '2026-04-07', other_income: 200, status_name: '等待支付'},
   {income_bill_id: 'INHERIT_PAID', fee_date: '2026-04-07', billing_period_date: '2026-04-07', other_income: 200, status_name: '已支付'},
 ];
+const mixedEvidenceBills = [
+  {income_bill_id: 'MIX_DETAIL', fee_date: '2026-04-08', billing_period_date: '2026-04-08', other_income: 100, status_name: '已支付'},
+  {income_bill_id: 'MIX_MISSING', fee_date: '2026-04-08', billing_period_date: '2026-04-08', other_income: 200, status_name: '已支付'},
+];
 
-const canonical = canonicalize([...replacementBills, ...paidTwiceBills, ...differentClientBills, ...inheritedDetailBills]);
+const canonical = canonicalize([
+  ...replacementBills,
+  ...paidTwiceBills,
+  ...differentClientBills,
+  ...inheritedDetailBills,
+  ...mixedEvidenceBills,
+]);
 const replacement = canonical.filter(row => row.fee_date === '2026-04-04');
 assert.equal(replacement.length, 1, 'pending-to-paid replacement must produce one canonical bill');
 assert.equal(replacement[0].income_bill_id, 'AR2604048323894665');
@@ -114,6 +124,7 @@ const detailRows = [
   {income_bill_id: 'PAID_A', fee_date: '2026-04-05', product: 'P1', shown_fee_rmb: 50},
   {income_bill_id: 'PAID_B', fee_date: '2026-04-05', product: 'P2', shown_fee_rmb: 50},
   {income_bill_id: 'INHERIT_PENDING', fee_date: '2026-04-07', product: 'P2', shown_fee_rmb: 100},
+  {income_bill_id: 'MIX_DETAIL', fee_date: '2026-04-08', product: 'P1', shown_fee_rmb: 100},
 ];
 const selectedDetailSources = canonical.map(row => ({
   canonical_income_bill_id: row.income_bill_id,
@@ -148,6 +159,25 @@ const allocatedSar = selectedDetailRows
 assert.ok(Math.abs(allocatedSar - dayTotal * 0.5 / 1.8) < 1e-9,
   'scaled product evidence must conserve the canonical ledger after 0.5 and 1.8 conversion');
 
+const mixedCanonical = canonical.filter(row => row.fee_date === '2026-04-08');
+const mixedAllocations = mixedCanonical.map(bill => {
+  const source = selectDetailSource(bill, detailRows);
+  const rows = detailRows.filter(row =>
+    row.fee_date === bill.fee_date && row.income_bill_id === source.detail_source_income_bill_id);
+  const detailShown = rows.reduce((sum, row) => sum + row.shown_fee_rmb, 0);
+  return {
+    bill: bill.income_bill_id,
+    productAllocatedRmb: detailShown > 0
+      ? rows.reduce((sum, row) => sum + row.shown_fee_rmb * bill.other_income / detailShown, 0)
+      : 0,
+    fallbackRmb: detailShown > 0 ? 0 : bill.other_income,
+  };
+});
+assert.deepEqual(mixedAllocations, [
+  {bill: 'MIX_DETAIL', productAllocatedRmb: 100, fallbackRmb: 0},
+  {bill: 'MIX_MISSING', productAllocatedRmb: 0, fallbackRmb: 200},
+], 'same-day independent bill without detail must stay in fallback instead of scaling another bill');
+
 const schema = read('infra/warehouse/schema.sql');
 const refresh = read('scripts/refresh_profit_marts.sql');
 const audit = read('scripts/audit_bi_warehouse.mjs');
@@ -157,9 +187,12 @@ assert.match(schema, /superseded_income_bill_ids/);
 assert.match(schema, /CREATE OR REPLACE VIEW mart\.et_storage_fee_canonical_detail_source/);
 assert.match(schema, /superseded_bill_detail_fallback/);
 assert.match(schema, /raw_summary->>'ClientId'/);
-assert.match(schema, /JOIN detail_bill cb/);
+assert.match(schema, /f\.canonical_income_bill_id/);
+assert.match(schema, /f\.fee_shown_fee_rmb \/ nullif\(sum\(coalesce\(d\.shown_fee_rmb,0\)\),0\) AS detail_bill_scale/);
+assert.match(schema, /fallback_bill_daily AS/);
+assert.match(refresh, /fallback_bill_daily AS/);
 assert.match(refresh, /FROM mart\.et_storage_fee_bill_canonical/);
-assert.match(refresh, /FROM mart\.et_storage_fee_canonical_detail_source/);
+assert.match(refresh, /JOIN mart\.et_storage_fee_canonical_detail_source/);
 assert.match(audit, /unresolved_replacement_chain_count/);
 assert.match(audit, /detail_scaled_days/);
 assert.match(audit, /detail_inherited_bill_count/);
@@ -181,5 +214,6 @@ console.log(JSON.stringify({
     'paid_detail_wins_over_superseded_detail',
     'missing_paid_detail_inherits_one_superseded_export',
     'scaled_product_and_store_amounts_conserve_canonical_ledger',
+    'same_day_independent_missing_detail_bill_uses_fallback',
   ],
 }, null, 2));

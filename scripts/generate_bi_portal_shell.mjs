@@ -9,6 +9,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {writeFileAtomic} from '../lib/atomic_file_publish.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const assetDir = path.join(ROOT, 'scripts', 'bi_app');
@@ -118,8 +119,7 @@ const wrote = [];
 for (const target of [args.outFile, args.compatV2File]) {
   if (!target) continue;
   if (wrote.includes(target)) continue;
-  await fs.mkdir(path.dirname(target), {recursive: true});
-  await fs.writeFile(target, html, 'utf8');
+  await writeFileAtomic(target, html, {encoding: 'utf8'});
   wrote.push(target);
 }
 console.log(JSON.stringify({ok: true, wrote}, null, 2));

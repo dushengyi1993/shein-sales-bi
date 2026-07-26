@@ -10,6 +10,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import {writeFileAtomic} from '../lib/atomic_file_publish.mjs';
 import {enrichProductDisplayNames} from '../lib/product_display_name.mjs';
 import {getAliasConfig} from '../lib/product_sku_normalizer.mjs';
 import {mergeRankedMarketingPriceLead} from '../lib/marketing_price_lead_merge.mjs';
@@ -52,7 +53,7 @@ function sleep(ms) {
 async function writeFileWithRetry(file, data, encoding = 'utf8', attempts = 8) {
   for (let i = 1; i <= attempts; i += 1) {
     try {
-      await fs.writeFile(file, data, encoding);
+      await writeFileAtomic(file, data, {encoding});
       return;
     } catch (err) {
       const code = String(err?.code || '');
@@ -257,7 +258,7 @@ const PORTAL_SECTION_SELECTS = {
 
 const STANDALONE_SECTION_SQL = {
   liveSalesToday: `
-WITH current_profit_items AS MATERIALIZED (
+WITH current_order_items AS MATERIALIZED (
   SELECT
     oi.order_item_key,
     oi.order_key,
@@ -271,94 +272,21 @@ WITH current_profit_items AS MATERIALIZED (
     oi.goods_title,
     coalesce(oi.quantity,0) AS quantity,
     coalesce(oi.sales_sar,0) AS gross_revenue_sar,
-    CASE WHEN coalesce(ai.revenue_reversal,false) THEN 0 ELSE coalesce(oi.sales_sar,0) END AS net_revenue_sar,
-    CASE
-      WHEN coalesce(ai.pending_revenue_risk,false) OR coalesce(ai.revenue_reversal,false) THEN 0
-      ELSE coalesce(oi.sales_sar,0)
-    END AS risk_adjusted_net_revenue_sar,
-    CASE WHEN coalesce(ai.pending_revenue_risk,false) THEN coalesce(oi.sales_sar,0) ELSE 0 END AS pending_revenue_risk_sar,
-    coalesce(ca.unit_cost_sar,prior_cost.avg_unit_cost_after_sar) AS live_unit_cost_sar,
-    coalesce(ai.revenue_reversal,false) AS revenue_reversal,
-    coalesce(ai.pending_revenue_risk,false) AS pending_revenue_risk,
-    coalesce(ai.pending_impact_quantity,0) AS pending_impact_quantity,
-    coalesce(ai.pending_impact_amount_sar,0) AS pending_impact_amount_sar,
-    coalesce(pc.actual_return_cost_sar,0) AS actual_return_cost_sar,
-    coalesce(ai.estimated_return_delivery_fee_sar,0) AS estimated_return_delivery_fee_sar,
-    CASE
-      WHEN pc.actual_return_cost_sar IS NOT NULL THEN pc.actual_return_cost_sar
-      ELSE coalesce(ai.estimated_return_delivery_fee_sar,0)
-    END AS return_delivery_fee_sar,
-    coalesce(pc.rtv_received_quantity,0) AS rtv_received_quantity,
-    coalesce(pc.rtv_received_to_09_quantity,0) AS rtv_received_to_09_quantity
+    oi.updated_at
   FROM fact.order_item oi
   LEFT JOIN dim.store s ON s.store_key=oi.store_key
-  LEFT JOIN mart.inventory_cost_sale_assignment ca
-    ON ca.order_item_key=oi.order_item_key
-  LEFT JOIN mart.profit_order_item_cache pc
-    ON pc.order_item_key=oi.order_item_key
-  LEFT JOIN LATERAL (
-    SELECT x.*
-    FROM mart.profit_after_sales_impact x
-    WHERE x.order_no=oi.order_no
-      AND x.store_key=oi.store_key
-      AND (x.revenue_reversal OR x.pending_revenue_risk)
-      AND (
-        (coalesce(x.skc,'') <> '' AND x.skc=oi.skc)
-        OR (
-          coalesce(x.standard_goods_sn,'') <> ''
-          AND dim.product_match_key(x.standard_goods_sn)=dim.product_match_key(oi.standard_goods_sn)
-        )
-        OR (coalesce(x.skc,'')='' AND coalesce(x.standard_goods_sn,'')='')
-      )
-    ORDER BY CASE
-      WHEN x.skc=oi.skc THEN 0
-      WHEN x.standard_goods_sn=oi.standard_goods_sn THEN 1
-      WHEN dim.product_match_key(x.standard_goods_sn)=dim.product_match_key(oi.standard_goods_sn) THEN 2
-      ELSE 3
-    END
-    LIMIT 1
-  ) ai ON true
-  LEFT JOIN LATERAL (
-    -- A targeted Webhook order reaches fact.order_item before the open-period
-    -- moving-average ledger is rebuilt.  Use only the last ledger state that
-    -- existed at the sale time; never use a later receipt or the all-history
-    -- static product cost, because either would leak future cost backwards.
-    SELECT l.avg_unit_cost_after_sar
-    FROM fact.inventory_cost_ledger l
-    WHERE ca.order_item_key IS NULL
-      AND l.match_key = dim.product_match_key(oi.standard_goods_sn)
-      AND l.effective_at <= coalesce(oi.order_create_time, oi.created_date::timestamp)
-    ORDER BY
-      l.effective_at DESC,
-      CASE l.event_type
-        WHEN 'adjustment' THEN 40
-        WHEN 'rtv_09_return' THEN 30
-        WHEN 'sale' THEN 20
-        WHEN 'receipt' THEN 10
-        WHEN 'inventory_count_reset' THEN 1
-        WHEN 'opening' THEN 0
-        ELSE 99
-      END DESC,
-      l.event_key DESC
-    LIMIT 1
-  ) prior_cost ON true
   WHERE oi.created_date=current_date
     AND coalesce(oi.store_key,'') <> ''
     AND coalesce(oi.standard_goods_sn,'') <> ''
 ),
-live_profit_items AS MATERIALIZED (
-  SELECT
-    p.*,
-    (
-      coalesce(p.gross_revenue_sar,0) > 0
-      AND p.live_unit_cost_sar IS NULL
-    ) AS live_cost_missing,
-    CASE
-      WHEN coalesce(p.gross_revenue_sar,0) <= 0 THEN 0
-      WHEN p.live_unit_cost_sar IS NULL THEN NULL
-      ELSE coalesce(p.quantity,0) * p.live_unit_cost_sar
-    END AS live_product_cost_sar
-  FROM current_profit_items p
+cached_profit_items AS MATERIALIZED (
+  -- This cache is published only after the moving-average ledger and every
+  -- accounting invariant pass in one transaction. New Webhook sales remain
+  -- visible immediately through current_order_items; their profit is labelled
+  -- pending until the event-driven accounting refresh publishes a new cache.
+  SELECT *
+  FROM mart.profit_order_item_cache
+  WHERE created_date=current_date
 ),
 live_items AS (
   SELECT
@@ -366,21 +294,23 @@ live_items AS (
     oi.store_key,
     oi.group_key,
     oi.order_no,
-    dim.product_canonical_sn(oi.standard_goods_sn) AS standard_goods_sn,
+    oi.standard_goods_sn,
     oi.skc,
     oi.goods_title,
-    coalesce(oi.quantity,0) AS source_quantity,
-    CASE WHEN coalesce(oi.net_revenue_sar,0) > 0 THEN coalesce(oi.quantity,0) ELSE 0 END AS quantity,
-    CASE WHEN coalesce(oi.gross_revenue_sar,0) > 0 THEN coalesce(oi.quantity,0) ELSE 0 END AS gross_quantity,
-    round(coalesce(oi.net_revenue_sar,0)::numeric,2) AS sales_sar,
-    round(coalesce(oi.gross_revenue_sar,0)::numeric,2) AS gross_sales_sar,
-    coalesce(p.is_cod,false) AS is_cod
-  FROM live_profit_items oi
+    oi.quantity AS source_quantity,
+    CASE WHEN coalesce(pc.net_revenue_sar,oi.gross_revenue_sar)>0 THEN oi.quantity ELSE 0 END AS quantity,
+    CASE WHEN oi.gross_revenue_sar>0 THEN oi.quantity ELSE 0 END AS gross_quantity,
+    round(coalesce(pc.net_revenue_sar,oi.gross_revenue_sar)::numeric,2) AS sales_sar,
+    round(oi.gross_revenue_sar::numeric,2) AS gross_sales_sar,
+    coalesce(p.is_cod,false) AS is_cod,
+    (pc.order_item_key IS NULL AND oi.gross_revenue_sar>0) AS accounting_pending
+  FROM current_order_items oi
+  LEFT JOIN cached_profit_items pc ON pc.order_item_key=oi.order_item_key
   LEFT JOIN (
-    SELECT store_key, order_no, bool_or(coalesce(is_cod,false)) AS is_cod
+    SELECT store_key,order_no,bool_or(coalesce(is_cod,false)) AS is_cod
     FROM fact.order_payment_flag
-    WHERE coalesce(order_no,'') <> ''
-    GROUP BY store_key, order_no
+    WHERE created_date=current_date AND coalesce(order_no,'') <> ''
+    GROUP BY store_key,order_no
   ) p ON p.store_key=oi.store_key AND p.order_no=oi.order_no
 ),
 profit_store_rows AS (
@@ -393,88 +323,100 @@ profit_store_rows AS (
     round(sum(coalesce(quantity,0))::numeric,0) AS quantity,
     count(*)::bigint AS order_lines,
     count(DISTINCT order_key)::bigint AS orders,
-    round(sum(live_product_cost_sar) FILTER (WHERE NOT live_cost_missing)::numeric,2) AS product_cost_sar,
+    round(sum(product_cost_sar) FILTER (WHERE NOT cost_missing)::numeric,2) AS product_cost_sar,
     round(sum(coalesce(return_delivery_fee_sar,0))::numeric,2) AS return_delivery_fee_sar,
-    round(sum(
-      CASE WHEN NOT live_cost_missing AND revenue_reversal AND coalesce(gross_revenue_sar,0) > 0
-        THEN least(coalesce(quantity,0),coalesce(rtv_received_quantity,0)) * live_unit_cost_sar
-        ELSE 0 END
-    )::numeric,2) AS rtv_recoverable_cost_sar,
-    round(sum(
-      CASE WHEN NOT live_cost_missing AND revenue_reversal AND coalesce(gross_revenue_sar,0) > 0
-        THEN least(coalesce(quantity,0),coalesce(rtv_received_to_09_quantity,0)) * live_unit_cost_sar
-        ELSE 0 END
-    )::numeric,2) AS rtv_09_recoverable_cost_sar,
+    round(sum(rtv_recoverable_cost_sar) FILTER (WHERE NOT cost_missing)::numeric,2) AS rtv_recoverable_cost_sar,
+    round(sum(rtv_09_recoverable_cost_sar) FILTER (WHERE NOT cost_missing)::numeric,2) AS rtv_09_recoverable_cost_sar,
     round(sum(coalesce(rtv_received_quantity,0))::numeric,0) AS rtv_received_quantity,
     round(sum(coalesce(rtv_received_to_09_quantity,0))::numeric,0) AS rtv_received_to_09_quantity,
-    round(sum(
-      CASE WHEN live_cost_missing THEN NULL
-        ELSE coalesce(net_revenue_sar,0) - coalesce(live_product_cost_sar,0) - coalesce(return_delivery_fee_sar,0)
-      END
-    )::numeric,2) AS profit_before_storage_sar,
+    round(sum(profit_before_storage_sar) FILTER (WHERE NOT cost_missing)::numeric,2) AS profit_before_storage_sar,
     0::numeric AS storage_fee_sar,
-    0::integer AS storage_matched,
+    false AS storage_matched,
     0::numeric AS fallback_storage_fee_sar,
-    round(sum(
-      CASE WHEN live_cost_missing THEN NULL
-        ELSE coalesce(net_revenue_sar,0) - coalesce(live_product_cost_sar,0) - coalesce(return_delivery_fee_sar,0)
-          + CASE WHEN revenue_reversal AND coalesce(gross_revenue_sar,0) > 0
-            THEN least(coalesce(quantity,0),coalesce(rtv_received_quantity,0)) * live_unit_cost_sar
-            ELSE 0 END
-      END
-    )::numeric,2) AS profit_if_rtv_received_resellable_sar,
-    round(sum(
-      CASE WHEN live_cost_missing THEN NULL
-        ELSE coalesce(net_revenue_sar,0) - coalesce(live_product_cost_sar,0) - coalesce(return_delivery_fee_sar,0)
-          + CASE WHEN revenue_reversal AND coalesce(gross_revenue_sar,0) > 0
-            THEN least(coalesce(quantity,0),coalesce(rtv_received_to_09_quantity,0)) * live_unit_cost_sar
-            ELSE 0 END
-      END
-    )::numeric,2) AS profit_if_rtv_09_resellable_sar,
-    round(sum(coalesce(net_revenue_sar,0)) FILTER (WHERE NOT live_cost_missing)::numeric,2) AS known_net_revenue_sar,
-    round(sum(coalesce(gross_revenue_sar,0)) FILTER (WHERE NOT live_cost_missing)::numeric,2) AS known_gross_revenue_sar,
-    round(sum(coalesce(gross_revenue_sar,0)) FILTER (WHERE live_cost_missing)::numeric,2) AS missing_cost_revenue_sar,
-    round(sum(coalesce(quantity,0)) FILTER (WHERE live_cost_missing)::numeric,0) AS missing_cost_quantity,
-    count(*) FILTER (WHERE live_cost_missing)::bigint AS missing_cost_lines,
+    round(sum(profit_if_rtv_received_resellable_sar) FILTER (WHERE NOT cost_missing)::numeric,2) AS profit_if_rtv_received_resellable_sar,
+    round(sum(profit_if_rtv_09_resellable_sar) FILTER (WHERE NOT cost_missing)::numeric,2) AS profit_if_rtv_09_resellable_sar,
+    round(sum(net_revenue_sar) FILTER (WHERE NOT cost_missing)::numeric,2) AS known_net_revenue_sar,
+    round(sum(gross_revenue_sar) FILTER (WHERE NOT cost_missing)::numeric,2) AS known_gross_revenue_sar,
+    round(sum(gross_revenue_sar) FILTER (WHERE cost_missing)::numeric,2) AS missing_cost_revenue_sar,
+    round(sum(quantity) FILTER (WHERE cost_missing)::numeric,0) AS missing_cost_quantity,
+    count(*) FILTER (WHERE cost_missing)::bigint AS missing_cost_lines,
     count(*) FILTER (WHERE revenue_reversal)::bigint AS reversal_lines,
     round(sum(coalesce(risk_adjusted_net_revenue_sar,0))::numeric,2) AS risk_adjusted_net_revenue_sar,
     round(sum(coalesce(pending_revenue_risk_sar,0))::numeric,2) AS pending_revenue_risk_sar,
-    round(sum(
-      CASE WHEN live_cost_missing THEN NULL
-        ELSE coalesce(risk_adjusted_net_revenue_sar,0) - coalesce(live_product_cost_sar,0) - coalesce(return_delivery_fee_sar,0)
-      END
-    )::numeric,2) AS risk_adjusted_profit_before_storage_sar,
+    round(sum(risk_adjusted_profit_before_storage_sar) FILTER (WHERE NOT cost_missing)::numeric,2) AS risk_adjusted_profit_before_storage_sar,
     count(*) FILTER (WHERE pending_revenue_risk)::bigint AS pending_revenue_risk_lines,
     round(sum(coalesce(pending_impact_quantity,0))::numeric,0) AS pending_impact_quantity,
     round(sum(coalesce(pending_impact_amount_sar,0))::numeric,2) AS pending_impact_amount_sar,
     round(sum(coalesce(actual_return_cost_sar,0))::numeric,2) AS actual_return_cost_sar,
     round(sum(coalesce(estimated_return_delivery_fee_sar,0))::numeric,2) AS estimated_return_delivery_fee_sar
-  FROM live_profit_items
-  GROUP BY created_date, store_key
+  FROM cached_profit_items
+  GROUP BY created_date,store_key
+),
+today_storage_alloc AS (
+  SELECT
+    store_key,
+    max(coalesce(group_key,'')) AS group_key,
+    round(sum(coalesce(allocated_storage_fee_sar,0))::numeric,2) AS storage_fee_sar
+  FROM mart.storage_fee_store_daily_cache
+  WHERE date=current_date AND coalesce(store_key,'') <> ''
+  GROUP BY store_key
+),
+today_storage_state AS (
+  SELECT count(*)>0 AS storage_matched FROM today_storage_alloc
+),
+accounting_freshness AS (
+  SELECT
+    (SELECT max(updated_at) FROM current_order_items) AS latest_sale_updated_at,
+    (SELECT max(refreshed_at) FROM mart.profit_mart_cache_meta WHERE cache_key='profit_marts' AND status='ok') AS accounting_refreshed_at,
+    EXISTS(SELECT 1 FROM live_items WHERE accounting_pending) AS accounting_pending
 ),
 profit_store_rows_final AS (
   SELECT
-    p.*,
-    p.profit_before_storage_sar AS profit_after_storage_sar,
-    p.risk_adjusted_profit_before_storage_sar AS risk_adjusted_profit_after_storage_sar,
-    p.profit_if_rtv_received_resellable_sar AS profit_if_rtv_received_resellable_after_storage_sar,
-    p.profit_if_rtv_09_resellable_sar AS profit_if_rtv_09_resellable_after_storage_sar,
-    CASE WHEN coalesce(p.net_revenue_sar,0) > 0
-      THEN round((coalesce(p.known_net_revenue_sar,0) / nullif(p.net_revenue_sar,0))::numeric,4)
-      ELSE NULL END AS cost_coverage_revenue_rate
+    coalesce(to_jsonb(p),'{}'::jsonb) || jsonb_build_object(
+      'date',current_date,
+      'store_key',coalesce(p.store_key,a.store_key),
+      'group_key',coalesce(nullif(p.group_key,''),a.group_key,''),
+      'storage_fee_sar',CASE WHEN r.storage_matched THEN coalesce(a.storage_fee_sar,0) ELSE 0 END,
+      'storage_matched',r.storage_matched,
+      'fallback_storage_fee_sar',0,
+      'profit_after_storage_sar',CASE
+        WHEN p.profit_before_storage_sar IS NULL AND p.store_key IS NOT NULL THEN NULL
+        ELSE coalesce(p.profit_before_storage_sar,0)-CASE WHEN r.storage_matched THEN coalesce(a.storage_fee_sar,0) ELSE 0 END
+      END,
+      'risk_adjusted_profit_after_storage_sar',CASE
+        WHEN p.risk_adjusted_profit_before_storage_sar IS NULL AND p.store_key IS NOT NULL THEN NULL
+        ELSE coalesce(p.risk_adjusted_profit_before_storage_sar,0)-CASE WHEN r.storage_matched THEN coalesce(a.storage_fee_sar,0) ELSE 0 END
+      END,
+      'profit_if_rtv_received_resellable_after_storage_sar',CASE
+        WHEN p.profit_if_rtv_received_resellable_sar IS NULL AND p.store_key IS NOT NULL THEN NULL
+        ELSE coalesce(p.profit_if_rtv_received_resellable_sar,0)-CASE WHEN r.storage_matched THEN coalesce(a.storage_fee_sar,0) ELSE 0 END
+      END,
+      'profit_if_rtv_09_resellable_after_storage_sar',CASE
+        WHEN p.profit_if_rtv_09_resellable_sar IS NULL AND p.store_key IS NOT NULL THEN NULL
+        ELSE coalesce(p.profit_if_rtv_09_resellable_sar,0)-CASE WHEN r.storage_matched THEN coalesce(a.storage_fee_sar,0) ELSE 0 END
+      END,
+      'cost_coverage_revenue_rate',CASE WHEN coalesce(p.gross_revenue_sar,0)>0
+        THEN round((coalesce(p.known_gross_revenue_sar,0)/nullif(p.gross_revenue_sar,0))::numeric,4)
+        ELSE NULL END
+    ) AS data
   FROM profit_store_rows p
+  FULL OUTER JOIN today_storage_alloc a ON a.store_key=p.store_key
+  CROSS JOIN today_storage_state r
+  WHERE p.store_key IS NOT NULL OR (r.storage_matched AND a.store_key IS NOT NULL)
 )
 SELECT jsonb_build_object(
-  'liveSalesToday', jsonb_build_object(
-    'date', current_date,
-    'generatedAt', now(),
-    'items', coalesce((
-      SELECT jsonb_agg(to_jsonb(t) ORDER BY t.store_key,t.order_no,t.standard_goods_sn,t.skc)
+  'liveSalesToday',jsonb_build_object(
+    'date',current_date,
+    'generatedAt',now(),
+    'latestSaleUpdatedAt',(SELECT latest_sale_updated_at FROM accounting_freshness),
+    'accountingRefreshedAt',(SELECT accounting_refreshed_at FROM accounting_freshness),
+    'accountingPending',(SELECT accounting_pending FROM accounting_freshness),
+    'items',coalesce((
+      SELECT jsonb_agg(to_jsonb(t)-'accounting_pending' ORDER BY t.store_key,t.order_no,t.standard_goods_sn,t.skc)
       FROM live_items t
     ),'[]'::jsonb),
-    'profitStoreRows', coalesce((
-      SELECT jsonb_agg(to_jsonb(t) ORDER BY t.store_key)
-      FROM profit_store_rows_final t
+    'profitStoreRows',coalesce((
+      SELECT jsonb_agg(t.data ORDER BY t.data->>'store_key') FROM profit_store_rows_final t
     ),'[]'::jsonb)
   )
 )::text;

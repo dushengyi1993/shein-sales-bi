@@ -16,7 +16,16 @@ INSERT INTO fact.order_item(
   ('OI_REAL_B','OK_REAL','S1','G1','O_REAL','2026-01-10','2026-01-10 10:01','P2','SKCB','SKUB','P2 realized',1,'SAR',40),
   ('OI_ACT_A','OK_ACT','S1','G1','O_ACT','2026-01-10','2026-01-10 10:02','P1','SKCA','SKUA','P1 actual fee',1,'SAR',60),
   ('OI_ACT_B','OK_ACT','S1','G1','O_ACT','2026-01-10','2026-01-10 10:02','P2','SKCB','SKUB','P2 actual fee',1,'SAR',40),
-  ('OI_RETURN_ACT','OK_RETURN_ACT','S1','G1','O_RETURN_ACT','2026-01-10','2026-01-10 10:03','P1','SKCR','SKUR','P1 return-order actual fee',1,'SAR',100);
+  ('OI_RETURN_ACT','OK_RETURN_ACT','S1','G1','O_RETURN_ACT','2026-01-10','2026-01-10 10:03','P1','SKCR','SKUR','P1 return-order actual fee',1,'SAR',100),
+  ('OI_PARTIAL_A','OK_PARTIAL','S1','G1','O_PARTIAL','2026-01-10','2026-01-10 10:04','P1','SKCP','SKUP','P1 partial A',1,'SAR',120),
+  ('OI_PARTIAL_B','OK_PARTIAL','S1','G1','O_PARTIAL','2026-01-10','2026-01-10 10:04','P1','SKCP','SKUP','P1 partial B',1,'SAR',80),
+  ('OI_PENDING_PART_A','OK_PENDING_PART','S1','G1','O_PENDING_PART','2026-01-10','2026-01-10 10:05','P1','SKCPP','SKUPP','P1 pending partial A',1,'SAR',120),
+  ('OI_PENDING_PART_B','OK_PENDING_PART','S1','G1','O_PENDING_PART','2026-01-10','2026-01-10 10:05','P1','SKCPP','SKUPP','P1 pending partial B',1,'SAR',80),
+  ('OI_RTV_A','OK_RTV','S1','G1','O_RTV','2026-01-10','2026-01-10 10:06','P1','SKCRTV','SKURTV','P1 RTV split A',1,'SAR',50),
+  ('OI_RTV_B','OK_RTV','S1','G1','O_RTV','2026-01-10','2026-01-10 10:06','P1','SKCRTV','SKURTV','P1 RTV split B',1,'SAR',50),
+  ('OI_RETURN_MIX_A','OK_RETURN_MIX','S1','G1','O_RETURN_MIX','2026-01-10','2026-01-10 10:07','P1','SKCRM_A','SKURM_A','P1 package actual A',1,'SAR',60),
+  ('OI_RETURN_MIX_B','OK_RETURN_MIX','S1','G1','O_RETURN_MIX','2026-01-10','2026-01-10 10:07','P2','SKCRM_B','SKURM_B','P2 package actual B',1,'SAR',40),
+  ('OI_MULTI','OK_MULTI','S1','G1','O_MULTI','2026-01-10','2026-01-10 10:08','P1','SKC_MULTI','SKU_MULTI','P1 realized plus pending',1,'SAR',100);
 
 INSERT INTO fact.inventory_cost_event(
   event_key,match_key,effective_at,event_type,quantity,cost_amount_sar,source_table,
@@ -70,16 +79,52 @@ INSERT INTO fact.after_sales_item(
   ('AF_ACT_B','2026-01-11','S1','G1','2026-01-11 09:02','AF_ACT','R_ACT','O_ACT',
    '退货退款','同意退款','已签收',40,'SAR','P2','SKCB',1,40),
   ('AF_RETURN_ACT','2026-01-11','S1','G1','2026-01-11 09:03','AF_RETURN_ACT','R_RETURN_ACT','O_RETURN_ACT',
-   '退货退款','同意退款','已签收',100,'SAR','P1','SKCR',1,100);
+   '退货退款','同意退款','已签收',100,'SAR','P1','SKCR',1,100),
+  ('AF_PARTIAL','2026-01-11','S1','G1','2026-01-11 09:04','AF_PARTIAL','R_PARTIAL','O_PARTIAL',
+   '退货退款','同意退款','已签收',100,'SAR','P1','SKCP',1,100),
+  ('AF_PENDING_PART','2026-01-11','S1','G1','2026-01-11 09:05','AF_PENDING_PART','R_PENDING_PART','O_PENDING_PART',
+   '退货退款','待买家退货','待寄回',50,'SAR','P1','SKCPP',1,50),
+  ('AF_RTV','2026-01-11','S1','G1','2026-01-11 09:06','AF_RTV','R_RTV','O_RTV',
+   '退货退款','同意退款','已签收',50,'SAR','P1','SKCRTV',1,50),
+  ('AF_RETURN_MIX_A','2026-01-11','S1','G1','2026-01-11 09:07','AF_RETURN_MIX','R_RETURN_MIX','O_RETURN_MIX',
+   '退货退款','同意退款','已签收',60,'SAR','P1','SKCRM_A',1,60),
+  ('AF_RETURN_MIX_B','2026-01-11','S1','G1','2026-01-11 09:07','AF_RETURN_MIX','R_RETURN_MIX','O_RETURN_MIX',
+   '退货退款','同意退款','已签收',40,'SAR','P2','SKCRM_B',1,40),
+  ('AF_MULTI_REAL','2026-01-11','S1','G1','2026-01-11 09:08','AF_MULTI_REAL','R_MULTI_REAL','O_MULTI',
+   '退货退款','同意退款','已签收',50,'SAR','P1','SKC_MULTI',0.5,50),
+  ('AF_MULTI_PENDING','2026-01-11','S1','G1','2026-01-11 09:09','AF_MULTI_PENDING','R_MULTI_PENDING','O_MULTI',
+   '退货退款','待买家退货','待寄回',30,'SAR','P1',NULL,0.3,30);
+
+INSERT INTO fact.et_return_order(
+  return_order_id,store_name_in,shipment_number,status,status_name,in_quantity,create_time
+) VALUES ('ET_RTV','ETRUH09散件仓','EXP_RTV','done','已到货',1,'2026-01-12 10:00');
+INSERT INTO fact.et_return_order_item(
+  unique_key,return_order_id,standard_goods_sn,match_key,quantity,instock,create_time
+) VALUES ('ET_RTV_ITEM','ET_RTV','P1',dim.product_match_key('P1'),1,1,'2026-01-12 10:00');
+INSERT INTO ops.rtv_tracking_verification(
+  verification_id,store_key,et_return_order_id,et_shipment_number,standard_goods_sn,
+  shein_aftersales_order_no,shein_order_no,shein_return_order_no,match_status,match_source
+) VALUES (
+  'RTV_SPLIT_VALIDATION','S1','ET_RTV','EXP_RTV','P1',
+  'AF_RTV','O_RTV','R_RTV','matched','validation'
+);
 
 INSERT INTO fact.openapi_return_order(
   return_order_key,ret_order_date,store_key,group_key,return_order_no,order_no,return_order_status,check_status
-) VALUES ('RO_RETURN_ACT','2026-01-11','S1','G1','R_RETURN_ACT','O_RETURN_ACT','7','2');
+) VALUES
+  ('RO_RETURN_ACT','2026-01-11','S1','G1','R_RETURN_ACT','O_RETURN_ACT','7','2'),
+  ('RO_RETURN_MIX','2026-01-11','S1','G1','R_RETURN_MIX','O_RETURN_MIX','7','2');
 INSERT INTO fact.openapi_return_item(
   return_item_key,return_order_key,ret_order_date,store_key,group_key,return_order_no,order_no,
   standard_goods_sn,skc,sku,quantity,performance_price,return_expense,return_freight_subsidy,amount_sar
-) VALUES ('RI_RETURN_ACT','RO_RETURN_ACT','2026-01-11','S1','G1','R_RETURN_ACT','O_RETURN_ACT',
-  'P1','SKCR','SKUR',1,16.77,0,0,83.23);
+) VALUES
+  ('RI_RETURN_ACT','RO_RETURN_ACT','2026-01-11','S1','G1','R_RETURN_ACT','O_RETURN_ACT',
+   'P1','SKCR','SKUR',1,16.77,0,0,83.23),
+  -- One actual package charge is present on product A only. Product B must not
+  -- retain its share of the 13.88 estimate; the 16.77 package actual is
+  -- allocated over both returned products.
+  ('RI_RETURN_MIX','RO_RETURN_MIX','2026-01-11','S1','G1','R_RETURN_MIX','O_RETURN_MIX',
+   'P1','SKCRM_A','SKURM_A',1,16.77,0,0,43.23);
 
 INSERT INTO fact.openapi_finance_check_order(
   check_order_key,store_key,group_key,check_order_no,bz_order_no,check_status,
@@ -107,7 +152,9 @@ INSERT INTO fact.et_income_bill(
   ('BILL_CLIENT_A_PAID','CLIENT_A','仓储费','paid','已支付',100,'2026-04-06 08:00','2026-04-06 08:00','2026-04-06'),
   ('BILL_CLIENT_B_PENDING','CLIENT_B','仓储费','waiting','等待支付',100,'2026-04-06 09:00','2026-04-06 09:00','2026-04-06'),
   ('BILL_INHERIT_PENDING',NULL,'仓储费','waiting','等待支付',200,'2026-04-07 08:00','2026-04-07 08:00','2026-04-07'),
-  ('BILL_INHERIT_PAID',NULL,'仓储费','paid','已支付',200,'2026-04-07 09:00','2026-04-07 09:00','2026-04-07');
+  ('BILL_INHERIT_PAID',NULL,'仓储费','paid','已支付',200,'2026-04-07 09:00','2026-04-07 09:00','2026-04-07'),
+  ('BILL_MIX_DETAIL',NULL,'仓储费','paid','已支付',100,'2026-04-08 08:00','2026-04-08 08:00','2026-04-08'),
+  ('BILL_MIX_MISSING',NULL,'仓储费','paid','已支付',200,'2026-04-08 09:00','2026-04-08 09:00','2026-04-08');
 INSERT INTO fact.et_storage_fee_product_detail(
   unique_key,income_bill_id,fee_date,warehouse_name,storage_type,storage_code,
   standard_goods_sn,match_key,quantity,shown_fee_rmb,actual_fee_rmb,actual_fee_sar
@@ -119,7 +166,8 @@ INSERT INTO fact.et_storage_fee_product_detail(
   ('SFD_PAID_A','BILL_PAID_A','2026-04-05','ETRUH09散件仓','散件','P1','P1',dim.product_match_key('P1'),10,50,25,25/1.8),
   ('SFD_PAID_B','BILL_PAID_B','2026-04-05','ETRUH09散件仓','散件','P2','P2',dim.product_match_key('P2'),10,50,25,25/1.8),
   -- Paid replacement has no detail; its one pending predecessor is inherited.
-  ('SFD_INHERIT_PENDING','BILL_INHERIT_PENDING','2026-04-07','ETRUH09散件仓','散件','P2','P2',dim.product_match_key('P2'),10,100,50,50/1.8);
+  ('SFD_INHERIT_PENDING','BILL_INHERIT_PENDING','2026-04-07','ETRUH09散件仓','散件','P2','P2',dim.product_match_key('P2'),10,100,50,50/1.8),
+  ('SFD_MIX_DETAIL','BILL_MIX_DETAIL','2026-04-08','ETRUH09散件仓','散件','P1','P1',dim.product_match_key('P1'),10,100,50,50/1.8);
 INSERT INTO fact.link_master_snapshot(
   unique_key,snapshot_date,store_key,group_key,standard_goods_sn,skc,is_on_shelf,is_wait_shelf,
   is_sold_out,is_out_shelf,is_hard_dead
@@ -144,6 +192,16 @@ DECLARE
   v_post_cost numeric;
   v_post_missing boolean;
   v_post_status text;
+  v_partial_net numeric;
+  v_partial_impact numeric;
+  v_pending_partial_risk numeric;
+  v_pending_partial_adjusted numeric;
+  v_rtv_received numeric;
+  v_rtv_09_received numeric;
+  v_rtv_recoverable numeric;
+  v_multi_net numeric;
+  v_multi_pending numeric;
+  v_multi_risk_adjusted numeric;
 BEGIN
   SELECT net_revenue_sar,pending_revenue_risk_sar,risk_adjusted_profit_before_storage_sar
     INTO v_net,v_risk,v_risk_profit
@@ -156,6 +214,39 @@ BEGIN
   FROM mart.profit_order_item WHERE order_no='O_REAL';
   IF abs(v_fee-13.88) > 0.005 THEN
     RAISE EXCEPTION 'package estimate must be once per package, got %',v_fee;
+  END IF;
+
+  SELECT sum(net_revenue_sar),sum(impact_amount_sar),sum(return_delivery_fee_sar)
+    INTO v_partial_net,v_partial_impact,v_fee
+  FROM mart.profit_order_item WHERE order_no='O_PARTIAL';
+  IF abs(v_partial_net-100) > 0.005
+     OR abs(v_partial_impact-100) > 0.005
+     OR abs(v_fee-13.88) > 0.005 THEN
+    RAISE EXCEPTION 'partial_refund_and_split_package_fee contract failed: net %, impact %, fee %',
+      v_partial_net,v_partial_impact,v_fee;
+  END IF;
+
+  SELECT sum(pending_revenue_risk_sar),sum(risk_adjusted_net_revenue_sar)
+    INTO v_pending_partial_risk,v_pending_partial_adjusted
+  FROM mart.profit_order_item WHERE order_no='O_PENDING_PART';
+  IF abs(v_pending_partial_risk-50) > 0.005
+     OR abs(v_pending_partial_adjusted-150) > 0.005 THEN
+    RAISE EXCEPTION 'pending_partial_refund contract failed: risk %, adjusted %',
+      v_pending_partial_risk,v_pending_partial_adjusted;
+  END IF;
+
+  SELECT
+    sum(rtv_received_quantity),
+    sum(rtv_received_to_09_quantity),
+    sum(rtv_recoverable_cost_sar)
+    INTO v_rtv_received,v_rtv_09_received,v_rtv_recoverable
+  FROM mart.profit_order_item
+  WHERE order_no='O_RTV';
+  IF abs(v_rtv_received-1) > 0.005
+     OR abs(v_rtv_09_received-1) > 0.005
+     OR abs(v_rtv_recoverable-10) > 0.005 THEN
+    RAISE EXCEPTION 'split_order_item_rtv_is_allocated_once contract failed: received %, received09 %, recoverable %',
+      v_rtv_received,v_rtv_09_received,v_rtv_recoverable;
   END IF;
 
   SELECT sum(return_delivery_fee_sar),sum(actual_return_cost_sar),count(*) FILTER (WHERE actual_return_cost_sar IS NOT NULL)
@@ -171,6 +262,31 @@ BEGIN
   IF abs(v_fee-16.77) > 0.005 OR abs(v_actual-16.77) > 0.005
      OR v_return_actual_source <> 'return_order_performance_price_actual' THEN
     RAISE EXCEPTION 'return-order performancePrice actual must replace package estimate: fee %, actual %, source %',v_fee,v_actual,v_return_actual_source;
+  END IF;
+
+  SELECT
+    sum(return_delivery_fee_sar),
+    sum(actual_return_cost_sar),
+    count(*) FILTER (WHERE actual_return_cost_sar IS NOT NULL)
+    INTO v_fee,v_actual,v_actual_rows
+  FROM mart.profit_order_item
+  WHERE order_no='O_RETURN_MIX';
+  IF abs(v_fee-16.77) > 0.005
+     OR abs(v_actual-16.77) > 0.005
+     OR v_actual_rows <> 2 THEN
+    RAISE EXCEPTION 'one product actual fee must replace the whole mixed package estimate: fee %, actual %, rows %',
+      v_fee,v_actual,v_actual_rows;
+  END IF;
+
+  SELECT net_revenue_sar,pending_revenue_risk_sar,risk_adjusted_net_revenue_sar
+    INTO v_multi_net,v_multi_pending,v_multi_risk_adjusted
+  FROM mart.profit_order_item
+  WHERE order_item_key='OI_MULTI';
+  IF abs(v_multi_net-50) > 0.005
+     OR abs(v_multi_pending-30) > 0.005
+     OR abs(v_multi_risk_adjusted-20) > 0.005 THEN
+    RAISE EXCEPTION 'realized and pending after-sales candidates must both survive matching: net %, pending %, adjusted %',
+      v_multi_net,v_multi_pending,v_multi_risk_adjusted;
   END IF;
 
   SELECT sum(unmapped_net_return_cost_sar),max(abs(reconciliation_delta_sar))
@@ -204,6 +320,7 @@ DECLARE
   v_count bigint;
   v_superseded text[];
   v_p1_fee numeric;
+  v_pool_fee numeric;
   v_detail_source text;
   v_detail_reason text;
 BEGIN
@@ -292,10 +409,22 @@ BEGIN
     RAISE EXCEPTION 'only canonical paid-bill detail may define product distribution: P1 %',v_p1_fee;
   END IF;
 
+  SELECT
+    sum(actual_allocated_fee_sar) FILTER (WHERE match_key=dim.product_match_key('P1')),
+    sum(actual_allocated_fee_sar) FILTER (WHERE match_key='CENTRAL_POOL')
+    INTO v_p1_fee,v_pool_fee
+  FROM mart.storage_fee_product_daily
+  WHERE date='2026-04-08';
+  IF abs(v_p1_fee-(100*0.5/1.8)) > 0.005
+     OR abs(v_pool_fee-(200*0.5/1.8)) > 0.005 THEN
+    RAISE EXCEPTION 'same_day_independent_missing_detail_bill must not scale onto detailed bill: P1 %, pool %',
+      v_p1_fee,v_pool_fee;
+  END IF;
+
   SELECT max(greatest(abs(store_allocation_delta_sar),abs(product_allocation_delta_sar),abs(product_store_allocation_delta_sar)))
     INTO v_delta
   FROM mart.storage_fee_daily_reconciliation
-  WHERE fee_date IN ('2026-04-04','2026-04-05','2026-04-07');
+  WHERE fee_date IN ('2026-04-04','2026-04-05','2026-04-07','2026-04-08');
   IF coalesce(v_delta,999) > 0.01 THEN
     RAISE EXCEPTION 'scaled canonical detail must conserve across ledger, product, and store layers: %',v_delta;
   END IF;
@@ -308,8 +437,13 @@ SELECT jsonb_build_object(
     'legacy_history_is_labeled_before_cutover',
     'post_cutover_missing_ledger_fails_closed',
     'package_estimate_once',
+    'partial_refund_and_split_package_fee',
+    'pending_partial_refund',
+    'split_order_item_rtv_is_allocated_once',
     'finance_actual_replaces_estimate',
     'return_order_performance_price_actual_replaces_estimate',
+    'mixed_package_actual_replaces_all_estimate',
+    'realized_and_pending_candidates_both_survive',
     'finance_unmapped_actual_is_visible_and_reconciles',
     'storage_active_link_or_central_pool',
     'storage_reconciles',
@@ -317,7 +451,8 @@ SELECT jsonb_build_object(
     'storage_two_paid_bills_are_not_merged',
     'storage_different_clients_are_not_cross_collapsed',
     'storage_superseded_detail_is_inherited_once_when_paid_detail_missing',
-    'storage_detail_scales_to_canonical_bill_and_conserves'
+    'storage_detail_scales_to_canonical_bill_and_conserves',
+    'same_day_independent_missing_detail_bill'
   )
 ) AS warehouse_business_logic_smoke;
 

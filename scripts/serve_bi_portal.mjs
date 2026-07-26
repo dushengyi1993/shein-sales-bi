@@ -88,6 +88,7 @@ import {
   runBiOpsIntentPlanner,
 } from '../lib/bi_ops_intent_planner.mjs';
 import {warehousePgConfigFromEnv} from '../lib/warehouse_pg.mjs';
+import {writeJsonFileAtomic} from '../lib/atomic_file_publish.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const {Client: PgClient} = pg;
@@ -206,6 +207,7 @@ const OPENAPI_RETURN_RECONCILIATION_FRESH_MS = Math.max(60_000, Number(process.e
 const OPENAPI_PRODUCT_RECONCILIATION_FRESH_MS = Math.max(60_000, Number(process.env.SHEIN_OPENAPI_PRODUCT_RECONCILIATION_FRESH_MS || 14 * 24 * 60 * 60 * 1000));
 const biSectionInFlight = new Map();
 const biSectionForceRerun = new Set();
+const biSectionRefreshFailures = new Map();
 let biSectionBackgroundQueue = Promise.resolve();
 let biProfitMartFreshnessPromise = null;
 const DEFAULT_BI_PORTAL_CORE_WARMUP_SECTIONS = ['homeRankings', 'profit', 'homeProfit', 'afterSales', 'orders', 'waybills'];
@@ -626,17 +628,11 @@ async function readJsonFile(file, fallback) {
 }
 
 async function writeJsonFile(file, value) {
-  await fs.mkdir(path.dirname(file), {recursive: true});
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(value, null, 2), 'utf8');
-  await fs.rename(tmp, file);
+  await writeJsonFileAtomic(file, value);
 }
 
 async function writeJsonFileCompact(file, value) {
-  await fs.mkdir(path.dirname(file), {recursive: true});
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(value), 'utf8');
-  await fs.rename(tmp, file);
+  await writeJsonFileAtomic(file, value, {spacing: 0, trailingNewline: false});
 }
 
 function loadOpenApiLocalConfigSync() {
@@ -6805,6 +6801,41 @@ function buildHomeProfitSummaryFromProfitData(profitData, sourceMeta = {}) {
   };
 }
 
+function biSectionRefreshFailureKey(root, section) {
+  return `${root}|${section}`;
+}
+
+function recordBiSectionRefreshFailure(root, section, error) {
+  biSectionRefreshFailures.set(biSectionRefreshFailureKey(root, section), {
+    at: new Date().toISOString(),
+    reason: String(error?.message || error || 'unknown refresh failure').replace(/[\r\n]+/g, ' ').slice(0, 800),
+  });
+}
+
+function clearBiSectionRefreshFailure(root, section) {
+  biSectionRefreshFailures.delete(biSectionRefreshFailureKey(root, section));
+}
+
+function biSectionRefreshFailureFields(root, section) {
+  const failure = biSectionRefreshFailures.get(biSectionRefreshFailureKey(root, section));
+  return failure ? {
+    refreshFailed: true,
+    refreshFailedAt: failure.at,
+    refreshError: failure.reason,
+  } : {};
+}
+
+function withBiSectionRefreshFailureHeaders(root, section, headers = {}) {
+  const failure = biSectionRefreshFailures.get(biSectionRefreshFailureKey(root, section));
+  if (!failure) return headers;
+  return {
+    ...headers,
+    'X-BI-Section-Refresh-Failed': 'true',
+    'X-BI-Section-Refresh-Failed-At': failure.at,
+    'X-BI-Section-Refresh-Error': encodeURIComponent(failure.reason),
+  };
+}
+
 function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt, options = {}) {
   const force = options.force === true;
   const key = `${root}|${section}|${generatedAt || ''}${force ? '|force' : ''}`;
@@ -6836,9 +6867,11 @@ function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt,
       }
     }
     const payload = await generateBiSection(args, root, section, generatedAt);
+    clearBiSectionRefreshFailure(root, section);
     logBiPortalCoreWarmup('section-background-done', {section, generatedAt, durationMs: Date.now() - startedAt});
     return payload;
   }).catch(err => {
+    recordBiSectionRefreshFailure(root, section, err);
     console.warn('BI section background generation failed', section, err?.message || err);
   }).finally(() => {
     biSectionInFlight.delete(key);
@@ -6892,14 +6925,75 @@ async function refreshProfitMarts(args) {
   return run;
 }
 
+async function refreshInventoryCostLedger(args) {
+  if (process.env.SHEIN_BI_INVENTORY_COST_REFRESH === '0') {
+    throw new Error('inventory cost ledger refresh is disabled; cannot safely rebuild stale profit marts');
+  }
+  const timeoutMs = Math.max(60_000, Number(process.env.SHEIN_BI_INVENTORY_COST_REFRESH_TIMEOUT_MS || 900_000));
+  const run = await runChildProcess('bash', [
+    path.join(ROOT, 'scripts', 'refresh_inventory_cost_ledger.sh'),
+  ], {
+    cwd: ROOT,
+    timeoutMs,
+    env: {
+      SHEIN_BI_DB_CONTAINER: args.container,
+      SHEIN_BI_DB_DATABASE: args.database,
+      SHEIN_BI_DB_USER: args.user,
+    },
+  });
+  if (!run.ok) {
+    const tail = String(run.stderr || run.stdout || '').slice(-4000);
+    throw new Error(`inventory cost ledger refresh failed: code=${run.code} timedOut=${run.timedOut} ${tail}`);
+  }
+  return run;
+}
+
 async function readProfitMartCacheFreshness(args) {
   const sql = `
+WITH primary_cutover AS (
+  SELECT NULLIF(setting_value,'')::date AS cutover_date
+  FROM ops.shein_webhook_runtime_setting
+  WHERE setting_key='primary_sales_cutover_date'
+    AND lower(coalesce((SELECT setting_value FROM ops.shein_webhook_runtime_setting WHERE setting_key='primary_sales_enabled'),'false')) IN ('1','true','yes','on')
+  LIMIT 1
+), latest_cost_run AS (
+  SELECT ledger_version,completed_at,source_cutoff_at
+  FROM ops.inventory_cost_run
+  WHERE status='completed' AND completed_at IS NOT NULL
+  ORDER BY completed_at DESC
+  LIMIT 1
+), post_cutover_assignment AS (
+  SELECT
+    count(*)::bigint AS rows,
+    count(l.source_order_item_key)::bigint AS assigned_rows
+  FROM fact.order_item oi
+  CROSS JOIN primary_cutover c
+  LEFT JOIN latest_cost_run r ON true
+  LEFT JOIN fact.inventory_cost_ledger l
+    ON l.source_order_item_key=oi.order_item_key
+   AND l.event_type='sale'
+   AND l.ledger_version=r.ledger_version
+  WHERE c.cutover_date IS NOT NULL
+    AND oi.created_date >= c.cutover_date
+    AND coalesce(oi.quantity,0) > 0
+    AND coalesce(oi.sales_sar,0) > 0
+)
 SELECT jsonb_build_object(
   'factOrderMax', (SELECT max(created_date) FROM fact.order_item),
-  'factUpdatedAt', (SELECT max(updated_at) FROM fact.order_item),
+  'factUpdatedAt', (
+    SELECT max(updated_at)
+    FROM fact.order_item
+    WHERE coalesce(quantity,0) > 0 AND coalesce(sales_sar,0) > 0
+  ),
   'profitCacheMax', (SELECT max(created_date) FROM mart.profit_order_item_cache),
   'profitCacheRows', (SELECT count(*) FROM mart.profit_order_item_cache),
-  'metaRefreshedAt', (SELECT max(refreshed_at) FROM mart.profit_mart_cache_meta WHERE cache_key='profit_marts' AND status='ok')
+  'metaRefreshedAt', (SELECT max(refreshed_at) FROM mart.profit_mart_cache_meta WHERE cache_key='profit_marts' AND status='ok'),
+  'costRunCompletedAt', (SELECT completed_at FROM latest_cost_run),
+  'costRunSourceCutoffAt', (SELECT source_cutoff_at FROM latest_cost_run),
+  'costAssignmentCoverageRequired', EXISTS (SELECT 1 FROM primary_cutover WHERE cutover_date IS NOT NULL),
+  'costAssignmentPostCutoverRows', (SELECT rows FROM post_cutover_assignment),
+  'costAssignmentPostCutoverAssignedRows', (SELECT assigned_rows FROM post_cutover_assignment),
+  'costAssignmentPostCutoverMissingRows', (SELECT rows-assigned_rows FROM post_cutover_assignment)
 )::text;
 `;
   const psql = psqlSpawnCommand(args, ' -q -t -A');
@@ -6942,6 +7036,33 @@ async function ensureProfitMartCacheFresh(args, generatedAt = '') {
         timedOut: false,
         stdout: `[ensureProfitMartCacheFresh] cache fresh factOrderMax=${decision.factOrderMax} factUpdatedAt=${freshness.factUpdatedAt || ''} profitCacheMax=${decision.profitCacheMax} rows=${decision.profitCacheRows} metaRefreshedAt=${freshness.metaRefreshedAt || ''} coreGeneratedAt=${generatedAt || ''} allowedCoreSkewMs=${decision.allowedCoreSkewMs}`,
         stderr: '',
+      };
+    }
+    // A newer order fact or an incomplete post-cutover assignment is never
+    // repaired by rebuilding profit alone: first rebuild the moving-average
+    // ledger, then verify the completed run actually covers the fact cutoff.
+    const needsLedger = !decision.coversCostRun
+      || !decision.coversCostCutoff
+      || !decision.coversCostAssignments;
+    if (needsLedger) {
+      const ledgerRun = await refreshInventoryCostLedger(args);
+      const afterLedger = await readProfitMartCacheFreshness(args);
+      const afterDecision = evaluateProfitMartCacheFreshness(afterLedger, {
+        coreGeneratedAt: generatedAt,
+        allowedCoreSkewMs: decision.allowedCoreSkewMs,
+      });
+      if (!afterDecision.coversCostRun || !afterDecision.coversCostCutoff || !afterDecision.coversCostAssignments) {
+        throw new Error(
+          `inventory cost ledger remains incomplete after refresh: cutoff=${afterLedger.costRunSourceCutoffAt || ''} `
+          + `factUpdatedAt=${afterLedger.factUpdatedAt || ''} assignment=${afterDecision.costAssignmentPostCutoverAssignedRows}/${afterDecision.costAssignmentPostCutoverRows} `
+          + `missing=${afterDecision.costAssignmentPostCutoverMissingRows}`,
+        );
+      }
+      const profitRun = await refreshProfitMarts(args);
+      return {
+        ...profitRun,
+        stdout: `${ledgerRun.stdout || ''}\n${profitRun.stdout || ''}`,
+        stderr: `${ledgerRun.stderr || ''}\n${profitRun.stderr || ''}`,
       };
     }
     return refreshProfitMarts(args);
@@ -7026,6 +7147,13 @@ function compactHomeRankingsSectionData(data) {
 }
 
 async function loadBiSection(args, root, section, options = {}) {
+  options = {
+    ...options,
+    extraFields: {
+      ...(options.extraFields || {}),
+      ...biSectionRefreshFailureFields(root, section),
+    },
+  };
   const force = !!options.force;
   const allowGenerate = options.allowGenerate !== false;
   const allowStale = options.allowStale !== false;
@@ -7043,20 +7171,37 @@ async function loadBiSection(args, root, section, options = {}) {
     const refreshScheduled = scheduleBiSectionBackgroundGeneration(args, root, section, meta.generatedAt, {force: true});
     const currentRaw = await readBiSectionCacheRaw(root, section, meta.generatedAt, true, {
       ...options,
-      extraFields: {refreshScheduled, coreGeneratedAt: meta.generatedAt},
+      extraFields: {
+        ...options.extraFields,
+        refreshScheduled,
+        coreGeneratedAt: meta.generatedAt,
+      },
     });
     if (currentRaw) {
       return {status: 202, rawBody: currentRaw.body, headers: {...currentRaw.headers, 'X-BI-Section-Refresh-Scheduled': 'true'}};
     }
     const staleRaw = await readBiSectionStaleRaw(root, section, meta.generatedAt, {...options, refreshScheduled});
     if (staleRaw) {
-      return {status: 202, rawBody: staleRaw.body, headers: {...staleRaw.headers, 'X-BI-Section-Refresh-Scheduled': 'true'}};
+      return {status: 202, rawBody: staleRaw.body, headers: withBiSectionRefreshFailureHeaders(root, section, {...staleRaw.headers, 'X-BI-Section-Refresh-Scheduled': 'true'})};
     }
     const stale = await readBiSectionCacheAnyGeneratedAt(root, section);
     if (stale) {
       return {status: 202, payload: {...stale, cacheHit: true, staleSection: true, cacheStale: true, refreshScheduled, coreGeneratedAt: meta.generatedAt}};
     }
-    return {status: 202, payload: {ok: true, section, generatedAt: meta.generatedAt, data: {}, refreshScheduled, cacheHit: false}};
+    // No complete current or stale artifact exists yet. This is a pending
+    // generation state, not a valid empty business result. The client must
+    // keep affected KPI in loading/unavailable state until a real cache lands.
+    return {
+      status: 202,
+      payload: {
+        ok: true,
+        section,
+        generatedAt: meta.generatedAt,
+        pendingSection: true,
+        refreshScheduled,
+        cacheHit: false,
+      },
+    };
   }
   if (section === 'homeProfit') {
     const cached = !force ? await readBiSectionCache(root, section, meta.generatedAt) : null;
@@ -7091,7 +7236,14 @@ async function loadBiSection(args, root, section, options = {}) {
         biSectionInFlight.delete(key);
       }));
     }
-    const payload = await biSectionInFlight.get(key);
+    let payload;
+    try {
+      payload = await biSectionInFlight.get(key);
+      clearBiSectionRefreshFailure(root, section);
+    } catch (error) {
+      recordBiSectionRefreshFailure(root, section, error);
+      throw error;
+    }
     if (payload) {
       const rawGenerated = await readBiSectionCacheRaw(root, section, meta.generatedAt, false, options);
       if (rawGenerated) return {status: 200, rawBody: rawGenerated.body, headers: rawGenerated.headers};
@@ -7116,7 +7268,7 @@ async function loadBiSection(args, root, section, options = {}) {
   if (!allowGenerate) {
     if (!force && allowStale) {
       const staleRaw = await readBiSectionStaleRaw(root, section, meta.generatedAt, options);
-      if (staleRaw) return {status: 200, rawBody: staleRaw.body, headers: staleRaw.headers};
+      if (staleRaw) return {status: 200, rawBody: staleRaw.body, headers: withBiSectionRefreshFailureHeaders(root, section, staleRaw.headers)};
       const stale = await readBiSectionCacheAnyGeneratedAt(root, section);
       if (stale) {
         return {status: 200, payload: {...stale, cacheHit: true, staleSection: true, cacheStale: true, coreGeneratedAt: meta.generatedAt}};
@@ -7137,7 +7289,7 @@ async function loadBiSection(args, root, section, options = {}) {
     const staleRaw = await readBiSectionStaleRaw(root, section, meta.generatedAt, options);
     if (staleRaw) {
       scheduleBiSectionBackgroundGeneration(args, root, section, meta.generatedAt);
-      return {status: 200, rawBody: staleRaw.body, headers: staleRaw.headers};
+      return {status: 200, rawBody: staleRaw.body, headers: withBiSectionRefreshFailureHeaders(root, section, staleRaw.headers)};
     }
   }
   if (!biSectionInFlight.has(key)) {
@@ -7145,7 +7297,20 @@ async function loadBiSection(args, root, section, options = {}) {
       biSectionInFlight.delete(key);
     }));
   }
-  const payload = await biSectionInFlight.get(key);
+  let payload;
+  try {
+    payload = await biSectionInFlight.get(key);
+    clearBiSectionRefreshFailure(root, section);
+  } catch (error) {
+    recordBiSectionRefreshFailure(root, section, error);
+    if (allowStale) {
+      const staleRaw = await readBiSectionStaleRaw(root, section, meta.generatedAt, options);
+      if (staleRaw) {
+        return {status: 200, rawBody: staleRaw.body, headers: withBiSectionRefreshFailureHeaders(root, section, staleRaw.headers)};
+      }
+    }
+    throw error;
+  }
   const rawGenerated = await readBiSectionCacheRaw(root, section, meta.generatedAt, false, options);
   if (rawGenerated) return {status: 200, rawBody: rawGenerated.body, headers: rawGenerated.headers};
   return {status: 200, payload: {...payload, cacheHit: false}};
@@ -8111,13 +8276,90 @@ async function main() {
         onEvent: event => appendAudit(args.auditFile, {at: new Date().toISOString(), type: `webhook-task-${event.event}`, ...event}),
       })
     : null;
-  const biLiveUpdateBridge = createBiLiveUpdateBridge({
+  const liveAccountingDebounceMs = Math.max(
+    5_000,
+    Number(process.env.SHEIN_BI_LIVE_ACCOUNTING_DEBOUNCE_MS || 45_000),
+  );
+  const liveAccountingRetryMs = Math.max(
+    liveAccountingDebounceMs,
+    Number(process.env.SHEIN_BI_LIVE_ACCOUNTING_RETRY_MS || 5 * 60_000),
+  );
+  let liveAccountingRefreshTimer = null;
+  let liveAccountingRefreshRunning = false;
+  let liveAccountingRefreshPendingEvent = null;
+  let liveAccountingRefreshStopped = false;
+  let biLiveUpdateBridge;
+
+  const runLiveAccountingRefresh = async () => {
+    liveAccountingRefreshTimer = null;
+    if (liveAccountingRefreshStopped || liveAccountingRefreshRunning || !liveAccountingRefreshPendingEvent) return;
+    const sourceEvent = liveAccountingRefreshPendingEvent;
+    liveAccountingRefreshPendingEvent = null;
+    liveAccountingRefreshRunning = true;
+    try {
+      const meta = await readBiPortalCoreMeta(root);
+      const generatedAt = String(meta?.generatedAt || '');
+      await ensureProfitMartCacheFresh(args, generatedAt);
+      if (allowGenerateSections && generatedAt) {
+        await generateBiSection(args, root, 'liveSalesToday', generatedAt);
+        clearBiSectionRefreshFailure(root, 'liveSalesToday');
+      }
+      biLiveUpdateBridge?.publish({
+        ...sourceEvent,
+        occurredAt: new Date().toISOString(),
+        accountingRefreshed: true,
+      });
+    } catch (error) {
+      recordBiSectionRefreshFailure(root, 'liveSalesToday', error);
+      console.error(`[bi-live-accounting] ${String(error?.message || error)}`);
+      biLiveUpdateBridge?.publish({
+        ...sourceEvent,
+        occurredAt: new Date().toISOString(),
+        accountingRefreshFailed: true,
+      });
+      if (!liveAccountingRefreshStopped) {
+        liveAccountingRefreshPendingEvent ||= sourceEvent;
+        if (!liveAccountingRefreshTimer) {
+          liveAccountingRefreshTimer = setTimeout(runLiveAccountingRefresh, liveAccountingRetryMs);
+          liveAccountingRefreshTimer.unref?.();
+        }
+      }
+    } finally {
+      liveAccountingRefreshRunning = false;
+      if (!liveAccountingRefreshStopped && liveAccountingRefreshPendingEvent && !liveAccountingRefreshTimer) {
+        liveAccountingRefreshTimer = setTimeout(runLiveAccountingRefresh, liveAccountingDebounceMs);
+        liveAccountingRefreshTimer.unref?.();
+      }
+    }
+  };
+
+  const scheduleLiveAccountingRefresh = event => {
+    if (
+      liveAccountingRefreshStopped
+      || !allowGenerateSections
+      || !['order','return'].includes(String(event?.kind || ''))
+    ) return;
+    liveAccountingRefreshPendingEvent = event;
+    if (liveAccountingRefreshRunning || liveAccountingRefreshTimer) return;
+    liveAccountingRefreshTimer = setTimeout(runLiveAccountingRefresh, liveAccountingDebounceMs);
+    liveAccountingRefreshTimer.unref?.();
+  };
+
+  const stopLiveAccountingRefresh = () => {
+    liveAccountingRefreshStopped = true;
+    liveAccountingRefreshPendingEvent = null;
+    if (liveAccountingRefreshTimer) clearTimeout(liveAccountingRefreshTimer);
+    liveAccountingRefreshTimer = null;
+  };
+
+  biLiveUpdateBridge = createBiLiveUpdateBridge({
     onUpdate: event => {
       if (event.kind === 'product' && event.receiptId) {
         void webhookTaskReconciler?.reconcileReceipt(event.receiptId).catch(error => {
           console.error(`[webhook-task-reconcile] ${String(error?.message || error)}`);
         });
       }
+      scheduleLiveAccountingRefresh(event);
       return event;
     },
   });
@@ -10578,6 +10820,11 @@ ${uploadCheckAnswer}` : `
   });
 
   await biLiveUpdateBridge.start();
+  scheduleLiveAccountingRefresh({
+    kind: 'order',
+    entityId: 'portal-startup-accounting-catchup',
+    occurredAt: new Date().toISOString(),
+  });
   await webhookTaskReconciler?.start();
   startBiPortalCoreWarmupWatcher(args, root, {allowGenerate: allowGenerateSections});
   linkOpsJobWorker?.start();
@@ -10587,6 +10834,7 @@ ${uploadCheckAnswer}` : `
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(JSON.stringify({ok: true, event: 'shutdown', signal, time: new Date().toISOString()}));
+    stopLiveAccountingRefresh();
     await linkOpsJobWorker?.stop();
     await webhookTaskReconciler?.stop();
     await biLiveUpdateBridge.stop();

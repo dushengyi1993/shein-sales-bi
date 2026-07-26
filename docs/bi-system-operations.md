@@ -48,6 +48,8 @@
 
 云端当前自动覆盖 Webhook/OpenAPI 当天销售、最终日核对与晋升、BI Portal、数据库备份、ET 货代仓、晨间慢变日更、异常通知和登录态巡检；网页/CLI 问数继续可用，飞书日报自动发送与飞书只读问数 service 当前均停用。覆盖审计使用 `scripts/audit_cloud_data_coverage.mjs`：查最新日防漏时用 `--expected-start range-start`，查历史断档时用 `--expected-start first-seen`。历史口径只检查每个店首个有效日期之后是否中间断档，不把店铺尚未开通/尚未接入前的日期算作缺抓；事件驱动当天无订单可以是合法零值，不因没有销售事件单独报警。
 
+商品对账的 warning 只表示可行动问题：OpenAPI 详情缺失、库存缺失，或从上一版 OpenAPI 的已上架状态回退且没有对应商品上下架 Webhook。OpenAPI-only、合法非上架状态和浏览器四态差异只作为诊断，不得让所有店长期 warning。凌晨 02:20 登录态、02:40 数据库备份、03:00 昨日最终核对共享云端锁顺序等待；不以旧 Windows 任务作为 Linux 生产健康依据。
+
 ### 4.2 本地历史任务 / 回滚参考
 
 以下 Windows 任务已于 `2026-05-15` 封存禁用，不再作为生产调度；除非明确回滚，不要重新启用：
@@ -78,7 +80,8 @@
 - 当前飞书 Base / 看板写入暂停；飞书日报只保留手动临时发送入口，自动发送已停用。
 - 云端刷新由 systemd unit 触发；不要从本文推导时间表，按 [cloud-bi-operations.md](cloud-bi-operations.md) 的 runbook 核验实际 timer。
 - 滚动后置 BI 的验收重点是销售文件入仓和 BI Portal 更新时间；RTV 换单复核耗时不应作为“高频销售 BI 没更新”的判断依据。RTV 属于统一日更补采子步骤，失败会进入 `daily-refresh` 告警。
-- BI Portal API section 会在 `outputs/bi-portal/sections/` 缓存；首页首屏优先加载轻量 `homeRankings`，完整 `rankings` 放到详情/子页需要时再拉。`homeRankings` 只包含首页需要的日店铺、日货号、日店铺×货号粒度，并由服务端裁掉重复长文本后以 gzip sidecar 返回。`inventoryTrend` 是展示库存趋势 section，来自 `fact.visible_inventory_snapshot`，用于“前台展示库存每日快照”趋势；它不同于 ET 货代仓实盘可售，也不同于成本表供给。`cloud_bi_refresh.sh` 会启动 section 预热脚本；`serve_bi_portal.mjs` 还会用 core `generatedAt` watcher 在服务启动和首页访问时兜底预热，避免新 core 后用户首开页面才生成慢 section。长期开着的网页每 60 秒只读检查 core；遇到新 core 但 section 仍在后台生成时，会按退避间隔自动重读该 section，完成后直接替换销售额，不再要求人工刷新整页。利润 mart 本来就在 core 发布前生成，因此允许短暂的流水线时间差；不能再因为 `mart.refreshed_at` 早于 `core.generatedAt` 数十秒就重复重建整套利润缓存。首页利润 `homeProfit` 仍从当前 `profit` section cache 派生；若页面首页利润异常偏低，先核对 `homeProfitSummary.sourceGeneratedAt` 与当前 `data.json.__sections.generatedAt` 是否一致，并确认 `staleSource=false`；否则页面应视为利润待预热，不能用旧利润判断业务。
+- BI Portal API section 会在 `outputs/bi-portal/sections/` 缓存；首页首屏优先加载轻量 `homeRankings`，完整 `rankings` 放到详情/子页需要时再拉。`homeRankings` 只包含首页需要的日店铺、日货号、日店铺×货号粒度，并由服务端裁掉重复长文本后以 gzip sidecar 返回。`inventoryTrend` 是展示库存趋势 section，来自 `fact.visible_inventory_snapshot`，用于“前台展示库存每日快照”趋势；它不同于 ET 货代仓实盘可售，也不同于成本表供给。`cloud_bi_refresh.sh` 会启动 section 预热脚本；`serve_bi_portal.mjs` 还会用 core `generatedAt` watcher 在服务启动和首页访问时兜底预热，避免新 core 后用户首开页面才生成慢 section。长期开着的网页不再每 60 秒轮询：订单 Webhook 入仓后由 PostgreSQL `NOTIFY` + SSE 立即推送当天销售；可见页面只保留 5 分钟低频兜底检查，用于弥补断线或漏掉的 core 通知。
+- 当天销售和利润分两阶段但不混造数据：新订单先直接从 `fact.order_item` 进入实时销售；Portal 将订单/退货事件合并 45 秒后重建移动加权成本台账与利润 cache，再推送一次利润更新。服务重启会补一次未处理事件，失败会在 5 分钟后自动重试。利润补账完成前页面明确显示“新订单已计入销售；利润正自动补成本”，不得拿静态均价或旧 cache 伪造当前利润。`homeProfit` 仍只从同一代 `profit` section cache 派生；若页面首页利润异常偏低，先核对 `homeProfitSummary.sourceGeneratedAt` 与当前 `data.json.__sections.generatedAt` 是否一致，并确认 `staleSource=false`。
 - 首页库存相关口径必须分开：`展示库存趋势` = SHEIN 前台展示库存快照；`ET可售` = 货代仓实盘可售；`成本表供给` = 到仓 + 在途 - 已售。不要把 `ET可售 + 在途` 当成总供给，也不要把展示库存趋势当成 ET 实盘。
 - 旧 `financeData` section 已下线，线上 `/api/bi/section/financeData` 应返回 `404`；V2 没有财务子页面时，不要恢复旧财务缓存/预热链路。`inventoryTrend` 当前只是展示库存趋势 section，云端 2026-06-20 实测约 `242KB`、gzip 约 `20KB`，不应再按旧的 21MB 假设优化。
 - `refresh_profit_marts.sql` 必须按依赖顺序复用本轮 `_cache_new`：昂贵的 `mart.profit_order_item` 只物化一次，随后仓储与利润聚合从已物化输入构建。禁止恢复逐个 `SELECT * FROM mart.<canonical_view>` 的叠层刷新；该写法会反复展开同一视图树，把生产规模刷新从约 3 分钟拖到约 18 分钟。
@@ -188,7 +191,8 @@
 ### 9.3 利润计算
 
 - 页面和报表分开给出已落定利润与未落定售后风险。已落定利润不能因未结售后而被提前冲成最终结果；风险调整值只作保守经营参考，必须带未落定标签。
-- 退货费依次取 `fact.openapi_finance_check_order*` 已结算净退货成本、`fact.openapi_return_item.performance_price` 退货单实际履约费；仅在两类实际值都缺失、且售后确为退货包裹时才估 `13.88 SAR`。`仅退款`、派件失败/异常和零金额取消单不得重复套估算退货费。
+- 退货费依次取 `fact.openapi_finance_check_order*` 已结算净退货成本、`fact.openapi_return_item.performance_price` 退货单实际履约费；仅在整个退货包裹都没有实际值、且售后确为退货包裹时才估 `13.88 SAR`。一个包裹只计一次，实际费用按该包裹退货商品数量分摊到订单行；只要包裹已有任一可信实际费用，包裹内其它行不得再叠加估算。`仅退款`、派件失败/异常和零金额取消单不得重复套估算退货费。
+- 同一订单行可以同时存在已落定退款和待决申请；利润视图必须保留全部候选，先冲已落定，再把待决风险限制在剩余营收/数量内，不能用 `LIMIT 1` 丢掉第二笔，也不能让合计退款超过该订单行。
 - 商品成本从首个可信 ET 实盘切点起来自移动加权台账：期初种子只能取生效日前一日 ET 结存，后续按入库、销售、已证实的 RTV 09 回流等事件推进；切点前因缺少批次消耗证据，只保留明确标注的 `legacy_pre_cutover_estimate`，不能声称批次精确。切点后缺台账不得退回静态均价；`ops.accounting_period_close` 冻结的会计期间拒绝重建。
 - 但 `sales_sar <= 0` 的 0 金额订单行（常见为“揽收前已取消”）不视为真实售出，不扣商品成本，也不加 `13.88 SAR` 退货派送费；否则会把取消单误当卖出后毁损，严重压低利润。
 - 利润率：`利润 / 净营收`。净营收为 0 时利润率为空，不硬算。
@@ -196,6 +200,7 @@
 - 成本缺失的订单行不参与真实利润额计算，并在页面显示成本覆盖率和缺成本销售额。
 - 仓储费正式来源是 ET 物流仓服账单 `仓储费`：显示金额按 RMB 读取，实际扣费按显示金额 × 0.5 后折 SAR；`fact.monthly_storage_fee` 仅保留为旧手工/历史兜底表。
 - 仓储费已纳入利润，但按“货号证据 → 货号 × 店铺销量 → `CENTRAL_POOL`”逐层分摊；明细与总账有差异时按日对账并保留方法。没有货号/店铺归属证据的余额必须留在 `CENTRAL_POOL`，不得静默丢失或以净销售额直接覆盖。
+- RTV 回仓只允许一个经济事件进入移动加权台账：同一售后退货即使同时被 OpenAPI/ET 运单直连和手工映射命中，也优先采用强证据路径并去重，不能让一件退货按两件回仓。
 - ET 仓储费导出码与 BI 展示货号分层处理：`storage_code` / `sku_code` 保留 ET 原始码，`match_key` 只做内部归并；BI/利润展示使用 `mart.product_display_by_match_key` 选出的销售或商品主档标准货号，不能把规范化中间短码当作新货号展示。
 - 月利润复核不能只看当前订单创建月结果；还要看售后申请月对历史订单月的回冲。2026 年 3/4/5 月审计见 `docs/bi-profit-audit-2026-03-05.md`：当前主利润公式未发现少扣退货，5 月利润暂高主要来自售后反转率尚低、成本率较低和退货快递费较少；5 月仍处售后成熟期，不能当最终稳定利润。
 

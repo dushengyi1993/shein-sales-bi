@@ -43,9 +43,31 @@ assert.match(schema, /CREATE TABLE IF NOT EXISTS fact\.openapi_finance_check_ord
 assert.match(schema, /CREATE OR REPLACE VIEW mart\.finance_return_cost_actual/);
 assert.match(schema, /finance_check_order_actual/);
 assert.match(schema, /return_order_performance_price_actual/);
+assert.match(schema, /CREATE OR REPLACE VIEW mart\.return_cost_package_actual/);
+assert.match(schema, /CREATE OR REPLACE VIEW mart\.return_package_catalog/);
 assert.match(schema, /LEFT JOIN mart\.return_cost_actual fa/);
 assert.match(schema, /pending_revenue_risk/);
 assert.match(schema, /estimated_return_delivery_fee_sar/);
+assert.match(schema, /after_sales_allocated AS/);
+assert.match(schema, /after_sales_candidate AS/);
+assert.match(schema, /after_sales_contribution AS/);
+assert.match(schema, /sum\(pending_revenue_contribution_sar\) AS pending_revenue_impact_before_cap_sar/);
+assert.match(schema, /estimated_return_delivery_fee_sar\s+\* greatest\(line_gross_revenue_sar,0\) \/ matched_gross_revenue_sar/);
+assert.match(schema, /AND NOT has_actual_return_cost/);
+const profitAccounting = schema.slice(
+  schema.indexOf('CREATE OR REPLACE VIEW mart.profit_order_item AS'),
+  schema.indexOf('CREATE OR REPLACE VIEW mart.product_display_by_match_key AS'),
+);
+const afterSalesAccounting = profitAccounting.slice(0, profitAccounting.indexOf('rtv_match AS ('));
+assert.doesNotMatch(
+  afterSalesAccounting,
+  /LEFT JOIN LATERAL[\s\S]*?LIMIT 1/,
+  'profit accounting must not discard a second realized or pending after-sales candidate',
+);
+assert.match(schema, /rtv_allocated AS/);
+assert.match(schema, /total_rtv_received_quantity \* line_quantity \/ matched_quantity/);
+assert.match(schema, /greatest\(\s*sum\([\s\S]*?max\(coalesce\(rdest\.final_09_quantity,0\)\)\s*\) AS et_received_to_09_qty/);
+assert.doesNotMatch(schema, /\)\s*\+ max\(coalesce\(rdest(?:_any)?\.final_09_quantity,0\)\) AS et_received_to_09_qty/);
 
 assert.match(schema, /CREATE OR REPLACE VIEW mart\.storage_fee_product_store_daily/);
 assert.match(schema, /SELECT d\.date, d\.match_key, 'CENTRAL_POOL'::text, 'CENTRAL_POOL'::text/);
@@ -75,6 +97,12 @@ assert.match(audit, /notes\.push\(`有 \$\{Number\(storage\.central_pool_fee_sar
 assert.match(portalGenerator, /SHEIN_BI_PROFIT_MART_SOURCE \|\| 'cache'/,
   'portal core must serve the published profit cache by default');
 assert.match(portalGenerator, /Operators may still\s*\n\/\/ request `view` explicitly/);
+assert.match(portalGenerator, /FROM mart\.profit_order_item_cache\s+WHERE created_date=current_date/,
+  'today live profit must use the atomically published canonical accounting cache');
+assert.doesNotMatch(portalGenerator, /live_unit_cost_sar/,
+  'today live profit must not value a partially assigned line using a whole-line fallback unit cost');
+assert.match(portalGenerator, /FROM mart\.storage_fee_store_daily_cache\s+WHERE date=current_date/,
+  'today storage allocation must use the same atomically published per-store accounting snapshot');
 assert.match(portalServer, /profitBackedSections = new Set\(\['profit', 'homeProfit', 'homeRankings', 'rankings', 'productSalesDaily', 'inventoryTrend'\]\)/,
   'inventory trend must use the published profit cache instead of expanding the live canonical view');
 assert.match(portalGenerator, /运营可售默认只计 09 散件仓/);
@@ -87,6 +115,7 @@ assert.match(portalClient, /class="audit-reasons"/);
 assert.match(portalGenerator, /id="auditReasons"/);
 
 assert.match(refresh, /^BEGIN ISOLATION LEVEL REPEATABLE READ;/m);
+assert.match(refresh, /pg_advisory_xact_lock\(hashtextextended\('shein-profit-mart-refresh', 0\)\)/);
 assert.match(refresh, /mart\.profit_daily_store_product/);
 assert.match(refresh, /mart\.storage_fee_product_store_daily_cache_new/);
 assert.equal((refresh.match(/FROM mart\.profit_order_item;/g) || []).length, 1,
@@ -103,8 +132,13 @@ for (const contract of [
   'legacy_history_is_labeled_before_cutover',
   'post_cutover_missing_ledger_fails_closed',
   'package_estimate_once',
+  'partial_refund_and_split_package_fee',
+  'pending_partial_refund',
+  'split_order_item_rtv_is_allocated_once',
   'finance_actual_replaces_estimate',
   'return_order_performance_price_actual_replaces_estimate',
+  'mixed_package_actual_replaces_all_estimate',
+  'realized_and_pending_candidates_both_survive',
   'storage_active_link_or_central_pool',
   'storage_reconciles',
 ]) {
@@ -122,6 +156,8 @@ console.log(JSON.stringify({
   contracts: [
     'time-bounded moving-average COGS with frozen periods',
     'pending after-sales separated from realized refunds',
+    'partial realized and pending refunds are capped and prorated across split order items',
+    'RTV received quantity is conserved across split order items',
     'finance or return-order actual cost replaces one estimate per package',
     'product-store storage allocation is conserved with CENTRAL_POOL residual',
     'repeatable-read mart publication and production regressions guarded',

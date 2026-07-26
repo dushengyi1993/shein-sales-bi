@@ -2,6 +2,16 @@
 
 本文件只维护 unit/timer 的部署参数与安全护栏；生产排班、人工补跑和验收见 [../../docs/cloud-bi-operations.md](../../docs/cloud-bi-operations.md)。调度事实以各 `.timer` 的 `OnCalendar` 为准。
 
+## 当前启用集与条件启用集（2026-07-26）
+
+**当前生产应启用**：`shein-bi-portal.service`、`shein-bi-webhook.service`，以及 `shein-bi-cloud-morning-chain`、`shein-bi-cloud-yesterday`、`shein-bi-db-backup`、`shein-bi-cloud-order-closure`、`shein-bi-cloud-browser-cleanup`、`shein-bi-cloud-disk-maintenance`、`shein-bi-cloud-marketing-live-guard`、`shein-bi-cloud-marketing-repair`、`shein-bi-cloud-watchdog`、`shein-bi-cloud-et-forwarder`、`shein-bi-cloud-et-storage-fee`、`shein-bi-cloud-session-manager` 的 timer。`daily-refresh` 由晨间链路触发，没有独立 timer。
+
+**条件启用**：`shein-bi-cloud-et-forwarder.timer`、`shein-bi-cloud-et-storage-fee.timer`、`shein-bi-cloud-session-manager.timer` 只有在服务器本地 ET/店铺授权和对应 profile 已验收时才启用；当前生产已验收时属于上面的启用集。`shein-bi-cloud-today.service` 只作人工灾备，不安装 timer。`shein-bi-lark-sales-qa.service` 和自动飞书日报保持 `disabled + inactive`。
+
+凌晨 `02:20` 登录态管家、`02:40` 数据库备份、`03:00` 昨日最终核对共享 `/opt/shein-bi/app/state/locks/shein-bi-nightly-maintenance.lock`：运行期用 `flock` 防并发；三个 timer 因宕机而同时补跑时，再由不触发额外任务的软 `Before/After` 顺序保证 `session-manager → db-backup → yesterday`。备份超时预算必须覆盖最长锁等待、备份 P99 时长和余量。登录态/销售 refresh unit 使用 `UMask=0077`，浏览器和凭据新落盘默认仅 owner 可读；备份使用 `UMask=0027`，备份目录可由运维组受控读取。共享锁文件由 unit 显式创建为 `sheinops:sheinops 0660`，不能改成 `/tmp` 锁。
+
+Linux 生产健康只以 systemd、watchdog、Portal health 和云端数据审计为准；旧 Windows 计划任务只是历史回滚参考，不能再用作 Linux 页面或告警的健康依据。
+
 - 当天销售不再使用 `shein-bi-cloud-today.timer` 每小时抓取。半托订单 Webhook 收到后按单查询 OpenAPI 并增量更新正式销售事实，Portal 通过 PostgreSQL `NOTIFY` + 登录态 SSE 刷新当前页面；`shein-bi-cloud-today.service` 只保留为人工灾备入口，不安装/启用对应 timer。
 - `shein-bi-cloud-session-manager.timer`：每天 `02:20`，在 `03:00` 最终日核对前顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并检查 profile 体积。
 - `shein-bi-cloud-yesterday.timer`：每天 `03:00` 抓取前一天 WebAPI 独立核对文件并复核前两天稳定日；切换日及以后 WebAPI 不写正式事实，必须完成 19/19 店 OpenAPI 深度匹配后才调用数据库函数原子晋升 OpenAPI 最终日切片。任一失败、warning、缺店或差异都禁止晋升。该每日唯一性任务使用 `Persistent=true`，service 自身仍通过锁和日期状态防重复。

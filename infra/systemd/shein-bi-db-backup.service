@@ -1,13 +1,18 @@
 [Unit]
 Description=SHEIN BI PostgreSQL backup
 Wants=docker.service
-After=docker.service
+After=docker.service shein-bi-cloud-session-manager.service
+Before=shein-bi-cloud-yesterday.service
 
 [Service]
 Type=oneshot
+User=root
+Group=sheinops
+UMask=0027
 WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/root
-TimeoutStartSec=1200
+Environment=SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-nightly-maintenance.lock
+TimeoutStartSec=10800
 Nice=19
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
@@ -16,4 +21,18 @@ MemoryHigh=500M
 MemoryMax=1000M
 OOMPolicy=stop
 KillMode=control-group
-ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_db_backup.sh
+NoNewPrivileges=true
+PrivateTmp=true
+RestrictSUIDSGID=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictRealtime=true
+ExecStartPre=/usr/bin/install -d -o sheinops -g sheinops -m 2770 /opt/shein-bi/app/state/locks
+ExecStartPre=/usr/bin/install -o sheinops -g sheinops -m 0660 /dev/null /opt/shein-bi/app/state/locks/shein-bi-nightly-maintenance.lock
+ExecStart=/usr/bin/flock -w 6600 ${SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE} /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_db_backup.sh

@@ -1,12 +1,13 @@
 [Unit]
 Description=SHEIN BI cloud yesterday final refresh
 Wants=network-online.target docker.service
-After=network-online.target docker.service
+After=network-online.target docker.service shein-bi-cloud-session-manager.service shein-bi-db-backup.service
 
 [Service]
 Type=oneshot
 User=sheinops
 Group=sheinops
+UMask=0077
 WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/home/sheinops
 Environment=TZ=Asia/Shanghai
@@ -14,10 +15,22 @@ Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=SHEIN_SALES_TRANSPORT=webapi
 Environment=SHEIN_DOCKER_USE_SUDO=1
 Environment=SHEIN_BI_OPENAPI_RECON_DIR=/opt/shein-bi/app/outputs/reports/openapi-sales-reconciliation
-TimeoutStartSec=10800
+Environment=SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-nightly-maintenance.lock
+TimeoutStartSec=18600
 MemoryHigh=1500M
 MemoryMax=2500M
 OOMPolicy=stop
 KillMode=control-group
-ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_bi_refresh.sh yesterday yesterday-final
-ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_bi_refresh.sh 2daysago third-day-stable-recheck
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictRealtime=true
+# One process holds the shared nightly lock across both final-day phases.
+ExecStartPre=+/usr/bin/install -d -o sheinops -g sheinops -m 2770 /opt/shein-bi/app/state/locks
+ExecStartPre=+/usr/bin/install -o sheinops -g sheinops -m 0660 /dev/null /opt/shein-bi/app/state/locks/shein-bi-nightly-maintenance.lock
+ExecStart=/usr/bin/flock -w 7800 ${SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE} /usr/bin/env bash -lc 'set -euo pipefail; /opt/shein-bi/app/scripts/cloud_bi_refresh.sh yesterday yesterday-final; /opt/shein-bi/app/scripts/cloud_bi_refresh.sh 2daysago third-day-stable-recheck'

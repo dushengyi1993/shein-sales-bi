@@ -148,7 +148,7 @@ assert.match(runnerSource, /\['--ensure-only'\]/, 'parallel reconciliation must 
 assert.match(runnerSource, /'--skip-ensure'/, 'parallel store loaders must not race on schema DDL');
 
 const productRunnerSource = await fs.readFile(path.join(ROOT, 'scripts', 'run_shein_openapi_products_reconciliation.mjs'), 'utf8');
-assert.match(productRunnerSource, /\['--ensure-only'\]/, 'parallel product reconciliation must run schema DDL once');
+assert.match(productRunnerSource, /\['--ensure-only'(?:,|\])/, 'parallel product reconciliation must run schema DDL once');
 assert.match(productRunnerSource, /'--skip-ensure'/, 'parallel product loaders must not race on schema DDL');
 
 console.log('openapi_sales_mapping_contract: checks passed');

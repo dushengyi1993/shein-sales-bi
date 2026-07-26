@@ -6,6 +6,7 @@ import {fileURLToPath} from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const source = fs.readFileSync(path.join(root, 'scripts', 'bi_app', 'client.js'), 'utf8');
+const server = fs.readFileSync(path.join(root, 'scripts', 'serve_bi_portal.mjs'), 'utf8');
 
 assert.match(source, /window\.addEventListener\('hashchange',syncTabFromLocation\)/, 'hash navigation stays synchronized');
 assert.match(source, /window\.addEventListener\('popstate',syncTabFromLocation\)/, 'browser back and forward are handled');
@@ -31,5 +32,20 @@ assert.match(source, /function adaptivePriceScale\(values,maxBins=8\)/, 'price c
 assert.match(source, /\(N\(v\)-minPrice\)\/scale\.span/, 'scatter y-axis starts at the actual minimum transaction price');
 assert.match(source, /bestText=priceBandText\(best\)/, 'best-selling price band uses the same adaptive boundaries');
 assert.doesNotMatch(source, /priceMax=niceCeil\(maxPrice\)/, 'scatter must not round its upper bound to coarse tens or hundreds');
+assert.match(source, /function sourceState\(name,rows=\[\]\)\{const st=SS\[name\]\?\.status\|\|'idle';if\(!rows\.length&&st==='error'\)return'unavailable'/, 'first-load section errors are represented as unavailable rather than zero-like data');
+assert.match(source, /function unavailableValue\(\)\{return'<span class=\"metric-unavailable\"><b>—<\/b><small>数据不可用<\/small><\/span>'\}/, 'unavailable KPIs must show an em dash and explicit unavailable copy');
+assert.match(source, /function sectionFailureNotice\(ns\).*data-load=.*role=\"alert\".*受影响 KPI 不会显示为 0/, 'failed sections have an actionable top-level alert with retry controls');
+assert.match(source, /缓存写入 \$\{fmtStamp\(st\.cachedAt\|\|st\.generatedAt\)\}；页面最新/, 'cache fallback always exposes its cache timestamp and current-page timestamp');
+assert.match(source, /j\.refreshFailed\?\('刷新失败'.*j\.refreshError/,
+  'stale section responses must expose the concrete server refresh failure to the operator');
+assert.match(source, /storageAwaitingSettlement:hp\.some\(profitStorageAwaitingSettlement\)/, 'live profit keeps an explicit storage-settlement state');
+assert.match(source, /今日仓储费待日结\/未扣/, 'unsettled current-day storage is never presented as already deducted');
+assert.match(source, /chart-readable-details/, 'scatter chart exposes a readable detail path in addition to points');
+assert.match(source, /class=\"chart-hit\" data-tip=.*tabindex=\"0\" role=\"img\" aria-label=/, 'trend data points are keyboard focusable and named');
+assert.match(source, /if\(j\?\.pendingSection\)/, 'a pending first-generation section stays in loading state');
+assert.match(server, /pendingSection: true/,
+  'an async first-generation cache miss must be pending, never a successful empty business result');
+assert.doesNotMatch(server, /data: \{\}, refreshScheduled, cacheHit: false/,
+  'the server must not represent a missing section cache as valid empty data');
 
 console.log('bi_client_resilience: refresh, version fallback, and history contracts passed');

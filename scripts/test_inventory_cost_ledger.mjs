@@ -59,10 +59,27 @@ const rebuildScript = await fs.readFile(new URL('./rebuild_inventory_cost_ledger
 assert.match(rebuildScript, /status='frozen'/);
 assert.match(rebuildScript, /effective_at::date < \$\{cutoff\}/);
 assert.match(rebuildScript, /oi\.created_date < \$\{cutoff\}/);
+assert.match(rebuildScript, /FROM ops\.rtv_tracking_verification v/);
+assert.match(rebuildScript, /d\.return_order_id = v\.et_return_order_id/);
+assert.match(rebuildScript, /'ops\.rtv_tracking_verification'::text AS source_table/);
+assert.match(rebuildScript, /economic_return_key/);
+assert.match(rebuildScript, /min\(source_priority\) OVER/);
+assert.match(rebuildScript, /WHERE source_priority = selected_source_priority/);
+assert.doesNotMatch(
+  rebuildScript,
+  /DISTINCT ON \(store_key, order_no, return_order_id, match_key\)/,
+  'a manually verified replacement ET id must not create a second economic RTV event',
+);
+assert.match(rebuildScript, /pg_advisory_xact_lock\(hashtextextended\('shein-inventory-cost-ledger-rebuild'/);
+assert.match(rebuildScript, /stale inventory-cost rebuild refused/);
+assert.match(rebuildScript, /'sourceSnapshotAt', statement_timestamp\(\)/);
+assert.match(rebuildScript, /sourceCutoffAt: source\?\.sourceSnapshotAt \|\| startedAt/);
+assert.match(rebuildScript, /openingStates: \[\.\.\.openingStateMap\(source\?\.openingStates\)\.entries\(\)\]/);
+assert.match(rebuildScript, /AND completed_at > \$\{sqlLiteral\(run\.startedAt\)\}::timestamptz/);
 assert.doesNotMatch(rebuildScript, /product_unit_cost_by_match_key/);
 const periodScript = await fs.readFile(new URL('./manage_accounting_period.mjs', import.meta.url), 'utf8');
 const seedScript = await fs.readFile(new URL('./seed_inventory_cost_opening_from_et.mjs', import.meta.url), 'utf8');
 assert.match(periodScript, /\\\\pset tuples_only on/);
 assert.match(seedScript, /\\\\pset tuples_only on/);
 
-console.log(JSON.stringify({ok:true, tests:['moving-average','future-receipt-isolation','rtv-reentry','missing-opening','inventory-count-reset','negative-rtv-shortfall','frozen-boundary','psql-readback-meta-command']}, null, 2));
+console.log(JSON.stringify({ok:true, tests:['moving-average','future-receipt-isolation','rtv-reentry','manual-rtv-verification-source','missing-opening','inventory-count-reset','negative-rtv-shortfall','frozen-boundary','concurrent-rebuild-stale-write-guard','psql-readback-meta-command']}, null, 2));

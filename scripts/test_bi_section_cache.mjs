@@ -41,12 +41,23 @@ try {
   assert.equal(gzipped.headers.Vary, 'Accept-Encoding');
   assert.ok((await fs.stat(path.join(root, 'sections', 'sample.json.gz'))).size > 0);
 
-  const stale = await readBiSectionStaleRaw(root, 'sample', 'generation-2', {gzip: true, refreshScheduled: true});
+  const stale = await readBiSectionStaleRaw(root, 'sample', 'generation-2', {
+    gzip: true,
+    refreshScheduled: true,
+    extraFields: {
+      refreshFailed: true,
+      refreshFailedAt: '2026-07-26T12:00:00.000Z',
+      refreshError: 'database timeout',
+    },
+  });
   const stalePayload = JSON.parse(gunzipSync(stale.body).toString('utf8'));
   assert.equal(stalePayload.staleSection, true);
   assert.equal(stalePayload.cacheStale, true);
   assert.equal(stalePayload.refreshScheduled, true);
   assert.equal(stalePayload.coreGeneratedAt, 'generation-2');
+  assert.equal(stalePayload.refreshFailed, true);
+  assert.equal(stalePayload.refreshFailedAt, '2026-07-26T12:00:00.000Z');
+  assert.equal(stalePayload.refreshError, 'database timeout');
   assert.equal(stale.headers['Cache-Control'], 'no-store');
 
   assert.equal(acceptsGzip('br, gzip, deflate'), true);

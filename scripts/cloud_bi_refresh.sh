@@ -11,6 +11,7 @@ METABASE_URL="${METABASE_URL:-http://127.0.0.1:3000}"
 PORTAL_HEALTH_URL="${PORTAL_HEALTH_URL:-}"
 PORTAL_INDEX_PATH="${PORTAL_INDEX_PATH:-$ROOT/outputs/bi-portal/index.html}"
 PORTAL_DATA_PATH="${PORTAL_DATA_PATH:-$ROOT/outputs/bi-portal/data.json}"
+MARKETING_PRICE_LEADS_PATH="${SHEIN_BI_MARKETING_PRICE_LEADS_PATH:-$ROOT/outputs/bi-portal/marketing-price-leads.json}"
 LOCK_FILE="${SHEIN_BI_REFRESH_LOCK_FILE:-$ROOT/state/locks/shein-bi-cloud-sales-refresh.lock}"
 PORTAL_REFRESH_LOCK_FILE="${SHEIN_BI_PORTAL_REFRESH_LOCK_FILE:-$ROOT/state/locks/shein-bi-portal-refresh.lock}"
 PORTAL_REFRESH_LOCK_WAIT_SEC="${SHEIN_BI_PORTAL_REFRESH_LOCK_WAIT_SEC:-1800}"
@@ -56,6 +57,31 @@ check_portal_health() {
   else
     echo "[cloud_bi_refresh] portal files ok index=$PORTAL_INDEX_PATH data=$PORTAL_DATA_PATH"
   fi
+  local marketing_health
+  marketing_health="$(marketing_price_snapshot_health)"
+  echo "[cloud_bi_refresh] marketing price snapshot health $marketing_health"
+  if [[ "${SHEIN_BI_MARKETING_PRICE_LEADS_REQUIRE_FRESH:-0}" == "1" && "$marketing_health" != fresh\|* ]]; then
+    echo "[cloud_bi_refresh] marketing price snapshot is not fresh and strict freshness is required" >&2
+    exit 1
+  fi
+}
+
+marketing_price_snapshot_health() {
+  node - "$MARKETING_PRICE_LEADS_PATH" <<'NODE'
+const fs = require('fs');
+const file = process.argv[2];
+try {
+  const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const freshness = doc && typeof doc.freshness === 'object' ? doc.freshness : {};
+  const status = String(freshness.status || 'unknown').toLowerCase();
+  const checkedAt = String(freshness.checkedAt || '');
+  const snapshotAt = String(freshness.snapshotGeneratedAt || doc.generatedAt || '');
+  const reason = String(freshness.reason || '').replace(/[\r\n|]+/g, ' ').slice(0, 500);
+  console.log(`${status}|checkedAt=${checkedAt}|snapshotAt=${snapshotAt}|reason=${reason}`);
+} catch (error) {
+  console.log(`error|reason=unreadable marketing price snapshot: ${String(error.message || error).replace(/[\r\n|]+/g, ' ').slice(0, 500)}`);
+}
+NODE
 }
 
 DATE="$(resolve_date "$TARGET")"
@@ -154,7 +180,12 @@ fi
 # 高频销售刷新只使用已经补采好的慢变数据快照；不要在两小时销售
 # 任务里顺手打开 SHEIN 后台扫描活动价，否则会拖慢当天经营数据刷新。
 # 慢变补采统一由 cloud_daily_refresh.sh 调度。
-node scripts/marketing/export_marketing_price_leads_for_bi.mjs || true
+node scripts/marketing/export_marketing_price_leads_for_bi.mjs
+MARKETING_PRICE_SNAPSHOT_HEALTH="$(marketing_price_snapshot_health)"
+case "$MARKETING_PRICE_SNAPSHOT_HEALTH" in
+  fresh\|*) echo "[cloud_bi_refresh] marketing price snapshot refreshed $MARKETING_PRICE_SNAPSHOT_HEALTH" ;;
+  *) echo "[cloud_bi_refresh] WARN marketing price snapshot is degraded $MARKETING_PRICE_SNAPSHOT_HEALTH" >&2 ;;
+esac
 
 prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
 {

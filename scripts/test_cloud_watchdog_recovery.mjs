@@ -329,6 +329,8 @@ assert.match(watchdogSource, /assessDailyMarketingGuardHealth/);
 assert.match(watchdogSource, /assessDailyMarketingRepairHealth/);
 assert.match(watchdogSource, /assessDailyLinkBusinessRecovery/);
 assert.match(watchdogSource, /assessDailyOpenapiProductRecovery/);
+assert.match(watchdogSource, /assessOpenapiProductReport/);
+assert.match(watchdogSource, /productReconciliationHealth/);
 assert.match(watchdogSource, /assessDailyOpenapiSalesRecovery/);
 assert.match(watchdogSource, /daily_link_openapi_sales_recovery/);
 assert.match(watchdogSource, /resolveMarketingScanEvidencePath/);

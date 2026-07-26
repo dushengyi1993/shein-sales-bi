@@ -48,6 +48,11 @@ function stamp() {
   return `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
 }
 
+async function readJson(file, fallback = null) {
+  try { return JSON.parse(await fs.readFile(file, 'utf8')); }
+  catch { return fallback; }
+}
+
 async function runPsql(args, sql) {
   const useWsl = process.platform === 'win32';
   const shellQuote = value => `'${String(value).replace(/'/g, `'\\''`)}'`;
@@ -114,7 +119,67 @@ async function checkMetabase(args) {
   }
 }
 
-function evaluate(summary, metabase) {
+function normalizedStoreKey(value) {
+  return String(value || '').trim().toUpperCase();
+}
+
+/**
+ * Product reconciliation is deliberately evaluated from the runner's semantic
+ * report, not from the legacy browser/OpenAPI row-count comparison in the
+ * warehouse. Browser four-state snapshots are diagnostic only; actionable
+ * states are missing OpenAPI detail/stock or an unexplained API rollback.
+ */
+function assessOpenapiProductReconciliationReport(report, expectedStoreKeys, nowMs = Date.now()) {
+  const expected = [...new Set((expectedStoreKeys || []).map(normalizedStoreKey).filter(Boolean))].sort();
+  if (!report || typeof report !== 'object') {
+    return {status: 'warning', warnings: ['尚未找到 OpenAPI 商品对账报告；请运行完整 19 店商品对账。'], notes: [], affectedStores: []};
+  }
+  const generatedAt = Date.parse(report.generatedAt || report.endedAt || '');
+  if (!Number.isFinite(generatedAt) || nowMs - generatedAt > 48 * 3600_000) {
+    return {status: 'warning', warnings: ['OpenAPI 商品对账报告超过 48 小时未更新；请运行完整 19 店商品对账。'], notes: [], affectedStores: []};
+  }
+  const rows = Array.isArray(report.results) ? report.results : [];
+  const byStore = new Map(rows.map(row => [normalizedStoreKey(row?.storeKey), row]).filter(([key]) => key));
+  const missing = expected.filter(storeKey => !byStore.has(storeKey));
+  const warnings = [];
+  if (missing.length) warnings.push(`OpenAPI 商品对账缺少店铺：${missing.join('、')}。`);
+  const affectedStores = [];
+  for (const storeKey of expected) {
+    const row = byStore.get(storeKey);
+    if (!row) continue;
+    const semantic = row.semanticReconciliation;
+    if (row.ok !== true) {
+      affectedStores.push(storeKey);
+      warnings.push(`${storeKey} 店商品对账未完成：${row.status || 'unknown'}。`);
+      continue;
+    }
+    if (!semantic || semantic.policyVersion !== 'openapi-current-webhook-previous/v1') {
+      affectedStores.push(storeKey);
+      warnings.push(`${storeKey} 店商品对账仍是旧口径或缺少语义结果；请重新运行完整对账。`);
+      continue;
+    }
+    if (semantic.status === 'warning') {
+      affectedStores.push(storeKey);
+      const detail = Array.isArray(semantic.warnings) ? semantic.warnings.join('；') : '存在可行动差异';
+      warnings.push(`${storeKey} 店商品对账需处理：${detail}`);
+    }
+  }
+  const diagnosticCount = rows.reduce((total, row) => {
+    const diagnostic = row?.semanticReconciliation?.browserDiagnostic || {};
+    return total
+      + Number(diagnostic.apiOnlySkcCount || 0)
+      + Number(diagnostic.browserOnlySkcCount || 0)
+      + Number(diagnostic.binaryOnShelfDifferenceCount || 0)
+      + Number(diagnostic.exactStatusDifferenceCount || 0);
+  }, 0);
+  const notes = warnings.length ? [] : [
+    `OpenAPI 商品对账通过：${expected.length}/${expected.length} 店；浏览器快照差异仅保留为诊断证据，不作为失败。`,
+    ...(diagnosticCount ? [`浏览器诊断差异计数 ${diagnosticCount}，不影响对账通过状态。`] : []),
+  ];
+  return {status: warnings.length ? 'warning' : 'ok', warnings, notes, affectedStores, generatedAt: report.generatedAt || report.endedAt || ''};
+}
+
+function evaluate(summary, metabase, productReconciliation = null) {
   const warnings = [];
   const errors = [];
   const notes = [];
@@ -252,6 +317,12 @@ function evaluate(summary, metabase) {
   }
   if (Number(finance.unmapped_lines || 0) > 0) {
     warnings.push(`有 ${finance.unmapped_lines} 条实际退货费尚未映射到订单行，金额 ${Number(finance.unmapped_actual_cost_sar || 0).toFixed(2)} SAR；该金额已单列风险，未静默计入或丢弃。`);
+  }
+
+  if (productReconciliation?.status === 'warning') {
+    warnings.push(...productReconciliation.warnings);
+  } else if (productReconciliation?.status === 'ok') {
+    notes.push(...productReconciliation.notes);
   }
 
   return {ok: errors.length === 0, errors, warnings, notes};
@@ -598,11 +669,18 @@ SELECT payload::text FROM summary;
   const raw = await runPsql(args, sql);
   const summary = JSON.parse(raw);
   const metabase = await checkMetabase(args);
-  const evaluation = evaluate(summary, metabase);
+  const storeConfig = await readJson(path.join(ROOT, 'config', 'stores.json'), {});
+  const expectedStoreKeys = (Array.isArray(storeConfig?.stores) ? storeConfig.stores : [])
+    .filter(store => store?.enabled !== false)
+    .map(store => store?.storeKey);
+  const productReport = await readJson(path.join(ROOT, 'state', 'openapi-probes', 'product-reconciliation.latest.json'), null);
+  const productReconciliation = assessOpenapiProductReconciliationReport(productReport, expectedStoreKeys);
+  const evaluation = evaluate(summary, metabase, productReconciliation);
   const report = {
     ok: evaluation.ok,
     generatedAt: new Date().toISOString(),
     metabase,
+    productReconciliation,
     evaluation,
     summary,
   };
@@ -615,6 +693,7 @@ SELECT payload::text FROM summary;
     latestDates: summary.latestDates,
     latestCounts: summary.latestCounts,
     accountingHealth: summary.accountingHealth,
+    productReconciliation,
     guidedActionByDomain: summary.guidedActionByDomain,
     warnings: evaluation.warnings,
     errors: evaluation.errors,

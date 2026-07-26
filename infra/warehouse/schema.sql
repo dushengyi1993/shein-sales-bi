@@ -1033,6 +1033,90 @@ CREATE INDEX IF NOT EXISTS idx_order_item_product ON fact.order_item(standard_go
 CREATE INDEX IF NOT EXISTS idx_order_item_skc ON fact.order_item(skc, created_date);
 CREATE INDEX IF NOT EXISTS idx_order_item_order_no ON fact.order_item(order_no);
 
+CREATE TABLE IF NOT EXISTS fact.order_payment_flag (
+  order_key text PRIMARY KEY,
+  store_key text NOT NULL,
+  group_key text,
+  order_id text,
+  order_no text,
+  bill_no text,
+  created_date date,
+  order_create_time timestamp without time zone,
+  is_cod boolean,
+  payment_method text,
+  payment_code text,
+  payment_label text,
+  payment_source text,
+  source_kind text NOT NULL,
+  source_file text,
+  raw_evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS order_payment_flag_store_date_idx
+  ON fact.order_payment_flag(store_key,created_date);
+CREATE INDEX IF NOT EXISTS order_payment_flag_is_cod_date_idx
+  ON fact.order_payment_flag(is_cod,created_date)
+  WHERE is_cod IS TRUE;
+CREATE INDEX IF NOT EXISTS order_payment_flag_order_no_idx
+  ON fact.order_payment_flag(store_key,order_no);
+
+-- Keep the OpenAPI parallel/primary tables in the authoritative warehouse
+-- schema.  Loaders may still run their idempotent ensure step, but a clean
+-- database must be capable of applying Webhook migrations and serving the BI
+-- without relying on a previous loader side effect.
+CREATE TABLE IF NOT EXISTS fact.openapi_store_daily_sales (
+  LIKE fact.store_daily_sales INCLUDING DEFAULTS,
+  PRIMARY KEY(date,store_key)
+);
+
+CREATE TABLE IF NOT EXISTS fact.openapi_order_header (
+  LIKE fact.order_header INCLUDING DEFAULTS,
+  source_snapshot_at timestamptz,
+  PRIMARY KEY(order_key)
+);
+
+CREATE TABLE IF NOT EXISTS fact.openapi_order_item (
+  LIKE fact.order_item INCLUDING DEFAULTS,
+  source_snapshot_at timestamptz,
+  PRIMARY KEY(order_item_key)
+);
+
+CREATE TABLE IF NOT EXISTS fact.openapi_order_payment_flag (
+  order_key text PRIMARY KEY,
+  store_key text NOT NULL,
+  group_key text,
+  order_id text,
+  order_no text,
+  bill_no text,
+  created_date date,
+  order_create_time timestamp without time zone,
+  is_cod boolean,
+  payment_method text,
+  payment_code text,
+  payment_label text,
+  payment_source text,
+  source_kind text NOT NULL,
+  source_file text,
+  raw_evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
+  source_snapshot_at timestamptz,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS openapi_order_header_date_store_idx
+  ON fact.openapi_order_header(created_date,store_key);
+CREATE INDEX IF NOT EXISTS openapi_order_item_date_store_idx
+  ON fact.openapi_order_item(created_date,store_key);
+CREATE INDEX IF NOT EXISTS openapi_order_item_order_no_idx
+  ON fact.openapi_order_item(store_key,order_no);
+CREATE INDEX IF NOT EXISTS openapi_order_payment_flag_store_date_idx
+  ON fact.openapi_order_payment_flag(store_key,created_date);
+CREATE INDEX IF NOT EXISTS openapi_order_payment_flag_is_cod_date_idx
+  ON fact.openapi_order_payment_flag(is_cod,created_date)
+  WHERE is_cod IS TRUE;
+CREATE INDEX IF NOT EXISTS openapi_order_payment_flag_order_no_idx
+  ON fact.openapi_order_payment_flag(store_key,order_no);
+
 CREATE TABLE IF NOT EXISTS fact.home_finance_snapshot (
   unique_key text PRIMARY KEY,
   snapshot_date date NOT NULL,
@@ -2394,18 +2478,147 @@ SELECT
 FROM mart.finance_return_cost_allocation
 GROUP BY order_item_key;
 
-CREATE OR REPLACE VIEW mart.return_cost_actual AS
-WITH ranked AS (
-  SELECT *,1 AS source_priority FROM mart.finance_return_cost_actual
+CREATE OR REPLACE VIEW mart.return_package_catalog AS
+SELECT
+  store_key,
+  order_no,
+  concat_ws(
+    ':',
+    store_key,
+    coalesce(nullif(return_order_no,''),nullif(aftersales_order_no,''),order_no)
+  ) AS package_key,
+  max(nullif(return_order_no,'')) AS return_order_no,
+  max(nullif(aftersales_order_no,'')) AS aftersales_order_no,
+  sum(greatest(coalesce(price_amount_total,price_amount,0),0)) AS package_amount_sar,
+  sum(greatest(coalesce(quantity,1),0)) AS package_quantity,
+  min(request_time) AS first_request_time
+FROM fact.after_sales_item
+WHERE coalesce(store_key,'') <> ''
+  AND coalesce(order_no,'') <> ''
+GROUP BY
+  store_key,
+  order_no,
+  concat_ws(
+    ':',
+    store_key,
+    coalesce(nullif(return_order_no,''),nullif(aftersales_order_no,''),order_no)
+  );
+
+CREATE OR REPLACE VIEW mart.return_cost_package_actual AS
+WITH settled_finance AS (
+  SELECT *
+  FROM fact.openapi_finance_check_order_item
+  WHERE check_status = 3
+    AND (
+      coalesce(return_expense_sar,0) <> 0
+      OR coalesce(return_freight_subsidy_sar,0) <> 0
+    )
+),
+finance_exact AS (
+  SELECT DISTINCT
+    f.check_order_item_key,
+    p.package_key,
+    p.store_key,
+    p.order_no,
+    1::numeric AS allocation_ratio,
+    f.return_expense_sar,
+    f.return_freight_subsidy_sar,
+    f.net_return_cost_sar,
+    f.check_order_no,
+    f.completed_pay_time
+  FROM settled_finance f
+  JOIN mart.return_package_catalog p
+    ON p.store_key = f.store_key
+   AND f.bz_order_no IN (p.return_order_no,p.aftersales_order_no)
+),
+finance_order_scope_candidates AS (
+  SELECT
+    f.check_order_item_key,
+    p.package_key,
+    p.store_key,
+    p.order_no,
+    greatest(p.package_amount_sar,p.package_quantity,1)::numeric AS allocation_weight,
+    f.return_expense_sar,
+    f.return_freight_subsidy_sar,
+    f.net_return_cost_sar,
+    f.check_order_no,
+    f.completed_pay_time
+  FROM settled_finance f
+  JOIN mart.return_package_catalog p
+    ON p.store_key = f.store_key
+   AND p.order_no = f.bz_order_no
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM finance_exact x
+    WHERE x.check_order_item_key = f.check_order_item_key
+  )
+),
+finance_order_scope AS (
+  SELECT
+    check_order_item_key,
+    package_key,
+    store_key,
+    order_no,
+    allocation_weight
+      / nullif(sum(allocation_weight) OVER (PARTITION BY check_order_item_key),0) AS allocation_ratio,
+    return_expense_sar,
+    return_freight_subsidy_sar,
+    net_return_cost_sar,
+    check_order_no,
+    completed_pay_time
+  FROM finance_order_scope_candidates
+),
+finance_allocated AS (
+  SELECT * FROM finance_exact
   UNION ALL
-  SELECT *,2 AS source_priority FROM mart.return_order_performance_cost_actual
+  SELECT * FROM finance_order_scope
+),
+finance_package AS (
+  SELECT
+    package_key,
+    max(store_key) AS store_key,
+    max(order_no) AS order_no,
+    sum(return_expense_sar * allocation_ratio) AS actual_return_expense_sar,
+    sum(return_freight_subsidy_sar * allocation_ratio) AS actual_return_freight_subsidy_sar,
+    sum(net_return_cost_sar * allocation_ratio) AS actual_return_cost_sar,
+    count(DISTINCT check_order_no) AS check_order_count,
+    max(completed_pay_time) AS latest_completed_pay_time,
+    'finance_check_order_actual'::text AS fee_source,
+    1 AS source_priority
+  FROM finance_allocated
+  GROUP BY package_key
+),
+return_order_package AS (
+  SELECT
+    concat_ws(':',store_key,return_order_no) AS package_key,
+    max(store_key) AS store_key,
+    max(order_no) AS order_no,
+    sum(performance_price) AS actual_return_expense_sar,
+    0::numeric AS actual_return_freight_subsidy_sar,
+    sum(performance_price) AS actual_return_cost_sar,
+    0::bigint AS check_order_count,
+    max(ret_order_date)::timestamp AS latest_completed_pay_time,
+    'return_order_performance_price_actual'::text AS fee_source,
+    2 AS source_priority
+  FROM fact.openapi_return_item
+  WHERE coalesce(performance_price,0) > 0
+  GROUP BY concat_ws(':',store_key,return_order_no)
+),
+ranked AS (
+  SELECT * FROM finance_package
+  UNION ALL
+  SELECT * FROM return_order_package
 ),
 selected AS (
-  SELECT *,row_number() OVER (PARTITION BY order_item_key ORDER BY source_priority) AS source_rank
-  FROM ranked
+  SELECT
+    r.*,
+    row_number() OVER (PARTITION BY package_key ORDER BY source_priority) AS source_rank
+  FROM ranked r
 )
 SELECT
-  order_item_key,
+  package_key,
+  store_key,
+  order_no,
   actual_return_expense_sar,
   actual_return_freight_subsidy_sar,
   actual_return_cost_sar,
@@ -2415,44 +2628,129 @@ SELECT
 FROM selected
 WHERE source_rank = 1;
 
+CREATE OR REPLACE VIEW mart.return_cost_actual AS
+WITH specific_candidates AS (
+  SELECT DISTINCT
+    p.package_key,
+    oi.order_item_key,
+    greatest(coalesce(oi.sales_sar,0),coalesce(oi.quantity,0),1)::numeric AS allocation_weight
+  FROM mart.return_package_catalog p
+  JOIN fact.after_sales_item ai
+    ON ai.store_key = p.store_key
+   AND ai.order_no = p.order_no
+   AND concat_ws(
+         ':',
+         ai.store_key,
+         coalesce(nullif(ai.return_order_no,''),nullif(ai.aftersales_order_no,''),ai.order_no)
+       ) = p.package_key
+  JOIN fact.order_item oi
+    ON oi.store_key = ai.store_key
+   AND oi.order_no = ai.order_no
+   AND (
+     (coalesce(ai.skc,'') <> '' AND oi.skc = ai.skc)
+     OR (
+       coalesce(dim.product_match_key(ai.standard_goods_sn),'') <> ''
+       AND dim.product_match_key(oi.standard_goods_sn)
+           = dim.product_match_key(ai.standard_goods_sn)
+     )
+   )
+),
+fallback_candidates AS (
+  SELECT
+    p.package_key,
+    oi.order_item_key,
+    greatest(coalesce(oi.sales_sar,0),coalesce(oi.quantity,0),1)::numeric AS allocation_weight
+  FROM mart.return_package_catalog p
+  JOIN fact.order_item oi
+    ON oi.store_key = p.store_key
+   AND oi.order_no = p.order_no
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM specific_candidates c
+    WHERE c.package_key = p.package_key
+  )
+),
+candidates AS (
+  SELECT * FROM specific_candidates
+  UNION ALL
+  SELECT * FROM fallback_candidates
+),
+weighted AS (
+  SELECT
+    c.*,
+    c.allocation_weight
+      / nullif(sum(c.allocation_weight) OVER (PARTITION BY c.package_key),0) AS allocation_ratio
+  FROM candidates c
+),
+allocated AS (
+  SELECT
+    w.order_item_key,
+    p.package_key,
+    p.actual_return_expense_sar * w.allocation_ratio AS actual_return_expense_sar,
+    p.actual_return_freight_subsidy_sar * w.allocation_ratio AS actual_return_freight_subsidy_sar,
+    p.actual_return_cost_sar * w.allocation_ratio AS actual_return_cost_sar,
+    p.check_order_count,
+    p.latest_completed_pay_time,
+    p.fee_source
+  FROM mart.return_cost_package_actual p
+  JOIN weighted w USING (package_key)
+)
+SELECT
+  order_item_key,
+  sum(actual_return_expense_sar) AS actual_return_expense_sar,
+  sum(actual_return_freight_subsidy_sar) AS actual_return_freight_subsidy_sar,
+  sum(actual_return_cost_sar) AS actual_return_cost_sar,
+  sum(check_order_count)::bigint AS check_order_count,
+  max(latest_completed_pay_time) AS latest_completed_pay_time,
+  string_agg(DISTINCT fee_source,' / ') AS fee_source
+FROM allocated
+GROUP BY order_item_key;
+
 CREATE OR REPLACE VIEW mart.profit_after_sales_impact AS
 WITH raw AS (
   SELECT
-    store_key,
-    order_no,
-    standard_goods_sn,
-    nullif(skc,'') AS skc,
-    aftersales_order_no,
-    return_order_no,
-    coalesce(quantity, 1) AS quantity,
-    coalesce(price_amount_total, price_amount, 0) AS amount_sar,
-    resolution_plan_name,
-    order_sub_status_name,
-    return_package_status_name,
-    concat_ws(':', store_key, coalesce(nullif(return_order_no,''), nullif(aftersales_order_no,''), order_no)) AS package_key,
+    ai.store_key,
+    ai.order_no,
+    ai.standard_goods_sn,
+    nullif(ai.skc,'') AS skc,
+    ai.aftersales_order_no,
+    ai.return_order_no,
+    coalesce(ai.quantity, 1) AS quantity,
+    coalesce(ai.price_amount_total, ai.price_amount, 0) AS amount_sar,
+    ai.resolution_plan_name,
+    ai.order_sub_status_name,
+    ai.return_package_status_name,
+    concat_ws(':', ai.store_key, coalesce(nullif(ai.return_order_no,''), nullif(ai.aftersales_order_no,''), ai.order_no)) AS package_key,
+    (pca.package_key IS NOT NULL) AS has_actual_return_cost,
     (
-      coalesce(resolution_plan_name,'') ILIKE '%退货%'
-      OR coalesce(resolution_plan_name,'') ILIKE '%仅退款%'
-      OR coalesce(order_sub_status_name,'') ILIKE ANY (ARRAY['%同意退款%','%已妥投%','%待交接%','%待买家退货%','%待卖家处理%','%待买家选择方案%'])
-      OR coalesce(return_package_status_name,'') ILIKE ANY (ARRAY['%已签收%','%派件失败%','%派件异常%'])
+      coalesce(ai.resolution_plan_name,'') ILIKE '%退货%'
+      OR coalesce(ai.resolution_plan_name,'') ILIKE '%仅退款%'
+      OR coalesce(ai.order_sub_status_name,'') ILIKE ANY (ARRAY['%同意退款%','%已妥投%','%待交接%','%待买家退货%','%待卖家处理%','%待买家选择方案%'])
+      OR coalesce(ai.return_package_status_name,'') ILIKE ANY (ARRAY['%已签收%','%派件失败%','%派件异常%'])
     ) AS reversal_candidate,
     (
-      coalesce(resolution_plan_name,'') ILIKE '%驳回%'
-      OR coalesce(order_sub_status_name,'') ILIKE '%已关闭%'
+      coalesce(ai.resolution_plan_name,'') ILIKE '%驳回%'
+      OR coalesce(ai.order_sub_status_name,'') ILIKE '%已关闭%'
       OR (
-        coalesce(order_sub_status_name,'') ILIKE '%已取消%'
-        AND coalesce(return_package_status_name,'') NOT ILIKE '%派件%'
+        coalesce(ai.order_sub_status_name,'') ILIKE '%已取消%'
+        AND coalesce(ai.return_package_status_name,'') NOT ILIKE '%派件%'
       )
     ) AS invalid_or_cancelled,
     (
-      coalesce(order_sub_status_name,'') ILIKE '%同意退款%'
+      coalesce(ai.order_sub_status_name,'') ILIKE '%同意退款%'
       OR (
-        coalesce(order_sub_status_name,'') ILIKE '%已取消%'
-        AND coalesce(return_package_status_name,'') ILIKE ANY (ARRAY['%派件失败%','%派件异常%'])
+        coalesce(ai.order_sub_status_name,'') ILIKE '%已取消%'
+        AND coalesce(ai.return_package_status_name,'') ILIKE ANY (ARRAY['%派件失败%','%派件异常%'])
       )
     ) AS final_signal
-  FROM fact.after_sales_item
-  WHERE coalesce(order_no,'') <> ''
+  FROM fact.after_sales_item ai
+  LEFT JOIN mart.return_cost_package_actual pca
+    ON pca.package_key = concat_ws(
+      ':',
+      ai.store_key,
+      coalesce(nullif(ai.return_order_no,''),nullif(ai.aftersales_order_no,''),ai.order_no)
+    )
+  WHERE coalesce(ai.order_no,'') <> ''
 ),
 classified AS (
   SELECT
@@ -2464,6 +2762,7 @@ classified AS (
       AND coalesce(resolution_plan_name,'') ILIKE '%退货%'
       AND coalesce(resolution_plan_name,'') NOT ILIKE '%仅退款%'
       AND NOT (coalesce(return_package_status_name,'') ILIKE ANY (ARRAY['%派件失败%','%派件异常%']))
+      AND NOT has_actual_return_cost
     ) AS charge_estimated_return_package
   FROM raw
 ),
@@ -3035,19 +3334,22 @@ et_return_received_base AS (
         ELSE 0
       END
     ) AS et_received_qty,
-    sum(
-      CASE
-        WHEN (coalesce(ro.store_name_in,'') ILIKE '%09%' OR coalesce(ro.store_name_in,'') ILIKE '%散件%')
-          AND coalesce(ro.status_name,'') IN ('已完结','已到货')
-          AND (coalesce(ro.in_quantity,0) > 0 OR coalesce(ri.instock,0) > 0)
-        THEN greatest(
-          coalesce(ri.instock,0),
-          CASE WHEN coalesce(ri.instock,0) > 0 THEN 0 ELSE coalesce(ri.quantity,0) END,
-          CASE WHEN ri.return_order_id IS NULL THEN coalesce(ro.in_quantity,0) ELSE 0 END
-        )
-        ELSE 0
-      END
-    ) + max(coalesce(rdest.final_09_quantity,0)) AS et_received_to_09_qty,
+    greatest(
+      sum(
+        CASE
+          WHEN (coalesce(ro.store_name_in,'') ILIKE '%09%' OR coalesce(ro.store_name_in,'') ILIKE '%散件%')
+            AND coalesce(ro.status_name,'') IN ('已完结','已到货')
+            AND (coalesce(ro.in_quantity,0) > 0 OR coalesce(ri.instock,0) > 0)
+          THEN greatest(
+            coalesce(ri.instock,0),
+            CASE WHEN coalesce(ri.instock,0) > 0 THEN 0 ELSE coalesce(ri.quantity,0) END,
+            CASE WHEN ri.return_order_id IS NULL THEN coalesce(ro.in_quantity,0) ELSE 0 END
+          )
+          ELSE 0
+        END
+      ),
+      max(coalesce(rdest.final_09_quantity,0))
+    ) AS et_received_to_09_qty,
     sum(
       CASE
         WHEN (coalesce(ro.store_name_in,'') ILIKE '%03%' OR coalesce(ro.store_name_in,'') ILIKE '%RTV%')
@@ -3092,19 +3394,22 @@ et_return_received_verification AS (
         ELSE 0
       END
     ) AS et_received_qty,
-    sum(
-      CASE
-        WHEN (coalesce(ro.store_name_in,'') ILIKE '%09%' OR coalesce(ro.store_name_in,'') ILIKE '%散件%')
-          AND coalesce(ro.status_name,'') IN ('已完结','已到货')
-          AND (coalesce(ro.in_quantity,0) > 0 OR coalesce(ri.instock,0) > 0)
-        THEN greatest(
-          coalesce(ri.instock,0),
-          CASE WHEN coalesce(ri.instock,0) > 0 THEN 0 ELSE coalesce(ri.quantity,0) END,
-          CASE WHEN ri.return_order_id IS NULL THEN coalesce(ro.in_quantity,0) ELSE 0 END
-        )
-        ELSE 0
-      END
-    ) + max(coalesce(rdest_any.final_09_quantity,0)) AS et_received_to_09_qty,
+    greatest(
+      sum(
+        CASE
+          WHEN (coalesce(ro.store_name_in,'') ILIKE '%09%' OR coalesce(ro.store_name_in,'') ILIKE '%散件%')
+            AND coalesce(ro.status_name,'') IN ('已完结','已到货')
+            AND (coalesce(ro.in_quantity,0) > 0 OR coalesce(ri.instock,0) > 0)
+          THEN greatest(
+            coalesce(ri.instock,0),
+            CASE WHEN coalesce(ri.instock,0) > 0 THEN 0 ELSE coalesce(ri.quantity,0) END,
+            CASE WHEN ri.return_order_id IS NULL THEN coalesce(ro.in_quantity,0) ELSE 0 END
+          )
+          ELSE 0
+        END
+      ),
+      max(coalesce(rdest_any.final_09_quantity,0))
+    ) AS et_received_to_09_qty,
     sum(
       CASE
         WHEN (coalesce(ro.store_name_in,'') ILIKE '%03%' OR coalesce(ro.store_name_in,'') ILIKE '%RTV%')
@@ -3133,6 +3438,7 @@ et_return_received_verification AS (
       string_agg(DISTINCT destination_summary, ' / ') FILTER (WHERE coalesce(destination_summary,'') <> '') AS destination_summary
     FROM mart.et_rtv_destination_allocation x
     WHERE x.return_order_id = ro.return_order_id
+      AND x.match_key = dim.product_match_key(ai.standard_goods_sn)
   ) rdest_any ON true
   WHERE v.match_status = 'matched'
     AND nullif(regexp_replace(upper(coalesce(v.et_shipment_number,'')), '[^0-9A-Z]', '', 'g'), '') IS NOT NULL
@@ -3500,6 +3806,277 @@ WITH cost_cutover AS (
   FROM fact.inventory_cost_opening
   WHERE status = 'approved'
 ),
+after_sales_candidate AS (
+  -- Treat every realized and pending after-sales aggregate as an independent
+  -- economic impact.  A single order/product can legitimately have both, so a
+  -- LIMIT 1 match would silently discard money or risk.
+  SELECT
+    oi.order_item_key,
+    coalesce(oi.sales_sar,0) AS line_gross_revenue_sar,
+    coalesce(oi.quantity,0) AS line_quantity,
+    ai.store_key AS impact_store_key,
+    ai.order_no AS impact_order_no,
+    ai.standard_goods_sn AS impact_standard_goods_sn,
+    ai.skc AS impact_skc,
+    ai.revenue_reversal,
+    ai.pending_revenue_risk,
+    ai.after_sales_cases,
+    ai.impact_quantity,
+    ai.impact_amount_sar,
+    ai.pending_impact_quantity,
+    ai.pending_impact_amount_sar,
+    ai.estimated_return_delivery_fee_sar,
+    ai.resolution_plans,
+    ai.order_sub_statuses,
+    ai.return_package_statuses,
+    CASE
+      WHEN coalesce(ai.skc,'') <> '' AND ai.skc = oi.skc THEN 0
+      WHEN coalesce(ai.standard_goods_sn,'') <> ''
+       AND ai.standard_goods_sn = oi.standard_goods_sn THEN 1
+      WHEN coalesce(ai.standard_goods_sn,'') <> ''
+       AND dim.product_match_key(ai.standard_goods_sn)
+           = dim.product_match_key(oi.standard_goods_sn) THEN 2
+      ELSE 3
+    END AS match_priority
+  FROM mart.profit_after_sales_impact ai
+  JOIN fact.order_item oi
+    ON oi.order_no = ai.order_no
+   AND oi.store_key = ai.store_key
+   AND (
+     (coalesce(ai.skc,'') <> '' AND ai.skc = oi.skc)
+     OR (
+       coalesce(ai.standard_goods_sn,'') <> ''
+       AND dim.product_match_key(ai.standard_goods_sn)
+           = dim.product_match_key(oi.standard_goods_sn)
+     )
+     OR (coalesce(ai.skc,'') = '' AND coalesce(ai.standard_goods_sn,'') = '')
+   )
+  WHERE ai.revenue_reversal OR ai.pending_revenue_risk
+),
+after_sales_best AS (
+  SELECT *
+  FROM (
+    SELECT
+      c.*,
+      min(match_priority) OVER (
+        PARTITION BY impact_store_key,impact_order_no,impact_standard_goods_sn,impact_skc
+      ) AS best_match_priority
+    FROM after_sales_candidate c
+  ) ranked
+  WHERE match_priority = best_match_priority
+),
+after_sales_basis AS (
+  SELECT
+    b.*,
+    sum(greatest(line_gross_revenue_sar,0)) OVER (
+      PARTITION BY impact_store_key,impact_order_no,impact_standard_goods_sn,impact_skc
+    ) AS matched_gross_revenue_sar,
+    sum(greatest(line_quantity,0)) OVER (
+      PARTITION BY impact_store_key,impact_order_no,impact_standard_goods_sn,impact_skc
+    ) AS matched_quantity,
+    row_number() OVER (
+      PARTITION BY impact_store_key,impact_order_no,impact_standard_goods_sn,impact_skc
+      ORDER BY order_item_key
+    ) AS matched_row_number
+  FROM after_sales_best b
+),
+after_sales_contribution AS (
+  SELECT
+    b.*,
+    CASE
+      WHEN NOT coalesce(revenue_reversal,false) THEN 0
+      WHEN coalesce(impact_amount_sar,0) > 0 AND matched_gross_revenue_sar > 0
+      THEN least(
+        greatest(line_gross_revenue_sar,0),
+        least(greatest(impact_amount_sar,0), matched_gross_revenue_sar)
+          * greatest(line_gross_revenue_sar,0) / matched_gross_revenue_sar
+      )
+      WHEN coalesce(impact_quantity,0) > 0 AND matched_quantity > 0
+      THEN greatest(line_gross_revenue_sar,0)
+        * least(1::numeric, greatest(impact_quantity,0) / matched_quantity)
+      ELSE greatest(line_gross_revenue_sar,0)
+    END AS realized_revenue_contribution_sar,
+    CASE
+      WHEN NOT coalesce(pending_revenue_risk,false) THEN 0
+      WHEN coalesce(pending_impact_amount_sar,0) > 0 AND matched_gross_revenue_sar > 0
+      THEN least(
+        greatest(line_gross_revenue_sar,0),
+        least(greatest(pending_impact_amount_sar,0), matched_gross_revenue_sar)
+          * greatest(line_gross_revenue_sar,0) / matched_gross_revenue_sar
+      )
+      WHEN coalesce(pending_impact_quantity,0) > 0 AND matched_quantity > 0
+      THEN greatest(line_gross_revenue_sar,0)
+        * least(1::numeric, greatest(pending_impact_quantity,0) / matched_quantity)
+      ELSE greatest(line_gross_revenue_sar,0)
+    END AS pending_revenue_contribution_sar,
+    CASE
+      WHEN NOT coalesce(revenue_reversal,false) THEN 0
+      WHEN coalesce(impact_quantity,0) > 0 AND matched_quantity > 0
+      THEN least(
+        greatest(line_quantity,0),
+        least(greatest(impact_quantity,0), matched_quantity)
+          * greatest(line_quantity,0) / matched_quantity
+      )
+      WHEN coalesce(impact_amount_sar,0) > 0 AND matched_gross_revenue_sar > 0
+      THEN greatest(line_quantity,0)
+        * least(1::numeric, greatest(impact_amount_sar,0) / matched_gross_revenue_sar)
+      ELSE greatest(line_quantity,0)
+    END AS realized_quantity_contribution,
+    CASE
+      WHEN NOT coalesce(pending_revenue_risk,false) THEN 0
+      WHEN coalesce(pending_impact_quantity,0) > 0 AND matched_quantity > 0
+      THEN least(
+        greatest(line_quantity,0),
+        least(greatest(pending_impact_quantity,0), matched_quantity)
+          * greatest(line_quantity,0) / matched_quantity
+      )
+      WHEN coalesce(pending_impact_amount_sar,0) > 0 AND matched_gross_revenue_sar > 0
+      THEN greatest(line_quantity,0)
+        * least(1::numeric, greatest(pending_impact_amount_sar,0) / matched_gross_revenue_sar)
+      ELSE greatest(line_quantity,0)
+    END AS pending_quantity_contribution,
+    CASE
+      WHEN coalesce(estimated_return_delivery_fee_sar,0) = 0 THEN 0
+      WHEN matched_gross_revenue_sar > 0
+      THEN estimated_return_delivery_fee_sar
+        * greatest(line_gross_revenue_sar,0) / matched_gross_revenue_sar
+      WHEN matched_quantity > 0
+      THEN estimated_return_delivery_fee_sar
+        * greatest(line_quantity,0) / matched_quantity
+      WHEN matched_row_number = 1 THEN estimated_return_delivery_fee_sar
+      ELSE 0
+    END AS estimated_return_fee_contribution_sar
+  FROM after_sales_basis b
+),
+after_sales_summed AS (
+  SELECT
+    order_item_key,
+    max(line_gross_revenue_sar) AS line_gross_revenue_sar,
+    max(line_quantity) AS line_quantity,
+    bool_or(revenue_reversal) AS revenue_reversal,
+    bool_or(pending_revenue_risk) AS pending_revenue_risk,
+    sum(coalesce(after_sales_cases,0))::bigint AS after_sales_cases,
+    least(
+      greatest(max(line_gross_revenue_sar),0),
+      sum(realized_revenue_contribution_sar)
+    ) AS realized_revenue_impact_sar,
+    sum(pending_revenue_contribution_sar) AS pending_revenue_impact_before_cap_sar,
+    least(
+      greatest(max(line_quantity),0),
+      sum(realized_quantity_contribution)
+    ) AS realized_impact_quantity,
+    sum(pending_quantity_contribution) AS pending_impact_quantity_before_cap,
+    sum(estimated_return_fee_contribution_sar) AS estimated_return_delivery_fee_sar,
+    string_agg(DISTINCT resolution_plans,' / ')
+      FILTER (WHERE coalesce(resolution_plans,'') <> '') AS resolution_plans,
+    string_agg(DISTINCT order_sub_statuses,' / ')
+      FILTER (WHERE coalesce(order_sub_statuses,'') <> '') AS order_sub_statuses,
+    string_agg(DISTINCT return_package_statuses,' / ')
+      FILTER (WHERE coalesce(return_package_statuses,'') <> '') AS return_package_statuses
+  FROM after_sales_contribution
+  GROUP BY order_item_key
+),
+after_sales_allocated AS (
+  SELECT
+    s.*,
+    least(
+      greatest(line_gross_revenue_sar - realized_revenue_impact_sar,0),
+      pending_revenue_impact_before_cap_sar
+    ) AS pending_revenue_impact_sar,
+    least(
+      greatest(line_quantity - realized_impact_quantity,0),
+      pending_impact_quantity_before_cap
+    ) AS pending_impact_quantity
+  FROM after_sales_summed s
+),
+rtv_match AS (
+  -- One RTV recovery row describes the returned quantity for an
+  -- order/product, not for every physical split order-item row. Allocate that
+  -- quantity once across the matching rows so recoverable cost is conserved.
+  SELECT
+    oi.order_item_key,
+    greatest(coalesce(oi.quantity,0),0) AS line_quantity,
+    rr.rtv_received_quantity AS total_rtv_received_quantity,
+    rr.rtv_received_to_09_quantity AS total_rtv_received_to_09_quantity,
+    rr.rtv_received_to_rtv_quantity AS total_rtv_received_to_rtv_quantity,
+    rr.rtv_recovery_status,
+    rr.rtv_express_numbers,
+    rr.et_return_order_ids,
+    rr.rtv_warehouses,
+    rr.rtv_latest_received_time,
+    sum(greatest(coalesce(oi.quantity,0),0)) OVER (
+      PARTITION BY oi.store_key, oi.order_no,
+        coalesce(nullif(rr.skc,''), dim.product_match_key(rr.standard_goods_sn), '__NONE__')
+    ) AS matched_quantity,
+    row_number() OVER (
+      PARTITION BY oi.store_key, oi.order_no,
+        coalesce(nullif(rr.skc,''), dim.product_match_key(rr.standard_goods_sn), '__NONE__')
+      ORDER BY oi.order_item_key
+    ) AS matched_row_number
+  FROM fact.order_item oi
+  LEFT JOIN LATERAL (
+    SELECT *
+    FROM mart.rtv_recovery_impact x
+    WHERE x.order_no = oi.order_no
+      AND x.store_key = oi.store_key
+      AND x.rtv_received_quantity > 0
+      AND (
+        (coalesce(x.skc,'') <> '' AND x.skc = oi.skc)
+        OR (
+          coalesce(x.standard_goods_sn,'') <> ''
+          AND dim.product_match_key(x.standard_goods_sn) = dim.product_match_key(oi.standard_goods_sn)
+        )
+        OR (coalesce(x.skc,'') = '' AND coalesce(x.standard_goods_sn,'') = '')
+      )
+    ORDER BY CASE
+      WHEN x.store_key = oi.store_key AND x.skc = oi.skc THEN -1
+      WHEN x.skc = oi.skc THEN 0
+      WHEN x.store_key = oi.store_key AND x.standard_goods_sn = oi.standard_goods_sn THEN 1
+      WHEN x.standard_goods_sn = oi.standard_goods_sn THEN 2
+      WHEN x.store_key = oi.store_key AND dim.product_match_key(x.standard_goods_sn) = dim.product_match_key(oi.standard_goods_sn) THEN 3
+      WHEN dim.product_match_key(x.standard_goods_sn) = dim.product_match_key(oi.standard_goods_sn) THEN 4
+      ELSE 5
+    END
+    LIMIT 1
+  ) rr ON true
+),
+rtv_allocated AS (
+  SELECT
+    m.order_item_key,
+    CASE
+      WHEN coalesce(total_rtv_received_quantity,0) <= 0 THEN 0
+      WHEN matched_quantity > 0 THEN least(
+        line_quantity,
+        total_rtv_received_quantity * line_quantity / matched_quantity
+      )
+      WHEN matched_row_number = 1 THEN total_rtv_received_quantity
+      ELSE 0
+    END AS rtv_received_quantity,
+    CASE
+      WHEN coalesce(total_rtv_received_to_09_quantity,0) <= 0 THEN 0
+      WHEN matched_quantity > 0 THEN least(
+        line_quantity,
+        total_rtv_received_to_09_quantity * line_quantity / matched_quantity
+      )
+      WHEN matched_row_number = 1 THEN total_rtv_received_to_09_quantity
+      ELSE 0
+    END AS rtv_received_to_09_quantity,
+    CASE
+      WHEN coalesce(total_rtv_received_to_rtv_quantity,0) <= 0 THEN 0
+      WHEN matched_quantity > 0 THEN least(
+        line_quantity,
+        total_rtv_received_to_rtv_quantity * line_quantity / matched_quantity
+      )
+      WHEN matched_row_number = 1 THEN total_rtv_received_to_rtv_quantity
+      ELSE 0
+    END AS rtv_received_to_rtv_quantity,
+    rtv_recovery_status,
+    rtv_express_numbers,
+    et_return_order_ids,
+    rtv_warehouses,
+    rtv_latest_received_time
+  FROM rtv_match m
+),
 base AS (
   SELECT
     oi.order_item_key,
@@ -3517,12 +4094,14 @@ base AS (
     oi.goods_title,
     coalesce(oi.quantity,0) AS quantity,
     coalesce(oi.sales_sar,0) AS gross_revenue_sar,
-    CASE WHEN coalesce(ai.revenue_reversal,false) THEN 0 ELSE coalesce(oi.sales_sar,0) END AS net_revenue_sar,
-    CASE WHEN coalesce(ai.pending_revenue_risk,false) THEN 0
-      WHEN coalesce(ai.revenue_reversal,false) THEN 0
-      ELSE coalesce(oi.sales_sar,0)
-    END AS risk_adjusted_net_revenue_sar,
-    CASE WHEN coalesce(ai.pending_revenue_risk,false) THEN coalesce(oi.sales_sar,0) ELSE 0 END AS pending_revenue_risk_sar,
+    greatest(coalesce(oi.sales_sar,0) - coalesce(ai.realized_revenue_impact_sar,0),0) AS net_revenue_sar,
+    greatest(
+      coalesce(oi.sales_sar,0)
+        - coalesce(ai.realized_revenue_impact_sar,0)
+        - coalesce(ai.pending_revenue_impact_sar,0),
+      0
+    ) AS risk_adjusted_net_revenue_sar,
+    coalesce(ai.pending_revenue_impact_sar,0) AS pending_revenue_risk_sar,
     CASE
       WHEN ca.order_item_key IS NULL
        AND (cc.effective_date IS NULL OR oi.created_date < cc.effective_date)
@@ -3579,10 +4158,10 @@ base AS (
     coalesce(ai.revenue_reversal,false) AS revenue_reversal,
     coalesce(ai.pending_revenue_risk,false) AS pending_revenue_risk,
     coalesce(ai.after_sales_cases,0) AS after_sales_cases,
-    coalesce(ai.impact_quantity,0) AS impact_quantity,
-    coalesce(ai.impact_amount_sar,0) AS impact_amount_sar,
+    coalesce(ai.realized_impact_quantity,0) AS impact_quantity,
+    coalesce(ai.realized_revenue_impact_sar,0) AS impact_amount_sar,
     coalesce(ai.pending_impact_quantity,0) AS pending_impact_quantity,
-    coalesce(ai.pending_impact_amount_sar,0) AS pending_impact_amount_sar,
+    coalesce(ai.pending_revenue_impact_sar,0) AS pending_impact_amount_sar,
     coalesce(fa.actual_return_expense_sar,0) AS actual_return_expense_sar,
     coalesce(fa.actual_return_freight_subsidy_sar,0) AS actual_return_freight_subsidy_sar,
     fa.actual_return_cost_sar,
@@ -3615,58 +4194,12 @@ base AS (
   LEFT JOIN mart.product_unit_cost_by_match_key c
     ON c.match_key <> ''
    AND c.match_key = dim.product_match_key(oi.standard_goods_sn)
-  LEFT JOIN LATERAL (
-    SELECT *
-    FROM mart.profit_after_sales_impact x
-    WHERE x.order_no = oi.order_no
-      AND x.store_key = oi.store_key
-      AND (x.revenue_reversal OR x.pending_revenue_risk)
-      AND (
-        (coalesce(x.skc,'') <> '' AND x.skc = oi.skc)
-        OR (
-          coalesce(x.standard_goods_sn,'') <> ''
-          AND dim.product_match_key(x.standard_goods_sn) = dim.product_match_key(oi.standard_goods_sn)
-        )
-        OR (coalesce(x.skc,'') = '' AND coalesce(x.standard_goods_sn,'') = '')
-      )
-    ORDER BY CASE
-      WHEN x.store_key = oi.store_key AND x.skc = oi.skc THEN -1
-      WHEN x.skc = oi.skc THEN 0
-      WHEN x.store_key = oi.store_key AND x.standard_goods_sn = oi.standard_goods_sn THEN 1
-      WHEN x.standard_goods_sn = oi.standard_goods_sn THEN 2
-      WHEN x.store_key = oi.store_key AND dim.product_match_key(x.standard_goods_sn) = dim.product_match_key(oi.standard_goods_sn) THEN 3
-      WHEN dim.product_match_key(x.standard_goods_sn) = dim.product_match_key(oi.standard_goods_sn) THEN 4
-      ELSE 5
-    END
-    LIMIT 1
-  ) ai ON true
+  LEFT JOIN after_sales_allocated ai
+    ON ai.order_item_key = oi.order_item_key
   LEFT JOIN mart.return_cost_actual fa
     ON fa.order_item_key = oi.order_item_key
-  LEFT JOIN LATERAL (
-    SELECT *
-    FROM mart.rtv_recovery_impact x
-    WHERE x.order_no = oi.order_no
-      AND x.store_key = oi.store_key
-      AND x.rtv_received_quantity > 0
-      AND (
-        (coalesce(x.skc,'') <> '' AND x.skc = oi.skc)
-        OR (
-          coalesce(x.standard_goods_sn,'') <> ''
-          AND dim.product_match_key(x.standard_goods_sn) = dim.product_match_key(oi.standard_goods_sn)
-        )
-        OR (coalesce(x.skc,'') = '' AND coalesce(x.standard_goods_sn,'') = '')
-      )
-    ORDER BY CASE
-      WHEN x.store_key = oi.store_key AND x.skc = oi.skc THEN -1
-      WHEN x.skc = oi.skc THEN 0
-      WHEN x.store_key = oi.store_key AND x.standard_goods_sn = oi.standard_goods_sn THEN 1
-      WHEN x.standard_goods_sn = oi.standard_goods_sn THEN 2
-      WHEN x.store_key = oi.store_key AND dim.product_match_key(x.standard_goods_sn) = dim.product_match_key(oi.standard_goods_sn) THEN 3
-      WHEN dim.product_match_key(x.standard_goods_sn) = dim.product_match_key(oi.standard_goods_sn) THEN 4
-      ELSE 5
-    END
-    LIMIT 1
-  ) rr ON true
+  LEFT JOIN rtv_allocated rr
+    ON rr.order_item_key = oi.order_item_key
 )
 SELECT
   order_item_key,
@@ -4152,27 +4685,45 @@ fee_daily AS (
   FROM mart.et_storage_fee_daily
   GROUP BY fee_date
 ),
-detail_bill AS (
-  -- Each canonical bill contributes exactly one selected evidence export:
-  -- itself when available, otherwise one superseded fallback.
-  SELECT DISTINCT fee_date, detail_source_income_bill_id AS income_bill_id
-  FROM mart.et_storage_fee_canonical_detail_source
-  WHERE detail_source_income_bill_id IS NOT NULL
-),
-detail_day AS (
+fee_bill AS (
   SELECT
-    d.fee_date AS date,
-    count(*) AS detail_rows,
+    f.fee_date AS date,
+    f.income_bill_id AS canonical_income_bill_id,
+    f.shown_fee_rmb AS fee_shown_fee_rmb,
+    f.actual_fee_sar AS fee_actual_fee_sar,
+    ds.detail_source_income_bill_id,
+    ds.detail_source_reason
+  FROM mart.et_storage_fee_daily f
+  LEFT JOIN mart.et_storage_fee_canonical_detail_source ds
+    ON ds.fee_date = f.fee_date
+   AND ds.canonical_income_bill_id = f.income_bill_id
+),
+detail_bill AS (
+  -- Completeness and scaling are bill-local.  A missing independent bill on a
+  -- day that also has a detailed bill must never be pushed into the latter's
+  -- SKU distribution.
+  SELECT
+    f.date,
+    f.canonical_income_bill_id,
+    f.detail_source_income_bill_id,
+    f.detail_source_reason,
+    count(d.unique_key) AS detail_rows,
     sum(coalesce(d.shown_fee_rmb,0)) AS detail_shown_fee_rmb,
-    max(f.shown_fee_rmb) AS fee_shown_fee_rmb,
-    abs(sum(coalesce(d.shown_fee_rmb,0)) - max(f.shown_fee_rmb)) <= 0.05 AS detail_complete,
-    max(f.shown_fee_rmb) / nullif(sum(coalesce(d.shown_fee_rmb,0)),0) AS detail_bill_scale
-  FROM fact.et_storage_fee_product_detail d
-  JOIN detail_bill cb
-    ON cb.fee_date = d.fee_date
-   AND cb.income_bill_id = d.income_bill_id
-  JOIN fee_daily f ON f.date = d.fee_date
-  GROUP BY d.fee_date
+    f.fee_shown_fee_rmb,
+    f.fee_actual_fee_sar,
+    abs(sum(coalesce(d.shown_fee_rmb,0)) - f.fee_shown_fee_rmb) <= 0.05 AS detail_complete,
+    f.fee_shown_fee_rmb / nullif(sum(coalesce(d.shown_fee_rmb,0)),0) AS detail_bill_scale
+  FROM fee_bill f
+  LEFT JOIN fact.et_storage_fee_product_detail d
+    ON d.fee_date = f.date
+   AND d.income_bill_id = f.detail_source_income_bill_id
+  GROUP BY
+    f.date,
+    f.canonical_income_bill_id,
+    f.detail_source_income_bill_id,
+    f.detail_source_reason,
+    f.fee_shown_fee_rmb,
+    f.fee_actual_fee_sar
 ),
 box_items AS (
   SELECT
@@ -4207,7 +4758,7 @@ detail_expanded AS (
       ELSE coalesce(dim.product_match_key(d.standard_goods_sn), dim.product_match_key(d.storage_code), nullif(d.match_key,''))
     END AS match_key,
     d.warehouse_name,
-    CASE WHEN dd.detail_complete THEN 'download_detail' ELSE 'download_detail_scaled_to_bill' END AS storage_allocation_method,
+    CASE WHEN db.detail_complete THEN 'download_detail' ELSE 'download_detail_scaled_to_bill' END AS storage_allocation_method,
     CASE WHEN bi.box_id IS NOT NULL THEN bi.item_quantity ELSE d.quantity END AS quantity,
     CASE WHEN bi.box_id IS NOT NULL THEN NULL::numeric ELSE d.volume_m3_per_unit END AS volume_m3_per_unit,
     CASE
@@ -4217,18 +4768,16 @@ detail_expanded AS (
     END AS volume_m3_total,
     d.rate_rmb_per_m3_day,
     CASE
-      WHEN bi.box_id IS NOT NULL AND coalesce(bt.total_item_quantity,0) > 0 THEN d.shown_fee_rmb * coalesce(dd.detail_bill_scale,1) * bi.item_quantity / nullif(bt.total_item_quantity,0)
-      WHEN bi.box_id IS NOT NULL AND coalesce(bt.item_count,0) > 0 THEN d.shown_fee_rmb * coalesce(dd.detail_bill_scale,1) / nullif(bt.item_count,0)
-      ELSE d.shown_fee_rmb * coalesce(dd.detail_bill_scale,1)
+      WHEN bi.box_id IS NOT NULL AND coalesce(bt.total_item_quantity,0) > 0 THEN d.shown_fee_rmb * coalesce(db.detail_bill_scale,1) * bi.item_quantity / nullif(bt.total_item_quantity,0)
+      WHEN bi.box_id IS NOT NULL AND coalesce(bt.item_count,0) > 0 THEN d.shown_fee_rmb * coalesce(db.detail_bill_scale,1) / nullif(bt.item_count,0)
+      ELSE d.shown_fee_rmb * coalesce(db.detail_bill_scale,1)
     END AS shown_fee_rmb
   FROM fact.et_storage_fee_product_detail d
-  JOIN detail_bill cb
-    ON cb.fee_date = d.fee_date
-   AND cb.income_bill_id = d.income_bill_id
-  JOIN detail_day dd
-    ON dd.date = d.fee_date
-   AND coalesce(dd.detail_rows,0) > 0
-   AND coalesce(dd.detail_shown_fee_rmb,0) <> 0
+  JOIN detail_bill db
+    ON db.date = d.fee_date
+   AND db.detail_source_income_bill_id = d.income_bill_id
+   AND coalesce(db.detail_rows,0) > 0
+   AND coalesce(db.detail_shown_fee_rmb,0) <> 0
   LEFT JOIN box_items bi
     ON d.storage_type ILIKE '%整箱%'
    AND bi.box_id = d.storage_code
@@ -4261,6 +4810,20 @@ detail_rows AS (
   WHERE coalesce(e.standard_goods_sn, e.match_key, '') <> ''
   GROUP BY e.date, e.source_snapshot_date, e.stock_snapshot_method, coalesce(pd.display_standard_goods_sn, e.standard_goods_sn, e.match_key), e.match_key, e.warehouse_name, e.storage_allocation_method
 ),
+fallback_bill_daily AS (
+  SELECT
+    date,
+    sum(fee_actual_fee_sar) AS fallback_actual_fee_sar
+  FROM detail_bill
+  WHERE coalesce(detail_rows,0) = 0
+     OR coalesce(detail_shown_fee_rmb,0) = 0
+  GROUP BY date
+),
+estimated_day AS (
+  SELECT date, sum(coalesce(actual_allocated_fee_sar,0)) AS estimated_allocated_fee_sar
+  FROM mart.storage_fee_product_daily_estimated
+  GROUP BY date
+),
 fallback_rows AS (
   SELECT
     e.date,
@@ -4277,16 +4840,17 @@ fallback_rows AS (
     e.warehouse_discount,
     NULL::numeric AS shown_fee_rmb,
     NULL::numeric AS actual_fee_rmb,
-    e.actual_allocated_fee_sar,
-    e.storage_allocation_method
+    f.fallback_actual_fee_sar
+      * e.actual_allocated_fee_sar / nullif(ed.estimated_allocated_fee_sar,0) AS actual_allocated_fee_sar,
+    ('bill_missing_detail:' || e.storage_allocation_method)::text AS storage_allocation_method
   FROM mart.storage_fee_product_daily_estimated e
+  JOIN fallback_bill_daily f
+    ON f.date = e.date
+  JOIN estimated_day ed
+    ON ed.date = e.date
   LEFT JOIN mart.product_display_by_match_key pd
     ON pd.match_key = e.match_key
-  LEFT JOIN detail_day d
-    ON d.date = e.date
-   AND coalesce(d.detail_rows,0) > 0
-   AND coalesce(d.detail_shown_fee_rmb,0) <> 0
-  WHERE d.date IS NULL
+  WHERE coalesce(ed.estimated_allocated_fee_sar,0) <> 0
 ),
 combined_rows AS (
   SELECT * FROM detail_rows

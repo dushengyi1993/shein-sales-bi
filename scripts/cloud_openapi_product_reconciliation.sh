@@ -36,6 +36,7 @@ ARGS=(
   --fetch-timeout-ms "$FETCH_TIMEOUT_MS"
   --load-timeout-ms "$LOAD_TIMEOUT_MS"
   --out "$REPORT_FILE"
+  --latest-out "$LATEST_REPORT_FILE"
 )
 export SHEIN_OPENAPI_PRODUCT_KEEP_SNAPSHOTS="$KEEP_SNAPSHOTS"
 
@@ -54,10 +55,6 @@ node scripts/run_shein_openapi_products_reconciliation.mjs "${ARGS[@]}"
 RUN_CODE=$?
 set -e
 
-mkdir -p "$(dirname "$LATEST_REPORT_FILE")"
-if [[ -s "$REPORT_FILE" ]]; then
-  cp -f "$REPORT_FILE" "$LATEST_REPORT_FILE"
-fi
 echo "[cloud_openapi_product_reconciliation] summary=$REPORT_FILE"
 echo "[cloud_openapi_product_reconciliation] latest=$LATEST_REPORT_FILE"
 cat "$REPORT_FILE" || true

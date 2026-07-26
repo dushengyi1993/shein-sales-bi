@@ -2,15 +2,18 @@
 Description=SHEIN BI cloud SHEIN login/session manager
 Wants=network-online.target
 After=network-online.target
+Before=shein-bi-db-backup.service shein-bi-cloud-yesterday.service
 
 [Service]
 Type=oneshot
 User=sheinops
 Group=sheinops
+UMask=0077
 WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/home/sheinops
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=SHEIN_BI_LOG_DIR=/srv/shein-bi/logs/cloud-session-manager
+Environment=SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-nightly-maintenance.lock
 TimeoutStartSec=7200
 Nice=10
 IOSchedulingClass=best-effort
@@ -19,4 +22,15 @@ MemoryHigh=1400M
 MemoryMax=1800M
 OOMPolicy=stop
 KillMode=control-group
-ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_shein_session_manager.sh
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictRealtime=true
+ExecStartPre=+/usr/bin/install -d -o sheinops -g sheinops -m 2770 /opt/shein-bi/app/state/locks
+ExecStartPre=+/usr/bin/install -o sheinops -g sheinops -m 0660 /dev/null /opt/shein-bi/app/state/locks/shein-bi-nightly-maintenance.lock
+ExecStart=/usr/bin/flock -w 900 ${SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE} /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_shein_session_manager.sh

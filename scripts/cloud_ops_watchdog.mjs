@@ -152,6 +152,36 @@ async function readJsonIfExists(file) {
   }
 }
 
+function normalizedStoreKey(value) {
+  return String(value || '').trim().toUpperCase();
+}
+
+// Keep the watchdog aligned with the warehouse audit: browser/OpenAPI
+// four-state differences are diagnostic only. The runner emits the actionable
+// semantic result based on current OpenAPI, prior OpenAPI, and Webhook proof.
+function assessOpenapiProductReport(report, expectedStoreKeys, nowMs = Date.now()) {
+  const expected = [...new Set((expectedStoreKeys || []).map(normalizedStoreKey).filter(Boolean))].sort();
+  if (!report || typeof report !== 'object') return {healthy: false, reason: 'report_missing', messages: ['OpenAPI 商品对账报告不存在；请运行完整 19 店对账。']};
+  const reportAt = Date.parse(report.generatedAt || report.endedAt || '');
+  if (!Number.isFinite(reportAt) || nowMs - reportAt > 48 * 3600_000) {
+    return {healthy: false, reason: 'report_stale', messages: ['OpenAPI 商品对账报告超过 48 小时未更新；请运行完整 19 店对账。']};
+  }
+  const rows = Array.isArray(report.results) ? report.results : [];
+  const byStore = new Map(rows.map(row => [normalizedStoreKey(row?.storeKey), row]).filter(([storeKey]) => storeKey));
+  const messages = [];
+  const missing = expected.filter(storeKey => !byStore.has(storeKey));
+  if (missing.length) messages.push(`OpenAPI 商品对账缺少店铺：${missing.join('、')}。`);
+  for (const storeKey of expected) {
+    const row = byStore.get(storeKey);
+    if (!row) continue;
+    const semantic = row.semanticReconciliation;
+    if (row.ok !== true) messages.push(`${storeKey} 店商品对账未完成：${row.status || 'unknown'}。`);
+    else if (!semantic || semantic.policyVersion !== 'openapi-current-webhook-previous/v1') messages.push(`${storeKey} 店商品对账仍是旧口径或缺少语义结果；请重跑。`);
+    else if (semantic.status === 'warning') messages.push(`${storeKey} 店商品对账需处理：${(semantic.warnings || []).join('；') || '存在可行动差异'}`);
+  }
+  return {healthy: messages.length === 0, reason: messages.length ? 'actionable_reconciliation_warning' : 'ok', messages};
+}
+
 function serviceExitAckKey(status) {
   return [
     status.name || '',
@@ -392,6 +422,15 @@ async function main() {
 
   const issues = [];
   const recoveries = [];
+  const storeConfig = await readJsonIfExists(path.join(ROOT, 'config', 'stores.json'));
+  const expectedStoreKeys = (Array.isArray(storeConfig?.stores) ? storeConfig.stores : [])
+    .filter(store => store?.enabled !== false)
+    .map(store => store?.storeKey);
+  const productReport = await readJsonIfExists(path.join(ROOT, 'state', 'openapi-probes', 'product-reconciliation.latest.json'));
+  const productReconciliationHealth = assessOpenapiProductReport(productReport, expectedStoreKeys);
+  if (!productReconciliationHealth.healthy) {
+    for (const message of productReconciliationHealth.messages) issues.push(`商品 OpenAPI 对账需处理：${message}`);
+  }
   const serviceExitAcks = await readServiceExitAcks();
   const units = [];
   for (const unit of UNIT_NAMES) {
@@ -457,11 +496,6 @@ async function main() {
   if (dailyRefresh?.error) {
     issues.push(`日更补采状态不可读：${dailyRefresh.error}`);
   } else if (dailyRefresh?.status && dailyRefresh.status !== 'ok' && !String(dailyRefresh.status).startsWith('skipped')) {
-    const storeConfig = await readJsonIfExists(path.join(ROOT, 'config', 'stores.json'));
-    const configuredStores = Array.isArray(storeConfig?.stores) ? storeConfig.stores : [];
-    const expectedStoreKeys = configuredStores
-      .filter(store => store?.enabled !== false)
-      .map(store => store?.storeKey);
     const linkRecovery = assessDailyLinkBusinessRecovery({
       dailyRefresh,
       linkSuccess: linkBusinessSuccess,
@@ -520,12 +554,18 @@ async function main() {
           expectedStoreKeys,
         })
       : {recovered: false, reason: 'recovery_scan_path_invalid'};
-    const productReport = await readJsonIfExists(path.join(ROOT, 'state', 'openapi-probes', 'product-reconciliation.latest.json'));
-    const productRecovery = assessDailyOpenapiProductRecovery({
+    const rawProductRecovery = assessDailyOpenapiProductRecovery({
       dailyRefresh,
       productReport,
       expectedStoreKeys,
     });
+    const productRecovery = productReconciliationHealth.healthy
+      ? rawProductRecovery
+      : {
+          recovered: false,
+          reason: `openapi_product_${productReconciliationHealth.reason}`,
+          evidence: {type: 'daily_openapi_product_recovery_blocked_by_actionable_warning'},
+        };
     dailyRefreshRecovery = linkRecovery.recovered
       ? linkRecovery
       : openapiSalesRecovery.recovered
@@ -643,6 +683,7 @@ async function main() {
     dailyRefresh,
     linkBusinessSuccess,
     dailyRefreshRecovery,
+    productReconciliationHealth,
     marketingGuardState,
     marketingGuardLastOkState,
     marketingGuardService,

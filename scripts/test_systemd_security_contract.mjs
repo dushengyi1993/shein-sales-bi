@@ -12,8 +12,8 @@ function property(unit, key) {
   return matches[0][1].trim();
 }
 
-function assertCommonHardening(unit, name, {allowAuditedSudo = false, protectSystem = 'full'} = {}) {
-  assert.equal(property(unit, 'UMask'), '0027', `${name} must not create world-readable runtime secrets`);
+function assertCommonHardening(unit, name, {allowAuditedSudo = false, protectSystem = 'full', umask = '0027'} = {}) {
+  assert.equal(property(unit, 'UMask'), umask, `${name} must not create world-readable runtime secrets`);
   assert.equal(property(unit, 'ProtectSystem'), protectSystem);
   assert.equal(property(unit, 'ProtectKernelTunables'), 'true');
   assert.equal(property(unit, 'ProtectKernelModules'), 'true');
@@ -81,7 +81,41 @@ for (const unitName of [
   assert.match(salesRefresh, /^Environment=SHEIN_DOCKER_USE_SUDO=1$/m);
   assert.match(salesRefresh, /^Environment=SHEIN_BI_OPENAPI_RECON_DIR=\/opt\/shein-bi\/app\/outputs\/reports\/openapi-sales-reconciliation$/m);
   assert.doesNotMatch(salesRefresh, /HOME=\/root|^User=root$|^Group=root$/m);
+  assert.equal(property(salesRefresh, 'UMask'), '0077', `${unitName} can touch browser/session state and must create private files`);
+  assertCommonHardening(salesRefresh, unitName, {allowAuditedSudo: true, umask: '0077'});
+  assert.doesNotMatch(salesRefresh, /^NoNewPrivileges=true$/m, `${unitName} uses audited sheinops NOPASSWD Docker helpers`);
 }
+
+const sessionManager = readUnit('shein-bi-cloud-session-manager.service');
+assert.equal(property(sessionManager, 'User'), 'sheinops');
+assert.equal(property(sessionManager, 'Group'), 'sheinops');
+assert.equal(property(sessionManager, 'UMask'), '0077', 'session manager persists browser credentials and must create private files');
+assertCommonHardening(sessionManager, 'session manager', {allowAuditedSudo: true, umask: '0077'});
+assert.match(sessionManager, /SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE=\/opt\/shein-bi\/app\/state\/locks\/shein-bi-nightly-maintenance\.lock/);
+assert.match(sessionManager, /flock -w 900/);
+assert.match(property(sessionManager, 'Before'), /shein-bi-db-backup\.service/);
+assert.match(property(sessionManager, 'Before'), /shein-bi-cloud-yesterday\.service/);
+
+const dbBackup = readUnit('shein-bi-db-backup.service');
+assert.equal(property(dbBackup, 'User'), 'root');
+assert.equal(property(dbBackup, 'Group'), 'sheinops');
+assert.equal(property(dbBackup, 'UMask'), '0027');
+assert.equal(property(dbBackup, 'NoNewPrivileges'), 'true');
+assert.equal(property(dbBackup, 'PrivateTmp'), 'true');
+assertCommonHardening(dbBackup, 'db backup');
+assert.match(dbBackup, /SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE=\/opt\/shein-bi\/app\/state\/locks\/shein-bi-nightly-maintenance\.lock/);
+assert.match(dbBackup, /flock -w 6600/);
+assert.equal(property(dbBackup, 'TimeoutStartSec'), '10800',
+  'backup timeout must cover the longest lock wait plus the backup execution budget');
+assert.match(property(dbBackup, 'After'), /shein-bi-cloud-session-manager\.service/);
+assert.match(property(dbBackup, 'Before'), /shein-bi-cloud-yesterday\.service/);
+
+const yesterday = readUnit('shein-bi-cloud-yesterday.service');
+assert.match(yesterday, /flock -w 7800/, 'yesterday final refresh waits for the shared nightly maintenance lock instead of colliding');
+assert.match(property(yesterday, 'After'), /shein-bi-cloud-session-manager\.service/);
+assert.match(property(yesterday, 'After'), /shein-bi-db-backup\.service/);
+assert.match(yesterday, /cloud_bi_refresh\.sh yesterday yesterday-final; \/opt\/shein-bi\/app\/scripts\/cloud_bi_refresh\.sh 2daysago third-day-stable-recheck/,
+  'both final-day phases must remain inside one lock holder');
 
 const browserCleanupTimer = readUnit('shein-bi-cloud-browser-cleanup.timer');
 const browserCleanupWindows = [...browserCleanupTimer.matchAll(/^OnCalendar=(.*)$/gm)].map(match => match[1].trim());

@@ -10,7 +10,7 @@
 
 ## 运维 runbook
 
-- [云端 BI 运行说明](cloud-bi-operations.md)、[BI 系统运行说明](bi-system-operations.md)、[云端优先交接](agent-handoff-cloud-first.md)
+- [云端 BI 运行说明](cloud-bi-operations.md)、[BI 系统运行说明](bi-system-operations.md)、[云端优先交接](agent-handoff-cloud-first.md)；商品对账、凌晨互斥、Linux 健康语义见上述运行说明与 [systemd unit 参数](../infra/systemd/README.md)
 - [应急恢复与备份](emergency-recovery-backup.md)、[迁移与恢复](migration-and-restore.md)、[全历史回补](bi-full-history-backfill.md)、[实际库存耗尽](actual-inventory-depletion.md)
 - [每日营销巡检交接](marketing-daily-inspection-handoff.md)、[发布清单](release-checklist.md)、[systemd unit 参数](../infra/systemd/README.md)
 
@@ -27,7 +27,7 @@
 
 ## 历史、发布与归档
 
-- [当前发布说明（2026.07.26.1）](bi-ops-release-2026-07-26.md)、[单应用生产切换（2026-07-26）](openapi-single-app-production-cutover-2026-07-26.md)、[半托 Webhook 实时销售切换（2026-07-23）](bi-webhook-live-cutover-2026-07-23.md)
+- [当前发布说明（2026.07.26.2）](bi-ops-release-2026-07-26.md)、[单应用生产切换（2026-07-26）](openapi-single-app-production-cutover-2026-07-26.md)、[半托 Webhook 实时销售切换（2026-07-23）](bi-webhook-live-cutover-2026-07-23.md)
 - [Webhook/平台动态发布说明（2026.07.20.2）](bi-webhook-release-2026-07-19.md)、[仓储费发布说明（2026.07.19.1）](bi-ops-release-2026-07-19.md)、[仓储费历史重述（2026-07-19）](storage-fee-history-restatement-2026-07-19.md)、[业务逻辑与营销加固（2026.07.18.1）](bi-ops-release-2026-07-18.md)、[BI V2 发布说明（2026-07-12）](bi-ops-v2-release-2026-07-12.md)
 - [优化复盘（2026-07-10）](optimization-review-2026-07-10.md)、[实施路线（历史）](implementation-roadmap.md)、[OpenAPI 自动运营原始方案（历史）](bi-ops-openapi-automation-plan.md)
 - [利润审计（2026-03-05）](bi-profit-audit-2026-03-05.md)、[负责人知识同步](owner-knowledge-sync.md)、[合作方 CLI 发布（2026-07-13）](partner-cli-release-2026-07-13.md)

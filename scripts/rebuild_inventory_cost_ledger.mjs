@@ -105,6 +105,7 @@ async function loadSources(args, rebuildFrom) {
   const cutoff = rebuildFrom ? `${sqlLiteral(rebuildFrom)}::date` : "'-infinity'::date";
   return await queryJson(args, `
 SELECT jsonb_build_object(
+  'sourceSnapshotAt', statement_timestamp(),
   'openingStates', coalesce((
     SELECT jsonb_agg(to_jsonb(x)) FROM (
       SELECT DISTINCT ON (match_key) match_key, quantity_after AS quantity, value_after_sar AS value,
@@ -156,31 +157,107 @@ SELECT jsonb_build_object(
   ), '[]'::jsonb),
   'rtv', coalesce((
     SELECT jsonb_agg(to_jsonb(x) ORDER BY x.effective_at, x.event_key) FROM (
-      WITH rtv_final AS (
+      WITH rtv_match_candidate AS (
         SELECT
           ai.store_key,
           ai.order_no,
-          d.return_order_id,
+          coalesce(nullif(ai.aftersales_order_no,''),nullif(ai.return_order_no,''),ai.order_no) AS economic_return_key,
+          d.return_order_id AS et_return_order_id,
           d.match_key,
-          max(coalesce(d.latest_destination_time, d.rtv_received_time)) AS effective_at,
-          max(d.final_09_quantity) AS final_09_quantity
+          d.latest_destination_time,
+          d.rtv_received_time,
+          d.final_09_quantity,
+          'mart.et_rtv_destination_allocation'::text AS source_table,
+          0 AS source_priority
         FROM mart.et_rtv_destination_allocation d
         JOIN fact.after_sales_item ai
           ON ai.return_order_no = d.return_order_id
          AND dim.product_match_key(ai.standard_goods_sn) = d.match_key
         WHERE coalesce(d.final_09_quantity,0) > 0
-        GROUP BY ai.store_key, ai.order_no, d.return_order_id, d.match_key
+
+        UNION ALL
+
+        SELECT
+          ai.store_key,
+          ai.order_no,
+          coalesce(nullif(ai.aftersales_order_no,''),nullif(ai.return_order_no,''),ai.order_no) AS economic_return_key,
+          d.return_order_id AS et_return_order_id,
+          d.match_key,
+          d.latest_destination_time,
+          d.rtv_received_time,
+          d.final_09_quantity,
+          'ops.rtv_tracking_verification'::text AS source_table,
+          1 AS source_priority
+        FROM ops.rtv_tracking_verification v
+        JOIN fact.after_sales_item ai
+          ON ai.store_key = v.store_key
+         AND ai.aftersales_order_no = v.shein_aftersales_order_no
+        JOIN mart.et_rtv_destination_allocation d
+          ON d.return_order_id = v.et_return_order_id
+         AND d.match_key = dim.product_match_key(ai.standard_goods_sn)
+        WHERE v.match_status = 'matched'
+          AND coalesce(d.final_09_quantity,0) > 0
+      ),
+      rtv_candidate_dedup AS (
+        -- A direct SHEIN=ET id and a manually verified replacement ET id may
+        -- describe the same after-sales case.  Deduplicate repeated fact rows
+        -- first, then choose exactly one evidence path for the economic return.
+        SELECT DISTINCT ON (
+          store_key, order_no, economic_return_key, et_return_order_id, match_key, source_priority
+        )
+          store_key,
+          order_no,
+          economic_return_key,
+          et_return_order_id,
+          match_key,
+          latest_destination_time,
+          rtv_received_time,
+          final_09_quantity,
+          source_table,
+          source_priority
+        FROM rtv_match_candidate
+        ORDER BY
+          store_key, order_no, economic_return_key, et_return_order_id, match_key, source_priority,
+          coalesce(latest_destination_time,rtv_received_time) DESC
+      ),
+      rtv_match AS (
+        SELECT *
+        FROM (
+          SELECT
+            d.*,
+            min(source_priority) OVER (
+              PARTITION BY store_key, order_no, economic_return_key, match_key
+            ) AS selected_source_priority
+          FROM rtv_candidate_dedup d
+        ) selected
+        WHERE source_priority = selected_source_priority
+      ),
+      rtv_final AS (
+        SELECT
+          store_key,
+          order_no,
+          economic_return_key,
+          match_key,
+          max(coalesce(latest_destination_time, rtv_received_time)) AS effective_at,
+          sum(final_09_quantity) AS final_09_quantity,
+          min(source_table) AS source_table
+        FROM rtv_match
+        GROUP BY store_key, order_no, economic_return_key, match_key
       )
       SELECT
-        'rtv09:' || rr.store_key || ':' || rr.return_order_id || ':' || oi.order_item_key AS event_key,
+        'rtv09:' || rr.store_key || ':' || rr.economic_return_key || ':' || oi.order_item_key AS event_key,
         rr.effective_at,
         dim.product_match_key(oi.standard_goods_sn) AS match_key,
         least(
           coalesce(oi.quantity,0),
           coalesce(rr.final_09_quantity,0) * coalesce(oi.quantity,0)
-            / nullif(sum(coalesce(oi.quantity,0)) OVER (PARTITION BY rr.store_key, rr.order_no, rr.return_order_id, dim.product_match_key(oi.standard_goods_sn)),0)
+            / nullif(sum(coalesce(oi.quantity,0)) OVER (
+                PARTITION BY rr.store_key, rr.order_no, rr.economic_return_key,
+                  dim.product_match_key(oi.standard_goods_sn)
+              ),0)
         ) AS quantity,
         oi.order_item_key AS source_order_item_key,
+        rr.source_table,
         CASE
           WHEN oi.created_date < ${cutoff}
            AND EXISTS (
@@ -224,7 +301,8 @@ function eventsFromSources(source) {
   });
   for (const row of source.rtv || []) events.push({
     eventKey: row.event_key, matchKey: row.match_key, effectiveAt: row.effective_at,
-    eventType: 'rtv_09_return', quantity: row.quantity, sourceTable: 'mart.et_rtv_destination_allocation',
+    eventType: 'rtv_09_return', quantity: row.quantity,
+    sourceTable: row.source_table || 'mart.et_rtv_destination_allocation',
     sourceKey: row.event_key, sourceOrderItemKey: row.source_order_item_key, unitCostSar: row.unit_cost_sar,
   });
   return events.map(event => ({...event, sourceHash: sha(JSON.stringify(event))}));
@@ -261,6 +339,15 @@ async function writeLedger(args, {events, ledgerRows, run, rebuildFrom}) {
   }));
   const condition = rebuildFrom ? `effective_at::date >= ${sqlLiteral(rebuildFrom)}::date` : 'true';
   let sql = 'BEGIN;\n';
+  sql += "SELECT pg_advisory_xact_lock(hashtextextended('shein-inventory-cost-ledger-rebuild', 0));\n";
+  sql += `DO $inventory_cost_rebuild_guard$\nBEGIN\n`;
+  sql += `  IF EXISTS (\n`;
+  sql += `    SELECT 1 FROM ops.inventory_cost_run\n`;
+  sql += `    WHERE status = 'completed'\n`;
+  sql += `      AND completed_at > ${sqlLiteral(run.startedAt)}::timestamptz\n`;
+  sql += `  ) THEN\n`;
+  sql += `    RAISE EXCEPTION 'stale inventory-cost rebuild refused: a newer snapshot committed after %', ${sqlLiteral(run.startedAt)}::timestamptz;\n`;
+  sql += `  END IF;\nEND\n$inventory_cost_rebuild_guard$;\n`;
   sql += `DELETE FROM fact.inventory_cost_event WHERE ${condition};\n`;
   sql += copyBlock('fact.inventory_cost_event', eventColumns, eventDbRows);
   sql += copyBlock('fact.inventory_cost_ledger', ledgerColumns, ledgerDbRows);
@@ -276,7 +363,11 @@ async function main() {
   const boundary = await resolveRebuildBoundary(args);
   const source = await loadSources(args, boundary.rebuildFrom);
   const events = eventsFromSources(source || {});
-  const sourceHash = sha(JSON.stringify(events));
+  const sourceHash = sha(JSON.stringify({
+    events,
+    openingStates: [...openingStateMap(source?.openingStates).entries()]
+      .sort(([left], [right]) => left.localeCompare(right)),
+  }));
   const ledgerVersion = `moving-average-v1:${sourceHash.slice(0, 16)}`;
   const built = buildInventoryCostLedger(events, {openingStates: openingStateMap(source?.openingStates), ledgerVersion});
   const completedAt = new Date().toISOString();
@@ -290,7 +381,15 @@ async function main() {
   };
   const run = {
     runId: `inventory-cost-${completedAt.replace(/[-:.TZ]/g, '').slice(0, 14)}-${process.pid}`,
-    ledgerVersion, startedAt, completedAt, sourceCutoffAt: completedAt, sourceHash,
+    ledgerVersion,
+    startedAt,
+    completedAt,
+    // This is the database statement snapshot that produced the event set,
+    // not the later Node completion time. A concurrent order arriving after
+    // the read must therefore invalidate freshness instead of being claimed
+    // as covered by this run.
+    sourceCutoffAt: source?.sourceSnapshotAt || startedAt,
+    sourceHash,
     eventCount: built.rows.length, saleCount: saleRows.length,
     unvaluedSaleCount: saleRows.filter(row => row.unvaluedQuantity > 0).length, summary,
   };

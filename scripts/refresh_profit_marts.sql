@@ -6,6 +6,7 @@ SET statement_timeout = '600s';
 SET lock_timeout = '30s';
 
 BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT pg_advisory_xact_lock(hashtextextended('shein-profit-mart-refresh', 0));
 
 CREATE TABLE IF NOT EXISTS mart.profit_mart_cache_meta (
   cache_key text PRIMARY KEY,
@@ -20,37 +21,41 @@ CREATE TABLE IF NOT EXISTS mart.profit_mart_cache_meta (
 DROP TABLE IF EXISTS mart.profit_order_item_cache_new;
 CREATE UNLOGGED TABLE mart.profit_order_item_cache_new AS
 SELECT * FROM mart.profit_order_item;
+CREATE UNIQUE INDEX ON mart.profit_order_item_cache_new(order_item_key);
+CREATE INDEX ON mart.profit_order_item_cache_new(created_date,store_key);
+CREATE INDEX ON mart.profit_order_item_cache_new(created_date,standard_goods_sn);
 ANALYZE mart.profit_order_item_cache_new;
 
 DROP TABLE IF EXISTS tmp_profit_mart_refresh_mode;
 CREATE TEMP TABLE tmp_profit_mart_refresh_mode AS
-WITH fee_daily AS (
-  SELECT fee_date AS date, sum(shown_fee_rmb) AS shown_fee_rmb
-  FROM mart.et_storage_fee_daily
-  GROUP BY fee_date
+WITH fee_bill AS (
+  SELECT
+    f.fee_date AS date,
+    f.income_bill_id AS canonical_income_bill_id,
+    f.shown_fee_rmb,
+    ds.detail_source_income_bill_id
+  FROM mart.et_storage_fee_daily f
+  LEFT JOIN mart.et_storage_fee_canonical_detail_source ds
+    ON ds.fee_date = f.fee_date
+   AND ds.canonical_income_bill_id = f.income_bill_id
 ),
 detail_bill AS (
-  -- Each canonical bill chooses one detail export: paid bill first, then one
-  -- superseded fallback only when the paid bill has no usable detail.
-  SELECT DISTINCT fee_date, detail_source_income_bill_id AS income_bill_id
-  FROM mart.et_storage_fee_canonical_detail_source
-  WHERE detail_source_income_bill_id IS NOT NULL
-),
-detail_day AS (
-  SELECT d.fee_date AS date, count(*) AS detail_rows,
+  SELECT
+    f.date,
+    f.canonical_income_bill_id,
+    count(d.unique_key) AS detail_rows,
     sum(coalesce(d.shown_fee_rmb,0)) AS detail_shown_fee_rmb
-  FROM fact.et_storage_fee_product_detail d
-  JOIN detail_bill cb
-    ON cb.fee_date = d.fee_date
-   AND cb.income_bill_id = d.income_bill_id
-  JOIN fee_daily f ON f.date=d.fee_date
-  GROUP BY d.fee_date
+  FROM fee_bill f
+  LEFT JOIN fact.et_storage_fee_product_detail d
+    ON d.fee_date = f.date
+   AND d.income_bill_id = f.detail_source_income_bill_id
+  GROUP BY f.date, f.canonical_income_bill_id
 )
-SELECT count(*) FILTER (
-  WHERE d.date IS NULL OR coalesce(d.detail_rows,0)=0 OR coalesce(d.detail_shown_fee_rmb,0)=0
+SELECT count(DISTINCT date) FILTER (
+  WHERE coalesce(d.detail_rows,0)=0 OR coalesce(d.detail_shown_fee_rmb,0)=0
 )::bigint AS missing_fee_days,
-count(*)::bigint AS fee_days
-FROM fee_daily f LEFT JOIN detail_day d USING(date);
+count(DISTINCT date)::bigint AS fee_days
+FROM detail_bill d;
 
 DROP TABLE IF EXISTS tmp_product_display_by_match_key;
 CREATE TEMP TABLE tmp_product_display_by_match_key AS
@@ -112,27 +117,42 @@ fee_daily AS (
   FROM mart.et_storage_fee_daily
   GROUP BY fee_date
 ),
-detail_bill AS (
-  -- Canonical bill first; exactly one superseded detail source only as an
-  -- evidence fallback, so replacement exports cannot be double-counted.
-  SELECT DISTINCT fee_date, detail_source_income_bill_id AS income_bill_id
-  FROM mart.et_storage_fee_canonical_detail_source
-  WHERE detail_source_income_bill_id IS NOT NULL
-),
-detail_day AS (
+fee_bill AS (
   SELECT
-    d.fee_date AS date,
-    count(*) AS detail_rows,
+    f.fee_date AS date,
+    f.income_bill_id AS canonical_income_bill_id,
+    f.shown_fee_rmb AS fee_shown_fee_rmb,
+    f.actual_fee_sar AS fee_actual_fee_sar,
+    ds.detail_source_income_bill_id,
+    ds.detail_source_reason
+  FROM mart.et_storage_fee_daily f
+  LEFT JOIN mart.et_storage_fee_canonical_detail_source ds
+    ON ds.fee_date = f.fee_date
+   AND ds.canonical_income_bill_id = f.income_bill_id
+),
+detail_bill AS (
+  SELECT
+    f.date,
+    f.canonical_income_bill_id,
+    f.detail_source_income_bill_id,
+    f.detail_source_reason,
+    count(d.unique_key) AS detail_rows,
     sum(coalesce(d.shown_fee_rmb,0)) AS detail_shown_fee_rmb,
-    max(f.shown_fee_rmb) AS fee_shown_fee_rmb,
-    abs(sum(coalesce(d.shown_fee_rmb,0)) - max(f.shown_fee_rmb)) <= 0.05 AS detail_complete,
-    max(f.shown_fee_rmb) / nullif(sum(coalesce(d.shown_fee_rmb,0)),0) AS detail_bill_scale
-  FROM fact.et_storage_fee_product_detail d
-  JOIN detail_bill cb
-    ON cb.fee_date = d.fee_date
-   AND cb.income_bill_id = d.income_bill_id
-  JOIN fee_daily f ON f.date = d.fee_date
-  GROUP BY d.fee_date
+    f.fee_shown_fee_rmb,
+    f.fee_actual_fee_sar,
+    abs(sum(coalesce(d.shown_fee_rmb,0)) - f.fee_shown_fee_rmb) <= 0.05 AS detail_complete,
+    f.fee_shown_fee_rmb / nullif(sum(coalesce(d.shown_fee_rmb,0)),0) AS detail_bill_scale
+  FROM fee_bill f
+  LEFT JOIN fact.et_storage_fee_product_detail d
+    ON d.fee_date = f.date
+   AND d.income_bill_id = f.detail_source_income_bill_id
+  GROUP BY
+    f.date,
+    f.canonical_income_bill_id,
+    f.detail_source_income_bill_id,
+    f.detail_source_reason,
+    f.fee_shown_fee_rmb,
+    f.fee_actual_fee_sar
 ),
 box_items AS (
   SELECT
@@ -167,7 +187,7 @@ detail_expanded AS (
       ELSE coalesce(dim.product_match_key(d.standard_goods_sn), dim.product_match_key(d.storage_code), nullif(d.match_key,''))
     END AS match_key,
     d.warehouse_name,
-    CASE WHEN dd.detail_complete THEN 'download_detail' ELSE 'download_detail_scaled_to_bill' END AS storage_allocation_method,
+    CASE WHEN db.detail_complete THEN 'download_detail' ELSE 'download_detail_scaled_to_bill' END AS storage_allocation_method,
     CASE WHEN bi.box_id IS NOT NULL THEN bi.item_quantity ELSE d.quantity END AS quantity,
     CASE WHEN bi.box_id IS NOT NULL THEN NULL::numeric ELSE d.volume_m3_per_unit END AS volume_m3_per_unit,
     CASE
@@ -177,18 +197,16 @@ detail_expanded AS (
     END AS volume_m3_total,
     d.rate_rmb_per_m3_day,
     CASE
-      WHEN bi.box_id IS NOT NULL AND coalesce(bt.total_item_quantity,0) > 0 THEN d.shown_fee_rmb * coalesce(dd.detail_bill_scale,1) * bi.item_quantity / nullif(bt.total_item_quantity,0)
-      WHEN bi.box_id IS NOT NULL AND coalesce(bt.item_count,0) > 0 THEN d.shown_fee_rmb * coalesce(dd.detail_bill_scale,1) / nullif(bt.item_count,0)
-      ELSE d.shown_fee_rmb * coalesce(dd.detail_bill_scale,1)
+      WHEN bi.box_id IS NOT NULL AND coalesce(bt.total_item_quantity,0) > 0 THEN d.shown_fee_rmb * coalesce(db.detail_bill_scale,1) * bi.item_quantity / nullif(bt.total_item_quantity,0)
+      WHEN bi.box_id IS NOT NULL AND coalesce(bt.item_count,0) > 0 THEN d.shown_fee_rmb * coalesce(db.detail_bill_scale,1) / nullif(bt.item_count,0)
+      ELSE d.shown_fee_rmb * coalesce(db.detail_bill_scale,1)
     END AS shown_fee_rmb
   FROM fact.et_storage_fee_product_detail d
-  JOIN detail_bill cb
-    ON cb.fee_date = d.fee_date
-   AND cb.income_bill_id = d.income_bill_id
-  JOIN detail_day dd
-    ON dd.date = d.fee_date
-   AND coalesce(dd.detail_rows,0) > 0
-   AND coalesce(dd.detail_shown_fee_rmb,0) <> 0
+  JOIN detail_bill db
+    ON db.date = d.fee_date
+   AND db.detail_source_income_bill_id = d.income_bill_id
+   AND coalesce(db.detail_rows,0) > 0
+   AND coalesce(db.detail_shown_fee_rmb,0) <> 0
   LEFT JOIN box_items bi
     ON d.storage_type ILIKE '%整箱%'
    AND bi.box_id = d.storage_code
@@ -221,6 +239,20 @@ detail_rows AS (
   WHERE coalesce(e.standard_goods_sn, e.match_key, '') <> ''
   GROUP BY e.date, e.source_snapshot_date, e.stock_snapshot_method, coalesce(pd.display_standard_goods_sn, e.standard_goods_sn, e.match_key), e.match_key, e.warehouse_name, e.storage_allocation_method
 ),
+fallback_bill_daily AS (
+  SELECT
+    date,
+    sum(fee_actual_fee_sar) AS fallback_actual_fee_sar
+  FROM detail_bill
+  WHERE coalesce(detail_rows,0) = 0
+     OR coalesce(detail_shown_fee_rmb,0) = 0
+  GROUP BY date
+),
+estimated_day AS (
+  SELECT date, sum(coalesce(actual_allocated_fee_sar,0)) AS estimated_allocated_fee_sar
+  FROM mart.storage_fee_product_daily_estimated
+  GROUP BY date
+),
 fallback_rows AS (
   SELECT
     e.date,
@@ -237,16 +269,17 @@ fallback_rows AS (
     e.warehouse_discount,
     NULL::numeric AS shown_fee_rmb,
     NULL::numeric AS actual_fee_rmb,
-    e.actual_allocated_fee_sar,
-    e.storage_allocation_method
+    f.fallback_actual_fee_sar
+      * e.actual_allocated_fee_sar / nullif(ed.estimated_allocated_fee_sar,0) AS actual_allocated_fee_sar,
+    ('bill_missing_detail:' || e.storage_allocation_method)::text AS storage_allocation_method
   FROM mart.storage_fee_product_daily_estimated e
+  JOIN fallback_bill_daily f
+    ON f.date = e.date
+  JOIN estimated_day ed
+    ON ed.date = e.date
   LEFT JOIN tmp_product_display_by_match_key pd
     ON pd.match_key = e.match_key
-  LEFT JOIN detail_day d
-    ON d.date = e.date
-   AND coalesce(d.detail_rows,0) > 0
-   AND coalesce(d.detail_shown_fee_rmb,0) <> 0
-  WHERE d.date IS NULL
+  WHERE coalesce(ed.estimated_allocated_fee_sar,0) <> 0
 ),
 combined_rows AS (
   SELECT * FROM detail_rows
@@ -501,6 +534,7 @@ JOIN day_total t USING (date)
 LEFT JOIN store_day s
   ON s.date = a.date
  AND s.store_key = a.store_key;
+CREATE UNIQUE INDEX ON mart.storage_fee_store_daily_cache_new(date,store_key);
 ANALYZE mart.storage_fee_store_daily_cache_new;
 DROP TABLE IF EXISTS mart.profit_daily_store_product_cache_new;
 CREATE UNLOGGED TABLE mart.profit_daily_store_product_cache_new AS
@@ -643,6 +677,8 @@ FULL JOIN storage s
  AND s.store_key = b.store_key
  AND s.group_key IS NOT DISTINCT FROM b.group_key
  AND s.match_key = dim.product_match_key(b.standard_goods_sn);
+CREATE INDEX ON mart.profit_daily_store_product_cache_new(date,store_key);
+CREATE INDEX ON mart.profit_daily_store_product_cache_new(date,standard_goods_sn);
 ANALYZE mart.profit_daily_store_product_cache_new;
 DROP TABLE IF EXISTS mart.profit_month_group_cache_new;
 CREATE UNLOGGED TABLE mart.profit_month_group_cache_new AS
