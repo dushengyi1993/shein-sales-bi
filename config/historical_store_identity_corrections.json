@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "incidentId": "profile-cycle-2026-05-14-2026-06-02",
+  "reason": "The QY, XL and YJ browser profiles were logged into the next store in a three-store cycle. The source files are valid sales artifacts, but their top-level store identity is wrong.",
+  "evidence": {
+    "affectedItemRows": 110,
+    "affectedOrders": 109,
+    "affectedSalesSar": 11261.81,
+    "uniqueSkcOwnershipConfirmedRows": 110,
+    "uniqueSkcOwnershipContradictions": 0,
+    "afterSalesCrossStoreConfirmedOrders": 18,
+    "openApiConfirmedOrders": 10,
+    "cleanBoundaryBefore": "2026-05-13",
+    "cleanBoundaryAfter": "2026-06-03"
+  },
+  "corrections": [
+    {
+      "id": "profile-cycle-qy-to-yj",
+      "sourceStoreKey": "QY",
+      "effectiveStoreKey": "YJ",
+      "startDate": "2026-05-14",
+      "endDate": "2026-06-02",
+      "expectedItemRows": 51
+    },
+    {
+      "id": "profile-cycle-xl-to-qy",
+      "sourceStoreKey": "XL",
+      "effectiveStoreKey": "QY",
+      "startDate": "2026-05-14",
+      "endDate": "2026-06-02",
+      "expectedItemRows": 31
+    },
+    {
+      "id": "profile-cycle-yj-to-xl",
+      "sourceStoreKey": "YJ",
+      "effectiveStoreKey": "XL",
+      "startDate": "2026-05-14",
+      "endDate": "2026-06-02",
+      "expectedItemRows": 28
+    }
+  ]
+}

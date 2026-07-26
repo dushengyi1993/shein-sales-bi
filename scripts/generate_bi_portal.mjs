@@ -4006,23 +4006,35 @@ after_sales_base AS (
     p.payment_label,
     p.payment_method,
     greatest(0, (current_date - a.request_time::date))::int AS open_days,
+    coalesce(settlement.settlement_state,'not_refund_candidate') AS settlement_state,
+    coalesce(settlement.settlement_state_label,'不影响退款') AS settlement_state_label,
+    coalesce(settlement.realized_reversal,false) AS realized_reversal,
+    coalesce(settlement.pending_revenue_risk,false) AS pending_revenue_risk,
     CASE
-      WHEN m.status_text ~ '(已取消|关闭)' THEN 'cancelled'
-      WHEN m.status_text ~ '(同意退款|已退款|已签收|已完成)' THEN 'settled'
+      WHEN settlement.settlement_state='closed_without_refund' THEN 'cancelled'
+      WHEN settlement.settlement_state='realized' THEN 'settled'
       WHEN m.status_text ~ '(待买家退货|待揽收|待寄回)' THEN 'waiting_buyer'
       WHEN m.status_text ~ '(运输|在途|已揽收|揽收|待交接)' THEN 'in_transit'
       WHEN m.status_text ~ '(待卖家|待平台|待审核|待处理|待仓库)' THEN 'platform_pending'
+      WHEN settlement.settlement_state='pending' THEN 'open'
+      WHEN m.status_text ~ '(已取消|关闭|已完成)' THEN 'cancelled'
       ELSE 'open'
     END AS status_group,
     CASE
-      WHEN m.status_text ~ '(已取消|关闭)' THEN '已取消'
-      WHEN m.status_text ~ '(同意退款|已退款|已签收|已完成)' THEN '已落定'
+      WHEN settlement.settlement_state='closed_without_refund' THEN '已取消/关闭'
+      WHEN settlement.settlement_state='realized' THEN '退款已落定'
       WHEN m.status_text ~ '(待买家退货|待揽收|待寄回)' THEN '待买家退货'
       WHEN m.status_text ~ '(运输|在途|已揽收|揽收|待交接)' THEN '退货物流中'
       WHEN m.status_text ~ '(待卖家|待平台|待审核|待处理|待仓库)' THEN '待平台/仓库处理'
-      ELSE '未落定'
+      WHEN settlement.settlement_state='pending' THEN '退款待落定'
+      WHEN m.status_text ~ '(已取消|关闭|已完成)' THEN '已闭环（无退款）'
+      ELSE '售后处理中'
     END AS status_group_label,
-    NOT (m.status_text ~ '(已取消|关闭|同意退款|已退款|已签收|已完成)') AS is_open,
+    CASE
+      WHEN settlement.settlement_state IN ('realized','closed_without_refund') THEN false
+      WHEN settlement.settlement_state='pending' THEN true
+      ELSE NOT (m.status_text ~ '(已取消|关闭|已完成)')
+    END AS is_open,
     CASE
       WHEN m.reason_text ~ '(COD|未妥投|拒收|派件|配送|物流|签收失败)' THEN '物流/COD'
       WHEN m.reason_text ~ '(质量|故障|坏|损坏|破损|无法使用|不好用|不工作)' THEN '质量问题'
@@ -4077,6 +4089,8 @@ after_sales_base AS (
     ON om.order_no = a.order_no
   LEFT JOIN after_sales_payment_flags p
     ON p.order_no = a.order_no
+  LEFT JOIN mart.after_sales_settlement_detail settlement
+    ON settlement.after_sales_item_key = a.after_sales_item_key
   LEFT JOIN LATERAL (
     SELECT
       concat_ws(' ', coalesce(a.reason_names,''), coalesce(a.resolution_plan_name,''), coalesce(a.order_sub_status_name,''), coalesce(a.return_package_status_name,'')) AS reason_text,
@@ -4114,6 +4128,10 @@ after_sales_grouped AS (
     payment_label,
     payment_method,
     open_days,
+    settlement_state,
+    settlement_state_label,
+    realized_reversal,
+    pending_revenue_risk,
     status_group,
     status_group_label,
     is_open,
@@ -4143,6 +4161,7 @@ after_sales_grouped AS (
     aftersales_order_no, return_order_no, order_no, standard_goods_sn, nullif(skc,''),
     resolution_plan_name, order_sub_status_name, return_package_status_name, reason_names,
     appeal_status, is_cod, payment_label, payment_method, open_days, status_group,
+    settlement_state, settlement_state_label, realized_reversal, pending_revenue_risk,
     status_group_label, is_open, reason_group, rtv_group, rtv_trace_status,
     rtv_recovery_status, shein_return_express_numbers, rtv_express_numbers,
     et_return_order_ids, rtv_warehouses, rtv_latest_received_time,
@@ -4176,6 +4195,10 @@ after_sales AS (
       payment_label,
       payment_method,
       open_days,
+      settlement_state,
+      settlement_state_label,
+      realized_reversal,
+      pending_revenue_risk,
       status_group,
       status_group_label,
       is_open,

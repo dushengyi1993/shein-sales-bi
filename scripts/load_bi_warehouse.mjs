@@ -19,6 +19,10 @@ import {
   extractPaymentFlagsFromSalesArtifact,
 } from '../lib/order_payment_flags.mjs';
 import {guardFormalSalesFacts} from '../lib/primary_sales_cutover_guard.mjs';
+import {
+  resolveHistoricalStoreIdentity,
+  storeIdentityCorrectionEvidence,
+} from '../lib/historical_store_identity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -349,7 +353,7 @@ async function collectStores() {
   }));
 }
 
-async function collectSales(args, productMap, skcMap) {
+async function collectSales(args, productMap, skcMap, stores, historicalStoreIdentityConfig) {
   const files = await listJsonFiles(args.salesDir, args.salesDate);
   const daily = [];
   const orders = [];
@@ -363,14 +367,30 @@ async function collectSales(args, productMap, skcMap) {
     const date = j.start || dateFromFile(file);
     const source = rel(file);
     const salesSourceKind = j.source === 'shein-openapi' ? 'openapi' : 'browser_webapi';
+    const storeIdentity = resolveHistoricalStoreIdentity({
+      sourceStoreKey: j.storeKey,
+      date,
+      config: historicalStoreIdentityConfig,
+      stores,
+    });
+    const correctionEvidence = storeIdentityCorrectionEvidence(storeIdentity);
+    const effectiveArtifact = {
+      ...j,
+      storeKey: storeIdentity.effectiveStoreKey,
+      groupKey: storeIdentity.groupKey || j.groupKey,
+      shopName: storeIdentity.shopName || j.shopName,
+    };
+    const rowSummary = row => correctionEvidence
+      ? {...row, _storeIdentityCorrection: correctionEvidence}
+      : row;
     const summary = j.summary || {};
     const goodsSales = summarizeSalesGoodsRows(j.goodsRows || []);
     const salesSar = Math.round((goodsSales.salesSar + Number.EPSILON) * 100) / 100;
     daily.push({
       date,
-      store_key: j.storeKey,
-      group_key: j.groupKey,
-      shop_name: j.shopName,
+      store_key: effectiveArtifact.storeKey,
+      group_key: effectiveArtifact.groupKey,
+      shop_name: effectiveArtifact.shopName,
       valid_order_count: int(goodsSales.positiveAmountOrderCount),
       goods_line_count: int((j.goodsRows || []).length),
       quantity_all: num(goodsSales.quantityAll),
@@ -379,28 +399,35 @@ async function collectSales(args, productMap, skcMap) {
       sales_rmb: Math.round((salesSar * 1.8 + Number.EPSILON) * 100) / 100,
       fetch_time: ts(j.fetchTime),
       source_file: source,
-      raw_summary: compactJson(summary),
+      raw_summary: compactJson(correctionEvidence ? {...summary, _storeIdentityCorrection: correctionEvidence} : summary),
     });
     catalog.push({
       file_path: source,
       file_kind: 'sales',
-      store_key: j.storeKey,
+      store_key: effectiveArtifact.storeKey,
       target_date: date,
       record_count: (j.goodsRows || []).length,
-      raw_meta: compactJson({fetchTime: j.fetchTime, summary}),
+      raw_meta: compactJson({
+        fetchTime: j.fetchTime,
+        summary,
+        ...(correctionEvidence ? {_storeIdentityCorrection: correctionEvidence} : {}),
+      }),
     });
-    paymentFlags.push(...extractPaymentFlagsFromSalesArtifact(j, {
+    paymentFlags.push(...extractPaymentFlagsFromSalesArtifact(effectiveArtifact, {
       date,
       sourceFile: source,
       sourceKind: salesSourceKind,
-    }));
+    }).map(row => correctionEvidence ? {
+      ...row,
+      raw_evidence: {...row.raw_evidence, _storeIdentityCorrection: correctionEvidence},
+    } : row));
     for (const [idx, row] of (j.orderRows || []).entries()) {
       const orderId = String(row.orderId || row.id || row.orderNo || idx);
-      const orderKey = `${j.storeKey}__${orderId}`;
+      const orderKey = `${effectiveArtifact.storeKey}__${orderId}`;
       orders.push({
         order_key: orderKey,
-        store_key: j.storeKey,
-        group_key: j.groupKey,
+        store_key: effectiveArtifact.storeKey,
+        group_key: effectiveArtifact.groupKey,
         order_id: row.orderId || '',
         order_no: row.orderNo || '',
         bill_no: row.billno || '',
@@ -413,15 +440,15 @@ async function collectSales(args, productMap, skcMap) {
         perform_status: row.performStatus ?? '',
         perform_status_desc: row.performStatusDesc || '',
         source_file: source,
-        raw_summary: compactJson(row),
+        raw_summary: compactJson(rowSummary(row)),
       });
     }
     for (const [idx, row] of (j.goodsRows || []).entries()) {
       const norm = normalizeGoodsSnDetailed(row.goodsSn || '', {goodsTitle: row.goodsTitle || row.goodsName || ''});
       const standard = norm.canonical || row.goodsSn || '';
       const orderId = String(row.orderId || row.orderNo || idx);
-      const orderKey = `${j.storeKey}__${orderId}`;
-      const itemKey = `${j.storeKey}__${date}__${orderId}__${row.goodsId || row.entityId || row.skcName || row.skuCode || idx}__${idx}`;
+      const orderKey = `${effectiveArtifact.storeKey}__${orderId}`;
+      const itemKey = `${effectiveArtifact.storeKey}__${date}__${orderId}__${row.goodsId || row.entityId || row.skcName || row.skuCode || idx}__${idx}`;
       const qty = num(row.number) ?? 0;
       const price = num(row.currencyPrice) ?? 0;
       const validSale = isValidSalesGoodsRow(row);
@@ -430,8 +457,8 @@ async function collectSales(args, productMap, skcMap) {
       const item = {
         order_item_key: itemKey,
         order_key: orderKey,
-        store_key: j.storeKey,
-        group_key: j.groupKey,
+        store_key: effectiveArtifact.storeKey,
+        group_key: effectiveArtifact.groupKey,
         order_id: row.orderId || '',
         order_no: row.orderNo || '',
         bill_no: row.billno || '',
@@ -456,7 +483,7 @@ async function collectSales(args, productMap, skcMap) {
         goods_performance_status: row.goodsPerformanceStatus ?? '',
         goods_performance_status_desc: row.goodsPerformanceStatusDesc || '',
         source_file: source,
-        raw_summary: compactJson(row),
+        raw_summary: compactJson(rowSummary(row)),
       };
       items.push(item);
       addProduct(productMap, {standardGoodsSn: standard, rawGoodsSn: row.goodsSn, date});
@@ -687,7 +714,10 @@ async function main() {
   const skcMap = new Map();
 
   const stores = await collectStores();
-  const sales = await collectSales(args, productMap, skcMap);
+  const historicalStoreIdentityConfig = await readJson(
+    path.join(ROOT, 'config', 'historical_store_identity_corrections.json'),
+  );
+  const sales = await collectSales(args, productMap, skcMap, stores, historicalStoreIdentityConfig);
   const primarySalesGuard = await readPrimarySalesGuard(args);
   const guardedSales = guardFormalSalesFacts(sales, primarySalesGuard);
   const formalSales = guardedSales.sales;

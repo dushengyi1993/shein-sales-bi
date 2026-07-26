@@ -319,6 +319,26 @@ function evaluate(summary, metabase, productReconciliation = null) {
     warnings.push(`有 ${finance.unmapped_lines} 条实际退货费尚未映射到订单行，金额 ${Number(finance.unmapped_actual_cost_sar || 0).toFixed(2)} SAR；该金额已单列风险，未静默计入或丢弃。`);
   }
 
+  const consistency = s.dataConsistency || {};
+  if (Number(consistency.cross_store_after_sales_orders || 0) > 0) {
+    const sample = Array.isArray(consistency.cross_store_after_sales_samples)
+      ? consistency.cross_store_after_sales_samples.slice(0, 4).join('、')
+      : '';
+    errors.push(`有 ${consistency.cross_store_after_sales_orders} 个订单的销售店铺与售后店铺不一致，已退款可能无法冲减净销量和利润${sample ? `；示例 ${sample}` : ''}。`);
+  }
+  if (Number(consistency.unique_skc_store_mismatch_rows || 0) > 0) {
+    errors.push(`有 ${consistency.unique_skc_store_mismatch_rows} 条订单商品的店铺与该 SKC 唯一归属店不一致，店铺销售归属可能串号。`);
+  }
+  if (Number(consistency.primary_openapi_store_mismatch_orders || 0) > 0) {
+    errors.push(`有 ${consistency.primary_openapi_store_mismatch_orders} 个订单的正式销售店铺与 OpenAPI 店铺不一致，需要先修正店铺归属再使用店铺业绩。`);
+  }
+  if (Number(consistency.order_key_store_prefix_mismatch_rows || 0) > 0) {
+    errors.push(`有 ${consistency.order_key_store_prefix_mismatch_rows} 条订单商品的稳定键仍保留其它店铺前缀，历史归属修复未完整闭环。`);
+  }
+  if (Number(consistency.daily_sales_reconciliation_rows || 0) > 0) {
+    errors.push(`有 ${consistency.daily_sales_reconciliation_rows} 个店铺日的销售汇总与订单明细不一致，首页与明细可能显示不同数字。`);
+  }
+
   if (productReconciliation?.status === 'warning') {
     warnings.push(...productReconciliation.warnings);
   } else if (productReconciliation?.status === 'ok') {
@@ -402,6 +422,100 @@ summary AS (
       'quality_rows', (SELECT count(*) FROM fact.quality_skc_snapshot WHERE snapshot_date = (SELECT quality_date FROM latest)),
       'comments_90d', (SELECT count(*) FROM fact.product_comment WHERE comment_date >= (SELECT business_date FROM latest) - interval '90 days'),
       'guided_actions', (SELECT count(*) FROM mart.bi_guided_action_current)
+    ),
+    'dataConsistency', (
+      WITH
+      link_owner AS (
+        SELECT skc,min(store_key) AS owner_store,count(DISTINCT store_key) AS owner_store_count
+        FROM fact.link_master_snapshot
+        WHERE coalesce(skc,'')<>''
+        GROUP BY skc
+      ),
+      cross_store_after_sales AS (
+        SELECT DISTINCT a.order_no,a.store_key AS after_sales_store,wrong.store_key AS sales_store
+        FROM fact.after_sales_item a
+        JOIN LATERAL (
+          SELECT min(oi.store_key) AS store_key
+          FROM fact.order_item oi
+          WHERE oi.order_no=a.order_no
+            AND oi.store_key<>a.store_key
+            AND (
+              (coalesce(a.skc,'')<>'' AND oi.skc=a.skc)
+              OR dim.product_match_key(oi.standard_goods_sn)=dim.product_match_key(a.standard_goods_sn)
+            )
+        ) wrong ON wrong.store_key IS NOT NULL
+        WHERE NOT EXISTS (
+          SELECT 1
+          FROM fact.order_item oi
+          WHERE oi.order_no=a.order_no
+            AND oi.store_key=a.store_key
+            AND (
+              (coalesce(a.skc,'')<>'' AND oi.skc=a.skc)
+              OR dim.product_match_key(oi.standard_goods_sn)=dim.product_match_key(a.standard_goods_sn)
+            )
+        )
+      ),
+      primary_orders AS (
+        SELECT order_no,min(store_key) AS store_key,count(DISTINCT store_key) AS store_count
+        FROM fact.order_item WHERE coalesce(order_no,'')<>'' GROUP BY order_no
+      ),
+      openapi_orders AS (
+        SELECT order_no,min(store_key) AS store_key,count(DISTINCT store_key) AS store_count
+        FROM fact.openapi_order_item WHERE coalesce(order_no,'')<>'' GROUP BY order_no
+      ),
+      order_daily AS (
+        SELECT
+          created_date AS date,
+          store_key,
+          count(DISTINCT order_no) FILTER (WHERE coalesce(sales_sar,0)>0)::integer AS orders,
+          count(*)::integer AS lines,
+          coalesce(sum(quantity),0) AS quantity,
+          round(coalesce(sum(sales_sar),0)::numeric,2) AS sales
+        FROM fact.order_item
+        GROUP BY created_date,store_key
+      ),
+      daily_mismatch AS (
+        SELECT daily.date,daily.store_key
+        FROM fact.store_daily_sales daily
+        FULL JOIN order_daily detail USING(date,store_key)
+        WHERE coalesce(daily.valid_order_count,0)<>coalesce(detail.orders,0)
+           OR coalesce(daily.goods_line_count,0)<>coalesce(detail.lines,0)
+           OR abs(coalesce(daily.quantity_positive_amount,0)-coalesce(detail.quantity,0))>0.0001
+           OR abs(coalesce(daily.sales_sar,0)-coalesce(detail.sales,0))>0.01
+      )
+      SELECT jsonb_build_object(
+        'cross_store_after_sales_orders',(SELECT count(DISTINCT order_no) FROM cross_store_after_sales),
+        'cross_store_after_sales_samples',coalesce((
+          SELECT jsonb_agg(sample ORDER BY sample)
+          FROM (
+            SELECT concat(order_no,'（销售 ',sales_store,' / 售后 ',after_sales_store,'）') AS sample
+            FROM cross_store_after_sales
+            ORDER BY order_no
+            LIMIT 8
+          ) samples
+        ),'[]'::jsonb),
+        'unique_skc_store_mismatch_rows',(
+          SELECT count(*)
+          FROM fact.order_item item
+          JOIN link_owner owner ON owner.skc=item.skc AND owner.owner_store_count=1
+          WHERE item.store_key<>owner.owner_store
+        ),
+        'primary_openapi_store_mismatch_orders',(
+          SELECT count(*)
+          FROM primary_orders primary_order
+          JOIN openapi_orders openapi_order USING(order_no)
+          WHERE primary_order.store_count=1
+            AND openapi_order.store_count=1
+            AND primary_order.store_key<>openapi_order.store_key
+        ),
+        'order_key_store_prefix_mismatch_rows',(
+          SELECT count(*)
+          FROM fact.order_item
+          WHERE order_item_key NOT LIKE store_key||'__%'
+             OR order_key NOT LIKE store_key||'__%'
+        ),
+        'daily_sales_reconciliation_rows',(SELECT count(*) FROM daily_mismatch)
+      )
     ),
     'accountingHealth', jsonb_build_object(
       'profit_cache', coalesce((

@@ -45,6 +45,9 @@ assert.match(schema, /finance_check_order_actual/);
 assert.match(schema, /return_order_performance_price_actual/);
 assert.match(schema, /CREATE OR REPLACE VIEW mart\.return_cost_package_actual/);
 assert.match(schema, /CREATE OR REPLACE VIEW mart\.return_package_catalog/);
+assert.match(schema, /CREATE OR REPLACE VIEW mart\.after_sales_settlement_detail/);
+assert.match(schema, /WHEN realized_reversal THEN 'realized'/);
+assert.match(schema, /WHEN pending_revenue_risk THEN 'pending'/);
 assert.match(schema, /LEFT JOIN mart\.return_cost_actual fa/);
 assert.match(schema, /pending_revenue_risk/);
 assert.match(schema, /estimated_return_delivery_fee_sar/);
@@ -93,6 +96,11 @@ assert.match(audit, /sales_probe_store_count/);
 assert.match(audit, /sales_coverage_is_event_driven_today/);
 assert.match(audit, /ops\.shein_webhook_primary_sales_enabled\(current_date\)/);
 assert.match(audit, /按 0 销量处理，不判为数据缺失/);
+assert.match(audit, /cross_store_after_sales_orders/);
+assert.match(audit, /unique_skc_store_mismatch_rows/);
+assert.match(audit, /primary_openapi_store_mismatch_orders/);
+assert.match(audit, /daily_sales_reconciliation_rows/);
+assert.match(audit, /已退款可能无法冲减净销量和利润/);
 assert.doesNotMatch(audit, /return arr\.length \? `\?\?\?/,
   'missing-store warnings must remain readable Chinese instead of mojibake');
 assert.match(audit, /notes\.push\(`有 \$\{storage\.detail_scaled_days\}/,
@@ -123,6 +131,10 @@ assert.match(portalClient, /SK-03038 按已批准例外计 09\+01/);
 assert.doesNotMatch(portalClient, /09散件仓 \+ 01整箱仓是可售实盘/);
 assert.match(portalClient, /function auditMessages\(\)/);
 assert.match(portalClient, /class="audit-reasons"/);
+assert.match(portalClient, /function returnSettlementKey\(r\)/);
+assert.match(portalClient, /已落定 \$\{M2\(orderTop\.realizedAmount\)\} · 待决 \$\{M2\(orderTop\.pendingAmount\)\} SAR/);
+assert.match(portalClient, /待决金额只作风险提示，不会提前冲减净销量或已落定利润/);
+assert.match(portalGenerator, /LEFT JOIN mart\.after_sales_settlement_detail settlement/);
 assert.match(portalGenerator, /id="auditReasons"/);
 
 assert.match(refresh, /^BEGIN ISOLATION LEVEL REPEATABLE READ;/m);

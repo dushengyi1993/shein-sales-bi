@@ -292,7 +292,14 @@ ET 物流仓服账单里的 `仓储费` 是仓储成本正式来源，旧 `fact.
 - `fact.inventory_cost_event` / `fact.inventory_cost_ledger`：从首个可信 ET 实盘切点起，按期初、盘点、入库、销售、RTV 最终进入 09 等事件，用移动加权平均维护数量、价值和销售 COGS。切点前无法知道真实批次消耗，利润保留 `legacy_pre_cutover_estimate` 并明确披露；切点后未估值或缺期初保持明确状态，不能再用未来成本表臆算补零。
 - `ops.accounting_period_close`：会计期间冻结边界；台账重建拒绝改写冻结期间，只允许从首个未冻结期间开始。
 - `fact.openapi_finance_check_order*`、`fact.openapi_return_item.performance_price` / `mart.return_cost_actual`：退货费优先用已结算财务净成本，其次用退货单商品行真实履约费；实际值都缺失时，只有退货包裹可保留 `13.88` 估算。来源区分 `finance_check_order_actual`、`return_order_performance_price_actual` 与 `package_estimate`。
-- 利润 mart 同时保留已落定利润、估算退货费和未落定售后风险字段；未结售后风险不能覆盖或改写已落定利润。
+- `mart.after_sales_settlement_detail` 是售后结算语义的唯一结构化来源：`realized` 才冲减净销量和已落定利润，`pending` 只进入待决风险，`closed_without_refund` 表示无退款闭环，`not_refund_candidate` 不影响退款口径。`已妥投` 或退货包裹 `已签收` 本身不是最终退款信号。
+- `mart.profit_after_sales_impact` 直接消费上述结算明细；利润 mart 同时保留已落定利润、估算退货费和未落定售后风险字段，未结售后风险不能覆盖或改写已落定利润。
+
+### 历史店铺身份纠正
+
+- `config/historical_store_identity_corrections.json` 只登记有完整证据、明确起止日和源店/实际店映射的历史身份事故；装载器在读取原始销售文件时应用同一规则，防止全历史重载把已修复错配重新写回。
+- `ops.historical_store_identity_correction` 保存已应用的规则快照，`ops.order_store_reassignment_audit` 逐订单商品行保留旧键、新键、原店、实际店和证据。修复工具默认只读，真实执行必须使用本次检查生成的精确 manifest hash。
+- 数仓体检必须同时检查：销售店铺与售后店铺、订单商品与唯一 SKC 归属、正式销售与 OpenAPI、稳定键店铺前缀、店铺日汇总与订单明细。任一不一致均为错误，不允许只在单张页面里打补丁。
 
 ### `fact.product_quality_daily`
 

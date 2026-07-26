@@ -1061,6 +1061,46 @@ CREATE INDEX IF NOT EXISTS order_payment_flag_is_cod_date_idx
 CREATE INDEX IF NOT EXISTS order_payment_flag_order_no_idx
   ON fact.order_payment_flag(store_key,order_no);
 
+CREATE TABLE IF NOT EXISTS ops.historical_store_identity_correction (
+  correction_id text PRIMARY KEY,
+  incident_id text NOT NULL,
+  source_store_key text NOT NULL REFERENCES dim.store(store_key),
+  effective_store_key text NOT NULL REFERENCES dim.store(store_key),
+  start_date date NOT NULL,
+  end_date date NOT NULL,
+  expected_item_rows integer,
+  reason text NOT NULL,
+  evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
+  active boolean NOT NULL DEFAULT true,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (source_store_key <> effective_store_key),
+  CHECK (start_date <= end_date)
+);
+
+CREATE TABLE IF NOT EXISTS ops.order_store_reassignment_audit (
+  run_id text NOT NULL,
+  correction_id text NOT NULL,
+  old_order_item_key text NOT NULL,
+  new_order_item_key text NOT NULL,
+  old_order_key text,
+  new_order_key text,
+  order_no text,
+  created_date date,
+  source_store_key text NOT NULL,
+  effective_store_key text NOT NULL,
+  standard_goods_sn text,
+  skc text,
+  quantity numeric,
+  sales_sar numeric,
+  source_file text,
+  evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
+  repaired_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (run_id, old_order_item_key)
+);
+
+CREATE INDEX IF NOT EXISTS order_store_reassignment_audit_order_idx
+  ON ops.order_store_reassignment_audit(order_no,created_date);
+
 -- Keep the OpenAPI parallel/primary tables in the authoritative warehouse
 -- schema.  Loaders may still run their idempotent ensure step, but a clean
 -- database must be capable of applying Webhook migrations and serving the BI
@@ -2706,9 +2746,10 @@ SELECT
 FROM allocated
 GROUP BY order_item_key;
 
-CREATE OR REPLACE VIEW mart.profit_after_sales_impact AS
+CREATE OR REPLACE VIEW mart.after_sales_settlement_detail AS
 WITH raw AS (
   SELECT
+    ai.after_sales_item_key,
     ai.store_key,
     ai.order_no,
     ai.standard_goods_sn,
@@ -2765,6 +2806,27 @@ classified AS (
       AND NOT has_actual_return_cost
     ) AS charge_estimated_return_package
   FROM raw
+)
+SELECT
+  *,
+  CASE
+    WHEN invalid_or_cancelled THEN 'closed_without_refund'
+    WHEN realized_reversal THEN 'realized'
+    WHEN pending_revenue_risk THEN 'pending'
+    ELSE 'not_refund_candidate'
+  END AS settlement_state,
+  CASE
+    WHEN invalid_or_cancelled THEN '已取消/关闭'
+    WHEN realized_reversal THEN '退款已落定'
+    WHEN pending_revenue_risk THEN '退款待落定'
+    ELSE '不影响退款'
+  END AS settlement_state_label
+FROM classified;
+
+CREATE OR REPLACE VIEW mart.profit_after_sales_impact AS
+WITH classified AS (
+  SELECT *
+  FROM mart.after_sales_settlement_detail
 ),
 package_basis AS (
   SELECT

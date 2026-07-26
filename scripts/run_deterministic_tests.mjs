@@ -104,6 +104,8 @@ const tests = [
   'scripts/smoke_cloud_marketing_live_guard_resilience.mjs',
   'scripts/test_openapi_sales_loader_validity.mjs',
   'scripts/test_openapi_sales_mapping_contract.mjs',
+  'scripts/test_historical_store_identity.mjs',
+  'scripts/test_historical_store_identity_repair_contract.mjs',
   'scripts/test_openapi_product_reconciliation_policy.mjs',
   'scripts/test_cloud_bi_refresh_lock_handoff.mjs',
   'scripts/test_portal_security.mjs',
