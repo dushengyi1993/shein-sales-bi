@@ -250,7 +250,7 @@ export function createSheinWebhookService({
   let timer = null;
   let working = false;
   let stopping = false;
-  const counters = {accepted: 0, duplicates: 0, rejected: 0, processed: 0, failed: 0};
+  const counters = {accepted: 0, duplicates: 0, retired: 0, rejected: 0, processed: 0, failed: 0};
 
   async function ingress(req, res) {
     const url = new URL(req.url || '/', 'http://localhost');
@@ -263,6 +263,17 @@ export function createSheinWebhookService({
     const deadlineAt = Date.now() + positiveInt(ingressBudgetMs, 1_200, {min: 250, max: 1_400});
     try {
       const headers = normalizeWebhookHeaders(req.headers);
+      // Legacy per-store apps may remain authorized for rollback while the
+      // production data plane is consolidated onto one shared app. Their app
+      // IDs are stored only as SHA-256 hashes. A match is acknowledged and
+      // discarded before body parsing, signature/decryption, persistence, or
+      // any business handler. This prevents duplicate writes and platform
+      // retry storms without retaining legacy app secrets in production.
+      if (credentialRegistry.isRetiredApp?.(headers)) {
+        counters.retired += 1;
+        req.resume();
+        return writeJson(res, 200, {ok: true, retired: true});
+      }
       const identity = credentialRegistry.resolve(headers);
       const rawBody = await beforeDeadline(readRawBody(req, maxBodyBytes), deadlineAt);
       const eventData = extractWebhookEventData({contentType: headers['content-type'], rawBody, maxBodyBytes});

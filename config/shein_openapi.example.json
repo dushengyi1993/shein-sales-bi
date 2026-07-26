@@ -12,14 +12,17 @@
   },
   "app": {
     "appId": "默认开放平台应用 APP_ID；不要提交真实值",
-    "appSecretKey": "默认开放平台应用 APP_SECRET_KEY；不要提交真实值"
+    "appSecretKey": "默认开放平台应用 APP_SECRET_KEY；不要提交真实值",
+    "webhookValidationStoreKey": "共享 App 的技术验证归属店铺，例如 DL；仅用于 appScopedOnly 隔离"
   },
   "apps": {
     "示例应用KEY": {
       "appId": "当不同店铺属于不同开放平台应用主体时，在这里填写该应用 APP_ID；不要提交真实值",
-      "appSecretKey": "当不同店铺属于不同开放平台应用主体时，在这里填写该应用 APP_SECRET_KEY；不要提交真实值"
+      "appSecretKey": "当不同店铺属于不同开放平台应用主体时，在这里填写该应用 APP_SECRET_KEY；不要提交真实值",
+      "webhookValidationStoreKey": "同一个 App 授权多店时必填一个已授权店铺；只隔离平台消息测试"
     }
   },
+  "webhookRetiredAppIdSha256": [],
   "stores": [
     {
       "storeKey": "DL",
@@ -30,7 +33,7 @@
       "secretKey": "解密后的店铺 secretKey；不要提交真实值",
       "encryptedSecretKey": "平台返回的加密 secretKey，可选；不要提交真实值",
       "authorizedAt": null,
-      "notes": "先用一个真实店铺试点，跑通后再复制到 16 店"
+      "notes": "先用一个真实店铺试点；同一 App 可授权 19 店，但每店仍必须保存各自唯一 OpenKey"
     }
   ],
   "safeWriteOperations": {

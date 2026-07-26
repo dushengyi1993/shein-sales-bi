@@ -1,9 +1,20 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import {loadSheinWebhookCredentialRegistry} from '../lib/shein_webhook_config.mjs';
 
+const retiredAppId = 'app-retired';
 const registry = await loadSheinWebhookCredentialRegistry({config: {
-  apps: {shared: {appId: 'app-shared', appSecretKey: 'secret-shared'}},
+  webhookRetiredAppIdSha256: [
+    crypto.createHash('sha256').update(retiredAppId, 'utf8').digest('hex'),
+  ],
+  apps: {
+    shared: {
+      appId: 'app-shared',
+      appSecretKey: 'secret-shared',
+      webhookValidationStoreKey: 'AA',
+    },
+  },
   stores: [
     {storeKey: 'AA', openKeyId: 'open-aa', appKey: 'shared'},
     {storeKey: 'BB', openKeyId: 'open-bb', app: {appId: 'app-bb', appSecretKey: 'secret-bb'}},
@@ -12,7 +23,10 @@ const registry = await loadSheinWebhookCredentialRegistry({config: {
   ],
 }});
 
-assert.deepEqual(registry.summary, {appCount: 2, storeCount: 3, configFile: ''});
+assert.deepEqual(registry.summary, {appCount: 2, storeCount: 3, retiredAppCount: 1, configFile: ''});
+assert.equal(registry.isRetiredApp({'x-lt-appid': retiredAppId}), true);
+assert.equal(registry.isRetiredApp({'x-lt-appid': 'app-shared'}), false);
+assert.equal(registry.isRetiredApp({}), false);
 assert.equal(registry.resolve({'x-lt-appid': 'app-bb'}).storeKey, 'BB');
 assert.equal(registry.resolve({'x-lt-appid': 'app-bb'}).identityScope, 'app_only');
 assert.equal(registry.resolve({'x-lt-appid': 'app-bb', 'x-lt-openkeyid': 'synthetic-test-open-key'}).storeKey, 'BB');
@@ -20,11 +34,25 @@ assert.equal(registry.resolve({'x-lt-appid': 'app-bb', 'x-lt-openkeyid': 'synthe
 assert.equal(registry.resolve({'x-lt-appid': 'app-shared', 'x-lt-openkeyid': 'open-aa'}).storeKey, 'AA');
 assert.equal(registry.resolve({'x-lt-appid': 'app-shared', 'x-lt-openkeyid': 'open-aa'}).identityScope, 'store');
 assert.equal(registry.resolve({'x-lt-openkeyid': 'open-cc'}).appId, 'app-shared');
-assert.throws(() => registry.resolve({'x-lt-appid': 'app-shared'}), /multiple stores/);
-assert.throws(() => registry.resolve({'x-lt-appid': 'app-shared', 'x-lt-openkeyid': 'synthetic-test-open-key'}), /multiple stores/);
+assert.equal(registry.resolve({'x-lt-appid': 'app-shared'}).storeKey, 'AA');
+assert.equal(registry.resolve({'x-lt-appid': 'app-shared'}).identityScope, 'app_only');
+assert.equal(registry.resolve({'x-lt-appid': 'app-shared', 'x-lt-openkeyid': 'synthetic-test-open-key'}).storeKey, 'AA');
+assert.equal(registry.resolve({'x-lt-appid': 'app-shared', 'x-lt-openkeyid': 'synthetic-test-open-key'}).identityScope, 'app_only');
 assert.throws(() => registry.resolve({'x-lt-appid': 'app-bb', 'x-lt-openkeyid': 'open-aa'}), /mismatch/);
 assert.throws(() => registry.resolve({'x-lt-appid': 'unknown'}), /Unknown/);
 assert.equal(JSON.stringify(registry.summary).includes('secret'), false);
+
+const sharedWithoutValidationStore = await loadSheinWebhookCredentialRegistry({config: {
+  apps: {shared: {appId: 'app-shared', appSecretKey: 'secret-shared'}},
+  stores: [
+    {storeKey: 'AA', openKeyId: 'open-aa', appKey: 'shared'},
+    {storeKey: 'CC', openKeyId: 'open-cc', appKey: 'shared'},
+  ],
+}});
+assert.throws(() => sharedWithoutValidationStore.resolve({
+  'x-lt-appid': 'app-shared',
+  'x-lt-openkeyid': 'synthetic-test-open-key',
+}), /multiple stores/);
 
 await assert.rejects(() => loadSheinWebhookCredentialRegistry({config: {
   stores: [
@@ -37,5 +65,31 @@ await assert.rejects(() => loadSheinWebhookCredentialRegistry({
   config: {stores: [{storeKey: 'AA', openKeyId: 'open-aa', appId: 'app-aa', appSecretKey: 'secret-aa'}]},
   expectedStoreKeys: ['AA', 'BB'],
 }), /missing=BB/);
+
+await assert.rejects(() => loadSheinWebhookCredentialRegistry({config: {
+  apps: {
+    shared: {
+      appId: 'app-shared',
+      appSecretKey: 'secret-shared',
+      webhookValidationStoreKey: 'MISSING',
+    },
+  },
+  stores: [
+    {storeKey: 'AA', openKeyId: 'open-aa', appKey: 'shared'},
+    {storeKey: 'CC', openKeyId: 'open-cc', appKey: 'shared'},
+  ],
+}}), /not authorized/);
+
+await assert.rejects(() => loadSheinWebhookCredentialRegistry({config: {
+  webhookRetiredAppIdSha256: ['not-a-sha256'],
+  stores: [{storeKey: 'AA', openKeyId: 'open-aa', appId: 'app-aa', appSecretKey: 'secret-aa'}],
+}}), /hash is invalid/);
+
+await assert.rejects(() => loadSheinWebhookCredentialRegistry({config: {
+  webhookRetiredAppIdSha256: [
+    crypto.createHash('sha256').update('app-aa', 'utf8').digest('hex'),
+  ],
+  stores: [{storeKey: 'AA', openKeyId: 'open-aa', appId: 'app-aa', appSecretKey: 'secret-aa'}],
+}}), /also marked as retired/);
 
 console.log('shein_webhook_config: app/store identity mapping passed');

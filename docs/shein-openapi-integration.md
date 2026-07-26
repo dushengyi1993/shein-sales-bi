@@ -4,6 +4,8 @@
 
 > 2026-06-28 补充：当前项目同时存在两条“API 化”链路。`SHEIN 官方 OpenAPI` 需要开放平台应用、授权和签名，19 店已完成授权/探针/隔离对账与受控写预检；`SHEIN 后台 WebAPI 直连` 复用已登录 Cookie/session 调后台接口，仍用于当前销售生产抓取的无浏览器直连优先。两者不要混为一谈，密钥和 Cookie session 都不得进入 GitHub。
 
+> 2026-07-26 更新：半托生产数据面已统一为 **DL 单一 App + 19 店各自唯一 OpenKey**。通用读取、受控写、BI/CLI、日更对账、营销库存兜底和 Webhook 均使用同一份私有配置；原独立 App 只保留为回滚资产。详见 [单应用生产切换记录](openapi-single-app-production-cutover-2026-07-26.md)。
+
 ## 当前已确认信息
 
 - 开发者主体：广州皓兰商贸有限公司。
@@ -17,6 +19,7 @@
 
 ## 当前收口（2026-06-28）
 
+- 2026-07-26 起，19 店生产凭据统一挂在 DL 半托 App 下；每个店铺仍使用自己的 OpenKey/secretKey，不能跨店复制。切换后只读探测为 19/19，受控写前检为 19/19。
 - 19 店官方 OpenAPI 授权、云端白名单、只读探针和脱敏能力总账已完成；销售、退货退款、商品/链接基础资料仍写 `fact.openapi_*` / `mart.openapi_*_reconciliation` 隔离层，不直接覆盖生产事实源。
 - 自动化运营受控写适配器已接入 `copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。真实提交必须走 BI 账号写权限、`safeWriteOperations`、真实写白名单、人 + 店 + 动作、dry-run `payloadHash`、任务 `waiting_review`、确认和回读/审计。
 - `copy_product_draft` 已使用 OpenAPI 商品详情 / `spu-info` mapper 还原类目、属性、图片、SKU、供货价、库存和尺寸重量等关键发布字段；强指纹回读未命中时只能人工核销，不能用平台 SKU、源 SKC 或货号文本弱匹配自动判完成。
@@ -49,7 +52,7 @@
 5. 用应用级 `APP_SECRET_KEY` 解密返回的 `secretKey`。
 6. 后续普通 API 调用使用店铺级 `openKeyId` + 解密后的 `secretKey` 生成签名。
 
-19 店全量接入时要额外注意：不同店铺可能属于不同开放平台应用主体。私有配置支持全局默认 `app`，也支持 `apps.<appKey>` 或店铺级 `stores[].appId/appSecretKey` 覆盖；授权换密钥时必须使用该店对应应用的密钥，不能把 HL 应用密钥默认复用给所有店。
+私有配置仍兼容全局默认 `app`、`apps.<appKey>` 和店铺级 `stores[].appId/appSecretKey`，用于迁移或回滚。当前生产明确使用 `apps.DL`；共享同一 App 不等于共享店铺密钥，授权换密钥时仍必须逐店完成，并保存该店唯一的 OpenKey/secretKey。
 
 注意：`/open-api/auth/get-by-token` 比较特殊，此时还没有店铺级密钥，签名要用应用级 `APP_ID` 和 `APP_SECRET_KEY`，请求头使用 `x-lt-appid`。
 

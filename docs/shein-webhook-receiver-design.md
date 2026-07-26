@@ -1,6 +1,6 @@
 # SHEIN Webhook 接收与“平台动态”运行说明
 
-> 状态：2026-07-20 已完成代码、数据库迁移、BI 子页面、P0 飞书出口、云端服务，以及 19/19 App 正式/测试回调和每店首批 10/10 事件订阅验收；2026-07-23 再新增平台向半托 App 实际开放的 3 项，当前为每店 13/13。
+> 状态：2026-07-20 已完成代码、数据库迁移、BI 子页面、P0 飞书出口、云端服务，以及当时 19/19 App 的回调与首批订阅验收；2026-07-23 扩为每 App 13 项。2026-07-26 生产数据面已合并为 DL 单一半托 App + 19 店授权，当前 App 仍为 13/14（视频转换关闭）。详见 [单应用生产切换记录](openapi-single-app-production-cutover-2026-07-26.md)。
 
 ## 1. 业务目标
 
@@ -16,7 +16,7 @@ Webhook 是平台状态变化的实时触发源，不替代 OpenAPI 详情接口
 
 ```mermaid
 flowchart LR
-  A["19 个 SHEIN OpenAPI App"] -->|"HTTPS 443"| B["Cloudflare"]
+  A["DL 半托 OpenAPI App<br/>19 个店铺授权"] -->|"HTTPS 443"| B["Cloudflare"]
   B --> C["HAProxy 443\nSNI + Cloudflare 直接来源门禁"]
   C --> D["Caddy 10443\n受控恢复真实来源 IP"]
   D --> E["Nginx\nSHEIN 官方推送 IP allowlist"]
@@ -38,7 +38,7 @@ flowchart LR
 POST https://sa.dushengyi.cc/api/shein/webhook/v1/events
 ```
 
-回调 URL 不带 query。19 个 App 可以配置同一 URL；正式业务事件依据 `x-lt-appid + x-lt-openKeyId` 映射到唯一店铺，已知跨店不一致、映射不唯一、缺店或重复店铺时失败关闭，不猜店铺。只有开放平台自身的技术探针可在 App 唯一映射时进入下述 `appScopedOnly` 隔离路径。
+回调 URL 不带 query。当前生产由一个 DL App 接收 19 店事件；正式业务事件依据 `x-lt-appid + x-lt-openKeyId` 映射到唯一店铺，已知跨店不一致、映射不唯一、缺店或重复店铺时失败关闭，不猜店铺。开放平台自身的技术探针使用临时 OpenKey，只有显式配置 `webhookValidationStoreKey` 时才进入 `appScopedOnly` 隔离路径，且绝不执行经营动作。旧 App 只按 App ID 哈希命中“确认并丢弃”路径，不读取正文、不落库，也不保留旧 App Secret。
 
 正式链路复用标准 443，但没有让应用直接信任客户端自报的 `CF-Connecting-IP`：HAProxy 先确认 `sa.dushengyi.cc` SNI 的直接来源属于 Cloudflare，再把 TLS 流量转到 Caddy `10443`；Caddy 只在这条受控上游后恢复 Cloudflare 写入的原始客户端 IP，Nginx 最后按 SHEIN 官方推送 IP 放行。签名仍是主校验，来源 IP 只是独立第二层。`8443` 继续作为受限故障回退，但不得写入平台正式/测试回调。
 
@@ -89,6 +89,8 @@ expected = randomKey + Base64(UTF8(hashHex))
 官方目录当前为 23 个 Webhook（新增 `3001903`）。其余事件已能安全解析和入库，但第一阶段不主动订阅；价格异常、库存预警等 P1 也不发飞书。
 
 2026-07-23 平台侧扩展订阅只以 19 个 `mode=5` App 的实时 `queryEventConfigList` 为准。实际可新增并已完成 19 店逐项回读的是 `3001461`、`3001792`、`3001793`，因此当前每店为 `13/13`。`3000804`、`3000912`、`3001068` 虽然接收器和官方文档目录均已支持，但平台未向这 19 个半托 App 返回订阅项，仍保持未订阅；不得改用全托 App 或把接收能力误写成订阅完成。
+
+2026-07-26 当前生产订阅改由 DL 单一半托 App 承载。平台对该 App 返回 14 个可选事件，13 个经营事件保持订阅，`product_video_conversion_completed` 保持关闭；原 19 App 的逐店结果保留为历史验收证据，不再代表当前生产拓扑。
 
 2026-07-24 业务闭环补齐：
 

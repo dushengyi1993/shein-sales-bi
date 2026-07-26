@@ -6,7 +6,7 @@
 
 - [BI 系统架构](bi-system-architecture.md)、[运行环境架构](runtime-architecture.md)、[仓库数据模型](data-model.md)、[BI 数仓模型](bi-warehouse-model.md)
 - [BI Portal 当前界面](bi-portal-ui-current.md)、[Metabase BI](metabase-bi.md)、[链接运营产品主数据](link-ops-product-master.md)
-- [OpenAPI 集成](shein-openapi-integration.md)、[OpenAPI API schema 索引](shein-openapi-api-schema-index.md)、[Webhook 接收与平台动态](shein-webhook-receiver-design.md)
+- [OpenAPI 集成](shein-openapi-integration.md)、[OpenAPI 单应用生产切换（2026-07-26）](openapi-single-app-production-cutover-2026-07-26.md)、[OpenAPI API schema 索引](shein-openapi-api-schema-index.md)、[Webhook 接收与平台动态](shein-webhook-receiver-design.md)
 
 ## 运维 runbook
 

@@ -457,7 +457,7 @@
 - `lib/shein_openapi_client.mjs` / `test_shein_openapi_client_timeout.mjs`：共享 OpenAPI 客户端与超时回归。超时覆盖网络请求和响应正文读取全过程，避免服务端已返回 headers 但 body 卡住时无限等待。
 
 - `scripts/serve_shein_webhook.mjs`：独立 Webhook HTTP receiver + PostgreSQL lease worker；1.2 秒入口预算内只有 AES 密文可靠落库后才返回 200，不参与 SHEIN 写。
-- `lib/shein_webhook_receiver.mjs` / `lib/shein_webhook_config.mjs`：官方签名/AES、三种 body 格式、23 个事件规范化，以及 19 App 到店铺的严格私有配置映射。
+- `lib/shein_webhook_receiver.mjs` / `lib/shein_webhook_config.mjs`：官方签名/AES、三种 body 格式、23 个事件规范化，以及单 App/多 App 到店铺 OpenKey 的严格私有配置映射；共享 App 技术探针进入 `appScopedOnly`，退役 App 只按哈希确认并丢弃。
 - `lib/shein_webhook_repository.mjs` / `infra/warehouse/migrations/20260719_001_shein_webhook_runtime.sql` / `infra/warehouse/migrations/20260721_001_shein_webhook_product_context.sql` / `infra/warehouse/migrations/20260723_001_webhook_primary_sales.sql`：只存密文的幂等 receipt/queue、安全前端投影、下架站点事件合并、受限商品/销售上下文函数、租约重试、按单 OpenAPI 入仓、2026-07-23 后可回滚的正式销售晋升，以及授权/额度店铺闸门。
 - `scripts/provision_shein_webhook_postgres_role.sh`：root-only 创建独立 `shein_webhook_ops` 与 `0600` 专用 EnvironmentFile，不输出密码；迁移随后只授予精准表权限。
 - `lib/shein_webhook_handlers.mjs` / `lib/shein_webhook_audit_context.mjs` / `lib/shein_webhook_order_return_sync.mjs`：商品生命周期安全记录与人话补全、审核失败的回调原因及只读议价信息补全、订单/退货按单号无损增量入仓、授权/额度风险处理；下架人/原因仅使用平台明示字段，审核补全失败不阻塞 P0，公网 worker 不读取运营任务表，合规事件不错误地封整店。

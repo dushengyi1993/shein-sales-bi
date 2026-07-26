@@ -33,6 +33,7 @@ import {normalizeGoodsSnDetailed} from '../../lib/product_sku_normalizer.mjs';
 import {
   buildManualLimitedDiscountIndex,
   classifyManualLimitedDiscountLiveState,
+  DEFAULT_MANUAL_LIMITED_DISCOUNT_OVERRIDES_PATH,
   loadManualLimitedDiscountRegistry,
 } from '../../lib/marketing_manual_limited_discount_overrides.mjs';
 
@@ -62,7 +63,13 @@ const sourceGuardPath = args.sourceGuard ? path.resolve(ROOT, args.sourceGuard) 
 const policy = await loadMarketingPricingPolicy(policyPath);
 const effectiveNow = args.now ? new Date(String(args.now).replace(' ', 'T') + (/[zZ]|[+-]\d{2}:?\d{2}$/.test(String(args.now)) ? '' : '+08:00')) : new Date();
 if (!Number.isFinite(effectiveNow.getTime())) throw new Error(`Invalid --now: ${args.now}`);
-const manualLimitedDiscountRegistry = await loadManualLimitedDiscountRegistry();
+const manualLimitedDiscountRegistryPath = path.resolve(
+  ROOT,
+  args.manualLimitedDiscountRegistry || DEFAULT_MANUAL_LIMITED_DISCOUNT_OVERRIDES_PATH,
+);
+const manualLimitedDiscountRegistry = await loadManualLimitedDiscountRegistry(
+  manualLimitedDiscountRegistryPath,
+);
 const manualLimitedDiscountIndex = buildManualLimitedDiscountIndex(
   manualLimitedDiscountRegistry,
   effectiveNow,

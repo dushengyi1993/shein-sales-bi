@@ -40,10 +40,13 @@ function signature(timestamp, randomKey = 'abc12') {
 
 const stored = [];
 const repository = {storeReceipt: async input => (stored.push(input), {receipt: {id: stored.length}, duplicate: stored.length > 1})};
-const registry = {resolve: headers => {
-  if (headers['x-lt-appid'] !== 'app-1' || headers['x-lt-openkeyid'] !== 'open-1') throw new Error('Unknown webhook app id');
-  return {appId: 'app-1', appSecretKey: secret, openKeyId: 'open-1', storeKey: 'AA'};
-}};
+const registry = {
+  isRetiredApp: headers => headers['x-lt-appid'] === 'app-retired',
+  resolve: headers => {
+    if (headers['x-lt-appid'] !== 'app-1' || headers['x-lt-openkeyid'] !== 'open-1') throw new Error('Unknown webhook app id');
+    return {appId: 'app-1', appSecretKey: secret, openKeyId: 'open-1', storeKey: 'AA'};
+  },
+};
 const service = createSheinWebhookService({repository, credentialRegistry: registry, workerEnabled: false, callbackPath, now: () => 1_700_000_000_000, logger: {warn() {}, error() {}}});
 const address = await service.start({host: '127.0.0.1', port: 0});
 const timestamp = '1700000000000';
@@ -63,13 +66,24 @@ assert.equal(stored[0].eventData, eventData);
 assert.equal('decryptedPayload' in stored[0], false, 'ingress must persist ciphertext, never plaintext');
 assert.ok(stored[0].statementTimeoutMs <= 800, 'receipt insert must carry a bounded PostgreSQL statement timeout');
 
+const retired = await fetch(url, {
+  method: 'POST',
+  headers: {'content-type': 'application/octet-stream', 'x-lt-appid': 'app-retired'},
+  body: 'legacy payload is never parsed',
+});
+assert.equal(retired.status, 200);
+assert.deepEqual(await retired.json(), {ok: true, retired: true});
+assert.equal(stored.length, 1, 'retired app delivery must not create a receipt');
+
 const bad = await fetch(url, {method: 'POST', headers: {...headers, 'x-lt-signature': 'wrong'}, body: JSON.stringify({eventData})});
 assert.equal(bad.status, 401);
 assert.equal(stored.length, 1);
 const query = await fetch(`${url}?bad=1`, {method: 'POST', headers, body: JSON.stringify({eventData})});
 assert.equal(query.status, 404);
 const health = await fetch(`http://127.0.0.1:${address.port}/healthz`);
-assert.equal((await health.json()).service, 'shein-webhook');
+const healthBody = await health.json();
+assert.equal(healthBody.service, 'shein-webhook');
+assert.equal(healthBody.counters.retired, 1);
 await service.stop();
 
 const deadlineRepository = {storeReceipt: async () => new Promise(() => {})};

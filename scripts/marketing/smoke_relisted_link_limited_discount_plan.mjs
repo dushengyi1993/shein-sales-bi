@@ -15,8 +15,10 @@ const outDir = path.join(tmp, 'out');
 const reportJson = path.join(tmp, 'report.json');
 const reportMd = path.join(tmp, 'report.md');
 const storesConfigPath = path.join(tmp, 'stores.json');
+const manualLimitedDiscountRegistryPath = path.join(tmp, 'manual-limited-discount-overrides.json');
 await fs.mkdir(storeHistoryDir, {recursive: true});
 await fs.writeFile(storesConfigPath, `${JSON.stringify({stores: [{storeKey: 'DL', enabled: true}]}, null, 2)}\n`, 'utf8');
+await fs.writeFile(manualLimitedDiscountRegistryPath, `${JSON.stringify({entries: []}, null, 2)}\n`, 'utf8');
 
 const skc = 'sv260208174499165647929';
 const canonical = 'SK-03038制冰机';
@@ -90,6 +92,7 @@ const result = spawnSync(process.execPath, [
   '--current-marketing-live-scan', liveScanPath,
   '--link-history-dir', historyDir,
   '--stores-config', storesConfigPath,
+  '--manual-limited-discount-registry', manualLimitedDiscountRegistryPath,
   '--out-dir', outDir,
   '--report-json', reportJson,
   '--report-md', reportMd,
@@ -132,6 +135,7 @@ const currentResult = spawnSync(process.execPath, [
   '--current-marketing-live-scan', liveScanPath,
   '--link-history-dir', historyDir,
   '--stores-config', storesConfigPath,
+  '--manual-limited-discount-registry', manualLimitedDiscountRegistryPath,
   '--out-dir', path.join(tmp, 'current-out'),
   '--report-json', currentReportJson,
   '--report-md', currentReportMd,
@@ -163,6 +167,7 @@ const futureFallbackResult = spawnSync(process.execPath, [
   '--current-marketing-live-scan', liveScanPath,
   '--link-history-dir', historyDir,
   '--stores-config', storesConfigPath,
+  '--manual-limited-discount-registry', manualLimitedDiscountRegistryPath,
   '--now', '2026-07-11 12:00:00',
   '--out-dir', path.join(tmp, 'future-fallback-out'),
   '--report-json', path.join(tmp, 'future-fallback-report.json'),
