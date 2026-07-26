@@ -1,9 +1,9 @@
 {
   "authorityId": "dushengyi",
-  "bundlePath": "owner-knowledge/bundles/3004ff0a0cfffa7a338d1bf67057b1e8ca7d16914712e5c09567f0737f00006f.json",
-  "bundleSha256": "265d2160af40db4261aa76f33255133f6f39d6e6c6b5ab1a3e57c66d0c73d9fe",
-  "fingerprint": "3004ff0a0cfffa7a338d1bf67057b1e8ca7d16914712e5c09567f0737f00006f",
-  "publishedAt": "2026-07-23T08:19:22.353Z",
+  "bundlePath": "owner-knowledge/bundles/29fb9a36f57cec8818d1062613d15fc7d1193aa43774f4b4d884402c59442b43.json",
+  "bundleSha256": "036efed88263e2e408b1fda47d37971db988d4e221fd6c695e741f7fea0706ad",
+  "fingerprint": "29fb9a36f57cec8818d1062613d15fc7d1193aa43774f4b4d884402c59442b43",
+  "publishedAt": "2026-07-26T10:27:40.738Z",
   "ruleCount": 36,
   "schemaVersion": 1
 }
