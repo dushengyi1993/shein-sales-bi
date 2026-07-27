@@ -136,8 +136,15 @@ assert.doesNotMatch(portalClient, /09散件仓 \+ 01整箱仓是可售实盘/);
 assert.match(portalClient, /function auditMessages\(\)/);
 assert.match(portalClient, /class="audit-reasons"/);
 assert.match(portalClient, /function returnSettlementKey\(r\)/);
-assert.match(portalClient, /已落定 \$\{M2\(orderTop\.realizedAmount\)\} · 待决 \$\{M2\(orderTop\.pendingAmount\)\} SAR/);
+assert.match(portalClient, /退款已落定 \$\{M2\(orderTop\.realizedAmount\)\} · 退款待落定 \$\{M2\(orderTop\.pendingAmount\)\} SAR/);
 assert.match(portalClient, /待决金额只作风险提示，不会提前冲减净销量或已落定利润/);
+assert.match(portalClient, /function salesReturnReconciliation\(s,orderSummary\)/,
+  'the homepage must explain the gross-to-net quantity equation next to the quantity KPI');
+assert.match(portalClient, /总销量 − \$\{M\(reversedQty\)\} \$\{reversedLabel\} = \$\{M\(s\.qty\)\} 净销量/);
+assert.match(portalClient, /另有 \$\{M\(pendingQty\)\} 件退款待落定，暂不扣减净销量/);
+assert.match(portalClient, /\['refund_pending','退款待落定'\]/,
+  'pending refund applications must have a directly visible filter on the return page');
+assert.match(portalClient, /status==='refund_pending'&&returnSettlementKey\(r\)!=='pending'/);
 assert.match(portalGenerator, /LEFT JOIN mart\.after_sales_settlement_detail settlement/);
 assert.match(portalGenerator, /id="auditReasons"/);
 
