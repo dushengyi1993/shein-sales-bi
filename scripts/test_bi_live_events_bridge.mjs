@@ -37,7 +37,7 @@ assert.deepEqual(order, {
   kind: 'order', receiptId: '', storeKey: 'TZ', entityId: 'GSH18A51T000BED', occurredAt: '2026-07-23T11:59:59.000Z',
 });
 assert.deepEqual(liveSectionsForBiUpdate('return'), ['liveSalesToday', 'orders', 'priceScatter', 'afterSales']);
-assert.deepEqual(liveSectionsForBiUpdate('product'), ['linksData', 'actions']);
+assert.deepEqual(liveSectionsForBiUpdate('product'), ['productState']);
 assert.deepEqual(liveSectionsForBiUpdate('platform'), []);
 assert.equal(normalizeBiLiveUpdatePayload('{"event":"unknown"}', fixedNow), null);
 assert.equal(normalizeBiLiveUpdatePayload('{"eventFamily":"inventory_warning"}', fixedNow)?.kind, 'platform');
@@ -112,6 +112,10 @@ assert.match(productionClient, /productStateOverlayMap/, 'the product list must 
 assert.match(productionClient, /平台实时更新/, 'operators must be able to distinguish live webhook state from the daily snapshot');
 assert.match(generator, /'productStateOverlay', \(SELECT data FROM product_state_overlay\)/,
   'the links section must include the latest trustworthy product-state overlay');
+assert.match(generator, /productState:[\s\S]*FROM ops\.shein_webhook_product_state/,
+  'live product updates must use a lightweight standalone state section');
+assert.match(productionClient, /products:\['linksData','productState','productSalesDaily'\]/,
+  'opening the product list must always load the latest event overlay');
 assert.match(generator, /liveSalesToday:[\s\S]*FROM fact\.order_item oi[\s\S]*WHERE oi\.created_date=current_date/, 'the live overlay must read the exact current-day order facts without rebuilding the full profit view');
 assert.match(generator, /liveSalesToday:[\s\S]*oi\.order_create_time[\s\S]*oi\.goods_performance_status_desc[\s\S]*p\.payment_label/,
   'the lightweight live section must carry enough order detail for an immediate order-center row');

@@ -11,7 +11,7 @@ PORTAL_URL="${SHEIN_BI_PORTAL_URL:-http://127.0.0.1:8787}"
 # before and after profit: the first pass serves a fast summary if the current
 # profit cache already exists, while the second pass refreshes it after a
 # successful profit warm. The frontend refuses stale homeProfit summaries.
-SECTIONS="${SHEIN_BI_PORTAL_PREWARM_SECTIONS:-homeRankings,afterSales,homeTrafficDaily,orders,homeProfit,actions,linksData,productSalesDaily,productTrafficDaily,comments,rtvData,waybills,rankings,profit,homeProfit}"
+SECTIONS="${SHEIN_BI_PORTAL_PREWARM_SECTIONS:-homeRankings,afterSales,homeTrafficDaily,orders,homeProfit,actions,linksData,productState,productSalesDaily,productTrafficDaily,comments,rtvData,waybills,rankings,profit,homeProfit}"
 LOG_DIR="${SHEIN_BI_PREWARM_LOG_DIR:-/srv/shein-bi/logs/cloud-portal-prewarm}"
 TIMEOUT_SECONDS="${SHEIN_BI_PREWARM_SECTION_TIMEOUT_SECONDS:-1200}"
 FORCE_REFRESH="${SHEIN_BI_PORTAL_PREWARM_FORCE:-1}"
