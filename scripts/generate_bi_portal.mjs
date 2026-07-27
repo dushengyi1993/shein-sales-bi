@@ -393,13 +393,28 @@ today_storage_alloc AS (
   SELECT
     store_key,
     max(coalesce(group_key,'')) AS group_key,
-    round(sum(coalesce(allocated_storage_fee_sar,0))::numeric,2) AS storage_fee_sar
+    round(sum(coalesce(allocated_storage_fee_sar,0))::numeric,2) AS storage_fee_sar,
+    max(date)::date AS storage_fee_source_date
   FROM mart.storage_fee_store_daily_cache
-  WHERE date=current_date AND coalesce(store_key,'') <> ''
+  WHERE date=coalesce(
+      (SELECT max(date) FROM mart.storage_fee_store_daily_cache WHERE date=current_date),
+      (SELECT max(date) FROM mart.storage_fee_store_daily_cache WHERE date<current_date)
+    )
+    AND coalesce(store_key,'') <> ''
   GROUP BY store_key
 ),
 today_storage_state AS (
   SELECT count(*)>0 AS storage_matched FROM today_storage_alloc
+),
+today_storage_billing_state AS (
+  SELECT
+    CASE
+      WHEN count(*)=0 THEN 'missing'
+      WHEN bool_and(coalesce(bill_status_name,'')='已支付') THEN 'settled'
+      ELSE 'provisional'
+    END AS storage_fee_status
+  FROM mart.et_storage_fee_daily
+  WHERE fee_date=current_date
 ),
 accounting_freshness AS (
   SELECT
@@ -415,6 +430,15 @@ profit_store_rows_final AS (
       'group_key',coalesce(nullif(p.group_key,''),a.group_key,''),
       'storage_fee_sar',CASE WHEN r.storage_matched THEN coalesce(a.storage_fee_sar,0) ELSE 0 END,
       'storage_matched',r.storage_matched,
+      'storage_fee_status',CASE
+        WHEN r.storage_matched AND b.storage_fee_status='missing' THEN 'provisional'
+        ELSE b.storage_fee_status
+      END,
+      'storage_fee_source_date',a.storage_fee_source_date,
+      'storage_fee_estimated_sar',CASE
+        WHEN r.storage_matched AND b.storage_fee_status<>'settled' THEN coalesce(a.storage_fee_sar,0)
+        ELSE 0
+      END,
       'fallback_storage_fee_sar',0,
       'profit_after_storage_sar',CASE
         WHEN p.profit_before_storage_sar IS NULL AND p.store_key IS NOT NULL THEN NULL
@@ -439,6 +463,7 @@ profit_store_rows_final AS (
   FROM profit_store_rows p
   FULL OUTER JOIN today_storage_alloc a ON a.store_key=p.store_key
   CROSS JOIN today_storage_state r
+  CROSS JOIN today_storage_billing_state b
   WHERE p.store_key IS NOT NULL OR (r.storage_matched AND a.store_key IS NOT NULL)
 )
 SELECT jsonb_build_object(
@@ -2581,6 +2606,23 @@ profit_daily_store_product AS (
       round(sum(coalesce(rtv_received_to_09_quantity,0))::numeric, 0) AS rtv_received_to_09_quantity,
       round(sum(coalesce(profit_before_storage_sar,0))::numeric, 2) AS profit_before_storage_sar,
       round(sum(coalesce(storage_fee_sar,0))::numeric, 2) AS storage_fee_sar,
+      CASE
+        WHEN profit_daily_store_product_source.date=current_date AND EXISTS (
+          SELECT 1 FROM mart.et_storage_fee_daily f
+          WHERE f.fee_date=profit_daily_store_product_source.date
+            AND coalesce(f.bill_status_name,'')<>'已支付'
+        ) THEN 'provisional'
+        WHEN EXISTS (
+          SELECT 1 FROM mart.et_storage_fee_daily f
+          WHERE f.fee_date=profit_daily_store_product_source.date
+        ) THEN 'settled'
+        ELSE 'missing'
+      END AS storage_fee_status,
+      round((CASE WHEN profit_daily_store_product_source.date=current_date AND EXISTS (
+        SELECT 1 FROM mart.et_storage_fee_daily f
+        WHERE f.fee_date=profit_daily_store_product_source.date
+          AND coalesce(f.bill_status_name,'')<>'已支付'
+      ) THEN sum(coalesce(storage_fee_sar,0)) ELSE 0 END)::numeric, 2) AS storage_fee_estimated_sar,
       round(sum(coalesce(profit_after_storage_sar, profit_before_storage_sar,0))::numeric, 2) AS profit_after_storage_sar,
       round(sum(coalesce(profit_if_rtv_received_resellable_sar,0))::numeric, 2) AS profit_if_rtv_received_resellable_sar,
       round(sum(coalesce(profit_if_rtv_09_resellable_sar,0))::numeric, 2) AS profit_if_rtv_09_resellable_sar,
@@ -2612,7 +2654,7 @@ profit_daily_store_product AS (
         ELSE NULL END AS cost_coverage_revenue_rate,
       string_agg(DISTINCT storage_fee_method, ' / ') FILTER (WHERE coalesce(storage_fee_method,'') <> '') AS storage_fee_method,
       string_agg(DISTINCT storage_allocation_stage, ' / ') FILTER (WHERE coalesce(storage_allocation_stage,'') <> '') AS storage_allocation_stage
-    FROM ${profitDailyStoreProduct}
+    FROM ${profitDailyStoreProduct} profit_daily_store_product_source
     WHERE coalesce(standard_goods_sn,'') <> ''
     GROUP BY date, store_key, group_key, standard_goods_sn
     ORDER BY date, store_key, standard_goods_sn
@@ -2772,8 +2814,25 @@ store_storage_daily AS (
       store_key,
       group_key,
       round(sum(coalesce(allocated_storage_fee_sar,0))::numeric, 2) AS storage_fee_sar,
+      CASE
+        WHEN storage_fee_store_daily_source.date=current_date AND EXISTS (
+          SELECT 1 FROM mart.et_storage_fee_daily f
+          WHERE f.fee_date=storage_fee_store_daily_source.date
+            AND coalesce(f.bill_status_name,'')<>'已支付'
+        ) THEN 'provisional'
+        WHEN EXISTS (
+          SELECT 1 FROM mart.et_storage_fee_daily f
+          WHERE f.fee_date=storage_fee_store_daily_source.date
+        ) THEN 'settled'
+        ELSE 'missing'
+      END AS storage_fee_status,
+      round((CASE WHEN storage_fee_store_daily_source.date=current_date AND EXISTS (
+        SELECT 1 FROM mart.et_storage_fee_daily f
+        WHERE f.fee_date=storage_fee_store_daily_source.date
+          AND coalesce(f.bill_status_name,'')<>'已支付'
+      ) THEN sum(coalesce(allocated_storage_fee_sar,0)) ELSE 0 END)::numeric, 2) AS storage_fee_estimated_sar,
       string_agg(DISTINCT allocation_method, ' / ') FILTER (WHERE coalesce(allocation_method,'') <> '') AS storage_fee_method
-    FROM ${storageFeeStoreDaily}
+    FROM ${storageFeeStoreDaily} storage_fee_store_daily_source
     GROUP BY date, store_key, group_key
   ) t
 ),

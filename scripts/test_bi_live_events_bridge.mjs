@@ -118,6 +118,8 @@ assert.match(generator, /accountingPending/,
 assert.doesNotMatch(generator.match(/liveSalesToday:[\s\S]*?`,\n  homeTrafficDaily:/)?.[0] || '', /live_unit_cost_sar/,
   'a partially assigned line must never be valued by multiplying the whole line by a fallback unit cost');
 assert.match(generator, /'profitStoreRows'[\s\S]*FROM profit_store_rows_final/, 'the lightweight section must publish current-day profit by store');
+assert.match(generator, /today_storage_billing_state[\s\S]*'storage_fee_status',CASE[\s\S]*b\.storage_fee_status[\s\S]*'storage_fee_estimated_sar'/,
+  'current-day profit must label and deduct the provisional ET storage bill instead of omitting it');
 assert.doesNotMatch(generator.match(/liveSalesToday:[\s\S]*?`,\n  homeTrafficDaily:/)?.[0] || '', /FROM mart\.profit_order_item oi/, 'the live endpoint must not expand the multi-minute full profit view');
 assert.doesNotMatch(portalServer, /createBiLiveCoreRefreshScheduler|live core refresh failed/, 'one webhook must not launch a full 40+ second portal rebuild');
 assert.match(portalServer, /SHEIN_BI_LIVE_ACCOUNTING_DEBOUNCE_MS \|\| 45_000/,

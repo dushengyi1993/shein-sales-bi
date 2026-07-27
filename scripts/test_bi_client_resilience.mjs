@@ -24,7 +24,7 @@ assert.match(source, /function inventoryMatchStatus\(r\)/, 'client keeps a backw
 assert.match(source, /match==='not_matched'/, 'client must not treat an unmatched ET record as zero stock');
 assert.match(source, /match==='stale'/, 'client must surface stale ET snapshots distinctly');
 assert.match(source, /仅在 ET 快照最新且已匹配、当前可售为 0、没有有效在途时成立/, 'client out-of-stock copy keeps the fresh-match invariant');
-assert.match(source, /label:'已落定利润'.*`\u5176中仓储费 /, 'settled profit keeps storage fee as an inline supporting figure');
+assert.match(source, /label:'已落定利润'.*storageNoteSar/, 'settled profit keeps storage fee as an inline supporting figure');
 assert.match(source, /label:'风险调整后利润'.*`\u5f85决售后风险 /, 'risk-adjusted profit keeps pending risk as an inline supporting figure');
 assert.doesNotMatch(source, /\{label:'(?:待决售后风险|已扣仓储费)',cells:/, 'profit summary must stay at three primary rows');
 assert.match(source, /'return-summary-matrix'\)\+/, 'returns and profit summary tables expose paired height-alignment classes');
@@ -38,8 +38,10 @@ assert.match(source, /function sectionFailureNotice\(ns\).*data-load=.*role=\"al
 assert.match(source, /缓存写入 \$\{fmtStamp\(st\.cachedAt\|\|st\.generatedAt\)\}；页面最新/, 'cache fallback always exposes its cache timestamp and current-page timestamp');
 assert.match(source, /j\.refreshFailed\?\('刷新失败'.*j\.refreshError/,
   'stale section responses must expose the concrete server refresh failure to the operator');
-assert.match(source, /storageAwaitingSettlement:hp\.some\(profitStorageAwaitingSettlement\)/, 'live profit keeps an explicit storage-settlement state');
-assert.match(source, /今日仓储费待日结\/未扣/, 'unsettled current-day storage is never presented as already deducted');
+assert.match(source, /storageEstimated:hp\.reduce\(\(a,r\)=>a\+profitStorageEstimated\(r\),0\)/, 'profit tracks the exact provisional storage amount in the selected range');
+assert.match(source, /含待结算预估/, 'provisional storage is labelled as an estimate while remaining deducted from profit');
+assert.match(source, /纯历史范围不会再显示“今日待日结”/, 'historical queries never inherit a misleading current-day storage warning');
+assert.doesNotMatch(source, /今日仓储费待日结\/未扣/, 'the old undifferentiated and misleading storage warning is removed');
 assert.match(source, /chart-readable-details/, 'scatter chart exposes a readable detail path in addition to points');
 assert.match(source, /class=\"chart-hit\" data-tip=.*tabindex=\"0\" role=\"img\" aria-label=/, 'trend data points are keyboard focusable and named');
 assert.match(source, /if\(j\?\.pendingSection\)/, 'a pending first-generation section stays in loading state');

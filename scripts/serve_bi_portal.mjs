@@ -6666,6 +6666,9 @@ function emptyHomeProfitScopeRow(date, scopeValue) {
     profit_before_storage_sar: 0,
     storage_fee_sar: 0,
     storage_matched: 0,
+    storage_fee_estimated_sar: 0,
+    storage_fee_provisional_rows: 0,
+    storage_fee_settled_rows: 0,
     fallback_storage_fee_sar: 0,
     profit_if_rtv_received_resellable_sar: 0,
     profit_if_rtv_09_resellable_sar: 0,
@@ -6735,6 +6738,10 @@ function buildHomeProfitSummaryFromProfitData(profitData, sourceMeta = {}) {
     if (!date) return;
     const row = getRow(date, scopeValue);
     row.storage_fee_sar += Number(r.storage_fee_sar || 0);
+    row.storage_fee_estimated_sar += Number(r.storage_fee_estimated_sar || 0);
+    const storageStatus = String(r.storage_fee_status || '').trim();
+    if (storageStatus === 'provisional') row.storage_fee_provisional_rows += 1;
+    else if (storageStatus === 'settled') row.storage_fee_settled_rows += 1;
     row.storage_matched += 1;
   };
   for (const r of rows) {
@@ -6762,6 +6769,7 @@ function buildHomeProfitSummaryFromProfitData(profitData, sourceMeta = {}) {
     'rtv_09_recoverable_cost_sar',
     'profit_before_storage_sar',
     'storage_fee_sar',
+    'storage_fee_estimated_sar',
     'fallback_storage_fee_sar',
     'profit_if_rtv_received_resellable_sar',
     'profit_if_rtv_09_resellable_sar',
@@ -6775,10 +6783,13 @@ function buildHomeProfitSummaryFromProfitData(profitData, sourceMeta = {}) {
     'actual_return_cost_sar',
     'estimated_return_delivery_fee_sar',
   ];
-  const countFields = ['quantity', 'order_lines', 'orders', 'rtv_received_quantity', 'rtv_received_to_09_quantity', 'missing_cost_quantity', 'missing_cost_lines', 'reversal_lines', 'pending_revenue_risk_lines', 'pending_impact_quantity', 'storage_matched'];
+  const countFields = ['quantity', 'order_lines', 'orders', 'rtv_received_quantity', 'rtv_received_to_09_quantity', 'missing_cost_quantity', 'missing_cost_lines', 'reversal_lines', 'pending_revenue_risk_lines', 'pending_impact_quantity', 'storage_matched', 'storage_fee_provisional_rows', 'storage_fee_settled_rows'];
   const dailyScopes = Array.from(map.values()).map(row => {
     const effectiveStorage = Number(row.storage_matched || 0) > 0 ? Number(row.storage_fee_sar || 0) : Number(row.fallback_storage_fee_sar || 0);
     const out = {...row};
+    out.storage_fee_status = Number(out.storage_fee_provisional_rows || 0) > 0
+      ? 'provisional'
+      : (Number(out.storage_fee_settled_rows || 0) > 0 ? 'settled' : 'missing');
     out.profit_after_storage_sar = Number(out.profit_before_storage_sar || 0) - effectiveStorage;
     out.risk_adjusted_profit_after_storage_sar = Number(out.risk_adjusted_profit_before_storage_sar || 0) - effectiveStorage;
     out.profit_if_rtv_received_resellable_after_storage_sar = Number(out.profit_if_rtv_received_resellable_sar || 0) - effectiveStorage;
