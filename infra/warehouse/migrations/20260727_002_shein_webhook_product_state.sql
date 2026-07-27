@@ -148,4 +148,95 @@ $$;
 COMMENT ON TABLE ops.shein_webhook_product_state
 IS 'Latest monotonic SHEIN Webhook on/off-shelf state per store/SKC; BI overlays it only while newer than the daily link snapshot.';
 
+-- Upgrade/backfill: project already-processed trustworthy lifecycle receipts
+-- into the new overlay. This restores same-day events received before this
+-- migration without replaying ciphertext or external side effects.
+WITH candidates AS (
+  SELECT
+    receipt.id,
+    receipt.store_key,
+    receipt.normalized->>'skc' AS skc,
+    receipt.normalized->>'eventFamily' AS event_family,
+    CASE
+      WHEN receipt.normalized->>'eventFamily'='product_delete_audit' THEN 'off_shelf'
+      ELSE receipt.normalized->>'action'
+    END AS action,
+    CASE
+      WHEN receipt.normalized->>'eventFamily'='product_delete_audit' THEN '4'
+      WHEN receipt.normalized->>'action'='on_shelf' THEN '1'
+      ELSE '4'
+    END AS shelf_status_code,
+    CASE
+      WHEN receipt.normalized->>'eventFamily'='product_delete_audit' THEN '已下架'
+      WHEN receipt.normalized->>'action'='on_shelf' THEN '已上架'
+      ELSE '已下架'
+    END AS shelf_status_name,
+    CASE WHEN receipt.normalized->>'action'='on_shelf' THEN true ELSE false END AS is_on_shelf,
+    CASE WHEN receipt.normalized->>'action'='on_shelf' THEN false ELSE true END AS is_out_shelf,
+    CASE
+      WHEN btrim(COALESCE(receipt.normalized->>'eventTime','')) ~ '^\d{1,30}$' THEN
+        CASE
+          WHEN length(ltrim(btrim(receipt.normalized->>'eventTime'),'0')) <= 10
+            THEN COALESCE(NULLIF(ltrim(btrim(receipt.normalized->>'eventTime'),'0'),''),'0')::numeric * 1000000
+          WHEN length(ltrim(btrim(receipt.normalized->>'eventTime'),'0')) <= 13
+            THEN COALESCE(NULLIF(ltrim(btrim(receipt.normalized->>'eventTime'),'0'),''),'0')::numeric * 1000
+          WHEN length(ltrim(btrim(receipt.normalized->>'eventTime'),'0')) <= 16
+            THEN COALESCE(NULLIF(ltrim(btrim(receipt.normalized->>'eventTime'),'0'),''),'0')::numeric
+          ELSE trunc(COALESCE(NULLIF(ltrim(btrim(receipt.normalized->>'eventTime'),'0'),''),'0')::numeric / 1000)
+        END
+      ELSE floor(extract(epoch FROM COALESCE(receipt.processed_at,receipt.received_at)) * 1000000)::numeric
+    END AS source_event_order,
+    COALESCE(
+      to_timestamp(
+        CASE
+          WHEN btrim(COALESCE(receipt.normalized->>'eventTime','')) ~ '^\d{10,16}$' THEN
+            CASE
+              WHEN length(btrim(receipt.normalized->>'eventTime')) <= 10
+                THEN (receipt.normalized->>'eventTime')::numeric
+              WHEN length(btrim(receipt.normalized->>'eventTime')) <= 13
+                THEN (receipt.normalized->>'eventTime')::numeric / 1000
+              ELSE (receipt.normalized->>'eventTime')::numeric / power(10, length(btrim(receipt.normalized->>'eventTime')) - 10)
+            END
+          ELSE NULL
+        END
+      ),
+      receipt.processed_at,
+      receipt.received_at
+    ) AS event_at,
+    COALESCE(receipt.normalized->'productContext','{}'::jsonb) AS product_context
+  FROM ops.shein_webhook_receipt AS receipt
+  WHERE receipt.status='succeeded'
+    AND COALESCE(receipt.normalized->>'appScopedOnly','false')<>'true'
+    AND COALESCE(receipt.normalized->>'skc','')<>''
+    AND (
+      (
+        receipt.normalized->>'eventFamily'='product_shelves'
+        AND receipt.normalized->>'action' IN ('on_shelf','off_shelf')
+      )
+      OR (
+        receipt.normalized->>'eventFamily'='product_delete_audit'
+        AND receipt.normalized->>'status'='2'
+      )
+    )
+), ranked AS (
+  SELECT *,
+    row_number() OVER (
+      PARTITION BY store_key, skc
+      ORDER BY source_event_order DESC, id DESC
+    ) AS rn
+  FROM candidates
+)
+INSERT INTO ops.shein_webhook_product_state(
+  store_key, skc, event_family, action, shelf_status_code, shelf_status_name,
+  is_on_shelf, is_wait_shelf, is_sold_out, is_out_shelf,
+  source_event_order, source_receipt_id, event_at, product_context
+)
+SELECT
+  store_key, skc, event_family, action, shelf_status_code, shelf_status_name,
+  is_on_shelf, false, false, is_out_shelf,
+  source_event_order, id, event_at, product_context
+FROM ranked
+WHERE rn=1
+ON CONFLICT (store_key,skc) DO NOTHING;
+
 COMMIT;

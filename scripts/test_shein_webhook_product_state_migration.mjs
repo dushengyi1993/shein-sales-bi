@@ -20,6 +20,9 @@ for (const file of files) {
   assert.match(sql, /GRANT EXECUTE ON FUNCTION ops\.apply_shein_webhook_product_state[\s\S]*TO shein_webhook_ops/);
   assert.match(sql, /GRANT SELECT ON TABLE ops\.shein_webhook_product_state TO shein_link_ops/);
   assert.doesNotMatch(sql, /GRANT (?:INSERT|UPDATE|DELETE)[^;]*ops\.shein_webhook_product_state TO shein_webhook_ops/);
+  assert.match(sql, /receipt\.status='succeeded'/);
+  assert.match(sql, /receipt\.normalized->>'action' IN \('on_shelf','off_shelf'\)/);
+  assert.match(sql, /ON CONFLICT \(store_key,skc\) DO NOTHING/);
 }
 
 console.log('shein_webhook_product_state_migration: monotonic event overlay and least-privilege ACL passed');
