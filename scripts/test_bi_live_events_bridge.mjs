@@ -41,6 +41,7 @@ assert.deepEqual(liveSectionsForBiUpdate('product'), ['productState']);
 assert.deepEqual(liveSectionsForBiUpdate('platform'), []);
 assert.equal(normalizeBiLiveUpdatePayload('{"event":"unknown"}', fixedNow), null);
 assert.equal(normalizeBiLiveUpdatePayload('{"eventFamily":"inventory_warning"}', fixedNow)?.kind, 'platform');
+assert.equal(normalizeBiLiveUpdatePayload('{"eventFamily":"rrp_review","skc":"SKC-1"}', fixedNow)?.kind, 'product');
 
 const bridge = createBiLiveUpdateBridge({
   ClientClass: FakePgClient,

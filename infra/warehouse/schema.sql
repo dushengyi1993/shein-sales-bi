@@ -7557,10 +7557,13 @@ BEGIN;
 CREATE TABLE IF NOT EXISTS ops.shein_webhook_product_state (
   store_key text NOT NULL CHECK (btrim(store_key) <> ''),
   skc text NOT NULL CHECK (btrim(skc) <> ''),
-  event_family text NOT NULL CHECK (event_family IN ('product_shelves','product_delete_audit')),
-  action text NOT NULL CHECK (action IN ('on_shelf','off_shelf')),
-  shelf_status_code text NOT NULL CHECK (shelf_status_code IN ('1','4')),
-  shelf_status_name text NOT NULL CHECK (shelf_status_name IN ('已上架','已下架')),
+  event_family text NOT NULL CHECK (event_family IN (
+    'product_shelves','product_delete_audit','product_audit',
+    'product_audit_all_channels','price_audit','rrp_review'
+  )),
+  action text NOT NULL CHECK (action IN ('on_shelf','wait_shelf','sold_out','off_shelf')),
+  shelf_status_code text NOT NULL CHECK (shelf_status_code IN ('1','2','3','4')),
+  shelf_status_name text NOT NULL CHECK (shelf_status_name IN ('已上架','待上架','已售罄','已下架')),
   is_on_shelf boolean NOT NULL,
   is_wait_shelf boolean NOT NULL DEFAULT false,
   is_sold_out boolean NOT NULL DEFAULT false,
@@ -7613,11 +7616,19 @@ BEGIN
     RAISE EXCEPTION 'invalid webhook product-state scope';
   END IF;
 
-  IF v_family='product_shelves' AND v_action='on_shelf' THEN
+  IF v_action='on_shelf' THEN
     v_shelf_action := 'on_shelf';
     v_shelf_code := '1';
     v_shelf_name := '已上架';
-  ELSIF v_family='product_shelves' AND v_action='off_shelf' THEN
+  ELSIF v_action='wait_shelf' THEN
+    v_shelf_action := 'wait_shelf';
+    v_shelf_code := '2';
+    v_shelf_name := '待上架';
+  ELSIF v_action='sold_out' THEN
+    v_shelf_action := 'sold_out';
+    v_shelf_code := '3';
+    v_shelf_name := '已售罄';
+  ELSIF v_action='off_shelf' THEN
     v_shelf_action := 'off_shelf';
     v_shelf_code := '4';
     v_shelf_name := '已下架';
@@ -7646,7 +7657,7 @@ BEGIN
     source_event_order, source_receipt_id, event_at, product_context
   ) VALUES (
     v_store, v_skc, v_family, v_shelf_action, v_shelf_code, v_shelf_name,
-    v_shelf_code='1', false, false, v_shelf_code='4',
+    v_shelf_code='1', v_shelf_code='2', v_shelf_code='3', v_shelf_code='4',
     p_source_event_order, p_receipt_id, p_event_at, v_context
   )
   ON CONFLICT (store_key, skc) DO UPDATE SET
@@ -7693,7 +7704,7 @@ END
 $$;
 
 COMMENT ON TABLE ops.shein_webhook_product_state
-IS 'Latest monotonic SHEIN Webhook on/off-shelf state per store/SKC; BI overlays it only while newer than the daily link snapshot.';
+IS 'Latest monotonic SHEIN four-state product lifecycle per store/SKC, from direct shelf events or exact OpenAPI readback after audit/price events; BI overlays it only while newer than the daily link snapshot.';
 
 WITH candidates AS (
   SELECT

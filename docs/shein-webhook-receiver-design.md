@@ -107,11 +107,12 @@ expected = randomKey + Base64(UTF8(hashHex))
 
 迁移：`infra/warehouse/migrations/20260719_001_shein_webhook_runtime.sql`；商品通知安全补全：`infra/warehouse/migrations/20260721_001_shein_webhook_product_context.sql`。
 
-商品列表实时状态层：`infra/warehouse/migrations/20260727_002_shein_webhook_product_state.sql`。
+商品列表实时状态层：`infra/warehouse/migrations/20260727_002_shein_webhook_product_state.sql`；四态回读扩展：`infra/warehouse/migrations/20260727_003_shein_webhook_product_state_four_states.sql`。
 
 - `product_shelves` 明确为 `on_shelf` / `off_shelf`，或商品删除审核明确通过时，按 `店铺 + SKC` 写入单调递增的实时状态。
-- `shelfState=0` 但没有历史上架或明确下架证据时仍视为“尚未上架”，不会把商品列表误改成“已下架”。
-- `linksData` 会读取实时状态层；浏览器通过 PostgreSQL `NOTIFY` → Portal SSE 立即刷新商品列表和动作池。
+- `shelfState=0` 但没有历史上架或明确下架证据时，不直接推断“已下架”。worker 会用该店 OpenAPI 权限按 SKC 查询商品，再调用 `spu-info` 回读 SHEIN-SA 的精确四态：`1 已上架 / 2 待上架 / 3 已售罄 / 4 已下架`。
+- 商品审核、涨价审核或建议零售价审核明确通过时同样只把事件当成回读触发器；只有精确商品详情返回四态后才更新覆盖矩阵，不能把“审核通过”直接硬编码成“待上架”。
+- `linksData + productState` 会把实时状态叠加到店铺 × 标准货号覆盖矩阵；浏览器通过 PostgreSQL `NOTIFY` → Portal SSE 立即刷新商品列表和覆盖计数。建议零售价事件也归入商品状态刷新，不再只刷新平台动态。
 - 日更链接快照仍保留，用于全量覆盖、字段补全和漏事件对账；Webhook 不负责历史流量、完整价格栈、商品素材等平台未推送字段。
 
 - `ops.shein_webhook_receipt`：AES 密文 `event_data`、密文 hash、最小规范化投影、幂等键、状态、lease、重试、告警与处理结果；不保存解密后的原始 payload。

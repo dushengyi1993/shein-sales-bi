@@ -80,6 +80,67 @@ assert.deepEqual(productIdentity, {
 assert.equal(calls.length, 3);
 assert.match(calls[2].url, /searchProduct$/);
 
+const productStateCalls = [];
+const productStateProvider = await createSheinWebhookAuditContextProvider({
+  config: {
+    apiBaseUrls: {prodSemiManaged: 'https://fake.shein.test'},
+    stores: [{storeKey: 'ZL', openKeyId: 'OPEN-ZL', secretKey: 'SECRET-ZL'}],
+  },
+  fetchImpl: async (url, init) => {
+    productStateCalls.push({url, body: JSON.parse(init.body)});
+    if (url.endsWith('/open-api/goods/searchProduct')) {
+      return {
+        ok: true, status: 200, statusText: 'OK',
+        text: async () => JSON.stringify({code: '0', info: {data: [{
+          spuName: 'SPU-WAIT',
+          skcList: [{skcName: 'SKC-WAIT', supplierCode: 'SK-04031胶囊咖啡机', skcShelfStatus: 0}],
+        }]}}),
+      };
+    }
+    if (url.endsWith('/open-api/goods/spu-info')) {
+      return {
+        ok: true, status: 200, statusText: 'OK',
+        text: async () => JSON.stringify({code: '0', info: {
+          spuName: 'SPU-WAIT',
+          skcInfoList: [{
+            skcName: 'SKC-WAIT',
+            supplierCode: 'SK-04031胶囊咖啡机',
+            shelfStatusInfoList: [{
+              siteAbbr: 'shein-sa',
+              shelfStatus: 2,
+              firstShelfTime: '1970-01-01 08:00:01',
+              lastUpdateTime: '2026-07-27 10:20:00',
+            }],
+          }],
+        }}),
+      };
+    }
+    throw new Error(`unexpected URL ${url}`);
+  },
+});
+const productState = await productStateProvider.getProductState({storeKey: 'zl', skc: 'SKC-WAIT'});
+assert.deepEqual(productState, {
+  source: 'shein_product_search+shein_spu_info',
+  storeKey: 'ZL',
+  skc: 'SKC-WAIT',
+  spu: 'SPU-WAIT',
+  supplierCode: 'SK-04031胶囊咖啡机',
+  shelfStatusCode: '2',
+  action: 'wait_shelf',
+  shelfStatusName: '待上架',
+  isOnShelf: false,
+  isWaitShelf: true,
+  isSoldOut: false,
+  isOutShelf: false,
+  firstShelfTime: '1970-01-01 08:00:01',
+  lastShelfTime: '',
+  lastUpdateTime: '2026-07-27 10:20:00',
+});
+assert.equal(productStateCalls.length, 2);
+assert.match(productStateCalls[0].url, /searchProduct$/);
+assert.match(productStateCalls[1].url, /spu-info$/);
+assert.deepEqual(productStateCalls[1].body, {spuName: 'SPU-WAIT', languageList: ['en', 'ar']});
+
 const missingReasonCalls = [];
 const missingReasonProvider = await createSheinWebhookAuditContextProvider({
   config: {

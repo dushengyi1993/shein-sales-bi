@@ -128,16 +128,25 @@ assert.deepEqual(productStateCalls[0], {
   },
 });
 
-const identityCalls = [];
+const stateReadbackCalls = [];
 const pendingProcessor = createSheinWebhookEventProcessor({
   webhookRepository: {
     ...webhookRepository,
     getProductBusinessContext: async () => null,
   },
   productAuditContextProvider: {
-    getProductIdentity: async input => {
-      identityCalls.push(input);
-      return {source: 'shein_product_search', skc: input.skc, supplierCode: 'SK-04031胶囊咖啡机', currentShelfStatus: '0'};
+    getProductState: async input => {
+      stateReadbackCalls.push(input);
+      return {
+        source: 'shein_product_search+shein_spu_info',
+        storeKey: input.storeKey,
+        skc: input.skc,
+        spu: 'SPU-WAIT',
+        supplierCode: 'SK-04031胶囊咖啡机',
+        shelfStatusCode: '2',
+        shelfStatusName: '待上架',
+        action: 'wait_shelf',
+      };
     },
   },
 });
@@ -157,8 +166,39 @@ assert.equal(pendingOutcome.title, 'ZL 店：SK-04031胶囊咖啡机上下架状
 assert.match(pendingOutcome.summary, /没有发现实际下架证据，无需告警/);
 assert.doesNotMatch(pendingOutcome.summary, /1970|2018|回收站|被下架/);
 assert.equal(pendingOutcome.normalized.productContextStatus, 'resolved');
-assert.deepEqual(identityCalls, [{storeKey: 'ZL', skc: 'sv260723145349087891523'}]);
-assert.equal(productStateCalls.length, 1, 'not_on_shelf without prior-live evidence must not alter the product list');
+assert.equal(pendingOutcome.normalized.productStateReadbackStatus, 'resolved');
+assert.deepEqual(stateReadbackCalls, [{storeKey: 'ZL', skc: 'sv260723145349087891523'}]);
+assert.equal(productStateCalls.length, 2, 'an exact pending-state readback must update the product list');
+assert.deepEqual(productStateCalls[1], {
+  receiptId: 201,
+  storeKey: 'ZL',
+  skc: 'sv260723145349087891523',
+  eventFamily: 'product_shelves',
+  action: 'wait_shelf',
+  status: undefined,
+  sourceEventOrder: '1784887354445000',
+  eventAt: '2026-07-24T10:02:34.445Z',
+  productContext: {
+    supplierCode: 'SK-04031胶囊咖啡机',
+    spu: 'SPU-WAIT',
+  },
+});
+
+const rrpApproved = await pendingProcessor.process({
+  ...base,
+  id: 202,
+  severity: {severity: 'P3', notifyFeishu: false},
+  normalized: {
+    eventFamily: 'rrp_review', eventCode: '3001792', eventLabel: '建议零售价审核状态更新',
+    storeKey: 'ZL', skc: 'SKC-RRP', businessId: 'SKC-RRP',
+    auditState: '2', status: '2', eventTime: '1784887355445', receivedAt: '2026-07-24T10:02:36.755Z',
+  },
+  payload: {},
+});
+assert.equal(rrpApproved.normalized.productStateReadbackStatus, 'resolved');
+assert.equal(productStateCalls.length, 3, 'an approved RRP event must trigger exact product-state readback');
+assert.equal(productStateCalls[2].eventFamily, 'rrp_review');
+assert.equal(productStateCalls[2].action, 'wait_shelf');
 
 const shelfCopyWithPlatformDetails = humanizeSheinWebhookEvent({
   eventFamily: 'product_shelves', storeKey: 'AA', skc: 'SKC-DOWN', action: 'off_shelf',

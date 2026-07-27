@@ -7380,9 +7380,9 @@ export function normalizeBiLiveUpdatePayload(payload, now = new Date()) {
   ).toLowerCase();
   let kind = '';
   if (/return|refund|after.?sale/.test(kindText)) kind = 'return';
-  else if (/product|shelf|audit|sku|price/.test(kindText)) kind = 'product';
+  else if (/product|shelf|audit|sku|price|rrp/.test(kindText)) kind = 'product';
   else if (/order|sales?/.test(kindText)) kind = 'order';
-  else if (/authorization|quota|compliance|inventory|out.?of.?stock|invoice|logistics|purchase|delivery|rrp/.test(kindText)) kind = 'platform';
+  else if (/authorization|quota|compliance|inventory|out.?of.?stock|invoice|logistics|purchase|delivery/.test(kindText)) kind = 'platform';
   if (!kind) return null;
   return {
     kind,
