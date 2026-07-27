@@ -207,10 +207,6 @@ th{position:sticky;top:0;background:#f5f0e8;color:#6d665d;font-size:11px;text-tr
 .metric-subvalue{display:block;margin-top:5px;font-size:10.5px;line-height:1.25;font-weight:760;letter-spacing:0;color:var(--muted)}
 .metric-subvalue.is-cost{color:#786957}
 .metric-subvalue.is-risk{color:#a34a32}
-.metric-reconciliation{margin-top:10px;border:1px solid rgba(39,94,234,.18);border-radius:13px;background:rgba(39,94,234,.055);padding:9px 10px;display:grid;grid-template-columns:auto 1fr;gap:2px 8px;align-items:baseline;color:#263344}
-.metric-reconciliation b{font-size:11px;color:var(--focus)}
-.metric-reconciliation span{font-size:12px;font-weight:800}
-.metric-reconciliation small{grid-column:2;font-size:11px;color:#8d4b37;font-weight:760}
 .metric-matrix.cols-1 .matrix-cell.value{font-size:20px}
 .metric-matrix.cols-5 .matrix-cell{min-height:44px;padding:7px 6px}
 .metric-matrix.cols-5 .matrix-cell.label{font-size:13px}
@@ -585,7 +581,6 @@ button:disabled,.btn:disabled{opacity:.58;cursor:not-allowed;filter:saturate(.75
   .panel{padding:14px}.intro{padding:17px 16px}.intro h2{font-size:29px}.head{display:block;margin-top:24px}.head h3{font-size:22px}.head>.trend-toggle{margin-top:10px;justify-content:flex-start}
   .kpi-six{gap:9px}.overview-matrix-card{padding:12px}.matrix-card-head{display:block}.matrix-card-head .sub{text-align:left;margin-top:4px;max-width:none}
   .metric-matrix .matrix-cell{padding:7px 5px}.metric-matrix .label{font-size:12px}.metric-matrix .value{font-size:14px}.metric-matrix.cols-1 .matrix-cell.value{font-size:17px}.metric-matrix.profit-summary-matrix{grid-template-columns:minmax(64px,.72fr) repeat(3,minmax(0,1fr))}.metric-matrix.return-summary-matrix{grid-template-columns:minmax(56px,.72fr) repeat(5,minmax(0,1fr))}.metric-matrix.return-summary-matrix .matrix-cell.head{height:38px;min-height:38px;padding:5px 2px;font-size:10.5px}.profit-summary-matrix .matrix-cell:not(.head),.metric-matrix.return-summary-matrix .matrix-cell:not(.head){height:60px;min-height:60px}.metric-subvalue{font-size:9.5px}
-  .metric-reconciliation{grid-template-columns:1fr;gap:2px}.metric-reconciliation small{grid-column:1}
   .rank-item{grid-template-columns:28px minmax(0,1fr);min-height:72px}.rank-value{grid-column:2;text-align:left}.rank-meta{white-space:normal;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}.rank-meta .meta-sep{margin:0 4px}
   .status-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.foot{text-align:center;line-height:1.45}
   .price-dist-kpis,.price-scatter-kpis{grid-template-columns:1fr 1fr}
