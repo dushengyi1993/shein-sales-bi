@@ -2,7 +2,7 @@
 (function clientApp(){const CFG=window.__SHEIN_STORE_CONFIG__||{stores:[],ownerGroups:[]};
 const TABS=[['home','总控驾驶舱','home'],['orders','订单中心','order'],['returns','退货退款','return'],['products','商品列表','product'],['inventory','库存管理','stock'],['traffic','流量数据','traffic'],['reviews','商品评价','review'],['marketing','营销中心','mkt'],['platform','平台动态','hook'],['ops','自动化运营','ops'],['system','系统健康','sys']];
 const SL={homeRankings:'首页销售/排行',homeProfit:'首页利润',liveSalesToday:'今日实时销售/利润',rankings:'完整排行',profit:'利润明细',actions:'动作池',linksData:'链接/覆盖',productSalesDaily:'商品页精简销售',homeTrafficDaily:'首页精简流量',productTrafficDaily:'货号级每日流量',inventoryTrend:'库存/ET发货',comments:'评价',orders:'订单',priceScatter:'订单成交价散点',afterSales:'售后',rtvData:'RTV追踪',waybills:'物流/ET出库'};
-const BASE_NEED={home:['homeRankings','afterSales','homeProfit','homeTrafficDaily','liveSalesToday'],orders:['orders'],returns:['afterSales','homeRankings'],products:['linksData','productSalesDaily'],inventory:['inventoryTrend','linksData'],traffic:['productTrafficDaily'],reviews:['comments','afterSales','homeRankings'],marketing:['linksData','actions'],ops:['actions','linksData'],system:[]};
+const BASE_NEED={home:['homeRankings','afterSales','homeProfit','homeTrafficDaily','liveSalesToday'],orders:['orders','liveSalesToday'],returns:['afterSales','homeRankings'],products:['linksData','productSalesDaily'],inventory:['inventoryTrend','linksData'],traffic:['productTrafficDaily'],reviews:['comments','afterSales','homeRankings'],marketing:['linksData','actions'],ops:['actions','linksData'],system:[]};
 const NEED=BASE_NEED;
 const VALID_TABS=new Set(TABS.map(t=>t[0]));
 const initialTab=VALID_TABS.has(String(location.hash||'').replace(/^#/,''))?String(location.hash).replace(/^#/,''):'home';
@@ -112,6 +112,64 @@ function applyLiveOrderRankingOverlay(){
   D.rankings.dailyStoreProductPaymentSummary=replaceRankingDate(D.rankings.dailyStoreProductPaymentSummary,date,finish(storeProductPaymentMap));
   DATA_ANCHOR_CACHE={key:'',value:''};
 }
+function liveOrderKey(r){const store=sk(r),id=String(r?.order_no||r?.bill_no||r?.order_item_key||'').trim();return store&&id?store+'|'+id:''}
+function applyLiveOrderRowsOverlay(){
+  const date=ISO(D.liveSalesToday?.date),items=D.liveSalesToday?.items;
+  if(!date||!Array.isArray(items)||!Array.isArray(D.orders))return;
+  const cachedByKey=new Map(A(D.orders).filter(r=>ISO(r?.created_date||r?.order_create_time)===date).map(r=>[liveOrderKey(r),r]).filter(([k])=>k));
+  const grouped=new Map();
+  for(const item of items){
+    const key=liveOrderKey(item);if(!key)continue;
+    if(!grouped.has(key))grouped.set(key,[]);
+    grouped.get(key).push(item);
+  }
+  const statusPriority={abnormal:10,returning:20,platform_unclosed:30,pending_recheck:40,pending:50,shipped:60,other:70,cancelled:80,done:90};
+  const liveRows=[];
+  for(const [key,rows] of grouped){
+    const cached=cachedByKey.get(key)||{},ranked=[...rows].sort((a,b)=>N(b.sales_sar)-N(a.sales_sar));
+    const first=ranked[0]||rows[0]||{},products=uniq(rows.map(r=>String(r?.standard_goods_sn||'').trim()).filter(Boolean));
+    const details=rows.map(r=>({standard_goods_sn:r?.standard_goods_sn||'',skc:r?.skc||'',goods_title:r?.goods_title||'',order_status_group:orderStatusKey({...r,order_status_desc:r?.goods_performance_status_desc||''})}));
+    const statusCounts={};for(const detail of details){const k=detail.order_status_group||'other';statusCounts[k]=(statusCounts[k]||0)+1}
+    const liveStatus=rows.map(r=>String(r?.goods_performance_status_desc||'').trim()).find(Boolean)||'';
+    const liveStatusGroup=Object.keys(statusCounts).sort((a,b)=>(statusPriority[a]??70)-(statusPriority[b]??70))[0]||'other';
+    const quantity=rows.reduce((a,r)=>a+N(r?.source_quantity??r?.quantity),0),salesSar=rows.reduce((a,r)=>a+N(r?.sales_sar),0);
+    const orderTimes=rows.map(r=>String(r?.order_create_time||'')).filter(Boolean).sort();
+    const updatedTimes=rows.map(r=>String(r?.updated_at||'')).filter(Boolean).sort();
+    const itemCount=rows.length,productCount=products.length;
+    const productSummary=productCount>1?`${productCount}个货号 / ${M(quantity)}件`:itemCount>1?`${first.standard_goods_sn||first.goods_title||'同货号'} / ${M(quantity)}件`:(first.standard_goods_sn||first.goods_title||'未识别商品');
+    const productDetailSummary=details.slice(0,5).map(r=>[r.standard_goods_sn,r.skc].filter(Boolean).join(' · ')).filter(Boolean).join('；');
+    liveRows.push({...cached,
+      order_item_key:first.order_item_key||cached.order_item_key||key,
+      order_group_key:first.order_no||first.bill_no||first.order_item_key||cached.order_group_key||key,
+      created_date:date,
+      store_key:sk(first)||cached.store_key,
+      group_key:first.group_key||cached.group_key||'',
+      order_no:first.order_no||cached.order_no||'',
+      bill_no:first.bill_no||cached.bill_no||'',
+      order_create_time:orderTimes[0]||cached.order_create_time||`${date}T00:00:00`,
+      updated_at:updatedTimes.at(-1)||D.liveSalesToday?.generatedAt||cached.updated_at||'',
+      standard_goods_sn:first.standard_goods_sn||cached.standard_goods_sn||'',
+      skc:first.skc||cached.skc||'',
+      goods_title:itemCount===1?(first.goods_title||cached.goods_title||''):(cached.goods_title||''),
+      item_count:itemCount,
+      product_count:productCount,
+      product_summary:productSummary,
+      product_detail_summary:productDetailSummary,
+      quantity,
+      sales_sar:Math.round(salesSar*100)/100,
+      order_status_desc:liveStatus||cached.order_status_desc||'订单已同步，履约状态待更新',
+      order_status_group:liveStatus?liveStatusGroup:(cached.order_status_group||'pending'),
+      order_status_source:liveStatus?'live_sales':(cached.order_status_source||'live_sales'),
+      is_cod:rows.some(r=>r?.is_cod===true||r?.is_cod===1||String(r?.is_cod).toLowerCase()==='true'),
+      payment_label:rows.map(r=>String(r?.payment_label||'').trim()).find(Boolean)||cached.payment_label||'',
+      payment_method:rows.map(r=>String(r?.payment_method||'').trim()).find(Boolean)||cached.payment_method||'',
+      status_distribution:statusCounts,
+      items:itemCount>1?details:[],
+      live_order_overlay:true
+    });
+  }
+  D.orders=[...A(D.orders).filter(r=>ISO(r?.created_date||r?.order_create_time)!==date),...liveRows];
+}
 
 function genAt(){return D.__sections?.generatedAt||D.generatedAt||D.__latestSectionGeneratedAt||''}
 
@@ -122,7 +180,7 @@ function clearSectionRecheck(n){if(SECTION_RECHECK_TIMERS[n]){clearTimeout(SECTI
 function scheduleSectionRecheck(n){if(SECTION_RECHECK_TIMERS[n])return;const state=SS[n]||{},attempt=Math.max(0,Number(state.recheckAttempt)||0);if(attempt>=SECTION_RECHECK_MAX_ATTEMPTS){if(state.pendingSection){SS[n]={...state,status:'error',error:'最新数据生成超时，请重试。',refreshing:false,refreshError:'',pendingSection:false};render()}return}const delay=Math.min(SECTION_RECHECK_MAX_MS,SECTION_RECHECK_BASE_MS*Math.max(1,attempt+1));SECTION_RECHECK_TIMERS[n]=setTimeout(()=>{delete SECTION_RECHECK_TIMERS[n];if(document.visibilityState==='hidden'){scheduleSectionRecheck(n);return}load(n,true,false,true).catch(()=>{})},delay)}
 function invalidateSectionsForCore(generatedAt){if(!generatedAt)return;for(const [name,state] of Object.entries(SS)){if(state?.generatedAt&&state.generatedAt!==generatedAt){clearSectionRecheck(name);SS[name]={...state,status:'idle',stale:true,refreshing:false,coreGeneratedAt:generatedAt,refreshError:'',recheckAttempt:0}}}}
 async function core({silent=false,ensureAfter=true}={}){if(CORE_PROMISE)return CORE_PROMISE;const previous=genAt();if(!silent){S.core='loading';render()}CORE_PROMISE=(async()=>{const r=await fetch('../data.json?ts='+Date.now(),{cache:'no-store'});if(!r.ok)throw Error('core HTTP '+r.status);merge(await r.json());LAST_CORE_REFRESH_MS=Date.now();S.core='ok';S.err='';const current=genAt();if(current&&current!==previous)invalidateSectionsForCore(current);if(!silent||S.rangePreset!=='custom')dates(true);render();if(ensureAfter)ensure(S.tab,true);return true})().catch(e=>{S.err=e?.message||String(e);if(!silent){S.core='error';render()}return false}).finally(()=>{CORE_PROMISE=null});return CORE_PROMISE}
-async function load(n,silent=false,force=false,recheck=false){let expected=D.__sections?.generatedAt||D.generatedAt||'',prev=SS[n]||{};if(prev.status==='ok'&&!force&&!recheck)return true;if(prev.status==='error'&&!force&&!recheck)return false;if(P[n])return P[n];const startedAt=Date.now();SS[n]={...prev,status:'loading',refreshing:force||recheck||!!prev.refreshing,error:'',refreshError:'',startedAt};setTimeout(()=>{if(SS[n]?.status==='loading'&&SS[n]?.startedAt===startedAt)render()},LOAD_HINT_MS+200);if(!silent)render();P[n]=(async()=>{const r=await fetch(surl(n,force),{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j&&j.ok===false)throw Error(j.error||'section failed');if(j?.pendingSection){const attempt=Math.max(0,Number(prev.recheckAttempt)||0)+1;SS[n]={status:'loading',error:'',generatedAt:j.generatedAt||'',cachedAt:'',stale:false,pendingSection:true,coreGeneratedAt:j.coreGeneratedAt||expected,refreshing:true,refreshError:'',recheckAttempt:attempt,startedAt};scheduleSectionRecheck(n);render();return true}let stale=!!(j&&(j.staleSection||j.cacheStale)),versionWarning='';if(expected&&j.generatedAt&&j.generatedAt!==expected&&!stale){await core({silent:true,ensureAfter:false});expected=D.__sections?.generatedAt||D.generatedAt||'';if(expected&&j.generatedAt!==expected){stale=true;versionWarning=n+' 数据版本与 core 暂未同步：section='+j.generatedAt+' core='+expected}}merge(j);if(n==='liveSalesToday'||n==='homeRankings'||n==='rankings')applyLiveOrderRankingOverlay();dates(false);const needsRecheck=stale||!!j.refreshScheduled;SS[n]={status:'ok',error:'',generatedAt:j.generatedAt||'',cachedAt:j.cachedAt||'',stale,coreGeneratedAt:j.coreGeneratedAt||expected,refreshing:needsRecheck,refreshError:j.refreshFailed?('刷新失败'+(j.refreshFailedAt?'（'+fmtStamp(j.refreshFailedAt)+'）':'')+'：'+(j.refreshError||'未知原因')):versionWarning,refreshFailedAt:j.refreshFailedAt||'',recheckAttempt:needsRecheck?(Math.max(0,Number(prev.recheckAttempt)||0)+1):0};if(needsRecheck)scheduleSectionRecheck(n);else clearSectionRecheck(n);render();return true})().catch(e=>{const msg=e?.message||String(e);if(prev.status==='ok'||prev.stale){SS[n]={...prev,status:'ok',error:'',refreshing:false,refreshError:msg,stale:true,coreGeneratedAt:prev.coreGeneratedAt||expected,recheckAttempt:Math.max(0,Number(prev.recheckAttempt)||0)+1};if(recheck)scheduleSectionRecheck(n)}else{SS[n]={status:'error',error:msg}}render();return false}).finally(()=>{delete P[n]});return P[n]}
+async function load(n,silent=false,force=false,recheck=false){let expected=D.__sections?.generatedAt||D.generatedAt||'',prev=SS[n]||{};if(prev.status==='ok'&&!force&&!recheck)return true;if(prev.status==='error'&&!force&&!recheck)return false;if(P[n])return P[n];const startedAt=Date.now();SS[n]={...prev,status:'loading',refreshing:force||recheck||!!prev.refreshing,error:'',refreshError:'',startedAt};setTimeout(()=>{if(SS[n]?.status==='loading'&&SS[n]?.startedAt===startedAt)render()},LOAD_HINT_MS+200);if(!silent)render();P[n]=(async()=>{const r=await fetch(surl(n,force),{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j&&j.ok===false)throw Error(j.error||'section failed');if(j?.pendingSection){const attempt=Math.max(0,Number(prev.recheckAttempt)||0)+1;SS[n]={status:'loading',error:'',generatedAt:j.generatedAt||'',cachedAt:'',stale:false,pendingSection:true,coreGeneratedAt:j.coreGeneratedAt||expected,refreshing:true,refreshError:'',recheckAttempt:attempt,startedAt};scheduleSectionRecheck(n);render();return true}let stale=!!(j&&(j.staleSection||j.cacheStale)),versionWarning='';if(expected&&j.generatedAt&&j.generatedAt!==expected&&!stale){await core({silent:true,ensureAfter:false});expected=D.__sections?.generatedAt||D.generatedAt||'';if(expected&&j.generatedAt!==expected){stale=true;versionWarning=n+' 数据版本与 core 暂未同步：section='+j.generatedAt+' core='+expected}}merge(j);if(n==='liveSalesToday'||n==='homeRankings'||n==='rankings')applyLiveOrderRankingOverlay();if(n==='liveSalesToday'||n==='orders')applyLiveOrderRowsOverlay();dates(false);const needsRecheck=stale||!!j.refreshScheduled;SS[n]={status:'ok',error:'',generatedAt:j.generatedAt||'',cachedAt:j.cachedAt||'',stale,coreGeneratedAt:j.coreGeneratedAt||expected,refreshing:needsRecheck,refreshError:j.refreshFailed?('刷新失败'+(j.refreshFailedAt?'（'+fmtStamp(j.refreshFailedAt)+'）':'')+'：'+(j.refreshError||'未知原因')):versionWarning,refreshFailedAt:j.refreshFailedAt||'',recheckAttempt:needsRecheck?(Math.max(0,Number(prev.recheckAttempt)||0)+1):0};if(needsRecheck)scheduleSectionRecheck(n);else clearSectionRecheck(n);render();return true})().catch(e=>{const msg=e?.message||String(e);if(prev.status==='ok'||prev.stale){SS[n]={...prev,status:'ok',error:'',refreshing:false,refreshError:msg,stale:true,coreGeneratedAt:prev.coreGeneratedAt||expected,recheckAttempt:Math.max(0,Number(prev.recheckAttempt)||0)+1};if(recheck)scheduleSectionRecheck(n)}else{SS[n]={status:'error',error:msg}}render();return false}).finally(()=>{delete P[n]});return P[n]}
 async function revalidateCore(){if(document.visibilityState==='hidden'||Date.now()-LAST_CORE_REFRESH_MS<CORE_REFRESH_MIN_MS)return;await core({silent:true,ensureAfter:true})}
 
 
@@ -134,7 +192,7 @@ function webhookCopyText(v,max=4000){return String(v??'').trim().slice(0,max)}
 function webhookRow(r){return{id:webhookText(r?.id),receivedAt:webhookText(r?.receivedAt),processedAt:webhookText(r?.processedAt),storeKey:webhookText(r?.storeKey).toUpperCase(),eventCode:webhookText(r?.eventCode),eventType:webhookText(r?.eventType),severity:webhookText(r?.severity),status:webhookText(r?.status),title:webhookCopyText(r?.title,300),summary:webhookCopyText(r?.summary),businessKey:webhookText(r?.businessKey),actionState:webhookText(r?.actionState),duplicate:Boolean(r?.duplicate)}}
 async function loadWebhook(force=false){const key=webhookQuery();if(WEBHOOK.promise)return WEBHOOK.promise;if(!force&&WEBHOOK.loadedKey===key&&(WEBHOOK.status==='ok'||WEBHOOK.status==='error'))return WEBHOOK.status==='ok';WEBHOOK.loadedKey=key;WEBHOOK.status='loading';WEBHOOK.error='';WEBHOOK.promise=(async()=>{const [summaryRes,eventsRes]=await Promise.all([fetch('/api/shein/webhook/summary',{cache:'no-store'}),fetch('/api/shein/webhook/events?'+key,{cache:'no-store'}),]);const [summaryJson,eventsJson]=await Promise.all([summaryRes.json(),eventsRes.json()]);if(!summaryRes.ok||summaryJson?.ok===false)throw Error(summaryJson?.error||('摘要 HTTP '+summaryRes.status));if(!eventsRes.ok||eventsJson?.ok===false)throw Error(eventsJson?.error||('事件 HTTP '+eventsRes.status));WEBHOOK.summary=summaryJson?.data||{};WEBHOOK.rows=A(eventsJson?.data?.rows).map(webhookRow);WEBHOOK.status='ok';return true})().catch(e=>{WEBHOOK.status='error';WEBHOOK.error=e?.message||String(e);return false}).finally(()=>{WEBHOOK.promise=null;if(S.tab==='platform')render()});if(S.tab==='platform')render();return WEBHOOK.promise}
 function liveSections(event){const allowed=new Set([...Object.keys(SL),'liveSalesToday']);return A(event?.sections).map(x=>String(x||'')).filter((x,i,a)=>allowed.has(x)&&a.indexOf(x)===i)}
-async function flushLiveRefresh(){LIVE_REFRESH_TIMER=null;if(LIVE_REFRESH_RUNNING)return;LIVE_REFRESH_RUNNING=true;const sections=[...LIVE_PENDING_SECTIONS],applyOrderOverlay=LIVE_PENDING_ORDER_OVERLAY;LIVE_PENDING_SECTIONS.clear();LIVE_PENDING_ORDER_OVERLAY=false;try{await core({silent:true,ensureAfter:false});const wanted=new Set([...needsFor(S.tab),...Object.entries(SS).filter(([,v])=>v?.status==='ok'||v?.stale).map(([k])=>k),'liveSalesToday']);await Promise.all(sections.filter(n=>wanted.has(n)).map(n=>{clearSectionRecheck(n);SS[n]={...(SS[n]||{}),status:'idle',stale:true,refreshing:true,coreGeneratedAt:genAt(),refreshError:'',recheckAttempt:0};return load(n,true,true)}));if(applyOrderOverlay)applyLiveOrderRankingOverlay();if(S.tab==='platform')await loadWebhook(true);render()}catch(e){console.warn('BI 实时刷新失败，五分钟兜底仍会继续',e)}finally{LIVE_REFRESH_RUNNING=false;if((LIVE_PENDING_SECTIONS.size||LIVE_PENDING_ORDER_OVERLAY)&&!LIVE_REFRESH_TIMER)LIVE_REFRESH_TIMER=setTimeout(flushLiveRefresh,500)}}
+async function flushLiveRefresh(){LIVE_REFRESH_TIMER=null;if(LIVE_REFRESH_RUNNING)return;LIVE_REFRESH_RUNNING=true;const sections=[...LIVE_PENDING_SECTIONS],applyOrderOverlay=LIVE_PENDING_ORDER_OVERLAY;LIVE_PENDING_SECTIONS.clear();LIVE_PENDING_ORDER_OVERLAY=false;try{await core({silent:true,ensureAfter:false});const wanted=new Set([...needsFor(S.tab),...Object.entries(SS).filter(([,v])=>v?.status==='ok'||v?.stale).map(([k])=>k),'liveSalesToday']);await Promise.all(sections.filter(n=>wanted.has(n)).map(n=>{clearSectionRecheck(n);SS[n]={...(SS[n]||{}),status:'idle',stale:true,refreshing:true,coreGeneratedAt:genAt(),refreshError:'',recheckAttempt:0};return load(n,true,true)}));if(applyOrderOverlay){applyLiveOrderRankingOverlay();applyLiveOrderRowsOverlay()}if(S.tab==='platform')await loadWebhook(true);render()}catch(e){console.warn('BI 实时刷新失败，五分钟兜底仍会继续',e)}finally{LIVE_REFRESH_RUNNING=false;if((LIVE_PENDING_SECTIONS.size||LIVE_PENDING_ORDER_OVERLAY)&&!LIVE_REFRESH_TIMER)LIVE_REFRESH_TIMER=setTimeout(flushLiveRefresh,500)}}
 function queueLiveRefresh(event){if(event?.kind==='order'||event?.kind==='return'){if(event.kind==='order')LIVE_LAST_ORDER_AT=newestStamp(LIVE_LAST_ORDER_AT,event.receivedAt||event.occurredAt);LIVE_PENDING_ORDER_OVERLAY=true}liveSections(event).forEach(n=>LIVE_PENDING_SECTIONS.add(n));WEBHOOK.loadedKey='';const platformVisible=S.tab==='platform';if(!LIVE_PENDING_SECTIONS.size&&!LIVE_PENDING_ORDER_OVERLAY&&!platformVisible)return;if(LIVE_REFRESH_TIMER||LIVE_REFRESH_RUNNING)return;LIVE_REFRESH_TIMER=setTimeout(flushLiveRefresh,350)}
 function startLiveUpdates(){if(LIVE_EVENT_SOURCE||typeof EventSource!=='function')return;try{const source=new EventSource('/api/bi/live-events');source.addEventListener('ready',message=>{try{const ready=JSON.parse(message.data||'{}'),at=ready?.live?.lastOrderAt;LIVE_LAST_ORDER_AT=newestStamp(LIVE_LAST_ORDER_AT,at);if(at)queueLiveRefresh({kind:'order',receivedAt:at,sections:LIVE_ORDER_SECTIONS});else render()}catch{}});source.addEventListener('live-update',message=>{try{queueLiveRefresh(JSON.parse(message.data||'{}'))}catch{}});source.onerror=()=>{};LIVE_EVENT_SOURCE=source;window.addEventListener('pagehide',()=>source.close(),{once:true})}catch(e){console.warn('BI 实时事件流暂不可用，已保留五分钟兜底',e)}}
 
@@ -503,7 +561,7 @@ function paymentBadge(r){return isCodOrder(r)?'<span class="cod-badge">COD</span
 function normalizedOrderText(x){return String(x||'').replace(/[\s_\-·：:]/g,'').toUpperCase()}
 function paymentDetailText(r){const raw=String(r?.payment_label||r?.payment_method||'').trim();const n=normalizedOrderText(raw);if(!raw||n==='COD'||n==='NONCOD')return'';return raw}
 function orderPaymentHtml(r){const parts=[paymentBadge(r),paymentDetailText(r)?H(paymentDetailText(r)):'' ].filter(Boolean);return parts.join(' ')}
-function orderStatusMetaText(r){if(r?.order_status_source==='recheck'){const n=N(r?.status_check_count)||1;return `复查 ${M(n)} 次 · ${fmtStamp(r?.status_checked_at||r?.updated_at)}`;}return `销售源 · ${fmtStamp(r?.updated_at)}`}
+function orderStatusMetaText(r){if(r?.order_status_source==='recheck'){const n=N(r?.status_check_count)||1;return `复查 ${M(n)} 次 · ${fmtStamp(r?.status_checked_at||r?.updated_at)}`;}if(r?.live_order_overlay)return `实时订单 · ${fmtStamp(r?.updated_at)}`;return `销售源 · ${fmtStamp(r?.updated_at)}`}
 
 function orderItems(r){return A(r?.items)}
 function orderProductMainText(r){if(N(r?.item_count)>1||N(r?.product_count)>1)return String(r?.product_summary||'多商品订单');return prod(r)}

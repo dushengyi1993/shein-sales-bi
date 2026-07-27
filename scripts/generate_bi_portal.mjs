@@ -265,11 +265,13 @@ WITH current_order_items AS MATERIALIZED (
     oi.store_key,
     coalesce(oi.group_key,s.group_key) AS group_key,
     oi.order_no,
+    oi.bill_no,
     oi.created_date,
     oi.order_create_time,
     dim.product_canonical_sn(oi.standard_goods_sn) AS standard_goods_sn,
     oi.skc,
     oi.goods_title,
+    oi.goods_performance_status_desc,
     coalesce(oi.quantity,0) AS quantity,
     coalesce(oi.sales_sar,0) AS gross_revenue_sar,
     oi.updated_at
@@ -294,9 +296,14 @@ live_items AS (
     oi.store_key,
     oi.group_key,
     oi.order_no,
+    oi.bill_no,
+    oi.order_item_key,
+    oi.order_create_time,
+    oi.updated_at,
     oi.standard_goods_sn,
     oi.skc,
     oi.goods_title,
+    oi.goods_performance_status_desc,
     oi.quantity AS source_quantity,
     CASE
       WHEN (
@@ -316,6 +323,8 @@ live_items AS (
     )::numeric,2) AS sales_sar,
     round(oi.gross_revenue_sar::numeric,2) AS gross_sales_sar,
     coalesce(p.is_cod,false) AS is_cod,
+    p.payment_label,
+    p.payment_method,
     (
       NOT freshness.cache_matches_source
       AND (oi.gross_revenue_sar <> 0 OR coalesce(pc.gross_revenue_sar,0) <> 0)
@@ -330,7 +339,12 @@ live_items AS (
     ) AS cache_matches_source
   ) freshness
   LEFT JOIN (
-    SELECT store_key,order_no,bool_or(coalesce(is_cod,false)) AS is_cod
+    SELECT
+      store_key,
+      order_no,
+      bool_or(coalesce(is_cod,false)) AS is_cod,
+      max(nullif(payment_label,'')) AS payment_label,
+      max(nullif(payment_method,'')) AS payment_method
     FROM fact.order_payment_flag
     WHERE created_date=current_date AND coalesce(order_no,'') <> ''
     GROUP BY store_key,order_no

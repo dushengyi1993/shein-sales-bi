@@ -91,6 +91,10 @@ assert.match(productionClient, /new EventSource\('\/api\/bi\/live-events'\)/, 't
 assert.match(productionClient, /CORE_VISIBLE_POLL_MS=5\*60\*1000/, 'the formal production shell must use a five-minute fallback');
 assert.match(productionClient, /LIVE_LAST_ORDER_AT=newestStamp/, 'the data-status timestamp must advance from real order events');
 assert.match(productionClient, /function applyLiveOrderRankingOverlay\(\)/, 'live orders must update today rankings without rebuilding the full profit mart');
+assert.match(productionClient, /function applyLiveOrderRowsOverlay\(\)/, 'live orders must update the order center without waiting for the heavy enriched-order cache');
+assert.match(productionClient, /orders:\['orders','liveSalesToday'\]/, 'opening the order center must load the same current-day live source as the homepage');
+assert.match(productionClient, /if\(n==='liveSalesToday'\|\|n==='orders'\)applyLiveOrderRowsOverlay\(\)/, 'the order overlay must be independent of section response order');
+assert.match(productionClient, /实时订单 ·/, 'live order rows must be labelled plainly while slower logistics enrichment catches up');
 assert.match(productionClient, /if\(!date\|\|!D\.rankings\)return;/, 'a verified zero-order live day must clear stale cached rankings instead of preserving old sales');
 assert.match(productionClient, /if\(n==='liveSalesToday'\|\|n==='homeRankings'\|\|n==='rankings'\)applyLiveOrderRankingOverlay\(\)/, 'initial section loading must reconcile cached rankings with live sales regardless of response order');
 assert.match(productionClient, /const liveSalesState=sourceState\('liveSalesToday',A\(D\.liveSalesToday\?\.items\)\);const rankingsState=combineSourceState\(sourceState\('homeRankings',s\.rows\),liveSalesState\)/, 'the homepage must wait for the live overlay and distinguish unavailable data from a business zero');
@@ -105,6 +109,8 @@ assert.match(productionClient, /if\(useLive&&d===liveDate\)return false/, 'cache
 assert.match(productionClient, /loadWebhook\(true\)/, 'platform activity must refresh when a live event arrives');
 assert.match(productionClient, /load\(n,true,true\)/, 'only relevant section APIs should be force-refreshed');
 assert.match(generator, /liveSalesToday:[\s\S]*FROM fact\.order_item oi[\s\S]*WHERE oi\.created_date=current_date/, 'the live overlay must read the exact current-day order facts without rebuilding the full profit view');
+assert.match(generator, /liveSalesToday:[\s\S]*oi\.order_create_time[\s\S]*oi\.goods_performance_status_desc[\s\S]*p\.payment_label/,
+  'the lightweight live section must carry enough order detail for an immediate order-center row');
 assert.match(generator, /FROM mart\.profit_order_item_cache\s+WHERE created_date=current_date/,
   'the live profit overlay must use the last atomically published canonical accounting cache');
 assert.match(generator, /accountingPending/,
