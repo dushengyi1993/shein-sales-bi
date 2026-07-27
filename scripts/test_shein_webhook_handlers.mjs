@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {createSheinWebhookEventProcessor, humanizeSheinWebhookEvent} from '../lib/shein_webhook_handlers.mjs';
 
 const gates = [];
+const productStateCalls = [];
 const currentGates = new Map();
 const updates = [];
 const productContextCalls = [];
@@ -32,6 +33,9 @@ const webhookRepository = {upsertStoreGate: async gate => {
     firstShelfTime: '2026-04-27 15:07:18',
     sales: {units7d: 1, grossSales7dSar: 57.46, units30d: 13, grossSales30dSar: 746.53, unitsLifetime: 20, grossSalesLifetimeSar: 1153.91, lastSaleDate: '2026-07-16'},
   };
+}, applyProductState: async input => {
+  productStateCalls.push(input);
+  return true;
 }};
 const task = {
   id: 'task-1', repositoryRevision: 3, ownerUser: 'owner',
@@ -101,7 +105,28 @@ assert.doesNotMatch(shelfOutcome.summary, /下架原因：/);
 assert.doesNotMatch(shelfOutcome.summary, /合并说明|\d+ 条站点变化/);
 assert.doesNotMatch(shelfOutcome.summary, /回收站/);
 assert.equal(shelfOutcome.normalized.productContextStatus, 'resolved');
+assert.equal(shelfOutcome.normalized.productState.applied, true);
 assert.ok(productContextCalls.some(call => call.skc === 'SKC-DOWN'));
+assert.equal(productStateCalls.length, 1);
+assert.deepEqual(productStateCalls[0], {
+  receiptId: 20,
+  storeKey: 'AA',
+  skc: 'SKC-DOWN',
+  eventFamily: 'product_shelves',
+  action: 'off_shelf',
+  status: undefined,
+  sourceEventOrder: '1784605591827000',
+  eventAt: '2026-07-21T03:46:31.827Z',
+  productContext: {
+    storeKey: 'AA',
+    skc: 'SKC-DOWN',
+    supplierCode: 'S1810电热水壶',
+    productName: 'S1810电热水壶',
+    variantName: '英规插(220-240V)',
+    firstShelfTime: '2026-04-27 15:07:18',
+    sales: {units7d: 1, grossSales7dSar: 57.46, units30d: 13, grossSales30dSar: 746.53, unitsLifetime: 20, grossSalesLifetimeSar: 1153.91, lastSaleDate: '2026-07-16'},
+  },
+});
 
 const identityCalls = [];
 const pendingProcessor = createSheinWebhookEventProcessor({
@@ -133,6 +158,7 @@ assert.match(pendingOutcome.summary, /没有发现实际下架证据，无需告
 assert.doesNotMatch(pendingOutcome.summary, /1970|2018|回收站|被下架/);
 assert.equal(pendingOutcome.normalized.productContextStatus, 'resolved');
 assert.deepEqual(identityCalls, [{storeKey: 'ZL', skc: 'sv260723145349087891523'}]);
+assert.equal(productStateCalls.length, 1, 'not_on_shelf without prior-live evidence must not alter the product list');
 
 const shelfCopyWithPlatformDetails = humanizeSheinWebhookEvent({
   eventFamily: 'product_shelves', storeKey: 'AA', skc: 'SKC-DOWN', action: 'off_shelf',

@@ -210,7 +210,8 @@ const PORTAL_SECTION_SELECTS = {
   'links', (SELECT data FROM links),
   'duplicateLinks', (SELECT data FROM duplicate_links),
   'storeLinks', (SELECT data FROM store_links),
-  'matrix', (SELECT data FROM matrix)
+  'matrix', (SELECT data FROM matrix),
+  'productStateOverlay', (SELECT data FROM product_state_overlay)
 `,
   productSalesDaily: `
   'productSalesDaily', (SELECT data FROM product_sales_daily)
@@ -1914,6 +1915,37 @@ visible_inventory_current AS (
   JOIN store_latest_visible_inventory svi
     ON svi.store_key = v.store_key AND svi.inventory_date = v.snapshot_date
   GROUP BY v.store_key, v.spu
+),
+product_state_overlay AS (
+  SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY event_at, store_key, skc), '[]'::jsonb) AS data
+  FROM (
+    SELECT
+      state.store_key,
+      state.skc,
+      state.shelf_status_code,
+      state.shelf_status_name,
+      state.is_on_shelf,
+      state.is_wait_shelf,
+      state.is_sold_out,
+      state.is_out_shelf,
+      state.event_at,
+      state.source_receipt_id,
+      nullif(state.product_context->>'supplierCode','') AS standard_goods_sn,
+      nullif(state.product_context->>'rawSupplierCode','') AS raw_goods_sn,
+      nullif(state.product_context->>'productName','') AS product_name_cn,
+      nullif(state.product_context->>'spu','') AS spu,
+      nullif(state.product_context->>'firstShelfTime','') AS first_shelf_time,
+      snapshot.updated_at AS snapshot_updated_at
+    FROM ops.shein_webhook_product_state AS state
+    LEFT JOIN LATERAL (
+      SELECT link.updated_at
+      FROM fact.link_master_snapshot AS link
+      WHERE link.store_key=state.store_key AND link.skc=state.skc
+      ORDER BY link.snapshot_date DESC, link.updated_at DESC
+      LIMIT 1
+    ) AS snapshot ON true
+    WHERE state.event_at > coalesce(snapshot.updated_at, '-infinity'::timestamptz)
+  ) AS t
 ),
 link_lifetime_sales AS (
   SELECT
@@ -4881,6 +4913,7 @@ SELECT jsonb_build_object(
   'duplicateLinks', (SELECT data FROM duplicate_links),
   'storeLinks', (SELECT data FROM store_links),
   'matrix', (SELECT data FROM matrix),
+  'productStateOverlay', (SELECT data FROM product_state_overlay),
   'comments', (SELECT data FROM comments),
   'commentSummary', (SELECT data FROM comment_summary),
   'actionDomain', (SELECT data FROM action_domain),

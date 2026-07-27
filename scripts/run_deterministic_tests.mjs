@@ -74,6 +74,7 @@ const tests = [
   'scripts/test_shein_webhook_write_gate.mjs',
   'scripts/test_shein_webhook_external_write_guard.mjs',
   'scripts/test_shein_webhook_handlers.mjs',
+  'scripts/test_shein_webhook_product_state_migration.mjs',
   'scripts/test_shein_webhook_task_reconciler.mjs',
   'scripts/test_shein_webhook_order_return_sync.mjs',
   'scripts/test_shein_webhook_service.mjs',

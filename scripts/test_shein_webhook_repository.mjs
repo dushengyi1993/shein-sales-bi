@@ -40,6 +40,7 @@ class FakePool {
       ]};
     }
     if (key === 'shein-webhook-get-product-business-context') return {rows: [{context: {storeKey: values[0], skc: values[1], supplierCode: 'S1810电热水壶'}}]};
+    if (key === 'shein-webhook-apply-product-state') return {rows: [{applied: true}]};
     if (key === 'shein-webhook-list-task-reconciliation-receipts') return {rows: [{...baseRow, status: 'succeeded', action_state: 'event_recorded_no_task_repository', normalized: {eventFamily: 'product_audit', productId: 'SPU-1', skc: 'SKC-1'}}]};
     if (key === 'shein-webhook-get-task-reconciliation-receipt') return {rows: [{...baseRow, status: 'succeeded', action_state: 'event_recorded_no_task_repository', normalized: {eventFamily: 'product_audit', productId: 'SPU-1', skc: 'SKC-1'}}]};
     if (key === 'shein-webhook-mark-task-reconciliation') return {rows: [{applied: true}]};
@@ -116,6 +117,20 @@ assert.match(latest(pool, 'shein-webhook-list-events').text, /WHERE FALSE/, 'emp
 const productContext = await repo.getProductBusinessContext({storeKey: 'tz', skc: 'SKC-1', eventAt: '2026-07-21T03:46:32.000Z'});
 assert.equal(productContext.supplierCode, 'S1810电热水壶');
 assert.deepEqual(latest(pool, 'shein-webhook-get-product-business-context').values, ['TZ', 'SKC-1', '2026-07-21T03:46:32.000Z']);
+assert.equal(await repo.applyProductState({
+  receiptId: 41,
+  storeKey: 'tz',
+  skc: 'SKC-1',
+  eventFamily: 'product_shelves',
+  action: 'off_shelf',
+  sourceEventOrder: '1784605591827000',
+  eventAt: '2026-07-21T03:46:31.827Z',
+  productContext: {supplierCode: 'S1810电热水壶'},
+}), true);
+assert.deepEqual(latest(pool, 'shein-webhook-apply-product-state').values, [
+  41, 'TZ', 'SKC-1', 'product_shelves', 'off_shelf', '',
+  '1784605591827000', '2026-07-21T03:46:31.827Z', '{"supplierCode":"S1810电热水壶"}',
+]);
 const reconciliationReceipts = await repo.listTaskReconciliationReceipts({limit: 20});
 assert.equal(reconciliationReceipts[0].idempotencyKey, '41');
 assert.match(latest(pool, 'shein-webhook-list-task-reconciliation-receipts').text, /event_recorded_no_task_repository/);

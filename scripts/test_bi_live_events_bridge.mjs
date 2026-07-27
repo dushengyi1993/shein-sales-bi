@@ -108,6 +108,10 @@ assert.match(productionClient, /新订单已计入销售；利润正自动补成
 assert.match(productionClient, /if\(useLive&&d===liveDate\)return false/, 'cached current-day profit must be removed before the live rows are appended');
 assert.match(productionClient, /loadWebhook\(true\)/, 'platform activity must refresh when a live event arrives');
 assert.match(productionClient, /load\(n,true,true\)/, 'only relevant section APIs should be force-refreshed');
+assert.match(productionClient, /productStateOverlayMap/, 'the product list must overlay newer webhook state immediately');
+assert.match(productionClient, /平台实时更新/, 'operators must be able to distinguish live webhook state from the daily snapshot');
+assert.match(generator, /'productStateOverlay', \(SELECT data FROM product_state_overlay\)/,
+  'the links section must include the latest trustworthy product-state overlay');
 assert.match(generator, /liveSalesToday:[\s\S]*FROM fact\.order_item oi[\s\S]*WHERE oi\.created_date=current_date/, 'the live overlay must read the exact current-day order facts without rebuilding the full profit view');
 assert.match(generator, /liveSalesToday:[\s\S]*oi\.order_create_time[\s\S]*oi\.goods_performance_status_desc[\s\S]*p\.payment_label/,
   'the lightweight live section must carry enough order detail for an immediate order-center row');

@@ -107,6 +107,13 @@ expected = randomKey + Base64(UTF8(hashHex))
 
 迁移：`infra/warehouse/migrations/20260719_001_shein_webhook_runtime.sql`；商品通知安全补全：`infra/warehouse/migrations/20260721_001_shein_webhook_product_context.sql`。
 
+商品列表实时状态层：`infra/warehouse/migrations/20260727_002_shein_webhook_product_state.sql`。
+
+- `product_shelves` 明确为 `on_shelf` / `off_shelf`，或商品删除审核明确通过时，按 `店铺 + SKC` 写入单调递增的实时状态。
+- `shelfState=0` 但没有历史上架或明确下架证据时仍视为“尚未上架”，不会把商品列表误改成“已下架”。
+- `linksData` 会读取实时状态层；浏览器通过 PostgreSQL `NOTIFY` → Portal SSE 立即刷新商品列表和动作池。
+- 日更链接快照仍保留，用于全量覆盖、字段补全和漏事件对账；Webhook 不负责历史流量、完整价格栈、商品素材等平台未推送字段。
+
 - `ops.shein_webhook_receipt`：AES 密文 `event_data`、密文 hash、最小规范化投影、幂等键、状态、lease、重试、告警与处理结果；不保存解密后的原始 payload。
 - `ops.shein_webhook_store_gate`：店铺级授权/额度闸门，同时保存平台事件顺序值；额度乱序按平台 `sendTimeStamp` 而不是本地收件 ID 判新旧。
 - `ops.get_shein_webhook_product_context(store, skc, event_at)`：`SECURITY DEFINER` 只读函数，只返回单个 SKC 的货号、商品/款式、上架时间和聚合销售；调用角色没有底层链接/利润明细表的直接 `SELECT`。查询严格截止事件日期，避免把未来快照写进历史通知。运营通知按“一货号一款式”展示，不单列款式字段。
