@@ -100,7 +100,8 @@ assert.match(productionClient, /if\(n==='liveSalesToday'\|\|n==='homeRankings'\|
 assert.match(productionClient, /const liveSalesState=sourceState\('liveSalesToday',A\(D\.liveSalesToday\?\.items\)\);const rankingsState=combineSourceState\(sourceState\('homeRankings',s\.rows\),liveSalesState\)/, 'the homepage must wait for the live overlay and distinguish unavailable data from a business zero');
 assert.match(productionClient, /const LIVE_ORDER_SECTIONS=\['liveSalesToday','orders','priceScatter'\]/, 'live orders must always refresh the lightweight today-sales section');
 assert.match(productionClient, /home:\['homeRankings','afterSales','homeProfit','homeTrafficDaily','liveSalesToday'\]/, 'the homepage must load the current-day profit overlay even before a new SSE event');
-assert.match(productionClient, /n==='liveSalesToday'\?'\?refresh=1'/, 'the lightweight today-sales section must refresh synchronously');
+assert.match(productionClient, /\['liveSalesToday','productState'\]\.includes\(n\)\?'\?refresh=1'/,
+  'the lightweight today-sales and product-state sections must refresh synchronously');
 assert.match(productionClient, /queueLiveRefresh\(\{kind:'order',receivedAt:at,sections:LIVE_ORDER_SECTIONS\}\)/, 'a newly opened page must catch up from the persisted last order receipt');
 assert.match(productionClient, /profitStoreRows/, 'the current-day store profit rows must replace the stale cached day');
 assert.match(productionClient, /新订单已计入销售；利润正自动补成本/,
