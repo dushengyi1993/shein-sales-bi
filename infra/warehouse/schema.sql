@@ -7704,7 +7704,7 @@ END
 $$;
 
 COMMENT ON TABLE ops.shein_webhook_product_state
-IS 'Latest monotonic SHEIN four-state product lifecycle per store/SKC, from direct shelf events or exact OpenAPI readback after audit/price events; BI overlays it only while newer than the daily link snapshot.';
+IS 'Latest monotonic SHEIN four-state product lifecycle per store/SKC, from direct shelf events or evidence-backed OpenAPI readback after audit/price events; BI overlays it only while newer than the daily link snapshot.';
 
 WITH candidates AS (
   SELECT

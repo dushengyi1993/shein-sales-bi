@@ -1,8 +1,9 @@
 BEGIN;
 
--- Expand the event overlay from direct on/off callbacks to the exact four-state
--- lifecycle returned by the read-only SHEIN product-detail API. Audit/price
--- results are never treated as a shelf state without that store + SKC readback.
+-- Expand the event overlay from direct on/off callbacks to a four-state
+-- lifecycle supported by read-only SHEIN current-state and lifecycle evidence.
+-- Audit/price results are never treated as shelf state without store + SKC
+-- readback; OpenAPI status 0 becomes wait_shelf only with never-shelved proof.
 ALTER TABLE ops.shein_webhook_product_state
   DROP CONSTRAINT IF EXISTS shein_webhook_product_state_event_family_check,
   DROP CONSTRAINT IF EXISTS shein_webhook_product_state_action_check,
@@ -144,6 +145,6 @@ END
 $$;
 
 COMMENT ON TABLE ops.shein_webhook_product_state
-IS 'Latest monotonic SHEIN four-state product lifecycle per store/SKC, from direct shelf events or exact OpenAPI readback after audit/price events; BI overlays it only while newer than the daily link snapshot.';
+IS 'Latest monotonic SHEIN four-state product lifecycle per store/SKC, from direct shelf events or evidence-backed OpenAPI readback after audit/price events; BI overlays it only while newer than the daily link snapshot.';
 
 COMMIT;

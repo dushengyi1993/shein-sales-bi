@@ -35,4 +35,4 @@ for (const file of [
 
 assert.match(baseMigration, /GRANT SELECT ON TABLE ops\.shein_webhook_product_state TO shein_link_ops/);
 
-console.log('shein_webhook_product_state_migration: exact four-state overlay and least-privilege ACL passed');
+console.log('shein_webhook_product_state_migration: evidence-backed four-state overlay and least-privilege ACL passed');

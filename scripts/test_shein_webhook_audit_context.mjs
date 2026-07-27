@@ -107,10 +107,12 @@ const productStateProvider = await createSheinWebhookAuditContextProvider({
             supplierCode: 'SK-04031胶囊咖啡机',
             shelfStatusInfoList: [{
               siteAbbr: 'shein-sa',
-              shelfStatus: 2,
+              shelfStatus: 0,
               firstShelfTime: '1970-01-01 08:00:01',
+              lastShelfTime: '2018-08-28 00:00:00',
               lastUpdateTime: '2026-07-27 10:20:00',
             }],
+            recycleInfoList: [{subSite: 'shein-sa', recycleStatus: 0}],
           }],
         }}),
       };
@@ -125,16 +127,19 @@ assert.deepEqual(productState, {
   skc: 'SKC-WAIT',
   spu: 'SPU-WAIT',
   supplierCode: 'SK-04031胶囊咖啡机',
+  platformShelfStatusCode: '0',
   shelfStatusCode: '2',
   action: 'wait_shelf',
   shelfStatusName: '待上架',
+  stateEvidence: 'not_on_shelf_and_never_shelved',
   isOnShelf: false,
   isWaitShelf: true,
   isSoldOut: false,
   isOutShelf: false,
   firstShelfTime: '1970-01-01 08:00:01',
-  lastShelfTime: '',
+  lastShelfTime: '2018-08-28 00:00:00',
   lastUpdateTime: '2026-07-27 10:20:00',
+  recycleStatus: '0',
 });
 assert.equal(productStateCalls.length, 2);
 assert.match(productStateCalls[0].url, /searchProduct$/);
