@@ -114,7 +114,7 @@ node scripts/bi_ops_cli.mjs jobs --scope-all  # 仅 Owner 全局只读
 - `--profile fast|balanced|deep|owner` 只改变理解深度。默认分层是 Luna low 20 秒、Terra low 45 秒、Terra medium 90 秒、Sol high 300 秒、Owner Sol high 600 秒；`xhigh` 只在 Owner 人工明确要求时使用，网页不启用 max/ultra。
 - 后台 `intent_plan` job 只补全店铺、商品、参数、歧义和风险，不直接授权或提交 SHEIN。终态为 `succeeded`、`failed` 或 `uncertain_write`；后两者先看详情，不要重复创建动作。
 - 飞书问数已主动暂停，生产 `shein-bi-lark-sales-qa.service` 必须保持 `disabled + inactive`；团队网页和 Owner CLI 不依赖它。
-- Owner/合伙人 CLI 的经营问数统一使用 `query` 读取云端 BI section，不依赖伙伴电脑里的完整项目或本地 V3 报表，也不再把问题转给云端问数模型。`query` 只按关键词确定性选择数据分区并返回完整结构化行，响应固定标明 `aiInvoked=false`；当前电脑上的 Codex 自己完成筛选、计算和说明。近 7 天链接多条件筛选（曝光、点击率、销量）应直接用链接行计算，点击率按 `c7_goods_uv / c7_eps_uv` 重算，支持全部 19 店和按店筛选；链接 section 与小时级销售 core 代次不同时，只有业务日期兼容规则通过才可读取，不能把正常日更链接数据误判为缺报表。
+- Owner/合伙人 CLI 的经营问数统一使用 `query` 读取云端 BI section，不依赖伙伴电脑里的完整项目或本地 V3 报表，也不再把问题转给云端问数模型。`query` 只按关键词确定性选择数据分区并返回完整结构化行，响应固定标明 `aiInvoked=false`；当前电脑上的 Codex 自己完成筛选、计算和说明。近 7 天链接多条件筛选应直接用链接行计算：曝光用 `c7_eps_uv`、销量用 `c7_sale_cnt`、加车访客用 `c7_cart_uv`，点击率按 `c7_goods_uv / c7_eps_uv` 重算；不得把商品访客误当成加车访客。该链路支持全部 19 店和按店筛选；链接 section 与小时级销售 core 代次不同时，只有业务日期兼容规则通过才可读取，不能把正常日更链接数据误判为缺报表。
 
 ### 负责人规则如何传给团队
 
@@ -197,7 +197,7 @@ $out = Join-Path $env:TEMP ("shein-bi-query-" + [guid]::NewGuid().ToString("N") 
 & "$HOME\.shein-bi\cli\shein-bi-ops.cmd" query --text "找出点击率4%以上、近7天曝光3000以上且近7天销量为0的链接" --out $out
 ```
 
-命令会把登录账号有权读取的结构化 BI 数据写入 `$out`，终端只显示文件路径、数据时间、加载分区和行数。当前 Codex 随后直接读取文件、按用户条件计算并回答。它不得调用 `ask`、`chat`、飞书问数、浏览器抓数或另一个模型。
+命令会把登录账号有权读取的结构化 BI 数据写入 `$out`，终端只显示文件路径、数据时间、加载分区和行数。当前 Codex 随后直接读取文件、按用户条件计算并回答。链接行已经包含 `c7_cart_uv` / `c30_cart_uv`，普通近 7 天或近 30 天加车筛选不需要加载六万多行逐日明细。它不得调用 `ask`、`chat`、飞书问数、浏览器抓数或另一个模型。
 
 自动分区不够时可以显式指定：
 
@@ -326,11 +326,13 @@ node scripts/bi_ops_cli.mjs resolve --task-id <任务ID> --status archived --not
 
 ### 看到 `401`
 
-一般是没有登录、会话过期或密码错误。重新运行：
+如果业务命令在更新检查阶段返回 `BI_LOGIN_REQUIRED`、`BI_SESSION_EXPIRED`，或旧版显示 `Partner CLI release endpoint returned invalid JSON (HTTP 401)`，说明这台电脑保存的 BI 登录会话缺失或已失效，查询还没有开始；不代表 GitHub Release 或云端发布接口坏了。用可交互终端重新登录一次：
 
 ```powershell
-node scripts/bi_ops_cli.mjs login --username 他的BI账号
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" login --username 他的BI账号
 ```
+
+由账号本人按提示输入密码，登录成功后直接重试原问题。CLI 会先完成受管更新，再读取负责人规则和业务数据。
 
 ### 看到 `403`
 

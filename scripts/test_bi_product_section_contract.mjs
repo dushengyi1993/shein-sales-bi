@@ -6,6 +6,7 @@ import {fileURLToPath} from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const generator = fs.readFileSync(path.join(root, 'scripts', 'generate_bi_portal.mjs'), 'utf8');
+const linkFetcher = fs.readFileSync(path.join(root, 'scripts', 'fetch_shein_links.mjs'), 'utf8');
 const server = fs.readFileSync(path.join(root, 'scripts', 'serve_bi_portal.mjs'), 'utf8');
 const client = fs.readFileSync(path.join(root, 'scripts', 'bi_app', 'client.js'), 'utf8');
 const prewarm = fs.readFileSync(path.join(root, 'scripts', 'prewarm_bi_portal_sections.sh'), 'utf8');
@@ -39,6 +40,17 @@ const productTrafficSql = standaloneSections.match(/productTrafficDaily:\s*`[\s\
 assert.match(productTrafficSql, /raw_product_traffic AS MATERIALIZED/);
 assert.match(productTrafficSql, /product_traffic_keys AS MATERIALIZED/);
 assert.match(productTrafficSql, /latest_link_status AS MATERIALIZED/);
+
+const linksDataSql = generator.slice(
+  generator.indexOf('store_latest_perf AS ('),
+  generator.indexOf('matrix AS ('),
+);
+assert.match(linksDataSql, /link_traffic_windows AS \(/, 'link data must aggregate add-to-cart visitors by link');
+assert.match(linksDataSql, /AS c7_cart_uv/, 'link data must expose a seven-day add-to-cart visitor metric');
+assert.match(linksDataSql, /AS c30_cart_uv/, 'link data must expose a 30-day add-to-cart visitor metric');
+assert.match(linksDataSql, /c7_eps_uv, c7_goods_uv, c7_cart_uv, c7_pay_rate/, 'store links must publish c7 cart visitors beside the other c7 metrics');
+assert.match(linkFetcher, /c7CartUv:\s*num\(c7\?\.cartUvIdx,\s*0\)/, 'future link snapshots must persist the platform c7 cart visitor metric');
+assert.match(linkFetcher, /c30CartUv:\s*num\(c30\?\.cartUvIdx,\s*0\)/, 'future link snapshots must persist the platform c30 cart visitor metric');
 
 const inventorySql = generator.slice(
   generator.indexOf('inventory_cost_product AS ('),

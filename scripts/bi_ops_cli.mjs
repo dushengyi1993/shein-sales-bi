@@ -419,6 +419,17 @@ function cookieFromSetCookie(headers) {
   return raw.split(';')[0].trim();
 }
 
+function biLoginRequiredError({expired = false} = {}) {
+  const err = new Error(
+    expired
+      ? 'BI 登录已失效，CLI 尚未执行当前请求。请先运行“$HOME\\.shein-bi\\cli\\shein-bi-ops.cmd login --username <你的BI账号>”重新登录一次，再重试原命令。'
+      : '尚未登录 BI，CLI 尚未执行当前请求。请先运行“$HOME\\.shein-bi\\cli\\shein-bi-ops.cmd login --username <你的BI账号>”完成登录，再重试原命令。',
+  );
+  err.code = expired ? 'BI_SESSION_EXPIRED' : 'BI_LOGIN_REQUIRED';
+  if (expired) err.status = 401;
+  return err;
+}
+
 async function request(args, pathname, {method = 'GET', body, auth = true} = {}) {
   const headers = {'accept': 'application/json', 'user-agent': `shein-bi-ops-cli/${BI_OPS_CLI_VERSION}`};
   if (body !== undefined) headers['content-type'] = 'application/json';
@@ -439,6 +450,11 @@ async function request(args, pathname, {method = 'GET', body, auth = true} = {})
     json = {raw: text};
   }
   if (!res.ok || json.ok === false) {
+    if (auth && res.status === 401) {
+      const err = biLoginRequiredError({expired: true});
+      err.response = json;
+      throw err;
+    }
     const err = new Error(json.error || `HTTP ${res.status}`);
     err.status = res.status;
     err.response = json;
@@ -463,7 +479,7 @@ async function refreshPartnerCli(args, {force = false, checkOnly = false} = {}) 
   const installRoot = await findManagedPartnerCliInstallRoot({entryRoot: ROOT});
   if (!installRoot) return {ok: true, managed: false, updated: false, currentVersion: BI_OPS_CLI_VERSION};
   const session = await readSession(args.sessionFile);
-  if (!session.cookie) throw new Error('尚未登录 BI，无法检查 CLI 更新');
+  if (!session.cookie) throw biLoginRequiredError();
   const result = await checkAndInstallPartnerCliUpdate({
     baseUrl: args.baseUrl,
     cookie: session.cookie,
@@ -1475,6 +1491,7 @@ main().catch(err => {
   const out = {
     ok: false,
     error: err?.message || String(err),
+    code: err?.code || null,
     status: err?.status || null,
     response: err?.response || null,
   };

@@ -31,8 +31,8 @@ let manifestCalls = 0;
 let bundleCalls = 0;
 const server = http.createServer((req, res) => {
   if (!String(req.headers.cookie || '').includes('bi_session=test')) {
-    res.writeHead(401, {'content-type': 'application/json'});
-    res.end(JSON.stringify({ok: false, error: 'auth required'}));
+    res.writeHead(401, {'content-type': 'text/plain; charset=utf-8'});
+    res.end('Unauthorized');
     return;
   }
   if (req.url === '/api/partner-cli/manifest') {
@@ -62,6 +62,23 @@ try {
     server.once('error', reject);
     server.listen(port, '127.0.0.1', resolve);
   });
+  let expiredError = null;
+  try {
+    await checkAndInstallPartnerCliUpdate({
+      baseUrl: `http://127.0.0.1:${port}`,
+      cookie: 'bi_session=expired',
+      currentVersion: oldVersion,
+      installRoot,
+      codexHome,
+    });
+  } catch (error) {
+    expiredError = error;
+  }
+  check('plain-text 401 has stable error code', expiredError?.code, 'BI_SESSION_EXPIRED');
+  check('plain-text 401 keeps HTTP status', expiredError?.status, 401);
+  check('plain-text 401 asks for BI login', expiredError?.message, text => text.includes('BI 登录已失效') && text.includes('login --username'));
+  check('plain-text 401 is not mislabeled invalid JSON', expiredError?.message, text => !text.includes('invalid JSON'));
+
   const updated = await checkAndInstallPartnerCliUpdate({
     baseUrl: `http://127.0.0.1:${port}`,
     cookie: 'bi_session=test',

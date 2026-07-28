@@ -2034,6 +2034,23 @@ product_lifetime_sales AS (
   WHERE coalesce(standard_goods_sn,'') <> ''
   GROUP BY store_key, dim.product_canonical_sn(standard_goods_sn)
 ),
+link_traffic_windows AS (
+  SELECT
+    p.store_key,
+    p.skc,
+    round(sum(coalesce(p.cart_uv, 0)) FILTER (
+      WHERE p.date BETWEEN pl.perf_date - 6 AND pl.perf_date
+    )::numeric, 0) AS c7_cart_uv,
+    round(sum(coalesce(p.cart_uv, 0)) FILTER (
+      WHERE p.date BETWEEN pl.perf_date - 29 AND pl.perf_date
+    )::numeric, 0) AS c30_cart_uv
+  FROM fact.link_performance_daily p
+  JOIN store_latest_perf pl
+    ON pl.store_key = p.store_key
+   AND p.date BETWEEN pl.perf_date - 29 AND pl.perf_date
+  WHERE coalesce(p.skc, '') <> ''
+  GROUP BY p.store_key, p.skc
+),
 link_health_base AS (
   SELECT
     l.snapshot_date AS link_date,
@@ -2077,6 +2094,18 @@ link_health_base AS (
     coalesce(p.goods_uv, 0) AS goods_uv,
     coalesce(p.click_rate, 0) AS click_rate,
     coalesce(p.cart_uv, 0) AS cart_uv,
+    coalesce(
+      CASE WHEN coalesce(p.raw_summary->>'c7CartUv','') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+        THEN (p.raw_summary->>'c7CartUv')::numeric ELSE NULL END,
+      tw.c7_cart_uv,
+      0
+    ) AS c7_cart_uv,
+    coalesce(
+      CASE WHEN coalesce(p.raw_summary->>'c30CartUv','') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+        THEN (p.raw_summary->>'c30CartUv')::numeric ELSE NULL END,
+      tw.c30_cart_uv,
+      0
+    ) AS c30_cart_uv,
     coalesce(p.cart_rate, 0) AS cart_rate,
     coalesce(p.pay_uv, 0) AS pay_uv,
     coalesce(p.pay_rate, 0) AS pay_rate,
@@ -2155,6 +2184,8 @@ link_health_base AS (
     ON pl.store_key = l.store_key
   LEFT JOIN fact.link_performance_daily p
     ON p.date = pl.perf_date AND p.store_key = l.store_key AND p.skc = l.skc
+  LEFT JOIN link_traffic_windows tw
+    ON tw.store_key = l.store_key AND tw.skc = l.skc
   LEFT JOIN link_lifetime_sales ls
     ON ls.store_key = l.store_key AND ls.skc = l.skc
   LEFT JOIN product_lifetime_sales pls
@@ -2235,8 +2266,8 @@ links AS (
       visible_shelf_statuses,
       shelf_status_name, shelf_age_days,
       sale_cnt, c7_sale_cnt, c30_sale_cnt, total_sale_volume, total_sale_order_count, last_sale_date, product_total_sale_volume, product_total_sale_order_count, product_last_sale_date,
-      eps_uv, goods_uv, click_rate, pay_rate,
-      c7_eps_uv, c7_goods_uv, c7_pay_rate, c30_eps_uv, c30_goods_uv, c30_pay_rate,
+      eps_uv, goods_uv, click_rate, cart_uv, cart_rate, pay_uv, pay_rate,
+      c7_eps_uv, c7_goods_uv, c7_cart_uv, c7_pay_rate, c30_eps_uv, c30_goods_uv, c30_cart_uv, c30_pay_rate,
       quality_grade, comment_count, bad_comment_rate, return_order_count,
       same_product_on_shelf_count, retire_candidate,
       high_exposure_low_click, high_visit_low_pay, wait_shelf_block_candidate,
@@ -2272,8 +2303,8 @@ duplicate_links AS (
       visible_shelf_statuses,
       shelf_status_name, shelf_age_days,
       sale_cnt, c7_sale_cnt, c30_sale_cnt, total_sale_volume, total_sale_order_count, last_sale_date, product_total_sale_volume, product_total_sale_order_count, product_last_sale_date,
-      eps_uv, goods_uv, click_rate, pay_rate,
-      c7_eps_uv, c7_goods_uv, c7_pay_rate, c30_eps_uv, c30_goods_uv, c30_pay_rate,
+      eps_uv, goods_uv, click_rate, cart_uv, cart_rate, pay_uv, pay_rate,
+      c7_eps_uv, c7_goods_uv, c7_cart_uv, c7_pay_rate, c30_eps_uv, c30_goods_uv, c30_cart_uv, c30_pay_rate,
       quality_grade, comment_count, bad_comment_rate, return_order_count,
       same_product_on_shelf_count, retire_candidate,
       high_exposure_low_click, high_visit_low_pay, wait_shelf_block_candidate,
@@ -2306,8 +2337,8 @@ store_links AS (
       visible_shelf_statuses,
       shelf_status_name, shelf_age_days,
       sale_cnt, c7_sale_cnt, c30_sale_cnt, total_sale_volume, total_sale_order_count, last_sale_date, product_total_sale_volume, product_total_sale_order_count, product_last_sale_date,
-      eps_uv, goods_uv, click_rate, pay_rate,
-      c7_eps_uv, c7_goods_uv, c7_pay_rate, c30_eps_uv, c30_goods_uv, c30_pay_rate,
+      eps_uv, goods_uv, click_rate, cart_uv, cart_rate, pay_uv, pay_rate,
+      c7_eps_uv, c7_goods_uv, c7_cart_uv, c7_pay_rate, c30_eps_uv, c30_goods_uv, c30_cart_uv, c30_pay_rate,
       quality_grade, comment_count, bad_comment_rate, return_order_count,
       same_product_on_shelf_count, retire_candidate,
       high_exposure_low_click, high_visit_low_pay, wait_shelf_block_candidate,
