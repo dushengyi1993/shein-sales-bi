@@ -20,3 +20,4 @@
 - CLI 测试覆盖主会话损坏、从备份恢复及退出后双文件清理。
 - `npm test`：124 / 124 通过。
 - 本机 Windows 构建 ZIP SHA256：`76923cff8cf8fa77a0c32c2037ae868e499198fe5c537e886288b34cba609851`。
+- GitHub Release 生产 ZIP SHA256：`c2b683ed049b1826568e2cc8827cbe36b960d360d8c15d0e1ff56eb557bf9af4`；受管 bundle 内容 SHA256：`4a869ae526b74d5db1ad62fe8ea30ee5b2595751584282389584f58001a27bb7`。
