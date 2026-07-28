@@ -115,7 +115,7 @@ cost AS (
     sum(cost_sar) / nullif(sum(shipped_quantity),0) AS opening_unit_cost_sar,
     count(*) AS cost_batch_count,
     max(arrived_date) AS latest_cost_arrival
-  FROM fact.product_cost_batch
+  FROM mart.product_cost_batch_timeline
   WHERE complete_batch
     AND arrived_date < ${date}
     AND coalesce(shipped_quantity,0) > 0

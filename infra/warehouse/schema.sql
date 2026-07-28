@@ -2087,9 +2087,137 @@ CREATE INDEX IF NOT EXISTS idx_product_cost_batch_product ON fact.product_cost_b
 CREATE INDEX IF NOT EXISTS idx_product_cost_batch_complete ON fact.product_cost_batch(standard_goods_sn, complete_batch);
 CREATE INDEX IF NOT EXISTS idx_product_cost_batch_arrival ON fact.product_cost_batch(standard_goods_sn, arrived_date);
 
+-- One cost timeline for accounting and BI. The spreadsheet remains the
+-- declared source for unlinked batches and arrival dates. Once a batch is
+-- linked to an ET shipment, only ET physical departure/arrival evidence may
+-- establish that it was shipped; a declared date cannot override an ET record
+-- that is still waiting to depart.
+CREATE OR REPLACE VIEW mart.product_cost_batch_timeline AS
+WITH track_event AS (
+  SELECT
+    t.ship_order_id,
+    max(
+      CASE
+        WHEN coalesce(e.event->>'TheDate','') ~ '^\d{4}-\d{2}-\d{2}'
+        THEN (e.event->>'TheDate')::timestamp
+      END
+    ) FILTER (
+      WHERE coalesce(e.event->>'Content','') ~* (
+        'shipment received|warehouse.*received|'
+        '海外仓.*(入库|收货|签收)|已入仓|已签收'
+      )
+      OR (
+        coalesce(e.event->>'Content','') ~* 'arrived at .*warehouse'
+        AND concat_ws(
+          ' ',
+          coalesce(e.event->>'Address',''),
+          coalesce(e.event->>'Content','')
+        ) !~* '(foshan|china|佛山)'
+      )
+    ) AS arrival_track_at,
+    max(
+      CASE
+        WHEN coalesce(e.event->>'TheDate','') ~ '^\d{4}-\d{2}-\d{2}'
+        THEN (e.event->>'TheDate')::timestamp
+      END
+    ) FILTER (
+      WHERE coalesce(e.event->>'Content','') ~* (
+        'departed to|left .*warehouse|发往海外|离开.*仓'
+      )
+    ) AS departure_track_at
+  FROM fact.et_ship_order_track t
+  LEFT JOIN LATERAL jsonb_array_elements(coalesce(t.tracks,'[]'::jsonb)) e(event)
+    ON true
+  GROUP BY t.ship_order_id
+),
+ship_evidence AS (
+  SELECT
+    o.ship_order_id,
+    coalesce(nullif(o.status,''),nullif(t.status,'')) AS status,
+    coalesce(nullif(t.status_name,''),nullif(o.status_name,'')) AS status_name,
+    -- Only a physical departure timestamp may make a batch available as
+    -- "in transit" evidence. Order creation/checking merely proves that an ET
+    -- shipment record exists and used to let not-yet-dispatched stock price an
+    -- earlier sale.
+    coalesce(o.ship_time, te.departure_track_at) AS departure_at,
+    CASE
+      WHEN coalesce(nullif(o.status,''),nullif(t.status,'')) = '12'
+        OR coalesce(t.status_name,o.status_name,'') ~* '(海外仓已入库|已入仓|已签收|shipment received)'
+        OR t.sign_time IS NOT NULL
+        OR te.arrival_track_at IS NOT NULL
+      THEN coalesce(t.sign_time, te.arrival_track_at, o.into_time, o.end_time)
+      ELSE NULL
+    END AS arrival_at
+  FROM fact.et_ship_order o
+  LEFT JOIN fact.et_ship_order_track t USING (ship_order_id)
+  LEFT JOIN track_event te USING (ship_order_id)
+)
+SELECT
+  b.batch_key,
+  b.standard_goods_sn,
+  b.raw_goods_sn,
+  b.batch_no,
+  CASE
+    WHEN se.ship_order_id IS NOT NULL
+    THEN coalesce(se.departure_at::date,se.arrival_at::date)
+    ELSE b.shipped_date
+  END AS shipped_date,
+  coalesce(b.arrived_date,se.arrival_at::date) AS arrived_date,
+  b.shipped_quantity,
+  b.goods_cost_amount,
+  b.first_leg_freight_amount,
+  b.other_cost_amount,
+  b.total_cost_amount,
+  b.currency_code,
+  b.cost_sar,
+  b.unit_cost_sar,
+  b.complete_batch,
+  b.ignored_reason,
+  b.purchase_unit_price,
+  b.length_cm,
+  b.width_cm,
+  b.height_cm,
+  b.volume_l,
+  b.weight_kg,
+  b.source_file,
+  b.source_sheet,
+  b.source_row_no,
+  b.imported_at,
+  b.raw_summary,
+  b.updated_at,
+  b.shipped_date AS declared_shipped_date,
+  b.arrived_date AS declared_arrived_date,
+  CASE
+    WHEN se.ship_order_id IS NOT NULL AND se.departure_at IS NOT NULL THEN 'et_shipment_departure'
+    WHEN se.ship_order_id IS NOT NULL AND se.arrival_at IS NOT NULL THEN 'et_shipment_arrival_conservative'
+    WHEN se.ship_order_id IS NOT NULL THEN 'et_linked_not_departed'
+    WHEN b.shipped_date IS NOT NULL THEN 'cost_file_unlinked'
+    ELSE 'missing'
+  END AS shipped_date_source,
+  CASE
+    WHEN b.shipped_date IS NOT NULL AND se.departure_at IS NOT NULL
+      AND b.shipped_date <> se.departure_at::date
+    THEN 'declared_vs_et_mismatch'
+    WHEN b.shipped_date IS NOT NULL AND se.ship_order_id IS NOT NULL
+      AND se.departure_at IS NULL AND se.arrival_at IS NULL
+    THEN 'declared_but_et_not_departed'
+    ELSE 'consistent_or_not_comparable'
+  END AS shipped_date_consistency,
+  CASE
+    WHEN b.arrived_date IS NOT NULL THEN 'cost_file'
+    WHEN se.arrival_at IS NOT NULL THEN 'et_shipment_tracking'
+    ELSE 'missing'
+  END AS arrival_date_source,
+  se.status AS et_ship_status,
+  se.status_name AS et_ship_status_name
+FROM fact.product_cost_batch b
+LEFT JOIN ship_evidence se
+  ON se.ship_order_id = b.batch_no;
+
 -- Event-sourced perpetual moving-average cost ledger. Physical batch identity
--- is not available at sale time, so accounting COGS is assigned from inventory
--- available immediately before each sale; future receipts never price history.
+-- is not available at sale time, so accounting COGS uses the evidence available
+-- at that sale. A later receipt may settle an explicitly estimated shortfall
+-- only while the period remains open; frozen periods are never rewritten.
 CREATE TABLE IF NOT EXISTS fact.inventory_cost_opening (
   opening_key text PRIMARY KEY,
   effective_date date NOT NULL,
@@ -2114,10 +2242,17 @@ CREATE TABLE IF NOT EXISTS fact.inventory_cost_event (
   source_table text NOT NULL,
   source_key text NOT NULL,
   source_order_item_key text,
+  estimated_unit_cost_sar numeric,
+  estimated_cost_basis text,
   source_hash text NOT NULL,
   period_key date NOT NULL,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE fact.inventory_cost_event
+  ADD COLUMN IF NOT EXISTS estimated_unit_cost_sar numeric;
+ALTER TABLE fact.inventory_cost_event
+  ADD COLUMN IF NOT EXISTS estimated_cost_basis text;
 
 CREATE INDEX IF NOT EXISTS idx_inventory_cost_event_order
   ON fact.inventory_cost_event(match_key, effective_at, event_type, event_key);
@@ -2142,11 +2277,24 @@ CREATE TABLE IF NOT EXISTS fact.inventory_cost_ledger (
   avg_unit_cost_after_sar numeric,
   valued_quantity numeric NOT NULL,
   unvalued_quantity numeric NOT NULL,
+  estimated_quantity numeric NOT NULL DEFAULT 0,
+  settled_estimated_quantity numeric NOT NULL DEFAULT 0,
+  estimation_variance_sar numeric NOT NULL DEFAULT 0,
   cogs_sar numeric NOT NULL,
   valuation_status text NOT NULL,
+  valuation_basis text,
   ledger_version text NOT NULL,
   calculated_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE fact.inventory_cost_ledger
+  ADD COLUMN IF NOT EXISTS estimated_quantity numeric NOT NULL DEFAULT 0;
+ALTER TABLE fact.inventory_cost_ledger
+  ADD COLUMN IF NOT EXISTS settled_estimated_quantity numeric NOT NULL DEFAULT 0;
+ALTER TABLE fact.inventory_cost_ledger
+  ADD COLUMN IF NOT EXISTS estimation_variance_sar numeric NOT NULL DEFAULT 0;
+ALTER TABLE fact.inventory_cost_ledger
+  ADD COLUMN IF NOT EXISTS valuation_basis text;
 
 CREATE INDEX IF NOT EXISTS idx_inventory_cost_ledger_sale
   ON fact.inventory_cost_ledger(source_order_item_key)
@@ -2186,7 +2334,11 @@ SELECT
   cogs_sar,
   valued_quantity,
   unvalued_quantity,
+  estimated_quantity,
+  settled_estimated_quantity,
+  estimation_variance_sar,
   valuation_status,
+  valuation_basis,
   ledger_version,
   calculated_at
 FROM fact.inventory_cost_ledger
@@ -3861,12 +4013,76 @@ LEFT JOIN LATERAL (
 CREATE OR REPLACE VIEW mart.profit_order_item AS
 WITH cost_cutover AS (
   -- Historical sales predate the first trustworthy physical count. Keep the
-  -- legacy static estimate only before the first approved ledger boundary;
-  -- from the boundary onward, missing ledger valuation must stay missing so a
-  -- future receipt can never leak backwards into current-period COGS.
+  -- date-aware legacy estimate only before the first approved ledger boundary;
+  -- from the boundary onward, missing ledger valuation must stay inside the
+  -- controlled ledger. An open-period shortfall may later be explicitly
+  -- settled by its receipt, but this legacy fallback must never price it.
   SELECT min(effective_date) AS effective_date
   FROM fact.inventory_cost_opening
   WHERE status = 'approved'
+),
+legacy_order_cost AS (
+  -- Pre-cutover history cannot prove a physical batch, but its estimate must
+  -- still be time-aware.  Use only batches already arrived on the order date;
+  -- when the historical source has no such arrival record, use only batches
+  -- already physically shipped by that date. If neither existed, leave the
+  -- order visibly unvalued instead of importing a future batch.
+  SELECT
+    oi.order_item_key,
+    coalesce(
+      (
+        sum(b.cost_sar) FILTER (
+          WHERE b.arrived_date IS NOT NULL
+            AND b.arrived_date <= coalesce(oi.order_create_time::date,oi.created_date)
+        )
+        / nullif(
+          sum(b.shipped_quantity) FILTER (
+            WHERE b.arrived_date IS NOT NULL
+              AND b.arrived_date <= coalesce(oi.order_create_time::date,oi.created_date)
+          ),
+          0
+        )
+      ),
+      (
+        sum(b.cost_sar) FILTER (
+          WHERE b.shipped_date IS NOT NULL
+            AND b.shipped_date <= coalesce(oi.order_create_time::date,oi.created_date)
+        )
+        / nullif(
+          sum(b.shipped_quantity) FILTER (
+            WHERE b.shipped_date IS NOT NULL
+              AND b.shipped_date <= coalesce(oi.order_create_time::date,oi.created_date)
+          ),
+          0
+        )
+      )
+    ) AS unit_cost_sar,
+    CASE
+      WHEN count(*) FILTER (
+        WHERE b.arrived_date IS NOT NULL
+          AND b.arrived_date <= coalesce(oi.order_create_time::date,oi.created_date)
+      ) > 0
+      THEN 'legacy_past_arrived_weighted_pre_cutover'
+      WHEN count(*) FILTER (
+        WHERE b.shipped_date IS NOT NULL
+          AND b.shipped_date <= coalesce(oi.order_create_time::date,oi.created_date)
+      ) > 0
+      THEN 'legacy_shipped_weighted_pre_cutover'
+      ELSE NULL
+    END AS valuation_basis
+  FROM fact.order_item oi
+  CROSS JOIN cost_cutover cc
+  JOIN mart.product_cost_batch_timeline b
+    ON b.complete_batch
+   AND coalesce(b.shipped_quantity,0) > 0
+   AND b.cost_sar IS NOT NULL
+   AND dim.product_match_key(b.standard_goods_sn)
+       = dim.product_match_key(oi.standard_goods_sn)
+  WHERE coalesce(oi.sales_sar,0) > 0
+    AND (cc.effective_date IS NULL OR oi.created_date < cc.effective_date)
+  GROUP BY
+    oi.order_item_key,
+    coalesce(oi.order_create_time::date,oi.created_date)
 ),
 after_sales_candidate AS (
   -- Treat every realized and pending after-sales aggregate as an independent
@@ -4164,44 +4380,64 @@ base AS (
     CASE
       WHEN ca.order_item_key IS NULL
        AND (cc.effective_date IS NULL OR oi.created_date < cc.effective_date)
-      THEN c.unit_cost_sar
+      THEN lc.unit_cost_sar
       ELSE ca.unit_cost_sar
     END AS unit_cost_sar,
     CASE
       WHEN ca.order_item_key IS NULL
        AND (cc.effective_date IS NULL OR oi.created_date < cc.effective_date)
-       AND c.unit_cost_sar IS NOT NULL
-      THEN coalesce(oi.quantity,0) * c.unit_cost_sar
+       AND lc.unit_cost_sar IS NOT NULL
+      THEN coalesce(oi.quantity,0) * lc.unit_cost_sar
       ELSE ca.cogs_sar
     END AS assigned_product_cost_sar,
     CASE
       WHEN ca.order_item_key IS NULL
        AND (cc.effective_date IS NULL OR oi.created_date < cc.effective_date)
-       AND c.unit_cost_sar IS NOT NULL
+       AND lc.unit_cost_sar IS NOT NULL
       THEN CASE WHEN coalesce(oi.sales_sar,0) > 0 THEN coalesce(oi.quantity,0) ELSE 0 END
       ELSE coalesce(ca.valued_quantity,0)
     END AS cost_valued_quantity,
     CASE
       WHEN ca.order_item_key IS NULL
        AND (cc.effective_date IS NULL OR oi.created_date < cc.effective_date)
-       AND c.unit_cost_sar IS NOT NULL
+       AND lc.unit_cost_sar IS NOT NULL
       THEN 0
       ELSE coalesce(ca.unvalued_quantity, CASE WHEN coalesce(oi.sales_sar,0) > 0 THEN coalesce(oi.quantity,0) ELSE 0 END)
     END AS cost_unvalued_quantity,
     CASE
       WHEN ca.order_item_key IS NULL
        AND (cc.effective_date IS NULL OR oi.created_date < cc.effective_date)
-       AND c.unit_cost_sar IS NOT NULL
+       AND lc.unit_cost_sar IS NOT NULL
+      THEN CASE WHEN coalesce(oi.sales_sar,0) > 0 THEN coalesce(oi.quantity,0) ELSE 0 END
+      ELSE coalesce(ca.estimated_quantity,0)
+    END AS cost_estimated_quantity,
+    CASE
+      WHEN ca.order_item_key IS NULL
+       AND (cc.effective_date IS NULL OR oi.created_date < cc.effective_date)
+      THEN 0
+      ELSE coalesce(ca.settled_estimated_quantity,0)
+    END AS cost_settled_estimated_quantity,
+    CASE
+      WHEN ca.order_item_key IS NULL
+       AND (cc.effective_date IS NULL OR oi.created_date < cc.effective_date)
+       AND lc.unit_cost_sar IS NOT NULL
       THEN 'legacy_pre_cutover_estimate'
       ELSE coalesce(ca.valuation_status, CASE WHEN coalesce(oi.sales_sar,0) > 0 THEN 'ledger_missing' ELSE 'not_sold' END)
     END AS cost_valuation_status,
     CASE
       WHEN ca.order_item_key IS NULL
        AND (cc.effective_date IS NULL OR oi.created_date < cc.effective_date)
-       AND c.unit_cost_sar IS NOT NULL
-      THEN 'legacy-static-cost-pre-cutover'
+       AND lc.unit_cost_sar IS NOT NULL
+      THEN 'legacy-date-aware-v1'
       ELSE ca.ledger_version
     END AS cost_ledger_version,
+    CASE
+      WHEN ca.order_item_key IS NULL
+       AND (cc.effective_date IS NULL OR oi.created_date < cc.effective_date)
+       AND lc.unit_cost_sar IS NOT NULL
+      THEN lc.valuation_basis
+      ELSE ca.valuation_basis
+    END AS cost_valuation_basis,
     cc.effective_date AS cost_cutover_date,
     c.complete_batch_count::bigint AS complete_batch_count,
     c.ignored_batch_count::bigint AS ignored_batch_count,
@@ -4210,7 +4446,7 @@ base AS (
       AND NOT (
         ca.order_item_key IS NULL
         AND (cc.effective_date IS NULL OR oi.created_date < cc.effective_date)
-        AND c.unit_cost_sar IS NOT NULL
+        AND lc.unit_cost_sar IS NOT NULL
       )
       AND (ca.order_item_key IS NULL OR coalesce(ca.unvalued_quantity,0) > 0)
     ) AS cost_missing,
@@ -4250,6 +4486,8 @@ base AS (
   LEFT JOIN dim.store s ON s.store_key = oi.store_key
   LEFT JOIN mart.inventory_cost_sale_assignment ca
     ON ca.order_item_key = oi.order_item_key
+  LEFT JOIN legacy_order_cost lc
+    ON lc.order_item_key = oi.order_item_key
   LEFT JOIN mart.product_unit_cost_by_match_key c
     ON c.match_key <> ''
    AND c.match_key = dim.product_match_key(oi.standard_goods_sn)
@@ -4355,7 +4593,10 @@ SELECT
   pending_revenue_risk_sar,
   cost_valued_quantity,
   cost_unvalued_quantity,
+  cost_estimated_quantity,
+  cost_settled_estimated_quantity,
   cost_valuation_status,
+  cost_valuation_basis,
   cost_ledger_version,
   cost_cutover_date,
   actual_return_expense_sar,
@@ -5217,9 +5458,26 @@ WITH base AS (
     sum(gross_revenue_sar) FILTER (WHERE cost_missing) AS missing_cost_revenue_sar,
     sum(quantity) FILTER (WHERE cost_missing) AS missing_cost_quantity,
     count(*) FILTER (WHERE cost_missing) AS missing_cost_lines,
-    sum(net_revenue_sar) FILTER (WHERE cost_valuation_status = 'estimated_negative_inventory_last_cost') AS estimated_cost_revenue_sar,
-    sum(quantity) FILTER (WHERE cost_valuation_status = 'estimated_negative_inventory_last_cost') AS estimated_cost_quantity,
-    count(*) FILTER (WHERE cost_valuation_status = 'estimated_negative_inventory_last_cost') AS estimated_cost_lines,
+    sum(
+      net_revenue_sar
+        * least(coalesce(cost_estimated_quantity,0),quantity)
+        / nullif(quantity,0)
+    ) FILTER (WHERE cost_valuation_status LIKE 'estimated_%') AS estimated_cost_revenue_sar,
+    sum(cost_estimated_quantity) FILTER (WHERE cost_valuation_status LIKE 'estimated_%') AS estimated_cost_quantity,
+    count(*) FILTER (
+      WHERE cost_valuation_status LIKE 'estimated_%'
+        AND coalesce(cost_estimated_quantity,0) > 0
+    ) AS estimated_cost_lines,
+    sum(net_revenue_sar) FILTER (
+      WHERE cost_valuation_status = 'legacy_pre_cutover_estimate'
+    ) AS legacy_estimated_cost_revenue_sar,
+    sum(cost_estimated_quantity) FILTER (
+      WHERE cost_valuation_status = 'legacy_pre_cutover_estimate'
+    ) AS legacy_estimated_cost_quantity,
+    count(*) FILTER (
+      WHERE cost_valuation_status = 'legacy_pre_cutover_estimate'
+        AND coalesce(cost_estimated_quantity,0) > 0
+    ) AS legacy_estimated_cost_lines,
     count(*) FILTER (WHERE revenue_reversal) AS reversal_lines,
     sum(return_delivery_fee_sar) FILTER (WHERE revenue_reversal) AS reversal_fee_sar,
     CASE
@@ -5285,6 +5543,9 @@ SELECT
   coalesce(b.estimated_cost_revenue_sar,0) AS estimated_cost_revenue_sar,
   coalesce(b.estimated_cost_quantity,0) AS estimated_cost_quantity,
   coalesce(b.estimated_cost_lines,0)::bigint AS estimated_cost_lines,
+  coalesce(b.legacy_estimated_cost_revenue_sar,0) AS legacy_estimated_cost_revenue_sar,
+  coalesce(b.legacy_estimated_cost_quantity,0) AS legacy_estimated_cost_quantity,
+  coalesce(b.legacy_estimated_cost_lines,0)::bigint AS legacy_estimated_cost_lines,
   coalesce(b.reversal_lines,0)::bigint AS reversal_lines,
   coalesce(b.reversal_fee_sar,0) AS reversal_fee_sar,
   b.profit_margin_before_storage,
@@ -5360,9 +5621,26 @@ WITH group_month AS (
     sum(gross_revenue_sar) FILTER (WHERE NOT cost_missing) AS known_gross_revenue_sar,
     sum(gross_revenue_sar) FILTER (WHERE cost_missing) AS missing_cost_revenue_sar,
     count(*) FILTER (WHERE cost_missing) AS missing_cost_lines,
-    sum(net_revenue_sar) FILTER (WHERE cost_valuation_status = 'estimated_negative_inventory_last_cost') AS estimated_cost_revenue_sar,
-    sum(quantity) FILTER (WHERE cost_valuation_status = 'estimated_negative_inventory_last_cost') AS estimated_cost_quantity,
-    count(*) FILTER (WHERE cost_valuation_status = 'estimated_negative_inventory_last_cost') AS estimated_cost_lines,
+    sum(
+      net_revenue_sar
+        * least(coalesce(cost_estimated_quantity,0),quantity)
+        / nullif(quantity,0)
+    ) FILTER (WHERE cost_valuation_status LIKE 'estimated_%') AS estimated_cost_revenue_sar,
+    sum(cost_estimated_quantity) FILTER (WHERE cost_valuation_status LIKE 'estimated_%') AS estimated_cost_quantity,
+    count(*) FILTER (
+      WHERE cost_valuation_status LIKE 'estimated_%'
+        AND coalesce(cost_estimated_quantity,0) > 0
+    ) AS estimated_cost_lines,
+    sum(net_revenue_sar) FILTER (
+      WHERE cost_valuation_status = 'legacy_pre_cutover_estimate'
+    ) AS legacy_estimated_cost_revenue_sar,
+    sum(cost_estimated_quantity) FILTER (
+      WHERE cost_valuation_status = 'legacy_pre_cutover_estimate'
+    ) AS legacy_estimated_cost_quantity,
+    count(*) FILTER (
+      WHERE cost_valuation_status = 'legacy_pre_cutover_estimate'
+        AND coalesce(cost_estimated_quantity,0) > 0
+    ) AS legacy_estimated_cost_lines,
     count(*) FILTER (WHERE revenue_reversal) AS reversal_lines,
     sum(risk_adjusted_net_revenue_sar) AS risk_adjusted_net_revenue_sar,
     sum(risk_adjusted_net_revenue_sar) FILTER (WHERE NOT cost_missing) AS known_risk_adjusted_net_revenue_sar,
@@ -5411,6 +5689,9 @@ SELECT
   coalesce(g.estimated_cost_revenue_sar,0) AS estimated_cost_revenue_sar,
   coalesce(g.estimated_cost_quantity,0) AS estimated_cost_quantity,
   coalesce(g.estimated_cost_lines,0)::bigint AS estimated_cost_lines,
+  coalesce(g.legacy_estimated_cost_revenue_sar,0) AS legacy_estimated_cost_revenue_sar,
+  coalesce(g.legacy_estimated_cost_quantity,0) AS legacy_estimated_cost_quantity,
+  coalesce(g.legacy_estimated_cost_lines,0)::bigint AS legacy_estimated_cost_lines,
   coalesce(g.reversal_lines,0)::bigint AS reversal_lines,
   coalesce(smt.total_storage_fee_sar,0) AS month_storage_fee_sar,
   coalesce(sgm.allocated_storage_fee_sar,0) AS allocated_storage_fee_sar,
@@ -5479,7 +5760,7 @@ SELECT
   sum(p.profit_if_rtv_received_resellable_sar) AS profit_if_rtv_received_resellable_sar,
   sum(p.profit_if_rtv_09_resellable_sar) AS profit_if_rtv_09_resellable_sar,
   CASE
-    WHEN sum(p.net_revenue_sar) FILTER (WHERE p.missing_cost_lines = 0) > 0
+    WHEN sum(coalesce(p.known_net_revenue_sar,0)) > 0
     THEN sum(p.profit_before_storage_sar) / nullif(sum(p.known_net_revenue_sar),0)
     ELSE NULL
   END AS profit_margin_before_storage,
@@ -5489,6 +5770,9 @@ SELECT
   sum(p.estimated_cost_revenue_sar) AS estimated_cost_revenue_sar,
   sum(p.estimated_cost_quantity) AS estimated_cost_quantity,
   sum(p.estimated_cost_lines) AS estimated_cost_lines,
+  sum(p.legacy_estimated_cost_revenue_sar) AS legacy_estimated_cost_revenue_sar,
+  sum(p.legacy_estimated_cost_quantity) AS legacy_estimated_cost_quantity,
+  sum(p.legacy_estimated_cost_lines) AS legacy_estimated_cost_lines,
   sum(p.reversal_lines) AS reversal_lines,
   max(c.unit_cost_sar) AS unit_cost_sar,
   max(c.complete_batch_count)::bigint AS complete_batch_count,
@@ -5506,7 +5790,7 @@ SELECT
   coalesce(max(ps.storage_fee_sar),0) AS storage_fee_sar,
   sum(p.profit_before_storage_sar) - coalesce(max(ps.storage_fee_sar),0) AS profit_after_storage_sar,
   CASE
-    WHEN sum(p.net_revenue_sar) FILTER (WHERE p.missing_cost_lines = 0) > 0
+    WHEN sum(coalesce(p.known_net_revenue_sar,0)) > 0
     THEN (sum(p.profit_before_storage_sar) - coalesce(max(ps.storage_fee_sar),0)) / nullif(sum(p.known_net_revenue_sar),0)
     ELSE NULL
   END AS profit_margin_after_storage,
@@ -5594,7 +5878,7 @@ batch_base AS (
       coalesce(shipped_quantity,0) > 0
       AND shipped_date IS NULL
     ) AS is_not_shipped_stock
-  FROM fact.product_cost_batch
+  FROM mart.product_cost_batch_timeline
   WHERE coalesce(dim.product_match_key(standard_goods_sn),'') <> ''
 ),
 batch_agg AS (

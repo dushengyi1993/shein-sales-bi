@@ -289,7 +289,8 @@ ET 物流仓服账单里的 `仓储费` 是仓储成本正式来源，旧 `fact.
 ### 成本台账、售后结算与期间冻结
 
 - `fact.inventory_cost_opening`：经批准的期初；`effective_date` 只取生效日前一日 ET 结存，禁止用同日快照避免重复计算当日流转。
-- `fact.inventory_cost_event` / `fact.inventory_cost_ledger`：从首个可信 ET 实盘切点起，按期初、盘点、入库、销售、RTV 最终进入 09 等事件，用移动加权平均维护数量、价值和销售 COGS。切点前无法知道真实批次消耗，利润保留 `legacy_pre_cutover_estimate` 并明确披露；切点后未估值或缺期初保持明确状态，不能再用未来成本表臆算补零。
+- `mart.product_cost_batch_timeline`：成本批次的统一时间线。到仓日期以成本表为主，漏填时只允许用 ET 明确“海外仓已入库”节点补齐，ETA 不能代替实际到仓。发货日期对未关联 ET 的批次使用成本表；一旦关联 ET 运单，必须由 ET 实际发出/离仓节点确认，缺发出节点但已有真实到仓时保守取到仓日，ET 仍待发时即使成本表有日期也保持未发。`shipped_date_source / shipped_date_consistency` 保留来源和冲突诊断。
+- `fact.inventory_cost_event` / `fact.inventory_cost_ledger`：从首个可信 ET 实盘切点起，按期初、盘点、入库、销售、RTV 最终进入 09 等事件，用移动加权平均维护数量、价值和销售 COGS。切点前无法知道真实批次消耗，利润保留 `legacy_pre_cutover_estimate`：优先按订单日前已到仓批次累计加权；没有到仓记录时，只使用订单日前已实际发出的批次；完全没有当时证据就留空，未来批次不得倒灌。切点后库存暂时为负时，使用订单当时已有在途批次成本或最近移动加权成本，并记录 `estimated_quantity / valuation_basis`；完全无成本证据才暂时留空。开放期间后续入库按 FIFO 结算缺口，`settled_estimated_quantity / estimation_variance_sar` 记录真实成本修正，并确保“期初价值 + 入库价值 = 已结算销售成本 + 期末库存价值”；冻结期间不回写。估算不能伪装成精确批次，也不能因为无法精确就把整单利润剔除。
 - `ops.accounting_period_close`：会计期间冻结边界；台账重建拒绝改写冻结期间，只允许从首个未冻结期间开始。
 - `fact.openapi_finance_check_order*`、`fact.openapi_return_item.performance_price` / `mart.return_cost_actual`：退货费优先用已结算财务净成本，其次用退货单商品行真实履约费；实际值都缺失时，只有退货包裹可保留 `13.88` 估算。来源区分 `finance_check_order_actual`、`return_order_performance_price_actual` 与 `package_estimate`。
 - `mart.after_sales_settlement_detail` 是售后结算语义的唯一结构化来源：`realized` 才冲减净销量和已落定利润，`pending` 只进入待决风险，`closed_without_refund` 表示无退款闭环，`not_refund_candidate` 不影响退款口径。`已妥投` 或退货包裹 `已签收` 本身不是最终退款信号。

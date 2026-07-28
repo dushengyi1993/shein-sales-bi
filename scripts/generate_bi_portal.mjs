@@ -418,9 +418,26 @@ profit_store_rows AS (
     round(sum(gross_revenue_sar) FILTER (WHERE cost_missing)::numeric,2) AS missing_cost_revenue_sar,
     round(sum(quantity) FILTER (WHERE cost_missing)::numeric,0) AS missing_cost_quantity,
     count(*) FILTER (WHERE cost_missing)::bigint AS missing_cost_lines,
-    round(sum(net_revenue_sar) FILTER (WHERE cost_valuation_status='estimated_negative_inventory_last_cost')::numeric,2) AS estimated_cost_revenue_sar,
-    round(sum(quantity) FILTER (WHERE cost_valuation_status='estimated_negative_inventory_last_cost')::numeric,0) AS estimated_cost_quantity,
-    count(*) FILTER (WHERE cost_valuation_status='estimated_negative_inventory_last_cost')::bigint AS estimated_cost_lines,
+    round(sum(
+      net_revenue_sar
+        * least(coalesce(cost_estimated_quantity,0),quantity)
+        / nullif(quantity,0)
+    ) FILTER (WHERE cost_valuation_status LIKE 'estimated_%')::numeric,2) AS estimated_cost_revenue_sar,
+    round(sum(cost_estimated_quantity) FILTER (WHERE cost_valuation_status LIKE 'estimated_%')::numeric,0) AS estimated_cost_quantity,
+    count(*) FILTER (
+      WHERE cost_valuation_status LIKE 'estimated_%'
+        AND coalesce(cost_estimated_quantity,0) > 0
+    )::bigint AS estimated_cost_lines,
+    round(sum(net_revenue_sar) FILTER (
+      WHERE cost_valuation_status='legacy_pre_cutover_estimate'
+    )::numeric,2) AS legacy_estimated_cost_revenue_sar,
+    round(sum(cost_estimated_quantity) FILTER (
+      WHERE cost_valuation_status='legacy_pre_cutover_estimate'
+    )::numeric,0) AS legacy_estimated_cost_quantity,
+    count(*) FILTER (
+      WHERE cost_valuation_status='legacy_pre_cutover_estimate'
+        AND coalesce(cost_estimated_quantity,0) > 0
+    )::bigint AS legacy_estimated_cost_lines,
     count(*) FILTER (WHERE revenue_reversal)::bigint AS reversal_lines,
     round(sum(coalesce(risk_adjusted_net_revenue_sar,0))::numeric,2) AS risk_adjusted_net_revenue_sar,
     round(sum(risk_adjusted_net_revenue_sar) FILTER (WHERE NOT cost_missing)::numeric,2) AS known_risk_adjusted_net_revenue_sar,
@@ -2712,6 +2729,9 @@ profit_daily_store_product AS (
       round(sum(coalesce(estimated_cost_revenue_sar,0))::numeric, 2) AS estimated_cost_revenue_sar,
       round(sum(coalesce(estimated_cost_quantity,0))::numeric, 0) AS estimated_cost_quantity,
       sum(coalesce(estimated_cost_lines,0)) AS estimated_cost_lines,
+      round(sum(coalesce(legacy_estimated_cost_revenue_sar,0))::numeric, 2) AS legacy_estimated_cost_revenue_sar,
+      round(sum(coalesce(legacy_estimated_cost_quantity,0))::numeric, 0) AS legacy_estimated_cost_quantity,
+      sum(coalesce(legacy_estimated_cost_lines,0)) AS legacy_estimated_cost_lines,
       sum(coalesce(reversal_lines,0)) AS reversal_lines,
       round(sum(coalesce(risk_adjusted_net_revenue_sar,0))::numeric, 2) AS risk_adjusted_net_revenue_sar,
       round(sum(coalesce(known_risk_adjusted_net_revenue_sar,0))::numeric, 2) AS known_risk_adjusted_net_revenue_sar,
@@ -2723,10 +2743,10 @@ profit_daily_store_product AS (
       round(sum(coalesce(pending_impact_amount_sar,0))::numeric, 2) AS pending_impact_amount_sar,
       round(sum(coalesce(actual_return_cost_sar,0))::numeric, 2) AS actual_return_cost_sar,
       round(sum(coalesce(estimated_return_delivery_fee_sar,0))::numeric, 2) AS estimated_return_delivery_fee_sar,
-      CASE WHEN sum(coalesce(net_revenue_sar,0)) FILTER (WHERE missing_cost_lines = 0) > 0
+      CASE WHEN sum(coalesce(known_net_revenue_sar,0)) > 0
         THEN round((sum(coalesce(profit_before_storage_sar,0)) / nullif(sum(coalesce(known_net_revenue_sar,0)),0))::numeric, 4)
         ELSE NULL END AS profit_margin_before_storage,
-      CASE WHEN sum(coalesce(net_revenue_sar,0)) FILTER (WHERE missing_cost_lines = 0) > 0
+      CASE WHEN sum(coalesce(known_net_revenue_sar,0)) > 0
         THEN round((sum(coalesce(profit_after_storage_sar, profit_before_storage_sar,0)) / nullif(sum(coalesce(known_net_revenue_sar,0)),0))::numeric, 4)
         ELSE NULL END AS profit_margin_after_storage,
       CASE WHEN sum(coalesce(net_revenue_sar,0)) > 0
@@ -2769,6 +2789,9 @@ profit_month_group AS (
       round(estimated_cost_revenue_sar::numeric, 2) AS estimated_cost_revenue_sar,
       round(estimated_cost_quantity::numeric, 0) AS estimated_cost_quantity,
       estimated_cost_lines,
+      round(legacy_estimated_cost_revenue_sar::numeric, 2) AS legacy_estimated_cost_revenue_sar,
+      round(legacy_estimated_cost_quantity::numeric, 0) AS legacy_estimated_cost_quantity,
+      legacy_estimated_cost_lines,
       reversal_lines,
       round(risk_adjusted_net_revenue_sar::numeric, 2) AS risk_adjusted_net_revenue_sar,
       round(known_risk_adjusted_net_revenue_sar::numeric, 2) AS known_risk_adjusted_net_revenue_sar,
@@ -2817,6 +2840,9 @@ profit_product_summary AS (
       round(estimated_cost_revenue_sar::numeric, 2) AS estimated_cost_revenue_sar,
       round(estimated_cost_quantity::numeric, 0) AS estimated_cost_quantity,
       estimated_cost_lines,
+      round(legacy_estimated_cost_revenue_sar::numeric, 2) AS legacy_estimated_cost_revenue_sar,
+      round(legacy_estimated_cost_quantity::numeric, 0) AS legacy_estimated_cost_quantity,
+      legacy_estimated_cost_lines,
       reversal_lines,
       round(risk_adjusted_net_revenue_sar::numeric, 2) AS risk_adjusted_net_revenue_sar,
       round(known_risk_adjusted_net_revenue_sar::numeric, 2) AS known_risk_adjusted_net_revenue_sar,
@@ -3191,7 +3217,7 @@ inventory_cost_product AS (
     min(arrived_date) AS cost_first_arrived_date,
     max(arrived_date) AS cost_latest_arrived_date,
     string_agg(DISTINCT nullif(batch_no,''), ', ' ORDER BY nullif(batch_no,'')) FILTER (WHERE coalesce(batch_no,'') <> '') AS cost_batch_nos
-  FROM fact.product_cost_batch
+  FROM mart.product_cost_batch_timeline
   WHERE coalesce(dim.product_match_key(standard_goods_sn),'') <> ''
   GROUP BY dim.product_match_key(standard_goods_sn)
 ),
@@ -3554,7 +3580,7 @@ inventory_depletion_batches AS (
           WHEN coalesce(b.shipped_quantity,0) > 0 THEN 2
           ELSE 9
         END AS batch_sort
-      FROM fact.product_cost_batch b
+      FROM mart.product_cost_batch_timeline b
       LEFT JOIN mart.inventory_depletion_product_current p
         ON p.match_key = dim.product_match_key(b.standard_goods_sn)
       WHERE coalesce(dim.product_match_key(b.standard_goods_sn),'') <> ''
@@ -8973,7 +8999,7 @@ function profitSummaryForAggregatedRows(rows){
   out.profitReceivedResellableSar -= effectiveStorageFee;
   out.profit09ResellableSar -= effectiveStorageFee;
   out.costCoverageRate = out.netRevenueSar > 0 ? out.knownGrossRevenueSar / out.netRevenueSar : null;
-  out.margin = out.netRevenueSar > 0 && out.knownGrossRevenueSar > 0 ? out.profitSar / out.netRevenueSar : null;
+  out.margin = out.knownGrossRevenueSar > 0 ? out.profitSar / out.knownGrossRevenueSar : null;
   out.hasAnyCost = out.knownGrossRevenueSar > 0 || out.productCostSar > 0;
   out.sourceGeneratedAt = DATA.homeProfitSummary?.sourceGeneratedAt || '';
   out.staleSource = Boolean(DATA.homeProfitSummary?.staleSource);
@@ -9033,7 +9059,7 @@ function profitSummaryForRows(rows, opts = {}){
   out.profitReceivedResellableSar -= out.storageFeeSar;
   out.profit09ResellableSar -= out.storageFeeSar;
   out.costCoverageRate = out.netRevenueSar > 0 ? out.knownGrossRevenueSar / out.netRevenueSar : null;
-  out.margin = out.netRevenueSar > 0 && out.knownGrossRevenueSar > 0 ? out.profitSar / out.netRevenueSar : null;
+  out.margin = out.knownGrossRevenueSar > 0 ? out.profitSar / out.knownGrossRevenueSar : null;
   out.hasAnyCost = out.knownGrossRevenueSar > 0 || out.productCostSar > 0;
   return out;
 }
@@ -9108,8 +9134,8 @@ function profitDisplayHtmlForMode(summary, mode = 'loss'){
 }
 function profitMarginHtmlForMode(summary, mode = 'loss'){
   const s = summary || {};
-  if (!s.hasAnyCost || !(Number(s.netRevenueSar || 0) > 0)) return '<div class="matrix-cell value profit-margin-cell"><span class="pending-profit">待成本表</span></div>';
-  const margin = profitAmountForMode(s, mode) / Number(s.netRevenueSar || 0);
+  if (!s.hasAnyCost || !(Number(s.knownGrossRevenueSar || 0) > 0)) return '<div class="matrix-cell value profit-margin-cell"><span class="pending-profit">待成本表</span></div>';
+  const margin = profitAmountForMode(s, mode) / Number(s.knownGrossRevenueSar || 0);
   const cls = Number(margin || 0) >= .25 ? 'positive' : Number(margin || 0) >= .1 ? 'warn' : 'danger';
   return '<div class="matrix-cell value profit-margin-cell"><span class="'+cls+'">'+escapeHtml(pct(margin))+'</span></div>';
 }
@@ -10544,7 +10570,7 @@ function aggregateProfitMonthRowsFromDailyRows(rows){
     profit_after_storage_sar:Math.round(r.profit_after_storage_sar * 100) / 100,
     profit_if_rtv_received_resellable_after_storage_sar:Math.round(r.profit_if_rtv_received_resellable_after_storage_sar * 100) / 100,
     profit_if_rtv_09_resellable_after_storage_sar:Math.round(r.profit_if_rtv_09_resellable_after_storage_sar * 100) / 100,
-    profit_margin_after_storage:r.net_revenue_sar > 0 ? r.profit_after_storage_sar / r.net_revenue_sar : null,
+    profit_margin_after_storage:r.known_net_revenue_sar > 0 ? r.profit_after_storage_sar / r.known_net_revenue_sar : null,
     cost_coverage_revenue_rate:r.net_revenue_sar > 0 ? r.known_net_revenue_sar / r.net_revenue_sar : null
   }));
 }
@@ -14831,7 +14857,7 @@ function aggregateProfitProductsFromDailyRows(rows){
   return Array.from(groups.values()).map(g => {
     const meta = metaMap.get(g.standard_goods_sn) || {};
     const coverage = g.net_revenue_sar > 0 ? g.known_net_revenue_sar / g.net_revenue_sar : null;
-    const margin = g.net_revenue_sar > 0 && g.known_net_revenue_sar > 0 ? g.profit_before_storage_sar / g.net_revenue_sar : null;
+    const margin = g.known_net_revenue_sar > 0 ? g.profit_before_storage_sar / g.known_net_revenue_sar : null;
     const profitAfterStorage = g.profit_before_storage_sar - Number(g.storage_fee_sar || 0);
     const marginAfterStorage = g.known_net_revenue_sar > 0 ? profitAfterStorage / g.known_net_revenue_sar : null;
     const storageMethods = Array.from(g.storageMethods || []);
@@ -14973,7 +14999,7 @@ function aggregateNoGroupsProfitMonthRows(rows){
     .sort((a,b)=>String(a.month_start).localeCompare(String(b.month_start)))
     .map(row => {
       row.cost_coverage_revenue_rate = Number(row.net_revenue_sar || 0) > 0 ? row._coverageNumerator / Number(row.net_revenue_sar || 0) : null;
-      row.profit_margin_after_storage = Number(row.net_revenue_sar || 0) > 0 ? Number(row.profit_after_storage_sar || 0) / Number(row.net_revenue_sar || 0) : null;
+      row.profit_margin_after_storage = Number(row._coverageNumerator || 0) > 0 ? Number(row.profit_after_storage_sar || 0) / Number(row._coverageNumerator || 0) : null;
       delete row._coverageNumerator;
       for (const f of numericFields) row[f] = Math.round(Number(row[f] || 0) * 100) / 100;
       return row;

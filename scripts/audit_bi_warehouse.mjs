@@ -266,6 +266,41 @@ function evaluate(summary, metabase, productReconciliation = null) {
       warnings.push(`最近成本台账仍有 ${latestCostRun.unvalued_sale_count} 条销售缺少可用历史成本；这些行不会硬算利润。`);
     }
   }
+  const costEstimation = accounting.cost_estimation || {};
+  if (Number(costEstimation.current_estimated_quantity || 0) > 0) {
+    notes.push(
+      `当前有 ${costEstimation.current_estimated_quantity} 件使用库存缺口成本估算`
+      + `（${costEstimation.current_estimated_lines || 0} 条订单行）；利润已计入，但不声称精确批次。`,
+    );
+  }
+  if (Number(costEstimation.legacy_estimated_quantity || 0) > 0) {
+    notes.push(
+      `切点前有 ${costEstimation.legacy_estimated_quantity} 件使用日期感知历史成本估算`
+      + `（${costEstimation.legacy_estimated_lines || 0} 条订单行）。`,
+    );
+  }
+  if (Number(costEstimation.settled_estimated_quantity || 0) > 0) {
+    notes.push(
+      `已有 ${costEstimation.settled_estimated_quantity} 件库存缺口估算被后续真实入库成本结算`
+      + `，累计修正商品成本 ${Number(costEstimation.estimation_variance_sar || 0).toFixed(2)} SAR。`,
+    );
+  }
+  if (Number(costEstimation.missing_cost_lines || 0) > 0) {
+    notes.push(
+      `有 ${costEstimation.missing_cost_lines} 条销售在订单发生时没有任何可用成本证据`
+      + `，已显示为待成本并从利润分子、分母同时剔除，没有用未来批次倒灌。`,
+    );
+  }
+  const marginInvariant = accounting.profit_margin_invariant || {};
+  if (Number(marginInvariant.daily_mismatch_rows || 0) > 0
+      || Number(marginInvariant.month_mismatch_rows || 0) > 0
+      || Number(marginInvariant.product_mismatch_rows || 0) > 0) {
+    errors.push(
+      `利润率分子分母口径不一致：日货号 ${marginInvariant.daily_mismatch_rows || 0} 条，`
+      + `月汇总 ${marginInvariant.month_mismatch_rows || 0} 条，`
+      + `货号总览 ${marginInvariant.product_mismatch_rows || 0} 条。`,
+    );
+  }
 
   const storage = accounting.storage_reconciliation || {};
   const maxStorageDelta = Math.max(
@@ -547,6 +582,78 @@ summary AS (
         ORDER BY r.completed_at DESC NULLS LAST, r.started_at DESC
         LIMIT 1
       ), '{}'::jsonb),
+      'cost_estimation', coalesce((
+        SELECT jsonb_build_object(
+          'current_estimated_lines', count(*) FILTER (
+            WHERE cost_valuation_status LIKE 'estimated_%'
+              AND coalesce(cost_estimated_quantity,0) > 0
+          ),
+          'current_estimated_quantity', coalesce(sum(cost_estimated_quantity) FILTER (
+            WHERE cost_valuation_status LIKE 'estimated_%'
+          ),0),
+          'current_estimated_revenue_sar', coalesce(sum(
+            net_revenue_sar
+              * least(coalesce(cost_estimated_quantity,0),quantity)
+              / nullif(quantity,0)
+          ) FILTER (WHERE cost_valuation_status LIKE 'estimated_%'),0),
+          'legacy_estimated_lines', count(*) FILTER (
+            WHERE cost_valuation_status='legacy_pre_cutover_estimate'
+              AND coalesce(cost_estimated_quantity,0) > 0
+          ),
+          'legacy_estimated_quantity', coalesce(sum(cost_estimated_quantity) FILTER (
+            WHERE cost_valuation_status='legacy_pre_cutover_estimate'
+          ),0),
+          'legacy_estimated_revenue_sar', coalesce(sum(net_revenue_sar) FILTER (
+            WHERE cost_valuation_status='legacy_pre_cutover_estimate'
+          ),0),
+          'settled_estimated_quantity', coalesce(sum(cost_settled_estimated_quantity),0),
+          'estimation_variance_sar', coalesce((
+            SELECT sum(l.estimation_variance_sar)
+            FROM fact.inventory_cost_ledger l
+            WHERE l.event_type='sale'
+              AND coalesce(l.settled_estimated_quantity,0) > 0
+          ),0),
+          'missing_cost_lines', count(*) FILTER (WHERE cost_missing),
+          'valuation_basis', string_agg(DISTINCT cost_valuation_basis,' / ') FILTER (
+            WHERE coalesce(cost_valuation_basis,'') <> ''
+          )
+        )
+        FROM mart.profit_order_item_cache
+      ), '{}'::jsonb),
+      'profit_margin_invariant', jsonb_build_object(
+        'daily_mismatch_rows', (
+          SELECT count(*)
+          FROM mart.profit_daily_store_product_cache
+          WHERE coalesce(known_net_revenue_sar,0) > 0
+            AND abs(
+              coalesce(profit_margin_after_storage,0)
+                - coalesce(profit_after_storage_sar,0) / nullif(known_net_revenue_sar,0)
+            ) > 0.000001
+        ),
+        'month_mismatch_rows', (
+          SELECT count(*)
+          FROM mart.profit_month_group_cache
+          WHERE coalesce(known_net_revenue_sar,0) > 0
+            AND abs(
+              coalesce(profit_margin_after_storage,0)
+                - coalesce(profit_after_storage_sar,0) / nullif(known_net_revenue_sar,0)
+            ) > 0.000001
+        ),
+        'product_mismatch_rows', (
+          SELECT count(*)
+          FROM mart.profit_product_summary_cache p
+          JOIN (
+            SELECT standard_goods_sn, sum(known_net_revenue_sar) AS known_net_revenue_sar
+            FROM mart.profit_daily_store_product_cache
+            GROUP BY standard_goods_sn
+          ) d USING (standard_goods_sn)
+          WHERE coalesce(d.known_net_revenue_sar,0) > 0
+            AND abs(
+              coalesce(p.profit_margin_after_storage,0)
+                - coalesce(p.profit_after_storage_sar,0) / nullif(d.known_net_revenue_sar,0)
+            ) > 0.000001
+        )
+      ),
       'storage_reconciliation', coalesce((
         WITH canonical AS (
           SELECT * FROM mart.et_storage_fee_bill_canonical

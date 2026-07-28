@@ -29,17 +29,55 @@ assert.match(schema, /CREATE TABLE IF NOT EXISTS ops\.inventory_cost_run/);
 assert.match(schema, /NULL::numeric AS estimated_on_hand_quantity/);
 assert.match(schema, /'model_estimate_disabled'::text AS inventory_match_status/);
 assert.match(schema, /legacy_pre_cutover_estimate/);
-assert.match(schema, /future receipt can never leak backwards into current-period COGS/);
-assert.match(costLedger, /estimated_negative_inventory_last_cost/,
-  'a sale after a known-cost stock count reaches zero must use the last known historical cost as an explicit estimate');
-assert.match(costLedger, /state\.avg = state\.quantity > 0 \? state\.value \/ state\.quantity : lastKnownUnitCost/,
-  'the last known cost must survive a temporary negative inventory state');
+assert.match(schema, /open-period shortfall may later be explicitly[\s\S]*settled by its receipt/);
+assert.match(schema, /CREATE OR REPLACE VIEW mart\.product_cost_batch_timeline/);
+assert.match(schema, /et_shipment_tracking/);
+assert.match(schema, /coalesce\(o\.ship_time, te\.departure_track_at\) AS departure_at/);
+assert.doesNotMatch(schema, /coalesce\(o\.ship_time, te\.departure_track_at, o\.check_time, o\.create_time\) AS departure_at/,
+  'shipment creation/checking is not physical in-transit cost evidence');
+assert.match(schema, /WHEN se\.ship_order_id IS NOT NULL[\s\S]*THEN coalesce\(se\.departure_at::date,se\.arrival_at::date\)/,
+  'a linked ET shipment must override an unverified spreadsheet departure date');
+assert.match(schema, /shipped_date_source/);
+assert.match(schema, /declared_but_et_not_departed/);
+assert.match(schema, /legacy_past_arrived_weighted_pre_cutover/);
+assert.match(schema, /legacy_shipped_weighted_pre_cutover/);
+assert.doesNotMatch(schema, /legacy_earliest_complete_batch_pre_cutover/,
+  'a pre-cutover sale must not use a batch first shipped after the order date');
+assert.match(costLedger, /estimated_inventory_gap_in_transit_cost/,
+  'a temporary inventory gap must prefer cost evidence that already existed at sale time');
+assert.match(costLedger, /estimated_inventory_gap_last_moving_average/,
+  'a sale after a known-cost stock count reaches zero must retain the last moving-average cost as a bounded fallback');
+assert.match(costLedger, /shortfallQueues/,
+  'negative inventory estimates must remain traceable until receipt settlement');
+assert.match(costLedger, /state\.value \+= eventCostSar - estimationVarianceSar/,
+  'receipt settlement must conserve inventory value and transfer only the estimate variance');
+assert.match(costLedger, /valued_after_inventory_gap_receipt/,
+  'a fully settled shortfall must stop appearing as a live estimate');
+assert.match(costRebuild, /b\.shipped_date <= sale\.effective_date/);
+assert.match(costRebuild, /b\.arrived_date > sale\.effective_date/);
+assert.match(costRebuild, /past_arrived_weighted_as_of_sale/);
+assert.match(costRebuild, /mart\.product_cost_batch_timeline/);
 assert.match(schema, /known_risk_adjusted_net_revenue_sar/);
 assert.match(refresh, /known_risk_adjusted_net_revenue_sar/);
 assert.match(schema, /estimated_cost_revenue_sar/);
 assert.match(refresh, /estimated_cost_revenue_sar/);
+assert.match(schema, /legacy_estimated_cost_revenue_sar/);
+assert.match(refresh, /legacy_estimated_cost_revenue_sar/);
+assert.match(schema, /cost_estimated_quantity/);
+assert.match(schema, /settled_estimated_quantity/);
+assert.match(schema, /estimation_variance_sar/);
+assert.match(costRebuild, /const SOURCE_TABLES[\s\S]*'fact\.order_item'[\s\S]*'ops\.accounting_period_close'/);
+assert.match(costRebuild, /LOCK TABLE\s+\$\{SOURCE_TABLES\.join\('[\s\S]*IN SHARE MODE/);
+assert.match(costRebuild, /inventory-cost source changed after snapshot/);
+assert.match(costRebuild, /txid_current_snapshot\(\)::text/);
+assert.match(costRebuild, /txid_visible_in_snapshot/);
+assert.match(costRebuild, /rows_not_visible_in_snapshot/);
 assert.match(schema, /nullif\(b\.known_risk_adjusted_net_revenue_sar,0\)/,
   'risk profit and its denominator must describe the same cost-covered rows');
+assert.doesNotMatch(schema, /FILTER \(WHERE p\.missing_cost_lines = 0\)/,
+  'a mixed known/missing daily row must not erase the known-cost product margin');
+assert.doesNotMatch(refresh, /FILTER \(WHERE p\.missing_cost_lines = 0\)/,
+  'published product margins must guard on covered revenue, not whole-row missing flags');
 assert.match(costRebuild, /Refusing to rewrite frozen accounting periods/);
 assert.match(costRebuild, /frozenRowsTouched/);
 assert.match(costRebuild, /latestApprovedOpeningDate/);
@@ -115,6 +153,10 @@ assert.match(audit, /cross_store_after_sales_orders/);
 assert.match(audit, /unique_skc_store_mismatch_rows/);
 assert.match(audit, /primary_openapi_store_mismatch_orders/);
 assert.match(audit, /daily_sales_reconciliation_rows/);
+assert.match(audit, /cost_estimation/);
+assert.match(audit, /profit_margin_invariant/);
+assert.match(audit, /product_mismatch_rows/);
+assert.match(audit, /利润率分子分母口径不一致/);
 assert.match(audit, /已退款可能无法冲减净销量和利润/);
 assert.doesNotMatch(audit, /return arr\.length \? `\?\?\?/,
   'missing-store warnings must remain readable Chinese instead of mojibake');
@@ -176,6 +218,10 @@ assert.doesNotMatch(refresh, /CREATE UNLOGGED TABLE mart\.storage_fee_store_dail
 for (const contract of [
   'pending_refund_is_risk_not_realized',
   'legacy_history_is_labeled_before_cutover',
+  'legacy_no_arrival_uses_only_already_shipped_cost',
+  'legacy_future_only_cost_stays_missing',
+  'cost_timeline_uses_destination_arrival_only',
+  'cost_timeline_requires_physical_departure',
   'post_cutover_missing_ledger_fails_closed',
   'package_estimate_once',
   'partial_refund_and_split_package_fee',

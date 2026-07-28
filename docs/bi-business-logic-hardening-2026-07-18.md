@@ -6,7 +6,7 @@
 
 1. 利润与售后风险分层：已落定利润单独核算；未结售后仅以风险/参考影响展示，不能提前改写最终损益。
 2. 退货费：已结算财务核对单优先，其次使用退货单商品行 `performancePrice` 实际费用；两者都没有且确为退货包裹时才按 `13.88 SAR` 估算。生产已见 `13.88 / 14.35 / 16.77 SAR`，不再把大包裹一律写死为 13.88。
-3. 成本：首个可信 ET 实盘日前的历史继续保留并明确标为 `legacy_pre_cutover_estimate`，因为无法反推当时卖的是哪一批；不得伪装成精确批次成本。切点期初只能使用生效日前一日 ET 结存，切点以后采用移动加权平均成本，缺台账就显示缺失，未来入库不再反向改价。冻结会计期间不可重建改写。
+3. 成本：首个可信 ET 实盘日前的历史继续保留并明确标为 `legacy_pre_cutover_estimate`，因为无法反推当时卖的是哪一批；优先使用订单日期前已到仓批次的累计加权成本，没有到仓记录时只使用订单日前已实际发出的批次，两类证据都没有就显示待成本，未来批次不得倒灌。切点期初只能使用生效日前一日 ET 结存，切点以后采用移动加权平均成本；成本库存暂时不足时优先使用订单当时已经实际发出的在途完整批次成本，否则沿用最近移动加权成本，并明确标记估算。建单/审核时间不算发货；批次一旦关联 ET 运单，成本表日期也不能覆盖 ET 仍待发状态。开放期间后续到货按 FIFO 用真实入库成本结算估算差额，原销售成本与剩余库存价值同时修正并保持价值守恒；冻结期间不回写。只有完全没有任何历史/在途成本依据时才暂时显示缺失，不能因追求精确而把整单成本剔除。
 4. 库存：运营可售默认仅 ET `09`；仅 `SK-03038` 例外可取 `09+01`。全仓物理量独立展示；ET 匹配缺失或证据过期均为 `unknown`，绝不转为零或用成本表推算。
 5. 仓储费：按货号证据分配，继而按货号 × 店铺销量分配；无证据余额入 `CENTRAL_POOL`，并以每日总账、货号与店铺分配三层对账。
 
@@ -33,7 +33,7 @@
 ## 核对入口
 
 - 退货与利润：`mart.finance_return_cost_actual`、`mart.profit_*`。
-- 成本：`fact.inventory_cost_opening`、`fact.inventory_cost_ledger`、`ops.accounting_period_close`。
+- 成本：`mart.product_cost_batch_timeline`、`fact.inventory_cost_opening`、`fact.inventory_cost_ledger`、`ops.accounting_period_close`。
 - 库存：ET 投影、`mart.inventory_projection` 与线上 BI section。
 - 仓储：`mart.storage_fee_product_daily`、`mart.storage_fee_product_store_daily`、`mart.storage_fee_daily_reconciliation`。
 - 回归：`scripts/test_shein_finance_check_orders.mjs`、`scripts/test_inventory_cost_ledger.mjs`、`scripts/test_inventory_projection_contract.mjs`、`scripts/test_warehouse_business_logic_contract.mjs`、`scripts/smoke_browser_task_lease.mjs`、`scripts/smoke_cloud_marketing_live_guard_resilience.mjs`。

@@ -7,6 +7,21 @@ import crypto from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {buildInventoryCostLedger} from '../lib/inventory_cost_ledger.mjs';
 
+// Keep this list aligned with every mutable base table read by loadSources()
+// either directly or through mart.product_cost_batch_timeline /
+// mart.et_rtv_destination_allocation.
+const SOURCE_TABLES = Object.freeze([
+  'fact.order_item',
+  'fact.product_cost_batch',
+  'fact.inventory_cost_opening',
+  'fact.after_sales_item',
+  'fact.et_ship_order',
+  'fact.et_ship_order_track',
+  'fact.et_stock_running',
+  'ops.rtv_tracking_verification',
+  'ops.accounting_period_close',
+]);
+
 function parseArgs(argv) {
   const args = {container: 'shein-warehouse-db', database: 'shein_bi', user: 'shein', dryRun: false};
   for (let i = 0; i < argv.length; i += 1) {
@@ -103,9 +118,17 @@ SELECT jsonb_build_object(
 
 async function loadSources(args, rebuildFrom) {
   const cutoff = rebuildFrom ? `${sqlLiteral(rebuildFrom)}::date` : "'-infinity'::date";
+  const sourceCountsSql = SOURCE_TABLES.flatMap(table => [
+    sqlLiteral(table),
+    `(SELECT count(*) FROM ${table})`,
+  ]).join(',\n    ');
   return await queryJson(args, `
 SELECT jsonb_build_object(
   'sourceSnapshotAt', statement_timestamp(),
+  'sourceSnapshot', txid_current_snapshot()::text,
+  'sourceCounts', jsonb_build_object(
+    ${sourceCountsSql}
+  ),
   'openingStates', coalesce((
     SELECT jsonb_agg(to_jsonb(x)) FROM (
       SELECT DISTINCT ON (match_key) match_key, quantity_after AS quantity, value_after_sar AS value,
@@ -141,19 +164,57 @@ SELECT jsonb_build_object(
       'matchKey', dim.product_match_key(standard_goods_sn),
       'quantity', shipped_quantity, 'costAmountSar', cost_sar
     ) ORDER BY arrived_date, batch_key)
-    FROM fact.product_cost_batch
+    FROM mart.product_cost_batch_timeline
     WHERE complete_batch AND arrived_date IS NOT NULL AND arrived_date >= ${cutoff}
       AND coalesce(shipped_quantity,0) > 0 AND cost_sar IS NOT NULL
   ), '[]'::jsonb),
   'sales', coalesce((
     SELECT jsonb_agg(jsonb_build_object(
-      'orderItemKey', order_item_key,
-      'effectiveAt', coalesce(order_create_time, created_date::timestamp),
-      'matchKey', dim.product_match_key(standard_goods_sn),
-      'quantity', quantity
-    ) ORDER BY coalesce(order_create_time, created_date::timestamp), order_item_key)
-    FROM fact.order_item
-    WHERE created_date >= ${cutoff} AND coalesce(quantity,0) > 0 AND coalesce(sales_sar,0) > 0
+      'orderItemKey', sale.order_item_key,
+      'effectiveAt', sale.effective_at,
+      'matchKey', sale.match_key,
+      'quantity', sale.quantity,
+      'estimatedUnitCostSar', coalesce(transit.unit_cost_sar,past.unit_cost_sar),
+      'estimatedCostBasis', CASE
+        WHEN transit.unit_cost_sar IS NOT NULL THEN 'in_transit_weighted_as_of_sale'
+        WHEN past.unit_cost_sar IS NOT NULL THEN 'past_arrived_weighted_as_of_sale'
+        ELSE NULL
+      END
+    ) ORDER BY sale.effective_at, sale.order_item_key)
+    FROM (
+      SELECT
+        oi.order_item_key,
+        coalesce(oi.order_create_time,oi.created_date::timestamp) AS effective_at,
+        coalesce(oi.order_create_time,oi.created_date::timestamp)::date AS effective_date,
+        dim.product_match_key(oi.standard_goods_sn) AS match_key,
+        oi.quantity
+      FROM fact.order_item oi
+      WHERE oi.created_date >= ${cutoff}
+        AND coalesce(oi.quantity,0) > 0
+        AND coalesce(oi.sales_sar,0) > 0
+    ) sale
+    LEFT JOIN LATERAL (
+      SELECT
+        sum(b.cost_sar) / nullif(sum(b.shipped_quantity),0) AS unit_cost_sar
+      FROM mart.product_cost_batch_timeline b
+      WHERE b.complete_batch
+        AND dim.product_match_key(b.standard_goods_sn) = sale.match_key
+        AND coalesce(b.shipped_quantity,0) > 0
+        AND b.cost_sar IS NOT NULL
+        AND b.shipped_date <= sale.effective_date
+        AND (b.arrived_date IS NULL OR b.arrived_date > sale.effective_date)
+    ) transit ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        sum(b.cost_sar) / nullif(sum(b.shipped_quantity),0) AS unit_cost_sar
+      FROM mart.product_cost_batch_timeline b
+      WHERE b.complete_batch
+        AND dim.product_match_key(b.standard_goods_sn) = sale.match_key
+        AND coalesce(b.shipped_quantity,0) > 0
+        AND b.cost_sar IS NOT NULL
+        AND b.arrived_date IS NOT NULL
+        AND b.arrived_date <= sale.effective_date
+    ) past ON true
   ), '[]'::jsonb),
   'rtv', coalesce((
     SELECT jsonb_agg(to_jsonb(x) ORDER BY x.effective_at, x.event_key) FROM (
@@ -292,12 +353,13 @@ function eventsFromSources(source) {
   for (const row of source.receipts || []) events.push({
     eventKey: `receipt:${row.batchKey}`, matchKey: row.matchKey, effectiveAt: row.effectiveAt,
     eventType: 'receipt', quantity: row.quantity, costAmountSar: row.costAmountSar,
-    sourceTable: 'fact.product_cost_batch', sourceKey: row.batchKey,
+    sourceTable: 'mart.product_cost_batch_timeline', sourceKey: row.batchKey,
   });
   for (const row of source.sales || []) events.push({
     eventKey: `sale:${row.orderItemKey}`, matchKey: row.matchKey, effectiveAt: row.effectiveAt,
     eventType: 'sale', quantity: row.quantity, sourceTable: 'fact.order_item',
     sourceKey: row.orderItemKey, sourceOrderItemKey: row.orderItemKey,
+    estimatedUnitCostSar: row.estimatedUnitCostSar, estimatedCostBasis: row.estimatedCostBasis,
   });
   for (const row of source.rtv || []) events.push({
     eventKey: row.event_key, matchKey: row.match_key, effectiveAt: row.effective_at,
@@ -319,12 +381,13 @@ function monthStart(value) {
 }
 
 async function writeLedger(args, {events, ledgerRows, run, rebuildFrom}) {
-  const eventColumns = ['event_key','match_key','effective_at','event_type','quantity','cost_amount_sar','source_table','source_key','source_order_item_key','source_hash','period_key'];
-  const ledgerColumns = ['event_key','match_key','effective_at','event_type','source_table','source_key','source_order_item_key','quantity','cost_amount_sar','quantity_before','value_before_sar','avg_unit_cost_before_sar','quantity_after','value_after_sar','avg_unit_cost_after_sar','valued_quantity','unvalued_quantity','cogs_sar','valuation_status','ledger_version'];
+  const eventColumns = ['event_key','match_key','effective_at','event_type','quantity','cost_amount_sar','source_table','source_key','source_order_item_key','estimated_unit_cost_sar','estimated_cost_basis','source_hash','period_key'];
+  const ledgerColumns = ['event_key','match_key','effective_at','event_type','source_table','source_key','source_order_item_key','quantity','cost_amount_sar','quantity_before','value_before_sar','avg_unit_cost_before_sar','quantity_after','value_after_sar','avg_unit_cost_after_sar','valued_quantity','unvalued_quantity','estimated_quantity','settled_estimated_quantity','estimation_variance_sar','cogs_sar','valuation_status','valuation_basis','ledger_version'];
   const eventDbRows = events.map(event => ({
     event_key: event.eventKey, match_key: event.matchKey, effective_at: event.effectiveAt,
     event_type: event.eventType, quantity: event.quantity, cost_amount_sar: event.costAmountSar,
     source_table: event.sourceTable, source_key: event.sourceKey, source_order_item_key: event.sourceOrderItemKey,
+    estimated_unit_cost_sar: event.estimatedUnitCostSar, estimated_cost_basis: event.estimatedCostBasis,
     source_hash: event.sourceHash, period_key: monthStart(event.effectiveAt),
   }));
   const ledgerDbRows = ledgerRows.map(row => ({
@@ -335,11 +398,23 @@ async function writeLedger(args, {events, ledgerRows, run, rebuildFrom}) {
     avg_unit_cost_before_sar: row.avgUnitCostBeforeSar, quantity_after: row.quantityAfter,
     value_after_sar: row.valueAfterSar, avg_unit_cost_after_sar: row.avgUnitCostAfterSar,
     valued_quantity: row.valuedQuantity, unvalued_quantity: row.unvaluedQuantity,
-    cogs_sar: row.cogsSar, valuation_status: row.valuationStatus, ledger_version: row.ledgerVersion,
+    estimated_quantity: row.estimatedQuantity,
+    settled_estimated_quantity: row.settledEstimatedQuantity,
+    estimation_variance_sar: row.estimationVarianceSar,
+    cogs_sar: row.cogsSar, valuation_status: row.valuationStatus,
+    valuation_basis: row.valuationBasis, ledger_version: row.ledgerVersion,
   }));
   const condition = rebuildFrom ? `effective_at::date >= ${sqlLiteral(rebuildFrom)}::date` : 'true';
   let sql = 'BEGIN;\n';
   sql += "SELECT pg_advisory_xact_lock(hashtextextended('shein-inventory-cost-ledger-rebuild', 0));\n";
+  // The read and write happen in separate processes/transactions. Lock every
+  // mutable source used by the snapshot, then reject the write if any source
+  // changed after the exact database statement timestamp returned by
+  // loadSources(). This closes the gap where a new order could otherwise land
+  // between the JSON snapshot and the ledger commit.
+  sql += `LOCK TABLE
+    ${SOURCE_TABLES.join(',\n    ')}
+  IN SHARE MODE;\n`;
   sql += `DO $inventory_cost_rebuild_guard$\nBEGIN\n`;
   sql += `  IF EXISTS (\n`;
   sql += `    SELECT 1 FROM ops.inventory_cost_run\n`;
@@ -348,6 +423,35 @@ async function writeLedger(args, {events, ledgerRows, run, rebuildFrom}) {
   sql += `  ) THEN\n`;
   sql += `    RAISE EXCEPTION 'stale inventory-cost rebuild refused: a newer snapshot committed after %', ${sqlLiteral(run.startedAt)}::timestamptz;\n`;
   sql += `  END IF;\nEND\n$inventory_cost_rebuild_guard$;\n`;
+  const sourceSnapshot = String(run.sourceSnapshot || '').trim();
+  if (!sourceSnapshot) throw new Error('Inventory cost source snapshot is missing');
+  const sourceGuards = SOURCE_TABLES.map(table => {
+    const expectedCount = Number(run.sourceCounts?.[table]);
+    if (!Number.isSafeInteger(expectedCount) || expectedCount < 0) {
+      throw new Error(`Inventory cost source count is invalid: table=${table} count=${run.sourceCounts?.[table]}`);
+    }
+    return `EXISTS (
+      SELECT 1
+      FROM (
+        SELECT
+          count(*)::bigint AS row_count,
+          count(*) FILTER (
+            WHERE NOT txid_visible_in_snapshot(
+              (xmin::text)::bigint,
+              ${sqlLiteral(sourceSnapshot)}::txid_snapshot
+            )
+          )::bigint AS rows_not_visible_in_snapshot
+        FROM ${table}
+      ) source_state
+      WHERE source_state.row_count <> ${expectedCount}
+         OR source_state.rows_not_visible_in_snapshot > 0
+    )`;
+  });
+  sql += `DO $inventory_cost_source_guard$\nBEGIN\n`;
+  sql += `  IF ${sourceGuards.join('\n    OR ')}\n`;
+  sql += `  THEN\n`;
+  sql += `    RAISE EXCEPTION 'inventory-cost source changed after snapshot %; retry rebuild', ${sqlLiteral(run.sourceCutoffAt)}::timestamptz;\n`;
+  sql += `  END IF;\nEND\n$inventory_cost_source_guard$;\n`;
   sql += `DELETE FROM fact.inventory_cost_event WHERE ${condition};\n`;
   sql += copyBlock('fact.inventory_cost_event', eventColumns, eventDbRows);
   sql += copyBlock('fact.inventory_cost_ledger', ledgerColumns, ledgerDbRows);
@@ -375,8 +479,13 @@ async function main() {
   const summary = {
     rebuildFrom: boundary.rebuildFrom,
     latestFrozenMonth: boundary.latestFrozenMonth,
+    sourceSnapshot: source?.sourceSnapshot || '',
+    sourceCounts: source?.sourceCounts || {},
     eventTypes: built.rows.reduce((acc, row) => ({...acc, [row.eventType]: (acc[row.eventType] || 0) + 1}), {}),
     valuationStatuses: saleRows.reduce((acc, row) => ({...acc, [row.valuationStatus]: (acc[row.valuationStatus] || 0) + 1}), {}),
+    estimatedSaleQuantity: saleRows.reduce((sum, row) => sum + Number(row.estimatedQuantity || 0), 0),
+    settledEstimatedQuantity: saleRows.reduce((sum, row) => sum + Number(row.settledEstimatedQuantity || 0), 0),
+    estimationVarianceSar: saleRows.reduce((sum, row) => sum + Number(row.estimationVarianceSar || 0), 0),
     endingProducts: built.endingStates.size,
   };
   const run = {
@@ -389,6 +498,8 @@ async function main() {
     // the read must therefore invalidate freshness instead of being claimed
     // as covered by this run.
     sourceCutoffAt: source?.sourceSnapshotAt || startedAt,
+    sourceSnapshot: source?.sourceSnapshot || '',
+    sourceCounts: source?.sourceCounts || {},
     sourceHash,
     eventCount: built.rows.length, saleCount: saleRows.length,
     unvaluedSaleCount: saleRows.filter(row => row.unvaluedQuantity > 0).length, summary,

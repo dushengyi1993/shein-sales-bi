@@ -5,7 +5,11 @@ BEGIN;
 
 INSERT INTO dim.store(store_key,group_key,shop_name) VALUES ('S1','G1','validation store');
 INSERT INTO dim.product(standard_goods_sn,sample_raw_goods_sn,first_seen_date,last_seen_date)
-VALUES ('P1','P1','2026-01-01','2026-01-31'),('P2','P2','2026-01-01','2026-01-31');
+VALUES
+  ('P1','P1','2026-01-01','2026-01-31'),
+  ('P2','P2','2026-01-01','2026-01-31'),
+  ('P3','P3','2026-01-01','2026-01-31'),
+  ('P4','P4','2026-01-01','2026-01-31');
 
 INSERT INTO fact.order_item(
   order_item_key,order_key,store_key,group_key,order_no,created_date,order_create_time,
@@ -53,7 +57,75 @@ FROM fact.order_item;
 -- allowing a future receipt to price a post-cutover sale retroactively.
 INSERT INTO fact.product_cost_batch(
   batch_key,standard_goods_sn,arrived_date,shipped_quantity,cost_sar,unit_cost_sar,complete_batch
-) VALUES ('PCB_LEGACY','P2','2026-01-01',10,100,10,true);
+) VALUES
+  ('PCB_LEGACY','P2','2026-01-01',10,100,10,true),
+  -- A later, more expensive batch must not leak backwards into OI_LEGACY.
+  ('PCB_FUTURE','P2','2026-01-20',10,200,20,true);
+INSERT INTO fact.et_ship_order(ship_order_id,status,status_name,create_time)
+VALUES
+  ('F_TIMELINE_ARRIVED','12','海外仓已入库','2026-01-01 08:00'),
+  ('F_TIMELINE_TRANSIT','7','发往海外','2026-01-01 08:00'),
+  ('F_TIMELINE_NOT_DISPATCHED','1','待发货','2026-01-01 08:00');
+INSERT INTO fact.et_ship_order_track(
+  ship_order_id,status,status_name,tracks
+) VALUES
+  (
+    'F_TIMELINE_ARRIVED','12','海外仓已入库',
+    $json$[
+      {"Address":"FOSHAN-CHINA","Content":"Arrived at Foshan warehouse","TheDate":"2026-01-02 10:00"},
+      {"Address":"Riyadh-KSA","Content":"Arrived at Riyadh warehouse","TheDate":"2026-01-05 16:00"}
+    ]$json$::jsonb
+  ),
+  (
+    'F_TIMELINE_TRANSIT','7','发往海外',
+    $json$[
+      {"Address":"FOSHAN-CHINA","Content":"Arrived at Foshan warehouse","TheDate":"2026-01-03 10:00"},
+      {"Address":"FOSHAN-CHINA","Content":"Departed to Riyadh port","TheDate":"2026-01-04 10:00"}
+    ]$json$::jsonb
+  );
+INSERT INTO fact.product_cost_batch(
+  batch_key,standard_goods_sn,batch_no,shipped_date,arrived_date,
+  shipped_quantity,cost_sar,unit_cost_sar,complete_batch
+) VALUES
+  ('PCB_TIMELINE_ARRIVED','P_TIMELINE','F_TIMELINE_ARRIVED','2026-01-01',NULL,10,100,10,true),
+  ('PCB_TIMELINE_TRANSIT','P_TIMELINE','F_TIMELINE_TRANSIT','2026-01-01',NULL,10,100,10,true),
+  -- A declared spreadsheet date must not override a linked ET shipment that
+  -- has not physically departed.
+  ('PCB_TIMELINE_NOT_DISPATCHED','P_TIMELINE','F_TIMELINE_NOT_DISPATCHED','2026-01-01',NULL,10,100,10,true);
+DO $$
+DECLARE
+  v_arrived date;
+  v_source text;
+  v_transit_arrived date;
+  v_not_dispatched_shipped date;
+  v_not_dispatched_source text;
+  v_not_dispatched_consistency text;
+BEGIN
+  SELECT arrived_date,arrival_date_source
+    INTO v_arrived,v_source
+  FROM mart.product_cost_batch_timeline
+  WHERE batch_key='PCB_TIMELINE_ARRIVED';
+  SELECT arrived_date
+    INTO v_transit_arrived
+  FROM mart.product_cost_batch_timeline
+  WHERE batch_key='PCB_TIMELINE_TRANSIT';
+  SELECT shipped_date,shipped_date_source,shipped_date_consistency
+    INTO v_not_dispatched_shipped,v_not_dispatched_source,v_not_dispatched_consistency
+  FROM mart.product_cost_batch_timeline
+  WHERE batch_key='PCB_TIMELINE_NOT_DISPATCHED';
+  IF v_arrived <> '2026-01-05'::date OR v_source <> 'et_shipment_tracking' THEN
+    RAISE EXCEPTION 'ET destination arrival inference failed: date %, source %',v_arrived,v_source;
+  END IF;
+  IF v_transit_arrived IS NOT NULL THEN
+    RAISE EXCEPTION 'origin warehouse must not be treated as overseas arrival: %',v_transit_arrived;
+  END IF;
+  IF v_not_dispatched_shipped IS NOT NULL
+     OR v_not_dispatched_source <> 'et_linked_not_departed'
+     OR v_not_dispatched_consistency <> 'declared_but_et_not_departed' THEN
+    RAISE EXCEPTION 'linked ET not-departed shipment must override declared date: date %, source %, consistency %',
+      v_not_dispatched_shipped,v_not_dispatched_source,v_not_dispatched_consistency;
+  END IF;
+END $$;
 INSERT INTO fact.inventory_cost_opening(
   opening_key,effective_date,match_key,opening_quantity,opening_unit_cost_sar,approval_ref,source,status
 ) VALUES ('OPEN_CUTOVER','2026-01-15',dim.product_match_key('P1'),10,10,'validation','validation','approved');
@@ -62,7 +134,14 @@ INSERT INTO fact.order_item(
   standard_goods_sn,skc,sku_code,goods_title,quantity,currency_code,sales_sar
 ) VALUES
   ('OI_LEGACY','OK_LEGACY','S1','G1','O_LEGACY','2026-01-10','2026-01-10 10:03','P2','SKC_LEGACY','SKU_LEGACY','P2 legacy estimate',1,'SAR',40),
+  ('OI_LEGACY_SHIPPED','OK_LEGACY_SHIPPED','S1','G1','O_LEGACY_SHIPPED','2026-01-10','2026-01-10 10:04','P3','SKC_LEGACY_SHIPPED','SKU_LEGACY_SHIPPED','P3 contemporaneous shipped estimate',1,'SAR',40),
+  ('OI_LEGACY_FUTURE','OK_LEGACY_FUTURE','S1','G1','O_LEGACY_FUTURE','2026-01-10','2026-01-10 10:05','P4','SKC_LEGACY_FUTURE','SKU_LEGACY_FUTURE','P4 future-only cost must stay missing',1,'SAR',40),
   ('OI_POST','OK_POST','S1','G1','O_POST','2026-01-16','2026-01-16 10:03','P2','SKC_POST','SKU_POST','P2 post cutover missing',1,'SAR',40);
+INSERT INTO fact.product_cost_batch(
+  batch_key,standard_goods_sn,shipped_date,arrived_date,shipped_quantity,cost_sar,unit_cost_sar,complete_batch
+) VALUES
+  ('PCB_LEGACY_SHIPPED','P3','2026-01-05','2026-01-20',10,150,15,true),
+  ('PCB_LEGACY_FUTURE_ONLY','P4','2026-01-20','2026-01-25',10,180,18,true);
 
 INSERT INTO fact.after_sales_item(
   after_sales_item_key,snapshot_date,store_key,group_key,request_time,aftersales_order_no,
@@ -197,6 +276,14 @@ DECLARE
   v_legacy_cost numeric;
   v_legacy_missing boolean;
   v_legacy_status text;
+  v_legacy_basis text;
+  v_legacy_estimated numeric;
+  v_legacy_shipped_cost numeric;
+  v_legacy_shipped_status text;
+  v_legacy_shipped_basis text;
+  v_legacy_future_cost numeric;
+  v_legacy_future_missing boolean;
+  v_legacy_future_status text;
   v_post_cost numeric;
   v_post_missing boolean;
   v_post_status text;
@@ -316,11 +403,36 @@ BEGIN
     RAISE EXCEPTION 'unmapped finance actual must remain visible and reconcile: unmapped %, delta %',v_unmapped,v_reconcile_delta;
   END IF;
 
-  SELECT product_cost_sar,cost_missing,cost_valuation_status
-    INTO v_legacy_cost,v_legacy_missing,v_legacy_status
+  SELECT product_cost_sar,cost_missing,cost_valuation_status,cost_valuation_basis,cost_estimated_quantity
+    INTO v_legacy_cost,v_legacy_missing,v_legacy_status,v_legacy_basis,v_legacy_estimated
   FROM mart.profit_order_item WHERE order_item_key='OI_LEGACY';
-  IF abs(v_legacy_cost-10) > 0.005 OR v_legacy_missing OR v_legacy_status <> 'legacy_pre_cutover_estimate' THEN
-    RAISE EXCEPTION 'pre-cutover legacy estimate contract failed: cost %, missing %, status %',v_legacy_cost,v_legacy_missing,v_legacy_status;
+  IF abs(v_legacy_cost-10) > 0.005
+     OR v_legacy_missing
+     OR v_legacy_status <> 'legacy_pre_cutover_estimate'
+     OR v_legacy_basis <> 'legacy_past_arrived_weighted_pre_cutover'
+     OR v_legacy_estimated <> 1 THEN
+    RAISE EXCEPTION 'pre-cutover legacy estimate contract failed: cost %, missing %, status %, basis %, estimated %',
+      v_legacy_cost,v_legacy_missing,v_legacy_status,v_legacy_basis,v_legacy_estimated;
+  END IF;
+
+  SELECT product_cost_sar,cost_valuation_status,cost_valuation_basis
+    INTO v_legacy_shipped_cost,v_legacy_shipped_status,v_legacy_shipped_basis
+  FROM mart.profit_order_item WHERE order_item_key='OI_LEGACY_SHIPPED';
+  IF abs(v_legacy_shipped_cost-15) > 0.005
+     OR v_legacy_shipped_status <> 'legacy_pre_cutover_estimate'
+     OR v_legacy_shipped_basis <> 'legacy_shipped_weighted_pre_cutover' THEN
+    RAISE EXCEPTION 'legacy in-transit estimate must use only already-shipped evidence: cost %, status %, basis %',
+      v_legacy_shipped_cost,v_legacy_shipped_status,v_legacy_shipped_basis;
+  END IF;
+
+  SELECT product_cost_sar,cost_missing,cost_valuation_status
+    INTO v_legacy_future_cost,v_legacy_future_missing,v_legacy_future_status
+  FROM mart.profit_order_item WHERE order_item_key='OI_LEGACY_FUTURE';
+  IF v_legacy_future_cost IS NOT NULL
+     OR NOT v_legacy_future_missing
+     OR v_legacy_future_status <> 'ledger_missing' THEN
+    RAISE EXCEPTION 'future-only legacy cost must remain missing: cost %, missing %, status %',
+      v_legacy_future_cost,v_legacy_future_missing,v_legacy_future_status;
   END IF;
 
   SELECT product_cost_sar,cost_missing,cost_valuation_status
@@ -455,6 +567,10 @@ SELECT jsonb_build_object(
   'contracts',jsonb_build_array(
     'pending_refund_is_risk_not_realized',
     'legacy_history_is_labeled_before_cutover',
+    'legacy_no_arrival_uses_only_already_shipped_cost',
+    'legacy_future_only_cost_stays_missing',
+    'cost_timeline_uses_destination_arrival_only',
+    'cost_timeline_requires_physical_departure',
     'post_cutover_missing_ledger_fails_closed',
     'package_estimate_once',
     'partial_refund_and_split_package_fee',

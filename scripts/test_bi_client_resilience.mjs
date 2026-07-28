@@ -31,8 +31,34 @@ assert.match(source, /function profitRevenue\(r\)\{return firstNum\(r,\['known_n
   'profit margin must divide covered profit by covered revenue, never by all revenue while costs are missing');
 assert.match(source, /function profitRiskRevenue\(r\)\{return firstNum\(r,\['known_risk_adjusted_net_revenue_sar','known_net_revenue_sar'/,
   'risk-adjusted margin must use the same cost-covered population');
-assert.match(source, /最近成本估算 \$\{M\(p\.estimatedCostQty\)\} 件/,
-  'negative-stock carry-forward estimates must be visible instead of silently presented as settled batch cost');
+assert.match(source, /库存缺口估算 \$\{M\(p\.estimatedCostQty\)\} 件/,
+  'negative-stock estimates must be visible without being presented as settled batch cost');
+assert.match(source, /legacyEstimatedCostQty:hp\.reduce\(\(a,r\)=>a\+firstNum\(r,\['legacy_estimated_cost_quantity'\]\),0\)/,
+  'profit aggregation includes date-aware historical cost estimates');
+assert.match(source, /legacyEstimatedCostRevenue:hp\.reduce\(\(a,r\)=>a\+firstNum\(r,\['legacy_estimated_cost_revenue_sar'\]\),0\)/,
+  'profit aggregation includes legacy estimated revenue');
+assert.match(source, /legacyEstimatedCostLines:hp\.reduce\(\(a,r\)=>a\+firstNum\(r,\['legacy_estimated_cost_lines'\]\),0\)/,
+  'profit aggregation includes legacy estimated lines');
+assert.match(source, /历史成本估算 \$\{M\(p\.legacyEstimatedCostQty\)\} 件/,
+  'legacy historical estimates are independently visible beside inventory-gap estimates');
+assert.match(source, /在可售成本库存不足时，使用订单当时已有的在途批次或最近移动加权成本估算；不代表精确批次。/,
+  'inventory-gap estimate tooltip explains its bounded cost basis without claiming an exact batch');
+assert.match(source, /优先用订单日前已到仓批次；没有到仓记录时只用订单日前已实际发出的批次；不代表精确批次。/,
+  'legacy estimate tooltip allows only cost evidence that existed by the order date');
+assert.match(source, /完全没有成本依据，已显示为待成本，不会拿未来批次倒灌/,
+  'fully missing costs stay separately labelled from both estimate types');
+assert.match(server, /legacy_estimated_cost_revenue_sar: 0/,
+  'homeProfit empty rows initialize legacy estimated revenue');
+assert.match(server, /row\.legacy_estimated_cost_quantity \+= Number\(r\.legacy_estimated_cost_quantity \|\| 0\)/,
+  'homeProfit aggregation retains legacy estimated quantities');
+assert.match(server, /row\.legacy_estimated_cost_revenue_sar \+= Number\(r\.legacy_estimated_cost_revenue_sar \|\| 0\)/,
+  'homeProfit aggregation retains legacy estimated revenue');
+assert.match(server, /row\.legacy_estimated_cost_lines \+= Number\(r\.legacy_estimated_cost_lines \|\| 0\)/,
+  'homeProfit aggregation retains legacy estimated lines');
+assert.match(server, /'legacy_estimated_cost_revenue_sar'/,
+  'homeProfit rounds and returns legacy estimated revenue');
+assert.match(server, /'legacy_estimated_cost_quantity', 'legacy_estimated_cost_lines'/,
+  'homeProfit rounds and returns legacy estimated counts');
 assert.match(source, /'return-summary-matrix'\)\+/, 'returns and profit summary tables expose paired height-alignment classes');
 assert.match(source, /function adaptivePriceScale\(values,maxBins=8\)/, 'price charts share one actual-range adaptive scale');
 assert.match(source, /\(N\(v\)-minPrice\)\/scale\.span/, 'scatter y-axis starts at the actual minimum transaction price');

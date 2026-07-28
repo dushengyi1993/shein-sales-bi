@@ -6682,6 +6682,9 @@ function emptyHomeProfitScopeRow(date, scopeValue) {
     estimated_cost_revenue_sar: 0,
     estimated_cost_quantity: 0,
     estimated_cost_lines: 0,
+    legacy_estimated_cost_revenue_sar: 0,
+    legacy_estimated_cost_quantity: 0,
+    legacy_estimated_cost_lines: 0,
     reversal_lines: 0,
     risk_adjusted_net_revenue_sar: 0,
     known_risk_adjusted_net_revenue_sar: 0,
@@ -6732,6 +6735,9 @@ function buildHomeProfitSummaryFromProfitData(profitData, sourceMeta = {}) {
     row.estimated_cost_revenue_sar += Number(r.estimated_cost_revenue_sar || 0);
     row.estimated_cost_quantity += Number(r.estimated_cost_quantity || 0);
     row.estimated_cost_lines += Number(r.estimated_cost_lines || 0);
+    row.legacy_estimated_cost_revenue_sar += Number(r.legacy_estimated_cost_revenue_sar || 0);
+    row.legacy_estimated_cost_quantity += Number(r.legacy_estimated_cost_quantity || 0);
+    row.legacy_estimated_cost_lines += Number(r.legacy_estimated_cost_lines || 0);
     row.reversal_lines += Number(r.reversal_lines || 0);
     row.risk_adjusted_net_revenue_sar += Number(r.risk_adjusted_net_revenue_sar ?? r.net_revenue_sar ?? 0);
     row.known_risk_adjusted_net_revenue_sar += Number(r.known_risk_adjusted_net_revenue_sar ?? r.known_net_revenue_sar ?? 0);
@@ -6787,6 +6793,7 @@ function buildHomeProfitSummaryFromProfitData(profitData, sourceMeta = {}) {
     'known_gross_revenue_sar',
     'missing_cost_revenue_sar',
     'estimated_cost_revenue_sar',
+    'legacy_estimated_cost_revenue_sar',
     'risk_adjusted_net_revenue_sar',
     'known_risk_adjusted_net_revenue_sar',
     'pending_revenue_risk_sar',
@@ -6795,7 +6802,7 @@ function buildHomeProfitSummaryFromProfitData(profitData, sourceMeta = {}) {
     'actual_return_cost_sar',
     'estimated_return_delivery_fee_sar',
   ];
-  const countFields = ['quantity', 'order_lines', 'orders', 'rtv_received_quantity', 'rtv_received_to_09_quantity', 'missing_cost_quantity', 'missing_cost_lines', 'estimated_cost_quantity', 'estimated_cost_lines', 'reversal_lines', 'pending_revenue_risk_lines', 'pending_impact_quantity', 'storage_matched', 'storage_fee_provisional_rows', 'storage_fee_settled_rows'];
+  const countFields = ['quantity', 'order_lines', 'orders', 'rtv_received_quantity', 'rtv_received_to_09_quantity', 'missing_cost_quantity', 'missing_cost_lines', 'estimated_cost_quantity', 'estimated_cost_lines', 'legacy_estimated_cost_quantity', 'legacy_estimated_cost_lines', 'reversal_lines', 'pending_revenue_risk_lines', 'pending_impact_quantity', 'storage_matched', 'storage_fee_provisional_rows', 'storage_fee_settled_rows'];
   const dailyScopes = Array.from(map.values()).map(row => {
     const effectiveStorage = Number(row.storage_matched || 0) > 0 ? Number(row.storage_fee_sar || 0) : Number(row.fallback_storage_fee_sar || 0);
     const out = {...row};

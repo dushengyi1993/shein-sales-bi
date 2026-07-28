@@ -563,9 +563,26 @@ WITH base AS (
     sum(gross_revenue_sar) FILTER (WHERE cost_missing) AS missing_cost_revenue_sar,
     sum(quantity) FILTER (WHERE cost_missing) AS missing_cost_quantity,
     count(*) FILTER (WHERE cost_missing) AS missing_cost_lines,
-    sum(net_revenue_sar) FILTER (WHERE cost_valuation_status = 'estimated_negative_inventory_last_cost') AS estimated_cost_revenue_sar,
-    sum(quantity) FILTER (WHERE cost_valuation_status = 'estimated_negative_inventory_last_cost') AS estimated_cost_quantity,
-    count(*) FILTER (WHERE cost_valuation_status = 'estimated_negative_inventory_last_cost') AS estimated_cost_lines,
+    sum(
+      net_revenue_sar
+        * least(coalesce(cost_estimated_quantity,0),quantity)
+        / nullif(quantity,0)
+    ) FILTER (WHERE cost_valuation_status LIKE 'estimated_%') AS estimated_cost_revenue_sar,
+    sum(cost_estimated_quantity) FILTER (WHERE cost_valuation_status LIKE 'estimated_%') AS estimated_cost_quantity,
+    count(*) FILTER (
+      WHERE cost_valuation_status LIKE 'estimated_%'
+        AND coalesce(cost_estimated_quantity,0) > 0
+    ) AS estimated_cost_lines,
+    sum(net_revenue_sar) FILTER (
+      WHERE cost_valuation_status = 'legacy_pre_cutover_estimate'
+    ) AS legacy_estimated_cost_revenue_sar,
+    sum(cost_estimated_quantity) FILTER (
+      WHERE cost_valuation_status = 'legacy_pre_cutover_estimate'
+    ) AS legacy_estimated_cost_quantity,
+    count(*) FILTER (
+      WHERE cost_valuation_status = 'legacy_pre_cutover_estimate'
+        AND coalesce(cost_estimated_quantity,0) > 0
+    ) AS legacy_estimated_cost_lines,
     count(*) FILTER (WHERE revenue_reversal) AS reversal_lines,
     sum(return_delivery_fee_sar) FILTER (WHERE revenue_reversal) AS reversal_fee_sar,
     CASE
@@ -631,6 +648,9 @@ SELECT
   coalesce(b.estimated_cost_revenue_sar,0) AS estimated_cost_revenue_sar,
   coalesce(b.estimated_cost_quantity,0) AS estimated_cost_quantity,
   coalesce(b.estimated_cost_lines,0)::bigint AS estimated_cost_lines,
+  coalesce(b.legacy_estimated_cost_revenue_sar,0) AS legacy_estimated_cost_revenue_sar,
+  coalesce(b.legacy_estimated_cost_quantity,0) AS legacy_estimated_cost_quantity,
+  coalesce(b.legacy_estimated_cost_lines,0)::bigint AS legacy_estimated_cost_lines,
   coalesce(b.reversal_lines,0)::bigint AS reversal_lines,
   coalesce(b.reversal_fee_sar,0) AS reversal_fee_sar,
   b.profit_margin_before_storage,
@@ -709,9 +729,26 @@ WITH group_month AS (
     sum(gross_revenue_sar) FILTER (WHERE NOT cost_missing) AS known_gross_revenue_sar,
     sum(gross_revenue_sar) FILTER (WHERE cost_missing) AS missing_cost_revenue_sar,
     count(*) FILTER (WHERE cost_missing) AS missing_cost_lines,
-    sum(net_revenue_sar) FILTER (WHERE cost_valuation_status = 'estimated_negative_inventory_last_cost') AS estimated_cost_revenue_sar,
-    sum(quantity) FILTER (WHERE cost_valuation_status = 'estimated_negative_inventory_last_cost') AS estimated_cost_quantity,
-    count(*) FILTER (WHERE cost_valuation_status = 'estimated_negative_inventory_last_cost') AS estimated_cost_lines,
+    sum(
+      net_revenue_sar
+        * least(coalesce(cost_estimated_quantity,0),quantity)
+        / nullif(quantity,0)
+    ) FILTER (WHERE cost_valuation_status LIKE 'estimated_%') AS estimated_cost_revenue_sar,
+    sum(cost_estimated_quantity) FILTER (WHERE cost_valuation_status LIKE 'estimated_%') AS estimated_cost_quantity,
+    count(*) FILTER (
+      WHERE cost_valuation_status LIKE 'estimated_%'
+        AND coalesce(cost_estimated_quantity,0) > 0
+    ) AS estimated_cost_lines,
+    sum(net_revenue_sar) FILTER (
+      WHERE cost_valuation_status = 'legacy_pre_cutover_estimate'
+    ) AS legacy_estimated_cost_revenue_sar,
+    sum(cost_estimated_quantity) FILTER (
+      WHERE cost_valuation_status = 'legacy_pre_cutover_estimate'
+    ) AS legacy_estimated_cost_quantity,
+    count(*) FILTER (
+      WHERE cost_valuation_status = 'legacy_pre_cutover_estimate'
+        AND coalesce(cost_estimated_quantity,0) > 0
+    ) AS legacy_estimated_cost_lines,
     count(*) FILTER (WHERE revenue_reversal) AS reversal_lines,
     sum(risk_adjusted_net_revenue_sar) AS risk_adjusted_net_revenue_sar,
     sum(risk_adjusted_net_revenue_sar) FILTER (WHERE NOT cost_missing) AS known_risk_adjusted_net_revenue_sar,
@@ -760,6 +797,9 @@ SELECT
   coalesce(g.estimated_cost_revenue_sar,0) AS estimated_cost_revenue_sar,
   coalesce(g.estimated_cost_quantity,0) AS estimated_cost_quantity,
   coalesce(g.estimated_cost_lines,0)::bigint AS estimated_cost_lines,
+  coalesce(g.legacy_estimated_cost_revenue_sar,0) AS legacy_estimated_cost_revenue_sar,
+  coalesce(g.legacy_estimated_cost_quantity,0) AS legacy_estimated_cost_quantity,
+  coalesce(g.legacy_estimated_cost_lines,0)::bigint AS legacy_estimated_cost_lines,
   coalesce(g.reversal_lines,0)::bigint AS reversal_lines,
   coalesce(smt.total_storage_fee_sar,0) AS month_storage_fee_sar,
   coalesce(sgm.allocated_storage_fee_sar,0) AS allocated_storage_fee_sar,
@@ -829,7 +869,7 @@ SELECT
   sum(p.profit_if_rtv_received_resellable_sar) AS profit_if_rtv_received_resellable_sar,
   sum(p.profit_if_rtv_09_resellable_sar) AS profit_if_rtv_09_resellable_sar,
   CASE
-    WHEN sum(p.net_revenue_sar) FILTER (WHERE p.missing_cost_lines = 0) > 0
+    WHEN sum(coalesce(p.known_net_revenue_sar,0)) > 0
     THEN sum(p.profit_before_storage_sar) / nullif(sum(p.known_net_revenue_sar),0)
     ELSE NULL
   END AS profit_margin_before_storage,
@@ -839,6 +879,9 @@ SELECT
   sum(p.estimated_cost_revenue_sar) AS estimated_cost_revenue_sar,
   sum(p.estimated_cost_quantity) AS estimated_cost_quantity,
   sum(p.estimated_cost_lines) AS estimated_cost_lines,
+  sum(p.legacy_estimated_cost_revenue_sar) AS legacy_estimated_cost_revenue_sar,
+  sum(p.legacy_estimated_cost_quantity) AS legacy_estimated_cost_quantity,
+  sum(p.legacy_estimated_cost_lines) AS legacy_estimated_cost_lines,
   sum(p.reversal_lines) AS reversal_lines,
   max(c.unit_cost_sar) AS unit_cost_sar,
   max(c.complete_batch_count)::bigint AS complete_batch_count,
@@ -856,7 +899,7 @@ SELECT
   coalesce(max(ps.storage_fee_sar),0) AS storage_fee_sar,
   sum(p.profit_before_storage_sar) - coalesce(max(ps.storage_fee_sar),0) AS profit_after_storage_sar,
   CASE
-    WHEN sum(p.net_revenue_sar) FILTER (WHERE p.missing_cost_lines = 0) > 0
+    WHEN sum(coalesce(p.known_net_revenue_sar,0)) > 0
     THEN (sum(p.profit_before_storage_sar) - coalesce(max(ps.storage_fee_sar),0)) / nullif(sum(p.known_net_revenue_sar),0)
     ELSE NULL
   END AS profit_margin_after_storage,
