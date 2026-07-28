@@ -7141,6 +7141,11 @@ async function generateBiSection(args, root, section, generatedAt) {
         throw new Error('homeProfit requires a fresh profit section cache');
       }
     }
+    const derived = await deriveHomeProfitSectionFromProfitCache(root, generatedAt);
+    if (!derived?.data?.homeProfitSummary) {
+      throw new Error('homeProfit could not be derived from the current profit section cache');
+    }
+    return derived;
   }
   const run = await runChildProcess(process.execPath, [
     path.join(ROOT, 'scripts', 'generate_bi_portal.mjs'),

@@ -183,6 +183,8 @@ assert.match(portalServer, /'accountingInputUpdatedAt', greatest\([\s\S]*fact\.a
   'return and after-sales mutations must invalidate profit without masquerading as new sales');
 assert.match(portalServer, /refreshHistoricalSections:[\s\S]*eventNeedsHistoricalRefresh/,
   'a webhook burst must preserve prior-day cancellation and return invalidation scope');
+assert.match(portalServer, /section === 'homeProfit'[\s\S]*deriveHomeProfitSectionFromProfitCache\(root, generatedAt\)[\s\S]*return derived/,
+  'forced historical profit refreshes must derive homeProfit instead of calling a nonexistent SQL section');
 assert.match(portalServer, /accountingRefreshed: true/,
   'clients must receive a second live signal after canonical accounting catches up');
 assert.match(portalServer, /SHEIN_BI_LIVE_ACCOUNTING_RETRY_MS \|\| 5 \* 60_000/,
