@@ -7871,7 +7871,11 @@ async function loadDirectBiQuery(args, root, actor, question, options = {}) {
       const result = await loadBiSection(args, root, section, {
         force: false,
         allowGenerate: options.allowGenerate !== false,
-        allowStale: false,
+        // Link performance is a daily business snapshot while the core sales
+        // envelope is regenerated intraday. Reuse the prior envelope here;
+        // loadBiOpsQueryData still accepts it only when linkDate exactly
+        // matches the core-declared link business date.
+        allowStale: section === 'linksData',
         gzip: false,
       });
       preparation.push({
