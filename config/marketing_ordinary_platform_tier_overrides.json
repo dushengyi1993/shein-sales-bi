@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "description": "Persistent evidence for ordinary marketing prices forced below the approved audit target by the platform minimum tier.",
+  "updatedAt": "2026-07-28T11:40:00+08:00",
+  "entries": [
+    {
+      "storeKey": "DL",
+      "skc": "sv260103161242703915999",
+      "activityId": 48733,
+      "canonical": "S1810电热水壶",
+      "approvedTargetPrice": 60.32,
+      "platformTierPrice": 58.31,
+      "validFrom": "2026-07-24 16:00:00",
+      "validTo": "2026-07-31 16:00:00",
+      "status": "active",
+      "reason": "Platform minimum tier observed after approval; owner authorized using the platform minimum tier without reapproval.",
+      "sourceThreadId": "019f5a25-84c5-7f01-87f2-ff478bfab12a",
+      "sourceOrderNo": "GSH18V6240025UA"
+    },
+    {
+      "storeKey": "TZ",
+      "skc": "sv260425142341553649719",
+      "activityId": 48733,
+      "canonical": "SK-223三明治机和早餐机",
+      "approvedTargetPrice": 90.18,
+      "platformTierPrice": 82.75,
+      "validFrom": "2026-07-24 16:00:00",
+      "validTo": "2026-07-31 16:00:00",
+      "status": "active",
+      "reason": "Observed order price equals floor2(121.70 * 68%); current limited discount is 90.18 and live coupon evidence is absent, so the lower price is attributed to the platform-forced ordinary tier.",
+      "sourceThreadId": "019f5a25-84c5-7f01-87f2-ff478bfab12a",
+      "sourceOrderNo": "GSH18D17C00MK6C"
+    }
+  ]
+}

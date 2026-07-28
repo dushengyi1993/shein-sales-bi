@@ -8,7 +8,10 @@ import {
   collectLatestRawMarketingLinkRows,
   mergeMarketingLinkRows,
 } from '../../lib/marketing_latest_raw_link_overlay.mjs';
-import {isRecentNewListingLink} from '../../lib/marketing_pricing_policy.mjs';
+import {
+  buildExposureTopLinkIndex,
+  isRecentNewListingLink,
+} from '../../lib/marketing_pricing_policy.mjs';
 
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'marketing-raw-link-overlay-'));
 try {
@@ -46,6 +49,14 @@ try {
   assert.equal(raw.rows[0].standard_goods_sn, 'SK-03038制冰机');
   assert.equal(raw.rows[0].first_shelf_time, '2026-07-15 21:56:01');
   assert.equal(raw.rows.some(row => row.skc === 'sold-out-must-not-enter-marketing-candidates'), false);
+  const rawIncludingOffShelf = collectLatestRawMarketingLinkRows({
+    historyDir: tmp,
+    reportDate: '2026-07-16',
+    storeKeys: ['TS'],
+    includeOffShelf: true,
+  });
+  assert.equal(rawIncludingOffShelf.rows.length, 2);
+  assert.equal(rawIncludingOffShelf.rows.some(row => row.skc === 'sold-out-must-not-enter-marketing-candidates'), true);
 
   const existing = {store_key: 'TS', skc: 'existing', standard_goods_sn: 'KEEP-BI', c7_eps_uv: 99};
   const merged = mergeMarketingLinkRows([existing], [
@@ -56,6 +67,17 @@ try {
   assert.equal(merged.rows.find(row => row.skc === 'existing').standard_goods_sn, 'KEEP-BI');
   assert.equal(merged.rows.some(row => row.skc === 'sv260714101779912497463'), true);
   assert.equal(isRecentNewListingLink(raw.rows[0], undefined, '2026-07-16').applies, true);
+  const exposure = buildExposureTopLinkIndex({
+    data: {
+      storeLinks: [
+        {...raw.rows[0], c7_eps_uv: 123},
+        {...raw.rows[0], skc: 'no-positive-metric', c7_eps_uv: 0},
+      ],
+    },
+  });
+  assert.equal(exposure.rowCount, 2);
+  assert.equal(exposure.positiveMetricRowCount, 1);
+  assert.equal(exposure.rankedRowCount, 1);
 
   const incompleteCoverage = assessLatestRawMarketingLinkCoverage({
     sourceFiles: raw.sourceFiles,

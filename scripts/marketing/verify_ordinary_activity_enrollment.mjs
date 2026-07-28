@@ -19,6 +19,7 @@ import {
   storeIdentityEvalBody,
 } from '../../lib/shein_store_identity.mjs';
 import {recoverSheinLoginIfNeeded} from '../../lib/shein_login_recovery.mjs';
+import {isOrdinaryPlatformTierRewriteAccepted} from '../../lib/marketing_ordinary_platform_price_policy.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
@@ -716,9 +717,13 @@ function compareWithFillEvidence({actual, expected, fillEvidence, skc}) {
     if (
       Number.isFinite(actual)
       && Number.isFinite(expected)
-      && actual + args.priceTolerance >= expected
       && Number.isFinite(rewritePrice)
-      && Math.abs(actual - rewritePrice) <= args.priceTolerance
+      && isOrdinaryPlatformTierRewriteAccepted({
+        actualPrice: actual,
+        platformExpectedPrice: rewritePrice,
+        discountMatches: true,
+        toleranceSar: args.priceTolerance,
+      })
     ) {
       return {
         ok: true,

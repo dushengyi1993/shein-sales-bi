@@ -60,6 +60,7 @@ check('absent shuffleImages has no applied changes', noShuffle.applied.length, 0
 
 const priceTask = {supplyPriceRange: {min: 310, max: 347}};
 const hlPrice = __testHooks.applyRandomSupplyPrice(clone(basePayload), priceTask, {}, 'HL');
+const hlPriceRepeat = __testHooks.applyRandomSupplyPrice(clone(basePayload), priceTask, {}, 'HL');
 const tzPrice = __testHooks.applyRandomSupplyPrice(clone(basePayload), priceTask, {}, 'TZ');
 const hlSkuPrices = asArray(hlPrice.payload.skc_list?.[0]?.sku_list).map(row => row.cost_info?.cost_price);
 const tzSkuPrices = asArray(tzPrice.payload.skc_list?.[0]?.sku_list).map(row => row.cost_info?.cost_price);
@@ -67,8 +68,11 @@ check('HL randomized all SKUs to one per-store price', new Set(hlSkuPrices).size
 check('TZ randomized all SKUs to one per-store price', new Set(tzSkuPrices).size, 1);
 check('random price in configured range', [...hlSkuPrices, ...tzSkuPrices].every(v => Number(v) >= 310 && Number(v) <= 347), true);
 check('random price differs by store bucket', hlSkuPrices[0] !== tzSkuPrices[0], true);
+check('randomized price is deterministic across preflight and execute', JSON.stringify(hlPriceRepeat.payload), JSON.stringify(hlPrice.payload));
 
-const shuffled = __testHooks.shufflePublishDetailImages(clone(basePayload), {shuffleImages: true}, {});
+const shuffleTask = {id: 'copy-task-1', shuffleImages: true};
+const shuffled = __testHooks.shufflePublishDetailImages(clone(basePayload), shuffleTask, {}, 'HL');
+const shuffledRepeat = __testHooks.shufflePublishDetailImages(clone(basePayload), shuffleTask, {}, 'HL');
 const shuffledRows = shuffled.payload.skc_list[0].image_info.image_info_list;
 const globallyUnique = __testHooks.ensurePublishImageSortGlobalUnique(shuffled.payload).payload;
 const finalRows = globallyUnique.skc_list[0].image_info.image_info_list;
@@ -77,6 +81,7 @@ check('main image remains sort=1', finalRows.find(row => Number(row.image_type) 
 check('square image keeps original sort position', finalRows.find(row => Number(row.image_type) === 5)?.image_sort, 3);
 check('detail image sorts fill non-reserved positions only', finalRows.filter(row => Number(row.image_type) === 2).map(row => Number(row.image_sort)).sort((a, b) => a - b).join(','), '2,4,5');
 check('image sorts remain globally unique', new Set(finalRows.map(row => Number(row.image_sort))).size, finalRows.length);
+check('detail image shuffle is deterministic across preflight and execute', JSON.stringify(shuffledRepeat.payload), JSON.stringify(shuffled.payload));
 
 const currentApplied = __testHooks.applyManualAttributeOverrides(clone(basePayload), {targets: {productRefs: ['BY-506空气炸锅']}}, {});
 const currentRows = asArray(currentApplied.payload.product_attribute_list);

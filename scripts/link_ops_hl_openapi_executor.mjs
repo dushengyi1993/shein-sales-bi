@@ -719,6 +719,13 @@ function taskPublishPreparationOverrides(task = {}, executionContext = {}) {
       task?.targets?.standardGoodsSn,
       task?.standardGoodsSn,
     ),
+    supplierSku: firstNonEmpty(
+      executionContext?.publishPreparation?.supplierSku,
+      task?.publishPreparation?.supplierSku,
+      task?.notes?.supplierSkuPolicy?.mode === 'unique-per-link'
+        ? task?.notes?.supplierSkuPolicy?.value
+        : '',
+    ),
     supplyPrice: firstNonEmpty(
       executionContext?.publishPreparation?.supplyPrice,
       task?.publishPreparation?.supplyPrice,
@@ -1310,18 +1317,26 @@ function normalizeInputCurrentExtraValue(value, unit = '') {
   return String(milliamps);
 }
 
-function randomIntInclusive(min, max) {
+function deterministicIntInclusive(min, max, seed) {
   const lo = Math.ceil(Number(min));
   const hi = Math.floor(Number(max));
   if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi < lo) return lo;
-  const range = hi - lo + 1;
-  const maxRandom = 0x100000000;
-  const limit = maxRandom - (maxRandom % range);
-  let value;
-  do {
-    value = crypto.randomBytes(4).readUInt32BE(0);
-  } while (value >= limit);
-  return lo + (value % range);
+  const range = BigInt(hi - lo + 1);
+  const digest = crypto.createHash('sha256').update(String(seed || ''), 'utf8').digest();
+  return lo + Number(digest.readBigUInt64BE(0) % range);
+}
+
+function taskRandomizationSeed(task, executionContext, targetStore, purpose) {
+  const taskId = safeString(firstNonEmpty(task?.id, executionContext?.taskId, executionContext?.parentTaskId), 160);
+  return sha256Stable({
+    purpose,
+    targetStore: normalizeStoreKey(targetStore),
+    taskId,
+    standardGoodsSn: taskStandardGoodsSn(task, executionContext),
+    sourceStore: normalizeStoreKey(firstNonEmpty(task?.sourceStore, executionContext?.sourceStore, executionContext?.targets?.sourceStore)),
+    sourceSkc: safeString(firstNonEmpty(task?.sourceSkc, task?.skc, executionContext?.sourceSkc, executionContext?.targets?.sourceSkc), 160),
+    createdAt: taskId ? '' : safeString(firstNonEmpty(task?.createdAt, executionContext?.taskCreatedAt, executionContext?.createdAt), 80),
+  });
 }
 
 function storePriceBucket({minCents, maxCents, targetStore}) {
@@ -1338,12 +1353,12 @@ function storePriceBucket({minCents, maxCents, targetStore}) {
   };
 }
 
-function randomPriceInRange(range, targetStore = '') {
+function randomPriceInRange(range, targetStore = '', seed = '') {
   const min = Number(range?.min ?? range?.from ?? range?.low);
   const max = Number(range?.max ?? range?.to ?? range?.high);
   if (!Number.isFinite(min) || !Number.isFinite(max) || min < 0 || max < min) return null;
   const bucket = storePriceBucket({minCents: Math.round(min * 100), maxCents: Math.round(max * 100), targetStore});
-  const cents = randomIntInclusive(bucket.minCents, bucket.maxCents);
+  const cents = deterministicIntInclusive(bucket.minCents, bucket.maxCents, seed);
   return (cents / 100).toFixed(2);
 }
 
@@ -1359,12 +1374,14 @@ function taskSupplyPriceRange(task, executionContext = {}, targetStore = '') {
     executionContext?.targets?.supply_price_range,
   ];
   for (const candidate of candidates) {
-    const price = randomPriceInRange(candidate, targetStore);
+    const seed = taskRandomizationSeed(task, executionContext, targetStore, 'supply_price');
+    const price = randomPriceInRange(candidate, targetStore, seed);
     if (price !== null) {
       return {
         min: Number(candidate?.min ?? candidate?.from ?? candidate?.low),
         max: Number(candidate?.max ?? candidate?.to ?? candidate?.high),
         __randomCostPrice: price,
+        __randomSeedHash: seed.slice(0, 16),
       };
     }
   }
@@ -1400,6 +1417,8 @@ function applyRandomSupplyPrice(payload, task, executionContext, targetStore) {
       currency: 'SAR',
       costPrice,
       perStoreRandomized: true,
+      deterministicAcrossPreflightAndExecute: true,
+      seedHash: range.__randomSeedHash,
     },
   };
 }
@@ -2028,19 +2047,25 @@ function taskApprovedImageOrderLocked(task) {
   );
 }
 
-function cryptoShuffle(values) {
+function cryptoShuffle(values, seed) {
   const out = [...values];
   for (let i = out.length - 1; i > 0; i -= 1) {
-    const j = randomIntInclusive(0, i);
+    const j = deterministicIntInclusive(0, i, `${seed}:${i}`);
     [out[i], out[j]] = [out[j], out[i]];
   }
   return out;
 }
 
-function shufflePublishDetailImages(payload, task, executionContext) {
+function shufflePublishDetailImages(payload, task, executionContext, targetStore = '') {
   if (!taskShuffleImagesEnabled(task, executionContext)) return {payload, applied: []};
   const next = jsonClone(payload || {});
   const applied = [];
+  const shuffleSeed = taskRandomizationSeed(
+    task,
+    executionContext,
+    firstNonEmpty(targetStore, executionContext?.targetStore, executionContext?.targets?.targetStore, task?.targetStore, task?.targets?.targetStore),
+    'detail_image_order',
+  );
   for (const [skcIndex, skc] of asArray(next.skc_list || next.skcList).entries()) {
     const imageInfo = skc?.image_info || skc?.imageInfo;
     const rows = asArray(imageInfo?.image_info_list || imageInfo?.imageInfoList);
@@ -2065,7 +2090,7 @@ function shufflePublishDetailImages(payload, task, executionContext) {
       if (Number.isFinite(sort) && sort > 1) reservedSorts.add(sort);
     }
     if (details.length <= 1) continue;
-    const shuffled = cryptoShuffle(details);
+    const shuffled = cryptoShuffle(details, `${shuffleSeed}:${skcIndex}`);
     let nextSort = 2;
     for (const item of shuffled) {
       while (reservedSorts.has(nextSort)) nextSort += 1;
@@ -2079,7 +2104,7 @@ function shufflePublishDetailImages(payload, task, executionContext) {
   return {payload: next, applied: [...new Set(applied)]};
 }
 
-function applyTargetStandardGoodsSn(payload, standardGoodsSn) {
+function applyTargetStandardGoodsSn(payload, standardGoodsSn, {preserveExplicitSupplierSku = false} = {}) {
   const goodsSn = safeString(standardGoodsSn, 240);
   if (!goodsSn) return {payload, applied: []};
   const next = jsonClone(payload || {});
@@ -2097,6 +2122,15 @@ function applyTargetStandardGoodsSn(payload, standardGoodsSn) {
     }
     for (const [skuIndex, sku] of asArray(skc.sku_list || skc.skuList).entries()) {
       if (!sku || typeof sku !== 'object') continue;
+      const explicitSupplierSku = safeString(sku.supplier_sku ?? sku.supplierSku, 240);
+      if (preserveExplicitSupplierSku && explicitSupplierSku) {
+        if ('supplierSku' in sku) {
+          sku.supplier_sku = explicitSupplierSku;
+          delete sku.supplierSku;
+        }
+        applied.push(`skc_list[${skcIndex}].sku_list[${skuIndex}].supplier_sku.explicit_unique_preserved`);
+        continue;
+      }
       if ((sku.supplier_sku ?? sku.supplierSku) !== goodsSn) {
         sku.supplier_sku = goodsSn;
         if ('supplierSku' in sku) delete sku.supplierSku;
@@ -2993,7 +3027,12 @@ async function main() {
     if (publishStandardApplied.call) calls.push(publishStandardApplied.call);
     const templateApplied = await applyAttributeTemplateRules(client, publishStandardApplied.payload);
     if (templateApplied.call) calls.push(templateApplied.call);
-    const standardGoodsSnApplied = applyTargetStandardGoodsSn(templateApplied.payload, taskStandardGoodsSn(task, effectiveExecutionContext));
+    const preserveExplicitSupplierSku = task?.notes?.supplierSkuPolicy?.mode === 'unique-per-link';
+    const standardGoodsSnApplied = applyTargetStandardGoodsSn(
+      templateApplied.payload,
+      taskStandardGoodsSn(task, effectiveExecutionContext),
+      {preserveExplicitSupplierSku},
+    );
     const randomSupplyPriceApplied = applyRandomSupplyPrice(standardGoodsSnApplied.payload, task, effectiveExecutionContext, targetStore);
     const explicitPreparationApplied = applyExplicitPublishPreparationOverrides(
       randomSupplyPriceApplied.payload,
@@ -3006,7 +3045,7 @@ async function main() {
     const approvedImageOrderLocked = taskApprovedImageOrderLocked(task);
     const imageShuffleApplied = approvedImageOrderLocked
       ? {payload: explicitPreparationApplied.payload, applied: ['publish_asset_binding.approved_order_locked']}
-      : shufflePublishDetailImages(explicitPreparationApplied.payload, task, effectiveExecutionContext);
+      : shufflePublishDetailImages(explicitPreparationApplied.payload, task, effectiveExecutionContext, targetStore);
     const imageSortApplied = ensurePublishImageSortGlobalUnique(imageShuffleApplied.payload);
     publishPayload = imageSortApplied.payload;
     const targetDuplicateCheck = await inspectTargetDuplicateProducts(client, publishPayload, targetStore, task);
@@ -3059,8 +3098,9 @@ async function main() {
     const expectedHash = expectedPayloadHash;
     const skipPayloadHashLock = Boolean(task?.skipPayloadHashLock || task?.targets?.skipPayloadHashLock || executionContext?.skipPayloadHashLock || executionContext?.targets?.skipPayloadHashLock);
     if (skipPayloadHashLock) {
-      warnings.push('skipPayloadHashLock=true: payload hash lock skipped (randomized payload)');
-    } else if (!expectedHash) {
+      blockers.push('skipPayloadHashLock 已停用；随机供货价和图片顺序已改为任务级确定性结果，必须重新 dry-run 并锁定精确 payload hash。');
+    }
+    if (!expectedHash) {
       blockers.push('真实提交缺少 dry-run 锁定的 payload hash，不能提交未经锁定的发布 payload。');
     } else if (!payloadHash || payloadHash !== expectedHash) {
       blockers.push(`真实提交 payload hash 与 dry-run 锁定值不一致：expected=${expectedHash || 'missing'} actual=${payloadHash || 'missing'}`);
@@ -3234,6 +3274,7 @@ export const __testHooks = {
   applyRandomSupplyPrice,
   applyExplicitPublishPreparationOverrides,
   applyTargetStandardGoodsSn,
+  taskPublishPreparationOverrides,
   resolvePreflightProductLock,
   taskApprovedImageOrderLocked,
   shufflePublishDetailImages,

@@ -5,9 +5,14 @@ import { SpreadsheetFile, Workbook } from '@oai/artifact-tool';
 import { normalizeGoodsSnDetailed } from '../../lib/product_sku_normalizer.mjs';
 import {buildSharedStorageCostIndex, findSharedStorageCost} from '../../lib/marketing_shared_storage_cost.mjs';
 import {
+  assessLatestRawMarketingLinkCoverage,
+  collectLatestRawMarketingLinkRows,
+} from '../../lib/marketing_latest_raw_link_overlay.mjs';
+import {
   buildLinkRowIndexFromBi,
   buildExposureTopLinkIndex,
   exposureTopRowsForCanonical,
+  inferNewListingShelfAgeDays,
   isNewListingOrdinaryMarketingActivity,
   isRecentNewListingLink,
   loadMarketingPricingPolicy,
@@ -33,15 +38,67 @@ const pricingPolicyPath = path.resolve(ROOT, cli.pricingPolicy || path.join('con
 const pricingPolicy = await loadMarketingPricingPolicy(pricingPolicyPath);
 const cloudBiStat = fssync.statSync(cloudBiPath);
 const cloudCostStat = fssync.statSync(cloudCostPath);
-const exposureDataPath = cli.exposureData ? path.resolve(ROOT, cli.exposureData) : '';
+const defaultExposureDataPath = path.resolve(ROOT, 'outputs', 'bi-portal', 'sections', 'linksData.json');
+const exposureDataPath = cli.exposureData
+  ? path.resolve(ROOT, cli.exposureData)
+  : (fssync.existsSync(defaultExposureDataPath) ? defaultExposureDataPath : '');
 const exposureBi = exposureDataPath ? JSON.parse(await fs.readFile(exposureDataPath, 'utf8')) : cloudBi;
 const exposureDataStat = exposureDataPath && fssync.existsSync(exposureDataPath)
   ? fssync.statSync(exposureDataPath)
   : cloudBiStat;
 const signupPricingPolicy = withSignupCliOverrides(pricingPolicy, cli);
-const rawActivityRows = activityDoc.detailRows || [];
-const {doc: exposureBiForRanking, summary: exposureCanonicalBackfill} = enrichExposureBiWithPlanCanonicals(exposureBi, rawActivityRows);
+const requestedActivityIds = new Set(
+  String(cli.activities || '')
+    .split(',')
+    .map(value => Number(value.trim()))
+    .filter(Number.isFinite),
+);
+const rawActivityRows = (activityDoc.detailRows || []).filter(row => (
+  requestedActivityIds.size === 0 || requestedActivityIds.has(Number(row['活动ID'] ?? row.activityId))
+));
+const hasNewListingOrdinaryActivity = rawActivityRows.some(row => isNewListingOrdinaryMarketingActivity(row, signupPricingPolicy));
+const selectedActivityStoreKeys = uniq((activityDoc.selectedStores || [])
+  .map(row => String(typeof row === 'string' ? row : (row?.storeKey || row?.store_key || '')).trim().toUpperCase())
+  .filter(Boolean));
+const activityStoreKeys = selectedActivityStoreKeys.length
+  ? selectedActivityStoreKeys
+  : uniq(rawActivityRows.map(row => String(row['店铺'] || row.storeKey || '').trim().toUpperCase()).filter(Boolean));
+const defaultRawLinkHistoryDir = path.resolve(ROOT, 'outputs', 'shein_links');
+const rawLinkHistoryDir = cli.rawLinkHistoryDir
+  ? path.resolve(ROOT, cli.rawLinkHistoryDir)
+  : (fssync.existsSync(defaultRawLinkHistoryDir) ? defaultRawLinkHistoryDir : '');
+const rawLinkSnapshot = rawLinkHistoryDir
+  ? collectLatestRawMarketingLinkRows({
+      historyDir: rawLinkHistoryDir,
+      reportDate: DATE_TAG,
+      storeKeys: activityStoreKeys,
+      includeOffShelf: true,
+    })
+  : {rows: [], sourceFiles: [], errors: [], storeCount: 0};
+const rawLinkCoverage = rawLinkHistoryDir
+  ? assessLatestRawMarketingLinkCoverage({...rawLinkSnapshot, storeKeys: activityStoreKeys})
+  : {complete: false, expectedStoreCount: activityStoreKeys.length, sourceFileCount: 0, missingStoreKeys: activityStoreKeys, parseErrorCount: 0};
+const {doc: exposureBiWithRawLinks, summary: rawLinkEvidenceOverlay} = mergeRawLinkEvidenceIntoBi(exposureBi, rawLinkSnapshot.rows);
+const {doc: exposureBiForRanking, summary: exposureCanonicalBackfill} = enrichExposureBiWithPlanCanonicals(exposureBiWithRawLinks, rawActivityRows);
 const exposureIndex = buildExposureTopLinkIndex(exposureBiForRanking, signupPricingPolicy);
+const exposureGeneratedAt = String(exposureBi?.generatedAt || exposureBi?.data?.generatedAt || '').trim();
+const exposureGeneratedDate = shanghaiDate(exposureGeneratedAt);
+const exposureFreshness = {
+  generatedAt: exposureGeneratedAt,
+  generatedDate: exposureGeneratedDate,
+  reportDate: DATE_TAG,
+  staleForReportDate: !exposureGeneratedDate || exposureGeneratedDate < DATE_TAG,
+  sourcePath: exposureDataPath ? path.relative(ROOT, exposureDataPath) : path.relative(ROOT, cloudBiPath),
+};
+if (hasNewListingOrdinaryActivity && rawLinkCoverage.complete !== true) {
+  throw new Error(`New-listing ordinary plan requires complete raw link snapshots: ${JSON.stringify(rawLinkCoverage)}`);
+}
+if (hasNewListingOrdinaryActivity && exposureFreshness.staleForReportDate) {
+  throw new Error(`New-listing ordinary plan requires a linksData snapshot generated on or after ${DATE_TAG}: ${JSON.stringify(exposureFreshness)}`);
+}
+if (signupPricingPolicy?.exposureTopLinks?.enabled !== false && exposureIndex.positiveMetricRowCount === 0) {
+  throw new Error('Ordinary marketing plan requires positive exposure metrics; raw link rows without c7/c30 exposure cannot establish the global Top5');
+}
 const exposureLinkIndex = buildLinkRowIndexFromBi(exposureBiForRanking);
 const targetFloorMargin = pctConfigToRatio(cli.targetFloorMarginPct ?? pricingPolicy.targetFloorMarginPct ?? 15);
 const selectionMarginBasis = normalizeSelectionMarginBasis(cli.selectionMarginBasis || 'full_cost_including_storage');
@@ -135,23 +192,33 @@ for (const [sku, group] of bySku.entries()) {
     const skc = String(row['SKC'] || '').trim();
     const link = exposureLinkIndex.byLinkKey.get(exposureLinkKey(storeKey, skc)) || null;
     const newListing = isRecentNewListingLink(link, signupPricingPolicy, DATE_TAG);
+    const shelfAge = inferNewListingShelfAgeDays(link, DATE_TAG);
     const activityMatched = isNewListingOrdinaryMarketingActivity(row, signupPricingPolicy);
     return {
-      applies: Boolean(activityMatched && newListing.applies),
+      ...newListing,
+      shelfAgeDays: newListing.shelfAgeDays ?? shelfAge.value,
+      shelfAgeSource: newListing.shelfAgeSource || shelfAge.source,
+      // An eligible row in a New Arrivals ordinary campaign is already the
+      // platform's first-signup evidence. Do not lose the approved Top5
+      // treatment merely because BI has not yet backfilled the link age.
+      applies: Boolean(activityMatched),
       activityMatched,
       link,
-      ...newListing,
+      reason: activityMatched ? 'new_listing_ordinary_activity' : newListing.reason,
     };
   };
-  const newListingTopTreatmentByLink = new Map(group.map(row => [exposureLinkKey(row['店铺'], row['SKC']), rowNewListingTopTreatmentInfo(row)]));
+  const newListingTreatmentKey = row => `${exposureLinkKey(row['店铺'], row['SKC'])}:${Number(row['活动ID'] || 0)}`;
+  const newListingTopTreatmentByActivityLink = new Map(
+    group.map(row => [newListingTreatmentKey(row), rowNewListingTopTreatmentInfo(row)]),
+  );
   const newListingTopTreatmentRows = uniqBy(
-    group.filter(row => newListingTopTreatmentByLink.get(exposureLinkKey(row['店铺'], row['SKC']))?.applies),
+    group.filter(row => newListingTopTreatmentByActivityLink.get(newListingTreatmentKey(row))?.applies),
     row => exposureLinkKey(row['店铺'], row['SKC']),
   );
   const hasNewListingTopTreatment = newListingTopTreatmentRows.length > 0;
   const rowIsTopExposure = row => {
     const linkKey = exposureLinkKey(row['店铺'], row['SKC']);
-    return topExposureLinkKeys.has(linkKey) || Boolean(newListingTopTreatmentByLink.get(linkKey)?.applies);
+    return topExposureLinkKeys.has(linkKey) || Boolean(newListingTopTreatmentByActivityLink.get(newListingTreatmentKey(row))?.applies);
   };
   const targetMargin = hasFixedPrice ? null : (baselineIsMargin ? baselineRule.otherMargin : (hasExposureRanking ? (exposureTargets?.otherMargin ?? baseTargetMargin) : baseTargetMargin));
   const topExposureMargin = hasFixedPrice
@@ -327,7 +394,6 @@ for (const [sku, group] of bySku.entries()) {
       ? '同货号按目标价执行'
       : '我按店铺平台上限微调；低利润店剔除/单独处理';
 
-  const skuTargetSafetyMargin = targetSafetyMargins.length ? Math.min(...targetSafetyMargins) : null;
   for (const [rowIdx, r] of group.entries()) {
     const strategy = rowStrategies[rowIdx] || {};
     const storeKey = String(r['店铺'] || '').trim().toUpperCase();
@@ -344,7 +410,7 @@ for (const [sku, group] of bySku.entries()) {
     const rowLinkKey = exposureLinkKey(storeKey, skc);
     const actualTopExposureLink = topExposureLinkKeys.has(rowLinkKey);
     const isTopExposureLink = rowIsTopExposure(r);
-    const newListingTopTreatment = newListingTopTreatmentByLink.get(rowLinkKey) || {};
+    const newListingTopTreatment = newListingTopTreatmentByActivityLink.get(newListingTreatmentKey(r)) || {};
     const productCost = r._cloudCost.productUnitCostSar;
     const fullCost = r._cloudCost.fullUnitCostSar;
     const marginAfterStorage = finalTargetPrice !== null && isNum(fullCost) && Number(fullCost) > 0 && finalTargetPrice > 0
@@ -366,7 +432,6 @@ for (const [sku, group] of bySku.entries()) {
     if (rowIntendedFinal === null) excludeReasons.push('missing_target_final_price');
     if (targetPrice === null || finalTargetPrice === null) excludeReasons.push('missing_row_target_price');
     const baselineAllowsBelowFloor = Boolean(baselineRule?.allowBelowFloor || baselineRule?.allowBelowFloorLinkKeys?.has(exposureLinkKey(storeKey, skc)));
-    if (!baselineAllowsBelowFloor && skuTargetSafetyMargin !== null && skuTargetSafetyMargin < targetFloorMargin - 1e-9) excludeReasons.push(`sku_target_${selectionMarginBasis}_margin_below_floor`);
     if (!baselineAllowsBelowFloor && marginForSelection !== null && marginForSelection < targetFloorMargin - 1e-9) excludeReasons.push(`row_${selectionMarginBasis}_margin_below_floor`);
     if (marginForSelection === null && !missingCost && !(storageRequiredForSelection && storageMissing)) excludeReasons.push(`missing_row_${selectionMarginBasis}_margin`);
     executionRows.push({
@@ -411,7 +476,11 @@ for (const [sku, group] of bySku.entries()) {
           ? `平台最低降幅上限 ${fmt(platformCap)} SAR 低于策略价 ${fmt(uncappedActivityPrice)} SAR`
           : '',
         actualTopExposureLink ? `命中本标准货号${exposureRankMetricText || '曝光'}全局前五` : '',
-        newListingTopTreatment.applies ? `新上架${newListingTopTreatment.shelfAgeDays}天且首次报新品活动，按曝光前五力度` : '',
+        newListingTopTreatment.applies
+          ? (newListingTopTreatment.shelfAgeDays === null || newListingTopTreatment.shelfAgeDays === undefined
+              ? '首次报新品活动，按曝光前五力度'
+              : `新上架${newListingTopTreatment.shelfAgeDays}天且首次报新品活动，按曝光前五力度`)
+          : '',
         baselineRule ? `继承上期最终版策略：${baselineRule.summary}` : '',
         strategy.priceJitteredFrom !== null ? `整数报价 ${fmt(strategy.priceJitteredFrom)} SAR 已按店铺/SKC稳定微调为 ${fmt(targetPrice)} SAR` : '',
         baselineAllowsBelowFloor && marginForSelection !== null && marginForSelection < targetFloorMargin - 1e-9 ? `继承上期确认：低于${round2(targetFloorMargin * 100)}%红线也允许按平台/清货价报名` : '',
@@ -551,7 +620,13 @@ const sourceSummary = {
     exposureTopN: signupPricingPolicy.exposureTopLinks?.topN || 5,
     exposureMetricFields: signupPricingPolicy.exposureTopLinks?.metricFields || [],
     exposureSourceRows: exposureIndex.rowCount,
+    exposurePositiveMetricRows: exposureIndex.positiveMetricRowCount,
+    exposureRankedRows: exposureIndex.rankedRowCount,
+    exposureFreshness,
     exposureCanonicalBackfill,
+    rawLinkHistoryDir: rawLinkHistoryDir ? path.relative(ROOT, rawLinkHistoryDir) : '',
+    rawLinkCoverage,
+    rawLinkEvidenceOverlay,
     selectionMarginBasis,
     selectionMarginRule: `${marginBasisText(selectionMarginBasis)} >= ${round2(targetFloorMargin * 100)}% 才进入自动 allowlist`,
     exposureMetricTierCounts: countMapValues(exposureIndex.metricLabelByGroup),
@@ -595,7 +670,9 @@ const activitySummaryRows = uniq(rawRows.map(r => Number(r['活动ID'] || 0)).fi
       `${costCovered}/${plannedRows.length}`,
       storageCovered === plannedRows.length ? `${storageCovered}/${plannedRows.length}` : `缺 ${plannedRows.length - storageCovered}/${plannedRows.length}`,
       plannedRows.length === sourceRows.length ? '全量进入待确认方案' : `剔除 ${sourceRows.length - plannedRows.length} 行`,
-      '未提交；普通活动须等你确认。仓储费仅作展示，自动兜底成本边界按不含仓储商品成本判断。',
+      selectionMarginBasis === 'full_cost_including_storage'
+        ? `未提交；普通活动须等你确认。本轮普通活动按含仓储成本利润率不低于 ${round2(targetFloorMargin * 100)}% 筛选；自动限时折扣兜底另按不含仓储商品成本边界。`
+        : `未提交；普通活动须等你确认。本轮筛选按不含仓储商品成本利润率不低于 ${round2(targetFloorMargin * 100)}%；仓储费与含仓储利润率仍完整展示。`,
     ];
   });
 const activitySummarySheet = workbook.worksheets.add('活动汇总');
@@ -753,9 +830,12 @@ riskSheet.tables.add(`A1:${colName(riskHeaders.length)}${riskRows.length + 1}`, 
 
 const couponSheet = workbook.worksheets.add('15%券流量试验计划');
 couponSheet.showGridLines = false;
+const couponActivityScope = uniq(executionRows.map(row => row.activityId))
+  .sort((a, b) => Number(a) - Number(b))
+  .join(' / ');
 const couponPlanRows = [
   ['状态','适用活动','本轮动作','定价边界','说明','备注/修改意见'],
-  ['无已批准目标','48732 / 48733 / 49565','不提交优惠券，也不把券当保底层','普通活动目标价不依赖优惠券触发','后续若单独批准15%小流量试验，再按指定店铺/SKC另建计划；30%/50%券禁止。',''],
+  ['无已批准目标',couponActivityScope,'不提交优惠券，也不把券当保底层','普通活动目标价不依赖优惠券触发','后续若单独批准15%小流量试验，再按指定店铺/SKC另建计划；30%/50%券禁止。',''],
 ];
 couponSheet.getRangeByIndexes(0, 0, couponPlanRows.length, couponPlanRows[0].length).values = couponPlanRows;
 couponSheet.getRange('A1:F1').format = {fill: '#595959', font: {bold: true, color: '#FFFFFF'}, wrapText: true};
@@ -1105,6 +1185,83 @@ function enrichExposureBiWithPlanCanonicals(bi, activityRows) {
     },
     summary,
   };
+}
+function mergeRawLinkEvidenceIntoBi(bi, rawRows) {
+  const data = bi?.data && typeof bi.data === 'object' ? bi.data : bi;
+  const rawByKey = new Map();
+  for (const row of rawRows || []) {
+    const key = exposureLinkKey(row?.store_key || row?.storeKey, row?.skc);
+    if (key) rawByKey.set(key, row);
+  }
+  const seen = new Set();
+  let enrichedExistingRows = 0;
+  const enrichRow = row => {
+    const key = exposureLinkKey(row?.store_key || row?.storeKey || row?.store, row?.skc);
+    if (!key) return row;
+    seen.add(key);
+    const raw = rawByKey.get(key);
+    if (!raw) return row;
+    const merged = {...row};
+    let changed = false;
+    for (const field of [
+      'standard_goods_sn',
+      'raw_goods_sn',
+      'first_shelf_time',
+      'created_time',
+      'link_date',
+      'is_on_shelf',
+      'shelf_status_name',
+    ]) {
+      if ((merged[field] === null || merged[field] === undefined || merged[field] === '') && raw[field] !== null && raw[field] !== undefined && raw[field] !== '') {
+        merged[field] = raw[field];
+        changed = true;
+      }
+    }
+    if (changed) {
+      merged.rawLinkEvidenceBackfilled = true;
+      enrichedExistingRows += 1;
+    }
+    return merged;
+  };
+  const storeLinks = Array.isArray(data?.storeLinks) ? data.storeLinks.map(enrichRow) : [];
+  const links = Array.isArray(data?.links) ? data.links.map(enrichRow) : [];
+  const appendedRows = [];
+  for (const [key, row] of rawByKey.entries()) {
+    if (seen.has(key)) continue;
+    appendedRows.push({...row, rawLinkEvidenceAppended: true});
+    seen.add(key);
+  }
+  const mergedData = {
+    ...(data || {}),
+    storeLinks: [...storeLinks, ...appendedRows],
+    links,
+  };
+  return {
+    doc: bi?.data && typeof bi.data === 'object' ? {...bi, data: mergedData} : mergedData,
+    summary: {
+      rawRows: rawByKey.size,
+      enrichedExistingRows,
+      appendedRows: appendedRows.length,
+      preservedBiMetrics: true,
+    },
+  };
+}
+function shanghaiDate(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const parsed = new Date(text);
+  if (!Number.isFinite(parsed.getTime())) {
+    const match = text.match(/^(20\d{2})[-/](\d{1,2})[-/](\d{1,2})/);
+    return match ? `${match[1]}-${String(match[2]).padStart(2, '0')}-${String(match[3]).padStart(2, '0')}` : '';
+  }
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(parsed);
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
 }
 function parseList(value) {
   if (value === null || value === undefined || value === '') return [];
@@ -1592,6 +1749,7 @@ function parseArgs(argv) {
   const allowedKeys = new Set([
     'baselinePriceOverrides',
     'baselineUserRemarks',
+    'activities',
     'bi',
     'cost',
     'date',
@@ -1600,6 +1758,7 @@ function parseArgs(argv) {
     'exposureData',
     'outputDir',
     'pricingPolicy',
+    'rawLinkHistoryDir',
     'report',
     'selectionMarginBasis',
     'targetFloorMarginPct',

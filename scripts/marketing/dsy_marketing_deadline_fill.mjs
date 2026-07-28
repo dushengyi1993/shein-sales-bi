@@ -25,6 +25,10 @@ import {
   assertOrdinaryCampaignApprovedSubset,
   loadOrdinaryCampaignApproval,
 } from '../../lib/marketing_ordinary_campaign_approval.mjs';
+import {
+  buildOrdinaryPlatformPriceAdjustmentAudit,
+  isOrdinaryPlatformTierRewriteAccepted,
+} from '../../lib/marketing_ordinary_platform_price_policy.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
@@ -226,7 +230,7 @@ function numValue(v) {
   return Number.isFinite(n) ? n : null;
 }
 
-function platformAdjustedCouponBlocker(rule, target, platformAdjusted) {
+function platformAdjustedCouponRisk(rule, target, platformAdjusted) {
   if (!platformAdjusted || !rule) return null;
   const couponFactor = numValue(rule.couponFactor);
   const finalTargetPrice = numValue(rule.finalTargetPrice ?? rule.intendedFinalTargetPrice);
@@ -235,8 +239,9 @@ function platformAdjustedCouponBlocker(rule, target, platformAdjusted) {
   const projectedFinalPrice = round2(Number(target) * couponFactor);
   if (projectedFinalPrice < finalTargetPrice - COUPON_FINAL_PRICE_TOLERANCE_SAR) {
     return {
-      priceStackBlocker: true,
-      reason: '平台最低降幅改价后叠15%券会低于目标价，已阻断提交',
+      couponStackRisk: true,
+      couponStackRiskType: 'platform_minimum_tier_coupon_final_below_target',
+      couponStackRiskReason: '普通活动按平台最低档报名后，若再叠加计划券，预计成交价会低于原目标价；普通活动继续报名并单列风险',
       couponFactor,
       finalTargetPrice,
       projectedFinalPrice,
@@ -1374,10 +1379,15 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
     const directSingletonSelected = allowSet?.size === 1
       && selected.selectedCount === 1
       && seenAllowed.has([...allowSet][0]);
+    const exactBatchFilteredSelection = Boolean(
+      allowlistBatchFilter?.matched
+      && allowlistBatchFilter?.totalAfterFilter === expectedSelectedCount
+      && selected.selectedCount === expectedSelectedCount
+    );
     const selectedMatchesPlan = allowSet
       ? missingAllowedSkcs.length === 0
         && selected.selectedCount === expectedSelectedCount
-        && (outOfPlanRows.length === 0 || directSingletonSelected)
+        && (outOfPlanRows.length === 0 || directSingletonSelected || exactBatchFilteredSelection)
       : true;
     const debug = {
       trCount: document.querySelectorAll('tr').length,
@@ -1417,7 +1427,9 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
       selectedClicks,
       clickedNext: Boolean(canNext),
       selectionMode: allowSet ? 'allowlist' : 'all',
-      selectionEvidenceMode: fullAllowlistHeaderConfirmed ? 'plan_count_visible_membership_header_count' : 'row_membership',
+      selectionEvidenceMode: fullAllowlistHeaderConfirmed
+        ? 'plan_count_visible_membership_header_count'
+        : (exactBatchFilteredSelection ? 'exact_batch_filter_and_selected_count' : 'row_membership'),
       expectedSelectedCount,
       matchedAllowedCount: allowSet ? (fullAllowlistHeaderConfirmed ? allowSet.size : seenAllowed.size) : null,
       missingAllowedSkcs,
@@ -1507,29 +1519,12 @@ function computeTarget(storeKey, activityId, row) {
     const projectedMargin = cost && target > 0 ? (target - cost) / target : null;
     const floorBreached = marginFloor !== null && projectedMargin !== null && projectedMargin < marginFloor;
     const discountPct = discountPctForTarget(current, minDiscount, target);
-    const priceStackBlocker = platformAdjustedCouponBlocker(override, target, platformAdjusted);
-    if (priceStackBlocker) {
-      return {
-        ok: false,
-        supplierNo: supplier,
-        canonical,
-        source: override.rule || 'price_override',
-        ruleType: 'price_override',
-        basePrice: targetBase,
-        randomOffset: 0,
-        marginTarget: null,
-        marginUsed: projectedMargin === null ? null : round2(projectedMargin * 100),
-        currentPrice: current,
-        targetPrice: target,
-        targetPriceText: target.toFixed(2),
-        discountPct,
-        minDiscount,
-        platformAdjusted,
-        minMarginFloor: marginFloor === null ? null : round2(marginFloor * 100),
-        floorBreached,
-        ...priceStackBlocker,
-      };
-    }
+    const platformAdjustmentAudit = buildOrdinaryPlatformPriceAdjustmentAudit({
+      rule: override,
+      adjustedTarget: target,
+      platformAdjusted,
+    });
+    const couponStackRisk = platformAdjustedCouponRisk(override, target, platformAdjusted);
     return {
       ok: true,
       supplierNo: supplier,
@@ -1548,6 +1543,8 @@ function computeTarget(storeKey, activityId, row) {
       platformAdjusted,
       minMarginFloor: marginFloor === null ? null : round2(marginFloor * 100),
       floorBreached,
+      ...platformAdjustmentAudit,
+      ...couponStackRisk,
     };
   }
   let source = '30pct_profit';
@@ -2003,15 +2000,26 @@ async function fillEditPage(cdp, sessionId, storeKey, activityId, allowSkcs = nu
       const variantExpectedByDiscount = floor2(variantCurrentPrice * (1 - expectedVariantDiscount / 100));
       const discountOk = variant.discount === String(expectedVariantDiscount);
       const exactTarget = discountOk && variant.price === t.targetPriceText;
-      const platformRewrite = discountOk
-        && Number.isFinite(actual)
-        && actual + 0.001 >= Number(t.targetPriceText)
-        && Math.abs(actual - variantExpectedByDiscount) <= 0.06;
+      const platformRewrite = isOrdinaryPlatformTierRewriteAccepted({
+        actualPrice: actual,
+        platformExpectedPrice: variantExpectedByDiscount,
+        discountMatches: discountOk,
+      });
       return {variant, actual, expectedVariantDiscount, variantExpectedByDiscount, exactTarget, platformRewrite, ok: exactTarget || platformRewrite};
     });
     const acceptableVariantPrices = variantPriceChecks.length && variantPriceChecks.every(check => check.ok);
     if (acceptableVariantPrices && variantPriceChecks.some(check => check.platformRewrite && !check.exactTarget)) {
-      platformRewrites.push({idx: t.idx, key, expectedPrice: t.targetPriceText, actualPrice: r.price, discount: String(t.discountPct), supplierNo: t.supplierNo, skc: t.skc});
+      platformRewrites.push({
+        idx: t.idx,
+        key,
+        expectedPrice: t.targetPriceText,
+        actualPrice: r.price,
+        discount: String(t.discountPct),
+        supplierNo: t.supplierNo,
+        skc: t.skc,
+        direction: Number(r.price) < Number(t.targetPriceText) ? 'below_approved_target' : 'at_or_above_approved_target',
+        policy: 'submit_platform_minimum_tier_and_audit',
+      });
       continue;
     }
     if (acceptableVariantPrices) continue;
@@ -2019,7 +2027,18 @@ async function fillEditPage(cdp, sessionId, storeKey, activityId, allowSkcs = nu
       const actualPrice = String(fillEvidence.actualPrice || '');
       const actualDiscount = String(fillEvidence.actualDiscount || '');
       if (actualPrice === expectedByDiscount && actualDiscount === String(t.discountPct) && actualPrice !== t.targetPriceText) {
-        platformRewrites.push({idx: t.idx, key, expectedPrice: t.targetPriceText, actualPrice, discount: String(t.discountPct), supplierNo: t.supplierNo, skc: t.skc, source: 'immediate_fill_readback'});
+        platformRewrites.push({
+          idx: t.idx,
+          key,
+          expectedPrice: t.targetPriceText,
+          actualPrice,
+          discount: String(t.discountPct),
+          supplierNo: t.supplierNo,
+          skc: t.skc,
+          source: 'immediate_fill_readback',
+          direction: Number(actualPrice) < Number(t.targetPriceText) ? 'below_approved_target' : 'at_or_above_approved_target',
+          policy: 'submit_platform_minimum_tier_and_audit',
+        });
         continue;
       }
       if (actualPrice === t.targetPriceText && actualDiscount === String(t.discountPct)) continue;
@@ -2217,14 +2236,35 @@ async function processActivity(cdp, store, activity) {
   if (loginRecovery.needed && !loginRecovery.ok) {
     return {ok: false, store: store.storeKey, activity, targetId, loginRecovery, reason: '活动页登录恢复失败'};
   }
-  const loadedState = loginRecovery.needed ? await waitForActivityOrLogin(cdp, sessionId, 35_000) : firstState;
+  let loadedState = loginRecovery.needed ? await waitForActivityOrLogin(cdp, sessionId, 35_000) : firstState;
+  const forceRefreshRecovery = {needed: !loadedState.activityReady, ok: Boolean(loadedState.activityReady), attempts: []};
+  for (let attempt = 1; !loadedState.activityReady && attempt <= 3; attempt += 1) {
+    await cdp.call('Page.reload', {ignoreCache: true}, sessionId).catch(() => (
+      evalJs(cdp, sessionId, `location.reload(); return {href: location.href};`).catch(() => null)
+    ));
+    await sleep(2500 * attempt);
+    loadedState = await waitForActivityOrLogin(cdp, sessionId, 35_000);
+    if (loadedState.loginReady) {
+      const refreshLoginRecovery = await recoverLoginIfNeeded(cdp, sessionId);
+      if (refreshLoginRecovery.needed && refreshLoginRecovery.ok) {
+        loadedState = await waitForActivityOrLogin(cdp, sessionId, 35_000);
+      }
+      forceRefreshRecovery.attempts.push({attempt, state: loadedState, loginRecovery: refreshLoginRecovery});
+    } else {
+      forceRefreshRecovery.attempts.push({attempt, state: loadedState});
+    }
+    if (loadedState.activityReady) {
+      forceRefreshRecovery.ok = true;
+      break;
+    }
+  }
   const loaded = Boolean(loadedState.activityReady);
   if (!loaded) {
     const pageState = await evalJs(cdp, sessionId, `
       const text = document.body?.innerText || '';
       return {href: location.href, title: document.title || '', head: text.slice(0, 800), tail: text.slice(-800)};
     `).catch(err => ({error: err.message}));
-    return {ok: false, store: store.storeKey, activity, targetId, firstState, renderRecovery, loginRecovery, loadedState, pageState, reason: '活动页面未加载'};
+    return {ok: false, store: store.storeKey, activity, targetId, firstState, renderRecovery, loginRecovery, forceRefreshRecovery, loadedState, pageState, reason: '活动页面未加载'};
   }
 
   const selection = await selectAllGoodsAndNext(cdp, sessionId, allowSkcs);

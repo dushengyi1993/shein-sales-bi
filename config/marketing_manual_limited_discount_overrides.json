@@ -1,7 +1,7 @@
 {
   "version": 1,
   "description": "Persistent source of truth for user-approved manual special limited discounts. Activity names are hints only; storeKey+skc and the active time window control automation protection.",
-  "updatedAt": "2026-07-26T07:45:26.425Z",
+  "updatedAt": "2026-07-28T02:52:13.310Z",
   "entries": [
     {
       "storeKey": "DX",
@@ -446,6 +446,24 @@
       "registeredAt": "2026-07-26 15:30:10",
       "lastReadbackAt": "2026-07-26 15:45:26",
       "lastReadbackArtifact": "tmp/marketing-signup/limited-discount-rescue/limited-discount-transaction-execute-NM-ac777454b8a90a7d0bd90b66.json"
+    },
+    {
+      "storeKey": "YJ",
+      "skc": "sv260207141736688412778",
+      "canonical": "SK-04031胶囊咖啡机",
+      "specialPrice": 228.71,
+      "validFrom": "2026-07-28 10:31:52",
+      "validTo": "2026-08-04 23:59:59",
+      "activityStock": 10,
+      "reason": "automated_high_click_zero_sales_top5_minus_2_margin_points",
+      "sourceThreadId": "automation:shein-2",
+      "sourceArtifact": "outputs/reports/high-click-special-plans/2026-07-28/high-click-special-9ec59709ada0c54106573314ce2fbcefeb3c1c3d43543edfc0e42b182ea5bd36.json",
+      "originalActivityId": null,
+      "currentActivityId": 83051550,
+      "status": "active",
+      "registeredAt": "2026-07-28 10:50:01",
+      "lastReadbackAt": "2026-07-28 10:52:13",
+      "lastReadbackArtifact": "tmp/marketing-signup/limited-discount-rescue/limited-discount-transaction-execute-YJ-09f107ce5e376038ec8b6b9d.json"
     }
   ]
 }

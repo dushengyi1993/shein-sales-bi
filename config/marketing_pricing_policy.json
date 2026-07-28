@@ -1,6 +1,6 @@
 {
   "description": "Machine-readable long-term pricing policy for SHEIN ordinary marketing signup, coupon pairing, and limited-discount fallback. This file contains no credentials.",
-  "updatedAt": "2026-07-16",
+  "updatedAt": "2026-07-27",
   "targetFloorMarginPct": 15,
   "automationExecution": {
     "enabled": true,
@@ -48,6 +48,8 @@
     "trafficSupportPriority": "must_signup_when_eligible",
     "minimumDiscountSource": "activity_page_or_api_dynamic_5_10_vip",
     "vipTierMandatory": true,
+    "platformForcedBelowApprovedTargetAction": "submit_platform_minimum_tier_and_audit",
+    "platformForcedBelowApprovedTargetRequiresReapproval": false,
     "platformForcedBelowTargetStatus": "below_target_due_to_platform_forced_discount",
     "knownOrdinaryPriceEvidenceIsPartOfPriceStack": true
   },

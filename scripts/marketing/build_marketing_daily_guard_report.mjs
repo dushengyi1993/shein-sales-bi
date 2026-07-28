@@ -33,6 +33,11 @@ import {
   loadKnownOrdinaryPriceEvidence,
   stackRowsHaveExistingOrdinaryMarketingLabel,
 } from '../../lib/marketing_ordinary_price_evidence.mjs';
+import {
+  buildOrdinaryPlatformTierEvidenceIndex,
+  findActiveOrdinaryPlatformTier,
+  loadOrdinaryPlatformTierRegistry,
+} from '../../lib/marketing_ordinary_platform_tier_evidence.mjs';
 import {summarizeStackReviewCoverage} from '../../lib/marketing_stack_review_coverage.mjs';
 import {
   DEFAULT_MARKETING_PRICING_POLICY,
@@ -64,6 +69,11 @@ import {
   buildHighClickSpecialEffectAudit,
   getHighClickSpecialPolicy,
 } from '../../lib/marketing_high_click_special_policy.mjs';
+import {
+  DRIFT_FIX_RESULT_FILE_PATTERN,
+  isDriftFixResultEligibleForReport,
+} from '../../lib/marketing_order_mitigation_history.mjs';
+import {normalizeLimitedRepairResult} from '../../lib/marketing_limited_repair_status.mjs';
 
 import {resolveCurrentMarketingPlanPair} from '../../lib/marketing_plan_selector.mjs';
 function readJsonSafe(file) {
@@ -2844,9 +2854,9 @@ function loadOrderPriceMitigationEvidence(reportDate) {
     DEFAULT_OUT_DIR,
     path.join(MARKETING_SIGNUP_DIR, 'limited-discount-rescue'),
   ];
-  const driftResultPattern = new RegExp(`^batch-drift-fix-result-${reportDate}(?:-.*)?\\.json$`, 'i');
   for (const dir of driftResultDirs) {
-    for (const file of listFiles(dir, driftResultPattern)) {
+    for (const file of listFiles(dir, DRIFT_FIX_RESULT_FILE_PATTERN)) {
+      if (!isDriftFixResultEligibleForReport(path.basename(file), reportDate)) continue;
       const doc = readJsonSafe(file);
       if (!doc) continue;
       evidenceFiles.push(rel(file));
@@ -2899,7 +2909,7 @@ function loadOrderPriceMitigationEvidence(reportDate) {
   };
 }
 
-function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOverridesSourcePath, activityWindowEvidence, orderMitigationEvidence, manualLimitedDiscountRegistry, now, maxAgeHours, linksDataDoc = null, linksDataSourcePath = ''}) {
+function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOverridesSourcePath, activityWindowEvidence, orderMitigationEvidence, manualLimitedDiscountRegistry, ordinaryPlatformTierIndex, now, maxAgeHours, linksDataDoc = null, linksDataSourcePath = ''}) {
   const plan = buildOrderTargetPlanIndex(priceOverridesDoc, priceOverridesSourcePath, activityWindowEvidence, linksDataDoc, linksDataSourcePath);
   const statusCounts = {};
   const byStore = {};
@@ -3040,6 +3050,8 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
       let planRow = null;
       let selectedPlan = {planRow: null, status: '', duplicateResolution: ''};
       let planWindowStatus = '';
+      let expectedPriceSource = 'ordinary_marketing_plan';
+      let platformTierEntry = null;
       const orderTime = orderLineTime(raw);
       let manualSpecialEntry = null;
       if (!storeKey || !skc) {
@@ -3055,7 +3067,21 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
         selectedPlan = selectOrderPlanRow(planCandidates, orderTime);
         planRow = selectedPlan.planRow || plan.bySkc.get(planKey) || null;
         planWindowStatus = selectedPlan.status || '';
+        platformTierEntry = findActiveOrdinaryPlatformTier(ordinaryPlatformTierIndex, {
+          storeKey,
+          skc,
+          activityId: planRow?.activityId,
+          at: orderTime || now,
+        });
+        if (
+          platformTierEntry
+          && planRow?.finalTargetPrice !== null
+          && platformTierEntry.platformTierPrice >= Number(planRow.finalTargetPrice) - 0.01
+        ) {
+          platformTierEntry = null;
+        }
         if (manualSpecialEntry) {
+          expectedPriceSource = 'manual_special_limited_discount_override';
           if (price === null) {
             status = 'missing_currency_price';
             reason = '命中人工特殊限时折扣窗口，但订单商品行缺 currencyPrice';
@@ -3107,11 +3133,14 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
           reason = `命中目标价计划，但 number=${quantity}，不能确认 currencyPrice 是否单件成交价`;
         } else {
           matchedPlanRows += 1;
-          finalTargetPrice = planRow.finalTargetPrice;
+          finalTargetPrice = platformTierEntry?.platformTierPrice ?? planRow.finalTargetPrice;
+          if (platformTierEntry) expectedPriceSource = 'ordinary_platform_forced_minimum_tier';
           deltaSar = Math.round((price - finalTargetPrice) * 100) / 100;
           if (deltaSar < -ORDER_PRICE_TOLERANCE_SAR) {
             status = 'below_target';
-            reason = '订单商品行成交价低于 finalTargetPrice';
+            reason = platformTierEntry
+              ? '订单商品行成交价低于平台强制最低档'
+              : '订单商品行成交价低于 finalTargetPrice';
             const mitigation = orderMitigationEvidence?.mitigatedBySkc?.get(`${storeKey}::${skc}`) || null;
             const orderAtMs = parseAnyDateTime(orderTime)?.getTime() ?? null;
             if (mitigation?.mitigatedAtMs !== null && mitigation?.mitigatedAtMs !== undefined && orderAtMs !== null && orderAtMs <= mitigation.mitigatedAtMs) {
@@ -3120,7 +3149,11 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
             }
           } else if (deltaSar > ORDER_PRICE_TOLERANCE_SAR) {
             status = 'above_target';
-            reason = '订单商品行成交价高于 finalTargetPrice';
+            reason = platformTierEntry
+              ? '订单商品行成交价高于平台强制最低档'
+              : '订单商品行成交价高于 finalTargetPrice';
+          } else if (platformTierEntry) {
+            reason = '订单商品行成交价命中用户已授权的平台强制最低档';
           }
         }
       }
@@ -3146,7 +3179,13 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
         currencyCode,
         finalTargetPrice,
         ordinaryPlanFinalTargetPrice: planRow?.finalTargetPrice ?? null,
-        expectedPriceSource: manualSpecialEntry ? 'manual_special_limited_discount_override' : 'ordinary_marketing_plan',
+        expectedPriceSource,
+        platformTierPrice: platformTierEntry?.platformTierPrice ?? null,
+        platformTierApprovedTargetPrice: platformTierEntry?.approvedTargetPrice ?? null,
+        platformTierActivityId: platformTierEntry?.activityId ?? null,
+        platformTierValidFrom: platformTierEntry?.validFrom || '',
+        platformTierValidTo: platformTierEntry?.validTo || '',
+        platformTierEvidenceSource: platformTierEntry?.sourcePath || '',
         manualSpecialPrice: manualSpecialEntry?.specialPrice ?? null,
         manualSpecialValidFrom: manualSpecialEntry?.validFrom || '',
         manualSpecialValidTo: manualSpecialEntry?.validTo || '',
@@ -3590,13 +3629,16 @@ function summarizeMandatoryLimitedDiscountStatus({liveScanSource, gapResultSourc
   const couponOnlyRows = liveRows.filter(row => String(row.marketing_price_evidence_type || '') === 'current_coupon_only_live_scan').length;
 
   const gapDoc = gapResultSource?.data || {};
-  const executedCount = Number(gapDoc.executedCount || 0);
-  const blockedCount = Number(gapDoc.blockedCount || 0);
-  const initialGap = Number(gapDoc.initialGap || 0);
-  const remainingGapByAfterScan = Number(gapDoc.remainingGapByAfterScan || gapDoc.remaining?.length || 0);
-  const byStoreExec = gapDoc.byStoreExec && typeof gapDoc.byStoreExec === 'object' ? gapDoc.byStoreExec : {};
-  const byStoreBlocked = gapDoc.byStoreBlocked && typeof gapDoc.byStoreBlocked === 'object' ? gapDoc.byStoreBlocked : {};
-  const reasonSummary = gapDoc.reasonSummary && typeof gapDoc.reasonSummary === 'object' ? gapDoc.reasonSummary : {};
+  const repair = normalizeLimitedRepairResult(gapDoc);
+  const {
+    executedCount,
+    blockedCount,
+    initialGap,
+    remainingGapByAfterScan,
+    byStoreExec,
+    byStoreBlocked,
+    reasonSummary,
+  } = repair;
   const fallbackTotal = Number(fallbackGaps?.total || 0);
   const fallbackByStore = fallbackGaps?.byStore || {};
   const fallbackByBucket = fallbackGaps?.byBucket || {};
@@ -3638,12 +3680,12 @@ function summarizeMandatoryLimitedDiscountStatus({liveScanSource, gapResultSourc
       executedCount,
       blockedCount,
       remainingGapByAfterScan,
-      afterLimitedRows: Number(gapDoc.afterLimitedRows || 0),
+      afterLimitedRows: repair.afterLimitedRows,
       byStoreExec,
       byStoreBlocked,
       reasonSummary,
-      executedSamples: Array.isArray(gapDoc.executed) ? gapDoc.executed.slice(0, 10) : [],
-      blockedSamples: Array.isArray(gapDoc.blocked) ? gapDoc.blocked.slice(0, 10) : [],
+      executedSamples: repair.executedSamples,
+      blockedSamples: repair.blockedSamples,
     },
     remainingLegacyFallback: {
       total: fallbackTotal,
@@ -4057,6 +4099,7 @@ async function main() {
   const biPortalLinksData = await read('biPortalLinksData', args.biPortalLinksData);
   const marketingPricingPolicy = await loadMarketingPricingPolicy(MARKETING_PRICING_POLICY_DEFAULT);
   const manualLimitedDiscountRegistry = await loadManualLimitedDiscountRegistry();
+  const ordinaryPlatformTierRegistry = await loadOrdinaryPlatformTierRegistry({root: ROOT});
   const targetPlan = await read('targetSelectionPlan', args.targetPlan);
   const priceOverrides = await read('priceOverridesPlan', args.priceOverrides);
   const storesConfig = await read('storesConfig', args.storesConfig);
@@ -4086,7 +4129,7 @@ async function main() {
   );
   const mandatoryLimitedGapFinalSource = await readSource(
     'mandatoryLimitedGapFinalResult',
-    latestReportFile(/^mandatory-limited-gap-final-result-.*\.json$/),
+    latestReportFile(/^(?:mandatory-limited-gap-final-result-.*|new-listing-7d-limited-discount-execution-summary-\d{4}-\d{2}-\d{2}(?:-.*)?)\.json$/),
     now,
     args.maxAgeHours,
   );
@@ -4143,10 +4186,11 @@ async function main() {
     couponEligibilityPlanError = err.message;
   }
   const ordinaryEvidenceByStore = new Map();
-  if (couponEligibilityPlan && knownOrdinaryEvidenceSource.exists) {
+  if (knownOrdinaryEvidenceSource.exists) {
     const evidenceStoreKeys = [...new Set([
-      ...mapKeys(couponEligibilityPlan.rowsByStore),
-      ...mapKeys(couponEligibilityPlan.allowed15ByStore || couponEligibilityPlan.byStore),
+      ...enabledStoreKeysFromConfig(storesConfig.data),
+      ...mapKeys(couponEligibilityPlan?.rowsByStore),
+      ...mapKeys(couponEligibilityPlan?.allowed15ByStore || couponEligibilityPlan?.byStore),
     ])].sort();
     for (const storeKey of evidenceStoreKeys) {
       const evidence = await loadKnownOrdinaryPriceEvidence({root: ROOT, storeKey});
@@ -4160,6 +4204,10 @@ async function main() {
     knownOrdinaryEvidenceSource.parseErrorCount = [...ordinaryEvidenceByStore.values()].reduce((n, e) => n + Number(e.parseErrorCount || 0), 0);
     if (knownOrdinaryEvidenceSource.parseErrorCount > 0) knownOrdinaryEvidenceSource.status = 'parse_error';
   }
+  const ordinaryPlatformTierIndex = buildOrdinaryPlatformTierEvidenceIndex({
+    registry: ordinaryPlatformTierRegistry,
+    ordinaryEvidenceByStore,
+  });
   const knownOrdinaryCancelMitigation = await loadKnownOrdinaryCancelMitigation(args.date);
   const orderPriceMitigationEvidence = loadOrderPriceMitigationEvidence(args.date);
   const activityWindowEvidence = loadActivityWindowEvidence(targetPlan.data, priceOverrides.data, biPortalLinksData.data);
@@ -4223,6 +4271,7 @@ async function main() {
     activityWindowEvidence,
     orderMitigationEvidence: orderPriceMitigationEvidence,
     manualLimitedDiscountRegistry,
+    ordinaryPlatformTierIndex,
     now,
     maxAgeHours: args.maxAgeHours,
     linksDataDoc: biPortalLinksData.source.status === 'ok' ? biPortalLinksData.data : null,

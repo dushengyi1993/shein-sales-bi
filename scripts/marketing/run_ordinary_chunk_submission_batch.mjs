@@ -22,7 +22,7 @@ function rowKey(row) {
 function parseArgs(argv) {
   const args = {
     stores: [], activities: [], selection: '', prices: '', approvalManifest: '', outDir: '',
-    excludeTargets: [], resumeDirs: [], chunkSize: 20, concurrency: 3,
+    excludeTargets: [], resumeDirs: [], chunkSize: 20, concurrency: 3, visible: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const key = argv[i];
@@ -36,6 +36,7 @@ function parseArgs(argv) {
     else if (key === '--resume-from') args.resumeDirs = split(argv[++i]).map(dir => path.resolve(dir));
     else if (key === '--chunk-size') args.chunkSize = Number(argv[++i] || 20);
     else if (key === '--concurrency') args.concurrency = Number(argv[++i] || 3);
+    else if (key === '--visible') args.visible = true;
     else throw new Error(`Unknown argument: ${key}`);
   }
   if (!args.stores.length || !args.activities.length || !args.selection || !args.prices || !args.approvalManifest || !args.outDir) {
@@ -205,7 +206,7 @@ async function worker() {
         '--price-overrides', priceFile,
         '--approval-manifest', approval.manifestPath,
         '--execution-work-fingerprint', approval.workFingerprint,
-        '--headless',
+        ...(args.visible ? [] : ['--headless']),
         ...runtimePort,
       ];
       console.log(`\n[CHUNK] DRY-RUN ${label} rows=${task.rows.length}`);

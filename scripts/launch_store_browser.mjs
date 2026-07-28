@@ -185,31 +185,7 @@ async function waitForDebugPort(port, timeoutMs = 20000) {
   let lastError = '';
   while (Date.now() < deadline) {
     try {
-      const pages = await new Promise((resolve, reject) => {
-        const req = http.get({
-          host: '127.0.0.1',
-          port,
-          path: '/json/list',
-          timeout: 1500,
-        }, res => {
-          let body = '';
-          res.setEncoding('utf8');
-          res.on('data', chunk => { body += chunk; });
-          res.on('end', () => {
-            if (res.statusCode !== 200) {
-              reject(new Error(`HTTP ${res.statusCode}`));
-              return;
-            }
-            try {
-              resolve(JSON.parse(body));
-            } catch (error) {
-              reject(error);
-            }
-          });
-        });
-        req.on('timeout', () => req.destroy(new Error('debug port timeout')));
-        req.on('error', reject);
-      });
+      const pages = await getDebugPages(port);
       if (Array.isArray(pages)) return {ok: true, pageCount: pages.length};
       lastError = 'debug port returned non-array page list';
     } catch (error) {
@@ -218,6 +194,112 @@ async function waitForDebugPort(port, timeoutMs = 20000) {
     await sleep(500);
   }
   return {ok: false, error: lastError || `debug port ${port} not ready within ${timeoutMs}ms`};
+}
+
+async function getDebugPages(port) {
+  return await new Promise((resolve, reject) => {
+    const req = http.get({
+      host: '127.0.0.1',
+      port,
+      path: '/json/list',
+      timeout: 1500,
+    }, res => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => { body += chunk; });
+      res.on('end', () => {
+        if (res.statusCode !== 200) {
+          reject(new Error(`HTTP ${res.statusCode}`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(body));
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('debug port timeout')));
+    req.on('error', reject);
+  });
+}
+
+async function forceRefreshMarketingPage(port, maxAttempts = 3) {
+  let lastState = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const pages = await getDebugPages(port);
+    const page = pages.find(item => item.type === 'page' && String(item.url || '').includes('sso.geiwohuo.com/#/mbrs/'))
+      || pages.find(item => item.type === 'page' && String(item.url || '').includes('sso.geiwohuo.com'))
+      || pages.find(item => item.type === 'page');
+    if (!page?.webSocketDebuggerUrl) {
+      throw new Error(`Chrome page target missing on port ${port}`);
+    }
+    const ws = new WebSocket(page.webSocketDebuggerUrl);
+    const pending = new Map();
+    let nextId = 0;
+    try {
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`WebSocket open timeout on port ${port}`)), 10_000);
+        ws.addEventListener('open', () => {
+          clearTimeout(timer);
+          resolve();
+        }, {once: true});
+        ws.addEventListener('error', error => {
+          clearTimeout(timer);
+          reject(error);
+        }, {once: true});
+      });
+    } catch (error) {
+      ws.close();
+      throw error;
+    }
+    ws.addEventListener('message', event => {
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (!message.id || !pending.has(message.id)) return;
+      const item = pending.get(message.id);
+      pending.delete(message.id);
+      clearTimeout(item.timer);
+      message.error ? item.reject(new Error(JSON.stringify(message.error))) : item.resolve(message.result);
+    });
+    const call = (method, params = {}) => new Promise((resolve, reject) => {
+      const id = ++nextId;
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(`CDP timeout: ${method}`));
+      }, 20_000);
+      pending.set(id, {resolve, reject, timer});
+      ws.send(JSON.stringify({id, method, params}));
+    });
+    try {
+      await call('Page.enable');
+      await call('Runtime.enable');
+      await call('Page.reload', {ignoreCache: true});
+      await sleep(3500);
+      const evaluated = await call('Runtime.evaluate', {
+        expression: `({
+          href: location.href,
+          text: String(document.body?.innerText || '').slice(0, 4000),
+          readyState: document.readyState
+        })`,
+        returnByValue: true,
+      });
+      lastState = evaluated?.result?.value || null;
+    } finally {
+      ws.close();
+    }
+    const text = String(lastState?.text || '');
+    const renderFailed = /渲染异常|LOADING_SOURCE_CODE|Failed to load app|Failed to load script/i.test(text);
+    if (!renderFailed) {
+      return {ok: true, attempts: attempt, state: lastState};
+    }
+    await sleep(1200);
+  }
+  return {ok: false, attempts: maxAttempts, state: lastState};
 }
 
 if (process.platform === 'win32') {
@@ -252,6 +334,15 @@ const debugPort = await waitForDebugPort(store.port);
 if (!debugPort.ok) {
   throw new Error(`Chrome remote debugging port not ready for ${store.storeKey} port=${store.port}: ${debugPort.error}`);
 }
+const marketingRefresh = customUrl.includes('/#/mbrs/')
+  ? await (async () => {
+      await sleep(2000);
+      return await forceRefreshMarketingPage(store.port);
+    })()
+  : null;
+if (marketingRefresh && !marketingRefresh.ok) {
+  throw new Error(`Marketing page still failed after ${marketingRefresh.attempts} forced refresh attempts for ${store.storeKey}`);
+}
 
 console.log(JSON.stringify({
   storeKey: store.storeKey,
@@ -264,4 +355,10 @@ console.log(JSON.stringify({
   headless: cliArgs.headless,
   background: cliArgs.background,
   debugPort,
+  marketingRefresh: marketingRefresh ? {
+    ok: marketingRefresh.ok,
+    attempts: marketingRefresh.attempts,
+    readyState: marketingRefresh.state?.readyState || '',
+    href: marketingRefresh.state?.href || '',
+  } : null,
 }, null, 2));
