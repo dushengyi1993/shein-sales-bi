@@ -26,6 +26,11 @@ assert.match(schema, /CREATE TABLE IF NOT EXISTS fact\.inventory_cost_event/);
 assert.match(schema, /CREATE TABLE IF NOT EXISTS fact\.inventory_cost_ledger/);
 assert.match(schema, /CREATE TABLE IF NOT EXISTS ops\.accounting_period_close/);
 assert.match(schema, /CREATE TABLE IF NOT EXISTS ops\.inventory_cost_run/);
+assert.match(
+  schema,
+  /CREATE OR REPLACE VIEW mart\.inventory_cost_sale_assignment AS[\s\S]*unvalued_quantity,\s*valuation_status,\s*ledger_version,\s*calculated_at,[\s\S]*estimated_quantity/,
+  'new assignment fields must append after the production view signature for an in-place upgrade',
+);
 assert.match(schema, /NULL::numeric AS estimated_on_hand_quantity/);
 assert.match(schema, /'model_estimate_disabled'::text AS inventory_match_status/);
 assert.match(schema, /legacy_pre_cutover_estimate/);
@@ -109,6 +114,11 @@ assert.match(schema, /AND NOT has_actual_return_cost/);
 const profitAccounting = schema.slice(
   schema.indexOf('CREATE OR REPLACE VIEW mart.profit_order_item AS'),
   schema.indexOf('CREATE OR REPLACE VIEW mart.product_display_by_match_key AS'),
+);
+assert.match(
+  profitAccounting,
+  /cost_unvalued_quantity,\s*cost_valuation_status,\s*cost_ledger_version,\s*cost_cutover_date,[\s\S]*pending_impact_amount_sar,[\s\S]*cost_estimated_quantity,\s*cost_settled_estimated_quantity,\s*cost_valuation_basis/,
+  'new profit fields must append after the production view signature for an in-place upgrade',
 );
 const afterSalesAccounting = profitAccounting.slice(0, profitAccounting.indexOf('rtv_match AS ('));
 assert.doesNotMatch(

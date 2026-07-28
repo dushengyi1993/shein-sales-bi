@@ -2334,13 +2334,16 @@ SELECT
   cogs_sar,
   valued_quantity,
   unvalued_quantity,
+  valuation_status,
+  ledger_version,
+  calculated_at,
+  -- New fields must stay appended after the original view signature. Moving
+  -- them into the middle makes CREATE OR REPLACE interpret the first new name
+  -- as a forbidden rename during an in-place production upgrade.
   estimated_quantity,
   settled_estimated_quantity,
   estimation_variance_sar,
-  valuation_status,
-  valuation_basis,
-  ledger_version,
-  calculated_at
+  valuation_basis
 FROM fact.inventory_cost_ledger
 WHERE event_type = 'sale'
   AND coalesce(source_order_item_key,'') <> '';
@@ -4593,10 +4596,7 @@ SELECT
   pending_revenue_risk_sar,
   cost_valued_quantity,
   cost_unvalued_quantity,
-  cost_estimated_quantity,
-  cost_settled_estimated_quantity,
   cost_valuation_status,
-  cost_valuation_basis,
   cost_ledger_version,
   cost_cutover_date,
   actual_return_expense_sar,
@@ -4625,7 +4625,12 @@ SELECT
   END AS risk_adjusted_profit_margin_before_storage,
   pending_revenue_risk,
   pending_impact_quantity,
-  pending_impact_amount_sar
+  pending_impact_amount_sar,
+  -- Append-only view evolution keeps CREATE OR REPLACE compatible with the
+  -- production signature consumed by existing caches and dependent views.
+  cost_estimated_quantity,
+  cost_settled_estimated_quantity,
+  cost_valuation_basis
 FROM base;
 
 CREATE OR REPLACE VIEW mart.product_display_by_match_key AS
@@ -5543,9 +5548,6 @@ SELECT
   coalesce(b.estimated_cost_revenue_sar,0) AS estimated_cost_revenue_sar,
   coalesce(b.estimated_cost_quantity,0) AS estimated_cost_quantity,
   coalesce(b.estimated_cost_lines,0)::bigint AS estimated_cost_lines,
-  coalesce(b.legacy_estimated_cost_revenue_sar,0) AS legacy_estimated_cost_revenue_sar,
-  coalesce(b.legacy_estimated_cost_quantity,0) AS legacy_estimated_cost_quantity,
-  coalesce(b.legacy_estimated_cost_lines,0)::bigint AS legacy_estimated_cost_lines,
   coalesce(b.reversal_lines,0)::bigint AS reversal_lines,
   coalesce(b.reversal_fee_sar,0) AS reversal_fee_sar,
   b.profit_margin_before_storage,
@@ -5593,7 +5595,10 @@ SELECT
   coalesce(b.pending_impact_amount_sar,0) AS pending_impact_amount_sar,
   coalesce(b.actual_return_cost_sar,0) AS actual_return_cost_sar,
   coalesce(b.estimated_return_delivery_fee_sar,0) AS estimated_return_delivery_fee_sar,
-  coalesce(s.storage_allocation_stage,'none') AS storage_allocation_stage
+  coalesce(s.storage_allocation_stage,'none') AS storage_allocation_stage,
+  coalesce(b.legacy_estimated_cost_revenue_sar,0) AS legacy_estimated_cost_revenue_sar,
+  coalesce(b.legacy_estimated_cost_quantity,0) AS legacy_estimated_cost_quantity,
+  coalesce(b.legacy_estimated_cost_lines,0)::bigint AS legacy_estimated_cost_lines
 FROM base b
 FULL JOIN storage s
   ON s.date = b.date
@@ -5689,9 +5694,6 @@ SELECT
   coalesce(g.estimated_cost_revenue_sar,0) AS estimated_cost_revenue_sar,
   coalesce(g.estimated_cost_quantity,0) AS estimated_cost_quantity,
   coalesce(g.estimated_cost_lines,0)::bigint AS estimated_cost_lines,
-  coalesce(g.legacy_estimated_cost_revenue_sar,0) AS legacy_estimated_cost_revenue_sar,
-  coalesce(g.legacy_estimated_cost_quantity,0) AS legacy_estimated_cost_quantity,
-  coalesce(g.legacy_estimated_cost_lines,0)::bigint AS legacy_estimated_cost_lines,
   coalesce(g.reversal_lines,0)::bigint AS reversal_lines,
   coalesce(smt.total_storage_fee_sar,0) AS month_storage_fee_sar,
   coalesce(sgm.allocated_storage_fee_sar,0) AS allocated_storage_fee_sar,
@@ -5736,7 +5738,10 @@ SELECT
   coalesce(g.pending_revenue_risk_lines,0)::bigint AS pending_revenue_risk_lines,
   coalesce(g.actual_return_cost_sar,0) AS actual_return_cost_sar,
   coalesce(g.estimated_return_delivery_fee_sar,0) AS estimated_return_delivery_fee_sar,
-  coalesce(sgm.storage_fee_method,'none') AS storage_fee_method
+  coalesce(sgm.storage_fee_method,'none') AS storage_fee_method,
+  coalesce(g.legacy_estimated_cost_revenue_sar,0) AS legacy_estimated_cost_revenue_sar,
+  coalesce(g.legacy_estimated_cost_quantity,0) AS legacy_estimated_cost_quantity,
+  coalesce(g.legacy_estimated_cost_lines,0)::bigint AS legacy_estimated_cost_lines
 FROM group_month g
 FULL JOIN storage_group_month sgm
   ON sgm.month_start = g.month_start
@@ -5770,9 +5775,6 @@ SELECT
   sum(p.estimated_cost_revenue_sar) AS estimated_cost_revenue_sar,
   sum(p.estimated_cost_quantity) AS estimated_cost_quantity,
   sum(p.estimated_cost_lines) AS estimated_cost_lines,
-  sum(p.legacy_estimated_cost_revenue_sar) AS legacy_estimated_cost_revenue_sar,
-  sum(p.legacy_estimated_cost_quantity) AS legacy_estimated_cost_quantity,
-  sum(p.legacy_estimated_cost_lines) AS legacy_estimated_cost_lines,
   sum(p.reversal_lines) AS reversal_lines,
   max(c.unit_cost_sar) AS unit_cost_sar,
   max(c.complete_batch_count)::bigint AS complete_batch_count,
@@ -5815,7 +5817,10 @@ SELECT
   sum(p.pending_impact_amount_sar) AS pending_impact_amount_sar,
   sum(p.actual_return_cost_sar) AS actual_return_cost_sar,
   sum(p.estimated_return_delivery_fee_sar) AS estimated_return_delivery_fee_sar,
-  string_agg(DISTINCT p.storage_allocation_stage, ' / ') AS storage_allocation_stage
+  string_agg(DISTINCT p.storage_allocation_stage, ' / ') AS storage_allocation_stage,
+  sum(p.legacy_estimated_cost_revenue_sar) AS legacy_estimated_cost_revenue_sar,
+  sum(p.legacy_estimated_cost_quantity) AS legacy_estimated_cost_quantity,
+  sum(p.legacy_estimated_cost_lines) AS legacy_estimated_cost_lines
 FROM mart.profit_daily_store_product p
 LEFT JOIN mart.product_unit_cost_by_match_key c
   ON c.match_key <> ''
