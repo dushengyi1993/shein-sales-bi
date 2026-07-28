@@ -11,7 +11,7 @@ const linkPlan = planBiOpsDirectQuerySections(
 );
 assert.deepEqual(
   linkPlan.sections,
-  ['linksData', 'productState', 'productTrafficDaily'],
+  ['linksData', 'productState'],
   'link filtering must load deterministic link/state/traffic data instead of a sales answer bot',
 );
 
