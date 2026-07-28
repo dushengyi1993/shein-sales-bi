@@ -141,6 +141,8 @@ guard 本身不应产生浏览器。repair worker 若因平台写入启动浏览
 
 云端 Chrome 进程归零后，清理器还必须删除已关闭店铺 profile 下的 `SingletonLock`、`SingletonCookie`、`SingletonSocket`；只能对确认无该店 Chrome 进程的精确 profile 执行。日报收口同时核对进程、调试端口、Chrome 临时目录和这些 profile 锁，避免“进程为 0 但下批浏览器仍因旧锁无法启动”。
 
+营销中心偶发 `application '/mbrs' died in status LOADING_SOURCE_CODE`、`Failed to load script` 或“渲染异常”时，根因是 `/mbrs` 微前端静态脚本首拉失败，不等同于店铺登录失效。`launch_store_browser.mjs` 对 `/#/mbrs/` 页面启动后必须先执行一次绕缓存强制刷新；错误文案仍存在时最多重试 3 次，成功后再做身份和业务检查，3 次仍失败才记录该店 blocker。提交脚本保留活动页未就绪时的二次防御性强刷。
+
 ### 浏览器租约与可恢复 guard
 
 `state/browser_task_leases/<task>--<store>.json` 是单任务、单店原子租约。有效租约（TTL 未到且同机 owner PID 存活）保护该店浏览器和 profile 锁；清理器只处理无有效租约的孤儿。TTL 到期、同机 owner 已死亡或格式损坏的租约会先被回收，再考虑清理该店。纯 session HTTP 的 cloud marketing guard 不持有浏览器租约；repair worker、链接/业务域抓取、登录态管家等确实启动浏览器的任务才申请租约，并把父任务的 task/runId 传给子批次做精确收尾。
@@ -196,6 +198,8 @@ guard 的 `runId` 写入不可覆盖的 `state/cloud_marketing_live_guard/report
 ### 8.4 执行与收尾
 
 - 写入前核对活动 ID、店铺身份、SKC、价格覆盖、平台最低降幅和活动窗口。
+- 用户批准后的 `targetPrice/finalTargetPrice` 是审计基准。若报名页普通档/VIP 档的最低降幅会把价格继续压低，不再阻断或重复确认，直接按平台最低档报名；执行结果必须记录批准价、平台实际价、差额和 `below_target_due_to_platform_forced_discount`。2026-07-27 用户以 DL `48802 / sv260103161242703915999` 的 `60.32 -> 58.31 SAR` 实例明确长期授权。该授权仅限普通营销活动的平台强制档位，不覆盖人工特殊限时折扣和限时折扣利润/底价门禁。
+- 订单审计必须同步使用平台强制最低档：优先读取已提交 `deadline-fill` 中的 `platformAdjustmentStatus/platformTierPrice`，历史缺失证据由 `config/marketing_ordinary_platform_tier_overrides.json` 补充。有效活动窗口内以平台档位价作为订单预期价，同时保留普通计划批准价作审计字段；不得再把精确命中平台档位的订单报成低价。
 - 用户已批准方案后，先小批执行并在同一任务内继续完成其余安全店铺；遇到单店登录/接口异常时记录并继续其他店，不让一个店拖死整批。
 - 候选 subset 只是待批准方案，不能自行标记 `submit=true`。只有显式 lock 后生成的 `*-user-approved.json + approval-manifest-*.json` 才能交给批量提交器；批量结果必须携带同一 work fingerprint。
 - 每个写入组只回读受影响店铺/活动；整条 repair queue 结束后再做一次全店 live readback。不得在每个组后都重复全扫 19 店，也不得省掉最终全店闭环。
@@ -217,6 +221,8 @@ guard 的 `runId` 写入不可覆盖的 `state/cloud_marketing_live_guard/report
 
 2026-07-22 完整 live 差集最初生成 `401` 条动作；精确续跑后共为 `391` 条链接新建限时折扣，最终只剩 `6` 条因 ET 当日实盘不足 10 阻断，平台 `0004` 阻断已归零。普通活动 session HTTP 与价格栈最终回读均为 19/19，漂移 `belowTarget=0`，guard blocker 归零；逐条活动证据见 `outputs/reports/limited-discount-created-detail-2026-07-22.{json,csv,md}`。同日已把 `2026-07-21 v48732-48733-49565-final-executed-all-991` 最终基准同步到云端，并验证选择器仍按活动窗口使用上一期有效基准。
 
+2026-07-28 普通活动 `49283/49286/50003` 最终报名 `743` 行。首批安全清单 `720` 行完成后，用户明确批准原先仅因“含仓储成本利润率低于 15%”剔除的 `23` 行全部报名；补充行只豁免该筛选线，不配优惠券，活动价为 `52.95/57.39/224.69 SAR`。最终 19 店合并 live readback：`missingRows=0`、`priceMismatchRows=0`、`extraAvailableRows=0`、`activityListGapRows=0`、`badPacketActivities=0`。当前基准为 `tmp/marketing-signup/20260728-final-merged-743/*final-executed-all-743.json`，由两个 approval manifest 的精确并集提升，禁止后续选择器回退到 720 行子集。
+
 ## 11. 关键文件
 
 - `skills/shein-marketing-ops/SKILL.md`（执行指令）
@@ -229,6 +235,16 @@ guard 的 `runId` 写入不可覆盖的 `state/cloud_marketing_live_guard/report
 - `scripts/marketing/batch_fix_limited_discount_drift.mjs`
 - `scripts/marketing/batch_apply_new_listing_limited_discount.mjs`
 - `scripts/marketing/merge_current_marketing_price_scans.mjs`
+- `scripts/marketing/build_ordinary_excluded_rows_supplement.mjs`
+- `scripts/marketing/merge_ordinary_campaign_plans.mjs`
+- `scripts/marketing/merge_ordinary_activity_enrollment_reports.mjs`
+- `scripts/marketing/promote_composite_ordinary_campaign_baseline.mjs`
+- `scripts/marketing/apply_ordinary_campaign_canonical_price_rule.mjs`
+- `lib/marketing_ordinary_platform_price_policy.mjs`
+- `lib/marketing_ordinary_platform_tier_evidence.mjs`
+- `lib/marketing_order_mitigation_history.mjs`
+- `lib/marketing_limited_repair_status.mjs`
+- `config/marketing_ordinary_platform_tier_overrides.json`
 - `config/marketing_manual_limited_discount_overrides.json`
 - `lib/marketing_manual_limited_discount_overrides.mjs`
 - `scripts/marketing/manage_manual_limited_discount_override.mjs`

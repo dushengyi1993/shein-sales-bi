@@ -80,7 +80,7 @@
 - 销售订单当前保留 WebAPI 生产事实源。2026-07-09 至 2026-07-15 首轮全店双跑的销售汇总、有效商品行和 SAR 散点金额一致，但发现店铺元数据、订单时间、取消行金额映射及原对账门禁过宽，因此不算“100% 无误”。2026-07-16 修复后从 2026-07-17 至 2026-07-23 重新完整双跑，预定 2026-07-24 核查结论；期间 OpenAPI 仍只写隔离并行层和对账层，不覆盖正式销售事实。退货退款、商品/链接基础资料同样仍写隔离并行层，不覆盖正式售后/链接事实。
 - 自动化运营写链路已接入官方 OpenAPI 动作：`copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。
 - `copy_product_draft` 已从单店适配推进到 19 店能力 smoke：源链接参数优先从 OpenAPI 商品列表 + `spu-info` / 商品详情 mapper 还原，不要求用户人工补完整发布 payload；强指纹回读未命中时只能进入人工核销，不能弱匹配自动判成功。
-- 批量复制支持：随机供货价区间 `supplyPriceRange`、细节图洗牌 `shuffleImages`、自动电流推断 `inferInputCurrentOverride`（从功率/电压推算）、随机 payload 跳 hash 锁 `skipPayloadHashLock`。
+- 批量复制支持：供货价区间 `supplyPriceRange`、细节图洗牌 `shuffleImages`、自动电流推断 `inferInputCurrentOverride`（从功率/电压推算）。自 2026.07.28.4 起，供货价和图片顺序使用任务级确定性伪随机，dry-run 与 execute 必须生成同一 payload；`skipPayloadHashLock` 已停用，真实写始终校验精确 payload hash。
 - `copy_product_draft` / 新链接发布默认只创建十年后定时上架的新链接，防止补链后短期自动上架；测试必须覆盖 payload 级和 SKC 级 `shelf_way=2` / `hope_on_sale_date`。
 - TZ/JSH/TZZ/XC 等 `query-store-info` 不返回 GS 账号的店铺，只允许在 `config/stores.json` / `config/store_account_truth.json` 的静态 `merchantId` 与实际候选一致、且没有 GS 账号冲突时使用 fallback；不得运行时自动回填或放宽身份校验。
 - 网页端最终确认不再显示固定确认框；用户在同一聊天里说“可以执行 / 提交吧 / 照做”等自然语言，服务端只在唯一当前事项、资料检查通过、权限和白名单命中时，内部映射到安全确认码。CLI/脚本仍必须显式传 `--confirm SHEIN_OPENAPI_SUBMIT`，防止绕过网页会话边界。

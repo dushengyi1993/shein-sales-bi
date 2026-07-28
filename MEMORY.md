@@ -5,6 +5,7 @@
 ## 红线
 
 - BI 数据判断、开发验收和故障排查只认云端运行时：云端 PostgreSQL、线上 BI、`/api/bi/section/*`、云端日志和 systemd；不得用仓库 `outputs/bi-portal/*` 判断生产现状。
+- 当前 Codex 和所有合伙人 CLI 的只读经营问题必须直接查权威源，或使用无模型 `query` 装载结构化 `data` 后由当前 Codex 计算；不得转问 BI `ask`、网页聊天、飞书问数或另一个 LLM。旧 `ask` 仅为 `query` 兼容别名。
 - 不要在本地直连或真实写 SHEIN OpenAPI；写操作走云端/受控脚本。普通任务先 dry-run、再人工确认、再回读审计；营销 timer 仅在负责人长期策略白名单内免逐次人工确认和人工提供 hash，但系统每轮仍必须自动计算、锁定并校验精确 payload/work hash，并保留完整预检、回读和审计。
 - 本地 BI、`8787`、`SHEIN-*` Windows 计划任务已封存；除非用户明确回滚，不得恢复本地生产调度。
 - 飞书 Base / 原生看板写入暂停；不要把日报、问数或异常提醒误判成 Base 写入恢复。
@@ -45,6 +46,7 @@
 - 普通营销活动真实报名/取消、优惠券提交/取消、补预算仍需要当前任务明确授权；每日巡检用 `owner-standing-cloud-marketing-v1` 长期授权自动处理限时折扣价格漂移、登记中的人工特殊折扣恢复、新链接/新上架 7 天、重新上架/漏限时折扣兜底，以及严格命中“7 日曝光 >3000、点击率 >4%、销量明确为 0”的高点击低转化专属折扣。用户不必逐次提供 hash，但系统每轮仍须自动生成并校验精确 work hash，通过授权上下文、身份、价格栈、库存/平台规则、dry-run、执行后精确回读与审计；任一写阶段失败后跳过后续写阶段，只做最终 live scan。
 - 营销定价以 `docs/marketing-campaign-signup-pricing-rules.md`、`config/marketing_pricing_policy.json`、`lib/marketing_pricing_policy.mjs` 为准；整数目标价提交前做安全 jitter 并复查。
 - 普通活动、优惠券、限时折扣、旧活动价、成本、仓储费和利润率必须做叠加安全审核；活动扫描过期或证据缺失时 fail closed。
+- 普通活动用户批准价是审计基准；报名页普通档/VIP 档强制更低价时，精确命中平台档位即可继续提交并记录差额，不重复确认。平台档位证据必须按活动 ID 和有效窗口隔离，不能串到其它活动或人工特殊限时折扣。
 - 新链接/新 SKC 不得简单标“待定价”：若能从最新已执行全量计划、同标准货号全局曝光 Top5 规则、成本/仓储费/底价推导出安全目标价，必须自动生成限时折扣兜底并回读；只有缺成本/目标价/仓储费、身份、库存或平台规则阻断时才 fail closed。
 - 新链接巡检不能只用 BI `linksData`：若各店最新 `outputs/shein_links` 原始快照生成更晚，按 `store+SKC` 只追加 BI 缺失行，再与 live 活动集合做差；活动 live scan 本身只返回活动商品，不能枚举在售无活动链接。共享实现为 `lib/marketing_latest_raw_link_overlay.mjs`。
 - 新上架 7 天未报活动优先补一期限时折扣；首次新品/超级新品按全局曝光 Top5 力度；已有冲突旧限时折扣则安全结束后重报。
@@ -57,7 +59,7 @@
 ## 链接 / 自动运营规则
 
 - 链接管理不再写飞书链接表；日常只走云端私有源文件、PostgreSQL、BI 门户和受控 OpenAPI。
-- 批量复制链接到多店走 `scripts/link_ops_hl_openapi_executor.mjs`；已支持 `supplyPriceRange` 随机供货价、`shuffleImages` 细节图加密洗牌、`inferInputCurrentOverride` 从功率/电压推电流、`skipPayloadHashLock` 随机 payload 跳 hash 锁。
+- 批量复制链接到多店走 `scripts/link_ops_hl_openapi_executor.mjs`；`supplyPriceRange` 和 `shuffleImages` 使用任务级确定性伪随机结果，保证 dry-run 与 execute payload 相同；真实写始终要求精确 payload hash，`skipPayloadHashLock` 已停用。
 - 限时折扣价格漂移自动修复走 `scripts/marketing/guard_limited_discount_drift.mjs` → `batch_fix_limited_discount_drift.mjs`；逐店串行"删漂移 SKC → dry-run → 剔除平台阻断 → execute 可执行子集 → readback → 关闭浏览器"。
 - 新上链接默认用标准货号（带中文）；图片顺序为卖点 -> 参数 -> 场景；细节图第一张必须是主封面。
 - 批量下架候选走 `scripts/build_link_retire_candidates_from_csv.mjs`（或 `bi_ops_cli retire-candidates`），执行走 `scripts/execute_retire_candidates_openapi.mjs`；已下架但货号未改的修复走 `scripts/repair_retire_supplier_code_openapi.mjs`，只调 `partialEdit` 不调 shelf，修复失败不阻断下架。

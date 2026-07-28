@@ -306,15 +306,18 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
 
 ## 五、平台折扣与页面回写
 
-- 若平台最低折扣要求更严格，则以平台允许的最高活动价为准。
+- 方案生成阶段若已能读取平台最低档，应把平台允许的最高活动价明确写入方案，连同利润率一起展示。
 - 计算方式：
 
 `平台允许最高活动价 = 当前价格 × (1 - 最低折扣要求)`
 
-- 若自动算出的目标价高于平台允许上限，则强制压到平台上限。
+- 用户批准后，`targetPrice/finalTargetPrice` 保留为审计基准。报名页后来出现更严格的普通档/VIP档，导致平台最低档低于批准价时，不再阻断或重复确认，直接按平台最低档报名。
 - 页面若因整数折扣、平台规则或前端联动而回写活动价：
   - 以页面最终实际显示值为准
-  - 但必须记录“脚本目标价 / 页面实际价 / 实际降幅”
+  - 记录“批准价 / 页面实际价 / 实际降幅”
+  - 页面价低于批准价时标记 `below_target_due_to_platform_forced_discount`，但只要价格精确命中平台档位即可继续提交；页面价与平台档位不一致才阻断
+  - 该授权只放行普通营销活动的平台强制档位，不改写人工特殊限时折扣登记价，也不放宽限时折扣利润/底价安全线
+  - 活动生效后的订单商品行也按同一平台档位价审计；普通计划批准价继续保留为对照，不得把平台强制价覆盖回普通方案。历史缺失的档位证据登记在 `config/marketing_ordinary_platform_tier_overrides.json`
 
 ## 六、填写与复核要求
 
@@ -335,9 +338,11 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
 - 脚本默认只完成勾选商品、填写活动价/降幅和复核；只有在用户明确授权“可以提交/自己提交/全自动报完”后，才允许传 `--submit` 点击最终 `提交报名`。首店仍必须先预填不提交，让用户确认页面无误；批量 runner 还必须验证不可变 approval manifest。
 - 下一次报新活动前，审核导出入口必须升级或补充为“叠加安全审核”版本：除了现有普通营销活动字段，还必须读取/合并当前和未来可能重叠的普通营销活动、优惠券和限时折扣。若脚本暂时只能导出普通活动，不得把它当作最终可报名审核表。
 - 按货号汇总的确认表由 `scripts/marketing/build_marketing_sku_approval.mjs --date YYYY-MM-DD --version vN` 生成；交付前必须跑 `scripts/marketing/verify_marketing_sku_approval.mjs --date YYYY-MM-DD --version vN`。校验至少覆盖：用户标注回归、仓储费缺失不伪装成 0、含仓储利润率不高于不含仓储利润率、利润率与建议最终成交价同口径、券策略明确“仅 15%”或“15/30/50 都禁止”、旧别名不独立出现。仓储证据缺失会告警并要求补证，但不再把不含仓储商品成本口径误判为整份表不可用。
+- 普通活动方案含 `New Arrivals / 新品 / 超级新品` 时，生成器必须同时读取生成日期不早于报告日的 `outputs/bi-portal/sections/linksData.json`，以及截至报告日、覆盖活动报告 `selectedStores` 全范围（全店批次为 19 店）的 `outputs/shein_links/<STORE>/<DATE>.json`。前者提供最新 7 日全局曝光排名，后者补 `firstShelfTime/createTime` 与上下架状态；原始快照只回填 BI 缺失字段，不覆盖 BI 已有曝光指标。原始快照缺店/解析失败、`linksData` 过期，或没有任何正向曝光指标时直接失败，禁止静默使用旧 Top5 或把“有原始链接行”冒充“有曝光数据”。
 - 重扫漏报或用户质疑漏报时，不要只处理上一次报错活动；必须逐店重新扫描 DSY 店铺（含 `MZ`，除非用户明确排除）在时间窗内仍可报名的活动，发现新增抓入商品就补填。
 - 报名方案生成时，BI/链接抓取可能尚未覆盖全部可报名 SKC；执行页才出现的新 SKC 必须补进系统，不得当作“计划外所以跳过”：
   - 若活动页 `totalGoods > expectedSelectedCount`、`selection.outOfPlanRows` 非空，或后台活动列表 `已报数量 < 可报总数`（即 `applyGoodsNum < allowGoodsNum`）存在不在当前最终计划里的差额，必须生成 supplement `selection-plan` / `price-overrides`；不能因为计划内 `missingRows=0` 就宣布没漏。
+  - “补报原剔除项”工具只允许接收 `excludeReason=row_full_cost_including_storage_margin_below_floor` 的行；缺成本、缺价格、其它门禁或混合原因一律拒绝。主计划与补充计划合并后，最终回读必须与合并计划的 `store + activity + SKC`、逐行目标价和 work fingerprint 精确一致，不能通过把 `plannedRows` 改成实际回读行数来制造全绿。
   - 新 SKC 优先克隆同店同 SKC 已批准活动的 `targetPrice/finalTargetPrice/couponFactor/combo`；没有既有批准价时才按当前定价、曝光和底价规则即时算价，算不清则 fail closed。
   - 补报后必须合并新的全量 repaired plan，并让 `verify_ordinary_activity_enrollment.mjs` 回读到 `missingRows=0`、`priceMismatchRows=0`、`extraAvailableRows=0`、`activityListGapRows=0`。
 - 若本期已生成价格覆盖表，执行时必须带 `--price-overrides outputs/reports/marketing-price-overrides-YYYY-MM-DD.json`，否则新品保护价、清货底线和本期用户确认价不会全部生效。

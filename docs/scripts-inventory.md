@@ -189,11 +189,13 @@
 
   - `fetch_shein_links.mjs`
 
+  - `link_ops_hl_openapi_executor.mjs`：19 店受控商品发布/复制执行器；执行前做店铺身份、源商品、目标同货号、属性模板、图片绑定、仓库和 payload 校验。`supplyPriceRange` 与 `shuffleImages` 使用任务级确定性伪随机，保证 dry-run/execute 生成同一 payload；`skipPayloadHashLock` 已停用。额外同货号链接可用结构化 `supplierSkuPolicy.mode=unique-per-link` 保留唯一 `supplier_sku`，但 `supplier_code` 仍使用标准货号。
+
   - `generate_link_ops_web_dashboard.mjs`
 
   - `restore_shein_store_session.mjs`：云端单店登录态恢复入口；先用私有 browser/WebAPI session bootstrap，再调用 `auto_relogin_shein_store.mjs` 验证 GSP + SBN 登录态，供 session-manager 和 link/business 日更复用。
 
-  - `serve_bi_portal.mjs`：同时承载 BI Portal 静态页面、链接运营状态 API 和云端临时登录维护入口；`/api/link-ops-chats` 支持运营会话、动态只读问数和明确命令自动入池，`/api/link-ops-tasks` 管理任务池，`/api/link-ops-assets` 管理任务素材包，`/api/link-ops-execute` 做受控执行前检查、HL 子执行器调度、进度和审计回写，`/api/cloud-login/sessions` 管理短时 noVNC 登录窗口。
+  - `serve_bi_portal.mjs`：同时承载 BI Portal 静态页面、确定性只读数据 API、链接运营状态 API 和云端临时登录维护入口。`/api/bi/query-data` 按当前登录账号读权限装载 section 并返回 `aiInvoked=false`；`/api/link-ops-chats` 只用于受控运营会话或显式产品测试，`/api/link-ops-tasks` 管理任务池，`/api/link-ops-assets` 管理任务素材包，`/api/link-ops-execute` 做受控执行前检查、HL 子执行器调度、进度和审计回写，`/api/cloud-login/sessions` 管理短时 noVNC 登录窗口。
 
   - `upload_link_ops_assets.mjs`：从本机把图片、证书、标题/规则文件同步到云端链接运营任务素材包；只走白名单文件类型，不上传敏感登录态。
 
@@ -210,6 +212,10 @@
   - `marketing/export_dsy_marketing_standards.mjs`：只读导出 DSY 营销活动填报标准。用户要先审核标准时，先跑 `--stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open`，排除优惠券活动，输出明细和“按标准货号一行”的审核表；价格规则读取 `config/marketing_pricing_policy.json`，可按 BI 曝光量识别同一标准货号在所有店铺、所有链接中的全局曝光前五链接利润率差异。
 
   - `marketing/build_marketing_sku_approval.mjs` / `marketing/verify_marketing_sku_approval.mjs`：按云端 BI / 成本映射生成并校验货号级确认表；确认表必须是用户可审的 Excel 人话版，而不是只给 CSV/JSON 或几百行明细。标准工作簿至少包含 `说明`、`按货号汇总`、`店铺差异明细`、`报名明细`、`剔除项/阻塞项`、`低价补救/风险项`、`15%券流量试验计划`（如适用）等 sheet；除说明页外必须有 `备注/修改意见` 列。确认表必须展示预期利润率、预期最终价、普通活动填报价、是否使用可选 15% 流量券、触券下探价、成本、仓储费/件、优惠券/限时折扣风险和带店铺前缀的全局曝光前五链接目标利润率差异，不能按每个店铺各算一组 Top5。
+    - 新品普通活动必须加载生成日期不早于报告日的 `linksData.json`，以及覆盖活动报告 `selectedStores` 全范围的原始链接快照；任一缺店/解析失败、曝光源过期或正向曝光指标为 0 均失败。原始快照可补上架时间和状态，不能覆盖 BI 曝光指标；不能用主 `data.json`、活动名称或“有链接行”猜测链接年龄/Top5。
+  - `marketing/apply_ordinary_campaign_canonical_price_rule.mjs`：在未锁定候选方案上应用用户批准的“同货号全局曝光 Top5 / 其它链接”两档价格并生成稳定小数、平台档位差额和审计文件；输出仍是待 lock 候选，不能直接提交。
+  - `marketing/build_ordinary_excluded_rows_supplement.mjs`：把用户明确批准的“仅因含仓储成本利润率低于 15% 被剔除”行生成独立补充计划。只接受精确 `row_full_cost_including_storage_margin_below_floor`，并要求成本、仓储、价格和利润率证据齐全；其它剔除原因 fail closed。
+  - `marketing/merge_ordinary_campaign_plans.mjs` / `marketing/promote_composite_ordinary_campaign_baseline.mjs`：合并主计划与已批准补充计划，并在两个 approval manifest 的逐行精确并集、全量干净回读都通过后晋升当前基线；任一重复键、payload 差异或回读缺口均拒绝。
 
   - `marketing/dsy_marketing_deadline_fill.mjs`：DSY 营销活动报名半自动补填；默认只勾选商品、填活动价/降幅和复核。真实 `--submit` 除用户明确授权外，还强制要求 `--approval-manifest`，并验证当前 selection/price 是批准计划的精确子集；文件变化或 work fingerprint 不符立即停止。支持 `--out-dir` 隔离探测/补报证据；选择页会记录 `availableRows/outOfPlanRows/outOfPlanCount`，当活动页出现计划外可报名 SKC 时必须生成 supplement `selection-plan` / `price-overrides` 并补进 repaired 全量计划，不能把新增可报行忽略掉。本期价格覆盖表用锁定后的 `*-user-approved.json`，缺成本例外仅用 `--min-discount-fallback SK-13034`；未命中逐行覆盖价时同样读取 `config/marketing_pricing_policy.json` 和 BI 曝光数据执行同一标准货号全局曝光前五利润率规则。
 
@@ -267,7 +273,7 @@
   - `marketing/smoke_shared_storage_cost.mjs`：验证零销量在库货号仍按 ET 货号仓储费与当前可售+破损数量形成共享仓储费/件。
   - `marketing/build_ordinary_campaign_plan_subset.mjs` / `marketing/lock_ordinary_campaign_execution_plan.mjs`：从候选计划生成待批准 subset，并把用户批准原话、来源、文件 SHA-256、payload hash 和 work fingerprint 锁入不可变 manifest；subset 本身不携带提交授权。
   - `marketing/run_ordinary_store_submission_batch.mjs` / `marketing/run_ordinary_chunk_submission_batch.mjs` / `marketing/run_ordinary_singleton_recovery_batch.mjs`：普通活动批准后的店级、分块和单行恢复执行器。三者都要求同一 approval manifest；chunk resume 只承认同一 fingerprint 的精确成功证据。
-  - `marketing/merge_ordinary_activity_enrollment_reports.mjs` / `marketing/promote_ordinary_campaign_baseline.mjs`：合并只读补充回读；只有全量回读无缺失、错价、计划外可报、活动列表缺口或坏包时，才把批准计划晋升为下一活动窗口基线。
+  - `marketing/merge_ordinary_activity_enrollment_reports.mjs` / `marketing/promote_ordinary_campaign_baseline.mjs`：合并只读补充回读；合并器必须重新读取补丁共同指向的唯一 selection/price 计划，逐行验证 `store + activity + SKC` 与目标价，不得用回读行数重写计划行数。只有全量回读无缺失、错价、计划外可报、活动列表缺口或坏包时，才把批准计划晋升为下一活动窗口基线。
   - `marketing/smoke_ordinary_campaign_approval.mjs`：验证批准文件不可变、selection/price 键严格对齐和 work fingerprint 一致。
   - `marketing/smoke_new_listing_limited_discount_plan_exact_price.mjs`：新上架限时折扣计划使用精确 storeKey+SKC 目标价证据。
   - `marketing/smoke_order_audit_linksdata_exact_target.mjs`：订单审计优先使用 linksData 精确 store/SKC 目标价和活动窗口。
@@ -369,7 +375,7 @@
 - `cloud_ops_watchdog.mjs`：云端 systemd/watchdog 新鲜度检查；销售/BI 页面按高频阈值，链接/业务域按日更低频阈值，并按 80% / 88% / 93% 三档监测根盘容量，异常时调用 `notify_sync_issue.mjs` 发飞书提醒。对孤立的历史营销扫描 warning，仅在 `lib/cloud_watchdog_recovery.mjs` 验证后续扫描更新、新鲜、19 店完整且 payload/行数自洽时记录 recovery；不删除历史 warning，也不吞掉其它异常。
 - `cloud_disk_maintenance.sh`：每周低优先级磁盘维护；抓数产物本地保留 30 天，COS 归档必须通过 gzip、成员清单和 SHA256 校验后才删除未变化的本地文件。profile 缓存仅在根盘达到 80%、没有有效浏览器租约且没有 Chrome 进程时清理，Cookie 与持久登录状态不在目标清单中。
 
-- `lark_sales_qa_bot.mjs`：云端只读问数核心，供网页和 Owner CLI 复用（独立飞书监听 service 仍暂停）；每轮从 BI Portal JSON 动态压缩销售、店铺、货号、链接/覆盖上下文并回复，不写数据库、飞书 Base 或 SHEIN 后台。近 7 天曝光/点击率/销量组合筛选直接读取 `storeLinks`，点击率按近 7 天商详访客除以曝光重算，不交给模型猜路由；“全店最低折后价”同样走确定性查询，只采用当前有效的后台折后价、普通活动价或限时折扣价，并返回并列最低链接、覆盖数与快照时间。安全约束中的否定式凭据词不算索取。产品文本和图表 label 优先使用 `product_display_name` / `productDisplayNames`。
+- `lark_sales_qa_bot.mjs`：历史飞书只读问数实现；生产 service 必须保持 `disabled + inactive`，当前网页/Partner CLI 只读查询不再复用它，也不调用它背后的模型。仅在明确诊断旧飞书问数产品时运行；其输出不能作为经营事实或写入依据。
 
 - `cloud_shein_session_manager.mjs` / `cloud_shein_session_manager.sh`：云端登录态管家；顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并输出 profile 体积报告。
 
@@ -494,6 +500,9 @@
 - `lib/marketing_ordinary_campaign_approval.mjs`：普通活动批准文件的不可变校验、键对齐、payload hash、work fingerprint 和 manifest 装载；批量提交器不得自行复制一套弱校验。
 
 - `lib/marketing_ordinary_price_evidence.mjs`：读取 `tmp/mbrs/deadline-fill-results` 中仍在活动生效窗口内的普通营销活动填报价，按 `storeKey + skc` 归组，并计算不含券保底价与 `finalTargetPrice` 的差异，同时保留触券下探风险；供优惠券提交器、每日 guard 和高券研究共用，避免旧普通活动低价或触券打穿风险只在某一个脚本里被发现。
+- `lib/marketing_ordinary_platform_price_policy.mjs` / `lib/marketing_ordinary_platform_tier_evidence.mjs` / `config/marketing_ordinary_platform_tier_overrides.json`：普通活动页面强制最低档的统一接受、审计和有效窗口证据。批准价保留作对照，平台档位精确命中可继续提交；证据按活动 ID 隔离，不能把同一 SKC 的其它活动档位串入订单审计。
+- `lib/marketing_order_mitigation_history.mjs`：按结果文件内日期而非当天文件名读取历史价格漂移修复，允许后续日报识别“订单发生在修复前”的已缓解异常，同时拒绝未来日期证据。
+- `lib/marketing_limited_repair_status.mjs`：把限时折扣修复的旧版汇总和新版批次结果归一到 guard 口径；区分已执行子集与库存/平台阻断子集，避免新版结果被显示成 0 执行或 0 阻断。
 
 
 
