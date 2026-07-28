@@ -4013,6 +4013,61 @@ LEFT JOIN LATERAL (
   WHERE d.return_order_id = ANY(regexp_split_to_array(coalesce(rr.et_return_order_ids,''), '\\s*/\\s*'))
 ) dest ON true;
 
+-- Profit views have accumulated additional audit columns over several live
+-- releases. PostgreSQL can only append columns with CREATE OR REPLACE VIEW;
+-- an older production signature therefore cannot always be upgraded in place.
+-- When any member of the dependent profit-view chain is not already on the
+-- current append-only signature, rebuild that chain once. The canonical cache
+-- tables remain available to the portal while the schema transaction runs,
+-- and every cascaded view is recreated below in dependency order.
+DO $profit_view_signature_migration$
+DECLARE
+  profit_order_columns text[];
+  profit_daily_columns text[];
+  profit_month_columns text[];
+  profit_product_columns text[];
+  needs_rebuild boolean := false;
+BEGIN
+  IF to_regclass('mart.profit_order_item') IS NOT NULL THEN
+    SELECT coalesce(array_agg(column_name ORDER BY ordinal_position),'{}'::text[])
+      INTO profit_order_columns
+    FROM information_schema.columns
+    WHERE table_schema='mart' AND table_name='profit_order_item';
+    SELECT coalesce(array_agg(column_name ORDER BY ordinal_position),'{}'::text[])
+      INTO profit_daily_columns
+    FROM information_schema.columns
+    WHERE table_schema='mart' AND table_name='profit_daily_store_product';
+    SELECT coalesce(array_agg(column_name ORDER BY ordinal_position),'{}'::text[])
+      INTO profit_month_columns
+    FROM information_schema.columns
+    WHERE table_schema='mart' AND table_name='profit_month_group';
+    SELECT coalesce(array_agg(column_name ORDER BY ordinal_position),'{}'::text[])
+      INTO profit_product_columns
+    FROM information_schema.columns
+    WHERE table_schema='mart' AND table_name='profit_product_summary';
+
+    needs_rebuild :=
+      cardinality(profit_order_columns) < 3
+      OR profit_order_columns[cardinality(profit_order_columns)-2:cardinality(profit_order_columns)]
+          <> ARRAY['cost_estimated_quantity','cost_settled_estimated_quantity','cost_valuation_basis']
+      OR cardinality(profit_daily_columns) < 3
+      OR profit_daily_columns[cardinality(profit_daily_columns)-2:cardinality(profit_daily_columns)]
+          <> ARRAY['legacy_estimated_cost_revenue_sar','legacy_estimated_cost_quantity','legacy_estimated_cost_lines']
+      OR cardinality(profit_month_columns) < 3
+      OR profit_month_columns[cardinality(profit_month_columns)-2:cardinality(profit_month_columns)]
+          <> ARRAY['legacy_estimated_cost_revenue_sar','legacy_estimated_cost_quantity','legacy_estimated_cost_lines']
+      OR cardinality(profit_product_columns) < 3
+      OR profit_product_columns[cardinality(profit_product_columns)-2:cardinality(profit_product_columns)]
+          <> ARRAY['legacy_estimated_cost_revenue_sar','legacy_estimated_cost_quantity','legacy_estimated_cost_lines'];
+
+    IF needs_rebuild THEN
+      RAISE NOTICE 'rebuilding profit view chain for append-only signature migration';
+      EXECUTE 'DROP VIEW mart.profit_order_item CASCADE';
+    END IF;
+  END IF;
+END
+$profit_view_signature_migration$;
+
 CREATE OR REPLACE VIEW mart.profit_order_item AS
 WITH cost_cutover AS (
   -- Historical sales predate the first trustworthy physical count. Keep the

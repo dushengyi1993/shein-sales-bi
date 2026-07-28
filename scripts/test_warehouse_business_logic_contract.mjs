@@ -34,6 +34,9 @@ assert.match(
 assert.match(schema, /NULL::numeric AS estimated_on_hand_quantity/);
 assert.match(schema, /'model_estimate_disabled'::text AS inventory_match_status/);
 assert.match(schema, /legacy_pre_cutover_estimate/);
+assert.match(schema, /DO \$profit_view_signature_migration\$/);
+assert.match(schema, /DROP VIEW mart\.profit_order_item CASCADE/);
+assert.match(schema, /rebuilding profit view chain for append-only signature migration/);
 assert.match(schema, /open-period shortfall may later be explicitly[\s\S]*settled by its receipt/);
 assert.match(schema, /CREATE OR REPLACE VIEW mart\.product_cost_batch_timeline/);
 assert.match(schema, /et_shipment_tracking/);
