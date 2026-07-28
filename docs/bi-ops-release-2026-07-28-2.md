@@ -32,4 +32,5 @@
 - `npm test`：124 / 124 通过。
 - Partner CLI 更新器包含纯文本 401 回归测试。
 - 新版链接 SQL 已在生产 PostgreSQL 上只读执行，返回 2052 条链接并包含 `cart_uv`、`cart_rate`、`c7_cart_uv`、`c30_cart_uv`。
-- Partner CLI 包 SHA256：`5b6e6b58dbd087bb6676208b451bf49a27b263aa19b2f95147fc621d1610b318`。
+- 本机 Windows 构建 ZIP SHA256：`5b6e6b58dbd087bb6676208b451bf49a27b263aa19b2f95147fc621d1610b318`。
+- GitHub Release 生产 ZIP SHA256：`abd135cab037479ab779914358b580bf8f9844c12b909b800af43c6822f36f44`；受管 bundle 内容 SHA256：`cecee521c670a53ab99ebff2bac775d97f3af8bc4ec3073b245dfee1aa21e4c9`。
