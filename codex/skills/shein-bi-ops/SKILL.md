@@ -13,18 +13,22 @@ Use the managed launcher, not a copied old `scripts/bi_ops_cli.mjs`:
 
 The launcher checks for an authenticated, hash-verified CLI update before business commands and restarts the same command on the new version when needed.
 
-## Read-only BI questions
+## Direct investigations and read-only facts
 
-For sales, traffic, inventory, profit, returns, link-performance filters, rankings, or other read-only business-data questions, call `ask` first and return its result directly:
+When the current Codex agent is asked to investigate, verify, calculate, repair, or execute work, it must query the authoritative source directly:
 
-```powershell
-& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" ask --text '<the user question>'
-```
+- cloud PostgreSQL and canonical marts for BI facts;
+- SHEIN OpenAPI for fresh platform state;
+- Webhook receipts, systemd, logs, and repository code for runtime diagnosis.
 
-- Use `chat` only for a continuing BI operations conversation or a controlled listing/link action that may create or update a task.
+**Do not call `ask`, BI chat, the Feishu Q&A bot, or another LLM as an intermediary.** The current agent is already responsible for answering the user and must not delegate fact-finding to another AI.
+
+`ask` or `chat` is allowed only when the user explicitly asks to test or diagnose the BI conversation surface, routing, permissions, or partner experience. In that case its response is test output, not authoritative evidence, and must be checked against the underlying source when factual accuracy matters.
+
 - Cloud BI is the source of truth. Do not claim that a local V3/export file is required for an ordinary BI query.
-- Never replace a failed BI query with browser scraping, `web-access`, SHEIN login automation, Chrome remote debugging, or a request that the user enable CDP. Those are not valid fallbacks for BI经营数据.
-- If `ask` returns an error, report the exact CLI error and stop. Do not reinterpret a routing error as missing business data and do not invent results.
+- Never replace a failed direct query with browser scraping, `web-access`, SHEIN login automation, Chrome remote debugging, or a request that the user enable CDP.
+- If direct cloud access fails, report the exact access/query error. Do not hide the failure by calling `ask` or inventing a result.
+- Use the managed CLI for controlled preflight and authorized business operations; verify final facts and write results directly from the underlying database/OpenAPI/readback.
 
 ## Authority and evidence
 

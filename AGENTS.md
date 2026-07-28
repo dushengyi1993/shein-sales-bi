@@ -2,6 +2,16 @@
 
 When a request is an actual SHEIN listing, image, title, inventory, price, link, or marketing operation, use the repository's controlled BI/Ops tooling rather than inventing an alternative workflow.
 
+## Direct investigation rule
+
+When the user asks the current Codex agent to investigate, verify, calculate, repair, or execute work:
+
+- Inspect the authoritative source directly: cloud PostgreSQL, SHEIN OpenAPI, Webhook receipts, systemd/services, logs, and repository code as applicable.
+- **Do not call BI `ask`, BI chat, the Feishu Q&A bot, or another LLM as an intermediary.** The current agent is responsible for doing the work, not asking another AI to answer it.
+- `ask`/chat may be used only when the user explicitly asks to test or diagnose that product surface, routing, permissions, or partner experience. Its response is test output, never authoritative business evidence.
+- A failed direct query must be reported as a direct-access failure. Do not hide it by falling back to `ask`, browser scraping, or another model.
+- Controlled CLI commands remain valid for preflight and authorized operations, but all factual conclusions and post-write readback must come from the underlying authoritative source.
+
 For partner/operator image work:
 
 - The current user's explicit instruction and a clearly named reviewed source such as `已审可用` are authoritative business approvals.
