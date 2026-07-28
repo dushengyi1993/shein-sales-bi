@@ -87,6 +87,7 @@ function parseArgs(argv) {
     format: '',
     queryJson: '',
     queryFile: '',
+    sections: [],
     categoryId: '',
     pageNum: 1,
     pageSize: 10,
@@ -188,6 +189,7 @@ function parseArgs(argv) {
     else if (a === '--knowledge-cache-dir') args.knowledgeCacheDir = path.resolve(String(argv[++i] || ''));
     else if (a === '--query-json') args.queryJson = String(argv[++i] || '');
     else if (a === '--query-file') args.queryFile = path.resolve(String(argv[++i] || ''));
+    else if (a === '--section' || a === '--sections') args.sections.push(...String(argv[++i] || '').split(/[,\s，、]+/).map(x => x.trim()).filter(Boolean));
     else if (a === '--help' || a === '-h') {
       args.command = 'help';
     } else if (!args.command) {
@@ -270,7 +272,9 @@ Usage:
   node scripts/bi_ops_cli.mjs openapi-call --doc-id <docId> --store FY --body-json '{}'
   node scripts/bi_ops_cli.mjs openapi-call --doc-id <GET docId> --store FY --query-json '{"id":"..."}'
   node scripts/bi_ops_cli.mjs openapi-catalog-plan --format summary [--out plan.json]
-  node scripts/bi_ops_cli.mjs ask --text "今天全部店铺销售额是多少"
+  node scripts/bi_ops_cli.mjs query --text "今天全部店铺销售额是多少" --out <结果.json>
+  node scripts/bi_ops_cli.mjs query --text "找出近7天曝光3000以上、点击率4%以上、销量0的链接" --sections linksData --out <结果.json>
+  node scripts/bi_ops_cli.mjs ask --text "今天全部店铺销售额是多少" --out <结果.json>  # 旧兼容别名，同样不调用模型
   node scripts/bi_ops_cli.mjs chats
   node scripts/bi_ops_cli.mjs chat --text "把 DX 的 PA4-6L 库存改成 30"
   node scripts/bi_ops_cli.mjs chat --chat-session <id> --text "先做系统检查，不要提交"
@@ -322,6 +326,8 @@ Options:
   --store-truth    底层 OpenAPI executor 测试用；默认 config/store_account_truth.json
   --category       publish-standard/search-product 用；末级分类 ID
   --page-size      search-product 用；最大 10
+  --sections       query 用；显式指定 rankings / linksData / productState / profit / inventoryTrend / orders / priceScatter / afterSales / comments / rtvData / waybills 等数据分区
+  --out            query 用；把完整结构化数据写入文件，终端只返回路径和数据口径
 
 Safety:
   - 密码只用于 login 请求，不写入 session 文件。
@@ -338,7 +344,8 @@ Safety:
   - openapi-call 是目录驱动 JSON 兜底工具；GET 用 --query-json/--query-file，POST 用 --body-json/--body-file；文件上传/WebHook 会被阻断，真实 execute 只能在云端边界内使用。
   - openapi-catalog-plan 只读取本地官方目录/schema，输出全量接口归位矩阵，不联网、不启用 WebHook receiver。
   - 所有任务创建/预检/执行/审计都走云端账号权限和审计。
-  - ask/chat 通过同一 BI 账号、会话归属、模型限流和审计边界；profile 只影响理解深度，不改变写权限。
+  - query 通过同一 BI 账号直接读取确定性的 BI 数据分区，返回 aiInvoked=false；当前 Codex 自己筛选、计算和说明，不调用云端问数模型。
+  - ask 是 query 的旧兼容别名，同样不会调用模型；只读需求不得使用 chat。chat 只用于受控运营动作会话或用户明确要求测试网页会话能力。
   - 每个云端业务命令开始前会用 ETag 检查负责人规则 manifest；有更新才原子下载，普通账号没有反向发布权限。
   - 受管安装还会在业务命令前检查 CLI release；有新版本时校验逐文件和 bundle SHA256，原子安装后重启同一命令。
   - execute 仍需服务端确认任务已预检通过，并且确认文本精确匹配。
@@ -441,7 +448,7 @@ async function request(args, pathname, {method = 'GET', body, auth = true} = {})
 }
 
 const KNOWLEDGE_CHECK_COMMANDS = new Set([
-  'doctor', 'me', 'capabilities', 'ask', 'chats', 'jobs', 'job', 'wait-job', 'wait_job',
+  'doctor', 'me', 'capabilities', 'query', 'ask', 'chats', 'jobs', 'job', 'wait-job', 'wait_job',
   'chat', 'tasks', 'create', 'preflight', 'execute', 'resolve', 'audit',
   'upload-pic', 'upload_pic', 'transform-pic', 'transform_pic',
   'prepare-publish', 'prepare_publish',
@@ -1146,6 +1153,47 @@ async function waitForLinkOpsJob(args, jobId) {
   throw error;
 }
 
+async function runDirectBiQuery(args, {legacyAlias = false} = {}) {
+  if (!args.text) throw new Error(`${legacyAlias ? 'ask' : 'query'} requires --text`);
+  const query = new URLSearchParams({q: args.text, source: 'codex_desktop_cli'});
+  const stores = [...new Set([...(args.stores || []), ...(args.sourceStores || [])])];
+  if (stores.length) query.set('stores', stores.join(','));
+  if (args.sections.length) query.set('sections', [...new Set(args.sections)].join(','));
+  const {json} = await request(args, `/api/bi/query-data?${query.toString()}`);
+  const output = {
+    ...json,
+    cli: {
+      command: legacyAlias ? 'ask' : 'query',
+      legacyAlias,
+      note: legacyAlias
+        ? 'ask 已改为 query 兼容别名；本次没有调用云端问数模型'
+        : '当前 Codex 应直接分析 data，不得再转发给其他问数模型',
+    },
+  };
+  if (!args.outputFile) {
+    print(output);
+    return;
+  }
+  await fs.mkdir(path.dirname(args.outputFile), {recursive: true});
+  await fs.writeFile(args.outputFile, `${JSON.stringify(output, null, 2)}\n`, {encoding: 'utf8', mode: 0o600});
+  try { await fs.chmod(args.outputFile, 0o600); } catch {}
+  print({
+    ok: true,
+    mode: output.mode,
+    readOnly: true,
+    aiInvoked: false,
+    savedTo: args.outputFile,
+    question: output.question,
+    generatedAt: output.generatedAt,
+    salesUpdatedAt: output.salesUpdatedAt,
+    linkUpdatedAt: output.linkUpdatedAt,
+    sections: output.sections,
+    scope: output.scope,
+    rowCounts: output.rowCounts,
+    cli: output.cli,
+  });
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.command === 'version') {
@@ -1292,13 +1340,12 @@ async function main() {
     print(json, !args.json);
     return;
   }
+  if (args.command === 'query') {
+    await runDirectBiQuery(args);
+    return;
+  }
   if (args.command === 'ask') {
-    if (!args.text) throw new Error('ask requires --text');
-    const {json} = await request(args, '/api/ops-agent/ask', {
-      method: 'POST',
-      body: {question: args.text, profile: args.profile || undefined, source: 'codex_desktop_cli'},
-    });
-    print(json);
+    await runDirectBiQuery(args, {legacyAlias: true});
     return;
   }
   if (args.command === 'chats') {

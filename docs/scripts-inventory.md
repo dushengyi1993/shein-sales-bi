@@ -613,7 +613,7 @@
 - `lib/owner_knowledge_distribution.mjs` / `scripts/validate_owner_knowledge_distribution.mjs`：生成不含来源/设备/凭证的 immutable GitHub bundle、manifest、hash 校验和专用分支 publisher；Git 调用有界超时，publisher 使用带 nonce/PID/心跳的唯一 ticket 队列。
 - `lib/cross_process_ticket_lock.mjs`：缓存与 Git publisher 共用的跨进程 ticket 锁；每个 contender 使用不可复用文件名，死亡 ticket 独立清理，避免固定 recovery mutex 自身成为永久死锁。
 - `lib/partner_knowledge_cache.mjs`：合伙人 CLI 的 ETag 版本检查、最低 CLI 版本门禁、bundle hash 校验，以及带心跳/进程存活校验、不可变 generation 和写前防回滚的本地原子缓存。
-- `config/partner_cli_package.json` / `scripts/build_partner_bi_ops_cli_package.ps1` / `scripts/install_partner_bi_ops_cli.ps1`：定义、构建和安装不含生产凭证的最小合伙人 CLI 包；安装到用户目录的版本化路径，不在任务中途自改代码。`2026.07.16.1` 起包内包含 `config/store_style_profiles.json`；`2026.07.21.1` 起 Skill 要求经营数据只读问题优先走 `ask`，禁止在 BI 查询失败时转去浏览器抓数或要求用户开启 Chrome 远程调试。
+- `config/partner_cli_package.json` / `scripts/build_partner_bi_ops_cli_package.ps1` / `scripts/install_partner_bi_ops_cli.ps1`：定义、构建和安装不含生产凭证的最小合伙人 CLI 包；安装到用户目录的版本化路径，不在任务中途自改代码。`2026.07.16.1` 起包内包含 `config/store_style_profiles.json`；`2026.07.28.1` 起所有 CLI 只读问数统一走无模型 `/api/bi/query-data`，由当前 Codex 直接分析结构化 BI 数据，旧 `ask` 仅为 `query` 兼容别名，禁止转去 BI/飞书问数模型、浏览器抓数或 Chrome 远程调试。
 - `scripts/serve_bi_portal.mjs`：网页自动运营主服务；生产通过 `SHEIN_LINK_OPS_STORE=postgres` 使用行级 runtime，数据库不可用时失败关闭。
 - `scripts/bi_ops_cli.mjs`：Owner/合伙人 CLI；云端业务命令前自动刷新负责人规则，`knowledge-status` 可做显式诊断；`chat/jobs/job/wait-job/--profile/--scope-all` 均不扩大写权限。
 - `scripts/bi_ops_intent_planner.mjs` / `lib/bi_ops_intent_planner.mjs`：严格 JSON schema 的结构化意图规划；只理解和规划，不执行 SHEIN 写。

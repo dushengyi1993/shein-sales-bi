@@ -21,9 +21,28 @@ When the current Codex agent is asked to investigate, verify, calculate, repair,
 - SHEIN OpenAPI for fresh platform state;
 - Webhook receipts, systemd, logs, and repository code for runtime diagnosis.
 
-**Do not call `ask`, BI chat, the Feishu Q&A bot, or another LLM as an intermediary.** The current agent is already responsible for answering the user and must not delegate fact-finding to another AI.
+**Do not call BI chat, the Feishu Q&A bot, or another LLM as an intermediary.** The current agent is already responsible for answering the user and must not delegate fact-finding to another AI.
 
-`ask` or `chat` is allowed only when the user explicitly asks to test or diagnose the BI conversation surface, routing, permissions, or partner experience. In that case its response is test output, not authoritative evidence, and must be checked against the underlying source when factual accuracy matters.
+For every read-only business request from the owner, a partner, or another operator, use the managed deterministic query command:
+
+```powershell
+$result = Join-Path $env:TEMP ("shein-bi-query-" + [guid]::NewGuid().ToString("N") + ".json")
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" query --text '<the user request verbatim>' --out $result
+```
+
+Then inspect `$result`, calculate/filter its structured `data` in the **current Codex task**, and answer the user. A valid response reports `mode=direct-bi-data` and `aiInvoked=false`.
+
+- The legacy CLI command `ask` is now only an alias of `query`; it no longer invokes the cloud Q&A model. Use `query` in all new work.
+- Do not use `chat` for read-only questions. `chat` is for controlled operational conversations, or for an explicit user-requested diagnosis of the web conversation product.
+- When automatic section selection is not enough, rerun with `--sections`. Useful sections include:
+  - sales/rankings: `rankings`, and `liveSalesToday` for current-day events;
+  - links, traffic, prices and shelf state: `linksData,productState,productTrafficDaily`;
+  - profit/cost/storage: `profit`;
+  - inventory/depletion/replenishment: `inventoryTrend`;
+  - order/unit-price details: `orders,priceScatter`;
+  - returns/refunds: `afterSales`; reviews: `comments`; RTV: `rtvData`; logistics: `waybills`.
+- Use `--stores` only to narrow the logged-in account's existing read scope; it never expands permissions.
+- If the endpoint reports an incomplete or stale required section, report that exact data failure. Do not fall back to a question bot, browser scraping, Chrome remote debugging, or a local V3 export.
 
 - Cloud BI is the source of truth. Do not claim that a local V3/export file is required for an ordinary BI query.
 - Never replace a failed direct query with browser scraping, `web-access`, SHEIN login automation, Chrome remote debugging, or a request that the user enable CDP.

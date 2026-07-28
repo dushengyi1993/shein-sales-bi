@@ -19,6 +19,7 @@ import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import crypto from 'node:crypto';
 import os from 'node:os';
+import {gzipSync} from 'node:zlib';
 import pg from 'pg';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
 import {executeUploadPic} from '../lib/openapi_adapters/upload_pic.mjs';
@@ -58,6 +59,11 @@ import {
   modelProfilePublicSummary,
   selectBiOpsModelProfile,
 } from '../lib/bi_ops_model_policy.mjs';
+import {
+  buildBiOpsDirectQueryResponse,
+  planBiOpsDirectQuerySections,
+} from '../lib/bi_ops_direct_query.mjs';
+import {loadBiOpsQueryData} from '../lib/bi_ops_query_context.mjs';
 import {createConfiguredLinkOpsStoreGateway} from '../lib/link_ops_store_gateway.mjs';
 import {createLinkOpsJobWorker} from '../lib/link_ops_job_worker.mjs';
 import {linkOpsPayloadHash} from '../lib/link_ops_repository.mjs';
@@ -7856,6 +7862,60 @@ async function askReadonlyOpsAgent(question, options = {}) {
   };
 }
 
+async function loadDirectBiQuery(args, root, actor, question, options = {}) {
+  const plan = planBiOpsDirectQuerySections(question, {sections: options.sections || []});
+  const preparation = [];
+  for (const section of plan.sections) {
+    const startedAt = Date.now();
+    try {
+      const result = await loadBiSection(args, root, section, {
+        force: false,
+        allowGenerate: options.allowGenerate !== false,
+        allowStale: false,
+        gzip: false,
+      });
+      preparation.push({
+        section,
+        status: Number(result?.status || 0),
+        ok: Number(result?.status || 0) >= 200 && Number(result?.status || 0) < 300,
+        durationMs: Date.now() - startedAt,
+        error: String(result?.payload?.error || ''),
+      });
+    } catch (error) {
+      preparation.push({
+        section,
+        status: 500,
+        ok: false,
+        durationMs: Date.now() - startedAt,
+        error: String(error?.message || error).slice(0, 500),
+      });
+    }
+  }
+
+  const loaded = await loadBiOpsQueryData({
+    question,
+    dataPath: path.join(root, 'data.json'),
+    sectionsDir: path.join(root, 'sections'),
+    sections: plan.sections,
+    maxCoreBytes: 64 * 1024 * 1024,
+    maxSectionBytes: 96 * 1024 * 1024,
+  });
+  const response = buildBiOpsDirectQueryResponse({
+    question,
+    sections: plan.sections,
+    data: loaded.data,
+    meta: loaded.meta,
+    readStores: normalizeStoreList(actor?.readStores || ['*']),
+    requestedStores: options.stores || [],
+  });
+  response.plan = {
+    mode: plan.mode,
+    intent: plan.intent,
+  };
+  response.sections.preparation = preparation;
+  return response;
+}
+
 async function readBodyJson(req, limitBytes = 1024 * 1024) {
   const raw = await readBodyText(req, limitBytes);
   return raw ? JSON.parse(raw) : {};
@@ -7945,6 +8005,25 @@ let firstRunCheckInFlight = false;
 
 function sendJson(res, status, value, headers = {}) {
   send(res, status, JSON.stringify(value, null, 2), {'Content-Type': 'application/json; charset=utf-8', ...headers});
+}
+
+function sendLargeJson(req, res, status, value, headers = {}) {
+  const body = Buffer.from(JSON.stringify(value), 'utf8');
+  if (body.length >= 64 * 1024 && acceptsGzip(req.headers['accept-encoding'])) {
+    const compressed = gzipSync(body, {level: 6});
+    return send(res, status, compressed, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Encoding': 'gzip',
+      'Content-Length': String(compressed.length),
+      'Vary': 'Accept-Encoding',
+      ...headers,
+    });
+  }
+  return send(res, status, body, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': String(body.length),
+    ...headers,
+  });
 }
 
 function agentErrorHttpDetails(error) {
@@ -9047,6 +9126,83 @@ async function main() {
       }
       if (url.pathname === '/api/auth/me') {
         return sendJson(res, actor ? 200 : 401, {ok: Boolean(actor), user: publicActor(actor)});
+      }
+      if (url.pathname === '/api/bi/query-data') {
+        if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        const question = String(url.searchParams.get('q') || url.searchParams.get('question') || '').normalize('NFKC').trim().slice(0, 4_000);
+        if (!question) {
+          return sendJson(res, 400, {
+            ok: false,
+            code: 'BI_QUERY_QUESTION_REQUIRED',
+            error: 'query-data requires q',
+          }, {'Cache-Control': 'no-store'});
+        }
+        const sections = [
+          ...url.searchParams.getAll('section'),
+          ...String(url.searchParams.get('sections') || '').split(/[,\s，、]+/),
+        ].map(value => String(value || '').trim()).filter(Boolean);
+        const stores = [
+          ...url.searchParams.getAll('store'),
+          ...String(url.searchParams.get('stores') || '').split(/[,\s，、]+/),
+        ].map(value => String(value || '').trim()).filter(Boolean);
+        const startedAt = Date.now();
+        try {
+          const result = await loadDirectBiQuery(args, root, actor || internalActor(), question, {
+            sections,
+            stores,
+            allowGenerate: allowGenerateSections,
+          });
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'bi-direct-query',
+            actor,
+            ...requestMeta(req),
+            questionPreview: question.slice(0, 240),
+            requestedSections: result.sections.requested,
+            loadedSections: result.sections.loaded,
+            scope: result.scope,
+            rowCounts: result.rowCounts,
+            durationMs: Date.now() - startedAt,
+            ok: result.ok,
+            aiInvoked: false,
+          });
+          if (!result.ok) {
+            const {data: _incompleteData, ...diagnostic} = result;
+            return sendJson(res, 503, {
+              ...diagnostic,
+              ok: false,
+              code: 'BI_QUERY_DATA_INCOMPLETE',
+              error: '所需 BI 数据分区未完整加载，未返回不完整结果',
+            }, {'Cache-Control': 'private, no-store'});
+          }
+          return sendLargeJson(req, res, 200, result, {'Cache-Control': 'private, no-store'});
+        } catch (error) {
+          const forbidden = String(error?.code || '') === 'BI_QUERY_STORE_FORBIDDEN';
+          const invalid = ['BI_QUERY_SECTION_UNSUPPORTED', 'BI_QUERY_TOO_MANY_SECTIONS'].includes(String(error?.code || ''));
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'bi-direct-query',
+            actor,
+            ...requestMeta(req),
+            questionPreview: question.slice(0, 240),
+            durationMs: Date.now() - startedAt,
+            ok: false,
+            aiInvoked: false,
+            errorCode: String(error?.code || 'BI_QUERY_FAILED'),
+            error: String(error?.message || error).slice(0, 500),
+          });
+          return sendJson(res, forbidden ? 403 : invalid ? 400 : 503, {
+            ok: false,
+            code: String(error?.code || 'BI_QUERY_FAILED'),
+            error: forbidden
+              ? '当前账号没有所选店铺的只读权限'
+              : invalid
+                ? String(error?.message || '查询分区不受支持')
+                : 'BI 只读数据暂时不可用',
+            ...(Array.isArray(error?.allowedStores) ? {allowedStores: error.allowedStores} : {}),
+            ...(Array.isArray(error?.deniedStores) ? {deniedStores: error.deniedStores} : {}),
+          }, {'Cache-Control': 'private, no-store'});
+        }
       }
       if (url.pathname === '/api/bi/live-events') {
         if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});

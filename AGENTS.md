@@ -12,6 +12,14 @@ When the user asks the current Codex agent to investigate, verify, calculate, re
 - A failed direct query must be reported as a direct-access failure. Do not hide it by falling back to `ask`, browser scraping, or another model.
 - Controlled CLI commands remain valid for preflight and authorized operations, but all factual conclusions and post-write readback must come from the underlying authoritative source.
 
+This applies equally to every partner/operator using the managed CLI:
+
+- For **any read-only business request**, call `shein-bi-ops query --text "<original request>" --out <json-file>`, then inspect and calculate from the returned structured `data` in the current Codex task.
+- `query` selects and loads deterministic cloud BI sections under the logged-in account's read scope and returns `aiInvoked=false`; it does not call the BI Q&A bot, Feishu bot, Codex gateway, or another LLM.
+- The legacy CLI command `ask` is only a compatibility alias for `query` and no longer calls `/api/ops-agent/ask`. New instructions must use `query`.
+- Do not use `chat` for a read-only question. `chat` is reserved for controlled operations or an explicit test of the web conversation product.
+- If automatic section selection is insufficient, rerun `query` with explicit `--sections`; do not fall back to a question bot or browser scraping.
+
 For partner/operator image work:
 
 - The current user's explicit instruction and a clearly named reviewed source such as `已审可用` are authoritative business approvals.

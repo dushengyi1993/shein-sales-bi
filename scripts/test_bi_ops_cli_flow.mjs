@@ -18,6 +18,68 @@ const tmpBase = path.join(ROOT, 'tmp');
 await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'bi-ops-cli-flow-smoke-'));
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const portalDir = path.join(tmpRoot, 'portal');
+const portalSectionsDir = path.join(portalDir, 'sections');
+const portalGeneration = '2026-07-28T12:00:00.000+08:00';
+await fs.mkdir(portalSectionsDir, {recursive: true});
+await fs.writeFile(path.join(portalDir, 'index.html'), '<!doctype html><title>CLI flow portal</title>', 'utf8');
+await fs.writeFile(path.join(portalDir, 'data.json'), JSON.stringify({
+  generatedAt: portalGeneration,
+  dates: {
+    salesDate: '2026-07-28',
+    salesUpdatedAt: '2026-07-28T11:59:00.000+08:00',
+    linkDate: '2026-07-28',
+    linkUpdatedAt: '2026-07-28T08:30:00.000+08:00',
+  },
+  stores: [
+    {store_key: 'DX', label: 'DX 店'},
+    {store_key: 'HL', label: 'HL 店'},
+  ],
+  productDisplayNames: {'PA4-6L': '测试商品'},
+  __sections: {
+    mode: 'api',
+    generatedAt: portalGeneration,
+    keys: ['rankings', 'liveSalesToday'],
+    loaded: ['core'],
+  },
+}), 'utf8');
+for (const [section, data] of Object.entries({
+  rankings: {
+    rankings: {
+      salesSummary: [{period_key: 'day', start_date: '2026-07-28', end_date: '2026-07-28', gross_sales_sar: 300, sales_sar: 300, gross_orders: 3, orders: 3, gross_quantity: 3, quantity: 3}],
+      dailyStores: [
+        {date: '2026-07-28', store_key: 'DX', gross_sales_sar: 100, sales_sar: 100, gross_orders: 1, orders: 1, gross_quantity: 1, quantity: 1},
+        {date: '2026-07-28', store_key: 'HL', gross_sales_sar: 200, sales_sar: 200, gross_orders: 2, orders: 2, gross_quantity: 2, quantity: 2},
+      ],
+      dailyProducts: [{date: '2026-07-28', standard_goods_sn: 'PA4-6L', gross_sales_sar: 300, sales_sar: 300, gross_orders: 3, orders: 3, gross_quantity: 3, quantity: 3}],
+      dailyStoreProducts: [
+        {date: '2026-07-28', store_key: 'DX', standard_goods_sn: 'PA4-6L', gross_sales_sar: 100, sales_sar: 100},
+        {date: '2026-07-28', store_key: 'HL', standard_goods_sn: 'PA4-6L', gross_sales_sar: 200, sales_sar: 200},
+      ],
+    },
+  },
+  liveSalesToday: {
+    liveSalesToday: {
+      date: '2026-07-28',
+      generatedAt: portalGeneration,
+      accountingPending: false,
+      items: [
+        {store_key: 'DX', order_no: 'DX-1', standard_goods_sn: 'PA4-6L', gross_revenue_sar: 100},
+        {store_key: 'HL', order_no: 'HL-1', standard_goods_sn: 'PA4-6L', gross_revenue_sar: 200},
+      ],
+      profitStoreRows: [],
+    },
+  },
+})) {
+  await fs.writeFile(path.join(portalSectionsDir, `${section}.json`), JSON.stringify({
+    ok: true,
+    section,
+    generatedAt: portalGeneration,
+    cachedAt: '2026-07-28T04:00:00.000Z',
+    data,
+    run: null,
+  }), 'utf8');
+}
 
 async function getFreePort() {
   return await new Promise((resolve, reject) => {
@@ -113,6 +175,7 @@ const server = spawn(process.execPath, [
   'scripts/serve_bi_portal.mjs',
   '--host', '127.0.0.1',
   '--port', String(port),
+  '--dir', portalDir,
   '--auth-file', authFile,
   '--access-roles-file', accessRolesFile,
   '--htpasswd-file', htpasswdFile,
@@ -226,6 +289,36 @@ try {
   check('operator doctor has checks', result.summary.operatorDoctorChecks, n => n >= 5);
   check('operator doctor sees logged-in user', result.summary.operatorDoctorUser, 'operator_cli_smoke');
   check('operator doctor does not enable safe write', result.summary.operatorDoctorSafeWrite, false);
+
+  const directQueryFile = path.join(tmpRoot, 'operator-direct-query.json');
+  const operatorDirectQuery = await runCli([
+    '--session-file', operatorSessionFile,
+    'query',
+    '--text', '今天全部店铺销售额和订单数是多少',
+    '--out', directQueryFile,
+  ]);
+  expectCliOk('operator direct query', operatorDirectQuery);
+  check('operator direct query invokes no AI', operatorDirectQuery.json?.aiInvoked, false);
+  check('operator direct query writes result file', fssync.existsSync(directQueryFile), true);
+  const directQueryData = JSON.parse(await fs.readFile(directQueryFile, 'utf8'));
+  check('operator direct query mode', directQueryData.mode, 'direct-bi-data');
+  check('operator direct query response marks no AI', directQueryData.aiInvoked, false);
+  check('operator direct query loads rankings', directQueryData.sections?.loaded || [], rows => rows.includes('rankings'));
+  check('operator direct query loads live sales', directQueryData.sections?.loaded || [], rows => rows.includes('liveSalesToday'));
+  check('operator direct query preserves complete store rows', directQueryData.data?.rankings?.dailyStores?.length, 2);
+
+  const legacyAskFile = path.join(tmpRoot, 'operator-legacy-ask.json');
+  const operatorLegacyAsk = await runCli([
+    '--session-file', operatorSessionFile,
+    'ask',
+    '--text', '今天全部店铺销售额和订单数是多少',
+    '--out', legacyAskFile,
+  ]);
+  expectCliOk('operator legacy ask alias', operatorLegacyAsk);
+  check('legacy ask alias invokes no AI', operatorLegacyAsk.json?.aiInvoked, false);
+  const legacyAskData = JSON.parse(await fs.readFile(legacyAskFile, 'utf8'));
+  check('legacy ask is direct data', legacyAskData.mode, 'direct-bi-data');
+  check('legacy ask is marked compatibility alias', legacyAskData.cli?.legacyAlias, true);
 
   const operatorDoctorRetireDx = await runCli(['--session-file', operatorSessionFile, 'doctor', '--operation', 'retire_link', '--stores', 'DX']);
   expectCliOk('operator doctor retire DX', operatorDoctorRetireDx);
@@ -358,6 +451,10 @@ try {
   check('all explicit and chat tasks carry owner knowledge snapshot', tasks.tasks || [], rows => Array.isArray(rows) && rows.every(row => Boolean(row?.ownerKnowledgePolicy?.fingerprint)));
   check('partner knowledge manifest cached atomically', fssync.existsSync(path.join(knowledgeCacheDir, 'manifest.json')), true);
   check('audit lines from CLI flow >= 12', result.summary.auditLines, n => n >= 12);
+  check('direct queries are audited without agent route', auditText, text => {
+    const directCount = (String(text).match(/"type":"bi-direct-query"/g) || []).length;
+    return directCount >= 2 && !String(text).includes('"type":"ops-agent-ask"');
+  });
 
   result.ok = result.checks.every(x => x.pass);
 } finally {

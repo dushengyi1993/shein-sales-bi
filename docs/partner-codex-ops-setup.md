@@ -30,7 +30,7 @@ npm run partner-cli:package
 
 产物位于忽略目录 `outputs/releases/`，同时生成 `.sha256`。压缩包只包含远程 CLI、负责人规则校验模块、安装脚本和本说明，不包含 `.env`、session、店铺 profile、服务器脚本或任何凭证。
 
-最小包保障 `login/doctor/me/capabilities/ask/chat/jobs/tasks/create/preflight/execute/audit/resolve`、本地 `plan-images`、同任务 `prepare-publish` 以及走云端的图片上传/转换。营销 CSV 候选生成、开发 smoke 等工具仍需要完整项目仓库，不作为合伙人日常必需能力。
+最小包保障 `login/doctor/me/capabilities/query/chat/jobs/tasks/create/preflight/execute/audit/resolve`、本地 `plan-images`、同任务 `prepare-publish` 以及走云端的图片上传/转换。旧 `ask` 仅保留为 `query` 的无模型兼容别名。营销 CSV 候选生成、开发 smoke 等工具仍需要完整项目仓库，不作为合伙人日常必需能力。
 
 ## 电脑安装
 
@@ -114,7 +114,7 @@ node scripts/bi_ops_cli.mjs jobs --scope-all  # 仅 Owner 全局只读
 - `--profile fast|balanced|deep|owner` 只改变理解深度。默认分层是 Luna low 20 秒、Terra low 45 秒、Terra medium 90 秒、Sol high 300 秒、Owner Sol high 600 秒；`xhigh` 只在 Owner 人工明确要求时使用，网页不启用 max/ultra。
 - 后台 `intent_plan` job 只补全店铺、商品、参数、歧义和风险，不直接授权或提交 SHEIN。终态为 `succeeded`、`failed` 或 `uncertain_write`；后两者先看详情，不要重复创建动作。
 - 飞书问数已主动暂停，生产 `shein-bi-lark-sales-qa.service` 必须保持 `disabled + inactive`；团队网页和 Owner CLI 不依赖它。
-- Owner CLI 的经营问数读取云端 BI section，不依赖伙伴电脑里的完整项目或本地 V3 报表。近 7 天链接多条件筛选（曝光、点击率、销量）由服务端确定性计算：点击率按 `c7_goods_uv / c7_eps_uv` 重算，支持全部 19 店和按店筛选；链接 section 与小时级销售 core 代次不同时，只要双方声明的链接业务日期完全一致即可读取，不能把正常的日更链接数据误判为缺报表。不得误路由为“今日销售额”，也不得把“不要读取认证信息”这种安全约束误判为索取凭据。
+- Owner/合伙人 CLI 的经营问数统一使用 `query` 读取云端 BI section，不依赖伙伴电脑里的完整项目或本地 V3 报表，也不再把问题转给云端问数模型。`query` 只按关键词确定性选择数据分区并返回完整结构化行，响应固定标明 `aiInvoked=false`；当前电脑上的 Codex 自己完成筛选、计算和说明。近 7 天链接多条件筛选（曝光、点击率、销量）应直接用链接行计算，点击率按 `c7_goods_uv / c7_eps_uv` 重算，支持全部 19 店和按店筛选；链接 section 与小时级销售 core 代次不同时，只有业务日期兼容规则通过才可读取，不能把正常日更链接数据误判为缺报表。
 
 ### 负责人规则如何传给团队
 
@@ -187,6 +187,27 @@ node scripts/bi_ops_cli.mjs tasks --pretty
 ## 日常怎么使用
 
 每次 `chat/create/preflight/execute/prepare-publish` 等业务命令会先检查 CLI release，再执行轻量规则检查。release 和规则都支持 ETag；无变化只返回 304，不拉整仓库，也不产生模型 Token。`execute` 发现云端 active bundle 尚未同步到 GitHub 时会暂时停住，稍后重试即可。
+
+### 所有只读问数：当前 Codex 直接查
+
+无论是负责人、合伙人还是普通运营，只要需求不修改 SHEIN，就不能把问题再丢给 BI 问数机器人或飞书机器人。让当前 Codex 运行：
+
+```powershell
+$out = Join-Path $env:TEMP ("shein-bi-query-" + [guid]::NewGuid().ToString("N") + ".json")
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" query --text "找出点击率4%以上、近7天曝光3000以上且近7天销量为0的链接" --out $out
+```
+
+命令会把登录账号有权读取的结构化 BI 数据写入 `$out`，终端只显示文件路径、数据时间、加载分区和行数。当前 Codex 随后直接读取文件、按用户条件计算并回答。它不得调用 `ask`、`chat`、飞书问数、浏览器抓数或另一个模型。
+
+自动分区不够时可以显式指定：
+
+```powershell
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" query --text "原始问题" --sections linksData,productState,productTrafficDaily --out $out
+```
+
+常用分区：销售/排行 `rankings`；今日实时订单与利润事件 `liveSalesToday`；链接/折后价/上下架 `linksData,productState`；利润/成本/仓储 `profit`；库存/去化/补货 `inventoryTrend`；订单成交价 `orders,priceScatter`；售后 `afterSales`；评论 `comments`；RTV `rtvData`；物流 `waybills`。
+
+旧命令 `ask` 为避免老口令失效仍可运行，但它现在只是 `query` 的兼容别名，同样返回 `aiInvoked=false`，不会调用 `/api/ops-agent/ask`。新口令统一写 `query`。`chat` 只用于需要形成受控运营任务的会话，不能用于普通问数。
 
 ### 推荐方式：直接让 Codex 调用工具
 

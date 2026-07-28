@@ -51,6 +51,7 @@ const tests = [
   'scripts/test_bi_ops_model_policy.mjs',
   'scripts/test_bi_ops_intent_planner.mjs',
   'scripts/test_bi_ops_query_context.mjs',
+  'scripts/test_bi_ops_direct_query.mjs',
   'scripts/test_owner_knowledge_policy.mjs',
   'scripts/test_owner_knowledge_service.mjs',
   'scripts/test_owner_knowledge_local_collector.mjs',
