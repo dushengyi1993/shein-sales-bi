@@ -32,7 +32,11 @@ assert.match(source, /function adaptivePriceScale\(values,maxBins=8\)/, 'price c
 assert.match(source, /\(N\(v\)-minPrice\)\/scale\.span/, 'scatter y-axis starts at the actual minimum transaction price');
 assert.match(source, /bestText=priceBandText\(best\)/, 'best-selling price band uses the same adaptive boundaries');
 assert.doesNotMatch(source, /priceMax=niceCeil\(maxPrice\)/, 'scatter must not round its upper bound to coarse tens or hundreds');
-assert.match(source, /function sourceState\(name,rows=\[\]\)\{const st=SS\[name\]\?\.status\|\|'idle';if\(!rows\.length&&st==='error'\)return'unavailable'/, 'first-load section errors are represented as unavailable rather than zero-like data');
+assert.match(source, /function sourceState\(name,rows=\[\]\)\{const state=SS\[name\]\|\|\{\},st=state\.status\|\|'idle',expected=sectionExpectedAt\(\),actual=String\(state\.generatedAt\|\|''\);if\(expected&&actual&&actual!==expected\)return st==='error'\?'unavailable':'loading'/, 'a section from another core generation is never rendered as a current business number');
+assert.match(source, /function clearSectionPayload\(n,generatedAt=''\)/, 'core transitions clear data owned by an older section generation');
+assert.match(source, /clearSectionPayload\(name,generatedAt\);SS\[name\]=\{\.\.\.state,status:'idle'/, 'invalidating a section removes its incompatible payload before rendering');
+assert.match(source, /if\(currentExpected&&responseGeneratedAt&&responseGeneratedAt!==currentExpected\)\{stale=true;versionWarning=.*clearSectionPayload\(n,currentExpected\).*return true\}/, 'an old in-flight response is quarantined instead of being merged after a new core arrives');
+assert.match(source, /merge\(j,n\)/, 'accepted section payloads record their owning section and generation');
 assert.match(source, /function unavailableValue\(\)\{return'<span class=\"metric-unavailable\"><b>—<\/b><small>数据不可用<\/small><\/span>'\}/, 'unavailable KPIs must show an em dash and explicit unavailable copy');
 assert.match(source, /function sectionFailureNotice\(ns\).*data-load=.*role=\"alert\".*受影响 KPI 不会显示为 0/, 'failed sections have an actionable top-level alert with retry controls');
 assert.match(source, /缓存写入 \$\{fmtStamp\(st\.cachedAt\|\|st\.generatedAt\)\}；页面最新/, 'cache fallback always exposes its cache timestamp and current-page timestamp');
@@ -49,5 +53,9 @@ assert.match(server, /pendingSection: true/,
   'an async first-generation cache miss must be pending, never a successful empty business result');
 assert.doesNotMatch(server, /data: \{\}, refreshScheduled, cacheHit: false/,
   'the server must not represent a missing section cache as valid empty data');
+assert.match(server, /const key = `\$\{root\}\|\$\{section\}\|\$\{generatedAt \|\| ''\}`;/,
+  'normal, warmup, and forced builders must share one single-flight key per section generation');
+assert.doesNotMatch(server.match(/function scheduleBiSectionBackgroundGeneration[\s\S]*?\n\}/)?.[0] || '', /\$\{force \? '\|force' : ''\}/,
+  'a forced refresh must not create a second concurrent producer key');
 
 console.log('bi_client_resilience: refresh, version fallback, and history contracts passed');

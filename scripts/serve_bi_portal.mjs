@@ -6849,7 +6849,12 @@ function withBiSectionRefreshFailureHeaders(root, section, headers = {}) {
 
 function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt, options = {}) {
   const force = options.force === true;
-  const key = `${root}|${section}|${generatedAt || ''}${force ? '|force' : ''}`;
+  // One section/generation may have only one producer. Previously force
+  // refreshes used a second "|force" key, so a warmup and several browser/SSE
+  // refreshes could rebuild the same cache concurrently and publish it in a
+  // different order. The rerun marker below already preserves one coalesced
+  // force refresh when data changes during an active build.
+  const key = `${root}|${section}|${generatedAt || ''}`;
   if (biSectionInFlight.has(key)) {
     if (force && !biSectionForceRerun.has(key)) {
       biSectionForceRerun.add(key);
