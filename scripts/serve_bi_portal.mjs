@@ -102,6 +102,7 @@ const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
 const SHEIN_OPENAPI_LOCAL_CONFIG_FILE = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
 const BI_OPS_WRITE_WHITELIST_FILE = process.env.SHEIN_BI_OPS_WRITE_WHITELIST_FILE || path.join(ROOT, 'config', 'bi_ops_write_whitelist.local.json');
 const DEFAULT_BI_SESSION_TTL_DAYS = 90;
+const DEFAULT_BI_PARTNER_CLI_SESSION_TTL_DAYS = 365;
 const partnerCliReleaseStore = createPartnerCliReleaseStore({
   releaseRoot: process.env.SHEIN_PARTNER_CLI_RELEASE_DIR || '',
   fallbackSourceRoot: ROOT,
@@ -125,6 +126,7 @@ function parseArgs(argv) {
     htpasswdFile: process.env.SHEIN_BI_HTPASSWD_FILE || '/srv/shein-bi/secrets/bi_basic_auth.htpasswd',
     sessionSecretFile: process.env.SHEIN_BI_SESSION_SECRET_FILE || path.join(ROOT, 'state', 'bi_portal_session_secret.local'),
     sessionTtlDays: Number(process.env.SHEIN_BI_SESSION_TTL_DAYS || DEFAULT_BI_SESSION_TTL_DAYS),
+    partnerCliSessionTtlDays: Number(process.env.SHEIN_BI_PARTNER_CLI_SESSION_TTL_DAYS || DEFAULT_BI_PARTNER_CLI_SESSION_TTL_DAYS),
     auditFile: path.join(ROOT, 'logs', 'bi_portal_action_audit.jsonl'),
     distro: 'Ubuntu-24.04',
     container: 'shein-warehouse-db',
@@ -149,6 +151,7 @@ function parseArgs(argv) {
     else if (a === '--htpasswd-file') args.htpasswdFile = path.resolve(argv[++i]);
     else if (a === '--session-secret-file') args.sessionSecretFile = path.resolve(argv[++i]);
     else if (a === '--session-ttl-days') args.sessionTtlDays = Number(argv[++i]);
+    else if (a === '--partner-cli-session-ttl-days') args.partnerCliSessionTtlDays = Number(argv[++i]);
     else if (a === '--audit-file') args.auditFile = path.resolve(argv[++i]);
     else if (a === '--distro') args.distro = argv[++i];
     else if (a === '--container') args.container = argv[++i];
@@ -163,7 +166,11 @@ function parseArgs(argv) {
   if (!Number.isFinite(args.sessionTtlDays) || args.sessionTtlDays < 1 || args.sessionTtlDays > 365) {
     throw new Error(`Invalid --session-ttl-days: ${args.sessionTtlDays}; expected 1-365`);
   }
+  if (!Number.isFinite(args.partnerCliSessionTtlDays) || args.partnerCliSessionTtlDays < 1 || args.partnerCliSessionTtlDays > 365) {
+    throw new Error(`Invalid --partner-cli-session-ttl-days: ${args.partnerCliSessionTtlDays}; expected 1-365`);
+  }
   args.sessionTtlDays = Math.round(args.sessionTtlDays);
+  args.partnerCliSessionTtlDays = Math.round(args.partnerCliSessionTtlDays);
   if (!args.linkOpsAssetDir) {
     args.linkOpsAssetDir = path.join(path.dirname(args.linkOpsTaskFile), 'bi_link_ops_assets');
   }
@@ -9096,22 +9103,51 @@ async function main() {
         }
         loginRateLimiter.success(rateKey);
         const actorLogin = actorFromUser(user);
-        const sessionTtlMs = args.sessionTtlDays * 86400 * 1000;
-        const token = signSessionPayload({username: user.username, iat: Date.now(), exp: Date.now() + sessionTtlMs}, sessionSecret);
-        await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'auth-login', ok: true, actor: actorLogin, ...requestMeta(req)});
+        const requestedClient = String(body.client || '').trim().toLowerCase();
+        const partnerCliLogin = requestedClient === 'partner-cli'
+          || /^shein-bi-ops-cli\//i.test(String(req.headers['user-agent'] || '').trim());
+        const sessionClient = partnerCliLogin ? 'partner-cli' : 'portal';
+        const sessionTtlDays = partnerCliLogin ? args.partnerCliSessionTtlDays : args.sessionTtlDays;
+        const issuedAt = Date.now();
+        const sessionTtlMs = sessionTtlDays * 86400 * 1000;
+        const expiresAtMs = issuedAt + sessionTtlMs;
+        const token = signSessionPayload({
+          username: user.username,
+          client: sessionClient,
+          iat: issuedAt,
+          exp: expiresAtMs,
+        }, sessionSecret);
+        await appendAudit(args.auditFile, {
+          at: new Date().toISOString(),
+          type: 'auth-login',
+          ok: true,
+          actor: actorLogin,
+          sessionClient,
+          sessionTtlDays,
+          ...requestMeta(req),
+        });
         if (contentType.includes('application/json')) {
           writeResponseHead(res, 200, {
             'Cache-Control': 'no-store',
             'Content-Type': 'application/json; charset=utf-8',
-            'Set-Cookie': sessionCookie(token, req, args.sessionTtlDays * 86400),
+            'Set-Cookie': sessionCookie(token, req, sessionTtlDays * 86400),
           });
-          res.end(JSON.stringify({ok: true, user: publicActor(actorLogin)}));
+          res.end(JSON.stringify({
+            ok: true,
+            user: publicActor(actorLogin),
+            session: {
+              client: sessionClient,
+              ttlDays: sessionTtlDays,
+              issuedAt: new Date(issuedAt).toISOString(),
+              expiresAt: new Date(expiresAtMs).toISOString(),
+            },
+          }));
           return;
         }
         const next = String(body.next || '/');
         writeResponseHead(res, 302, {
           'Cache-Control': 'no-store',
-          'Set-Cookie': sessionCookie(token, req, args.sessionTtlDays * 86400),
+          'Set-Cookie': sessionCookie(token, req, sessionTtlDays * 86400),
           'Location': next.startsWith('/') && !next.startsWith('//') ? next : '/',
         });
         res.end();

@@ -353,18 +353,48 @@ Safety:
 }
 
 async function readSession(file) {
+  const primary = await readSessionCandidate(file);
+  if (primary) return primary;
+  const backup = await readSessionCandidate(sessionBackupFile(file));
+  if (!backup) return {};
+  await writeSessionFileAtomic(file, backup).catch(() => {});
+  return backup;
+}
+
+function sessionBackupFile(file) {
+  return `${file}.backup`;
+}
+
+async function readSessionCandidate(file) {
   try {
-    const data = JSON.parse(await fs.readFile(file, 'utf8'));
-    return data && typeof data === 'object' ? data : {};
+    const data = JSON.parse((await fs.readFile(file, 'utf8')).replace(/^\uFEFF/, ''));
+    return data && typeof data === 'object' && String(data.cookie || '').trim() ? data : null;
   } catch {
-    return {};
+    return null;
+  }
+}
+
+async function writeSessionFileAtomic(file, data) {
+  await fs.mkdir(path.dirname(file), {recursive: true});
+  const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await fs.writeFile(temp, `${JSON.stringify(data, null, 2)}\n`, {encoding: 'utf8', mode: 0o600});
+    try {
+      await fs.rename(temp, file);
+    } catch (error) {
+      if (!['EEXIST', 'EPERM'].includes(error?.code)) throw error;
+      await fs.rm(file, {force: true});
+      await fs.rename(temp, file);
+    }
+    try { await fs.chmod(file, 0o600); } catch {}
+  } finally {
+    await fs.rm(temp, {force: true}).catch(() => {});
   }
 }
 
 async function writeSession(file, data) {
-  await fs.mkdir(path.dirname(file), {recursive: true});
-  await fs.writeFile(file, `${JSON.stringify(data, null, 2)}\n`, {encoding: 'utf8', mode: 0o600});
-  try { await fs.chmod(file, 0o600); } catch {}
+  await writeSessionFileAtomic(sessionBackupFile(file), data);
+  await writeSessionFileAtomic(file, data);
 }
 
 async function readStdinText() {
@@ -1233,7 +1263,12 @@ async function main() {
     const {json, res} = await request(args, '/api/login', {
       method: 'POST',
       auth: false,
-      body: {username: args.username, password: args.password},
+      body: {
+        username: args.username,
+        password: args.password,
+        client: 'partner-cli',
+        clientVersion: BI_OPS_CLI_VERSION,
+      },
     });
     const cookie = cookieFromSetCookie(res.headers);
     if (!cookie) throw new Error('Login succeeded but Set-Cookie was missing');
@@ -1241,8 +1276,10 @@ async function main() {
       baseUrl: args.baseUrl,
       cookie,
       user: json.user,
+      session: json.session || null,
+      expiresAt: String(json.session?.expiresAt || ''),
       savedAt: new Date().toISOString(),
-      note: 'Session cookie only; plaintext password is never stored.',
+      note: 'Session cookie only; plaintext password is never stored. A mode-0600 backup is maintained for interrupted-write recovery.',
     });
     const cliUpdate = await refreshPartnerCli(args, {force: true}).catch(error => ({ok: false, warning: String(error?.message || error)}));
     const knowledge = await refreshPartnerKnowledge(args).catch(error => ({ok: false, warning: String(error?.message || error)}));
@@ -1256,12 +1293,13 @@ async function main() {
       currentVersion: BI_OPS_CLI_VERSION,
       installedVersion: cliUpdate?.latestVersion || BI_OPS_CLI_VERSION,
       warning: cliUpdate?.warning || '',
-    }});
+    }, session: json.session || null});
     return;
   }
   if (args.command === 'logout') {
     await request(args, '/api/logout', {method: 'POST'}).catch(() => null);
     await fs.rm(args.sessionFile, {force: true}).catch(() => {});
+    await fs.rm(sessionBackupFile(args.sessionFile), {force: true}).catch(() => {});
     print({ok: true, sessionFile: args.sessionFile, loggedOut: true});
     return;
   }

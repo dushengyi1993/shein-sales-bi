@@ -265,9 +265,17 @@ try {
   const operatorSessionText = await fs.readFile(operatorSessionFile, 'utf8');
   check('operator session file exists', result.summary.operatorSessionFileExists, true);
   check('operator session stores no plaintext password', operatorSessionText.includes('operator-cli-pass'), false);
+  const operatorSessionBackupFile = `${operatorSessionFile}.backup`;
+  const operatorSessionBackupText = await fs.readFile(operatorSessionBackupFile, 'utf8');
+  check('operator session backup exists', fssync.existsSync(operatorSessionBackupFile), true);
+  check('operator session backup stores no plaintext password', operatorSessionBackupText.includes('operator-cli-pass'), false);
+  check('operator receives long-lived CLI session', operatorLogin.json?.session?.ttlDays, 365);
+  await fs.writeFile(operatorSessionFile, '{interrupted-write', 'utf8');
 
   const operatorMe = await runCli(['--session-file', operatorSessionFile, 'me']);
   expectCliOk('operator me', operatorMe);
+  const recoveredOperatorSession = JSON.parse(await fs.readFile(operatorSessionFile, 'utf8'));
+  check('operator session recovers from atomic backup', Boolean(recoveredOperatorSession.cookie), true);
   result.summary.operatorWriteStores = operatorMe.json?.user?.writeStores || [];
   check('operator writeStores from CLI me', result.summary.operatorWriteStores.join(','), 'DX,LQ,XC');
 
@@ -442,6 +450,7 @@ try {
   expectCliOk('operator logout', operatorLogout);
   result.summary.operatorSessionRemoved = !fssync.existsSync(operatorSessionFile);
   check('operator session removed after logout', result.summary.operatorSessionRemoved, true);
+  check('operator session backup removed after logout', fssync.existsSync(operatorSessionBackupFile), false);
 
   const tasks = JSON.parse(await fs.readFile(taskFile, 'utf8'));
   const auditText = fssync.existsSync(auditFile) ? await fs.readFile(auditFile, 'utf8') : '';

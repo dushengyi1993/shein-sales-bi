@@ -78,12 +78,12 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 然后按提示输入密码。
 
-登录成功后，本机会保存一个云端登录会话，默认位置：
+登录成功后，本机会保存一个 365 天有效的 Partner CLI 云端登录会话，默认位置：
 
 - Windows：`C:\Users\<用户名>\.shein-bi\ops-session.json`
 - macOS/Linux：`~/.shein-bi/ops-session.json`
 
-这个文件只保存登录会话，不保存明文密码。
+CLI 使用原子写入，并在同目录保留权限受限的 `ops-session.json.backup`；主文件因断电或写入中断损坏时会自动恢复。两个文件都只保存登录会话，不保存明文密码。网页端登录仍维持较短的常规有效期，不受 Partner CLI 长会话影响。
 
 如果需要确认当前登录的是谁：
 

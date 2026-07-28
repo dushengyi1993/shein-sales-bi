@@ -22,6 +22,7 @@ const child = spawn(process.execPath, [
   '--htpasswd-file', path.join(temp, 'missing.htpasswd'),
   '--session-secret-file', path.join(temp, 'session-secret'),
   '--session-ttl-days', '90',
+  '--partner-cli-session-ttl-days', '365',
   '--state-file', path.join(temp, 'state.json'),
   '--link-ops-task-file', path.join(temp, 'tasks.json'),
   '--link-ops-chat-file', path.join(temp, 'chats.json'),
@@ -61,6 +62,23 @@ try {
   assert.match(secureLogin.headers.get('set-cookie') || '', /Secure/);
   assert.match(secureLogin.headers.get('set-cookie') || '', /Max-Age=7776000/);
   const sessionCookie = String(secureLogin.headers.get('set-cookie') || '').split(';')[0];
+
+  const partnerCliLogin = await fetch(`${base}/api/login`, {
+    method: 'POST',
+    headers: {
+      ...publicHeaders,
+      'x-forwarded-proto': 'https',
+      'content-type': 'application/json',
+      origin: `https://127.0.0.1:${port}`,
+      'user-agent': 'shein-bi-ops-cli/2026.07.28.2',
+    },
+    body: JSON.stringify({username: 'security-test', password: 'correct-password', client: 'partner-cli'}),
+  });
+  assert.equal(partnerCliLogin.status, 200);
+  assert.match(partnerCliLogin.headers.get('set-cookie') || '', /Max-Age=31536000/);
+  const partnerCliLoginBody = await partnerCliLogin.json();
+  assert.equal(partnerCliLoginBody.session?.client, 'partner-cli');
+  assert.equal(partnerCliLoginBody.session?.ttlDays, 365);
 
   const sameOriginHeaders = {...publicHeaders, 'content-type': 'application/json', origin: base};
   const statuses = [];

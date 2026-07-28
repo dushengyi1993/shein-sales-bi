@@ -44,6 +44,7 @@ Then inspect `$result`, calculate/filter its structured `data` in the **current 
 - Use `--stores` only to narrow the logged-in account's existing read scope; it never expands permissions.
 - If the endpoint reports an incomplete or stale required section, report that exact data failure. Do not fall back to a question bot, browser scraping, Chrome remote debugging, or a local V3 export.
 - If the CLI reports `BI_LOGIN_REQUIRED` or `BI_SESSION_EXPIRED`, the query has not started. Run the managed launcher's `login --username <BI账号>` command once in an interactive terminal, let the operator enter the password, then retry the original request. A 401 from the release check is a local BI-session problem, not proof that the cloud release endpoint is broken.
+- Partner CLI login receives a 365-day session. The CLI writes the cookie atomically and keeps a permission-restricted backup for interrupted-write recovery; neither file contains the plaintext password.
 - Link rows expose `c7_cart_uv` / `c30_cart_uv` for add-to-cart visitors. Use these fields for “近7天/近30天加车访客” filters; do not substitute product visitors (`c7_goods_uv`) or load the oversized daily traffic section unless a day-by-day breakdown is actually needed.
 
 - Cloud BI is the source of truth. Do not claim that a local V3/export file is required for an ordinary BI query.
