@@ -101,8 +101,10 @@ assert.match(productionClient, /if\(n==='liveSalesToday'\|\|n==='homeRankings'\|
 assert.match(productionClient, /const liveSalesState=sourceState\('liveSalesToday',A\(D\.liveSalesToday\?\.items\)\);const rankingsState=combineSourceState\(sourceState\('homeRankings',s\.rows\),liveSalesState\)/, 'the homepage must wait for the live overlay and distinguish unavailable data from a business zero');
 assert.match(productionClient, /const LIVE_ORDER_SECTIONS=\['liveSalesToday','orders','priceScatter'\]/, 'live orders must always refresh the lightweight today-sales section');
 assert.match(productionClient, /home:\['homeRankings','afterSales','homeProfit','homeTrafficDaily','liveSalesToday'\]/, 'the homepage must load the current-day profit overlay even before a new SSE event');
-assert.match(productionClient, /\['liveSalesToday','productState'\]\.includes\(n\)\?'\?refresh=1'/,
+assert.match(productionClient, /if\(!\['liveSalesToday','productState'\]\.includes\(n\)\)params\.set\('async','1'\)/,
   'the lightweight today-sales and product-state sections must refresh synchronously');
+assert.match(productionClient, /params\.set\('refreshToken',LIVE_REFRESH_TOKEN\)/,
+  'all open pages must identify the same live event when requesting a section refresh');
 assert.match(productionClient, /queueLiveRefresh\(\{kind:'order',receivedAt:at,sections:LIVE_ORDER_SECTIONS\}\)/, 'a newly opened page must catch up from the persisted last order receipt');
 assert.match(productionClient, /profitStoreRows/, 'the current-day store profit rows must replace the stale cached day');
 assert.match(productionClient, /新订单已计入销售；利润正自动补成本/,
@@ -143,8 +145,10 @@ assert.match(portalServer, /SHEIN_BI_LIVE_ACCOUNTING_RETRY_MS \|\| 5 \* 60_000/,
 assert.match(portalServer, /portal-startup-accounting-catchup/,
   'a portal restart must reconcile events that arrived while it was offline');
 assert.match(portalServer, /liveUpdates:\s*biLiveUpdateBridge\.status\(\)/, 'portal health must expose LISTEN connection status');
-assert.match(portalServer, /scheduleBiSectionBackgroundGeneration\(args, root, section, meta\.generatedAt, \{force: true\}\)/, 'an SSE force refresh must not skip an existing section cache');
-assert.match(portalServer, /biSectionForceRerun[\s\S]*scheduleBiSectionBackgroundGeneration\(args, root, section, generatedAt, \{force: true\}\)/, 'an order arriving during a section rebuild must queue one coalesced rerun');
+assert.match(portalServer, /scheduleBiSectionBackgroundGeneration\(args, root, section, meta\.generatedAt, \{\s*force: true,\s*refreshToken: options\.refreshToken,/s, 'an SSE force refresh must not skip an existing section cache');
+assert.match(portalServer, /biSectionForceRerun[\s\S]*scheduleBiSectionBackgroundGeneration\(args, root, section, generatedAt, \{\s*force: true,\s*refreshToken: pendingRefreshToken,/s, 'a newer order arriving during a section rebuild must queue one coalesced rerun');
+assert.match(portalServer, /refreshToken !== activeToken[\s\S]*biSectionPendingRefreshTokens\.set/,
+  'duplicate refreshes for the same live event must not queue another expensive rebuild');
 
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'shein-bi-live-events-'));
 const port = await freePort();

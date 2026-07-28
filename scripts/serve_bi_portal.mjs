@@ -207,6 +207,8 @@ const OPENAPI_RETURN_RECONCILIATION_FRESH_MS = Math.max(60_000, Number(process.e
 const OPENAPI_PRODUCT_RECONCILIATION_FRESH_MS = Math.max(60_000, Number(process.env.SHEIN_OPENAPI_PRODUCT_RECONCILIATION_FRESH_MS || 14 * 24 * 60 * 60 * 1000));
 const biSectionInFlight = new Map();
 const biSectionForceRerun = new Set();
+const biSectionActiveRefreshTokens = new Map();
+const biSectionPendingRefreshTokens = new Map();
 const biSectionRefreshFailures = new Map();
 let biSectionBackgroundQueue = Promise.resolve();
 let biProfitMartFreshnessPromise = null;
@@ -6849,6 +6851,7 @@ function withBiSectionRefreshFailureHeaders(root, section, headers = {}) {
 
 function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt, options = {}) {
   const force = options.force === true;
+  const refreshToken = String(options.refreshToken || '').slice(0, 160);
   // One section/generation may have only one producer. Previously force
   // refreshes used a second "|force" key, so a warmup and several browser/SSE
   // refreshes could rebuild the same cache concurrently and publish it in a
@@ -6856,15 +6859,25 @@ function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt,
   // force refresh when data changes during an active build.
   const key = `${root}|${section}|${generatedAt || ''}`;
   if (biSectionInFlight.has(key)) {
-    if (force && !biSectionForceRerun.has(key)) {
-      biSectionForceRerun.add(key);
-      biSectionInFlight.get(key).finally(() => {
-        biSectionForceRerun.delete(key);
-        scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt, {force: true});
-      }).catch(() => {});
+    const activeToken = String(biSectionActiveRefreshTokens.get(key) || '');
+    if (force && refreshToken !== activeToken) {
+      biSectionPendingRefreshTokens.set(key, refreshToken);
+      if (!biSectionForceRerun.has(key)) {
+        biSectionForceRerun.add(key);
+        biSectionInFlight.get(key).finally(() => {
+          const pendingRefreshToken = String(biSectionPendingRefreshTokens.get(key) || '');
+          biSectionPendingRefreshTokens.delete(key);
+          biSectionForceRerun.delete(key);
+          scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt, {
+            force: true,
+            refreshToken: pendingRefreshToken,
+          });
+        }).catch(() => {});
+      }
     }
     return true;
   }
+  biSectionActiveRefreshTokens.set(key, refreshToken);
   const previousQueue = biSectionBackgroundQueue.catch(() => {});
   const run = previousQueue.then(async () => {
     const startedAt = Date.now();
@@ -6891,6 +6904,7 @@ function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt,
     console.warn('BI section background generation failed', section, err?.message || err);
   }).finally(() => {
     biSectionInFlight.delete(key);
+    biSectionActiveRefreshTokens.delete(key);
   });
   biSectionInFlight.set(key, run);
   biSectionBackgroundQueue = run.catch(() => {});
@@ -7184,7 +7198,10 @@ async function loadBiSection(args, root, section, options = {}) {
     if (!allowGenerate) {
       return {status: 403, payload: {ok: false, section, error: 'Section refresh is disabled in read-only or unauthenticated LAN mode'}};
     }
-    const refreshScheduled = scheduleBiSectionBackgroundGeneration(args, root, section, meta.generatedAt, {force: true});
+    const refreshScheduled = scheduleBiSectionBackgroundGeneration(args, root, section, meta.generatedAt, {
+      force: true,
+      refreshToken: options.refreshToken,
+    });
     const currentRaw = await readBiSectionCacheRaw(root, section, meta.generatedAt, true, {
       ...options,
       extraFields: {
@@ -9280,12 +9297,13 @@ async function main() {
           const section = decodeURIComponent(m[1]);
           const force = url.searchParams.get('refresh') === '1';
           const asyncRefresh = force && ['1', 'true', 'yes'].includes(String(url.searchParams.get('async') || '').toLowerCase());
+          const refreshToken = String(url.searchParams.get('refreshToken') || '').slice(0, 160);
           const allowGenerate = allowGenerateSections;
           if (force && !allowGenerate) {
             return sendJson(res, 403, {ok: false, section, error: 'Section refresh is disabled in read-only or unauthenticated LAN mode'});
           }
           try {
-            const result = await loadBiSection(args, root, section, {force, asyncRefresh, allowGenerate, gzip: acceptsGzip(req.headers['accept-encoding'])});
+            const result = await loadBiSection(args, root, section, {force, asyncRefresh, refreshToken, allowGenerate, gzip: acceptsGzip(req.headers['accept-encoding'])});
             if (result.rawBody) return send(res, result.status, result.rawBody, result.headers || {'Content-Type': 'application/json; charset=utf-8'});
             return sendJson(res, result.status, result.payload);
           } catch (err) {
