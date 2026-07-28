@@ -37,6 +37,23 @@ assert.equal(receiptAfterShortfall.quantityAfter, 2);
 assert.equal(receiptAfterShortfall.valueAfterSar, 20);
 assert.equal(receiptAfterShortfall.avgUnitCostAfterSar, 10);
 
+const knownCostShortfall = buildInventoryCostLedger([
+  {eventKey:'count-known',matchKey:'P2B',effectiveAt:'2026-01-01',eventType:'inventory_count_reset',quantity:1,costAmountSar:12,sourceKey:'count-known'},
+  {eventKey:'s-known-1',matchKey:'P2B',effectiveAt:'2026-01-02',eventType:'sale',quantity:1,sourceKey:'s-known-1',sourceOrderItemKey:'s-known-1'},
+  {eventKey:'s-known-2',matchKey:'P2B',effectiveAt:'2026-01-03',eventType:'sale',quantity:2,sourceKey:'s-known-2',sourceOrderItemKey:'s-known-2'},
+  {eventKey:'r-known',matchKey:'P2B',effectiveAt:'2026-01-04',eventType:'receipt',quantity:5,costAmountSar:100,sourceKey:'r-known'},
+], {ledgerVersion:'known-cost-shortfall'});
+assert.equal(knownCostShortfall.saleAssignments.get('s-known-2').unitCostSar, 12);
+assert.equal(knownCostShortfall.saleAssignments.get('s-known-2').cogsSar, 24);
+assert.equal(knownCostShortfall.saleAssignments.get('s-known-2').unvaluedQuantity, 0);
+assert.equal(knownCostShortfall.saleAssignments.get('s-known-2').valuationStatus, 'estimated_negative_inventory_last_cost');
+const knownShortfallSale = knownCostShortfall.rows.find(row => row.eventKey === 's-known-2');
+assert.equal(knownShortfallSale.quantityAfter, -2);
+assert.equal(knownShortfallSale.avgUnitCostAfterSar, 12);
+const knownReceipt = knownCostShortfall.rows.find(row => row.eventKey === 'r-known');
+assert.equal(knownReceipt.quantityAfter, 3);
+assert.equal(knownReceipt.avgUnitCostAfterSar, 20);
+
 const reset = buildInventoryCostLedger([
   {eventKey:'r-old',matchKey:'P3',effectiveAt:'2026-06-30',eventType:'receipt',quantity:100,costAmountSar:1000,sourceKey:'r-old'},
   {eventKey:'count',matchKey:'P3',effectiveAt:'2026-07-01',eventType:'inventory_count_reset',quantity:12,costAmountSar:180,sourceKey:'count'},
@@ -82,4 +99,4 @@ const seedScript = await fs.readFile(new URL('./seed_inventory_cost_opening_from
 assert.match(periodScript, /\\\\pset tuples_only on/);
 assert.match(seedScript, /\\\\pset tuples_only on/);
 
-console.log(JSON.stringify({ok:true, tests:['moving-average','future-receipt-isolation','rtv-reentry','manual-rtv-verification-source','missing-opening','inventory-count-reset','negative-rtv-shortfall','frozen-boundary','concurrent-rebuild-stale-write-guard','psql-readback-meta-command']}, null, 2));
+console.log(JSON.stringify({ok:true, tests:['moving-average','future-receipt-isolation','rtv-reentry','manual-rtv-verification-source','missing-opening','known-cost-negative-inventory-estimate','inventory-count-reset','negative-rtv-shortfall','frozen-boundary','concurrent-rebuild-stale-write-guard','psql-readback-meta-command']}, null, 2));

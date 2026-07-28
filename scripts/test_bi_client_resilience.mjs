@@ -27,6 +27,12 @@ assert.match(source, /仅在 ET 快照最新且已匹配、当前可售为 0、�
 assert.match(source, /label:'已落定利润'.*storageNoteSar/, 'settled profit keeps storage fee as an inline supporting figure');
 assert.match(source, /label:'风险调整后利润'.*`\u5f85决售后风险 /, 'risk-adjusted profit keeps pending risk as an inline supporting figure');
 assert.doesNotMatch(source, /\{label:'(?:待决售后风险|已扣仓储费)',cells:/, 'profit summary must stay at three primary rows');
+assert.match(source, /function profitRevenue\(r\)\{return firstNum\(r,\['known_net_revenue_sar','net_revenue_sar'/,
+  'profit margin must divide covered profit by covered revenue, never by all revenue while costs are missing');
+assert.match(source, /function profitRiskRevenue\(r\)\{return firstNum\(r,\['known_risk_adjusted_net_revenue_sar','known_net_revenue_sar'/,
+  'risk-adjusted margin must use the same cost-covered population');
+assert.match(source, /最近成本估算 \$\{M\(p\.estimatedCostQty\)\} 件/,
+  'negative-stock carry-forward estimates must be visible instead of silently presented as settled batch cost');
 assert.match(source, /'return-summary-matrix'\)\+/, 'returns and profit summary tables expose paired height-alignment classes');
 assert.match(source, /function adaptivePriceScale\(values,maxBins=8\)/, 'price charts share one actual-range adaptive scale');
 assert.match(source, /\(N\(v\)-minPrice\)\/scale\.span/, 'scatter y-axis starts at the actual minimum transaction price');

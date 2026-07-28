@@ -5217,6 +5217,9 @@ WITH base AS (
     sum(gross_revenue_sar) FILTER (WHERE cost_missing) AS missing_cost_revenue_sar,
     sum(quantity) FILTER (WHERE cost_missing) AS missing_cost_quantity,
     count(*) FILTER (WHERE cost_missing) AS missing_cost_lines,
+    sum(net_revenue_sar) FILTER (WHERE cost_valuation_status = 'estimated_negative_inventory_last_cost') AS estimated_cost_revenue_sar,
+    sum(quantity) FILTER (WHERE cost_valuation_status = 'estimated_negative_inventory_last_cost') AS estimated_cost_quantity,
+    count(*) FILTER (WHERE cost_valuation_status = 'estimated_negative_inventory_last_cost') AS estimated_cost_lines,
     count(*) FILTER (WHERE revenue_reversal) AS reversal_lines,
     sum(return_delivery_fee_sar) FILTER (WHERE revenue_reversal) AS reversal_fee_sar,
     CASE
@@ -5231,6 +5234,7 @@ WITH base AS (
       ELSE NULL
     END AS cost_coverage_revenue_rate,
     sum(risk_adjusted_net_revenue_sar) AS risk_adjusted_net_revenue_sar,
+    sum(risk_adjusted_net_revenue_sar) FILTER (WHERE NOT cost_missing) AS known_risk_adjusted_net_revenue_sar,
     sum(pending_revenue_risk_sar) AS pending_revenue_risk_sar,
     sum(risk_adjusted_profit_before_storage_sar) FILTER (WHERE NOT cost_missing) AS risk_adjusted_profit_before_storage_sar,
     count(*) FILTER (WHERE pending_revenue_risk) AS pending_revenue_risk_lines,
@@ -5278,6 +5282,9 @@ SELECT
   coalesce(b.missing_cost_revenue_sar,0) AS missing_cost_revenue_sar,
   coalesce(b.missing_cost_quantity,0) AS missing_cost_quantity,
   coalesce(b.missing_cost_lines,0)::bigint AS missing_cost_lines,
+  coalesce(b.estimated_cost_revenue_sar,0) AS estimated_cost_revenue_sar,
+  coalesce(b.estimated_cost_quantity,0) AS estimated_cost_quantity,
+  coalesce(b.estimated_cost_lines,0)::bigint AS estimated_cost_lines,
   coalesce(b.reversal_lines,0)::bigint AS reversal_lines,
   coalesce(b.reversal_fee_sar,0) AS reversal_fee_sar,
   b.profit_margin_before_storage,
@@ -5305,6 +5312,7 @@ SELECT
   END AS profit_if_rtv_09_resellable_after_storage_sar,
   coalesce(s.storage_fee_method,'none') AS storage_fee_method,
   coalesce(b.risk_adjusted_net_revenue_sar,0) AS risk_adjusted_net_revenue_sar,
+  coalesce(b.known_risk_adjusted_net_revenue_sar,0) AS known_risk_adjusted_net_revenue_sar,
   coalesce(b.pending_revenue_risk_sar,0) AS pending_revenue_risk_sar,
   CASE WHEN b.date IS NULL THEN 0 ELSE b.risk_adjusted_profit_before_storage_sar END AS risk_adjusted_profit_before_storage_sar,
   CASE
@@ -5313,10 +5321,10 @@ SELECT
     ELSE b.risk_adjusted_profit_before_storage_sar - coalesce(s.storage_fee_sar,0)
   END AS risk_adjusted_profit_after_storage_sar,
   CASE
-    WHEN coalesce(b.risk_adjusted_net_revenue_sar,0) > 0
+    WHEN coalesce(b.known_risk_adjusted_net_revenue_sar,0) > 0
       AND b.risk_adjusted_profit_before_storage_sar IS NOT NULL
     THEN (b.risk_adjusted_profit_before_storage_sar - coalesce(s.storage_fee_sar,0))
-      / nullif(b.risk_adjusted_net_revenue_sar,0)
+      / nullif(b.known_risk_adjusted_net_revenue_sar,0)
     ELSE NULL
   END AS risk_adjusted_profit_margin_after_storage,
   coalesce(b.pending_revenue_risk_lines,0)::bigint AS pending_revenue_risk_lines,
@@ -5348,11 +5356,16 @@ WITH group_month AS (
     sum(profit_before_storage_sar) FILTER (WHERE NOT cost_missing) AS profit_before_storage_sar,
     sum(profit_if_rtv_received_resellable_sar) FILTER (WHERE NOT cost_missing) AS profit_if_rtv_received_resellable_sar,
     sum(profit_if_rtv_09_resellable_sar) FILTER (WHERE NOT cost_missing) AS profit_if_rtv_09_resellable_sar,
+    sum(net_revenue_sar) FILTER (WHERE NOT cost_missing) AS known_net_revenue_sar,
     sum(gross_revenue_sar) FILTER (WHERE NOT cost_missing) AS known_gross_revenue_sar,
     sum(gross_revenue_sar) FILTER (WHERE cost_missing) AS missing_cost_revenue_sar,
     count(*) FILTER (WHERE cost_missing) AS missing_cost_lines,
+    sum(net_revenue_sar) FILTER (WHERE cost_valuation_status = 'estimated_negative_inventory_last_cost') AS estimated_cost_revenue_sar,
+    sum(quantity) FILTER (WHERE cost_valuation_status = 'estimated_negative_inventory_last_cost') AS estimated_cost_quantity,
+    count(*) FILTER (WHERE cost_valuation_status = 'estimated_negative_inventory_last_cost') AS estimated_cost_lines,
     count(*) FILTER (WHERE revenue_reversal) AS reversal_lines,
     sum(risk_adjusted_net_revenue_sar) AS risk_adjusted_net_revenue_sar,
+    sum(risk_adjusted_net_revenue_sar) FILTER (WHERE NOT cost_missing) AS known_risk_adjusted_net_revenue_sar,
     sum(pending_revenue_risk_sar) AS pending_revenue_risk_sar,
     sum(risk_adjusted_profit_before_storage_sar) FILTER (WHERE NOT cost_missing) AS risk_adjusted_profit_before_storage_sar,
     count(*) FILTER (WHERE pending_revenue_risk) AS pending_revenue_risk_lines,
@@ -5391,9 +5404,13 @@ SELECT
   CASE WHEN g.month_start IS NULL THEN 0 ELSE g.profit_before_storage_sar END AS profit_before_storage_sar,
   CASE WHEN g.month_start IS NULL THEN 0 ELSE g.profit_if_rtv_received_resellable_sar END AS profit_if_rtv_received_resellable_sar,
   CASE WHEN g.month_start IS NULL THEN 0 ELSE g.profit_if_rtv_09_resellable_sar END AS profit_if_rtv_09_resellable_sar,
+  coalesce(g.known_net_revenue_sar,0) AS known_net_revenue_sar,
   coalesce(g.known_gross_revenue_sar,0) AS known_gross_revenue_sar,
   coalesce(g.missing_cost_revenue_sar,0) AS missing_cost_revenue_sar,
   coalesce(g.missing_cost_lines,0)::bigint AS missing_cost_lines,
+  coalesce(g.estimated_cost_revenue_sar,0) AS estimated_cost_revenue_sar,
+  coalesce(g.estimated_cost_quantity,0) AS estimated_cost_quantity,
+  coalesce(g.estimated_cost_lines,0)::bigint AS estimated_cost_lines,
   coalesce(g.reversal_lines,0)::bigint AS reversal_lines,
   coalesce(smt.total_storage_fee_sar,0) AS month_storage_fee_sar,
   coalesce(sgm.allocated_storage_fee_sar,0) AS allocated_storage_fee_sar,
@@ -5413,8 +5430,8 @@ SELECT
     ELSE g.profit_if_rtv_09_resellable_sar - coalesce(sgm.allocated_storage_fee_sar,0)
   END AS profit_if_rtv_09_resellable_after_storage_sar,
   CASE
-    WHEN coalesce(g.net_revenue_sar,0) > 0 AND g.profit_before_storage_sar IS NOT NULL
-    THEN (g.profit_before_storage_sar - coalesce(sgm.allocated_storage_fee_sar,0)) / nullif(g.net_revenue_sar,0)
+    WHEN coalesce(g.known_net_revenue_sar,0) > 0 AND g.profit_before_storage_sar IS NOT NULL
+    THEN (g.profit_before_storage_sar - coalesce(sgm.allocated_storage_fee_sar,0)) / nullif(g.known_net_revenue_sar,0)
     ELSE NULL
   END AS profit_margin_after_storage,
   CASE
@@ -5422,6 +5439,7 @@ SELECT
     ELSE NULL
   END AS cost_coverage_revenue_rate,
   coalesce(g.risk_adjusted_net_revenue_sar,0) AS risk_adjusted_net_revenue_sar,
+  coalesce(g.known_risk_adjusted_net_revenue_sar,0) AS known_risk_adjusted_net_revenue_sar,
   coalesce(g.pending_revenue_risk_sar,0) AS pending_revenue_risk_sar,
   CASE WHEN g.month_start IS NULL THEN 0 ELSE g.risk_adjusted_profit_before_storage_sar END AS risk_adjusted_profit_before_storage_sar,
   CASE
@@ -5430,8 +5448,8 @@ SELECT
     ELSE g.risk_adjusted_profit_before_storage_sar - coalesce(sgm.allocated_storage_fee_sar,0)
   END AS risk_adjusted_profit_after_storage_sar,
   CASE
-    WHEN coalesce(g.risk_adjusted_net_revenue_sar,0) > 0 AND g.risk_adjusted_profit_before_storage_sar IS NOT NULL
-    THEN (g.risk_adjusted_profit_before_storage_sar - coalesce(sgm.allocated_storage_fee_sar,0)) / nullif(g.risk_adjusted_net_revenue_sar,0)
+    WHEN coalesce(g.known_risk_adjusted_net_revenue_sar,0) > 0 AND g.risk_adjusted_profit_before_storage_sar IS NOT NULL
+    THEN (g.risk_adjusted_profit_before_storage_sar - coalesce(sgm.allocated_storage_fee_sar,0)) / nullif(g.known_risk_adjusted_net_revenue_sar,0)
     ELSE NULL
   END AS risk_adjusted_profit_margin_after_storage,
   coalesce(g.pending_revenue_risk_lines,0)::bigint AS pending_revenue_risk_lines,
@@ -5468,6 +5486,9 @@ SELECT
   sum(p.missing_cost_revenue_sar) AS missing_cost_revenue_sar,
   sum(p.missing_cost_quantity) AS missing_cost_quantity,
   sum(p.missing_cost_lines) AS missing_cost_lines,
+  sum(p.estimated_cost_revenue_sar) AS estimated_cost_revenue_sar,
+  sum(p.estimated_cost_quantity) AS estimated_cost_quantity,
+  sum(p.estimated_cost_lines) AS estimated_cost_lines,
   sum(p.reversal_lines) AS reversal_lines,
   max(c.unit_cost_sar) AS unit_cost_sar,
   max(c.complete_batch_count)::bigint AS complete_batch_count,
@@ -5496,12 +5517,13 @@ SELECT
   max(ps.storage_source_snapshot_min) AS storage_source_snapshot_min,
   max(ps.storage_source_snapshot_max) AS storage_source_snapshot_max,
   sum(p.risk_adjusted_net_revenue_sar) AS risk_adjusted_net_revenue_sar,
+  sum(p.known_risk_adjusted_net_revenue_sar) AS known_risk_adjusted_net_revenue_sar,
   sum(p.pending_revenue_risk_sar) AS pending_revenue_risk_sar,
   sum(p.risk_adjusted_profit_before_storage_sar) AS risk_adjusted_profit_before_storage_sar,
   sum(p.risk_adjusted_profit_after_storage_sar) AS risk_adjusted_profit_after_storage_sar,
   CASE
-    WHEN sum(p.risk_adjusted_net_revenue_sar) > 0
-    THEN sum(p.risk_adjusted_profit_after_storage_sar) / nullif(sum(p.risk_adjusted_net_revenue_sar),0)
+    WHEN sum(p.known_risk_adjusted_net_revenue_sar) > 0
+    THEN sum(p.risk_adjusted_profit_after_storage_sar) / nullif(sum(p.known_risk_adjusted_net_revenue_sar),0)
     ELSE NULL
   END AS risk_adjusted_profit_margin_after_storage,
   sum(p.pending_revenue_risk_lines) AS pending_revenue_risk_lines,

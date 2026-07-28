@@ -15,6 +15,7 @@ const portalGenerator = read('scripts/generate_bi_portal.mjs');
 const portalServer = read('scripts/serve_bi_portal.mjs');
 const portalClient = read('scripts/bi_app/client.js');
 const costRebuild = read('scripts/rebuild_inventory_cost_ledger.mjs');
+const costLedger = read('lib/inventory_cost_ledger.mjs');
 const periodManager = read('scripts/manage_accounting_period.mjs');
 const openingSeed = read('scripts/seed_inventory_cost_opening_from_et.mjs');
 const linkFetch = read('scripts/fetch_shein_business_domains.mjs');
@@ -29,6 +30,16 @@ assert.match(schema, /NULL::numeric AS estimated_on_hand_quantity/);
 assert.match(schema, /'model_estimate_disabled'::text AS inventory_match_status/);
 assert.match(schema, /legacy_pre_cutover_estimate/);
 assert.match(schema, /future receipt can never leak backwards into current-period COGS/);
+assert.match(costLedger, /estimated_negative_inventory_last_cost/,
+  'a sale after a known-cost stock count reaches zero must use the last known historical cost as an explicit estimate');
+assert.match(costLedger, /state\.avg = state\.quantity > 0 \? state\.value \/ state\.quantity : lastKnownUnitCost/,
+  'the last known cost must survive a temporary negative inventory state');
+assert.match(schema, /known_risk_adjusted_net_revenue_sar/);
+assert.match(refresh, /known_risk_adjusted_net_revenue_sar/);
+assert.match(schema, /estimated_cost_revenue_sar/);
+assert.match(refresh, /estimated_cost_revenue_sar/);
+assert.match(schema, /nullif\(b\.known_risk_adjusted_net_revenue_sar,0\)/,
+  'risk profit and its denominator must describe the same cost-covered rows');
 assert.match(costRebuild, /Refusing to rewrite frozen accounting periods/);
 assert.match(costRebuild, /frozenRowsTouched/);
 assert.match(costRebuild, /latestApprovedOpeningDate/);
