@@ -544,8 +544,12 @@ WITH base AS (
     store_key,
     group_key,
     standard_goods_sn,
-    count(*) AS order_lines,
-    count(DISTINCT order_key) AS orders,
+    count(*) FILTER (
+      WHERE coalesce(gross_revenue_sar,0) > 0 AND coalesce(quantity,0) > 0
+    ) AS order_lines,
+    count(DISTINCT order_key) FILTER (
+      WHERE coalesce(gross_revenue_sar,0) > 0 AND coalesce(quantity,0) > 0
+    ) AS orders,
     sum(quantity) AS quantity,
     sum(gross_revenue_sar) AS gross_revenue_sar,
     sum(net_revenue_sar) AS net_revenue_sar,

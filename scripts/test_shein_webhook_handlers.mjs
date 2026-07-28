@@ -51,8 +51,23 @@ const processor = createSheinWebhookEventProcessor({
   webhookRepository,
   linkOpsRepository,
   orderReturnSync: {
-    syncOrder: async input => (syncCalls.push(['order', input]), {ok: true}),
-    syncReturn: async input => (syncCalls.push(['return', input]), {ok: true}),
+    syncOrder: async input => (syncCalls.push(['order', input]), {
+      kind: 'order',
+      artifact: {
+        start: '2026-07-27',
+        orderRows: [{orderStatus: 6, orderStatusDesc: '揽收前已取消'}],
+        goodsRows: [{
+          number: 1,
+          currencyPrice: 295.02,
+          isValidSale: false,
+          salesExclusionReason: 'cancelled_before_pickup',
+        }],
+      },
+    }),
+    syncReturn: async input => (syncCalls.push(['return', input]), {
+      kind: 'return',
+      artifact: {start: '2026-07-28'},
+    }),
   },
 });
 
@@ -66,7 +81,18 @@ assert.equal(orderOutcome.actionState, 'order_warehouse_synced');
 assert.equal(orderOutcome.title, 'AA 店：订单已同步');
 assert.equal(orderOutcome.summary, '订单 O-1 已同步到 BI，无需人工处理。');
 assert.doesNotMatch(`${orderOutcome.title}\n${orderOutcome.summary}`, /P3|3001442|状态 4|normal_or_non_alerting_event|order_warehouse_synced/);
-assert.equal((await processor.process({...base, normalized: {eventFamily: 'return', eventCode: '3000914', eventLabel: '退货', storeKey: 'AA', returnId: 'R-1', businessId: 'R-1'}, payload: {returnOrderNo: 'R-1'}})).actionState, 'return_warehouse_synced');
+assert.deepEqual(orderOutcome.normalized.warehouseSync, {
+  kind: 'order',
+  businessDate: '2026-07-27',
+  orderStatus: '6',
+  orderStatusDesc: '揽收前已取消',
+  salesQuantity: 0,
+  salesSar: 0,
+  cancelledBeforePickup: true,
+});
+const returnOutcome = await processor.process({...base, normalized: {eventFamily: 'return', eventCode: '3000914', eventLabel: '退货', storeKey: 'AA', returnId: 'R-1', businessId: 'R-1'}, payload: {returnOrderNo: 'R-1'}});
+assert.equal(returnOutcome.actionState, 'return_warehouse_synced');
+assert.deepEqual(returnOutcome.normalized.warehouseSync, {kind: 'return', businessDate: '2026-07-28'});
 assert.deepEqual(syncCalls, [
   ['order', {storeKey: 'AA', orderNo: 'O-1'}],
   ['return', {storeKey: 'AA', returnOrderNo: 'R-1'}],

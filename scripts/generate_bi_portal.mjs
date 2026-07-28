@@ -399,8 +399,12 @@ profit_store_rows AS (
     round(sum(coalesce(gross_revenue_sar,0))::numeric,2) AS gross_revenue_sar,
     round(sum(coalesce(net_revenue_sar,0))::numeric,2) AS net_revenue_sar,
     round(sum(coalesce(quantity,0))::numeric,0) AS quantity,
-    count(*)::bigint AS order_lines,
-    count(DISTINCT order_key)::bigint AS orders,
+    count(*) FILTER (
+      WHERE coalesce(gross_revenue_sar,0) > 0 AND coalesce(quantity,0) > 0
+    )::bigint AS order_lines,
+    count(DISTINCT order_key) FILTER (
+      WHERE coalesce(gross_revenue_sar,0) > 0 AND coalesce(quantity,0) > 0
+    )::bigint AS orders,
     round(sum(product_cost_sar) FILTER (WHERE NOT cost_missing)::numeric,2) AS product_cost_sar,
     round(sum(coalesce(return_delivery_fee_sar,0))::numeric,2) AS return_delivery_fee_sar,
     round(sum(rtv_recoverable_cost_sar) FILTER (WHERE NOT cost_missing)::numeric,2) AS rtv_recoverable_cost_sar,

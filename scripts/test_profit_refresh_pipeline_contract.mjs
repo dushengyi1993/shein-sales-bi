@@ -10,8 +10,10 @@ assert.match(source, /'costAssignmentPostCutoverMissingRows'/,
   'profit freshness query must measure post-cutover cost assignment coverage');
 assert.match(source, /oi\.created_date >= c\.cutover_date[\s\S]*coalesce\(oi\.quantity,0\) > 0[\s\S]*coalesce\(oi\.sales_sar,0\) > 0/,
   'cost assignment coverage must use the same positive-sale population as the ledger rebuild');
-assert.match(source, /'factUpdatedAt', \([\s\S]*WHERE coalesce\(quantity,0\) > 0 AND coalesce\(sales_sar,0\) > 0/,
-  'freshness cutoff must use the same positive-sale population as the ledger source snapshot');
+assert.match(source, /'orderFactUpdatedAt', \(SELECT max\(updated_at\) FROM fact\.order_item\)/,
+  'freshness must include zeroed cancellation rows so their prior ledger assignment is removed');
+assert.match(source, /'accountingInputUpdatedAt', greatest\([\s\S]*fact\.after_sales_item[\s\S]*fact\.openapi_return_item/,
+  'return and after-sales changes must invalidate profit even when order rows do not change');
 assert.match(source, /const ledgerRun = await refreshInventoryCostLedger\(args\);[\s\S]*const profitRun = await refreshProfitMarts\(args\);/,
   'a stale ledger must be rebuilt and verified before profit marts are refreshed');
 assert.match(source, /inventory cost ledger remains incomplete after refresh/,

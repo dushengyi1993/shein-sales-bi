@@ -225,6 +225,16 @@ assert.match(refresh, /FROM mart\.profit_order_item_cache_new/);
 assert.match(refresh, /FROM mart\.storage_fee_product_daily_cache_new/);
 assert.match(refresh, /FROM mart\.storage_fee_product_store_daily_cache_new/);
 assert.match(refresh, /dependency-ordered cache refresh; canonical conserving storage allocation computed once/);
+assert.match(
+  schema,
+  /CREATE OR REPLACE VIEW mart\.profit_daily_store_product AS[\s\S]*count\(\*\) FILTER \([\s\S]*gross_revenue_sar[\s\S]*quantity[\s\S]*AS order_lines/,
+  'cancelled zero-revenue rows must remain auditable without inflating profit order counts',
+);
+assert.match(
+  refresh,
+  /CREATE UNLOGGED TABLE mart\.profit_daily_store_product_cache_new AS[\s\S]*count\(DISTINCT order_key\) FILTER \([\s\S]*gross_revenue_sar[\s\S]*quantity[\s\S]*AS orders/,
+  'the published profit cache must exclude pre-pickup cancellations from order counts',
+);
 assert.doesNotMatch(refresh, /CREATE UNLOGGED TABLE mart\.storage_fee_store_daily_cache_new AS\s*SELECT \* FROM mart\.storage_fee_store_daily/,
   'downstream caches must not recompute the entire canonical dependency tree');
 

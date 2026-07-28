@@ -86,7 +86,10 @@ assert.deepEqual(claim.values, ['worker-a', 30_000]);
 await repo.markAlerted(claimed.id, {workerId: 'worker-a', actionState: 'alerted'});
 assert.match(latest(pool, 'shein-webhook-mark-alerted').text, /status='running' AND lease_owner=\$4/, 'alert completion must own the active lease');
 await repo.markProcessed(claimed.id, {workerId: 'worker-a', status: 'succeeded'});
-assert.match(latest(pool, 'shein-webhook-mark-processed').text, /status='running' AND lease_owner=\$11/, 'stale workers must not finalize a reclaimed receipt');
+const processed = latest(pool, 'shein-webhook-mark-processed');
+assert.match(processed.text, /status='running' AND lease_owner=\$11/, 'stale workers must not finalize a reclaimed receipt');
+assert.match(processed.text, /warehouseSync,businessDate/, 'live notifications must retain the affected order business date');
+assert.match(processed.text, /cancelledBeforePickup/, 'live notifications must identify a final pre-pickup cancellation');
 await assert.rejects(() => repo.markProcessed(claimed.id, {status: 'succeeded'}), /workerId is required/);
 
 const events = await repo.listEvents({allowedStores: ['JSH'], limit: 1});

@@ -34,14 +34,53 @@ const order = normalizeBiLiveUpdatePayload(JSON.stringify({
   eventFamily: 'order', storeKey: 'tz', orderId: 'GSH18A51T000BED', updatedAt: '2026-07-23T11:59:59.000Z',
 }), fixedNow);
 assert.deepEqual(order, {
-  kind: 'order', receiptId: '', storeKey: 'TZ', entityId: 'GSH18A51T000BED', occurredAt: '2026-07-23T11:59:59.000Z',
+  kind: 'order', receiptId: '', storeKey: 'TZ', entityId: 'GSH18A51T000BED',
+  businessDate: '', orderStatus: '', orderStatusDesc: '', cancelledBeforePickup: false,
+  salesQuantity: 0, salesSar: 0, occurredAt: '2026-07-23T11:59:59.000Z',
 });
 assert.deepEqual(liveSectionsForBiUpdate('return'), ['liveSalesToday', 'orders', 'priceScatter', 'afterSales']);
+assert.deepEqual(
+  liveSectionsForBiUpdate('order', {
+    businessDate: '2026-07-27',
+    occurredAt: '2026-07-28T06:50:00.000Z',
+    accountingRefreshed: true,
+  }),
+  ['liveSalesToday', 'orders', 'priceScatter', 'productSalesDaily', 'inventoryTrend', 'homeRankings', 'rankings', 'profit', 'homeProfit'],
+  'a prior-day cancellation must refresh the selected historical sales and profit sections after accounting catches up',
+);
+assert.deepEqual(
+  liveSectionsForBiUpdate('return', {accountingRefreshed: true}),
+  ['liveSalesToday', 'orders', 'priceScatter', 'afterSales', 'productSalesDaily', 'inventoryTrend', 'homeRankings', 'rankings', 'profit', 'homeProfit'],
+  'a return can change an older order and must invalidate every dependent business section',
+);
+assert.deepEqual(
+  liveSectionsForBiUpdate('order', {
+    accountingRefreshed: true,
+    accountingKinds: ['order', 'return'],
+    refreshHistoricalSections: true,
+  }),
+  ['liveSalesToday', 'orders', 'priceScatter', 'afterSales', 'productSalesDaily', 'inventoryTrend', 'homeRankings', 'rankings', 'profit', 'homeProfit'],
+  'coalescing a later sale must not discard an earlier return or historical-cancellation refresh scope',
+);
 assert.deepEqual(liveSectionsForBiUpdate('product'), ['productState']);
 assert.deepEqual(liveSectionsForBiUpdate('platform'), []);
 assert.equal(normalizeBiLiveUpdatePayload('{"event":"unknown"}', fixedNow), null);
 assert.equal(normalizeBiLiveUpdatePayload('{"eventFamily":"inventory_warning"}', fixedNow)?.kind, 'platform');
 assert.equal(normalizeBiLiveUpdatePayload('{"eventFamily":"rrp_review","skc":"SKC-1"}', fixedNow)?.kind, 'product');
+const cancelled = normalizeBiLiveUpdatePayload(JSON.stringify({
+  eventFamily: 'order',
+  storeKey: 'hl',
+  businessKey: 'GSH18V0390000KF',
+  businessDate: '2026-07-27',
+  orderStatus: '6',
+  orderStatusDesc: '揽收前已取消',
+  cancelledBeforePickup: true,
+  salesQuantity: 0,
+  salesSar: 0,
+}), fixedNow);
+assert.equal(cancelled.entityId, 'GSH18V0390000KF');
+assert.equal(cancelled.businessDate, '2026-07-27');
+assert.equal(cancelled.cancelledBeforePickup, true);
 
 const bridge = createBiLiveUpdateBridge({
   ClientClass: FakePgClient,
@@ -107,8 +146,8 @@ assert.match(productionClient, /params\.set\('refreshToken',LIVE_REFRESH_TOKEN\)
   'all open pages must identify the same live event when requesting a section refresh');
 assert.match(productionClient, /queueLiveRefresh\(\{kind:'order',receivedAt:at,sections:LIVE_ORDER_SECTIONS\}\)/, 'a newly opened page must catch up from the persisted last order receipt');
 assert.match(productionClient, /profitStoreRows/, 'the current-day store profit rows must replace the stale cached day');
-assert.match(productionClient, /新订单已计入销售；利润正自动补成本/,
-  'the homepage must explain a live sale whose accounting cache is still rebuilding');
+assert.match(productionClient, /订单变动已计入销售；利润正在同步/,
+  'the homepage must explain additions, cancellations, and returns while accounting catches up');
 assert.match(productionClient, /if\(useLive&&d===liveDate\)return false/, 'cached current-day profit must be removed before the live rows are appended');
 assert.match(productionClient, /loadWebhook\(true\)/, 'platform activity must refresh when a live event arrives');
 assert.match(productionClient, /load\(n,true,true\)/, 'only relevant section APIs should be force-refreshed');
@@ -138,6 +177,12 @@ assert.match(portalServer, /SHEIN_BI_LIVE_ACCOUNTING_DEBOUNCE_MS \|\| 45_000/,
   'order and return events must coalesce into an event-driven accounting refresh');
 assert.match(portalServer, /await ensureProfitMartCacheFresh\(args, generatedAt\)/,
   'the debounced refresh must rebuild the moving-average ledger before publishing profit');
+assert.match(portalServer, /'orderFactUpdatedAt', \(SELECT max\(updated_at\) FROM fact\.order_item\)/,
+  'a zeroed cancellation row must still invalidate the moving-average ledger and profit cache');
+assert.match(portalServer, /'accountingInputUpdatedAt', greatest\([\s\S]*fact\.after_sales_item[\s\S]*fact\.openapi_return_item/,
+  'return and after-sales mutations must invalidate profit without masquerading as new sales');
+assert.match(portalServer, /refreshHistoricalSections:[\s\S]*eventNeedsHistoricalRefresh/,
+  'a webhook burst must preserve prior-day cancellation and return invalidation scope');
 assert.match(portalServer, /accountingRefreshed: true/,
   'clients must receive a second live signal after canonical accounting catches up');
 assert.match(portalServer, /SHEIN_BI_LIVE_ACCOUNTING_RETRY_MS \|\| 5 \* 60_000/,

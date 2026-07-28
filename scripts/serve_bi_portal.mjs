@@ -7027,10 +7027,16 @@ WITH primary_cutover AS (
 )
 SELECT jsonb_build_object(
   'factOrderMax', (SELECT max(created_date) FROM fact.order_item),
-  'factUpdatedAt', (
-    SELECT max(updated_at)
-    FROM fact.order_item
-    WHERE coalesce(quantity,0) > 0 AND coalesce(sales_sar,0) > 0
+  -- Include zeroed rows. A pre-pickup cancellation changes a positive sale
+  -- into an auditable zero row; filtering to positive rows would hide the
+  -- mutation and leave stale revenue/cost in the published profit cache.
+  'factUpdatedAt', (SELECT max(updated_at) FROM fact.order_item),
+  'orderFactUpdatedAt', (SELECT max(updated_at) FROM fact.order_item),
+  'accountingInputUpdatedAt', greatest(
+    (SELECT max(updated_at) FROM fact.order_item),
+    (SELECT max(updated_at) FROM fact.after_sales_item),
+    (SELECT max(updated_at) FROM fact.openapi_return_order),
+    (SELECT max(updated_at) FROM fact.openapi_return_item)
   ),
   'profitCacheMax', (SELECT max(created_date) FROM mart.profit_order_item_cache),
   'profitCacheRows', (SELECT count(*) FROM mart.profit_order_item_cache),
@@ -7081,7 +7087,7 @@ async function ensureProfitMartCacheFresh(args, generatedAt = '') {
       return {
         code: 0,
         timedOut: false,
-        stdout: `[ensureProfitMartCacheFresh] cache fresh factOrderMax=${decision.factOrderMax} factUpdatedAt=${freshness.factUpdatedAt || ''} profitCacheMax=${decision.profitCacheMax} rows=${decision.profitCacheRows} metaRefreshedAt=${freshness.metaRefreshedAt || ''} coreGeneratedAt=${generatedAt || ''} allowedCoreSkewMs=${decision.allowedCoreSkewMs}`,
+        stdout: `[ensureProfitMartCacheFresh] cache fresh factOrderMax=${decision.factOrderMax} orderFactUpdatedAt=${freshness.orderFactUpdatedAt || freshness.factUpdatedAt || ''} accountingInputUpdatedAt=${freshness.accountingInputUpdatedAt || freshness.orderFactUpdatedAt || freshness.factUpdatedAt || ''} profitCacheMax=${decision.profitCacheMax} rows=${decision.profitCacheRows} metaRefreshedAt=${freshness.metaRefreshedAt || ''} coreGeneratedAt=${generatedAt || ''} allowedCoreSkewMs=${decision.allowedCoreSkewMs}`,
         stderr: '',
       };
     }
@@ -7101,7 +7107,7 @@ async function ensureProfitMartCacheFresh(args, generatedAt = '') {
       if (!afterDecision.coversCostRun || !afterDecision.coversCostCutoff || !afterDecision.coversCostAssignments) {
         throw new Error(
           `inventory cost ledger remains incomplete after refresh: cutoff=${afterLedger.costRunSourceCutoffAt || ''} `
-          + `factUpdatedAt=${afterLedger.factUpdatedAt || ''} assignment=${afterDecision.costAssignmentPostCutoverAssignedRows}/${afterDecision.costAssignmentPostCutoverRows} `
+          + `orderFactUpdatedAt=${afterLedger.orderFactUpdatedAt || afterLedger.factUpdatedAt || ''} assignment=${afterDecision.costAssignmentPostCutoverAssignedRows}/${afterDecision.costAssignmentPostCutoverRows} `
           + `missing=${afterDecision.costAssignmentPostCutoverMissingRows}`,
         );
       }
@@ -7429,20 +7435,55 @@ export function normalizeBiLiveUpdatePayload(payload, now = new Date()) {
     storeKey: boundedLiveText(record.storeKey || record.store_key || record.store || '', 32).toUpperCase(),
     entityId: boundedLiveText(
       record.orderId || record.order_no || record.orderNo || record.returnId || record.return_no || record.returnNo
-      || record.productId || record.product_id || record.productCode || record.skc || record.id || '',
+      || record.productId || record.product_id || record.productCode || record.skc
+      || record.businessKey || record.business_key || record.id || '',
       160
     ),
+    businessDate: boundedLiveText(record.businessDate || record.business_date || '', 10),
+    orderStatus: boundedLiveText(record.orderStatus || record.order_status || '', 40),
+    orderStatusDesc: boundedLiveText(record.orderStatusDesc || record.order_status_desc || '', 120),
+    cancelledBeforePickup: record.cancelledBeforePickup === true
+      || String(record.cancelledBeforePickup || '').toLowerCase() === 'true',
+    salesQuantity: Number.isFinite(Number(record.salesQuantity)) ? Number(record.salesQuantity) : 0,
+    salesSar: Number.isFinite(Number(record.salesSar)) ? Number(record.salesSar) : 0,
     occurredAt: boundedLiveText(record.occurredAt || record.updatedAt || record.updated_at || record.processedAt || record.createdAt || '', 64)
       || now.toISOString(),
   };
 }
 
-export function liveSectionsForBiUpdate(kind) {
+function shanghaiDateKey(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+export function liveSectionsForBiUpdate(kind, event = {}) {
   const base = ['liveSalesToday', 'orders', 'priceScatter'];
-  if (kind === 'return') return [...base, 'afterSales'];
-  if (kind === 'product') return ['productState'];
-  if (kind === 'order') return base;
-  return [];
+  const accountingKinds = new Set([
+    kind,
+    ...(Array.isArray(event.accountingKinds) ? event.accountingKinds : []),
+  ].map(value => String(value || '')));
+  const hasOrder = accountingKinds.has('order');
+  const hasReturn = accountingKinds.has('return');
+  if (!hasOrder && !hasReturn) return kind === 'product' ? ['productState'] : [];
+  const sections = [...base];
+  if (hasReturn) sections.push('afterSales');
+  if (!event.accountingRefreshed) return sections;
+  sections.push('productSalesDaily', 'inventoryTrend');
+  const businessDate = String(event.businessDate || '').slice(0, 10);
+  const currentDate = shanghaiDateKey(event.occurredAt || new Date());
+  const historicalOrder = hasOrder && businessDate && currentDate && businessDate !== currentDate;
+  if (hasReturn || event.refreshHistoricalSections || historicalOrder) {
+    sections.push('homeRankings', 'rankings', 'profit', 'homeProfit');
+  }
+  return sections;
 }
 
 function livePgClientConfig(env = process.env) {
@@ -7503,7 +7544,7 @@ export function createBiLiveUpdateBridge(options = {}) {
     if (!event) return;
     const wire = JSON.stringify({
       ...event,
-      sections: liveSectionsForBiUpdate(event.kind),
+      sections: liveSectionsForBiUpdate(event.kind, event),
       receivedAt: now().toISOString(),
     });
     for (const response of [...clients]) {
@@ -8383,13 +8424,42 @@ async function main() {
     }
   };
 
+  const mergeLiveAccountingRefreshEvent = (current, event) => {
+    const kinds = new Set([
+      ...(Array.isArray(current?.accountingKinds) ? current.accountingKinds : []),
+      current?.kind,
+      ...(Array.isArray(event?.accountingKinds) ? event.accountingKinds : []),
+      event?.kind,
+    ].map(value => String(value || '')).filter(value => ['order', 'return'].includes(value)));
+    const businessDate = String(event?.businessDate || '').slice(0, 10);
+    const currentDate = shanghaiDateKey(event?.occurredAt || new Date());
+    const eventNeedsHistoricalRefresh = event?.kind === 'return'
+      || Boolean(businessDate && currentDate && businessDate !== currentDate);
+    return {
+      ...(current || {}),
+      ...event,
+      accountingKinds: [...kinds],
+      refreshHistoricalSections: Boolean(
+        current?.refreshHistoricalSections
+        || event?.refreshHistoricalSections
+        || eventNeedsHistoricalRefresh
+      ),
+    };
+  };
+
   const scheduleLiveAccountingRefresh = event => {
     if (
       liveAccountingRefreshStopped
       || !allowGenerateSections
       || !['order','return'].includes(String(event?.kind || ''))
     ) return;
-    liveAccountingRefreshPendingEvent = event;
+    // Preserve the widest invalidation scope across a burst. Otherwise a
+    // current-day sale arriving after a prior-day cancellation could replace
+    // its metadata and leave the historical page cache stale.
+    liveAccountingRefreshPendingEvent = mergeLiveAccountingRefreshEvent(
+      liveAccountingRefreshPendingEvent,
+      event,
+    );
     if (liveAccountingRefreshRunning || liveAccountingRefreshTimer) return;
     liveAccountingRefreshTimer = setTimeout(runLiveAccountingRefresh, liveAccountingDebounceMs);
     liveAccountingRefreshTimer.unref?.();
@@ -10873,6 +10943,8 @@ ${uploadCheckAnswer}` : `
   await biLiveUpdateBridge.start();
   scheduleLiveAccountingRefresh({
     kind: 'order',
+    accountingKinds: ['order', 'return'],
+    refreshHistoricalSections: true,
     entityId: 'portal-startup-accounting-catchup',
     occurredAt: new Date().toISOString(),
   });

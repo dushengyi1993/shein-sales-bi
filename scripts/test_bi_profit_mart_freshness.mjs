@@ -63,6 +63,42 @@ const sameDayWebhookWrite = evaluateProfitMartCacheFreshness({
 assert.equal(sameDayWebhookWrite.fresh, false, 'a same-day webhook insert must invalidate the profit mart even when max dates match');
 assert.equal(sameDayWebhookWrite.coversFactChanges, false);
 
+const cancelledOrderMutation = evaluateProfitMartCacheFreshness({
+  factOrderMax: '2026-07-27',
+  orderFactUpdatedAt: '2026-07-28T12:50:02+08:00',
+  accountingInputUpdatedAt: '2026-07-28T12:50:02+08:00',
+  profitCacheMax: '2026-07-27',
+  profitCacheRows: 10_303,
+  metaRefreshedAt: '2026-07-28T12:49:00+08:00',
+  costRunCompletedAt: '2026-07-28T12:49:00+08:00',
+  costRunSourceCutoffAt: '2026-07-28T12:49:00+08:00',
+  costAssignmentCoverageRequired: true,
+  costAssignmentPostCutoverRows: 100,
+  costAssignmentPostCutoverAssignedRows: 100,
+  costAssignmentPostCutoverMissingRows: 0,
+}, {coreGeneratedAt: '2026-07-28T12:49:01+08:00'});
+assert.equal(cancelledOrderMutation.fresh, false, 'zeroing a cancelled order must invalidate revenue and profit caches');
+assert.equal(cancelledOrderMutation.coversFactChanges, false);
+assert.equal(cancelledOrderMutation.coversCostCutoff, false, 'a cancellation must rebuild the ledger so its old sale assignment is removed');
+
+const returnOnlyMutation = evaluateProfitMartCacheFreshness({
+  factOrderMax: '2026-07-27',
+  orderFactUpdatedAt: '2026-07-28T12:48:00+08:00',
+  accountingInputUpdatedAt: '2026-07-28T12:50:02+08:00',
+  profitCacheMax: '2026-07-27',
+  profitCacheRows: 10_303,
+  metaRefreshedAt: '2026-07-28T12:49:00+08:00',
+  costRunCompletedAt: '2026-07-28T12:48:30+08:00',
+  costRunSourceCutoffAt: '2026-07-28T12:48:30+08:00',
+  costAssignmentCoverageRequired: true,
+  costAssignmentPostCutoverRows: 100,
+  costAssignmentPostCutoverAssignedRows: 100,
+  costAssignmentPostCutoverMissingRows: 0,
+}, {coreGeneratedAt: '2026-07-28T12:49:01+08:00'});
+assert.equal(returnOnlyMutation.fresh, false, 'a return mutation must invalidate profit even when order facts did not change');
+assert.equal(returnOnlyMutation.coversFactChanges, false);
+assert.equal(returnOnlyMutation.coversCostCutoff, true, 'return-only changes do not require an unnecessary cost-ledger rebuild');
+
 const staleCostLedger = evaluateProfitMartCacheFreshness({
   factOrderMax: '2026-07-25',
   factUpdatedAt: '2026-07-25T18:04:00+08:00',
@@ -111,4 +147,4 @@ const costComplete = evaluateProfitMartCacheFreshness({
 }, {coreGeneratedAt: '2026-07-25T18:05:01+08:00'});
 assert.equal(costComplete.fresh, true, 'a completed ledger cutoff plus complete post-cutover assignment permits profit refresh');
 
-console.log('bi_profit_mart_freshness: pipeline ordering, cost cutoff, and assignment coverage guards passed');
+console.log('bi_profit_mart_freshness: inserts, cancellations, returns, cost cutoff, and assignment coverage guards passed');
