@@ -123,6 +123,30 @@ assert.equal(exact.quality.metadataDiffCount, 0);
 assert.equal(exact.quality.statusDiffCount > 0, true, 'transport-specific status overlays are visible but do not corrupt sales parity');
 assert.equal(exact.quality.identityOverlayRequired, true);
 
+const refundedReturnBrowser = structuredClone(apiArtifact);
+refundedReturnBrowser.source = 'shein-webapi';
+refundedReturnBrowser.orderRefs = [{orderId: 'INTERNAL-RETURN'}];
+refundedReturnBrowser.orders = [{
+  id: 'INTERNAL-RETURN',
+  orderNo: 'O-1',
+  tagCodeList: [{tagCode: 'COD', tagDesc: 'COD'}],
+}];
+const refundedReturnLine = refundedReturnBrowser.goodsRows.find((row) => row.goodsId === 'G-2');
+refundedReturnLine.pageStatus = 'RETURN_ON_WAY';
+refundedReturnLine.pageStatusDesc = '派件失败退回中';
+refundedReturnLine.performStatus = 4;
+refundedReturnLine.performStatusDesc = '尾程已发货';
+refundedReturnLine.goodsPerformanceStatus = 4;
+refundedReturnLine.goodsPerformanceStatusDesc = '尾程已发货';
+refundedReturnLine.salesExclusionReason = '';
+const transportStatusConflict = compareSalesArtifacts(refundedReturnBrowser, apiArtifact);
+assert.equal(transportStatusConflict.matched, true,
+  'the same refunded zero-value line must reconcile even when transports expose different fulfilment states');
+assert.equal(transportStatusConflict.quality.businessLineDiffCount, 0,
+  'transport-specific exclusion labels must not change business-line identity');
+assert.equal(transportStatusConflict.quality.statusDiffCount, 2,
+  'the replaced fulfilment state remains visible as one removed and one added status key');
+
 const paymentFlag = extractPaymentFlagsFromSalesArtifact(apiArtifact, {
   date: apiArtifact.start,
   sourceKind: 'openapi',

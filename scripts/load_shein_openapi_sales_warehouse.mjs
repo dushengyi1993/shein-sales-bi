@@ -18,7 +18,6 @@ import {spawn} from 'node:child_process';
 import {normalizeGoodsSnDetailed} from '../lib/product_sku_normalizer.mjs';
 import {
   isValidSalesGoodsRow,
-  salesExclusionReason,
   summarizeSalesGoodsRows,
 } from '../lib/shein_sales_validity.mjs';
 import {
@@ -773,24 +772,6 @@ function canonicalGoodsSn(row) {
   return cleanText(details.canonical || raw);
 }
 
-function canonicalExclusion(row) {
-  if (isValidSalesGoodsRow(row)) return '';
-  const reason = cleanText(salesExclusionReason(row)).toLowerCase();
-  if (reason.includes('cancel')) return 'cancelled';
-  const statusText = [
-    row?.pageStatus,
-    row?.pageStatusDesc,
-    row?.goodsPerformanceStatusDesc,
-    row?.orderStatusDesc,
-    row?.performStatusDesc,
-  ].map(cleanText).join(' ');
-  if (/cancel|取消/i.test(statusText)) return 'cancelled';
-  if (canonicalNumber(row?.number ?? row?.quantity) <= 0) return 'non_positive_quantity';
-  if (canonicalNumber(row?.currencyPrice) <= 0) return 'non_positive_amount';
-  if (row?.isValidSale === false || cleanText(row?.isValidSale).toLowerCase() === 'false') return 'explicit_invalid';
-  return reason || 'invalid';
-}
-
 function orderNoOf(row) {
   return cleanText(row?.orderNo || row?.billno || row?.billNo || row?.orderId || row?.id);
 }
@@ -819,7 +800,12 @@ function businessLineKey(row) {
     cleanText(row?.currencyCode || row?.currency_code).toUpperCase(),
     valid ? round2(row?.currencyPrice) : 0,
     valid,
-    canonicalExclusion(row),
+    // Exclusion reasons are transport-specific status metadata, not sales
+    // identity. WebAPI can describe a refunded zero-value line as returning
+    // while OpenAPI describes the same line as cancelled before pickup. Both
+    // are the same excluded business line; statusLineKey keeps the diagnostic
+    // difference without turning exact sales parity into a failed gate.
+    valid ? '' : 'excluded',
   ]);
 }
 
