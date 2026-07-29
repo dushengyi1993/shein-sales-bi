@@ -16,7 +16,7 @@ Environment=SHEIN_BI_COS_MOUNT=/lhcos-data
 Environment=SHEIN_BI_COS_ARCHIVE_ROOT=/lhcos-data/shein-bi-archive
 Environment=SHEIN_BI_OUTPUT_RETENTION_DAYS=30
 Environment=SHEIN_BI_TMP_RETENTION_DAYS=7
-Environment=SHEIN_BI_PROFILE_CACHE_THRESHOLD_PERCENT=80
+Environment=SHEIN_BI_PROFILE_CACHE_THRESHOLD_PERCENT=75
 Environment=SHEIN_BI_DISK_MAINTENANCE_LOG_DIR=/srv/shein-bi/logs/disk-maintenance
 TimeoutStartSec=7200
 Nice=15

@@ -129,12 +129,12 @@ assert.equal(property(diskMaintenance, 'OOMPolicy'), 'stop');
 assert.equal(property(diskMaintenance, 'NoNewPrivileges'), 'true');
 assert.equal(property(diskMaintenance, 'PrivateTmp'), 'true');
 assertCommonHardening(diskMaintenance, 'disk maintenance');
-assert.match(diskMaintenance, /SHEIN_BI_PROFILE_CACHE_THRESHOLD_PERCENT=80/);
+assert.match(diskMaintenance, /SHEIN_BI_PROFILE_CACHE_THRESHOLD_PERCENT=75/);
 assert.match(diskMaintenance, /SHEIN_BI_OUTPUT_RETENTION_DAYS=30/);
 assert.doesNotMatch(diskMaintenance, /restore_shein_store_session|bootstrap_shein_browser_session/,
   'root-run disk maintenance must never launch a SHEIN browser');
 const diskMaintenanceTimer = readUnit('shein-bi-cloud-disk-maintenance.timer');
-assert.equal(property(diskMaintenanceTimer, 'OnCalendar'), 'Sun *-*-* 01:35:00 Asia/Shanghai');
+assert.equal(property(diskMaintenanceTimer, 'OnCalendar'), '*-*-* 04:30:00 Asia/Shanghai');
 assert.equal(property(diskMaintenanceTimer, 'Persistent'), 'true');
 
 const marketingGuardTimer = readUnit('shein-bi-cloud-marketing-live-guard.timer');

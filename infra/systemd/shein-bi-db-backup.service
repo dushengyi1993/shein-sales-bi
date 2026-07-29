@@ -12,6 +12,9 @@ UMask=0027
 WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/root
 Environment=SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-nightly-maintenance.lock
+Environment=SHEIN_BI_BACKUP_RETENTION_DAYS=7
+Environment=SHEIN_BI_BACKUP_COS_MOUNT=/lhcos-data
+Environment=SHEIN_BI_BACKUP_COS_ARCHIVE_ROOT=/lhcos-data/shein-bi-db-backups
 TimeoutStartSec=10800
 Nice=19
 IOSchedulingClass=best-effort
