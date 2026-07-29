@@ -32,6 +32,25 @@ Linux 生产健康只以 systemd、watchdog、Portal health 和云端数据审�
 - `shein-bi-cloud-marketing-repair.timer`：`10:50/12:50/14:50/16:50/18:50` 消费 guard 的精确队列，`19:30` 做当天最后一次续跑与回读；每轮总预算最多 8 个活动组。父 worker 取得浏览器租约后把 task/runId 传给子批次，只关闭本任务拥有的店铺；每组 preflight、精确 work hash、旧活动快照、事务 journal、失败补偿和最终全店 readback 缺一不可。
 - `shein-bi-cloud-watchdog.timer`：每小时只读巡检。它可以用后续完整 19 店扫描证据收口孤立的历史扫描 warning，但必须保留原日更状态并在报告写出 recovery；其它 warning 或不完整证据仍告警。
 
+## 半托数据盘
+
+生产半托的大体积运行数据放在独立云硬盘 `/data`，应用仍使用原绝对路径：
+
+- `/data/shein-bi/profiles` bind mount 到 `/opt/shein-bi/app/profiles`
+- `/data/shein-bi/outputs` bind mount 到 `/opt/shein-bi/app/outputs`
+- `/data/shein-bi/runtime` bind mount 到 `/srv/shein-bi/runtime`
+- `/data/shein-bi/backups` bind mount 到 `/srv/shein-bi/backups`
+
+`/etc/fstab` 中的数据盘和四个 bind mount 必须使用 UUID/固定路径，不使用易漂移的 `/dev/vdX` 名称。每个 `shein-bi-*.service` 都应把 `shein-bi-data-disk-requires-mounts.conf` 安装为 systemd drop-in；任一挂载缺失时服务必须失败关闭，禁止写入系统盘上被 bind mount 遮蔽的空目录。迁移或恢复后至少验证：
+
+```bash
+findmnt --verify
+findmnt /data /opt/shein-bi/app/profiles /opt/shein-bi/app/outputs /srv/shein-bi/runtime /srv/shein-bi/backups
+systemctl show shein-bi-portal.service -p RequiresMountsFor
+```
+
+全托目录不属于这组 bind mount，不得混入半托数据盘迁移脚本或 drop-in。
+
 注意：`shein-bi-cloud-daily-refresh.service` 和它内部调用的 `cloud_link_business_sync.sh` 必须以 `sheinops` 运行，不能用 root 跑 SHEIN Chrome profile；否则会留下 root-owned profile 文件，导致登录态管家读 profile 报 `EACCES`。统一日更只收口前一完整日的慢变/补采，不重复承担当天销售；当天销售由半托 Webhook + OpenAPI 按单更新。迁移时停用并删除旧 `today` timer，mask 旧 `link-business/openapi-hl/rtv-verify` 分散 timer。ET/watchdog 使用 `Persistent=false`；每日唯一性任务使用 `Persistent=true` 并依赖锁、当天成功状态、忙碌/资源门禁防重复，事实以各 `.timer` 为准。ET forwarder 保持 root 执行，因为入仓依赖 Docker/root 环境，且 ET 使用独立 profile。
 
 资源护栏：高频销售和 ET 是轻量高优先任务；`daily-refresh` 是低优先慢任务，由晨间链路在销售刷新完成后启动。生产 oneshot 任务必须保留 `MemoryHigh` / `MemoryMax` / `OOMPolicy=stop`，常驻服务必须保留自己的 `MemoryHigh` / `MemoryMax` / `OOMPolicy=stop` / `Restart=always`；`daily-refresh` 必须保留启动前的忙碌写入任务等待和可用内存检查。宁可让慢变补采晚一次，也不要为了补齐链接/营销/RTV 数据把 BI Portal、Metabase 或销售刷新拖死。

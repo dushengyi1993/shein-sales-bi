@@ -137,6 +137,10 @@ const diskMaintenanceTimer = readUnit('shein-bi-cloud-disk-maintenance.timer');
 assert.equal(property(diskMaintenanceTimer, 'OnCalendar'), '*-*-* 04:30:00 Asia/Shanghai');
 assert.equal(property(diskMaintenanceTimer, 'Persistent'), 'true');
 
+const dataDiskGuard = readUnit('shein-bi-data-disk-requires-mounts.conf');
+assert.match(dataDiskGuard, /^RequiresMountsFor=\/data .*\/opt\/shein-bi\/app\/profiles .*\/opt\/shein-bi\/app\/outputs .*\/srv\/shein-bi\/runtime .*\/srv\/shein-bi\/backups$/m);
+assert.equal(property(dataDiskGuard, 'After'), 'local-fs.target');
+
 const marketingGuardTimer = readUnit('shein-bi-cloud-marketing-live-guard.timer');
 const marketingWindows = [...marketingGuardTimer.matchAll(/^OnCalendar=(.*)$/gm)].map(match => match[1].trim());
 assert.deepEqual(marketingWindows, ['*-*-* 10:30:00', '*-*-* 13:30:00', '*-*-* 16:30:00']);
