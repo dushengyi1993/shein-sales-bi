@@ -43,6 +43,8 @@ export function buildHighClickSpecialDiscountPlan({
     canonical: String(row.canonical || '').trim(),
     productName: String(row.productName || row.canonical || '').trim(),
     metrics: row.metrics || {},
+    qualificationReason: String(row.qualificationReason || ''),
+    qualificationRoutes: Array.isArray(row.qualificationRoutes) ? row.qualificationRoutes : [],
     specialPrice: Number(row.specialPrice),
     pricing: row.pricing || {},
     activityStock: Number(row.activityStock || audit.activityStock || 10),

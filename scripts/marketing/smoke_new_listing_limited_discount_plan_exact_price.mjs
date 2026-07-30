@@ -12,6 +12,7 @@ const outDir = path.join(tmp, 'out');
 const reportJson = path.join(tmp, 'report.json');
 const reportMd = path.join(tmp, 'report.md');
 const liveScanPath = path.join(tmp, 'live.json');
+const sourceGuardPath = path.join(tmp, 'guard.json');
 const linkHistoryDir = path.join(tmp, 'shein_links');
 const storesConfigPath = path.join(tmp, 'stores.json');
 
@@ -39,6 +40,18 @@ await fs.writeFile(linksDataPath, `${JSON.stringify({
       shelf_status_name: '已上架',
       shelf_age_days: 2,
       c7_eps_uv: 9,
+    },
+    {
+      store_key: 'JY',
+      skc: 'high-click-overlap-skc',
+      standard_goods_sn: 'HIGH-CLICK-OVERLAP',
+      raw_goods_sn: 'HIGH-CLICK-OVERLAP',
+      is_on_shelf: true,
+      shelf_status_name: '已上架',
+      shelf_age_days: 2,
+      c7_eps_uv: 5000,
+      c7_goods_uv: 250,
+      c7_sale_cnt: 0,
     },
     {
       store_key: 'JY',
@@ -159,6 +172,15 @@ await fs.writeFile(priceOverridesPath, `${JSON.stringify({
       combo: '普通活动价',
     },
     {
+      storeKey: 'JY',
+      activityId: 47064,
+      skc: 'high-click-overlap-skc',
+      canonical: 'HIGH-CLICK-OVERLAP',
+      finalTargetPrice: 66.66,
+      targetPrice: 66.66,
+      combo: '高点击阶段优先',
+    },
+    {
       storeKey: 'FY',
       activityId: 47064,
       skc: 'low-approved',
@@ -227,6 +249,15 @@ await fs.writeFile(priceOverridesPath, `${JSON.stringify({
   ],
 }, null, 2)}\n`, 'utf8');
 
+await fs.writeFile(sourceGuardPath, `${JSON.stringify({
+  reportDate: '2026-07-04',
+  highClickLowConversionSpecial: {
+    actionCount: 1,
+    rows: [{storeKey: 'JY', skc: 'high-click-overlap-skc'}],
+  },
+  limitedDiscountTargetPriceDrift: {belowRows: []},
+}, null, 2)}\n`, 'utf8');
+
 await fs.mkdir(path.join(linkHistoryDir, 'JY'), {recursive: true});
 await fs.writeFile(path.join(linkHistoryDir, 'JY', '2026-07-04.json'), `${JSON.stringify({
   ok: true,
@@ -253,6 +284,7 @@ const result = spawnSync(process.execPath, [
   '--report-json', reportJson,
   '--report-md', reportMd,
   '--current-marketing-live-scan', liveScanPath,
+  '--source-guard', sourceGuardPath,
   '--link-history-dir', linkHistoryDir,
   '--stores-config', storesConfigPath,
   '--no-supplemental-price-overrides',
@@ -280,6 +312,7 @@ assert.equal(rawOnlyRow.limitedDiscountPrice, 77.77);
 assert.equal(rawOnlyRow.topTierPriceSource, 'explicit_top_tier_price');
 assert.equal(report.latestRawLinkOverlay.addedRowCount, 1);
 assert.equal(report.latestRawLinkOverlay.addedRows[0].skc, 'raw-only-skc');
+assert.equal(report.latestRawLinkOverlay.updatedRowCount, 0);
 assert.equal(report.totals.liveCoveredIgnored, 2);
 const oldMissingRow = report.rows.find(row => row.skc === 'old-missing-limited');
 assert.equal(oldMissingRow.treatmentType, 'existing_on_shelf_missing_limited_discount');
@@ -290,6 +323,9 @@ assert.equal(oldMissingRow.endTime, '2026-08-03 23:59:59', 'persistent on-shelf 
 assert.equal(exactRow.endTime, '2026-07-11 23:59:59', 'new-listing top treatment remains a 7-day window');
 assert.equal(report.rule.mandatoryOnShelfDurationDays, 30);
 assert.equal(report.totals.existingOnShelfMissingLimitedDiscount, 1);
+assert.equal(report.totals.highClickSpecialStageExcluded, 1);
+assert.equal(report.rows.some(row => row.skc === 'high-click-overlap-skc'), false);
+assert.equal(report.ignored.some(row => row.skc === 'high-click-overlap-skc' && row.reason === 'handled_by_high_click_special_stage'), true);
 assert.equal(report.rule.liveLimitedEvidenceComplete, true);
 assert.equal(report.ignored.some(row => row.skc === 'covered-skc' && row.reason === 'live_new_listing_limited_discount_already_covered_at_target'), true);
 assert.equal(report.ignored.some(row => row.skc === 'covered-higher-skc' && row.reason === 'live_new_listing_limited_discount_already_covered_at_target'), true);

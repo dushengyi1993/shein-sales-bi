@@ -269,7 +269,7 @@ function latestFile(dir, regex) {
   return listFiles(dir, regex)[0] || '';
 }
 
-function latestCurrentMarketingLiveScanFile(dir, regex, storesConfigDoc) {
+export function latestCurrentMarketingLiveScanFile(dir, regex, storesConfigDoc) {
   const files = listFiles(dir, regex);
   const enabledStoreCount = Array.isArray(storesConfigDoc?.stores)
     ? storesConfigDoc.stores.filter(store => store?.enabled !== false).length
@@ -280,10 +280,19 @@ function latestCurrentMarketingLiveScanFile(dir, regex, storesConfigDoc) {
     const doc = readJsonSafe(newest);
     const stat = fsSync.statSync(newest);
     const freshHours = (Date.now() - stat.mtimeMs) / 36e5;
+    const rows = Array.isArray(doc?.rows) ? doc.rows : [];
+    const storeCount = new Set(rows.map(row => normKey(row.storeKey || row.store_key || row.store)).filter(Boolean)).size;
     // Prefer today's/fresh live scan even when one store hit login page. Using
     // an older all-green scan hides the actual blocker and violates the live
-    // evidence rule.
-    if (doc && doc?.partial !== true && freshHours <= 24) return newest;
+    // evidence rule. A targeted scan is still only patch evidence even when
+    // the scanner completed its requested subset and wrote partial=false.
+    if (
+      doc
+      && doc?.partial !== true
+      && freshHours <= 24
+      && enabledStoreCount > 0
+      && storeCount >= enabledStoreCount
+    ) return newest;
   }
   for (const file of files.slice(0, 20)) {
     const doc = readJsonSafe(file);
@@ -2141,6 +2150,16 @@ function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSour
         firstShelfTime: row.first_shelf_time,
         source: rel(row.raw_link_snapshot_source),
       })),
+      updatedRowCount: mergedLinks.updatedRowCount,
+      updatedRows: mergedLinks.updatedRows.slice(0, 60).map(row => ({
+        storeKey: row.store_key,
+        skc: row.skc,
+        canonical: row.standard_goods_sn,
+        linkDate: row.link_date,
+        firstShelfTime: row.first_shelf_time,
+        shelfStatusName: row.shelf_status_name,
+        source: rel(row.raw_link_snapshot_source),
+      })),
     },
     onShelfRows,
     exactPlannedRows,
@@ -3876,9 +3895,12 @@ function buildHumanSummary(report) {
     ok.push('新上架 7 天/重新上架无活动限时折扣：没有需要 Top5 待遇兜底/重报的链接。');
   }
   if (Number(highClickSpecial.actionCount || 0) > 0) {
-    watches.push(`高点击低转化专属折扣：${humanCount(highClickSpecial.actionCount, '条')}符合“7日曝光>3000、7日点击率>4%、7日销量=0”，已进入先登记保护、再 dry-run/执行/live 回读的自动队列；价格按同货号全局曝光Top5利润率再降2个百分点，库存10、周期7天。`);
+    watches.push(`高点击低转化专属折扣：${humanCount(highClickSpecial.actionCount, '条')}符合点击率或加车访客入口并已进入先登记保护、再 dry-run/执行/live 回读的自动队列；价格按同货号全局曝光Top5利润率再降2个百分点，库存10、周期7天。`);
   } else if (highClickSpecial.enabled !== false) {
     ok.push(`高点击低转化专属折扣：本轮符合条件 ${humanCount(highClickSpecial.qualifyingCount || 0, '条')}，其中已有有效人工特殊价保护 ${humanCount(highClickSpecial.protectedCount || 0, '条')}，无新增自动写入。`);
+  }
+  if (Number(highClickSpecial.pendingApprovalCount || 0) > 0) {
+    watches.push(`高点击低转化专属折扣：加车访客新增入口有 ${humanCount(highClickSpecial.pendingApprovalCount, '条')}首批候选待用户确认，尚未进入自动执行队列。`);
   }
   if (Number(highClickEffect.total || 0) > 0) {
     watches.push(`特殊折扣效果：跟踪 ${humanCount(highClickEffect.total, '条')}，最新7日口径已出单 ${humanCount(highClickEffect.convertedCount || 0, '条')}、仍在观察且0单 ${humanCount(highClickEffect.observingNoSaleCount || 0, '条')}、到期仍0单 ${humanCount(highClickEffect.endedWithoutSaleCount || 0, '条')}、当前指标缺失 ${humanCount(highClickEffect.missingCurrentMetricsCount || 0, '条')}；这是滚动7日方向性对比，不把同期变化误写成折扣因果。`);
@@ -4002,8 +4024,8 @@ function buildMarkdown(report) {
   lines.push('');
   const highClickSpecial = report.highClickLowConversionSpecial || {};
   const highClickEffect = report.highClickSpecialEffect || {};
-  lines.push('- 触发条件：当前在售，近7天曝光人数严格大于3000、近7天点击率严格大于4%，且近7天销量明确为0；缺失销量不按0处理。');
-  lines.push(`- 本轮候选：符合 ${humanCount(highClickSpecial.qualifyingCount || 0, '条')}；新增待自动登记/执行 ${humanCount(highClickSpecial.actionCount || 0, '条')}；已有人工特殊价保护 ${humanCount(highClickSpecial.protectedCount || 0, '条')}；价格证据阻断 ${humanCount(highClickSpecial.blockedCount || 0, '条')}。`);
+  lines.push('- 触发条件：当前在售且近7天销量明确为0，并满足任一入口：A. 近7天曝光>3000、点击率>4%；B. 近7天曝光>=3000、加车访客>=20。缺失销量或入口指标不猜测。');
+  lines.push(`- 本轮候选：符合 ${humanCount(highClickSpecial.qualifyingCount || 0, '条')}；新增待自动登记/执行 ${humanCount(highClickSpecial.actionCount || 0, '条')}；加车入口首批待确认 ${humanCount(highClickSpecial.pendingApprovalCount || 0, '条')}；已有人工特殊价保护 ${humanCount(highClickSpecial.protectedCount || 0, '条')}；价格证据阻断 ${humanCount(highClickSpecial.blockedCount || 0, '条')}。`);
   lines.push('- 执行口径：同货号全局曝光Top5利润率再降低2个百分点，库存10、周期7天；先登记人工特殊价保护，再 dry-run、执行和 live 回读。');
   if ((highClickSpecial.rows || []).length) {
     lines.push('');
@@ -4011,6 +4033,16 @@ function buildMarkdown(report) {
     lines.push('|---|---|---|---:|---:|---:|---:|');
     for (const row of highClickSpecial.rows.slice(0, 20)) {
       lines.push(`| ${row.storeKey} | ${String(row.productName || row.canonical || '').replaceAll('|', '/')} | ${row.skc} | ${row.metrics?.c7Exposure ?? ''} | ${humanPercent(row.metrics?.c7ClickRate)} | ${row.metrics?.c7SaleCount ?? ''} | ${num(row.specialPrice)} |`);
+    }
+  }
+  if ((highClickSpecial.pendingApprovalRows || []).length) {
+    lines.push('');
+    lines.push('### 加车访客入口首批待确认');
+    lines.push('');
+    lines.push('| 店铺 | 品名/货号 | SKC | 7日曝光 | 7日加车访客 | 7日点击率 | 7日销量 | 专属价 SAR |');
+    lines.push('|---|---|---|---:|---:|---:|---:|---:|');
+    for (const row of highClickSpecial.pendingApprovalRows.slice(0, 50)) {
+      lines.push(`| ${row.storeKey} | ${String(row.productName || row.canonical || '').replaceAll('|', '/')} | ${row.skc} | ${row.metrics?.c7Exposure ?? ''} | ${row.metrics?.c7CartVisitors ?? ''} | ${humanPercent(row.metrics?.c7ClickRate)} | ${row.metrics?.c7SaleCount ?? ''} | ${num(row.specialPrice)} |`);
     }
   }
   lines.push('');
@@ -4035,7 +4067,7 @@ function buildMarkdown(report) {
   lines.push(`- 订单商品行成交价：云端读取 ${humanCount(report.orderPriceAudit.cloud?.rows || 0, '行')}；活动窗口内命中目标并比价 ${humanCount(report.orderPriceAudit.cloud?.matchedPlanRows || 0, '行')}；窗口外历史线索 ${humanCount(report.orderPriceAudit.outsideWindow, '条')}；未命中计划背景数 ${humanCount(report.orderPriceAudit.cloud?.unmatchedRows || 0, '行')}；低于目标 ${humanCount(report.orderPriceAudit.below, '条')}；高于目标 ${humanCount(report.orderPriceAudit.above, '条')}；缺窗口/价格/粒度证据 ${humanCount(report.orderPriceAudit.dataQualityRows, '条')}`);
   const manualSpecial = report.manualSpecialLimitedDiscount || report.limitedDiscountTargetPriceDrift?.manualSpecialLimitedDiscount || {};
   lines.push(`- 人工特殊限时折扣保护：有效登记 ${humanCount(manualSpecial.activeCount || 0, '条')}；精确覆盖 ${humanCount((manualSpecial.coveredRows || []).length, '条')}；缺失/错价待恢复 ${humanCount(manualSpecial.actionCount || 0, '条')}。`);
-  lines.push(`- 高点击低转化专属折扣：符合 ${humanCount(highClickSpecial.qualifyingCount || 0, '条')}；新增自动队列 ${humanCount(highClickSpecial.actionCount || 0, '条')}；已保护 ${humanCount(highClickSpecial.protectedCount || 0, '条')}；效果已出单 ${humanCount(highClickEffect.convertedCount || 0, '条')}。`);
+  lines.push(`- 高点击低转化专属折扣：符合 ${humanCount(highClickSpecial.qualifyingCount || 0, '条')}；新增自动队列 ${humanCount(highClickSpecial.actionCount || 0, '条')}；加车入口首批待确认 ${humanCount(highClickSpecial.pendingApprovalCount || 0, '条')}；已保护 ${humanCount(highClickSpecial.protectedCount || 0, '条')}；效果已出单 ${humanCount(highClickEffect.convertedCount || 0, '条')}。`);
   const couponTrafficIntent = report.couponTrafficIntent || {};
   const budgetPrefix = couponTrafficIntent.enabled ? '可选流量券预算' : '优惠券预算观察';
   lines.push(`- ${budgetPrefix}：明确流量券目标 ${humanCount(couponTrafficIntent.allowed15TrafficCount || 0, '个')}；低于预算目标的店铺 ${humanCount(report.couponBudget.belowTargetCount, '个')}；缺回读证据 ${humanCount(report.couponBudget.missingEvidenceCount, '个')}`);
@@ -4879,6 +4911,7 @@ async function main() {
     && !report.newSkcCandidates.needsAgeReview
     && !report.newSkcCandidates.needsCouponReview
     && !report.highClickLowConversionSpecial.actionCount
+    && !report.highClickLowConversionSpecial.pendingApprovalCount
     && !report.highClickLowConversionSpecial.blockedCount
     && !report.couponNonGuaranteedFallbackGaps.total
     && !report.ordinaryEnrollmentOpenIssues.issueCount
@@ -4918,7 +4951,9 @@ async function main() {
   console.log(JSON.stringify({ok: true, mode: report.mode, json: rel(jsonPath), md: rel(mdPath), blockers: report.blockers.length}, null, 2));
 }
 
-await main().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await main().catch(err => {
+    console.error(err);
+    process.exit(1);
+  });
+}

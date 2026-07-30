@@ -20,6 +20,8 @@ const tests = [
   'scripts/marketing/smoke_marketing_pricing_policy.mjs',
   'scripts/marketing/smoke_authorized_fallback_inventory_top_up.mjs',
   'scripts/marketing/smoke_latest_raw_marketing_link_overlay.mjs',
+  'scripts/marketing/smoke_current_marketing_live_scan_selection.mjs',
+  'scripts/marketing/smoke_ordinary_activity_list_gap.mjs',
   'scripts/marketing/smoke_limited_discount_default_activity_stock.mjs',
   'scripts/marketing/smoke_manual_limited_discount_protection.mjs',
   'scripts/marketing/smoke_marketing_link_key_index.mjs',

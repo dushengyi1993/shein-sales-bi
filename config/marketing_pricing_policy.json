@@ -109,8 +109,15 @@
     "criteria": {
       "c7ExposureMinExclusive": 3000,
       "c7ClickRateMinExclusive": 0.04,
+      "cartVisitorRouteEnabled": true,
+      "c7CartExposureMinInclusive": 3000,
+      "c7CartVisitorsMinInclusive": 20,
       "c7SaleCountEquals": 0,
       "onShelfOnly": true
+    },
+    "execution": {
+      "cartVisitorRouteAutoExecute": true,
+      "cartVisitorRouteApprovalStatus": "approved_by_user_2026-07-29"
     },
     "pricing": {
       "top5MarginDeltaPct": 2,
@@ -127,7 +134,7 @@
       "lookbackDays": 30,
       "method": "rolling_7d_directional_comparison_not_causal_attribution"
     },
-    "ruleNote": "当前在售链接只有在近7天曝光人数严格大于3000、近7天点击率严格大于4%且近7天销量明确为0时才进入自动专属折扣。点击率使用c7_goods_uv/c7_eps_uv计算；缺失销量不能当0。价格按最新已批准普通活动同标准货号全局曝光Top5商品成本利润率再降低2个百分点，并遵守15%利润率底线；活动库存10、有效期7天。提交前必须先写人工特殊折扣保护登记，后续漂移/兜底不得覆盖。"
+    "ruleNote": "当前在售链接满足任一入口且近7天销量明确为0时进入高点击低转化专属折扣候选：A. 近7天曝光人数严格大于3000且点击率严格大于4%，点击率使用c7_goods_uv/c7_eps_uv计算；B. 近7天曝光人数大于等于3000且加车访客大于等于20。缺失销量不能当0。加车入口首批已于2026-07-29经用户确认，后续纳入长期自动执行。价格按最新已批准普通活动同标准货号全局曝光Top5商品成本利润率再降低2个百分点，并遵守15%利润率底线；默认活动库存10、有效期7天。提交前必须先写人工特殊折扣保护登记，后续漂移/兜底不得覆盖。"
   },
   "newListingWithin7Days": {
     "enabled": true,

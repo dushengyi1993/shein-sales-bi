@@ -342,6 +342,7 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
 - 重扫漏报或用户质疑漏报时，不要只处理上一次报错活动；必须逐店重新扫描 DSY 店铺（含 `MZ`，除非用户明确排除）在时间窗内仍可报名的活动，发现新增抓入商品就补填。
 - 报名方案生成时，BI/链接抓取可能尚未覆盖全部可报名 SKC；执行页才出现的新 SKC 必须补进系统，不得当作“计划外所以跳过”：
   - 若活动页 `totalGoods > expectedSelectedCount`、`selection.outOfPlanRows` 非空，或后台活动列表 `已报数量 < 可报总数`（即 `applyGoodsNum < allowGoodsNum`）存在不在当前最终计划里的差额，必须生成 supplement `selection-plan` / `price-overrides`；不能因为计划内 `missingRows=0` 就宣布没漏。
+  - `2026-07-29` 起，对用户已经批准并执行中的普通活动批次，上述差额只要在报名截止前出现，就属于长期授权的自动补报范围：巡检当轮完成 supplement、不可变 approval manifest、dry-run、真实提交和受影响店回读，不再逐次确认。补报优先克隆同店同 SKC 已批准价；没有同店批准行时按当前最终基准和既定 Top5/新品/备注规则计算。平台最低档更低时按平台档提交并审计差额。活动已截止、价格无法可靠推导、身份不一致或平台硬拒绝时才保留 blocker。该授权不包含未批准的新活动方案、普通活动库存虚增和优惠券。
   - “补报原剔除项”工具只允许接收 `excludeReason=row_full_cost_including_storage_margin_below_floor` 的行；缺成本、缺价格、其它门禁或混合原因一律拒绝。主计划与补充计划合并后，最终回读必须与合并计划的 `store + activity + SKC`、逐行目标价和 work fingerprint 精确一致，不能通过把 `plannedRows` 改成实际回读行数来制造全绿。
   - 新 SKC 优先克隆同店同 SKC 已批准活动的 `targetPrice/finalTargetPrice/couponFactor/combo`；没有既有批准价时才按当前定价、曝光和底价规则即时算价，算不清则 fail closed。
   - 补报后必须合并新的全量 repaired plan，并让 `verify_ordinary_activity_enrollment.mjs` 回读到 `missingRows=0`、`priceMismatchRows=0`、`extraAvailableRows=0`、`activityListGapRows=0`。
@@ -517,7 +518,7 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
 
 ### 人工特殊限时折扣保护（2026-07-13）
 
-- 用户明确批准的“高点击但不开单”等特殊限时折扣，提交前必须登记到 `config/marketing_manual_limited_discount_overrides.json`；键为 `storeKey + skc`，至少记录特殊价、有效期、活动库存、原因、来源任务/证据、当前活动 ID 和状态。
+- 用户明确批准的“高点击但不开单”等特殊限时折扣，提交前必须登记到生产运行态 `/srv/shein-bi/runtime/marketing_manual_limited_discount_overrides.json`；仓库 `config/marketing_manual_limited_discount_overrides.json` 只作本地/首次迁移种子。键为 `storeKey + skc`，至少记录特殊价、有效期、活动库存、原因、来源任务/证据、当前活动 ID 和状态。
 - 有效期内的特殊价允许低于普通 `finalTargetPrice`。每日 guard 只在 `manualSpecialLimitedDiscount` 审计区展示覆盖、缺失或错价，不得进入普通限时折扣漂移自动改价队列；订单审计在该窗口内使用特殊价，普通活动报价不随之改变。
 - 所有限时折扣自动写路径必须在计划层和执行层分别重读登记表。正确特殊活动保持不动；缺失或错价时按登记的精确价格、库存和结束时间恢复；到期后保护自然失效。
 - 混合活动只移除目标 SKC，禁止整场误伤。平台库存低于登记库存时先查 ET 实盘，ET 足够才允许补平台虚拟库存，ET 不足必须阻断。
@@ -525,9 +526,9 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
 
 ### 高点击低转化专属折扣自动化（2026-07-26）
 
-- 候选必须同时满足：当前在售、近 7 天曝光人数 `> 3000`、近 7 天点击率 `> 4%`、近 7 天销量 `= 0`。点击率统一用 `c7_goods_uv / c7_eps_uv` 计算，阈值是严格大于；缺销量、缺曝光或缺点击人数均不得进入自动写入。
+- 候选必须当前在售且近 7 天销量明确为 `0`，并满足任一入口：A. 近 7 天曝光人数 `> 3000`、点击率 `> 4%`，点击率统一用 `c7_goods_uv / c7_eps_uv` 计算且阈值严格大于；B. 近 7 天曝光人数 `>= 3000`、加车访客 `c7_cart_uv >= 20`。缺销量、缺曝光或缺对应入口指标均不得进入候选。加车访客入口首批只生成含价格的待确认清单，不能进入自动写入队列；用户确认首批后再启用长期自动执行。
 - 专属价沿用用户已批准的高点击实验口径：读取最新已批准普通活动基准，取同标准货号全局曝光 Top5 的商品成本利润率，再降低 2 个百分点，按 `ceil2(productCost / (1 - specialMargin))` 计算。特殊利润率低于 15% 底线、缺商品成本或缺可靠 Top5 目标价时阻断。
-- 活动库存固定 10，周期 7 天。执行器在提交 SHEIN 前先写 `config/marketing_manual_limited_discount_overrides.json`，再复用人工特殊折扣恢复链路完成 ET 门控库存补齐、混合活动精确拆分、dry-run、execute、live readback 和活动 ID 回写。
+- 默认活动库存 10、周期 7 天。执行器在提交 SHEIN 前先写生产运行态登记，再复用人工特殊折扣恢复链路完成 ET 门控库存补齐、混合活动精确拆分、dry-run、execute、live readback 和活动 ID 回写。效果基线与日报增加近 7 天加车访客及其变化值。
 - guard 生成计划时判断一次，repair worker 写登记前必须再用最新 `linksData` 判断一次；旧计划中的链接若已经出单、跌出曝光/点击率阈值或下架，则以 `no_longer_qualifies` 安全跳过。
 - 每日效果反馈记录报名时的 7 日曝光/点击率/销量基线，并与当前滚动 7 日指标对比，输出已出单、活动中仍 0 单、到期仍 0 单和数据缺失。该结果是方向性观察，不作单因素因果归因。
 

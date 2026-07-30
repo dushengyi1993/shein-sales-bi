@@ -153,6 +153,9 @@ const relistedHistory = collectRelistedLinkHistoryEvidence({
 const targetPriceDriftStageKeys = new Set((sourceGuardDoc?.limitedDiscountTargetPriceDrift?.belowRows || [])
   .map(row => exactPriceKey(normStore(row?.storeKey || row?.store_key), String(row?.skc || '').trim()))
   .filter(key => !key.endsWith('::')));
+const highClickSpecialStageKeys = new Set((sourceGuardDoc?.highClickLowConversionSpecial?.rows || [])
+  .map(row => exactPriceKey(normStore(row?.storeKey || row?.store_key), String(row?.skc || '').trim()))
+  .filter(key => !key.endsWith('::')));
 
 const rows = [];
 const blocked = [];
@@ -182,6 +185,15 @@ for (const link of storeLinks) {
     && (mandatoryOnShelfPolicy.requireCompleteLiveMarketingScan === false || liveLimitedEvidence.complete)
     && liveLimitedRows.length === 0;
   if (!recent.applies && !relistedApplies && !mandatoryOnShelfApplies) continue;
+  if (highClickSpecialStageKeys.has(exactKey)) {
+    ignored.push({
+      storeKey,
+      skc,
+      canonical: normalizeCanonicalFromLink(link),
+      reason: 'handled_by_high_click_special_stage',
+    });
+    continue;
+  }
   if (targetPriceDriftStageKeys.has(exactKey)) {
     ignored.push({
       storeKey,
@@ -486,6 +498,16 @@ const summary = {
       firstShelfTime: row.first_shelf_time,
       source: rel(row.raw_link_snapshot_source),
     })),
+    updatedRowCount: mergedLinks.updatedRowCount,
+    updatedRows: mergedLinks.updatedRows.slice(0, 60).map(row => ({
+      storeKey: row.store_key,
+      skc: row.skc,
+      canonical: row.standard_goods_sn,
+      linkDate: row.link_date,
+      firstShelfTime: row.first_shelf_time,
+      shelfStatusName: row.shelf_status_name,
+      source: rel(row.raw_link_snapshot_source),
+    })),
   },
   pricingPolicy: rel(policyPath),
   rule: {
@@ -516,6 +538,7 @@ const summary = {
     replaceExistingLimitedDiscount: rows.filter(row => row.action === 'replace_existing_limited_discount').length,
     blocked: blocked.length,
     ignored: ignored.length,
+    highClickSpecialStageExcluded: ignored.filter(row => row.reason === 'handled_by_high_click_special_stage').length,
     liveCoveredIgnored: ignored.filter(row => String(row.reason || '').startsWith('live_new_listing_limited_discount_already_covered')).length,
   },
   byStore: countBy(rows, 'storeKey'),
@@ -990,4 +1013,3 @@ function formatPrice(value) {
 function rel(file) {
   return path.relative(ROOT, file).replaceAll(path.sep, '/');
 }
-

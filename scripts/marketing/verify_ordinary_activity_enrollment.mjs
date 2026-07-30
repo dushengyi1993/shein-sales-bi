@@ -20,6 +20,7 @@ import {
 } from '../../lib/shein_store_identity.mjs';
 import {recoverSheinLoginIfNeeded} from '../../lib/shein_login_recovery.mjs';
 import {isOrdinaryPlatformTierRewriteAccepted} from '../../lib/marketing_ordinary_platform_price_policy.mjs';
+import {ordinaryActivityListGap} from '../../lib/marketing_ordinary_activity_list_gap.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
@@ -864,13 +865,7 @@ async function verifyStore(store, planRows) {
       const badPackets = latestSummary.badPackets || [];
       const allowGoodsNum = latest?.activityListHit?.allowGoodsNum ?? null;
       const applyGoodsNum = latest?.activityListHit?.applyGoodsNum ?? null;
-      const activityListGapCount = Number.isFinite(Number(allowGoodsNum))
-        ? Math.max(
-            0,
-            Number(allowGoodsNum || 0) - rowsForActivity.length,
-            Number(allowGoodsNum || 0) - activityRows.filter(row => row.enrolledOrUnderReview).length,
-          )
-        : 0;
+      const activityListGapCount = ordinaryActivityListGap(allowGoodsNum, applyGoodsNum);
       const extraAvailableCount = Math.max(Number(fillEvidence.extraAvailableCount || 0), activityListGapCount);
       result.activities.push({
         activityId,

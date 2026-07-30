@@ -489,7 +489,7 @@
 
 - `lib/marketing_automation_authorization.mjs`：读取 `config/marketing_pricing_policy.json` 中的负责人长期营销授权，校验授权 ID、运行上下文、动作白名单、全启用店范围和系统本轮自动锁定的 payload/work hash。用户不必逐次提供 hash；普通活动、优惠券、预算和策略外动作不在授权内。
 
-- `lib/marketing_manual_limited_discount_overrides.mjs`：人工特殊限时折扣登记、有效窗口、精确价格/活动库存/截止时间覆盖判定，以及 ET 门控库存动作的共享实现。
+- `lib/marketing_manual_limited_discount_overrides.mjs`：人工特殊限时折扣登记、有效窗口、精确价格/活动库存/截止时间覆盖判定，以及 ET 门控库存动作的共享实现；生产默认路径由 `SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY` 指向 `/srv/shein-bi/runtime`，仓库配置只作种子。
 
 - `lib/marketing_bounded_batch_resume.mjs`：把限时折扣批次结果拆成已完成、终态阻断、可重试和待续跑精确键，避免组级失败导致成功项重放。
 

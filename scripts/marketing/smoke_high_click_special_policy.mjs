@@ -24,8 +24,15 @@ const marketingPolicy = {
     criteria: {
       c7ExposureMinExclusive: 3000,
       c7ClickRateMinExclusive: 0.04,
+      cartVisitorRouteEnabled: true,
+      c7CartExposureMinInclusive: 3000,
+      c7CartVisitorsMinInclusive: 20,
       c7SaleCountEquals: 0,
       onShelfOnly: true,
+    },
+    execution: {
+      cartVisitorRouteAutoExecute: false,
+      cartVisitorRouteApprovalStatus: 'pending_initial_user_confirmation',
     },
     pricing: {top5MarginDeltaPct: 2, floorMarginPct: 15},
     limitedDiscount: {activityStock: 10, durationDays: 7},
@@ -53,7 +60,15 @@ const qualifying = {
   is_on_shelf: true,
   c7_eps_uv: 5000,
   c7_goods_uv: 250,
+  c7_cart_uv: 5,
   c7_sale_cnt: 0,
+};
+const cartQualifying = {
+  ...qualifying,
+  skc: 'sv-cart-qualified',
+  c7_eps_uv: 3000,
+  c7_goods_uv: 30,
+  c7_cart_uv: 20,
 };
 
 try {
@@ -63,6 +78,21 @@ try {
   assert.equal(evaluateHighClickLowConversionRow({...qualifying, c7_goods_uv: 200}, policy).qualifies, false, 'CTR threshold is strict >');
   assert.equal(evaluateHighClickLowConversionRow({...qualifying, c7_sale_cnt: undefined}, policy).qualifies, false, 'missing sales must not be treated as zero');
   assert.equal(evaluateHighClickLowConversionRow({...qualifying, c7_sale_cnt: 1}, policy).qualifies, false, 'a converted link is not eligible');
+  assert.deepEqual(
+    evaluateHighClickLowConversionRow(cartQualifying, policy).qualificationRoutes,
+    ['cart_visitors'],
+    'cart visitor route uses inclusive exposure and visitor thresholds',
+  );
+  assert.equal(
+    evaluateHighClickLowConversionRow({...cartQualifying, c7_cart_uv: 19}, policy).qualifies,
+    false,
+    'cart visitor threshold is inclusive at 20',
+  );
+  assert.equal(
+    evaluateHighClickLowConversionRow({...cartQualifying, c7_eps_uv: 2999}, policy).qualifies,
+    false,
+    'cart route exposure threshold is inclusive at 3000',
+  );
   assert.equal(
     evaluateHighClickLowConversionRow({...qualifying, is_on_shelf: undefined, shelf_status_name: ''}, policy).qualifies,
     false,
@@ -95,6 +125,37 @@ try {
   assert.equal(actionAudit.rows[0].specialPrice, 139.38);
   assert.equal(actionAudit.rows[0].activityStock, 10);
   assert.equal(actionAudit.rows[0].validTo, '2026-08-02 23:59:59');
+
+  const cartPendingAudit = buildHighClickLowConversionSpecialAudit({
+    linksDataDoc: {data: {links: [cartQualifying]}},
+    priceOverridesDoc,
+    costDoc,
+    manualRegistry: emptyRegistry,
+    marketingPolicy,
+    reportDate: '2026-07-26',
+    now,
+  });
+  assert.equal(cartPendingAudit.actionCount, 0, 'unapproved first cart batch must not enter the execution queue');
+  assert.equal(cartPendingAudit.pendingApprovalCount, 1);
+  assert.equal(cartPendingAudit.pendingApprovalRows[0].specialPrice, 139.38);
+
+  const cartApprovedAudit = buildHighClickLowConversionSpecialAudit({
+    linksDataDoc: {data: {links: [cartQualifying]}},
+    priceOverridesDoc,
+    costDoc,
+    manualRegistry: emptyRegistry,
+    marketingPolicy: {
+      ...marketingPolicy,
+      highClickLowConversionSpecial: {
+        ...marketingPolicy.highClickLowConversionSpecial,
+        execution: {cartVisitorRouteAutoExecute: true, cartVisitorRouteApprovalStatus: 'approved'},
+      },
+    },
+    reportDate: '2026-07-26',
+    now,
+  });
+  assert.equal(cartApprovedAudit.actionCount, 1, 'approved cart route enters the normal protected execution path');
+  assert.equal(cartApprovedAudit.pendingApprovalCount, 0);
 
   const activeRegistry = {
     entries: [{
@@ -175,6 +236,7 @@ try {
   console.log(JSON.stringify({
     ok: true,
     strictCriteria: true,
+    cartVisitorRoutePendingApproval: true,
     missingSalesNotZero: true,
     missingShelfEvidenceFailsClosed: true,
     exactSpecialPrice: 139.38,
