@@ -29,7 +29,7 @@
 
 - 架构和调度细节只查 `docs/bi-system-architecture.md` / `docs/bi-system-operations.md`，MEMORY 只保留“云端运行态为准”的红线。
 - 正式入口：`https://sa.dushengyi.cc/`；云端代码目录 `/opt/shein-bi/app`；SSH 别名 `ssh shein-bi-tencent`。详细架构见 `docs/bi-system-architecture.md`，运维见 `docs/bi-system-operations.md`。
-- GitHub release 只代表源码基线；生产以云端 `/opt/shein-bi/app` 和 systemd 实际状态为准。服务器 pull/reset 后必须重跑 BI 刷新。
+- GitHub release 只代表源码基线；稳定发布完成时云端 `/opt/shein-bi/app` 的 tracked source 必须精确等于 release target commit 且无源码脏改，随后再以 systemd、Portal、数据库和日志验收生产。Portal 生成物和可变运行态不得进入 Git。
 - 2026-07-26 起半托生产 OpenAPI 数据面为 **DL 单一 App + 19 店唯一 OpenKey**；旧 18 App 只留作回滚，不进入生产读写或 Webhook 业务处理。2026-07-23 起当天销售由订单 Webhook 触发按单 OpenAPI 写正式事实；`03:00` WebAPI 仅作独立核对，19/19 深度匹配后才原子晋升 OpenAPI 最终日切片。退货、商品/链接和编辑级资料仍按各自 OpenAPI、WebAPI/headless 与日更边界处理，不能把销售切源扩大成全域切源。
 - BI 自动运营会话、任务、job 和审计使用 PostgreSQL `ops.link_ops_*`；生产数据库不可用时失败关闭，不能静默回退本地 JSON。
 - 负责人经验只允许 `knowledgePublisher=true` 的本人账号和已登记设备单向发布；同事账号只能消费，不能反向覆盖，也不展示内部规则包版本。
@@ -43,14 +43,14 @@
 
 ## 营销活动
 
-- 普通营销活动真实报名/取消、优惠券提交/取消、补预算仍需要当前任务明确授权；每日巡检用 `owner-standing-cloud-marketing-v1` 长期授权自动处理限时折扣价格漂移、登记中的人工特殊折扣恢复、新链接/新上架 7 天、重新上架/漏限时折扣兜底，以及严格命中“7 日曝光 >3000、点击率 >4%、销量明确为 0”的高点击低转化专属折扣。用户不必逐次提供 hash，但系统每轮仍须自动生成并校验精确 work hash，通过授权上下文、身份、价格栈、库存/平台规则、dry-run、执行后精确回读与审计；任一写阶段失败后跳过后续写阶段，只做最终 live scan。
+- 未批准的新普通活动、优惠券提交/取消和补预算仍需要当前任务明确授权；每日巡检用 `owner-standing-cloud-marketing-v1` 长期授权自动处理已批准普通活动截止前新增可报差额、限时折扣价格漂移、登记中的人工特殊折扣恢复、新链接/新上架 7 天、重新上架/漏限时折扣兜底，以及销量明确为 0 且命中“7 日曝光 >3000 + 点击率 >4%”或“7 日曝光 >=3000 + 加车访客 >=20”的专属折扣。用户不必逐次提供 hash，但系统每轮仍须自动生成并校验精确 work hash，通过授权上下文、身份、价格栈、库存/平台规则、dry-run、执行后精确回读与审计；任一写阶段失败后跳过后续写阶段，只做最终 live scan。
 - 营销定价以 `docs/marketing-campaign-signup-pricing-rules.md`、`config/marketing_pricing_policy.json`、`lib/marketing_pricing_policy.mjs` 为准；整数目标价提交前做安全 jitter 并复查。
 - 普通活动、优惠券、限时折扣、旧活动价、成本、仓储费和利润率必须做叠加安全审核；活动扫描过期或证据缺失时 fail closed。
 - 普通活动用户批准价是审计基准；报名页普通档/VIP 档强制更低价时，精确命中平台档位即可继续提交并记录差额，不重复确认。平台档位证据必须按活动 ID 和有效窗口隔离，不能串到其它活动或人工特殊限时折扣。
 - 新链接/新 SKC 不得简单标“待定价”：若能从最新已执行全量计划、同标准货号全局曝光 Top5 规则、成本/仓储费/底价推导出安全目标价，必须自动生成限时折扣兜底并回读；只有缺成本/目标价/仓储费、身份、库存或平台规则阻断时才 fail closed。
-- 新链接巡检不能只用 BI `linksData`：若各店最新 `outputs/shein_links` 原始快照生成更晚，按 `store+SKC` 只追加 BI 缺失行，再与 live 活动集合做差；活动 live scan 本身只返回活动商品，不能枚举在售无活动链接。共享实现为 `lib/marketing_latest_raw_link_overlay.mjs`。
+- 新链接巡检不能只用 BI `linksData`：若各店最新 `outputs/shein_links` 原始快照生成更晚，按 `store+SKC` 追加 BI 缺失行，并允许只用更新快照修正上架状态/首次上架时间，不能覆盖 BI 流量、活动和库存证据；活动 live scan 本身只返回活动商品，不能枚举在售无活动链接。共享实现为 `lib/marketing_latest_raw_link_overlay.mjs`。
 - 新上架 7 天未报活动优先补一期限时折扣；首次新品/超级新品按全局曝光 Top5 力度；已有冲突旧限时折扣则安全结束后重报。
-- 人工特殊限时折扣以 `config/marketing_manual_limited_discount_overrides.json` 为事实源；有效窗口内 drift、新链接、重新上架和漏兜底链路都不得覆盖登记价。当前覆盖必须同时命中登记价、`activityStock` 和 `validTo`；缺失或任一不符都按登记精确恢复。平台库存不足时先查 ET，ET 足够才补虚拟库存。
+- 人工特殊限时折扣生产事实源为 `/srv/shein-bi/runtime/marketing_manual_limited_discount_overrides.json`，仓库 `config` 同名文件只作种子；有效窗口内 drift、新链接、重新上架和漏兜底链路都不得覆盖登记价。当前覆盖必须同时命中登记价、`activityStock` 和 `validTo`；缺失或任一不符都按登记精确恢复。平台库存不足时先查 ET，ET 足够才补虚拟库存。
 - 2026-07-16 用户授权所有已允许自动执行的限时折扣兜底链路（目标价漂移、新链接/新上架 7 天、重新上架无活动、漏限时折扣）在平台活动库存不足时先查 ET 当日实盘；ET 足够则只补平台虚拟库存到计划 `activityStock` 后继续 dry-run/execute/readback，ET 不足或证据过期仍阻断。该授权不包含普通营销活动库存和任意增库存。
 - 限时折扣新建/恢复结果必须逐条报告店铺、标准货号与中文品名、SKC、活动 ID、价格、活动库存、开始/截止时间和 live readback；不要只给活动号与价格。
 - 少量限时折扣补报只复扫受影响店，并用 `merge_current_marketing_price_scans.mjs` 合并最新成功的完整 19 店快照。系统刚创建且名称、价格、窗口均命中规则的未来限时折扣视为已排期待生效，防止重复创建；未来普通活动不提前参与订单目标审计。

@@ -8,7 +8,7 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 - **本地 BI 已封存**：本地 `8787`、`SHEIN-*` Windows 计划任务和本地抓数任务只作回滚参考，除非明确回滚不得恢复。
 - **飞书 Base / 原生看板写入暂停**：`state/feishu-base-sync-paused.flag` 存在时不写 Base/看板；异常提醒保留，日报只保留手动入口，问数走 BI 网页或 CLI。飞书只读问数 service 必须保持暂停。
 - **SHEIN 写操作受控**：普通任务默认 dry-run，真实提交须满足账号权限、人+店+动作、确认与回读审计；云端营销 timer 是负责人长期策略授权的有限例外，不逐次索要人工确认或人工提供 hash，但系统仍必须为每轮自动计算、锁定并校验精确 payload/work hash，且只能执行策略白名单内的限时折扣动作，并强制实时证据、预校验和写后回读。
-- **云端部署纪律**：GitHub release 是源码基线，不等于已部署；云端热修必须回填 GitHub，服务器拉取/重置后必须重跑云端 BI 刷新。
+- **云端部署纪律**：GitHub release 是源码基线，不等于已部署；稳定发布完成时，本机/GitHub/云端 tracked source 必须收敛到同一 commit，云端热修必须在同一事故内回填 GitHub。Portal 生成物和可变运行态不进入 Git。
 - **负责人经验单向继承**：负责人本机 Codex Desktop/CLI 与负责人 BI 会话的长期经验自动进入网页；其他账号只消费，不能反向覆盖。普通同事界面不展示无业务意义的规则包版本号。
 
 ## 关键入口
@@ -85,7 +85,7 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 
 | 主题 | 文档 |
 |---|---|
-| 2026.07.28.4 营销自动化与文档收口 | `docs/bi-ops-release-2026-07-28-4.md` |
+| 2026.07.30.1 当前正式发布 | `docs/bi-ops-release-2026-07-30.md` |
 | 运行环境架构 | `docs/runtime-architecture.md` |
 | 其他 agent 云端优先交接 | `docs/agent-handoff-cloud-first.md` |
 | 应急恢复备份边界 | `docs/emergency-recovery-backup.md` |
@@ -114,6 +114,7 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 | 营销活动报名价格规则 | `docs/marketing-campaign-signup-pricing-rules.md` |
 | 营销折扣自动化路线图 | `docs/marketing-automation-roadmap.md` |
 | 每日营销巡检交接与执行规则 | `docs/marketing-daily-inspection-handoff.md` |
+| 源码、发布与云端版本治理 | `docs/release-and-deployment-version-policy.md` |
 | scripts 脚本清单与废弃边界 | `docs/scripts-inventory.md` |
 | 负责人经验单向同步 | `docs/owner-knowledge-sync.md` |
 | 数据模型 | `docs/data-model.md` |

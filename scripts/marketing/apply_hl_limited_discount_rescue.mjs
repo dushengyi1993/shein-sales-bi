@@ -856,7 +856,7 @@ try {
       ));
     });
     result.manualSpecialProtection = {
-      registrySource: 'config/marketing_manual_limited_discount_overrides.json',
+      registrySource: manualRegistry.sourcePath,
       protectedTargetCount: targetRows.filter(row => row.manualSpecialLimitedDiscount).length,
       alreadyCoveredExact: manualSpecialAlreadyCovered,
     };

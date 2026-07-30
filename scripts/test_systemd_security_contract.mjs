@@ -151,6 +151,7 @@ const marketingGuardScript = fs.readFileSync(new URL('./cloud_marketing_live_gua
 assert.doesNotMatch(marketingGuard, /^ExecStart(?:Pre|Post)=.*cleanup_shein_store_browsers/m,
   'browserless marketing inspection must not have unit-level cleanup');
 assert.match(marketingGuard, /SHEIN_BI_MARKETING_LIVE_BUILD_REPAIR_QUEUE=1/);
+assert.match(marketingGuard, /SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY=\/srv\/shein-bi\/runtime\/marketing_manual_limited_discount_overrides\.json/);
 assert.doesNotMatch(marketingGuard, /SHEIN_BI_MARKETING_AUTOMATION_AUTHORIZATION=/, 'read-only inspection service must not receive write authorization');
 assert.match(marketingGuard, /SHEIN_BI_MARKETING_LIVE_SCAN_TIMEOUT_SEC=900/);
 assert.match(marketingGuard, /SHEIN_BI_MARKETING_PRICE_SESSION_CONCURRENCY=3/);
@@ -169,6 +170,7 @@ const marketingRepairScript = fs.readFileSync(new URL('./cloud_marketing_repair_
 assert.doesNotMatch(marketingRepair, /^ExecStart(?:Pre|Post)=.*cleanup_shein_store_browsers/m,
   'marketing repair must not stack unit-level cleanup around its lease-owned script cleanup');
 assert.match(marketingRepair, /SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS=8/);
+assert.match(marketingRepair, /SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY=\/srv\/shein-bi\/runtime\/marketing_manual_limited_discount_overrides\.json/);
 assert.match(marketingRepair, /SHEIN_BI_MARKETING_AUTOMATION_AUTHORIZATION=owner-standing-cloud-marketing-v1/);
 assert.match(marketingRepairScript, /--max-groups "\$REMAINING_GROUPS"/);
 assert.match(marketingRepairScript, /new_groups_in_result/);

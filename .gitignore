@@ -8,8 +8,7 @@ profiles/
 outputs/*
 !outputs/bi-portal/
 outputs/bi-portal/*
-!outputs/bi-portal/index.html
-!outputs/bi-portal/data.json
+!outputs/bi-portal/README.md
 !outputs/shein-openapi-doc-catalog/
 !outputs/shein-openapi-doc-catalog/**
 logs/

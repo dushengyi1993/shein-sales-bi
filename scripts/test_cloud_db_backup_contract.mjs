@@ -7,6 +7,8 @@ const service = fs.readFileSync(new URL('../infra/systemd/shein-bi-db-backup.ser
 
 assert.match(script, /BACKUP_RETENTION_DAYS:-7/);
 assert.match(script, /--prune-only/);
+assert.match(script, /SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY:-\/srv\/shein-bi\/runtime\/marketing_manual_limited_discount_overrides\.json/);
+assert.match(script, /marketing_manual_limited_discount_overrides\.json/);
 assert.match(script, /mountpoint -q "\$COS_MOUNT"/);
 assert.match(script, /sha256sum -c "\$source_dir\/SHA256SUMS\.txt"/);
 assert.match(script, /gzip -t "\$archive"/);
@@ -21,4 +23,4 @@ assert.match(service, /SHEIN_BI_BACKUP_RETENTION_DAYS=7/);
 assert.match(service, /SHEIN_BI_BACKUP_COS_MOUNT=\/lhcos-data/);
 assert.match(service, /SHEIN_BI_BACKUP_COS_ARCHIVE_ROOT=\/lhcos-data\/shein-bi-db-backups/);
 
-console.log(JSON.stringify({ok: true, checks: 12}, null, 2));
+console.log(JSON.stringify({ok: true, checks: 14}, null, 2));

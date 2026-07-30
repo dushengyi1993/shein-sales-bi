@@ -6,6 +6,7 @@ TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
 RETENTION_DAYS="${SHEIN_BI_BACKUP_RETENTION_DAYS:-7}"
 COS_MOUNT="${SHEIN_BI_BACKUP_COS_MOUNT:-/lhcos-data}"
 COS_ARCHIVE_ROOT="${SHEIN_BI_BACKUP_COS_ARCHIVE_ROOT:-$COS_MOUNT/shein-bi-db-backups}"
+MANUAL_LIMITED_DISCOUNT_REGISTRY="${SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY:-/srv/shein-bi/runtime/marketing_manual_limited_discount_overrides.json}"
 STAMP="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)"
 OUT_DIR="$BACKUP_ROOT/$STAMP"
 
@@ -102,8 +103,13 @@ if (( PRUNE_ONLY == 0 )); then
   else
     echo "[cloud_db_backup] skip metabase.dump: shein-metabase-db is not running (Metabase is archived/manual)"
   fi
+  if [[ -s "$MANUAL_LIMITED_DISCOUNT_REGISTRY" ]]; then
+    cp -- "$MANUAL_LIMITED_DISCOUNT_REGISTRY" "$OUT_DIR/marketing_manual_limited_discount_overrides.json"
+  else
+    echo "[cloud_db_backup] WARN manual limited-discount registry missing: $MANUAL_LIMITED_DISCOUNT_REGISTRY" >&2
+  fi
 
-  find "$OUT_DIR" -maxdepth 1 -type f -name '*.dump' -print0 |
+  find "$OUT_DIR" -maxdepth 1 -type f \( -name '*.dump' -o -name 'marketing_manual_limited_discount_overrides.json' \) -print0 |
     sort -z |
     xargs -0 sha256sum > "$OUT_DIR/SHA256SUMS.txt"
   du -sh "$OUT_DIR"

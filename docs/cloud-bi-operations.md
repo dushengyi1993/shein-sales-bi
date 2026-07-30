@@ -2,7 +2,7 @@
 
 
 
-> 当前权威状态：2026-07-26。V2 是唯一正式 BI 入口；本地 BI 已封存，V1 仅保留 GitHub archive 恢复点。半托 OpenAPI 生产数据面为 DL 单一 App + 19 店唯一 OpenKey。
+> 当前权威状态：2026-07-30。V2 是唯一正式 BI 入口；本地 BI 已封存，V1 仅保留 GitHub archive 恢复点。半托 OpenAPI 生产数据面为 DL 单一 App + 19 店唯一 OpenKey。
 
 
 ## 1. 当前入口
@@ -19,12 +19,12 @@
 
 - 域名入口：`https://sa.dushengyi.cc/`；服务器内部仍由 Nginx `127.0.0.1:8080` 转发到 BI Portal。
 
-- GitHub 仓库 `main` 是源码恢复基线；云端有值得保存的脚本、配置模板、门户静态产物或自动运营能力时，先同步回 GitHub，再部署到服务器。注意：截至 2026-06-24 交接核对，GitHub release `2026.06.23-bi-traffic-detail` 指向 `3f25f7c`，但云端 `/opt/shein-bi/app` 仍显示 `HEAD=5025d89` 且有 tracked 运行差异；其中流量页和刷新锁热修文件已同步到生产。GitHub 是“干净源码基线”，云端运行态是“业务真相”，两者不一致时不能直接 `pull/reset/add-all`。
-- 注意：`outputs/bi-portal/index.html` / `data.json` 会作为可恢复静态快照纳入 GitHub；服务器执行 `git reset --hard origin/main` 或类似部署后，可能把实时 BI 页面覆盖成仓库快照。每次服务器拉取/重置代码后，都要立即跑一次 `scripts/cloud_bi_refresh.sh today intraday` 或对应 systemd service，确认页面生成时间和销售源时间回到当前。
-
-- 云端 Git 同步红线：`/opt/shein-bi/app` 必须由 `sheinops:sheinops` 持有，不要用 `sudo git pull`。仓库 remote 使用 `git@github.com:dushengyi1993/shein-sales-bi.git`，`core.sshCommand` 必须指向 `/home/sheinops/.ssh/shein_bi_deploy`；不要指向 `/root/.ssh/...`，否则普通运维用户无法 fetch/pull。生产生成的 `outputs/bi-portal/data.json` / `index.html` 在服务器上用 `git update-index --skip-worktree` 标记为本地生成物，避免定时刷新后的实时页面把后续 `git pull --ff-only` 阻塞。若云端出现未提交热修复，先分类哪些应回填 GitHub、哪些是运行产物；在完成清单、备份和回滚方案前，不得 `git add -A`、`git reset --hard`、`git clean -fdx` 或强行让云端追 `origin/main`。
+- GitHub `main` 和正式 release tag 是源码恢复基线；云端 `/opt/shein-bi/app` 是该 commit 的部署工作树，不再作为第二个开发分支。Portal 页面、section cache、profile、session、日志和可变运营登记属于运行态，必须在忽略目录、`/srv`、`/data` 或数据库中保存。
+- `outputs/bi-portal/index.html`、`data.json` 和 `sections/` 自 2026-07-30 起不再纳入 Git。部署代码后必须重新生成 Portal；禁止把历史静态快照覆盖到生产。
+- 人工特殊限时折扣生产登记为 `/srv/shein-bi/runtime/marketing_manual_limited_discount_overrides.json`，systemd guard/repair 通过 `SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY` 读取。仓库同名 `config` 文件只作本地/首次迁移种子；数据库备份会把生产登记一并纳入校验和与 COS 保留链。
+- 云端 Git 同步红线：`/opt/shein-bi/app` 必须由 `sheinops:sheinops` 持有，不要用 `sudo git pull`。仓库 remote 使用 `git@github.com:dushengyi1993/shein-sales-bi.git`，`core.sshCommand` 指向 `/home/sheinops/.ssh/shein_bi_deploy`。若出现源码热修，先备份并回填 GitHub；在完成清单、回滚点和 hash 核对前，不得 `git add -A`、`git reset --hard`、`git clean -fdx`。
 - 发布顺序：BI 用户可见改动先在云端页面或云端服务输出验证，用户确认后再进入 GitHub `main` / release。本地验证只能证明开发产物可运行，不能替代云端最终审核。
-- 部署纪律：云端不得长期停在老 commit 上手动漂移。任何云端源码热修必须回填 GitHub；任何 GitHub release 必须写明“已部署云端”或“仅源码基线未部署”；交接前必须确认 `HEAD == origin/main`、无源码脏改、关键服务和 BI health 已验证。`.venv-*`、profile、session、日志、dump、临时上传等运行产物必须排除在 Git 之外。
+- 部署纪律：云端不得长期停在老 commit 上手动漂移。任何云端源码热修必须在同一事故内回填 GitHub；任何 GitHub release 必须写明“已部署云端”或“仅源码基线未部署”。交接前确认云端 `HEAD` 等于 release target SHA、tracked worktree 为空、关键服务和 BI health 已验证。完整规则见 [release-and-deployment-version-policy.md](release-and-deployment-version-policy.md)。
 - 当前 GitHub 发布边界：V2 是正式 release 线；V1 只保留 GitHub final/archive 纪念版 `2026.06.18-v1-final-archive`，线上 `/v1/` 不再提供访问，也不再纳入日常刷新或后续功能更新。
 
 

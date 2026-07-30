@@ -126,5 +126,5 @@ try {
 
   console.log(JSON.stringify({ok: true, firstCommit: first.sourceCommit, latestCommit: retried.sourceCommit, ruleCount: retried.bundle.ruleCount, pushRetryVerified: true}));
 } finally {
-  await fs.rm(temp, {recursive: true, force: true});
+  await fs.rm(temp, {recursive: true, force: true, maxRetries: 8, retryDelay: 100});
 }
