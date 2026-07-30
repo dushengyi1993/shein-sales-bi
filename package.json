@@ -16,7 +16,8 @@
     "owner-knowledge:validate-distribution": "node scripts/validate_owner_knowledge_distribution.mjs",
     "partner-cli:version": "node scripts/bi_ops_cli.mjs version",
     "partner-cli:package": "powershell -ExecutionPolicy Bypass -File scripts/build_partner_bi_ops_cli_package.ps1",
-    "test:deterministic": "node scripts/run_deterministic_tests.mjs",
+    "build:portal-shell": "node scripts/generate_bi_portal_shell.mjs",
+    "test:deterministic": "npm run build:portal-shell && node scripts/run_deterministic_tests.mjs",
     "test": "npm run check:generated && npm run check:source && npm run test:deterministic"
   },
   "dependencies": {

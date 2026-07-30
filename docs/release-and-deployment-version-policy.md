@@ -30,7 +30,7 @@
 1. 盘点 `git status --short`，区分源码、文档、生成物和他人改动。
 2. 删除或忽略可重建生成物；不得用 `git add -A` 混入运行数据。
 3. 更新架构、runbook、业务规则、发布说明和索引。
-4. 运行 `npm test`、`git diff --check` 及改动对应的专项测试。
+4. 运行 `npm test`、`git diff --check` 及改动对应的专项测试；`npm test` 必须从源码生成测试壳层，不能依赖工作区残留的 Portal 成品。
 5. 只提交已验证范围，推送 `main`，等待目标 SHA 的 CI 成功。
 
 ### 3.2 GitHub 发布
