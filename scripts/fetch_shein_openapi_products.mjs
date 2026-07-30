@@ -395,10 +395,18 @@ const priorPayload = priorPayloads[0] || null;
 const productRows = await fetchProductList(client, args);
 const spuNames = unique(productRows.map(row => row?.spuName));
 const skuCodes = unique(productRows.flatMap(row => asArray(row?.skuCodeList)));
+const priorDetailFallbacks = collectOpenapiProductDetailFallbacks({
+  priorPayloads,
+  currentDetailResults: [],
+  allowedSpus: spuNames,
+});
+const priorDetailSpus = new Set(priorDetailFallbacks.map(row => compact(row.spuName)));
+const uncachedDetailSpus = spuNames.filter(spu => !priorDetailSpus.has(spu));
 const selectedDetailSpus = args.skipDetails ? [] : selectOpenapiProductDetailSpus({
   spuNames,
   budget: args.maxDetails,
   priorPayload,
+  prioritySpus: uncachedDetailSpus,
   dateKey: fetchedAt,
 });
 const detailResults = await fetchDetails(client, selectedDetailSpus, args);
@@ -441,6 +449,7 @@ const payload = {
     distinctSkcCount: unique(productRows.map(row => row?.skcName)).length,
     distinctSkuCount: skuCodes.length,
     detailRequestedSpuCount: selectedDetailSpus.length,
+    detailPrioritySpuCount: Math.min(selectedDetailSpus.length, uncachedDetailSpus.length),
     detailDeferredSpuCount: Math.max(0, spuNames.length - selectedDetailSpus.length),
     detailOkSpuCount: detailResults.filter(r => r.ok).length,
     detailFailedSpuCount: detailFailures.length,

@@ -10,10 +10,11 @@ const selected = selectOpenapiProductDetailSpus({
   spuNames: names,
   budget: 2,
   priorPayload: {detailResults: [{spuName: 'D', ok: false}]},
+  prioritySpus: ['E'],
   dateKey: '2026-07-30T00:00:00.000Z',
 });
 assert.equal(selected.length, 2);
-assert.equal(selected[0], 'D', 'the prior failed detail must be retried before the rotating sample');
+assert.deepEqual(selected, ['E', 'D'], 'uncached/new products precede prior failures and the rotating sample');
 assert.equal(new Set(selected).size, selected.length);
 
 const fallbacks = collectOpenapiProductDetailFallbacks({
