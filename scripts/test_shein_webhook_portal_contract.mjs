@@ -21,6 +21,8 @@ const [portal, webhookServer, writeGate, productExecutor, maintenanceExecutor, n
 
 assert.match(portal, /\/api\/shein\/webhook\/summary/);
 assert.match(portal, /\/api\/shein\/webhook\/events/);
+assert.match(webhookServer, /SHEIN_WEBHOOK_CREDENTIAL_CONFIG_FILE\s*\|\|\s*openapiConfigFile/);
+assert.match(webhookServer, /createSheinWebhookAuditContextProvider\(\{configFile:\s*openapiConfigFile\}\)/);
 assert.match(portal, /actorStores\.includes\('\*'\) \? '\*' : actorStores/);
 assert.match(portal, /listEvents\(\{\s*allowedStores,/);
 assert.match(portal, /createSheinWebhookTaskReconciler/);

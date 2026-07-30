@@ -15,6 +15,7 @@ Environment=HOME=/home/sheinops
 Environment=PATH=/home/sheinops/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=CODEX_HOME=/home/sheinops/.codex
 Environment=SHEIN_OPENAPI_CONFIG_FILE=/opt/shein-bi/app/config/shein_openapi.local.json
+Environment=SHEIN_WEBHOOK_CREDENTIAL_CONFIG_FILE=/srv/shein-bi/secrets/webhook-openapi-central.json
 Environment=SHEIN_LINK_OPS_STORE=postgres
 Environment=SHEIN_WAREHOUSE_PG_HOST=127.0.0.1
 Environment=SHEIN_WAREHOUSE_PG_PORT=54329

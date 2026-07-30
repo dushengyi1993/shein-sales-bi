@@ -530,9 +530,13 @@ export function createSheinWebhookService({
 }
 
 async function main() {
-  const configFile = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
+  const openapiConfigFile = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
+  // Webhook delivery credentials can intentionally differ from the outbound
+  // OpenAPI data plane. This lets one central callback App receive events while
+  // all follow-up reads/writes use per-store Apps with isolated API quotas.
+  const webhookCredentialConfigFile = process.env.SHEIN_WEBHOOK_CREDENTIAL_CONFIG_FILE || openapiConfigFile;
   const credentialRegistry = await loadSheinWebhookCredentialRegistry({
-    configFile,
+    configFile: webhookCredentialConfigFile,
     expectedStoreKeys: DEFAULT_SHEIN_WEBHOOK_STORE_KEYS,
   });
   const warehousePool = createWarehousePgPool({env: process.env});
@@ -540,7 +544,7 @@ async function main() {
   const health = await repository.health();
   const pgExecutor = createWebhookPgScriptExecutor({pool: warehousePool});
   const warehouseArgs = {dryRun: false};
-  const productAuditContextProvider = await createSheinWebhookAuditContextProvider({configFile});
+  const productAuditContextProvider = await createSheinWebhookAuditContextProvider({configFile: openapiConfigFile});
   const eventProcessor = createSheinWebhookEventProcessor({
     webhookRepository: repository,
     // The public receiver role deliberately has no access to ops.link_ops_*.

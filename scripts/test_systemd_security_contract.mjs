@@ -48,6 +48,8 @@ assert.match(webhook, /^Environment=HOME=\/home\/sheinops$/m);
 assert.match(webhook, /^Environment=SHEIN_WEBHOOK_HOST=127\.0\.0\.1$/m);
 assert.match(webhook, /^Environment=SHEIN_WEBHOOK_PORT=8792$/m);
 assert.match(webhook, /^Environment=SHEIN_WEBHOOK_WORKER_ENABLED=1$/m);
+assert.match(webhook, /^Environment=SHEIN_OPENAPI_CONFIG_FILE=\/opt\/shein-bi\/app\/config\/shein_openapi\.local\.json$/m);
+assert.match(webhook, /^Environment=SHEIN_WEBHOOK_CREDENTIAL_CONFIG_FILE=\/srv\/shein-bi\/secrets\/webhook-openapi-central\.json$/m);
 assert.match(webhook, /^EnvironmentFile=\/srv\/shein-bi\/secrets\/webhook-warehouse\.env$/m);
 assert.match(webhook, /^Environment=SHEIN_WAREHOUSE_PG_USER=shein_webhook_ops$/m);
 assert.doesNotMatch(webhook, /portal-warehouse\.env|SHEIN_WAREHOUSE_PG_USER=shein_link_ops/, 'webhook must not inherit the portal database role');
