@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 import {inspectReleaseSourceState} from './check_release_source_state.mjs';
 
 function git(cwd, args) {
@@ -26,6 +27,17 @@ try {
 
   const clean = inspectReleaseSourceState({cwd: tmp, expectedCommit: head});
   assert.equal(clean.ok, true);
+  const deploymentStateFile = path.join(tmp, '.git', 'deployed_release.json');
+  execFileSync(process.execPath, [
+    fileURLToPath(new URL('./check_release_source_state.mjs', import.meta.url)),
+    '--cwd', tmp,
+    '--expected-commit', head,
+    '--record-deployment', 'fixture-v1',
+    '--deployment-state-file', deploymentStateFile,
+  ], {stdio: 'pipe'});
+  const deploymentState = JSON.parse(await fs.readFile(deploymentStateFile, 'utf8'));
+  assert.equal(deploymentState.tag, 'fixture-v1');
+  assert.equal(deploymentState.commit, head);
 
   git(tmp, ['update-index', '--skip-worktree', '--', 'tracked.txt']);
   await fs.rm(path.join(tmp, 'tracked.txt'));

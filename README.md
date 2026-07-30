@@ -85,7 +85,8 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 
 | 主题 | 文档 |
 |---|---|
-| 2026.07.30.2 当前正式发布 | `docs/bi-ops-release-2026-07-30-2.md` |
+| 2026.07.30.3 当前正式发布 | `docs/bi-ops-release-2026-07-30-3.md` |
+| 2026.07.30.2 源码一致性门禁 | `docs/bi-ops-release-2026-07-30-2.md` |
 | 2026.07.30.1 利润、营销与运行态隔离 | `docs/bi-ops-release-2026-07-30.md` |
 | 运行环境架构 | `docs/runtime-architecture.md` |
 | 其他 agent 云端优先交接 | `docs/agent-handoff-cloud-first.md` |

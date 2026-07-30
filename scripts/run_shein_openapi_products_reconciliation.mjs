@@ -100,6 +100,8 @@ function productSnapshotFromPayload(snapshot) {
       skc,
       shelfStatusCode: compact(row?.shelfStatusCode, 32),
       hasDetail: row?.sourceCompleteness?.hasDetail === true,
+      detailSource: compact(row?.sourceCompleteness?.detailSource, 32),
+      detailFetchedAt: compact(row?.sourceCompleteness?.detailFetchedAt, 64),
       hasStock: row?.sourceCompleteness?.hasStock === true,
     });
   }
@@ -152,14 +154,24 @@ export function assessProductReconciliationPolicy({current, previous = null, web
   }
 
   const detailMissing = [];
+  const cachedDetail = [];
+  const staleCachedDetail = [];
   const stockMissing = [];
   const statusRollbackWithoutWebhook = [];
   const statusRollbackWithWebhook = [];
   for (const row of currentRows.values()) {
     if (!row.hasDetail) detailMissing.push(row.skc);
+    if (row.hasDetail && row.detailSource === 'prior_cache') {
+      cachedDetail.push(row.skc);
+      const fetchedAt = Date.parse(row.detailFetchedAt || '');
+      const currentAt = Date.parse(current?.fetchedAt || '');
+      if (!Number.isFinite(fetchedAt) || !Number.isFinite(currentAt) || currentAt - fetchedAt > 21 * 86_400_000) {
+        staleCachedDetail.push(row.skc);
+      }
+    }
     if (!row.hasStock) stockMissing.push(row.skc);
     const prior = previousRows.get(row.skc);
-    if (prior?.shelfStatusCode === '1' && isOffShelfStatus(row.shelfStatusCode)) {
+    if (row.detailSource !== 'prior_cache' && prior?.shelfStatusCode === '1' && isOffShelfStatus(row.shelfStatusCode)) {
       const confirmed = (eventsBySkc.get(row.skc) || []).some(webhookEventConfirmsOffShelf);
       (confirmed ? statusRollbackWithWebhook : statusRollbackWithoutWebhook).push(row.skc);
     }
@@ -167,9 +179,11 @@ export function assessProductReconciliationPolicy({current, previous = null, web
 
   if (!currentRows.size) warnings.push('OpenAPI 当前快照为空，无法确认商品详情、库存和可售状态。');
   if (detailMissing.length) warnings.push(`OpenAPI 商品详情缺失 ${detailMissing.length} 条：${detailMissing.slice(0, 5).join('、')}${detailMissing.length > 5 ? '…' : ''}`);
+  if (staleCachedDetail.length) warnings.push(`OpenAPI 商品详情缓存超过 21 天 ${staleCachedDetail.length} 条：${staleCachedDetail.slice(0, 5).join('、')}${staleCachedDetail.length > 5 ? '…' : ''}`);
   if (stockMissing.length) warnings.push(`OpenAPI 库存缺失 ${stockMissing.length} 条：${stockMissing.slice(0, 5).join('、')}${stockMissing.length > 5 ? '…' : ''}`);
   if (statusRollbackWithoutWebhook.length) warnings.push(`商品状态从已上架回退且未收到对应 Webhook ${statusRollbackWithoutWebhook.length} 条：${statusRollbackWithoutWebhook.slice(0, 5).join('、')}${statusRollbackWithoutWebhook.length > 5 ? '…' : ''}`);
   if (!previousRows.size) notes.push('首次或历史基线不可用：本轮只校验当前 OpenAPI 详情/库存，不把浏览器差异当失败。');
+  if (cachedDetail.length) notes.push(`共享 App 额度内轮转刷新；${cachedDetail.length} 条沿用 21 天内最近成功详情，上下架实时变化仍以 Webhook 和当前业务域为准。`);
   if (statusRollbackWithWebhook.length) notes.push(`已由 Webhook 证实的上下架变化 ${statusRollbackWithWebhook.length} 条，已记录，不作为数据对账失败。`);
 
   const diagnostic = browserDiagnostic && typeof browserDiagnostic === 'object' ? {
@@ -190,6 +204,8 @@ export function assessProductReconciliationPolicy({current, previous = null, web
     counts: {
       apiCurrentRows: currentRows.size,
       detailMissing: detailMissing.length,
+      cachedDetail: cachedDetail.length,
+      staleCachedDetail: staleCachedDetail.length,
       stockMissing: stockMissing.length,
       statusRollbackWithoutWebhook: statusRollbackWithoutWebhook.length,
       statusRollbackWithWebhook: statusRollbackWithWebhook.length,

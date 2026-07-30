@@ -57,4 +57,20 @@ assert.equal(missingEvidence.status, 'warning');
 assert.equal(missingEvidence.counts.detailMissing, 1);
 assert.equal(missingEvidence.counts.stockMissing, 1);
 
+const cachedCurrent = snapshot([{
+  skc: 'CACHED',
+  shelfStatusCode: '4',
+  hasDetail: true,
+  detailSource: 'prior_cache',
+  detailFetchedAt: '2026-07-25T00:00:00.000Z',
+  hasStock: true,
+}]);
+const cachedPolicy = assessProductReconciliationPolicy({
+  current: cachedCurrent,
+  previous: snapshot([{skc: 'CACHED', shelfStatusCode: '1', hasDetail: true, hasStock: true}]),
+});
+assert.equal(cachedPolicy.status, 'matched', 'fresh cached detail is evidence fallback, not a false shelf rollback');
+assert.equal(cachedPolicy.counts.cachedDetail, 1);
+assert.equal(cachedPolicy.counts.statusRollbackWithoutWebhook, 0);
+
 console.log('openapi_product_reconciliation_policy: checks passed');

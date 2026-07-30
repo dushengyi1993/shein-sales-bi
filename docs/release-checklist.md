@@ -27,6 +27,6 @@
 ## 发布后
 
 - [ ] 对生产入口、关键 service/timer、日志和数据新鲜度做与风险相称的真实验收。
-- [ ] 云端 `HEAD` 等于 release target SHA，且 `node scripts/check_release_source_state.mjs --expected-commit <release SHA>` 通过；不得用 `skip-worktree` / `assume-unchanged` 隐藏缺失文件。
+- [ ] 云端 `HEAD` 等于 release target SHA，且 `node scripts/check_release_source_state.mjs --expected-commit <release tag> --record-deployment <release tag>` 通过；watchdog 以该部署标记持续检查 commit、脏改、隐藏索引和缺失文件。
 - [ ] 云端真实 warning、partial、stale、blocked 或 reconciliation 差异不得因发布而抹除、静默或改写为成功；在 release note/runbook 中保留其状态和下一步负责人。
 - [ ] 记录最终 target SHA、验证证据、残余风险及回滚命令/版本。

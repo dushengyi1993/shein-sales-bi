@@ -11,6 +11,10 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
+import {
+  collectOpenapiProductDetailFallbacks,
+  selectOpenapiProductDetailSpus,
+} from '../lib/openapi_product_detail_cache.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CONFIG = path.join(ROOT, 'config', 'shein_openapi.local.json');
@@ -98,6 +102,33 @@ async function cleanupOldSnapshots(outDir, keepSnapshots) {
     deleted += 1;
   }
   return {deleted, kept: Math.min(files.length, keepSnapshots)};
+}
+
+async function readPriorProductPayloads(outDir) {
+  let names = [];
+  try {
+    names = (await fs.readdir(outDir))
+      .filter(name => name.endsWith('.json'))
+      .sort((a, b) => {
+        if (a === 'latest.json') return -1;
+        if (b === 'latest.json') return 1;
+        return b.localeCompare(a);
+      });
+  } catch {
+    return [];
+  }
+  const seen = new Set();
+  const payloads = [];
+  for (const name of names) {
+    try {
+      const payload = JSON.parse(await fs.readFile(path.join(outDir, name), 'utf8'));
+      const key = compact(payload?.fetchedAt || payload?.generatedAt || name);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      payloads.push(payload);
+    } catch {}
+  }
+  return payloads;
 }
 
 function asArray(value) {
@@ -191,16 +222,30 @@ function parseStockRows(stockResponses) {
   return bySku;
 }
 
-function normalizeProductRows({storeKey, productRows, detailResults, stockBySku, fetchedAt}) {
+function normalizeProductRows({storeKey, productRows, detailResults, detailFallbackResults, stockBySku, fetchedAt}) {
   const detailBySpu = new Map();
   for (const result of detailResults) {
-    if (result?.ok && result.info?.spuName) detailBySpu.set(compact(result.info.spuName), result.info);
+    if (!result?.ok || !result?.info) continue;
+    const spu = compact(result.spuName || result.info?.spuName);
+    if (spu) detailBySpu.set(spu, {info: result.info, source: 'current', fetchedAt});
+  }
+  for (const result of detailFallbackResults) {
+    if (!result?.ok || !result?.info) continue;
+    const spu = compact(result.spuName || result.info?.spuName);
+    if (spu && !detailBySpu.has(spu)) {
+      detailBySpu.set(spu, {
+        info: result.info,
+        source: 'prior_cache',
+        fetchedAt: compact(result.detailFetchedAt),
+      });
+    }
   }
   const rows = [];
   for (const item of productRows) {
     const spu = compact(item?.spuName);
     const listSkc = compact(item?.skcName);
-    const detail = detailBySpu.get(spu);
+    const detailEvidence = detailBySpu.get(spu);
+    const detail = detailEvidence?.info;
     const detailSkcs = asArray(detail?.skcInfoList);
     const skcInfos = detailSkcs.length
       ? detailSkcs.filter(x => !listSkc || compact(x?.skcName) === listSkc)
@@ -248,6 +293,10 @@ function normalizeProductRows({storeKey, productRows, detailResults, stockBySku,
         sourceCompleteness: {
           hasList: true,
           hasDetail: Boolean(detail),
+          hasCurrentDetail: detailEvidence?.source === 'current',
+          hasCachedDetail: detailEvidence?.source === 'prior_cache',
+          detailSource: detailEvidence?.source || 'missing',
+          detailFetchedAt: detailEvidence?.fetchedAt || '',
           hasStock: stockRows.length > 0,
         },
       });
@@ -294,18 +343,17 @@ async function fetchDetail(client, spuName) {
 
 async function fetchDetails(client, spuNames, args) {
   if (args.skipDetails) return [];
-  const limited = args.maxDetails > 0 ? spuNames.slice(0, args.maxDetails) : spuNames;
-  const results = new Array(limited.length);
+  const results = new Array(spuNames.length);
   let cursor = 0;
   async function worker() {
     for (;;) {
       const idx = cursor;
       cursor += 1;
-      if (idx >= limited.length) return;
-      results[idx] = await fetchDetail(client, limited[idx]);
+      if (idx >= spuNames.length) return;
+      results[idx] = await fetchDetail(client, spuNames[idx]);
     }
   }
-  await Promise.all(Array.from({length: Math.min(args.detailConcurrency, limited.length || 1)}, () => worker()));
+  await Promise.all(Array.from({length: Math.min(args.detailConcurrency, spuNames.length || 1)}, () => worker()));
   return results.filter(Boolean);
 }
 
@@ -341,16 +389,31 @@ const client = new SheinOpenApiClient({
 });
 
 const fetchedAt = new Date().toISOString();
+const outDir = path.join(args.outDir, args.store);
+const priorPayloads = await readPriorProductPayloads(outDir);
+const priorPayload = priorPayloads[0] || null;
 const productRows = await fetchProductList(client, args);
 const spuNames = unique(productRows.map(row => row?.spuName));
 const skuCodes = unique(productRows.flatMap(row => asArray(row?.skuCodeList)));
-const detailResults = await fetchDetails(client, spuNames, args);
+const selectedDetailSpus = args.skipDetails ? [] : selectOpenapiProductDetailSpus({
+  spuNames,
+  budget: args.maxDetails,
+  priorPayload,
+  dateKey: fetchedAt,
+});
+const detailResults = await fetchDetails(client, selectedDetailSpus, args);
+const detailFallbackResults = collectOpenapiProductDetailFallbacks({
+  priorPayloads,
+  currentDetailResults: detailResults,
+  allowedSpus: spuNames,
+});
 const stockResponses = await fetchStock(client, skuCodes, args);
 const stockBySku = parseStockRows(stockResponses.filter(r => r.ok));
 const normalizedRows = normalizeProductRows({
   storeKey: args.store,
   productRows,
   detailResults,
+  detailFallbackResults,
   stockBySku,
   fetchedAt,
 });
@@ -377,9 +440,14 @@ const payload = {
     distinctSpuCount: spuNames.length,
     distinctSkcCount: unique(productRows.map(row => row?.skcName)).length,
     distinctSkuCount: skuCodes.length,
-    detailRequestedSpuCount: args.skipDetails ? 0 : (args.maxDetails > 0 ? Math.min(args.maxDetails, spuNames.length) : spuNames.length),
+    detailRequestedSpuCount: selectedDetailSpus.length,
+    detailDeferredSpuCount: Math.max(0, spuNames.length - selectedDetailSpus.length),
     detailOkSpuCount: detailResults.filter(r => r.ok).length,
     detailFailedSpuCount: detailFailures.length,
+    detailFallbackSpuCount: detailFallbackResults.length,
+    detailMissingAfterFallbackCount: unique(normalizedRows
+      .filter(row => row?.sourceCompleteness?.hasDetail !== true)
+      .map(row => row?.spu)).length,
     stockRequestedSkuCount: args.skipStock ? 0 : skuCodes.length,
     stockOkSkuCount: stockBySku.size,
     stockFailedChunkCount: stockFailures.length,
@@ -388,12 +456,12 @@ const payload = {
   },
   productList: productRows,
   detailResults,
+  detailFallbackResults,
   stockResponses,
   normalizedRows,
 };
 
 const stamp = fetchedAt.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
-const outDir = path.join(args.outDir, args.store);
 const outFile = path.join(outDir, `${stamp}.json`);
 const latestFile = path.join(outDir, 'latest.json');
 await writeJson(outFile, payload);
@@ -408,7 +476,7 @@ console.log(JSON.stringify({
   cleanup,
   summary: payload.summary,
   warnings: [
-    ...(detailFailures.length ? [`${detailFailures.length} 个 SPU 详情抓取失败`] : []),
+    ...(detailFailures.length ? [`${detailFailures.length} 个 SPU 本轮详情请求失败，优先使用最近成功详情兜底`] : []),
     ...(stockFailures.length ? [`${stockFailures.length} 个库存查询分片失败`] : []),
   ],
 }, null, 2));

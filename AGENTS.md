@@ -45,5 +45,5 @@ Real SHEIN writes still require cloud permissions, dry-run/preflight, an exact p
 - Do not leave tracked source edits on the cloud host. Emergency production fixes must be backed up, reproduced locally, committed, pushed, released, and redeployed in the same incident.
 - Runtime-generated Portal files, caches, profiles, logs, sessions, backups, and mutable marketing registries stay outside tracked source. Do not add them merely to make a release look complete.
 - A release is complete only after the target commit passes CI, the cloud checkout is exactly at that commit with no tracked source changes, required migrations/units are applied, and production health/readback succeeds.
-- Cloud acceptance must run `node scripts/check_release_source_state.mjs --expected-commit <release SHA>`; plain `git status` is insufficient because `skip-worktree` or `assume-unchanged` can hide missing source.
+- Cloud acceptance must run `node scripts/check_release_source_state.mjs --expected-commit <release tag> --record-deployment <release tag>`; watchdog continuously checks that marker. Plain `git status` is insufficient because `skip-worktree` or `assume-unchanged` can hide missing source.
 - Temporary GitHub-ahead-of-cloud time during validation is acceptable; unexplained or long-lived source drift is not. Do not claim production parity from a tag alone.

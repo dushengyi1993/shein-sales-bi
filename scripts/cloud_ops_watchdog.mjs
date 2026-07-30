@@ -13,6 +13,7 @@ import {
   assessDailyOpenapiProductRecovery,
   resolveMarketingScanEvidencePath,
 } from '../lib/cloud_watchdog_recovery.mjs';
+import {inspectReleaseSourceState} from './check_release_source_state.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_STATE_DIR = path.join(ROOT, 'state', 'cloud_ops_watchdog');
@@ -422,6 +423,25 @@ async function main() {
 
   const issues = [];
   const recoveries = [];
+  const deployedRelease = await readJsonIfExists(
+    process.env.SHEIN_BI_DEPLOYED_RELEASE_FILE || '/srv/shein-bi/runtime/deployed_release.json',
+  );
+  let releaseSourceState;
+  try {
+    releaseSourceState = inspectReleaseSourceState({
+      cwd: ROOT,
+      expectedCommit: deployedRelease?.commit || '',
+    });
+    if (!releaseSourceState.ok) {
+      issues.push(
+        `云端源码不一致：commitMatch=${releaseSourceState.commitMatches} dirty=${releaseSourceState.dirtyEntries.length} `
+        + `hidden=${releaseSourceState.hiddenIndexEntries.length} missing=${releaseSourceState.missingTrackedFiles.length}`,
+      );
+    }
+  } catch (error) {
+    releaseSourceState = {ok: false, error: String(error?.message || error)};
+    issues.push(`云端源码一致性检查失败：${releaseSourceState.error}`);
+  }
   const storeConfig = await readJsonIfExists(path.join(ROOT, 'config', 'stores.json'));
   const expectedStoreKeys = (Array.isArray(storeConfig?.stores) ? storeConfig.stores : [])
     .filter(store => store?.enabled !== false)
@@ -680,6 +700,8 @@ async function main() {
     generatedAt: new Date().toISOString(),
     issues,
     recoveries,
+    deployedRelease,
+    releaseSourceState,
     dailyRefresh,
     linkBusinessSuccess,
     dailyRefreshRecovery,
