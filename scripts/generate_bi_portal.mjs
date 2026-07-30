@@ -4323,7 +4323,7 @@ after_sales_base AS (
   WHERE a.request_time IS NOT NULL
     AND coalesce(a.order_sub_status_name,'') <> '已取消'
 ),
-after_sales_grouped AS (
+after_sales_grouped_raw AS (
   SELECT
     max(snapshot_date) AS snapshot_date,
     store_key,
@@ -4389,6 +4389,83 @@ after_sales_grouped AS (
     et_return_order_ids, rtv_warehouses, rtv_latest_received_time,
     destination_summary, next_action
 ),
+after_sales_grouped_ranked AS (
+  SELECT
+    g.*,
+    coalesce(
+      nullif(dim.product_match_key(g.standard_goods_sn),''),
+      nullif(g.skc,''),
+      '__ORDER__'
+    ) AS settlement_product_key,
+    row_number() OVER (
+      PARTITION BY
+        g.store_key,
+        g.order_no,
+        coalesce(nullif(g.aftersales_order_no,''), nullif(g.return_order_no,''), g.order_no),
+        coalesce(nullif(dim.product_match_key(g.standard_goods_sn),''), nullif(g.skc,''), '__ORDER__'),
+        g.settlement_state
+      ORDER BY
+        (nullif(g.return_order_no,'') IS NOT NULL) DESC,
+        (nullif(g.resolution_plan_name,'') IS NOT NULL) DESC,
+        (nullif(g.return_package_status_name,'') IS NOT NULL) DESC,
+        g.request_time DESC NULLS LAST,
+        g.amount_sar DESC NULLS LAST
+    ) AS settlement_case_detail_rank
+  FROM after_sales_grouped_raw g
+),
+after_sales_profit_pending AS (
+  SELECT
+    store_key,
+    order_no,
+    coalesce(
+      nullif(dim.product_match_key(standard_goods_sn),''),
+      nullif(skc,''),
+      '__ORDER__'
+    ) AS settlement_product_key,
+    sum(coalesce(pending_revenue_risk_sar,0)) AS pending_revenue_risk_sar
+  FROM mart.profit_order_item_cache
+  WHERE coalesce(pending_revenue_risk_sar,0) > 0
+  GROUP BY
+    store_key,
+    order_no,
+    coalesce(
+      nullif(dim.product_match_key(standard_goods_sn),''),
+      nullif(skc,''),
+      '__ORDER__'
+    )
+),
+after_sales_grouped_basis AS (
+  SELECT
+    r.*,
+    coalesce(p.pending_revenue_risk_sar,0) AS normalized_pending_total_sar,
+    sum(
+      CASE
+        WHEN r.settlement_state='pending' AND r.settlement_case_detail_rank=1
+        THEN greatest(r.amount_sar,0)
+        ELSE 0
+      END
+    ) OVER (
+      PARTITION BY r.store_key, r.order_no, r.settlement_product_key
+    ) AS normalized_pending_basis_sar
+  FROM after_sales_grouped_ranked r
+  LEFT JOIN after_sales_profit_pending p
+    ON p.store_key=r.store_key
+   AND p.order_no=r.order_no
+   AND p.settlement_product_key=r.settlement_product_key
+),
+after_sales_grouped AS (
+  SELECT
+    b.*,
+    CASE
+      WHEN b.settlement_state<>'pending' OR b.settlement_case_detail_rank<>1 THEN 0
+      WHEN b.normalized_pending_basis_sar > 0
+      THEN b.normalized_pending_total_sar
+        * greatest(b.amount_sar,0)
+        / b.normalized_pending_basis_sar
+      ELSE 0
+    END AS normalized_pending_revenue_risk_sar
+  FROM after_sales_grouped_basis b
+),
 after_sales AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) AS data
   FROM (
@@ -4421,6 +4498,7 @@ after_sales AS (
       settlement_state_label,
       realized_reversal,
       pending_revenue_risk,
+      normalized_pending_revenue_risk_sar,
       status_group,
       status_group_label,
       is_open,

@@ -4600,7 +4600,7 @@ SELECT
   END AS profit_before_storage_sar,
   CASE
     WHEN cost_missing THEN NULL
-    ELSE net_revenue_sar
+    ELSE risk_adjusted_net_revenue_sar
       - CASE WHEN gross_revenue_sar <= 0 THEN 0 ELSE assigned_product_cost_sar END
       - return_delivery_fee_sar
       + CASE
@@ -4611,7 +4611,7 @@ SELECT
   END AS profit_if_rtv_received_resellable_sar,
   CASE
     WHEN cost_missing THEN NULL
-    ELSE net_revenue_sar
+    ELSE risk_adjusted_net_revenue_sar
       - CASE WHEN gross_revenue_sar <= 0 THEN 0 ELSE assigned_product_cost_sar END
       - return_delivery_fee_sar
       + CASE

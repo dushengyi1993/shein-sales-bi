@@ -123,6 +123,21 @@ assert.match(
   /cost_unvalued_quantity,\s*cost_valuation_status,\s*cost_ledger_version,\s*cost_cutover_date,[\s\S]*pending_impact_amount_sar,[\s\S]*cost_estimated_quantity,\s*cost_settled_estimated_quantity,\s*cost_valuation_basis/,
   'new profit fields must append after the production view signature for an in-place upgrade',
 );
+assert.match(
+  profitAccounting,
+  /ELSE net_revenue_sar[\s\S]*END AS profit_before_storage_sar/,
+  'realized profit must remain based on settled net revenue',
+);
+assert.match(
+  profitAccounting,
+  /ELSE risk_adjusted_net_revenue_sar[\s\S]*END AS profit_if_rtv_received_resellable_sar/,
+  'RTV resellable profit must start from risk-adjusted revenue',
+);
+assert.match(
+  profitAccounting,
+  /ELSE risk_adjusted_net_revenue_sar[\s\S]*END AS profit_if_rtv_09_resellable_sar/,
+  'RTV 09 resellable profit must start from risk-adjusted revenue',
+);
 const afterSalesAccounting = profitAccounting.slice(0, profitAccounting.indexOf('rtv_match AS ('));
 assert.doesNotMatch(
   afterSalesAccounting,
@@ -202,6 +217,8 @@ assert.doesNotMatch(portalClient, /09散件仓 \+ 01整箱仓是可售实盘/);
 assert.match(portalClient, /function auditMessages\(\)/);
 assert.match(portalClient, /class="audit-reasons"/);
 assert.match(portalClient, /function returnSettlementKey\(r\)/);
+assert.match(portalClient, /function returnPendingRiskAmount\(r\)/);
+assert.match(portalClient, /pendingAmount:pending\.reduce\(\(a,r\)=>a\+returnPendingRiskAmount\(r\),0\)/);
 assert.match(portalClient, /退款待落定 \$\{M2\(orderTop\.pendingAmount\)\} SAR/);
 assert.match(portalClient, /待决金额只作风险提示，不会提前冲减净销量或已落定利润/);
 assert.doesNotMatch(portalClient, /function salesReturnReconciliation\(s,orderSummary\)/,
@@ -213,6 +230,8 @@ assert.match(portalClient, /\['refund_pending','退款待落定'\]/,
   'pending refund applications must have a directly visible filter on the return page');
 assert.match(portalClient, /status==='refund_pending'&&returnSettlementKey\(r\)!=='pending'/);
 assert.match(portalGenerator, /LEFT JOIN mart\.after_sales_settlement_detail settlement/);
+assert.match(portalGenerator, /after_sales_profit_pending AS/);
+assert.match(portalGenerator, /normalized_pending_revenue_risk_sar/);
 assert.match(portalGenerator, /id="auditReasons"/);
 
 assert.match(refresh, /^BEGIN ISOLATION LEVEL REPEATABLE READ;/m);

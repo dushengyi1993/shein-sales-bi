@@ -295,6 +295,8 @@ ET 物流仓服账单里的 `仓储费` 是仓储成本正式来源，旧 `fact.
 - `fact.openapi_finance_check_order*`、`fact.openapi_return_item.performance_price` / `mart.return_cost_actual`：退货费优先用已结算财务净成本，其次用退货单商品行真实履约费；实际值都缺失时，只有退货包裹可保留 `13.88` 估算。来源区分 `finance_check_order_actual`、`return_order_performance_price_actual` 与 `package_estimate`。
 - `mart.after_sales_settlement_detail` 是售后结算语义的唯一结构化来源：`realized` 才冲减净销量和已落定利润，`pending` 只进入待决风险，`closed_without_refund` 表示无退款闭环，`not_refund_candidate` 不影响退款口径。`已妥投` 或退货包裹 `已签收` 本身不是最终退款信号。
 - `mart.profit_after_sales_impact` 直接消费上述结算明细；利润 mart 同时保留已落定利润、估算退货费和未落定售后风险字段，未结售后风险不能覆盖或改写已落定利润。
+- 首页“待落定金额”和利润“待决售后风险”必须消费利润 mart 已按订单成交额封顶、按商品行分摊后的同一风险金额；同一售后单在平台不同处理阶段产生的重复明细只能保留作流程证据，不能重复累计风险。
+- `profit_if_rtv_received_resellable_sar` / `profit_if_rtv_09_resellable_sar` 以风险调整后收入为基础，再回加已确认入仓且可二售的商品成本。RTV 测算不得绕过待决售后风险回到已落定利润基线。
 
 ### 历史店铺身份纠正
 
