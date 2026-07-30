@@ -34,7 +34,7 @@ assert.ok((portal.match(/beforeStoreWrite: store => evaluateWebhookWriteGates\(\
 assert.match(writeGate, /probeSummary\.generatedAtMs\) > gateAt/);
 assert.match(writeGate, /probeSummary\?\.fresh === true/);
 for (const executor of [productExecutor, maintenanceExecutor]) {
-  assert.match(executor, /import \{runSheinWebhookExternalWriteGuarded\} from '\.\.\/lib\/shein_webhook_external_write_guard\.mjs';/);
+  assert.match(executor, /import \{[\s\S]*?createLoopbackTestWebhookWriteGuard,[\s\S]*?runSheinWebhookExternalWriteGuarded,[\s\S]*?\} from '\.\.\/lib\/shein_webhook_external_write_guard\.mjs';/);
   assert.match(executor, /runSheinWebhookExternalWriteGuarded\(\{[\s\S]*?writeStores:\s*\[[^\]]+\][\s\S]*?write:\s*\(\)\s*=>\s*client\.request\(/);
 }
 assert.match(productExecutor, /runSheinWebhookExternalWriteGuarded\(\{[\s\S]*?publishOrEdit/);

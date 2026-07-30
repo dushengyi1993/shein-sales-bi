@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "version": "2026.07.28.3",
+  "version": "2026.07.30.1",
   "entrypoint": "scripts/bi_ops_cli.mjs",
   "bootstrap": "scripts/partner_cli_bootstrap.mjs",
   "codexSkill": "codex/skills/shein-bi-ops/SKILL.md",

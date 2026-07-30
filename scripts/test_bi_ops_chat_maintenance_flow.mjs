@@ -339,6 +339,8 @@ try {
     cwd: ROOT,
     env: {
       ...process.env,
+      NODE_ENV: 'test',
+      SHEIN_BI_TEST_ALLOW_FAKE_WEBHOOK_GATE: '1',
       SHEIN_BI_CORE_WARMUP_DISABLED: '1',
       SHEIN_OPENAPI_CONFIG_FILE: openapiConfigFile,
       SHEIN_OPENAPI_READ_PROBE_SUMMARY_FILE: readProbeSummaryFile,

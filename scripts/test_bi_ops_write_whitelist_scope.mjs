@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * Real-write whitelist scope smoke for the SHEIN BI automation workbench.
+ * Account-scoped real-write permission smoke for the SHEIN BI workbench.
  *
  * This starts an isolated local portal with temporary auth/task/audit/openapi
- * files. It deliberately enables safeWriteOperations and a one-rule real-submit
- * whitelist only inside that temporary process, then proves the service still
- * scopes real-write permission by user + store + operation and does not issue a
- * real SHEIN write when the other execution gates are not satisfied.
+ * files. It deliberately gives an operator HL write scope while the legacy
+ * whitelist names only the owner. The service must authorize both accounts from
+ * BI writeStores, still enforce safeWriteOperations, and never issue a real
+ * SHEIN write while preflight/hash/lifecycle gates are incomplete.
  */
 import fs from 'node:fs/promises';
 import fssync from 'node:fs';
@@ -332,10 +332,11 @@ try {
   check('isolated safeWrite enabled', Boolean(caps.json?.safety?.safeWriteOperations?.enabled), true);
   check('isolated safeWrite allowed operation is copy only', asArray(caps.json?.safety?.safeWriteOperations?.allowedOperations).join(','), 'copy_product_draft');
   check('isolated safeWrite allowed store is HL only', asArray(caps.json?.safety?.safeWriteOperations?.allowedStores).join(','), 'HL');
-  check('isolated whitelist enabled', Boolean(caps.json?.safety?.realSubmitWhitelist?.enabled), true);
+  check('account-scoped write authorization enabled', Boolean(caps.json?.safety?.realSubmitWhitelist?.enabled), true);
+  check('legacy per-user whitelist is not an execution dependency', caps.json?.safety?.realSubmitWhitelist?.mode || '', 'account_write_scope');
   check('HL copy globally confirmable when scoped gates configured', result.summary.hlCopyRealSubmitSupported, true);
   check('owner HL copy is actor-confirmable', result.summary.ownerHlActorCanSubmit, true);
-  check('operator HL copy is not actor-confirmable without account whitelist', result.summary.operatorHlActorCanSubmit, false);
+  check('operator HL copy is actor-confirmable from writeStores', result.summary.operatorHlActorCanSubmit, true);
   check('HL title remains non-confirmable operation', result.summary.hlTitleRealSubmitSupported, false);
   check('DX is outside safeWrite store scope', result.summary.dxSafeStoreAllowed, false);
 
@@ -356,15 +357,15 @@ try {
     blockers: asArray(ownerRawTask?.execution?.preflight?.blockers || executionBlockersFromJson(ownerExec.json)),
   };
   check('owner execute request returns task update', ownerExec.status, 200);
-  check('owner HL whitelist allowed', Boolean(ownerHlCheck?.allowed), true);
-  check('owner whitelist rule id', ownerHlCheck?.ruleId || '', 'hl-owner-copy-smoke');
+  check('owner HL account scope allowed', Boolean(ownerHlCheck?.allowed), true);
+  check('owner account scope rule id', ownerHlCheck?.ruleId || '', 'account_write_scope');
   check('owner requested real submit recorded', Boolean(ownerAudit?.requestedRealSubmit), true);
   check('owner still blocked by other execution gates', Boolean(ownerAudit?.executeAllowed), false);
   check('owner did not issue execute to child executor', Boolean(ownerAudit?.issuedExecuteToExecutor), false);
   check('owner did not attempt SHEIN write', Boolean(ownerAudit?.sheinWriteAttempted || ownerAudit?.actualWriteSubmitted), false);
   check('owner blocker mentions not waiting_review', asArray(ownerRawTask?.execution?.preflight?.blockers || executionBlockersFromJson(ownerExec.json)).join('；'), text => /待复核|waiting_review|dry-run|payload hash/.test(String(text || '')));
 
-  const operatorHl = await createTask(operatorCookie, createCopyBody('operator HL copy denied by whitelist', {stores: ['HL'], productRefs: ['PA4-6L']}));
+  const operatorHl = await createTask(operatorCookie, createCopyBody('operator HL copy allowed by account scope', {stores: ['HL'], productRefs: ['PA4-6L']}));
   const operatorExec = await executeTask(operatorCookie, operatorHl.id);
   const operatorRawTask = await rawTaskById(operatorHl.id);
   const operatorAudit = operatorRawTask?.execution?.writeAudit || writeAuditFromExecute(operatorExec.json) || null;
@@ -381,12 +382,12 @@ try {
     blockers: asArray(operatorRawTask?.execution?.preflight?.blockers || executionBlockersFromJson(operatorExec.json)),
   };
   check('operator execute request returns task update', operatorExec.status, 200);
-  check('operator HL whitelist denied despite store write permission', Boolean(operatorHlCheck?.allowed), false);
-  check('operator whitelist reason mentions account', String(operatorHlCheck?.reason || ''), text => /账号|白名单/.test(text));
+  check('operator HL account scope allowed', Boolean(operatorHlCheck?.allowed), true);
+  check('operator account scope rule id', operatorHlCheck?.ruleId || '', 'account_write_scope');
   check('operator not execute allowed', Boolean(operatorAudit?.executeAllowed), false);
   check('operator did not issue execute to child executor', Boolean(operatorAudit?.issuedExecuteToExecutor), false);
   check('operator did not attempt SHEIN write', Boolean(operatorAudit?.sheinWriteAttempted || operatorAudit?.actualWriteSubmitted), false);
-  check('operator blockers mention whitelist', asArray(operatorRawTask?.execution?.preflight?.blockers || executionBlockersFromJson(operatorExec.json)).join('；'), text => /白名单/.test(String(text || '')));
+  check('operator remains blocked only by non-permission execution gates', asArray(operatorRawTask?.execution?.preflight?.blockers || executionBlockersFromJson(operatorExec.json)).join('；'), text => !/白名单|不在当前账号的店铺写权限范围/.test(String(text || '')));
 
   const ownerDx = await createTask(ownerCookie, createCopyBody('owner DX copy outside safe scope', {stores: ['DX'], productRefs: ['PA4-6L']}));
   const ownerDxExec = await executeTask(ownerCookie, ownerDx.id);
@@ -404,11 +405,11 @@ try {
     blockers: asArray(ownerDxRawTask?.execution?.preflight?.blockers || executionBlockersFromJson(ownerDxExec.json)),
   };
   check('owner DX execute request returns task update', ownerDxExec.status, 200);
-  check('owner DX whitelist denied because store/action not matched', Boolean(ownerDxCheck?.allowed), false);
+  check('owner DX account scope allowed', Boolean(ownerDxCheck?.allowed), true);
   check('owner DX not execute allowed', Boolean(ownerDxAudit?.executeAllowed), false);
   check('owner DX did not issue execute', Boolean(ownerDxAudit?.issuedExecuteToExecutor), false);
   check('owner DX did not attempt SHEIN write', Boolean(ownerDxAudit?.sheinWriteAttempted || ownerDxAudit?.actualWriteSubmitted), false);
-  check('owner DX blockers mention gate or whitelist', asArray(ownerDxRawTask?.execution?.preflight?.blockers || executionBlockersFromJson(ownerDxExec.json)).join('；'), text => /总闸门|白名单|真实提交/.test(String(text || '')));
+  check('owner DX blockers mention platform action gate', asArray(ownerDxRawTask?.execution?.preflight?.blockers || executionBlockersFromJson(ownerDxExec.json)).join('；'), text => /总闸门|allowedStores|真实提交/.test(String(text || '')));
 
   const ownerTitle = await createTask(ownerCookie, createTitleBody('owner HL title unsupported op', {stores: ['HL'], productRefs: ['PA4-6L']}));
   const ownerTitleExec = await executeTask(ownerCookie, ownerTitle.id);
@@ -426,12 +427,12 @@ try {
   };
   check('owner title execute request returns task update', ownerTitleExec.status, 200);
   const ownerTitleCheck = whitelistCheckFor(ownerTitleRawTask?.execution?.writeAudit || ownerTitleAudit, 'HL', 'update_title');
-  check('owner title has update_title whitelist check', Boolean(ownerTitleCheck), true);
-  check('owner title update_title whitelist denied', Boolean(ownerTitleCheck?.allowed), false);
+  check('owner title has update_title account-scope check', Boolean(ownerTitleCheck), true);
+  check('owner title account scope allowed', Boolean(ownerTitleCheck?.allowed), true);
   check('owner title not execute allowed', Boolean(ownerTitleAudit?.executeAllowed), false);
   check('owner title did not issue execute', Boolean(ownerTitleAudit?.issuedExecuteToExecutor), false);
   check('owner title did not attempt SHEIN write', Boolean(ownerTitleAudit?.sheinWriteAttempted || ownerTitleAudit?.actualWriteSubmitted), false);
-  check('owner title blockers mention action gate or whitelist', asArray(ownerTitleRawTask?.execution?.preflight?.blockers || executionBlockersFromJson(ownerTitleExec.json)).join('；'), text => /总闸门|allowedOperations|白名单|payload hash|维护预检/.test(String(text || '')));
+  check('owner title blockers mention action gate or preflight', asArray(ownerTitleRawTask?.execution?.preflight?.blockers || executionBlockersFromJson(ownerTitleExec.json)).join('；'), text => /总闸门|allowedOperations|payload hash|维护预检/.test(String(text || '')));
 
   const auditText = fssync.existsSync(auditFile) ? await fs.readFile(auditFile, 'utf8') : '';
   result.summary.taskCount = JSON.parse(await fs.readFile(taskFile, 'utf8')).tasks.length;

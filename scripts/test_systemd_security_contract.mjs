@@ -178,17 +178,6 @@ assert.match(marketingRepairScript, /--max-groups "\$REMAINING_GROUPS"/);
 assert.match(marketingRepairScript, /new_groups_in_result/);
 assert.equal(property(marketingRepair, 'TimeoutStartSec'), '2400');
 
-const dailyOpsDigestService = readUnit('shein-bi-cloud-daily-ops-group-digest.service');
-const dailyOpsDigestTimer = readUnit('shein-bi-cloud-daily-ops-group-digest.timer');
-assert.equal(property(dailyOpsDigestService, 'User'), 'sheinops');
-assert.equal(property(dailyOpsDigestService, 'Group'), 'sheinops');
-assert.equal(property(dailyOpsDigestService, 'NoNewPrivileges'), 'true');
-assert.equal(property(dailyOpsDigestService, 'PrivateTmp'), 'true');
-assert.equal(property(dailyOpsDigestService, 'ProtectSystem'), 'strict');
-assert.match(dailyOpsDigestService, /^ExecStart=\/usr\/bin\/node \/opt\/shein-bi\/app\/scripts\/send_daily_ops_group_digest\.mjs$/m);
-assert.equal(property(dailyOpsDigestTimer, 'OnCalendar'), '*-*-* 20:30:00');
-assert.equal(property(dailyOpsDigestTimer, 'Persistent'), 'true');
-
 const storageFeeTimer = readUnit('shein-bi-cloud-et-storage-fee.timer');
 assert.equal(property(storageFeeTimer, 'OnCalendar'), '*-*-* 14:10:00 Asia/Shanghai');
 assert.equal(property(storageFeeTimer, 'Persistent'), 'true');
@@ -226,7 +215,6 @@ for (const timerName of [
   'shein-bi-cloud-session-manager.timer',
   'shein-bi-cloud-yesterday.timer',
   'shein-bi-db-backup.timer',
-  'shein-bi-cloud-daily-ops-group-digest.timer',
 ]) {
   assert.equal(property(readUnit(timerName), 'Persistent'), 'true', `${timerName} must catch up after downtime`);
 }
@@ -240,7 +228,7 @@ console.log(JSON.stringify({
     'three off-window lease-aware browser cleanup windows',
     'three retry-capable marketing guard windows',
     'bounded resumable marketing repair worker',
-    'daily operations group digest',
+    'automation result delivery follows the existing Codex schedules',
     'daily canonical ET storage-fee sync',
     'persistent critical daily timers',
   ],

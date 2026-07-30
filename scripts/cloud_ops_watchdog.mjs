@@ -40,7 +40,6 @@ const TIMER_NAMES = [
   'shein-bi-cloud-order-closure.timer',
   'shein-bi-cloud-marketing-live-guard.timer',
   'shein-bi-cloud-marketing-repair.timer',
-  'shein-bi-cloud-daily-ops-group-digest.timer',
   'shein-bi-cloud-browser-cleanup.timer',
   'shein-bi-cloud-disk-maintenance.timer',
   'shein-bi-cloud-watchdog.timer',
@@ -423,6 +422,7 @@ async function main() {
   const logFile = path.join(args.logDir, `watchdog-${stamp}.json`);
 
   const issues = [];
+  const maintenanceNotes = [];
   const recoveries = [];
   const deployedRelease = await readJsonIfExists(
     process.env.SHEIN_BI_DEPLOYED_RELEASE_FILE || '/srv/shein-bi/runtime/deployed_release.json',
@@ -433,10 +433,17 @@ async function main() {
       cwd: ROOT,
       expectedCommit: deployedRelease?.commit || '',
     });
-    if (!releaseSourceState.ok) {
+    const sourceIntegrityBroken = releaseSourceState.commitMatches !== true
+      || releaseSourceState.missingTrackedFiles.length > 0;
+    if (sourceIntegrityBroken) {
       issues.push(
         `云端源码不一致：commitMatch=${releaseSourceState.commitMatches} dirty=${releaseSourceState.dirtyEntries.length} `
         + `hidden=${releaseSourceState.hiddenIndexEntries.length} missing=${releaseSourceState.missingTrackedFiles.length}`,
+      );
+    } else if (releaseSourceState.dirtyEntries.length || releaseSourceState.hiddenIndexEntries.length) {
+      maintenanceNotes.push(
+        `服务器运行目录有未发布改动：dirty=${releaseSourceState.dirtyEntries.length} `
+        + `hidden=${releaseSourceState.hiddenIndexEntries.length}；版本号一致且正式文件完整，不向运营群报警`,
       );
     }
   } catch (error) {
@@ -700,6 +707,7 @@ async function main() {
     ok: issues.length === 0,
     generatedAt: new Date().toISOString(),
     issues,
+    maintenanceNotes,
     recoveries,
     deployedRelease,
     releaseSourceState,

@@ -57,7 +57,7 @@ try {
 
   const help = await runCli(['help']);
   check('help exits 0', help.code, 0);
-  check('help says local direct OpenAPI forbidden', help.stdout, t => /本机因白名单\/身份边界不能直连真实 SHEIN OpenAPI/.test(String(t)));
+  check('help says local direct OpenAPI forbidden', help.stdout, t => /本机不处于受控云端执行边界，不能直连真实 SHEIN OpenAPI/.test(String(t)));
   check('help does not say delegate to local image tool', help.stdout, t => !/委托本地 OpenAPI 图片工具/.test(String(t)));
 
   const failed = checks.filter(c => !c.pass);

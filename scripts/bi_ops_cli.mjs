@@ -77,6 +77,7 @@ function parseArgs(argv) {
     approvedAssets: false,
     standardGoodsSn: '',
     supplyPrice: null,
+    productPrice: null,
     inventory: null,
     inputCurrentMa: null,
     titleAr: '',
@@ -157,6 +158,7 @@ function parseArgs(argv) {
     else if (a === '--approved-assets' || a === '--source-approved') args.approvedAssets = true;
     else if (a === '--standard-goods-sn' || a === '--supplier-code') args.standardGoodsSn = String(argv[++i] || '').trim();
     else if (a === '--supply-price') args.supplyPrice = Number(argv[++i]);
+    else if (a === '--product-price' || a === '--sale-price' || a === '--shop-price') args.productPrice = Number(argv[++i]);
     else if (a === '--inventory' || a === '--stock-qty') args.inventory = Number(argv[++i]);
     else if (a === '--input-current-ma') args.inputCurrentMa = Number(argv[++i]);
     else if (a === '--title-ar') args.titleAr = String(argv[++i] || '').trim();
@@ -274,6 +276,9 @@ Usage:
   node scripts/bi_ops_cli.mjs openapi-catalog-plan --format summary [--out plan.json]
   node scripts/bi_ops_cli.mjs query --text "今天全部店铺销售额是多少" --out <结果.json>
   node scripts/bi_ops_cli.mjs query --text "找出近7天曝光3000以上、点击率4%以上、销量0的链接" --sections linksData --out <结果.json>
+  node scripts/bi_ops_cli.mjs operate --operation update_inventory --store DX --product PA4-6L --inventory 30 --text "把库存改成30"
+  node scripts/bi_ops_cli.mjs operate --operation retire_link --store DX --product sv123 --text "下架这条链接"
+  node scripts/bi_ops_cli.mjs operate --operation update_product_price --store DX --product sv123 --product-price 99 --text "售价改成99 SAR"
   node scripts/bi_ops_cli.mjs ask --text "今天全部店铺销售额是多少" --out <结果.json>  # 旧兼容别名，同样不调用模型
   node scripts/bi_ops_cli.mjs chats
   node scripts/bi_ops_cli.mjs chat --text "把 DX 的 PA4-6L 库存改成 30"
@@ -337,7 +342,7 @@ Safety:
   - plan-images 只做本地图包角色规划，备用目录和明确“产品封面/AB测试”图不提交；会读取真实尺寸再判断方形图。
   - prepare-publish 上传后把图片 URL 和显式字段绑定回同一 task，再重新预演；不会新建替代任务，也不会静默复制源图。
   - retire-candidates 只生成下架候选明细，不执行下架；固定排除有新品标签、首次上架 15 天内或缺首次上架时间的链接，并要求人工确认。
-  - 本机因白名单/身份边界不能直连真实 SHEIN OpenAPI；bi_ops_cli 的真实 OpenAPI 调用必须走云端 BI 服务。
+  - 本机不处于受控云端执行边界，不能直连真实 SHEIN OpenAPI；bi_ops_cli 的真实 OpenAPI 调用必须走云端 BI 服务。
   - upload-pic / transform-pic 的 execute 委托云端 /api/openapi-image-asset/*；本地只做文件封装和权限会话传递。
   - audit-status / search-product / publish-standard / openapi-call 不允许通过 bi_ops_cli 从本机 execute；需要真实回读时到 shein-bi-tencent 云端执行或走云端任务审计。
   - order-fulfillment 是高风险订单履约工具；execute 必须额外提供确认文本和 dry-run payload hash。
@@ -345,6 +350,7 @@ Safety:
   - openapi-catalog-plan 只读取本地官方目录/schema，输出全量接口归位矩阵，不联网、不启用 WebHook receiver。
   - 所有任务创建/预检/执行/审计都走云端账号权限和审计。
   - query 通过同一 BI 账号直接读取确定性的 BI 数据分区，返回 aiInvoked=false；当前 Codex 自己筛选、计算和说明，不调用云端问数模型。
+  - operate 由当前本机 Codex 显式传入 operation/store/product/参数；服务器不会再用关键词或云端模型重新猜动作。它只创建任务并运行系统检查，不会直接提交。
   - ask 是 query 的旧兼容别名，同样不会调用模型；只读需求不得使用 chat。chat 只用于受控运营动作会话或用户明确要求测试网页会话能力。
   - 每个云端业务命令开始前会用 ETag 检查负责人规则 manifest；有更新才原子下载，普通账号没有反向发布权限。
   - 受管安装还会在业务命令前检查 CLI release；有新版本时校验逐文件和 bundle SHA256，原子安装后重启同一命令。
@@ -495,7 +501,7 @@ async function request(args, pathname, {method = 'GET', body, auth = true} = {})
 
 const KNOWLEDGE_CHECK_COMMANDS = new Set([
   'doctor', 'me', 'capabilities', 'query', 'ask', 'chats', 'jobs', 'job', 'wait-job', 'wait_job',
-  'chat', 'tasks', 'create', 'preflight', 'execute', 'resolve', 'audit',
+  'chat', 'tasks', 'create', 'operate', 'preflight', 'execute', 'resolve', 'audit',
   'upload-pic', 'upload_pic', 'transform-pic', 'transform_pic',
   'prepare-publish', 'prepare_publish',
 ]);
@@ -571,7 +577,7 @@ function print(data, pretty = false) {
     const safe = data?.safety?.safeWriteOperations || {};
     const whitelist = data?.safety?.realSubmitWhitelist || {};
     console.log(`OpenAPI 总账：${data.counts.apiConnected ?? data.counts.authorized ?? 0}/${data.counts.total || data.rows.length} API 已接通，${data.counts.writePrecheckReady || 0} 店可系统检查，${data.counts.actorControlledSubmitReady ?? 0} 店当前账号可受控提交`);
-    console.log(`真实写总闸门：${safe.enabled ? '开启' : '关闭'}；真实写试点白名单：${whitelist.enabled ? `开启(${whitelist.ruleCount || 0}条)` : '关闭'}；真实提交仍必须命中 人 + 店 + 动作 白名单`);
+    console.log(`真实写总闸门：${safe.enabled ? '开启' : '关闭'}；人员权限：按当前 BI 账号 writeStores 校验；权限模式=${whitelist.mode || 'account_write_scope'}`);
     for (const row of data.rows) {
       const actions = (Array.isArray(row.actionCapabilities) ? row.actionCapabilities : [])
         .map(action => {
@@ -583,7 +589,7 @@ function print(data, pretty = false) {
         })
         .join(' | ');
       const wl = row.realSubmitWhitelist || {};
-      const wlText = wl.enabled ? (wl.configured ? `白名单命中${wl.matchedRuleCount || 0}` : '白名单未命中') : '白名单关闭';
+      const wlText = wl.configured ? '账号可写' : '账号不可写';
       console.log(`${row.storeKey}\t${row.status || '-'}\t${wlText}\t${actions}`);
     }
     return;
@@ -599,7 +605,7 @@ function print(data, pretty = false) {
     }
     const safe = data.safety?.safeWriteOperations || {};
     const whitelist = data.safety?.realSubmitWhitelist || {};
-    console.log(`真实写：总闸门=${safe.enabled ? '开启' : '关闭'}，试点白名单=${whitelist.enabled ? `开启(${whitelist.ruleCount || 0}条)` : '关闭'}，静默写=${data.safety?.canSilentWrite ? '是' : '否'}`);
+    console.log(`真实写：总闸门=${safe.enabled ? '开启' : '关闭'}，账号店铺权限=${whitelist.mode || 'account_write_scope'}，静默写=${data.safety?.canSilentWrite ? '是' : '否'}`);
     if (data.requestedActionReadiness) {
       const readiness = data.requestedActionReadiness;
       console.log(`动作诊断：${readiness.operation} · ${readiness.requireRealSubmit ? '要求真实提交' : '要求可 dry-run'} · dry-run=${readiness.allCanDryRun ? '是' : '否'} · 真实提交=${readiness.allCanRealSubmitAfterPreflight ? '是' : '否'}`);
@@ -644,6 +650,18 @@ function taskTargets(args) {
   if (args.writeStores.length) targets.writeStores = [...new Set(args.writeStores)];
   if (args.products.length) targets.productRefs = [...new Set(args.products)];
   return targets;
+}
+
+function taskParameters(args) {
+  const parameters = {};
+  if (Number.isFinite(args.inventory)) parameters.inventory = args.inventory;
+  if (Number.isFinite(args.supplyPrice)) parameters.supplyPrice = args.supplyPrice;
+  if (Number.isFinite(args.productPrice)) parameters.productPrice = args.productPrice;
+  if (args.titleEn) parameters.title = args.titleEn;
+  if (args.titleAr) parameters.titleAr = args.titleAr;
+  if (args.standardGoodsSn) parameters.standardGoodsSn = args.standardGoodsSn;
+  if (args.note) parameters.actionNote = args.note;
+  return parameters;
 }
 
 function hasStoreAccess(user, field, storeKey) {
@@ -1451,13 +1469,39 @@ async function main() {
     print(json.data || json, !args.json);
     return;
   }
-  if (args.command === 'create') {
-    if (!args.text) throw new Error('create requires --text');
+  if (args.command === 'create' || args.command === 'operate') {
+    if (!args.text) throw new Error(`${args.command} requires --text`);
+    if (args.command === 'operate' && !args.operation) {
+      throw new Error('operate requires --operation <supported operation>');
+    }
     const {json} = await request(args, '/api/link-ops-tasks', {
       method: 'POST',
-      body: {command: args.text, source: 'codex_desktop_cli', targets: taskTargets(args)},
+      body: {
+        command: args.text,
+        source: args.operation ? 'codex_desktop_cli_structured' : 'codex_desktop_cli',
+        intents: args.operation ? [args.operation] : undefined,
+        targets: taskTargets(args),
+        parameters: taskParameters(args),
+      },
     });
-    print({ok: true, task: json.task, data: json.data});
+    if (args.command === 'create') {
+      print({ok: true, task: json.task, data: json.data, aiInvoked: false});
+      return;
+    }
+    const taskId = json.task?.id || json.data?.task?.id || '';
+    if (!taskId) throw new Error('operate created no task id');
+    const {json: preflightJson} = await request(args, '/api/link-ops-execute', {
+      method: 'POST',
+      body: {id: taskId, mode: 'dry-run', source: 'codex_desktop_cli_structured'},
+    });
+    print({
+      ok: true,
+      aiInvoked: false,
+      mode: 'structured-operation',
+      task: preflightJson.task || json.task,
+      execution: preflightJson.execution,
+      nextStep: '核对系统检查结果；只有用户明确确认后才调用 execute。',
+    });
     return;
   }
   if (args.command === 'authorize-duplicate-publish') {

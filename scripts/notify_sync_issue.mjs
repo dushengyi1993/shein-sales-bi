@@ -74,7 +74,135 @@ function idempotencyKey(parts) {
   return `sync-issue-${hash}`;
 }
 
-export function buildSyncIssueMessage({isWebhook = false, isMarketing = false, title, failed = [], loginRequired = [], message = '', logFile = '', now = new Date()} = {}) {
+function humanServiceName(unit) {
+  const names = {
+    'shein-bi-portal.service': 'BI 网页服务',
+    'shein-bi-webhook.service': 'SHEIN 实时消息接收服务',
+    'shein-bi-cloud-session-manager.service': '店铺登录状态维护服务',
+    'shein-bi-lark-sales-qa.service': '飞书问数服务',
+  };
+  return names[unit] || unit.replace(/^shein-bi-cloud-/, '').replace(/\.service$/, '').replace(/-/g, ' ');
+}
+
+function humanizeWatchdogIssue(issue) {
+  const text = String(issue || '').trim();
+  let match = text.match(/^云端源码不一致：commitMatch=(true|false) dirty=(\d+) hidden=(\d+) missing=(\d+)$/i);
+  if (match) {
+    const [, commitMatch, dirty, hidden, missing] = match;
+    const parts = [];
+    if (Number(dirty)) parts.push(`${dirty} 项未提交改动`);
+    if (Number(hidden)) parts.push(`${hidden} 项暂存区改动`);
+    if (Number(missing)) parts.push(`${missing} 个正式文件缺失`);
+    if (commitMatch !== 'true') parts.push('服务器版本号与正式发布版本不同');
+    return {
+      type: 'source',
+      text: `服务器运行目录有${parts.join('、') || '未发布变更'}。这不是抓数失败，但这些改动可能在下次发布或重启时被覆盖，需要维护人员核对后正式发布或移出运行目录。`,
+      detail: `版本号${commitMatch === 'true' ? '一致' : '不一致'}；未提交 ${dirty}；暂存区 ${hidden}；缺失文件 ${missing}`,
+    };
+  }
+
+  match = text.match(/^服务异常：(\S+)\s+state=(\S+)\s+result=(\S+)\s+exit=(\S+)\s+code=(\S+)$/);
+  if (match) {
+    return {
+      type: 'service',
+      text: `${humanServiceName(match[1])}运行失败，依赖它的自动任务可能暂时不能更新。系统会继续保留已经成功的数据，需要维护人员检查并恢复该服务。`,
+      detail: `${match[1]}：state=${match[2]} result=${match[3]} exit=${match[4]} code=${match[5]}`,
+    };
+  }
+
+  match = text.match(/^常驻服务未运行：(\S+)\s+state=(\S+)\s+result=(\S+)$/);
+  if (match) {
+    return {
+      type: 'service',
+      text: `${humanServiceName(match[1])}当前没有运行，相关实时更新可能暂停。`,
+      detail: `${match[1]}：state=${match[2]} result=${match[3]}`,
+    };
+  }
+
+  match = text.match(/^BI 覆盖不足：(.+)$/);
+  if (match) {
+    return {
+      type: 'coverage',
+      text: `部分店铺的数据还没有收齐：${match[1].replace(/覆盖不足：?/g, '').replace(/；/g, '；')}。已收齐的店铺仍可正常查看，缺失部分会继续补采。`,
+      detail: '',
+    };
+  }
+
+  match = text.match(/^链接\/业务域日更部分店铺失败：date=([^\s]+)\s+failed=([^\s]+)(?:\s+log=.*)?$/);
+  if (match) {
+    return {
+      type: 'coverage',
+      text: `${match[1]} 的商品链接数据没有全部更新，受影响店铺：${match[2].split(',').join('、')}。销售数据不一定受影响，但这些店铺的链接状态和流量指标可能仍是旧值。`,
+      detail: '',
+    };
+  }
+
+  match = text.match(/^营销修复队列未闭环：date=([^\s]+).*?rows=(\S+)\s+groups=(\S+)\s+workerStatus=(\S+)$/);
+  if (match) {
+    return {
+      type: 'marketing',
+      text: `${match[1]} 的营销自动修复还没有全部处理完，共 ${match[3]} 组、${match[2]} 条链接。未完成项不会强行写入 SHEIN，系统会继续处理或等待明确的业务条件。`,
+      detail: `workerStatus=${match[4]}`,
+    };
+  }
+
+  match = text.match(/^定时器未运行：(\S+)/);
+  if (match) {
+    return {
+      type: 'timer',
+      text: `自动排班 ${match[1]} 当前没有运行，对应任务可能不会按时执行。`,
+      detail: text,
+    };
+  }
+
+  if (/过期|覆盖不足|部分失败|补采异常/.test(text)) {
+    return {
+      type: 'coverage',
+      text: text
+        .replace(/^日更补采异常：/, '日更补采没有完整结束：')
+        .replace(/\s+log=\S+/g, '')
+        .replace(/\bdate=/g, '日期 ')
+        .replace(/\bstatus=/g, '状态 ')
+        .replace(/\bmessage=/g, '说明 '),
+      detail: '',
+    };
+  }
+
+  return {type: 'other', text, detail: ''};
+}
+
+function buildWatchdogMessage({message, logFile, now}) {
+  const issues = String(message || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const human = issues.map(humanizeWatchdogIssue);
+  const sourceOnly = human.length > 0 && human.every(item => item.type === 'source');
+  const headline = sourceOnly
+    ? '⚠️ BI 服务器上有未发布的程序改动'
+    : `⚠️ BI 有 ${human.length || 1} 项需要维护`;
+  const lines = [headline, ''];
+  if (sourceOnly) {
+    lines.push('数据抓取没有失败，BI 当前仍可使用。');
+  }
+  for (const item of human) lines.push(human.length > 1 ? `- ${item.text}` : item.text);
+  const details = human.map(item => item.detail).filter(Boolean);
+  if (details.length) {
+    lines.push('', `维护信息：${details.join('；')}`);
+  }
+  if (logFile) lines.push(`维护日志：${logFile}`);
+  lines.push('', `提醒时间：${bjDateTime(now)}`);
+  return lines.join('\n');
+}
+
+export function buildSyncIssueMessage({
+  isWebhook = false,
+  isMarketing = false,
+  isCloudWatchdog = false,
+  title,
+  failed = [],
+  loginRequired = [],
+  message = '',
+  logFile = '',
+  now = new Date(),
+} = {}) {
   if (isWebhook) {
     return [
       `🚨 ${title}`,
@@ -93,15 +221,18 @@ export function buildSyncIssueMessage({isWebhook = false, isMarketing = false, t
       `提醒时间：${bjDateTime(now)}`,
     ].join('\n');
   }
+  if (isCloudWatchdog) {
+    return buildWatchdogMessage({message, logFile, now});
+  }
   return [
     `⚠️ ${title}`,
     '',
     failed.length ? `失败店铺：${failed.join('、')}` : '',
     loginRequired.length ? `疑似登录态/验证问题：${loginRequired.join('、')}` : '',
-    message ? `原因：${message}` : '',
-    logFile ? `日志：${logFile}` : '',
+    message || '本次数据没有完整更新。',
+    logFile ? `维护日志：${logFile}` : '',
     '',
-    '处理原则：已成功店铺的数据继续同步；BI 会尽量刷新可用数据，不因单店失败整条中断。',
+    '已成功的数据仍可查看；缺失部分会继续补采。',
     `提醒时间：${bjDateTime(now)}`,
   ].filter(Boolean).join('\n');
 }
@@ -124,12 +255,22 @@ async function main() {
   const kind = String(args.kind || '').toLowerCase();
   const isWebhook = kind === 'webhook';
   const isMarketing = kind === 'marketing';
+  const isCloudWatchdog = kind === 'cloud-watchdog';
   const title = args.title || (isWebhook
     ? `SHEIN 平台高优先级动态：${modeLabel}`
     : isMarketing
       ? `SHEIN 营销任务提醒：${date}`
       : `SHEIN 同步异常提醒：${date} ${modeLabel}`);
-  const text = buildSyncIssueMessage({isWebhook, isMarketing, title, failed, loginRequired, message: args.message, logFile: args.logFile});
+  const text = buildSyncIssueMessage({
+    isWebhook,
+    isMarketing,
+    isCloudWatchdog,
+    title,
+    failed,
+    loginRequired,
+    message: args.message,
+    logFile: args.logFile,
+  });
 
   await fs.mkdir(OUT_DIR, {recursive: true});
   const stamp = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);

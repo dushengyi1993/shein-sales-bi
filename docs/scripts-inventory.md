@@ -375,7 +375,6 @@
 - `use_utf8.ps1`
 
 - `notify_sync_issue.mjs`
-- `send_daily_ops_group_digest.mjs`：每天20:30向团队运营群发送营销巡检、自动修复、商品对账和BI体检的人话结论，并附结论 Markdown 与当天营销巡检 Markdown；按日期落发送标记，避免重启补跑造成重复。
 
 - `cloud_ops_watchdog.mjs`：云端 systemd/watchdog 新鲜度检查；销售/BI 页面按高频阈值，链接/业务域按日更低频阈值，并按 80% / 88% / 93% 三档监测根盘容量，异常时调用 `notify_sync_issue.mjs` 发飞书提醒。对孤立的历史营销扫描 warning，仅在 `lib/cloud_watchdog_recovery.mjs` 验证后续扫描更新、新鲜、19 店完整且 payload/行数自洽时记录 recovery；不删除历史 warning，也不吞掉其它异常。
 - `cloud_disk_maintenance.sh`：每周低优先级磁盘维护；抓数产物本地保留 30 天，COS 归档必须通过 gzip、成员清单和 SHA256 校验后才删除未变化的本地文件。profile 缓存仅在根盘达到 80%、没有有效浏览器租约且没有 Chrome 进程时清理，Cookie 与持久登录状态不在目标清单中。

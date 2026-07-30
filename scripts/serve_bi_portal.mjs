@@ -70,6 +70,7 @@ import {linkOpsPayloadHash} from '../lib/link_ops_repository.mjs';
 import {createSheinWebhookRepository} from '../lib/shein_webhook_repository.mjs';
 import {createSheinWebhookTaskReconciler} from '../lib/shein_webhook_task_reconciler.mjs';
 import {evaluateSheinWebhookWriteGates} from '../lib/shein_webhook_write_gate.mjs';
+import {createLoopbackTestWebhookWriteGuard} from '../lib/shein_webhook_external_write_guard.mjs';
 import {createOwnerKnowledgeService} from '../lib/owner_knowledge_service.mjs';
 import {createOwnerKnowledgeGitPublisher} from '../lib/owner_knowledge_distribution.mjs';
 import {BI_OPS_CLI_VERSION} from '../lib/partner_knowledge_cache.mjs';
@@ -286,55 +287,59 @@ const LINK_MAINTENANCE_INTENTS = new Set([
   'update_product_price',
   'certificate_review',
 ]);
+const BI_OPS_STRUCTURED_WRITE_INTENTS = new Set([
+  'copy_product_draft',
+  ...LINK_MAINTENANCE_INTENTS,
+]);
 const LINK_OPS_MAINTENANCE_OFFICIAL_CANDIDATES = {
   activate_link: {
     endpoint: '/open-api/goods/modify-skc-shelf',
     label: '商品上下架',
     docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001253',
     evidence: 'SHEIN 官方公开文档目录确认该接口为“商品上下架”；schema 字段包含 skc_site_info_list / shelf_state / site_list / skc_name，shelf_state=1 为上架。',
-    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + 系统检查 payload hash + 回读/人工核销。'],
+    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 账号店铺写权限 + 系统检查 payload hash + 回读/人工核销。'],
   },
   retire_link: {
     endpoint: '/open-api/goods/modify-skc-shelf',
     label: '商品上下架',
     docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001253',
     evidence: 'SHEIN 官方公开文档目录确认该接口为“商品上下架”；schema 字段包含 skc_site_info_list / shelf_state / site_list / skc_name。',
-    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + 系统检查 payload hash + 回读/人工核销。'],
+    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 账号店铺写权限 + 系统检查 payload hash + 回读/人工核销。'],
   },
   update_title: {
     endpoint: '/open-api/goods/product/partialEdit',
     label: '商品局部编辑',
     docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001810',
     evidence: 'SHEIN 官方文档索引显示存在 Product Partial Edit（商品局部编辑）接口，更适合存量链接标题维护。',
-    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + 系统检查 payload hash + 回读/人工核销。'],
+    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 账号店铺写权限 + 系统检查 payload hash + 回读/人工核销。'],
   },
   update_images: {
     endpoint: '/open-api/goods/product/partialEdit',
     label: '商品局部编辑',
     docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001810',
     evidence: 'SHEIN 官方文档索引显示存在 Product Partial Edit（商品局部编辑）接口，更适合存量链接图片维护。',
-    missing: ['换图需提供完整 SHEIN partialEdit 图片 JSON，生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + 系统检查 payload hash + 回读/人工核销。'],
+    missing: ['换图需提供完整 SHEIN partialEdit 图片 JSON，生产真实提交仍需窄范围 safeWriteOperations + 账号店铺写权限 + 系统检查 payload hash + 回读/人工核销。'],
   },
   update_inventory: {
     endpoint: '/open-api/stock/change-inventory/v2',
     label: '库存更新',
     docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001738',
     evidence: 'SHEIN 官方公开文档目录确认该接口为“更新商家库存接口v2”；schema 字段包含 updateSkuInventoryQuantityRequests / skuCode / invType / changeType / changeQuantity。',
-    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + 系统检查 payload hash + 库存回读/人工核销。'],
+    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 账号店铺写权限 + 系统检查 payload hash + 库存回读/人工核销。'],
   },
   update_supply_price: {
     endpoint: '/open-api/goods/update-cost',
     label: '供货价更新',
     docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001681',
     evidence: 'SHEIN 官方文档索引显示存在 Cost Price Update / 供货价更新接口。',
-    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + 系统检查 payload hash + 回读/人工核销。'],
+    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 账号店铺写权限 + 系统检查 payload hash + 回读/人工核销。'],
   },
   update_product_price: {
     endpoint: '/open-api/openapi-business-backend/product/price/save',
     label: '商品售价更新',
     docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001407',
     evidence: 'SHEIN 官方公开文档目录确认该接口为“更新商品售价”；schema 字段包含 productPriceList / productCode / currencyCode / shopPrice / site。',
-    missing: ['商品售价 API 同时写 shopPrice/specialPrice；生产真实提交仍需窄范围 safeWriteOperations + 人/店/动作白名单 + 系统检查 payload hash + 回读/人工核销。'],
+    missing: ['商品售价 API 同时写 shopPrice/specialPrice；生产真实提交仍需窄范围 safeWriteOperations + 账号店铺写权限 + 系统检查 payload hash + 回读/人工核销。'],
   },
   certificate_review: {
     endpoint: '/open-api/goods/save-certificate-pool-skc-bind',
@@ -364,7 +369,7 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'link_maintenance_dry_run',
     precheck: true,
     realSubmit: false,
-    reason: '已接入官方商品上下架 OpenAPI 执行器；默认 系统检查 锁定 payload，真实上架必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
+    reason: '已接入官方商品上下架 OpenAPI 执行器；默认 系统检查 锁定 payload，真实上架必须通过动作总闸门、账号店铺写权限、确认文本并完成回读/人工核销。',
   },
   {
     key: 'retire_link',
@@ -373,7 +378,7 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'link_maintenance_dry_run',
     precheck: true,
     realSubmit: false,
-    reason: '已接入官方商品上下架 OpenAPI 执行器；默认 系统检查 锁定 payload，真实下架必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
+    reason: '已接入官方商品上下架 OpenAPI 执行器；默认 系统检查 锁定 payload，真实下架必须通过动作总闸门、账号店铺写权限、确认文本并完成回读/人工核销。',
   },
   {
     key: 'update_title',
@@ -382,7 +387,7 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'link_maintenance_dry_run',
     precheck: true,
     realSubmit: false,
-    reason: '已接入官方商品局部编辑 OpenAPI 执行器；默认 系统检查 锁定标题 payload，真实改标题必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
+    reason: '已接入官方商品局部编辑 OpenAPI 执行器；默认 系统检查 锁定标题 payload，真实改标题必须通过动作总闸门、账号店铺写权限、确认文本并完成回读/人工核销。',
   },
   {
     key: 'update_images',
@@ -391,7 +396,7 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'link_maintenance_dry_run',
     precheck: true,
     realSubmit: false,
-    reason: '已接入官方商品局部编辑 OpenAPI 执行器；换图要求提供完整 SHEIN partialEdit 图片 JSON，真实换图必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
+    reason: '已接入官方商品局部编辑 OpenAPI 执行器；换图要求提供完整 SHEIN partialEdit 图片 JSON，真实换图必须通过动作总闸门、账号店铺写权限、确认文本并完成回读/人工核销。',
   },
   {
     key: 'update_inventory',
@@ -400,7 +405,7 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'link_maintenance_dry_run',
     precheck: true,
     realSubmit: false,
-    reason: '已接入官方库存更新 OpenAPI 执行器；默认 系统检查 锁定库存 payload，真实改库存必须命中总闸门、白名单、确认文本并完成库存回读/人工核销。',
+    reason: '已接入官方库存更新 OpenAPI 执行器；默认 系统检查 锁定库存 payload，真实改库存必须通过动作总闸门、账号店铺写权限、确认文本并完成库存回读/人工核销。',
   },
   {
     key: 'update_supply_price',
@@ -409,7 +414,7 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'link_maintenance_dry_run',
     precheck: true,
     realSubmit: false,
-    reason: '已接入官方供货价更新 OpenAPI 执行器；默认 系统检查 锁定供货价 payload，真实改供货价必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
+    reason: '已接入官方供货价更新 OpenAPI 执行器；默认 系统检查 锁定供货价 payload，真实改供货价必须通过动作总闸门、账号店铺写权限、确认文本并完成回读/人工核销。',
   },
   {
     key: 'update_product_price',
@@ -418,7 +423,7 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'link_maintenance_dry_run',
     precheck: true,
     realSubmit: false,
-    reason: '已接入官方商品售价更新 OpenAPI 执行器；默认 系统检查 锁定售价 payload，真实改售价必须命中总闸门、白名单、确认文本并完成回读/人工核销。',
+    reason: '已接入官方商品售价更新 OpenAPI 执行器；默认 系统检查 锁定售价 payload，真实改售价必须通过动作总闸门、账号店铺写权限、确认文本并完成回读/人工核销。',
   },
   {
     key: 'campaign_signup',
@@ -445,7 +450,7 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     stage: 'link_maintenance_dry_run',
     precheck: true,
     realSubmit: false,
-    reason: '已接入官方证书/资质 OpenAPI JSON payload 执行器；真实提交仍必须命中总闸门、白名单、payload hash 和确认文本，提交后默认人工核销审核状态。',
+    reason: '已接入官方证书/资质 OpenAPI JSON payload 执行器；真实提交仍必须通过动作总闸门、账号店铺写权限、payload hash 和确认文本，提交后默认人工核销审核状态。',
   },
 ];
 
@@ -792,63 +797,57 @@ function biOpsWriteWhitelistRuleMatches(rule, {operation = '', storeKey = ''} = 
 }
 
 function biOpsWriteWhitelistConfigured({operation = '', storeKey = ''} = {}) {
-  const whitelist = biOpsWriteWhitelistSync();
-  const matches = whitelist.rules.filter(rule => rule.enabled && biOpsWriteWhitelistRuleMatches(rule, {operation, storeKey}));
+  const op = String(operation || '').trim().toLowerCase();
+  const store = String(storeKey || '').trim().toUpperCase();
+  const supported = BI_OPS_STRUCTURED_WRITE_INTENTS.has(op) && DEFAULT_SHEIN_STORE_KEYS.includes(store);
   return {
-    enabled: whitelist.enabled,
-    configured: matches.some(rule => rule.users.length || rule.ownerKeys.length || rule.users.includes('*') || rule.ownerKeys.includes('*')),
-    ruleCount: whitelist.rules.length,
-    matchedRuleCount: matches.length,
+    enabled: true,
+    configured: supported,
+    ruleCount: 0,
+    matchedRuleCount: supported ? 1 : 0,
+    mode: 'account_write_scope',
   };
 }
 
 function biOpsWriteWhitelistAllowedForActor(actor, {operation = '', storeKey = ''} = {}) {
-  const whitelist = biOpsWriteWhitelistSync();
-  const identities = actorIdentityCandidates(actor);
+  const op = String(operation || '').trim().toLowerCase();
+  const store = String(storeKey || '').trim().toUpperCase();
   const role = actorRoleCandidate(actor);
-  const matches = whitelist.rules.filter(rule => rule.enabled && biOpsWriteWhitelistRuleMatches(rule, {operation, storeKey}));
-  for (const rule of matches) {
-    const hasIdentitySelector = rule.users.length > 0 || rule.ownerKeys.length > 0;
-    const userAllowed = rule.users.includes('*') || identities.some(id => rule.users.includes(id));
-    const ownerAllowed = rule.ownerKeys.includes('*') || identities.some(id => rule.ownerKeys.includes(id));
-    const roleAllowed = !rule.roles.length || rule.roles.includes('*') || (role && rule.roles.includes(role));
-    if (hasIdentitySelector && (userAllowed || ownerAllowed) && roleAllowed) {
-      return {
-        allowed: true,
-        enabled: whitelist.enabled,
-        operation: String(operation || '').trim().toLowerCase(),
-        storeKey: String(storeKey || '').trim().toUpperCase(),
-        ruleId: rule.id,
-        matchedRuleCount: matches.length,
-      };
-    }
-  }
-  const reason = !whitelist.enabled
-    ? '真实写试点白名单未启用'
-    : !matches.length
-      ? '真实写试点白名单没有匹配的店铺+动作规则'
-      : '真实写试点白名单没有匹配当前账号';
+  const concreteActor = actor && !isInternalSystemActor(actor) && ['admin', 'owner', 'operator'].includes(role);
+  const operationSupported = BI_OPS_STRUCTURED_WRITE_INTENTS.has(op);
+  const storeSupported = DEFAULT_SHEIN_STORE_KEYS.includes(store);
+  const storeAllowed = storeSupported && actorCanWriteStores(actor, [store]);
+  const allowed = Boolean(concreteActor && operationSupported && storeAllowed);
+  const reason = !concreteActor
+    ? '真实写必须使用具体的 owner/admin/operator BI 账号'
+    : !operationSupported
+      ? '该动作尚未接入受控写执行器'
+      : !storeSupported
+        ? '目标店铺无效'
+        : !storeAllowed
+          ? '目标店铺不在当前账号的写权限范围'
+          : '';
   return {
-    allowed: false,
-    enabled: whitelist.enabled,
-    operation: String(operation || '').trim().toLowerCase(),
-    storeKey: String(storeKey || '').trim().toUpperCase(),
-    ruleId: '',
-    matchedRuleCount: matches.length,
+    allowed,
+    enabled: true,
+    operation: op,
+    storeKey: store,
+    ruleId: allowed ? 'account_write_scope' : '',
+    matchedRuleCount: allowed ? 1 : 0,
+    mode: 'account_write_scope',
     reason,
   };
 }
 
 function biOpsWriteWhitelistSummary() {
-  const whitelist = biOpsWriteWhitelistSync();
-  const operations = [...new Set(whitelist.rules.flatMap(rule => rule.operations))].sort();
-  const stores = [...new Set(whitelist.rules.flatMap(rule => rule.stores))].sort();
   return {
-    enabled: whitelist.enabled,
-    ruleCount: whitelist.rules.length,
-    operations,
-    stores,
-    source: path.relative(ROOT, whitelist.sourceFile),
+    enabled: true,
+    ruleCount: 0,
+    operations: [...BI_OPS_STRUCTURED_WRITE_INTENTS].sort(),
+    stores: [...DEFAULT_SHEIN_STORE_KEYS].sort(),
+    source: 'BI account writeStores',
+    mode: 'account_write_scope',
+    legacyWhitelistIgnored: true,
   };
 }
 
@@ -1153,8 +1152,7 @@ function linkOpsActionCapabilitiesForStore(storeKey, cap = openApiStoreCapabilit
       if (precheckSupported && !cap.safeWrite?.enabled) realSubmitBlockers.push('真实写总闸门未开启：safeWriteOperations.enabled=false');
       if (precheckSupported && cap.safeWrite?.enabled && !cap.safeWrite?.operationAllowed) realSubmitBlockers.push('真实写动作未进入 safeWriteOperations.allowedOperations 白名单');
       if (precheckSupported && cap.safeWrite?.enabled && !cap.safeWrite?.storeAllowed) realSubmitBlockers.push('目标店铺未进入 safeWriteOperations.allowedStores 白名单');
-      if (precheckSupported && cap.safeWrite?.allowed && !cap.realSubmitWhitelist?.enabled) realSubmitBlockers.push('真实写试点白名单未启用：bi_ops_write_whitelist.local.json enabled=false');
-      if (precheckSupported && cap.safeWrite?.allowed && cap.realSubmitWhitelist?.enabled && !cap.realSubmitWhitelist?.configured) realSubmitBlockers.push('真实写试点白名单未配置该店铺+动作+账号');
+      if (precheckSupported && cap.safeWrite?.allowed && !cap.realSubmitWhitelist?.configured) realSubmitBlockers.push('该动作尚未接入账号店铺写权限校验');
       if (precheckSupported && !cap.productPublishExecuteAdapter) realSubmitBlockers.push('商品发布/编辑真实提交适配器未对该店放行');
       nextStep = realSubmitSupported
         ? '先在会话里说明要做什么；系统检查资料完整后，你在聊天里同意即可提交。'
@@ -1175,14 +1173,14 @@ function linkOpsActionCapabilitiesForStore(storeKey, cap = openApiStoreCapabilit
         if (!control.safeWrite.enabled) realSubmitBlockers.push('真实写总闸门未开启：safeWriteOperations.enabled=false');
         if (control.safeWrite.enabled && !control.safeWrite.operationAllowed) realSubmitBlockers.push(`真实写动作未进入 safeWriteOperations.allowedOperations 白名单：${def.intent}`);
         if (control.safeWrite.enabled && !control.safeWrite.storeAllowed) realSubmitBlockers.push(`目标店铺未进入 safeWriteOperations.allowedStores 白名单：${storeKey}`);
-        if (control.safeWrite.enabled && !control.whitelistConfigured.configured) realSubmitBlockers.push('未配置真实写试点白名单（人+店+动作）');
+        if (control.safeWrite.enabled && !control.whitelistConfigured.configured) realSubmitBlockers.push('该动作尚未接入账号店铺写权限校验');
         if (!realSubmitSupported) {
           realSubmitBlockers.push(`官方接口 ${candidate.endpoint}（${candidate.label}）已纳入执行器，但尚未满足生产真实写门禁`);
           for (const item of candidate.missing || []) realSubmitBlockers.push(item);
         }
         nextStep = realSubmitSupported
           ? '先完成 系统检查 锁定 payload，再由有权限账号输入确认文本真实提交；提交后必须强回读或人工核销。'
-          : `先为 ${def.intent} 配置窄范围 safeWriteOperations 和真实写白名单，并完成 系统检查 payload 锁定。`;
+          : `先为 ${def.intent} 开启平台动作总闸门，并完成账号店铺权限校验与系统检查。`;
       } else {
         realSubmitBlockers.push('尚未接入 SHEIN 官方维护写接口');
         realSubmitBlockers.push('尚未验证维护动作执行后回读字段');
@@ -1195,7 +1193,7 @@ function linkOpsActionCapabilitiesForStore(storeKey, cap = openApiStoreCapabilit
       if (def.key === 'campaign_signup' || def.key === 'flash_discount') {
         realSubmitBlockers.push('官方公开 OpenAPI 目录当前无该营销写接口证据');
         realSubmitBlockers.push('该动作继续走已有本地营销运营流程和人工确认，不通过官方 OpenAPI 总闸门伪装成可提交');
-        nextStep = '若后续 SHEIN 开放营销报名/限时折扣官方接口，再按 系统检查、白名单、确认文本、回读/人工核销重新接入。';
+        nextStep = '若后续 SHEIN 开放营销报名/限时折扣官方接口，再按系统检查、账号店铺写权限、动作总闸门、确认文本和回读/人工核销重新接入。';
       } else {
         realSubmitBlockers.push('该动作当前还没有自动执行适配器，只能先按人工流程处理');
         nextStep = '先补动作专属系统检查和执行器，再讨论真实提交。';
@@ -1520,6 +1518,7 @@ function projectOpenApiCapabilityRowForClient(row, actor = null) {
       configured: Boolean(row.realSubmitWhitelist?.configured),
       ruleCount: Number(row.realSubmitWhitelist?.ruleCount || 0) || 0,
       matchedRuleCount: Number(row.realSubmitWhitelist?.matchedRuleCount || 0) || 0,
+      mode: String(row.realSubmitWhitelist?.mode || ''),
     },
     readDomains: asArray(row.readDomains).map(x => String(x || '').trim()).filter(Boolean),
     readDomainLabels: asArray(row.readDomainLabels).map(x => sanitizeLinkOpsClientText(x, 80)).filter(Boolean),
@@ -1584,6 +1583,7 @@ function projectOpenApiCapabilityLedgerForClient(ledger, actor = null) {
         ruleCount: Number(ledger?.safety?.realSubmitWhitelist?.ruleCount || 0) || 0,
         operations: asArray(ledger?.safety?.realSubmitWhitelist?.operations).map(x => String(x || '').trim()).filter(Boolean),
         stores: asArray(ledger?.safety?.realSubmitWhitelist?.stores).map(x => String(x || '').trim().toUpperCase()).filter(Boolean),
+        mode: String(ledger?.safety?.realSubmitWhitelist?.mode || ''),
       },
       maintenanceWrites: 'chat_controlled_checked_execution',
       productionSourceSwitch: 'cloud_current',
@@ -3350,16 +3350,56 @@ function linkOpsRiskNotes(intents, targets = {}) {
   return notes;
 }
 
+function normalizeStructuredLinkOpsIntents(value) {
+  const raw = asArray(value).map(item => String(item || '').trim().toLowerCase()).filter(Boolean);
+  if (!raw.length) return [];
+  const unsupported = raw.filter(intent => !BI_OPS_STRUCTURED_WRITE_INTENTS.has(intent));
+  if (unsupported.length) throw new Error(`Unsupported structured operation: ${unsupported.join(', ')}`);
+  return [...new Set(raw)].slice(0, 12);
+}
+
+function normalizeStructuredLinkOpsParameters(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const finite = (key, {min = 0, max = 1_000_000} = {}) => {
+    if (value[key] === undefined || value[key] === null || value[key] === '') return null;
+    const number = Number(value[key]);
+    if (!Number.isFinite(number) || number < min || number > max) {
+      throw new Error(`Invalid structured parameter ${key}`);
+    }
+    return number;
+  };
+  const text = (key, max) => String(value[key] || '').trim().slice(0, max);
+  const parameters = {
+    inventory: finite('inventory', {min: 0, max: 10_000_000}),
+    supplyPrice: finite('supplyPrice', {min: 0.01, max: 1_000_000}),
+    productPrice: finite('productPrice', {min: 0.01, max: 1_000_000}),
+    title: text('title', 1_000),
+    titleAr: text('titleAr', 1_000),
+    currency: (text('currency', 12) || 'SAR').toUpperCase(),
+    standardGoodsSn: text('standardGoodsSn', 200),
+    actionNote: text('actionNote', 1_000),
+  };
+  return Object.fromEntries(Object.entries(parameters).filter(([, entry]) => entry !== null && entry !== ''));
+}
+
 function buildLinkOpsTaskFromCommand(body, actor, req) {
   const command = String(body.command || body.text || '').trim();
   if (!command) throw new Error('Missing command');
   if (command.length > 2000) throw new Error('Command too long');
   const now = new Date().toISOString();
-  const intents = normalizeIntentsForCommand(inferLinkOpsIntent(command), command);
+  const structuredIntents = normalizeStructuredLinkOpsIntents(body.intents || body.operations || body.operation);
+  const intents = normalizeIntentsForCommand(
+    structuredIntents.length ? structuredIntents : inferLinkOpsIntent(command),
+    command,
+  );
+  const structuredParameters = normalizeStructuredLinkOpsParameters(body.parameters);
   const targets = normalizeTargetsForIntents(intents, mergeLinkOpsTargets(
     body.targets && typeof body.targets === 'object' ? body.targets : {},
-    inferLinkOpsTargets(command)
+    structuredIntents.length ? {} : inferLinkOpsTargets(command)
   ));
+  if (structuredParameters.standardGoodsSn && !targets.productRefs.includes(structuredParameters.standardGoodsSn)) {
+    targets.productRefs = [...targets.productRefs, structuredParameters.standardGoodsSn].slice(0, 24);
+  }
   const id = `lot_${now.replace(/[-:.TZ]/g, '').slice(0, 14)}_${crypto.randomBytes(4).toString('hex')}`;
   return bindLinkOpsRecordToActor({
     id,
@@ -3371,8 +3411,28 @@ function buildLinkOpsTaskFromCommand(body, actor, req) {
     command,
     intents,
     targets,
+    planning: structuredIntents.length ? {
+      version: 1,
+      requestType: 'action',
+      parameters: structuredParameters,
+      ambiguity: {hasAmbiguity: false, reasons: [], clarifyingQuestions: []},
+      risk: {
+        level: intents.some(intent => ['retire_link', 'update_supply_price', 'update_product_price'].includes(intent)) ? 'high' : 'medium',
+        writeRequested: true,
+        requiresHumanConfirmation: true,
+        reasons: ['本机 Codex 已提交结构化动作；服务器只按账号店铺权限、动作能力和任务快照执行。'],
+      },
+      confidence: 1,
+      summary: `结构化动作：${intents.map(linkOpsIntentLabel).join(' / ')}；未调用云端意图模型。`,
+      source: 'structured_cli',
+      advisory: false,
+      factsApplied: true,
+      completedAt: now,
+    } : null,
     preview: {
-      summary: `识别为：${intents.join(' / ')}；当前会话会跟进这件事；系统会先查源链接、资料缺口和店铺权限。`,
+      summary: structuredIntents.length
+        ? `结构化任务：${intents.map(linkOpsIntentLabel).join(' / ')}；系统不再通过关键词重新判断动作。`
+        : `识别为：${intents.join(' / ')}；当前会话会跟进这件事；系统会先查源链接、资料缺口和店铺权限。`,
       riskNotes: linkOpsRiskNotes(intents, targets),
       capabilitySummary: buildLinkOpsCapabilitySummary(targets),
       agentAnswer: '',
@@ -3394,7 +3454,9 @@ function buildLinkOpsTaskFromCommand(body, actor, req) {
     execution: {
       mode: 'manual_confirm_first',
       enabled: false,
-      note: '确认后进入执行准备；真实 SHEIN 写执行器和素材上传链路未齐全前，不直接改后台。',
+      note: structuredIntents.length
+        ? '结构化任务已建立；先做系统检查，真实提交仍需账号店铺权限、确认、快照一致和执行后回读。'
+        : '确认后进入执行准备；真实 SHEIN 写执行器和素材上传链路未齐全前，不直接改后台。',
     },
     history: [{
       at: now,
@@ -3694,6 +3756,7 @@ function projectLinkOpsPlanningForClient(planning) {
       rankDirection: sanitizeLinkOpsClientText(parameters.rankDirection || '', 40),
       limit: finiteOrNull(parameters.limit),
       title: sanitizeLinkOpsClientText(parameters.title || '', 500),
+      titleAr: sanitizeLinkOpsClientText(parameters.titleAr || '', 500),
       inventory: finiteOrNull(parameters.inventory),
       supplyPrice: finiteOrNull(parameters.supplyPrice),
       productPrice: finiteOrNull(parameters.productPrice),
@@ -5288,7 +5351,7 @@ async function runLinkMaintenancePrechecks(task, args, body = {}) {
       matchedLinks: matchedLinks.slice(0, 80),
       snapshotFile: path.relative(ROOT, file).replace(/\\/g, '/'),
       maintenanceIntents,
-      submitBoundary: '旧本地系统检查不负责真实提交；维护写动作必须走 OpenAPI 维护执行器、payload hash、白名单和回读门禁。',
+      submitBoundary: '旧本地系统检查不负责真实提交；维护写动作必须走 OpenAPI 维护执行器、payload hash、账号店铺写权限和回读门禁。',
     },
     readbackFingerprint,
     blockers,
@@ -5297,7 +5360,7 @@ async function runLinkMaintenancePrechecks(task, args, body = {}) {
       canSilentWrite: false,
       realSubmit: false,
       executeSupported: false,
-      note: '旧本地系统检查仅保留兼容；维护写真实提交必须走 OpenAPI 维护执行器、确认文本、白名单和回读。',
+      note: '旧本地系统检查仅保留兼容；维护写真实提交必须走 OpenAPI 维护执行器、确认文本、账号店铺写权限和回读。',
     },
   };
   return [{
@@ -6072,12 +6135,18 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     }
     : task;
   const preflight = runPreflightForLinkOpsTask(runnableTask);
-  const evaluateWebhookWriteGates = (stores = writeStores) => evaluateSheinWebhookWriteGates({
-    repository: args.sheinWebhookRepository,
-    writeStores: stores,
-    loadProbeSummary: loadOpenApiReadProbeSummarySync,
-    probeIsReadReady: openApiProbeResultIsReadReady,
+  const openApiConfigForGate = loadOpenApiLocalConfigSync();
+  const testWebhookGuard = createLoopbackTestWebhookWriteGuard({
+    baseUrl: openApiConfigForGate?.apiBaseUrls?.prodSemiManaged || '',
   });
+  const evaluateWebhookWriteGates = (stores = writeStores) => testWebhookGuard
+    ? testWebhookGuard({writeStores: stores})
+    : evaluateSheinWebhookWriteGates({
+        repository: args.sheinWebhookRepository,
+        writeStores: stores,
+        loadProbeSummary: loadOpenApiReadProbeSummarySync,
+        probeIsReadReady: openApiProbeResultIsReadReady,
+      });
   if (requestedMode === 'execute' && priorKnowledgeFingerprint && knowledgeBinding.changed) {
     preflight.blockers.push('负责人长期规则在上次系统检查后发生更新；必须按新规则重新系统检查，不能沿用旧预演直接提交。');
   }
@@ -6112,9 +6181,9 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       if (notEnabledStores.length) {
         preflight.blockers.push(`${notEnabledStores.join(',')} 商品发布/编辑真实提交未被服务端总闸门放行；本次只能重新 系统检查。`);
       }
-      const whitelistDenied = realSubmitWhitelistChecks.filter(check => check.operation === 'copy_product_draft' && !check.allowed);
-      if (whitelistDenied.length) {
-        preflight.blockers.push(`${whitelistDenied.map(check => check.storeKey).join(',')} 未命中真实写试点白名单（人+店+动作），不能真实提交。`);
+      const writeScopeDenied = realSubmitWhitelistChecks.filter(check => check.operation === 'copy_product_draft' && !check.allowed);
+      if (writeScopeDenied.length) {
+        preflight.blockers.push(`${writeScopeDenied.map(check => check.storeKey).join(',')} 不在当前账号的店铺写权限范围，不能真实提交。`);
       }
       const storesMissingPayloadHash = writeStores.filter(store => !payloadHashForStoreFromTaskExecution(task, store));
       if (storesMissingPayloadHash.length) {
@@ -6138,9 +6207,9 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
             if (control.safeWrite.enabled && !control.safeWrite.storeAllowed) reasons.push(`店铺 ${store} 未进入 allowedStores`);
             preflight.blockers.push(`${store}/${linkOpsIntentLabel(operation)} 未被服务端真实写总闸门放行：${reasons.join('，') || 'safeWriteOperations 不允许'}`);
           }
-          const whitelist = realSubmitWhitelistChecks.find(check => check.operation === operation && check.storeKey === store);
-          if (!whitelist?.allowed) {
-            preflight.blockers.push(`${store}/${linkOpsIntentLabel(operation)} 未命中真实写试点白名单（人+店+动作），不能真实提交。`);
+          const writeScope = realSubmitWhitelistChecks.find(check => check.operation === operation && check.storeKey === store);
+          if (!writeScope?.allowed) {
+            preflight.blockers.push(`${store}/${linkOpsIntentLabel(operation)} 不在当前账号的店铺写权限范围，不能真实提交。`);
           }
           if (!payloadHashForMaintenanceFromTaskExecution(task, store, operation)) {
             preflight.blockers.push(`${store}/${linkOpsIntentLabel(operation)} 缺少上一次 系统检查 锁定的 payload hash，不能真实提交。`);
@@ -6460,7 +6529,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       note: hasOpenApiProductExecutor
         ? 'OpenAPI 商品执行器已接入。默认只做系统检查；真实 publishOrEdit 必须任务已确认、payload 完整、显式 execute 和确认文本同时满足。'
         : hasOpenApiMaintenanceExecutor
-          ? 'OpenAPI 维护执行器已接入。默认只做系统检查；真实提交必须命中服务端总闸门、真实写白名单、系统检查 payload hash 和确认文本，提交后必须回读或人工核销。'
+          ? 'OpenAPI 维护执行器已接入。默认只做系统检查；真实提交必须通过账号店铺写权限、服务端动作总闸门、系统检查快照和确认，提交后必须回读或人工核销。'
           : '第一版只做材料/权限/防重检查和执行准备；正式 SHEIN 提交必须后续接具体适配器并保留人工确认。',
     },
     lifecycle: lifecycleTransition,

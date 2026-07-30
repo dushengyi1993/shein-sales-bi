@@ -368,7 +368,7 @@ async function main() {
   results.push({name: 'link retire candidate CSV report smoke', ...(await run(process.execPath, ['scripts/test_link_retire_candidates_from_csv.mjs']))});
   results.push({name: 'retire supplier-code repair payload smoke', ...(await run(process.execPath, ['scripts/test_retire_supplier_code_repair_payload.mjs']))});
   results.push({name: 'store identity merchant fallback smoke', ...(await run(process.execPath, ['scripts/test_shein_store_identity_merchant_fallback.mjs']))});
-  results.push({name: 'real-write whitelist scope smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_write_whitelist_scope.mjs']))});
+  results.push({name: 'account writeStores scope smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_write_whitelist_scope.mjs']))});
   results.push({name: 'production real-write safety smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_production_safety.mjs']))});
   results.push({name: 'copy_product_draft success lifecycle smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs']))});
   results.push({name: 'copy_product_draft approved asset binding smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs', '--asset-binding']))});
@@ -430,7 +430,7 @@ async function main() {
       'link retire CSV report smoke proves the batch confirmation table uses the same 15-day and newGoodsTag guards and does not submit writes',
       'retire supplier-code repair smoke proves failed waste-code partialEdit is not counted as done, repair mode never emits shelf payloads, FY/SK-5110 stays hard-excluded, and payloads fill required attributes/titles without local OpenAPI',
       'store identity merchant fallback smoke proves merchant-only OpenAPI identity is accepted only when static truth matches and no GS/merchant conflicts exist',
-      'whitelist scope smoke enables safeWriteOperations only inside an isolated temporary portal',
+      'account scope smoke proves BI writeStores authorizes assigned stores while safeWriteOperations remains the platform action gate',
       'production safety smoke checks locked and narrow-pilot configs through temporary files only',
       'copy_product_draft success smoke uses a local fake OpenAPI server only',
       'copy_product_draft generic product smoke proves the success path is not tied to SM-505A/505-specific defaults',
@@ -439,7 +439,7 @@ async function main() {
       'copy_product_draft chat pre-valid retry smoke proves a later natural-language confirm can refresh a formerly failed task and continue execution in the same turn when checks pass',
       'copy_product_draft weak-readback smoke proves weak evidence cannot auto-close a write task',
       'copy_product_draft chat locked lifecycle smoke proves submitted/needs-manual-resolve tasks cannot be rechecked or resubmitted from chat',
-      'copy_product_draft all-stores capability smoke proves non-HL stores can become confirmable when authorized, probed, gated and whitelisted',
+      'copy_product_draft all-stores capability smoke proves non-HL stores can become confirmable when authorized, probed, platform-gated and inside the actor writeStores scope',
       'maintenance executor smoke uses a local fake OpenAPI server to verify activate/retire/inventory/supply-price/product-price/title/image/certificate payloads and readback',
       'local image role planner smoke proves 本地图包规划 only scans files and does not upload or submit SHEIN writes',
       'SK-5110 batch draft static guard proves local-only 19-store draft keeps NM/HL old-link scope, XC dopamine set, title groups and product-cover exclusion before cloud execution',

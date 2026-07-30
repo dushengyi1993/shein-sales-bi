@@ -287,7 +287,7 @@ try {
   result.summary.whitelistEnabled = operatorCapabilities.json?.safety?.realSubmitWhitelist?.enabled ?? null;
   check('operator capabilities include 19 stores', result.summary.capabilityCount, 19);
   check('safe write remains disabled in smoke', result.summary.safeWriteEnabled, false);
-  check('real submit whitelist remains disabled in smoke', result.summary.whitelistEnabled, false);
+  check('account-scoped write authorization is enabled in smoke', result.summary.whitelistEnabled, true);
 
   const operatorDoctor = await runCli(['--session-file', operatorSessionFile, 'doctor']);
   expectCliOk('operator doctor', operatorDoctor);
@@ -360,15 +360,19 @@ try {
 
   const operatorCreateDx = await runCli([
     '--session-file', operatorSessionFile,
-    'create',
-    '--text', '把 DX 的 PA4-6L 做下架预检',
+    'operate',
+    '--operation', 'retire_link',
+    '--text', '处理这个目标，不要依赖关键词判断动作',
     '--stores', 'DX',
     '--products', 'PA4-6L',
   ]);
-  expectCliOk('operator create DX', operatorCreateDx);
+  expectCliOk('operator structured operate DX', operatorCreateDx);
   const operatorTaskId = operatorCreateDx.json?.task?.id || '';
   result.summary.operatorTaskId = operatorTaskId;
   check('operator task id present', Boolean(operatorTaskId), true);
+  check('operator structured operate invokes no cloud AI', operatorCreateDx.json?.aiInvoked, false);
+  check('operator structured operation bypasses keyword inference', operatorCreateDx.json?.task?.intents || [], intents => intents.length === 1 && intents[0] === 'retire_link');
+  check('operator structured operate runs preflight', Boolean(operatorCreateDx.json?.execution), true);
   check('operator task projection hides owner knowledge internals', Boolean(operatorCreateDx.json?.task?.ownerKnowledgePolicy), false);
 
   const operatorPreflight = await runCli(['--session-file', operatorSessionFile, 'preflight', '--task-id', operatorTaskId]);
@@ -384,8 +388,9 @@ try {
 
   const operatorCreateHlDenied = await runCli([
     '--session-file', operatorSessionFile,
-    'create',
-    '--text', '把 HL 的 PA4-6L 做下架预检',
+    'operate',
+    '--operation', 'retire_link',
+    '--text', '处理这个目标',
     '--stores', 'HL',
     '--products', 'PA4-6L',
   ]);
@@ -397,6 +402,7 @@ try {
   const operatorCopyAllowed = await runCli([
     '--session-file', operatorSessionFile,
     'create',
+    '--operation', 'copy_product_draft',
     '--text', '复制 CX 的 SM-961 到 DX',
     '--source-stores', 'CX',
     '--target-stores', 'DX',
@@ -438,7 +444,8 @@ try {
   const ownerCreateHl = await runCli([
     '--session-file', ownerSessionFile,
     'create',
-    '--text', '把 HL 的 PA4-6L 做下架预检',
+    '--operation', 'retire_link',
+    '--text', '处理这个目标',
     '--stores', 'HL',
     '--products', 'PA4-6L',
   ]);

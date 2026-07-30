@@ -16,7 +16,10 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import crypto from 'node:crypto';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
-import {runSheinWebhookExternalWriteGuarded} from '../lib/shein_webhook_external_write_guard.mjs';
+import {
+  createLoopbackTestWebhookWriteGuard,
+  runSheinWebhookExternalWriteGuarded,
+} from '../lib/shein_webhook_external_write_guard.mjs';
 import {
   formatStoreIdentityError,
   openApiIdentityToStorageIdentity,
@@ -121,6 +124,21 @@ function parseNumberForIntent(intent, text){
   };
   for(const re of specs[intent]||[]){ const m=raw.match(re); if(m) return Number(m[1]); }
   return parseNumberFromText(raw);
+}
+function structuredTaskParameters(task){
+  const direct=task?.parameters&&typeof task.parameters==='object'&&!Array.isArray(task.parameters)?task.parameters:{};
+  const planned=task?.planning?.parameters&&typeof task.planning.parameters==='object'&&!Array.isArray(task.planning.parameters)
+    ?task.planning.parameters:{};
+  return {...direct,...planned};
+}
+function numberForTask(intent,task,command){
+  const parameters=structuredTaskParameters(task);
+  const key={update_inventory:'inventory',update_supply_price:'supplyPrice',update_product_price:'productPrice'}[intent];
+  if(key&&parameters[key]!==undefined&&parameters[key]!==null&&parameters[key]!==''){
+    const value=Number(parameters[key]);
+    return Number.isFinite(value)?value:NaN;
+  }
+  return parseNumberForIntent(intent,command);
 }
 function stripTitleInstructionTail(value){
   let title=String(value||'').replace(/\s+/g,' ').trim();
@@ -443,7 +461,7 @@ async function fetchSpuInfoForImages(client, matches, calls, warnings){
   return spuInfoMap;
 }
 function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEditPayloads=[],certificatePayloads=[],spuInfoMap=new Map()}){
-  const command=String(task?.command||task?.text||''); const out=[];
+  const command=String(task?.command||task?.text||''); const parameters=structuredTaskParameters(task); const out=[];
   const firstPartialEditIntent = intents.find(intent => intent === 'update_title' || intent === 'update_images') || '';
   for(const intent of intents){
     const endpoint=ACTIONS[intent].endpoint;
@@ -456,17 +474,17 @@ function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEdi
       if(!active.length) blockers.push('下架任务没有匹配到已上架链接。');
       out.push({operation:intent, endpoint, body:{skc_site_info_list:active.map(m=>({shelf_state:2, site_list:[siteInfo.site], skc_name:m.skc}))}, targetLinks:active});
     } else if(intent==='update_inventory'){
-      const qty=parseNumberForIntent(intent, command); if(!Number.isFinite(qty)||qty<0) blockers.push('改库存任务缺少目标库存数量，例如“库存改成 100”。');
+      const qty=numberForTask(intent,task,command); if(!Number.isFinite(qty)||qty<0) blockers.push('改库存任务缺少目标库存数量。请提供结构化 inventory 参数。');
       const items=matches.flatMap(m=>m.skuCodes.map(sku=>({idempotencyKey:`biops-${task.id||nowId()}-${m.storeKey}-${sku}-${Math.max(0,Math.trunc(qty||0))}`.slice(0,120), skuCode:sku, invType:'VI', changeType:'OVERWRITE', changeQuantity:Math.max(0,Math.trunc(qty||0)), changeReason:'BI Ops guarded inventory update'})));
       if(!items.length) blockers.push('改库存任务未解析到 SKU code，无法构建库存更新 payload。');
       out.push({operation:intent, endpoint, body:{updateSkuInventoryQuantityRequests:items}, targetLinks:matches});
     } else if(intent==='update_supply_price'){
-      const price=parseNumberForIntent(intent, command); if(!Number.isFinite(price)||price<=0) blockers.push('改供货价任务缺少目标供货价，例如“供货价改成 80 SAR”。');
+      const price=numberForTask(intent,task,command); if(!Number.isFinite(price)||price<=0) blockers.push('改供货价任务缺少目标供货价。请提供结构化 supplyPrice 参数。');
       const items=matches.filter(m=>m.skuCodes.length).map(m=>({skc_name:m.skc, change_price_reason_flag:'4', change_remark:'BI Ops guarded cost update', sku_info_list:m.skuCodes.map(sku=>({sku_code:sku,cost:Number(price.toFixed(2)),currency:'SAR'}))}));
       if(!items.length) blockers.push('改供货价任务未解析到 SKU code，无法构建成本价 payload。');
       out.push({operation:intent, endpoint, body:{spu_name:matches[0]?.spu||'', skc_info_list:items}, targetLinks:matches});
     } else if(intent==='update_product_price'){
-      const price=parseNumberForIntent(intent, command); if(!Number.isFinite(price)||price<=0) blockers.push('改商品售价任务缺少目标售价，例如“售价改成 99 SAR”。');
+      const price=numberForTask(intent,task,command); if(!Number.isFinite(price)||price<=0) blockers.push('改商品售价任务缺少目标售价。请提供结构化 productPrice 参数。');
       warnings.push('商品售价 API 同时写入 shopPrice 与 specialPrice，避免 SHEIN 将未传 specialPrice 解析为 0；真实执行前仍需人工复核当前活动价影响。');
       const productPriceList=matches.flatMap(m=>m.skuCodes.map(sku=>({productCode:sku,currencyCode:siteInfo.currency||'SAR',shopPrice:Number(price.toFixed(2)),specialPrice:Number(price.toFixed(2)),site:siteInfo.site,riseReason:'4'})));
       if(!productPriceList.length) blockers.push('改商品售价任务未解析到 SKU code，无法构建售价 payload。');
@@ -475,10 +493,10 @@ function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEdi
       if (intent !== firstPartialEditIntent) continue;
       const hasTitle=intents.includes('update_title');
       const hasImages=intents.includes('update_images');
-      const title=hasTitle?parseTitleFromText(command):'';
-      const titleAr=hasTitle?parseTitleArFromText(command):'';
+      const title=hasTitle?safeString(parameters.title||parseTitleFromText(command),1000):'';
+      const titleAr=hasTitle?safeString(parameters.titleAr||parseTitleArFromText(command),1000):'';
       const attrOverrides=parseAttributeOverrides(task);
-      if(hasTitle && !title) blockers.push('改标题任务缺少新标题，例如"标题改成 XXX"。');
+      if(hasTitle && !title) blockers.push('改标题任务缺少新标题。请提供结构化 title 参数。');
       const imagePlans=hasImages?(Array.isArray(imageEditPayloads)?imageEditPayloads:[]):[];
       if(hasImages && !imagePlans.length) blockers.push('换图任务缺少完整 SHEIN partialEdit 图片 JSON：需提供 spu_name + image_info/skc_list/site_detail_image_info_list，或先通过图片上传/外链转换取得 SHEIN 图片 URL 后再提交。');
       const spuGroups=[...new Map(matches.map(m=>[m.spu,m])).values()].filter(m=>m.spu);
@@ -561,7 +579,10 @@ async function readbackForIntents(client, intents, matches, calls){
 async function main(){
   const args=parseArgs(process.argv.slice(2)); const startedAt=new Date().toISOString(); const runId=`lmo_${nowId()}_${crypto.randomBytes(4).toString('hex')}`; const {task, executionContext}=await loadTask(args); const store=args.store||taskStores(task)[0]; if(!store) throw new Error('Missing --store / task store'); const intents=taskIntents(task); const blockers=[]; const warnings=[]; const calls=[];
   if(!intents.length) blockers.push('任务不包含维护写动作。');
-  const {client, store: configuredStore}=await loadClient({...args, store});
+  const {config, client, store: configuredStore}=await loadClient({...args, store});
+  const testWebhookGuard=createLoopbackTestWebhookWriteGuard({
+    baseUrl:config.apiBaseUrls?.prodSemiManaged||SHEIN_OPENAPI_BASE_URLS.prodSemiManaged,
+  });
   const storeInfo=await callOpenApi(client,{name:'store-info',path:'/open-api/openapi-business-backend/query-store-info',body:{}}).catch(e=>({error:e}));
   if(storeInfo.error) warnings.push(`店铺信息探针失败：${safeString(storeInfo.error.message||storeInfo.error)}`); else calls.push(compactCallResult(storeInfo.name,storeInfo.path,storeInfo.method,{status:storeInfo.httpStatus,data:storeInfo.data}));
   const truth=STORE_ACCOUNT_TRUTH.stores?.[store];
@@ -609,6 +630,7 @@ async function main(){
     for(const p of payloads){
       const guardedWrite=await runSheinWebhookExternalWriteGuarded({
         writeStores:[store],
+        guard:testWebhookGuard||undefined,
         write:()=>client.request(p.endpoint,{method:'POST',body:p.body,headers:{language:'en'}}),
       });
       if(!guardedWrite.ok){
@@ -631,7 +653,7 @@ async function main(){
   const readbackCalls=[]; let readback={ok:false,status:args.mode==='execute'?'not_run':'planned_not_run',calls:readbackCalls};
   if(actualWriteSubmitted){ readback=await readbackForIntents(client,intents,resolved.matches,readbackCalls); }
   const state=args.mode==='execute' ? (actualWriteSubmitted?'submitted':'blocked') : (blockers.length?'blocked':'ready_for_submit');
-  const output={ok:blockers.length===0, runId, mode:args.mode, adapterKind:'link_maintenance_openapi_executor', state, startedAt, endedAt:new Date().toISOString(), storeKey:store, task:{id:task.id||'',status:task.status||'',intents,productRefs:taskProductRefs(task)}, payload:{found:Boolean(payloadHash), payloadHash, payloadHashAlgorithm:payloadHash?'sha256-stable-json-v1':'', summary:{operations:payloads.map(p=>p.operation), endpoints:payloads.map(p=>p.endpoint), targetCount:resolved.matches.length, skuCount:unique(resolved.matches.flatMap(m=>m.skuCodes)).length, imagePayloadInspection:{payloadCount:imagePayloadInspection.payloadCount,totalSpuImages:imagePayloadInspection.totalSpuImages,totalSkcImages:imagePayloadInspection.totalSkcImages,totalSiteDetailImages:imagePayloadInspection.totalSiteDetailImages,totalSkuImages:imagePayloadInspection.totalSkuImages,totalDetailImages:imagePayloadInspection.totalDetailImages,totalUrlRefs:imagePayloadInspection.totalUrlRefs,uniqueUrlCount:imagePayloadInspection.uniqueUrlCount}}, submitPlan}, adapterEvidence:{realSubmit:actualWriteSubmitted, canSilentWrite:false, matchedLinksCount:resolved.matches.length, matchedLinks:resolved.matches.slice(0,80), linkSnapshotFile:linkLoad.file?rel(linkLoad.file):'', productCacheFile:productLoad.file?rel(productLoad.file):'', siteInfo, imagePayloadInspection, calls}, publishResult: actualWriteSubmitted ? {code:'0', msg:'submitted', traceId:submitResults.map(x=>x.traceId).filter(Boolean).join(',')||null, operations:submitResults} : null, readbackFingerprint:{taskId:task.id||'', intents, targetStores:[store], matchedSkcs:resolved.matches.map(m=>m.skc).filter(Boolean), matchedSkuCodes:unique(resolved.matches.flatMap(m=>m.skuCodes)), payloadHash, readbackStatus:readback.status}, readback, blockers, warnings, safety:{canSilentWrite:false, executeRequiresConfirm:SUBMIT_CONFIRM_TEXT, dryRunDoesNotCallBusinessWrite:args.mode!=='execute', note:'维护写真实提交必须由 BI 服务端权限、白名单、payload hash 和确认文本共同放行；partialEdit 成功只代表提交版本生成，当前态仍以回读/审核状态为准。'}};
+  const output={ok:blockers.length===0, runId, mode:args.mode, adapterKind:'link_maintenance_openapi_executor', state, startedAt, endedAt:new Date().toISOString(), storeKey:store, task:{id:task.id||'',status:task.status||'',intents,productRefs:taskProductRefs(task)}, payload:{found:Boolean(payloadHash), payloadHash, payloadHashAlgorithm:payloadHash?'sha256-stable-json-v1':'', summary:{operations:payloads.map(p=>p.operation), endpoints:payloads.map(p=>p.endpoint), targetCount:resolved.matches.length, skuCount:unique(resolved.matches.flatMap(m=>m.skuCodes)).length, imagePayloadInspection:{payloadCount:imagePayloadInspection.payloadCount,totalSpuImages:imagePayloadInspection.totalSpuImages,totalSkcImages:imagePayloadInspection.totalSkcImages,totalSiteDetailImages:imagePayloadInspection.totalSiteDetailImages,totalSkuImages:imagePayloadInspection.totalSkuImages,totalDetailImages:imagePayloadInspection.totalDetailImages,totalUrlRefs:imagePayloadInspection.totalUrlRefs,uniqueUrlCount:imagePayloadInspection.uniqueUrlCount}}, submitPlan}, adapterEvidence:{realSubmit:actualWriteSubmitted, canSilentWrite:false, matchedLinksCount:resolved.matches.length, matchedLinks:resolved.matches.slice(0,80), linkSnapshotFile:linkLoad.file?rel(linkLoad.file):'', productCacheFile:productLoad.file?rel(productLoad.file):'', siteInfo, imagePayloadInspection, calls}, publishResult: actualWriteSubmitted ? {code:'0', msg:'submitted', traceId:submitResults.map(x=>x.traceId).filter(Boolean).join(',')||null, operations:submitResults} : null, readbackFingerprint:{taskId:task.id||'', intents, targetStores:[store], matchedSkcs:resolved.matches.map(m=>m.skc).filter(Boolean), matchedSkuCodes:unique(resolved.matches.flatMap(m=>m.skuCodes)), payloadHash, readbackStatus:readback.status}, readback, blockers, warnings, safety:{canSilentWrite:false, executeRequiresConfirm:SUBMIT_CONFIRM_TEXT, dryRunDoesNotCallBusinessWrite:args.mode!=='execute', note:'维护写真实提交必须由 BI 账号店铺写权限、动作总闸门、payload hash 和确认文本共同放行；partialEdit 成功只代表提交版本生成，当前态仍以回读/审核状态为准。'}};
   if(actualWriteSubmitted && !readback.ok){ output.ok=false; output.state='submitted'; output.blockers=[]; output.warnings.push('写接口返回成功但强回读未确认，任务必须锁定等待人工核销。'); }
   const outPath=path.join(args.outDir,`${runId}.local.json`); await writeJson(outPath,output); output.savedTo=rel(outPath); if(!args.quiet) console.log(JSON.stringify(output,null,2));
 }

@@ -30,7 +30,7 @@ npm run partner-cli:package
 
 产物位于忽略目录 `outputs/releases/`，同时生成 `.sha256`。压缩包只包含远程 CLI、负责人规则校验模块、安装脚本和本说明，不包含 `.env`、session、店铺 profile、服务器脚本或任何凭证。
 
-最小包保障 `login/doctor/me/capabilities/query/chat/jobs/tasks/create/preflight/execute/audit/resolve`、本地 `plan-images`、同任务 `prepare-publish` 以及走云端的图片上传/转换。旧 `ask` 仅保留为 `query` 的无模型兼容别名。营销 CSV 候选生成、开发 smoke 等工具仍需要完整项目仓库，不作为合伙人日常必需能力。
+最小包保障 `login/doctor/me/capabilities/query/operate/jobs/tasks/create/preflight/execute/audit/resolve`、本地 `plan-images`、同任务 `prepare-publish` 以及走云端的图片上传/转换。旧 `ask` 仅保留为 `query` 的无模型兼容别名；`chat` 仅保留网页会话兼容，不是合伙人 CLI 问数或写操作入口。营销 CSV 候选生成、开发 smoke 等工具仍需要完整项目仓库，不作为合伙人日常必需能力。
 
 ## 电脑安装
 
@@ -104,7 +104,7 @@ CLI 使用原子写入，并在同目录保留权限受限的 `ops-session.json.
 - 常用会话/作业命令：
 
 ```powershell
-node scripts/bi_ops_cli.mjs chat --text "把 DX 的 PA4-6L 库存改成 30" --wait-seconds 120
+node scripts/bi_ops_cli.mjs operate --operation update_inventory --store DX --product PA4-6L --inventory 30 --text "把 DX 的 PA4-6L 库存改成 30"
 node scripts/bi_ops_cli.mjs jobs --status running
 node scripts/bi_ops_cli.mjs job --job-id <作业ID>
 node scripts/bi_ops_cli.mjs wait-job --job-id <作业ID> --wait-seconds 120
@@ -112,7 +112,7 @@ node scripts/bi_ops_cli.mjs jobs --scope-all  # 仅 Owner 全局只读
 ```
 
 - `--profile fast|balanced|deep|owner` 只改变理解深度。默认分层是 Luna low 20 秒、Terra low 45 秒、Terra medium 90 秒、Sol high 300 秒、Owner Sol high 600 秒；`xhigh` 只在 Owner 人工明确要求时使用，网页不启用 max/ultra。
-- 后台 `intent_plan` job 只补全店铺、商品、参数、歧义和风险，不直接授权或提交 SHEIN。终态为 `succeeded`、`failed` 或 `uncertain_write`；后两者先看详情，不要重复创建动作。
+- 合伙人 CLI 写操作由本机 Codex 直接提交结构化 `operation/store/product/parameters`，响应固定标明 `aiInvoked=false`；不会再经过云端 `intent_plan` 或关键词权限判断。网页自然语言会话仍可保留后台理解，但它不能修改结构化任务事实或扩展权限。
 - 飞书问数已主动暂停，生产 `shein-bi-lark-sales-qa.service` 必须保持 `disabled + inactive`；团队网页和 Owner CLI 不依赖它。
 - Owner/合伙人 CLI 的经营问数统一使用 `query` 读取云端 BI section，不依赖伙伴电脑里的完整项目或本地 V3 报表，也不再把问题转给云端问数模型。`query` 只按关键词确定性选择数据分区并返回完整结构化行，响应固定标明 `aiInvoked=false`；当前电脑上的 Codex 自己完成筛选、计算和说明。近 7 天链接多条件筛选应直接用链接行计算：曝光用 `c7_eps_uv`、销量用 `c7_sale_cnt`、加车访客用 `c7_cart_uv`，点击率按 `c7_goods_uv / c7_eps_uv` 重算；不得把商品访客误当成加车访客。该链路支持全部 19 店和按店筛选；链接 section 与小时级销售 core 代次不同时，只有业务日期兼容规则通过才可读取，不能把正常日更链接数据误判为缺报表。
 
@@ -151,7 +151,7 @@ node scripts/bi_ops_cli.mjs jobs --scope-all  # 仅 Owner 全局只读
 - 云端 OpenAPI 能力总账能否访问；
 - 负责人规则 manifest/bundle 是否可读取、hash 是否匹配、CLI 是否达到最低版本；
 - 任务池接口是否可访问；
-- 真实写总闸门和真实写试点白名单当前状态。
+- 平台动作总闸门和当前账号店铺写权限状态。
 
 也可以在正式操作前检查某个账号对“某个店 + 某个动作”到底到哪一步可用：
 
@@ -163,8 +163,8 @@ node scripts/bi_ops_cli.mjs doctor --operation copy_product_draft --target-store
 ```
 
 - 不带 `--require-real-submit` 时，只要求能建任务 / dry-run；适合普通运营确认“我能不能先做预检”。
-- 带 `--require-real-submit` 时，会要求该账号、店铺和动作已经具备真实提交能力；如果仍被总闸门、白名单、账号写权限或动作适配器挡住，命令会退出非 0，并在 `requestedActionReadiness.items[].blockers` 里列出原因。
-- 目前已接入的官方 OpenAPI 写适配器包括：`copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。它们默认只做 dry-run；真实执行必须同时满足账号写权限、`safeWriteOperations`、真实写白名单、人 + 店 + 动作、上一次 dry-run 的 `payloadHash`、`waiting_review` 状态和确认文本 `SHEIN_OPENAPI_SUBMIT`。网页端不会要求用户输入英文安全码或固定确认框，而是在同一聊天里用“可以执行 / 提交吧 / 照做”等自然语言确认；服务端内部映射成安全确认码，CLI/脚本仍使用 `SHEIN_OPENAPI_SUBMIT`。
+- 带 `--require-real-submit` 时，会要求该账号、店铺和动作已经具备真实提交能力；如果仍被动作总闸门、账号店铺写权限或动作适配器挡住，命令会退出非 0，并在 `requestedActionReadiness.items[].blockers` 里列出原因。
+- 目前已接入的官方 OpenAPI 写适配器包括：`copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。它们默认只做系统检查；真实执行必须同时满足账号 `writeStores`、`safeWriteOperations`、上一次系统检查的 `payloadHash`、`waiting_review` 状态和确认文本 `SHEIN_OPENAPI_SUBMIT`。CLI 写需求由本机 Codex 通过 `operate` 结构化提交，不依赖自然语言关键词；网页端仍可在同一聊天里用“可以执行 / 提交吧 / 照做”等自然语言确认。
 - 批量下架弱链接前必须先出只读明细让用户确认。低曝光零销量候选统一按“已上架 + 近 7 天曝光 `<=300` + 近 7 天销量 `0` + 无平台新品标签 + 首次上架已满 15 天 + 最近库存恢复/重新在售已满 15 天”筛选。恢复日期优先按每日库存从 `0` 变为正数判断，其次读取最近 60 天售罄/下架到在售的状态跃迁，OpenAPI `last_shelf_time` 只作兜底；营销活动刚成功反而属于恢复期保护佐证。首次上架或最近恢复 15 天内的链接一律不进入下架执行清单，缺初次上架时间或恢复证据链不完整时只能放入待确认/不执行。用户确认后才可用 `retire_link` 下架，并尽力把货号改成 `（废）标准货号`；如果改废货号被平台 `partialEdit` 校验卡住，结果按“已下架但货号未改”汇总，不再为了货号阻断下架。
 - 维护类适配器使用官方文档：商品上下架 `3001253 /open-api/goods/modify-skc-shelf`（`activate_link` 使用 `shelf_state=1`，`retire_link` 使用 `shelf_state=2`），库存 `3001738 /open-api/stock/change-inventory/v2`，供货价 `3001681 /open-api/goods/update-cost`，售价 `3001407 /open-api/openapi-business-backend/product/price/save`，局部编辑 `3001810 /open-api/goods/product/partialEdit`；证书/资质包含 `3001477 /open-api/goods/save-or-update-certificate-pool`、`3001183 /open-api/goods/save-certificate-pool-skc-bind` 等证书接口。网页端 `update_images` 不能要求普通员工手写 `partialEdit` JSON：用户上传图片后，系统应在聊天里展示 AI 排序和资料缺口，再由执行层转换成 SHEIN 需要的图片 URL 与 `partialEdit` 字段；若转换不完整，任务停在资料检查。CLI/脚本仍可传完整结构化 payload 做管理员验收。`certificate_review` 要求提供 `certificatePayloads[{endpoint,body}]`，提交后默认人工核销审核状态。
 - `campaign_signup` / `flash_discount` 当前不走官方 OpenAPI：公开目录未发现营销报名、限时折扣、优惠券报名写接口证据，所以它们继续走本地营销运营流程、价格栈守卫和人工确认，不会在 OpenAPI 总账里伪装成“可真实提交”。
@@ -207,45 +207,45 @@ $out = Join-Path $env:TEMP ("shein-bi-query-" + [guid]::NewGuid().ToString("N") 
 
 常用分区：销售/排行 `rankings`；今日实时订单与利润事件 `liveSalesToday`；链接/折后价/上下架 `linksData,productState`；利润/成本/仓储 `profit`；库存/去化/补货 `inventoryTrend`；订单成交价 `orders,priceScatter`；售后 `afterSales`；评论 `comments`；RTV `rtvData`；物流 `waybills`。
 
-旧命令 `ask` 为避免老口令失效仍可运行，但它现在只是 `query` 的兼容别名，同样返回 `aiInvoked=false`，不会调用 `/api/ops-agent/ask`。新口令统一写 `query`。`chat` 只用于需要形成受控运营任务的会话，不能用于普通问数。
+旧命令 `ask` 为避免老口令失效仍可运行，但它现在只是 `query` 的兼容别名，同样返回 `aiInvoked=false`，不会调用 `/api/ops-agent/ask`。新口令统一写 `query`。合伙人 CLI 的写需求统一使用 `operate`；不要使用 `chat` 作为问数或写动作入口。
 
 ### 推荐方式：直接让 Codex 调用工具
 
 在 Codex App 里可以这样说：
 
 ```text
-请调用 node scripts/bi_ops_cli.mjs create --stores DL --products 520a --text "把 DL 的 520a 做下架预检，不要真实提交"
+请调用 node scripts/bi_ops_cli.mjs operate --operation retire_link --store DL --product 520a --text "把 DL 的 520a 下架"
 ```
 
 或者：
 
 ```text
-请调用 node scripts/bi_ops_cli.mjs create --stores TZZ --products SM-961 --text "复制 CX 的 SM-961 链接到 TZZ，先做预检"
+请调用 node scripts/bi_ops_cli.mjs operate --operation copy_product_draft --source-store CX --target-store TZZ --product SM-961 --text "复制 CX 的 SM-961 链接到 TZZ"
 ```
 
 跨店复制时，建议把来源店和写入店拆开写，避免把“读来源店”误当成“写来源店”：
 
 ```text
-请调用 node scripts/bi_ops_cli.mjs create --source-stores CX --target-stores TZZ --products SM-961 --text "复制 CX 的 SM-961 链接到 TZZ，先做预检"
+请调用 node scripts/bi_ops_cli.mjs operate --operation copy_product_draft --source-store CX --target-store TZZ --product SM-961 --text "复制 CX 的 SM-961 链接到 TZZ"
 ```
 
 ### 标准操作步骤
 
-#### 1. 创建任务
+#### 1. 创建结构化任务并完成首次系统检查
 
 ```powershell
-node scripts/bi_ops_cli.mjs create --stores DL --products 520a --text "把 DL 的 520a 做下架预检，不要真实提交"
+node scripts/bi_ops_cli.mjs operate --operation retire_link --store DL --product 520a --text "把 DL 的 520a 下架"
 ```
 
 跨店复制：
 
 ```powershell
-node scripts/bi_ops_cli.mjs create --source-stores CX --target-stores TZZ --products SM-961 --text "复制 CX 的 SM-961 链接到 TZZ，先做预检"
+node scripts/bi_ops_cli.mjs operate --operation copy_product_draft --source-store CX --target-store TZZ --product SM-961 --text "复制 CX 的 SM-961 链接到 TZZ"
 ```
 
-创建后会返回一个任务 ID。
+`operate` 会返回任务 ID 和首次系统检查结果，固定为 `aiInvoked=false`。本机 Codex 负责选择结构化动作，服务器不再从原句关键词重新猜动作。
 
-#### 2. 做预检
+#### 2. 补资料后重新系统检查（需要时）
 
 ```powershell
 node scripts/bi_ops_cli.mjs preflight --task-id <任务ID>
@@ -279,11 +279,11 @@ node scripts/bi_ops_cli.mjs execute --task-id <任务ID> --confirm SHEIN_OPENAPI
 - 服务端预检通过；
 - 任务处于可复核/可执行状态；
 - 当前账号有目标店铺写权限；
-- 当前账号、目标店铺和动作同时命中云端“真实写试点白名单”；
+- 目标动作已进入 `safeWriteOperations` 平台能力总闸门；
 - 确认文本必须精确等于 `SHEIN_OPENAPI_SUBMIT`；
 - 服务端会再次复核权限和任务状态。
 
-注意：这条命令不等于一定会真实提交。现在系统默认仍是安全模式；如果云端没有给这个“人 + 店 + 动作”开试点白名单，它会自动降级为预检 / dry-run，并在任务和审计里写明阻断原因。
+注意：这条命令不等于一定会真实提交。账号越权、动作未接入、系统检查未通过、任务快照变化、Webhook 闸门异常或回读能力不足时都会安全停止。
 
 #### 5. 人工核销异常任务（管理员才用）
 
@@ -317,7 +317,8 @@ node scripts/bi_ops_cli.mjs resolve --task-id <任务ID> --status archived --not
 
 - 合伙人/管理员：可读全部店铺，可写全部店铺。
 - 普通运营：可读全部店铺；自动运营写操作只允许自己的店铺。
-- “账号写权限”和“真实写试点白名单”是两层门：账号有某店写权限，只代表可以创建任务、上传素材、预检和复核；真正提交到 SHEIN，还必须由管理员在云端私有白名单里单独放行。
+- 人员权限只认 BI 账号 `writeStores`；平台是否支持某类写动作由 `safeWriteOperations` 控制。二者职责分离，不再额外维护容易不同步的“用户名 × 店铺 × 动作”私有白名单。
+- 负责人规则发布权限完全独立：只有 `knowledgePublisher=true` 的负责人账号或负责人设备可以发布规则。合伙人/运营即使有全店写权限，也只能读取和执行规则，不能修改、覆盖或反向同步负责人规则。
 - 复制同事店铺链接到自己店铺：允许读取同事店铺信息，但真实写入只能写到自己有权限的店铺；CLI 里用 `--source-stores` 表示只读来源，用 `--target-stores` 表示写入目标。
 - 越权写操作会返回 `403`，并写入云端审计。
 - 不建议给合伙人或普通运营服务器 SSH 权限；所有动作都应通过 BI 账号、任务池、预检、确认和审计链路完成。
@@ -340,7 +341,7 @@ node scripts/bi_ops_cli.mjs resolve --task-id <任务ID> --status archived --not
 
 ### 网页聊天说“提交吧”后仍然没有真实提交
 
-这是正常安全机制。除了账号写权限和自然语言确认，还必须命中云端私有的真实写试点白名单。没有白名单时，系统只做资料检查，不会碰 SHEIN 后台。CLI/脚本路径仍需要显式 `--confirm SHEIN_OPENAPI_SUBMIT`。
+先看任务的系统检查结果。真实提交仍要求账号店铺写权限、平台动作总闸门、已锁定任务快照和确认；CLI/脚本路径仍需要显式 `--confirm SHEIN_OPENAPI_SUBMIT`，但不再依赖私有人员白名单或用户说中特定自然语言关键词。
 
 ### 提示 `Task not found`
 
@@ -402,7 +403,7 @@ node scripts/bi_ops_cli.mjs logout
 - 不把云端 API Key、OpenAPI Secret、服务器 SSH 权限发给普通电脑。
 - 本机只保存会话 cookie，不保存明文密码。
 - 所有真实写操作都要能在云端审计里追溯到：操作者、时间、来源、目标店铺、任务、预检结果、执行结果和回读证据。
-- 没有预检通过、没有明确确认文本、没有真实写试点白名单，不允许真实提交。
+- 没有系统检查通过、没有明确确认、账号无目标店写权限或平台动作总闸门未开放，不允许真实提交。
 
 ## 管理员维护建议
 
@@ -411,13 +412,12 @@ node scripts/bi_ops_cli.mjs logout
 - 普通运营账号只给自己负责店铺的写权限。
 - 员工离职或岗位调整时，先改 BI 账号权限或禁用账号。
 - 定期抽查审计记录，尤其是上下架、改价、复制链接、批量维护等写操作。
-- 真实写试点白名单只放在云端私有 `config/bi_ops_write_whitelist.local.json`，不要提交 GitHub；仓库里的 `config/bi_ops_write_whitelist.example.json` 只是格式样例。
-- 普通发版或日常巡检时，建议在云端跑 `node scripts/check_bi_ops_production_safety.mjs --expect locked --pretty`，确认生产真实写仍处于锁定态。
-- 如果要开启首个真实写试点，先只放行 `copy_product_draft`，并在云端跑 `node scripts/check_bi_ops_production_safety.mjs --expect pilot --require-store <店铺> --require-operation copy_product_draft --require-user <BI账号> --pretty`。这一步只读，不会调用 SHEIN；通过后仍必须先 dry-run、人工确认、带 `SHEIN_OPENAPI_SUBMIT` 执行并回读。
+- 人员增减店铺权限只修改 BI 账号 `writeStores`；不要再同步维护 `config/bi_ops_write_whitelist.local.json`。旧文件仅作兼容，不参与授权。
+- 开放新动作时只调整 `safeWriteOperations`，并先验证动作 schema、系统检查、回读和审计；这不会自动扩大任何账号的店铺范围。
 
 ## 管理员验收脚本
 
-发版或调整账号权限后，建议先在本地或云端项目目录跑隔离 smoke。脚本会创建临时账号、临时任务池和临时审计文件，不使用生产任务池，也不会打开真实写白名单。
+发版或调整账号权限后，建议先在本地或云端项目目录跑隔离 smoke。脚本会创建临时账号、临时任务池和临时审计文件，不使用生产任务池。
 
 ```powershell
 node scripts/test_bi_ops_release_gate.mjs
@@ -433,14 +433,14 @@ node scripts/test_bi_ops_maintenance_executor_flow.mjs
 node scripts/test_link_ops_image_role_planner.mjs
 ```
 
-- `test_bi_ops_release_gate.mjs` 是发版前总入口，会串联语法检查、权限矩阵 smoke、CLI flow smoke、真实写白名单作用域 smoke、前端中文确认/反馈 smoke、商品详情 mapper smoke、店铺身份 merchantId fallback smoke、`git diff --check` 和旧确认文本扫描。
+- `test_bi_ops_release_gate.mjs` 是发版前总入口，会串联语法检查、权限矩阵 smoke、CLI 结构化写入 smoke、账号店铺写权限 smoke、前端中文确认/反馈 smoke、商品详情 mapper smoke、店铺身份 merchantId fallback smoke、`git diff --check` 和旧确认文本扫描。
 - `test_bi_ops_permissions.mjs` 验证服务端权限矩阵：普通运营可写自己店、不可写非负责店，跨店复制只校验写入店铺，全店管理账号可写全部店铺，`local-system` 不能写自动运营入口。
-- `test_bi_ops_cli_flow.mjs` 验证合伙人 / 本机 Codex App 的 CLI 调用链：`login`、`me`、`capabilities`、`create`、`preflight`、`audit`、`logout`，并确认 session 文件不保存明文密码、预检不触发真实写。
-- `test_bi_ops_write_whitelist_scope.mjs` 会在隔离临时门户里临时开启 `safeWriteOperations` 和一条真实写白名单，验证只有指定“人 + 店 + 动作”能命中；其他账号、店铺和动作仍被挡住，并且在缺少 dry-run、`waiting_review`、payload hash 等条件时不会真实提交。
+- `test_bi_ops_cli_flow.mjs` 验证合伙人 / 本机 Codex App 的 CLI 调用链：`login`、`me`、`capabilities`、`query`、`operate`、`preflight`、`audit`、`logout`，并确认结构化动作 `aiInvoked=false`、session 文件不保存明文密码、系统检查不触发真实写。
+- `test_bi_ops_write_whitelist_scope.mjs` 名称为旧兼容名，当前验证账号 `writeStores` 是人员写权限真源：旧私有白名单即使不含运营账号，也不能阻断其负责店铺；越权店铺、未开放动作和不完整任务快照仍会被挡住。
 - `test_bi_ops_frontend_confirm_feedback.mjs` 静态验证自动化运营页前端：网页端中文 `确认` 会映射到安全确认码，执行按钮有忙碌/完成/失败反馈，任务证据不覆盖聊天内容，回答可按 Markdown 分段展示。
 - `test_link_ops_product_draft_openapi_detail.mjs` 使用离线 fixture 验证 `copy_product_draft` 能从 OpenAPI 商品详情 / `spu-info` 映射类目、属性、图片、SKU、供货价、尺寸重量等发布 payload 关键字段，不要求用户手工补完整 payload。
 - `test_shein_store_identity_merchant_fallback.mjs` 验证 TZ/JSH/TZZ/XC 等 `query-store-info` 不返回 GS 账号时，只能在静态真相表 `merchantId` 匹配且没有 GS 冲突时使用 fallback；不得运行时自动回填或放宽店铺身份校验。
-- `test_bi_ops_production_safety.mjs` 验证生产安全检查器本身：锁定态通过、复制上品试点通过、维护写试点通过，`*` 通配、角色泛放、未实现动作放行和总闸门大于白名单都会失败。
+- `test_bi_ops_production_safety.mjs` 验证生产安全检查器本身：锁定态通过、复制上品试点通过、维护写试点通过，`*` 通配、角色泛放、未实现动作放行和越权动作放行都会失败。
 - `test_bi_ops_copy_product_success_flow.mjs` 使用本地假 OpenAPI 服务验证 `copy_product_draft` 成功闭环：任务创建、JSON payload 附件、dry-run 锁定 payload hash、显式确认执行、publish 成功、商品查询强指纹回读、任务自动 `done`。它不会调用真实 SHEIN；release gate 还会额外用 `--weak-readback` 跑一次，证明只有平台 SKU / 源 SKC / 货号文本等弱证据时，任务必须进入人工核销，不能自动判成功。
 - `test_bi_ops_maintenance_executor_flow.mjs` 使用本地假 OpenAPI 服务验证维护写执行器：恢复上架、下架、库存、供货价、售价、改标题、换图、证书绑定完整 payload、dry-run hash 锁定、显式确认 execute、库存 + 商品回读；同时覆盖换图 payload 摘要和危险 SKU 小图阻断。它不会调用真实 SHEIN。
 - `test_link_ops_image_role_planner.mjs` 使用临时本地图包验证离线图片角色规划：排除 `备用` 和 `产品封面` AB 测试图，识别主封面、第二封面、1:1 方形图，按卖点→参数→场景排序，容量不足时不硬凑 11 张，容量溢出时才分配高清 SKU 图。它不会上传图片或调用 SHEIN。

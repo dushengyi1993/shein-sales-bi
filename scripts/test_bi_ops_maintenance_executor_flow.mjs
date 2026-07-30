@@ -54,7 +54,15 @@ async function writeJson(relPath, value) {
 }
 function runNode(args) {
   return new Promise(resolve => {
-    const child = spawn(process.execPath, args, {cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe']});
+    const child = spawn(process.execPath, args, {
+      cwd: ROOT,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        NODE_ENV: 'test',
+        SHEIN_BI_TEST_ALLOW_FAKE_WEBHOOK_GATE: '1',
+      },
+    });
     let stdout = '', stderr = '';
     child.stdout.on('data', d => { stdout += d.toString(); });
     child.stderr.on('data', d => { stderr += d.toString(); });
@@ -157,7 +165,16 @@ try {
   const task = {
     id: 'maintenance-smoke',
     status: 'waiting_review',
-    command: '把 SMK 的 TEST-PRODUCT 下架，库存改成 100，供货价改成 80 SAR，售价改成 99 SAR，标题改成 Smoke Title，并换图',
+    command: '处理这项结构化维护任务；不要从这句话猜动作或参数',
+    planning: {
+      source: 'structured_cli',
+      parameters: {
+        inventory: 100,
+        supplyPrice: 80,
+        productPrice: 99,
+        title: 'Smoke Title',
+      },
+    },
     targets: {stores: ['SMK'], productRefs: ['TEST-PRODUCT']},
     partialEditPayload: {
       spu_name: 'spu-smoke',

@@ -89,7 +89,6 @@
 | `shein-bi-cloud-disk-maintenance.timer` | 每周日 `01:35`，随机延迟不超过 10 分钟 | 旧抓数校验归档到 COS、清理 7 天前临时文件；根盘达到 80% 且无浏览器任务时才清 profile 可再生缓存 |
 
 | `shein-bi-cloud-watchdog.timer` | 每小时 | 检查云端服务、timer 和 BI 数据新鲜度，异常时发飞书提醒 |
-| `shein-bi-cloud-daily-ops-group-digest.timer` | 北京时间 `20:30` | 向团队运营群发送每日巡检结论，并附结论与营销巡检报告 |
 
 | `shein-bi-lark-sales-qa.service` | **主动暂停** | 飞书只读问数机器人代码与 unit 保留，但生产必须保持 `disabled + inactive`；网页问数与 CLI 不依赖它 |
 

@@ -26,7 +26,8 @@ const syncText = buildSyncIssueMessage({
   now,
 });
 assert.match(syncText, /失败店铺：QH/);
-assert.match(syncText, /原因：订单抓取失败/);
+assert.match(syncText, /订单抓取失败/);
+assert.doesNotMatch(syncText, /处理原则：/);
 
 const marketingText = buildSyncIssueMessage({
   isMarketing: true,
@@ -38,4 +39,27 @@ assert.match(marketingText, /^⚠️ 营销兜底未完成/m);
 assert.match(marketingText, /系统没有虚增库存/);
 assert.doesNotMatch(marketingText, /SHEIN 同步异常|处理原则：已成功店铺|原因：/);
 
-console.log('notify_sync_issue: webhook and marketing alerts use business-language copy while sync alerts retain diagnostics');
+const sourceMismatchText = buildSyncIssueMessage({
+  isCloudWatchdog: true,
+  title: 'SHEIN 同步异常提醒：2026-07-30 watchdog',
+  message: '云端源码不一致：commitMatch=true dirty=3 hidden=0 missing=0',
+  logFile: '/srv/shein-bi/logs/cloud-watchdog/watchdog-20260730085001.json',
+  now,
+});
+assert.match(sourceMismatchText, /^⚠️ BI 服务器上有未发布的程序改动/m);
+assert.match(sourceMismatchText, /数据抓取没有失败，BI 当前仍可使用/);
+assert.match(sourceMismatchText, /3 项未提交改动/);
+assert.match(sourceMismatchText, /下次发布或重启时被覆盖/);
+assert.match(sourceMismatchText, /维护日志：/);
+assert.doesNotMatch(sourceMismatchText, /commitMatch=true|dirty=3|处理原则：已成功店铺|原因：云端源码/);
+
+const coverageText = buildSyncIssueMessage({
+  isCloudWatchdog: true,
+  message: 'BI 覆盖不足：SHEIN 销售日报 覆盖不足：1 天、2 个店铺日缺口；2026-07-24 缺 LQ,QY',
+  now,
+});
+assert.match(coverageText, /部分店铺的数据还没有收齐/);
+assert.match(coverageText, /2026-07-24 缺 LQ,QY/);
+assert.doesNotMatch(coverageText, /处理原则：|commitMatch|dirty=/);
+
+console.log('notify_sync_issue: webhook, marketing, sync and watchdog alerts use business-language copy');

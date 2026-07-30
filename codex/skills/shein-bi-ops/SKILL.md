@@ -52,6 +52,27 @@ Then inspect `$result`, calculate/filter its structured `data` in the **current 
 - If direct cloud access fails, report the exact access/query error. Do not hide the failure by calling `ask` or inventing a result.
 - Use the managed CLI for controlled preflight and authorized business operations; verify final facts and write results directly from the underlying database/OpenAPI/readback.
 
+## Structured write operations
+
+For partner/operator write requests, the current local Codex must understand the request itself and call `operate` with an explicit operation, store, product and structured parameters. Do **not** send the request to `chat`, the cloud Codex intent planner, or a keyword classifier.
+
+Examples:
+
+```powershell
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" operate --operation update_inventory --store DX --product PA4-6L --inventory 30 --text '<the user request verbatim>'
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" operate --operation update_product_price --store DX --product sv123 --product-price 99 --text '<the user request verbatim>'
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" operate --operation retire_link --store DX --product sv123 --text '<the user request verbatim>'
+```
+
+Supported structured operations are `copy_product_draft`, `activate_link`, `retire_link`, `update_inventory`, `update_supply_price`, `update_product_price`, `update_title`, `update_images`, and `certificate_review`.
+
+- `operate` creates the structured task and performs the first preflight. It returns `aiInvoked=false` and never performs the final SHEIN write.
+- The server authorizes business writes from the logged-in BI account's `writeStores`. Store scope cannot be expanded by CLI arguments.
+- `safeWriteOperations` remains the platform capability switch. Dry-run/preflight, payload lock, explicit user confirmation, Webhook gate, idempotency, audit and post-write readback remain mandatory.
+- After the user explicitly confirms the displayed plan, call `execute --task-id <id> --confirm SHEIN_OPENAPI_SUBMIT`.
+- If a required structured parameter is missing or ambiguous, ask only for that business value. Do not fall back to cloud chat or invent a value.
+- Owner knowledge is a separate permission domain. Partner/operator accounts may consume the active owner rules but may not publish, modify, replace or sync them. Only an account/device with `knowledgePublisher=true` can publish owner rules; store write access, including all-store access, never grants that permission.
+
 ## Authority and evidence
 
 Apply this precedence without improvising:

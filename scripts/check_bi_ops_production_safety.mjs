@@ -244,73 +244,33 @@ function auditConfig({safeWrite, whitelist, knownStores, tracked, openapiFile, w
   }
 
   if (!safeWrite.enabled) {
-    notes.push('safeWriteOperations.enabled=false；真实写第一层总闸门关闭。');
-    if (whitelist.enabled) warnings.push('真实写试点白名单已启用，但总闸门关闭；当前不会真实提交，建议保持两者一致。');
+    notes.push('safeWriteOperations.enabled=false；平台动作真实写总闸门关闭。');
   } else {
     if (!safeWrite.requireDryRun) errors.push('safeWriteOperations.requireDryRun=false；真实写必须保留 dry-run payload 锁定。');
     if (!safeWrite.allowedStores.length) errors.push('safeWriteOperations.allowedStores 为空；启用真实写时必须明确店铺。');
-    if (safeWrite.allowedStores.includes('*')) errors.push('safeWriteOperations.allowedStores 不能使用 *，试点必须列出具体店铺。');
+    if (safeWrite.allowedStores.includes('*')) errors.push('safeWriteOperations.allowedStores 不能使用 *，必须列出具体店铺。');
     const unknownSafeStores = safeWrite.allowedStores.filter(store => store !== '*' && knownStores.size && !knownStores.has(store));
     if (unknownSafeStores.length) errors.push(`safeWriteOperations.allowedStores 包含未知店铺：${unknownSafeStores.join(',')}`);
     if (!safeWrite.allowedOperations.length) errors.push('safeWriteOperations.allowedOperations 为空；启用真实写时必须明确动作。');
-    if (safeWrite.allowedOperations.includes('*')) errors.push('safeWriteOperations.allowedOperations 不能使用 *，试点必须列出具体动作。');
+    if (safeWrite.allowedOperations.includes('*')) errors.push('safeWriteOperations.allowedOperations 不能使用 *，必须列出具体动作。');
     const unsupportedSafeOps = safeWrite.allowedOperations.filter(op => !ALLOWED_REAL_SUBMIT_OPERATIONS.has(op));
     if (unsupportedSafeOps.length) errors.push(`safeWriteOperations.allowedOperations 包含尚未实现真实提交适配器的动作：${unsupportedSafeOps.join(',')}`);
-
-    if (!whitelist.enabled) errors.push('safeWriteOperations 已开启，但真实写试点白名单 enabled=false。');
-    if (whitelist.enabled && !whitelist.enabledRules.length) errors.push('真实写试点白名单已开启，但没有 enabled=true 且 realSubmit=true 的有效规则。');
   }
 
-  for (const rule of whitelist.enabledRules) {
-    if (!rule.stores.length) errors.push(`白名单规则 ${rule.id} 未明确 stores。`);
-    if (rule.stores.includes('*')) errors.push(`白名单规则 ${rule.id} 不能使用 stores=*。`);
-    const unknownRuleStores = rule.stores.filter(store => knownStores.size && !knownStores.has(store));
-    if (unknownRuleStores.length) errors.push(`白名单规则 ${rule.id} 包含未知店铺：${unknownRuleStores.join(',')}`);
-    if (!rule.operations.length) errors.push(`白名单规则 ${rule.id} 未明确 operations。`);
-    if (rule.operations.includes('*')) errors.push(`白名单规则 ${rule.id} 不能使用 operations=*。`);
-    const unsupportedRuleOps = rule.operations.filter(op => !ALLOWED_REAL_SUBMIT_OPERATIONS.has(op));
-    if (unsupportedRuleOps.length) errors.push(`白名单规则 ${rule.id} 包含尚未实现真实提交适配器的动作：${unsupportedRuleOps.join(',')}`);
-    if (!rule.users.length && !rule.ownerKeys.length) {
-      errors.push(`白名单规则 ${rule.id} 缺少 allowedUsers/allowedOwnerKeys；不能只靠角色泛放真实写。`);
-    }
-    if (rule.roles.includes('*')) errors.push(`白名单规则 ${rule.id} 不能使用 allowedRoles=*。`);
-    if (safeWrite.enabled) {
-      for (const store of rule.stores) {
-        if (!hasToken(safeWrite.allowedStores, store)) errors.push(`白名单规则 ${rule.id} 的店铺 ${store} 不在 safeWriteOperations.allowedStores 内。`);
-      }
-      for (const op of rule.operations) {
-        if (!hasToken(safeWrite.allowedOperations, op)) errors.push(`白名单规则 ${rule.id} 的动作 ${op} 不在 safeWriteOperations.allowedOperations 内。`);
-      }
-    }
-  }
-
-  if (safeWrite.enabled && whitelist.enabledRules.length) {
-    for (const store of safeWrite.allowedStores.filter(x => x !== '*')) {
-      const covered = whitelist.enabledRules.some(rule => rule.stores.includes(store));
-      if (!covered) errors.push(`safeWriteOperations.allowedStores 包含 ${store}，但没有有效白名单规则覆盖该店。`);
-    }
-    for (const op of safeWrite.allowedOperations.filter(x => x !== '*')) {
-      const covered = whitelist.enabledRules.some(rule => rule.operations.includes(op));
-      if (!covered) errors.push(`safeWriteOperations.allowedOperations 包含 ${op}，但没有有效白名单规则覆盖该动作。`);
-    }
+  if (whitelist.enabled || whitelist.enabledRules.length) {
+    notes.push('旧 bi_ops_write_whitelist 配置仍存在，但已退出人员授权链路；人员权限只认 BI 账号 writeStores。');
   }
 
   for (const store of requireStores) {
-    const matched = whitelist.enabledRules.some(rule => rule.stores.includes(store));
-    if (!matched) errors.push(`--require-store ${store} 未命中任何有效真实写白名单规则。`);
+    if (!hasToken(safeWrite.allowedStores, store)) errors.push(`--require-store ${store} 未进入 safeWriteOperations.allowedStores。`);
   }
   for (const op of requireOperations) {
-    const matched = whitelist.enabledRules.some(rule => rule.operations.includes(op));
-    if (!matched) errors.push(`--require-operation ${op} 未命中任何有效真实写白名单规则。`);
+    if (!hasToken(safeWrite.allowedOperations, op)) errors.push(`--require-operation ${op} 未进入 safeWriteOperations.allowedOperations。`);
   }
-  for (const user of requireUsers) {
-    const matched = whitelist.enabledRules.some(rule => rule.users.includes(user));
-    if (!matched) errors.push(`--require-user ${user} 未命中任何有效真实写白名单规则。`);
-  }
+  if (requireUsers.length) warnings.push('--require-user 已废弃；人员权限请用 BI 账号 writeStores 和权限矩阵 smoke 验证。');
 
   let state = 'locked';
-  if (safeWrite.enabled && whitelist.enabledRules.length) state = 'pilot_ready';
-  else if (safeWrite.enabled || whitelist.enabled) state = 'incomplete';
+  if (safeWrite.enabled) state = 'pilot_ready';
   if (errors.length) state = 'unsafe';
 
   if (expect === 'locked' && state !== 'locked') errors.push(`期望 locked，但当前状态是 ${state}。`);
@@ -323,16 +283,16 @@ function auditConfig({safeWrite, whitelist, knownStores, tracked, openapiFile, w
     errors,
     warnings,
     notes,
-    pilotRules: whitelist.enabledRules.map(summarizeRule),
+    pilotRules: [],
   };
 }
 
 function printPretty(report) {
   console.log(`BI Ops 生产真实写安全检查：${report.ok ? '通过' : '未通过'} · state=${report.state}`);
   console.log(`OpenAPI 配置：${report.files.openapi.exists ? '存在' : '不存在'} · ${report.files.openapi.path}`);
-  console.log(`真实写白名单：${report.files.whitelist.exists ? '存在' : '不存在'} · ${report.files.whitelist.path}`);
+  console.log(`旧人员白名单（已退出授权）：${report.files.whitelist.exists ? '存在' : '不存在'} · ${report.files.whitelist.path}`);
   console.log(`safeWrite：enabled=${report.safeWrite.enabled} requireDryRun=${report.safeWrite.requireDryRun} stores=${report.safeWrite.allowedStores.join(',') || '-'} operations=${report.safeWrite.allowedOperations.join(',') || '-'}`);
-  console.log(`whitelist：enabled=${report.whitelist.enabled} enabledRules=${report.whitelist.enabledRuleCount}/${report.whitelist.ruleCount}`);
+  console.log('人员权限：按 BI 账号 writeStores 校验');
   if (report.pilotRules.length) {
     for (const rule of report.pilotRules) {
       console.log(`- rule ${rule.id}: stores=${rule.stores.join(',')} ops=${rule.operations.join(',')} users=${rule.users.join(',') || '-'} ownerKeys=${rule.ownerKeys.join(',') || '-'} roles=${rule.roles.join(',') || '-'}`);
@@ -389,8 +349,8 @@ async function main() {
     errors: audit.errors,
     nextStep: audit.ok
       ? (audit.state === 'pilot_ready'
-        ? '可以进入小范围真实写试点：先 dry-run，确认 payload hash、任务状态和确认文本，再执行并回读。'
-        : '当前真实写保持锁定；如需试点，先准备窄范围 safeWriteOperations 和人+店+动作白名单。')
+        ? '平台动作总闸门已通过：仍需账号 writeStores、系统检查快照、确认、审计和回读。'
+        : '当前真实写保持锁定；如需开放动作，先准备明确的 safeWriteOperations 店铺与动作范围。')
       : '不要启动或重启真实写试点；先修复 errors，再重新运行本检查。',
   };
   if (args.json) console.log(JSON.stringify(report, null, 2));

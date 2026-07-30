@@ -21,12 +21,12 @@
 
 - 2026-07-26 起，19 店生产凭据统一挂在 DL 半托 App 下；每个店铺仍使用自己的 OpenKey/secretKey，不能跨店复制。切换后只读探测为 19/19，受控写前检为 19/19。
 - 19 店官方 OpenAPI 授权、云端白名单、只读探针和脱敏能力总账已完成；销售、退货退款、商品/链接基础资料仍写 `fact.openapi_*` / `mart.openapi_*_reconciliation` 隔离层，不直接覆盖生产事实源。
-- 自动化运营受控写适配器已接入 `copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。真实提交必须走 BI 账号写权限、`safeWriteOperations`、真实写白名单、人 + 店 + 动作、dry-run `payloadHash`、任务 `waiting_review`、确认和回读/审计。
+- 自动化运营受控写适配器已接入 `copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。真实提交必须走 BI 账号 `writeStores`、`safeWriteOperations` 动作总闸门、dry-run `payloadHash`、任务 `waiting_review`、确认和回读/审计。
 - `copy_product_draft` 已使用 OpenAPI 商品详情 / `spu-info` mapper 还原类目、属性、图片、SKU、供货价、库存和尺寸重量等关键发布字段；强指纹回读未命中时只能人工核销，不能用平台 SKU、源 SKC 或货号文本弱匹配自动判完成。
 - 新上品、复制上品、补链接等从未上过架的新链接默认 `shelf_way=2`，并写入约十年后的 `hope_on_sale_date`；短期内不能自动上架。维护已有链接的 `activate_link` / `retire_link` 才按用户指令改变现有链接状态。
 - TZ/JSH/TZZ/XC 等店铺身份校验允许静态 `merchantId` fallback，但只能在配置真相匹配且无 GS 账号冲突时使用；不得运行时自动回填或放宽 `account_mismatch`。
-- 网页端最终提交不再显示固定确认框；用户在同一聊天里说“可以执行 / 提交吧 / 照做”等自然语言，服务端在唯一当前事项、资料检查通过、权限和白名单命中时内部映射为安全码 `SHEIN_OPENAPI_SUBMIT`。CLI 和脚本仍必须显式传安全码。
-- 当前 release gate 覆盖前端确认/反馈、OpenAPI 商品详情 mapper、店铺身份 merchantId fallback、权限矩阵、CLI flow、真实写白名单作用域、生产安全、复制上品成功/弱回读和维护写执行器 smoke。
+- 网页端最终提交不再显示固定确认框；用户在同一聊天里说“可以执行 / 提交吧 / 照做”等自然语言，服务端在唯一当前事项、资料检查通过、账号店铺写权限和动作总闸门命中时内部映射为安全码 `SHEIN_OPENAPI_SUBMIT`。CLI 和脚本仍必须显式传安全码。
+- 当前 release gate 覆盖前端确认/反馈、OpenAPI 商品详情 mapper、店铺身份 merchantId fallback、权限矩阵、CLI flow、账号 `writeStores` 作用域、生产安全、复制上品成功/弱回读和维护写执行器 smoke。
 - 发版门禁已纳入下架候选策略/CSV 构建/货号修复 payload 三个 smoke 测试。
 
 ## 应用创建建议
@@ -41,7 +41,7 @@
 - 库存管理：查询和调整库存。
 - 财务管理：收入账单、对账单。
 
-读数据 / 对账 / 入仓已形成 19 店隔离并行层；价格、库存、上下架、复制上品、标题/图片、证书等写操作必须走自动化运营任务池，不得绕过 `safeWriteOperations`、真实写白名单、dry-run `payloadHash`、确认、回读和审计。
+读数据 / 对账 / 入仓已形成 19 店隔离并行层；价格、库存、上下架、复制上品、标题/图片、证书等写操作必须走自动化运营任务池，不得绕过 `safeWriteOperations`、账号店铺写权限、dry-run `payloadHash`、确认、回读和审计。
 
 ## 授权与密钥流程
 
@@ -212,7 +212,7 @@ node scripts/load_bi_warehouse.mjs --sales-dir outputs/shein_openapi_fetch --sal
   - `update_product_price`：`3001407 /open-api/openapi-business-backend/product/price/save`，同时写 `shopPrice` 与 `specialPrice`，避免未传 `specialPrice` 被平台解析为 `0`。
   - `update_title` / `update_images`：`3001810 /open-api/goods/product/partialEdit`。换图只接受完整 SHEIN 图片 JSON（`spu_name + image_info/skc_list/site_detail_image_info_list`），普通图片上传/外链转换需先取得 SHEIN 图片 URL。
   - `certificate_review`：证书要求查询、证书池创建/编辑、店铺证书池创建/编辑、SKC 绑定商品证书池等证书接口；执行器接受 `certificatePayloads[{endpoint,body}]`，endpoint 必须在证书允许列表内，提交后默认人工核销审核状态。
-- 执行边界：所有动作默认只 dry-run，生成并锁定 `payloadHash`；真实提交必须同时满足 BI 账号写权限、`safeWriteOperations`、真实写白名单、人 + 店 + 动作、任务处于 `waiting_review`、确认文本 `SHEIN_OPENAPI_SUBMIT`、提交后回读或人工核销。
+- 执行边界：所有动作默认只 dry-run，生成并锁定 `payloadHash`；真实提交必须同时满足 BI 账号 `writeStores`、`safeWriteOperations` 动作总闸门、任务处于 `waiting_review`、确认文本 `SHEIN_OPENAPI_SUBMIT`、提交后回读或人工核销。
 - 营销边界：公开 OpenAPI 目录当前未发现普通营销活动报名、限时折扣、优惠券报名写接口；`campaign_signup` / `flash_discount` 不列入官方 OpenAPI 可实现动作，继续走本地营销运营流程、价格栈守卫和人工确认。
 - 官方文档验证入口示例：
 
@@ -291,7 +291,7 @@ node scripts/link_ops_hl_openapi_executor.mjs --task-id <任务ID> --dry-run
 - 目标店铺包含 `HL`；
 - intent 包含 `copy_product_draft`；
 - 发布 payload 完整，包含类目、属性、站点、SKC 图片、销售属性、SKU、供货价/成本、库存、尺寸重量和上架方式等字段；
-- 命令显式传入 `--execute --confirm SHEIN_OPENAPI_SUBMIT`，且任务命中服务端 `safeWriteOperations` 总闸门和 `config/bi_ops_write_whitelist.local.json` 的“人 + 店 + 动作”真实写试点白名单。
+- 命令显式传入 `--execute --confirm SHEIN_OPENAPI_SUBMIT`，且任务通过服务端 `safeWriteOperations` 动作总闸门和当前 BI 账号 `writeStores` 店铺写权限。旧私有白名单不再参与人员授权。
 
 当前边界：执行器已经不再停留在“HL 没有权限 / 适配器未实现”，但 BI 现有链接表现数据不足以直接还原完整商品发布 payload。复制 DL 等非 OpenAPI 店铺的已上 SKC 到 HL 时，还需要“源商品详情抓取/映射器”把源后台详情转换成 `publishOrEdit` 所需 payload；否则执行器会阻断并说明缺失类目、属性、SKU、成本、库存和尺寸重量等资料。图片素材对 `copy_product_draft` 不再作为第一层硬阻断，执行器会先尝试从源商品快照复制，源快照不足时再阻断。
 

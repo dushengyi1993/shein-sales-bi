@@ -88,7 +88,8 @@ async function main() {
     });
     assert.equal(pilot.json.ok, true);
     assert.equal(pilot.json.state, 'pilot_ready');
-    assert.equal(pilot.json.pilotRules.length, 1);
+    assert.equal(pilot.json.pilotRules.length, 0);
+    assert.match((pilot.json.warnings || []).join('；'), /require-user 已废弃/);
 
     const wildcard = await runCase(tmp, 'wildcard', {
       openapi: {
@@ -166,7 +167,7 @@ async function main() {
     assert.equal(unsupportedAction.json.ok, false);
     assert.match(unsupportedAction.stdout, /尚未实现真实提交适配器/);
 
-    const rolesOnly = await runCase(tmp, 'roles-only', {
+    const legacyRolesOnlyIgnored = await runCase(tmp, 'roles-only', {
       openapi: {
         safeWriteOperations: {
           enabled: true,
@@ -186,10 +187,10 @@ async function main() {
           allowedRoles: ['owner'],
         }],
       },
-      expectCode: 1,
     });
-    assert.equal(rolesOnly.json.ok, false);
-    assert.match(rolesOnly.stdout, /不能只靠角色泛放真实写/);
+    assert.equal(legacyRolesOnlyIgnored.json.ok, true);
+    assert.equal(legacyRolesOnlyIgnored.json.state, 'pilot_ready');
+    assert.match((legacyRolesOnlyIgnored.json.notes || []).join('；'), /退出人员授权链路/);
 
     const safeBroaderThanWhitelist = await runCase(tmp, 'safe-broader', {
       openapi: {
@@ -211,14 +212,13 @@ async function main() {
           allowedUsers: ['owner_smoke'],
         }],
       },
-      expectCode: 1,
     });
-    assert.equal(safeBroaderThanWhitelist.json.ok, false);
-    assert.match(safeBroaderThanWhitelist.stdout, /没有有效白名单规则覆盖该店/);
+    assert.equal(safeBroaderThanWhitelist.json.ok, true);
+    assert.equal(safeBroaderThanWhitelist.json.state, 'pilot_ready');
 
     console.log(JSON.stringify({
       ok: true,
-      cases: ['locked', 'pilot', 'maintenance-pilot', 'wildcard', 'unsupported-action', 'roles-only', 'safe-broader'],
+      cases: ['locked', 'pilot', 'maintenance-pilot', 'wildcard', 'unsupported-action', 'legacy-whitelist-ignored', 'safe-scope-independent-of-legacy-whitelist'],
       tmpCleaned: true,
     }, null, 2));
   } finally {

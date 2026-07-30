@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import {
   checkSheinWebhookExternalWriteGate,
+  createLoopbackTestWebhookWriteGuard,
   runSheinWebhookExternalWriteGuarded,
 } from '../lib/shein_webhook_external_write_guard.mjs';
 
@@ -45,5 +46,20 @@ const second = await runSheinWebhookExternalWriteGuarded({
 assert.equal(second.ok, false);
 assert.equal(maintenanceRequests, 1, 'a gate closed during maintenance must prevent the next payload write');
 assert.equal(closes, 3, 'each self-created repository pool is closed');
+
+const testEnv = {NODE_ENV: 'test', SHEIN_BI_TEST_ALLOW_FAKE_WEBHOOK_GATE: '1'};
+assert.equal(
+  createLoopbackTestWebhookWriteGuard({baseUrl: 'https://openapi.sheincorp.com', env: testEnv}),
+  null,
+  'the fake gate must never apply to a production SHEIN host',
+);
+assert.equal(
+  createLoopbackTestWebhookWriteGuard({baseUrl: 'http://127.0.0.1:8799', env: {...testEnv, NODE_ENV: 'production'}}),
+  null,
+  'the fake gate must never apply outside NODE_ENV=test',
+);
+const fakeGuard = createLoopbackTestWebhookWriteGuard({baseUrl: 'http://127.0.0.1:8799', env: testEnv});
+assert.equal(typeof fakeGuard, 'function');
+assert.equal((await fakeGuard({writeStores: ['hl']})).testOnly, true);
 
 console.log('shein_webhook_external_write_guard: immediate fail-closed publish and per-payload maintenance checks passed');

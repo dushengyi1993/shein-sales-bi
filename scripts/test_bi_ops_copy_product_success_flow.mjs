@@ -608,6 +608,8 @@ const portal = spawn(process.execPath, [
   cwd: ROOT,
   env: {
     ...process.env,
+    NODE_ENV: 'test',
+    SHEIN_BI_TEST_ALLOW_FAKE_WEBHOOK_GATE: '1',
     SHEIN_BI_CORE_WARMUP_DISABLED: '1',
     SHEIN_OPENAPI_CONFIG_FILE: openapiConfigFile,
     SHEIN_BI_OPS_WRITE_WHITELIST_FILE: whitelistFile,

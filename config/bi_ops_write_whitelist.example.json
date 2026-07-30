@@ -1,4 +1,5 @@
 {
+  "_deprecated": "2026-07-30 起真实写人员权限直接使用 BI 账号 writeStores。本文件仅保留旧部署兼容，不再参与执行授权；负责人规则发布权限仍由 knowledgePublisher 独立控制。",
   "enabled": false,
   "rules": [
     {

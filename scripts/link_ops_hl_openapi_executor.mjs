@@ -27,7 +27,10 @@ import {
   taskHasUnboundImageAssets,
 } from '../lib/link_ops_publish_asset_binding.mjs';
 import {evaluateAdditionalDuplicatePublishOverride} from '../lib/link_ops_duplicate_publish_override.mjs';
-import {runSheinWebhookExternalWriteGuarded} from '../lib/shein_webhook_external_write_guard.mjs';
+import {
+  createLoopbackTestWebhookWriteGuard,
+  runSheinWebhookExternalWriteGuarded,
+} from '../lib/shein_webhook_external_write_guard.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CONFIG = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
@@ -3110,8 +3113,10 @@ async function main() {
   const readyForSubmit = blockers.length === 0 && Boolean(publishPayload);
   let publishResult = null;
   if (args.mode === 'execute' && readyForSubmit) {
+    const testWebhookGuard = createLoopbackTestWebhookWriteGuard({baseUrl: client.baseUrl});
     const guardedWrite = await runSheinWebhookExternalWriteGuarded({
       writeStores: [targetStore],
+      guard: testWebhookGuard || undefined,
       write: () => client.request('/open-api/goods/product/publishOrEdit', {
         method: 'POST',
         body: publishPayload,

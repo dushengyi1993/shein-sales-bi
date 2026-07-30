@@ -41,6 +41,6 @@
     "requireDryRun": true,
     "allowedOperations": [],
     "allowedStores": [],
-    "notes": "第一层物理总闸门：只控制哪些店铺+动作具备真实写适配器。即使这里开启，仍必须同时命中 config/bi_ops_write_whitelist.local.json 的人+店+动作试点白名单。"
+    "notes": "平台动作物理总闸门：只控制哪些店铺+动作具备可靠真实写适配器。人员权限以登录 BI 账号的 writeStores 为唯一事实源；仍必须完成 dry-run、任务快照锁定、用户确认、审计和回读。"
   }
 }

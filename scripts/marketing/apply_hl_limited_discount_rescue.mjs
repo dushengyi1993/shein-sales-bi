@@ -323,6 +323,7 @@ try {
       activityStock,
       activityNamePrefix,
       replaceActivityIds,
+      registrySource,
     } = __arg;
 
     const headers = {'content-type': 'application/json;charset=UTF-8'};
@@ -856,7 +857,7 @@ try {
       ));
     });
     result.manualSpecialProtection = {
-      registrySource: manualRegistry.sourcePath,
+      registrySource,
       protectedTargetCount: targetRows.filter(row => row.manualSpecialLimitedDiscount).length,
       alreadyCoveredExact: manualSpecialAlreadyCovered,
     };
@@ -1029,6 +1030,7 @@ try {
       startDelayMinutes: args.startDelayMinutes,
       activityNamePrefix: effectiveActivityNamePrefix,
       replaceActivityIds: args.replaceActivityIds,
+      registrySource: manualRegistry.sourcePath,
     },
   );
 
