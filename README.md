@@ -85,7 +85,8 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 
 | 主题 | 文档 |
 |---|---|
-| 2026.07.30.5 当前正式发布 | `docs/bi-ops-release-2026-07-30-5.md` |
+| 2026.07.30.6 当前正式发布 | `docs/bi-ops-release-2026-07-30-6.md` |
+| 2026.07.30.5 上一正式发布 | `docs/bi-ops-release-2026-07-30-5.md` |
 | 2026.07.30 半托19店独立应用切回 | `docs/openapi-per-store-production-cutback-2026-07-30.md` |
 | 2026.07.30.4 上一正式发布 | `docs/bi-ops-release-2026-07-30-4.md` |
 | 2026.07.30.3 共享商品详情额度与持续门禁 | `docs/bi-ops-release-2026-07-30-3.md` |

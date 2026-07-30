@@ -40,6 +40,7 @@ const TIMER_NAMES = [
   'shein-bi-cloud-order-closure.timer',
   'shein-bi-cloud-marketing-live-guard.timer',
   'shein-bi-cloud-marketing-repair.timer',
+  'shein-bi-cloud-daily-ops-group-digest.timer',
   'shein-bi-cloud-browser-cleanup.timer',
   'shein-bi-cloud-disk-maintenance.timer',
   'shein-bi-cloud-watchdog.timer',

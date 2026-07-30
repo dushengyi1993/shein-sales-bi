@@ -1,0 +1,10 @@
+[Unit]
+Description=Send daily SHEIN operations inspection digest at 20:30
+
+[Timer]
+OnCalendar=*-*-* 20:30:00
+Persistent=true
+Unit=shein-bi-cloud-daily-ops-group-digest.service
+
+[Install]
+WantedBy=timers.target

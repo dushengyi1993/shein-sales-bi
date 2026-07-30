@@ -4,7 +4,7 @@
 
 ## 当前启用集与条件启用集（2026-07-30）
 
-**当前生产应启用**：`shein-bi-portal.service`、`shein-bi-webhook.service`，以及 `shein-bi-cloud-morning-chain`、`shein-bi-cloud-yesterday`、`shein-bi-db-backup`、`shein-bi-cloud-order-closure`、`shein-bi-cloud-browser-cleanup`、`shein-bi-cloud-disk-maintenance`、`shein-bi-cloud-marketing-live-guard`、`shein-bi-cloud-marketing-repair`、`shein-bi-cloud-watchdog`、`shein-bi-cloud-et-forwarder`、`shein-bi-cloud-et-storage-fee`、`shein-bi-cloud-session-manager` 的 timer。`daily-refresh` 由晨间链路触发，没有独立 timer。
+**当前生产应启用**：`shein-bi-portal.service`、`shein-bi-webhook.service`，以及 `shein-bi-cloud-morning-chain`、`shein-bi-cloud-yesterday`、`shein-bi-db-backup`、`shein-bi-cloud-order-closure`、`shein-bi-cloud-browser-cleanup`、`shein-bi-cloud-disk-maintenance`、`shein-bi-cloud-marketing-live-guard`、`shein-bi-cloud-marketing-repair`、`shein-bi-cloud-daily-ops-group-digest`、`shein-bi-cloud-watchdog`、`shein-bi-cloud-et-forwarder`、`shein-bi-cloud-et-storage-fee`、`shein-bi-cloud-session-manager` 的 timer。`daily-refresh` 由晨间链路触发，没有独立 timer。
 
 **条件启用**：`shein-bi-cloud-et-forwarder.timer`、`shein-bi-cloud-et-storage-fee.timer`、`shein-bi-cloud-session-manager.timer` 只有在服务器本地 ET/店铺授权和对应 profile 已验收时才启用；当前生产已验收时属于上面的启用集。`shein-bi-cloud-today.service` 只作人工灾备，不安装 timer。`shein-bi-lark-sales-qa.service` 和自动飞书日报保持 `disabled + inactive`。
 
@@ -30,6 +30,7 @@ Linux 生产健康只以 systemd、watchdog、Portal health 和云端数据审�
 - `shein-bi-cloud-disk-maintenance.timer`：每天 `04:30`（随机延迟最多 10 分钟）执行低优先级磁盘维护。抓数原始产物本地保留 30 天，旧文件只有在 COS 归档、成员清单和 SHA256 校验完成后才删除；临时文件保留 7 天。由于 ET 与抓数产物存在经过审计的 root/sheinops 混合属主，该 service 以 root 读取和删除明确白名单路径，但不启动浏览器、不加载登录页，也不写业务数据。浏览器 profile 只有根盘达到 75% 且没有有效浏览器租约或 Chrome 进程时才清可再生缓存，永不删除 Cookie、Local Storage、IndexedDB 等登录/持久状态。journald 由 `90-shein-bi-journald-disk-cap.conf` 限制为最多 1GB，并至少给根盘保留 5GB。
 - `shein-bi-cloud-marketing-live-guard.service`：`10:30/13:30/16:30` 提供每日巡检及失败重试窗口；当天首次成功后后续窗口退出。该服务以 session HTTP 一次读取 19 店普通活动、15% 券 active 集合与当前/未来活动价，生成精确 manifest/hash 与 repair queue；不启动浏览器、不申请浏览器租约、不执行清理、不持有写授权。`2026-07-18` 生产实测 `157s`、19/19 店、1516 行、Chrome `0 -> 0`。
 - `shein-bi-cloud-marketing-repair.timer`：`10:50/12:50/14:50/16:50/18:50` 消费 guard 的精确队列，`19:30` 做当天最后一次续跑与回读；每轮总预算最多 8 个活动组。父 worker 取得浏览器租约后把 task/runId 传给子批次，只关闭本任务拥有的店铺；每组 preflight、精确 work hash、旧活动快照、事务 journal、失败补偿和最终全店 readback 缺一不可。
+- `shein-bi-cloud-daily-ops-group-digest.timer`：每天 `20:30` 把当天营销巡检结论、自动修复状态、商品全量对账和 BI 体检摘要发送到团队运营群，并附上结论 Markdown 与营销巡检人话版报告。`config/lark_report.json` 中 `recipientChatId` 优先于个人 `recipientUserId`，群 ID 不进 GitHub。
 - guard 与 repair 都通过 `SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY=/srv/shein-bi/runtime/marketing_manual_limited_discount_overrides.json` 读取生产可变登记；不得再让 timer 改写仓库 `config/` 下的种子文件。
 - `shein-bi-cloud-watchdog.timer`：每小时只读巡检。它可以用后续完整 19 店扫描证据收口孤立的历史扫描 warning，但必须保留原日更状态并在报告写出 recovery；其它 warning 或不完整证据仍告警。
 
@@ -70,8 +71,8 @@ systemctl daemon-reload
 # 在某些 systemd 状态下这会立即触发 timer 关联服务，造成部署时销售、
 # ET、日更、登录态管家等任务并发。推荐先 enable，再逐个 start timer；
 # start timer 只启动计时器，不应手动 start 对应 service。
-systemctl enable shein-bi-portal.service shein-bi-webhook.service shein-bi-cloud-morning-chain.timer shein-bi-cloud-yesterday.timer shein-bi-db-backup.timer shein-bi-cloud-order-closure.timer shein-bi-cloud-browser-cleanup.timer shein-bi-cloud-disk-maintenance.timer shein-bi-cloud-marketing-live-guard.timer shein-bi-cloud-marketing-repair.timer
-systemctl start shein-bi-portal.service shein-bi-webhook.service shein-bi-cloud-morning-chain.timer shein-bi-cloud-yesterday.timer shein-bi-db-backup.timer shein-bi-cloud-order-closure.timer shein-bi-cloud-browser-cleanup.timer shein-bi-cloud-disk-maintenance.timer shein-bi-cloud-marketing-live-guard.timer shein-bi-cloud-marketing-repair.timer
+systemctl enable shein-bi-portal.service shein-bi-webhook.service shein-bi-cloud-morning-chain.timer shein-bi-cloud-yesterday.timer shein-bi-db-backup.timer shein-bi-cloud-order-closure.timer shein-bi-cloud-browser-cleanup.timer shein-bi-cloud-disk-maintenance.timer shein-bi-cloud-marketing-live-guard.timer shein-bi-cloud-marketing-repair.timer shein-bi-cloud-daily-ops-group-digest.timer
+systemctl start shein-bi-portal.service shein-bi-webhook.service shein-bi-cloud-morning-chain.timer shein-bi-cloud-yesterday.timer shein-bi-db-backup.timer shein-bi-cloud-order-closure.timer shein-bi-cloud-browser-cleanup.timer shein-bi-cloud-disk-maintenance.timer shein-bi-cloud-marketing-live-guard.timer shein-bi-cloud-marketing-repair.timer shein-bi-cloud-daily-ops-group-digest.timer
 # 飞书问数保持暂停；以下两条必须分别返回 disabled / inactive：
 systemctl is-enabled shein-bi-lark-sales-qa.service || true
 systemctl is-active shein-bi-lark-sales-qa.service || true

@@ -14,6 +14,7 @@ import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import {normalizeGoodsSn} from '../lib/product_sku_normalizer.mjs';
 import {isValidSalesGoodsRow, salesAmountSar, salesQuantity, summarizeSalesGoodsRows} from '../lib/shein_sales_validity.mjs';
+import {maskLarkDeliveryTarget, resolveLarkDeliveryTarget} from '../lib/lark_delivery_target.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
@@ -56,6 +57,7 @@ function parseArgs(argv) {
     else if (a === '--groups') args.groups = argv[++i].split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
     else if (a === '--date') args.today = argv[++i];
     else if (a === '--recipient-user-id') args.recipientUserId = argv[++i];
+    else if (a === '--recipient-chat-id') args.recipientChatId = argv[++i];
     else if (a === '--as') args.as = argv[++i];
     else if (a === '--idempotency-key') args.idempotencyKey = argv[++i];
     else if (a === '--sync-today') args.syncToday = true;
@@ -544,9 +546,13 @@ const yesterday = (() => {
   return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
 })();
 
-const recipientUserId = args.recipientUserId || reportConfig.recipientUserId;
-if ((args.send || args.dryRun) && !recipientUserId) {
-  throw new Error('Missing recipient user id. Set config/lark_report.json recipientUserId or pass --recipient-user-id.');
+const deliveryTarget = resolveLarkDeliveryTarget({
+  config: reportConfig,
+  chatId: args.recipientChatId,
+  userId: args.recipientUserId,
+});
+if ((args.send || args.dryRun) && !deliveryTarget) {
+  throw new Error('Missing Feishu recipient. Set recipientChatId/recipientUserId in config/lark_report.json.');
 }
 
 let syncResult = null;
@@ -624,7 +630,7 @@ if (args.send || args.dryRun) {
   const cmd = [
     'im', '+messages-send',
     '--as', args.as,
-    '--user-id', recipientUserId,
+    ...deliveryTarget.cliArgs,
     '--text', message,
     '--idempotency-key', args.idempotencyKey || `sr-${today.replaceAll('-', '')}-${groupLabel.replaceAll('/', '')}`,
   ];
@@ -635,7 +641,7 @@ if (args.send || args.dryRun) {
     const imageCmd = [
       'im', '+messages-send',
       '--as', args.as,
-      '--user-id', recipientUserId,
+      ...deliveryTarget.cliArgs,
       '--image', relImage,
       '--idempotency-key', `${args.idempotencyKey || `sr-${today.replaceAll('-', '')}-${groupLabel.replaceAll('/', '')}`}-img`,
     ];
@@ -648,7 +654,7 @@ if (args.send || args.dryRun) {
     const imageCmd = [
       'im', '+messages-send',
       '--as', args.as,
-      '--user-id', recipientUserId,
+      ...deliveryTarget.cliArgs,
       '--image', relImage,
       '--idempotency-key', `${args.idempotencyKey || `sr-${today.replaceAll('-', '')}-${groupLabel.replaceAll('/', '')}`}-month-${month.replaceAll('-', '')}-img`,
     ];
@@ -669,7 +675,7 @@ if (args.send && !feishuBasePaused && state.baseToken && state.tables?.['飞书�
     todaySar: todayData.totalSar,
     status: '成功',
     summary: message,
-    note: `recipient=${recipientUserId}; identity=${args.as}${syncWarning ? '; syncWarning=true' : ''}`,
+    note: `recipient=${maskLarkDeliveryTarget(deliveryTarget)}; identity=${args.as}${syncWarning ? '; syncWarning=true' : ''}`,
   });
 }
 
@@ -680,7 +686,7 @@ console.log(JSON.stringify({
   reportGroups,
   today,
   yesterday,
-  recipientUserId: recipientUserId ? `${recipientUserId.slice(0, 6)}...` : null,
+  recipient: maskLarkDeliveryTarget(deliveryTarget),
   syncToday: args.syncToday,
   feishuBasePaused,
   syncOk: syncResult ? syncResult.ok : null,

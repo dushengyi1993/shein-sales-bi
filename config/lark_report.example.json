@@ -1,6 +1,8 @@
 ﻿{
+  "recipientChatId": "oc_xxx_replace_with_feishu_chat_id",
+  "recipientChatNote": "Preferred target for BI alerts, Webhook P0 notifications, daily reports and inspection documents.",
   "recipientUserId": "ou_xxx_replace_with_feishu_open_id",
-  "recipientNote": "Feishu/Lark recipient open_id for daily report. Keep the real value in config/lark_report.json, which is ignored by git.",
+  "recipientNote": "Optional direct-message fallback. recipientChatId takes precedence. Keep real IDs in ignored config/lark_report.json.",
   "defaultIdentity": "bot",
   "identityNote": "Use bot by default. If switching to user identity, grant the required Feishu message permission first.",
   "reportGroups": ["ALL"],

@@ -88,6 +88,8 @@ const tests = [
   'scripts/test_shein_webhook_order_return_sync.mjs',
   'scripts/test_shein_webhook_service.mjs',
   'scripts/test_notify_sync_issue.mjs',
+  'scripts/test_lark_delivery_target.mjs',
+  'scripts/test_daily_ops_group_digest.mjs',
   'scripts/test_shein_webhook_portal_contract.mjs',
   'scripts/test_webhook_primary_sales_migration.mjs',
   'scripts/test_bi_live_events_bridge.mjs',

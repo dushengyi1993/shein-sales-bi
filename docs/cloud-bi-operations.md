@@ -89,6 +89,7 @@
 | `shein-bi-cloud-disk-maintenance.timer` | 每周日 `01:35`，随机延迟不超过 10 分钟 | 旧抓数校验归档到 COS、清理 7 天前临时文件；根盘达到 80% 且无浏览器任务时才清 profile 可再生缓存 |
 
 | `shein-bi-cloud-watchdog.timer` | 每小时 | 检查云端服务、timer 和 BI 数据新鲜度，异常时发飞书提醒 |
+| `shein-bi-cloud-daily-ops-group-digest.timer` | 北京时间 `20:30` | 向团队运营群发送每日巡检结论，并附结论与营销巡检报告 |
 
 | `shein-bi-lark-sales-qa.service` | **主动暂停** | 飞书只读问数机器人代码与 unit 保留，但生产必须保持 `disabled + inactive`；网页问数与 CLI 不依赖它 |
 
@@ -171,7 +172,7 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 
 - 统一日更补采云端入口：`scripts/cloud_daily_refresh.sh yesterday`；生产由晨间链路启动 `shein-bi-cloud-daily-refresh.service`。它内部调用 `scripts/cloud_link_business_sync.sh` 做链接/业务域、SBN 营销概览等慢变域日更，并串行执行 `scripts/cloud_rtv_verify.sh`；不再重复 MBRs 全店价格栈扫描，该 live 证据只由独立 marketing guard 读取。旧 `scripts/cloud_openapi_hl_reconciliation.sh` 仅保留为显式手动诊断入口。链接/业务域带全店日指标全 0 不入仓守卫。该入口不应在白天手动全量补跑 19 店；若必须补跑，先确认当前没有 ET/门户生成/营销写入任务，并检查可用内存。
 
-- 云端异常通知入口：`scripts/cloud_ops_watchdog.mjs`。对于内容精确等于 `marketing price scan failed` 的单一日更 warning，watchdog 只有在后续 guard 状态引用一份比 warning 更新、24 小时内、`ok=true` / `partial=false`、与当前 enabled store 集合完全一致且行数自洽的扫描时，才在 `recoveries` 中记录恢复并停止重复告警。原 `daily-refresh-last.json` 和历史日志必须保留；混合 warning、过期/未来时间、路径越界、缺店、重复店、失败店或残缺 payload 一律不能自动变绿。
+- 云端异常通知入口：`scripts/cloud_ops_watchdog.mjs`。`config/lark_report.json` 配置 `recipientChatId` 后，watchdog、同步异常、营销提醒和 Webhook P0 都统一发送到团队运营群，不再向负责人个人私聊；个人 `recipientUserId` 只保留为显式移除群目标后的灾备。对于内容精确等于 `marketing price scan failed` 的单一日更 warning，watchdog 只有在后续 guard 状态引用一份比 warning 更新、24 小时内、`ok=true` / `partial=false`、与当前 enabled store 集合完全一致且行数自洽的扫描时，才在 `recoveries` 中记录恢复并停止重复告警。原 `daily-refresh-last.json` 和历史日志必须保留；混合 warning、过期/未来时间、路径越界、缺店、重复店、失败店或残缺 payload 一律不能自动变绿。
 
 - 云端覆盖审计入口：`scripts/audit_cloud_data_coverage.mjs`。最新日防漏用 `--expected-start range-start`，历史断档排查用 `--expected-start first-seen`；后者按每个店自己的首个有效日期之后查中间断档，避免把店铺尚未开通/尚未接入前的日期误判为缺抓。
 

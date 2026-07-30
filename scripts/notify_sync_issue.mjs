@@ -4,6 +4,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import crypto from 'node:crypto';
+import {maskLarkDeliveryTarget, resolveLarkDeliveryTarget} from '../lib/lark_delivery_target.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const REPORT_CONFIG_PATH = path.join(ROOT, 'config', 'lark_report.json');
@@ -116,7 +117,7 @@ async function main() {
   }
 
   const cfg = await readJson(REPORT_CONFIG_PATH, {});
-  const recipient = cfg.recipientUserId;
+  const target = resolveLarkDeliveryTarget({config: cfg});
   const identity = cfg.defaultIdentity || 'bot';
   const date = args.date || new Date().toISOString().slice(0, 10);
   const modeLabel = args.mode || 'sync';
@@ -139,8 +140,8 @@ async function main() {
     console.log(JSON.stringify({ok: true, dryRun: true, text, outFile}, null, 2));
     return;
   }
-  if (!recipient) {
-    console.log(JSON.stringify({ok: false, skipped: true, reason: 'missing recipientUserId', outFile}, null, 2));
+  if (!target) {
+    console.log(JSON.stringify({ok: false, skipped: true, reason: 'missing Feishu recipientChatId/recipientUserId', outFile}, null, 2));
     process.exitCode = 1;
     return;
   }
@@ -148,7 +149,7 @@ async function main() {
   const baseLarkArgs = [
     'im', '+messages-send',
     '--as', identity,
-    '--user-id', recipient,
+    ...target.cliArgs,
     '--text', text,
   ];
   const key = args.idempotencyKey || idempotencyKey([date, modeLabel, failed.join(','), loginRequired.join(','), args.message, stamp]);
@@ -165,6 +166,7 @@ async function main() {
     ok: res.ok,
     code: res.code,
     outFile,
+    target: maskLarkDeliveryTarget(target),
     idempotencyKey: key,
     fallbackTried,
     stdoutTail: res.stdout.slice(-1000),
