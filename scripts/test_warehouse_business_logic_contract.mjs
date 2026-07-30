@@ -219,6 +219,11 @@ assert.match(portalClient, /class="audit-reasons"/);
 assert.match(portalClient, /function returnSettlementKey\(r\)/);
 assert.match(portalClient, /function returnPendingRiskAmount\(r\)/);
 assert.match(portalClient, /pendingAmount:pending\.reduce\(\(a,r\)=>a\+returnPendingRiskAmount\(r\),0\)/);
+assert.match(
+  portalClient,
+  /if\(hasRisk\)return profitRiskAdjusted\(r\)\+firstNum\(r,\['rtv_recoverable_cost_sar'\]\)/,
+  'homepage RTV aggregation must use the displayed risk-adjusted profit plus recoverable cost without daily rounding drift',
+);
 assert.match(portalClient, /退款待落定 \$\{M2\(orderTop\.pendingAmount\)\} SAR/);
 assert.match(portalClient, /待决金额只作风险提示，不会提前冲减净销量或已落定利润/);
 assert.doesNotMatch(portalClient, /function salesReturnReconciliation\(s,orderSummary\)/,
