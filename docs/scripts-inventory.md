@@ -73,6 +73,10 @@
 
 
 
+- 发布验收：
+
+  - `check_release_source_state.mjs`：同时核对目标 commit、工作树、`skip-worktree` / `assume-unchanged` 和 tracked 文件完整性，避免云端出现 `git status` 假干净。
+
 - 销售/日报/看板：
 
   - `run_sales_sync_job.mjs`

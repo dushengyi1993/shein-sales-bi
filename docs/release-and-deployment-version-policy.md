@@ -47,7 +47,8 @@
 4. 应用 schema、systemd unit、服务重启和 section 预热。
 5. 验收：
    - `git rev-parse HEAD` 等于 release target SHA；
-   - `git status --porcelain --untracked-files=no` 为空；
+   - `node scripts/check_release_source_state.mjs --expected-commit <release SHA>` 通过；
+   - 不得用 `skip-worktree` / `assume-unchanged` 隐藏缺失或被改写的 tracked 文件；
    - CI 成功；
    - Portal health、关键 service/timer、数据库和业务读回通过。
 
@@ -65,12 +66,12 @@
 git status --short --branch
 git diff --check
 npm test
+node scripts/check_release_source_state.mjs --expected-commit HEAD
 gh run list --repo dushengyi1993/shein-sales-bi --limit 5
 
 # 云端
 cd /opt/shein-bi/app
-git rev-parse HEAD
-git status --porcelain --untracked-files=no
+node scripts/check_release_source_state.mjs --expected-commit 2026.07.30.2
 systemctl is-active shein-bi-portal.service shein-bi-webhook.service
 curl -fsS http://127.0.0.1:8787/api/health
 ```
