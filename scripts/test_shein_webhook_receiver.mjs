@@ -116,7 +116,7 @@ const officialFixtures = Object.freeze({
   '3000914': {severity: 'P3', fields: {returnId: 'ND67E08VAR', eventTime: '1706771656710'}},
   '3001503': {severity: 'P0', fields: {status: '1', authType: '1', supplierId: '22043644'}},
   '3001061': {severity: 'P0', fields: {availableLimit: 0, supplierId: '5511473', eventTime: '2593111773260075'}},
-  '3001104': {severity: 'P0', fields: {skc: 'sr25050899111321041', complianceRequired: '1', complianceMissing: '1', eventTime: '2025-05-08 11:23:08'}},
+  '3001104': {severity: 'P0', fields: {skc: 'sr25050899111321041', complianceTypeId: 3, complianceRequired: '1', complianceMissing: '1', eventTime: '2025-05-08 11:23:08'}},
   '3001461': {severity: 'P3', fields: {deliveryNo: 'GU2509025285251076', placeRequestId: '2509033332639749', businessId: '2509033332639749', eventTime: '1756879655633'}},
   '3001792': {severity: 'P3', fields: {skc: 'sc260414201529947197009', auditState: '2', status: '2', eventTime: '2026-06-02 21:46:25'}},
   '3001793': {severity: 'P3', fields: {skc: 'sc260414201529947197009', rrpEndEffectiveDate: '9999-12-31 23:59:59', status: 'ACTIVE'}},
@@ -181,6 +181,18 @@ test('normalizes order, return, authorization, quota, and compliance classificat
   assert.equal(classifyWebhookSeverity({normalizedEvent: normalizeWebhookBusinessEvent({eventCode: '3001061', payload: {quota: 0}})}).severity, 'P0');
   assert.equal(classifyWebhookSeverity({normalizedEvent: normalizeWebhookBusinessEvent({eventCode: '3001104', payload: {complianceStatus: 'EXPIRED'}})}).severity, 'P0');
   assert.equal(classifyWebhookSeverity({normalizedEvent: normalizeWebhookBusinessEvent({eventCode: '3001104', payload: {isRequired: 0, isMiss: 1}})}).severity, 'P3');
+  const inactiveCompliance = normalizeWebhookBusinessEvent({
+    eventCode: '3001104',
+    payload: {skc: 'SW-OLD', complianceTypeId: 3, isRequired: 1, isMiss: 1},
+  });
+  const inactiveClassification = classifyWebhookSeverity({normalizedEvent: {
+    ...inactiveCompliance,
+    productContextStatus: 'not_found',
+    productIdentityStatus: 'not_found',
+  }});
+  assert.equal(inactiveClassification.severity, 'P1');
+  assert.equal(inactiveClassification.notifyFeishu, false);
+  assert.equal(inactiveClassification.reason, 'required_compliance_for_inactive_product');
   assert.equal(classifyWebhookSeverity({normalizedEvent: normalizeWebhookBusinessEvent({eventCode: '3001903', payload: {skc_name: 'SKC-DELETE', status: 2}})}).reason, 'unexpected_product_removal');
 });
 test('keeps routine platform flow quiet while surfacing business-impacting changes', () => {

@@ -329,6 +329,108 @@ assert.equal(rrpExpiring.title, 'TZ 店：SK-999食品料理机建议零售价�
 assert.match(rrpExpiring.summary, /有效期至：2026-07-27 23:59/);
 assert.match(rrpExpiring.summary, /7 天内到期/);
 
+const complianceCopy = humanizeSheinWebhookEvent({
+  eventFamily: 'compliance',
+  storeKey: 'DX',
+  skc: 'sv260714225607244563190',
+  businessId: 'sv260714225607244563190',
+  complianceTypeId: 3,
+  eventTime: '2026-07-30 20:18:28',
+  productContext: {
+    supplierCode: 'SK-999食品料理机',
+    productName: 'SK-999食品料理机',
+    lastKnownShelfStatus: '已上架',
+    sales: {
+      units7d: 2,
+      grossSales7dSar: 420,
+      units30d: 5,
+      grossSales30dSar: 1050,
+      unitsLifetime: 8,
+      grossSalesLifetimeSar: 1680,
+      lastSaleDate: '2026-07-29',
+    },
+  },
+  productContextStatus: 'resolved',
+}, {severity: 'P0'});
+assert.equal(complianceCopy.title, 'DX 店：SK-999食品料理机：实拍图需要补充');
+assert.match(complianceCopy.summary, /货号：SK-999食品料理机/);
+assert.match(complianceCopy.summary, /链接：sv260714225607244563190/);
+assert.match(complianceCopy.summary, /缺失资料：商品实拍图/);
+assert.match(complianceCopy.summary, /当前状态：已上架/);
+assert.match(complianceCopy.summary, /近30天 5 件 \/ 1,050\.00 SAR/);
+assert.match(complianceCopy.summary, /失效时间：2026-07-30 20:18/);
+
+const complianceIdentityCalls = [];
+const complianceProcessor = createSheinWebhookEventProcessor({
+  webhookRepository: {
+    ...webhookRepository,
+    getProductBusinessContext: async () => null,
+  },
+  productAuditContextProvider: {
+    getProductIdentity: async input => {
+      complianceIdentityCalls.push(input);
+      if (input.skc === 'SW-OLD') return null;
+      return {
+        source: 'shein_product_search',
+        skc: input.skc,
+        supplierCode: 'SK-03038制冰机',
+        productName: 'SK-03038制冰机',
+        currentShelfStatus: '1',
+      };
+    },
+  },
+});
+const activeCompliance = await complianceProcessor.process({
+  ...base,
+  id: 301,
+  severity: {severity: 'P0', notifyFeishu: true},
+  normalized: {
+    eventFamily: 'compliance',
+    eventCode: '3001104',
+    storeKey: 'LQ',
+    skc: 'SKC-COMPLIANCE',
+    businessId: 'SKC-COMPLIANCE',
+    complianceTypeId: 1,
+    complianceRequired: '1',
+    complianceMissing: '1',
+    eventTime: '2026-07-30 20:18:28',
+  },
+  payload: {},
+});
+assert.equal(activeCompliance.normalized.productIdentityStatus, 'resolved');
+assert.equal(activeCompliance.title, 'LQ 店：SK-03038制冰机：欧盟责任人需要补充');
+assert.match(activeCompliance.summary, /货号：SK-03038制冰机/);
+assert.match(activeCompliance.summary, /缺失资料：欧盟责任人/);
+assert.match(activeCompliance.summary, /当前状态：已上架/);
+
+const inactiveCompliance = await complianceProcessor.process({
+  ...base,
+  id: 302,
+  severity: {severity: 'P1', notifyFeishu: false},
+  normalized: {
+    eventFamily: 'compliance',
+    eventCode: '3001104',
+    storeKey: 'DX',
+    skc: 'SW-OLD',
+    businessId: 'SW-OLD',
+    complianceTypeId: 3,
+    complianceRequired: '1',
+    complianceMissing: '1',
+    eventTime: '2026-07-30 20:18:28',
+  },
+  payload: {},
+});
+assert.equal(inactiveCompliance.normalized.productContextStatus, 'not_found');
+assert.equal(inactiveCompliance.normalized.productIdentityStatus, 'not_found');
+assert.equal(inactiveCompliance.title, 'DX 店：历史商品：实拍图失效');
+assert.match(inactiveCompliance.summary, /商品编号：SW-OLD/);
+assert.match(inactiveCompliance.summary, /BI 和 SHEIN 当前商品列表都没有找到/);
+assert.match(inactiveCompliance.summary, /无需按在售商品处理/);
+assert.deepEqual(complianceIdentityCalls, [
+  {storeKey: 'LQ', skc: 'SKC-COMPLIANCE'},
+  {storeKey: 'DX', skc: 'SW-OLD'},
+]);
+
 const productResult = await processor.process({...base, normalized: {eventFamily: 'product_audit', eventCode: '3001450', eventLabel: '审核', storeKey: 'AA', productId: 'SPU-1', skc: 'SKC-1', businessId: 'DOC-1'}, payload: {spuName: 'SPU-1', skcName: 'SKC-1', documentSn: 'DOC-1', version: '7'}});
 assert.equal(productResult.actionState, 'task_readback_attached');
 assert.equal(updates.length, 1);

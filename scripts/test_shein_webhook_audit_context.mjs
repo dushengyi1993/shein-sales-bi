@@ -75,6 +75,7 @@ assert.deepEqual(productIdentity, {
   source: 'shein_product_search',
   skc: 'SKC-1',
   supplierCode: '(全)KJ-102三明治机和早餐机',
+  productName: '',
   currentShelfStatus: '',
 });
 assert.equal(calls.length, 3);
