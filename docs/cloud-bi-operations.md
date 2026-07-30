@@ -2,7 +2,7 @@
 
 
 
-> 当前权威状态：2026-07-30。V2 是唯一正式 BI 入口；本地 BI 已封存，V1 仅保留 GitHub archive 恢复点。半托 OpenAPI 生产数据面为 DL 单一 App + 19 店唯一 OpenKey。
+> 当前权威状态：2026-07-30。V2 是唯一正式 BI 入口；本地 BI 已封存，V1 仅保留 GitHub archive 恢复点。半托出站 OpenAPI 为19店独立 App；Webhook 入站由 DL 中央 App 统一验签。
 
 
 ## 1. 当前入口
@@ -436,7 +436,7 @@ CODEX_HOME=/home/sheinops/.codex SHEIN_QA_CODEX_GATEWAY_ENABLED=1 node scripts/l
 - 恢复手段：若云端 SBN 子系统态整体失效，可在本机用 `scripts/auto_relogin_shein_store.mjs` 恢复对应店铺、再用 `scripts/export_shein_browser_session.mjs` 导出 `state/shein_browser_sessions/*.local.json` 并同步到云端私有同名目录；这些 session 文件是敏感运行态，不进 GitHub。若失败页面其实是协议签署 / 公告 / 通知确认挡住登录按钮，应先在可见/noVNC 窗口中关闭或确认普通弹窗并再次点击登录，然后导出/回灌 session；不要只看 `login_not_restored` 就认定必须用户扫码。
 # 2026-07-26 运行语义补充
 
-- 商品对账以 **当前 OpenAPI 商品列表/库存 + 共享 App 额度内轮转刷新的详情 + 21 天内最近成功详情 + 商品上下架 Webhook** 为准。DL 单一 App 的 19 店共享详情额度，日更默认每店轮转刷新 16 个 SPU，并优先补上次失败项；不能再同时打满全店几千条详情。OpenAPI 独有链接、API 合法的待上架/下架状态、额度内的近期详情缓存，以及浏览器四态快照差异都只保留为诊断信息。只有没有任何可用详情、当前库存缺失、详情缓存超过 21 天，或实时详情显示“已上架 → 非已上架”但没有对应 Webhook 证据，才是需要处理的 warning。
+- 商品对账以 **当前 OpenAPI 商品列表、库存、每日全量详情和商品上下架 Webhook** 为准。19店分别使用独立 App 配额，`cloud_openapi_product_reconciliation.sh` 默认 `maxDetails=0`，不再轮转；近期成功详情只在单条瞬时失败时作为短期降级证据。OpenAPI 独有链接、API 合法的待上架/下架状态和浏览器四态快照差异只保留为诊断信息。没有任何可用详情、当前库存缺失、详情缓存超过21天，或实时详情显示“已上架 → 非已上架”但没有对应 Webhook 证据，才是需要处理的 warning。
 - `scripts/audit_bi_warehouse.mjs`、watchdog 和 `state/openapi-probes/product-reconciliation.latest.json` 使用同一语义。先看具体店铺和具体缺口，不把“browser mismatch”当成可操作事故。
 - 凌晨登录态、备份、昨日最终核对共享同一把锁。正常运行时后启动任务等待；宕机后 Persistent timer 同时补跑时，软 `Before/After` 只做 `session-manager → db-backup → yesterday` 排序，不触发额外任务，`flock` 仍是最终互斥。验收时检查三个 service 的 journal 是否按顺序出现锁等待及最终完成记录。
 - 云端 Linux 的运行状态只看 systemd、watchdog、Portal `/api/health` 与数仓审计；旧 Windows 计划任务不参与生产健康判断。

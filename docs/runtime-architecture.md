@@ -7,7 +7,7 @@
 - 半托当天销售主入口为 Webhook + 按单 OpenAPI；前一天最终日由 WebAPI 独立文件与 19 店 OpenAPI 深度匹配后原子晋升。`salesTransport=auto` 与浏览器继续服务最终日核对、登录续期和其它未完全 API 化的数据域。
 - 当天订单入仓后，Portal 通过 PostgreSQL `NOTIFY` + SSE 立即更新销售，不再每 60 秒轮询；新订单或已有订单金额/数量变化都先显示正式事实值并标记利润待补账，相同内容重放不误报。订单/退货事件按 45 秒合并，自动重建移动加权成本与利润 cache，完成后再次推送。补账期间只显示“利润正自动补成本”，不以旧成本或假零值替代；服务重启会追赶、失败 5 分钟后重试。
 - 暂停开关为 `state/feishu-base-sync-paused.flag`；存在该文件时跳过飞书事实表、产品表、月表、宽表和看板写入，删除后可恢复。
-- 云端当前自动覆盖 Webhook/OpenAPI 当天销售、最终日核对与晋升、BI Portal、数据库备份、ET 货代仓、晨间慢变日更、异常通知、登录态巡检、残留浏览器清理和网页/CLI 问数；半托生产 OpenAPI 数据面为 DL 单一 App + 19 店唯一 OpenKey。
+- 云端当前自动覆盖 Webhook/OpenAPI 当天销售、最终日核对与晋升、BI Portal、数据库备份、ET 货代仓、晨间慢变日更、异常通知、登录态巡检、残留浏览器清理和网页/CLI 问数；半托出站 OpenAPI 为19店独立 App，Webhook 入站由 DL 中央 App 统一验签。
 - 当前正式门户为 V2；V1 已从线上 `/v1/` 下线，只保留 GitHub final/archive release `2026.06.18-v1-final-archive` 作为恢复点，不再进入正式 release 或日常刷新。
 - SHEIN 临时人工登录维护入口已云端化：BI `/cloud-login-maintenance` 通过 noVNC 打开指定店铺独立 profile 的短时 Chrome 窗口，完成后导出/探测 session 并关闭临时进程。
 - BI Portal 生成端会用 `lib/product_display_name.mjs` 给 `data.json` 补齐 `product_display_name` / `productDisplayNames`；前端页面和云端飞书问数机器人共用该显示名，后台归因 key 仍保持 `standard_goods_sn`。

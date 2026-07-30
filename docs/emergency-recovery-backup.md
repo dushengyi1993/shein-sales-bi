@@ -48,7 +48,7 @@
 
 ### 可以较高把握重建的部分
 
-- SHEIN 半托销售：代码和数据库 schema 可由 GitHub 恢复，但生产还必须恢复 DL 单一 App 的 19 店私有授权、Webhook 环境、按单 apply/最终日 promote 门禁和数据库备份。WebAPI 可按日期重抓独立核对文件，不能在切换日以后直接重建第二份正式销售事实。
+- SHEIN 半托销售：代码和数据库 schema 可由 GitHub 恢复，但生产还必须恢复19店独立出站授权、中央 Webhook 验签配置、按单 apply/最终日 promote 门禁和数据库备份。WebAPI 可按日期重抓独立核对文件，不能在切换日以后直接重建第二份正式销售事实。
 - BI 门户：生成脚本在 GitHub；从数据库恢复后重新生成 shell、core 和 section cache。
 - 货号归并、销售有效性、日报和 BI 计算：核心逻辑都在 `lib/`、`scripts/`、`docs/` 和 `infra/warehouse/schema.sql`。
 - 评论翻译缓存和协作动作状态：已做小体积应急快照。

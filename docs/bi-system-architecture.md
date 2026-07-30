@@ -37,7 +37,7 @@ flowchart LR
 5. **生产链路逐步 API 化，不冒险硬迁移**
    - 云端 systemd 已覆盖 Webhook/OpenAPI 当天销售、最终日核对与晋升、BI Portal、数据库备份、ET、飞书日报手动入口、统一慢变日更、异常通知和登录态巡检；网页/CLI 问数继续可用，飞书日报自动发送与飞书只读问数 service 均停用。
    - 2026-07-23 起半托当天销售由 Webhook 触发按单 OpenAPI 写正式事实；前一天 WebAPI 只作独立核对，19/19 店深度匹配后才原子晋升 OpenAPI 日切片。商品流量、四档状态、营销与编辑级资料仍按各自 OpenAPI/WebAPI/headless 边界逐项演进。
-   - 2026-07-26 起半托生产 OpenAPI 数据面为 DL 单一 App + 19 店唯一 OpenKey；原独立 App 只作回滚，不进入生产业务处理。
+   - 2026-07-30 起半托出站 OpenAPI 数据面恢复为19店独立 App，商品详情可每日全量；Webhook 入站继续由 DL 中央 App 统一验签，后续回读使用对应店铺的独立 App。
 
 ## 当前服务
 

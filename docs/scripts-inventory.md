@@ -388,7 +388,7 @@
 - `cloud_morning_chain.sh`：云端晨间串行链路入口；08:00 默认跳过当天销售全店刷新，直接启动前一完整日统一慢变日更。当前 `SHEIN_BI_MORNING_SALES_REFRESH=0`、`SHEIN_BI_MORNING_SEND_LARK_REPORT=0`；当天销售由 Webhook/OpenAPI 增量更新，日报默认不发送。
 
 - `cloud_daily_refresh.sh`：云端统一日更补采入口；集中执行每天一次的链接/业务域、SBN 营销概览、RTV 换单复核、体检和 BI 刷新。它不再调用全店 `scan_current_marketing_prices_for_bi.mjs`，避免与独立 guard 重复抓同一 MBRs 价格栈。该入口中的 OpenAPI 销售步骤只产出来源/对账证据；正式最终日晋升属于 `03:00` 的全店深度匹配门禁。退货、商品/链接仍按各自隔离对账和切源边界处理。
-- `cloud_openapi_product_reconciliation.sh`：单一 App 共享额度下的商品对账入口；列表/库存全量，详情默认每店轮转 16 条并使用最近成功详情兜底，禁止恢复全店并发全量 `spu-info`。
+- `cloud_openapi_product_reconciliation.sh`：19店独立 App 配额下的商品对账入口；列表、库存和详情默认每日全量，单条瞬时失败才使用最近成功详情短期兜底。
 
 - `cloud_link_business_sync.sh`：云端链接/业务域低层入口；按店顺序 bootstrap 浏览器会话、抓链接和业务域、入仓。生产调度由 `cloud_daily_refresh.sh` 调用它，避免日更任务分散。
 

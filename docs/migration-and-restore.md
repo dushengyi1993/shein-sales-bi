@@ -90,7 +90,7 @@ git clone https://github.com/dushengyi1993/shein-sales-bi.git
 
 更稳的目标是：
 
-- 恢复半托销售时先恢复 DL 单一 App 的 19 店私有授权、Webhook receiver、PostgreSQL apply/promote 函数与最终日门禁；WebAPI session 只恢复为独立核对/灾备和其它尚未 API 化数据域，不能重新设为切换日后的第二份正式销售写入。
+- 恢复半托销售时先恢复19店独立出站授权、中央 Webhook 验签配置、Webhook receiver、PostgreSQL apply/promote 函数与最终日门禁；WebAPI session 只恢复为独立核对/灾备和其它尚未 API 化数据域，不能重新设为切换日后的第二份正式销售写入。
 - Cookie session、OpenAPI 密钥和飞书配置放在云服务器环境变量、密钥管理服务或加密本地文件中，禁止提交 GitHub。
 - 数据库存 PostgreSQL。
 - 当前完整 BI 迁移必须同时考虑 Metabase 和 BI Portal：Metabase 不是可直接删除的可选组件，仍承接深度分析、筛选和自由钻取；BI Portal 承接日常经营入口。

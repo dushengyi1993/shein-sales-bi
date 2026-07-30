@@ -30,7 +30,7 @@
 - 架构和调度细节只查 `docs/bi-system-architecture.md` / `docs/bi-system-operations.md`，MEMORY 只保留“云端运行态为准”的红线。
 - 正式入口：`https://sa.dushengyi.cc/`；云端代码目录 `/opt/shein-bi/app`；SSH 别名 `ssh shein-bi-tencent`。详细架构见 `docs/bi-system-architecture.md`，运维见 `docs/bi-system-operations.md`。
 - GitHub release 只代表源码基线；稳定发布完成时云端 `/opt/shein-bi/app` 必须通过 `check_release_source_state.mjs --record-deployment`，精确等于 release target commit，且不存在源码脏改、隐藏索引标记或缺失的 tracked 文件；watchdog 持续核对该部署标记，随后再以 systemd、Portal、数据库和日志验收生产。Portal 生成物和可变运行态不得进入 Git。
-- 2026-07-26 起半托生产 OpenAPI 数据面为 **DL 单一 App + 19 店唯一 OpenKey**；旧 18 App 只留作回滚，不进入生产读写或 Webhook 业务处理。单一 App 的商品详情额度由 19 店共享：列表/库存每日全量，`spu-info` 每店轮转 16 条并优先补失败项，其余使用 21 天内最近成功详情，实时上下架由 Webhook/业务域更新，禁止恢复全店并发全量详情。2026-07-23 起当天销售由订单 Webhook 触发按单 OpenAPI 写正式事实；`03:00` WebAPI 仅作独立核对，19/19 深度匹配后才原子晋升 OpenAPI 最终日切片。退货、商品/链接和编辑级资料仍按各自 OpenAPI、WebAPI/headless 与日更边界处理，不能把销售切源扩大成全域切源。
+- 2026-07-30 起半托出站 OpenAPI 数据面为 **19 店各自独立 App + 19 组店铺授权**；通用读取、受控写、BI/CLI、日更、营销兜底和 Webhook 后续回读都使用店铺自己的 App 配额，商品列表、库存和 `spu-info` 每日全量，不再按每店 16 条轮转。Webhook 入站验签仍由 DL 中央 App 统一接收，凭据单独保存在 `/srv/shein-bi/secrets/webhook-openapi-central.json`；它不发起批量商品 API 请求，旧独立 App 的重复回调继续在读正文前丢弃。2026-07-23 起当天销售由订单 Webhook 触发按单 OpenAPI 写正式事实；`03:00` WebAPI 仅作独立核对，19/19 深度匹配后才原子晋升 OpenAPI 最终日切片。退货、商品/链接和编辑级资料仍按各自 OpenAPI、WebAPI/headless 与日更边界处理，不能把销售切源扩大成全域切源。
 - BI 自动运营会话、任务、job 和审计使用 PostgreSQL `ops.link_ops_*`；生产数据库不可用时失败关闭，不能静默回退本地 JSON。
 - 负责人经验只允许 `knowledgePublisher=true` 的本人账号和已登记设备单向发布；同事账号只能消费，不能反向覆盖，也不展示内部规则包版本。
 

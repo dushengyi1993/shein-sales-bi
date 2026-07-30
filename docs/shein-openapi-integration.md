@@ -4,7 +4,7 @@
 
 > 2026-06-28 历史边界：项目同时存在官方 OpenAPI 与复用登录态的后台 WebAPI。2026-07-23 起销售事实已切为 Webhook/按单 OpenAPI + 最终日全店门禁；WebAPI 仍用于独立核对和未完全 API 化的数据域。两者不要混为一谈，密钥和 Cookie session 都不得进入 GitHub。
 
-> 2026-07-26 更新：半托生产数据面已统一为 **DL 单一 App + 19 店各自唯一 OpenKey**。通用读取、受控写、BI/CLI、日更对账、营销库存兜底和 Webhook 均使用同一份私有配置；原独立 App 只保留为回滚资产。详见 [单应用生产切换记录](openapi-single-app-production-cutover-2026-07-26.md)。
+> 2026-07-30 更新：半托出站数据面已恢复为 **19店独立 App + 19组店铺授权**。通用读取、受控写、BI/CLI、日更对账、营销库存兜底和 Webhook 后续回读使用店铺独立配额；Webhook 入站验签继续由 DL 中央 App 承担并使用独立私有配置。详见 [独立应用切回记录](openapi-per-store-production-cutback-2026-07-30.md)。
 
 ## 当前已确认信息
 

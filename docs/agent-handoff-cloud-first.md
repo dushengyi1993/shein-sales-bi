@@ -21,7 +21,7 @@
 | 云端 SSH | `ssh shein-bi-tencent` |
 | 应用目录 | `/opt/shein-bi/app` |
 | 数据底座 | PostgreSQL warehouse + Metabase |
-| 半托 OpenAPI | DL 单一 App + 19 店唯一 OpenKey |
+| 半托 OpenAPI | 出站19店独立App；Webhook入站由DL中央App统一验签 |
 | 当天销售 | 订单 Webhook → 按单 OpenAPI → 正式事实 → Portal SSE |
 | 最终日销售 | WebAPI 独立核对 + 19/19 OpenAPI 深度匹配后原子晋升 |
 | 飞书 | Base/看板暂停；日报手动；P0 异常提醒保留；问数 service 停用 |
@@ -139,7 +139,7 @@ node scripts/audit_bi_warehouse.mjs
 - 不恢复每小时当天销售 timer；实时销售异常应查 Webhook receipt、OpenAPI targeted sync、PostgreSQL `NOTIFY` 和 Portal SSE。
 - 不恢复每 30 分钟或每小时全局浏览器清理；当前只清无有效租约的孤儿。
 - 不启用飞书问数 service 或 Base/看板写入，除非用户重新明确授权并完成独立验收。
-- 不把旧 18 个独立 OpenAPI App 重新混入生产配置；回滚必须按 [单应用切换记录](openapi-single-app-production-cutover-2026-07-26.md) 完整执行。
+- 不把中央 Webhook 凭据用于出站批量抓取，也不让旧独立 App 的重复回调进入业务表；当前拓扑和回滚按 [独立应用切回记录](openapi-per-store-production-cutback-2026-07-30.md) 执行。
 
 ## 9. 推荐工作流
 
