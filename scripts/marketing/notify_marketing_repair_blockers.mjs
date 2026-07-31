@@ -4,7 +4,10 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {buildMarketingRepairBlockerNotice} from '../../lib/marketing_repair_blocker_notice.mjs';
+import {
+  buildMarketingRepairBlockerNotice,
+  buildMarketingRepairNotificationKey,
+} from '../../lib/marketing_repair_blocker_notice.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -41,6 +44,10 @@ const fingerprint = crypto.createHash('sha256')
   .update(JSON.stringify(notice.rows))
   .digest('hex')
   .slice(0, 20);
+const notificationKey = buildMarketingRepairNotificationKey(
+  args.date || report.date || 'unknown',
+  fingerprint,
+);
 const notifyArgs = [
   'scripts/notify_sync_issue.mjs',
   '--kind', 'marketing',
@@ -49,7 +56,7 @@ const notifyArgs = [
   '--title', notice.title,
   '--message', notice.message,
   '--log-file', args.logFile,
-  '--idempotency-key', `marketing-repair-blocked-${args.date || report.date || 'unknown'}-${fingerprint}`,
+  '--idempotency-key', notificationKey,
   '--force',
 ];
 if (args.dryRun) notifyArgs.push('--dry-run');
