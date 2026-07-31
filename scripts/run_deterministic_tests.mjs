@@ -9,6 +9,7 @@ const tests = [
   'scripts/marketing/smoke_limited_repair_status.mjs',
   'scripts/marketing/smoke_marketing_repair_manifest.mjs',
   'scripts/marketing/smoke_marketing_repair_queue.mjs',
+  'scripts/marketing/smoke_marketing_daily_group_report.mjs',
   'scripts/marketing/smoke_bounded_fallback_resume.mjs',
   'scripts/marketing/smoke_high_click_special_policy.mjs',
   'scripts/marketing/smoke_shared_storage_cost.mjs',

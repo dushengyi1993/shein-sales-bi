@@ -499,6 +499,11 @@ fi
 
 if [[ "$STACK_REVIEW_STATUS" -eq 0 && "$ORDINARY_LIVE_READY" -eq 1 && "$SCAN_STATUS" -eq 0 && "$GUARD_STATUS" -eq 0 && "$HIGH_CLICK_PLAN_STATUS" -eq 0 && "$ON_SHELF_PLAN_STATUS" -eq 0 && "$MANUAL_PLAN_STATUS" -eq 0 && "$DRIFT_PLAN_STATUS" -eq 0 && "$REPAIR_QUEUE_BUILD_STATUS" -eq 0 ]]; then
   write_state "ok" "marketing inspection completed; repairDeferred=$REPAIR_DEFERRED" 1
+  if [[ "$REPAIR_DEFERRED" -eq 0 ]]; then
+    node scripts/marketing/send_marketing_daily_group_report.mjs \
+      --date "$DATE" --queue "$REPAIR_QUEUE_FILE" --guard "$GUARD_OUT" \
+      || echo "[cloud_marketing_live_guard] WARN complete group report delivery failed" >&2
+  fi
   echo "[cloud_marketing_live_guard] done ok date=$DATE log=$LOG_FILE"
 else
   write_state "warning" "stackReview=$STACK_REVIEW_STATUS ordinaryLiveReady=$ORDINARY_LIVE_READY liveScan=$SCAN_STATUS guard=$GUARD_STATUS highClickPlan=$HIGH_CLICK_PLAN_STATUS onShelfPlan=$ON_SHELF_PLAN_STATUS manualPlan=$MANUAL_PLAN_STATUS driftPlan=$DRIFT_PLAN_STATUS repairQueue=$REPAIR_QUEUE_BUILD_STATUS" 0

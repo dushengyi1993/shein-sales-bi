@@ -135,6 +135,14 @@ fs.writeFileSync(process.env.STATE_FILE, `${JSON.stringify(state, null, 2)}\n`);
 NODE
 }
 
+send_daily_group_report() {
+  node scripts/marketing/send_marketing_daily_group_report.mjs \
+    --date "$DATE" --queue "$QUEUE_FILE" \
+    --guard "$ROOT/outputs/reports/marketing-daily-guard-${DATE}.json" \
+    --execution "$ROOT/outputs/reports/new-listing-7d-limited-discount-execution-summary-${DATE}.json" \
+    || echo "[cloud_marketing_repair] WARN complete group report delivery failed" >&2
+}
+
 run_final_readback() {
   local stamp scan_out guard_out price_overrides price_path manual_count drift_count manual_plan
   stamp="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)-repair-final"
@@ -229,6 +237,7 @@ if [[ "$QUEUE_STATUS" == "completed" || "$QUEUE_STATUS" == "blocked" ]]; then
   else
     write_state ok "repair queue already completed"
   fi
+  send_daily_group_report
   echo "[cloud_marketing_repair] queue already terminal status=$QUEUE_STATUS"
   exit 0
 fi
@@ -271,6 +280,7 @@ if [[ "$HIGH_CLICK_STATUS" != "not_required" && "$HIGH_CLICK_STATUS" != "complet
     if (( BLOCKED_TARGETS > 0 && FAILED_TARGETS == 0 )); then
       update_stage highClickSpecial blocked false "ET/platform preflight safely blocked one or more protected specials" "$RESULT_PATH"
       write_state blocked "high-click special repair safely blocked by current ET inventory/platform conditions"
+      send_daily_group_report
       exit 0
     fi
     update_stage highClickSpecial failed false "execute/readback failed status=$status" "$RESULT_PATH"
@@ -360,9 +370,7 @@ if [[ "$FALLBACK_STATUS" != "not_required" && "$FALLBACK_STATUS" != "completed" 
     if (( BLOCKED_TARGETS > 0 && FAILED_TARGETS == 0 )); then
       update_stage fallbackRepair blocked false "preflight reached terminal inventory/platform blockers; no unsafe write attempted" "$RESULT_PATH"
       write_state blocked "fallback repair safely blocked by current inventory/platform conditions"
-      node scripts/marketing/notify_marketing_repair_blockers.mjs \
-        --date "$DATE" --result "$RESULT_PATH" --log-file "$LOG_FILE" \
-        || echo "[cloud_marketing_repair] WARN blocker notification failed"
+      send_daily_group_report
       echo "[cloud_marketing_repair] terminal business blockers reported date=$DATE rows=$BLOCKED_TARGETS"
       exit 0
     fi
@@ -385,6 +393,7 @@ if [[ "$(queue_value 'j.status' pending)" == "awaiting_final_readback" ]]; then
   if run_final_readback; then
     if [[ "$(queue_value 'j.status' pending)" == "completed" ]]; then
       write_state ok "all queued repairs passed final full-store live readback"
+      send_daily_group_report
       echo "[cloud_marketing_repair] done ok date=$DATE"
       exit 0
     fi
