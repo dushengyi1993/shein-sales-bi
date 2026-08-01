@@ -619,7 +619,7 @@
 
 ## 每日低虚拟库存巡检
 
-- `scripts/inventory/build_daily_inventory_replenishment_plan.mjs`：19 店只读计划器。仅处理已上架或平台售罄、单 SKU、SHEIN 可售库存不高于 20 且 ET 当天库存已匹配的链接；ET 可售大于 20 时，建议目标为 `min(100, ET 当天可售)`，不会把共享 ET 实盘按店铺拆分。ET 可售不高于 20 时只报“实盘分配”，不生成虚拟库存写入。由于 OpenAPI 可能把“库存为 0 导致售罄”的商品状态仍返回已上架，报告用“本店可售为 0 + 同货号其他店已上架且可售大于 0”另列 `crossStoreSoldOutFindings`，不能只依赖状态文字。
+- `scripts/inventory/build_daily_inventory_replenishment_plan.mjs`：19 店只读计划器。ET 事实直接读取独立刷新、带 `cachedAt` 的 `outputs/bi-portal/sections/inventoryTrend.json`，不能用整站 `data.json.generatedAt` 代替 section 新鲜度。仅处理已上架或平台售罄、单 SKU、SHEIN 可售库存不高于 20 且 ET 当天库存已匹配的链接；ET 可售大于 20 时，建议目标为 `min(100, ET 当天可售)`，不会把共享 ET 实盘按店铺拆分。ET 可售不高于 20 时只报“实盘分配”，不生成虚拟库存写入。由于 OpenAPI 可能把“库存为 0 导致售罄”的商品状态仍返回已上架，报告用“本店可售为 0 + 同货号其他店已上架且可售大于 0”另列 `crossStoreSoldOutFindings`，不能只依赖状态文字。
 - 同一报告独立列出 ET 可售大于 20、按加权销量计算的在库去化周期小于 90 天的补货提醒。ET 未匹配、非当天、SHEIN 快照过期、库存分片失败或多 SKU 均失败关闭。
 - `scripts/inventory/execute_daily_inventory_replenishment_plan.mjs`：只执行当天、无 blocker、policy 版本一致且 hash 完整的精确计划；第一阶段必须用报告中的 `payloadHash` 逐次人工确认。每条执行前重查商品在架状态、SKU 映射、ET 当天库存和 SHEIN 实时库存，写后回读；单条失败继续记录，不能扩大到未确认行。
 - `config/inventory_replenishment_policy.json` 当前 `execution.mode=manual_review` 且自动执行关闭。`shein-bi-daily-inventory-replenishment-guard.timer` 只生成报告，不执行修改；经过试运行后若要自动执行，必须另行修改 policy、审计常驻授权并重新发布。

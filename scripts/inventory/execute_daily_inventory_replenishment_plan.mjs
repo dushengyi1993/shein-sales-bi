@@ -25,7 +25,7 @@ function parseArgs(argv) {
     plan: '',
     policy: path.join(ROOT, 'config', 'inventory_replenishment_policy.json'),
     config: process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json'),
-    biData: path.join(ROOT, 'outputs', 'bi-portal', 'data.json'),
+    biData: path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'inventoryTrend.json'),
     out: '',
     execute: false,
     executionMode: 'manual_review',
@@ -126,7 +126,7 @@ async function assertStillListed(client, row) {
 const args = parseArgs(process.argv.slice(2));
 const [plan, policy, config, biDocument] = await Promise.all([readJson(args.plan), readJson(args.policy), readJson(args.config), readJson(args.biData)]);
 const bi = biDocument?.data && typeof biDocument.data === 'object' ? biDocument.data : biDocument;
-const biGeneratedAt = biDocument.generatedAt || bi.generatedAt || bi.createdAt;
+const biGeneratedAt = biDocument.cachedAt || biDocument.generatedAt || bi.generatedAt || bi.createdAt;
 const biAge = ageHours(biGeneratedAt);
 if (!Number.isFinite(biAge) || biAge < -0.25 || biAge > Number(policy.maxBiSnapshotAgeHours || 4)) {
   throw new Error(`BI/ET projection is stale: generatedAt=${biGeneratedAt || ''} ageHours=${biAge}`);

@@ -17,7 +17,7 @@ function parseArgs(argv) {
     policy: path.join(ROOT, 'config', 'inventory_replenishment_policy.json'),
     stores: path.join(ROOT, 'config', 'stores.json'),
     productsDir: path.join(ROOT, 'outputs', 'shein_openapi_products'),
-    biData: path.join(ROOT, 'outputs', 'bi-portal', 'data.json'),
+    biData: path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'inventoryTrend.json'),
     out: '',
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -49,13 +49,13 @@ const args = parseArgs(process.argv.slice(2));
 const [policy, storeConfig, biDocument] = await Promise.all([readJson(args.policy), readJson(args.stores), readJson(args.biData)]);
 const bi = biDocument?.data && typeof biDocument.data === 'object' ? biDocument.data : biDocument;
 const stores = enabledStoreKeys(storeConfig);
-const biGeneratedAt = biDocument.generatedAt || bi.generatedAt || bi.createdAt;
+const biGeneratedAt = biDocument.cachedAt || biDocument.generatedAt || bi.generatedAt || bi.createdAt;
 const biAge = ageHours(biGeneratedAt);
 const blockers = [];
 const sourceEvidence = [];
 sourceEvidence.push({
   store: 'ET',
-  file: 'outputs/bi-portal/data.json',
+  file: 'outputs/bi-portal/sections/inventoryTrend.json',
   fetchedAt: biGeneratedAt || '',
   ageHours: Number.isFinite(biAge) ? Number(biAge.toFixed(4)) : null,
 });
