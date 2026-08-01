@@ -38,19 +38,19 @@ assert.deepEqual(order, {
   businessDate: '', orderStatus: '', orderStatusDesc: '', cancelledBeforePickup: false,
   salesQuantity: 0, salesSar: 0, occurredAt: '2026-07-23T11:59:59.000Z',
 });
-assert.deepEqual(liveSectionsForBiUpdate('return'), ['liveSalesToday', 'orders', 'priceScatter', 'afterSales']);
+assert.deepEqual(liveSectionsForBiUpdate('return'), ['liveSalesToday', 'orders', 'afterSales']);
 assert.deepEqual(
   liveSectionsForBiUpdate('order', {
     businessDate: '2026-07-27',
     occurredAt: '2026-07-28T06:50:00.000Z',
     accountingRefreshed: true,
   }),
-  ['liveSalesToday', 'orders', 'priceScatter', 'productSalesDaily', 'inventoryTrend', 'homeRankings', 'rankings', 'profit', 'homeProfit'],
+  ['liveSalesToday', 'orders', 'productSalesDaily', 'inventoryTrend', 'homeRankings', 'rankings', 'profit', 'homeProfit'],
   'a prior-day cancellation must refresh the selected historical sales and profit sections after accounting catches up',
 );
 assert.deepEqual(
   liveSectionsForBiUpdate('return', {accountingRefreshed: true}),
-  ['liveSalesToday', 'orders', 'priceScatter', 'afterSales', 'productSalesDaily', 'inventoryTrend', 'homeRankings', 'rankings', 'profit', 'homeProfit'],
+  ['liveSalesToday', 'orders', 'afterSales', 'productSalesDaily', 'inventoryTrend', 'homeRankings', 'rankings', 'profit', 'homeProfit'],
   'a return can change an older order and must invalidate every dependent business section',
 );
 assert.deepEqual(
@@ -59,7 +59,7 @@ assert.deepEqual(
     accountingKinds: ['order', 'return'],
     refreshHistoricalSections: true,
   }),
-  ['liveSalesToday', 'orders', 'priceScatter', 'afterSales', 'productSalesDaily', 'inventoryTrend', 'homeRankings', 'rankings', 'profit', 'homeProfit'],
+  ['liveSalesToday', 'orders', 'afterSales', 'productSalesDaily', 'inventoryTrend', 'homeRankings', 'rankings', 'profit', 'homeProfit'],
   'coalescing a later sale must not discard an earlier return or historical-cancellation refresh scope',
 );
 assert.deepEqual(liveSectionsForBiUpdate('product'), ['productState']);
@@ -138,7 +138,9 @@ assert.match(productionClient, /实时订单 ·/, 'live order rows must be label
 assert.match(productionClient, /if\(!date\|\|!D\.rankings\)return;/, 'a verified zero-order live day must clear stale cached rankings instead of preserving old sales');
 assert.match(productionClient, /if\(n==='liveSalesToday'\|\|n==='homeRankings'\|\|n==='rankings'\)applyLiveOrderRankingOverlay\(\)/, 'initial section loading must reconcile cached rankings with live sales regardless of response order');
 assert.match(productionClient, /const liveSalesState=sourceState\('liveSalesToday',A\(D\.liveSalesToday\?\.items\)\);const rankingsState=combineSourceState\(sourceState\('homeRankings',s\.rows\),liveSalesState\)/, 'the homepage must wait for the live overlay and distinguish unavailable data from a business zero');
-assert.match(productionClient, /const LIVE_ORDER_SECTIONS=\['liveSalesToday','orders','priceScatter'\]/, 'live orders must always refresh the lightweight today-sales section');
+assert.match(productionClient, /const LIVE_ORDER_SECTIONS=\['liveSalesToday'\]/, 'live orders refresh one lightweight source instead of rebuilding large order and scatter caches per browser');
+assert.match(productionClient, /function applyLivePriceScatterOverlay\(\)/, 'the current-day scatter is overlaid from the same authoritative live order facts');
+assert.match(productionClient, /if\(n==='liveSalesToday'\|\|n==='priceScatter'\)applyLivePriceScatterOverlay\(\)/, 'the scatter overlay works regardless of section load order');
 assert.match(productionClient, /home:\['homeRankings','afterSales','homeProfit','homeTrafficDaily','liveSalesToday'\]/, 'the homepage must load the current-day profit overlay even before a new SSE event');
 assert.match(productionClient, /if\(!\['liveSalesToday','productState'\]\.includes\(n\)\)params\.set\('async','1'\)/,
   'the lightweight today-sales and product-state sections must refresh synchronously');

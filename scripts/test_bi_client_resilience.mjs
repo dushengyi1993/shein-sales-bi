@@ -76,8 +76,16 @@ assert.match(source, /merge\(j,n\)/, 'accepted section payloads record their own
 assert.match(source, /function unavailableValue\(\)\{return'<span class=\"metric-unavailable\"><b>—<\/b><small>数据不可用<\/small><\/span>'\}/, 'unavailable KPIs must show an em dash and explicit unavailable copy');
 assert.match(source, /function sectionFailureNotice\(ns\).*data-load=.*role=\"alert\".*受影响 KPI 不会显示为 0/, 'failed sections have an actionable top-level alert with retry controls');
 assert.match(source, /缓存写入 \$\{fmtStamp\(st\.cachedAt\|\|st\.generatedAt\)\}；页面最新/, 'cache fallback always exposes its cache timestamp and current-page timestamp');
-assert.match(source, /j\.refreshFailed\?\('刷新失败'.*j\.refreshError/,
-  'stale section responses must expose the concrete server refresh failure to the operator');
+assert.match(source, /const needsRecheck=stale\|\|!!j\.refreshScheduled\|\|!!j\.refreshFailed/,
+  'a failed background refresh remains on automatic recheck instead of pinning an error in the browser');
+assert.match(source, /function sectionRefreshFailureText\(j\).*系统会继续重试；当前仍显示上次完整数据/,
+  'persistent refresh failures use operator-readable copy instead of raw server stack text');
+assert.match(source, /function sectionNeedsBanner\(n\).*actual!==expected.*!st\.refreshing&&st\.refreshError/,
+  'routine same-generation live refreshes do not flash the large cache warning banner');
+assert.match(server, /const BI_FAST_BACKGROUND_SECTIONS = new Set\(\['homeRankings', 'homeProfit'\]\)/,
+  'lightweight homepage cache work has a lane independent from multi-minute heavy sections');
+assert.match(server, /automatic-retry:\$\{failure\.at\}/,
+  'a recorded refresh failure schedules a bounded single-flight retry when the cache is read again');
 assert.match(source, /storageEstimated:hp\.reduce\(\(a,r\)=>a\+profitStorageEstimated\(r\),0\)/, 'profit tracks the exact provisional storage amount in the selected range');
 assert.match(source, /含待结算预估/, 'provisional storage is labelled as an estimate while remaining deducted from profit');
 assert.match(source, /纯历史范围不会再显示“今日待日结”/, 'historical queries never inherit a misleading current-day storage warning');
@@ -95,5 +103,7 @@ assert.match(server, /const refreshScheduled = scheduleBiSectionBackgroundGenera
   'stale responses must tell the client when a replacement generation is already scheduled');
 assert.doesNotMatch(server.match(/function scheduleBiSectionBackgroundGeneration[\s\S]*?\n\}/)?.[0] || '', /\$\{force \? '\|force' : ''\}/,
   'a forced refresh must not create a second concurrent producer key');
+assert.match(server, /biSectionLastCompletedRefreshTokens\.get\(key\) === refreshToken[\s\S]*?return false/,
+  'multiple browsers receiving the same live event cannot rebuild the same section repeatedly');
 
 console.log('bi_client_resilience: refresh, version fallback, and history contracts passed');

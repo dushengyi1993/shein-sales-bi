@@ -223,9 +223,12 @@ const biSectionInFlight = new Map();
 const biSectionForceRerun = new Set();
 const biSectionActiveRefreshTokens = new Map();
 const biSectionPendingRefreshTokens = new Map();
+const biSectionLastCompletedRefreshTokens = new Map();
 const biSectionRefreshFailures = new Map();
 let biSectionBackgroundQueue = Promise.resolve();
+let biSectionFastBackgroundQueue = Promise.resolve();
 let biProfitMartFreshnessPromise = null;
+const BI_FAST_BACKGROUND_SECTIONS = new Set(['homeRankings', 'homeProfit']);
 const DEFAULT_BI_PORTAL_CORE_WARMUP_SECTIONS = ['homeRankings', 'profit', 'homeProfit', 'afterSales', 'orders', 'waybills'];
 const BI_PORTAL_CORE_WARMUP_INTERVAL_MS = Math.max(15_000, Number(process.env.SHEIN_BI_CORE_WARMUP_INTERVAL_MS || 60_000));
 const biPortalCoreWarmupState = {
@@ -6957,6 +6960,9 @@ function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt,
   // different order. The rerun marker below already preserves one coalesced
   // force refresh when data changes during an active build.
   const key = `${root}|${section}|${generatedAt || ''}`;
+  if (force && refreshToken && biSectionLastCompletedRefreshTokens.get(key) === refreshToken) {
+    return false;
+  }
   if (biSectionInFlight.has(key)) {
     const activeToken = String(biSectionActiveRefreshTokens.get(key) || '');
     if (force && refreshToken !== activeToken) {
@@ -6977,7 +6983,11 @@ function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt,
     return true;
   }
   biSectionActiveRefreshTokens.set(key, refreshToken);
-  const previousQueue = biSectionBackgroundQueue.catch(() => {});
+  // Lightweight homepage derivations must not sit behind a multi-minute
+  // product/link rebuild. Keep one separate serial lane for them while all
+  // heavy database sections continue to share the original bounded lane.
+  const fastLane = BI_FAST_BACKGROUND_SECTIONS.has(section);
+  const previousQueue = (fastLane ? biSectionFastBackgroundQueue : biSectionBackgroundQueue).catch(() => {});
   const run = previousQueue.then(async () => {
     const startedAt = Date.now();
     logBiPortalCoreWarmup('section-background-start', {section, generatedAt});
@@ -6996,6 +7006,12 @@ function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt,
     }
     const payload = await generateBiSection(args, root, section, generatedAt);
     clearBiSectionRefreshFailure(root, section);
+    if (force && refreshToken) {
+      biSectionLastCompletedRefreshTokens.set(key, refreshToken);
+      if (biSectionLastCompletedRefreshTokens.size > 200) {
+        biSectionLastCompletedRefreshTokens.delete(biSectionLastCompletedRefreshTokens.keys().next().value);
+      }
+    }
     logBiPortalCoreWarmup('section-background-done', {section, generatedAt, durationMs: Date.now() - startedAt});
     return payload;
   }).catch(err => {
@@ -7006,7 +7022,8 @@ function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt,
     biSectionActiveRefreshTokens.delete(key);
   });
   biSectionInFlight.set(key, run);
-  biSectionBackgroundQueue = run.catch(() => {});
+  if (fastLane) biSectionFastBackgroundQueue = run.catch(() => {});
+  else biSectionBackgroundQueue = run.catch(() => {});
   return true;
 }
 
@@ -7212,13 +7229,13 @@ async function generateBiSection(args, root, section, generatedAt) {
   // published cache avoids expanding mart.profit_order_item on every trend
   // request, which previously turned one portal warmup into a 10+ minute SQL.
   const profitBackedSections = new Set(['profit', 'homeProfit', 'homeRankings', 'rankings', 'productSalesDaily', 'inventoryTrend']);
-  // homeRankings is the homepage's historical baseline. Current-day orders,
-  // cancellations, and returns are overlaid from liveSalesToday in the client,
-  // so rebuilding the inventory-cost ledger before this lightweight section
+  // homeRankings and homeProfit are homepage historical baselines. Current-day
+  // sales and profit are overlaid from liveSalesToday in the client, so
+  // rebuilding the inventory-cost ledger before either lightweight section
   // only blocks the homepage without improving the displayed current-day fact.
   // The live-accounting worker remains responsible for publishing a new
-  // complete profit cache; a later forced ranking refresh then reads it.
-  const accountingFreshnessRequiredSections = new Set(['profit', 'homeProfit', 'rankings', 'productSalesDaily', 'inventoryTrend']);
+  // complete profit cache; later lightweight refreshes then read it.
+  const accountingFreshnessRequiredSections = new Set(['profit', 'rankings', 'productSalesDaily', 'inventoryTrend']);
   const useProfitMartCache = profitBackedSections.has(section) && process.env.SHEIN_BI_PROFIT_MART_CACHE_DISABLED !== '1';
   const sourceMode = useProfitMartCache ? 'cache' : 'view';
   const refreshRun = sourceMode === 'cache' && accountingFreshnessRequiredSections.has(section)
@@ -7313,6 +7330,22 @@ async function loadBiSection(args, root, section, options = {}) {
   if (meta.mode !== 'api' && !force) {
     return {status: 400, payload: {ok: false, error: 'BI portal is not in api data mode', section, mode: meta.mode}};
   }
+  if (!force && allowGenerate) {
+    const failure = biSectionRefreshFailures.get(biSectionRefreshFailureKey(root, section));
+    if (failure) {
+      const refreshScheduled = scheduleBiSectionBackgroundGeneration(args, root, section, meta.generatedAt, {
+        force: true,
+        refreshToken: `automatic-retry:${failure.at}`,
+      });
+      options = {
+        ...options,
+        extraFields: {
+          ...(options.extraFields || {}),
+          refreshScheduled,
+        },
+      };
+    }
+  }
   if (force && options.asyncRefresh) {
     if (!allowGenerate) {
       return {status: 403, payload: {ok: false, section, error: 'Section refresh is disabled in read-only or unauthenticated LAN mode'}};
@@ -7330,11 +7363,11 @@ async function loadBiSection(args, root, section, options = {}) {
       },
     });
     if (currentRaw) {
-      return {status: 202, rawBody: currentRaw.body, headers: {...currentRaw.headers, 'X-BI-Section-Refresh-Scheduled': 'true'}};
+      return {status: 202, rawBody: currentRaw.body, headers: {...currentRaw.headers, 'X-BI-Section-Refresh-Scheduled': String(refreshScheduled)}};
     }
     const staleRaw = await readBiSectionStaleRaw(root, section, meta.generatedAt, {...options, refreshScheduled});
     if (staleRaw) {
-      return {status: 202, rawBody: staleRaw.body, headers: withBiSectionRefreshFailureHeaders(root, section, {...staleRaw.headers, 'X-BI-Section-Refresh-Scheduled': 'true'})};
+      return {status: 202, rawBody: staleRaw.body, headers: withBiSectionRefreshFailureHeaders(root, section, {...staleRaw.headers, 'X-BI-Section-Refresh-Scheduled': String(refreshScheduled)})};
     }
     const stale = await readBiSectionCacheAnyGeneratedAt(root, section);
     if (stale) {
@@ -7567,7 +7600,6 @@ function shanghaiDateKey(value = new Date()) {
 }
 
 export function liveSectionsForBiUpdate(kind, event = {}) {
-  const base = ['liveSalesToday', 'orders', 'priceScatter'];
   const accountingKinds = new Set([
     kind,
     ...(Array.isArray(event.accountingKinds) ? event.accountingKinds : []),
@@ -7575,17 +7607,23 @@ export function liveSectionsForBiUpdate(kind, event = {}) {
   const hasOrder = accountingKinds.has('order');
   const hasReturn = accountingKinds.has('return');
   if (!hasOrder && !hasReturn) return kind === 'product' ? ['productState'] : [];
-  const sections = [...base];
-  if (hasReturn) sections.push('afterSales');
-  if (!event.accountingRefreshed) return sections;
-  sections.push('productSalesDaily', 'inventoryTrend');
   const businessDate = String(event.businessDate || '').slice(0, 10);
   const currentDate = shanghaiDateKey(event.occurredAt || new Date());
   const historicalOrder = hasOrder && businessDate && currentDate && businessDate !== currentDate;
+  // liveSalesToday already carries current-day order rows and enough fields to
+  // overlay the order list, rankings, and price scatter in the browser. Do not
+  // regenerate the large orders/priceScatter sections for every tab or every
+  // connected browser. Historical changes and returns still invalidate the
+  // durable dependent sections below.
+  const sections = ['liveSalesToday'];
+  if (hasReturn) sections.push('orders', 'afterSales');
+  else if (historicalOrder) sections.push('orders');
+  if (!event.accountingRefreshed) return [...new Set(sections)];
+  sections.push('productSalesDaily', 'inventoryTrend');
   if (hasReturn || event.refreshHistoricalSections || historicalOrder) {
     sections.push('homeRankings', 'rankings', 'profit', 'homeProfit');
   }
-  return sections;
+  return [...new Set(sections)];
 }
 
 function livePgClientConfig(env = process.env) {
