@@ -1,0 +1,20 @@
+[Unit]
+Description=SHEIN BI daily low virtual inventory inspection
+Wants=network-online.target
+After=network-online.target shein-bi-cloud-et-forwarder.service
+
+[Service]
+Type=oneshot
+User=sheinops
+Group=sheinops
+WorkingDirectory=/opt/shein-bi/app
+Environment=HOME=/home/sheinops
+Environment=TZ=Asia/Shanghai
+Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_BI_INVENTORY_RUNTIME_ROOT=/srv/shein-bi/runtime/daily-inventory-replenishment
+TimeoutStartSec=1200
+Nice=12
+CPUWeight=40
+MemoryHigh=1000M
+MemoryMax=1600M
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_daily_inventory_replenishment_guard.sh

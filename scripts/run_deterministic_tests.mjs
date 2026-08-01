@@ -111,6 +111,7 @@ const tests = [
   'scripts/test_systemd_security_contract.mjs',
   'scripts/test_bi_product_section_contract.mjs',
   'scripts/test_inventory_projection_contract.mjs',
+  'scripts/test_inventory_replenishment_policy.mjs',
   'scripts/test_inventory_cost_ledger.mjs',
   'scripts/test_shein_finance_check_orders.mjs',
   'scripts/test_storage_fee_bill_canonicalization.mjs',
