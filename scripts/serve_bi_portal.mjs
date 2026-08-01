@@ -7212,9 +7212,18 @@ async function generateBiSection(args, root, section, generatedAt) {
   // published cache avoids expanding mart.profit_order_item on every trend
   // request, which previously turned one portal warmup into a 10+ minute SQL.
   const profitBackedSections = new Set(['profit', 'homeProfit', 'homeRankings', 'rankings', 'productSalesDaily', 'inventoryTrend']);
+  // homeRankings is the homepage's historical baseline. Current-day orders,
+  // cancellations, and returns are overlaid from liveSalesToday in the client,
+  // so rebuilding the inventory-cost ledger before this lightweight section
+  // only blocks the homepage without improving the displayed current-day fact.
+  // The live-accounting worker remains responsible for publishing a new
+  // complete profit cache; a later forced ranking refresh then reads it.
+  const accountingFreshnessRequiredSections = new Set(['profit', 'homeProfit', 'rankings', 'productSalesDaily', 'inventoryTrend']);
   const useProfitMartCache = profitBackedSections.has(section) && process.env.SHEIN_BI_PROFIT_MART_CACHE_DISABLED !== '1';
   const sourceMode = useProfitMartCache ? 'cache' : 'view';
-  const refreshRun = sourceMode === 'cache' ? await ensureProfitMartCacheFresh(args, generatedAt) : null;
+  const refreshRun = sourceMode === 'cache' && accountingFreshnessRequiredSections.has(section)
+    ? await ensureProfitMartCacheFresh(args, generatedAt)
+    : null;
   if (sourceMode === 'cache' && section === 'homeProfit') {
     const currentProfitCache = await readBiSectionCache(root, 'profit', generatedAt);
     if (!currentProfitCache) {
@@ -7429,9 +7438,15 @@ async function loadBiSection(args, root, section, options = {}) {
   }
   const key = `${root}|${section}|${meta.generatedAt || ''}`;
   if (!force && allowStale) {
-    const staleRaw = await readBiSectionStaleRaw(root, section, meta.generatedAt, options);
+    // A current-generation cache miss always needs a producer. Schedule it
+    // before serializing the stale response so the client can distinguish a
+    // normal version transition from an actual failed refresh.
+    const refreshScheduled = scheduleBiSectionBackgroundGeneration(args, root, section, meta.generatedAt);
+    const staleRaw = await readBiSectionStaleRaw(root, section, meta.generatedAt, {
+      ...options,
+      refreshScheduled,
+    });
     if (staleRaw) {
-      scheduleBiSectionBackgroundGeneration(args, root, section, meta.generatedAt);
       return {status: 200, rawBody: staleRaw.body, headers: withBiSectionRefreshFailureHeaders(root, section, staleRaw.headers)};
     }
   }

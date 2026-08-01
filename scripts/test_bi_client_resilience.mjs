@@ -18,6 +18,10 @@ assert.match(source, /if\(needsRecheck\)scheduleSectionRecheck\(n\)/, 'stale or 
 assert.match(source, /完成后页面会自动更新/, 'operator copy promises only the implemented automatic update');
 assert.match(source, /await core\(\{silent:true,ensureAfter:false\}\)/, 'section version mismatches revalidate core first');
 assert.match(source, /versionWarning=.*数据版本与 core 暂未同步/, 'persistent mismatches degrade to an explicit stale warning');
+assert.match(source, /const transitionPending=!!\(j\?\.refreshScheduled&&!j\?\.refreshFailed\)/,
+  'a scheduled generation transition is distinguished from an actual refresh failure');
+assert.match(source, /refreshError:transitionPending\?'':versionWarning/,
+  'normal core-to-section convergence must not flash a false refresh-failed message');
 assert.doesNotMatch(source, /throw Error\(n\+' generatedAt 不匹配/, 'version mismatches must not hard-fail a usable cached page');
 assert.match(source, /history\.pushState\(null,'',hash\)/, 'normal navigation creates browser history');
 assert.match(source, /function inventoryMatchStatus\(r\)/, 'client keeps a backward-compatible inventory match-state reader');
@@ -87,6 +91,8 @@ assert.doesNotMatch(server, /data: \{\}, refreshScheduled, cacheHit: false/,
   'the server must not represent a missing section cache as valid empty data');
 assert.match(server, /const key = `\$\{root\}\|\$\{section\}\|\$\{generatedAt \|\| ''\}`;/,
   'normal, warmup, and forced builders must share one single-flight key per section generation');
+assert.match(server, /const refreshScheduled = scheduleBiSectionBackgroundGeneration[\s\S]*?readBiSectionStaleRaw\(root, section, meta\.generatedAt, \{[\s\S]*?refreshScheduled/,
+  'stale responses must tell the client when a replacement generation is already scheduled');
 assert.doesNotMatch(server.match(/function scheduleBiSectionBackgroundGeneration[\s\S]*?\n\}/)?.[0] || '', /\$\{force \? '\|force' : ''\}/,
   'a forced refresh must not create a second concurrent producer key');
 

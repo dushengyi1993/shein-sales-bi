@@ -209,6 +209,13 @@ assert.match(portalGenerator, /FROM mart\.storage_fee_store_daily_cache\s+WHERE 
   'today storage allocation must use the same atomically published per-store accounting snapshot');
 assert.match(portalServer, /profitBackedSections = new Set\(\['profit', 'homeProfit', 'homeRankings', 'rankings', 'productSalesDaily', 'inventoryTrend'\]\)/,
   'inventory trend must use the published profit cache instead of expanding the live canonical view');
+assert.match(portalServer, /accountingFreshnessRequiredSections = new Set\(\['profit', 'homeProfit', 'rankings', 'productSalesDaily', 'inventoryTrend'\]\)/,
+  'homepage rankings must read the last complete accounting cache without blocking on a moving-cost rebuild');
+assert.doesNotMatch(
+  portalServer.match(/accountingFreshnessRequiredSections = new Set\(\[[^\]]+\]\)/)?.[0] || '',
+  /homeRankings/,
+  'current-day live order overlays make a synchronous homeRankings accounting rebuild redundant',
+);
 assert.match(portalGenerator, /运营可售默认只计 09 散件仓/);
 assert.doesNotMatch(portalGenerator, /09散件仓 \+ 01整箱仓为可售/);
 assert.match(portalClient, /运营可售默认只计 09 散件仓/);
