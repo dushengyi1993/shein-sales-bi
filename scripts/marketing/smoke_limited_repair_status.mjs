@@ -74,6 +74,12 @@ assert.equal(driftRepairBatchExitCode({businessBlockedGroups: 2, deferredGroups:
 assert.equal(driftRepairBatchExitCode({businessBlockedGroups: 2}), 4);
 assert.equal(driftRepairBatchExitCode({}), 0);
 
+const batchSource = await import('node:fs/promises').then(fs => (
+  fs.readFile(new URL('./batch_fix_limited_discount_drift.mjs', import.meta.url), 'utf8')
+));
+assert.match(batchSource, /storesBlocked: blockedStoreKeys\.size/);
+assert.match(batchSource, /storesFailed: failedStoreKeys\.size/);
+
 console.log(JSON.stringify({
   ok: true,
   test: 'daily_guard_and_drift_worker_classify_completed_blocked_and_failed_repairs',

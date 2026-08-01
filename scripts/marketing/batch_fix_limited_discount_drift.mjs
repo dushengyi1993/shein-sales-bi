@@ -16,7 +16,9 @@ import {
 } from '../../lib/marketing_automation_authorization.mjs';
 import {
   driftRepairBatchExitCode,
+  isCompletedDriftRepairResult,
   isSettledDriftRepairResult,
+  isTerminalDriftBusinessBlock,
   summarizeDriftRepairOutcomes,
 } from '../../lib/marketing_drift_repair_outcome.mjs';
 import {loadExactDriftRepairManifest} from '../../lib/marketing_repair_manifest.mjs';
@@ -614,7 +616,20 @@ process.exitCode = driftRepairBatchExitCode({
 
 function summarizeTotals(results) {
   const storeKeys = [...new Set(results.map(result => result.storeKey).filter(Boolean))];
-  const failedStoreKeys = new Set(results.filter(result => !result.ok).map(result => result.storeKey).filter(Boolean));
+  const resultsByStore = new Map(storeKeys.map(storeKey => [
+    storeKey,
+    results.filter(result => result.storeKey === storeKey),
+  ]));
+  const failedStoreKeys = new Set(storeKeys.filter(storeKey => (
+    resultsByStore.get(storeKey).some(result => !isCompletedDriftRepairResult(result) && !isTerminalDriftBusinessBlock(result))
+  )));
+  const blockedStoreKeys = new Set(storeKeys.filter(storeKey => (
+    !failedStoreKeys.has(storeKey)
+    && resultsByStore.get(storeKey).some(isTerminalDriftBusinessBlock)
+  )));
+  const completedStoreKeys = new Set(storeKeys.filter(storeKey => (
+    resultsByStore.get(storeKey).every(isCompletedDriftRepairResult)
+  )));
   const targetSkcs = results.reduce((sum, result) => sum + (result.targetSkcs?.length || 0), 0);
   const removedSkcs = results.reduce((sum, result) => (
     sum + (result.removals || [])
@@ -626,7 +641,8 @@ function summarizeTotals(results) {
   const outcomes = summarizeDriftRepairOutcomes(results);
   return {
     storesProcessed: storeKeys.length,
-    storesOk: storeKeys.length - failedStoreKeys.size,
+    storesOk: completedStoreKeys.size,
+    storesBlocked: blockedStoreKeys.size,
     storesFailed: failedStoreKeys.size,
     groupsProcessed: results.length,
     targetSkcs,
