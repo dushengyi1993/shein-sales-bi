@@ -344,9 +344,14 @@ if [[ "$DRIFT_STATUS" != "not_required" && "$DRIFT_STATUS" != "completed" ]]; th
       write_state pending "drift repair chunk completed; queue will resume without replaying successful groups"
       exit 0
     fi
-    update_stage driftRepair failed false "execute/readback failed status=$status" "$RESULT_PATH"
-    write_state failed "drift repair failed status=$status"
-    exit "$status"
+    if [[ "$status" -eq 4 ]]; then
+      update_stage driftRepair blocked false "current inventory/platform conditions safely blocked one or more drift repairs; existing protection was preserved" "$RESULT_PATH"
+      consume_group_budget "$(new_groups_in_result "$RESULT_PATH")"
+    else
+      update_stage driftRepair failed false "execute/readback failed status=$status" "$RESULT_PATH"
+      write_state failed "drift repair failed status=$status"
+      exit "$status"
+    fi
   fi
 fi
 
@@ -389,7 +394,15 @@ if [[ "$FALLBACK_STATUS" != "not_required" && "$FALLBACK_STATUS" != "completed" 
   fi
 fi
 
-if [[ "$(queue_value 'j.status' pending)" == "awaiting_final_readback" ]]; then
+QUEUE_STATUS="$(queue_value 'j.status' pending)"
+if [[ "$QUEUE_STATUS" == "blocked" ]]; then
+  write_state blocked "all executable repairs were processed; remaining links are safely blocked by current inventory/platform conditions"
+  send_daily_group_report
+  echo "[cloud_marketing_repair] done with terminal business blockers date=$DATE"
+  exit 0
+fi
+
+if [[ "$QUEUE_STATUS" == "awaiting_final_readback" ]]; then
   if run_final_readback; then
     if [[ "$(queue_value 'j.status' pending)" == "completed" ]]; then
       write_state ok "all queued repairs passed final full-store live readback"

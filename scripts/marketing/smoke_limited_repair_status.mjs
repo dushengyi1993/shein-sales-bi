@@ -1,5 +1,11 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import {
+  driftRepairBatchExitCode,
+  isSettledDriftRepairResult,
+  isTerminalDriftBusinessBlock,
+  summarizeDriftRepairOutcomes,
+} from '../../lib/marketing_drift_repair_outcome.mjs';
 import {normalizeLimitedRepairResult} from '../../lib/marketing_limited_repair_status.mjs';
 
 const modern = normalizeLimitedRepairResult({
@@ -49,7 +55,26 @@ assert.equal(legacy.executedCount, 2);
 assert.equal(legacy.blockedCount, 1);
 assert.equal(legacy.remainingGapByAfterScan, 1);
 
+const driftResults = [
+  {ok: true, status: 'replaced_all', readback: {ok: true, safe: true}},
+  {ok: false, status: 'initial_platform_blocked_preserved', readback: {ok: false, safe: true}},
+  {ok: false, status: 'create_preflight_blocked_without_deletion', readback: {ok: false, safe: true}},
+];
+assert.equal(isTerminalDriftBusinessBlock(driftResults[1]), true);
+assert.equal(isSettledDriftRepairResult(driftResults[1]), true, 'safe business blockers must not replay within the same immutable daily manifest');
+assert.equal(isTerminalDriftBusinessBlock(driftResults[2]), false, 'transport/preflight failures remain retryable system failures');
+assert.deepEqual(summarizeDriftRepairOutcomes(driftResults), {
+  completedGroups: 1,
+  businessBlockedGroups: 1,
+  failedGroups: 1,
+  unsafeGroups: 0,
+});
+assert.equal(driftRepairBatchExitCode({failedGroups: 1, businessBlockedGroups: 2}), 2);
+assert.equal(driftRepairBatchExitCode({businessBlockedGroups: 2, deferredGroups: 1}), 3);
+assert.equal(driftRepairBatchExitCode({businessBlockedGroups: 2}), 4);
+assert.equal(driftRepairBatchExitCode({}), 0);
+
 console.log(JSON.stringify({
   ok: true,
-  test: 'daily_guard_normalizes_modern_and_legacy_limited_repair_results',
+  test: 'daily_guard_and_drift_worker_classify_completed_blocked_and_failed_repairs',
 }));

@@ -14,6 +14,11 @@ import {
   assertMarketingAutomationAuthorization,
   MARKETING_AUTOMATION_ACTIONS,
 } from '../../lib/marketing_automation_authorization.mjs';
+import {
+  driftRepairBatchExitCode,
+  isSettledDriftRepairResult,
+  summarizeDriftRepairOutcomes,
+} from '../../lib/marketing_drift_repair_outcome.mjs';
 import {loadExactDriftRepairManifest} from '../../lib/marketing_repair_manifest.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -379,6 +384,9 @@ async function processStore(storeKey, rescuePath, args, manualIndex, browserSess
       safe: tx.safe === true,
       restoredCoveredSkcs: tx.compensation?.restoredCoveredSkcs || [],
     };
+    record.safe = tx.safe === true;
+    record.terminal = tx.terminal === true;
+    record.initialBlockers = tx.initialBlockers || {};
     record.ok = tx.ok === true;
     record.status = String(tx.status || (record.ok ? 'replaced_all' : 'failed'));
     record.error = record.ok ? '' : (tx.safe === true
@@ -409,18 +417,16 @@ function summarizeRaw(result) {
   };
 }
 
-function isCompletedRepairResult(result) {
-  if (!result?.ok) return false;
-  if (result.readback?.ok === true) return true;
-  return ['already_exactly_covered', 'dry_run_transaction_locked', 'dry_run_create_only', 'protected_manual_special_skipped'].includes(String(result.status || ''));
-}
-
 async function loadResumableResults(args, workFingerprint) {
   if (!args.resume || !(await pathExists(args.out))) return [];
   try {
     const previous = JSON.parse(await fs.readFile(args.out, 'utf8'));
     if (previous.workFingerprint !== workFingerprint || previous.dryRunOnly !== args.dryRunOnly) return [];
-    return (previous.results || []).filter(isCompletedRepairResult);
+    // A platform/inventory blocker is settled for this immutable daily
+    // manifest. Replaying it in every worker window cannot make progress and
+    // used to turn safe business conditions into a false system failure. A
+    // new daily guard/fingerprint will reconsider the link automatically.
+    return (previous.results || []).filter(isSettledDriftRepairResult);
   } catch {
     return [];
   }
@@ -589,16 +595,22 @@ for (const [storeKey, storeEntries] of entriesByStore.entries()) {
 }
 
 const finalDoc = await writeProgress(args, common, results, deferredEntries);
+const outcomeTotals = summarizeDriftRepairOutcomes(results);
 console.log(JSON.stringify({
-  ok: results.every(result => result.ok) && deferredEntries.length === 0,
+  ok: outcomeTotals.failedGroups === 0
+    && outcomeTotals.businessBlockedGroups === 0
+    && deferredEntries.length === 0,
   complete: deferredEntries.length === 0,
   out: rel(args.out),
   totals: finalDoc.totals,
+  outcomes: outcomeTotals,
   resumedGroups: resumedResults.length,
   deferredGroups: deferredEntries.length,
 }, null, 2));
-if (!results.every(result => result.ok)) process.exitCode = 2;
-else if (deferredEntries.length) process.exitCode = 3;
+process.exitCode = driftRepairBatchExitCode({
+  ...outcomeTotals,
+  deferredGroups: deferredEntries.length,
+});
 
 function summarizeTotals(results) {
   const storeKeys = [...new Set(results.map(result => result.storeKey).filter(Boolean))];
@@ -611,6 +623,7 @@ function summarizeTotals(results) {
   ), 0);
   const blockedSkcs = results.reduce((sum, result) => sum + (result.blockedSkcs?.length || 0), 0);
   const createdSkcs = results.reduce((sum, result) => sum + (result.readback?.overlapSkcs?.length || 0), 0);
+  const outcomes = summarizeDriftRepairOutcomes(results);
   return {
     storesProcessed: storeKeys.length,
     storesOk: storeKeys.length - failedStoreKeys.size,
@@ -620,6 +633,7 @@ function summarizeTotals(results) {
     removedSkcs,
     blockedSkcs,
     createdSkcs,
+    ...outcomes,
     statuses: results.reduce((acc, result) => {
       acc[result.status] = (acc[result.status] || 0) + 1;
       return acc;
