@@ -223,13 +223,15 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 
 - 临时会话只保存 session id、短期访问 token、过期时间、端口、PID、日志文件和完成状态；不把密码、cookie、localStorage、请求头或 SHEIN token 写入仓库、文档或聊天。
 
-- 操作流程：打开维护中心 -> 选店铺和页面 -> 打开云端登录窗口 -> 处理普通登录弹窗或人工完成登录/验证码 -> 回维护中心点“我已完成并关闭”。完成动作会触发 `export_shein_browser_session.mjs --no-launch` 和 `bootstrap_shein_browser_session.mjs --no-launch` 验证，然后关闭 Chrome / x11vnc / websockify / Xvfb。
+- 操作流程：打开维护中心 -> 选店铺和页面 -> 打开云端登录窗口 -> 处理普通登录弹窗或人工完成登录/验证码 -> 回维护中心点“我已完成并关闭”。完成动作会触发 `export_shein_browser_session.mjs --no-launch` 和 `bootstrap_shein_browser_session.mjs --no-launch` 双重验证，然后关闭 Chrome / x11vnc / websockify / Xvfb；任一验证失败都不会标成“已完成”。
+
+- 自动续跑：若 `link-business-last-partial.json` 仍记录该店因登录失效导致的链接/业务域缺口，验证成功后会写入私有恢复队列；`shein-bi-cloud-manual-login-recovery.path` 会立即唤醒独立 service，timer 每 2 分钟作漏触发兜底。恢复任务只租用、清理和补抓该店，成功后合并之前已成功的其他店铺证据、入仓、刷新 BI，并让 watchdog 将旧 session-manager 退出状态识别为已恢复。用户不需要再通知维护人员手工续跑；任务不挂在 Portal 进程下，Portal 重启或内存限制不会中断其监督边界。
 
 - 普通登录弹窗边界：协议签署、公告、通知确认、`知道了` / `确认` / `同意` 等不涉及店铺经营承诺、资质、付费、活动报名或授权范围变更的弹窗，可由运维代理在维护窗口中关闭/确认后再点登录；它们不等同于验证码阻塞。若弹窗内容是新的法律承诺、资质承诺、付费/结算、活动报名、授权范围变化，或出现验证码、滑块、短信、人脸、缺账号密码，则停下让用户处理。
 
 - Nginx 配置必须支持 WebSocket upgrade；仓库模板为 `infra/nginx/shein-bi.conf`，包含 `proxy_set_header Upgrade` 和 `proxy_set_header Connection "upgrade"`。Caddy 在公网 TLS 层传入的 `X-Forwarded-Proto: https` 必须由 Nginx 继续传给 Portal，不得用内部 HTTP hop 的 `$scheme` 覆盖；否则真实同源 POST 会被误判为跨域。修改后要用携带 `Host: sa.dushengyi.cc` / `Origin: https://sa.dushengyi.cc` / `X-Forwarded-Proto: https` 的 Nginx 内网探针验证：未登录请求应返回 `401`，不应返回同源拒绝 `403`。
 
-- 日志与状态：状态文件 `/srv/shein-bi/runtime/cloud_manual_login_sessions.json`；日志目录 `/srv/shein-bi/logs/cloud-manual-login`。这些都是服务器私有运行态，不进 GitHub。
+- 日志与状态：状态文件 `/srv/shein-bi/runtime/cloud_manual_login_sessions.json`；自动续跑队列/状态/归档目录 `/srv/shein-bi/runtime/cloud_manual_login_recovery`；日志目录 `/srv/shein-bi/logs/cloud-manual-login`。这些都是服务器私有运行态，不进 GitHub。
 
 - 若开启时提示某店 `CDP port ... is already open`：先确认是否有生产同步 service 正在运行。`cloud_manual_login_session.mjs` 会在确认没有生产同步 service 活跃时自动清理已完成/已关闭临时窗口留下的孤儿 Chrome/VNC 进程；若生产同步正在运行，应等待同步结束，不要强杀。
 

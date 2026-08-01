@@ -14,6 +14,7 @@ import {
   resolveMarketingScanEvidencePath,
 } from '../lib/cloud_watchdog_recovery.mjs';
 import {collapseWatchdogRootCauseIssues} from '../lib/cloud_watchdog_issue_collapse.mjs';
+import {assessSessionManagerManualRecovery} from '../lib/cloud_manual_login_recovery.mjs';
 import {inspectReleaseSourceState} from './check_release_source_state.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -27,6 +28,7 @@ const UNIT_NAMES = [
   'shein-bi-cloud-et-forwarder.service',
   'shein-bi-cloud-daily-refresh.service',
   'shein-bi-cloud-session-manager.service',
+  'shein-bi-cloud-manual-login-recovery.service',
   'shein-bi-cloud-morning-chain.service',
   'shein-bi-cloud-order-closure.service',
   'shein-bi-cloud-disk-maintenance.service',
@@ -38,6 +40,7 @@ const TIMER_NAMES = [
   'shein-bi-cloud-et-forwarder.timer',
   'shein-bi-cloud-morning-chain.timer',
   'shein-bi-cloud-session-manager.timer',
+  'shein-bi-cloud-manual-login-recovery.timer',
   'shein-bi-cloud-order-closure.timer',
   'shein-bi-cloud-marketing-live-guard.timer',
   'shein-bi-cloud-marketing-repair.timer',
@@ -461,6 +464,11 @@ async function main() {
     for (const message of productReconciliationHealth.messages) issues.push(`商品 OpenAPI 对账需处理：${message}`);
   }
   const serviceExitAcks = await readServiceExitAcks();
+  const sessionManagerReport = await readJsonIfExists(path.join(ROOT, 'outputs', 'reports', 'cloud-session-manager-latest.json'));
+  const manualLoginState = await readJsonIfExists(
+    process.env.SHEIN_MANUAL_LOGIN_STATE_FILE || '/srv/shein-bi/runtime/cloud_manual_login_sessions.json',
+  );
+  let sessionManagerManualRecovery = {recovered: false, reason: 'session_manager_unit_not_checked'};
   const units = [];
   for (const unit of UNIT_NAMES) {
     const status = await systemctlShow(unit);
@@ -472,10 +480,29 @@ async function main() {
     const abnormalState = status.ActiveState === 'failed' || !resultOk;
     const acknowledgedExit = abnormalExit && !abnormalState && serviceExitAcks.has(serviceExitAckKey(status));
     status.serviceExitAcknowledged = acknowledgedExit;
+    const isSessionManager = unit === 'shein-bi-cloud-session-manager.service';
+    if (isSessionManager) {
+      sessionManagerManualRecovery = assessSessionManagerManualRecovery({
+        sessionReport: sessionManagerReport,
+        manualLoginState,
+        unitStatus: status,
+      });
+      status.manualRecoveryVerified = sessionManagerManualRecovery.recovered === true;
+    }
     if (ALWAYS_RUNNING_UNITS.has(unit) && status.ActiveState !== 'active') {
       issues.push(`常驻服务未运行：${unit} state=${status.ActiveState || '-'} result=${status.Result || '-'}`);
     } else if (abnormalState || (abnormalExit && !acknowledgedExit)) {
-      issues.push(`服务异常：${unit} state=${status.ActiveState || '-'} result=${status.Result || '-'} exit=${status.ExecMainStatus || '-'} code=${status.ExecMainCode || '-'}`);
+      if (isSessionManager && sessionManagerManualRecovery.recovered) {
+        maintenanceNotes.push(
+          `店铺登录异常已在人工登录后验证恢复：${sessionManagerManualRecovery.recoveredStores?.join('、') || '最新会话'}；不再重复报警旧 service 退出状态。`,
+        );
+        recoveries.push({
+          type: 'manual_login_session_recovery',
+          ...sessionManagerManualRecovery,
+        });
+      } else {
+        issues.push(`服务异常：${unit} state=${status.ActiveState || '-'} result=${status.Result || '-'} exit=${status.ExecMainStatus || '-'} code=${status.ExecMainCode || '-'}`);
+      }
     }
   }
   const timers = [];
@@ -704,7 +731,6 @@ async function main() {
     // for operations follow-up, but do not page Feishu unless pending/stale/failed checks above fire.
   }
 
-  const sessionManagerReport = await readJsonIfExists(path.join(ROOT, 'outputs', 'reports', 'cloud-session-manager-latest.json'));
   for (const row of Array.isArray(sessionManagerReport?.results) ? sessionManagerReport.results : []) {
     const relativeProbe = String(row?.probe?.reportFile || '').trim();
     const probePath = relativeProbe ? path.resolve(ROOT, relativeProbe) : '';
@@ -728,6 +754,7 @@ async function main() {
     dailyRefresh,
     linkBusinessSuccess,
     dailyRefreshRecovery,
+    sessionManagerManualRecovery,
     productReconciliationHealth,
     issueCollapse,
     marketingGuardState,

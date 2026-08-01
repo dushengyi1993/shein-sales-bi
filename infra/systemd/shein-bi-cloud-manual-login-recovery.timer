@@ -1,0 +1,12 @@
+[Unit]
+Description=Fallback poll for verified SHEIN manual-login recovery jobs
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=2min
+AccuracySec=15s
+Persistent=true
+Unit=shein-bi-cloud-manual-login-recovery.service
+
+[Install]
+WantedBy=timers.target

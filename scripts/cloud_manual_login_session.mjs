@@ -16,11 +16,15 @@ import {fileURLToPath} from 'node:url';
 import {spawn, spawnSync} from 'node:child_process';
 import crypto from 'node:crypto';
 import net from 'node:net';
+import {planManualLoginLinkRecovery} from '../lib/cloud_manual_login_recovery.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
 const DEFAULT_STATE_FILE = process.env.SHEIN_MANUAL_LOGIN_STATE_FILE || '/srv/shein-bi/runtime/cloud_manual_login_sessions.json';
 const DEFAULT_LOG_DIR = process.env.SHEIN_MANUAL_LOGIN_LOG_DIR || '/srv/shein-bi/logs/cloud-manual-login';
+const DEFAULT_RECOVERY_DIR = process.env.SHEIN_MANUAL_LOGIN_RECOVERY_DIR || '/srv/shein-bi/runtime/cloud_manual_login_recovery';
+const DEFAULT_LINK_PARTIAL_FILE = process.env.SHEIN_LINK_BUSINESS_PARTIAL_FILE
+  || path.join(ROOT, 'state', 'cloud_ops_alerts', 'link-business-last-partial.json');
 const DEFAULT_EXPIRES_MINUTES = 30;
 const DEFAULT_WIDTH = 1365;
 const DEFAULT_HEIGHT = 900;
@@ -41,6 +45,7 @@ const BUSY_SYNC_SERVICES = [
   'shein-bi-cloud-yesterday.service',
   'shein-bi-cloud-daily-refresh.service',
   'shein-bi-cloud-session-manager.service',
+  'shein-bi-cloud-manual-login-recovery.service',
   'shein-bi-cloud-et-forwarder.service',
   'shein-bi-cloud-rtv-verify.service',
 ];
@@ -237,6 +242,7 @@ function publicSession(session, options = {}) {
     openUrl: showToken ? session.openUrl : '',
     token: showToken ? session.token : undefined,
     finish: session.finish || null,
+    recovery: session.recovery || null,
     error: session.error || '',
   };
 }
@@ -420,6 +426,38 @@ async function finishExport(session) {
   };
 }
 
+async function scheduleLinkRecovery(session, args) {
+  const partialState = await readJson(DEFAULT_LINK_PARTIAL_FILE, null);
+  const plan = planManualLoginLinkRecovery({partialState, storeKey: session.storeKey});
+  if (!plan.required) return {status: 'not_required', reason: plan.reason};
+
+  const queueDir = path.join(DEFAULT_RECOVERY_DIR, 'queue');
+  await fs.mkdir(queueDir, {recursive: true});
+  const logFile = path.join(args.logDir, `${session.id}-recovery.log`);
+  const scheduledAt = new Date().toISOString();
+  const queueFile = path.join(queueDir, `${session.id}.json`);
+  const temporary = `${queueFile}.${process.pid}.tmp`;
+  await fs.writeFile(temporary, `${JSON.stringify({
+    schemaVersion: 'shein-manual-login-recovery-queue/v1',
+    sessionId: session.id,
+    storeKey: plan.storeKey,
+    date: plan.date,
+    scheduledAt,
+    priorLogFile: plan.priorLogFile,
+  }, null, 2)}\n`, 'utf8');
+  await fs.rename(temporary, queueFile);
+  return {
+    status: 'scheduled',
+    reason: plan.reason,
+    storeKey: plan.storeKey,
+    date: plan.date,
+    scheduledAt,
+    queueFile,
+    stateFile: path.join(DEFAULT_RECOVERY_DIR, `${session.id}.json`),
+    logFile,
+  };
+}
+
 async function cmdStart(args) {
   if (!args.storeKey) throw new Error('Missing --store');
   const config = await readStoreConfig();
@@ -580,17 +618,25 @@ async function cmdStop(args, finish = false) {
     finishResult = await finishExport(session);
     session.finish = finishResult;
   }
-  session.status = finish ? (finishResult?.export?.ok ? 'completed' : 'completed_with_warning') : 'closed';
+  const finishVerified = finishResult?.export?.ok === true && finishResult?.probe?.ok === true;
+  session.status = finish ? (finishVerified ? 'completed' : 'completed_with_warning') : 'closed';
   if (finish) session.completedAt = new Date().toISOString();
   else session.closedAt = new Date().toISOString();
   session.stopResults = await stopProcesses(session);
+  if (finishVerified) session.recovery = await scheduleLinkRecovery(session, args);
   session.token = '';
   session.openUrl = '';
   session.openPath = '';
   state.sessions[idx] = session;
   state.updatedAt = new Date().toISOString();
   await writeJson(args.stateFile, state);
-  return {ok: true, session: publicSession(session, {showToken: true})};
+  return {
+    ok: !finish || finishVerified,
+    error: finish && !finishVerified
+      ? '登录态没有通过完整验证，请重新打开该店登录窗口后再试。'
+      : '',
+    session: publicSession(session, {showToken: true}),
+  };
 }
 
 async function main() {

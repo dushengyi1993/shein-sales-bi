@@ -16,7 +16,7 @@
 ## 2. 日常入口
 
 - 云端 BI 门户：[https://sa.dushengyi.cc/](https://sa.dushengyi.cc/)，旧 IP 入口 [http://43.165.167.135/](http://43.165.167.135/) 仅作兜底；已启用 BI 应用内登录，密码不得写入仓库或文档。
-- 云端登录维护中心：[https://sa.dushengyi.cc/cloud-login-maintenance](https://sa.dushengyi.cc/cloud-login-maintenance)。当 SHEIN / SBN 子系统登录态失效、遇到验证码/滑块，或被协议签署 / 公告 / 通知确认等普通登录弹窗挡住时，用它临时打开指定店铺的云端浏览器窗口；普通登录干扰弹窗可由运维代理关闭/确认后再点登录，完成后必须点“我已完成并关闭”。
+- 云端登录维护中心：[https://sa.dushengyi.cc/cloud-login-maintenance](https://sa.dushengyi.cc/cloud-login-maintenance)。当 SHEIN / SBN 子系统登录态失效、遇到验证码/滑块，或被协议签署 / 公告 / 通知确认等普通登录弹窗挡住时，用它临时打开指定店铺的云端浏览器窗口；普通登录干扰弹窗可由运维代理关闭/确认后再点登录，完成后必须点“我已完成并关闭”。登录态双重验证通过后，系统会自动补跑该店之前失败的链接/业务域数据，无需再人工通知续跑。
 - 本机 BI 门户和局域网协作入口已封存：`http://127.0.0.1:8787/`、`http://DUSHENGYI-PC2:8787/` 不再作为正式入口。
 - 仓库门户灾备文件：`outputs/bi-portal/index.html`（不代表当前云端运行态）
 - V2 是当前唯一正式生产门户；V1 已从线上 `/v1/` 下线，只保留 GitHub release tag `2026.06.18-v1-final-archive` 作为恢复点，不再作为日常运维对象。V2 数据判断和验收必须走云端运行态/线上 section API。

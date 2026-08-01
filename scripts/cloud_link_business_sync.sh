@@ -52,15 +52,23 @@ check_portal_health() {
 close_store_browsers() {
   cd "$ROOT"
   local owned_args=()
+  local selection_args=(--all)
   if [[ "$LEASE_ACTIVE" == "1" ]]; then
     owned_args+=(--owned-lease-task "$LEASE_TASK" --owned-lease-run-id "$LEASE_RUN_ID")
   fi
-  node scripts/cleanup_shein_store_browsers.mjs --all --cleanup-chrome-tmp --kill-after-sec 5 "${owned_args[@]}" || true
+  if [[ -n "${SHEIN_LINK_BUSINESS_STORES:-}" ]]; then
+    selection_args=(--stores "$SHEIN_LINK_BUSINESS_STORES")
+  fi
+  node scripts/cleanup_shein_store_browsers.mjs "${selection_args[@]}" --cleanup-chrome-tmp --kill-after-sec 5 "${owned_args[@]}" || true
 }
 
 lease_action() {
+  local selection_args=(--group ALL)
+  if [[ -n "${SHEIN_LINK_BUSINESS_STORES:-}" ]]; then
+    selection_args=(--stores "$SHEIN_LINK_BUSINESS_STORES")
+  fi
   node scripts/manage_browser_task_leases.mjs "$1" --root "$ROOT" --task "$LEASE_TASK" \
-    --run-id "$LEASE_RUN_ID" --owner-pid "$$" --ttl-sec "$LEASE_TTL_SEC" --group ALL
+    --run-id "$LEASE_RUN_ID" --owner-pid "$$" --ttl-sec "$LEASE_TTL_SEC" "${selection_args[@]}"
 }
 
 on_exit() {
@@ -198,9 +206,42 @@ done
 if [[ "${#FAILED_STORES[@]}" -gt 0 ]]; then
   echo "[cloud_link_business_sync] WARN failed stores: ${FAILED_STORES[*]}" >&2
   mkdir -p "$ROOT/state/cloud_ops_alerts"
-  cat > "$ROOT/state/cloud_ops_alerts/link-business-last-partial.json" <<JSON
-{"date":"$DATE","generatedAt":"$(TZ="$TZ_NAME" date --iso-8601=seconds)","failedStores":"${FAILED_STORES[*]}","successStores":"${SUCCESS_STORES[*]}","logFile":"$LOG_FILE"}
-JSON
+  DATE="$DATE" \
+  GENERATED_AT="$(TZ="$TZ_NAME" date --iso-8601=seconds)" \
+  FAILED_STORES="${FAILED_STORES[*]}" \
+  SUCCESS_STORES="${SUCCESS_STORES[*]}" \
+  LOG_FILE="$LOG_FILE" \
+  node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const file = path.join(process.cwd(), 'state', 'cloud_ops_alerts', 'link-business-last-partial.json');
+const split = value => (Array.isArray(value) ? value : String(value || '').split(/[\s,]+/))
+  .map(item => String(item || '').trim().toUpperCase())
+  .filter(Boolean);
+let prior = null;
+try { prior = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+const sameDate = String(prior?.date || '') === String(process.env.DATE || '');
+const success = new Set(sameDate ? split(prior?.successStores) : []);
+const failed = new Set(sameDate ? split(prior?.failedStores) : []);
+for (const store of split(process.env.SUCCESS_STORES)) {
+  success.add(store);
+  failed.delete(store);
+}
+for (const store of split(process.env.FAILED_STORES)) {
+  failed.add(store);
+  success.delete(store);
+}
+const payload = {
+  date: process.env.DATE,
+  generatedAt: process.env.GENERATED_AT,
+  failedStores: [...failed].join(' '),
+  successStores: [...success].join(' '),
+  logFile: process.env.LOG_FILE,
+};
+const temporary = `${file}.${process.pid}.tmp`;
+fs.writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+fs.renameSync(temporary, file);
+NODE
   if [[ "${SHEIN_LINK_BUSINESS_LOAD_PARTIAL:-0}" != "1" && "${SHEIN_LINK_BUSINESS_LOAD_PARTIAL:-0}" != "true" ]]; then
     echo "[cloud_link_business_sync] partial result recorded; skip BI warehouse/portal refresh to avoid presenting incomplete link/business date" >&2
     check_portal_health

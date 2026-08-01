@@ -1,0 +1,40 @@
+[Unit]
+Description=SHEIN BI targeted refresh after verified manual store login
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+RequiresMountsFor=/opt/shein-bi/app/outputs /opt/shein-bi/app/profiles /srv/shein-bi/runtime /srv/shein-bi/logs
+
+[Service]
+Type=oneshot
+User=sheinops
+Group=sheinops
+UMask=0077
+WorkingDirectory=/opt/shein-bi/app
+Environment=HOME=/home/sheinops
+Environment=TZ=Asia/Shanghai
+Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_MANUAL_LOGIN_RECOVERY_DIR=/srv/shein-bi/runtime/cloud_manual_login_recovery
+Environment=SHEIN_MANUAL_LOGIN_LOG_DIR=/srv/shein-bi/logs/cloud-manual-login
+TimeoutStartSec=7200
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUWeight=50
+MemoryHigh=2600M
+MemoryMax=3400M
+OOMPolicy=stop
+KillMode=control-group
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictRealtime=true
+ExecStartPre=+/usr/bin/install -d -o sheinops -g sheinops -m 2770 /srv/shein-bi/runtime/cloud_manual_login_recovery
+ExecStartPre=+/usr/bin/install -d -o sheinops -g sheinops -m 2770 /srv/shein-bi/runtime/cloud_manual_login_recovery/queue
+ExecStartPre=+/usr/bin/install -d -o sheinops -g sheinops -m 2770 /srv/shein-bi/logs/cloud-manual-login
+ExecCondition=/usr/bin/bash -c 'for unit in shein-bi-cloud-daily-refresh.service shein-bi-cloud-yesterday.service shein-bi-cloud-et-forwarder.service shein-bi-cloud-session-manager.service shein-bi-db-backup.service shein-bi-cloud-marketing-repair.service; do /usr/bin/systemctl is-active --quiet "$$unit" && exit 1; done; exit 0'
+ExecStart=/usr/bin/node /opt/shein-bi/app/scripts/cloud_manual_login_recovery_queue.mjs

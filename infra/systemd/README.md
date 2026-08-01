@@ -4,7 +4,7 @@
 
 ## 当前启用集与条件启用集（2026-07-30）
 
-**当前生产应启用**：`shein-bi-portal.service`、`shein-bi-webhook.service`，以及 `shein-bi-cloud-morning-chain`、`shein-bi-cloud-yesterday`、`shein-bi-db-backup`、`shein-bi-cloud-order-closure`、`shein-bi-cloud-browser-cleanup`、`shein-bi-cloud-disk-maintenance`、`shein-bi-cloud-marketing-live-guard`、`shein-bi-cloud-marketing-repair`、`shein-bi-cloud-watchdog`、`shein-bi-cloud-et-forwarder`、`shein-bi-cloud-et-storage-fee`、`shein-bi-cloud-session-manager` 的 timer。`daily-refresh` 由晨间链路触发，没有独立 timer。
+**当前生产应启用**：`shein-bi-portal.service`、`shein-bi-webhook.service`，以及 `shein-bi-cloud-morning-chain`、`shein-bi-cloud-yesterday`、`shein-bi-db-backup`、`shein-bi-cloud-order-closure`、`shein-bi-cloud-browser-cleanup`、`shein-bi-cloud-disk-maintenance`、`shein-bi-cloud-marketing-live-guard`、`shein-bi-cloud-marketing-repair`、`shein-bi-cloud-watchdog`、`shein-bi-cloud-et-forwarder`、`shein-bi-cloud-et-storage-fee`、`shein-bi-cloud-session-manager`、`shein-bi-cloud-manual-login-recovery` 的 timer；人工登录恢复同时启用同名 `.path` 以便队列落盘后立即启动。`daily-refresh` 由晨间链路触发，没有独立 timer。
 
 **条件启用**：`shein-bi-cloud-et-forwarder.timer`、`shein-bi-cloud-et-storage-fee.timer`、`shein-bi-cloud-session-manager.timer` 只有在服务器本地 ET/店铺授权和对应 profile 已验收时才启用；当前生产已验收时属于上面的启用集。`shein-bi-cloud-today.service` 只作人工灾备，不安装 timer。`shein-bi-lark-sales-qa.service` 和自动飞书日报保持 `disabled + inactive`。
 
@@ -14,6 +14,7 @@ Linux 生产健康只以 systemd、watchdog、Portal health 和云端数据审�
 
 - 当天销售不再使用 `shein-bi-cloud-today.timer` 每小时抓取。半托订单 Webhook 收到后按单查询 OpenAPI 并增量更新正式销售事实，Portal 通过 PostgreSQL `NOTIFY` + 登录态 SSE 刷新当前页面；`shein-bi-cloud-today.service` 只保留为人工灾备入口，不安装/启用对应 timer。
 - `shein-bi-cloud-session-manager.timer`：每天 `02:20`，在 `03:00` 最终日核对前顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并检查 profile 体积。
+- `shein-bi-cloud-manual-login-recovery.path` / `.timer`：人工登录完成且双重探测通过后，立即消费私有恢复队列，定向补跑该店之前失败的链接/业务域数据；path 负责即时唤醒，2 分钟 timer 只作漏触发兜底。service 使用独立 cgroup 和内存护栏，不把 Chrome 补采挂在 Portal cgroup 下。
 - `shein-bi-cloud-yesterday.timer`：每天 `03:00` 抓取前一天 WebAPI 独立核对文件并复核前两天稳定日；切换日及以后 WebAPI 不写正式事实，必须完成 19/19 店 OpenAPI 深度匹配后才调用数据库函数原子晋升 OpenAPI 最终日切片。任一失败、warning、缺店或差异都禁止晋升。该每日唯一性任务使用 `Persistent=true`，service 自身仍通过锁和日期状态防重复。
 - `shein-bi-db-backup.timer`：每天 `02:40` 备份业务库、Metabase 元数据库和生产人工特殊折扣登记到 `/srv/shein-bi/backups/auto`。本地保留 7 天；过期备份必须先归档到 `/lhcos-data/shein-bi-db-backups` 并通过源文件 SHA256、压缩包完整性和 COS 回读 SHA256 校验，之后才删除本地副本。COS 不可用或校验失败时保留本地文件。
 - `shein-bi-cloud-et-forwarder.timer`：每天 `01:20/04:20/07:20/10:20/13:20/17:20/20:20/23:20` 抓取 ET 货代仓/出库单、入仓，并轻量刷新订单/物流/售后相关 section；不开启开机补跑。需要服务器本地 `config/et_forwarder.local.json` 或 `ET_FORWARDER_USERNAME/ET_FORWARDER_PASSWORD`，密钥不进 GitHub。
@@ -62,7 +63,7 @@ systemctl show shein-bi-portal.service -p RequiresMountsFor
 部署到服务器后执行：
 
 ```bash
-cp infra/systemd/*.service infra/systemd/*.timer /etc/systemd/system/
+cp infra/systemd/*.service infra/systemd/*.timer infra/systemd/*.path /etc/systemd/system/
 cp infra/systemd/90-shein-bi-journald-disk-cap.conf /etc/systemd/journald.conf.d/
 chmod +x scripts/cloud_bi_refresh.sh scripts/cloud_db_backup.sh scripts/cloud_disk_maintenance.sh scripts/cloud_et_forwarder_sync.sh scripts/cloud_et_storage_fee_sync.sh scripts/cloud_link_business_sync.sh scripts/cloud_daily_refresh.sh scripts/cloud_daily_lark_report.sh scripts/cloud_marketing_live_guard.sh scripts/cloud_marketing_repair_worker.sh
 systemd-analyze verify /etc/systemd/system/shein-bi-portal.service /etc/systemd/system/shein-bi-webhook.service /etc/systemd/system/shein-bi-lark-sales-qa.service
@@ -71,8 +72,8 @@ systemctl daemon-reload
 # 在某些 systemd 状态下这会立即触发 timer 关联服务，造成部署时销售、
 # ET、日更、登录态管家等任务并发。推荐先 enable，再逐个 start timer；
 # start timer 只启动计时器，不应手动 start 对应 service。
-systemctl enable shein-bi-portal.service shein-bi-webhook.service shein-bi-cloud-morning-chain.timer shein-bi-cloud-yesterday.timer shein-bi-db-backup.timer shein-bi-cloud-order-closure.timer shein-bi-cloud-browser-cleanup.timer shein-bi-cloud-disk-maintenance.timer shein-bi-cloud-marketing-live-guard.timer shein-bi-cloud-marketing-repair.timer
-systemctl start shein-bi-portal.service shein-bi-webhook.service shein-bi-cloud-morning-chain.timer shein-bi-cloud-yesterday.timer shein-bi-db-backup.timer shein-bi-cloud-order-closure.timer shein-bi-cloud-browser-cleanup.timer shein-bi-cloud-disk-maintenance.timer shein-bi-cloud-marketing-live-guard.timer shein-bi-cloud-marketing-repair.timer
+systemctl enable shein-bi-portal.service shein-bi-webhook.service shein-bi-cloud-morning-chain.timer shein-bi-cloud-yesterday.timer shein-bi-db-backup.timer shein-bi-cloud-order-closure.timer shein-bi-cloud-browser-cleanup.timer shein-bi-cloud-disk-maintenance.timer shein-bi-cloud-marketing-live-guard.timer shein-bi-cloud-marketing-repair.timer shein-bi-cloud-manual-login-recovery.path shein-bi-cloud-manual-login-recovery.timer
+systemctl start shein-bi-portal.service shein-bi-webhook.service shein-bi-cloud-morning-chain.timer shein-bi-cloud-yesterday.timer shein-bi-db-backup.timer shein-bi-cloud-order-closure.timer shein-bi-cloud-browser-cleanup.timer shein-bi-cloud-disk-maintenance.timer shein-bi-cloud-marketing-live-guard.timer shein-bi-cloud-marketing-repair.timer shein-bi-cloud-manual-login-recovery.path shein-bi-cloud-manual-login-recovery.timer
 # 飞书问数保持暂停；以下两条必须分别返回 disabled / inactive：
 systemctl is-enabled shein-bi-lark-sales-qa.service || true
 systemctl is-active shein-bi-lark-sales-qa.service || true

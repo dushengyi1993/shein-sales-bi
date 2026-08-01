@@ -383,7 +383,8 @@
 
 - `cloud_shein_session_manager.mjs` / `cloud_shein_session_manager.sh`：云端登录态管家；顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并输出 profile 体积报告。
 
-- `cloud_manual_login_session.mjs`：云端临时人工登录窗口管理器；按店启动 Xvfb + Chrome + x11vnc + websockify/noVNC，完成后导出/探测登录态并关闭临时进程。状态、短期 token 和日志都属于服务器私有运行态，不提交 GitHub。
+- `cloud_manual_login_session.mjs`：云端临时人工登录窗口管理器；按店启动 Xvfb + Chrome + x11vnc + websockify/noVNC，完成后同时验证导出和 SBN 探测并关闭临时进程。若该店仍有链接/业务域部分失败，会写入恢复队列。
+- `cloud_manual_login_recovery_queue.mjs` / `cloud_manual_login_recovery.mjs`：由独立 systemd path + timer 监督恢复队列，只补跑登录已恢复的目标店；验证完整成功状态、入仓和 Portal 刷新后才归档为完成，失败保留状态和日志供 watchdog 报警。状态、短期 token 和日志都属于服务器私有运行态，不提交 GitHub。
 
 - `cloud_morning_chain.sh`：云端晨间串行链路入口；08:00 默认跳过当天销售全店刷新，直接启动前一完整日统一慢变日更。当前 `SHEIN_BI_MORNING_SALES_REFRESH=0`、`SHEIN_BI_MORNING_SEND_LARK_REPORT=0`；当天销售由 Webhook/OpenAPI 增量更新，日报默认不发送。
 

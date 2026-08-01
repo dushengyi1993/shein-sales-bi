@@ -258,7 +258,7 @@
 - 实现链路：`scripts/cloud_manual_login_session.mjs` 启动 `Xvfb + Chrome + x11vnc + websockify/noVNC`，`scripts/serve_bi_portal.mjs` 提供 `/api/cloud-login/sessions`、`/cloud-login/session/:id` 和 noVNC WebSocket 代理。
 - 安全边界：外网仍只经过现有 HTTPS 网关和 BI 应用内登录；临时维护会话 token 只短时存在于服务器私有状态文件，完成/关闭后会清空 token 和入口 URL；不保存密码、cookie、localStorage 或请求头值到 GitHub、文档或聊天。
 - 资源边界：一次只允许一个临时登录窗口。若某店 CDP 端口被已完成/已关闭的临时窗口残留占用，脚本会在确认没有生产同步 service 运行时清理孤儿 Chrome/VNC 进程；若生产同步正在运行，则拒绝开启并提示等待。
-- 验证边界：创建会话后应能获得 noVNC `101 Switching Protocols`；点击“我已完成并关闭”后应完成 `export_shein_browser_session.mjs --no-launch` 与 `bootstrap_shein_browser_session.mjs --no-launch`，且不残留 Chrome/Xvfb/x11vnc/websockify 进程。
+- 验证边界：创建会话后应能获得 noVNC `101 Switching Protocols`；点击“我已完成并关闭”后应完成 `export_shein_browser_session.mjs --no-launch` 与 `bootstrap_shein_browser_session.mjs --no-launch`，两者均通过才标记完成，且不残留 Chrome/Xvfb/x11vnc/websockify 进程。若该店仍在当天链接/业务域失败清单中，系统会把任务写入私有队列，由独立 systemd path/timer 定向续跑该店、合并完整 19 店证据并刷新 BI。
 ## 2026-07-26 对账与凌晨互斥约束
 
 商品可售状态的生产权威是 OpenAPI 当前快照；前一版 OpenAPI 用于识别状态回退，Webhook 用于确认正常的平台上下架变化。浏览器链接快照因四态词典和刷新时点不同，只作为诊断，不可直接判定 OpenAPI 失败。
