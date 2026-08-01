@@ -13,6 +13,7 @@ import {
   assessDailyOpenapiProductRecovery,
   resolveMarketingScanEvidencePath,
 } from '../lib/cloud_watchdog_recovery.mjs';
+import {collapseWatchdogRootCauseIssues} from '../lib/cloud_watchdog_issue_collapse.mjs';
 import {inspectReleaseSourceState} from './check_release_source_state.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -703,6 +704,19 @@ async function main() {
     // for operations follow-up, but do not page Feishu unless pending/stale/failed checks above fire.
   }
 
+  const sessionManagerReport = await readJsonIfExists(path.join(ROOT, 'outputs', 'reports', 'cloud-session-manager-latest.json'));
+  for (const row of Array.isArray(sessionManagerReport?.results) ? sessionManagerReport.results : []) {
+    const relativeProbe = String(row?.probe?.reportFile || '').trim();
+    const probePath = relativeProbe ? path.resolve(ROOT, relativeProbe) : '';
+    const allowedRoot = path.join(ROOT, 'outputs', 'reports') + path.sep;
+    if (probePath.startsWith(allowedRoot)) row.probeEvidence = await readJsonIfExists(probePath);
+  }
+  const issueCollapse = collapseWatchdogRootCauseIssues({issues, sessionReport: sessionManagerReport});
+  if (issueCollapse.collapsed) {
+    issues.splice(0, issues.length, ...issueCollapse.issues);
+    maintenanceNotes.push(`已合并同一登录根因产生的 ${issueCollapse.removedCount} 条重复技术告警。`);
+  }
+
   const report = {
     ok: issues.length === 0,
     generatedAt: new Date().toISOString(),
@@ -715,6 +729,7 @@ async function main() {
     linkBusinessSuccess,
     dailyRefreshRecovery,
     productReconciliationHealth,
+    issueCollapse,
     marketingGuardState,
     marketingGuardLastOkState,
     marketingGuardService,

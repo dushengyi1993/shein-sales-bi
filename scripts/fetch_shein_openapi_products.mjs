@@ -28,6 +28,8 @@ function parseArgs(argv) {
     maxPages: 200,
     maxDetails: 0,
     detailConcurrency: 3,
+    detailRetryAttempts: Number(process.env.SHEIN_OPENAPI_PRODUCT_DETAIL_RETRY_ATTEMPTS || 3),
+    detailRetryBaseDelayMs: Number(process.env.SHEIN_OPENAPI_PRODUCT_DETAIL_RETRY_BASE_DELAY_MS || 1200),
     stockChunkSize: 50,
     skipDetails: false,
     skipStock: false,
@@ -42,6 +44,8 @@ function parseArgs(argv) {
     else if (a === '--max-pages') args.maxPages = Number(argv[++i]);
     else if (a === '--max-details') args.maxDetails = Number(argv[++i]);
     else if (a === '--detail-concurrency') args.detailConcurrency = Number(argv[++i]);
+    else if (a === '--detail-retry-attempts') args.detailRetryAttempts = Number(argv[++i]);
+    else if (a === '--detail-retry-base-delay-ms') args.detailRetryBaseDelayMs = Number(argv[++i]);
     else if (a === '--stock-chunk-size') args.stockChunkSize = Number(argv[++i]);
     else if (a === '--keep-snapshots') args.keepSnapshots = Number(argv[++i]);
     else if (a === '--skip-details') args.skipDetails = true;
@@ -64,6 +68,8 @@ Use --max-details 0 for all listed SPUs; --skip-details for list-only smoke test
   args.maxPages = Math.max(1, Math.min(1000, Number.isFinite(args.maxPages) ? Math.trunc(args.maxPages) : 200));
   args.maxDetails = Math.max(0, Number.isFinite(args.maxDetails) ? Math.trunc(args.maxDetails) : 0);
   args.detailConcurrency = Math.max(1, Math.min(8, Number.isFinite(args.detailConcurrency) ? Math.trunc(args.detailConcurrency) : 3));
+  args.detailRetryAttempts = Math.max(1, Math.min(6, Number.isFinite(args.detailRetryAttempts) ? Math.trunc(args.detailRetryAttempts) : 3));
+  args.detailRetryBaseDelayMs = Math.max(250, Math.min(10_000, Number.isFinite(args.detailRetryBaseDelayMs) ? Math.trunc(args.detailRetryBaseDelayMs) : 1200));
   args.stockChunkSize = Math.max(1, Math.min(100, Number.isFinite(args.stockChunkSize) ? Math.trunc(args.stockChunkSize) : 50));
   args.keepSnapshots = Math.max(0, Math.min(30, Number.isFinite(args.keepSnapshots) ? Math.trunc(args.keepSnapshots) : 2));
   return args;
@@ -341,6 +347,21 @@ async function fetchDetail(client, spuName) {
   }
 }
 
+function isRetryableDetailFailure(result) {
+  const status = Number(result?.httpStatus || 0);
+  const code = String(result?.code || '');
+  const text = `${result?.msg || ''} ${result?.error || ''}`.toLowerCase();
+  return status === 408
+    || status === 429
+    || status >= 500
+    || code === '832213'
+    || /限流|rate.?limit|timeout|timed out|temporar/.test(text);
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 async function fetchDetails(client, spuNames, args) {
   if (args.skipDetails) return [];
   const results = new Array(spuNames.length);
@@ -350,7 +371,14 @@ async function fetchDetails(client, spuNames, args) {
       const idx = cursor;
       cursor += 1;
       if (idx >= spuNames.length) return;
-      results[idx] = await fetchDetail(client, spuNames[idx]);
+      let result = null;
+      for (let attempt = 1; attempt <= args.detailRetryAttempts; attempt += 1) {
+        result = await fetchDetail(client, spuNames[idx]);
+        result.attempts = attempt;
+        if (result.ok || !isRetryableDetailFailure(result) || attempt >= args.detailRetryAttempts) break;
+        await sleep(args.detailRetryBaseDelayMs * (2 ** (attempt - 1)));
+      }
+      results[idx] = result;
     }
   }
   await Promise.all(Array.from({length: Math.min(args.detailConcurrency, spuNames.length || 1)}, () => worker()));

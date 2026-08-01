@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import {
   collectOpenapiProductDetailFallbacks,
   selectOpenapiProductDetailSpus,
@@ -38,5 +39,12 @@ const fallbacks = collectOpenapiProductDetailFallbacks({
 assert.deepEqual(fallbacks.map(row => row.spuName).sort(), ['B', 'C']);
 assert.equal(fallbacks.find(row => row.spuName === 'B').info.version, 'newer');
 assert.equal(fallbacks.find(row => row.spuName === 'B').detailFetchedAt, '2026-07-29T00:00:00.000Z');
+
+const fetchSource = fs.readFileSync(new URL('./fetch_shein_openapi_products.mjs', import.meta.url), 'utf8');
+assert.match(fetchSource, /detailRetryAttempts/);
+assert.match(fetchSource, /detailRetryBaseDelayMs/);
+assert.match(fetchSource, /isRetryableDetailFailure/);
+assert.match(fetchSource, /code === '832213'/);
+assert.match(fetchSource, /await sleep\(args\.detailRetryBaseDelayMs/);
 
 console.log('openapi_product_detail_cache: checks passed');

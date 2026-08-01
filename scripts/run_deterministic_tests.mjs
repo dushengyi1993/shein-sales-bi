@@ -49,6 +49,7 @@ const tests = [
   'scripts/test_marketing_scan_resilience.mjs',
   'scripts/test_marketing_price_lead_merge.mjs',
   'scripts/test_cloud_watchdog_recovery.mjs',
+  'scripts/test_cloud_watchdog_issue_collapse.mjs',
   'scripts/test_bi_client_resilience.mjs',
   'scripts/test_bi_frontend_accessibility.mjs',
   'scripts/test_bi_section_cache.mjs',
