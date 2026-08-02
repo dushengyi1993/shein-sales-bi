@@ -16,6 +16,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import crypto from 'node:crypto';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
+import {selectVirtualInventoryWarehouseCode} from '../lib/shein_inventory_warehouse.mjs';
 import {
   createLoopbackTestWebhookWriteGuard,
   runSheinWebhookExternalWriteGuarded,
@@ -460,7 +461,7 @@ async function fetchSpuInfoForImages(client, matches, calls, warnings){
   }
   return spuInfoMap;
 }
-function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEditPayloads=[],certificatePayloads=[],spuInfoMap=new Map()}){
+function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEditPayloads=[],certificatePayloads=[],spuInfoMap=new Map(),inventoryWarehouseCode='' }){
   const command=String(task?.command||task?.text||''); const parameters=structuredTaskParameters(task); const out=[];
   const firstPartialEditIntent = intents.find(intent => intent === 'update_title' || intent === 'update_images') || '';
   for(const intent of intents){
@@ -475,7 +476,7 @@ function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEdi
       out.push({operation:intent, endpoint, body:{skc_site_info_list:active.map(m=>({shelf_state:2, site_list:[siteInfo.site], skc_name:m.skc}))}, targetLinks:active});
     } else if(intent==='update_inventory'){
       const qty=numberForTask(intent,task,command); if(!Number.isFinite(qty)||qty<0) blockers.push('改库存任务缺少目标库存数量。请提供结构化 inventory 参数。');
-      const items=matches.flatMap(m=>m.skuCodes.map(sku=>({idempotencyKey:`biops-${task.id||nowId()}-${m.storeKey}-${sku}-${Math.max(0,Math.trunc(qty||0))}`.slice(0,120), skuCode:sku, invType:'VI', changeType:'OVERWRITE', changeQuantity:Math.max(0,Math.trunc(qty||0)), changeReason:'BI Ops guarded inventory update'})));
+      const items=matches.flatMap(m=>m.skuCodes.map(sku=>({idempotencyKey:`biops-${task.id||nowId()}-${m.storeKey}-${sku}-${Math.max(0,Math.trunc(qty||0))}`.slice(0,120), skuCode:sku, invType:'VI', ...(inventoryWarehouseCode?{warehouseCode:inventoryWarehouseCode}:{}), changeType:'OVERWRITE', changeQuantity:Math.max(0,Math.trunc(qty||0)), changeReason:'BI Ops guarded inventory update'})));
       if(!items.length) blockers.push('改库存任务未解析到 SKU code，无法构建库存更新 payload。');
       out.push({operation:intent, endpoint, body:{updateSkuInventoryQuantityRequests:items}, targetLinks:matches});
     } else if(intent==='update_supply_price'){
@@ -564,10 +565,28 @@ function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEdi
   return out;
 }
 async function readbackProduct(client, matches, calls){ const response=await client.request('/open-api/openapi-business-backend/product/query',{method:'POST',body:{pageNum:1,pageSize:100},headers:{language:'en'}}); calls.push(compactCallResult('product-query-readback','/open-api/openapi-business-backend/product/query','POST',response)); const rows=[]; const q=[response.data]; const seen=new Set(); while(q.length&&rows.length<500){ const cur=q.shift(); if(!cur||typeof cur!=='object'||seen.has(cur)) continue; seen.add(cur); if(Array.isArray(cur)){q.push(...cur); continue;} if(cur.skcName||cur.skc_name||cur.spuName||cur.spu_name||cur.supplierCode||cur.supplier_code||cur.skuCodeList||cur.skuCodes) rows.push(cur); q.push(...Object.values(cur)); } const matched=matches.filter(m=>rows.some(r=>productRowMatches(r,{skc:m.skc,spu:m.spu,standard:m.standardGoodsSn}))); return {ok:matched.length>0, status:matched.length?'matched_product_query':'not_matched_product_query', scannedRows:rows.length, matchedRows:matched.slice(0,20), calls}; }
-async function readbackStock(client, matches, calls){ const skuCodes=unique(matches.flatMap(m=>m.skuCodes)); if(!skuCodes.length) return {ok:false,status:'missing_sku_codes',matchedRows:[],calls}; const response=await client.request('/open-api/stock/stock-query',{method:'POST',body:{skuCodes},headers:{language:'en'}}); calls.push(compactCallResult('stock-query-readback','/open-api/stock/stock-query','POST',response)); const ok=String(response.data?.code)==='0'; return {ok, status:ok?'matched_stock_query':'stock_query_failed', skuCodes:skuCodes.slice(0,100), matchedRows:ok?matches.slice(0,20):[], calls}; }
-async function readbackForIntents(client, intents, matches, calls){
+async function readbackStock(client, matches, calls, expectedInventory){
+  const skuCodes=unique(matches.flatMap(m=>m.skuCodes));
+  if(!skuCodes.length) return {ok:false,status:'missing_sku_codes',matchedRows:[],calls};
+  const response=await client.request('/open-api/stock/stock-query',{method:'POST',body:{skuCodeList:skuCodes,warehouseType:'2',invType:'VI'},headers:{language:'en'}});
+  calls.push(compactCallResult('stock-query-readback','/open-api/stock/stock-query','POST',response));
+  if(String(response.data?.code)!=='0') return {ok:false,status:'stock_query_failed',skuCodes:skuCodes.slice(0,100),matchedRows:[],calls};
+  const rows=asArray(response.data?.info)
+    .flatMap(group=>asArray(group?.goodsInventory))
+    .flatMap(group=>asArray(group?.skuList));
+  const missingSkuCodes=skuCodes.filter(sku=>!rows.some(row=>String(row?.skuCode||'')===sku));
+  const mismatchedSkuCodes=Number.isFinite(expectedInventory)
+    ? skuCodes.filter(sku=>{
+      const row=rows.find(item=>String(item?.skuCode||'')===sku);
+      return row && Number(row.totalUsableInventory)!==Number(expectedInventory);
+    })
+    : [];
+  const ok=missingSkuCodes.length===0&&mismatchedSkuCodes.length===0;
+  return {ok,status:ok?'matched_stock_query_exact':'stock_query_readback_mismatch',skuCodes:skuCodes.slice(0,100),missingSkuCodes,mismatchedSkuCodes,expectedInventory:Number.isFinite(expectedInventory)?expectedInventory:null,matchedRows:ok?matches.slice(0,20):[],calls};
+}
+async function readbackForIntents(client, intents, matches, calls, expectedInventory){
   const groups=[];
-  if(intents.includes('update_inventory')) groups.push(await readbackStock(client,matches,calls));
+  if(intents.includes('update_inventory')) groups.push(await readbackStock(client,matches,calls,expectedInventory));
   const productReadbackIntents=intents.filter(x=>!['update_inventory','certificate_review'].includes(x));
   if(productReadbackIntents.length) groups.push(await readbackProduct(client,matches,calls));
   if(intents.includes('certificate_review')) groups.push({ok:false,status:'certificate_submitted_manual_review_required',matchedRows:[],calls,warnings:['证书/资质提交后需人工确认平台审核状态，不能自动判成功。']});
@@ -599,6 +618,20 @@ async function main(){
     else if(acceptedByMerchantOnly) warnings.push(`${store} OpenAPI 店铺信息未返回 GS账号，但 merchantId=${identity.expectedMerchantId} 已匹配；若后续接口返回冲突 GS账号仍会阻断。`);
   }
   const siteInfo=await getDefaultSite(client,calls,warnings);
+  let inventoryWarehouseCode='';
+  if(intents.includes('update_inventory')){
+    const warehouseResponse=await client.request('/open-api/msc/warehouse/list',{method:'GET',headers:{language:'en'}});
+    calls.push(compactCallResult('warehouse-list','/open-api/msc/warehouse/list','GET',warehouseResponse));
+    if(String(warehouseResponse.data?.code)!=='0'){
+      blockers.push(`商家仓库列表查询失败：${safeString(warehouseResponse.data?.msg||warehouseResponse.data?.code||'未知错误')}`);
+    }else{
+      try{
+        inventoryWarehouseCode=selectVirtualInventoryWarehouseCode(warehouseResponse.data?.info,{site:siteInfo.site});
+      }catch(error){
+        blockers.push(`无法唯一确定库存仓库：${safeString(error.message||error,240)}`);
+      }
+    }
+  }
   const linkLoad=await loadLinkRows(args); if(linkLoad.error) blockers.push(`无法读取 BI 链接快照：${linkLoad.error}`);
   const productLoad=await loadProductRows(store,args); if(productLoad.error) warnings.push(`OpenAPI 商品缓存不可读，将只用链接快照：${productLoad.error}`);
   const jsonAssets=await loadJsonAssetPayloads(task);
@@ -616,7 +649,7 @@ async function main(){
   const spuInfoMap=intents.includes('update_images')
     ? await fetchSpuInfoForImages(client,resolved.matches,calls,warnings)
     : new Map();
-  const payloads=buildPayloads({task:taskWithJsonAssets,intents,matches:resolved.matches,siteInfo,blockers,warnings,imageEditPayloads,certificatePayloads,spuInfoMap});
+  const payloads=buildPayloads({task:taskWithJsonAssets,intents,matches:resolved.matches,siteInfo,blockers,warnings,imageEditPayloads,certificatePayloads,spuInfoMap,inventoryWarehouseCode});
   const submitPlan={storeKey:store,intents,payloads:payloads.map(p=>({operation:p.operation,endpoint:p.endpoint,body:p.body,targetSkcs:p.targetLinks.map(x=>x.skc).filter(Boolean)}))};
   const payloadHash=payloads.some(p=>Object.keys(p.body||{}).length)?sha256Stable(submitPlan):'';
   if(args.mode==='execute'){
@@ -651,7 +684,8 @@ async function main(){
     actualWriteSubmitted=submitResults.some(r=>String(r.code)==='0' && r.infoSuccess!==false);
   }
   const readbackCalls=[]; let readback={ok:false,status:args.mode==='execute'?'not_run':'planned_not_run',calls:readbackCalls};
-  if(actualWriteSubmitted){ readback=await readbackForIntents(client,intents,resolved.matches,readbackCalls); }
+  const expectedInventory=intents.includes('update_inventory')?numberForTask('update_inventory',task,String(task?.command||task?.text||'')):null;
+  if(actualWriteSubmitted){ readback=await readbackForIntents(client,intents,resolved.matches,readbackCalls,expectedInventory); }
   const state=args.mode==='execute' ? (actualWriteSubmitted?'submitted':'blocked') : (blockers.length?'blocked':'ready_for_submit');
   const output={ok:blockers.length===0, runId, mode:args.mode, adapterKind:'link_maintenance_openapi_executor', state, startedAt, endedAt:new Date().toISOString(), storeKey:store, task:{id:task.id||'',status:task.status||'',intents,productRefs:taskProductRefs(task)}, payload:{found:Boolean(payloadHash), payloadHash, payloadHashAlgorithm:payloadHash?'sha256-stable-json-v1':'', summary:{operations:payloads.map(p=>p.operation), endpoints:payloads.map(p=>p.endpoint), targetCount:resolved.matches.length, skuCount:unique(resolved.matches.flatMap(m=>m.skuCodes)).length, imagePayloadInspection:{payloadCount:imagePayloadInspection.payloadCount,totalSpuImages:imagePayloadInspection.totalSpuImages,totalSkcImages:imagePayloadInspection.totalSkcImages,totalSiteDetailImages:imagePayloadInspection.totalSiteDetailImages,totalSkuImages:imagePayloadInspection.totalSkuImages,totalDetailImages:imagePayloadInspection.totalDetailImages,totalUrlRefs:imagePayloadInspection.totalUrlRefs,uniqueUrlCount:imagePayloadInspection.uniqueUrlCount}}, submitPlan}, adapterEvidence:{realSubmit:actualWriteSubmitted, canSilentWrite:false, matchedLinksCount:resolved.matches.length, matchedLinks:resolved.matches.slice(0,80), linkSnapshotFile:linkLoad.file?rel(linkLoad.file):'', productCacheFile:productLoad.file?rel(productLoad.file):'', siteInfo, imagePayloadInspection, calls}, publishResult: actualWriteSubmitted ? {code:'0', msg:'submitted', traceId:submitResults.map(x=>x.traceId).filter(Boolean).join(',')||null, operations:submitResults} : null, readbackFingerprint:{taskId:task.id||'', intents, targetStores:[store], matchedSkcs:resolved.matches.map(m=>m.skc).filter(Boolean), matchedSkuCodes:unique(resolved.matches.flatMap(m=>m.skuCodes)), payloadHash, readbackStatus:readback.status}, readback, blockers, warnings, safety:{canSilentWrite:false, executeRequiresConfirm:SUBMIT_CONFIRM_TEXT, dryRunDoesNotCallBusinessWrite:args.mode!=='execute', note:'维护写真实提交必须由 BI 账号店铺写权限、动作总闸门、payload hash 和确认文本共同放行；partialEdit 成功只代表提交版本生成，当前态仍以回读/审核状态为准。'}};
   if(actualWriteSubmitted && !readback.ok){ output.ok=false; output.state='submitted'; output.blockers=[]; output.warnings.push('写接口返回成功但强回读未确认，任务必须锁定等待人工核销。'); }

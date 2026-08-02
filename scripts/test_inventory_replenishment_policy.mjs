@@ -10,6 +10,7 @@ import {
   resolveInventoryShelfStatus,
   stableInventoryHash,
 } from '../lib/inventory_replenishment_policy.mjs';
+import {selectVirtualInventoryWarehouseCode} from '../lib/shein_inventory_warehouse.mjs';
 
 const policy = {
   triggerUsableInventoryAtOrBelow: 20,
@@ -38,6 +39,15 @@ assert.equal(canonicalInventoryKey('SK-04031胶囊咖啡机'), 'SK04031');
 assert.deepEqual(resolveInventoryShelfStatus({shelf_status_name: '已下架', is_out_shelf: true}, '3').code, '4');
 assert.deepEqual(resolveInventoryShelfStatus({shelf_status_name: '已售罄', is_sold_out: true}, '1').code, '3');
 assert.deepEqual(resolveInventoryShelfStatus({shelf_status_name: '已上架', is_on_shelf: true}, '4').code, '1');
+assert.equal(selectVirtualInventoryWarehouseCode({list: [{warehouseCode: 'PS-SA', saleCountryList: ['SA']}]}), 'PS-SA');
+assert.equal(selectVirtualInventoryWarehouseCode({list: [
+  {warehouseCode: 'PS-EU', saleCountryList: ['DE']},
+  {warehouseCode: 'PS-SA', saleCountryList: ['SA']},
+]}, {site: 'shein-sa'}), 'PS-SA');
+assert.throws(() => selectVirtualInventoryWarehouseCode({list: [
+  {warehouseCode: 'PS-SA-1', saleCountryList: ['SA']},
+  {warehouseCode: 'PS-SA-2', saleCountryList: ['SA']},
+]}, {site: 'shein-sa'}), /Multiple merchant warehouses match SA/);
 assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '1', skuCount: 1, platformUsableInventory: 20, etSellableInventory: 100, etSnapshotCurrentDay: true, c7SaleCount: 0, policy}).action, 'set_exact');
 assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '1', skuCount: 1, platformUsableInventory: 20, etSellableInventory: 99, etSnapshotCurrentDay: true, c7SaleCount: 0, policy}), {
   action: 'set_exact',
@@ -83,4 +93,4 @@ const hash = 'a'.repeat(64);
 assert.deepEqual(assertDailyInventoryExecutionAuthorization({policy, payloadHash: hash, confirmHash: hash}).mode, 'manual_review');
 assert.throws(() => assertDailyInventoryExecutionAuthorization({policy, payloadHash: hash, confirmHash: 'b'.repeat(64)}), /confirm-hash/);
 assert.throws(() => assertDailyInventoryExecutionAuthorization({policy, mode: 'automatic', payloadHash: hash, confirmHash: hash}), /automation is disabled/);
-console.log(JSON.stringify({ok: true, checks: 31}, null, 2));
+console.log(JSON.stringify({ok: true, checks: 34}, null, 2));

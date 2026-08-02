@@ -93,6 +93,13 @@ const fake = http.createServer(async (req, res) => {
   if (pathname === '/open-api/goods/query-site-list') {
     return sendJson(res, {code: '0', msg: 'OK', info: [{sub_site_list: [{site_abbr: 'shein-sa', currency: 'SAR'}]}]});
   }
+  if (pathname === '/open-api/msc/warehouse/list') {
+    return sendJson(res, {code: '0', msg: 'OK', info: {list: [{
+      warehouseCode: 'PS-SMOKE-SA',
+      warehouseName: 'Saudi Arabia',
+      saleCountryList: ['SA'],
+    }]}});
+  }
   if (pathname === '/open-api/goods/modify-skc-shelf') {
     const row = body.json?.skc_site_info_list?.[0] || {};
     const okRetire = row.shelf_state === 2 && row.skc_name === 'sv-smoke-skc';
@@ -102,7 +109,7 @@ const fake = http.createServer(async (req, res) => {
   }
   if (pathname === '/open-api/stock/change-inventory/v2') {
     const row = body.json?.updateSkuInventoryQuantityRequests?.[0] || {};
-    if (row.skuCode !== 'sku-smoke-001' || row.changeQuantity !== 100 || row.changeType !== 'OVERWRITE') return sendJson(res, {code: '400', msg: 'bad inventory payload'}, 200);
+    if (row.skuCode !== 'sku-smoke-001' || row.changeQuantity !== 100 || row.changeType !== 'OVERWRITE' || row.warehouseCode !== 'PS-SMOKE-SA') return sendJson(res, {code: '400', msg: 'bad inventory payload'}, 200);
     return sendJson(res, {code: '0', msg: 'OK', traceId: 'trace-inventory'});
   }
   if (pathname === '/open-api/goods/update-cost') {
@@ -130,7 +137,10 @@ const fake = http.createServer(async (req, res) => {
     return sendJson(res, {code: '0', msg: 'OK', traceId: 'trace-certificate'});
   }
   if (pathname === '/open-api/stock/stock-query') {
-    return sendJson(res, {code: '0', msg: 'OK', info: [{skuCode: 'sku-smoke-001', usableInventory: 100}]});
+    return sendJson(res, {code: '0', msg: 'OK', info: [{goodsInventory: [{
+      skcName: 'sv-smoke-skc',
+      skuList: [{skuCode: 'sku-smoke-001', totalUsableInventory: 100}],
+    }]}]});
   }
   if (pathname === '/open-api/openapi-business-backend/product/query') {
     return sendJson(res, {code: '0', msg: 'OK', info: {data: [

@@ -10,6 +10,7 @@ import {
   stableInventoryHash,
 } from '../../lib/inventory_replenishment_policy.mjs';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../../lib/shein_openapi_client.mjs';
+import {selectVirtualInventoryWarehouseCode} from '../../lib/shein_inventory_warehouse.mjs';
 import {
   formatStoreIdentityError,
   openApiIdentityToStorageIdentity,
@@ -99,13 +100,37 @@ async function readStock(client, skuCode) {
     .flatMap(group => asArray(group?.goodsInventory))
     .flatMap(group => asArray(group?.skuList))
     .find(item => String(item?.skuCode || '') === skuCode);
-  if (!row) throw new Error(`stock-query returned no row for ${skuCode}`);
+  if (!row) {
+    return {
+      skuCode,
+      totalInventoryQuantity: 0,
+      totalUsableInventory: 0,
+      totalLockedQuantity: 0,
+      stockRowMissing: true,
+      warehouseCodes: [],
+    };
+  }
   return {
     skuCode,
     totalInventoryQuantity: Number(row.totalInventoryQuantity || 0),
     totalUsableInventory: Number(row.totalUsableInventory || 0),
     totalLockedQuantity: Number(row.totalLockedQuantity || 0),
+    stockRowMissing: false,
+    warehouseCodes: asArray(row.warehouseInventoryList)
+      .map(item => String(item?.warehouseCode || '').trim())
+      .filter(Boolean),
   };
+}
+
+async function resolveMissingVirtualInventoryWarehouseCode(client) {
+  const response = await client.request('/open-api/msc/warehouse/list', {
+    method: 'GET',
+    headers: {language: 'en'},
+  });
+  if (String(response.data?.code) !== '0') {
+    throw new Error(`warehouse-list failed: ${response.data?.code} ${response.data?.msg || ''}`);
+  }
+  return selectVirtualInventoryWarehouseCode(response.data?.info, {site: 'shein-sa'});
 }
 
 async function assertStillListed(client, row) {
@@ -285,6 +310,9 @@ for (const row of rows) {
     try {
       await assertStillListed(client, row);
       let before = await readStock(client, row.skuCode);
+      const warehouseCode = before.stockRowMissing
+        ? await resolveMissingVirtualInventoryWarehouseCode(client)
+        : '';
       if (row.ruleClass === 'recent_sale_scarcity') {
         const refillBelow = Number(policy?.recentSaleScarcity?.refillWhenBelow ?? 5);
         const capAbove = Number(policy?.recentSaleScarcity?.capWhenAbove ?? 10);
@@ -313,6 +341,7 @@ for (const row of rows) {
             idempotencyKey,
             skuCode: row.skuCode,
             invType: 'VI',
+            ...(warehouseCode ? {warehouseCode} : {}),
             changeType: 'OVERWRITE',
             changeQuantity: overwrite,
             changeReason: 'Owner-authorized daily inventory target after current-day ET and sales/exposure guard',

@@ -111,6 +111,17 @@ const fakeOpenApi = http.createServer(async (request, response) => {
       info: [{sub_site_list: [{site_abbr: 'shein-sa', currency: 'SAR'}]}],
     });
   }
+  if (pathname === '/open-api/msc/warehouse/list') {
+    return sendJson(response, {
+      code: '0',
+      msg: 'OK',
+      info: {list: [{
+        warehouseCode: 'PS-MAINT-SA',
+        warehouseName: 'Saudi Arabia',
+        saleCountryList: ['SA'],
+      }]},
+    });
+  }
   if (pathname === '/open-api/stock/change-inventory/v2') {
     return sendJson(response, {
       code: '0',
@@ -167,7 +178,10 @@ const fakeOpenApi = http.createServer(async (request, response) => {
       code: '0',
       msg: 'OK',
       traceId: 'fake-stock-readback-trace',
-      info: [{skuCode: 'sku-maint-001', availableInventory: 111}],
+      info: [{goodsInventory: [{
+        skcName: 'sv-maint-skc',
+        skuList: [{skuCode: 'sku-maint-001', totalUsableInventory: 111}],
+      }]}],
     });
   }
   if (pathname === '/open-api/openapi-business-backend/product/query') {
@@ -616,4 +630,3 @@ try {
 
 console.log(JSON.stringify(result, null, 2));
 if (!result.ok) process.exit(1);
-
