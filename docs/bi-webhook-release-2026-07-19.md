@@ -34,7 +34,7 @@ BI 新增独立“平台动态”子页面，普通状态变化不再塞入首�
 ## 可靠性与安全
 
 - 正式公网回调：`https://sa.dushengyi.cc/api/shein/webhook/v1/events`；`8443` 只保留为受限故障回退，不是开放平台生产配置。
-- 标准 443 链路为 Cloudflare -> HAProxy 443 -> Caddy 10443 -> Nginx -> receiver。HAProxy 只让 Cloudflare 直接来源进入该域名的 HTTPS 分支，Caddy 只在这条受控链路中接受 `CF-Connecting-IP`，Nginx 再按 SHEIN 官方推送 IP 放行；官方 HMAC 签名始终是主校验。
+- 2026-08-02 起标准 443 链路改为公网直连 -> HAProxy 443 -> Caddy 10443 -> Nginx -> receiver，不再依赖 Cloudflare。由于 TCP 模式 HAProxy 不向当前 Caddy 构建传递原始客户端 IP，Nginx 对精确回调路径实施共享限流，官方 HMAC 签名是授权校验；`8443` 故障回退仍保留官方推送 IP 白名单。
 - 应用入口预算 1.2 秒、receipt SQL statement timeout 0.8 秒、Nginx read timeout 1.4 秒；仅在密文 receipt 与队列可靠落库后返回 200。
 - PostgreSQL 只保存 AES 密文与最小规范化投影，不保存解密后的原始 payload；BI API 不返回 App/openKey、密文或买家原始信息。
 - worker 使用租约、`FOR UPDATE SKIP LOCKED`、续租失败中止、指数重试与 dead-letter；授权/额度事件先完成数据库封闸，再启动可能较慢的飞书通知。

@@ -16,10 +16,9 @@ Webhook 是平台状态变化的实时触发源，不替代 OpenAPI 详情接口
 
 ```mermaid
 flowchart LR
-  A["DL 半托 OpenAPI App<br/>19 个店铺授权"] -->|"HTTPS 443"| B["Cloudflare"]
-  B --> C["HAProxy 443\nSNI + Cloudflare 直接来源门禁"]
-  C --> D["Caddy 10443\n受控恢复真实来源 IP"]
-  D --> E["Nginx\nSHEIN 官方推送 IP allowlist"]
+  A["DL 半托 OpenAPI App<br/>19 个店铺授权"] -->|"HTTPS 443"| C["HAProxy 443\nSSH/TLS 协议分流"]
+  C --> D["Caddy 10443\nTLS 与精确域名入口"]
+  D --> E["Nginx\n精确路径 + 共享限流"]
   E --> F["shein-bi-webhook :8792"]
   F --> G["验签 + AES 解密 + 最小校验"]
   G --> H["PostgreSQL 密文 receipt/queue"]
@@ -40,7 +39,7 @@ POST https://sa.dushengyi.cc/api/shein/webhook/v1/events
 
 回调 URL 不带 query。当前生产由一个 DL App 接收 19 店事件；正式业务事件依据 `x-lt-appid + x-lt-openKeyId` 映射到唯一店铺，已知跨店不一致、映射不唯一、缺店或重复店铺时失败关闭，不猜店铺。开放平台自身的技术探针使用临时 OpenKey，只有显式配置 `webhookValidationStoreKey` 时才进入 `appScopedOnly` 隔离路径，且绝不执行经营动作。旧 App 只按 App ID 哈希命中“确认并丢弃”路径，不读取正文、不落库，也不保留旧 App Secret。
 
-正式链路复用标准 443，但没有让应用直接信任客户端自报的 `CF-Connecting-IP`：HAProxy 先确认 `sa.dushengyi.cc` SNI 的直接来源属于 Cloudflare，再把 TLS 流量转到 Caddy `10443`；Caddy 只在这条受控上游后恢复 Cloudflare 写入的原始客户端 IP，Nginx 最后按 SHEIN 官方推送 IP 放行。签名仍是主校验，来源 IP 只是独立第二层。`8443` 继续作为受限故障回退，但不得写入平台正式/测试回调。
+正式链路复用标准 443 并直接回源，不接受或信任客户端自报的 `CF-Connecting-IP`。HAProxy 以 TCP 模式完成 SSH/TLS 分流后把流量转到 Caddy `10443`；当前 Caddy 构建不支持 PROXY protocol，因此标准 443 无法恢复原始客户端 IP。Nginx 只暴露精确 POST 路径并施加共享限流，接收器以官方 HMAC 签名作为授权真值。`8443` 继续作为带官方推送 IP 白名单的受限故障回退，但不得写入平台正式/测试回调。
 
 ## 3. 官方协议实现
 
