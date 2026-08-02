@@ -1,14 +1,47 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import {assessProductReconciliationPolicy} from './run_shein_openapi_products_reconciliation.mjs';
+import {
+  assessProductReconciliationPolicy,
+  resolveProductReconciliationReportTargets,
+} from './run_shein_openapi_products_reconciliation.mjs';
 
 const runnerSource = await fs.readFile(new URL('./run_shein_openapi_products_reconciliation.mjs', import.meta.url), 'utf8');
 const cloudWrapperSource = await fs.readFile(new URL('./cloud_openapi_product_reconciliation.sh', import.meta.url), 'utf8');
-assert.match(runnerSource, /writeJsonFileAtomic\(args\.out, output\)/);
-assert.match(runnerSource, /writeJsonFileAtomic\(args\.latestOut, output\)/);
+assert.match(runnerSource, /writeJsonFileAtomic\(reportTargets\.out, output\)/);
+assert.match(runnerSource, /writeJsonFileAtomic\(reportTargets\.latestOut, output\)/);
 assert.match(cloudWrapperSource, /--latest-out "\$LATEST_REPORT_FILE"/);
 assert.doesNotMatch(cloudWrapperSource, /cp -f "\$REPORT_FILE" "\$LATEST_REPORT_FILE"/);
+
+const fullReportTargets = resolveProductReconciliationReportTargets({
+  out: '/tmp/full.json',
+  latestOut: '/tmp/latest.json',
+  requestedStores: ['DL', 'DX'],
+  allAuthorizedStores: ['DX', 'DL'],
+});
+assert.equal(fullReportTargets.complete, true);
+assert.equal(fullReportTargets.kind, 'all_authorized_stores');
+assert.equal(fullReportTargets.latestOut, '/tmp/latest.json');
+
+const targetedReportTargets = resolveProductReconciliationReportTargets({
+  out: '/tmp/scoped.json',
+  latestOut: '/tmp/latest.json',
+  requestedStores: ['LQ'],
+  allAuthorizedStores: ['DL', 'LQ'],
+});
+assert.equal(targetedReportTargets.complete, false);
+assert.equal(targetedReportTargets.kind, 'targeted_stores');
+assert.equal(targetedReportTargets.out, '/tmp/scoped.json');
+assert.equal(targetedReportTargets.latestOut, '');
+assert.equal(targetedReportTargets.latestSuppressedReason, 'targeted_run_cannot_replace_all_store_latest');
+
+const defaultTargetedReportTargets = resolveProductReconciliationReportTargets({
+  requestedStores: ['LQ'],
+  allAuthorizedStores: ['DL', 'LQ'],
+});
+assert.equal(defaultTargetedReportTargets.complete, false);
+assert.match(defaultTargetedReportTargets.out, /product-reconciliation\.targeted-LQ\.latest\.json$/);
+assert.equal(defaultTargetedReportTargets.latestOut, '');
 
 function snapshot(rows) {
   return {

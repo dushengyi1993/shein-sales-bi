@@ -17,6 +17,40 @@ const DEFAULT_CONFIG = path.join(ROOT, 'config', 'shein_openapi.local.json');
 const DEFAULT_OUT = path.join(ROOT, 'state', 'openapi-probes', 'product-reconciliation.latest.json');
 const DEFAULT_STORES = ['CX', 'DL', 'DX', 'FY', 'HL', 'JSH', 'JY', 'LQ', 'MZ', 'NM', 'QH', 'QY', 'TS', 'TZ', 'TZZ', 'XC', 'XL', 'YJ', 'ZL'];
 
+function normalizedStoreSet(values) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map(value => String(value || '').trim().toUpperCase())
+    .filter(Boolean))]
+    .sort();
+}
+
+export function resolveProductReconciliationReportTargets({
+  out = DEFAULT_OUT,
+  latestOut = '',
+  requestedStores = [],
+  allAuthorizedStores = [],
+} = {}) {
+  const requested = normalizedStoreSet(requestedStores);
+  const expected = normalizedStoreSet(allAuthorizedStores);
+  const complete = requested.length === expected.length
+    && requested.every((storeKey, index) => storeKey === expected[index]);
+  const scopeSlug = requested.join('-') || 'none';
+  const defaultOutRequested = path.resolve(out || DEFAULT_OUT) === path.resolve(DEFAULT_OUT);
+  const resolvedOut = !complete && defaultOutRequested
+    ? path.join(path.dirname(DEFAULT_OUT), `product-reconciliation.targeted-${scopeSlug}.latest.json`)
+    : out;
+  return {
+    complete,
+    kind: complete ? 'all_authorized_stores' : 'targeted_stores',
+    expectedStores: expected,
+    out: resolvedOut,
+    latestOut: complete ? latestOut : '',
+    latestSuppressedReason: !complete && latestOut
+      ? 'targeted_run_cannot_replace_all_store_latest'
+      : '',
+  };
+}
+
 function parseArgs(argv) {
   const args = {
     config: DEFAULT_CONFIG,
@@ -488,6 +522,15 @@ export async function main(argv = process.argv.slice(2)) {
     .filter(([key]) => key));
   const requested = (args.stores.length ? args.stores : DEFAULT_STORES).filter((x, i, arr) => arr.indexOf(x) === i);
   const authorized = requested.filter(storeKey => isAuthorized(configured.get(storeKey)));
+  const allAuthorized = [...configured.entries()]
+    .filter(([, entry]) => isAuthorized(entry))
+    .map(([storeKey]) => storeKey);
+  const reportTargets = resolveProductReconciliationReportTargets({
+    out: args.out,
+    latestOut: args.latestOut,
+    requestedStores: requested,
+    allAuthorizedStores: allAuthorized,
+  });
   const skipped = requested
     .filter(storeKey => !isAuthorized(configured.get(storeKey)))
     .map(storeKey => ({storeKey, status: configured.has(storeKey) ? 'configured_disabled_or_incomplete' : 'missing_config'}));
@@ -525,6 +568,16 @@ export async function main(argv = process.argv.slice(2)) {
     maxDetails: args.maxDetails,
     requestedStores: requested,
     authorizedStores: authorized,
+    reportScope: {
+      kind: reportTargets.kind,
+      complete: reportTargets.complete,
+      expectedStores: reportTargets.expectedStores,
+    },
+    publication: {
+      out: reportTargets.out ? path.relative(ROOT, reportTargets.out) : '',
+      latestOut: reportTargets.latestOut ? path.relative(ROOT, reportTargets.latestOut) : '',
+      latestSuppressedReason: reportTargets.latestSuppressedReason,
+    },
     ensure: {
       ok: ensureStep.ok,
       code: ensureStep.code,
@@ -539,11 +592,11 @@ export async function main(argv = process.argv.slice(2)) {
     results: publicResults,
   };
 
-  if (args.out) {
-    await writeJsonFileAtomic(args.out, output);
+  if (reportTargets.out) {
+    await writeJsonFileAtomic(reportTargets.out, output);
   }
-  if (args.latestOut) {
-    await writeJsonFileAtomic(args.latestOut, output);
+  if (reportTargets.latestOut) {
+    await writeJsonFileAtomic(reportTargets.latestOut, output);
   }
   return output;
 }
