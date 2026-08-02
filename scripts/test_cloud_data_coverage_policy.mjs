@@ -34,7 +34,39 @@ const explicit = classifyMissingCoverageRows({
 assert.deepEqual(explicit.blockingRows.map(row => row.date), ['2026-07-23', '2026-07-24']);
 assert.equal(explicit.nonBlockingCurrentDayRows.length, 0);
 
+const afterMidnightBeforeFinalizer = classifyMissingCoverageRows({
+  rows: [
+    {date: '2026-08-02', missingStoreCount: 1, missingStores: ['TZ']},
+    {date: '2026-08-03', missingStoreCount: 2, missingStores: ['TZ', 'DL']},
+  ],
+  allowSparseCurrentDay: true,
+  currentDate: '2026-08-03',
+  currentHour: 0,
+  finalizationGraceHours: 4,
+  explicitRange: false,
+});
+assert.deepEqual(afterMidnightBeforeFinalizer.blockingRows, []);
+assert.deepEqual(
+  afterMidnightBeforeFinalizer.nonBlockingCurrentDayRows.map(row => row.date),
+  ['2026-08-02', '2026-08-03'],
+);
+
+const afterFinalizerDeadline = classifyMissingCoverageRows({
+  rows: [
+    {date: '2026-08-02', missingStoreCount: 1, missingStores: ['TZ']},
+    {date: '2026-08-03', missingStoreCount: 2, missingStores: ['TZ', 'DL']},
+  ],
+  allowSparseCurrentDay: true,
+  currentDate: '2026-08-03',
+  currentHour: 4,
+  finalizationGraceHours: 4,
+  explicitRange: false,
+});
+assert.deepEqual(afterFinalizerDeadline.blockingRows.map(row => row.date), ['2026-08-02']);
+assert.deepEqual(afterFinalizerDeadline.nonBlockingCurrentDayRows.map(row => row.date), ['2026-08-03']);
+
 const watchdog = fs.readFileSync(new URL('./cloud_ops_watchdog.mjs', import.meta.url), 'utf8');
-assert.match(watchdog, /'--recent-days', '2'/);
+assert.match(watchdog, /SHEIN_CLOUD_WATCHDOG_FINALIZED_SALES_SLA_MINUTE/);
+assert.match(watchdog, /'--recent-days', String\(recentDays\)/);
 
 console.log('cloud_data_coverage_policy: finalized days block; current webhook day stays informational');

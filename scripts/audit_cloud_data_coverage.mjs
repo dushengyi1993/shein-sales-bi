@@ -26,8 +26,11 @@ const TABLE_RULES = [
     storeWhere: DEFAULT_STORE_WHERE,
     // Webhook-primary sales only materializes today's row after a store has an
     // order event. A missing row today can therefore mean a legitimate zero,
-    // while the next-day finalized snapshot must still cover every store.
+    // while the next-day 03:00 finalizer materializes explicit zero rows. Keep
+    // the prior day informational until 04:00 so the 00:50/01:50/02:50
+    // watchdog runs do not alert on stores with legitimately zero orders.
     allowSparseCurrentDay: true,
+    finalizationGraceHours: 4,
   },
   {
     key: 'linkPerformance',
@@ -177,27 +180,38 @@ WHERE ${rule.storeWhere || DEFAULT_STORE_WHERE};
   };
 }
 
-async function databaseCurrentDate(args) {
-  return (await runPsql(args, 'SELECT current_date::text;')).trim();
+async function databaseClock(args) {
+  const out = (await runPsql(args, "SELECT current_date::text, extract(hour FROM localtime)::int;")).trim();
+  const [currentDate, currentHour] = out.split('\t');
+  return {
+    currentDate,
+    currentHour: Number(currentHour || 0),
+  };
 }
 
 export function classifyMissingCoverageRows({
   rows,
   allowSparseCurrentDay = false,
   currentDate = '',
+  currentHour = 0,
+  finalizationGraceHours = 0,
   explicitRange = false,
 }) {
   const missingRows = rows.filter(row => row.missingStoreCount > 0);
   if (!allowSparseCurrentDay || explicitRange || !currentDate) {
     return {blockingRows: missingRows, nonBlockingCurrentDayRows: []};
   }
+  const priorDate = addDays(currentDate, -1);
+  const priorDateInGrace = Number(currentHour) < Number(finalizationGraceHours || 0);
+  const isNonBlocking = row => row.date === currentDate
+    || (priorDateInGrace && row.date === priorDate);
   return {
-    blockingRows: missingRows.filter(row => row.date !== currentDate),
-    nonBlockingCurrentDayRows: missingRows.filter(row => row.date === currentDate),
+    blockingRows: missingRows.filter(row => !isNonBlocking(row)),
+    nonBlockingCurrentDayRows: missingRows.filter(isNonBlocking),
   };
 }
 
-async function auditRule(args, rule, currentDate) {
+async function auditRule(args, rule, clock) {
   const expected = await expectedStores(args, rule);
   const latest = await latestDate(args, rule);
   if (!latest) {
@@ -309,7 +323,9 @@ ORDER BY c.d;
   } = classifyMissingCoverageRows({
     rows,
     allowSparseCurrentDay: Boolean(rule.allowSparseCurrentDay),
-    currentDate,
+    currentDate: clock.currentDate,
+    currentHour: clock.currentHour,
+    finalizationGraceHours: Number(rule.finalizationGraceHours || 0),
     explicitRange: Boolean(args.start || args.end),
   });
   const zeroMetricDates = rule.zeroMetricExpression
@@ -365,9 +381,9 @@ async function main() {
   const selected = TABLE_RULES.filter(r => args.tables.includes(r.key));
   const unknown = args.tables.filter(key => !TABLE_RULES.some(r => r.key === key));
   if (unknown.length) throw new Error(`Unknown --tables key(s): ${unknown.join(', ')}`);
-  const currentDate = await databaseCurrentDate(args);
+  const clock = await databaseClock(args);
   const checks = [];
-  for (const rule of selected) checks.push(await auditRule(args, rule, currentDate));
+  for (const rule of selected) checks.push(await auditRule(args, rule, clock));
   const issueCount = checks.reduce((sum, c) => sum + c.issues.length, 0);
   const report = {
     ok: issueCount === 0,
@@ -379,7 +395,8 @@ async function main() {
       tables: args.tables,
       expectedStart: args.expectedStart,
       statementTimeoutMs: args.statementTimeoutMs,
-      currentDate,
+      currentDate: clock.currentDate,
+      currentHour: clock.currentHour,
     },
     issueCount,
     checks,
