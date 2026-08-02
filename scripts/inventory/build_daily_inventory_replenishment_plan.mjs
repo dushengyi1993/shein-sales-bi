@@ -7,6 +7,7 @@ import {
   canonicalInventoryKey,
   classifyEtInventoryAlert,
   decideDailyInventoryReplenishment,
+  resolveInventoryShelfStatus,
   stableInventoryHash,
 } from '../../lib/inventory_replenishment_policy.mjs';
 
@@ -119,30 +120,65 @@ const actionable = [];
 const linkAlerts = [];
 const ignored = [];
 const lowEtAllocations = [];
-const sellingStoresByMatchKey = new Map();
-for (const row of linkRows) {
-  if (String(row.shelfStatusCode || '') !== '1' || Number(row.sheinUsableInventory) <= 0) continue;
+const rowContexts = linkRows.map(row => {
   const matchKey = canonicalInventoryKey(row.supplierCode);
+  const metrics = linkMetricsByKey.get(`${String(row.storeKey || '').toUpperCase()}::${String(row.skc || '').trim()}`);
+  return {
+    row,
+    metrics,
+    matchKey,
+    shelfStatus: resolveInventoryShelfStatus(metrics, row.shelfStatusCode),
+  };
+});
+const onShelfSkcsByStoreMatchKey = new Map();
+for (const metrics of linkMetricRows) {
+  if (resolveInventoryShelfStatus(metrics).code !== '1') continue;
+  const matchKey = canonicalInventoryKey(
+    metrics.standard_goods_sn
+    ?? metrics.standardGoodsSn
+    ?? metrics.raw_goods_sn
+    ?? metrics.rawGoodsSn,
+  );
   if (!matchKey) continue;
-  if (!sellingStoresByMatchKey.has(matchKey)) sellingStoresByMatchKey.set(matchKey, new Set());
-  sellingStoresByMatchKey.get(matchKey).add(String(row.storeKey || ''));
+  const key = `${String(metrics.store_key || metrics.storeKey || '').toUpperCase()}::${matchKey}`;
+  if (!onShelfSkcsByStoreMatchKey.has(key)) onShelfSkcsByStoreMatchKey.set(key, new Set());
+  onShelfSkcsByStoreMatchKey.get(key).add(String(metrics.skc || ''));
+}
+for (const context of rowContexts) {
+  if (context.shelfStatus.code !== '1' || !context.matchKey) continue;
+  const key = `${String(context.row.storeKey || '').toUpperCase()}::${context.matchKey}`;
+  if (!onShelfSkcsByStoreMatchKey.has(key)) onShelfSkcsByStoreMatchKey.set(key, new Set());
+  onShelfSkcsByStoreMatchKey.get(key).add(String(context.row.skc || ''));
+}
+const sellingStoresByMatchKey = new Map();
+for (const context of rowContexts) {
+  if (context.shelfStatus.code !== '1' || Number(context.row.sheinUsableInventory) <= 0 || !context.matchKey) continue;
+  if (!sellingStoresByMatchKey.has(context.matchKey)) sellingStoresByMatchKey.set(context.matchKey, new Set());
+  sellingStoresByMatchKey.get(context.matchKey).add(String(context.row.storeKey || ''));
 }
 const evaluatedRows = [];
-for (const row of linkRows) {
-  const matchKey = canonicalInventoryKey(row.supplierCode);
+for (const context of rowContexts) {
+  const {row, metrics, matchKey, shelfStatus} = context;
   const et = etByKey.get(matchKey);
-  const metrics = linkMetricsByKey.get(`${String(row.storeKey || '').toUpperCase()}::${String(row.skc || '').trim()}`);
   const otherSellingStores = [...(sellingStoresByMatchKey.get(matchKey) || [])]
     .filter(storeKey => storeKey && storeKey !== row.storeKey)
     .sort();
+  const sameStoreOnShelfSkcs = [...(onShelfSkcsByStoreMatchKey.get(
+    `${String(row.storeKey || '').toUpperCase()}::${matchKey}`,
+  ) || [])]
+    .filter(skc => skc && skc !== String(row.skc || ''))
+    .sort();
+  const inventoryRelevant = shelfStatus.code === '1'
+    || (shelfStatus.code === '3' && sameStoreOnShelfSkcs.length === 0);
   const operationalDate = dateText(
     String(et?.et_operational_stock_policy || '').includes('01_full_carton_exception')
       ? et?.et_box_snapshot_date
       : et?.et_store_snapshot_date,
   );
   const decision = decideDailyInventoryReplenishment({
-    shelfStatusCode: String(row.shelfStatusCode || ''),
+    shelfStatusCode: shelfStatus.code,
     otherStoreOnShelfWithStock: otherSellingStores.length > 0,
+    sameStoreOnShelfLinkExists: sameStoreOnShelfSkcs.length > 0,
     skuCount: Array.isArray(row.skuCodes) ? row.skuCodes.length : 0,
     platformUsableInventory: row.sheinUsableInventory,
     etSellableInventory: et?.current_sellable_quantity ?? et?.et_estimated_available_qty,
@@ -161,9 +197,16 @@ for (const row of linkRows) {
     platformUsableInventory: Number(row.sheinUsableInventory),
     platformTotalInventory: Number(row.sheinInventoryQuantity),
     platformLockedInventory: Number(row.sheinLockedQuantity),
-    shelfStatusCode: String(row.shelfStatusCode || ''),
+    openApiShelfStatusCode: String(row.shelfStatusCode || ''),
+    shelfStatusCode: shelfStatus.code,
+    shelfStatusName: shelfStatus.name,
+    shelfStatusSource: shelfStatus.source,
+    sameStoreOnShelfSkcs,
     otherSellingStores,
-    crossStoreSoldOutFinding: Number(row.sheinUsableInventory) <= 0 && otherSellingStores.length > 0,
+    crossStoreSoldOutFinding: Number(row.sheinUsableInventory) <= 0
+      && otherSellingStores.length > 0
+      && inventoryRelevant
+      && sameStoreOnShelfSkcs.length === 0,
     etSellableInventory: et?.current_sellable_quantity ?? et?.et_estimated_available_qty ?? null,
     etSnapshotDate: operationalDate,
     c7SaleCount: metrics?.c7_sale_cnt ?? null,
@@ -173,15 +216,14 @@ for (const row of linkRows) {
     productName: metrics?.product_display_name || metrics?.product_name_cn || '',
     decision: decision.reason,
   };
-  evaluatedRows.push({row, et, metrics, decision, base});
+  evaluatedRows.push({row, et, metrics, decision, base, inventoryRelevant});
 }
 
 const lowEtGroups = new Map();
 for (const item of evaluatedRows) {
   const threshold = Number(policy.lowEtAllocationAtOrBelow ?? 10);
   const etQty = Number(item.base.etSellableInventory);
-  const eligibleStatus = new Set((policy.eligibleShelfStatusCodes || ['1', '3']).map(String)).has(item.base.shelfStatusCode);
-  if (!eligibleStatus || !Number.isFinite(etQty) || etQty > threshold) continue;
+  if (!item.inventoryRelevant || !Number.isFinite(etQty) || etQty > threshold) continue;
   if (!lowEtGroups.has(item.base.matchKey)) lowEtGroups.set(item.base.matchKey, []);
   lowEtGroups.get(item.base.matchKey).push(item);
 }
@@ -252,7 +294,16 @@ for (const item of evaluatedRows) {
   else ignored.push({...base, action: decision.action});
 }
 
+const inventoryRelevantMatchKeys = new Set(
+  evaluatedRows.filter(item => item.inventoryRelevant).map(item => item.base.matchKey).filter(Boolean),
+);
+const etAlertsExcludedNoRelevantLinks = etRows.filter(row => !inventoryRelevantMatchKeys.has(
+  String(row.match_key || canonicalInventoryKey(row.standard_goods_sn)).toUpperCase(),
+)).length;
 const etAlerts = etRows
+  .filter(row => inventoryRelevantMatchKeys.has(
+    String(row.match_key || canonicalInventoryKey(row.standard_goods_sn)).toUpperCase(),
+  ))
   .map(row => {
     const daysOfSupplyOnHand = row.days_of_supply_on_hand ?? null;
     const etSellableInventory = row.current_sellable_quantity ?? row.et_estimated_available_qty ?? null;
@@ -330,6 +381,7 @@ const report = {
   counts: {
     enabledStores: stores.length,
     scannedLinks: linkRows.length,
+    inventoryRelevantLinks: evaluatedRows.filter(item => item.inventoryRelevant).length,
     actionable: actionable.length,
     inventoryIncreases: actionable.filter(row => row.inventoryAction === 'increase').length,
     inventoryDecreases: actionable.filter(row => row.inventoryAction === 'decrease').length,
@@ -345,6 +397,9 @@ const report = {
     crossStoreSoldOutFindings: crossStoreSoldOutFindings.length,
     crossStoreSoldOutActionable: crossStoreSoldOutFindings.filter(row => actionable.some(action => action.storeKey === row.storeKey && action.skc === row.skc)).length,
     crossStoreSoldOutAlerts: crossStoreSoldOutFindings.filter(row => linkAlerts.some(alert => alert.storeKey === row.storeKey && alert.skc === row.skc)).length,
+    outShelfLinksExcluded: ignored.filter(row => row.shelfStatusCode === '4').length,
+    waitShelfLinksExcluded: ignored.filter(row => row.shelfStatusCode === '2').length,
+    soldOutLinksIgnoredSameStoreOnShelf: ignored.filter(row => row.decision === 'sold_out_has_same_store_on_shelf_link').length,
     linkAlerts: linkAlerts.length,
     etCritical: etAlerts.filter(row => row.severity === 'critical').length,
     etWarning: etAlerts.filter(row => row.severity === 'warning').length,
@@ -352,6 +407,7 @@ const report = {
     etBelow120Days: etAlerts.filter(row => row.replenishmentNeeded).length,
     etManualAllocation: etAlerts.filter(row => row.manualAllocationNeeded).length,
     etUnknown: etAlerts.filter(row => row.severity === 'unknown').length,
+    etAlertsExcludedNoRelevantLinks,
   },
 };
 await fs.mkdir(path.dirname(args.out), {recursive: true});

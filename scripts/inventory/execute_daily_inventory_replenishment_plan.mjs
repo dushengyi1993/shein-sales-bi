@@ -6,6 +6,7 @@ import {
   assertDailyInventoryExecutionAuthorization,
   canonicalInventoryKey,
   computeInventoryOverwriteQuantity,
+  resolveInventoryShelfStatus,
   stableInventoryHash,
 } from '../../lib/inventory_replenishment_policy.mjs';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../../lib/shein_openapi_client.mjs';
@@ -196,6 +197,20 @@ const linkMetricsByKey = new Map(linkMetricRows.map(row => [
   `${String(row.store_key || row.storeKey || '').toUpperCase()}::${String(row.skc || '').trim()}`,
   row,
 ]));
+const onShelfSkcsByStoreMatchKey = new Map();
+for (const metrics of linkMetricRows) {
+  if (resolveInventoryShelfStatus(metrics).code !== '1') continue;
+  const matchKey = canonicalInventoryKey(
+    metrics.standard_goods_sn
+    ?? metrics.standardGoodsSn
+    ?? metrics.raw_goods_sn
+    ?? metrics.rawGoodsSn,
+  );
+  if (!matchKey) continue;
+  const key = `${String(metrics.store_key || metrics.storeKey || '').toUpperCase()}::${matchKey}`;
+  if (!onShelfSkcsByStoreMatchKey.has(key)) onShelfSkcsByStoreMatchKey.set(key, new Set());
+  onShelfSkcsByStoreMatchKey.get(key).add(String(metrics.skc || ''));
+}
 const results = [];
 const clients = new Map();
 for (const row of rows) {
@@ -216,6 +231,28 @@ for (const row of rows) {
     }
     const metrics = linkMetricsByKey.get(`${String(row.storeKey || '').toUpperCase()}::${String(row.skc || '').trim()}`);
     if (!metrics) throw new Error('Current 7-day link metrics are unavailable');
+    const currentShelfStatus = resolveInventoryShelfStatus(metrics, row.openApiShelfStatusCode || row.shelfStatusCode);
+    if (currentShelfStatus.code !== String(row.shelfStatusCode || '')) {
+      throw new Error(`Four-state shelf status changed after plan: ${row.shelfStatusName || row.shelfStatusCode} -> ${currentShelfStatus.name}`);
+    }
+    if (!new Set((policy.eligibleShelfStatusCodes || ['1', '3']).map(String)).has(currentShelfStatus.code)) {
+      throw new Error(`Link is not inventory-relevant: ${currentShelfStatus.name}`);
+    }
+    const currentSameStoreOnShelfSkcs = [...(onShelfSkcsByStoreMatchKey.get(
+      `${String(row.storeKey || '').toUpperCase()}::${String(row.matchKey || canonicalInventoryKey(row.canonical)).toUpperCase()}`,
+    ) || [])]
+      .filter(skc => skc && skc !== String(row.skc || ''))
+      .sort();
+    if (
+      currentShelfStatus.code === String(policy.soldOutShelfStatusCode || '3')
+      && policy.ignoreSoldOutWhenSameStoreHasOnShelfCanonical !== false
+      && currentSameStoreOnShelfSkcs.length > 0
+    ) {
+      throw new Error(`Sold-out link is superseded by same-store on-shelf link(s): ${currentSameStoreOnShelfSkcs.join(',')}`);
+    }
+    if (JSON.stringify(currentSameStoreOnShelfSkcs) !== JSON.stringify([...asArray(row.sameStoreOnShelfSkcs)].sort())) {
+      throw new Error('Same-store on-shelf link evidence changed after plan');
+    }
     if (Number(metrics.c7_sale_cnt) !== Number(row.c7SaleCount) || Number(metrics.c7_eps_uv) !== Number(row.c7Exposure)) {
       throw new Error('7-day sales/exposure evidence changed after plan');
     }

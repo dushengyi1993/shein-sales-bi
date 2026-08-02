@@ -619,9 +619,9 @@
 
 ## 每日低虚拟库存巡检
 
-- `scripts/inventory/build_daily_inventory_replenishment_plan.mjs`：19 店只读计划器。ET 事实读取独立 `inventoryTrend.json.cachedAt`，销量/曝光读取 `linksData.json.cachedAt`，库存读取各店 OpenAPI 快照。`ET > 10` 时，近 7 天开过单的链接在库存大于 10 时降到 10、小于 5 时补回 10、5-10 保持；未开单链接在平台库存不大于 20 时目标为 `min(100, ET)`。`ET <= 10` 时按同标准货号全局近 7 天曝光 Top5 平均分配 ET 整数库存，余数给更高曝光，非 Top5 目标为 0。任一链接缺曝光、多 SKU 或证据不新鲜时整货号失败关闭。
-- 同一报告独立列出 `ET > 10` 且按加权销量计算的在库去化周期小于 `120` 天的补货提醒。本店库存为 0、其他店同货号仍有库存继续单列 `crossStoreSoldOutFindings`，不能只依赖状态文字。完整业务口径见 [每日库存巡检与实盘分配规则](inventory-replenishment-patrol-rules.md)。
-- `scripts/inventory/execute_daily_inventory_replenishment_plan.mjs`：只执行当天、无全局 blocker、policy 版本一致且 hash 完整的精确计划；报告中的 `payloadHash` 仍需逐次人工确认。执行器同时支持增库存、降到 10、Top5 配额和非 Top5 清零；每条执行前重查商品状态、SKU、ET、近 7 天销量/曝光和实时库存，精确保留锁定/不可用量并回读可用库存等于批准目标。单条失败继续记录，最后统一汇总。
+- `scripts/inventory/build_daily_inventory_replenishment_plan.mjs`：19 店只读计划器。ET 事实读取独立 `inventoryTrend.json.cachedAt`，销量、曝光和链接四态读取 `linksData.json.cachedAt`，库存读取各店 OpenAPI 快照。四态优先于 OpenAPI 回退状态：待上架、已下架一律排除；已售罄链接若同店同标准货号已有其他已上架链接也排除。`ET > 10` 时，近 7 天开过单的合格链接在库存大于 10 时降到 10、小于 5 时补回 10、5-10 保持；未开单链接在平台库存不大于 20 时目标为 `min(100, ET)`。`ET <= 10` 时只在合格链接中按同标准货号全局近 7 天曝光 Top5 平均分配 ET 整数库存，余数给更高曝光，非 Top5 目标为 0。任一合格链接缺曝光、多 SKU 或证据不新鲜时整货号失败关闭。
+- 同一报告独立列出 `ET > 10` 且按加权销量计算的在库去化周期小于 `120` 天的补货提醒；全部链接均为待上架/已下架的货号不提醒。本店库存为 0、其他店同货号仍有库存继续单列 `crossStoreSoldOutFindings`，但本店已有其他已上架同款时忽略已售罄旧链接，且待上架/已下架绝不进入。完整业务口径见 [每日库存巡检与实盘分配规则](inventory-replenishment-patrol-rules.md)。
+- `scripts/inventory/execute_daily_inventory_replenishment_plan.mjs`：只执行当天、无全局 blocker、policy 版本一致且 hash 完整的精确计划；报告中的 `payloadHash` 仍需逐次人工确认。执行器同时支持增库存、降到 10、Top5 配额和非 Top5 清零；每条执行前重查 linksData 四态、同店同款已上架链接、SKU、ET、近 7 天销量/曝光和实时库存，任何状态/替代链接变化都使旧计划失败关闭。精确保留锁定/不可用量并回读可用库存等于批准目标；单条失败继续记录，最后统一汇总。
 - `config/inventory_replenishment_policy.json` 当前 `execution.mode=manual_review` 且自动执行关闭。`shein-bi-daily-inventory-replenishment-guard.timer` 只生成报告，不执行修改；经过试运行后若要自动执行，必须另行修改 policy、审计常驻授权并重新发布。
 
 

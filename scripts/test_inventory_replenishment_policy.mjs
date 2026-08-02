@@ -7,6 +7,7 @@ import {
   classifyEtInventoryAlert,
   computeInventoryOverwriteQuantity,
   decideDailyInventoryReplenishment,
+  resolveInventoryShelfStatus,
   stableInventoryHash,
 } from '../lib/inventory_replenishment_policy.mjs';
 
@@ -18,6 +19,8 @@ const policy = {
   recentSaleScarcity: {minimumSaleCount: 1, targetUsableInventory: 10, refillWhenBelow: 5, capWhenAbove: 10},
   lowEtAllocation: {topExposureLinkCount: 5},
   eligibleShelfStatusCodes: ['1', '3'],
+  soldOutShelfStatusCode: '3',
+  ignoreSoldOutWhenSameStoreHasOnShelfCanonical: true,
   soldOutRequiresOtherStoreOnShelfWithStock: true,
   requireExactlyOneSku: true,
   requireCurrentDayEtSnapshot: true,
@@ -32,6 +35,9 @@ const policy = {
 };
 
 assert.equal(canonicalInventoryKey('SK-04031胶囊咖啡机'), 'SK04031');
+assert.deepEqual(resolveInventoryShelfStatus({shelf_status_name: '已下架', is_out_shelf: true}, '3').code, '4');
+assert.deepEqual(resolveInventoryShelfStatus({shelf_status_name: '已售罄', is_sold_out: true}, '1').code, '3');
+assert.deepEqual(resolveInventoryShelfStatus({shelf_status_name: '已上架', is_on_shelf: true}, '4').code, '1');
 assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '1', skuCount: 1, platformUsableInventory: 20, etSellableInventory: 100, etSnapshotCurrentDay: true, c7SaleCount: 0, policy}).action, 'set_exact');
 assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '1', skuCount: 1, platformUsableInventory: 20, etSellableInventory: 99, etSnapshotCurrentDay: true, c7SaleCount: 0, policy}), {
   action: 'set_exact',
@@ -52,6 +58,7 @@ assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '1', skuCou
 assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '4', skuCount: 1, platformUsableInventory: 1, etSellableInventory: 500, etSnapshotCurrentDay: true, c7SaleCount: 0, policy}).reason, 'shelf_status_not_eligible');
 assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '3', otherStoreOnShelfWithStock: true, skuCount: 1, platformUsableInventory: 0, etSellableInventory: 40, etSnapshotCurrentDay: true, c7SaleCount: 0, policy}).targetUsableInventory, 40);
 assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '3', otherStoreOnShelfWithStock: false, skuCount: 1, platformUsableInventory: 0, etSellableInventory: 40, etSnapshotCurrentDay: true, c7SaleCount: 0, policy}).reason, 'sold_out_without_other_store_selling');
+assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '3', sameStoreOnShelfLinkExists: true, otherStoreOnShelfWithStock: true, skuCount: 1, platformUsableInventory: 0, etSellableInventory: 40, etSnapshotCurrentDay: true, c7SaleCount: 0, policy}).reason, 'sold_out_has_same_store_on_shelf_link');
 assert.equal(decideDailyInventoryReplenishment({shelfStatusCode: '3', otherStoreOnShelfWithStock: false, skuCount: 1, platformUsableInventory: 0, etSellableInventory: 40, etSnapshotCurrentDay: true, c7SaleCount: 1, policy}).targetUsableInventory, 10);
 assert.equal(computeInventoryOverwriteQuantity(100, {totalInventoryQuantity: 10, totalUsableInventory: 8, totalLockedQuantity: 1}), 102);
 assert.equal(computeInventoryOverwriteQuantity(10, {totalInventoryQuantity: 100, totalUsableInventory: 100, totalLockedQuantity: 0}), 10);
@@ -76,4 +83,4 @@ const hash = 'a'.repeat(64);
 assert.deepEqual(assertDailyInventoryExecutionAuthorization({policy, payloadHash: hash, confirmHash: hash}).mode, 'manual_review');
 assert.throws(() => assertDailyInventoryExecutionAuthorization({policy, payloadHash: hash, confirmHash: 'b'.repeat(64)}), /confirm-hash/);
 assert.throws(() => assertDailyInventoryExecutionAuthorization({policy, mode: 'automatic', payloadHash: hash, confirmHash: hash}), /automation is disabled/);
-console.log(JSON.stringify({ok: true, checks: 27}, null, 2));
+console.log(JSON.stringify({ok: true, checks: 31}, null, 2));
