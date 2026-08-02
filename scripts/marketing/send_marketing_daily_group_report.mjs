@@ -165,7 +165,7 @@ export function buildMarketingDailyFinalMarkdown({
   const stageLines = Object.entries(queue?.stages || {}).map(([name, stage]) => (
     `- ${name}: ${stage?.status || 'unknown'}；行数 ${Number(stage?.rows || 0)}；组数 ${Number(stage?.groups || 0)}`
   ));
-  return [
+  const markdown = [
     `# ${date} 营销巡检最终报告`,
     '',
     '> 本文件为巡检、授权修复及写后 live 回读全部结束后的唯一最终附件。',
@@ -178,6 +178,9 @@ export function buildMarketingDailyFinalMarkdown({
     ...(stageLines.length ? ['## 自动化阶段终态', '', ...stageLines, ''] : []),
     ...(executionSections.length ? ['## 自动执行结果', '', ...executionSections.flatMap(section => [section, ''])] : []),
   ].join('\n').trim() + '\n';
+  return markdown
+    .replaceAll('，不能自动执行', '，仍需等待阻断解除')
+    .replaceAll('不能自动执行；', '仍需等待阻断解除；');
 }
 
 function runLark(args) {

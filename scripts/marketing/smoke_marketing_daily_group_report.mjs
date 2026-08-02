@@ -16,6 +16,7 @@ const guardMarkdown = `# report
 - 本轮候选：符合 7 条；已保护 7 条。
 - 效果跟踪：共 24 条；最新7日已出单 14 条。
 ## 今日关键状态
+- 价格止损阻塞：2 个，不能自动执行
 - 订单商品行成交价：低于目标 0 条；高于目标 0 条。
 - 未来 3 天普通活动提醒：0 个。
 `;
@@ -75,6 +76,7 @@ const finalMarkdown = buildMarketingDailyFinalMarkdown({
 assert.match(finalMarkdown, /营销巡检最终报告/);
 assert.match(finalMarkdown, /唯一最终附件/);
 assert.match(finalMarkdown, /自动执行结果/);
+assert.doesNotMatch(finalMarkdown, /不能自动执行/);
 
 const queue = {
   status: 'blocked',
