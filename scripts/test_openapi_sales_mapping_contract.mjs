@@ -84,6 +84,42 @@ assert.equal(cancelled.pageStatus, 'CANCEL');
 assert.equal(cancelled.isValidSale, false);
 assert.equal(cancelled.salesExclusionReason, 'cancelled_before_pickup');
 
+const refundedAfterFulfillmentDetail = {
+  ...structuredClone(detail),
+  orderNo: 'O-2',
+  orderStatus: 6,
+  orderGoodsInfoList: [
+    {
+      ...structuredClone(detail.orderGoodsInfoList[0]),
+      goodsId: 'G-3',
+      skuCode: 'SKU-3',
+      skc: 'SKC-3',
+      estimatedIncome: 139.38,
+      newGoodsStatus: 6,
+      performanceTag: 1,
+    },
+    {
+      ...structuredClone(detail.orderGoodsInfoList[0]),
+      goodsId: 'G-4',
+      skuCode: 'SKU-4',
+      skc: 'SKC-4',
+      estimatedIncome: 156.94,
+      newGoodsStatus: 6,
+      performanceTag: 3,
+    },
+  ],
+};
+const refundedAfterFulfillment = mapOpenApiOrderDetails([refundedAfterFulfillmentDetail]);
+for (const row of refundedAfterFulfillment.goodsRows) {
+  assert.equal(row.isValidSale, true, 'a positive-income refund after fulfilment remains a gross sale');
+  assert.equal(row.salesExclusionReason, '');
+  assert.equal(row.postFulfillmentRefund, true);
+  assert.equal(row.goodsPerformanceStatus, 4);
+  assert.equal(row.goodsPerformanceStatusDesc, '退款后履约状态待复查');
+  assert.equal(row.performStatusDesc, '退款后履约状态待复查');
+  assert.equal(row.currencyPrice, row.openApiEstimatedIncome);
+}
+
 const apiArtifact = {
   storeKey: 'TST',
   groupKey: metadata.groupKey,

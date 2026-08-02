@@ -51,19 +51,38 @@ const processor = createSheinWebhookEventProcessor({
   webhookRepository,
   linkOpsRepository,
   orderReturnSync: {
-    syncOrder: async input => (syncCalls.push(['order', input]), {
-      kind: 'order',
-      artifact: {
-        start: '2026-07-27',
-        orderRows: [{orderStatus: 6, orderStatusDesc: '揽收前已取消'}],
-        goodsRows: [{
-          number: 1,
-          currencyPrice: 295.02,
-          isValidSale: false,
-          salesExclusionReason: 'cancelled_before_pickup',
-        }],
-      },
-    }),
+    syncOrder: async input => {
+      syncCalls.push(['order', input]);
+      if (input.orderNo === 'O-2') {
+        return {
+          kind: 'order',
+          artifact: {
+            start: '2026-07-27',
+            orderRows: [{orderStatus: 6, orderStatusDesc: '用户已退款'}],
+            goodsRows: [{
+              number: 1,
+              currencyPrice: 139.38,
+              isValidSale: true,
+              salesExclusionReason: '',
+              postFulfillmentRefund: true,
+            }],
+          },
+        };
+      }
+      return {
+        kind: 'order',
+        artifact: {
+          start: '2026-07-27',
+          orderRows: [{orderStatus: 6, orderStatusDesc: '揽收前已取消'}],
+          goodsRows: [{
+            number: 1,
+            currencyPrice: 295.02,
+            isValidSale: false,
+            salesExclusionReason: 'cancelled_before_pickup',
+          }],
+        },
+      };
+    },
     syncReturn: async input => (syncCalls.push(['return', input]), {
       kind: 'return',
       artifact: {start: '2026-07-28'},
@@ -90,11 +109,31 @@ assert.deepEqual(orderOutcome.normalized.warehouseSync, {
   salesSar: 0,
   cancelledBeforePickup: true,
 });
+const refundedAfterFulfillmentOutcome = await processor.process({
+  ...base,
+  id: 2,
+  idempotencyKey: 'b'.repeat(64),
+  normalized: {
+    eventFamily: 'order', eventCode: '3001442', eventLabel: '订单',
+    storeKey: 'AA', orderId: 'O-2', businessId: 'O-2', status: '6',
+  },
+  payload: {orderNo: 'O-2'},
+});
+assert.deepEqual(refundedAfterFulfillmentOutcome.normalized.warehouseSync, {
+  kind: 'order',
+  businessDate: '2026-07-27',
+  orderStatus: '6',
+  orderStatusDesc: '用户已退款',
+  salesQuantity: 1,
+  salesSar: 139.38,
+  cancelledBeforePickup: false,
+});
 const returnOutcome = await processor.process({...base, normalized: {eventFamily: 'return', eventCode: '3000914', eventLabel: '退货', storeKey: 'AA', returnId: 'R-1', businessId: 'R-1'}, payload: {returnOrderNo: 'R-1'}});
 assert.equal(returnOutcome.actionState, 'return_warehouse_synced');
 assert.deepEqual(returnOutcome.normalized.warehouseSync, {kind: 'return', businessDate: '2026-07-28'});
 assert.deepEqual(syncCalls, [
   ['order', {storeKey: 'AA', orderNo: 'O-1'}],
+  ['order', {storeKey: 'AA', orderNo: 'O-2'}],
   ['return', {storeKey: 'AA', returnOrderNo: 'R-1'}],
 ]);
 
