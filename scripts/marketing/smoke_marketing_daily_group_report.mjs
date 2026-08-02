@@ -47,16 +47,23 @@ const summary = buildMarketingDailyGroupSummary({
     createdAt: '2026-07-31T04:05:00.000Z',
     limitedDiscountTargetPriceDrift: {belowTarget: 2},
     manualSpecialLimitedDiscount: {activeCount: 24, checked: 24},
+    mandatoryLimitedDiscountStatus: {
+      live: {storeCount: 19, okStoreCount: 19, limitedRows: 604},
+      latestAutoRepair: {blockedCount: 2},
+    },
+    orderPriceAudit: {auditedRows: 65, below: 0, above: 0},
+    highClickSpecialEffect: {total: 24, convertedCount: 14},
+    t3MarketingCandidates: [{activityId: 49767}, {activityId: 49776}],
   },
   executionMarkdown,
   executionReport,
 });
 assert.match(summary, /巡检和授权修复已完成/);
-assert.match(summary, /覆盖 19\/19 店/);
+assert.match(summary, /最终回读 19\/19 店/);
 assert.match(summary, /可安全执行的动作均已处理/);
 assert.match(summary, /人工特殊折扣 24\/24 精确覆盖/);
 assert.doesNotMatch(summary, /不能自动执行/);
-assert.match(summary, /最新7日已出单 14 条/);
+assert.match(summary, /高点击专属折扣跟踪 24 条，已出单 14 条/);
 assert.match(summary, /完整明细见唯一附件/);
 
 const finalMarkdown = buildMarketingDailyFinalMarkdown({

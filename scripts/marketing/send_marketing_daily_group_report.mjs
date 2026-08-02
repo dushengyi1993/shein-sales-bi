@@ -112,22 +112,31 @@ export function buildMarketingDailyGroupSummary({
   const blockers = buildMarketingRepairBlockerNotice(executionReport || {}).rows;
   const liveScan = firstMatching(fallback, /^巡检：/);
   const highClickStatus = firstMatching(highClick, /^本轮候选：/);
-  const tracking = firstMatching(highClick, /^效果跟踪：/);
-  const orderPrice = firstMatching(keyState, /^订单商品行成交价：/);
-  const future = firstMatching(keyState, /^未来 3 天普通活动提醒：/);
   const remainingDrift = Number(guardReport?.limitedDiscountTargetPriceDrift?.belowTarget || 0);
   const manual = guardReport?.manualSpecialLimitedDiscount || {};
+  const live = guardReport?.mandatoryLimitedDiscountStatus?.live || {};
+  const repair = guardReport?.mandatoryLimitedDiscountStatus?.latestAutoRepair || {};
+  const orders = guardReport?.orderPriceAudit || {};
+  const effect = guardReport?.highClickSpecialEffect || {};
+  const ordinaryActivityCount = new Set((guardReport?.t3MarketingCandidates || [])
+    .map(row => String(row?.activityId || ''))
+    .filter(Boolean)).size;
   const sentenceParts = [
     `${date} 营销巡检和授权修复已完成`,
-    liveScan ? liveScan.replace(/^巡检：/, 'SHEIN后台') : '',
+    Number(live.storeCount || 0) > 0
+      ? `SHEIN后台最终回读 ${Number(live.okStoreCount || 0)}/${Number(live.storeCount || 0)} 店，当前限时折扣 ${Number(live.limitedRows || 0)} 行`
+      : liveScan?.replace(/^巡检：/, ''),
     executionConclusion.length ? '本轮授权范围内可安全执行的动作均已处理' : '',
     `人工特殊折扣 ${Number(manual.activeCount || 0)}/${Number(manual.checked || 0)} 精确覆盖`,
     remainingDrift > 0 ? `仍有 ${remainingDrift} 条目标价漂移受平台或ET库存阻断` : '目标价漂移已处理完毕',
-    blockers.length > 0 ? `另有 ${blockers.length} 条兜底库存阻断` : '',
-    orderPrice,
-    highClickStatus,
-    tracking,
-    future,
+    Number(repair.blockedCount || blockers.length) > 0
+      ? `另有 ${Number(repair.blockedCount || blockers.length)} 条兜底库存阻断`
+      : '',
+    `订单商品行审计 ${Number(orders.auditedRows || 0)} 行，低于目标 ${Number(orders.below || 0)} 条、高于目标 ${Number(orders.above || 0)} 条`,
+    Number(effect.total || 0) > 0
+      ? `高点击专属折扣跟踪 ${Number(effect.total || 0)} 条，已出单 ${Number(effect.convertedCount || 0)} 条`
+      : highClickStatus,
+    ordinaryActivityCount > 0 ? `未来3天普通活动 ${ordinaryActivityCount} 个批次待跟进` : '',
     '完整明细见唯一附件',
   ].filter(Boolean);
   return `${sentenceParts.join('；')}。`;
