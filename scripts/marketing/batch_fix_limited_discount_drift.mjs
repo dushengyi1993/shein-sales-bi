@@ -259,6 +259,32 @@ async function replaceTransactionally({storeKey, port, rescuePath, execute}) {
   return {...result, parsed: loaded.summary, full: loaded.full, outPath: loaded.outPath};
 }
 
+async function applyRescue({storeKey, port, rescuePath}) {
+  const result = await runCommand(process.execPath, [
+    'scripts/marketing/apply_hl_limited_discount_rescue.mjs',
+    '--store-key', storeKey,
+    '--port', String(port),
+    '--rescue', rescuePath,
+    '--dry-run',
+  ], {timeoutMs: 900000});
+  const loaded = await loadToolOutputFromStdout(result);
+  return {...result, parsed: loaded.summary, full: loaded.full, outPath: loaded.outPath};
+}
+
+async function topUpAuthorizedDriftInventory({storeKey, skc, rescuePath, execute}) {
+  const commandArgs = [
+    'scripts/marketing/manage_manual_limited_discount_inventory.mjs',
+    '--store', storeKey,
+    '--skc', skc,
+    '--rescue', rescuePath,
+    execute ? '--execute' : '--dry-run',
+  ];
+  if (execute) commandArgs.push('--confirm', 'AUTHORIZED_LIMITED_DISCOUNT_FALLBACK_STOCK_TOP_UP');
+  const result = await runCommand(process.execPath, commandArgs, {timeoutMs: 300000});
+  const loaded = await loadToolOutputFromStdout(result);
+  return {...result, parsed: loaded.summary, full: loaded.full, outPath: loaded.outPath};
+}
+
 function summarizeCommand(result) {
   return {
     ok: result.ok,
@@ -337,6 +363,50 @@ async function processStore(storeKey, rescuePath, args, manualIndex, browserSess
       record.launched = browserSession.launchSummary || {ok: true, reused: true};
     } else {
       record.launched = summarizeRaw(await launchStore(storeKey));
+    }
+
+    if (!args.dryRunOnly) {
+      const inventoryPreflight = await applyRescue({
+        storeKey,
+        port: store.port,
+        rescuePath: activeRescuePath,
+      });
+      record.inventoryPreflight = summarizeCommand(inventoryPreflight);
+      const inventorySkcs = [...new Set((inventoryPreflight.full?.validation?.invalid || [])
+        .filter(row => row.reason === 'inventory below configured activity stock')
+        .map(row => String(row.skc || '').trim())
+        .filter(Boolean))];
+      for (const skc of inventorySkcs) {
+        const inventoryDryRun = await topUpAuthorizedDriftInventory({
+          storeKey,
+          skc,
+          rescuePath: activeRescuePath,
+          execute: false,
+        });
+        const inventoryExecute = inventoryDryRun.full?.ok
+          ? await topUpAuthorizedDriftInventory({
+              storeKey,
+              skc,
+              rescuePath: activeRescuePath,
+              execute: true,
+            })
+          : null;
+        record.inventoryTopUps.push({
+          skc,
+          dryRun: inventoryDryRun.full || inventoryDryRun.parsed || summarizeRaw(inventoryDryRun),
+          execute: inventoryExecute
+            ? (inventoryExecute.full || inventoryExecute.parsed || summarizeRaw(inventoryExecute))
+            : null,
+        });
+      }
+      if (inventorySkcs.length) {
+        const retry = await applyRescue({
+          storeKey,
+          port: store.port,
+          rescuePath: activeRescuePath,
+        });
+        record.postInventoryTopUpDryRun = summarizeCommand(retry);
+      }
     }
 
     const transaction = await replaceTransactionally({

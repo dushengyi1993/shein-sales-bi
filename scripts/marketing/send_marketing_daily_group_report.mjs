@@ -51,44 +51,124 @@ function firstMatching(lines, pattern) {
   return lines.find(line => pattern.test(line)) || '';
 }
 
-export function buildMarketingDailyGroupSummary({date, guardMarkdown = '', executionMarkdown = '', executionReport = null} = {}) {
-  const intro = extractBullets(guardMarkdown, '先看结论');
+function latestTimestamp(...values) {
+  const parsed = values
+    .map(value => Date.parse(String(value || '')))
+    .filter(Number.isFinite);
+  return parsed.length ? Math.max(...parsed) : NaN;
+}
+
+export function assessMarketingDailyDeliveryReadiness({queue = null, guardReport = null, executionReport = null} = {}) {
+  const queueStatus = String(queue?.status || 'no_queue');
+  if (queue && !['completed', 'blocked'].includes(queueStatus)) {
+    return {ready: false, reason: `repair queue is not terminal: ${queueStatus}`};
+  }
+  const guardAt = latestTimestamp(guardReport?.updatedAt, guardReport?.createdAt);
+  if (!Number.isFinite(guardAt)) return {ready: false, reason: 'final guard timestamp is missing'};
+  const totalRows = Number(queue?.counts?.totalRows || 0);
+  if (!queue || totalRows === 0) return {ready: true, reason: 'terminal no-repair guard'};
+
+  const queueAt = latestTimestamp(queue?.updatedAt, queue?.createdAt);
+  const executionAt = latestTimestamp(
+    executionReport?.finishedAt,
+    executionReport?.updatedAt,
+    executionReport?.createdAt,
+  );
+  const requiredAt = Math.max(
+    Number.isFinite(queueAt) ? queueAt : 0,
+    Number.isFinite(executionAt) ? executionAt : 0,
+  );
+  if (guardAt < requiredAt) {
+    return {
+      ready: false,
+      reason: 'final guard predates the terminal queue or execution result',
+      guardAt: new Date(guardAt).toISOString(),
+      requiredAt: new Date(requiredAt).toISOString(),
+    };
+  }
+  return {ready: true, reason: 'terminal queue has post-execution final guard'};
+}
+
+function extractSection(markdown, heading) {
+  const marker = `## ${heading}`;
+  const start = markdown.indexOf(marker);
+  if (start < 0) return '';
+  const rest = markdown.slice(start);
+  const next = rest.slice(marker.length).search(/\n##\s+/);
+  return (next >= 0 ? rest.slice(0, marker.length + next) : rest).trim();
+}
+
+export function buildMarketingDailyGroupSummary({
+  date,
+  guardMarkdown = '',
+  guardReport = null,
+  executionMarkdown = '',
+  executionReport = null,
+} = {}) {
   const fallback = extractBullets(guardMarkdown, '限时折扣兜底情况');
   const highClick = extractBullets(guardMarkdown, '高点击低转化专属折扣');
   const keyState = extractBullets(guardMarkdown, '今日关键状态');
   const executionConclusion = extractBullets(executionMarkdown, '结论');
-  const executed = extractBullets(executionMarkdown, '已执行');
   const blockers = buildMarketingRepairBlockerNotice(executionReport || {}).rows;
-
-  const lines = [
-    `## ${date} 营销巡检完整结论`,
-    '',
-    `**${intro[0] || '营销巡检已完成。'}**`,
-  ];
   const liveScan = firstMatching(fallback, /^巡检：/);
-  if (liveScan) lines.push(`- ${liveScan.replace(/^巡检：/, '实时检查：')}`);
-  for (const line of executionConclusion) lines.push(`- ${line}`);
-  if (executed.length) lines.push(`- 已执行明细：${executed.join('；')}`);
-  if (blockers.length) {
-    lines.push('- 未完成明细：');
-    for (const row of blockers) {
-      lines.push(`  - ${row.storeKey} · ${row.canonical || row.skc}：平台可用 ${row.platformStock ?? '未知'}，ET 可用 ${row.etStock ?? '未知'}，活动需要 ${row.required ?? '未知'}`);
-    }
-  }
   const highClickStatus = firstMatching(highClick, /^本轮候选：/);
   const tracking = firstMatching(highClick, /^效果跟踪：/);
   const orderPrice = firstMatching(keyState, /^订单商品行成交价：/);
   const future = firstMatching(keyState, /^未来 3 天普通活动提醒：/);
-  for (const line of [highClickStatus, tracking, orderPrice, future].filter(Boolean)) lines.push(`- ${line}`);
-  lines.push(
+  const remainingDrift = Number(guardReport?.limitedDiscountTargetPriceDrift?.belowTarget || 0);
+  const manual = guardReport?.manualSpecialLimitedDiscount || {};
+  const sentenceParts = [
+    `${date} 营销巡检和授权修复已完成`,
+    liveScan ? liveScan.replace(/^巡检：/, 'SHEIN后台') : '',
+    executionConclusion.length ? '本轮授权范围内可安全执行的动作均已处理' : '',
+    `人工特殊折扣 ${Number(manual.activeCount || 0)}/${Number(manual.checked || 0)} 精确覆盖`,
+    remainingDrift > 0 ? `仍有 ${remainingDrift} 条目标价漂移受平台或ET库存阻断` : '目标价漂移已处理完毕',
+    blockers.length > 0 ? `另有 ${blockers.length} 条兜底库存阻断` : '',
+    orderPrice,
+    highClickStatus,
+    tracking,
+    future,
+    '完整明细见唯一附件',
+  ].filter(Boolean);
+  return `${sentenceParts.join('；')}。`;
+}
+
+export function buildMarketingDailyFinalMarkdown({
+  date,
+  summary,
+  queue = null,
+  guardMarkdown = '',
+  executionMarkdown = '',
+} = {}) {
+  const guardSections = [
+    '需要做什么',
+    '需要留意',
+    '已确认安全/已处理',
+    '限时折扣兜底情况',
+    '高点击低转化专属折扣',
+    '今日关键状态',
+  ].map(heading => extractSection(guardMarkdown, heading)).filter(Boolean);
+  const executionSections = [
+    '结论',
+    '已执行',
+    '未完成',
+  ].map(heading => extractSection(executionMarkdown, heading)).filter(Boolean);
+  const stageLines = Object.entries(queue?.stages || {}).map(([name, stage]) => (
+    `- ${name}: ${stage?.status || 'unknown'}；行数 ${Number(stage?.rows || 0)}；组数 ${Number(stage?.groups || 0)}`
+  ));
+  return [
+    `# ${date} 营销巡检最终报告`,
     '',
-    blockers.length
-      ? '**下一步：**库存恢复后系统会自动复查；当前没有虚增库存，也没有强行提交被平台阻断的活动。'
-      : '**下一步：**今天没有需要人工处理的营销事项。',
+    '> 本文件为巡检、授权修复及写后 live 回读全部结束后的唯一最终附件。',
     '',
-    '完整人话版巡检报告和自动执行结果见附件。',
-  );
-  return lines.join('\n');
+    '## 最终结论',
+    '',
+    summary,
+    '',
+    ...guardSections.flatMap(section => [section, '']),
+    ...(stageLines.length ? ['## 自动化阶段终态', '', ...stageLines, ''] : []),
+    ...(executionSections.length ? ['## 自动执行结果', '', ...executionSections.flatMap(section => [section, ''])] : []),
+  ].join('\n').trim() + '\n';
 }
 
 function runLark(args) {
@@ -125,36 +205,56 @@ async function main() {
   const statePath = path.resolve(ROOT, `state/cloud_marketing_live_guard/group-delivery/marketing-daily-${args.date}.json`);
 
   const queue = await readJson(queuePath, null);
-  if (queue && !['completed', 'blocked'].includes(String(queue.status || ''))) {
-    console.log(JSON.stringify({ok: true, skipped: true, reason: `repair queue is not terminal: ${queue.status || 'unknown'}`}));
-    return;
-  }
-
   const guardMarkdown = await readText(guardMdPath);
   if (!guardMarkdown) throw new Error(`Missing marketing guard Markdown: ${guardMdPath}`);
+  const guardReport = await readJson(guardJsonPath, null);
+  if (!guardReport) throw new Error(`Missing marketing guard JSON: ${guardJsonPath}`);
   const executionMarkdown = await readText(executionMdPath);
   const executionReport = await readJson(executionJsonPath, null);
+  const readiness = assessMarketingDailyDeliveryReadiness({queue, guardReport, executionReport});
+  if (!readiness.ready) {
+    console.log(JSON.stringify({ok: true, skipped: true, finalReady: false, ...readiness}));
+    process.exitCode = 3;
+    return;
+  }
   const summary = buildMarketingDailyGroupSummary({
     date: args.date,
     guardMarkdown,
+    guardReport,
     executionMarkdown,
     executionReport,
   });
+  const finalMarkdown = buildMarketingDailyFinalMarkdown({
+    date: args.date,
+    summary,
+    queue,
+    guardMarkdown,
+    executionMarkdown,
+  });
+  const finalMdPath = path.resolve(ROOT, `outputs/reports/marketing-daily-final-${args.date}.md`);
+  await fs.writeFile(finalMdPath, finalMarkdown, 'utf8');
   const fingerprint = crypto.createHash('sha256')
-    .update([guardMarkdown, executionMarkdown, String(queue?.status || 'no_queue')].join('\n---\n'))
+    .update([finalMarkdown, String(queue?.status || 'no_queue')].join('\n---\n'))
     .digest('hex');
   const prior = await readJson(statePath, {});
   const state = prior.fingerprint === fingerprint
     ? prior
-    : {date: args.date, fingerprint, summarySent: false, guardSent: false, executionSent: !executionMarkdown};
+    : {
+      date: args.date,
+      fingerprint,
+      queueFingerprint: queue?.queueFingerprint || '',
+      summarySent: false,
+      finalReportSent: false,
+    };
 
   if (args.dryRun) {
     console.log(JSON.stringify({
       ok: true,
       dryRun: true,
+      finalReady: true,
       queueStatus: queue?.status || 'no_queue',
       summary,
-      files: [guardMdPath, ...(executionMarkdown ? [executionMdPath] : [])],
+      files: [finalMdPath],
     }, null, 2));
     return;
   }
@@ -163,15 +263,14 @@ async function main() {
     await writeState(statePath, {
       ...state,
       summarySent: true,
-      guardSent: true,
-      executionSent: true,
+      finalReportSent: true,
       adoptedExistingAt: new Date().toISOString(),
     });
     console.log(JSON.stringify({ok: true, adoptedExisting: true, fingerprint}));
     return;
   }
 
-  if (state.summarySent && state.guardSent && state.executionSent) {
+  if (state.summarySent && state.finalReportSent) {
     console.log(JSON.stringify({ok: true, skipped: true, reason: 'same final report already delivered'}));
     return;
   }
@@ -188,16 +287,10 @@ async function main() {
     state.summarySent = true;
     await writeState(statePath, state);
   }
-  if (!state.guardSent) {
-    await runLark(['im', '+messages-send', '--as', identity, ...target.cliArgs, '--file', path.relative(ROOT, guardMdPath),
-      '--idempotency-key', `mkt-day-${compactDate}-guard-${shortHash}`]);
-    state.guardSent = true;
-    await writeState(statePath, state);
-  }
-  if (!state.executionSent && executionMarkdown) {
-    await runLark(['im', '+messages-send', '--as', identity, ...target.cliArgs, '--file', path.relative(ROOT, executionMdPath),
-      '--idempotency-key', `mkt-day-${compactDate}-exec-${shortHash}`]);
-    state.executionSent = true;
+  if (!state.finalReportSent) {
+    await runLark(['im', '+messages-send', '--as', identity, ...target.cliArgs, '--file', path.relative(ROOT, finalMdPath),
+      '--idempotency-key', `mkt-day-${compactDate}-final-${shortHash}`]);
+    state.finalReportSent = true;
     await writeState(statePath, state);
   }
 

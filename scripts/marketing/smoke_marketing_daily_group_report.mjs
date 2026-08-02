@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import {buildMarketingDailyGroupSummary} from './send_marketing_daily_group_report.mjs';
+import fs from 'node:fs/promises';
+import {
+  assessMarketingDailyDeliveryReadiness,
+  buildMarketingDailyFinalMarkdown,
+  buildMarketingDailyGroupSummary,
+} from './send_marketing_daily_group_report.mjs';
 
 const guardMarkdown = `# report
 ## 先看结论
@@ -22,6 +27,8 @@ const executionMarkdown = `# execution
 - DL: 活动 123，2 个 SKC
 `;
 const executionReport = {
+  finishedAt: '2026-07-31T04:00:00.000Z',
+  totals: {executedTargetCount: 7},
   results: [{
     storeKey: 'TZ',
     inventoryTopUps: [{
@@ -36,13 +43,66 @@ const executionReport = {
 const summary = buildMarketingDailyGroupSummary({
   date: '2026-07-31',
   guardMarkdown,
+  guardReport: {
+    createdAt: '2026-07-31T04:05:00.000Z',
+    limitedDiscountTargetPriceDrift: {belowTarget: 2},
+    manualSpecialLimitedDiscount: {activeCount: 24, checked: 24},
+  },
   executionMarkdown,
   executionReport,
 });
-assert.match(summary, /完整结论/);
+assert.match(summary, /巡检和授权修复已完成/);
 assert.match(summary, /覆盖 19\/19 店/);
-assert.match(summary, /实际新建\/重建 7 个/);
-assert.match(summary, /TZ · SK-7015绞肉机：平台可用 7，ET 可用 4，活动需要 10/);
+assert.match(summary, /可安全执行的动作均已处理/);
+assert.match(summary, /人工特殊折扣 24\/24 精确覆盖/);
+assert.doesNotMatch(summary, /不能自动执行/);
 assert.match(summary, /最新7日已出单 14 条/);
-assert.match(summary, /完整人话版巡检报告和自动执行结果见附件/);
-console.log('marketing daily group report: complete summary and attachments are required');
+assert.match(summary, /完整明细见唯一附件/);
+
+const finalMarkdown = buildMarketingDailyFinalMarkdown({
+  date: '2026-07-31',
+  summary,
+  guardMarkdown,
+  executionMarkdown,
+});
+assert.match(finalMarkdown, /营销巡检最终报告/);
+assert.match(finalMarkdown, /唯一最终附件/);
+assert.match(finalMarkdown, /自动执行结果/);
+
+const queue = {
+  status: 'blocked',
+  createdAt: '2026-07-31T03:00:00.000Z',
+  updatedAt: '2026-07-31T04:02:00.000Z',
+  counts: {totalRows: 9},
+};
+assert.equal(assessMarketingDailyDeliveryReadiness({
+  queue,
+  guardReport: {createdAt: '2026-07-31T04:01:00.000Z'},
+  executionReport,
+}).ready, false, 'a pre-terminal guard must never be delivered');
+assert.equal(assessMarketingDailyDeliveryReadiness({
+  queue,
+  guardReport: {createdAt: '2026-07-31T04:05:00.000Z'},
+  executionReport,
+}).ready, true, 'a post-terminal final guard is deliverable');
+
+const senderSource = await fs.readFile(
+  new URL('./send_marketing_daily_group_report.mjs', import.meta.url),
+  'utf8',
+);
+assert.equal(
+  (senderSource.match(/'--file'/g) || []).length,
+  1,
+  'daily delivery must have exactly one file-send path',
+);
+const workerSource = await fs.readFile(
+  new URL('../cloud_marketing_repair_worker.sh', import.meta.url),
+  'utf8',
+);
+assert.match(
+  workerSource,
+  /if \[\[ "\$QUEUE_STATUS" == "blocked" \]\]; then[\s\S]*?run_terminal_final_snapshot[\s\S]*?send_daily_group_report/,
+  'terminal blockers must refresh final evidence before delivery',
+);
+
+console.log('marketing daily group report: final gate and one attachment policy are enforced');

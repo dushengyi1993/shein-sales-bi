@@ -83,6 +83,8 @@ try {
   const driftBatchSource = await fs.readFile(path.join(process.cwd(), 'scripts/marketing/batch_fix_limited_discount_drift.mjs'), 'utf8');
   assert.match(driftBatchSource, /replace_limited_discount_transactionally\.mjs/);
   assert.doesNotMatch(driftBatchSource, /remove_skc_from_limited_discount\.mjs/);
+  assert.match(driftBatchSource, /topUpAuthorizedDriftInventory/);
+  assert.match(driftBatchSource, /AUTHORIZED_LIMITED_DISCOUNT_FALLBACK_STOCK_TOP_UP/);
 
   const fallbackBatchSource = await fs.readFile(path.join(process.cwd(), 'scripts/marketing/batch_apply_new_listing_limited_discount.mjs'), 'utf8');
   assert.match(fallbackBatchSource, /for \(const skc of inventorySkcs\)/);
@@ -102,6 +104,7 @@ try {
     exactTopUpTo: 10,
     deterministicIdempotencyKey: true,
     driftBatchUsesSafeTransaction: true,
+    driftBatchUsesEtGatedInventoryTopUp: true,
     multiSkcFallbackBatchIntegrated: true,
     boundedInventoryWriteRetry: true,
   }));

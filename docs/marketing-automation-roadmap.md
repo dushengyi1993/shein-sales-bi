@@ -71,6 +71,7 @@
 - 本地 Codex heartbeat 只负责汇报、观察报告、dry-run 清单和阻塞原因；云端 guard timer 只负责完整 live scan、精确计划和建队列，不持有写授权。负责人长期策略授权内的限时折扣动作只由独立 repair worker 执行。
 - 复核频率按风险分层。云端 timer 每日做一次 19 店完整基线；动作后只复扫受影响店并与成功基线合并（shell 尚未接入定点合并前，保留最终全量复扫）。本地临时补扫按候选店铺最小集合和 3–5 店小批次执行，跑完关闭。
 - repair worker 的最终闭环必须按固定顺序执行：19 店普通活动/优惠券 session HTTP stack review 刷新 → 19 店价格栈 final scan → guard 重建。价格栈放在最后，避免待生效活动在 stack review 期间跨过开始时间，又被旧价格快照重新判为缺口。大批修复可能超过 `30` 分钟的同轮证据时差；如果不刷新 stack review，guard 会把已被当日 live 证据取代的历史 coupon/overlap 中间文件重新判成 stale blocker。最终 stack review 是 browserless session HTTP 刷新，不得回退为逐店前端扫描。
+- 飞书交付是最终闭环产物，不是 worker 进度通知。发送器要求队列已终态，且最终 guard 时间不早于队列终态和执行结果；不满足时返回 `finalReady=false`，禁止发送。每日只交付一段简短最终结论和一个合并后的 `marketing-daily-final-YYYY-MM-DD.md`，guard 与 execution 文件仅作为生成素材保留在云端。
 - `source stale` 只表示证据需要刷新，不等于可以自动全店 live scan；如果没有低价止损、补券窗口或用户授权，日报只能报告“需补证据/等待窗口”，不得用全量前端扫描替代判断。
 - 若调用 `scripts/marketing/submit_coupon_activity_goods.mjs`，必须带 `--dry-run` 或 `--no-submit`。
 - 默认禁止本地 heartbeat 向无授权的写入型脚本传 `--execute`。长期授权例外包括：已批准普通活动在报名截止前新出现的可报差额、限时折扣价格漂移修复、登记中的人工特殊折扣恢复、新链接/新上架 7 天/重新上架无活动/漏限时折扣兜底，以及满足严格 7 日指标的高点击低转化专属折扣。它们不逐次索要人工确认，但每轮必须自动计算并校验精确 payload/work hash，同时通过授权 ID/上下文、身份、价格栈、库存/平台校验、dry-run 和执行后 live 回读。未批准的新普通活动、优惠券取消、补预算和无证据写入仍不得自动执行。
@@ -179,6 +180,7 @@
 - 少量自动补报完成后，使用 `merge_current_marketing_price_scans.mjs --base <完整19店快照> --overlay <受影响店复扫> --out <合并快照>`，再基于合并快照生成 final guard；不得为 1–3 店补报无条件重扫 19 店。合并器不调用 SHEIN，只接受成功且非 partial 的完整基线和成功店铺 overlay。
 - 自动任务新建或恢复限时折扣后的日报必须逐条列出店铺、标准货号/中文品名、SKC、活动 ID、价格、活动库存、开始/截止时间和 live readback 结果，不得只列活动号和价格。
 - 批量日报的逐条明细可以另存 JSON/CSV/Markdown，但汇报正文至少要给出总数、按店/活动汇总、新链接逐条结果和每一条未解决 blocker，并提供最终 live scan 对应的明细文件；执行器中途摘要不能替代最终 19 店回读。
+- 目标价漂移与新链接/漏兜底共用同一库存补齐授权：dry-run 返回活动库存不足时必须先查 ET 当日实盘；ET 足够则把平台可用库存精确补到本次 `activityStock` 后重新 dry-run/事务替换/live readback，ET 不足才保留 blocker。不得因为漂移链路先遇到混合旧活动就跳过该 ET 门控。
 
 ### 4.2 新链接动作卡落地边界
 

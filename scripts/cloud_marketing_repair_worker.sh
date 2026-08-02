@@ -139,18 +139,18 @@ send_daily_group_report() {
   node scripts/marketing/send_marketing_daily_group_report.mjs \
     --date "$DATE" --queue "$QUEUE_FILE" \
     --guard "$ROOT/outputs/reports/marketing-daily-guard-${DATE}.json" \
-    --execution "$ROOT/outputs/reports/new-listing-7d-limited-discount-execution-summary-${DATE}.json" \
-    || echo "[cloud_marketing_repair] WARN complete group report delivery failed" >&2
+    --execution "$ROOT/outputs/reports/new-listing-7d-limited-discount-execution-summary-${DATE}.json"
 }
 
-run_final_readback() {
-  local stamp scan_out guard_out price_overrides price_path manual_count drift_count manual_plan
+FINAL_SCAN_OUT=""
+
+run_terminal_final_snapshot() {
+  local stamp scan_out
   stamp="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)-repair-final"
   scan_out="$ROOT/tmp/marketing-signup/current-price-live/current-marketing-price-live-${DATE}-${stamp}.json"
-  guard_out="$ROOT/outputs/reports/marketing-daily-guard-${DATE}.json"
-  # Repair may run longer than the guard's same-run evidence skew. Refresh the
-  # browserless ordinary/coupon snapshot first, then take the latest price scan
-  # so scheduled activities cannot cross their start time after price readback.
+  # Every terminal report is built after a fresh browserless ordinary/coupon
+  # snapshot and a final 19-store price readback. A blocked queue is not a
+  # report-ready state by itself.
   lease_action heartbeat
   timeout -k "$STACK_REVIEW_KILL_AFTER_SEC" "$STACK_REVIEW_TIMEOUT_SEC" \
     node scripts/marketing/export_marketing_stack_review.mjs \
@@ -168,6 +168,14 @@ run_final_readback() {
   node scripts/marketing/build_marketing_daily_guard_report.mjs \
     --date "$DATE" --max-age-hours "$GUARD_MAX_AGE_HOURS" \
     --cloud-bi-ssh "$GUARD_CLOUD_BI_SSH" --cloud-bi-root "$GUARD_CLOUD_BI_ROOT"
+  FINAL_SCAN_OUT="$scan_out"
+}
+
+run_final_readback() {
+  local scan_out guard_out price_overrides price_path manual_count drift_count manual_plan
+  run_terminal_final_snapshot
+  scan_out="$FINAL_SCAN_OUT"
+  guard_out="$ROOT/outputs/reports/marketing-daily-guard-${DATE}.json"
   node scripts/marketing/build_high_click_special_discount_plan.mjs \
     --date "$DATE" --guard "$guard_out" \
     --out "$ROOT/outputs/reports/high-click-low-conversion-special-plan-${DATE}.json"
@@ -237,7 +245,17 @@ if [[ "$QUEUE_STATUS" == "completed" || "$QUEUE_STATUS" == "blocked" ]]; then
   else
     write_state ok "repair queue already completed"
   fi
+  set +e
   send_daily_group_report
+  REPORT_STATUS=$?
+  set -e
+  if [[ "$REPORT_STATUS" -eq 3 ]]; then
+    echo "[cloud_marketing_repair] terminal queue has no post-execution final guard; refreshing final evidence"
+    run_terminal_final_snapshot
+    send_daily_group_report
+  elif [[ "$REPORT_STATUS" -ne 0 ]]; then
+    echo "[cloud_marketing_repair] WARN complete group report delivery failed status=$REPORT_STATUS" >&2
+  fi
   echo "[cloud_marketing_repair] queue already terminal status=$QUEUE_STATUS"
   exit 0
 fi
@@ -280,12 +298,12 @@ if [[ "$HIGH_CLICK_STATUS" != "not_required" && "$HIGH_CLICK_STATUS" != "complet
     if (( BLOCKED_TARGETS > 0 && FAILED_TARGETS == 0 )); then
       update_stage highClickSpecial blocked false "ET/platform preflight safely blocked one or more protected specials" "$RESULT_PATH"
       write_state blocked "high-click special repair safely blocked by current ET inventory/platform conditions"
-      send_daily_group_report
-      exit 0
+      consume_group_budget "$(processed_items_this_run "$RESULT_PATH")"
+    else
+      update_stage highClickSpecial failed false "execute/readback failed status=$status" "$RESULT_PATH"
+      write_state failed "high-click special execute failed status=$status"
+      exit "$status"
     fi
-    update_stage highClickSpecial failed false "execute/readback failed status=$status" "$RESULT_PATH"
-    write_state failed "high-click special execute failed status=$status"
-    exit "$status"
   fi
 fi
 
@@ -375,12 +393,12 @@ if [[ "$FALLBACK_STATUS" != "not_required" && "$FALLBACK_STATUS" != "completed" 
     if (( BLOCKED_TARGETS > 0 && FAILED_TARGETS == 0 )); then
       update_stage fallbackRepair blocked false "preflight reached terminal inventory/platform blockers; no unsafe write attempted" "$RESULT_PATH"
       write_state blocked "fallback repair safely blocked by current inventory/platform conditions"
-      send_daily_group_report
-      echo "[cloud_marketing_repair] terminal business blockers reported date=$DATE rows=$BLOCKED_TARGETS"
-      exit 0
+      consume_group_budget "$(new_groups_in_result "$RESULT_PATH")"
+      echo "[cloud_marketing_repair] terminal fallback blockers recorded; final snapshot still required date=$DATE rows=$BLOCKED_TARGETS"
+    else
+      update_stage fallbackRepair completed true "bounded execute and per-group readback succeeded" "$RESULT_PATH"
+      consume_group_budget "$(new_groups_in_result "$RESULT_PATH")"
     fi
-    update_stage fallbackRepair completed true "bounded execute and per-group readback succeeded" "$RESULT_PATH"
-    consume_group_budget "$(new_groups_in_result "$RESULT_PATH")"
   else
     status=$?
     if [[ "$status" -eq 3 ]]; then
@@ -397,8 +415,9 @@ fi
 QUEUE_STATUS="$(queue_value 'j.status' pending)"
 if [[ "$QUEUE_STATUS" == "blocked" ]]; then
   write_state blocked "all executable repairs were processed; remaining links are safely blocked by current inventory/platform conditions"
+  run_terminal_final_snapshot
   send_daily_group_report
-  echo "[cloud_marketing_repair] done with terminal business blockers date=$DATE"
+  echo "[cloud_marketing_repair] done with terminal business blockers after final live snapshot date=$DATE"
   exit 0
 fi
 
