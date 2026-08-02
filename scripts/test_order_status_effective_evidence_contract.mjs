@@ -16,6 +16,8 @@ const watchdog = read('scripts/cloud_ops_watchdog.mjs');
 for (const source of [schema, migration, recheck]) {
   assert.match(source, /CREATE OR REPLACE VIEW ops\.order_status_recheck_effective/);
   assert.match(source, /oi\.order_item_key AS fact_order_item_key/);
+  assert.match(source, /rs\.lifecycle_status_group = 'returning'[\s\S]*THEN 100/);
+  assert.match(source, /rs\.lifecycle_status_group = 'done'[\s\S]*THEN 90/);
   assert.match(source, /rs\.last_checked_at DESC NULLS LAST/);
   assert.match(source, /dim\.product_canonical_sn\(rs\.standard_goods_sn\)/);
 }

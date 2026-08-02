@@ -33,6 +33,19 @@ JOIN ops.order_status_recheck_state rs
  )
 ORDER BY
   oi.order_item_key,
+  CASE
+    WHEN rs.lifecycle_status_group = 'returning'
+     AND concat_ws(' ', rs.latest_page_status_desc, rs.latest_goods_performance_status_desc) ~ '(派件失败|未妥投|退回|拒收)' THEN 100
+    WHEN rs.lifecycle_status_group = 'done'
+     AND concat_ws(' ', rs.latest_page_status_desc, rs.latest_goods_performance_status_desc) ~ '(已签收|已完成|妥投)' THEN 90
+    WHEN rs.lifecycle_status_group = 'returning' THEN 80
+    WHEN rs.lifecycle_status_group = 'done' THEN 70
+    WHEN rs.lifecycle_status_group = 'abnormal' THEN 60
+    WHEN rs.lifecycle_status_group = 'shipped' THEN 50
+    WHEN rs.lifecycle_status_group = 'pending' THEN 40
+    WHEN rs.lifecycle_status_group = 'cancelled' THEN 20
+    ELSE 10
+  END DESC,
   rs.last_checked_at DESC NULLS LAST,
   CASE
     WHEN rs.order_item_key = oi.order_item_key THEN 50
