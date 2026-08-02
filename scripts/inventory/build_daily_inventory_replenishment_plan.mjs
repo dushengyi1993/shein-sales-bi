@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {
+  allocateLowEtInventory,
   canonicalInventoryKey,
   classifyEtInventoryAlert,
   decideDailyInventoryReplenishment,
@@ -18,6 +19,7 @@ function parseArgs(argv) {
     stores: path.join(ROOT, 'config', 'stores.json'),
     productsDir: path.join(ROOT, 'outputs', 'shein_openapi_products'),
     biData: path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'inventoryTrend.json'),
+    linksData: path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'linksData.json'),
     out: '',
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -27,6 +29,7 @@ function parseArgs(argv) {
     else if (a === '--stores') args.stores = path.resolve(argv[++i] || '');
     else if (a === '--products-dir') args.productsDir = path.resolve(argv[++i] || '');
     else if (a === '--bi-data') args.biData = path.resolve(argv[++i] || '');
+    else if (a === '--links-data') args.linksData = path.resolve(argv[++i] || '');
     else if (a === '--out') args.out = path.resolve(argv[++i] || '');
     else throw new Error(`Unknown argument: ${a}`);
   }
@@ -46,11 +49,19 @@ const enabledStoreKeys = config => {
 };
 
 const args = parseArgs(process.argv.slice(2));
-const [policy, storeConfig, biDocument] = await Promise.all([readJson(args.policy), readJson(args.stores), readJson(args.biData)]);
+const [policy, storeConfig, biDocument, linksDocument] = await Promise.all([
+  readJson(args.policy),
+  readJson(args.stores),
+  readJson(args.biData),
+  readJson(args.linksData),
+]);
 const bi = biDocument?.data && typeof biDocument.data === 'object' ? biDocument.data : biDocument;
+const links = linksDocument?.data && typeof linksDocument.data === 'object' ? linksDocument.data : linksDocument;
 const stores = enabledStoreKeys(storeConfig);
 const biGeneratedAt = biDocument.cachedAt || biDocument.generatedAt || bi.generatedAt || bi.createdAt;
 const biAge = ageHours(biGeneratedAt);
+const linksGeneratedAt = linksDocument.cachedAt || linksDocument.generatedAt || links.generatedAt || links.createdAt;
+const linksAge = ageHours(linksGeneratedAt);
 const blockers = [];
 const sourceEvidence = [];
 sourceEvidence.push({
@@ -62,9 +73,25 @@ sourceEvidence.push({
 if (!Number.isFinite(biAge) || biAge < -0.25 || biAge > Number(policy.maxBiSnapshotAgeHours || 4)) {
   blockers.push(`BI/ET projection is stale: generatedAt=${biGeneratedAt || ''} ageHours=${biAge}`);
 }
+sourceEvidence.push({
+  store: 'BI_LINKS',
+  file: 'outputs/bi-portal/sections/linksData.json',
+  fetchedAt: linksGeneratedAt || '',
+  ageHours: Number.isFinite(linksAge) ? Number(linksAge.toFixed(4)) : null,
+});
+if (!Number.isFinite(linksAge) || linksAge < -0.25 || linksAge > Number(policy.maxLinksSnapshotAgeHours || 4)) {
+  blockers.push(`BI links data is stale: generatedAt=${linksGeneratedAt || ''} ageHours=${linksAge}`);
+}
 
 const etRows = Array.isArray(bi?.inventoryDepletion?.products) ? bi.inventoryDepletion.products : [];
 const etByKey = new Map(etRows.map(row => [String(row.match_key || canonicalInventoryKey(row.standard_goods_sn)).toUpperCase(), row]));
+const linkMetricRows = Array.isArray(links?.storeLinks)
+  ? links.storeLinks
+  : Array.isArray(links?.links) ? links.links : [];
+const linkMetricsByKey = new Map(linkMetricRows.map(row => [
+  `${String(row.store_key || row.storeKey || '').toUpperCase()}::${String(row.skc || '').trim()}`,
+  row,
+]));
 const linkRows = [];
 for (const store of stores) {
   const file = path.join(args.productsDir, store, 'latest.json');
@@ -91,6 +118,7 @@ for (const store of stores) {
 const actionable = [];
 const linkAlerts = [];
 const ignored = [];
+const lowEtAllocations = [];
 const sellingStoresByMatchKey = new Map();
 for (const row of linkRows) {
   if (String(row.shelfStatusCode || '') !== '1' || Number(row.sheinUsableInventory) <= 0) continue;
@@ -99,9 +127,11 @@ for (const row of linkRows) {
   if (!sellingStoresByMatchKey.has(matchKey)) sellingStoresByMatchKey.set(matchKey, new Set());
   sellingStoresByMatchKey.get(matchKey).add(String(row.storeKey || ''));
 }
+const evaluatedRows = [];
 for (const row of linkRows) {
   const matchKey = canonicalInventoryKey(row.supplierCode);
   const et = etByKey.get(matchKey);
+  const metrics = linkMetricsByKey.get(`${String(row.storeKey || '').toUpperCase()}::${String(row.skc || '').trim()}`);
   const otherSellingStores = [...(sellingStoresByMatchKey.get(matchKey) || [])]
     .filter(storeKey => storeKey && storeKey !== row.storeKey)
     .sort();
@@ -117,6 +147,7 @@ for (const row of linkRows) {
     platformUsableInventory: row.sheinUsableInventory,
     etSellableInventory: et?.current_sellable_quantity ?? et?.et_estimated_available_qty,
     etSnapshotCurrentDay: operationalDate === args.date && String(et?.inventory_match_status || '') === 'matched',
+    c7SaleCount: metrics?.c7_sale_cnt,
     policy,
   });
   const base = {
@@ -135,14 +166,86 @@ for (const row of linkRows) {
     crossStoreSoldOutFinding: Number(row.sheinUsableInventory) <= 0 && otherSellingStores.length > 0,
     etSellableInventory: et?.current_sellable_quantity ?? et?.et_estimated_available_qty ?? null,
     etSnapshotDate: operationalDate,
+    c7SaleCount: metrics?.c7_sale_cnt ?? null,
+    c30SaleCount: metrics?.c30_sale_cnt ?? null,
+    c7Exposure: metrics?.c7_eps_uv ?? null,
+    c7GoodsVisitors: metrics?.c7_goods_uv ?? null,
+    productName: metrics?.product_display_name || metrics?.product_name_cn || '',
     decision: decision.reason,
   };
-  if (decision.action === 'top_up') actionable.push({
-    ...base,
-    targetUsableInventory: decision.targetUsableInventory,
-    replenishmentQuantity: Math.max(0, decision.targetUsableInventory - Number(row.sheinUsableInventory)),
-  });
-  else if (decision.action === 'alert' || decision.action === 'block') linkAlerts.push({...base, action: decision.action});
+  evaluatedRows.push({row, et, metrics, decision, base});
+}
+
+const lowEtGroups = new Map();
+for (const item of evaluatedRows) {
+  const threshold = Number(policy.lowEtAllocationAtOrBelow ?? 10);
+  const etQty = Number(item.base.etSellableInventory);
+  const eligibleStatus = new Set((policy.eligibleShelfStatusCodes || ['1', '3']).map(String)).has(item.base.shelfStatusCode);
+  if (!eligibleStatus || !Number.isFinite(etQty) || etQty > threshold) continue;
+  if (!lowEtGroups.has(item.base.matchKey)) lowEtGroups.set(item.base.matchKey, []);
+  lowEtGroups.get(item.base.matchKey).push(item);
+}
+
+const handledLowEtKeys = new Set();
+for (const [matchKey, group] of lowEtGroups) {
+  handledLowEtKeys.add(matchKey);
+  const blockingRows = group.filter(item => item.decision.action !== 'allocate');
+  if (blockingRows.length) {
+    for (const item of group) {
+      linkAlerts.push({
+        ...item.base,
+        action: 'block',
+        decision: blockingRows.some(row => row.base.storeKey === item.base.storeKey && row.base.skc === item.base.skc)
+          ? item.decision.reason
+          : 'low_et_allocation_group_has_blocked_link',
+      });
+    }
+    continue;
+  }
+  try {
+    const ranked = allocateLowEtInventory(group.map(item => item.base), Math.floor(Number(group[0].base.etSellableInventory)), policy);
+    const plannedAllocationTotal = ranked.reduce((sum, row) => sum + Number(row.targetUsableInventory || 0), 0);
+    for (const allocation of ranked) {
+      const allocationRow = {
+        ...allocation,
+        plannedAllocationTotal,
+        allocationLinkCount: ranked.length,
+        topExposureLinkCount: Math.min(Number(policy?.lowEtAllocation?.topExposureLinkCount ?? 5), ranked.length),
+        decision: allocation.isTopExposureLink
+          ? 'low_et_allocate_to_top_exposure_link'
+          : 'low_et_zero_non_top_exposure_link',
+      };
+      lowEtAllocations.push(allocationRow);
+      if (Number(allocation.platformUsableInventory) !== Number(allocation.targetUsableInventory)) {
+        actionable.push({
+          ...allocationRow,
+          ruleClass: 'low_et_top_exposure_allocation',
+          inventoryAction: Number(allocation.platformUsableInventory) < Number(allocation.targetUsableInventory) ? 'increase' : 'decrease',
+          replenishmentQuantity: Math.max(0, Number(allocation.targetUsableInventory) - Number(allocation.platformUsableInventory)),
+          reductionQuantity: Math.max(0, Number(allocation.platformUsableInventory) - Number(allocation.targetUsableInventory)),
+        });
+      }
+    }
+  } catch (error) {
+    for (const item of group) linkAlerts.push({...item.base, action: 'block', decision: `low_et_allocation_blocked: ${error.message}`});
+  }
+}
+
+for (const item of evaluatedRows) {
+  if (handledLowEtKeys.has(item.base.matchKey)) continue;
+  const {decision, base} = item;
+  if (decision.action === 'set_exact') {
+    actionable.push({
+      ...base,
+      ruleClass: String(decision.reason || '').startsWith('recent_sale_scarcity')
+        ? 'recent_sale_scarcity'
+        : 'legacy_virtual_inventory_top_up',
+      targetUsableInventory: decision.targetUsableInventory,
+      inventoryAction: Number(base.platformUsableInventory) < Number(decision.targetUsableInventory) ? 'increase' : 'decrease',
+      replenishmentQuantity: Math.max(0, decision.targetUsableInventory - Number(base.platformUsableInventory)),
+      reductionQuantity: Math.max(0, Number(base.platformUsableInventory) - decision.targetUsableInventory),
+    });
+  } else if (decision.action === 'alert' || decision.action === 'block') linkAlerts.push({...base, action: decision.action});
   else ignored.push({...base, action: decision.action});
 }
 
@@ -160,11 +263,11 @@ const etAlerts = etRows
       ...row,
       alert: classifyEtInventoryAlert(row, policy),
       manualAllocationNeeded: hasNumericEt
-        && Number(etSellableInventory) <= Number(policy?.etAlerts?.lowQuantity ?? 20),
+        && Number(etSellableInventory) <= Number(policy?.etAlerts?.lowQuantity ?? 10),
       replenishmentNeeded: hasNumericEt
-        && Number(etSellableInventory) > Number(policy?.etAlerts?.lowQuantity ?? 20)
+        && Number(etSellableInventory) > Number(policy?.etAlerts?.lowQuantity ?? 10)
         && hasNumericDays
-        && Number(daysOfSupplyOnHand) < Number(policy?.etAlerts?.replenishmentDaysOfSupply ?? 90),
+        && Number(daysOfSupplyOnHand) < Number(policy?.etAlerts?.replenishmentDaysOfSupply ?? 120),
     };
   })
   .filter(row => row.alert.severity !== 'ok')
@@ -186,7 +289,13 @@ const etAlerts = etRows
 
 actionable.sort((a, b) => a.storeKey.localeCompare(b.storeKey) || a.skc.localeCompare(b.skc));
 linkAlerts.sort((a, b) => a.canonical.localeCompare(b.canonical) || a.storeKey.localeCompare(b.storeKey));
-const crossStoreSoldOutFindings = [...actionable, ...linkAlerts]
+lowEtAllocations.sort((a, b) => a.canonical.localeCompare(b.canonical) || a.exposureRank - b.exposureRank);
+const outcomeByLink = new Map([...ignored, ...linkAlerts, ...lowEtAllocations, ...actionable].map(row => [
+  `${row.storeKey}::${row.skc}`,
+  row,
+]));
+const crossStoreSoldOutFindings = evaluatedRows
+  .map(item => outcomeByLink.get(`${item.base.storeKey}::${item.base.skc}`) || item.base)
   .filter(row => row.crossStoreSoldOutFinding)
   .sort((a, b) => a.canonical.localeCompare(b.canonical) || a.storeKey.localeCompare(b.storeKey));
 const payload = {
@@ -198,6 +307,8 @@ const payload = {
   blockers: [...new Set(blockers)],
   actionable,
   linkAlerts,
+  ignored,
+  lowEtAllocations,
   crossStoreSoldOutFindings,
   etAlerts,
 };
@@ -206,6 +317,7 @@ const payloadHash = stableInventoryHash({
   date: payload.date,
   policyVersion: payload.policyVersion,
   actionable,
+  lowEtAllocations,
   sourceEvidence: sourceEvidence.map(({ageHours: _ageHours, ...evidence}) => evidence),
 });
 const report = {
@@ -216,13 +328,20 @@ const report = {
     enabledStores: stores.length,
     scannedLinks: linkRows.length,
     actionable: actionable.length,
-    crossStoreSoldOutActionable: actionable.filter(row => row.crossStoreSoldOutFinding).length,
-    crossStoreSoldOutAlerts: linkAlerts.filter(row => row.crossStoreSoldOutFinding).length,
+    inventoryIncreases: actionable.filter(row => row.inventoryAction === 'increase').length,
+    inventoryDecreases: actionable.filter(row => row.inventoryAction === 'decrease').length,
+    recentSaleScarcityActions: actionable.filter(row => row.ruleClass === 'recent_sale_scarcity').length,
+    legacyVirtualTopUps: actionable.filter(row => row.ruleClass === 'legacy_virtual_inventory_top_up').length,
+    lowEtAllocationActions: actionable.filter(row => row.ruleClass === 'low_et_top_exposure_allocation').length,
+    lowEtAllocationRows: lowEtAllocations.length,
+    lowEtZeroTargets: lowEtAllocations.filter(row => Number(row.targetUsableInventory) === 0).length,
+    crossStoreSoldOutActionable: crossStoreSoldOutFindings.filter(row => actionable.some(action => action.storeKey === row.storeKey && action.skc === row.skc)).length,
+    crossStoreSoldOutAlerts: crossStoreSoldOutFindings.filter(row => linkAlerts.some(alert => alert.storeKey === row.storeKey && alert.skc === row.skc)).length,
     linkAlerts: linkAlerts.length,
     etCritical: etAlerts.filter(row => row.severity === 'critical').length,
     etWarning: etAlerts.filter(row => row.severity === 'warning').length,
     etReplenishment: etAlerts.filter(row => row.severity === 'replenishment').length,
-    etBelow90Days: etAlerts.filter(row => row.replenishmentNeeded).length,
+    etBelow120Days: etAlerts.filter(row => row.replenishmentNeeded).length,
     etManualAllocation: etAlerts.filter(row => row.manualAllocationNeeded).length,
     etUnknown: etAlerts.filter(row => row.severity === 'unknown').length,
   },

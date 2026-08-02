@@ -1,0 +1,115 @@
+#!/usr/bin/env node
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'daily-inventory-plan-'));
+const date = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
+const now = new Date().toISOString();
+const productsDir = path.join(tmp, 'products');
+await fs.mkdir(path.join(productsDir, 'A'), {recursive: true});
+
+const productRows = [
+  ...[1, 2, 3, 4, 5, 6].map(index => ({
+    storeKey: 'A',
+    spu: `spu-low-${index}`,
+    skc: `skc-low-${index}`,
+    skuCodes: [`sku-low-${index}`],
+    supplierCode: 'LOW-1产品',
+    shelfStatusCode: '1',
+    sheinUsableInventory: 5,
+    sheinInventoryQuantity: 5,
+    sheinLockedQuantity: 0,
+  })),
+  {
+    storeKey: 'A', spu: 'spu-scarce', skc: 'skc-scarce', skuCodes: ['sku-scarce'],
+    supplierCode: 'SALE-1产品', shelfStatusCode: '1',
+    sheinUsableInventory: 30, sheinInventoryQuantity: 30, sheinLockedQuantity: 0,
+  },
+  {
+    storeKey: 'A', spu: 'spu-stable', skc: 'skc-stable', skuCodes: ['sku-stable'],
+    supplierCode: 'SALE-2产品', shelfStatusCode: '1',
+    sheinUsableInventory: 7, sheinInventoryQuantity: 7, sheinLockedQuantity: 0,
+  },
+  {
+    storeKey: 'A', spu: 'spu-legacy', skc: 'skc-legacy', skuCodes: ['sku-legacy'],
+    supplierCode: 'OLD-1产品', shelfStatusCode: '1',
+    sheinUsableInventory: 5, sheinInventoryQuantity: 5, sheinLockedQuantity: 0,
+  },
+];
+await fs.writeFile(path.join(productsDir, 'A', 'latest.json'), JSON.stringify({
+  fetchedAt: now,
+  summary: {stockFailedChunkCount: 0},
+  normalizedRows: productRows,
+}));
+await fs.writeFile(path.join(tmp, 'stores.json'), JSON.stringify({stores: [{storeKey: 'A', enabled: true}]}));
+await fs.writeFile(path.join(tmp, 'inventoryTrend.json'), JSON.stringify({
+  cachedAt: now,
+  data: {
+    inventoryDepletion: {
+      products: [
+        {match_key: 'LOW1', standard_goods_sn: 'LOW-1产品', current_sellable_quantity: 8, et_store_snapshot_date: date, inventory_match_status: 'matched', days_of_supply_on_hand: 4},
+        {match_key: 'SALE1', standard_goods_sn: 'SALE-1产品', current_sellable_quantity: 50, et_store_snapshot_date: date, inventory_match_status: 'matched', days_of_supply_on_hand: 150},
+        {match_key: 'SALE2', standard_goods_sn: 'SALE-2产品', current_sellable_quantity: 50, et_store_snapshot_date: date, inventory_match_status: 'matched', days_of_supply_on_hand: 150},
+        {match_key: 'OLD1', standard_goods_sn: 'OLD-1产品', current_sellable_quantity: 50, et_store_snapshot_date: date, inventory_match_status: 'matched', days_of_supply_on_hand: 119},
+      ],
+    },
+  },
+}));
+await fs.writeFile(path.join(tmp, 'linksData.json'), JSON.stringify({
+  cachedAt: now,
+  data: {
+    storeLinks: [
+      ...[1, 2, 3, 4, 5, 6].map(index => ({
+        store_key: 'A',
+        skc: `skc-low-${index}`,
+        standard_goods_sn: 'LOW-1产品',
+        c7_eps_uv: 700 - index * 100,
+        c7_goods_uv: 70 - index,
+        c7_sale_cnt: 0,
+        c30_sale_cnt: 0,
+      })),
+      {store_key: 'A', skc: 'skc-scarce', standard_goods_sn: 'SALE-1产品', c7_eps_uv: 1000, c7_goods_uv: 100, c7_sale_cnt: 2, c30_sale_cnt: 10},
+      {store_key: 'A', skc: 'skc-stable', standard_goods_sn: 'SALE-2产品', c7_eps_uv: 900, c7_goods_uv: 90, c7_sale_cnt: 1, c30_sale_cnt: 8},
+      {store_key: 'A', skc: 'skc-legacy', standard_goods_sn: 'OLD-1产品', c7_eps_uv: 500, c7_goods_uv: 50, c7_sale_cnt: 0, c30_sale_cnt: 0},
+    ],
+  },
+}));
+
+const out = path.join(tmp, 'plan.json');
+const originalArgv = process.argv;
+process.argv = [
+  process.execPath,
+  path.join(ROOT, 'scripts', 'inventory', 'build_daily_inventory_replenishment_plan.mjs'),
+  '--date', date,
+  '--policy', path.join(ROOT, 'config', 'inventory_replenishment_policy.json'),
+  '--stores', path.join(tmp, 'stores.json'),
+  '--products-dir', productsDir,
+  '--bi-data', path.join(tmp, 'inventoryTrend.json'),
+  '--links-data', path.join(tmp, 'linksData.json'),
+  '--out', out,
+];
+try {
+  await import(`./inventory/build_daily_inventory_replenishment_plan.mjs?test=${Date.now()}`);
+} finally {
+  process.argv = originalArgv;
+}
+const plan = JSON.parse(await fs.readFile(out, 'utf8'));
+assert.equal(plan.executable, true);
+assert.equal(plan.counts.scannedLinks, 9);
+assert.equal(plan.counts.lowEtAllocationRows, 6);
+assert.equal(plan.counts.lowEtAllocationActions, 6);
+assert.equal(plan.counts.recentSaleScarcityActions, 1);
+assert.equal(plan.counts.legacyVirtualTopUps, 1);
+assert.equal(plan.counts.actionable, 8);
+assert.equal(plan.counts.inventoryIncreases, 1);
+assert.equal(plan.counts.inventoryDecreases, 7);
+assert.equal(plan.counts.etBelow120Days, 1);
+assert.deepEqual(plan.lowEtAllocations.map(row => row.targetUsableInventory), [2, 2, 2, 1, 1, 0]);
+assert.equal(plan.actionable.find(row => row.skc === 'skc-scarce')?.targetUsableInventory, 10);
+assert.equal(plan.ignored.find(row => row.skc === 'skc-stable')?.decision, 'recent_sale_scarcity_inventory_within_band');
+assert.match(plan.payloadHash, /^[a-f0-9]{64}$/);
+console.log(JSON.stringify({ok: true, checks: 15}, null, 2));

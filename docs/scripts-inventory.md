@@ -619,9 +619,9 @@
 
 ## 每日低虚拟库存巡检
 
-- `scripts/inventory/build_daily_inventory_replenishment_plan.mjs`：19 店只读计划器。ET 事实直接读取独立刷新、带 `cachedAt` 的 `outputs/bi-portal/sections/inventoryTrend.json`，不能用整站 `data.json.generatedAt` 代替 section 新鲜度。仅处理已上架或平台售罄、单 SKU、SHEIN 可售库存不高于 20 且 ET 当天库存已匹配的链接；ET 可售大于 20 时，建议目标为 `min(100, ET 当天可售)`，不会把共享 ET 实盘按店铺拆分。ET 可售不高于 20 时只报“实盘分配”，不生成虚拟库存写入。由于 OpenAPI 可能把“库存为 0 导致售罄”的商品状态仍返回已上架，报告用“本店可售为 0 + 同货号其他店已上架且可售大于 0”另列 `crossStoreSoldOutFindings`，不能只依赖状态文字。
-- 同一报告独立列出 ET 可售大于 20、按加权销量计算的在库去化周期小于 90 天的补货提醒。ET 未匹配、非当天、SHEIN 快照过期、库存分片失败或多 SKU 均失败关闭。
-- `scripts/inventory/execute_daily_inventory_replenishment_plan.mjs`：只执行当天、无 blocker、policy 版本一致且 hash 完整的精确计划；第一阶段必须用报告中的 `payloadHash` 逐次人工确认。每条执行前重查商品在架状态、SKU 映射、ET 当天库存和 SHEIN 实时库存，写后回读；单条失败继续记录，不能扩大到未确认行。
+- `scripts/inventory/build_daily_inventory_replenishment_plan.mjs`：19 店只读计划器。ET 事实读取独立 `inventoryTrend.json.cachedAt`，销量/曝光读取 `linksData.json.cachedAt`，库存读取各店 OpenAPI 快照。`ET > 10` 时，近 7 天开过单的链接在库存大于 10 时降到 10、小于 5 时补回 10、5-10 保持；未开单链接在平台库存不大于 20 时目标为 `min(100, ET)`。`ET <= 10` 时按同标准货号全局近 7 天曝光 Top5 平均分配 ET 整数库存，余数给更高曝光，非 Top5 目标为 0。任一链接缺曝光、多 SKU 或证据不新鲜时整货号失败关闭。
+- 同一报告独立列出 `ET > 10` 且按加权销量计算的在库去化周期小于 `120` 天的补货提醒。本店库存为 0、其他店同货号仍有库存继续单列 `crossStoreSoldOutFindings`，不能只依赖状态文字。完整业务口径见 [每日库存巡检与实盘分配规则](inventory-replenishment-patrol-rules.md)。
+- `scripts/inventory/execute_daily_inventory_replenishment_plan.mjs`：只执行当天、无全局 blocker、policy 版本一致且 hash 完整的精确计划；报告中的 `payloadHash` 仍需逐次人工确认。执行器同时支持增库存、降到 10、Top5 配额和非 Top5 清零；每条执行前重查商品状态、SKU、ET、近 7 天销量/曝光和实时库存，精确保留锁定/不可用量并回读可用库存等于批准目标。单条失败继续记录，最后统一汇总。
 - `config/inventory_replenishment_policy.json` 当前 `execution.mode=manual_review` 且自动执行关闭。`shein-bi-daily-inventory-replenishment-guard.timer` 只生成报告，不执行修改；经过试运行后若要自动执行，必须另行修改 policy、审计常驻授权并重新发布。
 
 

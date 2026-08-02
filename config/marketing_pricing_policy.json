@@ -1,6 +1,6 @@
 {
   "description": "Machine-readable long-term pricing policy for SHEIN ordinary marketing signup, coupon pairing, and limited-discount fallback. This file contains no credentials.",
-  "updatedAt": "2026-07-27",
+  "updatedAt": "2026-08-02",
   "targetFloorMarginPct": 15,
   "automationExecution": {
     "enabled": true,
@@ -15,12 +15,13 @@
     ],
     "storeScope": "all_enabled_stores",
     "allowedActions": [
+      "supplement_approved_ordinary_marketing_activity",
       "restore_manual_special_limited_discount",
       "repair_limited_discount_target_price_drift",
       "apply_new_listing_limited_discount_fallback",
       "apply_high_click_low_conversion_special_discount",
       "create_or_replace_limited_discount_activity",
-      "top_up_limited_discount_virtual_inventory"
+      "temporarily_raise_and_restore_activity_inventory"
     ],
     "requiredGuards": [
       "fresh_complete_ordinary_marketing_scan",
@@ -29,6 +30,11 @@
       "store_identity_check",
       "preflight",
       "target_price_floor",
+      "activity_minimum_stock_live_evidence",
+      "inventory_before_snapshot",
+      "per_store_skc_inventory_lock",
+      "finally_restore_inventory",
+      "post_restore_inventory_and_enrollment_readback",
       "post_write_readback",
       "audit_artifact"
     ],
@@ -42,6 +48,82 @@
     "missingStorageDoesNotBlock": true,
     "ruleNote": "新上架/重新上架链接在最新最终版找不到同标准货号目标价时，只要商品成本存在，就按默认30%利润率的曝光Top5待遇（下调5个点且不低于15%底线）自动推导目标价。当前筛选红线按不含仓储的商品成本，仓储费缺失不能把已有成本误报为无成本。"
   },
+  "activityMinimumInventoryTransaction": {
+    "enabled": true,
+    "implementationStatus": "rules_only_executor_not_implemented_fail_closed",
+    "appliesTo": ["ordinary_marketing_signup", "limited_discount_signup"],
+    "platformMinimumSources": ["activity_live_page", "query_goods", "dry_run"],
+    "biPlatformSaleableStockRole": "signal_only",
+    "lockScope": "store_key_plus_skc_or_sku",
+    "beforeSnapshotFields": ["totalUsableInventory", "totalInventoryQuantity", "totalLockedQuantity"],
+    "temporaryRaiseMode": "exact_platform_minimum_usable_inventory",
+    "preserveCurrentLockedAndUnavailableInventory": true,
+    "allowWhenMatchedEtOperationalSaleableAtOrBelow": 10,
+    "finallyRestoreOriginalUsableInventory": true,
+    "restoreUsesCurrentLockedAndUnavailableInventory": true,
+    "postRestoreReadback": ["inventory", "activity_enrollment_status"],
+    "failClosedConditions": [
+      "restore_failed",
+      "activity_invalid_or_withdrawn_after_restore",
+      "locked_or_unavailable_quantity_changed_and_original_usable_cannot_be_restored_exactly"
+    ],
+    "persistentInventoryIncreaseAuthorized": false,
+    "couponInventoryIncreaseAuthorized": false,
+    "detachedInventoryChangeAuthorized": false,
+    "legacyPersistentTopUpForbidden": true,
+    "executorCapabilityRequired": true,
+    "requiredEvidenceFields": [
+      "platformMinimumSource",
+      "inventoryBefore",
+      "temporaryInventoryWrite",
+      "inventoryAfterTemporaryWrite",
+      "enrollmentReadback",
+      "restoreAttempt",
+      "inventoryAfterRestore",
+      "enrollmentAfterRestore"
+    ],
+    "supersedes": [
+      "ordinary_activity_inventory_increase_not_authorized",
+      "platform_activity_minimum_above_requested_stock_always_blocks"
+    ],
+    "riskNote": "临时补量只存在于报名事务短窗口，期间可能产生订单或超卖风险；提交与live回读结束后，无论成功失败都必须在finally中恢复报名之前的原可用库存，并回读库存及报名状态。"
+  },
+  "lowEtFastSellerPricePullback": {
+    "enabled": true,
+    "implementationStatus": "rules_only_executor_not_implemented_fail_closed",
+    "executorCapabilityRequired": true,
+    "appliesOnlyTo": [
+      "new_ordinary_marketing_signup",
+      "ordinary_marketing_supplement",
+      "ordinary_marketing_rebuild",
+      "new_limited_discount_signup",
+      "limited_discount_rebuild"
+    ],
+    "retroactivelyRewriteHealthyRunningActivities": false,
+    "criteria": {
+      "matchedEtOperationalSaleableMaxInclusive": 10,
+      "canonicalGoodsValidSales30dAcross19StoresMinExclusive": 30
+    },
+    "top5Scope": "same_standard_goods_sn_across_19_stores_all_links_latest_7d_exposure",
+    "sales30dScope": "same_standard_goods_sn_across_19_stores",
+    "pricingAction": {
+      "mode": "move_up_one_price_tier",
+      "globalExposureTop5": "restore_latest_approved_ordinary_link_price",
+      "ordinaryLinks": "recalculate_with_ordinary_target_margin_plus_5_percentage_points",
+      "mechanicallyReduceDisplayedDiscountBy5Pct": false,
+      "platformMinimumDiscountOrMaximumSignupPriceWins": true,
+      "costFloorAndMarginSafetyRemainHard": true
+    },
+    "recovery": "when_et_operational_saleable_above_10_future_new_activities_return_to_original_approved_tier",
+    "mustNotPolluteLatestApprovedBaseline": true,
+    "priority": [
+      "low_et_fast_seller_price_pullback",
+      "automatic_high_click_special_discount",
+      "new_listing_or_new_product_top5_treatment",
+      "ordinary_activity_baseline"
+    ],
+    "manualSpecialDiscountAction": "do_not_auto_override_list_for_user_review"
+  },
   "ordinaryMarketing": {
     "mustSignupDuringSignupWindow": true,
     "signupWindowIsSeparateFromEventWindow": true,
@@ -51,7 +133,9 @@
     "platformForcedBelowApprovedTargetAction": "submit_platform_minimum_tier_and_audit",
     "platformForcedBelowApprovedTargetRequiresReapproval": false,
     "platformForcedBelowTargetStatus": "below_target_due_to_platform_forced_discount",
-    "knownOrdinaryPriceEvidenceIsPartOfPriceStack": true
+    "knownOrdinaryPriceEvidenceIsPartOfPriceStack": true,
+    "inventoryPolicyRef": "activityMinimumInventoryTransaction",
+    "lowEtFastSellerPricePolicyRef": "lowEtFastSellerPricePullback"
   },
   "coupon": {
     "defaultExecutableRatePct": 15,
@@ -77,6 +161,8 @@
     "defaultDiscountRatePct": 15,
     "defaultPriceFactor": 0.85,
     "oldLimitedDiscountCanBeCancelledAndRecreated": true,
+    "inventoryPolicyRef": "activityMinimumInventoryTransaction",
+    "lowEtFastSellerPricePolicyRef": "lowEtFastSellerPricePullback",
     "mustNotInterfereTargetPrice": true,
     "adjustWhenInterferes": true,
     "priorityNote": "Limited discount is the guaranteed fallback price layer when ordinary marketing is not enough. Coupons are not guaranteed to trigger, so do not rely on ordinary marketing + 15% coupon as the primary guaranteed price stack; cancel/recreate or adjust limited discounts when the guaranteed base price would be lower or higher than the intended target. Unless the user explicitly requests otherwise, fallback limited-discount activity stock is exactly 10 and the activity window is 7 days."

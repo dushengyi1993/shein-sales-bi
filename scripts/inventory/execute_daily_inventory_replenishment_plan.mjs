@@ -26,6 +26,7 @@ function parseArgs(argv) {
     policy: path.join(ROOT, 'config', 'inventory_replenishment_policy.json'),
     config: process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json'),
     biData: path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'inventoryTrend.json'),
+    linksData: path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'linksData.json'),
     out: '',
     execute: false,
     executionMode: 'manual_review',
@@ -38,6 +39,7 @@ function parseArgs(argv) {
     else if (a === '--policy') args.policy = path.resolve(argv[++i] || '');
     else if (a === '--config') args.config = path.resolve(argv[++i] || '');
     else if (a === '--bi-data') args.biData = path.resolve(argv[++i] || '');
+    else if (a === '--links-data') args.linksData = path.resolve(argv[++i] || '');
     else if (a === '--out') args.out = path.resolve(argv[++i] || '');
     else if (a === '--max-rows') args.maxRows = Number(argv[++i]);
     else if (a === '--execute') args.execute = true;
@@ -124,8 +126,15 @@ async function assertStillListed(client, row) {
 }
 
 const args = parseArgs(process.argv.slice(2));
-const [plan, policy, config, biDocument] = await Promise.all([readJson(args.plan), readJson(args.policy), readJson(args.config), readJson(args.biData)]);
+const [plan, policy, config, biDocument, linksDocument] = await Promise.all([
+  readJson(args.plan),
+  readJson(args.policy),
+  readJson(args.config),
+  readJson(args.biData),
+  readJson(args.linksData),
+]);
 const bi = biDocument?.data && typeof biDocument.data === 'object' ? biDocument.data : biDocument;
+const links = linksDocument?.data && typeof linksDocument.data === 'object' ? linksDocument.data : linksDocument;
 const biGeneratedAt = biDocument.cachedAt || biDocument.generatedAt || bi.generatedAt || bi.createdAt;
 const biAge = ageHours(biGeneratedAt);
 if (!Number.isFinite(biAge) || biAge < -0.25 || biAge > Number(policy.maxBiSnapshotAgeHours || 4)) {
@@ -137,6 +146,7 @@ const expectedHash = stableInventoryHash({
   date: plan.date,
   policyVersion: plan.policyVersion,
   actionable: plan.actionable,
+  lowEtAllocations: plan.lowEtAllocations,
   sourceEvidence: asArray(plan.sourceEvidence).map(({ageHours: _ageHours, ...evidence}) => evidence),
 });
 if (expectedHash !== plan.payloadHash) throw new Error(`Plan payload hash mismatch: expected=${plan.payloadHash} actual=${expectedHash}`);
@@ -144,12 +154,24 @@ if (plan.executable !== true || asArray(plan.blockers).length) throw new Error('
 const today = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
 if (plan.date !== today) throw new Error(`Plan date is not current day: ${plan.date} vs ${today}`);
 for (const evidence of asArray(plan.sourceEvidence)) {
-  const maximumAge = String(evidence.store || '') === 'ET'
+  const evidenceStore = String(evidence.store || '');
+  const maximumAge = evidenceStore === 'ET'
     ? Number(policy.maxBiSnapshotAgeHours || 4)
-    : Number(policy.maxOpenApiSnapshotAgeHours || 2);
+    : evidenceStore === 'BI_LINKS'
+      ? Number(policy.maxLinksSnapshotAgeHours || 4)
+      : Number(policy.maxOpenApiSnapshotAgeHours || 2);
   const evidenceAge = ageHours(evidence.fetchedAt);
   if (!Number.isFinite(evidenceAge) || evidenceAge < -0.25 || evidenceAge > maximumAge) {
     throw new Error(`Plan source evidence is stale: ${evidence.store || evidence.file || 'unknown'} ageHours=${evidenceAge}`);
+  }
+}
+const currentSourceTimes = new Map([
+  ['ET', biGeneratedAt],
+  ['BI_LINKS', linksDocument.cachedAt || linksDocument.generatedAt || links.generatedAt || links.createdAt],
+]);
+for (const evidence of asArray(plan.sourceEvidence).filter(row => currentSourceTimes.has(String(row.store || '')))) {
+  if (String(currentSourceTimes.get(String(evidence.store || '')) || '') !== String(evidence.fetchedAt || '')) {
+    throw new Error(`Plan source changed after hash generation: ${evidence.store}`);
   }
 }
 const rows = asArray(plan.actionable).slice(0, args.maxRows);
@@ -167,6 +189,13 @@ const etByKey = new Map(asArray(bi?.inventoryDepletion?.products).map(row => [
   String(row.match_key || canonicalInventoryKey(row.standard_goods_sn)).toUpperCase(),
   row,
 ]));
+const linkMetricRows = Array.isArray(links?.storeLinks)
+  ? links.storeLinks
+  : Array.isArray(links?.links) ? links.links : [];
+const linkMetricsByKey = new Map(linkMetricRows.map(row => [
+  `${String(row.store_key || row.storeKey || '').toUpperCase()}::${String(row.skc || '').trim()}`,
+  row,
+]));
 const results = [];
 const clients = new Map();
 for (const row of rows) {
@@ -180,12 +209,31 @@ for (const row of rows) {
         : et?.et_store_snapshot_date,
     ).slice(0, 10);
     if (etDate !== today || String(et?.inventory_match_status || '') !== 'matched') throw new Error('ET inventory is not a current-day matched fact');
-    if (etQty < Number(policy.minimumEtSellableForVirtualTopUp || 21)) throw new Error(`ET sellable inventory requires manual allocation: ${etQty}`);
+    if (Number(row.etSellableInventory) !== etQty) throw new Error(`ET sellable inventory changed after plan: ${row.etSellableInventory} -> ${etQty}`);
     const approvedTarget = Number(row.targetUsableInventory);
-    if (!Number.isInteger(approvedTarget) || approvedTarget < 1 || approvedTarget > Number(policy.targetUsableInventory || 100)) {
+    if (!Number.isInteger(approvedTarget) || approvedTarget < 0 || approvedTarget > Number(policy.targetUsableInventory || 100)) {
       throw new Error(`Invalid approved target usable inventory: ${row.targetUsableInventory}`);
     }
-    if (etQty < approvedTarget) throw new Error(`ET sellable inventory dropped below approved target: ${etQty} < ${approvedTarget}`);
+    const metrics = linkMetricsByKey.get(`${String(row.storeKey || '').toUpperCase()}::${String(row.skc || '').trim()}`);
+    if (!metrics) throw new Error('Current 7-day link metrics are unavailable');
+    if (Number(metrics.c7_sale_cnt) !== Number(row.c7SaleCount) || Number(metrics.c7_eps_uv) !== Number(row.c7Exposure)) {
+      throw new Error('7-day sales/exposure evidence changed after plan');
+    }
+    if (row.ruleClass === 'low_et_top_exposure_allocation') {
+      if (etQty > Number(policy.lowEtAllocationAtOrBelow ?? 10)) throw new Error(`ET no longer requires physical allocation: ${etQty}`);
+      if (etQty < Number(row.plannedAllocationTotal || 0)) {
+        throw new Error(`ET sellable inventory dropped below planned allocation total: ${etQty} < ${row.plannedAllocationTotal}`);
+      }
+    } else {
+      if (etQty < Number(policy.minimumEtSellableForVirtualTopUp || 11)) throw new Error(`ET sellable inventory requires physical allocation: ${etQty}`);
+      if (etQty < approvedTarget) throw new Error(`ET sellable inventory dropped below approved target: ${etQty} < ${approvedTarget}`);
+      if (row.ruleClass === 'recent_sale_scarcity' && Number(metrics.c7_sale_cnt) < Number(policy?.recentSaleScarcity?.minimumSaleCount ?? 1)) {
+        throw new Error('Link no longer qualifies for recent-sale scarcity inventory');
+      }
+      if (row.ruleClass === 'legacy_virtual_inventory_top_up' && Number(metrics.c7_sale_cnt) >= Number(policy?.recentSaleScarcity?.minimumSaleCount ?? 1)) {
+        throw new Error('Link now qualifies for recent-sale scarcity inventory; rebuild plan');
+      }
+    }
     if (!args.execute) {
       results.push({...result, state: 'dry_run_ready', etSellableInventory: etQty});
       continue;
@@ -200,15 +248,28 @@ for (const row of rows) {
     try {
       await assertStillListed(client, row);
       let before = await readStock(client, row.skuCode);
-      if (before.totalUsableInventory > Number(policy.triggerUsableInventoryAtOrBelow || 20)) {
-        results.push({...result, state: 'skipped_recovered', before});
+      if (row.ruleClass === 'recent_sale_scarcity') {
+        const refillBelow = Number(policy?.recentSaleScarcity?.refillWhenBelow ?? 5);
+        const capAbove = Number(policy?.recentSaleScarcity?.capWhenAbove ?? 10);
+        if (before.totalUsableInventory >= refillBelow && before.totalUsableInventory <= capAbove) {
+          results.push({...result, state: 'skipped_within_scarcity_band', before});
+          continue;
+        }
+      } else if (row.ruleClass === 'legacy_virtual_inventory_top_up') {
+        if (before.totalUsableInventory > Number(policy.triggerUsableInventoryAtOrBelow || 20)) {
+          results.push({...result, state: 'skipped_recovered', before});
+          continue;
+        }
+      }
+      if (before.totalUsableInventory === approvedTarget) {
+        results.push({...result, state: 'skipped_target_already_matched', before});
         continue;
       }
       let after = before;
       const writes = [];
-      for (let attempt = 1; attempt <= 2 && after.totalUsableInventory < approvedTarget; attempt += 1) {
+      for (let attempt = 1; attempt <= 2 && after.totalUsableInventory !== approvedTarget; attempt += 1) {
         const overwrite = computeInventoryOverwriteQuantity(approvedTarget, after);
-        const idempotencyKey = `bi-inv-${stableInventoryHash({planHash: plan.payloadHash, store: row.storeKey, sku: row.skuCode, overwrite, attempt}).slice(0, 42)}`;
+        const idempotencyKey = `bi-inv-${stableInventoryHash({planHash: plan.payloadHash, store: row.storeKey, sku: row.skuCode, target: approvedTarget, overwrite, attempt}).slice(0, 42)}`;
         const response = await client.request('/open-api/stock/change-inventory/v2', {
           method: 'POST',
           body: {updateSkuInventoryQuantityRequests: [{
@@ -217,7 +278,7 @@ for (const row of rows) {
             invType: 'VI',
             changeType: 'OVERWRITE',
             changeQuantity: overwrite,
-            changeReason: 'Owner-authorized daily low virtual inventory replenishment after current-day ET stock guard',
+            changeReason: 'Owner-authorized daily inventory target after current-day ET and sales/exposure guard',
           }]},
           headers: {language: 'en'},
         });
@@ -235,10 +296,10 @@ for (const row of rows) {
         for (let readbackAttempt = 1; readbackAttempt <= 10; readbackAttempt += 1) {
           await sleep(3000);
           after = await readStock(client, row.skuCode);
-          if (after.totalUsableInventory >= approvedTarget) break;
+          if (after.totalUsableInventory === approvedTarget) break;
         }
       }
-      if (after.totalUsableInventory < approvedTarget) throw new Error(`readback usable inventory ${after.totalUsableInventory} below target ${approvedTarget}`);
+      if (after.totalUsableInventory !== approvedTarget) throw new Error(`readback usable inventory ${after.totalUsableInventory} does not match target ${approvedTarget}`);
       results.push({...result, state: 'updated_readback_matched', before, after, writes});
     } finally {
       await release();
@@ -255,7 +316,7 @@ const counts = {
   total: results.length,
   updated: results.filter(row => row.state === 'updated_readback_matched').length,
   dryRunReady: results.filter(row => row.state === 'dry_run_ready').length,
-  skipped: results.filter(row => row.state === 'skipped_recovered').length,
+  skipped: results.filter(row => row.state.startsWith('skipped_')).length,
   blocked: results.filter(row => row.state === 'blocked').length,
 };
 if (results.length === 0) {

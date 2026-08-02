@@ -17,7 +17,7 @@
 
 ## 业务规则
 
-- [营销活动报名定价规则](marketing-campaign-signup-pricing-rules.md)、[营销自动化路线图](marketing-automation-roadmap.md)
+- [营销活动报名定价规则](marketing-campaign-signup-pricing-rules.md)、[营销自动化路线图](marketing-automation-roadmap.md)、[每日库存巡检与实盘分配规则](inventory-replenishment-patrol-rules.md)
 - [产品套图方法论](product-image-suite-methodology.md)、[产品套图研究](product-image-suite-research.md)、[参考月表结构](reference-month-table-structure.md)
 
 ## 参考与开发交接
@@ -28,7 +28,7 @@
 
 ## 历史、发布与归档
 
-- [当前发布说明（2026.07.30.7）](bi-ops-release-2026-07-30-7.md)、[上一正式版本（2026.07.30.6）](bi-ops-release-2026-07-30-6.md)、[19店独立应用切回（2026-07-30）](openapi-per-store-production-cutback-2026-07-30.md)、[共享商品详情额度与持续门禁（2026.07.30.3，历史）](bi-ops-release-2026-07-30-3.md)、[源码一致性门禁（2026.07.30.2）](bi-ops-release-2026-07-30-2.md)、[利润、营销与运行态隔离（2026.07.30.1）](bi-ops-release-2026-07-30.md)、[上一正式版本（2026.07.28.4）](bi-ops-release-2026-07-28-4.md)、[Partner CLI 长会话（2026.07.28.3）](bi-ops-release-2026-07-28-3.md)、[加车访客与查询修复（2026.07.28.2）](bi-ops-release-2026-07-28-2.md)、[无模型只读 query（2026.07.28.1）](bi-ops-release-2026-07-28.md)、[利润成本修复（2026-07-28）](bi-profit-cost-correction-2026-07-28.md)
+- [当前发布说明（2026.08.02.4）](bi-ops-release-2026-08-02-4.md)、[上一正式版本（2026.08.02.3）](https://github.com/dushengyi1993/shein-sales-bi/releases/tag/2026.08.02.3)、[19店独立应用切回（2026-07-30）](openapi-per-store-production-cutback-2026-07-30.md)、[共享商品详情额度与持续门禁（2026.07.30.3，历史）](bi-ops-release-2026-07-30-3.md)、[源码一致性门禁（2026.07.30.2）](bi-ops-release-2026-07-30-2.md)、[利润、营销与运行态隔离（2026.07.30.1）](bi-ops-release-2026-07-30.md)、[上一正式版本（2026.07.28.4）](bi-ops-release-2026-07-28-4.md)、[Partner CLI 长会话（2026.07.28.3）](bi-ops-release-2026-07-28-3.md)、[加车访客与查询修复（2026.07.28.2）](bi-ops-release-2026-07-28-2.md)、[无模型只读 query（2026.07.28.1）](bi-ops-release-2026-07-28.md)、[利润成本修复（2026-07-28）](bi-profit-cost-correction-2026-07-28.md)
 - [CLI 自动更新收口（2026.07.27.3）](bi-ops-release-2026-07-27.3.md)、[售后对账可见性修复（2026.07.27.2）](bi-ops-release-2026-07-27.2.md)、[历史店铺与售后口径修复（2026.07.27.1）](bi-ops-release-2026-07-27.md)、[全项目审查修复（2026.07.26.2）](bi-ops-release-2026-07-26.md)、[单应用生产切换（2026-07-26）](openapi-single-app-production-cutover-2026-07-26.md)、[半托 Webhook 实时销售切换（2026-07-23）](bi-webhook-live-cutover-2026-07-23.md)
 - [Partner CLI 最低折后价修复（2026.07.21.1，历史 ask 口径）](bi-ops-release-2026-07-21.md)、[自动运营与 Partner CLI（2026.07.16.1）](bi-ops-release-2026-07-16.md)
 - [Webhook/平台动态发布说明（2026.07.20.2）](bi-webhook-release-2026-07-19.md)、[仓储费发布说明（2026.07.19.1）](bi-ops-release-2026-07-19.md)、[仓储费历史重述（2026-07-19）](storage-fee-history-restatement-2026-07-19.md)、[业务逻辑与营销加固（2026.07.18.1）](bi-ops-release-2026-07-18.md)、[BI V2 发布说明（2026-07-12）](bi-ops-v2-release-2026-07-12.md)
