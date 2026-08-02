@@ -22,7 +22,8 @@ for (const source of [schema, migration, recheck]) {
 
 assert.match(portal, /FROM ops\.order_status_recheck_effective rs/);
 assert.match(portal, /ON rs\.fact_order_item_key = r\.order_item_key/);
-assert.match(portal, /rs\.lifecycle_status_group IN \('returning','abnormal'\)/);
+assert.match(portal, /rs\.lifecycle_status_group IN \('returning','abnormal','done'\)/);
+assert.match(portal, /coalesce\(rs\.lifecycle_status_group,'cancelled'\) = 'cancelled'/);
 assert.match(portal, /已出库后平台取消（待复查）/);
 assert.match(portal, /nullif\(rs\.latest_page_status_desc,''\)/);
 

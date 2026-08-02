@@ -4017,7 +4017,7 @@ order_item_enriched_base AS (
   LEFT JOIN LATERAL (
     SELECT
       CASE
-        WHEN rs.lifecycle_status_group IN ('returning','abnormal') THEN coalesce(
+        WHEN rs.lifecycle_status_group IN ('returning','abnormal','done') THEN coalesce(
           nullif(rs.latest_page_status_desc,''),
           nullif(rs.latest_goods_performance_status_desc,''),
           nullif(rs.latest_perform_status_desc,''),
@@ -4025,7 +4025,9 @@ order_item_enriched_base AS (
           r.goods_performance_status_desc,
           ''
         )
-        WHEN e.et_outbound_id IS NOT NULL AND concat_ws(' ',
+        WHEN e.et_outbound_id IS NOT NULL
+         AND coalesce(rs.lifecycle_status_group,'cancelled') = 'cancelled'
+         AND concat_ws(' ',
           coalesce(rs.latest_page_status_desc,''),
           coalesce(rs.latest_goods_performance_status_desc,''),
           coalesce(rs.latest_order_status_desc,''),
