@@ -183,6 +183,47 @@ assert.equal(transportStatusConflict.quality.businessLineDiffCount, 0,
 assert.equal(transportStatusConflict.quality.statusDiffCount, 2,
   'the replaced fulfilment state remains visible as one removed and one added status key');
 
+const postFulfillmentRefundApiArtifact = {
+  storeKey: 'TST',
+  groupKey: metadata.groupKey,
+  shopName: metadata.shopName,
+  start: '2026-07-10',
+  source: 'shein-openapi',
+  orderRefs: [{orderNo: 'O-2'}],
+  orders: [refundedAfterFulfillmentDetail],
+  ...refundedAfterFulfillment,
+};
+const postFulfillmentRefundBrowserArtifact = structuredClone(postFulfillmentRefundApiArtifact);
+postFulfillmentRefundBrowserArtifact.source = 'shein-webapi';
+postFulfillmentRefundBrowserArtifact.orders = [{
+  id: 'INTERNAL-REFUND',
+  orderNo: 'O-2',
+  tagCodeList: [{tagCode: 'COD', tagDesc: 'COD'}],
+}];
+for (const row of postFulfillmentRefundBrowserArtifact.goodsRows) {
+  row.currencyPrice = 0;
+  row.isValidSale = false;
+  delete row.postFulfillmentRefund;
+  row.pageStatus = 'RETURN_ON_WAY';
+  row.pageStatusDesc = '派件失败退回中';
+  row.performStatus = 4;
+  row.performStatusDesc = '尾程已发货';
+  row.goodsPerformanceStatus = 4;
+  row.goodsPerformanceStatusDesc = '尾程已发货';
+}
+const postFulfillmentRefundOverlay = compareSalesArtifacts(
+  postFulfillmentRefundBrowserArtifact,
+  postFulfillmentRefundApiArtifact,
+);
+assert.equal(postFulfillmentRefundOverlay.matched, true,
+  'an explicit OpenAPI post-fulfilment refund restores gross sales without creating a reconciliation warning');
+assert.equal(postFulfillmentRefundOverlay.deltas.salesSar, 0);
+assert.equal(postFulfillmentRefundOverlay.quality.postFulfillmentRefundOverlayCount, 2);
+assert.equal(postFulfillmentRefundOverlay.quality.postFulfillmentRefundOverlaySalesSar, 296.32);
+assert.equal(postFulfillmentRefundOverlay.quality.rawBrowserSalesSar, 0);
+assert.equal(postFulfillmentRefundOverlay.quality.rawSalesSarDelta, 296.32);
+assert.deepEqual(postFulfillmentRefundOverlay.quality.postFulfillmentRefundOverlayOrderNos, ['O-2']);
+
 const paymentFlag = extractPaymentFlagsFromSalesArtifact(apiArtifact, {
   date: apiArtifact.start,
   sourceKind: 'openapi',

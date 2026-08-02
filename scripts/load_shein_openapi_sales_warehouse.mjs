@@ -911,6 +911,70 @@ function identityOverlayRequired(browserData, apiData) {
     || (browserGoods.some((row) => cleanText(row?.suffix)) && !apiGoods.some((row) => cleanText(row?.suffix)));
 }
 
+function samePostFulfillmentRefundLine(browserRow, apiRow) {
+  if (orderNoOf(browserRow) !== orderNoOf(apiRow)) return false;
+  if (canonicalNumber(browserRow?.number ?? browserRow?.quantity) !== canonicalNumber(apiRow?.number ?? apiRow?.quantity)) return false;
+  const identities = [
+    [cleanText(browserRow?.goodsId), cleanText(apiRow?.goodsId)],
+    [cleanText(browserRow?.skuCode || browserRow?.sku_code), cleanText(apiRow?.skuCode || apiRow?.sku_code)],
+    [cleanText(browserRow?.skcName || browserRow?.skc), cleanText(apiRow?.skcName || apiRow?.skc)],
+    [canonicalGoodsSn(browserRow), canonicalGoodsSn(apiRow)],
+  ].filter(([browserValue, apiValue]) => browserValue && apiValue);
+  return identities.length > 0 && identities.every(([browserValue, apiValue]) => browserValue === apiValue);
+}
+
+function hasPostFulfillmentRefundEvidence(row) {
+  const performanceTag = Number(row?.performanceTag);
+  const goodsStatus = Number(row?.newOrderGoodsStatus);
+  const orderStatus = Number(row?.orderStatus);
+  const status = [
+    row?.pageStatus,
+    row?.pageStatusDesc,
+    row?.orderStatusDesc,
+    row?.performStatusDesc,
+    row?.goodsPerformanceStatusDesc,
+  ].map(cleanText).join(' ');
+  return goodsStatus === 6
+    && (performanceTag === 1 || performanceTag === 3)
+    && (orderStatus === 6 || /退款|退货|退回|派件失败|return|refund/i.test(status));
+}
+
+function overlayPostFulfillmentRefundLines(browserData, apiData) {
+  const browserGoodsRows = asArray(browserData?.goodsRows).map((row) => ({...row}));
+  const apiGoodsRows = asArray(apiData?.goodsRows);
+  const usedBrowserIndexes = new Set();
+  const overlays = [];
+  for (const apiRow of apiGoodsRows) {
+    if (apiRow?.postFulfillmentRefund !== true || !isValidSalesGoodsRow(apiRow)) continue;
+    const browserIndex = browserGoodsRows.findIndex((browserRow, index) => (
+      !usedBrowserIndexes.has(index)
+      && !isValidSalesGoodsRow(browserRow)
+      && hasPostFulfillmentRefundEvidence(browserRow)
+      && samePostFulfillmentRefundLine(browserRow, apiRow)
+    ));
+    if (browserIndex < 0) continue;
+    const browserRow = browserGoodsRows[browserIndex];
+    usedBrowserIndexes.add(browserIndex);
+    browserGoodsRows[browserIndex] = {
+      ...browserRow,
+      currencyCode: apiRow?.currencyCode ?? browserRow?.currencyCode,
+      currencyPrice: apiRow?.currencyPrice,
+      isValidSale: true,
+      salesExclusionReason: '',
+      reconciliationOverlay: 'post_fulfillment_refund',
+    };
+    overlays.push({
+      orderNo: orderNoOf(apiRow),
+      goodsId: cleanText(apiRow?.goodsId),
+      salesSar: round2(apiRow?.currencyPrice),
+    });
+  }
+  return {
+    browserData: {...browserData, goodsRows: browserGoodsRows},
+    overlays,
+  };
+}
+
 function compactArtifactSummary(summary) {
   if (!summary) return null;
   const {orderNos, goodsIds, ...rest} = summary;
@@ -924,7 +988,10 @@ function compactArtifactSummary(summary) {
 export function compareSalesArtifacts(browserData, apiData) {
   const api = summarizeArtifact(apiData || {});
   if (!browserData) return {matched: false, browser: null, api, deltas: null, quality: null};
-  const browser = summarizeArtifact(browserData);
+  const rawBrowser = summarizeArtifact(browserData);
+  const lifecycleOverlay = overlayPostFulfillmentRefundLines(browserData, apiData);
+  const comparisonBrowserData = lifecycleOverlay.browserData;
+  const browser = summarizeArtifact(comparisonBrowserData);
   const browserOrderSet = new Set(browser.orderNos);
   const apiOrderSet = new Set(api.orderNos);
   const browserGoodsSet = new Set(browser.goodsIds);
@@ -942,7 +1009,8 @@ export function compareSalesArtifacts(browserData, apiData) {
     invalidGoodsLineCount: api.invalidGoodsLineCount - browser.invalidGoodsLineCount,
     invalidSalesSar: round2(api.invalidSalesSar - browser.invalidSalesSar),
   };
-  const browserGoodsRows = asArray(browserData?.goodsRows);
+  const browserGoodsRows = asArray(comparisonBrowserData?.goodsRows);
+  const rawBrowserGoodsRows = asArray(browserData?.goodsRows);
   const apiGoodsRows = asArray(apiData?.goodsRows);
   const businessLines = compareMultisets(
     browserGoodsRows.map(businessLineKey),
@@ -957,7 +1025,7 @@ export function compareSalesArtifacts(browserData, apiData) {
   const metadataDiffCount = metadataValues(browserData)
     .filter((value, index) => value !== metadataValues(apiData)[index]).length;
   const statuses = compareMultisets(
-    browserGoodsRows.map(statusLineKey),
+    rawBrowserGoodsRows.map(statusLineKey),
     apiGoodsRows.map(statusLineKey),
   );
   const quality = {
@@ -968,6 +1036,11 @@ export function compareSalesArtifacts(browserData, apiData) {
     metadataDiffCount,
     statusDiffCount: statuses.diffCount,
     identityOverlayRequired: identityOverlayRequired(browserData, apiData),
+    postFulfillmentRefundOverlayCount: lifecycleOverlay.overlays.length,
+    postFulfillmentRefundOverlaySalesSar: round2(lifecycleOverlay.overlays.reduce((sum, row) => sum + row.salesSar, 0)),
+    postFulfillmentRefundOverlayOrderNos: [...new Set(lifecycleOverlay.overlays.map((row) => row.orderNo))].slice(0, 12),
+    rawBrowserSalesSar: rawBrowser.salesSar,
+    rawSalesSarDelta: round2(api.salesSar - rawBrowser.salesSar),
     examples: {
       businessLines: businessLines.examples,
       scatterPoints: scatterPoints.examples,
