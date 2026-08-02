@@ -377,8 +377,8 @@ WITH effective AS (
       END
     ) AS status_group
   FROM fact.order_item oi
-  LEFT JOIN ops.order_status_recheck_state rs
-    ON rs.order_item_key = oi.order_item_key
+  LEFT JOIN ops.order_status_recheck_effective rs
+    ON rs.fact_order_item_key = oi.order_item_key
   WHERE oi.created_date < current_date - interval '10 days'
 ), summary AS (
   SELECT

@@ -3834,9 +3834,9 @@ order_payment_flags AS (
 ),
 order_status_rechecks AS (
   SELECT rs.*
-  FROM ops.order_status_recheck_state rs
+  FROM ops.order_status_recheck_effective rs
   JOIN order_rows r
-    ON r.order_item_key = rs.order_item_key
+    ON r.order_item_key = rs.fact_order_item_key
 ),
 order_waybill_candidates AS (
   SELECT
@@ -3957,7 +3957,9 @@ order_item_enriched_base AS (
     st.status_desc AS perform_status_desc,
     st.status_desc AS order_status_desc,
     CASE
-      WHEN rs.is_terminal AND rs.lifecycle_status_group IN ('done','cancelled','returning') THEN rs.lifecycle_status_group
+      WHEN rs.is_terminal AND rs.lifecycle_status_group IN ('done','returning') THEN rs.lifecycle_status_group
+      WHEN rs.is_terminal AND rs.lifecycle_status_group = 'cancelled' AND e.et_outbound_id IS NULL THEN 'cancelled'
+      WHEN e.et_outbound_id IS NOT NULL AND st.status_text ~ '(揽收前已取消|取消|关闭)' THEN 'abnormal'
       WHEN st.status_text ~ '(未妥投|退回|拒收)' THEN 'returning'
       WHEN st.status_text ~ '(取消|关闭)' THEN 'cancelled'
       WHEN st.status_text ~ '(已签收|已完成|妥投)' THEN 'done'
@@ -4003,16 +4005,42 @@ order_item_enriched_base AS (
     e.et_shipper_name
   FROM order_rows r
   LEFT JOIN order_status_rechecks rs
-    ON rs.order_item_key = r.order_item_key
+    ON rs.fact_order_item_key = r.order_item_key
   LEFT JOIN order_payment_flags p
     ON p.store_key = r.store_key
    AND p.order_no = r.order_no
   LEFT JOIN order_waybill_latest w
     ON w.store_key = r.store_key
    AND w.order_no = r.order_no
+  LEFT JOIN et_outbound_latest e
+    ON e.express_code_norm = regexp_replace(upper(coalesce(w.express_code,'')), '[^0-9A-Z]', '', 'g')
   LEFT JOIN LATERAL (
     SELECT
-      coalesce(nullif(rs.latest_goods_performance_status_desc,''), r.goods_performance_status_desc, '') AS status_desc,
+      CASE
+        WHEN rs.lifecycle_status_group IN ('returning','abnormal') THEN coalesce(
+          nullif(rs.latest_page_status_desc,''),
+          nullif(rs.latest_goods_performance_status_desc,''),
+          nullif(rs.latest_perform_status_desc,''),
+          nullif(rs.latest_order_status_desc,''),
+          r.goods_performance_status_desc,
+          ''
+        )
+        WHEN e.et_outbound_id IS NOT NULL AND concat_ws(' ',
+          coalesce(rs.latest_page_status_desc,''),
+          coalesce(rs.latest_goods_performance_status_desc,''),
+          coalesce(rs.latest_order_status_desc,''),
+          coalesce(rs.latest_perform_status_desc,''),
+          coalesce(r.goods_performance_status_desc,'')
+        ) ~ '(揽收前已取消|取消|关闭)' THEN '已出库后平台取消（待复查）'
+        ELSE coalesce(
+          nullif(rs.latest_goods_performance_status_desc,''),
+          nullif(rs.latest_page_status_desc,''),
+          nullif(rs.latest_perform_status_desc,''),
+          nullif(rs.latest_order_status_desc,''),
+          r.goods_performance_status_desc,
+          ''
+        )
+      END AS status_desc,
       concat_ws(' ',
         coalesce(nullif(rs.latest_goods_performance_status_desc,''), r.goods_performance_status_desc, ''),
         coalesce(rs.latest_page_status_desc,''),
@@ -4022,8 +4050,6 @@ order_item_enriched_base AS (
         coalesce(w.tag_desc,'')
       ) AS status_text
   ) st ON true
-  LEFT JOIN et_outbound_latest e
-    ON e.express_code_norm = regexp_replace(upper(coalesce(w.express_code,'')), '[^0-9A-Z]', '', 'g')
   LEFT JOIN order_waybill_counts wc
     ON wc.store_key = r.store_key
    AND wc.order_no = r.order_no

@@ -73,6 +73,48 @@ CREATE INDEX IF NOT EXISTS idx_order_status_recheck_order
   ON ops.order_status_recheck_state(store_key, order_no);
 CREATE INDEX IF NOT EXISTS idx_order_status_recheck_group
   ON ops.order_status_recheck_state(lifecycle_status_group, is_terminal, last_checked_at);
+CREATE OR REPLACE VIEW ops.order_status_recheck_effective AS
+SELECT DISTINCT ON (oi.order_item_key)
+  oi.order_item_key AS fact_order_item_key,
+  CASE
+    WHEN rs.order_item_key = oi.order_item_key THEN 'exact_item_key'
+    WHEN coalesce(oi.sku_code,'') <> '' AND rs.sku_code = oi.sku_code THEN 'store_order_sku'
+    WHEN coalesce(oi.goods_id,'') <> '' AND rs.goods_id = oi.goods_id THEN 'store_order_goods'
+    WHEN coalesce(oi.skc,'') <> '' AND rs.skc = oi.skc THEN 'store_order_skc'
+    ELSE 'store_order_product'
+  END AS match_basis,
+  rs.*
+FROM fact.order_item oi
+JOIN ops.order_status_recheck_state rs
+  ON rs.store_key = oi.store_key
+ AND (
+   rs.order_item_key = oi.order_item_key
+   OR (
+     coalesce(nullif(rs.order_no,''), nullif(rs.bill_no,'')) =
+       coalesce(nullif(oi.order_no,''), nullif(oi.bill_no,''))
+     AND (
+       (coalesce(oi.sku_code,'') <> '' AND rs.sku_code = oi.sku_code)
+       OR (coalesce(oi.goods_id,'') <> '' AND rs.goods_id = oi.goods_id)
+       OR (coalesce(oi.skc,'') <> '' AND rs.skc = oi.skc)
+       OR (
+         coalesce(oi.standard_goods_sn,'') <> ''
+         AND dim.product_canonical_sn(rs.standard_goods_sn) =
+             dim.product_canonical_sn(oi.standard_goods_sn)
+       )
+     )
+   )
+ )
+ORDER BY
+  oi.order_item_key,
+  rs.last_checked_at DESC NULLS LAST,
+  CASE
+    WHEN rs.order_item_key = oi.order_item_key THEN 50
+    WHEN coalesce(oi.sku_code,'') <> '' AND rs.sku_code = oi.sku_code THEN 40
+    WHEN coalesce(oi.goods_id,'') <> '' AND rs.goods_id = oi.goods_id THEN 30
+    WHEN coalesce(oi.skc,'') <> '' AND rs.skc = oi.skc THEN 20
+    ELSE 10
+  END DESC,
+  rs.updated_at DESC NULLS LAST;
 `;
 
 const COLUMNS = [
@@ -227,12 +269,28 @@ function candidateSql(args) {
     ? 'true'
     : `(last_checked_at IS NULL OR last_checked_at < now() - (${Number(args.cooldownHours)} || ' hours')::interval)`;
   return `
-WITH base AS (
+WITH et_outbound_orders AS (
+  SELECT DISTINCT
+    w.store_key,
+    trim(o.order_no) AS order_no
+  FROM fact.waybill_package w
+  CROSS JOIN LATERAL regexp_split_to_table(coalesce(w.order_no_list,''), '[,，;；[:space:]]+') AS o(order_no)
+  JOIN fact.et_outbound e
+    ON regexp_replace(upper(coalesce(e.remark,'')), '[^0-9A-Z]', '', 'g') =
+       regexp_replace(upper(coalesce(w.express_code,'')), '[^0-9A-Z]', '', 'g')
+  WHERE trim(o.order_no) <> ''
+),
+base AS (
   SELECT
     oi.store_key,
     oi.created_date,
     oi.order_item_key,
-    coalesce(rs.lifecycle_status_group,
+    CASE
+      WHEN eo.order_no IS NOT NULL
+       AND coalesce(oi.goods_performance_status_desc,'') ~ '(揽收前已取消|取消|关闭)'
+       AND coalesce(rs.lifecycle_status_group,'cancelled') = 'cancelled'
+      THEN 'abnormal'
+      ELSE coalesce(rs.lifecycle_status_group,
       CASE
         WHEN coalesce(oi.goods_performance_status_desc,'') ~ '(未妥投|退回|拒收)' THEN 'returning'
         WHEN coalesce(oi.goods_performance_status_desc,'') ~ '(取消|关闭)' THEN 'cancelled'
@@ -242,13 +300,28 @@ WITH base AS (
         WHEN coalesce(oi.goods_performance_status_desc,'') ~ '(待处理|待发货|待揽收|待出库|待|下单成功|已打印面单)' THEN 'pending'
         ELSE 'other'
       END
-    ) AS effective_group,
-    coalesce(rs.is_terminal,false) AS is_terminal,
+    ) END AS effective_group,
+    CASE
+      WHEN eo.order_no IS NOT NULL
+       AND coalesce(oi.goods_performance_status_desc,'') ~ '(揽收前已取消|取消|关闭)'
+       AND coalesce(rs.lifecycle_status_group,'cancelled') = 'cancelled'
+      THEN false
+      ELSE coalesce(rs.is_terminal,false)
+    END AS is_terminal,
     rs.last_checked_at
   FROM fact.order_item oi
-  LEFT JOIN ops.order_status_recheck_state rs
-    ON rs.order_item_key = oi.order_item_key
-  WHERE oi.created_date <= current_date - (${Number(args.minAgeDays)} || ' days')::interval
+  LEFT JOIN ops.order_status_recheck_effective rs
+    ON rs.fact_order_item_key = oi.order_item_key
+  LEFT JOIN et_outbound_orders eo
+    ON eo.store_key = oi.store_key
+   AND eo.order_no = oi.order_no
+  WHERE (
+      oi.created_date <= current_date - (${Number(args.minAgeDays)} || ' days')::interval
+      OR (
+        eo.order_no IS NOT NULL
+        AND coalesce(oi.goods_performance_status_desc,'') ~ '(揽收前已取消|取消|关闭)'
+      )
+    )
     ${storeFilter}
 ), candidates AS (
   SELECT
@@ -288,7 +361,18 @@ async function openFactRowsForPair(args, pair) {
   const store = sqlLiteral(pair.storeKey);
   const date = sqlLiteral(pair.createdDate);
   const sql = `
-WITH base AS (
+WITH et_outbound_orders AS (
+  SELECT DISTINCT
+    w.store_key,
+    trim(o.order_no) AS order_no
+  FROM fact.waybill_package w
+  CROSS JOIN LATERAL regexp_split_to_table(coalesce(w.order_no_list,''), '[,，;；[:space:]]+') AS o(order_no)
+  JOIN fact.et_outbound e
+    ON regexp_replace(upper(coalesce(e.remark,'')), '[^0-9A-Z]', '', 'g') =
+       regexp_replace(upper(coalesce(w.express_code,'')), '[^0-9A-Z]', '', 'g')
+  WHERE trim(o.order_no) <> ''
+),
+base AS (
   SELECT
     coalesce(nullif(oi.order_item_key,''), md5(concat_ws('|', oi.store_key, coalesce(oi.order_no,''), coalesce(oi.bill_no,''), coalesce(oi.standard_goods_sn,''), coalesce(oi.skc,''), coalesce(oi.order_create_time::text,''), coalesce(oi.goods_title,'')))) AS order_item_key,
     oi.order_key,
@@ -309,8 +393,19 @@ WITH base AS (
     oi.goods_performance_status_desc,
     oi.raw_summary AS original_raw_summary,
     rs.order_item_key IS NOT NULL AS has_recheck,
-    coalesce(rs.is_terminal,false) AS is_terminal,
-    coalesce(rs.lifecycle_status_group,
+    CASE
+      WHEN eo.order_no IS NOT NULL
+       AND coalesce(oi.goods_performance_status_desc,'') ~ '(揽收前已取消|取消|关闭)'
+       AND coalesce(rs.lifecycle_status_group,'cancelled') = 'cancelled'
+      THEN false
+      ELSE coalesce(rs.is_terminal,false)
+    END AS is_terminal,
+    CASE
+      WHEN eo.order_no IS NOT NULL
+       AND coalesce(oi.goods_performance_status_desc,'') ~ '(揽收前已取消|取消|关闭)'
+       AND coalesce(rs.lifecycle_status_group,'cancelled') = 'cancelled'
+      THEN 'abnormal'
+      ELSE coalesce(rs.lifecycle_status_group,
       CASE
         WHEN coalesce(oi.goods_performance_status_desc,'') ~ '(未妥投|退回|拒收)' THEN 'returning'
         WHEN coalesce(oi.goods_performance_status_desc,'') ~ '(取消|关闭)' THEN 'cancelled'
@@ -320,10 +415,13 @@ WITH base AS (
         WHEN coalesce(oi.goods_performance_status_desc,'') ~ '(待处理|待发货|待揽收|待出库|待|下单成功|已打印面单)' THEN 'pending'
         ELSE 'other'
       END
-    ) AS effective_group
+    ) END AS effective_group
   FROM fact.order_item oi
-  LEFT JOIN ops.order_status_recheck_state rs
-    ON rs.order_item_key = oi.order_item_key
+  LEFT JOIN ops.order_status_recheck_effective rs
+    ON rs.fact_order_item_key = oi.order_item_key
+  LEFT JOIN et_outbound_orders eo
+    ON eo.store_key = oi.store_key
+   AND eo.order_no = oi.order_no
   WHERE oi.store_key = ${store}
     AND oi.created_date = ${date}::date
 )
