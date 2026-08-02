@@ -9,9 +9,14 @@ import {
   MARKETING_AUTOMATION_ACTIONS,
 } from '../../lib/marketing_automation_authorization.mjs';
 import {loadExactManualRepairPlan} from '../../lib/marketing_repair_manifest.mjs';
+import {
+  activityExecutionTransactionHash,
+  executeLimitedDiscountWithInventoryTransaction,
+  planLimitedDiscountInventoryTransaction,
+} from '../../lib/marketing_activity_inventory_integration.mjs';
+import {revalidateLowEtFastSellerRescueArtifact} from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const STOCK_CONFIRM = 'MANUAL_SPECIAL_LIMITED_DISCOUNT_STOCK_TOP_UP';
 
 function parseArgs(argv) {
   const args = {
@@ -132,17 +137,6 @@ async function replaceTransactionally(storeKey, port, rescuePath, execute) {
   ], execute ? 1200000 : 900000));
 }
 
-function inventoryShortage(full) {
-  return (full?.validation?.invalid || []).some(row => row.reason === 'inventory below configured activity stock');
-}
-
-async function inventoryGuard(storeKey, skc, execute) {
-  const args = ['scripts/marketing/manage_manual_limited_discount_inventory.mjs', '--store', storeKey, '--skc', skc];
-  if (execute) args.push('--execute', '--confirm', STOCK_CONFIRM);
-  else args.push('--dry-run');
-  return await loadCommandOutput(await run(process.execPath, args, 600000));
-}
-
 function mixedConflicts(full) {
   return (full?.before?.conflictActivities || []).filter(activity => Number(activity.extraCount || 0) > 0);
 }
@@ -209,9 +203,19 @@ async function processOne(file, storeMap, args) {
   const row = rescue.rows?.[0];
   const storeKey = String(rescue.storeKey || row?.storeKey || '').toUpperCase();
   const store = storeMap.get(storeKey);
-  const record = {storeKey, skc: row?.skc || '', specialPrice: row?.limitedDiscountPrice, rescuePath: rel(rescuePath), dryRun: null, inventory: null, transaction: null, execute: null, readback: null, registryUpdate: null, close: null, status: 'pending', ok: false, error: ''};
+  const record = {storeKey, skc: row?.skc || '', specialPrice: row?.limitedDiscountPrice, rescuePath: rel(rescuePath), dryRun: null, lowEtFastSellerPricePullbackRevalidation: null, inventoryTransactionPlan: null, inventoryTransaction: null, transaction: null, execute: null, readback: null, registryUpdate: null, close: null, status: 'pending', ok: false, error: ''};
   try {
     if (!store) throw new Error(`Unknown store ${storeKey}`);
+    record.lowEtFastSellerPricePullbackRevalidation = await revalidateLowEtFastSellerRescueArtifact({
+      root: ROOT,
+      rescue,
+      reportDate: args.date,
+    });
+    if (!record.lowEtFastSellerPricePullbackRevalidation.ok) {
+      record.status = 'manual_special_low_et_review_blocked';
+      record.error = record.lowEtFastSellerPricePullbackRevalidation.reason;
+      return record;
+    }
     const launch = await launchStore(storeKey);
     if (!launch.ok) throw new Error(`launch failed: ${launch.stderr || launch.stdout}`);
     let dry = await applyRescue(storeKey, store.port, rescuePath, false);
@@ -221,13 +225,6 @@ async function processOne(file, storeMap, args) {
     if (!dryAssessment.ok && !dryAssessment.recoverable) {
       record.status = 'dry_run_blocked';
       record.error = dryAssessment.reasons.join('; ');
-      return record;
-    }
-    record.inventory = await inventoryGuard(storeKey, row.skc, false);
-    const inventoryDecision = record.inventory.full?.decision || record.inventory.summary?.decision || null;
-    if (!record.inventory.ok || !inventoryDecision?.ok) {
-      record.status = 'et_inventory_blocked';
-      record.error = inventoryDecision?.reason || record.inventory.stderr || 'inventory guard failed';
       return record;
     }
     if (dry.full.alreadyCovered) {
@@ -240,27 +237,50 @@ async function processOne(file, storeMap, args) {
       return record;
     }
 
+    const transactionHash = activityExecutionTransactionHash(
+      'manual_special_limited_discount_restore',
+      storeKey,
+      rescuePath,
+      rescue,
+      dry.full?.validation || null,
+    );
     if (args.dryRunOnly) {
+      record.inventoryTransactionPlan = await planLimitedDiscountInventoryTransaction({
+        root: ROOT,
+        storeKey,
+        rescue,
+        preflightFull: dry.full,
+        transactionHash,
+      });
+      if (!record.inventoryTransactionPlan.ok) {
+        record.status = 'inventory_transaction_plan_blocked';
+        record.error = record.inventoryTransactionPlan.blockers?.map(item => item.error || item.reason).join('; ') || 'inventory transaction plan blocked';
+        return record;
+      }
       record.status = dry.full.ok === true ? 'dry_run_ready' : 'dry_run_recoverable';
       record.recovery = dryAssessment;
       record.ok = true;
       return record;
     }
-    if (inventoryDecision.action === 'top_up_platform_virtual_stock') {
-      record.inventory = await inventoryGuard(storeKey, row.skc, true);
-      if (!record.inventory.ok || record.inventory.full?.ok === false) throw new Error('platform virtual inventory top-up/readback failed');
-      dry = await applyRescue(storeKey, store.port, rescuePath, false);
-      if (!dry.full) throw new Error('post-stock dry-run produced no output');
-      record.dryRun = summarizeDryRun(dry.full, dry.outPath);
-      dryAssessment = assessRecoverableDryRun(dry.full);
-      if (inventoryShortage(dry.full)) throw new Error('inventory remains below activity stock after guarded top-up path');
-      if (!dryAssessment.ok && !dryAssessment.recoverable) {
-        throw new Error(`post-stock dry-run has non-recoverable blockers: ${dryAssessment.reasons.join('; ')}`);
-      }
+    const activityInventoryTransaction = await executeLimitedDiscountWithInventoryTransaction({
+      root: ROOT,
+      storeKey,
+      rescue,
+      preflightFull: dry.full,
+      transactionHash,
+      runSubmit: async () => await replaceTransactionally(storeKey, store.port, rescuePath, true),
+      runEnrollmentReadback: async () => await applyRescue(storeKey, store.port, rescuePath, false),
+    });
+    record.inventoryTransaction = activityInventoryTransaction;
+    const transaction = activityInventoryTransaction.commandResult;
+    if (!activityInventoryTransaction.ok) {
+      record.status = activityInventoryTransaction.safe === true
+        ? 'inventory_transaction_or_enrollment_blocked'
+        : 'inventory_transaction_restore_failed';
+      record.error = activityInventoryTransaction.blockers?.map(item => item.error || item.reason).join('; ')
+        || 'activity inventory transaction failed';
+      return record;
     }
-
-    if (inventoryShortage(dry.full)) throw new Error('inventory remains below activity stock after guarded top-up path');
-    const transaction = await replaceTransactionally(storeKey, store.port, rescuePath, true);
     record.transaction = {
       ok: transaction.full?.ok === true,
       safe: transaction.full?.safe === true,

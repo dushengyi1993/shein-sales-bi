@@ -29,6 +29,10 @@ import {
   buildOrdinaryPlatformPriceAdjustmentAudit,
   isOrdinaryPlatformTierRewriteAccepted,
 } from '../../lib/marketing_ordinary_platform_price_policy.mjs';
+import {
+  applyLowEtFastSellerPricePullbackToRows,
+  buildLowEtFastSellerPricingContext,
+} from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
@@ -45,6 +49,7 @@ const now = new Date();
 const deadlineMs = now.getTime() + (args.hours * 3600_000);
 const PRICING_POLICY = await loadMarketingPricingPolicy(args.pricingPolicy);
 const PRICING_BI = await readJsonIfExists(args.bi, null);
+const INVENTORY_TREND = await readJsonIfExists(args.inventoryTrend, null);
 const EXPOSURE_INDEX = buildExposureTopLinkIndex(PRICING_BI, PRICING_POLICY);
 
 const DEFAULT_MARGIN_TARGET = 0.30;
@@ -64,6 +69,14 @@ const priceOverrideRules = new Map();
 const storePriceOverrideRules = new Map();
 const rowPriceOverrideRules = new Map();
 const selectionAllowRules = new Map();
+let LOW_ET_PRICE_PULLBACK = {
+  enabled: PRICING_POLICY?.lowEtFastSellerPricePullback?.enabled !== false,
+  evidenceHash: '',
+  appliedCount: 0,
+  blockedCount: 0,
+  manualReviewCount: 0,
+  results: [],
+};
 
 function registerRuleKeys(map, label, value) {
   const keys = [
@@ -76,8 +89,8 @@ function registerRuleKeys(map, label, value) {
 
 for (const [label, value] of fixedPriceBase) registerRuleKeys(fixedPriceRules, label, value);
 for (const [label, value] of marginRuleBase) registerRuleKeys(marginRules, label, value);
-await loadPriceOverrides();
 await loadSelectionPlan();
+await loadPriceOverrides();
 
 function parseArgs(argv) {
   const out = {
@@ -99,8 +112,10 @@ function parseArgs(argv) {
     selectionPlan: '',
     pricingPolicy: path.join(ROOT, 'config', 'marketing_pricing_policy.json'),
     bi: path.join(ROOT, 'outputs', 'bi-portal', 'data.json'),
+    inventoryTrend: path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'inventoryTrend.json'),
     outDir: '',
     executionWorkFingerprint: '',
+    expectedLowEtEvidenceHash: '',
     approvalManifest: '',
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -123,13 +138,18 @@ function parseArgs(argv) {
     else if (a === '--selection-plan') out.selectionPlan = path.resolve(argv[++i] || '');
     else if (a === '--pricing-policy') out.pricingPolicy = path.resolve(argv[++i] || '');
     else if (a === '--bi') out.bi = path.resolve(argv[++i] || '');
+    else if (a === '--inventory-trend') out.inventoryTrend = path.resolve(argv[++i] || '');
     else if (a === '--out-dir') out.outDir = path.resolve(argv[++i] || '');
     else if (a === '--execution-work-fingerprint') out.executionWorkFingerprint = String(argv[++i] || '').trim().toLowerCase();
+    else if (a === '--expected-low-et-evidence-hash') out.expectedLowEtEvidenceHash = String(argv[++i] || '').trim().toLowerCase();
     else if (a === '--approval-manifest') out.approvalManifest = path.resolve(argv[++i] || '');
     else throw new Error(`Unknown argument: ${a}`);
   }
   if (out.executionWorkFingerprint && !/^[a-f0-9]{64}$/.test(out.executionWorkFingerprint)) {
     throw new Error('Invalid --execution-work-fingerprint');
+  }
+  if (out.expectedLowEtEvidenceHash && !/^[a-f0-9]{64}$/.test(out.expectedLowEtEvidenceHash)) {
+    throw new Error('Invalid --expected-low-et-evidence-hash');
   }
   return out;
 }
@@ -162,6 +182,15 @@ function compact(s) {
   return String(s || '').normalize('NFKC').replace(/\s+/g, '').replace(/[()（）【】\[\]_:：/\\]/g, '').toUpperCase();
 }
 
+function formatShanghaiDate(value = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(value);
+}
+
 function modelCode(s) {
   return String(s || '').match(/^[A-Z]{1,5}-?\d+[A-Z]?(?:-\d+)?/i)?.[0] || '';
 }
@@ -169,7 +198,55 @@ function modelCode(s) {
 async function loadPriceOverrides() {
   if (!args.priceOverrides) return;
   const doc = JSON.parse(await fs.readFile(args.priceOverrides, 'utf8'));
-  const items = Array.isArray(doc.items) ? doc.items : [];
+  const lowEtContext = buildLowEtFastSellerPricingContext({
+    inventoryTrendDoc: INVENTORY_TREND,
+    linksDataDoc: PRICING_BI,
+    baselineDoc: doc,
+    costDoc: COST_DOC,
+    marketingPolicy: PRICING_POLICY,
+    reportDate: formatShanghaiDate(now),
+  });
+  const adjusted = applyLowEtFastSellerPricePullbackToRows({
+    rows: Array.isArray(doc.items) ? doc.items : [],
+    context: lowEtContext,
+    costDoc: COST_DOC,
+    isManualSpecial: item => item?.manualSpecialLimitedDiscount === true,
+  });
+  LOW_ET_PRICE_PULLBACK = {
+    enabled: lowEtContext.policy.enabled !== false,
+    evidenceHash: lowEtContext.evidenceHash,
+    appliedCount: adjusted.appliedCount,
+    blockedCount: adjusted.blockedCount,
+    manualReviewCount: adjusted.manualReviewCount,
+    blockers: lowEtContext.blockers,
+    results: adjusted.results.map(result => ({
+      storeKey: result.row?.storeKey || '',
+      skc: result.row?.skc || '',
+      canonical: result.row?.canonical || result.evidence?.canonical || '',
+      applied: result.applied === true,
+      blocked: result.blocked === true,
+      manualReview: result.manualReview === true,
+      reason: result.reason,
+      finalTargetPrice: result.row?.finalTargetPrice ?? result.row?.targetPrice ?? null,
+      audit: result.audit || null,
+    })),
+  };
+  if (args.submit) {
+    if (!args.expectedLowEtEvidenceHash) {
+      throw new Error('--submit requires --expected-low-et-evidence-hash from the immediately preceding dry-run');
+    }
+    if (args.expectedLowEtEvidenceHash !== lowEtContext.evidenceHash) {
+      throw new Error(`low ET pricing evidence drift: expected=${args.expectedLowEtEvidenceHash} actual=${lowEtContext.evidenceHash}`);
+    }
+    const unsafe = adjusted.results.filter(result => (
+      (result.blocked || result.manualReview)
+      && isSelectedPriceRow(result.row)
+    ));
+    if (unsafe.length) {
+      throw new Error(`low ET pricing fail-closed rows=${unsafe.length}: ${unsafe.slice(0, 5).map(result => `${result.row?.storeKey || ''}/${result.row?.skc || ''}:${result.reason}`).join(',')}`);
+    }
+  }
+  const items = adjusted.rows;
   for (const item of items) {
     const label = item.canonical || item.goodsSn || item.supplierNo || '';
     if (!label || item.targetPrice === undefined || item.targetPrice === null) continue;
@@ -192,6 +269,15 @@ async function loadPriceOverrides() {
       for (const key of item.keys || []) priceOverrideRules.set(compact(key), item);
     }
   }
+}
+
+function isSelectedPriceRow(row) {
+  if (!args.selectionPlan) return true;
+  const storeKey = String(row?.storeKey || '').trim().toUpperCase();
+  const activityId = Number(row?.activityId || 0);
+  const skc = String(row?.skc || '').trim().toLowerCase();
+  if (!storeKey || !activityId || !skc) return false;
+  return selectionAllowRules.get(`${storeKey}:${activityId}`)?.has(skc) === true;
 }
 
 async function loadSelectionPlan() {
@@ -876,6 +962,11 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
   pageSize = {...pageSize, attempts: pageSizeAttempts};
   await sleep(500);
 
+  const activityInventoryTransactionPlan = await queryOrdinaryActivityInventoryTransactionPlan(
+    cdp,
+    sessionId,
+    allowSkcs,
+  );
   const preselectedSingle = {attempted: false, selected: false, reason: 'batch_skc_textarea_filter_preferred'};
   const prefilteredAllowlist = allowSkcs?.length
     ? await applyAllowlistBatchFilterViaCdp(cdp, sessionId, allowSkcs)
@@ -1444,12 +1535,13 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
       ...total,
       ...selected,
     };
-  `, {allowSkcs, preselectedSingle, prefilteredAllowlist});
+  `, {allowSkcs, preselectedSingle, prefilteredAllowlist, activityInventoryTransactionPlan});
 
   const editReady = await waitFor(cdp, sessionId, `document.body && document.body.innerText.includes('提报的活动价格')`, 30_000);
-  const selectedOk = result.selectionMode === 'allowlist'
+  const inventoryPlanOk = activityInventoryTransactionPlan.ok === true;
+  const selectedOk = inventoryPlanOk && (result.selectionMode === 'allowlist'
     ? result.selectedMatchesPlan
-    : (!result.totalGoods || result.selectedCount >= result.totalGoods);
+    : (!result.totalGoods || result.selectedCount >= result.totalGoods));
   if (!editReady && selectedOk && result.selectionMode === 'allowlist' && result.clickedNext) {
     await evalJs(cdp, sessionId, `
       const visible = el => {
@@ -1471,10 +1563,131 @@ async function selectAllGoodsAndNext(cdp, sessionId, allowSkcs = null) {
   const editReadyAfterRetry = editReady || await waitFor(cdp, sessionId, `document.body && document.body.innerText.includes('提报的活动价格')`, 10_000);
   const reason = selectedOk
     ? undefined
-    : (result.selectionMode === 'allowlist'
+    : (!inventoryPlanOk
+      ? `活动最低库存 live 证据不完整：${activityInventoryTransactionPlan.blockers.map(row => row.reason).join(',') || 'unknown'}`
+      : (result.selectionMode === 'allowlist'
       ? `选择计划不匹配：已选 ${result.selectedCount}/${result.expectedSelectedCount}，未找到 ${result.missingAllowedSkcs?.join(',') || '-'}`
-      : `只选中 ${result.selectedCount}/${result.totalGoods} 个商品`);
-  return {...result, pageSize, ok: editReadyAfterRetry && selectedOk, mode: editReadyAfterRetry ? 'edit' : 'choose', reason};
+      : `只选中 ${result.selectedCount}/${result.totalGoods} 个商品`));
+  return {
+    ...result,
+    pageSize,
+    activityInventoryTransactionPlan,
+    ok: editReadyAfterRetry && selectedOk,
+    mode: editReadyAfterRetry ? 'edit' : 'choose',
+    reason,
+  };
+}
+
+async function queryOrdinaryActivityInventoryTransactionPlan(cdp, sessionId, allowSkcs) {
+  return await evalJs(cdp, sessionId, `
+    const allow = new Set((Array.isArray(__arg) ? __arg : []).map(value => String(value || '').trim().toLowerCase()).filter(Boolean));
+    const activityId = Number((location.href.match(/\\/config\\/(\\d+)/) || [])[1] || 0);
+    const source = 'ordinary_activity_query_supplier_goods_list_v2';
+    const number = value => {
+      if (value === null || value === undefined || value === '') return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+    const first = (row, fields) => {
+      for (const field of fields) {
+        const value = number(row?.[field]);
+        if (value !== null) return {field, value};
+      }
+      return {field:'', value:null};
+    };
+    try {
+      const response = await fetch('/mrs-api-prefix/mbrs/activity/query_supplier_goods_list_v2?page_num=1&page_size=500', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'content-type': 'application/json;charset=UTF-8',
+          'Origin-Url': location.href,
+          'x-bbl-route': location.hash.replace(/^#/, '') || '/mbrs/marketing/list',
+          'x-req-zone-id': 'Asia/Shanghai',
+          'x-lt-language': 'CN',
+          'LAN': 'CN',
+        },
+        body: JSON.stringify({
+          activity_id: activityId,
+          is_partake: 0,
+          main_site: 'shein',
+          pricing_currency_code: 'SAR',
+          skc_query: {grade_tree_list: []},
+        }),
+      });
+      const packet = await response.json();
+      const list = packet?.info?.partake_goods_list || [];
+      if (!response.ok || String(packet?.code ?? '0') !== '0') {
+        return {
+          ok:false,
+          source,
+          activityId,
+          rows:[],
+          blockers:[{reason:'ordinary_activity_goods_query_failed', httpStatus:response.status, code:packet?.code ?? null, message:packet?.msg || ''}],
+          writeAttempted:false,
+        };
+      }
+      const rows = list
+        .map(row => {
+          const skc = String(row?.skc || '').trim().toLowerCase();
+          if (!skc || (allow.size && !allow.has(skc))) return null;
+          const current = first(row, [
+            'total_usable_inventory', 'totalUsableInventory', 'usable_inventory_num',
+            'usableInventoryNum', 'inventory_num', 'inventoryNum', 'ivt_num', 'stock_num',
+          ]);
+          const minimum = first(row, [
+            'activity_min_stock', 'activityMinStock', 'min_stock', 'minStock',
+            'minimum_stock', 'minimumStock', 'minimum_inventory_num', 'minimumInventoryNum',
+          ]);
+          const minimumUsableInventory = minimum.value !== null && minimum.value > 0
+            ? Math.ceil(minimum.value)
+            : null;
+          const currentUsableInventory = current.value !== null && current.value >= 0
+            ? Math.floor(current.value)
+            : null;
+          return {
+            skc,
+            canonical: String(row?.supplier_no || row?.sku_supplier_no || '').trim(),
+            currentUsableInventory,
+            currentSourceField: current.field,
+            minimumUsableInventory,
+            minimumSourceField: minimum.field,
+            minimumRequired: minimumUsableInventory !== null,
+            requiresTemporaryRaise: minimumUsableInventory !== null
+              && currentUsableInventory !== null
+              && currentUsableInventory < minimumUsableInventory,
+          };
+        })
+        .filter(Boolean);
+      const found = new Set(rows.map(row => row.skc));
+      const missing = [...allow].filter(skc => !found.has(skc));
+      const blockers = missing.map(skc => ({skc, reason:'ordinary_activity_goods_query_missing_target'}));
+      for (const row of rows) {
+        if (row.minimumRequired && row.currentUsableInventory === null) {
+          blockers.push({skc:row.skc, reason:'ordinary_activity_live_usable_inventory_missing'});
+        }
+      }
+      return {
+        ok:blockers.length === 0,
+        source,
+        activityId,
+        queriedAt:new Date().toISOString(),
+        total:Number(packet?.info?.total ?? list.length),
+        rows,
+        blockers,
+        writeAttempted:false,
+      };
+    } catch (error) {
+      return {
+        ok:false,
+        source,
+        activityId,
+        rows:[],
+        blockers:[{reason:'ordinary_activity_goods_query_exception', error:String(error?.message || error)}],
+        writeAttempted:false,
+      };
+    }
+  `, allowSkcs || []);
 }
 
 function computeTarget(storeKey, activityId, row) {
@@ -2357,6 +2570,7 @@ const summary = {
   executionWorkFingerprint: args.executionWorkFingerprint || '',
   approvalManifest: EXECUTION_APPROVAL ? path.relative(ROOT, EXECUTION_APPROVAL.manifestPath) : '',
   approvalManifestHash: EXECUTION_APPROVAL?.manifestHash || '',
+  lowEtFastSellerPricePullback: LOW_ET_PRICE_PULLBACK,
   stores: [],
 };
 
@@ -2408,6 +2622,13 @@ for (const store of selectedStores) {
       console.log(`[${store.storeKey}] 处理 ${activity.activityId} ${activity.name}`);
       const result = await processActivity(cdp, store, activity).catch(err => ({ok: false, store: store.storeKey, activity, reason: err.message, stack: err.stack}));
       result.executionWorkFingerprint = args.executionWorkFingerprint || '';
+      result.lowEtFastSellerPricePullback = {
+        evidenceHash: LOW_ET_PRICE_PULLBACK.evidenceHash,
+        rows: LOW_ET_PRICE_PULLBACK.results.filter(row => (
+          String(row.storeKey || '').toUpperCase() === String(store.storeKey || '').toUpperCase()
+          && selectionAllowList(store.storeKey, activity.activityId)?.includes(String(row.skc || '').toLowerCase())
+        )),
+      };
       storeResult.results.push(result);
       if (result.targetId && (result.ok || args.noClose)) keepTargetIds.push(result.targetId);
       const file = path.join(OUT_DIR, `${store.storeKey}-${activity.activityId}.json`);

@@ -19,6 +19,10 @@ import {
 } from '../../lib/marketing_high_click_special_policy.mjs';
 import {loadMarketingPricingPolicy} from '../../lib/marketing_pricing_policy.mjs';
 import {
+  buildLowEtFastSellerPricingContext,
+  revalidateLowEtFastSellerPricePullback,
+} from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
+import {
   loadExactHighClickSpecialPlan,
   loadExactManualRepairPlan,
 } from '../../lib/marketing_repair_manifest.mjs';
@@ -245,9 +249,26 @@ const authorization = args.execute
     payloadHash: exactPlan.workFingerprint,
   })
   : null;
-const policy = getHighClickSpecialPolicy(await loadMarketingPricingPolicy(POLICY_PATH));
+const marketingPricingPolicy = await loadMarketingPricingPolicy(POLICY_PATH);
+const policy = getHighClickSpecialPolicy(marketingPricingPolicy);
 const linksPath = path.resolve(ROOT, exactPlan.plan.sourceLinksData || 'outputs/bi-portal/sections/linksData.json');
 const linksDoc = await readJson(linksPath);
+const inventoryTrendPath = path.resolve(ROOT, exactPlan.plan.sourceInventoryTrend || 'outputs/bi-portal/sections/inventoryTrend.json');
+const priceOverridesPath = path.resolve(ROOT, exactPlan.plan.sourcePriceOverrides || '');
+const costMapPath = path.resolve(ROOT, exactPlan.plan.sourceCostMap || 'tmp/mbrs/marketing-cost-map.json');
+const [inventoryTrendDoc, priceOverridesDoc, costDoc] = await Promise.all([
+  readJson(inventoryTrendPath),
+  readJson(priceOverridesPath),
+  readJson(costMapPath),
+]);
+const lowEtContext = buildLowEtFastSellerPricingContext({
+  inventoryTrendDoc,
+  linksDataDoc: linksDoc,
+  baselineDoc: priceOverridesDoc,
+  costDoc,
+  marketingPolicy: marketingPricingPolicy,
+  reportDate: args.date,
+});
 const liveRowsByKey = new Map(uniqueLinkRows(linksDoc).map(row => [
   manualLimitedDiscountKey(row?.store_key || row?.storeKey || row?.store, row?.skc || row?.SKC),
   row,
@@ -321,6 +342,23 @@ for (const row of selected) {
     processedThisRun.push(record);
     continue;
   }
+  const lowEtRevalidation = revalidateLowEtFastSellerPricePullback({
+    row: {
+      ...row,
+      finalTargetPrice: row.specialPrice,
+      targetPrice: row.specialPrice,
+      limitedDiscountPrice: row.specialPrice,
+    },
+    context: lowEtContext,
+    costDoc,
+  });
+  record.lowEtFastSellerPricePullbackRevalidation = lowEtRevalidation;
+  if (!lowEtRevalidation.ok) {
+    record.status = 'low_et_pricing_evidence_drift';
+    record.reason = lowEtRevalidation.reason;
+    processedThisRun.push(record);
+    continue;
+  }
   record.metrics = revalidation.evaluation.metrics;
   if (!args.execute) {
     record.status = 'dry_run_ready_to_register';
@@ -391,7 +429,8 @@ if (args.execute && restoreKeys.size > 0) {
       status: restored.status,
       ok: restored.ok === true,
       dryRun: restored.dryRun,
-      inventory: restored.inventory?.full?.decision || restored.inventory?.summary?.decision || null,
+      inventoryTransactionPlan: restored.inventoryTransactionPlan || null,
+      inventoryTransaction: restored.inventoryTransaction || null,
       transaction: restored.transaction,
       readback: restored.readback,
       close: restored.close,

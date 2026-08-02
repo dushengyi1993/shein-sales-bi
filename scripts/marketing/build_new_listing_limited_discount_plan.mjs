@@ -36,12 +36,17 @@ import {
   DEFAULT_MANUAL_LIMITED_DISCOUNT_OVERRIDES_PATH,
   loadManualLimitedDiscountRegistry,
 } from '../../lib/marketing_manual_limited_discount_overrides.mjs';
+import {
+  applyLowEtFastSellerPricePullback,
+  buildLowEtFastSellerPricingContext,
+} from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
 
 const ROOT = process.cwd();
 const DEFAULT_LINKS_DATA = path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'linksData.json');
 const DEFAULT_POLICY = path.join(ROOT, 'config', 'marketing_pricing_policy.json');
 const DEFAULT_STORES_CONFIG = path.join(ROOT, 'config', 'stores.json');
 const DEFAULT_COST_MAP = path.join(ROOT, 'tmp', 'mbrs', 'marketing-cost-map.json');
+const DEFAULT_INVENTORY_TREND = path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'inventoryTrend.json');
 const DEFAULT_PRICE_OVERRIDES = path.join(
   ROOT,
   'tmp',
@@ -75,6 +80,7 @@ const manualLimitedDiscountIndex = buildManualLimitedDiscountIndex(
   effectiveNow,
 );
 const costMapPath = path.resolve(ROOT, args.costMap || policy?.topTreatmentCostFallback?.costMapPath || DEFAULT_COST_MAP);
+const inventoryTrendPath = path.resolve(ROOT, args.inventoryTrend || DEFAULT_INVENTORY_TREND);
 const durationDays = positiveInt(
   policy?.newListingWithin7Days?.limitedDiscount?.durationDays ?? policy?.limitedDiscount?.defaultDurationDays,
   7,
@@ -94,6 +100,7 @@ const storesConfigPath = path.resolve(ROOT, args.storesConfig || DEFAULT_STORES_
 const storesConfig = await readJson(storesConfigPath);
 const priceDoc = await readJson(priceOverridesPath);
 const costDoc = fsSync.existsSync(costMapPath) ? await readJson(costMapPath) : {};
+const inventoryTrendDoc = await readJson(inventoryTrendPath);
 const liveScanPath = args.currentMarketingLiveScan
   ? path.resolve(ROOT, args.currentMarketingLiveScan)
   : '';
@@ -134,6 +141,14 @@ const supplementalPriceIndexes = args.noSupplementalPriceOverrides === 'true'
   : await loadSupplementalNewListingPriceIndexes(priceOverridesPath, args.supplementalPriceOverridesDir);
 const priceIndexes = [primaryPriceIndex, ...supplementalPriceIndexes];
 const exposureIndex = buildExposureTopLinkIndex({storeLinks}, policy);
+const lowEtContext = buildLowEtFastSellerPricingContext({
+  inventoryTrendDoc,
+  linksDataDoc: {storeLinks},
+  baselineDoc: priceDoc,
+  costDoc,
+  marketingPolicy: policy,
+  reportDate,
+});
 const liveLimitedEvidence = collectLiveLimitedDiscountEvidence(liveScanDoc, liveScanPath, {
   now: effectiveNow,
   requiredEndTime: endTime,
@@ -333,7 +348,40 @@ for (const link of storeLinks) {
     });
     continue;
   }
-  const topTierPrice = resolvedTopTier.price;
+  const lowEtDecision = manualSpecialEntry
+    ? {
+      applied: false,
+      blocked: false,
+      manualReview: true,
+      reason: 'active_manual_special_requires_user_review',
+      row: {finalTargetPrice: resolvedTopTier.price},
+    }
+    : applyLowEtFastSellerPricePullback({
+      row: {
+        ...common,
+        finalTargetPrice: resolvedTopTier.price,
+        targetPrice: resolvedTopTier.price,
+        limitedDiscountPrice: resolvedTopTier.price,
+        productUnitCostSar: costTopTier.productUnitCostSar ?? null,
+      },
+      context: lowEtContext,
+      costDoc,
+    });
+  if (lowEtDecision.blocked && !lowEtDecision.manualReview) {
+    blocked.push({
+      ...common,
+      reason: lowEtDecision.reason,
+      lowEtFastSellerPricePullback: {
+        evidence: lowEtDecision.evidence || null,
+        rank: lowEtDecision.rank || null,
+      },
+      note: '低 ET 畅销货号的新建/重建价格必须有当天 ET、跨19店30天销量、Top5及基准证据；证据不全时拒绝沿用旧价。',
+    });
+    continue;
+  }
+  const topTierPrice = lowEtDecision.applied
+    ? lowEtDecision.row.finalTargetPrice
+    : resolvedTopTier.price;
   const action = manualSpecialEntry
     ? (manualSpecialLiveState?.status === 'covered_exact' ? 'keep_manual_special_limited_discount' : 'restore_manual_special_limited_discount')
     : hasCurrentLimitedDiscount ? 'replace_existing_limited_discount' : 'create_limited_discount';
@@ -375,6 +423,12 @@ for (const link of storeLinks) {
     storageUnitCostSar: costTopTier.storageUnitCostSar ?? null,
     selectionCostBasis: costTopTier.selectionCostBasis || '',
     topTierPriceSource: resolvedTopTier.source,
+    lowEtFastSellerPricePullback: lowEtDecision.audit || {
+      applied: false,
+      manualReview: lowEtDecision.manualReview === true,
+      reason: lowEtDecision.reason,
+      contextEvidenceHash: lowEtContext.evidenceHash,
+    },
     priceEvidenceSourcePath: priceEvidence?.priceOverridesSource || (costTopTier.available ? rel(costMapPath) : ''),
     supplementalPriceEvidence: priceEvidence?.supplementalPriceEvidence === true,
     targetPriceEvidenceScope: exactPriceEvidence
@@ -420,6 +474,8 @@ for (const [, storeRows] of groupBy(rows, row => `${row.storeKey}::${row.endTime
     purpose: `new_listing_or_relisted_top_treatment_limited_discount_fallback_${reportDate}`,
     sourceLinksData: rel(linksDataPath),
     sourcePriceOverrides: rel(priceOverridesPath),
+    sourceInventoryTrend: rel(inventoryTrendPath),
+    sourceCostMap: rel(costMapPath),
     sourceGuard: sourceGuardPath ? rel(sourceGuardPath) : '',
     pricingPolicy: rel(policyPath),
     endTime: storeRows[0].endTime,
@@ -459,6 +515,7 @@ for (const [, storeRows] of groupBy(rows, row => `${row.storeKey}::${row.endTime
       manualSpecialValidTo: row.manualSpecialValidTo,
       manualSpecialCurrentActivityId: row.manualSpecialCurrentActivityId,
       activityStock: row.activityStock,
+      lowEtFastSellerPricePullback: row.lowEtFastSellerPricePullback,
     })),
   };
   await fs.writeFile(rescuePath, `${JSON.stringify(rescue, null, 2)}\n`, 'utf8');
@@ -479,6 +536,7 @@ const summary = {
   sourceLinksData: rel(linksDataPath),
   sourceLinksGeneratedAt: linksDoc.generatedAt || linksData.generatedAt || '',
   sourcePriceOverrides: rel(priceOverridesPath),
+  sourceInventoryTrend: rel(inventoryTrendPath),
   sourceCostMap: rel(costMapPath),
   sourceCurrentMarketingLiveScan: liveScanPath ? rel(liveScanPath) : '',
   sourceRelistedLinkHistory: rel(linkHistoryDir),
@@ -510,6 +568,13 @@ const summary = {
     })),
   },
   pricingPolicy: rel(policyPath),
+  lowEtFastSellerPricePullback: {
+    evidenceHash: lowEtContext.evidenceHash,
+    blockerCount: lowEtContext.blockers.length,
+    blockers: lowEtContext.blockers,
+    appliedCount: rows.filter(row => row.lowEtFastSellerPricePullback?.applied === true).length,
+    manualReviewCount: rows.filter(row => row.lowEtFastSellerPricePullback?.manualReview === true).length,
+  },
   rule: {
     windowDays: Number(policy?.newListingWithin7Days?.windowDays || 7),
     pricingTreatment: policy?.newListingWithin7Days?.pricingTreatment || 'same_as_global_exposure_top5',

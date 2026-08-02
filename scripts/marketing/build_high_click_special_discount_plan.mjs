@@ -52,6 +52,7 @@ export function buildHighClickSpecialDiscountPlan({
     validTo: String(row.validTo || ''),
     replacesExpiredRegistryEntry: row.replacesExpiredRegistryEntry === true,
     previousRegistryEntry: row.previousRegistryEntry || null,
+    lowEtFastSellerPricePullback: row.lowEtFastSellerPricePullback || null,
     action: 'register_then_restore_exact_high_click_special',
   }));
   const seen = new Set();
@@ -76,6 +77,7 @@ export function buildHighClickSpecialDiscountPlan({
     sourceLinksData: audit.sourceLinksData || '',
     sourcePriceOverrides: audit.sourcePriceOverrides || guard?.targetPlanSelection?.priceOverrides || '',
     sourceCostMap: audit.sourceCostMap || '',
+    sourceInventoryTrend: audit.sourceInventoryTrend || '',
     sourceThreadId: sourceThreadId || process.env.SHEIN_BI_MARKETING_SOURCE_THREAD_ID || 'automation:shein-2',
     sourceAutomationId: 'shein-2',
     reason: 'automated_high_click_zero_sales_top5_minus_2_margin_points',

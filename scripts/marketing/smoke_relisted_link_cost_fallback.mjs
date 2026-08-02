@@ -15,8 +15,15 @@ const liveScan = path.join(tmp, 'live.json');
 const historyDir = path.join(tmp, 'shein_links');
 const storeHistory = path.join(historyDir, 'NM');
 const storesConfig = path.join(tmp, 'stores.json');
+const inventoryTrend = path.join(tmp, 'inventoryTrend.json');
 await fs.mkdir(storeHistory, {recursive: true});
 await fs.writeFile(storesConfig, JSON.stringify({stores: [{storeKey: 'NM', enabled: true}]}));
+await fs.writeFile(inventoryTrend, JSON.stringify({products: [{
+  canonical,
+  inventory_match_status: 'matched',
+  operational_sellable_qty: 11,
+  operational_snapshot_date: '2026-07-12',
+}]}));
 
 await fs.writeFile(linksData, JSON.stringify({storeLinks: [{
   store_key: 'NM', skc, standard_goods_sn: canonical, raw_goods_sn: canonical,
@@ -54,6 +61,7 @@ const result = spawnSync(process.execPath, [
   '--current-marketing-live-scan', liveScan,
   '--link-history-dir', historyDir,
   '--stores-config', storesConfig,
+  '--inventory-trend', inventoryTrend,
   '--no-supplemental-price-overrides',
   '--out-dir', path.join(tmp, 'out'),
   '--report-json', reportJson,

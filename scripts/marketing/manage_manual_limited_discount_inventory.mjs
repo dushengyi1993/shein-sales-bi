@@ -329,6 +329,12 @@ async function readPlatformStock(client, skuCodes) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.execute) {
+    throw new Error(
+      'Legacy persistent marketing inventory top-up is disabled. '
+      + 'Use the inventory-aware ordinary/limited-discount runner so temporary stock is restored in finally.',
+    );
+  }
   const target = await resolveInventoryTarget(args);
   const payloadHash = createHash('sha256').update(JSON.stringify({
     action: 'top_up_limited_discount_virtual_inventory',

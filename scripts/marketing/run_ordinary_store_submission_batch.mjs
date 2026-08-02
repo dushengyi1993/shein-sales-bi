@@ -5,6 +5,8 @@ import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {loadOrdinaryCampaignApproval} from '../../lib/marketing_ordinary_campaign_approval.mjs';
+import {activityExecutionTransactionHash} from '../../lib/marketing_activity_inventory_integration.mjs';
+import {executeOrdinaryActivityWithInventoryTransaction} from '../../lib/marketing_ordinary_activity_transaction_runner.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -35,10 +37,26 @@ function parseArgs(argv) {
 function runNode(commandArgs, label) {
   return new Promise(resolve => {
     const child = spawn(process.execPath, commandArgs, {cwd: ROOT, windowsHide: true});
-    child.stdout.on('data', chunk => process.stdout.write(`[${label}] ${chunk}`));
-    child.stderr.on('data', chunk => process.stderr.write(`[${label}] ${chunk}`));
-    child.on('exit', (code, signal) => resolve({code, signal}));
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', chunk => {
+      stdout += chunk.toString();
+      process.stdout.write(`[${label}] ${chunk}`);
+    });
+    child.stderr.on('data', chunk => {
+      stderr += chunk.toString();
+      process.stderr.write(`[${label}] ${chunk}`);
+    });
+    child.on('exit', (code, signal) => resolve({ok: code === 0, code, signal, stdout, stderr}));
   });
+}
+
+function lastJson(text) {
+  const source = String(text || '').trim();
+  for (let i = source.lastIndexOf('{'); i >= 0; i = source.lastIndexOf('{', i - 1)) {
+    try { return JSON.parse(source.slice(i)); } catch {}
+  }
+  return null;
 }
 
 async function newestSummary(dir) {
@@ -105,15 +123,55 @@ async function worker() {
       continue;
     }
     console.log(`[STORE-BATCH] EXECUTE ${storeKey}`);
-    const executeProcess = await runNode([...base, '--submit', '--out-dir', executeDir], `${storeKey}:execute`);
-    const execute = await newestSummary(executeDir);
-    const executeResults = activityResults(execute.doc);
-    row.executeProcess = executeProcess;
-    row.executeFile = execute.file || '';
-    row.executeError = execute.error || '';
-    row.executeResults = executeResults;
-    row.status = executeProcess.code === 0 && executeResults.length
-      && executeResults.every(result => result.ok && result.submit?.submitted === true)
+    const transactionHash = activityExecutionTransactionHash(
+      approval.workFingerprint,
+      storeKey,
+      args.activities,
+      dryResults.map(result => result?.selection?.activityInventoryTransactionPlan || null),
+    );
+    const transaction = await executeOrdinaryActivityWithInventoryTransaction({
+      root: ROOT,
+      storeKey,
+      dryResults,
+      transactionHash,
+      runSubmit: async () => {
+        const lowEtEvidenceHash = dry.doc?.lowEtFastSellerPricePullback?.evidenceHash || '';
+        const executeProcess = await runNode([
+          ...base,
+          '--submit',
+          '--expected-low-et-evidence-hash', lowEtEvidenceHash,
+          '--out-dir', executeDir,
+        ], `${storeKey}:execute`);
+        const execute = await newestSummary(executeDir);
+        return {
+          ok: executeProcess.code === 0,
+          executeProcess,
+          executeFile: execute.file || '',
+          executeError: execute.error || '',
+          executeResults: activityResults(execute.doc),
+        };
+      },
+      runVerify: async ({phase}) => {
+        const verify = await runNode([
+          path.join(ROOT, 'scripts', 'marketing', 'verify_ordinary_activity_enrollment.mjs'),
+          '--stores', storeKey,
+          '--activity', args.activities.join(','),
+          '--selection-plan', args.selection,
+          '--price-overrides', args.prices,
+          '--wait-ms', '30000',
+        ], `${storeKey}:verify:${phase}`);
+        return lastJson(verify.stdout)?.summary || {ok: false, reason: verify.stderr || 'verify output missing'};
+      },
+    });
+    row.inventoryTransaction = transaction;
+    const submitResult = transaction.submitResult || {};
+    row.executeProcess = submitResult.executeProcess || null;
+    row.executeFile = submitResult.executeFile || '';
+    row.executeError = submitResult.executeError || '';
+    row.executeResults = submitResult.executeResults || [];
+    row.status = transaction.ok === true
+      && row.executeResults.length
+      && row.executeResults.every(result => result.ok && result.submit?.submitted === true)
       ? 'submitted'
       : 'execute_failed';
     results.push(row);

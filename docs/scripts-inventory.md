@@ -260,10 +260,10 @@
   - `marketing/replace_limited_discount_transactionally.mjs`：所有限时折扣替换的唯一写入口。删除前持久化旧活动/SKC 快照和事务 journal；目标创建或回读失败时按快照自动恢复旧保护，任何仍失保 SKC 返回 critical。安全回滚不等于修复成功，后续 worker 可在同一精确 hash 下重新评估并重试。
   - `marketing/build_limited_discount_drift_rescue_plan.mjs`：从每日 guard 的 `limitedDiscountTargetPriceDrift.belowRows` 构建限时折扣漂移修复计划，按店/分组输出 JSON rescue 文件，以当前 `finalTargetPrice` 作为限时折扣价，并把策略默认 `activityStock=10` 写入 rescue 根和明细行。
   - `marketing/manage_manual_limited_discount_override.mjs`：人工特殊限时折扣持久登记 CLI，支持 `validate/list/register/update-activity/disable`；真实特殊价提交前必须先登记，live 回读后写回活动 ID。所有变更在跨进程 ticket lock 内重新读取后原子更新，防止 timer 与 CLI 并发丢失登记。
-  - `marketing/build_manual_limited_discount_restore_plan.mjs` / `marketing/batch_restore_manual_limited_discounts.mjs`：从 guard 的 `manualSpecialLimitedDiscount` 审计区构建精确特殊价恢复计划，完成 dry-run、ET 门控库存处理后，把替换交给统一事务执行器；只有目标活动精确回读成功才更新登记。混合旧活动不再由批处理直接先删后建。
-  - `marketing/manage_manual_limited_discount_inventory.mjs`：ET 门控的限时折扣库存守卫。默认只为有效人工特殊登记项服务；`--rescue <json>` 模式用于 2026-07-16 已授权的目标价漂移、新链接/新上架 7 天、重新上架无活动、漏限时折扣 rescue。优先查询 `mart.et_product_inventory_current`，生产只读角色无权访问时只接受新鲜且带当天 ET snapshot 的云端 BI ET 投影。写前在逐链接跨进程锁内二次回读平台库存，已被其它进程补足时不覆盖；旧 rescue 缺库存字段时读取策略默认 10。平台 `OVERWRITE` 的不可用量取 `max(totalLockedQuantity, totalInventoryQuantity - totalUsableInventory)`，覆盖量至少为“要求可用库存 + 不可用量”且不下调现有总量；实际覆盖量进入幂等键，最终以 `totalUsableInventory >= activityStock` 回读为准。ET 不足/过期/回读不一致时返回非零；不得用于普通营销活动库存或任意增库存。
-  - `marketing/batch_apply_new_listing_limited_discount.mjs`：批量执行新链接/新上架/重新上架/在售老链接漏兜底。多 SKC rescue 中每个库存目标独立调用 ET 门控库存守卫；可执行子集可继续，但被排除的 SKC 会让该组保持 blocker 并在后续轮次重试，不能因部分成功把整组标成完成。替换写统一走事务执行器。
-  - `marketing/smoke_authorized_fallback_inventory_top_up.mjs`：验证 ET 足够时精确补到 10、ET 不足阻断、平台库存已足够不写、确定性 idempotency key，以及普通 rescue 不能冒充人工特殊登记项。
+  - `marketing/build_manual_limited_discount_restore_plan.mjs` / `marketing/batch_restore_manual_limited_discounts.mjs`：从 guard 的 `manualSpecialLimitedDiscount` 审计区构建精确特殊价恢复计划，完成 dry-run 和活动 live 最低值事务临时补量/恢复后，把替换交给统一事务执行器；只有恢复原可用库存且目标活动精确回读成功才更新登记。混合旧活动不再由批处理直接先删后建。
+  - `marketing/manage_manual_limited_discount_inventory.mjs`：旧 ET 门控持久补量工具，仅保留历史 dry-run/决策兼容；`--execute` 已永久 fail closed，不能再作为生产写入口。所有普通活动、人工特殊恢复、目标价漂移、新链接/重新上架/漏兜底和高点击专属折扣的库存不足，统一由 `lib/marketing_activity_inventory_transaction.mjs` 在同一报名事务内按 live/query/dry-run 最低值临时补量，并在 `finally` 恢复原可用库存及完成库存/报名双回读。
+  - `marketing/batch_apply_new_listing_limited_discount.mjs`：批量执行新链接/新上架/重新上架/在售老链接漏兜底。多 SKC rescue 中每个库存目标独立读取活动 live 最低值并在报名事务内临时补量、提交、恢复及双回读；可执行子集可继续，但被排除的 SKC 会让该组保持 blocker 并在后续轮次重试，不能因部分成功把整组标成完成。替换写统一走事务执行器。
+  - `marketing/smoke_authorized_fallback_inventory_top_up.mjs`：验证旧持久补量决策仅作历史兼容、旧工具真实执行已禁用，以及营销批处理全部改用事务模块的精确临时补量、恢复和确定性幂等键。
   - `marketing/remove_skc_from_limited_discount.mjs`：从限时折扣活动中移除指定 SKC 的 CDP 执行器，带登录恢复和店铺身份校验。真实执行需明确授权；营销修复的 dry-run 已修为预演完成后立即返回，绝不得误调用本执行器。
   - `marketing/batch_fix_limited_discount_drift.mjs`：限时折扣价格漂移批量修复器。加载精确 manifest/work fingerprint，按店复用浏览器、按组 checkpoint/resume，并把每组交给事务执行器。平台阻断或安全回滚均保持未完成；输出汇总目标、旧活动快照、补偿覆盖、失保项和创建回读。
   - `marketing/guard_limited_discount_drift.mjs`：限时折扣漂移上层入口。判断 `limitedDiscountTargetPriceDrift.belowRows` 非空时调用 `batch_fix_limited_discount_drift.mjs`；无漂移时 no-op。
@@ -271,7 +271,7 @@
   - `marketing/smoke_limited_discount_drift_activity_stock.mjs`：验证漂移 rescue 显式库存、旧 rescue 默认库存、锁定库存补偿、不得下调平台总库存，以及覆盖量变化必须生成新幂等键。
   - `marketing/smoke_limited_discount_target_price_guard.mjs`：rescue 执行路径拒绝低于目标价的限时折扣。
   - `marketing/smoke_manual_limited_discount_protection.mjs`：验证无保护时旧逻辑会排队、有效保护剔除三条、到期恢复普通规则、stale rescue 防御、普通漂移不受影响、特殊价精确恢复，以及价格/活动库存/`validTo` 三项 live 覆盖、写阶段 fail closed 和 ET 足够/不足分支。
-  - `marketing/build_high_click_special_discount_plan.mjs` / `marketing/batch_apply_high_click_special_discounts.mjs`：高点击低转化专属限时折扣的精确计划与有界执行。只接受当前在售、7 日曝光 `>3000`、点击率 `>4%`、销量明确为 `0` 的链接；执行前重读指标、先登记特殊价保护，再复用 ET 门控/事务替换/live 回读。
+  - `marketing/build_high_click_special_discount_plan.mjs` / `marketing/batch_apply_high_click_special_discounts.mjs`：高点击低转化专属限时折扣的精确计划与有界执行。只接受当前在售、7 日曝光 `>3000`、点击率 `>4%`、销量明确为 `0` 的链接；执行前重读指标与低 ET 畅销品价格优先级，先登记特殊价保护，再复用活动最低值事务临时补量/恢复、事务替换和 live readback。
   - `marketing/smoke_high_click_special_policy.mjs`：覆盖严格阈值、缺失销量不当零、Top5 利润率下调、保护优先、过期恢复、stale 计划重判和滚动 7 日效果分类。
   - `marketing/smoke_bounded_fallback_resume.mjs`：验证组级部分失败时只续跑未覆盖的精确键，不重放已有 `createdActivityId + desiredCoveredSkcs` 的成功项。
   - `marketing/smoke_shared_storage_cost.mjs`：验证零销量在库货号仍按 ET 货号仓储费与当前可售+破损数量形成共享仓储费/件。
@@ -495,7 +495,7 @@
 
 - `lib/marketing_automation_authorization.mjs`：读取 `config/marketing_pricing_policy.json` 中的负责人长期营销授权，校验授权 ID、运行上下文、动作白名单、全启用店范围和系统本轮自动锁定的 payload/work hash。用户不必逐次提供 hash；普通活动、优惠券、预算和策略外动作不在授权内。
 
-- `lib/marketing_manual_limited_discount_overrides.mjs`：人工特殊限时折扣登记、有效窗口、精确价格/活动库存/截止时间覆盖判定，以及 ET 门控库存动作的共享实现；生产默认路径由 `SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY` 指向 `/srv/shein-bi/runtime`，仓库配置只作种子。
+- `lib/marketing_manual_limited_discount_overrides.mjs`：人工特殊限时折扣登记、有效窗口、精确价格/活动库存/截止时间覆盖判定，以及旧 ET 门控库存决策的历史兼容实现；其中持久补量动作不得执行。生产报名库存不足统一交给活动库存事务模块临时补量并恢复；登记默认路径由 `SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY` 指向 `/srv/shein-bi/runtime`，仓库配置只作种子。
 
 - `lib/marketing_bounded_batch_resume.mjs`：把限时折扣批次结果拆成已完成、终态阻断、可重试和待续跑精确键，避免组级失败导致成功项重放。
 

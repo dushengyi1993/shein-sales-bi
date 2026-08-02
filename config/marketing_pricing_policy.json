@@ -50,7 +50,7 @@
   },
   "activityMinimumInventoryTransaction": {
     "enabled": true,
-    "implementationStatus": "rules_only_executor_not_implemented_fail_closed",
+    "implementationStatus": "implemented",
     "appliesTo": ["ordinary_marketing_signup", "limited_discount_signup"],
     "platformMinimumSources": ["activity_live_page", "query_goods", "dry_run"],
     "biPlatformSaleableStockRole": "signal_only",
@@ -90,7 +90,7 @@
   },
   "lowEtFastSellerPricePullback": {
     "enabled": true,
-    "implementationStatus": "rules_only_executor_not_implemented_fail_closed",
+    "implementationStatus": "implemented",
     "executorCapabilityRequired": true,
     "appliesOnlyTo": [
       "new_ordinary_marketing_signup",

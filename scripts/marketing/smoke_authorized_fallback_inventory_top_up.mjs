@@ -4,7 +4,10 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {resolveLimitedDiscountInventoryTopUpAction} from '../../lib/marketing_manual_limited_discount_overrides.mjs';
-import {buildInventoryIdempotencyKey, resolveInventoryTarget} from './manage_manual_limited_discount_inventory.mjs';
+import {
+  buildActivityInventoryIdempotencyKey,
+  planActivityInventoryTransaction,
+} from '../../lib/marketing_activity_inventory_transaction.mjs';
 
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'authorized-fallback-inventory-'));
 try {
@@ -30,12 +33,8 @@ try {
     }],
   }), 'utf8');
 
-  const target = await resolveInventoryTarget({store: 'LQ', skc: 'sv25100554440744444', rescue: rescuePath});
-  assert.equal(target.mode, 'authorized_auto_fallback');
-  assert.equal(target.canonical, 'SK-5110电磁炉');
-  assert.equal(target.activityStock, 10);
-  assert.equal(target.targetPrice, 61.34);
-
+  // This pure helper is retained only to parse historical artifacts. Its
+  // `top_up_platform_virtual_stock` decision is not an executable permission.
   assert.deepEqual(resolveLimitedDiscountInventoryTopUpAction({platformStock: 5, etStock: 234, activityStock: 10}), {
     ok: true,
     action: 'top_up_platform_virtual_stock',
@@ -48,65 +47,65 @@ try {
   assert.equal(resolveLimitedDiscountInventoryTopUpAction({platformStock: 10, etStock: 0, activityStock: 10}).action, 'no_top_up_needed');
 
   const idempotencyInput = {
-    authorizationId: 'owner-standing-cloud-marketing-v1',
-    mode: target.mode,
-    store: 'LQ',
-    skc: 'sv25100554440744444',
-    skuCode: 'SKU-1',
-    activityStock: 10,
-    validTo: target.validTo,
-    sourceArtifact: target.sourceArtifact,
-  };
-  const firstIdempotencyKey = buildInventoryIdempotencyKey(idempotencyInput);
-  assert.equal(firstIdempotencyKey, buildInventoryIdempotencyKey(idempotencyInput));
-  assert.notEqual(firstIdempotencyKey, buildInventoryIdempotencyKey({...idempotencyInput, activityStock: 11}));
-  assert.notEqual(firstIdempotencyKey, buildInventoryIdempotencyKey({...idempotencyInput, retryAttempt: 2}));
-  assert.match(firstIdempotencyKey, /^bi-marketing-inventory-[a-f0-9]{64}$/);
-
-  const protectedPath = path.join(tmp, 'protected.json');
-  await fs.writeFile(protectedPath, JSON.stringify({
-    storeKey: 'LQ',
-    activityStock: 10,
-    rows: [{
+    transactionHash: 'a'.repeat(64),
+    target: {
       storeKey: 'LQ',
       skc: 'sv25100554440744444',
-      canonical: 'SK-5110电磁炉',
-      limitedDiscountPrice: 61.34,
-      manualSpecialLimitedDiscount: true,
+      skuCode: 'SKU-1',
+    },
+    phase: 'temporary_raise',
+    overwriteQuantity: 12,
+    attempt: 1,
+  };
+  const firstIdempotencyKey = buildActivityInventoryIdempotencyKey(idempotencyInput);
+  assert.equal(firstIdempotencyKey, buildActivityInventoryIdempotencyKey(idempotencyInput));
+  assert.notEqual(firstIdempotencyKey, buildActivityInventoryIdempotencyKey({...idempotencyInput, overwriteQuantity: 13}));
+  assert.notEqual(firstIdempotencyKey, buildActivityInventoryIdempotencyKey({...idempotencyInput, attempt: 2}));
+  assert.match(firstIdempotencyKey, /^bi-marketing-activity-inventory-[a-f0-9]{64}$/);
+  const transactionPlan = await planActivityInventoryTransaction({
+    transactionHash: idempotencyInput.transactionHash,
+    readStock: async () => ({
+      totalUsableInventory: 5,
+      totalInventoryQuantity: 7,
+      totalLockedQuantity: 2,
+    }),
+    targets: [{
+      storeKey: 'LQ',
+      skc: idempotencyInput.target.skc,
+      skuCode: idempotencyInput.target.skuCode,
+      minimumUsableInventory: 10,
+      minimumSource: 'dry_run',
     }],
-  }), 'utf8');
-  await assert.rejects(
-    resolveInventoryTarget({store: 'LQ', skc: 'sv25100554440744444', rescue: protectedPath}),
-    /Manual-special rows must use registry mode/,
-  );
+  });
+  assert.equal(transactionPlan.ok, true);
+  assert.equal(transactionPlan.rows[0].requiresTemporaryRaise, true);
+  assert.equal(transactionPlan.rows[0].temporaryOverwriteQuantity, 12);
 
   const driftBatchSource = await fs.readFile(path.join(process.cwd(), 'scripts/marketing/batch_fix_limited_discount_drift.mjs'), 'utf8');
   assert.match(driftBatchSource, /replace_limited_discount_transactionally\.mjs/);
   assert.doesNotMatch(driftBatchSource, /remove_skc_from_limited_discount\.mjs/);
-  assert.match(driftBatchSource, /topUpAuthorizedDriftInventory/);
-  assert.match(driftBatchSource, /AUTHORIZED_LIMITED_DISCOUNT_FALLBACK_STOCK_TOP_UP/);
+  assert.match(driftBatchSource, /executeLimitedDiscountWithInventoryTransaction/);
+  assert.doesNotMatch(driftBatchSource, /manage_manual_limited_discount_inventory\.mjs/);
 
   const fallbackBatchSource = await fs.readFile(path.join(process.cwd(), 'scripts/marketing/batch_apply_new_listing_limited_discount.mjs'), 'utf8');
-  assert.match(fallbackBatchSource, /for \(const skc of inventorySkcs\)/);
-  assert.match(fallbackBatchSource, /writeInventoryExecutableSubset/);
-  assert.match(fallbackBatchSource, /remainingInventorySkcs/);
-  assert.match(fallbackBatchSource, /executed_subset_with_platform_or_inventory_blockers/);
+  assert.match(fallbackBatchSource, /executeLimitedDiscountWithInventoryTransaction/);
+  assert.doesNotMatch(fallbackBatchSource, /manage_manual_limited_discount_inventory\.mjs/);
 
   const inventoryManagerSource = await fs.readFile(path.join(process.cwd(), 'scripts/marketing/manage_manual_limited_discount_inventory.mjs'), 'utf8');
-  assert.match(inventoryManagerSource, /writeAttempt <= 2/);
-  assert.match(inventoryManagerSource, /writeReadbackFailure/);
+  assert.match(inventoryManagerSource, /Legacy persistent marketing inventory top-up is disabled/);
+  assert.match(inventoryManagerSource, /if \(args\.execute\)/);
 
   console.log(JSON.stringify({
     ok: true,
-    test: 'authorized_fallback_inventory_top_up_et_gated',
-    enoughEt: 'top_up_platform_virtual_stock',
-    insufficientEt: 'et_stock_below_activity_stock',
-    exactTopUpTo: 10,
+    test: 'legacy_persistent_top_up_disabled_transaction_replacement',
+    legacyDecisionCompatibilityOnly: 'top_up_platform_virtual_stock',
+    exactTemporaryUsable: 10,
+    exactTemporaryOverwriteQuantity: 12,
     deterministicIdempotencyKey: true,
     driftBatchUsesSafeTransaction: true,
-    driftBatchUsesEtGatedInventoryTopUp: true,
-    multiSkcFallbackBatchIntegrated: true,
-    boundedInventoryWriteRetry: true,
+    driftBatchUsesPersistentTopUp: false,
+    multiSkcFallbackBatchUsesTransaction: true,
+    legacyExecuteDisabled: true,
   }));
 } finally {
   await fs.rm(tmp, {recursive: true, force: true});

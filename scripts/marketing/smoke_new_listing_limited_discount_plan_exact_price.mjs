@@ -15,8 +15,26 @@ const liveScanPath = path.join(tmp, 'live.json');
 const sourceGuardPath = path.join(tmp, 'guard.json');
 const linkHistoryDir = path.join(tmp, 'shein_links');
 const storesConfigPath = path.join(tmp, 'stores.json');
+const inventoryTrendPath = path.join(tmp, 'inventoryTrend.json');
 
 await fs.writeFile(storesConfigPath, `${JSON.stringify({stores: [{storeKey: 'JY', enabled: true}]}, null, 2)}\n`, 'utf8');
+await fs.writeFile(inventoryTrendPath, `${JSON.stringify({
+  products: [
+    'KF-JN-02便携咖啡机',
+    'SK-JFB-794卷发钳和卷发棒',
+    'HIGH-CLICK-OVERLAP',
+    'COVERED',
+    'COVERED-HIGHER',
+    'COVERED-LOWER',
+    'OLD-CANONICAL',
+    'RAW-ONLY',
+  ].map(canonical => ({
+    canonical,
+    inventory_match_status: 'matched',
+    operational_sellable_qty: 11,
+    operational_snapshot_date: '2026-07-04',
+  })),
+}, null, 2)}\n`, 'utf8');
 
 await fs.writeFile(linksDataPath, `${JSON.stringify({
   generatedAt: '2026-07-04T10:00:00+08:00',
@@ -287,6 +305,7 @@ const result = spawnSync(process.execPath, [
   '--source-guard', sourceGuardPath,
   '--link-history-dir', linkHistoryDir,
   '--stores-config', storesConfigPath,
+  '--inventory-trend', inventoryTrendPath,
   '--no-supplemental-price-overrides',
 ], {encoding: 'utf8'});
 
@@ -357,6 +376,7 @@ const incompleteResult = spawnSync(process.execPath, [
   '--current-marketing-live-scan', incompleteLiveScanPath,
   '--link-history-dir', linkHistoryDir,
   '--stores-config', storesConfigPath,
+  '--inventory-trend', inventoryTrendPath,
   '--no-supplemental-price-overrides',
 ], {encoding: 'utf8'});
 assert.equal(incompleteResult.status, 0, incompleteResult.stderr || incompleteResult.stdout);

@@ -8,6 +8,8 @@ import {
   loadOrdinaryCampaignApproval,
   ordinaryCampaignRowKey,
 } from '../../lib/marketing_ordinary_campaign_approval.mjs';
+import {activityExecutionTransactionHash} from '../../lib/marketing_activity_inventory_integration.mjs';
+import {executeOrdinaryActivityWithInventoryTransaction} from '../../lib/marketing_ordinary_activity_transaction_runner.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -91,10 +93,26 @@ async function collectSubmittedKeys(rootDir, expectedWorkFingerprint) {
 function runNode(commandArgs, label) {
   return new Promise(resolve => {
     const child = spawn(process.execPath, commandArgs, {cwd: ROOT, windowsHide: true});
-    child.stdout.on('data', chunk => process.stdout.write(`[${label}] ${chunk}`));
-    child.stderr.on('data', chunk => process.stderr.write(`[${label}] ${chunk}`));
-    child.on('exit', (code, signal) => resolve({code, signal}));
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', chunk => {
+      stdout += chunk.toString();
+      process.stdout.write(`[${label}] ${chunk}`);
+    });
+    child.stderr.on('data', chunk => {
+      stderr += chunk.toString();
+      process.stderr.write(`[${label}] ${chunk}`);
+    });
+    child.on('exit', (code, signal) => resolve({ok: code === 0, code, signal, stdout, stderr}));
   });
+}
+
+function lastJson(text) {
+  const source = String(text || '').trim();
+  for (let i = source.lastIndexOf('{'); i >= 0; i = source.lastIndexOf('{', i - 1)) {
+    try { return JSON.parse(source.slice(i)); } catch {}
+  }
+  return null;
 }
 
 async function readResult(dir, storeKey, activityId) {
@@ -224,13 +242,56 @@ async function worker() {
         continue;
       }
       console.log(`[CHUNK] EXECUTE ${label}`);
-      const executeProcess = await runNode([...base, '--submit', '--out-dir', executeDir], `${label}:execute`);
-      const execute = await readResult(executeDir, storeKey, task.activityId);
-      result.executeProcess = executeProcess;
-      result.executeFile = execute.file;
-      result.execute = execute.doc || null;
-      result.executeReadError = execute.error || '';
-      result.status = executeProcess.code === 0 && execute.doc?.ok && execute.doc?.submit?.submitted === true ? 'submitted' : 'execute_failed';
+      const transactionHash = activityExecutionTransactionHash(
+        approval.workFingerprint,
+        storeKey,
+        task.activityId,
+        task.rows.map(row => row.skc),
+        dry.doc?.selection?.activityInventoryTransactionPlan || null,
+      );
+      const transaction = await executeOrdinaryActivityWithInventoryTransaction({
+        root: ROOT,
+        storeKey,
+        dryResults: [dry.doc],
+        transactionHash,
+        runSubmit: async () => {
+          const lowEtEvidenceHash = dry.doc?.lowEtFastSellerPricePullback?.evidenceHash || '';
+          const executeProcess = await runNode([
+            ...base,
+            '--submit',
+            '--expected-low-et-evidence-hash', lowEtEvidenceHash,
+            '--out-dir', executeDir,
+          ], `${label}:execute`);
+          const execute = await readResult(executeDir, storeKey, task.activityId);
+          return {
+            ok: executeProcess.code === 0,
+            executeProcess,
+            executeFile: execute.file,
+            execute: execute.doc || null,
+            executeReadError: execute.error || '',
+          };
+        },
+        runVerify: async ({phase}) => {
+          const verify = await runNode([
+            path.join(ROOT, 'scripts', 'marketing', 'verify_ordinary_activity_enrollment.mjs'),
+            '--stores', storeKey,
+            '--activity', String(task.activityId),
+            '--selection-plan', selectionFile,
+            '--price-overrides', priceFile,
+            '--wait-ms', '30000',
+          ], `${label}:verify:${phase}`);
+          return lastJson(verify.stdout)?.summary || {ok: false, reason: verify.stderr || 'verify output missing'};
+        },
+      });
+      result.inventoryTransaction = transaction;
+      const submitted = transaction.submitResult || {};
+      result.executeProcess = submitted.executeProcess || null;
+      result.executeFile = submitted.executeFile || '';
+      result.execute = submitted.execute || null;
+      result.executeReadError = submitted.executeReadError || '';
+      result.status = transaction.ok === true && result.execute?.ok && result.execute?.submit?.submitted === true
+        ? 'submitted'
+        : 'execute_failed';
       results.push(result);
       console.log(`[CHUNK] ${result.status.toUpperCase()} ${label}`);
     }

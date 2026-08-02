@@ -187,10 +187,12 @@ for (const item of evaluatedRows) {
 }
 
 const handledLowEtKeys = new Set();
+const blockedLowEtKeys = new Set();
 for (const [matchKey, group] of lowEtGroups) {
   handledLowEtKeys.add(matchKey);
   const blockingRows = group.filter(item => item.decision.action !== 'allocate');
   if (blockingRows.length) {
+    blockedLowEtKeys.add(matchKey);
     for (const item of group) {
       linkAlerts.push({
         ...item.base,
@@ -227,6 +229,7 @@ for (const [matchKey, group] of lowEtGroups) {
       }
     }
   } catch (error) {
+    blockedLowEtKeys.add(matchKey);
     for (const item of group) linkAlerts.push({...item.base, action: 'block', decision: `low_et_allocation_blocked: ${error.message}`});
   }
 }
@@ -335,6 +338,11 @@ const report = {
     lowEtAllocationActions: actionable.filter(row => row.ruleClass === 'low_et_top_exposure_allocation').length,
     lowEtAllocationRows: lowEtAllocations.length,
     lowEtZeroTargets: lowEtAllocations.filter(row => Number(row.targetUsableInventory) === 0).length,
+    lowEtNonTopZeroTargets: lowEtAllocations.filter(row => row.isTopExposureLink === false && Number(row.targetUsableInventory) === 0).length,
+    lowEtCandidateCanonicalCount: lowEtGroups.size,
+    lowEtAllocatedCanonicalCount: new Set(lowEtAllocations.map(row => row.matchKey)).size,
+    lowEtBlockedCanonicalCount: blockedLowEtKeys.size,
+    crossStoreSoldOutFindings: crossStoreSoldOutFindings.length,
     crossStoreSoldOutActionable: crossStoreSoldOutFindings.filter(row => actionable.some(action => action.storeKey === row.storeKey && action.skc === row.skc)).length,
     crossStoreSoldOutAlerts: crossStoreSoldOutFindings.filter(row => linkAlerts.some(alert => alert.storeKey === row.storeKey && alert.skc === row.skc)).length,
     linkAlerts: linkAlerts.length,

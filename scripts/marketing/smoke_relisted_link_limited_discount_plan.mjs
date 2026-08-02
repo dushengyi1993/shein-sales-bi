@@ -16,12 +16,19 @@ const reportJson = path.join(tmp, 'report.json');
 const reportMd = path.join(tmp, 'report.md');
 const storesConfigPath = path.join(tmp, 'stores.json');
 const manualLimitedDiscountRegistryPath = path.join(tmp, 'manual-limited-discount-overrides.json');
+const inventoryTrendPath = path.join(tmp, 'inventoryTrend.json');
 await fs.mkdir(storeHistoryDir, {recursive: true});
 await fs.writeFile(storesConfigPath, `${JSON.stringify({stores: [{storeKey: 'DL', enabled: true}]}, null, 2)}\n`, 'utf8');
 await fs.writeFile(manualLimitedDiscountRegistryPath, `${JSON.stringify({entries: []}, null, 2)}\n`, 'utf8');
 
 const skc = 'sv260208174499165647929';
 const canonical = 'SK-03038制冰机';
+await fs.writeFile(inventoryTrendPath, `${JSON.stringify({products: [{
+  canonical,
+  inventory_match_status: 'matched',
+  operational_sellable_qty: 11,
+  operational_snapshot_date: '2026-07-11',
+}]}, null, 2)}\n`, 'utf8');
 await fs.writeFile(linksDataPath, `${JSON.stringify({
   generatedAt: '2026-07-11T14:00:00+08:00',
   data: {
@@ -93,6 +100,7 @@ const result = spawnSync(process.execPath, [
   '--link-history-dir', historyDir,
   '--stores-config', storesConfigPath,
   '--manual-limited-discount-registry', manualLimitedDiscountRegistryPath,
+  '--inventory-trend', inventoryTrendPath,
   '--out-dir', outDir,
   '--report-json', reportJson,
   '--report-md', reportMd,
@@ -136,6 +144,7 @@ const currentResult = spawnSync(process.execPath, [
   '--link-history-dir', historyDir,
   '--stores-config', storesConfigPath,
   '--manual-limited-discount-registry', manualLimitedDiscountRegistryPath,
+  '--inventory-trend', inventoryTrendPath,
   '--out-dir', path.join(tmp, 'current-out'),
   '--report-json', currentReportJson,
   '--report-md', currentReportMd,
@@ -168,6 +177,7 @@ const futureFallbackResult = spawnSync(process.execPath, [
   '--link-history-dir', historyDir,
   '--stores-config', storesConfigPath,
   '--manual-limited-discount-registry', manualLimitedDiscountRegistryPath,
+  '--inventory-trend', inventoryTrendPath,
   '--now', '2026-07-11 12:00:00',
   '--out-dir', path.join(tmp, 'future-fallback-out'),
   '--report-json', path.join(tmp, 'future-fallback-report.json'),

@@ -8,6 +8,10 @@ import {
   loadManualLimitedDiscountRegistry,
   partitionRowsByManualLimitedDiscount,
 } from '../../lib/marketing_manual_limited_discount_overrides.mjs';
+import {
+  applyLowEtFastSellerPricePullback,
+  buildLowEtFastSellerPricingContext,
+} from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_ACTIVITY_NAME_PREFIX = '限时折扣目标价漂移修复';
@@ -88,8 +92,8 @@ function num(value) {
 function groupKey(row) {
   return [
     row.storeKey,
-    row.limitedDiscountName || '',
-    row.limitedDiscountEnd || '',
+    row.limitedDiscountName || row.sourceLimitedDiscountName || '',
+    row.limitedDiscountEnd || row.sourceLimitedDiscountEnd || '',
   ].join('::');
 }
 
@@ -136,21 +140,53 @@ export function buildLimitedDiscountDriftRescuePlan(guard, options = {}) {
   const manualIndex = options.manualIndex || buildManualLimitedDiscountIndex(options.manualRegistry || {entries: []}, options.now || new Date());
   const partitioned = partitionRowsByManualLimitedDiscount(candidateRows, manualIndex, options.now || new Date());
   const rows = partitioned.ordinaryRows;
-  const selectedRows = Number(options.maxRows || 0) > 0 ? rows.slice(0, Number(options.maxRows)) : rows;
+  const limitedRows = [];
+  const lowEtBlockedRows = [];
+  for (const sourceRow of rows) {
+    const normalized = normalizeRow(sourceRow, activityStock);
+    if (!options.lowEtContext) {
+      limitedRows.push(normalized);
+      continue;
+    }
+    const decision = applyLowEtFastSellerPricePullback({
+      row: normalized,
+      context: options.lowEtContext,
+      costDoc: options.costDoc || {},
+    });
+    if (decision.blocked) {
+      lowEtBlockedRows.push({
+        storeKey: normalized.storeKey,
+        skc: normalized.skc,
+        canonical: normalized.canonical,
+        reason: decision.reason,
+        evidence: decision.evidence || null,
+      });
+      continue;
+    }
+    limitedRows.push({
+      ...decision.row,
+      lowEtFastSellerPricePullback: decision.audit || {
+        applied: false,
+        reason: decision.reason,
+        contextEvidenceHash: options.lowEtContext.evidenceHash,
+      },
+    });
+  }
+  const selectedRows = Number(options.maxRows || 0) > 0 ? limitedRows.slice(0, Number(options.maxRows)) : limitedRows;
   const groups = new Map();
   for (const row of selectedRows) {
     const key = groupKey(row);
     if (!groups.has(key)) {
       groups.set(key, {
         storeKey: row.storeKey,
-        limitedDiscountName: row.limitedDiscountName || '',
-        limitedDiscountNameDate: ymdFromText(row.limitedDiscountName),
-        limitedDiscountEnd: row.limitedDiscountEnd || '',
-        activityId: row.activityId || '',
+        limitedDiscountName: row.limitedDiscountName || row.sourceLimitedDiscountName || '',
+        limitedDiscountNameDate: ymdFromText(row.limitedDiscountName || row.sourceLimitedDiscountName),
+        limitedDiscountEnd: row.limitedDiscountEnd || row.sourceLimitedDiscountEnd || '',
+        activityId: row.activityId || row.priceSourceActivityId || '',
         rows: [],
       });
     }
-    groups.get(key).rows.push(normalizeRow(row, activityStock));
+    groups.get(key).rows.push(row);
   }
   const byStore = {};
   const rescueFiles = [];
@@ -168,6 +204,7 @@ export function buildLimitedDiscountDriftRescuePlan(guard, options = {}) {
       belowTarget: candidateRows.length,
       ordinaryBelowTarget: rows.length,
       protectedManualSpecial: partitioned.protectedRows.length,
+      lowEtBlocked: lowEtBlockedRows.length,
       selected: selectedRows.length,
       groups: groups.size,
       stores: Object.keys(byStore).length,
@@ -182,6 +219,11 @@ export function buildLimitedDiscountDriftRescuePlan(guard, options = {}) {
       validTo: entry.validTo,
       reason: 'active manual-special registry entry defensively removed from ordinary drift rescue plan',
     })),
+    lowEtBlockedRows,
+    lowEtFastSellerPricePullback: options.lowEtContext ? {
+      evidenceHash: options.lowEtContext.evidenceHash,
+      appliedCount: selectedRows.filter(row => row.lowEtFastSellerPricePullback?.applied === true).length,
+    } : null,
     groups: [...groups.values()].sort((a, b) => a.storeKey.localeCompare(b.storeKey) || String(a.limitedDiscountName).localeCompare(String(b.limitedDiscountName))),
     rescueFiles,
   };
@@ -193,6 +235,24 @@ async function main() {
   const manualRegistry = await loadManualLimitedDiscountRegistry();
   const endTime = args.endTime;
   const pricingPolicy = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'marketing_pricing_policy.json'), 'utf8'));
+  const sourceLinksData = guard.highClickLowConversionSpecial?.sourceLinksData || 'outputs/bi-portal/sections/linksData.json';
+  const sourceInventoryTrend = guard.highClickLowConversionSpecial?.sourceInventoryTrend || 'outputs/bi-portal/sections/inventoryTrend.json';
+  const sourceCostMap = guard.highClickLowConversionSpecial?.sourceCostMap || 'tmp/mbrs/marketing-cost-map.json';
+  const sourcePriceOverrides = guard.limitedDiscountTargetPriceDrift?.planSourcePath || guard.targetPlanSelection?.priceOverrides || '';
+  const [linksDataDoc, inventoryTrendDoc, baselineDoc, costDoc] = await Promise.all([
+    fs.readFile(path.resolve(ROOT, sourceLinksData), 'utf8').then(JSON.parse),
+    fs.readFile(path.resolve(ROOT, sourceInventoryTrend), 'utf8').then(JSON.parse),
+    fs.readFile(path.resolve(ROOT, sourcePriceOverrides), 'utf8').then(JSON.parse),
+    fs.readFile(path.resolve(ROOT, sourceCostMap), 'utf8').then(JSON.parse),
+  ]);
+  const lowEtContext = buildLowEtFastSellerPricingContext({
+    inventoryTrendDoc,
+    linksDataDoc,
+    baselineDoc,
+    costDoc,
+    marketingPolicy: pricingPolicy,
+    reportDate: guard.reportDate,
+  });
   const activityStock = Number.isInteger(Number(pricingPolicy?.limitedDiscount?.defaultActivityStock))
     && Number(pricingPolicy.limitedDiscount.defaultActivityStock) > 0
     ? Number(pricingPolicy.limitedDiscount.defaultActivityStock)
@@ -202,6 +262,8 @@ async function main() {
     maxRows: args.maxRows,
     manualRegistry,
     activityStock,
+    lowEtContext,
+    costDoc,
   });
   await fs.mkdir(args.outDir, {recursive: true});
   const clearedStaleRescueFiles = await clearGeneratedRescueFiles(args.outDir);
@@ -214,6 +276,9 @@ async function main() {
       sourceGuard: plan.sourceGuard,
       sourceLiveScan: plan.sourceLiveScan,
       sourcePriceOverrides: plan.sourcePriceOverrides,
+      sourceLinksData,
+      sourceInventoryTrend,
+      sourceCostMap,
       sourceLimitedDiscountName: group.limitedDiscountName,
       sourceLimitedDiscountEnd: group.limitedDiscountEnd,
       endTime,

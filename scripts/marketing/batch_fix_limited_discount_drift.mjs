@@ -22,6 +22,12 @@ import {
   summarizeDriftRepairOutcomes,
 } from '../../lib/marketing_drift_repair_outcome.mjs';
 import {loadExactDriftRepairManifest} from '../../lib/marketing_repair_manifest.mjs';
+import {
+  activityExecutionTransactionHash,
+  executeLimitedDiscountWithInventoryTransaction,
+  planLimitedDiscountInventoryTransaction,
+} from '../../lib/marketing_activity_inventory_integration.mjs';
+import {revalidateLowEtFastSellerRescueArtifact} from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp/marketing-signup/limited-discount-rescue');
@@ -271,20 +277,6 @@ async function applyRescue({storeKey, port, rescuePath}) {
   return {...result, parsed: loaded.summary, full: loaded.full, outPath: loaded.outPath};
 }
 
-async function topUpAuthorizedDriftInventory({storeKey, skc, rescuePath, execute}) {
-  const commandArgs = [
-    'scripts/marketing/manage_manual_limited_discount_inventory.mjs',
-    '--store', storeKey,
-    '--skc', skc,
-    '--rescue', rescuePath,
-    execute ? '--execute' : '--dry-run',
-  ];
-  if (execute) commandArgs.push('--confirm', 'AUTHORIZED_LIMITED_DISCOUNT_FALLBACK_STOCK_TOP_UP');
-  const result = await runCommand(process.execPath, commandArgs, {timeoutMs: 300000});
-  const loaded = await loadToolOutputFromStdout(result);
-  return {...result, parsed: loaded.summary, full: loaded.full, outPath: loaded.outPath};
-}
-
 function summarizeCommand(result) {
   return {
     ok: result.ok,
@@ -359,62 +351,88 @@ async function processStore(storeKey, rescuePath, args, manualIndex, browserSess
       record.skippedCreate = true;
       return record;
     }
+    record.lowEtFastSellerPricePullbackRevalidation = await revalidateLowEtFastSellerRescueArtifact({
+      root: ROOT,
+      rescue,
+      reportDate: args.date,
+    });
+    if (!record.lowEtFastSellerPricePullbackRevalidation.ok) {
+      record.status = 'low_et_price_pullback_evidence_drift';
+      record.error = record.lowEtFastSellerPricePullbackRevalidation.reason;
+      return record;
+    }
     if (browserSession.ready) {
       record.launched = browserSession.launchSummary || {ok: true, reused: true};
     } else {
       record.launched = summarizeRaw(await launchStore(storeKey));
     }
 
-    if (!args.dryRunOnly) {
-      const inventoryPreflight = await applyRescue({
-        storeKey,
-        port: store.port,
-        rescuePath: activeRescuePath,
-      });
-      record.inventoryPreflight = summarizeCommand(inventoryPreflight);
-      const inventorySkcs = [...new Set((inventoryPreflight.full?.validation?.invalid || [])
-        .filter(row => row.reason === 'inventory below configured activity stock')
-        .map(row => String(row.skc || '').trim())
-        .filter(Boolean))];
-      for (const skc of inventorySkcs) {
-        const inventoryDryRun = await topUpAuthorizedDriftInventory({
-          storeKey,
-          skc,
-          rescuePath: activeRescuePath,
-          execute: false,
-        });
-        const inventoryExecute = inventoryDryRun.full?.ok
-          ? await topUpAuthorizedDriftInventory({
-              storeKey,
-              skc,
-              rescuePath: activeRescuePath,
-              execute: true,
-            })
-          : null;
-        record.inventoryTopUps.push({
-          skc,
-          dryRun: inventoryDryRun.full || inventoryDryRun.parsed || summarizeRaw(inventoryDryRun),
-          execute: inventoryExecute
-            ? (inventoryExecute.full || inventoryExecute.parsed || summarizeRaw(inventoryExecute))
-            : null,
-        });
-      }
-      if (inventorySkcs.length) {
-        const retry = await applyRescue({
-          storeKey,
-          port: store.port,
-          rescuePath: activeRescuePath,
-        });
-        record.postInventoryTopUpDryRun = summarizeCommand(retry);
-      }
-    }
-
-    const transaction = await replaceTransactionally({
+    const inventoryPreflight = await applyRescue({
       storeKey,
       port: store.port,
       rescuePath: activeRescuePath,
-      execute: !args.dryRunOnly,
     });
+    record.inventoryPreflight = summarizeCommand(inventoryPreflight);
+    if (!inventoryPreflight.full) {
+      throw new Error(`inventory preflight did not produce a readable result for ${storeKey}`);
+    }
+    const transactionHash = activityExecutionTransactionHash(
+      'limited_discount_target_price_drift',
+      storeKey,
+      activeRescuePath,
+      rescue,
+      inventoryPreflight.full?.validation || null,
+    );
+    let transaction;
+    if (args.dryRunOnly) {
+      record.inventoryTransactionPlan = await planLimitedDiscountInventoryTransaction({
+        root: ROOT,
+        storeKey,
+        rescue,
+        preflightFull: inventoryPreflight.full,
+        transactionHash,
+      });
+      if (!record.inventoryTransactionPlan.ok) {
+        record.status = 'inventory_transaction_plan_blocked';
+        record.error = record.inventoryTransactionPlan.blockers?.map(item => item.error || item.reason).join('; ') || 'inventory transaction plan blocked';
+        return record;
+      }
+      transaction = await replaceTransactionally({
+        storeKey,
+        port: store.port,
+        rescuePath: activeRescuePath,
+        execute: false,
+      });
+    } else {
+      const inventoryTransaction = await executeLimitedDiscountWithInventoryTransaction({
+        root: ROOT,
+        storeKey,
+        rescue,
+        preflightFull: inventoryPreflight.full,
+        transactionHash,
+        runSubmit: async () => await replaceTransactionally({
+          storeKey,
+          port: store.port,
+          rescuePath: activeRescuePath,
+          execute: true,
+        }),
+        runEnrollmentReadback: async () => await applyRescue({
+          storeKey,
+          port: store.port,
+          rescuePath: activeRescuePath,
+        }),
+      });
+      record.inventoryTransaction = inventoryTransaction;
+      if (!inventoryTransaction.ok) {
+        record.status = inventoryTransaction.safe === true
+          ? 'inventory_transaction_or_enrollment_blocked'
+          : 'inventory_transaction_restore_failed';
+        record.error = inventoryTransaction.blockers?.map(item => item.error || item.reason).join('; ')
+          || 'activity inventory transaction failed';
+        return record;
+      }
+      transaction = inventoryTransaction.commandResult;
+    }
     record.transaction = summarizeCommand(transaction);
     if (!transaction.full) {
       throw new Error(`transactional replacement did not produce a readable result for ${storeKey}: ${transaction.stderr || transaction.stdout || transaction.error || ''}`);
@@ -459,8 +477,12 @@ async function processStore(storeKey, rescuePath, args, manualIndex, browserSess
     record.safe = tx.safe === true;
     record.terminal = tx.terminal === true;
     record.initialBlockers = tx.initialBlockers || {};
-    record.ok = tx.ok === true;
-    record.status = String(tx.status || (record.ok ? 'replaced_all' : 'failed'));
+    const inventoryTransactionReady = args.dryRunOnly
+      && (record.inventoryTransactionPlan?.rows || []).some(row => row.requiresTemporaryRaise === true);
+    record.ok = tx.ok === true || inventoryTransactionReady;
+    record.status = inventoryTransactionReady
+      ? 'dry_run_inventory_transaction_ready'
+      : String(tx.status || (record.ok ? 'replaced_all' : 'failed'));
     record.error = record.ok ? '' : (tx.safe === true
       ? 'replacement was not completed; previous protection was restored and the queue remains blocked for review'
       : 'replacement failed and one or more SKCs remain uncovered');

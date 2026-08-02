@@ -62,6 +62,7 @@ const qualifying = {
   c7_goods_uv: 250,
   c7_cart_uv: 5,
   c7_sale_cnt: 0,
+  c30_valid_sale_cnt: 0,
 };
 const cartQualifying = {
   ...qualifying,
@@ -69,6 +70,14 @@ const cartQualifying = {
   c7_eps_uv: 3000,
   c7_goods_uv: 30,
   c7_cart_uv: 20,
+};
+const inventoryTrendDoc = {
+  products: [{
+    canonical: 'SK-3378杆式吸尘器',
+    inventory_match_status: 'matched',
+    operational_sellable_qty: 11,
+    operational_snapshot_date: '2026-07-26',
+  }],
 };
 
 try {
@@ -114,6 +123,7 @@ try {
   const emptyRegistry = {entries: []};
   const actionAudit = buildHighClickLowConversionSpecialAudit({
     linksDataDoc: {data: {links: [qualifying]}},
+    inventoryTrendDoc,
     priceOverridesDoc,
     costDoc,
     manualRegistry: emptyRegistry,
@@ -128,6 +138,7 @@ try {
 
   const cartPendingAudit = buildHighClickLowConversionSpecialAudit({
     linksDataDoc: {data: {links: [cartQualifying]}},
+    inventoryTrendDoc,
     priceOverridesDoc,
     costDoc,
     manualRegistry: emptyRegistry,
@@ -141,6 +152,7 @@ try {
 
   const cartApprovedAudit = buildHighClickLowConversionSpecialAudit({
     linksDataDoc: {data: {links: [cartQualifying]}},
+    inventoryTrendDoc,
     priceOverridesDoc,
     costDoc,
     manualRegistry: emptyRegistry,
@@ -175,6 +187,7 @@ try {
   };
   const protectedAudit = buildHighClickLowConversionSpecialAudit({
     linksDataDoc: {data: {links: [qualifying]}},
+    inventoryTrendDoc,
     priceOverridesDoc,
     costDoc,
     manualRegistry: activeRegistry,
@@ -190,6 +203,7 @@ try {
   };
   const renewedAudit = buildHighClickLowConversionSpecialAudit({
     linksDataDoc: {data: {links: [qualifying]}},
+    inventoryTrendDoc,
     priceOverridesDoc,
     costDoc,
     manualRegistry: expiredRegistry,

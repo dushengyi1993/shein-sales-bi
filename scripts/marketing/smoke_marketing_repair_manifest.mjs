@@ -12,8 +12,10 @@ import {
 const batchSource = await fs.readFile(new URL('./batch_fix_limited_discount_drift.mjs', import.meta.url), 'utf8');
 assert.match(batchSource, /replace_limited_discount_transactionally\.mjs/,
   'drift repair must delegate replacement safety to the durable transaction wrapper');
-assert.match(batchSource, /execute:\s*!args\.dryRunOnly/,
-  'the batch must pass dry-run mode into the transaction wrapper before any live mutation is possible');
+assert.match(batchSource, /executeLimitedDiscountWithInventoryTransaction/,
+  'the batch must wrap every live mutation in the shared activity-inventory transaction');
+assert.match(batchSource, /runSubmit:\s*async\s*\(\)\s*=>\s*await replaceTransactionally/,
+  'the transactional replacement must be the submit callback inside the inventory transaction');
 assert.doesNotMatch(batchSource, /remove_skc_from_limited_discount\.mjs/,
   'the batch must not contain a direct delete path outside the transaction wrapper');
 

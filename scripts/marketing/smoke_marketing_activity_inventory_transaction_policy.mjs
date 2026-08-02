@@ -13,9 +13,9 @@ const policyPath = path.join(ROOT, 'config', 'marketing_pricing_policy.json');
 const policy = JSON.parse(await fs.readFile(policyPath, 'utf8'));
 const authorization = policy.automationExecution;
 assert.equal(policy.activityMinimumInventoryTransaction?.enabled, true);
-assert.equal(policy.activityMinimumInventoryTransaction?.implementationStatus, 'rules_only_executor_not_implemented_fail_closed');
+assert.equal(policy.activityMinimumInventoryTransaction?.implementationStatus, 'implemented');
 assert.equal(policy.lowEtFastSellerPricePullback?.enabled, true);
-assert.equal(policy.lowEtFastSellerPricePullback?.implementationStatus, 'rules_only_executor_not_implemented_fail_closed');
+assert.equal(policy.lowEtFastSellerPricePullback?.implementationStatus, 'implemented');
 assert.equal(authorization.allowedActions.includes(MARKETING_AUTOMATION_ACTIONS.TOP_UP_VIRTUAL_INVENTORY), false);
 assert.equal(
   authorization.allowedActions.includes(MARKETING_AUTOMATION_ACTIONS.TEMPORARILY_RAISE_AND_RESTORE_ACTIVITY_INVENTORY),
@@ -40,5 +40,6 @@ console.log(JSON.stringify({
   ok: true,
   checks: 8,
   oldPersistentTopUpAuthorized: false,
-  newTransactionRuleAuthorizedButExecutorFailClosed: true,
+  transactionExecutorImplemented: true,
+  lowEtFastSellerPricingImplemented: true,
 }, null, 2));

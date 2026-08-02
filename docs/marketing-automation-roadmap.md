@@ -36,9 +36,10 @@
 - 普通活动和限时折扣报名的最低库存只认活动 live 页面、`query_goods` 或 dry-run；BI `platform_saleable_stock` 仅作线索。
 - 报名前在同一 `store + SKC/SKU` 库存锁内记录实时 `totalUsableInventory / totalInventoryQuantity / totalLockedQuantity`。不足时只临时补到平台要求的精确最低可用库存，完成提交和 live readback 后，无论成功失败都在 `finally` 恢复报名之前的原可用库存；恢复计算必须保留恢复时实时锁定/不可用量。
 - 恢复后再次回读库存与活动报名状态。恢复失败、恢复后活动失效/被平台撤销，或锁定量变化导致无法精确恢复原可用库存时 fail closed。即使 ET 运营可售 `<= 10` 也只允许该短时事务补量；该窗口存在订单/超卖风险。禁止永久增库存、优惠券补库存和脱离报名事务的库存修改。
-- 在事务执行器、普通活动 runner、限时折扣 rescue 和恢复器全部能输出补量前/临时写后/恢复后证据之前，旧 ET 门控持久补量路径必须停用；能力缺失按实现 blocker 处理，不能借新授权继续永久补量。
+- 执行代码已由 `lib/marketing_activity_inventory_transaction.mjs`、`lib/marketing_activity_inventory_openapi.mjs` 和 `lib/marketing_activity_inventory_integration.mjs` 实现，并接入三个普通活动 runner、人工特殊恢复、目标价漂移、新链接/重新上架/漏兜底及高点击专属折扣。旧 ET 门控持久补量的真实执行已永久禁用；任一入口缺 live 最低值、锁、恢复或恢复后双回读能力时仍按 blocker fail closed。
 - 新报名、补报或重建普通活动/限时折扣时，若 ET 当天已匹配运营可售 `<= 10`，且同一标准货号跨 19 店近 30 天有效销量合计 `> 30`，价格档位上移一级：全局最新 7 天曝光 Top5 恢复到普通链接最新已批准价；普通链接按普通目标利润率加 5 个百分点重算。平台允许价优先，成本/底价/利润线仍是硬门禁。
 - 不追溯改写正常旧活动；ET 恢复 `> 10` 后，后续新活动恢复原档位，不污染最新已批准基准。优先级为“ET 低库存畅销品收回 > 自动高点击专属折扣 > 新链接/新品 Top5 > 普通基准”；人工特殊折扣不自动覆盖，单独列用户审核。
+- 价格收回由 `lib/marketing_low_et_fast_seller_pricing.mjs` 统一实现：先按 ET/30 天销量短路，再按 `store + SKC` 精确读取该链接普通档批准价；Top5 缺精确链接普通档价时 fail closed，不得用同货号中位数替代。普通活动 dry-run 输出证据 hash，execute 必须携带并重读；四类限时折扣执行器也会重读当天 ET、30 天销量和 Top5 后拒绝 stale rescue。
 
 ## 2. 价格栈判定规则
 

@@ -42,21 +42,23 @@ assert.match(maintenanceExecutor, /for\s*\(const p of payloads\)[\s\S]*?runShein
 
 assert.match(nginx, /location = \/api\/shein\/webhook\/v1\/events/);
 assert.match(nginx, /proxy_pass http:\/\/127\.0\.0\.1:8792/);
-assert.match(nginx, /allow 120\.24\.77\.228;/);
-assert.match(nginx, /deny all;/);
+assert.match(nginx, /limit_except POST \{ deny all; \}/);
+assert.match(nginx, /limit_req zone=shein_bi_webhook_ingress burst=200 nodelay;/);
+assert.match(nginx, /limit_conn shein_bi_webhook_connections 40;/);
+assert.doesNotMatch(nginx, /allow 120\.24\.77\.228;/, 'the shared 443 hop cannot recover the original peer IP');
 assert.match(nginx, /proxy_connect_timeout 250ms;/);
 assert.match(nginx, /proxy_read_timeout 1400ms;/);
 
 assert.match(caddy, /https:\/\/sa\.dushengyi\.cc:8443/);
 assert.match(caddy, /https:\/\/sa\.dushengyi\.cc:10443/);
 assert.match(caddy, /path \/api\/shein\/webhook\/v1\/events/);
-assert.match(caddy, /remote_ip 173\.245\.48\.0\/20/);
-assert.match(caddy, /header_up X-Real-IP \{http\.request\.header\.CF-Connecting-IP\}/);
+assert.match(caddy, /remote_ip 120\.24\.77\.228/);
+assert.match(caddy, /header_up X-Real-IP \{remote_host\}/);
+assert.doesNotMatch(caddy, /CF-Connecting-IP/);
 assert.match(haproxy, /acl is_shein_bi_sni req\.ssl_sni -i sa\.dushengyi\.cc/);
-assert.match(haproxy, /acl is_cloudflare src 173\.245\.48\.0\/20/);
-const proxyReject = haproxy.indexOf('tcp-request content reject if is_tls is_shein_bi_sni !is_cloudflare');
 const proxyTlsAccept = haproxy.indexOf('tcp-request content accept if is_tls');
-assert.ok(proxyReject >= 0 && proxyTlsAccept > proxyReject, 'Cloudflare/SNI reject must run before TLS acceptance');
+assert.ok(proxyTlsAccept >= 0, 'direct HTTPS must be accepted only after a complete TLS ClientHello is recognizable');
+assert.doesNotMatch(haproxy, /acl is_cloudflare src|!is_cloudflare/, 'direct-origin mode must not retain the removed Cloudflare peer gate');
 assert.doesNotMatch(haproxy, /tcp-request content accept if \{ req\.len gt 0 \}/, 'partial first bytes must not bypass TLS SNI inspection');
 
 assert.match(service, /^User=sheinops$/m);

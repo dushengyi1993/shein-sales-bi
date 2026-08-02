@@ -10,6 +10,8 @@ import {
   stableOrdinaryCampaignPayload,
   validateOrdinaryCampaignDocuments,
 } from '../../lib/marketing_ordinary_campaign_approval.mjs';
+import {activityExecutionTransactionHash} from '../../lib/marketing_activity_inventory_integration.mjs';
+import {executeOrdinaryActivityWithInventoryTransaction} from '../../lib/marketing_ordinary_activity_transaction_runner.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -34,10 +36,26 @@ function parseArgs(argv) {
 function runNode(commandArgs, label) {
   return new Promise(resolve => {
     const child = spawn(process.execPath, commandArgs, {cwd: ROOT, windowsHide: true});
-    child.stdout.on('data', chunk => process.stdout.write(`[${label}] ${chunk}`));
-    child.stderr.on('data', chunk => process.stderr.write(`[${label}] ${chunk}`));
-    child.on('exit', (code, signal) => resolve({code, signal}));
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', chunk => {
+      stdout += chunk.toString();
+      process.stdout.write(`[${label}] ${chunk}`);
+    });
+    child.stderr.on('data', chunk => {
+      stderr += chunk.toString();
+      process.stderr.write(`[${label}] ${chunk}`);
+    });
+    child.on('exit', (code, signal) => resolve({ok: code === 0, code, signal, stdout, stderr}));
   });
+}
+
+function lastJson(text) {
+  const source = String(text || '').trim();
+  for (let i = source.lastIndexOf('{'); i >= 0; i = source.lastIndexOf('{', i - 1)) {
+    try { return JSON.parse(source.slice(i)); } catch {}
+  }
+  return null;
 }
 
 async function readResult(outDir, target) {
@@ -122,13 +140,56 @@ async function worker() {
         continue;
       }
       console.log(`[SINGLETON] EXECUTE ${label}`);
-      const executeProcess = await runNode([...base, '--submit', '--out-dir', executeDir], `${label}:execute`);
-      const execute = await readResult(executeDir, target);
-      rowResult.executeProcess = executeProcess;
-      rowResult.execute = execute.doc || null;
-      rowResult.executeFile = execute.file;
-      rowResult.executeReadError = execute.error || '';
-      rowResult.status = executeProcess.code === 0 && execute.doc?.ok && execute.doc?.submit?.submitted === true ? 'submitted' : 'execute_failed';
+      const transactionHash = activityExecutionTransactionHash(
+        approval.workFingerprint,
+        storeKey,
+        target.activityId,
+        target.skc,
+        dry.doc?.selection?.activityInventoryTransactionPlan || null,
+      );
+      const transaction = await executeOrdinaryActivityWithInventoryTransaction({
+        root: ROOT,
+        storeKey,
+        dryResults: [dry.doc],
+        transactionHash,
+        runSubmit: async () => {
+          const lowEtEvidenceHash = dry.doc?.lowEtFastSellerPricePullback?.evidenceHash || '';
+          const executeProcess = await runNode([
+            ...base,
+            '--submit',
+            '--expected-low-et-evidence-hash', lowEtEvidenceHash,
+            '--out-dir', executeDir,
+          ], `${label}:execute`);
+          const execute = await readResult(executeDir, target);
+          return {
+            ok: executeProcess.code === 0,
+            executeProcess,
+            execute: execute.doc || null,
+            executeFile: execute.file,
+            executeReadError: execute.error || '',
+          };
+        },
+        runVerify: async ({phase}) => {
+          const verify = await runNode([
+            path.join(ROOT, 'scripts', 'marketing', 'verify_ordinary_activity_enrollment.mjs'),
+            '--stores', storeKey,
+            '--activity', String(target.activityId),
+            '--selection-plan', selection,
+            '--price-overrides', prices,
+            '--wait-ms', '30000',
+          ], `${label}:verify:${phase}`);
+          return lastJson(verify.stdout)?.summary || {ok: false, reason: verify.stderr || 'verify output missing'};
+        },
+      });
+      rowResult.inventoryTransaction = transaction;
+      const submitted = transaction.submitResult || {};
+      rowResult.executeProcess = submitted.executeProcess || null;
+      rowResult.execute = submitted.execute || null;
+      rowResult.executeFile = submitted.executeFile || '';
+      rowResult.executeReadError = submitted.executeReadError || '';
+      rowResult.status = transaction.ok === true && rowResult.execute?.ok && rowResult.execute?.submit?.submitted === true
+        ? 'submitted'
+        : 'execute_failed';
       results.push(rowResult);
       console.log(`[SINGLETON] ${rowResult.status.toUpperCase()} ${label}`);
     }

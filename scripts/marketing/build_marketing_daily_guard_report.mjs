@@ -92,6 +92,7 @@ const TARGET_PLAN_LEGACY_DEFAULT = path.join(MARKETING_SIGNUP_DIR, 'selection-pl
 const PRICE_OVERRIDES_LEGACY_DEFAULT = path.join(MARKETING_SIGNUP_DIR, 'price-overrides-2026-06-03-ALL-ready.json');
 const BI_PORTAL_DATA_DEFAULT = path.join(ROOT, 'outputs', 'bi-portal', 'data.json');
 const BI_PORTAL_LINKS_DATA_DEFAULT = path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'linksData.json');
+const BI_PORTAL_INVENTORY_TREND_DEFAULT = path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'inventoryTrend.json');
 const MARKETING_PRICING_POLICY_DEFAULT = path.join(ROOT, 'config', 'marketing_pricing_policy.json');
 const MARKETING_COST_MAP_DEFAULT = path.join(ROOT, 'tmp', 'mbrs', 'marketing-cost-map.json');
 const HIGH_CLICK_EFFECT_LEDGER_DEFAULT = path.join(ROOT, 'state', 'marketing_high_click_special_effects.json');
@@ -146,6 +147,7 @@ function parseArgs(argv) {
     maxAgeHours: DEFAULT_MAX_AGE_HOURS,
     biPortalData: BI_PORTAL_DATA_DEFAULT,
     biPortalLinksData: BI_PORTAL_LINKS_DATA_DEFAULT,
+    biPortalInventoryTrend: BI_PORTAL_INVENTORY_TREND_DEFAULT,
     targetPlan: '',
     priceOverrides: '',
     targetPlanExplicit: false,
@@ -164,6 +166,7 @@ function parseArgs(argv) {
     else if (a === '--max-age-hours') args.maxAgeHours = Number(argv[++i]);
     else if (a === '--bi-portal-data') args.biPortalData = path.resolve(argv[++i]);
     else if (a === '--bi-portal-links-data') args.biPortalLinksData = path.resolve(argv[++i]);
+    else if (a === '--bi-portal-inventory-trend') args.biPortalInventoryTrend = path.resolve(argv[++i]);
     else if (a === '--target-plan') {
       args.targetPlan = path.resolve(argv[++i]);
       args.targetPlanExplicit = true;
@@ -4129,6 +4132,7 @@ async function main() {
   const biPortal = biPortalSelection.selected;
   sources.push(biPortal.source);
   const biPortalLinksData = await read('biPortalLinksData', args.biPortalLinksData);
+  const biPortalInventoryTrend = await read('biPortalInventoryTrend', args.biPortalInventoryTrend);
   const marketingPricingPolicy = await loadMarketingPricingPolicy(MARKETING_PRICING_POLICY_DEFAULT);
   const manualLimitedDiscountRegistry = await loadManualLimitedDiscountRegistry();
   const ordinaryPlatformTierRegistry = await loadOrdinaryPlatformTierRegistry({root: ROOT});
@@ -4356,6 +4360,7 @@ async function main() {
   const highClickSpecialPolicy = getHighClickSpecialPolicy(marketingPricingPolicy);
   const highClickLowConversionSpecial = buildHighClickLowConversionSpecialAudit({
     linksDataDoc: biPortalLinksData.data,
+    inventoryTrendDoc: biPortalInventoryTrend.data,
     priceOverridesDoc: priceOverrides.data,
     costDoc: readJsonSafe(MARKETING_COST_MAP_DEFAULT) || {},
     manualRegistry: manualLimitedDiscountRegistry,
@@ -4366,6 +4371,7 @@ async function main() {
     sourceLinksDataStatus: biPortalLinksData.source.status || 'missing',
     sourcePriceOverrides: priceOverrides.source.path || rel(args.priceOverrides),
     sourceCostMap: rel(MARKETING_COST_MAP_DEFAULT),
+    sourceInventoryTrend: biPortalInventoryTrend.source.path || rel(args.biPortalInventoryTrend),
   });
   const highClickSpecialEffect = buildHighClickSpecialEffectAudit({
     linksDataDoc: biPortalLinksData.data,

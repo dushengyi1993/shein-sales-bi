@@ -102,6 +102,10 @@ assert.equal(plan.executable, true);
 assert.equal(plan.counts.scannedLinks, 9);
 assert.equal(plan.counts.lowEtAllocationRows, 6);
 assert.equal(plan.counts.lowEtAllocationActions, 6);
+assert.equal(plan.counts.lowEtNonTopZeroTargets, 1);
+assert.equal(plan.counts.lowEtCandidateCanonicalCount, 1);
+assert.equal(plan.counts.lowEtAllocatedCanonicalCount, 1);
+assert.equal(plan.counts.lowEtBlockedCanonicalCount, 0);
 assert.equal(plan.counts.recentSaleScarcityActions, 1);
 assert.equal(plan.counts.legacyVirtualTopUps, 1);
 assert.equal(plan.counts.actionable, 8);
@@ -112,4 +116,4 @@ assert.deepEqual(plan.lowEtAllocations.map(row => row.targetUsableInventory), [2
 assert.equal(plan.actionable.find(row => row.skc === 'skc-scarce')?.targetUsableInventory, 10);
 assert.equal(plan.ignored.find(row => row.skc === 'skc-stable')?.decision, 'recent_sale_scarcity_inventory_within_band');
 assert.match(plan.payloadHash, /^[a-f0-9]{64}$/);
-console.log(JSON.stringify({ok: true, checks: 15}, null, 2));
+console.log(JSON.stringify({ok: true, checks: 19}, null, 2));
