@@ -1,20 +1,29 @@
-# 每日库存自动执行结果落盘修复
+# 营销库存事务业务阻断分类修复
 
 目标版本：`2026.08.03.7`
 发布日期：2026-08-03
 
-## 1. 修复
+## 1. 修正内容
 
-- 自动执行器无论最后若干行是否因已命中目标而 `continue`，循环结束后都原子写入包含全部结果的终态文件。
-- OpenAPI 读取与带幂等键的库存写入遇到 `832213` / QPS 限流时进行有界退避重试。
-- 守卫仍要求结果 hash、执行标志和结果行数完整匹配计划后才把当日任务视为完成。
+- 限时折扣批次同时包含“临时补量目标”和“平台硬拒绝目标”时，恢复后活动校验只核对本次实际临时补量的 SKC。
+- 临时补量 SKC 已按目标价格、活动库存和截止时间精确覆盖，且库存已恢复一致时，平台对同批其他 SKC 的拒绝归类为业务阻断，不再误报库存恢复失败。
+- 临时补量目标缺失、错价、库存不足、截止时间不足，或库存恢复不精确时仍 fail closed。
 
-## 2. 验证
+## 2. 当日影响
 
-- 本地与云端 `npm test`。
-- 生产手动触发一次 09:35 守卫验收：结果文件行数等于计划 actionable，授权上下文正确，全部行具有终态。
-- `node scripts/check_release_source_state.mjs --expected-commit 2026.08.03.7 --record-deployment 2026.08.03.7` 返回 `ok=true`。
+- 2026-08-03 第一轮 8 个漂移组均已完成库存恢复，但旧调用层将平台 `0004/0006` 等业务阻断误标为 `inventory_transaction_restore_failed`，导致 repair queue 提前停止。
+- 发布后从当天 repair queue 重新评估；已安全恢复的组保留业务阻断证据，其他组和 fallback 继续执行。
+- 不修改现有 systemd timer。
 
-## 3. 回滚
+## 3. 验证
 
-- 回滚点为 `2026.08.03.6`；该版本的库存门禁本身有效，但不应继续用于自动模式，因为末尾安全跳过可能导致结果文件不完整。
+- `smoke_marketing_activity_inventory_integration.mjs`：`38` 项通过。
+- `smoke_marketing_activity_inventory_transaction.mjs`：`35` 项通过。
+- repair queue 和 repair status 专项测试通过。
+- 完整 `npm test`、CI、云端测试和 release source state 检查必须通过。
+
+## 4. 发布与回滚
+
+- GitHub `main`、tag `2026.08.03.7` 与云端 `/opt/shein-bi/app` 必须指向同一 commit。
+- 云端执行 `node scripts/check_release_source_state.mjs --expected-commit 2026.08.03.7 --record-deployment 2026.08.03.7` 并取得 `ok=true`。
+- 回滚点为 `2026.08.03.6`；回滚前确认没有活动库存事务处于临时补量窗口。
