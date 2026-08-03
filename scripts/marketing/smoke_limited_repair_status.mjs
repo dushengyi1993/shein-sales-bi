@@ -59,15 +59,33 @@ const driftResults = [
   {ok: true, status: 'replaced_all', readback: {ok: true, safe: true}},
   {ok: false, status: 'initial_platform_blocked_preserved', readback: {ok: false, safe: true}},
   {ok: false, status: 'create_preflight_blocked_without_deletion', readback: {ok: false, safe: true}},
+  {
+    ok: false,
+    status: 'inventory_transaction_or_enrollment_blocked',
+    inventoryTransaction: {writeAttempted: false, safe: false},
+  },
+  {
+    ok: false,
+    status: 'inventory_transaction_or_enrollment_blocked',
+    inventoryTransaction: {writeAttempted: true, safe: true},
+  },
+  {
+    ok: false,
+    status: 'inventory_transaction_or_enrollment_blocked',
+    inventoryTransaction: {writeAttempted: true, safe: false},
+  },
 ];
 assert.equal(isTerminalDriftBusinessBlock(driftResults[1]), true);
 assert.equal(isSettledDriftRepairResult(driftResults[1]), true, 'safe business blockers must not replay within the same immutable daily manifest');
 assert.equal(isTerminalDriftBusinessBlock(driftResults[2]), false, 'transport/preflight failures remain retryable system failures');
+assert.equal(isTerminalDriftBusinessBlock(driftResults[3]), true, 'pre-validation blockers with zero inventory writes are terminal business blockers');
+assert.equal(isTerminalDriftBusinessBlock(driftResults[4]), true, 'inventory writes restored safely before a platform block are terminal business blockers');
+assert.equal(isTerminalDriftBusinessBlock(driftResults[5]), false, 'unsafe inventory restoration remains a system failure');
 assert.deepEqual(summarizeDriftRepairOutcomes(driftResults), {
   completedGroups: 1,
-  businessBlockedGroups: 1,
-  failedGroups: 1,
-  unsafeGroups: 0,
+  businessBlockedGroups: 3,
+  failedGroups: 2,
+  unsafeGroups: 1,
 });
 assert.equal(driftRepairBatchExitCode({failedGroups: 1, businessBlockedGroups: 2}), 2);
 assert.equal(driftRepairBatchExitCode({businessBlockedGroups: 2, deferredGroups: 1}), 3);
