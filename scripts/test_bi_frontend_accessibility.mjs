@@ -8,8 +8,12 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const shell = fs.readFileSync(path.join(root, 'scripts', 'generate_bi_portal_shell.mjs'), 'utf8');
 const client = fs.readFileSync(path.join(root, 'scripts', 'bi_app', 'client.js'), 'utf8');
 const css = fs.readFileSync(path.join(root, 'scripts', 'bi_app', 'styles.css'), 'utf8');
+const favicon = fs.readFileSync(path.join(root, 'scripts', 'bi_app', 'favicon.svg'), 'utf8');
+const generatedFavicon = fs.readFileSync(path.join(root, 'outputs', 'bi-portal', 'favicon.svg'), 'utf8');
 
 assert.match(shell, /<meta name="description"/);
+assert.match(shell, /<link rel="icon" href="\/favicon\.svg\?v=/);
+assert.match(shell, /class="mark" aria-hidden="true"><img src="\/favicon\.svg\?v=/);
 assert.match(shell, /class="skip-link" href="#content"/);
 assert.match(shell, /<nav class="nav" id="nav" aria-label="主导航"/);
 assert.match(shell, /<main class="main" id="content" tabindex="-1"/);
@@ -34,6 +38,10 @@ assert.match(client, /document\.addEventListener\('focusin'.*\[data-tip\]/, 'key
 assert.match(client, /chart-readable-details/, 'scatter chart includes a screen-reader-readable table entry point');
 assert.match(css, /\.section-failure-notice\{border:2px solid #b42318/, 'unavailable data alert has high-contrast visual treatment');
 assert.match(css, /\.chart-hit:focus-visible,.price-scatter-dot:focus-visible/, 'keyboard chart focus has a visible indicator');
+assert.match(css, /\.mark img\{display:block;width:100%;height:100%;object-fit:cover\}/);
+assert.match(favicon, /aria-label="SHEIN 半托运营工作台"/);
+assert.match(favicon, /fill="#b64b32"/);
+assert.equal(generatedFavicon, favicon, 'generated portal must publish the exact tracked favicon asset');
 
 assert.match(css, /:focus-visible/);
 assert.match(css, /prefers-reduced-motion:reduce/);

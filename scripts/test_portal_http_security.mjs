@@ -43,6 +43,13 @@ try {
   assert.match(loginPage.headers.get('content-security-policy') || '', /frame-ancestors 'self'/);
   assert.equal(loginPage.headers.get('x-frame-options'), 'SAMEORIGIN');
   assert.equal(loginPage.headers.get('strict-transport-security'), 'max-age=31536000');
+  const favicon = await fetch(`${base}/favicon.svg`, {headers: publicHeaders});
+  assert.equal(favicon.status, 200);
+  assert.match(favicon.headers.get('content-type') || '', /^image\/svg\+xml/);
+  assert.match(await favicon.text(), /SHEIN 半托运营工作台/);
+  const legacyFavicon = await fetch(`${base}/favicon.ico`, {headers: publicHeaders, redirect: 'manual'});
+  assert.equal(legacyFavicon.status, 302);
+  assert.match(legacyFavicon.headers.get('location') || '', /^\/favicon\.svg\?v=/);
 
   const crossOrigin = await fetch(`${base}/api/login`, {
     method: 'POST',

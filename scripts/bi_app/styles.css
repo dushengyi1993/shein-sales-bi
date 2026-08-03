@@ -7,7 +7,8 @@ button,input,select{font:inherit}
 button{cursor:pointer}
 .sidebar{position:fixed;inset:18px auto 18px 18px;width:248px;padding:14px;border-radius:24px;background:var(--side);color:#fffaf0;box-shadow:0 24px 70px rgba(38,40,32,.16);display:flex;flex-direction:column}
 .brand{padding:5px 6px 10px;border-bottom:1px solid rgba(255,255,255,.1);margin-bottom:8px;display:flex;align-items:center;gap:10px;flex:0 0 auto}
-.mark{width:36px;height:36px;border-radius:13px;display:grid;place-items:center;background:#f8f4eb;color:#15130f;font-weight:880;letter-spacing:-.08em}
+.mark{width:36px;height:36px;border-radius:13px;display:grid;place-items:center;overflow:hidden;background:#f8f4eb;border:1px solid rgba(255,255,255,.12);box-shadow:0 5px 16px rgba(0,0,0,.16)}
+.mark img{display:block;width:100%;height:100%;object-fit:cover}
 .brand h1{font-size:17px;line-height:1.05;margin:0;letter-spacing:-.055em}
 .brand p{margin:2px 0 0;font-size:11px}
 .brand p,.foot,.muted,.tiny,.note{color:var(--muted)}

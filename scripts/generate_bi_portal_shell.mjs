@@ -13,6 +13,7 @@ import {writeFileAtomic} from '../lib/atomic_file_publish.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const assetDir = path.join(ROOT, 'scripts', 'bi_app');
+const BRAND_ASSET_VERSION = '20260803.1';
 
 function parseArgs(argv) {
   const args = {
@@ -70,13 +71,14 @@ function renderHtml({storeConfig, css, clientJs}) {
 <meta name="theme-color" content="#171612" />
 <meta name="color-scheme" content="light" />
 <title>SHEIN BI · 运营工作台</title>
+<link rel="icon" href="/favicon.svg?v=${BRAND_ASSET_VERSION}" type="image/svg+xml" />
 <style>${css}</style>
 </head>
 <body>
 <a class="skip-link" href="#content">跳到主要内容</a>
 <aside class="sidebar">
   <div class="brand" aria-label="SHEIN BI">
-    <div class="mark" aria-hidden="true">BI</div>
+    <div class="mark" aria-hidden="true"><img src="/favicon.svg?v=${BRAND_ASSET_VERSION}" alt="" /></div>
     <div>
       <h1>SHEIN BI</h1>
       <p>运营工作台</p>
@@ -102,11 +104,12 @@ function renderHtml({storeConfig, css, clientJs}) {
 </html>`;
 }
 
-const [storeConfigRaw, productAliases, css, clientJs] = await Promise.all([
+const [storeConfigRaw, productAliases, css, clientJs, faviconSvg] = await Promise.all([
   readJson(path.join(ROOT, 'config', 'stores.json'), {stores: [], ownerGroups: [], groups: {}}),
   readJson(path.join(ROOT, 'config', 'product_aliases.json'), {aliases: []}),
   fs.readFile(path.join(assetDir, 'styles.css'), 'utf8'),
   fs.readFile(path.join(assetDir, 'client.js'), 'utf8'),
+  fs.readFile(path.join(assetDir, 'favicon.svg'), 'utf8'),
 ]);
 const storeConfig = {
   ...storeConfigRaw,
@@ -116,10 +119,16 @@ const storeConfig = {
 const args = parseArgs(process.argv.slice(2));
 const html = renderHtml({storeConfig, css, clientJs});
 const wrote = [];
+const wroteAssets = [];
 for (const target of [args.outFile, args.compatV2File]) {
   if (!target) continue;
   if (wrote.includes(target)) continue;
   await writeFileAtomic(target, html, {encoding: 'utf8'});
+  const faviconTarget = path.join(path.dirname(target), 'favicon.svg');
+  if (!wroteAssets.includes(faviconTarget)) {
+    await writeFileAtomic(faviconTarget, faviconSvg, {encoding: 'utf8'});
+    wroteAssets.push(faviconTarget);
+  }
   wrote.push(target);
 }
-console.log(JSON.stringify({ok: true, wrote}, null, 2));
+console.log(JSON.stringify({ok: true, wrote, wroteAssets}, null, 2));

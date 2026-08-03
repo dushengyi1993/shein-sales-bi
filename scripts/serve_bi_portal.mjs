@@ -1972,7 +1972,10 @@ function authenticateRequest(req, users, sessionSecret) {
 }
 
 function isPublicPath(pathname) {
-  return pathname === '/login' || pathname === '/api/login' || pathname === '/favicon.ico';
+  return pathname === '/login'
+    || pathname === '/api/login'
+    || pathname === '/favicon.ico'
+    || pathname === '/favicon.svg';
 }
 
 function isApiPath(pathname) {
@@ -2324,7 +2327,7 @@ function actionStatePatchStore(patch) {
 function loginPageHtml({error = '', next = '/', user = ''} = {}) {
   const safeNext = next && String(next).startsWith('/') && !String(next).startsWith('//') ? String(next) : '/';
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>SHEIN BI 登录</title><style>
+<title>SHEIN BI 登录</title><link rel="icon" href="/favicon.svg?v=20260803.1" type="image/svg+xml"/><style>
 :root{color-scheme:light;--bg:#f6f1ea;--ink:#211b16;--muted:#7a6f65;--line:#e6d9c9;--brand:#7357ff;--brand2:#f97316;--card:rgba(255,255,255,.86)}
 *{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:radial-gradient(circle at 12% 8%,#efe7ff 0,transparent 34%),radial-gradient(circle at 88% 18%,#ffe8c7 0,transparent 30%),linear-gradient(135deg,#fbf7f1,#efe9df);color:var(--ink);display:grid;place-items:center;padding:24px}
 .shell{width:min(980px,100%);display:grid;grid-template-columns:1.08fr .92fr;gap:22px;align-items:stretch}.hero,.card{border:1px solid rgba(120,98,72,.16);background:var(--card);backdrop-filter:blur(18px);box-shadow:0 24px 80px rgba(38,28,17,.12);border-radius:28px}
@@ -9722,7 +9725,9 @@ async function main() {
         }
       }
       if (url.pathname === '/favicon.ico') {
-        return send(res, 204, '', {'Content-Type': 'image/x-icon'});
+        writeResponseHead(res, 302, {'Location': '/favicon.svg?v=20260803.1'});
+        res.end();
+        return;
       }
       if (url.pathname === '/v1' || url.pathname.startsWith('/v1/')) {
         return send(res, 410, '旧版 BI 已封存，不再提供线上入口；请访问 / 使用当前 BI 主系统。', {'Content-Type': 'text/plain; charset=utf-8'});
