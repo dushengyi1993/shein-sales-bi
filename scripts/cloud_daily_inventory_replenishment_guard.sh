@@ -34,7 +34,7 @@ if [[ -f "$RESULT" ]] && jq -e --arg hash "$HASH" --argjson total "$TOTAL" '
   and (.results | length) == $total
   and ([.results[].state] | all(. != "planned" and . != "dry_run_ready"))
 ' "$RESULT" >/dev/null; then
-  jq '{ok:true,state:"already_completed",planHash,executionMode,generatedAt,counts:{
+  jq '{ok: (([.results[]|select(.state=="blocked")]|length) == 0),state:"already_completed",planHash,executionMode,generatedAt,counts:{
     total:(.results|length),
     updated:([.results[]|select(.state=="updated_readback_matched")]|length),
     skipped:([.results[]|select(.state|startswith("skipped_"))]|length),
