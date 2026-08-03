@@ -1,6 +1,6 @@
 # 营销报名零库存恢复与延迟回读修复
 
-目标版本：`2026.08.03.4`
+目标版本：`2026.08.03.5`
 发布日期：2026-08-03
 
 ## 1. 修正内容
@@ -25,6 +25,6 @@
 
 ## 4. 发布与回滚
 
-- GitHub `main`、tag `2026.08.03.4` 与云端 `/opt/shein-bi/app` 必须指向同一 commit。
-- 云端执行 `node scripts/check_release_source_state.mjs --expected-commit 2026.08.03.4 --record-deployment 2026.08.03.4` 并取得 `ok=true`。
-- 回滚点为 `2026.08.03.3`；回滚前必须确认没有活动库存事务处于临时补量窗口。
+- GitHub `main`、tag `2026.08.03.5` 与云端 `/opt/shein-bi/app` 必须指向同一 commit。
+- 云端执行 `node scripts/check_release_source_state.mjs --expected-commit 2026.08.03.5 --record-deployment 2026.08.03.5` 并取得 `ok=true`。
+- 回滚点为 `2026.08.03.4`；回滚前必须确认没有活动库存事务处于临时补量窗口。
