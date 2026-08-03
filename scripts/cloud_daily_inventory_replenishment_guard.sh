@@ -58,7 +58,10 @@ if [[ ! -f "$RESULT" ]] || ! jq -e --arg hash "$HASH" --argjson total "$TOTAL" '
   .planHash == $hash and .execute == true and (.results | length) == $total
 ' "$RESULT" >/dev/null; then
   echo "automatic inventory executor did not produce a complete result" >&2
-  exit "${EXECUTOR_STATUS:-1}"
+  if (( EXECUTOR_STATUS != 0 )); then
+    exit "$EXECUTOR_STATUS"
+  fi
+  exit 1
 fi
 
 # Row-level blockers are terminal, auditable business results. The 09:45 report
