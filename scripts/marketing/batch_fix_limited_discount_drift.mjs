@@ -24,6 +24,7 @@ import {
 import {loadExactDriftRepairManifest} from '../../lib/marketing_repair_manifest.mjs';
 import {
   activityExecutionTransactionHash,
+  classifyActivityInventoryFailureStatus,
   executeLimitedDiscountWithInventoryTransaction,
   planLimitedDiscountInventoryTransaction,
 } from '../../lib/marketing_activity_inventory_integration.mjs';
@@ -424,9 +425,7 @@ async function processStore(storeKey, rescuePath, args, manualIndex, browserSess
       });
       record.inventoryTransaction = inventoryTransaction;
       if (!inventoryTransaction.ok) {
-        record.status = inventoryTransaction.safe === true
-          ? 'inventory_transaction_or_enrollment_blocked'
-          : 'inventory_transaction_restore_failed';
+        record.status = classifyActivityInventoryFailureStatus(inventoryTransaction);
         record.error = inventoryTransaction.blockers?.map(item => item.error || item.reason).join('; ')
           || 'activity inventory transaction failed';
         return record;

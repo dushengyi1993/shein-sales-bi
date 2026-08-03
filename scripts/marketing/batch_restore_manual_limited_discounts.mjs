@@ -11,6 +11,7 @@ import {
 import {loadExactManualRepairPlan} from '../../lib/marketing_repair_manifest.mjs';
 import {
   activityExecutionTransactionHash,
+  classifyActivityInventoryFailureStatus,
   executeLimitedDiscountWithInventoryTransaction,
   planLimitedDiscountInventoryTransaction,
 } from '../../lib/marketing_activity_inventory_integration.mjs';
@@ -274,9 +275,7 @@ async function processOne(file, storeMap, args) {
     record.inventoryTransaction = activityInventoryTransaction;
     const transaction = activityInventoryTransaction.commandResult;
     if (!activityInventoryTransaction.ok) {
-      record.status = activityInventoryTransaction.safe === true
-        ? 'inventory_transaction_or_enrollment_blocked'
-        : 'inventory_transaction_restore_failed';
+      record.status = classifyActivityInventoryFailureStatus(activityInventoryTransaction);
       record.error = activityInventoryTransaction.blockers?.map(item => item.error || item.reason).join('; ')
         || 'activity inventory transaction failed';
       return record;

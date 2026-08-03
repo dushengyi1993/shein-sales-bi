@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
+  classifyActivityInventoryFailureStatus,
   executeLimitedDiscountWithInventoryTransaction,
   extractLimitedDiscountInventoryTargets,
 } from '../../lib/marketing_activity_inventory_integration.mjs';
@@ -175,6 +176,17 @@ assert.doesNotMatch(
   partialResult.blockers.map(row => row.reason).join(','),
   /activity_invalid_or_withdrawn_after_inventory_restore/,
 );
+assert.equal(classifyActivityInventoryFailureStatus(partialResult), 'inventory_transaction_or_enrollment_blocked');
+assert.equal(classifyActivityInventoryFailureStatus({
+  ok: false,
+  safe: false,
+  writeAttempted: false,
+}), 'inventory_transaction_or_enrollment_blocked');
+assert.equal(classifyActivityInventoryFailureStatus({
+  ok: false,
+  safe: false,
+  writeAttempted: true,
+}), 'inventory_transaction_restore_failed');
 
 const sources = {
   manual: await read('scripts/marketing/batch_restore_manual_limited_discounts.mjs'),
@@ -198,7 +210,7 @@ assert.match(sources.legacy, /Legacy persistent marketing inventory top-up is di
 
 console.log(JSON.stringify({
   ok: true,
-  checks: 38,
+  checks: 44,
   ordinaryRunners: 3,
   limitedDiscountPaths: 4,
   legacyPersistentTopUpExecutable: false,

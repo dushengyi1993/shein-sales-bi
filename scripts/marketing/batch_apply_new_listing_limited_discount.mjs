@@ -31,6 +31,7 @@ import {
 import {loadExactFallbackRepairPlan} from '../../lib/marketing_repair_manifest.mjs';
 import {
   activityExecutionTransactionHash,
+  classifyActivityInventoryFailureStatus,
   executeLimitedDiscountWithInventoryTransaction,
   planLimitedDiscountInventoryTransaction,
 } from '../../lib/marketing_activity_inventory_integration.mjs';
@@ -472,9 +473,7 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
     record.inventoryTransaction = inventoryTransaction;
     if (!inventoryTransaction.ok) {
       record.blocked = {
-        type: inventoryTransaction.safe === true
-          ? 'inventory_transaction_or_enrollment_blocked'
-          : 'inventory_transaction_restore_failed',
+        type: classifyActivityInventoryFailureStatus(inventoryTransaction),
         reason: inventoryTransaction.blockers?.map(item => item.error || item.reason).join('; ')
           || 'activity inventory transaction failed',
         blockedSkcs: inventoryTransaction.extractedTargets?.map(item => item.skc) || [],
