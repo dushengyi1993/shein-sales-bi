@@ -5,8 +5,10 @@ DATE="$(TZ=Asia/Shanghai date +%F)"
 RUNTIME_ROOT="${SHEIN_BI_INVENTORY_RUNTIME_ROOT:-/srv/shein-bi/runtime/daily-inventory-replenishment}"
 PLAN="$RUNTIME_ROOT/plans/daily-inventory-replenishment-$DATE.json"
 RESULT="$RUNTIME_ROOT/results/daily-inventory-replenishment-$DATE.json"
-LOCK="$RUNTIME_ROOT/daily-inventory-replenishment.lock"
+LOCK="$ROOT/state/locks/daily-inventory-replenishment.lock"
 mkdir -p "$(dirname "$PLAN")" "$(dirname "$RESULT")"
+. "$ROOT/scripts/lib/shared_lock.sh"
+prepare_shared_lock_file "$LOCK"
 exec 9>"$LOCK"
 if ! flock -n 9; then
   echo "daily inventory replenishment guard is already running" >&2
