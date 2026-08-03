@@ -14,7 +14,9 @@ import {connectCdp} from '../lib/shein_browser.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
 const OUT_DIR = path.join(ROOT, 'state', 'shein_browser_sessions');
+const WEBAPI_OUT_DIR = path.join(ROOT, 'state', 'shein_webapi_sessions');
 const ORDER_URL = 'https://sso.geiwohuo.com/#/gsp/order-management/list';
+const GSP_ORIGIN = 'https://sso.geiwohuo.com';
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -25,6 +27,7 @@ function parseArgs(argv) {
     stores: null,
     group: 'ALL',
     outDir: OUT_DIR,
+    webApiOutDir: WEBAPI_OUT_DIR,
     launch: true,
     headless: true,
     waitMs: 2500,
@@ -35,6 +38,7 @@ function parseArgs(argv) {
     else if (a === '--stores') args.stores = argv[++i].split(',').map(x => x.trim().toUpperCase()).filter(Boolean);
     else if (a === '--group') args.group = argv[++i].trim().toUpperCase();
     else if (a === '--out-dir') args.outDir = path.resolve(argv[++i]);
+    else if (a === '--webapi-out-dir') args.webApiOutDir = path.resolve(argv[++i]);
     else if (a === '--no-launch') args.launch = false;
     else if (a === '--visible') args.headless = false;
     else if (a === '--headless') args.headless = true;
@@ -148,6 +152,77 @@ function normalizeCookie(cookie) {
   };
 }
 
+function cookieHeaderFromCookies(cookies) {
+  return cookies
+    .filter(cookie => cookie?.name && cookie?.value !== undefined)
+    .map(cookie => `${cookie.name}=${cookie.value}`)
+    .join('; ');
+}
+
+function formatSecChUa(brands) {
+  if (!Array.isArray(brands) || !brands.length) return '';
+  return brands
+    .filter(brand => brand?.brand && brand?.version)
+    .map(brand => `"${String(brand.brand).replace(/"/g, '\\"')}";v="${String(brand.version).replace(/"/g, '')}"`)
+    .join(', ');
+}
+
+function shanghaiDate() {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+}
+
+async function validateWebApiSession(session) {
+  const date = shanghaiDate();
+  const response = await fetch(`${GSP_ORIGIN}/gsp/orderPlus/listOrder`, {
+    method: 'POST',
+    credentials: 'omit',
+    signal: AbortSignal.timeout(15_000),
+    headers: {
+      'User-Agent': session.userAgent || 'Mozilla/5.0',
+      'Accept': 'application/json, text/plain, */*',
+      'Accept-Language': session.acceptLanguage || 'zh-CN,zh;q=0.9,en;q=0.8',
+      'Content-Type': 'application/json;charset=UTF-8',
+      'Origin': GSP_ORIGIN,
+      'Referer': `${GSP_ORIGIN}/`,
+      'Cookie': session.cookieHeader,
+      'Origin-Path': '/order-management/list',
+      'Origin-Url': `${GSP_ORIGIN}/#/gsp/order-management/list`,
+      'build-version': '2026-04-23 11:38',
+      ...(session.clientHints?.secChUa ? {'sec-ch-ua': session.clientHints.secChUa} : {}),
+      ...(session.clientHints?.secChUaMobile ? {'sec-ch-ua-mobile': session.clientHints.secChUaMobile} : {}),
+      ...(session.clientHints?.secChUaPlatform ? {'sec-ch-ua-platform': session.clientHints.secChUaPlatform} : {}),
+    },
+    body: JSON.stringify({
+      allocateTimeStart: `${date} 00:00:00`,
+      allocateTimeEnd: `${date} 23:59:59`,
+      excludeOrderType: 5,
+      tabIndex: 1,
+      page: 1,
+      perPage: 1,
+    }),
+  });
+  const text = await response.text();
+  let body = null;
+  try { body = JSON.parse(text); } catch {}
+  const code = String(body?.code ?? '');
+  if (!body || code !== '0') {
+    throw new Error(`exported_webapi_session_probe_failed:http=${response.status}:code=${code || 'non_json'}`);
+  }
+  return {ok: true, code, count: Number(body?.info?.meta?.count || 0)};
+}
+
+async function writeJsonAtomic(file, payload) {
+  await fs.mkdir(path.dirname(file), {recursive: true});
+  const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  await fs.writeFile(temp, JSON.stringify(payload, null, 2), {encoding: 'utf8', mode: 0o600});
+  await fs.rename(temp, file);
+}
+
 async function exportStore(store, args) {
   const browser = await launchStore(store, args);
   if (browser.error) return {storeKey: store.storeKey, ok: false, stage: 'browser', browser};
@@ -159,14 +234,26 @@ async function exportStore(store, args) {
       .filter(c => /(^|\.)geiwohuo\.com$/i.test(String(c.domain || '').replace(/^\./, '')))
       .map(normalizeCookie);
     const storage = await exportStorage(send);
-    const ua = await send('Runtime.evaluate', {returnByValue: true, expression: 'navigator.userAgent'});
+    const browserInfo = await send('Runtime.evaluate', {
+      returnByValue: true,
+      expression: `(() => ({
+        userAgent: navigator.userAgent,
+        language: navigator.language || '',
+        languages: Array.from(navigator.languages || []),
+        platform: navigator.userAgentData?.platform || navigator.platform || '',
+        mobile: Boolean(navigator.userAgentData?.mobile),
+        brands: navigator.userAgentData?.brands || []
+      }))()`,
+    });
+    const hints = browserInfo.result?.value || {};
+    const exportedAt = new Date().toISOString();
     const payload = {
       version: 1,
       storeKey: store.storeKey,
       shopName: store.shopName,
-      exportedAt: new Date().toISOString(),
+      exportedAt,
       pageUrl: ORDER_URL,
-      userAgent: ua.result?.value || '',
+      userAgent: hints.userAgent || '',
       cookieCount: cookies.length,
       localStorageCount: Object.keys(storage.localStorage || {}).length,
       sessionStorageCount: Object.keys(storage.sessionStorage || {}).length,
@@ -174,13 +261,37 @@ async function exportStore(store, args) {
       localStorage: storage.localStorage || {},
       sessionStorage: storage.sessionStorage || {},
     };
-    await fs.mkdir(args.outDir, {recursive: true});
+    const webApiPayload = {
+      version: 1,
+      storeKey: store.storeKey,
+      shopName: store.shopName,
+      source: 'export_shein_browser_session.cdp',
+      exportedAt,
+      pageUrl: ORDER_URL,
+      cookieCount: cookies.length,
+      cookieHeader: cookieHeaderFromCookies(cookies),
+      userAgent: hints.userAgent || '',
+      acceptLanguage: Array.isArray(hints.languages) && hints.languages.length
+        ? hints.languages.join(',')
+        : (hints.language || 'zh-CN,zh;q=0.9,en;q=0.8'),
+      clientHints: {
+        secChUa: formatSecChUa(hints.brands),
+        secChUaMobile: hints.mobile ? '?1' : '?0',
+        secChUaPlatform: hints.platform ? `"${String(hints.platform).replace(/"/g, '')}"` : '',
+      },
+    };
+    if (!webApiPayload.cookieHeader) throw new Error('exported_webapi_session_has_no_geiwohuo_cookies');
+    const webApiProbe = await validateWebApiSession(webApiPayload);
     const file = path.join(args.outDir, `${store.storeKey}.local.json`);
-    await fs.writeFile(file, JSON.stringify(payload, null, 2), 'utf8');
+    const webApiFile = path.join(args.webApiOutDir, `${store.storeKey}.local.json`);
+    await writeJsonAtomic(file, payload);
+    await writeJsonAtomic(webApiFile, webApiPayload);
     return {
       storeKey: store.storeKey,
       ok: true,
       file,
+      webApiFile,
+      webApiProbe,
       cookieCount: payload.cookieCount,
       localStorageCount: payload.localStorageCount,
       sessionStorageCount: payload.sessionStorageCount,
@@ -213,6 +324,8 @@ const summary = {
     localStorageCount: r.localStorageCount || 0,
     sessionStorageCount: r.sessionStorageCount || 0,
     file: r.file ? path.relative(ROOT, r.file).replace(/\\/g, '/') : '',
+    webApiFile: r.webApiFile ? path.relative(ROOT, r.webApiFile).replace(/\\/g, '/') : '',
+    webApiProbe: r.webApiProbe || null,
   })),
 };
 console.log(JSON.stringify(summary, null, 2));

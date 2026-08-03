@@ -318,7 +318,7 @@ GitHub 应保存：
 
 - 历史 V1 时间筛选弹窗回归检查已随 V1 线上下线而停止；如需排查旧版，只能从 GitHub release tag `2026.06.18-v1-final-archive` 临时恢复到隔离环境。
 
-- 登录态恢复统一走 `restore_shein_store_session.mjs`：先用服务器私有 `state/shein_browser_sessions/*.local.json` / `state/shein_webapi_sessions/*.local.json` bootstrap，再运行 `auto_relogin_shein_store.mjs` 验证 GSP order WebAPI 和 SBN 商品分析页；验证成功后必须立即调用 `export_shein_browser_session.mjs --no-launch` 刷新该店 browser session 导出，避免第二天继续回灌过期 SBN 状态。云端没有保存密码的店铺不能只靠 Chrome autofill 自愈，若 SBN 已过期且无保存密码，需要走 `/cloud-login-maintenance` 处理一次；若只是协议/通知弹窗阻塞，运维代理可先点掉弹窗并重试登录，不必直接判定为用户验证码阻塞。
+- 登录态恢复统一走 `restore_shein_store_session.mjs`：先用服务器私有 `state/shein_browser_sessions/*.local.json` / `state/shein_webapi_sessions/*.local.json` bootstrap，再运行 `auto_relogin_shein_store.mjs` 验证 GSP order WebAPI 和 SBN 商品分析页；验证成功后必须立即调用 `export_shein_browser_session.mjs --no-launch`，同时原子刷新 browser session 与可复用 WebAPI Cookie session，并用一次只读 GSP 请求验证导出文件。每日 `02:20` session manager 只有在本轮 WebAPI 导出时间新鲜且探针通过时才算该店成功，不能因为历史 session 文件“存在”就报绿。云端没有保存密码的店铺不能只靠 Chrome autofill 自愈，若 SBN 已过期且无保存密码，需要走 `/cloud-login-maintenance` 处理一次；若只是协议/通知弹窗阻塞，运维代理可先点掉弹窗并重试登录，不必直接判定为用户验证码阻塞。
 
 - 云端人工登录入口验证：`/cloud-login-maintenance` 返回 `200`；`/cloud-login/novnc/vnc.html` 返回 `200`；创建会话后 `/cloud-login/session/:id` 返回 `200` 且 WebSocket 升级返回 `101 Switching Protocols`；点“我已完成并关闭”后 export/probe 成功且不残留 Chrome/Xvfb/x11vnc/websockify 进程。
 

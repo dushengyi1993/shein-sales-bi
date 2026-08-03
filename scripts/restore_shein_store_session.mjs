@@ -135,6 +135,8 @@ async function exportCurrentSession() {
       localStorageCount: r.localStorageCount || 0,
       sessionStorageCount: r.sessionStorageCount || 0,
       file: r.file || '',
+      webApiFile: r.webApiFile || '',
+      webApiProbe: r.webApiProbe || null,
     })) : [],
     stderrPreview: preview(exported.stderr),
   };

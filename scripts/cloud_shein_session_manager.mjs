@@ -295,18 +295,29 @@ async function probeStore(store, args) {
     browser: await fileMeta(browserSessionFile),
     webapi: await fileMeta(webApiSessionFile),
   };
+  const webApiExportedAtMs = Date.parse(sessionMeta.webapi.updatedAt || '');
+  const runStartedAtMs = Date.parse(startedAt);
+  const webApiSessionFresh = Number.isFinite(webApiExportedAtMs)
+    && Number.isFinite(runStartedAtMs)
+    && webApiExportedAtMs >= runStartedAtMs - 5_000;
+  const webApiProbeOk = parsed?.exportSession?.stores?.some(entry =>
+    String(entry?.storeKey || '').toUpperCase() === store.storeKey
+    && entry?.webApiProbe?.ok === true
+  ) === true;
   const okFromParsed = parsed ? Boolean(parsed.ok) : res.ok;
   const warnings = [];
   if (profileSizeAfter > args.profileWarnBytes) warnings.push(`profile_size_high:${humanBytes(profileSizeAfter)}`);
   if (!sessionMeta.browser.exists) warnings.push('missing_browser_session_export');
   if (!sessionMeta.webapi.exists) warnings.push('missing_webapi_session_export');
+  if (!webApiSessionFresh) warnings.push('stale_webapi_session_export');
+  if (!webApiProbeOk) warnings.push('webapi_session_probe_not_verified');
   if (closeResult && !closeResult.ok) warnings.push(`close_launched_chrome_failed:${closeResult.error || '-'}`);
   return {
     storeKey: store.storeKey,
     groupKey: store.groupKey,
     shopName: store.shopName,
     port: store.port,
-    ok: res.ok && okFromParsed,
+    ok: res.ok && okFromParsed && webApiSessionFresh && webApiProbeOk,
     mode: args.restore ? 'restore' : 'check',
     startedAt,
     endedAt,

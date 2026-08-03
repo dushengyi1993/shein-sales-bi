@@ -8,7 +8,7 @@
 
 **条件启用**：`shein-bi-cloud-et-forwarder.timer`、`shein-bi-cloud-et-storage-fee.timer`、`shein-bi-cloud-session-manager.timer` 只有在服务器本地 ET/店铺授权和对应 profile 已验收时才启用；当前生产已验收时属于上面的启用集。`shein-bi-cloud-today.service` 只作人工灾备，不安装 timer。`shein-bi-lark-sales-qa.service` 和自动飞书日报保持 `disabled + inactive`。
 
-凌晨 `02:20` 登录态管家、`02:40` 数据库备份、`03:00` 昨日最终核对共享 `/opt/shein-bi/app/state/locks/shein-bi-nightly-maintenance.lock`：运行期用 `flock` 防并发；三个 timer 因宕机而同时补跑时，再由不触发额外任务的软 `Before/After` 顺序保证 `session-manager → db-backup → yesterday`。备份超时预算必须覆盖最长锁等待、备份 P99 时长和余量。登录态/销售 refresh unit 使用 `UMask=0077`，浏览器和凭据新落盘默认仅 owner 可读；备份使用 `UMask=0027`，备份目录可由运维组受控读取。共享锁文件由 unit 显式创建为 `sheinops:sheinops 0660`，不能改成 `/tmp` 锁。
+凌晨 `02:20` 登录态管家、`02:40` 数据库备份、`03:00` 昨日最终核对共享 `/opt/shein-bi/app/state/locks/shein-bi-nightly-maintenance.lock`：运行期用 `flock` 防并发；三个 timer 因宕机而同时补跑时，再由不触发额外任务的软 `Before/After` 顺序保证 `session-manager → db-backup → yesterday`。登录态管家每日验证各店 GSP/SBN 后，同时刷新 browser session 和 WebAPI Cookie session；WebAPI 导出必须是本轮新文件且只读探针通过，不能只检查旧文件存在。备份超时预算必须覆盖最长锁等待、备份 P99 时长和余量。登录态/销售 refresh unit 使用 `UMask=0077`，浏览器和凭据新落盘默认仅 owner 可读；备份使用 `UMask=0027`，备份目录可由运维组受控读取。共享锁文件由 unit 显式创建为 `sheinops:sheinops 0660`，不能改成 `/tmp` 锁。
 
 Linux 生产健康只以 systemd、watchdog、Portal health 和云端数据审计为准；旧 Windows 计划任务只是历史回滚参考，不能再用作 Linux 页面或告警的健康依据。
 
