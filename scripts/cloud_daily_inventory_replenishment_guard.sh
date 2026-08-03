@@ -66,7 +66,7 @@ fi
 
 # Row-level blockers are terminal, auditable business results. The 09:45 report
 # surfaces them; they must not turn a completed daily scan into a systemd crash.
-jq '{ok:([.results[]|select(.state=="blocked")]|length)==0,state:"completed",planHash,executionMode,generatedAt,counts:{
+jq '{ok: (([.results[]|select(.state=="blocked")]|length) == 0),state:"completed",planHash,executionMode,generatedAt,counts:{
   total:(.results|length),
   updated:([.results[]|select(.state=="updated_readback_matched")]|length),
   skipped:([.results[]|select(.state|startswith("skipped_"))]|length),
