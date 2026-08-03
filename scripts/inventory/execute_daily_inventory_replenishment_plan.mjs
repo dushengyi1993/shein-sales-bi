@@ -201,8 +201,9 @@ for (const evidence of asArray(plan.sourceEvidence).filter(row => currentSourceT
   }
 }
 const rows = asArray(plan.actionable).slice(0, args.maxRows);
+let executionAuthorization = null;
 if (args.execute) {
-  assertDailyInventoryExecutionAuthorization({
+  executionAuthorization = assertDailyInventoryExecutionAuthorization({
     policy,
     mode: args.executionMode,
     context: process.env.SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT || '',
@@ -211,6 +212,17 @@ if (args.execute) {
     confirmHash: args.confirmHash,
   });
 }
+const resultEnvelope = currentResults => ({
+  schemaVersion: 'daily-inventory-replenishment-result/v1',
+  generatedAt: new Date().toISOString(),
+  planHash: plan.payloadHash,
+  policyVersion: plan.policyVersion,
+  execute: args.execute,
+  executionMode: args.execute ? executionAuthorization?.mode : 'dry_run',
+  authorizationId: executionAuthorization?.authorizationId || null,
+  authorizationContext: executionAuthorization?.context || null,
+  results: currentResults,
+});
 const etByKey = new Map(asArray(bi?.inventoryDepletion?.products).map(row => [
   String(row.match_key || canonicalInventoryKey(row.standard_goods_sn)).toUpperCase(),
   row,
@@ -373,7 +385,7 @@ for (const row of rows) {
   } catch (error) {
     results.push({...result, state: 'blocked', error: error.message});
   }
-  const interim = {schemaVersion: 'daily-inventory-replenishment-result/v1', generatedAt: new Date().toISOString(), planHash: plan.payloadHash, execute: args.execute, results};
+  const interim = resultEnvelope(results);
   await fs.mkdir(path.dirname(args.out), {recursive: true});
   await fs.writeFile(`${args.out}.tmp`, `${JSON.stringify(interim, null, 2)}\n`, 'utf8');
   await fs.rename(`${args.out}.tmp`, args.out);
@@ -386,7 +398,7 @@ const counts = {
   blocked: results.filter(row => row.state === 'blocked').length,
 };
 if (results.length === 0) {
-  const empty = {schemaVersion: 'daily-inventory-replenishment-result/v1', generatedAt: new Date().toISOString(), planHash: plan.payloadHash, execute: args.execute, results};
+  const empty = resultEnvelope(results);
   await fs.mkdir(path.dirname(args.out), {recursive: true});
   await fs.writeFile(args.out, `${JSON.stringify(empty, null, 2)}\n`, 'utf8');
 }

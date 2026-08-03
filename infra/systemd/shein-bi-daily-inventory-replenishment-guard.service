@@ -1,5 +1,5 @@
 [Unit]
-Description=SHEIN BI daily low virtual inventory inspection
+Description=SHEIN BI daily guarded inventory replenishment
 Wants=network-online.target
 After=network-online.target shein-bi-cloud-et-forwarder.service
 
@@ -12,6 +12,8 @@ Environment=HOME=/home/sheinops
 Environment=TZ=Asia/Shanghai
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=SHEIN_BI_INVENTORY_RUNTIME_ROOT=/srv/shein-bi/runtime/daily-inventory-replenishment
+Environment=SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT=cloud_daily_inventory_replenishment_guard
+Environment=SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION=owner-automatic-inventory-20260803-v1
 TimeoutStartSec=1200
 Nice=12
 CPUWeight=40

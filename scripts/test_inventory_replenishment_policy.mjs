@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import {
   allocateLowEtInventory,
   assertDailyInventoryExecutionAuthorization,
@@ -92,5 +93,59 @@ assert.equal(stableInventoryHash({b: 1, a: 2}), stableInventoryHash({a: 2, b: 1}
 const hash = 'a'.repeat(64);
 assert.deepEqual(assertDailyInventoryExecutionAuthorization({policy, payloadHash: hash, confirmHash: hash}).mode, 'manual_review');
 assert.throws(() => assertDailyInventoryExecutionAuthorization({policy, payloadHash: hash, confirmHash: 'b'.repeat(64)}), /confirm-hash/);
-assert.throws(() => assertDailyInventoryExecutionAuthorization({policy, mode: 'automatic', payloadHash: hash, confirmHash: hash}), /automation is disabled/);
-console.log(JSON.stringify({ok: true, checks: 34}, null, 2));
+assert.throws(() => assertDailyInventoryExecutionAuthorization({policy, mode: 'automatic', payloadHash: hash, confirmHash: hash}), /Automatic inventory execution is not enabled/);
+const automaticPolicy = structuredClone(policy);
+automaticPolicy.execution = {
+  mode: 'automatic',
+  perRunUserConfirmationRequired: false,
+  perRunPayloadHashRequired: true,
+  storeScope: 'all_enabled_stores',
+  automaticExecution: {
+    enabled: true,
+    authorizationId: 'owner-automatic-inventory-20260803-v1',
+    allowedContext: 'cloud_daily_inventory_replenishment_guard',
+  },
+};
+assert.deepEqual(assertDailyInventoryExecutionAuthorization({
+  policy: automaticPolicy,
+  mode: 'automatic',
+  context: 'cloud_daily_inventory_replenishment_guard',
+  authorizationId: 'owner-automatic-inventory-20260803-v1',
+  payloadHash: hash,
+  confirmHash: hash,
+}), {
+  mode: 'automatic',
+  authorizationId: 'owner-automatic-inventory-20260803-v1',
+  context: 'cloud_daily_inventory_replenishment_guard',
+  payloadHash: hash,
+  storeScope: 'all_enabled_stores',
+});
+assert.throws(() => assertDailyInventoryExecutionAuthorization({
+  policy: automaticPolicy,
+  mode: 'automatic',
+  context: 'wrong_context',
+  authorizationId: 'owner-automatic-inventory-20260803-v1',
+  payloadHash: hash,
+  confirmHash: hash,
+}), /context is not authorized/);
+assert.throws(() => assertDailyInventoryExecutionAuthorization({
+  policy: automaticPolicy,
+  mode: 'automatic',
+  context: 'cloud_daily_inventory_replenishment_guard',
+  authorizationId: 'wrong_authorization',
+  payloadHash: hash,
+  confirmHash: hash,
+}), /authorization id mismatch/);
+const livePolicy = JSON.parse(fs.readFileSync(new URL('../config/inventory_replenishment_policy.json', import.meta.url), 'utf8'));
+const guardScript = fs.readFileSync(new URL('./cloud_daily_inventory_replenishment_guard.sh', import.meta.url), 'utf8');
+const guardService = fs.readFileSync(new URL('../infra/systemd/shein-bi-daily-inventory-replenishment-guard.service', import.meta.url), 'utf8');
+assert.equal(livePolicy.execution.mode, 'automatic');
+assert.equal(livePolicy.execution.perRunUserConfirmationRequired, false);
+assert.equal(livePolicy.execution.automaticExecution.enabled, true);
+assert.match(guardScript, /flock -n 9/);
+assert.match(guardScript, /--execution-mode automatic/);
+assert.match(guardScript, /--confirm-hash "\$HASH"/);
+assert.match(guardScript, /state:"already_completed"/);
+assert.match(guardService, new RegExp(`SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT=${livePolicy.execution.automaticExecution.allowedContext}`));
+assert.match(guardService, new RegExp(`SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION=${livePolicy.execution.automaticExecution.authorizationId}`));
+console.log(JSON.stringify({ok: true, checks: 46}, null, 2));

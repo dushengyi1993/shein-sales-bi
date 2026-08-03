@@ -1,6 +1,6 @@
 {
   "schemaVersion": "daily-inventory-replenishment-policy/v1",
-  "policyVersion": "2026-08-02.2",
+  "policyVersion": "2026-08-03.1",
   "timezone": "Asia/Shanghai",
   "triggerUsableInventoryAtOrBelow": 20,
   "targetUsableInventory": 100,
@@ -36,16 +36,16 @@
     "replenishmentDaysOfSupply": 120
   },
   "execution": {
-    "mode": "manual_review",
-    "perRunUserConfirmationRequired": true,
+    "mode": "automatic",
+    "perRunUserConfirmationRequired": false,
     "perRunPayloadHashRequired": true,
     "storeScope": "all_enabled_stores",
     "automaticExecution": {
-      "enabled": false,
-      "authorizationId": null,
-      "allowedContext": null,
-      "authorizedAt": null,
-      "authorizedBy": null
+      "enabled": true,
+      "authorizationId": "owner-automatic-inventory-20260803-v1",
+      "allowedContext": "cloud_daily_inventory_replenishment_guard",
+      "authorizedAt": "2026-08-03T11:54:00+08:00",
+      "authorizedBy": "owner_explicit_codex_confirmation"
     }
   }
 }
