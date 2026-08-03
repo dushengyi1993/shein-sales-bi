@@ -61,6 +61,22 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const asArray = value => value == null ? [] : Array.isArray(value) ? value : [value];
 const ageHours = value => (Date.now() - new Date(value || '').getTime()) / 3_600_000;
 
+function isRateLimitedResponse(response) {
+  const code = String(response?.data?.code ?? '');
+  const message = String(response?.data?.msg || '').toLowerCase();
+  return code === '832213' || message.includes('限流') || message.includes('qps') || message.includes('rate limit');
+}
+
+async function requestWithRateLimitRetry(client, pathname, options, {maxAttempts = 4} = {}) {
+  let response;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    response = await client.request(pathname, options);
+    if (!isRateLimitedResponse(response) || attempt === maxAttempts) return response;
+    await sleep(1500 * attempt);
+  }
+  return response;
+}
+
 function findStoreConfig(config, storeKey) {
   const rows = Array.isArray(config?.stores)
     ? config.stores
@@ -76,7 +92,7 @@ async function createStoreClient(config, storeKey) {
     openKeyId: store.openKeyId,
     secretKey: store.secretKey,
   });
-  const response = await client.request('/open-api/openapi-business-backend/query-store-info', {method: 'POST', body: {}, headers: {language: 'en'}});
+  const response = await requestWithRateLimitRetry(client, '/open-api/openapi-business-backend/query-store-info', {method: 'POST', body: {}, headers: {language: 'en'}});
   if (String(response.data?.code) !== '0') throw new Error(`${storeKey} store identity query failed`);
   const identity = validateStoreIdentity({
     store,
@@ -90,7 +106,7 @@ async function createStoreClient(config, storeKey) {
 }
 
 async function readStock(client, skuCode) {
-  const response = await client.request('/open-api/stock/stock-query', {
+  const response = await requestWithRateLimitRetry(client, '/open-api/stock/stock-query', {
     method: 'POST',
     body: {skuCodeList: [skuCode], warehouseType: '2', invType: 'VI'},
     headers: {language: 'en'},
@@ -123,7 +139,7 @@ async function readStock(client, skuCode) {
 }
 
 async function resolveMissingVirtualInventoryWarehouseCode(client) {
-  const response = await client.request('/open-api/msc/warehouse/list', {
+  const response = await requestWithRateLimitRetry(client, '/open-api/msc/warehouse/list', {
     method: 'GET',
     headers: {language: 'en'},
   });
@@ -134,7 +150,7 @@ async function resolveMissingVirtualInventoryWarehouseCode(client) {
 }
 
 async function assertStillListed(client, row) {
-  const response = await client.request('/open-api/goods/spu-info', {
+  const response = await requestWithRateLimitRetry(client, '/open-api/goods/spu-info', {
     method: 'POST',
     body: {spuName: row.spu, languageList: ['en']},
     headers: {language: 'en'},
@@ -223,6 +239,12 @@ const resultEnvelope = currentResults => ({
   authorizationContext: executionAuthorization?.context || null,
   results: currentResults,
 });
+const writeResultFile = async currentResults => {
+  const envelope = resultEnvelope(currentResults);
+  await fs.mkdir(path.dirname(args.out), {recursive: true});
+  await fs.writeFile(`${args.out}.tmp`, `${JSON.stringify(envelope, null, 2)}\n`, 'utf8');
+  await fs.rename(`${args.out}.tmp`, args.out);
+};
 const etByKey = new Map(asArray(bi?.inventoryDepletion?.products).map(row => [
   String(row.match_key || canonicalInventoryKey(row.standard_goods_sn)).toUpperCase(),
   row,
@@ -347,7 +369,7 @@ for (const row of rows) {
       for (let attempt = 1; attempt <= 2 && after.totalUsableInventory !== approvedTarget; attempt += 1) {
         const overwrite = computeInventoryOverwriteQuantity(approvedTarget, after);
         const idempotencyKey = `bi-inv-${stableInventoryHash({planHash: plan.payloadHash, store: row.storeKey, sku: row.skuCode, target: approvedTarget, overwrite, attempt}).slice(0, 42)}`;
-        const response = await client.request('/open-api/stock/change-inventory/v2', {
+        const response = await requestWithRateLimitRetry(client, '/open-api/stock/change-inventory/v2', {
           method: 'POST',
           body: {updateSkuInventoryQuantityRequests: [{
             idempotencyKey,
@@ -385,10 +407,7 @@ for (const row of rows) {
   } catch (error) {
     results.push({...result, state: 'blocked', error: error.message});
   }
-  const interim = resultEnvelope(results);
-  await fs.mkdir(path.dirname(args.out), {recursive: true});
-  await fs.writeFile(`${args.out}.tmp`, `${JSON.stringify(interim, null, 2)}\n`, 'utf8');
-  await fs.rename(`${args.out}.tmp`, args.out);
+  await writeResultFile(results);
 }
 const counts = {
   total: results.length,
@@ -397,10 +416,8 @@ const counts = {
   skipped: results.filter(row => row.state.startsWith('skipped_')).length,
   blocked: results.filter(row => row.state === 'blocked').length,
 };
-if (results.length === 0) {
-  const empty = resultEnvelope(results);
-  await fs.mkdir(path.dirname(args.out), {recursive: true});
-  await fs.writeFile(args.out, `${JSON.stringify(empty, null, 2)}\n`, 'utf8');
-}
+// A trailing run of `continue`-based safe skips does not pass through the
+// per-row checkpoint below. Always publish the complete terminal envelope.
+await writeResultFile(results);
 console.log(JSON.stringify({ok: counts.blocked === 0, planHash: plan.payloadHash, out: path.relative(ROOT, args.out).replaceAll(path.sep, '/'), counts}, null, 2));
 if (counts.blocked) process.exitCode = 1;

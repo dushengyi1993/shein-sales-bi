@@ -139,6 +139,7 @@ assert.throws(() => assertDailyInventoryExecutionAuthorization({
 const livePolicy = JSON.parse(fs.readFileSync(new URL('../config/inventory_replenishment_policy.json', import.meta.url), 'utf8'));
 const guardScript = fs.readFileSync(new URL('./cloud_daily_inventory_replenishment_guard.sh', import.meta.url), 'utf8');
 const guardService = fs.readFileSync(new URL('../infra/systemd/shein-bi-daily-inventory-replenishment-guard.service', import.meta.url), 'utf8');
+const executorScript = fs.readFileSync(new URL('./inventory/execute_daily_inventory_replenishment_plan.mjs', import.meta.url), 'utf8');
 assert.equal(livePolicy.execution.mode, 'automatic');
 assert.equal(livePolicy.execution.perRunUserConfirmationRequired, false);
 assert.equal(livePolicy.execution.automaticExecution.enabled, true);
@@ -148,4 +149,6 @@ assert.match(guardScript, /--confirm-hash "\$HASH"/);
 assert.match(guardScript, /state:"already_completed"/);
 assert.match(guardService, new RegExp(`SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT=${livePolicy.execution.automaticExecution.allowedContext}`));
 assert.match(guardService, new RegExp(`SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION=${livePolicy.execution.automaticExecution.authorizationId}`));
-console.log(JSON.stringify({ok: true, checks: 46}, null, 2));
+assert.match(executorScript, /Always publish the complete terminal envelope\.\s*await writeResultFile\(results\);/);
+assert.match(executorScript, /requestWithRateLimitRetry\(client, '\/open-api\/stock\/change-inventory\/v2'/);
+console.log(JSON.stringify({ok: true, checks: 48}, null, 2));
