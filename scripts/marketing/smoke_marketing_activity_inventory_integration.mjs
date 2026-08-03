@@ -113,6 +113,69 @@ for (const purpose of [
   assert.equal(state.stock.totalUsableInventory, 6, purpose);
 }
 
+const partialRescue = {
+  purpose: 'target_price_drift_partial_platform_block',
+  activityStock: 10,
+  endTime: '2026-08-09 23:59:59',
+  rows: [
+    {
+      storeKey: 'DX',
+      skc: 'sv-raised-and-covered',
+      canonical: 'JD-389',
+      limitedDiscountPrice: 132.31,
+      activityStock: 10,
+    },
+    {
+      storeKey: 'DX',
+      skc: 'sv-unrelated-platform-block',
+      canonical: 'SK-7015',
+      limitedDiscountPrice: 91.43,
+      activityStock: 10,
+    },
+  ],
+};
+const partialState = fakeAdapterState();
+const partialResult = await executeLimitedDiscountWithInventoryTransaction({
+  root: ROOT,
+  storeKey: 'DX',
+  rescue: partialRescue,
+  preflightFull: {
+    validation: {
+      invalid: [{
+        skc: 'sv-raised-and-covered',
+        reason: 'inventory below configured activity stock',
+        inventory: 6,
+        attendNum: 10,
+      }],
+    },
+  },
+  transactionHash: crypto.createHash('sha256').update('partial-platform-block').digest('hex'),
+  adapterFactory: fakeAdapterFactory(partialState),
+  runSubmit: async () => ({
+    ok: false,
+    full: {
+      ok: false,
+      safe: true,
+      status: 'platform_blocked_old_protection_restored',
+    },
+  }),
+  runEnrollmentReadback: async () => ({
+    ok: false,
+    full: limitedReadback({
+      ...partialRescue,
+      rows: [partialRescue.rows[0]],
+      ok: false,
+    }),
+  }),
+});
+assert.equal(partialResult.ok, false);
+assert.equal(partialResult.safe, true);
+assert.equal(partialState.stock.totalUsableInventory, 6);
+assert.doesNotMatch(
+  partialResult.blockers.map(row => row.reason).join(','),
+  /activity_invalid_or_withdrawn_after_inventory_restore/,
+);
+
 const sources = {
   manual: await read('scripts/marketing/batch_restore_manual_limited_discounts.mjs'),
   drift: await read('scripts/marketing/batch_fix_limited_discount_drift.mjs'),
@@ -135,7 +198,7 @@ assert.match(sources.legacy, /Legacy persistent marketing inventory top-up is di
 
 console.log(JSON.stringify({
   ok: true,
-  checks: 34,
+  checks: 38,
   ordinaryRunners: 3,
   limitedDiscountPaths: 4,
   legacyPersistentTopUpExecutable: false,
@@ -171,7 +234,7 @@ function fakeAdapterFactory(state) {
 
 function limitedReadback(rescue) {
   return {
-    ok: true,
+    ok: rescue.ok !== false,
     before: {
       conflictActivities: [{
         state: 2,
