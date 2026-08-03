@@ -15,7 +15,7 @@ Linux 生产健康只以 systemd、watchdog、Portal health 和云端数据审�
 - 当天销售不再使用 `shein-bi-cloud-today.timer` 每小时抓取。半托订单 Webhook 收到后按单查询 OpenAPI 并增量更新正式销售事实，Portal 通过 PostgreSQL `NOTIFY` + 登录态 SSE 刷新当前页面；`shein-bi-cloud-today.service` 只保留为人工灾备入口，不安装/启用对应 timer。
 - `shein-bi-cloud-session-manager.timer`：每天 `02:20`，在 `03:00` 最终日核对前顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并检查 profile 体积。
 - `shein-bi-cloud-manual-login-recovery.path` / `.timer`：人工登录完成且双重探测通过后，立即消费私有恢复队列，定向补跑该店之前失败的链接/业务域数据；path 负责即时唤醒，2 分钟 timer 只作漏触发兜底。service 使用独立 cgroup 和内存护栏，不把 Chrome 补采挂在 Portal cgroup 下。
-- `shein-bi-cloud-yesterday.timer`：每天 `03:00` 抓取前一天 WebAPI 独立核对文件并复核前两天稳定日；切换日及以后 WebAPI 不写正式事实，必须完成 19/19 店 OpenAPI 深度匹配后才调用数据库函数原子晋升 OpenAPI 最终日切片。任一失败、warning、缺店或差异都禁止晋升。该每日唯一性任务使用 `Persistent=true`，service 自身仍通过锁和日期状态防重复。
+- `shein-bi-cloud-yesterday.timer`：每天 `03:00` 用官方 OpenAPI 收齐前一天19店完整日切片并复核前两天稳定日；逐店 fetch/load/每日行完整性门禁全部通过后，才调用数据库函数原子晋升最终日切片。该链路不再依赖易过期的 Seller Center Cookie 或浏览器 profile；任一失败、缺店或缺少每日行都禁止晋升。该每日唯一性任务使用 `Persistent=true`，service 自身仍通过锁和日期状态防重复。
 - `shein-bi-db-backup.timer`：每天 `02:40` 备份业务库、Metabase 元数据库和生产人工特殊折扣登记到 `/srv/shein-bi/backups/auto`。本地保留 7 天；过期备份必须先归档到 `/lhcos-data/shein-bi-db-backups` 并通过源文件 SHA256、压缩包完整性和 COS 回读 SHA256 校验，之后才删除本地副本。COS 不可用或校验失败时保留本地文件。
 - `shein-bi-cloud-et-forwarder.timer`：每天 `01:20/04:20/07:20/10:20/13:20/17:20/20:20/23:20` 抓取 ET 货代仓/出库单、入仓，并轻量刷新订单/物流/售后相关 section；不开启开机补跑。需要服务器本地 `config/et_forwarder.local.json` 或 `ET_FORWARDER_USERNAME/ET_FORWARDER_PASSWORD`，密钥不进 GitHub。
 - `shein-bi-cloud-et-storage-fee.timer`：每天 `14:10` 只读抓取 ET 仓储费最终账单与 SKU 明细，执行 canonical 去重、利润 cache 发布、四层对账与 `profit/homeProfit` 预热。它与通用 ET 共用 profile/锁，但使用独立状态、输出和日志；`Persistent=true`，失败必须告警，不能静默跳过。

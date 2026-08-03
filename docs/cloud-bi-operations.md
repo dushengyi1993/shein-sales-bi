@@ -94,7 +94,7 @@
 
 
 
-ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启用并通过手动验证；飞书只读问数服务自 2026-07-11 起保持 `disabled + inactive`。2026-07-23 起，19 店半托当天销售由订单 Webhook 触发按单 OpenAPI 查询并写正式事实表，在线 BI 通过 SSE 实时刷新；旧每小时 `today` timer 已删除。每日 `03:00` WebAPI 仍抓前一天作为独立核对证据，但切换日以后不得直接清理或写入正式销售事实；只有 19 店 OpenAPI 与 WebAPI 全部深度匹配后，才原子晋升 OpenAPI 最终日切片。晨间日更继续补齐链接/业务域、RTV、SBN 和商品流量等非订单数据。Webhook 替代的是半托当天销售轮询，不等于所有数据域都已无浏览器或无 WebAPI。
+ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启用并通过手动验证；飞书只读问数服务自 2026-07-11 起保持 `disabled + inactive`。2026-07-23 起，19 店半托当天销售由订单 Webhook 触发按单 OpenAPI 查询并写正式事实表，在线 BI 通过 SSE 实时刷新；旧每小时 `today` timer 已删除。2026-08-03 起每日 `03:00` 最终日收口也改为19店官方 OpenAPI 完整性门禁后原子晋升，不再依赖易过期的 Seller Center Cookie。晨间日更继续补齐链接/业务域、RTV、SBN 和商品流量等非订单数据；这些尚未 API 化的数据域仍可能使用 WebAPI/headless。
 
 
 
@@ -107,14 +107,14 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 | 时间 / 频率 | 任务 | 形式 | 生产事实影响 | 备注 |
 |---|---|---|---|---|
 | 实时事件 | 半托订单 Webhook + 按单 OpenAPI 同步 | Webhook 触发，只查发生变化的订单 | 更新当天正式销售事实、日汇总并通知在线 BI | 旧每小时 `today` timer 已删除；失败进入 Webhook 重试/dead-letter 与 watchdog。 |
-| `03:00` | 昨日最终销售与前两天稳定日复核 `shein-bi-cloud-yesterday.service` | WebAPI 独立抓取 + 19 店 OpenAPI 深度对账 | WebAPI 不写正式事实；19/19 全匹配后原子晋升 OpenAPI 日切片 | 任一失败、warning、缺店或差异都禁止晋升，避免双写或用不完整日覆盖正式事实。 |
+| `03:00` | 昨日最终销售与前两天稳定日复核 `shein-bi-cloud-yesterday.service` | 19 店官方 OpenAPI 全量 | 逐店 fetch/load/每日行完整性通过后原子晋升 OpenAPI 日切片 | 任一失败、缺店或缺少每日行都禁止晋升，避免用不完整日覆盖正式事实。 |
 | `08:00` | 晨间串行链路 `shein-bi-cloud-morning-chain.service` | 直接启动日更补采 | 不重复抓当天销售，只触发慢变日更 | 飞书日报自动发送关闭。 |
 | 晨间链路之后，每日一次 | 统一日更补采 `shein-bi-cloud-daily-refresh.service` / `cloud_daily_refresh.sh yesterday` | 混合：WebAPI/headless + OpenAPI 来源/对账层 | 写链接/业务域、SBN 营销概览线索、RTV 复核等慢变数据；其中的销售步骤不直接写正式事实 | 不再重复执行 MBRs 全店营销价格栈扫描；该实时扫描只属于独立 guard。商品四档状态、SBN 经营/流量等仍需 WebAPI/headless。 |
 | 晨间日更内每日一次，跑 D-1 | 销售/退货/商品 OpenAPI reconciliation | OpenAPI | 更新 `fact.openapi_*` 和 `mart.openapi_*_reconciliation`，不直接对正式事实表做原始 DML | 销售最终日晋升只属于 `03:00` 的 19/19 深度匹配门禁；退货/商品继续按各自隔离对账和切源门禁处理。 |
 | `01:20/04:20/07:20/10:20/13:20/17:20/20:20/23:20` | ET 货代仓/出库单 `shein-bi-cloud-et-forwarder.service` | ET headless/API | 写 ET 仓库、出库单，并轻量刷新订单/物流/售后 section | 不是 SHEIN OpenAPI；异常不应中断已成功店铺数据。 |
 | `14:10` | ET 仓储费 `shein-bi-cloud-et-storage-fee.service` | ET headless/API，只读 `IncomeBill(sort=2)` + `ExportStoreFee` | 写仓储费事实、canonical 账单与利润 cache | 与通用 ET 共用 profile 锁但隔离输出；只预热利润，不刷新无关库存趋势。 |
 | `02:20` | 登录态管家 `shein-bi-cloud-session-manager.service` | 短生命周期 headless browser + WebAPI/SBN 探针 | 不写销售事实 | 恢复 WebAPI + SBN 登录态，结束后关闭它启动的浏览器。 |
-| `06:30` | 订单闭环复查 `shein-bi-cloud-order-closure.service` | WebAPI | 只更新订单生命周期状态，不重写历史销售事实 | 用于未终态订单复查；不随销售 OpenAPI 候选切换。 |
+| `06:30` | 订单闭环复查 `shein-bi-cloud-order-closure.service` | OpenAPI + Webhook/售后/ET 既有证据 | 只更新订单生命周期状态，不重写历史销售事实 | 不再因店铺后台 Cookie 过期整批失败；已有更强物流终态证据不会被较弱状态覆盖。 |
 | `10:30/13:30/16:30` | 每日营销 live guard `shein-bi-cloud-marketing-live-guard.service` | session HTTP 只读直连 | 一次读取 19 店普通活动、15% 券 active 集合与当前/未来活动价，生成精确计划和 repair queue；不持有写授权 | 不启动浏览器、不申请浏览器租约、不执行清理；当天首次成功后后续窗口只作失败重试。 |
 | `10:50/12:50/14:50/16:50/18:50/19:30` | 营销 repair worker | 受控浏览器写入 | 只执行负责人长期授权内的限时折扣修复 | 前五轮有界续跑，`19:30` 做最终续跑与回读；每轮总预算 8 组。 |
 | `03:45/09:50/21:00` | 浏览器残留清理 `shein-bi-cloud-browser-cleanup.service` | 本机进程清理 | 不写业务数据 | 避开日更和营销窗口，只回收无有效租约保护的孤儿浏览器。 |
@@ -157,7 +157,7 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 
 
 - 当天人工灾备入口：`scripts/cloud_bi_refresh.sh today intraday`。日常当天销售由订单 Webhook 触发按单 OpenAPI 写正式事实，不安装每小时 timer；只有实时链路故障并明确决定灾备时才手动运行。
-- 前一天最终版入口：`scripts/cloud_bi_refresh.sh yesterday final`。WebAPI 生成独立核对文件但在切换日以后不写正式事实；19/19 店 OpenAPI 深度匹配后才调用 `ops.promote_openapi_sales_slice` 原子晋升。
+- 前一天最终版入口：`scripts/cloud_bi_refresh.sh yesterday final`。切换日以后直接收齐19店 OpenAPI 完整日切片；逐店 fetch/load/每日行门禁通过后才调用 `ops.promote_openapi_sales_slice` 原子晋升。
 
 - Portal section 预热有两层：`cloud_bi_refresh.sh` 生成 core 后会后台启动 `scripts/prewarm_bi_portal_sections.sh`；`serve_bi_portal.mjs` 还会在服务启动和首页访问时检测 `data.json.generatedAt`，通过 core warmup watcher 兜底预热 section，防止用户打开页面时才现场生成。`homeRankings` / `homeProfit` 是首页轻量 section，分别从最后一次完整发布的销售/利润 cache 派生，再由 `liveSalesToday` 覆盖当天变化，二者都不允许同步触发移动成本重算，并使用独立 fast lane 避免被重 section 阻塞。普通同代实时刷新只更新状态 chip，不弹顶部缓存警告；后台失败会自动单飞重试，连续重试耗尽后才显示人话错误。当前日订单列表、排行和成交价散点由 `liveSalesToday` 覆盖，同一个 SSE token 不得被多个浏览器重复生成。完整 `rankings` / `profit` 仍保留给详情和筛选；若 `homeProfit` 的来源代次不匹配，前端仍必须拒绝旧利润，不能拿旧值当业务真相。
 - Portal 实时链路不做 60 秒轮询：订单 Webhook 入仓后先通过 PostgreSQL `NOTIFY` + SSE 推送销售；可见页面仅每 5 分钟做一次兜底检查。Portal 将订单/退货事件按默认 `45s` 合并后执行成本台账和利润 cache 刷新，成功后再推送 `accountingRefreshed=true`；失败默认 `5min` 后自动重试，服务启动时也会补做离线期间的事件。可用 `SHEIN_BI_LIVE_ACCOUNTING_DEBOUNCE_MS` / `SHEIN_BI_LIVE_ACCOUNTING_RETRY_MS` 调整，但不得把它改回高频全量销售抓数。
@@ -178,7 +178,7 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 
 - 飞书只读问数机器人（云端 Codex CLI 网关）保留入口：`scripts/cloud_lark_sales_qa_bot.sh` / `scripts/lark_sales_qa_bot.mjs`；当前只用于离线诊断或未来经明确授权恢复，生产 service 不运行。
 
-- 半托销售生产链路已按日期切换：当天由 Webhook + 按单 OpenAPI 增量写正式事实；最终日由 19 店 OpenAPI 全量与 WebAPI 独立文件深度匹配后原子晋升。`fact.openapi_*` 和 `mart.openapi_sales_reconciliation` 仍保留为可追溯来源与门禁证据，不得绕过全店匹配直接覆盖正式日切片。
+- 半托销售生产链路已按日期切换：当天由 Webhook + 按单 OpenAPI 增量写正式事实；最终日由19店 OpenAPI 全量完整性门禁后原子晋升。`fact.openapi_*` 和 `mart.openapi_sales_reconciliation` 仍保留为可追溯来源与诊断证据，不得绕过全店完整性门禁直接覆盖正式日切片。
 
 - WebAPI/headless 没有被全局删除：商品四档状态、SBN 经营/流量、营销活动、部分编辑级商品资料、订单生命周期复查等仍按各自边界使用。退货退款、商品/链接基础资料是否进入正式事实必须按对应域单独验收，不能借销售切源一刀切。
 
@@ -310,7 +310,7 @@ GitHub 应保存：
 
 - `shein-bi-cloud-watchdog.timer` 应保持 active；销售数据过期按 12 小时、页面底稿按 30 小时、链接/业务域按 48 小时提醒，并检查 Portal 的 SSE/LISTEN 连接。若报告通过恢复证据收口历史营销扫描 warning，必须同时看到 `issues=[]`、`recoveries[].type=daily_marketing_price_scan_recovery` 和原始 `dailyRefresh.status=warning`，不能只看进程退出码。
 
-- `shein-bi-cloud-morning-chain.timer` 应保持 active；慢变日更由它启动 `shein-bi-cloud-daily-refresh.service`。手动复跑用 `scripts/cloud_daily_refresh.sh yesterday`。若单店卡在 SBN `x-gw-auth`，优先看该店 attempt 重试日志；若 RTV 子步骤失败，先看底层脚本日志。当天销售由半托订单 Webhook 触发按单 OpenAPI 写正式事实，`03:00` 全店 OpenAPI 只在与 WebAPI 独立核对结果 19/19 深度匹配后原子晋升最终日切片；退货退款、商品/链接等其它数据域仍按各自 OpenAPI、WebAPI/headless 与日更边界处理。不要回退到本机补抓冒充云端日更。旧的 `shein-bi-cloud-link-business.timer`、`shein-bi-cloud-openapi-hl.timer`、`shein-bi-cloud-rtv-verify.timer` 应保持 masked，避免日更补采重复跑。
+- `shein-bi-cloud-morning-chain.timer` 应保持 active；慢变日更由它启动 `shein-bi-cloud-daily-refresh.service`。手动复跑用 `scripts/cloud_daily_refresh.sh yesterday`。若单店卡在 SBN `x-gw-auth`，优先看该店 attempt 重试日志；若 RTV 子步骤失败，先看底层脚本日志。当天销售由半托订单 Webhook 触发按单 OpenAPI 写正式事实，`03:00` 全店 OpenAPI 在19店逐店 fetch/load/每日行完整性通过后原子晋升最终日切片；退货退款、商品/链接等其它数据域仍按各自 OpenAPI、WebAPI/headless 与日更边界处理。不要回退到本机补抓冒充云端日更。旧的 `shein-bi-cloud-link-business.timer`、`shein-bi-cloud-openapi-hl.timer`、`shein-bi-cloud-rtv-verify.timer` 应保持 masked，避免日更补采重复跑。
 
 - `shein-bi-cloud-session-manager.timer` 应保持 active；手动复跑用 `scripts/cloud_shein_session_manager.sh`。报告文件在 `outputs/reports/cloud-session-manager-latest.json` / `.md`，若失败会被 watchdog 按 service failed 逻辑提醒。
 

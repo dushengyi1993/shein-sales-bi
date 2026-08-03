@@ -5,8 +5,10 @@ const source = await fs.readFile(new URL('./cloud_bi_refresh.sh', import.meta.ur
 
 assert.match(source, /shein_webhook_primary_sales_enabled\(DATE '\$DATE'\)/);
 assert.match(source, /run_shein_openapi_sales_reconciliation\.mjs/);
-assert.match(source, /Number\(counts\.matched\) === expected/);
-assert.match(source, /Number\(counts\.warning \|\| 0\) === 0/);
+assert.match(source, /row\?\.fetch\?\.ok === true/);
+assert.match(source, /row\?\.load\?\.ok === true/);
+assert.match(source, /Number\(row\?\.load\?\.rowCounts\?\.daily \|\| 0\) === 1/);
+assert.doesNotMatch(source, /Number\(counts\.matched\) === expected/);
 assert.match(source, /ops\.promote_openapi_sales_slice\(DATE '\$DATE',DATE '\$DATE'\)/);
 
 const loader = await fs.readFile(new URL('./load_bi_warehouse.mjs', import.meta.url), 'utf8');
@@ -15,4 +17,4 @@ assert.match(loader, /guardFormalSalesFacts/);
 assert.match(loader, /formalSales\.items/);
 assert.match(loader, /cleanupLoadedSlices\(args, formalSales\.daily/);
 
-console.log('cloud_primary_sales_finalize_contract: WebAPI compare, 19-store gate and canonical promotion passed');
+console.log('cloud_primary_sales_finalize_contract: 19-store OpenAPI completeness gate and canonical promotion passed');

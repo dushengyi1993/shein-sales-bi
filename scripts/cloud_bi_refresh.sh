@@ -101,38 +101,20 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 echo "[cloud_bi_refresh] start target=$TARGET date=$DATE mode=$MODE root=$ROOT"
 cd "$ROOT"
 
-export SHEIN_SALES_TRANSPORT="${SHEIN_SALES_TRANSPORT:-webapi}"
+export SHEIN_SALES_TRANSPORT="${SHEIN_SALES_TRANSPORT:-openapi}"
 export SHEIN_BI_PORTAL_TIMEOUT_MS="${SHEIN_BI_PORTAL_TIMEOUT_MS:-1800000}"
 export SHEIN_BI_PORTAL_DATA_MODE="${SHEIN_BI_PORTAL_DATA_MODE:-api}"
 
-node scripts/run_sales_sync_job.mjs \
-  --date "$DATE" \
-  --group ALL \
-  --skip-lark-base \
-  --store-attempts "${SHEIN_STORE_ATTEMPTS:-1}" \
-  --no-launch \
-  --no-products \
-  --no-monthly \
-  --no-compact \
-  --no-dashboard \
-  --status "cloud-${MODE}"
-
-node scripts/load_bi_warehouse.mjs \
-  --sales-date "$DATE" \
-  --skip-links \
-  --skip-dashboard
-
-# After the Webhook/OpenAPI cutover, the 03:00 WebAPI fetch remains an
-# independent final-day comparison source. It must never become a second copy
-# in the formal facts. The warehouse loader above therefore skips formal sales
-# rows on/after the configured cutover. Refresh the complete OpenAPI day,
-# require all 19 stores to match the WebAPI artifacts, then atomically promote
-# that canonical slice into the formal facts.
 PRIMARY_SALES_ACTIVE="$(
   "${DOCKER[@]}" exec shein-warehouse-db psql -X -qAt -U shein -d shein_bi \
     -c "SELECT CASE WHEN ops.shein_webhook_primary_sales_enabled(DATE '$DATE') THEN 'true' ELSE 'false' END"
 )"
 if [[ "$PRIMARY_SALES_ACTIVE" == "true" && "${SHEIN_BI_PRIMARY_SALES_FINALIZE:-1}" != "0" ]]; then
+  # Webhook + official OpenAPI are the production sales sources after cutover.
+  # Finalize the complete day from all 19 authorized stores without depending
+  # on expiring Seller Center cookies or browser profiles.  The OpenAPI fetch,
+  # load, and per-store daily-row checks below are the completeness gate; the
+  # reconciliation status against any old WebAPI artifact is diagnostic only.
   OPENAPI_RECON_DIR="${SHEIN_BI_OPENAPI_RECON_DIR:-/srv/shein-bi/logs/openapi-sales-reconciliation}"
   OPENAPI_RECON_FILE="$OPENAPI_RECON_DIR/openapi-sales-$DATE-$STAMP.json"
   mkdir -p "$OPENAPI_RECON_DIR"
@@ -146,24 +128,57 @@ const file = process.argv[2];
 const report = JSON.parse(fs.readFileSync(file, 'utf8'));
 const counts = report.counts || {};
 const expected = 19;
+const expectedStores = ['CX','DL','DX','FY','HL','JSH','JY','LQ','MZ','NM','QH','QY','TS','TZ','TZZ','XC','XL','YJ','ZL'];
+const authorizedStores = [...new Set((report.authorizedStores || []).map(value => String(value || '').trim().toUpperCase()))].sort();
+const results = Array.isArray(report.results) ? report.results : [];
 const ok = report.ok === true
   && Number(counts.total) === expected
   && Number(counts.succeeded) === expected
-  && Number(counts.matched) === expected
   && Number(counts.failed || 0) === 0
-  && Number(counts.warning || 0) === 0
-  && Number(counts.missingBrowser || 0) === 0
-  && Number(counts.skipped || 0) === 0;
+  && Number(counts.skipped || 0) === 0
+  && JSON.stringify(authorizedStores) === JSON.stringify(expectedStores)
+  && results.length === expected
+  && results.every(row =>
+    row?.ok === true
+    && row?.fetch?.ok === true
+    && row?.load?.ok === true
+    && Number(row?.load?.rowCounts?.daily || 0) === 1
+  );
 if (!ok) {
-  throw new Error(`OpenAPI final-day gate failed: ${JSON.stringify(counts)}`);
+  throw new Error(`OpenAPI final-day completeness gate failed: ${JSON.stringify({
+    counts,
+    authorizedStores,
+    resultCount: results.length,
+    failedStores: results.filter(row => !(row?.ok === true && row?.fetch?.ok === true && row?.load?.ok === true && Number(row?.load?.rowCounts?.daily || 0) === 1)).map(row => row?.storeKey),
+  })}`);
 }
-console.log(`[cloud_bi_refresh] OpenAPI final-day gate passed: ${JSON.stringify(counts)}`);
+console.log(`[cloud_bi_refresh] OpenAPI final-day completeness gate passed: ${JSON.stringify(counts)}`);
 NODE
   PROMOTION_RESULT="$(
     "${DOCKER[@]}" exec shein-warehouse-db psql -X -qAt -F '|' -v ON_ERROR_STOP=1 -U shein -d shein_bi \
       -c "SELECT headers_written,items_written,payment_flags_written,daily_rows_refreshed FROM ops.promote_openapi_sales_slice(DATE '$DATE',DATE '$DATE')"
   )"
   echo "[cloud_bi_refresh] canonical OpenAPI sales promoted date=$DATE result=$PROMOTION_RESULT reconciliation=$OPENAPI_RECON_FILE"
+else
+  # Historical pre-cutover recovery only. Production dates must not fall back
+  # to Seller Center sessions merely because a browser profile is available.
+  export SHEIN_SALES_TRANSPORT=webapi
+  node scripts/run_sales_sync_job.mjs \
+    --date "$DATE" \
+    --group ALL \
+    --skip-lark-base \
+    --store-attempts "${SHEIN_STORE_ATTEMPTS:-1}" \
+    --no-launch \
+    --no-products \
+    --no-monthly \
+    --no-compact \
+    --no-dashboard \
+    --status "cloud-${MODE}"
+
+  node scripts/load_bi_warehouse.mjs \
+    --sales-date "$DATE" \
+    --skip-links \
+    --skip-dashboard
 fi
 
 COST_LEDGER_STATUS=0

@@ -152,7 +152,7 @@ function parseArgs(argv) {
     minAgeDays: 2,
     cooldownHours: 20,
     ignoreCooldown: false,
-    transport: process.env.SHEIN_SALES_TRANSPORT || 'webapi',
+    transport: process.env.SHEIN_SALES_TRANSPORT || 'openapi',
     dryRun: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -175,8 +175,8 @@ function parseArgs(argv) {
     else if (a === '--end') args.end = argv[++i];
     else throw new Error(`Unknown argument: ${a}`);
   }
-  if (args.transport && !['webapi', 'auto', 'browser'].includes(args.transport)) {
-    throw new Error('--transport must be one of: webapi, auto, browser');
+  if (args.transport && !['openapi', 'webapi', 'auto', 'browser'].includes(args.transport)) {
+    throw new Error('--transport must be one of: openapi, webapi, auto, browser');
   }
   if (args.date) {
     args.start = args.date;
@@ -547,7 +547,7 @@ async function fillMissingEvidenceRows(args, pair, fetchJson, sourceFile, rows) 
   const meta = {
     checkedAt,
     sourceFile,
-    transport: fetchJson.transport || fetchJson.orderPage?.transport || args.transport || '',
+    transport: fetchJson.transport || (fetchJson.source === 'shein-openapi' ? 'openapi' : '') || fetchJson.orderPage?.transport || args.transport || '',
     fetchTime: ts(fetchJson.fetchTime),
   };
   const missingRows = [];
@@ -575,14 +575,22 @@ function parseJsonFromOutput(text) {
 }
 
 async function fetchPair(args, runDir, pair) {
-  const fetchArgs = [
-    path.join(ROOT, 'scripts', 'fetch_shein_sales.mjs'),
-    pair.storeKey,
-    '--date', pair.createdDate,
-    '--transport', args.transport,
-    '--out', runDir,
-    '--json',
-  ];
+  const openApi = args.transport === 'openapi';
+  const fetchArgs = openApi
+    ? [
+        path.join(ROOT, 'scripts', 'fetch_shein_openapi_sales.mjs'),
+        pair.storeKey,
+        '--date', pair.createdDate,
+        '--out', runDir,
+      ]
+    : [
+        path.join(ROOT, 'scripts', 'fetch_shein_sales.mjs'),
+        pair.storeKey,
+        '--date', pair.createdDate,
+        '--transport', args.transport,
+        '--out', runDir,
+        '--json',
+      ];
   const res = await run(process.execPath, fetchArgs, {
     timeoutMs: Number(process.env.SHEIN_ORDER_RECHECK_FETCH_TIMEOUT_MS || 180_000),
     env: {...process.env, SHEIN_SALES_TRANSPORT: args.transport},
@@ -674,7 +682,7 @@ function rowsFromFetchFile(file) {
       last_checked_at: checkedAt,
       terminal_at: status.terminal ? checkedAt : null,
       source_file: sourceFile,
-      transport: j.transport || j.orderPage?.transport || '',
+      transport: j.transport || (j.source === 'shein-openapi' ? 'openapi' : '') || j.orderPage?.transport || '',
       fetch_time: ts(j.fetchTime),
       raw_summary: compactJson(row),
     });

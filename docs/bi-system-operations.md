@@ -8,7 +8,7 @@
 - BI 系统当前以云端为正式入口，负责 PostgreSQL 数据仓库、Metabase 和 BI 经营门户。
 - 当前不能直接停用或删除 Metabase：PostgreSQL 是数据底座，Metabase 是正式深度分析/自由钻取层，BI Portal 是日常经营入口；只有等自研门户完全覆盖深钻能力后，才能重新评估是否降级 Metabase。
 - 不从飞书反抓数据做 BI 源头；BI 源头来自 SHEIN 后台抓取后的私有源文件 / PostgreSQL。
-- 半托当天销售由订单 Webhook 触发按单 OpenAPI 写正式事实；前一天最终收口用 WebAPI 独立文件做全店深度核对，匹配后原子晋升 OpenAPI 日切片。Chrome profile 仍用于商品/流量/营销/订单生命周期等未完全 API 化的数据域和登录续期，不是当天销售轮询主路径。
+- 半托当天销售由订单 Webhook 触发按单 OpenAPI 写正式事实；前一天最终收口由19店 OpenAPI 完整性门禁通过后原子晋升日切片。订单生命周期复查也优先使用 OpenAPI，并结合 Webhook、售后和 ET 证据；Chrome profile 只保留给商品流量、营销与编辑级资料等尚未完成 API 化的数据域。
 - BI 后置刷新失败不应反向影响 SHEIN 抓数、异常通知或后续手动日报入口。
 - 暂停开关：`state/feishu-base-sync-paused.flag`。存在该文件时，跳过飞书事实表、产品表、月表、宽表和看板写入；删除该文件后可恢复写表链路。
 - 营销折扣自动化仍按“只读巡检 / 精确队列 / 受控修复 / live 回读”分层；长期路线图见 `docs/marketing-automation-roadmap.md`。guard 使用 session HTTP，一次读取 19 店普通活动、15% 券 active 集合与当前/未来活动价，不启动浏览器、不持有租约或写授权。`2026-07-18` 生产实测完整巡检 `157s`、1516 行、19/19 店成功、Chrome `0 -> 0`。repair worker 于 `10:50/12:50/14:50/16:50/18:50/19:30` 每轮最多处理 8 个活动组，强制精确 hash、旧保护快照、事务 journal、失败补偿和最终全店 readback。

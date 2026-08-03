@@ -23,7 +23,7 @@
 | 数据底座 | PostgreSQL warehouse + Metabase |
 | 半托 OpenAPI | 出站19店独立App；Webhook入站由DL中央App统一验签 |
 | 当天销售 | 订单 Webhook → 按单 OpenAPI → 正式事实 → Portal SSE |
-| 最终日销售 | WebAPI 独立核对 + 19/19 OpenAPI 深度匹配后原子晋升 |
+| 最终日销售 | 19/19 OpenAPI 完整性门禁通过后原子晋升 |
 | 飞书 | Base/看板暂停；日报手动；P0 异常提醒保留；问数 service 停用 |
 
 19 店：`CX DL DX FY HL JSH JY LQ MZ NM QH QY TS TZ TZZ XC XL YJ ZL`。

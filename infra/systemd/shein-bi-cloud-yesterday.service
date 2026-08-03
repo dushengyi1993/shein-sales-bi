@@ -12,7 +12,7 @@ WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/home/sheinops
 Environment=TZ=Asia/Shanghai
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
-Environment=SHEIN_SALES_TRANSPORT=webapi
+Environment=SHEIN_SALES_TRANSPORT=openapi
 Environment=SHEIN_DOCKER_USE_SUDO=1
 Environment=SHEIN_BI_OPENAPI_RECON_DIR=/opt/shein-bi/app/outputs/reports/openapi-sales-reconciliation
 Environment=SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-nightly-maintenance.lock

@@ -114,6 +114,7 @@ assert.match(property(dbBackup, 'Before'), /shein-bi-cloud-yesterday\.service/);
 
 const yesterday = readUnit('shein-bi-cloud-yesterday.service');
 assert.match(yesterday, /flock -w 7800/, 'yesterday final refresh waits for the shared nightly maintenance lock instead of colliding');
+assert.match(yesterday, /SHEIN_SALES_TRANSPORT=openapi/, 'final-day sales must not depend on expiring Seller Center sessions');
 assert.match(property(yesterday, 'After'), /shein-bi-cloud-session-manager\.service/);
 assert.match(property(yesterday, 'After'), /shein-bi-db-backup\.service/);
 assert.match(yesterday, /cloud_bi_refresh\.sh yesterday yesterday-final; \/opt\/shein-bi\/app\/scripts\/cloud_bi_refresh\.sh 2daysago third-day-stable-recheck/,
