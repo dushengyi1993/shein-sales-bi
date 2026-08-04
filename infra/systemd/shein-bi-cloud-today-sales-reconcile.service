@@ -1,0 +1,28 @@
+[Unit]
+Description=SHEIN BI lightweight current-day OpenAPI sales reconciliation
+Wants=network-online.target docker.service shein-bi-portal.service
+After=network-online.target docker.service shein-bi-portal.service
+
+[Service]
+Type=oneshot
+User=sheinops
+Group=sheinops
+UMask=0077
+WorkingDirectory=/opt/shein-bi/app
+Environment=HOME=/home/sheinops
+Environment=TZ=Asia/Shanghai
+Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_BI_PORTAL_URL=http://127.0.0.1:8787
+Environment=SHEIN_OPENAPI_RECONCILE_CONCURRENCY=3
+TimeoutStartSec=120
+TimeoutStopSec=15
+KillMode=control-group
+Nice=12
+CPUWeight=20
+CPUQuota=30%
+IOWeight=20
+MemoryHigh=400M
+MemoryMax=700M
+OOMPolicy=stop
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_today_sales_reconcile.sh
+SuccessExitStatus=75

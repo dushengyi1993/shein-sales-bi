@@ -13,6 +13,18 @@ LEASE_TASK="${SHEIN_LINK_BUSINESS_LEASE_TASK:-cloud-link-business}"
 LEASE_RUN_ID="${SHEIN_LINK_BUSINESS_RUN_ID:-$(node -e 'console.log(require("node:crypto").randomUUID())')}"
 LEASE_TTL_SEC="${SHEIN_LINK_BUSINESS_LEASE_TTL_SEC:-5400}"
 LEASE_ACTIVE=0
+FETCH_ONLY="${SHEIN_LINK_BUSINESS_FETCH_ONLY:-0}"
+FINALIZE_ONLY="${SHEIN_LINK_BUSINESS_FINALIZE_ONLY:-0}"
+CHUNK_RESULT_FILE="${SHEIN_LINK_BUSINESS_CHUNK_RESULT_FILE:-}"
+
+is_true() {
+  [[ "$1" == "1" || "$1" == "true" ]]
+}
+
+if is_true "$FETCH_ONLY" && is_true "$FINALIZE_ONLY"; then
+  echo "SHEIN_LINK_BUSINESS_FETCH_ONLY and SHEIN_LINK_BUSINESS_FINALIZE_ONLY are mutually exclusive" >&2
+  exit 64
+fi
 
 resolve_date() {
   local target="$1"
@@ -114,6 +126,40 @@ fs.renameSync(tmp, file);
 NODE
 }
 
+write_chunk_result() {
+  local status="$1"
+  local message="$2"
+  [[ -n "$CHUNK_RESULT_FILE" ]] || return 0
+  mkdir -p "$(dirname "$CHUNK_RESULT_FILE")"
+  DATE="$DATE" \
+  STATUS="$status" \
+  MESSAGE="$message" \
+  SUCCESS_STORES="${SUCCESS_STORES[*]}" \
+  FAILED_STORES="${FAILED_STORES[*]}" \
+  LOG_FILE="$LOG_FILE" \
+  CHUNK_RESULT_FILE="$CHUNK_RESULT_FILE" \
+  node - <<'NODE'
+const fs = require('fs');
+const split = value => String(value || '')
+  .split(/[\s,]+/)
+  .map(item => item.trim().toUpperCase())
+  .filter(Boolean);
+const payload = {
+  ok: process.env.STATUS === 'done',
+  status: process.env.STATUS,
+  date: process.env.DATE,
+  generatedAt: new Date().toISOString(),
+  successfulStores: split(process.env.SUCCESS_STORES),
+  failedStores: split(process.env.FAILED_STORES),
+  message: process.env.MESSAGE || '',
+  logFile: process.env.LOG_FILE,
+};
+const temporary = `${process.env.CHUNK_RESULT_FILE}.${process.pid}.tmp`;
+fs.writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, {mode: 0o660});
+fs.renameSync(temporary, process.env.CHUNK_RESULT_FILE);
+NODE
+}
+
 store_profile_dir() {
   local key="$1"
   STORE_KEY="$key" node -e "const fs=require('fs'); const path=require('path'); const cfg=JSON.parse(fs.readFileSync('config/stores.json','utf8')); const s=(cfg.stores||[]).find(x=>String(x.storeKey).toUpperCase()===process.env.STORE_KEY.toUpperCase()); if(!s) process.exit(2); console.log(path.join(process.cwd(),'profiles',\`persistent-\${s.profileKey}-profile\`));"
@@ -150,58 +196,109 @@ export SHEIN_BI_PORTAL_TIMEOUT_MS="${SHEIN_BI_PORTAL_TIMEOUT_MS:-1800000}"
 export SHEIN_BI_PORTAL_DATA_MODE="${SHEIN_BI_PORTAL_DATA_MODE:-api}"
 
 trap on_exit EXIT
-lease_action acquire
-LEASE_ACTIVE=1
-close_store_browsers
-
 STORES="$(store_keys)"
 FAILED_STORES=()
 SUCCESS_STORES=()
 ALLOW_PARTIAL="${SHEIN_LINK_BUSINESS_ALLOW_PARTIAL:-1}"
-for STORE in $STORES; do
-  STORE_OK=0
-  MAX_ATTEMPTS="${SHEIN_LINK_BUSINESS_STORE_ATTEMPTS:-3}"
-  for ATTEMPT in $(seq 1 "$MAX_ATTEMPTS"); do
-    lease_action heartbeat >/dev/null
-    echo "[cloud_link_business_sync] store=$STORE attempt=$ATTEMPT/$MAX_ATTEMPTS bootstrap/fetch start"
-    close_one_store_browser "$STORE"
-    if node scripts/restore_shein_store_session.mjs \
-      --store "$STORE" \
-      --date "$DATE" \
-      --headless \
-      --timeout-ms "${SHEIN_SESSION_RESTORE_TIMEOUT_MS:-180000}" \
-      && node scripts/fetch_shein_links.mjs \
-        --stores "$STORE" \
-        --date "$DATE" \
-        --page-size "${SHEIN_LINK_PAGE_SIZE:-50}" \
-      && node scripts/fetch_shein_business_domains.mjs \
+if is_true "$FINALIZE_ONLY"; then
+  echo "[cloud_link_business_sync] finalize-only validate current-date all-store evidence"
+  while IFS='|' read -r STATUS STORE REASON; do
+    [[ -n "$STORE" ]] || continue
+    if [[ "$STATUS" == "ok" ]]; then
+      SUCCESS_STORES+=("$STORE")
+    else
+      FAILED_STORES+=("$STORE")
+      echo "[cloud_link_business_sync] finalize evidence missing store=$STORE reason=$REASON" >&2
+    fi
+  done < <(
+    DATE="$DATE" STORES="$STORES" node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const date = process.env.DATE;
+const stores = String(process.env.STORES || '').split(/\s+/).map(value => value.trim().toUpperCase()).filter(Boolean);
+for (const store of stores) {
+  const files = [
+    path.join(process.cwd(), 'outputs', 'shein_links', store, `${date}.json`),
+    path.join(process.cwd(), 'outputs', 'shein_business_domains', store, `${date}.json`),
+  ];
+  let reason = '';
+  for (const file of files) {
+    try {
+      const payload = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const payloadStore = String(payload?.store?.storeKey || '').trim().toUpperCase();
+      if (payload?.ok !== true) reason = `not_ok:${path.basename(path.dirname(file))}`;
+      else if (String(payload?.date || '') !== date) reason = `date_mismatch:${path.basename(path.dirname(file))}`;
+      else if (payloadStore !== store) reason = `store_mismatch:${path.basename(path.dirname(file))}`;
+    } catch (error) {
+      reason = error?.code === 'ENOENT' ? `missing:${file}` : `invalid:${file}`;
+    }
+    if (reason) break;
+  }
+  process.stdout.write(`${reason ? 'failed' : 'ok'}|${store}|${reason}\n`);
+}
+NODE
+  )
+else
+  lease_action acquire
+  LEASE_ACTIVE=1
+  close_store_browsers
+  for STORE in $STORES; do
+    STORE_OK=0
+    MAX_ATTEMPTS="${SHEIN_LINK_BUSINESS_STORE_ATTEMPTS:-3}"
+    for ATTEMPT in $(seq 1 "$MAX_ATTEMPTS"); do
+      lease_action heartbeat >/dev/null
+      echo "[cloud_link_business_sync] store=$STORE attempt=$ATTEMPT/$MAX_ATTEMPTS bootstrap/fetch start"
+      close_one_store_browser "$STORE"
+      if node scripts/restore_shein_store_session.mjs \
         --store "$STORE" \
         --date "$DATE" \
-        --domains "${SHEIN_BUSINESS_DOMAINS:-home,afterSales,waybill,fulfillment,productInventory,management,marketing,quality,comments}" \
-        --wait-ms "${SHEIN_BUSINESS_WAIT_MS:-2000}" \
-        --max-pages "${SHEIN_BUSINESS_MAX_PAGES:-20}" \
-        --store-attempts "${SHEIN_BUSINESS_STORE_ATTEMPTS:-2}" \
-        --relogin-headless \
-        --json; then
-      STORE_OK=1
+        --headless \
+        --timeout-ms "${SHEIN_SESSION_RESTORE_TIMEOUT_MS:-180000}" \
+        && node scripts/fetch_shein_links.mjs \
+          --stores "$STORE" \
+          --date "$DATE" \
+          --page-size "${SHEIN_LINK_PAGE_SIZE:-50}" \
+        && node scripts/fetch_shein_business_domains.mjs \
+          --store "$STORE" \
+          --date "$DATE" \
+          --domains "${SHEIN_BUSINESS_DOMAINS:-home,afterSales,waybill,fulfillment,productInventory,management,marketing,quality,comments}" \
+          --wait-ms "${SHEIN_BUSINESS_WAIT_MS:-2000}" \
+          --max-pages "${SHEIN_BUSINESS_MAX_PAGES:-20}" \
+          --store-attempts "${SHEIN_BUSINESS_STORE_ATTEMPTS:-2}" \
+          --relogin-headless \
+          --json; then
+        STORE_OK=1
+        close_one_store_browser "$STORE"
+        echo "[cloud_link_business_sync] store=$STORE done"
+        break
+      fi
       close_one_store_browser "$STORE"
-      echo "[cloud_link_business_sync] store=$STORE done"
-      break
+      echo "[cloud_link_business_sync] store=$STORE attempt=$ATTEMPT failed; will retry after short cooldown" >&2
+      sleep 10
+    done
+    if [[ "$STORE_OK" != "1" ]]; then
+      echo "[cloud_link_business_sync] store=$STORE failed after $MAX_ATTEMPTS attempts" >&2
+      FAILED_STORES+=("$STORE")
+      if ! is_true "$ALLOW_PARTIAL"; then
+        write_chunk_result "failed" "store fetch failed"
+        exit 1
+      fi
+    else
+      SUCCESS_STORES+=("$STORE")
     fi
-    close_one_store_browser "$STORE"
-    echo "[cloud_link_business_sync] store=$STORE attempt=$ATTEMPT failed; will retry after short cooldown" >&2
-    sleep 10
   done
-  if [[ "$STORE_OK" != "1" ]]; then
-    echo "[cloud_link_business_sync] store=$STORE failed after $MAX_ATTEMPTS attempts" >&2
-    FAILED_STORES+=("$STORE")
-    if [[ "$ALLOW_PARTIAL" != "1" && "$ALLOW_PARTIAL" != "true" ]]; then
-      exit 1
-    fi
-  else
-    SUCCESS_STORES+=("$STORE")
+fi
+
+if is_true "$FETCH_ONLY"; then
+  if [[ "${#FAILED_STORES[@]}" -gt 0 ]]; then
+    write_chunk_result "failed" "one or more stores failed"
+    echo "[cloud_link_business_sync] fetch-only failed stores=${FAILED_STORES[*]}" >&2
+    exit 1
   fi
-done
+  write_chunk_result "done" "selected stores fetched; global merge intentionally deferred"
+  echo "[cloud_link_business_sync] fetch-only done date=$DATE stores=${SUCCESS_STORES[*]} log=$LOG_FILE"
+  exit 0
+fi
 
 if [[ "${#FAILED_STORES[@]}" -gt 0 ]]; then
   echo "[cloud_link_business_sync] WARN failed stores: ${FAILED_STORES[*]}" >&2
@@ -246,6 +343,9 @@ NODE
     echo "[cloud_link_business_sync] partial result recorded; skip BI warehouse/portal refresh to avoid presenting incomplete link/business date" >&2
     check_portal_health
     echo "[cloud_link_business_sync] done with partial failures date=$DATE failed=${FAILED_STORES[*]} log=$LOG_FILE"
+    if is_true "$FINALIZE_ONLY"; then
+      exit 1
+    fi
     exit 0
   fi
 fi
@@ -398,8 +498,15 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 
 if [[ "$SHEIN_BI_PORTAL_DATA_MODE" == "api" && "${SHEIN_BI_PORTAL_PREWARM_DISABLED:-0}" != "1" ]]; then
-  nohup bash scripts/prewarm_bi_portal_sections.sh >/dev/null 2>&1 &
-  echo "[cloud_link_business_sync] portal section prewarm started pid=$!"
+  bash scripts/enqueue_bi_portal_sections.sh \
+    --sections linksData,productState,productTrafficDaily,homeTrafficDaily \
+    --priority 20 \
+    --reason "link-business-$DATE"
+  bash scripts/enqueue_bi_portal_sections.sh \
+    --sections afterSales,waybills,comments,actions \
+    --priority 50 \
+    --reason "link-business-$DATE"
+  echo "[cloud_link_business_sync] portal sections queued for bounded host-locked refresh"
 fi
 
 check_portal_health

@@ -99,9 +99,10 @@ BI 系统当前分为三层入口：
 当前自动任务状态：
 
 - 生产调度以 `infra/systemd/*.timer` 和 [cloud-bi-operations.md](cloud-bi-operations.md) 为事实源；半托当天销售由 Webhook 事件触发，不再存在每小时 `today` timer。
-- 云端 `shein-bi-cloud-morning-chain.timer`：每天 `08:00`，跳过重复的当天销售抓取，直接启动 `shein-bi-cloud-daily-refresh.service` 做前一完整日统一补采；当前飞书日报自动发送已停用。
-- 云端 `shein-bi-cloud-yesterday.timer`：每天 `03:00`，收齐前一天19店 OpenAPI 完整日切片、复核稳定日，并在逐店 fetch/load/每日行门禁通过后原子晋升最终日切片。
-- 云端 `shein-bi-db-backup.timer`：每天 `02:40`，备份业务库和 Metabase 元数据库。
+- 半托与全托共用主机的当前排班、共享 host 锁、晨间 14+5 marker DAG 和 Portal 单队列见 [shared-host-resource-schedule.md](shared-host-resource-schedule.md)。
+- 晨间链路拆为 `08:00` 前14店、`08:45` 后5店合并、`08:55` 非浏览器补充；普通页面不能再并发生成重 section。
+- 云端 `shein-bi-cloud-yesterday.timer`：每天 `02:45`，在 session/backup marker 通过后收齐前一天19店 OpenAPI 完整日切片并复核稳定日。
+- 云端 `shein-bi-db-backup.timer`：每天 `01:45`，在全托 `01:55` 备份前完成并释放共享重任务车道。
 - 云端 `shein-bi-cloud-session-manager.timer`、`shein-bi-cloud-et-forwarder.timer`、`shein-bi-cloud-browser-cleanup.timer` 和 `shein-bi-cloud-watchdog.timer` 分别承担登录态巡检、ET 出库/货代、非业务窗口残留浏览器清理和异常通知。飞书问数服务保持暂停；旧 `today/daily-lark-report/link-business/rtv-verify/openapi-hl` 分散 timer 不再是生产调度。
 - 本地 `SHEIN-BI-Daily-Pipeline-0700`、`SHEIN-Sales-15Stores-LinkManagement-0530`、`SHEIN-Sales-ETForwarder-0420` 等 Windows 任务已封存禁用，仅保留为回滚/迁移参考。
 

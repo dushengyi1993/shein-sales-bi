@@ -2,7 +2,9 @@
 Description=Run SHEIN BI cloud ET forwarder sync at business checkpoints
 
 [Timer]
-OnCalendar=*-*-* 01,04,07,10,13,17,20,23:20:00
+OnCalendar=*-*-* 01,04:12:00
+OnCalendar=*-*-* 07,10,13,17,20,23:20:00
+AccuracySec=5s
 Persistent=false
 Unit=shein-bi-cloud-et-forwarder.service
 

@@ -16,6 +16,7 @@ LOG_DIR="${SHEIN_BI_PREWARM_LOG_DIR:-/srv/shein-bi/logs/cloud-portal-prewarm}"
 TIMEOUT_SECONDS="${SHEIN_BI_PREWARM_SECTION_TIMEOUT_SECONDS:-1200}"
 FORCE_REFRESH="${SHEIN_BI_PORTAL_PREWARM_FORCE:-1}"
 ASYNC_REFRESH="${SHEIN_BI_PORTAL_PREWARM_ASYNC:-1}"
+HOST_LOCKED_WORKER="${SHEIN_BI_PORTAL_PREWARM_HOST_LOCKED:-0}"
 LOCK_FILE="${SHEIN_BI_PORTAL_PREWARM_LOCK_FILE:-$ROOT/state/locks/shein-bi-portal-prewarm.lock}"
 
 mkdir -p "$LOG_DIR"
@@ -47,7 +48,11 @@ for RAW_SECTION in "${SECTION_LIST[@]}"; do
       SECTION_URL="${SECTION_URL}&async=1"
     fi
   fi
-  if curl -fsS --max-time "$TIMEOUT_SECONDS" "$SECTION_URL" >/dev/null; then
+  CURL_HEADERS=()
+  if [[ "$HOST_LOCKED_WORKER" == "1" || "$HOST_LOCKED_WORKER" == "true" ]]; then
+    CURL_HEADERS=(-H 'X-SHEIN-BI-HOST-LOCKED-WORKER: 1')
+  fi
+  if curl -fsS --max-time "$TIMEOUT_SECONDS" "${CURL_HEADERS[@]}" "$SECTION_URL" >/dev/null; then
     END="$(date +%s)"
     echo "[prewarm_bi_portal_sections] section=$SECTION ok duration_sec=$((END-START))"
   else

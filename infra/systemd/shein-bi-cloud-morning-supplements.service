@@ -1,0 +1,40 @@
+[Unit]
+Description=SHEIN BI morning non-browser daily supplements
+Wants=network-online.target docker.service shein-bi-portal.service
+After=network-online.target docker.service shein-bi-portal.service systemd-tmpfiles-setup.service
+
+[Service]
+Type=oneshot
+Slice=shein-host-heavy-bi.slice
+User=sheinops
+Group=sheinops
+UMask=0077
+WorkingDirectory=/opt/shein-bi/app
+Environment=HOME=/home/sheinops
+Environment=TZ=Asia/Shanghai
+Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_BI_PORTAL_URL=http://127.0.0.1:8787
+Environment=SHEIN_DOCKER_USE_SUDO=1
+Environment=SHEIN_BI_MORNING_CHAIN_LOG_DIR=/srv/shein-bi/logs/cloud-morning-chain
+Environment=SHEIN_BI_MORNING_CHAIN_STATE_DIR=/opt/shein-bi/app/state/cloud_morning_chain
+Environment=SHEIN_BI_DAILY_LOG_DIR=/srv/shein-bi/logs/cloud-daily-refresh
+Environment=SHEIN_BI_DAILY_WAIT_BUSY_TIMEOUT_SEC=120
+Environment=SHEIN_BI_DAILY_MIN_AVAILABLE_MEM_MIB=2048
+Environment=SHEIN_BI_DAILY_OPENAPI_RECONCILIATION=1
+Environment=SHEIN_BI_DAILY_OPENAPI_RETURN_RECONCILIATION=1
+Environment=SHEIN_BI_DAILY_OPENAPI_FINANCE_SYNC=1
+Environment=SHEIN_OPENAPI_FINANCE_WINDOW_DAYS=35
+Environment=SHEIN_OPENAPI_FINANCE_CONCURRENCY=3
+Environment=SHEIN_BI_DAILY_OPENAPI_PRODUCT_RECONCILIATION=1
+Environment=SHEIN_BI_DAILY_INVENTORY_COST_REFRESH=1
+TimeoutStartSec=1200
+TimeoutStopSec=30
+KillMode=control-group
+Nice=10
+CPUWeight=40
+IOWeight=30
+MemoryHigh=1800M
+MemoryMax=2600M
+OOMPolicy=stop
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain morning-supplements --class openapi --lock-wait-sec 120 --deadline-at 09:11 --defer-state /srv/shein-bi/runtime/host-scheduler/morning-supplements.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_morning_chain.sh supplements
+SuccessExitStatus=75

@@ -179,23 +179,45 @@ export SHEIN_BI_PORTAL_TIMEOUT_MS="${SHEIN_BI_PORTAL_TIMEOUT_MS:-1800000}"
 export SHEIN_BI_PORTAL_DATA_MODE="${SHEIN_BI_PORTAL_DATA_MODE:-api}"
 
 DAILY_WARNINGS=()
+LINK_BUSINESS_MODE="${SHEIN_BI_DAILY_LINK_BUSINESS_MODE:-full}"
 
 wait_for_busy_writers
 wait_for_lark_report_lock
 ensure_capacity_for_slow_refresh
 
-echo "[cloud_daily_refresh] step=link-business date=$DATE"
-if ! SHEIN_LINK_BUSINESS_REFRESH_PORTAL=0 bash scripts/cloud_link_business_sync.sh "$DATE"; then
-  DAILY_WARNINGS+=("link-business failed")
-  echo "[cloud_daily_refresh] WARN link/business daily refresh failed; continue other daily supplements and keep previous successful warehouse data where guarded" >&2
-fi
-if [[ -s "$ROOT/state/cloud_ops_alerts/link-business-last-partial.json" ]]; then
-  DAILY_WARNINGS+=("link-business partial")
-  echo "[cloud_daily_refresh] WARN link/business recorded partial store failures; keep the warning visible in the unified daily refresh status" >&2
-fi
-if [[ -s "$ROOT/state/cloud_ops_alerts/link-business-last-metric-not-ready.json" ]]; then
-  DAILY_WARNINGS+=("link-business metrics not ready")
-  echo "[cloud_daily_refresh] WARN link/business metrics were not ready; keep previous complete link/business data visible" >&2
+case "$LINK_BUSINESS_MODE" in
+  full)
+    echo "[cloud_daily_refresh] step=link-business mode=full date=$DATE"
+    if ! SHEIN_LINK_BUSINESS_REFRESH_PORTAL=0 bash scripts/cloud_link_business_sync.sh "$DATE"; then
+      DAILY_WARNINGS+=("link-business failed")
+      echo "[cloud_daily_refresh] WARN link/business daily refresh failed; continue other daily supplements and keep previous successful warehouse data where guarded" >&2
+    fi
+    ;;
+  finalize)
+    echo "[cloud_daily_refresh] step=link-business mode=finalize date=$DATE"
+    if ! SHEIN_LINK_BUSINESS_FINALIZE_ONLY=1 SHEIN_LINK_BUSINESS_REFRESH_PORTAL=0 \
+      bash scripts/cloud_link_business_sync.sh "$DATE"; then
+      DAILY_WARNINGS+=("link-business finalize failed")
+      echo "[cloud_daily_refresh] WARN link/business final merge failed; continue non-link supplements but keep prior complete link snapshot" >&2
+    fi
+    ;;
+  skip)
+    echo "[cloud_daily_refresh] step=link-business mode=skip date=$DATE; require caller-owned merged evidence"
+    ;;
+  *)
+    echo "[cloud_daily_refresh] invalid SHEIN_BI_DAILY_LINK_BUSINESS_MODE=$LINK_BUSINESS_MODE" >&2
+    exit 64
+    ;;
+esac
+if [[ "$LINK_BUSINESS_MODE" != "skip" ]]; then
+  if [[ -s "$ROOT/state/cloud_ops_alerts/link-business-last-partial.json" ]]; then
+    DAILY_WARNINGS+=("link-business partial")
+    echo "[cloud_daily_refresh] WARN link/business recorded partial store failures; keep the warning visible in the unified daily refresh status" >&2
+  fi
+  if [[ -s "$ROOT/state/cloud_ops_alerts/link-business-last-metric-not-ready.json" ]]; then
+    DAILY_WARNINGS+=("link-business metrics not ready")
+    echo "[cloud_daily_refresh] WARN link/business metrics were not ready; keep previous complete link/business data visible" >&2
+  fi
 fi
 
 echo "[cloud_daily_refresh] marketing current-price evidence is owned by cloud_marketing_live_guard; skip duplicate all-store scan"
@@ -314,22 +336,32 @@ prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
     fi
 
     if [[ "$SHEIN_BI_PORTAL_DATA_MODE" == "api" && "${SHEIN_BI_PORTAL_PREWARM_DISABLED:-0}" != "1" ]]; then
-      echo "[cloud_daily_refresh] refresh inventory-critical linksData section synchronously"
-      if SHEIN_BI_PORTAL_PREWARM_SECTIONS=linksData SHEIN_BI_PORTAL_PREWARM_ASYNC=0 \
-        bash scripts/prewarm_bi_portal_sections.sh 8>&-; then
-        echo "[cloud_daily_refresh] inventory-critical linksData section refreshed"
+      if [[ "$LINK_BUSINESS_MODE" != "skip" ]]; then
+        echo "[cloud_daily_refresh] refresh inventory-critical linksData section synchronously"
+        if SHEIN_BI_PORTAL_PREWARM_SECTIONS=linksData \
+          SHEIN_BI_PORTAL_PREWARM_ASYNC=0 \
+          SHEIN_BI_PORTAL_PREWARM_HOST_LOCKED=1 \
+          bash scripts/prewarm_bi_portal_sections.sh 8>&-; then
+          echo "[cloud_daily_refresh] inventory-critical linksData section refreshed"
+        else
+          DAILY_WARNINGS+=("linksData section refresh failed")
+          echo "[cloud_daily_refresh] WARN linksData section refresh failed; inventory guard will fail closed or retry its own source preparation" >&2
+        fi
       else
-        DAILY_WARNINGS+=("linksData section refresh failed")
-        echo "[cloud_daily_refresh] WARN linksData section refresh failed; inventory guard will fail closed or retry its own source preparation" >&2
+        echo "[cloud_daily_refresh] linksData was synchronously published by the caller-owned all-store merge"
       fi
-      # Run the lightweight async request fan-out in the foreground so systemd
-      # cannot kill the launcher when this oneshot service exits. The actual
-      # async section jobs live inside the persistent Portal service.
-      if bash scripts/prewarm_bi_portal_sections.sh 8>&-; then
-        echo "[cloud_daily_refresh] portal section prewarm requests submitted"
+      if bash scripts/enqueue_bi_portal_sections.sh \
+        --sections homeRankings,afterSales,orders,homeProfit \
+        --priority 10 \
+        --reason "daily-refresh-$DATE" \
+        && bash scripts/enqueue_bi_portal_sections.sh \
+          --sections actions,productState,productSalesDaily,productTrafficDaily,comments,rtvData,waybills,rankings,profit \
+          --priority 50 \
+          --reason "daily-refresh-$DATE"; then
+        echo "[cloud_daily_refresh] portal sections queued for bounded host-locked refresh"
       else
-        DAILY_WARNINGS+=("portal section prewarm failed")
-        echo "[cloud_daily_refresh] WARN portal section prewarm request fan-out failed" >&2
+        DAILY_WARNINGS+=("portal section queue failed")
+        echo "[cloud_daily_refresh] WARN portal section queue enqueue failed" >&2
       fi
     fi
   fi

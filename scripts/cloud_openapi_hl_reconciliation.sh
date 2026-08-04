@@ -61,8 +61,11 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 
 if [[ "$SHEIN_BI_PORTAL_DATA_MODE" == "api" && "${SHEIN_BI_PORTAL_PREWARM_DISABLED:-0}" != "1" ]]; then
-  nohup bash scripts/prewarm_bi_portal_sections.sh >/dev/null 2>&1 &
-  echo "[cloud_openapi_hl] portal section prewarm started pid=$!"
+  bash scripts/enqueue_bi_portal_sections.sh \
+    --sections liveSalesToday,homeRankings,orders,homeProfit \
+    --priority 30 \
+    --reason "legacy-hl-reconciliation-$DATE"
+  echo "[cloud_openapi_hl] Portal sections queued for bounded host-locked refresh"
 fi
 
 echo "[cloud_openapi_hl] done date=$DATE log=$LOG_FILE"

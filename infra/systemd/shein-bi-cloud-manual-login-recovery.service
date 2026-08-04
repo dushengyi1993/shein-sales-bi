@@ -1,11 +1,12 @@
 [Unit]
 Description=SHEIN BI targeted refresh after verified manual store login
 Wants=network-online.target docker.service
-After=network-online.target docker.service
+After=network-online.target docker.service systemd-tmpfiles-setup.service
 RequiresMountsFor=/opt/shein-bi/app/outputs /opt/shein-bi/app/profiles /srv/shein-bi/runtime /srv/shein-bi/logs
 
 [Service]
 Type=oneshot
+Slice=shein-host-heavy-bi.slice
 User=sheinops
 Group=sheinops
 UMask=0077
@@ -36,5 +37,7 @@ RestrictRealtime=true
 ExecStartPre=+/usr/bin/install -d -o sheinops -g sheinops -m 2770 /srv/shein-bi/runtime/cloud_manual_login_recovery
 ExecStartPre=+/usr/bin/install -d -o sheinops -g sheinops -m 2770 /srv/shein-bi/runtime/cloud_manual_login_recovery/queue
 ExecStartPre=+/usr/bin/install -d -o sheinops -g sheinops -m 2770 /srv/shein-bi/logs/cloud-manual-login
+ExecCondition=/usr/bin/bash -c 'case "$(date +%%H)" in 04|08|11) exit 1;; esac'
 ExecCondition=/usr/bin/bash -c 'for unit in shein-bi-cloud-daily-refresh.service shein-bi-cloud-yesterday.service shein-bi-cloud-et-forwarder.service shein-bi-cloud-session-manager.service shein-bi-db-backup.service shein-bi-cloud-marketing-repair.service; do /usr/bin/systemctl is-active --quiet "$$unit" && exit 1; done; exit 0'
-ExecStart=/usr/bin/node /opt/shein-bi/app/scripts/cloud_manual_login_recovery_queue.mjs
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain manual-login-recovery --class browser --lock-wait-sec 0 --deadline-minute 17 --deadline-next-hour --defer-state /srv/shein-bi/runtime/host-scheduler/manual-login-recovery.latest.json -- /usr/bin/node /opt/shein-bi/app/scripts/cloud_manual_login_recovery_queue.mjs
+SuccessExitStatus=75

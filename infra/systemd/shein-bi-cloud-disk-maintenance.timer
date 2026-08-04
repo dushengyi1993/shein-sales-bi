@@ -2,9 +2,9 @@
 Description=Run SHEIN BI guarded disk maintenance daily
 
 [Timer]
-OnCalendar=*-*-* 04:30:00 Asia/Shanghai
-RandomizedDelaySec=10m
-Persistent=true
+OnCalendar=*-*-* 00:10:00 Asia/Shanghai
+AccuracySec=5s
+Persistent=false
 Unit=shein-bi-cloud-disk-maintenance.service
 
 [Install]

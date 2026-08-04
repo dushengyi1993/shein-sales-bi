@@ -1,0 +1,15 @@
+[Unit]
+Description=SHEIN half-managed child slice under the shared host heavy budget
+Before=slices.target
+
+[Slice]
+CPUAccounting=true
+CPUWeight=50
+CPUQuota=90%
+IOAccounting=true
+IOWeight=50
+MemoryAccounting=true
+MemoryHigh=2G
+MemoryMax=3G
+MemorySwapMax=128M
+TasksMax=512

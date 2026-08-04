@@ -170,6 +170,8 @@ assert.match(serviceUnit, /MemoryMax=3400M/);
 assert.match(serviceUnit, /cloud_manual_login_recovery_queue\.mjs/);
 assert.match(serviceUnit, /ExecCondition=.*shein-bi-cloud-daily-refresh\.service/);
 assert.match(pathUnit, /DirectoryNotEmpty=\/srv\/shein-bi\/runtime\/cloud_manual_login_recovery\/queue/);
-assert.match(timerUnit, /OnUnitInactiveSec=2min/);
+assert.match(timerUnit, /OnCalendar=\*-\*-\* \*:47:00/);
+assert.match(timerUnit, /Persistent=false/);
+assert.doesNotMatch(timerUnit, /OnUnitInactiveSec=/);
 
 console.log(JSON.stringify({ok: true, tests: 23}, null, 2));

@@ -8,6 +8,7 @@ LINKS_DATA_FILE="${SHEIN_BI_LINKS_DATA_FILE:-$ROOT/outputs/bi-portal/sections/li
 LINKS_MAX_AGE_SECONDS="${SHEIN_BI_INVENTORY_LINKS_MAX_AGE_SECONDS:-1800}"
 LINKS_REFRESH_TIMEOUT_SECONDS="${SHEIN_BI_INVENTORY_LINKS_REFRESH_TIMEOUT_SECONDS:-1200}"
 REFRESH_OPENAPI_ON_STALE="${SHEIN_BI_INVENTORY_REFRESH_OPENAPI_ON_STALE:-1}"
+REQUIRE_PIPELINE_MARKERS="${SHEIN_BI_INVENTORY_REQUIRE_PIPELINE_MARKERS:-0}"
 PLAN="$RUNTIME_ROOT/plans/daily-inventory-replenishment-$DATE.json"
 RESULT="$RUNTIME_ROOT/results/daily-inventory-replenishment-$DATE.json"
 LOCK="$ROOT/state/locks/daily-inventory-replenishment.lock"
@@ -20,6 +21,26 @@ if ! flock -n 9; then
   exit 0
 fi
 cd "$ROOT"
+
+if [[ "$REQUIRE_PIPELINE_MARKERS" == "1" || "$REQUIRE_PIPELINE_MARKERS" == "true" ]]; then
+  node scripts/pipeline_marker.mjs require \
+    --stage morning-links-ready \
+    --date "$DATE" \
+    --status done,warning \
+    || {
+      echo "[daily_inventory_guard] all-store morning link merge is not ready" >&2
+      exit 75
+    }
+  node scripts/pipeline_marker.mjs require \
+    --stage stock-refresh \
+    --date "$DATE" \
+    --status done,warning \
+    --not-before "${DATE}T09:11:00+08:00" \
+    || {
+      echo "[daily_inventory_guard] 09:12 stock refresh marker is not ready" >&2
+      exit 75
+    }
+fi
 
 links_data_age_seconds() {
   local cached_at cached_epoch now_epoch
@@ -42,6 +63,7 @@ ensure_links_data_fresh() {
   fi
   echo "[daily_inventory_guard] refresh linksData synchronously force=$force previousAgeSeconds=${age:-unknown}"
   curl -fsS --max-time "$LINKS_REFRESH_TIMEOUT_SECONDS" \
+    -H 'X-SHEIN-BI-HOST-LOCKED-WORKER: 1' \
     "$PORTAL_URL/api/bi/section/linksData?refresh=1" >/dev/null
   age="$(links_data_age_seconds 2>/dev/null || true)"
   if [[ ! "$age" =~ ^[0-9]+$ ]] || (( age > LINKS_MAX_AGE_SECONDS )); then

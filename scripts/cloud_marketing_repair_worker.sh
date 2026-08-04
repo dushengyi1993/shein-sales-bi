@@ -293,9 +293,9 @@ if [[ "$QUEUE_STATUS" == "completed" || "$QUEUE_STATUS" == "blocked" ]]; then
 fi
 ACTIVE_BUSY="$(active_busy_services)"
 if [[ -n "$ACTIVE_BUSY" ]]; then
-  write_state skipped_busy "busy services active: $ACTIVE_BUSY"
-  echo "[cloud_marketing_repair] SKIP busy services active: $ACTIVE_BUSY"
-  exit 0
+  write_state deferred_to_local "cloud host is busy; keep the exact queue for local-browser continuation: $ACTIVE_BUSY"
+  echo "[cloud_marketing_repair] DEFER TO LOCAL busy services active: $ACTIVE_BUSY"
+  exit 75
 fi
 
 lease_action acquire

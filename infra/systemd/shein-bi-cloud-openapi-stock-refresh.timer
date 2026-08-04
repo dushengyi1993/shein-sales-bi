@@ -2,8 +2,8 @@
 Description=Refresh current SHEIN virtual stock twice per hour
 
 [Timer]
-OnCalendar=*-*-* *:25,55:00
-RandomizedDelaySec=30
+OnCalendar=*-*-* *:12,45:00
+RandomizedDelaySec=15
 Persistent=false
 Unit=shein-bi-cloud-openapi-stock-refresh.service
 

@@ -5,6 +5,7 @@ After=network-online.target docker.service
 
 [Service]
 Type=oneshot
+Slice=shein-host-heavy-bi.slice
 User=sheinops
 Group=sheinops
 WorkingDirectory=/opt/shein-bi/app
@@ -37,4 +38,5 @@ MemoryHigh=2200M
 MemoryMax=2800M
 OOMPolicy=stop
 KillMode=control-group
-ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_daily_refresh.sh yesterday
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain daily-refresh --class browser --lock-wait-sec 120 --defer-state /srv/shein-bi/runtime/host-scheduler/daily-refresh.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_daily_refresh.sh yesterday
+SuccessExitStatus=75

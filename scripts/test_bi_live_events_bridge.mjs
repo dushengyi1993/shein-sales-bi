@@ -179,8 +179,8 @@ assert.doesNotMatch(generator.match(/liveSalesToday:[\s\S]*?`,\n  homeTrafficDai
 assert.doesNotMatch(portalServer, /createBiLiveCoreRefreshScheduler|live core refresh failed/, 'one webhook must not launch a full 40+ second portal rebuild');
 assert.match(portalServer, /SHEIN_BI_LIVE_ACCOUNTING_DEBOUNCE_MS \|\| 45_000/,
   'order and return events must coalesce into an event-driven accounting refresh');
-assert.match(portalServer, /await ensureProfitMartCacheFresh\(args, generatedAt\)/,
-  'the debounced refresh must rebuild the moving-average ledger before publishing profit');
+assert.match(portalServer, /enqueueHostLockedBiSection\(section, generatedAt,[\s\S]*live-accounting-/,
+  'returns and historical mutations must queue canonical accounting behind the shared host lock');
 assert.match(portalServer, /'orderFactUpdatedAt', \(SELECT max\(updated_at\) FROM fact\.order_item\)/,
   'a zeroed cancellation row must still invalidate the moving-average ledger and profit cache');
 assert.match(portalServer, /'accountingInputUpdatedAt', greatest\([\s\S]*fact\.after_sales_item[\s\S]*fact\.openapi_return_item/,
@@ -189,8 +189,12 @@ assert.match(portalServer, /refreshHistoricalSections:[\s\S]*eventNeedsHistorica
   'a webhook burst must preserve prior-day cancellation and return invalidation scope');
 assert.match(portalServer, /section === 'homeProfit'[\s\S]*deriveHomeProfitSectionFromProfitCache\(root, generatedAt\)[\s\S]*return derived/,
   'forced historical profit refreshes must derive homeProfit instead of calling a nonexistent SQL section');
-assert.match(portalServer, /accountingRefreshed: true/,
-  'clients must receive a second live signal after canonical accounting catches up');
+assert.match(portalServer, /accountingQueued: true/,
+  'clients must be told that canonical accounting was queued without delaying live sales');
+assert.match(portalServer, /BI_INLINE_FAST_SECTIONS = new Set\(\['liveSalesToday', 'productState', 'inventoryStock'\]\)/,
+  'only genuinely lightweight live sections may generate inside the Portal process');
+assert.match(portalServer, /x-shein-bi-host-locked-worker/,
+  'heavy section generation must require the trusted local host-locked worker');
 assert.match(portalServer, /SHEIN_BI_LIVE_ACCOUNTING_RETRY_MS \|\| 5 \* 60_000/,
   'a failed accounting refresh must retry without waiting for another order');
 assert.match(portalServer, /portal-startup-accounting-catchup/,

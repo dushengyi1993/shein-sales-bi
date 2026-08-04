@@ -57,15 +57,17 @@ assert.doesNotMatch(refresh, /:'payload'/,
   'the notifier must not rely on psql variable expansion inside -c');
 assert.match(refresh, /inventory_refresh/,
   'the live event must have a dedicated inventory refresh kind');
+assert.match(refresh, /pipeline_marker\.mjs[\s\S]*--stage stock-refresh/,
+  'a successful 19-store refresh must publish the inventory dependency marker');
 
 assert.match(service, /User=sheinops/,
   'the inventory refresh must not run as root');
 assert.match(service, /TimeoutStartSec=900/,
   'the oneshot must have a bounded runtime');
-assert.match(timer, /OnCalendar=\*-\*-\* \*:25,55:00/,
+assert.match(timer, /OnCalendar=\*-\*-\* \*:12,45:00/,
   'current virtual stock must refresh twice per hour');
-assert.match(timer, /RandomizedDelaySec=30/,
-  'stock refresh jitter must remain clear of the full-managed top-of-hour and :12 jobs');
+assert.match(timer, /RandomizedDelaySec=15/,
+  'stock refresh jitter must stay bounded while the :12 run feeds the inventory marker');
 assert.match(timer, /Persistent=false/,
   'missed stock refreshes must not burst after downtime');
 assert.match(watchdog, /'shein-bi-cloud-openapi-stock-refresh\.service'/,

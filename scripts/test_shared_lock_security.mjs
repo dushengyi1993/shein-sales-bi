@@ -13,7 +13,6 @@ const lockScripts = [
   'scripts/cloud_daily_lark_report.sh',
   'scripts/cloud_et_forwarder_sync.sh',
   'scripts/cloud_marketing_live_guard.sh',
-  'scripts/cloud_morning_chain.sh',
   'scripts/prewarm_bi_portal_sections.sh',
 ];
 
@@ -35,18 +34,38 @@ const daily = read('scripts/cloud_daily_refresh.sh');
 assert.match(daily, /prepare_shared_lock_file "\$LARK_REPORT_LOCK_FILE"/);
 assert.match(daily, /prepare_shared_lock_file "\$PORTAL_REFRESH_LOCK_FILE"/);
 
+const hostWrapper = read('scripts/run_host_heavy_job.sh');
+assert.match(hostWrapper, /source "\$ROOT\/scripts\/lib\/shared_lock\.sh"/);
+assert.match(hostWrapper, /prepare_shared_lock_file "\$PROJECT_LOCK"/);
+assert.match(hostWrapper, /prepare_shared_lock_file "\$DOMAIN_LOCK"/);
+assert.ok(
+  hostWrapper.indexOf('exec 9<>"$HOST_LOCK"') < hostWrapper.indexOf('exec 8<>"$PROJECT_LOCK"')
+  && hostWrapper.indexOf('exec 8<>"$PROJECT_LOCK"') < hostWrapper.indexOf('exec 7<>"$DOMAIN_LOCK"'),
+  'shared host jobs must lock host before project and domain',
+);
+
 const unitLocks = new Map([
   ['infra/systemd/shein-bi-cloud-daily-refresh.service', ['SHEIN_BI_DAILY_LOCK_FILE', 'SHEIN_LARK_REPORT_LOCK_FILE']],
   ['infra/systemd/shein-bi-cloud-daily-lark-report.service', ['SHEIN_LARK_REPORT_LOCK_FILE']],
   ['infra/systemd/shein-bi-cloud-et-forwarder.service', ['SHEIN_ET_LOCK_FILE']],
   ['infra/systemd/shein-bi-cloud-marketing-live-guard.service', ['SHEIN_BI_MARKETING_LIVE_LOCK_FILE']],
-  ['infra/systemd/shein-bi-cloud-morning-chain.service', ['SHEIN_BI_MORNING_CHAIN_LOCK_FILE']],
 ]);
 for (const [relativePath, variables] of unitLocks) {
   const source = read(relativePath);
   for (const variable of variables) {
     assert.match(source, new RegExp(`Environment=${variable}=\\/opt\\/shein-bi\\/app\\/state\\/locks\\/`), `${relativePath} must pin ${variable} inside state/locks`);
   }
+  assert.doesNotMatch(source, /\/tmp\/[^\s]*\.lock/);
+}
+
+for (const relativePath of [
+  'infra/systemd/shein-bi-cloud-morning-chain.service',
+  'infra/systemd/shein-bi-cloud-morning-link-chunk-2.service',
+  'infra/systemd/shein-bi-cloud-morning-supplements.service',
+]) {
+  const source = read(relativePath);
+  assert.match(source, /run_host_heavy_job\.sh/);
+  assert.match(source, /^Slice=shein-host-heavy-bi\.slice$/m);
   assert.doesNotMatch(source, /\/tmp\/[^\s]*\.lock/);
 }
 

@@ -1,16 +1,18 @@
 [Unit]
 Description=SHEIN BI cleanup stale headless store Chrome processes
 Wants=network-online.target
-After=network-online.target
+After=network-online.target systemd-tmpfiles-setup.service
 
 [Service]
 Type=oneshot
+Slice=shein-host-heavy-bi.slice
 User=sheinops
 Group=sheinops
 WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/home/sheinops
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
-ExecStart=/usr/bin/env node /opt/shein-bi/app/scripts/cleanup_shein_store_browsers.mjs --all --only-headless --cleanup-chrome-tmp --kill-after-sec 10
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain browser-cleanup --class browser --lock-wait-sec 0 --deadline-minute 27 --defer-state /srv/shein-bi/runtime/host-scheduler/browser-cleanup.latest.json -- /usr/bin/env node /opt/shein-bi/app/scripts/cleanup_shein_store_browsers.mjs --all --only-headless --cleanup-chrome-tmp --kill-after-sec 10
+SuccessExitStatus=75
 TimeoutStartSec=90
 TimeoutStopSec=30
 KillMode=control-group

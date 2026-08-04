@@ -13,6 +13,7 @@ const portal = read('scripts/generate_bi_portal.mjs');
 const recheck = read('scripts/recheck_order_statuses.mjs');
 const watchdog = read('scripts/cloud_ops_watchdog.mjs');
 const closureUnit = read('infra/systemd/shein-bi-cloud-order-closure.service');
+const closureScript = read('scripts/cloud_order_closure.sh');
 
 for (const source of [schema, migration, recheck]) {
   assert.match(source, /CREATE OR REPLACE VIEW ops\.order_status_recheck_effective/);
@@ -36,8 +37,9 @@ assert.match(recheck, /coalesce\(rs\.lifecycle_status_group,'cancelled'\) = 'can
 assert.match(recheck, /fetch_shein_openapi_sales\.mjs/);
 assert.match(recheck, /\['openapi', 'webapi', 'auto', 'browser'\]/);
 assert.match(closureUnit, /SHEIN_SALES_TRANSPORT=openapi/);
-assert.match(closureUnit, /--transport openapi/);
+assert.match(closureScript, /--transport openapi/);
 assert.doesNotMatch(closureUnit, /--transport webapi/);
+assert.doesNotMatch(closureScript, /--transport webapi/);
 assert.match(watchdog, /LEFT JOIN ops\.order_status_recheck_effective rs/);
 
 for (const source of [portal, recheck, watchdog]) {

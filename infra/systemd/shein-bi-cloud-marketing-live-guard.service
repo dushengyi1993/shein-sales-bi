@@ -5,6 +5,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+Slice=shein-host-heavy-bi.slice
 User=sheinops
 Group=sheinops
 WorkingDirectory=/opt/shein-bi/app
@@ -32,4 +33,5 @@ MemoryHigh=1000M
 MemoryMax=1400M
 OOMPolicy=stop
 KillMode=control-group
-ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_marketing_live_guard.sh
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain marketing-live --class openapi --lock-wait-sec 0 --deadline-minute 27 --defer-state /srv/shein-bi/runtime/host-scheduler/marketing-live.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_marketing_live_guard.sh
+SuccessExitStatus=75

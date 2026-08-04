@@ -10,7 +10,7 @@
 
 ## 运维 runbook
 
-- [云端 BI 运行说明](cloud-bi-operations.md)、[BI 系统运行说明](bi-system-operations.md)、[云端优先交接](agent-handoff-cloud-first.md)；商品对账、凌晨互斥、Linux 健康语义见上述运行说明与 [systemd unit 参数](../infra/systemd/README.md)
+- [云端 BI 运行说明](cloud-bi-operations.md)、[半托 / 全托共用主机排班与资源合同](shared-host-resource-schedule.md)、[BI 系统运行说明](bi-system-operations.md)、[云端优先交接](agent-handoff-cloud-first.md)；商品对账、凌晨互斥、Linux 健康语义见上述运行说明与 [systemd unit 参数](../infra/systemd/README.md)
 - [应急恢复与备份](emergency-recovery-backup.md)、[迁移与恢复](migration-and-restore.md)、[全历史回补](bi-full-history-backfill.md)、[实际库存耗尽](actual-inventory-depletion.md)
 - [每日营销巡检交接](marketing-daily-inspection-handoff.md)、[发布清单](release-checklist.md)、[systemd unit 参数](../infra/systemd/README.md)
 - [源码、发布与云端版本治理](release-and-deployment-version-policy.md)

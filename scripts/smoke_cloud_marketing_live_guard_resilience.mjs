@@ -43,9 +43,9 @@ assert.doesNotMatch(guard, /consider_reserved_time "browser-cleanup/);
 assert.match(guard, /flag: 'wx'/);
 assert.match(cleanup, /reclaimStaleBrowserLeases/);
 assert.match(cleanup, /active_store_lease/);
-assert.match(cleanupTimer, /03:45:00/);
-assert.match(cleanupTimer, /09:50:00/);
-assert.match(cleanupTimer, /21:00:00/);
+assert.match(cleanupTimer, /03:20:00/);
+assert.match(cleanupTimer, /09:25:00/);
+assert.match(cleanupTimer, /21:20:00/);
 assert.doesNotMatch(cleanupTimer, /\*:15:00/);
 assert.match(stackReview, /fetchCoupon15PctRuleStatsHttp/);
 assert.match(stackReview, /MULTI_LEVEL_RULE_ENROLLED_GOODS/);
@@ -79,8 +79,11 @@ for (const source of [linkBusiness, sessionManager, rtvVerify]) {
   assert.match(source, /manage_browser_task_leases\.mjs/);
 }
 assert.doesNotMatch(linkBusiness, /pkill\s+-f/);
-assert.ok(linkBusiness.indexOf('lease_action acquire') < linkBusiness.indexOf('LEASE_ACTIVE=1\nclose_store_browsers'),
-  'link/business sync must acquire its all-store lease before cleaning browsers');
+assert.match(
+  linkBusiness,
+  /lease_action acquire\s+LEASE_ACTIVE=1\s+close_store_browsers/,
+  'link/business sync must acquire its all-store lease before cleaning browsers',
+);
 assert.match(cleanup, /ownedLeaseTask/);
 assert.match(repairWorker, /--owned-lease-task "\$LEASE_TASK"/);
 for (const source of repairBatchSources) {

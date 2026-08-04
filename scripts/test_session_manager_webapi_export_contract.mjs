@@ -23,7 +23,7 @@ assert.match(manager, /stale_webapi_session_export/);
 assert.match(manager, /webapi_session_probe_not_verified/);
 assert.match(manager, /res\.ok && okFromParsed && webApiSessionFresh && webApiProbeOk/);
 
-assert.match(timer, /OnCalendar=\*-\*-\* 02:20:00/);
-assert.match(timer, /Persistent=true/);
+assert.match(timer, /OnCalendar=\*-\*-\* 00:45:00/);
+assert.match(timer, /Persistent=false/);
 
 console.log('session_manager_webapi_export_contract: daily profile login now refreshes and verifies reusable WebAPI sessions');

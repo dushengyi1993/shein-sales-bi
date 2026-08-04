@@ -229,6 +229,10 @@ let biSectionBackgroundQueue = Promise.resolve();
 let biSectionFastBackgroundQueue = Promise.resolve();
 let biProfitMartFreshnessPromise = null;
 const BI_FAST_BACKGROUND_SECTIONS = new Set(['homeRankings', 'homeProfit']);
+const BI_INLINE_FAST_SECTIONS = new Set(['liveSalesToday', 'productState', 'inventoryStock']);
+const BI_EXTERNAL_SECTION_QUEUE_ENABLED = process.platform !== 'win32'
+  && !['0', 'false', 'no', 'off'].includes(String(process.env.SHEIN_BI_EXTERNAL_SECTION_QUEUE_ENABLED || '1').trim().toLowerCase());
+const biExternalSectionQueuePending = new Set();
 const DEFAULT_BI_PORTAL_CORE_WARMUP_SECTIONS = ['homeRankings', 'profit', 'homeProfit', 'afterSales', 'orders', 'waybills'];
 const BI_PORTAL_CORE_WARMUP_INTERVAL_MS = Math.max(15_000, Number(process.env.SHEIN_BI_CORE_WARMUP_INTERVAL_MS || 60_000));
 const biPortalCoreWarmupState = {
@@ -6954,9 +6958,52 @@ function withBiSectionRefreshFailureHeaders(root, section, headers = {}) {
   };
 }
 
+function enqueueHostLockedBiSection(section, generatedAt = '', options = {}) {
+  if (!BI_EXTERNAL_SECTION_QUEUE_ENABLED || BI_INLINE_FAST_SECTIONS.has(section)) return false;
+  const key = `${section}|${generatedAt || ''}`;
+  if (biExternalSectionQueuePending.has(key)) return true;
+  biExternalSectionQueuePending.add(key);
+  const priority = ['homeRankings', 'homeProfit', 'afterSales', 'orders'].includes(section) ? '10' : '50';
+  const reason = String(options.reason || `portal-${generatedAt || 'current'}`).slice(0, 240);
+  const child = spawn('/usr/bin/env', [
+    'bash',
+    path.join(ROOT, 'scripts', 'enqueue_bi_portal_sections.sh'),
+    '--sections', section,
+    '--priority', priority,
+    '--reason', reason,
+  ], {
+    cwd: ROOT,
+    env: process.env,
+    stdio: ['ignore', 'ignore', 'ignore'],
+  });
+  child.once('error', error => {
+    console.error(`[bi-section-queue] enqueue failed section=${section} error=${String(error?.message || error)}`);
+  });
+  child.once('exit', code => {
+    if (code && code !== 75) {
+      console.error(`[bi-section-queue] enqueue exited section=${section} code=${code}`);
+    }
+  });
+  child.unref?.();
+  const timer = setTimeout(() => biExternalSectionQueuePending.delete(key), 15_000);
+  timer.unref?.();
+  return true;
+}
+
+function sectionRequiresHostLockedWorker(section, options = {}) {
+  return BI_EXTERNAL_SECTION_QUEUE_ENABLED
+    && !BI_INLINE_FAST_SECTIONS.has(section)
+    && options.hostLockedWorker !== true;
+}
+
 function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt, options = {}) {
   const force = options.force === true;
   const refreshToken = String(options.refreshToken || '').slice(0, 160);
+  if (sectionRequiresHostLockedWorker(section, options)) {
+    return enqueueHostLockedBiSection(section, generatedAt, {
+      reason: force ? `portal-force-${generatedAt || 'current'}` : `portal-cache-miss-${generatedAt || 'current'}`,
+    });
+  }
   // One section/generation may have only one producer. Previously force
   // refreshes used a second "|force" key, so a warmup and several browser/SSE
   // refreshes could rebuild the same cache concurrently and publish it in a
@@ -6979,6 +7026,7 @@ function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt,
           scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt, {
             force: true,
             refreshToken: pendingRefreshToken,
+            hostLockedWorker: options.hostLockedWorker === true,
           });
         }).catch(() => {});
       }
@@ -7339,6 +7387,7 @@ async function loadBiSection(args, root, section, options = {}) {
       const refreshScheduled = scheduleBiSectionBackgroundGeneration(args, root, section, meta.generatedAt, {
         force: true,
         refreshToken: `automatic-retry:${failure.at}`,
+        hostLockedWorker: options.hostLockedWorker === true,
       });
       options = {
         ...options,
@@ -7356,6 +7405,7 @@ async function loadBiSection(args, root, section, options = {}) {
     const refreshScheduled = scheduleBiSectionBackgroundGeneration(args, root, section, meta.generatedAt, {
       force: true,
       refreshToken: options.refreshToken,
+      hostLockedWorker: options.hostLockedWorker === true,
     });
     const currentRaw = await readBiSectionCacheRaw(root, section, meta.generatedAt, true, {
       ...options,
@@ -7477,7 +7527,9 @@ async function loadBiSection(args, root, section, options = {}) {
     // A current-generation cache miss always needs a producer. Schedule it
     // before serializing the stale response so the client can distinguish a
     // normal version transition from an actual failed refresh.
-    const refreshScheduled = scheduleBiSectionBackgroundGeneration(args, root, section, meta.generatedAt);
+    const refreshScheduled = scheduleBiSectionBackgroundGeneration(args, root, section, meta.generatedAt, {
+      hostLockedWorker: options.hostLockedWorker === true,
+    });
     const staleRaw = await readBiSectionStaleRaw(root, section, meta.generatedAt, {
       ...options,
       refreshScheduled,
@@ -7485,6 +7537,23 @@ async function loadBiSection(args, root, section, options = {}) {
     if (staleRaw) {
       return {status: 200, rawBody: staleRaw.body, headers: withBiSectionRefreshFailureHeaders(root, section, staleRaw.headers)};
     }
+  }
+  if (sectionRequiresHostLockedWorker(section, options)) {
+    const refreshScheduled = enqueueHostLockedBiSection(section, meta.generatedAt, {
+      reason: `portal-empty-cache-${meta.generatedAt || 'current'}`,
+    });
+    return {
+      status: 202,
+      payload: {
+        ok: false,
+        section,
+        cacheHit: false,
+        refreshScheduled,
+        queuedForHostLockedWorker: true,
+        generatedAt: meta.generatedAt,
+        error: 'BI section is queued for the bounded server refresh lane',
+      },
+    };
   }
   if (!biSectionInFlight.has(key)) {
     biSectionInFlight.set(key, generateBiSection(args, root, section, meta.generatedAt).finally(() => {
@@ -8612,25 +8681,52 @@ async function main() {
     const sourceEvent = liveAccountingRefreshPendingEvent;
     liveAccountingRefreshPendingEvent = null;
     liveAccountingRefreshRunning = true;
+    let liveProjectionRefreshed = false;
+    const accountingKinds = new Set([
+      sourceEvent?.kind,
+      ...(Array.isArray(sourceEvent?.accountingKinds) ? sourceEvent.accountingKinds : []),
+    ].map(value => String(value || '')));
+    const canonicalAccountingRequired = accountingKinds.has('return')
+      || sourceEvent?.refreshHistoricalSections === true;
     try {
       const meta = await readBiPortalCoreMeta(root);
       const generatedAt = String(meta?.generatedAt || '');
-      await ensureProfitMartCacheFresh(args, generatedAt);
       if (allowGenerateSections && generatedAt) {
         await generateBiSection(args, root, 'liveSalesToday', generatedAt);
         clearBiSectionRefreshFailure(root, 'liveSalesToday');
       }
+      liveProjectionRefreshed = true;
+      // Publish current sales first. A normal current-day order must never wait
+      // for moving-average cost or historical profit rebuilds before becoming
+      // visible on the homepage and order center.
       biLiveUpdateBridge?.publish({
         ...sourceEvent,
         occurredAt: new Date().toISOString(),
-        accountingRefreshed: true,
+        liveProjectionRefreshed: true,
+      });
+      if (!canonicalAccountingRequired) return;
+
+      const queuedSections = sourceEvent?.refreshHistoricalSections
+        ? ['orders', 'afterSales', 'productSalesDaily', 'inventoryTrend', 'homeRankings', 'rankings', 'profit', 'homeProfit']
+        : ['orders', 'afterSales', 'profit', 'homeProfit'];
+      for (const section of queuedSections) {
+        enqueueHostLockedBiSection(section, generatedAt, {
+          reason: `live-accounting-${sourceEvent?.kind || 'event'}`,
+        });
+      }
+      biLiveUpdateBridge?.publish({
+        ...sourceEvent,
+        occurredAt: new Date().toISOString(),
+        liveProjectionRefreshed: true,
+        accountingQueued: true,
       });
     } catch (error) {
-      recordBiSectionRefreshFailure(root, 'liveSalesToday', error);
+      recordBiSectionRefreshFailure(root, liveProjectionRefreshed ? 'profit' : 'liveSalesToday', error);
       console.error(`[bi-live-accounting] ${String(error?.message || error)}`);
       biLiveUpdateBridge?.publish({
         ...sourceEvent,
         occurredAt: new Date().toISOString(),
+        liveProjectionRefreshed,
         accountingRefreshFailed: true,
       });
       if (!liveAccountingRefreshStopped) {
@@ -9716,12 +9812,21 @@ async function main() {
           const force = url.searchParams.get('refresh') === '1';
           const asyncRefresh = force && ['1', 'true', 'yes'].includes(String(url.searchParams.get('async') || '').toLowerCase());
           const refreshToken = String(url.searchParams.get('refreshToken') || '').slice(0, 160);
+          const hostLockedWorker = isTrustedInternalRequest(req)
+            && String(req.headers['x-shein-bi-host-locked-worker'] || '') === '1';
           const allowGenerate = allowGenerateSections;
           if (force && !allowGenerate) {
             return sendJson(res, 403, {ok: false, section, error: 'Section refresh is disabled in read-only or unauthenticated LAN mode'});
           }
           try {
-            const result = await loadBiSection(args, root, section, {force, asyncRefresh, refreshToken, allowGenerate, gzip: acceptsGzip(req.headers['accept-encoding'])});
+            const result = await loadBiSection(args, root, section, {
+              force,
+              asyncRefresh,
+              refreshToken,
+              hostLockedWorker,
+              allowGenerate,
+              gzip: acceptsGzip(req.headers['accept-encoding']),
+            });
             if (result.rawBody) return send(res, result.status, result.rawBody, result.headers || {'Content-Type': 'application/json; charset=utf-8'});
             return sendJson(res, result.status, result.payload);
           } catch (err) {

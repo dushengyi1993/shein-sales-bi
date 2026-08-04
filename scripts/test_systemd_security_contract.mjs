@@ -94,7 +94,9 @@ assert.equal(property(sessionManager, 'Group'), 'sheinops');
 assert.equal(property(sessionManager, 'UMask'), '0077', 'session manager persists browser credentials and must create private files');
 assertCommonHardening(sessionManager, 'session manager', {allowAuditedSudo: true, umask: '0077'});
 assert.match(sessionManager, /SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE=\/opt\/shein-bi\/app\/state\/locks\/shein-bi-nightly-maintenance\.lock/);
-assert.match(sessionManager, /flock -w 900/);
+assert.match(sessionManager, /--deadline-at 01:27/);
+assert.match(sessionManager, /--stage nightly-session/);
+assert.match(sessionManager, /flock -w 120/);
 assert.match(property(sessionManager, 'Before'), /shein-bi-db-backup\.service/);
 assert.match(property(sessionManager, 'Before'), /shein-bi-cloud-yesterday\.service/);
 
@@ -106,14 +108,18 @@ assert.equal(property(dbBackup, 'NoNewPrivileges'), 'true');
 assert.equal(property(dbBackup, 'PrivateTmp'), 'true');
 assertCommonHardening(dbBackup, 'db backup');
 assert.match(dbBackup, /SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE=\/opt\/shein-bi\/app\/state\/locks\/shein-bi-nightly-maintenance\.lock/);
-assert.match(dbBackup, /flock -w 6600/);
+assert.match(dbBackup, /--deadline-at 01:52/);
+assert.match(dbBackup, /--stage nightly-backup --require nightly-session/);
+assert.match(dbBackup, /flock -w 120/);
 assert.equal(property(dbBackup, 'TimeoutStartSec'), '10800',
   'backup timeout must cover the longest lock wait plus the backup execution budget');
 assert.match(property(dbBackup, 'After'), /shein-bi-cloud-session-manager\.service/);
 assert.match(property(dbBackup, 'Before'), /shein-bi-cloud-yesterday\.service/);
 
 const yesterday = readUnit('shein-bi-cloud-yesterday.service');
-assert.match(yesterday, /flock -w 7800/, 'yesterday final refresh waits for the shared nightly maintenance lock instead of colliding');
+assert.match(yesterday, /flock -w 120/, 'yesterday final refresh waits briefly for the shared nightly maintenance lock');
+assert.match(yesterday, /--deadline-at 03:27/);
+assert.match(yesterday, /--stage yesterday-final --business-date yesterday --require nightly-session --require nightly-backup/);
 assert.match(yesterday, /SHEIN_SALES_TRANSPORT=openapi/, 'final-day sales must not depend on expiring Seller Center sessions');
 assert.match(property(yesterday, 'After'), /shein-bi-cloud-session-manager\.service/);
 assert.match(property(yesterday, 'After'), /shein-bi-db-backup\.service/);
@@ -122,8 +128,8 @@ assert.match(yesterday, /cloud_bi_refresh\.sh yesterday yesterday-final; \/opt\/
 
 const browserCleanupTimer = readUnit('shein-bi-cloud-browser-cleanup.timer');
 const browserCleanupWindows = [...browserCleanupTimer.matchAll(/^OnCalendar=(.*)$/gm)].map(match => match[1].trim());
-assert.deepEqual(browserCleanupWindows, ['*-*-* 03:45:00', '*-*-* 09:50:00', '*-*-* 21:00:00']);
-assert.equal(property(browserCleanupTimer, 'Persistent'), 'true');
+assert.deepEqual(browserCleanupWindows, ['*-*-* 03:20:00', '*-*-* 09:25:00', '*-*-* 21:20:00']);
+assert.equal(property(browserCleanupTimer, 'Persistent'), 'false');
 
 const diskMaintenance = readUnit('shein-bi-cloud-disk-maintenance.service');
 assert.equal(property(diskMaintenance, 'User'), 'root');
@@ -137,8 +143,8 @@ assert.match(diskMaintenance, /SHEIN_BI_OUTPUT_RETENTION_DAYS=30/);
 assert.doesNotMatch(diskMaintenance, /restore_shein_store_session|bootstrap_shein_browser_session/,
   'root-run disk maintenance must never launch a SHEIN browser');
 const diskMaintenanceTimer = readUnit('shein-bi-cloud-disk-maintenance.timer');
-assert.equal(property(diskMaintenanceTimer, 'OnCalendar'), '*-*-* 04:30:00 Asia/Shanghai');
-assert.equal(property(diskMaintenanceTimer, 'Persistent'), 'true');
+assert.equal(property(diskMaintenanceTimer, 'OnCalendar'), '*-*-* 00:10:00 Asia/Shanghai');
+assert.equal(property(diskMaintenanceTimer, 'Persistent'), 'false');
 
 const dataDiskGuard = readUnit('shein-bi-data-disk-requires-mounts.conf');
 assert.match(dataDiskGuard, /^RequiresMountsFor=\/data .*\/opt\/shein-bi\/app\/profiles .*\/opt\/shein-bi\/app\/outputs .*\/srv\/shein-bi\/runtime .*\/srv\/shein-bi\/backups$/m);
@@ -146,8 +152,8 @@ assert.equal(property(dataDiskGuard, 'After'), 'local-fs.target');
 
 const marketingGuardTimer = readUnit('shein-bi-cloud-marketing-live-guard.timer');
 const marketingWindows = [...marketingGuardTimer.matchAll(/^OnCalendar=(.*)$/gm)].map(match => match[1].trim());
-assert.deepEqual(marketingWindows, ['*-*-* 10:30:00', '*-*-* 13:30:00', '*-*-* 16:30:00']);
-assert.equal(property(marketingGuardTimer, 'Persistent'), 'true');
+assert.deepEqual(marketingWindows, ['*-*-* 11:00:00', '*-*-* 13:00:00', '*-*-* 16:00:00']);
+assert.equal(property(marketingGuardTimer, 'Persistent'), 'false');
 
 const marketingGuard = readUnit('shein-bi-cloud-marketing-live-guard.service');
 const marketingGuardScript = fs.readFileSync(new URL('./cloud_marketing_live_guard.sh', import.meta.url), 'utf8');
@@ -167,7 +173,7 @@ assert.equal(property(marketingGuard, 'TimeoutStartSec'), '1800');
 const marketingRepairTimer = readUnit('shein-bi-cloud-marketing-repair.timer');
 const marketingRepairWindows = [...marketingRepairTimer.matchAll(/^OnCalendar=(.*)$/gm)].map(match => match[1].trim());
 assert.deepEqual(marketingRepairWindows, ['*-*-* 10,12,14,16,18:50:00', '*-*-* 19:30:00']);
-assert.equal(property(marketingRepairTimer, 'Persistent'), 'true');
+assert.equal(property(marketingRepairTimer, 'Persistent'), 'false');
 const marketingRepair = readUnit('shein-bi-cloud-marketing-repair.service');
 const marketingRepairScript = fs.readFileSync(new URL('./cloud_marketing_repair_worker.sh', import.meta.url), 'utf8');
 assert.doesNotMatch(marketingRepair, /^ExecStart(?:Pre|Post)=.*cleanup_shein_store_browsers/m,
@@ -180,8 +186,8 @@ assert.match(marketingRepairScript, /new_groups_in_result/);
 assert.equal(property(marketingRepair, 'TimeoutStartSec'), '2400');
 
 const storageFeeTimer = readUnit('shein-bi-cloud-et-storage-fee.timer');
-assert.equal(property(storageFeeTimer, 'OnCalendar'), '*-*-* 14:10:00 Asia/Shanghai');
-assert.equal(property(storageFeeTimer, 'Persistent'), 'true');
+assert.equal(property(storageFeeTimer, 'OnCalendar'), '*-*-* 14:20:00 Asia/Shanghai');
+assert.equal(property(storageFeeTimer, 'Persistent'), 'false');
 
 const storageFeeSync = readUnit('shein-bi-cloud-et-storage-fee.service');
 assert.equal(property(storageFeeSync, 'User'), 'sheinops');
@@ -212,12 +218,16 @@ assert.doesNotMatch(storageFeeSync, /^RestrictSUIDSGID=true$/m,
 
 for (const timerName of [
   'shein-bi-cloud-morning-chain.timer',
+  'shein-bi-cloud-morning-link-chunk-2.timer',
+  'shein-bi-cloud-morning-supplements.timer',
   'shein-bi-cloud-order-closure.timer',
   'shein-bi-cloud-session-manager.timer',
   'shein-bi-cloud-yesterday.timer',
   'shein-bi-db-backup.timer',
+  'shein-bi-cloud-rtv-verify.timer',
 ]) {
-  assert.equal(property(readUnit(timerName), 'Persistent'), 'true', `${timerName} must catch up after downtime`);
+  assert.equal(property(readUnit(timerName), 'Persistent'), 'false',
+    `${timerName} must not replay at an arbitrary minute and collide with the reserved home lane`);
 }
 
 console.log(JSON.stringify({

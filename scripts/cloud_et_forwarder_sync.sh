@@ -247,10 +247,11 @@ if [[ "${SHEIN_ET_REFRESH_PORTAL:-1}" == "1" ]]; then
             --data-mode "$PORTAL_DATA_MODE"
           node scripts/generate_bi_portal_shell.mjs
           if [[ "$PORTAL_DATA_MODE" == "api" && "${SHEIN_BI_PORTAL_PREWARM_DISABLED:-0}" != "1" ]]; then
-            SHEIN_BI_PORTAL_PREWARM_SECTIONS="$PORTAL_REFRESH_SECTIONS" \
-            SHEIN_BI_PORTAL_PREWARM_ASYNC="${SHEIN_BI_PORTAL_PREWARM_ASYNC:-1}" \
-            nohup bash scripts/prewarm_bi_portal_sections.sh >/dev/null 2>&1 &
-            echo "[cloud_et_forwarder_sync] portal section prewarm started pid=$! sections=$PORTAL_REFRESH_SECTIONS"
+            bash scripts/enqueue_bi_portal_sections.sh \
+              --sections "$PORTAL_REFRESH_SECTIONS" \
+              --priority 20 \
+              --reason "et-forwarder-$DATE-$MODE"
+            echo "[cloud_et_forwarder_sync] Portal sections queued sections=$PORTAL_REFRESH_SECTIONS"
           fi
           ;;
         sections|section|light|lightweight)
@@ -258,9 +259,14 @@ if [[ "${SHEIN_ET_REFRESH_PORTAL:-1}" == "1" ]]; then
             echo "[cloud_et_forwarder_sync] lightweight section refresh disabled by SHEIN_BI_PORTAL_PREWARM_DISABLED=1"
           else
             echo "[cloud_et_forwarder_sync] lightweight section refresh sections=$PORTAL_REFRESH_SECTIONS"
-            SHEIN_BI_PORTAL_PREWARM_SECTIONS="$PORTAL_REFRESH_SECTIONS" \
-            SHEIN_BI_PORTAL_PREWARM_ASYNC="${SHEIN_BI_PORTAL_PREWARM_ASYNC:-1}" \
-            bash scripts/prewarm_bi_portal_sections.sh
+            SHEIN_BI_PORTAL_PREWARM_SECTIONS=orders,waybills,afterSales \
+            SHEIN_BI_PORTAL_PREWARM_ASYNC=0 \
+            SHEIN_BI_PORTAL_PREWARM_HOST_LOCKED=1 \
+              bash scripts/prewarm_bi_portal_sections.sh
+            bash scripts/enqueue_bi_portal_sections.sh \
+              --sections inventoryTrend \
+              --priority 40 \
+              --reason "et-forwarder-$DATE-$MODE"
           fi
           ;;
         none|off|0|false)

@@ -1,0 +1,11 @@
+[Unit]
+Description=Give deferred Portal sections an opportunity after the reserved home lane
+
+[Timer]
+OnCalendar=*-*-* *:52:00
+AccuracySec=15s
+Persistent=false
+Unit=shein-bi-cloud-portal-section-queue.service
+
+[Install]
+WantedBy=timers.target

@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
 PORTAL_URL="${SHEIN_BI_PORTAL_URL:-http://127.0.0.1:8787}"
+TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
+RUN_DATE="$(TZ="$TZ_NAME" date +%F)"
 STATE_FILE="${SHEIN_OPENAPI_STOCK_REFRESH_STATE_FILE:-$ROOT/state/openapi-probes/stock-refresh.latest.json}"
 REPORT_FILE="${SHEIN_OPENAPI_PRODUCT_RECONCILE_LATEST_FILE:-$ROOT/state/openapi-probes/product-reconciliation.latest.json}"
 STARTED_AT="$(date -Is)"
@@ -57,4 +59,13 @@ jq -n \
     stockFile: $stockFile
   }' > "$TMP_FILE"
 mv -f "$TMP_FILE" "$STATE_FILE"
+node "$ROOT/scripts/pipeline_marker.mjs" write \
+  --stage stock-refresh \
+  --date "$RUN_DATE" \
+  --business-date "$RUN_DATE" \
+  --status done \
+  --message "19-store OpenAPI virtual stock refreshed" \
+  --evidence "$STATE_FILE" \
+  --evidence "$REPORT_FILE" \
+  >/dev/null
 cat "$STATE_FILE"

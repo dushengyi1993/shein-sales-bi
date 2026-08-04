@@ -2,10 +2,9 @@
 Description=Fallback poll for verified SHEIN manual-login recovery jobs
 
 [Timer]
-OnBootSec=2min
-OnUnitInactiveSec=2min
+OnCalendar=*-*-* *:47:00
 AccuracySec=15s
-Persistent=true
+Persistent=false
 Unit=shein-bi-cloud-manual-login-recovery.service
 
 [Install]

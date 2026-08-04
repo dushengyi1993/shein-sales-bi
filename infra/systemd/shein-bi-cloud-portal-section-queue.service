@@ -1,0 +1,32 @@
+[Unit]
+Description=SHEIN BI bounded Portal section refresh queue
+Wants=network-online.target shein-bi-portal.service
+After=network-online.target shein-bi-portal.service systemd-tmpfiles-setup.service
+
+[Service]
+Type=oneshot
+Slice=shein-host-heavy-bi.slice
+User=sheinops
+Group=sheinops
+UMask=0027
+WorkingDirectory=/opt/shein-bi/app
+Environment=HOME=/home/sheinops
+Environment=TZ=Asia/Shanghai
+Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_BI_PORTAL_URL=http://127.0.0.1:8787
+Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_FILE=/opt/shein-bi/app/state/portal-section-queue/queue.json
+Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS=3
+Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_SECTION_TIMEOUT_SEC=900
+Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_LEASE_SEC=1200
+TimeoutStartSec=2100
+TimeoutStopSec=30
+KillMode=control-group
+Nice=15
+CPUWeight=20
+IOWeight=20
+MemoryHigh=900M
+MemoryMax=1400M
+OOMPolicy=stop
+ExecCondition=/usr/bin/bash -c 'case "$(date +%%H)" in 01|06|08) exit 1;; esac'
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain portal-sections --class materializer --lock-wait-sec 0 --deadline-minute 17 --deadline-next-hour --defer-state /srv/shein-bi/runtime/host-scheduler/portal-sections.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_portal_section_queue_worker.sh
+SuccessExitStatus=75

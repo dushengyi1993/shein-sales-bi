@@ -1,13 +1,18 @@
 [Unit]
 Description=SHEIN BI cloud full RTV tracking verification
 Wants=network-online.target docker.service
-After=network-online.target docker.service
+After=network-online.target docker.service systemd-tmpfiles-setup.service
 
 [Service]
 Type=oneshot
+Slice=shein-host-heavy-bi.slice
+User=sheinops
+Group=sheinops
+UMask=0077
 WorkingDirectory=/opt/shein-bi/app
-Environment=HOME=/root
+Environment=HOME=/home/sheinops
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=TZ=Asia/Shanghai
 Environment=SHEIN_RTV_TRANSPORT=webapi
 Environment=SHEIN_RTV_VERIFY_TIMEOUT_MS=3600000
 Environment=SHEIN_RTV_LIMIT=160
@@ -20,4 +25,5 @@ MemoryHigh=1000M
 MemoryMax=1500M
 OOMPolicy=stop
 KillMode=control-group
-ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_rtv_verify.sh
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain rtv-verify --class browser --lock-wait-sec 120 --deadline-at 05:27 --defer-state /srv/shein-bi/runtime/host-scheduler/rtv-verify.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/run_pipeline_stage.sh --stage rtv-verify --business-date yesterday --message "RTV tracking verification completed" -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_rtv_verify.sh
+SuccessExitStatus=75

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run RTV verification after full-managed finance and before the 05:32 home lane
+
+[Timer]
+OnCalendar=*-*-* 04:50:00
+AccuracySec=5s
+Persistent=false
+Unit=shein-bi-cloud-rtv-verify.service
+
+[Install]
+WantedBy=timers.target

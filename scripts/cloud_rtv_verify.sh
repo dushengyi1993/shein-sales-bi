@@ -59,8 +59,11 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 
 if [[ "$SHEIN_BI_PORTAL_DATA_MODE" == "api" && "${SHEIN_BI_PORTAL_PREWARM_DISABLED:-0}" != "1" ]]; then
-  nohup bash scripts/prewarm_bi_portal_sections.sh >/dev/null 2>&1 &
-  echo "[cloud_rtv_verify] portal section prewarm started pid=$!"
+  bash scripts/enqueue_bi_portal_sections.sh \
+    --sections rtvData,afterSales,homeProfit,profit \
+    --priority 20 \
+    --reason "rtv-verify-$STAMP"
+  echo "[cloud_rtv_verify] Portal sections queued for bounded host-locked refresh"
 fi
 
 echo "[cloud_rtv_verify] done log=$LOG_FILE"

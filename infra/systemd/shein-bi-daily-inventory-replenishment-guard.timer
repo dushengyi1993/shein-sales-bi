@@ -2,8 +2,8 @@
 Description=Run daily low virtual inventory inspection after ET refresh
 
 [Timer]
-OnCalendar=*-*-* 09:35:00
-Persistent=true
+OnCalendar=*-*-* 09:15:00
+Persistent=false
 Unit=shein-bi-daily-inventory-replenishment-guard.service
 
 [Install]

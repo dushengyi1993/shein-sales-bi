@@ -2,133 +2,184 @@
 set -Eeuo pipefail
 
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
-source "$ROOT/scripts/lib/shared_lock.sh"
 TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
+STAGE="${1:-chunk-1}"
 LOG_DIR="${SHEIN_BI_MORNING_CHAIN_LOG_DIR:-/srv/shein-bi/logs/cloud-morning-chain}"
-LOCK_FILE="${SHEIN_BI_MORNING_CHAIN_LOCK_FILE:-$ROOT/state/locks/shein-bi-cloud-morning-chain.lock}"
 STATE_DIR="${SHEIN_BI_MORNING_CHAIN_STATE_DIR:-$ROOT/state/cloud_morning_chain}"
-DAILY_REFRESH_UNIT="${SHEIN_BI_MORNING_DAILY_REFRESH_UNIT:-shein-bi-cloud-daily-refresh.service}"
-DAILY_REFRESH_WAIT_SEC="${SHEIN_BI_MORNING_DAILY_REFRESH_WAIT_SEC:-14400}"
-SEND_LARK_REPORT="${SHEIN_BI_MORNING_SEND_LARK_REPORT:-0}"
-RUN_SALES_REFRESH="${SHEIN_BI_MORNING_SALES_REFRESH:-0}"
-ALLOW_REPEAT="${SHEIN_BI_MORNING_CHAIN_FORCE:-0}"
+RUN_DATE="$(TZ="$TZ_NAME" date +%F)"
+DATA_DATE="$(TZ="$TZ_NAME" date -d yesterday +%F)"
+STAMP="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)"
+LOG_FILE="$LOG_DIR/morning-${STAGE}-${DATA_DATE}-${STAMP}.log"
+CHUNK_1_STORES="${SHEIN_BI_MORNING_CHUNK_1_STORES:-DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ,CX,YJ,XL,QY}"
+CHUNK_2_STORES="${SHEIN_BI_MORNING_CHUNK_2_STORES:-QH,TZ,JSH,TZZ,XC}"
 DRY_RUN="${SHEIN_BI_MORNING_CHAIN_DRY_RUN:-0}"
-
-resolve_today() {
-  TZ="$TZ_NAME" date +%F
-}
 
 now_iso() {
   TZ="$TZ_NAME" date --iso-8601=seconds
-}
-
-wait_for_unit_inactive() {
-  local unit="$1"
-  local timeout="$2"
-  local interval=15
-  local elapsed=0
-  while systemctl is-active --quiet "$unit"; do
-    if (( elapsed >= timeout )); then
-      echo "[cloud_morning_chain] ERROR timeout waiting for $unit after ${timeout}s" >&2
-      return 1
-    fi
-    echo "[cloud_morning_chain] wait active unit=$unit elapsed=${elapsed}s"
-    sleep "$interval"
-    elapsed=$((elapsed + interval))
-  done
 }
 
 write_state() {
   local status="$1"
   local message="$2"
   mkdir -p "$STATE_DIR" "$ROOT/state/cloud_ops_alerts"
-  local state_json
-  state_json="{\"date\":\"$DATE\",\"generatedAt\":\"$(now_iso)\",\"status\":\"$status\",\"message\":\"$message\",\"logFile\":\"$LOG_FILE\"}"
-  printf '%s\n' "$state_json" > "$STATE_DIR/latest.json"
-  if [[ "$status" == "ok" ]]; then
-    rm -f "$ROOT/state/cloud_ops_alerts/morning-chain-last.json" 2>/dev/null || true
-  else
-    printf '%s\n' "$state_json" > "$ROOT/state/cloud_ops_alerts/morning-chain-last.json"
-  fi
+  STATUS="$status" MESSAGE="$message" STAGE="$STAGE" RUN_DATE="$RUN_DATE" \
+  DATA_DATE="$DATA_DATE" LOG_FILE="$LOG_FILE" node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const root = process.env.SHEIN_BI_ROOT || process.cwd();
+const stateDir = process.env.SHEIN_BI_MORNING_CHAIN_STATE_DIR
+  || path.join(root, 'state', 'cloud_morning_chain');
+const payload = {
+  date: process.env.RUN_DATE,
+  businessDate: process.env.DATA_DATE,
+  generatedAt: new Date().toISOString(),
+  stage: process.env.STAGE,
+  status: process.env.STATUS,
+  message: process.env.MESSAGE,
+  logFile: process.env.LOG_FILE,
+};
+const write = file => {
+  const temporary = `${file}.${process.pid}.tmp`;
+  fs.mkdirSync(path.dirname(file), {recursive: true});
+  fs.writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, {mode: 0o660});
+  fs.renameSync(temporary, file);
+};
+write(path.join(stateDir, 'latest.json'));
+if (payload.status === 'ok' && payload.stage === 'supplements') {
+  try { fs.unlinkSync(path.join(root, 'state', 'cloud_ops_alerts', 'morning-chain-last.json')); } catch {}
+} else if (!['ok', 'running'].includes(payload.status)) {
+  write(path.join(root, 'state', 'cloud_ops_alerts', 'morning-chain-last.json'));
+}
+NODE
+}
+
+write_marker() {
+  local marker_stage="$1"
+  local status="$2"
+  local message="$3"
+  shift 3
+  local args=(
+    write
+    --stage "$marker_stage"
+    --date "$RUN_DATE"
+    --business-date "$DATA_DATE"
+    --status "$status"
+    --message "$message"
+  )
+  local evidence
+  for evidence in "$@"; do
+    [[ -n "$evidence" ]] && args+=(--evidence "$evidence")
+  done
+  node "$ROOT/scripts/pipeline_marker.mjs" "${args[@]}"
+}
+
+require_marker() {
+  node "$ROOT/scripts/pipeline_marker.mjs" require \
+    --stage "$1" \
+    --date "$RUN_DATE" \
+    --status done,warning
 }
 
 on_error() {
   local line="$1"
   local status="$2"
   set +e
-  write_state "failed" "morning chain aborted at line=$line exit=$status"
-  echo "[cloud_morning_chain] ERROR aborted at line=$line exit=$status log=$LOG_FILE" >&2
+  write_state "failed" "stage=$STAGE aborted at line=$line exit=$status"
+  write_marker "morning-$STAGE" "failed" "aborted at line=$line exit=$status" "$LOG_FILE" >/dev/null || true
+  echo "[cloud_morning_chain] ERROR stage=$STAGE line=$line exit=$status log=$LOG_FILE" >&2
   exit "$status"
 }
 
+run_fetch_chunk() {
+  local stores="$1"
+  local result_file="$2"
+  SHEIN_LINK_BUSINESS_STORES="$stores" \
+  SHEIN_LINK_BUSINESS_FETCH_ONLY=1 \
+  SHEIN_LINK_BUSINESS_ALLOW_PARTIAL=0 \
+  SHEIN_LINK_BUSINESS_CHUNK_RESULT_FILE="$result_file" \
+  SHEIN_LINK_BUSINESS_STORE_ATTEMPTS="${SHEIN_LINK_BUSINESS_STORE_ATTEMPTS:-2}" \
+  SHEIN_LINK_BUSINESS_REFRESH_PORTAL=0 \
+    bash scripts/cloud_link_business_sync.sh "$DATA_DATE"
+}
+
 mkdir -p "$LOG_DIR" "$STATE_DIR"
-DATE="$(resolve_today)"
-STAMP="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)"
-LOG_FILE="$LOG_DIR/morning-chain-${DATE}-${STAMP}.log"
-DONE_FLAG="$STATE_DIR/${DATE}.done"
-
-prepare_shared_lock_file "$LOCK_FILE"
-exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
-  echo "[cloud_morning_chain] another morning chain is running; skip"
-  exit 0
-fi
-
 exec > >(tee -a "$LOG_FILE") 2>&1
 trap 'on_error "$LINENO" "$?"' ERR
-
 cd "$ROOT"
-echo "[cloud_morning_chain] start date=$DATE root=$ROOT dryRun=$DRY_RUN sendLarkReport=$SEND_LARK_REPORT"
+export SHEIN_BI_ROOT="$ROOT"
+export SHEIN_BI_MORNING_CHAIN_STATE_DIR="$STATE_DIR"
+
+echo "[cloud_morning_chain] start stage=$STAGE runDate=$RUN_DATE businessDate=$DATA_DATE dryRun=$DRY_RUN"
 
 if [[ "$DRY_RUN" == "1" || "$DRY_RUN" == "true" ]]; then
-  if [[ "$SEND_LARK_REPORT" == "1" || "$SEND_LARK_REPORT" == "true" ]]; then
-    echo "[cloud_morning_chain] dry-run plan: sales refresh -> Lark report without duplicate sync -> daily refresh service"
-  else
-    echo "[cloud_morning_chain] dry-run plan: sales refresh -> skip Lark report -> daily refresh service"
-  fi
-  write_state "ok" "dry-run plan validated"
+  case "$STAGE" in
+    chunk-1) echo "[cloud_morning_chain] dry-run: fetch first 14 stores only" ;;
+    chunk-2) echo "[cloud_morning_chain] dry-run: require chunk-1, fetch remaining 5, merge all 19 and refresh linksData" ;;
+    supplements) echo "[cloud_morning_chain] dry-run: require merged links, run non-browser daily supplements without RTV" ;;
+    *) exit 64 ;;
+  esac
+  write_state "ok" "dry-run stage validated"
   exit 0
 fi
 
-if [[ -f "$DONE_FLAG" && "$ALLOW_REPEAT" != "1" && "$ALLOW_REPEAT" != "true" ]]; then
-  echo "[cloud_morning_chain] already completed for date=$DATE flag=$DONE_FLAG"
-  write_state "ok" "already completed for date=$DATE"
-  exit 0
-fi
+case "$STAGE" in
+  chunk-1)
+    write_state "running" "first 14 stores are refreshing"
+    RESULT_FILE="$STATE_DIR/${RUN_DATE}-chunk-1.json"
+    run_fetch_chunk "$CHUNK_1_STORES" "$RESULT_FILE"
+    write_marker "morning-chunk-1" "done" "first 14 stores fetched" "$RESULT_FILE" "$LOG_FILE" >/dev/null
+    write_state "ok" "first 14 stores completed"
+    ;;
+  chunk-2)
+    if ! require_marker "morning-chunk-1"; then
+      write_state "deferred" "first 14-store marker is not ready"
+      write_marker "morning-chunk-2" "deferred" "missing morning-chunk-1 marker" "$LOG_FILE" >/dev/null
+      exit 75
+    fi
+    write_state "running" "remaining 5 stores are refreshing"
+    RESULT_FILE="$STATE_DIR/${RUN_DATE}-chunk-2.json"
+    run_fetch_chunk "$CHUNK_2_STORES" "$RESULT_FILE"
+    write_marker "morning-chunk-2" "done" "remaining 5 stores fetched" "$RESULT_FILE" "$LOG_FILE" >/dev/null
 
-if [[ "$RUN_SALES_REFRESH" == "1" || "$RUN_SALES_REFRESH" == "true" ]]; then
-  write_state "running" "sales fallback refresh started"
-  SHEIN_BI_REFRESH_BUSY_EXIT_CODE=75 bash scripts/cloud_bi_refresh.sh today morning-chain
-  echo "[cloud_morning_chain] sales fallback refresh done"
-else
-  echo "[cloud_morning_chain] webhook is the intraday sales source; skip duplicate morning sales pull"
-fi
+    write_state "running" "all 19 stores are merging"
+    SHEIN_LINK_BUSINESS_FINALIZE_ONLY=1 \
+    SHEIN_LINK_BUSINESS_ALLOW_PARTIAL=0 \
+    SHEIN_LINK_BUSINESS_REFRESH_PORTAL=0 \
+      bash scripts/cloud_link_business_sync.sh "$DATA_DATE"
 
-echo "[cloud_morning_chain] start Lark daily report stage"
-if [[ "$SEND_LARK_REPORT" == "1" || "$SEND_LARK_REPORT" == "true" ]]; then
-  write_state "running" "daily report started"
-  SHEIN_LARK_REPORT_SYNC_TODAY=0 bash scripts/cloud_daily_lark_report.sh today
-  echo "[cloud_morning_chain] daily report done; start slow daily refresh via $DAILY_REFRESH_UNIT"
-else
-  write_state "running" "daily report skipped; daily refresh starting"
-  echo "[cloud_morning_chain] Lark daily report disabled; start slow daily refresh via $DAILY_REFRESH_UNIT"
-fi
+    node scripts/generate_bi_portal.mjs \
+      --metabase-url "${METABASE_URL:-http://127.0.0.1:3000}" \
+      --data-mode api
+    node scripts/generate_bi_portal_shell.mjs
+    curl -fsS --max-time "${SHEIN_BI_MORNING_LINKS_REFRESH_TIMEOUT_SEC:-600}" \
+      -H 'X-SHEIN-BI-HOST-LOCKED-WORKER: 1' \
+      "${SHEIN_BI_PORTAL_URL:-http://127.0.0.1:8787}/api/bi/section/linksData?refresh=1" \
+      >/dev/null
+    write_marker "morning-links-ready" "done" "all 19 stores merged and linksData refreshed" \
+      "$STATE_DIR/${RUN_DATE}-chunk-1.json" "$RESULT_FILE" "$LOG_FILE" >/dev/null
+    write_state "ok" "all 19 stores merged; linksData is ready"
+    ;;
+  supplements)
+    if ! require_marker "morning-links-ready"; then
+      write_state "deferred" "all-store link marker is not ready"
+      write_marker "morning-supplements" "deferred" "missing morning-links-ready marker" "$LOG_FILE" >/dev/null
+      exit 75
+    fi
+    write_state "running" "daily OpenAPI, cost and profit supplements are refreshing"
+    SHEIN_BI_DAILY_LINK_BUSINESS_MODE=skip \
+    SHEIN_BI_DAILY_RTV_VERIFY=0 \
+    SHEIN_BI_PORTAL_PREWARM_DISABLED=0 \
+      bash scripts/cloud_daily_refresh.sh "$DATA_DATE"
+    write_marker "morning-supplements" "done" "daily supplements completed; RTV runs in its own pre-work slot" \
+      "$LOG_FILE" >/dev/null
+    printf 'completed_at=%s\nbusiness_date=%s\nlog=%s\n' "$(now_iso)" "$DATA_DATE" "$LOG_FILE" \
+      > "$STATE_DIR/${RUN_DATE}.done"
+    write_state "ok" "morning pipeline completed"
+    ;;
+  *)
+    echo "Unsupported morning stage: $STAGE" >&2
+    exit 64
+    ;;
+esac
 
-write_state "running" "daily refresh started"
-if command -v systemctl >/dev/null 2>&1; then
-  systemctl reset-failed "$DAILY_REFRESH_UNIT" || true
-  systemctl start "$DAILY_REFRESH_UNIT"
-  wait_for_unit_inactive "$DAILY_REFRESH_UNIT" "$DAILY_REFRESH_WAIT_SEC"
-  RESULT="$(systemctl show "$DAILY_REFRESH_UNIT" -p Result --value 2>/dev/null || true)"
-  STATUS="$(systemctl show "$DAILY_REFRESH_UNIT" -p ExecMainStatus --value 2>/dev/null || true)"
-  if [[ -n "$RESULT" && "$RESULT" != "success" ]]; then
-    echo "[cloud_morning_chain] ERROR $DAILY_REFRESH_UNIT result=$RESULT status=${STATUS:-}" >&2
-    exit 1
-  fi
-else
-  bash scripts/cloud_daily_refresh.sh yesterday
-fi
-
-printf 'completed_at=%s\nlog=%s\n' "$(now_iso)" "$LOG_FILE" > "$DONE_FLAG"
-write_state "ok" "morning chain completed"
-echo "[cloud_morning_chain] done date=$DATE log=$LOG_FILE"
+echo "[cloud_morning_chain] done stage=$STAGE log=$LOG_FILE"

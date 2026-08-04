@@ -1,0 +1,31 @@
+[Unit]
+Description=SHEIN BI morning link/business chunk 2 of 2 and all-store merge
+Wants=network-online.target docker.service shein-bi-portal.service
+After=network-online.target docker.service shein-bi-portal.service systemd-tmpfiles-setup.service
+
+[Service]
+Type=oneshot
+Slice=shein-host-heavy-bi.slice
+User=sheinops
+Group=sheinops
+UMask=0077
+WorkingDirectory=/opt/shein-bi/app
+Environment=HOME=/home/sheinops
+Environment=TZ=Asia/Shanghai
+Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_BI_PORTAL_URL=http://127.0.0.1:8787
+Environment=SHEIN_BI_MORNING_CHAIN_LOG_DIR=/srv/shein-bi/logs/cloud-morning-chain
+Environment=SHEIN_BI_MORNING_CHAIN_STATE_DIR=/opt/shein-bi/app/state/cloud_morning_chain
+Environment=SHEIN_BI_MORNING_CHUNK_2_STORES=QH,TZ,JSH,TZZ,XC
+Environment=SHEIN_LINK_BUSINESS_STORE_ATTEMPTS=2
+TimeoutStartSec=1200
+TimeoutStopSec=30
+KillMode=control-group
+Nice=10
+CPUWeight=40
+IOWeight=30
+MemoryHigh=2200M
+MemoryMax=2800M
+OOMPolicy=stop
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain morning-link-chunk-2 --class browser --lock-wait-sec 120 --deadline-at 09:00 --defer-state /srv/shein-bi/runtime/host-scheduler/morning-link-chunk-2.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_morning_chain.sh chunk-2
+SuccessExitStatus=75

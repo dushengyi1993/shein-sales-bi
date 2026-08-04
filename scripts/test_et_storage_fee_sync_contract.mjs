@@ -76,8 +76,8 @@ assert.match(service, /shein-bi-cloud-et-forwarder\.lock/, 'service must share t
 assert.match(service, /et_storage_fee_sync_state\.json/, 'service must configure the isolated storage-fee state file');
 assert.match(service, /outputs\/et-storage-fee/, 'service must configure the isolated storage-fee output directory');
 assert.match(service, /^Environment=SHEIN_DOCKER_USE_SUDO=1$/m, 'service must explicitly enable the audited Docker sudo path');
-assert.match(timer, /14:10:00 Asia\/Shanghai/, 'timer must run after the 13:20 generic ET slot in Beijing time');
-assert.match(timer, /Persistent=true/, 'missed daily run should be recoverable');
+assert.match(timer, /14:20:00 Asia\/Shanghai/, 'timer must use the bounded 14:20-14:27 host-heavy slot');
+assert.match(timer, /Persistent=false/, 'a missed run must not replay inside the reserved home lane');
 assert.doesNotMatch(timer, /01,03|\*\/2|every two hours/i, 'timer must not run every two hours');
 
 console.log('ET storage-fee sync contract: ok');

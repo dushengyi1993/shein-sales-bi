@@ -2,7 +2,7 @@
 
 
 
-> 当前权威状态：2026-07-30。V2 是唯一正式 BI 入口；本地 BI 已封存，V1 仅保留 GitHub archive 恢复点。半托出站 OpenAPI 为19店独立 App；Webhook 入站由 DL 中央 App 统一验签。
+> 当前权威状态：2026-08-04。V2 是唯一正式 BI 入口；本地 BI 已封存，V1 仅保留 GitHub archive 恢复点。半托出站 OpenAPI 为19店独立 App；Webhook 入站由 DL 中央 App 统一验签。半托与全托共用主机的当前时间轴、共享锁、Portal 单队列和让路规则统一见 [shared-host-resource-schedule.md](shared-host-resource-schedule.md)；本文中的历史时刻不得覆盖该合同。
 
 
 ## 1. 当前入口
@@ -73,21 +73,22 @@
 | --- | --- | --- |
 
 | 半托订单 Webhook + OpenAPI 按单同步 | 实时事件触发 | 更新当天正式销售事实并通过 SSE 通知在线 BI；旧 `shein-bi-cloud-today.timer` 已停用并删除 |
-| `shein-bi-cloud-openapi-stock-refresh.timer` | 每小时 `:25/:55` | 避开全托整点和`:12`销售同步，轻量刷新19店当前商品库存；全店成功后只重建独立 `inventoryStock` section，并通过 SSE 更新库存矩阵 |
-| `shein-bi-cloud-yesterday.timer` | 北京时间 `03:00` | 刷新前一天最终销售，并复核前两天稳定日 |
+| `shein-bi-cloud-openapi-stock-refresh.timer` | 每小时 `:12/:45` | 轻量刷新19店当前商品库存；09:12 主轮同时发布库存守卫依赖 marker |
+| `shein-bi-cloud-today-sales-reconcile.timer` | 每 15 分钟 | 在 Webhook 之外用19店 OpenAPI 纠偏当天销售，只刷新 `liveSalesToday`；属于轻量快车道 |
+| `shein-bi-cloud-yesterday.timer` | 北京时间 `02:45` | 依赖 session/backup marker，刷新前一天最终销售并复核稳定日 |
 
-| `shein-bi-db-backup.timer` | 北京时间 `02:40` | 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto` |
+| `shein-bi-db-backup.timer` | 北京时间 `01:45` | 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto`；01:52 前释放给全托备份 |
 
-| `shein-bi-cloud-et-forwarder.timer` | 北京时间 `01:20/04:20/07:20/10:20/13:20/17:20/20:20/23:20` | 按经营检查点抓取 ET 货代仓/出库单、入仓，只轻量刷新订单/物流/售后相关 section；需要服务器本地 ET 登录配置 |
+| `shein-bi-cloud-et-forwarder.timer` | 北京时间 `01:12/04:12/07:20/10:20/13:20/17:20/20:20/23:20` | 按经营检查点抓取 ET 货代仓/出库单、入仓；同步刷新轻量 section，重 section 进入 host-locked 队列 |
 
-| `shein-bi-cloud-et-storage-fee.timer` | 北京时间 `14:10` | 只读同步 ET 仓储费最终账单与 SKU 明细，重建利润 cache、对账并只预热 `profit/homeProfit` |
+| `shein-bi-cloud-et-storage-fee.timer` | 北京时间 `14:20` | 只读同步 ET 仓储费最终账单与 SKU 明细，14:27 前完成利润 cache 与对账 |
 
-| `shein-bi-cloud-morning-chain.timer` | 北京时间 `08:00` | 晨间串行链路：跳过重复的当天销售抓取，直接启动前一完整日统一补采；当前 `SHEIN_BI_MORNING_SEND_LARK_REPORT=0` |
+| 晨间三阶段 | `08:00 / 08:45 / 08:55` | 前14店 fetch-only；后5店并19店合并；最后运行 OpenAPI/成本/利润补充。每阶段用 marker 衔接 |
 
-| `shein-bi-cloud-session-manager.timer` | 北京时间 `02:20` | 云端登录态管家：顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，检查 profile 体积，生成报告 |
+| `shein-bi-cloud-session-manager.timer` | 北京时间 `00:45` | 云端登录态管家：顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，检查 profile 体积并写 session marker |
 
-| `shein-bi-cloud-browser-cleanup.timer` | 每天 `03:45/09:50/21:00` | 租约感知地回收过期/死亡租约和无有效租约的孤儿浏览器；避开日更与营销窗口 |
-| `shein-bi-cloud-disk-maintenance.timer` | 每周日 `01:35`，随机延迟不超过 10 分钟 | 旧抓数校验归档到 COS、清理 7 天前临时文件；根盘达到 80% 且无浏览器任务时才清 profile 可再生缓存 |
+| `shein-bi-cloud-browser-cleanup.timer` | 每天 `03:20/09:25/21:20` | 在共享 host 锁和租约保护下回收半托孤儿浏览器；不与全托 supply/home 同窗 |
+| `shein-bi-cloud-disk-maintenance.timer` | 每天 `00:10` | 旧抓数校验归档到 COS、清理 7 天前临时文件；00:27 前释放 |
 
 | `shein-bi-cloud-watchdog.timer` | 每小时 | 检查云端服务、timer 和 BI 数据新鲜度，异常时发飞书提醒 |
 
@@ -103,7 +104,9 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 
 
 
-### 当前排班总览（2026-07-26 核对）
+### 历史排班快照（2026-07-26，已由 2026-08-04 共用主机合同替代）
+
+> 下表仅用于追溯旧任务名称和业务作用，不再作为当前钟点依据。当前分钟、依赖 marker、共享锁和 Portal 队列一律以 [shared-host-resource-schedule.md](shared-host-resource-schedule.md) 与 `infra/systemd/*.timer` 为准。
 
 | 时间 / 频率 | 任务 | 形式 | 生产事实影响 | 备注 |
 |---|---|---|---|---|
@@ -160,8 +163,8 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 - 当天人工灾备入口：`scripts/cloud_bi_refresh.sh today intraday`。日常当天销售由订单 Webhook 触发按单 OpenAPI 写正式事实，不安装每小时 timer；只有实时链路故障并明确决定灾备时才手动运行。
 - 前一天最终版入口：`scripts/cloud_bi_refresh.sh yesterday final`。切换日以后直接收齐19店 OpenAPI 完整日切片；逐店 fetch/load/每日行门禁通过后才调用 `ops.promote_openapi_sales_slice` 原子晋升。
 
-- Portal section 预热有两层：`cloud_bi_refresh.sh` 生成 core 后会后台启动 `scripts/prewarm_bi_portal_sections.sh`；`serve_bi_portal.mjs` 还会在服务启动和首页访问时检测 `data.json.generatedAt`，通过 core warmup watcher 兜底预热 section，防止用户打开页面时才现场生成。`homeRankings` / `homeProfit` 是首页轻量 section，分别从最后一次完整发布的销售/利润 cache 派生，再由 `liveSalesToday` 覆盖当天变化，二者都不允许同步触发移动成本重算，并使用独立 fast lane 避免被重 section 阻塞。普通同代实时刷新只更新状态 chip，不弹顶部缓存警告；后台失败会自动单飞重试，连续重试耗尽后才显示人话错误。当前日订单列表、排行和成交价散点由 `liveSalesToday` 覆盖，同一个 SSE token 不得被多个浏览器重复生成。完整 `rankings` / `profit` 仍保留给详情和筛选；若 `homeProfit` 的来源代次不匹配，前端仍必须拒绝旧利润，不能拿旧值当业务真相。
-- Portal 实时链路不做 60 秒轮询：订单 Webhook 入仓后先通过 PostgreSQL `NOTIFY` + SSE 推送销售；可见页面仅每 5 分钟做一次兜底检查。Portal 将订单/退货事件按默认 `45s` 合并后执行成本台账和利润 cache 刷新，成功后再推送 `accountingRefreshed=true`；失败默认 `5min` 后自动重试，服务启动时也会补做离线期间的事件。可用 `SHEIN_BI_LIVE_ACCOUNTING_DEBOUNCE_MS` / `SHEIN_BI_LIVE_ACCOUNTING_RETRY_MS` 调整，但不得把它改回高频全量销售抓数。
+- Portal section 已改为一条 host-locked 队列：core、页面或 SSE 只把 `orders/profit/linksData` 等重 section 合并入队，不再 `nohup` 扇出 16 个后台生成任务。`shein-bi-cloud-portal-section-queue.service` 持 `/run/lock/shein-host-heavy.lock` 后逐个同步生成；旧 JSON 在新结果原子发布前继续可读。只有 `liveSalesToday`、`productState`、`inventoryStock` 可在 Portal 轻量快车道直接生成。完整边界见 [shared-host-resource-schedule.md](shared-host-resource-schedule.md)。
+- Portal 实时链路不做 60 秒轮询：订单 Webhook 入仓后先通过 PostgreSQL `NOTIFY` + SSE 推送销售；可见页面仅每 5 分钟做一次兜底检查。普通当天订单只刷新 `liveSalesToday`，不会等待移动加权成本；退货和历史订单变动把 `orders/afterSales/profit/homeProfit` 等 canonical accounting section 加入 host-locked 队列，并在页面标注利润待同步。Portal 进程本身不得直接启动成本台账重算。
 - 营销修复队列必须区分“系统失败”和“业务条件不满足”。库存不足、平台明确拒绝且旧活动保护仍完整的链接，在当天不可变 manifest 内记为 `blocked`，不得每个窗口重复执行或把 worker 标成 `failed`；下一天的新 guard/fingerprint 会自动重新评估。网络、浏览器、鉴权、读回失败仍记为 `failed` 并重试/告警。某阶段存在安全业务阻塞时，worker 仍应继续处理后续互不重叠的修复阶段，最后以人话报告未执行原因。
 - 实时销售直接查询当天 `fact.order_item`，利润只读取同一次原子发布的 `mart.profit_order_item_cache` 与仓储费 cache。新订单尚未进入 cache，或已有订单行的金额/数量与 cache 不一致时，API 都返回 `accountingPending=true`，实时销售先采用正式事实行，页面显示利润正在补成本；相同内容的幂等 Webhook 重放不会误报待补账。禁止用静态单位成本、旧利润或零值掩盖这个时间差。
 - `productTrafficDaily` section 当前是日期 × 店铺 × 标准货号 × SKC 粒度，并从最新链接主快照带出 `shelf_status_name`、`is_on_shelf`、`is_sold_out`、`is_out_shelf` 等字段。流量页前端按顶部时间范围聚合成店铺 × 标准货号 × SKC 明细，默认只看已上架链接；若要追溯历史某日当时的上架状态，需要另做日期对齐的历史状态层，不能把当前快照解释成历史状态事实。
@@ -171,7 +174,7 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 
 - 飞书日报云端入口：`scripts/cloud_daily_lark_report.sh today` 仅保留为手动临时发送；正式自动发送当前关闭，`scripts/cloud_morning_chain.sh` 默认跳过日报后直接启动慢变日更。
 
-- 统一日更补采云端入口：`scripts/cloud_daily_refresh.sh yesterday`；生产由晨间链路启动 `shein-bi-cloud-daily-refresh.service`。它内部调用 `scripts/cloud_link_business_sync.sh` 做链接/业务域、SBN 营销概览等慢变域日更，并串行执行 `scripts/cloud_rtv_verify.sh`；不再重复 MBRs 全店价格栈扫描，该 live 证据只由独立 marketing guard 读取。旧 `scripts/cloud_openapi_hl_reconciliation.sh` 仅保留为显式手动诊断入口。链接/业务域带全店日指标全 0 不入仓守卫。该入口不应在白天手动全量补跑 19 店；若必须补跑，先确认当前没有 ET/门户生成/营销写入任务，并检查可用内存。
+- 晨间生产入口拆成 `cloud_morning_chain.sh chunk-1 / chunk-2 / supplements`：08:00 前14店仅抓取，08:45 后5店完成后才合并19店证据并同步发布 `linksData`，08:55 再运行 OpenAPI/成本/利润补充。RTV 已移到 04:50 独立受锁窗口，不再拉长晨间链路。`scripts/cloud_daily_refresh.sh yesterday` 仍保留为受控手动全量恢复入口；旧 `scripts/cloud_openapi_hl_reconciliation.sh` 仅用于显式诊断。
 
 - 云端异常通知入口：`scripts/cloud_ops_watchdog.mjs`。`config/lark_report.json` 配置 `recipientChatId` 后，watchdog、同步异常、营销提醒和 Webhook P0 都统一发送到团队运营群，不再向负责人个人私聊；个人 `recipientUserId` 只保留为显式移除群目标后的灾备。对于内容精确等于 `marketing price scan failed` 的单一日更 warning，watchdog 只有在后续 guard 状态引用一份比 warning 更新、24 小时内、`ok=true` / `partial=false`、与当前 enabled store 集合完全一致且行数自洽的扫描时，才在 `recoveries` 中记录恢复并停止重复告警。原 `daily-refresh-last.json` 和历史日志必须保留；混合 warning、过期/未来时间、路径越界、缺店、重复店、失败店或残缺 payload 一律不能自动变绿。
 

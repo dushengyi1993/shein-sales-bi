@@ -187,6 +187,7 @@ if [[ "${SHEIN_ET_STORAGE_FEE_REFRESH_PORTAL:-1}" == "1" ]]; then
       # potentially expensive refresh.
       SHEIN_BI_PORTAL_PREWARM_SECTIONS='profit,homeProfit' \
         SHEIN_BI_PORTAL_PREWARM_ASYNC=0 \
+        SHEIN_BI_PORTAL_PREWARM_HOST_LOCKED=1 \
         bash scripts/prewarm_bi_portal_sections.sh
     else
       echo '[cloud_et_storage_fee_sync] WARN portal refresh lock busy; prior portal cache retained' >&2

@@ -1,18 +1,24 @@
 [Unit]
-Description=SHEIN BI cloud morning chain: 08 sales -> optional Lark report -> daily refresh
+Description=SHEIN BI morning link/business chunk 1 of 2 (first 14 stores)
 Wants=network-online.target docker.service
-After=network-online.target docker.service
+After=network-online.target docker.service systemd-tmpfiles-setup.service
 
 [Service]
 Type=oneshot
+Slice=shein-host-heavy-bi.slice
+User=sheinops
+Group=sheinops
+UMask=0077
 WorkingDirectory=/opt/shein-bi/app
-Environment=HOME=/root
+Environment=HOME=/home/sheinops
 Environment=TZ=Asia/Shanghai
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
-Environment=SHEIN_BI_MORNING_CHAIN_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-morning-chain.lock
-Environment=SHEIN_BI_MORNING_SEND_LARK_REPORT=0
-Environment=SHEIN_BI_MORNING_SALES_REFRESH=0
-TimeoutStartSec=21600
+Environment=SHEIN_BI_MORNING_CHAIN_LOG_DIR=/srv/shein-bi/logs/cloud-morning-chain
+Environment=SHEIN_BI_MORNING_CHAIN_STATE_DIR=/opt/shein-bi/app/state/cloud_morning_chain
+Environment=SHEIN_BI_MORNING_CHUNK_1_STORES=DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ,CX,YJ,XL,QY
+Environment=SHEIN_LINK_BUSINESS_STORE_ATTEMPTS=2
+TimeoutStartSec=1800
+TimeoutStopSec=30
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
@@ -21,4 +27,5 @@ MemoryHigh=2600M
 MemoryMax=3400M
 OOMPolicy=stop
 KillMode=control-group
-ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_morning_chain.sh
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain morning-link-chunk-1 --class browser --lock-wait-sec 120 --deadline-at 08:27 --defer-state /srv/shein-bi/runtime/host-scheduler/morning-link-chunk-1.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_morning_chain.sh chunk-1
+SuccessExitStatus=75

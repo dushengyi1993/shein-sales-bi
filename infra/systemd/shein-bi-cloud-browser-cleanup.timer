@@ -2,10 +2,11 @@
 Description=Run SHEIN BI orphan Chrome cleanup outside data and marketing windows
 
 [Timer]
-OnCalendar=*-*-* 03:45:00
-OnCalendar=*-*-* 09:50:00
-OnCalendar=*-*-* 21:00:00
-Persistent=true
+OnCalendar=*-*-* 03:20:00
+OnCalendar=*-*-* 09:25:00
+OnCalendar=*-*-* 21:20:00
+AccuracySec=5s
+Persistent=false
 Unit=shein-bi-cloud-browser-cleanup.service
 
 [Install]

@@ -5,6 +5,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+Slice=shein-host-heavy-bi.slice
 User=sheinops
 Group=sheinops
 WorkingDirectory=/opt/shein-bi/app
@@ -31,4 +32,5 @@ MemoryHigh=2200M
 MemoryMax=3000M
 OOMPolicy=stop
 KillMode=control-group
-ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_marketing_repair_worker.sh
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain marketing-repair --class browser --lock-wait-sec 0 --deadline-minute 17 --deadline-next-hour --defer-state /srv/shein-bi/runtime/host-scheduler/marketing-repair.latest.json --defer-reason deferred_to_local -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_marketing_repair_worker.sh
+SuccessExitStatus=75

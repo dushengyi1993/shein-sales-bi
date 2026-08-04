@@ -1,0 +1,11 @@
+[Unit]
+Description=Reconcile current SHEIN sales every fifteen minutes
+
+[Timer]
+OnCalendar=*-*-* *:00,15,30,45:00
+AccuracySec=15s
+Persistent=false
+Unit=shein-bi-cloud-today-sales-reconcile.service
+
+[Install]
+WantedBy=timers.target
