@@ -17,6 +17,8 @@ function ok(cond, msg) {
   if (!cond) failures.push(msg);
 }
 
+ok(html.includes(client), 'generated portal shell does not contain the complete current source client');
+
 for (const required of [
   'OPS.tasks={version:1,updatedAt:null,tasks:[]}',
   'opsTasksForSession',

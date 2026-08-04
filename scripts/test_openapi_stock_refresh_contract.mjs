@@ -14,6 +14,7 @@ const refresh = read('scripts/cloud_openapi_stock_refresh.sh');
 const service = read('infra/systemd/shein-bi-cloud-openapi-stock-refresh.service');
 const timer = read('infra/systemd/shein-bi-cloud-openapi-stock-refresh.timer');
 const watchdog = read('scripts/cloud_ops_watchdog.mjs');
+const portalService = read('infra/systemd/shein-bi-portal.service');
 
 assert.match(generator, /openapi_inventory_current AS \(/,
   'linksData must overlay the current OpenAPI inventory source');
@@ -69,5 +70,7 @@ assert.match(watchdog, /'shein-bi-cloud-openapi-stock-refresh\.service'/,
   'watchdog must report a failed current-stock refresh service');
 assert.match(watchdog, /'shein-bi-cloud-openapi-stock-refresh\.timer'/,
   'watchdog must verify the current-stock refresh schedule is enabled');
+assert.match(portalService, /ExecStartPre=\/usr\/bin\/node scripts\/generate_bi_portal_shell\.mjs/,
+  'every Portal restart must rebuild the deployed shell from the current client source');
 
 console.log('openapi_stock_refresh_contract: current-stock source, 19-store gate, scheduling, and live refresh passed');

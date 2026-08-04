@@ -65,6 +65,7 @@ Environment=SHEIN_BI_INTENT_PLANNER_ENABLED=1
 Environment=SHEIN_BI_JOB_WORKER_ENABLED=1
 Environment=SHEIN_BI_JOB_POLL_MS=1500
 Environment=SHEIN_BI_JOB_LEASE_MS=600000
+ExecStartPre=/usr/bin/node scripts/generate_bi_portal_shell.mjs
 ExecStart=/usr/bin/node scripts/serve_bi_portal.mjs --host 127.0.0.1 --port 8787 --state-file /srv/shein-bi/runtime/bi_action_state.json --link-ops-task-file /srv/shein-bi/runtime/bi_link_ops_tasks.json --link-ops-chat-file /srv/shein-bi/runtime/bi_link_ops_chats.json --link-ops-asset-dir /srv/shein-bi/runtime/bi_link_ops_assets --audit-file /srv/shein-bi/logs/bi_portal_action_audit.jsonl
 Restart=always
 RestartSec=5
