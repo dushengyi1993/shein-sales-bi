@@ -63,6 +63,13 @@ assert.match(repairWorker, /run_terminal_final_snapshot\(\)[\s\S]*export_marketi
   'repair final readback must refresh ordinary/coupon session HTTP evidence before the latest price scan and final guard rebuild');
 assert.match(repairWorker, /run_final_readback\(\)[\s\S]*run_terminal_final_snapshot/,
   'completed repair queues must reuse the terminal final snapshot before rebuilding the queue');
+assert.match(repairWorker, /check_marketing_terminal_report_readiness\.mjs/,
+  'blocked queues must not send the final report before final-snapshot work is terminally accounted');
+assert.match(
+  repairWorker,
+  /if \[\[ "\$QUEUE_STATUS" == "completed" \|\| "\$QUEUE_STATUS" == "blocked" \]\]; then[\s\S]*?terminal_report_ready[\s\S]*?send_daily_group_report/,
+  'terminal readiness gate must run before blocked-queue report delivery',
+);
 assert.match(repairWorker, /export SHEIN_BI_BROWSER_LEASE_TASK="\$LEASE_TASK"/);
 assert.match(repairWorker, /export SHEIN_BI_BROWSER_LEASE_RUN_ID="\$RUN_ID"/);
 assert.doesNotMatch(dailyRefresh, /manage_browser_task_leases\.mjs/);

@@ -81,7 +81,7 @@ guard 尚未结束时，heartbeat 每 60–90 秒轮询，最长 30 分钟；结
 - 修复 worker 在 `10:50/12:50/14:50/16:50/18:50/19:30` 运行，单轮按总预算最多处理 `8` 个活动组、最长 `40` 分钟；一个阶段提前完成时会用剩余预算继续下一阶段，不再空耗整个时间窗。同店复用浏览器，成功组可 resume，失败/阻断组不会被误记为完成。
 - 每个替换组仍先 preflight/dry-run，再锁定旧活动完整快照和精确 hash。真实删除、目标活动创建、回读与补偿由事务执行器统一管理；目标创建失败时自动恢复旧保护。dry-run 不得进入删除或任何真实写路径。
 - 修复队列全部组完成后，最终闭环顺序固定为：先用 session HTTP 刷新 19 店普通活动/优惠券 stack review，再做 19 店价格栈 final live readback，最后重建 guard。价格栈必须最后扫，避免刚创建的待生效活动在 stack review 期间跨过开始时间后，又被旧价格快照误判为缺失。修复耗时超过同轮证据时差时，不得沿用巡检开始时的旧 stack review，让已被 live 证据替代的优惠券中间文件重新变成 stale blocker。巡检 watchdog 与修复 watchdog 分别验收，后者必须在 `20:00` 前确认修复闭环或明确剩余 blocker。
-- 飞书日报只能在最终 19 店 stack review、价格栈 readback 和 guard 重建之后发送。队列刚进入 `blocked`、某个 worker 阶段结束或 execution summary 刚落盘都只是中间态；发送器必须校验最终 guard 的时间晚于终态队列和执行结果，否则拒绝发送。群内固定只发“一段最终结论 + 一个 `marketing-daily-final-YYYY-MM-DD.md` 附件”，不得再分别发送 guard/execution 两个附件，也不得把 guard 的只读“不能自动执行”标题当成整轮执行结论。
+- 飞书日报只能在最终 19 店 stack review、价格栈 readback 和 guard 重建之后发送。队列刚进入 `blocked`、某个 worker 阶段结束或 execution summary 刚落盘都只是中间态；blocked 队列完成最终扫描后必须重建四类 repair plan，并用 `check_marketing_terminal_report_readiness.mjs` 按精确 `store+SKC` 核对：新出现且尚未执行/安全阻断的行必须重新入队，不能先发日报。发送器仍须校验最终 guard 的时间晚于终态队列和执行结果。群内固定只发“一段最终结论 + 一个 `marketing-daily-final-YYYY-MM-DD.md` 附件”，不得再分别发送 guard/execution 两个附件，也不得把 guard 的只读“不能自动执行”标题当成整轮执行结论。
 - 候选范围同时包括持续在售老链接的 `30` 天兜底，以及新品/重新上架的 `7` 天兜底；两者都以精确 `storeKey + SKC` manifest 为准。价格漂移阶段与兜底阶段必须键级互斥，发现重叠直接拒绝建队列，不能重复修同一链接。
 - 高点击低转化专属折扣优先于普通漏兜底/新品/重新上架阶段。普通兜底计划器必须读取同一 guard 的 `highClickLowConversionSpecial.rows`，把这些精确 `storeKey + SKC` 记为 `handled_by_high_click_special_stage` 并从普通 rescue 中剔除；队列构建器仍对未被上游解释的任何跨阶段重复 fail closed。2026-07-30 已修复因 `DL::sv260208174499165647929` 同时进入高点击与普通兜底而导致整条 repair queue 无法生成的问题。
 

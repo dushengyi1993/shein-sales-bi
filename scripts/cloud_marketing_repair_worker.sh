@@ -172,8 +172,13 @@ run_terminal_final_snapshot() {
 }
 
 run_final_readback() {
-  local scan_out guard_out price_overrides price_path manual_count drift_count manual_plan
   run_terminal_final_snapshot
+  build_current_repair_plans
+  rebuild_repair_queue
+}
+
+build_current_repair_plans() {
+  local scan_out guard_out price_overrides price_path manual_count drift_count manual_plan
   scan_out="$FINAL_SCAN_OUT"
   guard_out="$ROOT/outputs/reports/marketing-daily-guard-${DATE}.json"
   node scripts/marketing/build_high_click_special_discount_plan.mjs \
@@ -199,6 +204,12 @@ run_final_readback() {
       --out-dir "$ROOT/tmp/marketing-signup/limited-discount-fallback/target-price-drift-${DATE}" \
       --end-time "$(TZ="$TZ_NAME" date -d "$DATE +7 days" +%F) 23:59:59"
   fi
+}
+
+rebuild_repair_queue() {
+  local guard_out manual_plan
+  guard_out="$ROOT/outputs/reports/marketing-daily-guard-${DATE}.json"
+  manual_plan="$ROOT/tmp/marketing-signup/manual-limited-discount-restore/${DATE}/manual-limited-discount-restore-plan.json"
   node scripts/marketing/manage_marketing_repair_queue.mjs build \
     --date "$DATE" --guard "$guard_out" \
     --high-click-plan "$ROOT/outputs/reports/high-click-low-conversion-special-plan-${DATE}.json" \
@@ -206,6 +217,19 @@ run_final_readback() {
     --drift-plan-dir "$ROOT/tmp/marketing-signup/limited-discount-fallback/target-price-drift-${DATE}" \
     --fallback-plan "$ROOT/outputs/reports/new-listing-7d-limited-discount-plan-${DATE}.json" \
     --queue "$QUEUE_FILE"
+}
+
+terminal_report_ready() {
+  node scripts/marketing/check_marketing_terminal_report_readiness.mjs \
+    --guard "$ROOT/outputs/reports/marketing-daily-guard-${DATE}.json" \
+    --high-click-plan "$ROOT/outputs/reports/high-click-low-conversion-special-plan-${DATE}.json" \
+    --manual-plan "$ROOT/tmp/marketing-signup/manual-limited-discount-restore/${DATE}/manual-limited-discount-restore-plan.json" \
+    --drift-plan "$ROOT/tmp/marketing-signup/limited-discount-fallback/target-price-drift-${DATE}/limited-discount-target-drift-rescue-plan-${DATE}.json" \
+    --fallback-plan "$ROOT/outputs/reports/new-listing-7d-limited-discount-plan-${DATE}.json" \
+    --high-click-result "$ROOT/outputs/reports/high-click-low-conversion-special-execution-${DATE}.json" \
+    --manual-result "$ROOT/tmp/marketing-signup/manual-limited-discount-restore/${DATE}/manual-limited-discount-restore-result.json" \
+    --drift-result "$ROOT/tmp/marketing-signup/limited-discount-rescue/batch-drift-fix-result-${DATE}.json" \
+    --fallback-result "$ROOT/outputs/reports/new-listing-7d-limited-discount-execution-summary-${DATE}.json"
 }
 
 on_exit() {
@@ -241,7 +265,15 @@ fi
 QUEUE_STATUS="$(queue_value 'j.status' missing)"
 if [[ "$QUEUE_STATUS" == "completed" || "$QUEUE_STATUS" == "blocked" ]]; then
   if [[ "$QUEUE_STATUS" == "blocked" ]]; then
-    write_state blocked "repair queue reached a terminal business blocker; no unsafe write was attempted"
+    run_terminal_final_snapshot
+    build_current_repair_plans
+    if ! terminal_report_ready; then
+      rebuild_repair_queue
+      write_state pending "final snapshot found new authorized repair work; final report delivery deferred"
+      echo "[cloud_marketing_repair] final report deferred because final snapshot added unhandled repair work"
+      exit 0
+    fi
+    write_state blocked "repair queue reached terminal business blockers and final-snapshot work is fully accounted"
   else
     write_state ok "repair queue already completed"
   fi
