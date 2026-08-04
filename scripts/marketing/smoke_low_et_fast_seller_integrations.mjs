@@ -94,6 +94,37 @@ assert.equal(highClick.rows[0].storeKey, 'DX'); checks += 1;
 assert.equal(highClick.rows[0].lowEtFastSellerPricePullback.applied, true); checks += 1;
 assert.equal(highClick.rows[0].specialPrice, 120); checks += 1;
 
+const ordinaryHighClickLinks = {
+  storeLinks: linksDataDoc.storeLinks.map((row, index) => ({
+    ...row,
+    c7_goods_uv: index === 5 ? 500 : 10,
+    c7_cart_uv: 0,
+  })),
+};
+const ordinaryHighClickBaseline = {
+  items: baselineDoc.items.map((row, index) => ({
+    ...row,
+    ordinaryTargetMargin: index === 5 ? 0.42 : row.ordinaryTargetMargin,
+  })),
+};
+const ordinaryHighClick = buildHighClickLowConversionSpecialAudit({
+  linksDataDoc: ordinaryHighClickLinks,
+  inventoryTrendDoc,
+  priceOverridesDoc: ordinaryHighClickBaseline,
+  costDoc,
+  manualRegistry: {entries: []},
+  marketingPolicy,
+  reportDate,
+  now: new Date('2026-08-02T04:00:00Z'),
+  sourceLinksDataStatus: 'ok',
+});
+assert.equal(ordinaryHighClick.actionCount, 1); checks += 1;
+assert.equal(ordinaryHighClick.rows[0].storeKey, 'ZL'); checks += 1;
+assert.equal(ordinaryHighClick.rows[0].lowEtFastSellerPricePullback.mode, 'ordinary_link_target_margin_plus_5_points'); checks += 1;
+assert.equal(ordinaryHighClick.rows[0].lowEtFastSellerPricePullback.ordinaryTargetMargin, 0.30); checks += 1;
+assert.equal(ordinaryHighClick.rows[0].lowEtFastSellerPricePullback.targetMargin, 0.47); checks += 1;
+assert.equal(ordinaryHighClick.rows[0].specialPrice, 132.08); checks += 1;
+
 const protectedHighClick = buildHighClickLowConversionSpecialAudit({
   linksDataDoc,
   inventoryTrendDoc,
