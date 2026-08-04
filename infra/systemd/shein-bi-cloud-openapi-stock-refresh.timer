@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh current SHEIN virtual stock twice per hour
+
+[Timer]
+OnCalendar=*-*-* *:12,42:00
+RandomizedDelaySec=90
+Persistent=false
+Unit=shein-bi-cloud-openapi-stock-refresh.service
+
+[Install]
+WantedBy=timers.target

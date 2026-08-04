@@ -1981,6 +1981,21 @@ visible_inventory_current AS (
     ON svi.store_key = v.store_key AND svi.inventory_date = v.snapshot_date
   GROUP BY v.store_key, v.spu
 ),
+openapi_inventory_current AS (
+  SELECT DISTINCT ON (p.store_key, p.skc)
+    p.store_key,
+    p.skc,
+    p.fetched_at AS openapi_inventory_fetched_at,
+    p.shelf_status_code AS openapi_inventory_shelf_status_code,
+    p.shelf_status_name AS openapi_inventory_shelf_status_name,
+    p.shein_usable_inventory AS openapi_usable_inventory,
+    p.shein_inventory_quantity AS openapi_inventory_quantity,
+    p.shein_locked_quantity AS openapi_locked_quantity
+  FROM fact.openapi_product_link p
+  WHERE p.has_stock IS TRUE
+    AND p.fetched_at >= now() - interval '45 minutes'
+  ORDER BY p.store_key, p.skc, p.fetched_at DESC
+),
 product_state_overlay AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY event_at, store_key, skc), '[]'::jsonb) AS data
   FROM (
@@ -2120,6 +2135,12 @@ link_health_base AS (
     vic.visible_order_locked_quantity,
     vic.visible_pay_locked_quantity,
     vic.visible_shelf_statuses,
+    oic.openapi_inventory_fetched_at,
+    oic.openapi_inventory_shelf_status_code,
+    oic.openapi_inventory_shelf_status_name,
+    oic.openapi_usable_inventory,
+    oic.openapi_inventory_quantity,
+    oic.openapi_locked_quantity,
     coalesce(sp.on_shelf_count, 0) AS same_product_on_shelf_count,
     (
       l.is_on_shelf
@@ -2192,6 +2213,8 @@ link_health_base AS (
     ON pls.store_key = l.store_key AND pls.standard_goods_sn = dim.product_canonical_sn(l.standard_goods_sn)
   LEFT JOIN visible_inventory_current vic
     ON vic.store_key = l.store_key AND vic.spu = l.spu
+  LEFT JOIN openapi_inventory_current oic
+    ON oic.store_key = l.store_key AND oic.skc = l.skc
   LEFT JOIN (
     SELECT l2.store_key, dim.product_canonical_sn(l2.standard_goods_sn) AS standard_goods_sn, count(*) FILTER (WHERE l2.is_on_shelf) AS on_shelf_count
     FROM fact.link_master_snapshot l2
@@ -2264,6 +2287,12 @@ links AS (
       round(visible_order_locked_quantity::numeric, 0) AS visible_order_locked_quantity,
       round(visible_pay_locked_quantity::numeric, 0) AS visible_pay_locked_quantity,
       visible_shelf_statuses,
+      openapi_inventory_fetched_at,
+      openapi_inventory_shelf_status_code,
+      openapi_inventory_shelf_status_name,
+      round(openapi_usable_inventory::numeric, 0) AS openapi_usable_inventory,
+      round(openapi_inventory_quantity::numeric, 0) AS openapi_inventory_quantity,
+      round(openapi_locked_quantity::numeric, 0) AS openapi_locked_quantity,
       shelf_status_name, shelf_age_days,
       sale_cnt, c7_sale_cnt, c30_sale_cnt, total_sale_volume, total_sale_order_count, last_sale_date, product_total_sale_volume, product_total_sale_order_count, product_last_sale_date,
       eps_uv, goods_uv, click_rate, cart_uv, cart_rate, pay_uv, pay_rate,
@@ -2301,6 +2330,12 @@ duplicate_links AS (
       round(visible_order_locked_quantity::numeric, 0) AS visible_order_locked_quantity,
       round(visible_pay_locked_quantity::numeric, 0) AS visible_pay_locked_quantity,
       visible_shelf_statuses,
+      openapi_inventory_fetched_at,
+      openapi_inventory_shelf_status_code,
+      openapi_inventory_shelf_status_name,
+      round(openapi_usable_inventory::numeric, 0) AS openapi_usable_inventory,
+      round(openapi_inventory_quantity::numeric, 0) AS openapi_inventory_quantity,
+      round(openapi_locked_quantity::numeric, 0) AS openapi_locked_quantity,
       shelf_status_name, shelf_age_days,
       sale_cnt, c7_sale_cnt, c30_sale_cnt, total_sale_volume, total_sale_order_count, last_sale_date, product_total_sale_volume, product_total_sale_order_count, product_last_sale_date,
       eps_uv, goods_uv, click_rate, cart_uv, cart_rate, pay_uv, pay_rate,
@@ -2335,6 +2370,12 @@ store_links AS (
       round(visible_order_locked_quantity::numeric, 0) AS visible_order_locked_quantity,
       round(visible_pay_locked_quantity::numeric, 0) AS visible_pay_locked_quantity,
       visible_shelf_statuses,
+      openapi_inventory_fetched_at,
+      openapi_inventory_shelf_status_code,
+      openapi_inventory_shelf_status_name,
+      round(openapi_usable_inventory::numeric, 0) AS openapi_usable_inventory,
+      round(openapi_inventory_quantity::numeric, 0) AS openapi_inventory_quantity,
+      round(openapi_locked_quantity::numeric, 0) AS openapi_locked_quantity,
       shelf_status_name, shelf_age_days,
       sale_cnt, c7_sale_cnt, c30_sale_cnt, total_sale_volume, total_sale_order_count, last_sale_date, product_total_sale_volume, product_total_sale_order_count, product_last_sale_date,
       eps_uv, goods_uv, click_rate, cart_uv, cart_rate, pay_uv, pay_rate,

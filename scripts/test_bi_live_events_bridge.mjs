@@ -63,9 +63,11 @@ assert.deepEqual(
   'coalescing a later sale must not discard an earlier return or historical-cancellation refresh scope',
 );
 assert.deepEqual(liveSectionsForBiUpdate('product'), ['productState']);
+assert.deepEqual(liveSectionsForBiUpdate('inventory'), ['linksData']);
 assert.deepEqual(liveSectionsForBiUpdate('platform'), []);
 assert.equal(normalizeBiLiveUpdatePayload('{"event":"unknown"}', fixedNow), null);
 assert.equal(normalizeBiLiveUpdatePayload('{"eventFamily":"inventory_warning"}', fixedNow)?.kind, 'platform');
+assert.equal(normalizeBiLiveUpdatePayload('{"kind":"inventory_refresh"}', fixedNow)?.kind, 'inventory');
 assert.equal(normalizeBiLiveUpdatePayload('{"eventFamily":"rrp_review","skc":"SKC-1"}', fixedNow)?.kind, 'product');
 const cancelled = normalizeBiLiveUpdatePayload(JSON.stringify({
   eventFamily: 'order',

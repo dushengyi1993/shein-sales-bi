@@ -13,6 +13,7 @@ MAX_DETAILS="${SHEIN_OPENAPI_PRODUCT_RECONCILE_MAX_DETAILS:-0}"
 SKIP_DETAILS="${SHEIN_OPENAPI_PRODUCT_RECONCILE_SKIP_DETAILS:-0}"
 SKIP_STOCK="${SHEIN_OPENAPI_PRODUCT_RECONCILE_SKIP_STOCK:-0}"
 KEEP_SNAPSHOTS="${SHEIN_OPENAPI_PRODUCT_KEEP_SNAPSHOTS:-2}"
+LOCK_FILE="${SHEIN_OPENAPI_PRODUCT_RECONCILE_LOCK_FILE:-$ROOT/state/locks/openapi-product-reconciliation.lock}"
 
 STAMP="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)"
 mkdir -p "$LOG_DIR"
@@ -23,6 +24,13 @@ LATEST_REPORT_FILE="${SHEIN_OPENAPI_PRODUCT_RECONCILE_LATEST_FILE:-$ROOT/state/o
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 cd "$ROOT"
+. "$ROOT/scripts/lib/shared_lock.sh"
+prepare_shared_lock_file "$LOCK_FILE"
+exec 9>"$LOCK_FILE"
+if ! flock -w 900 9; then
+  echo "Timed out waiting for OpenAPI product reconciliation lock: $LOCK_FILE" >&2
+  exit 75
+fi
 echo "[cloud_openapi_product_reconciliation] start stores=$STORES_CSV concurrency=$CONCURRENCY maxDetails=$MAX_DETAILS root=$ROOT"
 
 if [[ ! -s config/shein_openapi.local.json ]]; then

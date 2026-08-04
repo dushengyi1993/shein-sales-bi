@@ -89,6 +89,7 @@ const tests = [
   'scripts/test_link_retire_candidates_from_csv.mjs',
   'scripts/test_retire_supplier_code_repair_payload.mjs',
   'scripts/test_shein_openapi_client_timeout.mjs',
+  'scripts/test_openapi_stock_refresh_contract.mjs',
   'scripts/test_shein_webhook_receiver.mjs',
   'scripts/test_shein_webhook_audit_context.mjs',
   'scripts/test_shein_webhook_config.mjs',

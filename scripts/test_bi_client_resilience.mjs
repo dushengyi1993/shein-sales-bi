@@ -28,13 +28,19 @@ assert.match(source, /function inventoryMatchStatus\(r\)/, 'client keeps a backw
 assert.match(source, /match==='not_matched'/, 'client must not treat an unmatched ET record as zero stock');
 assert.match(source, /match==='stale'/, 'client must surface stale ET snapshots distinctly');
 assert.match(source, /仅在 ET 快照最新且已匹配、当前可售为 0、没有有效在途时成立/, 'client out-of-stock copy keeps the fresh-match invariant');
-assert.match(source, /function inventoryStoreCellRows\(linkRows\)\{const m=new Map\(\);for\(const r of A\(linkRows\)\)\{if\(linkStatusKey\(r\)!=='on'\)continue;/,
-  'inventory matrix must discard waiting, sold-out, and off-shelf links before building store cells');
+assert.match(source, /function inventoryMatrixLinkOnShelf\(r\)\{return String\(r\?\.openapi_inventory_shelf_status_code\?\?''\)==='1'&&!!r\?\.openapi_inventory_fetched_at\}/,
+  'inventory matrix must require a current OpenAPI on-shelf row');
+assert.match(source, /function inventoryStoreCellRows\(linkRows\)\{const m=new Map\(\);for\(const r of A\(linkRows\)\)\{if\(!inventoryMatrixLinkOnShelf\(r\)\)continue;/,
+  'inventory matrix must discard waiting, sold-out, off-shelf, and stale rows before building store cells');
 const inventoryStoreCellSource = source.match(/function inventoryStoreCell\(p,store,cellRows\)\{[\s\S]*?\nfunction inventoryLegend/)?.[0] || '';
 assert.match(inventoryStoreCellSource, /shown=saleable!=null\?saleable:display/,
   'inventory matrix uses saleable stock when present and only falls back to display stock when saleable is unavailable');
-assert.match(inventoryStoreCellSource, /这里只统计当前已上架链接；待上架、售罄和已下架链接不参与矩阵/,
-  'inventory matrix explains the on-shelf-only scope');
+assert.match(inventoryStoreCellSource, /rows\.map\(inventoryMatrixStockValue\)/,
+  'inventory matrix reads current OpenAPI usable stock instead of the daily browser snapshot');
+assert.doesNotMatch(inventoryStoreCellSource, /linkStockValue|linkDisplayStockValue|visible_usable_inventory|visible_inventory_quantity/,
+  'inventory matrix must not fall back to stale browser inventory fields');
+assert.match(inventoryStoreCellSource, /待上架、售罄、已下架及过期快照不参与矩阵/,
+  'inventory matrix explains the current OpenAPI on-shelf-only scope');
 assert.doesNotMatch(inventoryStoreCellSource, /sold=|wait=|off=/,
   'inventory matrix must not render non-on-shelf status counts or classes');
 assert.match(source, /无已上架链接<\/span>/, 'inventory legend does not expose waiting or off-shelf states');

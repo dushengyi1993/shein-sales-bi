@@ -7562,7 +7562,8 @@ export function normalizeBiLiveUpdatePayload(payload, now = new Date()) {
     80
   ).toLowerCase();
   let kind = '';
-  if (/return|refund|after.?sale/.test(kindText)) kind = 'return';
+  if (/inventory.?refresh|stock.?refresh/.test(kindText)) kind = 'inventory';
+  else if (/return|refund|after.?sale/.test(kindText)) kind = 'return';
   else if (/product|shelf|audit|sku|price|rrp/.test(kindText)) kind = 'product';
   else if (/order|sales?/.test(kindText)) kind = 'order';
   else if (/authorization|quota|compliance|inventory|out.?of.?stock|invoice|logistics|purchase|delivery/.test(kindText)) kind = 'platform';
@@ -7609,7 +7610,11 @@ export function liveSectionsForBiUpdate(kind, event = {}) {
   ].map(value => String(value || '')));
   const hasOrder = accountingKinds.has('order');
   const hasReturn = accountingKinds.has('return');
-  if (!hasOrder && !hasReturn) return kind === 'product' ? ['productState'] : [];
+  if (!hasOrder && !hasReturn) {
+    if (kind === 'product') return ['productState'];
+    if (kind === 'inventory') return ['linksData'];
+    return [];
+  }
   const businessDate = String(event.businessDate || '').slice(0, 10);
   const currentDate = shanghaiDateKey(event.occurredAt || new Date());
   const historicalOrder = hasOrder && businessDate && currentDate && businessDate !== currentDate;
