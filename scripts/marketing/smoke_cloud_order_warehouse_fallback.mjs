@@ -7,6 +7,7 @@ import path from 'node:path';
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cloud-order-fallback-'));
 const helper = path.resolve('scripts/cloud_read_order_files.py');
+const python = process.platform === 'win32' ? 'python' : 'python3';
 const fixturePath = path.join(root, 'warehouse.json');
 const existingDir = path.join(root, 'outputs', 'shein_fetch', 'DL');
 await fs.mkdir(existingDir, {recursive: true});
@@ -33,7 +34,7 @@ await fs.writeFile(fixturePath, JSON.stringify({
   }],
 }), 'utf8');
 
-const run = spawnSync('python', [
+const run = spawnSync(python, [
   helper,
   root,
   'DL,DX,QY',
@@ -63,7 +64,7 @@ assert.deepEqual(result.warehouseFallback, {
   source: 'fact.order_item',
 });
 
-const disabled = spawnSync('python', [
+const disabled = spawnSync(python, [
   helper,
   root,
   'DX',
