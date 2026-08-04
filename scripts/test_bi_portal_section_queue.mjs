@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {spawnSync} from 'node:child_process';
 
 import {
   claimNext,
@@ -66,6 +70,38 @@ const recovered = claimNext(queue, {
 });
 assert.equal(recovered.section, 'orders');
 assert.equal(recovered.attempts, 3);
+
+const defaultLeaseQueue = {version: 1, updatedAt: '', entries: []};
+enqueueSections(defaultLeaseQueue, {sections: ['orders'], now: start});
+const defaultLease = claimNext(defaultLeaseQueue, {now: new Date(start.getTime() + 1_000)});
+assert.match(defaultLease.leaseId, /^[0-9a-f-]{36}$/i);
+
+const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-portal-section-queue-'));
+try {
+  const queueFile = path.join(temp, 'queue.json');
+  const run = (...args) => spawnSync(process.execPath, [
+    path.join(process.cwd(), 'scripts', 'manage_bi_portal_section_queue.mjs'),
+    ...args,
+    '--file', queueFile,
+  ], {cwd: process.cwd(), encoding: 'utf8'});
+  const enqueue = run('enqueue', '--sections', 'orders');
+  assert.equal(enqueue.status, 0, enqueue.stderr);
+  const claim = run('claim', '--lease-seconds', '60');
+  assert.equal(claim.status, 0, claim.stderr);
+  assert.match(JSON.parse(claim.stdout).entry.leaseId, /^[0-9a-f-]{36}$/i);
+
+  const broken = JSON.parse(fs.readFileSync(queueFile, 'utf8'));
+  broken.entries[0].leaseId = '';
+  broken.entries[0].leaseExpiresAt = '2099-01-01T00:00:00.000Z';
+  fs.writeFileSync(queueFile, `${JSON.stringify(broken, null, 2)}\n`);
+  const status = run('status');
+  assert.equal(status.status, 0, status.stderr);
+  const repaired = JSON.parse(status.stdout);
+  assert.equal(repaired.entries[0].status, 'pending');
+  assert.equal(repaired.entries[0].leaseExpiresAt, '');
+} finally {
+  fs.rmSync(temp, {recursive: true, force: true});
+}
 
 assert.throws(() => enqueueSections(queue, {sections: ['../escape']}), /SECTION_INVALID/);
 console.log(JSON.stringify({ok: true}));

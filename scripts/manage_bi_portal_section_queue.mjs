@@ -38,7 +38,7 @@ function parseArgs(argv) {
     priority: 50,
     reason: '',
     section: '',
-    leaseId: '',
+    leaseId: undefined,
     leaseSeconds: 2_700,
     error: '',
   };
@@ -115,7 +115,7 @@ function recoverExpired(queue, nowMillis) {
   for (const entry of queue.entries) {
     if (entry.status !== 'running') continue;
     const expiresAt = Date.parse(entry.leaseExpiresAt || '');
-    if (Number.isNaN(expiresAt) || expiresAt <= nowMillis) {
+    if (!entry.leaseId || Number.isNaN(expiresAt) || expiresAt <= nowMillis) {
       entry.status = 'pending';
       entry.leaseId = '';
       entry.leaseExpiresAt = '';
