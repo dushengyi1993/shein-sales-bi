@@ -28,6 +28,18 @@ assert.match(source, /function inventoryMatchStatus\(r\)/, 'client keeps a backw
 assert.match(source, /match==='not_matched'/, 'client must not treat an unmatched ET record as zero stock');
 assert.match(source, /match==='stale'/, 'client must surface stale ET snapshots distinctly');
 assert.match(source, /仅在 ET 快照最新且已匹配、当前可售为 0、没有有效在途时成立/, 'client out-of-stock copy keeps the fresh-match invariant');
+assert.match(source, /function inventoryStoreCellRows\(linkRows\)\{const m=new Map\(\);for\(const r of A\(linkRows\)\)\{if\(linkStatusKey\(r\)!=='on'\)continue;/,
+  'inventory matrix must discard waiting, sold-out, and off-shelf links before building store cells');
+const inventoryStoreCellSource = source.match(/function inventoryStoreCell\(p,store,cellRows\)\{[\s\S]*?\nfunction inventoryLegend/)?.[0] || '';
+assert.match(inventoryStoreCellSource, /shown=saleable!=null\?saleable:display/,
+  'inventory matrix uses saleable stock when present and only falls back to display stock when saleable is unavailable');
+assert.match(inventoryStoreCellSource, /这里只统计当前已上架链接；待上架、售罄和已下架链接不参与矩阵/,
+  'inventory matrix explains the on-shelf-only scope');
+assert.doesNotMatch(inventoryStoreCellSource, /sold=|wait=|off=/,
+  'inventory matrix must not render non-on-shelf status counts or classes');
+assert.match(source, /无已上架链接<\/span>/, 'inventory legend does not expose waiting or off-shelf states');
+assert.match(source, /front=ls\.frontStockRows>0\?N\(ls\.frontSaleable\):null,frontText=inventoryVirtualQtyText\(front\)/,
+  'inventory matrix product totals stay blank when no on-shelf link has a stock value instead of fabricating zero');
 assert.match(source, /label:'已落定利润'.*storageNoteSar/, 'settled profit keeps storage fee as an inline supporting figure');
 assert.match(source, /label:'风险调整后利润'.*`\u5f85决售后风险 /, 'risk-adjusted profit keeps pending risk as an inline supporting figure');
 assert.doesNotMatch(source, /\{label:'(?:待决售后风险|已扣仓储费)',cells:/, 'profit summary must stay at three primary rows');

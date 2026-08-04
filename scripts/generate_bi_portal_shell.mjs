@@ -81,7 +81,7 @@ function renderHtml({storeConfig, css, clientJs}) {
     <div class="mark" aria-hidden="true"><img src="/favicon.svg?v=${BRAND_ASSET_VERSION}" alt="" /></div>
     <div>
       <h1>SHEIN BI</h1>
-      <p>运营工作台</p>
+      <p>沙特半托运营工作台</p>
     </div>
   </div>
   <nav class="nav" id="nav" aria-label="主导航"></nav>

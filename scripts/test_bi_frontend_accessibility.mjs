@@ -14,6 +14,7 @@ const generatedFavicon = fs.readFileSync(path.join(root, 'outputs', 'bi-portal',
 assert.match(shell, /<meta name="description"/);
 assert.match(shell, /<link rel="icon" href="\/favicon\.svg\?v=/);
 assert.match(shell, /class="mark" aria-hidden="true"><img src="\/favicon\.svg\?v=/);
+assert.match(shell, /<p>沙特半托运营工作台<\/p>/);
 assert.match(shell, /class="skip-link" href="#content"/);
 assert.match(shell, /<nav class="nav" id="nav" aria-label="主导航"/);
 assert.match(shell, /<main class="main" id="content" tabindex="-1"/);
