@@ -13,8 +13,18 @@ assert.match(
 
 assert.match(
   dailySource,
-  /nohup\s+bash\s+scripts\/prewarm_bi_portal_sections\.sh\s+8>&-\s+>\/dev\/null\s+2>&1\s+&/,
-  'daily background portal prewarm must close its inherited portal lock descriptor',
+  /SHEIN_BI_PORTAL_PREWARM_SECTIONS=linksData\s+SHEIN_BI_PORTAL_PREWARM_ASYNC=0\s+\\\s*\n\s*bash scripts\/prewarm_bi_portal_sections\.sh 8>&-/,
+  'daily refresh must synchronously publish the inventory-critical linksData section',
+);
+assert.match(
+  dailySource,
+  /if bash scripts\/prewarm_bi_portal_sections\.sh 8>&-; then/,
+  'daily async prewarm request fan-out must run in the foreground of the oneshot unit',
+);
+assert.doesNotMatch(
+  dailySource,
+  /nohup\s+bash\s+scripts\/prewarm_bi_portal_sections\.sh/,
+  'daily oneshot must not launch a child that systemd KillMode=control-group will terminate',
 );
 
 assert.match(source, /marketing_price_snapshot_health\(\)/,

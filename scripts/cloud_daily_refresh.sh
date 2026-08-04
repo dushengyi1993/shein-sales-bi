@@ -314,8 +314,23 @@ prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
     fi
 
     if [[ "$SHEIN_BI_PORTAL_DATA_MODE" == "api" && "${SHEIN_BI_PORTAL_PREWARM_DISABLED:-0}" != "1" ]]; then
-      nohup bash scripts/prewarm_bi_portal_sections.sh 8>&- >/dev/null 2>&1 &
-      echo "[cloud_daily_refresh] portal section prewarm started pid=$!"
+      echo "[cloud_daily_refresh] refresh inventory-critical linksData section synchronously"
+      if SHEIN_BI_PORTAL_PREWARM_SECTIONS=linksData SHEIN_BI_PORTAL_PREWARM_ASYNC=0 \
+        bash scripts/prewarm_bi_portal_sections.sh 8>&-; then
+        echo "[cloud_daily_refresh] inventory-critical linksData section refreshed"
+      else
+        DAILY_WARNINGS+=("linksData section refresh failed")
+        echo "[cloud_daily_refresh] WARN linksData section refresh failed; inventory guard will fail closed or retry its own source preparation" >&2
+      fi
+      # Run the lightweight async request fan-out in the foreground so systemd
+      # cannot kill the launcher when this oneshot service exits. The actual
+      # async section jobs live inside the persistent Portal service.
+      if bash scripts/prewarm_bi_portal_sections.sh 8>&-; then
+        echo "[cloud_daily_refresh] portal section prewarm requests submitted"
+      else
+        DAILY_WARNINGS+=("portal section prewarm failed")
+        echo "[cloud_daily_refresh] WARN portal section prewarm request fan-out failed" >&2
+      fi
     fi
   fi
 } 8>>"$PORTAL_REFRESH_LOCK_FILE"
