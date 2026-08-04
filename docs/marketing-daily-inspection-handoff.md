@@ -62,6 +62,17 @@ node scripts/marketing/export_marketing_stack_review.mjs \
 
 guard 尚未结束时，heartbeat 每 60–90 秒轮询，最长 30 分钟；结束后只读取并汇报巡检证据。获准的大批修复另入队列，由 worker 完成，不能再与巡检同步串行。
 
+### 2.4 订单商品行与 Webhook 仓库回退
+
+订单成交价审计仍只认商品行单价，不用订单汇总金额替代。读取顺序为：
+
+1. 优先读取新鲜且身份/日期匹配的 `outputs/shein_fetch/<STORE>/<DATE>.json`；
+2. 文件缺失时，`cloud_read_order_files.py` 必须只读查询 Webhook 已入仓的 `fact.order_item` / `fact.order_header`，按 19 店和报告日期切片投影同等商品行字段；
+3. 仓库回退只在内存返回证据，不生成或覆盖旧销售文件；输出必须标记 `sourceType=warehouse_webhook_order_item`、查询时间和仓库行数；
+4. 文件和仓库都不可用、仓库查询失败、商品行缺 `currencyPrice` 或活动窗口证据时继续 fail closed，禁止把 0 行写成“没有偏离”。
+
+这条回退解决销售主链切换到 Webhook 后，营销 guard 仍因旧 `shein_fetch` 文件停更而把已有仓库订单误报为缺失的问题。
+
 ### 3.1 2026-07-18 巡检/修复解耦
 
 云端证据：`2026-07-17` 的全在售兜底差集产生 `74` 条；`2026-07-18` 基准切换产生 `61` 条、`32` 个活动组。旧流程把完整巡检与大批写入同步串行，曾在约一小时后被系统杀掉，不能再作为生产路径。

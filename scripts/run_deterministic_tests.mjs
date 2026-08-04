@@ -34,6 +34,7 @@ const tests = [
   'scripts/marketing/smoke_merge_current_marketing_price_scans.mjs',
   'scripts/marketing/smoke_new_listing_limited_discount_plan_exact_price.mjs',
   'scripts/marketing/smoke_order_audit_linksdata_exact_target.mjs',
+  'scripts/marketing/smoke_cloud_order_warehouse_fallback.mjs',
   'scripts/marketing/smoke_order_mitigation_history.mjs',
   'scripts/marketing/smoke_order_target_price_windows.mjs',
   'scripts/marketing/smoke_ordinary_composite_plan_tools.mjs',

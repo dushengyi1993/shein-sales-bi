@@ -2344,12 +2344,17 @@ async function readCloudSheinFetchOrderRows({
         maxBytes: cloudBiMaxBytes,
       });
     const data = JSON.parse(text.replace(/^\uFEFF/, ''));
+    const files = Array.isArray(data.files) ? data.files : [];
+    const warehouseFallbackFileCount = files.filter(file => file?.sourceType === 'warehouse_webhook_order_item').length;
     return {
       ...base,
       status: 'ok',
+      transport: warehouseFallbackFileCount > 0 ? 'warehouse_webhook_fallback' : base.transport,
       stores: safeStores,
       dates: safeDates,
-      files: Array.isArray(data.files) ? data.files : [],
+      files,
+      warehouseFallback: data.warehouseFallback || null,
+      warehouseFallbackError: data.warehouseFallbackError || '',
     };
   } catch (err) {
     return {
@@ -2973,10 +2978,14 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
 
   for (const file of cloudRowsDoc?.files || []) {
     const remotePath = file.remotePath || '';
+    const sourcePath = remotePath.startsWith('warehouse://')
+      ? remotePath
+      : (remotePath ? `ssh:${cloudRowsDoc.host || ''}:${remotePath}` : '');
     sourceFiles.push({
       storeKey: file.storeKey,
       date: file.date,
-      path: remotePath ? `ssh:${cloudRowsDoc.host || ''}:${remotePath}` : '',
+      path: sourcePath,
+      sourceType: file.sourceType || '',
       exists: file.exists === true,
       ok: file.ok === true,
       rowCount: Number(file.rowCount || 0),
@@ -3182,7 +3191,9 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
       addStatus(status);
       addByStore(storeKey, status);
       const outRow = {
-        source: 'cloud_shein_fetch_goodsRows',
+        source: file.sourceType === 'warehouse_webhook_order_item'
+          ? 'cloud_warehouse_order_item'
+          : 'cloud_shein_fetch_goodsRows',
         storeKey,
         date: raw.date || file.date,
         orderNo,
@@ -3194,7 +3205,7 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
         skuCode: raw.skuCode || '',
         skuSn: raw.skuSn || '',
         suffix: raw.suffix || '',
-        sourcePath: remotePath ? `ssh:${cloudRowsDoc.host || ''}:${remotePath}` : '',
+        sourcePath,
         number: quantity,
         currencyPrice: price,
         actualUnitPriceUsed: quantity === null || quantity === 1 ? price : null,
@@ -3254,7 +3265,9 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
     ...rows.filter(row => row.status === 'matches_target'),
   ].slice(0, 20);
   return {
-    source: 'cloud_shein_fetch',
+    source: cloudRowsDoc?.transport === 'warehouse_webhook_fallback'
+      ? 'cloud_warehouse_order_item'
+      : 'cloud_shein_fetch',
     status: cloudRowsDoc?.status || 'unknown',
     transport: cloudRowsDoc?.transport || 'ssh',
     host: cloudRowsDoc?.host || '',
@@ -3292,6 +3305,8 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
     duplicateRowCount: duplicateRows.length,
     duplicateRows: duplicateRows.slice(0, 20),
     sourceFiles: sourceFiles.slice(0, 80),
+    warehouseFallback: cloudRowsDoc?.warehouseFallback || null,
+    warehouseFallbackError: cloudRowsDoc?.warehouseFallbackError || '',
     rows: cloudRows,
     auditedRows: rows.length,
     matchedPlanRows,
@@ -3324,7 +3339,7 @@ function summarizeCloudOrderPriceAudit({cloudRowsDoc, priceOverridesDoc, priceOv
 
 function buildOrderPriceAuditFromCloud(cloudAudit) {
   return {
-    source: 'cloud_shein_fetch',
+    source: cloudAudit.source || 'cloud_shein_fetch',
     status: cloudAudit.status,
     files: Number(cloudAudit.cloudFiles || 0),
     rows: Number(cloudAudit.rows || 0),

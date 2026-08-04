@@ -134,7 +134,7 @@
 
 日常巡检的目标是发现必须处理的风险，不是每天把所有前端 profile 重跑一遍。标准分层如下：
 
-1. **每日 live 观察层**：先运行 `build_marketing_daily_guard_report.mjs --cloud-bi-ssh shein-bi-tencent --cloud-bi-root /opt/shein-bi/app` 读取经营线索，但不能以 BI 作为已报/未报最终证据；每日必须有当天或足够新鲜的 SHEIN 后台 live scan/readback，直接读取普通活动、限时折扣、优惠券集合。普通活动和价格栈优先走云端 session HTTP，不启动浏览器；只有写入、登录恢复或平台无 HTTP 能力的步骤才按店铺最小集合取得浏览器租约，完成后立即关闭。
+1. **每日 live 观察层**：先运行 `build_marketing_daily_guard_report.mjs --cloud-bi-ssh shein-bi-tencent --cloud-bi-root /opt/shein-bi/app` 读取经营线索，但不能以 BI 作为已报/未报最终证据；每日必须有当天或足够新鲜的 SHEIN 后台 live scan/readback，直接读取普通活动、限时折扣、优惠券集合。订单商品行优先读取新鲜 `shein_fetch`，文件缺失时只读回退到 Webhook 已入仓的 `fact.order_item`，不得因旧文件链停更把仓库已有订单写成 0 行。普通活动和价格栈优先走云端 session HTTP，不启动浏览器；只有写入、登录恢复或平台无 HTTP 能力的步骤才按店铺最小集合取得浏览器租约，完成后立即关闭。
 2. **定点补证层**：guard 或 live scan 出现具体店铺/SKC 的低价止损、普通活动漏报、身份异常、限时折扣兜底缺口或可选流量券候选时，只扫这些店铺/活动，不扫无关店铺。
 3. **一次性验收层**：大批量真实提交完成后允许做一次全量回读，作为该批次最终验收；之后同一批次不重复全量，除非有新异常或用户要求。
 4. **人工窗口处理层**：到约定处理窗口后，先用 guard / 风险计划缩小候选范围，再分批 dry-run 和执行取消券、限时折扣或普通活动补报；补完后只对影响店铺做必要回读，不把“全量前端复核”做成日常动作。
