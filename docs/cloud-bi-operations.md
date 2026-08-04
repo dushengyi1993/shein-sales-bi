@@ -73,7 +73,7 @@
 | --- | --- | --- |
 
 | 半托订单 Webhook + OpenAPI 按单同步 | 实时事件触发 | 更新当天正式销售事实并通过 SSE 通知在线 BI；旧 `shein-bi-cloud-today.timer` 已停用并删除 |
-| `shein-bi-cloud-openapi-stock-refresh.timer` | 每小时 `:12/:42` | 轻量刷新19店当前商品库存；全店成功后重建 `linksData` 并通过 SSE 更新库存矩阵 |
+| `shein-bi-cloud-openapi-stock-refresh.timer` | 每小时 `:12/:42` | 轻量刷新19店当前商品库存；全店成功后只重建独立 `inventoryStock` section，并通过 SSE 更新库存矩阵 |
 | `shein-bi-cloud-yesterday.timer` | 北京时间 `03:00` | 刷新前一天最终销售，并复核前两天稳定日 |
 
 | `shein-bi-db-backup.timer` | 北京时间 `02:40` | 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto` |

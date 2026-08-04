@@ -63,7 +63,7 @@ assert.deepEqual(
   'coalescing a later sale must not discard an earlier return or historical-cancellation refresh scope',
 );
 assert.deepEqual(liveSectionsForBiUpdate('product'), ['productState']);
-assert.deepEqual(liveSectionsForBiUpdate('inventory'), ['linksData']);
+assert.deepEqual(liveSectionsForBiUpdate('inventory'), ['inventoryStock']);
 assert.deepEqual(liveSectionsForBiUpdate('platform'), []);
 assert.equal(normalizeBiLiveUpdatePayload('{"event":"unknown"}', fixedNow), null);
 assert.equal(normalizeBiLiveUpdatePayload('{"eventFamily":"inventory_warning"}', fixedNow)?.kind, 'platform');

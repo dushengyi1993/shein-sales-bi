@@ -24,21 +24,21 @@ jq -e '
 ' "$REPORT_FILE" >/dev/null
 
 curl -fsS --max-time "${SHEIN_OPENAPI_STOCK_PORTAL_REFRESH_TIMEOUT_SECONDS:-600}" \
-  "$PORTAL_URL/api/bi/section/linksData?refresh=1" >/dev/null
+  "$PORTAL_URL/api/bi/section/inventoryStock?refresh=1" >/dev/null
 
-LINKS_FILE="$ROOT/outputs/bi-portal/sections/linksData.json"
+STOCK_FILE="$ROOT/outputs/bi-portal/sections/inventoryStock.json"
 jq -e '
-  (.data.storeLinks // []) | any(
-    .openapi_inventory_fetched_at != null
-    and .openapi_inventory_shelf_status_code != null
+  (.data.inventoryStock // []) | any(
+    .fetched_at != null
+    and .shelf_status_code != null
   )
-' "$LINKS_FILE" >/dev/null
+' "$STOCK_FILE" >/dev/null
 
 OCCURRED_AT="$(date -Is)"
 PAYLOAD="{\"kind\":\"inventory_refresh\",\"occurredAt\":\"$OCCURRED_AT\"}"
 sudo -n docker exec shein-warehouse-db sh -lc \
-  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -v payload="$1" -Atc "SELECT pg_notify('\''shein_bi_live_update'\'', :'\''payload'\'');"' \
-  sh "$PAYLOAD" >/dev/null
+  "psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -v ON_ERROR_STOP=1 -Atc \"SELECT pg_notify('shein_bi_live_update', '$PAYLOAD');\"" \
+  >/dev/null
 
 mkdir -p "$(dirname "$STATE_FILE")"
 TMP_FILE="${STATE_FILE}.${BASHPID}.tmp"
@@ -46,7 +46,7 @@ jq -n \
   --arg startedAt "$STARTED_AT" \
   --arg generatedAt "$OCCURRED_AT" \
   --arg reportFile "$REPORT_FILE" \
-  --arg linksFile "$LINKS_FILE" \
+  --arg stockFile "$STOCK_FILE" \
   '{
     ok: true,
     startedAt: $startedAt,
@@ -54,7 +54,7 @@ jq -n \
     stores: 19,
     mode: "openapi-list-stock-cached-detail",
     reportFile: $reportFile,
-    linksFile: $linksFile
+    stockFile: $stockFile
   }' > "$TMP_FILE"
 mv -f "$TMP_FILE" "$STATE_FILE"
 cat "$STATE_FILE"

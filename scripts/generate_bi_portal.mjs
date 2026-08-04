@@ -134,6 +134,7 @@ const PORTAL_API_SECTION_KEYS = [
   'profit',
   'actions',
   'linksData',
+  'inventoryStock',
   'productState',
   'productSalesDaily',
   'homeTrafficDaily',
@@ -262,6 +263,33 @@ const PORTAL_SECTION_SELECTS = {
 };
 
 const STANDALONE_SECTION_SQL = {
+  inventoryStock: `
+WITH current_inventory AS (
+  SELECT DISTINCT ON (p.store_key, p.skc)
+    p.store_key,
+    p.skc,
+    p.fetched_at,
+    p.shelf_status_code,
+    p.shelf_status_name,
+    p.shein_usable_inventory,
+    p.shein_inventory_quantity,
+    p.shein_locked_quantity
+  FROM fact.openapi_product_link p
+  WHERE p.has_stock IS TRUE
+    AND p.fetched_at >= now() - interval '45 minutes'
+  ORDER BY p.store_key, p.skc, p.fetched_at DESC
+)
+SELECT jsonb_build_object(
+  'inventoryStock',
+  coalesce(
+    (
+      SELECT jsonb_agg(to_jsonb(t) ORDER BY t.store_key, t.skc)
+      FROM current_inventory t
+    ),
+    '[]'::jsonb
+  )
+)::text;
+`,
   productState: `
 WITH product_state_overlay AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY event_at, store_key, skc), '[]'::jsonb) AS data

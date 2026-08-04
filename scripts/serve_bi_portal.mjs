@@ -202,7 +202,7 @@ const OPENAPI_IMAGE_ASSET_ALLOWED_MIME = new Set(['image/jpeg', 'image/png']);
 const OPENAPI_IMAGE_ASSET_TYPES = new Set([1, 2, 5, 6, 7]);
 const DEFAULT_SHEIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
 const DEFAULT_MANUAL_LOGIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
-const BI_PORTAL_SECTION_KEYS = new Set(['homeProfit', 'homeRankings', 'rankings', 'profit', 'actions', 'linksData', 'productState', 'productSalesDaily', 'homeTrafficDaily', 'productTrafficDaily', 'inventoryTrend', 'comments', 'orders', 'liveSalesToday', 'priceScatter', 'afterSales', 'rtvData', 'waybills']);
+const BI_PORTAL_SECTION_KEYS = new Set(['homeProfit', 'homeRankings', 'rankings', 'profit', 'actions', 'linksData', 'inventoryStock', 'productState', 'productSalesDaily', 'homeTrafficDaily', 'productTrafficDaily', 'inventoryTrend', 'comments', 'orders', 'liveSalesToday', 'priceScatter', 'afterSales', 'rtvData', 'waybills']);
 const BI_PORTAL_SECTION_TIMEOUT_MS = Math.max(60_000, Number(process.env.SHEIN_BI_SECTION_TIMEOUT_MS || 900_000));
 const BI_LIVE_UPDATE_CHANNEL = 'shein_bi_live_update';
 const BI_LIVE_UPDATE_RECONNECT_MS = Math.max(1_000, Number(process.env.SHEIN_BI_LIVE_UPDATE_RECONNECT_MS || 5_000));
@@ -7612,7 +7612,7 @@ export function liveSectionsForBiUpdate(kind, event = {}) {
   const hasReturn = accountingKinds.has('return');
   if (!hasOrder && !hasReturn) {
     if (kind === 'product') return ['productState'];
-    if (kind === 'inventory') return ['linksData'];
+    if (kind === 'inventory') return ['inventoryStock'];
     return [];
   }
   const businessDate = String(event.businessDate || '').slice(0, 10);

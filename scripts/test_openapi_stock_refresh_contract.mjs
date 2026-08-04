@@ -22,11 +22,17 @@ assert.match(generator, /oic\.store_key = l\.store_key AND oic\.skc = l\.skc/,
   'OpenAPI stock must join by exact store and SKC');
 assert.match(generator, /openapi_usable_inventory/,
   'linksData must publish current OpenAPI usable stock');
+assert.match(generator, /inventoryStock: `[\s\S]*FROM fact\.openapi_product_link[\s\S]*interval '45 minutes'/,
+  'the frequent inventory section must be a lightweight standalone OpenAPI query');
 
 assert.match(client, /openapi_inventory_shelf_status_code/,
   'the inventory matrix must use the OpenAPI shelf state');
 assert.match(client, /openapi_usable_inventory/,
   'the inventory matrix must use the OpenAPI usable inventory');
+assert.match(client, /inventory:\['inventoryTrend','linksData','inventoryStock'\]/,
+  'the inventory page must load the independent current-stock section');
+assert.match(client, /A\(D\.inventoryStock\)/,
+  'the independent current-stock section must overlay the slower link metadata');
 assert.match(client, /45 分钟内的 OpenAPI 当前库存/,
   'the operator copy must disclose the inventory freshness gate');
 
@@ -41,10 +47,12 @@ assert.match(refresh, /SHEIN_OPENAPI_PRODUCT_RECONCILE_SKIP_STOCK=0/,
   'the frequent inventory refresh must fetch stock');
 assert.match(refresh, /\.counts\.total == 19[\s\S]*\.counts\.succeeded == 19[\s\S]*\.counts\.stockMissing == 0/,
   'the inventory refresh must fail closed unless all 19 stores return stock');
-assert.match(refresh, /api\/bi\/section\/linksData\?refresh=1/,
-  'a successful stock load must rebuild linksData synchronously');
+assert.match(refresh, /api\/bi\/section\/inventoryStock\?refresh=1/,
+  'a successful stock load must rebuild only the lightweight current-stock section');
 assert.match(refresh, /pg_notify[\s\S]*shein_bi_live_update/,
   'a successful stock refresh must notify open BI pages');
+assert.doesNotMatch(refresh, /:'payload'/,
+  'the notifier must not rely on psql variable expansion inside -c');
 assert.match(refresh, /inventory_refresh/,
   'the live event must have a dedicated inventory refresh kind');
 
