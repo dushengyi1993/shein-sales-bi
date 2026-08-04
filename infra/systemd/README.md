@@ -13,7 +13,7 @@
 Linux 生产健康只以 systemd、watchdog、Portal health 和云端数据审计为准；旧 Windows 计划任务只是历史回滚参考，不能再用作 Linux 页面或告警的健康依据。
 
 - 当天销售不再使用 `shein-bi-cloud-today.timer` 每小时抓取。半托订单 Webhook 收到后按单查询 OpenAPI 并增量更新正式销售事实，Portal 通过 PostgreSQL `NOTIFY` + 登录态 SSE 刷新当前页面；`shein-bi-cloud-today.service` 只保留为人工灾备入口，不安装/启用对应 timer。
-- `shein-bi-cloud-openapi-stock-refresh.timer`：每小时 `:12/:42` 轻量刷新19店商品列表与库存，复用最近成功的商品详情，不启动浏览器。SHEIN Webhook 不提供完整的当前虚拟库存，因此店铺×货号矩阵不能依赖日更浏览器快照；本任务只有在19店库存全部成功、无缺失后才重建独立的轻量 `inventoryStock` section，并通过 PostgreSQL `NOTIFY` + SSE 更新已打开页面，不重复生成耗时较长的完整 `linksData`。矩阵仅接受45分钟内 OpenAPI 确认已上架的库存，过期或缺失时显示未知，不回退到旧库存。
+- `shein-bi-cloud-openapi-stock-refresh.timer`：每小时 `:25/:55` 轻量刷新19店商品列表与库存，避开全托整点任务和 `:12` 销售同步，复用最近成功的商品详情，不启动浏览器。SHEIN Webhook 不提供完整的当前虚拟库存，因此店铺×货号矩阵不能依赖日更浏览器快照；本任务只有在19店库存全部成功、无缺失后才重建独立的轻量 `inventoryStock` section，并通过 PostgreSQL `NOTIFY` + SSE 更新已打开页面，不重复生成耗时较长的完整 `linksData`。矩阵仅接受45分钟内 OpenAPI 确认已上架的库存，过期或缺失时显示未知，不回退到旧库存。
 - `shein-bi-cloud-session-manager.timer`：每天 `02:20`，在 `03:00` 最终日核对前顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并检查 profile 体积。
 - `shein-bi-cloud-manual-login-recovery.path` / `.timer`：人工登录完成且双重探测通过后，立即消费私有恢复队列，定向补跑该店之前失败的链接/业务域数据；path 负责即时唤醒，2 分钟 timer 只作漏触发兜底。service 使用独立 cgroup 和内存护栏，不把 Chrome 补采挂在 Portal cgroup 下。
 - `shein-bi-cloud-yesterday.timer`：每天 `03:00` 用官方 OpenAPI 收齐前一天19店完整日切片并复核前两天稳定日；逐店 fetch/load/每日行完整性门禁全部通过后，才调用数据库函数原子晋升最终日切片。该链路不再依赖易过期的 Seller Center Cookie 或浏览器 profile；任一失败、缺店或缺少每日行都禁止晋升。该每日唯一性任务使用 `Persistent=true`，service 自身仍通过锁和日期状态防重复。

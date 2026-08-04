@@ -141,7 +141,7 @@
 
   - `serve_bi_portal.mjs`：云端 BI Portal 服务，提供静态页、健康检查和 `/api/bi/section/:section`；缓存读写、generation 校验、raw/gzip sidecar 与 stale 元数据统一由 `lib/bi_section_cache.mjs` 负责；`homeProfit` / `homeRankings` 都从最后一份完整 cache 派生并由 `liveSalesToday` 覆盖当前日，不等待移动成本台账重算，且走独立 fast lane。当前日订单、排行与成交价散点也由 `liveSalesToday` 覆盖，同一个 SSE token 只允许服务端生成一次；普通同代刷新不弹顶部缓存告警，失败自动重试耗尽后才提示。`inventoryTrend` 必须读取已发布利润 cache，禁止每次展开实时 `mart.profit_order_item`；服务启动和首页访问会触发 core `generatedAt` watcher 兜底预热 section，健康接口暴露 `biCoreWarmup` 状态。
 
-  - `cloud_openapi_stock_refresh.sh`：云端19店当前虚拟库存轻量刷新入口；商品详情复用最近成功缓存，只请求商品列表与库存。必须19/19店成功且库存无缺失后才重建独立的轻量 `inventoryStock` section，随后发送 `inventory_refresh` 数据库通知，让已打开的 BI 页面通过 SSE 更新库存矩阵；不重复生成耗时较长的完整 `linksData`。矩阵只接受45分钟内、OpenAPI 确认已上架的库存，不回退到日更浏览器快照。
+  - `cloud_openapi_stock_refresh.sh`：云端19店当前虚拟库存轻量刷新入口；定时器安排在每小时 `:25/:55`，避开全托整点任务和`:12`销售同步。商品详情复用最近成功缓存，只请求商品列表与库存。必须19/19店成功且库存无缺失后才重建独立的轻量 `inventoryStock` section，随后发送 `inventory_refresh` 数据库通知，让已打开的 BI 页面通过 SSE 更新库存矩阵；不重复生成耗时较长的完整 `linksData`。矩阵只接受45分钟内、OpenAPI 确认已上架的库存，不回退到日更浏览器快照。
 
   - `prewarm_bi_portal_sections.sh`：云端 Portal section 预热脚本，由 `cloud_bi_refresh.sh` 在 api data mode 下后台启动；默认先预热首页关键 section，并在 `profit` 成功后补跑 `homeProfit`。前端会拒绝 `staleSource=true` 或 `sourceGeneratedAt` 不匹配的旧利润摘要；若脚本未及时跑完，`serve_bi_portal.mjs` 的 core warmup watcher 会兜底。
 

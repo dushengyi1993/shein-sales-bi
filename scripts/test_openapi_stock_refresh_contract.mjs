@@ -62,8 +62,10 @@ assert.match(service, /User=sheinops/,
   'the inventory refresh must not run as root');
 assert.match(service, /TimeoutStartSec=900/,
   'the oneshot must have a bounded runtime');
-assert.match(timer, /OnCalendar=\*-\*-\* \*:12,42:00/,
+assert.match(timer, /OnCalendar=\*-\*-\* \*:25,55:00/,
   'current virtual stock must refresh twice per hour');
+assert.match(timer, /RandomizedDelaySec=30/,
+  'stock refresh jitter must remain clear of the full-managed top-of-hour and :12 jobs');
 assert.match(timer, /Persistent=false/,
   'missed stock refreshes must not burst after downtime');
 assert.match(watchdog, /'shein-bi-cloud-openapi-stock-refresh\.service'/,
