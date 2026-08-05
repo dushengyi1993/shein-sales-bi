@@ -138,6 +138,9 @@ assert.match(portalQueueWorker, /outside_safe_start_window/);
 const repair = read('scripts/cloud_marketing_repair_worker.sh');
 assert.match(repair, /write_state deferred_to_local/);
 assert.match(unit('shein-bi-cloud-marketing-repair.service'), /--defer-reason deferred_to_local/);
+assert.match(unit('shein-bi-cloud-marketing-repair.service'), /SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS=1/);
+assert.match(repair, /CURRENT_MINUTE >= 23 && CURRENT_MINUTE <= 42/);
+assert.match(repair, /remaining exact queue preserved for local-browser continuation/);
 
 const portal = read('scripts/serve_bi_portal.mjs');
 const liveWorker = portal.slice(

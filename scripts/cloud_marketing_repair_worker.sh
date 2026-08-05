@@ -14,6 +14,7 @@ LEASE_TASK="${SHEIN_BI_MARKETING_REPAIR_LEASE_TASK:-cloud-marketing-repair}"
 LEASE_TTL_SEC="${SHEIN_BI_MARKETING_REPAIR_LEASE_TTL_SEC:-3000}"
 LEASE_ACQUIRED=0
 MAX_GROUPS="${SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS:-8}"
+AUTOMATION_CONTEXT="${SHEIN_BI_MARKETING_AUTOMATION_CONTEXT:-}"
 SCAN_TIMEOUT_SEC="${SHEIN_BI_MARKETING_LIVE_SCAN_TIMEOUT_SEC:-2400}"
 SCAN_KILL_AFTER_SEC="${SHEIN_BI_MARKETING_LIVE_SCAN_KILL_AFTER_SEC:-60}"
 STACK_REVIEW_TIMEOUT_SEC="${SHEIN_BI_MARKETING_STACK_REVIEW_TIMEOUT_SEC:-900}"
@@ -133,6 +134,16 @@ try {
 } catch {}
 fs.writeFileSync(process.env.STATE_FILE, `${JSON.stringify(state, null, 2)}\n`);
 NODE
+}
+
+defer_remaining_work() {
+  local message="$1"
+  if [[ "$AUTOMATION_CONTEXT" == "cloud_timer" ]]; then
+    write_state deferred_to_local "$message; remaining exact queue preserved for local-browser continuation"
+    exit 75
+  fi
+  write_state pending "$message"
+  exit 0
 }
 
 send_daily_group_report() {
@@ -297,6 +308,19 @@ if [[ -n "$ACTIVE_BUSY" ]]; then
   echo "[cloud_marketing_repair] DEFER TO LOCAL busy services active: $ACTIVE_BUSY"
   exit 75
 fi
+CURRENT_MINUTE="$(TZ="$TZ_NAME" date +%M)"
+CURRENT_MINUTE=$((10#$CURRENT_MINUTE))
+if [[ "$AUTOMATION_CONTEXT" == "cloud_timer" ]]; then
+  if (( CURRENT_MINUTE >= 23 && CURRENT_MINUTE <= 42 )); then
+    write_state deferred_to_local "reserved :32-:43 core-data lane is too close; exact repair queue preserved for local-browser continuation"
+    echo "[cloud_marketing_repair] DEFER TO LOCAL outside safe start window minute=$CURRENT_MINUTE"
+    exit 75
+  fi
+  if (( MAX_GROUPS > 1 )); then
+    echo "[cloud_marketing_repair] cap cloud repair batch groups=$MAX_GROUPS -> 1"
+    MAX_GROUPS=1
+  fi
+fi
 
 lease_action acquire
 LEASE_ACQUIRED=1
@@ -322,8 +346,7 @@ if [[ "$HIGH_CLICK_STATUS" != "not_required" && "$HIGH_CLICK_STATUS" != "complet
     status=$?
     if [[ "$status" -eq 3 ]]; then
       update_stage highClickSpecial pending false "bounded chunk completed; more exact-plan items remain" "$RESULT_PATH"
-      write_state pending "high-click special chunk completed; queue will resume without replaying successful items"
-      exit 0
+      defer_remaining_work "high-click special chunk completed without replaying successful items"
     fi
     BLOCKED_TARGETS="$(result_total "$RESULT_PATH" blocked)"
     FAILED_TARGETS="$(result_total "$RESULT_PATH" failed)"
@@ -340,8 +363,7 @@ if [[ "$HIGH_CLICK_STATUS" != "not_required" && "$HIGH_CLICK_STATUS" != "complet
 fi
 
 if (( REMAINING_GROUPS <= 0 )); then
-  write_state pending "bounded group budget consumed; remaining stages continue on the next worker run"
-  exit 0
+  defer_remaining_work "bounded group budget consumed"
 fi
 
 MANUAL_STATUS="$(queue_value 'j.stages?.manualSpecialRestore?.status' not_required)"
@@ -362,8 +384,7 @@ if [[ "$MANUAL_STATUS" != "not_required" && "$MANUAL_STATUS" != "completed" ]]; 
     status=$?
     if [[ "$status" -eq 3 ]]; then
       update_stage manualSpecialRestore pending false "bounded chunk completed; more exact-plan items remain" "$RESULT_PATH"
-      write_state pending "manual-special repair chunk completed; queue will resume without replaying successful items"
-      exit 0
+      defer_remaining_work "manual-special repair chunk completed without replaying successful items"
     fi
     update_stage manualSpecialRestore failed false "execute/readback failed status=$status"
     write_state failed "manual special restore failed status=$status"
@@ -372,8 +393,7 @@ if [[ "$MANUAL_STATUS" != "not_required" && "$MANUAL_STATUS" != "completed" ]]; 
 fi
 
 if (( REMAINING_GROUPS <= 0 )); then
-  write_state pending "bounded group budget consumed; remaining stages continue on the next worker run"
-  exit 0
+  defer_remaining_work "bounded group budget consumed"
 fi
 
 DRIFT_STATUS="$(queue_value 'j.stages?.driftRepair?.status' not_required)"
@@ -391,8 +411,7 @@ if [[ "$DRIFT_STATUS" != "not_required" && "$DRIFT_STATUS" != "completed" ]]; th
     status=$?
     if [[ "$status" -eq 3 ]]; then
       update_stage driftRepair pending false "bounded chunk completed; more exact-manifest groups remain" "$RESULT_PATH"
-      write_state pending "drift repair chunk completed; queue will resume without replaying successful groups"
-      exit 0
+      defer_remaining_work "drift repair chunk completed without replaying successful groups"
     fi
     if [[ "$status" -eq 4 ]]; then
       update_stage driftRepair blocked false "current inventory/platform conditions safely blocked one or more drift repairs; existing protection was preserved" "$RESULT_PATH"
@@ -407,8 +426,7 @@ fi
 
 
 if (( REMAINING_GROUPS <= 0 )); then
-  write_state pending "bounded group budget consumed; remaining stages continue on the next worker run"
-  exit 0
+  defer_remaining_work "bounded group budget consumed"
 fi
 
 FALLBACK_STATUS="$(queue_value 'j.stages?.fallbackRepair?.status' not_required)"
@@ -435,8 +453,7 @@ if [[ "$FALLBACK_STATUS" != "not_required" && "$FALLBACK_STATUS" != "completed" 
     status=$?
     if [[ "$status" -eq 3 ]]; then
       update_stage fallbackRepair pending false "bounded chunk completed; more exact-plan groups remain" "$RESULT_PATH"
-      write_state pending "fallback repair chunk completed; queue will resume without replaying successful groups"
-      exit 0
+      defer_remaining_work "fallback repair chunk completed without replaying successful groups"
     fi
     update_stage fallbackRepair failed false "execute/readback failed status=$status" "$RESULT_PATH"
     write_state failed "fallback repair failed status=$status"
