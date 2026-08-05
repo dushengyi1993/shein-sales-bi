@@ -30,6 +30,15 @@ assert.equal(evaluateHostResourcePressure({
   memoryFullAvg10: 0,
   ioFullAvg10: 0,
 }, HOST_RESOURCE_PRESSURE_PROFILES.browser).ready, true);
+assert.equal(HOST_RESOURCE_PRESSURE_PROFILES['browser-secondary'].minimumAvailableMemoryMiB, 4096);
+assert.equal(evaluateHostResourcePressure({
+  uptimeSeconds: 3600,
+  cpuCount: 2,
+  load1: 0.8,
+  availableMemoryMiB: 3900,
+  memoryFullAvg10: 0,
+  ioFullAvg10: 0,
+}, HOST_RESOURCE_PRESSURE_PROFILES['browser-secondary']).ready, false);
 
 const slice = unit('shein-host-heavy-bi.slice');
 assert.match(slice, /^CPUQuota=90%$/m);
@@ -68,9 +77,42 @@ const heavyUnits = [
 for (const name of heavyUnits) {
   const content = unit(name);
   assert.match(content, /^Slice=shein-host-heavy-bi\.slice$/m, name);
-  assert.match(content, /run_host_heavy_job\.sh/, name);
+  assert.match(content, /run_host_(?:heavy|browser_read)_job\.sh|run_cloud_portal_section_queue_slot\.sh/, name);
   assert.match(content, /^SuccessExitStatus=75$/m, name);
 }
+
+const browserReadUnits = [
+  'shein-bi-cloud-session-manager.service',
+  'shein-bi-cloud-morning-chain.service',
+  'shein-bi-cloud-morning-link-chunk-2.service',
+  'shein-bi-cloud-rtv-verify.service',
+  'shein-bi-cloud-et-forwarder.service',
+  'shein-bi-cloud-et-storage-fee.service',
+];
+for (const name of browserReadUnits) {
+  assert.match(unit(name), /run_host_browser_read_job\.sh/, name);
+}
+for (const name of [
+  'shein-bi-cloud-marketing-repair.service',
+  'shein-bi-daily-inventory-replenishment-guard.service',
+  'shein-bi-cloud-portal-section-queue.service',
+]) {
+  assert.doesNotMatch(unit(name), /run_host_browser_read_job\.sh/,
+    `${name} must remain exclusive because it writes business or materialized state`);
+}
+
+const browserReadWrapper = read('scripts/run_host_browser_read_job.sh');
+assert.match(browserReadWrapper, /flock -s -w "\$LOCK_WAIT_SEC" 9/);
+assert.match(browserReadWrapper, /shein-browser-read-0\.lock/);
+assert.match(browserReadWrapper, /shein-browser-read-1\.lock/);
+assert.match(browserReadWrapper, /PRESSURE_CLASS=browser-secondary/);
+assert.match(browserReadWrapper, /SHEIN_BI_HOST_RESOURCE_LANE=browser-read/);
+assert.ok(
+  browserReadWrapper.indexOf('exec 9<>"$HOST_LOCK"') < browserReadWrapper.indexOf('exec 8<>"$PROJECT_LOCK"')
+  && browserReadWrapper.indexOf('exec 8<>"$PROJECT_LOCK"') < browserReadWrapper.indexOf('exec 7<>"$DOMAIN_LOCK"')
+  && browserReadWrapper.indexOf('exec 7<>"$DOMAIN_LOCK"') < browserReadWrapper.indexOf('check_host_resource_pressure.mjs'),
+  'browser read lock order must remain host -> project -> domain -> slot -> pressure',
+);
 
 for (const name of [
   'shein-bi-cloud-today-sales-reconcile.service',
@@ -127,13 +169,21 @@ const automatedShell = fs.readdirSync(new URL('./', import.meta.url))
 assert.doesNotMatch(automatedShell, /nohup[^\n]*prewarm_bi_portal_sections/,
   'automated jobs must enqueue bounded section refreshes instead of detached 16-section fan-out');
 assert.match(automatedShell, /enqueue_bi_portal_sections\.sh/);
-assert.match(unit('shein-bi-cloud-portal-section-queue.timer'), /^\s*OnCalendar=\*-\*-\* \*:52:00$/m);
+assert.match(unit('shein-bi-cloud-portal-section-queue.timer'), /^\s*OnCalendar=\*-\*-\* \*:14,44:00$/m);
 const portalQueueUnit = unit('shein-bi-cloud-portal-section-queue.service');
 const portalQueueWorker = read('scripts/cloud_portal_section_queue_worker.sh');
-assert.match(portalQueueUnit, /^Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED=1$/m);
+const portalQueueSlot = read('scripts/run_cloud_portal_section_queue_slot.sh');
+assert.match(portalQueueUnit, /run_cloud_portal_section_queue_slot\.sh/);
+assert.doesNotMatch(portalQueueUnit, /--deadline-next-hour/);
+assert.match(portalQueueSlot, /DEADLINE_MINUTE=17/);
+assert.match(portalQueueSlot, /DEADLINE_MINUTE=27/);
+assert.match(portalQueueSlot, /DEADLINE_MINUTE=57/);
+assert.match(portalQueueSlot, /SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED=1/);
 assert.match(portalQueueWorker, /unscheduled_direct_entry/);
-assert.match(portalQueueWorker, /10#\$START_MINUTE < 43/);
+assert.match(portalQueueWorker, /10#\$START_MINUTE >= 13/);
+assert.match(portalQueueWorker, /10#\$START_MINUTE >= 43/);
 assert.match(portalQueueWorker, /outside_safe_start_window/);
+assert.match(portalQueueWorker, /stop before next core lane/);
 
 const repair = read('scripts/cloud_marketing_repair_worker.sh');
 assert.match(repair, /write_state deferred_to_local/);

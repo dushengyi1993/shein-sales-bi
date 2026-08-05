@@ -11,6 +11,13 @@ export const HOST_RESOURCE_PRESSURE_PROFILES = Object.freeze({
     maximumMemoryFullAvg10: 1,
     maximumIoFullAvg10: 5,
   }),
+  'browser-secondary': Object.freeze({
+    minimumUptimeSeconds: 900,
+    minimumAvailableMemoryMiB: 4096,
+    maximumLoadPerCpu: 0.65,
+    maximumMemoryFullAvg10: 0.5,
+    maximumIoFullAvg10: 3,
+  }),
   openapi: Object.freeze({
     minimumUptimeSeconds: 900,
     minimumAvailableMemoryMiB: 2048,
@@ -37,7 +44,7 @@ function finiteNonNegative(value) {
 export function parseArgs(argv = []) {
   let resourceClass = null;
   for (const token of argv) {
-    const match = /^--class=(browser|openapi|materializer)$/.exec(token);
+    const match = /^--class=(browser|browser-secondary|openapi|materializer)$/.exec(token);
     if (!match || resourceClass !== null) {
       throw new TypeError('HOST_RESOURCE_PRESSURE_ARGUMENT_INVALID');
     }

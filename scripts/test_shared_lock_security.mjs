@@ -64,7 +64,7 @@ for (const relativePath of [
   'infra/systemd/shein-bi-cloud-morning-supplements.service',
 ]) {
   const source = read(relativePath);
-  assert.match(source, /run_host_heavy_job\.sh/);
+  assert.match(source, /run_host_(?:heavy|browser_read)_job\.sh/);
   assert.match(source, /^Slice=shein-host-heavy-bi\.slice$/m);
   assert.doesNotMatch(source, /\/tmp\/[^\s]*\.lock/);
 }

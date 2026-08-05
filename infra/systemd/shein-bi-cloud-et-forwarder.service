@@ -32,5 +32,5 @@ MemoryHigh=800M
 MemoryMax=1200M
 OOMPolicy=stop
 KillMode=control-group
-ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain et-forwarder --class browser --lock-wait-sec 120 --deadline-minute 29 --defer-state /srv/shein-bi/runtime/host-scheduler/et-forwarder.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/run_pipeline_stage.sh --stage et-forwarder --message "ET warehouse sync completed" -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_et_forwarder_sync.sh today
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_browser_read_job.sh --domain et-forwarder --lock-wait-sec 120 --deadline-minute 29 --defer-state /srv/shein-bi/runtime/host-scheduler/et-forwarder.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/run_pipeline_stage.sh --stage et-forwarder --message "ET warehouse sync completed" -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_et_forwarder_sync.sh today
 SuccessExitStatus=75

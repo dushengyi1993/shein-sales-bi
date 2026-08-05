@@ -27,5 +27,5 @@ IOWeight=30
 MemoryHigh=2200M
 MemoryMax=2800M
 OOMPolicy=stop
-ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain morning-link-chunk-2 --class browser --lock-wait-sec 120 --deadline-at 09:10 --defer-state /srv/shein-bi/runtime/host-scheduler/morning-link-chunk-2.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_morning_chain.sh chunk-2
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_browser_read_job.sh --domain morning-link-chunk-2 --lock-wait-sec 120 --deadline-at 09:10 --defer-state /srv/shein-bi/runtime/host-scheduler/morning-link-chunk-2.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_morning_chain.sh chunk-2
 SuccessExitStatus=75
