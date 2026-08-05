@@ -8,9 +8,20 @@ LOCK_FILE="${SHEIN_BI_PORTAL_SECTION_QUEUE_LOCK_FILE:-$ROOT/state/locks/shein-bi
 MAX_SECTIONS="${SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS:-3}"
 SECTION_TIMEOUT="${SHEIN_BI_PORTAL_SECTION_QUEUE_SECTION_TIMEOUT_SEC:-900}"
 LEASE_SECONDS="${SHEIN_BI_PORTAL_SECTION_QUEUE_LEASE_SEC:-1200}"
+SCHEDULED_ENTRY="${SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED:-0}"
+START_HOUR="$(date +%H)"
+START_MINUTE="$(date +%M)"
 
 [[ "$MAX_SECTIONS" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$SECTION_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || exit 64
+if [[ "$SCHEDULED_ENTRY" != "1" ]]; then
+  echo "[portal-section-worker] defer reason=unscheduled_direct_entry; use shein-bi-cloud-portal-section-queue.service" >&2
+  exit 75
+fi
+if [[ "$START_HOUR" =~ ^(01|06|08)$ ]] || (( 10#$START_MINUTE < 43 )); then
+  echo "[portal-section-worker] defer reason=outside_safe_start_window hour=$START_HOUR minute=$START_MINUTE" >&2
+  exit 75
+fi
 
 source "$ROOT/scripts/lib/shared_lock.sh"
 prepare_shared_lock_file "$LOCK_FILE"

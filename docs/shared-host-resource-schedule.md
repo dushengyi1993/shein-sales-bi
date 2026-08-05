@@ -63,6 +63,7 @@ flowchart LR
 - 浏览器页面、SSE、core warmup 不再直接后台扇出 16 个 section，也不允许普通请求现场启动 `orders`、`profit` 或成本台账重算。
 - `liveSalesToday`、`productState`、`inventoryStock` 仍可在 Portal 轻量快车道同步生成。
 - 其它 section 统一进入 `state/portal-section-queue/queue.json`；`shein-bi-cloud-portal-section-queue.service` 持共享 host 锁后逐个同步生成。
+- 队列 worker 只允许由正式 service 在每小时 `:43–:59` 安全起跑窗口进入；直接从 SSH/脚本在 `:00–:42` 拉起必须返回 75 并保留 pending 队列，禁止用“下一小时 :17 截止”把一次手工任务放大成近一小时锁占用。
 - 只有无代理头的本机请求并带 `X-SHEIN-BI-HOST-LOCKED-WORKER: 1` 才能绕过排队。公网或普通 BI 用户不能伪装成重任务 worker。
 - 订单事件先发布 `liveSalesToday`；退货和历史订单变动只把成本/利润重算入队，不得让销售实时展示等待移动加权成本。
 - worker 被截止信号终止时，队列 lease 会自动过期并在下一安全窗口恢复；旧 section JSON 原子保留。

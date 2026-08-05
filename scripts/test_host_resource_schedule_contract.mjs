@@ -128,6 +128,12 @@ assert.doesNotMatch(automatedShell, /nohup[^\n]*prewarm_bi_portal_sections/,
   'automated jobs must enqueue bounded section refreshes instead of detached 16-section fan-out');
 assert.match(automatedShell, /enqueue_bi_portal_sections\.sh/);
 assert.match(unit('shein-bi-cloud-portal-section-queue.timer'), /^\s*OnCalendar=\*-\*-\* \*:52:00$/m);
+const portalQueueUnit = unit('shein-bi-cloud-portal-section-queue.service');
+const portalQueueWorker = read('scripts/cloud_portal_section_queue_worker.sh');
+assert.match(portalQueueUnit, /^Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED=1$/m);
+assert.match(portalQueueWorker, /unscheduled_direct_entry/);
+assert.match(portalQueueWorker, /10#\$START_MINUTE < 43/);
+assert.match(portalQueueWorker, /outside_safe_start_window/);
 
 const repair = read('scripts/cloud_marketing_repair_worker.sh');
 assert.match(repair, /write_state deferred_to_local/);
