@@ -179,6 +179,7 @@ const marketingRepairScript = fs.readFileSync(new URL('./cloud_marketing_repair_
 assert.doesNotMatch(marketingRepair, /^ExecStart(?:Pre|Post)=.*cleanup_shein_store_browsers/m,
   'marketing repair must not stack unit-level cleanup around its lease-owned script cleanup');
 assert.match(marketingRepair, /SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS=1/);
+assert.match(marketingRepair, /SHEIN_BI_MARKETING_REPAIR_EXECUTION_LOCATION=cloud/);
 assert.match(marketingRepair, /SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY=\/srv\/shein-bi\/runtime\/marketing_manual_limited_discount_overrides\.json/);
 assert.match(marketingRepair, /SHEIN_BI_MARKETING_AUTOMATION_AUTHORIZATION=owner-standing-cloud-marketing-v1/);
 assert.match(marketingRepairScript, /--max-groups "\$REMAINING_GROUPS"/);
@@ -186,6 +187,9 @@ assert.match(marketingRepairScript, /new_groups_in_result/);
 assert.match(marketingRepairScript, /cap cloud repair batch groups=.* -> 1/);
 assert.match(marketingRepairScript, /CURRENT_MINUTE >= 23 && CURRENT_MINUTE <= 42/);
 assert.match(marketingRepairScript, /defer_remaining_work/);
+assert.match(marketingRepairScript, /IS_CLOUD_EXECUTION=1/);
+assert.match(marketingRepairScript, /EXECUTION_LOCATION.*== "local".*ROOT.*!= "\/opt\/shein-bi\/app"/);
+assert.doesNotMatch(marketingRepairScript, /AUTOMATION_CONTEXT.*== "cloud_timer"/);
 assert.equal(property(marketingRepair, 'TimeoutStartSec'), '2400');
 
 const storageFeeTimer = readUnit('shein-bi-cloud-et-storage-fee.timer');

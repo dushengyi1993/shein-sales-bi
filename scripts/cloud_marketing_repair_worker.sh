@@ -15,6 +15,11 @@ LEASE_TTL_SEC="${SHEIN_BI_MARKETING_REPAIR_LEASE_TTL_SEC:-3000}"
 LEASE_ACQUIRED=0
 MAX_GROUPS="${SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS:-8}"
 AUTOMATION_CONTEXT="${SHEIN_BI_MARKETING_AUTOMATION_CONTEXT:-}"
+EXECUTION_LOCATION="${SHEIN_BI_MARKETING_REPAIR_EXECUTION_LOCATION:-cloud}"
+IS_CLOUD_EXECUTION=1
+if [[ "$EXECUTION_LOCATION" == "local" && "$ROOT" != "/opt/shein-bi/app" ]]; then
+  IS_CLOUD_EXECUTION=0
+fi
 SCAN_TIMEOUT_SEC="${SHEIN_BI_MARKETING_LIVE_SCAN_TIMEOUT_SEC:-2400}"
 SCAN_KILL_AFTER_SEC="${SHEIN_BI_MARKETING_LIVE_SCAN_KILL_AFTER_SEC:-60}"
 STACK_REVIEW_TIMEOUT_SEC="${SHEIN_BI_MARKETING_STACK_REVIEW_TIMEOUT_SEC:-900}"
@@ -138,7 +143,7 @@ NODE
 
 defer_remaining_work() {
   local message="$1"
-  if [[ "$AUTOMATION_CONTEXT" == "cloud_timer" ]]; then
+  if (( IS_CLOUD_EXECUTION == 1 )); then
     write_state deferred_to_local "$message; remaining exact queue preserved for local-browser continuation"
     exit 75
   fi
@@ -310,14 +315,14 @@ if [[ -n "$ACTIVE_BUSY" ]]; then
 fi
 CURRENT_MINUTE="$(TZ="$TZ_NAME" date +%M)"
 CURRENT_MINUTE=$((10#$CURRENT_MINUTE))
-if [[ "$AUTOMATION_CONTEXT" == "cloud_timer" ]]; then
+if (( IS_CLOUD_EXECUTION == 1 )); then
   if (( CURRENT_MINUTE >= 23 && CURRENT_MINUTE <= 42 )); then
     write_state deferred_to_local "reserved :32-:43 core-data lane is too close; exact repair queue preserved for local-browser continuation"
-    echo "[cloud_marketing_repair] DEFER TO LOCAL outside safe start window minute=$CURRENT_MINUTE"
+    echo "[cloud_marketing_repair] DEFER TO LOCAL outside safe start window minute=$CURRENT_MINUTE context=${AUTOMATION_CONTEXT:-unknown}"
     exit 75
   fi
   if (( MAX_GROUPS > 1 )); then
-    echo "[cloud_marketing_repair] cap cloud repair batch groups=$MAX_GROUPS -> 1"
+    echo "[cloud_marketing_repair] cap cloud repair batch groups=$MAX_GROUPS -> 1 context=${AUTOMATION_CONTEXT:-unknown}"
     MAX_GROUPS=1
   fi
 fi
