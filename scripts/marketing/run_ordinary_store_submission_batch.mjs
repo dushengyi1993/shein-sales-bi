@@ -169,11 +169,19 @@ async function worker() {
     row.executeFile = submitResult.executeFile || '';
     row.executeError = submitResult.executeError || '';
     row.executeResults = submitResult.executeResults || [];
-    row.status = transaction.ok === true
+    const platformSubmitted = Boolean(
+      row.executeProcess?.code === 0
       && row.executeResults.length
-      && row.executeResults.every(result => result.ok && result.submit?.submitted === true)
+      && row.executeResults.every(result => (
+        result.ok
+        && result.submit?.ok === true
+        && result.submit?.submitted === true
+        && result.submit?.state?.successUrl === true
+      )),
+    );
+    row.status = transaction.ok === true && platformSubmitted
       ? 'submitted'
-      : 'execute_failed';
+      : (platformSubmitted ? 'submitted_readback_failed' : 'execute_failed');
     results.push(row);
     console.log(`[STORE-BATCH] ${row.status.toUpperCase()} ${storeKey}`);
   }
@@ -187,11 +195,16 @@ const summary = {
   workFingerprint: approval.workFingerprint,
   stores: args.stores,
   submittedStores: results.filter(row => row.status === 'submitted').map(row => row.storeKey),
+  submittedReadbackFailedStores: results.filter(row => row.status === 'submitted_readback_failed').map(row => row.storeKey),
   dryRunFailedStores: results.filter(row => row.status === 'dry_run_failed').map(row => row.storeKey),
   executeFailedStores: results.filter(row => row.status === 'execute_failed').map(row => row.storeKey),
   results,
 };
 const file = path.join(args.outDir, 'store-submission-summary.json');
 await fs.writeFile(file, `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
-console.log(`\n[STORE-BATCH] SUMMARY ${path.relative(ROOT, file)} submitted=${summary.submittedStores.length}/${args.stores.length}`);
+console.log(
+  `\n[STORE-BATCH] SUMMARY ${path.relative(ROOT, file)} `
+  + `verified=${summary.submittedStores.length}/${args.stores.length} `
+  + `submitted_readback_failed=${summary.submittedReadbackFailedStores.length}`,
+);
 process.exitCode = summary.submittedStores.length === args.stores.length ? 0 : 2;

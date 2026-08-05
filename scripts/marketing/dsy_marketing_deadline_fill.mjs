@@ -395,9 +395,19 @@ function psSingleQuote(value) {
 }
 
 function closeExistingStoreChrome(store) {
-  // P3-#11: on Linux/cloud, browser cleanup is handled by cleanup_shein_store_browsers.mjs
-  // This function only handles Windows local profile cleanup.
-  if (process.platform !== 'win32') return;
+  if (process.platform !== 'win32') {
+    const cleanup = spawnSync(process.execPath, [
+      path.join(ROOT, 'scripts', 'cleanup_shein_store_browsers.mjs'),
+      '--store',
+      store.storeKey,
+      '--kill-after-sec',
+      '5',
+    ], {cwd: ROOT, encoding: 'utf8', timeout: 15_000});
+    if (cleanup.status !== 0) {
+      console.warn(`[${store.storeKey}] 云端浏览器收口失败：${cleanup.stderr || cleanup.stdout || `exit=${cleanup.status}`}`);
+    }
+    return;
+  }
   const profileNeedle = `persistent-${store.profileKey}-profile`;
   const script = [
     "$ErrorActionPreference = 'SilentlyContinue'",
@@ -2576,16 +2586,17 @@ const summary = {
 
 for (const store of selectedStores) {
   console.log(`\n[${store.storeKey}] 打开${args.headless ? '云端无头' : '可见前端'}浏览器并检查活动...`);
-  if (!args.noClose) {
-    closeExistingStoreChrome(store);
-    await sleep(2500);
-    launchVisible(store);
-    await sleep(3500);
-  }
-  bringStoreWindowToFront(store);
-  await sleep(800);
-  const cdp = await connectStore(store);
+  let cdp = null;
   try {
+    if (!args.noClose) {
+      closeExistingStoreChrome(store);
+      await sleep(2500);
+      launchVisible(store);
+      await sleep(3500);
+    }
+    bringStoreWindowToFront(store);
+    await sleep(800);
+    cdp = await connectStore(store);
     const listPage = await newPage(cdp, LIST_URL);
     await waitFor(cdp, listPage.sessionId, 'document.body', 30_000);
     const loginRecovery = await recoverLoginIfNeeded(cdp, listPage.sessionId);
@@ -2640,7 +2651,11 @@ for (const store of selectedStores) {
     summary.stores.push({store: store.storeKey, shopName: store.shopName, port: store.port, error: err.message, stack: err.stack});
     console.log(`[${store.storeKey}] 异常：${err.message}`);
   } finally {
-    cdp.close();
+    if (!args.noClose && cdp && process.platform !== 'win32') {
+      await cdp.call('Browser.close').catch(() => {});
+      await sleep(500);
+    }
+    cdp?.close();
     if (!args.noClose) {
       await sleep(500);
       closeExistingStoreChrome(store);

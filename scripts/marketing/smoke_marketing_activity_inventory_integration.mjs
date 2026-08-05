@@ -189,6 +189,7 @@ assert.equal(classifyActivityInventoryFailureStatus({
 }), 'inventory_transaction_restore_failed');
 
 const sources = {
+  deadlineFill: await read('scripts/marketing/dsy_marketing_deadline_fill.mjs'),
   manual: await read('scripts/marketing/batch_restore_manual_limited_discounts.mjs'),
   drift: await read('scripts/marketing/batch_fix_limited_discount_drift.mjs'),
   fallback: await read('scripts/marketing/batch_apply_new_listing_limited_discount.mjs'),
@@ -206,11 +207,15 @@ assert.match(sources.highClick, /batch_restore_manual_limited_discounts\.mjs/);
 for (const key of ['store', 'chunk', 'singleton']) {
   assert.match(sources[key], /executeOrdinaryActivityWithInventoryTransaction/, key);
 }
+assert.match(sources.deadlineFill, /cdp\.call\('Browser\.close'\)/);
+assert.match(sources.deadlineFill, /cleanup_shein_store_browsers\.mjs/);
+assert.match(sources.store, /submitted_readback_failed/);
+assert.match(sources.store, /submittedReadbackFailedStores/);
 assert.match(sources.legacy, /Legacy persistent marketing inventory top-up is disabled/);
 
 console.log(JSON.stringify({
   ok: true,
-  checks: 44,
+  checks: 48,
   ordinaryRunners: 3,
   limitedDiscountPaths: 4,
   legacyPersistentTopUpExecutable: false,
