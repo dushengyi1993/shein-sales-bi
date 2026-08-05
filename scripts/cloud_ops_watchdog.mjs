@@ -63,7 +63,9 @@ const TIMER_NAMES = [
   'shein-bi-cloud-portal-section-queue.timer',
   'shein-bi-cloud-et-storage-fee.timer',
   'shein-bi-cloud-marketing-live-guard.timer',
-  'shein-bi-cloud-marketing-repair.timer',
+  // Cloud marketing repair is intentionally disabled. The guarded repair
+  // queue is inspected separately and is handed to the local browser lane
+  // when cloud capacity is not suitable for transactional writes.
   'shein-bi-cloud-browser-cleanup.timer',
   'shein-bi-cloud-disk-maintenance.timer',
   'shein-bi-cloud-watchdog.timer',
