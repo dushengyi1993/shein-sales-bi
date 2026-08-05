@@ -82,6 +82,7 @@
 | `shein-bi-cloud-et-forwarder.timer` | 北京时间 `01:12/04:12/07:20/10:20/13:20/17:20/20:20/23:20` | 按经营检查点抓取 ET 货代仓/出库单、入仓；同步刷新轻量 section，重 section 进入 host-locked 队列 |
 
 | `shein-bi-cloud-et-storage-fee.timer` | 北京时间 `14:20` | 只读同步 ET 仓储费最终账单与 SKU 明细，14:27 前完成利润 cache 与对账 |
+| `shein-bi-daily-inventory-replenishment-guard.timer` | 北京时间 `13:45` | 依赖晨间19店合并和13:12后库存 marker，生成当天计划并按常驻授权自动执行；14:17前释放，14:45 Codex任务只做事后审计 |
 
 | 晨间三阶段 | `08:00 / 08:45 / 09:12` | 前12店 fetch-only；后7店并19店合并；最后运行 OpenAPI/成本/利润补充。每阶段用 marker 衔接，超时重跑只补当天尚未完成的店铺 |
 

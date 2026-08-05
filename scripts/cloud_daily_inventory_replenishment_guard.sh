@@ -35,9 +35,9 @@ if [[ "$REQUIRE_PIPELINE_MARKERS" == "1" || "$REQUIRE_PIPELINE_MARKERS" == "true
     --stage stock-refresh \
     --date "$DATE" \
     --status done,warning \
-    --not-before "${DATE}T09:11:00+08:00" \
+    --not-before "${DATE}T13:11:00+08:00" \
     || {
-      echo "[daily_inventory_guard] 09:12 stock refresh marker is not ready" >&2
+      echo "[daily_inventory_guard] 13:12 stock refresh marker is not ready" >&2
       exit 75
     }
 fi
@@ -170,7 +170,7 @@ if [[ ! -f "$RESULT" ]] || ! jq -e --arg hash "$HASH" --argjson total "$TOTAL" '
   exit 1
 fi
 
-# Row-level blockers are terminal, auditable business results. The 09:45 report
+# Row-level blockers are terminal, auditable business results. The 14:45 report
 # surfaces them; they must not turn a completed daily scan into a systemd crash.
 jq '{ok: (([.results[]|select(.state=="blocked")]|length) == 0),state:"completed",planHash,executionMode,generatedAt,counts:{
   total:(.results|length),

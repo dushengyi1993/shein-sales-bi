@@ -139,6 +139,7 @@ assert.throws(() => assertDailyInventoryExecutionAuthorization({
 const livePolicy = JSON.parse(fs.readFileSync(new URL('../config/inventory_replenishment_policy.json', import.meta.url), 'utf8'));
 const guardScript = fs.readFileSync(new URL('./cloud_daily_inventory_replenishment_guard.sh', import.meta.url), 'utf8');
 const guardService = fs.readFileSync(new URL('../infra/systemd/shein-bi-daily-inventory-replenishment-guard.service', import.meta.url), 'utf8');
+const guardTimer = fs.readFileSync(new URL('../infra/systemd/shein-bi-daily-inventory-replenishment-guard.timer', import.meta.url), 'utf8');
 const executorScript = fs.readFileSync(new URL('./inventory/execute_daily_inventory_replenishment_plan.mjs', import.meta.url), 'utf8');
 assert.equal(livePolicy.execution.mode, 'automatic');
 assert.equal(livePolicy.execution.perRunUserConfirmationRequired, false);
@@ -157,6 +158,10 @@ assert.match(guardService, new RegExp(`SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATI
 assert.match(guardService, /^Wants=.*shein-bi-cloud-morning-chain\.service$/m);
 assert.match(guardService, /^After=.*shein-bi-cloud-morning-chain\.service.*shein-bi-cloud-et-forwarder\.service$/m);
 assert.match(guardService, /^Environment=SHEIN_BI_INVENTORY_LINKS_MAX_AGE_SECONDS=1800$/m);
+assert.match(guardService, /--deadline-at 14:17/);
+assert.match(guardTimer, /^OnCalendar=\*-\*-\* 13:45:00$/m);
+assert.match(guardTimer, /^Persistent=false$/m);
+assert.match(guardScript, /--not-before "\$\{DATE\}T13:11:00\+08:00"/);
 assert.match(executorScript, /Always publish the complete terminal envelope\.\s*await writeResultFile\(results\);/);
 assert.match(executorScript, /requestWithRateLimitRetry\(client, '\/open-api\/stock\/change-inventory\/v2'/);
 console.log(JSON.stringify({ok: true, checks: 57}, null, 2));

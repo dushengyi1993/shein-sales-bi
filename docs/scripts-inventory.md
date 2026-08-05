@@ -625,7 +625,7 @@
 - 同一报告独立列出 `ET > 10` 且按加权销量计算的在库去化周期小于 `120` 天的补货提醒；全部链接均为待上架/已下架的货号不提醒。本店库存为 0、其他店同货号仍有库存继续单列 `crossStoreSoldOutFindings`，但本店已有其他已上架同款时忽略已售罄旧链接，且待上架/已下架绝不进入。完整业务口径见 [每日库存巡检与实盘分配规则](inventory-replenishment-patrol-rules.md)。
 - `scripts/inventory/execute_daily_inventory_replenishment_plan.mjs`：只执行当天、无全局 blocker、policy 版本一致且 hash 完整的精确计划。2026-08-03 起由受限云端上下文自动传入当天同一个 `payloadHash`，不再逐日人工确认；执行器同时支持增库存、降到 10、Top5 配额和非 Top5 清零。每条执行前重查 linksData 四态、同店同款已上架链接、SKU、ET、近 7 天销量/曝光和实时库存，任何状态/替代链接变化都使该行失败关闭。精确保留锁定/不可用量并回读可用库存等于批准目标；单条失败继续记录，最后统一汇总。首次建立 VI 库存行时先查询商家仓库列表，只有唯一仓或站点国家唯一匹配仓时才带 `warehouseCode` 提交，多仓歧义失败关闭。
 - `scripts/link_ops_maintenance_openapi_executor.mjs`：单条 `update_inventory` 同样先锁定唯一商家仓并把 `warehouseCode` 纳入 payload hash；回读固定使用官方 `skuCodeList + warehouseType=2 + invType=VI` 参数，并逐 SKU 校验可用库存精确命中目标。
-- `config/inventory_replenishment_policy.json` 当前 `execution.mode=automatic`。`shein-bi-daily-inventory-replenishment-guard.timer` 每天 `09:35` 等待晨间链路完成后生成精确计划；先确保 `linksData` section 在30分钟内同步刷新，OpenAPI商品/库存快照过期或有失败分片时做一次19店只读刷新并重建计划。仅在当天来源新鲜、计划可执行、hash完整且systemd授权ID/上下文均匹配时自动执行。脚本用跨进程锁防并发，并识别同hash的完整结果防止重复执行；单条blocker作为可审计业务结果交给`09:45`报告，不伪装成成功。
+- `config/inventory_replenishment_policy.json` 当前 `execution.mode=automatic`。`shein-bi-daily-inventory-replenishment-guard.timer` 每天 `13:45` 等待晨间链路完成，并要求当天 `13:12` 后的19店库存 marker，再生成精确计划；先确保 `linksData` section 在30分钟内同步刷新，OpenAPI商品/库存快照过期或有失败分片时做一次19店只读刷新并重建计划。仅在当天来源新鲜、计划可执行、hash完整且systemd授权ID/上下文均匹配时自动执行。脚本用跨进程锁防并发，并识别同hash的完整结果防止重复执行；单条blocker作为可审计业务结果交给`14:45`报告，不伪装成成功。事后审计必须读取当天 service、plan、result 与完成 marker；尚未执行不得解释为0条或成功。
 
 
 
