@@ -160,6 +160,14 @@ const repairBlocked = assessDailyMarketingRepairHealth({
 assert.equal(repairBlocked.healthy, true);
 assert.equal(repairBlocked.pending, false);
 assert.equal(repairBlocked.reason, 'today_repair_queue_blocked_and_reported');
+const repairDeferredToLocal = assessDailyMarketingRepairHealth({
+  queueState: {date: '2026-07-18', status: 'pending', counts: {totalRows: 23, totalGroups: 13}},
+  repairState: {date: '2026-07-18', status: 'deferred_to_local'},
+  nowMs: Date.parse('2026-07-18T20:30:00+08:00'),
+});
+assert.equal(repairDeferredToLocal.healthy, true);
+assert.equal(repairDeferredToLocal.pending, true);
+assert.equal(repairDeferredToLocal.reason, 'today_repair_queue_deferred_to_local');
 const dailyRefresh = {
   date: '2026-07-10',
   generatedAt: '2026-07-11T09:17:54+08:00',

@@ -566,6 +566,10 @@ async function main() {
   });
   if (!marketingRepairHealth.healthy) {
     issues.push(`营销修复队列未闭环：date=${marketingRepairHealth.today} reason=${marketingRepairHealth.reason} queueStatus=${marketingRepairQueue?.status || '-'} rows=${marketingRepairQueue?.counts?.totalRows ?? '-'} groups=${marketingRepairQueue?.counts?.totalGroups ?? '-'} workerStatus=${marketingRepairState?.status || '-'}`);
+  } else if (marketingRepairHealth.reason === 'today_repair_queue_deferred_to_local') {
+    maintenanceNotes.push(
+      `营销修复队列已移交本地受控执行：date=${marketingRepairHealth.today} rows=${marketingRepairQueue?.counts?.totalRows ?? '-'} groups=${marketingRepairQueue?.counts?.totalGroups ?? '-'}`,
+    );
   }
 
   const partialLinkBusiness = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'link-business-last-partial.json'));
