@@ -129,7 +129,7 @@ function normalizedStoreKey(value) {
  * warehouse. Browser four-state snapshots are diagnostic only; actionable
  * states are missing OpenAPI detail/stock or an unexplained API rollback.
  */
-function assessOpenapiProductReconciliationReport(report, expectedStoreKeys, nowMs = Date.now()) {
+export function assessOpenapiProductReconciliationReport(report, expectedStoreKeys, nowMs = Date.now()) {
   const expected = [...new Set((expectedStoreKeys || []).map(normalizedStoreKey).filter(Boolean))].sort();
   if (!report || typeof report !== 'object') {
     return {status: 'warning', warnings: ['尚未找到 OpenAPI 商品对账报告；请运行完整 19 店商品对账。'], notes: [], affectedStores: []};
@@ -153,7 +153,7 @@ function assessOpenapiProductReconciliationReport(report, expectedStoreKeys, now
       warnings.push(`${storeKey} 店商品对账未完成：${row.status || 'unknown'}。`);
       continue;
     }
-    if (!semantic || semantic.policyVersion !== 'openapi-current-webhook-previous/v1') {
+    if (!semantic || !['openapi-current-webhook-previous/v1', 'openapi-current-webhook-previous/v2'].includes(semantic.policyVersion)) {
       affectedStores.push(storeKey);
       warnings.push(`${storeKey} 店商品对账仍是旧口径或缺少语义结果；请重新运行完整对账。`);
       continue;
@@ -918,7 +918,11 @@ SELECT payload::text FROM summary;
   if (!report.ok) process.exit(1);
 }
 
-main().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+const isMain = process.argv[1]
+  && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  main().catch(err => {
+    console.error(err);
+    process.exit(1);
+  });
+}

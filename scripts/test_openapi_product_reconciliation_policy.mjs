@@ -5,6 +5,7 @@ import {
   assessProductReconciliationPolicy,
   resolveProductReconciliationReportTargets,
 } from './run_shein_openapi_products_reconciliation.mjs';
+import {assessOpenapiProductReconciliationReport} from './audit_bi_warehouse.mjs';
 
 const runnerSource = await fs.readFile(new URL('./run_shein_openapi_products_reconciliation.mjs', import.meta.url), 'utf8');
 const cloudWrapperSource = await fs.readFile(new URL('./cloud_openapi_product_reconciliation.sh', import.meta.url), 'utf8');
@@ -105,6 +106,18 @@ assert.equal(stockOnlyPendingDetail.counts.detailMissing, 1);
 assert.equal(stockOnlyPendingDetail.counts.detailMissingActionable, 0);
 assert.equal(stockOnlyPendingDetail.counts.detailPendingEnrichment, 1);
 assert.match(stockOnlyPendingDetail.notes.join('\n'), /不作为故障报警/);
+
+const v2AuditReport = assessOpenapiProductReconciliationReport({
+  generatedAt: new Date().toISOString(),
+  results: [{
+    storeKey: 'DL',
+    ok: true,
+    semanticReconciliation: stockOnlyPendingDetail,
+  }],
+}, ['DL']);
+assert.equal(v2AuditReport.status, 'ok',
+  'warehouse audit must accept the current v2 semantic policy instead of leaving a recovered alert in Portal core');
+assert.deepEqual(v2AuditReport.warnings, []);
 
 const cachedCurrent = snapshot([{
   skc: 'CACHED',
