@@ -325,6 +325,7 @@ if (( IS_CLOUD_EXECUTION == 1 )); then
     echo "[cloud_marketing_repair] cap cloud repair batch groups=$MAX_GROUPS -> 1 context=${AUTOMATION_CONTEXT:-unknown}"
     MAX_GROUPS=1
   fi
+  export SHEIN_BI_MARKETING_CLOUD_WRITE_GATE=bounded-repair-v1
 fi
 
 lease_action acquire

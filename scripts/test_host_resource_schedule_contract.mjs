@@ -144,6 +144,17 @@ assert.match(repair, /CURRENT_MINUTE >= 23 && CURRENT_MINUTE <= 42/);
 assert.match(repair, /remaining exact queue preserved for local-browser continuation/);
 assert.match(repair, /IS_CLOUD_EXECUTION=1/);
 assert.doesNotMatch(repair, /AUTOMATION_CONTEXT.*== "cloud_timer"/);
+assert.match(repair, /SHEIN_BI_MARKETING_CLOUD_WRITE_GATE=bounded-repair-v1/);
+
+const nodeWrapper = read('infra/bin/shein-bi-node');
+const cloudWriteGate = read('lib/cloud_marketing_write_gate.mjs');
+assert.match(hostWrapper, /SHEIN_BI_HOST_HEAVY_WRAPPED=1/);
+assert.match(hostWrapper, /SHEIN_BI_HOST_HEAVY_DOMAIN="\$DOMAIN"/);
+assert.match(nodeWrapper, /cloud-marketing-write-gate/);
+assert.match(nodeWrapper, /shared host wrapper is not an ancestor/);
+assert.match(nodeWrapper, /cloud batch limit must be exactly one/);
+assert.match(cloudWriteGate, /cloud_marketing_write_requires_shared_host_wrapper/);
+assert.match(cloudWriteGate, /cloud_marketing_write_wrapper_ancestor_missing/);
 
 const portal = read('scripts/serve_bi_portal.mjs');
 const liveWorker = portal.slice(

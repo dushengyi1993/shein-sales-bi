@@ -33,6 +33,7 @@ import {
   applyLowEtFastSellerPricePullbackToRows,
   buildLowEtFastSellerPricingContext,
 } from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
+import {assertCloudMarketingWriteGate} from '../../lib/cloud_marketing_write_gate.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
@@ -42,6 +43,7 @@ const COST_DOC = JSON.parse(await fs.readFile(path.join(ROOT, 'tmp', 'mbrs', 'ma
 const COSTS = COST_DOC.costMap || {};
 const TRUE_COSTS = COST_DOC.trueCostMap || {};
 const args = parseArgs(process.argv.slice(2));
+if (args.submit) assertCloudMarketingWriteGate();
 const EXECUTION_APPROVAL = await loadExecutionApproval();
 const OUT_DIR = args.outDir ? path.resolve(args.outDir) : path.join(ROOT, 'tmp', 'mbrs', 'deadline-fill-results');
 await fs.mkdir(OUT_DIR, {recursive: true});

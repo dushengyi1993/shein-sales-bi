@@ -192,6 +192,8 @@ elif [[ -n "$DEADLINE_MINUTE" ]]; then
 fi
 
 echo "[host-heavy] start domain=$DOMAIN class=$RESOURCE_CLASS command=$1"
+export SHEIN_BI_HOST_HEAVY_WRAPPED=1
+export SHEIN_BI_HOST_HEAVY_DOMAIN="$DOMAIN"
 set +e
 "${TIMEOUT_ARGS[@]}" "$@"
 STATUS=$?

@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+REAL_NODE="${SHEIN_BI_REAL_NODE:-/usr/bin/node}"
+WRITE_INTENT=0
+MARKETING_SCRIPT=""
+
+for arg in "$@"; do
+  case "$arg" in
+    --execute|--submit)
+      WRITE_INTENT=1
+      ;;
+  esac
+  if [[ "$arg" == *scripts/marketing/*.mjs ]]; then
+    MARKETING_SCRIPT="$arg"
+  fi
+done
+
+deny() {
+  echo "[cloud-marketing-write-gate] deferred_to_local: $1" >&2
+  exit 75
+}
+
+has_host_wrapper_ancestor() {
+  local pid="$PPID" depth=0 cmd parent
+  while [[ "$pid" =~ ^[0-9]+$ ]] && (( pid > 1 && depth < 24 )); do
+    cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+    if [[ "$cmd" == *run_host_heavy_job.sh* && "$cmd" == *"--domain marketing-repair"* ]]; then
+      return 0
+    fi
+    parent="$(awk '/^PPid:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true)"
+    pid="$parent"
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
+argument_value() {
+  local wanted="$1" previous="" arg
+  shift
+  for arg in "$@"; do
+    if [[ "$previous" == "$wanted" ]]; then
+      printf '%s\n' "$arg"
+      return 0
+    fi
+    if [[ "$arg" == "$wanted="* ]]; then
+      printf '%s\n' "${arg#*=}"
+      return 0
+    fi
+    previous="$arg"
+  done
+  return 1
+}
+
+if (( WRITE_INTENT == 1 )) && [[ -n "$MARKETING_SCRIPT" ]] && [[ -d /srv/shein-bi ]]; then
+  [[ "${SHEIN_BI_HOST_HEAVY_WRAPPED:-}" == "1" ]] || deny "missing shared host wrapper"
+  [[ "${SHEIN_BI_HOST_HEAVY_DOMAIN:-}" == "marketing-repair" ]] || deny "wrong shared host domain"
+  [[ "${SHEIN_BI_MARKETING_CLOUD_WRITE_GATE:-}" == "bounded-repair-v1" ]] || deny "cloud write gate token missing"
+  has_host_wrapper_ancestor || deny "shared host wrapper is not an ancestor"
+
+  base="${MARKETING_SCRIPT##*/}"
+  case "$base" in
+    batch_*.mjs)
+      minute=$((10#$(date +%M)))
+      if (( minute >= 23 && minute <= 42 )); then
+        deny "reserved :32-:43 core-data lane is too close"
+      fi
+      limit="$(argument_value --max-groups "$@" || argument_value --max-items "$@" || true)"
+      [[ "$limit" =~ ^[0-9]+$ ]] && (( limit >= 1 && limit <= 1 )) \
+        || deny "cloud batch limit must be exactly one"
+      ;;
+  esac
+fi
+
+exec "$REAL_NODE" "$@"

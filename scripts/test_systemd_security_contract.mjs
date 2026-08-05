@@ -190,6 +190,7 @@ assert.match(marketingRepairScript, /defer_remaining_work/);
 assert.match(marketingRepairScript, /IS_CLOUD_EXECUTION=1/);
 assert.match(marketingRepairScript, /EXECUTION_LOCATION.*== "local".*ROOT.*!= "\/opt\/shein-bi\/app"/);
 assert.doesNotMatch(marketingRepairScript, /AUTOMATION_CONTEXT.*== "cloud_timer"/);
+assert.match(marketingRepairScript, /SHEIN_BI_MARKETING_CLOUD_WRITE_GATE=bounded-repair-v1/);
 assert.equal(property(marketingRepair, 'TimeoutStartSec'), '2400');
 
 const storageFeeTimer = readUnit('shein-bi-cloud-et-storage-fee.timer');
