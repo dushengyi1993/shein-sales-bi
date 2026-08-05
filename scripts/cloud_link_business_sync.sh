@@ -16,6 +16,7 @@ LEASE_ACTIVE=0
 FETCH_ONLY="${SHEIN_LINK_BUSINESS_FETCH_ONLY:-0}"
 FINALIZE_ONLY="${SHEIN_LINK_BUSINESS_FINALIZE_ONLY:-0}"
 CHUNK_RESULT_FILE="${SHEIN_LINK_BUSINESS_CHUNK_RESULT_FILE:-}"
+RESUME_COMPLETED="${SHEIN_LINK_BUSINESS_RESUME_COMPLETED:-$FETCH_ONLY}"
 
 is_true() {
   [[ "$1" == "1" || "$1" == "true" ]]
@@ -182,6 +183,27 @@ store_keys() {
   node -e "const fs=require('fs'); const cfg=JSON.parse(fs.readFileSync('config/stores.json','utf8')); console.log((cfg.stores||[]).filter(s=>s.enabled!==false).map(s=>s.storeKey).join(' '));"
 }
 
+store_evidence_is_complete() {
+  local store="$1"
+  DATE="$DATE" STORE="$store" node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const date = process.env.DATE;
+const store = String(process.env.STORE || '').trim().toUpperCase();
+const files = [
+  path.join(process.cwd(), 'outputs', 'shein_links', store, `${date}.json`),
+  path.join(process.cwd(), 'outputs', 'shein_business_domains', store, `${date}.json`),
+];
+for (const file of files) {
+  let payload;
+  try { payload = JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch { process.exit(1); }
+  const payloadStore = String(payload?.store?.storeKey || '').trim().toUpperCase();
+  if (payload?.ok !== true || String(payload?.date || '') !== date || payloadStore !== store) process.exit(1);
+}
+NODE
+}
+
 DATE="$(resolve_date "$TARGET")"
 STAMP="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)"
 mkdir -p "$LOG_DIR"
@@ -243,6 +265,11 @@ else
   LEASE_ACTIVE=1
   close_store_browsers
   for STORE in $STORES; do
+    if is_true "$RESUME_COMPLETED" && store_evidence_is_complete "$STORE"; then
+      SUCCESS_STORES+=("$STORE")
+      echo "[cloud_link_business_sync] store=$STORE resume-skip exact-date link/business evidence already complete"
+      continue
+    fi
     STORE_OK=0
     MAX_ATTEMPTS="${SHEIN_LINK_BUSINESS_STORE_ATTEMPTS:-3}"
     for ATTEMPT in $(seq 1 "$MAX_ATTEMPTS"); do

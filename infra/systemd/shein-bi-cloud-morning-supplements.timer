@@ -2,7 +2,7 @@
 Description=Run morning supplements only after the all-store merge marker exists
 
 [Timer]
-OnCalendar=*-*-* 08:55:00
+OnCalendar=*-*-* 09:12:00
 AccuracySec=5s
 Persistent=false
 Unit=shein-bi-cloud-morning-supplements.service

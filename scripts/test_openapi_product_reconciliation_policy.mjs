@@ -88,7 +88,23 @@ const missingEvidence = assessProductReconciliationPolicy({
 });
 assert.equal(missingEvidence.status, 'warning');
 assert.equal(missingEvidence.counts.detailMissing, 1);
+assert.equal(missingEvidence.counts.detailMissingActionable, 1);
+assert.equal(missingEvidence.counts.detailPendingEnrichment, 0);
 assert.equal(missingEvidence.counts.stockMissing, 1);
+assert.equal(missingEvidence.policyVersion, 'openapi-current-webhook-previous/v2');
+
+const stockOnlyPendingDetail = assessProductReconciliationPolicy({
+  current: snapshot([{skc: 'NEW_PENDING', shelfStatusCode: '0', hasDetail: false, hasStock: true}]),
+  previous: null,
+  detailCheckActionable: false,
+  detailValidationMode: 'stock_only',
+});
+assert.equal(stockOnlyPendingDetail.status, 'matched',
+  'a new product awaiting the daily detail pass must not make a successful stock refresh look broken');
+assert.equal(stockOnlyPendingDetail.counts.detailMissing, 1);
+assert.equal(stockOnlyPendingDetail.counts.detailMissingActionable, 0);
+assert.equal(stockOnlyPendingDetail.counts.detailPendingEnrichment, 1);
+assert.match(stockOnlyPendingDetail.notes.join('\n'), /不作为故障报警/);
 
 const cachedCurrent = snapshot([{
   skc: 'CACHED',

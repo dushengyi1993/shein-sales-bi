@@ -11,12 +11,32 @@ import {
   assessDailyMarketingScanRecovery,
   assessDailyOpenapiSalesRecovery,
   assessDailyOpenapiProductRecovery,
+  assessSystemdOneshotResult,
   resolveMarketingScanEvidencePath,
 } from '../lib/cloud_watchdog_recovery.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const nowMs = Date.parse('2026-07-11T12:30:00+08:00');
 const stores = ['DL', 'DX', 'QY'];
+
+const expectedConditionSkip = assessSystemdOneshotResult({
+  ActiveState: 'inactive',
+  Result: 'exec-condition',
+  ExecMainStatus: '0',
+});
+assert.equal(expectedConditionSkip.expectedConditionSkip, true);
+assert.equal(expectedConditionSkip.resultOk, true);
+assert.equal(expectedConditionSkip.abnormalExit, false);
+assert.equal(expectedConditionSkip.abnormalState, false);
+
+const timedOutOneshot = assessSystemdOneshotResult({
+  ActiveState: 'failed',
+  Result: 'timeout',
+  ExecMainStatus: '124',
+});
+assert.equal(timedOutOneshot.resultOk, false);
+assert.equal(timedOutOneshot.abnormalExit, true);
+assert.equal(timedOutOneshot.abnormalState, true);
 
 const openapiSalesDaily = {
   date: '2026-07-24',

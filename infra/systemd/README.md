@@ -13,14 +13,14 @@
 Linux 生产健康只以 systemd、watchdog、Portal health 和云端数据审计为准；旧 Windows 计划任务只是历史回滚参考，不能再用作 Linux 页面或告警的健康依据。
 
 - 当天销售不再使用 `shein-bi-cloud-today.timer` 每小时抓取。半托订单 Webhook 收到后按单查询 OpenAPI 并增量更新正式销售事实，Portal 通过 PostgreSQL `NOTIFY` + 登录态 SSE 刷新当前页面；`shein-bi-cloud-today.service` 只保留为人工灾备入口，不安装/启用对应 timer。
-- `shein-bi-cloud-openapi-stock-refresh.timer`：每小时 `:12/:45` 轻量刷新19店商品列表与库存；拿不到共享机会窗口时允许跳过第二轮，不能挤占 `:32–:43` 全托首页车道。SHEIN Webhook 不提供完整的当前虚拟库存，因此店铺×货号矩阵不能依赖日更浏览器快照；本任务只有在19店库存全部成功、无缺失后才重建独立的轻量 `inventoryStock` section，并通过 PostgreSQL `NOTIFY` + SSE 更新已打开页面，不重复生成耗时较长的完整 `linksData`。矩阵仅接受45分钟内 OpenAPI 确认已上架的库存，过期或缺失时显示未知，不回退到旧库存。
+- `shein-bi-cloud-openapi-stock-refresh.timer`：每小时 `:12/:45` 轻量刷新19店商品列表与库存；`07:12` 同轮按每店32条的上限优先补齐新商品详情并轮转旧缓存，其余高频轮只复用详情缓存。等待每日轮转的新详情不作为故障，真实请求失败、超过21天的详情缓存或库存缺失仍必须告警。拿不到共享机会窗口时允许跳过第二轮，不能挤占 `:32–:43` 全托首页车道。SHEIN Webhook 不提供完整的当前虚拟库存，因此店铺×货号矩阵不能依赖日更浏览器快照；本任务只有在19店库存全部成功、无缺失后才重建独立的轻量 `inventoryStock` section，并通过 PostgreSQL `NOTIFY` + SSE 更新已打开页面，不重复生成耗时较长的完整 `linksData`。矩阵仅接受45分钟内 OpenAPI 确认已上架的库存，过期或缺失时显示未知，不回退到旧库存。
 - `shein-bi-cloud-session-manager.timer`：每天 `00:45` 顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，并写入夜间依赖 marker。
 - `shein-bi-cloud-manual-login-recovery.timer`：每小时 `:47` 在安全窗口消费私有恢复队列，定向补跑该店之前失败的链接/业务域数据；`.path` 必须保持禁用，避免任意分钟拉起 Chrome。service 使用独立 cgroup 和内存护栏，不把 Chrome 补采挂在 Portal cgroup 下。
 - `shein-bi-cloud-yesterday.timer`：每天 `02:45`，仅在登录态和数据库备份 marker 完整后，用官方 OpenAPI 收齐前一天19店完整日切片并复核前两天稳定日；逐店 fetch/load/每日行完整性门禁全部通过后，才调用数据库函数原子晋升最终日切片。任一失败、缺店或缺少每日行都禁止晋升；`Persistent=false`。
 - `shein-bi-db-backup.timer`：每天 `01:45`，仅在登录态 marker 完整后备份业务库、Metabase 元数据库和生产人工特殊折扣登记到 `/srv/shein-bi/backups/auto`。本地保留 7 天；过期备份必须先归档到 `/lhcos-data/shein-bi-db-backups` 并通过源文件 SHA256、压缩包完整性和 COS 回读 SHA256 校验，之后才删除本地副本。COS 不可用或校验失败时保留本地文件。
 - `shein-bi-cloud-et-forwarder.timer`：每天 `01:12/04:12/07:20/10:20/13:20/17:20/20:20/23:20` 抓取 ET 货代仓/出库单、入仓，并轻量刷新订单/物流/售后相关 section；不开启开机补跑。需要服务器本地 `config/et_forwarder.local.json` 或 `ET_FORWARDER_USERNAME/ET_FORWARDER_PASSWORD`，密钥不进 GitHub。
 - `shein-bi-cloud-et-storage-fee.timer`：每天 `14:20` 只读抓取 ET 仓储费最终账单与 SKU 明细，执行 canonical 去重、利润 cache 发布、四层对账与受队列控制的 `profit/homeProfit` 刷新；`Persistent=false`，失败必须告警，不能静默跳过。
-- `shein-bi-cloud-morning-chain.timer`：每天 `08:00` 先抓14店，必须在 `08:27` 前释放共享重任务锁；`08:45` 抓剩余5店并合并，`08:55` 在 morning marker 完整后执行补充域。当天销售走独立轻量快车道，不等待晨间链路。自动飞书日报继续关闭（`SHEIN_BI_MORNING_SEND_LARK_REPORT=0`）。
+- `shein-bi-cloud-morning-chain.timer`：每天 `08:00` 先抓12店，必须在 `08:27` 前释放共享重任务锁；`08:45` 抓剩余7店并合并，`09:12` 在 morning marker 完整后执行补充域。逐店当天 link/business 文件验收通过后可断点复用，截止续跑不会重复抓已完成店铺。当天销售走独立轻量快车道，不等待晨间链路。自动飞书日报继续关闭（`SHEIN_BI_MORNING_SEND_LARK_REPORT=0`）。
 - `shein-bi-cloud-daily-refresh.service`：统一执行前一完整日链接/业务域、SBN 营销概览、RTV 退货轨迹复核、入仓、体检与 BI 刷新；不再重复调用 MBRs 全店营销价格栈扫描，实时普通活动/券/限时折扣只由独立 guard 读取。全店日指标仍全 0 时跳过链接/业务域入仓刷新。该服务由晨间链路触发；启动前等待销售/ET 等写入任务并检查内存，忙碌或低内存时记录状态后跳过。OpenAPI runner 先单进程 schema ensure，再让 worker `--skip-ensure` 并行入仓；销售在切换日以后遵守“Webhook 当天增量 + 03:00 全店深度匹配后原子晋升”，退货/商品等其它数据域仍按各自对账与日更边界收口。
 - `cloud_daily_lark_report.sh` / `shein-bi-cloud-daily-lark-report.service`：日报服务保留为手动诊断入口；正式自动发送当前停用，晨间链路默认 `SHEIN_BI_MORNING_SEND_LARK_REPORT=0`。需要服务器本地 `config/lark_report.json`、`lark-cli` 和飞书授权，密钥/授权不进 GitHub。
 - `shein-bi-cloud-order-closure.timer`：每天 `06:52` 从云端订单底库找未终态订单，重查 SHEIN 当前状态并写入 `ops.order_status_recheck_state`，只更新订单生命周期状态，不重写历史销售事实；成功后把 `orders` 放入受锁队列，不直接扇出重建。

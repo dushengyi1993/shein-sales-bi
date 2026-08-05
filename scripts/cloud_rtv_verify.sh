@@ -51,13 +51,6 @@ if [[ "${SHEIN_RTV_REFRESH_PORTAL:-1}" != "1" && "${SHEIN_RTV_REFRESH_PORTAL:-1}
   exit 0
 fi
 
-node scripts/generate_bi_portal.mjs --metabase-url "$METABASE_URL"
-node scripts/generate_bi_portal_shell.mjs
-
-if command -v systemctl >/dev/null 2>&1; then
-  systemctl is-active --quiet shein-bi-portal.service || systemctl start shein-bi-portal.service || true
-fi
-
 if [[ "$SHEIN_BI_PORTAL_DATA_MODE" == "api" && "${SHEIN_BI_PORTAL_PREWARM_DISABLED:-0}" != "1" ]]; then
   bash scripts/enqueue_bi_portal_sections.sh \
     --sections rtvData,afterSales,homeProfit,profit \

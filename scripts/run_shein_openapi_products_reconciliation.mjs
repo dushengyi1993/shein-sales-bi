@@ -173,7 +173,14 @@ function webhookEventConfirmsOffShelf(event) {
  * the API. A transition from OpenAPI on-shelf to a non-on-shelf state is only
  * actionable when the matching product-shelves webhook is absent.
  */
-export function assessProductReconciliationPolicy({current, previous = null, webhookEvents = [], browserDiagnostic = null} = {}) {
+export function assessProductReconciliationPolicy({
+  current,
+  previous = null,
+  webhookEvents = [],
+  browserDiagnostic = null,
+  detailCheckActionable = true,
+  detailValidationMode = 'full',
+} = {}) {
   const warnings = [];
   const notes = [];
   const currentRows = current?.bySkc instanceof Map ? current.bySkc : new Map();
@@ -212,7 +219,11 @@ export function assessProductReconciliationPolicy({current, previous = null, web
   }
 
   if (!currentRows.size) warnings.push('OpenAPI 当前快照为空，无法确认商品详情、库存和可售状态。');
-  if (detailMissing.length) warnings.push(`OpenAPI 商品详情缺失 ${detailMissing.length} 条：${detailMissing.slice(0, 5).join('、')}${detailMissing.length > 5 ? '…' : ''}`);
+  if (detailMissing.length && detailCheckActionable) {
+    warnings.push(`OpenAPI 商品详情缺失 ${detailMissing.length} 条：${detailMissing.slice(0, 5).join('、')}${detailMissing.length > 5 ? '…' : ''}`);
+  } else if (detailMissing.length) {
+    notes.push(`本轮为${detailValidationMode === 'stock_only' ? '高频库存快照' : '有界详情轮转'}，${detailMissing.length} 条新商品详情等待每日补齐；商品列表和库存已成功，不作为故障报警。`);
+  }
   if (staleCachedDetail.length) warnings.push(`OpenAPI 商品详情缓存超过 21 天 ${staleCachedDetail.length} 条：${staleCachedDetail.slice(0, 5).join('、')}${staleCachedDetail.length > 5 ? '…' : ''}`);
   if (stockMissing.length) warnings.push(`OpenAPI 库存缺失 ${stockMissing.length} 条：${stockMissing.slice(0, 5).join('、')}${stockMissing.length > 5 ? '…' : ''}`);
   if (statusRollbackWithoutWebhook.length) warnings.push(`商品状态从已上架回退且未收到对应 Webhook ${statusRollbackWithoutWebhook.length} 条：${statusRollbackWithoutWebhook.slice(0, 5).join('、')}${statusRollbackWithoutWebhook.length > 5 ? '…' : ''}`);
@@ -231,13 +242,16 @@ export function assessProductReconciliationPolicy({current, previous = null, web
   }
 
   return {
-    policyVersion: 'openapi-current-webhook-previous/v1',
+    policyVersion: 'openapi-current-webhook-previous/v2',
+    detailValidationMode,
     status: warnings.length ? 'warning' : 'matched',
     warnings,
     notes,
     counts: {
       apiCurrentRows: currentRows.size,
       detailMissing: detailMissing.length,
+      detailMissingActionable: detailCheckActionable ? detailMissing.length : 0,
+      detailPendingEnrichment: detailCheckActionable ? 0 : detailMissing.length,
       cachedDetail: cachedDetail.length,
       staleCachedDetail: staleCachedDetail.length,
       stockMissing: stockMissing.length,
@@ -412,6 +426,19 @@ async function runOneStore(storeKey, args) {
     previous: priorSnapshot,
     webhookEvents,
     browserDiagnostic: row,
+    detailCheckActionable: !args.skipDetails
+      && (
+        Number(fetchStep.parsed?.summary?.detailDeferredSpuCount || 0) === 0
+        || (
+          Number(fetchStep.parsed?.summary?.detailFailedSpuCount || 0) > 0
+          && Number(fetchStep.parsed?.summary?.detailMissingAfterFallbackCount || 0) > 0
+        )
+      ),
+    detailValidationMode: args.skipDetails
+      ? 'stock_only'
+      : Number(fetchStep.parsed?.summary?.detailDeferredSpuCount || 0) > 0
+        ? 'bounded'
+        : 'full',
   });
   if (webhookEvidenceError && reconciliation.counts.statusRollbackWithoutWebhook > 0) {
     reconciliation.warnings.push(`商品状态回退无法读取 Webhook 证据：${webhookEvidenceError}`);
@@ -552,11 +579,26 @@ export async function main(argv = process.argv.slice(2)) {
     if (r.status === 'matched') acc.matched += 1;
     if (r.status === 'warning') acc.warning += 1;
     acc.detailMissing += Number(r.semanticReconciliation?.counts?.detailMissing || 0);
+    acc.detailMissingActionable += Number(r.semanticReconciliation?.counts?.detailMissingActionable || 0);
+    acc.detailPendingEnrichment += Number(r.semanticReconciliation?.counts?.detailPendingEnrichment || 0);
     acc.stockMissing += Number(r.semanticReconciliation?.counts?.stockMissing || 0);
     acc.statusRollbackWithoutWebhook += Number(r.semanticReconciliation?.counts?.statusRollbackWithoutWebhook || 0);
     if (r.status === 'missing_browser') acc.missingBrowser += 1;
     return acc;
-  }, {total: 0, succeeded: 0, failed: 0, matched: 0, warning: 0, detailMissing: 0, stockMissing: 0, statusRollbackWithoutWebhook: 0, missingBrowser: 0, skipped: skipped.length});
+  }, {
+    total: 0,
+    succeeded: 0,
+    failed: 0,
+    matched: 0,
+    warning: 0,
+    detailMissing: 0,
+    detailMissingActionable: 0,
+    detailPendingEnrichment: 0,
+    stockMissing: 0,
+    statusRollbackWithoutWebhook: 0,
+    missingBrowser: 0,
+    skipped: skipped.length,
+  });
 
   const output = {
     schemaVersion: 'shein-openapi-product-reconciliation-run/v2',
@@ -566,6 +608,7 @@ export async function main(argv = process.argv.slice(2)) {
     endedAt: new Date().toISOString(),
     concurrency: args.concurrency,
     maxDetails: args.maxDetails,
+    detailValidationMode: args.skipDetails ? 'stock_only' : args.maxDetails > 0 ? 'bounded' : 'full',
     requestedStores: requested,
     authorizedStores: authorized,
     reportScope: {

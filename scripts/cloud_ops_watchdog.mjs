@@ -11,9 +11,13 @@ import {
   assessDailyMarketingScanRecovery,
   assessDailyOpenapiSalesRecovery,
   assessDailyOpenapiProductRecovery,
+  assessSystemdOneshotResult,
   resolveMarketingScanEvidencePath,
 } from '../lib/cloud_watchdog_recovery.mjs';
-import {collapseWatchdogRootCauseIssues} from '../lib/cloud_watchdog_issue_collapse.mjs';
+import {
+  collapseWatchdogRootCauseIssues,
+  prepareWatchdogNotificationIssues,
+} from '../lib/cloud_watchdog_issue_collapse.mjs';
 import {assessSessionManagerManualRecovery} from '../lib/cloud_manual_login_recovery.mjs';
 import {inspectReleaseSourceState} from './check_release_source_state.mjs';
 
@@ -197,7 +201,9 @@ function assessOpenapiProductReport(report, expectedStoreKeys, nowMs = Date.now(
     if (!row) continue;
     const semantic = row.semanticReconciliation;
     if (row.ok !== true) messages.push(`${storeKey} 店商品对账未完成：${row.status || 'unknown'}。`);
-    else if (!semantic || semantic.policyVersion !== 'openapi-current-webhook-previous/v1') messages.push(`${storeKey} 店商品对账仍是旧口径或缺少语义结果；请重跑。`);
+    else if (!semantic || !['openapi-current-webhook-previous/v1', 'openapi-current-webhook-previous/v2'].includes(semantic.policyVersion)) {
+      messages.push(`${storeKey} 店商品对账仍是旧口径或缺少语义结果；请重跑。`);
+    }
     else if (semantic.status === 'warning') messages.push(`${storeKey} 店商品对账需处理：${(semantic.warnings || []).join('；') || '存在可行动差异'}`);
   }
   return {healthy: messages.length === 0, reason: messages.length ? 'actionable_reconciliation_warning' : 'ok', messages};
@@ -490,12 +496,16 @@ async function main() {
     const status = await systemctlShow(unit);
     units.push(status);
     if (status.LoadState === 'not-found') continue;
-    const exitStatus = String(status.ExecMainStatus || '');
-    const resultOk = !status.Result || status.Result === 'success';
-    const abnormalExit = status.ActiveState !== 'active' && !resultOk && exitStatus && exitStatus !== '0';
-    const abnormalState = status.ActiveState === 'failed' || !resultOk;
+    const {
+      exitStatus,
+      expectedConditionSkip,
+      resultOk,
+      abnormalExit,
+      abnormalState,
+    } = assessSystemdOneshotResult(status);
     const acknowledgedExit = abnormalExit && !abnormalState && serviceExitAcks.has(serviceExitAckKey(status));
     status.serviceExitAcknowledged = acknowledgedExit;
+    status.expectedConditionSkip = expectedConditionSkip;
     const isSessionManager = unit === 'shein-bi-cloud-session-manager.service';
     if (isSessionManager) {
       sessionManagerManualRecovery = assessSessionManagerManualRecovery({
@@ -758,6 +768,7 @@ async function main() {
     issues.splice(0, issues.length, ...issueCollapse.issues);
     maintenanceNotes.push(`已合并同一登录根因产生的 ${issueCollapse.removedCount} 条重复技术告警。`);
   }
+  const notificationSelection = prepareWatchdogNotificationIssues({issues, limit: 12});
 
   const report = {
     ok: issues.length === 0,
@@ -773,6 +784,7 @@ async function main() {
     sessionManagerManualRecovery,
     productReconciliationHealth,
     issueCollapse,
+    notificationSelection,
     marketingGuardState,
     marketingGuardLastOkState,
     marketingGuardService,
@@ -798,7 +810,7 @@ async function main() {
   let notified = false;
   let notifyResult = null;
   if (!args.dryRun && issues.length && (args.force || issueKey !== previous)) {
-    const text = issues.slice(0, 12).join('\n');
+    const text = notificationSelection.issues.join('\n');
     notifyResult = await notify(args, text, logFile);
     notified = notifyResult.ok;
     if (notifyResult.ok) await fs.writeFile(stateFile, issueKey, 'utf8');

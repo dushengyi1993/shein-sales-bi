@@ -8,10 +8,45 @@ RUN_DATE="$(TZ="$TZ_NAME" date +%F)"
 STATE_FILE="${SHEIN_OPENAPI_STOCK_REFRESH_STATE_FILE:-$ROOT/state/openapi-probes/stock-refresh.latest.json}"
 REPORT_FILE="${SHEIN_OPENAPI_PRODUCT_RECONCILE_LATEST_FILE:-$ROOT/state/openapi-probes/product-reconciliation.latest.json}"
 STARTED_AT="$(date -Is)"
+DETAIL_MODE="${SHEIN_OPENAPI_STOCK_REFRESH_DETAILS_MODE:-auto}"
+DETAIL_BUDGET="${SHEIN_OPENAPI_STOCK_REFRESH_DETAIL_BUDGET:-32}"
+DETAIL_REFRESH_CLOCK="${SHEIN_OPENAPI_STOCK_REFRESH_DETAIL_CLOCK:-07:12}"
+CURRENT_CLOCK="$(TZ="$TZ_NAME" date +%H:%M)"
 
 cd "$ROOT"
 
-SHEIN_OPENAPI_PRODUCT_RECONCILE_SKIP_DETAILS=1 \
+case "$DETAIL_MODE" in
+  full)
+    SKIP_DETAILS=0
+    ;;
+  skip)
+    SKIP_DETAILS=1
+    ;;
+  auto)
+    if [[ "$CURRENT_CLOCK" == "$DETAIL_REFRESH_CLOCK" ]]; then
+      SKIP_DETAILS=0
+    else
+      SKIP_DETAILS=1
+    fi
+    ;;
+  *)
+    echo "Invalid SHEIN_OPENAPI_STOCK_REFRESH_DETAILS_MODE=$DETAIL_MODE; expected auto, full or skip" >&2
+    exit 64
+    ;;
+esac
+[[ "$DETAIL_BUDGET" =~ ^[1-9][0-9]*$ ]] || {
+  echo "Invalid SHEIN_OPENAPI_STOCK_REFRESH_DETAIL_BUDGET=$DETAIL_BUDGET" >&2
+  exit 64
+}
+if [[ "$SKIP_DETAILS" == "0" ]]; then
+  REFRESH_MODE="openapi-list-stock-bounded-detail"
+else
+  REFRESH_MODE="openapi-list-stock-cached-detail"
+fi
+echo "[cloud_openapi_stock_refresh] detailMode=$DETAIL_MODE currentClock=$CURRENT_CLOCK detailClock=$DETAIL_REFRESH_CLOCK skipDetails=$SKIP_DETAILS detailBudget=$DETAIL_BUDGET"
+
+SHEIN_OPENAPI_PRODUCT_RECONCILE_SKIP_DETAILS="$SKIP_DETAILS" \
+SHEIN_OPENAPI_PRODUCT_RECONCILE_MAX_DETAILS="$DETAIL_BUDGET" \
 SHEIN_OPENAPI_PRODUCT_RECONCILE_SKIP_STOCK=0 \
 SHEIN_OPENAPI_PRODUCT_RECONCILE_CONCURRENCY="${SHEIN_OPENAPI_STOCK_REFRESH_CONCURRENCY:-4}" \
 SHEIN_OPENAPI_PRODUCT_KEEP_SNAPSHOTS=1 \
@@ -49,12 +84,13 @@ jq -n \
   --arg generatedAt "$OCCURRED_AT" \
   --arg reportFile "$REPORT_FILE" \
   --arg stockFile "$STOCK_FILE" \
+  --arg mode "$REFRESH_MODE" \
   '{
     ok: true,
     startedAt: $startedAt,
     generatedAt: $generatedAt,
     stores: 19,
-    mode: "openapi-list-stock-cached-detail",
+    mode: $mode,
     reportFile: $reportFile,
     stockFile: $stockFile
   }' > "$TMP_FILE"

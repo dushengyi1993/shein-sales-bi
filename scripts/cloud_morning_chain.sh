@@ -10,8 +10,8 @@ RUN_DATE="$(TZ="$TZ_NAME" date +%F)"
 DATA_DATE="$(TZ="$TZ_NAME" date -d yesterday +%F)"
 STAMP="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)"
 LOG_FILE="$LOG_DIR/morning-${STAGE}-${DATA_DATE}-${STAMP}.log"
-CHUNK_1_STORES="${SHEIN_BI_MORNING_CHUNK_1_STORES:-DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ,CX,YJ,XL,QY}"
-CHUNK_2_STORES="${SHEIN_BI_MORNING_CHUNK_2_STORES:-QH,TZ,JSH,TZZ,XC}"
+CHUNK_1_STORES="${SHEIN_BI_MORNING_CHUNK_1_STORES:-DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ,CX,YJ}"
+CHUNK_2_STORES="${SHEIN_BI_MORNING_CHUNK_2_STORES:-XL,QY,QH,TZ,JSH,TZZ,XC}"
 DRY_RUN="${SHEIN_BI_MORNING_CHAIN_DRY_RUN:-0}"
 
 now_iso() {
@@ -113,8 +113,8 @@ echo "[cloud_morning_chain] start stage=$STAGE runDate=$RUN_DATE businessDate=$D
 
 if [[ "$DRY_RUN" == "1" || "$DRY_RUN" == "true" ]]; then
   case "$STAGE" in
-    chunk-1) echo "[cloud_morning_chain] dry-run: fetch first 14 stores only" ;;
-    chunk-2) echo "[cloud_morning_chain] dry-run: require chunk-1, fetch remaining 5, merge all 19 and refresh linksData" ;;
+    chunk-1) echo "[cloud_morning_chain] dry-run: fetch first 12 stores only" ;;
+    chunk-2) echo "[cloud_morning_chain] dry-run: require chunk-1, fetch remaining 7, merge all 19 and refresh linksData" ;;
     supplements) echo "[cloud_morning_chain] dry-run: require merged links, run non-browser daily supplements without RTV" ;;
     *) exit 64 ;;
   esac
@@ -124,22 +124,22 @@ fi
 
 case "$STAGE" in
   chunk-1)
-    write_state "running" "first 14 stores are refreshing"
+    write_state "running" "first 12 stores are refreshing"
     RESULT_FILE="$STATE_DIR/${RUN_DATE}-chunk-1.json"
     run_fetch_chunk "$CHUNK_1_STORES" "$RESULT_FILE"
-    write_marker "morning-chunk-1" "done" "first 14 stores fetched" "$RESULT_FILE" "$LOG_FILE" >/dev/null
-    write_state "ok" "first 14 stores completed"
+    write_marker "morning-chunk-1" "done" "first 12 stores fetched" "$RESULT_FILE" "$LOG_FILE" >/dev/null
+    write_state "ok" "first 12 stores completed"
     ;;
   chunk-2)
     if ! require_marker "morning-chunk-1"; then
-      write_state "deferred" "first 14-store marker is not ready"
+      write_state "deferred" "first 12-store marker is not ready"
       write_marker "morning-chunk-2" "deferred" "missing morning-chunk-1 marker" "$LOG_FILE" >/dev/null
       exit 75
     fi
-    write_state "running" "remaining 5 stores are refreshing"
+    write_state "running" "remaining 7 stores are refreshing"
     RESULT_FILE="$STATE_DIR/${RUN_DATE}-chunk-2.json"
     run_fetch_chunk "$CHUNK_2_STORES" "$RESULT_FILE"
-    write_marker "morning-chunk-2" "done" "remaining 5 stores fetched" "$RESULT_FILE" "$LOG_FILE" >/dev/null
+    write_marker "morning-chunk-2" "done" "remaining 7 stores fetched" "$RESULT_FILE" "$LOG_FILE" >/dev/null
 
     write_state "running" "all 19 stores are merging"
     SHEIN_LINK_BUSINESS_FINALIZE_ONLY=1 \

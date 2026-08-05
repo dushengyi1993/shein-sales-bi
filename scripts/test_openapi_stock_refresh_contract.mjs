@@ -43,8 +43,18 @@ assert.match(reconcile, /openapi-product-reconciliation\.lock/,
 assert.match(reconcile, /flock -w 900 9/,
   'OpenAPI inventory refresh must wait boundedly rather than overlap another reconciliation');
 
-assert.match(refresh, /SHEIN_OPENAPI_PRODUCT_RECONCILE_SKIP_DETAILS=1/,
-  'the frequent inventory refresh must reuse cached details');
+assert.match(refresh, /DETAIL_MODE="\$\{SHEIN_OPENAPI_STOCK_REFRESH_DETAILS_MODE:-auto\}"/,
+  'the frequent inventory refresh must default to an explicit automatic detail policy');
+assert.match(refresh, /DETAIL_REFRESH_CLOCK="\$\{SHEIN_OPENAPI_STOCK_REFRESH_DETAIL_CLOCK:-07:12\}"/,
+  'one daily stock pass must also advance product detail coverage');
+assert.match(refresh, /DETAIL_BUDGET="\$\{SHEIN_OPENAPI_STOCK_REFRESH_DETAIL_BUDGET:-32\}"/,
+  'the daily detail pass must remain bounded per store');
+assert.match(refresh, /if \[\[ "\$CURRENT_CLOCK" == "\$DETAIL_REFRESH_CLOCK" \]\]; then[\s\S]*SKIP_DETAILS=0[\s\S]*else[\s\S]*SKIP_DETAILS=1/,
+  'only the configured daily pass may fetch bounded details; other frequent passes reuse cache');
+assert.match(refresh, /SHEIN_OPENAPI_PRODUCT_RECONCILE_SKIP_DETAILS="\$SKIP_DETAILS"/,
+  'the selected detail mode must reach the reconciliation runner');
+assert.match(refresh, /SHEIN_OPENAPI_PRODUCT_RECONCILE_MAX_DETAILS="\$DETAIL_BUDGET"/,
+  'the daily detail rotation must enforce its per-store request budget');
 assert.match(refresh, /SHEIN_OPENAPI_PRODUCT_RECONCILE_SKIP_STOCK=0/,
   'the frequent inventory refresh must fetch stock');
 assert.match(refresh, /\.counts\.total == 19[\s\S]*\.counts\.succeeded == 19[\s\S]*\.counts\.stockMissing == 0/,

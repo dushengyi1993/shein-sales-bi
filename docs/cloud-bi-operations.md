@@ -73,7 +73,7 @@
 | --- | --- | --- |
 
 | 半托订单 Webhook + OpenAPI 按单同步 | 实时事件触发 | 更新当天正式销售事实并通过 SSE 通知在线 BI；旧 `shein-bi-cloud-today.timer` 已停用并删除 |
-| `shein-bi-cloud-openapi-stock-refresh.timer` | 每小时 `:12/:45` | 轻量刷新19店当前商品库存；09:12 主轮同时发布库存守卫依赖 marker |
+| `shein-bi-cloud-openapi-stock-refresh.timer` | 每小时 `:12/:45` | 轻量刷新19店当前商品库存；`07:12` 主轮另按每店32条有界轮转补齐商品详情，其余轮复用缓存；每轮成功后发布库存守卫依赖 marker |
 | `shein-bi-cloud-today-sales-reconcile.timer` | 每 15 分钟 | 在 Webhook 之外用19店 OpenAPI 纠偏当天销售，只刷新 `liveSalesToday`；属于轻量快车道 |
 | `shein-bi-cloud-yesterday.timer` | 北京时间 `02:45` | 依赖 session/backup marker，刷新前一天最终销售并复核稳定日 |
 
@@ -83,7 +83,7 @@
 
 | `shein-bi-cloud-et-storage-fee.timer` | 北京时间 `14:20` | 只读同步 ET 仓储费最终账单与 SKU 明细，14:27 前完成利润 cache 与对账 |
 
-| 晨间三阶段 | `08:00 / 08:45 / 08:55` | 前14店 fetch-only；后5店并19店合并；最后运行 OpenAPI/成本/利润补充。每阶段用 marker 衔接 |
+| 晨间三阶段 | `08:00 / 08:45 / 09:12` | 前12店 fetch-only；后7店并19店合并；最后运行 OpenAPI/成本/利润补充。每阶段用 marker 衔接，超时重跑只补当天尚未完成的店铺 |
 
 | `shein-bi-cloud-session-manager.timer` | 北京时间 `00:45` | 云端登录态管家：顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，检查 profile 体积并写 session marker |
 
@@ -174,7 +174,7 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 
 - 飞书日报云端入口：`scripts/cloud_daily_lark_report.sh today` 仅保留为手动临时发送；正式自动发送当前关闭，`scripts/cloud_morning_chain.sh` 默认跳过日报后直接启动慢变日更。
 
-- 晨间生产入口拆成 `cloud_morning_chain.sh chunk-1 / chunk-2 / supplements`：08:00 前14店仅抓取，08:45 后5店完成后才合并19店证据并同步发布 `linksData`，08:55 再运行 OpenAPI/成本/利润补充。RTV 已移到 04:50 独立受锁窗口，不再拉长晨间链路。`scripts/cloud_daily_refresh.sh yesterday` 仍保留为受控手动全量恢复入口；旧 `scripts/cloud_openapi_hl_reconciliation.sh` 仅用于显式诊断。
+- 晨间生产入口拆成 `cloud_morning_chain.sh chunk-1 / chunk-2 / supplements`：08:00 前12店仅抓取，08:45 后7店完成后才合并19店证据并同步发布 `linksData`，09:12 再运行 OpenAPI/成本/利润补充。每个 fetch chunk 都复用当天已验证完成的逐店证据，截止后续跑不会从第一店重来。RTV 已移到 04:50 独立受锁窗口，核验成功后只把相关 section 放入队列，不再因重复生成整站 Portal 把任务误报为失败。商品详情由 07:12 库存主轮每日有界补齐；其它高频库存轮只复用详情缓存，待轮转的新商品不作为故障报警。`scripts/cloud_daily_refresh.sh yesterday` 仍保留为受控手动全量恢复入口；旧 `scripts/cloud_openapi_hl_reconciliation.sh` 仅用于显式诊断。
 
 - 云端异常通知入口：`scripts/cloud_ops_watchdog.mjs`。`config/lark_report.json` 配置 `recipientChatId` 后，watchdog、同步异常、营销提醒和 Webhook P0 都统一发送到团队运营群，不再向负责人个人私聊；个人 `recipientUserId` 只保留为显式移除群目标后的灾备。对于内容精确等于 `marketing price scan failed` 的单一日更 warning，watchdog 只有在后续 guard 状态引用一份比 warning 更新、24 小时内、`ok=true` / `partial=false`、与当前 enabled store 集合完全一致且行数自洽的扫描时，才在 `recoveries` 中记录恢复并停止重复告警。原 `daily-refresh-last.json` 和历史日志必须保留；混合 warning、过期/未来时间、路径越界、缺店、重复店、失败店或残缺 payload 一律不能自动变绿。
 

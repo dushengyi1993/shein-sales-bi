@@ -99,8 +99,8 @@ BI 系统当前分为三层入口：
 当前自动任务状态：
 
 - 生产调度以 `infra/systemd/*.timer` 和 [cloud-bi-operations.md](cloud-bi-operations.md) 为事实源；半托当天销售由 Webhook 事件触发，不再存在每小时 `today` timer。
-- 半托与全托共用主机的当前排班、共享 host 锁、晨间 14+5 marker DAG 和 Portal 单队列见 [shared-host-resource-schedule.md](shared-host-resource-schedule.md)。
-- 晨间链路拆为 `08:00` 前14店、`08:45` 后5店合并、`08:55` 非浏览器补充；普通页面不能再并发生成重 section。
+- 半托与全托共用主机的当前排班、共享 host 锁、晨间 12+7 marker DAG 和 Portal 单队列见 [shared-host-resource-schedule.md](shared-host-resource-schedule.md)。
+- 晨间链路拆为 `08:00` 前12店、`08:45` 后7店合并、`09:12` 非浏览器补充；逐店证据可断点续跑，普通页面不能再并发生成重 section。
 - 云端 `shein-bi-cloud-yesterday.timer`：每天 `02:45`，在 session/backup marker 通过后收齐前一天19店 OpenAPI 完整日切片并复核稳定日。
 - 云端 `shein-bi-db-backup.timer`：每天 `01:45`，在全托 `01:55` 备份前完成并释放共享重任务车道。
 - 云端 `shein-bi-cloud-session-manager.timer`、`shein-bi-cloud-et-forwarder.timer`、`shein-bi-cloud-browser-cleanup.timer` 和 `shein-bi-cloud-watchdog.timer` 分别承担登录态巡检、ET 出库/货代、非业务窗口残留浏览器清理和异常通知。飞书问数服务保持暂停；旧 `today/daily-lark-report/link-business/rtv-verify/openapi-hl` 分散 timer 不再是生产调度。

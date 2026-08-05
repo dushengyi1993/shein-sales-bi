@@ -91,19 +91,29 @@ assert.deepEqual(calendars(unit('shein-bi-cloud-yesterday.timer')), ['*-*-* 02:4
 assert.deepEqual(calendars(unit('shein-bi-cloud-rtv-verify.timer')), ['*-*-* 04:50:00']);
 assert.deepEqual(calendars(unit('shein-bi-cloud-morning-chain.timer')), ['*-*-* 08:00:00']);
 assert.deepEqual(calendars(unit('shein-bi-cloud-morning-link-chunk-2.timer')), ['*-*-* 08:45:00']);
-assert.deepEqual(calendars(unit('shein-bi-cloud-morning-supplements.timer')), ['*-*-* 08:55:00']);
+assert.deepEqual(calendars(unit('shein-bi-cloud-morning-supplements.timer')), ['*-*-* 09:12:00']);
 assert.deepEqual(calendars(unit('shein-bi-cloud-openapi-stock-refresh.timer')), ['*-*-* *:12,45:00']);
 assert.deepEqual(calendars(unit('shein-bi-cloud-today-sales-reconcile.timer')), ['*-*-* *:00,15,30,45:00']);
-assert.deepEqual(calendars(unit('shein-bi-daily-inventory-replenishment-guard.timer')), ['*-*-* 09:15:00']);
+assert.deepEqual(calendars(unit('shein-bi-daily-inventory-replenishment-guard.timer')), ['*-*-* 11:18:00']);
 
 const morning = read('scripts/cloud_morning_chain.sh');
-assert.match(morning, /DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ,CX,YJ,XL,QY/);
-assert.match(morning, /QH,TZ,JSH,TZZ,XC/);
+assert.match(morning, /SHEIN_BI_MORNING_CHUNK_1_STORES:-DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ,CX,YJ/);
+assert.match(morning, /SHEIN_BI_MORNING_CHUNK_2_STORES:-XL,QY,QH,TZ,JSH,TZZ,XC/);
 assert.match(morning, /SHEIN_LINK_BUSINESS_FETCH_ONLY=1/);
 assert.match(morning, /SHEIN_LINK_BUSINESS_FINALIZE_ONLY=1/);
 assert.match(morning, /morning-links-ready/);
 assert.match(morning, /SHEIN_BI_DAILY_LINK_BUSINESS_MODE=skip/);
 assert.match(morning, /SHEIN_BI_DAILY_RTV_VERIFY=0/);
+assert.match(read('scripts/cloud_link_business_sync.sh'), /SHEIN_LINK_BUSINESS_RESUME_COMPLETED/,
+  'a deadline retry must reuse exact-date completed store evidence instead of starting all stores over');
+assert.match(unit('shein-bi-cloud-morning-supplements.service'), /^Environment=SHEIN_BI_DAILY_OPENAPI_PRODUCT_RECONCILIATION=0$/m,
+  'the daily bounded 07:12 stock/detail pass owns product enrichment');
+
+const rtvVerify = read('scripts/cloud_rtv_verify.sh');
+assert.doesNotMatch(rtvVerify, /node scripts\/generate_bi_portal\.mjs/,
+  'a successful long RTV verification must not fail later on a duplicate full portal build');
+assert.match(rtvVerify, /enqueue_bi_portal_sections\.sh/,
+  'RTV post-processing must use the host-locked section queue');
 
 const inventory = read('scripts/cloud_daily_inventory_replenishment_guard.sh');
 assert.match(inventory, /--stage morning-links-ready/);

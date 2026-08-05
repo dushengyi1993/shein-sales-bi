@@ -25,5 +25,5 @@ Nice=12
 CPUWeight=40
 MemoryHigh=1000M
 MemoryMax=1600M
-ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain inventory-guard --class openapi --lock-wait-sec 120 --deadline-at 09:27 --defer-state /srv/shein-bi/runtime/host-scheduler/inventory-guard.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/run_pipeline_stage.sh --stage inventory-guard --require morning-links-ready --require stock-refresh --message "daily inventory guard completed" -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_daily_inventory_replenishment_guard.sh
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain inventory-guard --class openapi --lock-wait-sec 120 --deadline-at 11:27 --defer-state /srv/shein-bi/runtime/host-scheduler/inventory-guard.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/run_pipeline_stage.sh --stage inventory-guard --require morning-links-ready --require stock-refresh --message "daily inventory guard completed" -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_daily_inventory_replenishment_guard.sh
 SuccessExitStatus=75
