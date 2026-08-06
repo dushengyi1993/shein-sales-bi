@@ -61,6 +61,7 @@ const forwarderService = fs.readFileSync(new URL('../infra/systemd/shein-bi-clou
 const guardService = fs.readFileSync(new URL('../infra/systemd/shein-bi-et-low-inventory-guard.service', import.meta.url), 'utf8');
 const recheckTimer = fs.readFileSync(new URL('../infra/systemd/shein-bi-et-low-inventory-recheck.timer', import.meta.url), 'utf8');
 assert.match(executor, /skipped_safety_no_increase/);
+assert.match(executor, /skipped_safety_no_longer_inventory_relevant/);
 assert.match(executor, /Decrease-only safety plan contains a non-decrease action/);
 assert.match(forwarder, /orders,waybills,afterSales,inventoryTrend/);
 assert.match(forwarderService, /^OnSuccess=shein-bi-et-low-inventory-guard\.service$/m);
