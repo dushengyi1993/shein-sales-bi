@@ -278,6 +278,46 @@ function normalizeImageEditPayloadsFromJsonAssets(task, matches, warnings){
   return embedded.filter(payload=>{ const key=sha256Stable(payload); if(seen.has(key)) return false; seen.add(key); return true; });
 }
 
+function resolveApprovedImageBindingIdentity(task, store, missingRefs, warnings){
+  const binding=task?.publishAssetBinding;
+  const payload=task?.imageEditPayload||task?.partialEditPayload||task?.targets?.imageEditPayload;
+  if(!binding || binding.kind!=='update_images' || binding.sourceApproved!==true) return {matches:[],unresolved:missingRefs};
+  if(normalizeStoreKey(binding.targetStore)!==normalizeStoreKey(store)) return {matches:[],unresolved:missingRefs};
+  if(!/^[a-f0-9]{64}$/i.test(String(binding.bindingFingerprint||''))) return {matches:[],unresolved:missingRefs};
+  if(!payload || typeof payload!=='object') return {matches:[],unresolved:missingRefs};
+  const spu=safeString(payload.spu_name||payload.spuName,120);
+  if(!/^[a-z]\d{10,}$/i.test(spu) || normalizeSheinSkc(spu)) return {matches:[],unresolved:missingRefs};
+  const rows=asArray(payload.skc_list||payload.skcList);
+  const matches=[];
+  const resolvedRefs=new Set();
+  for(const row of rows){
+    const skc=normalizeSheinSkc(row?.skc_name||row?.skcName);
+    if(!skc) continue;
+    const skuCodes=unique(asArray(row?.sku_list||row?.skuList)
+      .map(sku=>safeString(sku?.sku_code||sku?.skuCode,80))
+      .filter(Boolean));
+    matches.push({
+      storeKey:store,
+      ref:skc,
+      skc,
+      spu:spu.toLowerCase(),
+      standardGoodsSn:safeString(task?.targets?.standardGoodsSn||'',160),
+      skuCodes,
+      onShelf:false,
+      sheinUsableInventory:0,
+      productRowFound:true,
+      resolvedFrom:'task_approved_image_identity',
+    });
+    for(const ref of missingRefs){
+      if(sameSheinSkc(ref,skc) || compactRef(ref)===compactRef(spu)) resolvedRefs.add(String(ref));
+    }
+  }
+  if(matches.length){
+    warnings.push(`换图目标使用同一任务已审核绑定的明确 SPU/SKC 身份；未回退旧链接快照，真实提交仍需 payload hash 与确认门禁。`);
+  }
+  return {matches,unresolved:missingRefs.filter(ref=>!resolvedRefs.has(String(ref)))};
+}
+
 function collectLiveSkcRows(payload){
   const out=[];
   const seen=new Set();
@@ -757,9 +797,12 @@ async function main(){
   const jsonAssets=await loadJsonAssetPayloads(task);
   const taskWithJsonAssets={...task,_jsonAssets:jsonAssets};
   const snapshotResolved=resolveTargets({task, store, linkRows:linkLoad.rows||[], productRows:productLoad.rows||[]});
-  const liveResolved=await resolveMissingExactSkcsFromOpenApi(client,store,snapshotResolved.missing,calls,warnings);
+  const boundResolved=intents.includes('update_images')
+    ? resolveApprovedImageBindingIdentity(task,store,snapshotResolved.missing,warnings)
+    : {matches:[],unresolved:snapshotResolved.missing};
+  const liveResolved=await resolveMissingExactSkcsFromOpenApi(client,store,boundResolved.unresolved,calls,warnings);
   const mergedMatches=[]; const mergedKeys=new Set();
-  for(const match of [...snapshotResolved.matches,...liveResolved.matches]){ const key=`${match.storeKey}|${normalizeSheinSkc(match.skc)||compactRef(match.skc)}|${compactRef(match.spu)}`; if(mergedKeys.has(key)) continue; mergedKeys.add(key); mergedMatches.push(match); }
+  for(const match of [...snapshotResolved.matches,...boundResolved.matches,...liveResolved.matches]){ const key=`${match.storeKey}|${normalizeSheinSkc(match.skc)||compactRef(match.skc)}|${compactRef(match.spu)}`; if(mergedKeys.has(key)) continue; mergedKeys.add(key); mergedMatches.push(match); }
   const resolved={refs:snapshotResolved.refs,matches:mergedMatches,missing:liveResolved.unresolved};
   if(resolved.missing.length) blockers.push(`未定位到目标货号/SKC：${resolved.missing.join('、')}`);
   if(!resolved.matches.length) blockers.push('没有可执行目标链接。');

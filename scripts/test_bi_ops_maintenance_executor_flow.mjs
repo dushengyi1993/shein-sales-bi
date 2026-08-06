@@ -311,7 +311,14 @@ try {
     id: 'live-sb-image-smoke',
     status: 'waiting_review',
     command: '给刚发布的 SB 链接换图',
-    targets: {stores: ['SMK'], productRefs: ['SB260806202334303501938']},
+    targets: {stores: ['SMK'], productRefs: ['B2608062023343035', 'SB260806202334303501938']},
+    publishAssetBinding: {
+      schemaVersion: 2,
+      kind: 'update_images',
+      sourceApproved: true,
+      targetStore: 'SMK',
+      bindingFingerprint: 'a'.repeat(64),
+    },
     partialEditPayload: {
       spu_name: 'B2608062023343035',
       is_spu_pic: true,
@@ -319,7 +326,7 @@ try {
       skc_list: [{
         skc_name: 'SB260806202334303501938',
         image_info: {image_info_list: [{image_sort: 1, image_type: 1, image_url: 'http://imgdeal-test01.shein.com/images3_pi/live-sb-main.jpg'}]},
-        sku_list: [{image_info: {image_info_list: [{image_sort: 1, image_type: 1, image_url: 'http://imgdeal-test01.shein.com/images3_pi/live-sb-sku.jpg'}]}}],
+        sku_list: [{sku_code: 'sku-live-sb-001', image_info: {image_info_list: [{image_sort: 1, image_type: 1, image_url: 'http://imgdeal-test01.shein.com/images3_pi/live-sb-sku.jpg'}]}}],
       }],
     },
     intents: ['update_images'],
@@ -329,13 +336,24 @@ try {
   const liveSbDry = await runNode([...commonArgs, '--task-id', liveSbTask.id, '--task-json', liveSbTaskFile, '--dry-run']);
   const liveSbPlan = liveSbDry.json?.payload?.submitPlan?.payloads?.[0];
   check('uppercase SB exact target dry-run exits 0', liveSbDry.code, 0);
-  check('uppercase SB exact target resolves from live OpenAPI', liveSbDry.json?.ok, true);
-  check('uppercase SB exact target records live resolution', liveSbDry.json?.adapterEvidence?.matchedLinks?.[0]?.resolvedFrom, 'openapi_exact_skc');
+  check('approved SB target resolves while live search is not ready', liveSbDry.json?.ok, true);
+  check('approved SB target records same-task binding resolution', liveSbDry.json?.adapterEvidence?.matchedLinks?.[0]?.resolvedFrom, 'task_approved_image_identity');
   check('uppercase SB image payload uses canonical live skc', liveSbPlan?.body?.skc_list?.[0]?.skc_name, 'sb260806202334303501938');
   check('uppercase SB image payload fills immediate live sku', liveSbPlan?.body?.skc_list?.[0]?.sku_list?.[0]?.sku_code, 'sku-live-sb-001');
   check('uppercase SB image payload injects live group code', liveSbPlan?.body?.skc_list?.[0]?.image_info?.image_group_code, 'G-LIVE-SKC');
-  check('uppercase SB resolution called searchProduct', calls.some(c => c.path === '/open-api/goods/searchProduct'), true);
-  check('uppercase SB exact lookup respects searchProduct pageSize limit', calls.find(c => c.path === '/open-api/goods/searchProduct')?.body?.pageSize, 10);
+  check('approved SB binding does not depend on searchProduct indexing', calls.some(c => c.path === '/open-api/goods/searchProduct'), false);
+
+  const liveSbSearchTask = {
+    ...liveSbTask,
+    id: 'live-sb-search-smoke',
+    targets: {stores: ['SMK'], productRefs: ['SB260806202334303501938']},
+    publishAssetBinding: undefined,
+  };
+  const liveSbSearchTaskFile = await writeJson('task-live-sb-search.json', {version: 1, tasks: [liveSbSearchTask]});
+  calls.length = 0;
+  const liveSbSearchDry = await runNode([...commonArgs, '--task-id', liveSbSearchTask.id, '--task-json', liveSbSearchTaskFile, '--dry-run']);
+  check('unbound SB target still resolves from live OpenAPI', liveSbSearchDry.json?.adapterEvidence?.matchedLinks?.[0]?.resolvedFrom, 'openapi_exact_skc');
+  check('unbound SB exact lookup respects searchProduct pageSize limit', calls.find(c => c.path === '/open-api/goods/searchProduct')?.body?.pageSize, 10);
 
   const badImageTask = {
     id: 'bad-image-smoke',
