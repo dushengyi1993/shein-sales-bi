@@ -7,6 +7,7 @@ import {
   buildMarketingDailyGroupSummary,
   countOutstandingGuardRepairs,
 } from './send_marketing_daily_group_report.mjs';
+import {resolveEffectiveCloudBiSsh} from './build_marketing_daily_guard_report.mjs';
 
 const guardMarkdown = `# report
 ## 先看结论
@@ -21,6 +22,12 @@ const guardMarkdown = `# report
 - 订单商品行成交价：低于目标 0 条；高于目标 0 条。
 - 未来 3 天普通活动提醒：0 个。
 `;
+assert.equal(resolveEffectiveCloudBiSsh({
+  root: '/opt/shein-bi/app', cloudBiRoot: '/opt/shein-bi/app', cloudBiSsh: 'shein-bi-tencent',
+}), 'local', 'a cloud process must never SSH its own repository alias');
+assert.equal(resolveEffectiveCloudBiSsh({
+  root: '/workspace/local', cloudBiRoot: '/opt/shein-bi/app', cloudBiSsh: 'shein-bi-tencent',
+}), 'shein-bi-tencent', 'a workstation may still use the configured cloud SSH alias');
 const executionMarkdown = `# execution
 ## 结论
 - 计划可处理 9 个链接；本次实际新建/重建 7 个。
@@ -74,7 +81,7 @@ const finalMarkdown = buildMarketingDailyFinalMarkdown({
   guardMarkdown,
   executionMarkdown,
 });
-assert.match(finalMarkdown, /营销巡检最终报告/);
+assert.match(finalMarkdown, /营销巡检报告/);
 assert.match(finalMarkdown, /唯一最终附件/);
 assert.match(finalMarkdown, /自动执行结果/);
 assert.doesNotMatch(finalMarkdown, /不能自动执行/);
@@ -138,6 +145,37 @@ assert.equal(assessMarketingDailyDeliveryReadiness({
   guardReport: {createdAt: '2026-07-31T04:05:00.000Z'},
 }).ready, true, 'a terminal zero-row queue is deliverable only with a zero-action guard');
 
+const localHandoffQueue = {
+  status: 'deferred_to_local',
+  createdAt: '2026-07-31T04:00:00.000Z',
+  updatedAt: '2026-07-31T04:01:00.000Z',
+  counts: {totalRows: 9},
+};
+assert.equal(assessMarketingDailyDeliveryReadiness({
+  queue: localHandoffQueue,
+  guardReport: {createdAt: '2026-07-31T04:00:00.000Z'},
+}).ready, true, 'a non-empty exact queue handed to local execution is reportable as an inspection result');
+const localSummary = buildMarketingDailyGroupSummary({
+  date: '2026-07-31',
+  queue: localHandoffQueue,
+  guardMarkdown,
+  guardReport: {
+    mandatoryLimitedDiscountStatus: {live: {storeCount: 19, okStoreCount: 19, limitedRows: 604}},
+    manualSpecialLimitedDiscount: {},
+    limitedDiscountTargetPriceDrift: {},
+    orderPriceAudit: {},
+    highClickSpecialEffect: {},
+  },
+  executionMarkdown,
+  executionReport,
+});
+assert.match(localSummary, /巡检已完成，9 条已形成精确队列/);
+assert.doesNotMatch(localSummary, /授权修复已完成|可安全执行的动作均已处理/);
+const localMarkdown = buildMarketingDailyFinalMarkdown({
+  date: '2026-07-31', summary: localSummary, queue: localHandoffQueue, guardMarkdown,
+});
+assert.match(localMarkdown, /不能视为写后终态/);
+
 const senderSource = await fs.readFile(
   new URL('./send_marketing_daily_group_report.mjs', import.meta.url),
   'utf8',
@@ -156,5 +194,6 @@ assert.match(
   /if \[\[ "\$QUEUE_STATUS" == "blocked" \]\]; then[\s\S]*?run_terminal_final_snapshot[\s\S]*?send_daily_group_report/,
   'terminal blockers must refresh final evidence before delivery',
 );
+assert.match(workerSource, /DEFER TO LOCAL before browser lease or SHEIN mutation/);
 
 console.log('marketing daily group report: final gate and one attachment policy are enforced');

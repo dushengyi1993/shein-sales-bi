@@ -221,7 +221,30 @@ async function updateStage(args) {
   console.log(JSON.stringify({ok: true, queue: rel(queuePath), stage: stageName, status, queueStatus: queue.status}, null, 2));
 }
 
+async function handoffLocal(args) {
+  const queuePath = path.resolve(ROOT, args.queue || '');
+  if (!args.queue) throw new Error('Missing --queue');
+  const queue = await readJson(queuePath);
+  if (['completed', 'blocked'].includes(String(queue.status || ''))) {
+    console.log(JSON.stringify({ok: true, queue: rel(queuePath), status: queue.status, unchanged: true}, null, 2));
+    return;
+  }
+  if (Object.values(queue.stages || {}).some(stage => String(stage?.status || '') === 'failed')) {
+    throw new Error('Cannot hand off a queue with failed stages; rebuild the exact queue first');
+  }
+  queue.status = 'deferred_to_local';
+  queue.handoff = {
+    location: 'local',
+    reason: String(args.reason || 'cloud marketing writes are disabled'),
+    handedOffAt: new Date().toISOString(),
+  };
+  queue.updatedAt = new Date().toISOString();
+  await writeJsonAtomic(queuePath, queue);
+  console.log(JSON.stringify({ok: true, queue: rel(queuePath), status: queue.status, counts: queue.counts}, null, 2));
+}
+
 const args = parseArgs(process.argv.slice(2));
 if (args.command === 'build') await buildQueue(args);
 else if (args.command === 'update-stage') await updateStage(args);
+else if (args.command === 'handoff-local') await handoffLocal(args);
 else throw new Error(`Unknown command: ${args.command}`);

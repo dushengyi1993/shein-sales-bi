@@ -21,7 +21,10 @@ GUARD_CLOUD_BI_ROOT="${SHEIN_BI_MARKETING_LIVE_CLOUD_BI_ROOT:-$ROOT}"
 MIN_AVAILABLE_MEM_MIB="${SHEIN_BI_MARKETING_LIVE_MIN_AVAILABLE_MEM_MIB:-2200}"
 BUILD_REPAIR_QUEUE="${SHEIN_BI_MARKETING_LIVE_BUILD_REPAIR_QUEUE:-${SHEIN_BI_MARKETING_LIVE_AUTO_REPAIR:-0}}"
 RESERVED_WINDOW_MINUTES="${SHEIN_BI_MARKETING_LIVE_RESERVED_WINDOW_MINUTES:-6}"
-IGNORE_RESERVED_WINDOW="${SHEIN_BI_MARKETING_LIVE_IGNORE_RESERVED_WINDOW:-0}"
+# The managed live guard is session-HTTP/OpenAPI only. Resource tokens and the
+# host pressure gate already isolate it; the old minute table caused the 11:00
+# run to reject itself and is opt-in only for legacy/manual browser scans.
+IGNORE_RESERVED_WINDOW="${SHEIN_BI_MARKETING_LIVE_IGNORE_RESERVED_WINDOW:-1}"
 FORCE_RERUN="${SHEIN_BI_MARKETING_LIVE_FORCE_RERUN:-0}"
 # P3-#9: load busy services from config file, fallback to env var or hardcoded default
 BUSY_SERVICES_CONFIG="$ROOT/config/cloud_marketing_busy_services.json"
@@ -88,6 +91,10 @@ run_guard_report() {
     --max-age-hours "$GUARD_MAX_AGE_HOURS" \
     --cloud-bi-ssh "$GUARD_CLOUD_BI_SSH" \
     --cloud-bi-root "$GUARD_CLOUD_BI_ROOT"
+}
+
+refresh_marketing_cost_map() {
+  python3 scripts/marketing/build_marketing_cost_map.py
 }
 
 run_on_shelf_limited_discount_plan() {
@@ -392,6 +399,15 @@ fi
 # or clean profiles owned by unrelated tasks.
 echo "[cloud_marketing_live_guard] browserless inspection via session HTTP"
 
+COST_MAP_STATUS=0
+echo "[cloud_marketing_live_guard] refresh current marketing cost evidence"
+if refresh_marketing_cost_map; then
+  echo "[cloud_marketing_live_guard] marketing cost evidence refreshed"
+else
+  COST_MAP_STATUS=$?
+  echo "[cloud_marketing_live_guard] WARN marketing cost evidence returned status=$COST_MAP_STATUS" >&2
+fi
+
 # Ordinary marketing is the highest-priority layer. Refresh its full-store live
 # evidence every day before evaluating limited-discount drift or fallback work.
 # Session HTTP reuses the session-manager evidence and does not open browsers;
@@ -480,7 +496,10 @@ if [[ "$BUILD_REPAIR_QUEUE" == "1" && "$STACK_REVIEW_STATUS" -eq 0 && "$ORDINARY
       REPAIR_TOTAL_GROUPS="$(queue_json_value 'Number(j.counts?.totalGroups || 0)' 0)"
       if [[ "$REPAIR_TOTAL_ROWS" =~ ^[0-9]+$ && "$REPAIR_TOTAL_ROWS" -gt 0 ]]; then
         REPAIR_DEFERRED=1
-        echo "[cloud_marketing_live_guard] repair workload queued rows=$REPAIR_TOTAL_ROWS groups=$REPAIR_TOTAL_GROUPS; inspection is read-only and all writes are deferred to the bounded repair worker"
+        node scripts/marketing/manage_marketing_repair_queue.mjs handoff-local \
+          --queue "$REPAIR_QUEUE_FILE" \
+          --reason "cloud marketing writes are disabled; preserve the exact queue for local controlled execution"
+        echo "[cloud_marketing_live_guard] repair workload queued rows=$REPAIR_TOTAL_ROWS groups=$REPAIR_TOTAL_GROUPS; cloud inspection is complete and all writes are handed to local controlled execution"
       fi
     else
       REPAIR_QUEUE_BUILD_STATUS=$?
@@ -497,16 +516,14 @@ else
   fi
 fi
 
-if [[ "$STACK_REVIEW_STATUS" -eq 0 && "$ORDINARY_LIVE_READY" -eq 1 && "$SCAN_STATUS" -eq 0 && "$GUARD_STATUS" -eq 0 && "$HIGH_CLICK_PLAN_STATUS" -eq 0 && "$ON_SHELF_PLAN_STATUS" -eq 0 && "$MANUAL_PLAN_STATUS" -eq 0 && "$DRIFT_PLAN_STATUS" -eq 0 && "$REPAIR_QUEUE_BUILD_STATUS" -eq 0 ]]; then
+if [[ "$COST_MAP_STATUS" -eq 0 && "$STACK_REVIEW_STATUS" -eq 0 && "$ORDINARY_LIVE_READY" -eq 1 && "$SCAN_STATUS" -eq 0 && "$GUARD_STATUS" -eq 0 && "$HIGH_CLICK_PLAN_STATUS" -eq 0 && "$ON_SHELF_PLAN_STATUS" -eq 0 && "$MANUAL_PLAN_STATUS" -eq 0 && "$DRIFT_PLAN_STATUS" -eq 0 && "$REPAIR_QUEUE_BUILD_STATUS" -eq 0 ]]; then
   write_state "ok" "marketing inspection completed; repairDeferred=$REPAIR_DEFERRED" 1
-  if [[ "$REPAIR_DEFERRED" -eq 0 ]]; then
-    node scripts/marketing/send_marketing_daily_group_report.mjs \
-      --date "$DATE" --queue "$REPAIR_QUEUE_FILE" --guard "$GUARD_OUT" \
-      || echo "[cloud_marketing_live_guard] WARN complete group report delivery failed" >&2
-  fi
+  node scripts/marketing/send_marketing_daily_group_report.mjs \
+    --date "$DATE" --queue "$REPAIR_QUEUE_FILE" --guard "$GUARD_OUT" \
+    || echo "[cloud_marketing_live_guard] WARN group report delivery failed" >&2
   echo "[cloud_marketing_live_guard] done ok date=$DATE log=$LOG_FILE"
 else
-  write_state "warning" "stackReview=$STACK_REVIEW_STATUS ordinaryLiveReady=$ORDINARY_LIVE_READY liveScan=$SCAN_STATUS guard=$GUARD_STATUS highClickPlan=$HIGH_CLICK_PLAN_STATUS onShelfPlan=$ON_SHELF_PLAN_STATUS manualPlan=$MANUAL_PLAN_STATUS driftPlan=$DRIFT_PLAN_STATUS repairQueue=$REPAIR_QUEUE_BUILD_STATUS" 0
-  echo "[cloud_marketing_live_guard] done warning stackReviewStatus=$STACK_REVIEW_STATUS ordinaryLiveReady=$ORDINARY_LIVE_READY scanStatus=$SCAN_STATUS guardStatus=$GUARD_STATUS highClickPlanStatus=$HIGH_CLICK_PLAN_STATUS onShelfPlanStatus=$ON_SHELF_PLAN_STATUS manualPlanStatus=$MANUAL_PLAN_STATUS driftPlanStatus=$DRIFT_PLAN_STATUS repairQueueStatus=$REPAIR_QUEUE_BUILD_STATUS log=$LOG_FILE" >&2
+  write_state "warning" "costMap=$COST_MAP_STATUS stackReview=$STACK_REVIEW_STATUS ordinaryLiveReady=$ORDINARY_LIVE_READY liveScan=$SCAN_STATUS guard=$GUARD_STATUS highClickPlan=$HIGH_CLICK_PLAN_STATUS onShelfPlan=$ON_SHELF_PLAN_STATUS manualPlan=$MANUAL_PLAN_STATUS driftPlan=$DRIFT_PLAN_STATUS repairQueue=$REPAIR_QUEUE_BUILD_STATUS" 0
+  echo "[cloud_marketing_live_guard] done warning costMapStatus=$COST_MAP_STATUS stackReviewStatus=$STACK_REVIEW_STATUS ordinaryLiveReady=$ORDINARY_LIVE_READY scanStatus=$SCAN_STATUS guardStatus=$GUARD_STATUS highClickPlanStatus=$HIGH_CLICK_PLAN_STATUS onShelfPlanStatus=$ON_SHELF_PLAN_STATUS manualPlanStatus=$MANUAL_PLAN_STATUS driftPlanStatus=$DRIFT_PLAN_STATUS repairQueueStatus=$REPAIR_QUEUE_BUILD_STATUS log=$LOG_FILE" >&2
   exit 1
 fi

@@ -197,7 +197,21 @@ function parseArgs(argv) {
   });
   args.targetPlan = args.planSelection.targetPlan;
   args.priceOverrides = args.planSelection.priceOverrides;
+  args.cloudBiSsh = resolveEffectiveCloudBiSsh({
+    root: ROOT,
+    cloudBiRoot: args.cloudBiRoot,
+    cloudBiSsh: args.cloudBiSsh,
+  });
   return args;
+}
+
+export function resolveEffectiveCloudBiSsh({root = ROOT, cloudBiRoot = '', cloudBiSsh = ''} = {}) {
+  const effectiveRoot = path.resolve(String(cloudBiRoot || DEFAULT_CLOUD_BI_ROOT));
+  // A production process whose requested cloud root is its own repository
+  // must read local authoritative files. SSHing the host alias from itself is
+  // both unnecessary and, on the server, usually impossible to resolve.
+  if (effectiveRoot === path.resolve(root)) return 'local';
+  return String(cloudBiSsh || '').trim();
 }
 
 function pad2(n) {

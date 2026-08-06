@@ -63,7 +63,7 @@ export function assessMarketingDailyDeliveryReadiness({queue = null, guardReport
   if (!queue) {
     return {ready: false, reason: 'repair queue is missing; inspection cannot be called final'};
   }
-  if (!['completed', 'blocked'].includes(queueStatus)) {
+  if (!['completed', 'blocked', 'deferred_to_local'].includes(queueStatus)) {
     return {ready: false, reason: `repair queue is not terminal: ${queueStatus}`};
   }
   const guardAt = latestTimestamp(guardReport?.updatedAt, guardReport?.createdAt);
@@ -78,6 +78,13 @@ export function assessMarketingDailyDeliveryReadiness({queue = null, guardReport
     };
   }
   if (totalRows === 0) return {ready: true, reason: 'terminal no-repair guard'};
+  if (queueStatus === 'deferred_to_local') {
+    return {
+      ready: true,
+      reason: 'inspection is complete and the exact non-empty repair queue is handed to local controlled execution',
+      outstanding,
+    };
+  }
 
   const queueAt = latestTimestamp(queue?.updatedAt, queue?.createdAt);
   const executionAt = latestTimestamp(
@@ -131,6 +138,7 @@ function extractSection(markdown, heading) {
 
 export function buildMarketingDailyGroupSummary({
   date,
+  queue = null,
   guardMarkdown = '',
   guardReport = null,
   executionMarkdown = '',
@@ -152,12 +160,16 @@ export function buildMarketingDailyGroupSummary({
   const ordinaryActivityCount = new Set((guardReport?.t3MarketingCandidates || [])
     .map(row => String(row?.activityId || ''))
     .filter(Boolean)).size;
+  const localHandoff = String(queue?.status || '') === 'deferred_to_local';
+  const queuedRows = Number(queue?.counts?.totalRows || 0);
   const sentenceParts = [
-    `${date} 营销巡检和授权修复已完成`,
+    localHandoff
+      ? `${date} 营销巡检已完成，${queuedRows} 条已形成精确队列，等待本地受控处理`
+      : `${date} 营销巡检和授权修复已完成`,
     Number(live.storeCount || 0) > 0
       ? `SHEIN后台最终回读 ${Number(live.okStoreCount || 0)}/${Number(live.storeCount || 0)} 店，当前限时折扣 ${Number(live.limitedRows || 0)} 行`
       : liveScan?.replace(/^巡检：/, ''),
-    executionConclusion.length ? '本轮授权范围内可安全执行的动作均已处理' : '',
+    !localHandoff && executionConclusion.length ? '本轮授权范围内可安全执行的动作均已处理' : '',
     `人工特殊折扣 ${Number(manual.activeCount || 0)}/${Number(manual.checked || 0)} 精确覆盖`,
     remainingDrift > 0 ? `仍有 ${remainingDrift} 条目标价漂移受平台或ET库存阻断` : '目标价漂移已处理完毕',
     Number(repair.blockedCount || blockers.length) > 0
@@ -197,9 +209,11 @@ export function buildMarketingDailyFinalMarkdown({
     `- ${name}: ${stage?.status || 'unknown'}；行数 ${Number(stage?.rows || 0)}；组数 ${Number(stage?.groups || 0)}`
   ));
   const markdown = [
-    `# ${date} 营销巡检最终报告`,
+    `# ${date} 营销巡检报告`,
     '',
-    '> 本文件为巡检、授权修复及写后 live 回读全部结束后的唯一最终附件。',
+    String(queue?.status || '') === 'deferred_to_local'
+      ? '> 本文件为今日只读巡检结论；精确写入队列已移交本地受控执行，不能视为写后终态。'
+      : '> 本文件为巡检、授权修复及写后 live 回读全部结束后的唯一最终附件。',
     '',
     '## 最终结论',
     '',
@@ -262,6 +276,7 @@ async function main() {
   }
   const summary = buildMarketingDailyGroupSummary({
     date: args.date,
+    queue,
     guardMarkdown,
     guardReport,
     executionMarkdown,

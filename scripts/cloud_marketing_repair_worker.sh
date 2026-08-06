@@ -307,6 +307,21 @@ if [[ "$QUEUE_STATUS" == "completed" || "$QUEUE_STATUS" == "blocked" ]]; then
   echo "[cloud_marketing_repair] queue already terminal status=$QUEUE_STATUS"
   exit 0
 fi
+if (( IS_CLOUD_EXECUTION == 1 )); then
+  node scripts/marketing/manage_marketing_repair_queue.mjs handoff-local \
+    --queue "$QUEUE_FILE" \
+    --reason "cloud marketing writes are disabled; preserve the exact queue for local controlled execution"
+  write_state deferred_to_local "cloud marketing writes are disabled; exact queue preserved for local controlled execution"
+  set +e
+  send_daily_group_report
+  REPORT_STATUS=$?
+  set -e
+  if [[ "$REPORT_STATUS" -ne 0 && "$REPORT_STATUS" -ne 3 ]]; then
+    echo "[cloud_marketing_repair] WARN local-handoff group report delivery failed status=$REPORT_STATUS" >&2
+  fi
+  echo "[cloud_marketing_repair] DEFER TO LOCAL before browser lease or SHEIN mutation"
+  exit 75
+fi
 ACTIVE_BUSY="$(active_busy_services)"
 if [[ -n "$ACTIVE_BUSY" ]]; then
   write_state deferred_to_local "cloud host is busy; keep the exact queue for local-browser continuation: $ACTIVE_BUSY"
