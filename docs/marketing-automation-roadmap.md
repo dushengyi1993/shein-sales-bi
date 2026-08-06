@@ -78,7 +78,7 @@
 
 自动任务模式的硬边界：
 
-- 云端 guard timer 负责完整 live scan、精确计划和建队列，不持有写授权。本地 Codex heartbeat 在 `11:10/13:10/16:10` 读取当天精确事实，以不弹前端的 headless Chrome 串行执行负责人长期授权内的限时折扣动作并完成受影响店回读；首轮主执行，后两轮只续跑。云端 repair 仅在 `20:45/21:15` 做本机未闭环的应急兜底，每段最多 1 店/1组。
+- 云端 guard timer 负责完整 live scan、精确计划和建队列，不持有写授权。本地 Codex heartbeat 在 `11:10/13:10/16:10` 读取当天精确事实，以不弹前端的 headless Chrome 按 3–4 店一批执行负责人长期授权内的限时折扣动作并完成受影响店回读；默认 4 店，资源不足降为 3 店，批内跨店并行但同店写链路严格串行，整批终态后关闭全部 Profile 再开下一批。首轮主执行，后两轮只续跑。云端 repair 仅在 `20:45/21:15` 做本机未闭环的应急兜底，每段最多 1 店/1组。
 - 复核频率按风险分层。云端 timer 每日做一次 19 店完整基线；动作后只复扫受影响店并与成功基线合并，最终由云端 browserless 全店复核。普通活动/价格栈浏览器补扫按候选店铺最小集合串行执行，跑完关闭；不得恢复无差别19店前端扫描。
 - repair worker 的最终闭环必须按固定顺序执行：19 店普通活动/优惠券 session HTTP stack review 刷新 → 19 店价格栈 final scan → guard 重建。价格栈放在最后，避免待生效活动在 stack review 期间跨过开始时间，又被旧价格快照重新判为缺口。大批修复可能超过 `30` 分钟的同轮证据时差；如果不刷新 stack review，guard 会把已被当日 live 证据取代的历史 coupon/overlap 中间文件重新判成 stale blocker。最终 stack review 是 browserless session HTTP 刷新，不得回退为逐店前端扫描。
 - 飞书交付是最终闭环产物，不是 worker 进度通知。发送器要求队列已终态，且最终 guard 时间不早于队列终态和执行结果；blocked 队列还必须在最终扫描后重建当前 repair plans，并由 `check_marketing_terminal_report_readiness.mjs` 证明每个计划键已执行或已取得本轮安全阻断证据。发现未处理键时重建队列并延后发送，不得把第一次 blocked 当成日报终点。每日只交付一段简短最终结论和一个合并后的 `marketing-daily-final-YYYY-MM-DD.md`，guard 与 execution 文件仅作为生成素材保留在云端。

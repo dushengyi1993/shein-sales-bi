@@ -33,7 +33,7 @@ Linux 生产健康只以 systemd、watchdog、Portal health 和云端数据审�
 - `shein-bi-cloud-browser-cleanup.timer`：每天仅在 `03:20/09:25/21:20` 三个非核心窗口回收过期或死亡 owner 租约，再清理无有效任务租约保护的 headless Chrome 和临时目录。它不强杀可见人工登录窗口，也不打断仍持有有效租约的抓取/营销任务。
 - `shein-bi-cloud-disk-maintenance.timer`：每天 `00:10` 执行低优先级磁盘维护，并必须在 `00:27` 前释放主机重任务锁。抓数原始产物本地保留 30 天，旧文件只有在 COS 归档、成员清单和 SHA256 校验完成后才删除；临时文件保留 7 天。由于 ET 与抓数产物存在经过审计的 root/sheinops 混合属主，该 service 以 root 读取和删除明确白名单路径，但不启动浏览器、不加载登录页，也不写业务数据。浏览器 profile 只有根盘达到 75% 且没有有效浏览器租约或 Chrome 进程时才清可再生缓存，永不删除 Cookie、Local Storage、IndexedDB 等登录/持久状态。journald 由 `90-shein-bi-journald-disk-cap.conf` 限制为最多 1GB，并至少给根盘保留 5GB。
 - `shein-bi-cloud-marketing-live-guard.service`：`11:00/13:00/16:00` 提供每日巡检及失败重试窗口；当天首次成功后后续窗口退出。该服务以 session HTTP 一次读取 19 店普通活动、15% 券 active 集合与当前/未来活动价，生成精确 manifest/hash 与 repair queue；共享锁忙时延期，不占用全托核心首页车道。
-- `shein-bi-cloud-marketing-repair.timer`：仅作本机离线后的晚间应急兜底，`20:45/21:15` 各启动一次。每次先用 19 店 browserless live readback 重建精确剩余队列，再最多执行 1 店/1组；分别在 `20:57/21:27` 前硬收口并释放共享浏览器车道。日常写入由本机 `11:10/13:10/16:10` headless 任务完成。
+- `shein-bi-cloud-marketing-repair.timer`：仅作本机离线后的晚间应急兜底，`20:45/21:15` 各启动一次。每次先用 19 店 browserless live readback 重建精确剩余队列，再最多执行 1 店/1组；分别在 `20:57/21:27` 前硬收口并释放共享浏览器车道。日常写入由本机 `11:10/13:10/16:10` headless 任务按 3–4 个独立 Profile 一批完成；这个本机并发规则不扩大云端 fallback 的单组上限。
 - Codex 自动巡检不另设固定晚间汇总。每日待议价、营销、淘汰链接巡检分别按现有 Codex 自动任务的实际时间执行，并在各自任务完成后把同一份人话结论和产出文件发到团队运营群，避免重复消息或提前汇总未完成结果。
 - guard 与 repair 都通过 `SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY=/srv/shein-bi/runtime/marketing_manual_limited_discount_overrides.json` 读取生产可变登记；不得再让 timer 改写仓库 `config/` 下的种子文件。
 - `shein-bi-cloud-watchdog.timer`：每小时只读巡检。它可以用后续完整 19 店扫描证据收口孤立的历史扫描 warning，但必须保留原日更状态并在报告写出 recovery；其它 warning 或不完整证据仍告警。
