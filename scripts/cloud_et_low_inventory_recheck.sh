@@ -5,7 +5,7 @@ ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
 RUNTIME_ROOT="${SHEIN_BI_ET_LOW_INVENTORY_RUNTIME_ROOT:-/srv/shein-bi/runtime/et-low-inventory-guard}"
 STATE="$RUNTIME_ROOT/state/latest.json"
 if [[ ! -s "$STATE" ]] || [[ "$(jq -r '.active == true' "$STATE")" != "true" ]]; then
-  echo "[et_low_inventory_recheck] no active ET 1-10 watchlist; skip browser refresh"
+  echo "[et_low_inventory_recheck] no active ET 1-20 watchlist; skip browser refresh"
   exit 0
 fi
 

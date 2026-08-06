@@ -7,18 +7,18 @@ import {assertDailyInventoryExecutionAuthorization} from '../lib/inventory_reple
 const sourcePlan = {
   schemaVersion: 'daily-inventory-replenishment-plan/v1',
   date: '2026-08-06',
-  policyVersion: '2026-08-06.1',
+  policyVersion: '2026-08-06.2',
   payloadHash: 'a'.repeat(64),
   sourceEvidence: [{store: 'ET', fetchedAt: '2026-08-06T05:20:00.000Z', ageHours: 0.1}],
   blockers: [],
   actionable: [
-    {storeKey: 'A', skc: 'down', matchKey: 'LOW1', ruleClass: 'low_et_top_exposure_allocation', platformUsableInventory: 10, targetUsableInventory: 2, inventoryAction: 'decrease', replenishmentQuantity: 0},
-    {storeKey: 'B', skc: 'up', matchKey: 'LOW1', ruleClass: 'low_et_top_exposure_allocation', platformUsableInventory: 0, targetUsableInventory: 2, inventoryAction: 'increase', replenishmentQuantity: 2},
+    {storeKey: 'A', skc: 'down', matchKey: 'LOW1', ruleClass: 'low_et_top_exposure_allocation', platformUsableInventory: 10, targetUsableInventory: 4, inventoryAction: 'decrease', replenishmentQuantity: 0},
+    {storeKey: 'B', skc: 'up', matchKey: 'LOW1', ruleClass: 'low_et_top_exposure_allocation', platformUsableInventory: 0, targetUsableInventory: 4, inventoryAction: 'increase', replenishmentQuantity: 4},
     {storeKey: 'C', skc: 'ordinary', matchKey: 'HIGH1', ruleClass: 'legacy_virtual_inventory_top_up', platformUsableInventory: 0, targetUsableInventory: 100, inventoryAction: 'increase', replenishmentQuantity: 100},
   ],
   lowEtAllocations: [
-    {storeKey: 'A', skc: 'down', matchKey: 'LOW1', etSellableInventory: 4, platformUsableInventory: 10, targetUsableInventory: 2},
-    {storeKey: 'B', skc: 'up', matchKey: 'LOW1', etSellableInventory: 4, platformUsableInventory: 0, targetUsableInventory: 2},
+    {storeKey: 'A', skc: 'down', matchKey: 'LOW1', etSellableInventory: 17, platformUsableInventory: 10, targetUsableInventory: 4},
+    {storeKey: 'B', skc: 'up', matchKey: 'LOW1', etSellableInventory: 17, platformUsableInventory: 0, targetUsableInventory: 4},
   ],
   counts: {enabledStores: 2, scannedLinks: 3, inventoryRelevantLinks: 3, lowEtBlockedCanonicalCount: 0},
 };
@@ -26,6 +26,7 @@ const sourcePlan = {
 const plan = buildEtLowInventorySafetyPlan(sourcePlan, {batchId: 'et-daily-2026-08-06-test'});
 assert.equal(plan.schemaVersion, 'et-low-inventory-safety-plan/v1');
 assert.equal(plan.executionConstraints.decreaseOnly, true);
+assert.equal(plan.executionConstraints.maximumEtSellableInventory, 17);
 assert.equal(plan.actionable.length, 1);
 assert.equal(plan.actionable[0].skc, 'down');
 assert.equal(plan.counts.inventoryIncreases, 0);
@@ -38,7 +39,7 @@ const auth = assertDailyInventoryExecutionAuthorization({
   policy,
   mode: 'automatic',
   context: 'cloud_et_low_inventory_guard',
-  authorizationId: 'owner-automatic-et-low-inventory-20260806-v1',
+  authorizationId: 'owner-automatic-et-low-inventory-20260806-v2',
   payloadHash: plan.payloadHash,
   confirmHash: plan.payloadHash,
 });
