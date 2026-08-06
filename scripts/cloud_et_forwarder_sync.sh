@@ -259,7 +259,7 @@ if [[ "${SHEIN_ET_REFRESH_PORTAL:-1}" == "1" ]]; then
             echo "[cloud_et_forwarder_sync] lightweight section refresh disabled by SHEIN_BI_PORTAL_PREWARM_DISABLED=1"
           else
             echo "[cloud_et_forwarder_sync] lightweight section refresh sections=$PORTAL_REFRESH_SECTIONS"
-            SHEIN_BI_PORTAL_PREWARM_SECTIONS=orders,waybills,afterSales \
+            SHEIN_BI_PORTAL_PREWARM_SECTIONS="${SHEIN_ET_SYNC_PREWARM_SECTIONS:-orders,waybills,afterSales,inventoryTrend}" \
             SHEIN_BI_PORTAL_PREWARM_ASYNC=0 \
             SHEIN_BI_PORTAL_PREWARM_HOST_LOCKED=1 \
               bash scripts/prewarm_bi_portal_sections.sh

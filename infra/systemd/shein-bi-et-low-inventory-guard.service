@@ -1,0 +1,24 @@
+[Unit]
+Description=SHEIN BI ET low-inventory decrease-only safety guard
+Wants=network-online.target
+After=network-online.target shein-bi-cloud-et-forwarder.service
+
+[Service]
+Type=oneshot
+Slice=shein-host-heavy-bi.slice
+User=sheinops
+Group=sheinops
+WorkingDirectory=/opt/shein-bi/app
+Environment=HOME=/home/sheinops
+Environment=TZ=Asia/Shanghai
+Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_BI_ET_LOW_INVENTORY_RUNTIME_ROOT=/srv/shein-bi/runtime/et-low-inventory-guard
+Environment=SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT=cloud_et_low_inventory_guard
+Environment=SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION=owner-automatic-et-low-inventory-20260806-v1
+TimeoutStartSec=900
+Nice=8
+CPUWeight=50
+MemoryHigh=800M
+MemoryMax=1200M
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain et-low-inventory-guard --class openapi --lock-wait-sec 120 --deadline-minute 27 --defer-state /srv/shein-bi/runtime/host-scheduler/et-low-inventory-guard.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_et_low_inventory_guard.sh
+SuccessExitStatus=75
