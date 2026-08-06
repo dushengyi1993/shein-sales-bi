@@ -77,6 +77,7 @@ import {BI_OPS_CLI_VERSION} from '../lib/partner_knowledge_cache.mjs';
 import {createPartnerCliReleaseStore} from '../lib/partner_cli_release_store.mjs';
 import {
   applyApprovedImageBindingsToPublishPayload,
+  applyApprovedImageBindingsToMaintenancePayload,
   applyExplicitPublishPreparationOverrides,
   normalizePublishPreparationOverrides,
 } from '../lib/link_ops_publish_asset_binding.mjs';
@@ -4759,6 +4760,90 @@ function linkOpsPublishResultSummaryFromExecutors(execs = []) {
   return summary;
 }
 
+function taskPublishIdentityEvidence(task) {
+  const executors = [
+    ...asArray(task?.execution?.openApiProductExecutors),
+    task?.execution?.hlOpenApiExecutor,
+    task?.openApiProductExecutor,
+  ].filter(Boolean);
+  const summary = linkOpsPublishResultSummaryFromExecutors(executors);
+  const fingerprints = [
+    task?.readbackFingerprint,
+    task?.execution?.readbackFingerprint,
+    ...executors.map(row => row?.readbackFingerprint),
+  ].filter(value => value && typeof value === 'object');
+  for (const fingerprint of fingerprints) {
+    summary.spuNames.push(...asArray(fingerprint.publishSpuNames || fingerprint.spuNames));
+    summary.skcNames.push(...asArray(fingerprint.publishSkcNames || fingerprint.skcNames || fingerprint.matchedSkcs));
+    summary.skuCodes.push(...asArray(fingerprint.publishSkuCodes || fingerprint.skuCodes || fingerprint.matchedSkuCodes));
+  }
+  const unique = values => [...new Set(values.map(value => String(value || '').trim()).filter(Boolean))];
+  summary.spuNames = unique(summary.spuNames);
+  summary.skcNames = unique(summary.skcNames);
+  summary.skuCodes = unique(summary.skuCodes);
+  return summary;
+}
+
+function resolveApprovedMaintenanceImageIdentity(task, body, taskRows = [], {actor = null, targetStore = ''} = {}) {
+  const sourceTaskId = String(
+    body?.sourceTaskId
+      || body?.sourcePublishTaskId
+      || task?.sourceTaskId
+      || task?.targets?.sourceTaskId
+      || task?.targets?.sourcePublishTaskId
+      || '',
+  ).trim();
+  const sourceTask = sourceTaskId
+    ? asArray(taskRows).find(row => String(row?.id || '').trim() === sourceTaskId)
+    : null;
+  if (sourceTaskId && !sourceTask) throw new Error(`Referenced publish task not found: ${sourceTaskId}`);
+  if (sourceTask) {
+    const sourceAccess = authorizeLinkOpsRecord(actor, sourceTask, {kind: 'task', mode: 'read', claimLegacy: false});
+    if (!sourceAccess.ok) {
+      const error = new Error(sourceAccess.denied?.error || 'No permission to read referenced publish task');
+      error.status = 403;
+      error.response = sourceAccess.denied;
+      throw error;
+    }
+    const sourceStores = [...new Set([...taskTargetStores(sourceTask), ...taskWriteStores(sourceTask)])];
+    if (targetStore && !sourceStores.includes(targetStore)) {
+      throw new Error(`Referenced publish task ${sourceTaskId} does not target store ${targetStore}`);
+    }
+  }
+  const sourceIdentity = sourceTask ? taskPublishIdentityEvidence(sourceTask) : {spuNames: [], skcNames: [], skuCodes: []};
+  const explicit = body?.productIdentity && typeof body.productIdentity === 'object' ? body.productIdentity : {};
+  const explicitSpu = String(explicit.spuName || explicit.spu_name || explicit.spu || body?.spuName || body?.spu || '').trim();
+  const explicitSkc = String(explicit.skcName || explicit.skc_name || explicit.skc || body?.skcName || body?.skc || '').trim();
+  const explicitSkuCodes = asArray(explicit.skuCodes || explicit.sku_codes || explicit.skuCodeList || body?.skuCodes || body?.skuCodeList)
+    .map(value => String(value || '').trim())
+    .filter(Boolean);
+  const refs = asArray(task?.targets?.productRefs || task?.productRefs)
+    .map(value => String(value || '').trim())
+    .filter(Boolean);
+  const refSpus = refs.filter(value => /^[a-z]\d{10,}$/i.test(value) && !/^s(?:v|b)\d+$/i.test(value));
+  const refSkcs = refs.filter(value => /^s(?:v|b)\d+$/i.test(value));
+  const candidateSpus = explicitSpu ? [explicitSpu] : (sourceIdentity.spuNames.length ? sourceIdentity.spuNames : refSpus);
+  const candidateSkcs = explicitSkc ? [explicitSkc] : (sourceIdentity.skcNames.length ? sourceIdentity.skcNames : refSkcs);
+  if (explicitSpu && sourceIdentity.spuNames.length && !sourceIdentity.spuNames.some(value => value.toLowerCase() === explicitSpu.toLowerCase())) {
+    throw new Error(`Explicit SPU ${explicitSpu} does not match referenced publish task ${sourceTaskId}`);
+  }
+  if (explicitSkc && sourceIdentity.skcNames.length && !sourceIdentity.skcNames.some(value => value.toLowerCase() === explicitSkc.toLowerCase())) {
+    throw new Error(`Explicit SKC ${explicitSkc} does not match referenced publish task ${sourceTaskId}`);
+  }
+  const uniqueInsensitive = values => [...new Map(values.map(value => [value.toLowerCase(), value])).values()];
+  const spuNames = uniqueInsensitive(candidateSpus);
+  const skcNames = uniqueInsensitive(candidateSkcs);
+  if (spuNames.length !== 1) throw new Error(`Approved update_images binding requires exactly one SPU; received ${spuNames.length}`);
+  if (skcNames.length !== 1) throw new Error(`Approved update_images binding requires exactly one sv/sb SKC; received ${skcNames.length}`);
+  return {
+    spuName: spuNames[0],
+    skcName: skcNames[0],
+    skuCodes: explicitSkuCodes.length ? explicitSkuCodes : sourceIdentity.skuCodes,
+    sourceTaskId,
+    source: sourceTask ? 'referenced_publish_task' : (explicitSpu || explicitSkc ? 'explicit_cli_identity' : 'task_product_refs'),
+  };
+}
+
 function formatLinkOpsPublishResultSummary(summary = {}) {
   const parts = [];
   if (asArray(summary.spuNames).length) parts.push(`SPU：${summary.spuNames.slice(0, 3).join('、')}`);
@@ -5822,7 +5907,7 @@ async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey
   };
 }
 
-async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req) {
+async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req, taskRows = []) {
   if (!task || typeof task !== 'object') throw new Error('Task not found');
   if (taskRequiresOwnerLifecycleResolve(task)) {
     const error = new Error('该任务已进入提交后待回读/人工处理状态，不能替换发布素材');
@@ -5843,6 +5928,86 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req)
   if (body.sourceApproved !== true) throw new Error('必须明确 sourceApproved=true 才能绑定人工审核素材');
   const bindings = asArray(body.bindings);
   if (!bindings.length || bindings.length > 14) throw new Error('Approved publish asset binding requires 1-14 uploaded images');
+  const intents = asArray(task?.intents).map(value => String(value || '').trim()).filter(Boolean);
+  const isMaintenanceImageBinding = intents.includes('update_images') && !intents.includes('copy_product_draft');
+  if (isMaintenanceImageBinding) {
+    const otherMaintenanceIntents = intents.filter(intent => LINK_MAINTENANCE_INTENTS.has(intent) && intent !== 'update_images');
+    if (otherMaintenanceIntents.length) {
+      throw new Error(`Approved update_images binding cannot share a task with other maintenance writes: ${otherMaintenanceIntents.join(', ')}`);
+    }
+    const identity = resolveApprovedMaintenanceImageIdentity(task, body, taskRows, {actor, targetStore});
+    const bound = applyApprovedImageBindingsToMaintenancePayload(identity, bindings, {sourceApproved: true});
+    const now = new Date().toISOString();
+    const bindingFingerprint = crypto.createHash('sha256').update(JSON.stringify({
+      targetStore,
+      identity: bound.identity,
+      bindings: bound.bindings.map(row => ({name: row.name, role: row.role, imageType: row.imageType, imageUrl: row.imageUrl, sha256: row.sha256})),
+    })).digest('hex');
+    const nextTask = {
+      ...task,
+      imageEditPayload: bound.payload,
+      publishAssetBinding: {
+        schemaVersion: 2,
+        kind: 'update_images',
+        sourceApproved: true,
+        authority: 'human_reviewed_source',
+        targetStore,
+        boundAt: now,
+        boundByUser: actorUser(actor, req),
+        bindingFingerprint,
+        imageCount: bound.bindings.length,
+        images: bound.bindings.map(row => ({
+          name: row.name,
+          relativePath: row.relativePath,
+          role: row.role,
+          imageType: row.imageType,
+          imageUrl: row.imageUrl,
+          width: row.width,
+          height: row.height,
+          sha256: row.sha256,
+        })),
+        evidence: {...bound.evidence, identitySource: identity.source, sourceTaskId: identity.sourceTaskId || ''},
+      },
+      execution: {
+        ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
+        state: 'needs_repreflight',
+        linkMaintenanceExecutors: [],
+        linkMaintenancePrechecks: [],
+        preflight: {
+          ok: false,
+          blockers: ['人工审核图片已绑定到既有 update_images 任务，需要基于新 imageEditPayload 重新预演。'],
+          warnings: [],
+        },
+      },
+      note: '人工审核图片已绑定到同一换图任务；旧预演锁已作废，必须重新预演后才能提交。',
+      updatedAt: now,
+    };
+    nextTask.history = appendTaskHistory(nextTask, 'approved_maintenance_images_bound', actor, req, {
+      targetStore,
+      bindingFingerprint,
+      imageCount: bound.bindings.length,
+      boundNames: bound.evidence.boundNames,
+      identity: bound.identity,
+      identitySource: identity.source,
+      sourceTaskId: identity.sourceTaskId || '',
+    });
+    return {
+      task: nextTask,
+      binding: {
+        targetStore,
+        bindingFingerprint,
+        payloadSource: 'task.imageEditPayload',
+        ...bound.evidence,
+        identity: bound.identity,
+        identitySource: identity.source,
+        sourceTaskId: identity.sourceTaskId || '',
+        preflightInvalidated: true,
+      },
+    };
+  }
+  if (!intents.includes('copy_product_draft')) {
+    throw new Error('Approved image binding supports copy_product_draft or a standalone update_images task only');
+  }
   const publishPreparation = normalizePublishPreparationOverrides(body.publishPreparation || body);
   const taskForCapture = {
     ...task,
@@ -10362,7 +10527,7 @@ async function main() {
         if (linkOpsExecutionLocks.has(lockId)) return sendJson(res, 409, {ok: false, error: '该任务正在执行其他检查，请等待当前操作结束'});
         linkOpsExecutionLocks.add(lockId);
         try {
-          const prepared = await prepareApprovedPublishAssetsForTask(access.record, args, body, actor, req);
+          const prepared = await prepareApprovedPublishAssetsForTask(access.record, args, body, actor, req, current.tasks);
           const tasks = current.tasks.slice();
           tasks[found.idx] = prepared.task;
           current = {version: 1, updatedAt: new Date().toISOString(), tasks};

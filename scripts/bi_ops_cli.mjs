@@ -41,6 +41,7 @@ function parseArgs(argv) {
     username: process.env.SHEIN_BI_USERNAME || '',
     password: process.env.SHEIN_BI_PASSWORD || '',
     taskId: '',
+    sourceTaskId: '',
     jobId: '',
     chatSessionId: '',
     text: '',
@@ -121,6 +122,7 @@ function parseArgs(argv) {
     else if (a === '--password' || a === '-p') args.password = String(argv[++i] || '');
     else if (a === '--password-stdin') args.passwordStdin = true;
     else if (a === '--task-id' || a === '--id') args.taskId = String(argv[++i] || '').trim();
+    else if (a === '--source-task-id' || a === '--source-publish-task-id') args.sourceTaskId = String(argv[++i] || '').trim();
     else if (a === '--job-id') args.jobId = String(argv[++i] || '').trim();
     else if (a === '--chat-session' || a === '--chat-session-id') args.chatSessionId = String(argv[++i] || '').trim();
     else if (a === '--text' || a === '--command') args.text = String(argv[++i] || '').trim();
@@ -263,6 +265,8 @@ Usage:
   node scripts/bi_ops_cli.mjs maintenance-readiness --operation retire_link --doc-evidence <schema.json> --store-probe <probe.json> --readback-evidence <readback.json> --expect pilot_ready
   node scripts/bi_ops_cli.mjs plan-images --image-dir <图片文件夹> [--store JSH] [--out roles.json]
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <id> --store JSH --image-dir <已审可用图片目录> --approved-assets --standard-goods-sn "(全)SK-999食品料理机" --supply-price 210 --inventory 100
+  node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --spu <SPU> --skc <SB/SV-SKC> [--sku-code <SKU>]
+  node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --source-task-id <刚发布任务id>
   node scripts/bi_ops_cli.mjs retire-candidates --file <v3-times.csv> --performance-date 2026-07-04 [--out <dir>]
   node scripts/bi_ops_cli.mjs upload-pic --store FY --image-type 2 --file <image.jpg> [--mode dry-run|execute]
   node scripts/bi_ops_cli.mjs transform-pic --store FY --image-type 2 --url <https://...> [--mode dry-run|execute]
@@ -318,6 +322,7 @@ Options:
   --expect         maintenance-readiness 用；blocked / schema_ready / pilot_ready
   --image-dir      plan-images 用；只扫描本地图包并输出角色规划，不上传、不提交
   --approved-assets  prepare-publish 用；确认图片目录已经过人工审核，AI 不得按语义擅自剔图
+  --source-task-id    prepare-publish 的 update_images 模式；从指定已提交发布任务的 publishResult/readbackFingerprint 精确继承 SPU/SKC/SKU
   --standard-goods-sn / --supply-price / --inventory
                    prepare-publish 用；把货号、供货价和库存锁到同一任务
   --supplier-sku / --input-current-ma
@@ -1053,9 +1058,15 @@ async function runPreparePublish(args) {
       sourceDirLabel: path.basename(args.imageDir),
       bindings: uploaded,
       publishPreparation,
+      sourceTaskId: args.sourceTaskId || '',
+      productIdentity: {
+        spuName: args.spuList[0] || '',
+        skcName: args.skcList[0] || '',
+        skuCodes: args.skuCodeList || [],
+      },
     },
   });
-  if (bindingJson?.binding?.payloadSource !== 'task') throw new Error('云端没有确认 payloadSource=task，已停止重新预演');
+  if (!String(bindingJson?.binding?.payloadSource || '').startsWith('task')) throw new Error('云端没有确认图片 payload 已绑定到同一 task，已停止重新预演');
   const {json: preflightJson} = await request(args, '/api/link-ops-execute', {
     method: 'POST',
     body: {id: args.taskId, mode: 'dry-run', source: 'codex_desktop_cli_prepare_publish'},

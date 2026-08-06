@@ -779,6 +779,45 @@ try {
     check('bound payload retains 45dB image', JSON.stringify(boundRawTask?.openapiPublishPayload || {}), text => text.includes('45db.png'));
     check('bound payload locks supply price', boundRawTask?.openapiPublishPayload?.skc_list?.[0]?.sku_list?.[0]?.cost_info?.cost_price, '210.00');
     check('bound payload locks exact supplier code', boundRawTask?.openapiPublishPayload?.skc_list?.[0]?.supplier_code, taskStandardGoodsSn);
+
+    const maintenanceCreated = await req('/api/link-ops-tasks', {
+      method: 'POST',
+      cookie,
+      body: {
+        source: 'maintenance_asset_binding_smoke',
+        command: '将 HL 的既有链接替换为已审套图',
+        targets: {stores: ['HL'], productRefs: ['B2608062023343035', 'SB260806202334303501938']},
+      },
+    });
+    const maintenanceTaskId = extractTaskId(maintenanceCreated.json);
+    await updateRawTaskById(maintenanceTaskId, task => ({
+      ...task,
+      status: 'waiting_review',
+      intents: ['update_images'],
+      targets: {...task.targets, stores: ['HL'], writeStores: ['HL'], productRefs: ['B2608062023343035', 'SB260806202334303501938']},
+    }));
+    const maintenanceBinding = await req('/api/link-ops-publish-assets', {
+      method: 'POST',
+      cookie,
+      body: {
+        taskId: maintenanceTaskId,
+        store: 'HL',
+        sourceApproved: true,
+        productIdentity: {spuName: 'B2608062023343035', skcName: 'SB260806202334303501938'},
+        bindings: [
+          {name: '02-approved-main.png', role: 'mainCover', imageType: 1, imageUrl: 'https://img.shein.com/approved/main.png', width: 900, height: 1200, order: 1},
+          {name: '05-approved-carousel.png', role: 'carouselSecondCover', imageType: 1, imageUrl: 'https://img.shein.com/approved/carousel.png', width: 900, height: 1200, order: 2},
+          {name: '11-approved-detail.png', role: 'detail', imageType: 2, imageUrl: 'https://img.shein.com/approved/detail.png', width: 900, height: 1200, order: 3},
+          {name: '03-approved-square.png', role: 'squareImage', imageType: 5, imageUrl: 'https://img.shein.com/approved/square.png', width: 1254, height: 1254, order: 4},
+        ],
+      },
+    });
+    const maintenanceRawTask = await rawTaskById(maintenanceTaskId);
+    check('approved update_images binding status', maintenanceBinding.status, 200);
+    check('approved update_images binding uses task image payload', maintenanceBinding.json?.binding?.payloadSource, 'task.imageEditPayload');
+    check('approved update_images binding locks exact SB target', maintenanceRawTask?.imageEditPayload?.skc_list?.[0]?.skc_name, 'sb260806202334303501938');
+    check('approved update_images binding does not create publish payload', 'openapiPublishPayload' in (maintenanceRawTask || {}), false);
+    check('approved update_images binding touches no title or stock', JSON.stringify(maintenanceRawTask?.imageEditPayload || {}), text => !/multi_language_name_list|stock_info|cost_info|shopPrice|specialPrice/.test(text));
   }
 
   let dryRun = null;
@@ -1031,7 +1070,7 @@ try {
   const auditText = fssync.existsSync(auditFile) ? await fs.readFile(auditFile, 'utf8') : '';
   result.summary.taskCount = Array.isArray(tasks.tasks) ? tasks.tasks.length : 0;
   result.summary.auditLines = auditText.trim() ? auditText.trim().split(/\r?\n/).length : 0;
-  check('task count', result.summary.taskCount, 1);
+  check('task count', result.summary.taskCount, ASSET_BINDING ? 2 : 1);
   check('audit lines >= expected', result.summary.auditLines, n => n >= (WEAK_READBACK_ONLY ? 8 : 5));
 
   result.ok = result.checks.every(x => x.pass);

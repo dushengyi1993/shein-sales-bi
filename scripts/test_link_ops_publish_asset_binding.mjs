@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import {
   applyApprovedImageBindingsToPublishPayload,
+  applyApprovedImageBindingsToMaintenancePayload,
   applyExplicitPublishPreparationOverrides,
   taskHasUnboundImageAssets,
 } from '../lib/link_ops_publish_asset_binding.mjs';
@@ -49,6 +50,18 @@ const explicitSkuBindings = [
 const explicitlyBoundSku = applyApprovedImageBindingsToPublishPayload(payload, explicitSkuBindings, {sourceApproved: true});
 check('binds SKU image only when explicitly planned', explicitlyBoundSku.payload.skc_list[0].sku_list[0].image_info.image_info_list[0].image_url, 'https://img.shein.com/upload/sku.png');
 check('reports explicitly planned SKU image', explicitlyBoundSku.evidence.skuImage, '13-sku.png');
+
+const maintenanceBound = applyApprovedImageBindingsToMaintenancePayload({
+  spuName: 'B2608062023343035',
+  skcName: 'SB260806202334303501938',
+  skuCodes: ['SKU-LIVE-SB-001'],
+}, explicitSkuBindings, {sourceApproved: true});
+check('maintenance binding canonicalizes SPU', maintenanceBound.payload.spu_name, 'b2608062023343035');
+check('maintenance binding canonicalizes SB SKC', maintenanceBound.payload.skc_list[0].skc_name, 'sb260806202334303501938');
+check('maintenance binding carries exact SKU only for image binding', maintenanceBound.payload.skc_list[0].sku_list[0].sku_code, 'SKU-LIVE-SB-001');
+check('maintenance binding has no title field', 'multi_language_name_list' in maintenanceBound.payload, false);
+check('maintenance binding has no inventory or price fields', JSON.stringify(maintenanceBound.payload), text => !/stock_info|cost_info|shopPrice|specialPrice/.test(text));
+check('maintenance binding records task image payload source', maintenanceBound.evidence.payloadSource, 'task.imageEditPayload');
 
 const overridden = applyExplicitPublishPreparationOverrides(bound.payload, {
   standardGoodsSn: '(全)SK-999食品料理机',
