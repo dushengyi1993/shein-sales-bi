@@ -202,6 +202,7 @@ try {
       source: 'structured_cli',
       parameters: {
         inventory: 100,
+        expectedCurrentInventory: 100,
         supplyPrice: 80,
         productPrice: 99,
         title: 'Smoke Title',
@@ -268,6 +269,25 @@ try {
   check('dry-run does not misclassify CDN /80/ path as tiny SKU', dry.json?.blockers || [], xs => !asArray(xs).some(x => /high-resolution-sku-main/.test(String(x))));
   check('dry-run does not misclassify numeric 80 filename as tiny SKU', dry.json?.blockers || [], xs => !asArray(xs).some(x => /\/80\.jpg/.test(String(x))));
   check('dry-run does not call write endpoint', dryPaths.some(p => ['/open-api/goods/modify-skc-shelf','/open-api/stock/change-inventory/v2','/open-api/goods/update-cost','/open-api/openapi-business-backend/product/price/save','/open-api/goods/product/partialEdit'].includes(p)), false);
+  check('dry-run validates exact current inventory through OpenAPI', dry.json?.adapterEvidence?.inventoryPreflight?.ok, true);
+  check('dry-run records exact current inventory gate', dry.json?.safety?.inventoryPreflightRequired, true);
+
+  const driftTask = {
+    id: 'inventory-drift-gate-smoke',
+    status: 'waiting_review',
+    command: '验证库存写前漂移门禁',
+    planning: {source: 'structured_cli', parameters: {inventory: 100, expectedCurrentInventory: 99}},
+    targets: {stores: ['SMK'], productRefs: ['TEST-PRODUCT']},
+    intents: ['update_inventory'],
+  };
+  const driftTaskFile = await writeJson('task-inventory-drift.json', {version: 1, tasks: [driftTask]});
+  calls.length = 0;
+  const driftDry = await runNode([...commonArgs, '--task-id', driftTask.id, '--task-json', driftTaskFile, '--dry-run']);
+  check('inventory drift gate exits without exception', driftDry.code, 0);
+  check('inventory drift gate blocks mismatched current stock', driftDry.json?.ok, false);
+  check('inventory drift gate reports exact mismatch', driftDry.json?.blockers || [], xs => asArray(xs).some(x => /期望当前可用 99/.test(String(x))));
+  check('inventory drift gate uses official stock query', calls.some(c => c.path === '/open-api/stock/stock-query'), true);
+  check('inventory drift gate never calls write endpoint', calls.some(c => c.path === '/open-api/stock/change-inventory/v2'), false);
 
   const manyDetailTask = {
     id: 'many-detail-image-smoke',
