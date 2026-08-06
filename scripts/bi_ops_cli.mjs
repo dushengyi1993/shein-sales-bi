@@ -134,8 +134,8 @@ function parseArgs(argv) {
     else if (a === '--product' || a === '--products' || a === '--ref') args.products.push(...splitList(argv[++i]));
     else if (a === '--spu' || a === '--spu-name') args.spuList.push(...splitList(argv[++i]));
     else if (a === '--skc' || a === '--skc-name') args.skcList.push(...splitList(argv[++i]));
-    else if (a === '--sku-code') args.skuCodeList.push(...splitList(argv[++i]));
-    else if (a === '--supplier-sku') args.supplierSkuList.push(...splitList(argv[++i]));
+    else if (a === '--sku-code') args.skuCodeList.push(...splitListPreserveCase(argv[++i]));
+    else if (a === '--supplier-sku') args.supplierSkuList.push(...splitListPreserveCase(argv[++i]));
     else if (a === '--operation' || a === '--action' || a === '--intent') args.operation = normalizeOperationName(argv[++i]);
     else if (a === '--mode') args.mode = String(argv[++i] || 'dry-run').trim();
     else if (a === '--confirm') args.confirm = String(argv[++i] || '').trim();
@@ -238,11 +238,15 @@ function normalizeOperationName(value) {
   return aliases.get(lower) || lower;
 }
 
-function splitList(value) {
+function splitListPreserveCase(value) {
   return String(value || '')
     .split(/[,\s/]+/)
-    .map(x => x.trim().toUpperCase())
+    .map(x => x.trim())
     .filter(Boolean);
+}
+
+function splitList(value) {
+  return splitListPreserveCase(value).map(x => x.toUpperCase());
 }
 
 function help() {

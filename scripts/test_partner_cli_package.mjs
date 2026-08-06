@@ -74,6 +74,11 @@ const installerText = await fs.readFile(path.join(ROOT, 'scripts/install_partner
 if (!installerText.includes('%~dp0bootstrap.mjs')) {
   throw new Error('partner launcher must resolve bootstrap relative to itself so Unicode install paths remain valid');
 }
+const cliText = await fs.readFile(path.join(ROOT, 'scripts/bi_ops_cli.mjs'), 'utf8');
+if (!cliText.includes("--sku-code') args.skuCodeList.push(...splitListPreserveCase")
+  || !cliText.includes("--supplier-sku') args.supplierSkuList.push(...splitListPreserveCase")) {
+  throw new Error('partner CLI must preserve case-sensitive SKU and supplier SKU values');
+}
 
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'partner-cli-package-'));
 try {
