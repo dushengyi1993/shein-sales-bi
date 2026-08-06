@@ -114,7 +114,20 @@ const fake = http.createServer(async (req, res) => {
       return sendJson(res, {code: '0', msg: 'OK', info: {
         spuName: 'b2608062023343035',
         spuImageInfoList: [{groupCode: 'G-LIVE-SPU'}],
-        skcInfoList: [{skcName: 'sb260806202334303501938', skcImageInfoList: [{groupCode: 'G-LIVE-SKC'}]}],
+        skcInfoList: [{
+          skcName: 'sb260806202334303501938',
+          skcImageInfoList: [{groupCode: 'G-LIVE-SKC'}],
+          skuInfoList: [{skuCode: 'sku-live-sb-001', saleAttributeList: [{attributeId: 27, attributeValueId: 513}]}],
+        }],
+      }});
+    }
+    if (body.json?.spuName === 'spu-smoke') {
+      return sendJson(res, {code: '0', msg: 'OK', info: {
+        spuName: 'spu-smoke',
+        skcInfoList: [{
+          skcName: 'sv-smoke-skc',
+          skuInfoList: [{skuCode: 'sku-smoke-001', saleAttributeList: [{attributeId: 27, attributeValueId: 513}]}],
+        }],
       }});
     }
     return sendJson(res, {code: '0', msg: 'OK', info: {}});
@@ -301,6 +314,8 @@ try {
   check('dry-run records SKU image count', dry.json?.payload?.summary?.imagePayloadInspection?.totalSkuImages, 1);
   check('dry-run records total detail count', dry.json?.payload?.summary?.imagePayloadInspection?.totalDetailImages, 10);
   check('dry-run records image inspection evidence', dry.json?.adapterEvidence?.imagePayloadInspection?.payloads?.[0]?.skcImageCount, 12);
+  check('dry-run injects live SKU sale attributes for SKU image edit',
+    dry.json?.payload?.submitPlan?.payloads?.find(p => p.operation === 'update_title_and_images')?.body?.skc_list?.[0]?.sku_list?.[0]?.sale_attribute_list?.[0]?.attribute_value_id, 513);
   check('existing image group codes are reported as retained, not injected', dry.json?.warnings || [], xs => asArray(xs).some(x => /保留 payload 中已有的 2 个 image_group_code/.test(String(x))) && !asArray(xs).some(x => /已注入.*image_group_code/.test(String(x))));
   check('dry-run does not misclassify CDN /80/ path as tiny SKU', dry.json?.blockers || [], xs => !asArray(xs).some(x => /high-resolution-sku-main/.test(String(x))));
   check('dry-run does not misclassify numeric 80 filename as tiny SKU', dry.json?.blockers || [], xs => !asArray(xs).some(x => /\/80\.jpg/.test(String(x))));
@@ -396,6 +411,7 @@ try {
   check('approved SB target records same-task binding resolution', liveSbDry.json?.adapterEvidence?.matchedLinks?.[0]?.resolvedFrom, 'task_approved_image_identity');
   check('uppercase SB image payload uses canonical live skc', liveSbPlan?.body?.skc_list?.[0]?.skc_name, 'sb260806202334303501938');
   check('uppercase SB image payload fills immediate live sku', liveSbPlan?.body?.skc_list?.[0]?.sku_list?.[0]?.sku_code, 'sku-live-sb-001');
+  check('uppercase SB image payload injects live SKU sale attributes', liveSbPlan?.body?.skc_list?.[0]?.sku_list?.[0]?.sale_attribute_list?.[0]?.attribute_value_id, 513);
   check('uppercase SB image payload injects live group code', liveSbPlan?.body?.skc_list?.[0]?.image_info?.image_group_code, 'G-LIVE-SKC');
   check('approved SB binding does not depend on searchProduct indexing', calls.some(c => c.path === '/open-api/goods/searchProduct'), false);
 
