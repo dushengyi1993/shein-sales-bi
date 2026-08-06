@@ -68,6 +68,18 @@ check('maintenance binding has no title field', 'multi_language_name_list' in ma
 check('maintenance binding has no inventory or price fields', JSON.stringify(maintenanceBound.payload), text => !/stock_info|cost_info|shopPrice|specialPrice/.test(text));
 check('maintenance binding records task image payload source', maintenanceBound.evidence.payloadSource, 'task.imageEditPayload');
 
+const maintenanceWithoutSkuImage = applyApprovedImageBindingsToMaintenancePayload({
+  spuName: 'B2608062023343035',
+  skcName: 'SB260806202334303501938',
+  skuCodes: ['SKU-LIVE-SB-001'],
+}, bindings, {sourceApproved: true});
+check('maintenance binding omits SKU node when no SKU image is planned',
+  'sku_list' in maintenanceWithoutSkuImage.payload.skc_list[0], false);
+check('maintenance binding still locks exact SKU identity outside payload',
+  maintenanceWithoutSkuImage.identity.skuCodes[0], 'SKU-LIVE-SB-001');
+check('maintenance binding without SKU image does not claim SKU fields are touched',
+  maintenanceWithoutSkuImage.evidence.touchedFields.join(','), text => !text.includes('sku_list'));
+
 const correction = buildPendingListingImageCorrection({
   sourceTask: {
     id: 'published-source-task',
