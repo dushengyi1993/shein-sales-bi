@@ -3674,13 +3674,13 @@ inventory_depletion_batches AS (
         coalesce(p.gross_sold_quantity,0) AS product_gross_sold_quantity,
         CASE
           WHEN coalesce(b.shipped_quantity,0) > 0 AND b.arrived_date IS NOT NULL AND b.first_leg_freight_amount IS NOT NULL THEN '已到仓'
-          WHEN coalesce(b.shipped_quantity,0) > 0 AND b.shipped_date IS NOT NULL THEN '在途/待录头程'
+          WHEN coalesce(b.shipped_quantity,0) > 0 AND (b.shipped_date IS NOT NULL OR b.has_shipping_order_no) THEN '在途/待录头程'
           WHEN coalesce(b.shipped_quantity,0) > 0 THEN '未发/待确认'
           ELSE '忽略'
         END AS batch_status,
         CASE
           WHEN coalesce(b.shipped_quantity,0) > 0 AND b.arrived_date IS NOT NULL AND b.first_leg_freight_amount IS NOT NULL THEN 0
-          WHEN coalesce(b.shipped_quantity,0) > 0 AND b.shipped_date IS NOT NULL THEN 1
+          WHEN coalesce(b.shipped_quantity,0) > 0 AND (b.shipped_date IS NOT NULL OR b.has_shipping_order_no) THEN 1
           WHEN coalesce(b.shipped_quantity,0) > 0 THEN 2
           ELSE 9
         END AS batch_sort

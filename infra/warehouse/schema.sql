@@ -2269,7 +2269,11 @@ SELECT
     ELSE 'missing'
   END AS arrival_date_source,
   se.status AS et_ship_status,
-  se.status_name AS et_ship_status_name
+  se.status_name AS et_ship_status_name,
+  (
+    coalesce(b.raw_summary->>'__has_shipping_order_no','false') = 'true'
+    OR se.ship_order_id IS NOT NULL
+  ) AS has_shipping_order_no
 FROM fact.product_cost_batch b
 LEFT JOIN ship_evidence se
   ON se.ship_order_id = b.batch_no;
@@ -5985,6 +5989,7 @@ batch_base AS (
     source_sheet,
     source_row_no,
     raw_summary,
+    has_shipping_order_no,
     (
       coalesce(shipped_quantity,0) > 0
       AND arrived_date IS NOT NULL
@@ -5992,7 +5997,7 @@ batch_base AS (
     ) AS is_arrived_stock,
     (
       coalesce(shipped_quantity,0) > 0
-      AND shipped_date IS NOT NULL
+      AND (shipped_date IS NOT NULL OR has_shipping_order_no)
       AND NOT (
         arrived_date IS NOT NULL
         AND first_leg_freight_amount IS NOT NULL
@@ -6001,6 +6006,7 @@ batch_base AS (
     (
       coalesce(shipped_quantity,0) > 0
       AND shipped_date IS NULL
+      AND NOT has_shipping_order_no
     ) AS is_not_shipped_stock
   FROM mart.product_cost_batch_timeline
   WHERE coalesce(dim.product_match_key(standard_goods_sn),'') <> ''

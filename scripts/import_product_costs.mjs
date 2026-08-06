@@ -159,7 +159,8 @@ function buildCostRow(row, sourceFile, sourceSheet, idx) {
   const rawGoodsSn = text(pick(row, ['货号', '标准货号', '商品货号', 'goods_sn', 'sku', '型号']));
   const title = text(pick(row, ['品名', '商品名称', '标题', '产品名称']));
   const normalized = normalizeGoodsSnDetailed(rawGoodsSn, {goodsTitle: title});
-  const batchNo = text(pick(row, ['发货单号', '发货申请单', '发货申请单号', '批次号', '发货批次', '采购单号', '单号'])) || `${path.basename(sourceFile)}-${sourceSheet}-${idx}`;
+  const shippingOrderNo = text(pick(row, ['发货单号', '发货申请单', '发货申请单号']));
+  const batchNo = shippingOrderNo || text(pick(row, ['批次号', '发货批次', '采购单号', '单号'])) || `${path.basename(sourceFile)}-${sourceSheet}-${idx}`;
   const shippedDate = dateOnly(pick(row, ['发货日期', '发货时间', '发货日', '出货日期', '出货时间', 'shipping_date', 'shipped_date']));
   const arrivedDate = dateOnly(pick(row, ['到仓/派送日期', '到仓日期', '到仓时间', '派送日期', '派送时间', '入仓日期', '入库日期', 'arrived_date', 'warehouse_arrived_date']));
   const shippedQuantity = num(pick(row, ['发货数量', '数量', '出货数量', '入仓数量', '总数量']));
@@ -208,7 +209,7 @@ function buildCostRow(row, sourceFile, sourceSheet, idx) {
     source_file: rel(sourceFile),
     source_sheet: sourceSheet,
     source_row_no: idx,
-    raw_summary: row,
+    raw_summary: {...row, __has_shipping_order_no: Boolean(shippingOrderNo)},
   };
 }
 
@@ -292,7 +293,12 @@ else:
     raise SystemExit('unsupported file type: ' + ext)
 print(json.dumps(out, ensure_ascii=False))
 `;
-  const res = spawnSync(py, ['-c', code, file], {encoding: 'utf8', windowsHide: true, maxBuffer: 80 * 1024 * 1024});
+  const res = spawnSync(py, ['-c', code, file], {
+    encoding: 'utf8',
+    windowsHide: true,
+    maxBuffer: 80 * 1024 * 1024,
+    env: {...process.env, PYTHONUTF8: '1'},
+  });
   if (res.status !== 0) throw new Error(`parse file failed: ${res.stderr || res.stdout}`);
   return JSON.parse(res.stdout || '[]');
 }

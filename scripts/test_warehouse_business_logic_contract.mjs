@@ -46,6 +46,11 @@ assert.doesNotMatch(schema, /coalesce\(o\.ship_time, te\.departure_track_at, o\.
 assert.match(schema, /WHEN se\.ship_order_id IS NOT NULL[\s\S]*THEN coalesce\(se\.departure_at::date,se\.arrival_at::date\)/,
   'a linked ET shipment must override an unverified spreadsheet departure date');
 assert.match(schema, /shipped_date_source/);
+assert.match(schema, /has_shipping_order_no/);
+assert.match(schema, /shipped_date IS NOT NULL OR has_shipping_order_no/,
+  'an explicit shipping order number must make an undated batch operationally in transit');
+assert.match(schema, /shipped_date IS NULL[\s\S]*AND NOT has_shipping_order_no/,
+  'an undated batch with a shipping order number must not remain in not-shipped');
 assert.match(schema, /declared_but_et_not_departed/);
 assert.match(schema, /legacy_past_arrived_weighted_pre_cutover/);
 assert.match(schema, /legacy_shipped_weighted_pre_cutover/);
@@ -61,7 +66,8 @@ assert.match(costLedger, /state\.value \+= eventCostSar - estimationVarianceSar/
   'receipt settlement must conserve inventory value and transfer only the estimate variance');
 assert.match(costLedger, /valued_after_inventory_gap_receipt/,
   'a fully settled shortfall must stop appearing as a live estimate');
-assert.match(costRebuild, /b\.shipped_date <= sale\.effective_date/);
+assert.match(costRebuild, /b\.shipped_date <= sale\.effective_date/,
+  'shipping-order-only status must not invent a historical shipment date for costing');
 assert.match(costRebuild, /b\.arrived_date > sale\.effective_date/);
 assert.match(costRebuild, /past_arrived_weighted_as_of_sale/);
 assert.match(costRebuild, /mart\.product_cost_batch_timeline/);
