@@ -380,6 +380,14 @@ node scripts/bi_ops_cli.mjs tasks --pretty
 
 如果换图任务引用的是刚刚成功发布的任务，也可以用 `--source-task-id <发布任务ID>`，系统只从该任务的 `publishResult/readbackFingerprint` 继承唯一 SPU/SKC/SKU。两种方式都会把图片绑定为同一任务的 `imageEditPayload`，不会回退旧链接快照，也不会带入标题、库存或价格；绑定后仍须重新 dry-run 锁定 hash，真实提交仍走原确认和回读门禁。
 
+如果该新链接仍处于 `documentState=1` 待审核，`partialEdit` 不能直接换图。此时使用：
+
+```powershell
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" prepare-pending-image-correction --task-id <换图任务ID> --store <店铺> --source-task-id <原发布任务ID>
+```
+
+该命令复用换图任务里已经绑定的已审图片，不重复上传。服务端严格从原发布任务读取完整 `publishOrEdit` payload，并只注入平台返回的精确 SPU/SKC/SKU、替换图片字段；标题、货号、价格、库存、属性、尺寸重量必须与原发布 payload 指纹一致。预演会把“待审核时先撤回，精确回读 `documentState=4` 后完整重提”作为同一受控计划锁定 hash。真实执行仍需明确确认；撤回后重提若收到明确失败，任务保留为可恢复状态，下一次必须重新回读、预演和确认，不会重复撤回或盲目重提。
+
 该命令读取实际尺寸、按角色上传、把返回 URL 与货号/供货价/库存等显式事实绑定到同一任务，然后基于新 payload 重新预演。返回结果必须看到 `payloadSource=task`、图片数量/名称、方形图尺寸和新的 payload hash；它本身不真实发布。
 - 真正提交 SHEIN 前，后台仍要把图片转成 SHEIN 可接受的图片 URL，先查官方图片方案，再把前端角色映射到 `partialEdit` / 发布 payload 的 SPU/SKC/SKU 层级。不同类目图片方案可能不同，不能把“轮播图/细节图/SKU 图”的前端叫法直接等同于固定 OpenAPI 字段。
 - CLI / 执行器会在 `update_images` 的 dry-run 阶段检查图片 payload：SPU 层 `image_info` 必须搭配 `is_spu_pic=true`，SKC 图类型只能是 `1/2/5/6` 且主图唯一，细节图总数最多 11 张，SKU 图只能用 `image_type=1` 的高清主图；疑似 `sku-80` / `80x80` 裁切图会被阻断。`partialEdit` 返回成功并生成版本号，或后台任务已进入流转 / 待审核 / 审核中 / 待终审，即代表 SHEIN 已接收提交；后续是平台审核生命周期，不要当作“没提交”反复执行。最终当前态仍以审核完成后的回读或后台可见态为准。

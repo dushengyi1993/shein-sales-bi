@@ -19,6 +19,10 @@ import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_
 import {selectVirtualInventoryWarehouseCode} from '../lib/shein_inventory_warehouse.mjs';
 import {normalizeSheinSkc, sameSheinSkc} from '../lib/shein_product_identifiers.mjs';
 import {
+  extractExactDocumentState,
+  validatePendingListingImageCorrection,
+} from '../lib/link_ops_pending_listing_image_correction.mjs';
+import {
   createLoopbackTestWebhookWriteGuard,
   runSheinWebhookExternalWriteGuarded,
 } from '../lib/shein_webhook_external_write_guard.mjs';
@@ -620,6 +624,31 @@ async function fetchSpuInfoForImages(client, matches, calls, warnings){
   }
   return spuInfoMap;
 }
+async function queryPendingCorrectionDocumentState(client, correction, calls, {label='pending-correction-state'}={}){
+  const response=await client.request('/open-api/goods/query-document-state',{
+    method:'POST',
+    body:{spuList:[{spuName:correction.identity.spuName,version:correction.documentVersion}]},
+    headers:{language:'zh-cn'},
+  });
+  calls.push(compactCallResult(label,'/open-api/goods/query-document-state','POST',response));
+  if(!response.ok||String(response.data?.code)!=='0') return {ok:false,documentState:null,reason:safeString(response.data?.msg||response.data?.code||'query-document-state failed',300)};
+  return extractExactDocumentState(response.data,correction.identity,correction.documentVersion);
+}
+async function waitForPendingCorrectionState(client, correction, expectedState, calls){
+  const attempts=Math.max(1,Math.min(8,Number(process.env.SHEIN_PENDING_IMAGE_CORRECTION_STATE_ATTEMPTS||4)));
+  const delayMs=Math.max(0,Math.min(5000,Number(process.env.SHEIN_PENDING_IMAGE_CORRECTION_STATE_DELAY_MS||750)));
+  let latest=null;
+  for(let attempt=1;attempt<=attempts;attempt+=1){
+    latest=await queryPendingCorrectionDocumentState(client,correction,calls,{label:`pending-correction-state-${attempt}`});
+    if(latest.ok&&latest.documentState===expectedState) return {...latest,attempts:attempt};
+    if(attempt<attempts&&delayMs>0) await new Promise(resolve=>setTimeout(resolve,delayMs));
+  }
+  return {...(latest||{}),ok:false,attempts,reason:latest?.reason||`documentState did not become ${expectedState}`};
+}
+function correctionResponseSucceeded(response){
+  if(!response?.ok||String(response.data?.code)!=='0') return false;
+  return !(response.data?.info&&typeof response.data.info==='object'&&response.data.info.success===false);
+}
 function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEditPayloads=[],certificatePayloads=[],spuInfoMap=new Map(),inventoryWarehouseCode='' }){
   const command=String(task?.command||task?.text||''); const parameters=structuredTaskParameters(task); const out=[];
   const firstPartialEditIntent = intents.find(intent => intent === 'update_title' || intent === 'update_images') || '';
@@ -806,6 +835,19 @@ async function main(){
   const resolved={refs:snapshotResolved.refs,matches:mergedMatches,missing:liveResolved.unresolved};
   if(resolved.missing.length) blockers.push(`未定位到目标货号/SKC：${resolved.missing.join('、')}`);
   if(!resolved.matches.length) blockers.push('没有可执行目标链接。');
+  const correctionValidation=intents.includes('update_images')
+    ?validatePendingListingImageCorrection(task,{store})
+    :{present:false,ok:false,blockers:[],correction:null};
+  if(correctionValidation.present&&!correctionValidation.ok) blockers.push(...correctionValidation.blockers);
+  if(correctionValidation.present&&(intents.length!==1||intents[0]!=='update_images')) blockers.push('待审核新品纠图计划只能单独执行 update_images，不能混入其他维护动作。');
+  const correction=correctionValidation.ok?correctionValidation.correction:null;
+  let correctionStateBefore=null;
+  if(correction){
+    const stateProbe=await queryPendingCorrectionDocumentState(client,correction,calls);
+    if(!stateProbe.ok) blockers.push(`待审核新品纠图无法精确回读审核状态：${safeString(stateProbe.reason,300)}`);
+    else if(![1,4].includes(stateProbe.documentState)) blockers.push(`待审核新品纠图仅允许从待审核(1)或已撤回(4)继续；当前 documentState=${stateProbe.documentState}`);
+    else correctionStateBefore=stateProbe.documentState;
+  }
   const imageEditPayloads=intents.includes('update_images')
     ? normalizeImageEditPayloadsFromJsonAssets(taskWithJsonAssets,resolved.matches,warnings)
     : [];
@@ -813,11 +855,21 @@ async function main(){
     ? inspectImageEditPayloads(imageEditPayloads,blockers,warnings)
     : inspectImageEditPayloads([],blockers,warnings);
   const certificatePayloads=normalizeCertificatePayloadsFromJsonAssets(taskWithJsonAssets,warnings);
-  const spuInfoMap=intents.includes('update_images')
+  const spuInfoMap=intents.includes('update_images')&&!correction
     ? await fetchSpuInfoForImages(client,resolved.matches,calls,warnings)
     : new Map();
-  const payloads=buildPayloads({task:taskWithJsonAssets,intents,matches:resolved.matches,siteInfo,blockers,warnings,imageEditPayloads,certificatePayloads,spuInfoMap,inventoryWarehouseCode});
-  const submitPlan={storeKey:store,intents,payloads:payloads.map(p=>({operation:p.operation,endpoint:p.endpoint,body:p.body,targetSkcs:p.targetLinks.map(x=>x.skc).filter(Boolean)}))};
+  const payloads=correction&&correctionStateBefore!==null
+    ?[
+      ...(correctionStateBefore===1?[{operation:'pending_new_listing_revoke',endpoint:'/open-api/goods/revoke-product',body:{spuName:correction.identity.spuName},targetLinks:resolved.matches}]:[]),
+      {operation:'pending_new_listing_republish',endpoint:'/open-api/goods/product/publishOrEdit',body:correction.republishPayload,targetLinks:resolved.matches},
+    ]
+    :buildPayloads({task:taskWithJsonAssets,intents,matches:resolved.matches,siteInfo,blockers,warnings,imageEditPayloads,certificatePayloads,spuInfoMap,inventoryWarehouseCode});
+  const submitPlan={
+    storeKey:store,
+    intents,
+    ...(correction?{pendingNewListingImageCorrection:{correctionFingerprint:correction.correctionFingerprint,sourceTaskId:correction.sourceTaskId,documentVersion:correction.documentVersion,documentStateBefore:correctionStateBefore}}:{}),
+    payloads:payloads.map(p=>({operation:p.operation,endpoint:p.endpoint,body:p.body,targetSkcs:p.targetLinks.map(x=>x.skc).filter(Boolean)})),
+  };
   const payloadHash=payloads.some(p=>Object.keys(p.body||{}).length)?sha256Stable(submitPlan):'';
   if(args.mode==='execute'){
     const expected=safeString(executionContext?.expectedPayloadHash||executionContext?.request?.expectedPayloadHash||executionContext?.request?.payloadHash||'',120);
@@ -846,7 +898,7 @@ async function main(){
       }
     }
   }
-  let submitResults=[]; let actualWriteSubmitted=false;
+  let submitResults=[]; let actualWriteSubmitted=false; let writeAttempted=false; let recoveryRequired=false; let correctionReadback=null; let correctionPublishResult=null;
   if(args.mode==='execute' && blockers.length===0){
     for(const p of payloads){
       const guardedWrite=await runSheinWebhookExternalWriteGuarded({
@@ -858,10 +910,43 @@ async function main(){
         blockers.push(...(guardedWrite.gate?.blockers||['平台动态安全闸门阻止真实提交。']));
         break;
       }
+      writeAttempted=true;
       const response=guardedWrite.value;
       const compact=compactCallResult(p.operation,p.endpoint,'POST',response);
       calls.push(compact);
       submitResults.push({...compact, operation:p.operation});
+      if(correction&&p.operation==='pending_new_listing_revoke'){
+        if(!correctionResponseSucceeded(response)){
+          blockers.push(`待审核新品撤回失败：${safeString(response.data?.msg||response.data?.code||'未知错误')}`);
+          break;
+        }
+        const withdrawn=await waitForPendingCorrectionState(client,correction,4,calls);
+        correctionReadback={phase:'revoke',...withdrawn};
+        if(!withdrawn.ok||withdrawn.documentState!==4){
+          recoveryRequired=true;
+          blockers.push(`平台已接收撤回请求，但尚未精确回读到 documentState=4；当前=${withdrawn.documentState??'unknown'}，保留任务稍后从状态回读继续。`);
+          break;
+        }
+        continue;
+      }
+      if(correction&&p.operation==='pending_new_listing_republish'){
+        correctionPublishResult={httpStatus:response.status,code:response.data?.code??null,msg:response.data?.msg??null,traceId:response.data?.traceId??null,info:response.data?.info??null};
+        if(!correctionResponseSucceeded(response)){
+          recoveryRequired=true;
+          const errors=asArray(response.data?.info?.pre_valid_result).flatMap(row=>asArray(row?.messages)).map(value=>safeString(value,300)).filter(Boolean);
+          blockers.push(`待审核新品完整重提失败，商品保持已撤回，可重新预演后恢复：${errors.join('；')||safeString(response.data?.msg||response.data?.code||'未知错误')}`);
+          break;
+        }
+        actualWriteSubmitted=true;
+        const nextVersion=safeString(response.data?.info?.version||'',160);
+        if(!nextVersion){
+          correctionReadback={ok:false,phase:'republish',documentState:null,reason:'publishOrEdit success response missing version'};
+        }else{
+          const republished=await waitForPendingCorrectionState(client,{...correction,documentVersion:nextVersion},1,calls);
+          correctionReadback={phase:'republish',version:nextVersion,...republished};
+        }
+        continue;
+      }
       if(String(response.data?.code)!=='0'){
         blockers.push(`${p.operation} 返回失败：${safeString(response.data?.msg||response.data?.code||'未知错误')}`);
       }else if(response.data?.info?.success===false){
@@ -869,13 +954,17 @@ async function main(){
         blockers.push(`${p.operation} 校验失败：${errs||'info.success=false 但无详细错误'}`);
       }
     }
-    actualWriteSubmitted=submitResults.some(r=>String(r.code)==='0' && r.infoSuccess!==false);
+    if(!correction) actualWriteSubmitted=submitResults.some(r=>String(r.code)==='0' && r.infoSuccess!==false);
   }
   const readbackCalls=[]; let readback={ok:false,status:args.mode==='execute'?'not_run':'planned_not_run',calls:readbackCalls};
   const expectedInventory=intents.includes('update_inventory')?numberForTask('update_inventory',task,String(task?.command||task?.text||'')):null;
-  if(actualWriteSubmitted){ readback=await readbackForIntents(client,intents,resolved.matches,readbackCalls,expectedInventory); }
-  const state=args.mode==='execute' ? (actualWriteSubmitted?'submitted':'blocked') : (blockers.length?'blocked':'ready_for_submit');
-  const output={ok:blockers.length===0, runId, mode:args.mode, adapterKind:'link_maintenance_openapi_executor', state, startedAt, endedAt:new Date().toISOString(), storeKey:store, task:{id:task.id||'',status:task.status||'',intents,productRefs:taskProductRefs(task)}, payload:{found:Boolean(payloadHash), payloadHash, payloadHashAlgorithm:payloadHash?'sha256-stable-json-v1':'', summary:{operations:payloads.map(p=>p.operation), endpoints:payloads.map(p=>p.endpoint), targetCount:resolved.matches.length, skuCount:unique(resolved.matches.flatMap(m=>m.skuCodes)).length, imagePayloadInspection:{payloadCount:imagePayloadInspection.payloadCount,totalSpuImages:imagePayloadInspection.totalSpuImages,totalSkcImages:imagePayloadInspection.totalSkcImages,totalSiteDetailImages:imagePayloadInspection.totalSiteDetailImages,totalSkuImages:imagePayloadInspection.totalSkuImages,totalDetailImages:imagePayloadInspection.totalDetailImages,totalUrlRefs:imagePayloadInspection.totalUrlRefs,uniqueUrlCount:imagePayloadInspection.uniqueUrlCount}}, submitPlan}, adapterEvidence:{realSubmit:actualWriteSubmitted, canSilentWrite:false, matchedLinksCount:resolved.matches.length, matchedLinks:resolved.matches.slice(0,80), linkSnapshotFile:linkLoad.file?rel(linkLoad.file):'', productCacheFile:productLoad.file?rel(productLoad.file):'', siteInfo, imagePayloadInspection, inventoryPreflight, calls}, publishResult: actualWriteSubmitted ? {code:'0', msg:'submitted', traceId:submitResults.map(x=>x.traceId).filter(Boolean).join(',')||null, operations:submitResults} : null, readbackFingerprint:{taskId:task.id||'', intents, targetStores:[store], matchedSkcs:resolved.matches.map(m=>m.skc).filter(Boolean), matchedSkuCodes:unique(resolved.matches.flatMap(m=>m.skuCodes)), payloadHash, readbackStatus:readback.status}, readback, blockers, warnings, safety:{canSilentWrite:false, executeRequiresConfirm:SUBMIT_CONFIRM_TEXT, dryRunDoesNotCallBusinessWrite:args.mode!=='execute', inventoryPreflightRequired:hasExpectedCurrentInventory, note:'维护写真实提交必须由 BI 账号店铺写权限、动作总闸门、payload hash 和确认文本共同放行；传入 expectedCurrentInventory 时还必须通过官方 OpenAPI 写前漂移门禁。'}};
+  if(actualWriteSubmitted){
+    readback=correction
+      ?{ok:Boolean(correctionReadback?.ok&&correctionReadback?.documentState===1),status:correctionReadback?.ok&&correctionReadback?.documentState===1?'matched_pending_document_state':'pending_document_state_readback_failed',matchedRows:correctionReadback?.ok?[correction.identity]:[],calls:readbackCalls,evidence:correctionReadback}
+      :await readbackForIntents(client,intents,resolved.matches,readbackCalls,expectedInventory);
+  }
+  const state=args.mode==='execute' ? (actualWriteSubmitted?'submitted':(recoveryRequired?'pending_listing_image_correction_recovery_required':'blocked')) : (blockers.length?'blocked':'ready_for_submit');
+  const output={ok:blockers.length===0, runId, mode:args.mode, adapterKind:'link_maintenance_openapi_executor', state, startedAt, endedAt:new Date().toISOString(), storeKey:store, task:{id:task.id||'',status:task.status||'',intents,productRefs:taskProductRefs(task)}, payload:{found:Boolean(payloadHash), payloadHash, payloadHashAlgorithm:payloadHash?'sha256-stable-json-v1':'', summary:{operations:payloads.map(p=>p.operation), endpoints:payloads.map(p=>p.endpoint), targetCount:resolved.matches.length, skuCount:unique(resolved.matches.flatMap(m=>m.skuCodes)).length, imagePayloadInspection:{payloadCount:imagePayloadInspection.payloadCount,totalSpuImages:imagePayloadInspection.totalSpuImages,totalSkcImages:imagePayloadInspection.totalSkcImages,totalSiteDetailImages:imagePayloadInspection.totalSiteDetailImages,totalSkuImages:imagePayloadInspection.totalSkuImages,totalDetailImages:imagePayloadInspection.totalDetailImages,totalUrlRefs:imagePayloadInspection.totalUrlRefs,uniqueUrlCount:imagePayloadInspection.uniqueUrlCount}}, submitPlan}, adapterEvidence:{realSubmit:actualWriteSubmitted,writeAttempted,recoveryRequired,correctionStateBefore,correctionReadback,correctionFingerprint:correction?.correctionFingerprint||'',sourceTaskId:correction?.sourceTaskId||'',protectedFieldsHash:correction?.protectedFieldsHash||'',phaseResults:submitResults,canSilentWrite:false,matchedLinksCount:resolved.matches.length,matchedLinks:resolved.matches.slice(0,80),linkSnapshotFile:linkLoad.file?rel(linkLoad.file):'',productCacheFile:productLoad.file?rel(productLoad.file):'',siteInfo,imagePayloadInspection,inventoryPreflight,calls}, publishResult: correction ? correctionPublishResult : (actualWriteSubmitted ? {code:'0', msg:'submitted', traceId:submitResults.map(x=>x.traceId).filter(Boolean).join(',')||null, operations:submitResults} : null), readbackFingerprint:{taskId:task.id||'', intents, targetStores:[store], matchedSkcs:resolved.matches.map(m=>m.skc).filter(Boolean), matchedSkuCodes:unique(resolved.matches.flatMap(m=>m.skuCodes)), payloadHash, readbackStatus:readback.status}, readback, blockers, warnings, safety:{canSilentWrite:false,executeRequiresConfirm:SUBMIT_CONFIRM_TEXT,dryRunDoesNotCallBusinessWrite:args.mode!=='execute',inventoryPreflightRequired:hasExpectedCurrentInventory,pendingListingCorrection:correction?{sourceTaskRequired:true,exactIdentityRequired:true,approvedBindingRequired:true,phasedRevokeAndRepublish:true,protectedFieldsUntouched:true}:null,note:'维护写真实提交必须由账号权限、动作总闸门、payload hash 和确认文本共同放行；待审核新品纠图还必须撤回成功并精确回读 state=4 后，才可用原完整 payload 重提。'}};
   if(actualWriteSubmitted && !readback.ok){ output.ok=false; output.state='submitted'; output.blockers=[]; output.warnings.push('写接口返回成功但强回读未确认，任务必须锁定等待人工核销。'); }
   const outPath=path.join(args.outDir,`${runId}.local.json`); await writeJson(outPath,output); output.savedTo=rel(outPath); if(!args.quiet) console.log(JSON.stringify(output,null,2));
 }

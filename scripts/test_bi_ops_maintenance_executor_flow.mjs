@@ -11,6 +11,7 @@ import path from 'node:path';
 import net from 'node:net';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {buildPendingListingImageCorrection} from '../lib/link_ops_pending_listing_image_correction.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const KEEP_TEMP = process.argv.includes('--keep-temp');
@@ -82,6 +83,9 @@ function check(label, actual, expected) {
 }
 
 const calls = [];
+let correctionDocumentState = 1;
+let correctionDocumentVersion = 'SPMP260806300745650';
+let failCorrectionRepublish = true;
 const port = await freePort();
 const fake = http.createServer(async (req, res) => {
   const body = await readBody(req);
@@ -114,6 +118,38 @@ const fake = http.createServer(async (req, res) => {
       }});
     }
     return sendJson(res, {code: '0', msg: 'OK', info: {}});
+  }
+  if (pathname === '/open-api/goods/query-document-state') {
+    const item = body.json?.spuList?.[0] || {};
+    if (String(item.spuName).toLowerCase() !== 'b2608062023343035' || item.version !== correctionDocumentVersion) return sendJson(res, {code: '0', msg: 'OK', info: {data: []}});
+    return sendJson(res, {code: '0', msg: 'OK', info: {data: [{
+      spuName: 'b2608062023343035',
+      version: correctionDocumentVersion,
+      skcList: [{skcName: 'sb260806202334303501938', documentState: correctionDocumentState}],
+    }]}});
+  }
+  if (pathname === '/open-api/goods/revoke-product') {
+    if (body.json?.spuName !== 'b2608062023343035' || correctionDocumentState !== 1) return sendJson(res, {code: '400', msg: 'bad revoke payload/state'});
+    correctionDocumentState = 4;
+    return sendJson(res, {code: '0', msg: 'OK', traceId: 'trace-correction-revoke'});
+  }
+  if (pathname === '/open-api/goods/product/publishOrEdit') {
+    const row = body.json?.skc_list?.[0] || {};
+    const sku = row?.sku_list?.[0] || {};
+    const unchanged = body.json?.spu_name === 'b2608062023343035'
+      && row.skc_name === 'sb260806202334303501938'
+      && sku.sku_code === 'SKU-LIVE-SB-001'
+      && row.supplier_code === 'SK-15061热风梳'
+      && sku.supplier_sku === 'SK-15061-ORIGINAL'
+      && sku.cost_info?.cost_price === '88.00'
+      && sku.stock_info_list?.[0]?.stock === 100
+      && body.json?.multi_language_name_list?.[0]?.name === 'Original locked title'
+      && row.image_info?.image_info_list?.some(image => String(image.image_url).includes('approved-correction-main'));
+    if (!unchanged) return sendJson(res, {code: '400', msg: 'protected fields or correction images invalid'});
+    if (failCorrectionRepublish) return sendJson(res, {code: '0', msg: 'OK', info: {success: false, pre_valid_result: [{form: 'smoke', messages: ['recoverable republish failure']}]}});
+    correctionDocumentVersion = 'SPMP260806399999999';
+    correctionDocumentState = 1;
+    return sendJson(res, {code: '0', msg: 'OK', traceId: 'trace-correction-publish', info: {success: true, version: correctionDocumentVersion, spu_name: 'b2608062023343035', skc_list: [{skc_name: 'sb260806202334303501938', sku_list: [{sku_code: 'SKU-LIVE-SB-001'}]}]}});
   }
   if (pathname === '/open-api/msc/warehouse/list') {
     return sendJson(res, {code: '0', msg: 'OK', info: {list: [{
@@ -374,6 +410,74 @@ try {
   const liveSbSearchDry = await runNode([...commonArgs, '--task-id', liveSbSearchTask.id, '--task-json', liveSbSearchTaskFile, '--dry-run']);
   check('unbound SB target still resolves from live OpenAPI', liveSbSearchDry.json?.adapterEvidence?.matchedLinks?.[0]?.resolvedFrom, 'openapi_exact_skc');
   check('unbound SB exact lookup respects searchProduct pageSize limit', calls.find(c => c.path === '/open-api/goods/searchProduct')?.body?.pageSize, 10);
+
+  const correctionBindings = [
+    {name: 'approved-correction-main.png', role: 'mainCover', imageType: 1, imageUrl: 'https://img.shein.com/approved-correction-main.png', width: 900, height: 1200, order: 1},
+    {name: 'approved-correction-detail.png', role: 'detail', imageType: 2, imageUrl: 'https://img.shein.com/approved-correction-detail.png', width: 900, height: 1200, order: 2},
+    {name: 'approved-correction-square.png', role: 'squareImage', imageType: 5, imageUrl: 'https://img.shein.com/approved-correction-square.png', width: 1200, height: 1200, order: 3},
+  ];
+  const correctionSourcePayload = {
+    category_id: 789,
+    multi_language_name_list: [{language: 'en', name: 'Original locked title'}],
+    product_attribute_list: [{attribute_id: 1000546, attribute_extra_value: 'SK-15061'}],
+    skc_list: [{
+      supplier_code: 'SK-15061热风梳',
+      image_info: {image_info_list: [{image_type: 1, image_sort: 1, image_url: 'https://img.shein.com/wrong-sm961.png'}]},
+      sku_list: [{supplier_sku: 'SK-15061-ORIGINAL', cost_info: {currency: 'SAR', cost_price: '88.00'}, stock_info_list: [{warehouse_id: 'WH-SMOKE', stock: 100}]}],
+    }],
+  };
+  const correctionBindingFingerprint = 'c'.repeat(64);
+  const correctionPlan = buildPendingListingImageCorrection({
+    sourceTask: {id: 'source-publish-smoke', openapiPublishPayload: correctionSourcePayload, execution: {actualWriteSubmitted: true}},
+    sourceTaskId: 'source-publish-smoke',
+    targetStore: 'SMK',
+    identity: {spuName: 'b2608062023343035', skcName: 'sb260806202334303501938', skuCodes: ['SKU-LIVE-SB-001']},
+    documentVersion: correctionDocumentVersion,
+    approvedBindings: correctionBindings,
+    approvedBindingFingerprint: correctionBindingFingerprint,
+  });
+  const correctionTask = {
+    id: 'pending-correction-smoke',
+    status: 'waiting_review',
+    command: '纠正待审核新品图片',
+    targets: {stores: ['SMK'], productRefs: ['b2608062023343035', 'sb260806202334303501938']},
+    intents: ['update_images'],
+    publishAssetBinding: {schemaVersion: 2, kind: 'update_images', sourceApproved: true, targetStore: 'SMK', bindingFingerprint: correctionBindingFingerprint},
+    imageEditPayload: {
+      spu_name: 'b2608062023343035',
+      skc_list: [{skc_name: 'sb260806202334303501938', image_info: correctionPlan.republishPayload.skc_list[0].image_info, sku_list: [{sku_code: 'SKU-LIVE-SB-001'}]}],
+    },
+    pendingNewListingImageCorrection: correctionPlan,
+  };
+  const correctionDryFile = await writeJson('task-pending-correction-dry.json', {version: 1, tasks: [correctionTask]});
+  calls.length = 0;
+  const correctionDry = await runNode([...commonArgs, '--task-id', correctionTask.id, '--task-json', correctionDryFile, '--dry-run']);
+  const correctionDryHash = correctionDry.json?.payload?.payloadHash || '';
+  check('pending correction dry-run ready', correctionDry.json?.state, 'ready_for_submit');
+  check('pending correction dry-run locks hash', Boolean(correctionDryHash), true);
+  check('pending correction dry-run plans revoke then republish', correctionDry.json?.payload?.summary?.operations || [], xs => JSON.stringify(xs) === JSON.stringify(['pending_new_listing_revoke','pending_new_listing_republish']));
+  check('pending correction dry-run performs no write', calls.some(call => ['/open-api/goods/revoke-product','/open-api/goods/product/publishOrEdit'].includes(call.path)), false);
+  check('pending correction dry-run queries exact version', calls.find(call => call.path === '/open-api/goods/query-document-state')?.body?.spuList?.[0]?.version, 'SPMP260806300745650');
+  const correctionExecFile = await writeJson('task-pending-correction-exec.json', {version: 1, executionContext: {expectedPayloadHash: correctionDryHash}, tasks: [correctionTask]});
+  calls.length = 0;
+  const correctionFailed = await runNode([...commonArgs, '--task-id', correctionTask.id, '--task-json', correctionExecFile, '--execute', '--confirm', CONFIRM_TEXT]);
+  check('pending correction definite republish failure is recoverable', correctionFailed.json?.state, 'pending_listing_image_correction_recovery_required');
+  check('pending correction records write attempt without final submit', correctionFailed.json?.adapterEvidence?.writeAttempted, true);
+  check('pending correction does not claim final submit on failure', correctionFailed.json?.adapterEvidence?.realSubmit, false);
+  check('pending correction leaves document withdrawn', correctionDocumentState, 4);
+  calls.length = 0;
+  const correctionRecoveryDry = await runNode([...commonArgs, '--task-id', correctionTask.id, '--task-json', correctionDryFile, '--dry-run']);
+  const correctionRecoveryHash = correctionRecoveryDry.json?.payload?.payloadHash || '';
+  check('pending correction recovery dry-run skips repeated revoke', correctionRecoveryDry.json?.payload?.summary?.operations || [], xs => JSON.stringify(xs) === JSON.stringify(['pending_new_listing_republish']));
+  check('pending correction recovery receives new phase hash', correctionRecoveryHash !== correctionDryHash, true);
+  failCorrectionRepublish = false;
+  const correctionRecoveryExecFile = await writeJson('task-pending-correction-recovery-exec.json', {version: 1, executionContext: {expectedPayloadHash: correctionRecoveryHash}, tasks: [correctionTask]});
+  calls.length = 0;
+  const correctionRecovered = await runNode([...commonArgs, '--task-id', correctionTask.id, '--task-json', correctionRecoveryExecFile, '--execute', '--confirm', CONFIRM_TEXT]);
+  check('pending correction recovered submit succeeds', correctionRecovered.json?.state, 'submitted');
+  check('pending correction recovered readback exact state', correctionRecovered.json?.readback?.status, 'matched_pending_document_state');
+  check('pending correction strong readback uses new version', correctionRecovered.json?.readback?.evidence?.version, 'SPMP260806399999999');
+  check('pending correction never calls partialEdit', calls.some(call => call.path === '/open-api/goods/product/partialEdit'), false);
 
   const badImageTask = {
     id: 'bad-image-smoke',

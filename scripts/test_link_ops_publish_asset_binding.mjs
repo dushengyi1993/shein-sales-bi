@@ -5,6 +5,11 @@ import {
   applyExplicitPublishPreparationOverrides,
   taskHasUnboundImageAssets,
 } from '../lib/link_ops_publish_asset_binding.mjs';
+import {
+  buildPendingListingImageCorrection,
+  extractExactDocumentState,
+  validatePendingListingImageCorrection,
+} from '../lib/link_ops_pending_listing_image_correction.mjs';
 
 const checks = [];
 function check(label, actual, expected) {
@@ -62,6 +67,36 @@ check('maintenance binding carries exact SKU only for image binding', maintenanc
 check('maintenance binding has no title field', 'multi_language_name_list' in maintenanceBound.payload, false);
 check('maintenance binding has no inventory or price fields', JSON.stringify(maintenanceBound.payload), text => !/stock_info|cost_info|shopPrice|specialPrice/.test(text));
 check('maintenance binding records task image payload source', maintenanceBound.evidence.payloadSource, 'task.imageEditPayload');
+
+const correction = buildPendingListingImageCorrection({
+  sourceTask: {
+    id: 'published-source-task',
+    openapiPublishPayload: payload,
+    execution: {actualWriteSubmitted: true},
+  },
+  sourceTaskId: 'published-source-task',
+  targetStore: 'HL',
+  identity: {spuName: 'B2608062023343035', skcName: 'SB260806202334303501938', skuCodes: ['SKU-LIVE-SB-001']},
+  documentVersion: 'SPMP260806300745650',
+  approvedBindings: explicitSkuBindings,
+  approvedBindingFingerprint: 'b'.repeat(64),
+});
+const correctionTask = {publishAssetBinding: {bindingFingerprint: 'b'.repeat(64)}, pendingNewListingImageCorrection: correction};
+const correctionValidation = validatePendingListingImageCorrection(correctionTask, {store: 'HL'});
+check('pending correction validates exact source/binding identity', correctionValidation.ok, true);
+check('pending correction injects platform SPU', correction.republishPayload.spu_name, 'b2608062023343035');
+check('pending correction injects platform SB SKC', correction.republishPayload.skc_list[0].skc_name, 'sb260806202334303501938');
+check('pending correction injects platform SKU', correction.republishPayload.skc_list[0].sku_list[0].sku_code, 'SKU-LIVE-SB-001');
+check('pending correction keeps original title', correction.republishPayload.multi_language_name_list[0].name, 'old ar');
+check('pending correction keeps original supplier code', correction.republishPayload.skc_list[0].supplier_code, 'old-code');
+check('pending correction keeps original price', correction.republishPayload.skc_list[0].sku_list[0].cost_info.cost_price, '99.00');
+check('pending correction keeps original inventory', correction.republishPayload.skc_list[0].sku_list[0].stock_info_list[0].stock, 8);
+check('pending correction replaces wrong image', JSON.stringify(correction.republishPayload), text => text.includes('/upload/main.png') && !text.includes('source.jpg'));
+const state = extractExactDocumentState({info: {data: [{spuName: 'b2608062023343035', version: 'SPMP260806300745650', skcList: [{skcName: 'sb260806202334303501938', documentState: 1}]}]}}, correction.identity, correction.documentVersion);
+check('pending correction reads one exact pending document', state.documentState, 1);
+const tamperedCorrectionTask = JSON.parse(JSON.stringify(correctionTask));
+tamperedCorrectionTask.pendingNewListingImageCorrection.republishPayload.skc_list[0].supplier_code = 'tampered';
+check('pending correction rejects protected-field drift', validatePendingListingImageCorrection(tamperedCorrectionTask, {store: 'HL'}).ok, false);
 
 const overridden = applyExplicitPublishPreparationOverrides(bound.payload, {
   standardGoodsSn: '(全)SK-999食品料理机',

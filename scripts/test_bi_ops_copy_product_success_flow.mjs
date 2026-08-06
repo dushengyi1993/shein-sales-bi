@@ -326,6 +326,13 @@ const fakeOpenApi = http.createServer(async (req, res) => {
       },
     });
   }
+  if (pathname === '/open-api/goods/query-document-state') {
+    const item = body.json?.spuList?.[0] || {};
+    if (String(item.spuName || '').toLowerCase() === 'b2608062023343035' && item.version === 'SPMP260806300745650') {
+      return sendJson(res, {code: '0', msg: 'OK', info: {data: [{spuName: 'b2608062023343035', version: 'SPMP260806300745650', skcList: [{skcName: 'sb260806202334303501938', documentState: 1}]}]}});
+    }
+    return sendJson(res, {code: '0', msg: 'OK', info: {data: []}});
+  }
   if (pathname === '/open-api/goods/query-publish-fill-in-standard') {
     return sendJson(res, {
       code: '0',
@@ -780,6 +787,26 @@ try {
     check('bound payload locks supply price', boundRawTask?.openapiPublishPayload?.skc_list?.[0]?.sku_list?.[0]?.cost_info?.cost_price, '210.00');
     check('bound payload locks exact supplier code', boundRawTask?.openapiPublishPayload?.skc_list?.[0]?.supplier_code, taskStandardGoodsSn);
 
+    const correctionSourceCreated = await req('/api/link-ops-tasks', {
+      method: 'POST',
+      cookie,
+      body: {source: 'pending_correction_source_smoke', command: 'source publish task', targets: {stores: ['HL'], productRefs: [taskStandardGoodsSn]}},
+    });
+    const correctionSourceTaskId = extractTaskId(correctionSourceCreated.json);
+    await updateRawTaskById(correctionSourceTaskId, task => ({
+      ...task,
+      status: 'done',
+      intents: ['copy_product_draft'],
+      targets: {...task.targets, stores: ['HL'], writeStores: ['HL']},
+      openapiPublishPayload: boundRawTask.openapiPublishPayload,
+      execution: {
+        actualWriteSubmitted: true,
+        writeAudit: {actualWriteSubmitted: true},
+        openApiProductExecutors: [{
+          publishResult: {code: '0', msg: 'OK', info: {success: true, version: 'SPMP260806300745650', spu_name: 'b2608062023343035', skc_list: [{skc_name: 'sb260806202334303501938', sku_list: [{sku_code: 'SKU-LIVE-SB-001'}]}]}},
+        }],
+      },
+    }));
     const maintenanceCreated = await req('/api/link-ops-tasks', {
       method: 'POST',
       cookie,
@@ -803,7 +830,7 @@ try {
         taskId: maintenanceTaskId,
         store: 'HL',
         sourceApproved: true,
-        productIdentity: {spuName: 'B2608062023343035', skcName: 'SB260806202334303501938'},
+        sourceTaskId: correctionSourceTaskId,
         bindings: [
           {name: '02-approved-main.png', role: 'mainCover', imageType: 1, imageUrl: 'https://img.shein.com/approved/main.png', width: 900, height: 1200, order: 1},
           {name: '05-approved-carousel.png', role: 'carouselSecondCover', imageType: 1, imageUrl: 'https://img.shein.com/approved/carousel.png', width: 900, height: 1200, order: 2},
@@ -812,12 +839,24 @@ try {
         ],
       },
     });
-    const maintenanceRawTask = await rawTaskById(maintenanceTaskId);
+    let maintenanceRawTask = await rawTaskById(maintenanceTaskId);
     check('approved update_images binding status', maintenanceBinding.status, 200);
     check('approved update_images binding uses task image payload', maintenanceBinding.json?.binding?.payloadSource, 'task.imageEditPayload');
+    check('approved update_images binding prepares pending correction', maintenanceBinding.json?.binding?.pendingNewListingImageCorrection, true);
+    check('approved update_images binding locks source publish task', maintenanceRawTask?.pendingNewListingImageCorrection?.sourceTaskId, correctionSourceTaskId);
+    check('pending correction keeps full source title', maintenanceRawTask?.pendingNewListingImageCorrection?.republishPayload?.multi_language_name_list?.[0]?.name, boundRawTask?.openapiPublishPayload?.multi_language_name_list?.[0]?.name);
     check('approved update_images binding locks exact SB target', maintenanceRawTask?.imageEditPayload?.skc_list?.[0]?.skc_name, 'sb260806202334303501938');
     check('approved update_images binding does not create publish payload', 'openapiPublishPayload' in (maintenanceRawTask || {}), false);
     check('approved update_images binding touches no title or stock', JSON.stringify(maintenanceRawTask?.imageEditPayload || {}), text => !/multi_language_name_list|stock_info|cost_info|shopPrice|specialPrice/.test(text));
+    const reusedCorrection = await req('/api/link-ops-publish-assets', {
+      method: 'POST',
+      cookie,
+      body: {taskId: maintenanceTaskId, store: 'HL', sourceApproved: true, sourceTaskId: correctionSourceTaskId, reuseApprovedBinding: true},
+    });
+    maintenanceRawTask = await rawTaskById(maintenanceTaskId);
+    check('existing approved binding can prepare correction without reupload', reusedCorrection.status, 200);
+    check('reused correction keeps same approved image count', maintenanceRawTask?.publishAssetBinding?.imageCount, 4);
+    check('reused correction keeps source task', maintenanceRawTask?.pendingNewListingImageCorrection?.sourceTaskId, correctionSourceTaskId);
     const maintenanceDryRun = await req('/api/link-ops-execute', {
       method: 'POST',
       cookie,
@@ -1082,7 +1121,7 @@ try {
   const auditText = fssync.existsSync(auditFile) ? await fs.readFile(auditFile, 'utf8') : '';
   result.summary.taskCount = Array.isArray(tasks.tasks) ? tasks.tasks.length : 0;
   result.summary.auditLines = auditText.trim() ? auditText.trim().split(/\r?\n/).length : 0;
-  check('task count', result.summary.taskCount, ASSET_BINDING ? 2 : 1);
+  check('task count', result.summary.taskCount, ASSET_BINDING ? 3 : 1);
   check('audit lines >= expected', result.summary.auditLines, n => n >= (WEAK_READBACK_ONLY ? 8 : 5));
 
   result.ok = result.checks.every(x => x.pass);
