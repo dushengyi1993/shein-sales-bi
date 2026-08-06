@@ -397,7 +397,7 @@ try {
       skc_list: [{
         skc_name: 'SB260806202334303501938',
         image_info: {image_info_list: [{image_sort: 1, image_type: 1, image_url: 'http://imgdeal-test01.shein.com/images3_pi/live-sb-main.jpg'}]},
-        sku_list: [{sku_code: 'sku-live-sb-001', image_info: {image_info_list: [{image_sort: 1, image_type: 1, image_url: 'http://imgdeal-test01.shein.com/images3_pi/live-sb-sku.jpg'}]}}],
+        sku_list: [{sku_code: 'SKU-LIVE-SB-001', image_info: {image_info_list: [{image_sort: 1, image_type: 1, image_url: 'http://imgdeal-test01.shein.com/images3_pi/live-sb-sku.jpg'}]}}],
       }],
     },
     intents: ['update_images'],

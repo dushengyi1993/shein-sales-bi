@@ -617,9 +617,10 @@ async function fetchSpuInfoForImages(client, matches, calls, warnings){
           if(skcName&&skcGroupCode) skcGroups[skcKey]=skcGroupCode;
           const skuSaleAttributes={};
           for(const skuRow of asArray(skcRow.skuInfoList||skcRow.sku_info_list||skcRow.skuList||skcRow.sku_list)){
-            const skuCode=safeString(skuRow.skuCode||skuRow.sku_code||'',160).toLowerCase();
+            const exactSkuCode=safeString(skuRow.skuCode||skuRow.sku_code||'',160);
+            const skuCode=exactSkuCode.toLowerCase();
             if(!skuCode) continue;
-            skuSaleAttributes[skuCode]=asArray(skuRow.saleAttributeList||skuRow.sale_attribute_list).map(attribute=>{
+            skuSaleAttributes[skuCode]={skuCode:exactSkuCode,saleAttributes:asArray(skuRow.saleAttributeList||skuRow.sale_attribute_list).map(attribute=>{
               const attributeId=Number(attribute?.attributeId??attribute?.attribute_id);
               const attributeValueId=Number(attribute?.attributeValueId??attribute?.attribute_value_id);
               const customAttributeValue=safeString(attribute?.customAttributeValue??attribute?.custom_attribute_value,200);
@@ -630,7 +631,7 @@ async function fetchSpuInfoForImages(client, matches, calls, warnings){
                 ...(customAttributeValue?{custom_attribute_value:customAttributeValue}:{}),
                 ...(language?{language}:{}),
               };
-            }).filter(attribute=>attribute.attribute_id);
+            }).filter(attribute=>attribute.attribute_id)};
           }
           if(skcName&&Object.keys(skuSaleAttributes).length) skuSaleAttributesBySkc[skcKey]=skuSaleAttributes;
         }
@@ -758,7 +759,8 @@ function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEdi
                   if(!sku?.image_info||Object.prototype.hasOwnProperty.call(sku,'sale_attribute_list')) continue;
                   const skuKey=safeString(sku.sku_code||sku.skuCode,160).toLowerCase();
                   if(Object.prototype.hasOwnProperty.call(liveSkuAttributes,skuKey)){
-                    sku.sale_attribute_list=JSON.parse(JSON.stringify(liveSkuAttributes[skuKey]));
+                    sku.sku_code=liveSkuAttributes[skuKey].skuCode;
+                    sku.sale_attribute_list=JSON.parse(JSON.stringify(liveSkuAttributes[skuKey].saleAttributes));
                     injectedSkuSaleAttributeCount+=1;
                   } else {
                     blockers.push(`SKU 图片编辑缺少实时销售属性：${safeString(sku.sku_code||sku.skuCode,160)}；已阻断提交，避免平台把图片编辑误判为不完整 SKU 编辑。`);
