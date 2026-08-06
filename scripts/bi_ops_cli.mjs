@@ -267,6 +267,7 @@ Usage:
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <id> --store JSH --image-dir <已审可用图片目录> --approved-assets --standard-goods-sn "(全)SK-999食品料理机" --supply-price 210 --inventory 100
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --spu <SPU> --skc <SB/SV-SKC> [--sku-code <SKU>]
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --source-task-id <刚发布任务id>
+  node scripts/bi_ops_cli.mjs prepare-pending-image-correction --task-id <update_images任务id> --store HL --source-task-id <刚发布任务id>
   node scripts/bi_ops_cli.mjs retire-candidates --file <v3-times.csv> --performance-date 2026-07-04 [--out <dir>]
   node scripts/bi_ops_cli.mjs upload-pic --store FY --image-type 2 --file <image.jpg> [--mode dry-run|execute]
   node scripts/bi_ops_cli.mjs transform-pic --store FY --image-type 2 --url <https://...> [--mode dry-run|execute]
@@ -323,6 +324,7 @@ Options:
   --image-dir      plan-images 用；只扫描本地图包并输出角色规划，不上传、不提交
   --approved-assets  prepare-publish 用；确认图片目录已经过人工审核，AI 不得按语义擅自剔图
   --source-task-id    prepare-publish 的 update_images 模式；从指定已提交发布任务的 publishResult/readbackFingerprint 精确继承 SPU/SKC/SKU
+                      prepare-pending-image-correction 会复用任务中现有已审图片绑定，不重复上传图片
   --standard-goods-sn / --supply-price / --inventory
                    prepare-publish 用；把货号、供货价和库存锁到同一任务
   --supplier-sku / --input-current-ma
@@ -509,6 +511,7 @@ const KNOWLEDGE_CHECK_COMMANDS = new Set([
   'chat', 'tasks', 'create', 'operate', 'preflight', 'execute', 'resolve', 'audit',
   'upload-pic', 'upload_pic', 'transform-pic', 'transform_pic',
   'prepare-publish', 'prepare_publish',
+  'prepare-pending-image-correction', 'prepare_pending_image_correction',
 ]);
 
 const AUTO_UPDATE_COMMANDS = new Set([
@@ -1097,6 +1100,45 @@ async function runPreparePublish(args) {
   });
 }
 
+async function runPreparePendingImageCorrection(args) {
+  if (!args.taskId) throw new Error('prepare-pending-image-correction requires --task-id <id>');
+  if (!args.sourceTaskId) throw new Error('prepare-pending-image-correction requires --source-task-id <published task id>');
+  const store = [...new Set([...(args.writeStores || []), ...(args.stores || [])])][0] || '';
+  if (!store) throw new Error('prepare-pending-image-correction requires --store <target store>');
+  const {json: bindingJson} = await request(args, '/api/link-ops-publish-assets', {
+    method: 'POST',
+    body: {
+      taskId: args.taskId,
+      store,
+      sourceApproved: true,
+      sourceTaskId: args.sourceTaskId,
+      reuseApprovedBinding: true,
+    },
+  });
+  if (bindingJson?.binding?.pendingNewListingImageCorrection !== true) {
+    throw new Error('云端没有生成待审核新品纠图计划；已停止预演');
+  }
+  const {json: preflightJson} = await request(args, '/api/link-ops-execute', {
+    method: 'POST',
+    body: {id: args.taskId, mode: 'dry-run', source: 'codex_desktop_cli_prepare_pending_image_correction'},
+  });
+  print({
+    ok: true,
+    taskId: args.taskId,
+    sourceTaskId: args.sourceTaskId,
+    store,
+    binding: bindingJson.binding,
+    task: preflightJson.task,
+    execution: preflightJson.execution,
+    safety: {
+      imagesReused: true,
+      imagesUploadedAgain: false,
+      realWriteOccurred: false,
+      nextStep: '核对撤回+完整重提计划及 payloadHash；只有用户明确确认后才调用 execute。',
+    },
+  });
+}
+
 function operatorGuide() {
   return {
     ok: true,
@@ -1371,6 +1413,10 @@ async function main() {
   }
   if (args.command === 'prepare-publish' || args.command === 'prepare_publish') {
     await runPreparePublish(args);
+    return;
+  }
+  if (args.command === 'prepare-pending-image-correction' || args.command === 'prepare_pending_image_correction') {
+    await runPreparePendingImageCorrection(args);
     return;
   }
   if (args.command === 'retire-candidates' || args.command === 'retire_candidates') {

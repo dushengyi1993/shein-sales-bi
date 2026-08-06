@@ -81,6 +81,7 @@ import {
   applyExplicitPublishPreparationOverrides,
   normalizePublishPreparationOverrides,
 } from '../lib/link_ops_publish_asset_binding.mjs';
+import {buildPendingListingImageCorrection} from '../lib/link_ops_pending_listing_image_correction.mjs';
 import {
   ADDITIONAL_DUPLICATE_PUBLISH_CONFIRM_TEXT,
   normalizeAdditionalDuplicatePublishOverrideInput,
@@ -4841,6 +4842,8 @@ function resolveApprovedMaintenanceImageIdentity(task, body, taskRows = [], {act
     skuCodes: explicitSkuCodes.length ? explicitSkuCodes : sourceIdentity.skuCodes,
     sourceTaskId,
     source: sourceTask ? 'referenced_publish_task' : (explicitSpu || explicitSkc ? 'explicit_cli_identity' : 'task_product_refs'),
+    _sourceTask: sourceTask,
+    _sourceVersions: sourceIdentity.versions,
   };
 }
 
@@ -5516,7 +5519,7 @@ function asArray(value) {
 
 function buildLinkOpsExecutionWriteAudit({task, actor, req, runId, at, requestedMode, finalState, submitted, executorRuns = [], blockers = [], warnings = [], confirmTextPresent = false, executeAllowed = false, lifecycleTransition = null, realSubmitWhitelistChecks = []}) {
   const issuedExecuteToExecutor = executorRuns.some(executorRun => String(executorRun?.mode || '') === 'execute');
-  const sheinWriteAttempted = executorRuns.some(executorRun => Boolean(executorRun?.result?.publishResult));
+  const sheinWriteAttempted = executorRuns.some(executorRun => Boolean(executorRun?.result?.publishResult || executorRun?.result?.adapterEvidence?.writeAttempted));
   const suspiciousWriteAttempted = executorRuns.some(executorRun => Boolean(executorRun?.result?.suspiciousWriteAttempted) || String(executorRun?.result?.state || '') === 'suspicious_write_attempted');
   const lifecycleLocked = Boolean(lifecycleTransition?.locked);
   const requiresManualResolve = Boolean(lifecycleTransition?.needsManualResolve || suspiciousWriteAttempted);
@@ -5638,6 +5641,24 @@ function classifyLinkOpsLifecycle({
   originalStatus = '',
 }) {
   const readbacks = executorReadbackOutcomes(executorResults);
+  if (executorState === 'pending_listing_image_correction_recovery_required') {
+    return {
+      version: 1,
+      fromStatus: originalStatus,
+      toStatus: 'waiting_review',
+      status: 'pending_listing_image_correction_recovery_required',
+      lifecycleStatus: 'pending_listing_image_correction_recovery_required',
+      terminal: false,
+      locked: false,
+      needsManualResolve: false,
+      requestedMode,
+      executorState,
+      submitted: false,
+      submittedPossibly: false,
+      readbacks,
+      note: '待审核新品纠图已完成可确认的撤回阶段，但完整重提尚未成功；任务保留为可恢复状态，必须重新回读、预演并确认后继续。',
+    };
+  }
   if (suspiciousWriteAttempted) {
     return {
       version: 1,
@@ -5802,7 +5823,11 @@ function payloadHashForMaintenanceFromTaskExecution(task, storeKey = '', operati
   const match = runs.find(run => {
     const storeMatches = String(run?.storeKey || '').trim().toUpperCase() === target
       || String(run?.storeKey || '').split(',').map(x => x.trim().toUpperCase()).includes(target);
-    const operations = Array.isArray(run?.payload?.summary?.operations) ? run.payload.summary.operations.map(x => String(x).toLowerCase()) : [];
+    const operations = [
+      ...asArray(run?.payload?.summary?.operations),
+      ...asArray(run?.payload?.submitPlan?.intents),
+      ...asArray(run?.readbackFingerprint?.intents),
+    ].map(x => String(x).toLowerCase());
     return storeMatches && (!op || operations.includes(op));
   }) || (runs.length === 1 ? runs[0] : null);
   const hash = String(match?.payload?.payloadHash || '').trim();
@@ -5946,7 +5971,11 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
     throw error;
   }
   if (body.sourceApproved !== true) throw new Error('必须明确 sourceApproved=true 才能绑定人工审核素材');
-  const bindings = asArray(body.bindings);
+  const bindings = asArray(body.bindings).length
+    ? asArray(body.bindings)
+    : body.reuseApprovedBinding === true
+      ? asArray(task?.publishAssetBinding?.images)
+      : [];
   if (!bindings.length || bindings.length > 14) throw new Error('Approved publish asset binding requires 1-14 uploaded images');
   const intents = asArray(task?.intents).map(value => String(value || '').trim()).filter(Boolean);
   const isMaintenanceImageBinding = intents.includes('update_images') && !intents.includes('copy_product_draft');
@@ -5963,9 +5992,22 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
       identity: bound.identity,
       bindings: bound.bindings.map(row => ({name: row.name, role: row.role, imageType: row.imageType, imageUrl: row.imageUrl, sha256: row.sha256})),
     })).digest('hex');
+    const sourceVersions = [...new Set(asArray(identity._sourceVersions).map(value => String(value || '').trim()).filter(Boolean))];
+    const pendingNewListingImageCorrection = identity._sourceTask
+      ? buildPendingListingImageCorrection({
+          sourceTask: identity._sourceTask,
+          sourceTaskId: identity.sourceTaskId,
+          targetStore,
+          identity: bound.identity,
+          documentVersion: sourceVersions.length === 1 ? sourceVersions[0] : '',
+          approvedBindings: bound.bindings,
+          approvedBindingFingerprint: bindingFingerprint,
+        })
+      : null;
     const nextTask = {
       ...task,
       imageEditPayload: bound.payload,
+      ...(pendingNewListingImageCorrection ? {pendingNewListingImageCorrection} : {}),
       publishAssetBinding: {
         schemaVersion: 2,
         kind: 'update_images',
@@ -5986,7 +6028,13 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
           height: row.height,
           sha256: row.sha256,
         })),
-        evidence: {...bound.evidence, identitySource: identity.source, sourceTaskId: identity.sourceTaskId || ''},
+        evidence: {
+          ...bound.evidence,
+          identitySource: identity.source,
+          sourceTaskId: identity.sourceTaskId || '',
+          pendingNewListingImageCorrection: Boolean(pendingNewListingImageCorrection),
+          correctionFingerprint: pendingNewListingImageCorrection?.correctionFingerprint || '',
+        },
       },
       execution: {
         ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
@@ -6020,8 +6068,10 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
         ...bound.evidence,
         identity: bound.identity,
         identitySource: identity.source,
-        sourceTaskId: identity.sourceTaskId || '',
-        preflightInvalidated: true,
+      sourceTaskId: identity.sourceTaskId || '',
+      pendingNewListingImageCorrection: Boolean(pendingNewListingImageCorrection),
+      correctionFingerprint: pendingNewListingImageCorrection?.correctionFingerprint || '',
+      preflightInvalidated: true,
       },
     };
   }
@@ -6544,7 +6594,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
   const executorRuns = [...openApiProductExecutors, ...openApiMaintenanceExecutors];
   const executorResults = executorRuns.map(x => x.result).filter(Boolean);
   const issuedExecuteToExecutor = executorRuns.some(x => String(x?.mode || '') === 'execute');
-  const sheinWriteAttempted = executorResults.some(x => Boolean(x?.publishResult));
+  const sheinWriteAttempted = executorResults.some(x => Boolean(x?.publishResult || x?.adapterEvidence?.writeAttempted));
   const suspiciousWriteAttempted = executorResults.some(x => Boolean(x?.suspiciousWriteAttempted) || String(x?.state || '') === 'suspicious_write_attempted');
   const combinedBlockers = uniqueMessages([
     ...preflight.blockers,
@@ -6559,11 +6609,14 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
   const hasOpenApiProductExecutor = openApiProductExecutors.length > 0;
   const hasOpenApiMaintenanceExecutor = openApiMaintenanceExecutors.length > 0;
   const submitted = executorResults.some(x => x?.state === 'submitted');
+  const pendingListingCorrectionRecovery = executorResults.some(x => x?.state === 'pending_listing_image_correction_recovery_required');
   const publishPreValidFailed = executorResults.some(x => x?.state === 'publish_pre_valid_failed' || x?.publishResult?.info?.success === false);
   const executorState = submitted
     ? 'submitted'
     : suspiciousWriteAttempted
       ? 'suspicious_write_attempted'
+      : pendingListingCorrectionRecovery
+        ? 'pending_listing_image_correction_recovery_required'
       : publishPreValidFailed
         ? 'publish_pre_valid_failed'
     : hasOpenApiProductExecutor
