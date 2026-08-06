@@ -122,16 +122,36 @@ if (cliArgs.port !== null) {
   store.port = cliArgs.port;
 }
 const profileDir = path.join(ROOT, 'profiles', `persistent-${store.profileKey}-profile`);
-const cacheDir = path.join(profileDir, 'cache');
+// Keep disposable browser cache outside the persistent login profile.  The old
+// layout placed it below every store profile and allowed Chromium to grow an
+// unbounded copy per store.  Login state (Cookies/Local Storage/IndexedDB)
+// remains in profileDir; only cache lives in the disposable root.
+const localCacheRoot = process.env.SHEIN_BI_LOCAL_BROWSER_CACHE_ROOT
+  ? path.resolve(process.env.SHEIN_BI_LOCAL_BROWSER_CACHE_ROOT)
+  : path.join(process.env.LOCALAPPDATA || ROOT, 'SheinBI', 'browser-cache');
+const cacheDir = process.platform === 'win32'
+  ? path.join(localCacheRoot, String(store.profileKey || store.storeKey).toLowerCase())
+  : path.join(profileDir, 'cache');
 const logDir = path.join(ROOT, 'logs');
 fs.mkdirSync(profileDir, {recursive: true});
 fs.mkdirSync(cacheDir, {recursive: true});
 fs.mkdirSync(logDir, {recursive: true});
 const profileName = ensureProfileName(profileDir, store);
+const disabledFeatures = [
+  'OptimizationGuideOnDeviceModel',
+  'OptimizationGuideModelDownloading',
+  'OptimizationGuideModelExecution',
+  'PromptAPIForGeminiNano',
+  'SummarizationAPIForGeminiNano',
+  'WriterAPIForGeminiNano',
+  'RewriterAPIForGeminiNano',
+  ...(cliArgs.allowLocalNetworkAssets ? ['LocalNetworkAccessChecks'] : []),
+];
 
 const args = [
   `--user-data-dir=${profileDir}`,
   `--disk-cache-dir=${cacheDir}`,
+  '--disk-cache-size=104857600',
   '--remote-debugging-address=127.0.0.1',
   `--remote-debugging-port=${store.port}`,
   '--profile-directory=Profile 1',
@@ -140,11 +160,13 @@ const args = [
   '--disable-background-timer-throttling',
   '--disable-renderer-backgrounding',
   '--disable-backgrounding-occluded-windows',
-  ...(cliArgs.allowLocalNetworkAssets ? [
-    // Some SHEIN CDN hostnames resolve through the local proxy address space.
-    // Current Chrome otherwise blocks those official scripts under LNA checks.
-    '--disable-features=LocalNetworkAccessChecks',
-  ] : []),
+  // SHEIN automation does not use Chrome's on-device AI.  Disabling these
+  // components prevents multi-gigabyte model copies from being downloaded
+  // independently into every persistent store profile.
+  // Some SHEIN CDN hostnames resolve through the local proxy address space;
+  // when requested, LocalNetworkAccessChecks joins the same switch so a
+  // duplicate --disable-features argument cannot overwrite the model guards.
+  `--disable-features=${disabledFeatures.join(',')}`,
   ...(!cliArgs.background && !cliArgs.headless ? [
     '--start-maximized',
   ] : []),
@@ -350,6 +372,7 @@ console.log(JSON.stringify({
   profileName,
   port: store.port,
   profileDir,
+  cacheDir,
   url: customUrl,
   mode: cliArgs.headless ? 'headless' : (cliArgs.background ? 'background' : 'visible'),
   headless: cliArgs.headless,

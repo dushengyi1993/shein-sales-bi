@@ -172,7 +172,7 @@ assert.equal(property(marketingGuard, 'TimeoutStartSec'), '1800');
 
 const marketingRepairTimer = readUnit('shein-bi-cloud-marketing-repair.timer');
 const marketingRepairWindows = [...marketingRepairTimer.matchAll(/^OnCalendar=(.*)$/gm)].map(match => match[1].trim());
-assert.deepEqual(marketingRepairWindows, ['*-*-* 10,12,14,16,18,19:50:00']);
+assert.deepEqual(marketingRepairWindows, ['*-*-* 20:45:00', '*-*-* 21:15:00']);
 assert.equal(property(marketingRepairTimer, 'Persistent'), 'false');
 const marketingRepair = readUnit('shein-bi-cloud-marketing-repair.service');
 const marketingRepairScript = fs.readFileSync(new URL('./cloud_marketing_repair_worker.sh', import.meta.url), 'utf8');
@@ -180,6 +180,8 @@ assert.doesNotMatch(marketingRepair, /^ExecStart(?:Pre|Post)=.*cleanup_shein_sto
   'marketing repair must not stack unit-level cleanup around its lease-owned script cleanup');
 assert.match(marketingRepair, /SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS=1/);
 assert.match(marketingRepair, /SHEIN_BI_MARKETING_REPAIR_EXECUTION_LOCATION=cloud/);
+assert.match(marketingRepair, /SHEIN_BI_MARKETING_CLOUD_FALLBACK_ENABLED=true/);
+assert.match(marketingRepair, /run_cloud_marketing_fallback_slot\.sh/);
 assert.match(marketingRepair, /SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY=\/srv\/shein-bi\/runtime\/marketing_manual_limited_discount_overrides\.json/);
 assert.match(marketingRepair, /SHEIN_BI_MARKETING_AUTOMATION_AUTHORIZATION=owner-standing-cloud-marketing-v1/);
 assert.match(marketingRepairScript, /--max-groups "\$REMAINING_GROUPS"/);
@@ -191,6 +193,7 @@ assert.match(marketingRepairScript, /IS_CLOUD_EXECUTION=1/);
 assert.match(marketingRepairScript, /EXECUTION_LOCATION.*== "local".*ROOT.*!= "\/opt\/shein-bi\/app"/);
 assert.doesNotMatch(marketingRepairScript, /AUTOMATION_CONTEXT.*== "cloud_timer"/);
 assert.match(marketingRepairScript, /SHEIN_BI_MARKETING_CLOUD_WRITE_GATE=bounded-repair-v1/);
+assert.match(marketingRepairScript, /local execution already covered all authorized repairs/);
 assert.equal(property(marketingRepair, 'TimeoutStartSec'), '2400');
 
 const storageFeeTimer = readUnit('shein-bi-cloud-et-storage-fee.timer');

@@ -158,7 +158,7 @@ guard 只生成并锁定队列，不执行任何写入。价格决策先按“ET
 
 人工特殊折扣的“已覆盖”不是只看价格：live 证据必须同时证明精确价格、活动库存不少于登记 `activityStock`、活动截止时间不早于登记 `validTo`。新建/恢复后必须按活动 ID、价格、库存和截止时间逐项精确回读；缺字段也视为证据不足并进入恢复/阻断，不得报绿。
 
-guard 本身不应产生浏览器。repair worker 若因平台写入启动浏览器，必须在每个店铺批次完成、失败或阻断后通过父任务拥有的租约立即关闭；最终确认远程调试端口和临时 Chrome 目录为 0。
+guard 本身不应产生浏览器。日常 repair/write 优先由负责人本机的后台 headless Chrome 串行执行，不弹前端、不抢焦点；每个店铺批次完成、失败或阻断后立即关闭。云端只在当日本机没有闭环时，于 `20:45–20:57`、`21:15–21:27` 两个应急窗各处理最多 1 店/1组，并在执行前用全店只读重扫消除本地已经完成的工作，禁止重放。最终确认远程调试端口和临时 Chrome 目录为 0。
 
 云端 Chrome 进程归零后，清理器还必须删除已关闭店铺 profile 下的 `SingletonLock`、`SingletonCookie`、`SingletonSocket`；只能对确认无该店 Chrome 进程的精确 profile 执行。日报收口同时核对进程、调试端口、Chrome 临时目录和这些 profile 锁，避免“进程为 0 但下批浏览器仍因旧锁无法启动”。
 
@@ -168,7 +168,9 @@ guard 本身不应产生浏览器。repair worker 若因平台写入启动浏览
 
 `state/browser_task_leases/<task>--<store>.json` 是单任务、单店原子租约。有效租约（TTL 未到且同机 owner PID 存活）保护该店浏览器和 profile 锁；清理器只处理无有效租约的孤儿。TTL 到期、同机 owner 已死亡或格式损坏的租约会先被回收，再考虑清理该店。纯 session HTTP 的 cloud marketing guard 不持有浏览器租约；repair worker、链接/业务域抓取、登录态管家等确实启动浏览器的任务才申请租约，并把父任务的 task/runId 传给子批次做精确收尾。
 
-guard 的 `runId` 写入不可覆盖的 `state/cloud_marketing_live_guard/reports/marketing-live-guard-<date>-<runId>.json`。当天第一次成功巡检后，`13:30/16:30` 只作为失败重试窗口，不会在 repair queue 消费期间再次全店扫描、重建 hash 或冲掉进度。写阶段的状态与 resume 证据只保存在 repair queue 和各批次结果中；只有精确回读成功的组才可跳过。
+guard 的 `runId` 写入不可覆盖的 `state/cloud_marketing_live_guard/reports/marketing-live-guard-<date>-<runId>.json`。当前云端只读窗口是 `11:00/13:00/16:00`；当天第一次成功后，后两次只作为失败重试，不会在 repair queue 消费期间再次无条件重建 hash。负责人本机自动化在 `11:10/13:10/16:10` 读取当天证据：首轮主执行，后两轮只续跑未终态工作；guard 仍在运行时最多短等 5 分钟，随后记 WAITING 并交给下一轮，禁止会话空轮询半小时。只有精确回读成功的组才可跳过。
+
+本地和云端店铺登录态必须分开维护。本机执行只探测/恢复本地独立 Profile；云端 `session-manager` 独立维护服务器 Profile 和 session HTTP。正常流程不得复制 Cookie 冒充另一侧恢复成功；只有云端自身缺失且经过验证的受控导出/回灌流程才允许做一次性迁移。
 
 ## 7. 每日人话输出
 
@@ -229,6 +231,7 @@ guard 的 `runId` 写入不可覆盖的 `state/cloud_marketing_live_guard/report
 - 每个写入组只回读受影响店铺/活动；整条 repair queue 结束后再做一次全店 live readback。不得在每个组后都重复全扫 19 店，也不得省掉最终全店闭环。
 - 限时折扣组部分成功时，以 `createdActivityId + desiredCoveredSkcs` 作为精确续跑证据；已创建成功的 SKC 不得整组重放，只把未覆盖或明确阻断的 `storeKey + SKC` 留给下一批。`blockedTargetCount` 按唯一阻断键计数，progress 只能在本批所有选中组结束后写 `complete=true`。
 - 无论成功、失败或阻断，本批浏览器立即关闭；最终确认调试端口和 Chrome 临时目录为 0。
+- 本机批次结束后运行 `node scripts/cleanup_local_shein_browser_profile_cache.mjs --apply`。该工具默认 dry-run、活动 Profile 必跳过，真实清理只删除 Chrome 模型和缓存；Cookies、Login Data、Local Storage、Session Storage、IndexedDB 为永久保护项。
 
 ## 9. 当前效率基线与防回退
 

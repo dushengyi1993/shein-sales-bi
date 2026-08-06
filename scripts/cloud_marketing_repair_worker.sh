@@ -16,6 +16,10 @@ LEASE_ACQUIRED=0
 MAX_GROUPS="${SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS:-8}"
 AUTOMATION_CONTEXT="${SHEIN_BI_MARKETING_AUTOMATION_CONTEXT:-}"
 EXECUTION_LOCATION="${SHEIN_BI_MARKETING_REPAIR_EXECUTION_LOCATION:-cloud}"
+CLOUD_FALLBACK_ENABLED="${SHEIN_BI_MARKETING_CLOUD_FALLBACK_ENABLED:-false}"
+FALLBACK_MIN_START_BUDGET_SEC="${SHEIN_BI_MARKETING_REPAIR_MIN_START_BUDGET_SEC:-360}"
+FALLBACK_HARD_DEADLINE_MINUTE="${SHEIN_BI_MARKETING_REPAIR_SLOT_HARD_DEADLINE_MINUTE:-}"
+FALLBACK_HARD_DEADLINE_NEXT_HOUR="${SHEIN_BI_MARKETING_REPAIR_SLOT_HARD_DEADLINE_NEXT_HOUR:-0}"
 IS_CLOUD_EXECUTION=1
 if [[ "$EXECUTION_LOCATION" == "local" && "$ROOT" != "/opt/shein-bi/app" ]]; then
   IS_CLOUD_EXECUTION=0
@@ -149,6 +153,40 @@ defer_remaining_work() {
   fi
   write_state pending "$message"
   exit 0
+}
+
+fallback_remaining_seconds() {
+  [[ -n "$FALLBACK_HARD_DEADLINE_MINUTE" ]] || { echo 999999; return 0; }
+  local now_epoch current_hour deadline_epoch
+  now_epoch="$(date +%s)"
+  current_hour="$(date +%Y-%m-%dT%H)"
+  deadline_epoch="$(date -d "${current_hour}:${FALLBACK_HARD_DEADLINE_MINUTE}:00" +%s)"
+  if [[ "$FALLBACK_HARD_DEADLINE_NEXT_HOUR" == "1" ]]; then
+    deadline_epoch=$((deadline_epoch + 3600))
+  fi
+  echo $((deadline_epoch - now_epoch))
+}
+
+ensure_fallback_start_budget() {
+  (( IS_CLOUD_EXECUTION == 1 )) || return 0
+  [[ "$CLOUD_FALLBACK_ENABLED" == "true" ]] || return 0
+  local remaining
+  remaining="$(fallback_remaining_seconds)"
+  if (( remaining < FALLBACK_MIN_START_BUDGET_SEC )); then
+    defer_remaining_work "cloud emergency slot has ${remaining}s left; refuse to start another transaction"
+  fi
+}
+
+validate_cloud_fallback_window() {
+  (( IS_CLOUD_EXECUTION == 1 )) || return 0
+  [[ "$CLOUD_FALLBACK_ENABLED" == "true" ]] || return 0
+  local hour minute
+  hour=$((10#$(TZ="$TZ_NAME" date +%H)))
+  minute=$((10#$(TZ="$TZ_NAME" date +%M)))
+  if ! (( (hour == 20 && minute >= 45 && minute < 57) || (hour == 21 && minute >= 15 && minute < 27) )); then
+    write_state deferred_to_local "cloud emergency fallback is outside 20:45-20:57 / 21:15-21:27"
+    exit 75
+  fi
 }
 
 send_daily_group_report() {
@@ -307,7 +345,7 @@ if [[ "$QUEUE_STATUS" == "completed" || "$QUEUE_STATUS" == "blocked" ]]; then
   echo "[cloud_marketing_repair] queue already terminal status=$QUEUE_STATUS"
   exit 0
 fi
-if (( IS_CLOUD_EXECUTION == 1 )); then
+if (( IS_CLOUD_EXECUTION == 1 )) && [[ "$CLOUD_FALLBACK_ENABLED" != "true" ]]; then
   node scripts/marketing/manage_marketing_repair_queue.mjs handoff-local \
     --queue "$QUEUE_FILE" \
     --reason "cloud marketing writes are disabled; preserve the exact queue for local controlled execution"
@@ -322,6 +360,7 @@ if (( IS_CLOUD_EXECUTION == 1 )); then
   echo "[cloud_marketing_repair] DEFER TO LOCAL before browser lease or SHEIN mutation"
   exit 75
 fi
+validate_cloud_fallback_window
 ACTIVE_BUSY="$(active_busy_services)"
 if [[ -n "$ACTIVE_BUSY" ]]; then
   write_state deferred_to_local "cloud host is busy; keep the exact queue for local-browser continuation: $ACTIVE_BUSY"
@@ -350,8 +389,33 @@ export SHEIN_BI_BROWSER_LEASE_RUN_ID="$RUN_ID"
 cleanup_store_browsers
 REMAINING_GROUPS="$MAX_GROUPS"
 
+# A local runner may have completed writes without mutating the cloud queue.
+# The emergency cloud slot therefore rebuilds the exact queue from a fresh
+# browserless 19-store snapshot before it is allowed to open any cloud Chrome.
+# This prevents replaying work already completed on the owner's computer.
+if (( IS_CLOUD_EXECUTION == 1 )) && [[ "$CLOUD_FALLBACK_ENABLED" == "true" ]]; then
+  run_terminal_final_snapshot
+  build_current_repair_plans
+  rebuild_repair_queue
+  QUEUE_STATUS="$(queue_value 'j.status' pending)"
+  if [[ "$QUEUE_STATUS" == "completed" ]]; then
+    write_state ok "local execution already covered all authorized repairs; cloud fallback only performed final readback"
+    send_daily_group_report
+    echo "[cloud_marketing_repair] fallback readback found no remaining work date=$DATE"
+    exit 0
+  fi
+  if [[ "$QUEUE_STATUS" == "blocked" ]]; then
+    write_state blocked "final readback found only terminal business blockers; cloud fallback did not write"
+    send_daily_group_report
+    echo "[cloud_marketing_repair] fallback readback found only terminal blockers date=$DATE"
+    exit 0
+  fi
+  ensure_fallback_start_budget
+fi
+
 HIGH_CLICK_STATUS="$(queue_value 'j.stages?.highClickSpecial?.status' not_required)"
 if [[ "$HIGH_CLICK_STATUS" != "not_required" && "$HIGH_CLICK_STATUS" != "completed" ]]; then
+  ensure_fallback_start_budget
   WORK_FINGERPRINT="$(queue_value 'j.stages?.highClickSpecial?.workFingerprint' '')"
   export SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH="$WORK_FINGERPRINT"
   GUARD_PATH="$ROOT/$(queue_value 'j.sourceGuard' '')"
@@ -389,6 +453,7 @@ fi
 
 MANUAL_STATUS="$(queue_value 'j.stages?.manualSpecialRestore?.status' not_required)"
 if [[ "$MANUAL_STATUS" != "not_required" && "$MANUAL_STATUS" != "completed" ]]; then
+  ensure_fallback_start_budget
   export SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH="$(queue_value 'j.stages?.manualSpecialRestore?.workFingerprint || j.stages?.manualSpecialRestore?.inputFingerprint' '')"
   WORK_FINGERPRINT="$(queue_value 'j.stages?.manualSpecialRestore?.workFingerprint' '')"
   GUARD_PATH="$ROOT/$(queue_value 'j.sourceGuard' '')"
@@ -419,6 +484,7 @@ fi
 
 DRIFT_STATUS="$(queue_value 'j.stages?.driftRepair?.status' not_required)"
 if [[ "$DRIFT_STATUS" != "not_required" && "$DRIFT_STATUS" != "completed" ]]; then
+  ensure_fallback_start_budget
   WORK_FINGERPRINT="$(queue_value 'j.stages?.driftRepair?.workFingerprint' '')"
   export SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH="$WORK_FINGERPRINT"
   GUARD_PATH="$ROOT/$(queue_value 'j.sourceGuard' '')"
@@ -452,6 +518,7 @@ fi
 
 FALLBACK_STATUS="$(queue_value 'j.stages?.fallbackRepair?.status' not_required)"
 if [[ "$FALLBACK_STATUS" != "not_required" && "$FALLBACK_STATUS" != "completed" ]]; then
+  ensure_fallback_start_budget
   WORK_FINGERPRINT="$(queue_value 'j.stages?.fallbackRepair?.workFingerprint' '')"
   export SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH="$WORK_FINGERPRINT"
   GUARD_PATH="$ROOT/$(queue_value 'j.sourceGuard' '')"
@@ -492,6 +559,7 @@ if [[ "$QUEUE_STATUS" == "blocked" ]]; then
 fi
 
 if [[ "$QUEUE_STATUS" == "awaiting_final_readback" ]]; then
+  ensure_fallback_start_budget
   if run_final_readback; then
     if [[ "$(queue_value 'j.status' pending)" == "completed" ]]; then
       write_state ok "all queued repairs passed final full-store live readback"

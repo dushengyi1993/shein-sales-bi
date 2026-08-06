@@ -77,7 +77,7 @@ const heavyUnits = [
 for (const name of heavyUnits) {
   const content = unit(name);
   assert.match(content, /^Slice=shein-host-heavy-bi\.slice$/m, name);
-  assert.match(content, /run_host_(?:heavy|browser_read)_job\.sh|run_cloud_portal_section_queue_slot\.sh/, name);
+  assert.match(content, /run_host_(?:heavy|browser_read)_job\.sh|run_cloud_(?:portal_section_queue|marketing_fallback)_slot\.sh/, name);
   assert.match(content, /^SuccessExitStatus=75$/m, name);
 }
 
@@ -198,15 +198,25 @@ assert.match(portalQueueWorker, /outside_safe_start_window/);
 assert.match(portalQueueWorker, /stop before next core lane/);
 
 const repair = read('scripts/cloud_marketing_repair_worker.sh');
+const repairSlot = read('scripts/run_cloud_marketing_fallback_slot.sh');
 assert.match(repair, /write_state deferred_to_local/);
-assert.match(unit('shein-bi-cloud-marketing-repair.service'), /--defer-reason deferred_to_local/);
+assert.match(unit('shein-bi-cloud-marketing-repair.service'), /run_cloud_marketing_fallback_slot\.sh/);
+assert.match(repairSlot, /--defer-reason deferred_to_local/);
+assert.match(repairSlot, /HARD_DEADLINE_MINUTE=57/);
+assert.match(repairSlot, /HARD_DEADLINE_MINUTE=27/);
+assert.match(repairSlot, /HOUR == 20/);
+assert.match(repairSlot, /HOUR == 21/);
 assert.match(unit('shein-bi-cloud-marketing-repair.service'), /SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS=1/);
 assert.match(unit('shein-bi-cloud-marketing-repair.service'), /SHEIN_BI_MARKETING_REPAIR_EXECUTION_LOCATION=cloud/);
+assert.match(unit('shein-bi-cloud-marketing-repair.service'), /SHEIN_BI_MARKETING_CLOUD_FALLBACK_ENABLED=true/);
 assert.match(repair, /CURRENT_MINUTE >= 23 && CURRENT_MINUTE <= 42/);
 assert.match(repair, /remaining exact queue preserved for local-browser continuation/);
 assert.match(repair, /IS_CLOUD_EXECUTION=1/);
 assert.doesNotMatch(repair, /AUTOMATION_CONTEXT.*== "cloud_timer"/);
 assert.match(repair, /SHEIN_BI_MARKETING_CLOUD_WRITE_GATE=bounded-repair-v1/);
+assert.match(repair, /fallback readback found no remaining work/);
+assert.match(repair, /refuse to start another transaction/);
+assert.match(repair, /outside 20:45-20:57 \/ 21:15-21:27/);
 
 const nodeWrapper = read('infra/bin/shein-bi-node');
 const cloudWriteGate = read('lib/cloud_marketing_write_gate.mjs');

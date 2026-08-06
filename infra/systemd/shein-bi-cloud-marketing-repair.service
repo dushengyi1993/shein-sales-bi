@@ -21,6 +21,8 @@ Environment=SHEIN_BI_MARKETING_LIVE_SCAN_KILL_AFTER_SEC=60
 Environment=SHEIN_BI_MARKETING_PRICE_SESSION_CONCURRENCY=3
 Environment=SHEIN_BI_MARKETING_AUTOMATION_CONTEXT=cloud_timer
 Environment=SHEIN_BI_MARKETING_REPAIR_EXECUTION_LOCATION=cloud
+Environment=SHEIN_BI_MARKETING_CLOUD_FALLBACK_ENABLED=true
+Environment=SHEIN_BI_MARKETING_REPAIR_MIN_START_BUDGET_SEC=360
 Environment=SHEIN_BI_MARKETING_AUTOMATION_AUTHORIZATION=owner-standing-cloud-marketing-v1
 TimeoutStartSec=2400
 TimeoutStopSec=90
@@ -33,5 +35,5 @@ MemoryHigh=2200M
 MemoryMax=3000M
 OOMPolicy=stop
 KillMode=control-group
-ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain marketing-repair --class browser --lock-wait-sec 0 --deadline-minute 17 --deadline-next-hour --defer-state /srv/shein-bi/runtime/host-scheduler/marketing-repair.latest.json --defer-reason deferred_to_local -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_marketing_repair_worker.sh
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_cloud_marketing_fallback_slot.sh
 SuccessExitStatus=75

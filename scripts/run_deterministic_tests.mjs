@@ -156,6 +156,7 @@ const tests = [
   'scripts/test_bi_ops_frontend_confirm_feedback.mjs',
   'scripts/test_shein_store_identity_merchant_fallback.mjs',
   'scripts/test_shein_browser_cdp.mjs',
+  'scripts/test_local_browser_profile_cache_cleanup.mjs',
   'scripts/test_bi_ops_portal_shell_sync.mjs',
 ];
 

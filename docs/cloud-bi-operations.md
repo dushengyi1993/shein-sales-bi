@@ -120,8 +120,9 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 | `14:10` | ET 仓储费 `shein-bi-cloud-et-storage-fee.service` | ET headless/API，只读 `IncomeBill(sort=2)` + `ExportStoreFee` | 写仓储费事实、canonical 账单与利润 cache | 与通用 ET 共用 profile 锁但隔离输出；只预热利润，不刷新无关库存趋势。 |
 | `02:20` | 登录态管家 `shein-bi-cloud-session-manager.service` | 短生命周期 headless browser + WebAPI/SBN 探针 | 不写销售事实 | 恢复 WebAPI + SBN 登录态，结束后关闭它启动的浏览器。 |
 | `06:30` | 订单闭环复查 `shein-bi-cloud-order-closure.service` | OpenAPI + Webhook/售后/ET 既有证据 | 只更新订单生命周期状态，不重写历史销售事实 | 不再因店铺后台 Cookie 过期整批失败；已有更强物流终态证据不会被较弱状态覆盖。 |
-| `10:30/13:30/16:30` | 每日营销 live guard `shein-bi-cloud-marketing-live-guard.service` | session HTTP 只读直连 | 一次读取 19 店普通活动、15% 券 active 集合与当前/未来活动价，生成精确计划和 repair queue；不持有写授权 | 不启动浏览器、不申请浏览器租约、不执行清理；当天首次成功后后续窗口只作失败重试。 |
-| `10:50/12:50/14:50/16:50/18:50/19:30` | 营销 repair worker | 受控浏览器写入 | 只执行负责人长期授权内的限时折扣修复 | 前五轮有界续跑，`19:30` 做最终续跑与回读；每轮总预算 8 组。 |
+| `11:00/13:00/16:00` | 每日营销检查 `shein-bi-cloud-marketing-live-guard.service` | session HTTP 只读直连 | 一次读取 19 店普通活动、15% 券 active 集合与当前/未来活动价，生成待处理营销清单；不持有写授权 | 不启动浏览器；当天首次成功后后续窗口只作失败重试。 |
+| 本机 `11:10/13:10/16:10` | 本地后台营销执行 | Windows headless Chrome，串行单店 | 只执行负责人长期授权内的限时折扣修复；每店 dry-run、事务、定点回读后立即关浏览器 | `11:10` 主执行；后两次只续跑未终态队列。本机离线时保留队列，不把 WAITING 报成故障。 |
+| `20:45/21:15` | 云端营销应急兜底 `shein-bi-cloud-marketing-repair.service` | 受控浏览器写入 | 先做全店只读重扫，只有本机当天未闭环的长期授权缺口才执行 | 两段分别在 `20:57/21:27` 停止派新组，每段最多 1 店/1组；`21:02–21:13` 全托核心首页车道绝不占用。 |
 | `03:45/09:50/21:00` | 浏览器残留清理 `shein-bi-cloud-browser-cleanup.service` | 本机进程清理 | 不写业务数据 | 避开日更和营销窗口，只回收无有效租约保护的孤儿浏览器。 |
 | 每小时 `:50` | watchdog `shein-bi-cloud-watchdog.service` | 只读巡检 | 不写业务数据 | 检查服务、timer、BI 新鲜度、销售/页面过期、浏览器残留并发提醒。 |
 | `02:40` | 数据库备份 `shein-bi-db-backup.service` | PostgreSQL dump/备份 | 备份 | 默认保留 14 天。 |
@@ -130,6 +131,8 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 - 仓储费回灌/补跑使用 `bash scripts/cloud_et_storage_fee_sync.sh backfill YYYY-MM-DD`。完成标准不是“抓到文件”，而是 `check_storage_fee_profit.mjs` 四层守恒、`audit_bi_warehouse.mjs` 无 errors、timer/service success 和 profile Chrome 为 0。
 
 - 营销 live guard 临时补跑必须避开 ET `:20`、晨间/日更、登录态管家、备份和订单闭环。`2026-07-18 21:06` 的 19 店生产实测为 `157s`、Chrome `0 -> 0`；若正常巡检再次升到十几分钟或数小时，应视为重复抓取、浏览器回退或扫描夹带写入的故障。
+- 本地和云端登录态是两套独立运行态：本地 Profile 只服务本机后台执行，云端 session manager 继续独立维护服务器 Profile/session HTTP。任一侧恢复成功都不能冒充另一侧已恢复；验证码或协议弹窗只在该侧自动恢复失败后才打开可见维护窗口。
+- 本机持久 Profile 只保留登录必需状态。`launch_store_browser.mjs` 把磁盘缓存放到 `%LOCALAPPDATA%/SheinBI/browser-cache` 并限制为 100MB；批次结束且无本项目 Chrome 后运行 `cleanup_local_shein_browser_profile_cache.mjs --apply`，只清理模型和缓存，永不删除 Cookies、Login Data、Local/Session Storage 或 IndexedDB。
 
 - 慢变补采只放在 `shein-bi-cloud-daily-refresh.service`：由 `shein-bi-cloud-morning-chain.timer` 在 08:00 直接启动；链接/业务域、商品列表/库存/流量、SBN 营销概览和 RTV 换单复核集中在这个批次内。MBRs 全店普通活动/优惠券/限时折扣价格栈只由独立 guard 实时读取，禁止在日更内再扫一遍。
 

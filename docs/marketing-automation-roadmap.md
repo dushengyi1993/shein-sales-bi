@@ -78,13 +78,13 @@
 
 自动任务模式的硬边界：
 
-- 本地 Codex heartbeat 只负责汇报、观察报告、dry-run 清单和阻塞原因；云端 guard timer 只负责完整 live scan、精确计划和建队列，不持有写授权。负责人长期策略授权内的限时折扣动作只由独立 repair worker 执行。
-- 复核频率按风险分层。云端 timer 每日做一次 19 店完整基线；动作后只复扫受影响店并与成功基线合并（shell 尚未接入定点合并前，保留最终全量复扫）。本地临时补扫按候选店铺最小集合和 3–5 店小批次执行，跑完关闭。
+- 云端 guard timer 负责完整 live scan、精确计划和建队列，不持有写授权。本地 Codex heartbeat 在 `11:10/13:10/16:10` 读取当天精确事实，以不弹前端的 headless Chrome 串行执行负责人长期授权内的限时折扣动作并完成受影响店回读；首轮主执行，后两轮只续跑。云端 repair 仅在 `20:45/21:15` 做本机未闭环的应急兜底，每段最多 1 店/1组。
+- 复核频率按风险分层。云端 timer 每日做一次 19 店完整基线；动作后只复扫受影响店并与成功基线合并，最终由云端 browserless 全店复核。普通活动/价格栈浏览器补扫按候选店铺最小集合串行执行，跑完关闭；不得恢复无差别19店前端扫描。
 - repair worker 的最终闭环必须按固定顺序执行：19 店普通活动/优惠券 session HTTP stack review 刷新 → 19 店价格栈 final scan → guard 重建。价格栈放在最后，避免待生效活动在 stack review 期间跨过开始时间，又被旧价格快照重新判为缺口。大批修复可能超过 `30` 分钟的同轮证据时差；如果不刷新 stack review，guard 会把已被当日 live 证据取代的历史 coupon/overlap 中间文件重新判成 stale blocker。最终 stack review 是 browserless session HTTP 刷新，不得回退为逐店前端扫描。
 - 飞书交付是最终闭环产物，不是 worker 进度通知。发送器要求队列已终态，且最终 guard 时间不早于队列终态和执行结果；blocked 队列还必须在最终扫描后重建当前 repair plans，并由 `check_marketing_terminal_report_readiness.mjs` 证明每个计划键已执行或已取得本轮安全阻断证据。发现未处理键时重建队列并延后发送，不得把第一次 blocked 当成日报终点。每日只交付一段简短最终结论和一个合并后的 `marketing-daily-final-YYYY-MM-DD.md`，guard 与 execution 文件仅作为生成素材保留在云端。
 - `source stale` 只表示证据需要刷新，不等于可以自动全店 live scan；如果没有低价止损、补券窗口或用户授权，日报只能报告“需补证据/等待窗口”，不得用全量前端扫描替代判断。
 - 若调用 `scripts/marketing/submit_coupon_activity_goods.mjs`，必须带 `--dry-run` 或 `--no-submit`。
-- 默认禁止本地 heartbeat 向无授权的写入型脚本传 `--execute`。长期授权例外包括：已批准普通活动在报名截止前新出现的可报差额、限时折扣价格漂移修复、登记中的人工特殊折扣恢复、新链接/新上架 7 天/重新上架无活动/漏限时折扣兜底，以及满足严格 7 日指标的高点击低转化专属折扣。它们不逐次索要人工确认，但每轮必须自动计算并校验精确 payload/work hash，同时通过授权 ID/上下文、身份、价格栈、库存/平台校验、dry-run 和执行后 live 回读。未批准的新普通活动、优惠券取消、补预算和无证据写入仍不得自动执行。
+- 默认禁止本地 heartbeat 向无授权的写入型脚本传 `--execute`。长期授权例外包括：已批准普通活动在报名截止前新出现的可报差额、限时折扣价格漂移修复、登记中的人工特殊折扣恢复、新链接/新上架 7 天/重新上架无活动/漏限时折扣兜底，以及满足严格 7 日指标的高点击低转化专属折扣。上述例外现在以本机后台 headless 执行为主，不逐次索要人工确认，但每轮必须自动计算并校验精确 payload/work hash，同时通过授权 ID/上下文、身份、价格栈、库存/平台校验、dry-run 和执行后 live 回读。未批准的新普通活动、优惠券取消、补预算和无证据写入仍不得自动执行。
 - 真实提交、回读、限时折扣补报或用户手动接管后，都必须把本批店铺浏览器关掉；全店批量任务结束后做一次全店 close 和 debug port 检查，确认没有店铺 profile 残留，不能把浏览器清理完全寄托给定时 cleanup。
 - 浏览器清理的完成条件包含店铺 profile 的 `SingletonLock/Cookie/Socket` 清理；仅在该 profile 已无 Chrome 进程时删除。进程和端口为 0 但 Singleton 锁仍在，不能视为可供下一批复用。
 - 营销中心 `/#/mbrs/` 若首屏出现 `LOADING_SOURCE_CODE`、`Failed to load script` 或“渲染异常”，浏览器启动器必须先绕缓存强刷，并按错误文案最多自动重试 3 次；恢复后继续当前店，不能把 CDN 静态脚本首拉失败误报为登录失效或跳过该店。提交/回读脚本仍需保留页面未就绪时的防御性重试。
