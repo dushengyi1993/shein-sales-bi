@@ -19,7 +19,7 @@ Environment=SHEIN_BI_PORTAL_REFRESH_LOCK_FILE=/opt/shein-bi/app/state/locks/shei
 Environment=SHEIN_PYTHON=/opt/shein-bi/app/.venv-et/bin/python
 Environment=SHEIN_ET_LOG_DIR=/srv/shein-bi/logs/cloud-et-forwarder
 Environment=SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT=cloud_et_low_inventory_guard
-Environment=SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION=owner-automatic-et-low-inventory-20260806-v2
+Environment=SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION=owner-automatic-et-low-inventory-20260806-v1
 TimeoutStartSec=900
 Nice=8
 CPUWeight=45

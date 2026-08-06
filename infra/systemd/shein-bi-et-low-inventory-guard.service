@@ -14,7 +14,7 @@ Environment=TZ=Asia/Shanghai
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=SHEIN_BI_ET_LOW_INVENTORY_RUNTIME_ROOT=/srv/shein-bi/runtime/et-low-inventory-guard
 Environment=SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT=cloud_et_low_inventory_guard
-Environment=SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION=owner-automatic-et-low-inventory-20260806-v2
+Environment=SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION=owner-automatic-et-low-inventory-20260806-v1
 TimeoutStartSec=900
 Nice=8
 CPUWeight=50

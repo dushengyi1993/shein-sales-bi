@@ -16,8 +16,8 @@ import {selectVirtualInventoryWarehouseCode} from '../lib/shein_inventory_wareho
 const policy = {
   triggerUsableInventoryAtOrBelow: 20,
   targetUsableInventory: 100,
-  minimumEtSellableForVirtualTopUp: 21,
-  lowEtAllocationAtOrBelow: 20,
+  minimumEtSellableForVirtualTopUp: 11,
+  lowEtAllocationAtOrBelow: 10,
   recentSaleScarcity: {minimumSaleCount: 1, targetUsableInventory: 10, refillWhenBelow: 5, capWhenAbove: 10},
   lowEtAllocation: {topExposureLinkCount: 5},
   eligibleShelfStatusCodes: ['1', '3'],
@@ -26,7 +26,7 @@ const policy = {
   soldOutRequiresOtherStoreOnShelfWithStock: true,
   requireExactlyOneSku: true,
   requireCurrentDayEtSnapshot: true,
-  etAlerts: {criticalDaysOfSupply: 7, warningDaysOfSupply: 14, lowQuantity: 20, replenishmentDaysOfSupply: 120},
+  etAlerts: {criticalDaysOfSupply: 7, warningDaysOfSupply: 14, lowQuantity: 10, replenishmentDaysOfSupply: 120},
   execution: {
     mode: 'manual_review',
     perRunUserConfirmationRequired: true,
@@ -56,16 +56,15 @@ assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '1', skuCou
   targetUsableInventory: 99,
   etSellableInventory: 99,
 });
-assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '1', skuCount: 1, platformUsableInventory: 100, etSellableInventory: 17, etSnapshotCurrentDay: true, c7SaleCount: 0, policy}).action, 'allocate');
-assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '1', skuCount: 1, platformUsableInventory: 20, etSellableInventory: 20, etSnapshotCurrentDay: true, c7SaleCount: 3, policy}).action, 'allocate');
-assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '1', skuCount: 1, platformUsableInventory: 50, etSellableInventory: 21, etSnapshotCurrentDay: true, c7SaleCount: 2, policy}), {
+assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '1', skuCount: 1, platformUsableInventory: 20, etSellableInventory: 10, etSnapshotCurrentDay: true, c7SaleCount: 3, policy}).action, 'allocate');
+assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '1', skuCount: 1, platformUsableInventory: 50, etSellableInventory: 11, etSnapshotCurrentDay: true, c7SaleCount: 2, policy}), {
   action: 'set_exact',
   reason: 'recent_sale_scarcity_cap_to_ten',
   targetUsableInventory: 10,
-  etSellableInventory: 21,
+  etSellableInventory: 11,
 });
-assert.equal(decideDailyInventoryReplenishment({shelfStatusCode: '1', skuCount: 1, platformUsableInventory: 7, etSellableInventory: 21, etSnapshotCurrentDay: true, c7SaleCount: 2, policy}).reason, 'recent_sale_scarcity_inventory_within_band');
-assert.equal(decideDailyInventoryReplenishment({shelfStatusCode: '1', skuCount: 1, platformUsableInventory: 4, etSellableInventory: 21, etSnapshotCurrentDay: true, c7SaleCount: 2, policy}).reason, 'recent_sale_scarcity_refill_to_ten');
+assert.equal(decideDailyInventoryReplenishment({shelfStatusCode: '1', skuCount: 1, platformUsableInventory: 7, etSellableInventory: 11, etSnapshotCurrentDay: true, c7SaleCount: 2, policy}).reason, 'recent_sale_scarcity_inventory_within_band');
+assert.equal(decideDailyInventoryReplenishment({shelfStatusCode: '1', skuCount: 1, platformUsableInventory: 4, etSellableInventory: 11, etSnapshotCurrentDay: true, c7SaleCount: 2, policy}).reason, 'recent_sale_scarcity_refill_to_ten');
 assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '1', skuCount: 2, platformUsableInventory: 1, etSellableInventory: 500, etSnapshotCurrentDay: true, c7SaleCount: 0, policy}).reason, 'sku_count_not_one');
 assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '4', skuCount: 1, platformUsableInventory: 1, etSellableInventory: 500, etSnapshotCurrentDay: true, c7SaleCount: 0, policy}).reason, 'shelf_status_not_eligible');
 assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '3', otherStoreOnShelfWithStock: true, skuCount: 1, platformUsableInventory: 0, etSellableInventory: 40, etSnapshotCurrentDay: true, c7SaleCount: 0, policy}).targetUsableInventory, 40);
@@ -85,21 +84,11 @@ const allocations = allocateLowEtInventory([
 ], 8, policy);
 assert.deepEqual(allocations.map(row => row.targetUsableInventory), [2, 2, 2, 1, 1, 0]);
 assert.deepEqual(allocations.map(row => row.exposureRank), [1, 2, 3, 4, 5, 6]);
-const allocationsAtSeventeen = allocateLowEtInventory([
-  {storeKey: 'A', skc: '1', c7Exposure: 600, c7GoodsVisitors: 60, c7SaleCount: 1},
-  {storeKey: 'B', skc: '2', c7Exposure: 500, c7GoodsVisitors: 50, c7SaleCount: 0},
-  {storeKey: 'C', skc: '3', c7Exposure: 400, c7GoodsVisitors: 40, c7SaleCount: 0},
-  {storeKey: 'D', skc: '4', c7Exposure: 300, c7GoodsVisitors: 30, c7SaleCount: 0},
-  {storeKey: 'E', skc: '5', c7Exposure: 200, c7GoodsVisitors: 20, c7SaleCount: 0},
-  {storeKey: 'F', skc: '6', c7Exposure: 100, c7GoodsVisitors: 10, c7SaleCount: 0},
-], 17, policy);
-assert.deepEqual(allocationsAtSeventeen.map(row => row.targetUsableInventory), [4, 4, 3, 3, 3, 0]);
-assert.equal(allocationsAtSeventeen.reduce((sum, row) => sum + row.targetUsableInventory, 0), 17);
 assert.deepEqual(classifyEtInventoryAlert({current_sellable_quantity: 0}, policy).severity, 'critical');
 assert.deepEqual(classifyEtInventoryAlert({current_sellable_quantity: null}, policy).severity, 'unknown');
 assert.deepEqual(classifyEtInventoryAlert({current_sellable_quantity: 80, days_of_supply_on_hand: 119}, policy).reason, 'et_days_of_supply_below_replenishment_threshold');
-assert.deepEqual(classifyEtInventoryAlert({current_sellable_quantity: 20, days_of_supply_on_hand: 120}, policy).reason, 'et_quantity_needs_manual_allocation');
-assert.deepEqual(classifyEtInventoryAlert({current_sellable_quantity: 21, days_of_supply_on_hand: 120}, policy).reason, 'sufficient');
+assert.deepEqual(classifyEtInventoryAlert({current_sellable_quantity: 10, days_of_supply_on_hand: 120}, policy).reason, 'et_quantity_needs_manual_allocation');
+assert.deepEqual(classifyEtInventoryAlert({current_sellable_quantity: 11, days_of_supply_on_hand: 120}, policy).reason, 'sufficient');
 assert.equal(stableInventoryHash({b: 1, a: 2}), stableInventoryHash({a: 2, b: 1}));
 const hash = 'a'.repeat(64);
 assert.deepEqual(assertDailyInventoryExecutionAuthorization({policy, payloadHash: hash, confirmHash: hash}).mode, 'manual_review');
@@ -159,7 +148,7 @@ assert.equal(livePolicy.execution.perRunUserConfirmationRequired, false);
 assert.equal(livePolicy.execution.automaticExecution.enabled, true);
 assert.equal(livePolicy.lowEtFastGuard.enabled, true);
 assert.equal(livePolicy.lowEtFastGuard.decreaseOnly, true);
-assert.equal(livePolicy.execution.automaticExecution.authorizationByContext.cloud_et_low_inventory_guard, 'owner-automatic-et-low-inventory-20260806-v2');
+assert.equal(livePolicy.execution.automaticExecution.authorizationByContext.cloud_et_low_inventory_guard, 'owner-automatic-et-low-inventory-20260806-v1');
 assert.match(guardScript, /flock -n 9/);
 assert.match(guardScript, /ensure_links_data_fresh/);
 assert.match(guardScript, /api\/bi\/section\/linksData\?refresh=1/);

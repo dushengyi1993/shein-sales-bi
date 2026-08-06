@@ -1,11 +1,11 @@
 {
   "schemaVersion": "daily-inventory-replenishment-policy/v1",
-  "policyVersion": "2026-08-06.2",
+  "policyVersion": "2026-08-06.1",
   "timezone": "Asia/Shanghai",
   "triggerUsableInventoryAtOrBelow": 20,
   "targetUsableInventory": 100,
-  "minimumEtSellableForVirtualTopUp": 21,
-  "lowEtAllocationAtOrBelow": 20,
+  "minimumEtSellableForVirtualTopUp": 11,
+  "lowEtAllocationAtOrBelow": 10,
   "recentSaleScarcity": {
     "lookbackDays": 7,
     "minimumSaleCount": 1,
@@ -20,10 +20,10 @@
   },
   "lowEtFastGuard": {
     "enabled": true,
-    "authorizationId": "owner-automatic-et-low-inventory-20260806-v2",
-    "authorizedAt": "2026-08-06T20:40:00+08:00",
+    "authorizationId": "owner-automatic-et-low-inventory-20260806-v1",
+    "authorizedAt": "2026-08-06T14:38:00+08:00",
     "authorizedBy": "owner_explicit_codex_confirmation",
-    "triggerAtOrBelow": 20,
+    "triggerAtOrBelow": 10,
     "decreaseOnly": true,
     "maxLinksSnapshotAgeHours": 24,
     "adaptiveRecheck": {
@@ -47,7 +47,7 @@
   "etAlerts": {
     "criticalDaysOfSupply": 7,
     "warningDaysOfSupply": 14,
-    "lowQuantity": 20,
+    "lowQuantity": 10,
     "replenishmentDaysOfSupply": 120
   },
   "execution": {
@@ -65,7 +65,7 @@
       ],
       "authorizationByContext": {
         "cloud_daily_inventory_replenishment_guard": "owner-automatic-inventory-20260803-v1",
-        "cloud_et_low_inventory_guard": "owner-automatic-et-low-inventory-20260806-v2"
+        "cloud_et_low_inventory_guard": "owner-automatic-et-low-inventory-20260806-v1"
       },
       "authorizedAt": "2026-08-03T11:54:00+08:00",
       "authorizedBy": "owner_explicit_codex_confirmation"

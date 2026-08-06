@@ -42,10 +42,7 @@ export function buildEtLowInventorySafetyPlan(sourcePlan, {batchId}) {
   const executionConstraints = {
     mode: 'et_low_inventory_safety',
     decreaseOnly: true,
-    maximumEtSellableInventory: Math.max(
-      0,
-      ...lowEtAllocations.map(row => Number(row.etSellableInventory)).filter(Number.isFinite),
-    ),
+    maximumEtSellableInventory: 10,
     triggerBatchId: batchId,
   };
   const blockers = [...new Set(Array.isArray(sourcePlan.blockers) ? sourcePlan.blockers : [])];
