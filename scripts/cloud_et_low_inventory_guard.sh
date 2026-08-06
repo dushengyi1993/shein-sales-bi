@@ -29,6 +29,18 @@ if [[ -z "$BATCH_ID" || "$TARGET_DATE" != "$DATE" || "$MANIFEST_OK" != "true" ]]
   exit 75
 fi
 if [[ -s "$STATE" ]] && [[ "$(jq -r '.lastProcessedBatchId // empty' "$STATE")" == "$BATCH_ID" ]]; then
+  # Older releases treated low-ET canonicals that still need future observation
+  # as a technical execution failure. A completed batch with no row-level
+  # blocker is healthy; keep the watchlist active without failing systemd.
+  if jq -e '(.counts.blocked // 0) == 0 and .ok != true' "$STATE" >/dev/null; then
+    tmp="$STATE.$$.tmp"
+    jq '
+      .ok = true
+      | .businessState = (if .active == true then "watching" else "settled" end)
+      | .counts.pendingCanonical = (.counts.blockedCanonical // 0)
+    ' "$STATE" >"$tmp"
+    mv "$tmp" "$STATE"
+  fi
   jq '{ok:true,state:"batch_already_processed",lastProcessedBatchId,active,planHash,result}' "$STATE"
   exit 0
 fi
@@ -120,7 +132,7 @@ jq -n \
   --argjson skipped "$SKIPPED" \
   --argjson blocked "$BLOCKED" \
   --argjson blockedCanonical "$BLOCKED_CANONICAL" \
-  '{ok:($blocked==0 and $blockedCanonical==0),active:$active,updatedAt:$at,lastProcessedBatchId:$batch,plan:$plan,planHash:$hash,result:$result,counts:{total:$total,updated:$updated,skipped:$skipped,blocked:$blocked,blockedCanonical:$blockedCanonical}}' >"$tmp"
+  '{ok:($blocked==0),businessState:(if $active then "watching" else "settled" end),active:$active,updatedAt:$at,lastProcessedBatchId:$batch,plan:$plan,planHash:$hash,result:$result,counts:{total:$total,updated:$updated,skipped:$skipped,blocked:$blocked,blockedCanonical:$blockedCanonical,pendingCanonical:$blockedCanonical}}' >"$tmp"
 mv "$tmp" "$STATE"
 jq '{ok,state:"completed",active,lastProcessedBatchId,planHash,result,counts}' "$STATE"
-if (( BLOCKED > 0 || BLOCKED_CANONICAL > 0 )); then exit 1; fi
+if (( BLOCKED > 0 )); then exit 1; fi

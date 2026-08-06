@@ -65,8 +65,12 @@ assert.match(forwarder, /orders,waybills,afterSales,inventoryTrend/);
 assert.match(forwarderService, /^OnSuccess=shein-bi-et-low-inventory-guard\.service$/m);
 assert.match(guardService, /SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT=cloud_et_low_inventory_guard/);
 assert.match(guard, /--operation-mode et_low_inventory_safety/);
+assert.match(guard, /\{ok:\(\$blocked==0\),businessState:/);
+assert.match(guard, /pendingCanonical:\$blockedCanonical/);
+assert.match(guard, /if \(\( BLOCKED > 0 \)\); then exit 1; fi/);
+assert.doesNotMatch(guard, /BLOCKED > 0 \|\| BLOCKED_CANONICAL > 0/);
 assert.match(recheck, /SHEIN_ET_ENDPOINTS="store_stock,box_stock"/);
 assert.match(recheckTimer, /^OnCalendar=\*-\*-\* 00,02,05,06,08,09,11,12,15,16,18,19,22:20:00$/m);
 assert.match(recheckTimer, /^Persistent=false$/m);
 
-console.log(JSON.stringify({ok: true, checks: 22}, null, 2));
+console.log(JSON.stringify({ok: true, checks: 26}, null, 2));
