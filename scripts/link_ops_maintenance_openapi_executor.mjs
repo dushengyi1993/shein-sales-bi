@@ -604,18 +604,38 @@ async function fetchSpuInfoForImages(client, matches, calls, warnings){
           ||spuImageRows.find(row=>row?.groupCode||row?.group_code)?.group_code
           ||'',120);
         const skcGroups={};
+        const skuSaleAttributesBySkc={};
         for(const skcRow of asArray(info.skcInfoList||info.skc_info_list||info.skcList||info.skc_list)){
           const skcName=safeString(skcRow.skcName||skcRow.skc_name||skcRow.skc||'',160);
+          const skcKey=normalizeSheinSkc(skcName)||skcName.toLowerCase();
           const skcImageRows=asArray(skcRow.skcImageInfoList||skcRow.skc_image_info_list||skcRow.imageInfoList||skcRow.image_info_list);
           const skcGroupCode=safeString(
             skcRow.groupCode||skcRow.group_code||skcRow.imageGroupCode||skcRow.image_group_code
             ||skcImageRows.find(row=>row?.groupCode||row?.group_code)?.groupCode
             ||skcImageRows.find(row=>row?.groupCode||row?.group_code)?.group_code
             ||'',120);
-          if(skcName&&skcGroupCode) skcGroups[normalizeSheinSkc(skcName)||skcName.toLowerCase()]=skcGroupCode;
+          if(skcName&&skcGroupCode) skcGroups[skcKey]=skcGroupCode;
+          const skuSaleAttributes={};
+          for(const skuRow of asArray(skcRow.skuInfoList||skcRow.sku_info_list||skcRow.skuList||skcRow.sku_list)){
+            const skuCode=safeString(skuRow.skuCode||skuRow.sku_code||'',160).toLowerCase();
+            if(!skuCode) continue;
+            skuSaleAttributes[skuCode]=asArray(skuRow.saleAttributeList||skuRow.sale_attribute_list).map(attribute=>{
+              const attributeId=Number(attribute?.attributeId??attribute?.attribute_id);
+              const attributeValueId=Number(attribute?.attributeValueId??attribute?.attribute_value_id);
+              const customAttributeValue=safeString(attribute?.customAttributeValue??attribute?.custom_attribute_value,200);
+              const language=safeString(attribute?.language,20);
+              return {
+                ...(Number.isFinite(attributeId)&&attributeId>0?{attribute_id:attributeId}:{}),
+                ...(Number.isFinite(attributeValueId)&&attributeValueId>0?{attribute_value_id:attributeValueId}:{}),
+                ...(customAttributeValue?{custom_attribute_value:customAttributeValue}:{}),
+                ...(language?{language}:{}),
+              };
+            }).filter(attribute=>attribute.attribute_id);
+          }
+          if(skcName&&Object.keys(skuSaleAttributes).length) skuSaleAttributesBySkc[skcKey]=skuSaleAttributes;
         }
-        if(spuGroupCode||Object.keys(skcGroups).length){
-          spuInfoMap.set(m.spu,{spuGroupCode, skcGroups, productTypeId:info.productTypeId||info.product_type_id||null});
+        if(spuGroupCode||Object.keys(skcGroups).length||Object.keys(skuSaleAttributesBySkc).length){
+          spuInfoMap.set(m.spu,{spuGroupCode, skcGroups, skuSaleAttributesBySkc, productTypeId:info.productTypeId||info.product_type_id||null});
         }
       }
     }catch(e){
@@ -730,6 +750,22 @@ function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEdi
                   if(gc && skc.image_info && !skc.image_info.image_group_code){ skc.image_info.image_group_code=gc; injectedGroupCodeCount+=1; }
                 }
               }
+              let injectedSkuSaleAttributeCount=0;
+              for(const skc of asArray(body.skc_list)){
+                const skcKey=normalizeSheinSkc(skc?.skc_name)||safeString(skc?.skc_name,120).toLowerCase();
+                const liveSkuAttributes=spuInfo.skuSaleAttributesBySkc?.[skcKey]||{};
+                for(const sku of asArray(skc?.sku_list)){
+                  if(!sku?.image_info||Object.prototype.hasOwnProperty.call(sku,'sale_attribute_list')) continue;
+                  const skuKey=safeString(sku.sku_code||sku.skuCode,160).toLowerCase();
+                  if(Object.prototype.hasOwnProperty.call(liveSkuAttributes,skuKey)){
+                    sku.sale_attribute_list=JSON.parse(JSON.stringify(liveSkuAttributes[skuKey]));
+                    injectedSkuSaleAttributeCount+=1;
+                  } else {
+                    blockers.push(`SKU 图片编辑缺少实时销售属性：${safeString(sku.sku_code||sku.skuCode,160)}；已阻断提交，避免平台把图片编辑误判为不完整 SKU 编辑。`);
+                  }
+                }
+              }
+              if(injectedSkuSaleAttributeCount>0) warnings.push(`partialEdit SKU 图片已原样注入 ${injectedSkuSaleAttributeCount} 个 SKU 的实时 sale_attribute_list（来自 spu-info）。`);
             }
             if(injectedGroupCodeCount>0){
               warnings.push(`partialEdit 图片已注入 ${injectedGroupCodeCount} 个 image_group_code（来自 spu-info 实时查询）。`);
