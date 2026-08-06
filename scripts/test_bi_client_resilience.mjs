@@ -98,8 +98,14 @@ assert.match(source, /const needsRecheck=stale\|\|!!j\.refreshScheduled\|\|!!j\.
   'a failed background refresh remains on automatic recheck instead of pinning an error in the browser');
 assert.match(source, /function sectionRefreshFailureText\(j\).*系统会继续重试；当前仍显示上次完整数据/,
   'persistent refresh failures use operator-readable copy instead of raw server stack text');
-assert.match(source, /function sectionNeedsBanner\(n\).*actual!==expected.*!st\.refreshing&&st\.refreshError/,
-  'routine same-generation live refreshes do not flash the large cache warning banner');
+assert.match(source, /function sectionNeedsBanner\(n\).*loading=st\.status==='loading'.*slow=loading.*st\.pendingSection.*loading&&\(st\.refreshing\|\|slow\).*actual!==expected.*!st\.refreshing&&st\.refreshError/,
+  'pending and visible section refreshes keep the cache status banner on screen');
+assert.match(source, /缓存正在刷新.*data-reset-cache=.*重置缓存/,
+  'cache refresh banner keeps a visible reset control while data is loading');
+assert.match(source, /async function resetSectionCache\(n\).*clearSectionPayload\(n\).*return load\(n,false,true\)/,
+  'reset control clears only the current browser section payload and requests a fresh server section');
+assert.match(source, /if\(b\.dataset\.resetCache\)\{resetSectionCache\(b\.dataset\.resetCache\);return\}/,
+  'cache reset control is wired to the click handler');
 assert.match(server, /const BI_FAST_BACKGROUND_SECTIONS = new Set\(\['homeRankings', 'homeProfit'\]\)/,
   'lightweight homepage cache work has a lane independent from multi-minute heavy sections');
 assert.match(server, /automatic-retry:\$\{failure\.at\}/,
