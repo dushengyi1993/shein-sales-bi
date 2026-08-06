@@ -16,7 +16,6 @@ LOG_DIR="${SHEIN_ET_STORAGE_FEE_LOG_DIR:-/srv/shein-bi/logs/cloud-et-storage-fee
 # Deliberately the generic ET lock: this is mutual exclusion, not merely a
 # storage-fee job lock.
 LOCK_FILE="${SHEIN_ET_LOCK_FILE:-$ROOT/state/locks/shein-bi-cloud-et-forwarder.lock}"
-PORTAL_REFRESH_LOCK_FILE="${SHEIN_BI_PORTAL_REFRESH_LOCK_FILE:-$ROOT/state/locks/shein-bi-portal-refresh.lock}"
 ET_PROFILE_DIR="${SHEIN_ET_PROFILE_DIR:-$ROOT/profiles/persistent-et-forwarder-profile}"
 STATE_PATH="${SHEIN_ET_STORAGE_FEE_STATE_PATH:-$ROOT/state/et_storage_fee_sync_state.json}"
 OUTPUT_DIR="${SHEIN_ET_STORAGE_FEE_OUTPUT_DIR:-$ROOT/outputs/et-storage-fee}"
@@ -174,25 +173,19 @@ node scripts/check_storage_fee_profit.mjs --mode local --start "$COVERAGE_START"
 node scripts/audit_bi_warehouse.mjs
 
 if [[ "${SHEIN_ET_STORAGE_FEE_REFRESH_PORTAL:-1}" == "1" ]]; then
-  PHASE="prewarm"
-  prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
-  {
-    if flock -w "${SHEIN_BI_PORTAL_REFRESH_LOCK_WAIT_SEC:-120}" 8; then
-      if command -v systemctl >/dev/null 2>&1; then
-        systemctl is-active --quiet shein-bi-portal.service || systemctl start shein-bi-portal.service || true
-      fi
-      echo '[cloud_et_storage_fee_sync] lightweight portal refresh sections=profit,homeProfit'
-      # Storage fees change profit only. Inventory trend has its own ET/source
-      # lifecycle and must not extend this accounting job with an unrelated,
-      # potentially expensive refresh.
-      SHEIN_BI_PORTAL_PREWARM_SECTIONS='profit,homeProfit' \
-        SHEIN_BI_PORTAL_PREWARM_ASYNC=0 \
-        SHEIN_BI_PORTAL_PREWARM_HOST_LOCKED=1 \
-        bash scripts/prewarm_bi_portal_sections.sh
-    else
-      echo '[cloud_et_storage_fee_sync] WARN portal refresh lock busy; prior portal cache retained' >&2
-    fi
-  } 8>>"$PORTAL_REFRESH_LOCK_FILE"
+  PHASE="enqueue"
+  # Storage fees change profit only. Publishing the warehouse/profit facts is
+  # the business completion boundary; slow Portal sections belong to the
+  # bounded materializer queue and must not turn a successful ET settlement
+  # into a systemd timeout.
+  if bash scripts/enqueue_bi_portal_sections.sh \
+    --sections profit,homeProfit \
+    --priority 10 \
+    --reason "et-storage-fee-${TARGET_DATE}"; then
+    echo '[cloud_et_storage_fee_sync] portal refresh queued sections=profit,homeProfit'
+  else
+    echo '[cloud_et_storage_fee_sync] WARN portal section enqueue failed; settled warehouse/profit cache remains valid' >&2
+  fi
 fi
 
 echo "[cloud_et_storage_fee_sync] done mode=$MODE date=$TARGET_DATE manifest=$MANIFEST_PATH log=$LOG_FILE"

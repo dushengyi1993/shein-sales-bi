@@ -50,12 +50,14 @@ assert.match(sync, /signal_et_chrome TERM[\s\S]*signal_et_chrome KILL/, 'ET Chro
 assert.match(sync, /trap cleanup_et_browser EXIT/, 'ET Chrome cleanup must run on success and failure');
 assert.doesNotMatch(sync, /find \/tmp -maxdepth/, 'dedicated cleanup must not sweep global tmp files');
 assert.match(sync, /incomplete ExportStoreFee detail; retry required/, 'partial ExportStoreFee detail must fail loudly for retry');
-assert.match(sync, /load_et_forwarder_warehouse\.mjs[\s\S]*refresh_profit_marts\.sh[\s\S]*prewarm_bi_portal_sections\.sh/, 'warehouse load, profit refresh, and portal refresh must be ordered');
+assert.match(sync, /load_et_forwarder_warehouse\.mjs[\s\S]*refresh_profit_marts\.sh[\s\S]*enqueue_bi_portal_sections\.sh/, 'warehouse load, profit refresh, and deferred Portal enqueue must be ordered');
 assert.match(sync, /refresh_profit_marts\.sh[\s\S]*check_storage_fee_profit\.mjs[\s\S]*audit_bi_warehouse\.mjs/, 'coverage and warehouse audit must run after profit refresh');
-assert.match(sync, /SHEIN_BI_PORTAL_PREWARM_SECTIONS='profit,homeProfit'/, 'storage sync must refresh only the profit sections it changes');
-assert.doesNotMatch(sync, /SHEIN_BI_PORTAL_PREWARM_SECTIONS='[^']*inventoryTrend/, 'storage sync must not trigger unrelated inventory trend generation');
+assert.match(sync, /--sections profit,homeProfit/, 'storage sync must queue only the profit sections it changes');
+assert.match(sync, /--priority 10/, 'settled storage-fee profit refresh must retain business priority');
+assert.doesNotMatch(sync, /prewarm_bi_portal_sections\.sh/, 'storage settlement must not synchronously wait for Portal materialization');
+assert.doesNotMatch(sync, /--sections [^\n]*inventoryTrend/, 'storage sync must not trigger unrelated inventory trend generation');
 assert.match(sync, /PHASE="fetch"/, 'sync must initialize an explicit failure phase');
-for (const phase of ['fetch', 'validate', 'load', 'refresh', 'audit', 'prewarm']) {
+for (const phase of ['fetch', 'validate', 'load', 'refresh', 'audit', 'enqueue']) {
   assert.match(sync, new RegExp(`PHASE="${phase}"`), `sync must track ${phase} failures`);
 }
 assert.match(sync, /phase=\$PHASE/, 'failure alert must report the current phase');
