@@ -27,6 +27,7 @@ import {
   taskHasUnboundImageAssets,
 } from '../lib/link_ops_publish_asset_binding.mjs';
 import {evaluateAdditionalDuplicatePublishOverride} from '../lib/link_ops_duplicate_publish_override.mjs';
+import {isSheinSkc, sameSheinSkc} from '../lib/shein_product_identifiers.mjs';
 import {
   createLoopbackTestWebhookWriteGuard,
   runSheinWebhookExternalWriteGuarded,
@@ -2316,7 +2317,10 @@ function enrichExistingTargetSkcsFromSpuInfo(matches, info) {
   const next = matches.map(row => ({...row}));
   const skcs = asArray(info?.skcInfoList || info?.skc_info_list || info?.skcList || info?.skc_list);
   for (const row of next) {
-    const detail = skcs.find(item => safeString(item?.skcName || item?.skc_name || '', 120) === row.skcName);
+    const detail = skcs.find(item => {
+      const candidate = safeString(item?.skcName || item?.skc_name, 120);
+      return sameSheinSkc(candidate, row.skcName) || candidate.toLowerCase() === safeString(row.skcName, 120).toLowerCase();
+    });
     if (!detail) continue;
     const siteShelf = asArray(detail?.shelfStatusInfoList || detail?.shelf_status_info_list)
       .find(item => /shein-sa/i.test(String(item?.siteAbbr || item?.site_abbr || item?.subSite || '')));
@@ -2350,8 +2354,8 @@ async function terminalReplacementDuplicateOverride(client, task, targetStore, m
     && typeof replacement === 'object'
     && Number(replacement.state) === expectedState
     && normalizeStoreKey(replacement.store) === normalizeStoreKey(targetStore)
-    && /^sv\d+$/i.test(safeString(replacement.skc, 120))
-    && /^(?:sr|v)\d+$/i.test(safeString(replacement.spu, 120));
+    && isSheinSkc(safeString(replacement.skc, 120))
+    && /^(?:sr|v|b)\d+$/i.test(safeString(replacement.spu, 120));
   if (!enabled) return {allowed: false, replacement: null, liveValidation: {status: 'not_requested'}};
 
   const replacedSkc = safeString(replacement.skc, 120);
@@ -2359,7 +2363,7 @@ async function terminalReplacementDuplicateOverride(client, task, targetStore, m
   // the product list.  The narrow exception is only for a *different* draft
   // replacing an exact terminal rejected/withdrawn document while older
   // same-code links coexist.
-  if (matches.some(row => safeString(row?.skcName, 120) === replacedSkc)) {
+  if (matches.some(row => sameSheinSkc(row?.skcName, replacedSkc))) {
     return {allowed: false, replacement: {store: targetStore, spu: replacement.spu, skc: replacedSkc, state: expectedState}, liveValidation: {status: 'replacement_present_in_product_search'}};
   }
   const replacedSpu = safeString(replacement.spu, 120);
@@ -2380,7 +2384,7 @@ async function terminalReplacementDuplicateOverride(client, task, targetStore, m
     const liveSkc = asArray(response.data?.info?.data)
       .filter(row => safeString(row?.spuName || row?.spu_name, 120) === replacedSpu)
       .flatMap(row => asArray(row?.skcList || row?.skc_list))
-      .find(row => safeString(row?.skcName || row?.skc_name, 120) === replacedSkc);
+      .find(row => sameSheinSkc(row?.skcName || row?.skc_name, replacedSkc));
     const documentState = Number(liveSkc?.documentState ?? liveSkc?.document_state);
     const allowed = Number.isFinite(documentState) && documentState === expectedState;
     return {
