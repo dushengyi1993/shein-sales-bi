@@ -8,11 +8,11 @@ import {
 
 const input = normalizeAdditionalDuplicatePublishOverrideInput({
   store: 'nm',
-  existingSkcs: ['SV260714225544971215796', 'invalid', 'sv260714225544971215796'],
+  existingSkcs: ['SV260714225544971215796', 'SB260806202334303501938', 'invalid', 'sv260714225544971215796', 'sb260806202334303501938'],
   reason: '旧链接议价成功并保留，本任务明确额外新增一条。',
   confirmation: ADDITIONAL_DUPLICATE_PUBLISH_CONFIRM_TEXT,
 });
-assert.deepEqual(input.existingSkcs, ['sv260714225544971215796']);
+assert.deepEqual(input.existingSkcs, ['sv260714225544971215796', 'sb260806202334303501938']);
 assert.equal(input.store, 'NM');
 
 const task = {
@@ -23,30 +23,31 @@ const task = {
     approvedBy: {username: 'owner'},
   },
 };
-const exact = evaluateAdditionalDuplicatePublishOverride(task, 'NM', [{skcName: 'sv260714225544971215796'}]);
+const exact = evaluateAdditionalDuplicatePublishOverride(task, 'NM', [{skcName: 'sv260714225544971215796'}, {skcName: 'SB260806202334303501938'}]);
 assert.equal(exact.allowed, true);
 assert.equal(exact.status, 'authorized_exact_live_duplicate_set');
 
 const stringOwner = evaluateAdditionalDuplicatePublishOverride({
   ...task,
   duplicatePublishOverride: {...task.duplicatePublishOverride, approvedBy: 'owner'},
-}, 'NM', [{skcName: 'sv260714225544971215796'}]);
+}, 'NM', [{skcName: 'sv260714225544971215796'}, {skcName: 'sb260806202334303501938'}]);
 assert.equal(stringOwner.allowed, true);
 
 const newUnexpectedDuplicate = evaluateAdditionalDuplicatePublishOverride(task, 'NM', [
   {skcName: 'sv260714225544971215796'},
+  {skcName: 'sb260806202334303501938'},
   {skcName: 'sv260723000000000000001'},
 ]);
 assert.equal(newUnexpectedDuplicate.allowed, false);
 assert.equal(newUnexpectedDuplicate.status, 'authorization_mismatch');
 
-const wrongStore = evaluateAdditionalDuplicatePublishOverride(task, 'HL', [{skcName: 'sv260714225544971215796'}]);
+const wrongStore = evaluateAdditionalDuplicatePublishOverride(task, 'HL', [{skcName: 'sv260714225544971215796'}, {skcName: 'sb260806202334303501938'}]);
 assert.equal(wrongStore.allowed, false);
 
 const missingOwner = evaluateAdditionalDuplicatePublishOverride({
   ...task,
   duplicatePublishOverride: {...task.duplicatePublishOverride, approvedBy: {}},
-}, 'NM', [{skcName: 'sv260714225544971215796'}]);
+}, 'NM', [{skcName: 'sv260714225544971215796'}, {skcName: 'sb260806202334303501938'}]);
 assert.equal(missingOwner.allowed, false);
 
 console.log('link_ops_duplicate_publish_override: exact task/store/SKC authorization passed');

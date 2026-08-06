@@ -211,6 +211,7 @@ node scripts/load_bi_warehouse.mjs --sales-dir outputs/shein_openapi_fetch --sal
   - `update_supply_price`：`3001681 /open-api/goods/update-cost`，按 SKC/SKU 写供货价。
   - `update_product_price`：`3001407 /open-api/openapi-business-backend/product/price/save`，同时写 `shopPrice` 与 `specialPrice`，避免未传 `specialPrice` 被平台解析为 `0`。
   - `update_title` / `update_images`：`3001810 /open-api/goods/product/partialEdit`。换图只接受完整 SHEIN 图片 JSON（`spu_name + image_info/skc_list/site_detail_image_info_list`），普通图片上传/外链转换需先取得 SHEIN 图片 URL。
+    - 半托平台 SKC 同时存在 `sv...` 与 `sb...` 两种真实编号；授权锁和维护匹配统一按大小写不敏感的精确完整编号处理。刚发布且尚未进入 BI 链接快照的 `sv/sb`，维护预演只允许通过 OpenAPI `searchProduct` 精确回查且唯一命中后定位，不允许用货号模糊匹配代替。
   - `certificate_review`：证书要求查询、证书池创建/编辑、店铺证书池创建/编辑、SKC 绑定商品证书池等证书接口；执行器接受 `certificatePayloads[{endpoint,body}]`，endpoint 必须在证书允许列表内，提交后默认人工核销审核状态。
 - 执行边界：所有动作默认只 dry-run，生成并锁定 `payloadHash`；真实提交必须同时满足 BI 账号 `writeStores`、`safeWriteOperations` 动作总闸门、任务处于 `waiting_review`、确认文本 `SHEIN_OPENAPI_SUBMIT`、提交后回读或人工核销。
 - 营销边界：公开 OpenAPI 目录当前未发现普通营销活动报名、限时折扣、优惠券报名写接口；`campaign_signup` / `flash_discount` 不列入官方 OpenAPI 可实现动作，继续走本地营销运营流程、价格栈守卫和人工确认。

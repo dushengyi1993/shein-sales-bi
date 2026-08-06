@@ -17,6 +17,7 @@ import {fileURLToPath} from 'node:url';
 import crypto from 'node:crypto';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
 import {selectVirtualInventoryWarehouseCode} from '../lib/shein_inventory_warehouse.mjs';
+import {normalizeSheinSkc, sameSheinSkc} from '../lib/shein_product_identifiers.mjs';
 import {
   createLoopbackTestWebhookWriteGuard,
   runSheinWebhookExternalWriteGuarded,
@@ -205,7 +206,28 @@ async function writeJson(file,data){ await fs.mkdir(path.dirname(file),{recursiv
 function normalizeTaskStore(data){ if(Array.isArray(data?.tasks)) return data; if(data?.id) return {version:1,tasks:[data]}; throw new Error('Task JSON must be a task object or {tasks:[...]}'); }
 async function loadTask(args){ const source=args.taskJson||args.taskFile; const store=normalizeTaskStore(await readJson(source)); const task=args.taskId?store.tasks.find(t=>String(t?.id||'')===args.taskId):(store.tasks.length===1?store.tasks[0]:null); if(!task) throw new Error(`Task not found: ${args.taskId||'(missing --task-id)'}`); return {source, task, taskStore: store, executionContext: store.executionContext || null}; }
 function taskStores(task){ return unique([...(task?.targets?.stores||[]), ...(task?.targets?.targetStores||[]), ...(task?.stores||[]), ...(task?.targetStores||[])]).map(normalizeStoreKey).filter(Boolean); }
-function taskProductRefs(task){ return unique([...(task?.targets?.productRefs||[]), ...(task?.productRefs||[]), ...(task?.products||[])]).map(x=>safeString(x,120)).filter(Boolean); }
+function taskPublishedSkcRefs(task){
+  const rows=[];
+  const executors=[
+    ...asArray(task?.execution?.openApiProductExecutors),
+    task?.execution?.hlOpenApiExecutor,
+    task?.openApiProductExecutor,
+  ].filter(Boolean);
+  for(const executor of executors){
+    rows.push(...asArray(executor?.readbackFingerprint?.publishSkcNames));
+    rows.push(...asArray(executor?.publishResult?.info?.skc_list || executor?.publishResult?.info?.skcList)
+      .map(item=>item?.skc_name || item?.skcName));
+  }
+  rows.push(...asArray(task?.readbackFingerprint?.publishSkcNames));
+  rows.push(...asArray(task?.publishResult?.info?.skc_list || task?.publishResult?.info?.skcList)
+    .map(item=>item?.skc_name || item?.skcName));
+  return unique(rows.map(normalizeSheinSkc).filter(Boolean));
+}
+function taskProductRefs(task){
+  const explicit=unique([...(task?.targets?.productRefs||[]), ...(task?.productRefs||[]), ...(task?.products||[])]).map(x=>safeString(x,120)).filter(Boolean);
+  const published=taskPublishedSkcRefs(task);
+  return published.length ? published : explicit;
+}
 function taskIntents(task){ return asArray(task?.intents).map(x=>String(x||'').trim()).filter(x=>MAINTENANCE_INTENTS.has(x)); }
 function linkRowStore(row){ return normalizeStoreKey(row?.store_key || row?.storeKey); }
 function linkRowSkc(row){ return safeString(row?.skc || row?.skcCode || row?.skc_code,120); }
@@ -254,6 +276,103 @@ function normalizeImageEditPayloadsFromJsonAssets(task, matches, warnings){
   if(embedded.length) warnings.push(`换图将使用已提供的 SHEIN partialEdit 图片 JSON：${unique(sources).join('、')}；执行前需人工确认该 JSON 不会清空其他图片层级。`);
   const seen=new Set();
   return embedded.filter(payload=>{ const key=sha256Stable(payload); if(seen.has(key)) return false; seen.add(key); return true; });
+}
+
+function collectLiveSkcRows(payload){
+  const out=[];
+  const seen=new Set();
+  const walk=(value, context={})=>{
+    if(!value || typeof value!=='object' || seen.has(value)) return;
+    seen.add(value);
+    if(Array.isArray(value)){ for(const item of value) walk(item,context); return; }
+    const next={
+      spu:safeString(value.spuName||value.spu_name||value.spu||context.spu,120),
+      supplierCode:safeString(value.supplierCode||value.supplier_code||context.supplierCode,160),
+    };
+    const skc=safeString(value.skcName||value.skc_name||value.skc,120);
+    if(skc){
+      const skuCodes=unique([
+        ...parseSkuCodes(value.skuCodeList||value.sku_code_list||value.skuCodes||value.sku_codes),
+        ...asArray(value.skuList||value.sku_list).map(row=>safeString(row?.skuCode||row?.sku_code,80)).filter(Boolean),
+      ]);
+      out.push({skc,spu:next.spu,supplierCode:next.supplierCode,skuCodes});
+    }
+    for(const child of Object.values(value)) walk(child,next);
+  };
+  walk(payload,{});
+  const uniqueRows=[];
+  const keys=new Set();
+  for(const row of out){
+    const key=`${normalizeSheinSkc(row.skc)||compactRef(row.skc)}|${compactRef(row.spu)}`;
+    if(keys.has(key)) continue;
+    keys.add(key);
+    uniqueRows.push(row);
+  }
+  return uniqueRows;
+}
+
+async function resolveMissingExactSkcsFromOpenApi(client, store, missingRefs, calls, warnings){
+  const matches=[];
+  const unresolved=[];
+  for(const rawRef of missingRefs){
+    const ref=normalizeSheinSkc(rawRef);
+    if(!ref){ unresolved.push(rawRef); continue; }
+    try{
+      const response=await client.request('/open-api/goods/searchProduct',{
+        method:'POST',
+        body:{pageNum:1,pageSize:20,skcNameList:[ref],languageList:['en','ar']},
+        headers:{language:'en'},
+      });
+      calls.push(compactCallResult(`search-product-exact-skc-${ref}`,'/open-api/goods/searchProduct','POST',response));
+      if(!response.ok || String(response.data?.code)!=='0'){
+        unresolved.push(rawRef);
+        continue;
+      }
+      const exact=collectLiveSkcRows(response.data).filter(row=>sameSheinSkc(row.skc,ref));
+      if(exact.length!==1 || !exact[0].spu){
+        warnings.push(`${store} 实时精确 SKC 定位 ${rawRef} 返回 ${exact.length} 条有效候选；必须唯一且包含 SPU，当前不自动选择。`);
+        unresolved.push(rawRef);
+        continue;
+      }
+      const row=exact[0];
+      matches.push({
+        ref:rawRef,
+        storeKey:store,
+        skc:normalizeSheinSkc(row.skc)||safeString(row.skc,120),
+        spu:safeString(row.spu,120),
+        standardGoodsSn:safeString(row.supplierCode,160),
+        isOnShelf:null,
+        skuCodes:row.skuCodes,
+        supplierCode:safeString(row.supplierCode,160),
+        costSar:null,
+        sheinUsableInventory:0,
+        productRowFound:true,
+        resolvedFrom:'openapi_exact_skc',
+      });
+    }catch(error){
+      calls.push({name:`search-product-exact-skc-${ref}`,path:'/open-api/goods/searchProduct',method:'POST',httpStatus:null,code:null,msg:safeString(error?.message||error,300),traceId:null});
+      unresolved.push(rawRef);
+    }
+  }
+  return {matches,unresolved};
+}
+
+function canonicalizeImagePlanTargets(plan, matches){
+  const body=structuredClone(plan);
+  const targetSpu=safeString(body?.spu_name||body?.spuName,120);
+  const group=matches.filter(m=>!targetSpu || compactRef(m.spu)===compactRef(targetSpu));
+  if(group.length && targetSpu) body.spu_name=group[0].spu;
+  for(const skcRow of asArray(body?.skc_list||body?.skcList)){
+    const requested=safeString(skcRow?.skc_name||skcRow?.skcName,120);
+    const target=group.find(m=>sameSheinSkc(m.skc,requested)) || (!requested && group.length===1 ? group[0] : null);
+    if(!target) continue;
+    skcRow.skc_name=target.skc;
+    const skuRows=asArray(skcRow?.sku_list||skcRow?.skuList);
+    if(skuRows.length===target.skuCodes.length){
+      skuRows.forEach((sku,index)=>{ if(!safeString(sku?.sku_code||sku?.skuCode,80)) sku.sku_code=target.skuCodes[index]; });
+    }
+  }
+  return body;
 }
 function imageInfoRows(container){ return asArray(container?.image_info_list || container?.imageInfoList); }
 function imageRowType(row){
@@ -449,7 +568,7 @@ async function fetchSpuInfoForImages(client, matches, calls, warnings){
             ||skcImageRows.find(row=>row?.groupCode||row?.group_code)?.groupCode
             ||skcImageRows.find(row=>row?.groupCode||row?.group_code)?.group_code
             ||'',120);
-          if(skcName&&skcGroupCode) skcGroups[skcName]=skcGroupCode;
+          if(skcName&&skcGroupCode) skcGroups[normalizeSheinSkc(skcName)||skcName.toLowerCase()]=skcGroupCode;
         }
         if(spuGroupCode||Object.keys(skcGroups).length){
           spuInfoMap.set(m.spu,{spuGroupCode, skcGroups, productTypeId:info.productTypeId||info.product_type_id||null});
@@ -516,13 +635,14 @@ function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEdi
           warnings.push('partialEdit 标题已覆盖 SKC skc_title（平台全量校验用 SKC 标题）；如商品有必填关联属性，已从 attributeOverrides 补齐。');
         }
         if(hasImages){
-          const plan=imagePlans.find(p=>p.spu_name===m.spu) || imagePlans[0];
+          const rawPlan=imagePlans.find(p=>compactRef(p.spu_name||p.spuName)===compactRef(m.spu)) || imagePlans[0];
+          const plan=rawPlan?canonicalizeImagePlanTargets(rawPlan,matches.filter(x=>compactRef(x.spu)===compactRef(m.spu))):null;
           if(plan){
             if(plan.image_info){ body.image_info=plan.image_info; body.is_spu_pic=plan.is_spu_pic!==false; }
             if(plan.skc_list){
               if(body.skc_list){
                 for(const oldSkc of body.skc_list){
-                  const newSkc=plan.skc_list.find(s=>s.skc_name===oldSkc.skc_name);
+                  const newSkc=plan.skc_list.find(s=>sameSheinSkc(s.skc_name||s.skcName,oldSkc.skc_name)||compactRef(s.skc_name||s.skcName)===compactRef(oldSkc.skc_name));
                   if(newSkc){ oldSkc.image_info=newSkc.image_info; if(newSkc.sku_list) oldSkc.sku_list=newSkc.sku_list; }
                 }
               } else { body.skc_list=plan.skc_list; body.is_spu_pic=plan.is_spu_pic!==false; }
@@ -537,7 +657,7 @@ function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEdi
               if(spuInfo.spuGroupCode && body.image_info && !body.image_info.image_group_code){ body.image_info.image_group_code=spuInfo.spuGroupCode; injectedGroupCodeCount+=1; }
               if(spuInfo.skcGroups && body.skc_list){
                 for(const skc of body.skc_list){
-                  const gc=spuInfo.skcGroups[skc.skc_name];
+                  const gc=spuInfo.skcGroups[normalizeSheinSkc(skc.skc_name)||safeString(skc.skc_name,120).toLowerCase()];
                   if(gc && skc.image_info && !skc.image_info.image_group_code){ skc.image_info.image_group_code=gc; injectedGroupCodeCount+=1; }
                 }
               }
@@ -632,11 +752,15 @@ async function main(){
       }
     }
   }
-  const linkLoad=await loadLinkRows(args); if(linkLoad.error) blockers.push(`无法读取 BI 链接快照：${linkLoad.error}`);
+  const linkLoad=await loadLinkRows(args); if(linkLoad.error) warnings.push(`BI 链接快照不可读，将仅允许用实时精确 SKC 定位：${linkLoad.error}`);
   const productLoad=await loadProductRows(store,args); if(productLoad.error) warnings.push(`OpenAPI 商品缓存不可读，将只用链接快照：${productLoad.error}`);
   const jsonAssets=await loadJsonAssetPayloads(task);
   const taskWithJsonAssets={...task,_jsonAssets:jsonAssets};
-  const resolved=resolveTargets({task, store, linkRows:linkLoad.rows||[], productRows:productLoad.rows||[]});
+  const snapshotResolved=resolveTargets({task, store, linkRows:linkLoad.rows||[], productRows:productLoad.rows||[]});
+  const liveResolved=await resolveMissingExactSkcsFromOpenApi(client,store,snapshotResolved.missing,calls,warnings);
+  const mergedMatches=[]; const mergedKeys=new Set();
+  for(const match of [...snapshotResolved.matches,...liveResolved.matches]){ const key=`${match.storeKey}|${normalizeSheinSkc(match.skc)||compactRef(match.skc)}|${compactRef(match.spu)}`; if(mergedKeys.has(key)) continue; mergedKeys.add(key); mergedMatches.push(match); }
+  const resolved={refs:snapshotResolved.refs,matches:mergedMatches,missing:liveResolved.unresolved};
   if(resolved.missing.length) blockers.push(`未定位到目标货号/SKC：${resolved.missing.join('、')}`);
   if(!resolved.matches.length) blockers.push('没有可执行目标链接。');
   const imageEditPayloads=intents.includes('update_images')

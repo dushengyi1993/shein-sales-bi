@@ -93,6 +93,28 @@ const fake = http.createServer(async (req, res) => {
   if (pathname === '/open-api/goods/query-site-list') {
     return sendJson(res, {code: '0', msg: 'OK', info: [{sub_site_list: [{site_abbr: 'shein-sa', currency: 'SAR'}]}]});
   }
+  if (pathname === '/open-api/goods/searchProduct') {
+    const requested = body.json?.skcNameList?.[0] || '';
+    if (String(requested).toLowerCase() === 'sb260806202334303501938') {
+      return sendJson(res, {code: '0', msg: 'OK', info: {data: [{
+        spuName: 'b2608062023343035',
+        skcName: 'sb260806202334303501938',
+        supplierCode: 'SK-15061热风梳',
+        skuCodeList: ['sku-live-sb-001'],
+      }]}});
+    }
+    return sendJson(res, {code: '0', msg: 'OK', info: {data: []}});
+  }
+  if (pathname === '/open-api/goods/spu-info') {
+    if (body.json?.spuName === 'b2608062023343035') {
+      return sendJson(res, {code: '0', msg: 'OK', info: {
+        spuName: 'b2608062023343035',
+        spuImageInfoList: [{groupCode: 'G-LIVE-SPU'}],
+        skcInfoList: [{skcName: 'sb260806202334303501938', skcImageInfoList: [{groupCode: 'G-LIVE-SKC'}]}],
+      }});
+    }
+    return sendJson(res, {code: '0', msg: 'OK', info: {}});
+  }
   if (pathname === '/open-api/msc/warehouse/list') {
     return sendJson(res, {code: '0', msg: 'OK', info: {list: [{
       warehouseCode: 'PS-SMOKE-SA',
@@ -284,6 +306,35 @@ try {
   check('many-detail image dry-run reports warning not blocker', manyDetailDry.json?.warnings || [], xs => asArray(xs).some(x => /细节图.*超过 11 张/.test(String(x))));
   check('spu-info without group codes reports honest missing warning', manyDetailDry.json?.warnings || [], xs => asArray(xs).some(x => /缺少 image_group_code/.test(String(x))) && !asArray(xs).some(x => /已注入.*image_group_code/.test(String(x))));
   check('many-detail image dry-run has no numeric 80 sku blocker', manyDetailDry.json?.blockers || [], xs => !asArray(xs).some(x => /80\.jpg/.test(String(x))));
+
+  const liveSbTask = {
+    id: 'live-sb-image-smoke',
+    status: 'waiting_review',
+    command: '给刚发布的 SB 链接换图',
+    targets: {stores: ['SMK'], productRefs: ['SB260806202334303501938']},
+    partialEditPayload: {
+      spu_name: 'B2608062023343035',
+      is_spu_pic: true,
+      image_info: {image_info_list: [{image_sort: 1, image_type: 1, image_url: 'http://imgdeal-test01.shein.com/images3_pi/live-sb-spu-main.jpg'}]},
+      skc_list: [{
+        skc_name: 'SB260806202334303501938',
+        image_info: {image_info_list: [{image_sort: 1, image_type: 1, image_url: 'http://imgdeal-test01.shein.com/images3_pi/live-sb-main.jpg'}]},
+        sku_list: [{image_info: {image_info_list: [{image_sort: 1, image_type: 1, image_url: 'http://imgdeal-test01.shein.com/images3_pi/live-sb-sku.jpg'}]}}],
+      }],
+    },
+    intents: ['update_images'],
+  };
+  const liveSbTaskFile = await writeJson('task-live-sb-image.json', {version: 1, tasks: [liveSbTask]});
+  calls.length = 0;
+  const liveSbDry = await runNode([...commonArgs, '--task-id', liveSbTask.id, '--task-json', liveSbTaskFile, '--dry-run']);
+  const liveSbPlan = liveSbDry.json?.payload?.submitPlan?.payloads?.[0];
+  check('uppercase SB exact target dry-run exits 0', liveSbDry.code, 0);
+  check('uppercase SB exact target resolves from live OpenAPI', liveSbDry.json?.ok, true);
+  check('uppercase SB exact target records live resolution', liveSbDry.json?.adapterEvidence?.matchedLinks?.[0]?.resolvedFrom, 'openapi_exact_skc');
+  check('uppercase SB image payload uses canonical live skc', liveSbPlan?.body?.skc_list?.[0]?.skc_name, 'sb260806202334303501938');
+  check('uppercase SB image payload fills immediate live sku', liveSbPlan?.body?.skc_list?.[0]?.sku_list?.[0]?.sku_code, 'sku-live-sb-001');
+  check('uppercase SB image payload injects live group code', liveSbPlan?.body?.skc_list?.[0]?.image_info?.image_group_code, 'G-LIVE-SKC');
+  check('uppercase SB resolution called searchProduct', calls.some(c => c.path === '/open-api/goods/searchProduct'), true);
 
   const badImageTask = {
     id: 'bad-image-smoke',
