@@ -318,6 +318,11 @@ fi
 
 if is_true "$FETCH_ONLY"; then
   if [[ "${#FAILED_STORES[@]}" -gt 0 ]]; then
+    if is_true "$ALLOW_PARTIAL"; then
+      write_chunk_result "warning" "one or more stores failed; completed stores are preserved for the next chunk"
+      echo "[cloud_link_business_sync] fetch-only partial stores=${SUCCESS_STORES[*]} failed=${FAILED_STORES[*]}" >&2
+      exit 0
+    fi
     write_chunk_result "failed" "one or more stores failed"
     echo "[cloud_link_business_sync] fetch-only failed stores=${FAILED_STORES[*]}" >&2
     exit 1
@@ -370,7 +375,7 @@ NODE
     echo "[cloud_link_business_sync] partial result recorded; skip BI warehouse/portal refresh to avoid presenting incomplete link/business date" >&2
     check_portal_health
     echo "[cloud_link_business_sync] done with partial failures date=$DATE failed=${FAILED_STORES[*]} log=$LOG_FILE"
-    if is_true "$FINALIZE_ONLY"; then
+    if is_true "$FINALIZE_ONLY" && ! is_true "$ALLOW_PARTIAL"; then
       exit 1
     fi
     exit 0

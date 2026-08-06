@@ -14,9 +14,9 @@ Environment=HOME=/home/sheinops
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=TZ=Asia/Shanghai
 Environment=SHEIN_RTV_TRANSPORT=webapi
-Environment=SHEIN_RTV_VERIFY_TIMEOUT_MS=3600000
-Environment=SHEIN_RTV_LIMIT=160
-Environment=SHEIN_RTV_CASE_LIMIT=12
+Environment=SHEIN_RTV_VERIFY_TIMEOUT_MS=1500000
+Environment=SHEIN_RTV_LIMIT=80
+Environment=SHEIN_RTV_CASE_LIMIT=8
 TimeoutStartSec=7200
 Nice=10
 IOSchedulingClass=best-effort

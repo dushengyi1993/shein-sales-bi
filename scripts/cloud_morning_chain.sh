@@ -95,11 +95,61 @@ run_fetch_chunk() {
   local result_file="$2"
   SHEIN_LINK_BUSINESS_STORES="$stores" \
   SHEIN_LINK_BUSINESS_FETCH_ONLY=1 \
-  SHEIN_LINK_BUSINESS_ALLOW_PARTIAL=0 \
+  SHEIN_LINK_BUSINESS_ALLOW_PARTIAL=1 \
   SHEIN_LINK_BUSINESS_CHUNK_RESULT_FILE="$result_file" \
   SHEIN_LINK_BUSINESS_STORE_ATTEMPTS="${SHEIN_LINK_BUSINESS_STORE_ATTEMPTS:-2}" \
   SHEIN_LINK_BUSINESS_REFRESH_PORTAL=0 \
     bash scripts/cloud_link_business_sync.sh "$DATA_DATE"
+}
+
+chunk_result_status() {
+  RESULT_FILE="$1" node - <<'NODE'
+const fs = require('fs');
+try {
+  const payload = JSON.parse(fs.readFileSync(process.env.RESULT_FILE, 'utf8'));
+  process.stdout.write(String(payload.status || (payload.ok ? 'done' : 'failed')));
+} catch {
+  process.stdout.write('failed');
+}
+NODE
+}
+
+chunk_result_failed_stores() {
+  RESULT_FILE="$1" node - <<'NODE'
+const fs = require('fs');
+try {
+  const payload = JSON.parse(fs.readFileSync(process.env.RESULT_FILE, 'utf8'));
+  process.stdout.write((payload.failedStores || []).map(String).filter(Boolean).join(','));
+} catch {}
+NODE
+}
+
+missing_exact_date_stores() {
+  DATA_DATE="$DATA_DATE" node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const root = process.cwd();
+const date = process.env.DATA_DATE;
+const config = JSON.parse(fs.readFileSync(path.join(root, 'config', 'stores.json'), 'utf8'));
+const missing = [];
+for (const row of config.stores || []) {
+  if (row.enabled === false) continue;
+  const store = String(row.storeKey || '').trim().toUpperCase();
+  let complete = Boolean(store);
+  for (const domain of ['shein_links', 'shein_business_domains']) {
+    const file = path.join(root, 'outputs', domain, store, `${date}.json`);
+    try {
+      const payload = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const payloadStore = String(payload?.store?.storeKey || '').trim().toUpperCase();
+      if (payload?.ok !== true || String(payload?.date || '') !== date || payloadStore !== store) complete = false;
+    } catch {
+      complete = false;
+    }
+  }
+  if (!complete) missing.push(store);
+}
+process.stdout.write(missing.join(','));
+NODE
 }
 
 mkdir -p "$LOG_DIR" "$STATE_DIR"
@@ -127,8 +177,15 @@ case "$STAGE" in
     write_state "running" "first 12 stores are refreshing"
     RESULT_FILE="$STATE_DIR/${RUN_DATE}-chunk-1.json"
     run_fetch_chunk "$CHUNK_1_STORES" "$RESULT_FILE"
-    write_marker "morning-chunk-1" "done" "first 12 stores fetched" "$RESULT_FILE" "$LOG_FILE" >/dev/null
-    write_state "ok" "first 12 stores completed"
+    CHUNK_STATUS="$(chunk_result_status "$RESULT_FILE")"
+    FAILED_STORES="$(chunk_result_failed_stores "$RESULT_FILE")"
+    if [[ "$CHUNK_STATUS" == "warning" ]]; then
+      write_marker "morning-chunk-1" "warning" "first chunk completed with store gaps: $FAILED_STORES" "$RESULT_FILE" "$LOG_FILE" >/dev/null
+      write_state "warning" "first chunk completed; failed stores will not block the second chunk: $FAILED_STORES"
+    else
+      write_marker "morning-chunk-1" "done" "first 12 stores fetched" "$RESULT_FILE" "$LOG_FILE" >/dev/null
+      write_state "ok" "first 12 stores completed"
+    fi
     ;;
   chunk-2)
     if ! require_marker "morning-chunk-1"; then
@@ -139,13 +196,29 @@ case "$STAGE" in
     write_state "running" "remaining 7 stores are refreshing"
     RESULT_FILE="$STATE_DIR/${RUN_DATE}-chunk-2.json"
     run_fetch_chunk "$CHUNK_2_STORES" "$RESULT_FILE"
-    write_marker "morning-chunk-2" "done" "remaining 7 stores fetched" "$RESULT_FILE" "$LOG_FILE" >/dev/null
+    CHUNK_STATUS="$(chunk_result_status "$RESULT_FILE")"
+    FAILED_STORES="$(chunk_result_failed_stores "$RESULT_FILE")"
+    if [[ "$CHUNK_STATUS" == "warning" ]]; then
+      write_marker "morning-chunk-2" "warning" "second chunk completed with store gaps: $FAILED_STORES" "$RESULT_FILE" "$LOG_FILE" >/dev/null
+    else
+      write_marker "morning-chunk-2" "done" "remaining 7 stores fetched" "$RESULT_FILE" "$LOG_FILE" >/dev/null
+    fi
 
     write_state "running" "all 19 stores are merging"
     SHEIN_LINK_BUSINESS_FINALIZE_ONLY=1 \
-    SHEIN_LINK_BUSINESS_ALLOW_PARTIAL=0 \
+    SHEIN_LINK_BUSINESS_ALLOW_PARTIAL=1 \
     SHEIN_LINK_BUSINESS_REFRESH_PORTAL=0 \
       bash scripts/cloud_link_business_sync.sh "$DATA_DATE"
+
+    MISSING_STORES="$(missing_exact_date_stores)"
+    if [[ -n "$MISSING_STORES" ]]; then
+      write_marker "morning-links-ready" "warning" \
+        "all stores were attempted; retained the previous complete link snapshot; missing exact-date stores: $MISSING_STORES" \
+        "$STATE_DIR/${RUN_DATE}-chunk-1.json" "$RESULT_FILE" "$LOG_FILE" >/dev/null
+      write_state "warning" "link refresh is partial; supplements may continue; missing stores: $MISSING_STORES"
+      echo "[cloud_morning_chain] WARN exact-date link/business gaps remain stores=$MISSING_STORES; previous complete Portal snapshot retained"
+      exit 0
+    fi
 
     node scripts/generate_bi_portal.mjs \
       --metabase-url "${METABASE_URL:-http://127.0.0.1:3000}" \

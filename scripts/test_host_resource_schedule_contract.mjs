@@ -142,12 +142,19 @@ const morning = read('scripts/cloud_morning_chain.sh');
 assert.match(morning, /SHEIN_BI_MORNING_CHUNK_1_STORES:-DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ,CX,YJ/);
 assert.match(morning, /SHEIN_BI_MORNING_CHUNK_2_STORES:-XL,QY,QH,TZ,JSH,TZZ,XC/);
 assert.match(morning, /SHEIN_LINK_BUSINESS_FETCH_ONLY=1/);
+assert.match(morning, /SHEIN_LINK_BUSINESS_ALLOW_PARTIAL=1/,
+  'one transient store failure must not prevent the other morning stores from being fetched');
+assert.match(morning, /first chunk completed; failed stores will not block the second chunk/);
+assert.match(morning, /retained the previous complete link snapshot/,
+  'a partial link day must preserve the previous complete Portal snapshot while supplements continue');
 assert.match(morning, /SHEIN_LINK_BUSINESS_FINALIZE_ONLY=1/);
 assert.match(morning, /morning-links-ready/);
 assert.match(morning, /SHEIN_BI_DAILY_LINK_BUSINESS_MODE=skip/);
 assert.match(morning, /SHEIN_BI_DAILY_RTV_VERIFY=0/);
 assert.match(read('scripts/cloud_link_business_sync.sh'), /SHEIN_LINK_BUSINESS_RESUME_COMPLETED/,
   'a deadline retry must reuse exact-date completed store evidence instead of starting all stores over');
+assert.match(read('scripts/cloud_link_business_sync.sh'), /write_chunk_result "warning"/,
+  'fetch-only chunks must preserve partial progress as warning evidence instead of aborting at the first store');
 assert.match(unit('shein-bi-cloud-morning-supplements.service'), /^Environment=SHEIN_BI_DAILY_OPENAPI_PRODUCT_RECONCILIATION=0$/m,
   'the daily bounded 07:12 stock/detail pass owns product enrichment');
 
@@ -156,6 +163,11 @@ assert.doesNotMatch(rtvVerify, /node scripts\/generate_bi_portal\.mjs/,
   'a successful long RTV verification must not fail later on a duplicate full portal build');
 assert.match(rtvVerify, /enqueue_bi_portal_sections\.sh/,
   'RTV post-processing must use the host-locked section queue');
+const rtvVerifyUnit = unit('shein-bi-cloud-rtv-verify.service');
+assert.match(rtvVerifyUnit, /^Environment=SHEIN_RTV_VERIFY_TIMEOUT_MS=1500000$/m,
+  'RTV must stop cleanly before the 05:27 browser-lane deadline');
+assert.match(rtvVerifyUnit, /^Environment=SHEIN_RTV_LIMIT=80$/m);
+assert.match(rtvVerifyUnit, /^Environment=SHEIN_RTV_CASE_LIMIT=8$/m);
 
 const inventory = read('scripts/cloud_daily_inventory_replenishment_guard.sh');
 assert.match(inventory, /--stage morning-links-ready/);
