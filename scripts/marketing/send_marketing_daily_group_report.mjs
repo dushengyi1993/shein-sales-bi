@@ -60,13 +60,24 @@ function latestTimestamp(...values) {
 
 export function assessMarketingDailyDeliveryReadiness({queue = null, guardReport = null, executionReport = null} = {}) {
   const queueStatus = String(queue?.status || 'no_queue');
-  if (queue && !['completed', 'blocked'].includes(queueStatus)) {
+  if (!queue) {
+    return {ready: false, reason: 'repair queue is missing; inspection cannot be called final'};
+  }
+  if (!['completed', 'blocked'].includes(queueStatus)) {
     return {ready: false, reason: `repair queue is not terminal: ${queueStatus}`};
   }
   const guardAt = latestTimestamp(guardReport?.updatedAt, guardReport?.createdAt);
   if (!Number.isFinite(guardAt)) return {ready: false, reason: 'final guard timestamp is missing'};
   const totalRows = Number(queue?.counts?.totalRows || 0);
-  if (!queue || totalRows === 0) return {ready: true, reason: 'terminal no-repair guard'};
+  const outstanding = countOutstandingGuardRepairs(guardReport);
+  if (totalRows === 0 && outstanding.total > 0) {
+    return {
+      ready: false,
+      reason: 'terminal zero-row queue conflicts with outstanding guard repair actions',
+      outstanding,
+    };
+  }
+  if (totalRows === 0) return {ready: true, reason: 'terminal no-repair guard'};
 
   const queueAt = latestTimestamp(queue?.updatedAt, queue?.createdAt);
   const executionAt = latestTimestamp(
@@ -87,6 +98,26 @@ export function assessMarketingDailyDeliveryReadiness({queue = null, guardReport
     };
   }
   return {ready: true, reason: 'terminal queue has post-execution final guard'};
+}
+
+export function countOutstandingGuardRepairs(guardReport = null) {
+  const guard = guardReport || {};
+  const counts = {
+    highClickSpecial: Number(guard?.highClickLowConversionSpecial?.actionCount || 0),
+    manualSpecialRestore: Number(guard?.manualSpecialLimitedDiscount?.actionCount || 0),
+    driftRepair: Math.max(
+      Number(guard?.limitedDiscountTargetPriceDrift?.belowTarget || 0),
+      Number(guard?.limitedDiscountTargetPriceDrift?.belowRows?.length || 0),
+    ),
+    fallbackRepair: Math.max(
+      Number(guard?.newSkcCandidates?.newListingWithin7DaysLimitedDiscount?.executableActionCount || 0),
+      Number(guard?.newSkcCandidates?.newListingWithin7DaysLimitedDiscount?.actionCount || 0),
+    ),
+  };
+  return {
+    ...counts,
+    total: Object.values(counts).reduce((sum, value) => sum + value, 0),
+  };
 }
 
 function extractSection(markdown, heading) {

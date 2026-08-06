@@ -5,6 +5,7 @@ import {
   assessMarketingDailyDeliveryReadiness,
   buildMarketingDailyFinalMarkdown,
   buildMarketingDailyGroupSummary,
+  countOutstandingGuardRepairs,
 } from './send_marketing_daily_group_report.mjs';
 
 const guardMarkdown = `# report
@@ -94,6 +95,48 @@ assert.equal(assessMarketingDailyDeliveryReadiness({
   guardReport: {createdAt: '2026-07-31T04:05:00.000Z'},
   executionReport,
 }).ready, true, 'a post-terminal final guard is deliverable');
+
+assert.equal(assessMarketingDailyDeliveryReadiness({
+  queue: null,
+  guardReport: {createdAt: '2026-07-31T04:05:00.000Z'},
+}).ready, false, 'a missing queue must never be treated as a no-repair final');
+
+const terminalZeroQueue = {
+  status: 'completed',
+  createdAt: '2026-07-31T04:00:00.000Z',
+  updatedAt: '2026-07-31T04:01:00.000Z',
+  counts: {totalRows: 0},
+};
+assert.equal(assessMarketingDailyDeliveryReadiness({
+  queue: terminalZeroQueue,
+  guardReport: {
+    createdAt: '2026-07-31T04:05:00.000Z',
+    highClickLowConversionSpecial: {actionCount: 2},
+    manualSpecialLimitedDiscount: {actionCount: 3},
+    limitedDiscountTargetPriceDrift: {belowRows: [{}, {}]},
+    newSkcCandidates: {
+      newListingWithin7DaysLimitedDiscount: {executableActionCount: 4},
+    },
+  },
+}).ready, false, 'a zero-row queue cannot hide outstanding guard repair actions');
+assert.deepEqual(countOutstandingGuardRepairs({
+  highClickLowConversionSpecial: {actionCount: 2},
+  manualSpecialLimitedDiscount: {actionCount: 3},
+  limitedDiscountTargetPriceDrift: {belowRows: [{}, {}]},
+  newSkcCandidates: {
+    newListingWithin7DaysLimitedDiscount: {executableActionCount: 4},
+  },
+}), {
+  highClickSpecial: 2,
+  manualSpecialRestore: 3,
+  driftRepair: 2,
+  fallbackRepair: 4,
+  total: 11,
+});
+assert.equal(assessMarketingDailyDeliveryReadiness({
+  queue: terminalZeroQueue,
+  guardReport: {createdAt: '2026-07-31T04:05:00.000Z'},
+}).ready, true, 'a terminal zero-row queue is deliverable only with a zero-action guard');
 
 const senderSource = await fs.readFile(
   new URL('./send_marketing_daily_group_report.mjs', import.meta.url),
