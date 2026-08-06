@@ -818,6 +818,18 @@ try {
     check('approved update_images binding locks exact SB target', maintenanceRawTask?.imageEditPayload?.skc_list?.[0]?.skc_name, 'sb260806202334303501938');
     check('approved update_images binding does not create publish payload', 'openapiPublishPayload' in (maintenanceRawTask || {}), false);
     check('approved update_images binding touches no title or stock', JSON.stringify(maintenanceRawTask?.imageEditPayload || {}), text => !/multi_language_name_list|stock_info|cost_info|shopPrice|specialPrice/.test(text));
+    const maintenanceDryRun = await req('/api/link-ops-execute', {
+      method: 'POST',
+      cookie,
+      body: {id: maintenanceTaskId, mode: 'dry-run', source: 'maintenance_asset_binding_smoke'},
+    });
+    const maintenanceDryRaw = await rawTaskById(maintenanceTaskId);
+    const maintenanceExecutors = asArray(maintenanceDryRaw?.execution?.linkMaintenanceExecutors);
+    check('approved update_images dry-run status', maintenanceDryRun.status, 200);
+    check('approved update_images no longer reports missing image material', maintenanceDryRaw?.execution?.preflight?.blockers || [], rows => !asArray(rows).some(row => /缺少图片素材/.test(String(row))));
+    check('approved update_images dry-run resolves one exact target', maintenanceExecutors?.[0]?.adapterEvidence?.matchedLinksCount, 1);
+    check('approved update_images dry-run locks payload hash', Boolean(maintenanceExecutors?.[0]?.payload?.payloadHash), true);
+    check('approved update_images without SKU image remains warning only', maintenanceExecutors?.[0]?.adapterEvidence?.imagePayloadInspection?.warnings || [], rows => asArray(rows).some(row => /未提供 SKU 图/.test(String(row))));
   }
 
   let dryRun = null;

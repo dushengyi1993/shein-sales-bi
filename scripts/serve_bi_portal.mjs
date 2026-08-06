@@ -4587,7 +4587,7 @@ function runPreflightForLinkOpsTask(task) {
   if (!['confirmed', 'in_progress', 'waiting_review'].includes(status)) {
     blockers.push('我还没有把这件事整理成可执行处理；你直接在聊天里明确要做什么，我会继续往下查。');
   }
-  if (needs.includes('image') && !intents.includes('copy_product_draft') && !assets.some(a => a.kind === 'image') && !hasJsonAsset) {
+  if (needs.includes('image') && !intents.includes('copy_product_draft') && !assets.some(a => a.kind === 'image') && !hasJsonAsset && !hasApprovedMaintenanceImageBinding(task)) {
     blockers.push('缺少图片素材：请上传图片，或上传系统导出的图片资料 JSON。');
   }
   if (needs.includes('image_or_certificate') && !assets.some(a => a.kind === 'image' || a.kind === 'certificate' || a.mime === 'application/json')) {
@@ -5321,9 +5321,29 @@ function hasTitleMaintenanceMaterial(task) {
   return /(?:标题|title).{0,16}(?:改成|改为|换成|更新为|改到|=>|：|:)/i.test(text);
 }
 
+function hasApprovedMaintenanceImageBinding(task) {
+  const binding = task?.publishAssetBinding;
+  const payload = task?.imageEditPayload || task?.partialEditPayload || task?.targets?.imageEditPayload;
+  if (!binding || binding.kind !== 'update_images' || binding.sourceApproved !== true) return false;
+  if (!/^[a-f0-9]{64}$/i.test(String(binding.bindingFingerprint || ''))) return false;
+  const targetStore = normalizeConcreteStoreKeys([binding.targetStore])[0] || '';
+  if (!targetStore || !taskWriteStores(task).includes(targetStore)) return false;
+  if (!payload || typeof payload !== 'object') return false;
+  const spu = String(payload.spu_name || payload.spuName || '').trim();
+  if (!/^[a-z]\d{10,}$/i.test(spu) || /^s(?:v|b)\d+$/i.test(spu)) return false;
+  const skcRows = asArray(payload.skc_list || payload.skcList);
+  if (!skcRows.length || skcRows.some(row => !/^s(?:v|b)\d+$/i.test(String(row?.skc_name || row?.skcName || '').trim()))) return false;
+  const imageRows = [
+    ...asArray(payload?.image_info?.image_info_list || payload?.imageInfo?.imageInfoList),
+    ...skcRows.flatMap(row => asArray(row?.image_info?.image_info_list || row?.imageInfo?.imageInfoList)),
+  ];
+  return imageRows.some(row => /^https?:\/\//i.test(String(row?.image_url || row?.imageUrl || '').trim()));
+}
+
 function hasImageMaintenanceMaterial(task) {
   const assets = Array.isArray(task?.assets) ? task.assets : [];
-  return assets.some(a => a?.kind === 'image' || String(a?.mime || '').startsWith('image/'));
+  return hasApprovedMaintenanceImageBinding(task)
+    || assets.some(a => a?.kind === 'image' || String(a?.mime || '').startsWith('image/'));
 }
 
 function groupMaintenanceRowsByStoreAndStandard(rows) {
