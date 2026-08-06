@@ -68,6 +68,8 @@ const heavyUnits = [
   'shein-bi-cloud-rtv-verify.service',
   'shein-bi-cloud-order-closure.service',
   'shein-bi-cloud-et-forwarder.service',
+  'shein-bi-et-low-inventory-guard.service',
+  'shein-bi-et-low-inventory-recheck.service',
   'shein-bi-cloud-marketing-live-guard.service',
   'shein-bi-cloud-marketing-repair.service',
   'shein-bi-daily-inventory-replenishment-guard.service',
@@ -128,6 +130,10 @@ assert.deepEqual(calendars(unit('shein-bi-cloud-et-forwarder.timer')), [
   '*-*-* 01,04:12:00',
   '*-*-* 07,10,13,17,20,23:20:00',
 ]);
+assert.deepEqual(calendars(unit('shein-bi-et-low-inventory-recheck.timer')), [
+  '*-*-* 00,02,05,06,08,09,11,12,15,16,18,19,22:20:00',
+]);
+assert.match(unit('shein-bi-cloud-et-forwarder.service'), /^OnSuccess=shein-bi-et-low-inventory-guard\.service$/m);
 assert.deepEqual(calendars(unit('shein-bi-db-backup.timer')), ['*-*-* 01:45:00']);
 assert.deepEqual(calendars(unit('shein-bi-cloud-yesterday.timer')), ['*-*-* 02:45:00']);
 assert.deepEqual(calendars(unit('shein-bi-cloud-rtv-verify.timer')), ['*-*-* 04:50:00']);
@@ -136,7 +142,7 @@ assert.deepEqual(calendars(unit('shein-bi-cloud-morning-link-chunk-2.timer')), [
 assert.deepEqual(calendars(unit('shein-bi-cloud-morning-supplements.timer')), ['*-*-* 09:12:00']);
 assert.deepEqual(calendars(unit('shein-bi-cloud-openapi-stock-refresh.timer')), ['*-*-* *:12,45:00']);
 assert.deepEqual(calendars(unit('shein-bi-cloud-today-sales-reconcile.timer')), ['*-*-* *:00,15,30,45:00']);
-assert.deepEqual(calendars(unit('shein-bi-daily-inventory-replenishment-guard.timer')), ['*-*-* 13:45:00']);
+assert.deepEqual(calendars(unit('shein-bi-daily-inventory-replenishment-guard.timer')), ['*-*-* 15:15:00']);
 
 const morning = read('scripts/cloud_morning_chain.sh');
 assert.match(morning, /SHEIN_BI_MORNING_CHUNK_1_STORES:-DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ,CX,YJ/);
@@ -172,7 +178,7 @@ assert.match(rtvVerifyUnit, /^Environment=SHEIN_RTV_CASE_LIMIT=8$/m);
 const inventory = read('scripts/cloud_daily_inventory_replenishment_guard.sh');
 assert.match(inventory, /--stage morning-links-ready/);
 assert.match(inventory, /--stage stock-refresh/);
-assert.match(inventory, /T13:11:00\+08:00/);
+assert.match(inventory, /T15:11:00\+08:00/);
 
 const automatedShell = fs.readdirSync(new URL('./', import.meta.url))
   .filter(name => name.endsWith('.sh'))

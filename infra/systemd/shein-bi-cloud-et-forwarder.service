@@ -2,6 +2,7 @@
 Description=SHEIN BI cloud ET forwarder sync
 Wants=network-online.target docker.service
 After=network-online.target docker.service systemd-tmpfiles-setup.service
+OnSuccess=shein-bi-et-low-inventory-guard.service
 
 [Service]
 Type=oneshot
