@@ -351,7 +351,7 @@ prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
         echo "[cloud_daily_refresh] linksData was synchronously published by the caller-owned all-store merge"
       fi
       if bash scripts/enqueue_bi_portal_sections.sh \
-        --sections homeRankings,afterSales,orders,homeProfit \
+        --sections homeRankings,afterSales,orders,homeProfit,homeTrafficDaily,priceScatter \
         --priority 10 \
         --reason "daily-refresh-$DATE" \
         && bash scripts/enqueue_bi_portal_sections.sh \

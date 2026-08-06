@@ -230,10 +230,18 @@ let biSectionFastBackgroundQueue = Promise.resolve();
 let biProfitMartFreshnessPromise = null;
 const BI_FAST_BACKGROUND_SECTIONS = new Set(['homeRankings', 'homeProfit']);
 const BI_INLINE_FAST_SECTIONS = new Set(['liveSalesToday', 'productState', 'inventoryStock']);
+const BI_OWNER_VISIBLE_PRIORITY_SECTIONS = new Set([
+  'homeRankings',
+  'homeProfit',
+  'afterSales',
+  'orders',
+  'homeTrafficDaily',
+  'priceScatter',
+]);
 const BI_EXTERNAL_SECTION_QUEUE_ENABLED = process.platform !== 'win32'
   && !['0', 'false', 'no', 'off'].includes(String(process.env.SHEIN_BI_EXTERNAL_SECTION_QUEUE_ENABLED || '1').trim().toLowerCase());
 const biExternalSectionQueuePending = new Set();
-const DEFAULT_BI_PORTAL_CORE_WARMUP_SECTIONS = ['homeRankings', 'profit', 'homeProfit', 'afterSales', 'orders', 'waybills'];
+const DEFAULT_BI_PORTAL_CORE_WARMUP_SECTIONS = ['homeRankings', 'profit', 'homeProfit', 'afterSales', 'orders', 'homeTrafficDaily', 'priceScatter', 'waybills'];
 const BI_PORTAL_CORE_WARMUP_INTERVAL_MS = Math.max(15_000, Number(process.env.SHEIN_BI_CORE_WARMUP_INTERVAL_MS || 60_000));
 const biPortalCoreWarmupState = {
   generatedAt: '',
@@ -6963,7 +6971,12 @@ function enqueueHostLockedBiSection(section, generatedAt = '', options = {}) {
   const key = `${section}|${generatedAt || ''}`;
   if (biExternalSectionQueuePending.has(key)) return true;
   biExternalSectionQueuePending.add(key);
-  const priority = ['homeRankings', 'homeProfit', 'afterSales', 'orders'].includes(section) ? '10' : '50';
+  // A user pressing "force refresh" must not sit behind background rebuilds.
+  // Normal first-screen sections share the same priority as the other home
+  // accounting cards; all remaining sections keep the background default.
+  const priority = options.force === true
+    ? '0'
+    : (BI_OWNER_VISIBLE_PRIORITY_SECTIONS.has(section) ? '10' : '50');
   const reason = String(options.reason || `portal-${generatedAt || 'current'}`).slice(0, 240);
   const child = spawn('/usr/bin/env', [
     'bash',
@@ -7002,6 +7015,7 @@ function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt,
   if (sectionRequiresHostLockedWorker(section, options)) {
     return enqueueHostLockedBiSection(section, generatedAt, {
       reason: force ? `portal-force-${generatedAt || 'current'}` : `portal-cache-miss-${generatedAt || 'current'}`,
+      force,
     });
   }
   // One section/generation may have only one producer. Previously force

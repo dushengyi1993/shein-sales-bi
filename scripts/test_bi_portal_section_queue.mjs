@@ -76,6 +76,34 @@ enqueueSections(defaultLeaseQueue, {sections: ['orders'], now: start});
 const defaultLease = claimNext(defaultLeaseQueue, {now: new Date(start.getTime() + 1_000)});
 assert.match(defaultLease.leaseId, /^[0-9a-f-]{36}$/i);
 
+const starvationQueue = {version: 1, updatedAt: '', entries: []};
+enqueueSections(starvationQueue, {
+  sections: ['oldBackground'],
+  priority: 50,
+  now: start,
+});
+enqueueSections(starvationQueue, {
+  sections: ['freshAccounting'],
+  priority: 10,
+  now: new Date(start.getTime() + 100 * 60_000),
+});
+const agedClaim = claimNext(starvationQueue, {
+  leaseSeconds: 60,
+  leaseId: 'lease-aged',
+  now: new Date(start.getTime() + 101 * 60_000),
+});
+assert.equal(agedClaim.section, 'oldBackground', 'aged background work must not starve behind recurring fresh accounting work');
+
+const forcedQueue = {version: 1, updatedAt: '', entries: []};
+enqueueSections(forcedQueue, {sections: ['veryOldBackground'], priority: 50, now: start});
+enqueueSections(forcedQueue, {sections: ['ownerForced'], priority: 0, now: new Date(start.getTime() + 10 * 60 * 60_000)});
+const forcedClaim = claimNext(forcedQueue, {
+  leaseSeconds: 60,
+  leaseId: 'lease-forced',
+  now: new Date(start.getTime() + 10 * 60 * 60_000 + 1_000),
+});
+assert.equal(forcedClaim.section, 'ownerForced', 'explicit owner refresh must remain ahead of aged background work');
+
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-portal-section-queue-'));
 try {
   const queueFile = path.join(temp, 'queue.json');

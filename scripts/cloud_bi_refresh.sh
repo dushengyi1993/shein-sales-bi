@@ -238,7 +238,7 @@ prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
 
     if [[ "$SHEIN_BI_PORTAL_DATA_MODE" == "api" && "${SHEIN_BI_PORTAL_PREWARM_DISABLED:-0}" != "1" ]]; then
       bash scripts/enqueue_bi_portal_sections.sh \
-        --sections homeRankings,afterSales,orders,homeProfit \
+        --sections homeRankings,afterSales,orders,homeProfit,homeTrafficDaily,priceScatter \
         --priority 10 \
         --reason "sales-$MODE-$DATE"
       bash scripts/enqueue_bi_portal_sections.sh \

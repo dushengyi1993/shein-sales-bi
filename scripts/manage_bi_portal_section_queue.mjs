@@ -8,6 +8,7 @@ import {fileURLToPath} from 'node:url';
 const DEFAULT_FILE = process.env.SHEIN_BI_PORTAL_SECTION_QUEUE_FILE
   || path.join(process.cwd(), 'state', 'portal-section-queue', 'queue.json');
 const SECTION_PATTERN = /^[A-Za-z][A-Za-z0-9]{0,79}$/;
+const QUEUE_AGING_INTERVAL_MS = 2 * 60 * 1_000;
 
 function usage(message = '') {
   if (message) console.error(message);
@@ -165,11 +166,25 @@ export function claimNext(queue, {
 } = {}) {
   const nowMillis = now.getTime();
   recoverExpired(queue, nowMillis);
+  // A steady stream of priority-10 accounting work used to keep priority-50
+  // daily/page caches pending forever.  Age lowers the effective priority by
+  // one point every two minutes, but never ahead of an explicit priority-0
+  // operator refresh.  This keeps urgent work urgent while placing a hard
+  // bound on starvation for the rest of the queue.
+  const effectivePriority = entry => {
+    const priority = Math.max(0, Number(entry.priority || 0));
+    if (priority === 0) return 0;
+    const requestedAt = Date.parse(entry.requestedAt || '');
+    const waitedMillis = Number.isFinite(requestedAt) ? Math.max(0, nowMillis - requestedAt) : 0;
+    const ageCredit = Math.floor(waitedMillis / QUEUE_AGING_INTERVAL_MS);
+    return Math.max(1, priority - ageCredit);
+  };
   const pending = queue.entries
     .filter(entry => entry.status === 'pending')
     .sort((left, right) => (
-      Number(left.priority || 0) - Number(right.priority || 0)
+      effectivePriority(left) - effectivePriority(right)
       || String(left.requestedAt || '').localeCompare(String(right.requestedAt || ''))
+      || Number(left.priority || 0) - Number(right.priority || 0)
       || String(left.section).localeCompare(String(right.section))
     ));
   const entry = pending[0];
