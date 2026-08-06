@@ -351,19 +351,7 @@ for (const row of rows) {
     const lockFile = path.join(ROOT, 'state', 'locks', `daily-inventory-${row.storeKey}-${row.skc}`.replace(/[^A-Za-z0-9_.-]/g, '_'));
     const release = await acquireCrossProcessTicketLock(lockFile, {timeoutMs: 60_000, staleMs: 20 * 60_000});
     try {
-      try {
-        await assertStillListed(client, row);
-      } catch (error) {
-        const message = error?.message || String(error);
-        if (
-          plan?.executionConstraints?.decreaseOnly === true
-          && /shelf status is no longer eligible:/i.test(message)
-        ) {
-          results.push({...result, state: 'skipped_safety_no_longer_inventory_relevant', error: message});
-          continue;
-        }
-        throw error;
-      }
+      await assertStillListed(client, row);
       let before = await readStock(client, row.skuCode);
       if (before.totalUsableInventory === approvedTarget) {
         results.push({...result, state: 'skipped_target_already_matched', before});
