@@ -335,6 +335,7 @@ try {
   check('uppercase SB image payload fills immediate live sku', liveSbPlan?.body?.skc_list?.[0]?.sku_list?.[0]?.sku_code, 'sku-live-sb-001');
   check('uppercase SB image payload injects live group code', liveSbPlan?.body?.skc_list?.[0]?.image_info?.image_group_code, 'G-LIVE-SKC');
   check('uppercase SB resolution called searchProduct', calls.some(c => c.path === '/open-api/goods/searchProduct'), true);
+  check('uppercase SB exact lookup respects searchProduct pageSize limit', calls.find(c => c.path === '/open-api/goods/searchProduct')?.body?.pageSize, 10);
 
   const badImageTask = {
     id: 'bad-image-smoke',

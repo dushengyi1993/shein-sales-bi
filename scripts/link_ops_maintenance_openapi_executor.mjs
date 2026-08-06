@@ -320,7 +320,7 @@ async function resolveMissingExactSkcsFromOpenApi(client, store, missingRefs, ca
     try{
       const response=await client.request('/open-api/goods/searchProduct',{
         method:'POST',
-        body:{pageNum:1,pageSize:20,skcNameList:[ref],languageList:['en','ar']},
+        body:{pageNum:1,pageSize:10,skcNameList:[ref],languageList:['en','ar']},
         headers:{language:'en'},
       });
       calls.push(compactCallResult(`search-product-exact-skc-${ref}`,'/open-api/goods/searchProduct','POST',response));
