@@ -190,6 +190,7 @@ const expectedHash = stableInventoryHash({
   actionable: plan.actionable,
   lowEtAllocations: plan.lowEtAllocations,
   sourceEvidence: asArray(plan.sourceEvidence).map(({ageHours: _ageHours, ...evidence}) => evidence),
+  ...(plan.executionConstraints ? {executionConstraints: plan.executionConstraints} : {}),
 });
 if (expectedHash !== plan.payloadHash) throw new Error(`Plan payload hash mismatch: expected=${plan.payloadHash} actual=${expectedHash}`);
 if (plan.executable !== true || asArray(plan.blockers).length) throw new Error('Plan is not executable');
@@ -200,7 +201,9 @@ for (const evidence of asArray(plan.sourceEvidence)) {
   const maximumAge = evidenceStore === 'ET'
     ? Number(policy.maxBiSnapshotAgeHours || 4)
     : evidenceStore === 'BI_LINKS'
-      ? Number(policy.maxLinksSnapshotAgeHours || 4)
+      ? Number(plan?.executionConstraints?.decreaseOnly
+        ? policy?.lowEtFastGuard?.maxLinksSnapshotAgeHours || policy.maxLinksSnapshotAgeHours || 4
+        : policy.maxLinksSnapshotAgeHours || 4)
       : Number(policy.maxOpenApiSnapshotAgeHours || 2);
   const evidenceAge = ageHours(evidence.fetchedAt);
   if (!Number.isFinite(evidenceAge) || evidenceAge < -0.25 || evidenceAge > maximumAge) {
@@ -217,6 +220,11 @@ for (const evidence of asArray(plan.sourceEvidence).filter(row => currentSourceT
   }
 }
 const rows = asArray(plan.actionable).slice(0, args.maxRows);
+if (plan?.executionConstraints?.decreaseOnly === true && rows.some(row => (
+  Number(row.targetUsableInventory) >= Number(row.platformUsableInventory)
+))) {
+  throw new Error('Decrease-only safety plan contains a non-decrease action');
+}
 let executionAuthorization = null;
 if (args.execute) {
   executionAuthorization = assertDailyInventoryExecutionAuthorization({
@@ -237,6 +245,7 @@ const resultEnvelope = currentResults => ({
   executionMode: args.execute ? executionAuthorization?.mode : 'dry_run',
   authorizationId: executionAuthorization?.authorizationId || null,
   authorizationContext: executionAuthorization?.context || null,
+  executionConstraints: plan.executionConstraints || null,
   results: currentResults,
 });
 const writeResultFile = async currentResults => {
@@ -344,9 +353,14 @@ for (const row of rows) {
     try {
       await assertStillListed(client, row);
       let before = await readStock(client, row.skuCode);
-      const warehouseCode = before.stockRowMissing
-        ? await resolveMissingVirtualInventoryWarehouseCode(client)
-        : '';
+      if (before.totalUsableInventory === approvedTarget) {
+        results.push({...result, state: 'skipped_target_already_matched', before});
+        continue;
+      }
+      if (plan?.executionConstraints?.decreaseOnly === true && before.totalUsableInventory < approvedTarget) {
+        results.push({...result, state: 'skipped_safety_no_increase', before});
+        continue;
+      }
       if (row.ruleClass === 'recent_sale_scarcity') {
         const refillBelow = Number(policy?.recentSaleScarcity?.refillWhenBelow ?? 5);
         const capAbove = Number(policy?.recentSaleScarcity?.capWhenAbove ?? 10);
@@ -360,10 +374,9 @@ for (const row of rows) {
           continue;
         }
       }
-      if (before.totalUsableInventory === approvedTarget) {
-        results.push({...result, state: 'skipped_target_already_matched', before});
-        continue;
-      }
+      const warehouseCode = before.stockRowMissing
+        ? await resolveMissingVirtualInventoryWarehouseCode(client)
+        : '';
       let after = before;
       const writes = [];
       for (let attempt = 1; attempt <= 2 && after.totalUsableInventory !== approvedTarget; attempt += 1) {
@@ -378,7 +391,9 @@ for (const row of rows) {
             ...(warehouseCode ? {warehouseCode} : {}),
             changeType: 'OVERWRITE',
             changeQuantity: overwrite,
-            changeReason: 'Owner-authorized daily inventory target after current-day ET and sales/exposure guard',
+            changeReason: plan?.executionConstraints?.decreaseOnly
+              ? 'Owner-authorized ET low-inventory safety reduction after current-day ET guard'
+              : 'Owner-authorized daily inventory target after current-day ET and sales/exposure guard',
           }]},
           headers: {language: 'en'},
         });

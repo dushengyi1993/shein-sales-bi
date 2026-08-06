@@ -21,6 +21,7 @@ function parseArgs(argv) {
     productsDir: path.join(ROOT, 'outputs', 'shein_openapi_products'),
     biData: path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'inventoryTrend.json'),
     linksData: path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'linksData.json'),
+    operationMode: 'daily',
     out: '',
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -31,10 +32,12 @@ function parseArgs(argv) {
     else if (a === '--products-dir') args.productsDir = path.resolve(argv[++i] || '');
     else if (a === '--bi-data') args.biData = path.resolve(argv[++i] || '');
     else if (a === '--links-data') args.linksData = path.resolve(argv[++i] || '');
+    else if (a === '--operation-mode') args.operationMode = String(argv[++i] || '');
     else if (a === '--out') args.out = path.resolve(argv[++i] || '');
     else throw new Error(`Unknown argument: ${a}`);
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(args.date)) throw new Error('Invalid --date');
+  if (!['daily', 'et_low_inventory_safety'].includes(args.operationMode)) throw new Error('Invalid --operation-mode');
   if (!args.out) args.out = path.join(ROOT, 'outputs', 'reports', `daily-inventory-replenishment-plan-${args.date}.json`);
   return args;
 }
@@ -63,6 +66,9 @@ const biGeneratedAt = biDocument.cachedAt || biDocument.generatedAt || bi.genera
 const biAge = ageHours(biGeneratedAt);
 const linksGeneratedAt = linksDocument.cachedAt || linksDocument.generatedAt || links.generatedAt || links.createdAt;
 const linksAge = ageHours(linksGeneratedAt);
+const maximumLinksAgeHours = args.operationMode === 'et_low_inventory_safety'
+  ? Number(policy?.lowEtFastGuard?.maxLinksSnapshotAgeHours || policy.maxLinksSnapshotAgeHours || 4)
+  : Number(policy.maxLinksSnapshotAgeHours || 4);
 const blockers = [];
 const sourceEvidence = [];
 sourceEvidence.push({
@@ -80,7 +86,7 @@ sourceEvidence.push({
   fetchedAt: linksGeneratedAt || '',
   ageHours: Number.isFinite(linksAge) ? Number(linksAge.toFixed(4)) : null,
 });
-if (!Number.isFinite(linksAge) || linksAge < -0.25 || linksAge > Number(policy.maxLinksSnapshotAgeHours || 4)) {
+if (!Number.isFinite(linksAge) || linksAge < -0.25 || linksAge > maximumLinksAgeHours) {
   blockers.push(`BI links data is stale: generatedAt=${linksGeneratedAt || ''} ageHours=${linksAge}`);
 }
 

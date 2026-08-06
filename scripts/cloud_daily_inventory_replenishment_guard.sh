@@ -35,9 +35,9 @@ if [[ "$REQUIRE_PIPELINE_MARKERS" == "1" || "$REQUIRE_PIPELINE_MARKERS" == "true
     --stage stock-refresh \
     --date "$DATE" \
     --status done,warning \
-    --not-before "${DATE}T13:11:00+08:00" \
+    --not-before "${DATE}T15:11:00+08:00" \
     || {
-      echo "[daily_inventory_guard] 13:12 stock refresh marker is not ready" >&2
+      echo "[daily_inventory_guard] 15:12 stock refresh marker is not ready" >&2
       exit 75
     }
 fi
