@@ -17,7 +17,7 @@ Environment=SHEIN_BI_PORTAL_URL=http://127.0.0.1:8787
 Environment=SHEIN_BI_MORNING_CHAIN_LOG_DIR=/srv/shein-bi/logs/cloud-morning-chain
 Environment=SHEIN_BI_MORNING_CHAIN_STATE_DIR=/opt/shein-bi/app/state/cloud_morning_chain
 Environment=SHEIN_BI_MORNING_CHUNK_2_STORES=XL,QY,QH,TZ,JSH,TZZ,XC
-Environment=SHEIN_LINK_BUSINESS_STORE_ATTEMPTS=2
+Environment=SHEIN_LINK_BUSINESS_STORE_ATTEMPTS=1
 TimeoutStartSec=1800
 TimeoutStopSec=30
 KillMode=control-group

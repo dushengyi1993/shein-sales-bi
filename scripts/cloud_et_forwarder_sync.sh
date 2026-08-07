@@ -19,6 +19,8 @@ SKIP_IF_SERVICES="${SHEIN_ET_SKIP_IF_SERVICES:-shein-bi-cloud-daily-refresh.serv
 ET_CHROME_PROFILE_NAME="persistent-et-forwarder-profile"
 ET_CHROME_TMP_DIR="${SHEIN_ET_CHROME_TMP_DIR:-/tmp/shein-bi-et-forwarder-chrome-tmp}"
 ET_CLEANUP_LEGACY_CHROME_TMP="${SHEIN_ET_CLEANUP_LEGACY_CHROME_TMP:-1}"
+ET_TRANSPORT="${SHEIN_ET_TRANSPORT:-http}"
+ET_HTTP_SESSION_FILE="${SHEIN_ET_HTTP_SESSION_FILE:-$ROOT/state/et_forwarder_http_session.local.json}"
 
 resolve_date() {
   local target="$1"
@@ -128,6 +130,7 @@ check_portal_health() {
 }
 
 prepare_et_chrome_tmp() {
+  [[ "$ET_TRANSPORT" == "browser" ]] || return 0
   if [[ "${SHEIN_ET_CLEANUP_BROWSER:-1}" == "0" || "${SHEIN_ET_CLEANUP_BROWSER:-1}" == "false" ]]; then
     return 0
   fi
@@ -142,6 +145,7 @@ live_chrome_process_count() {
 }
 
 cleanup_et_browser() {
+  [[ "$ET_TRANSPORT" == "browser" ]] || return 0
   if [[ "${SHEIN_ET_CLEANUP_BROWSER:-1}" == "0" || "${SHEIN_ET_CLEANUP_BROWSER:-1}" == "false" ]]; then
     return 0
   fi
@@ -189,6 +193,8 @@ protect_et_capacity
 prepare_et_chrome_tmp
 
 FETCH_ARGS=(
+  --transport "$ET_TRANSPORT"
+  --session-file "$ET_HTTP_SESSION_FILE"
   --mode "$MODE"
   --date "$DATE"
   --overlap-rows "${SHEIN_ET_OVERLAP_ROWS:-5}"
@@ -199,6 +205,8 @@ FETCH_ARGS=(
 )
 if [[ "$TARGET" == "ship-backfill" || "$TARGET" == "ship-full" ]]; then
   FETCH_ARGS=(
+    --transport "$ET_TRANSPORT"
+    --session-file "$ET_HTTP_SESSION_FILE"
     --mode backfill
     --date "$DATE"
     --start-date "${SHEIN_ET_SHIP_BACKFILL_START_DATE:-2024-01-01}"

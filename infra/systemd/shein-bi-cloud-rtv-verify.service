@@ -25,5 +25,5 @@ MemoryHigh=1000M
 MemoryMax=1500M
 OOMPolicy=stop
 KillMode=control-group
-ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_browser_read_job.sh --domain rtv-verify --lock-wait-sec 120 --deadline-at 05:27 --defer-state /srv/shein-bi/runtime/host-scheduler/rtv-verify.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/run_pipeline_stage.sh --stage rtv-verify --business-date yesterday --message "RTV tracking verification completed" -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_rtv_verify.sh
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain rtv-verify --class materializer --lock-wait-sec 120 --deadline-at 05:27 --defer-state /srv/shein-bi/runtime/host-scheduler/rtv-verify.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/run_pipeline_stage.sh --stage rtv-verify --business-date yesterday --message "RTV tracking verification completed" -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_rtv_verify.sh
 SuccessExitStatus=75

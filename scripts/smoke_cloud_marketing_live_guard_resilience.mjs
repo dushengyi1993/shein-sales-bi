@@ -78,9 +78,12 @@ assert.match(repairWorker, /export SHEIN_BI_BROWSER_LEASE_RUN_ID="\$RUN_ID"/);
 assert.doesNotMatch(dailyRefresh, /manage_browser_task_leases\.mjs/);
 assert.doesNotMatch(dailyRefresh, /cleanup_shein_store_browsers|close_store_browsers/);
 assert.doesNotMatch(dailyRefresh, /scan_current_marketing_prices_for_bi\.mjs/);
-for (const source of [linkBusiness, sessionManager, rtvVerify]) {
+for (const source of [linkBusiness, sessionManager]) {
   assert.match(source, /manage_browser_task_leases\.mjs/);
 }
+assert.match(rtvVerify, /--transport webapi/);
+assert.doesNotMatch(rtvVerify, /manage_browser_task_leases\.mjs|launch_store_browser|--headless/,
+  'RTV direct WebAPI verification must not reserve a browser lease');
 assert.doesNotMatch(linkBusiness, /pkill\s+-f/);
 assert.match(
   linkBusiness,

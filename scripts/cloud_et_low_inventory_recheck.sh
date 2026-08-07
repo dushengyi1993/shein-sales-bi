@@ -5,11 +5,12 @@ ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
 RUNTIME_ROOT="${SHEIN_BI_ET_LOW_INVENTORY_RUNTIME_ROOT:-/srv/shein-bi/runtime/et-low-inventory-guard}"
 STATE="$RUNTIME_ROOT/state/latest.json"
 if [[ ! -s "$STATE" ]] || [[ "$(jq -r '.active == true' "$STATE")" != "true" ]]; then
-  echo "[et_low_inventory_recheck] no active ET 1-10 watchlist; skip browser refresh"
+  echo "[et_low_inventory_recheck] no active ET 1-10 watchlist; skip ET HTTP refresh"
   exit 0
 fi
 
-echo "[et_low_inventory_recheck] active low-ET watchlist; run stock-only ET refresh"
+echo "[et_low_inventory_recheck] active low-ET watchlist; run stock-only ET direct HTTP refresh"
+SHEIN_ET_TRANSPORT="${SHEIN_ET_TRANSPORT:-http}" \
 SHEIN_ET_ENDPOINTS="store_stock,box_stock" \
 SHEIN_ET_REFRESH_PORTAL_MODE="sections" \
 SHEIN_ET_SYNC_PREWARM_SECTIONS="inventoryTrend" \

@@ -151,6 +151,8 @@ function parseArgs(argv) {
     maxPairs: 80,
     minAgeDays: 2,
     cooldownHours: 20,
+    pairAttempts: 3,
+    retryDelayMs: 1500,
     ignoreCooldown: false,
     transport: process.env.SHEIN_SALES_TRANSPORT || 'openapi',
     dryRun: false,
@@ -166,6 +168,8 @@ function parseArgs(argv) {
     else if (a === '--max-pairs') args.maxPairs = Math.max(1, Number(argv[++i] || 1));
     else if (a === '--min-age-days') args.minAgeDays = Math.max(0, Number(argv[++i] || 0));
     else if (a === '--cooldown-hours') args.cooldownHours = Math.max(0, Number(argv[++i] || 0));
+    else if (a === '--pair-attempts') args.pairAttempts = Math.max(1, Math.min(5, Number(argv[++i] || 1)));
+    else if (a === '--retry-delay-ms') args.retryDelayMs = Math.max(0, Number(argv[++i] || 0));
     else if (a === '--ignore-cooldown') args.ignoreCooldown = true;
     else if (a === '--transport') args.transport = String(argv[++i] || '').trim().toLowerCase();
     else if (a === '--dry-run') args.dryRun = true;
@@ -778,6 +782,8 @@ async function main() {
     minAgeDays: args.minAgeDays,
     cooldownHours: args.ignoreCooldown ? 0 : args.cooldownHours,
     transport: args.transport,
+    pairAttempts: args.pairAttempts,
+    qualityStatus: 'complete',
     pairs: [],
     totals: {fetchedPairs: 0, failedPairs: 0, rows: 0, terminalRows: 0, byGroup: {}},
   };
@@ -791,11 +797,19 @@ async function main() {
   }
 
   for (const pair of pairs) {
-    const fetched = await fetchPair(args, runDir, pair);
+    let fetched = null;
+    const attempts = [];
+    for (let attempt = 1; attempt <= args.pairAttempts; attempt += 1) {
+      fetched = await fetchPair(args, runDir, pair);
+      attempts.push({attempt, ok: fetched.ok, code: fetched.code});
+      if (fetched.ok && fssync.existsSync(fetched.file)) break;
+      if (attempt < args.pairAttempts && args.retryDelayMs > 0) {
+        await new Promise(resolve => setTimeout(resolve, args.retryDelayMs * attempt));
+      }
+    }
     if (!fetched.ok || !fssync.existsSync(fetched.file)) {
-      report.ok = false;
       report.totals.failedPairs += 1;
-      report.pairs.push({pair, ok: false, code: fetched.code, error: fetched.stderrTail || fetched.stdoutTail});
+      report.pairs.push({pair, ok: false, attempts, code: fetched.code, error: fetched.stderrTail || fetched.stdoutTail});
       await writeState(args, report);
       continue;
     }
@@ -811,6 +825,7 @@ async function main() {
     report.pairs.push({
       pair,
       ok: true,
+      attempts,
       file: sourceFile,
       fetchTime: json.fetchTime,
       apiCount: json.summary?.apiCount ?? null,
@@ -826,6 +841,13 @@ async function main() {
   }
 
   report.finishedAt = new Date().toISOString();
+  if (report.totals.failedPairs > 0 && report.totals.fetchedPairs > 0) {
+    report.ok = true;
+    report.qualityStatus = 'partial';
+  } else if (report.totals.failedPairs > 0) {
+    report.ok = false;
+    report.qualityStatus = 'failed';
+  }
   await writeState(args, report);
   console.log(JSON.stringify(report, null, 2));
   if (!report.ok) process.exitCode = 1;

@@ -152,6 +152,46 @@ process.stdout.write(missing.join(','));
 NODE
 }
 
+merge_store_lists() {
+  FIRST="$1" SECOND="$2" node - <<'NODE'
+const values = `${process.env.FIRST || ''},${process.env.SECOND || ''}`
+  .split(/[\s,]+/)
+  .map(value => value.trim().toUpperCase())
+  .filter(Boolean);
+process.stdout.write([...new Set(values)].join(','));
+NODE
+}
+
+finalize_links_if_complete() {
+  SHEIN_LINK_BUSINESS_FINALIZE_ONLY=1 \
+  SHEIN_LINK_BUSINESS_ALLOW_PARTIAL=1 \
+  SHEIN_LINK_BUSINESS_REFRESH_PORTAL=0 \
+    bash scripts/cloud_link_business_sync.sh "$DATA_DATE"
+
+  local missing_stores
+  missing_stores="$(missing_exact_date_stores)"
+  if [[ -n "$missing_stores" ]]; then
+    write_state "warning" "link refresh is still partial; retryable stores: $missing_stores"
+    write_marker "morning-links-partial" "warning" \
+      "current-date evidence is incomplete; retryable stores: $missing_stores" \
+      "$LOG_FILE" >/dev/null
+    echo "[cloud_morning_chain] WARN exact-date link/business gaps remain stores=$missing_stores; recovery stage will resume only these stores"
+    return 75
+  fi
+
+  node scripts/generate_bi_portal.mjs \
+    --metabase-url "${METABASE_URL:-http://127.0.0.1:3000}" \
+    --data-mode api
+  node scripts/generate_bi_portal_shell.mjs
+  curl -fsS --max-time "${SHEIN_BI_MORNING_LINKS_REFRESH_TIMEOUT_SEC:-600}" \
+    -H 'X-SHEIN-BI-HOST-LOCKED-WORKER: 1' \
+    "${SHEIN_BI_PORTAL_URL:-http://127.0.0.1:8787}/api/bi/section/linksData?refresh=1" \
+    >/dev/null
+  write_marker "morning-links-ready" "done" "all 19 stores merged and linksData refreshed" \
+    "$STATE_DIR/${RUN_DATE}-chunk-1.json" "$STATE_DIR/${RUN_DATE}-chunk-2.json" "$LOG_FILE" >/dev/null
+  write_state "ok" "all 19 stores merged; linksData is ready"
+}
+
 mkdir -p "$LOG_DIR" "$STATE_DIR"
 exec > >(tee -a "$LOG_FILE") 2>&1
 trap 'on_error "$LINENO" "$?"' ERR
@@ -188,14 +228,14 @@ case "$STAGE" in
     fi
     ;;
   chunk-2)
+    PRIOR_MISSING="$(missing_exact_date_stores)"
+    TARGET_STORES="$(merge_store_lists "$CHUNK_2_STORES" "$PRIOR_MISSING")"
     if ! require_marker "morning-chunk-1"; then
-      write_state "deferred" "first 12-store marker is not ready"
-      write_marker "morning-chunk-2" "deferred" "missing morning-chunk-1 marker" "$LOG_FILE" >/dev/null
-      exit 75
+      echo "[cloud_morning_chain] first chunk marker missing; resume from exact-date store evidence instead of blocking the whole pipeline"
     fi
-    write_state "running" "remaining 7 stores are refreshing"
+    write_state "running" "second chunk is refreshing its stores plus unfinished first-chunk stores: $TARGET_STORES"
     RESULT_FILE="$STATE_DIR/${RUN_DATE}-chunk-2.json"
-    run_fetch_chunk "$CHUNK_2_STORES" "$RESULT_FILE"
+    run_fetch_chunk "$TARGET_STORES" "$RESULT_FILE"
     CHUNK_STATUS="$(chunk_result_status "$RESULT_FILE")"
     FAILED_STORES="$(chunk_result_failed_stores "$RESULT_FILE")"
     if [[ "$CHUNK_STATUS" == "warning" ]]; then
@@ -205,32 +245,7 @@ case "$STAGE" in
     fi
 
     write_state "running" "all 19 stores are merging"
-    SHEIN_LINK_BUSINESS_FINALIZE_ONLY=1 \
-    SHEIN_LINK_BUSINESS_ALLOW_PARTIAL=1 \
-    SHEIN_LINK_BUSINESS_REFRESH_PORTAL=0 \
-      bash scripts/cloud_link_business_sync.sh "$DATA_DATE"
-
-    MISSING_STORES="$(missing_exact_date_stores)"
-    if [[ -n "$MISSING_STORES" ]]; then
-      write_marker "morning-links-ready" "warning" \
-        "all stores were attempted; retained the previous complete link snapshot; missing exact-date stores: $MISSING_STORES" \
-        "$STATE_DIR/${RUN_DATE}-chunk-1.json" "$RESULT_FILE" "$LOG_FILE" >/dev/null
-      write_state "warning" "link refresh is partial; supplements may continue; missing stores: $MISSING_STORES"
-      echo "[cloud_morning_chain] WARN exact-date link/business gaps remain stores=$MISSING_STORES; previous complete Portal snapshot retained"
-      exit 0
-    fi
-
-    node scripts/generate_bi_portal.mjs \
-      --metabase-url "${METABASE_URL:-http://127.0.0.1:3000}" \
-      --data-mode api
-    node scripts/generate_bi_portal_shell.mjs
-    curl -fsS --max-time "${SHEIN_BI_MORNING_LINKS_REFRESH_TIMEOUT_SEC:-600}" \
-      -H 'X-SHEIN-BI-HOST-LOCKED-WORKER: 1' \
-      "${SHEIN_BI_PORTAL_URL:-http://127.0.0.1:8787}/api/bi/section/linksData?refresh=1" \
-      >/dev/null
-    write_marker "morning-links-ready" "done" "all 19 stores merged and linksData refreshed" \
-      "$STATE_DIR/${RUN_DATE}-chunk-1.json" "$RESULT_FILE" "$LOG_FILE" >/dev/null
-    write_state "ok" "all 19 stores merged; linksData is ready"
+    finalize_links_if_complete || exit $?
     ;;
   supplements)
     if ! require_marker "morning-links-ready"; then
