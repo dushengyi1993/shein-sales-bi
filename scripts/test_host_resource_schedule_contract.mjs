@@ -87,12 +87,19 @@ const browserReadUnits = [
   'shein-bi-cloud-session-manager.service',
   'shein-bi-cloud-morning-chain.service',
   'shein-bi-cloud-morning-link-chunk-2.service',
-  'shein-bi-cloud-rtv-verify.service',
-  'shein-bi-cloud-et-forwarder.service',
-  'shein-bi-cloud-et-storage-fee.service',
 ];
 for (const name of browserReadUnits) {
   assert.match(unit(name), /run_host_browser_read_job\.sh/, name);
+}
+for (const name of [
+  'shein-bi-cloud-rtv-verify.service',
+  'shein-bi-cloud-et-forwarder.service',
+  'shein-bi-cloud-et-storage-fee.service',
+  'shein-bi-et-low-inventory-recheck.service',
+]) {
+  const content = unit(name);
+  assert.doesNotMatch(content, /run_host_browser_read_job\.sh|--class browser/,
+    `${name} has a direct WebAPI/HTTP implementation and must not reserve a browser lane`);
 }
 for (const name of [
   'shein-bi-cloud-marketing-repair.service',
@@ -151,8 +158,8 @@ assert.match(morning, /SHEIN_LINK_BUSINESS_FETCH_ONLY=1/);
 assert.match(morning, /SHEIN_LINK_BUSINESS_ALLOW_PARTIAL=1/,
   'one transient store failure must not prevent the other morning stores from being fetched');
 assert.match(morning, /first chunk completed; failed stores will not block the second chunk/);
-assert.match(morning, /retained the previous complete link snapshot/,
-  'a partial link day must preserve the previous complete Portal snapshot while supplements continue');
+assert.match(morning, /recovery stage will resume only these stores/,
+  'a partial link day must preserve exact progress and retry only unfinished stores');
 assert.match(morning, /SHEIN_LINK_BUSINESS_FINALIZE_ONLY=1/);
 assert.match(morning, /morning-links-ready/);
 assert.match(morning, /SHEIN_BI_DAILY_LINK_BUSINESS_MODE=skip/);

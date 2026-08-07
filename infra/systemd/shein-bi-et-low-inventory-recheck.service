@@ -18,6 +18,8 @@ Environment=SHEIN_ET_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-et-f
 Environment=SHEIN_BI_PORTAL_REFRESH_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-portal-refresh.lock
 Environment=SHEIN_PYTHON=/opt/shein-bi/app/.venv-et/bin/python
 Environment=SHEIN_ET_LOG_DIR=/srv/shein-bi/logs/cloud-et-forwarder
+Environment=SHEIN_ET_TRANSPORT=http
+Environment=SHEIN_ET_HTTP_SESSION_FILE=/opt/shein-bi/app/state/et_forwarder_http_session.local.json
 Environment=SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT=cloud_et_low_inventory_guard
 Environment=SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION=owner-automatic-et-low-inventory-20260806-v1
 TimeoutStartSec=900
@@ -27,5 +29,5 @@ MemoryHigh=800M
 MemoryMax=1200M
 OOMPolicy=stop
 KillMode=control-group
-ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain et-low-inventory-recheck --class browser --lock-wait-sec 60 --deadline-minute 27 --defer-state /srv/shein-bi/runtime/host-scheduler/et-low-inventory-recheck.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_et_low_inventory_recheck.sh
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain et-low-inventory-recheck --class materializer --lock-wait-sec 60 --deadline-minute 27 --defer-state /srv/shein-bi/runtime/host-scheduler/et-low-inventory-recheck.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_et_low_inventory_recheck.sh
 SuccessExitStatus=75

@@ -136,7 +136,9 @@ async function systemctlShow(name) {
 
 function parseDate(value) {
   if (!value) return null;
-  const raw = String(value).replace(' ', 'T');
+  const text = String(value).trim();
+  const systemd = text.match(/^(?:[A-Za-z]{3}\s+)?(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\s+[A-Za-z]+)?$/);
+  const raw = systemd ? `${systemd[1]}T${systemd[2]}+08:00` : text.replace(' ', 'T');
   const d = new Date(raw.includes('+') || raw.endsWith('Z') ? raw : `${raw}+08:00`);
   return Number.isNaN(d.getTime()) ? null : d;
 }
@@ -145,6 +147,38 @@ function hoursSince(value) {
   const d = parseDate(value);
   if (!d) return null;
   return (Date.now() - d.getTime()) / 36e5;
+}
+
+function bjDateKey(now = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(now);
+}
+
+function laterThanServiceExit(completedAt, status) {
+  const completed = parseDate(completedAt)?.getTime();
+  const exited = parseDate(status?.ExecMainExitTimestamp || status?.StateChangeTimestamp)?.getTime();
+  return Number.isFinite(completed) && (!Number.isFinite(exited) || completed >= exited);
+}
+
+function assessBusinessRecovery(unit, status, {morningMarker, orderRecheckState} = {}) {
+  const morningUnits = new Set([
+    'shein-bi-cloud-morning-chain.service',
+    'shein-bi-cloud-morning-link-chunk-2.service',
+    'shein-bi-cloud-morning-supplements.service',
+  ]);
+  if (morningUnits.has(unit)
+    && morningMarker?.runDate === bjDateKey()
+    && ['done', 'warning'].includes(String(morningMarker?.status || ''))
+    && laterThanServiceExit(morningMarker?.completedAt, status)) {
+    return {recovered: true, reason: 'morning_links_ready_after_unit_exit', completedAt: morningMarker.completedAt};
+  }
+  if (unit === 'shein-bi-cloud-order-closure.service'
+    && orderRecheckState?.ok === true
+    && laterThanServiceExit(orderRecheckState?.finishedAt, status)) {
+    return {recovered: true, reason: 'order_recheck_completed_after_unit_exit', completedAt: orderRecheckState.finishedAt};
+  }
+  return {recovered: false};
 }
 
 function fmtHours(n) {
@@ -491,6 +525,8 @@ async function main() {
     for (const message of productReconciliationHealth.messages) issues.push(`商品 OpenAPI 对账需处理：${message}`);
   }
   const serviceExitAcks = await readServiceExitAcks();
+  const morningReadyMarker = await readJsonIfExists(path.join(ROOT, 'state', 'pipeline-markers', 'morning-links-ready.latest.json'));
+  const orderRecheckStateForServices = await readJsonIfExists(path.join(ROOT, 'state', 'order_status_recheck_last.json'));
   const sessionManagerReport = await readJsonIfExists(path.join(ROOT, 'outputs', 'reports', 'cloud-session-manager-latest.json'));
   const manualLoginState = await readJsonIfExists(
     process.env.SHEIN_MANUAL_LOGIN_STATE_FILE || '/srv/shein-bi/runtime/cloud_manual_login_sessions.json',
@@ -512,6 +548,11 @@ async function main() {
     status.serviceExitAcknowledged = acknowledgedExit;
     status.expectedConditionSkip = expectedConditionSkip;
     const isSessionManager = unit === 'shein-bi-cloud-session-manager.service';
+    const businessRecovery = assessBusinessRecovery(unit, status, {
+      morningMarker: morningReadyMarker,
+      orderRecheckState: orderRecheckStateForServices,
+    });
+    status.businessRecovery = businessRecovery;
     if (isSessionManager) {
       sessionManagerManualRecovery = assessSessionManagerManualRecovery({
         sessionReport: sessionManagerReport,
@@ -531,6 +572,9 @@ async function main() {
           type: 'manual_login_session_recovery',
           ...sessionManagerManualRecovery,
         });
+      } else if (businessRecovery.recovered) {
+        maintenanceNotes.push(`${unit} 的旧退出状态已被后续业务完成标记覆盖，不再向运营群重复报警。`);
+        recoveries.push({type: 'business_stage_recovery', unit, ...businessRecovery});
       } else {
         issues.push(`服务异常：${unit} state=${status.ActiveState || '-'} result=${status.Result || '-'} exit=${status.ExecMainStatus || '-'} code=${status.ExecMainCode || '-'}`);
       }
@@ -753,6 +797,8 @@ async function main() {
   }
   if (orderClosure.state && orderClosure.state.ok === false) {
     issues.push(`订单状态复查最近一次失败：failedPairs=${orderClosure.state?.totals?.failedPairs ?? '-'} run=${orderClosure.state?.runId || '-'}`);
+  } else if (orderClosure.state?.qualityStatus === 'partial') {
+    maintenanceNotes.push(`订单状态复查已完成主体数据，少量接口失败保留定向重试：failedPairs=${orderClosure.state?.totals?.failedPairs ?? 0}。`);
   }
   if (!orderClosure.db?.ok) {
     issues.push(`订单闭环 DB 审计失败：${orderClosure.db?.error || 'unknown'}`);

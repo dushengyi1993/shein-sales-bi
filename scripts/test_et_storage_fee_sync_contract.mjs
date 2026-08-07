@@ -23,7 +23,9 @@ const dailyContext = buildContext({mode: 'daily', date: '2026-07-19', startDate:
 assert.equal(dailyContext.rollingStart, '2026-07-17', 'daily context must use the intended two-day Beijing overlap');
 assert.equal(dailyContext.financeStart, '2026-06-01', 'daily finance context must start on the prior month first day');
 assert.match(sync, /--storage-fee-only/, 'dedicated sync must use the storage-fee-only fetch contract');
-assert.match(sync, /persistent-et-forwarder-profile/, 'dedicated sync must use the dedicated ET Chrome profile');
+assert.match(sync, /ET_TRANSPORT="\$\{SHEIN_ET_TRANSPORT:-http\}"/, 'dedicated sync must use direct HTTP by default');
+assert.match(sync, /--transport "\$ET_TRANSPORT"/, 'dedicated sync must pass the selected ET transport');
+assert.match(sync, /--session-file "\$ET_HTTP_SESSION_FILE"/, 'dedicated sync must reuse the protected ET HTTP cookie jar');
 assert.match(sync, /shein-bi-cloud-et-forwarder\.lock/, 'dedicated sync must share the generic ET lock');
 assert.match(sync, /flock -w "\$\{SHEIN_ET_STORAGE_FEE_LOCK_WAIT_SEC:-1800\}" 9/, 'dedicated sync must wait up to 30 minutes for the shared ET lock');
 assert.match(sync, /failed phase=lock/, 'shared-lock exhaustion must raise an explicit alert');
@@ -65,6 +67,8 @@ assert.match(sync, /PHASE" == "fetch"[\s\S]*PHASE" == "validate"[\s\S]*PHASE" ==
 assert.match(sync, /raw\/cache may have advanced; inspect audit/, 'post-refresh failures must not claim old caches were retained');
 assert.doesNotMatch(sync, /\/Finance\/(?:IncomeBill\/)?(?:Create|Update|Delete|Submit)/i, 'dedicated sync must not add ET write endpoints');
 assert.match(service, /cloud_et_storage_fee_sync\.sh daily/, 'service must run daily mode');
+assert.match(service, /^Environment=SHEIN_ET_TRANSPORT=http$/m, 'normal storage-fee runs must not launch Chrome');
+assert.doesNotMatch(service, /run_host_browser_read_job\.sh|--class browser/, 'storage-fee must not reserve a browser lane');
 assert.match(service, /^User=sheinops$/m, 'service must run as sheinops');
 assert.match(service, /^Group=sheinops$/m, 'service must use the sheinops group');
 assert.match(service, /^UMask=0027$/m, 'service must create non-world-readable files');

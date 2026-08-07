@@ -41,6 +41,8 @@ function parseArgs(argv) {
     autoLogin: true,
     visible: false,
     statePath: path.join(ROOT, 'state', 'et_forwarder_sync_state.json'),
+    sessionPath: path.join(ROOT, 'state', 'et_forwarder_http_session.local.json'),
+    transport: 'http',
     endpoints: '',
     includeFinance: false,
     storageFeeOnly: false,
@@ -70,6 +72,10 @@ function parseArgs(argv) {
     else if (a === '--min-pages') args.minPages = Number(argv[++i]);
     else if (a === '--wait-ms') args.waitMs = Number(argv[++i]);
     else if (a === '--state-path') args.statePath = path.resolve(argv[++i]);
+    else if (a === '--session-file') args.sessionPath = path.resolve(argv[++i]);
+    else if (a === '--transport') args.transport = String(argv[++i] || '').trim().toLowerCase();
+    else if (a === '--http') args.transport = 'http';
+    else if (a === '--browser') args.transport = 'browser';
     else if (a === '--endpoints') args.endpoints = argv[++i] || '';
     else if (a === '--include-finance') args.includeFinance = true;
     else if (a === '--no-finance') args.includeFinance = false;
@@ -90,6 +96,9 @@ function parseArgs(argv) {
   args.shipLookbackDays = Math.max(1, Number(args.shipLookbackDays) || 7);
   if (!['daily', 'backfill', 'smoke'].includes(args.mode)) {
     throw new Error(`Unsupported mode: ${args.mode}`);
+  }
+  if (!['http', 'browser'].includes(args.transport)) {
+    throw new Error(`Unsupported ET transport: ${args.transport}`);
   }
   if (args.mode === 'smoke') {
     args.maxPages = args.maxPages || 1;
@@ -341,6 +350,7 @@ async function getEtPage(args) {
 }
 
 async function browserFetchJson(cdp, args, url) {
+  if (cdp?.kind === 'http') return await cdp.fetchJson(url);
   const absolute = url.startsWith('http') ? url : args.baseUrl + url;
   const pathOrUrl = url.startsWith('http') ? absolute : url;
   const script = `(async()=>{` +
@@ -361,6 +371,7 @@ async function browserFetchJson(cdp, args, url) {
 }
 
 async function browserPostJson(cdp, args, url, bodyParams = {}) {
+  if (cdp?.kind === 'http') return await cdp.postJson(url, bodyParams);
   const absolute = url.startsWith('http') ? url : args.baseUrl + url;
   const pathOrUrl = url.startsWith('http') ? absolute : url;
   const script = `(async()=>{` +
@@ -383,6 +394,7 @@ async function browserPostJson(cdp, args, url, bodyParams = {}) {
 }
 
 async function browserFetchText(cdp, args, url) {
+  if (cdp?.kind === 'http') return await cdp.fetchText(url);
   const absolute = url.startsWith('http') ? url : args.baseUrl + url;
   const pathOrUrl = url.startsWith('http') ? absolute : url;
   const script = `(async()=>{` +
@@ -511,6 +523,203 @@ async function autoLoginEt(cdp, args) {
     await sleep(500);
   }
   throw new Error(`ET auto login failed after captcha attempts: ${lastMessage}`);
+}
+
+function parseSetCookieLine(line) {
+  const first = String(line || '').split(';', 1)[0];
+  const splitAt = first.indexOf('=');
+  if (splitAt <= 0) return null;
+  return {name: first.slice(0, splitAt).trim(), value: first.slice(splitAt + 1)};
+}
+
+export class EtHttpClient {
+  constructor({baseUrl, sessionPath, cookies = [], userAgent = 'Mozilla/5.0'} = {}) {
+    this.kind = 'http';
+    this.baseUrl = String(baseUrl || '').replace(/\/+$/, '');
+    this.sessionPath = sessionPath ? path.resolve(sessionPath) : '';
+    this.cookies = new Map((cookies || []).map(row => [String(row.name || ''), String(row.value || '')]).filter(([name]) => name));
+    this.userAgent = userAgent;
+  }
+
+  static async load({baseUrl, sessionPath}) {
+    let payload = null;
+    try {
+      payload = JSON.parse((await fs.readFile(sessionPath, 'utf8')).replace(/^\uFEFF/, ''));
+    } catch {}
+    if (payload?.baseUrl && String(payload.baseUrl).replace(/\/+$/, '') !== String(baseUrl).replace(/\/+$/, '')) payload = null;
+    return new EtHttpClient({
+      baseUrl,
+      sessionPath,
+      cookies: payload?.cookies || [],
+      userAgent: payload?.userAgent || 'Mozilla/5.0',
+    });
+  }
+
+  cookieHeader() {
+    return [...this.cookies].map(([name, value]) => `${name}=${value}`).join('; ');
+  }
+
+  absorbCookies(response) {
+    const lines = typeof response?.headers?.getSetCookie === 'function'
+      ? response.headers.getSetCookie()
+      : [];
+    for (const line of lines) {
+      const parsed = parseSetCookieLine(line);
+      if (!parsed) continue;
+      if (parsed.value) this.cookies.set(parsed.name, parsed.value);
+      else this.cookies.delete(parsed.name);
+    }
+  }
+
+  async request(url, options = {}) {
+    const absolute = /^https?:\/\//i.test(String(url)) ? String(url) : `${this.baseUrl}${url}`;
+    const headers = {
+      'User-Agent': this.userAgent,
+      ...(this.cookies.size ? {'Cookie': this.cookieHeader()} : {}),
+      ...(options.headers || {}),
+    };
+    const response = await fetch(absolute, {
+      ...options,
+      headers,
+      redirect: options.redirect || 'follow',
+      signal: options.signal || AbortSignal.timeout(Number(options.timeoutMs || 45_000)),
+    });
+    this.absorbCookies(response);
+    return response;
+  }
+
+  async fetchJson(url) {
+    const response = await this.request(url, {
+      headers: {'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json, text/javascript, */*; q=0.01'},
+    });
+    const text = await response.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch {}
+    if (!response.ok || !json || /\/Login\//i.test(response.url)) {
+      throw new Error(`ET HTTP fetch failed status=${response.status} url=${url} head=${text.slice(0, 400)}`);
+    }
+    return json;
+  }
+
+  async postJson(url, bodyParams = {}) {
+    const isLoginEndpoint = /^\/Login\//i.test(String(url || ''));
+    const body = new URLSearchParams();
+    for (const [key, value] of Object.entries(bodyParams || {})) body.set(key, String(value ?? ''));
+    const response = await this.request(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+      },
+      body,
+    });
+    const text = await response.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch {}
+    if (!response.ok || !json || (!isLoginEndpoint && /\/Login\//i.test(response.url))) {
+      throw new Error(`ET HTTP POST failed status=${response.status} url=${url} head=${text.slice(0, 400)}`);
+    }
+    return json;
+  }
+
+  async fetchText(url) {
+    const response = await this.request(url, {
+      headers: {'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'},
+    });
+    const html = await response.text();
+    if (!response.ok || /\/Login\//i.test(response.url)) {
+      throw new Error(`ET HTTP text fetch failed status=${response.status} url=${url} head=${html.slice(0, 400)}`);
+    }
+    return html
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 12000);
+  }
+
+  async probe() {
+    try {
+      const json = await this.fetchJson(`/Goods/StockSearch/GetStoreStockGridJson?page=1&limit=1&t=${Math.random()}`);
+      const rows = Array.isArray(json?.data) ? json.data : (Array.isArray(json?.rows) ? json.rows : null);
+      return {ok: Array.isArray(rows), rowCount: rows?.length ?? null};
+    } catch (error) {
+      return {ok: false, error: String(error?.message || error)};
+    }
+  }
+
+  async login({credentials, recognizeCaptcha, maxAttempts = 5}) {
+    let lastMessage = '';
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      let captchaFile = '';
+      try {
+        const captcha = await this.request(`/Login/GetAuthCode?t=${Date.now()}-${attempt}`);
+        if (!captcha.ok) throw new Error(`captcha HTTP ${captcha.status}`);
+        captchaFile = path.join(ROOT, 'tmp', 'et-captcha', `http-captcha-${process.pid}-${Date.now()}-${attempt}.png`);
+        await fs.mkdir(path.dirname(captchaFile), {recursive: true});
+        await fs.writeFile(captchaFile, Buffer.from(await captcha.arrayBuffer()), {mode: 0o600});
+        const code = String(await recognizeCaptcha(captchaFile)).replace(/[^0-9A-Za-z]/g, '').slice(0, 5);
+        if (code.length < 4) {
+          lastMessage = 'captcha OCR returned too short result';
+          continue;
+        }
+        const json = await this.postJson(`/Login/CheckCustomerLogin?t=${Math.random()}`, {
+          username: credentials.username,
+          password: credentials.password,
+          vercode: code,
+          redirectLink: '',
+        });
+        if (json?.state !== 'success') {
+          lastMessage = String(json?.message || json?.state || 'login rejected');
+          continue;
+        }
+        const probe = await this.probe();
+        if (probe.ok) return {ok: true, attempts: attempt, probe};
+        lastMessage = probe.error || 'login accepted but probe failed';
+      } catch (error) {
+        lastMessage = String(error?.message || error);
+      } finally {
+        if (captchaFile) await fs.unlink(captchaFile).catch(() => {});
+      }
+    }
+    throw new Error(`ET direct HTTP login failed after ${maxAttempts} attempts: ${lastMessage}`);
+  }
+
+  async save() {
+    if (!this.sessionPath) return;
+    await fs.mkdir(path.dirname(this.sessionPath), {recursive: true});
+    const payload = {
+      version: 1,
+      baseUrl: this.baseUrl,
+      updatedAt: new Date().toISOString(),
+      userAgent: this.userAgent,
+      cookies: [...this.cookies].map(([name, value]) => ({name, value})),
+    };
+    const temporary = `${this.sessionPath}.${process.pid}.tmp`;
+    await fs.writeFile(temporary, `${JSON.stringify(payload, null, 2)}\n`, {mode: 0o600});
+    await fs.rename(temporary, this.sessionPath);
+    await fs.chmod(this.sessionPath, 0o600).catch(() => {});
+  }
+
+  close() {}
+}
+
+async function createEtHttpClient(args) {
+  const client = await EtHttpClient.load({baseUrl: args.baseUrl, sessionPath: args.sessionPath});
+  let probe = await client.probe();
+  let login = null;
+  if (!probe.ok) {
+    const credentials = await readSavedEtCredentials(args);
+    login = await client.login({credentials, recognizeCaptcha: recognizeEtCaptcha});
+    probe = login.probe;
+  }
+  await client.save();
+  console.log(JSON.stringify({ok: true, step: 'et_http_session', source: login ? 'direct_login' : 'session_file', cookieCount: client.cookies.size, probe}));
+  return client;
 }
 
 function withParams(pathname, params) {
@@ -777,6 +986,39 @@ function isStorageFeeBill(row) {
 }
 
 async function browserFetchStorageFeeCsv(cdp, args, incomeBillId) {
+  if (cdp?.kind === 'http') {
+    const postJson = await cdp.postJson(`/Finance/IncomeBill/ExportStoreFee?t=${Math.random()}`, {incomeBillId});
+    if (postJson?.state !== 'success' || !postJson?.message) {
+      throw new Error(`ExportStoreFee failed for ${incomeBillId}: ${JSON.stringify(postJson).slice(0, 800)}`);
+    }
+    const fileUrl = new URL(postJson.message, args.baseUrl).href;
+    const response = await cdp.request(fileUrl + (fileUrl.includes('?') ? '&' : '?') + `t=${Math.random()}`, {
+      headers: {'X-Requested-With': 'XMLHttpRequest'},
+    });
+    const buf = await response.arrayBuffer();
+    let text = '';
+    let encoding = 'gb18030';
+    try {
+      text = new TextDecoder('gb18030').decode(buf);
+    } catch {
+      encoding = 'utf-8';
+      text = new TextDecoder('utf-8').decode(buf);
+    }
+    const out = {
+      ok: response.ok,
+      postStatus: 200,
+      postJson,
+      fileStatus: response.status,
+      fileUrl: response.url,
+      contentType: response.headers.get('content-type') || '',
+      contentDisposition: response.headers.get('content-disposition') || '',
+      byteLength: buf.byteLength,
+      encoding,
+      text,
+    };
+    if (!out.ok) throw new Error(`ExportStoreFee download failed for ${incomeBillId}: HTTP ${response.status}`);
+    return out;
+  }
   const expression = `(${async function downloadStorageFeeCsv(id, baseUrl) {
     const sameOriginBase = (location && /^https?:/.test(location.origin)) ? location.origin : baseUrl;
     const body = new URLSearchParams();
@@ -1024,25 +1266,30 @@ function endpointKeysForMode(args) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const state = await readState(args.statePath);
-  if (!(await isCdpReady(args.port))) {
-    if (!args.launch) throw new Error(`ET Chrome CDP is not ready on port ${args.port}.`);
-    await launchChrome(args);
-  }
-  const page = await getEtPage(args);
-  const cdp = new CdpClient(page.webSocketDebuggerUrl);
-  await cdp.connect();
-  await cdp.call('Page.enable').catch(() => {});
-  if (!page.url?.startsWith(args.baseUrl)) {
-    await cdp.call('Page.navigate', {url: args.baseUrl + '/Home/Index'});
-    await sleep(1800);
-  }
-  let home = await probeEtHome(cdp, args);
-  if (home.status !== 200 || home.login) {
-    await autoLoginEt(cdp, args);
-    home = await probeEtHome(cdp, args);
+  let cdp = null;
+  if (args.transport === 'http') {
+    cdp = await createEtHttpClient(args);
+  } else {
+    if (!(await isCdpReady(args.port))) {
+      if (!args.launch) throw new Error(`ET Chrome CDP is not ready on port ${args.port}.`);
+      await launchChrome(args);
+    }
+    const page = await getEtPage(args);
+    cdp = new CdpClient(page.webSocketDebuggerUrl);
+    await cdp.connect();
+    await cdp.call('Page.enable').catch(() => {});
+    if (!page.url?.startsWith(args.baseUrl)) {
+      await cdp.call('Page.navigate', {url: args.baseUrl + '/Home/Index'});
+      await sleep(1800);
+    }
+    let home = await probeEtHome(cdp, args);
     if (home.status !== 200 || home.login) {
-      cdp.close();
-      throw new Error(`ET login state is not ready. status=${home.status} title=${home.title}`);
+      await autoLoginEt(cdp, args);
+      home = await probeEtHome(cdp, args);
+      if (home.status !== 200 || home.login) {
+        cdp.close();
+        throw new Error(`ET login state is not ready. status=${home.status} title=${home.title}`);
+      }
     }
   }
 
@@ -1174,6 +1421,7 @@ async function main() {
     }
     manifest.ok = true;
   } finally {
+    if (cdp?.kind === 'http') await cdp.save().catch(() => {});
     cdp.close();
   }
   const manifestPath = path.join(batchDir, 'manifest.json');

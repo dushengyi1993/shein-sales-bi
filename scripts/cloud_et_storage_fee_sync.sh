@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Read-only ET storage-fee ingestion. It intentionally shares the generic ET
-# lock/profile so an ET browser session can never be used by both pipelines.
+# Read-only ET storage-fee ingestion. It shares the generic ET lock and HTTP
+# session so the generic and finance pipelines cannot mutate the cookie jar at
+# the same time. Normal runs do not launch Chrome.
 set -Eeuo pipefail
 
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
@@ -17,6 +18,8 @@ LOG_DIR="${SHEIN_ET_STORAGE_FEE_LOG_DIR:-/srv/shein-bi/logs/cloud-et-storage-fee
 # storage-fee job lock.
 LOCK_FILE="${SHEIN_ET_LOCK_FILE:-$ROOT/state/locks/shein-bi-cloud-et-forwarder.lock}"
 ET_PROFILE_DIR="${SHEIN_ET_PROFILE_DIR:-$ROOT/profiles/persistent-et-forwarder-profile}"
+ET_TRANSPORT="${SHEIN_ET_TRANSPORT:-http}"
+ET_HTTP_SESSION_FILE="${SHEIN_ET_HTTP_SESSION_FILE:-$ROOT/state/et_forwarder_http_session.local.json}"
 STATE_PATH="${SHEIN_ET_STORAGE_FEE_STATE_PATH:-$ROOT/state/et_storage_fee_sync_state.json}"
 OUTPUT_DIR="${SHEIN_ET_STORAGE_FEE_OUTPUT_DIR:-$ROOT/outputs/et-storage-fee}"
 ET_CHROME_TMP_DIR="${SHEIN_ET_STORAGE_FEE_CHROME_TMP_DIR:-/tmp/shein-bi-et-storage-fee-chrome-tmp}"
@@ -45,6 +48,7 @@ notify_issue() {
 }
 
 prepare_et_chrome_tmp() {
+  [[ "$ET_TRANSPORT" == "browser" ]] || return 0
   mkdir -p "$ET_CHROME_TMP_DIR"
   chmod 0700 "$ET_CHROME_TMP_DIR"
   export TMPDIR="$ET_CHROME_TMP_DIR"
@@ -75,6 +79,7 @@ signal_et_chrome() {
 }
 
 cleanup_et_browser() {
+  [[ "$ET_TRANSPORT" == "browser" ]] || return 0
   local wait_round
   signal_et_chrome TERM
   for wait_round in 1 2 3 4 5 6 7 8 9 10; do
@@ -116,7 +121,7 @@ trap cleanup_et_browser EXIT
 cd "$ROOT"
 mkdir -p "$OUTPUT_DIR"
 chmod 0750 "$OUTPUT_DIR"
-FETCH_ARGS=(--storage-fee-only --detail-names storage_fee_product_detail --mode "$MODE" --date "$TARGET_DATE" --profile-dir "$ET_PROFILE_DIR" --state-path "$STATE_PATH" --out-dir "$OUTPUT_DIR" --wait-ms "${SHEIN_ET_STORAGE_FEE_WAIT_MS:-250}")
+FETCH_ARGS=(--transport "$ET_TRANSPORT" --session-file "$ET_HTTP_SESSION_FILE" --storage-fee-only --detail-names storage_fee_product_detail --mode "$MODE" --date "$TARGET_DATE" --profile-dir "$ET_PROFILE_DIR" --state-path "$STATE_PATH" --out-dir "$OUTPUT_DIR" --wait-ms "${SHEIN_ET_STORAGE_FEE_WAIT_MS:-250}")
 if [[ "$MODE" == "daily" ]]; then
   # Previous-month-to-date is a bounded, safe overlap window; detail exports
   # repair late-generated bills without fetching unrelated finance categories.
@@ -125,7 +130,7 @@ else
   FETCH_ARGS+=(--start-date "$BACKFILL_START_DATE" --detail-all --no-state-update)
 fi
 
-echo "[cloud_et_storage_fee_sync] start mode=$MODE date=$TARGET_DATE profile=$ET_PROFILE_DIR lock=$LOCK_FILE"
+echo "[cloud_et_storage_fee_sync] start mode=$MODE date=$TARGET_DATE transport=$ET_TRANSPORT lock=$LOCK_FILE"
 PHASE="fetch"
 node scripts/fetch_et_forwarder.mjs "${FETCH_ARGS[@]}"
 MANIFEST_INDEX="$OUTPUT_DIR/latest-manifest.json"

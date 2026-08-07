@@ -268,6 +268,7 @@ else
     if is_true "$RESUME_COMPLETED" && store_evidence_is_complete "$STORE"; then
       SUCCESS_STORES+=("$STORE")
       echo "[cloud_link_business_sync] store=$STORE resume-skip exact-date link/business evidence already complete"
+      write_chunk_result "running" "incremental progress saved after resume-skip: $STORE"
       continue
     fi
     STORE_OK=0
@@ -297,6 +298,8 @@ else
         STORE_OK=1
         close_one_store_browser "$STORE"
         echo "[cloud_link_business_sync] store=$STORE done"
+        SUCCESS_STORES+=("$STORE")
+        write_chunk_result "running" "incremental progress saved after store: $STORE"
         break
       fi
       close_one_store_browser "$STORE"
@@ -306,12 +309,11 @@ else
     if [[ "$STORE_OK" != "1" ]]; then
       echo "[cloud_link_business_sync] store=$STORE failed after $MAX_ATTEMPTS attempts" >&2
       FAILED_STORES+=("$STORE")
+      write_chunk_result "running" "incremental failed-store progress saved after store: $STORE"
       if ! is_true "$ALLOW_PARTIAL"; then
         write_chunk_result "failed" "store fetch failed"
         exit 1
       fi
-    else
-      SUCCESS_STORES+=("$STORE")
     fi
   done
 fi

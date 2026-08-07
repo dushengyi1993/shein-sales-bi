@@ -59,6 +59,7 @@ const recheck = fs.readFileSync(new URL('./cloud_et_low_inventory_recheck.sh', i
 const forwarderService = fs.readFileSync(new URL('../infra/systemd/shein-bi-cloud-et-forwarder.service', import.meta.url), 'utf8');
 const guardService = fs.readFileSync(new URL('../infra/systemd/shein-bi-et-low-inventory-guard.service', import.meta.url), 'utf8');
 const recheckTimer = fs.readFileSync(new URL('../infra/systemd/shein-bi-et-low-inventory-recheck.timer', import.meta.url), 'utf8');
+const recheckService = fs.readFileSync(new URL('../infra/systemd/shein-bi-et-low-inventory-recheck.service', import.meta.url), 'utf8');
 assert.match(executor, /skipped_safety_no_increase/);
 assert.match(executor, /Decrease-only safety plan contains a non-decrease action/);
 assert.match(forwarder, /orders,waybills,afterSales,inventoryTrend/);
@@ -70,6 +71,9 @@ assert.match(guard, /pendingCanonical:\$blockedCanonical/);
 assert.match(guard, /if \(\( BLOCKED > 0 \)\); then exit 1; fi/);
 assert.doesNotMatch(guard, /BLOCKED > 0 \|\| BLOCKED_CANONICAL > 0/);
 assert.match(recheck, /SHEIN_ET_ENDPOINTS="store_stock,box_stock"/);
+assert.match(recheck, /SHEIN_ET_TRANSPORT="\$\{SHEIN_ET_TRANSPORT:-http\}"/);
+assert.match(recheckService, /^Environment=SHEIN_ET_TRANSPORT=http$/m);
+assert.doesNotMatch(recheckService, /run_host_browser_read_job\.sh|--class browser/);
 assert.match(recheckTimer, /^OnCalendar=\*-\*-\* 00,02,05,06,08,09,11,12,15,16,18,19,22:20:00$/m);
 assert.match(recheckTimer, /^Persistent=false$/m);
 
