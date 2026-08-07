@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Read-only ET storage-fee ingestion. It shares the generic ET lock and HTTP
-# session so the generic and finance pipelines cannot mutate the cookie jar at
-# the same time. Normal runs do not launch Chrome.
+# Read-only ET storage-fee ingestion. It shares the generic ET lock but keeps a
+# separate sheinops-owned HTTP session from the root-owned generic forwarder.
+# Normal runs do not launch Chrome.
 set -Eeuo pipefail
 
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
@@ -19,7 +19,7 @@ LOG_DIR="${SHEIN_ET_STORAGE_FEE_LOG_DIR:-/srv/shein-bi/logs/cloud-et-storage-fee
 LOCK_FILE="${SHEIN_ET_LOCK_FILE:-$ROOT/state/locks/shein-bi-cloud-et-forwarder.lock}"
 ET_PROFILE_DIR="${SHEIN_ET_PROFILE_DIR:-$ROOT/profiles/persistent-et-forwarder-profile}"
 ET_TRANSPORT="${SHEIN_ET_TRANSPORT:-http}"
-ET_HTTP_SESSION_FILE="${SHEIN_ET_HTTP_SESSION_FILE:-$ROOT/state/et_forwarder_http_session.local.json}"
+ET_HTTP_SESSION_FILE="${SHEIN_ET_HTTP_SESSION_FILE:-$ROOT/state/et_storage_fee_http_session.local.json}"
 STATE_PATH="${SHEIN_ET_STORAGE_FEE_STATE_PATH:-$ROOT/state/et_storage_fee_sync_state.json}"
 OUTPUT_DIR="${SHEIN_ET_STORAGE_FEE_OUTPUT_DIR:-$ROOT/outputs/et-storage-fee}"
 ET_CHROME_TMP_DIR="${SHEIN_ET_STORAGE_FEE_CHROME_TMP_DIR:-/tmp/shein-bi-et-storage-fee-chrome-tmp}"
