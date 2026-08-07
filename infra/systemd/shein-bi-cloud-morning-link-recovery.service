@@ -28,5 +28,4 @@ MemoryHigh=2200M
 MemoryMax=2800M
 OOMPolicy=stop
 ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_cloud_morning_link_recovery_slot.sh
-SuccessExitStatus=75
-
+SuccessExitStatus=75 124
