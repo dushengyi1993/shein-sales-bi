@@ -171,6 +171,10 @@ assert.match(morning, /while \[\[ -n "\$MISSING_STORES" \]\]/,
 assert.match(morning, /waiting platform readiness retryRound=/,
   'platform readiness must resume in the same run instead of creating another timer');
 assert.match(morning, /run_inventory_stage/);
+assert.match(morning, /pipeline_marker_done "morning-supplements"/,
+  'a restarted coordinator must resume after the completed atomic publish checkpoint instead of rebuilding it');
+assert.match(morning, /pipeline_marker_done "daily-operating-refresh"/,
+  'a completed business date must be an idempotent no-op when the service is started again');
 assert.match(morning, /daily inventory guard is waiting for host capacity inside the same run/,
   'temporary resource pressure must keep the inventory stage in the same coordinator run');
 assert.match(morning, /if SHEIN_BI_INVENTORY_REQUIRE_PIPELINE_MARKERS=1[\s\S]*inventory_status=\$\?/,
