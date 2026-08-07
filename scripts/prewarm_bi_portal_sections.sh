@@ -36,6 +36,7 @@ echo "[prewarm_bi_portal_sections] start root=$ROOT url=$PORTAL_URL sections=$SE
 cd "$ROOT"
 
 IFS=',' read -r -a SECTION_LIST <<< "$SECTIONS"
+FAILED_SECTIONS=()
 for RAW_SECTION in "${SECTION_LIST[@]}"; do
   SECTION="$(echo "$RAW_SECTION" | xargs)"
   [[ -n "$SECTION" ]] || continue
@@ -59,7 +60,13 @@ for RAW_SECTION in "${SECTION_LIST[@]}"; do
     STATUS=$?
     END="$(date +%s)"
     echo "[prewarm_bi_portal_sections] section=$SECTION failed status=$STATUS duration_sec=$((END-START))" >&2
+    FAILED_SECTIONS+=("$SECTION:$STATUS")
   fi
 done
+
+if [[ "${#FAILED_SECTIONS[@]}" -gt 0 ]]; then
+  echo "[prewarm_bi_portal_sections] failed sections=$(IFS=,; echo "${FAILED_SECTIONS[*]}") log=$LOG_FILE" >&2
+  exit 1
+fi
 
 echo "[prewarm_bi_portal_sections] done log=$LOG_FILE"

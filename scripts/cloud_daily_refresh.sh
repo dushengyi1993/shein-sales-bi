@@ -322,6 +322,7 @@ else
 fi
 
 COST_LEDGER_STATUS=0
+CRITICAL_PORTAL_STATUS=0
 if [[ "${SHEIN_BI_DAILY_INVENTORY_COST_REFRESH:-1}" == "1" || "${SHEIN_BI_DAILY_INVENTORY_COST_REFRESH:-1}" == "true" ]]; then
   echo "[cloud_daily_refresh] step=inventory-cost-ledger"
   set +e
@@ -384,15 +385,30 @@ prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
       else
         echo "[cloud_daily_refresh] linksData was synchronously published by the caller-owned all-store merge"
       fi
+
+      # The daily coordinator is not complete while homepage-critical caches
+      # still belong to the previous core generation.  Previously these six
+      # sections were only queued two-at-a-time, so recurring order/return
+      # refreshes could leave the homepage on a multi-day fallback even though
+      # the daily run had already been marked done.
+      CRITICAL_PORTAL_SECTIONS="${SHEIN_BI_DAILY_CRITICAL_PORTAL_SECTIONS:-homeRankings,homeTrafficDaily,priceScatter,afterSales,orders,homeProfit}"
+      echo "[cloud_daily_refresh] refresh homepage-critical sections synchronously sections=$CRITICAL_PORTAL_SECTIONS"
+      if SHEIN_BI_PORTAL_PREWARM_SECTIONS="$CRITICAL_PORTAL_SECTIONS" \
+        SHEIN_BI_PORTAL_PREWARM_ASYNC=0 \
+        SHEIN_BI_PORTAL_PREWARM_HOST_LOCKED=1 \
+        bash scripts/prewarm_bi_portal_sections.sh 8>&-; then
+        echo "[cloud_daily_refresh] homepage-critical sections refreshed"
+      else
+        CRITICAL_PORTAL_STATUS=$?
+        DAILY_WARNINGS+=("homepage-critical section refresh failed status=$CRITICAL_PORTAL_STATUS")
+        echo "[cloud_daily_refresh] WARN homepage-critical section refresh failed; keep the run open and retain cache fallbacks" >&2
+      fi
+
       if bash scripts/enqueue_bi_portal_sections.sh \
-        --sections homeRankings,afterSales,orders,homeProfit,homeTrafficDaily,priceScatter \
-        --priority 10 \
-        --reason "daily-refresh-$DATE" \
-        && bash scripts/enqueue_bi_portal_sections.sh \
           --sections actions,productState,productSalesDaily,productTrafficDaily,comments,rtvData,waybills,rankings,profit \
           --priority 50 \
           --reason "daily-refresh-$DATE"; then
-        echo "[cloud_daily_refresh] portal sections queued for bounded host-locked refresh"
+        echo "[cloud_daily_refresh] non-critical portal sections queued for bounded host-locked refresh"
       else
         DAILY_WARNINGS+=("portal section queue failed")
         echo "[cloud_daily_refresh] WARN portal section queue enqueue failed" >&2
@@ -409,4 +425,10 @@ if [[ "${#DAILY_WARNINGS[@]}" -gt 0 ]]; then
 else
   rm -f "$ROOT/state/cloud_ops_alerts/daily-refresh-last.json" 2>/dev/null || true
   echo "[cloud_daily_refresh] done date=$DATE log=$LOG_FILE"
+fi
+
+if [[ "$CRITICAL_PORTAL_STATUS" -ne 0 \
+  && "${SHEIN_BI_DAILY_REQUIRE_CRITICAL_PORTAL_SECTIONS:-0}" == "1" ]]; then
+  echo "[cloud_daily_refresh] critical Portal sections are incomplete; unified coordinator must retry before marking the daily publish complete" >&2
+  exit 75
 fi
