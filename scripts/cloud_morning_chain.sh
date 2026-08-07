@@ -90,6 +90,25 @@ write_marker() {
   node "$ROOT/scripts/pipeline_marker.mjs" "${args[@]}"
 }
 
+pipeline_marker_done() {
+  local marker_stage="$1"
+  MARKER_STAGE="$marker_stage" RUN_DATE="$RUN_DATE" DATA_DATE="$DATA_DATE" node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const root = process.env.SHEIN_BI_ROOT || process.cwd();
+const file = path.join(root, 'state', 'pipeline-markers', process.env.RUN_DATE, `${process.env.MARKER_STAGE}.json`);
+try {
+  const payload = JSON.parse(fs.readFileSync(file, 'utf8'));
+  process.exit(payload?.ok === true
+    && payload?.status === 'done'
+    && payload?.runDate === process.env.RUN_DATE
+    && payload?.businessDate === process.env.DATA_DATE ? 0 : 1);
+} catch {
+  process.exit(1);
+}
+NODE
+}
+
 on_error() {
   local line="$1"
   local status="$2"
@@ -237,6 +256,11 @@ fi
 
 case "$STAGE" in
   all)
+    if pipeline_marker_done "daily-operating-refresh"; then
+      write_state "ok" "today's complete daily operating run is already published; no duplicate work was started"
+      echo "[cloud_morning_chain] resume-skip complete daily-operating-refresh marker"
+      exit 0
+    fi
     write_state "running" "one daily coordinator is refreshing all 19 stores; the previous complete BI snapshot stays visible until the run is complete"
     RESULT_FILE="$STATE_DIR/${RUN_DATE}-all.json"
     run_all_store_fetch "$RESULT_FILE"
@@ -260,22 +284,26 @@ case "$STAGE" in
       MISSING_STORES="$(missing_exact_date_stores)"
     done
 
-    SUPPLEMENT_RETRY_ROUND=0
-    while true; do
-      require_run_budget "platform-readiness-and-publish"
-      if run_supplements_stage; then
-        break
-      else
-        SUPPLEMENT_STATUS=$?
-      fi
-      if [[ "$SUPPLEMENT_STATUS" -ne 75 ]]; then
-        exit "$SUPPLEMENT_STATUS"
-      fi
-      SUPPLEMENT_RETRY_ROUND=$((SUPPLEMENT_RETRY_ROUND + 1))
-      write_state "waiting" "all 19 stores are collected but the platform daily metrics are not ready; the same run will retry without publishing partial data"
-      echo "[cloud_morning_chain] waiting platform readiness retryRound=$SUPPLEMENT_RETRY_ROUND"
-      sleep "${SHEIN_BI_MORNING_PLATFORM_RETRY_DELAY_SEC:-300}"
-    done
+    if pipeline_marker_done "morning-supplements"; then
+      echo "[cloud_morning_chain] resume-skip completed supplements/Portal checkpoint; continuing with inventory in the same logical daily run"
+    else
+      SUPPLEMENT_RETRY_ROUND=0
+      while true; do
+        require_run_budget "platform-readiness-and-publish"
+        if run_supplements_stage; then
+          break
+        else
+          SUPPLEMENT_STATUS=$?
+        fi
+        if [[ "$SUPPLEMENT_STATUS" -ne 75 ]]; then
+          exit "$SUPPLEMENT_STATUS"
+        fi
+        SUPPLEMENT_RETRY_ROUND=$((SUPPLEMENT_RETRY_ROUND + 1))
+        write_state "waiting" "all 19 stores are collected but the platform daily metrics are not ready; the same run will retry without publishing partial data"
+        echo "[cloud_morning_chain] waiting platform readiness retryRound=$SUPPLEMENT_RETRY_ROUND"
+        sleep "${SHEIN_BI_MORNING_PLATFORM_RETRY_DELAY_SEC:-300}"
+      done
+    fi
     run_inventory_stage
     write_marker "daily-operating-refresh" "done" "all 19 stores, supplements and inventory completed in one run" \
       "$RESULT_FILE" "$LOG_FILE" >/dev/null
