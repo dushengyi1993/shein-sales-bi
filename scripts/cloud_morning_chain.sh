@@ -178,26 +178,43 @@ run_inventory_stage() {
   # browser/DB lane for the whole 19-store request.
   bash scripts/cloud_openapi_stock_refresh.sh
 
-  set +e
-  SHEIN_BI_INVENTORY_REQUIRE_PIPELINE_MARKERS=1 \
-  SHEIN_BI_INVENTORY_STOCK_NOT_BEFORE="${RUN_DATE}T00:00:00+08:00" \
-  SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT=cloud_daily_inventory_replenishment_guard \
-  SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION=owner-automatic-inventory-20260803-v1 \
-    bash scripts/run_host_heavy_job.sh \
-      --domain daily-operating-inventory \
-      --class openapi \
-      --lock-wait-sec 900 \
-      --defer-state /srv/shein-bi/runtime/host-scheduler/daily-operating-inventory.latest.json \
-      -- bash scripts/cloud_daily_inventory_replenishment_guard.sh
-  local inventory_status=$?
-  set -e
-  if [[ "$inventory_status" == "0" ]]; then
-    write_marker "daily-inventory-guard" "done" "daily inventory guard completed inside the unified run" "$LOG_FILE" >/dev/null
-  elif [[ "$inventory_status" == "2" || "$inventory_status" == "75" ]]; then
-    write_marker "daily-inventory-guard" "warning" "daily inventory guard completed with business blockers or deferred capacity; no partial write was presented" "$LOG_FILE" >/dev/null
-  else
+  local inventory_status retry_delay
+  retry_delay="${SHEIN_BI_MORNING_RESOURCE_RETRY_DELAY_SEC:-60}"
+  while true; do
+    require_run_budget "daily inventory guard"
+    # Keep the command in an if-condition so the inherited ERR trap does not
+    # turn the scheduler's temporary 75 into a failed business run.
+    if SHEIN_BI_INVENTORY_REQUIRE_PIPELINE_MARKERS=1 \
+      SHEIN_BI_INVENTORY_STOCK_NOT_BEFORE="${RUN_DATE}T00:00:00+08:00" \
+      SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT=cloud_daily_inventory_replenishment_guard \
+      SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION=owner-automatic-inventory-20260803-v1 \
+        bash scripts/run_host_heavy_job.sh \
+          --domain daily-operating-inventory \
+          --class openapi \
+          --lock-wait-sec 900 \
+          --defer-state /srv/shein-bi/runtime/host-scheduler/daily-operating-inventory.latest.json \
+          -- bash scripts/cloud_daily_inventory_replenishment_guard.sh; then
+      inventory_status=0
+    else
+      inventory_status=$?
+    fi
+
+    if [[ "$inventory_status" == "0" ]]; then
+      write_marker "daily-inventory-guard" "done" "daily inventory guard completed inside the unified run" "$LOG_FILE" >/dev/null
+      return 0
+    fi
+    if [[ "$inventory_status" == "2" ]]; then
+      write_marker "daily-inventory-guard" "warning" "daily inventory guard completed with business blockers; no unsafe write was presented" "$LOG_FILE" >/dev/null
+      return 0
+    fi
+    if [[ "$inventory_status" == "75" ]]; then
+      write_state "waiting_resource" "daily inventory guard is waiting for host capacity inside the same run; completed daily data remains published"
+      echo "[cloud_morning_chain] daily inventory guard waiting for capacity; retrying same run in ${retry_delay}s"
+      sleep "$retry_delay"
+      continue
+    fi
     return "$inventory_status"
-  fi
+  done
 }
 
 mkdir -p "$LOG_DIR" "$STATE_DIR"
