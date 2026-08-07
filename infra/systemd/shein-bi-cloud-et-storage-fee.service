@@ -13,11 +13,11 @@ WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/home/sheinops
 Environment=TZ=Asia/Shanghai
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
-# Must remain the generic ET lock: it serializes the shared HTTP cookie jar.
+# Must remain the generic ET lock: it serializes ET authentication and backend reads.
 Environment=SHEIN_ET_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-et-forwarder.lock
 Environment=SHEIN_ET_PROFILE_DIR=/opt/shein-bi/app/profiles/persistent-et-forwarder-profile
 Environment=SHEIN_ET_TRANSPORT=http
-Environment=SHEIN_ET_HTTP_SESSION_FILE=/opt/shein-bi/app/state/et_forwarder_http_session.local.json
+Environment=SHEIN_ET_HTTP_SESSION_FILE=/opt/shein-bi/app/state/et_storage_fee_http_session.local.json
 Environment=SHEIN_ET_STORAGE_FEE_STATE_PATH=/opt/shein-bi/app/state/et_storage_fee_sync_state.json
 Environment=SHEIN_ET_STORAGE_FEE_OUTPUT_DIR=/opt/shein-bi/app/outputs/et-storage-fee
 Environment=SHEIN_BI_PORTAL_REFRESH_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-portal-refresh.lock
