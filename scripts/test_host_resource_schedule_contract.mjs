@@ -171,6 +171,10 @@ assert.match(morning, /while \[\[ -n "\$MISSING_STORES" \]\]/,
 assert.match(morning, /waiting platform readiness retryRound=/,
   'platform readiness must resume in the same run instead of creating another timer');
 assert.match(morning, /run_inventory_stage/);
+assert.match(morning, /daily inventory guard is waiting for host capacity inside the same run/,
+  'temporary resource pressure must keep the inventory stage in the same coordinator run');
+assert.match(morning, /if SHEIN_BI_INVENTORY_REQUIRE_PIPELINE_MARKERS=1[\s\S]*inventory_status=\$\?/,
+  'the inventory scheduler command must be conditional so exit 75 is handled instead of tripping the ERR trap');
 const linkBusinessSync = read('scripts/cloud_link_business_sync.sh');
 assert.match(linkBusinessSync, /SHEIN_LINK_BUSINESS_RESUME_COMPLETED/,
   'an internal retry must reuse exact-date completed store evidence instead of starting all stores over');
