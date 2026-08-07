@@ -1,6 +1,6 @@
 {
   "schemaVersion": "daily-inventory-replenishment-policy/v1",
-  "policyVersion": "2026-08-06.1",
+  "policyVersion": "2026-08-07.1",
   "timezone": "Asia/Shanghai",
   "triggerUsableInventoryAtOrBelow": 20,
   "targetUsableInventory": 100,

@@ -35,6 +35,21 @@ assert.match(generator, /et\.operational_sellable_qty AS et_estimated_available_
 assert.match(generator, /et\.estimated_available_qty AS et_all_warehouse_inventory_qty/, 'all-warehouse physical stock remains separate evidence');
 const schema = fs.readFileSync(path.join(root, 'infra', 'warehouse', 'schema.sql'), 'utf8');
 assert.match(schema, /WHEN coalesce\(s\.match_key,b\.match_key\) = 'SK03038'/, 'only the approved SK-03038 exception counts 01 full-carton stock as operational sellable');
+assert.match(
+  schema,
+  /sum\(coalesce\(quantity, 0\)\) FILTER \(WHERE storeroom_name LIKE '%09%' OR storeroom_name ILIKE '%散件%'\) AS loose_sellable_qty/,
+  '09 operational sellable stock uses ET available Quantity, not physical RealQuantity',
+);
+assert.match(
+  schema,
+  /sum\(coalesce\(quantity, 0\)\) FILTER \(WHERE storeroom_name LIKE '%01%' OR storeroom_name ILIKE '%整箱%'\) AS full_carton_qty/,
+  'the approved 01 full-carton exception also uses ET available Quantity',
+);
+assert.doesNotMatch(
+  schema,
+  /sum\(coalesce\(real_quantity, quantity, 0\)\) FILTER \(WHERE storeroom_name LIKE '%(?:09|01)%'/,
+  'physical RealQuantity must never feed an operational-sellable warehouse aggregate',
+);
 assert.match(schema, /0\.3 \* \(coalesce\(s\.gross_sold_7d,0\) \/ 7\.0\) \+ 0\.7 \* \(coalesce\(s\.gross_sold_30d,0\) \/ 30\.0\)/, 'warehouse velocity uses 30% recent and 70% 30-day baseline');
 assert.match(generator, /gross_sold_7d,0\) \/ 7\.0 \* 0\.3.*gross_sold_30d,0\) \/ 30\.0 \* 0\.7/, 'portal SQL uses the same velocity weights');
 assert.match(generator, /round\(weighted_daily_gross_sales::numeric, 4\)/, 'portal keeps enough daily-rate precision for slow sellers');
