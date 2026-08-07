@@ -85,7 +85,7 @@
 | `shein-bi-daily-inventory-replenishment-guard.timer` | 北京时间 `15:15` | 依赖晨间19店合并和15:12后库存 marker，生成当天计划并按常驻授权自动执行；15:27前释放 |
 | `shein-bi-daily-inventory-replenishment-guard-retry.timer` | 北京时间 `15:45` | 仅在主执行没有完成 marker 时重试一次；成功日直接退出，不重复写；15:57前释放，16:20 Codex任务再做事后审计 |
 
-| 晨间链接与补充 | `08:00 / 08:45 / 10:15 / 12:15 / 14:45 / 09:12` | 前12店、后续店与19店合并；三个恢复点只补当天缺店，marker 已完成时不打开浏览器；补充域仍由09:12按依赖执行，缺marker只等待，不伪报失败 |
+| 晨间链接与补充 | `08:00 / 08:45 / 11:15 / 12:15 / 14:45 / 09:12` | 前12店、后续店与19店合并；三个恢复点只补当天缺店，marker 已完成时不打开浏览器；11:15 避开 10:20 ET；Portal 队列主动让路；补充域仍由09:12按依赖执行 |
 
 | `shein-bi-cloud-session-manager.timer` | 北京时间 `00:45` | 云端登录态管家：顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，检查 profile 体积并写 session marker |
 

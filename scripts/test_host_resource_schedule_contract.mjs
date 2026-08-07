@@ -150,7 +150,7 @@ assert.deepEqual(calendars(unit('shein-bi-cloud-rtv-verify.timer')), ['*-*-* 04:
 assert.deepEqual(calendars(unit('shein-bi-cloud-morning-chain.timer')), ['*-*-* 08:00:00']);
 assert.deepEqual(calendars(unit('shein-bi-cloud-morning-link-chunk-2.timer')), ['*-*-* 08:45:00']);
 assert.deepEqual(calendars(unit('shein-bi-cloud-morning-link-recovery.timer')), [
-  '*-*-* 10,12:15:00',
+  '*-*-* 11,12:15:00',
   '*-*-* 14:45:00',
 ]);
 assert.deepEqual(calendars(unit('shein-bi-cloud-morning-supplements.timer')), ['*-*-* 09:12:00']);
@@ -224,6 +224,9 @@ assert.match(portalQueueSlot, /DEADLINE_MINUTE=17/);
 assert.match(portalQueueSlot, /DEADLINE_MINUTE=27/);
 assert.match(portalQueueSlot, /DEADLINE_MINUTE=57/);
 assert.match(portalQueueSlot, /SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED=1/);
+assert.match(portalQueueSlot, /morning_link_recovery_priority/);
+assert.match(portalQueueSlot, /inventory_guard_priority/);
+assert.match(portalQueueSlot, /inventory_guard_retry_priority/);
 assert.match(portalQueueWorker, /unscheduled_direct_entry/);
 assert.match(portalQueueWorker, /10#\$START_MINUTE >= 13/);
 assert.match(portalQueueWorker, /10#\$START_MINUTE >= 43/);

@@ -2,7 +2,7 @@
 Description=Retry only unfinished morning link/business stores in bounded safe slots
 
 [Timer]
-OnCalendar=*-*-* 10,12:15:00
+OnCalendar=*-*-* 11,12:15:00
 OnCalendar=*-*-* 14:45:00
 AccuracySec=5s
 Persistent=false
@@ -10,4 +10,3 @@ Unit=shein-bi-cloud-morning-link-recovery.service
 
 [Install]
 WantedBy=timers.target
-
