@@ -9,6 +9,7 @@ LINKS_MAX_AGE_SECONDS="${SHEIN_BI_INVENTORY_LINKS_MAX_AGE_SECONDS:-1800}"
 LINKS_REFRESH_TIMEOUT_SECONDS="${SHEIN_BI_INVENTORY_LINKS_REFRESH_TIMEOUT_SECONDS:-1200}"
 REFRESH_OPENAPI_ON_STALE="${SHEIN_BI_INVENTORY_REFRESH_OPENAPI_ON_STALE:-1}"
 REQUIRE_PIPELINE_MARKERS="${SHEIN_BI_INVENTORY_REQUIRE_PIPELINE_MARKERS:-0}"
+STOCK_NOT_BEFORE="${SHEIN_BI_INVENTORY_STOCK_NOT_BEFORE:-${DATE}T15:11:00+08:00}"
 PLAN="$RUNTIME_ROOT/plans/daily-inventory-replenishment-$DATE.json"
 RESULT="$RUNTIME_ROOT/results/daily-inventory-replenishment-$DATE.json"
 LOCK="$ROOT/state/locks/daily-inventory-replenishment.lock"
@@ -35,9 +36,9 @@ if [[ "$REQUIRE_PIPELINE_MARKERS" == "1" || "$REQUIRE_PIPELINE_MARKERS" == "true
     --stage stock-refresh \
     --date "$DATE" \
     --status done,warning \
-    --not-before "${DATE}T15:11:00+08:00" \
+    --not-before "$STOCK_NOT_BEFORE" \
     || {
-      echo "[daily_inventory_guard] 15:12 stock refresh marker is not ready" >&2
+      echo "[daily_inventory_guard] stock refresh marker is not ready after $STOCK_NOT_BEFORE" >&2
       exit 75
     }
 fi

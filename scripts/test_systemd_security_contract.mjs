@@ -229,15 +229,11 @@ assert.doesNotMatch(storageFeeSync, /^RestrictSUIDSGID=true$/m,
 
 for (const timerName of [
   'shein-bi-cloud-morning-chain.timer',
-  'shein-bi-cloud-morning-link-chunk-2.timer',
-  'shein-bi-cloud-morning-link-recovery.timer',
-  'shein-bi-cloud-morning-supplements.timer',
   'shein-bi-cloud-order-closure.timer',
   'shein-bi-cloud-session-manager.timer',
   'shein-bi-cloud-yesterday.timer',
   'shein-bi-db-backup.timer',
   'shein-bi-cloud-rtv-verify.timer',
-  'shein-bi-daily-inventory-replenishment-guard-retry.timer',
 ]) {
   assert.equal(property(readUnit(timerName), 'Persistent'), 'false',
     `${timerName} must not replay at an arbitrary minute and collide with the reserved home lane`);

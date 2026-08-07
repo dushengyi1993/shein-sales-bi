@@ -7,32 +7,13 @@ MINUTE=$((10#$(date +%M)))
 DEADLINE_MINUTE=""
 MAX_SECTIONS=1
 
-marker_ready() {
-  node "$ROOT/scripts/pipeline_marker.mjs" require \
-    --stage "$1" \
-    --date "$(TZ=Asia/Shanghai date +%F)" \
-    --status done,warning >/dev/null 2>&1
-}
-
-yield_to_business_recovery() {
-  # Portal materialization is cache maintenance.  It must never take the host
-  # lock immediately before a missing-store recovery or the two inventory
-  # execution slots.  Existing cache remains available while this run defers.
-  if (( HOUR >= 8 )) && ! marker_ready morning-links-ready; then
-    echo "[portal-section-slot] defer reason=morning_links_not_ready hour=$HOUR minute=$MINUTE" >&2
+yield_to_daily_coordinator() {
+  # Portal materialization is cache maintenance. The daily business refresh is
+  # now one coordinator rather than several timer slots, so only yield while
+  # that single run is active. The previous complete cache remains available.
+  if systemctl is-active --quiet shein-bi-cloud-morning-chain.service; then
+    echo "[portal-section-slot] defer reason=daily_operating_refresh_active hour=$HOUR minute=$MINUTE" >&2
     exit 75
-  fi
-  if (( MINUTE >= 13 && MINUTE <= 16 )); then
-    if (( HOUR == 15 )) && ! marker_ready inventory-guard; then
-      echo "[portal-section-slot] defer reason=inventory_guard_priority hour=$HOUR minute=$MINUTE" >&2
-      exit 75
-    fi
-  fi
-  if (( MINUTE >= 43 && MINUTE <= 46 )); then
-    if (( HOUR == 15 )) && ! marker_ready inventory-guard; then
-      echo "[portal-section-slot] defer reason=inventory_guard_retry_priority hour=$HOUR minute=$MINUTE" >&2
-      exit 75
-    fi
   fi
 }
 
@@ -59,7 +40,7 @@ else
   exit 75
 fi
 
-yield_to_business_recovery
+yield_to_daily_coordinator
 
 export SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED=1
 export SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_MINUTE="$DEADLINE_MINUTE"

@@ -38,13 +38,9 @@ const UNIT_NAMES = [
   'shein-bi-cloud-today-sales-reconcile.service',
   'shein-bi-cloud-manual-login-recovery.service',
   'shein-bi-cloud-morning-chain.service',
-  'shein-bi-cloud-morning-link-chunk-2.service',
-  'shein-bi-cloud-morning-link-recovery.service',
-  'shein-bi-cloud-morning-supplements.service',
   'shein-bi-cloud-rtv-verify.service',
   'shein-bi-cloud-order-closure.service',
   'shein-bi-daily-inventory-replenishment-guard.service',
-  'shein-bi-daily-inventory-replenishment-guard-retry.service',
   'shein-bi-cloud-portal-section-queue.service',
   'shein-bi-cloud-et-storage-fee.service',
   'shein-bi-cloud-disk-maintenance.service',
@@ -60,13 +56,8 @@ const TIMER_NAMES = [
   'shein-bi-cloud-openapi-stock-refresh.timer',
   'shein-bi-cloud-today-sales-reconcile.timer',
   'shein-bi-cloud-manual-login-recovery.timer',
-  'shein-bi-cloud-morning-link-chunk-2.timer',
-  'shein-bi-cloud-morning-link-recovery.timer',
-  'shein-bi-cloud-morning-supplements.timer',
   'shein-bi-cloud-rtv-verify.timer',
   'shein-bi-cloud-order-closure.timer',
-  'shein-bi-daily-inventory-replenishment-guard.timer',
-  'shein-bi-daily-inventory-replenishment-guard-retry.timer',
   'shein-bi-cloud-portal-section-queue.timer',
   'shein-bi-cloud-et-storage-fee.timer',
   'shein-bi-cloud-marketing-live-guard.timer',
@@ -168,9 +159,6 @@ function laterThanServiceExit(completedAt, status) {
 function assessBusinessRecovery(unit, status, {morningMarker, orderRecheckState} = {}) {
   const morningUnits = new Set([
     'shein-bi-cloud-morning-chain.service',
-    'shein-bi-cloud-morning-link-chunk-2.service',
-    'shein-bi-cloud-morning-link-recovery.service',
-    'shein-bi-cloud-morning-supplements.service',
   ]);
   if (morningUnits.has(unit)
     && morningMarker?.runDate === bjDateKey()

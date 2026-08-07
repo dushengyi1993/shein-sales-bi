@@ -1,8 +1,9 @@
 [Unit]
-Description=Run SHEIN BI cloud morning chain after the 08:00 sales slot
+Description=Run the single complete SHEIN BI daily operating refresh before work
 
 [Timer]
-OnCalendar=*-*-* 08:00:00
+OnCalendar=*-*-* 07:10:00
+AccuracySec=5s
 Persistent=false
 Unit=shein-bi-cloud-morning-chain.service
 

@@ -17,6 +17,10 @@ FETCH_ONLY="${SHEIN_LINK_BUSINESS_FETCH_ONLY:-0}"
 FINALIZE_ONLY="${SHEIN_LINK_BUSINESS_FINALIZE_ONLY:-0}"
 CHUNK_RESULT_FILE="${SHEIN_LINK_BUSINESS_CHUNK_RESULT_FILE:-}"
 RESUME_COMPLETED="${SHEIN_LINK_BUSINESS_RESUME_COMPLETED:-$FETCH_ONLY}"
+PER_STORE_BROWSER_WRAPPER="${SHEIN_LINK_BUSINESS_PER_STORE_BROWSER_WRAPPER:-0}"
+RESOURCE_RETRIES="${SHEIN_LINK_BUSINESS_RESOURCE_RETRIES:-12}"
+RESOURCE_RETRY_SLEEP_SEC="${SHEIN_LINK_BUSINESS_RESOURCE_RETRY_SLEEP_SEC:-30}"
+BROWSER_CONCURRENCY="${SHEIN_LINK_BUSINESS_BROWSER_CONCURRENCY:-2}"
 
 is_true() {
   [[ "$1" == "1" || "$1" == "true" ]]
@@ -175,6 +179,37 @@ close_one_store_browser() {
   node scripts/cleanup_shein_store_browsers.mjs --store "$key" --cleanup-chrome-tmp --kill-after-sec 5 "${owned_args[@]}" || true
 }
 
+run_store_fetch() {
+  local store="$1"
+  if is_true "$PER_STORE_BROWSER_WRAPPER"; then
+    bash scripts/run_host_browser_read_job.sh \
+      --domain "daily-link-${store,,}" \
+      --lock-wait-sec "${SHEIN_LINK_BUSINESS_BROWSER_LOCK_WAIT_SEC:-600}" \
+      --defer-state "/srv/shein-bi/runtime/host-scheduler/daily-link-${store,,}.latest.json" \
+      -- bash scripts/cloud_link_business_store_fetch.sh "$store" "$DATE"
+    return $?
+  fi
+
+  node scripts/restore_shein_store_session.mjs \
+    --store "$store" \
+    --date "$DATE" \
+    --headless \
+    --timeout-ms "${SHEIN_SESSION_RESTORE_TIMEOUT_MS:-180000}" \
+    && node scripts/fetch_shein_links.mjs \
+      --stores "$store" \
+      --date "$DATE" \
+      --page-size "${SHEIN_LINK_PAGE_SIZE:-50}" \
+    && node scripts/fetch_shein_business_domains.mjs \
+      --store "$store" \
+      --date "$DATE" \
+      --domains "${SHEIN_BUSINESS_DOMAINS:-home,afterSales,waybill,fulfillment,productInventory,management,marketing,quality,comments}" \
+      --wait-ms "${SHEIN_BUSINESS_WAIT_MS:-2000}" \
+      --max-pages "${SHEIN_BUSINESS_MAX_PAGES:-20}" \
+      --store-attempts "${SHEIN_BUSINESS_STORE_ATTEMPTS:-2}" \
+      --relogin-headless \
+      --json
+}
+
 store_keys() {
   if [[ -n "${SHEIN_LINK_BUSINESS_STORES:-}" ]]; then
     echo "$SHEIN_LINK_BUSINESS_STORES" | tr ',' ' '
@@ -202,6 +237,56 @@ for (const file of files) {
   if (payload?.ok !== true || String(payload?.date || '') !== date || payloadStore !== store) process.exit(1);
 }
 NODE
+}
+
+run_store_worker() {
+  local store="$1"
+  local status_dir="$2"
+  local store_ok=0
+  local max_attempts="${SHEIN_LINK_BUSINESS_STORE_ATTEMPTS:-3}"
+
+  if is_true "$RESUME_COMPLETED" && store_evidence_is_complete "$store"; then
+    echo "success" > "$status_dir/$store"
+    echo "[cloud_link_business_sync] store=$store resume-skip exact-date link/business evidence already complete"
+    return 0
+  fi
+
+  local attempt resource_attempt store_status
+  for attempt in $(seq 1 "$max_attempts"); do
+    lease_action heartbeat >/dev/null
+    echo "[cloud_link_business_sync] store=$store attempt=$attempt/$max_attempts bootstrap/fetch start"
+    close_one_store_browser "$store"
+    resource_attempt=0
+    while true; do
+      set +e
+      run_store_fetch "$store"
+      store_status=$?
+      set -e
+      if [[ "$store_status" == "75" && "$resource_attempt" -lt "$RESOURCE_RETRIES" ]]; then
+        resource_attempt=$((resource_attempt + 1))
+        echo "[cloud_link_business_sync] store=$store waiting for browser capacity retry=$resource_attempt/$RESOURCE_RETRIES"
+        sleep "$RESOURCE_RETRY_SLEEP_SEC"
+        continue
+      fi
+      break
+    done
+    close_one_store_browser "$store"
+    if [[ "$store_status" == "0" ]]; then
+      store_ok=1
+      echo "[cloud_link_business_sync] store=$store done"
+      break
+    fi
+    echo "[cloud_link_business_sync] store=$store attempt=$attempt failed; will retry after short cooldown" >&2
+    sleep 10
+  done
+
+  if [[ "$store_ok" == "1" ]]; then
+    echo "success" > "$status_dir/$store"
+  else
+    echo "failed" > "$status_dir/$store"
+    echo "[cloud_link_business_sync] store=$store failed after $max_attempts attempts" >&2
+  fi
+  return 0
 }
 
 DATE="$(resolve_date "$TARGET")"
@@ -264,7 +349,29 @@ else
   lease_action acquire
   LEASE_ACTIVE=1
   close_store_browsers
-  for STORE in $STORES; do
+  if is_true "$PER_STORE_BROWSER_WRAPPER" && [[ "$BROWSER_CONCURRENCY" =~ ^[0-9]+$ ]] && (( BROWSER_CONCURRENCY > 1 )); then
+    STATUS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/shein-link-business-status.XXXXXX")"
+    ACTIVE_WORKERS=0
+    for STORE in $STORES; do
+      run_store_worker "$STORE" "$STATUS_DIR" &
+      ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1))
+      if (( ACTIVE_WORKERS >= BROWSER_CONCURRENCY )); then
+        wait -n || true
+        ACTIVE_WORKERS=$((ACTIVE_WORKERS - 1))
+      fi
+    done
+    wait || true
+    for STORE in $STORES; do
+      if [[ "$(cat "$STATUS_DIR/$STORE" 2>/dev/null || true)" == "success" ]]; then
+        SUCCESS_STORES+=("$STORE")
+      else
+        FAILED_STORES+=("$STORE")
+      fi
+    done
+    rm -rf -- "$STATUS_DIR"
+    write_chunk_result "running" "parallel store workers completed inside the same coordinator run"
+  else
+    for STORE in $STORES; do
     if is_true "$RESUME_COMPLETED" && store_evidence_is_complete "$STORE"; then
       SUCCESS_STORES+=("$STORE")
       echo "[cloud_link_business_sync] store=$STORE resume-skip exact-date link/business evidence already complete"
@@ -277,24 +384,21 @@ else
       lease_action heartbeat >/dev/null
       echo "[cloud_link_business_sync] store=$STORE attempt=$ATTEMPT/$MAX_ATTEMPTS bootstrap/fetch start"
       close_one_store_browser "$STORE"
-      if node scripts/restore_shein_store_session.mjs \
-        --store "$STORE" \
-        --date "$DATE" \
-        --headless \
-        --timeout-ms "${SHEIN_SESSION_RESTORE_TIMEOUT_MS:-180000}" \
-        && node scripts/fetch_shein_links.mjs \
-          --stores "$STORE" \
-          --date "$DATE" \
-          --page-size "${SHEIN_LINK_PAGE_SIZE:-50}" \
-        && node scripts/fetch_shein_business_domains.mjs \
-          --store "$STORE" \
-          --date "$DATE" \
-          --domains "${SHEIN_BUSINESS_DOMAINS:-home,afterSales,waybill,fulfillment,productInventory,management,marketing,quality,comments}" \
-          --wait-ms "${SHEIN_BUSINESS_WAIT_MS:-2000}" \
-          --max-pages "${SHEIN_BUSINESS_MAX_PAGES:-20}" \
-          --store-attempts "${SHEIN_BUSINESS_STORE_ATTEMPTS:-2}" \
-          --relogin-headless \
-          --json; then
+      RESOURCE_ATTEMPT=0
+      while true; do
+        set +e
+        run_store_fetch "$STORE"
+        STORE_STATUS=$?
+        set -e
+        if [[ "$STORE_STATUS" == "75" && "$RESOURCE_ATTEMPT" -lt "$RESOURCE_RETRIES" ]]; then
+          RESOURCE_ATTEMPT=$((RESOURCE_ATTEMPT + 1))
+          echo "[cloud_link_business_sync] store=$STORE waiting for browser capacity retry=$RESOURCE_ATTEMPT/$RESOURCE_RETRIES"
+          sleep "$RESOURCE_RETRY_SLEEP_SEC"
+          continue
+        fi
+        break
+      done
+      if [[ "$STORE_STATUS" == "0" ]]; then
         STORE_OK=1
         close_one_store_browser "$STORE"
         echo "[cloud_link_business_sync] store=$STORE done"
@@ -315,7 +419,8 @@ else
         exit 1
       fi
     fi
-  done
+    done
+  fi
 fi
 
 if is_true "$FETCH_ONLY"; then

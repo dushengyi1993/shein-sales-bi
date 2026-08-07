@@ -180,6 +180,7 @@ export SHEIN_BI_PORTAL_DATA_MODE="${SHEIN_BI_PORTAL_DATA_MODE:-api}"
 
 DAILY_WARNINGS=()
 LINK_BUSINESS_MODE="${SHEIN_BI_DAILY_LINK_BUSINESS_MODE:-full}"
+LINK_BUSINESS_STATUS=0
 
 wait_for_busy_writers
 wait_for_lark_report_lock
@@ -195,8 +196,12 @@ case "$LINK_BUSINESS_MODE" in
     ;;
   finalize)
     echo "[cloud_daily_refresh] step=link-business mode=finalize date=$DATE"
-    if ! SHEIN_LINK_BUSINESS_FINALIZE_ONLY=1 SHEIN_LINK_BUSINESS_REFRESH_PORTAL=0 \
-      bash scripts/cloud_link_business_sync.sh "$DATE"; then
+    set +e
+    SHEIN_LINK_BUSINESS_FINALIZE_ONLY=1 SHEIN_LINK_BUSINESS_REFRESH_PORTAL=0 \
+      bash scripts/cloud_link_business_sync.sh "$DATE"
+    LINK_BUSINESS_STATUS=$?
+    set -e
+    if [[ "$LINK_BUSINESS_STATUS" -ne 0 ]]; then
       DAILY_WARNINGS+=("link-business finalize failed")
       echo "[cloud_daily_refresh] WARN link/business final merge failed; continue non-link supplements but keep prior complete link snapshot" >&2
     fi
@@ -209,6 +214,35 @@ case "$LINK_BUSINESS_MODE" in
     exit 64
     ;;
 esac
+
+if [[ "${SHEIN_BI_DAILY_REQUIRE_COMPLETE_LINK_BUSINESS:-0}" == "1" || "${SHEIN_BI_DAILY_REQUIRE_COMPLETE_LINK_BUSINESS:-0}" == "true" ]]; then
+  LINK_BUSINESS_BLOCKER="$(
+    DATE="$DATE" LINK_BUSINESS_STATUS="$LINK_BUSINESS_STATUS" node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const root = process.cwd();
+const date = String(process.env.DATE || '');
+const status = Number(process.env.LINK_BUSINESS_STATUS || 0);
+const blockers = [];
+if (status !== 0) blockers.push(`finalize_exit_${status}`);
+for (const [file, label] of [
+  ['link-business-last-partial.json', 'store_gaps'],
+  ['link-business-last-metric-not-ready.json', 'metrics_not_ready'],
+]) {
+  try {
+    const payload = JSON.parse(fs.readFileSync(path.join(root, 'state', 'cloud_ops_alerts', file), 'utf8'));
+    if (String(payload?.date || '') === date) blockers.push(label);
+  } catch {}
+}
+process.stdout.write(blockers.join(','));
+NODE
+  )"
+  if [[ -n "$LINK_BUSINESS_BLOCKER" ]]; then
+    write_daily_alert "waiting_platform" "link/business is not complete for $DATE: $LINK_BUSINESS_BLOCKER; prior complete Portal snapshot retained"
+    echo "[cloud_daily_refresh] WAITING link/business incomplete blockers=$LINK_BUSINESS_BLOCKER; do not publish a partial daily snapshot" >&2
+    exit 75
+  fi
+fi
 if [[ "$LINK_BUSINESS_MODE" != "skip" ]]; then
   if [[ -s "$ROOT/state/cloud_ops_alerts/link-business-last-partial.json" ]]; then
     DAILY_WARNINGS+=("link-business partial")

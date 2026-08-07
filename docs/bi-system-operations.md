@@ -92,7 +92,7 @@
 ## 6. 链接表现更新规则
 
 - 链接表现每天更新一次即可，适合放在后半夜。
-- 本地历史任务 `SHEIN-Sales-15Stores-LinkManagement-0530` 已封存禁用；当前生产由云端 `shein-bi-cloud-morning-chain.timer` 在 08:00 销售刷新后触发 `shein-bi-cloud-daily-refresh.service` 统一执行日更补采。
+- 本地历史任务 `SHEIN-Sales-15Stores-LinkManagement-0530` 已封存禁用；当前生产由云端 `shein-bi-cloud-morning-chain.timer` 在 07:10 启动一个完整19店日更 run，内部调用补充域并在完整门禁后一次发布。
 - 云端手动补链接/业务域和价格线索应在服务器运行 `scripts/cloud_daily_refresh.sh yesterday` 或指定日期。低层诊断仍可用 `scripts/cloud_link_business_sync.sh yesterday`，但生产日更入口以 daily refresh 为准。不要用本机补抓冒充云端日更。
 - BI 门户侧栏的“链接表现数据”更新时间应显示源文件抓取时间：`outputs/shein_links/<店铺>/<链接日>.json` 内 `fetchTime` 的最大值；“售后/库存/财务数据”更新时间应显示业务域源文件抓取时间：`outputs/shein_business_domains/<店铺>/<业务日>.json` 内 `fetchTime` 的最大值；BI 重跑重新入仓时产生的数据库 `updated_at` 只可作为内部排障字段，不作为主要更新时间展示。
 - 如果部分店失败：尽量同步成功店铺，并发送飞书异常提醒。
