@@ -870,7 +870,10 @@ store_agg_raw AS (
     match_key,
     max(title_cn) FILTER (WHERE coalesce(title_cn,'') <> '') AS sample_title_cn,
     sum(coalesce(real_quantity, quantity, 0)) AS loose_total_qty,
-    sum(coalesce(real_quantity, quantity, 0)) FILTER (WHERE storeroom_name LIKE '%09%' OR storeroom_name ILIKE '%散件%') AS loose_sellable_qty,
+    -- ET Quantity is the currently available/sellable quantity. RealQuantity is
+    -- physical/accounting stock and may remain positive while available stock is
+    -- already zero because of reservations or other availability constraints.
+    sum(coalesce(quantity, 0)) FILTER (WHERE storeroom_name LIKE '%09%' OR storeroom_name ILIKE '%散件%') AS loose_sellable_qty,
     sum(coalesce(real_quantity, quantity, 0)) FILTER (WHERE storeroom_name LIKE '%03%' OR storeroom_name ILIKE '%RTV%') AS rtv_qty,
     sum(coalesce(real_quantity, quantity, 0)) FILTER (WHERE storeroom_name LIKE '%04%' OR storeroom_name ILIKE '%Damaged%' OR storeroom_name ILIKE '%破损%') AS damaged_qty,
     sum(coalesce(real_quantity, quantity, 0)) FILTER (WHERE storeroom_name LIKE '%06%' OR storeroom_name ILIKE '%报废%') AS scrap_qty,
@@ -902,7 +905,9 @@ box_agg_raw AS (
     match_key,
     max(title_cn) FILTER (WHERE coalesce(title_cn,'') <> '') AS sample_title_cn,
     sum(coalesce(real_quantity, quantity, 0)) AS box_total_qty,
-    sum(coalesce(real_quantity, quantity, 0)) FILTER (WHERE storeroom_name LIKE '%01%' OR storeroom_name ILIKE '%整箱%') AS full_carton_qty,
+    -- The approved SK-03038 operational exception also uses ET available
+    -- quantity; physical RealQuantity remains available in box_total_qty only.
+    sum(coalesce(quantity, 0)) FILTER (WHERE storeroom_name LIKE '%01%' OR storeroom_name ILIKE '%整箱%') AS full_carton_qty,
     count(DISTINCT box_id) AS box_count,
     string_agg(DISTINCT nullif(storeroom_name,''), ' / ') AS box_warehouses,
     max(snapshot_date) AS box_snapshot_date
