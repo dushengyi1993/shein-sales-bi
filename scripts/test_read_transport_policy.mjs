@@ -28,9 +28,11 @@ assert.doesNotMatch(rtv, /launch_store_browser|--headless|manage_browser_task_le
 
 const morning = read('scripts/cloud_morning_chain.sh');
 const linkSync = read('scripts/cloud_link_business_sync.sh');
-assert.match(morning, /resume from exact-date store evidence instead of blocking the whole pipeline/);
-assert.match(linkSync, /incremental progress saved after store/,
-  'a hard deadline must not erase stores already completed in the morning chain');
+assert.match(morning, /while \[\[ -n "\$MISSING_STORES" \]\]/,
+  'the one daily run must keep retrying only unfinished stores instead of splitting work across timers');
+assert.match(morning, /previous complete BI snapshot stays visible until the run is complete/);
+assert.match(linkSync, /store_evidence_is_complete/,
+  'same-run retries must reuse exact-date store evidence instead of restarting completed stores');
 
 const orderRecheck = read('scripts/recheck_order_statuses.mjs');
 assert.match(orderRecheck, /pairAttempts:\s*3/);
