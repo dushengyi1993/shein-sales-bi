@@ -104,7 +104,7 @@ if ! flock -s -w "$LOCK_WAIT_SEC" 9; then
 fi
 
 exec 8<>"$PROJECT_LOCK"
-if ! flock -w "$LOCK_WAIT_SEC" 8; then
+if ! flock -s -w "$LOCK_WAIT_SEC" 8; then
   echo "[host-browser-read] defer domain=$DOMAIN reason=project_lock_busy" >&2
   record_defer "${DEFER_REASON}:project_lock_busy"
   exit 75

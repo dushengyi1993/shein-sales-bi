@@ -16,6 +16,9 @@ assert.doesNotMatch(exporter, /console\.(?:log|error)\([^)]*cookieHeader/);
 
 assert.match(restore, /webApiFile: r\.webApiFile/);
 assert.match(restore, /webApiProbe: r\.webApiProbe/);
+assert.match(restore, /--fast-start/);
+assert.match(restore, /restoreMode = 'direct_relogin'/);
+assert.match(restore, /direct_relogin_then_bootstrap/);
 
 assert.match(manager, /webApiSessionFresh/);
 assert.match(manager, /webApiProbeOk/);

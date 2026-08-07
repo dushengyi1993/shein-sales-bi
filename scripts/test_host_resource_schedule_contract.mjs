@@ -62,10 +62,6 @@ const heavyUnits = [
   'shein-bi-cloud-session-manager.service',
   'shein-bi-db-backup.service',
   'shein-bi-cloud-yesterday.service',
-  'shein-bi-cloud-morning-chain.service',
-  'shein-bi-cloud-morning-link-chunk-2.service',
-  'shein-bi-cloud-morning-link-recovery.service',
-  'shein-bi-cloud-morning-supplements.service',
   'shein-bi-cloud-rtv-verify.service',
   'shein-bi-cloud-order-closure.service',
   'shein-bi-cloud-et-forwarder.service',
@@ -74,27 +70,27 @@ const heavyUnits = [
   'shein-bi-cloud-marketing-live-guard.service',
   'shein-bi-cloud-marketing-repair.service',
   'shein-bi-daily-inventory-replenishment-guard.service',
-  'shein-bi-daily-inventory-replenishment-guard-retry.service',
   'shein-bi-cloud-portal-section-queue.service',
   'shein-bi-cloud-manual-login-recovery.service',
 ];
 for (const name of heavyUnits) {
   const content = unit(name);
   assert.match(content, /^Slice=shein-host-heavy-bi\.slice$/m, name);
-  assert.match(content, /run_host_(?:heavy|browser_read)_job\.sh|run_cloud_(?:portal_section_queue|marketing_fallback|morning_link_recovery)_slot\.sh|run_cloud_inventory_guard_retry\.sh/, name);
-  assert.match(content, name === 'shein-bi-cloud-morning-link-recovery.service'
-    ? /^SuccessExitStatus=75 124$/m
-    : /^SuccessExitStatus=75$/m, name);
+  assert.match(content, /run_host_(?:heavy|browser_read)_job\.sh|run_cloud_(?:portal_section_queue|marketing_fallback)_slot\.sh/, name);
+  assert.match(content, /^SuccessExitStatus=75$/m, name);
 }
+
+const dailyCoordinatorUnit = unit('shein-bi-cloud-morning-chain.service');
+assert.match(dailyCoordinatorUnit, /^Slice=shein-host-heavy-bi\.slice$/m);
+assert.match(dailyCoordinatorUnit, /cloud_morning_chain\.sh all/);
+assert.doesNotMatch(dailyCoordinatorUnit, /--deadline-at|run_host_browser_read_job\.sh/,
+  'the coordinator must not hold a browser token or be cut into an arbitrary clock slot');
 
 const browserReadUnits = [
   'shein-bi-cloud-session-manager.service',
-  'shein-bi-cloud-morning-chain.service',
-  'shein-bi-cloud-morning-link-chunk-2.service',
-  'shein-bi-cloud-morning-link-recovery.service',
 ];
 for (const name of browserReadUnits) {
-  assert.match(unit(name), /run_host_browser_read_job\.sh|run_cloud_morning_link_recovery_slot\.sh/, name);
+  assert.match(unit(name), /run_host_browser_read_job\.sh/, name);
 }
 for (const name of [
   'shein-bi-cloud-rtv-verify.service',
@@ -117,6 +113,8 @@ for (const name of [
 
 const browserReadWrapper = read('scripts/run_host_browser_read_job.sh');
 assert.match(browserReadWrapper, /flock -s -w "\$LOCK_WAIT_SEC" 9/);
+assert.match(browserReadWrapper, /flock -s -w "\$LOCK_WAIT_SEC" 8/,
+  'read-only store workers may share the half-managed project lane while the two host browser slots enforce the machine cap');
 assert.match(browserReadWrapper, /shein-browser-read-0\.lock/);
 assert.match(browserReadWrapper, /shein-browser-read-1\.lock/);
 assert.match(browserReadWrapper, /PRESSURE_CLASS=browser-secondary/);
@@ -149,41 +147,43 @@ assert.match(unit('shein-bi-cloud-et-forwarder.service'), /^OnSuccess=shein-bi-e
 assert.deepEqual(calendars(unit('shein-bi-db-backup.timer')), ['*-*-* 01:45:00']);
 assert.deepEqual(calendars(unit('shein-bi-cloud-yesterday.timer')), ['*-*-* 02:45:00']);
 assert.deepEqual(calendars(unit('shein-bi-cloud-rtv-verify.timer')), ['*-*-* 04:50:00']);
-assert.deepEqual(calendars(unit('shein-bi-cloud-morning-chain.timer')), ['*-*-* 08:00:00']);
-assert.deepEqual(calendars(unit('shein-bi-cloud-morning-link-chunk-2.timer')), ['*-*-* 08:45:00']);
-assert.deepEqual(calendars(unit('shein-bi-cloud-morning-link-recovery.timer')), [
-  '*-*-* 11,12:15:00',
-  '*-*-* 14:45:00',
-]);
-assert.deepEqual(calendars(unit('shein-bi-cloud-morning-supplements.timer')), ['*-*-* 09:12:00']);
+assert.deepEqual(calendars(unit('shein-bi-cloud-morning-chain.timer')), ['*-*-* 07:10:00']);
 assert.deepEqual(calendars(unit('shein-bi-cloud-openapi-stock-refresh.timer')), ['*-*-* *:12,45:00']);
 assert.deepEqual(calendars(unit('shein-bi-cloud-today-sales-reconcile.timer')), ['*-*-* *:00,15,30,45:00']);
-assert.deepEqual(calendars(unit('shein-bi-daily-inventory-replenishment-guard.timer')), ['*-*-* 15:15:00']);
-assert.deepEqual(calendars(unit('shein-bi-daily-inventory-replenishment-guard-retry.timer')), ['*-*-* 15:45:00']);
 
 const morning = read('scripts/cloud_morning_chain.sh');
-assert.match(morning, /SHEIN_BI_MORNING_CHUNK_1_STORES:-DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ,CX,YJ/);
-assert.match(morning, /SHEIN_BI_MORNING_CHUNK_2_STORES:-XL,QY,QH,TZ,JSH,TZZ,XC/);
 assert.match(morning, /SHEIN_LINK_BUSINESS_FETCH_ONLY=1/);
 assert.match(morning, /SHEIN_LINK_BUSINESS_ALLOW_PARTIAL=1/,
   'one transient store failure must not prevent the other morning stores from being fetched');
-assert.match(morning, /first chunk completed; failed stores will not block the second chunk/);
-assert.match(morning, /recovery stage will resume only these stores/,
-  'a partial link day must preserve exact progress and retry only unfinished stores');
-assert.match(morning, /SHEIN_LINK_BUSINESS_FINALIZE_ONLY=1/);
+assert.doesNotMatch(morning, /chunk-1\)|chunk-2\)|supplements\)/,
+  'the production coordinator must not retain callable split-stage entry points');
 assert.match(morning, /morning-links-ready/);
-assert.match(morning, /SHEIN_BI_DAILY_LINK_BUSINESS_MODE=skip/);
+assert.match(morning, /SHEIN_BI_DAILY_LINK_BUSINESS_MODE=finalize/);
+assert.match(morning, /SHEIN_BI_DAILY_REQUIRE_COMPLETE_LINK_BUSINESS=1/,
+  'the unified coordinator must not publish when any store or metric readiness gate is incomplete');
 assert.match(morning, /SHEIN_BI_DAILY_RTV_VERIFY=0/);
+assert.match(morning, /cloud_morning_chain\.sh all|all\)/);
+assert.match(morning, /SHEIN_LINK_BUSINESS_PER_STORE_BROWSER_WRAPPER=1/);
+assert.match(morning, /previous complete BI snapshot stays visible until the run is complete/);
+assert.match(morning, /retrying only those stores inside the same run/);
+assert.match(morning, /while \[\[ -n "\$MISSING_STORES" \]\]/,
+  'unfinished stores must remain checkpoints in the same coordinator until complete or the run safety budget expires');
+assert.match(morning, /waiting platform readiness retryRound=/,
+  'platform readiness must resume in the same run instead of creating another timer');
+assert.match(morning, /run_inventory_stage/);
 assert.match(read('scripts/cloud_link_business_sync.sh'), /SHEIN_LINK_BUSINESS_RESUME_COMPLETED/,
-  'a deadline retry must reuse exact-date completed store evidence instead of starting all stores over');
+  'an internal retry must reuse exact-date completed store evidence instead of starting all stores over');
+assert.match(read('scripts/cloud_link_business_sync.sh'), /SHEIN_LINK_BUSINESS_BROWSER_CONCURRENCY:-2/,
+  'the one coordinator may use two bounded browser workers without becoming two business runs');
+assert.match(read('scripts/cloud_link_business_sync.sh'), /NODE\n}\n\nrun_store_worker\(\)/,
+  'the store worker must be executable shell code, not accidental content inside the evidence-check heredoc');
+const dailyRefresh = read('scripts/cloud_daily_refresh.sh');
+assert.match(dailyRefresh, /SHEIN_BI_DAILY_REQUIRE_COMPLETE_LINK_BUSINESS/);
+assert.match(dailyRefresh, /prior complete Portal snapshot retained/);
 assert.match(read('scripts/cloud_link_business_sync.sh'), /write_chunk_result "warning"/,
   'fetch-only chunks must preserve partial progress as warning evidence instead of aborting at the first store');
-const morningRecovery = read('scripts/run_cloud_morning_link_recovery_slot.sh');
-assert.match(morningRecovery, /morning-links-ready/);
-assert.match(morningRecovery, /DEADLINE_MINUTE=27/);
-assert.match(morningRecovery, /DEADLINE_MINUTE=57/);
-assert.match(unit('shein-bi-cloud-morning-supplements.service'), /^Environment=SHEIN_BI_DAILY_OPENAPI_PRODUCT_RECONCILIATION=0$/m,
-  'the daily bounded 07:12 stock/detail pass owns product enrichment');
+assert.match(read('scripts/cloud_link_business_store_fetch.sh'), /--fast-start/);
+assert.match(read('scripts/cloud_link_business_store_fetch.sh'), /--page-size "\$\{SHEIN_LINK_PAGE_SIZE:-100\}"/);
 
 const rtvVerify = read('scripts/cloud_rtv_verify.sh');
 assert.doesNotMatch(rtvVerify, /node scripts\/generate_bi_portal\.mjs/,
@@ -200,10 +200,7 @@ const inventory = read('scripts/cloud_daily_inventory_replenishment_guard.sh');
 assert.match(inventory, /--stage morning-links-ready/);
 assert.match(inventory, /--stage stock-refresh/);
 assert.match(inventory, /T15:11:00\+08:00/);
-const inventoryRetry = read('scripts/run_cloud_inventory_guard_retry.sh');
-assert.match(inventoryRetry, /--stage inventory-guard/);
-assert.match(inventoryRetry, /--deadline-at 15:57/);
-assert.match(inventoryRetry, /primary run already complete/);
+assert.match(inventory, /SHEIN_BI_INVENTORY_STOCK_NOT_BEFORE/);
 
 const etForwarder = read('scripts/fetch_et_forwarder.mjs');
 assert.match(etForwarder, /SHEIN_ET_HTTP_READ_ATTEMPTS/);
@@ -226,11 +223,7 @@ assert.match(portalQueueSlot, /DEADLINE_MINUTE=17/);
 assert.match(portalQueueSlot, /DEADLINE_MINUTE=27/);
 assert.match(portalQueueSlot, /DEADLINE_MINUTE=57/);
 assert.match(portalQueueSlot, /SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED=1/);
-assert.match(portalQueueSlot, /morning_links_not_ready/);
-assert.match(portalQueueSlot, /inventory_guard_priority/);
-assert.match(portalQueueSlot, /inventory_guard_retry_priority/);
-assert.match(unit('shein-bi-cloud-morning-link-recovery.service'), /^SuccessExitStatus=75 124$/m,
-  'a bounded recovery deadline is a resumable partial result, not a crashed service');
+assert.match(portalQueueSlot, /daily_operating_refresh_active/);
 assert.match(portalQueueWorker, /unscheduled_direct_entry/);
 assert.match(portalQueueWorker, /10#\$START_MINUTE >= 13/);
 assert.match(portalQueueWorker, /10#\$START_MINUTE >= 43/);

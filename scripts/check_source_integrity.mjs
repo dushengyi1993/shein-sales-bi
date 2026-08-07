@@ -8,7 +8,10 @@ function trackedFiles(patterns) {
     maxBuffer: 32 * 1024 * 1024,
   });
   if (result.status !== 0) throw new Error(result.stderr || 'git ls-files failed');
-  return result.stdout.split('\0').filter(Boolean);
+  // `git ls-files --cached` also lists tracked paths deleted in the current
+  // change.  Validate the resulting tree, not files that are intentionally
+  // being removed by this commit.
+  return result.stdout.split('\0').filter(file => file && fs.existsSync(file));
 }
 
 function run(command, args) {

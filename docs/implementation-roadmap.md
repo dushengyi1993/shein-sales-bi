@@ -22,7 +22,7 @@
 - 只保留当月和上个月的独立月表，更早月份进入年度汇总。
 - 当前云端 systemd 调度：
   - 当前生产调度已迁交 systemd；具体触发时间不在历史路线图维护，见 [cloud-bi-operations.md](cloud-bi-operations.md)。
-  - `shein-bi-cloud-morning-chain.timer` 每天 `08:00` 先刷新销售，再启动慢变日更；当前飞书日报自动发送已停用；
+  - `shein-bi-cloud-morning-chain.timer` 每天 `07:10` 启动单一19店慢变经营 run；当天销售走独立实时链路，当前飞书日报自动发送已停用；
   - `shein-bi-cloud-yesterday.timer` 每天 `03:00` 刷新前一天最终销售并复核稳定日；
   - `shein-bi-db-backup.timer` 每天 `02:40` 备份数据库；
   - 本地 Windows 计划任务已封存禁用，只作回滚/迁移参考。

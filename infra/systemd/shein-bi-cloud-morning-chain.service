@@ -1,7 +1,7 @@
 [Unit]
-Description=SHEIN BI morning link/business chunk 1 of 2 (first 12 stores)
-Wants=network-online.target docker.service
-After=network-online.target docker.service systemd-tmpfiles-setup.service
+Description=SHEIN BI unified daily operating refresh (19 stores, supplements and inventory)
+Wants=network-online.target docker.service shein-bi-portal.service
+After=network-online.target docker.service shein-bi-portal.service systemd-tmpfiles-setup.service
 
 [Service]
 Type=oneshot
@@ -13,11 +13,31 @@ WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/home/sheinops
 Environment=TZ=Asia/Shanghai
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_BI_PORTAL_URL=http://127.0.0.1:8787
+Environment=SHEIN_DOCKER_USE_SUDO=1
 Environment=SHEIN_BI_MORNING_CHAIN_LOG_DIR=/srv/shein-bi/logs/cloud-morning-chain
 Environment=SHEIN_BI_MORNING_CHAIN_STATE_DIR=/opt/shein-bi/app/state/cloud_morning_chain
-Environment=SHEIN_BI_MORNING_CHUNK_1_STORES=DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ,CX,YJ
-Environment=SHEIN_LINK_BUSINESS_STORE_ATTEMPTS=1
-TimeoutStartSec=1800
+Environment=SHEIN_BI_DAILY_LOG_DIR=/srv/shein-bi/logs/cloud-daily-refresh
+Environment=SHEIN_BI_DAILY_WAIT_BUSY_TIMEOUT_SEC=120
+Environment=SHEIN_BI_DAILY_MIN_AVAILABLE_MEM_MIB=2048
+Environment=SHEIN_BI_DAILY_OPENAPI_RECONCILIATION=1
+Environment=SHEIN_BI_DAILY_OPENAPI_RETURN_RECONCILIATION=1
+Environment=SHEIN_BI_DAILY_OPENAPI_FINANCE_SYNC=1
+Environment=SHEIN_OPENAPI_FINANCE_WINDOW_DAYS=35
+Environment=SHEIN_OPENAPI_FINANCE_CONCURRENCY=3
+Environment=SHEIN_BI_DAILY_OPENAPI_PRODUCT_RECONCILIATION=0
+Environment=SHEIN_BI_DAILY_INVENTORY_COST_REFRESH=1
+Environment=SHEIN_LINK_BUSINESS_STORE_ATTEMPTS=2
+Environment=SHEIN_LINK_BUSINESS_RESOURCE_RETRIES=12
+Environment=SHEIN_LINK_BUSINESS_RESOURCE_RETRY_SLEEP_SEC=30
+Environment=SHEIN_LINK_BUSINESS_BROWSER_CONCURRENCY=2
+Environment=SHEIN_BI_MORNING_RUN_BUDGET_SEC=10200
+Environment=SHEIN_BI_MORNING_STORE_RETRY_DELAY_SEC=120
+Environment=SHEIN_BI_MORNING_PLATFORM_RETRY_DELAY_SEC=300
+Environment=SHEIN_LINK_PAGE_SIZE=100
+Environment=SHEIN_BUSINESS_PAGE_SIZE=100
+Environment=SHEIN_BUSINESS_WAIT_MS=500
+TimeoutStartSec=10800
 TimeoutStopSec=30
 Nice=10
 IOSchedulingClass=best-effort
@@ -27,5 +47,4 @@ MemoryHigh=2600M
 MemoryMax=3400M
 OOMPolicy=stop
 KillMode=control-group
-ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_browser_read_job.sh --domain morning-link-chunk-1 --lock-wait-sec 120 --deadline-at 08:27 --defer-state /srv/shein-bi/runtime/host-scheduler/morning-link-chunk-1.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_morning_chain.sh chunk-1
-SuccessExitStatus=75
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_morning_chain.sh all

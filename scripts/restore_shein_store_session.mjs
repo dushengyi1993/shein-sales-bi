@@ -27,6 +27,7 @@ function parseArgs(argv) {
     date: '',
     headless: true,
     timeoutMs: 180_000,
+    fastStart: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -35,6 +36,7 @@ function parseArgs(argv) {
     else if (a === '--timeout-ms') args.timeoutMs = Math.max(30_000, Number(argv[++i] || args.timeoutMs));
     else if (a === '--headless') args.headless = true;
     else if (a === '--visible') args.headless = false;
+    else if (a === '--fast-start') args.fastStart = true;
     else if (!a.startsWith('--') && !args.store) args.store = String(a || '').trim().toUpperCase();
   }
   if (!args.store) throw new Error('Missing --store, e.g. --store DL');
@@ -142,8 +144,10 @@ async function exportCurrentSession() {
   };
 }
 
-const current = await runAutoRelogin({checkOnly: true, timeoutMs: Math.min(args.timeoutMs, 75_000)});
-console.log(`[restore_shein_store_session] ${args.store} current_profile_probe ${current.result.ok ? 'ok' : 'failed'}${current.result.timedOut ? ' timed_out' : ''}`);
+const current = args.fastStart
+  ? {result: {ok: false, code: null, stdout: '', stderr: '', timedOut: false}, parsed: null}
+  : await runAutoRelogin({checkOnly: true, timeoutMs: Math.min(args.timeoutMs, 75_000)});
+console.log(`[restore_shein_store_session] ${args.store} current_profile_probe ${args.fastStart ? 'skipped_fast_start' : (current.result.ok ? 'ok' : 'failed')}${current.result.timedOut ? ' timed_out' : ''}`);
 
 let bootstrap = null;
 let bootstrapJson = null;
@@ -151,7 +155,23 @@ let relogin = current.result;
 let reloginJson = current.parsed;
 let restoreMode = 'current_profile';
 let exportSession = null;
-if (!(current.result.ok && current.parsed?.ok)) {
+if (args.fastStart) {
+  const directRelogin = await runAutoRelogin({checkOnly: false, timeoutMs: args.timeoutMs});
+  relogin = directRelogin.result;
+  reloginJson = directRelogin.parsed;
+  restoreMode = 'direct_relogin';
+  console.log(`[restore_shein_store_session] ${args.store} direct_relogin ${relogin.ok ? 'ok' : 'failed'}${relogin.timedOut ? ' timed_out' : ''}`);
+  if (!(relogin.ok && reloginJson?.ok)) {
+    bootstrap = await runNode('bootstrap_shein_browser_session.mjs', common, args.timeoutMs + 30_000);
+    bootstrapJson = parseLastJson(bootstrap.stdout);
+    console.log(`[restore_shein_store_session] ${args.store} bootstrap_fallback ${bootstrap.ok ? 'ok' : 'failed'}${bootstrap.timedOut ? ' timed_out' : ''}`);
+    const fallbackRelogin = await runAutoRelogin({checkOnly: false, timeoutMs: args.timeoutMs});
+    relogin = fallbackRelogin.result;
+    reloginJson = fallbackRelogin.parsed;
+    restoreMode = 'direct_relogin_then_bootstrap';
+    console.log(`[restore_shein_store_session] ${args.store} fallback_relogin ${relogin.ok ? 'ok' : 'failed'}${relogin.timedOut ? ' timed_out' : ''}`);
+  }
+} else if (!(current.result.ok && current.parsed?.ok)) {
   bootstrap = await runNode('bootstrap_shein_browser_session.mjs', common, args.timeoutMs + 30_000);
   bootstrapJson = parseLastJson(bootstrap.stdout);
   console.log(`[restore_shein_store_session] ${args.store} bootstrap ${bootstrap.ok ? 'ok' : 'failed'}${bootstrap.timedOut ? ' timed_out' : ''}`);
