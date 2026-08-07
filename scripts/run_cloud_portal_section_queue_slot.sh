@@ -18,21 +18,17 @@ yield_to_business_recovery() {
   # Portal materialization is cache maintenance.  It must never take the host
   # lock immediately before a missing-store recovery or the two inventory
   # execution slots.  Existing cache remains available while this run defers.
+  if (( HOUR >= 8 )) && ! marker_ready morning-links-ready; then
+    echo "[portal-section-slot] defer reason=morning_links_not_ready hour=$HOUR minute=$MINUTE" >&2
+    exit 75
+  fi
   if (( MINUTE >= 13 && MINUTE <= 16 )); then
-    if (( HOUR == 11 || HOUR == 12 )) && ! marker_ready morning-links-ready; then
-      echo "[portal-section-slot] defer reason=morning_link_recovery_priority hour=$HOUR minute=$MINUTE" >&2
-      exit 75
-    fi
     if (( HOUR == 15 )) && ! marker_ready inventory-guard; then
       echo "[portal-section-slot] defer reason=inventory_guard_priority hour=$HOUR minute=$MINUTE" >&2
       exit 75
     fi
   fi
   if (( MINUTE >= 43 && MINUTE <= 46 )); then
-    if (( HOUR == 14 )) && ! marker_ready morning-links-ready; then
-      echo "[portal-section-slot] defer reason=morning_link_recovery_priority hour=$HOUR minute=$MINUTE" >&2
-      exit 75
-    fi
     if (( HOUR == 15 )) && ! marker_ready inventory-guard; then
       echo "[portal-section-slot] defer reason=inventory_guard_retry_priority hour=$HOUR minute=$MINUTE" >&2
       exit 75

@@ -82,7 +82,9 @@ for (const name of heavyUnits) {
   const content = unit(name);
   assert.match(content, /^Slice=shein-host-heavy-bi\.slice$/m, name);
   assert.match(content, /run_host_(?:heavy|browser_read)_job\.sh|run_cloud_(?:portal_section_queue|marketing_fallback|morning_link_recovery)_slot\.sh|run_cloud_inventory_guard_retry\.sh/, name);
-  assert.match(content, /^SuccessExitStatus=75$/m, name);
+  assert.match(content, name === 'shein-bi-cloud-morning-link-recovery.service'
+    ? /^SuccessExitStatus=75 124$/m
+    : /^SuccessExitStatus=75$/m, name);
 }
 
 const browserReadUnits = [
@@ -224,9 +226,11 @@ assert.match(portalQueueSlot, /DEADLINE_MINUTE=17/);
 assert.match(portalQueueSlot, /DEADLINE_MINUTE=27/);
 assert.match(portalQueueSlot, /DEADLINE_MINUTE=57/);
 assert.match(portalQueueSlot, /SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED=1/);
-assert.match(portalQueueSlot, /morning_link_recovery_priority/);
+assert.match(portalQueueSlot, /morning_links_not_ready/);
 assert.match(portalQueueSlot, /inventory_guard_priority/);
 assert.match(portalQueueSlot, /inventory_guard_retry_priority/);
+assert.match(unit('shein-bi-cloud-morning-link-recovery.service'), /^SuccessExitStatus=75 124$/m,
+  'a bounded recovery deadline is a resumable partial result, not a crashed service');
 assert.match(portalQueueWorker, /unscheduled_direct_entry/);
 assert.match(portalQueueWorker, /10#\$START_MINUTE >= 13/);
 assert.match(portalQueueWorker, /10#\$START_MINUTE >= 43/);
