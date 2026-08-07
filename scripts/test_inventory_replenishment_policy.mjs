@@ -140,6 +140,8 @@ const livePolicy = JSON.parse(fs.readFileSync(new URL('../config/inventory_reple
 const guardScript = fs.readFileSync(new URL('./cloud_daily_inventory_replenishment_guard.sh', import.meta.url), 'utf8');
 const guardService = fs.readFileSync(new URL('../infra/systemd/shein-bi-daily-inventory-replenishment-guard.service', import.meta.url), 'utf8');
 const guardTimer = fs.readFileSync(new URL('../infra/systemd/shein-bi-daily-inventory-replenishment-guard.timer', import.meta.url), 'utf8');
+const guardRetryScript = fs.readFileSync(new URL('./run_cloud_inventory_guard_retry.sh', import.meta.url), 'utf8');
+const guardRetryTimer = fs.readFileSync(new URL('../infra/systemd/shein-bi-daily-inventory-replenishment-guard-retry.timer', import.meta.url), 'utf8');
 const etSafetyGuard = fs.readFileSync(new URL('./cloud_et_low_inventory_guard.sh', import.meta.url), 'utf8');
 const etSafetyService = fs.readFileSync(new URL('../infra/systemd/shein-bi-et-low-inventory-guard.service', import.meta.url), 'utf8');
 const executorScript = fs.readFileSync(new URL('./inventory/execute_daily_inventory_replenishment_plan.mjs', import.meta.url), 'utf8');
@@ -166,6 +168,10 @@ assert.match(guardService, /^Environment=SHEIN_BI_INVENTORY_LINKS_MAX_AGE_SECOND
 assert.match(guardService, /--deadline-at 15:27/);
 assert.match(guardTimer, /^OnCalendar=\*-\*-\* 15:15:00$/m);
 assert.match(guardTimer, /^Persistent=false$/m);
+assert.match(guardRetryTimer, /^OnCalendar=\*-\*-\* 15:45:00$/m);
+assert.match(guardRetryTimer, /^Persistent=false$/m);
+assert.match(guardRetryScript, /--stage inventory-guard/);
+assert.match(guardRetryScript, /--deadline-at 15:57/);
 assert.match(guardScript, /--not-before "\$\{DATE\}T15:11:00\+08:00"/);
 assert.match(executorScript, /Always publish the complete terminal envelope\.\s*await writeResultFile\(results\);/);
 assert.match(executorScript, /requestWithRateLimitRetry\(client, '\/open-api\/stock\/change-inventory\/v2'/);

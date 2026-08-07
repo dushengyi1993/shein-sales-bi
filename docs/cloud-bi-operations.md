@@ -82,9 +82,10 @@
 | `shein-bi-cloud-et-forwarder.timer` | 北京时间 `01:12/04:12/07:20/10:20/13:20/17:20/20:20/23:20` | 按经营检查点抓取 ET 货代仓/出库单、入仓；同步刷新轻量 section，重 section 进入 host-locked 队列 |
 
 | `shein-bi-cloud-et-storage-fee.timer` | 北京时间 `14:20` | 只读同步 ET 仓储费最终账单与 SKU 明细，14:27 前完成利润 cache 与对账 |
-| `shein-bi-daily-inventory-replenishment-guard.timer` | 北京时间 `13:45` | 依赖晨间19店合并和13:12后库存 marker，生成当天计划并按常驻授权自动执行；14:17前释放，14:45 Codex任务只做事后审计 |
+| `shein-bi-daily-inventory-replenishment-guard.timer` | 北京时间 `15:15` | 依赖晨间19店合并和15:12后库存 marker，生成当天计划并按常驻授权自动执行；15:27前释放 |
+| `shein-bi-daily-inventory-replenishment-guard-retry.timer` | 北京时间 `15:45` | 仅在主执行没有完成 marker 时重试一次；成功日直接退出，不重复写；15:57前释放，16:20 Codex任务再做事后审计 |
 
-| 晨间三阶段 | `08:00 / 08:45 / 09:12` | 前12店 fetch-only；后7店并19店合并；最后运行 OpenAPI/成本/利润补充。每阶段用 marker 衔接，超时重跑只补当天尚未完成的店铺 |
+| 晨间链接与补充 | `08:00 / 08:45 / 10:15 / 12:15 / 14:45 / 09:12` | 前12店、后续店与19店合并；三个恢复点只补当天缺店，marker 已完成时不打开浏览器；补充域仍由09:12按依赖执行，缺marker只等待，不伪报失败 |
 
 | `shein-bi-cloud-session-manager.timer` | 北京时间 `00:45` | 云端登录态管家：顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，检查 profile 体积并写 session marker |
 
