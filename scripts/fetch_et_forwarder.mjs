@@ -589,16 +589,38 @@ export class EtHttpClient {
   }
 
   async fetchJson(url) {
-    const response = await this.request(url, {
-      headers: {'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json, text/javascript, */*; q=0.01'},
-    });
-    const text = await response.text();
-    let json = null;
-    try { json = JSON.parse(text); } catch {}
-    if (!response.ok || !json || /\/Login\//i.test(response.url)) {
-      throw new Error(`ET HTTP fetch failed status=${response.status} url=${url} head=${text.slice(0, 400)}`);
+    const maxAttempts = Math.max(1, Number(process.env.SHEIN_ET_HTTP_READ_ATTEMPTS || 3));
+    let lastError = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const response = await this.request(url, {
+          timeoutMs: Number(process.env.SHEIN_ET_HTTP_READ_TIMEOUT_MS || 75_000),
+          headers: {'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json, text/javascript, */*; q=0.01'},
+        });
+        const text = await response.text();
+        let json = null;
+        try { json = JSON.parse(text); } catch {}
+        if (!response.ok || !json || /\/Login\//i.test(response.url)) {
+          const error = new Error(`ET HTTP fetch failed status=${response.status} url=${url} head=${text.slice(0, 400)}`);
+          error.httpStatus = response.status;
+          throw error;
+        }
+        return json;
+      } catch (error) {
+        lastError = error;
+        const status = Number(error?.httpStatus || 0);
+        const retryable = error?.name === 'TimeoutError'
+          || /timeout|aborted|ECONNRESET|EPIPE|fetch failed/i.test(String(error?.message || error))
+          || status === 408
+          || status === 429
+          || status >= 500;
+        if (!retryable || attempt >= maxAttempts) throw error;
+        const delayMs = Math.min(4_000, 750 * attempt);
+        console.warn(`[et-http] read retry endpoint=${url} attempt=${attempt}/${maxAttempts} reason=${error?.name || 'error'} delayMs=${delayMs}`);
+        await sleep(delayMs);
+      }
     }
-    return json;
+    throw lastError || new Error(`ET HTTP fetch failed url=${url}`);
   }
 
   async postJson(url, bodyParams = {}) {

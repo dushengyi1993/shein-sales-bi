@@ -1,0 +1,11 @@
+[Unit]
+Description=Retry the daily inventory guard only when the 15:15 run did not complete
+
+[Timer]
+OnCalendar=*-*-* 15:45:00
+AccuracySec=5s
+Persistent=false
+Unit=shein-bi-daily-inventory-replenishment-guard-retry.service
+
+[Install]
+WantedBy=timers.target

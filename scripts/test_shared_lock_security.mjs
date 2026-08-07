@@ -61,10 +61,11 @@ for (const [relativePath, variables] of unitLocks) {
 for (const relativePath of [
   'infra/systemd/shein-bi-cloud-morning-chain.service',
   'infra/systemd/shein-bi-cloud-morning-link-chunk-2.service',
+  'infra/systemd/shein-bi-cloud-morning-link-recovery.service',
   'infra/systemd/shein-bi-cloud-morning-supplements.service',
 ]) {
   const source = read(relativePath);
-  assert.match(source, /run_host_(?:heavy|browser_read)_job\.sh/);
+  assert.match(source, /run_host_(?:heavy|browser_read)_job\.sh|run_cloud_morning_link_recovery_slot\.sh/);
   assert.match(source, /^Slice=shein-host-heavy-bi\.slice$/m);
   assert.doesNotMatch(source, /\/tmp\/[^\s]*\.lock/);
 }

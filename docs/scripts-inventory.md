@@ -629,7 +629,7 @@
 - `scripts/inventory/build_et_low_inventory_safety_plan.mjs` / `scripts/cloud_et_low_inventory_guard.sh`：每次 ET 正式同步成功后，从完整计划中只保留 `ET<=10` 且目标低于当前库存的动作，生成独立 64 位 hash，并在 `cloud_et_low_inventory_guard` 常驻授权上下文中只减不增、逐条回读。`ET=0` 清零；`ET=1-10` 执行全局曝光 Top5 配额和非 Top5 清零。当前库存低于配额时安全跳过，绝不由快速守卫补库存。仍需后续观察或只能安全跳过的货号保留为 `watching/pendingCanonical` 业务状态，不再把 systemd 服务误报为失败；只有真实行级 blocker、计划/执行器错误才失败。
 - `scripts/cloud_et_low_inventory_recheck.sh`：只在低 ET 观察状态为 active 时运行，额外抓取 `store_stock + box_stock` 两个 ET 库存端点并立即再次运行安全守卫；无观察货号时不启动浏览器。额外复查按小时补齐常规 ET 八次同步之间的空档。
 - `scripts/link_ops_maintenance_openapi_executor.mjs`：单条 `update_inventory` 同样先锁定唯一商家仓并把 `warehouseCode` 纳入 payload hash；回读固定使用官方 `skuCodeList + warehouseType=2 + invType=VI` 参数，并逐 SKU 校验可用库存精确命中目标。
-- `config/inventory_replenishment_policy.json` 当前 `execution.mode=automatic`。`shein-bi-daily-inventory-replenishment-guard.timer` 每天 `15:15` 等待晨间链路完成，并要求当天 `15:12` 后的19店库存 marker，再生成精确计划；先确保 `linksData` section 在30分钟内同步刷新，OpenAPI商品/库存快照过期或有失败分片时做一次19店只读刷新并重建计划。仅在当天来源新鲜、计划可执行、hash完整且systemd授权ID/上下文均匹配时自动执行。脚本用跨进程锁防并发，并识别同hash的完整结果防止重复执行；单条blocker作为可审计业务结果交给`15:45`报告，不伪装成成功。事后审计必须读取当天 service、plan、result 与完成 marker；尚未执行不得解释为0条或成功。
+- `config/inventory_replenishment_policy.json` 当前 `execution.mode=automatic`。`shein-bi-daily-inventory-replenishment-guard.timer` 每天 `15:15` 等待晨间链路完成，并要求当天 `15:12` 后的19店库存 marker，再生成精确计划；主执行未落定时 `15:45` 由 retry timer 幂等补跑，已有完成 marker 时不会重复执行。先确保 `linksData` section 在30分钟内同步刷新，OpenAPI商品/库存快照过期或有失败分片时做一次19店只读刷新并重建计划。仅在当天来源新鲜、计划可执行、hash完整且systemd授权ID/上下文均匹配时自动执行。脚本用跨进程锁防并发，并识别同hash的完整结果防止重复执行；单条blocker作为可审计业务结果交给`16:20`报告，不伪装成成功。事后审计必须读取当天 service、plan、result 与完成 marker；尚未执行不得解释为0条或成功。
 
 
 
