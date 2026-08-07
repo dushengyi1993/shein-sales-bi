@@ -351,16 +351,26 @@ else
   close_store_browsers
   if is_true "$PER_STORE_BROWSER_WRAPPER" && [[ "$BROWSER_CONCURRENCY" =~ ^[0-9]+$ ]] && (( BROWSER_CONCURRENCY > 1 )); then
     STATUS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/shein-link-business-status.XXXXXX")"
-    ACTIVE_WORKERS=0
+    WORKER_PIDS=()
     for STORE in $STORES; do
       run_store_worker "$STORE" "$STATUS_DIR" &
-      ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1))
-      if (( ACTIVE_WORKERS >= BROWSER_CONCURRENCY )); then
-        wait -n || true
-        ACTIVE_WORKERS=$((ACTIVE_WORKERS - 1))
+      WORKER_PIDS+=("$!")
+      if (( ${#WORKER_PIDS[@]} >= BROWSER_CONCURRENCY )); then
+        FINISHED_PID=""
+        wait -n -p FINISHED_PID "${WORKER_PIDS[@]}" || true
+        REMAINING_PIDS=()
+        for WORKER_PID in "${WORKER_PIDS[@]}"; do
+          [[ "$WORKER_PID" == "$FINISHED_PID" ]] || REMAINING_PIDS+=("$WORKER_PID")
+        done
+        WORKER_PIDS=("${REMAINING_PIDS[@]}")
       fi
     done
-    wait || true
+    # Do not use bare `wait` here. This script logs through a process-substitution
+    # `tee`, which is also a shell child and only exits after this script closes
+    # stdout. Waiting for every child would deadlock the coordinator and tee.
+    for WORKER_PID in "${WORKER_PIDS[@]}"; do
+      wait "$WORKER_PID" || true
+    done
     for STORE in $STORES; do
       if [[ "$(cat "$STATUS_DIR/$STORE" 2>/dev/null || true)" == "success" ]]; then
         SUCCESS_STORES+=("$STORE")

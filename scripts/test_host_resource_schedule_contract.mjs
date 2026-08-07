@@ -171,16 +171,21 @@ assert.match(morning, /while \[\[ -n "\$MISSING_STORES" \]\]/,
 assert.match(morning, /waiting platform readiness retryRound=/,
   'platform readiness must resume in the same run instead of creating another timer');
 assert.match(morning, /run_inventory_stage/);
-assert.match(read('scripts/cloud_link_business_sync.sh'), /SHEIN_LINK_BUSINESS_RESUME_COMPLETED/,
+const linkBusinessSync = read('scripts/cloud_link_business_sync.sh');
+assert.match(linkBusinessSync, /SHEIN_LINK_BUSINESS_RESUME_COMPLETED/,
   'an internal retry must reuse exact-date completed store evidence instead of starting all stores over');
-assert.match(read('scripts/cloud_link_business_sync.sh'), /SHEIN_LINK_BUSINESS_BROWSER_CONCURRENCY:-2/,
+assert.match(linkBusinessSync, /SHEIN_LINK_BUSINESS_BROWSER_CONCURRENCY:-2/,
   'the one coordinator may use two bounded browser workers without becoming two business runs');
-assert.match(read('scripts/cloud_link_business_sync.sh'), /NODE\n}\n\nrun_store_worker\(\)/,
+assert.match(linkBusinessSync, /NODE\n}\n\nrun_store_worker\(\)/,
   'the store worker must be executable shell code, not accidental content inside the evidence-check heredoc');
+assert.match(linkBusinessSync, /wait -n -p FINISHED_PID "\$\{WORKER_PIDS\[@\]\}"/,
+  'parallel store workers must be reaped by pid without waiting for unrelated logger children');
+assert.doesNotMatch(linkBusinessSync, /^\s*wait\s*(?:\|\|\s*true)?\s*$/m,
+  'a bare wait deadlocks against the process-substitution tee that waits for coordinator stdout to close');
 const dailyRefresh = read('scripts/cloud_daily_refresh.sh');
 assert.match(dailyRefresh, /SHEIN_BI_DAILY_REQUIRE_COMPLETE_LINK_BUSINESS/);
 assert.match(dailyRefresh, /prior complete Portal snapshot retained/);
-assert.match(read('scripts/cloud_link_business_sync.sh'), /write_chunk_result "warning"/,
+assert.match(linkBusinessSync, /write_chunk_result "warning"/,
   'fetch-only chunks must preserve partial progress as warning evidence instead of aborting at the first store');
 assert.match(read('scripts/cloud_link_business_store_fetch.sh'), /--fast-start/);
 assert.match(read('scripts/cloud_link_business_store_fetch.sh'), /--page-size "\$\{SHEIN_LINK_PAGE_SIZE:-100\}"/);
