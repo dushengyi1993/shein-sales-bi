@@ -152,7 +152,7 @@ assert.equal(property(dataDiskGuard, 'After'), 'local-fs.target');
 
 const marketingGuardTimer = readUnit('shein-bi-cloud-marketing-live-guard.timer');
 const marketingWindows = [...marketingGuardTimer.matchAll(/^OnCalendar=(.*)$/gm)].map(match => match[1].trim());
-assert.deepEqual(marketingWindows, ['*-*-* 11:00:00', '*-*-* 13:00:00', '*-*-* 16:00:00']);
+assert.deepEqual(marketingWindows, ['*-*-* 11:00:00']);
 assert.equal(property(marketingGuardTimer, 'Persistent'), 'false');
 
 const marketingGuard = readUnit('shein-bi-cloud-marketing-live-guard.service');
@@ -164,10 +164,14 @@ assert.match(marketingGuard, /SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY=\/srv\/s
 assert.doesNotMatch(marketingGuard, /SHEIN_BI_MARKETING_AUTOMATION_AUTHORIZATION=/, 'read-only inspection service must not receive write authorization');
 assert.match(marketingGuard, /SHEIN_BI_MARKETING_LIVE_SCAN_TIMEOUT_SEC=900/);
 assert.match(marketingGuard, /SHEIN_BI_MARKETING_PRICE_SESSION_CONCURRENCY=3/);
+assert.match(marketingGuard, /SHEIN_BI_MARKETING_STAGE_ATTEMPTS=3/);
+assert.match(marketingGuard, /SHEIN_BI_MARKETING_STAGE_RETRY_DELAY_SEC=30/);
 assert.doesNotMatch(marketingGuard, /SHEIN_BI_MARKETING_LIVE_LEASE_TTL_SEC=/);
 assert.doesNotMatch(marketingGuardScript, /manage_browser_task_leases\.mjs|cleanup_shein_store_browsers/);
 assert.doesNotMatch(marketingGuardScript, /batch_(?:fix_limited_discount_drift|apply_new_listing_limited_discount)\.mjs[^\n]*--execute/);
 assert.doesNotMatch(marketingGuardScript, /batch_restore_manual_limited_discounts\.mjs[^\n]*--execute/);
+assert.match(marketingGuardScript, /run_stage_with_retry/);
+assert.match(marketingGuardScript, /final group report waits for the same-day repair queue terminal state/);
 assert.equal(property(marketingGuard, 'TimeoutStartSec'), '1800');
 
 const marketingRepairTimer = readUnit('shein-bi-cloud-marketing-repair.timer');
@@ -194,6 +198,7 @@ assert.match(marketingRepairScript, /EXECUTION_LOCATION.*== "local".*ROOT.*!= "\
 assert.doesNotMatch(marketingRepairScript, /AUTOMATION_CONTEXT.*== "cloud_timer"/);
 assert.match(marketingRepairScript, /SHEIN_BI_MARKETING_CLOUD_WRITE_GATE=bounded-repair-v1/);
 assert.match(marketingRepairScript, /local execution already covered all authorized repairs/);
+assert.match(marketingRepairScript, /the final report waits for local execution and terminal readback/);
 assert.equal(property(marketingRepair, 'TimeoutStartSec'), '2400');
 
 const storageFeeTimer = readUnit('shein-bi-cloud-et-storage-fee.timer');
@@ -227,8 +232,16 @@ assert.doesNotMatch(storageFeeSync, /^NoNewPrivileges=true$/m,
 assert.doesNotMatch(storageFeeSync, /^RestrictSUIDSGID=true$/m,
   'storage-fee sync must not block its audited sudo elevation');
 
+const morningTimer = readUnit('shein-bi-cloud-morning-chain.timer');
+const morningService = readUnit('shein-bi-cloud-morning-chain.service');
+const morningScript = fs.readFileSync(new URL('./cloud_morning_chain.sh', import.meta.url), 'utf8');
+assert.equal(property(morningTimer, 'Persistent'), 'true');
+assert.match(morningService, /SHEIN_BI_MORNING_CATCHUP_MIN_UPTIME_SEC=600/);
+assert.match(morningScript, /pipeline_marker_done "daily-operating-refresh"/);
+assert.match(morningScript, /wait_for_catchup_startup_window/);
+assert.match(morningScript, /catch-up is yielding to the full-managed priority run/);
+
 for (const timerName of [
-  'shein-bi-cloud-morning-chain.timer',
   'shein-bi-cloud-order-closure.timer',
   'shein-bi-cloud-session-manager.timer',
   'shein-bi-cloud-yesterday.timer',
@@ -246,7 +259,7 @@ console.log(JSON.stringify({
     'shein-bi-webhook.service',
     'shein-bi-lark-sales-qa.service',
     'three off-window lease-aware browser cleanup windows',
-    'three retry-capable marketing guard windows',
+    'one retry-capable daily marketing guard coordinator',
     'bounded resumable marketing repair worker',
     'automation result delivery follows the existing Codex schedules',
     'daily canonical ET storage-fee sync',

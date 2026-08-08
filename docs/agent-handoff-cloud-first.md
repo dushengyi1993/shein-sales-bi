@@ -35,7 +35,7 @@
 - `shein-warehouse-db` / `shein-metabase` / `shein-metabase-db`：Docker 数据与分析层。
 - `shein-bi-cloud-yesterday.timer`：`03:00` 最终日核对与 OpenAPI 晋升门禁。
 - `shein-bi-cloud-morning-chain.timer`：`07:10` 单 run 完成前一完整日19店慢变补采、补充域、一次发布和库存维护。
-- `shein-bi-cloud-marketing-live-guard.timer`：`10:30/13:30/16:30` 只读巡检/重试。
+- `shein-bi-cloud-marketing-live-guard.timer`：每天 `11:00` 单次只读巡检；失败阶段在同一个 coordinator 内有界重试。
 - `shein-bi-cloud-marketing-repair.timer`：有界营销修复与最终回读。
 - `shein-bi-cloud-watchdog.timer`：每小时 `:50` 只读体检与异常提醒。
 - `shein-bi-cloud-browser-cleanup.timer`：`03:45/09:50/21:00` 租约感知的孤儿浏览器清理。

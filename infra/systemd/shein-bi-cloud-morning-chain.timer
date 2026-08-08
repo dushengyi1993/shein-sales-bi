@@ -4,7 +4,10 @@ Description=Run the single complete SHEIN BI daily operating refresh before work
 [Timer]
 OnCalendar=*-*-* 07:10:00
 AccuracySec=5s
-Persistent=false
+# This is the only daily business timer allowed to catch up after a same-day
+# reboot. The coordinator is date-idempotent and waits for boot/resource
+# stability before entering any heavy stage.
+Persistent=true
 Unit=shein-bi-cloud-morning-chain.service
 
 [Install]

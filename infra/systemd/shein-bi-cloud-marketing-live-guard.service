@@ -19,6 +19,8 @@ Environment=SHEIN_BI_MARKETING_LIVE_SCAN_TIMEOUT_SEC=900
 Environment=SHEIN_BI_MARKETING_LIVE_SCAN_KILL_AFTER_SEC=60
 Environment=SHEIN_BI_MARKETING_PRICE_STORE_ATTEMPTS=3
 Environment=SHEIN_BI_MARKETING_PRICE_SESSION_CONCURRENCY=3
+Environment=SHEIN_BI_MARKETING_STAGE_ATTEMPTS=3
+Environment=SHEIN_BI_MARKETING_STAGE_RETRY_DELAY_SEC=30
 # This service is inspection/queue-build only. Owner-authorized writes are
 # isolated in the bounded repair worker and never extend the scan critical path.
 Environment=SHEIN_BI_MARKETING_LIVE_BUILD_REPAIR_QUEUE=1
