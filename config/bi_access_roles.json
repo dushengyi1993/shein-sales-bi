@@ -74,6 +74,13 @@
       "ownerKey": "TIANHAO",
       "readStores": ["*"],
       "writeStores": ["HL", "TZ", "TS"]
+    },
+    "郑裔航": {
+      "displayName": "郑裔航",
+      "role": "operator",
+      "ownerKey": "ZHENGYIHANG",
+      "readStores": ["*"],
+      "writeStores": ["JSH"]
     }
   }
 }
