@@ -240,6 +240,10 @@ assert.match(morningService, /SHEIN_BI_MORNING_CATCHUP_MIN_UPTIME_SEC=600/);
 assert.match(morningScript, /pipeline_marker_done "daily-operating-refresh"/);
 assert.match(morningScript, /wait_for_catchup_startup_window/);
 assert.match(morningScript, /catch-up is yielding to the full-managed priority run/);
+assert.ok(
+  morningScript.indexOf("NODE\n}\n\nactive_full_managed_priority_services()") >= 0,
+  'catch-up shell functions must be declared after the pipeline-marker Node heredoc closes',
+);
 
 for (const timerName of [
   'shein-bi-cloud-order-closure.timer',
