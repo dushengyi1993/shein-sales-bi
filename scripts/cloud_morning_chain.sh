@@ -109,6 +109,8 @@ try {
 } catch {
   process.exit(1);
 }
+NODE
+}
 
 active_full_managed_priority_services() {
   local service active=()
@@ -145,8 +147,6 @@ wait_for_catchup_startup_window() {
     echo "[cloud_morning_chain] catch-up waits for priority services: $active"
     sleep "$CATCHUP_RETRY_DELAY_SEC"
   done
-}
-NODE
 }
 
 on_error() {
