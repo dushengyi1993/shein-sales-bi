@@ -8,7 +8,7 @@
 
 **条件启用**：`shein-bi-cloud-et-forwarder.timer`、`shein-bi-cloud-et-storage-fee.timer`、`shein-bi-cloud-session-manager.timer` 只有在服务器本地 ET/店铺授权和对应 profile 已验收时才启用；当前生产已验收时属于上面的启用集。`shein-bi-cloud-today.service` 只作人工灾备，不安装 timer。`shein-bi-lark-sales-qa.service` 和自动飞书日报保持 `disabled + inactive`。
 
-凌晨 `00:45` 登录态管家、`01:45` 数据库备份、`02:45` 昨日最终核对共享 `/opt/shein-bi/app/state/locks/shein-bi-nightly-maintenance.lock`，并通过带日期 marker 保证 `session-manager → db-backup → yesterday`。所有 timer 使用 `Persistent=false`，不能在宕机恢复后任意补跑。半托重任务还必须按 `host → project → domain → pressure → command` 取得 `/run/lock/shein-host-heavy.lock`；半托只维护 `shein-host-heavy-bi.slice`，不得覆盖全托维护的主机 slice/tmpfiles。完整联合排班见 [../../docs/shared-host-resource-schedule.md](../../docs/shared-host-resource-schedule.md)。
+凌晨 `00:45` 登录态管家、`01:45` 数据库备份、`02:45` 昨日最终核对共享 `/opt/shein-bi/app/state/locks/shein-bi-nightly-maintenance.lock`，并通过带日期 marker 保证 `session-manager → db-backup → yesterday`。除 `shein-bi-cloud-morning-chain.timer` 外，所有 timer 使用 `Persistent=false`，不能在宕机恢复后任意补跑。晨间 timer 是唯一开机补跑例外：先按业务日期 marker 幂等退出，开机不足 10 分钟时在同一 run 内等待，且让路全托优先服务后才进入分阶段执行。半托重任务还必须按 `host → project → domain → pressure → command` 取得 `/run/lock/shein-host-heavy.lock`；半托只维护 `shein-host-heavy-bi.slice`，不得覆盖全托维护的主机 slice/tmpfiles。完整联合排班见 [../../docs/shared-host-resource-schedule.md](../../docs/shared-host-resource-schedule.md)。
 
 Linux 生产健康只以 systemd、watchdog、Portal health 和云端数据审计为准；旧 Windows 计划任务只是历史回滚参考，不能再用作 Linux 页面或告警的健康依据。
 
@@ -32,8 +32,8 @@ Linux 生产健康只以 systemd、watchdog、Portal health 和云端数据审�
 - `shein-bi-lark-sales-qa.service`：飞书只读问数机器人代码和 unit 保留，但 2026-07-11 起生产主动暂停，必须保持 `disabled + inactive`，部署时不得 `enable`、`start` 或 `enable --now`。若未来经明确授权恢复，仍必须以 `sheinops` 运行，保留 `HOME=/home/sheinops`、`NoNewPrivileges`、`PrivateTmp` 和内存护栏；Lark keychain 不得进入仓库/日志。
 - `shein-bi-cloud-browser-cleanup.timer`：每天仅在 `03:20/09:25/21:20` 三个非核心窗口回收过期或死亡 owner 租约，再清理无有效任务租约保护的 headless Chrome 和临时目录。它不强杀可见人工登录窗口，也不打断仍持有有效租约的抓取/营销任务。
 - `shein-bi-cloud-disk-maintenance.timer`：每天 `00:10` 执行低优先级磁盘维护，并必须在 `00:27` 前释放主机重任务锁。抓数原始产物本地保留 30 天，旧文件只有在 COS 归档、成员清单和 SHA256 校验完成后才删除；临时文件保留 7 天。由于 ET 与抓数产物存在经过审计的 root/sheinops 混合属主，该 service 以 root 读取和删除明确白名单路径，但不启动浏览器、不加载登录页，也不写业务数据。浏览器 profile 只有根盘达到 75% 且没有有效浏览器租约或 Chrome 进程时才清可再生缓存，永不删除 Cookie、Local Storage、IndexedDB 等登录/持久状态。journald 由 `90-shein-bi-journald-disk-cap.conf` 限制为最多 1GB，并至少给根盘保留 5GB。
-- `shein-bi-cloud-marketing-live-guard.service`：`11:00/13:00/16:00` 提供每日巡检及失败重试窗口；当天首次成功后后续窗口退出。该服务以 session HTTP 一次读取 19 店普通活动、15% 券 active 集合与当前/未来活动价，生成精确 manifest/hash 与 repair queue；共享锁忙时延期，不占用全托核心首页车道。
-- `shein-bi-cloud-marketing-repair.timer`：仅作本机离线后的晚间应急兜底，`20:45/21:15` 各启动一次。每次先用 19 店 browserless live readback 重建精确剩余队列，再最多执行 1 店/1组；分别在 `20:57/21:27` 前硬收口并释放共享浏览器车道。日常写入由本机 `11:10/13:10/16:10` headless 任务按 3–4 个独立 Profile 一批完成；这个本机并发规则不扩大云端 fallback 的单组上限。
+- `shein-bi-cloud-marketing-live-guard.service`：每天 `11:00` 只启动一个巡检 coordinator；普通活动、价格栈和 guard 报告的瞬时失败在同一 run 内仅重试失败阶段，不再依赖 13:00/16:00 重跑整套巡检。该服务以 session HTTP 一次读取 19 店普通活动、15% 券 active 集合与当前/未来活动价，生成精确 manifest/hash 与 repair queue；有待修复项时不提前发中间群报，必须等本地 repair/write 与最终回读终态后只发一次最终报告。
+- `shein-bi-cloud-marketing-repair.timer`：仅作本机离线后的晚间应急兜底，`20:45/21:15` 各启动一次。每次先用 19 店 browserless live readback 重建精确剩余队列，再最多执行 1 店/1组；分别在 `20:57/21:27` 前硬收口并释放共享浏览器车道。日常写入由本机每天 `11:10` 启动的单一 headless 任务持续完成，按 3–4 个独立 Profile 一批推进到终态；这个本机并发规则不扩大云端 fallback 的单组上限。
 - Codex 自动巡检不另设固定晚间汇总。每日待议价、营销、淘汰链接巡检分别按现有 Codex 自动任务的实际时间执行，并在各自任务完成后把同一份人话结论和产出文件发到团队运营群，避免重复消息或提前汇总未完成结果。
 - guard 与 repair 都通过 `SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY=/srv/shein-bi/runtime/marketing_manual_limited_discount_overrides.json` 读取生产可变登记；不得再让 timer 改写仓库 `config/` 下的种子文件。
 - `shein-bi-cloud-watchdog.timer`：每小时只读巡检。它可以用后续完整 19 店扫描证据收口孤立的历史扫描 warning，但必须保留原日更状态并在报告写出 recovery；其它 warning 或不完整证据仍告警。
@@ -57,7 +57,7 @@ systemctl show shein-bi-portal.service -p RequiresMountsFor
 
 全托目录不属于这组 bind mount，不得混入半托数据盘迁移脚本或 drop-in。
 
-注意：`shein-bi-cloud-daily-refresh.service` 和它内部调用的 `cloud_link_business_sync.sh` 必须以 `sheinops` 运行，不能用 root 跑 SHEIN Chrome profile；否则会留下 root-owned profile 文件，导致登录态管家读 profile 报 `EACCES`。统一日更只收口前一完整日的慢变/补采，不重复承担当天销售；当天销售由半托 Webhook + OpenAPI 按单更新。迁移时停用并删除旧 `today` timer，mask 旧 `link-business/openapi-hl` 分散 timer；`rtv-verify` 已恢复为受共享锁保护的独立每日任务，不得 mask。所有 timer 使用 `Persistent=false`，事实以各 `.timer` 为准。ET forwarder 保持 root 执行，因为入仓依赖 Docker/root 环境，且 ET 使用独立 profile。
+注意：`shein-bi-cloud-daily-refresh.service` 和它内部调用的 `cloud_link_business_sync.sh` 必须以 `sheinops` 运行，不能用 root 跑 SHEIN Chrome profile；否则会留下 root-owned profile 文件，导致登录态管家读 profile 报 `EACCES`。统一日更只收口前一完整日的慢变/补采，不重复承担当天销售；当天销售由半托 Webhook + OpenAPI 按单更新。迁移时停用并删除旧 `today` timer，mask 旧 `link-business/openapi-hl` 分散 timer；`rtv-verify` 已恢复为受共享锁保护的独立每日任务，不得 mask。除带同日幂等、开机稳定期和优先任务让路门禁的 `shein-bi-cloud-morning-chain.timer` 外，其余 timer 使用 `Persistent=false`；事实以各 `.timer` 为准。ET forwarder 保持 root 执行，因为入仓依赖 Docker/root 环境，且 ET 使用独立 profile。
 
 资源护栏：高频销售和 ET 是轻量高优先任务；`daily-refresh` 是低优先慢任务，由晨间链路在销售刷新完成后启动。生产 oneshot 任务必须保留 `MemoryHigh` / `MemoryMax` / `OOMPolicy=stop`，常驻服务必须保留自己的 `MemoryHigh` / `MemoryMax` / `OOMPolicy=stop` / `Restart=always`；`daily-refresh` 必须保留启动前的忙碌写入任务等待和可用内存检查。宁可让慢变补采晚一次，也不要为了补齐链接/营销/RTV 数据把 BI Portal、Metabase 或销售刷新拖死。
 

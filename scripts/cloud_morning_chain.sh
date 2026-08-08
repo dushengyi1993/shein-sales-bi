@@ -14,6 +14,9 @@ DRY_RUN="${SHEIN_BI_MORNING_CHAIN_DRY_RUN:-0}"
 RUN_STARTED_EPOCH="$(date +%s)"
 RUN_BUDGET_SEC="${SHEIN_BI_MORNING_RUN_BUDGET_SEC:-10200}"
 RUN_DEADLINE_EPOCH=$((RUN_STARTED_EPOCH + RUN_BUDGET_SEC))
+CATCHUP_MIN_UPTIME_SEC="${SHEIN_BI_MORNING_CATCHUP_MIN_UPTIME_SEC:-600}"
+CATCHUP_RETRY_DELAY_SEC="${SHEIN_BI_MORNING_CATCHUP_RETRY_DELAY_SEC:-30}"
+FULL_MANAGED_PRIORITY_SERVICES="${SHEIN_BI_MORNING_FULL_MANAGED_PRIORITY_SERVICES:-shein-fm-home-realtime.service shein-fm-home-daily.service shein-fm-session-renewal.service shein-fm-supply-sync.service shein-fm-home-finance-daily.service}"
 
 now_iso() {
   TZ="$TZ_NAME" date --iso-8601=seconds
@@ -105,6 +108,43 @@ try {
     && payload?.businessDate === process.env.DATA_DATE ? 0 : 1);
 } catch {
   process.exit(1);
+}
+
+active_full_managed_priority_services() {
+  local service active=()
+  command -v systemctl >/dev/null 2>&1 || return 0
+  for service in $FULL_MANAGED_PRIORITY_SERVICES; do
+    if systemctl is-active --quiet "$service"; then
+      active+=("$service")
+    fi
+  done
+  printf '%s' "${active[*]:-}"
+}
+
+wait_for_catchup_startup_window() {
+  local now_seconds scheduled_seconds uptime_seconds wait_seconds active
+  now_seconds=$((10#$(TZ="$TZ_NAME" date +%H) * 3600 + 10#$(TZ="$TZ_NAME" date +%M) * 60 + 10#$(TZ="$TZ_NAME" date +%S)))
+  scheduled_seconds=$((7 * 3600 + 10 * 60))
+  if (( now_seconds <= scheduled_seconds + 60 )); then
+    return 0
+  fi
+
+  uptime_seconds="$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 0)"
+  if (( uptime_seconds < CATCHUP_MIN_UPTIME_SEC )); then
+    wait_seconds=$((CATCHUP_MIN_UPTIME_SEC - uptime_seconds))
+    write_state "waiting_resource" "same-day boot catch-up is waiting ${wait_seconds}s for the host to become stable; no heavy resource is held"
+    echo "[cloud_morning_chain] catch-up startup stability wait=${wait_seconds}s uptime=${uptime_seconds}s"
+    sleep "$wait_seconds"
+  fi
+
+  while true; do
+    require_run_budget "catch-up-priority-window"
+    active="$(active_full_managed_priority_services)"
+    [[ -z "$active" ]] && break
+    write_state "waiting_resource" "same-day boot catch-up is yielding to the full-managed priority run: $active"
+    echo "[cloud_morning_chain] catch-up waits for priority services: $active"
+    sleep "$CATCHUP_RETRY_DELAY_SEC"
+  done
 }
 NODE
 }
@@ -262,6 +302,7 @@ case "$STAGE" in
       echo "[cloud_morning_chain] resume-skip complete daily-operating-refresh marker"
       exit 0
     fi
+    wait_for_catchup_startup_window
     write_state "running" "one daily coordinator is refreshing all 19 stores; the previous complete BI snapshot stays visible until the run is complete"
     RESULT_FILE="$STATE_DIR/${RUN_DATE}-all.json"
     run_all_store_fetch "$RESULT_FILE"

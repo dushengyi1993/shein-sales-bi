@@ -69,7 +69,7 @@
 
 - 名称：`SHEIN 每日营销巡检`
 - 计划：Codex heartbeat 在本会话继续报告；完整巡检保持独立分钟级运行。大批修复改由队列 worker 在北京时间 `10:50/12:50/14:50/16:50/18:50/19:30` 取任务，单轮最多 `8` 个活动组、最长 `40` 分钟，不再由巡检同步等待。
-- 防撞车：全量 live scan 不是“看到空闲就硬跑”。开跑前必须检查核心服务 active；同时避开 ET forwarder 的固定 `:20` 窗口、晨间链路/日更、登录态管家、备份、订单闭环和 watchdog。当天销售已由 Webhook 实时触发，不再假设存在整点销售 timer。browser cleanup 只在 `03:45/09:50/21:00` 运行且租约感知，只回收孤儿，不再作为迫使有效任务中断的资源窗口。当天第一次完整巡检成功后，后续 guard timer 只作失败重试，不能因 repair queue 尚未完成就重新全扫并重建工作 hash。
+- 防撞车：全量 live scan 不是“看到空闲就硬跑”。每天 `11:00` 只启动一个云端只读 coordinator；普通活动、价格栈或 guard 报告失败时只在同一 run 内重试失败阶段，不再创建 13:00/16:00 的整套重跑。开跑前仍检查核心服务 active，并避开 ET、晨间日更、登录态维护、备份、订单闭环和 watchdog。当天销售由 Webhook 实时触发；浏览器清理只回收孤儿，不得中断有效任务。
 - 边界：先检查云端核心任务是否正在运行，再运行 `build_marketing_daily_guard_report.mjs` 和后台 live scan/readback；生成风险报告、精确 manifest/hash 和候选活动组并入队。巡检最长 `30` 分钟，不能等待无边界写入。未批准的新普通活动、优惠券、补预算仍不得自动真实提交/取消；已批准普通活动截止前新增可报差额、限时折扣价格漂移、新链接/新上架 7 天/重新上架及在售老链接兜底、高点击低转化专属折扣是已授权自动写入例外，worker 必须通过批准锁、身份校验、价格栈校验、dry-run 和执行后 live readback；继续禁止 `30%/50%` 券真实上线。
 - 限时折扣漂移自动修复：guard 报告中 `limitedDiscountTargetPriceDrift.belowRows` 非空时，生成精确 manifest/hash 后入队；worker 同店复用浏览器并按活动组 resume。价格漂移与兜底计划在 `storeKey + SKC` 上必须互斥。替换统一走“旧保护快照 → 删除 → 目标创建/readback → 失败自动补偿恢复”，平台阻断仍保留为待处理，不能把“旧保护已恢复”冒充修复成功。
 - 批次部分成功也属于可恢复状态：执行结果已有 `createdActivityId` 和 `desiredCoveredSkcs` 时，resume 只跳过这些精确成功键，不得因为组级 `ok=false` 重放整个活动组。延后组优先返回“仍有工作”状态；只有阻断项且本批已消费完成时允许进入最终 live readback，由最新差集重建更小的 blocker 队列。
@@ -78,7 +78,7 @@
 
 自动任务模式的硬边界：
 
-- 云端 guard timer 负责完整 live scan、精确计划和建队列，不持有写授权。本地 Codex heartbeat 在 `11:10/13:10/16:10` 读取当天精确事实，以不弹前端的 headless Chrome 按 3–4 店一批执行负责人长期授权内的限时折扣动作并完成受影响店回读；默认 4 店，资源不足降为 3 店，批内跨店并行但同店写链路严格串行，整批终态后关闭全部 Profile 再开下一批。首轮主执行，后两轮只续跑。云端 repair 仅在 `20:45/21:15` 做本机未闭环的应急兜底，每段最多 1 店/1组。
+- 云端 guard timer 负责完整 live scan、精确计划和建队列，不持有写授权。本地 Codex heartbeat 每天 `11:10` 只启动一次，读取当天精确事实后持续处理同一队列直至终态：不弹前端的 headless Chrome 按 3–4 店一批执行负责人长期授权内的限时折扣动作并完成受影响店回读；默认 4 店，资源不足降为 3 店，批内跨店并行但同店写链路严格串行，整批终态后关闭全部 Profile 再开下一批。最后只做一次19店全量回读和一次群报。云端 repair 仅在 `20:45/21:15` 做本机未闭环的应急兜底，每段最多 1 店/1组。
 - 复核频率按风险分层。云端 timer 每日做一次 19 店完整基线；动作后只复扫受影响店并与成功基线合并，最终由云端 browserless 全店复核。普通活动/价格栈浏览器补扫按候选店铺最小集合串行执行，跑完关闭；不得恢复无差别19店前端扫描。
 - repair worker 的最终闭环必须按固定顺序执行：19 店普通活动/优惠券 session HTTP stack review 刷新 → 19 店价格栈 final scan → guard 重建。价格栈放在最后，避免待生效活动在 stack review 期间跨过开始时间，又被旧价格快照重新判为缺口。大批修复可能超过 `30` 分钟的同轮证据时差；如果不刷新 stack review，guard 会把已被当日 live 证据取代的历史 coupon/overlap 中间文件重新判成 stale blocker。最终 stack review 是 browserless session HTTP 刷新，不得回退为逐店前端扫描。
 - 飞书交付是最终闭环产物，不是 worker 进度通知。发送器要求队列已终态，且最终 guard 时间不早于队列终态和执行结果；blocked 队列还必须在最终扫描后重建当前 repair plans，并由 `check_marketing_terminal_report_readiness.mjs` 证明每个计划键已执行或已取得本轮安全阻断证据。发现未处理键时重建队列并延后发送，不得把第一次 blocked 当成日报终点。每日只交付一段简短最终结论和一个合并后的 `marketing-daily-final-YYYY-MM-DD.md`，guard 与 execution 文件仅作为生成素材保留在云端。

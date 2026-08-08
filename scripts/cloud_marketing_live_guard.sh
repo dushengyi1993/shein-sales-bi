@@ -15,6 +15,8 @@ SCAN_TIMEOUT_SEC="${SHEIN_BI_MARKETING_LIVE_SCAN_TIMEOUT_SEC:-2400}"
 SCAN_KILL_AFTER_SEC="${SHEIN_BI_MARKETING_LIVE_SCAN_KILL_AFTER_SEC:-60}"
 STACK_REVIEW_TIMEOUT_SEC="${SHEIN_BI_MARKETING_STACK_REVIEW_TIMEOUT_SEC:-600}"
 STACK_REVIEW_KILL_AFTER_SEC="${SHEIN_BI_MARKETING_STACK_REVIEW_KILL_AFTER_SEC:-30}"
+STAGE_ATTEMPTS="${SHEIN_BI_MARKETING_STAGE_ATTEMPTS:-3}"
+STAGE_RETRY_DELAY_SEC="${SHEIN_BI_MARKETING_STAGE_RETRY_DELAY_SEC:-30}"
 GUARD_MAX_AGE_HOURS="${SHEIN_BI_MARKETING_LIVE_GUARD_MAX_AGE_HOURS:-96}"
 GUARD_CLOUD_BI_SSH="${SHEIN_BI_MARKETING_LIVE_CLOUD_BI_SSH:-local}"
 GUARD_CLOUD_BI_ROOT="${SHEIN_BI_MARKETING_LIVE_CLOUD_BI_ROOT:-$ROOT}"
@@ -83,6 +85,27 @@ run_marketing_stack_review() {
       --session-http \
       --cloud-bi-ssh "$GUARD_CLOUD_BI_SSH" \
       --cloud-bi-root "$GUARD_CLOUD_BI_ROOT"
+}
+
+run_stage_with_retry() {
+  local label="$1"
+  shift
+  local attempt=1
+  local status=1
+  while (( attempt <= STAGE_ATTEMPTS )); do
+    echo "[cloud_marketing_live_guard] stage=$label attempt=$attempt/$STAGE_ATTEMPTS"
+    if "$@"; then
+      return 0
+    else
+      status=$?
+    fi
+    if (( attempt < STAGE_ATTEMPTS )); then
+      echo "[cloud_marketing_live_guard] WARN stage=$label attempt=$attempt status=$status; retrying the failed stage inside the same daily run in ${STAGE_RETRY_DELAY_SEC}s" >&2
+      sleep "$STAGE_RETRY_DELAY_SEC"
+    fi
+    attempt=$((attempt + 1))
+  done
+  return "$status"
 }
 
 run_guard_report() {
@@ -413,8 +436,8 @@ fi
 # Session HTTP reuses the session-manager evidence and does not open browsers;
 # the guard report below verifies 19/19 explicit store coverage and freshness.
 STACK_REVIEW_STATUS=0
-  echo "[cloud_marketing_live_guard] refresh ordinary marketing stack review via session HTTP"
-if run_marketing_stack_review; then
+echo "[cloud_marketing_live_guard] refresh ordinary marketing stack review via session HTTP"
+if run_stage_with_retry "ordinary-stack-review" run_marketing_stack_review; then
   echo "[cloud_marketing_live_guard] ordinary marketing stack review refreshed"
 else
   STACK_REVIEW_STATUS=$?
@@ -422,7 +445,7 @@ else
 fi
 
 SCAN_STATUS=0
-if run_live_scan "$SCAN_OUT"; then
+if run_stage_with_retry "limited-discount-live-scan" run_live_scan "$SCAN_OUT"; then
   echo "[cloud_marketing_live_guard] live scan done scan=$SCAN_OUT"
 else
   SCAN_STATUS=$?
@@ -430,7 +453,7 @@ else
 fi
 
 GUARD_STATUS=0
-if run_guard_report; then
+if run_stage_with_retry "guard-report" run_guard_report; then
   echo "[cloud_marketing_live_guard] guard report done guard=$GUARD_OUT"
 else
   GUARD_STATUS=$?
@@ -443,6 +466,8 @@ MANUAL_PLAN_STATUS=0
 DRIFT_PLAN_STATUS=0
 REPAIR_QUEUE_BUILD_STATUS=0
 REPAIR_DEFERRED=0
+REPAIR_TOTAL_ROWS=0
+REPAIR_TOTAL_GROUPS=0
 ORDINARY_LIVE_READY="$(guard_json_value '(j.marketingStackReviewCoverage?.coverageComplete === true && Number(j.marketingStackReviewFreshness?.activityAgeHours ?? 999999) <= Number(j.marketingStackReviewFreshness?.activityFreshnessThresholdHours ?? 48)) ? 1 : 0' 0)"
 echo "[cloud_marketing_live_guard] ordinary live evidence ready=$ORDINARY_LIVE_READY stackReviewStatus=$STACK_REVIEW_STATUS"
 if [[ "$BUILD_REPAIR_QUEUE" == "1" && "$STACK_REVIEW_STATUS" -eq 0 && "$ORDINARY_LIVE_READY" -eq 1 && "$SCAN_STATUS" -eq 0 && "$GUARD_STATUS" -eq 0 ]]; then
@@ -518,9 +543,13 @@ fi
 
 if [[ "$COST_MAP_STATUS" -eq 0 && "$STACK_REVIEW_STATUS" -eq 0 && "$ORDINARY_LIVE_READY" -eq 1 && "$SCAN_STATUS" -eq 0 && "$GUARD_STATUS" -eq 0 && "$HIGH_CLICK_PLAN_STATUS" -eq 0 && "$ON_SHELF_PLAN_STATUS" -eq 0 && "$MANUAL_PLAN_STATUS" -eq 0 && "$DRIFT_PLAN_STATUS" -eq 0 && "$REPAIR_QUEUE_BUILD_STATUS" -eq 0 ]]; then
   write_state "ok" "marketing inspection completed; repairDeferred=$REPAIR_DEFERRED" 1
-  node scripts/marketing/send_marketing_daily_group_report.mjs \
-    --date "$DATE" --queue "$REPAIR_QUEUE_FILE" --guard "$GUARD_OUT" \
-    || echo "[cloud_marketing_live_guard] WARN group report delivery failed" >&2
+  if [[ "$REPAIR_TOTAL_ROWS" -eq 0 ]]; then
+    node scripts/marketing/send_marketing_daily_group_report.mjs \
+      --date "$DATE" --queue "$REPAIR_QUEUE_FILE" --guard "$GUARD_OUT" \
+      || echo "[cloud_marketing_live_guard] WARN group report delivery failed" >&2
+  else
+    echo "[cloud_marketing_live_guard] final group report waits for the same-day repair queue terminal state; no intermediate report sent"
+  fi
   echo "[cloud_marketing_live_guard] done ok date=$DATE log=$LOG_FILE"
 else
   write_state "warning" "costMap=$COST_MAP_STATUS stackReview=$STACK_REVIEW_STATUS ordinaryLiveReady=$ORDINARY_LIVE_READY liveScan=$SCAN_STATUS guard=$GUARD_STATUS highClickPlan=$HIGH_CLICK_PLAN_STATUS onShelfPlan=$ON_SHELF_PLAN_STATUS manualPlan=$MANUAL_PLAN_STATUS driftPlan=$DRIFT_PLAN_STATUS repairQueue=$REPAIR_QUEUE_BUILD_STATUS" 0
