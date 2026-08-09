@@ -273,6 +273,7 @@
 
 - 初始化一次：`powershell -ExecutionPolicy Bypass -File scripts/install_local_repo_hygiene.ps1`，启用 `fetch.prune=true`、`pull.ff=only` 和仓库内 `pre-push` 防误推钩子。
 - 安装每周维护：`powershell -ExecutionPolicy Bypass -File scripts/install_local_workspace_hygiene_task.ps1`。任务每周日 18:20 运行，错过后开机补跑，只清理至少 3 天前且无进程占用的 `tmp/cloud-marketing-workers-*` / `tmp/cloud-marketing-local-runtime-*`，不碰正式 `profiles`、`outputs` 或业务证据。
+- 维护任务使用 PowerShell `-File` 直接执行；脚本把成功或失败结果原子写入 `logs/local-workspace-hygiene-latest.json`。禁止在 Task Scheduler 中重新拼接 `-Command` 管道写日志，避免路径转义或管道失败后只留下过期的成功记录。
 - 手工预演：`powershell -ExecutionPolicy Bypass -File scripts/cleanup_local_workspace_hygiene.ps1`；确认后加 `-Apply`。脚本只接受固定命名和固定根目录，目录联接目标必须精确指向本项目 `profiles` 或 `node_modules`，否则拒绝删除。
 - 一个任务只保留一个 `codex/*` 分支/worktree。PR 合并、发版和生产回读完成后立即执行 `git worktree remove <path>`、删除本地任务分支并 `git fetch --prune`；GitHub 已启用合并后自动删除 head branch。
 - Chrome 的本地基础模型对运营自动化无用途。受控 launcher 会把 `optimization_guide.on_device_foundational_model_user_settings` 固定为 `false`，同时保留下载 feature gate；缓存清理器会删除已有模型但保留 Cookie、Login Data、Local/Session Storage 和 IndexedDB。

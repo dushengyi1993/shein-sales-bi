@@ -2,10 +2,15 @@
 param(
   [switch]$Apply,
   [ValidateRange(1, 30)]
-  [int]$MinimumAgeDays = 3
+  [int]$MinimumAgeDays = 3,
+  [string]$OutputPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
+$Utf8NoBom = [Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $Utf8NoBom
+[Console]::OutputEncoding = $Utf8NoBom
+$OutputEncoding = $Utf8NoBom
 $Root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
 $TmpRoot = [IO.Path]::GetFullPath((Join-Path $Root 'tmp')).TrimEnd('\')
 $Cutoff = (Get-Date).AddDays(-$MinimumAgeDays)
@@ -14,6 +19,31 @@ $AllowedJunctionTargets = @(
   [IO.Path]::GetFullPath((Join-Path $Root 'profiles')).TrimEnd('\'),
   [IO.Path]::GetFullPath((Join-Path $Root 'node_modules')).TrimEnd('\')
 )
+
+function Write-AtomicJsonReport([object]$Value) {
+  if ([string]::IsNullOrWhiteSpace($OutputPath)) { return }
+  $resolved = [IO.Path]::GetFullPath($OutputPath)
+  $parent = Split-Path -Parent $resolved
+  New-Item -ItemType Directory -Path $parent -Force | Out-Null
+  $temporary = "$resolved.tmp.$PID.$([guid]::NewGuid().ToString('N'))"
+  $json = $Value | ConvertTo-Json -Depth 8
+  [IO.File]::WriteAllText($temporary, $json, $Utf8NoBom)
+  Move-Item -LiteralPath $temporary -Destination $resolved -Force
+}
+
+trap {
+  $failure = [ordered]@{
+    ok = $false
+    mode = if ($Apply) { 'apply' } else { 'dry-run' }
+    generatedAt = (Get-Date).ToString('o')
+    root = $Root
+    error = $_.Exception.Message
+    errorType = $_.Exception.GetType().FullName
+  }
+  try { Write-AtomicJsonReport $failure } catch {}
+  Write-Error $_.Exception.Message
+  exit 1
+}
 
 function Test-ProcessReferencesPath([string]$Path) {
   $needle = [IO.Path]::GetFullPath($Path)
@@ -103,4 +133,5 @@ $report = [ordered]@{
   branchCount = $branchCount
   worktreeCount = $worktreeCount
 }
+Write-AtomicJsonReport $report
 $report | ConvertTo-Json -Depth 6
