@@ -119,7 +119,7 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 | `01:20/04:20/07:20/10:20/13:20/17:20/20:20/23:20` | ET 货代仓/出库单 `shein-bi-cloud-et-forwarder.service` | ET headless/API | 写 ET 仓库、出库单，并轻量刷新订单/物流/售后 section | 不是 SHEIN OpenAPI；异常不应中断已成功店铺数据。 |
 | `14:10` | ET 仓储费 `shein-bi-cloud-et-storage-fee.service` | ET headless/API，只读 `IncomeBill(sort=2)` + `ExportStoreFee` | 写仓储费事实、canonical 账单与利润 cache | 与通用 ET 共用 profile 锁但隔离输出；只预热利润，不刷新无关库存趋势。 |
 | `02:20` | 登录态管家 `shein-bi-cloud-session-manager.service` | 短生命周期 headless browser + WebAPI/SBN 探针 | 不写销售事实 | 恢复 WebAPI + SBN 登录态，结束后关闭它启动的浏览器。 |
-| `06:30` | 订单闭环复查 `shein-bi-cloud-order-closure.service` | OpenAPI + Webhook/售后/ET 既有证据 | 只更新订单生命周期状态，不重写历史销售事实 | 不再因店铺后台 Cookie 过期整批失败；已有更强物流终态证据不会被较弱状态覆盖。 |
+| `06:52` | 订单闭环复查 `shein-bi-cloud-order-closure.service` | OpenAPI + Webhook/售后/ET 既有证据 | 一个 coordinator 完成当天整轮，只更新订单生命周期状态，不重写历史销售事实 | 瞬时资源压力在同一 run 内每60秒重试，最晚07:27前启动；不再因一次门禁延期整天漏跑，也不再因店铺后台 Cookie 过期整批失败。 |
 | `11:00` | 每日营销检查 `shein-bi-cloud-marketing-live-guard.service` | session HTTP 只读直连 | 单一 coordinator 读取 19 店普通活动、15% 券 active 集合与当前/未来活动价，生成待处理营销清单；不持有写授权 | 不启动浏览器；瞬时失败只在同一 run 内重试失败阶段，不再于 13:00/16:00 重跑整套。 |
 | 本机 `11:10/13:10/16:10` | 本地后台营销执行 | Windows headless Chrome，默认 4 店一批、负载较高时 3 店一批 | 只执行负责人长期授权内的限时折扣修复；批内跨店并行、同店 dry-run→hash→事务→库存恢复→定点回读严格串行；整批终态后关闭本批 Profile 再开下一批 | `11:10` 主执行；后两次只续跑未终态队列。本机离线时保留队列，不把 WAITING 报成故障。 |
 | `20:45/21:15` | 云端营销应急兜底 `shein-bi-cloud-marketing-repair.service` | 受控浏览器写入 | 先做全店只读重扫，只有本机当天未闭环的长期授权缺口才执行 | 两段分别在 `20:57/21:27` 停止派新组，每段最多 1 店/1组；`21:02–21:13` 全托核心首页车道绝不占用。 |

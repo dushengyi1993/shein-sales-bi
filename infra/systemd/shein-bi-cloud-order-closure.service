@@ -13,6 +13,8 @@ WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/root
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=SHEIN_SALES_TRANSPORT=openapi
+Environment=SHEIN_BI_ORDER_CLOSURE_RETRY_DELAY_SEC=60
+Environment=SHEIN_BI_ORDER_CLOSURE_START_DEADLINE=07:27
 TimeoutStartSec=10800
 Nice=5
 IOSchedulingClass=best-effort
@@ -21,5 +23,5 @@ MemoryHigh=1000M
 MemoryMax=1500M
 OOMPolicy=stop
 KillMode=control-group
-ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain order-closure --class openapi --lock-wait-sec 120 --deadline-at 07:27 --defer-state /srv/shein-bi/runtime/host-scheduler/order-closure.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/run_pipeline_stage.sh --stage order-closure --business-date yesterday --message "order lifecycle closure completed" -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_order_closure.sh
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_order_closure_coordinator.sh
 SuccessExitStatus=75
