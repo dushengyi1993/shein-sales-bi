@@ -16,8 +16,10 @@ const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
 const ORDER_URL = 'https://sso.geiwohuo.com/#/gsp/order-management/list';
 const HOME_URL = 'https://sso.geiwohuo.com/#/gsp/home';
 const SBN_URL = 'https://sso.geiwohuo.com/#/sbn/merchandise/details';
+const MARKETING_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
 const encodeRedirect = url => Buffer.from(url, 'utf8').toString('base64');
 const LOGIN_URLS = [
+  `https://sso.geiwohuo.com/#/login/GMPSSO/${encodeRedirect(MARKETING_URL)}`,
   `https://sso.geiwohuo.com/#/login/GMPSSO/${encodeRedirect(SBN_URL)}`,
   `https://sso.geiwohuo.com/#/login/GMPSSO/${encodeRedirect(ORDER_URL)}`,
   `https://sso.geiwohuo.com/#/login/GMPSSO/${encodeRedirect(HOME_URL)}`,
@@ -124,6 +126,17 @@ async function navigate(send, url, waitMs = 3500) {
   await sleep(waitMs);
 }
 
+async function refreshIfBlank(send) {
+  const blank = await evaluate(send, `(() => {
+    const text = (document.body?.innerText || '').trim();
+    return document.readyState === 'complete' && text.length === 0;
+  })()`);
+  if (!blank) return false;
+  await send('Page.reload', {ignoreCache: true});
+  await sleep(5000);
+  return true;
+}
+
 async function pageInfo(send) {
   return await evaluate(send, `(() => {
     const text = document.body?.innerText || '';
@@ -198,6 +211,25 @@ async function sbnProbe(send) {
       textPreview: text.slice(0, 500)
     };
   })()`);
+}
+
+async function marketingProbe(send) {
+  await navigate(send, MARKETING_URL, 8000);
+  const refreshed = await refreshIfBlank(send);
+  const result = await evaluate(send, `(() => {
+    const text = document.body?.innerText || '';
+    return {
+      href: location.href,
+      title: document.title,
+      ok: !/\\/login\\/GMPSSO\\//.test(location.href)
+        && text.includes('\u8425\u9500\u6d3b\u52a8\u62a5\u540d'),
+      hasLoginText: text.includes('\u8d26\u53f7')
+        && text.includes('\u5bc6\u7801')
+        && text.includes('\u767b\u5f55'),
+      textPreview: text.slice(0, 500)
+    };
+  })()`);
+  return {...result, refreshed};
 }
 
 async function trySavedPassword(send) {
@@ -304,6 +336,9 @@ async function restoreOne(store, opts) {
     let probe = await apiProbe(send, opts.date);
     steps.push({step: 'initial-probe', probe});
     if (probe.code === '0') {
+      const marketing = await marketingProbe(send);
+      steps.push({step: 'initial-marketing-probe', marketing});
+      if (marketing.ok) return {storeKey: store.storeKey, ok: true, alreadyOk: true, steps};
       const sbn = await sbnProbe(send);
       steps.push({step: 'initial-sbn-probe', sbn});
       if (sbn.ok) return {storeKey: store.storeKey, ok: true, alreadyOk: true, steps};
@@ -314,9 +349,10 @@ async function restoreOne(store, opts) {
       if (Date.now() - started > opts.timeoutMs) break;
       await closeModalIfAny(send);
       await navigate(send, url, 4500);
+      const refreshed = await refreshIfBlank(send);
       await closeModalIfAny(send);
       let info = await pageInfo(send);
-      steps.push({step: 'navigate', url, info: {href: info.href, title: info.title, hasLoginText: info.hasLoginText, inputs: info.inputs}});
+      steps.push({step: 'navigate', url, refreshed, info: {href: info.href, title: info.title, hasLoginText: info.hasLoginText, inputs: info.inputs}});
 
       const hasPasswordInput = info.inputs?.some(x => String(x.type).toLowerCase() === 'password' && x.visible);
       const looksLogin = info.hasLoginText || hasPasswordInput;
@@ -370,6 +406,9 @@ async function restoreOne(store, opts) {
       probe = await apiProbe(send, opts.date);
       steps.push({step: 'probe-after-url', url, probe});
       if (probe.code === '0') {
+        const marketing = await marketingProbe(send);
+        steps.push({step: 'marketing-probe-after-url', url, marketing});
+        if (marketing.ok) return {storeKey: store.storeKey, ok: true, alreadyOk: false, steps};
         const sbn = await sbnProbe(send);
         steps.push({step: 'sbn-probe-after-url', url, sbn});
         if (sbn.ok) return {storeKey: store.storeKey, ok: true, alreadyOk: false, steps};
