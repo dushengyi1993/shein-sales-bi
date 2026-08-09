@@ -14,6 +14,7 @@ const recheck = read('scripts/recheck_order_statuses.mjs');
 const watchdog = read('scripts/cloud_ops_watchdog.mjs');
 const closureUnit = read('infra/systemd/shein-bi-cloud-order-closure.service');
 const closureScript = read('scripts/cloud_order_closure.sh');
+const closureCoordinator = read('scripts/cloud_order_closure_coordinator.sh');
 
 for (const source of [schema, migration, recheck]) {
   assert.match(source, /CREATE OR REPLACE VIEW ops\.order_status_recheck_effective/);
@@ -37,7 +38,16 @@ assert.match(recheck, /coalesce\(rs\.lifecycle_status_group,'cancelled'\) = 'can
 assert.match(recheck, /fetch_shein_openapi_sales\.mjs/);
 assert.match(recheck, /\['openapi', 'webapi', 'auto', 'browser'\]/);
 assert.match(closureUnit, /SHEIN_SALES_TRANSPORT=openapi/);
+assert.match(closureUnit, /cloud_order_closure_coordinator\.sh/);
 assert.match(closureScript, /--transport openapi/);
+assert.match(closureCoordinator, /retrying inside the same daily run/);
+assert.match(closureCoordinator, /status" -ne 75/);
+assert.match(closureCoordinator, /resource deferral persisted until the start deadline/);
+assert.match(closureCoordinator, /while true; do/);
+assert.match(closureCoordinator, /sleep "\$RETRY_DELAY_SEC"/);
+assert.match(closureCoordinator, /SHEIN_BI_ORDER_CLOSURE_DEADLINE_EPOCH/);
+assert.match(closureCoordinator, /run_host_heavy_job\.sh/);
+assert.match(closureCoordinator, /run_pipeline_stage\.sh/);
 assert.doesNotMatch(closureUnit, /--transport webapi/);
 assert.doesNotMatch(closureScript, /--transport webapi/);
 assert.match(watchdog, /LEFT JOIN ops\.order_status_recheck_effective rs/);

@@ -76,7 +76,7 @@ const heavyUnits = [
 for (const name of heavyUnits) {
   const content = unit(name);
   assert.match(content, /^Slice=shein-host-heavy-bi\.slice$/m, name);
-  assert.match(content, /run_host_(?:heavy|browser_read)_job\.sh|run_cloud_(?:portal_section_queue|marketing_fallback)_slot\.sh/, name);
+  assert.match(content, /run_host_(?:heavy|browser_read)_job\.sh|run_cloud_(?:portal_section_queue|marketing_fallback)_slot\.sh|cloud_order_closure_coordinator\.sh/, name);
   assert.match(content, /^SuccessExitStatus=75$/m, name);
 }
 
