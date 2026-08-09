@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+# GitHub Free cannot protect this private repository's main branch. Block an
+# accidental local direct push (including deletion/force-push) and keep the PR
+# + CI + release workflow as the only normal path. An owner may deliberately
+# bypass this one-machine guard for an emergency with
+# SHEIN_BI_ALLOW_MAIN_PUSH=1, but the incident must still be released/deployed.
+while read -r local_ref local_oid remote_ref remote_oid; do
+  if [ "$remote_ref" = "refs/heads/main" ] && [ "${SHEIN_BI_ALLOW_MAIN_PUSH:-0}" != "1" ]; then
+    echo "Blocked: direct push to main. Push a codex/* branch and merge it through a PR." >&2
+    exit 1
+  fi
+done
+
+exit 0

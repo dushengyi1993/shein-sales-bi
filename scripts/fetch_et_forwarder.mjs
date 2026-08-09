@@ -12,6 +12,10 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn, spawnSync} from 'node:child_process';
 import {findChromeExecutable} from '../lib/chrome_executable.mjs';
+import {
+  chromeDisabledFeaturesArg,
+  disableChromeOnDeviceAiForProfile,
+} from '../lib/chrome_profile_hygiene.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -236,12 +240,14 @@ async function launchChrome(args) {
   const chrome = findChrome();
   if (!chrome) throw new Error('Cannot find Chrome/Chromium for ET forwarder profile.');
   await fs.mkdir(args.profileDir, {recursive: true});
+  disableChromeOnDeviceAiForProfile(args.profileDir);
   const chromeArgs = [
     `--remote-debugging-port=${args.port}`,
     `--user-data-dir=${args.profileDir}`,
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-popup-blocking',
+    chromeDisabledFeaturesArg(),
     '--disable-dev-shm-usage',
     args.baseUrl + '/Home/Index',
   ];

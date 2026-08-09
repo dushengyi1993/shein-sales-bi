@@ -15,6 +15,10 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {
+  disableChromeOnDeviceAiForProfile,
+  readChromeOnDeviceAiSetting,
+} from '../lib/chrome_profile_hygiene.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_PROFILES_ROOT = path.join(ROOT, 'profiles');
@@ -159,6 +163,7 @@ async function main() {
     cacheRootValidation: null,
     profilesScanned: profiles.length,
     profilesSkippedActive: [],
+    onDeviceAiSettings: [],
     targets: [],
     reclaimedBytes: 0,
     errors: [],
@@ -170,6 +175,14 @@ async function main() {
       report.profilesSkippedActive.push(path.basename(profile));
       continue;
     }
+    const before = readChromeOnDeviceAiSetting(profile);
+    const setting = args.apply ? disableChromeOnDeviceAiForProfile(profile) : before;
+    report.onDeviceAiSettings.push({
+      profile: path.basename(profile),
+      disabled: args.apply ? setting.disabled : before.disabled,
+      changed: args.apply ? setting.changed : false,
+      previous: args.apply ? setting.previous : before.value,
+    });
     for (const relative of PROFILE_CACHE_PATHS) {
       const target = path.resolve(profile, relative);
       if (!isWithin(profile, target) || !fs.existsSync(target)) continue;

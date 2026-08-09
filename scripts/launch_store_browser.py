@@ -45,6 +45,9 @@ def ensure_profile_name(profile_dir: Path, store: dict):
     entry["name"] = profile_name
     entry["is_using_default_name"] = False
     entry.setdefault("avatar_icon", "chrome://theme/IDR_PROFILE_AVATAR_26")
+    local_state.setdefault("optimization_guide", {})[
+        "on_device_foundational_model_user_settings"
+    ] = False
     save_json(local_state_path, local_state)
     (profile_dir / "PROFILE_NAME.txt").write_text(profile_name + "\n", encoding="utf-8")
 
@@ -74,6 +77,7 @@ def main():
         "--profile-directory=Profile 1",
         "--no-first-run",
         "--no-default-browser-check",
+        "--disable-features=OptimizationGuideOnDeviceModel,OptimizationGuideModelDownloading,OptimizationGuideModelExecution,PromptAPIForGeminiNano,SummarizationAPIForGeminiNano,WriterAPIForGeminiNano,RewriterAPIForGeminiNano",
         args.url,
     ]
     subprocess.Popen(cmd, cwd=ROOT)

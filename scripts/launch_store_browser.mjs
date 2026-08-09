@@ -14,6 +14,10 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn, spawnSync} from 'node:child_process';
 import http from 'node:http';
+import {
+  chromeDisabledFeaturesArg,
+  disableChromeOnDeviceAiForProfile,
+} from '../lib/chrome_profile_hygiene.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHROME_CANDIDATES = [
@@ -160,16 +164,7 @@ if (process.platform === 'win32') {
 fs.mkdirSync(cacheDir, {recursive: true});
 fs.mkdirSync(logDir, {recursive: true});
 const profileName = ensureProfileName(profileDir, store);
-const disabledFeatures = [
-  'OptimizationGuideOnDeviceModel',
-  'OptimizationGuideModelDownloading',
-  'OptimizationGuideModelExecution',
-  'PromptAPIForGeminiNano',
-  'SummarizationAPIForGeminiNano',
-  'WriterAPIForGeminiNano',
-  'RewriterAPIForGeminiNano',
-  ...(cliArgs.allowLocalNetworkAssets ? ['LocalNetworkAccessChecks'] : []),
-];
+const onDeviceAi = disableChromeOnDeviceAiForProfile(profileDir);
 
 const args = [
   `--user-data-dir=${profileDir}`,
@@ -189,7 +184,7 @@ const args = [
   // Some SHEIN CDN hostnames resolve through the local proxy address space;
   // when requested, LocalNetworkAccessChecks joins the same switch so a
   // duplicate --disable-features argument cannot overwrite the model guards.
-  `--disable-features=${disabledFeatures.join(',')}`,
+  chromeDisabledFeaturesArg(cliArgs.allowLocalNetworkAssets ? ['LocalNetworkAccessChecks'] : []),
   ...(!cliArgs.background && !cliArgs.headless ? [
     '--start-maximized',
   ] : []),
@@ -395,6 +390,7 @@ console.log(JSON.stringify({
   profileName,
   port: store.port,
   profileDir,
+  onDeviceAiDisabled: onDeviceAi.disabled,
   cacheDir,
   url: customUrl,
   mode: cliArgs.headless ? 'headless' : (cliArgs.background ? 'background' : 'visible'),

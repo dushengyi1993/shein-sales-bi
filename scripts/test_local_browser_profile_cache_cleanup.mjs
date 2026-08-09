@@ -40,6 +40,11 @@ assert.equal(run.status, 0, run.stderr || run.stdout);
 const report = JSON.parse(run.stdout);
 assert.equal(report.ok, true);
 assert.ok(report.reclaimedBytes > 0);
+assert.deepEqual(report.onDeviceAiSettings.map(item => [item.profile, item.disabled]), [
+  ['persistent-dl-profile', true],
+]);
+const localState = JSON.parse(await fs.readFile(path.join(profile, 'Local State'), 'utf8'));
+assert.equal(localState.optimization_guide.on_device_foundational_model_user_settings, false);
 for (const file of disposable) await assert.rejects(fs.stat(file));
 for (const file of preserved) assert.equal((await fs.readFile(file, 'utf8')), 'test');
 
@@ -61,13 +66,22 @@ assert.equal(await fs.readFile(unsafeSentinel, 'utf8'), 'preserved');
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const launcher = await fs.readFile(path.join(scriptDir, 'launch_store_browser.mjs'), 'utf8');
+const mainLauncher = await fs.readFile(path.join(scriptDir, 'launch_shein_main_browser.mjs'), 'utf8');
+const etLauncher = await fs.readFile(path.join(scriptDir, 'fetch_et_forwarder.mjs'), 'utf8');
+const manualLoginLauncher = await fs.readFile(path.join(scriptDir, 'cloud_manual_login_session.mjs'), 'utf8');
+const hygiene = await fs.readFile(path.join(scriptDir, '..', 'lib', 'chrome_profile_hygiene.mjs'), 'utf8');
 assert.match(launcher, /LOCALAPPDATA[\s\S]*SheinBI[\s\S]*browser-cache/);
 assert.match(launcher, /\.shein-bi-disposable-cache-root/);
 assert.match(launcher, /shein-bi-disposable-browser-cache-v1/);
 assert.match(launcher, /--disk-cache-size=104857600/);
-assert.equal((launcher.match(/--disable-features=/g) || []).length, 1, 'all disabled Chrome features must share one switch');
-assert.match(launcher, /OptimizationGuideOnDeviceModel/);
+assert.match(hygiene, /return `--disable-features=/);
+assert.match(hygiene, /OptimizationGuideOnDeviceModel/);
+assert.match(hygiene, /on_device_foundational_model_user_settings/);
 assert.match(launcher, /LocalNetworkAccessChecks/);
+for (const source of [launcher, mainLauncher, etLauncher, manualLoginLauncher]) {
+  assert.match(source, /disableChromeOnDeviceAiForProfile/);
+  assert.match(source, /chromeDisabledFeaturesArg/);
+}
 
 await fs.rm(root, {recursive: true, force: true});
 console.log(JSON.stringify({ok: true, preserved: preserved.length, removed: disposable.length}));

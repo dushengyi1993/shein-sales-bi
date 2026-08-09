@@ -47,3 +47,12 @@ Real SHEIN writes still require cloud permissions, dry-run/preflight, an exact p
 - A release is complete only after the target commit passes CI, the cloud checkout is exactly at that commit with no tracked source changes, required migrations/units are applied, and production health/readback succeeds.
 - Cloud acceptance must run `node scripts/check_release_source_state.mjs --expected-commit <release tag> --record-deployment <release tag>`; watchdog continuously checks that marker. Plain `git status` is insufficient because `skip-worktree` or `assume-unchanged` can hide missing source.
 - Temporary GitHub-ahead-of-cloud time during validation is acceptable; unexplained or long-lived source drift is not. Do not claim production parity from a tag alone.
+
+## Local branch, worktree, and runtime hygiene
+
+- Keep the primary checkout on a clean, current `main`. Create at most one task-specific `codex/*` worktree per active task; a merged/released/deployed task is not active.
+- After the release and production readback complete, remove the clean task worktree with `git worktree remove`, delete its local branch, and prune remote refs. Never leave completed worktrees as historical backups; GitHub history and verified `.bundle` archives are the backup.
+- Never delete a worktree folder directly in Explorer or with a blind recursive delete. Worktrees may contain `profiles` or `node_modules` junctions; detach only verified junctions and use Git's worktree command.
+- GitHub is configured to delete merged head branches automatically. Do not disable that setting. This private repository currently lacks paid branch protection, so install `.githooks/pre-push` with `scripts/install_local_repo_hygiene.ps1`; direct pushes/deletions of `main` stay blocked locally and normal changes go through PR + CI.
+- Task-local browser/runtime copies belong only under allowlisted `tmp/cloud-marketing-workers-*` or `tmp/cloud-marketing-local-runtime-*` paths. Copy terminal evidence into `outputs/`, then let the weekly hygiene task remove stale runtime directories; never duplicate persistent login profiles.
+- All SHEIN Chrome launchers must set `optimization_guide.on_device_foundational_model_user_settings=false` and retain the model-download feature gates. Do not bypass the controlled launchers or re-enable Chrome's local foundational model; it is unused by operations and consumes multiple GB per user-data directory.
