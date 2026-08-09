@@ -290,7 +290,7 @@
 
   - `marketing/scan_current_marketing_prices_for_bi.mjs`：全店当前/未来普通活动、限时折扣和 active 优惠券价格层只读扫描；生产 session HTTP 每批并发 3 店，支持 `--store-attempts 1..5`（默认最多 3 次，仅重试已分类瞬时错误）。最终快照必须有完整 store payload、聚合 rows、`rowCount`、`ok` 和 `partial`；限时折扣行保留活动 ID、活动库存、商品库存和起止时间。
 
-  - `cleanup_shein_store_browsers.mjs`：按配置店铺 profile 精确关闭 Chrome/Chromium，清理 Chrome 临时目录；确认目标店铺进程归零后同时删除该 profile 的 `SingletonLock/Cookie/Socket`，避免进程已关但旧锁阻断下一批启动。不得删除仍有目标进程的 profile 锁，也不处理 ET forwarder 等非营销 profile。
+  - `cleanup_shein_store_browsers.mjs`：按配置店铺 profile 精确关闭 Chrome/Chromium，清理**当前运行账号所有**的 Chrome 临时目录；其它项目/账号创建的 `/tmp/com.google.Chrome.*` 只计入 `foreignIgnored`，不得跨账号删除或因此判任务失败。确认目标店铺进程归零后同时删除该 profile 的 `SingletonLock/Cookie/Socket`，避免进程已关但旧锁阻断下一批启动。不得删除仍有目标进程的 profile 锁，也不处理 ET forwarder 等非营销 profile。
 
   - `lib/browser_task_lease.mjs` / `smoke_browser_task_lease.mjs`：实际启动浏览器的任务按“任务 × 店铺”获取、心跳和释放租约；过期或 owner PID 已死亡才回收。`shein-bi-cloud-browser-cleanup.timer` 只在 `03:45/09:50/21:00` 回收过期租约并清理未受有效租约保护的孤儿浏览器。纯 session HTTP guard 不申请租约。
 

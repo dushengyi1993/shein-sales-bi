@@ -161,6 +161,7 @@ const tests = [
   'scripts/test_shein_browser_cdp.mjs',
   'scripts/test_local_browser_profile_cache_cleanup.mjs',
   'scripts/test_local_repo_hygiene_contract.mjs',
+  'scripts/test_chrome_tmp_hygiene.mjs',
   'scripts/test_bi_ops_portal_shell_sync.mjs',
 ];
 

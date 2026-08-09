@@ -10,6 +10,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {readBrowserLeases, reclaimStaleBrowserLeases} from '../lib/browser_task_lease.mjs';
+import {cleanupOwnedChromeTmpDirectories} from '../lib/chrome_tmp_hygiene.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -130,39 +131,13 @@ function cleanupChromeTmpDirs(args) {
   if (process.platform === 'win32' || !args.cleanupChromeTmp) {
     return {enabled: Boolean(args.cleanupChromeTmp), skipped: process.platform === 'win32' ? 'unsupported-platform' : 'disabled', beforeCount: 0, afterCount: 0, removed: []};
   }
-  const liveCount = liveChromeProcessCount();
-  const tmpRoot = '/tmp';
-  const isChromeTmp = name => /^\.?com\.google\.Chrome\.[A-Za-z0-9_-]+$/.test(name);
-  const before = fs.readdirSync(tmpRoot)
-    .filter(isChromeTmp)
-    .map(name => path.join(tmpRoot, name))
-    .filter(p => {
-      try { return fs.statSync(p).isDirectory(); } catch { return false; }
-    })
-    .sort();
-  if (liveCount > 0) {
-    return {enabled: true, skipped: 'live-chrome-processes', liveCount, beforeCount: before.length, afterCount: before.length, removed: []};
-  }
-  const removed = [];
-  for (const dir of before) {
-    if (args.dryRun) {
-      removed.push({path: dir, dryRun: true});
-      continue;
-    }
-    try {
-      fs.rmSync(dir, {recursive: true, force: true});
-      removed.push({path: dir});
-    } catch (err) {
-      removed.push({path: dir, error: err?.code || String(err?.message || err)});
-    }
-  }
-  const after = fs.readdirSync(tmpRoot)
-    .filter(isChromeTmp)
-    .map(name => path.join(tmpRoot, name))
-    .filter(p => {
-      try { return fs.statSync(p).isDirectory(); } catch { return false; }
-    });
-  return {enabled: true, liveCount, beforeCount: before.length, afterCount: after.length, removed};
+  return cleanupOwnedChromeTmpDirectories({
+    enabled: true,
+    dryRun: args.dryRun,
+    liveCount: liveChromeProcessCount(),
+    tmpRoot: '/tmp',
+    ownerUid: typeof process.getuid === 'function' ? process.getuid() : null,
+  });
 }
 
 function cleanupProfileSingletons(stores, args, remainingMatches = [], protectedStoreKeys = new Set()) {
@@ -285,7 +260,7 @@ else {
   for (const item of report.before || []) console.log(`- ${item.storeKey} pid=${item.pid} ppid=${item.ppid} rssKb=${item.rssKb}`);
   if (report.chromeTmp?.enabled) {
     const suffix = report.chromeTmp.skipped ? ` skipped=${report.chromeTmp.skipped}` : '';
-    console.log(`[cleanup_shein_store_browsers] chromeTmp before=${report.chromeTmp.beforeCount ?? 0} after=${report.chromeTmp.afterCount ?? 0}${suffix}`);
+    console.log(`[cleanup_shein_store_browsers] chromeTmp ownedBefore=${report.chromeTmp.beforeCount ?? 0} ownedAfter=${report.chromeTmp.afterCount ?? 0} foreignIgnored=${report.chromeTmp.foreignCount ?? 0} unsafeIgnored=${report.chromeTmp.unsafeCount ?? 0}${suffix}`);
   }
   if (report.profileSingletons?.removed?.length) {
     console.log(`[cleanup_shein_store_browsers] profileSingletons removed=${report.profileSingletons.removed.length} errors=${report.profileSingletons.errorCount}`);
