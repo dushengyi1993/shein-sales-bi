@@ -12,6 +12,12 @@ assert.match(source, /window\.addEventListener\('hashchange',syncTabFromLocation
 assert.match(source, /window\.addEventListener\('popstate',syncTabFromLocation\)/, 'browser back and forward are handled');
 assert.match(source, /document\.addEventListener\('visibilitychange'/, 'long-open tabs refresh after becoming visible');
 assert.match(source, /setInterval\(\(\)=>\{revalidateCore\(\)\.catch\(\(\)=>\{\}\)\},CORE_VISIBLE_POLL_MS\)/, 'visible long-open tabs periodically revalidate core');
+assert.match(source, /if\(n==='liveSalesToday'\)LAST_LIVE_REFRESH_MS=Date\.now\(\)/,
+  'every accepted live-order projection records the last successful refresh time');
+assert.match(source, /async function revalidateCore\(\).*liveDue=now-LAST_LIVE_REFRESH_MS>=CORE_VISIBLE_POLL_MS.*if\(liveDue\)await load\('liveSalesToday',true,true\)/,
+  'the five-minute visible-tab fallback force-refreshes live orders when SSE delivery is missed');
+assert.doesNotMatch(source.match(/async function revalidateCore\(\)[^\n]*/)?.[0] || '', /load\('orders'/,
+  'the missed-SSE fallback must not rebuild the large historical orders section');
 assert.match(source, /function scheduleSectionRecheck\(n\)/, 'stale sections schedule an automatic recheck');
 assert.match(source, /load\(n,true,false,true\)/, 'section rechecks bypass browser state without forcing duplicate generation');
 assert.match(source, /if\(needsRecheck\)scheduleSectionRecheck\(n\)/, 'stale or background-refresh responses are polled until current');
