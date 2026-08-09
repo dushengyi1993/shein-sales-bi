@@ -122,7 +122,7 @@
 - 旧 `profiles/persistent-hl-profile` 已删除；当前 HL 正式使用 `profiles/persistent-shein-main-profile`。
 - `YJ=profiles/persistent-yj-profile`、`XL=profiles/persistent-xl-profile`、`QY=profiles/persistent-qy-profile` 是当前正确生产绑定；若怀疑错位，必须按店铺账号真相和 live 登录/抓数归属复核，不能回滚到旧交叉绑定。
 - `profiles/persistent-feishu-profile` 是飞书网页登录态，用于看板富文本、卡片样式和页面自动化，不属于 SHEIN 店铺登录。
-- Chrome 自动生成的 `OptGuideOnDeviceModel` 是重复模型缓存，不是登录态。等同步任务和 Chrome 进程停止后，可只删除各 profile 下的 `OptGuideOnDeviceModel` 来释放约 30GB+。
+- Chrome 自动生成的 `OptGuideOnDeviceModel` 是模型缓存，不是登录态。受控 launcher 在每次启动前把 `optimization_guide.on_device_foundational_model_user_settings` 固定为 `false`，并保留模型下载 feature gate；缓存清理器只删模型/缓存，不碰 Cookie、Login Data、Local/Session Storage 或 IndexedDB。禁止绕过 launcher 直接打开持久 Profile，否则 Chrome 可能重新下载约 4GB/份的模型。
 - 瘦身时不要动 `Profile 1`、`Default`、`Network`、`Local Storage`、Cookies/Session 相关文件。
 - 2026-05-02 文件整理报告见 `outputs/cleanup/project-file-cleanup-2026-05-02.md`；误生成的 `E:\Codex` 已归档到 `backups/file-cleanup-20260502T125310/E-Codex-stray-chrome-profile`。
 

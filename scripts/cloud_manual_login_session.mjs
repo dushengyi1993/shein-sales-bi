@@ -17,6 +17,10 @@ import {spawn, spawnSync} from 'node:child_process';
 import crypto from 'node:crypto';
 import net from 'node:net';
 import {planManualLoginLinkRecovery} from '../lib/cloud_manual_login_recovery.mjs';
+import {
+  chromeDisabledFeaturesArg,
+  disableChromeOnDeviceAiForProfile,
+} from '../lib/chrome_profile_hygiene.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
@@ -531,6 +535,7 @@ async function cmdStart(args) {
 
   const prof = profileDir(store);
   await fs.mkdir(prof, {recursive: true});
+  disableChromeOnDeviceAiForProfile(prof);
   const chromeArgs = [
     `--user-data-dir=${prof}`,
     `--disk-cache-dir=${path.join(prof, 'cache')}`,
@@ -542,6 +547,7 @@ async function cmdStart(args) {
     '--disable-background-timer-throttling',
     '--disable-renderer-backgrounding',
     '--disable-backgrounding-occluded-windows',
+    chromeDisabledFeaturesArg(),
     '--disable-dev-shm-usage',
     '--window-size=' + args.width + ',' + args.height,
     url,

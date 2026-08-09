@@ -4,6 +4,10 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {findChromeExecutable} from '../lib/chrome_executable.mjs';
+import {
+  chromeDisabledFeaturesArg,
+  disableChromeOnDeviceAiForProfile,
+} from '../lib/chrome_profile_hygiene.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = {
@@ -22,7 +26,8 @@ async function launch(){
   const chrome=findChromeExecutable();
   if(!chrome) throw new Error('no chrome');
   await fs.mkdir(args.profileDir,{recursive:true});
-  const chromeArgs=[`--remote-debugging-port=${args.port}`,`--user-data-dir=${args.profileDir}`,'--no-first-run','--no-default-browser-check','--disable-popup-blocking','--disable-dev-shm-usage','--no-sandbox','--headless=new','--disable-gpu',args.baseUrl+'/Home/Index'];
+  disableChromeOnDeviceAiForProfile(args.profileDir);
+  const chromeArgs=[`--remote-debugging-port=${args.port}`,`--user-data-dir=${args.profileDir}`,'--no-first-run','--no-default-browser-check','--disable-popup-blocking',chromeDisabledFeaturesArg(),'--disable-dev-shm-usage','--no-sandbox','--headless=new','--disable-gpu',args.baseUrl+'/Home/Index'];
   const child=spawn(chrome,chromeArgs,{cwd:ROOT,detached:true,stdio:'ignore',env:{...process.env}});
   child.unref();
   for(let i=0;i<40;i++){if(await ready()) return; await sleep(500)}

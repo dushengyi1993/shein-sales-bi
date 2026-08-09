@@ -9,6 +9,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn, spawnSync} from 'node:child_process';
+import {
+  chromeDisabledFeaturesArg,
+  disableChromeOnDeviceAiForProfile,
+} from '../lib/chrome_profile_hygiene.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_URL = 'https://sso.geiwohuo.com/#/gsp/inventory-management/storage-age';
@@ -102,6 +106,7 @@ fs.mkdirSync(profileDir, {recursive: true});
 fs.mkdirSync(cacheDir, {recursive: true});
 fs.mkdirSync(logDir, {recursive: true});
 ensureProfileName(profileDir);
+const onDeviceAi = disableChromeOnDeviceAiForProfile(profileDir);
 
 const chromeArgs = [
   `--user-data-dir=${profileDir}`,
@@ -114,6 +119,7 @@ const chromeArgs = [
   '--disable-background-timer-throttling',
   '--disable-renderer-backgrounding',
   '--disable-backgrounding-occluded-windows',
+  chromeDisabledFeaturesArg(),
   ...(cliArgs.headless ? [
     '--headless=new',
     '--disable-gpu',
@@ -173,4 +179,5 @@ console.log(JSON.stringify({
   cacheDir,
   url: cliArgs.url,
   mode: cliArgs.headless ? 'headless' : (cliArgs.background ? 'background' : 'visible'),
+  onDeviceAiDisabled: onDeviceAi.disabled,
 }, null, 2));

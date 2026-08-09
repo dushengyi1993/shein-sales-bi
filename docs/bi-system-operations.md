@@ -269,6 +269,14 @@
 - `2026-05-05` 已按上述流程恢复一次，并备份到 `D:\SheinBI\docker-data\recovery-backups\volumes-backup-20260505-094819.tar.gz`。
 - 恢复后必须验证：`http://127.0.0.1:8787/`、`http://DUSHENGYI-PC2:8787/` 或当前 WLAN IPv4 入口返回 200，BI 流水线最新日志为 `success`，BI audit 无 warning / error。
 
+### 12.2 本机 Git 与临时目录卫生
+
+- 初始化一次：`powershell -ExecutionPolicy Bypass -File scripts/install_local_repo_hygiene.ps1`，启用 `fetch.prune=true`、`pull.ff=only` 和仓库内 `pre-push` 防误推钩子。
+- 安装每周维护：`powershell -ExecutionPolicy Bypass -File scripts/install_local_workspace_hygiene_task.ps1`。任务每周日 18:20 运行，错过后开机补跑，只清理至少 3 天前且无进程占用的 `tmp/cloud-marketing-workers-*` / `tmp/cloud-marketing-local-runtime-*`，不碰正式 `profiles`、`outputs` 或业务证据。
+- 手工预演：`powershell -ExecutionPolicy Bypass -File scripts/cleanup_local_workspace_hygiene.ps1`；确认后加 `-Apply`。脚本只接受固定命名和固定根目录，目录联接目标必须精确指向本项目 `profiles` 或 `node_modules`，否则拒绝删除。
+- 一个任务只保留一个 `codex/*` 分支/worktree。PR 合并、发版和生产回读完成后立即执行 `git worktree remove <path>`、删除本地任务分支并 `git fetch --prune`；GitHub 已启用合并后自动删除 head branch。
+- Chrome 的本地基础模型对运营自动化无用途。受控 launcher 会把 `optimization_guide.on_device_foundational_model_user_settings` 固定为 `false`，同时保留下载 feature gate；缓存清理器会删除已有模型但保留 Cookie、Login Data、Local/Session Storage 和 IndexedDB。
+
 ## 13. 货号 / 评价 / 动作池当前运维口径
 
 - 货号页 `全店覆盖与承接` 的销售口径是“本店 + 标准货号 + 当前时间段”的全部 SKC / 链接合计销售；最佳 SKC 不承担销售汇总口径，只承担承接判断口径。
