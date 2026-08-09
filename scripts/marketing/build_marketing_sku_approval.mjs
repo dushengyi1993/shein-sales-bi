@@ -9,6 +9,13 @@ import {
   collectLatestRawMarketingLinkRows,
 } from '../../lib/marketing_latest_raw_link_overlay.mjs';
 import {
+  applyLowEtFastSellerPricePullbackToRows,
+  buildLowEtFastSellerPricingContext,
+} from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
+import {
+  buildManualLimitedDiscountIndex,
+} from '../../lib/marketing_manual_limited_discount_overrides.mjs';
+import {
   buildLinkRowIndexFromBi,
   buildExposureTopLinkIndex,
   exposureTopRowsForCanonical,
@@ -104,8 +111,42 @@ const targetFloorMargin = pctConfigToRatio(cli.targetFloorMarginPct ?? pricingPo
 const selectionMarginBasis = normalizeSelectionMarginBasis(cli.selectionMarginBasis || 'full_cost_including_storage');
 const storageRequiredForSelection = selectionMarginBasis !== 'product_cost_excluding_storage';
 const EXECUTION_TAG = cli.executionTag || executionTagFromVersion(OUTPUT_VERSION);
-const baselinePolicy = cli.baselinePriceOverrides
-  ? await loadBaselinePricePolicy(path.resolve(ROOT, cli.baselinePriceOverrides), cli.baselineUserRemarks ? path.resolve(ROOT, cli.baselineUserRemarks) : '')
+const baselinePriceOverridesPath = cli.baselinePriceOverrides
+  ? path.resolve(ROOT, cli.baselinePriceOverrides)
+  : '';
+const baselinePriceOverridesDoc = baselinePriceOverridesPath
+  ? JSON.parse(await fs.readFile(baselinePriceOverridesPath, 'utf8'))
+  : null;
+const baselinePolicy = baselinePriceOverridesPath
+  ? await loadBaselinePricePolicy(baselinePriceOverridesPath, cli.baselineUserRemarks ? path.resolve(ROOT, cli.baselineUserRemarks) : '')
+  : null;
+const inventoryTrendPath = path.resolve(
+  ROOT,
+  cli.inventoryTrend || path.join('outputs', 'bi-portal', 'sections', 'inventoryTrend.json'),
+);
+const inventoryTrendDoc = fssync.existsSync(inventoryTrendPath)
+  ? JSON.parse(await fs.readFile(inventoryTrendPath, 'utf8'))
+  : null;
+const manualLimitedRegistryPath = path.resolve(
+  ROOT,
+  cli.manualLimitedRegistry || path.join('config', 'marketing_manual_limited_discount_overrides.json'),
+);
+const manualLimitedRegistryDoc = fssync.existsSync(manualLimitedRegistryPath)
+  ? JSON.parse(await fs.readFile(manualLimitedRegistryPath, 'utf8'))
+  : {entries: []};
+const manualLimitedDiscountIndex = buildManualLimitedDiscountIndex(
+  manualLimitedRegistryDoc,
+  new Date(),
+);
+const lowEtFastSellerContext = baselinePriceOverridesDoc && inventoryTrendDoc
+  ? buildLowEtFastSellerPricingContext({
+      inventoryTrendDoc,
+      linksDataDoc: exposureBi,
+      baselineDoc: baselinePriceOverridesDoc,
+      costDoc: cloudCostDoc,
+      marketingPolicy: pricingPolicy,
+      reportDate: DATE_TAG,
+    })
   : null;
 
 const TRUE_COSTS = cloudCostDoc.trueCostMap || {};
@@ -462,6 +503,7 @@ for (const [sku, group] of bySku.entries()) {
       marginAfterStorage: roundOrNull(marginAfterStorage, 4),
       marginForSelection: roundOrNull(marginForSelection, 4),
       selectionMarginBasis,
+      marginFloorExempt: baselineAllowsBelowFloor,
       isTopExposureLink,
       newListingTopTreatment: Boolean(newListingTopTreatment.applies),
       newListingShelfAgeDays: newListingTopTreatment.shelfAgeDays ?? null,
@@ -540,7 +582,174 @@ for (const [sku, group] of bySku.entries()) {
   });
 }
 
-const rank = {'缺云端成本，需先确认': 0, '缺仓储口径，需复核': 1, '利润低于红线/需确认': 2, '部分店需系统处理+限时折扣': 3, '部分店需系统处理': 4, '限时折扣需注意': 5, '可按货号确认': 6};
+const lowEtFastSellerOverlay = lowEtFastSellerContext
+  ? applyLowEtFastSellerPricePullbackToRows({
+      rows: executionRows,
+      context: lowEtFastSellerContext,
+      costDoc: cloudCostDoc,
+      isManualSpecial: row => manualLimitedDiscountIndex.activeByKey.has(
+        `${String(row.storeKey || '').trim().toUpperCase()}::${String(row.skc || '').trim()}`,
+      ),
+    })
+  : null;
+if (lowEtFastSellerOverlay) {
+  for (let index = 0; index < executionRows.length; index += 1) {
+    const current = executionRows[index];
+    const decision = lowEtFastSellerOverlay.results[index];
+    if (decision.applied) {
+      const adjusted = decision.row;
+      const finalTargetPrice = round2(adjusted.finalTargetPrice);
+      const marginBeforeStorage = finalTargetPrice > 0 && Number(current.cost) > 0
+        ? (finalTargetPrice - Number(current.cost)) / finalTargetPrice
+        : null;
+      const marginAfterStorage = finalTargetPrice > 0 && Number(current.fullCost) > 0
+        ? (finalTargetPrice - Number(current.fullCost)) / finalTargetPrice
+        : null;
+      const marginForSelection = selectionMarginBasis === 'product_cost_excluding_storage'
+        ? marginBeforeStorage
+        : marginAfterStorage;
+      const priceDerivedReasons = new Set([
+        'missing_target_final_price',
+        'missing_row_target_price',
+        `missing_row_${selectionMarginBasis}_margin`,
+        `row_${selectionMarginBasis}_margin_below_floor`,
+      ]);
+      const retainedExcludeReasons = String(current.excludeReason || '')
+        .split(';')
+        .map(reason => reason.trim())
+        .filter(Boolean)
+        .filter(reason => !priceDerivedReasons.has(reason));
+      if (
+        marginForSelection === null
+        && !retainedExcludeReasons.includes('missing_cloud_product_cost')
+        && !retainedExcludeReasons.includes('missing_cloud_storage_unit_cost')
+      ) {
+        retainedExcludeReasons.push(`missing_row_${selectionMarginBasis}_margin`);
+      }
+      if (
+        current.marginFloorExempt !== true
+        && marginForSelection !== null
+        && marginForSelection < targetFloorMargin - 1e-9
+      ) {
+        retainedExcludeReasons.push(`row_${selectionMarginBasis}_margin_below_floor`);
+      }
+      executionRows[index] = {
+        ...current,
+        ...adjusted,
+        selected: retainedExcludeReasons.length === 0,
+        excludeReason: retainedExcludeReasons.join(';'),
+        preLowEtTargetPrice: current.targetPrice,
+        targetPrice: finalTargetPrice,
+        finalTargetPrice,
+        intendedFinalTargetPrice: finalTargetPrice,
+        marginBeforeStorage: roundOrNull(marginBeforeStorage, 4),
+        marginAfterStorage: roundOrNull(marginAfterStorage, 4),
+        marginForSelection: roundOrNull(marginForSelection, 4),
+        lowEtFastSellerPricePullback: {
+          ...adjusted.lowEtFastSellerPricePullback,
+          selectionBlockedReasons: retainedExcludeReasons,
+        },
+        rule: 'low_et_fast_seller_price_pullback',
+        note: [
+          current.note,
+          decision.audit.mode === 'top5_restore_latest_approved_canonical_ordinary_price'
+            ? 'ET<=10且跨19店30天销量>30：Top5恢复该标准货号统一普通档已批准价'
+            : 'ET<=10且跨19店30天销量>30：普通链接目标利润率提高5个百分点',
+          decision.audit.platformClipped ? '已按平台允许报名价上限裁剪' : '',
+        ].filter(Boolean).join('；'),
+      };
+      continue;
+    }
+    if (decision.blocked) {
+      const manualReview = decision.manualReview === true;
+      executionRows[index] = {
+        ...current,
+        selected: false,
+        excludeReason: manualReview
+          ? 'active_manual_special_requires_user_review'
+          : decision.reason,
+        lowEtFastSellerPricePullback: {
+          applied: false,
+          blocked: true,
+          manualReview,
+          reason: decision.reason,
+          evidenceHash: decision.evidence?.evidenceHash || '',
+          contextEvidenceHash: lowEtFastSellerContext.evidenceHash,
+        },
+        note: [
+          current.note,
+          manualReview
+            ? '有效人工特殊限时折扣仍在保护期，普通活动价格收回不自动覆盖，需单独审核'
+            : `ET低库存畅销品定价证据阻断：${decision.reason}`,
+        ].filter(Boolean).join('；'),
+      };
+    }
+  }
+
+  for (const approval of approvalRows) {
+    const canonicalRows = executionRows.filter(row => row.canonical === approval['标准货号']);
+    const appliedRows = canonicalRows.filter(row => (
+      row.lowEtFastSellerPricePullback?.applied === true && row.selected === true
+    ));
+    const blockedRows = canonicalRows.filter(row => (
+      row.lowEtFastSellerPricePullback?.blocked === true
+      || (row.lowEtFastSellerPricePullback?.selectionBlockedReasons || []).length > 0
+      || String(row.excludeReason || '').startsWith('active_manual_special_requires_user_review')
+      || String(row.excludeReason || '').startsWith('top5_missing_canonical_ordinary_approved_price')
+      || String(row.excludeReason || '').startsWith('missing_current_day_matched_et_inventory')
+    ));
+    if (!appliedRows.length && !blockedRows.length) continue;
+    const selectedRows = canonicalRows.filter(row => row.selected);
+    if (selectedRows.length) {
+      approval['建议最终成交价SAR'] = range(selectedRows.map(row => row.finalTargetPrice));
+      approval['建议普通活动价SAR'] = range(selectedRows.map(row => row.targetPrice));
+      approval['组合后预计最终价SAR'] = range(selectedRows.map(row => row.finalTargetPrice));
+      const selectedTopRows = selectedRows.filter(row => row.isTopExposureLink);
+      const selectedOrdinaryRows = selectedRows.filter(row => !row.isTopExposureLink);
+      approval['曝光前五建议最终成交价SAR'] = selectedTopRows.length
+        ? range(selectedTopRows.map(row => row.finalTargetPrice))
+        : (blockedRows.some(row => row.isTopExposureLink) ? '单独审核' : '');
+      approval['其他链接建议最终成交价SAR'] = selectedOrdinaryRows.length
+        ? range(selectedOrdinaryRows.map(row => row.finalTargetPrice))
+        : '';
+      approval['不含仓储利润率'] = pct(Math.min(...selectedRows.map(row => row.marginBeforeStorage).filter(isNum)));
+      approval['含仓储利润率'] = pct(Math.min(...selectedRows.map(row => row.marginAfterStorage).filter(isNum)));
+    }
+    const manualReviewRows = blockedRows.filter(row => row.lowEtFastSellerPricePullback?.manualReview === true);
+    const missingEtRows = blockedRows.filter(row => row.excludeReason === 'missing_current_day_matched_et_inventory');
+    const missingTop5BaselineRows = blockedRows.filter(row => row.excludeReason === 'top5_missing_canonical_ordinary_approved_price');
+    approval['系统结论'] = appliedRows.length && blockedRows.length
+      ? `低库存已收回${appliedRows.length}行，另${blockedRows.length}行单列`
+      : appliedRows.length
+        ? '低库存畅销品已收回一档'
+        : blockedRows.length > 0 && missingEtRows.length === blockedRows.length
+          ? 'ET库存未匹配（不是低库存结论）'
+          : '低库存规则缺证据';
+    approval['曝光规则目标利润率'] = [
+      approval['曝光规则目标利润率'],
+      appliedRows.length ? `ET低库存畅销品收回 ${appliedRows.length} 行` : '',
+      manualReviewRows.length ? `人工特殊价保护 ${manualReviewRows.length} 行` : '',
+      missingTop5BaselineRows.length ? `Top5缺精确普通档基准 ${missingTop5BaselineRows.length} 行` : '',
+      missingEtRows.length ? `ET当天库存未匹配 ${missingEtRows.length} 行（不判定为低库存）` : '',
+    ].filter(Boolean).join('；');
+    approval['给你看-店铺差异处理'] = appliedRows.length && blockedRows.length
+      ? `${appliedRows.length}行按收回后价格；${manualReviewRows.length}行特殊价保持；${missingTop5BaselineRows.length}行补普通档基准`
+      : blockedRows.length > 0 && missingEtRows.length === blockedRows.length
+        ? '只是ET库存未匹配，不算低库存；先补库存证据'
+        : blockedRows.length
+          ? '缺证据行单独处理'
+      : '按ET低库存畅销品收回后价格执行';
+    approval['你只需确认'] = appliedRows.length && blockedRows.length
+      ? `确认已收回的 ${appliedRows.length} 行；人工特殊价保持不动`
+      : blockedRows.length > 0 && missingEtRows.length === blockedRows.length
+        ? '无需确认价格；先补ET当天库存匹配'
+        : blockedRows.length
+          ? `确认收回价；另审核 ${blockedRows.length} 行证据缺口`
+      : '确认本期按低库存畅销品价格收回一档';
+  }
+}
+
+const rank = {'缺云端成本，需先确认': 0, '缺仓储口径，需复核': 1, 'ET库存未匹配（不是低库存结论）': 2, '低库存规则缺证据': 3, '利润低于红线/需确认': 4, '部分店需系统处理+限时折扣': 5, '部分店需系统处理': 6, '限时折扣需注意': 7, '低库存畅销品已收回一档': 8, '可按货号确认': 9};
 approvalRows.sort((a, b) => (rank[a['系统结论']] ?? 9) - (rank[b['系统结论']] ?? 9) || String(a['标准货号']).localeCompare(String(b['标准货号']), 'zh-Hans-CN'));
 
 const confirmHeaders = [
@@ -634,6 +843,19 @@ const sourceSummary = {
     baselinePriceOverrides: baselinePolicy ? path.relative(ROOT, baselinePolicy.filePath) : '',
     baselineUserRemarks: cli.baselineUserRemarks ? path.relative(ROOT, path.resolve(ROOT, cli.baselineUserRemarks)) : '',
     baselineRuleCount: baselinePolicy?.summaries?.length || 0,
+    lowEtFastSellerPricePullback: lowEtFastSellerOverlay ? {
+      enabled: true,
+      inventoryTrend: path.relative(ROOT, inventoryTrendPath),
+      manualLimitedDiscountRegistry: path.relative(ROOT, manualLimitedRegistryPath),
+      evidenceHash: lowEtFastSellerContext.evidenceHash,
+      contextBlockerCount: lowEtFastSellerContext.blockers.length,
+      appliedCount: lowEtFastSellerOverlay.appliedCount,
+      blockedCount: lowEtFastSellerOverlay.blockedCount,
+      manualReviewCount: lowEtFastSellerOverlay.manualReviewCount,
+    } : {
+      enabled: false,
+      reason: 'missing_baseline_or_inventory_trend',
+    },
   },
   output: {
     rows: confirmRows.length,
@@ -717,6 +939,9 @@ const statusRange = sheet.getRangeByIndexes(1, statusCol, confirmRows.length, 1)
 statusRange.conditionalFormats.add('containsText', {text: '缺云端成本', format: {fill: '#FCE4D6', font: {bold: true, color: '#9C0006'}}});
 statusRange.conditionalFormats.add('containsText', {text: '缺仓储', format: {fill: '#FCE4D6', font: {bold: true, color: '#9C0006'}}});
 statusRange.conditionalFormats.add('containsText', {text: '利润低于', format: {fill: '#FFC7CE', font: {bold: true, color: '#9C0006'}}});
+statusRange.conditionalFormats.add('containsText', {text: 'ET库存未匹配', format: {fill: '#F4CCCC', font: {bold: true, color: '#9C0006'}}});
+statusRange.conditionalFormats.add('containsText', {text: '低库存已收回', format: {fill: '#FFF2CC', font: {bold: true, color: '#7F6000'}}});
+statusRange.conditionalFormats.add('containsText', {text: '低库存畅销品已收回一档', format: {fill: '#D9EAD3', font: {bold: true, color: '#274E13'}}});
 statusRange.conditionalFormats.add('containsText', {text: '部分店', format: {fill: '#FFF2CC', font: {bold: true, color: '#7F6000'}}});
 statusRange.conditionalFormats.add('containsText', {text: '限时折扣', format: {fill: '#E2F0D9', font: {bold: true, color: '#375623'}}});
 
@@ -795,7 +1020,7 @@ differenceSheet.tables.add(`A1:${colName(differenceHeaders.length)}${differenceR
 const blockedHeaders = ['店铺','活动ID','标准货号','SKC','建议报名价SAR','商品成本SAR','仓储费SAR/件','阻塞原因','处理建议','备注/修改意见'];
 const excludedRowsForSheet = executionRows.filter(r => !r.selected);
 const blockedRows = excludedRowsForSheet.length ? excludedRowsForSheet.map(r => [
-  r.storeKey, r.activityId, r.canonical, r.skc, r.targetPrice, r.cost, r.storageUnitCostSar, r.excludeReason,
+  r.storeKey, r.activityId, r.canonical, r.skc, r.targetPrice, r.cost, r.storageUnitCostSar, humanLowEtReason(r.excludeReason),
   '先补齐对应证据或调整价格，再单独补报；不影响其他安全行。', '',
 ]) : [['','','','','','','','无阻塞项',`本轮 ${executionRows.filter(r => r.selected).length} 行均进入待确认方案。`,'']];
 const blockedSheet = workbook.worksheets.add('剔除项与阻塞项');
@@ -827,6 +1052,55 @@ for (const h of ['不含仓储利润率','含仓储利润率']) {
 }
 for (let c = 0; c < riskHeaders.length; c++) riskSheet.getRangeByIndexes(0, c, riskRows.length + 1, 1).format.columnWidthPx = /风险|结论|备注/.test(riskHeaders[c]) ? 290 : 150;
 riskSheet.tables.add(`A1:${colName(riskHeaders.length)}${riskRows.length + 1}`, true, `RiskItems${safeTableSuffix(OUTPUT_VERSION)}`).style = 'TableStyleMedium5';
+
+const lowEtHeaders = [
+  '店铺','活动ID','标准货号','SKC','ET当日可售','跨19店30天销量','Top5身份','原方案价SAR','收回后价格SAR',
+  '处理状态','原因','备注/修改意见',
+];
+const lowEtRows = lowEtFastSellerOverlay
+  ? executionRows
+      .filter(row => row.lowEtFastSellerPricePullback)
+      .map(row => {
+        const audit = row.lowEtFastSellerPricePullback || {};
+        const evidence = lowEtFastSellerContext.byCanonical.get(compact(row.canonical)) || {};
+        const manualReview = audit.manualReview === true;
+        return [
+          row.storeKey, row.activityId, row.canonical, row.skc,
+          audit.etOperationalSaleable ?? evidence.etOperationalSaleable ?? '',
+          audit.validSales30d ?? evidence.validSales30d ?? '',
+          audit.isTop5 === true ? '是' : (audit.isTop5 === false ? '否' : ''),
+          audit.applied === true ? row.preLowEtTargetPrice : row.targetPrice,
+          audit.applied === true ? row.targetPrice : '',
+          audit.applied === true && row.selected === true
+            ? '低库存畅销品：已收回一档'
+            : audit.applied === true
+              ? '收回价已计算，但其他安全门禁阻断'
+            : (manualReview
+                ? '人工特殊价保护：保持原价，不自动覆盖'
+                : row.excludeReason === 'missing_current_day_matched_et_inventory'
+                  ? 'ET库存未匹配：不能判定为低库存'
+                  : '低库存规则缺价格证据：暂不报名'),
+          humanLowEtReason(audit.mode || audit.reason || row.excludeReason),
+          '',
+        ];
+      })
+  : [];
+const lowEtDisplayRows = lowEtRows.length
+  ? lowEtRows
+  : [['','','','','','','','','','本轮无命中项','','']];
+const lowEtSheet = workbook.worksheets.add('ET低库存价格收回');
+lowEtSheet.showGridLines = false;
+lowEtSheet.getRangeByIndexes(0, 0, lowEtDisplayRows.length + 1, lowEtHeaders.length).values = [lowEtHeaders, ...lowEtDisplayRows];
+lowEtSheet.freezePanes.freezeRows(1);
+lowEtSheet.freezePanes.freezeColumns(4);
+lowEtSheet.getRangeByIndexes(0, 0, 1, lowEtHeaders.length).format = {fill: '#7030A0', font: {bold: true, color: '#FFFFFF'}, wrapText: true};
+lowEtSheet.getRangeByIndexes(1, 0, lowEtDisplayRows.length, lowEtHeaders.length).format = {wrapText: true};
+for (let c = 0; c < lowEtHeaders.length; c++) {
+  const header = lowEtHeaders[c];
+  lowEtSheet.getRangeByIndexes(0, c, lowEtDisplayRows.length + 1, 1).format.columnWidthPx =
+    /标准货号|状态|原因|备注/.test(header) ? 260 : 140;
+}
+lowEtSheet.tables.add(`A1:${colName(lowEtHeaders.length)}${lowEtDisplayRows.length + 1}`, true, `LowEtPullback${safeTableSuffix(OUTPUT_VERSION)}`).style = 'TableStyleMedium4';
 
 const couponSheet = workbook.worksheets.add('15%券流量试验计划');
 couponSheet.showGridLines = false;
@@ -1540,6 +1814,8 @@ async function writeExecutionArtifacts(rows, opts) {
       newListingShelfAgeDays: r.newListingShelfAgeDays,
       newListingShelfAgeSource: r.newListingShelfAgeSource,
       platformNewLabel: r.platformNewLabel,
+      preLowEtTargetPrice: r.preLowEtTargetPrice ?? null,
+      lowEtFastSellerPricePullback: r.lowEtFastSellerPricePullback || null,
     }));
     const priceItems = scopeRows.map(r => ({
       storeKey: r.storeKey,
@@ -1561,6 +1837,8 @@ async function writeExecutionArtifacts(rows, opts) {
       newListingShelfAgeDays: r.newListingShelfAgeDays,
       newListingShelfAgeSource: r.newListingShelfAgeSource,
       platformNewLabel: r.platformNewLabel,
+      preLowEtTargetPrice: r.preLowEtTargetPrice ?? null,
+      lowEtFastSellerPricePullback: r.lowEtFastSellerPricePullback || null,
       couponFactor: r.couponFactor,
       minMarginFloor: targetFloorMargin,
       rule: r.rule,
@@ -1707,10 +1985,10 @@ async function writeExecutionArtifacts(rows, opts) {
     ...Object.entries(summary.byActivityAllSafe).map(([activity, count]) => `- 活动 ${activity}: ${count} 行`),
     '',
     '## 剔除原因',
-    ...Object.entries(summary.excludedByReason).map(([reason, count]) => `- ${reason}: ${count} 行`),
+    ...Object.entries(summary.excludedByReason).map(([reason, count]) => `- ${humanLowEtReason(reason)}：${count} 行`),
     '',
     '## 剔除样例（前 30）',
-    ...topExcluded.map(r => `- ${r.storeKey} / ${r.activityId} / \`${r.skc}\` / ${r.canonical}: ${r.excludeReason}; 预计最终价 ${fmt(r.finalTargetPrice)} SAR，筛选利润 ${pct(r.marginForSelection)}（不含仓储 ${pct(r.marginBeforeStorage)} / 含仓储 ${pct(r.marginAfterStorage)}）`),
+    ...topExcluded.map(r => `- ${r.storeKey} / ${r.activityId} / \`${r.skc}\` / ${r.canonical}: ${humanLowEtReason(r.excludeReason)}；预计最终价 ${fmt(r.finalTargetPrice)} SAR，筛选利润 ${pct(r.marginForSelection)}（不含仓储 ${pct(r.marginBeforeStorage)} / 含仓储 ${pct(r.marginAfterStorage)}）`),
     '',
     '## 文件',
     `- 主执行 allowlist：\`${paths.mainNoJsh.selectionPlan}\``,
@@ -1741,9 +2019,23 @@ function excludedExecutionRow(row) {
     marginForSelection: row.marginForSelection,
     selectionMarginBasis: row.selectionMarginBasis,
     isTopExposureLink: row.isTopExposureLink,
+    preLowEtTargetPrice: row.preLowEtTargetPrice ?? null,
+    lowEtFastSellerPricePullback: row.lowEtFastSellerPricePullback || null,
     excludeReason: row.excludeReason,
     note: row.note,
   };
+}
+function humanLowEtReason(reason) {
+  const text = String(reason || '').trim();
+  const labels = {
+    ordinary_link_target_margin_plus_5_points: '普通链接：目标利润率提高5个百分点',
+    top5_restore_latest_approved_canonical_ordinary_price: 'Top5链接：恢复该标准货号统一普通档已批准价',
+    active_manual_special_requires_user_review: '有效人工特殊折扣仍在保护期，保持原价，不自动覆盖',
+    top5_missing_canonical_ordinary_approved_price: '低库存Top5缺该标准货号统一普通档已批准价',
+    missing_current_day_matched_et_inventory: 'ET当天库存未匹配，不能判定为低库存',
+    missing_complete_canonical_valid_sales_30d: '缺同货号跨19店完整30天销量证据',
+  };
+  return labels[text] || text;
 }
 function parseArgs(argv) {
   const allowedKeys = new Set([
@@ -1756,6 +2048,8 @@ function parseArgs(argv) {
     'executionOutputDir',
     'executionTag',
     'exposureData',
+    'inventoryTrend',
+    'manualLimitedRegistry',
     'outputDir',
     'pricingPolicy',
     'rawLinkHistoryDir',

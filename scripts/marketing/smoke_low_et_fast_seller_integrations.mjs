@@ -19,7 +19,7 @@ const baselineDoc = {
     skc: `link-${index + 1}`,
     canonical,
     finalTargetPrice: index < 5 ? 100 + index : 110,
-    ordinaryLinkApprovedPrice: 120 + index,
+    ordinaryLinkApprovedPrice: 120,
     ordinaryTargetMargin: 0.30,
     isTopExposureLink: index < 5,
   })),
@@ -122,8 +122,8 @@ assert.equal(ordinaryHighClick.actionCount, 1); checks += 1;
 assert.equal(ordinaryHighClick.rows[0].storeKey, 'ZL'); checks += 1;
 assert.equal(ordinaryHighClick.rows[0].lowEtFastSellerPricePullback.mode, 'ordinary_link_target_margin_plus_5_points'); checks += 1;
 assert.equal(ordinaryHighClick.rows[0].lowEtFastSellerPricePullback.ordinaryTargetMargin, 0.30); checks += 1;
-assert.equal(ordinaryHighClick.rows[0].lowEtFastSellerPricePullback.targetMargin, 0.47); checks += 1;
-assert.equal(ordinaryHighClick.rows[0].specialPrice, 132.08); checks += 1;
+assert.equal(ordinaryHighClick.rows[0].lowEtFastSellerPricePullback.targetMargin, 0.35); checks += 1;
+assert.equal(ordinaryHighClick.rows[0].specialPrice, 107.7); checks += 1;
 
 const protectedHighClick = buildHighClickLowConversionSpecialAudit({
   linksDataDoc,
@@ -181,13 +181,29 @@ try {
     baseline: path.join(temp, 'baseline.json'),
     costMap: path.join(temp, 'cost.json'),
     pricingPolicy: path.join(temp, 'policy.json'),
+    rawLinkHistory: path.join(temp, 'raw-links'),
+    storesConfig: path.join(temp, 'stores.json'),
   };
+  await Promise.all(stores.map(async storeKey => {
+    const storeDir = path.join(sources.rawLinkHistory, storeKey);
+    await fs.mkdir(storeDir, {recursive: true});
+    await fs.writeFile(path.join(storeDir, `${reportDate}.json`), JSON.stringify({
+      ok: true,
+      date: reportDate,
+      fetchTime: `${reportDate} 10:00:00`,
+      store: {storeKey},
+      linkRows: [],
+    }));
+  }));
   await Promise.all([
     fs.writeFile(sources.linksData, JSON.stringify(linksDataDoc)),
     fs.writeFile(sources.inventoryTrend, JSON.stringify(inventoryTrendDoc)),
     fs.writeFile(sources.baseline, JSON.stringify(baselineDoc)),
     fs.writeFile(sources.costMap, JSON.stringify(costDoc)),
     fs.writeFile(sources.pricingPolicy, JSON.stringify(marketingPolicy)),
+    fs.writeFile(sources.storesConfig, JSON.stringify({
+      stores: stores.map(storeKey => ({storeKey, enabled: true})),
+    })),
   ]);
   const rescue = {
     createdAt: `${reportDate}T00:00:00Z`,
@@ -196,10 +212,13 @@ try {
     sourcePriceOverrides: sources.baseline,
     sourceCostMap: sources.costMap,
     pricingPolicy: sources.pricingPolicy,
+    sourceRawLinkHistory: sources.rawLinkHistory,
+    sourceStoresConfig: sources.storesConfig,
     rows: drift.groups[0].rows,
   };
   const current = await revalidateLowEtFastSellerRescueArtifact({root: temp, rescue, reportDate});
   assert.equal(current.ok, true); checks += 1;
+  assert.equal(current.rawLinkOverlay.complete, true); checks += 1;
   await fs.writeFile(sources.inventoryTrend, JSON.stringify({
     products: [{...inventoryTrendDoc.products[0], operational_sellable_qty: 11}],
   }));
@@ -224,6 +243,17 @@ for (const file of sourceFiles) {
   assert.match(text, /LowEtFastSeller|lowEtFastSeller|low_et_/i, `${file} must integrate low ET pricing`);
   checks += 1;
 }
+
+const approvalBuilder = await fs.readFile(
+  path.resolve('scripts/marketing/build_marketing_sku_approval.mjs'),
+  'utf8',
+);
+assert.match(approvalBuilder, /selectionBlockedReasons:\s*retainedExcludeReasons/); checks += 1;
+assert.doesNotMatch(
+  approvalBuilder,
+  /\.\.\.adjusted,\s*selected:\s*true,\s*excludeReason:\s*''/,
+  'low ET repricing must not clear unrelated hard blockers',
+); checks += 1;
 
 console.log(JSON.stringify({
   ok: true,

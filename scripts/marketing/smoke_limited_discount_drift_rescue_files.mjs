@@ -12,6 +12,8 @@ const linksPath = path.join(tmp, 'links.json');
 const inventoryPath = path.join(tmp, 'inventory.json');
 const pricePath = path.join(tmp, 'price.json');
 const costPath = path.join(tmp, 'cost.json');
+const rawLinkHistory = path.join(tmp, 'raw-links');
+const storesConfigPath = path.join(tmp, 'stores.json');
 await fs.mkdir(outDir, {recursive: true});
 await fs.writeFile(path.join(outDir, 'limited-drift-rescue-TS-stale.json'), '{}\n', 'utf8');
 
@@ -56,6 +58,28 @@ await fs.writeFile(pricePath, JSON.stringify({items: fixtureRows.map(item => ({
   finalTargetPrice: 100,
 }))}));
 await fs.writeFile(costPath, JSON.stringify({costMap: {}}));
+await fs.writeFile(storesConfigPath, JSON.stringify({
+  stores: ['FY', 'HL'].map(storeKey => ({storeKey, enabled: true})),
+}));
+for (const storeKey of ['FY', 'HL']) {
+  const storeDir = path.join(rawLinkHistory, storeKey);
+  await fs.mkdir(storeDir, {recursive: true});
+  await fs.writeFile(path.join(storeDir, '2026-07-11.json'), JSON.stringify({
+    ok: true,
+    date: '2026-07-11',
+    fetchTime: '2026-07-11 10:00:00',
+    store: {storeKey},
+    linkRows: fixtureRows
+      .filter(item => item.storeKey === storeKey)
+      .map(item => ({
+        store_key: item.storeKey,
+        skc: item.skc,
+        standard_goods_sn: item.canonical,
+        c7_eps_uv: 100,
+        c30_valid_sale_cnt: 0,
+      })),
+  }));
+}
 
 await fs.writeFile(guardPath, `${JSON.stringify({
   reportDate: '2026-07-11',
@@ -76,6 +100,8 @@ const result = spawnSync(process.execPath, [
   '--guard', guardPath,
   '--out-dir', outDir,
   '--end-time', '2026-07-21 23:59:59',
+  '--raw-link-history', rawLinkHistory,
+  '--stores-config', storesConfigPath,
 ], {encoding: 'utf8'});
 
 assert.equal(result.status, 0, result.stderr || result.stdout);

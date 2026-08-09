@@ -95,13 +95,36 @@ assert.equal(sales30MissingBaseline.blocked, false); checks += 1;
 const hitMissingBaseline = missingBaselineDecision({et: 10, sales: 31});
 assert.equal(hitMissingBaseline.applied, false); checks += 1;
 assert.equal(hitMissingBaseline.blocked, true); checks += 1;
-assert.equal(hitMissingBaseline.reason, 'top5_missing_exact_link_ordinary_approved_price'); checks += 1;
+assert.equal(hitMissingBaseline.reason, 'top5_missing_canonical_ordinary_approved_price'); checks += 1;
 
 const boundary10 = evaluateLowEtFastSellerCanonical(canonical, context({et: 10, sales: 31}));
 assert.equal(boundary10.applies, true); checks += 1;
 assert.equal(evaluateLowEtFastSellerCanonical(canonical, context({et: 11, sales: 31})).applies, false); checks += 1;
 assert.equal(evaluateLowEtFastSellerCanonical(canonical, context({et: 10, sales: 30})).applies, false); checks += 1;
 assert.equal(evaluateLowEtFastSellerCanonical(canonical, context({et: 10, sales: 31})).applies, true); checks += 1;
+const descriptorCanonical = `${canonical}产品`;
+const descriptorContext = buildLowEtFastSellerPricingContext({
+  inventoryTrendDoc: {
+    products: [{
+      canonical,
+      inventory_match_status: 'matched',
+      operational_sellable_qty: 10,
+      operational_snapshot_date: reportDate,
+    }],
+  },
+  linksDataDoc: {
+    storeLinks: links(31).storeLinks.map(row => ({...row, standard_goods_sn: descriptorCanonical})),
+  },
+  baselineDoc: {
+    items: baseline.items.map(row => ({...row, canonical: descriptorCanonical})),
+  },
+  costDoc: {
+    costMap: {[descriptorCanonical]: 70},
+    trueCostMap: {[descriptorCanonical]: {unitCostSar: 70, storageUnitCostSar: 8}},
+  },
+  reportDate,
+});
+assert.equal(evaluateLowEtFastSellerCanonical(descriptorCanonical, descriptorContext).applies, true); checks += 1;
 
 const top5 = applyLowEtFastSellerPricePullback({
   row: {...baseline.items[0], finalTargetPrice: 95, targetPrice: 95},
@@ -109,7 +132,7 @@ const top5 = applyLowEtFastSellerPricePullback({
   costDoc,
 });
 assert.equal(top5.applied, true); checks += 1;
-assert.equal(top5.audit.mode, 'top5_restore_latest_approved_ordinary_link_price'); checks += 1;
+assert.equal(top5.audit.mode, 'top5_restore_latest_approved_canonical_ordinary_price'); checks += 1;
 assert.equal(top5.row.finalTargetPrice, 120); checks += 1;
 const top5OtherStore = applyLowEtFastSellerPricePullback({
   row: {...baseline.items[1], finalTargetPrice: 96, targetPrice: 96},
@@ -117,9 +140,9 @@ const top5OtherStore = applyLowEtFastSellerPricePullback({
   costDoc,
 });
 assert.equal(top5OtherStore.applied, true); checks += 1;
-assert.equal(top5OtherStore.row.finalTargetPrice, 125); checks += 1;
-assert.notEqual(top5OtherStore.row.finalTargetPrice, top5.row.finalTargetPrice); checks += 1;
-const missingExactLinkPrice = applyLowEtFastSellerPricePullback({
+assert.equal(top5OtherStore.row.finalTargetPrice, 120); checks += 1;
+assert.equal(top5OtherStore.row.finalTargetPrice, top5.row.finalTargetPrice); checks += 1;
+const missingExactLinkPriceUsesCanonicalPrice = applyLowEtFastSellerPricePullback({
   row: {
     ...baseline.items[1],
     ordinaryLinkApprovedPrice: null,
@@ -142,8 +165,8 @@ const missingExactLinkPrice = applyLowEtFastSellerPricePullback({
   }),
   costDoc,
 });
-assert.equal(missingExactLinkPrice.applied, false); checks += 1;
-assert.equal(missingExactLinkPrice.reason, 'top5_missing_exact_link_ordinary_approved_price'); checks += 1;
+assert.equal(missingExactLinkPriceUsesCanonicalPrice.applied, true); checks += 1;
+assert.equal(missingExactLinkPriceUsesCanonicalPrice.row.finalTargetPrice, 120); checks += 1;
 
 const ordinary = applyLowEtFastSellerPricePullback({
   row: {...baseline.items[5], finalTargetPrice: 95, targetPrice: 95},
@@ -181,9 +204,7 @@ const revalidated = revalidateLowEtFastSellerPricePullback({
 });
 assert.equal(revalidated.ok, true); checks += 1;
 const changedLinkBaseline = {
-  items: baseline.items.map((row, index) => index === 0
-    ? {...row, ordinaryLinkApprovedPrice: 121}
-    : row),
+  items: baseline.items.map(row => ({...row, ordinaryLinkApprovedPrice: 121})),
 };
 const changedBaselineContext = buildLowEtFastSellerPricingContext({
   inventoryTrendDoc: inventory(10),
