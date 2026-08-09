@@ -26,5 +26,12 @@ assert.match(cleanup, /--apply --json/);
 assert.match(taskInstaller, /SHEIN-BI-Local-Workspace-Hygiene/);
 assert.match(taskInstaller, /StartWhenAvailable/);
 assert.match(taskInstaller, /MinimumAgeDays 3/);
+assert.match(taskInstaller, /-File/);
+assert.match(taskInstaller, /-OutputPath/);
+assert.doesNotMatch(taskInstaller, /-Command/);
+assert.match(cleanup, /Write-AtomicJsonReport/);
+assert.match(cleanup, /errorType/);
+assert.match(cleanup, /Console\]::OutputEncoding/);
+assert.match(cleanup, /\$OutputEncoding\s*=\s*\$Utf8NoBom/);
 
 console.log(JSON.stringify({ok: true}));
